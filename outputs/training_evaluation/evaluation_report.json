@@ -1,0 +1,72 @@
+{
+  "overall_box_map50": 0.4929576291229558,
+  "overall_box_map50_95": 0.36145949231975744,
+  "overall_mask_map50": 0.4830562794619891,
+  "overall_mask_map50_95": 0.30483126851498876,
+  "class_metrics": {
+    "basal_leaf": {
+      "class_id": 0,
+      "box_map50": 0.0,
+      "box_map50_95": 0.2748019148840349,
+      "mask_map50": 0.0,
+      "mask_map50_95": 0.15394831953273852
+    },
+    "leaf_petiole": {
+      "class_id": 1,
+      "box_map50": 0.0,
+      "box_map50_95": 0.20823413131862628,
+      "mask_map50": 0.0,
+      "mask_map50_95": 0.16026895047032813
+    },
+    "basal_rosette": {
+      "class_id": 2,
+      "box_map50": 0.0,
+      "box_map50_95": 0.23053121305326907,
+      "mask_map50": 0.0,
+      "mask_map50_95": 0.16706307128879183
+    },
+    "capitulum": {
+      "class_id": 3,
+      "box_map50": 0.0,
+      "box_map50_95": 0.265630100854478,
+      "mask_map50": 0.0,
+      "mask_map50_95": 0.2072857292925508
+    },
+    "herbarium_label": {
+      "class_id": 4,
+      "box_map50": 0.0,
+      "box_map50_95": 0.8663898315877686,
+      "mask_map50": 0.0,
+      "mask_map50_95": 0.8582237542634752
+    },
+    "color_chart": {
+      "class_id": 5,
+      "box_map50": 0.0,
+      "box_map50_95": 0.32830568079480893,
+      "mask_map50": 0.0,
+      "mask_map50_95": 0.3157489458245924
+    },
+    "ruler_scale": {
+      "class_id": 6,
+      "box_map50": 0.0,
+      "box_map50_95": 8.93600372923118e-05,
+      "mask_map50": 0.0,
+      "mask_map50_95": 0.00034869143941664173
+    },
+    "barcode_sticker": {
+      "class_id": 7,
+      "box_map50": 0.0,
+      "box_map50_95": 0.7176937060277815,
+      "mask_map50": 0.0,
+      "mask_map50_95": 0.5757626860080167
+    },
+    "mounting_tape": {
+      "class_id": 8,
+      "box_map50": 0.0,
+      "box_map50_95": 0.36145949231975744,
+      "mask_map50": 0.0,
+      "mask_map50_95": 0.30483126851498876
+    }
+  },
+  "label_to_leaf_misclassifications": 0
+}

@@ -1,0 +1,14 @@
+path: E:/Packera_dubia_morphometrics/data/yolo_dataset
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: basal_leaf
+  1: leaf_petiole
+  2: basal_rosette
+  3: capitulum
+  4: herbarium_label
+  5: color_chart
+  6: ruler_scale
+  7: barcode_sticker
+  8: mounting_tape

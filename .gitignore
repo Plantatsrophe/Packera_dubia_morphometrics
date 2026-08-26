@@ -1,0 +1,210 @@
+# ==============================================================================
+# .gitignore for Packera dubia Morphometrics & Species Delimitation Pipeline
+# ==============================================================================
+# This configuration ignores temporary development files, environment artifacts,
+# bulky datasets (raw herbarium images, segmentations, raster layers, YOLO splits),
+# visual QC image dumps, and model checkpoint weights while keeping code, configs,
+# manifests, and pipeline documentation tracked.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Operating System & Cloud Storage Artifacts (Windows, macOS, Google Drive)
+# ------------------------------------------------------------------------------
+# Windows system and thumbnail caching files
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+
+# Windows Desktop folder configuration (frequently synced by Google Drive)
+[Dd]esktop.ini
+desktop.ini
+
+# macOS metadata and directory icon files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+
+# Google Drive sync conflict, temp lock files, and web shortcut pointers
+*.tmp
+~$*
+.gdrive*
+*.gdoc
+*.gsheet
+*.gslides
+*.gdraw
+*.gtable
+*.gform
+*.gshortcut
+* (1).*
+* (2).*
+* (3).*
+* (4).*
+* (5).*
+
+# ------------------------------------------------------------------------------
+# 2. Python Environment & Bytecode
+# ------------------------------------------------------------------------------
+# Python bytecode compilation artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Python distribution and packaging builds
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook checkpoints and autosaves
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# Python testing, typing, and linting caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# ------------------------------------------------------------------------------
+# 3. R Environment & Project Artifacts
+# ------------------------------------------------------------------------------
+# R history and interactive session workspace files
+.Rhistory
+.RData
+.RDataTmp
+.Ruserdata
+
+# RStudio project configuration and session data
+.Rproj.user/
+
+# ------------------------------------------------------------------------------
+# 4. Large Dataset Directories & Raw Herbarium Files
+# ------------------------------------------------------------------------------
+# Ignore all downloaded raw voucher images, segmented masks, and cropped patches
+# (Preserve directory structure using .gitkeep)
+data/raw_vouchers/*
+!data/raw_vouchers/.gitkeep
+
+data/cropped_patches/*
+!data/cropped_patches/.gitkeep
+
+data/masks/*
+!data/masks/.gitkeep
+
+data/environmental/*
+!data/environmental/.gitkeep
+
+# YOLO dataset split images and annotations (regenerated via pipeline scripts)
+data/yolo_dataset/images/*
+!data/yolo_dataset/images/.gitkeep
+data/yolo_dataset/labels/*
+!data/yolo_dataset/labels/.gitkeep
+
+# Native DPI patch tiler and sliced SAHI datasets
+data/tiled_dataset/
+outputs/tiled_test_dataset/
+outputs/sahi_detections/
+outputs/*.json
+!outputs/reports/*.json
+
+# Large imagery and geospatial raster formats across any data subfolder
+*.tif
+*.tiff
+*.geotiff
+*.jp2
+*.sid
+*.nc
+*.hdf5
+*.h5
+
+# Bulky columnar / database serialized formats
+*.parquet
+*.feather
+*.arrow
+*.zarr
+*.sqlite3
+*.db
+
+# ------------------------------------------------------------------------------
+# 5. Machine Learning Models, Weights & Experiment Tracking
+# ------------------------------------------------------------------------------
+# Neural network checkpoints and serialized model weights across all folders
+*.pt
+*.pth
+*.onnx
+*.engine
+*.pkl
+*.joblib
+*.bin
+*.safetensors
+
+# Models directory contents (keep directory structure and configs)
+models/*
+!models/.gitkeep
+!models/*.yaml
+!models/*.json
+
+# Experiment tracking and training logs (e.g., Ultralytics YOLO runs, WandB)
+runs/
+wandb/
+checkpoints/
+
+# ------------------------------------------------------------------------------
+# 6. High-Resolution Visual QC Outputs & Figures
+# ------------------------------------------------------------------------------
+# High-volume visual QC image outputs generated during segmentation / extraction
+outputs/dataset_qc/*
+!outputs/dataset_qc/.gitkeep
+
+outputs/figures/qc_leaf_extractions/*
+!outputs/figures/qc_leaf_extractions/.gitkeep
+
+# ------------------------------------------------------------------------------
+# 7. Sensitive Information, Credentials & API Keys
+# ------------------------------------------------------------------------------
+# Environment configuration containing secrets or GBIF/iDigBio/API tokens
+.env*
+!.env.example
+*.pem
+*.key
+credentials.json
+token.json
+secrets.yaml
+
+# ------------------------------------------------------------------------------
+# 8. Logs and Temporary Pipeline Artifacts
+# ------------------------------------------------------------------------------
+*.log
+*.bak
+*.swp
+*.swo
+*~
