@@ -180,12 +180,12 @@ Train the `YOLOv8x-seg` instance segmentation model on the sliced $1024 \times 1
 
 Fresh training run on sliced tiles (100 epochs, batch 8, RAM caching):
 ```bash
-python scripts/train_artifact_robust_yolo.py --data data/tiled_dataset_config.yaml --epochs 100 --batch 8 --imgsz 1024 --cache ram --workers 16
+python scripts/train_artifact_robust_yolo.py --data data/tiled_dataset_config.yaml --epochs 100 --batch 8 --imgsz 1024 --cache ram --workers 0
 ```
 
 Resume interrupted training from last saved checkpoint (`last.pt`):
 ```bash
-python scripts/train_artifact_robust_yolo.py --resume --cache ram --workers 16
+python scripts/train_artifact_robust_yolo.py --resume --cache ram --workers 0
 ```
 
 Explicitly re-partition tiled dataset by specimen sheets:

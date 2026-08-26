@@ -486,14 +486,24 @@ class RobustYOLOTrainer:
         self.resume = resume
         self.cache = cache
 
-        # On Windows with Google Drive / Cloud mounts (G:\), multi-process DataLoader workers (workers > 0)
-        # spawn subprocesses that compete for virtual filesystem handles, causing transient cv2.imread
-        # read failures and FileNotFoundError. Default to 0 for rock-solid synchronous loading on Windows.
+        # Windows Multiprocessing & RAM Caching IPC Protection:
+        # On Windows, Python uses `spawn` instead of `fork` to initialize DataLoader worker subprocesses.
+        # When `cache='ram'` is enabled, the entire in-memory dataset (20,000+ images) must be serialized
+        # (pickled) and passed through IPC pipes to each spawned worker. This immediately exhausts Windows
+        # IPC pipe memory buffers and throws `MemoryError: reduction.pickle.load(from_parent)`.
+        # When caching in RAM on Windows, workers must be 0 (main process zero-copy in-memory loading).
         if workers is not None:
             self.workers = workers
         else:
-            # Default to 0 on Windows to prevent multi-worker Google Drive virtual file lock errors
             self.workers = 0 if os.name == "nt" else 4
+
+        if os.name == "nt" and self.cache == "ram" and self.workers > 0:
+            logger.warning(
+                f"Windows multiprocessing 'spawn' cannot serialize a 20,000+ image RAM cache "
+                f"across {self.workers} worker IPC pipes (causes MemoryError). "
+                f"Automatically adjusting workers=0 for ultra-fast zero-copy main-process RAM caching."
+            )
+            self.workers = 0
 
         # Detect optimal device and batch
         auto_device, auto_batch = detect_optimal_device_and_batch(batch, imgsz=self.imgsz)
