@@ -96,22 +96,38 @@ packera-dubia-morphometrics/
 │       ├── leaf_extraction_qc.csv # Quality control log for hierarchical leaf extraction
 │       ├── label_noise_audit.csv  # Cleanlab & discordance error logs
 │       └── triage_queue.csv       # High-entropy vouchers prioritized for expert review
+├── docs/
+│   └── Transfer pc intrusctions.md    # System setup and transfer instructions
 ├── models/
 │   ├── yolov8_leaf_best.pt        # Fine-tuned YOLOv8x-seg weights for organ segmentation
 │   └── dinov2_backbone.pth        # Self-supervised vision transformer feature weights
 ├── scripts/
-│   ├── 01_voucher_harvester.py    # Multi-tier GBIF ingestion, DwC parsing, image download
-│   ├── 02_hierarchical_leaf_extractor.py # 5-Stage precision leaf extraction & 4-tier hierarchy
-│   ├── artifact_filter_gatekeeper.py # Pre-blanking layout & post-extraction validation gatekeeper
-│   ├── build_artifact_robust_dataset.py # 9-Class YOLO segmentation dataset builder
-│   ├── native_dpi_patch_tiler.py  # Core sliding window geometry & SAHI helper module
-│   ├── run_dpi_tiler.py           # Multi-process native-DPI patch tiler component (ProcessPoolExecutor)
-│   ├── run_sahi_inference.py      # Standalone SAHI sliced inference runner with checkpoint resumption
-│   ├── train_artifact_robust_yolo.py # Production YOLOv8x-seg fine-tuning engine (RAM caching, AMP)
-│   ├── 03_fourier_extractor.R     # Label-blind Elliptic Fourier Analysis (Momocs)
-│   ├── 04_gmm_morphotools.R       # GMM BIC testing & MorphoTools2 passive CDA
-│   ├── 05_cleanlab_vision_xai.py  # Confident Learning label pruning & Grad-CAM XAI
-│   └── 06_multimodal_spatial_rf.R # Multi-view ecological consensus & Spatial Random Forest
+│   ├── core/                      # Shared utility classes, metrics, and models
+│   │   ├── config.py              # Centralized hyperparameters and class schema mapping
+│   │   ├── data_structures.py     # Reusable dataclasses for telemetry and geometric metrics
+│   │   ├── dataset_builder.py     # YOLO dataset generation worker logic
+│   │   ├── gatekeeper_engine.py   # Deterministic layout mask and text routing algorithm
+│   │   ├── harvester.py           # GBIF/DwC pipeline download engine
+│   │   ├── leaf_extraction.py     # 5-Stage precision extraction hierarchy logic
+│   │   ├── logger.py              # Standardized multi-stream logging configuration
+│   │   └── tiling_utils.py        # Core sliding window geometry & SAHI helper module
+│   ├── data_prep/
+│   │   ├── 01_voucher_harvester.py
+│   │   └── build_artifact_robust_dataset.py
+│   ├── vision/
+│   │   ├── 02_hierarchical_leaf_extractor.py
+│   │   ├── artifact_filter_gatekeeper.py
+│   │   ├── run_dpi_tiler.py
+│   │   └── run_sahi_inference.py
+│   ├── morphometrics/
+│   │   ├── 03_fourier_extractor.R
+│   │   └── 04_gmm_morphotools.R
+│   ├── analysis/
+│   │   ├── 05_cleanlab_vision_xai.py
+│   │   └── 06_multimodal_spatial_rf.R
+│   ├── tests/
+│   │   └── test_native_dpi_patch_tiler.py
+│   └── train_artifact_robust_yolo.py # Production YOLOv8x-seg fine-tuning engine (RAM caching, AMP)
 ├── outputs/
 │   ├── figures/                   # CDA biplots, Grad-CAM saliency panels, EFA contours
 │   ├── training_evaluation/       # YOLOv8x class mAP curves, confusion matrices, loss telemetry
@@ -160,19 +176,19 @@ Summary metrics from initial quality-controlled voucher ingestion (`01_voucher_h
 ### 1. Ingestion & Authority Stratification
 Harvest specimen records from GBIF, filter spatial coordinate uncertainty ($\le 5000\,\text{m}$), parse taxonomic authority slips into Gold/Silver/Bronze tiers, compute circular phenological metrics, and download high-resolution sheets:
 ```bash
-python scripts/01_voucher_harvester.py --download-images --max-records-per-taxon 1000 --concurrency 15
+python scripts/data_prep/01_voucher_harvester.py --download-images --max-records-per-taxon 1000 --concurrency 15
 ```
 
 ### 2. Build Artifact-Robust YOLO Segmentation Dataset
 Construct the 9-class instance segmentation training set with negative background sheet patches and bounding polygons for botanical organs and mounting hardware:
 ```bash
-python scripts/build_artifact_robust_dataset.py --output-dir data/yolo_dataset --imgsz 1024
+python scripts/data_prep/build_artifact_robust_dataset.py --output-dir data/yolo_dataset --imgsz 1024
 ```
 
 ### 3. High-Throughput Native-DPI Patch Tiling (`run_dpi_tiler.py`)
 Tile full-resolution specimen scans ($1024 \times 1024$, 20% overlap) across multi-core CPU workers with dynamic polygon clipping and background paper sub-sampling:
 ```bash
-python scripts/run_dpi_tiler.py --input-dir data/raw_vouchers --labels-dir data/yolo_dataset/labels --output-dir data/tiled_dataset --num-workers 32 --tile-size 1024 --overlap 0.20
+python scripts/vision/run_dpi_tiler.py --input-dir data/raw_vouchers --labels-dir data/yolo_dataset/labels --output-dir data/tiled_dataset --num-workers 32 --tile-size 1024 --overlap 0.20
 ```
 
 ### 4. Fine-Tune Artifact-Robust YOLOv8x-seg on Sliced DPI Tiles
@@ -196,42 +212,42 @@ python scripts/train_artifact_robust_yolo.py --split-tiled-dataset --train-ratio
 ### 5. Sliced Aided Hyper Inference (`run_sahi_inference.py`)
 Run SAHI sliced inference on full-resolution gigapixel sheets using fine-tuned YOLOv8 segmentation weights with automatic checkpoint resumption:
 ```bash
-python scripts/run_sahi_inference.py --weights models/yolov8_leaf_best.pt --input-dir data/raw_vouchers --output-dir outputs/sahi_detections --conf 0.25 --iou 0.45 --slice-size 1024 --overlap 0.20
+python scripts/vision/run_sahi_inference.py --weights models/yolov8_leaf_best.pt --input-dir data/raw_vouchers --output-dir outputs/sahi_detections --conf 0.25 --iou 0.45 --slice-size 1024 --overlap 0.20
 ```
 
 ### 6. Hierarchical Precision Leaf Extraction & Gatekeeper Validation
 Execute the 5-stage precision extraction framework with pre-emptive hard-masking and post-extraction validation:
 ```bash
-python scripts/02_hierarchical_leaf_extractor.py --weights models/yolov8_leaf_best.pt --conf-threshold 0.25
+python scripts/vision/02_hierarchical_leaf_extractor.py --weights models/yolov8_leaf_best.pt --conf-threshold 0.25
 ```
 
 Run the standalone unit test suite for the deterministic gatekeeper:
 ```bash
-python scripts/artifact_filter_gatekeeper.py --test
+python scripts/vision/artifact_filter_gatekeeper.py --test
 ```
 
 ### 7. Label-Blind Elliptic Fourier Analysis (Momocs)
 Extract normalized harmonic coefficients (EFA) on binarized Tier 1 and Tier 2 leaf silhouettes via `Momocs`:
 ```bash
-Rscript scripts/03_fourier_extractor.R --input data/masks/tier1_intact/ --harmonics 12
+Rscript scripts/morphometrics/03_fourier_extractor.R --input data/masks/tier1_intact/ --harmonics 12
 ```
 
 ### 8. GMM Cluster Testing & Passive Sample CDA (MorphoTools2)
 Model natural morphospace clusters via Gaussian Mixture Models (`mclust`) and execute Canonical Discriminant Analysis with passive sample projection (`MorphoTools2`):
 ```bash
-Rscript scripts/04_gmm_morphotools.R --metadata data/tables/curated_vouchers.csv
+Rscript scripts/morphometrics/04_gmm_morphotools.R --metadata data/tables/curated_vouchers.csv
 ```
 
 ### 9. Confident Learning Label Pruning & Grad-CAM XAI
 Extract DINOv2 visual embeddings, identify mislabeled vouchers via `cleanlab`, and generate Grad-CAM visual explanation heatmaps:
 ```bash
-python scripts/05_cleanlab_vision_xai.py --backbone dinov2_vitb14 --cleanlab-threshold 0.85
+python scripts/analysis/05_cleanlab_vision_xai.py --backbone dinov2_vitb14 --cleanlab-threshold 0.85
 ```
 
 ### 10. Multi-View Spatial Random Forest & Niche Modeling
 Integrate SoilGrids pedology (pH, CEC, sand fraction) and WorldClim climate variables to detect cross-modal conflicts and train spatial random forest models with Moran's Eigenvector Maps:
 ```bash
-Rscript scripts/06_multimodal_spatial_rf.R --env-dir data/environmental/
+Rscript scripts/analysis/06_multimodal_spatial_rf.R --env-dir data/environmental/
 ```
 
 ---

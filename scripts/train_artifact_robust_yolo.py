@@ -1013,9 +1013,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--cache",
         type=str,
-        default="ram",
+        default="disk",
         choices=["ram", "disk", "none"],
-        help="Image caching strategy. 'ram' pre-loads scans into memory for maximum training speed."
+        help="Image caching strategy. 'disk' is recommended on Windows to prevent memory exhaustion with high workers."
     )
     parser.add_argument(
         "--resume",

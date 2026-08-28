@@ -59,6 +59,9 @@ Usage:
 
 import os
 import sys
+from scripts.core.config import CLASS_NAMES, CLASS_MAP, CLASS_COLORS_BGR, DEFAULT_WORKSPACE, DEFAULT_RAW_DIR, DEFAULT_CURATED_CSV, DEFAULT_OUTPUT_DIR, DEFAULT_CONFIG_PATH, DEFAULT_QC_DIR
+from scripts.core.logger import setup_logging
+from scripts.core.data_structures import ArtifactDetection, GeometricMetrics, SpectralMetrics, TextureMetrics, FilterResult, InstanceAnnotation
 import math
 import glob
 import logging
@@ -98,9 +101,6 @@ except ImportError:
 # Global Directory & Class Configuration
 # -----------------------------------------------------------------------------
 
-DEFAULT_RAW_DIR = Path("data/raw_vouchers")
-DEFAULT_MODEL_PATH = Path("models/yolov8_leaf_best.pt")
-DEFAULT_FALLBACK_MODEL = Path("yolov8n-seg.pt")
 
 OUTPUT_DIRS = {
     "rosettes_dense": Path("data/cropped_patches/rosettes_dense"),
@@ -137,11 +137,7 @@ CLASS_MAP = {name: idx for idx, name in enumerate(CLASS_NAMES)}
 # Logging Configuration
 # -----------------------------------------------------------------------------
 
-def setup_logging(log_file: Optional[Path] = None, verbose: bool = False) -> logging.Logger:
-    """
-    Configures detailed multi-handler logging with timestamps and formatters.
-    """
-    logger = logging.getLogger("HierarchicalLeafExtractor")
+logger = logging.getLogger("HierarchicalLeafExtractor")
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     logger.handlers.clear()
 

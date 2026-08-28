@@ -45,6 +45,9 @@ Usage:
 
 import os
 import sys
+from scripts.core.config import CLASS_NAMES, CLASS_MAP, CLASS_COLORS_BGR, DEFAULT_WORKSPACE, DEFAULT_RAW_DIR, DEFAULT_CURATED_CSV, DEFAULT_OUTPUT_DIR, DEFAULT_CONFIG_PATH, DEFAULT_QC_DIR
+from scripts.core.logger import setup_logging
+from scripts.core.data_structures import ArtifactDetection, GeometricMetrics, SpectralMetrics, TextureMetrics, FilterResult, InstanceAnnotation
 import math
 import json
 import time
@@ -98,32 +101,12 @@ logging.basicConfig(
 logger = logging.getLogger("NativeDPITiler")
 
 # Multi-class schema mapping for botanical vision model
-CLASS_NAMES: List[str] = [
-    "basal_leaf",       # 0: Leaf blade / intact leaf
-    "leaf_petiole",     # 1: Distinct petiole / leaf stalk
-    "basal_rosette",    # 2: Clustered basal rosette
-    "capitulum",        # 3: Inflorescence / flower head
-    "herbarium_label",  # 4: Main specimen metadata label
-    "color_chart",      # 5: Calibration color chart / palette
-    "ruler_scale",      # 6: Measurement scale / centimeter bar
-    "barcode_sticker",  # 7: Digitization barcode / QR sticker
-    "mounting_tape",    # 8: Linen, paper, or plastic mounting tape strip
-]
 
-CLASS_MAP: Dict[str, int] = {name: idx for idx, name in enumerate(CLASS_NAMES)}
+
+
 
 # Color palette for debug visual overlays (BGR format)
-CLASS_COLORS_BGR: Dict[int, Tuple[int, int, int]] = {
-    0: (0, 200, 0),      # basal_leaf: Green
-    1: (50, 255, 150),   # leaf_petiole: Mint Green
-    2: (0, 140, 70),     # basal_rosette: Forest Green
-    3: (0, 215, 255),    # capitulum: Yellow/Gold
-    4: (30, 30, 230),    # herbarium_label: Red
-    5: (230, 30, 230),   # color_chart: Magenta
-    6: (0, 140, 255),    # ruler_scale: Orange
-    7: (230, 180, 0),    # barcode_sticker: Cyan
-    8: (180, 0, 180),    # mounting_tape: Violet
-}
+
 
 
 # =============================================================================

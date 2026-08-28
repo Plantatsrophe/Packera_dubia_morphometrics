@@ -29,7 +29,7 @@ from shapely.geometry import Polygon, box
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from scripts.native_dpi_patch_tiler import (
+from scripts.core.tiling_utils import (
     CLASS_NAMES,
     CLASS_MAP,
     HerbariumAnnotation,

@@ -42,7 +42,7 @@ sys.path.insert(0, str(root_dir))
 sys.path.insert(0, str(root_dir / "scripts"))
 
 # Import SAHI inference engine from core module
-from scripts.native_dpi_patch_tiler import (
+from scripts.core.tiling_utils import (
     HerbariumSAHIInference,
     CLASS_NAMES
 )

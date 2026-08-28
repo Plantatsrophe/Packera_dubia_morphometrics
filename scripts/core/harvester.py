@@ -39,6 +39,9 @@ Usage:
 
 import os
 import sys
+from scripts.core.config import CLASS_NAMES, CLASS_MAP, CLASS_COLORS_BGR, DEFAULT_WORKSPACE, DEFAULT_RAW_DIR, DEFAULT_CURATED_CSV, DEFAULT_OUTPUT_DIR, DEFAULT_CONFIG_PATH, DEFAULT_QC_DIR
+from scripts.core.logger import setup_logging
+from scripts.core.data_structures import ArtifactDetection, GeometricMetrics, SpectralMetrics, TextureMetrics, FilterResult, InstanceAnnotation
 import re
 import math
 import time
@@ -62,7 +65,6 @@ import pygbif.species as species
 # -----------------------------------------------------------------------------
 
 # Target focal taxa in the Packera dubia complex and allied North American clades
-DEFAULT_TARGET_TAXA = [
     "Packera dubia",
     "Packera tomentosa",
     "Senecio tomentosus",
@@ -116,8 +118,6 @@ OUTPUTS_DIR = BASE_DIR / "outputs"
 REPORTS_DIR = OUTPUTS_DIR / "reports"
 
 # Default Output paths
-DEFAULT_OUTPUT_CSV = TABLES_DIR / "curated_vouchers.csv"
-DEFAULT_SUMMARY_LOG = REPORTS_DIR / "voucher_ingestion_summary.log"
 
 # -----------------------------------------------------------------------------
 # Logging Configuration
