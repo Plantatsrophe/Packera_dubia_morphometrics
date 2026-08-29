@@ -202,7 +202,7 @@ python scripts/data_prep/build_artifact_robust_dataset.py --output-dir data/yolo
 ### 3. High-Throughput Native-DPI Patch Tiling (`run_dpi_tiler.py`)
 Tile full-resolution specimen scans ($1024 \times 1024$, 20% overlap) across multi-core CPU workers with dynamic polygon clipping and background paper sub-sampling:
 ```bash
-python scripts/vision/run_dpi_tiler.py --input-dir data/raw_vouchers --labels-dir data/yolo_dataset/labels --output-dir data/tiled_dataset --num-workers 32 --tile-size 1024 --overlap 0.20
+python scripts/vision/run_dpi_tiler.py --input-dir data/yolo_dataset/images --labels-dir data/yolo_dataset/labels --output-dir data/tiled_dataset --num-workers 32 --tile-size 1024 --overlap 0.20
 ```
 
 ### 4. Fine-Tune Artifact-Robust YOLOv8m-seg on Sliced DPI Tiles

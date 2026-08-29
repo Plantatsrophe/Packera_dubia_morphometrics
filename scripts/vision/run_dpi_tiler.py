@@ -170,7 +170,8 @@ def run_dpi_tiling(
     image_files: List[Path] = []
     if resolved_input_dir.exists():
         for ext in image_extensions:
-            image_files.extend(resolved_input_dir.glob(ext))
+            # BUGFIX: Use rglob instead of glob to recursively search for images in subdirectories (e.g., train, val, test)
+            image_files.extend(resolved_input_dir.rglob(ext))
     image_files = sorted(list(set(image_files)))
 
     if limit is not None and limit > 0:
@@ -220,6 +221,13 @@ def run_dpi_tiling(
     task_list = []
     for img_p in image_files:
         lbl_p = label_index.get(img_p.stem)
+        
+        # BUGFIX: Skip images that don't have a corresponding label file.
+        # This prevents the tiler from generating thousands of false-negative background tiles
+        # from images that actually contain plants but are just missing labels.
+        if lbl_p is None:
+            continue
+            
         task_list.append((
             img_p,
             lbl_p,
