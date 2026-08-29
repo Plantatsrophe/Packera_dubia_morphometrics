@@ -21,9 +21,14 @@ from pathlib import Path
 import os
 import psutil
 
-from train.config import parse_arguments, resolve_default_paths
-from train.dataset import prepare_tiled_dataset_split
-from train.trainer import RobustYOLOTrainer
+# Add project root directory to sys.path to ensure absolute module imports resolve
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.train.config import parse_arguments, resolve_default_paths
+from scripts.train.dataset import prepare_tiled_dataset_split
+from scripts.train.trainer import RobustYOLOTrainer
 
 logging.basicConfig(
     level=logging.INFO,

@@ -103,14 +103,24 @@ packera-dubia-morphometrics/
 │   └── dinov2_backbone.pth        # Self-supervised vision transformer feature weights
 ├── scripts/
 │   ├── core/                      # Shared utility classes, metrics, and models
+│   │   ├── artifact_harvester.py  # Detects and extracts tape, labels, and rulers
+│   │   ├── augmentation.py        # Synthetic occlusion copy-paste and background negative extraction
+│   │   ├── botanical_annotations.py # Computer vision logic for leaf and stem masking
 │   │   ├── config.py              # Centralized hyperparameters and class schema mapping
 │   │   ├── data_structures.py     # Reusable dataclasses for telemetry and geometric metrics
-│   │   ├── dataset_builder.py     # YOLO dataset generation worker logic
+│   │   ├── dataset_builder.py     # YOLO dataset orchestrator logic
+│   │   ├── dataset_utils.py       # Data partitioning and QC rendering
 │   │   ├── gatekeeper_engine.py   # Deterministic layout mask and text routing algorithm
-│   │   ├── harvester.py           # GBIF/DwC pipeline download engine
-│   │   ├── leaf_extraction.py     # 5-Stage precision extraction hierarchy logic
+│   │   ├── gatekeeper_tests.py    # Synthetic generative test suites for artifact gatekeeper
+│   │   ├── harvester.py           # GBIF/DwC pipeline download orchestrator
+│   │   ├── harvester_utils.py     # Circular phenology and metadata parsing
+│   │   ├── leaf_cv_utils.py       # Low-level OpenCV processing
+│   │   ├── leaf_extraction.py     # 5-Stage precision extraction hierarchy orchestrator
+│   │   ├── leaf_morphometrics.py  # High-level geometric tracing and morphometrics
 │   │   ├── logger.py              # Standardized multi-stream logging configuration
-│   │   └── tiling_utils.py        # Core sliding window geometry & SAHI helper module
+│   │   ├── sahi_inference.py      # Ultralytics SAHI wrapper classes
+│   │   ├── tiling_geometry.py     # Polygon coordinate reprojection and clipping
+│   │   └── tiling_utils.py        # Core sliding window orchestration
 │   ├── data_prep/
 │   │   ├── 01_voucher_harvester.py
 │   │   └── build_artifact_robust_dataset.py
@@ -130,8 +140,8 @@ packera-dubia-morphometrics/
 │   │   ├── config.py              # CLI argument parsing and default configurations
 │   │   ├── dataset.py             # Tiled dataset partitioning logic
 │   │   ├── evaluator.py           # Validation and cross-classification metrics
-│   │   └── trainer.py             # Model initialization and hyperparameter configuration
-│   └── train_yolo.py # Production YOLOv8m-seg fine-tuning engine (RAM caching, AMP)
+│   │   ├── trainer.py             # Model initialization and hyperparameter configuration
+│   │   └── train_yolo.py          # Production YOLOv8m-seg fine-tuning engine (RAM caching, AMP)
 ├── outputs/
 │   ├── figures/                   # CDA biplots, Grad-CAM saliency panels, EFA contours
 │   ├── training_evaluation/       # YOLOv8m class mAP curves, confusion matrices, loss telemetry
@@ -178,7 +188,7 @@ Summary metrics from initial quality-controlled voucher ingestion (`01_voucher_h
 ## 🚀 Execution & Workflow Guide
 
 ### 1. Ingestion & Authority Stratification
-Harvest specimen records from GBIF, filter spatial coordinate uncertainty ($\le 5000\,\text{m}$), parse taxonomic authority slips into Gold/Silver/Bronze tiers, compute circular phenological metrics, and download high-resolution sheets:
+Harvest specimen records from GBIF (relaxing strict coordinate requirements to maximize imagery), filter spatial coordinate uncertainty ($\le 5000\,\text{m}$) where available, parse taxonomic authority slips into Gold/Silver/Bronze tiers, compute circular phenological metrics, export county/state locations, and download high-resolution sheets:
 ```bash
 python scripts/data_prep/01_voucher_harvester.py --download-images --max-records-per-taxon 5000 --concurrency 15
 ```
@@ -200,17 +210,17 @@ Train the `YOLOv8m-seg` instance segmentation model on the sliced $1024 \times 1
 
 Fresh training run on sliced tiles (150 epochs, batch 8, disk caching):
 ```bash
-python scripts/train_yolo.py --data data/tiled_dataset_config.yaml --epochs 150 --batch 8 --imgsz 1024 --cache disk --workers 16
+python scripts/train/train_yolo.py --data data/tiled_dataset_config.yaml --epochs 150 --batch 8 --imgsz 1024 --cache disk --workers 16
 ```
 
 Resume interrupted training from last saved checkpoint (`last.pt`):
 ```bash
-python scripts/train_yolo.py --resume --cache disk --workers 16
+python scripts/train/train_yolo.py --resume --cache disk --workers 16
 ```
 
 Explicitly re-partition tiled dataset by specimen sheets:
 ```bash
-python scripts/train_yolo.py --split-tiled-dataset --train-ratio 0.70 --val-ratio 0.15 --test-ratio 0.15
+python scripts/train/train_yolo.py --split-tiled-dataset --train-ratio 0.70 --val-ratio 0.15 --test-ratio 0.15
 ```
 
 ### 5. Sliced Aided Hyper Inference (`run_sahi_inference.py`)

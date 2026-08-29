@@ -39,9 +39,9 @@ from scripts.core.tiling_utils import (
     NativeDPISlidingWindow,
     DynamicGeometricReprojector,
     BackgroundPaperFilter,
-    NativeDPIPatchTiler,
-    HerbariumSAHIInference
+    NativeDPIPatchTiler
 )
+from scripts.core.sahi_inference import HerbariumSAHIInference
 from scripts.vision.run_dpi_tiler import run_dpi_tiling
 from scripts.vision.run_sahi_inference import run_sahi_inference
 

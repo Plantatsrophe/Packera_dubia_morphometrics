@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--negative-ratio", type=float, default=0.09,
-        help="Proportion of dataset comprising pure background negative sheets (default: 0.09 / ~9%)."
+        help="Proportion of dataset comprising pure background negative sheets (default: 0.09 / ~9%%)."
     )
     parser.add_argument(
         "--augment-prob", type=float, default=0.75,

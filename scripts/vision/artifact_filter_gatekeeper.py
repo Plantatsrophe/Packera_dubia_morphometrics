@@ -10,7 +10,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.logger import setup_logging
-from scripts.core.gatekeeper_engine import ArtifactFilterGatekeeper, run_synthetic_test_suite
+from scripts.core.gatekeeper_engine import ArtifactFilterGatekeeper
+from scripts.core.gatekeeper_tests import run_synthetic_test_suite
 
 logger = setup_logging()
 
