@@ -127,7 +127,7 @@ packera-dubia-morphometrics/
 │   │   └── 06_multimodal_spatial_rf.R
 │   ├── tests/
 │   │   └── test_native_dpi_patch_tiler.py
-│   └── train_artifact_robust_yolo.py # Production YOLOv8x-seg fine-tuning engine (RAM caching, AMP)
+│   └── train_yolo.py # Production YOLOv8x-seg fine-tuning engine (RAM caching, AMP)
 ├── outputs/
 │   ├── figures/                   # CDA biplots, Grad-CAM saliency panels, EFA contours
 │   ├── training_evaluation/       # YOLOv8x class mAP curves, confusion matrices, loss telemetry
@@ -194,19 +194,19 @@ python scripts/vision/run_dpi_tiler.py --input-dir data/raw_vouchers --labels-di
 ### 4. Fine-Tune Artifact-Robust YOLOv8x-seg on Sliced DPI Tiles
 Train the `YOLOv8x-seg` instance segmentation model on the sliced $1024 \times 1024$ native-DPI tiles (`data/tiled_dataset_config.yaml`) with mixed precision AMP, botanical loss weighting, and RAM dataset caching:
 
-Fresh training run on sliced tiles (100 epochs, batch 8, RAM caching):
+Fresh training run on sliced tiles (150 epochs, batch 8, RAM caching):
 ```bash
-python scripts/train_artifact_robust_yolo.py --data data/tiled_dataset_config.yaml --epochs 100 --batch 8 --imgsz 1024 --cache ram --workers 0
+python scripts/train_yolo.py --data data/tiled_dataset_config.yaml --epochs 150 --batch 8 --imgsz 1024 --cache ram --workers 0
 ```
 
 Resume interrupted training from last saved checkpoint (`last.pt`):
 ```bash
-python scripts/train_artifact_robust_yolo.py --resume --cache ram --workers 0
+python scripts/train_yolo.py --resume --cache ram --workers 0
 ```
 
 Explicitly re-partition tiled dataset by specimen sheets:
 ```bash
-python scripts/train_artifact_robust_yolo.py --split-tiled-dataset --train-ratio 0.70 --val-ratio 0.15 --test-ratio 0.15
+python scripts/train_yolo.py --split-tiled-dataset --train-ratio 0.70 --val-ratio 0.15 --test-ratio 0.15
 ```
 
 ### 5. Sliced Aided Hyper Inference (`run_sahi_inference.py`)
