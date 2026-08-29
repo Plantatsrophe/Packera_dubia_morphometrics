@@ -1,21 +1,21 @@
 {
-  "total_samples": 1491,
+  "total_samples": 8,
   "stats": {
-    "train_samples": 1052,
-    "val_samples": 217,
-    "test_samples": 222,
-    "negative_samples": 123,
-    "total_instances": 16459,
+    "train_samples": 4,
+    "val_samples": 1,
+    "test_samples": 3,
+    "negative_samples": 3,
+    "total_instances": 81,
     "class_counts": {
-      "basal_leaf": 8481,
-      "leaf_petiole": 2417,
-      "basal_rosette": 146,
-      "capitulum": 1731,
-      "herbarium_label": 1527,
-      "color_chart": 1116,
-      "ruler_scale": 278,
-      "barcode_sticker": 556,
-      "mounting_tape": 207
+      "basal_leaf": 45,
+      "leaf_petiole": 10,
+      "basal_rosette": 3,
+      "capitulum": 10,
+      "herbarium_label": 7,
+      "color_chart": 3,
+      "ruler_scale": 3,
+      "barcode_sticker": 0,
+      "mounting_tape": 0
     }
   },
   "config_yaml": "E:\\Packera_dubia_morphometrics\\data\\dataset_config.yaml",

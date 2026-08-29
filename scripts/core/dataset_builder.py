@@ -7,6 +7,7 @@ import math
 import numpy as np
 import random
 import yaml
+import json
 import glob
 import logging
 import pandas as pd
@@ -215,8 +216,13 @@ def build_artifact_robust_dataset(
 
         # 5. Hard Negative Injection (Pure background sheet regions with empty .txt label)
         logger.info(f"Injecting {num_negatives} hard negative background sheets into split '{split_name}'...")
+        donor_pool = split_vouchers if split_vouchers else vouchers
+        if not donor_pool:
+            continue
+
         for neg_idx in range(num_negatives):
-            donor_v = split_vouchers[neg_idx % len(split_vouchers)]
+            # Select background donor voucher safely from available pool
+            donor_v = donor_pool[neg_idx % len(donor_pool)]
             donor_img = cv2.imread(str(donor_v["image_path"]))
             if donor_img is None:
                 continue

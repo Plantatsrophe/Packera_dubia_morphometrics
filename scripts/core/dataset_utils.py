@@ -23,6 +23,9 @@ except ImportError:
     def tqdm(iterable, *args, **kwargs):
         return iterable
 
+# Initialize shared structured pipeline logger
+logger = setup_logging()
+
 
 def stratify_and_partition_dataset(
     vouchers: List[Dict[str, Any]],

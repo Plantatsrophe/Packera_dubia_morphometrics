@@ -25,6 +25,9 @@ except ImportError:
 from sahi import AutoDetectionModel
 from sahi.predict import get_sliced_prediction
 
+# Initialize shared structured pipeline logger
+logger = setup_logging()
+
 class HerbariumSAHIInference:
     """
     Inference wrapper utilizing SAHI (Slicing Aided Hyper Inference) to perform
