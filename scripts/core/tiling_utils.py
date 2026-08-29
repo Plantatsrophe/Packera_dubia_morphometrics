@@ -206,7 +206,8 @@ class NativeDPIPatchTiler:
     def process_sheet(
         self,
         image_path: Union[str, Path],
-        label_path: Optional[Union[str, Path]] = None
+        label_path: Optional[Union[str, Path]] = None,
+        split_name: Optional[str] = None
     ) -> List[Path]:
         """
         Processes a single full-resolution herbarium sheet:
@@ -304,6 +305,13 @@ class NativeDPIPatchTiler:
             tile_name = f"{sheet_stem}_tile_y{y1:05d}_x{x1:05d}"
             out_img_path = self.images_dir / f"{tile_name}.jpg"
             out_lbl_path = self.labels_dir / f"{tile_name}.txt"
+            if split_name:
+                out_img_dir = self.images_dir / split_name
+                out_lbl_dir = self.labels_dir / split_name
+                out_img_dir.mkdir(parents=True, exist_ok=True)
+                out_lbl_dir.mkdir(parents=True, exist_ok=True)
+                out_img_path = out_img_dir / f"{tile_name}.jpg"
+                out_lbl_path = out_lbl_dir / f"{tile_name}.txt"
 
             # Save JPEG image patch with high quality (95%)
             cv2.imwrite(str(out_img_path), tile_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 95])

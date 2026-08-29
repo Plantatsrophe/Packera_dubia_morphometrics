@@ -161,8 +161,8 @@ class RobustYOLOTrainer:
             "dfl": 1.5,
 
             "mosaic": 1.0,
-            "mixup": 0.25,
-            "copy_paste": 0.40,
+            "mixup": 0.0,
+            "copy_paste": 0.0,
             "degrees": 45.0,
             "translate": 0.1,
             "scale": 0.5,

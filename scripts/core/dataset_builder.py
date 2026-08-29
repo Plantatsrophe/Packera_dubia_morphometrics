@@ -374,9 +374,9 @@ def parse_args() -> argparse.Namespace:
 if __name__ == '__main__':
     args = parse_args()
     build_artifact_robust_dataset(
-        raw_vouchers_dir=Path(args.input_dir),
+        raw_vouchers_dir=Path(args.raw_dir),
         curated_csv_path=Path(args.curated_csv),
         output_dir=Path(args.output_dir),
         limit=args.limit,
-        num_workers=args.concurrency
+        num_workers=args.num_workers
     )

@@ -76,6 +76,7 @@ def _process_single_sheet_worker(task_args: Tuple) -> Dict[str, Any]:
         task_args (Tuple): Tuple containing:
             - img_p (Path): Absolute path to the specimen image.
             - lbl_p (Path or None): Path to matching ground-truth label file.
+            - split_name (str or None): Dataset split ("train", "val", "test") to maintain stratification.
             - tile_size (int): Dimension of square tiles in pixels (e.g., 1024).
             - overlap (float): Overlap ratio between adjacent windows (e.g., 0.20).
             - min_area_ratio (float): Minimum visible area ratio to retain clipped polygon.
@@ -90,6 +91,7 @@ def _process_single_sheet_worker(task_args: Tuple) -> Dict[str, Any]:
     (
         img_p,
         lbl_p,
+        split_name,
         tile_size,
         overlap,
         min_area_ratio,
@@ -111,7 +113,7 @@ def _process_single_sheet_worker(task_args: Tuple) -> Dict[str, Any]:
     )
 
     # Execute processing for this individual sheet
-    worker_tiler.process_sheet(image_path=img_p, label_path=lbl_p)
+    worker_tiler.process_sheet(image_path=img_p, label_path=lbl_p, split_name=split_name)
     return worker_tiler.metrics
 
 
@@ -228,9 +230,12 @@ def run_dpi_tiling(
         if lbl_p is None:
             continue
             
+        split_name = img_p.parent.name if img_p.parent.name in ["train", "val", "test"] else None
+
         task_list.append((
             img_p,
             lbl_p,
+            split_name,
             tile_size,
             overlap,
             min_area_ratio,
