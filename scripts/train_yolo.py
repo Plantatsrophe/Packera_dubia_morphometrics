@@ -18,6 +18,8 @@ Description:
 import sys
 import logging
 from pathlib import Path
+import os
+import psutil
 
 from train.config import parse_arguments, resolve_default_paths
 from train.dataset import prepare_tiled_dataset_split
@@ -80,14 +82,26 @@ def main():
     )
 
     if not args.eval_only:
-        # 1. Execute Training Loop
-        trainer.train()
+        try:
+            # 1. Execute Training Loop
+            trainer.train()
 
-        # 2. Export Best Model Checkpoint to models/yolov8_leaf_best.pt
-        best_checkpoint_path = trainer.export_best_checkpoint()
+            # 2. Export Best Model Checkpoint to models/yolov8_leaf_best.pt
+            best_checkpoint_path = trainer.export_best_checkpoint()
 
-        # 3. Evaluate and Export Comprehensive Metrics
-        trainer.evaluator.evaluate_and_export_metrics(checkpoint_path=best_checkpoint_path, split="val")
+            # 3. Evaluate and Export Comprehensive Metrics
+            trainer.evaluator.evaluate_and_export_metrics(checkpoint_path=best_checkpoint_path, split="val")
+        except KeyboardInterrupt:
+            logger.warning("KeyboardInterrupt received! Cleaning up child PyTorch DataLoader workers to prevent zombies...")
+            parent = psutil.Process(os.getpid())
+            children = parent.children(recursive=True)
+            for child in children:
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            logger.info(f"Successfully killed {len(children)} background workers. Exiting safely.")
+            sys.exit(1)
     else:
         # Evaluation Only Mode
         eval_checkpoint = args.checkpoint if args.checkpoint else trainer.paths["best_model_export"]
