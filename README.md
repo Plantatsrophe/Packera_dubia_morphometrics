@@ -39,7 +39,7 @@ In complex, hybridizing aster clades such as *Packera*, botanical audits reveal 
 flowchart TD
     A["Raw Herbarium Ingestion\n(GBIF / iDigBio / SEINet)"] --> B["Tier 1: Determiner Authority Stratification\n(Gold: Specialists | Silver: Herbaria | Bronze: Unverified)"]
     B --> C["Stage 1: Pre-Emptive Layout Hard-Masking\n(Sterilize Labels, Color Charts & Rulers with 10px Padding)"]
-    C --> D["Stage 2 & 3: Native-DPI YOLOv8x-seg & Patch Tiling\n(Extract Basal Blades, Petioles, Rosettes, Capitula)"]
+    C --> D["Stage 2 & 3: Native-DPI YOLOv8m-seg & Patch Tiling\n(Extract Basal Blades, Petioles, Rosettes, Capitula)"]
     D --> E["Deterministic Gatekeeper Verification\n(Rectangularity < 0.86 | Corner Angles | Solidity >= 0.72 | HSV Saturation)"]
     E -->|"Passed (Valid Silhouettes)"| F["Tier 2: Label-Blind Morphometrics\n(Momocs EFA + DINOv2 Embeddings + GMM Clustering)"]
     E -->|"Printed Text Detected"| G["data/cropped_patches/annotations/\n(OCR & Metadata Archive)"]
@@ -85,7 +85,7 @@ flowchart TD
 packera-dubia-morphometrics/
 ├── data/
 │   ├── raw_vouchers/              # High-resolution specimen sheet imagery (.jpg)
-│   ├── yolo_dataset/              # 9-class annotated dataset for YOLOv8x-seg training
+│   ├── yolo_dataset/              # 9-class annotated dataset for YOLOv8m-seg training
 │   ├── native_dpi_tiles/          # 1024x1024 native-DPI cropped voucher patches
 │   ├── cropped_patches/           # Extracted ROIs (basal leaves, rosettes, capitula)
 │   │   └── annotations/           # Routed text annotation slips and label patches
@@ -99,7 +99,7 @@ packera-dubia-morphometrics/
 ├── docs/
 │   └── Transfer pc intrusctions.md    # System setup and transfer instructions
 ├── models/
-│   ├── yolov8_leaf_best.pt        # Fine-tuned YOLOv8x-seg weights for organ segmentation
+│   ├── yolov8_leaf_best.pt        # Fine-tuned YOLOv8m-seg weights for organ segmentation
 │   └── dinov2_backbone.pth        # Self-supervised vision transformer feature weights
 ├── scripts/
 │   ├── core/                      # Shared utility classes, metrics, and models
@@ -126,11 +126,15 @@ packera-dubia-morphometrics/
 │   │   ├── 05_cleanlab_vision_xai.py
 │   │   └── 06_multimodal_spatial_rf.R
 │   ├── tests/
-│   │   └── test_native_dpi_patch_tiler.py
-│   └── train_yolo.py # Production YOLOv8x-seg fine-tuning engine (RAM caching, AMP)
+│   ├── train/                     # Modular YOLOv8 fine-tuning package
+│   │   ├── config.py              # CLI argument parsing and default configurations
+│   │   ├── dataset.py             # Tiled dataset partitioning logic
+│   │   ├── evaluator.py           # Validation and cross-classification metrics
+│   │   └── trainer.py             # Model initialization and hyperparameter configuration
+│   └── train_yolo.py # Production YOLOv8m-seg fine-tuning engine (RAM caching, AMP)
 ├── outputs/
 │   ├── figures/                   # CDA biplots, Grad-CAM saliency panels, EFA contours
-│   ├── training_evaluation/       # YOLOv8x class mAP curves, confusion matrices, loss telemetry
+│   ├── training_evaluation/       # YOLOv8m class mAP curves, confusion matrices, loss telemetry
 │   └── reports/                   # BIC model summaries & taxonomic revision keys
 └── README.md
 ```
@@ -191,8 +195,8 @@ Tile full-resolution specimen scans ($1024 \times 1024$, 20% overlap) across mul
 python scripts/vision/run_dpi_tiler.py --input-dir data/raw_vouchers --labels-dir data/yolo_dataset/labels --output-dir data/tiled_dataset --num-workers 32 --tile-size 1024 --overlap 0.20
 ```
 
-### 4. Fine-Tune Artifact-Robust YOLOv8x-seg on Sliced DPI Tiles
-Train the `YOLOv8x-seg` instance segmentation model on the sliced $1024 \times 1024$ native-DPI tiles (`data/tiled_dataset_config.yaml`) with mixed precision AMP, botanical loss weighting, and RAM dataset caching:
+### 4. Fine-Tune Artifact-Robust YOLOv8m-seg on Sliced DPI Tiles
+Train the `YOLOv8m-seg` instance segmentation model on the sliced $1024 \times 1024$ native-DPI tiles (`data/tiled_dataset_config.yaml`) with mixed precision AMP, botanical loss weighting, and RAM dataset caching:
 
 Fresh training run on sliced tiles (150 epochs, batch 8, RAM caching):
 ```bash
