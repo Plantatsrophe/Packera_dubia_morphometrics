@@ -163,6 +163,11 @@ def run_dpi_tiling(
     resolved_output_dir = Path(output_dir) if output_dir else root_dir / "data" / "tiled_dataset"
     resolved_summary_path = Path(summary_output) if summary_output else root_dir / "outputs" / "tiling_summary.json"
 
+    if force and resolved_output_dir.exists():
+        import shutil
+        print(f"WARNING: Purging old data in {resolved_output_dir} to start fresh...")
+        shutil.rmtree(resolved_output_dir)
+
     # Auto-adjust worker process count to machine CPU capacity
     available_cpus = os.cpu_count() or 4
     effective_workers = max(1, min(available_cpus, num_workers))
