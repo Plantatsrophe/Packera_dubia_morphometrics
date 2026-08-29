@@ -196,16 +196,16 @@ python scripts/vision/run_dpi_tiler.py --input-dir data/raw_vouchers --labels-di
 ```
 
 ### 4. Fine-Tune Artifact-Robust YOLOv8m-seg on Sliced DPI Tiles
-Train the `YOLOv8m-seg` instance segmentation model on the sliced $1024 \times 1024$ native-DPI tiles (`data/tiled_dataset_config.yaml`) with mixed precision AMP, botanical loss weighting, and RAM dataset caching:
+Train the `YOLOv8m-seg` instance segmentation model on the sliced $1024 \times 1024$ native-DPI tiles (`data/tiled_dataset_config.yaml`) with mixed precision AMP, botanical loss weighting, and disk dataset caching:
 
-Fresh training run on sliced tiles (150 epochs, batch 8, RAM caching):
+Fresh training run on sliced tiles (150 epochs, batch 8, disk caching):
 ```bash
-python scripts/train_yolo.py --data data/tiled_dataset_config.yaml --epochs 150 --batch 8 --imgsz 1024 --cache ram --workers 0
+python scripts/train_yolo.py --data data/tiled_dataset_config.yaml --epochs 150 --batch 8 --imgsz 1024 --cache disk --workers 16
 ```
 
 Resume interrupted training from last saved checkpoint (`last.pt`):
 ```bash
-python scripts/train_yolo.py --resume --cache ram --workers 0
+python scripts/train_yolo.py --resume --cache disk --workers 16
 ```
 
 Explicitly re-partition tiled dataset by specimen sheets:

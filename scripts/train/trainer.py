@@ -159,7 +159,6 @@ class RobustYOLOTrainer:
             "box": 7.5,
             "cls": 0.5,
             "dfl": 1.5,
-            "fl_gamma": 1.5,
 
             "mosaic": 1.0,
             "mixup": 0.25,

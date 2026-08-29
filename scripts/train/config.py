@@ -132,8 +132,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=0 if os.name == "nt" else 4,
-        help="Number of DataLoader worker subprocesses (0 recommended on Windows/Google Drive)."
+        default=16,
+        help="Number of DataLoader worker subprocesses (0 recommended on Windows/Google Drive with RAM cache)."
     )
     parser.add_argument(
         "--cache",
