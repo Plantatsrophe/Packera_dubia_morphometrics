@@ -1,8 +1,15 @@
 import re
 import os
 
-with open('git_diff.txt', 'r', encoding='utf-8') as f:
-    diff = f.read()
+if os.path.exists('git_diff.txt'):
+    try:
+        with open('git_diff.txt', 'r', encoding='utf-8') as f:
+            diff = f.read()
+    except UnicodeDecodeError:
+        with open('git_diff.txt', 'r', encoding='utf-16', errors='replace') as f:
+            diff = f.read()
+else:
+    diff = ""
 
 deleted_funcs = []
 deleted_classes = []

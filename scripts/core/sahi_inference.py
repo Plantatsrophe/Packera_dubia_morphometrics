@@ -7,6 +7,7 @@ import numpy as np
 import cv2
 import json
 import glob
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any, Union
 from collections import defaultdict
@@ -21,9 +22,14 @@ except ImportError:
     def tqdm(iterable, *args, **kwargs):
         return iterable
 
-
-from sahi import AutoDetectionModel
-from sahi.predict import get_sliced_prediction
+try:
+    from sahi import AutoDetectionModel
+    from sahi.predict import get_sliced_prediction
+    SAHI_AVAILABLE = True
+except ImportError:
+    AutoDetectionModel = None
+    get_sliced_prediction = None
+    SAHI_AVAILABLE = False
 
 # Initialize shared structured pipeline logger
 logger = setup_logging()

@@ -11,7 +11,7 @@ import unittest
 from typing import Dict, List, Tuple, Optional, Any, Union
 from collections import defaultdict
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 # Common imports
 from scripts.core.config import CLASS_NAMES, CLASS_MAP, CLASS_COLORS_BGR, DEFAULT_WORKSPACE

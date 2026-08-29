@@ -11,8 +11,10 @@ import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any, Union
 from collections import defaultdict
 from pathlib import Path
-from scipy import ndimage
-from skimage.morphology import skeletonize
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # Common imports
 from scripts.core.config import CLASS_NAMES, CLASS_MAP, CLASS_COLORS_BGR, DEFAULT_WORKSPACE, DEFAULT_RAW_DIR
@@ -415,5 +417,17 @@ def parse_args() -> argparse.Namespace:
         help="Enable verbose DEBUG logging output"
     )
     return parser.parse_args()
+
+
+if __name__ == "__main__":
+    cli_args = parse_args()
+    run_pipeline(
+        raw_dir=cli_args.raw_dir,
+        model_path=cli_args.model_path,
+        conf_threshold=cli_args.conf_threshold,
+        limit=cli_args.limit,
+        save_overlays=not cli_args.no_overlays,
+        clean_first=cli_args.clean
+    )
 
 

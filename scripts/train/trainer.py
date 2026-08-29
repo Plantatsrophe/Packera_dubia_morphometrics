@@ -64,7 +64,7 @@ class RobustYOLOTrainer:
         epochs: int = 150,
         device: Optional[str] = None,
         workers: Optional[int] = None,
-        cache: Optional[str] = "ram",
+        cache: Optional[str] = "disk",
         resume: bool = False,
         project_root: Optional[Path] = None,
         experiment_name: str = "artifact_robust_yolov8_seg"

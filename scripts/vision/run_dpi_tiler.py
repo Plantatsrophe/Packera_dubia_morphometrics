@@ -32,6 +32,7 @@ import json
 import logging
 import argparse
 import concurrent.futures
+import cv2
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -100,6 +101,10 @@ def _process_single_sheet_worker(task_args: Tuple) -> Dict[str, Any]:
         visualize,
         skip_existing
     ) = task_args
+
+    # Disable OpenCV multi-threading within parallel worker processes to prevent thread contention
+    cv2.setNumThreads(0)
+    cv2.ocl.setUseOpenCL(False)
 
     # Instantiate lightweight local worker tiler instance
     worker_tiler = NativeDPIPatchTiler(

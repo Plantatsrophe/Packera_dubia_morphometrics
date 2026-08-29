@@ -1,4 +1,4 @@
-path: E:/Packera_dubia_morphometrics/data/tiled_dataset
+path: /home/brandon/Packera_dubia_morphometrics/data/tiled_dataset
 train: images/train
 val: images/val
 test: images/test

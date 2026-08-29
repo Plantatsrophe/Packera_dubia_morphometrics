@@ -12,6 +12,10 @@ from collections import defaultdict
 from pathlib import Path
 from dataclasses import dataclass
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 # Common imports
 from scripts.core.config import CLASS_NAMES, CLASS_MAP, CLASS_COLORS_BGR, DEFAULT_WORKSPACE
 from scripts.core.logger import setup_logging
