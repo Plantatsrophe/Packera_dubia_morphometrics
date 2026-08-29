@@ -72,128 +72,11 @@ except ImportError:
 
 
 # =============================================================================
-# 1. Dataset Schema & Global Configuration
+# Logging Setup
 # =============================================================================
 
-# Multi-class schema mapping for botanical vision model
-
-
-
-
-# Distinct RGB color palette for rendering class overlays during QC
-
-
-# Default filesystem paths
-
-
-# =============================================================================
-# 2. Logging Setup
-# =============================================================================
-
-logger = logging.getLogger("ArtifactRobustDatasetBuilder")
-    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
-    logger.handlers.clear()
-
-    formatter = logging.Formatter(
-        "[%(asctime)s] [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-    if log_file:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-
-    return logger
-
-
-logger = setup_logging()
-
-
-# =============================================================================
-# 3. Annotation Data Structures & Helper Functions
-# =============================================================================
-
-class ID, normalized/absolute bounding box, and polygon contour points.
-    """
-    def __init__(
-        self,
-        class_id: int,
-        polygon: np.ndarray,  # Shape (N, 2) in absolute pixel coordinates [[x, y], ...]
-        bbox: Optional[Tuple[float, float, float, float]] = None,  # (x1, y1, x2, y2)
-        confidence: float = 1.0,
-        is_synthetic: bool = False,
-        tag: str = ""
-    ):
-        self.class_id = int(class_id)
-        self.polygon = np.asarray(polygon, dtype=np.float32)
-        if bbox is not None:
-            self.bbox = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
-        else:
-            if len(self.polygon) > 0:
-                x_min = float(np.min(self.polygon[:, 0]))
-                y_min = float(np.min(self.polygon[:, 1]))
-                x_max = float(np.max(self.polygon[:, 0]))
-                y_max = float(np.max(self.polygon[:, 1]))
-                self.bbox = (x_min, y_min, x_max, y_max)
-            else:
-                self.bbox = (0.0, 0.0, 0.0, 0.0)
-        self.confidence = float(confidence)
-        self.is_synthetic = bool(is_synthetic)
-        self.tag = tag
-
-    @property
-    def class_name(self) -> str:
-        if 0 <= self.class_id < len(CLASS_NAMES):
-            return CLASS_NAMES[self.class_id]
-        return f"class_{self.class_id}"
-
-    def to_yolo_seg_line(self, img_w: int, img_h: int) -> str:
-        """
-        Converts instance polygon to Ultralytics YOLO segmentation format:
-        <class_id> <x1_norm> <y1_norm> <x2_norm> <y2_norm> ...
-        """
-        if len(self.polygon) < 3 or img_w <= 0 or img_h <= 0:
-            # Fallback to normalized bounding box box polygon (4 corners)
-            x1, y1, x2, y2 = self.bbox
-            pts = np.array([
-                [x1, y1], [x2, y1], [x2, y2], [x1, y2]
-            ], dtype=np.float32)
-        else:
-            pts = self.polygon
-
-        # Normalize coordinates between 0.0 and 1.0, clipped to bounds
-        norm_pts = pts.copy()
-        norm_pts[:, 0] = np.clip(norm_pts[:, 0] / float(img_w), 0.0, 1.0)
-        norm_pts[:, 1] = np.clip(norm_pts[:, 1] / float(img_h), 0.0, 1.0)
-
-        coords_str = " ".join([f"{x:.6f} {y:.6f}" for x, y in norm_pts])
-        return f"{self.class_id} {coords_str}"
-
-    def to_yolo_det_line(self, img_w: int, img_h: int) -> str:
-        """
-        Converts instance bounding box to Ultralytics YOLO detection format:
-        <class_id> <x_center_norm> <y_center_norm> <width_norm> <height_norm>
-        """
-        x1, y1, x2, y2 = self.bbox
-        bw = max(0.0, x2 - x1)
-        bh = max(0.0, y2 - y1)
-        cx = x1 + bw / 2.0
-        cy = y1 + bh / 2.0
-
-        cx_norm = np.clip(cx / float(img_w), 0.0, 1.0)
-        cy_norm = np.clip(cy / float(img_h), 0.0, 1.0)
-        w_norm = np.clip(bw / float(img_w), 0.0, 1.0)
-        h_norm = np.clip(bh / float(img_h), 0.0, 1.0)
-
-        return f"{self.class_id} {cx_norm:.6f} {cy_norm:.6f} {w_norm:.6f} {h_norm:.6f}"
+# Initialize module logger with standard formatting
+logger = setup_logging(name="ArtifactRobustDatasetBuilder")
 
 
 # =============================================================================
@@ -1278,7 +1161,7 @@ def parse_args() -> argparse.Namespace:
         help="Number of processing threads/workers (default 4)."
     )
     parser.add_argument(
-        "--limit", type=int, default=None,
+        "--limit", type=int, default=1500,
         help="Optional limit on the number of vouchers to process."
     )
     parser.add_argument(

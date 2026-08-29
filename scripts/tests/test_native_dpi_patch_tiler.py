@@ -25,9 +25,12 @@ import cv2
 import numpy as np
 from shapely.geometry import Polygon, box
 
-# Add workspace and scripts directory to python path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent))
+# Add project root directory (two levels up from scripts/tests) to python path
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from scripts.core.tiling_utils import (
     CLASS_NAMES,
@@ -39,8 +42,8 @@ from scripts.core.tiling_utils import (
     NativeDPIPatchTiler,
     HerbariumSAHIInference
 )
-from scripts.run_dpi_tiler import run_dpi_tiling
-from scripts.run_sahi_inference import run_sahi_inference
+from scripts.vision.run_dpi_tiler import run_dpi_tiling
+from scripts.vision.run_sahi_inference import run_sahi_inference
 
 
 class TestNativeDPISlidingWindow(unittest.TestCase):

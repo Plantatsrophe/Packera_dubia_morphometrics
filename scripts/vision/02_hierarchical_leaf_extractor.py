@@ -2,6 +2,13 @@
 import sys
 import argparse
 from pathlib import Path
+
+# Add project root directory (two levels up from scripts/vision) to sys.path
+# This ensures absolute module imports from `scripts.*` resolve seamlessly
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from scripts.core.logger import setup_logging
 from scripts.core.leaf_extraction import run_pipeline
 

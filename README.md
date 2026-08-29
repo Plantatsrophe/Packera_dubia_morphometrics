@@ -180,13 +180,13 @@ Summary metrics from initial quality-controlled voucher ingestion (`01_voucher_h
 ### 1. Ingestion & Authority Stratification
 Harvest specimen records from GBIF, filter spatial coordinate uncertainty ($\le 5000\,\text{m}$), parse taxonomic authority slips into Gold/Silver/Bronze tiers, compute circular phenological metrics, and download high-resolution sheets:
 ```bash
-python scripts/data_prep/01_voucher_harvester.py --download-images --max-records-per-taxon 1000 --concurrency 15
+python scripts/data_prep/01_voucher_harvester.py --download-images --max-records-per-taxon 5000 --concurrency 15
 ```
 
 ### 2. Build Artifact-Robust YOLO Segmentation Dataset
-Construct the 9-class instance segmentation training set with negative background sheet patches and bounding polygons for botanical organs and mounting hardware:
+Construct the 9-class instance segmentation training set with negative background sheet patches and bounding polygons for botanical organs and mounting hardware. Stratifies and caps the dataset at 1,500 diverse vouchers:
 ```bash
-python scripts/data_prep/build_artifact_robust_dataset.py --output-dir data/yolo_dataset --imgsz 1024
+python scripts/data_prep/build_artifact_robust_dataset.py --output-dir data/yolo_dataset --limit 1500
 ```
 
 ### 3. High-Throughput Native-DPI Patch Tiling (`run_dpi_tiler.py`)

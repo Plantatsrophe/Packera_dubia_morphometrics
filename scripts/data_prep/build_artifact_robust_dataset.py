@@ -3,6 +3,13 @@ import sys
 import argparse
 import logging
 from pathlib import Path
+
+# Add project root directory (two levels up from scripts/data_prep) to sys.path
+# This guarantees that absolute imports starting with `scripts.` resolve regardless of CWD or launch method
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from scripts.core.logger import setup_logging
 from scripts.core.config import DEFAULT_RAW_DIR, DEFAULT_CURATED_CSV, DEFAULT_OUTPUT_DIR, DEFAULT_CONFIG_PATH, DEFAULT_QC_DIR
 from scripts.core.dataset_builder import build_artifact_robust_dataset
@@ -74,7 +81,7 @@ def parse_args() -> argparse.Namespace:
         help="Number of processing threads/workers (default 4)."
     )
     parser.add_argument(
-        "--limit", type=int, default=None,
+        "--limit", type=int, default=1500,
         help="Optional limit on the number of vouchers to process."
     )
     parser.add_argument(

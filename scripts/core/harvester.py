@@ -33,7 +33,7 @@ Determiner Credibility Tiers:
                      or blank determiner fields.
 
 Usage:
-    py scripts/01_voucher_harvester.py --download-images --max-records 1000
+    py scripts/01_voucher_harvester.py --download-images --max-records 5000
 ===============================================================================
 """
 
@@ -65,6 +65,7 @@ import pygbif.species as species
 # -----------------------------------------------------------------------------
 
 # Target focal taxa in the Packera dubia complex and allied North American clades
+DEFAULT_TARGET_TAXA = [
     "Packera dubia",
     "Packera tomentosa",
     "Senecio tomentosus",
@@ -110,7 +111,7 @@ VALID_TYPE_STATUSES = {
 }
 
 # Base directories
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = BASE_DIR / "data"
 RAW_VOUCHERS_DIR = DATA_DIR / "raw_vouchers"
 TABLES_DIR = DATA_DIR / "tables"
@@ -118,6 +119,8 @@ OUTPUTS_DIR = BASE_DIR / "outputs"
 REPORTS_DIR = OUTPUTS_DIR / "reports"
 
 # Default Output paths
+DEFAULT_OUTPUT_CSV = TABLES_DIR / "curated_vouchers.csv"
+DEFAULT_SUMMARY_LOG = REPORTS_DIR / "voucher_harvest_summary.log"
 
 # -----------------------------------------------------------------------------
 # Logging Configuration
@@ -554,8 +557,7 @@ def harvest_taxa_occurrences(
         taxon_harvested = 0
         taxon_retained = 0
 
-        while taxon_harvested < max_records_per_taxon:
-            fetch_limit = min(limit, max_records_per_taxon - taxon_harvested)
+        while taxon_retained < max_records_per_taxon:
             try:
                 # Query GBIF occurrence search endpoint
                 response = occ.search(
@@ -563,7 +565,7 @@ def harvest_taxa_occurrences(
                     country="US",
                     basisOfRecord="PRESERVED_SPECIMEN",
                     hasCoordinate=True,
-                    limit=fetch_limit,
+                    limit=limit,
                     offset=offset
                 )
             except Exception as e:
@@ -593,15 +595,15 @@ def harvest_taxa_occurrences(
                 # Coordinate uncertainty check (must be <= 5000 meters)
                 uncertainty_raw = rec.get("coordinateUncertaintyInMeters")
                 if uncertainty_raw is None:
-                    # Filter out null uncertainty as per strict pipeline requirements
-                    continue
-                
-                try:
-                    uncertainty_val = float(uncertainty_raw)
-                    if uncertainty_val > max_uncertainty_meters:
+                    # Assume default uncertainty if null (allows records with coordinates but missing uncertainty metadata)
+                    uncertainty_val = max_uncertainty_meters
+                else:
+                    try:
+                        uncertainty_val = float(uncertainty_raw)
+                        if uncertainty_val > max_uncertainty_meters:
+                            continue
+                    except (ValueError, TypeError):
                         continue
-                except (ValueError, TypeError):
-                    continue
 
                 # 2. Temporal & Phenology Validation (year, month, day)
                 year = rec.get("year")
@@ -686,6 +688,9 @@ def harvest_taxa_occurrences(
                 }
                 all_curated_records.append(curated_record)
                 taxon_retained += 1
+                
+                if taxon_retained >= max_records_per_taxon:
+                    break
 
             offset += len(results)
             if offset >= count:
@@ -783,8 +788,8 @@ def main() -> None:
     parser.add_argument(
         "--max-records-per-taxon",
         type=int,
-        default=1000,
-        help="Maximum records to harvest per taxon (default: 1000)."
+        default=5000,
+        help="Maximum records to harvest per taxon (default: 5000)."
     )
     parser.add_argument(
         "--download-images",

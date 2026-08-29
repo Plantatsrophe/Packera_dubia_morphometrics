@@ -36,9 +36,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
 # Add repository root and scripts directory to sys.path for absolute imports
-root_dir = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(root_dir))
-sys.path.insert(0, str(root_dir / "scripts"))
+# parents[2] resolves to the project root directory when this file is inside scripts/vision/
+root_dir = Path(__file__).resolve().parents[2]
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
+if str(root_dir / "scripts") not in sys.path:
+    sys.path.insert(0, str(root_dir / "scripts"))
 
 # Import native DPI patch tiler class from core module
 from scripts.core.tiling_utils import (
