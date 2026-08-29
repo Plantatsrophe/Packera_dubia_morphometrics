@@ -15,7 +15,7 @@ from scipy import ndimage
 from skimage.morphology import skeletonize
 
 # Common imports
-from scripts.core.config import CLASS_NAMES, CLASS_MAP, CLASS_COLORS_BGR, DEFAULT_WORKSPACE
+from scripts.core.config import CLASS_NAMES, CLASS_MAP, CLASS_COLORS_BGR, DEFAULT_WORKSPACE, DEFAULT_RAW_DIR
 from scripts.core.logger import setup_logging
 from scripts.core.data_structures import ArtifactDetection, GeometricMetrics, SpectralMetrics, TextureMetrics, FilterResult, InstanceAnnotation
 try:
@@ -30,10 +30,26 @@ from scripts.core.leaf_morphometrics import detect_leaf_midrib_axis, align_mask_
 
 logger = setup_logging()
 
+DEFAULT_MODEL_PATH = DEFAULT_WORKSPACE / "models" / "yolov8_leaf_best.pt"
+
+OUTPUT_DIRS = {
+    "annotations": DEFAULT_WORKSPACE / "data" / "masks" / "annotations",
+    "rosettes_dense": DEFAULT_WORKSPACE / "data" / "masks" / "rosettes_dense",
+    "basal_leaves_raw": DEFAULT_WORKSPACE / "data" / "masks" / "basal_leaves_raw",
+    "tier1_intact": DEFAULT_WORKSPACE / "data" / "masks" / "tier1_intact",
+    "tier2_reflected": DEFAULT_WORKSPACE / "data" / "masks" / "tier2_reflected",
+    "tier3_open_curves": DEFAULT_WORKSPACE / "data" / "masks" / "tier3_open_curves",
+    "capitula": DEFAULT_WORKSPACE / "data" / "masks" / "capitula",
+    "qc_overlays": DEFAULT_WORKSPACE / "outputs" / "extraction_qc",
+    "tables": DEFAULT_WORKSPACE / "data" / "tables"
+}
+
 def process_voucher_precision(
     image_path: Path,
     output_dirs: Dict[str, Path],
-    save_overlays: bool = True
+    save_overlays: bool = True,
+    model: Optional[Any] = None,
+    conf_threshold: float = 0.25
 ) -> List[Dict[str, Any]]:
     """
     Executes the full 5-Stage Precision Extraction Pipeline on a single voucher sheet.
@@ -98,6 +114,20 @@ def process_voucher_precision(
             leaf_patch = rosette_crop_bgr[ly:ly+lh, lx:lx+lw]
             if leaf_patch.size == 0:
                 continue
+
+            # YOLO Gatekeeper Injection
+            if model is not None:
+                results = model.predict(leaf_patch, conf=conf_threshold, verbose=False)
+                has_leaf = False
+                for r in results:
+                    if r.boxes is not None and len(r.boxes.cls) > 0:
+                        for cls_id in r.boxes.cls:
+                            if int(cls_id.item()) == 0:  # 0 is basal_leaf
+                                has_leaf = True
+                                break
+                if not has_leaf:
+                    logger.debug(f"YOLO Gatekeeper REJECTED leaf_{leaf_idx}: No basal_leaf detected in patch.")
+                    continue
 
             raw_patch_path = output_dirs["basal_leaves_raw"] / f"{catalog_number}_leaf_{leaf_idx}.jpg"
             cv2.imwrite(str(raw_patch_path), leaf_patch)
@@ -280,6 +310,15 @@ def run_pipeline(
         image_paths = image_paths[:limit]
         logger.info(f"Subsetting to first {limit} vouchers as requested.")
 
+    try:
+        from ultralytics import YOLO
+        logger.info(f"Loading YOLO gatekeeper from: {model_path}")
+        model = YOLO(model_path)
+    except Exception as e:
+        logger.error(f"Failed to load YOLO model: {e}")
+        logger.warning("Falling back to raw heuristics without gatekeeper!")
+        model = None
+
     all_qc_records: List[Dict[str, Any]] = []
 
     for img_path in tqdm(image_paths, desc="Extracting Basal Leaves", unit="sheet"):
@@ -287,7 +326,9 @@ def run_pipeline(
             records = process_voucher_precision(
                 image_path=img_path,
                 output_dirs=OUTPUT_DIRS,
-                save_overlays=save_overlays
+                save_overlays=save_overlays,
+                model=model,
+                conf_threshold=conf_threshold
             )
             all_qc_records.extend(records)
         except Exception as exc:

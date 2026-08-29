@@ -157,31 +157,31 @@ Summary metrics from initial quality-controlled voucher ingestion (`01_voucher_h
 
 | Metric | Count | Percentage |
 | :--- | :--- | :--- |
-| **Total Quality-Filtered Vouchers** | **1,581** | **100.0%** |
-| 🥇 **Tier 1 (Gold Standard Anchors)** | **898** | **56.8%** |
-| 🥈 **Tier 2 (Silver Standard Institutional)** | **60** | **3.8%** |
-| 🥉 **Tier 3 (Bronze Standard Candidates)** | **623** | **39.4%** |
-| 📸 **High-Resolution Images Downloaded** | **1,330** | **84.1%** |
+| **Total Quality-Filtered Vouchers** | **6,610** | **100.0%** |
+| 🥇 **Tier 1 (Gold Standard Anchors)** | **2,592** | **39.2%** |
+| 🥈 **Tier 2 (Silver Standard Institutional)** | **171** | **2.6%** |
+| 🥉 **Tier 3 (Bronze Standard Candidates)** | **3,847** | **58.2%** |
+| 📸 **High-Resolution Images Downloaded** | **6,610** | **100.0%** |
 
 ### Taxonomic Distribution (Raw Ingested Determinations):
-* *Packera anonyma*: 413 records (26.1%)
-* *Packera plattensis*: 250 records (15.8%)
-* *Packera paupercula*: 206 records (13.0%)
-* *Packera tomentosa*: 164 records (10.4%)
-* *Packera dubia*: 147 records (9.3%)
-* *Packera paupercula* var. *savannarum*: 134 records (8.5%)
-* *Packera paupercula* var. *paupercula*: 79 records (5.0%)
-* *Senecio smallii*: 68 records (4.3%)
+* *Packera anonyma*: 1,808 records (27.4%)
+* *Packera paupercula*: 1,221 records (18.5%)
+* *Packera plattensis*: 1,188 records (18.0%)
+* *Packera tomentosa*: 845 records (12.8%)
+* *Packera paupercula* var. *paupercula*: 255 records (3.9%)
+* *Packera dubia*: 225 records (3.4%)
+* *Senecio plattensis*: 223 records (3.4%)
+* *Packera paupercula* var. *savannarum*: 208 records (3.1%)
 
 ### Primary Contributing Herbarium Repositories:
-* **NCU** (Univ. of North Carolina Herbarium): 418 records (26.4%)
-* **WIS** (Univ. of Wisconsin Herbarium): 296 records (18.7%)
-* **MIN** (Univ. of Minnesota Herbarium): 105 records (6.6%)
-* **WILLI** (William & Mary Herbarium): 90 records (5.7%)
-* **CSCN** (Chadron State College Herbarium): 71 records (4.5%)
-* **NY** (New York Botanical Garden): 63 records (4.0%)
-* **BRIT** (Botanical Research Institute of Texas): 35 records (2.2%)
-* **ODU** (Old Dominion University): 34 records (2.2%)
+* **NCU** (Univ. of North Carolina Herbarium): 557 records (8.4%)
+* **WIS** (Univ. of Wisconsin Herbarium): 515 records (7.8%)
+* **US** (Smithsonian Institution): 368 records (5.6%)
+* **ANSP** (Academy of Natural Sciences): 265 records (4.0%)
+* **NY** (New York Botanical Garden): 259 records (3.9%)
+* **BRIT** (Botanical Research Institute of Texas): 234 records (3.5%)
+* **GA** (University of Georgia Herbarium): 217 records (3.3%)
+* **VPI** (Virginia Tech Herbarium): 185 records (2.8%)
 
 ---
 
@@ -208,9 +208,9 @@ python scripts/vision/run_dpi_tiler.py --input-dir data/yolo_dataset/images --la
 ### 4. Fine-Tune Artifact-Robust YOLOv8m-seg on Sliced DPI Tiles
 Train the `YOLOv8m-seg` instance segmentation model on the sliced $1024 \times 1024$ native-DPI tiles (`data/tiled_dataset_config.yaml`) with mixed precision AMP, botanical loss weighting, and disk dataset caching:
 
-Fresh training run on sliced tiles (150 epochs, batch 8, disk caching):
+Fresh training run on sliced tiles (150 epochs, batch 12, disk caching):
 ```bash
-python scripts/train/train_yolo.py --data data/tiled_dataset_config.yaml --epochs 150 --batch 8 --imgsz 1024 --cache disk --workers 16
+python scripts/train/train_yolo.py --data data/tiled_dataset_config.yaml --epochs 150 --batch 12 --imgsz 1024 --cache disk --workers 16
 ```
 
 Resume interrupted training from last saved checkpoint (`last.pt`):

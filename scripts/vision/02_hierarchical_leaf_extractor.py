@@ -55,12 +55,8 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     run_pipeline(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        qc_dir=args.qc_dir,
-        weights_path=args.weights,
+        raw_dir=args.input_dir,
+        model_path=args.weights,
         conf_threshold=args.conf_threshold,
-        max_vouchers=args.max_vouchers,
-        num_workers=args.workers,
-        verbose=args.verbose
+        limit=args.max_vouchers
     )
