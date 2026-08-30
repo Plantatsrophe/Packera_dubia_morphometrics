@@ -530,8 +530,8 @@ class PrecisionSAM2Annotator:
     def run(self):
         """Main annotation event loop with explicit HighGUI backend configuration."""
         window_name = "SAM 2 Precision Botanical Annotator"
-        # Explicitly configure window backend to disable Qt context menu and toolbars
-        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_NORMAL)
+        # Configure window backend to disable Qt scroll-hand drag panning, context menu, and toolbars
+        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE | cv2.WINDOW_GUI_NORMAL)
         cv2.resizeWindow(window_name, self.window_w, self.window_h)
         cv2.setMouseCallback(window_name, self.mouse_callback, param=(self.window_w, self.window_h))
 
