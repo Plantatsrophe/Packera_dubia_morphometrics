@@ -21,7 +21,7 @@ Controls & Shortcuts:
       4: root_rhizome, 5: basal_rosette_clump, 6: capitulum
   - 'u': Undo last saved instance
   - 'c': Clear active candidate prompts, boxes, cut lines, and lasso paths
-  - 's' / Enter / 'v': Save voucher annotations (.txt) and advance to next sheet
+  - Enter: Save voucher annotations (.txt) and advance to next sheet
   - 'b': Go back to previous voucher in queue (reloads existing annotations)
   - 'n': Skip forward to next voucher (without saving)
   - 'w' / 'a' / 's' / 'd' (or Arrow Keys): Pan viewport Up / Left / Down / Right
@@ -522,7 +522,7 @@ class PrecisionSAM2Annotator:
         help_line1 = "L-Click: Point | R-Click / Alt+Click: Exclude | 'e': Mode | Shift+Drag: Box | Ctrl+Drag: Cut | 'l': Lasso"
         cv2.putText(display, help_line1, (20, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1, cv2.LINE_AA)
 
-        help_line2 = "0-6: Class | 'u': Undo | 'c': Clear | 's'/Enter: Save | 'b': Back | 'n': Skip | WASD: Pan | 'z'/'x': Zoom"
+        help_line2 = "0-6: Class | 'u': Undo | 'c': Clear | Enter: Save | 'b': Back | 'n': Skip | WASD: Pan | 'z'/'x': Zoom"
         cv2.putText(display, help_line2, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 230, 255), 1, cv2.LINE_AA)
 
         return display
@@ -604,8 +604,8 @@ class PrecisionSAM2Annotator:
                     logger.info("Skipping forward to next voucher...")
                     break
 
-                # 's' Key / Enter / 'v' -> SAVE & ADVANCE TO NEXT VOUCHER
-                elif key in (13, ord('s'), ord('v'), ord('S')):
+                # Enter Key (13, 10) -> SAVE & ADVANCE TO NEXT VOUCHER
+                elif key in (13, 10):
                     self.save_current_sheet()
                     self.current_idx += 1
                     break
@@ -637,16 +637,16 @@ class PrecisionSAM2Annotator:
                     self.zoom(1.0 / 1.3, center_x=cx, center_y=cy)
 
                 # Pan Controls (WASD & Arrow keys)
-                elif key in (ord('w'), 82, 0):  # Up
+                elif key in (ord('w'), ord('W'), 82, 0):  # Up
                     self.pan_offset[1] -= int(200 / self.zoom_level)
                     self.clamp_pan()
-                elif key in (ord('s'), 84, 1):  # Down
+                elif key in (ord('s'), ord('S'), 84, 1):  # Down
                     self.pan_offset[1] += int(200 / self.zoom_level)
                     self.clamp_pan()
-                elif key in (ord('a'), 81, 2):  # Left
+                elif key in (ord('a'), ord('A'), 81, 2):  # Left
                     self.pan_offset[0] -= int(200 / self.zoom_level)
                     self.clamp_pan()
-                elif key in (ord('d'), 83, 3):  # Right
+                elif key in (ord('d'), ord('D'), 83, 3):  # Right
                     self.pan_offset[0] += int(200 / self.zoom_level)
                     self.clamp_pan()
 
