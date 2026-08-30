@@ -1,5 +1,5 @@
 # Robust Species Delimitation Pipeline for the *Packera dubia* Complex
-### Integrating Automated Morphometrics, Deep Learning, Ecological Niches, and Multi-Tiered Herbarium Misidentification Mitigation
+### Integrating Automated Morphometrics, LeafMachine2, Ecological Niches, and Multi-Tiered Herbarium Misidentification Mitigation
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.xxxxxx.svg)](https://doi.org/10.5281/zenodo.xxxxxx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -12,12 +12,14 @@
 
 This repository houses the end-to-end computational and statistical pipeline for the taxonomic revision and species delimitation of the ***Packera dubia* (Spreng.) Trock & Mabb. complex** (Asteraceae: Senecioneae) across Eastern and Central North America.
 
-Developed as part of doctoral research at the **University of North Carolina at Chapel Hill** in collaboration with the **UNC Herbarium (NCU)**, this project couples automated high-throughput morphometrics, native-DPI deep vision segmentation (YOLOv8-seg + SAM 2), deterministic artifact gatekeeping, and ecological niche modeling with a formal **Six-Tiered Herbarium Misidentification Mitigation Architecture**.
+Developed as part of doctoral research at the **University of North Carolina at Chapel Hill** in collaboration with the **UNC Herbarium (NCU)**, this project couples automated high-throughput morphometrics via **LeafMachine2**, deterministic specimen quality control, and ecological niche modeling with a formal **Six-Tiered Herbarium Misidentification Mitigation Architecture**.
 
 - **Principal Investigator:** J. Brandon Fuller (PhD Candidate, Department of Biology, UNC-CH)
 - **Faculty Advisor:** Dr. Alan S. Weakley (Director, NCU Herbarium; UNC Biology)
 - **Standard Operating Procedure:** `UNC-BOT-SOP-2026-04-REV2`
 - **Target Taxa:** *Packera dubia* (formerly *P. tomentosa* / *Senecio tomentosus*), *P. anonyma*, *P. plattensis*, *P. paupercula* (including var. *paupercula* and var. *savannarum*), and allied southeastern lineages.
+
+> **Note on Workflow Transition:** Organ detection, segmentation, and leaf extraction were previously handled by a custom-trained YOLOv8m-seg + SAM 2 pipeline. This has been replaced by **LeafMachine2 (LM2)**, which provides a pre-trained, actively maintained detection framework purpose-built for herbarium specimens. The old pipeline scripts are preserved in [`scripts/_archive/`](scripts/_archive/README_ARCHIVE.md).
 
 ---
 
@@ -41,56 +43,37 @@ flowchart TD
         A["Raw Specimen Sheet Ingestion\n(GBIF / iDigBio / SEINet)"] --> B["Determiner Authority Stratification\n(🥇 Tier 1: Specialists | 🥈 Tier 2: Herbaria | 🥉 Tier 3: Unverified)"]
     end
 
-    subgraph Phase2["Phase 2: Human-Guided Annotation & Dataset Engineering"]
-        B --> C["Interactive SAM 2 Ground-Truth Annotation\n(Multi-Modal Prompts: Points, Exclusion, Boxes, Knife, Lasso)"]
-        C --> D["Artifact-Robust Dataset Construction\n(7 Botanical Classes + 9% Hard-Negative Non-Botanical Sheets)"]
-        D --> E["Native-DPI Patch Tiling\n(1024x1024 Overlapping Tiles + Dynamic Coordinate Reprojection)"]
+    subgraph Phase2["Phase 2: LeafMachine2 Organ Detection & Extraction"]
+        B --> C["Input Preparation\n(prepare_lm2_dataset.py: image staging & manifest)"]
+        C --> D["LeafMachine2 Processing\n(LeafPriority Detector · Ruler Isolation · Leaf Component Extraction)"]
+        D --> E["LM2 Structured Output\n(Cropped Leaf ROIs · Measurements · QC Overlays · CSV Summaries)"]
     end
 
-    subgraph Phase3["Phase 3: Deep Vision Training & Full-Sheet Inference"]
-        E --> F["Fine-Tune YOLOv8m-seg Model\n(Disk-Cached PyTorch 2.0 Mixed Precision Training)"]
-        F --> G["Full-Sheet Sliced Inference via SAHI\n(Gigapixel Sheet Organ Detection & Segmentation)"]
+    subgraph Phase3["Phase 3: Label-Blind Morphometrics & Discriminant Analysis"]
+        E --> F["Label-Blind Morphometrics\n(Momocs EFA + GMM mclust Clustering)"]
+        F --> G["Tier 3 Mitigation: Passive Sample Projection\n(MorphoTools2 CDA: Verified Anchors Define Axes, Suspects Projected Passively)"]
     end
 
-    subgraph Phase4["Phase 4: Hierarchical Extraction & Artifact Gatekeeping"]
-        G --> H["Stage 1: Pre-Emptive Layout Sterilization\n(Hard-Mask Labels, Rulers & Color Charts with 10px Padding)"]
-        H --> I["Stage 2 & 3: EDT Peak Seeding & SAM 2 Disentanglement\n(Disentangle Overlapping Basal Rosettes & Petioles)"]
-        I --> J["Stage 4: Deterministic Artifact Gatekeeper\n(Rectangularity < 0.86 | Solidity >= 0.72 | Spectral Saturation | Typography)"]
-        J --> K["Stage 5: Botanical Topology Classifier\n(Skeleton Geometry: Petiole vs Cauline Stem vs Root)"]
-        K --> L["4-Tier Silhouette Routing\n(Tier 1: Intact | Tier 2: Reflected | Tier 3: Open Curves | Tier 4: Dense Clumps)"]
-    end
-
-    subgraph Phase5["Phase 5: Label-Blind Morphometrics & Discriminant Analysis"]
-        L --> M["Tier 2 Mitigation: Label-Blind Morphometrics\n(Momocs EFA + DINOv2 Embeddings + GMM mclust Clustering)"]
-        M --> N["Tier 3 Mitigation: Passive Sample Projection\n(MorphoTools2 CDA: Verified Anchors Define Axes, Suspects Projected Passively)"]
-    end
-
-    subgraph Phase6["Phase 6: Multi-Modal Consensus, XAI & Expert Triage"]
-        N --> O["Tier 4 Mitigation: Cross-Modal Consensus\n(Morphology + Phenological Harmonics + SoilGrids 250m & WorldClim)"]
-        O --> P["Tier 5 Mitigation: Confident Learning & XAI\n(Cleanlab Joint Noise Matrix + Captum Grad-CAM Saliency)"]
-        P --> Q["Tier 6 Mitigation: Digital Triage Queue\n(Interactive Specialist Re-Determination for Ambiguous Vouchers)"]
-        Q --> R["Validated Species Delimitation & Taxonomic Revision"]
+    subgraph Phase4["Phase 4: Multi-Modal Consensus, XAI & Expert Triage"]
+        G --> H["Tier 4 Mitigation: Cross-Modal Consensus\n(Morphology + Phenological Harmonics + SoilGrids 250m & WorldClim)"]
+        H --> I["Tier 5 Mitigation: Confident Learning & XAI\n(Cleanlab Joint Noise Matrix + Captum Grad-CAM Saliency)"]
+        I --> J["Tier 6 Mitigation: Digital Triage Queue\n(Interactive Specialist Re-Determination for Ambiguous Vouchers)"]
+        J --> K["Validated Species Delimitation & Taxonomic Revision"]
     end
 ```
 
 ### End-to-End Pipeline & Workflow Sequence:
 1. **Specimen Ingestion & Authority Stratification (`01_voucher_harvester.py`):**
    Harvests high-resolution voucher imagery across aggregators (GBIF, iDigBio, SEINet), filters spatial uncertainty ($\le 5000\,\text{m}$), and stratifies determinations into Gold, Silver, and Bronze authority tiers.
-2. **Human-Guided Ground-Truth Annotation with SAM 2 (`annotate_with_sam2.py`):**
-   Specialist botanists generate pixel-precise ground-truth polygon annotations across the 7-class botanical schema using an interactive GUI equipped with multi-modal SAM 2 controls (positive/negative point prompts, bounding boxes, knife-cut segmentation, and freehand lasso contours).
-3. **Artifact-Robust Dataset Construction (`build_artifact_robust_dataset.py`):**
-   Pairs annotated botanical instances with hard-negative non-botanical background patches (~9% non-botanical tape, accession labels, color charts, scale bars) to eliminate false-positive background detections. Stratifies data into 70/15/15 train/val/test splits.
-4. **Native-DPI Patch Tiling (`run_dpi_tiler.py`):**
-   Tiles multi-megapixel herbarium scans into $1024 \times 1024$ native-DPI windows with 20% overlap, dynamic polygon clipping, and background paper sub-sampling.
-5. **Deep Vision Model Training (`train_yolo.py`):**
-   Fine-tunes `YOLOv8m-seg` on native-DPI tiles using PyTorch 2.0 mixed precision AMP and botanical organ class weighting.
-6. **Full-Sheet Sliced Inference (`run_sahi_inference.py`):**
-   Executes Sliced Aided Hyper Inference (SAHI) across full-resolution gigapixel sheets to detect and segment all candidate organs.
-7. **Hierarchical Extraction, Disentanglement & Gatekeeping (`02_hierarchical_leaf_extractor.py`):**
-   Sterilizes non-botanical artifacts with layout hard-masking, performs Euclidean Distance Transform (EDT) peak seeding for automated SAM 2 rosette disentanglement, evaluates geometric/spectral gatekeeper metrics, classifies linear organ topology, and routes silhouettes into 4 leaf quality tiers.
-8. **Label-Blind Morphometrics & Multivariate Delimitation (`03_fourier_extractor.R` & `04_gmm_morphotools.R`):**
-   Extracts Elliptic Fourier Analysis (EFA) harmonics via `Momocs`, models natural clusters with Gaussian Mixture Models (`mclust`), and runs Canonical Discriminant Analysis with passive sample projection (`MorphoTools2`).
-9. **Multi-Modal Validation, Confident Learning & Expert Triage (`05_cleanlab_vision_xai.py` & `06_multimodal_spatial_rf.R`):**
+2. **LeafMachine2 Input Preparation (`prepare_lm2_dataset.py`):**
+   Stages downloaded voucher images into the LM2 input directory structure and generates a run manifest linking specimens to their authority tier metadata.
+3. **LeafMachine2 Organ Detection & Leaf Extraction (`LeafMachine2.py`):**
+   Runs the LM2 pipeline with Packera-optimized configuration (`lm2_packera_highperf.yaml`). LM2 automatically detects plant components (leaves, rulers, labels, color charts), isolates ruler scale references, crops individual leaf ROIs, and outputs structured CSV measurement summaries and QC overlay images.
+4. **Label-Blind Elliptic Fourier Analysis (`03_fourier_extractor.R`):**
+   Extracts normalized harmonic coefficients (EFA) on LM2-extracted leaf silhouettes via `Momocs`, models natural clusters with Gaussian Mixture Models (`mclust`), and runs Canonical Discriminant Analysis with passive sample projection (`MorphoTools2`).
+5. **GMM Cluster Testing & Passive Sample CDA (`04_gmm_morphotools.R`):**
+   Models natural morphospace clusters via Gaussian Mixture Models (`mclust`) and executes Canonical Discriminant Analysis with passive sample projection (`MorphoTools2`).
+6. **Multi-Modal Validation, Confident Learning & Expert Triage (`05_cleanlab_vision_xai.py` & `06_multimodal_spatial_rf.R`):**
    Validates models with DINOv2 self-supervised embeddings, `cleanlab` label noise estimation, `Captum` Grad-CAM saliency heatmaps, and spatial Random Forests incorporating SoilGrids 250m pedology and WorldClim climate layers to populate a digital triage queue for expert re-determination.
 
 ---
@@ -113,106 +96,57 @@ flowchart TD
 
 ---
 
-### Deterministic Botanical Extraction & Artifact Gatekeeper Details:
-* **7-Class Botanical Taxonomy:**
-  Standardized 7-class organ ontology: `basal_leaf_blade` (0), `leaf_petiole` (1), `cauline_leaf` (2), `cauline_stem` (3), `root_rhizome` (4), `basal_rosette_clump` (5), `capitulum` (6).
-* **Deterministic Layout Sterilization & Geometric Gatekeeper (`gatekeeper_engine.py` & `gatekeeper_metrics.py`):**
-  - **Pre-Segmentation Hard-Masking:** Automatically zero-fills bounding boxes of accession labels, calibration color charts, and scale rulers to solid white (`RGB [255, 255, 255]`) with a 10-pixel padding boundary prior to segmentation.
-  - **Post-Extraction Morphological Filter:** Discards rectangular tape ($\text{Rectangularity} > 0.86$), rejects 4-vertex orthogonal quadrilaterals with angles $\in [80^\circ, 100^\circ]$, and requires $\text{Solidity} \ge 0.72$ for intact single leaves.
-  - **Spectral Saturation Reclassification:** Flags vibrant swatches ($S > 0.45$ on $>15\%$ of area) as `color_chart`.
-  - **Laplacian Text Verification:** Detects high-frequency typographic glyphs and routes label patches to `data/cropped_patches/annotations/`.
-* **Botanical Topology Classifier (`botanical_topology_classifier.py`):**
-  Linear organ skeleton classifier evaluating tortuosity, endpoint connectivity, orientation, and sheet position to separate `leaf_petiole`, `cauline_stem`, and `root_rhizome`.
-* **Rosette Disentanglement via EDT + SAM 2 (`02_hierarchical_leaf_extractor.py`):**
-  Euclidean Distance Transform (EDT) local peak detection generates spatial coordinate prompts for Segment Anything 2 (SAM 2) or marker-controlled watershed segmentation.
-* **Four-Tiered Precision Leaf Extraction Hierarchy:**
-  - **Tier 1 (Direct Intact Leaf):** High-confidence, unbroken silhouettes ($\text{UCS} \ge 0.85, \text{Solidity} \ge 0.72$). Horizontally aligned (apex left, petiole right) for standard Fourier decomposition.
-  - **Tier 2 (Hemi-Blade Bilateral Reflection):** Single undamaged half-blade reflected bilaterally across the midrib axis to reconstruct occluded leaves.
-  - **Tier 3 (Open Margin Curves):** Traces continuous unoccluded margin coordinates $(x, y)$ and scalar caliper dimensions.
-  - **Tier 4 (Dense-Rosette Patches):** Crops dense rosette clumps for DINOv2 self-supervised feature extraction.
-
----
-
 ## 📁 Repository Structure
 
 ```text
 packera-dubia-morphometrics/
+├── LeafMachine2/                      # LeafMachine2 submodule (organ detection engine)
+│   ├── LeafMachine2.py                # Main LM2 runner entrypoint
+│   ├── LeafMachine2.yaml              # LM2 default configuration
+│   └── leafmachine2/                  # LM2 core library
+├── LM2_Project/                       # Packera-specific LM2 project files
+│   ├── configs/
+│   │   └── lm2_packera_highperf.yaml  # Optimized LM2 config (batch 50, 8 workers, CUDA)
+│   └── Data/
+│       ├── images/                    # Staged voucher images (LM2 input)
+│       └── output/                    # LM2 structured outputs (crops, CSVs, QC overlays)
 ├── data/
-│   ├── raw_vouchers/              # High-resolution specimen sheet imagery (.jpg)
-│   ├── raw_annotations/           # Ground-truth human polygon annotations (.txt, .json)
-│   ├── yolo_dataset/              # 7-class annotated dataset for YOLOv8-seg training
-│   ├── tiled_dataset/             # 1024x1024 native-DPI cropped voucher patches
-│   ├── cropped_patches/           # Extracted ROIs (basal leaves, rosettes, capitula)
-│   │   ├── annotations/           # Routed text annotation slips and label patches
-│   │   └── rosettes_dense/        # Tier 4 unsegmented dense rosette clumps
-│   ├── masks/                     # Binarized leaf silhouettes
-│   │   ├── tier1_intact/          # Tier 1 intact leaf silhouettes
-│   │   ├── tier2_reflected/       # Tier 2 bilateral symmetry reflected masks
-│   │   ├── tier3_open_curves/     # Tier 3 continuous margin curve CSVs
-│   │   └── capitula/              # Involucre / flower head crops
-│   ├── environmental/             # SoilGrids 250m and WorldClim 2.1 GeoTIFF rasters
+│   ├── raw_vouchers/                  # High-resolution specimen sheet imagery (.jpg)
+│   ├── environmental/                 # SoilGrids 250m and WorldClim 2.1 GeoTIFF rasters
 │   └── tables/
-│       ├── curated_vouchers.csv   # Cleaned Darwin Core metadata with Determiner Tiers
-│       ├── leaf_extraction_qc.csv # Quality control log for hierarchical leaf extraction
-│       ├── dataset_manifest.csv   # Specimen partition manifest
-│       └── label_noise_audit.csv  # Cleanlab & discordance error logs
-├── models/
-│   ├── yolov8_leaf_best.pt        # Fine-tuned YOLOv8m-seg weights for organ segmentation
-│   ├── checkpoints/               # Pretrained foundation weights (SAM 2 Hiera Large)
-│   └── dinov2_backbone.pth        # Self-supervised vision transformer feature weights
+│       ├── curated_vouchers.csv       # Cleaned Darwin Core metadata with Determiner Tiers
+│       └── label_noise_audit.csv      # Cleanlab & discordance error logs
 ├── scripts/
-│   ├── core/                      # Modular library classes & mathematical algorithms (<500 SLOC)
-│   │   ├── artifact_harvester.py  # Detects and extracts tape, labels, and rulers
-│   │   ├── augmentation.py        # Occlusion copy-paste and background negative extraction
-│   │   ├── botanical_annotations.py # 7-Class label parsing and format normalization
-│   │   ├── botanical_topology_classifier.py # Linear organ skeleton classifier (petiole/stem/root)
-│   │   ├── config.py              # Centralized ontology definitions, paths, and color maps
-│   │   ├── data_structures.py     # Reusable dataclasses for telemetry and geometry
-│   │   ├── dataset_builder.py     # 7-Class YOLO dataset builder & synthetic suite
-│   │   ├── dataset_utils.py       # Data partitioning and QC overlay rendering
-│   │   ├── gatekeeper_engine.py   # Deterministic layout mask and text routing algorithm
-│   │   ├── gatekeeper_metrics.py  # Mathematical geometric, spectral, and texture metrics
-│   │   ├── harvester.py           # GBIF/DwC pipeline download orchestrator
-│   │   ├── harvester_utils.py     # Circular phenology and metadata parsing
-│   │   ├── leaf_cv_utils.py       # Low-level OpenCV, EDT peak seeding, and SAM 2 prompting
-│   │   ├── leaf_extraction.py     # 5-Stage precision extraction & 4-tier routing engine
-│   │   ├── leaf_morphometrics.py  # Longitudinal midrib alignment and symmetry reflection
-│   │   ├── leaf_spine_tracer.py   # Frangi vesselness filter & 3-point anatomical spine tracing
-│   │   ├── logger.py              # Standardized multi-stream logging configuration
-│   │   ├── sahi_inference.py      # Full-sheet SAHI sliced inference engine
-│   │   ├── tiling_geometry.py     # Polygon coordinate reprojection and clipping
-│   │   └── tiling_utils.py        # Sliding window patch tiling library classes
-│   ├── data_prep/                 # Data harvesting and dataset creation CLI scripts
-│   │   ├── 01_voucher_harvester.py
-│   │   ├── annotate_with_sam2.py
-│   │   └── build_artifact_robust_dataset.py
-│   ├── vision/                    # Deep learning & vision execution entrypoints
-│   │   ├── 02_hierarchical_leaf_extractor.py
-│   │   ├── artifact_filter_gatekeeper.py
-│   │   ├── run_dpi_tiler.py
-│   │   └── run_sahi_inference.py
-│   ├── morphometrics/             # R morphometrics and statistical scripts
-│   │   ├── 03_fourier_extractor.R
-│   │   └── 04_gmm_morphotools.R
-│   ├── analysis/                  # Machine learning and spatial modeling scripts
-│   │   ├── 05_cleanlab_vision_xai.py
-│   │   └── 06_multimodal_spatial_rf.R
-│   ├── tests/                     # Unified unittest test suite
-│   │   ├── test_botanical_topology_classifier.py
-│   │   ├── test_gatekeeper.py
-│   │   ├── test_hierarchical_leaf_extractor.py
-│   │   └── test_native_dpi_patch_tiler.py
-│   ├── train/                     # Modular YOLOv8 fine-tuning package
-│   │   ├── config.py              # Training hyperparameters and argument parsing
-│   │   ├── dataset.py             # Tiled dataset partitioning logic
-│   │   ├── evaluator.py           # Validation and cross-classification metrics
-│   │   ├── trainer.py             # Model initialization and PyTorch 2.0 compile
-│   │   └── train_yolo.py          # Production YOLOv8 fine-tuning CLI runner
+│   ├── core/                          # Shared library classes (harvester utilities)
+│   │   ├── harvester.py               # GBIF/DwC pipeline download orchestrator
+│   │   ├── harvester_utils.py         # Circular phenology and metadata parsing
+│   │   └── ...                        # Supporting utilities
+│   ├── data_prep/                     # Data harvesting and LM2 input preparation
+│   │   ├── 01_voucher_harvester.py    # Specimen record harvesting CLI
+│   │   ├── configure_leafmachine2.py  # LM2 configuration helper
+│   │   └── prepare_lm2_dataset.py     # Stages images for LM2 input
+│   ├── vision/                        # LM2 configuration and execution scripts
+│   │   └── configure_leafmachine2.py  # Programmatic LM2 YAML config generator
+│   ├── morphometrics/                 # R morphometrics and statistical scripts
+│   │   ├── 03_fourier_extractor.R     # EFA harmonic extraction (Momocs)
+│   │   └── 04_gmm_morphotools.R       # GMM clustering & CDA (mclust, MorphoTools2)
+│   ├── analysis/                      # Machine learning and spatial modeling scripts
+│   │   ├── 05_cleanlab_vision_xai.py  # DINOv2 embeddings, Cleanlab, Grad-CAM XAI
+│   │   └── 06_multimodal_spatial_rf.R # Spatial RF with SoilGrids & WorldClim
+│   ├── tests/                         # Active test suite
+│   │   └── test_voucher_harvester.py  # Voucher harvesting tests
+│   └── _archive/                      # Archived custom CV/ML pipeline (pre-LM2)
+│       ├── README_ARCHIVE.md          # Archive documentation
+│       ├── vision/                    # Old hierarchical extractor, tiler, SAHI runner
+│       ├── data_prep/                 # SAM 2 annotation GUI, dataset builder
+│       ├── train/                     # Custom YOLOv8m-seg fine-tuning package
+│       ├── tests/                     # Tests for archived pipeline components
+│       └── root_artifacts/            # YOLO weights, runs, segment-anything-2
 ├── outputs/
-│   ├── extraction_qc/             # Visual extraction QC overlays
-│   ├── dataset_qc/                # Multi-class dataset bounding overlays
-│   ├── figures/                   # CDA biplots, Grad-CAM saliency panels, EFA contours
-│   └── reports/                   # BIC summaries, dataset manifests & taxonomic keys
+│   ├── figures/                       # CDA biplots, Grad-CAM saliency panels, EFA contours
+│   └── reports/                       # BIC summaries, dataset manifests & taxonomic keys
+├── .venv_LM2/                         # LeafMachine2 Python virtual environment
+├── setup_leafmachine2.sh              # LM2 environment setup script
 └── README.md
 ```
 
@@ -250,78 +184,69 @@ Harvest specimen records from GBIF, filter spatial coordinate uncertainty ($\le 
 python scripts/data_prep/01_voucher_harvester.py --download-images --max-records-per-taxon 5000 --concurrency 15
 ```
 
-### 2. Interactive Annotation with SAM 2 (`annotate_with_sam2.py`)
-Interactively segment botanical organs on voucher sheets with zero-shot SAM 2 point prompts:
+### 2. Prepare LeafMachine2 Input (`prepare_lm2_dataset.py`)
+Stage downloaded voucher images into the LM2 project input directory and generate a specimen manifest:
 ```bash
-python scripts/data_prep/annotate_with_sam2.py --image data/raw_vouchers/NCU00012345.jpg --class-name basal_leaf_blade
+python scripts/data_prep/prepare_lm2_dataset.py \
+    --vouchers data/tables/curated_vouchers.csv \
+    --image-src data/raw_vouchers/ \
+    --output LM2_Project/Data/images/
 ```
 
-### 3. Build 7-Class Artifact-Robust YOLO Dataset (`build_artifact_robust_dataset.py`)
-Construct the 7-class instance segmentation training set with hard negative background sheet patches (~9%) and human annotations. Stratifies into 70/15/15 train/val/test splits and exports dataset YAML:
+### 3. Configure LeafMachine2 (`configure_leafmachine2.py`)
+Generate or update the Packera-optimized LM2 YAML configuration (batch 50, 8 workers, CUDA, LeafPriority detector):
 ```bash
-python scripts/data_prep/build_artifact_robust_dataset.py --output-dir data/yolo_dataset --limit 1500
-```
-Run the synthetic verification suite to test format compliance:
-```bash
-python scripts/data_prep/build_artifact_robust_dataset.py --test
-```
+# Generate optimized config in LM2_Project/configs/
+python scripts/vision/configure_leafmachine2.py
 
-### 4. High-Throughput Native-DPI Patch Tiling (`run_dpi_tiler.py`)
-Tile full-resolution specimen scans ($1024 \times 1024$, 20% overlap) across multi-core CPU workers with dynamic polygon clipping and background paper sub-sampling:
-```bash
-python scripts/vision/run_dpi_tiler.py --input-dir data/yolo_dataset/images --labels-dir data/yolo_dataset/labels --output-dir data/tiled_dataset --num-workers 16 --tile-size 1024 --overlap 0.20
+# Update LeafMachine2 default config in-place
+python scripts/vision/configure_leafmachine2.py --update-main-config
+
+# Custom batch size and worker count
+python scripts/vision/configure_leafmachine2.py -o LM2_Project/configs/custom.yaml --batch-size 50 --num-workers 8
 ```
 
-### 5. Fine-Tune Artifact-Robust YOLOv8m-seg (`train_yolo.py`)
-Train `YOLOv8m-seg` on native-DPI tiles with mixed precision AMP, botanical loss weighting, and disk caching:
+### 4. Run LeafMachine2 (`LeafMachine2.py`)
+Execute the full LM2 pipeline on staged voucher images using the Packera-optimized configuration.
+LM2 handles ruler isolation, color-chart exclusion, plant component detection, and leaf ROI cropping automatically:
 ```bash
-# Fresh training run on sliced tiles (150 epochs, batch 12, disk caching)
-python scripts/train/train_yolo.py --data data/tiled_dataset_config.yaml --epochs 150 --batch 12 --imgsz 1024 --cache disk --workers 16
+# Activate the dedicated LM2 virtual environment
+source .venv_LM2/bin/activate
 
-# Resume interrupted training from last checkpoint
-python scripts/train/train_yolo.py --resume --cache disk --workers 16
+# Run LM2 with the Packera high-performance config
+cd LeafMachine2
+python LeafMachine2.py
+```
+Outputs are written to `LM2_Project/Data/output/Packera_dubia_LM2/`, including:
+- Cropped leaf ROI images
+- Per-specimen CSV measurement tables
+- QC overlay images with detected components annotated
+- Run summary logs
 
-# Run a 1-epoch dry-run verification
-python scripts/train/train_yolo.py --dry-run
+### 5. Label-Blind Elliptic Fourier Analysis (`03_fourier_extractor.R`)
+Extract normalized harmonic coefficients (EFA) on LM2-extracted leaf silhouettes via `Momocs`:
+```bash
+Rscript scripts/morphometrics/03_fourier_extractor.R --input LM2_Project/Data/output/Packera_dubia_LM2/ --harmonics 12
 ```
 
-### 6. Full-Sheet Sliced Inference with SAHI (`run_sahi_inference.py`)
-Execute Sliced Aided Hyper Inference (SAHI) on full-resolution gigapixel sheets using fine-tuned weights:
-```bash
-python scripts/vision/run_sahi_inference.py --weights models/yolov8_leaf_best.pt --input-dir data/raw_vouchers --output-dir outputs/sahi_detections --conf 0.25 --iou 0.45 --slice-size 1024 --overlap 0.20
-```
-
-### 7. 5-Stage Precision Leaf Extraction & Disentanglement (`02_hierarchical_leaf_extractor.py`)
-Execute the precision botanical extraction pipeline with EDT peak seeding, SAM 2 point prompting, gatekeeper filtering, and 4-tier routing:
-```bash
-python scripts/vision/02_hierarchical_leaf_extractor.py --weights models/yolov8_leaf_best.pt --conf-threshold 0.25 --use-sam2
-```
-
-### 8. Run Unified Automated Test Suite
-Execute the full test suite verifying all 4 test modules (32 tests across gatekeeper, topology classifier, leaf extractor, and patch tiler):
-```bash
-python -m unittest discover -s scripts/tests
-```
-
-### 9. Label-Blind Elliptic Fourier Analysis (`03_fourier_extractor.R`)
-Extract normalized harmonic coefficients (EFA) on binarized Tier 1 and Tier 2 leaf silhouettes via `Momocs`:
-```bash
-Rscript scripts/morphometrics/03_fourier_extractor.R --input data/masks/tier1_intact/ --harmonics 12
-```
-
-### 10. GMM Cluster Testing & Passive Sample CDA (`04_gmm_morphotools.R`)
+### 6. GMM Cluster Testing & Passive Sample CDA (`04_gmm_morphotools.R`)
 Model natural morphospace clusters via Gaussian Mixture Models (`mclust`) and execute Canonical Discriminant Analysis with passive sample projection (`MorphoTools2`):
 ```bash
 Rscript scripts/morphometrics/04_gmm_morphotools.R --metadata data/tables/curated_vouchers.csv
 ```
 
-### 11. Confident Learning Label Pruning & Grad-CAM XAI (`05_cleanlab_vision_xai.py`)
+### 7. Run Active Test Suite
+```bash
+python -m unittest discover -s scripts/tests
+```
+
+### 8. Confident Learning Label Pruning & Grad-CAM XAI (`05_cleanlab_vision_xai.py`)
 Extract DINOv2 visual embeddings, identify mislabeled vouchers via `cleanlab`, and generate Grad-CAM visual explanation heatmaps:
 ```bash
 python scripts/analysis/05_cleanlab_vision_xai.py --backbone dinov2_vitb14 --cleanlab-threshold 0.85
 ```
 
-### 12. Multi-View Spatial Random Forest & Niche Modeling (`06_multimodal_spatial_rf.R`)
+### 9. Multi-View Spatial Random Forest & Niche Modeling (`06_multimodal_spatial_rf.R`)
 Integrate SoilGrids pedology (pH, CEC, sand fraction) and WorldClim climate variables to detect cross-modal conflicts and train spatial random forest models:
 ```bash
 Rscript scripts/analysis/06_multimodal_spatial_rf.R --env-dir data/environmental/
@@ -331,13 +256,20 @@ Rscript scripts/analysis/06_multimodal_spatial_rf.R --env-dir data/environmental
 
 ## 📦 System Requirements & Dependencies
 
-### Python Environment
+### LeafMachine2 Environment
+LeafMachine2 runs in its own dedicated virtual environment (`.venv_LM2`). Use the provided setup script:
+```bash
+bash setup_leafmachine2.sh
+source .venv_LM2/bin/activate
+```
+See [`LeafMachine2/requirements.txt`](LeafMachine2/requirements.txt) for the full LM2 dependency list.
+
+### Python Environment (Pipeline Scripts)
 - Python $\ge 3.10$
-- Dependencies: `pygbif`, `requests`, `pandas`, `numpy`, `tqdm`, `ultralytics` (YOLOv8), `torch`, `torchvision`, `cleanlab`, `captum`, `opencv-python`, `scikit-learn`, `matplotlib`, `seaborn`, `shapely`, `pyyaml`
-- SAM 2 (Segment Anything 2): `hydra-core`, `omegaconf`
+- Dependencies: `pygbif`, `requests`, `pandas`, `numpy`, `tqdm`, `opencv-python`, `scikit-learn`, `matplotlib`, `seaborn`, `shapely`, `pyyaml`, `cleanlab`, `captum`, `torch`, `torchvision`
 
 ```bash
-pip install pygbif requests pandas numpy tqdm ultralytics torch torchvision cleanlab captum opencv-python scikit-learn matplotlib seaborn shapely pyyaml hydra-core omegaconf
+pip install pygbif requests pandas numpy tqdm opencv-python scikit-learn matplotlib seaborn shapely pyyaml cleanlab captum torch torchvision
 ```
 
 ### R Environment
@@ -362,6 +294,7 @@ remotes::install_github(c("V-Z/MorphoTools2", "danlwarren/ENMTools", "blasbenito
 6. **Šlenker, M., et al.** (2022). MorphoTools2: an R package for multivariate morphometric analysis. *Bioinformatics*, 38(10), 2954–2955.
 7. **Trock, D. K.** (2006). *Packera*. In Flora of North America Editorial Committee (Eds.), *Flora of North America North of Mexico* (Vol. 20, pp. 570–602). Oxford University Press.
 8. **Weakley, A. S.** (2026). *Flora of the Southeastern United States*. University of North Carolina Herbarium (NCU), North Carolina Botanical Garden.
+9. **Weaver, W. N., et al.** (2024). LeafMachine2: Using machine learning to rapidly measure plant traits captured in herbarium specimens. *Applications in Plant Sciences*, 12(1), e11545.
 
 ---
 
