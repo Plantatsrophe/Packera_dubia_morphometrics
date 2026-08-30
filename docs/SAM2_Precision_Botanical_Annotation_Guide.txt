@@ -1,0 +1,209 @@
+﻿================================================================================
+SAM 2 PRECISION BOTANICAL ANNOTATION & MORPHOMETRICS CALIBRATION GUIDE
+Project: Packera dubia Species Delimitation & Morphometrics Pipeline
+Repository: https://github.com/Plantatsrophe/Packera_dubia_morphometrics (Branch: ubuntu)
+Target Taxon: Packera dubia (Spreng.) Trock & Mabb. Complex (Asteraceae: Senecioneae)
+Author: J. Brandon Fuller (University of North Carolina at Chapel Hill / NCU Herbarium)
+================================================================================
+
+
+1. EXECUTIVE OVERVIEW & PROBLEM RESOLUTION
+--------------------------------------------------------------------------------
+In dried herbarium vouchers of Packera dubia, basal leaf petioles terminate directly 
+at the caudex (root crown), physically merging with fibrous roots and rhizomes. 
+Because both structures consist of dark, pressed, fibrous plant material without high-contrast 
+color boundaries, naive single-point prompts cause SAM 2 (Segment Anything Model 2) to 
+bleed across the caudex and lump roots, stems, and petioles into a single mask.
+
+
+This guide provides the complete protocol for using the upgraded precision SAM 2 annotator 
+(`scripts/annotate_with_sam2.py`), which incorporates three mathematical constraint mechanisms:
+  a. Bounding Box Prompts (Shift + Drag): Restricts SAM 2 attention strictly within the box.
+  b. Negative Exclusion Points (Right-Click): Explicitly forces roots/background out of the mask.
+  c. Interactive Knife Tool (Ctrl + Drag): Slices contiguous tissue masks across the caudex boundary.
+
+
+Following this protocol, 50-100 vouchers can be cleanly annotated in under 2 hours to provide 
+a gold-standard calibration dataset for YOLOv8/YOLOv11 instance segmentation.
+
+
+
+
+2. ENVIRONMENT SETUP & SAM 2 INSTALLATION
+--------------------------------------------------------------------------------
+Execute these commands in your Ubuntu/Linux terminal or Google Antigravity session:
+
+
+# A. Clone and install SAM 2 from source with CUDA support
+git clone https://github.com/facebookresearch/segment-anything-2.git
+cd segment-anything-2
+pip install -e .
+cd ..
+
+
+# B. Download the SAM 2 Hiera Large model checkpoint & configuration
+mkdir -p models/checkpoints
+cd models/checkpoints
+wget -q https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt
+wget -q https://raw.githubusercontent.com/facebookresearch/segment-anything-2/main/sam2_configs/sam2_hiera_l.yaml
+cd ../..
+
+
+# C. Verify raw voucher and annotation directory structure
+mkdir -p data/raw_vouchers data/raw_annotations data/yolo_dataset outputs/dataset_qc
+
+
+
+
+3. BOTANICAL CLASS ONTOLOGY (7-CLASS SCHEMA)
+--------------------------------------------------------------------------------
+Ensure `data/dataset_config.yaml` is configured with the dedicated 7-class botanical schema:
+
+
+Class ID | Class Name           | Botanical Definition & Diagnostic Landmarks
+---------|----------------------|-----------------------------------------------------------
+   0     | basal_leaf_blade     | Expanded laminar portion of basal leaves (crenate/serrate)
+   1     | leaf_petiole         | Narrow foliar stalk connecting caudex to the basal blade
+   2     | cauline_leaf         | Sessile, lyrately-pinnatifid leaves on the flowering stalk
+   3     | cauline_stem         | Main vertical flowering stalk / scape / peduncle
+   4     | root_rhizome         | Subterranean dark fibrous roots, rhizomes, and rootlets
+   5     | basal_rosette_clump  | Dense, overlapping basal rosette center / crown
+   6     | capitulum            | Inflorescence head / cylindrical involucre / phyllaries
+
+
+
+
+4. INTERACTIVE CONTROLS & HOTKEY REFERENCE
+--------------------------------------------------------------------------------
+Launch the tool via:
+  python scripts/annotate_with_sam2.py
+
+
+Mouse & Keyboard Controls:
+  - Left-Click:          Add positive foreground prompt point (Green dot)
+  - Right-Click:         Add negative exclusion prompt point (Red dot)
+  - Shift + Left-Drag:   Draw Bounding Box Prompt (Constrains SAM 2 search space)
+  - Ctrl + Left-Drag:    Draw Knife / Cut Line (Slices mask across the caudex boundary)
+  - 'z' / 'x':           Zoom In / Zoom Out centered on the current viewport
+  - 'w' / 'a' / 's' / 'd': Pan viewport Up / Left / Down / Right
+  - Keys '0' through '6': Assign candidate mask to Class ID (0 to 6)
+  - 'c':                 Clear current candidate points/box
+  - 'u':                 Undo last saved instance
+  - Enter or 'v':        Save current sheet annotations (.txt) and load next voucher
+  - 'q' or Esc:          Quit application safely
+
+
+
+
+5. STEP-BY-STEP ANNOTATION PROTOCOL
+--------------------------------------------------------------------------------
+For each herbarium voucher sheet:
+
+
+Step A: Zoom to Region of Interest
+  - Press 'z' to zoom into the basal rosette / root crown at native resolution.
+  - Use 'w', 'a', 's', 'd' to position the caudex in the center of the screen.
+
+
+Step B: Annotating Basal Leaves (Without Root Bleed)
+  1. Hold Shift + Left-Drag a bounding box around ONLY the target leaf blade and petiole, 
+     stopping exactly at the caudex / root crown.
+  2. If SAM 2 bleeds into adjacent roots or petioles:
+     - Right-Click (Red dot) on the root or adjacent petiole tissue to exclude it.
+     - OR hold Ctrl + Left-Drag a straight cut line across the petiole-caudex junction.
+  3. Press '0' to save as `basal_leaf_blade` (Green) OR '1' for `leaf_petiole` (Mint Green).
+
+
+Step C: Annotating Roots & Rhizomes
+  1. Hold Shift + Left-Drag a bounding box around the subterranean root mass at the base of the sheet.
+  2. Right-Click (Red dot) on the petiole bases if any foliar tissue is captured.
+  3. Press '4' to save as `root_rhizome` (Red/Brown).
+
+
+Step D: Annotating Cauline Stems & Leaves
+  1. Left-Click along the vertical flowering stalk.
+  2. Press '3' to save as `cauline_stem` (Orange).
+  3. Left-Click individual stem leaves and press '2' for `cauline_leaf` (Yellow-Green).
+
+
+Step E: Annotating Capitula (Heads)
+  1. Left-Click each involucre / flower head in the synflorescence.
+  2. Press '6' to save as `capitulum` (Yellow).
+
+
+Step F: Save and Advance
+  - Press Enter (or 'v').
+  - The script formats all polygon coordinates into normalized YOLO format (0.0 to 1.0) 
+    and saves them to `data/raw_annotations/{catalogNumber}.txt`.
+
+
+
+
+6. DATASET BUILDING & MODEL FINE-TUNING
+--------------------------------------------------------------------------------
+Once 50-100 vouchers are annotated in `data/raw_annotations/`, partition the data and 
+train YOLOv8x/v11x-seg:
+
+
+# Step 1: Build stratified 70/15/15 train/val/test splits with 9% background negatives
+python scripts/build_artifact_robust_dataset.py \
+  --raw-images-dir data/raw_vouchers \
+  --annotations-dir data/raw_annotations \
+  --output-dir data/yolo_dataset \
+  --config-yaml data/dataset_config.yaml \
+  --negative-ratio 0.09
+
+
+# Step 2: Train YOLO with botanical-safe augmentations (mosaic=0, mixup=0, cls=1.5)
+python scripts/train_artifact_robust_yolo.py \
+  --config data/dataset_config.yaml \
+  --imgsz 1024 \
+  --epochs 120 \
+  --batch 8
+
+
+
+
+7. DOWNSTREAM EXTRACTION & MORPHOMETRIC PIPELINE
+--------------------------------------------------------------------------------
+With the retuned model weights saved at `models/yolov8_leaf_best.pt`, run the master 
+extraction and analysis sequence:
+
+
+# Step 3: Run 5-Stage Precision Botanical Extraction (with EDT + SAM 2 Rosette Disentangling)
+python scripts/02_hierarchical_leaf_extractor.py \
+  --raw-dir data/raw_vouchers \
+  --model-path models/yolov8_leaf_best.pt \
+  --conf-threshold 0.25 \
+  --use-sam2 \
+  --output-dir data/masks
+
+
+# Step 4: Closed 12-Harmonic EFA & Passive Sample Projection CDA (R)
+Rscript scripts/03_fourier_morphotools_cda.R \
+  --curated-csv data/tables/curated_vouchers.csv \
+  --tier1-dir data/masks/tier1_intact \
+  --tier2-dir data/masks/tier2_reflected \
+  --tier3-dir data/masks/tier3_open_curves \
+  --output-biplot outputs/figures/cda_passive_projection.pdf
+
+
+# Step 5: DINOv2 Visual Embeddings, Confident Learning & Grad-CAM XAI
+python scripts/04_cleanlab_vision_xai.py \
+  --rosette-dir data/cropped_patches/rosettes_dense \
+  --leaf-dir data/masks/tier1_intact \
+  --prune-threshold 0.85 \
+  --output-csv data/tables/cleanlab_pruned_vouchers.csv
+
+
+# Step 6: Multi-View Ecological Consensus & Spatial Random Forests (R)
+Rscript scripts/05_spatial_rf_ecological_consensus.R \
+  --pruned-vouchers data/tables/cleanlab_pruned_vouchers.csv \
+  --soil-dir data/environmental/soil \
+  --climate-dir data/environmental/worldclim \
+  --output-report outputs/reports/taxonomic_decision_matrix.html
+
+
+================================================================================
+End of Guide.
+================================================================================
