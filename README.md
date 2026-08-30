@@ -33,45 +33,73 @@ In complex, hybridizing aster clades such as *Packera*, botanical audits reveal 
 
 ---
 
-## 🛡️ Six-Tiered Misidentification & Extraction Architecture
+## 🛡️ Six-Tiered Misidentification & Hierarchical Extraction Architecture
 
 ```mermaid
 flowchart TD
-    A["Raw Herbarium Ingestion\n(GBIF / iDigBio / SEINet)"] --> B["Tier 1: Determiner Authority Stratification\n(Gold: Specialists | Silver: Herbaria | Bronze: Unverified)"]
-    B --> C["Stage 1: Pre-Emptive Layout Hard-Masking\n(Sterilize Labels, Color Charts & Rulers with 10px Padding)"]
-    C --> D["Stage 2 & 3: Native-DPI YOLOv8-seg & SAM 2 Extraction\n(7-Class Organ Ingestion: Blades, Petioles, Stems, Clumps, Capitula)"]
-    D --> E["Deterministic Gatekeeper & Topology Routing\n(Rectangularity < 0.86 | Solidity >= 0.72 | Linear Organ Topology Classifier)"]
-    E -->|"Passed (Valid Silhouettes)"| F["Tier 2: Label-Blind Morphometrics\n(Momocs EFA + DINOv2 Embeddings + GMM Clustering)"]
-    E -->|"Printed Text Detected"| G["data/cropped_patches/annotations/\n(OCR & Metadata Archive)"]
-    F --> H["Tier 3: Passive Sample Projection\n(MorphoTools2 CDA: Anchors Define Axes, Suspects Projected Passively)"]
-    H --> I["Tier 4: Multi-View Cross-Modal Consensus\n(Morphology + Phenology Harmonics + SoilGrids 250m & WorldClim)"]
-    I --> J["Tier 5: Confident Learning & XAI\n(Cleanlab Label Noise Estimation + Captum Grad-CAM Saliency)"]
-    J --> K["Tier 6: Digital Triage Queue & Expert Re-Determination\n(Interactive Dashboard for NCU Specialist Review)"]
-    K --> L["Validated Species Delimitation & Taxonomic Revision"]
+    subgraph Phase1["Phase 1: Ingestion & Authority Stratification"]
+        A["Raw Specimen Sheet Ingestion\n(GBIF / iDigBio / SEINet)"] --> B["Determiner Authority Stratification\n(🥇 Tier 1: Specialists | 🥈 Tier 2: Herbaria | 🥉 Tier 3: Unverified)"]
+    end
+
+    subgraph Phase2["Phase 2: Human-Guided Annotation & Dataset Engineering"]
+        B --> C["Interactive SAM 2 Ground-Truth Annotation\n(Multi-Modal Prompts: Points, Exclusion, Boxes, Knife, Lasso)"]
+        C --> D["Artifact-Robust Dataset Construction\n(7 Botanical Classes + 9% Hard-Negative Non-Botanical Sheets)"]
+        D --> E["Native-DPI Patch Tiling\n(1024x1024 Overlapping Tiles + Dynamic Coordinate Reprojection)"]
+    end
+
+    subgraph Phase3["Phase 3: Deep Vision Training & Full-Sheet Inference"]
+        E --> F["Fine-Tune YOLOv8m-seg Model\n(Disk-Cached PyTorch 2.0 Mixed Precision Training)"]
+        F --> G["Full-Sheet Sliced Inference via SAHI\n(Gigapixel Sheet Organ Detection & Segmentation)"]
+    end
+
+    subgraph Phase4["Phase 4: Hierarchical Extraction & Artifact Gatekeeping"]
+        G --> H["Stage 1: Pre-Emptive Layout Sterilization\n(Hard-Mask Labels, Rulers & Color Charts with 10px Padding)"]
+        H --> I["Stage 2 & 3: EDT Peak Seeding & SAM 2 Disentanglement\n(Disentangle Overlapping Basal Rosettes & Petioles)"]
+        I --> J["Stage 4: Deterministic Artifact Gatekeeper\n(Rectangularity < 0.86 | Solidity >= 0.72 | Spectral Saturation | Typography)"]
+        J --> K["Stage 5: Botanical Topology Classifier\n(Skeleton Geometry: Petiole vs Cauline Stem vs Root)"]
+        K --> L["4-Tier Silhouette Routing\n(Tier 1: Intact | Tier 2: Reflected | Tier 3: Open Curves | Tier 4: Dense Clumps)"]
+    end
+
+    subgraph Phase5["Phase 5: Label-Blind Morphometrics & Discriminant Analysis"]
+        L --> M["Tier 2 Mitigation: Label-Blind Morphometrics\n(Momocs EFA + DINOv2 Embeddings + GMM mclust Clustering)"]
+        M --> N["Tier 3 Mitigation: Passive Sample Projection\n(MorphoTools2 CDA: Verified Anchors Define Axes, Suspects Projected Passively)"]
+    end
+
+    subgraph Phase6["Phase 6: Multi-Modal Consensus, XAI & Expert Triage"]
+        N --> O["Tier 4 Mitigation: Cross-Modal Consensus\n(Morphology + Phenological Harmonics + SoilGrids 250m & WorldClim)"]
+        O --> P["Tier 5 Mitigation: Confident Learning & XAI\n(Cleanlab Joint Noise Matrix + Captum Grad-CAM Saliency)"]
+        P --> Q["Tier 6 Mitigation: Digital Triage Queue\n(Interactive Specialist Re-Determination for Ambiguous Vouchers)"]
+        Q --> R["Validated Species Delimitation & Taxonomic Revision"]
+    end
 ```
 
-### Detailed Mitigation & Extraction Protocols:
-* **Tier 1 — Determination History & Taxonomic Authority Stratification:**
-  Vouchers are classified into authority tiers based on annotator expertise:
+### End-to-End Pipeline & Workflow Sequence:
+1. **Specimen Ingestion & Authority Stratification (`01_voucher_harvester.py`):**
+   Harvests high-resolution voucher imagery across aggregators (GBIF, iDigBio, SEINet), filters spatial uncertainty ($\le 5000\,\text{m}$), and stratifies determinations into Gold, Silver, and Bronze authority tiers.
+2. **Human-Guided Ground-Truth Annotation with SAM 2 (`annotate_with_sam2.py`):**
+   Specialist botanists generate pixel-precise ground-truth polygon annotations across the 7-class botanical schema using an interactive GUI equipped with multi-modal SAM 2 controls (positive/negative point prompts, bounding boxes, knife-cut segmentation, and freehand lasso contours).
+3. **Artifact-Robust Dataset Construction (`build_artifact_robust_dataset.py`):**
+   Pairs annotated botanical instances with hard-negative non-botanical background patches (~9% non-botanical tape, accession labels, color charts, scale bars) to eliminate false-positive background detections. Stratifies data into 70/15/15 train/val/test splits.
+4. **Native-DPI Patch Tiling (`run_dpi_tiler.py`):**
+   Tiles multi-megapixel herbarium scans into $1024 \times 1024$ native-DPI windows with 20% overlap, dynamic polygon clipping, and background paper sub-sampling.
+5. **Deep Vision Model Training (`train_yolo.py`):**
+   Fine-tunes `YOLOv8m-seg` on native-DPI tiles using PyTorch 2.0 mixed precision AMP and botanical organ class weighting.
+6. **Full-Sheet Sliced Inference (`run_sahi_inference.py`):**
+   Executes Sliced Aided Hyper Inference (SAHI) across full-resolution gigapixel sheets to detect and segment all candidate organs.
+7. **Hierarchical Extraction, Disentanglement & Gatekeeping (`02_hierarchical_leaf_extractor.py`):**
+   Sterilizes non-botanical artifacts with layout hard-masking, performs Euclidean Distance Transform (EDT) peak seeding for automated SAM 2 rosette disentanglement, evaluates geometric/spectral gatekeeper metrics, classifies linear organ topology, and routes silhouettes into 4 leaf quality tiers.
+8. **Label-Blind Morphometrics & Multivariate Delimitation (`03_fourier_extractor.R` & `04_gmm_morphotools.R`):**
+   Extracts Elliptic Fourier Analysis (EFA) harmonics via `Momocs`, models natural clusters with Gaussian Mixture Models (`mclust`), and runs Canonical Discriminant Analysis with passive sample projection (`MorphoTools2`).
+9. **Multi-Modal Validation, Confident Learning & Expert Triage (`05_cleanlab_vision_xai.py` & `06_multimodal_spatial_rf.R`):**
+   Validates models with DINOv2 self-supervised embeddings, `cleanlab` label noise estimation, `Captum` Grad-CAM saliency heatmaps, and spatial Random Forests incorporating SoilGrids 250m pedology and WorldClim climate layers to populate a digital triage queue for expert re-determination.
+
+---
+
+### The Six-Tiered Misidentification Mitigation Framework:
+* **Tier 1 — Taxonomic Authority Stratification:**
   - **Tier 1 (Gold Standard / Anchor Vouchers):** Nomenclatural types or determinations signed by recognized *Packera* / Senecioneae specialists (T.M. Barkley, D.K. Trock, R.R. Kowal, A.S. Weakley, J.F. Bain, A.M. Mahoney, J.B. Fuller).
   - **Tier 2 (Silver Standard / Institutional Vouchers):** Vouchers curated at major herbaria (NCU, GA, US, NY, BRIT, MO, WIS) with complete reproductive/vegetative structures.
   - **Tier 3 (Bronze Standard / Candidate Vouchers):** Unverified general floristic collections. Withheld from initial training seeds.
-* **Deterministic Layout Sterilization & Geometric Gatekeeper (`gatekeeper_engine.py` & `gatekeeper_metrics.py`):**
-  - **Pre-Segmentation Hard-Masking:** Automatically zero-fills bounding boxes of accession labels, calibration color charts, and scale rulers to solid white (`RGB [255, 255, 255]`) with a 10-pixel padding boundary prior to segmentation.
-  - **Post-Extraction Morphological Filter:** Discards rectangular tape ($\text{Rectangularity} > 0.86$), rejects 4-vertex orthogonal quadrilaterals with angles $\in [80^\circ, 100^\circ]$, and requires $\text{Solidity} \ge 0.72$ for intact single leaves.
-  - **Spectral Saturation Reclassification:** Flags vibrant swatches ($S > 0.45$ on $>15\%$ of area) as `color_chart`.
-  - **Laplacian Text Verification:** Detects high-frequency typographic glyphs and routes label patches to `data/cropped_patches/annotations/`.
-* **7-Class Botanical Taxonomy:**
-  Standardized 7-class organ ontology: `basal_leaf_blade` (0), `leaf_petiole` (1), `cauline_leaf` (2), `cauline_stem` (3), `root_rhizome` (4), `basal_rosette_clump` (5), `capitulum` (6).
-* **Botanical Topology Classifier (`botanical_topology_classifier.py`):**
-  Linear organ skeleton classifier evaluating tortuosity, endpoint connectivity, orientation, and sheet position to separate `leaf_petiole`, `cauline_stem`, and `root_rhizome`.
-* **Rosette Disentanglement via EDT + SAM 2 (`02_hierarchical_leaf_extractor.py`):**
-  Euclidean Distance Transform (EDT) local peak detection generates spatial coordinate prompts for Segment Anything 2 (SAM 2) or marker-controlled watershed segmentation.
-* **Four-Tiered Precision Leaf Extraction Hierarchy:**
-  - **Tier 1 (Direct Intact Leaf):** High-confidence, unbroken silhouettes ($\text{UCS} \ge 0.85, \text{Solidity} \ge 0.72$). Horizontally aligned (apex left, petiole right) for standard Fourier decomposition.
-  - **Tier 2 (Hemi-Blade Bilateral Reflection):** Single undamaged half-blade reflected bilaterally across the midrib axis to reconstruct occluded leaves.
-  - **Tier 3 (Open Margin Curves):** Traces continuous unoccluded margin coordinates $(x, y)$ and scalar caliper dimensions.
-  - **Tier 4 (Dense-Rosette Patches):** Crops dense rosette clumps for DINOv2 self-supervised feature extraction.
 * **Tier 2 — Label-Blind Unsupervised Phenotypic Discovery:**
   Elliptic Fourier Analysis (EFA) and DINOv2 vision embeddings are extracted without prior taxonomic labels. Gaussian Mixture Modeling (`mclust`) detects natural morphological clusters; label discordances against Tier 1 anchors are flagged automatically.
 * **Tier 3 — Passive Sample Projection in Discriminant Analyses (`MorphoTools2`):**
@@ -82,6 +110,26 @@ flowchart TD
   Uses `cleanlab` to estimate the joint distribution matrix of noisy labels versus true latent classes, pruning label errors ($C_{\text{error}} > 0.85$). `Captum` Grad-CAM heatmaps confirm models focus on botanical traits (tomentum, margins) rather than mounting artifacts.
 * **Tier 6 — Digital Triage Queue & Expert Re-Determination:**
   Discordant and high-entropy vouchers ($H(p) \ge 0.50$) are exported to an interactive triage dashboard for manual visual re-determination by project botanists.
+
+---
+
+### Deterministic Botanical Extraction & Artifact Gatekeeper Details:
+* **7-Class Botanical Taxonomy:**
+  Standardized 7-class organ ontology: `basal_leaf_blade` (0), `leaf_petiole` (1), `cauline_leaf` (2), `cauline_stem` (3), `root_rhizome` (4), `basal_rosette_clump` (5), `capitulum` (6).
+* **Deterministic Layout Sterilization & Geometric Gatekeeper (`gatekeeper_engine.py` & `gatekeeper_metrics.py`):**
+  - **Pre-Segmentation Hard-Masking:** Automatically zero-fills bounding boxes of accession labels, calibration color charts, and scale rulers to solid white (`RGB [255, 255, 255]`) with a 10-pixel padding boundary prior to segmentation.
+  - **Post-Extraction Morphological Filter:** Discards rectangular tape ($\text{Rectangularity} > 0.86$), rejects 4-vertex orthogonal quadrilaterals with angles $\in [80^\circ, 100^\circ]$, and requires $\text{Solidity} \ge 0.72$ for intact single leaves.
+  - **Spectral Saturation Reclassification:** Flags vibrant swatches ($S > 0.45$ on $>15\%$ of area) as `color_chart`.
+  - **Laplacian Text Verification:** Detects high-frequency typographic glyphs and routes label patches to `data/cropped_patches/annotations/`.
+* **Botanical Topology Classifier (`botanical_topology_classifier.py`):**
+  Linear organ skeleton classifier evaluating tortuosity, endpoint connectivity, orientation, and sheet position to separate `leaf_petiole`, `cauline_stem`, and `root_rhizome`.
+* **Rosette Disentanglement via EDT + SAM 2 (`02_hierarchical_leaf_extractor.py`):**
+  Euclidean Distance Transform (EDT) local peak detection generates spatial coordinate prompts for Segment Anything 2 (SAM 2) or marker-controlled watershed segmentation.
+* **Four-Tiered Precision Leaf Extraction Hierarchy:**
+  - **Tier 1 (Direct Intact Leaf):** High-confidence, unbroken silhouettes ($\text{UCS} \ge 0.85, \text{Solidity} \ge 0.72$). Horizontally aligned (apex left, petiole right) for standard Fourier decomposition.
+  - **Tier 2 (Hemi-Blade Bilateral Reflection):** Single undamaged half-blade reflected bilaterally across the midrib axis to reconstruct occluded leaves.
+  - **Tier 3 (Open Margin Curves):** Traces continuous unoccluded margin coordinates $(x, y)$ and scalar caliper dimensions.
+  - **Tier 4 (Dense-Rosette Patches):** Crops dense rosette clumps for DINOv2 self-supervised feature extraction.
 
 ---
 
