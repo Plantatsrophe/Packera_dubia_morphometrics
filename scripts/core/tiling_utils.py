@@ -163,6 +163,7 @@ class NativeDPIPatchTiler:
             "positive_tiles_generated": 0,
             "negative_tiles_retained": 0,
             "negative_tiles_discarded": 0,
+            "negative_tiles_discarded_due_to_fragments": 0,
             "class_instance_counts": {name: 0 for name in CLASS_NAMES},
             "class_tile_counts": {name: 0 for name in CLASS_NAMES},
             "tile_size": self.tile_size,
@@ -285,7 +286,7 @@ class NativeDPIPatchTiler:
                 effective_w, effective_h = tile_w, tile_h
 
             # Reproject and clip annotations into local tile space
-            tile_annotations = self.reprojector.reproject_annotations_to_tile(
+            tile_annotations, dropped_any_fragment = self.reprojector.reproject_annotations_to_tile(
                 annotations, win, effective_w, effective_h
             )
 
@@ -293,7 +294,11 @@ class NativeDPIPatchTiler:
 
             # Apply hard negative background filtering
             if not is_positive:
-                if not self.bg_filter.should_keep_empty_tile(tile_crop):
+                if dropped_any_fragment:
+                    # STRICT GATING: Discard empty tiles that contain dropped partial instances
+                    self.metrics["negative_tiles_discarded_due_to_fragments"] += 1
+                    continue
+                elif not self.bg_filter.should_keep_empty_tile(tile_crop):
                     self.metrics["negative_tiles_discarded"] += 1
                     continue
                 else:
@@ -580,6 +585,7 @@ def main() -> None:
     logger.info("Positive Tiles Generated: %d", tiler.metrics["positive_tiles_generated"])
     logger.info("Empty Tiles Retained:     %d", tiler.metrics["negative_tiles_retained"])
     logger.info("Empty Tiles Discarded:    %d", tiler.metrics["negative_tiles_discarded"])
+    logger.info("Tiles Discarded (Fragments): %d", tiler.metrics["negative_tiles_discarded_due_to_fragments"])
     logger.info("Summary JSON:             %s", summary_path)
     logger.info("==========================================================")
 

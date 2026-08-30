@@ -1,0 +1,29 @@
+2026-08-29 22:17:46 [INFO] (DPITilerRunner) =================================================================
+2026-08-29 22:17:46 [INFO] (DPITilerRunner) STARTING NATIVE-DPI PATCH TILING PIPELINE
+2026-08-29 22:17:46 [INFO] (DPITilerRunner) Input Directory:      data/raw_vouchers
+2026-08-29 22:17:46 [INFO] (DPITilerRunner) Labels Directory:     data/yolo_dataset/labels
+2026-08-29 22:17:46 [INFO] (DPITilerRunner) Output Directory:     data/tiled_dataset
+2026-08-29 22:17:46 [INFO] (DPITilerRunner) Total Sheets Found:   1
+2026-08-29 22:17:46 [INFO] (DPITilerRunner) CPU Worker Pool:      32 processes (Available: 64 cores)
+2026-08-29 22:17:46 [INFO] (DPITilerRunner) Tile Parameters:      1024x1024 px | Overlap: 20.0% | Min Area: 15.0% | BG Keep: 5.0%
+2026-08-29 22:17:46 [INFO] (DPITilerRunner) Skip Existing Tiles:  False (Force Mode: True)
+2026-08-29 22:17:46 [INFO] (DPITilerRunner) =================================================================
+2026-08-29 22:17:46 [INFO] (DPITilerRunner) Indexed 1634 ground-truth label files from 'data/yolo_dataset/labels'
+WARNING: Purging old data in data/tiled_dataset to start fresh...
+[2026-08-29 22:17:47] [INFO] Processing sheet '000331814' | Native Resolution: 4000x6000 (24.0 MP)
+2026-08-29 22:17:47 [INFO] (PackeraPipeline) Processing sheet '000331814' | Native Resolution: 4000x6000 (24.0 MP)
+[2026-08-29 22:17:47] [INFO] Loaded 25 ground-truth annotations for sheet '000331814'
+2026-08-29 22:17:47 [INFO] (PackeraPipeline) Loaded 25 ground-truth annotations for sheet '000331814'
+[2026-08-29 22:17:47] [INFO] Generated 40 native-DPI slice windows (Tile Size: 1024, Overlap: 20%)
+2026-08-29 22:17:47 [INFO] (PackeraPipeline) Generated 40 native-DPI slice windows (Tile Size: 1024, Overlap: 20%)
+2026-08-29 22:17:47 [INFO] (DPITilerRunner) Tiling progress: 1/1 sheets processed (100.0%)...
+2026-08-29 22:17:47 [INFO] (DPITilerRunner) =================================================================
+2026-08-29 22:17:47 [INFO] (DPITilerRunner) NATIVE-DPI TILING COMPLETE in 0.07 minutes (4.32 seconds)
+2026-08-29 22:17:47 [INFO] (DPITilerRunner) Total Sheets Processed:    1
+2026-08-29 22:17:47 [INFO] (DPITilerRunner) Total Tiles Generated:    25
+2026-08-29 22:17:47 [INFO] (DPITilerRunner) Positive Tiles Generated: 25
+2026-08-29 22:17:47 [INFO] (DPITilerRunner) Negative Tiles Retained:  0
+2026-08-29 22:17:47 [INFO] (DPITilerRunner) Negative Tiles Discarded: 10
+2026-08-29 22:17:47 [INFO] (DPITilerRunner) Tiles Discarded (Fragments): 5
+2026-08-29 22:17:47 [INFO] (DPITilerRunner) Summary File Saved:       outputs/tiling_summary.json
+2026-08-29 22:17:47 [INFO] (DPITilerRunner) =================================================================

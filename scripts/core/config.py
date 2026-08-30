@@ -12,6 +12,8 @@ CLASS_NAMES: List[str] = [
     "ruler_scale",      # 6: Measurement scale / centimeter bar
     "barcode_sticker",  # 7: Digitization barcode / QR sticker
     "mounting_tape",    # 8: Linen, paper, or plastic mounting tape strip
+    "peduncle",         # 9: Flowering stem
+    "root",             # 10: Root system
 ]
 
 CLASS_MAP: Dict[str, int] = {name: idx for idx, name in enumerate(CLASS_NAMES)}
@@ -27,6 +29,8 @@ CLASS_COLORS_BGR: Dict[int, Tuple[int, int, int]] = {
     6: (0, 140, 255),    # ruler_scale: Orange
     7: (230, 180, 0),    # barcode_sticker: Cyan
     8: (180, 0, 180),    # mounting_tape: Purple / Violet
+    9: (100, 255, 255),  # peduncle: Light Yellow
+    10: (50, 100, 200),  # root: Orange/Brown (BGR)
 }
 
 # Default filesystem paths

@@ -146,7 +146,7 @@ class DynamicGeometricReprojector:
         window: Tuple[int, int, int, int],
         tile_width: int,
         tile_height: int
-    ) -> List[Tuple[int, List[Tuple[float, float]]]]:
+    ) -> Tuple[List[Tuple[int, List[Tuple[float, float]]]], bool]:
         """
         Clips and transforms full-sheet annotations to local normalized tile coordinates.
 
@@ -157,11 +157,14 @@ class DynamicGeometricReprojector:
             tile_height: Height of the tile in pixels.
 
         Returns:
-            List of (class_id, normalized_polygon_points) for surviving instances.
+            Tuple containing:
+              - List of (class_id, normalized_polygon_points) for surviving instances.
+              - Boolean flag True if any polygon fragment was dropped due to min_area_ratio.
         """
         x1, y1, x2, y2 = window
         win_box = box(x1, y1, x2, y2)
         surviving_instances: List[Tuple[int, List[Tuple[float, float]]]] = []
+        dropped_any_fragment = False
 
         for ann in annotations:
             # Check bounding box envelope overlap before expensive boolean operation
@@ -203,6 +206,7 @@ class DynamicGeometricReprojector:
                             "Filtered partial class %d: visible ratio %.3f < threshold %.2f",
                             ann.class_id, visible_ratio, self.min_area_ratio
                         )
+                        dropped_any_fragment = True
                         continue
 
                     # Extract exterior boundary coordinates
@@ -234,7 +238,7 @@ class DynamicGeometricReprojector:
                 logger.debug("Error clipping polygon for class %d: %s", ann.class_id, err)
                 continue
 
-        return surviving_instances
+        return surviving_instances, dropped_any_fragment
 
 
 class BackgroundPaperFilter:
@@ -258,6 +262,8 @@ class BackgroundPaperFilter:
         """
         Evaluates an empty tile (0 annotations) and decides whether to keep it as
         a hard negative background sample.
+        Applies a max local standard deviation filter (64x64 grid, threshold 15.0)
+        to strictly discard tiles containing artifacts before randomly sub-sampling.
 
         Args:
             tile_image: RGB or BGR numpy image tile array.
@@ -265,7 +271,25 @@ class BackgroundPaperFilter:
         Returns:
             True if tile should be retained, False to discard.
         """
-        # Roll dice with retention probability (5%)
+        # 1. Max Local Standard Deviation Gating
+        tile_gray = cv2.cvtColor(tile_image, cv2.COLOR_BGR2GRAY)
+        h, w = tile_gray.shape
+        grid_size = 64
+        
+        # Ensure dimensions are divisible by grid_size (e.g. 1024 / 64 = 16)
+        if h % grid_size == 0 and w % grid_size == 0:
+            grid = tile_gray.reshape(h // grid_size, grid_size, w // grid_size, grid_size)
+            local_stds = grid.std(axis=(1, 3))
+            max_local_std = local_stds.max()
+        else:
+            # Fallback if tile was not padded correctly (should not happen in our pipeline)
+            max_local_std = tile_gray.std()
+            
+        if max_local_std > 15.0:
+            # Reject tile: contains too much structural variance (roots, tape, shadows)
+            return False
+
+        # 2. Random Sub-sampling for pure paper
         if self.rng.random() <= self.keep_prob:
             return True
         return False

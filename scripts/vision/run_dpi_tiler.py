@@ -209,6 +209,7 @@ def run_dpi_tiling(
             "positive_tiles_generated": 0,
             "negative_tiles_retained": 0,
             "negative_tiles_discarded": 0,
+            "negative_tiles_discarded_due_to_fragments": 0,
             "class_tile_counts": {}
         }
 
@@ -226,6 +227,7 @@ def run_dpi_tiling(
         "positive_tiles_generated": 0,
         "negative_tiles_retained": 0,
         "negative_tiles_discarded": 0,
+        "negative_tiles_discarded_due_to_fragments": 0,
         "class_tile_counts": {name: 0 for name in CLASS_NAMES}
     }
 
@@ -274,6 +276,7 @@ def run_dpi_tiling(
                 master_metrics["positive_tiles_generated"] += sheet_metrics.get("positive_tiles_generated", 0)
                 master_metrics["negative_tiles_retained"] += sheet_metrics.get("negative_tiles_retained", 0)
                 master_metrics["negative_tiles_discarded"] += sheet_metrics.get("negative_tiles_discarded", 0)
+                master_metrics["negative_tiles_discarded_due_to_fragments"] += sheet_metrics.get("negative_tiles_discarded_due_to_fragments", 0)
                 
                 # Aggregate class counts
                 for k, v in sheet_metrics.get("class_tile_counts", {}).items():
@@ -295,6 +298,7 @@ def run_dpi_tiling(
     logger.info("Positive Tiles Generated: %d", master_metrics["positive_tiles_generated"])
     logger.info("Negative Tiles Retained:  %d", master_metrics["negative_tiles_retained"])
     logger.info("Negative Tiles Discarded: %d", master_metrics["negative_tiles_discarded"])
+    logger.info("Tiles Discarded (Fragments): %d", master_metrics["negative_tiles_discarded_due_to_fragments"])
     logger.info("Summary File Saved:       %s", resolved_summary_path)
     logger.info("=================================================================")
 

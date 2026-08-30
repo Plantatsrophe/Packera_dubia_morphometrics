@@ -67,129 +67,153 @@ class ArtifactHarvester:
         annotations: List[InstanceAnnotation] = []
 
         # ---------------------------------------------------------------------
-        # 1. Herbarium Label (typically bottom-right quadrant)
+        # 1. Herbarium Label (typically bottom 50% of the sheet)
         # ---------------------------------------------------------------------
-        label_y1, label_y2 = int(h * 0.60), int(h * 0.99)
-        label_x1, label_x2 = int(w * 0.50), int(w * 0.99)
+        label_y1, label_y2 = int(h * 0.50), int(h * 0.99)
+        label_x1, label_x2 = 0, w
         label_roi = gray[label_y1:label_y2, label_x1:label_x2]
 
-        _, label_thresh = cv2.threshold(label_roi, 195, 255, cv2.THRESH_BINARY)
-        contours, _ = cv2.findContours(label_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        edges = cv2.Canny(label_roi, 50, 150)
+        # Close edges to merge text into solid blocks
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 35))
+        closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area > (w * h * 0.015):
+            if area > (w * h * 0.005):
                 bx, by, bw, bh = cv2.boundingRect(cnt)
-                # Ensure rectangular aspect ratio typical of herbarium labels
-                if 0.5 < (bw / max(1, bh)) < 3.0:
-                    abs_x1, abs_y1 = label_x1 + bx, label_y1 + by
-                    abs_x2, abs_y2 = abs_x1 + bw, abs_y1 + bh
-                    poly = np.array([
-                        [abs_x1, abs_y1], [abs_x2, abs_y1],
-                        [abs_x2, abs_y2], [abs_x1, abs_y2]
-                    ], dtype=np.float32)
-                    ann = InstanceAnnotation(
-                        class_id=CLASS_MAP["herbarium_label"],
-                        polygon=poly,
-                        bbox=(abs_x1, abs_y1, abs_x2, abs_y2),
-                        confidence=0.95,
-                        tag="detected_label"
-                    )
-                    annotations.append(ann)
-                    # Cache crop
-                    crop = image_bgr[abs_y1:abs_y2, abs_x1:abs_x2].copy()
-                    if crop.size > 0:
-                        self.artifact_bank["herbarium_label"].append({
-                            "image": crop,
-                            "source": catalog_number
-                        })
-                    break
+                bbox_area = bw * bh
+                if bbox_area > (w * h * 0.015):
+                    rect_ratio = area / max(1.0, float(bbox_area))
+                    if 0.5 < (bw / max(1, bh)) < 3.0 and rect_ratio > 0.4:
+                        abs_x1, abs_y1 = label_x1 + bx, label_y1 + by
+                        abs_x2, abs_y2 = abs_x1 + bw, abs_y1 + bh
+                        poly = np.array([
+                            [abs_x1, abs_y1], [abs_x2, abs_y1],
+                            [abs_x2, abs_y2], [abs_x1, abs_y2]
+                        ], dtype=np.float32)
+                        ann = InstanceAnnotation(
+                            class_id=CLASS_MAP["herbarium_label"],
+                            polygon=poly,
+                            bbox=(abs_x1, abs_y1, abs_x2, abs_y2),
+                            confidence=0.95,
+                            tag="detected_label"
+                        )
+                        annotations.append(ann)
+                        crop = image_bgr[abs_y1:abs_y2, abs_x1:abs_x2].copy()
+                        if crop.size > 0:
+                            self.artifact_bank["herbarium_label"].append({
+                                "image": crop,
+                                "source": catalog_number
+                            })
+                        break
 
         # ---------------------------------------------------------------------
-        # 2. Color Calibration Chart & Ruler Scale (typically along left margin or top)
+        # 2. Color Calibration Chart & Ruler Scale (typically along left or right margin, or top/bottom)
         # ---------------------------------------------------------------------
-        left_margin_w = int(w * 0.22)
-        left_roi = image_bgr[:, :left_margin_w]
-        left_hsv = cv2.cvtColor(left_roi, cv2.COLOR_BGR2HSV)
-        sat = left_hsv[:, :, 1]
-
-        # High saturation regions indicate color patches
+        margin_w = int(w * 0.25)
+        sat = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)[:, :, 1]
         _, sat_thresh = cv2.threshold(sat, 80, 255, cv2.THRESH_BINARY)
-        chart_cnts, _ = cv2.findContours(sat_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Mask out the middle to only look at margins
+        mask = np.zeros_like(sat_thresh)
+        mask[:, :margin_w] = 255
+        mask[:, -margin_w:] = 255
+        sat_thresh_margins = cv2.bitwise_and(sat_thresh, sat_thresh, mask=mask)
+
+        chart_cnts, _ = cv2.findContours(sat_thresh_margins, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         for cnt in chart_cnts:
             area = cv2.contourArea(cnt)
             if (w * h * 0.003) < area < (w * h * 0.08):
                 bx, by, bw, bh = cv2.boundingRect(cnt)
-                # Expand slightly to capture the full chart frame
-                margin = int(bw * 0.15)
-                cx1 = max(0, bx - margin)
-                cy1 = max(0, by - margin)
-                cx2 = min(left_margin_w, bx + bw + margin)
-                cy2 = min(h, by + bh + margin)
-                poly = np.array([
-                    [cx1, cy1], [cx2, cy1],
-                    [cx2, cy2], [cx1, cy2]
-                ], dtype=np.float32)
-                ann = InstanceAnnotation(
-                    class_id=CLASS_MAP["color_chart"],
-                    polygon=poly,
-                    bbox=(cx1, cy1, cx2, cy2),
-                    confidence=0.90,
-                    tag="detected_color_chart"
-                )
-                annotations.append(ann)
-                crop = image_bgr[cy1:cy2, cx1:cx2].copy()
-                if crop.size > 0:
-                    self.artifact_bank["color_chart"].append({
-                        "image": crop,
-                        "source": catalog_number
-                    })
-                break
-
-        # ---------------------------------------------------------------------
-        # 3. Barcode Sticker (top margins or corners, stark black-and-white stripes)
-        # ---------------------------------------------------------------------
-        top_roi = gray[:int(h * 0.35), :]
-        grad_x = cv2.Sobel(top_roi, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(top_roi, cv2.CV_32F, 0, 1, ksize=3)
-        grad = cv2.subtract(grad_x, grad_y)
-        grad = cv2.convertScaleAbs(grad)
-        blurred = cv2.blur(grad, (9, 9))
-        _, barcode_thresh = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 7))
-        closed = cv2.morphologyEx(barcode_thresh, cv2.MORPH_CLOSE, kernel)
-
-        barcode_cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in barcode_cnts:
-            area = cv2.contourArea(cnt)
-            if (w * h * 0.001) < area < (w * h * 0.03):
-                bx, by, bw, bh = cv2.boundingRect(cnt)
-                aspect = bw / max(1, bh)
-                if 1.5 < aspect < 5.5:
+                rect_ratio = area / max(1.0, float(bw * bh))
+                if rect_ratio > 0.85:
+                    # Expand slightly to capture the full chart frame
+                    margin = int(bw * 0.15)
+                    cx1 = max(0, bx - margin)
+                    cy1 = max(0, by - margin)
+                    cx2 = min(w, bx + bw + margin)
+                    cy2 = min(h, by + bh + margin)
                     poly = np.array([
-                        [bx, by], [bx + bw, by],
-                        [bx + bw, by + bh], [bx, by + bh]
+                        [cx1, cy1], [cx2, cy1],
+                        [cx2, cy2], [cx1, cy2]
                     ], dtype=np.float32)
                     ann = InstanceAnnotation(
-                        class_id=CLASS_MAP["barcode_sticker"],
+                        class_id=CLASS_MAP["color_chart"],
                         polygon=poly,
-                        bbox=(bx, by, bx + bw, by + bh),
-                        confidence=0.88,
-                        tag="detected_barcode"
+                        bbox=(cx1, cy1, cx2, cy2),
+                        confidence=0.90,
+                        tag="detected_color_chart"
                     )
                     annotations.append(ann)
-                    crop = image_bgr[by:by+bh, bx:bx+bw].copy()
+                    crop = image_bgr[cy1:cy2, cx1:cx2].copy()
                     if crop.size > 0:
-                        self.artifact_bank["barcode_sticker"].append({
+                        self.artifact_bank["color_chart"].append({
                             "image": crop,
                             "source": catalog_number
                         })
                     break
 
         # ---------------------------------------------------------------------
+        # 3. Barcode Sticker (top/bottom margins, stark black-and-white stripes)
+        # ---------------------------------------------------------------------
+        # Extract both top and bottom ROIs
+        rois = [
+            (gray[:int(h * 0.35), :], 0),
+            (gray[int(h * 0.65):, :], int(h * 0.65))
+        ]
+        
+        for roi_gray, y_offset in rois:
+            grad_x = cv2.Sobel(roi_gray, cv2.CV_32F, 1, 0, ksize=3)
+            grad_y = cv2.Sobel(roi_gray, cv2.CV_32F, 0, 1, ksize=3)
+            grad = cv2.subtract(grad_x, grad_y)
+            grad = cv2.convertScaleAbs(grad)
+            blurred = cv2.blur(grad, (9, 9))
+            _, barcode_thresh = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 7))
+            closed = cv2.morphologyEx(barcode_thresh, cv2.MORPH_CLOSE, kernel)
+
+            barcode_cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            found_barcode = False
+            for cnt in barcode_cnts:
+                area = cv2.contourArea(cnt)
+                if (w * h * 0.001) < area < (w * h * 0.03):
+                    bx, by, bw, bh = cv2.boundingRect(cnt)
+                    aspect = bw / max(1, bh)
+                    rect_ratio = area / max(1.0, float(bw * bh))
+                    if 1.5 < aspect < 5.5 and rect_ratio > 0.8:
+                        abs_y1 = y_offset + by
+                        abs_y2 = abs_y1 + bh
+                        poly = np.array([
+                            [bx, abs_y1], [bx + bw, abs_y1],
+                            [bx + bw, abs_y2], [bx, abs_y2]
+                        ], dtype=np.float32)
+                        ann = InstanceAnnotation(
+                            class_id=CLASS_MAP["barcode_sticker"],
+                            polygon=poly,
+                            bbox=(bx, abs_y1, bx + bw, abs_y2),
+                            confidence=0.88,
+                            tag="detected_barcode"
+                        )
+                        annotations.append(ann)
+                        crop = image_bgr[abs_y1:abs_y2, bx:bx+bw].copy()
+                        if crop.size > 0:
+                            self.artifact_bank["barcode_sticker"].append({
+                                "image": crop,
+                                "source": catalog_number
+                            })
+                        found_barcode = True
+                        break
+            if found_barcode:
+                break
+
+        # ---------------------------------------------------------------------
         # 4. Ruler Scale (elongated rectangular tick strip)
         # ---------------------------------------------------------------------
+        left_margin_w = int(w * 0.25)
+        left_roi = gray[:, :left_margin_w]
         ruler_edges = cv2.Canny(left_roi, 50, 150)
         lines = cv2.HoughLinesP(ruler_edges, 1, np.pi / 180, threshold=80, minLineLength=int(h * 0.08), maxLineGap=15)
         if lines is not None and len(lines) > 0:
