@@ -27,7 +27,12 @@ def detect_optimal_device_and_batch(requested_batch: Optional[int] = None, imgsz
 
     device_name = torch.cuda.get_device_name(0)
     total_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-    logger.info(f"CUDA accelerator detected: {device_name} ({total_memory_gb:.2f} GB VRAM)")
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("high")
+    logger.info(f"CUDA accelerator detected: {device_name} ({total_memory_gb:.2f} GB VRAM) | cuDNN benchmark: Enabled | TF32: Enabled")
 
     if requested_batch is not None:
         logger.info(f"Using user-specified batch size: {requested_batch}")
@@ -66,6 +71,7 @@ class RobustYOLOTrainer:
         workers: Optional[int] = None,
         cache: Optional[str] = "disk",
         resume: bool = False,
+        compile: bool = False,
         project_root: Optional[Path] = None,
         experiment_name: str = "artifact_robust_yolov8_seg"
     ):
@@ -77,6 +83,7 @@ class RobustYOLOTrainer:
         self.epochs = epochs
         self.experiment_name = experiment_name
         self.resume = resume
+        self.compile = compile
         self.cache = cache
 
         if workers is not None:
@@ -145,6 +152,7 @@ class RobustYOLOTrainer:
             "workers": self.workers,
             "cache": self.cache,
             "amp": True,
+            "compile": self.compile,
 
             "optimizer": "auto",
             "lr0": 0.01,
@@ -156,18 +164,20 @@ class RobustYOLOTrainer:
             "weight_decay": 0.001,
             "momentum": 0.937,
 
+            "deterministic": False,
+
             "box": 7.5,
             "cls": 0.5,
             "dfl": 1.5,
 
-            "mosaic": 1.0,
+            "mosaic": 0.5,
             "mixup": 0.0,
             "copy_paste": 0.0,
-            "degrees": 45.0,
+            "degrees": 15.0,
             "translate": 0.1,
             "scale": 0.5,
             "shear": 0.0,
-            "perspective": 0.0001,
+            "perspective": 0.0,
             "fliplr": 0.5,
             "flipud": 0.0,
             "hsv_h": 0.015,
@@ -181,7 +191,7 @@ class RobustYOLOTrainer:
             "save_period": -1,
             "patience": 20,
             "val": True,
-            "plots": True,
+            "plots": False,
             "verbose": True
         }
         return hyperparameters

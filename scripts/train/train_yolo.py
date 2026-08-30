@@ -15,11 +15,17 @@ Description:
 ===============================================================================
 """
 
+import os
 import sys
 import logging
 from pathlib import Path
-import os
 import psutil
+
+# Enforce optimal single-threaded worker math to eliminate CPU thread contention on 64-core systems
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # Add project root directory to sys.path to ensure absolute module imports resolve
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -83,6 +89,7 @@ def main():
         workers=args.workers,
         cache=cache_val,
         resume=args.resume,
+        compile=args.compile,
         experiment_name=args.name
     )
 

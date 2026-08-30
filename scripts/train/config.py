@@ -148,6 +148,11 @@ def parse_arguments() -> argparse.Namespace:
         help="Resume training from existing runs/segment/<name>/weights/last.pt without restarting."
     )
     parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable PyTorch 2.0+ torch.compile(model) with TorchInductor/Triton backend for accelerated training throughput."
+    )
+    parser.add_argument(
         "--name",
         type=str,
         default="artifact_robust_yolov8_seg",
