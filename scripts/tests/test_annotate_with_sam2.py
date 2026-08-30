@@ -110,6 +110,15 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         self.assertEqual(self.annotator.zoom_level, 1.0)
         self.assertEqual(self.annotator.pan_offset, [0, 0])
 
+    def test_pan_controls(self):
+        # Pan at 1.0x zoom automatically triggers 1.5x magnification
+        self.annotator.zoom_level = 1.0
+        self.annotator.pan_offset = [0, 0]
+        self.annotator.pan(dy_frac=0.20)
+        self.assertGreater(self.annotator.zoom_level, 1.0)
+        self.assertGreater(self.annotator.pan_offset[1], 0)
+
+
     def test_multi_modal_exclusion_points(self):
         window_dims = (800, 600)
 

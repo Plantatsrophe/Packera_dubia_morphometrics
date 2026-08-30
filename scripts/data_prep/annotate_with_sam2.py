@@ -215,6 +215,34 @@ class PrecisionSAM2Annotator:
         self.pan_offset[1] = int(center_y - (center_y - self.pan_offset[1]) * (old_zoom / new_zoom))
         self.zoom_level = new_zoom
         self.clamp_pan()
+        logger.info(f"Zoom level: {self.zoom_level:.1f}x | Viewport offset: ({self.pan_offset[0]}, {self.pan_offset[1]})")
+
+    def pan(self, dx_frac: float = 0.0, dy_frac: float = 0.0):
+        """
+        Pans the viewport by a fraction of the current visible window.
+        If currently at 1.0x zoom (entire sheet visible), automatically zooms
+        to 1.5x first so panning takes immediate visible effect.
+        """
+        if self.orig_w <= 0 or self.orig_h <= 0:
+            return
+
+        # If at 1.0x zoom, auto-magnify to 1.5x so panning is active
+        if self.zoom_level <= 1.0:
+            self.zoom_level = 1.5
+            view_w = int(self.orig_w / self.zoom_level)
+            view_h = int(self.orig_h / self.zoom_level)
+            self.pan_offset = [int((self.orig_w - view_w) / 2), int((self.orig_h - view_h) / 2)]
+
+        view_w = max(1, int(self.orig_w / self.zoom_level))
+        view_h = max(1, int(self.orig_h / self.zoom_level))
+
+        step_x = int(view_w * dx_frac)
+        step_y = int(view_h * dy_frac)
+
+        self.pan_offset[0] += step_x
+        self.pan_offset[1] += step_y
+        self.clamp_pan()
+        logger.info(f"Viewport panned to ({self.pan_offset[0]}, {self.pan_offset[1]}) [Zoom: {self.zoom_level:.1f}x]")
 
     def mouse_callback(self, event, x, y, flags, param):
         """
@@ -225,6 +253,14 @@ class PrecisionSAM2Annotator:
         window_w, window_h = param
         orig_x, orig_y = self.get_orig_coords(x, y, window_w, window_h)
         self.last_mouse_pos = (orig_x, orig_y)
+
+        # 0. Mouse Wheel Zoom
+        if event == cv2.EVENT_MOUSEWHEEL:
+            if flags > 0:
+                self.zoom(1.25, center_x=orig_x, center_y=orig_y)
+            else:
+                self.zoom(1.0 / 1.25, center_x=orig_x, center_y=orig_y)
+            return
 
         # 1. Bounding Box Prompt Drag (Shift + Left Click Drag)
         if (flags & cv2.EVENT_FLAG_SHIFTKEY) and event == cv2.EVENT_LBUTTONDOWN:
@@ -638,17 +674,13 @@ class PrecisionSAM2Annotator:
 
                 # Pan Controls (WASD & Arrow keys)
                 elif key in (ord('w'), ord('W'), 82, 0):  # Up
-                    self.pan_offset[1] -= int(200 / self.zoom_level)
-                    self.clamp_pan()
+                    self.pan(dy_frac=-0.20)
                 elif key in (ord('s'), ord('S'), 84, 1):  # Down
-                    self.pan_offset[1] += int(200 / self.zoom_level)
-                    self.clamp_pan()
+                    self.pan(dy_frac=0.20)
                 elif key in (ord('a'), ord('A'), 81, 2):  # Left
-                    self.pan_offset[0] -= int(200 / self.zoom_level)
-                    self.clamp_pan()
-                elif key in (ord('d'), ord('D'), 83, 3):  # Right
-                    self.pan_offset[0] += int(200 / self.zoom_level)
-                    self.clamp_pan()
+                    self.pan(dx_frac=-0.20)
+                elif key in (ord('d'), ord('D'), 3):       # Right
+                    self.pan(dx_frac=0.20)
 
                 # Clear Active Candidate Prompts ('c')
                 elif key == ord('c'):
