@@ -1,0 +1,167 @@
+﻿Standard Operating Procedure (SOP): Robust Species Delimitation Pipeline for the Packera dubia Complex
+Protocol Identifier: UNC-BOT-SOP-2026-04-REV4
+Principal Investigator: J. Brandon Fuller (PhD Candidate, Department of Biology, University of North Carolina at Chapel Hill)
+Advisor / Laboratory: Dr. Alan S. Weakley (Director, NCU Herbarium; UNC Biology)
+Target Taxon: Packera dubia (Spreng.) Trock & Mabb. Complex (Asteraceae: Senecioneae) and allied taxa (P. anonyma, P. plattensis, P. paupercula)
+Execution Environment: Google Antigravity & HPC (Python 3.10+ in .venv_LM2, R 4.3+)
+1. Executive Summary & Purpose
+This SOP documents the migration from the custom-trained YOLOv8/SAM 2 prototype to the community-standardized LeafMachine2 (LM2) pipeline (Weaver et al. 2024). LM2 provides pre-trained Plant Component Detectors (PCD), automatic ruler scale isolation, physical millimeter conversion, and leaf ROI cropping; original custom scripts are preserved in scripts/_archive/. LM2 integrates with the 4-tiered basal leaf extraction and symmetry-reconstruction protocol, the 6-tiered herbarium misidentification mitigation architecture, Momocs EFA, mclust GMMs, MorphoTools2 passive CDA, DINOv2 self-supervised embeddings, Cleanlab label noise curation, and spatialRF/SoilGrids/WorldClim niche modeling.
+2. Methodological Framework & Botanical Challenges
+2.1 The Challenge of Overlapping Basal Leaves and Herbarium Non-Plant Artifacts
+Botanical computer vision for Packera must address label & stamp bleed, missing petioles, and rosette clump fusion. LeafMachine2, utilizing the LeafPriority detector and PointRend sub-pixel boundary refinement, coupled with the 4-tiered extraction protocol (Tier 1 pristine silhouette, Tier 2 hemi-blade bilateral symmetry reflection, Tier 3 open Chebyshev polynomials, Tier 4 whole-rosette DINOv2 embeddings), overcomes these systematic bottlenecks.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+* Stage 5: Convexity & Solidity Gatekeeper & Involucre-Specific Cropping: Filter single leaves with Solidity = Areamask​/Areaconvex_hull​≥0.72; filter capitula for cylindrical involucre profiles with aspect ratio H/W ≈ 0.8 - 1.5.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+Following extraction, the pipeline deploys a 4-Tiered Hierarchical Basal Leaf Extraction Protocol:
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+   * Tier 1 (Direct Pristine Extraction): Vouchers possessing at least one basal leaf with an Unoccluded Completeness Score (UCS≥0.85) and Solidity ≥0.72 are segmented directly into clean, closed silhouettes for 12-harmonic EFA.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+   * Tier 2 (Hemi-Blade Bilateral Symmetry Reflection): When basal leaves are partially occluded on one lateral margin or petiole, but possess a completely unobstructed half-blade (from apex to base along the midrib), the algorithm detects the primary midrib axis, isolates the unobstructed half-margin, and symmetrically reflects it across the midrib axis in OpenCV to synthesize a 100% complete, unoccluded bilateral silhouette for closed EFA.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+   * Tier 3 (Open-Outline Analysis & Landmark Morphometrics): For heavily crowded or damaged rosettes where neither half-blade is clean, open margin curvature is analyzed via orthogonal polynomials (Momocs::opoly) and sliding semi-landmarks in geomorph, coupled with scalar caliper traits (petiole length, max blade width, apex angle).
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+   * Tier 4 (Dense-Rosette Deep Vision Embeddings): Concurrently, the unsegmented, full basal rosette patch (including leaf density, petiole crowding, and arachnoid tomentum texture) is passed directly to the DINOv2-ViT-B/14 vision transformer to extract holistic, segmentation-free 768-dimensional phenotypic embeddings.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+2.2 Six-Tiered Herbarium Misidentification Mitigation Framework
+The pipeline implements: (1) Authority Stratification (Gold/Silver/Bronze), (2) Label-Blind GMM Discovery, (3) Passive Sample CDA in MorphoTools2, (4) Multi-Modal Consensus (SoilGrids/WorldClim/phenology), (5) Confident Learning in Cleanlab, and (6) Digital Triage Queue.
+2.3 LeafMachine2 Configuration & Botanical Extraction Safeguards
+LM2 settings are optimized for high-throughput: PCD confidence threshold 0.72, batch_size 50, 8 workers, CUDA acceleration, PointRend instance segmentation, ruler scale detection, and multi-plant DBSCAN spatial clustering.
+3. System Architecture & Workspace Directory Structure
+
+
+packera-dubia-morphometrics/
+├── LeafMachine2/                      # LeafMachine2 submodule (organ detection engine)
+│   ├── LeafMachine2.py                # Main LM2 runner entrypoint
+│   ├── LeafMachine2.yaml              # LM2 default configuration
+│   └── leafmachine2/                  # LM2 core library
+├── LM2_Project/                       # Packera-specific LM2 project files
+│   ├── configs/
+│   │   └── lm2_packera_highperf.yaml  # Optimized LM2 config (batch 50, 8 workers, CUDA)
+│   └── Data/
+│       ├── images/                    # Staged voucher images (LM2 input)
+│       └── output/                    # LM2 structured outputs (crops, CSVs, QC overlays)
+├── data/
+│   ├── raw_vouchers/                  # High-resolution specimen sheet imagery (.jpg)
+│   ├── environmental/                 # SoilGrids 250m and WorldClim 2.1 GeoTIFF rasters
+│   └── tables/
+│       ├── curated_vouchers.csv       # Cleaned Darwin Core metadata with Determiner Tiers
+│       └── label_noise_audit.csv      # Cleanlab & discordance error logs
+├── scripts/
+│   ├── core/                          # Shared library classes (harvester utilities)
+│   │   ├── harvester.py               # GBIF/DwC pipeline download orchestrator
+│   │   └── harvester_utils.py         # Circular phenology and metadata parsing
+│   ├── data_prep/                     # Data harvesting and LM2 input preparation
+│   │   ├── 01_voucher_harvester.py    # Specimen record harvesting CLI
+│   │   ├── configure_leafmachine2.py  # LM2 configuration helper
+│   │   └── prepare_lm2_dataset.py     # Stages images for LM2 input
+│   ├── vision/                        # LM2 configuration and execution scripts
+│   │   └── configure_leafmachine2.py  # Programmatic LM2 YAML config generator
+│   ├── morphometrics/                 # R morphometrics and statistical scripts
+│   │   ├── 03_fourier_extractor.R     # EFA harmonic extraction (Momocs)
+│   │   └── 04_gmm_morphotools.R       # GMM clustering & CDA (mclust, MorphoTools2)
+│   ├── analysis/                      # Machine learning and spatial modeling scripts
+│   │   ├── 05_cleanlab_vision_xai.py  # DINOv2 embeddings, Cleanlab, Grad-CAM XAI
+│   │   └── 06_multimodal_spatial_rf.R # Spatial RF with SoilGrids & WorldClim
+│   ├── tests/                         # Active test suite
+│   │   └── test_voucher_harvester.py  # Voucher harvesting tests
+│   └── _archive/                      # Archived custom CV/ML pipeline (pre-LM2)
+│       ├── README_ARCHIVE.md          # Archive documentation
+│       └── ...
+├── outputs/
+│   ├── figures/                       # CDA biplots, Grad-CAM saliency panels, EFA contours
+│   └── reports/                       # BIC summaries, dataset manifests & taxonomic keys
+├── .venv_LM2/                         # LeafMachine2 Python virtual environment
+├── setup_leafmachine2.sh              # LM2 environment setup script
+└── README.md
+
+4. Step-by-Step Implementation Protocols & Gemini 3.7 Agentic Prompts
+Phase 1: Multi-Tiered Ingestion & Authority Stratification
+GEMINI 3.7 AGENTIC PROMPT 1: Voucher Ingestion & Authority Stratification (scripts/data_prep/01_voucher_harvester.py)
+Phase 2: LeafMachine2 Integration, Configuration, & Execution
+GEMINI 3.7 AGENTIC PROMPT 2A: LeafMachine2 Input Preparation (scripts/data_prep/prepare_lm2_dataset.py)
+GEMINI 3.7 AGENTIC PROMPT 2B: High-Performance Packera LeafMachine2 Configuration (scripts/vision/configure_leafmachine2.py)
+GEMINI 3.7 AGENTIC PROMPT 2C: LeafMachine2 Execution & QC Extraction (LeafMachine2/LeafMachine2.py)
+Phase 3: Label-Blind Morphometrics & Statistical Modeling
+GEMINI 3.7 AGENTIC PROMPT 3: Label-Blind Elliptic Fourier Analysis (scripts/morphometrics/03_fourier_extractor.R)
+GEMINI 3.7 AGENTIC PROMPT 4: GMM Clustering & Passive Sample CDA (scripts/morphometrics/04_gmm_morphotools.R)
+Phase 4: Deep Vision Analysis & XAI
+GEMINI 3.7 AGENTIC PROMPT 5: Confident Learning Label Pruning & Grad-CAM XAI (scripts/analysis/05_cleanlab_vision_xai.py)
+Phase 5: Multi-Modal Consensus & Spatial Modeling
+GEMINI 3.7 AGENTIC PROMPT 6: Multi-Modal Consensus & Spatial Random Forests (scripts/analysis/06_multimodal_spatial_rf.R)
+5. Multi-Evidence Taxonomic Decision Matrix (USC / Species Delimitation 4.0)
+Taxonomic Status
+	Morphometric Criterion (GMM / LDA)
+	Phenological Divergence
+	Edaphic / Pedological Niche (SoilGrids)
+	Ecological Niche Divergence (MaxEnt Identity D)
+	Actionable Taxonomic Outcome
+	Distinct Species (Flatrock Endemic)
+	Distinct GMM cluster (ΔBIC>10); LDA cross-validation ≥90%
+	Significant non-overlapping flowering peak (p<0.01)
+	Distinct geochemical adaptive zone (p<0.01)
+	Significant failure of Niche Identity (D<Dnull​, p<0.01)
+	Formal species-level recognition / resurrection
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Subspecies / Variety (Western Prairie Race)
+	Moderate LDA accuracy (75–89%); distinct Fourier outline mean with overlapping range
+	Overlapping flowering window across similar latitudes
+	Regional climatic differentiation with conserved edaphic preference
+	Moderate niche overlap (D≈0.40−0.65)
+	Varietal / Subspecific circumscription (P. dubia var. nov.)
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Ecophenotypic Variant (Single polymorphic taxon)
+	Continuous intergradation; single GMM component (K=1)
+	Continuous cline correlated solely with latitude/elevation
+	Generalist or continuous soil cline
+	Niche identity cannot be rejected (p>0.05)
+	Synonymy under broad, polymorphic Packera dubia
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Hybrid Swarm / Reticulation (Sandhill × Flatrock contact)
+	Passive samples plotting intermediately along Can1; high classification entropy (H≥0.50)
+	Broad, bimodal flowering window overlapping both parental taxa
+	Restricted to ecotonal contact zones or disturbed boundaries
+	Intermediate / overlapping hybrid envelope
+	Designation as nothospecies (Packera ×hybrid)
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	6. Quality Assurance & Occlusion / Misidentification Audit Checklist
+Quality Control Step
+	Verification Metric & Rule
+	Corrective Action if Violated
+	Determiner Authority Check
+	All Tier 1 (Gold) vouchers must have verified annotation slips by recognized specialists.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Downgrade to Tier 2 or Tier 3; exclude from primary training seeds.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Leaf Occlusion & Symmetry Verification
+	Tier 1 leaves must have UCS≥0.85. Tier 2 reflected leaves must have midrib angle error < 5°.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Route failed leaves to Tier 3 open curves and Tier 4 whole-rosette DINOv2 embeddings.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	LeafMachine2 PCD Confidence Threshold
+	Plant Component Detector threshold set to 0.72 for dense basal rosettes. Ruler scale must be detected for mm conversion.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Adjust threshold to balance false positives against buried foliar fragments.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	DBSCAN Multi-Plant Spatial Clustering
+	Bounding box centroids successfully separated into distinct individual plant IDs.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Tune spatial epsilon and min_samples parameters in DBSCAN script.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Cleanlab Label Noise Threshold
+	Vouchers with Cleanlab issue score > 0.85 flagged as corrupted labels.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Automatically prune from deep vision training sets; verify via Grad-CAM.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Multi-View Ecological Sanity Check
+	Voucher locality must match known edaphic range and seasonal flowering window.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Isolate triple-stream discordances and test for hybrid status.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Leaf Convexity & Solidity Gatekeeper
+	Single leaves must have Solidity (Area/Convex Area) ≥0.72.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	Route fused composite clumps to Tier 4 or EDT peak seeding.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex
+	7. Concluding Summary
+This modernized SOP establishes an end-to-end pipeline utilizing community-standardized LeafMachine2 for high-throughput botanical extraction. By resolving artifacts and occlusions through sub-pixel refinement and symmetry reconstruction, this protocol delivers a professional, reproducible workflow for Brandon Fuller's PhD dissertation research at the University of North Carolina at Chapel Hill.
+SOP: Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex

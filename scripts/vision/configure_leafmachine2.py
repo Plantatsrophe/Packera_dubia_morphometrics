@@ -90,7 +90,7 @@ def get_default_lm2_template() -> Dict[str, Any]:
                 "species_list": "",
                 "GBIF_mode": "all",
                 "batch_size": 50,
-                "num_workers": 8,
+                "num_workers": 1,
                 "num_workers_ruler": 8,
                 "num_workers_seg": 8,
                 "device": "cuda",
@@ -347,7 +347,9 @@ def run_leafmachine2(
 def generate_high_performance_config(
     base_config: Optional[Union[str, Path, Dict[str, Any]]] = None,
     batch_size: int = 50,
-    num_workers: int = 8,
+    num_workers: int = 1,
+    num_workers_ruler: int = 8,
+    num_workers_seg: int = 8,
     device: str = "cuda",
     use_leaf_priority: bool = True,
     images_dir: Optional[Union[str, Path]] = None,
@@ -364,7 +366,9 @@ def generate_high_performance_config(
     Args:
         base_config: Path to existing YAML file, or a dict, or None (uses default template).
         batch_size: Processing batch size (default: 50).
-        num_workers: Parallel workers for processing, ruler, and seg (default: 8).
+        num_workers: Parallel workers for YOLOv5 component detection (default: 1 for single GPU to prevent OOM).
+        num_workers_ruler: Parallel workers for ruler conversion (default: 8).
+        num_workers_seg: Parallel workers for leaf segmentation (default: 8).
         device: Compute hardware device ('cuda' or 'cpu', default: 'cuda').
         use_leaf_priority: Set PCD to 'LeafPriority' (Version 2.2) (default: True).
         images_dir: Directory containing input herbarium images / symlinks.
@@ -402,8 +406,8 @@ def generate_high_performance_config(
 
     proj["batch_size"] = int(batch_size)
     proj["num_workers"] = int(num_workers)
-    proj["num_workers_ruler"] = int(num_workers)
-    proj["num_workers_seg"] = int(num_workers)
+    proj["num_workers_ruler"] = int(num_workers_ruler)
+    proj["num_workers_seg"] = int(num_workers_seg)
     proj["device"] = str(device)
     proj["run_name"] = str(run_name)
 
@@ -539,8 +543,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=8,
-        help="Number of parallel worker processes/threads (default: 8).",
+        default=1,
+        help="Number of parallel worker processes/threads for component detector (default: 1 for single GPU).",
     )
     parser.add_argument(
         "--device",
