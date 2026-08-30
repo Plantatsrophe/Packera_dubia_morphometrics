@@ -104,11 +104,12 @@ class TestDynamicGeometricReprojector(unittest.TestCase):
         ann = HerbariumAnnotation(class_id=0, polygon=poly)
 
         window = (100, 100, 1124, 1124)
-        results = self.reprojector.reproject_annotations_to_tile(
+        results, dropped = self.reprojector.reproject_annotations_to_tile(
             annotations=[ann], window=window, tile_width=1024, tile_height=1024
         )
 
         self.assertEqual(len(results), 1)
+        self.assertFalse(dropped)
         class_id, norm_pts = results[0]
         self.assertEqual(class_id, 0)
         # Verify local coordinate re-projection:
@@ -130,12 +131,13 @@ class TestDynamicGeometricReprojector(unittest.TestCase):
 
         # Window intersecting only from (140, 50) to (150, 150) -> width 10, height 100 -> area 1000 = 10%
         window = (140, 0, 1164, 1024)
-        results = self.reprojector.reproject_annotations_to_tile(
+        results, dropped = self.reprojector.reproject_annotations_to_tile(
             annotations=[ann], window=window, tile_width=1024, tile_height=1024
         )
 
         # 10% < 15% threshold -> should be filtered out
         self.assertEqual(len(results), 0)
+        self.assertTrue(dropped)
 
     def test_partial_polygon_retained_above_15_percent(self):
         """
@@ -147,12 +149,13 @@ class TestDynamicGeometricReprojector(unittest.TestCase):
 
         # Window intersecting from (120, 50) to (150, 150) -> width 30, height 100 -> area 3000 = 30%
         window = (120, 0, 1144, 1024)
-        results = self.reprojector.reproject_annotations_to_tile(
+        results, dropped = self.reprojector.reproject_annotations_to_tile(
             annotations=[ann], window=window, tile_width=1024, tile_height=1024
         )
 
         # 30% >= 15% threshold -> should be preserved
         self.assertEqual(len(results), 1)
+        self.assertFalse(dropped)
         class_id, norm_pts = results[0]
         self.assertEqual(class_id, 0)
         self.assertGreaterEqual(len(norm_pts), 3)
@@ -239,8 +242,8 @@ class TestNativeDPIPatchTilerPipeline(unittest.TestCase):
 
         self.assertEqual(metrics["total_sheets_processed"], 1)
         self.assertGreater(metrics["total_tiles_generated"], 0)
-        self.assertGreater(metrics["class_instance_counts"]["basal_leaf"], 0)
-        self.assertGreater(metrics["class_instance_counts"]["ruler_scale"], 0)
+        self.assertGreater(metrics["class_instance_counts"]["basal_leaf_blade"], 0)
+        self.assertGreater(metrics["class_instance_counts"]["capitulum"], 0)
 
 
 class TestSplitPipelineComponents(unittest.TestCase):

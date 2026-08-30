@@ -61,6 +61,9 @@ class TextureMetrics:
     horizontal_stroke_density: float
     vertical_stroke_density: float
     is_printed_text: bool
+    mean_val: float = 0.0
+    mean_sat: float = 0.0
+    is_paper_substrate: bool = False
 
 @dataclass
 class FilterResult:

@@ -3,17 +3,15 @@ import argparse
 from pathlib import Path
 from typing import Dict, Optional
 
-# Standardized botanical and mounting artifact multi-class taxonomy
+# Standardized 7-class botanical ontology taxonomy
 STANDARD_CLASS_MAPPING: Dict[int, str] = {
-    0: "basal_leaf",       # Intact leaf / lamina blade
-    1: "leaf_petiole",     # Distinct petiole / leaf stalk
-    2: "basal_rosette",    # Clustered basal rosette
-    3: "capitulum",        # Inflorescence / flower head
-    4: "herbarium_label",  # Specimen metadata collection label
-    5: "color_chart",      # Color calibration chart / palette
-    6: "ruler_scale",      # Centimeter scale / measurement bar
-    7: "barcode_sticker",  # Digitization barcode / QR sticker
-    8: "mounting_tape",    # Linen, paper, or plastic mounting tape strip
+    0: "basal_leaf_blade",     # Laminar portion of basal leaves
+    1: "leaf_petiole",         # Narrow petiole stalk connecting caudex to blade
+    2: "cauline_leaf",         # Sessile/lyrately-pinnatifid leaves on flowering stalk
+    3: "cauline_stem",         # Main vertical flowering stalk / scape
+    4: "root_rhizome",         # Dark fibrous subterranean roots and caudex
+    5: "basal_rosette_clump",  # Dense overlapping basal rosette crown
+    6: "capitulum",            # Inflorescence head / involucre
 }
 
 def resolve_default_paths(project_root: Optional[Path] = None) -> Dict[str, Path]:
@@ -38,8 +36,8 @@ def resolve_default_paths(project_root: Optional[Path] = None) -> Dict[str, Path
     tiled_config = project_root / "data" / "tiled_dataset_config.yaml"
     legacy_config = project_root / "data" / "dataset_config.yaml"
 
-    # Default to tiled dataset config if tiled dataset exists, else legacy config
-    default_config = tiled_config if tiled_dataset_dir.exists() else legacy_config
+    # Default to standard dataset config if present, else tiled dataset config
+    default_config = legacy_config if legacy_config.exists() else tiled_config
 
     paths = {
         "root": project_root,

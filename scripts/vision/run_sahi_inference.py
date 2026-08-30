@@ -45,10 +45,8 @@ if str(root_dir / "scripts") not in sys.path:
     sys.path.insert(0, str(root_dir / "scripts"))
 
 # Import SAHI inference engine from core module
-from scripts.core.tiling_utils import (
-    HerbariumSAHIInference,
-    CLASS_NAMES
-)
+from scripts.core.sahi_inference import HerbariumSAHIInference
+from scripts.core.config import CLASS_NAMES
 
 # Configure structured logging format
 logging.basicConfig(

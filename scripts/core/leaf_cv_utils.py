@@ -1,28 +1,63 @@
+"""
+scripts/core/leaf_cv_utils.py
+=============================
+Computer vision utilities for botanical leaf extraction, artifact blanking,
+EDT peak seeding, SAM 2/watershed segmentation, and solidity evaluation.
+"""
 
-import os
-import sys
+from __future__ import annotations
+
+import glob
+import json
 import logging
 import math
-import numpy as np
-import cv2
-import json
-import glob
-import pandas as pd
-from typing import Dict, List, Tuple, Optional, Any, Union
+import os
+import sys
 from collections import defaultdict
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import cv2
+import numpy as np
+import pandas as pd
 from scipy import ndimage
 from skimage.morphology import skeletonize
 
-# Common imports
-from scripts.core.config import CLASS_NAMES, CLASS_MAP, CLASS_COLORS_BGR, DEFAULT_WORKSPACE
+from scripts.core.config import CLASS_COLORS_BGR, CLASS_MAP, CLASS_NAMES, DEFAULT_WORKSPACE
+from scripts.core.data_structures import (
+    ArtifactDetection,
+    FilterResult,
+    GeometricMetrics,
+    InstanceAnnotation,
+    SpectralMetrics,
+    TextureMetrics,
+)
+from scripts.core.leaf_spine_tracer import (
+    frangi_vesselness_filter_2d,
+    trace_3point_anatomical_spine,
+)
 from scripts.core.logger import setup_logging
-from scripts.core.data_structures import ArtifactDetection, GeometricMetrics, SpectralMetrics, TextureMetrics, FilterResult, InstanceAnnotation
+
 try:
     from tqdm import tqdm
 except ImportError:
     def tqdm(iterable, *args, **kwargs):
         return iterable
+
+logger = setup_logging()
+
+__all__ = [
+    "detect_sheet_artifacts",
+    "apply_hard_artifact_blanking",
+    "detect_native_dpi_regions",
+    "frangi_vesselness_filter_2d",
+    "trace_3point_anatomical_spine",
+    "extract_edt_point_seeds",
+    "load_sam2_predictor",
+    "segment_leaves_sam2_or_watershed",
+    "evaluate_convexity_and_solidity",
+    "filter_involucre_profiles",
+]
 
 
 def detect_sheet_artifacts(image_bgr: np.ndarray) -> Dict[str, List[Dict[str, Any]]]:
@@ -214,154 +249,6 @@ def detect_native_dpi_regions(
     return rosette_bbox, cyme_bboxes
 
 
-def frangi_vesselness_filter_2d(image_gray: np.ndarray, sigmas: List[float] = [1.0, 2.0, 3.0]) -> np.ndarray:
-    """
-    Stage 3 Helper: Computes 2D multi-scale Hessian ridge filter (Frangi vesselness)
-    to trace thin, faint petioles obscured by arachnoid tomentum or mounting tape.
-    """
-    max_response = np.zeros_like(image_gray, dtype=np.float32)
-    inv_img = 255.0 - image_gray.astype(np.float32)
-
-    for sigma in sigmas:
-        smoothed = ndimage.gaussian_filter(inv_img, sigma=sigma)
-        dy, dx = np.gradient(smoothed)
-        dyy, dyx = np.gradient(dy)
-        dxy, dxx = np.gradient(dx)
-
-        trace = dxx + dyy
-        det = dxx * dyy - dxy * dyx
-        discriminant = np.sqrt(np.maximum(trace**2 - 4 * det, 0))
-
-        lambda1 = 0.5 * (trace + discriminant)
-        lambda2 = 0.5 * (trace - discriminant)
-
-        c = 15.0
-        beta = 0.5
-
-        rb = np.abs(lambda1) / (np.abs(lambda2) + 1e-6)
-        s2 = lambda1**2 + lambda2**2
-
-        vesselness = np.exp(-(rb**2) / (2 * beta**2)) * (1.0 - np.exp(-s2 / (2 * c**2)))
-        vesselness[lambda2 > 0] = 0.0
-
-        max_response = np.maximum(max_response, vesselness)
-
-    norm = max_response.max()
-    if norm > 0:
-        max_response = max_response / norm
-
-    return max_response
-
-
-def trace_3point_anatomical_spine(
-    leaf_mask: np.ndarray,
-    leaf_gray: np.ndarray
-) -> Dict[str, Any]:
-    """
-    Stage 3: Traces the 3-point anatomical spine (LeafMachine2 protocol)
-    modeling each basal leaf with three keypoints:
-        - p_apex: Lamina apex (distal tip)
-        - p_transition: Lamina-to-petiole junction (blade base expansion)
-        - p_caudex: Petiole insertion point at the caudex / rootstock
-    """
-    h, w = leaf_mask.shape[:2]
-    contours, _ = cv2.findContours(leaf_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
-        return {
-            "p_apex": (0, 0),
-            "p_transition": (0, 0),
-            "p_caudex": (0, 0),
-            "petiole_length_px": 0.0,
-            "lamina_length_px": 0.0,
-            "total_spine_length_px": 0.0,
-            "spine_points": []
-        }
-
-    main_cnt = max(contours, key=cv2.contourArea)
-    pts = main_cnt.reshape(-1, 2).astype(np.float32)
-
-    line_params = cv2.fitLine(main_cnt, cv2.DIST_L2, 0, 0.01, 0.01)
-    vx, vy, x0, y0 = [float(v[0]) for v in line_params]
-
-    projections = (pts[:, 0] - x0) * vx + (pts[:, 1] - y0) * vy
-    min_idx = int(np.argmin(projections))
-    max_idx = int(np.argmax(projections))
-
-    pt_a = (int(pts[min_idx][0]), int(pts[min_idx][1]))
-    pt_b = (int(pts[max_idx][0]), int(pts[max_idx][1]))
-
-    M = cv2.moments(leaf_mask)
-    if M["m00"] > 0:
-        cx = M["m10"] / M["m00"]
-        cy = M["m01"] / M["m00"]
-        dist_a = math.hypot(pt_a[0] - cx, pt_a[0] - cy)
-        dist_b = math.hypot(pt_b[0] - cx, pt_b[0] - cy)
-        if dist_a > dist_b:
-            p_caudex, p_apex = pt_a, pt_b
-        else:
-            p_caudex, p_apex = pt_b, pt_a
-    else:
-        p_apex, p_caudex = pt_a, pt_b
-
-    spine_vec = np.array([p_caudex[0] - p_apex[0], p_caudex[1] - p_apex[1]], dtype=np.float32)
-    spine_len = float(np.linalg.norm(spine_vec))
-    if spine_len < 5:
-        return {
-            "p_apex": p_apex,
-            "p_transition": p_apex,
-            "p_caudex": p_caudex,
-            "petiole_length_px": 0.0,
-            "lamina_length_px": spine_len,
-            "total_spine_length_px": spine_len,
-            "spine_points": [p_apex, p_caudex]
-        }
-
-    spine_unit = spine_vec / spine_len
-    perp_unit = np.array([-spine_unit[1], spine_unit[0]], dtype=np.float32)
-
-    num_samples = 50
-    widths = []
-    sample_points = []
-    for t in np.linspace(0.1, 0.95, num_samples):
-        center_pt = np.array(p_apex, dtype=np.float32) + t * spine_vec
-        sample_points.append(center_pt)
-
-        span = 0
-        for s in range(-int(w / 2), int(w / 2)):
-            probe = center_pt + s * perp_unit
-            px, py = int(round(probe[0])), int(round(probe[1]))
-            if 0 <= px < w and 0 <= py < h and leaf_mask[py, px] > 0:
-                span += 1
-        widths.append(span)
-
-    widths = np.array(widths, dtype=np.float32)
-    max_w = np.max(widths) if len(widths) > 0 else 1.0
-
-    narrow_indices = np.where(widths <= 0.35 * max_w)[0]
-    if len(narrow_indices) > 0:
-        trans_idx = narrow_indices[0]
-        trans_pt = sample_points[trans_idx]
-        p_transition = (int(round(trans_pt[0])), int(round(trans_pt[1])))
-    else:
-        mid_pt = np.array(p_apex, dtype=np.float32) + 0.60 * spine_vec
-        p_transition = (int(round(mid_pt[0])), int(round(mid_pt[1])))
-
-    vesselness = frangi_vesselness_filter_2d(leaf_gray, sigmas=[1.0, 2.0, 3.0])
-    petiole_len = float(math.hypot(p_caudex[0] - p_transition[0], p_caudex[1] - p_transition[1]))
-    lamina_len = float(math.hypot(p_transition[0] - p_apex[0], p_transition[1] - p_apex[1]))
-
-    return {
-        "p_apex": p_apex,
-        "p_transition": p_transition,
-        "p_caudex": p_caudex,
-        "petiole_length_px": petiole_len,
-        "lamina_length_px": lamina_len,
-        "total_spine_length_px": spine_len,
-        "vesselness_peak": float(vesselness.max()),
-        "spine_points": [p_apex, p_transition, p_caudex]
-    }
-
-
 def extract_edt_point_seeds(
     rosette_binary_mask: np.ndarray,
     min_distance_px: int = 25,
@@ -394,20 +281,105 @@ def extract_edt_point_seeds(
     return dist_transform, filtered_seeds
 
 
+def load_sam2_predictor(
+    checkpoint_path: Optional[Union[str, Path]] = None,
+    model_cfg: Optional[Union[str, Path]] = None,
+    device: Optional[str] = None
+) -> Optional[Any]:
+    """
+    Safely loads and initializes a SAM2ImagePredictor instance.
+    Returns None if SAM 2 packages or weights are unavailable.
+    """
+    try:
+        import torch
+        from sam2.build_sam import build_sam2
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+        if checkpoint_path is None:
+            checkpoint_path = DEFAULT_WORKSPACE / "models" / "checkpoints" / "sam2_hiera_large.pt"
+        if model_cfg is None:
+            model_cfg = "sam2_hiera_l.yaml"
+
+        checkpoint_path = Path(checkpoint_path)
+        if not checkpoint_path.is_file():
+            logger.warning(f"SAM 2 checkpoint not found at {checkpoint_path}")
+            return None
+
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        sam2_model = build_sam2(str(model_cfg), str(checkpoint_path), device=device)
+        predictor = SAM2ImagePredictor(sam2_model)
+        logger.info(f"SAM 2 Predictor initialized on {device} from {checkpoint_path}")
+        return predictor
+    except Exception as e:
+        logger.warning(f"Failed to load SAM 2 predictor: {e}. Gracefully falling back to watershed.")
+        return None
+
+
 def segment_leaves_sam2_or_watershed(
     rosette_crop_bgr: np.ndarray,
     rosette_binary_mask: np.ndarray,
-    point_seeds: List[Tuple[int, int]]
+    point_seeds: List[Tuple[int, int]],
+    use_sam2: bool = True,
+    sam2_predictor: Optional[Any] = None,
+    sam2_checkpoint: Optional[Union[str, Path]] = None,
+    sam2_model_cfg: Optional[Union[str, Path]] = None
 ) -> List[np.ndarray]:
     """
     Stage 4: Uses EDT peak coordinates as positive point prompts in SAM 2
-    or marker-controlled watershed segmentation to disentangle individual leaf layers.
+    (point_labels=np.array([1]), multimask_output=True) or marker-controlled watershed
+    segmentation to disentangle individual leaf layers.
     """
     h, w = rosette_binary_mask.shape[:2]
     leaf_masks: List[np.ndarray] = []
 
     if not point_seeds:
         return leaf_masks
+
+    if use_sam2:
+        try:
+            predictor = sam2_predictor
+            if predictor is None:
+                predictor = load_sam2_predictor(sam2_checkpoint, sam2_model_cfg)
+
+            if predictor is not None:
+                crop_rgb = cv2.cvtColor(rosette_crop_bgr, cv2.COLOR_BGR2RGB)
+                predictor.set_image(crop_rgb)
+
+                for sx, sy in point_seeds:
+                    point_coords = np.array([[sx, sy]], dtype=np.float32)
+                    point_labels = np.array([1], dtype=np.int32)
+
+                    masks, scores, logits = predictor.predict(
+                        point_coords=point_coords,
+                        point_labels=point_labels,
+                        multimask_output=True
+                    )
+
+                    if masks is not None and len(masks) > 0:
+                        best_idx = int(np.argmax(scores))
+                        raw_mask = masks[best_idx]
+                        if hasattr(raw_mask, "cpu"):
+                            raw_mask = raw_mask.cpu().numpy()
+                        if raw_mask.dtype == bool:
+                            mask_u8 = raw_mask.astype(np.uint8) * 255
+                        else:
+                            mask_u8 = (raw_mask > 0).astype(np.uint8) * 255
+
+                        leaf_mask = cv2.bitwise_and(mask_u8, rosette_binary_mask)
+                        if cv2.countNonZero(leaf_mask) >= 300:
+                            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                            leaf_mask = cv2.morphologyEx(leaf_mask, cv2.MORPH_CLOSE, kernel)
+                            leaf_masks.append(leaf_mask)
+
+                if leaf_masks:
+                    logger.debug(f"SAM 2 successfully disentangled {len(leaf_masks)} leaf layers from rosette.")
+                    return leaf_masks
+                else:
+                    logger.debug("SAM 2 returned no valid masks >= 300 px, falling back to watershed.")
+        except Exception as exc:
+            logger.warning(f"SAM 2 segmentation failed ({exc}), falling back to marker-controlled watershed.")
 
     markers = np.zeros((h, w), dtype=np.int32)
     for idx, (sx, sy) in enumerate(point_seeds):
@@ -510,5 +482,3 @@ def filter_involucre_profiles(
             })
 
     return valid_involucres
-
-

@@ -1,1 +1,4 @@
-catalogNumber,assigned_tier,ucs_score,solidity,midrib_angle,symmetry_reconstructed,mask_path
+catalogNumber,assigned_tier,ucs_score,solidity,midrib_angle,symmetry_reconstructed,mask_path,leaf_index,petiole_length_px,lamina_length_px,status
+000331814,4,0.0,0.0,0.0,FALSE,/home/brandon/Packera_dubia_morphometrics/data/cropped_patches/rosettes_dense/000331814_rosette.jpg,-1,0.0,0.0,TIER_4_UNSEGMENTED_ROSETTE_CLUMP
+00116749,4,0.0,0.0,0.0,FALSE,/home/brandon/Packera_dubia_morphometrics/data/cropped_patches/rosettes_dense/00116749_rosette.jpg,-1,0.0,0.0,TIER_4_UNSEGMENTED_ROSETTE_CLUMP
+00116756,4,0.0,0.0,0.0,FALSE,/home/brandon/Packera_dubia_morphometrics/data/cropped_patches/rosettes_dense/00116756_rosette.jpg,-1,0.0,0.0,TIER_4_UNSEGMENTED_ROSETTE_CLUMP

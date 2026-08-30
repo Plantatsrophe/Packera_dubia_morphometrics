@@ -1,36 +1,28 @@
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-# Multi-class schema mapping for botanical vision model
+# Standard 7-class botanical ontology mapping for Packera phenotyping
 CLASS_NAMES: List[str] = [
-    "basal_leaf",       # 0: Leaf blade / intact leaf
-    "leaf_petiole",     # 1: Distinct petiole / leaf stalk
-    "basal_rosette",    # 2: Clustered basal rosette
-    "capitulum",        # 3: Inflorescence / flower head
-    "herbarium_label",  # 4: Main specimen metadata label
-    "color_chart",      # 5: Calibration color chart / palette
-    "ruler_scale",      # 6: Measurement scale / centimeter bar
-    "barcode_sticker",  # 7: Digitization barcode / QR sticker
-    "mounting_tape",    # 8: Linen, paper, or plastic mounting tape strip
-    "peduncle",         # 9: Flowering stem
-    "root",             # 10: Root system
+    "basal_leaf_blade",     # 0: laminar portion of basal leaves
+    "leaf_petiole",         # 1: narrow petiole stalk connecting caudex to blade
+    "cauline_leaf",         # 2: sessile/lyrately-pinnatifid leaves on flowering stalk
+    "cauline_stem",         # 3: main vertical flowering stalk / scape
+    "root_rhizome",         # 4: dark fibrous subterranean roots and caudex
+    "basal_rosette_clump",  # 5: dense overlapping basal rosette crown
+    "capitulum",            # 6: inflorescence head / involucre
 ]
 
 CLASS_MAP: Dict[str, int] = {name: idx for idx, name in enumerate(CLASS_NAMES)}
 
-# Distinct RGB color palette for rendering class overlays during QC
+# Distinct RGB/BGR color palette for rendering class overlays during QC
 CLASS_COLORS_BGR: Dict[int, Tuple[int, int, int]] = {
-    0: (0, 200, 0),      # basal_leaf: Vibrant Green
+    0: (0, 200, 0),      # basal_leaf_blade: Vibrant Green
     1: (50, 255, 150),   # leaf_petiole: Mint Green
-    2: (0, 140, 70),     # basal_rosette: Dark Forest Green
-    3: (0, 215, 255),    # capitulum: Gold / Yellow
-    4: (30, 30, 230),    # herbarium_label: Bright Red
-    5: (230, 30, 230),   # color_chart: Magenta
-    6: (0, 140, 255),    # ruler_scale: Orange
-    7: (230, 180, 0),    # barcode_sticker: Cyan
-    8: (180, 0, 180),    # mounting_tape: Purple / Violet
-    9: (100, 255, 255),  # peduncle: Light Yellow
-    10: (50, 100, 200),  # root: Orange/Brown (BGR)
+    2: (0, 165, 255),    # cauline_leaf: Bright Orange
+    3: (0, 215, 255),    # cauline_stem: Gold / Yellow
+    4: (50, 100, 200),   # root_rhizome: Rust / Earth Brown
+    5: (0, 140, 70),     # basal_rosette_clump: Dark Forest Green
+    6: (230, 30, 230),   # capitulum: Vivid Magenta / Purple
 }
 
 # Default filesystem paths

@@ -1,32 +1,0 @@
-[2026-08-29 22:21:02] [INFO] Initializing Artifact-Robust Botanical Dataset Builder...
-[2026-08-29 22:21:02] [INFO] YOLO Schema: ['basal_leaf', 'leaf_petiole', 'basal_rosette', 'capitulum', 'herbarium_label', 'color_chart', 'ruler_scale', 'barcode_sticker', 'mounting_tape']
-[2026-08-29 22:21:02] [INFO] Target Hard Negative Proportion: 9.0%
-[2026-08-29 22:21:02] [INFO] Augmentation Probability: 75.0% | Min Instance Area: 150.0 px
-[2026-08-29 22:21:02] [WARNING] Purging existing dataset output directory to prevent stale label contamination: /home/brandon/Packera_dubia_morphometrics/data/yolo_dataset
-[2026-08-29 22:21:02] [INFO] Loaded 6610 records from curated vouchers table: /home/brandon/Packera_dubia_morphometrics/data/tables/curated_vouchers.csv
-[2026-08-29 22:21:03] [INFO] Limiting processing to first 1 vouchers as requested.
-[2026-08-29 22:21:03] [INFO] Stratified Dataset Partition: Train=1 | Val=0 | Test=0 (Total: 1 vouchers across 1 strata)
-[2026-08-29 22:21:03] [INFO] Pass 1/2: Harvesting artifact patches across voucher collection...
-Harvesting Artifacts:   0%|          | 0/1 [00:00<?, ?it/s]Harvesting Artifacts: 100%|██████████| 1/1 [00:00<00:00,  5.72it/s]Harvesting Artifacts: 100%|██████████| 1/1 [00:00<00:00,  5.72it/s]
-[2026-08-29 22:21:03] [INFO] Artifact Bank Populated: herbarium_label: 1, color_chart: 1, ruler_scale: 0, barcode_sticker: 0, mounting_tape: 5
-[2026-08-29 22:21:03] [INFO] Pass 2/2: Building YOLO partitions, annotations, and negative injections...
-[2026-08-29 22:21:03] [INFO] Processing split 'train' (1 base vouchers)...
-Split [train]:   0%|          | 0/1 [00:00<?, ?it/s]Split [train]: 100%|██████████| 1/1 [00:00<00:00,  2.31it/s]Split [train]: 100%|██████████| 1/1 [00:00<00:00,  2.31it/s]
-[2026-08-29 22:21:03] [INFO] Injecting 1 hard negative background sheets into split 'train'...
-[2026-08-29 22:21:03] [INFO] Processing split 'val' (0 base vouchers)...
-Split [val]: 0it [00:00, ?it/s]Split [val]: 0it [00:00, ?it/s]
-[2026-08-29 22:21:03] [INFO] Injecting 1 hard negative background sheets into split 'val'...
-[2026-08-29 22:21:04] [INFO] Processing split 'test' (0 base vouchers)...
-Split [test]: 0it [00:00, ?it/s]Split [test]: 0it [00:00, ?it/s]
-[2026-08-29 22:21:04] [INFO] Injecting 1 hard negative background sheets into split 'test'...
-[2026-08-29 22:21:04] [INFO] Ultralytics dataset configuration written to: /home/brandon/Packera_dubia_morphometrics/data/dataset_config.yaml
-[2026-08-29 22:21:04] [INFO] ==============================================================================
-[2026-08-29 22:21:04] [INFO] ARTIFACT-ROBUST DATASET BUILD COMPLETED SUCCESSFULLY
-[2026-08-29 22:21:04] [INFO] Total Samples Generated: 4
-[2026-08-29 22:21:04] [INFO] Train: 2 | Val: 1 | Test: 1
-[2026-08-29 22:21:04] [INFO] Hard Negative Background Sheets: 3 (75.0%)
-[2026-08-29 22:21:04] [INFO] Total Instances Annotated: 22
-[2026-08-29 22:21:04] [INFO] Class Distribution: {'basal_leaf': 13, 'leaf_petiole': 3, 'basal_rosette': 0, 'capitulum': 4, 'herbarium_label': 2, 'color_chart': 0, 'ruler_scale': 0, 'barcode_sticker': 0, 'mounting_tape': 0}
-[2026-08-29 22:21:04] [INFO] Config YAML: /home/brandon/Packera_dubia_morphometrics/data/dataset_config.yaml
-[2026-08-29 22:21:04] [INFO] QC Overlay Figures: /home/brandon/Packera_dubia_morphometrics/outputs/dataset_qc
-[2026-08-29 22:21:04] [INFO] ==============================================================================
