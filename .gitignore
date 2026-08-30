@@ -75,6 +75,8 @@ wheels/
 # Virtual environments
 .env
 .venv
+.venv*/
+.venv_LM2/
 env/
 venv/
 ENV/
@@ -221,3 +223,13 @@ secrets.yaml
 *.swp
 *.swo
 *~
+
+# ------------------------------------------------------------------------------
+# 9. LeafMachine2 Model, Cloned Repository & Project Workspace
+# ------------------------------------------------------------------------------
+# LeafMachine2 cloned upstream repository, weights, and component detector models
+LeafMachine2/
+
+# LeafMachine2 working project data and outputs
+LM2_Project/
+
