@@ -132,9 +132,12 @@ data/yolo_dataset/images/*
 data/yolo_dataset/labels/*
 !data/yolo_dataset/labels/.gitkeep
 
-# Curated and generated voucher metadata tables
-data/tables/curated_vouchers.csv
-data/tables/dataset_manifest.csv
+# Tabular datasets, CSVs, and spreadsheets across all folders
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.ods
 
 # Native DPI patch tiler and sliced SAHI datasets
 data/tiled_dataset/

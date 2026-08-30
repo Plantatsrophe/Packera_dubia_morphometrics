@@ -80,3 +80,25 @@ VALID_TYPE_STATUSES = {
     "HOLOTYPE", "ISOTYPE", "LECTOTYPE", "ISOLECTOTYPE", "SYNTYPE", "ISOSYNTYPE",
     "NEOTYPE", "ISONEOTYPE", "PARATYPE", "ISOPARATYPE", "EPITYPE", "TYPE", "COTYPE"
 }
+
+# US States & Territories situated farther west than Texas and Oklahoma
+# (Rocky Mountains, Intermountain West, Southwest, Pacific Northwest, West Coast, Pacific)
+EXCLUDED_WESTERN_STATES = {
+    "CO", "COLORADO",
+    "NM", "NEW MEXICO",
+    "WY", "WYOMING",
+    "MT", "MONTANA",
+    "UT", "UTAH",
+    "AZ", "ARIZONA",
+    "NV", "NEVADA",
+    "ID", "IDAHO",
+    "WA", "WASHINGTON",
+    "OR", "OREGON",
+    "CA", "CALIFORNIA",
+    "AK", "ALASKA",
+    "HI", "HAWAII",
+}
+
+# Westernmost continental coordinate threshold for target regional study (West of Texas panhandle/West TX: -106.65° W)
+WESTERN_LONGITUDE_THRESHOLD = -106.65
+

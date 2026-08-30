@@ -25,6 +25,8 @@ from scripts.core.config import (
     VALID_TYPE_STATUSES,
     SPECIALIST_PATTERNS,
     MAJOR_HERBARIA_CODES,
+    EXCLUDED_WESTERN_STATES,
+    WESTERN_LONGITUDE_THRESHOLD,
 )
 
 
@@ -185,6 +187,52 @@ def calculate_circular_phenology(year: Any, month: Any, day: Any) -> Optional[Tu
         return doy, pheno_sin, pheno_cos
     except (ValueError, TypeError, OverflowError):
         return None
+
+
+def is_excluded_western_region(
+    state_province: Optional[str],
+    lat: Optional[float] = None,
+    lon: Optional[float] = None
+) -> bool:
+    """
+    Determines whether a record originates from a US state or territory farther west than Texas and Oklahoma.
+    
+    Excluded regions include the Rocky Mountains, Intermountain West, Southwest, Pacific Northwest,
+    West Coast, and Pacific states (e.g. CO, NM, WY, MT, UT, AZ, NV, ID, WA, OR, CA, AK, HI).
+    
+    Disambiguates 'Washington' (State, excluded) from 'Washington, D.C.' / 'District of Columbia' (East, retained).
+    
+    Args:
+        state_province: State or province name / abbreviation string (or None/NaN).
+        lat: Optional decimal latitude float.
+        lon: Optional decimal longitude float.
+        
+    Returns:
+        bool: True if the record should be excluded as a western locality; False otherwise.
+    """
+    if state_province is not None and not (isinstance(state_province, float) and math.isnan(state_province)):
+        raw_state = str(state_province).strip()
+        # Clean state string (remove trailing punctuation, qualifiers like '(State)', etc.)
+        cleaned = re.sub(r"\(state\)", "", raw_state, flags=re.IGNORECASE).strip(" ._,-")
+        upper_state = cleaned.upper()
+        
+        # Disambiguation: Preserve District of Columbia / Washington, D.C.
+        if upper_state in {"WASHINGTON, D.C.", "WASHINGTON D.C.", "WASHINGTON DC", "DISTRICT OF COLUMBIA", "DC"}:
+            return False
+            
+        if upper_state in EXCLUDED_WESTERN_STATES:
+            return True
+            
+    # Coordinate fallback: If state is unrecorded or not in excluded list, check western longitude bound
+    if lon is not None:
+        try:
+            lon_val = float(lon)
+            if lon_val < WESTERN_LONGITUDE_THRESHOLD:
+                return True
+        except (ValueError, TypeError):
+            pass
+            
+    return False
 
 
 def infer_regional_group(

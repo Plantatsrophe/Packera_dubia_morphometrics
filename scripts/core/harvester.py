@@ -37,12 +37,14 @@ from scripts.core.harvester_utils import (
     extract_high_res_image_url,
     print_and_log_summary,
     download_all_voucher_images,
+    is_excluded_western_region,
 )
 
 def harvest_taxa_occurrences(
     taxa_list: List[str],
     max_uncertainty_meters: float = 5000.0,
     max_records_per_taxon: int = 1000,
+    exclude_western: bool = True,
     logger: Optional[logging.Logger] = None
 ) -> pd.DataFrame:
     """
@@ -50,7 +52,7 @@ def harvest_taxa_occurrences(
     
     Filters applied:
       - Basis of record: PRESERVED_SPECIMEN
-      - Geographic scope: United States (country='US')
+      - Geographic scope: United States (country='US'), excluding states farther west than Texas and Oklahoma
       - Spatial validation: Non-null coordinates, coordinateUncertaintyInMeters <= max_uncertainty_meters
       - Temporal validation: Valid collection dates (year, month, day)
       - Media validation: High-resolution sheet image URL present
@@ -59,6 +61,7 @@ def harvest_taxa_occurrences(
         taxa_list: List of botanical species names to query.
         max_uncertainty_meters: Maximum allowed georeferencing uncertainty in meters.
         max_records_per_taxon: Maximum records to harvest per taxon query.
+        exclude_western: Whether to exclude records from states farther west than TX/OK (default: True).
         logger: Logger instance.
         
     Returns:
@@ -77,6 +80,7 @@ def harvest_taxa_occurrences(
         limit = 300  # GBIF page size limit
         taxon_harvested = 0
         taxon_retained = 0
+        taxon_western_excluded = 0
 
         while taxon_retained < max_records_per_taxon:
             try:
@@ -112,6 +116,12 @@ def harvest_taxa_occurrences(
                         lon_val = float(lon)
                     except (ValueError, TypeError):
                         pass
+
+                # Geographic Scope & Western State Exclusion (Filter out states farther west than TX & OK)
+                state_prov = rec.get("stateProvince")
+                if exclude_western and is_excluded_western_region(state_prov, lat=lat_val, lon=lon_val):
+                    taxon_western_excluded += 1
+                    continue
 
                 # Coordinate uncertainty check (only if coordinates exist)
                 uncertainty_val = max_uncertainty_meters
@@ -220,7 +230,11 @@ def harvest_taxa_occurrences(
                 break
             time.sleep(0.1)  # Respectful GBIF rate limiting
 
-        logger.info(f"Taxon '{taxon}': Processed {taxon_harvested} occurrences -> Retained {taxon_retained} curated records meeting quality filters.")
+        logger.info(
+            f"Taxon '{taxon}': Processed {taxon_harvested} occurrences -> "
+            f"Retained {taxon_retained} curated records meeting quality filters "
+            f"(Western states excluded: {taxon_western_excluded})."
+        )
 
     # Convert to DataFrame
     df = pd.DataFrame(all_curated_records)
@@ -251,6 +265,12 @@ def main() -> None:
         type=int,
         default=5000,
         help="Maximum records to harvest per taxon (default: 5000)."
+    )
+    parser.add_argument(
+        "--exclude-western",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Exclude vouchers from states farther west than Texas and Oklahoma (default: True)."
     )
     parser.add_argument(
         "--download-images",
@@ -291,12 +311,14 @@ def main() -> None:
     logger.info("Starting Packera Voucher Ingestion & Authority Stratification Pipeline...")
     logger.info(f"Target Taxa: {args.taxa}")
     logger.info(f"Max Coordinate Uncertainty Threshold: {args.max_uncertainty} m")
+    logger.info(f"Exclude Western States (> TX & OK): {args.exclude_western}")
 
     # Step 1: Harvest and curate metadata records from GBIF
     df_curated = harvest_taxa_occurrences(
         taxa_list=args.taxa,
         max_uncertainty_meters=args.max_uncertainty,
         max_records_per_taxon=args.max_records_per_taxon,
+        exclude_western=args.exclude_western,
         logger=logger
     )
 
