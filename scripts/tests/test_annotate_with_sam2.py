@@ -21,12 +21,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.annotate_with_sam2 import (
-    PrecisionSAM2Annotator,
-    CLASS_NAMES,
-    CLASS_COLORS,
-    get_project_root
-)
+try:
+    from scripts.data_prep.annotate_with_sam2 import (
+        PrecisionSAM2Annotator,
+        CLASS_NAMES,
+        CLASS_COLORS,
+        get_project_root
+    )
+except ImportError:
+    from scripts.annotate_with_sam2 import (
+        PrecisionSAM2Annotator,
+        CLASS_NAMES,
+        CLASS_COLORS,
+        get_project_root
+    )
 
 
 class TestPrecisionSAM2Annotator(unittest.TestCase):
@@ -44,8 +52,8 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         self.test_img_path = self.vouchers_dir / "NCU00099999.jpg"
         cv2.imwrite(str(self.test_img_path), self.test_img)
 
-        with patch("scripts.annotate_with_sam2.build_sam2") as mock_build_sam2, \
-             patch("scripts.annotate_with_sam2.SAM2ImagePredictor") as mock_predictor_cls:
+        with patch("scripts.data_prep.annotate_with_sam2.build_sam2") as mock_build_sam2, \
+             patch("scripts.data_prep.annotate_with_sam2.SAM2ImagePredictor") as mock_predictor_cls:
             
             mock_predictor = MagicMock()
             mock_predictor.predict.return_value = (
@@ -81,6 +89,25 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         self.assertFalse(self.annotator.lasso_mode)
         self.assertEqual(self.annotator.zoom_level, 1.0)
         self.assertEqual(self.annotator.pan_offset, [0, 0])
+
+    def test_auto_resume_unannotated_voucher(self):
+        # Create second voucher image in test directory
+        img2_path = self.vouchers_dir / "NCU00088888.jpg"
+        cv2.imwrite(str(img2_path), self.test_img)
+
+        # Create annotation file for the first voucher (NCU00099999.txt)
+        (self.annotations_dir / "NCU00099999.txt").write_text("0 0.1 0.1 0.2 0.1 0.2 0.2 0.1 0.2\n")
+
+        with patch("scripts.data_prep.annotate_with_sam2.build_sam2") as mock_build_sam2, \
+             patch("scripts.data_prep.annotate_with_sam2.SAM2ImagePredictor") as mock_predictor_cls:
+            annotator = PrecisionSAM2Annotator(
+                images_dir=self.vouchers_dir,
+                output_dir=self.annotations_dir,
+                checkpoint_path="dummy.pt",
+                config_path="dummy.yaml"
+            )
+            # Should auto-advance to index of NCU00088888 because NCU00099999 is already annotated
+            self.assertEqual(annotator.image_files[annotator.current_idx].stem, "NCU00088888")
 
     def test_coordinate_mapping(self):
         # 1.0x Zoom at window 800x600 mapping to 800x1000 image

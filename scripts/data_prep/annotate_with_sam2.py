@@ -98,7 +98,8 @@ class PrecisionSAM2Annotator:
         checkpoint_path: Union[str, Path] = "models/checkpoints/sam2_hiera_large.pt",
         config_path: Union[str, Path] = "sam2_hiera_l.yaml",
         window_w: int = 1280,
-        window_h: int = 960
+        window_h: int = 960,
+        resume_unannotated: bool = True
     ):
         self.project_root = get_project_root()
         self.images_dir = Path(images_dir) if Path(images_dir).is_absolute() else self.project_root / images_dir
@@ -137,6 +138,16 @@ class PrecisionSAM2Annotator:
         self.predictor = SAM2ImagePredictor(sam2_model)
 
         self.current_idx = 0
+        if resume_unannotated and not single_image:
+            for idx, img_p in enumerate(self.image_files):
+                label_p = self.output_dir / f"{img_p.stem}.txt"
+                if not label_p.exists():
+                    self.current_idx = idx
+                    logger.info(f"Auto-resuming queue at first unannotated voucher [{idx + 1}/{len(self.image_files)}]: {img_p.name}")
+                    break
+            else:
+                logger.info(f"All {len(self.image_files)} vouchers in queue already have saved annotations.")
+
         self.current_img: Optional[np.ndarray] = None
         self.orig_h = 0
         self.orig_w = 0
@@ -718,6 +729,7 @@ def parse_args():
     parser.add_argument("--config", type=str, default="sam2_hiera_l.yaml", help="SAM 2 config filename")
     parser.add_argument("--width", type=int, default=1280, help="Display window width")
     parser.add_argument("--height", type=int, default=960, help="Display window height")
+    parser.add_argument("--start-from-beginning", action="store_true", help="Start from the first voucher in queue even if already annotated")
     return parser.parse_args()
 
 
@@ -730,6 +742,7 @@ if __name__ == "__main__":
         checkpoint_path=args.checkpoint,
         config_path=args.config,
         window_w=args.width,
-        window_h=args.height
+        window_h=args.height,
+        resume_unannotated=not args.start_from_beginning
     )
     annotator.run()
