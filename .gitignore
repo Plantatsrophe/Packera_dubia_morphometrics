@@ -151,7 +151,15 @@ outputs/
 !outputs/reports/
 outputs/reports/dataset_build_summary.json
 
-# Large imagery and geospatial raster formats across any data subfolder
+# Large imagery, raster dumps, and image files across all subfolders
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.bmp
+*.gif
+*.ico
+*.svg
 *.tif
 *.tiff
 *.geotiff
@@ -168,6 +176,28 @@ outputs/reports/dataset_build_summary.json
 *.zarr
 *.sqlite3
 *.db
+
+# Scratch and debug directories
+scratch/
+
+# ------------------------------------------------------------------------------
+# Archive Directories (Historical, legacy, and decommissioned scripts / data)
+# ------------------------------------------------------------------------------
+*_archive/
+*_archive/**
+*archive/
+*archive/**
+_archive/
+_archive/**
+archive/
+archive/**
+**/_archive/
+**/_archive/**
+**/archive/
+**/archive/**
+data/_archive/
+scripts/_archive/
+outputs/_archive/
 
 # ------------------------------------------------------------------------------
 # 5. Machine Learning Models, Weights & Experiment Tracking
@@ -232,4 +262,5 @@ LeafMachine2/
 
 # LeafMachine2 working project data and outputs
 LM2_Project/
+
 
