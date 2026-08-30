@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script: scripts/data_prep/annotate_with_sam2.py
+Script: scripts/annotate_with_sam2.py
 Project: Packera dubia Morphometrics Pipeline
 Description: Production-ready Interactive Botanical Instance Segmentation Annotator
              powered by Segment Anything Model 2 (SAM 2) with multi-modal boundary
@@ -53,7 +53,7 @@ def get_project_root() -> Path:
     for parent in current.parents:
         if (parent / "data").exists() or (parent / "models").exists() or (parent / ".git").exists():
             return parent
-    return current.parents[1] if len(current.parents) > 1 else current.parents[0]
+    return current.parents[0] if len(current.parents) > 0 else current
 
 
 PROJECT_ROOT = get_project_root()

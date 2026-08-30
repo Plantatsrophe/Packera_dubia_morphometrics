@@ -2,8 +2,9 @@
 Tests for Precision SAM 2 Botanical Annotator
 ==============================================
 Verifies window configurations, multi-modal exclusion point handling,
-bounding box prompting, knife cut geometry, YOLO polygon extraction,
-and HUD mode state transitions.
+bounding box prompting, freehand lasso conversion, knife cut geometry,
+YOLO polygon extraction, zoom/pan clamping, hard negative background saving,
+voucher skipping, and HUD mode state transitions.
 """
 
 import sys
@@ -20,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.data_prep.annotate_with_sam2 import (
+from scripts.annotate_with_sam2 import (
     PrecisionSAM2Annotator,
     CLASS_NAMES,
     CLASS_COLORS,
@@ -43,8 +44,8 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         self.test_img_path = self.vouchers_dir / "NCU00099999.jpg"
         cv2.imwrite(str(self.test_img_path), self.test_img)
 
-        with patch("scripts.data_prep.annotate_with_sam2.build_sam2") as mock_build_sam2, \
-             patch("scripts.data_prep.annotate_with_sam2.SAM2ImagePredictor") as mock_predictor_cls:
+        with patch("scripts.annotate_with_sam2.build_sam2") as mock_build_sam2, \
+             patch("scripts.annotate_with_sam2.SAM2ImagePredictor") as mock_predictor_cls:
             
             mock_predictor = MagicMock()
             mock_predictor.predict.return_value = (
@@ -77,6 +78,7 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         self.assertEqual(len(self.annotator.image_files), 1)
         self.assertEqual(self.annotator.image_files[0].stem, "NCU00099999")
         self.assertFalse(self.annotator.exclusion_mode)
+        self.assertFalse(self.annotator.lasso_mode)
         self.assertEqual(self.annotator.zoom_level, 1.0)
         self.assertEqual(self.annotator.pan_offset, [0, 0])
 
@@ -92,6 +94,21 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         orig_x, orig_y = self.annotator.get_orig_coords(400, 300, 800, 600)
         self.assertEqual(orig_x, 400)
         self.assertEqual(orig_y, 500)
+
+    def test_zoom_and_clamping(self):
+        # Zoom in by 2.0x anchored at (400, 500)
+        self.annotator.zoom(2.0, center_x=400, center_y=500)
+        self.assertEqual(self.annotator.zoom_level, 2.0)
+        self.assertEqual(self.annotator.pan_offset, [200, 250])
+
+        # Zoom exceeding 6.0x should clamp to 6.0x
+        self.annotator.zoom(10.0, center_x=400, center_y=500)
+        self.assertEqual(self.annotator.zoom_level, 6.0)
+
+        # Zoom out below 1.0x should clamp to 1.0x and reset pan
+        self.annotator.zoom(0.01)
+        self.assertEqual(self.annotator.zoom_level, 1.0)
+        self.assertEqual(self.annotator.pan_offset, [0, 0])
 
     def test_multi_modal_exclusion_points(self):
         window_dims = (800, 600)
@@ -117,6 +134,29 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         self.annotator.mouse_callback(cv2.EVENT_LBUTTONDOWN, 400, 550, 0, window_dims)
         self.assertEqual(len(self.annotator.prompt_points), 4)
         self.assertEqual(self.annotator.prompt_labels[-1], 0)
+
+    def test_freehand_lasso_tool(self):
+        window_dims = (800, 600)
+        self.annotator.lasso_mode = True
+        self.annotator.exclusion_mode = False
+
+        # Start Lasso Drag
+        self.annotator.mouse_callback(cv2.EVENT_LBUTTONDOWN, 100, 100, 0, window_dims)
+        self.assertTrue(self.annotator.is_drawing_lasso)
+
+        # Mouse Moves along triangle path
+        self.annotator.mouse_callback(cv2.EVENT_MOUSEMOVE, 200, 100, 0, window_dims)
+        self.annotator.mouse_callback(cv2.EVENT_MOUSEMOVE, 200, 200, 0, window_dims)
+        self.annotator.mouse_callback(cv2.EVENT_MOUSEMOVE, 100, 200, 0, window_dims)
+
+        # Release Mouse -> Fill polygon
+        self.annotator.mouse_callback(cv2.EVENT_LBUTTONUP, 100, 100, 0, window_dims)
+        self.assertFalse(self.annotator.is_drawing_lasso)
+        self.assertIsNotNone(self.annotator.current_candidate_mask)
+        self.assertTrue(self.annotator.current_candidate_mask.dtype == bool)
+        # Inside of the triangle (mapped coordinates) should be True
+        poly = self.annotator.mask_to_yolo_polygon(self.annotator.current_candidate_mask)
+        self.assertGreaterEqual(len(poly), 6)
 
     def test_bounding_box_prompt(self):
         window_dims = (800, 600)
@@ -166,7 +206,7 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         for v in poly:
             self.assertTrue(0.0 <= v <= 1.0)
 
-    def test_save_current_sheet(self):
+    def test_save_current_sheet_with_instances(self):
         self.annotator.saved_instances = [
             {"class_id": 0, "polygon": [0.1, 0.1, 0.2, 0.1, 0.2, 0.2, 0.1, 0.2]},
             {"class_id": 1, "polygon": [0.3, 0.3, 0.4, 0.3, 0.4, 0.4, 0.3, 0.4]},
@@ -185,15 +225,39 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         self.assertTrue(lines[1].startswith("1 "))
         self.assertTrue(lines[2].startswith("4 "))
 
+    def test_save_current_sheet_hard_negative_empty_sample(self):
+        # 0 instances saved -> exports empty .txt hard negative
+        self.annotator.saved_instances = []
+        self.annotator.save_current_sheet()
+
+        label_file = self.annotator.output_dir / "NCU00099999.txt"
+        self.assertTrue(label_file.exists())
+        self.assertEqual(label_file.stat().st_size, 0)
+
     def test_hud_rendering_and_mode_display(self):
         self.annotator.exclusion_mode = False
+        self.annotator.lasso_mode = False
         display_inc = self.annotator.render_display(800, 600)
         self.assertEqual(display_inc.shape, (600, 800, 3))
 
         self.annotator.exclusion_mode = True
+        self.annotator.lasso_mode = False
         display_exc = self.annotator.render_display(800, 600)
         self.assertEqual(display_exc.shape, (600, 800, 3))
+
+    def test_load_existing_annotations(self):
+        # Write dummy YOLO annotation file
+        label_file = self.annotator.output_dir / "NCU00099999.txt"
+        with open(label_file, "w") as f:
+            f.write("0 0.1 0.1 0.2 0.1 0.2 0.2 0.1 0.2\n")
+            f.write("2 0.3 0.3 0.4 0.3 0.4 0.4 0.3 0.4\n")
+
+        self.annotator.load_existing_annotations("NCU00099999")
+        self.assertEqual(len(self.annotator.saved_instances), 2)
+        self.assertEqual(self.annotator.saved_instances[0]["class_id"], 0)
+        self.assertEqual(self.annotator.saved_instances[1]["class_id"], 2)
 
 
 if __name__ == "__main__":
     unittest.main()
+

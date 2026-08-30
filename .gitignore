@@ -114,6 +114,9 @@ htmlcov/
 data/raw_vouchers/*
 !data/raw_vouchers/.gitkeep
 
+data/raw_annotations/*
+!data/raw_annotations/.gitkeep
+
 data/cropped_patches/*
 !data/cropped_patches/.gitkeep
 
