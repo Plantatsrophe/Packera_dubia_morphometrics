@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger("PointRendConfig")
 
@@ -48,12 +48,14 @@ def build_pointrend_cfg(
     val_dataset_name: Optional[str] = None,
     output_dir: Union[str, Path] = "LM2_Project/Data/output/pcd_training",
     base_weights_path: Optional[str] = None,
-    num_classes: int = 2,
+    num_classes: int = 3,
     base_lr: float = 0.0001,
     max_iters: int = 2500,
     batch_size_per_image: int = 128,
     num_workers: int = 4,
     device: str = "cuda",
+    min_rpn_size: float = 32.0,
+    anchor_sizes: Optional[List[List[int]]] = None,
 ) -> Any:
     """
     Constructs a Detectron2 CfgNode configured with PointRend head for Packera leaves.
@@ -86,6 +88,15 @@ def build_pointrend_cfg(
 
     if hasattr(cfg.MODEL, "POINT_HEAD"):
         cfg.MODEL.POINT_HEAD.NUM_CLASSES = num_classes
+
+    # Multi-level FPN anchor sizes: 5 levels (p2-p6) removing small sub-lobar anchors
+    if anchor_sizes is not None:
+        cfg.MODEL.ANCHOR_GENERATOR.SIZES = anchor_sizes
+    else:
+        cfg.MODEL.ANCHOR_GENERATOR.SIZES = [[64], [128], [256], [512], [1024]]
+
+    # Minimum proposal size to discard tiny lobe fragments in RPN
+    cfg.MODEL.RPN.MIN_SIZE = min_rpn_size
 
     # Solver / Optimizer hyperparameters
     cfg.SOLVER.IMS_PER_BATCH = 2

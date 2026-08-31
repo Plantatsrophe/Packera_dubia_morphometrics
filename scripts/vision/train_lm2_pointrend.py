@@ -24,6 +24,8 @@ _script_root = Path(__file__).resolve().parents[2]
 if str(_script_root) not in sys.path:
     sys.path.insert(0, str(_script_root))
 
+from typing import List, Optional
+
 from scripts.vision.pointrend_config import build_pointrend_cfg, freeze_backbone_stages
 from scripts.vision.pointrend_export import export_lm2_compatible_checkpoint
 from scripts.vision.pointrend_trainer import PointRendPackeraTrainer
@@ -35,19 +37,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger("TrainPointRend")
 
+DEFAULT_THING_CLASSES = ["ideal_leaf", "partial_leaf", "cauline_leaf"]
+
 
 def register_packera_coco_dataset(
     dataset_name: str,
     coco_json_path: Path,
-    images_dir: Path
+    images_dir: Path,
+    thing_classes: Optional[List[str]] = None,
 ) -> None:
     """Registers COCO dataset with Detectron2 dataset catalog."""
     try:
         from detectron2.data.datasets import register_coco_instances
         from detectron2.data import MetadataCatalog
         register_coco_instances(dataset_name, {}, str(coco_json_path), str(images_dir))
-        MetadataCatalog.get(dataset_name).thing_classes = ["ideal_leaf", "partial_leaf"]
-        logger.info(f"Registered COCO dataset: '{dataset_name}' from {coco_json_path}")
+        classes = thing_classes or DEFAULT_THING_CLASSES
+        MetadataCatalog.get(dataset_name).thing_classes = classes
+        logger.info(f"Registered COCO dataset: '{dataset_name}' with classes {classes} from {coco_json_path}")
     except ImportError:
         logger.warning("Detectron2 not installed; dataset registration skipped.")
 
@@ -64,6 +70,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weights", type=str, default=None)
     parser.add_argument("--iterations", type=int, default=2500)
     parser.add_argument("--lr", type=float, default=0.0001)
+    parser.add_argument("--num-classes", type=int, default=3, help="Number of foreground classes (ideal_leaf, partial_leaf, cauline_leaf)")
+    parser.add_argument("--min-rpn-size", type=float, default=32.0, help="Minimum RPN proposal box size to discard tiny lobe fragments")
     parser.add_argument("--freeze-stages", type=int, default=2)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -79,17 +87,20 @@ def main() -> None:
     train_ds_name = "packera_pcd_train"
     val_ds_name = "packera_pcd_val" if args.val_coco_json else None
 
-    register_packera_coco_dataset(train_ds_name, args.coco_json, args.images_dir)
+    register_packera_coco_dataset(train_ds_name, args.coco_json, args.images_dir, thing_classes=DEFAULT_THING_CLASSES)
     if val_ds_name:
-        register_packera_coco_dataset(val_ds_name, args.val_coco_json, args.images_dir)
+        register_packera_coco_dataset(val_ds_name, args.val_coco_json, args.images_dir, thing_classes=DEFAULT_THING_CLASSES)
 
     cfg = build_pointrend_cfg(
         train_dataset_name=train_ds_name,
         val_dataset_name=val_ds_name,
         output_dir=args.output_dir,
         base_weights_path=args.weights,
+        num_classes=args.num_classes,
         base_lr=args.lr,
         max_iters=args.iterations,
+        min_rpn_size=args.min_rpn_size,
+        anchor_sizes=[[64], [128], [256], [512], [1024]],
     )
 
     if args.dry_run:
