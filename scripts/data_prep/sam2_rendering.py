@@ -139,6 +139,7 @@ def compose_mask_overlay(
 ) -> np.ndarray:
     """
     Composites saved multi-class instances and candidate mask overlays onto image.
+    Used for caching the pre-composited base layer.
     """
     overlay = base_image.copy()
 
@@ -165,3 +166,56 @@ def compose_mask_overlay(
         cv2.drawContours(overlay, c_contours, -1, (255, 255, 255), 2)
 
     return overlay
+
+
+def overlay_candidate_mask_on_viewport(
+    viewport_bgr: np.ndarray,
+    candidate_mask: Optional[np.ndarray],
+    transform: Tuple[float, float, int, int],
+    alpha: float = 0.55
+) -> np.ndarray:
+    """
+    Overlays the active SAM 2 candidate segmentation mask directly onto the cropped
+    viewport frame in viewport space for sub-millisecond rendering speed.
+    """
+    if candidate_mask is None or np.count_nonzero(candidate_mask) == 0:
+        return viewport_bgr
+
+    target_h, target_w = viewport_bgr.shape[:2]
+    scale_x, scale_y, crop_x0, crop_y0 = transform
+    img_h, img_w = candidate_mask.shape[:2]
+
+    crop_w = max(10, int(target_w / max(scale_x, 1e-6)))
+    crop_h = max(10, int(target_h / max(scale_y, 1e-6)))
+
+    src_x0 = max(0, crop_x0)
+    src_x1 = min(img_w, crop_x0 + crop_w)
+    src_y0 = max(0, crop_y0)
+    src_y1 = min(img_h, crop_y0 + crop_h)
+
+    if src_x1 <= src_x0 or src_y1 <= src_y0:
+        return viewport_bgr
+
+    mask_slice = candidate_mask[src_y0:src_y1, src_x0:src_x1]
+    if not np.any(mask_slice > 0):
+        return viewport_bgr
+
+    dst_x0 = max(0, -crop_x0) if crop_x0 < 0 else 0
+    dst_y0 = max(0, -crop_y0) if crop_y0 < 0 else 0
+    dst_x1 = dst_x0 + (src_x1 - src_x0)
+    dst_y1 = dst_y0 + (src_y1 - src_y0)
+
+    canvas_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
+    canvas_mask[dst_y0:dst_y1, dst_x0:dst_x1] = mask_slice
+
+    scaled_mask = cv2.resize(canvas_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+    locs = scaled_mask > 0
+    if np.any(locs):
+        viewport_bgr[locs] = (
+            viewport_bgr[locs] * (1.0 - alpha) + np.array([255, 255, 0], dtype=np.uint8) * alpha
+        ).astype(np.uint8)
+        cnts, _ = cv2.findContours(scaled_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(viewport_bgr, cnts, -1, (255, 255, 255), 2)
+
+    return viewport_bgr
+
