@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-08-30T00:01:39.888882",
+  "total_samples": 10,
+  "stats": {
+    "train_samples": 6,
+    "val_samples": 2,
+    "test_samples": 2,
+    "negative_samples": 3,
+    "total_instances": 49,
+    "class_counts": {
+      "basal_leaf_blade": 7,
+      "leaf_petiole": 7,
+      "cauline_leaf": 7,
+      "cauline_stem": 7,
+      "root_rhizome": 7,
+      "basal_rosette_clump": 7,
+      "capitulum": 7
+    }
+  },
+  "classes": {
+    "0": "basal_leaf_blade",
+    "1": "leaf_petiole",
+    "2": "cauline_leaf",
+    "3": "cauline_stem",
+    "4": "root_rhizome",
+    "5": "basal_rosette_clump",
+    "6": "capitulum"
+  },
+  "config_yaml": "/home/brandon/Packera_dubia_morphometrics/outputs/test_synthetic_dataset/dataset_config.yaml",
+  "qc_plots_dir": "/home/brandon/Packera_dubia_morphometrics/outputs/test_synthetic_dataset/qc_overlays"
+}

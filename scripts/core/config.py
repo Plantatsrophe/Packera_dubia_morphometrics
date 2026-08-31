@@ -34,6 +34,12 @@ DEFAULT_SUMMARY_LOG = DEFAULT_WORKSPACE / "outputs" / "reports" / "voucher_inges
 DEFAULT_OUTPUT_DIR = DEFAULT_WORKSPACE / "data" / "yolo_dataset"
 DEFAULT_CONFIG_PATH = DEFAULT_WORKSPACE / "data" / "dataset_config.yaml"
 DEFAULT_QC_DIR = DEFAULT_WORKSPACE / "outputs" / "dataset_qc"
+DEFAULT_QUARANTINE_DIR = DEFAULT_WORKSPACE / "data" / "raw_vouchers_quarantine"
+
+# Default specimen image quality and optical resolution thresholds
+DEFAULT_MIN_MEGAPIXELS: float = 8.0          # Minimum optical resolution (e.g. 2400 x 3300 px)
+DEFAULT_MIN_FILE_SIZE_KB: float = 500.0       # Minimum non-trivial compressed image size in KB
+DEFAULT_MIN_SHARPNESS_LAPLACIAN: float = 80.0 # Minimum Laplacian variance for blur/upscale rejection
 
 # Target focal taxa in the Packera dubia complex and allied North American clades
 DEFAULT_TARGET_TAXA: List[str] = [

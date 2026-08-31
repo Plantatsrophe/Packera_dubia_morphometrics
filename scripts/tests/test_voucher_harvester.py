@@ -11,10 +11,14 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+import tempfile
+from PIL import Image
+
 from scripts.core.config import (
     EXCLUDED_WESTERN_STATES,
     WESTERN_LONGITUDE_THRESHOLD,
     DEFAULT_TARGET_TAXA,
+    DEFAULT_MIN_MEGAPIXELS,
 )
 from scripts.core.harvester_utils import (
     is_excluded_western_region,
@@ -22,6 +26,9 @@ from scripts.core.harvester_utils import (
     parse_determiner_tier,
     calculate_circular_phenology,
     infer_regional_group,
+    optimize_herbarium_image_url,
+    extract_high_res_image_url,
+    validate_image_quality,
 )
 from scripts.core.harvester import harvest_taxa_occurrences
 
@@ -188,6 +195,76 @@ class TestVoucherHarvesterGeographicFiltering(unittest.TestCase):
             self.assertIn("TEX001", retained_catalogs)
             self.assertNotIn("COLO001", retained_catalogs)
             self.assertNotIn("RM001", retained_catalogs)
+
+
+class TestImageQualityAndUrlOptimization(unittest.TestCase):
+    """Test suite for URL rewriting, media ranking, and optical image quality validation."""
+
+    def test_optimize_smithsonian_nmnh_urls(self):
+        """Verify that dimension clamps (&h=2000) are removed from Smithsonian NMNH URLs."""
+        raw_url = "https://collections.nmnh.si.edu/media/?i=11709418&h=2000"
+        optimized = optimize_herbarium_image_url(raw_url)
+        self.assertEqual(optimized, "https://collections.nmnh.si.edu/media/?i=11709418")
+
+    def test_optimize_symbiota_urls(self):
+        """Verify that web/thumbnail paths and suffixes are upgraded to orig/large."""
+        web_url = "https://media01.symbiota.org/media/seinet/sernec/NCU/web/NCU001_web.jpg"
+        optimized = optimize_herbarium_image_url(web_url)
+        self.assertIn("/orig/", optimized)
+        self.assertIn("_lg.jpg", optimized)
+
+        tn_url = "https://media01.symbiota.org/media/seinet/sernec/NCU/tn/NCU001_tn.jpg"
+        optimized_tn = optimize_herbarium_image_url(tn_url)
+        self.assertIn("/orig/", optimized_tn)
+        self.assertIn("_lg.jpg", optimized_tn)
+
+    def test_optimize_iiif_urls(self):
+        """Verify that IIIF URLs are rewritten to request max/full resolution."""
+        iiif_url = "https://images.herbarium.org/iiif/2/NCU001/full/!1000,1000/0/default.jpg"
+        optimized = optimize_herbarium_image_url(iiif_url)
+        self.assertIn("/full/max/", optimized)
+
+    def test_extract_high_res_image_url_media_ranking(self):
+        """Verify that extract_high_res_image_url selects original/large image even when thumbnail is listed first."""
+        media_list = [
+            {
+                "type": "StillImage",
+                "format": "image/jpeg",
+                "identifier": "https://media.symbiota.org/NCU/thumbnails/NCU001_tn.jpg"
+            },
+            {
+                "type": "StillImage",
+                "format": "image/jpeg",
+                "identifier": "https://media.symbiota.org/NCU/original/NCU001_lg.jpg"
+            },
+        ]
+        selected_url = extract_high_res_image_url(media_list)
+        self.assertIn("_lg.jpg", selected_url)
+        self.assertNotIn("_tn.jpg", selected_url)
+
+    def test_validate_image_quality_high_vs_low_resolution(self):
+        """Verify that validate_image_quality accepts high-res sheets and rejects low-res images."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+
+            # 1. Create small low-res image (800 x 1000 = 0.8 MP)
+            low_res_img = tmp_path / "low_res.jpg"
+            img_small = Image.new("RGB", (800, 1000), color=(128, 128, 128))
+            img_small.save(low_res_img, "JPEG")
+
+            is_valid, metrics = validate_image_quality(low_res_img, min_megapixels=8.0, min_file_size_kb=1.0)
+            self.assertFalse(is_valid)
+            self.assertEqual(metrics["reason"], "low_resolution")
+            self.assertLess(metrics["megapixels"], 8.0)
+
+            # 2. Create high-res image (3000 x 4000 = 12.0 MP)
+            high_res_img = tmp_path / "high_res.jpg"
+            img_large = Image.new("RGB", (3000, 4000), color=(128, 128, 128))
+            img_large.save(high_res_img, "JPEG")
+
+            is_valid_high, metrics_high = validate_image_quality(high_res_img, min_megapixels=8.0, min_file_size_kb=1.0)
+            self.assertTrue(is_valid_high)
+            self.assertEqual(metrics_high["megapixels"], 12.0)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,10 @@ from scripts.core.config import (
     DEFAULT_TARGET_TAXA,
     DEFAULT_OUTPUT_CSV,
     DEFAULT_SUMMARY_LOG,
+    DEFAULT_MIN_MEGAPIXELS,
+    DEFAULT_MIN_FILE_SIZE_KB,
+    DEFAULT_MIN_SHARPNESS_LAPLACIAN,
+    DEFAULT_QUARANTINE_DIR,
 )
 
 # Harvester parsing, scoring, downloading, and logging utilities
@@ -38,6 +42,7 @@ from scripts.core.harvester_utils import (
     print_and_log_summary,
     download_all_voucher_images,
     is_excluded_western_region,
+    validate_image_quality,
 )
 
 def harvest_taxa_occurrences(
@@ -273,6 +278,30 @@ def main() -> None:
         help="Exclude vouchers from states farther west than Texas and Oklahoma (default: True)."
     )
     parser.add_argument(
+        "--min-megapixels",
+        type=float,
+        default=DEFAULT_MIN_MEGAPIXELS,
+        help=f"Minimum optical resolution in Megapixels (default: {DEFAULT_MIN_MEGAPIXELS})."
+    )
+    parser.add_argument(
+        "--min-file-size-kb",
+        type=float,
+        default=DEFAULT_MIN_FILE_SIZE_KB,
+        help=f"Minimum compressed image file size in KB (default: {DEFAULT_MIN_FILE_SIZE_KB})."
+    )
+    parser.add_argument(
+        "--check-sharpness",
+        action="store_true",
+        default=False,
+        help="Enable Laplacian variance edge sharpness evaluation to reject upscaled/blurry images."
+    )
+    parser.add_argument(
+        "--min-sharpness",
+        type=float,
+        default=DEFAULT_MIN_SHARPNESS_LAPLACIAN,
+        help=f"Minimum Laplacian variance threshold (default: {DEFAULT_MIN_SHARPNESS_LAPLACIAN})."
+    )
+    parser.add_argument(
         "--download-images",
         action="store_true",
         default=False,
@@ -312,6 +341,7 @@ def main() -> None:
     logger.info(f"Target Taxa: {args.taxa}")
     logger.info(f"Max Coordinate Uncertainty Threshold: {args.max_uncertainty} m")
     logger.info(f"Exclude Western States (> TX & OK): {args.exclude_western}")
+    logger.info(f"Image Quality Thresholds: min_megapixels={args.min_megapixels} MP, min_file_size_kb={args.min_file_size_kb} KB, check_sharpness={args.check_sharpness}")
 
     # Step 1: Harvest and curate metadata records from GBIF
     df_curated = harvest_taxa_occurrences(
@@ -341,6 +371,45 @@ def main() -> None:
                 logger=logger
             )
         )
+
+        # Step 2b: Validate resolution, file size, and optical quality of downloaded/cached images
+        logger.info(f"Auditing specimen image quality (min_megapixels={args.min_megapixels} MP, min_file_size_kb={args.min_file_size_kb} KB)...")
+        valid_indices = []
+        quality_rejected = 0
+        mp_values = []
+
+        for idx, row in df_curated.iterrows():
+            img_dest = DEFAULT_WORKSPACE / row["image_path"]
+            is_valid, q_metrics = validate_image_quality(
+                image_path=img_dest,
+                min_megapixels=args.min_megapixels,
+                min_file_size_kb=args.min_file_size_kb,
+                check_sharpness=args.check_sharpness,
+                min_sharpness=args.min_sharpness,
+            )
+            if is_valid:
+                valid_indices.append(idx)
+                if "megapixels" in q_metrics:
+                    mp_values.append(q_metrics["megapixels"])
+            else:
+                quality_rejected += 1
+                # If image exists locally but failed quality criteria, remove to prevent dirty cache
+                if img_dest.exists():
+                    try:
+                        img_dest.unlink()
+                    except Exception:
+                        pass
+
+        logger.info(
+            f"Quality Audit Complete: Retained {len(valid_indices)} vouchers meeting quality standards "
+            f"(Rejected {quality_rejected} substandard/low-res images)."
+        )
+        df_curated = df_curated.loc[valid_indices].reset_index(drop=True)
+
+        if download_stats is not None:
+            download_stats["quality_rejected"] = quality_rejected
+            if mp_values:
+                download_stats["median_mp"] = float(np.median(mp_values))
 
     # Step 3: Export standardized CSV (excluding internal temporary columns)
     export_columns = [
