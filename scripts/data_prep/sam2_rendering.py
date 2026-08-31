@@ -65,15 +65,24 @@ def render_hud_overlay(
     cv2.putText(canvas, prog_text, (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (240, 240, 240), 2, cv2.LINE_AA)
 
     # Active Mode display with dynamic color
-    mode_color = (0, 255, 0) if mode == "INCLUDE" else ((0, 0, 255) if mode == "EXCLUDE" else (255, 255, 0))
-    mode_str = f"MODE: [{mode}]"
-    cv2.putText(canvas, mode_str, (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2, cv2.LINE_AA)
+    if mode == "POLYGON":
+        mode_color = (0, 220, 255)
+        mode_str = "MODE: [POLYGON BOX]"
+        inst_summary = "Left-Click: Mark Points | Click Start / Enter / Right-Click: Close Box | Backspace: Undo | P: Exit"
+    elif mode == "KNIFE":
+        mode_color = (0, 100, 255)
+        mode_str = "MODE: [KNIFE CUT]"
+        inst_summary = "Drag line across mask to sever overlapping parts | K: Exit Knife"
+    else:
+        mode_color = (0, 255, 0)
+        mode_str = "MODE: [SELECT]"
+        inst_summary = f"Saved: {len(saved_instances)} | P: Polygon Box | K: Knife | C: Clear | U: Undo | 0-6: Classify | Enter: Save"
 
-    # Instance count summary
-    inst_summary = f"Saved: {len(saved_instances)} instances | Keys 0-6: Classify | Enter: Save | n: Skip | b: Back | q: Quit"
-    cv2.putText(canvas, inst_summary, (200, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 200, 200), 1, cv2.LINE_AA)
+    cv2.putText(canvas, mode_str, (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2, cv2.LINE_AA)
+    cv2.putText(canvas, inst_summary, (220, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1, cv2.LINE_AA)
 
     return canvas
+
 
 
 def apply_viewport_transform(
@@ -81,26 +90,43 @@ def apply_viewport_transform(
     zoom_level: float,
     pan_offset: Tuple[int, int],
     target_w: int,
-    target_h: int
+    target_h: int,
+    bg_color: Tuple[int, int, int] = (35, 35, 35)
 ) -> Tuple[np.ndarray, Tuple[float, float, int, int]]:
     """
-    Crops and rescales the image to match viewport pan and zoom levels.
+    Crops and rescales the image to match viewport pan and zoom levels,
+    allowing smooth panning beyond image boundaries with neutral background padding.
 
     Returns:
         Tuple: (rendered_viewport_img, (scale_x, scale_y, crop_x0, crop_y0))
     """
     img_h, img_w = image.shape[:2]
-    crop_w = int(img_w / zoom_level)
-    crop_h = int(img_h / zoom_level)
+    crop_w = max(10, int(img_w / max(zoom_level, 1.0)))
+    crop_h = max(10, int(img_h / max(zoom_level, 1.0)))
 
-    crop_x0 = max(0, min(img_w - crop_w, pan_offset[0]))
-    crop_y0 = max(0, min(img_h - crop_h, pan_offset[1]))
+    crop_x0 = pan_offset[0]
+    crop_y0 = pan_offset[1]
 
-    cropped = image[crop_y0:crop_y0 + crop_h, crop_x0:crop_x0 + crop_w]
-    scaled = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+    # Calculate valid source image overlap bounds
+    src_x0 = max(0, crop_x0)
+    src_x1 = min(img_w, crop_x0 + crop_w)
+    src_y0 = max(0, crop_y0)
+    src_y1 = min(img_h, crop_y0 + crop_h)
 
-    scale_x = target_w / crop_w
-    scale_y = target_h / crop_h
+    # Destination canvas coordinates
+    dst_x0 = max(0, -crop_x0) if crop_x0 < 0 else 0
+    dst_y0 = max(0, -crop_y0) if crop_y0 < 0 else 0
+    dst_x1 = dst_x0 + max(0, src_x1 - src_x0)
+    dst_y1 = dst_y0 + max(0, src_y1 - src_y0)
+
+    canvas = np.full((crop_h, crop_w, 3), bg_color, dtype=image.dtype)
+    if src_x1 > src_x0 and src_y1 > src_y0 and dst_x1 <= crop_w and dst_y1 <= crop_h:
+        canvas[dst_y0:dst_y1, dst_x0:dst_x1] = image[src_y0:src_y1, src_x0:src_x1]
+
+    scaled = cv2.resize(canvas, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+    scale_x = target_w / max(crop_w, 1)
+    scale_y = target_h / max(crop_h, 1)
 
     return scaled, (scale_x, scale_y, crop_x0, crop_y0)
 

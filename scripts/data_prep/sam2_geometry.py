@@ -145,3 +145,52 @@ def mask_to_normalized_polygon(
         norm_pts.append(f"{round(y / h, 6):.6f}")
 
     return f"{class_id} " + " ".join(norm_pts)
+
+
+def polygon_to_bounding_box(
+    polygon_points: List[Tuple[int, int]]
+) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Computes the enclosing bounding box (min_x, min_y, max_x, max_y) from a sequence of polygon vertices.
+
+    Args:
+        polygon_points: List of (x, y) integer pixel coordinates.
+
+    Returns:
+        Optional[Tuple[int, int, int, int]]: (min_x, min_y, max_x, max_y) or None if empty.
+    """
+    if not polygon_points:
+        return None
+    xs = [p[0] for p in polygon_points]
+    ys = [p[1] for p in polygon_points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def polygon_interior_point(
+    polygon_points: List[Tuple[int, int]],
+    img_h: int,
+    img_w: int
+) -> Optional[Tuple[float, float]]:
+    """
+    Finds the optimal interior point (pole of inaccessibility) inside an arbitrary polygon
+    using Euclidean distance transform.
+
+    Args:
+        polygon_points: List of (x, y) vertices defining the selection polygon.
+        img_h: Image height in pixels.
+        img_w: Image width in pixels.
+
+    Returns:
+        Optional[Tuple[float, float]]: (x, y) interior coordinate to guide SAM 2 prompt.
+    """
+    if len(polygon_points) < 3:
+        return None
+    mask = rasterize_lasso_polygon(polygon_points, img_h, img_w)
+    if np.count_nonzero(mask) == 0:
+        return None
+    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    _, max_val, _, max_loc = cv2.minMaxLoc(dist)
+    if max_val > 0:
+        return float(max_loc[0]), float(max_loc[1])
+    return float(polygon_points[0][0]), float(polygon_points[0][1])
+

@@ -97,5 +97,47 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
             self.assertEqual(img_m0.shape, (100, 100))
             self.assertEqual(set(np.unique(img_m0)), {0, 255})
 
+    def test_polygon_bounding_box_and_interior_selection(self):
+        from scripts.data_prep.sam2_geometry import polygon_to_bounding_box, polygon_interior_point, rasterize_lasso_polygon
+        
+        # Test 1: Bounding box from vertices
+        poly = [(10, 20), (50, 15), (75, 60), (30, 80), (10, 40)]
+        bbox = polygon_to_bounding_box(poly)
+        self.assertIsNotNone(bbox)
+        self.assertEqual(bbox, (10, 15, 75, 80))
+
+        # Test 2: Interior point inside mask
+        interior = polygon_interior_point(poly, img_h=100, img_w=100)
+        self.assertIsNotNone(interior)
+        ix, iy = interior
+        # Verify interior point falls within bounding box
+        self.assertTrue(10 <= ix <= 75)
+        self.assertTrue(15 <= iy <= 80)
+        # Verify interior point falls inside rasterized polygon mask
+        mask = rasterize_lasso_polygon(poly, 100, 100)
+        self.assertEqual(mask[int(iy), int(ix)], 255)
+
+        # Test 3: Annotator finalize_polygon_selection integration
+        annotator = PrecisionSAM2Annotator.__new__(PrecisionSAM2Annotator)
+        annotator.orig_h = 100
+        annotator.orig_w = 100
+        annotator.polygon_points = [(10, 20), (50, 20), (50, 60), (10, 60)]
+        annotator.candidate_mask = None
+        annotator.point_coords = []
+        annotator.point_labels = []
+        annotator.box_prompt = None
+        annotator.predictor = None  # Mock no predictor to test fallback
+
+        annotator.finalize_polygon_selection()
+
+        # Bounding box prompt should be set
+        self.assertEqual(annotator.box_prompt, [10.0, 20.0, 50.0, 60.0])
+        # Candidate mask should be rasterized polygon
+        self.assertIsNotNone(annotator.candidate_mask)
+        self.assertGreater(np.count_nonzero(annotator.candidate_mask), 0)
+        self.assertEqual(annotator.polygon_points, [])
+
+
 if __name__ == "__main__":
     unittest.main()
+
