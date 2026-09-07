@@ -18,7 +18,7 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-from scripts.analysis.run_triage_dashboard_synthesis import (
+from scripts._archive.analysis.run_triage_dashboard_synthesis import (
     standardize_packera_taxon,
     apply_taxonomic_decision_matrix,
     TARGET_TAXA,
@@ -89,11 +89,11 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertTrue(triage_csv.exists(), f"Missing triage queue at {triage_csv}")
 
     def test_entrypoint_scripts_exist(self):
-        """Verify that Step 07 R and Python entrypoints exist."""
+        """Verify that Step 07 R canonical script and archived Python entrypoint exist."""
         r_script = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
-        py_script = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.py"
-        self.assertTrue(r_script.exists(), "07_triage_dashboard_synthesis.R must exist.")
-        self.assertTrue(py_script.exists(), "07_triage_dashboard_synthesis.py must exist.")
+        py_archived = PROJECT_ROOT / "scripts" / "_archive" / "analysis" / "07_triage_dashboard_synthesis.py"
+        self.assertTrue(r_script.exists(), "07_triage_dashboard_synthesis.R must exist as canonical R script.")
+        self.assertTrue(py_archived.exists(), "07_triage_dashboard_synthesis.py must exist in _archive/analysis.")
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-from scripts.analysis.run_multimodal_spatial_rf import (
+from scripts._archive.analysis.run_multimodal_spatial_rf import (
     standardize_packera_taxon,
     extract_environmental_layers,
     execute_crossmodal_consensus,
@@ -81,11 +81,11 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertEqual(flagged_df.loc[0, "triage_category"], "Clean_MultiModal_Consensus")
 
     def test_entrypoint_scripts_exist(self):
-        """Verify that Step 06 R and Python entrypoints exist."""
+        """Verify that Step 06 R canonical script and archived Python entrypoint exist."""
         r_script = PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R"
-        py_script = PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.py"
-        self.assertTrue(r_script.exists(), "06_multimodal_spatial_rf.R must exist.")
-        self.assertTrue(py_script.exists(), "06_multimodal_spatial_rf.py must exist.")
+        py_archived = PROJECT_ROOT / "scripts" / "_archive" / "analysis" / "06_multimodal_spatial_rf.py"
+        self.assertTrue(r_script.exists(), "06_multimodal_spatial_rf.R must exist as canonical R script.")
+        self.assertTrue(py_archived.exists(), "06_multimodal_spatial_rf.py must exist in _archive/analysis.")
 
 
 if __name__ == "__main__":

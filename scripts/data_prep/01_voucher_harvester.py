@@ -24,21 +24,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.core.config import (
-    DEFAULT_MIN_FILE_SIZE_KB,
-    DEFAULT_MIN_MEGAPIXELS,
-    DEFAULT_MIN_SHARPNESS_LAPLACIAN,
-    DEFAULT_OUTPUT_CSV,
-    DEFAULT_RAW_DIR,
-    DEFAULT_SUMMARY_LOG,
-    DEFAULT_TARGET_TAXA,
-    DEFAULT_WORKSPACE,
-)
+from scripts.core.config import PipelineConfig
 from scripts.core.harvester import VoucherHarvester, setup_logger
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
     """Constructs command-line argument parser for the voucher harvester."""
+    cfg = PipelineConfig.from_yaml()
     parser = argparse.ArgumentParser(
         description="Automated GBIF Voucher Harvester & Determiner Authority Scorer for Packera dubia complex."
     )
@@ -47,40 +39,40 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--taxa",
         dest="taxa",
         nargs="+",
-        default=DEFAULT_TARGET_TAXA,
+        default=cfg.taxa.target_species,
         help="One or more scientific binomials to harvest from GBIF (e.g. 'Packera dubia').",
     )
     parser.add_argument(
         "--out-dir",
         type=str,
-        default=str(DEFAULT_RAW_DIR),
-        help=f"Directory for storing raw downloaded voucher images (default: {DEFAULT_RAW_DIR}).",
+        default=str(cfg.paths.raw_vouchers_dir),
+        help=f"Directory for storing raw downloaded voucher images (default: {cfg.paths.raw_vouchers_dir}).",
     )
     parser.add_argument(
         "--output-csv",
         type=str,
-        default=str(DEFAULT_OUTPUT_CSV),
-        help=f"Path for curated metadata CSV output (default: {DEFAULT_OUTPUT_CSV}).",
+        default=str(cfg.paths.curated_vouchers_csv),
+        help=f"Path for curated metadata CSV output (default: {cfg.paths.curated_vouchers_csv}).",
     )
     parser.add_argument(
         "--max-records",
         "--max-records-per-taxon",
         dest="max_records",
         type=int,
-        default=5000,
-        help="Maximum records to retain per taxon query (default: 5000).",
+        default=cfg.harvesting.max_records_per_taxon,
+        help=f"Maximum records to retain per taxon query (default: {cfg.harvesting.max_records_per_taxon}).",
     )
     parser.add_argument(
         "--max-uncertainty",
         type=float,
-        default=5000.0,
-        help="Maximum allowed georeferencing uncertainty in meters (default: 5000.0).",
+        default=cfg.harvesting.max_uncertainty_meters,
+        help=f"Maximum allowed georeferencing uncertainty in meters (default: {cfg.harvesting.max_uncertainty_meters}).",
     )
     parser.add_argument(
         "--exclude-western",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Exclude records from western US states (> TX & OK) (default: True).",
+        default=cfg.harvesting.exclude_western,
+        help=f"Exclude records from western US states (> TX & OK) (default: {cfg.harvesting.exclude_western}).",
     )
     parser.add_argument(
         "--download-images",
@@ -91,20 +83,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=15,
-        help="Maximum concurrent asynchronous image downloads (default: 15).",
+        default=cfg.harvesting.download_concurrency,
+        help=f"Maximum concurrent asynchronous image downloads (default: {cfg.harvesting.download_concurrency}).",
     )
     parser.add_argument(
         "--min-megapixels",
         type=float,
-        default=DEFAULT_MIN_MEGAPIXELS,
-        help=f"Minimum resolution threshold in Megapixels (default: {DEFAULT_MIN_MEGAPIXELS}).",
+        default=cfg.thresholds.min_megapixels,
+        help=f"Minimum resolution threshold in Megapixels (default: {cfg.thresholds.min_megapixels}).",
     )
     parser.add_argument(
         "--min-file-size-kb",
         type=float,
-        default=DEFAULT_MIN_FILE_SIZE_KB,
-        help=f"Minimum image file size in KB (default: {DEFAULT_MIN_FILE_SIZE_KB}).",
+        default=cfg.thresholds.min_file_size_kb,
+        help=f"Minimum image file size in KB (default: {cfg.thresholds.min_file_size_kb}).",
     )
     parser.add_argument(
         "--check-sharpness",
@@ -115,14 +107,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-sharpness",
         type=float,
-        default=DEFAULT_MIN_SHARPNESS_LAPLACIAN,
-        help=f"Minimum Laplacian variance score for sharpness (default: {DEFAULT_MIN_SHARPNESS_LAPLACIAN}).",
+        default=cfg.thresholds.min_sharpness_laplacian,
+        help=f"Minimum Laplacian variance score for sharpness (default: {cfg.thresholds.min_sharpness_laplacian}).",
     )
     parser.add_argument(
         "--log-file",
         type=str,
-        default=str(DEFAULT_SUMMARY_LOG),
-        help=f"Path for summary log file (default: {DEFAULT_SUMMARY_LOG}).",
+        default=str(cfg.paths.summary_log),
+        help=f"Path for summary log file (default: {cfg.paths.summary_log}).",
     )
     parser.add_argument(
         "-v",
@@ -136,6 +128,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     """CLI execution entrypoint."""
+    cfg = PipelineConfig.from_yaml()
     parser = build_cli_parser()
     args = parser.parse_args()
 
@@ -154,7 +147,7 @@ def main() -> None:
         concurrency=args.concurrency,
         output_csv=Path(args.output_csv),
         raw_dir=Path(args.out_dir),
-        workspace_dir=DEFAULT_WORKSPACE,
+        workspace_dir=cfg.paths.workspace_root,
         logger=logger,
     )
 

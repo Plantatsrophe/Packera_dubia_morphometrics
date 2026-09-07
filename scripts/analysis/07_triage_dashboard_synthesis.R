@@ -420,6 +420,7 @@ generate_taxonomic_revision_report <- function(df, opts) {
 # 6. Main Execution Pipeline
 # ------------------------------------------------------------------------------
 main <- function() {
+  set.seed(42)
   opts <- parse_args_robust()
   message("=== Starting Final Triage Dashboard & Taxonomic Synthesis ===")
   triage_df <- build_triage_queue(opts)

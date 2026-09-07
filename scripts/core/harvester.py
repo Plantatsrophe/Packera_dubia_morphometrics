@@ -60,13 +60,17 @@ from scripts.core.logger import setup_logging
 EXPORT_COLUMNS = [
     "catalogNumber",
     "institutionCode",
+    "scientificName",
     "species_raw",
+    "identifiedBy",
     "determiner_raw",
     "determiner_tier",
     "type_status",
     "county",
     "stateProvince",
+    "decimalLatitude",
     "latitude",
+    "decimalLongitude",
     "longitude",
     "coordinateUncertainty",
     "year",
@@ -470,8 +474,47 @@ def export_curated_table(
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    df = df.copy()
+    if not df.empty:
+        if "scientificName" not in df.columns and "species_raw" in df.columns:
+            df["scientificName"] = df["species_raw"]
+        elif "species_raw" not in df.columns and "scientificName" in df.columns:
+            df["species_raw"] = df["scientificName"]
+
+        if "decimalLatitude" not in df.columns and "latitude" in df.columns:
+            df["decimalLatitude"] = df["latitude"]
+        elif "latitude" not in df.columns and "decimalLatitude" in df.columns:
+            df["latitude"] = df["decimalLatitude"]
+
+        if "decimalLongitude" not in df.columns and "longitude" in df.columns:
+            df["decimalLongitude"] = df["longitude"]
+        elif "longitude" not in df.columns and "decimalLongitude" in df.columns:
+            df["longitude"] = df["decimalLongitude"]
+
+        if "identifiedBy" not in df.columns and "determiner_raw" in df.columns:
+            df["identifiedBy"] = df["determiner_raw"]
+        elif "determiner_raw" not in df.columns and "identifiedBy" in df.columns:
+            df["determiner_raw"] = df["identifiedBy"]
+
+        dwc_contract_cols = [
+            "catalogNumber",
+            "scientificName",
+            "decimalLatitude",
+            "decimalLongitude",
+            "eventDate",
+            "identifiedBy",
+            "determiner_tier",
+            "image_path",
+        ]
+        for c in dwc_contract_cols:
+            if c not in df.columns:
+                df[c] = ""
+
     cols_to_export = [col for col in EXPORT_COLUMNS if col in df.columns]
-    df_export = df[cols_to_export] if not df.empty else pd.DataFrame(columns=EXPORT_COLUMNS)
+    extra_cols = [c for c in df.columns if c not in cols_to_export and not c.startswith("_")]
+    final_cols = cols_to_export + extra_cols
+
+    df_export = df[final_cols] if not df.empty else pd.DataFrame(columns=EXPORT_COLUMNS)
 
     temp_file = tempfile.NamedTemporaryFile(
         mode="w",
@@ -721,13 +764,17 @@ class VoucherHarvester:
                     curated_record = {
                         "catalogNumber": catalog_number,
                         "institutionCode": inst_code,
+                        "scientificName": rec.get("scientificName") or rec.get("species") or taxon,
                         "species_raw": rec.get("scientificName") or rec.get("species") or taxon,
+                        "identifiedBy": determiner_raw,
                         "determiner_raw": determiner_raw,
                         "determiner_tier": determiner_tier,
                         "type_status": type_status,
                         "county": rec.get("county") or "",
                         "stateProvince": state_prov or "",
+                        "decimalLatitude": lat_val,
                         "latitude": lat_val,
+                        "decimalLongitude": lon_val,
                         "longitude": lon_val,
                         "coordinateUncertainty": uncertainty_val,
                         "year": year_val,

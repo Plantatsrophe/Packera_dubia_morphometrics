@@ -6,6 +6,7 @@ Darwin Core metadata normalization, and atomic persistence.
 ===============================================================================
 """
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -376,6 +377,116 @@ class TestAtomicTableExport(unittest.TestCase):
             self.assertEqual(read_df.iloc[0]["catalogNumber"], "NCU001")
             self.assertEqual(read_df.iloc[0]["year"], 1998)
             self.assertEqual(read_df.iloc[0]["determiner_tier"], "Tier_1_Gold")
+
+            # Validate Darwin Core contract headers
+            expected_contract_headers = [
+                "catalogNumber",
+                "scientificName",
+                "decimalLatitude",
+                "decimalLongitude",
+                "eventDate",
+                "identifiedBy",
+                "determiner_tier",
+                "image_path",
+            ]
+            for col in expected_contract_headers:
+                self.assertIn(col, read_df.columns, f"Missing required contract header '{col}'")
+
+            # Validate backwards-compatible legacy column preservation
+            legacy_headers = ["species_raw", "determiner_raw", "latitude", "longitude"]
+            for col in legacy_headers:
+                self.assertIn(col, read_df.columns, f"Missing backwards-compatible header '{col}'")
+
+            # Check value consistency between DwC and legacy aliases
+            self.assertEqual(read_df.iloc[0]["scientificName"], "Packera dubia")
+            self.assertEqual(read_df.iloc[0]["species_raw"], "Packera dubia")
+            self.assertEqual(read_df.iloc[0]["identifiedBy"], "D.K. Trock")
+            self.assertEqual(read_df.iloc[0]["determiner_raw"], "D.K. Trock")
+            self.assertAlmostEqual(read_df.iloc[0]["decimalLatitude"], 35.8)
+            self.assertAlmostEqual(read_df.iloc[0]["latitude"], 35.8)
+            self.assertAlmostEqual(read_df.iloc[0]["decimalLongitude"], -78.6)
+            self.assertAlmostEqual(read_df.iloc[0]["longitude"], -78.6)
+
+    def test_curated_vouchers_table_contract(self):
+        """Verify production curated_vouchers.csv adheres to Darwin Core contract headers."""
+        prod_csv = Path(__file__).resolve().parents[2] / "data" / "tables" / "curated_vouchers.csv"
+        if not prod_csv.exists():
+            self.skipTest("Production curated_vouchers.csv not present.")
+        df = pd.read_csv(prod_csv)
+        contract_cols = [
+            "catalogNumber",
+            "scientificName",
+            "decimalLatitude",
+            "decimalLongitude",
+            "eventDate",
+            "identifiedBy",
+            "determiner_tier",
+            "image_path",
+        ]
+        for col in contract_cols:
+            self.assertIn(col, df.columns, f"Contract column '{col}' missing from curated_vouchers.csv")
+
+        legacy_cols = ["species_raw", "determiner_raw", "latitude", "longitude"]
+        for col in legacy_cols:
+            self.assertIn(col, df.columns, f"Legacy column '{col}' missing from curated_vouchers.csv")
+
+
+class TestVoucherHarvesterCLI(unittest.TestCase):
+    """Test suite for 01_voucher_harvester.py CLI parser and main entrypoint."""
+
+    def test_cli_parser_defaults(self):
+        """Verify default CLI arguments match PipelineConfig specifications."""
+        import importlib
+        mod_cli = importlib.import_module("scripts.data_prep.01_voucher_harvester")
+        parser = mod_cli.build_cli_parser()
+        args = parser.parse_args([])
+
+        self.assertIsInstance(args.taxa, list)
+        self.assertGreater(len(args.taxa), 0)
+        self.assertEqual(args.max_records, 5000)
+        self.assertEqual(args.min_megapixels, 8.0)
+        self.assertEqual(args.min_file_size_kb, 500.0)
+        self.assertTrue(args.exclude_western)
+        self.assertFalse(args.download_images)
+
+    def test_cli_parser_custom_args(self):
+        """Verify custom CLI arguments are correctly parsed."""
+        import importlib
+        mod_cli = importlib.import_module("scripts.data_prep.01_voucher_harvester")
+        parser = mod_cli.build_cli_parser()
+        args = parser.parse_args([
+            "--taxa", "Packera dubia", "Packera anonyma",
+            "--max-records", "50",
+            "--out-dir", "/tmp/custom_vouchers",
+            "--output-csv", "/tmp/custom_curated.csv",
+            "--download-images",
+            "--check-sharpness",
+        ])
+
+        self.assertEqual(args.taxa, ["Packera dubia", "Packera anonyma"])
+        self.assertEqual(args.max_records, 50)
+        self.assertEqual(args.out_dir, "/tmp/custom_vouchers")
+        self.assertEqual(args.output_csv, "/tmp/custom_curated.csv")
+        self.assertTrue(args.download_images)
+        self.assertTrue(args.check_sharpness)
+
+    def test_cli_main_invocation(self):
+        """Verify main() entrypoint constructs VoucherHarvester and triggers run()."""
+        import importlib
+        mod_cli = importlib.import_module("scripts.data_prep.01_voucher_harvester")
+
+        with patch.object(sys, "argv", ["01_voucher_harvester.py", "--max-records", "5", "--no-exclude-western"]), \
+             patch.object(mod_cli, "VoucherHarvester") as mock_harvester_cls:
+            mock_instance = MagicMock()
+            mock_harvester_cls.return_value = mock_instance
+
+            mod_cli.main()
+
+            mock_harvester_cls.assert_called_once()
+            _, kwargs = mock_harvester_cls.call_args
+            self.assertEqual(kwargs["max_records_per_taxon"], 5)
+            self.assertFalse(kwargs["exclude_western"])
+            mock_instance.run.assert_called_once_with(download_images=False)
 
 
 if __name__ == "__main__":

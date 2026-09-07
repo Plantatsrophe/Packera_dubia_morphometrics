@@ -40,7 +40,32 @@ DETECTRON2_PATH = LM2_DIR / "segmentation" / "detectron2"
 if DETECTRON2_PATH.exists() and str(DETECTRON2_PATH) not in sys.path:
     sys.path.insert(0, str(DETECTRON2_PATH))
 
-from scripts.vision.pointrend_trainer import PointRendPackeraTrainer
+try:
+    from detectron2.engine import DefaultTrainer
+    from detectron2.evaluation import COCOEvaluator
+except ImportError:
+    DefaultTrainer = object
+    COCOEvaluator = None
+
+
+class PointRendPackeraTrainer(DefaultTrainer):
+    """
+    Custom Detectron2 trainer for PointRend fine-tuning on Packera leaf morphology.
+    """
+
+    @classmethod
+    def build_evaluator(cls, cfg: Any, dataset_name: str, output_folder: Optional[str] = None):
+        if output_folder is None:
+            output_folder = os.path.join(cfg.OUTPUT_DIR, "validation_eval")
+        Path(output_folder).mkdir(parents=True, exist_ok=True)
+        if COCOEvaluator is not None:
+            return COCOEvaluator(dataset_name, output_dir=output_folder)
+        return None
+
+    def build_hooks(self):
+        hooks = super().build_hooks() if hasattr(super(), "build_hooks") else []
+        return hooks
+
 
 logging.basicConfig(
     level=logging.INFO,

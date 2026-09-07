@@ -403,6 +403,7 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
 # 7. Main Execution Pipeline
 # ------------------------------------------------------------------------------
 main <- function() {
+  set.seed(42)
   opts <- parse_args_robust()
   message("=== Starting Multimodal Spatial RF & Ecological Niche Analysis ===")
   

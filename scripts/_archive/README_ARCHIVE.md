@@ -21,9 +21,10 @@ All downstream downstream R and Python morphometrics, deep vision XAI, spatial e
 |:---|:---|:---|
 | `core/` | 16 legacy modules | Custom SAHI tiler geometry, legacy artifact filters, augmentation, dataset builders, and leaf spine tracers |
 | `vision/` | 4 scripts | Legacy 5-stage leaf extraction (`02_hierarchical_leaf_extractor.py`), SAHI full-sheet inference (`run_sahi_inference.py`), native-DPI tiler (`run_dpi_tiler.py`), and artifact filter gatekeeper |
-| `data_prep/` | 2 scripts | Precision SAM 2 annotation GUI (`annotate_with_sam2.py`) and 7-class YOLO dataset builder (`build_artifact_robust_dataset.py`) |
+| `data_prep/` | 4 scripts | Precision SAM 2 annotation GUI (`annotate_with_sam2.py`), 7-class YOLO dataset builder (`build_artifact_robust_dataset.py`), voucher image staging runner (`prepare_lm2_dataset.py`), and symlink staging utility (`staging_utils.py`) |
 | `train/` | 6 modules | Custom YOLOv8m-seg fine-tuning engine with mixed-precision AMP, class weighting, and disk caching |
 | `tests/` | 5 test suites | Unit and regression tests for legacy YOLO/SAM2 components |
+| `analysis/` | 7 modules | Redundant Phase 5 micro-modules (`cleanlab_curator.py`, `dinov2_embeddings.py`, `gradcam_visualizer.py`), duplicate Python Phase 6 (`06_multimodal_spatial_rf.py`, `run_multimodal_spatial_rf.py`), and duplicate Python Phase 7 (`07_triage_dashboard_synthesis.py`, `run_triage_dashboard_synthesis.py`) |
 | `root_artifacts/` | Pre-trained weights & models | Legacy YOLO weight checkpoints (`yolov8m-seg.pt`, `yolov8x-seg.pt`), SAM 2 submodule, and training runs |
 | `../../data/_archive/` | Legacy datasets | Archived YOLO training sets, SAM2 masks, manual annotations, and tiled patches |
 | `../../outputs/_archive/` | Legacy outputs | Historical SAHI detection summaries, tiling logs, synthetic benchmark runs, and GPU profiling logs |
@@ -38,8 +39,12 @@ All downstream downstream R and Python morphometrics, deep vision XAI, spatial e
 | `run_dpi_tiler.py` + `scripts/_archive/core/tiling_geometry.py` | LM2 internal high-resolution multi-crop detector |
 | `train/` (`trainer.py`, `train_yolo.py`) | LM2 zero-shot/pre-trained botanical organ detector |
 | `run_sahi_inference.py` | LM2 native execution (`LeafMachine2/LeafMachine2.py`) |
-| `02_hierarchical_leaf_extractor.py` | `scripts/vision/02_postprocess_lm2_routing.py` (DBSCAN + 4-Tier Routing) |
-| `artifact_filter_gatekeeper.py` | `scripts/vision/geometric_gatekeeper.py` (UCS + Solidity + Pose) |
+| `02_hierarchical_leaf_extractor.py` | `scripts/pipeline/02_segment_and_extract.py` (PointRend + Midrib Reflection + Contour Export) |
+| `artifact_filter_gatekeeper.py` | `scripts/vision/lm2_geometry_utils.py` (UCS + Solidity + Midrib Angle) |
+| `prepare_lm2_dataset.py` + `staging_utils.py` | Direct ingestion in `scripts/pipeline/02_segment_and_extract.py` reading directly from `data/raw_vouchers/` via `data/tables/curated_vouchers.csv` |
+| `cleanlab_curator.py`, `dinov2_embeddings.py`, `gradcam_visualizer.py` | Consolidated [`scripts/analysis/05_cleanlab_vision_xai.py`](../analysis/05_cleanlab_vision_xai.py) |
+| `06_multimodal_spatial_rf.py` + `run_multimodal_spatial_rf.py` | Canonical R implementation [`scripts/analysis/06_multimodal_spatial_rf.R`](../analysis/06_multimodal_spatial_rf.R) |
+| `07_triage_dashboard_synthesis.py` + `run_triage_dashboard_synthesis.py` | Canonical R implementation [`scripts/analysis/07_triage_dashboard_synthesis.R`](../analysis/07_triage_dashboard_synthesis.R) |
 
 ---
 
@@ -47,11 +52,12 @@ All downstream downstream R and Python morphometrics, deep vision XAI, spatial e
 
 The modernized 7-stage pipeline entry points are:
 1. **Phase 1:** [`scripts/data_prep/01_voucher_harvester.py`](../data_prep/01_voucher_harvester.py)
-2. **Phase 2:** [`scripts/vision/02_postprocess_lm2_routing.py`](../vision/02_postprocess_lm2_routing.py) (following [`LeafMachine2/LeafMachine2.py`](../../LeafMachine2/LeafMachine2.py))
+2. **Phase 2:** [`scripts/pipeline/02_segment_and_extract.py`](../pipeline/02_segment_and_extract.py) (Direct PointRend segmentation & leaf extraction)
 3. **Phase 3:** [`scripts/morphometrics/03_fourier_extractor.R`](../morphometrics/03_fourier_extractor.R)
 4. **Phase 4:** [`scripts/morphometrics/04_gmm_morphotools.R`](../morphometrics/04_gmm_morphotools.R)
-5. **Phase 5:** [`scripts/analysis/05_cleanlab_vision_xai.py`](../analysis/05_cleanlab_vision_xai.py)
-6. **Phase 6:** [`scripts/analysis/06_multimodal_spatial_rf.R`](../analysis/06_multimodal_spatial_rf.R) / [`06_multimodal_spatial_rf.py`](../analysis/06_multimodal_spatial_rf.py)
-7. **Phase 7:** [`scripts/analysis/07_triage_dashboard_synthesis.R`](../analysis/07_triage_dashboard_synthesis.R) / [`07_triage_dashboard_synthesis.py`](../analysis/07_triage_dashboard_synthesis.py)
+5. **Phase 5:** [`scripts/analysis/05_cleanlab_vision_xai.py`](../analysis/05_cleanlab_vision_xai.py) (Consolidated DINOv2 embeddings, Cleanlab audit, & Grad-CAM XAI)
+6. **Phase 6:** [`scripts/analysis/06_multimodal_spatial_rf.R`](../analysis/06_multimodal_spatial_rf.R) (Canonical Spatial Random Forests with MEMs & Warren's Identity)
+7. **Phase 7:** [`scripts/analysis/07_triage_dashboard_synthesis.R`](../analysis/07_triage_dashboard_synthesis.R) (Canonical Multi-Evidence Triage Dashboard & Plate Generator)
+8. **Pipeline Orchestrator:** [`main.py`](../../main.py) (`harvest`, `segment`, `morphometrics`, `synthesis`, and `run-all`)
 
 Refer to the primary [`README.md`](../../README.md) and [`docs/WORKFLOW_GUIDE.md`](../../docs/WORKFLOW_GUIDE.md) for full execution guides.

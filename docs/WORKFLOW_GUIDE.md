@@ -120,17 +120,14 @@ python scripts/data_prep/01_voucher_harvester.py \
 
 ## Phase 2: LeafMachine2 Organ Detection & Geometric Routing
 
-### 2.1 Prepare LM2 Staging & Configuration
-- **Scripts:** [`scripts/data_prep/prepare_lm2_dataset.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/data_prep/prepare_lm2_dataset.py), [`scripts/vision/configure_leafmachine2.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/vision/configure_leafmachine2.py)
+> [!NOTE]
+> Physical image staging via `prepare_lm2_dataset.py` has been archived to `scripts/_archive/data_prep/prepare_lm2_dataset.py`. The modern pipeline script [`scripts/pipeline/02_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02_segment_and_extract.py) reads directly from `data/raw_vouchers/` via paths defined in `data/tables/curated_vouchers.csv`, eliminating redundant symlink copying and disk overhead.
+
+### 2.1 LM2 Configuration
+- **Script:** [`scripts/vision/configure_leafmachine2.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/vision/configure_leafmachine2.py)
 - **Environment:** `.venv`
 
 ```bash
-# Stage voucher images for LM2
-python scripts/data_prep/prepare_lm2_dataset.py \
-    --vouchers data/tables/curated_vouchers.csv \
-    --image-src data/raw_vouchers/ \
-    --output LM2_Project/Data/images/
-
 # Generate high-performance LM2 configuration (Batch 50, 8 CUDA workers)
 python scripts/vision/configure_leafmachine2.py --update-main-config
 ```

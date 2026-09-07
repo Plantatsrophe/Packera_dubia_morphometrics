@@ -11,6 +11,7 @@ Description:
       - harvest: Queries GBIF occurrences, scores determiner tiers, downloads imagery.
       - segment: PointRend deep segmentation, bilateral midrib reflection, contour export.
       - morphometrics: Rscript EFA (Momocs) and GMM/CDA clustering (MorphoTools2).
+      - synthesis: Canonical Phases 5-7 (Vision XAI, Spatial RF, & Triage Dashboard).
       - run-all: Executes the complete production workflow sequentially.
 ===============================================================================
 """
@@ -30,7 +31,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import load_config
+from scripts.core.config import PipelineConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,7 +89,7 @@ def verify_dir_has_files(dir_path: Path, pattern: str, description: str, hint_cm
 # Phase Execution Handlers
 # =============================================================================
 
-def run_harvest(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
+def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     """Executes Phase 1: Voucher harvesting and authority tier stratification."""
     logger.info("=== Starting Phase 1: Voucher Ingestion & Authority Stratification ===")
     
@@ -128,7 +129,7 @@ def run_harvest(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
     logger.info("Phase 1 completed successfully.")
 
 
-def run_segment(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
+def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     """Executes Phase 2: PointRend segmentation, midrib reflection, and contour extraction."""
     logger.info("=== Starting Phase 2: Segmentation & Geometric Leaf Extraction ===")
     
@@ -166,7 +167,7 @@ def run_segment(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
     logger.info("Phase 2 completed successfully.")
 
 
-def run_morphometrics(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
+def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     """Executes Phase 3: EFA, GMM, and passive sample CDA via R scripts."""
     logger.info("=== Starting Phase 3: Morphometrics, EFA & Discriminant Analysis ===")
 
@@ -235,14 +236,121 @@ def run_morphometrics(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
     logger.info("Phase 3 completed successfully.")
 
 
-def run_all(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
+def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
+    """Executes Phases 5, 6, and 7: Vision XAI, Spatial Macroecology, and Synthesis Triage."""
+    logger.info("=== Starting Synthesis Workflow (Phases 5, 6, 7) ===")
+
+    rscript_bin = shutil.which("Rscript")
+    if not rscript_bin:
+        logger.error(
+            "Rscript binary not found in system PATH.\n"
+            "Spatial macroecology and synthesis dashboard require R (>= 4.3) with spatialRF, ENMTools, and terra."
+        )
+        sys.exit(1)
+
+    vouchers_csv = Path(getattr(args, "vouchers", None) or cfg["paths"]["curated_vouchers_csv"])
+    verify_file_exists(vouchers_csv, "curated vouchers table", "python main.py harvest")
+
+    # -------------------------------------------------------------------------
+    # Stage 5: DINOv2 Deep Vision Feature Extraction & Cleanlab XAI Audit
+    # -------------------------------------------------------------------------
+    xai_script = PROJECT_ROOT / "scripts" / "analysis" / "05_cleanlab_vision_xai.py"
+    verify_file_exists(xai_script, "Cleanlab Vision XAI script")
+
+    rosette_dir = Path(getattr(args, "rosette_dir", None) or "data/cropped_patches")
+    audit_csv = Path(getattr(args, "vision_audit", None) or "data/tables/label_noise_audit.csv")
+    xai_fig = Path(getattr(args, "xai_plot", None) or "outputs/figures/GradCAM_audit_panel.png")
+    cleanlab_thresh = getattr(args, "cleanlab_threshold", 0.85)
+
+    cmd_xai = [
+        sys.executable, str(xai_script),
+        "--rosette-dir", str(rosette_dir),
+        "--vouchers-csv", str(vouchers_csv),
+        "--output-csv", str(audit_csv),
+        "--output-figure", str(xai_fig),
+        "--cleanlab-threshold", str(cleanlab_thresh),
+    ]
+    if getattr(args, "export_figures", True):
+        cmd_xai.append("--export-figures")
+    else:
+        cmd_xai.append("--no-export-figures")
+
+    logger.info(f"Running Phase 5 Cleanlab Vision XAI: {' '.join(cmd_xai)}")
+    subprocess.run(cmd_xai, check=True)
+    verify_file_exists(audit_csv, "Cleanlab label noise audit CSV")
+
+    # -------------------------------------------------------------------------
+    # Stage 6: Multimodal Spatial Random Forests & Warren's Niche Identity Tests
+    # -------------------------------------------------------------------------
+    spatial_rf_script = PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R"
+    verify_file_exists(spatial_rf_script, "Spatial RF R script")
+
+    morph_flags = Path(getattr(args, "morphometrics", None) or cfg["paths"]["morphometric_flags_csv"])
+    env_dir = Path(getattr(args, "env_dir", None) or "data/environmental")
+    conflict_flags = Path(getattr(args, "conflict_flags", None) or "data/tables/multimodal_conflict_flags.csv")
+    spatial_plot = Path(getattr(args, "spatial_plot", None) or "outputs/figures/spatial_rf_niche_importance.pdf")
+    spatial_summary = Path(getattr(args, "spatial_summary", None) or "outputs/reports/multimodal_spatial_rf_summary.csv")
+
+    cmd_spatial = [
+        rscript_bin, str(spatial_rf_script),
+        "--vouchers", str(vouchers_csv),
+        "--morphometrics", str(morph_flags),
+        "--vision-audit", str(audit_csv),
+        "--env-dir", str(env_dir),
+        "--output-flags", str(conflict_flags),
+        "--output-plot", str(spatial_plot),
+        "--output-summary", str(spatial_summary),
+    ]
+    if getattr(args, "permutations", None) is not None:
+        cmd_spatial.extend(["--permutations", str(args.permutations)])
+    if getattr(args, "n_trees", None) is not None:
+        cmd_spatial.extend(["--n-trees", str(args.n_trees)])
+
+    logger.info(f"Running Phase 6 Multimodal Spatial RF: {' '.join(cmd_spatial)}")
+    subprocess.run(cmd_spatial, check=True)
+    verify_file_exists(conflict_flags, "multimodal conflict flags CSV")
+
+    # -------------------------------------------------------------------------
+    # Stage 7: Multi-Evidence Taxonomic Decision Matrix & Triage Dashboard
+    # -------------------------------------------------------------------------
+    triage_script = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
+    verify_file_exists(triage_script, "Triage Dashboard R script")
+
+    gmm_summary = Path(getattr(args, "gmm_summary", None) or cfg["paths"]["gmm_report_csv"])
+    output_queue = Path(getattr(args, "output_queue", None) or "data/tables/triage_queue.csv")
+    synthesis_plot = Path(getattr(args, "synthesis_plot", None) or "outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf")
+    synthesis_report = Path(getattr(args, "synthesis_report", None) or "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md")
+
+    cmd_triage = [
+        rscript_bin, str(triage_script),
+        "--vouchers", str(vouchers_csv),
+        "--morphometrics", str(morph_flags),
+        "--vision-audit", str(audit_csv),
+        "--multimodal-flags", str(conflict_flags),
+        "--gmm-summary", str(gmm_summary),
+        "--niche-summary", str(spatial_summary),
+        "--output-queue", str(output_queue),
+        "--output-plot", str(synthesis_plot),
+        "--output-report", str(synthesis_report),
+    ]
+    logger.info(f"Running Phase 7 Triage Dashboard Synthesis: {' '.join(cmd_triage)}")
+    subprocess.run(cmd_triage, check=True)
+    verify_file_exists(output_queue, "triage queue CSV")
+    verify_file_exists(synthesis_report, "taxonomic revision summary markdown report")
+
+    logger.info("=== Synthesis Workflow (Phases 5, 6, 7) Completed Successfully ===")
+
+
+def run_all(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     """Executes the end-to-end production workflow sequentially."""
     logger.info("==================================================================")
-    logger.info("Executing End-to-End Production Pipeline (harvest -> segment -> morphometrics)")
+    logger.info("Executing End-to-End Production Pipeline")
+    logger.info("  (harvest -> segment -> morphometrics -> synthesis)")
     logger.info("==================================================================")
     run_harvest(args, cfg)
     run_segment(args, cfg)
     run_morphometrics(args, cfg)
+    run_synthesis(args, cfg)
     logger.info("==================================================================")
     logger.info("End-to-End Pipeline Execution Completed Successfully!")
     logger.info("==================================================================")
@@ -307,8 +415,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_morph.add_argument("--num-pcs", type=int, default=None, help="Number of PCA dimensions")
     p_morph.add_argument("--max-k", type=int, default=None, help="Max GMM mixture components")
 
+    # Subcommand: synthesis
+    p_synth = subparsers.add_parser("synthesis", help="Phases 5-7: Vision XAI, Spatial RF, & Triage Dashboard")
+    p_synth.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
+    p_synth.add_argument("--rosette-dir", type=Path, default=None, help="Directory with cropped rosette patches")
+    p_synth.add_argument("--morphometrics", type=Path, default=None, help="Morphometrics flags CSV")
+    p_synth.add_argument("--vision-audit", type=Path, default=None, help="Output vision audit CSV")
+    p_synth.add_argument("--cleanlab-threshold", type=float, default=0.85, help="Cleanlab noise cutoff threshold")
+    p_synth.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
+    p_synth.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
+    p_synth.add_argument("--env-dir", type=Path, default=None, help="Directory containing environmental rasters")
+    p_synth.add_argument("--conflict-flags", type=Path, default=None, help="Output multimodal conflict flags CSV")
+    p_synth.add_argument("--spatial-plot", type=Path, default=None, help="Output spatial RF PDF plot")
+    p_synth.add_argument("--spatial-summary", type=Path, default=None, help="Output Warren's identity summary CSV")
+    p_synth.add_argument("--permutations", type=int, default=100, help="Warren's identity test permutations")
+    p_synth.add_argument("--n-trees", type=int, default=500, help="Random forest trees")
+    p_synth.add_argument("--gmm-summary", type=Path, default=None, help="GMM Bayes factor report CSV")
+    p_synth.add_argument("--output-queue", type=Path, default=None, help="Output expert triage queue CSV")
+    p_synth.add_argument("--synthesis-plot", type=Path, default=None, help="Output 6-panel synthesis plate PDF")
+    p_synth.add_argument("--synthesis-report", type=Path, default=None, help="Output revision summary Markdown")
+    p_synth.add_argument("--xai-plot", type=Path, default=None, help="Output Grad-CAM panel PNG")
+
     # Subcommand: run-all
-    p_all = subparsers.add_parser("run-all", help="Execute complete pipeline (harvest -> segment -> morphometrics)")
+    p_all = subparsers.add_parser("run-all", help="Execute complete pipeline (harvest -> segment -> morphometrics -> synthesis)")
     # Merge key arguments from previous stages
     p_all.add_argument("--taxa", nargs="+", default=None, help="Target taxonomic binomials")
     p_all.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
@@ -335,6 +464,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--harmonics", type=int, default=None, help="Number of Fourier harmonics (k)")
     p_all.add_argument("--num-pcs", type=int, default=None, help="Number of PCA dimensions")
     p_all.add_argument("--max-k", type=int, default=None, help="Max GMM mixture components")
+    p_all.add_argument("--rosette-dir", type=Path, default=None, help="Directory with cropped rosette patches")
+    p_all.add_argument("--cleanlab-threshold", type=float, default=0.85, help="Cleanlab noise cutoff threshold")
+    p_all.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
+    p_all.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
 
     return parser
 
@@ -346,12 +479,13 @@ def main() -> None:
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
-    cfg = load_config(args.config)
+    cfg = PipelineConfig.from_yaml(args.config)
 
     dispatch = {
         "harvest": run_harvest,
         "segment": run_segment,
         "morphometrics": run_morphometrics,
+        "synthesis": run_synthesis,
         "run-all": run_all,
     }
 
