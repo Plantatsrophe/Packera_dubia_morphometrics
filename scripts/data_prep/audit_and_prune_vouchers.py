@@ -37,7 +37,7 @@ from scripts.core.config import (
     DEFAULT_MIN_FILE_SIZE_KB,
     DEFAULT_MIN_SHARPNESS_LAPLACIAN,
 )
-from scripts.core.harvester_utils import (
+from scripts.core.harvester import (
     setup_logger,
     validate_image_quality,
 )

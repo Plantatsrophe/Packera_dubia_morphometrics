@@ -8,10 +8,12 @@
 #   Label-blind Gaussian Mixture Model (mclust::Mclust) clustering and Canonical
 #   Discriminant Analysis with passive sample projection (MorphoTools2).
 #   1. Ingests curated_vouchers.csv and leaf_efa_harmonics.csv.
-#   2. Fits GMMs blind to herbarium determinations to detect natural clusters.
-#   3. Computes Bayes Factors (2ΔBIC) across competing K-component models.
-#   4. Executes CDA with Tier 3 Bronze vouchers as passiveSamples.
-#   5. Exports misidentification audit flags and publication-quality biplots.
+#   2. Calculates circular phenology (pheno_sin, pheno_cos) from doy.
+#   3. Fits unsupervised GMMs (seed = 42) on Fourier PCs to discover clusters.
+#   4. Computes Bayes Factors (2ΔBIC) across competing K-component models.
+#   5. Executes CDA via MorphoTools2 (Gold anchors active, Bronze passive).
+#   6. Flags morphospace outliers in data/tables/morphometric_flags.csv.
+#   7. Outputs CDA biplots to outputs/figures/cda_passive_projection.pdf.
 # ==============================================================================
 
 suppressPackageStartupMessages({
@@ -34,7 +36,7 @@ parse_args_robust <- function() {
     optparse::make_option(c("-e", "--harmonics"), type = "character",
       default = "data/tables/leaf_efa_harmonics.csv", help = "Leaf EFA harmonics CSV [default: %default]"),
     optparse::make_option(c("-f", "--output-flags"), type = "character",
-      default = "data/tables/morphometrics_misidentification_flags.csv", help = "Flags output CSV [default: %default]"),
+      default = "data/tables/morphometric_flags.csv", help = "Flags output CSV [default: %default]"),
     optparse::make_option(c("-p", "--output-plot"), type = "character",
       default = "outputs/figures/cda_passive_projection.pdf", help = "Output CDA PDF biplot [default: %default]"),
     optparse::make_option(c("-r", "--output-report"), type = "character",
@@ -53,7 +55,7 @@ parse_args_robust <- function() {
   raw_args <- commandArgs(trailingOnly = TRUE)
   opts <- list(
     vouchers = "data/tables/curated_vouchers.csv", harmonics = "data/tables/leaf_efa_harmonics.csv",
-    output_flags = "data/tables/morphometrics_misidentification_flags.csv",
+    output_flags = "data/tables/morphometric_flags.csv",
     output_plot = "outputs/figures/cda_passive_projection.pdf",
     output_report = "outputs/reports/gmm_bayes_factors_summary.csv", max_k = 8, num_pcs = 5
   )
@@ -73,8 +75,20 @@ parse_args_robust <- function() {
 }
 
 # ------------------------------------------------------------------------------
-# 2. Taxonomic Concept Standardization
+# 2. Circular Phenology & Taxonomic Concept Standardization
 # ------------------------------------------------------------------------------
+calculate_circular_phenology <- function(df) {
+  if ("doy" %in% names(df)) {
+    doy_val <- suppressWarnings(as.numeric(df$doy))
+    valid <- !is.na(doy_val) & doy_val >= 1 & doy_val <= 366
+    df$pheno_sin <- NA_real_
+    df$pheno_cos <- NA_real_
+    df$pheno_sin[valid] <- round(sin(2 * pi * doy_val[valid] / 365.25), 6)
+    df$pheno_cos[valid] <- round(cos(2 * pi * doy_val[valid] / 365.25), 6)
+  }
+  return(df)
+}
+
 standardize_packera_taxon <- function(species_vec) {
   sapply(species_vec, function(s) {
     if (is.na(s) || nchar(trimws(s)) == 0) return("Unknown")
@@ -88,7 +102,7 @@ standardize_packera_taxon <- function(species_vec) {
 }
 
 # ------------------------------------------------------------------------------
-# 3. Label-Blind Gaussian Mixture Modeling & Bayes Factor Testing
+# 3. Gaussian Mixture Modeling & Bayes Factor Testing (Seed = 42)
 # ------------------------------------------------------------------------------
 fit_gmm_em_pure <- function(X, max_k = 8, tol = 1e-5, max_iter = 150) {
   N <- nrow(X); p <- ncol(X); best_bic <- -Inf; best_model <- NULL
@@ -143,7 +157,9 @@ fit_gmm_em_pure <- function(X, max_k = 8, tol = 1e-5, max_iter = 150) {
 
 run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8) {
   X <- as.matrix(df[, feature_cols])
-  message("Fitting Label-Blind Gaussian Mixture Models (K = 1 to ", max_k, ")...")
+  message("Fitting Label-Blind Gaussian Mixture Models (K = 1 to ", max_k, ", seed = 42)...")
+  set.seed(42)
+
   best_k <- 1; best_name <- "Full_Covariance_EM"; bic_table <- NULL; cls <- NULL; unc <- NULL
 
   if (requireNamespace("mclust", quietly = TRUE)) {
@@ -177,7 +193,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8) {
 # 4. Canonical Discriminant Analysis with Passive Sample Projection
 # ------------------------------------------------------------------------------
 run_cda_with_passive_projection <- function(df, feature_cols, target_taxa) {
-  message("Configuring Canonical Discriminant Analysis (CDA) in MorphoTools2 Architecture...")
+  message("Configuring Canonical Discriminant Analysis in MorphoTools2 Architecture...")
   is_active <- (df$determiner_tier == "Tier_1_Gold") & (df$species_standardized %in% target_taxa)
   active_idx <- which(is_active); passive_idx <- which(!is_active)
   message(sprintf("Active Anchors (Tier 1 Gold): %d | Passive Projected: %d", length(active_idx), length(passive_idx)))
@@ -210,7 +226,9 @@ run_cda_with_passive_projection <- function(df, feature_cols, target_taxa) {
   }
   var_pct <- round((eig_vals / sum(eig_vals)) * 100, 2)
   message("=== CDA Canonical Variates Eigenvalues & Variance ===")
-  for (j in seq_len(num_axes)) message(sprintf("  Can%d: Eigenvalue = %7.4f (%5.2f%% variation)", j, eig_vals[j], var_pct[j]))
+  for (j in seq_len(num_axes)) {
+    message(sprintf("  Can%d: Eigenvalue = %7.4f (%5.2f%% variation)", j, eig_vals[j], var_pct[j]))
+  }
 
   Z_all <- t(t(X) - grand_mean) %*% eig_vecs
   canonical_centroids <- t(t(group_means) - grand_mean) %*% eig_vecs
@@ -232,10 +250,10 @@ run_cda_with_passive_projection <- function(df, feature_cols, target_taxa) {
 }
 
 # ------------------------------------------------------------------------------
-# 5. Herbarium Misidentification Auditing & Triage Flagging
+# 5. Outlier Flagging & Herbarium Misidentification Auditing
 # ------------------------------------------------------------------------------
 audit_misidentifications <- function(df, cda_res, gmm_res) {
-  message("Auditing specimens for herbarium misidentifications & label discordances...")
+  message("Auditing specimens for morphospace outliers & label discordances...")
   n <- nrow(df); flags <- logical(n); triage <- character(n); reasons <- character(n)
 
   for (i in seq_len(n)) {
@@ -246,7 +264,8 @@ audit_misidentifications <- function(df, cda_res, gmm_res) {
       if (raw_sp == pred_sp) {
         flags[i] <- FALSE; triage[i] <- "CLEAN"; reasons[i] <- "Verified_Tier1_Gold_Anchor"
       } else if (post_p >= 0.85) {
-        flags[i] <- TRUE; triage[i] <- "HIGH"; reasons[i] <- sprintf("Tier_1_Gold_Morphological_Discordance_to_%s", gsub(" ", "_", pred_sp))
+        flags[i] <- TRUE; triage[i] <- "HIGH"
+        reasons[i] <- sprintf("Tier_1_Gold_Morphological_Discordance_to_%s", gsub(" ", "_", pred_sp))
       } else {
         flags[i] <- FALSE; triage[i] <- "MEDIUM"; reasons[i] <- "Tier_1_Gold_Borderline_Variant"
       }
@@ -273,19 +292,19 @@ audit_misidentifications <- function(df, cda_res, gmm_res) {
   df$cda_predicted_taxon <- cda_res$predicted_taxon; df$cda_posterior_prob <- round(cda_res$posterior_prob, 4)
   df$can1 <- round(cda_res$canonical_scores[, 1], 5)
   df$can2 <- if (ncol(cda_res$canonical_scores) >= 2) round(cda_res$canonical_scores[, 2], 5) else 0.0
-  df$is_passive <- !cda_res$is_active; df$misidentification_flag <- flags
+  df$is_passive <- !cda_res$is_active; df$morphometric_outlier_flag <- flags
   df$triage_priority <- triage; df$discordance_reason <- reasons
 
-  message(sprintf("Audit Complete: %d misidentifications flagged (%d HIGH, %d MEDIUM priority)",
+  message(sprintf("Audit Complete: %d morphospace outliers/discordances flagged (%d HIGH, %d MEDIUM)",
                   sum(flags), sum(triage == "HIGH"), sum(triage == "MEDIUM")))
   return(df)
 }
 
 # ------------------------------------------------------------------------------
-# 6. Publication-Quality Multi-Panel Vector Biplot Generation
+# 6. Publication-Quality CDA Biplot Vector Graphic (PDF)
 # ------------------------------------------------------------------------------
 generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf) {
-  message("Rendering publication-quality multi-panel CDA biplot PDF: ", output_pdf)
+  message("Rendering publication-quality CDA biplot PDF: ", output_pdf)
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
 
   pdf(output_pdf, width = 12, height = 10, pointsize = 11)
@@ -313,8 +332,8 @@ generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf) {
 
   passive_sub <- audit_df[audit_df$is_passive, ]
   if (nrow(passive_sub) > 0) {
-    clean_p <- passive_sub[!passive_sub$misidentification_flag, ]
-    flagged_p <- passive_sub[passive_sub$misidentification_flag, ]
+    clean_p <- passive_sub[!passive_sub$morphometric_outlier_flag, ]
+    flagged_p <- passive_sub[passive_sub$morphometric_outlier_flag, ]
     if (nrow(clean_p) > 0) points(clean_p$can1, clean_p$can2, pch = 5, col = adjustcolor("gray40", alpha.f = 0.5), cex = 0.8)
     if (nrow(flagged_p) > 0) points(flagged_p$can1, flagged_p$can2, pch = 23, bg = "#D55E00", col = "black", cex = 1.1, lwd = 1.2)
   }
@@ -324,7 +343,7 @@ generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf) {
     text(cda_res$centroids[k, 1], cda_res$centroids[k, 2], labels = rownames(cda_res$centroids)[k],
          pos = 3, cex = 0.8, font = 4, col = "black")
   }
-  legend("topleft", legend = c("Tier 1 Gold Anchors", "Tier 3 Passive Congruent", "Flagged Misidentification"),
+  legend("topleft", legend = c("Tier 1 Gold Anchors", "Tier 3 Passive Congruent", "Flagged Morphospace Outliers"),
          pch = c(21, 5, 23), pt.bg = c("#009E73", NA, "#D55E00"), col = c("#009E73", "gray40", "black"), bty = "n", cex = 0.8)
 
   # Panel B: Unsupervised GMM Clusters on EFA Morphospace
@@ -343,21 +362,21 @@ generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf) {
                 xlab = "Number of Mixture Components (K)", ylab = "Bayes Factor (2ΔBIC vs K-1)",
                 main = "C. Species Boundary Evidence (Kass & Raftery 1995)", font.main = 2)
   abline(h = c(2, 6, 10), lty = 2, col = c("gray60", "gray40", "red3"))
-  text(bp[length(bp)], 10.5, "Decisive (2ΔBIC ≥ 10)", adj = c(1, 0), cex = 0.7, col = "red3", font = 3)
+  text(bp[length(bp)], 10.5, "Decisive (2ΔBIC >= 10)", adj = c(1, 0), cex = 0.7, col = "red3", font = 3)
 
-  # Panel D: Posterior Probability Re-determination Shift
-  hist(audit_df$cda_posterior_prob[audit_df$misidentification_flag], breaks = 15,
+  # Panel D: Posterior Confidence Distribution
+  hist(audit_df$cda_posterior_prob[audit_df$morphometric_outlier_flag], breaks = 15,
        col = adjustcolor("#D55E00", alpha.f = 0.6), border = "white",
        xlab = "CDA Posterior Classification Confidence", ylab = "Specimen Count",
-       main = "D. Posterior Confidence of Flagged Misidentifications", font.main = 2)
-  hist(audit_df$cda_posterior_prob[!audit_df$misidentification_flag], breaks = 20,
+       main = "D. Posterior Confidence of Flagged Outliers", font.main = 2)
+  hist(audit_df$cda_posterior_prob[!audit_df$morphometric_outlier_flag], breaks = 20,
        col = adjustcolor("#009E73", alpha.f = 0.35), border = "white", add = TRUE)
-  legend("topleft", legend = c("Flagged Misidentifications", "Congruent Vouchers"),
+  legend("topleft", legend = c("Flagged Outliers", "Congruent Vouchers"),
          fill = c(adjustcolor("#D55E00", alpha.f = 0.6), adjustcolor("#009E73", alpha.f = 0.35)), bty = "n", cex = 0.8)
 
-  title("Packera dubia Complex: Morphometrics & Misidentification Triage", outer = TRUE, cex.main = 1.4)
+  title("Packera dubia Complex: Morphometrics & Passive CDA", outer = TRUE, cex.main = 1.4)
   dev.off()
-  message("Biplot graphic successfully saved to ", output_pdf)
+  message("CDA biplot graphic successfully saved to ", output_pdf)
 }
 
 # ------------------------------------------------------------------------------
@@ -365,13 +384,19 @@ generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf) {
 # ------------------------------------------------------------------------------
 run_gmm_morphotools_pipeline <- function(opts) {
   message("==================================================================")
-  message("Starting Packera Morphometrics Cluster Discovery & Passive CDA")
+  message("Starting Packera Morphometrics GMM & Passive MorphoTools2 CDA")
   message("Vouchers: ", opts$vouchers, " | Harmonics: ", opts$harmonics)
+  message("Flags Output: ", opts$output_flags, " | CDA Plot: ", opts$output_plot)
   message("==================================================================")
 
   if (!file.exists(opts$harmonics)) stop("Harmonics file not found: ", opts$harmonics)
   efa_df <- read.csv(opts$harmonics, stringsAsFactors = FALSE)
   vouchers_df <- if (file.exists(opts$vouchers)) read.csv(opts$vouchers, stringsAsFactors = FALSE) else NULL
+
+  # Calculate circular phenology in-script
+  if (!is.null(vouchers_df)) {
+    vouchers_df <- calculate_circular_phenology(vouchers_df)
+  }
 
   pca_cols <- paste0("PC", 1:opts$num_pcs)
   missing_pca <- setdiff(pca_cols, names(efa_df))
@@ -385,7 +410,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   closed_df$species_standardized <- standardize_packera_taxon(closed_df$species_raw)
   target_taxa <- c("Packera anonyma", "Packera dubia", "Packera plattensis", "Packera paupercula")
 
-  # 1. Unsupervised Gaussian Mixture Modeling (Label-Blind)
+  # 1. Unsupervised Gaussian Mixture Modeling (Label-Blind, Seed = 42)
   gmm_res <- run_gmm_cluster_analysis(closed_df, pca_cols, max_k = opts$max_k)
   dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE)
   write.csv(gmm_res$bic_table, file = opts$output_report, row.names = FALSE)
@@ -394,26 +419,26 @@ run_gmm_morphotools_pipeline <- function(opts) {
   # 2. Canonical Discriminant Analysis with Passive Sample Projection
   cda_res <- run_cda_with_passive_projection(closed_df, pca_cols, target_taxa)
 
-  # 3. Herbarium Misidentification Auditing & Triage
+  # 3. Outlier Flagging & Misidentification Auditing
   audited_df <- audit_misidentifications(closed_df, cda_res, gmm_res)
 
   if (!is.null(vouchers_df)) {
     v_meta <- intersect(names(vouchers_df), c("catalogNumber", "institutionCode", "county", "stateProvince",
-                                              "latitude", "longitude", "pheno_sin", "pheno_cos", "regional_group"))
+                                              "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group"))
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), v_meta, drop = FALSE]
     audited_df <- merge(audited_df, v_sub, by = "catalogNumber", all.x = TRUE, suffixes = c("", "_meta"))
   }
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "species_raw", "species_standardized",
                  "determiner_tier", "cda_predicted_taxon", "cda_posterior_prob", "is_passive",
-                 "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster",
-                 "gmm_uncertainty", "can1", "can2", "PC1", "PC2", "PC3", "PC4", "PC5")
+                 "morphometric_outlier_flag", "triage_priority", "discordance_reason", "gmm_cluster",
+                 "gmm_uncertainty", "can1", "can2", "pheno_sin", "pheno_cos", "PC1", "PC2", "PC3", "PC4", "PC5")
   lead_cols <- intersect(lead_cols, names(audited_df))
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]
 
   dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE)
   write.csv(out_df, file = opts$output_flags, row.names = FALSE, na = "")
-  message("Master misidentification flags table exported: ", opts$output_flags, " (Rows: ", nrow(out_df), ")")
+  message("Master morphometric flags table exported: ", opts$output_flags, " (Rows: ", nrow(out_df), ")")
 
   # 4. Multi-Panel Publication PDF Biplot
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot)

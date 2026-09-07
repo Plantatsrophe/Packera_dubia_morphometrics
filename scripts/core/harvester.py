@@ -1,391 +1,798 @@
-import os
-import sys
-import time
-import argparse
+"""
+===============================================================================
+Module: harvester.py
+Project: Packera dubia Species Delimitation & Morphometrics Pipeline
+Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
+
+Description:
+    Unified botanical voucher ingestion, Darwin Core metadata normalization,
+    determiner authority evaluation, and asynchronous media acquisition engine.
+    Consolidates GBIF occurrence querying, 3-tier determiner authority
+    stratification, geographic boundary filtering, image quality validation,
+    and atomic curated dataset persistence.
+===============================================================================
+"""
+
+from __future__ import annotations
+
 import asyncio
-import aiohttp
+import datetime
 import logging
 import math
+import os
+import re
+import sys
+import tempfile
+import time
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any, Union
-from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
+
+import aiohttp
 import numpy as np
 import pandas as pd
+from PIL import Image
 import pygbif.occurrences as occ
 from tqdm.asyncio import tqdm as async_tqdm
+
+# Allow decompression of high-resolution botanical herbarium sheets (>89 MP)
+Image.MAX_IMAGE_PIXELS = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Configuration path and taxonomy defaults
 from scripts.core.config import (
-    DEFAULT_WORKSPACE,
+    DEFAULT_MIN_FILE_SIZE_KB,
+    DEFAULT_MIN_MEGAPIXELS,
+    DEFAULT_MIN_SHARPNESS_LAPLACIAN,
+    DEFAULT_OUTPUT_CSV,
     DEFAULT_RAW_DIR,
     DEFAULT_TARGET_TAXA,
-    DEFAULT_OUTPUT_CSV,
-    DEFAULT_SUMMARY_LOG,
-    DEFAULT_MIN_MEGAPIXELS,
-    DEFAULT_MIN_FILE_SIZE_KB,
-    DEFAULT_MIN_SHARPNESS_LAPLACIAN,
-    DEFAULT_QUARANTINE_DIR,
+    DEFAULT_WORKSPACE,
+    EXCLUDED_WESTERN_STATES,
+    MAJOR_HERBARIA_CODES,
+    SPECIALIST_PATTERNS,
+    VALID_TYPE_STATUSES,
+    WESTERN_LONGITUDE_THRESHOLD,
 )
+from scripts.core.logger import setup_logging
 
-# Harvester parsing, scoring, downloading, and logging utilities
-from scripts.core.harvester_utils import (
-    setup_logger,
-    sanitize_filename,
-    parse_determiner_tier,
-    calculate_circular_phenology,
-    infer_regional_group,
-    extract_high_res_image_url,
-    print_and_log_summary,
-    download_all_voucher_images,
-    is_excluded_western_region,
-    validate_image_quality,
-)
+EXPORT_COLUMNS = [
+    "catalogNumber",
+    "institutionCode",
+    "species_raw",
+    "determiner_raw",
+    "determiner_tier",
+    "type_status",
+    "county",
+    "stateProvince",
+    "latitude",
+    "longitude",
+    "coordinateUncertainty",
+    "year",
+    "month",
+    "day",
+    "eventDate",
+    "regional_group",
+    "image_path",
+]
 
-def harvest_taxa_occurrences(
-    taxa_list: List[str],
-    max_uncertainty_meters: float = 5000.0,
-    max_records_per_taxon: int = 1000,
-    exclude_western: bool = True,
-    logger: Optional[logging.Logger] = None
-) -> pd.DataFrame:
+
+def setup_logger(log_file_path: Optional[Path] = None, verbose: bool = False) -> logging.Logger:
+    """Configures or retrieves a formatted logger for voucher harvesting."""
+    return setup_logging(log_file=log_file_path, verbose=verbose, name="VoucherHarvester")
+
+
+def sanitize_filename(name: str) -> str:
+    """Sanitizes arbitrary strings into safe, valid filesystem filenames across platforms."""
+    clean = re.sub(r'[\\/*?:"<>|\s]+', "_", str(name).strip())
+    clean = clean.strip("._")
+    return clean if clean else "voucher_unknown"
+
+
+def parse_determiner_tier(
+    type_status_raw: Optional[str],
+    identified_by_raw: Optional[str],
+    recorded_by_raw: Optional[str],
+    history_raw: Optional[str],
+    institution_code_raw: Optional[str],
+    locality_raw: Optional[str],
+    habitat_raw: Optional[str],
+) -> Tuple[str, str, str]:
     """
-    Executes paginated queries to the GBIF Occurrence API and filters records according to DwC standards.
-    
-    Filters applied:
-      - Basis of record: PRESERVED_SPECIMEN
-      - Geographic scope: United States (country='US'), excluding states farther west than Texas and Oklahoma
-      - Spatial validation: Non-null coordinates, coordinateUncertaintyInMeters <= max_uncertainty_meters
-      - Temporal validation: Valid collection dates (year, month, day)
-      - Media validation: High-resolution sheet image URL present
-      
-    Args:
-        taxa_list: List of botanical species names to query.
-        max_uncertainty_meters: Maximum allowed georeferencing uncertainty in meters.
-        max_records_per_taxon: Maximum records to harvest per taxon query.
-        exclude_western: Whether to exclude records from states farther west than TX/OK (default: True).
-        logger: Logger instance.
-        
+    Evaluates Darwin Core fields to assign a taxonomic determination credibility tier.
+
+    Tiers:
+      - Tier_1_Gold: Primary/secondary nomenclatural types or verified specialist annotations.
+      - Tier_2_Silver: Determinations from major research herbaria with complete ecological locality.
+      - Tier_3_Bronze: Unverified candidate collections, general collectors, or missing determiner.
+
     Returns:
-        pd.DataFrame: Curated dataframe containing parsed metadata and authority scores.
+        Tuple[str, str, str]: (determiner_tier, type_status_clean, determiner_raw_combined)
     """
-    if logger is None:
-        logger = logging.getLogger("VoucherHarvester")
+    type_status = str(type_status_raw).strip() if type_status_raw is not None else ""
+    identified_by = str(identified_by_raw).strip() if identified_by_raw is not None else ""
+    recorded_by = str(recorded_by_raw).strip() if recorded_by_raw is not None else ""
+    history = str(history_raw).strip() if history_raw is not None else ""
+    institution = str(institution_code_raw).strip().upper() if institution_code_raw is not None else ""
+    locality = str(locality_raw).strip() if locality_raw is not None else ""
+    habitat = str(habitat_raw).strip() if habitat_raw is not None else ""
 
-    all_curated_records = []
-    seen_catalog_keys = set()
+    determiner_raw = identified_by if identified_by else (history if history else recorded_by)
+    combined_audit_text = f"{type_status} | {identified_by} | {history} | {recorded_by}"
 
-    for taxon in taxa_list:
-        logger.info(f"Querying GBIF API for taxon: '{taxon}' (country=US, basisOfRecord=PRESERVED_SPECIMEN)...")
-        
-        offset = 0
-        limit = 300  # GBIF page size limit
-        taxon_harvested = 0
-        taxon_retained = 0
-        taxon_western_excluded = 0
+    type_status_clean = "None"
+    is_type = False
+    if type_status and type_status.upper() not in {"NONE", "NOT A TYPE", "NOTATYPE", "UNSPECIFIED", "NULL"}:
+        for valid_type in VALID_TYPE_STATUSES:
+            if re.search(rf"\b{valid_type}\b", type_status, re.IGNORECASE):
+                type_status_clean = valid_type.title()
+                is_type = True
+                break
 
-        while taxon_retained < max_records_per_taxon:
+    is_specialist = False
+    for pattern in SPECIALIST_PATTERNS:
+        if re.search(pattern, combined_audit_text, re.IGNORECASE):
+            is_specialist = True
+            break
+
+    if is_type or is_specialist:
+        return "Tier_1_Gold", type_status_clean, determiner_raw
+
+    is_major_herbarium = institution in MAJOR_HERBARIA_CODES
+    has_rich_locality = len(locality) > 10 or len(habitat) > 5
+    has_determiner = bool(identified_by and identified_by.lower() not in {"unknown", "anonymous", "none", "null"})
+
+    if is_major_herbarium and has_rich_locality and has_determiner:
+        return "Tier_2_Silver", type_status_clean, determiner_raw
+
+    return "Tier_3_Bronze", type_status_clean, determiner_raw
+
+
+def is_excluded_western_region(
+    state_province: Optional[str],
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+) -> bool:
+    """Determines whether a record originates from a US state farther west than TX and OK."""
+    if state_province is not None and not (isinstance(state_province, float) and math.isnan(state_province)):
+        raw_state = str(state_province).strip()
+        cleaned = re.sub(r"\(state\)", "", raw_state, flags=re.IGNORECASE).strip(" ._,-")
+        upper_state = cleaned.upper()
+
+        if upper_state in {"WASHINGTON, D.C.", "WASHINGTON D.C.", "WASHINGTON DC", "DISTRICT OF COLUMBIA", "DC"}:
+            return False
+
+        if upper_state in EXCLUDED_WESTERN_STATES:
+            return True
+
+    if lon is not None:
+        try:
+            lon_val = float(lon)
+            if lon_val < WESTERN_LONGITUDE_THRESHOLD:
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    return False
+
+
+def infer_regional_group(
+    lat: Optional[float],
+    lon: Optional[float],
+    state_province: Optional[str] = None,
+    habitat: Optional[str] = None,
+    locality: Optional[str] = None,
+) -> str:
+    """Assigns an ecological / physiographic regional group based on coordinates, state, and habitat."""
+    text_context = f"{state_province or ''} {habitat or ''} {locality or ''}".lower()
+
+    if any(k in text_context for k in ["sandhill", "sand hill", "longleaf", "coastal plain", "dune", "maritime", "pocosin"]):
+        return "Coastal_Plain_Sandhills"
+    if any(k in text_context for k in ["flatrock", "granite outcrop", "granite", "diabase", "piedmont", "monadnock"]):
+        return "Piedmont_Granite_Flatrocks"
+    if any(k in text_context for k in ["blue ridge", "appalachian", "balds", "cove", "ridge and valley", "smoky", "high elevation"]):
+        return "Appalachian_Highlands"
+    if any(k in text_context for k in ["prairie", "glade", "limestone glade", "cedar glade", "ozark", "interior low plateau", "barren"]):
+        return "Interior_Prairie_Midwest"
+
+    state = (state_province or "").upper().strip()
+
+    coastal_states = {"FL", "FLORIDA", "LA", "LOUISIANA", "MS", "MISSISSIPPI"}
+    if state in coastal_states:
+        return "Coastal_Plain_Sandhills"
+
+    if state in {"NC", "NORTH CAROLINA", "SC", "SOUTH CAROLINA", "GA", "GEORGIA", "VA", "VIRGINIA"}:
+        if lon is not None:
+            if lon > -78.0:
+                return "Coastal_Plain_Sandhills"
+            elif -81.0 <= lon <= -78.0:
+                return "Piedmont_Granite_Flatrocks"
+            else:
+                return "Appalachian_Highlands"
+        return "Piedmont_Granite_Flatrocks"
+
+    if state in {"TN", "TENNESSEE", "KY", "KENTUCKY", "WV", "WEST VIRGINIA", "PA", "PENNSYLVANIA"}:
+        if lon is not None:
+            return "Appalachian_Highlands" if lon > -84.0 else "Interior_Prairie_Midwest"
+        return "Appalachian_Highlands"
+
+    if state in {"MO", "MISSOURI", "AR", "ARKANSAS", "IL", "ILLINOIS", "IN", "INDIANA", "OH", "OHIO", "IA", "IOWA", "KS", "KANSAS", "NE", "NEBRASKA", "OK", "OKLAHOMA", "TX", "TEXAS"}:
+        return "Interior_Prairie_Midwest"
+
+    if lat is not None and lon is not None:
+        if 24.0 <= lat <= 38.0 and -85.0 <= lon <= -75.0:
+            return "Piedmont_Granite_Flatrocks"
+        if 34.0 <= lat <= 45.0 and -84.0 <= lon <= -70.0:
+            return "Appalachian_Highlands"
+        if 28.0 <= lat <= 49.0 and -102.0 <= lon <= -84.0:
+            return "Interior_Prairie_Midwest"
+        if 25.0 <= lat <= 35.0 and -98.0 <= lon <= -80.0:
+            return "Coastal_Plain_Sandhills"
+
+    return "Other_US"
+
+
+def optimize_herbarium_image_url(url: str) -> str:
+    """Transforms provider-specific URLs to request full-resolution original scans."""
+    if not url or not isinstance(url, str):
+        return ""
+
+    optimized = url.strip()
+
+    # Smithsonian NMNH: strip dimension clamp (e.g. &h=2000)
+    if "collections.nmnh.si.edu/media/" in optimized:
+        optimized = re.sub(r"[?&][hw]=\d+", "", optimized)
+        if "?" not in optimized and "&" in optimized:
+            optimized = optimized.replace("&", "?", 1)
+
+    # Symbiota / SERNEC / SEINet / CCH portals: replace web/thumbnail with orig/large
+    if any(k in optimized.lower() for k in ["symbiota", "sernec", "seinet", "cch2", "swbiodiversity"]):
+        optimized = re.sub(r"/(?:web|tn|thumbnails?)/", "/orig/", optimized, flags=re.IGNORECASE)
+        optimized = re.sub(r"_(?:tn|web|sm)\.(jpe?g|png)", r"_lg.\1", optimized, flags=re.IGNORECASE)
+
+    # IIIF endpoints: replace constrained dimensions with /full/max/
+    if "/full/!" in optimized or "/full/pct:" in optimized or re.search(r"/full/\d+,\d*/", optimized):
+        optimized = re.sub(r"/full/(?:!?\d+,\d*|pct:\d+)/", "/full/max/", optimized)
+
+    return optimized
+
+
+def extract_high_res_image_url(media_list: Optional[List[Dict[str, Any]]]) -> Optional[str]:
+    """Parses Darwin Core media records, scoring and prioritizing highest-quality specimen image."""
+    if not media_list or not isinstance(media_list, list):
+        return None
+
+    scored_candidates: List[Tuple[float, str]] = []
+
+    for item in media_list:
+        if not isinstance(item, dict):
+            continue
+
+        m_type = str(item.get("type", ""))
+        m_format = str(item.get("format", "")).lower()
+        identifier = str(item.get("identifier", "")).strip()
+
+        if not identifier or not identifier.startswith(("http://", "https://")):
+            continue
+
+        score = 0.0
+        if m_type == "StillImage" or "image" in m_format:
+            score += 50.0
+        if identifier.lower().endswith((".jpg", ".jpeg", ".png", ".tif", ".tiff")):
+            score += 20.0
+
+        ident_lower = identifier.lower()
+        if any(h in ident_lower for h in ["_lg", "_large", "original", "/orig/", "/master/", "/highres/", "/full/", "hires", "high_res"]):
+            score += 100.0
+        if "max" in ident_lower:
+            score += 30.0
+
+        if any(t in ident_lower for t in ["_tn", "_thumb", "thumbnail", "_sm", "_small", "preview", "icon", "mini"]):
+            score -= 150.0
+        if "detailimages" in ident_lower:
+            score -= 25.0
+        if re.search(r"[?&]h=(?:[1-9]\d{0,2}|1\d{3}|2000)\b", ident_lower):
+            score -= 10.0
+
+        optimized_url = optimize_herbarium_image_url(identifier)
+        scored_candidates.append((score, optimized_url))
+
+    if not scored_candidates:
+        return None
+
+    scored_candidates.sort(key=lambda x: x[0], reverse=True)
+    return scored_candidates[0][1]
+
+
+def validate_image_quality(
+    image_path: Path,
+    min_megapixels: float = DEFAULT_MIN_MEGAPIXELS,
+    min_file_size_kb: float = DEFAULT_MIN_FILE_SIZE_KB,
+    check_sharpness: bool = False,
+    min_sharpness: float = DEFAULT_MIN_SHARPNESS_LAPLACIAN,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Evaluates image resolution, byte size, and optical sharpness metrics."""
+    if not image_path.exists():
+        return False, {"valid": False, "reason": "file_not_found"}
+
+    file_size_kb = image_path.stat().st_size / 1024.0
+    if file_size_kb < min_file_size_kb:
+        return False, {
+            "valid": False,
+            "reason": "file_size_too_small",
+            "file_size_kb": round(file_size_kb, 1),
+            "min_file_size_kb": min_file_size_kb,
+        }
+
+    try:
+        with Image.open(image_path) as img:
+            w, h = img.size
+            mp = round((w * h) / 1e6, 2)
+    except Exception as e:
+        return False, {
+            "valid": False,
+            "reason": f"corrupt_or_unreadable_image: {e}",
+            "file_size_kb": round(file_size_kb, 1),
+        }
+
+    if mp < min_megapixels:
+        return False, {
+            "valid": False,
+            "reason": "low_resolution",
+            "megapixels": mp,
+            "min_megapixels": min_megapixels,
+            "width": w,
+            "height": h,
+            "file_size_kb": round(file_size_kb, 1),
+        }
+
+    sharpness_score = None
+    if check_sharpness:
+        try:
+            import cv2
+            img_cv = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+            if img_cv is not None:
+                sharpness_score = round(float(cv2.Laplacian(img_cv, cv2.CV_64F).var()), 2)
+                if sharpness_score < min_sharpness:
+                    return False, {
+                        "valid": False,
+                        "reason": "blurry_or_upscaled",
+                        "sharpness": sharpness_score,
+                        "min_sharpness": min_sharpness,
+                        "megapixels": mp,
+                        "width": w,
+                        "height": h,
+                        "file_size_kb": round(file_size_kb, 1),
+                    }
+        except Exception:
+            pass
+
+    return True, {
+        "valid": True,
+        "megapixels": mp,
+        "width": w,
+        "height": h,
+        "file_size_kb": round(file_size_kb, 1),
+        "sharpness": sharpness_score,
+    }
+
+
+async def download_single_image(
+    session: aiohttp.ClientSession,
+    image_url: str,
+    destination_path: Path,
+    semaphore: asyncio.Semaphore,
+    max_retries: int = 3,
+) -> bool:
+    """Asynchronously downloads a single voucher image file to local storage with retry logic."""
+    if destination_path.exists() and destination_path.stat().st_size > 1024:
+        return True
+
+    async with semaphore:
+        for attempt in range(1, max_retries + 1):
             try:
-                # Query GBIF occurrence search endpoint
-                response = occ.search(
-                    scientificName=taxon,
-                    country="US",
-                    basisOfRecord="PRESERVED_SPECIMEN",
-                    limit=limit,
-                    offset=offset
-                )
-            except Exception as e:
-                logger.error(f"GBIF API query error for '{taxon}' at offset {offset}: {e}")
-                break
+                timeout = aiohttp.ClientTimeout(total=45, connect=15)
+                async with session.get(image_url, timeout=timeout) as response:
+                    if response.status == 200:
+                        content_type = response.headers.get("Content-Type", "").lower()
+                        content = await response.read()
+                        if len(content) > 1024 and (
+                            not content_type
+                            or "image" in content_type
+                            or "octet-stream" in content_type
+                            or content[:3] == b"\xff\xd8\xff"
+                        ):
+                            destination_path.parent.mkdir(parents=True, exist_ok=True)
+                            temp_path = destination_path.with_suffix(".tmp")
+                            with open(temp_path, "wb") as f:
+                                f.write(content)
+                            temp_path.replace(destination_path)
+                            return True
+                    elif response.status in {404, 410}:
+                        return False
+            except (aiohttp.ClientError, asyncio.TimeoutError, Exception):
+                if attempt == max_retries:
+                    return False
+                await asyncio.sleep(1.0 * (2 ** (attempt - 1)))
+        return False
 
-            results = response.get("results", [])
-            count = response.get("count", 0)
-            if not results:
-                break
 
-            for rec in results:
-                taxon_harvested += 1
+async def download_all_voucher_images(
+    records_to_download: List[Tuple[str, Path]],
+    concurrency_limit: int = 15,
+    logger: Optional[logging.Logger] = None,
+) -> Dict[str, int]:
+    """Coordinates asynchronous batch downloading of voucher images with concurrency control."""
+    semaphore = asyncio.Semaphore(concurrency_limit)
+    headers = {
+        "User-Agent": "PackeraResearchBot/1.0 (UNC Chapel Hill Herbarium; Evolutionary Morphometrics Lab)"
+    }
+    stats = {"success": 0, "skipped": 0, "failed": 0}
 
-                # 1. Geographic Coordinate & Uncertainty Validation
-                lat = rec.get("decimalLatitude")
-                lon = rec.get("decimalLongitude")
-                
-                lat_val = None
-                lon_val = None
-                if lat is not None and lon is not None:
-                    try:
-                        lat_val = float(lat)
-                        lon_val = float(lon)
-                    except (ValueError, TypeError):
-                        pass
+    pending = []
+    for url, dest in records_to_download:
+        if dest.exists() and dest.stat().st_size > 1024:
+            stats["skipped"] += 1
+        else:
+            pending.append((url, dest))
 
-                # Geographic Scope & Western State Exclusion (Filter out states farther west than TX & OK)
-                state_prov = rec.get("stateProvince")
-                if exclude_western and is_excluded_western_region(state_prov, lat=lat_val, lon=lon_val):
-                    taxon_western_excluded += 1
-                    continue
+    if not pending:
+        if logger:
+            logger.info(f"All {stats['skipped']} voucher images are already cached locally.")
+        return stats
 
-                # Coordinate uncertainty check (only if coordinates exist)
-                uncertainty_val = max_uncertainty_meters
-                if lat_val is not None and lon_val is not None:
-                    uncertainty_raw = rec.get("coordinateUncertaintyInMeters")
-                    if uncertainty_raw is not None:
+    if logger:
+        logger.info(f"Initiating asynchronous download of {len(pending)} pending images (Concurrency: {concurrency_limit})...")
+
+    connector = aiohttp.TCPConnector(limit=concurrency_limit, limit_per_host=5, ssl=False)
+    async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+        tasks = [
+            download_single_image(session, url, dest, semaphore)
+            for url, dest in pending
+        ]
+        results = await async_tqdm.gather(*tasks, desc="Downloading Voucher Sheets", unit="img")
+        for success in results:
+            if success:
+                stats["success"] += 1
+            else:
+                stats["failed"] += 1
+
+    return stats
+
+
+def export_curated_table(
+    df: pd.DataFrame,
+    output_path: Path,
+    logger: Optional[logging.Logger] = None,
+) -> Path:
+    """Atomically exports the curated vouchers DataFrame to CSV via temporary file replacement."""
+    output_path = Path(output_path).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cols_to_export = [col for col in EXPORT_COLUMNS if col in df.columns]
+    df_export = df[cols_to_export] if not df.empty else pd.DataFrame(columns=EXPORT_COLUMNS)
+
+    temp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        delete=False,
+        dir=output_path.parent,
+        suffix=".tmp",
+        encoding="utf-8",
+    )
+    temp_path = Path(temp_file.name)
+    try:
+        df_export.to_csv(temp_file, index=False, encoding="utf-8")
+        temp_file.flush()
+        os.fsync(temp_file.fileno())
+        temp_file.close()
+        temp_path.replace(output_path)
+        if logger:
+            logger.info(f"Atomically saved curated vouchers table ({len(df_export)} records) to: {output_path}")
+        return output_path
+    except Exception as e:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+        if logger:
+            logger.error(f"Failed to atomically write curated table to {output_path}: {e}")
+        raise
+
+
+def print_and_log_summary(
+    df: pd.DataFrame,
+    download_stats: Optional[Dict[str, Any]],
+    logger: logging.Logger,
+) -> None:
+    """Generates a publication-grade summary of the harvested dataset."""
+    total_records = len(df)
+    logger.info("=" * 80)
+    logger.info("                  PACKERA VOUCHER INGESTION & CURATION SUMMARY                  ")
+    logger.info("=" * 80)
+    logger.info(f"Total Quality-Filtered Specimen Vouchers: {total_records:,}")
+
+    if total_records == 0:
+        logger.warning("No records were retained. Check query parameters or network connection.")
+        logger.info("=" * 80)
+        return
+
+    # Determiner Tier Breakdown
+    tier_counts = df["determiner_tier"].value_counts()
+    logger.info("\n--- TAXONOMIC DETERMINER AUTHORITY STRATIFICATION ---")
+    for tier in ["Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze"]:
+        cnt = tier_counts.get(tier, 0)
+        pct = (cnt / total_records) * 100.0
+        logger.info(f"  * {tier:<15} : {cnt:>5} records ({pct:>5.1f}%)")
+
+    # Species Breakdown
+    species_counts = df["species_raw"].value_counts()
+    logger.info("\n--- TAXON DISTRIBUTION (RAW DETERMINATIONS) ---")
+    for sp, cnt in species_counts.head(8).items():
+        pct = (cnt / total_records) * 100.0
+        logger.info(f"  * {sp:<45} : {cnt:>5} records ({pct:>5.1f}%)")
+
+    # Regional Ecological Groups Breakdown
+    region_counts = df["regional_group"].value_counts()
+    logger.info("\n--- REGIONAL ECO-GEOGRAPHIC GROUPS ---")
+    for reg, cnt in region_counts.items():
+        pct = (cnt / total_records) * 100.0
+        logger.info(f"  * {reg:<30} : {cnt:>5} records ({pct:>5.1f}%)")
+
+    # Herbarium Institutions (Top 10)
+    inst_counts = df["institutionCode"].value_counts()
+    logger.info("\n--- TOP HERBARIUM INSTITUTIONS ---")
+    for inst, cnt in inst_counts.head(10).items():
+        pct = (cnt / total_records) * 100.0
+        logger.info(f"  * {inst:<15} : {cnt:>5} records ({pct:>5.1f}%)")
+
+    # Image Download & Quality Summary
+    if download_stats:
+        logger.info("\n--- SPECIMEN IMAGE DOWNLOAD & QUALITY STATUS ---")
+        logger.info(f"  * Downloaded Successfully : {download_stats.get('success', 0):>5}")
+        logger.info(f"  * Cached / Skipped        : {download_stats.get('skipped', 0):>5}")
+        logger.info(f"  * Quality Filter Rejected : {download_stats.get('quality_rejected', 0):>5}")
+        logger.info(f"  * Failed / Inaccessible   : {download_stats.get('failed', 0):>5}")
+        if "median_mp" in download_stats:
+            logger.info(f"  * Median Image Resolution : {download_stats.get('median_mp', 0.0):>5.2f} Megapixels")
+
+    logger.info("=" * 80)
+
+
+class VoucherHarvester:
+    """
+    Consolidated botanical voucher harvester and curator for the Packera dubia species complex.
+    Unifies GBIF query execution, Darwin Core metadata normalization, 3-tier determiner authority
+    stratification, geographic filtering, and asynchronous high-resolution image acquisition.
+    """
+
+    def __init__(
+        self,
+        taxa: Optional[List[str]] = None,
+        max_uncertainty_meters: float = 5000.0,
+        max_records_per_taxon: int = 5000,
+        exclude_western: bool = True,
+        min_megapixels: float = DEFAULT_MIN_MEGAPIXELS,
+        min_file_size_kb: float = DEFAULT_MIN_FILE_SIZE_KB,
+        check_sharpness: bool = False,
+        min_sharpness: float = DEFAULT_MIN_SHARPNESS_LAPLACIAN,
+        concurrency: int = 15,
+        output_csv: Path = DEFAULT_OUTPUT_CSV,
+        raw_dir: Path = DEFAULT_RAW_DIR,
+        workspace_dir: Path = DEFAULT_WORKSPACE,
+        logger: Optional[logging.Logger] = None,
+    ):
+        self.taxa = taxa or DEFAULT_TARGET_TAXA
+        self.max_uncertainty_meters = max_uncertainty_meters
+        self.max_records_per_taxon = max_records_per_taxon
+        self.exclude_western = exclude_western
+        self.min_megapixels = min_megapixels
+        self.min_file_size_kb = min_file_size_kb
+        self.check_sharpness = check_sharpness
+        self.min_sharpness = min_sharpness
+        self.concurrency = concurrency
+        self.output_csv = Path(output_csv)
+        self.raw_dir = Path(raw_dir)
+        self.workspace_dir = Path(workspace_dir)
+        self.logger = logger or logging.getLogger("VoucherHarvester")
+
+    def harvest(self) -> pd.DataFrame:
+        """Harvests and normalizes Darwin Core occurrence records across configured taxa."""
+        all_curated_records: List[Dict[str, Any]] = []
+        seen_catalog_keys: set = set()
+
+        for taxon in self.taxa:
+            self.logger.info(f"Querying GBIF API for taxon: '{taxon}' (country=US, basisOfRecord=PRESERVED_SPECIMEN)...")
+            offset = 0
+            limit = 300
+            taxon_harvested = 0
+            taxon_retained = 0
+            taxon_western_excluded = 0
+
+            while taxon_retained < self.max_records_per_taxon:
+                try:
+                    response = occ.search(
+                        scientificName=taxon,
+                        country="US",
+                        basisOfRecord="PRESERVED_SPECIMEN",
+                        limit=limit,
+                        offset=offset,
+                    )
+                except Exception as e:
+                    self.logger.error(f"GBIF API query error for '{taxon}' at offset {offset}: {e}")
+                    break
+
+                results = response.get("results", [])
+                count = response.get("count", 0)
+                if not results:
+                    break
+
+                for rec in results:
+                    taxon_harvested += 1
+
+                    # 1. Geographic Coordinate & Uncertainty Validation
+                    lat = rec.get("decimalLatitude")
+                    lon = rec.get("decimalLongitude")
+                    lat_val: Optional[float] = None
+                    lon_val: Optional[float] = None
+                    if lat is not None and lon is not None:
                         try:
-                            parsed_unc = float(uncertainty_raw)
-                            if parsed_unc > max_uncertainty_meters:
-                                continue
-                            uncertainty_val = parsed_unc
+                            lat_val = float(lat)
+                            lon_val = float(lon)
                         except (ValueError, TypeError):
                             pass
 
-                # 2. Temporal & Phenology Validation (year, month, day)
-                year = rec.get("year")
-                month = rec.get("month")
-                day = rec.get("day")
-                pheno_res = calculate_circular_phenology(year, month, day)
-                if pheno_res is None:
-                    continue
-                doy, pheno_sin, pheno_cos = pheno_res
+                    state_prov = rec.get("stateProvince")
+                    if self.exclude_western and is_excluded_western_region(state_prov, lat=lat_val, lon=lon_val):
+                        taxon_western_excluded += 1
+                        continue
 
-                # 3. High-Resolution Media Image Validation
-                media_list = rec.get("media", [])
-                image_url = extract_high_res_image_url(media_list)
-                if not image_url:
-                    continue
+                    uncertainty_val = self.max_uncertainty_meters
+                    if lat_val is not None and lon_val is not None:
+                        uncertainty_raw = rec.get("coordinateUncertaintyInMeters")
+                        if uncertainty_raw is not None:
+                            try:
+                                parsed_unc = float(uncertainty_raw)
+                                if parsed_unc > self.max_uncertainty_meters:
+                                    continue
+                                uncertainty_val = parsed_unc
+                            except (ValueError, TypeError):
+                                pass
 
-                # 4. Catalog Number & Herbarium Institution Normalization
-                raw_catalog = rec.get("catalogNumber")
-                inst_code = rec.get("institutionCode") or rec.get("collectionCode") or "UNKNOWN_INST"
-                gbif_key = str(rec.get("key", ""))
+                    # 2. Raw Darwin Core Temporal Validation
+                    raw_year = rec.get("year")
+                    raw_month = rec.get("month")
+                    raw_day = rec.get("day")
+                    try:
+                        y = int(raw_year)
+                        m = int(raw_month)
+                        d = int(raw_day)
+                        valid_date = datetime.date(y, m, d)
+                        year_val, month_val, day_val = y, m, d
+                    except (ValueError, TypeError, OverflowError):
+                        continue
 
-                if raw_catalog and str(raw_catalog).strip():
-                    catalog_number = sanitize_filename(str(raw_catalog).strip())
-                else:
-                    catalog_number = f"{sanitize_filename(inst_code)}_{gbif_key}"
+                    event_date = str(rec.get("eventDate") or valid_date.isoformat()).strip()
 
-                # Ensure unique catalog identifier across duplicate uploads
-                unique_key = (catalog_number, gbif_key)
-                if unique_key in seen_catalog_keys:
-                    continue
-                seen_catalog_keys.add(unique_key)
+                    # 3. High-Resolution Media Image Validation
+                    media_list = rec.get("media", [])
+                    image_url = extract_high_res_image_url(media_list)
+                    if not image_url:
+                        continue
 
-                # Local image path destination
-                relative_image_path = f"data/raw_vouchers/{catalog_number}.jpg"
+                    # 4. Catalog Number & Herbarium Institution Normalization
+                    raw_catalog = rec.get("catalogNumber")
+                    inst_code = rec.get("institutionCode") or rec.get("collectionCode") or "UNKNOWN_INST"
+                    gbif_key = str(rec.get("key", ""))
 
-                # 5. Taxonomic Authority & Determiner Tier Stratification
-                type_status_raw = rec.get("typeStatus")
-                identified_by_raw = rec.get("identifiedBy")
-                recorded_by_raw = rec.get("recordedBy")
-                history_raw = rec.get("verbatimIdentificationHistory")
-                locality_raw = rec.get("locality") or rec.get("verbatimLocality")
-                habitat_raw = rec.get("habitat")
-                species_raw = rec.get("scientificName") or rec.get("species") or taxon
+                    if raw_catalog and str(raw_catalog).strip():
+                        catalog_number = sanitize_filename(str(raw_catalog).strip())
+                    else:
+                        catalog_number = f"{sanitize_filename(inst_code)}_{gbif_key}"
 
-                determiner_tier, type_status, determiner_raw = parse_determiner_tier(
-                    type_status_raw=type_status_raw,
-                    identified_by_raw=identified_by_raw,
-                    recorded_by_raw=recorded_by_raw,
-                    history_raw=history_raw,
-                    institution_code_raw=inst_code,
-                    locality_raw=locality_raw,
-                    habitat_raw=habitat_raw
-                )
+                    unique_key = (catalog_number, gbif_key)
+                    if unique_key in seen_catalog_keys:
+                        continue
+                    seen_catalog_keys.add(unique_key)
 
-                # 6. Regional Ecological Group Assignment
-                state_prov = rec.get("stateProvince")
-                regional_group = infer_regional_group(
-                    lat=lat_val,
-                    lon=lon_val,
-                    state_province=state_prov,
-                    habitat=habitat_raw,
-                    locality=locality_raw
-                )
+                    relative_image_path = f"data/raw_vouchers/{catalog_number}.jpg"
 
-                # Append standardized record
-                curated_record = {
-                    "catalogNumber": catalog_number,
-                    "institutionCode": inst_code,
-                    "species_raw": species_raw,
-                    "determiner_raw": determiner_raw,
-                    "determiner_tier": determiner_tier,
-                    "type_status": type_status,
-                    "county": rec.get("county") or "",
-                    "stateProvince": state_prov or "",
-                    "latitude": lat_val,
-                    "longitude": lon_val,
-                    "coordinateUncertainty": uncertainty_val,
-                    "doy": doy,
-                    "pheno_sin": pheno_sin,
-                    "pheno_cos": pheno_cos,
-                    "regional_group": regional_group,
-                    "image_path": relative_image_path,
-                    "_image_url": image_url,  # Temporary internal column for downloading
-                }
-                all_curated_records.append(curated_record)
-                taxon_retained += 1
-                
-                if taxon_retained >= max_records_per_taxon:
+                    # 5. Taxonomic Authority & Determiner Tier Stratification
+                    determiner_tier, type_status, determiner_raw = parse_determiner_tier(
+                        type_status_raw=rec.get("typeStatus"),
+                        identified_by_raw=rec.get("identifiedBy"),
+                        recorded_by_raw=rec.get("recordedBy"),
+                        history_raw=rec.get("verbatimIdentificationHistory"),
+                        institution_code_raw=inst_code,
+                        locality_raw=rec.get("locality") or rec.get("verbatimLocality"),
+                        habitat_raw=rec.get("habitat"),
+                    )
+
+                    # 6. Regional Ecological Group Assignment
+                    regional_group = infer_regional_group(
+                        lat=lat_val,
+                        lon=lon_val,
+                        state_province=state_prov,
+                        habitat=rec.get("habitat"),
+                        locality=rec.get("locality") or rec.get("verbatimLocality"),
+                    )
+
+                    curated_record = {
+                        "catalogNumber": catalog_number,
+                        "institutionCode": inst_code,
+                        "species_raw": rec.get("scientificName") or rec.get("species") or taxon,
+                        "determiner_raw": determiner_raw,
+                        "determiner_tier": determiner_tier,
+                        "type_status": type_status,
+                        "county": rec.get("county") or "",
+                        "stateProvince": state_prov or "",
+                        "latitude": lat_val,
+                        "longitude": lon_val,
+                        "coordinateUncertainty": uncertainty_val,
+                        "year": year_val,
+                        "month": month_val,
+                        "day": day_val,
+                        "eventDate": event_date,
+                        "regional_group": regional_group,
+                        "image_path": relative_image_path,
+                        "_image_url": image_url,
+                    }
+                    all_curated_records.append(curated_record)
+                    taxon_retained += 1
+
+                    if taxon_retained >= self.max_records_per_taxon:
+                        break
+
+                offset += len(results)
+                if offset >= count:
                     break
+                time.sleep(0.1)
 
-            offset += len(results)
-            if offset >= count:
-                break
-            time.sleep(0.1)  # Respectful GBIF rate limiting
+            self.logger.info(
+                f"Taxon '{taxon}': Processed {taxon_harvested} occurrences -> "
+                f"Retained {taxon_retained} curated records meeting quality filters "
+                f"(Western states excluded: {taxon_western_excluded})."
+            )
 
-        logger.info(
-            f"Taxon '{taxon}': Processed {taxon_harvested} occurrences -> "
-            f"Retained {taxon_retained} curated records meeting quality filters "
-            f"(Western states excluded: {taxon_western_excluded})."
-        )
+        return pd.DataFrame(all_curated_records)
 
-    # Convert to DataFrame
-    df = pd.DataFrame(all_curated_records)
-    return df
+    def download_and_validate_media(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        """Asynchronously downloads voucher specimen sheets and filters substandard imagery."""
+        if df.empty or "_image_url" not in df.columns:
+            return df, {"success": 0, "skipped": 0, "failed": 0, "quality_rejected": 0}
 
-
-def main() -> None:
-    """
-    Main entry point for command-line execution of the voucher harvester.
-    """
-    parser = argparse.ArgumentParser(
-        description="Automated GBIF Voucher Harvester & Determiner Authority Scorer for Packera dubia."
-    )
-    parser.add_argument(
-        "--taxa",
-        nargs="+",
-        default=DEFAULT_TARGET_TAXA,
-        help="List of scientific binomials or names to harvest from GBIF."
-    )
-    parser.add_argument(
-        "--max-uncertainty",
-        type=float,
-        default=5000.0,
-        help="Maximum coordinate uncertainty in meters (default: 5000.0)."
-    )
-    parser.add_argument(
-        "--max-records-per-taxon",
-        type=int,
-        default=5000,
-        help="Maximum records to harvest per taxon (default: 5000)."
-    )
-    parser.add_argument(
-        "--exclude-western",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Exclude vouchers from states farther west than Texas and Oklahoma (default: True)."
-    )
-    parser.add_argument(
-        "--min-megapixels",
-        type=float,
-        default=DEFAULT_MIN_MEGAPIXELS,
-        help=f"Minimum optical resolution in Megapixels (default: {DEFAULT_MIN_MEGAPIXELS})."
-    )
-    parser.add_argument(
-        "--min-file-size-kb",
-        type=float,
-        default=DEFAULT_MIN_FILE_SIZE_KB,
-        help=f"Minimum compressed image file size in KB (default: {DEFAULT_MIN_FILE_SIZE_KB})."
-    )
-    parser.add_argument(
-        "--check-sharpness",
-        action="store_true",
-        default=False,
-        help="Enable Laplacian variance edge sharpness evaluation to reject upscaled/blurry images."
-    )
-    parser.add_argument(
-        "--min-sharpness",
-        type=float,
-        default=DEFAULT_MIN_SHARPNESS_LAPLACIAN,
-        help=f"Minimum Laplacian variance threshold (default: {DEFAULT_MIN_SHARPNESS_LAPLACIAN})."
-    )
-    parser.add_argument(
-        "--download-images",
-        action="store_true",
-        default=False,
-        help="Flag to enable asynchronous high-resolution specimen image downloading."
-    )
-    parser.add_argument(
-        "--concurrency",
-        type=int,
-        default=15,
-        help="Max concurrent asynchronous image downloads (default: 15)."
-    )
-    parser.add_argument(
-        "--output-csv",
-        type=str,
-        default=str(DEFAULT_OUTPUT_CSV),
-        help=f"Target path for curated metadata CSV (default: {DEFAULT_OUTPUT_CSV})."
-    )
-    parser.add_argument(
-        "--log-file",
-        type=str,
-        default=str(DEFAULT_SUMMARY_LOG),
-        help=f"Path for summary log file (default: {DEFAULT_SUMMARY_LOG})."
-    )
-
-    args = parser.parse_args()
-
-    # Create destination directories
-    output_csv_path = Path(args.output_csv)
-    output_csv_path.parent.mkdir(parents=True, exist_ok=True)
-    DEFAULT_RAW_DIR.mkdir(parents=True, exist_ok=True)
-    log_file_path = Path(args.log_file)
-    log_file_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Initialize logger
-    logger = setup_logger(log_file_path)
-    logger.info("Starting Packera Voucher Ingestion & Authority Stratification Pipeline...")
-    logger.info(f"Target Taxa: {args.taxa}")
-    logger.info(f"Max Coordinate Uncertainty Threshold: {args.max_uncertainty} m")
-    logger.info(f"Exclude Western States (> TX & OK): {args.exclude_western}")
-    logger.info(f"Image Quality Thresholds: min_megapixels={args.min_megapixels} MP, min_file_size_kb={args.min_file_size_kb} KB, check_sharpness={args.check_sharpness}")
-
-    # Step 1: Harvest and curate metadata records from GBIF
-    df_curated = harvest_taxa_occurrences(
-        taxa_list=args.taxa,
-        max_uncertainty_meters=args.max_uncertainty,
-        max_records_per_taxon=args.max_records_per_taxon,
-        exclude_western=args.exclude_western,
-        logger=logger
-    )
-
-    download_stats = None
-
-    # Step 2: Asynchronously download specimen images if enabled
-    if args.download_images and not df_curated.empty and "_image_url" in df_curated.columns:
-        download_queue = []
-        for _, row in df_curated.iterrows():
+        download_queue: List[Tuple[str, Path]] = []
+        for _, row in df.iterrows():
             url = row["_image_url"]
-            # Resolve image destination path relative to project workspace
-            dest = DEFAULT_WORKSPACE / row["image_path"]
+            dest = self.workspace_dir / row["image_path"]
             download_queue.append((url, dest))
 
-        logger.info(f"Starting asynchronous download of {len(download_queue)} voucher sheets...")
-        download_stats = asyncio.run(
+        self.logger.info(f"Starting asynchronous download of {len(download_queue)} voucher sheets...")
+        stats: Dict[str, Any] = asyncio.run(
             download_all_voucher_images(
                 records_to_download=download_queue,
-                concurrency_limit=args.concurrency,
-                logger=logger
+                concurrency_limit=self.concurrency,
+                logger=self.logger,
             )
         )
 
-        # Step 2b: Validate resolution, file size, and optical quality of downloaded/cached images
-        logger.info(f"Auditing specimen image quality (min_megapixels={args.min_megapixels} MP, min_file_size_kb={args.min_file_size_kb} KB)...")
+        self.logger.info(
+            f"Auditing specimen image quality (min_megapixels={self.min_megapixels} MP, "
+            f"min_file_size_kb={self.min_file_size_kb} KB)..."
+        )
         valid_indices = []
         quality_rejected = 0
         mp_values = []
 
-        for idx, row in df_curated.iterrows():
-            img_dest = DEFAULT_WORKSPACE / row["image_path"]
+        for idx, row in df.iterrows():
+            img_dest = self.workspace_dir / row["image_path"]
             is_valid, q_metrics = validate_image_quality(
                 image_path=img_dest,
-                min_megapixels=args.min_megapixels,
-                min_file_size_kb=args.min_file_size_kb,
-                check_sharpness=args.check_sharpness,
-                min_sharpness=args.min_sharpness,
+                min_megapixels=self.min_megapixels,
+                min_file_size_kb=self.min_file_size_kb,
+                check_sharpness=self.check_sharpness,
+                min_sharpness=self.min_sharpness,
             )
             if is_valid:
                 valid_indices.append(idx)
@@ -393,55 +800,70 @@ def main() -> None:
                     mp_values.append(q_metrics["megapixels"])
             else:
                 quality_rejected += 1
-                # If image exists locally but failed quality criteria, remove to prevent dirty cache
                 if img_dest.exists():
                     try:
                         img_dest.unlink()
                     except Exception:
                         pass
 
-        logger.info(
+        self.logger.info(
             f"Quality Audit Complete: Retained {len(valid_indices)} vouchers meeting quality standards "
             f"(Rejected {quality_rejected} substandard/low-res images)."
         )
-        df_curated = df_curated.loc[valid_indices].reset_index(drop=True)
+        df_filtered = df.loc[valid_indices].reset_index(drop=True)
+        stats["quality_rejected"] = quality_rejected
+        if mp_values:
+            stats["median_mp"] = float(np.median(mp_values))
 
-        if download_stats is not None:
-            download_stats["quality_rejected"] = quality_rejected
-            if mp_values:
-                download_stats["median_mp"] = float(np.median(mp_values))
+        return df_filtered, stats
 
-    # Step 3: Export standardized CSV (excluding internal temporary columns)
-    export_columns = [
-        "catalogNumber",
-        "institutionCode",
-        "species_raw",
-        "determiner_raw",
-        "determiner_tier",
-        "type_status",
-        "county",
-        "stateProvince",
-        "latitude",
-        "longitude",
-        "coordinateUncertainty",
-        "doy",
-        "pheno_sin",
-        "pheno_cos",
-        "regional_group",
-        "image_path"
-    ]
-    
-    if not df_curated.empty:
-        df_export = df_curated[[col for col in export_columns if col in df_curated.columns]]
-        df_export.to_csv(output_csv_path, index=False, encoding="utf-8")
-        logger.info(f"Successfully exported {len(df_export)} curated records to: {output_csv_path}")
-    else:
-        # Create empty table with standardized headers
-        pd.DataFrame(columns=export_columns).to_csv(output_csv_path, index=False, encoding="utf-8")
-        logger.warning(f"No records met all filtering criteria. Created empty table at: {output_csv_path}")
+    def export(self, df: pd.DataFrame) -> Path:
+        """Atomically persists the curated vouchers table to CSV."""
+        return export_curated_table(df, self.output_csv, logger=self.logger)
 
-    # Step 4: Output comprehensive summary log
-    print_and_log_summary(df_curated, download_stats, logger)
-    logger.info("Pipeline execution completed successfully.")
+    def run(self, download_images: bool = False) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
+        """Executes the end-to-end voucher ingestion and curation workflow."""
+        self.logger.info("Starting Packera Voucher Ingestion & Authority Stratification Pipeline...")
+        self.logger.info(f"Target Taxa: {self.taxa}")
+        self.logger.info(f"Max Coordinate Uncertainty Threshold: {self.max_uncertainty_meters} m")
+        self.logger.info(f"Exclude Western States (> TX & OK): {self.exclude_western}")
+
+        df_curated = self.harvest()
+        download_stats = None
+
+        if download_images and not df_curated.empty:
+            df_curated, download_stats = self.download_and_validate_media(df_curated)
+
+        self.export(df_curated)
+        print_and_log_summary(df_curated, download_stats, self.logger)
+        self.logger.info("Pipeline execution completed successfully.")
+        return df_curated, download_stats
 
 
+def harvest_taxa_occurrences(
+    taxa_list: List[str],
+    max_uncertainty_meters: float = 5000.0,
+    max_records_per_taxon: int = 1000,
+    exclude_western: bool = True,
+    logger: Optional[logging.Logger] = None,
+) -> pd.DataFrame:
+    """Backwards-compatible functional entry point for occurrence harvesting."""
+    harvester = VoucherHarvester(
+        taxa=taxa_list,
+        max_uncertainty_meters=max_uncertainty_meters,
+        max_records_per_taxon=max_records_per_taxon,
+        exclude_western=exclude_western,
+        logger=logger,
+    )
+    return harvester.harvest()
+
+
+def main() -> None:
+    """CLI execution wrapper delegating to data prep runner."""
+    import importlib
+    cli_mod = importlib.import_module("scripts.data_prep.01_voucher_harvester")
+    cli_mod.main()
+
+
+if __name__ == "__main__":
+    main()

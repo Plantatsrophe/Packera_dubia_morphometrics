@@ -1,36 +1,38 @@
 #!/usr/bin/env python3
 """
-Unit tests for botanical voucher harvesting and geographic exclusion filters.
-Tests the exclusion of western US states (farther west than Texas and Oklahoma)
-and verifies standard botanical ingestion filtering.
+===============================================================================
+Unit tests for botanical voucher harvesting, authority stratification,
+Darwin Core metadata normalization, and atomic persistence.
+===============================================================================
 """
 
-import unittest
-from unittest.mock import patch, MagicMock
-from pathlib import Path
-import pandas as pd
-import numpy as np
-
 import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import pandas as pd
 from PIL import Image
 
 from scripts.core.config import (
+    DEFAULT_MIN_MEGAPIXELS,
+    DEFAULT_TARGET_TAXA,
     EXCLUDED_WESTERN_STATES,
     WESTERN_LONGITUDE_THRESHOLD,
-    DEFAULT_TARGET_TAXA,
-    DEFAULT_MIN_MEGAPIXELS,
 )
-from scripts.core.harvester_utils import (
-    is_excluded_western_region,
-    sanitize_filename,
-    parse_determiner_tier,
-    calculate_circular_phenology,
-    infer_regional_group,
-    optimize_herbarium_image_url,
+from scripts.core.harvester import (
+    VoucherHarvester,
+    export_curated_table,
     extract_high_res_image_url,
+    harvest_taxa_occurrences,
+    infer_regional_group,
+    is_excluded_western_region,
+    optimize_herbarium_image_url,
+    parse_determiner_tier,
+    sanitize_filename,
     validate_image_quality,
 )
-from scripts.core.harvester import harvest_taxa_occurrences
 
 
 class TestVoucherHarvesterGeographicFiltering(unittest.TestCase):
@@ -41,25 +43,25 @@ class TestVoucherHarvesterGeographicFiltering(unittest.TestCase):
         western_names = [
             "Colorado", "New Mexico", "Wyoming", "Montana", "Utah",
             "Idaho", "Arizona", "Nevada", "Washington", "Oregon",
-            "California", "Alaska", "Hawaii"
+            "California", "Alaska", "Hawaii",
         ]
         for state in western_names:
             with self.subTest(state=state):
                 self.assertTrue(
                     is_excluded_western_region(state),
-                    f"State '{state}' should be excluded."
+                    f"State '{state}' should be excluded.",
                 )
 
     def test_western_states_exclusion_abbreviations(self):
         """Verify that 2-letter postal codes for western states are excluded."""
         western_codes = [
-            "CO", "NM", "WY", "MT", "UT", "ID", "AZ", "NV", "WA", "OR", "CA", "AK", "HI"
+            "CO", "NM", "WY", "MT", "UT", "ID", "AZ", "NV", "WA", "OR", "CA", "AK", "HI",
         ]
         for code in western_codes:
             with self.subTest(code=code):
                 self.assertTrue(
                     is_excluded_western_region(code),
-                    f"Code '{code}' should be excluded."
+                    f"Code '{code}' should be excluded.",
                 )
 
     def test_eastern_and_plains_states_retained(self):
@@ -91,7 +93,7 @@ class TestVoucherHarvesterGeographicFiltering(unittest.TestCase):
             with self.subTest(state=state):
                 self.assertFalse(
                     is_excluded_western_region(state),
-                    f"State '{state}' should be retained (not excluded)."
+                    f"State '{state}' should be retained (not excluded).",
                 )
 
     def test_washington_dc_disambiguation(self):
@@ -106,24 +108,21 @@ class TestVoucherHarvesterGeographicFiltering(unittest.TestCase):
 
     def test_coordinate_fallback_filtering(self):
         """Verify longitude threshold fallback when stateProvince is missing/unrecorded."""
-        # Specimen in Colorado/Utah region with missing state
         self.assertTrue(
             is_excluded_western_region(None, lat=39.5, lon=-108.5),
-            "Unrecorded state with longitude < -106.65 should be excluded."
+            "Unrecorded state with longitude < -106.65 should be excluded.",
         )
-        # Specimen in North Carolina with missing state
         self.assertFalse(
             is_excluded_western_region(None, lat=35.9, lon=-79.0),
-            "Unrecorded state with Eastern longitude should be retained."
+            "Unrecorded state with Eastern longitude should be retained.",
         )
-        # Specimen in Texas with missing state
         self.assertFalse(
             is_excluded_western_region(None, lat=31.5, lon=-98.0),
-            "Unrecorded state in central Texas longitude should be retained."
+            "Unrecorded state in central Texas longitude should be retained.",
         )
 
-    def test_harvester_ingestion_drops_western_records(self):
-        """Verify harvest_taxa_occurrences filters out western records from mock API response."""
+    def test_harvester_ingestion_drops_western_records_and_retains_dwc_fields(self):
+        """Verify harvester normalizes raw DwC temporal fields and excludes western records."""
         mock_results = [
             {
                 "key": 1001,
@@ -145,9 +144,11 @@ class TestVoucherHarvesterGeographicFiltering(unittest.TestCase):
                 "decimalLongitude": -79.05,
                 "coordinateUncertaintyInMeters": 100.0,
                 "year": 2020, "month": 5, "day": 10,
+                "eventDate": "2020-05-10",
                 "media": [{"identifier": "https://example.com/ncu1.jpg", "type": "StillImage", "format": "image/jpeg"}],
                 "catalogNumber": "NCU001",
                 "institutionCode": "NCU",
+                "identifiedBy": "Debra Trock",
             },
             {
                 "key": 1003,
@@ -178,14 +179,13 @@ class TestVoucherHarvesterGeographicFiltering(unittest.TestCase):
         with patch("scripts.core.harvester.occ.search") as mock_occ_search:
             mock_occ_search.return_value = {
                 "results": mock_results,
-                "count": len(mock_results)
+                "count": len(mock_results),
             }
 
-            # Harvest with exclude_western=True (default)
             df = harvest_taxa_occurrences(
                 taxa_list=["Packera paupercula"],
                 max_records_per_taxon=10,
-                exclude_western=True
+                exclude_western=True,
             )
 
             # Only NCU001 (NC) and TEX001 (TX) should be retained
@@ -195,6 +195,79 @@ class TestVoucherHarvesterGeographicFiltering(unittest.TestCase):
             self.assertIn("TEX001", retained_catalogs)
             self.assertNotIn("COLO001", retained_catalogs)
             self.assertNotIn("RM001", retained_catalogs)
+
+            # Check raw Darwin Core temporal fields are present
+            self.assertIn("year", df.columns)
+            self.assertIn("month", df.columns)
+            self.assertIn("day", df.columns)
+            self.assertIn("eventDate", df.columns)
+
+            # Verify circular phenology features are DECOUPLED and not present
+            self.assertNotIn("pheno_sin", df.columns)
+            self.assertNotIn("pheno_cos", df.columns)
+            self.assertNotIn("doy", df.columns)
+
+            # Check Determiner Tier Stratification (NCU001 was identified by Debra Trock -> Tier_1_Gold)
+            ncu_rec = df[df["catalogNumber"] == "NCU001"].iloc[0]
+            self.assertEqual(ncu_rec["determiner_tier"], "Tier_1_Gold")
+
+
+class TestDeterminerAuthorityStratification(unittest.TestCase):
+    """Test suite for 3-tier determiner authority classification."""
+
+    def test_tier_1_specialist(self):
+        """Specialist annotations (Trock, Barkley, Kowal) map to Tier_1_Gold."""
+        tier, t_clean, determiner = parse_determiner_tier(
+            type_status_raw=None,
+            identified_by_raw="D.K. Trock",
+            recorded_by_raw="John Doe",
+            history_raw=None,
+            institution_code_raw="NCU",
+            locality_raw="Granite outcrop near Wake Forest",
+            habitat_raw="Flatrock",
+        )
+        self.assertEqual(tier, "Tier_1_Gold")
+        self.assertEqual(determiner, "D.K. Trock")
+
+    def test_tier_1_type_specimen(self):
+        """Holotypes and isotypes map to Tier_1_Gold regardless of determiner."""
+        tier, t_clean, determiner = parse_determiner_tier(
+            type_status_raw="Holotype",
+            identified_by_raw=None,
+            recorded_by_raw="A. Radford",
+            history_raw=None,
+            institution_code_raw="NCU",
+            locality_raw="Rich mountain slope",
+            habitat_raw="Cove forest",
+        )
+        self.assertEqual(tier, "Tier_1_Gold")
+        self.assertEqual(t_clean, "Holotype")
+
+    def test_tier_2_major_herbarium_rich_locality(self):
+        """Major herbarium with rich locality and verified determiner maps to Tier_2_Silver."""
+        tier, t_clean, determiner = parse_determiner_tier(
+            type_status_raw=None,
+            identified_by_raw="Botanist Jane",
+            recorded_by_raw="Jane Collector",
+            history_raw=None,
+            institution_code_raw="NCU",
+            locality_raw="Roadside embankment 5 miles north of Chapel Hill",
+            habitat_raw="Granitic glade",
+        )
+        self.assertEqual(tier, "Tier_2_Silver")
+
+    def test_tier_3_bronze_unverified(self):
+        """General collectors or unknown herbaria without rich ecology map to Tier_3_Bronze."""
+        tier, t_clean, determiner = parse_determiner_tier(
+            type_status_raw=None,
+            identified_by_raw=None,
+            recorded_by_raw="Unknown Collector",
+            history_raw=None,
+            institution_code_raw="XYZ_HERB",
+            locality_raw="Roadside",
+            habitat_raw=None,
+        )
+        self.assertEqual(tier, "Tier_3_Bronze")
 
 
 class TestImageQualityAndUrlOptimization(unittest.TestCase):
@@ -230,12 +303,12 @@ class TestImageQualityAndUrlOptimization(unittest.TestCase):
             {
                 "type": "StillImage",
                 "format": "image/jpeg",
-                "identifier": "https://media.symbiota.org/NCU/thumbnails/NCU001_tn.jpg"
+                "identifier": "https://media.symbiota.org/NCU/thumbnails/NCU001_tn.jpg",
             },
             {
                 "type": "StillImage",
                 "format": "image/jpeg",
-                "identifier": "https://media.symbiota.org/NCU/original/NCU001_lg.jpg"
+                "identifier": "https://media.symbiota.org/NCU/original/NCU001_lg.jpg",
             },
         ]
         selected_url = extract_high_res_image_url(media_list)
@@ -247,7 +320,7 @@ class TestImageQualityAndUrlOptimization(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
 
-            # 1. Create small low-res image (800 x 1000 = 0.8 MP)
+            # 1. Low-res image (800 x 1000 = 0.8 MP)
             low_res_img = tmp_path / "low_res.jpg"
             img_small = Image.new("RGB", (800, 1000), color=(128, 128, 128))
             img_small.save(low_res_img, "JPEG")
@@ -257,7 +330,7 @@ class TestImageQualityAndUrlOptimization(unittest.TestCase):
             self.assertEqual(metrics["reason"], "low_resolution")
             self.assertLess(metrics["megapixels"], 8.0)
 
-            # 2. Create high-res image (3000 x 4000 = 12.0 MP)
+            # 2. High-res image (3000 x 4000 = 12.0 MP)
             high_res_img = tmp_path / "high_res.jpg"
             img_large = Image.new("RGB", (3000, 4000), color=(128, 128, 128))
             img_large.save(high_res_img, "JPEG")
@@ -265,6 +338,44 @@ class TestImageQualityAndUrlOptimization(unittest.TestCase):
             is_valid_high, metrics_high = validate_image_quality(high_res_img, min_megapixels=8.0, min_file_size_kb=1.0)
             self.assertTrue(is_valid_high)
             self.assertEqual(metrics_high["megapixels"], 12.0)
+
+
+class TestAtomicTableExport(unittest.TestCase):
+    """Test suite for atomic CSV table persistence."""
+
+    def test_atomic_export_creates_file_with_dwc_columns(self):
+        """Verify export_curated_table creates destination CSV with DwC headers."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = Path(tmpdir) / "curated_test.csv"
+            sample_df = pd.DataFrame([
+                {
+                    "catalogNumber": "NCU001",
+                    "institutionCode": "NCU",
+                    "species_raw": "Packera dubia",
+                    "determiner_raw": "D.K. Trock",
+                    "determiner_tier": "Tier_1_Gold",
+                    "type_status": "None",
+                    "county": "Wake",
+                    "stateProvince": "North Carolina",
+                    "latitude": 35.8,
+                    "longitude": -78.6,
+                    "coordinateUncertainty": 500.0,
+                    "year": 1998,
+                    "month": 5,
+                    "day": 12,
+                    "eventDate": "1998-05-12",
+                    "regional_group": "Piedmont_Granite_Flatrocks",
+                    "image_path": "data/raw_vouchers/NCU001.jpg",
+                }
+            ])
+
+            exported_path = export_curated_table(sample_df, out_file)
+            self.assertTrue(exported_path.exists())
+            read_df = pd.read_csv(exported_path)
+            self.assertEqual(len(read_df), 1)
+            self.assertEqual(read_df.iloc[0]["catalogNumber"], "NCU001")
+            self.assertEqual(read_df.iloc[0]["year"], 1998)
+            self.assertEqual(read_df.iloc[0]["determiner_tier"], "Tier_1_Gold")
 
 
 if __name__ == "__main__":
