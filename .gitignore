@@ -369,7 +369,56 @@ LM2_Project/
 # ------------------------------------------------------------------------------
 # 10. IDE, Editor & Agent Configurations
 # ------------------------------------------------------------------------------
+# VS Code
 .vscode/
+
+# JetBrains / PyCharm
+.idea/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# AI Agents & Coding Assistants
 .agents/
 AGENTS.md
 agents.md
+.gemini/
+GEMINI.md
+gemini.md
+.cursor/
+.cursorrules
+.claude/
+CLAUDE.md
+claude.md
+
+# ------------------------------------------------------------------------------
+# 11. System Core Dumps & Crash Diagnostics
+# ------------------------------------------------------------------------------
+/core
+core.[0-9]*
+vgcore.*
+
+# ------------------------------------------------------------------------------
+# 12. Compressed Archives & Raw Specimen Bundles
+# ------------------------------------------------------------------------------
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.7z
+*.rar
+
+# ------------------------------------------------------------------------------
+# 13. GPU Kernel & Deep Learning Compiler Caches
+# ------------------------------------------------------------------------------
+.triton/
+.nv/
+
+# ------------------------------------------------------------------------------
+# 14. Testing Frameworks & Extended Tooling Caches
+# ------------------------------------------------------------------------------
+.tox/
+.nox/
+.hypothesis/

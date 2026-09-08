@@ -104,6 +104,7 @@ Navigation & Viewport Controls:
 Segmentation & Prompting:
   - Left-Click:          Add positive foreground prompt point (Green landmark).
   - Right-Click:         Add negative exclusion prompt point (Red landmark).
+  - Ctrl + Z / 'z' / Bksp: Undo last prompt point (removes single inclusion or exclusion point and re-runs SAM 2 in real time; also clickable via the top-right '[Undo Pt (Ctrl+Z)]' HUD button).
   - Shift + Left-Drag:   Draw bounding box constraint (restricts SAM 2 search space).
   - Tab:                 Cycle through the 3 SAM 2 multimask candidate granularities (sub-lobe vs. blade vs. clump).
   - 'k':                 Two-click knife tool for petiole/caudex slicing (Click 1: start cut, Click 2: end cut; press 'k' again to toggle off).
@@ -159,9 +160,10 @@ C. Caudex Separation via the Two-Click Knife Tool ('k'):
      SAM 2 cannot infer an anatomical boundary because the pressed plant tissue is continuous and dark.
    - Press `k` to activate Knife Mode.
    - Click once at one edge of the petiole-caudex junction, then click across the opposite edge.
-   - The annotator draws a straight cut line across the junction and divides the candidate mask, 
-     keeping only the foliar segment connected to your primary prompt point.
-   - Press `k` again to exit knife mode, then press '1' to commit the clean `leaf_petiole` instance.
+   - The annotator severs the mask along the cut line and automatically prunes away the disconnected 
+     fragment, retaining only the target segment containing your prompt point(s).
+   - Upon completing the cut, the annotator automatically returns to SELECT mode so you can press '1' 
+     to commit the clean `leaf_petiole` instance immediately.
 
 D. Managing Arachnoid Tomentum with Morphological Margin Tuning ('+' / '-'):
    - *Packera dubia* and *Packera tomentosa* display woolly, arachnoid pubescence (tomentum) along 

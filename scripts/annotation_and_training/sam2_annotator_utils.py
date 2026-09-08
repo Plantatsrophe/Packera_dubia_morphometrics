@@ -111,31 +111,96 @@ def split_mask_with_knife_line(
     line_start: Tuple[int, int],
     line_end: Tuple[int, int],
     line_thickness: int = 2,
-    dilation_px: int = 2
+    dilation_px: int = 2,
+    keep_points: Optional[List[Tuple[float, float]]] = None,
+    bounding_box: Optional[Tuple[float, float, float, float]] = None,
 ) -> np.ndarray:
     """
     Sever a binary mask using a knife cut line across petiole-caudex junction
     or overlapping blade boundary, zeroing out mask pixels along the line with dilation.
 
+    If keep_points (e.g. positive foreground prompts) or bounding_box is provided,
+    connected components analysis is applied to automatically retain the component(s)
+    belonging to the intended target and prune severed disconnected fragments.
+
     Args:
-        binary_mask: 2D uint8 binary mask array.
+        binary_mask: 2D uint8 or bool binary mask array.
         line_start: (x, y) start coordinate.
         line_end: (x, y) end coordinate.
         line_thickness: Initial cut line stroke width in pixels.
         dilation_px: Morphological dilation radius applied to cut line (default 2 px).
+        keep_points: Optional list of (x, y) float coordinates of foreground prompts to retain.
+        bounding_box: Optional (bx0, by0, bx1, by1) bbox prompt to guide component retention.
 
     Returns:
-        np.ndarray: Mask with knife cut line zeroed out.
+        np.ndarray: Pruned binary mask with severed unwanted fragments cleared.
     """
-    cut_mask = binary_mask.copy()
+    is_bool = (binary_mask.dtype == bool)
+    cut_mask = (binary_mask.astype(np.uint8) * 255) if is_bool else binary_mask.copy()
     h, w = cut_mask.shape[:2]
+
     line_canvas = np.zeros((h, w), dtype=np.uint8)
     cv2.line(line_canvas, line_start, line_end, 255, thickness=line_thickness)
     if dilation_px > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * dilation_px + 1, 2 * dilation_px + 1))
         line_canvas = cv2.dilate(line_canvas, kernel, iterations=1)
     cut_mask[line_canvas > 0] = 0
-    return cut_mask
+
+    # Prune severed fragments if prompt guidance is provided
+    if (keep_points is not None or bounding_box is not None) and np.count_nonzero(cut_mask) > 0:
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            (cut_mask > 0).astype(np.uint8), connectivity=8
+        )
+        if num_labels > 2:
+            kept_labels = set()
+
+            if keep_points:
+                for pt in keep_points:
+                    px, py = int(round(pt[0])), int(round(pt[1]))
+                    matched_lbl = 0
+                    if 0 <= px < w and 0 <= py < h:
+                        matched_lbl = labels[py, px]
+
+                    # If point falls on zeroed line, search local neighborhood
+                    if matched_lbl == 0:
+                        for dy in range(-4, 5):
+                            for dx in range(-4, 5):
+                                nx, ny = px + dx, py + dy
+                                if 0 <= nx < w and 0 <= ny < h and labels[ny, nx] > 0:
+                                    matched_lbl = labels[ny, nx]
+                                    break
+                            if matched_lbl > 0:
+                                break
+
+                    if matched_lbl > 0:
+                        kept_labels.add(matched_lbl)
+
+            # If no point prompt matched, check bounding box overlap
+            if not kept_labels and bounding_box is not None:
+                bx0, by0, bx1, by1 = [int(round(v)) for v in bounding_box]
+                bx0, bx1 = max(0, min(bx0, bx1)), min(w, max(bx0, bx1))
+                by0, by1 = max(0, min(by0, by1)), min(h, max(by0, by1))
+
+                best_overlap = 0
+                best_lbl = 0
+                for lbl in range(1, num_labels):
+                    overlap = np.count_nonzero(labels[by0:by1, bx0:bx1] == lbl)
+                    if overlap > best_overlap:
+                        best_overlap = overlap
+                        best_lbl = lbl
+                if best_lbl > 0:
+                    kept_labels.add(best_lbl)
+
+            # Fallback: retain largest connected component
+            if not kept_labels:
+                largest_lbl = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+                kept_labels.add(largest_lbl)
+
+            # Discard severed fragments not in kept_labels
+            mask_kept = np.isin(labels, list(kept_labels))
+            cut_mask[~mask_kept] = 0
+
+    return (cut_mask > 0) if is_bool else cut_mask
 
 
 def apply_knife_cut(
@@ -401,6 +466,19 @@ def mask_to_polygons(
 # 3. Viewport & Native Rendering Routines
 # ===============================================================================
 
+def get_undo_button_rect(canvas_w: int, hud_h: int = 70) -> Tuple[int, int, int, int]:
+    """
+    Returns (x0, y0, x1, y1) bounding box for the clickable Undo Point button in the HUD.
+    """
+    btn_w = 170
+    btn_h = 26
+    x0 = max(10, canvas_w - btn_w - 15)
+    y0 = 38
+    x1 = x0 + btn_w
+    y1 = y0 + btn_h
+    return x0, y0, x1, y1
+
+
 def render_hud_overlay(
     display_img: np.ndarray,
     voucher_name: str,
@@ -419,7 +497,7 @@ def render_hud_overlay(
     """
     Renders semi-transparent HUD banner at top of window displaying:
     [Voucher: X/Y | Catalog: NCU... | Instances: N (B:x, P:y) | Zoom: Zx | Mask: C/3 (IoU) | View: Fill/Contour]
-    plus active tool mode and shortcut reminders.
+    plus active tool mode, shortcut reminders, and an interactive Undo Point button.
     """
     canvas = display_img.copy()
     h, w = canvas.shape[:2]
@@ -453,19 +531,37 @@ def render_hud_overlay(
     )
     cv2.putText(canvas, header_text, (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (245, 245, 245), 2, cv2.LINE_AA)
 
+    # Render Clickable "Undo Pt (Ctrl+Z)" button badge in top-right of HUD
+    bx0, by0, bx1, by1 = get_undo_button_rect(w, hud_h)
+    if bx0 > 240:
+        btn_overlay = canvas.copy()
+        cv2.rectangle(btn_overlay, (bx0, by0), (bx1, by1), (48, 48, 48), -1)
+        cv2.addWeighted(btn_overlay, 0.85, canvas, 0.15, 0, canvas)
+        cv2.rectangle(canvas, (bx0, by0), (bx1, by1), (110, 110, 110), 1)
+        cv2.putText(
+            canvas,
+            "Undo Pt (Ctrl+Z)",
+            (bx0 + 12, by0 + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.44,
+            (235, 235, 235),
+            1,
+            cv2.LINE_AA,
+        )
+
     # Line 2: Mode & dynamic shortcut controls
     if mode == "POLYGON":
         mode_color = (0, 220, 255)
         mode_str = "MODE: [POLYGON BOX]"
-        inst_summary = "Left-Click: Mark Vertices | Enter / Click Start: Finalize Box | Backspace: Undo | P: Exit"
+        inst_summary = "Left-Click: Vertices | Ctrl+Z / Bksp: Undo | Enter: Finalize | P: Exit"
     elif mode == "KNIFE":
         mode_color = (0, 100, 255)
         mode_str = "MODE: [KNIFE CUT]"
-        inst_summary = "Two-Click: Click Pt A then Pt B across junction to sever mask with 2px cut | K: Exit"
+        inst_summary = "Two-Click: Click Pt A then Pt B across junction | Ctrl+Z: Undo Pt A | K: Exit"
     else:
         mode_color = (0, 255, 0)
         mode_str = "MODE: [SELECT]"
-        inst_summary = "0-6: Commit | Tab: Granularity | o: Fill/Contour | v: Peek | +/-: Margin | k: Knife | [/]: Alpha | f: Fit | Enter: Save"
+        inst_summary = "Ctrl+Z: Undo Pt | 0-6: Commit | Tab: Granularity | o: View | +/-: Margin | k: Knife | Enter: Save"
 
     cv2.putText(canvas, mode_str, (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, mode_color, 2, cv2.LINE_AA)
     cv2.putText(canvas, inst_summary, (205, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (215, 215, 215), 1, cv2.LINE_AA)

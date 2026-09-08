@@ -31,6 +31,7 @@ from scripts.annotation_and_training.sam2_annotator_utils import (
     clamp_viewport_pan,
     convert_masks_to_coco_dataset,
     export_coco_annotations,
+    get_undo_button_rect,
     image_to_viewport_coords,
     overlay_candidate_mask_on_viewport,
     parse_mask_filename,
@@ -140,6 +141,40 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         # Pixels further away must remain foreground
         self.assertEqual(cut[50, 10], 255)
         self.assertEqual(cut[50, 90], 255)
+
+    def test_knife_sever_and_prune_with_prompt_point(self):
+        mask = np.ones((100, 100), dtype=np.uint8) * 255
+        # Cut vertically at x=50, keeping the left fragment with prompt at (25, 50)
+        cut_left = split_mask_with_knife_line(
+            mask, (50, 0), (50, 100), line_thickness=2, dilation_px=2,
+            keep_points=[(25.0, 50.0)]
+        )
+        # Left side must be retained
+        self.assertEqual(cut_left[50, 10], 255)
+        self.assertEqual(cut_left[50, 25], 255)
+        # Right severed fragment must be completely cleared/pruned
+        self.assertEqual(cut_left[50, 75], 0)
+        self.assertEqual(cut_left[50, 90], 0)
+
+        # Cut vertically at x=50, keeping the right fragment with prompt at (75, 50)
+        cut_right = split_mask_with_knife_line(
+            mask, (50, 0), (50, 100), line_thickness=2, dilation_px=2,
+            keep_points=[(75.0, 50.0)]
+        )
+        # Left severed fragment must be pruned
+        self.assertEqual(cut_right[50, 25], 0)
+        # Right side must be retained
+        self.assertEqual(cut_right[50, 75], 255)
+
+    def test_knife_sever_and_prune_with_bounding_box(self):
+        mask = np.ones((100, 100), dtype=np.uint8) * 255
+        # Cut vertically at x=50, bounding box only encompasses the right side [60, 10, 95, 90]
+        cut_box = split_mask_with_knife_line(
+            mask, (50, 0), (50, 100), line_thickness=2, dilation_px=2,
+            bounding_box=(60.0, 10.0, 95.0, 90.0)
+        )
+        self.assertEqual(cut_box[50, 25], 0)
+        self.assertEqual(cut_box[50, 75], 255)
 
     def test_morphological_tuning(self):
         mask = np.zeros((100, 100), dtype=np.uint8)
@@ -654,6 +689,194 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         self.assertEqual(eroded_bool.dtype, bool)
         self.assertEqual(np.count_nonzero(dilated_bool), expected_dilated_area)
         self.assertEqual(np.count_nonzero(eroded_bool), expected_eroded_area)
+
+    def test_x11_window_wm_delete_and_close_event(self):
+        """
+        Verifies that X11GUIWindow correctly registers the WM_DELETE_WINDOW protocol
+        and that poll_events reliably catches WM ClientMessage close events.
+        """
+        import os
+        import ctypes
+        if not os.environ.get("DISPLAY"):
+            self.skipTest("No X11 DISPLAY available")
+
+        import scripts.annotation_and_training.annotate_with_sam2 as a
+        try:
+            win = a.X11GUIWindow(title="Test Close Event", width=200, height=200)
+        except Exception as e:
+            self.skipTest(f"X11 display connection failed: {e}")
+
+        try:
+            self.assertIsNotNone(win.disp)
+            self.assertGreater(win.wm_delete, 0)
+
+            # Send synthetic WM_DELETE_WINDOW ClientMessage
+            x11 = ctypes.CDLL("libX11.so.6")
+            x11.XInternAtom.restype = ctypes.c_ulong
+            x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            wm_protocols = x11.XInternAtom(win.disp, b"WM_PROTOCOLS", False)
+
+            evt = a.XEvent()
+            evt.type = 33
+            evt.xclient.type = 33
+            evt.xclient.serial = 0
+            evt.xclient.send_event = 1
+            evt.xclient.display = win.disp
+            evt.xclient.window = win.win
+            evt.xclient.message_type = wm_protocols
+            evt.xclient.format = 32
+            evt.xclient.data_l[0] = win.wm_delete
+
+            x11.XSendEvent.restype = ctypes.c_int
+            x11.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long, ctypes.c_void_p]
+            x11.XSendEvent(win.disp, win.win, 0, 0, ctypes.byref(evt))
+
+            x11.XSync.restype = ctypes.c_int
+            x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            x11.XSync(win.disp, 0)
+
+            events = win.poll_events()
+            close_events = [ev for ev in events if ev[0] == "close"]
+            self.assertEqual(len(close_events), 1)
+        finally:
+            win.close()
+
+    def test_get_undo_button_rect(self):
+        x0, y0, x1, y1 = get_undo_button_rect(1280, 70)
+        self.assertEqual(x1 - x0, 170)
+        self.assertEqual(y1 - y0, 26)
+        self.assertGreater(x0, 0)
+        self.assertLess(x1, 1280)
+        self.assertGreaterEqual(y0, 0)
+        self.assertLessEqual(y1, 70)
+
+    def test_hud_renders_undo_button(self):
+        canvas = np.zeros((400, 1000, 3), dtype=np.uint8)
+        hud = render_hud_overlay(
+            display_img=canvas,
+            voucher_name="TEST_VOUCHER",
+            voucher_idx=0,
+            total_vouchers=1,
+            saved_instances=[],
+            mode="SELECT",
+            zoom_level=1.0,
+            pan_offset=(0, 0),
+        )
+        bx0, by0, bx1, by1 = get_undo_button_rect(1000, 70)
+        btn_crop = hud[by0:by1, bx0:bx1]
+        self.assertGreater(np.count_nonzero(btn_crop), 0)
+
+    def test_undo_last_point_prompts(self):
+        annotator = PrecisionSAM2Annotator.__new__(PrecisionSAM2Annotator)
+        annotator.predictor = None
+        annotator.active_image = None
+        annotator.mode = "SELECT"
+        annotator.knife_pt_a = None
+        annotator.polygon_points = []
+        annotator.box_prompt = None
+        annotator.candidate_mask = np.ones((50, 50), dtype=np.uint8) * 255
+        annotator.candidate_masks = [annotator.candidate_mask.copy()]
+        annotator.candidate_scores = [0.91]
+
+        # Add 2 inclusion points and 1 exclusion point
+        annotator.point_coords = [[10.0, 10.0], [20.0, 20.0], [30.0, 30.0]]
+        annotator.point_labels = [1, 1, 0]
+
+        # 1. Undo exclusion point
+        res1 = annotator.undo_last_point()
+        self.assertTrue(res1)
+        self.assertEqual(annotator.point_coords, [[10.0, 10.0], [20.0, 20.0]])
+        self.assertEqual(annotator.point_labels, [1, 1])
+
+        # 2. Undo 2nd inclusion point
+        res2 = annotator.undo_last_point()
+        self.assertTrue(res2)
+        self.assertEqual(annotator.point_coords, [[10.0, 10.0]])
+        self.assertEqual(annotator.point_labels, [1])
+
+        # 3. Undo 1st inclusion point (buffer becomes empty)
+        res3 = annotator.undo_last_point()
+        self.assertTrue(res3)
+        self.assertEqual(annotator.point_coords, [])
+        self.assertEqual(annotator.point_labels, [])
+        # Candidate mask should now be cleared
+        self.assertIsNone(annotator.candidate_mask)
+        self.assertEqual(annotator.candidate_masks, [])
+        self.assertEqual(annotator.candidate_scores, [])
+
+        # 4. Undo when empty should return False gracefully
+        res4 = annotator.undo_last_point()
+        self.assertFalse(res4)
+
+    def test_undo_last_point_knife_and_polygon(self):
+        annotator = PrecisionSAM2Annotator.__new__(PrecisionSAM2Annotator)
+        annotator.predictor = None
+        annotator.active_image = None
+        annotator.point_coords = []
+        annotator.point_labels = []
+        annotator.box_prompt = None
+        annotator.candidate_mask = None
+        annotator.candidate_masks = []
+        annotator.candidate_scores = []
+
+        # Knife mode with Point A
+        annotator.mode = "KNIFE"
+        annotator.knife_pt_a = (150, 250)
+        res_k = annotator.undo_last_point()
+        self.assertTrue(res_k)
+        self.assertIsNone(annotator.knife_pt_a)
+
+        # Polygon mode with vertices
+        annotator.mode = "POLYGON"
+        annotator.polygon_points = [(10, 10), (20, 20), (30, 30)]
+        res_p = annotator.undo_last_point()
+        self.assertTrue(res_p)
+        self.assertEqual(annotator.polygon_points, [(10, 10), (20, 20)])
+
+        # Bounding box prompt
+        annotator.mode = "SELECT"
+        annotator.box_prompt = [5.0, 5.0, 50.0, 50.0]
+        res_b = annotator.undo_last_point()
+        self.assertTrue(res_b)
+        self.assertIsNone(annotator.box_prompt)
+
+    def test_undo_last_point_event_triggers(self):
+        annotator = PrecisionSAM2Annotator.__new__(PrecisionSAM2Annotator)
+        annotator.predictor = None
+        annotator.active_image = None
+        annotator.mode = "SELECT"
+        annotator.knife_pt_a = None
+        annotator.polygon_points = []
+        annotator.box_prompt = None
+        annotator.candidate_mask = None
+        annotator.candidate_masks = []
+        annotator.candidate_scores = []
+        annotator.window_w = 1280
+        annotator.window_h = 800
+
+        annotator.point_coords = [[10.0, 10.0], [20.0, 20.0]]
+        annotator.point_labels = [1, 0]
+
+        # Simulate Ctrl+Z keypress keysym
+        sym = ord('z')
+        if sym in (ord('z'), ord('Z'), 0xff08, 0xffff):
+            annotator.undo_last_point()
+        self.assertEqual(len(annotator.point_coords), 1)
+
+        # Simulate Backspace keypress keysym (0xff08)
+        sym_bksp = 0xff08
+        if sym_bksp in (ord('z'), ord('Z'), 0xff08, 0xffff):
+            annotator.undo_last_point()
+        self.assertEqual(len(annotator.point_coords), 0)
+
+        # Simulate clicking on HUD Undo button
+        annotator.point_coords = [[15.0, 25.0]]
+        annotator.point_labels = [1]
+        bx0, by0, bx1, by1 = get_undo_button_rect(annotator.window_w)
+        click_x, click_y = bx0 + 5, by0 + 5
+        if bx0 <= click_x <= bx1 and by0 <= click_y <= by1:
+            annotator.undo_last_point()
+        self.assertEqual(len(annotator.point_coords), 0)
 
 
 if __name__ == "__main__":

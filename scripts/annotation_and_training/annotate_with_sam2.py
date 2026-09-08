@@ -79,6 +79,7 @@ from scripts.annotation_and_training.sam2_annotator_utils import (
     polygon_to_bounding_box,
     rasterize_lasso_polygon,
     render_hud_overlay,
+    get_undo_button_rect,
     save_coco_json,
     split_mask_with_knife_line,
     viewport_to_image_coords,
@@ -246,6 +247,8 @@ class X11GUIWindow:
         ]
         self._x11.XFlush.restype = ctypes.c_int
         self._x11.XFlush.argtypes = [ctypes.c_void_p]
+        self._x11.XPending.restype = ctypes.c_int
+        self._x11.XPending.argtypes = [ctypes.c_void_p]
         self._x11.XEventsQueued.restype = ctypes.c_int
         self._x11.XEventsQueued.argtypes = [ctypes.c_void_p, ctypes.c_int]
         self._x11.XNextEvent.restype = ctypes.c_int
@@ -296,6 +299,7 @@ class X11GUIWindow:
         )
         self._x11.XSelectInput(self.disp, self.win, event_mask)
         self._x11.XMapWindow(self.disp, self.win)
+        self._x11.XFlush(self.disp)
 
         self.gc = self._x11.XCreateGC(self.disp, self.win, 0, None)
         self.bgra_buffer = np.zeros((self.height, self.width, 4), dtype=np.uint8)
@@ -329,23 +333,22 @@ class X11GUIWindow:
         self._x11.XFlush(self.disp)
 
     def poll_events(self) -> List[Tuple[str, Any]]:
-        """Polls queued X11 events with 192-byte safe union, auto-repeat filter, and resize tracking."""
+        """Polls queued X11 events with 192-byte safe union, auto-repeat filter, and resize/close tracking."""
         raw_events = []
         if not hasattr(self, "disp") or not self.disp:
             return raw_events
 
         evt = XEvent()
-        QueuedAfterReading = 1
 
-        while self._x11.XEventsQueued(self.disp, QueuedAfterReading) > 0:
+        while self._x11.XPending(self.disp) > 0:
             self._x11.XNextEvent(self.disp, ctypes.byref(evt))
             if evt.type == 2:  # KeyPress
                 keysym = self._x11.XKeycodeToKeysym(self.disp, evt.xkey.keycode, 0)
-                raw_events.append(('key_press', keysym))
+                raw_events.append(('key_press', keysym, evt.xkey.state))
             elif evt.type == 3:  # KeyRelease
                 # Detect and swallow fake X11 keyboard auto-repeat releases
                 is_repeat = False
-                if self._x11.XEventsQueued(self.disp, QueuedAfterReading) > 0:
+                if self._x11.XPending(self.disp) > 0:
                     next_evt = XEvent()
                     self._x11.XPeekEvent(self.disp, ctypes.byref(next_evt))
                     if (next_evt.type == 2 and
@@ -355,7 +358,7 @@ class X11GUIWindow:
                         is_repeat = True
                 if not is_repeat:
                     keysym = self._x11.XKeycodeToKeysym(self.disp, evt.xkey.keycode, 0)
-                    raw_events.append(('key_release', keysym))
+                    raw_events.append(('key_release', keysym, evt.xkey.state))
             elif evt.type == 4:  # ButtonPress
                 btn = evt.xbutton.button
                 raw_events.append(('button_press', evt.xbutton.x, evt.xbutton.y, btn, evt.xbutton.state))
@@ -364,13 +367,15 @@ class X11GUIWindow:
                 raw_events.append(('button_release', evt.xbutton.x, evt.xbutton.y, btn, evt.xbutton.state))
             elif evt.type == 6:  # MotionNotify
                 raw_events.append(('motion', evt.xmotion.x, evt.xmotion.y, evt.xmotion.state))
+            elif evt.type == 17:  # DestroyNotify (Window destroyed by WM)
+                raw_events.append(('close', None))
             elif evt.type == 22:  # ConfigureNotify (Window Resize)
                 cfg = evt.xconfigure
                 if cfg.width > 0 and cfg.height > 0 and (cfg.width != self.width or cfg.height != self.height):
                     self._resize_buffer(cfg.width, cfg.height)
                     raw_events.append(('resize', cfg.width, cfg.height))
             elif evt.type == 33:  # ClientMessage (WM_DELETE_WINDOW)
-                if evt.xclient.data_l[0] == self.wm_delete:
+                if evt.xclient.data_l[0] == self.wm_delete or evt.xclient.message_type == self.wm_delete:
                     raw_events.append(('close', None))
 
         return raw_events
@@ -511,9 +516,6 @@ class PrecisionSAM2Annotator:
 
     def run_inference(self) -> None:
         """Executes SAM 2 inference with multimask_output=True to retrieve 3 proposal granularities."""
-        if self.predictor is None or self.active_image is None:
-            return
-
         pts = np.array(self.point_coords, dtype=np.float32) if self.point_coords else None
         lbls = np.array(self.point_labels, dtype=np.int32) if self.point_labels else None
         box = np.array(self.box_prompt, dtype=np.float32) if self.box_prompt else None
@@ -522,6 +524,9 @@ class PrecisionSAM2Annotator:
             self.candidate_masks = []
             self.candidate_scores = []
             self.candidate_mask = None
+            return
+
+        if self.predictor is None or self.active_image is None:
             return
 
         try:
@@ -584,6 +589,42 @@ class PrecisionSAM2Annotator:
 
         logger.info(f"Finalized custom polygon bounding box with {len(self.polygon_points)} vertices")
         self.polygon_points = []
+
+    def undo_last_point(self) -> bool:
+        """
+        Removes the most recently placed inclusion or exclusion point prompt,
+        or cancels uncommitted knife / polygon / bounding box constraints,
+        and re-executes SAM 2 inference in real time.
+        """
+        if self.mode == "KNIFE" and self.knife_pt_a is not None:
+            self.knife_pt_a = None
+            logger.info("Undid Knife Point A.")
+            return True
+
+        if self.mode == "POLYGON" and self.polygon_points:
+            popped_poly = self.polygon_points.pop()
+            logger.info(f"Undid last polygon vertex at {popped_poly}. Remaining vertices: {len(self.polygon_points)}")
+            return True
+
+        if self.point_coords:
+            popped_pt = self.point_coords.pop()
+            popped_lbl = self.point_labels.pop() if self.point_labels else 1
+            lbl_name = "inclusion (+)" if popped_lbl == 1 else "exclusion (-)"
+            logger.info(
+                f"Undid last prompt point: {lbl_name} at ({popped_pt[0]:.1f}, {popped_pt[1]:.1f}). "
+                f"Remaining points: {len(self.point_coords)}"
+            )
+            self.run_inference()
+            return True
+
+        if self.box_prompt is not None:
+            self.box_prompt = None
+            logger.info("Undid bounding box prompt.")
+            self.run_inference()
+            return True
+
+        logger.info("No active prompt points or constraints to undo.")
+        return False
 
     def commit_active_instance(self, class_id: int) -> None:
         """Instant Class Commit: assigns class, commits mask, resets prompts, readies next leaf."""
@@ -816,6 +857,12 @@ class PrecisionSAM2Annotator:
                         ix, iy = self._viewport_to_image(vx, vy, scale_x, scale_y, crop_x0, crop_y0)
 
                         if btn == 1:  # Left Button
+                            if vy < 70:
+                                bx0, by0, bx1, by1 = get_undo_button_rect(self.window_w)
+                                if bx0 <= vx <= bx1 and by0 <= vy <= by1:
+                                    self.clicked_undo_button = True
+                                    self.undo_last_point()
+                                    continue
                             self.lbutton_down = True
                             self.drag_start_screen = (vx, vy)
                             self.drag_start_img = (ix, iy)
@@ -841,13 +888,38 @@ class PrecisionSAM2Annotator:
                                     logger.info(f"Knife Point A set at {(ix, iy)}. Click Point B to sever mask.")
                                 else:
                                     if self.candidate_mask is not None:
+                                        # Gather foreground prompts to automatically retain target component
+                                        keep_pts = [
+                                            (float(pt[0]), float(pt[1]))
+                                            for pt, lbl in zip(self.point_coords, self.point_labels)
+                                            if lbl == 1
+                                        ]
+                                        bbox = tuple(self.box_prompt) if self.box_prompt is not None else None
+
+                                        # Fallback to interior point if polygon lasso was used
+                                        if not keep_pts and self.polygon_points:
+                                            poly_pt = polygon_interior_point(self.polygon_points, self.orig_h, self.orig_w)
+                                            if poly_pt is not None:
+                                                keep_pts = [poly_pt]
+
                                         self.candidate_mask = split_mask_with_knife_line(
-                                            self.candidate_mask, self.knife_pt_a, (ix, iy), line_thickness=2, dilation_px=2
+                                            self.candidate_mask,
+                                            self.knife_pt_a,
+                                            (ix, iy),
+                                            line_thickness=2,
+                                            dilation_px=2,
+                                            keep_points=keep_pts if (keep_pts or bbox is not None) else None,
+                                            bounding_box=bbox,
                                         )
                                         if self.candidate_masks and self.active_mask_idx < len(self.candidate_masks):
                                             self.candidate_masks[self.active_mask_idx] = self.candidate_mask.copy()
-                                        logger.info(f"Applied 2-click knife cut from {self.knife_pt_a} to {(ix, iy)}")
+                                        logger.info(
+                                            f"Applied 2-click knife cut from {self.knife_pt_a} to {(ix, iy)} "
+                                            f"(retained target prompt component, pruned severed fragment)."
+                                        )
                                     self.knife_pt_a = None
+                                    self.mode = "SELECT"
+                                    logger.info("Knife cut complete -> switched back to SELECT mode.")
                             else:
                                 self.is_box_dragging = False
 
@@ -923,6 +995,9 @@ class PrecisionSAM2Annotator:
                         ix, iy = self._viewport_to_image(vx, vy, scale_x, scale_y, crop_x0, crop_y0)
 
                         if btn == 1:
+                            if getattr(self, "clicked_undo_button", False):
+                                self.clicked_undo_button = False
+                                continue
                             self.lbutton_down = False
                             if self.is_pan_dragging:
                                 self.is_pan_dragging = False
@@ -956,9 +1031,14 @@ class PrecisionSAM2Annotator:
 
                     elif ev_type == "key_press":
                         sym = ev[1]
+                        state = ev[2] if len(ev) > 2 else 0
+
+                        # Undo prompt point / constraint (Ctrl+Z, 'z'/'Z', Backspace, Delete)
+                        if sym in (ord('z'), ord('Z'), 0xff08, 0xffff):
+                            self.undo_last_point()
 
                         # Instant Class Commit (0 through 6)
-                        if sym in [ord(str(i)) for i in range(len(CLASS_NAMES))]:
+                        elif sym in [ord(str(i)) for i in range(len(CLASS_NAMES))]:
                             class_id = sym - ord('0')
                             self.commit_active_instance(class_id)
 
@@ -1087,6 +1167,7 @@ class PrecisionSAM2Annotator:
                                 self.is_pan_dragging = False
 
                     elif ev_type == "close":
+                        logger.info("Window close requested (GUI 'X' button) -> saving current sheet and exiting...")
                         self.save_current_sheet()
                         should_exit = True
                         break
