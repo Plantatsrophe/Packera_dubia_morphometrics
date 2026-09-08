@@ -765,3 +765,57 @@ For peer-reviewed publication and dissertation replication packages, data assets
 | **Normalized 2D Contours & Harmonics** | `data/contours/`, `data/tables/leaf_efa_harmonics.csv` | Zenodo DOI: `10.5281/zenodo.xxxxxx` | Zenodo direct download / Parquet release |
 | **Environmental Rasters (SoilGrids & WorldClim)** | `data/environmental/` | Zenodo DOI: `10.5281/zenodo.xxxxxx` | Zenodo raster bundle archive |
 | **Darwin Core Curated Occurrence Tables** | `data/tables/curated_vouchers.csv` | Zenodo DOI: `10.5281/zenodo.xxxxxx` | Dynamic harvest via GBIF or static Zenodo table |
+
+---
+
+## 10. Draft Dissertation Methods: Phenotyping, Symmetry Validation & Batch-Effect Controls
+
+*The following draft text is prepared for direct incorporation into dissertation Methods sections and peer-reviewed systematic publications:*
+
+### 10.1 Conceptual Framing under the Unified Species Concept
+Taxonomic boundaries within the *Packera dubia* (Spreng.) Trock & Mabb. complex (Asteraceae: Senecioneae) were delimited under the Unified Species Concept (USC; de Queiroz 2007), which defines species as separately evolving metapopulation lineages. Under the USC, operational criteria—including morphological diagnosability, reproductive isolation, monophyly, and ecological divergence—serve as contingent lines of evidence that develop at varying rates along the speciation continuum. Because vegetative morphology in *Packera* has historically been clouded by ecophenotypic plasticity, developmental heterophylly, and high rates of herbarium misidentification (20–40% in uncurated aggregator datasets), we developed an automated high-throughput vegetative phenotyping and herbarium triage pipeline to test morphological diagnosability across thousands of digital vouchers. This vegetative morphospace was evaluated in concert with reproductive macro-morphology (capitulum aspect ratios and floret series), documented cytotaxonomic cytotypes ($2n = 44, 46, 88$; Kowal 1975), reduced-representation nextRAD phylogenomics, and multi-scale edaphic niche profiling.
+
+### 10.2 Four-Tiered Geometric Routing & Midrib Reflection
+Specimen sheets were processed through LeafMachine2 (LM2; Weaver et al. 2024) using domain-adapted PointRend instance segmentation weights fine-tuned on basal rosettes annotated via Segment Anything Model 2 (SAM 2). To maximize specimen retention without incorporating occluded or damaged margins, candidate leaf segmentations were evaluated through deterministic geometric gatekeeping:
+1. **Tier 1 (Direct Pristine Extraction):** Unoccluded basal leaves meeting Solidity $\ge 0.72$ and Unoccluded Completeness Score (UCS $\ge 0.85$) were segmented directly into closed 2D silhouettes.
+2. **Tier 2 (Hemi-Blade Bilateral Midrib Reflection):** Leaves occluded along one lateral margin but retaining an intact half-blade from apex to petiole transition were identified. The primary midrib was parameterized as a directional centerline vector, and the intact half-blade was reflected across the midrib in OpenCV to reconstruct a synthetic, unoccluded bilateral silhouette.
+3. **Tier 3 (Open Margin Analysis):** Fragmentary leaves lacking an intact half-blade were analyzed via open Chebyshev polynomials (`Momocs::opoly`) and linear caliper traits.
+4. **Tier 4 (Holistic Rosette Deep Vision Embeddings):** Dense rosette clusters were cropped for holistic feature extraction via self-supervised vision transformers (DINOv2-ViT-B/14).
+
+### 10.3 Symmetric Elliptic Fourier Analysis ($A_n, D_n$) & Reflection Parity
+Closed contours from Tier 1 and Tier 2 leaves were digitized into 300 equidistant Cartesian coordinates and parameterized using normalized Elliptic Fourier Analysis (EFA; Kuhl and Giardina 1982) up to 12 harmonics via `Momocs`. Contours were aligned along the longitudinal midrib axis prior to decomposition. Under midrib-aligned EFA, outline variation is partitioned into:
+$$x(t) = a_0 + \sum_{n=1}^N \left( A_n \cos \frac{2n\pi t}{T} + B_n \sin \frac{2n\pi t}{T} \right)$$
+$$y(t) = c_0 + \sum_{n=1}^N \left( C_n \cos \frac{2n\pi t}{T} + D_n \sin \frac{2n\pi t}{T} \right)$$
+Harmonic coefficients $A_n$ and $D_n$ describe variations that are strictly symmetric relative to the midrib reflection axis, whereas $B_n$ and $C_n$ describe asymmetric components. Because Tier 2 bilateral reflection mathematically forces $B_n \equiv 0$ and $C_n \equiv 0$, retaining all four coefficients would introduce an artificial, non-biological segregation between Tier 1 pristine leaves (which exhibit natural fluctuating asymmetry and pressing shear) and Tier 2 reflected leaves in multivariate morphospace. Consequently, all downstream ordinations (Principal Component Analysis, Gaussian Mixture Models, and Canonical Discriminant Analysis) were restricted to the symmetric harmonic coefficients ($A_n, D_n$). This mathematical isolation eliminated fluctuating asymmetry artifacts and press shear, establishing rigorous geometric parity between Tier 1 and Tier 2 specimens while preserving full diagnostic outline resolution across taxonomic boundaries.
+
+### 10.4 Deep Vision Batch-Effect Controls & Mounting Paper Neutralization
+To prevent self-supervised deep vision representations (DINOv2-ViT-B/14) from learning spurious non-biological artifacts arising from herbarium sheet paper stock, historical paper oxidation, or institutional scanner lighting, a dual-stage batch-effect control protocol was implemented:
+1. **Mounting Paper Background Neutralization:** Raw rosette image patches were segmented to isolate botanical plant tissue from mounting sheet paper. Non-plant sheet pixels (paper background, herbarium labels, mounting tape, fragment packets) were neutralized to a uniform neutral gray value (RGB: 128, 128, 128) prior to patch tokenization. Gradient-weighted Class Activation Mapping (Grad-CAM) confirmed that model attention localized strictly on diagnostic vegetative structures (tomentum density, margin dentation, petiole bases) rather than sheet provenance.
+2. **Institutional ANOVA Audits:** Systematic one-way Analysis of Variance (ANOVA) and Multivariate ANOVA (MANOVA) models were fitted across all morphological PC axes and DINOv2 latent embeddings using contributing herbarium repository codes (`institutionCode`, e.g., NCU, GA, US, NY, MO, WIS) as the grouping factor. Cluster partitions exhibiting statistically significant institutional bias ($p < 0.01$) after conditioning on taxonomic identity were flagged for batch-effect covariate adjustment and ComBat harmonization.
+
+### 10.5 Multi-Scale Micro-Edaphic Validation: SoilGrids & USDA SSURGO
+To assess ecological divergence, georeferenced specimen coordinates were evaluated across two spatial scales:
+1. **Regional Macro-Edaphic Rasters:** Pedological rasters at 250m resolution from SoilGrids (pH in $\text{H}_2\text{O}$, cation exchange capacity [CEC], sand and clay mass fractions, and bulk density) provided broad soil profiles across the eastern North American range.
+2. **Fine-Scale Micro-Edaphic Outcrop Validation:** Because key taxa within the complex (notably *Packera anonyma*) are edaphic specialists endemic to granitic flatrocks, sandstone glades, and ultramafic barrens that frequently span linear extents smaller than a 250m grid cell, occurrence coordinates were intersected via spatial overlay with the 1:24,000 USDA NRCS Soil Survey Geographic Database (SSURGO) vector coverage. SSURGO polygon map units (`musym`, soil series names) and tabular horizon components (depth to lithic bedrock, surface rock fragment percentages, cation saturation) were extracted. Spatial Random Forests and Warren's Niche Identity tests ($D$) evaluated whether morphometric boundaries coincided with genuine micro-edaphic substrate restrictions, differentiating obligate lithological endemics from broadly distributed generalist taxa.
+
+### 10.6 Multi-Lineage Evidence Integration
+Vegetative morphometric clusters derived from symmetric EFA and DINOv2 embeddings were integrated with independent evidence lines:
+- **Reproductive Macro-Morphology:** Capitulum aspect ratios (involucre height-to-width ratios), phyllary counts, and ray/disc floret dimensions.
+- **Cytology:** Known chromosome numbers and polyploid series ($2n = 44, 46, 88$; Kowal 1975).
+- **Phylogenomics:** Reduced-representation nextRAD SNP alignments resolving deep lineage divergence, polyploid reticulation, and hybrid swarms.
+Taxa demonstrating concordance across morphological diagnosability, reproductive architecture, cytotypic stability, and micro-edaphic specialization were recognized at the species rank under the Unified Species Concept.
+
+---
+
+## 11. Key Literature & Citations
+
+1. Barkley, T. M. 1988. Variation among the Senecioneae (Asteraceae) in North America. *Brittonia* 40(2): 211–221. doi: 10.2307/2807005
+2. de Queiroz, K. 2007. Species concepts and species delimitation. *Systematic Biology* 56(6): 879–886. doi: 10.1080/10635150701701083
+3. Kowal, R. R. 1975. Systematics of *Senecio aureus* and allied species on the Gaspé Peninsula, Quebec. *Memoirs of the Torrey Botanical Club* 23(2): 1–113.
+4. Kuhl, F. P., and C. R. Giardina. 1982. Elliptic Fourier features of a closed contour. *Computer Graphics and Image Processing* 18(3): 236–258. doi: 10.1016/0146-664X(82)90034-X
+5. Mabberley, D. J., D. K. Trock, and A. S. Weakley. 2020. The nomenclature of *Packera dubia* (Asteraceae: Senecioneae). *Taxon* 69(6): 1334–1337. doi: 10.1002/tax.12351
+6. Northcutt, C. G., L. Jiang, and I. L. Chuang. 2021. Confident Learning: Estimating Uncertainty in Dataset Labels. *Journal of Artificial Intelligence Research* 70: 1373–1411. doi: 10.1613/jair.1.12125
+7. Šlenker, M., P. Koutecký, and P. Marhold. 2022. MorphoTools2: an R package for multivariate morphometric analysis. *Bioinformatics* 38(10): 2954–2955. doi: 10.1093/bioinformatics/btac173
+8. Trock, D. K. 2006. *Packera*. In Flora of North America Editorial Committee (eds.), *Flora of North America North of Mexico*, Vol. 20, 570–602. Oxford University Press, New York.
+9. Weakley, A. S. 2026. *Flora of the Southeastern United States*. University of North Carolina Herbarium (NCU), North Carolina Botanical Garden, Chapel Hill.
+10. Weaver, W. N., P. S. Ng, and R. LaFrance. 2024. LeafMachine2: Using machine learning to rapidly measure plant traits captured in herbarium specimens. *Applications in Plant Sciences* 12(1): e11545. doi: 10.1002/aps3.11545

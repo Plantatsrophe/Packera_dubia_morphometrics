@@ -38,6 +38,7 @@ detect_ruler_scale_hough = step02.detect_ruler_scale_hough
 export_standardized_contour = step02.export_standardized_contour
 extract_tier1_pristine = step02.extract_tier1_pristine
 extract_tier2_reflected = step02.extract_tier2_reflected
+compute_capitulum_metrics = step02.compute_capitulum_metrics
 
 
 class TestSegmentAndExtract(unittest.TestCase):
@@ -153,6 +154,35 @@ class TestSegmentAndExtract(unittest.TestCase):
         clustered = cluster_plant_individuals([inst1, inst2, inst3], sheet_width=2000, sheet_height=2000)
         self.assertEqual(clustered[0].plant_individual_id, clustered[1].plant_individual_id)
         self.assertNotEqual(clustered[0].plant_individual_id, clustered[2].plant_individual_id)
+
+    def test_compute_capitulum_metrics_valid(self) -> None:
+        """Verify valid cylindrical capitulum metric extraction and mm scaling."""
+        mask = np.zeros((300, 300), dtype=np.uint8)
+        # Draw a vertical ellipse representing an upright cylindrical capitulum (H=140, W=100)
+        cv2.ellipse(mask, (150, 150), (50, 70), 0, 0, 360, 255, -1)
+
+        metrics = compute_capitulum_metrics(mask, (80, 100, 220, 200), pixels_per_mm=10.0)
+        self.assertIsNotNone(metrics)
+        self.assertGreaterEqual(metrics["capitulum_aspect_ratio"], 0.7)
+        self.assertLessEqual(metrics["capitulum_aspect_ratio"], 2.0)
+        self.assertAlmostEqual(metrics["capitulum_aspect_ratio"], 1.4, delta=0.15)
+        self.assertAlmostEqual(metrics["involucre_height_mm"], 14.0, delta=1.5)
+        self.assertAlmostEqual(metrics["involucre_width_mm"], 10.0, delta=1.5)
+
+    def test_compute_capitulum_metrics_filter_extremes(self) -> None:
+        """Verify aberrant non-cylindrical shapes are rejected by 0.7 <= H/W <= 2.0 gating."""
+        # 1. Extreme flattened horizontal disc (AR < 0.7)
+        mask_flat = np.zeros((200, 200), dtype=np.uint8)
+        cv2.rectangle(mask_flat, (20, 90), (180, 110), 255, -1)  # W=160, H=20, AR=0.125
+        metrics_flat = compute_capitulum_metrics(mask_flat, (90, 20, 110, 180))
+        self.assertIsNone(metrics_flat, "Excessively flat outline must be rejected (AR < 0.7).")
+
+        # 2. Extreme vertical stem fragment (AR > 2.0)
+        mask_stem = np.zeros((300, 100), dtype=np.uint8)
+        cv2.rectangle(mask_stem, (40, 20), (60, 280), 255, -1)  # W=20, H=260, AR=13.0
+        metrics_stem = compute_capitulum_metrics(mask_stem, (20, 40, 280, 60))
+        self.assertIsNone(metrics_stem, "Excessively elongated stem fragment must be rejected (AR > 2.0).")
+
 
 
 class TestSegmentAndExtractResumption(unittest.TestCase):

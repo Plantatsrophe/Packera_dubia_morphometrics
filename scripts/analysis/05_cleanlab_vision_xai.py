@@ -40,6 +40,11 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
 # Set reproducible random seeds
 torch.manual_seed(42)
 np.random.seed(42)
@@ -61,6 +66,7 @@ TARGET_TAXA: List[str] = [
 __all__ = [
     "TARGET_TAXA",
     "standardize_packera_taxon",
+    "neutralize_mounting_paper",
     "RosettePatchDataset",
     "load_and_link_rosette_patches",
     "extract_dinov2_embeddings",
@@ -107,15 +113,71 @@ def standardize_packera_taxon(species_str: Optional[str]) -> str:
 
 
 # =============================================================================
-# 2. PyTorch Dataset & Herbarium Linking
+# 2. Mounting Paper Background Neutralization & PyTorch Dataset
 # =============================================================================
+
+def neutralize_mounting_paper(
+    image: Image.Image | np.ndarray,
+    neutral_color: Tuple[int, int, int] = (128, 128, 128),
+) -> Image.Image:
+    """Neutralizes herbarium mounting paper background to uniform neutral gray.
+
+    Before feeding whole-rosette image patches into DINOv2 (ViT-B/14), this function
+    computes an Otsu and adaptive chromatic threshold mask separating botanical
+    tissue (green/brown foliar lamina, petiole vasculature, and arachnoid tomentum)
+    from the mounting sheet paper background.
+
+    All non-plant background paper pixels are replaced with a uniform, neutral
+    gray value: RGB(128, 128, 128). This prevents vision transformers from
+    keying into yellowed paper fibers, mounting glue, or herbarium stamps.
+
+    Vectorized using OpenCV / NumPy array slicing (strictly zero per-pixel loops).
+    """
+    if isinstance(image, Image.Image):
+        img_arr = np.array(image.convert("RGB"))
+        was_pil = True
+    else:
+        img_arr = np.array(image, copy=True)
+        was_pil = False
+
+    if img_arr.size == 0:
+        return Image.fromarray(img_arr) if was_pil else img_arr
+
+    if cv2 is not None:
+        gray = cv2.cvtColor(img_arr, cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        # Otsu thresholding: botanical tissue is darker than bright mounting paper
+        _, plant_mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Morphological closing (5x5 ellipse) to bridge arachnoid tomentum, venation, and leaf blades
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        plant_mask = cv2.morphologyEx(plant_mask, cv2.MORPH_CLOSE, kernel)
+
+        bg_mask = (plant_mask == 0)
+    else:
+        # Vectorized NumPy fallback if cv2 is not available
+        gray = (0.2989 * img_arr[:, :, 0] + 0.5870 * img_arr[:, :, 1] + 0.1140 * img_arr[:, :, 2])
+        thresh = np.percentile(gray, 60)
+        bg_mask = (gray > thresh)
+
+    neutralized = img_arr.copy()
+    neutralized[bg_mask] = neutral_color
+
+    return Image.fromarray(neutralized) if was_pil else neutralized
+
 
 class RosettePatchDataset(Dataset):
     """PyTorch Dataset loading dense basal rosette image crops for DINOv2."""
 
-    def __init__(self, records: List[Dict], transform: transforms.Compose):
+    def __init__(
+        self,
+        records: List[Dict],
+        transform: transforms.Compose,
+        neutralize_background: bool = True,
+    ):
         self.records = records
         self.transform = transform
+        self.neutralize_background = neutralize_background
 
     def __len__(self) -> int:
         return len(self.records)
@@ -125,6 +187,8 @@ class RosettePatchDataset(Dataset):
         image_path = Path(rec["patch_path"])
         if image_path.exists():
             image = Image.open(image_path).convert("RGB")
+            if self.neutralize_background:
+                image = neutralize_mounting_paper(image)
         else:
             image = Image.new("RGB", (224, 224), color=(128, 128, 128))
         tensor = self.transform(image)
@@ -194,6 +258,7 @@ def extract_dinov2_embeddings(
     model_name: str = "dinov2_vitb14",
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     batch_size: int = 32,
+    neutralize_background: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Extracts 768-dimensional DINOv2 self-supervised [CLS] token representations."""
     torch.manual_seed(42)
@@ -205,7 +270,9 @@ def extract_dinov2_embeddings(
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    dataset = RosettePatchDataset(records, transform=transform)
+    dataset = RosettePatchDataset(
+        records, transform=transform, neutralize_background=neutralize_background
+    )
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     # Fast reproducible simulation for tests without physical patch crops
@@ -412,6 +479,7 @@ def generate_gradcam_panel(
         img_path = Path(rec["patch_path"])
         if img_path.exists():
             img = Image.open(img_path).convert("RGB")
+            img = neutralize_mounting_paper(img)
             img_arr = np.array(img)
         else:
             # Generate representative botanical green patch
@@ -494,6 +562,19 @@ def parse_args() -> argparse.Namespace:
         help="Alias for --cleanlab-threshold",
     )
     parser.add_argument(
+        "--neutralize-background",
+        dest="neutralize_background",
+        action="store_true",
+        default=True,
+        help="Neutralize mounting paper background to RGB(128, 128, 128) using Otsu thresholding (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-neutralize-background",
+        dest="neutralize_background",
+        action="store_false",
+        help="Disable mounting paper background neutralization",
+    )
+    parser.add_argument(
         "--export-figures",
         dest="export_figures",
         action="store_true",
@@ -526,7 +607,9 @@ def main() -> None:
     logger.info(f"Loaded {len(records)} specimens for DINOv2 feature extraction.")
 
     # 2. Extract self-supervised DINOv2 embeddings
-    features, labels, cat_nums = extract_dinov2_embeddings(records)
+    features, labels, cat_nums = extract_dinov2_embeddings(
+        records, neutralize_background=args.neutralize_background
+    )
 
     # 3. Fit out-of-fold cross-validated probabilities
     pred_probs, acc, f1 = compute_out_of_fold_probabilities(features, labels)

@@ -15,6 +15,7 @@ import pandas as pd
 # Dynamically import module with numeric prefix
 mod_xai = importlib.import_module("scripts.analysis.05_cleanlab_vision_xai")
 standardize_packera_taxon = mod_xai.standardize_packera_taxon
+neutralize_mounting_paper = mod_xai.neutralize_mounting_paper
 extract_dinov2_embeddings = mod_xai.extract_dinov2_embeddings
 run_confident_learning_audit = mod_xai.run_confident_learning_audit
 compute_out_of_fold_probabilities = mod_xai.compute_out_of_fold_probabilities
@@ -41,6 +42,38 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         self.assertEqual(standardize_packera_taxon("Packera paupercula var. pseudotomentosa"), "Packera paupercula")
         self.assertEqual(standardize_packera_taxon("Senecio plattensis Nutt."), "Packera plattensis")
         self.assertEqual(standardize_packera_taxon(None), "Unknown")
+
+    def test_neutralize_mounting_paper(self):
+        """Test vectorized Otsu background neutralization replaces paper with RGB(128,128,128)."""
+        from PIL import Image
+
+        # Create a 100x100 synthetic patch: bright yellowed paper background (220, 215, 195)
+        # with a dark green botanical leaf circle in the center (45, 95, 35)
+        arr = np.full((100, 100, 3), fill_value=[225, 220, 200], dtype=np.uint8)
+        y, x = np.ogrid[:100, :100]
+        mask_leaf = ((x - 50) ** 2 + (y - 50) ** 2) <= 25 ** 2
+        arr[mask_leaf] = [45, 95, 35]
+
+        img = Image.fromarray(arr)
+        neutralized_img = neutralize_mounting_paper(img)
+        res_arr = np.array(neutralized_img)
+
+        # Output shape and type should match input
+        self.assertEqual(res_arr.shape, (100, 100, 3))
+        self.assertEqual(res_arr.dtype, np.uint8)
+
+        # Background paper pixels should be neutralized to uniform neutral gray (128, 128, 128)
+        corner_pixels = res_arr[0, 0]
+        np.testing.assert_array_equal(corner_pixels, [128, 128, 128], err_msg="Corner paper pixel not neutral gray")
+
+        # Botanical tissue in the center should be preserved
+        center_pixel = res_arr[50, 50]
+        np.testing.assert_array_equal(center_pixel, [45, 95, 35], err_msg="Center plant tissue altered")
+
+        # Test with raw numpy array input as well
+        res_from_arr = neutralize_mounting_paper(arr)
+        np.testing.assert_array_equal(res_from_arr[0, 0], [128, 128, 128])
+        np.testing.assert_array_equal(res_from_arr[50, 50], [45, 95, 35])
 
     def test_dinov2_feature_extraction_synthetic(self):
         """Test DINOv2 feature extraction returns (N, 768) embeddings for synthetic records."""

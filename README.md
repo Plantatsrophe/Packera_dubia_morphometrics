@@ -1,6 +1,6 @@
-# Robust Species Delimitation Pipeline for the *Packera dubia* Complex
+# Automated High-Throughput Vegetative Phenotyping and Herbarium Triage Pipeline for the *Packera dubia* Complex
 
-### Integrating Automated Morphometrics, LeafMachine2, Ecological Niches, and Multi-Tiered Herbarium Misidentification Mitigation
+### Operationalizing Morphological Diagnosability under the Unified Species Concept
 
 [![DOI]()](https://doi.org/10.5281/zenodo.xxxxxx) [![License: MIT]()](https://opensource.org/licenses/MIT) [![Python 3.10+]()](https://www.python.org/downloads/) [![R 4.3+]()](https://www.r-project.org/)
 
@@ -8,9 +8,15 @@
 
 ## 🌿 Project Overview
 
-This repository houses the computational and statistical pipeline for the taxonomic revision and species delimitation of the ***Packera dubia*** **(Spreng.) Trock & Mabb. complex** (Asteraceae: Senecioneae) across Eastern and Central North America.
+This repository houses the computational and statistical pipeline for the automated high-throughput vegetative phenotyping, morphological diagnosability assessment, and herbarium triage of the ***Packera dubia*** **(Spreng.) Trock & Mabb. complex** (Asteraceae: Senecioneae) across Eastern and Central North America.
 
-Developed as part of doctoral research at the **University of North Carolina at Chapel Hill** in collaboration with the **UNC Herbarium (NCU)**, this project couples automated high-throughput morphometrics via **LeafMachine2 (LM2)**, deterministic specimen quality control, and ecological niche modeling with a formal **Multi-Tiered Herbarium Misidentification Mitigation Architecture**.
+Developed as part of doctoral research at the **University of North Carolina at Chapel Hill** in collaboration with the **UNC Herbarium (NCU)**, this project operationalizes morphological diagnosability under the **Unified Species Concept (USC; de Queiroz 2007)**. Under the USC, species are conceptualized as separately evolving metapopulation lineages. In taxonomically complex plant clades characterized by ecophenotypic plasticity and historical misidentification, vegetative morphometrics serves as a high-throughput operational screen evaluated in concert with multiple independent lines of evolutionary evidence:
+- **Reproductive Macro-Morphology:** Capitulum aspect ratios, phyllary series counts, and ray/disc floret dimensions.
+- **Cytotaxonomic Cytotypes:** Known chromosome numbers and ploidy races ($2n = 44, 46, 88$; Kowal 1975).
+- **Reduced-Representation Phylogenomics:** High-throughput nextRAD single nucleotide polymorphism (SNP) datasets resolving reticulate evolution and lineage boundaries.
+- **Micro-Edaphic Validation:** Regional 250m SoilGrids pedological rasters complemented by fine-scale 1:24,000 USDA NRCS SSURGO vector map units resolving localized rock outcrop endemics.
+
+The computational infrastructure couples automated organ detection via **LeafMachine2 (LM2)**, deterministic geometric gatekeeping, bilateral symmetry reconstruction, label-blind Elliptic Fourier Analysis (EFA), self-supervised deep vision (DINOv2), and confident learning with a formal **Multi-Tiered Herbarium Misidentification Mitigation Architecture**.
 
 - **Principal Investigator:** J. Brandon Fuller (PhD Candidate, Department of Biology, UNC-CH)  
 - **Faculty Advisor:** Dr. Alan S. Weakley (Director, NCU Herbarium; UNC Biology)  
@@ -268,9 +274,11 @@ python main.py run-all --download-images
    - 🥇 **Tier 1 (Gold Standard):** Specialist determinations (Barkley, Trock, Kowal, Weakley, Bain, Mahoney, Fuller) and verified type specimens.  
    - 🥈 **Tier 2 (Silver Standard):** Vouchers determined at major herbaria (NCU, GA, US, NY, BRIT, MO, WIS, VDB, FLAS) with complete locality data.  
    - 🥉 **Tier 3 (Bronze Standard):** General floristic collections and unverified aggregator determinations.  
-2. **Bilateral Symmetry Reconstruction (Tier 2 Reflection):** Asteraceae basal leaves frequently overlap in herbarium presses. When a leaf has an unobstructed half-blade from apex to base, the algorithm detects the primary midrib axis and symmetrically reflects the clean half across the midrib in OpenCV, synthesizing a complete, unoccluded bilateral silhouette for closed EFA.  
+2. **Bilateral Symmetry Reconstruction & Symmetric EFA:** Asteraceae basal leaves frequently overlap in herbarium presses. When a leaf has an unobstructed half-blade from apex to base, the algorithm detects the primary midrib axis and symmetrically reflects the clean half across the midrib in OpenCV, synthesizing a complete, unoccluded bilateral silhouette for closed EFA. Downstream Fourier analysis isolates the **symmetric harmonic component** ($A_n, D_n$), eliminating fluctuating asymmetry artifacts and reflection bias between Tier 1 pristine and Tier 2 reflected leaves.  
 3. **Decoupled Metric Scaling:** Closed Elliptic Fourier Analysis is inherently scale-invariant when normalized (`Momocs::efourier(..., norm = TRUE)`). Contour extraction and shape analysis proceed unconditionally; ruler scale detection is decoupled and used strictly for absolute scalar metrics (blade area, petiole length, centroid size).  
-4. **Passive Sample Canonical Discriminant Analysis:** Canonical axes in `MorphoTools2` are trained strictly on verified Tier 1 Gold specimens. Tier 3 Bronze vouchers and conflicting specimens are projected passively, preventing aggregator label noise from distorting morphological taxon boundaries.
+4. **Passive Sample Canonical Discriminant Analysis:** Canonical axes in `MorphoTools2` are trained strictly on verified Tier 1 Gold specimens. Tier 3 Bronze vouchers and conflicting specimens are projected passively, preventing aggregator label noise from distorting morphological taxon boundaries.  
+5. **Micro-Edaphic Validation:** Regional 250m SoilGrids pedological rasters (pH, CEC, sand fraction, bulk density) are complemented by fine-scale 1:24,000 USDA NRCS SSURGO vector map units, resolving localized edaphic specialization for rock outcrop endemics (granite flatrocks, sandstone glades, and ultramafic barrens).  
+6. **Batch-Effect Controls:** Rosette crops undergo mounting paper background neutralization to eliminate herbarium sheet aging and color artifacts in DINOv2 self-supervised embeddings. Institutional ANOVA audits across contributing herbaria verify that morphometric and latent vision clusters represent genuine biological lineages rather than digitization artifacts.
 
 ---
 
@@ -299,12 +307,15 @@ For dissertation methods and publication reproduction:
 ## 📚 Key Literature & Citations
 
 1. Barkley, T. M. 1988. Variation among the Senecioneae (Asteraceae) in North America. *Brittonia* 40(2): 211–221. doi: 10.2307/2807005  
-2. Mabberley, D. J., D. K. Trock, and A. S. Weakley. 2020. The nomenclature of *Packera dubia* (Asteraceae: Senecioneae). *Taxon* 69(6): 1334–1337. doi: 10.1002/tax.12351  
-3. Northcutt, C. G., L. Jiang, and I. L. Chuang. 2021. Confident Learning: Estimating Uncertainty in Dataset Labels. *Journal of Artificial Intelligence Research* 70: 1373–1411. doi: 10.1613/jair.1.12125  
-4. Šlenker, M., P. Koutecký, and P. Marhold. 2022. MorphoTools2: an R package for multivariate morphometric analysis. *Bioinformatics* 38(10): 2954–2955. doi: 10.1093/bioinformatics/btac173  
-5. Trock, D. K. 2006. *Packera*. In Flora of North America Editorial Committee (eds.), *Flora of North America North of Mexico*, Vol. 20, 570–602. Oxford University Press, New York.  
-6. Weakley, A. S. 2026. *Flora of the Southeastern United States*. University of North Carolina Herbarium (NCU), North Carolina Botanical Garden, Chapel Hill.  
-7. Weaver, W. N., P. S. Ng, and R. LaFrance. 2024. LeafMachine2: Using machine learning to rapidly measure plant traits captured in herbarium specimens. *Applications in Plant Sciences* 12(1): e11545. doi: 10.1002/aps3.11545
+2. de Queiroz, K. 2007. Species concepts and species delimitation. *Systematic Biology* 56(6): 879–886. doi: 10.1080/10635150701701083  
+3. Kowal, R. R. 1975. Systematics of *Senecio aureus* and allied species on the Gaspé Peninsula, Quebec. *Memoirs of the Torrey Botanical Club* 23(2): 1–113.  
+4. Kuhl, F. P., and C. R. Giardina. 1982. Elliptic Fourier features of a closed contour. *Computer Graphics and Image Processing* 18(3): 236–258. doi: 10.1016/0146-664X(82)90034-X  
+5. Mabberley, D. J., D. K. Trock, and A. S. Weakley. 2020. The nomenclature of *Packera dubia* (Asteraceae: Senecioneae). *Taxon* 69(6): 1334–1337. doi: 10.1002/tax.12351  
+6. Northcutt, C. G., L. Jiang, and I. L. Chuang. 2021. Confident Learning: Estimating Uncertainty in Dataset Labels. *Journal of Artificial Intelligence Research* 70: 1373–1411. doi: 10.1613/jair.1.12125  
+7. Šlenker, M., P. Koutecký, and P. Marhold. 2022. MorphoTools2: an R package for multivariate morphometric analysis. *Bioinformatics* 38(10): 2954–2955. doi: 10.1093/bioinformatics/btac173  
+8. Trock, D. K. 2006. *Packera*. In Flora of North America Editorial Committee (eds.), *Flora of North America North of Mexico*, Vol. 20, 570–602. Oxford University Press, New York.  
+9. Weakley, A. S. 2026. *Flora of the Southeastern United States*. University of North Carolina Herbarium (NCU), North Carolina Botanical Garden, Chapel Hill.  
+10. Weaver, W. N., P. S. Ng, and R. LaFrance. 2024. LeafMachine2: Using machine learning to rapidly measure plant traits captured in herbarium specimens. *Applications in Plant Sciences* 12(1): e11545. doi: 10.1002/aps3.11545
 
 ---
 

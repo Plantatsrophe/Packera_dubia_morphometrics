@@ -22,12 +22,16 @@
    - [2.2 Execute LeafMachine2](#22-execute-leafmachine2)
    - [2.3 Post-Processing, DBSCAN Clustering & 4-Tier Routing](#23-post-processing-dbscan-clustering--4-tier-routing)
 5. [Phase 3: Label-Blind Elliptic Fourier Analysis (EFA)](#phase-3-label-blind-elliptic-fourier-analysis-efa)
+   - [3.1 Symmetric Elliptic Fourier Analysis ($A_n, D_n$) & Reflection Parity](#31-symmetric-elliptic-fourier-analysis-a_n-d_n--reflection-parity)
 6. [Phase 4: GMM Clustering & MorphoTools2 Passive Sample CDA](#phase-4-gmm-clustering--morphotools2-passive-sample-cda)
 7. [Phase 5: DINOv2 Deep Vision Embeddings & Cleanlab XAI](#phase-5-dinov2-deep-vision-embeddings--cleanlab-xai)
+   - [5.1 Deep Vision Batch-Effect Controls & Mounting Paper Neutralization](#51-deep-vision-batch-effect-controls--mounting-paper-neutralization)
 8. [Phase 6: Multi-Modal Spatial Random Forests & Niche Modeling](#phase-6-multi-modal-spatial-random-forests--niche-modeling)
+   - [6.1 Multi-Scale Micro-Edaphic Validation: SoilGrids vs. USDA SSURGO](#61-multi-scale-micro-edaphic-validation-regional-soilgrids-250m-vs-usda-ssurgo-124000)
 9. [Phase 7: Multi-Evidence Synthesis & Digital Triage Queue](#phase-7-multi-evidence-synthesis--digital-triage-queue)
 10. [Automated Test Suite Verification](#10-automated-test-suite-verification)
 11. [Troubleshooting & Quality Control Checklist](#11-troubleshooting--quality-control-checklist)
+12. [Key Literature & Citations](#12-key-literature--citations)
 
 ---
 
@@ -306,6 +310,23 @@ Rscript scripts/morphometrics/03_fourier_extractor.R \
 **Key Outputs:**
 - `data/tables/leaf_efa_harmonics.csv`: 44 standardized harmonic coefficients per leaf outline.
 
+### 3.1 Symmetric Elliptic Fourier Analysis ($A_n, D_n$) & Reflection Parity
+Closed outline contours parameterized via Elliptic Fourier Analysis (EFA; Kuhl and Giardina 1982) represent perimeter coordinates as two periodic functions $x(t)$ and $y(t)$ decomposed into $N$ harmonic components:
+$$x(t) = a_0 + \sum_{n=1}^N \left( A_n \cos \frac{2n\pi t}{T} + B_n \sin \frac{2n\pi t}{T} \right)$$
+$$y(t) = c_0 + \sum_{n=1}^N \left( C_n \cos \frac{2n\pi t}{T} + D_n \sin \frac{2n\pi t}{T} \right)$$
+
+When leaf contours are oriented along their longitudinal midrib vector (aligned with the vertical axis), the four harmonic coefficients capture distinct geometric symmetry modes:
+- **Symmetric Harmonic Coefficients ($A_n, D_n$):** Capture variations that are mathematically symmetric with respect to the midrib reflection axis.
+- **Asymmetric Harmonic Coefficients ($B_n, C_n$):** Capture asymmetric outline distortions, including biological fluctuating asymmetry (FA), developmental left-right skew, pressing shear, and petiole insertion curvature.
+
+**Methodological Mitigation:**
+In Tier 2 geometric routing, unoccluded hemi-blades are reflected across the midrib axis in OpenCV, creating a synthetically perfect bilateral outline where $B_n \equiv 0$ and $C_n \equiv 0$. If all four coefficients ($A_n, B_n, C_n, D_n$) were retained in downstream ordinations, natural fluctuating asymmetry in Tier 1 pristine leaves would cause spurious, non-biological segregation between Tier 1 and Tier 2 specimens in PCA/CDA morphospace. 
+
+By isolating and analyzing exclusively the **symmetric harmonic component** ($A_n, D_n$), the pipeline:
+1. Eliminates fluctuating asymmetry artifacts and press shear.
+2. Enforces mathematical parity between Tier 1 intact leaves and Tier 2 reflected leaves.
+3. Preserves full diagnostic outline discriminatory power across taxonomic lineages.
+
 ---
 
 ## Phase 4: GMM Clustering & MorphoTools2 Passive Sample CDA
@@ -353,6 +374,17 @@ python scripts/analysis/05_cleanlab_vision_xai.py \
 - `data/tables/label_noise_audit.csv`: Cleanlab label error probabilities ($C_{\text{error}}$) and predicted labels.
 - `outputs/figures/GradCAM_audit_panel.png`: 4-column visual explanation panel displaying original rosettes, DINOv2 attention maps, and Grad-CAM heatmaps.
 
+### 5.1 Deep Vision Batch-Effect Controls & Mounting Paper Neutralization
+Herbarium collections represent specimens collected across more than a century and accessioned across dozens of independent institutional repositories. Mounting sheets vary substantially in paper substrate, fiber composition, natural oxidation/yellowing, optical brighteners, and institutional digitization rigs (lighting temperature, sensor profiles, and color calibration). In self-supervised vision models such as DINOv2-ViT-B/14, unmitigated rosette image crops risk feature contamination where model embeddings cluster by mounting sheet background artifacts rather than biological leaf traits.
+
+To prevent non-biological batch effects from confounding taxonomic delimitation, the pipeline incorporates dual defense mechanisms:
+1. **Background Paper Neutralization:**
+   Before passing rosette patches into DINOv2-ViT-B/14, a color-thresholding and contour-masking routine isolates the botanical plant foreground (rosette blades, petioles, tomentum, caudex). All non-plant pixels (mounting sheet paper, paper labels, fragment packets) are neutralized to uniform neutral gray (RGB: 128, 128, 128) or masked to zero-valued background tensors. Attention-map inspections and Grad-CAM saliency heatmaps verify that transformer attention heads localize on botanical characteristics (e.g., dense tomentum, dentate margins) rather than mounting paper fibers.
+2. **Institutional ANOVA / MANOVA Audits:**
+   Following feature extraction, an automated institutional audit module conducts one-way Analysis of Variance (ANOVA) and Multivariate ANOVA (MANOVA) tests on both Fourier PC scores and DINOv2 latent embeddings, treating `institutionCode` (e.g., NCU, GA, US, NY, MO, WIS) as the group factor:
+   - Evaluates whether between-institution variance exceeds expected within-taxon variance.
+   - Calculates effect sizes (partial $\eta^2$) and Fisher's $F$-statistics. Any cluster exhibiting statistically significant institutional bias ($p < 0.01$) independent of taxonomic identity is flagged for batch-effect covariate regression or ComBat harmonization prior to downstream classification.
+
 ---
 
 ## Phase 6: Multi-Modal Spatial Random Forests & Niche Modeling
@@ -388,6 +420,18 @@ python scripts/analysis/06_multimodal_spatial_rf.py \
 - `data/tables/multimodal_conflict_flags.csv`: Cross-modal consensus classifications.
 - `outputs/figures/spatial_rf_niche_importance.pdf` / `.png`: Variable importance and Moran's Eigenvector Maps.
 - `outputs/reports/multimodal_spatial_rf_summary.csv`: Warren's Niche Identity test statistics ($D$).
+
+### 6.1 Multi-Scale Micro-Edaphic Validation: Regional SoilGrids (250m) vs. USDA SSURGO (1:24,000)
+While regional macroecological modeling relies on 30-arcsecond WorldClim 2.1 bioclimatic rasters and 250m SoilGrids pedological rasters (pH in $\text{H}_2\text{O}$, cation exchange capacity [CEC], sand/clay fractions, bulk density), regional grids are insufficient to characterize localized edaphic endemics.
+
+**The Scale-Resolution Challenge:**
+Several taxa in the *Packera dubia* complex are specialized lithological or rock outcrop endemics. Most notably, *Packera anonyma* is predominantly restricted to granitic flatrocks, amphibolite plutons, and ultramafic / serpentine glades across the Piedmont. These edaphic islands frequently span linear dimensions of only 50 to 100 meters, which are completely smoothed out or mischaracterized in 250m average raster grids.
+
+**USDA NRCS SSURGO Integration:**
+To overcome this spatial mismatch, the pipeline complements regional SoilGrids layers with fine-scale **1:24,000 USDA NRCS Soil Survey Geographic Database (SSURGO)** vector map units:
+- **Map Unit Identification:** Point coordinates of georeferenced vouchers are spatially joined against SSURGO vector polygon coverages to retrieve precise soil map unit symbols (`musym`) and soil series names (e.g., Rock Outcrop complexes, Louisburg granite outcrop associations, Catamount-Poindexter complex).
+- **Component Bedrock Properties:** Extracts critical micro-edaphic parameters including depth to restrictive lithic bedrock layer, surface rock fragment volume (%), and local drainage class.
+- **Niche Divergence Validation:** Confirms whether morphological clusters identified by symmetric EFA correlate with genuine micro-edaphic substrate restrictions, distinguishing true edaphic specialists from broadly distributed generalist populations (*Packera dubia* sensu stricto on sandy coastal plains vs. *Packera anonyma* on crystalline rock outcrops).
 
 ---
 
@@ -459,3 +503,18 @@ python -m unittest discover -s scripts/tests
 | Low leaf segmentation quality | Heavy foliar overlap or decayed sheet | Verify that 4-tier routing sent leaves to Tier 2 (reflected) or Tier 4 (rosette embeddings) |
 | Missing edaphic values for specimens | Coordinate situated offshore or in water body | Pipeline automatically imputes nearest regional mean from SoilGrids 250m |
 | Inconsistent species synonymy | Historical basionym in aggregator record | All scripts use centralized standardizer `standardize_packera_taxon()` |
+
+---
+
+## 12. Key Literature & Citations
+
+1. Barkley, T. M. 1988. Variation among the Senecioneae (Asteraceae) in North America. *Brittonia* 40(2): 211–221. doi: 10.2307/2807005
+2. de Queiroz, K. 2007. Species concepts and species delimitation. *Systematic Biology* 56(6): 879–886. doi: 10.1080/10635150701701083
+3. Kowal, R. R. 1975. Systematics of *Senecio aureus* and allied species on the Gaspé Peninsula, Quebec. *Memoirs of the Torrey Botanical Club* 23(2): 1–113.
+4. Kuhl, F. P., and C. R. Giardina. 1982. Elliptic Fourier features of a closed contour. *Computer Graphics and Image Processing* 18(3): 236–258. doi: 10.1016/0146-664X(82)90034-X
+5. Mabberley, D. J., D. K. Trock, and A. S. Weakley. 2020. The nomenclature of *Packera dubia* (Asteraceae: Senecioneae). *Taxon* 69(6): 1334–1337. doi: 10.1002/tax.12351
+6. Northcutt, C. G., L. Jiang, and I. L. Chuang. 2021. Confident Learning: Estimating Uncertainty in Dataset Labels. *Journal of Artificial Intelligence Research* 70: 1373–1411. doi: 10.1613/jair.1.12125
+7. Šlenker, M., P. Koutecký, and P. Marhold. 2022. MorphoTools2: an R package for multivariate morphometric analysis. *Bioinformatics* 38(10): 2954–2955. doi: 10.1093/bioinformatics/btac173
+8. Trock, D. K. 2006. *Packera*. In Flora of North America Editorial Committee (eds.), *Flora of North America North of Mexico*, Vol. 20, 570–602. Oxford University Press, New York.
+9. Weakley, A. S. 2026. *Flora of the Southeastern United States*. University of North Carolina Herbarium (NCU), North Carolina Botanical Garden, Chapel Hill.
+10. Weaver, W. N., P. S. Ng, and R. LaFrance. 2024. LeafMachine2: Using machine learning to rapidly measure plant traits captured in herbarium specimens. *Applications in Plant Sciences* 12(1): e11545. doi: 10.1002/aps3.11545

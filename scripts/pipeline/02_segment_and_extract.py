@@ -121,6 +121,77 @@ class DetectedInstance:
 
 
 # =============================================================================
+# Capitulum Macro-Reproductive Metric Extraction
+# =============================================================================
+
+def compute_capitulum_metrics(
+    mask: np.ndarray,
+    bbox: Tuple[int, int, int, int],
+    pixels_per_mm: Optional[float] = None,
+    min_ar: float = 0.7,
+    max_ar: float = 2.0,
+) -> Optional[Dict[str, Any]]:
+    """
+    Computes involucre height (H_inv), width (W_inv), and aspect ratio (AR_inv = H/W)
+    for a segmented Class 6 capitulum instance.
+
+    Filters for valid cylindrical capitula where min_ar <= H/W <= max_ar (default 0.7 to 2.0).
+    Dimensions are computed via oriented bounding box (cv2.minAreaRect), resolving the longitudinal
+    axis (peduncle-to-apex height) versus transverse diameter (involucre width) based on dominant vertical
+    alignment on the herbarium sheet.
+    """
+    h_inv_px = 0.0
+    w_inv_px = 0.0
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours and cv2.contourArea(max(contours, key=cv2.contourArea)) >= 10:
+        main_contour = max(contours, key=cv2.contourArea)
+        rect = cv2.minAreaRect(main_contour)
+        box = cv2.boxPoints(rect)
+        v1 = box[1] - box[0]
+        v2 = box[2] - box[1]
+        len1 = float(np.linalg.norm(v1))
+        len2 = float(np.linalg.norm(v2))
+
+        # Herbarium specimens are mounted with flowering stalks ascending vertically (y-axis).
+        # Resolve the longitudinal axis (height) as the edge with greater vertical projection (|Δy|/len).
+        norm1 = max(len1, 1e-6)
+        norm2 = max(len2, 1e-6)
+        vert1 = abs(float(v1[1])) / norm1
+        vert2 = abs(float(v2[1])) / norm2
+
+        if vert1 >= vert2:
+            h_inv_px = len1
+            w_inv_px = len2
+        else:
+            h_inv_px = len2
+            w_inv_px = len1
+    else:
+        # Fallback to axis-aligned bounding box
+        ymin, xmin, ymax, xmax = bbox
+        h_inv_px = float(max(ymax - ymin, 1))
+        w_inv_px = float(max(xmax - xmin, 1))
+
+    if w_inv_px <= 1e-6:
+        return None
+
+    aspect_ratio = h_inv_px / w_inv_px
+    if not (min_ar <= aspect_ratio <= max_ar):
+        return None
+
+    h_inv_mm = (h_inv_px / pixels_per_mm) if (pixels_per_mm and pixels_per_mm > 0) else np.nan
+    w_inv_mm = (w_inv_px / pixels_per_mm) if (pixels_per_mm and pixels_per_mm > 0) else np.nan
+
+    return {
+        "involucre_height_px": round(h_inv_px, 2),
+        "involucre_width_px": round(w_inv_px, 2),
+        "involucre_height_mm": round(h_inv_mm, 3) if not np.isnan(h_inv_mm) else np.nan,
+        "involucre_width_mm": round(w_inv_mm, 3) if not np.isnan(w_inv_mm) else np.nan,
+        "capitulum_aspect_ratio": round(aspect_ratio, 4),
+    }
+
+
+# =============================================================================
 # Direct PointRend Model Inference Engine
 # =============================================================================
 
@@ -282,6 +353,7 @@ class SegmentAndExtractPipeline:
             device=self.device,
             score_thresh=self.score_thresh
         )
+        self.voucher_repro_records: Dict[str, Dict[str, Any]] = {}
 
     def shutdown(self) -> None:
         """Cleans up background thread pools."""
@@ -385,11 +457,68 @@ class SegmentAndExtractPipeline:
                 "failure_reason": "no_leaves_detected",
                 "details": "Model produced 0 candidate leaf segmentations"
             }
+            self.voucher_repro_records[catalog_number] = {
+                "catalogNumber": catalog_number,
+                "capitula_count": 0,
+                "involucre_height_px": np.nan,
+                "involucre_width_px": np.nan,
+                "involucre_height_mm": np.nan,
+                "involucre_width_mm": np.nan,
+                "capitulum_aspect_ratio": np.nan,
+            }
             return [], failure_record
 
-        # Build detected instances
+        # Separate raw detections into Class 6 capitula and vegetative leaf candidates (class_id != 6)
+        capitulum_detections = [d for d in raw_detections if d[3] == 6]
+        leaf_detections = [d for d in raw_detections if d[3] != 6]
+
+        # Extract macro-reproductive metrics from valid cylindrical capitula (0.7 <= H/W <= 2.0)
+        valid_capitula: List[Dict[str, Any]] = []
+        for bbox, mask, score, class_id in capitulum_detections:
+            metrics = compute_capitulum_metrics(mask, bbox, pixels_per_mm)
+            if metrics is not None:
+                metrics["score"] = score
+                valid_capitula.append(metrics)
+
+        capitula_count = len(valid_capitula)
+        if capitula_count > 0:
+            med_h_px = float(np.median([c["involucre_height_px"] for c in valid_capitula]))
+            med_w_px = float(np.median([c["involucre_width_px"] for c in valid_capitula]))
+            h_mm_list = [c["involucre_height_mm"] for c in valid_capitula if not np.isnan(c["involucre_height_mm"])]
+            w_mm_list = [c["involucre_width_mm"] for c in valid_capitula if not np.isnan(c["involucre_width_mm"])]
+            med_h_mm = float(np.median(h_mm_list)) if h_mm_list else np.nan
+            med_w_mm = float(np.median(w_mm_list)) if w_mm_list else np.nan
+            med_ar = float(np.median([c["capitulum_aspect_ratio"] for c in valid_capitula]))
+        else:
+            med_h_px = np.nan
+            med_w_px = np.nan
+            med_h_mm = np.nan
+            med_w_mm = np.nan
+            med_ar = np.nan
+
+        repro_summary = {
+            "catalogNumber": catalog_number,
+            "capitula_count": capitula_count,
+            "involucre_height_px": round(med_h_px, 2) if not np.isnan(med_h_px) else np.nan,
+            "involucre_width_px": round(med_w_px, 2) if not np.isnan(med_w_px) else np.nan,
+            "involucre_height_mm": round(med_h_mm, 3) if not np.isnan(med_h_mm) else np.nan,
+            "involucre_width_mm": round(med_w_mm, 3) if not np.isnan(med_w_mm) else np.nan,
+            "capitulum_aspect_ratio": round(med_ar, 4) if not np.isnan(med_ar) else np.nan,
+        }
+        self.voucher_repro_records[catalog_number] = repro_summary
+
+        if not leaf_detections:
+            failure_record = {
+                "catalogNumber": catalog_number,
+                "image_path": str(image_path),
+                "failure_reason": "no_leaves_detected",
+                "details": f"Model produced 0 candidate leaf segmentations ({capitula_count} capitula detected)"
+            }
+            return [], failure_record
+
+        # Build detected leaf instances
         instances: List[DetectedInstance] = []
-        for idx, (bbox, mask, score, class_id) in enumerate(raw_detections, 1):
+        for idx, (bbox, mask, score, class_id) in enumerate(leaf_detections, 1):
             instances.append(DetectedInstance(
                 catalog_number=catalog_number,
                 leaf_id=idx,
@@ -438,7 +567,7 @@ class SegmentAndExtractPipeline:
                     rejected_instances.append(inst)
                     continue
 
-            # Record successfully extracted leaf
+            # Record successfully extracted leaf with appended specimen-level reproductive metrics
             extracted_records.append({
                 "catalogNumber": catalog_number,
                 "plant_individual_id": inst.plant_individual_id,
@@ -450,7 +579,13 @@ class SegmentAndExtractPipeline:
                 "midrib_angle_deg": round(inst.midrib_angle_deg, 2),
                 "pixels_per_mm": round(inst.pixels_per_mm, 4) if inst.pixels_per_mm else np.nan,
                 "mask_path": inst.mask_path,
-                "contour_path": inst.contour_path
+                "contour_path": inst.contour_path,
+                "capitula_count": capitula_count,
+                "involucre_height_px": repro_summary["involucre_height_px"],
+                "involucre_width_px": repro_summary["involucre_width_px"],
+                "involucre_height_mm": repro_summary["involucre_height_mm"],
+                "involucre_width_mm": repro_summary["involucre_width_mm"],
+                "capitulum_aspect_ratio": repro_summary["capitulum_aspect_ratio"],
             })
 
         # Route vouchers with 0 valid silhouettes to failed manifest
@@ -493,9 +628,11 @@ class SegmentAndExtractPipeline:
         manifest_path = self.tables_dir / "extracted_leaf_manifest.csv"
         legacy_manifest_path = self.tables_dir / "extracted_leaves_manifest.csv"
         failed_qc_path = self.tables_dir / "failed_qc_vouchers.csv"
+        repro_manifest_path = self.tables_dir / "voucher_reproductive_metrics.csv"
 
         existing_extracted_by_cat: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         existing_failed_by_cat: Dict[str, Dict[str, Any]] = {}
+        existing_repro_by_cat: Dict[str, Dict[str, Any]] = {}
 
         if not self.force:
             for path in [manifest_path, legacy_manifest_path]:
@@ -517,6 +654,15 @@ class SegmentAndExtractPipeline:
                             existing_failed_by_cat[str(rec["catalogNumber"]).strip()] = rec
                 except Exception as e:
                     logger.warning(f"Could not load previous failed QC table at {failed_qc_path}: {e}")
+
+            if repro_manifest_path.exists() and repro_manifest_path.stat().st_size > 0:
+                try:
+                    prev_repro = pd.read_csv(repro_manifest_path)
+                    if not prev_repro.empty and "catalogNumber" in prev_repro.columns:
+                        for rec in prev_repro.to_dict(orient="records"):
+                            existing_repro_by_cat[str(rec["catalogNumber"]).strip()] = rec
+                except Exception as e:
+                    logger.warning(f"Could not load previous reproductive table at {repro_manifest_path}: {e}")
 
         all_extracted_records: List[Dict[str, Any]] = []
         all_failed_records: List[Dict[str, Any]] = []
@@ -542,6 +688,9 @@ class SegmentAndExtractPipeline:
                     all_extracted_records.extend(existing_extracted_by_cat[cat_num])
                 elif cat_num in existing_failed_by_cat:
                     all_failed_records.append(existing_failed_by_cat[cat_num])
+
+                if cat_num in existing_repro_by_cat:
+                    self.voucher_repro_records[cat_num] = existing_repro_by_cat[cat_num]
                 continue
 
             processed_count += 1
@@ -566,7 +715,9 @@ class SegmentAndExtractPipeline:
             extracted_df = pd.DataFrame(columns=[
                 "catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier",
                 "ucs_score", "solidity", "midrib_angle_deg", "pixels_per_mm",
-                "mask_path", "contour_path"
+                "mask_path", "contour_path", "capitula_count",
+                "involucre_height_px", "involucre_width_px", "involucre_height_mm",
+                "involucre_width_mm", "capitulum_aspect_ratio"
             ])
 
         failed_df = pd.DataFrame(all_failed_records)
@@ -575,16 +726,33 @@ class SegmentAndExtractPipeline:
                 "catalogNumber", "image_path", "failure_reason", "details"
             ])
 
+        repro_df = pd.DataFrame(list(self.voucher_repro_records.values()))
+        if repro_df.empty:
+            repro_df = pd.DataFrame(columns=[
+                "catalogNumber", "capitula_count", "involucre_height_px",
+                "involucre_width_px", "involucre_height_mm", "involucre_width_mm",
+                "capitulum_aspect_ratio"
+            ])
+        else:
+            repro_cols = [
+                "catalogNumber", "capitula_count", "involucre_height_px",
+                "involucre_width_px", "involucre_height_mm", "involucre_width_mm",
+                "capitulum_aspect_ratio"
+            ]
+            repro_df = repro_df[[c for c in repro_cols if c in repro_df.columns]]
+
         # Atomically save manifests via temporary files
         self._atomic_save_csv(extracted_df, manifest_path)
         self._atomic_save_csv(extracted_df, legacy_manifest_path)
         self._atomic_save_csv(failed_df, failed_qc_path)
+        self._atomic_save_csv(repro_df, repro_manifest_path)
 
         logger.info("==================================================================")
         logger.info(f"Extraction completed!")
         logger.info(f"  Extracted Leaves: {len(extracted_df)} -> {manifest_path}")
         logger.info(f"  Legacy Manifest: {len(extracted_df)} -> {legacy_manifest_path}")
         logger.info(f"  Failed QC Vouchers: {len(failed_df)} -> {failed_qc_path}")
+        logger.info(f"  Reproductive Metrics: {len(repro_df)} -> {repro_manifest_path}")
         if not extracted_df.empty and "assigned_tier" in extracted_df.columns:
             tier_dist = extracted_df["assigned_tier"].value_counts().to_dict()
             for tier, count in tier_dist.items():
