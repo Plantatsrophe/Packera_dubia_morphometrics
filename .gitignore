@@ -7,6 +7,31 @@
 # manifests, and pipeline documentation tracked.
 # ==============================================================================
 
+# ==============================================================================
+# Model Checkpoints, Training Telemetry & Heavy Datasets (Strict GitHub Hygiene)
+# ==============================================================================
+# Model checkpoints and weights
+models/*.pth
+models/*.pt
+models/*.bin
+*.pth
+*.pt
+
+# TensorBoard and Training telemetry
+data/annotations/pcd_training_output/
+*.tfevents.*
+lightning_logs/
+wandb/
+
+# Heavy imagery and spatial rasters
+data/raw_vouchers/*.jpg
+data/raw_vouchers/*.jpeg
+data/raw_vouchers/*.png
+data/environmental/*.tif
+data/environmental/*.tiff
+data/masks/
+data/cropped_patches/
+
 # ------------------------------------------------------------------------------
 # 1. Operating System & Cloud Storage Artifacts (Windows, macOS, Google Drive)
 # ------------------------------------------------------------------------------
