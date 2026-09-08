@@ -514,22 +514,22 @@ def calculate_cursor_centered_zoom(
     if new_zoom <= 1.001:
         return 1.0, [0, 0]
 
-    # Calculate image coordinates under cursor with current zoom/pan
-    curr_crop_w = max(10, orig_w / max(current_zoom, 1.0))
-    curr_crop_h = max(10, orig_h / max(current_zoom, 1.0))
+    # Calculate image coordinates under cursor with current zoom/pan using floating point precision
+    curr_crop_w = max(10.0, orig_w / max(current_zoom, 1.0))
+    curr_crop_h = max(10.0, orig_h / max(current_zoom, 1.0))
     scale_x = target_w / curr_crop_w
     scale_y = target_h / curr_crop_h
 
-    ix = current_pan[0] + cursor_vx / max(scale_x, 1e-6)
-    iy = current_pan[1] + cursor_vy / max(scale_y, 1e-6)
+    ix = float(current_pan[0]) + float(cursor_vx) / max(scale_x, 1e-6)
+    iy = float(current_pan[1]) + float(cursor_vy) / max(scale_y, 1e-6)
 
     # Compute new crop dimensions
-    new_crop_w = max(10, orig_w / new_zoom)
-    new_crop_h = max(10, orig_h / new_zoom)
+    new_crop_w = max(10.0, orig_w / new_zoom)
+    new_crop_h = max(10.0, orig_h / new_zoom)
 
     # Anchor (ix, iy) to remain under (cursor_vx, cursor_vy)
-    new_pan_x = int(round(ix - (cursor_vx / target_w) * new_crop_w))
-    new_pan_y = int(round(iy - (cursor_vy / target_h) * new_crop_h))
+    new_pan_x = int(round(ix - (float(cursor_vx) / max(target_w, 1)) * new_crop_w))
+    new_pan_y = int(round(iy - (float(cursor_vy) / max(target_h, 1)) * new_crop_h))
 
     # Clamp pan offset so viewport doesn't drift uncontrollably
     min_x = -int(new_crop_w * 0.85)
@@ -853,11 +853,16 @@ def convert_masks_to_coco_dataset(
                 candidate_img = images_dir_path / img_file_name
                 if candidate_img.exists():
                     try:
-                        probe = cv2.imread(str(candidate_img))
-                        if probe is not None:
-                            h, w = probe.shape[:2]
+                        from PIL import Image
+                        with Image.open(candidate_img) as im:
+                            w, h = im.size
                     except Exception:
-                        pass
+                        try:
+                            probe = cv2.imread(str(candidate_img))
+                            if probe is not None:
+                                h, w = probe.shape[:2]
+                        except Exception:
+                            pass
 
             images_dict[img_file_name] = {
                 "id": image_id_counter,

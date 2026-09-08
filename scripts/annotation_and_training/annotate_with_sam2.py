@@ -88,6 +88,109 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("SAM2Annotator")
 
 
+class XKeyEvent(ctypes.Structure):
+    _fields_ = [
+        ('type', ctypes.c_int),
+        ('serial', ctypes.c_ulong),
+        ('send_event', ctypes.c_int),
+        ('display', ctypes.c_void_p),
+        ('window', ctypes.c_ulong),
+        ('root', ctypes.c_ulong),
+        ('subwindow', ctypes.c_ulong),
+        ('time', ctypes.c_ulong),
+        ('x', ctypes.c_int),
+        ('y', ctypes.c_int),
+        ('x_root', ctypes.c_int),
+        ('y_root', ctypes.c_int),
+        ('state', ctypes.c_uint),
+        ('keycode', ctypes.c_uint),
+        ('same_screen', ctypes.c_int),
+    ]
+
+
+class XButtonEvent(ctypes.Structure):
+    _fields_ = [
+        ('type', ctypes.c_int),
+        ('serial', ctypes.c_ulong),
+        ('send_event', ctypes.c_int),
+        ('display', ctypes.c_void_p),
+        ('window', ctypes.c_ulong),
+        ('root', ctypes.c_ulong),
+        ('subwindow', ctypes.c_ulong),
+        ('time', ctypes.c_ulong),
+        ('x', ctypes.c_int),
+        ('y', ctypes.c_int),
+        ('x_root', ctypes.c_int),
+        ('y_root', ctypes.c_int),
+        ('state', ctypes.c_uint),
+        ('button', ctypes.c_uint),
+        ('same_screen', ctypes.c_int),
+    ]
+
+
+class XMotionEvent(ctypes.Structure):
+    _fields_ = [
+        ('type', ctypes.c_int),
+        ('serial', ctypes.c_ulong),
+        ('send_event', ctypes.c_int),
+        ('display', ctypes.c_void_p),
+        ('window', ctypes.c_ulong),
+        ('root', ctypes.c_ulong),
+        ('subwindow', ctypes.c_ulong),
+        ('time', ctypes.c_ulong),
+        ('x', ctypes.c_int),
+        ('y', ctypes.c_int),
+        ('x_root', ctypes.c_int),
+        ('y_root', ctypes.c_int),
+        ('state', ctypes.c_uint),
+        ('is_hint', ctypes.c_char),
+        ('same_screen', ctypes.c_int),
+    ]
+
+
+class XClientMessageEvent(ctypes.Structure):
+    _fields_ = [
+        ('type', ctypes.c_int),
+        ('serial', ctypes.c_ulong),
+        ('send_event', ctypes.c_int),
+        ('display', ctypes.c_void_p),
+        ('window', ctypes.c_ulong),
+        ('message_type', ctypes.c_ulong),
+        ('format', ctypes.c_int),
+        ('data_l', ctypes.c_long * 5),
+    ]
+
+
+class XConfigureEvent(ctypes.Structure):
+    _fields_ = [
+        ('type', ctypes.c_int),
+        ('serial', ctypes.c_ulong),
+        ('send_event', ctypes.c_int),
+        ('display', ctypes.c_void_p),
+        ('event', ctypes.c_ulong),
+        ('window', ctypes.c_ulong),
+        ('x', ctypes.c_int),
+        ('y', ctypes.c_int),
+        ('width', ctypes.c_int),
+        ('height', ctypes.c_int),
+        ('border_width', ctypes.c_int),
+        ('above', ctypes.c_ulong),
+        ('override_redirect', ctypes.c_int),
+    ]
+
+
+class XEvent(ctypes.Union):
+    _fields_ = [
+        ('type', ctypes.c_int),
+        ('xkey', XKeyEvent),
+        ('xbutton', XButtonEvent),
+        ('xmotion', XMotionEvent),
+        ('xclient', XClientMessageEvent),
+        ('xconfigure', XConfigureEvent),
+        ('pad', ctypes.c_long * 24),
+    ]
+
+
 class X11GUIWindow:
     """
     High-performance native X11 window for interactive botanical annotation,
@@ -102,6 +205,7 @@ class X11GUIWindow:
         self.disp = None
         self.win = None
         self.gc = None
+        self.ximage = None
         self._init_x11()
 
     def _init_x11(self) -> None:
@@ -146,6 +250,8 @@ class X11GUIWindow:
         self._x11.XEventsQueued.argtypes = [ctypes.c_void_p, ctypes.c_int]
         self._x11.XNextEvent.restype = ctypes.c_int
         self._x11.XNextEvent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        self._x11.XPeekEvent.restype = ctypes.c_int
+        self._x11.XPeekEvent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         self._x11.XKeycodeToKeysym.restype = ctypes.c_ulong
         self._x11.XKeycodeToKeysym.argtypes = [ctypes.c_void_p, ctypes.c_ubyte, ctypes.c_int]
         self._x11.XDestroyWindow.restype = ctypes.c_int
@@ -174,11 +280,37 @@ class X11GUIWindow:
         atom_arr = (ctypes.c_ulong * 1)(self.wm_delete)
         self._x11.XSetWMProtocols(self.disp, self.win, atom_arr, 1)
 
-        event_mask = (1 << 15) | (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 6) | (1 << 17)
+        # Include ButtonMotionMask, Button1-3MotionMasks so drag motion is reported
+        event_mask = (
+            (1 << 0)   # KeyPressMask
+            | (1 << 1) # KeyReleaseMask
+            | (1 << 2) # ButtonPressMask
+            | (1 << 3) # ButtonReleaseMask
+            | (1 << 6) # PointerMotionMask
+            | (1 << 8) # Button1MotionMask
+            | (1 << 9) # Button2MotionMask
+            | (1 << 10) # Button3MotionMask
+            | (1 << 13) # ButtonMotionMask
+            | (1 << 15) # ExposureMask
+            | (1 << 17) # StructureNotifyMask
+        )
         self._x11.XSelectInput(self.disp, self.win, event_mask)
         self._x11.XMapWindow(self.disp, self.win)
 
         self.gc = self._x11.XCreateGC(self.disp, self.win, 0, None)
+        self.bgra_buffer = np.zeros((self.height, self.width, 4), dtype=np.uint8)
+        self.ximage = self._x11.XCreateImage(
+            self.disp, self.visual, self.depth, 2,
+            0, self.bgra_buffer.ctypes.data_as(ctypes.c_char_p),
+            self.width, self.height, 32, 0
+        )
+
+    def _resize_buffer(self, new_width: int, new_height: int) -> None:
+        """Reallocates backbuffer and XImage on window resize."""
+        if new_width <= 0 or new_height <= 0 or (new_width == self.width and new_height == self.height):
+            return
+        self.width = new_width
+        self.height = new_height
         self.bgra_buffer = np.zeros((self.height, self.width, 4), dtype=np.uint8)
         self.ximage = self._x11.XCreateImage(
             self.disp, self.visual, self.depth, 2,
@@ -197,56 +329,49 @@ class X11GUIWindow:
         self._x11.XFlush(self.disp)
 
     def poll_events(self) -> List[Tuple[str, Any]]:
-        """Polls queued X11 events, handling key presses, releases, buttons, and motion."""
+        """Polls queued X11 events with 192-byte safe union, auto-repeat filter, and resize tracking."""
         raw_events = []
         if not hasattr(self, "disp") or not self.disp:
             return raw_events
 
-        class XEvent(ctypes.Structure):
-            _fields_ = [
-                ('type', ctypes.c_int),
-                ('serial', ctypes.c_ulong),
-                ('send_event', ctypes.c_int),
-                ('display', ctypes.c_void_p),
-                ('window', ctypes.c_ulong),
-                ('root', ctypes.c_ulong),
-                ('subwindow', ctypes.c_ulong),
-                ('time', ctypes.c_ulong),
-                ('x', ctypes.c_int),
-                ('y', ctypes.c_int),
-                ('x_root', ctypes.c_int),
-                ('y_root', ctypes.c_int),
-                ('state', ctypes.c_uint),
-                ('button_or_keycode', ctypes.c_uint),
-                ('same_screen', ctypes.c_int),
-                ('pad', ctypes.c_ulong * 10)
-            ]
-
         evt = XEvent()
         QueuedAfterReading = 1
-        latest_motion = None
 
         while self._x11.XEventsQueued(self.disp, QueuedAfterReading) > 0:
             self._x11.XNextEvent(self.disp, ctypes.byref(evt))
             if evt.type == 2:  # KeyPress
-                keysym = self._x11.XKeycodeToKeysym(self.disp, evt.button_or_keycode, 0)
+                keysym = self._x11.XKeycodeToKeysym(self.disp, evt.xkey.keycode, 0)
                 raw_events.append(('key_press', keysym))
             elif evt.type == 3:  # KeyRelease
-                keysym = self._x11.XKeycodeToKeysym(self.disp, evt.button_or_keycode, 0)
-                raw_events.append(('key_release', keysym))
+                # Detect and swallow fake X11 keyboard auto-repeat releases
+                is_repeat = False
+                if self._x11.XEventsQueued(self.disp, QueuedAfterReading) > 0:
+                    next_evt = XEvent()
+                    self._x11.XPeekEvent(self.disp, ctypes.byref(next_evt))
+                    if (next_evt.type == 2 and
+                        next_evt.xkey.keycode == evt.xkey.keycode and
+                        next_evt.xkey.time == evt.xkey.time):
+                        self._x11.XNextEvent(self.disp, ctypes.byref(next_evt))
+                        is_repeat = True
+                if not is_repeat:
+                    keysym = self._x11.XKeycodeToKeysym(self.disp, evt.xkey.keycode, 0)
+                    raw_events.append(('key_release', keysym))
             elif evt.type == 4:  # ButtonPress
-                btn = evt.button_or_keycode
-                raw_events.append(('button_press', evt.x, evt.y, btn, evt.state))
+                btn = evt.xbutton.button
+                raw_events.append(('button_press', evt.xbutton.x, evt.xbutton.y, btn, evt.xbutton.state))
             elif evt.type == 5:  # ButtonRelease
-                btn = evt.button_or_keycode
-                raw_events.append(('button_release', evt.x, evt.y, btn, evt.state))
+                btn = evt.xbutton.button
+                raw_events.append(('button_release', evt.xbutton.x, evt.xbutton.y, btn, evt.xbutton.state))
             elif evt.type == 6:  # MotionNotify
-                latest_motion = ('motion', evt.x, evt.y, evt.state)
+                raw_events.append(('motion', evt.xmotion.x, evt.xmotion.y, evt.xmotion.state))
+            elif evt.type == 22:  # ConfigureNotify (Window Resize)
+                cfg = evt.xconfigure
+                if cfg.width > 0 and cfg.height > 0 and (cfg.width != self.width or cfg.height != self.height):
+                    self._resize_buffer(cfg.width, cfg.height)
+                    raw_events.append(('resize', cfg.width, cfg.height))
             elif evt.type == 33:  # ClientMessage (WM_DELETE_WINDOW)
-                raw_events.append(('close', None))
-
-        if latest_motion is not None:
-            raw_events.append(latest_motion)
+                if evt.xclient.data_l[0] == self.wm_delete:
+                    raw_events.append(('close', None))
 
         return raw_events
 
@@ -347,6 +472,7 @@ class PrecisionSAM2Annotator:
 
         # Mouse & Key Interaction tracking
         self.lbutton_down: bool = False
+        self.rbutton_down: bool = False
         self.space_down: bool = False
         self.drag_start_screen: Tuple[int, int] = (0, 0)
         self.drag_start_img: Tuple[int, int] = (0, 0)
@@ -690,6 +816,9 @@ class PrecisionSAM2Annotator:
                         ix, iy = self._viewport_to_image(vx, vy, scale_x, scale_y, crop_x0, crop_y0)
 
                         if btn == 1:  # Left Button
+                            self.lbutton_down = True
+                            self.drag_start_screen = (vx, vy)
+                            self.drag_start_img = (ix, iy)
                             if self.space_down:
                                 self.is_pan_dragging = True
                                 self.pan_drag_start = (vx, vy)
@@ -720,9 +849,6 @@ class PrecisionSAM2Annotator:
                                         logger.info(f"Applied 2-click knife cut from {self.knife_pt_a} to {(ix, iy)}")
                                     self.knife_pt_a = None
                             else:
-                                self.lbutton_down = True
-                                self.drag_start_screen = (vx, vy)
-                                self.drag_start_img = (ix, iy)
                                 self.is_box_dragging = False
 
                         elif btn == 2:  # Middle Button Drag Pan
@@ -730,16 +856,12 @@ class PrecisionSAM2Annotator:
                             self.pan_drag_start = (vx, vy)
                             self.pan_offset_start = list(self.pan_offset)
 
-                        elif btn == 3:  # Right Button: Background point prompt
-                            self.is_pan_dragging = False
-                            if self.mode == "POLYGON" and len(self.polygon_points) >= 3:
-                                self.finalize_polygon_selection()
-                            elif self.mode == "KNIFE":
-                                self.knife_pt_a = None
-                            else:
-                                self.point_coords.append([float(ix), float(iy)])
-                                self.point_labels.append(0)
-                                self.run_inference()
+                        elif btn == 3:  # Right Button (Drag to pan or click for background prompt)
+                            self.rbutton_down = True
+                            self.drag_start_screen = (vx, vy)
+                            self.drag_start_img = (ix, iy)
+                            self.pan_drag_start = (vx, vy)
+                            self.pan_offset_start = list(self.pan_offset)
 
                         elif btn == 4:  # Wheel Up -> Cursor-Centered Zoom In
                             self.zoom_level, self.pan_offset = calculate_cursor_centered_zoom(
@@ -747,6 +869,12 @@ class PrecisionSAM2Annotator:
                                 target_w=self.window_w, target_h=self.window_h,
                                 orig_w=self.orig_w, orig_h=self.orig_h, step=1.15, min_zoom=1.0, max_zoom=16.0
                             )
+                            crop_w = max(10, int(self.orig_w / max(self.zoom_level, 1.0)))
+                            crop_h = max(10, int(self.orig_h / max(self.zoom_level, 1.0)))
+                            scale_x = self.window_w / max(crop_w, 1)
+                            scale_y = self.window_h / max(crop_h, 1)
+                            crop_x0 = self.pan_offset[0]
+                            crop_y0 = self.pan_offset[1]
 
                         elif btn == 5:  # Wheel Down -> Cursor-Centered Zoom Out
                             self.zoom_level, self.pan_offset = calculate_cursor_centered_zoom(
@@ -754,6 +882,12 @@ class PrecisionSAM2Annotator:
                                 target_w=self.window_w, target_h=self.window_h,
                                 orig_w=self.orig_w, orig_h=self.orig_h, step=1.15, min_zoom=1.0, max_zoom=16.0
                             )
+                            crop_w = max(10, int(self.orig_w / max(self.zoom_level, 1.0)))
+                            crop_h = max(10, int(self.orig_h / max(self.zoom_level, 1.0)))
+                            scale_x = self.window_w / max(crop_w, 1)
+                            scale_y = self.window_h / max(crop_h, 1)
+                            crop_x0 = self.pan_offset[0]
+                            crop_y0 = self.pan_offset[1]
 
                     elif ev_type == "motion":
                         _, vx, vy, state = ev
@@ -761,21 +895,24 @@ class PrecisionSAM2Annotator:
                         self.hover_img_pos = (ix, iy)
                         self.hover_screen_pos = (vx, vy)
 
+                        if getattr(self, "rbutton_down", False) and not self.is_pan_dragging:
+                            if max(abs(vx - self.drag_start_screen[0]), abs(vy - self.drag_start_screen[1])) > 5:
+                                self.is_pan_dragging = True
+
                         if self.is_pan_dragging:
                             dx = vx - self.pan_drag_start[0]
                             dy = vy - self.pan_drag_start[1]
                             img_dx = int(dx / max(scale_x, 1e-6))
                             img_dy = int(dy / max(scale_y, 1e-6))
-                            if self.zoom_level > 1.0:
-                                crop_w = int(self.orig_w / self.zoom_level)
-                                crop_h = int(self.orig_h / self.zoom_level)
-                                min_x = -int(crop_w * 0.85)
-                                max_x = int(self.orig_w - crop_w * 0.15)
-                                min_y = -int(crop_h * 0.85)
-                                max_y = int(self.orig_h - crop_h * 0.15)
-                                self.pan_offset[0] = max(min_x, min(max_x, self.pan_offset_start[0] - img_dx))
-                                self.pan_offset[1] = max(min_y, min(max_y, self.pan_offset_start[1] - img_dy))
-                        elif getattr(self, "lbutton_down", False) and self.mode == "SELECT":
+                            crop_w = int(self.orig_w / max(self.zoom_level, 1.0))
+                            crop_h = int(self.orig_h / max(self.zoom_level, 1.0))
+                            min_x = -int(crop_w * 0.85)
+                            max_x = int(self.orig_w - crop_w * 0.15)
+                            min_y = -int(crop_h * 0.85)
+                            max_y = int(self.orig_h - crop_h * 0.15)
+                            self.pan_offset[0] = max(min_x, min(max_x, self.pan_offset_start[0] - img_dx))
+                            self.pan_offset[1] = max(min_y, min(max_y, self.pan_offset_start[1] - img_dy))
+                        elif getattr(self, "lbutton_down", False) and self.mode == "SELECT" and not self.space_down:
                             if max(abs(vx - self.drag_start_screen[0]), abs(vy - self.drag_start_screen[1])) > 5:
                                 self.is_box_dragging = True
                                 x0, y0 = self.drag_start_img
@@ -787,7 +924,7 @@ class PrecisionSAM2Annotator:
 
                         if btn == 1:
                             self.lbutton_down = False
-                            if self.is_pan_dragging and self.space_down:
+                            if self.is_pan_dragging:
                                 self.is_pan_dragging = False
                             elif self.is_box_dragging:
                                 self.is_box_dragging = False
@@ -798,6 +935,24 @@ class PrecisionSAM2Annotator:
                                 self.run_inference()
                         elif btn == 2:
                             self.is_pan_dragging = False
+                        elif btn == 3:
+                            was_panning = self.is_pan_dragging
+                            self.rbutton_down = False
+                            self.is_pan_dragging = False
+                            if not was_panning:
+                                if self.mode == "POLYGON" and len(self.polygon_points) >= 3:
+                                    self.finalize_polygon_selection()
+                                elif self.mode == "KNIFE":
+                                    self.knife_pt_a = None
+                                else:
+                                    self.point_coords.append([float(ix), float(iy)])
+                                    self.point_labels.append(0)
+                                    self.run_inference()
+
+                    elif ev_type == "resize":
+                        _, new_w, new_h = ev
+                        self.window_w = new_w
+                        self.window_h = new_h
 
                     elif ev_type == "key_press":
                         sym = ev[1]

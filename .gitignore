@@ -366,4 +366,8 @@ LeafMachine2/
 # LeafMachine2 working project data and outputs
 LM2_Project/
 
-
+# ------------------------------------------------------------------------------
+# 10. IDE, Editor & Agent Configurations
+# ------------------------------------------------------------------------------
+.vscode/
+.agents/
