@@ -182,25 +182,40 @@ Packera\_dubia\_morphometrics/
 
 ### Track A: Assisted Annotation & LM2 Fine-Tuning (Run Once)
 
-To fine-tune LeafMachine2 on dense, overlapping *Packera* basal rosettes:
+To fine-tune LeafMachine2's PointRend Plant Component Detector (PCD) on dense, overlapping *Packera* basal rosettes:
 
-\# 1\. Interactively annotate 50–100 vouchers with SAM 2
+```bash
+# 1. Interactively annotate 50–100 vouchers with SAM 2
+python scripts/annotation_and_training/annotate_with_sam2.py \
+    --images-dir data/raw_vouchers/ \
+    --output-coco data/annotations/packera_train_coco.json
 
-python scripts/annotation\_and\_training/annotate\_with\_sam2.py \\
+# 2. Fine-tune LM2's Plant Component Detector (PCD) on generated COCO annotations
+python scripts/annotation_and_training/finetune_lm2_pcd.py \
+    --coco-annotations data/annotations/packera_train_coco.json \
+    --epochs 30 \
+    --output-weights models/lm2_packera_pcd_finetuned.pth
+```
 
-    \--input-dir data/raw\_vouchers/ \\
+#### SAM 2 Botanical Annotator Hotkey Cheat-Sheet
+| Key / Gesture | Function & Botanical Context |
+| :--- | :--- |
+| **Mouse Wheel** | Cursor-centered smooth zoom in / out ($1.0\times$–$16.0\times$). |
+| **Middle Drag** / `Space`+Drag | Pan viewport smoothly across high-resolution herbarium scan. |
+| **`f`** | Fit viewport to window ($1.0\times$). |
+| **Left / Right Click** | Positive foreground / negative exclusion prompt points. |
+| **Shift + Left-Drag** | Bounding box prompt constraint. |
+| **`Tab`** | Cycle 3 SAM 2 candidate granularities (sub-lobe vs. blade vs. clump). |
+| **`o`** | Toggle mask fill vs. 1-px boundary contour line (inspect margin crenations). |
+| **Hold `v`** | Hold-to-peek: Temporarily hide all overlays to inspect bare pixels. |
+| **`[` / `]`** | Adjust mask overlay alpha transparency ($0.10$ to $0.90$). |
+| **`k`** | Two-click knife tool to sever petiole bases from caudex tissue. |
+| **`+` / `-`** | 1-pixel binary dilation / erosion for tomentum margin tuning. |
+| **`0`–`6`** | Instant botanical class commit (`0`: blade, `1`: petiole, `2`: cauline leaf, `3`: cauline stem, `4`: root, `5`: rosette clump, `6`: capitulum). |
+| **`u` / `c`** | Undo last committed instance (`u`) / clear active prompts (`c`). |
+| **`n` / `Enter`** | Advance/skip voucher (`n`) / save annotations and advance to next sheet (`Enter`). |
 
-    \--output-coco data/annotations/packera\_train\_coco.json
-
-\# 2\. Fine-tune LM2's Plant Component Detector (PCD)
-
-python scripts/annotation\_and\_training/finetune\_lm2\_pcd.py \\
-
-    \--coco-annotations data/annotations/packera\_train\_coco.json \\
-
-    \--epochs 30 \\
-
-    \--output-weights models/lm2\_packera\_pcd\_finetuned.pth
+> Detailed protocols, class ontologies, and boundary best practices for dense rosettes are documented in [`docs/SAM2_Precision_Botanical_Annotation_Guide.txt`](file:///home/brandon/Packera_dubia_morphometrics/docs/SAM2_Precision_Botanical_Annotation_Guide.txt) and [`docs/WORKFLOW_GUIDE.md`](file:///home/brandon/Packera_dubia_morphometrics/docs/WORKFLOW_GUIDE.md).
 
 ---
 

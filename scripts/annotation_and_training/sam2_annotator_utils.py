@@ -110,23 +110,117 @@ def split_mask_with_knife_line(
     binary_mask: np.ndarray,
     line_start: Tuple[int, int],
     line_end: Tuple[int, int],
-    line_thickness: int = 3
+    line_thickness: int = 2,
+    dilation_px: int = 2
 ) -> np.ndarray:
     """
-    Sever a binary mask using a knife cut line (e.g. to isolate blade from petiole/roots).
+    Sever a binary mask using a knife cut line across petiole-caudex junction
+    or overlapping blade boundary, zeroing out mask pixels along the line with dilation.
 
     Args:
         binary_mask: 2D uint8 binary mask array.
         line_start: (x, y) start coordinate.
         line_end: (x, y) end coordinate.
-        line_thickness: Cut line stroke width in pixels.
+        line_thickness: Initial cut line stroke width in pixels.
+        dilation_px: Morphological dilation radius applied to cut line (default 2 px).
 
     Returns:
         np.ndarray: Mask with knife cut line zeroed out.
     """
     cut_mask = binary_mask.copy()
-    cv2.line(cut_mask, line_start, line_end, 0, thickness=line_thickness)
+    h, w = cut_mask.shape[:2]
+    line_canvas = np.zeros((h, w), dtype=np.uint8)
+    cv2.line(line_canvas, line_start, line_end, 255, thickness=line_thickness)
+    if dilation_px > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2 * dilation_px + 1, 2 * dilation_px + 1))
+        line_canvas = cv2.dilate(line_canvas, kernel, iterations=1)
+    cut_mask[line_canvas > 0] = 0
     return cut_mask
+
+
+def apply_knife_cut(
+    binary_mask: np.ndarray,
+    pt1: Tuple[int, int],
+    pt2: Tuple[int, int],
+    thickness: int = 2,
+) -> np.ndarray:
+    """
+    Sever a binary mask using a knife cut line between pt1 and pt2, zeroing out
+    mask pixels along the line.
+
+    Args:
+        binary_mask: 2D uint8 or bool binary mask array.
+        pt1: (x, y) start coordinate.
+        pt2: (x, y) end coordinate.
+        thickness: Line stroke width in pixels (default 2).
+
+    Returns:
+        np.ndarray: Mask with knife cut line zeroed out.
+    """
+    is_bool = (binary_mask.dtype == bool)
+    cut_mask = (binary_mask.astype(np.uint8) * 255) if is_bool else binary_mask.copy()
+    h, w = cut_mask.shape[:2]
+    line_canvas = np.zeros((h, w), dtype=np.uint8)
+    cv2.line(line_canvas, pt1, pt2, 255, thickness=thickness)
+    cut_mask[line_canvas > 0] = 0
+    return (cut_mask > 0) if is_bool else cut_mask
+
+
+def apply_morphological_tuning(
+    binary_mask: np.ndarray,
+    operation: str = "dilate",
+    kernel_size: int = 3
+) -> np.ndarray:
+    """
+    Applies single-pixel 3x3 morphological dilation or erosion on the active mask
+    to capture or trim arachnoid tomentum hairs along the blade margin.
+
+    Args:
+        binary_mask: 2D uint8 or bool binary mask.
+        operation: 'dilate' ('+', '=') or 'erode' ('-', '_').
+        kernel_size: Morphological structuring element size (default 3 for 3x3).
+
+    Returns:
+        np.ndarray: Tuned binary mask matching input dtype.
+    """
+    if binary_mask is None or binary_mask.size == 0:
+        return binary_mask
+
+    is_bool = (binary_mask.dtype == bool)
+    u8_mask = binary_mask.astype(np.uint8) * 255 if is_bool else binary_mask.astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+
+    op_norm = str(operation).lower().strip()
+    if op_norm in ("dilate", "dilation", "+", "="):
+        tuned = cv2.dilate(u8_mask, kernel, iterations=1)
+    elif op_norm in ("erode", "erosion", "-", "_"):
+        tuned = cv2.erode(u8_mask, kernel, iterations=1)
+    else:
+        tuned = u8_mask
+
+    return (tuned > 0) if is_bool else tuned
+
+
+def apply_mask_dilation(
+    binary_mask: np.ndarray,
+    kernel_size: int = 3,
+) -> np.ndarray:
+    """
+    Applies single-pixel morphological dilation with a kernel_size x kernel_size
+    structuring element (default 3x3) without boundary inversion.
+    """
+    return apply_morphological_tuning(binary_mask, operation="dilate", kernel_size=kernel_size)
+
+
+def apply_mask_erosion(
+    binary_mask: np.ndarray,
+    kernel_size: int = 3,
+) -> np.ndarray:
+    """
+    Applies single-pixel morphological erosion with a kernel_size x kernel_size
+    structuring element (default 3x3) without boundary inversion.
+    """
+    return apply_morphological_tuning(binary_mask, operation="erode", kernel_size=kernel_size)
 
 
 def rasterize_lasso_polygon(
@@ -316,9 +410,16 @@ def render_hud_overlay(
     mode: str,
     zoom_level: float,
     pan_offset: Tuple[int, int],
+    candidate_idx: Optional[int] = None,
+    candidate_total: int = 3,
+    candidate_iou: Optional[float] = None,
+    view_mode: str = "FILL",
+    alpha: float = 0.55,
 ) -> np.ndarray:
     """
-    Renders top status bar HUD with voucher progress, mode, and shortcut reminders.
+    Renders semi-transparent HUD banner at top of window displaying:
+    [Voucher: X/Y | Catalog: NCU... | Instances: N (B:x, P:y) | Zoom: Zx | Mask: C/3 (IoU) | View: Fill/Contour]
+    plus active tool mode and shortcut reminders.
     """
     canvas = display_img.copy()
     h, w = canvas.shape[:2]
@@ -326,31 +427,120 @@ def render_hud_overlay(
     # Top HUD banner background
     hud_h = 70
     overlay = canvas.copy()
-    cv2.rectangle(overlay, (0, 0), (w, hud_h), (25, 25, 25), -1)
-    cv2.addWeighted(overlay, 0.75, canvas, 0.25, 0, canvas)
+    cv2.rectangle(overlay, (0, 0), (w, hud_h), (20, 20, 20), -1)
+    cv2.addWeighted(overlay, 0.78, canvas, 0.22, 0, canvas)
 
-    # Header text: Voucher progress
-    prog_text = f"[{voucher_idx + 1}/{total_vouchers}] Voucher: {voucher_name} | Zoom: {zoom_level:.1f}x | Pan: ({pan_offset[0]}, {pan_offset[1]})"
-    cv2.putText(canvas, prog_text, (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (240, 240, 240), 2, cv2.LINE_AA)
+    # Compute breakdown counts
+    n_inst = len(saved_instances)
+    n_basal_whole = sum(1 for inst in saved_instances if inst.get("class_id") == 0)
+    n_basal_part = sum(1 for inst in saved_instances if inst.get("class_id") == 1)
+    inst_str = f"Instances: {n_inst} (B:{n_basal_whole}, P:{n_basal_part})"
 
-    # Active Mode display with dynamic color
+    # Mask proposal summary
+    if candidate_idx is not None:
+        iou_str = f"{candidate_iou:.2f}" if candidate_iou is not None else "N/A"
+        mask_str = f"Mask: {candidate_idx + 1}/{candidate_total} ({iou_str})"
+    else:
+        mask_str = "Mask: None"
+
+    view_str = f"View: {'Fill' if str(view_mode).upper() == 'FILL' else 'Contour'}"
+    zoom_str = f"Zoom: {zoom_level:.1f}x"
+
+    # Line 1: Structured status string
+    header_text = (
+        f"[Voucher: {voucher_idx + 1}/{total_vouchers} | Catalog: {voucher_name} | "
+        f"{inst_str} | {zoom_str} | {mask_str} | {view_str}]"
+    )
+    cv2.putText(canvas, header_text, (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (245, 245, 245), 2, cv2.LINE_AA)
+
+    # Line 2: Mode & dynamic shortcut controls
     if mode == "POLYGON":
         mode_color = (0, 220, 255)
         mode_str = "MODE: [POLYGON BOX]"
-        inst_summary = "Left-Click: Mark Points | Click Start / Enter / Right-Click: Close Box | Backspace: Undo | P: Exit"
+        inst_summary = "Left-Click: Mark Vertices | Enter / Click Start: Finalize Box | Backspace: Undo | P: Exit"
     elif mode == "KNIFE":
         mode_color = (0, 100, 255)
         mode_str = "MODE: [KNIFE CUT]"
-        inst_summary = "Drag line across mask to sever overlapping parts | K: Exit Knife"
+        inst_summary = "Two-Click: Click Pt A then Pt B across junction to sever mask with 2px cut | K: Exit"
     else:
         mode_color = (0, 255, 0)
         mode_str = "MODE: [SELECT]"
-        inst_summary = f"Saved: {len(saved_instances)} | P: Polygon Box | K: Knife | C: Clear | U: Undo | 0-6: Classify | Enter: Save"
+        inst_summary = "0-6: Commit | Tab: Granularity | o: Fill/Contour | v: Peek | +/-: Margin | k: Knife | [/]: Alpha | f: Fit | Enter: Save"
 
-    cv2.putText(canvas, mode_str, (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2, cv2.LINE_AA)
-    cv2.putText(canvas, inst_summary, (220, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1, cv2.LINE_AA)
+    cv2.putText(canvas, mode_str, (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, mode_color, 2, cv2.LINE_AA)
+    cv2.putText(canvas, inst_summary, (205, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (215, 215, 215), 1, cv2.LINE_AA)
 
     return canvas
+
+
+def calculate_cursor_centered_zoom(
+    current_zoom: float,
+    current_pan: Tuple[int, int],
+    cursor_vx: int,
+    cursor_vy: int,
+    zoom_in: bool,
+    target_w: int,
+    target_h: int,
+    orig_w: int,
+    orig_h: int,
+    step: float = 1.15,
+    min_zoom: float = 1.0,
+    max_zoom: float = 16.0
+) -> Tuple[float, List[int]]:
+    """
+    Computes smooth cursor-centered zoom step, mapping window viewport coordinates (vx, vy)
+    to native image coordinates dynamically to prevent prompt point offset drift.
+
+    Args:
+        current_zoom: Current viewport zoom factor (>= 1.0).
+        current_pan: Current (pan_x, pan_y) in image space.
+        cursor_vx: Viewport X coordinate of mouse cursor.
+        cursor_vy: Viewport Y coordinate of mouse cursor.
+        zoom_in: True to zoom in (step * 1.15), False to zoom out (/ 1.15).
+        target_w: Viewport window width.
+        target_h: Viewport window height.
+        orig_w: Native full-resolution image width.
+        orig_h: Native full-resolution image height.
+        step: Zoom multiplier step (default 1.15).
+        min_zoom: Clamped lower zoom bound (1.0).
+        max_zoom: Clamped upper zoom bound (16.0).
+
+    Returns:
+        Tuple[float, List[int]]: (new_zoom, [new_pan_x, new_pan_y])
+    """
+    new_zoom = current_zoom * step if zoom_in else current_zoom / step
+    new_zoom = max(min_zoom, min(max_zoom, round(new_zoom, 3)))
+
+    if new_zoom <= 1.001:
+        return 1.0, [0, 0]
+
+    # Calculate image coordinates under cursor with current zoom/pan
+    curr_crop_w = max(10, orig_w / max(current_zoom, 1.0))
+    curr_crop_h = max(10, orig_h / max(current_zoom, 1.0))
+    scale_x = target_w / curr_crop_w
+    scale_y = target_h / curr_crop_h
+
+    ix = current_pan[0] + cursor_vx / max(scale_x, 1e-6)
+    iy = current_pan[1] + cursor_vy / max(scale_y, 1e-6)
+
+    # Compute new crop dimensions
+    new_crop_w = max(10, orig_w / new_zoom)
+    new_crop_h = max(10, orig_h / new_zoom)
+
+    # Anchor (ix, iy) to remain under (cursor_vx, cursor_vy)
+    new_pan_x = int(round(ix - (cursor_vx / target_w) * new_crop_w))
+    new_pan_y = int(round(iy - (cursor_vy / target_h) * new_crop_h))
+
+    # Clamp pan offset so viewport doesn't drift uncontrollably
+    min_x = -int(new_crop_w * 0.85)
+    max_x = int(orig_w - new_crop_w * 0.15)
+    min_y = -int(new_crop_h * 0.85)
+    max_y = int(orig_h - new_crop_h * 0.15)
+
+    clamped_pan_x = max(min_x, min(max_x, new_pan_x))
+    clamped_pan_y = max(min_y, min(max_y, new_pan_y))
+
+    return new_zoom, [clamped_pan_x, clamped_pan_y]
 
 
 def apply_viewport_transform(
@@ -398,6 +588,65 @@ def apply_viewport_transform(
     return scaled, (scale_x, scale_y, crop_x0, crop_y0)
 
 
+def image_to_viewport_coords(
+    ix: Union[int, float],
+    iy: Union[int, float],
+    scale_x: float,
+    scale_y: float,
+    crop_x0: int,
+    crop_y0: int,
+) -> Tuple[float, float]:
+    """
+    Maps native image coordinate (ix, iy) to viewport/screen coordinate (vx, vy).
+    """
+    vx = (float(ix) - float(crop_x0)) * float(scale_x)
+    vy = (float(iy) - float(crop_y0)) * float(scale_y)
+    return vx, vy
+
+
+def viewport_to_image_coords(
+    vx: Union[int, float],
+    vy: Union[int, float],
+    scale_x: float,
+    scale_y: float,
+    crop_x0: int,
+    crop_y0: int,
+    orig_w: Optional[int] = None,
+    orig_h: Optional[int] = None,
+) -> Tuple[float, float]:
+    """
+    Maps viewport/screen coordinate (vx, vy) to native image coordinate (ix, iy).
+    """
+    ix = float(crop_x0) + float(vx) / max(float(scale_x), 1e-9)
+    iy = float(crop_y0) + float(vy) / max(float(scale_y), 1e-9)
+    if orig_w is not None:
+        ix = max(0.0, min(float(orig_w - 1), ix))
+    if orig_h is not None:
+        iy = max(0.0, min(float(orig_h - 1), iy))
+    return ix, iy
+
+
+def clamp_viewport_pan(
+    pan_x: int,
+    pan_y: int,
+    zoom_level: float,
+    orig_w: int,
+    orig_h: int,
+    margin_ratio: float = 0.15,
+) -> Tuple[int, int]:
+    """
+    Clamps viewport pan offset to ensure the viewport cannot shift entirely
+    off the specimen canvas, keeping at least `margin_ratio` visible.
+    """
+    crop_w = max(10, orig_w / max(zoom_level, 1.0))
+    crop_h = max(10, orig_h / max(zoom_level, 1.0))
+    min_x = -int(crop_w * (1.0 - margin_ratio))
+    max_x = int(orig_w - crop_w * margin_ratio)
+    min_y = -int(crop_h * (1.0 - margin_ratio))
+    max_y = int(orig_h - crop_h * margin_ratio)
+    return max(min_x, min(max_x, int(pan_x))), max(min_y, min(max_y, int(pan_y)))
+
+
 def compose_mask_overlay(
     base_image: np.ndarray,
     saved_instances: List[Dict[str, Any]],
@@ -439,11 +688,20 @@ def overlay_candidate_mask_on_viewport(
     viewport_bgr: np.ndarray,
     candidate_mask: Optional[np.ndarray],
     transform: Tuple[float, float, int, int],
-    alpha: float = 0.55
+    alpha: float = 0.55,
+    view_mode: str = "FILL",
+    mask_color: Tuple[int, int, int] = (255, 255, 0),
+    contour_color: Tuple[int, int, int] = (255, 255, 255),
+    contour_thickness: int = 2,
 ) -> np.ndarray:
     """
     Overlays active SAM 2 candidate segmentation mask directly onto cropped
     viewport frame in viewport space for sub-millisecond rendering speed.
+
+    Supports:
+      - view_mode='FILL': Solid translucent fill + high-contrast border contour.
+      - view_mode='CONTOUR': High-contrast border contour only (1-2 px) without fill,
+        enabling verification of fine crenate/dentate teeth against mounting paper.
     """
     if candidate_mask is None or np.count_nonzero(candidate_mask) == 0:
         return viewport_bgr
@@ -478,11 +736,16 @@ def overlay_candidate_mask_on_viewport(
     scaled_mask = cv2.resize(canvas_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
     locs = scaled_mask > 0
     if np.any(locs):
-        viewport_bgr[locs] = (
-            viewport_bgr[locs] * (1.0 - alpha) + np.array([255, 255, 0], dtype=np.uint8) * alpha
-        ).astype(np.uint8)
+        # Draw translucent fill if mode is FILL
+        if str(view_mode).upper() == "FILL":
+            fill_color = np.array(mask_color, dtype=np.uint8)
+            viewport_bgr[locs] = (
+                viewport_bgr[locs] * (1.0 - alpha) + fill_color * alpha
+            ).astype(np.uint8)
+
+        # Draw high-contrast contour line in both FILL and CONTOUR modes
         cnts, _ = cv2.findContours(scaled_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(viewport_bgr, cnts, -1, (255, 255, 255), 2)
+        cv2.drawContours(viewport_bgr, cnts, -1, contour_color, contour_thickness)
 
     return viewport_bgr
 

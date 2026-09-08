@@ -8,8 +8,9 @@ Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 Description:
     Interactive Botanical Instance Segmentation Annotator powered by Segment
     Anything Model 2 (SAM 2) with high-performance native X11 GUI rendering,
-    viewport-first compositing, sub-pixel leaf contour extraction, point/box/lasso
-    prompts, knife slicing, and automated COCO JSON export (`annotations_packera_train.json`).
+    smooth cursor-centered navigation, multimask proposal cycling, high-contrast
+    inspection modes, two-click knife slicing, single-pixel morphological margin
+    tuning, instant class commitment, and incremental COCO JSON export.
 ===============================================================================
 """
 
@@ -42,7 +43,6 @@ PROJECT_ROOT = get_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Fallback path inclusion for SAM 2 if not installed in current site-packages
 SAM2_ARCHIVE_PATH = PROJECT_ROOT / "scripts" / "_archive" / "root_artifacts" / "segment-anything-2"
 if SAM2_ARCHIVE_PATH.exists() and str(SAM2_ARCHIVE_PATH) not in sys.path:
     sys.path.insert(0, str(SAM2_ARCHIVE_PATH))
@@ -59,11 +59,18 @@ from scripts.annotation_and_training.sam2_annotator_utils import (
     CLASS_NAMES,
     PCD_CLASS_MAPPING,
     PCD_COCO_CATEGORIES,
+    apply_knife_cut,
+    apply_mask_dilation,
+    apply_mask_erosion,
+    apply_morphological_tuning,
     apply_viewport_transform,
+    calculate_cursor_centered_zoom,
+    clamp_viewport_pan,
     clip_box_to_image,
     compose_mask_overlay,
     convert_masks_to_coco_dataset,
     export_coco_annotations,
+    image_to_viewport_coords,
     mask_to_normalized_polygon,
     mask_to_polygons,
     mask_to_yolo_bbox,
@@ -74,6 +81,7 @@ from scripts.annotation_and_training.sam2_annotator_utils import (
     render_hud_overlay,
     save_coco_json,
     split_mask_with_knife_line,
+    viewport_to_image_coords,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -189,7 +197,7 @@ class X11GUIWindow:
         self._x11.XFlush(self.disp)
 
     def poll_events(self) -> List[Tuple[str, Any]]:
-        """Polls queued X11 events, coalescing mouse motion."""
+        """Polls queued X11 events, handling key presses, releases, buttons, and motion."""
         raw_events = []
         if not hasattr(self, "disp") or not self.disp:
             return raw_events
@@ -223,6 +231,9 @@ class X11GUIWindow:
             if evt.type == 2:  # KeyPress
                 keysym = self._x11.XKeycodeToKeysym(self.disp, evt.button_or_keycode, 0)
                 raw_events.append(('key_press', keysym))
+            elif evt.type == 3:  # KeyRelease
+                keysym = self._x11.XKeycodeToKeysym(self.disp, evt.button_or_keycode, 0)
+                raw_events.append(('key_release', keysym))
             elif evt.type == 4:  # ButtonPress
                 btn = evt.button_or_keycode
                 raw_events.append(('button_press', evt.x, evt.y, btn, evt.state))
@@ -257,9 +268,10 @@ class X11GUIWindow:
 
 class PrecisionSAM2Annotator:
     """
-    Interactive botanical annotator using SAM 2 on Packera specimens.
-    Accepts point, rectangular box, and custom polygon lasso prompts.
-    Exports both raw PNG masks and standardized COCO format annotations.
+    Interactive botanical annotator using SAM 2 on Packera herbarium vouchers.
+    Features cursor-centered smooth zooming, multimask proposal cycling,
+    quality inspection modes, botanical knife slicing, morphological tuning,
+    instant classification commit, and incremental COCO JSON dataset export.
     """
 
     def __init__(
@@ -300,7 +312,6 @@ class PrecisionSAM2Annotator:
 
         self.checkpoint_path = Path(checkpoint_path)
         self.config_path = str(config_path)
-
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.predictor = None
         self._init_model()
@@ -311,28 +322,41 @@ class PrecisionSAM2Annotator:
         self.orig_h = 1000
         self.orig_w = 1000
 
+        # Prompt buffers
         self.point_coords: List[List[float]] = []
         self.point_labels: List[int] = []
         self.box_prompt: Optional[List[float]] = None
+        self.polygon_points: List[Tuple[int, int]] = []
+
+        # SAM 2 Multimask candidate state
+        self.candidate_masks: List[np.ndarray] = []
+        self.candidate_scores: List[float] = []
+        self.active_mask_idx: int = 0
         self.candidate_mask: Optional[np.ndarray] = None
         self.saved_instances: List[Dict[str, Any]] = []
 
-        self.zoom_level = 1.0
-        self.pan_offset = [0, 0]
-        self.mode = "SELECT"
+        # Viewport Navigation
+        self.zoom_level: float = 1.0
+        self.pan_offset: List[int] = [0, 0]
+        self.mode: str = "SELECT"
 
-        self.lbutton_down = False
-        self.drag_start_screen = (0, 0)
-        self.drag_start_img = (0, 0)
-        self.is_box_dragging = False
-        self.is_knife_dragging = False
-        self.knife_start = (0, 0)
-        self.knife_current = (0, 0)
-        self.is_pan_dragging = False
-        self.pan_drag_start = (0, 0)
-        self.pan_offset_start = [0, 0]
+        # Quality Inspection Modes
+        self.view_mode: str = "FILL"        # "FILL" or "CONTOUR"
+        self.is_peeking: bool = False       # Hold-to-peek 'v' key
+        self.overlay_alpha: float = 0.55    # Adjust via '[' and ']'
 
-        self.polygon_points: List[Tuple[int, int]] = []
+        # Mouse & Key Interaction tracking
+        self.lbutton_down: bool = False
+        self.space_down: bool = False
+        self.drag_start_screen: Tuple[int, int] = (0, 0)
+        self.drag_start_img: Tuple[int, int] = (0, 0)
+        self.is_box_dragging: bool = False
+        self.is_pan_dragging: bool = False
+        self.pan_drag_start: Tuple[int, int] = (0, 0)
+        self.pan_offset_start: List[int] = [0, 0]
+
+        # Two-Click Knife Tool
+        self.knife_pt_a: Optional[Tuple[int, int]] = None
         self.hover_img_pos: Tuple[int, int] = (0, 0)
         self.hover_screen_pos: Tuple[int, int] = (0, 0)
 
@@ -357,11 +381,10 @@ class PrecisionSAM2Annotator:
         if not self.saved_instances:
             self.cached_base_layer = self.active_image.copy()
             return
-
-        self.cached_base_layer = compose_mask_overlay(self.active_image, self.saved_instances)
+        self.cached_base_layer = compose_mask_overlay(self.active_image, self.saved_instances, alpha=self.overlay_alpha)
 
     def run_inference(self) -> None:
-        """Executes SAM 2 inference on current prompts."""
+        """Executes SAM 2 inference with multimask_output=True to retrieve 3 proposal granularities."""
         if self.predictor is None or self.active_image is None:
             return
 
@@ -370,6 +393,8 @@ class PrecisionSAM2Annotator:
         box = np.array(self.box_prompt, dtype=np.float32) if self.box_prompt else None
 
         if pts is None and box is None:
+            self.candidate_masks = []
+            self.candidate_scores = []
             self.candidate_mask = None
             return
 
@@ -378,18 +403,31 @@ class PrecisionSAM2Annotator:
                 point_coords=pts,
                 point_labels=lbls,
                 box=box,
-                multimask_output=False
+                multimask_output=True
             )
             if masks is not None and len(masks) > 0:
-                self.candidate_mask = (masks[0] > 0.0).astype(np.uint8) * 255
+                self.candidate_masks = [(m > 0.0).astype(np.uint8) * 255 for m in masks]
+                self.candidate_scores = [float(s) for s in scores]
+                if self.active_mask_idx >= len(self.candidate_masks):
+                    self.active_mask_idx = min(1, len(self.candidate_masks) - 1)
+                self.candidate_mask = self.candidate_masks[self.active_mask_idx]
         except Exception as e:
             logger.error(f"SAM 2 prediction error: {e}")
 
+    def cycle_multimask_proposal(self) -> None:
+        """Cycles through candidate granularities (1: sub-lobe, 2: blade, 3: clump)."""
+        if not self.candidate_masks:
+            return
+        self.active_mask_idx = (self.active_mask_idx + 1) % len(self.candidate_masks)
+        self.candidate_mask = self.candidate_masks[self.active_mask_idx]
+        iou_val = self.candidate_scores[self.active_mask_idx] if self.active_mask_idx < len(self.candidate_scores) else None
+        iou_str = f"{iou_val:.2f}" if iou_val is not None else "N/A"
+        logger.info(f"Cycled mask proposal -> #{self.active_mask_idx + 1}/3 (IoU: {iou_str})")
+
     def finalize_polygon_selection(self) -> None:
-        """Converts marked polygon selection into a precise SAM 2 bounding box prompt."""
+        """Converts marked polygon vertices into bounding box and interior point prompt."""
         if len(self.polygon_points) < 3:
             return
-
         poly_box = polygon_to_bounding_box(self.polygon_points)
         if not poly_box:
             return
@@ -408,7 +446,6 @@ class PrecisionSAM2Annotator:
             self.point_labels = []
 
         self.run_inference()
-
         poly_mask = rasterize_lasso_polygon(self.polygon_points, self.orig_h, self.orig_w)
         if self.candidate_mask is not None and np.count_nonzero(self.candidate_mask) > 0:
             constrained = cv2.bitwise_and(self.candidate_mask, poly_mask)
@@ -416,14 +453,45 @@ class PrecisionSAM2Annotator:
         else:
             self.candidate_mask = poly_mask
 
+        if self.candidate_masks and self.active_mask_idx < len(self.candidate_masks):
+            self.candidate_masks[self.active_mask_idx] = self.candidate_mask.copy()
+
         logger.info(f"Finalized custom polygon bounding box with {len(self.polygon_points)} vertices")
         self.polygon_points = []
 
-    def save_current_sheet(self) -> None:
-        """Saves current sheet's instances to YOLO text file, binary PNG masks, and syncs COCO."""
-        if not hasattr(self, "image_files") or not self.image_files:
+    def commit_active_instance(self, class_id: int) -> None:
+        """Instant Class Commit: assigns class, commits mask, resets prompts, readies next leaf."""
+        if class_id < 0 or class_id >= len(CLASS_NAMES):
             return
-        if self.current_idx >= len(self.image_files):
+        if self.candidate_mask is None or np.count_nonzero(self.candidate_mask) == 0:
+            return
+
+        label = CLASS_NAMES[class_id]
+        poly_str = mask_to_normalized_polygon(self.candidate_mask, class_id)
+        if poly_str:
+            poly = [float(val) for val in poly_str.split()[1:]]
+            self.saved_instances.append({
+                "class_id": class_id,
+                "label": label,
+                "polygon": poly,
+                "binary_mask": self.candidate_mask > 0,
+                "mask": self.candidate_mask.copy()
+            })
+            self.candidate_mask = None
+            self.candidate_masks = []
+            self.candidate_scores = []
+            self.active_mask_idx = 0
+            self.point_coords = []
+            self.point_labels = []
+            self.box_prompt = None
+            self.polygon_points = []
+            self.knife_pt_a = None
+            self._update_cached_base_layer()
+            logger.info(f"Committed instance #{len(self.saved_instances)} -> '{label}' (Class {class_id})")
+
+    def save_current_sheet(self) -> None:
+        """Autosaves active sheet's annotations to YOLO txt, PNG masks, and syncs COCO JSON."""
+        if not hasattr(self, "image_files") or not self.image_files or self.current_idx >= len(self.image_files):
             return
 
         current_file = self.image_files[self.current_idx]
@@ -449,7 +517,6 @@ class PrecisionSAM2Annotator:
 
         logger.info(f"Saved {len(self.saved_instances)} instances for voucher {voucher_id}")
 
-        # Synchronize COCO format dataset
         try:
             export_coco_annotations(
                 masks_dir=self.masks_dir,
@@ -461,10 +528,8 @@ class PrecisionSAM2Annotator:
             logger.warning(f"COCO synchronization warning: {err}")
 
     def load_active_image(self) -> bool:
-        """Loads current voucher sheet into memory."""
-        if not hasattr(self, "image_files") or not self.image_files:
-            return False
-        if self.current_idx >= len(self.image_files):
+        """Loads current voucher sheet into memory and initializes SAM 2 image embeddings."""
+        if not hasattr(self, "image_files") or not self.image_files or self.current_idx >= len(self.image_files):
             return False
 
         img_path = self.image_files[self.current_idx]
@@ -477,11 +542,15 @@ class PrecisionSAM2Annotator:
         self.point_coords = []
         self.point_labels = []
         self.box_prompt = None
+        self.candidate_masks = []
+        self.candidate_scores = []
+        self.active_mask_idx = 0
         self.candidate_mask = None
         self.saved_instances = []
         self.zoom_level = 1.0
         self.pan_offset = [0, 0]
         self.polygon_points = []
+        self.knife_pt_a = None
 
         self._update_cached_base_layer()
 
@@ -509,9 +578,7 @@ class PrecisionSAM2Annotator:
             logger.warning(f"No valid voucher images found in {self.images_dir}")
             return
 
-        window_title = "SAM 2 Precision Botanical Annotator"
-        win = X11GUIWindow(title=window_title, width=self.window_w, height=self.window_h)
-
+        win = X11GUIWindow(title="SAM 2 Precision Botanical Annotator", width=self.window_w, height=self.window_h)
         if not self.load_active_image():
             logger.error("Failed to load initial voucher image.")
             win.close()
@@ -519,12 +586,14 @@ class PrecisionSAM2Annotator:
 
         try:
             while True:
-                if self.cached_base_layer is None:
+                if self.cached_base_layer is None or self.active_image is None:
                     break
 
                 current_voucher = self.image_files[self.current_idx].stem
+                render_base = self.active_image if self.is_peeking else self.cached_base_layer
+
                 viewport_img, transform = apply_viewport_transform(
-                    self.cached_base_layer,
+                    render_base,
                     self.zoom_level,
                     tuple(self.pan_offset),
                     self.window_w,
@@ -532,63 +601,81 @@ class PrecisionSAM2Annotator:
                 )
                 scale_x, scale_y, crop_x0, crop_y0 = transform
 
-                # Candidate mask overlay
-                if self.candidate_mask is not None:
+                # Candidate mask overlay (suppressed while holding 'v' to peek)
+                if not self.is_peeking and self.candidate_mask is not None:
                     viewport_img = overlay_candidate_mask_on_viewport(
-                        viewport_img, self.candidate_mask, transform
+                        viewport_img,
+                        self.candidate_mask,
+                        transform,
+                        alpha=self.overlay_alpha,
+                        view_mode=self.view_mode,
                     )
 
-                # Point prompts
-                for pt, lbl in zip(self.point_coords, self.point_labels):
-                    vx, vy = self._image_to_viewport(pt[0], pt[1], scale_x, scale_y, crop_x0, crop_y0)
-                    if 0 <= vx < self.window_w and 0 <= vy < self.window_h:
-                        color = (0, 255, 0) if lbl == 1 else (0, 0, 255)
-                        cv2.circle(viewport_img, (vx, vy), 5, color, -1)
-                        cv2.circle(viewport_img, (vx, vy), 7, (255, 255, 255), 1)
-
-                # Bounding box prompt
-                if self.box_prompt is not None:
-                    bx0, by0, bx1, by1 = self.box_prompt
-                    b_vx0, b_vy0 = self._image_to_viewport(bx0, by0, scale_x, scale_y, crop_x0, crop_y0)
-                    b_vx1, b_vy1 = self._image_to_viewport(bx1, by1, scale_x, scale_y, crop_x0, crop_y0)
-                    cv2.rectangle(viewport_img, (b_vx0, b_vy0), (b_vx1, b_vy1), (0, 255, 255), 2)
-
-                # Knife line preview
-                if self.is_knife_dragging:
-                    k0 = self._image_to_viewport(self.knife_start[0], self.knife_start[1], scale_x, scale_y, crop_x0, crop_y0)
-                    k1 = self._image_to_viewport(self.knife_current[0], self.knife_current[1], scale_x, scale_y, crop_x0, crop_y0)
-                    cv2.line(viewport_img, k0, k1, (0, 0, 255), 3)
-
-                # Polygon lasso preview
-                if self.polygon_points:
-                    v_pts = [self._image_to_viewport(p[0], p[1], scale_x, scale_y, crop_x0, crop_y0) for p in self.polygon_points]
-                    if len(v_pts) >= 3:
-                        poly_ov = viewport_img.copy()
-                        pts_arr = np.array(v_pts, dtype=np.int32).reshape((-1, 1, 2))
-                        cv2.fillPoly(poly_ov, [pts_arr], (0, 220, 255))
-                        cv2.addWeighted(poly_ov, 0.25, viewport_img, 0.75, 0, viewport_img)
-
-                    for i in range(len(v_pts) - 1):
-                        cv2.line(viewport_img, v_pts[i], v_pts[i + 1], (0, 240, 255), 2, cv2.LINE_AA)
-
-                    if self.mode == "POLYGON" and hasattr(self, "hover_screen_pos"):
-                        cv2.line(viewport_img, v_pts[-1], self.hover_screen_pos, (0, 200, 255), 1, cv2.LINE_AA)
-
-                    for idx, (vx, vy) in enumerate(v_pts):
+                # Overlays & Prompts (suppressed while holding 'v')
+                if not self.is_peeking:
+                    # Point prompts
+                    for pt, lbl in zip(self.point_coords, self.point_labels):
+                        vx, vy = self._image_to_viewport(pt[0], pt[1], scale_x, scale_y, crop_x0, crop_y0)
                         if 0 <= vx < self.window_w and 0 <= vy < self.window_h:
-                            c = (0, 255, 0) if idx == 0 else (0, 220, 255)
-                            cv2.circle(viewport_img, (vx, vy), 6 if idx == 0 else 5, c, -1)
-                            cv2.circle(viewport_img, (vx, vy), 8 if idx == 0 else 7, (255, 255, 255), 1)
+                            c = (0, 255, 0) if lbl == 1 else (0, 0, 255)
+                            cv2.circle(viewport_img, (vx, vy), 5, c, -1)
+                            cv2.circle(viewport_img, (vx, vy), 7, (255, 255, 255), 1)
 
+                    # Bounding box prompt
+                    if self.box_prompt is not None:
+                        bx0, by0, bx1, by1 = self.box_prompt
+                        b_vx0, b_vy0 = self._image_to_viewport(bx0, by0, scale_x, scale_y, crop_x0, crop_y0)
+                        b_vx1, b_vy1 = self._image_to_viewport(bx1, by1, scale_x, scale_y, crop_x0, crop_y0)
+                        cv2.rectangle(viewport_img, (b_vx0, b_vy0), (b_vx1, b_vy1), (0, 255, 255), 2)
+
+                    # Two-Click Knife line preview
+                    if self.mode == "KNIFE" and self.knife_pt_a is not None:
+                        k0 = self._image_to_viewport(self.knife_pt_a[0], self.knife_pt_a[1], scale_x, scale_y, crop_x0, crop_y0)
+                        k1 = self._image_to_viewport(self.hover_img_pos[0], self.hover_img_pos[1], scale_x, scale_y, crop_x0, crop_y0)
+                        cv2.line(viewport_img, k0, k1, (0, 0, 255), 2, cv2.LINE_AA)
+                        cv2.circle(viewport_img, k0, 4, (0, 255, 255), -1)
+
+                    # Polygon lasso preview
+                    if self.polygon_points:
+                        v_pts = [self._image_to_viewport(p[0], p[1], scale_x, scale_y, crop_x0, crop_y0) for p in self.polygon_points]
+                        if len(v_pts) >= 3:
+                            poly_ov = viewport_img.copy()
+                            pts_arr = np.array(v_pts, dtype=np.int32).reshape((-1, 1, 2))
+                            cv2.fillPoly(poly_ov, [pts_arr], (0, 220, 255))
+                            cv2.addWeighted(poly_ov, 0.25, viewport_img, 0.75, 0, viewport_img)
+
+                        for i in range(len(v_pts) - 1):
+                            cv2.line(viewport_img, v_pts[i], v_pts[i + 1], (0, 240, 255), 2, cv2.LINE_AA)
+
+                        if self.mode == "POLYGON" and hasattr(self, "hover_screen_pos"):
+                            cv2.line(viewport_img, v_pts[-1], self.hover_screen_pos, (0, 200, 255), 1, cv2.LINE_AA)
+
+                        for idx, (vx, vy) in enumerate(v_pts):
+                            if 0 <= vx < self.window_w and 0 <= vy < self.window_h:
+                                c = (0, 255, 0) if idx == 0 else (0, 220, 255)
+                                cv2.circle(viewport_img, (vx, vy), 6 if idx == 0 else 5, c, -1)
+                                cv2.circle(viewport_img, (vx, vy), 8 if idx == 0 else 7, (255, 255, 255), 1)
+
+                # Render Top Status HUD banner
+                active_iou = (
+                    self.candidate_scores[self.active_mask_idx]
+                    if (self.candidate_mask is not None and self.candidate_scores and self.active_mask_idx < len(self.candidate_scores))
+                    else None
+                )
                 hud_display = render_hud_overlay(
-                    viewport_img,
-                    current_voucher,
-                    self.current_idx,
-                    len(self.image_files),
-                    self.saved_instances,
-                    self.mode,
-                    self.zoom_level,
-                    tuple(self.pan_offset),
+                    display_img=viewport_img,
+                    voucher_name=current_voucher,
+                    voucher_idx=self.current_idx,
+                    total_vouchers=len(self.image_files),
+                    saved_instances=self.saved_instances,
+                    mode=self.mode,
+                    zoom_level=self.zoom_level,
+                    pan_offset=tuple(self.pan_offset),
+                    candidate_idx=self.active_mask_idx if self.candidate_mask is not None else None,
+                    candidate_total=len(self.candidate_masks) if self.candidate_masks else 3,
+                    candidate_iou=active_iou,
+                    view_mode=self.view_mode,
+                    alpha=self.overlay_alpha,
                 )
                 win.imshow(hud_display)
 
@@ -597,13 +684,17 @@ class PrecisionSAM2Annotator:
 
                 for ev in events:
                     ev_type = ev[0]
+
                     if ev_type == "button_press":
                         _, vx, vy, btn, state = ev
                         ix, iy = self._viewport_to_image(vx, vy, scale_x, scale_y, crop_x0, crop_y0)
 
                         if btn == 1:  # Left Button
-                            self.is_pan_dragging = False
-                            if self.mode == "POLYGON":
+                            if self.space_down:
+                                self.is_pan_dragging = True
+                                self.pan_drag_start = (vx, vy)
+                                self.pan_offset_start = list(self.pan_offset)
+                            elif self.mode == "POLYGON":
                                 if len(self.polygon_points) >= 3:
                                     s_vx, s_vy = self._image_to_viewport(
                                         self.polygon_points[0][0], self.polygon_points[0][1],
@@ -615,37 +706,54 @@ class PrecisionSAM2Annotator:
                                         self.polygon_points.append((ix, iy))
                                 else:
                                     self.polygon_points.append((ix, iy))
-                            elif self.mode == "KNIFE" or (state & 0x0004):
-                                self.is_knife_dragging = True
-                                self.knife_start = (ix, iy)
-                                self.knife_current = (ix, iy)
+                            elif self.mode == "KNIFE":
+                                if self.knife_pt_a is None:
+                                    self.knife_pt_a = (ix, iy)
+                                    logger.info(f"Knife Point A set at {(ix, iy)}. Click Point B to sever mask.")
+                                else:
+                                    if self.candidate_mask is not None:
+                                        self.candidate_mask = split_mask_with_knife_line(
+                                            self.candidate_mask, self.knife_pt_a, (ix, iy), line_thickness=2, dilation_px=2
+                                        )
+                                        if self.candidate_masks and self.active_mask_idx < len(self.candidate_masks):
+                                            self.candidate_masks[self.active_mask_idx] = self.candidate_mask.copy()
+                                        logger.info(f"Applied 2-click knife cut from {self.knife_pt_a} to {(ix, iy)}")
+                                    self.knife_pt_a = None
                             else:
                                 self.lbutton_down = True
                                 self.drag_start_screen = (vx, vy)
                                 self.drag_start_img = (ix, iy)
                                 self.is_box_dragging = False
 
-                        elif btn == 3:  # Right Button
+                        elif btn == 2:  # Middle Button Drag Pan
+                            self.is_pan_dragging = True
+                            self.pan_drag_start = (vx, vy)
+                            self.pan_offset_start = list(self.pan_offset)
+
+                        elif btn == 3:  # Right Button: Background point prompt
                             self.is_pan_dragging = False
                             if self.mode == "POLYGON" and len(self.polygon_points) >= 3:
                                 self.finalize_polygon_selection()
+                            elif self.mode == "KNIFE":
+                                self.knife_pt_a = None
                             else:
                                 self.point_coords.append([float(ix), float(iy)])
                                 self.point_labels.append(0)
                                 self.run_inference()
 
-                        elif btn == 2:  # Middle Button Pan
-                            self.is_pan_dragging = True
-                            self.pan_drag_start = (vx, vy)
-                            self.pan_offset_start = list(self.pan_offset)
+                        elif btn == 4:  # Wheel Up -> Cursor-Centered Zoom In
+                            self.zoom_level, self.pan_offset = calculate_cursor_centered_zoom(
+                                self.zoom_level, tuple(self.pan_offset), vx, vy, zoom_in=True,
+                                target_w=self.window_w, target_h=self.window_h,
+                                orig_w=self.orig_w, orig_h=self.orig_h, step=1.15, min_zoom=1.0, max_zoom=16.0
+                            )
 
-                        elif btn == 4:  # Wheel Up -> Zoom In
-                            self.zoom_level = min(10.0, round(self.zoom_level * 1.25, 2))
-
-                        elif btn == 5:  # Wheel Down -> Zoom Out
-                            self.zoom_level = max(1.0, round(self.zoom_level / 1.25, 2))
-                            if self.zoom_level <= 1.0:
-                                self.pan_offset = [0, 0]
+                        elif btn == 5:  # Wheel Down -> Cursor-Centered Zoom Out
+                            self.zoom_level, self.pan_offset = calculate_cursor_centered_zoom(
+                                self.zoom_level, tuple(self.pan_offset), vx, vy, zoom_in=False,
+                                target_w=self.window_w, target_h=self.window_h,
+                                orig_w=self.orig_w, orig_h=self.orig_h, step=1.15, min_zoom=1.0, max_zoom=16.0
+                            )
 
                     elif ev_type == "motion":
                         _, vx, vy, state = ev
@@ -653,14 +761,7 @@ class PrecisionSAM2Annotator:
                         self.hover_img_pos = (ix, iy)
                         self.hover_screen_pos = (vx, vy)
 
-                        if getattr(self, "lbutton_down", False) and self.mode != "POLYGON":
-                            if max(abs(vx - self.drag_start_screen[0]), abs(vy - self.drag_start_screen[1])) > 5:
-                                self.is_box_dragging = True
-                                x0, y0 = self.drag_start_img
-                                self.box_prompt = [float(min(x0, ix)), float(min(y0, iy)), float(max(x0, ix)), float(max(y0, iy))]
-                        elif getattr(self, "is_knife_dragging", False):
-                            self.knife_current = (ix, iy)
-                        elif getattr(self, "is_pan_dragging", False):
+                        if self.is_pan_dragging:
                             dx = vx - self.pan_drag_start[0]
                             dy = vy - self.pan_drag_start[1]
                             img_dx = int(dx / max(scale_x, 1e-6))
@@ -674,6 +775,11 @@ class PrecisionSAM2Annotator:
                                 max_y = int(self.orig_h - crop_h * 0.15)
                                 self.pan_offset[0] = max(min_x, min(max_x, self.pan_offset_start[0] - img_dx))
                                 self.pan_offset[1] = max(min_y, min(max_y, self.pan_offset_start[1] - img_dy))
+                        elif getattr(self, "lbutton_down", False) and self.mode == "SELECT":
+                            if max(abs(vx - self.drag_start_screen[0]), abs(vy - self.drag_start_screen[1])) > 5:
+                                self.is_box_dragging = True
+                                x0, y0 = self.drag_start_img
+                                self.box_prompt = [float(min(x0, ix)), float(min(y0, iy)), float(max(x0, ix)), float(max(y0, iy))]
 
                     elif ev_type == "button_release":
                         _, vx, vy, btn, state = ev
@@ -681,63 +787,91 @@ class PrecisionSAM2Annotator:
 
                         if btn == 1:
                             self.lbutton_down = False
-                            if self.is_box_dragging:
+                            if self.is_pan_dragging and self.space_down:
+                                self.is_pan_dragging = False
+                            elif self.is_box_dragging:
                                 self.is_box_dragging = False
                                 self.run_inference()
-                            elif self.is_knife_dragging:
-                                self.is_knife_dragging = False
-                                if self.candidate_mask is not None:
-                                    self.candidate_mask = split_mask_with_knife_line(
-                                        self.candidate_mask, self.knife_start, (ix, iy), line_thickness=3
-                                    )
-                                    logger.info(f"Applied knife cut line from {self.knife_start} to {(ix, iy)}")
-                            elif self.mode != "POLYGON":
+                            elif self.mode == "SELECT":
                                 self.point_coords.append([float(ix), float(iy)])
                                 self.point_labels.append(1)
                                 self.run_inference()
-
                         elif btn == 2:
                             self.is_pan_dragging = False
 
                     elif ev_type == "key_press":
                         sym = ev[1]
 
-                        # Taxonomic classification keys 0-6
+                        # Instant Class Commit (0 through 6)
                         if sym in [ord(str(i)) for i in range(len(CLASS_NAMES))]:
                             class_id = sym - ord('0')
-                            label = CLASS_NAMES[class_id]
+                            self.commit_active_instance(class_id)
 
-                            if self.candidate_mask is not None and np.count_nonzero(self.candidate_mask) > 0:
-                                poly_str = mask_to_normalized_polygon(self.candidate_mask, class_id)
-                                if poly_str:
-                                    poly = [float(val) for val in poly_str.split()[1:]]
-                                    self.saved_instances.append({
-                                        "class_id": class_id,
-                                        "label": label,
-                                        "polygon": poly,
-                                        "binary_mask": self.candidate_mask > 0,
-                                        "mask": self.candidate_mask.copy()
-                                    })
-                                    self.candidate_mask = None
-                                    self.point_coords = []
-                                    self.point_labels = []
-                                    self.box_prompt = None
-                                    self.polygon_points = []
-                                    self._update_cached_base_layer()
-                                    logger.info(f"Assigned instance #{len(self.saved_instances)} -> '{label}' (Class {class_id})")
+                        # Multimask proposal cycling (Tab key)
+                        elif sym == 0xff09:
+                            self.cycle_multimask_proposal()
 
+                        # View mode toggle (Fill vs Contour)
+                        elif sym in (ord('o'), ord('O')):
+                            self.view_mode = "CONTOUR" if self.view_mode == "FILL" else "FILL"
+                            logger.info(f"Toggled view mode -> {self.view_mode}")
+
+                        # Hold-to-peek ('v' / 'V')
+                        elif sym in (ord('v'), ord('V')):
+                            self.is_peeking = True
+
+                        # Viewport Fit to Window ('f' / 'F')
+                        elif sym in (ord('f'), ord('F')):
+                            self.zoom_level = 1.0
+                            self.pan_offset = [0, 0]
+                            logger.info("Reset viewport to 1.0x (Fit to Window)")
+
+                        # Overlay alpha adjustment ('[' and ']')
+                        elif sym == ord('['):
+                            self.overlay_alpha = max(0.1, round(self.overlay_alpha - 0.1, 2))
+                            self._update_cached_base_layer()
+                            logger.info(f"Adjusted overlay alpha -> {self.overlay_alpha:.2f}")
+                        elif sym == ord(']'):
+                            self.overlay_alpha = min(0.9, round(self.overlay_alpha + 0.1, 2))
+                            self._update_cached_base_layer()
+                            logger.info(f"Adjusted overlay alpha -> {self.overlay_alpha:.2f}")
+
+                        # Morphological margin tuning (+ / = and - / _)
+                        elif sym in (ord('+'), ord('='), 0xffab):
+                            if self.candidate_mask is not None:
+                                self.candidate_mask = apply_morphological_tuning(self.candidate_mask, "dilate", 3)
+                                if self.candidate_masks and self.active_mask_idx < len(self.candidate_masks):
+                                    self.candidate_masks[self.active_mask_idx] = self.candidate_mask.copy()
+                                logger.info("Applied 3x3 binary dilation (+ margin)")
+                        elif sym in (ord('-'), ord('_'), 0xffad):
+                            if self.candidate_mask is not None:
+                                self.candidate_mask = apply_morphological_tuning(self.candidate_mask, "erode", 3)
+                                if self.candidate_masks and self.active_mask_idx < len(self.candidate_masks):
+                                    self.candidate_masks[self.active_mask_idx] = self.candidate_mask.copy()
+                                logger.info("Applied 3x3 binary erosion (- margin)")
+
+                        # Two-click knife tool ('k' / 'K')
+                        elif sym in (ord('k'), ord('K')):
+                            self.mode = "KNIFE" if self.mode != "KNIFE" else "SELECT"
+                            self.knife_pt_a = None
+                            logger.info(f"Switched tool mode -> {self.mode}")
+
+                        # Polygon lasso tool ('p' / 'P')
                         elif sym in (ord('p'), ord('P')):
                             self.mode = "POLYGON" if self.mode != "POLYGON" else "SELECT"
                             if self.mode != "POLYGON":
                                 self.polygon_points = []
+                            logger.info(f"Switched tool mode -> {self.mode}")
 
-                        elif sym in (ord('k'), ord('K')):
-                            self.mode = "KNIFE" if self.mode != "KNIFE" else "SELECT"
+                        # Space bar down for panning
+                        elif sym == 0x0020:
+                            self.space_down = True
 
-                        elif sym in (0xff0d, 0xff8d, 0x20):  # Enter / Space
+                        # Enter / Space to finalize polygon or save & advance sheet
+                        elif sym in (0xff0d, 0xff8d):
                             if self.mode == "POLYGON" and len(self.polygon_points) >= 3:
                                 self.finalize_polygon_selection()
-                            elif self.mode != "POLYGON" and sym in (0xff0d, 0xff8d):
+                            else:
                                 self.save_current_sheet()
                                 self.current_idx += 1
                                 if self.current_idx < len(self.image_files):
@@ -747,20 +881,26 @@ class PrecisionSAM2Annotator:
                                     should_exit = True
                                     break
 
+                        # Clear current prompts ('c' / 'C')
                         elif sym in (ord('c'), ord('C')):
                             self.point_coords = []
                             self.point_labels = []
                             self.box_prompt = None
                             self.candidate_mask = None
+                            self.candidate_masks = []
+                            self.candidate_scores = []
                             self.polygon_points = []
+                            self.knife_pt_a = None
 
+                        # Undo last instance ('u' / 'U')
                         elif sym in (ord('u'), ord('U')):
                             if self.saved_instances:
                                 popped = self.saved_instances.pop()
                                 self._update_cached_base_layer()
                                 logger.info(f"Removed instance: {popped.get('label')}")
 
-                        elif sym in (ord('n'), ord('N'), ord('v'), ord('V')):
+                        # Next sheet ('n' / 'N')
+                        elif sym in (ord('n'), ord('N')):
                             self.save_current_sheet()
                             self.current_idx += 1
                             if self.current_idx < len(self.image_files):
@@ -769,16 +909,27 @@ class PrecisionSAM2Annotator:
                                 should_exit = True
                                 break
 
+                        # Previous sheet ('b' / 'B')
                         elif sym in (ord('b'), ord('B')):
                             self.save_current_sheet()
                             if self.current_idx > 0:
                                 self.current_idx -= 1
                                 self.load_active_image()
 
+                        # Quit ('q' / 'Q' / Escape)
                         elif sym in (ord('q'), ord('Q'), 0xff1b):
                             self.save_current_sheet()
                             should_exit = True
                             break
+
+                    elif ev_type == "key_release":
+                        sym = ev[1]
+                        if sym in (ord('v'), ord('V')):
+                            self.is_peeking = False
+                        elif sym == 0x0020:
+                            self.space_down = False
+                            if self.is_pan_dragging:
+                                self.is_pan_dragging = False
 
                     elif ev_type == "close":
                         self.save_current_sheet()

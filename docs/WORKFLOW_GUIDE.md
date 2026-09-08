@@ -16,6 +16,10 @@
 2. [Seven-Phase Pipeline Overview](#2-seven-phase-pipeline-overview)
 3. [Phase 1: Voucher Ingestion & Authority Stratification](#phase-1-voucher-ingestion--authority-stratification)
 4. [Phase 2: LeafMachine2 Organ Detection & Geometric Routing](#phase-2-leafmachine2-organ-detection--geometric-routing)
+   - [2.0 Track A: SAM 2 Assisted Botanical Annotation & Model Fine-Tuning](#20-track-a-sam-2-assisted-botanical-annotation--model-fine-tuning)
+   - [2.1 LM2 Configuration](#21-lm2-configuration)
+   - [2.2 Execute LeafMachine2](#22-execute-leafmachine2)
+   - [2.3 Post-Processing, DBSCAN Clustering & 4-Tier Routing](#23-post-processing-dbscan-clustering--4-tier-routing)
 5. [Phase 3: Label-Blind Elliptic Fourier Analysis (EFA)](#phase-3-label-blind-elliptic-fourier-analysis-efa)
 6. [Phase 4: GMM Clustering & MorphoTools2 Passive Sample CDA](#phase-4-gmm-clustering--morphotools2-passive-sample-cda)
 7. [Phase 5: DINOv2 Deep Vision Embeddings & Cleanlab XAI](#phase-5-dinov2-deep-vision-embeddings--cleanlab-xai)
@@ -162,6 +166,77 @@ python scripts/data_prep/01_voucher_harvester.py \
 
 > [!NOTE]
 > Physical image staging via `prepare_lm2_dataset.py` has been archived to `scripts/_archive/data_prep/prepare_lm2_dataset.py`. The modern pipeline script [`scripts/pipeline/02_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02_segment_and_extract.py) reads directly from `data/raw_vouchers/` via paths defined in `data/tables/curated_vouchers.csv`, eliminating redundant symlink copying and disk overhead.
+
+### 2.0 Track A: SAM 2 Assisted Botanical Annotation & Model Fine-Tuning
+- **Script:** [`scripts/annotation_and_training/annotate_with_sam2.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/annotation_and_training/annotate_with_sam2.py)
+- **Environment:** `.venv` (with CUDA and Segment Anything 2 installed)
+- **Reference Manual:** [`docs/SAM2_Precision_Botanical_Annotation_Guide.txt`](file:///home/brandon/Packera_dubia_morphometrics/docs/SAM2_Precision_Botanical_Annotation_Guide.txt)
+- **Purpose:** Produces millimeter-accurate instance segmentation masks of basal leaf blades, petioles, cauline organs, and roots across dried herbarium specimens. Uses SAM 2 Hiera Large with cursor-centered viewport navigation, multimask proposal cycling (`Tab`), boundary contour inspection (`o`), hold-to-peek bare pixels (`v`), two-click knife slicing (`k`), and morphological margin tuning (`+`/`-`).
+
+```bash
+# Launch interactive SAM 2 botanical annotator GUI
+source .venv/bin/activate
+python scripts/annotation_and_training/annotate_with_sam2.py \
+    --images-dir data/raw_vouchers \
+    --output-dir data/raw_annotations \
+    --output-coco data/annotations/packera_train_coco.json
+
+# (Optional) Recompile standardized COCO JSON from masks in headless mode:
+python scripts/annotation_and_training/annotate_with_sam2.py \
+    --export-coco \
+    --masks-dir data/raw_annotations/masks \
+    --images-dir data/raw_vouchers \
+    --output-coco data/annotations/packera_train_coco.json \
+    --val-split 0.15
+```
+
+#### Command-Line Arguments:
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--images-dir` | Path | `data/raw_vouchers` | Directory of high-resolution voucher scans. |
+| `--output-dir` | Path | `data/raw_annotations` | Target directory for polygon text files and PNG masks. |
+| `--output-coco` | Path | `data/annotations/packera_train_coco.json` | Incremental/compiled standardized COCO JSON output. |
+| `--single-image` | Path | `None` | Target a single voucher image file for focused editing. |
+| `--checkpoint` | Path | `models/checkpoints/sam2_hiera_large.pt` | SAM 2 model weights checkpoint. |
+| `--config` | String | `sam2_hiera_l.yaml` | Model configuration YAML file. |
+| `--export-coco` | Flag | `False` | Compile COCO annotations directly from existing mask directory without GUI. |
+| `--masks-dir` | Path | `data/raw_annotations/masks` | Source masks folder for `--export-coco`. |
+| `--val-split` | Float | `0.0` | Validation partition fraction for train/val COCO split. |
+
+#### Hotkey Reference & Control Matrix:
+| Category | Control / Key | Action & Botanical Context |
+| :--- | :--- | :--- |
+| **Navigation** | **Mouse Wheel** | Smooth cursor-centered zoom in / out ($1.0\times$ to $16.0\times$). |
+| | **Middle-Click Drag** | Pan viewport across high-resolution voucher sheet. |
+| | **`Space` + Left-Drag** | Alternative viewport pan. |
+| | **`f`** | Fit full herbarium voucher to window ($1.0\times$). |
+| **Segmentation** | **Left-Click** | Place positive prompt point (green marker). |
+| | **Right-Click** | Place negative exclusion point (red marker). |
+| | **Shift + Left-Drag** | Bounding box prompt constraint. |
+| | **`Tab`** | Cycle 3 SAM 2 candidate granularities (sub-lobe vs. blade vs. clump). |
+| | **`k`** | Two-click knife tool to sever petiole bases from caudex tissue. |
+| | **`+` / `-`** | 1-pixel binary dilation / erosion for tomentum margin tuning. |
+| | **`p`** | Toggle polygon lasso mode (Left-Click points, Enter to finalize). |
+| **Inspection** | **`o`** | Toggle mask fill vs. 1-px boundary contour line (inspect crenations). |
+| | **Hold `v`** | Hold-to-peek: Temporarily hide overlays to view bare pixels. |
+| | **`[` / `]`** | Adjust mask overlay alpha transparency ($0.10$ to $0.90$). |
+| **Commit & Session**| **`0`–`6`** | Instant botanical class commit (`0`: blade, `1`: petiole, `2`: cauline leaf, `3`: cauline stem, `4`: root, `5`: rosette clump, `6`: capitulum). |
+| | **`u`** | Undo last committed instance on current sheet. |
+| | **`c`** | Clear active candidate prompts and bounding box. |
+| | **`n` / `b`** | Save and advance to Next (`n`) or return to Previous (`b`) voucher sheet. |
+| | **`Enter`** | Finalize polygon lasso OR save sheet annotations and advance. |
+| | **`q` / `Esc`** | Save current sheet annotations and quit safely. |
+
+#### Downstream Fine-Tuning:
+Once 50–100 vouchers are annotated, fine-tune LeafMachine2's PointRend Plant Component Detector (PCD):
+```bash
+python scripts/annotation_and_training/finetune_lm2_pcd.py \
+    --coco-annotations data/annotations/packera_train_coco.json \
+    --epochs 30 \
+    --output-weights models/lm2_packera_pcd_finetuned.pth
+```
+
+---
 
 ### 2.1 LM2 Configuration
 - **Script:** [`scripts/vision/configure_leafmachine2.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/vision/configure_leafmachine2.py)

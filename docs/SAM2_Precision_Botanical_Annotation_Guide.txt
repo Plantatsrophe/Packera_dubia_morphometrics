@@ -1,4 +1,4 @@
-﻿================================================================================
+================================================================================
 SAM 2 PRECISION BOTANICAL ANNOTATION & MORPHOMETRICS CALIBRATION GUIDE
 Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 Repository: https://github.com/Plantatsrophe/Packera_dubia_morphometrics (Branch: ubuntu)
@@ -17,14 +17,17 @@ bleed across the caudex and lump roots, stems, and petioles into a single mask.
 
 
 This guide provides the complete protocol for using the upgraded precision SAM 2 annotator 
-(`scripts/annotate_with_sam2.py`), which incorporates three mathematical constraint mechanisms:
-  a. Bounding Box Prompts (Shift + Drag): Restricts SAM 2 attention strictly within the box.
-  b. Negative Exclusion Points (Right-Click): Explicitly forces roots/background out of the mask.
-  c. Interactive Knife Tool (Ctrl + Drag): Slices contiguous tissue masks across the caudex boundary.
+(`scripts/annotation_and_training/annotate_with_sam2.py`), which incorporates five botanical constraint 
+and inspection mechanisms:
+  a. Bounding Box Prompts (Shift + Drag): Restricts SAM 2 attention strictly within the targeted lamina/petiole.
+  b. Negative Exclusion Points (Right-Click): Explicitly forces roots, overlapping blades, or background out of the mask.
+  c. Multimask Proposal Cycling (Tab): Cycles through SAM 2's 3 hierarchy levels (sub-lobe vs. blade vs. clump).
+  d. Two-Click Knife Slicing ('k'): Performs clean, straight dissections across the petiole-caudex junction.
+  e. Morphological Margin Tuning ('+' / '-'): Provides 1-pixel binary dilation/erosion to dial in fuzzy tomentose margins.
 
 
 Following this protocol, 50-100 vouchers can be cleanly annotated in under 2 hours to provide 
-a gold-standard calibration dataset for YOLOv8/YOLOv11 instance segmentation.
+a gold-standard calibration dataset for LeafMachine2 PCD (PointRend) and YOLOv8/YOLOv11 instance segmentation.
 
 
 
@@ -50,7 +53,7 @@ cd ../..
 
 
 # C. Verify raw voucher and annotation directory structure
-mkdir -p data/raw_vouchers data/raw_annotations data/yolo_dataset outputs/dataset_qc
+mkdir -p data/raw_vouchers data/raw_annotations data/annotations data/yolo_dataset outputs/dataset_qc
 
 
 
@@ -76,54 +79,131 @@ Class ID | Class Name           | Botanical Definition & Diagnostic Landmarks
 4. INTERACTIVE CONTROLS & HOTKEY REFERENCE
 --------------------------------------------------------------------------------
 Launch the tool via:
-  python scripts/annotate_with_sam2.py
+  python scripts/annotation_and_training/annotate_with_sam2.py \
+    --images-dir data/raw_vouchers \
+    --output-dir data/raw_annotations \
+    --output-coco data/annotations/packera_train_coco.json
+
+CLI Options:
+  --images-dir PATH       Input directory containing high-resolution raw herbarium voucher scans (default: data/raw_vouchers)
+  --output-dir PATH       Directory for intermediate YOLO-format mask coordinate texts and PNG masks (default: data/raw_annotations)
+  --output-coco PATH      Destination path for standardized COCO JSON dataset (default: data/annotations/packera_train_coco.json)
+  --single-image PATH     Target a specific herbarium voucher image for focused editing
+  --checkpoint PATH       Path to SAM 2 Hiera weights (default: models/checkpoints/sam2_hiera_large.pt)
+  --config CONFIG         SAM 2 model architecture configuration file (default: sam2_hiera_l.yaml)
+  --export-coco           Compile and export COCO dataset from existing masks in headless mode
+  --masks-dir PATH        Source masks directory for headless --export-coco compilation
+  --val-split FRACTION    Validation partition fraction (e.g., 0.15 for 15% val split)
+
+Navigation & Viewport Controls:
+  - Mouse Wheel:         Cursor-centered zoom in / out (smooth 1.0x to 16.0x magnification).
+  - Middle-Click Drag:   Smooth viewport pan across high-resolution herbarium scans.
+  - Space + Left-Drag:   Alternative smooth viewport pan.
+  - 'f':                 Fit to screen (resets zoom to 1.0x and centers sheet).
+
+Segmentation & Prompting:
+  - Left-Click:          Add positive foreground prompt point (Green landmark).
+  - Right-Click:         Add negative exclusion prompt point (Red landmark).
+  - Shift + Left-Drag:   Draw bounding box constraint (restricts SAM 2 search space).
+  - Tab:                 Cycle through the 3 SAM 2 multimask candidate granularities (sub-lobe vs. blade vs. clump).
+  - 'k':                 Two-click knife tool for petiole/caudex slicing (Click 1: start cut, Click 2: end cut; press 'k' again to toggle off).
+  - '+' / '=':           Single-pixel binary dilation (expands mask margin outward into arachnoid tomentum).
+  - '-' / '_':           Single-pixel binary erosion (contracts mask margin inward from background glare/bleed).
+  - 'p':                 Toggle polygon lasso mode (Left-Click to trace custom vertices, Enter/Right-Click to finalize).
+
+Inspection & Visibility:
+  - 'o':                 Toggle view mode: semi-transparent mask fill vs. 1-pixel boundary contour line (for crenation inspection).
+  - Hold 'v':            Hold-to-peek: Temporarily hides all mask and prompt overlays to reveal bare specimen pixels.
+  - '[' and ']':         Decrease / increase mask overlay alpha transparency (steps of 0.1, clamped between 0.10 and 0.90).
+
+Commit & Session Management:
+  - Keys '0' through '6': Instant botanical class assignment and instance commit (commits active mask to class ID 0–6).
+  - 'u':                 Undo last committed instance on current sheet.
+  - 'c':                 Clear current candidate points, bounding box, knife line, and candidate masks.
+  - 'n':                 Save current annotations and advance to next voucher sheet (or skip sheet if unannotated).
+  - 'b':                 Save current annotations and return to previous voucher sheet.
+  - Enter:               Finalize polygon lasso selection OR save sheet annotations and advance to next voucher.
+  - 'q' or Esc:          Save current sheet annotations and quit application cleanly.
 
 
-Mouse & Keyboard Controls:
-  - Left-Click:          Add positive foreground prompt point (Green dot)
-  - Right-Click:         Add negative exclusion prompt point (Red dot)
-  - Shift + Left-Drag:   Draw Bounding Box Prompt (Constrains SAM 2 search space)
-  - Ctrl + Left-Drag:    Draw Knife / Cut Line (Slices mask across the caudex boundary)
-  - 'z' / 'x':           Zoom In / Zoom Out centered on the current viewport
-  - 'w' / 'a' / 's' / 'd': Pan viewport Up / Left / Down / Right
-  - Keys '0' through '6': Assign candidate mask to Class ID (0 to 6)
-  - 'c':                 Clear current candidate points/box
-  - 'u':                 Undo last saved instance
-  - Enter or 'v':        Save current sheet annotations (.txt) and load next voucher
-  - 'q' or Esc:          Quit application safely
+
+
+5. BOTANICAL BOUNDARY BEST PRACTICES FOR DENSE PACKERA ROSETTES
+--------------------------------------------------------------------------------
+The basal rosettes of Packera dubia present extreme morphometric challenges: petiole bases 
+densely crowd at the caudex, blades overlap at acute angles, margins possess subtle 
+crenate-dentate teeth, and petioles/sinuses often bear flocculent white tomentum (pubescence). 
+Adhere to the following operational protocols to ensure research-grade segmentation:
+
+A. Disentangling Clumps via Multimask Proposal Cycling (Tab):
+   - When placing a positive point on a basal blade that overlaps another, SAM 2 frequently generates 
+     an ambiguous response. By default, the top-confidence mask may capture the entire multi-leaf clump.
+   - Do NOT immediately add numerous negative points. Instead, press `Tab` to cycle through the 3 
+     internal proposal granularities computed by SAM 2:
+       * Granularity 1 (Sub-part): Single leaf lobe or crenation tooth.
+       * Granularity 2 (Part): The isolated individual leaf blade (lamina).
+       * Granularity 3 (Whole): The aggregated rosette clump.
+   - In 85% of crowded cases, cycling with `Tab` reveals the clean, isolated blade mask instantly.
+
+B. Validating Tooth and Sinus Margins via Contour-Only Mode ('o'):
+   - Standard solid mask overlays can obscure fine crenate/dentate margin architecture and secondary teeth.
+   - Press `o` to switch from filled mask rendering to a crisp 1-pixel boundary contour line.
+   - Inspect the contour against the raw leaf margin at 4.0x–8.0x zoom:
+       * Verify that tooth apices and sinus depths are faithfully traced without bridging adjacent teeth.
+       * Hold `v` to peek the bare image and check whether apparent margin irregularities are true teeth 
+         or pressed petiole fragments of overlapping leaves.
+   - Press `o` again to return to filled overlay mode before committing.
+
+C. Caudex Separation via the Two-Click Knife Tool ('k'):
+   - Where the petiole inserts into the caudex or merges into subterranean rhizome tissue, 
+     SAM 2 cannot infer an anatomical boundary because the pressed plant tissue is continuous and dark.
+   - Press `k` to activate Knife Mode.
+   - Click once at one edge of the petiole-caudex junction, then click across the opposite edge.
+   - The annotator draws a straight cut line across the junction and divides the candidate mask, 
+     keeping only the foliar segment connected to your primary prompt point.
+   - Press `k` again to exit knife mode, then press '1' to commit the clean `leaf_petiole` instance.
+
+D. Managing Arachnoid Tomentum with Morphological Margin Tuning ('+' / '-'):
+   - *Packera dubia* and *Packera tomentosa* display woolly, arachnoid pubescence (tomentum) along 
+     the petiole and blade margin. Depending on lighting, SAM 2 may either under-segment by clinging 
+     to the green/brown lamina core or over-segment into white woolly halos.
+   - Press `+` to apply a single-pixel 3x3 binary dilation if the mask cuts inside the true laminar margin.
+   - Press `-` to apply a single-pixel 3x3 binary erosion if the mask bleeds into diffuse edge hairs or background paper.
 
 
 
 
-5. STEP-BY-STEP ANNOTATION PROTOCOL
+6. STEP-BY-STEP ANNOTATION PROTOCOL
 --------------------------------------------------------------------------------
 For each herbarium voucher sheet:
 
 
-Step A: Zoom to Region of Interest
-  - Press 'z' to zoom into the basal rosette / root crown at native resolution.
-  - Use 'w', 'a', 's', 'd' to position the caudex in the center of the screen.
+Step A: Viewport Navigation & Basal Cluster Orientation
+  - Hover the cursor over the basal rosette and roll the Mouse Wheel up to zoom in (2.0x to 8.0x).
+  - Middle-Click Drag (or hold Space + Left Drag) to center the caudex and basal leaves in view.
+  - Press 'f' at any time to reset zoom to 1.0x and survey the full voucher sheet.
 
 
-Step B: Annotating Basal Leaves (Without Root Bleed)
-  1. Hold Shift + Left-Drag a bounding box around ONLY the target leaf blade and petiole, 
-     stopping exactly at the caudex / root crown.
-  2. If SAM 2 bleeds into adjacent roots or petioles:
-     - Right-Click (Red dot) on the root or adjacent petiole tissue to exclude it.
-     - OR hold Ctrl + Left-Drag a straight cut line across the petiole-caudex junction.
-  3. Press '0' to save as `basal_leaf_blade` (Green) OR '1' for `leaf_petiole` (Mint Green).
+Step B: Annotating Basal Leaf Blades & Petioles
+  1. Hold Shift + Left-Drag a bounding box around the target leaf blade, or Left-Click directly in the 
+     mid-lamina.
+  2. Press Tab to select the individual blade candidate proposal over the clump proposal.
+  3. Press 'o' to inspect margin contours along the crenations. If hairs cause bleeding, press '-' once.
+  4. Press '0' to instantly commit the mask as `basal_leaf_blade` (Green).
+  5. Left-Click along the corresponding petiole. If it bleeds into the caudex, press 'k' and click two 
+     points across the petiole base to sever it.
+  6. Press '1' to instantly commit as `leaf_petiole` (Mint Green).
 
 
 Step C: Annotating Roots & Rhizomes
   1. Hold Shift + Left-Drag a bounding box around the subterranean root mass at the base of the sheet.
-  2. Right-Click (Red dot) on the petiole bases if any foliar tissue is captured.
+  2. Right-Click on overlapping petiole bases if any foliar tissue is captured.
   3. Press '4' to save as `root_rhizome` (Red/Brown).
 
 
 Step D: Annotating Cauline Stems & Leaves
-  1. Left-Click along the vertical flowering stalk.
-  2. Press '3' to save as `cauline_stem` (Orange).
-  3. Left-Click individual stem leaves and press '2' for `cauline_leaf` (Yellow-Green).
+  1. Left-Click along the vertical flowering scape / peduncle. Press '3' for `cauline_stem` (Orange).
+  2. Left-Click individual stem leaves; press Tab if needed, then press '2' for `cauline_leaf` (Yellow-Green).
 
 
 Step E: Annotating Capitula (Heads)
@@ -132,20 +212,30 @@ Step E: Annotating Capitula (Heads)
 
 
 Step F: Save and Advance
-  - Press Enter (or 'v').
-  - The script formats all polygon coordinates into normalized YOLO format (0.0 to 1.0) 
-    and saves them to `data/raw_annotations/{catalogNumber}.txt`.
+  - Press Enter (or 'n').
+  - The script automatically writes normalized YOLO polygon coordinates to `data/raw_annotations/{id}.txt`, 
+    exports instance mask PNGs to `data/raw_annotations/masks/{id}_*.png`, updates the incremental 
+    COCO dataset JSON (`data/annotations/packera_train_coco.json`), and loads the next voucher.
+  - Use 'b' to navigate back to previous vouchers if adjustments are needed.
 
 
 
 
-6. DATASET BUILDING & MODEL FINE-TUNING
+7. DATASET BUILDING & MODEL FINE-TUNING
 --------------------------------------------------------------------------------
-Once 50-100 vouchers are annotated in `data/raw_annotations/`, partition the data and 
-train YOLOv8x/v11x-seg:
+Once 50-100 vouchers are annotated in `data/raw_annotations/`, compile or verify the 
+COCO dataset (`data/annotations/packera_train_coco.json`) and fine-tune LeafMachine2's 
+PointRend Plant Component Detector (PCD) or YOLO:
 
 
-# Step 1: Build stratified 70/15/15 train/val/test splits with 9% background negatives
+# Option A: Fine-tune LeafMachine2 PointRend PCD (Production Pipeline Backbone)
+python scripts/annotation_and_training/finetune_lm2_pcd.py \
+  --coco-annotations data/annotations/packera_train_coco.json \
+  --epochs 30 \
+  --output-weights models/lm2_packera_pcd_finetuned.pth
+
+
+# Option B: Build stratified 70/15/15 YOLO splits with 9% background negatives
 python scripts/build_artifact_robust_dataset.py \
   --raw-images-dir data/raw_vouchers \
   --annotations-dir data/raw_annotations \
@@ -154,7 +244,7 @@ python scripts/build_artifact_robust_dataset.py \
   --negative-ratio 0.09
 
 
-# Step 2: Train YOLO with botanical-safe augmentations (mosaic=0, mixup=0, cls=1.5)
+# Train YOLOv8/YOLOv11 with botanical-safe augmentations (mosaic=0, mixup=0, cls=1.5)
 python scripts/train_artifact_robust_yolo.py \
   --config data/dataset_config.yaml \
   --imgsz 1024 \
@@ -164,10 +254,10 @@ python scripts/train_artifact_robust_yolo.py \
 
 
 
-7. DOWNSTREAM EXTRACTION & MORPHOMETRIC PIPELINE
+8. DOWNSTREAM EXTRACTION & MORPHOMETRIC PIPELINE
 --------------------------------------------------------------------------------
-With the retuned model weights saved at `models/yolov8_leaf_best.pt`, run the master 
-extraction and analysis sequence:
+With the fine-tuned model weights saved at `models/lm2_packera_pcd_finetuned.pth` 
+(or `models/yolov8_leaf_best.pt`), run the master extraction and analysis sequence:
 
 
 # Step 3: Run 5-Stage Precision Botanical Extraction (with EDT + SAM 2 Rosette Disentangling)
