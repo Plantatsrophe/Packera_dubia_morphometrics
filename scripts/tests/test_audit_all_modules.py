@@ -26,6 +26,7 @@ ACTIVE_MODULES = [
     "scripts.annotation_and_training.annotate_with_sam2",
     "scripts.annotation_and_training.sam2_annotator_utils",
     "scripts.vision.lm2_geometry_utils",
+    "scripts.vision.configure_leafmachine2",
     "scripts.pipeline.02_segment_and_extract",
     "scripts.analysis.05_cleanlab_vision_xai",
 ]

@@ -461,6 +461,7 @@ class TestVoucherHarvesterCLI(unittest.TestCase):
             "--output-csv", "/tmp/custom_curated.csv",
             "--download-images",
             "--check-sharpness",
+            "--force",
         ])
 
         self.assertEqual(args.taxa, ["Packera dubia", "Packera anonyma"])
@@ -469,13 +470,14 @@ class TestVoucherHarvesterCLI(unittest.TestCase):
         self.assertEqual(args.output_csv, "/tmp/custom_curated.csv")
         self.assertTrue(args.download_images)
         self.assertTrue(args.check_sharpness)
+        self.assertTrue(args.force)
 
     def test_cli_main_invocation(self):
         """Verify main() entrypoint constructs VoucherHarvester and triggers run()."""
         import importlib
         mod_cli = importlib.import_module("scripts.data_prep.01_voucher_harvester")
 
-        with patch.object(sys, "argv", ["01_voucher_harvester.py", "--max-records", "5", "--no-exclude-western"]), \
+        with patch.object(sys, "argv", ["01_voucher_harvester.py", "--max-records", "5", "--no-exclude-western", "--force"]), \
              patch.object(mod_cli, "VoucherHarvester") as mock_harvester_cls:
             mock_instance = MagicMock()
             mock_harvester_cls.return_value = mock_instance
@@ -486,7 +488,147 @@ class TestVoucherHarvesterCLI(unittest.TestCase):
             _, kwargs = mock_harvester_cls.call_args
             self.assertEqual(kwargs["max_records_per_taxon"], 5)
             self.assertFalse(kwargs["exclude_western"])
+            self.assertTrue(kwargs["force"])
             mock_instance.run.assert_called_once_with(download_images=False)
+
+
+class TestVoucherHarvesterResumptionLogic(unittest.TestCase):
+    """Test suite for download resumption, atomic downloads, and CSV merging."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.dir_path = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_download_single_image_resumption_skips_existing(self):
+        """Verify that an existing non-empty voucher image is retained and skipped when force=False."""
+        import asyncio
+        from scripts.core.harvester import download_single_image
+
+        dest_file = self.dir_path / "NCU000123.jpg"
+        dest_file.write_bytes(b"\xff\xd8\xff" + b"A" * 2048)
+
+        mock_session = MagicMock()
+        mock_logger = MagicMock()
+        semaphore = asyncio.Semaphore(1)
+
+        success, was_skipped = asyncio.run(
+            download_single_image(
+                session=mock_session,
+                image_url="https://example.com/sheet.jpg",
+                destination_path=dest_file,
+                semaphore=semaphore,
+                force=False,
+                logger=mock_logger,
+            )
+        )
+
+        self.assertTrue(success)
+        self.assertTrue(was_skipped)
+        mock_session.get.assert_not_called()
+        mock_logger.info.assert_called()
+        self.assertIn("Skipping download for existing voucher", mock_logger.info.call_args[0][0])
+
+    def test_download_single_image_force_redownloads(self):
+        """Verify that when force=True, existing files are re-downloaded and replaced atomically."""
+        import asyncio
+        from scripts.core.harvester import download_single_image
+
+        dest_file = self.dir_path / "NCU000456.jpg"
+        dest_file.write_bytes(b"old_data")
+
+        new_image_data = b"\xff\xd8\xff" + b"X" * 2048
+
+        # Mock aiohttp response context manager
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {"Content-Type": "image/jpeg"}
+
+        async def mock_read():
+            return new_image_data
+        mock_response.read = mock_read
+
+        class MockGetContext:
+            async def __aenter__(self):
+                return mock_response
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        mock_session = MagicMock()
+        mock_session.get.return_value = MockGetContext()
+        semaphore = asyncio.Semaphore(1)
+
+        success, was_skipped = asyncio.run(
+            download_single_image(
+                session=mock_session,
+                image_url="https://example.com/sheet.jpg",
+                destination_path=dest_file,
+                semaphore=semaphore,
+                force=True,
+            )
+        )
+
+        self.assertTrue(success)
+        self.assertFalse(was_skipped)
+        mock_session.get.assert_called_once()
+        self.assertEqual(dest_file.read_bytes(), new_image_data)
+
+    def test_download_all_voucher_images_counters(self):
+        """Verify download_all_voucher_images aggregates progress counters [Processed: X | Skipped: Y | Total: Z]."""
+        import asyncio
+        from scripts.core.harvester import download_all_voucher_images
+
+        img1 = self.dir_path / "NCU_EXISTING.jpg"
+        img1.write_bytes(b"\xff\xd8\xff" + b"Z" * 1500)
+        img2 = self.dir_path / "NCU_PENDING.jpg"
+
+        records = [
+            ("https://example.com/img1.jpg", img1),
+            ("https://example.com/img2.jpg", img2),
+        ]
+
+        mock_logger = MagicMock()
+        with patch("scripts.core.harvester.download_single_image", return_value=(True, False)):
+            stats = asyncio.run(
+                download_all_voucher_images(
+                    records_to_download=records,
+                    concurrency_limit=2,
+                    force=False,
+                    logger=mock_logger,
+                )
+            )
+
+        self.assertEqual(stats["total"], 2)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["success"], 1)
+        mock_logger.info.assert_called()
+
+    def test_export_curated_table_merges_without_duplicates(self):
+        """Verify export_curated_table merges new records with existing CSV without duplicate catalogNumber rows."""
+        csv_path = self.dir_path / "curated_vouchers.csv"
+
+        df_initial = pd.DataFrame([
+            {"catalogNumber": "NCU001", "scientificName": "Packera dubia", "year": 2020},
+            {"catalogNumber": "NCU002", "scientificName": "Packera dubia", "year": 2021},
+        ])
+        export_curated_table(df_initial, csv_path)
+        self.assertEqual(len(pd.read_csv(csv_path)), 2)
+
+        # Second harvest includes NCU002 (duplicate) and NCU003 (new)
+        df_new = pd.DataFrame([
+            {"catalogNumber": "NCU002", "scientificName": "Packera dubia", "year": 2022},
+            {"catalogNumber": "NCU003", "scientificName": "Packera dubia", "year": 2023},
+        ])
+        export_curated_table(df_new, csv_path)
+
+        df_merged = pd.read_csv(csv_path)
+        self.assertEqual(len(df_merged), 3, "Merged table must contain exactly 3 unique vouchers.")
+        self.assertListEqual(list(df_merged["catalogNumber"]), ["NCU001", "NCU002", "NCU003"])
+        # Should keep last updated value for NCU002
+        ncu002_year = df_merged[df_merged["catalogNumber"] == "NCU002"]["year"].iloc[0]
+        self.assertEqual(ncu002_year, 2022)
 
 
 if __name__ == "__main__":

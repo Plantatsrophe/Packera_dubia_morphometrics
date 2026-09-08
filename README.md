@@ -209,6 +209,9 @@ python scripts/annotation\_and\_training/finetune\_lm2\_pcd.py \\
 All production pipeline phases are orchestrated through the unified entry point `main.py`. Execution parameters and file paths default to the centralized settings in `config/config.yaml` and can be overridden via CLI arguments:
 
 ```bash
+# Preflight Environment & Dependency Diagnostic:
+python main.py check-env
+
 # Phase 1: Voucher Harvesting & Determiner Authority Stratification
 python main.py harvest --max-records 5000 --download-images
 
@@ -223,9 +226,11 @@ python main.py run-all --download-images
 ```
 
 #### Preflight Sanity Checks & Defensive Gating
-`main.py` incorporates automated preflight sanity checks:
+`main.py` incorporates automated preflight sanity checks and a dedicated environment diagnostic subcommand:
+- **`check-env` Subcommand**: Instantaneous (<5s) validation across Python version ($\ge 3.10$), active CUDA device & VRAM (without tensor allocation), core Python dependencies (`cv2`, `torch`, `cleanlab`, `pygbif`, `yaml`), `Rscript` availability and R package probe (`Momocs`, `mclust`, `MorphoTools2`, `spatialRF`, `terra`, `tidyverse`, `optparse`), directory write permissions, `.venv_LM2`, and fine-tuned model checkpoint.
 - **GPU Availability**: Inspects CUDA availability before Phase 2 segmentation, warning if running on CPU or failing early if CUDA was explicitly required.
 - **Input Gating**: Verifies existence and non-emptiness of upstream prerequisite files (`curated_vouchers.csv`, model checkpoints, `data/contours/`), failing early with informative diagnostic hints if an upstream step was skipped.
+- **Automated Multi-Environment Orchestration**: `main.py` dynamically resolves the dedicated LeafMachine2 Python interpreter (`.venv_LM2/bin/python` on Linux/macOS or `.venv_LM2/Scripts/python.exe` on Windows) for Phase 2 segmentation tasks. Users run `main.py` from the primary pipeline environment without manual virtualenv activation/deactivation; `main.py` seamlessly invokes `02_segment_and_extract.py` under `.venv_LM2` via subprocess, providing real-time diagnostics (`[INFO] Executing LeafMachine2 segmentation via: .venv_LM2/bin/python`) and strict exit-code propagation.
 - **Environment Tools**: Checks for system dependencies (such as `Rscript` for Phase 3 morphometrics) before starting processing.
 
 ---

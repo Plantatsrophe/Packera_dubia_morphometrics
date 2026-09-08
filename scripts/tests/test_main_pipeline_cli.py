@@ -75,10 +75,23 @@ class TestMainPipelineCLI(unittest.TestCase):
         self.assertFalse(args_synth.export_figures)
         self.assertEqual(args_synth.permutations, 50)
 
+        # check-env
+        args_check = parser.parse_args(["check-env", "--strict"])
+        self.assertEqual(args_check.subcommand, "check-env")
+        self.assertTrue(args_check.strict)
+
         # run-all
         args_all = parser.parse_args(["run-all", "--download-images"])
         self.assertEqual(args_all.subcommand, "run-all")
         self.assertTrue(args_all.download_images)
+
+        # force / overwrite flags across subparsers
+        self.assertTrue(parser.parse_args(["harvest", "--force"]).force)
+        self.assertTrue(parser.parse_args(["harvest", "--overwrite"]).force)
+        self.assertTrue(parser.parse_args(["segment", "--force"]).force)
+        self.assertTrue(parser.parse_args(["segment", "--overwrite"]).force)
+        self.assertTrue(parser.parse_args(["run-all", "--force"]).force)
+        self.assertTrue(parser.parse_args(["run-all", "--overwrite"]).force)
 
     def test_gpu_availability_check(self):
         """Verify GPU availability check runs and returns boolean without unhandled exception."""
@@ -127,6 +140,57 @@ class TestMainPipelineCLI(unittest.TestCase):
             self.assertEqual(args.subcommand, "segment")
             self.assertEqual(args.device, "cpu")
 
+    def test_run_harvest_forwards_force_flag(self):
+        """Verify run_harvest appends --force flag to child subprocess command."""
+        from unittest.mock import MagicMock
+        parser = main.build_parser()
+        args = parser.parse_args(["harvest", "--force"])
+        cfg = {
+            "paths": {
+                "raw_vouchers_dir": "/tmp/dummy_raw",
+                "curated_vouchers_csv": "/tmp/dummy_curated.csv",
+            },
+            "harvesting": {
+                "max_records_per_taxon": 100,
+                "max_uncertainty_meters": 5000,
+                "min_megapixels": 8.0,
+                "min_file_size_kb": 500,
+                "download_concurrency": 10,
+            },
+        }
+        with patch("subprocess.run") as mock_subp, \
+             patch("main.verify_file_exists"):
+            main.run_harvest(args, cfg)
+            mock_subp.assert_called_once()
+            cmd_args = mock_subp.call_args[0][0]
+            self.assertIn("--force", cmd_args)
+
+    def test_run_segment_forwards_force_flag(self):
+        """Verify run_segment appends --force flag to child subprocess command."""
+        parser = main.build_parser()
+        args = parser.parse_args(["segment", "--force"])
+        cfg = {
+            "paths": {
+                "curated_vouchers_csv": "/tmp/dummy_curated.csv",
+                "model_weights": "models/dummy.pth",
+                "workspace_root": "/tmp/dummy_root",
+                "contours_dir": "/tmp/dummy_contours",
+            },
+            "segmentation": {
+                "device": "cpu",
+                "min_solidity": 0.72,
+                "min_ucs": 0.85,
+                "score_thresh": 0.40,
+            },
+        }
+        with patch("subprocess.run") as mock_subp, \
+             patch("main.verify_file_exists"), \
+             patch("main.verify_dir_has_files"):
+            main.run_segment(args, cfg)
+            mock_subp.assert_called_once()
+            cmd_args = mock_subp.call_args[0][0]
+            self.assertIn("--force", cmd_args)
+
     def test_main_dispatch_run_all(self):
         """Verify main() entrypoint dispatches run-all subcommand to handler."""
         with patch.object(sys, "argv", ["main.py", "run-all"]), \
@@ -134,6 +198,138 @@ class TestMainPipelineCLI(unittest.TestCase):
             main.main()
             mock_run_all.assert_called_once()
 
+    def test_check_environment_clean_pass(self):
+        """Verify check_environment() returns True and passes cleanly when dependencies are satisfied."""
+        dummy_completed_probe = MagicMock(returncode=0, stdout="ALL_INSTALLED\n", stderr="")
+        dummy_ver_probe = MagicMock(returncode=0, stdout="4.3.2\n", stderr="")
+
+        def mock_subp_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) > 2 and "getRversion" in str(cmd[2]):
+                return dummy_ver_probe
+            return dummy_completed_probe
+
+        with patch("shutil.which", return_value="/usr/bin/Rscript"), \
+             patch("subprocess.run", side_effect=mock_subp_run), \
+             patch("importlib.import_module", return_value=MagicMock(__version__="1.0.0")):
+            result = main.check_environment()
+            self.assertTrue(result)
+
+    def test_check_env_cli_exits_cleanly(self):
+        """Verify 'main.py check-env' CLI subcommand exits with status code 0 when diagnostics pass."""
+        with patch.object(sys, "argv", ["main.py", "check-env"]), \
+             patch("main.check_environment", return_value=True):
+            with self.assertRaises(SystemExit) as cm:
+                main.main()
+            self.assertEqual(cm.exception.code, 0)
+
+    def test_check_env_cli_exits_code_1_on_failure(self):
+        """Verify 'main.py check-env' CLI subcommand exits with status code 1 when diagnostics fail."""
+        with patch.object(sys, "argv", ["main.py", "check-env"]), \
+             patch("main.check_environment", return_value=False):
+            with self.assertRaises(SystemExit) as cm:
+                main.main()
+            self.assertEqual(cm.exception.code, 1)
+
+    def test_check_environment_missing_rscript(self):
+        """Verify check_environment() reports failure when Rscript is missing from PATH."""
+        with patch("shutil.which", return_value=None):
+            result = main.check_environment()
+            self.assertFalse(result)
+
+    def test_check_environment_missing_r_packages_remediation(self):
+        """Verify check_environment() identifies missing R packages and prints remediation command."""
+        missing_probe = MagicMock(
+            returncode=1,
+            stdout="MISSING: Momocs,MorphoTools2\n",
+            stderr="",
+        )
+        with patch("shutil.which", return_value="/usr/bin/Rscript"), \
+             patch("subprocess.run", return_value=missing_probe):
+            result = main.check_environment()
+            self.assertFalse(result)
+
+
+    def test_get_lm2_python_executable_unix(self):
+        """Verify get_lm2_python_executable resolves .venv_LM2/bin/python on Unix systems."""
+        with patch.object(Path, "exists", side_effect=[True]):
+            resolved = main.get_lm2_python_executable()
+            self.assertEqual(resolved, main.PROJECT_ROOT / ".venv_LM2" / "bin" / "python")
+
+    def test_get_lm2_python_executable_windows(self):
+        """Verify get_lm2_python_executable resolves .venv_LM2/Scripts/python.exe on Windows."""
+        with patch.object(Path, "exists", side_effect=[False, True]):
+            resolved = main.get_lm2_python_executable()
+            self.assertEqual(resolved, main.PROJECT_ROOT / ".venv_LM2" / "Scripts" / "python.exe")
+
+    def test_get_lm2_python_executable_fallback_warning(self):
+        """Verify get_lm2_python_executable falls back to sys.executable and warns if .venv_LM2 is absent."""
+        with patch.object(Path, "exists", return_value=False), \
+             patch.object(main.logger, "warning") as mock_warn:
+            resolved = main.get_lm2_python_executable()
+            self.assertEqual(resolved, Path(sys.executable))
+            mock_warn.assert_called_once()
+            self.assertIn("LeafMachine2 dedicated virtual environment", mock_warn.call_args[0][0])
+
+    def test_run_segment_uses_resolved_lm2_interpreter(self):
+        """Verify run_segment invokes 02_segment_and_extract.py with resolved LM2 interpreter and logs diagnostic."""
+        parser = main.build_parser()
+        args = parser.parse_args(["segment"])
+        cfg = {
+            "paths": {
+                "curated_vouchers_csv": "/tmp/dummy_curated.csv",
+                "model_weights": "models/dummy.pth",
+                "contours_dir": "/tmp/dummy_contours",
+            },
+            "segmentation": {
+                "device": "cpu",
+                "min_solidity": 0.72,
+                "min_ucs": 0.85,
+                "score_thresh": 0.40,
+            },
+        }
+        dummy_lm2_python = main.PROJECT_ROOT / ".venv_LM2" / "bin" / "python"
+        with patch("main.get_lm2_python_executable", return_value=dummy_lm2_python), \
+             patch("subprocess.run") as mock_subp, \
+             patch("main.verify_file_exists"), \
+             patch("main.verify_dir_has_files"), \
+             patch.object(main.logger, "info") as mock_info:
+            main.run_segment(args, cfg)
+            mock_subp.assert_called_once()
+            cmd_called = mock_subp.call_args[0][0]
+            self.assertEqual(cmd_called[0], str(dummy_lm2_python))
+            # Verify diagnostic log entry
+            log_messages = [call[0][0] for call in mock_info.call_args_list if call[0]]
+            self.assertTrue(
+                any("Executing LeafMachine2 segmentation via: .venv_LM2/bin/python" in msg for msg in log_messages),
+                f"Expected diagnostic log missing from: {log_messages}",
+            )
+
+    def test_run_segment_propagates_non_zero_exit_code(self):
+        """Verify run_segment catches CalledProcessError and immediately exits with non-zero status."""
+        parser = main.build_parser()
+        args = parser.parse_args(["segment"])
+        cfg = {
+            "paths": {
+                "curated_vouchers_csv": "/tmp/dummy_curated.csv",
+                "model_weights": "models/dummy.pth",
+                "contours_dir": "/tmp/dummy_contours",
+            },
+            "segmentation": {
+                "device": "cpu",
+                "min_solidity": 0.72,
+                "min_ucs": 0.85,
+                "score_thresh": 0.40,
+            },
+        }
+        import subprocess as sp
+        error = sp.CalledProcessError(returncode=2, cmd=["dummy_cmd"])
+        with patch("subprocess.run", side_effect=error), \
+             patch("main.verify_file_exists"):
+            with self.assertRaises(SystemExit) as cm:
+                main.run_segment(args, cfg)
+            self.assertEqual(cm.exception.code, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
+

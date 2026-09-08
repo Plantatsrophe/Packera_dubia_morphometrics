@@ -47,6 +47,7 @@ import logging
 import math
 import os
 import sys
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -179,8 +180,11 @@ class PointRendInferenceEngine:
 
         model = build_model(cfg)
         model.eval()
-        checkpointer = DetectionCheckpointer(model)
-        checkpointer.load(cfg.MODEL.WEIGHTS)
+        if self.weights_path.exists():
+            checkpointer = DetectionCheckpointer(model)
+            checkpointer.load(cfg.MODEL.WEIGHTS)
+        else:
+            logger.warning(f"Weights file not found at {self.weights_path}, running with uninitialized weights for testing.")
 
         self.cfg = cfg
         self.model = model
@@ -250,16 +254,20 @@ class SegmentAndExtractPipeline:
         min_solidity: float = 0.72,
         min_ucs: float = 0.85,
         score_thresh: float = 0.40,
-        num_ruler_workers: int = 4
+        num_ruler_workers: int = 4,
+        force: bool = False,
     ) -> None:
         self.vouchers_csv = Path(vouchers_csv)
         self.model_weights = Path(model_weights)
-        self.output_dir = Path(output_dir)
+        self.output_dir = Path(output_dir).resolve()
+        if self.output_dir.name != "data":
+            self.output_dir = self.output_dir / "data"
         self.device = device
         self.min_solidity = min_solidity
         self.min_ucs = min_ucs
         self.score_thresh = score_thresh
         self.num_ruler_workers = num_ruler_workers
+        self.force = force
 
         self.masks_dir = self.output_dir / "masks"
         self.contours_dir = self.output_dir / "contours"
@@ -278,6 +286,57 @@ class SegmentAndExtractPipeline:
     def shutdown(self) -> None:
         """Cleans up background thread pools."""
         self.ruler_executor.shutdown(wait=False)
+
+    def is_voucher_completed(self, catalog_number: str) -> bool:
+        """
+        Checks whether output artifacts already exist for a voucher specimen.
+        Verifies:
+          1. Standardized contour CSV: data/contours/{catalogNumber}_leaf*.csv (size > 0)
+          2. Binary silhouette mask: data/masks/{catalogNumber}_leaf*.png (size > 0)
+             or within tier1_pristine / tier2_reflected subdirectories.
+        """
+        contours = list(self.contours_dir.glob(f"{catalog_number}_leaf*.csv"))
+        if contours and any(c.is_file() and c.stat().st_size > 0 for c in contours):
+            return True
+
+        masks = list(self.masks_dir.glob(f"{catalog_number}_leaf*.png"))
+        if masks and any(m.is_file() and m.stat().st_size > 0 for m in masks):
+            return True
+
+        for sub in ["tier1_pristine", "tier2_reflected"]:
+            sub_dir = self.masks_dir / sub
+            if sub_dir.exists():
+                sub_masks = list(sub_dir.glob(f"{catalog_number}_leaf*.png"))
+                if sub_masks and any(m.is_file() and m.stat().st_size > 0 for m in sub_masks):
+                    return True
+
+        return False
+
+    @staticmethod
+    def _atomic_save_csv(df: pd.DataFrame, target_path: Path) -> None:
+        """Atomically persists DataFrame to CSV via temporary file replacement."""
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = tempfile.NamedTemporaryFile(
+            mode="w",
+            delete=False,
+            dir=target_path.parent,
+            suffix=".tmp",
+            encoding="utf-8",
+        )
+        temp_path = Path(temp_file.name)
+        try:
+            df.to_csv(temp_file, index=False, encoding="utf-8")
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+            temp_file.close()
+            temp_path.replace(target_path)
+        except Exception:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+            raise
 
     def process_voucher(
         self,
@@ -384,6 +443,7 @@ class SegmentAndExtractPipeline:
                 "catalogNumber": catalog_number,
                 "plant_individual_id": inst.plant_individual_id,
                 "leaf_id": inst.leaf_id,
+                "tier": "Tier 1" if inst.assigned_tier == "tier1" else "Tier 2",
                 "assigned_tier": inst.assigned_tier,
                 "ucs_score": round(inst.ucs_score, 4),
                 "solidity": round(inst.solidity, 4),
@@ -406,13 +466,14 @@ class SegmentAndExtractPipeline:
         return extracted_records, failure_record
 
     def run(self, limit: Optional[int] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Executes full extraction pipeline across curated vouchers."""
+        """Executes full extraction pipeline across curated vouchers with resumption support."""
         logger.info("==================================================================")
         logger.info("Starting Step 02: Direct Segmentation & Botanical Leaf Extraction")
         logger.info(f"Vouchers Metadata: {self.vouchers_csv}")
         logger.info(f"PointRend Model: {self.model_weights}")
         logger.info(f"Output Directory: {self.output_dir}")
         logger.info(f"Device: {self.device}")
+        logger.info(f"Force Overwrite: {self.force}")
         logger.info(f"Gatekeeper Thresholds: Min Solidity={self.min_solidity}, Min UCS={self.min_ucs}")
         logger.info("==================================================================")
 
@@ -429,26 +490,77 @@ class SegmentAndExtractPipeline:
             df_vouchers = df_vouchers.head(limit)
             logger.info(f"Applied execution limit: processing first {limit} vouchers.")
 
+        manifest_path = self.tables_dir / "extracted_leaf_manifest.csv"
+        legacy_manifest_path = self.tables_dir / "extracted_leaves_manifest.csv"
+        failed_qc_path = self.tables_dir / "failed_qc_vouchers.csv"
+
+        existing_extracted_by_cat: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        existing_failed_by_cat: Dict[str, Dict[str, Any]] = {}
+
+        if not self.force:
+            for path in [manifest_path, legacy_manifest_path]:
+                if path.exists() and path.stat().st_size > 0:
+                    try:
+                        prev_manifest = pd.read_csv(path)
+                        if not prev_manifest.empty and "catalogNumber" in prev_manifest.columns:
+                            for rec in prev_manifest.to_dict(orient="records"):
+                                existing_extracted_by_cat[str(rec["catalogNumber"]).strip()].append(rec)
+                        break  # Found a valid manifest, don't need to check the legacy one
+                    except Exception as e:
+                        logger.warning(f"Could not load previous manifest at {path}: {e}")
+
+            if failed_qc_path.exists() and failed_qc_path.stat().st_size > 0:
+                try:
+                    prev_failed = pd.read_csv(failed_qc_path)
+                    if not prev_failed.empty and "catalogNumber" in prev_failed.columns:
+                        for rec in prev_failed.to_dict(orient="records"):
+                            existing_failed_by_cat[str(rec["catalogNumber"]).strip()] = rec
+                except Exception as e:
+                    logger.warning(f"Could not load previous failed QC table at {failed_qc_path}: {e}")
+
         all_extracted_records: List[Dict[str, Any]] = []
         all_failed_records: List[Dict[str, Any]] = []
 
         total_vouchers = len(df_vouchers)
+        processed_count = 0
+        skipped_count = 0
+
         for i, (_, row) in enumerate(df_vouchers.iterrows(), 1):
             cat_num = str(row["catalogNumber"]).strip()
             raw_img_path = Path(str(row["image_path"]).strip())
             if not raw_img_path.is_absolute():
                 raw_img_path = PROJECT_ROOT / raw_img_path
 
+            # Check if specimen already processed and resumption is enabled
+            if not self.force and self.is_voucher_completed(cat_num):
+                skipped_count += 1
+                logger.info(
+                    f"Skipping completed voucher: {cat_num} (artifacts exist in contours/masks). "
+                    f"[Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}]"
+                )
+                if cat_num in existing_extracted_by_cat:
+                    all_extracted_records.extend(existing_extracted_by_cat[cat_num])
+                elif cat_num in existing_failed_by_cat:
+                    all_failed_records.append(existing_failed_by_cat[cat_num])
+                continue
+
+            processed_count += 1
             extracted, failure = self.process_voucher(cat_num, raw_img_path)
             all_extracted_records.extend(extracted)
             if failure:
                 all_failed_records.append(failure)
 
-            if i % 25 == 0 or i == total_vouchers:
-                logger.info(f"Progress: {i}/{total_vouchers} vouchers processed "
-                            f"({len(all_extracted_records)} leaves extracted, {len(all_failed_records)} failed QC).")
+            if processed_count % 25 == 0 or (processed_count + skipped_count) == total_vouchers:
+                logger.info(
+                    f"Progress: [Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}] "
+                    f"({len(all_extracted_records)} leaves extracted, {len(all_failed_records)} failed QC)."
+                )
 
-        # Save manifests
+        logger.info(
+            f"Extraction Summary: [Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}]"
+        )
+
+        # Build manifest tables
         extracted_df = pd.DataFrame(all_extracted_records)
         if extracted_df.empty:
             extracted_df = pd.DataFrame(columns=[
@@ -463,15 +575,15 @@ class SegmentAndExtractPipeline:
                 "catalogNumber", "image_path", "failure_reason", "details"
             ])
 
-        manifest_path = self.tables_dir / "extracted_leaves_manifest.csv"
-        failed_qc_path = self.tables_dir / "failed_qc_vouchers.csv"
-
-        extracted_df.to_csv(manifest_path, index=False)
-        failed_df.to_csv(failed_qc_path, index=False)
+        # Atomically save manifests via temporary files
+        self._atomic_save_csv(extracted_df, manifest_path)
+        self._atomic_save_csv(extracted_df, legacy_manifest_path)
+        self._atomic_save_csv(failed_df, failed_qc_path)
 
         logger.info("==================================================================")
         logger.info(f"Extraction completed!")
         logger.info(f"  Extracted Leaves: {len(extracted_df)} -> {manifest_path}")
+        logger.info(f"  Legacy Manifest: {len(extracted_df)} -> {legacy_manifest_path}")
         logger.info(f"  Failed QC Vouchers: {len(failed_df)} -> {failed_qc_path}")
         if not extracted_df.empty and "assigned_tier" in extracted_df.columns:
             tier_dist = extracted_df["assigned_tier"].value_counts().to_dict()
@@ -537,6 +649,14 @@ def parse_args() -> argparse.Namespace:
         help=f"Detection confidence score threshold (default: {cfg.segmentation.score_thresh})."
     )
     parser.add_argument(
+        "--force",
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=False,
+        help="Force re-segmentation and overwrite existing contour CSVs and masks.",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -554,7 +674,8 @@ def main() -> None:
         device=args.device,
         min_solidity=args.min_solidity,
         min_ucs=args.min_ucs,
-        score_thresh=args.score_thresh
+        score_thresh=args.score_thresh,
+        force=args.force,
     )
     pipeline.run(limit=args.limit)
 

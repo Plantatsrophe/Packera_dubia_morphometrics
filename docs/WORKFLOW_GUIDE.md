@@ -40,8 +40,11 @@ pip install -r requirements.txt
 LeafMachine2 requires specific PyTorch, Torchvision, and MMDetection dependencies. Use the provided installation script:
 ```bash
 bash setup_leafmachine2.sh
-source .venv_LM2/bin/activate
 ```
+
+> [!TIP]
+> **Automated Multi-Environment Orchestration:**
+> You do **not** need to manually switch or activate `.venv_LM2` in your shell when executing Phase 2. The unified runner `main.py` includes an automatic Python interpreter resolver (`get_lm2_python_executable()`) that checks for `.venv_LM2/bin/python` (Linux/macOS) or `.venv_LM2/Scripts/python.exe` (Windows). When invoking `python main.py segment` or `python main.py run-all` from your primary `.venv`, `main.py` automatically routes execution to the dedicated `.venv_LM2` interpreter, streams diagnostics to the console and logger, and catches non-zero exit codes to halt subsequent phases on failure.
 
 ### C. R Statistical Computing Environment
 Requires R $\ge 4.3.0$ with `Momocs`, `MorphoTools2`, `mclust`, `spatialRF`, `terra`, and `tidyverse`:
@@ -133,15 +136,21 @@ python scripts/vision/configure_leafmachine2.py --update-main-config
 ```
 
 ### 2.2 Execute LeafMachine2
-- **Script:** [`LeafMachine2/LeafMachine2.py`](file:///home/brandon/Packera_dubia_morphometrics/LeafMachine2/LeafMachine2.py)
-- **Environment:** `.venv_LM2`
+- **Unified Pipeline Runner:** `python main.py segment` (automatically resolves `.venv_LM2` and executes segmentation)
+- **Script (Direct):** [`scripts/pipeline/02_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02_segment_and_extract.py) / [`LeafMachine2/LeafMachine2.py`](file:///home/brandon/Packera_dubia_morphometrics/LeafMachine2/LeafMachine2.py)
+- **Environment:** Automatically resolved to `.venv_LM2` by `main.py`
 
 ```bash
+# Recommended: Orchestrated directly from primary .venv
+python main.py segment --weights models/lm2_packera_pcd_finetuned.pth
+
+# Manual fallback (standalone):
 source .venv_LM2/bin/activate
 cd LeafMachine2
 python LeafMachine2.py
 cd ..
 ```
+
 
 ### 2.3 Post-Processing, DBSCAN Clustering & 4-Tier Routing
 - **Script:** [`scripts/vision/02_postprocess_lm2_routing.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/vision/02_postprocess_lm2_routing.py)

@@ -117,6 +117,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=f"Path for summary log file (default: {cfg.paths.summary_log}).",
     )
     parser.add_argument(
+        "--force",
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=False,
+        help="Force re-download and overwrite existing cached voucher images.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -149,6 +157,7 @@ def main() -> None:
         raw_dir=Path(args.out_dir),
         workspace_dir=cfg.paths.workspace_root,
         logger=logger,
+        force=args.force,
     )
 
     harvester.run(download_images=args.download_images)

@@ -33,8 +33,12 @@ suppressPackageStartupMessages({
 # ------------------------------------------------------------------------------
 parse_args_robust <- function() {
   option_list <- list(
+    optparse::make_option(c("-i", "--input"), type = "character",
+      default = "data/contours/", help = "Directory containing contour CSVs (alias for --contours-dir) [default: %default]"),
     optparse::make_option(c("-c", "--contours-dir"), type = "character",
       default = "data/contours/", help = "Directory containing contour CSVs [default: %default]"),
+    optparse::make_option(c("-f", "--manifest"), type = "character",
+      default = "data/tables/extracted_leaf_manifest.csv", help = "Extracted leaf manifest CSV [default: %default]"),
     optparse::make_option(c("-m", "--masks-dir"), type = "character",
       default = "data/masks/", help = "Fallback masks directory [default: %default]"),
     optparse::make_option(c("-v", "--vouchers"), type = "character",
@@ -54,14 +58,16 @@ parse_args_robust <- function() {
 
   raw_args <- commandArgs(trailingOnly = TRUE)
   opts <- list(
-    contours_dir = "data/contours/", masks_dir = "data/masks/",
-    vouchers = "data/tables/curated_vouchers.csv",
+    input = "data/contours/", contours_dir = "data/contours/", manifest = "data/tables/extracted_leaf_manifest.csv",
+    masks_dir = "data/masks/", vouchers = "data/tables/curated_vouchers.csv",
     output = "data/tables/leaf_efa_harmonics.csv", harmonics = 12, num_pcs = 5
   )
   i <- 1
   while (i <= length(raw_args)) {
     arg <- raw_args[i]
-    if (arg %in% c("-c", "--contours-dir") && i < length(raw_args)) { opts$contours_dir <- raw_args[i + 1]; i <- i + 2 }
+    if (arg %in% c("-i", "--input") && i < length(raw_args)) { opts$input <- raw_args[i + 1]; opts$contours_dir <- raw_args[i + 1]; i <- i + 2 }
+    else if (arg %in% c("-c", "--contours-dir") && i < length(raw_args)) { opts$contours_dir <- raw_args[i + 1]; opts$input <- raw_args[i + 1]; i <- i + 2 }
+    else if (arg %in% c("-f", "--manifest") && i < length(raw_args)) { opts$manifest <- raw_args[i + 1]; i <- i + 2 }
     else if (arg %in% c("-m", "--masks-dir") && i < length(raw_args)) { opts$masks_dir <- raw_args[i + 1]; i <- i + 2 }
     else if (arg %in% c("-v", "--vouchers") && i < length(raw_args)) { opts$vouchers <- raw_args[i + 1]; i <- i + 2 }
     else if (arg %in% c("-o", "--output") && i < length(raw_args)) { opts$output <- raw_args[i + 1]; i <- i + 2 }
@@ -168,15 +174,40 @@ run_fourier_extraction <- function(opts) {
   vouchers_df <- if (file.exists(opts$vouchers)) read.csv(opts$vouchers, stringsAsFactors = FALSE) else NULL
   if (!is.null(vouchers_df)) message("Loaded ", nrow(vouchers_df), " curated voucher records.")
 
-  # 1. Discover coordinate CSVs from data/contours/
-  contour_files <- if (dir.exists(opts$contours_dir)) {
-    list.files(opts$contours_dir, pattern = "\\.csv$", full.names = TRUE)
-  } else character(0)
-
-  # Fallback to masks directory if contours are not present
+  # 1. Discover coordinates via Dual Ingestion Engine
+  contour_files <- character(0)
   use_masks_fallback <- FALSE
+  manifest_df <- if (file.exists(opts$manifest)) read.csv(opts$manifest, stringsAsFactors = FALSE) else NULL
+
+  if (!is.null(manifest_df) && nrow(manifest_df) > 0) {
+    message("Ingesting via extracted leaf manifest: ", opts$manifest)
+    if ("contour_path" %in% names(manifest_df)) {
+        contour_files <- manifest_df$contour_path[file.exists(manifest_df$contour_path)]
+    }
+    if (length(contour_files) == 0 && "mask_path" %in% names(manifest_df)) {
+        mask_files <- manifest_df$mask_path[file.exists(manifest_df$mask_path)]
+        if (length(mask_files) > 0) {
+            contour_files <- mask_files
+            use_masks_fallback <- TRUE
+        }
+    }
+  }
+
   if (length(contour_files) == 0) {
-    message("No contour CSVs in ", opts$contours_dir, ". Checking fallback masks...")
+      if (dir.exists(opts$input)) {
+        contour_files <- list.files(opts$input, pattern = "\\.csv$", full.names = TRUE)
+        if (length(contour_files) == 0) {
+            mask_files <- list.files(opts$input, pattern = "\\.(png|jpg)$", full.names = TRUE, recursive = TRUE)
+            if (length(mask_files) > 0) {
+                contour_files <- mask_files
+                use_masks_fallback <- TRUE
+            }
+        }
+      }
+  }
+
+  if (length(contour_files) == 0) {
+    message("No contour CSVs in input dir. Checking fallback masks...")
     fallback_dir <- opts$masks_dir
     if (!dir.exists(fallback_dir) && dir.exists("data/_archive/masks/tier1_intact")) {
       fallback_dir <- "data/_archive/masks/tier1_intact"
@@ -184,11 +215,12 @@ run_fourier_extraction <- function(opts) {
     mask_files <- list.files(fallback_dir, pattern = "\\.(png|jpg)$", full.names = TRUE, recursive = TRUE)
     if (length(mask_files) > 0) {
       message("Found ", length(mask_files), " fallback mask files.")
+      contour_files <- mask_files
       use_masks_fallback <- TRUE
     }
   }
 
-  if (length(contour_files) == 0 && !use_masks_fallback) {
+  if (length(contour_files) == 0) {
     stop("No input contour CSVs or mask files found to process.")
   }
 
@@ -199,8 +231,32 @@ run_fourier_extraction <- function(opts) {
 
   message("Ingesting contour coordinates from ", length(contour_files), " files...")
   for (f in contour_files) {
-    coo <- load_contour_file(f)
+    # If mask fallback, attempt to use EBImage/Momocs import functions, though custom logic might be needed
+    # (Assuming Momocs::import_jpg / import_txt can handle or load_contour_file handles basic parsing)
+    if (use_masks_fallback && grepl("\\.(png|jpg)$", f, ignore.case = TRUE)) {
+        if (requireNamespace("Momocs", quietly = TRUE)) {
+            tryCatch({
+                tmp_coo <- Momocs::import_jpg(f)
+                if (is.list(tmp_coo) && length(tmp_coo) > 0) {
+                    coo <- tmp_coo[[1]]
+                } else {
+                    coo <- NULL
+                }
+            }, error = function(e) { coo <<- NULL })
+        } else {
+            coo <- NULL
+        }
+    } else {
+        coo <- load_contour_file(f)
+    }
+
     if (is.null(coo)) next
+
+    # Enforce clockwise orientation
+    if (requireNamespace("Momocs", quietly = TRUE)) {
+        coo <- tryCatch(Momocs::coo_cw(coo), error = function(e) coo)
+    }
+
     meta <- parse_specimen_id(f)
 
     # Calculate basic morphometric geometry
@@ -218,7 +274,10 @@ run_fourier_extraction <- function(opts) {
       catalogNumber = meta$catalogNumber,
       plant_individual_id = meta$plant_id,
       leaf_id = meta$leaf_id,
-      assigned_tier = "Tier_1_Direct",
+      assigned_tier = if (!is.null(manifest_df) && "assigned_tier" %in% names(manifest_df)) {
+          m_match <- manifest_df[manifest_df$catalogNumber == meta$catalogNumber & manifest_df$leaf_id == meta$leaf_id, ]
+          if (nrow(m_match) > 0) m_match$assigned_tier[1] else "Tier_1_Direct"
+      } else { "Tier_1_Direct" },
       aspect_ratio = aspect_ratio,
       area_px = round(area_px, 1),
       mask_source = f,

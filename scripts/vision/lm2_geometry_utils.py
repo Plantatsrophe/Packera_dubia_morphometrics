@@ -138,7 +138,8 @@ def extract_tier1_pristine(
     Tier 1: Direct Pristine Silhouette extraction.
     Saves binary mask to output_dir/masks/ and output_dir/masks/tier1_intact/.
     """
-    mask_dir = output_dir / "masks"
+    out_base = (output_dir / "data") if (output_dir.name != "data" and (output_dir / "data").is_dir()) else output_dir
+    mask_dir = out_base / "masks"
     mask_dir.mkdir(parents=True, exist_ok=True)
     tier1_dir = mask_dir / "tier1_intact"
     tier1_dir.mkdir(parents=True, exist_ok=True)
@@ -279,7 +280,8 @@ def extract_tier2_reflected(
 
     main_save_path = None
     if output_dir is not None:
-        mask_dir = output_dir / "masks"
+        out_base = (output_dir / "data") if (output_dir.name != "data" and (output_dir / "data").is_dir()) else output_dir
+        mask_dir = out_base / "masks"
         mask_dir.mkdir(parents=True, exist_ok=True)
         tier2_dir = mask_dir / "tier2_reflected"
         tier2_dir.mkdir(parents=True, exist_ok=True)
@@ -330,8 +332,9 @@ def export_standardized_contour(
 ) -> Optional[str]:
     """
     Extracts vectorized 2D (x, y) boundary coordinates from a binary silhouette mask,
-    normalizes coordinates (x_norm, y_norm) for downstream Elliptic Fourier Analysis,
-    and saves to output_dir/contours/{catalogNumber}_leaf{id}.csv.
+    enforces consistent clockwise orientation, normalizes coordinates (x_norm, y_norm)
+    for downstream Elliptic Fourier Analysis, and saves to
+    output_dir/contours/{catalogNumber}_leaf{id}.csv.
     """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
@@ -366,6 +369,12 @@ def export_standardized_contour(
     x_resamp = np.interp(target_distances, cum_dist, pts[:, 0])
     y_resamp = np.interp(target_distances, cum_dist, pts[:, 1])
 
+    # Enforce consistent clockwise contour orientation (in image space, clockwise has positive signed area)
+    signed_area = 0.5 * float(np.sum(x_resamp * np.roll(y_resamp, -1) - np.roll(x_resamp, -1) * y_resamp))
+    if signed_area < 0:
+        x_resamp = x_resamp[::-1]
+        y_resamp = y_resamp[::-1]
+
     min_x, max_x = np.min(x_resamp), np.max(x_resamp)
     min_y, max_y = np.min(y_resamp), np.max(y_resamp)
     span_x = max(max_x - min_x, 1e-6)
@@ -381,7 +390,8 @@ def export_standardized_contour(
         "y_norm": np.round((y_resamp - min_y) / span_y, 6),
     })
 
-    contour_dir = output_dir / "contours"
+    out_base = (output_dir / "data") if (output_dir.name != "data" and (output_dir / "data").is_dir()) else output_dir
+    contour_dir = out_base / "contours"
     contour_dir.mkdir(parents=True, exist_ok=True)
     out_csv = contour_dir / f"{catalog_number}_leaf{leaf_id}.csv"
     contour_df.to_csv(out_csv, index=False)

@@ -30,6 +30,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 step02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
 DetectedInstance = step02.DetectedInstance
+SegmentAndExtractPipeline = step02.SegmentAndExtractPipeline
+parse_args = step02.parse_args
 cluster_plant_individuals = step02.cluster_plant_individuals
 compute_geometric_metrics = step02.compute_geometric_metrics
 detect_ruler_scale_hough = step02.detect_ruler_scale_hough
@@ -151,6 +153,145 @@ class TestSegmentAndExtract(unittest.TestCase):
         clustered = cluster_plant_individuals([inst1, inst2, inst3], sheet_width=2000, sheet_height=2000)
         self.assertEqual(clustered[0].plant_individual_id, clustered[1].plant_individual_id)
         self.assertNotEqual(clustered[0].plant_individual_id, clustered[2].plant_individual_id)
+
+
+class TestSegmentAndExtractResumption(unittest.TestCase):
+    """Test suite for Step 02 inference resumption, artifact skipping, and CLI flags."""
+
+    def setUp(self) -> None:
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_resumption_"))
+        self.vouchers_csv = self.temp_dir / "test_curated_vouchers.csv"
+        self.output_dir = self.temp_dir / "pipeline_data" / "data"
+        self.contours_dir = self.output_dir / "contours"
+        self.masks_dir = self.output_dir / "masks"
+        self.tables_dir = self.output_dir / "tables"
+
+        for d in [self.contours_dir, self.masks_dir, self.tables_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+
+        # Create 2 dummy images and vouchers CSV
+        self.img1 = self.temp_dir / "NCU001.jpg"
+        self.img2 = self.temp_dir / "NCU002.jpg"
+        self.img1.write_bytes(b"\xff\xd8\xff" + b"1" * 500)
+        self.img2.write_bytes(b"\xff\xd8\xff" + b"2" * 500)
+
+        df = pd.DataFrame([
+            {"catalogNumber": "NCU001", "image_path": str(self.img1)},
+            {"catalogNumber": "NCU002", "image_path": str(self.img2)},
+        ])
+        df.to_csv(self.vouchers_csv, index=False)
+
+    def tearDown(self) -> None:
+        if self.temp_dir.exists():
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_is_voucher_completed_identifies_artifacts(self) -> None:
+        """Verify is_voucher_completed identifies existing contour CSV or mask files."""
+        pipeline = SegmentAndExtractPipeline(
+            vouchers_csv=self.vouchers_csv,
+            model_weights=Path("models/dummy.pth"),
+            output_dir=self.output_dir,
+            device="cpu",
+            force=False,
+        )
+        self.assertFalse(pipeline.is_voucher_completed("NCU001"))
+
+        # Create contour file
+        contour_file = self.contours_dir / "NCU001_leaf1.csv"
+        contour_file.write_text("catalogNumber,leaf_id,point_index,x,y\nNCU001,1,0,10,20\n")
+        self.assertTrue(pipeline.is_voucher_completed("NCU001"))
+        self.assertFalse(pipeline.is_voucher_completed("NCU002"))
+
+        # Create mask file for NCU002
+        mask_file = self.masks_dir / "NCU002_leaf1.png"
+        mask_file.write_bytes(b"dummy_png_bytes")
+        self.assertTrue(pipeline.is_voucher_completed("NCU002"))
+        pipeline.shutdown()
+
+    def test_run_resumes_and_skips_completed_specimens(self) -> None:
+        """Verify run skips inference on completed vouchers and retains prior manifest entries."""
+        # Setup pre-existing contour for NCU001
+        contour_file = self.contours_dir / "NCU001_leaf1.csv"
+        contour_file.write_text("catalogNumber,leaf_id\nNCU001,1\n")
+
+        # Setup pre-existing manifest with entry for NCU001
+        manifest_file = self.tables_dir / "extracted_leaves_manifest.csv"
+        pd.DataFrame([{
+            "catalogNumber": "NCU001",
+            "plant_individual_id": 1,
+            "leaf_id": 1,
+            "assigned_tier": "tier1",
+            "ucs_score": 0.90,
+            "solidity": 0.85,
+            "midrib_angle_deg": 12.0,
+            "pixels_per_mm": 10.5,
+            "mask_path": "data/masks/NCU001_leaf1.png",
+            "contour_path": str(contour_file),
+        }]).to_csv(manifest_file, index=False)
+
+        pipeline = SegmentAndExtractPipeline(
+            vouchers_csv=self.vouchers_csv,
+            model_weights=Path("models/dummy.pth"),
+            output_dir=self.output_dir,
+            device="cpu",
+            force=False,
+        )
+
+        mock_extracted = [{
+            "catalogNumber": "NCU002",
+            "plant_individual_id": 1,
+            "leaf_id": 1,
+            "assigned_tier": "tier1",
+            "ucs_score": 0.88,
+            "solidity": 0.82,
+            "midrib_angle_deg": 5.0,
+            "pixels_per_mm": 10.0,
+            "mask_path": "data/masks/NCU002_leaf1.png",
+            "contour_path": "data/contours/NCU002_leaf1.csv",
+        }]
+
+        from unittest.mock import patch
+        with patch.object(pipeline, "process_voucher", return_value=(mock_extracted, None)) as mock_process:
+            extracted_df, failed_df = pipeline.run()
+
+            # process_voucher must be called ONLY once (for NCU002, skipping NCU001)
+            mock_process.assert_called_once()
+            self.assertEqual(mock_process.call_args[0][0], "NCU002")
+
+            # Final manifest must retain records for BOTH NCU001 and NCU002
+            self.assertEqual(len(extracted_df), 2)
+            self.assertListEqual(list(extracted_df["catalogNumber"]), ["NCU001", "NCU002"])
+
+    def test_run_force_flag_reprocesses_all(self) -> None:
+        """Verify that force=True re-runs inference even if artifacts exist."""
+        contour_file = self.contours_dir / "NCU001_leaf1.csv"
+        contour_file.write_text("catalogNumber,leaf_id\nNCU001,1\n")
+
+        pipeline = SegmentAndExtractPipeline(
+            vouchers_csv=self.vouchers_csv,
+            model_weights=Path("models/dummy.pth"),
+            output_dir=self.output_dir,
+            device="cpu",
+            force=True,
+        )
+
+        from unittest.mock import patch
+        with patch.object(pipeline, "process_voucher", return_value=([], None)) as mock_process:
+            pipeline.run()
+            # process_voucher must be called for BOTH NCU001 and NCU002
+            self.assertEqual(mock_process.call_count, 2)
+
+    def test_parse_args_force_and_overwrite(self) -> None:
+        """Verify parse_args supports --force and --overwrite flags."""
+        import sys
+        from unittest.mock import patch
+        with patch.object(sys, "argv", ["02_segment_and_extract.py", "--force"]):
+            args = parse_args()
+            self.assertTrue(args.force)
+
+        with patch.object(sys, "argv", ["02_segment_and_extract.py", "--overwrite"]):
+            args = parse_args()
+            self.assertTrue(args.force)
 
 
 if __name__ == "__main__":

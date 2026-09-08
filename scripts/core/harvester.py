@@ -388,13 +388,25 @@ async def download_single_image(
     destination_path: Path,
     semaphore: asyncio.Semaphore,
     max_retries: int = 3,
-) -> bool:
-    """Asynchronously downloads a single voucher image file to local storage with retry logic."""
-    if destination_path.exists() and destination_path.stat().st_size > 1024:
-        return True
+    force: bool = False,
+    logger: Optional[logging.Logger] = None,
+) -> Tuple[bool, bool]:
+    """Asynchronously downloads a single voucher image file to local storage with retry logic.
+
+    Returns:
+        Tuple[bool, bool]: (success, was_skipped)
+    """
+    if not force and destination_path.exists() and os.path.getsize(destination_path) > 0:
+        if logger:
+            logger.info(
+                f"Skipping download for existing voucher {destination_path.name} "
+                f"({os.path.getsize(destination_path)} bytes)."
+            )
+        return True, True
 
     async with semaphore:
         for attempt in range(1, max_retries + 1):
+            temp_path: Optional[Path] = None
             try:
                 timeout = aiohttp.ClientTimeout(total=45, connect=15)
                 async with session.get(image_url, timeout=timeout) as response:
@@ -408,23 +420,37 @@ async def download_single_image(
                             or content[:3] == b"\xff\xd8\xff"
                         ):
                             destination_path.parent.mkdir(parents=True, exist_ok=True)
-                            temp_path = destination_path.with_suffix(".tmp")
-                            with open(temp_path, "wb") as f:
-                                f.write(content)
+                            temp_file = tempfile.NamedTemporaryFile(
+                                dir=destination_path.parent,
+                                prefix=f"{destination_path.stem}_",
+                                suffix=".tmp",
+                                delete=False,
+                            )
+                            temp_path = Path(temp_file.name)
+                            temp_file.write(content)
+                            temp_file.flush()
+                            os.fsync(temp_file.fileno())
+                            temp_file.close()
                             temp_path.replace(destination_path)
-                            return True
+                            return True, False
                     elif response.status in {404, 410}:
-                        return False
+                        return False, False
             except (aiohttp.ClientError, asyncio.TimeoutError, Exception):
+                if temp_path and temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except Exception:
+                        pass
                 if attempt == max_retries:
-                    return False
+                    return False, False
                 await asyncio.sleep(1.0 * (2 ** (attempt - 1)))
-        return False
+        return False, False
 
 
 async def download_all_voucher_images(
     records_to_download: List[Tuple[str, Path]],
     concurrency_limit: int = 15,
+    force: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> Dict[str, int]:
     """Coordinates asynchronous batch downloading of voucher images with concurrency control."""
@@ -432,35 +458,56 @@ async def download_all_voucher_images(
     headers = {
         "User-Agent": "PackeraResearchBot/1.0 (UNC Chapel Hill Herbarium; Evolutionary Morphometrics Lab)"
     }
-    stats = {"success": 0, "skipped": 0, "failed": 0}
+    total_records = len(records_to_download)
+    stats = {"success": 0, "skipped": 0, "failed": 0, "total": total_records}
 
     pending = []
     for url, dest in records_to_download:
-        if dest.exists() and dest.stat().st_size > 1024:
+        if not force and dest.exists() and os.path.getsize(dest) > 0:
+            if logger:
+                logger.info(
+                    f"Retaining existing voucher image: {dest.name} "
+                    f"({os.path.getsize(dest)} bytes)."
+                )
             stats["skipped"] += 1
         else:
             pending.append((url, dest))
 
     if not pending:
         if logger:
-            logger.info(f"All {stats['skipped']} voucher images are already cached locally.")
+            logger.info(
+                f"All {stats['skipped']} voucher images are already cached locally. "
+                f"[Processed: 0 | Skipped: {stats['skipped']} | Total: {total_records}]"
+            )
         return stats
 
     if logger:
-        logger.info(f"Initiating asynchronous download of {len(pending)} pending images (Concurrency: {concurrency_limit})...")
+        logger.info(
+            f"Initiating asynchronous download of {len(pending)} pending images (Concurrency: {concurrency_limit})... "
+            f"[Processed: 0 | Skipped: {stats['skipped']} | Total: {total_records}]"
+        )
 
     connector = aiohttp.TCPConnector(limit=concurrency_limit, limit_per_host=5, ssl=False)
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
         tasks = [
-            download_single_image(session, url, dest, semaphore)
+            download_single_image(session, url, dest, semaphore, force=force, logger=logger)
             for url, dest in pending
         ]
         results = await async_tqdm.gather(*tasks, desc="Downloading Voucher Sheets", unit="img")
-        for success in results:
+        for success, was_skipped in results:
             if success:
-                stats["success"] += 1
+                if was_skipped:
+                    stats["skipped"] += 1
+                else:
+                    stats["success"] += 1
             else:
                 stats["failed"] += 1
+
+    if logger:
+        logger.info(
+            f"Voucher Download Summary: "
+            f"[Processed: {stats['success']} | Skipped: {stats['skipped']} | Total: {total_records}]"
+        )
 
     return stats
 
@@ -473,6 +520,26 @@ def export_curated_table(
     """Atomically exports the curated vouchers DataFrame to CSV via temporary file replacement."""
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Merge with existing records if table exists to prevent data loss on resumption
+    if output_path.exists() and output_path.stat().st_size > 0:
+        try:
+            df_existing = pd.read_csv(output_path)
+            if not df_existing.empty and "catalogNumber" in df_existing.columns:
+                if df.empty:
+                    df = df_existing
+                else:
+                    pre_count = len(df_existing)
+                    df = pd.concat([df_existing, df], ignore_index=True)
+                    df = df.drop_duplicates(subset=["catalogNumber"], keep="last").reset_index(drop=True)
+                    if logger:
+                        logger.info(
+                            f"Merged records with existing table: {pre_count} previous -> "
+                            f"{len(df)} total unique vouchers by catalogNumber."
+                        )
+        except Exception as e:
+            if logger:
+                logger.warning(f"Could not read existing table at {output_path} for merging: {e}")
 
     df = df.copy()
     if not df.empty:
@@ -625,6 +692,7 @@ class VoucherHarvester:
         raw_dir: Path = DEFAULT_RAW_DIR,
         workspace_dir: Path = DEFAULT_WORKSPACE,
         logger: Optional[logging.Logger] = None,
+        force: bool = False,
     ):
         self.taxa = taxa or DEFAULT_TARGET_TAXA
         self.max_uncertainty_meters = max_uncertainty_meters
@@ -639,6 +707,7 @@ class VoucherHarvester:
         self.raw_dir = Path(raw_dir)
         self.workspace_dir = Path(workspace_dir)
         self.logger = logger or logging.getLogger("VoucherHarvester")
+        self.force = force
 
     def harvest(self) -> pd.DataFrame:
         """Harvests and normalizes Darwin Core occurrence records across configured taxa."""
@@ -820,6 +889,7 @@ class VoucherHarvester:
             download_all_voucher_images(
                 records_to_download=download_queue,
                 concurrency_limit=self.concurrency,
+                force=self.force,
                 logger=self.logger,
             )
         )
@@ -868,12 +938,20 @@ class VoucherHarvester:
         """Atomically persists the curated vouchers table to CSV."""
         return export_curated_table(df, self.output_csv, logger=self.logger)
 
-    def run(self, download_images: bool = False) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
+    def run(
+        self,
+        download_images: bool = False,
+        force: Optional[bool] = None,
+    ) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
         """Executes the end-to-end voucher ingestion and curation workflow."""
+        if force is not None:
+            self.force = force
+
         self.logger.info("Starting Packera Voucher Ingestion & Authority Stratification Pipeline...")
         self.logger.info(f"Target Taxa: {self.taxa}")
         self.logger.info(f"Max Coordinate Uncertainty Threshold: {self.max_uncertainty_meters} m")
         self.logger.info(f"Exclude Western States (> TX & OK): {self.exclude_western}")
+        self.logger.info(f"Force Overwrite Mode: {self.force}")
 
         df_curated = self.harvest()
         download_stats = None

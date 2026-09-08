@@ -19,6 +19,7 @@ Description:
 from __future__ import annotations
 
 import argparse
+import importlib
 import logging
 import shutil
 import subprocess
@@ -26,19 +27,18 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import yaml
+
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.config import PipelineConfig
+from scripts.core.logger import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("PackeraPipeline")
+logger = setup_logging(name="PackeraPipeline")
+
 
 
 # =============================================================================
@@ -85,6 +85,233 @@ def verify_dir_has_files(dir_path: Path, pattern: str, description: str, hint_cm
         sys.exit(1)
 
 
+def check_environment(args: Optional[argparse.Namespace] = None) -> bool:
+    """Performs comprehensive diagnostic checks across Python, CUDA, R,
+
+    configuration files, filesystem directories, and model checkpoints.
+
+    Returns:
+        bool: True if all critical checks pass, False if any critical check fails.
+    """
+    strict = getattr(args, "strict", False) if args else False
+    custom_config = getattr(args, "config", None) if args else None
+    critical_failure = False
+    warning_count = 0
+
+    print("=" * 79)
+    print("Packera dubia Morphometrics Pipeline: Environment & Dependency Diagnostic")
+    print("=" * 79)
+
+    # -------------------------------------------------------------------------
+    # 1. Python & CUDA Environment
+    # -------------------------------------------------------------------------
+    print("\n[1/4] Python & CUDA Environment:")
+
+    # Python version check (>= 3.10)
+    py_ver_str = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    if sys.version_info >= (3, 10):
+        print(f"  [PASS] Python version: {py_ver_str} (>= 3.10 required)")
+    else:
+        print(f"  [FAIL] Python version: {py_ver_str} is unsupported (>= 3.10 required).")
+        critical_failure = True
+
+    # PyTorch & CUDA check
+    try:
+        import torch
+        if torch.cuda.is_available():
+            dev_name = torch.cuda.get_device_name(0)
+            props = torch.cuda.get_device_properties(0)
+            vram_gb = props.total_memory / (1024 ** 3)
+            print(f"  [PASS] PyTorch CUDA acceleration: {dev_name} ({vram_gb:.2f} GB VRAM)")
+        else:
+            print("  [WARN] CUDA acceleration unavailable; PyTorch operations will run on CPU.")
+            warning_count += 1
+            if strict:
+                critical_failure = True
+    except ImportError:
+        print("  [WARN] PyTorch is not installed in current environment; cannot probe CUDA.")
+        warning_count += 1
+        if strict:
+            critical_failure = True
+
+    # Core package imports
+    core_packages = [
+        ("cv2", "OpenCV"),
+        ("torch", "PyTorch"),
+        ("cleanlab", "Cleanlab"),
+        ("pygbif", "pygbif"),
+        ("yaml", "PyYAML"),
+    ]
+    for pkg_module, pkg_display in core_packages:
+        try:
+            mod = importlib.import_module(pkg_module)
+            ver = getattr(mod, "__version__", "installed")
+            print(f"  [PASS] Python package '{pkg_module}' ({pkg_display}): version {ver}")
+        except ImportError:
+            print(f"  [FAIL] Python package '{pkg_module}' ({pkg_display}) is NOT installed.")
+            print(f"         Remediation: pip install {pkg_module}")
+            critical_failure = True
+
+    # -------------------------------------------------------------------------
+    # 2. R Runtime & Statistical Packages
+    # -------------------------------------------------------------------------
+    print("\n[2/4] R Runtime & Statistical Packages:")
+    rscript_bin = shutil.which("Rscript")
+    required_r_pkgs = ['Momocs', 'mclust', 'MorphoTools2', 'spatialRF', 'terra', 'tidyverse', 'optparse']
+    r_pkg_str = ", ".join(f"'{p}'" for p in required_r_pkgs)
+
+    if not rscript_bin:
+        print("  [FAIL] 'Rscript' binary not found in system $PATH.")
+        print("         R (>= 4.3) is required for Momocs, MorphoTools2, and spatialRF.")
+        print("         Remediation:")
+        print("           1. Install R (>= 4.3) via system package manager (e.g., apt-get install r-base r-base-dev).")
+        print(f"           2. Install required packages:")
+        print(f"              Rscript -e \"install.packages(c({r_pkg_str}), repos='https://cloud.r-project.org')\"")
+        critical_failure = True
+    else:
+        try:
+            r_ver_proc = subprocess.run(
+                [rscript_bin, "-e", "cat(as.character(getRversion()))"],
+                capture_output=True, text=True, timeout=5,
+            )
+            r_ver_text = r_ver_proc.stdout.strip()
+            if r_ver_proc.returncode == 0 and r_ver_text and r_ver_text[0].isdigit():
+                print(f"  [PASS] Rscript executable: {rscript_bin} (R {r_ver_text})")
+            else:
+                print(f"  [PASS] Rscript executable: {rscript_bin}")
+        except Exception:
+            print(f"  [PASS] Rscript executable: {rscript_bin}")
+
+        r_probe_cmd = (
+            "pkgs <- c('Momocs', 'mclust', 'MorphoTools2', 'spatialRF', 'terra', 'tidyverse', 'optparse'); "
+            "missing <- pkgs[!sapply(pkgs, requireNamespace, quietly=TRUE)]; "
+            "if(length(missing)>0) { cat('MISSING:', paste(missing, collapse=','), fill=TRUE); quit(status=1) } "
+            "else { cat('ALL_INSTALLED', fill=TRUE); quit(status=0) }"
+        )
+        try:
+            probe_proc = subprocess.run(
+                [rscript_bin, "-e", r_probe_cmd],
+                capture_output=True, text=True, timeout=10,
+            )
+            if probe_proc.returncode == 0 and "ALL_INSTALLED" in probe_proc.stdout:
+                print(f"  [PASS] Required R packages verified: {', '.join(required_r_pkgs)}")
+            else:
+                combined_out = probe_proc.stdout + " " + probe_proc.stderr
+                missing_pkgs: List[str] = []
+                for line in combined_out.splitlines():
+                    if "MISSING:" in line:
+                        pkgs_part = line.split("MISSING:", 1)[1].strip()
+                        missing_pkgs = [p.strip() for p in pkgs_part.split(",") if p.strip()]
+                        break
+                if not missing_pkgs:
+                    missing_pkgs = required_r_pkgs
+
+                print(f"  [FAIL] Missing R package(s): {', '.join(missing_pkgs)}")
+                missing_quoted = ", ".join(f"'{p}'" for p in missing_pkgs)
+                print("         Remediation:")
+                print(f"           Rscript -e \"install.packages(c({missing_quoted}), repos='https://cloud.r-project.org')\"")
+                critical_failure = True
+        except subprocess.TimeoutExpired:
+            print("  [FAIL] R package validation probe timed out (>10s).")
+            critical_failure = True
+        except Exception as exc:
+            print(f"  [FAIL] Error executing R package probe: {exc}")
+            critical_failure = True
+
+    # -------------------------------------------------------------------------
+    # 3. Directory & Configuration Verification
+    # -------------------------------------------------------------------------
+    print("\n[3/4] Directory & Configuration Verification:")
+    cfg_file = Path(custom_config or (PROJECT_ROOT / "config" / "config.yaml"))
+    parsed_config: Optional[Dict[str, Any]] = None
+
+    if not cfg_file.exists():
+        print(f"  [FAIL] Pipeline configuration file not found at: {cfg_file}")
+        critical_failure = True
+    else:
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                parsed_config = yaml.safe_load(f)
+            if not isinstance(parsed_config, dict) or "paths" not in parsed_config:
+                print(f"  [FAIL] Configuration at {cfg_file} is invalid or missing 'paths' section.")
+                critical_failure = True
+            else:
+                rel_cfg = cfg_file.relative_to(PROJECT_ROOT) if cfg_file.is_relative_to(PROJECT_ROOT) else cfg_file
+                print(f"  [PASS] Configuration file parsed & valid: {rel_cfg}")
+        except Exception as exc:
+            print(f"  [FAIL] Error parsing YAML configuration at {cfg_file}: {exc}")
+            critical_failure = True
+
+    target_dirs = [
+        "data/raw_vouchers",
+        "data/tables",
+        "data/contours",
+        "outputs/figures",
+    ]
+    for dir_rel in target_dirs:
+        dir_path = PROJECT_ROOT / dir_rel
+        try:
+            dir_path.mkdir(parents=True, exist_ok=True)
+            probe_file = dir_path / ".perm_check_probe"
+            probe_file.touch()
+            probe_file.unlink()
+            print(f"  [PASS] Directory exists and writable: {dir_rel}/")
+        except Exception as exc:
+            print(f"  [FAIL] Directory missing or write-permission denied: {dir_rel}/ ({exc})")
+            critical_failure = True
+
+    # -------------------------------------------------------------------------
+    # 4. Model Checkpoint & Sub-Environments
+    # -------------------------------------------------------------------------
+    print("\n[4/4] Model Checkpoint & Sub-Environments:")
+    venv_lm2 = PROJECT_ROOT / ".venv_LM2"
+    venv_lm2_python = venv_lm2 / "bin" / "python"
+    if venv_lm2.is_dir() and (venv_lm2_python.exists() or (venv_lm2 / "Scripts" / "python.exe").exists()):
+        print(f"  [PASS] LeafMachine2 virtual environment found: {venv_lm2.name}/")
+    else:
+        print(f"  [WARN] LeafMachine2 environment (.venv_LM2) not found at {venv_lm2}")
+        warning_count += 1
+        if strict:
+            critical_failure = True
+
+    model_rel = (
+        parsed_config.get("paths", {}).get("model_weights", "models/lm2_packera_pcd_finetuned.pth")
+        if parsed_config
+        else "models/lm2_packera_pcd_finetuned.pth"
+    )
+    model_path = PROJECT_ROOT / model_rel
+    if model_path.exists() and model_path.is_file():
+        size_mb = model_path.stat().st_size / (1024 * 1024)
+        print(f"  [PASS] Fine-tuned model checkpoint verified: {model_rel} ({size_mb:.2f} MB)")
+    else:
+        print(f"  [FAIL] Fine-tuned model checkpoint not found at: {model_path}")
+        print("         Remediation: Place trained weights at models/lm2_packera_pcd_finetuned.pth")
+        critical_failure = True
+
+    # -------------------------------------------------------------------------
+    # Readiness Verdict
+    # -------------------------------------------------------------------------
+    print("=" * 79)
+    if critical_failure:
+        print("Readiness Verdict: [FAIL] Environment is NOT ready for production.")
+        print("Please resolve the [FAIL] dependencies listed above before starting runs.")
+        print("=" * 79)
+        return False
+    else:
+        if warning_count > 0:
+            print(f"Readiness Verdict: [PASS] Ready with {warning_count} warning(s).")
+        else:
+            print("Readiness Verdict: [PASS] Complete pipeline environment verified & ready!")
+        print("=" * 79)
+        return True
+
+
+def run_check_env(args: argparse.Namespace, cfg: Optional[PipelineConfig] = None) -> None:
+    """CLI handler executing environment diagnostics and terminating with status code."""
+    success = check_environment(args)
+    sys.exit(0 if success else 1)
+
+
 # =============================================================================
 # Phase Execution Handlers
 # =============================================================================
@@ -120,6 +347,8 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
 
     if args.download_images:
         cmd.append("--download-images")
+    if getattr(args, "force", False):
+        cmd.append("--force")
     if args.verbose:
         cmd.append("--verbose")
 
@@ -127,6 +356,37 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     subprocess.run(cmd, check=True)
     verify_file_exists(output_csv, "harvested vouchers CSV output")
     logger.info("Phase 1 completed successfully.")
+
+
+def get_lm2_python_executable() -> Path:
+    """Resolves the Python interpreter executable for LeafMachine2 execution.
+
+    Checks for:
+      - Unix/Ubuntu: .venv_LM2/bin/python
+      - Windows: .venv_LM2/Scripts/python.exe
+
+    Returns:
+        Path: Path to the LM2 virtual environment Python interpreter if found,
+        otherwise falls back to sys.executable and logs a warning advising setup
+        via setup_leafmachine2.sh.
+    """
+    venv_lm2 = PROJECT_ROOT / ".venv_LM2"
+    candidates = [
+        venv_lm2 / "bin" / "python",
+        venv_lm2 / "Scripts" / "python.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    logger.warning(
+        "LeafMachine2 dedicated virtual environment (.venv_LM2) not found at %s. "
+        "Falling back to current active interpreter (%s). "
+        "Please run 'bash setup_leafmachine2.sh' to configure the dedicated LM2 environment.",
+        venv_lm2,
+        sys.executable,
+    )
+    return Path(sys.executable)
 
 
 def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
@@ -146,9 +406,16 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     if device == "cuda":
         check_gpu_availability(warn_only=True)
 
-    out_dir = Path(args.output_dir or cfg["paths"]["workspace_root"])
+    lm2_python = get_lm2_python_executable()
+    try:
+        display_path = lm2_python.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        display_path = str(lm2_python)
+    logger.info(f"Executing LeafMachine2 segmentation via: {display_path}")
+
+    out_dir = Path(args.output_dir or (PROJECT_ROOT / "data"))
     cmd = [
-        sys.executable, str(script_path),
+        str(lm2_python), str(script_path),
         "--vouchers", str(vouchers_csv),
         "--model-weights", str(model_weights),
         "--output-dir", str(out_dir),
@@ -159,9 +426,16 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     ]
     if args.limit:
         cmd.extend(["--limit", str(args.limit)])
+    if getattr(args, "force", False):
+        cmd.append("--force")
 
     logger.info(f"Running command: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        logger.error(f"LeafMachine2 segmentation failed with exit code {exc.returncode}")
+        sys.exit(exc.returncode)
+
     contours_dir = Path(cfg["paths"]["contours_dir"])
     verify_dir_has_files(contours_dir, "*.csv", "extracted leaf contours")
     logger.info("Phase 2 completed successfully.")
@@ -179,11 +453,13 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         )
         sys.exit(1)
 
-    contours_dir = Path(args.contours_dir or cfg["paths"]["contours_dir"])
+    contours_dir = Path(getattr(args, "input", None) or args.contours_dir or cfg["paths"]["contours_dir"])
     verify_dir_has_files(contours_dir, "*.csv", "leaf contours", "python main.py segment")
 
     vouchers_csv = Path(args.vouchers or cfg["paths"]["curated_vouchers_csv"])
     verify_file_exists(vouchers_csv, "curated vouchers table", "python main.py harvest")
+
+    manifest_csv = Path(getattr(args, "manifest", None) or "data/tables/extracted_leaf_manifest.csv")
 
     efa_script = PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R"
     verify_file_exists(efa_script, "EFA extractor R script")
@@ -197,7 +473,8 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     # Step 3A: Fourier EFA
     cmd_efa = [
         rscript_bin, str(efa_script),
-        "--contours-dir", str(contours_dir),
+        "--input", str(contours_dir),
+        "--manifest", str(manifest_csv),
         "--vouchers", str(vouchers_csv),
         "--output", str(efa_out),
         "--harmonics", str(harmonics),
@@ -380,6 +657,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True, help="Pipeline phase to execute")
 
+    # Subcommand: check-env
+    p_check = subparsers.add_parser(
+        "check-env",
+        help="Run comprehensive preflight environment & dependency diagnostics",
+    )
+    p_check.add_argument(
+        "--strict",
+        action="store_true",
+        default=False,
+        help="Treat warnings (such as missing CUDA) as critical failures.",
+    )
+
     # Subcommand: harvest
     p_harvest = subparsers.add_parser("harvest", help="Phase 1: Ingest GBIF occurrences & download images")
     p_harvest.add_argument("--taxa", nargs="+", default=None, help="Target taxonomic binomials")
@@ -391,6 +680,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_harvest.add_argument("--min-file-size-kb", type=float, default=None, help="Min file size in KB")
     p_harvest.add_argument("--concurrency", type=int, default=None, help="Download concurrency")
     p_harvest.add_argument("--download-images", action="store_true", default=False, help="Download specimen images")
+    p_harvest.add_argument(
+        "--force",
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=False,
+        help="Force re-download and overwrite existing cached voucher images.",
+    )
 
     # Subcommand: segment
     p_segment = subparsers.add_parser("segment", help="Phase 2: Segment leaves & export contours")
@@ -402,9 +699,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_segment.add_argument("--min-ucs", type=float, default=None, help="Tier 1 min UCS score")
     p_segment.add_argument("--score-thresh", type=float, default=None, help="PCD detection score threshold")
     p_segment.add_argument("--limit", type=int, default=None, help="Limit number of vouchers to process")
+    p_segment.add_argument(
+        "--force",
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=False,
+        help="Force re-segmentation and overwrite existing contour CSVs and masks.",
+    )
 
     # Subcommand: morphometrics
     p_morph = subparsers.add_parser("morphometrics", help="Phase 3: Fourier EFA, GMM, & passive CDA in R")
+    p_morph.add_argument("--input", type=Path, default=None, help="Input contours directory")
+    p_morph.add_argument("--manifest", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_morph.add_argument("--contours-dir", type=Path, default=None, help="Input contours directory")
     p_morph.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
     p_morph.add_argument("--harmonics-out", type=Path, default=None, help="Output harmonics CSV")
@@ -448,6 +755,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--min-file-size-kb", type=float, default=None, help="Min file size in KB")
     p_all.add_argument("--concurrency", type=int, default=None, help="Download concurrency")
     p_all.add_argument("--download-images", action="store_true", default=False, help="Download specimen images")
+    p_all.add_argument(
+        "--force",
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=False,
+        help="Force re-harvesting and re-segmentation, overwriting existing artifacts.",
+    )
     p_all.add_argument("--vouchers", type=Path, default=None, help="Input curated vouchers CSV")
     p_all.add_argument("--weights", type=Path, default=None, help="Model weights checkpoint (.pth)")
     p_all.add_argument("--output-dir", type=Path, default=None, help="Root output directory")
@@ -456,6 +771,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--min-ucs", type=float, default=None, help="Tier 1 min UCS score")
     p_all.add_argument("--score-thresh", type=float, default=None, help="PCD detection score threshold")
     p_all.add_argument("--limit", type=int, default=None, help="Limit number of vouchers to process")
+    p_all.add_argument("--input", type=Path, default=None, help="Input contours directory")
+    p_all.add_argument("--manifest", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_all.add_argument("--contours-dir", type=Path, default=None, help="Input contours directory")
     p_all.add_argument("--harmonics-out", type=Path, default=None, help="Output harmonics CSV")
     p_all.add_argument("--flags-out", type=Path, default=None, help="Output morphometric flags CSV")
@@ -479,9 +796,14 @@ def main() -> None:
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
+    if args.subcommand == "check-env":
+        run_check_env(args)
+        return
+
     cfg = PipelineConfig.from_yaml(args.config)
 
     dispatch = {
+        "check-env": run_check_env,
         "harvest": run_harvest,
         "segment": run_segment,
         "morphometrics": run_morphometrics,
