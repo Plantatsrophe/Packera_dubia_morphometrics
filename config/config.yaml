@@ -23,6 +23,12 @@ paths:
   figures_dir: "outputs/figures"
   models_dir: "models"
 
+# Model Checkpoints & Remote Artifacts
+models:
+  pcd_weights_path: "models/lm2_packera_pcd_finetuned.pth"
+  pcd_weights_url: "https://github.com/Plantatsrophe/Packera_dubia_morphometrics/releases/download/v1.0-weights/lm2_packera_pcd_finetuned.pth"
+  pcd_weights_sha256: "" # Optional checksum verification
+
 # Target Focal Taxa, Synonyms, and Outgroups
 taxa:
   target_species:

@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
-from scripts.core.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, PipelineConfig
+from scripts.core.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, ModelsConfig, PipelineConfig
 
 
 def load_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
@@ -25,4 +25,4 @@ def load_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str, Any
     return cfg_obj.to_dict()
 
 
-__all__ = ["PipelineConfig", "load_config", "PROJECT_ROOT", "DEFAULT_CONFIG_PATH"]
+__all__ = ["PipelineConfig", "ModelsConfig", "load_config", "PROJECT_ROOT", "DEFAULT_CONFIG_PATH"]

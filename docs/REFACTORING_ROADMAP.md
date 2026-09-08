@@ -749,4 +749,19 @@ Requirements:
 - Generate Snakemake DAG visualization: snakemake --dag | dot -Tpng > docs/pipeline_dag.png.
 ```
 
+---
 
+## 9. Academic Data Availability & Persistent Archiving
+
+For peer-reviewed publication and dissertation replication packages, data assets are deposited in persistent open-access archives following FAIR data principles:
+
+### Dissertation Methods Statement Template
+> *"Model weights, extracted 2D contour coordinate matrices, and environmental rasters are persistently deposited on Zenodo under DOI: 10.5281/zenodo.xxxxxx."*
+
+### Deposited Artifact Matrix
+| Artifact Class | Local Target Path | Archival Repository & Persistent Identifier | Access Protocol |
+|:---|:---|:---|:---|
+| **Fine-tuned LM2 Model Weights** | `models/lm2_packera_pcd_finetuned.pth` | Zenodo DOI: `10.5281/zenodo.xxxxxx` / GitHub Releases (`v1.0-weights`) | Automated on demand (`python main.py download-weights`) |
+| **Normalized 2D Contours & Harmonics** | `data/contours/`, `data/tables/leaf_efa_harmonics.csv` | Zenodo DOI: `10.5281/zenodo.xxxxxx` | Zenodo direct download / Parquet release |
+| **Environmental Rasters (SoilGrids & WorldClim)** | `data/environmental/` | Zenodo DOI: `10.5281/zenodo.xxxxxx` | Zenodo raster bundle archive |
+| **Darwin Core Curated Occurrence Tables** | `data/tables/curated_vouchers.csv` | Zenodo DOI: `10.5281/zenodo.xxxxxx` | Dynamic harvest via GBIF or static Zenodo table |

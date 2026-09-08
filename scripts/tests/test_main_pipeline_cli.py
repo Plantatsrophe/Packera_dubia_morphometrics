@@ -16,7 +16,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import main
-from config import load_config, DEFAULT_CONFIG_PATH
+from config import DEFAULT_CONFIG_PATH, load_config
+from scripts.core.artifact_manager import (
+    compute_sha256,
+    download_file_with_progress,
+    ensure_model_weights,
+)
 
 
 class TestMainPipelineCLI(unittest.TestCase):
@@ -26,10 +31,13 @@ class TestMainPipelineCLI(unittest.TestCase):
         """Verify config.yaml loads with all required pipeline sections."""
         cfg = load_config(DEFAULT_CONFIG_PATH)
         self.assertIn("paths", cfg)
+        self.assertIn("models", cfg)
         self.assertIn("taxonomy", cfg)
         self.assertIn("harvesting", cfg)
         self.assertIn("segmentation", cfg)
         self.assertIn("morphometrics", cfg)
+        self.assertIn("pcd_weights_path", cfg["models"])
+        self.assertIn("pcd_weights_url", cfg["models"])
 
         # Verify resolved paths
         self.assertIn("resolved_paths", cfg)
@@ -80,6 +88,11 @@ class TestMainPipelineCLI(unittest.TestCase):
         self.assertEqual(args_check.subcommand, "check-env")
         self.assertTrue(args_check.strict)
 
+        # download-weights
+        args_dl = parser.parse_args(["download-weights", "--force"])
+        self.assertEqual(args_dl.subcommand, "download-weights")
+        self.assertTrue(args_dl.force)
+
         # run-all
         args_all = parser.parse_args(["run-all", "--download-images"])
         self.assertEqual(args_all.subcommand, "run-all")
@@ -90,6 +103,8 @@ class TestMainPipelineCLI(unittest.TestCase):
         self.assertTrue(parser.parse_args(["harvest", "--overwrite"]).force)
         self.assertTrue(parser.parse_args(["segment", "--force"]).force)
         self.assertTrue(parser.parse_args(["segment", "--overwrite"]).force)
+        self.assertTrue(parser.parse_args(["download-weights", "--force"]).force)
+        self.assertTrue(parser.parse_args(["download-weights", "--overwrite"]).force)
         self.assertTrue(parser.parse_args(["run-all", "--force"]).force)
         self.assertTrue(parser.parse_args(["run-all", "--overwrite"]).force)
 
@@ -328,6 +343,107 @@ class TestMainPipelineCLI(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 main.run_segment(args, cfg)
             self.assertEqual(cm.exception.code, 2)
+
+    def test_ensure_model_weights_preexisting(self):
+        """Verify ensure_model_weights returns existing non-empty weights without downloading."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dummy_pth = Path(tmp_dir) / "test_weights.pth"
+            dummy_pth.write_bytes(b"dummy model checkpoint data")
+
+            cfg = {
+                "models": {
+                    "pcd_weights_path": str(dummy_pth),
+                    "pcd_weights_url": "https://example.com/weights.pth",
+                    "pcd_weights_sha256": "",
+                }
+            }
+            with patch("scripts.core.artifact_manager.download_file_with_progress") as mock_dl:
+                result = ensure_model_weights(cfg, force=False)
+                self.assertEqual(result, dummy_pth)
+                mock_dl.assert_not_called()
+
+    def test_ensure_model_weights_missing_url_graceful_error(self):
+        """Verify ensure_model_weights raises ValueError when weights are missing and URL is empty."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            non_existent_pth = Path(tmp_dir) / "missing_weights.pth"
+            cfg = {
+                "models": {
+                    "pcd_weights_path": str(non_existent_pth),
+                    "pcd_weights_url": "",
+                    "pcd_weights_sha256": "",
+                }
+            }
+            with self.assertRaises(ValueError) as ctx:
+                ensure_model_weights(cfg, force=False)
+            self.assertIn("no remote download URL", str(ctx.exception))
+
+    def test_ensure_model_weights_download_success(self):
+        """Verify ensure_model_weights triggers download and atomic staging when file is missing."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target_pth = Path(tmp_dir) / "downloaded_weights.pth"
+            cfg = {
+                "models": {
+                    "pcd_weights_path": str(target_pth),
+                    "pcd_weights_url": "https://github.com/Plantatsrophe/Packera_dubia_morphometrics/releases/download/v1.0-weights/lm2_packera_pcd_finetuned.pth",
+                    "pcd_weights_sha256": "",
+                }
+            }
+
+            def fake_download(url, dest, expected_sha256=None, chunk_size=None):
+                dest = Path(dest)
+                dest.write_bytes(b"downloaded simulated checkpoint")
+                return dest
+
+            with patch("scripts.core.artifact_manager.download_file_with_progress", side_effect=fake_download) as mock_dl:
+                res = ensure_model_weights(cfg, force=False)
+                self.assertEqual(res, target_pth)
+                mock_dl.assert_called_once()
+                self.assertTrue(target_pth.exists())
+
+    def test_ensure_model_weights_checksum_verification(self):
+        """Verify ensure_model_weights and download_file_with_progress enforce SHA256 integrity."""
+        import hashlib
+        data = b"synthetic torch model payload"
+        correct_hash = hashlib.sha256(data).hexdigest()
+        bad_hash = "0123456789abcdef" * 4
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target_pth = Path(tmp_dir) / "payload.pth"
+
+            class DummyResponse:
+                def __init__(self):
+                    self.headers = {"Content-Length": str(len(data))}
+                def read(self, chunk_size):
+                    if not hasattr(self, "_read_done"):
+                        self._read_done = True
+                        return data
+                    return b""
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    pass
+
+            # Test successful checksum
+            with patch("urllib.request.urlopen", return_value=DummyResponse()):
+                download_file_with_progress("https://example.com/model.pth", target_pth, expected_sha256=correct_hash)
+                self.assertTrue(target_pth.exists())
+                self.assertEqual(compute_sha256(target_pth), correct_hash)
+
+            # Test checksum mismatch raises ValueError and removes partial file
+            with patch("urllib.request.urlopen", return_value=DummyResponse()):
+                with self.assertRaises(ValueError) as ctx:
+                    download_file_with_progress("https://example.com/model.pth", target_pth, expected_sha256=bad_hash)
+                self.assertIn("Checksum verification failed", str(ctx.exception))
+
+    def test_main_dispatch_download_weights(self):
+        """Verify main() entrypoint dispatches download-weights subcommand."""
+        with patch.object(sys, "argv", ["main.py", "download-weights", "--force"]), \
+             patch("main.run_download_weights") as mock_dl:
+            main.main()
+            mock_dl.assert_called_once()
+            args, cfg = mock_dl.call_args[0]
+            self.assertEqual(args.subcommand, "download-weights")
+            self.assertTrue(args.force)
 
 
 if __name__ == "__main__":

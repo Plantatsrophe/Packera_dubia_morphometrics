@@ -212,6 +212,9 @@ All production pipeline phases are orchestrated through the unified entry point 
 # Preflight Environment & Dependency Diagnostic:
 python main.py check-env
 
+# Pre-cache / Download Fine-Tuned Model Weights (Automatic on First Run):
+python main.py download-weights
+
 # Phase 1: Voucher Harvesting & Determiner Authority Stratification
 python main.py harvest --max-records 5000 --download-images
 
@@ -224,6 +227,15 @@ python main.py morphometrics --harmonics 12
 # Run the entire pipeline end-to-end:
 python main.py run-all --download-images
 ```
+
+#### Model Weights & Automated Artifact Acquisition
+- **Automatic Retrieval:** Fine-tuned LeafMachine2 PointRend weights (`models/lm2_packera_pcd_finetuned.pth`, ~425 MB) are automatically fetched on the first run of `python main.py segment` (or `main.py run-all`) if not locally present.
+- **Manual Pre-Caching:** Weights can be pre-cached or force-refreshed ahead of batch execution using the dedicated CLI command:
+  ```bash
+  python main.py download-weights [--force]
+  ```
+- **Persistent Archival:** Model weights are permanently deposited under the release / Zenodo archive (`https://github.com/Plantatsrophe/Packera_dubia_morphometrics/releases/download/v1.0-weights/lm2_packera_pcd_finetuned.pth` / Zenodo DOI: `10.5281/zenodo.xxxxxx`).
+- **Integrity Verification:** Downloads stream atomically to temporary files and undergo automated SHA256 checksum verification (`config.models.pcd_weights_sha256`) to guarantee artifact integrity and prevent partial corrupted checkpoints.
 
 #### Preflight Sanity Checks & Defensive Gating
 `main.py` incorporates automated preflight sanity checks and a dedicated environment diagnostic subcommand:
@@ -247,25 +259,38 @@ python main.py run-all --download-images
 
 ---
 
+## 💾 Data & Model Availability
+
+### Academic Citation & Replication Statement
+For dissertation methods and publication reproduction:
+> *"Model weights, extracted 2D contour coordinate matrices, and environmental rasters are persistently deposited on Zenodo under DOI: 10.5281/zenodo.xxxxxx."*
+
+- **Fine-Tuned Model Weights (`models/`):** LeafMachine2 PointRend weights (`lm2_packera_pcd_finetuned.pth`) are deposited on Zenodo (DOI: `10.5281/zenodo.xxxxxx`) and mirrored via GitHub Releases (`v1.0-weights`).
+- **Extracted 2D Contour Matrices (`data/contours/`):** Normalized 2D coordinate matrices and 12-harmonic Fourier coefficients (`data/tables/leaf_efa_harmonics.csv`) are persistently archived on Zenodo.
+- **Environmental Rasters (`data/environmental/`):** Pre-computed WorldClim 2.1 (30s bioclimatic variables) and SoilGrids 250m GeoTIFF layers are packaged in the Zenodo archive for headless execution of spatial random forests and niche identity tests.
+
+---
+
 ## 📦 Requirements
 
-- **Python $\\ge$ 3.10:** `torch`, `torchvision`, `opencv-python`, `scikit-learn`, `scipy`, `pandas`, `numpy`, `pygbif`, `requests`, `pyyaml`.  
-- **R $\\ge$ 4.3:** `Momocs`, `MorphoTools2`, `mclust`, `spatialRF`, `terra`, `tidyverse`, `optparse`.
+- **Python $\ge$ 3.10:** `torch`, `torchvision`, `opencv-python`, `scikit-learn`, `scipy`, `pandas`, `numpy`, `pygbif`, `requests`, `pyyaml`.  
+- **R $\ge$ 4.3:** `Momocs`, `MorphoTools2`, `mclust`, `spatialRF`, `terra`, `tidyverse`, `optparse`.
 
 ---
 
 ## 📚 Key Literature & Citations
 
-1. Barkley, T. M. 1988\. Variation among the Senecioneae (Asteraceae) in North America. *Brittonia* 40(2): 211–221. doi: 10.2307/2807005  
-2. Mabberley, D. J., D. K. Trock, and A. S. Weakley. 2020\. The nomenclature of *Packera dubia* (Asteraceae: Senecioneae). *Taxon* 69(6): 1334–1337. doi: 10.1002/tax.12351  
-3. Northcutt, C. G., L. Jiang, and I. L. Chuang. 2021\. Confident Learning: Estimating Uncertainty in Dataset Labels. *Journal of Artificial Intelligence Research* 70: 1373–1411. doi: 10.1613/jair.1.12125  
-4. Šlenker, M., P. Koutecký, and P. Marhold. 2022\. MorphoTools2: an R package for multivariate morphometric analysis. *Bioinformatics* 38(10): 2954–2955. doi: 10.1093/bioinformatics/btac173  
-5. Trock, D. K. 2006\. *Packera*. In Flora of North America Editorial Committee (eds.), *Flora of North America North of Mexico*, Vol. 20, 570–602. Oxford University Press, New York.  
-6. Weakley, A. S. 2026\. *Flora of the Southeastern United States*. University of North Carolina Herbarium (NCU), North Carolina Botanical Garden, Chapel Hill.  
-7. Weaver, W. N., P. S. Ng, and R. LaFrance. 2024\. LeafMachine2: Using machine learning to rapidly measure plant traits captured in herbarium specimens. *Applications in Plant Sciences* 12(1): e11545. doi: 10.1002/aps3.11545
+1. Barkley, T. M. 1988. Variation among the Senecioneae (Asteraceae) in North America. *Brittonia* 40(2): 211–221. doi: 10.2307/2807005  
+2. Mabberley, D. J., D. K. Trock, and A. S. Weakley. 2020. The nomenclature of *Packera dubia* (Asteraceae: Senecioneae). *Taxon* 69(6): 1334–1337. doi: 10.1002/tax.12351  
+3. Northcutt, C. G., L. Jiang, and I. L. Chuang. 2021. Confident Learning: Estimating Uncertainty in Dataset Labels. *Journal of Artificial Intelligence Research* 70: 1373–1411. doi: 10.1613/jair.1.12125  
+4. Šlenker, M., P. Koutecký, and P. Marhold. 2022. MorphoTools2: an R package for multivariate morphometric analysis. *Bioinformatics* 38(10): 2954–2955. doi: 10.1093/bioinformatics/btac173  
+5. Trock, D. K. 2006. *Packera*. In Flora of North America Editorial Committee (eds.), *Flora of North America North of Mexico*, Vol. 20, 570–602. Oxford University Press, New York.  
+6. Weakley, A. S. 2026. *Flora of the Southeastern United States*. University of North Carolina Herbarium (NCU), North Carolina Botanical Garden, Chapel Hill.  
+7. Weaver, W. N., P. S. Ng, and R. LaFrance. 2024. LeafMachine2: Using machine learning to rapidly measure plant traits captured in herbarium specimens. *Applications in Plant Sciences* 12(1): e11545. doi: 10.1002/aps3.11545
 
 ---
 
 ## 📄 License & Attribution
 
-This project is licensed under the **MIT License**. Herbarium specimen images harvested through the pipeline remain subject to the individual institutional data and copyright policies of the contributing herbaria.  
+This project is licensed under the **MIT License**. Herbarium specimen images harvested through the pipeline remain subject to the individual institutional data and copyright policies of the contributing herbaria.
+  

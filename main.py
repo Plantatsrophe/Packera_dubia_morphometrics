@@ -34,6 +34,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.core.artifact_manager import ensure_model_weights
 from scripts.core.config import PipelineConfig
 from scripts.core.logger import setup_logging
 
@@ -280,12 +281,20 @@ def check_environment(args: Optional[argparse.Namespace] = None) -> bool:
         else "models/lm2_packera_pcd_finetuned.pth"
     )
     model_path = PROJECT_ROOT / model_rel
-    if model_path.exists() and model_path.is_file():
+    if not (model_path.exists() and model_path.is_file() and model_path.stat().st_size > 0):
+        print(f"  [INFO] Model checkpoint missing at {model_path}. Invoking automated artifact manager...")
+        try:
+            cfg_obj = PipelineConfig.from_yaml(cfg_file) if cfg_file.exists() else (parsed_config or {})
+            ensure_model_weights(cfg_obj)
+        except Exception as exc:
+            print(f"  [WARN] Automatic weights acquisition failed: {exc}")
+
+    if model_path.exists() and model_path.is_file() and model_path.stat().st_size > 0:
         size_mb = model_path.stat().st_size / (1024 * 1024)
         print(f"  [PASS] Fine-tuned model checkpoint verified: {model_rel} ({size_mb:.2f} MB)")
     else:
         print(f"  [FAIL] Fine-tuned model checkpoint not found at: {model_path}")
-        print("         Remediation: Place trained weights at models/lm2_packera_pcd_finetuned.pth")
+        print("         Remediation: Run `python main.py download-weights` or place trained weights manually.")
         critical_failure = True
 
     # -------------------------------------------------------------------------
@@ -310,6 +319,17 @@ def run_check_env(args: argparse.Namespace, cfg: Optional[PipelineConfig] = None
     """CLI handler executing environment diagnostics and terminating with status code."""
     success = check_environment(args)
     sys.exit(0 if success else 1)
+
+
+def run_download_weights(args: argparse.Namespace, cfg: PipelineConfig) -> None:
+    """Downloads and verifies fine-tuned model checkpoint weights."""
+    logger.info("=== Checking & Downloading Model Weights Checkpoint ===")
+    try:
+        saved_path = ensure_model_weights(cfg, force=getattr(args, "force", False))
+        logger.info(f"Model weights checkpoint ready at: {saved_path}")
+    except Exception as exc:
+        logger.error(f"Failed to acquire model weights: {exc}")
+        sys.exit(1)
 
 
 # =============================================================================
@@ -399,7 +419,14 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     vouchers_csv = Path(args.vouchers or cfg["paths"]["curated_vouchers_csv"])
     verify_file_exists(vouchers_csv, "curated vouchers metadata table", "python main.py harvest")
 
-    model_weights = Path(args.weights or cfg["paths"]["model_weights"])
+    if args.weights:
+        model_weights = Path(args.weights)
+    else:
+        try:
+            model_weights = ensure_model_weights(cfg)
+        except Exception as exc:
+            logger.warning(f"Automated weights acquisition could not complete: {exc}")
+            model_weights = Path(cfg["paths"]["model_weights"])
     verify_file_exists(model_weights, "PointRend model weights checkpoint")
 
     device = args.device or cfg["segmentation"].get("device", "cuda")
@@ -669,6 +696,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Treat warnings (such as missing CUDA) as critical failures.",
     )
 
+    # Subcommand: download-weights
+    p_dl = subparsers.add_parser(
+        "download-weights",
+        help="Download and verify fine-tuned PointRend model weights from remote repository",
+    )
+    p_dl.add_argument(
+        "--force",
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=False,
+        help="Force re-download even if model weights file exists locally.",
+    )
+
     # Subcommand: harvest
     p_harvest = subparsers.add_parser("harvest", help="Phase 1: Ingest GBIF occurrences & download images")
     p_harvest.add_argument("--taxa", nargs="+", default=None, help="Target taxonomic binomials")
@@ -804,6 +845,7 @@ def main() -> None:
 
     dispatch = {
         "check-env": run_check_env,
+        "download-weights": run_download_weights,
         "harvest": run_harvest,
         "segment": run_segment,
         "morphometrics": run_morphometrics,

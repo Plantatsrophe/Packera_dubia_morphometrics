@@ -101,6 +101,16 @@ class SegmentationConfig:
     device: str = "cuda"
 
 
+@dataclass(frozen=True)
+class ModelsConfig:
+    """Model weights checkpoint paths, remote URLs, and integrity hashes."""
+    pcd_weights_path: Path = PROJECT_ROOT / "models" / "lm2_packera_pcd_finetuned.pth"
+    pcd_weights_url: str = (
+        "https://github.com/Plantatsrophe/Packera_dubia_morphometrics/releases/download/v1.0-weights/lm2_packera_pcd_finetuned.pth"
+    )
+    pcd_weights_sha256: str = ""
+
+
 @dataclass
 class PipelineConfig:
     """Centralized, type-hinted configuration for Packera dubia pipeline."""
@@ -110,6 +120,7 @@ class PipelineConfig:
     morphometrics: MorphometricsConfig
     harvesting: HarvestingConfig
     segmentation: SegmentationConfig
+    models: ModelsConfig = field(default_factory=ModelsConfig)
     _raw_dict: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __getitem__(self, key: str) -> Any:
@@ -189,6 +200,16 @@ class PipelineConfig:
             seg_kwargs["model_weights"] = _resolve(seg_kwargs["model_weights"])
         segmentation = SegmentationConfig(**seg_kwargs)
 
+        models_dict = raw_cfg.get("models", {})
+        models_kwargs: Dict[str, Any] = {}
+        if "pcd_weights_path" in models_dict:
+            models_kwargs["pcd_weights_path"] = _resolve(models_dict["pcd_weights_path"])
+        if "pcd_weights_url" in models_dict:
+            models_kwargs["pcd_weights_url"] = str(models_dict["pcd_weights_url"])
+        if "pcd_weights_sha256" in models_dict:
+            models_kwargs["pcd_weights_sha256"] = str(models_dict["pcd_weights_sha256"])
+        models = ModelsConfig(**models_kwargs)
+
         resolved_raw = dict(raw_cfg)
         resolved_raw["resolved_paths"] = {
             k: getattr(paths, k) for k in paths.__dataclass_fields__
@@ -197,7 +218,7 @@ class PipelineConfig:
         return cls(
             paths=paths, taxa=taxa, thresholds=thresholds,
             morphometrics=morph, harvesting=harvesting,
-            segmentation=segmentation, _raw_dict=resolved_raw,
+            segmentation=segmentation, models=models, _raw_dict=resolved_raw,
         )
 
 

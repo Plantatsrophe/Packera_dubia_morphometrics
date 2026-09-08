@@ -9,6 +9,10 @@
 ## 📋 Table of Contents
 
 1. [Environment & Setup](#1-environment--setup)
+   - [A. Primary Python Pipeline Environment (`.venv`)](#a-primary-python-pipeline-environment-venv)
+   - [B. LeafMachine2 Dedicated Virtual Environment (`.venv_LM2`)](#b-leafmachine2-dedicated-virtual-environment-venv_lm2)
+   - [C. R Statistical Computing Environment](#c-r-statistical-computing-environment)
+   - [D. Large File & Storage Architecture](#d-large-file--storage-architecture)
 2. [Seven-Phase Pipeline Overview](#2-seven-phase-pipeline-overview)
 3. [Phase 1: Voucher Ingestion & Authority Stratification](#phase-1-voucher-ingestion--authority-stratification)
 4. [Phase 2: LeafMachine2 Organ Detection & Geometric Routing](#phase-2-leafmachine2-organ-detection--geometric-routing)
@@ -52,6 +56,39 @@ Requires R $\ge 4.3.0$ with `Momocs`, `MorphoTools2`, `mclust`, `spatialRF`, `te
 install.packages(c("Momocs", "mclust", "terra", "tidyverse", "sf", "ggplot2", "patchwork", "gridExtra", "optparse", "remotes"))
 remotes::install_github(c("V-Z/MorphoTools2", "danlwarren/ENMTools", "blasbenito/spatialRF"))
 ```
+
+### D. Large File & Storage Architecture
+
+To maintain a lean, reproducible codebase and comply with Git repository storage best practices, bulky binary checkpoints and heavy raster/specimen data are excluded from version control via `.gitignore`:
+- **Model Checkpoints (`models/*.pth`, `models/*.pt`, `models/*.bin`):** Deep learning weights (such as `lm2_packera_pcd_finetuned.pth`, ~425 MB) are excluded to prevent repository bloat. Checkpoints are automatically retrieved and integrity-verified on demand via [`scripts/core/artifact_manager.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/core/artifact_manager.py).
+- **Raw Specimen Imagery (`data/raw_vouchers/*.jpg`):** The production dataset comprises 6,610 high-resolution voucher sheets (>25 GB). Specimen images are downloaded directly to local storage during Phase 1 (`python main.py harvest --download-images`).
+
+#### Reproducing Dissertation Analyses: Downloading Rasters & Model Weights
+Researchers reproducing the dissertation results without re-harvesting large image repositories or re-training detector models can retrieve all upstream assets from open scientific repositories:
+
+1. **Fine-Tuned Model Weights:**
+   Automatically acquired upon running `python main.py segment` or manually pre-cached via:
+   ```bash
+   python main.py download-weights
+   ```
+   Checkpoints are archived on GitHub Releases (`v1.0-weights`) and Zenodo (DOI: `10.5281/zenodo.xxxxxx`), with integrity validated via SHA256 hashing.
+
+2. **Pre-Computed Environmental Rasters (`data/environmental/`):**
+   Phase 6 (Macroecological Niche Modeling) utilizes 30-arcsecond WorldClim 2.1 bioclimatic rasters and SoilGrids 250m pedological layers (pH in H2O, CEC, sand/clay percentages). A pre-clipped GeoTIFF raster package covering the southeastern and midwestern United States study region is deposited on Zenodo:
+   ```bash
+   # Create target environmental directory
+   mkdir -p data/environmental
+
+   # Download and unpack the Zenodo environmental raster archive
+   tar -xzvf packera_environmental_rasters.tar.gz -C data/environmental/
+   ```
+
+3. **Pre-Extracted Contour Coordinate Matrices:**
+   To reproduce the morphological analyses (Phases 3–4) directly without running deep segmentation on raw sheets, standardized 2D contour coordinate matrices (`data/contours/`) and curated Darwin Core voucher tables (`data/tables/curated_vouchers.csv`) can be unpacked directly from Zenodo.
+
+#### Academic Data Availability Statement
+For dissertation methods sections and peer-reviewed publication reproduction:
+> *"Model weights, extracted 2D contour coordinate matrices, and environmental rasters are persistently deposited on Zenodo under DOI: 10.5281/zenodo.xxxxxx."*
 
 ---
 
