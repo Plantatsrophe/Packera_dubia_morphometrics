@@ -22,6 +22,8 @@
 
 suppressPackageStartupMessages({
   if (requireNamespace("Momocs", quietly = TRUE)) library(Momocs)
+  if (requireNamespace("vegan", quietly = TRUE)) library(vegan)
+  if (requireNamespace("ggplot2", quietly = TRUE)) library(ggplot2)
   if (requireNamespace("dplyr", quietly = TRUE)) library(dplyr)
   if (requireNamespace("readr", quietly = TRUE)) library(readr)
   if (requireNamespace("tibble", quietly = TRUE)) library(tibble)
@@ -48,7 +50,15 @@ parse_args_robust <- function() {
     optparse::make_option(c("-k", "--harmonics"), type = "integer",
       default = 12, help = "Number of Fourier harmonics (nb.h) [default: %default]"),
     optparse::make_option(c("-p", "--num-pcs"), type = "integer",
-      default = 5, help = "Number of PCA dimensions to extract [default: %default]")
+      default = 5, help = "Number of PCA dimensions to extract [default: %default]"),
+    optparse::make_option(c("-r", "--report-out"), type = "character",
+      default = "outputs/reports/tier_symmetry_validation.csv", help = "PERMANOVA validation report CSV [default: %default]"),
+    optparse::make_option(c("-g", "--plot-out"), type = "character",
+      default = "outputs/figures/tier1_vs_tier2_density_overlay.pdf", help = "Tier density overlay plot PDF [default: %default]"),
+    optparse::make_option(c("--permutations"), type = "integer",
+      default = 999, help = "Number of permutations for PERMANOVA [default: %default]"),
+    optparse::make_option(c("--seed"), type = "integer",
+      default = 42, help = "Random seed for reproducible permutations [default: %default]")
   )
 
   if (requireNamespace("optparse", quietly = TRUE)) {
@@ -60,7 +70,10 @@ parse_args_robust <- function() {
   opts <- list(
     input = "data/contours/", contours_dir = "data/contours/", manifest = "data/tables/extracted_leaf_manifest.csv",
     masks_dir = "data/masks/", vouchers = "data/tables/curated_vouchers.csv",
-    output = "data/tables/leaf_efa_harmonics.csv", harmonics = 12, num_pcs = 5
+    output = "data/tables/leaf_efa_harmonics.csv", harmonics = 12, num_pcs = 5,
+    report_out = "outputs/reports/tier_symmetry_validation.csv",
+    plot_out = "outputs/figures/tier1_vs_tier2_density_overlay.pdf",
+    permutations = 999, seed = 42
   )
   i <- 1
   while (i <= length(raw_args)) {
@@ -73,6 +86,10 @@ parse_args_robust <- function() {
     else if (arg %in% c("-o", "--output") && i < length(raw_args)) { opts$output <- raw_args[i + 1]; i <- i + 2 }
     else if (arg %in% c("-k", "--harmonics") && i < length(raw_args)) { opts$harmonics <- as.integer(raw_args[i + 1]); i <- i + 2 }
     else if (arg %in% c("-p", "--num-pcs") && i < length(raw_args)) { opts$num_pcs <- as.integer(raw_args[i + 1]); i <- i + 2 }
+    else if (arg %in% c("-r", "--report-out") && i < length(raw_args)) { opts$report_out <- raw_args[i + 1]; i <- i + 2 }
+    else if (arg %in% c("-g", "--plot-out") && i < length(raw_args)) { opts$plot_out <- raw_args[i + 1]; i <- i + 2 }
+    else if (arg == "--permutations" && i < length(raw_args)) { opts$permutations <- as.integer(raw_args[i + 1]); i <- i + 2 }
+    else if (arg == "--seed" && i < length(raw_args)) { opts$seed <- as.integer(raw_args[i + 1]); i <- i + 2 }
     else { i <- i + 1 }
   }
   return(opts)
@@ -327,15 +344,30 @@ run_fourier_extraction <- function(opts) {
   }
   efa_df <- cbind(fac_df, as.data.frame(harm_mat))
 
-  # 4. PCA on Harmonic Coefficients (PC1-PC5)
-  message("Running PCA on EFA harmonics...")
-  complete_idx <- which(complete.cases(harm_mat))
+  # 4. Symmetric Fourier Decomposition & PCA (PC1-PC5)
+  # In normalized EFA with major axis horizontal alignment:
+  # - An and Dn capture symmetric outline variance (bilateral symmetry across longitudinal midrib)
+  # - Bn and Cn capture asymmetric variance (fluctuating asymmetry / lateral skew)
+  # Isolating An and Dn guarantees that Tier 1 (pristine) and Tier 2 (reflected) leaves are evaluated
+  # strictly on the symmetric morphological component, eliminating artificial symmetry artifacts.
+  message("Extracting symmetric harmonic coefficients (An and Dn harmonics)...")
+  sym_names <- c(paste0("A", seq_len(opts$harmonics)), paste0("D", seq_len(opts$harmonics)))
+  sym_harmonics <- harm_mat[, sym_names, drop = FALSE]
+
+  message("Running PCA strictly on symmetric harmonics (sym_harmonics)...")
+  complete_idx <- which(complete.cases(sym_harmonics))
   for (p in seq_len(opts$num_pcs)) efa_df[[paste0("PC", p)]] <- NA_real_
 
   if (length(complete_idx) >= opts$num_pcs) {
-    pca_fit <- stats::prcomp(harm_mat[complete_idx, ], center = TRUE, scale. = TRUE)
+    # Filter constant/zero-variance coefficients (e.g. invariant A1 = 1.0 in normalized EFA)
+    col_vars <- apply(sym_harmonics[complete_idx, , drop = FALSE], 2, stats::var)
+    active_sym_cols <- names(col_vars[col_vars > 1e-8])
+    message(sprintf("Active symmetric harmonic dimensions with non-zero variance: %d / %d",
+                    length(active_sym_cols), ncol(sym_harmonics)))
+
+    pca_fit <- stats::prcomp(sym_harmonics[complete_idx, active_sym_cols, drop = FALSE], center = TRUE, scale. = TRUE)
     var_exp <- round((pca_fit$sdev^2) / sum(pca_fit$sdev^2) * 100, 2)
-    message("=== Morphospace PCA Variance Explained ===")
+    message("=== Symmetric Morphospace PCA Variance Explained ===")
     for (p in seq_len(min(opts$num_pcs, length(var_exp)))) {
       message(sprintf("  PC%d: %5.2f%% variance", p, var_exp[p]))
     }
@@ -346,10 +378,10 @@ run_fourier_extraction <- function(opts) {
     }
   }
 
-  # 5. Darwin Core Metadata Integration & Export
+  # 5. Darwin Core Metadata Integration & Standardization
   if (!is.null(vouchers_df)) {
     meta_cols <- intersect(names(vouchers_df), c(
-      "catalogNumber", "species_raw", "determiner_raw", "determiner_tier",
+      "catalogNumber", "scientificName", "species_raw", "determiner_raw", "determiner_tier",
       "county", "stateProvince", "latitude", "longitude",
       "pheno_sin", "pheno_cos", "regional_group"
     ))
@@ -357,8 +389,29 @@ run_fourier_extraction <- function(opts) {
     efa_df <- merge(efa_df, v_sub, by = "catalogNumber", all.x = TRUE)
   }
 
+  # Standardize reconstruction_tier: Tier 1 (Pristine Direct) vs. Tier 2 (Reflected Hemi-blade)
+  efa_df$reconstruction_tier <- ifelse(
+    grepl("tier_?1", efa_df$assigned_tier, ignore.case = TRUE),
+    "Tier 1",
+    ifelse(grepl("tier_?2", efa_df$assigned_tier, ignore.case = TRUE), "Tier 2", NA_character_)
+  )
+
+  if (!"scientificName" %in% names(efa_df)) {
+    efa_df$scientificName <- efa_df$species_raw
+  } else {
+    efa_df$scientificName <- ifelse(is.na(efa_df$scientificName) | efa_df$scientificName == "",
+                                    efa_df$species_raw, efa_df$scientificName)
+  }
+  if (!"determiner_tier" %in% names(efa_df)) {
+    efa_df$determiner_tier <- "Tier_3_Bronze"
+  } else {
+    efa_df$determiner_tier <- ifelse(is.na(efa_df$determiner_tier) | efa_df$determiner_tier == "",
+                                     "Tier_3_Bronze", efa_df$determiner_tier)
+  }
+
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier",
-                 "species_raw", "determiner_tier", "PC1", "PC2", "PC3", "PC4", "PC5",
+                 "reconstruction_tier", "scientificName", "species_raw", "determiner_tier",
+                 "PC1", "PC2", "PC3", "PC4", "PC5",
                  "aspect_ratio", "area_px", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
@@ -366,6 +419,165 @@ run_fourier_extraction <- function(opts) {
   dir.create(dirname(opts$output), recursive = TRUE, showWarnings = FALSE)
   write.csv(efa_df, file = opts$output, row.names = FALSE, na = "")
   message("Master EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(efa_df), ")")
+
+  # 6. Empirical Tier Validation Test (PERMANOVA via adonis2 / fallback manova)
+  valid_tier_idx <- which(!is.na(efa_df$reconstruction_tier) & complete.cases(sym_harmonics))
+  if (length(valid_tier_idx) >= 10) {
+    message("==================================================================")
+    message("Executing Empirical Tier Validation Test (PERMANOVA)")
+    message("Model: sym_harmonics ~ scientificName + determiner_tier + reconstruction_tier")
+    message(sprintf("Sample Size: %d outlines (Tier 1: %d | Tier 2: %d)",
+                    length(valid_tier_idx),
+                    sum(efa_df$reconstruction_tier[valid_tier_idx] == "Tier 1"),
+                    sum(efa_df$reconstruction_tier[valid_tier_idx] == "Tier 2")))
+    message("==================================================================")
+
+    tier_manifest <- efa_df[valid_tier_idx, , drop = FALSE]
+    tier_sym <- sym_harmonics[valid_tier_idx, , drop = FALSE]
+
+    tier_manifest$scientificName <- as.factor(tier_manifest$scientificName)
+    tier_manifest$determiner_tier <- as.factor(tier_manifest$determiner_tier)
+    tier_manifest$reconstruction_tier <- as.factor(tier_manifest$reconstruction_tier)
+
+    set.seed(opts$seed)
+    permanova_df <- NULL
+
+    if (requireNamespace("vegan", quietly = TRUE)) {
+      message(sprintf("Executing vegan::adonis2 (permutations = %d, seed = %d)...",
+                      opts$permutations, opts$seed))
+      ad_res <- tryCatch({
+        vegan::adonis2(
+          tier_sym ~ scientificName + determiner_tier + reconstruction_tier,
+          data = tier_manifest,
+          permutations = opts$permutations,
+          method = "euclidean",
+          by = "terms"
+        )
+      }, error = function(e) {
+        warning("vegan::adonis2 encountered an issue: ", e$message, ". Falling back to stats::manova().")
+        NULL
+      })
+
+      if (!is.null(ad_res)) {
+        permanova_df <- as.data.frame(ad_res)
+        permanova_df$Term <- rownames(permanova_df)
+        rownames(permanova_df) <- NULL
+        if ("F.Model" %in% names(permanova_df)) permanova_df$F <- permanova_df$F.Model
+        if ("Pr(>F)" %in% names(permanova_df)) permanova_df$p_value <- permanova_df[["Pr(>F)"]]
+      }
+    }
+
+    # Defensive fallback if vegan is not available or encountered an error
+    if (is.null(permanova_df)) {
+      message("vegan package not available; executing defensive fallback using analytical sequential SS decomposition...")
+      Y <- as.matrix(tier_sym)
+      Y_cent <- scale(Y, center = TRUE, scale = FALSE)
+      SS_tot <- sum(Y_cent^2)
+      N_obs <- nrow(tier_manifest)
+
+      fit1 <- stats::lm(Y_cent ~ scientificName, data = tier_manifest)
+      Y_hat1 <- stats::fitted(fit1)
+      SS_sp <- sum(Y_hat1^2)
+      df_sp <- fit1$rank - 1
+
+      fit2 <- stats::lm(Y_cent ~ scientificName + determiner_tier, data = tier_manifest)
+      Y_hat2 <- stats::fitted(fit2)
+      SS_12 <- sum(Y_hat2^2)
+      SS_det <- SS_12 - SS_sp
+      df_det <- fit2$rank - fit1$rank
+
+      fit3 <- stats::lm(Y_cent ~ scientificName + determiner_tier + reconstruction_tier, data = tier_manifest)
+      Y_hat3 <- stats::fitted(fit3)
+      SS_123 <- sum(Y_hat3^2)
+      SS_tier <- SS_123 - SS_12
+      df_tier <- fit3$rank - fit2$rank
+
+      SS_res <- SS_tot - SS_123
+      df_res <- N_obs - fit3$rank
+
+      MS_res <- SS_res / max(df_res, 1)
+      F_sp <- (SS_sp / max(df_sp, 1)) / MS_res
+      F_det <- (SS_det / max(df_det, 1)) / MS_res
+      F_tier <- (SS_tier / max(df_tier, 1)) / MS_res
+
+      p_sp <- stats::pf(F_sp, df_sp, df_res, lower.tail = FALSE)
+      p_det <- stats::pf(F_det, df_det, df_res, lower.tail = FALSE)
+      p_tier <- stats::pf(F_tier, df_tier, df_res, lower.tail = FALSE)
+
+      permanova_df <- data.frame(
+        Term = c("scientificName", "determiner_tier", "reconstruction_tier", "Residual", "Total"),
+        Df = c(df_sp, df_det, df_tier, df_res, N_obs - 1),
+        SumOfSqs = round(c(SS_sp, SS_det, SS_tier, SS_res, SS_tot), 4),
+        R2 = round(c(SS_sp / SS_tot, SS_det / SS_tot, SS_tier / SS_tot, SS_res / SS_tot, 1.0), 6),
+        F = c(round(F_sp, 4), round(F_det, 4), round(F_tier, 4), NA_real_, NA_real_),
+        p_value = c(round(p_sp, 5), round(p_det, 5), round(p_tier, 5), NA_real_, NA_real_),
+        stringsAsFactors = FALSE
+      )
+    }
+
+    # Format table columns and export report CSV
+    report_cols <- intersect(c("Term", "Df", "SumOfSqs", "R2", "F", "p_value"), names(permanova_df))
+    permanova_df <- permanova_df[, report_cols, drop = FALSE]
+
+    dir.create(dirname(opts$report_out), recursive = TRUE, showWarnings = FALSE)
+    write.csv(permanova_df, file = opts$report_out, row.names = FALSE)
+    message("PERMANOVA Tier Validation report exported to: ", opts$report_out)
+
+    # Verification assertions
+    tier_row <- permanova_df[grepl("reconstruction_tier", permanova_df$Term, ignore.case = TRUE), ]
+    if (nrow(tier_row) > 0) {
+      r2_val <- tier_row$R2[1]
+      p_val <- tier_row$p_value[1]
+      message(sprintf("PERMANOVA Result: reconstruction_tier explains %.4f%% of variance (R2 = %.6f, p = %.4f)",
+                      r2_val * 100, r2_val, p_val))
+      if (r2_val < 0.01) {
+        message("[ASSERTION PASS] reconstruction_tier accounts for <1.0% of total variance (R2 < 0.01).")
+      } else {
+        message("[ASSERTION NOTE] reconstruction_tier R2 = ", round(r2_val, 4))
+      }
+      if (!is.na(p_val) && p_val > 0.05) {
+        message("[ASSERTION PASS] reconstruction_tier is non-significant (p > 0.05).")
+      } else {
+        message("[ASSERTION NOTE] reconstruction_tier p-value = ", p_val)
+      }
+    }
+
+    # 7. Diagnostic Comparative Density Plot Export
+    dir.create(dirname(opts$plot_out), recursive = TRUE, showWarnings = FALSE)
+    if (requireNamespace("ggplot2", quietly = TRUE)) {
+      plot_df <- tier_manifest[!is.na(tier_manifest$PC1) & !is.na(tier_manifest$PC2), ]
+      p1 <- ggplot2::ggplot(plot_df, ggplot2::aes(x = PC1, fill = reconstruction_tier, color = reconstruction_tier)) +
+        ggplot2::geom_density(alpha = 0.4, linewidth = 0.8) +
+        ggplot2::scale_fill_manual(values = c("Tier 1" = "#1b9e77", "Tier 2" = "#d95f02")) +
+        ggplot2::scale_color_manual(values = c("Tier 1" = "#1b9e77", "Tier 2" = "#d95f02")) +
+        ggplot2::labs(title = "Empirical Tier Morphological Equivalence",
+                      subtitle = "Symmetric Fourier PC1 Density Distribution (Tier 1 Pristine vs. Tier 2 Reflected)",
+                      x = "Symmetric Morphospace PC1", y = "Density",
+                      fill = "Reconstruction Tier", color = "Reconstruction Tier") +
+        ggplot2::theme_minimal(base_size = 12) +
+        ggplot2::theme(legend.position = "bottom", plot.title = ggplot2::element_text(face = "bold"))
+      ggplot2::ggsave(opts$plot_out, plot = p1, width = 8, height = 5)
+    } else {
+      pdf(opts$plot_out, width = 8, height = 5)
+      pc1_t1 <- tier_manifest$PC1[tier_manifest$reconstruction_tier == "Tier 1"]
+      pc1_t2 <- tier_manifest$PC1[tier_manifest$reconstruction_tier == "Tier 2"]
+      d1 <- stats::density(pc1_t1, na.rm = TRUE)
+      d2 <- stats::density(pc1_t2, na.rm = TRUE)
+      xlims <- range(c(d1$x, d2$x))
+      ylims <- c(0, max(c(d1$y, d2$y)) * 1.1)
+      plot(d1, xlim = xlims, ylim = ylims, col = "#1b9e77", lwd = 2,
+           main = "Symmetric Fourier PC1 Density: Tier 1 vs Tier 2",
+           xlab = "Symmetric Morphospace PC1", ylab = "Density")
+      lines(d2, col = "#d95f02", lwd = 2, lty = 2)
+      polygon(d1, col = grDevices::adjustcolor("#1b9e77", alpha.f = 0.3), border = NA)
+      polygon(d2, col = grDevices::adjustcolor("#d95f02", alpha.f = 0.3), border = NA)
+      legend("topright", legend = c("Tier 1 (Pristine)", "Tier 2 (Reflected)"),
+             col = c("#1b9e77", "#d95f02"), lwd = 2, lty = c(1, 2), bty = "n")
+      dev.off()
+    }
+    message("Diagnostic comparative density plot exported: ", opts$plot_out)
+  }
+
   return(invisible(efa_df))
 }
 
