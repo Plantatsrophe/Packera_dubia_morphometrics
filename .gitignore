@@ -231,6 +231,9 @@ outputs/*
 
 # Scratch and debug directories
 scratch/
+scratch/**
+**/scratch/
+**/scratch/**
 
 # ------------------------------------------------------------------------------
 # Archive, Backup, Snapshot & Quarantine Directories
