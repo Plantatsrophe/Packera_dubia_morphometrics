@@ -286,10 +286,13 @@ For dissertation methods and publication reproduction:
 
 ---
 
-## 📦 Requirements
+## 📦 System Requirements & Dependencies
 
 - **Python $\ge$ 3.10:** `torch`, `torchvision`, `opencv-python`, `scikit-learn`, `scipy`, `pandas`, `numpy`, `pygbif`, `requests`, `pyyaml`.  
 - **R $\ge$ 4.3:** `Momocs`, `MorphoTools2`, `mclust`, `spatialRF`, `terra`, `tidyverse`, `optparse`.
+
+> [!TIP]
+> **Windows Users**: The recommended and fully supported way to run this pipeline on Windows is via **WSL 2 (Ubuntu)**. See [`docs/WINDOWS_WSL2_SETUP.md`](docs/WINDOWS_WSL2_SETUP.md) for a 10-minute setup guide with full GPU and GUI support.
 
 ---
 

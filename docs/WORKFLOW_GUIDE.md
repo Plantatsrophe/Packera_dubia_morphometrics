@@ -9,6 +9,7 @@
 ## 📋 Table of Contents
 
 1. [Environment & Setup](#1-environment--setup)
+   - [Windows / WSL 2 Setup Guide (`docs/WINDOWS_WSL2_SETUP.md`)](WINDOWS_WSL2_SETUP.md)
    - [A. Primary Python Pipeline Environment (`.venv`)](#a-primary-python-pipeline-environment-venv)
    - [B. LeafMachine2 Dedicated Virtual Environment (`.venv_LM2`)](#b-leafmachine2-dedicated-virtual-environment-venv_lm2)
    - [C. R Statistical Computing Environment](#c-r-statistical-computing-environment)
@@ -31,6 +32,10 @@
 ---
 
 ## 1. Environment & Setup
+
+> [!TIP]
+> **Windows Users (WSL 2 Setup Guide):**  
+> If running on Windows, the recommended and supported execution environment is **Windows Subsystem for Linux (WSL 2 with Ubuntu)**. WSL 2 provides full NVIDIA CUDA acceleration, native WSLg GUI support for interactive annotation (`annotate_with_sam2.py`), and high-performance ext4 disk I/O. Please follow our step-by-step setup guide in [`docs/WINDOWS_WSL2_SETUP.md`](WINDOWS_WSL2_SETUP.md).
 
 The pipeline operates across two dedicated Python environments and an R statistical environment:
 
