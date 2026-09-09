@@ -536,7 +536,20 @@ run_gmm_morphotools_pipeline <- function(opts) {
   closed_df <- efa_df[efa_df$assigned_tier %in% c("Tier_1_Direct", "Tier_2_Reflected"), ]
   valid_idx <- which(complete.cases(closed_df[, pca_cols]))
   closed_df <- closed_df[valid_idx, ]
-  message(sprintf("Valid closed leaf outlines for morphometric modeling: %d", nrow(closed_df)))
+  # Ensure primary GMM and CDA run on specimen-level median table (1 row = 1 voucher collection event)
+  if (any(duplicated(closed_df$catalogNumber))) {
+    message("Aggregating to specimen-level median profile (1 row = 1 voucher collection event)...")
+    num_cols <- intersect(c(pca_cols, "foliar_variance", "leaf_count", "aspect_ratio", "area_px"), names(closed_df))
+    meta_cols <- setdiff(names(closed_df), c(num_cols, "shape_id", "leaf_id", "mask_source"))
+    closed_df <- closed_df %>%
+      dplyr::group_by(catalogNumber) %>%
+      dplyr::summarise(
+        dplyr::across(dplyr::all_of(num_cols), ~ stats::median(.x, na.rm = TRUE)),
+        dplyr::across(dplyr::all_of(meta_cols[meta_cols != "catalogNumber"]), ~ stats::na.omit(.x)[1]),
+        .groups = "drop"
+      )
+  }
+  message(sprintf("Specimen-level collection units for morphometric modeling (1 row = 1 voucher): %d", nrow(closed_df)))
 
   # Ingest macro-reproductive traits if requested and available
   include_repro <- FALSE

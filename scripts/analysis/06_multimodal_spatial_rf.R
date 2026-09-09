@@ -716,6 +716,15 @@ main <- function() {
     vouchers_df <- dplyr::left_join(vouchers_df, vis_df[, intersect(names(vis_df), c("catalogNumber", "vision_predicted_label", "c_error", "is_label_corrupted"))], by = "catalogNumber")
   }
 
+  # Filter strictly for primary duplicate vouchers (exsiccatae deduplication)
+  if ("is_primary_duplicate" %in% names(vouchers_df)) {
+    n_pre_filter <- nrow(vouchers_df)
+    vouchers_df <- vouchers_df[toupper(as.character(vouchers_df$is_primary_duplicate)) %in% c("TRUE", "T", "1"), ]
+    n_post_filter <- nrow(vouchers_df)
+    message(sprintf("Exsiccatae Stratification Filter: Retaining %d primary vouchers (%d duplicate sheets excluded to prevent spatial pseudoreplication).",
+                    n_post_filter, n_pre_filter - n_post_filter))
+  }
+
   # Filter valid coordinates
   vouchers_df <- vouchers_df[!is.na(vouchers_df$latitude) & !is.na(vouchers_df$longitude), ]
   message(sprintf("Processing %d georeferenced vouchers across target taxa...", nrow(vouchers_df)))

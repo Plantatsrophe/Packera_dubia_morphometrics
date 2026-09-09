@@ -531,14 +531,388 @@ def is_botanical_dissection(
     return bool(is_dissected)
 
 
+def trim_petiole_tail(
+    mask: np.ndarray,
+    p_base: Optional[Tuple[int, int]] = None,
+    p_apex: Optional[Tuple[int, int]] = None,
+    step_px: int = 2,
+    max_petiole_width: float = 16.0,
+    gradient_threshold: float = 0.75,
+    max_search_fraction: float = 0.45,
+    min_petiole_length_px: float = 14.0,
+    aspect_ratio_protrusion_thresh: float = 3.0,
+    return_metadata: bool = False,
+) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, Any]]]:
+    """
+    Width-Inflection Junction Trimmer.
+
+    Detects and perpendicularly trims narrow petiole stalks extending below the leaf blade
+    at the petiole-lamina junction. In Packera, petioles are long and slender. If segmentation
+    masks include accidental 5-15 mm segments of the petiole stalk below the blade, closed EFA
+    is hyper-dominated by the narrow linear "tail", distorting harmonics A1...A3 and masking
+    true blade shape variation.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Binary uint8 mask of the detected leaf instance (0 and 255/nonzero).
+    p_base : Optional[Tuple[int, int]]
+        Detected or estimated basal insertion point (x, y). If None, auto-detected
+        along primary longitudinal midrib axis.
+    p_apex : Optional[Tuple[int, int]]
+        Detected or estimated blade apex point (x, y). If None, auto-detected.
+    step_px : int
+        Step interval in pixels along the medial axis (default: 2 px).
+    max_petiole_width : float
+        Maximum cross-sectional width in pixels to consider a narrow petiole stalk
+        (Packera petiole stalks typically maintain W ~ 5-15 px, default threshold: 22.0 px).
+    gradient_threshold : float
+        Width gradient inflection threshold (dW/dL > threshold) where the petiole stalk
+        rapidly flares into the lamina (default: 0.75).
+    max_search_fraction : float
+        Fraction of longitudinal axis length to search from the base (default: 0.45).
+    min_petiole_length_px : float
+        Minimum longitudinal stalk length in pixels required before triggering a junction
+        trim (default: 8.0 px), preventing clipping of acute blade tips on clean leaves.
+    aspect_ratio_protrusion_thresh : float
+        Protrusion aspect ratio (length / width) threshold in the basal 5% segment
+        for the fallback morphological width check (default: 3.0).
+    return_metadata : bool
+        If True, returns a tuple of (trimmed_mask, metadata_dict).
+
+    Returns
+    -------
+    Union[np.ndarray, Tuple[np.ndarray, Dict[str, Any]]]
+        Trimmed binary mask, or (trimmed_mask, metadata) if return_metadata=True.
+    """
+    if mask is None or np.count_nonzero(mask) < 30:
+        meta = {
+            "is_trimmed": False,
+            "trim_distance_px": 0.0,
+            "junction_pt": None,
+            "p_base": p_base,
+            "p_apex": p_apex,
+            "original_area": int(np.count_nonzero(mask)) if mask is not None else 0,
+            "trimmed_area": int(np.count_nonzero(mask)) if mask is not None else 0,
+            "stalk_width_mean": 0.0,
+            "reason": "EMPTY_OR_TINY_MASK",
+        }
+        fallback_mask = mask.copy() if mask is not None else np.zeros((10, 10), dtype=np.uint8)
+        return (fallback_mask, meta) if return_metadata else fallback_mask
+
+    h, w = mask.shape[:2]
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        meta = {
+            "is_trimmed": False,
+            "trim_distance_px": 0.0,
+            "junction_pt": None,
+            "p_base": p_base,
+            "p_apex": p_apex,
+            "original_area": int(np.count_nonzero(mask)),
+            "trimmed_area": int(np.count_nonzero(mask)),
+            "stalk_width_mean": 0.0,
+            "reason": "NO_CONTOURS",
+        }
+        return (mask.copy(), meta) if return_metadata else mask.copy()
+
+    main_cnt = max(contours, key=cv2.contourArea)
+    pts = main_cnt.reshape(-1, 2).astype(np.float32)
+
+    # 1. Medial Longitudinal Axis via cv2.fitLine
+    line_params = cv2.fitLine(main_cnt, cv2.DIST_L2, 0, 0.01, 0.01)
+    vx, vy, x0, y0 = [float(v[0]) for v in line_params]
+    projections = (pts[:, 0] - x0) * vx + (pts[:, 1] - y0) * vy
+
+    min_idx = int(np.argmin(projections))
+    max_idx = int(np.argmax(projections))
+    ep1 = (int(pts[min_idx, 0]), int(pts[min_idx, 1]))
+    ep2 = (int(pts[max_idx, 0]), int(pts[max_idx, 1]))
+
+    # Vectorized helper to sample perpendicular cross-sectional widths
+    def _sample_widths(pt_start: Tuple[int, int], pt_end: Tuple[int, int], sample_dist: float) -> Tuple[np.ndarray, np.ndarray]:
+        v_dir = np.array([pt_end[0] - pt_start[0], pt_end[1] - pt_start[1]], dtype=np.float64)
+        L = np.hypot(v_dir[0], v_dir[1])
+        if L < 1e-5:
+            return np.array([]), np.array([])
+        u = v_dir / L
+        n = np.array([-u[1], u[0]], dtype=np.float64)
+        s_steps = np.arange(0, sample_dist, step_px, dtype=np.float64)
+        if len(s_steps) == 0:
+            return np.array([]), np.array([])
+        centers = np.array(pt_start, dtype=np.float64)[None, :] + s_steps[:, None] * u[None, :]
+        w_span = min(max(h, w), 350)
+        t_steps = np.arange(-w_span, w_span + 1, 1.0, dtype=np.float64)
+        gx = np.round(centers[:, 0, None] + t_steps[None, :] * n[0]).astype(np.int32)
+        gy = np.round(centers[:, 1, None] + t_steps[None, :] * n[1]).astype(np.int32)
+        valid = (gx >= 0) & (gx < w) & (gy >= 0) & (gy < h)
+        grid_mask = np.zeros((len(s_steps), len(t_steps)), dtype=bool)
+        grid_mask[valid] = mask[gy[valid], gx[valid]] > 0
+        mid_idx = len(t_steps) // 2
+        widths = np.zeros(len(s_steps), dtype=np.float64)
+        for i in range(len(s_steps)):
+            row = grid_mask[i]
+            mid_i = mid_idx
+            if not row[mid_idx]:
+                nz = np.where(row)[0]
+                if len(nz) > 0 and abs(nz[np.argmin(np.abs(nz - mid_idx))] - mid_idx) <= 6:
+                    mid_i = nz[np.argmin(np.abs(nz - mid_idx))]
+                else:
+                    widths[i] = 0.0
+                    continue
+            l = mid_i
+            while l > 0 and row[l - 1]:
+                l -= 1
+            r = mid_i
+            while r < len(row) - 1 and row[r + 1]:
+                r += 1
+            widths[i] = float(r - l + 1)
+        return s_steps, widths
+
+    # Resolve endpoints and orientation
+    if p_base is not None and p_apex is not None:
+        cand_base, cand_apex = p_base, p_apex
+    else:
+        # Probe both endpoints along the fitted longitudinal axis
+        probe_dist = min(60.0, np.hypot(ep2[0] - ep1[0], ep2[1] - ep1[1]) * 0.35)
+        s1, w1 = _sample_widths(ep1, ep2, probe_dist)
+        s2, w2 = _sample_widths(ep2, ep1, probe_dist)
+
+        narrow_1 = np.where(w1 <= max_petiole_width)[0] if len(w1) else np.array([])
+        narrow_2 = np.where(w2 <= max_petiole_width)[0] if len(w2) else np.array([])
+        stalk_len_1 = float(s1[narrow_1[-1]]) if len(narrow_1) else 0.0
+        stalk_len_2 = float(s2[narrow_2[-1]]) if len(narrow_2) else 0.0
+
+        if stalk_len_1 >= min_petiole_length_px and stalk_len_1 >= stalk_len_2 + 6.0:
+            cand_base, cand_apex = ep1, ep2
+        elif stalk_len_2 >= min_petiole_length_px and stalk_len_2 >= stalk_len_1 + 6.0:
+            cand_base, cand_apex = ep2, ep1
+        else:
+            cand_base = p_base if p_base is not None else ep2
+            cand_apex = p_apex if p_apex is not None else ep1
+
+    axis_len = float(math.hypot(cand_apex[0] - cand_base[0], cand_apex[1] - cand_base[1]))
+    if axis_len < 15.0:
+        meta = {
+            "is_trimmed": False,
+            "trim_distance_px": 0.0,
+            "junction_pt": None,
+            "p_base": cand_base,
+            "p_apex": cand_apex,
+            "original_area": int(np.count_nonzero(mask)),
+            "trimmed_area": int(np.count_nonzero(mask)),
+            "stalk_width_mean": 0.0,
+            "reason": "AXIS_TOO_SHORT",
+        }
+        return (mask.copy(), meta) if return_metadata else mask.copy()
+
+    # Step along medial axis from basal insertion toward apex at step_px intervals
+    search_dist = min(axis_len * max_search_fraction, axis_len - 10.0)
+    s_steps, widths = _sample_widths(cand_base, cand_apex, search_dist)
+    if len(s_steps) < 5:
+        meta = {
+            "is_trimmed": False,
+            "trim_distance_px": 0.0,
+            "junction_pt": None,
+            "p_base": cand_base,
+            "p_apex": cand_apex,
+            "original_area": int(np.count_nonzero(mask)),
+            "trimmed_area": int(np.count_nonzero(mask)),
+            "stalk_width_mean": 0.0,
+            "reason": "INSUFFICIENT_STEPS",
+        }
+        return (mask.copy(), meta) if return_metadata else mask.copy()
+
+    # 2. Guard against truncate / cordate leaves: broad base is never clipped
+    w_init = np.median(widths[:min(3, len(widths))])
+    if w_init > max_petiole_width:
+        meta = {
+            "is_trimmed": False,
+            "trim_distance_px": 0.0,
+            "junction_pt": None,
+            "p_base": cand_base,
+            "p_apex": cand_apex,
+            "original_area": int(np.count_nonzero(mask)),
+            "trimmed_area": int(np.count_nonzero(mask)),
+            "stalk_width_mean": 0.0,
+            "reason": "CORDATE_OR_BROAD_BASE_PROTECTED",
+        }
+        return (mask.copy(), meta) if return_metadata else mask.copy()
+
+    # Find contiguous narrow petiole stalk segment (W <= max_petiole_width)
+    narrow_indices = []
+    for k in range(len(s_steps)):
+        if widths[k] <= max_petiole_width:
+            narrow_indices.append(k)
+        else:
+            break
+
+    if not narrow_indices:
+        meta = {
+            "is_trimmed": False,
+            "trim_distance_px": 0.0,
+            "junction_pt": None,
+            "p_base": cand_base,
+            "p_apex": cand_apex,
+            "original_area": int(np.count_nonzero(mask)),
+            "trimmed_area": int(np.count_nonzero(mask)),
+            "stalk_width_mean": 0.0,
+            "reason": "NO_NARROW_BASE",
+        }
+        return (mask.copy(), meta) if return_metadata else mask.copy()
+
+    stalk_len = s_steps[narrow_indices[-1]]
+    junction_idx = None
+    reason = None
+
+    # Fallback Morphological Width Check if stalk is short
+    if stalk_len < min_petiole_length_px:
+        idx_5 = np.where(s_steps <= 0.05 * axis_len)[0]
+        if len(idx_5) >= 2:
+            w_5 = np.mean(widths[idx_5])
+            L_5 = s_steps[idx_5[-1]]
+            ar = L_5 / max(w_5, 1.0)
+            if ar > aspect_ratio_protrusion_thresh and w_5 <= max_petiole_width and stalk_len >= 6.0:
+                junction_idx = narrow_indices[-1]
+                reason = "FALLBACK_MORPHOLOGICAL_PROTRUSION_TRIMMED"
+            else:
+                reason = "CLEAN_BLADE_UNCLIPPED"
+        else:
+            reason = "CLEAN_BLADE_UNCLIPPED"
+    else:
+        # A narrow petiole stalk exists; search for width inflection junction into lamina
+        for k in narrow_indices:
+            if s_steps[k] < min_petiole_length_px:
+                continue
+            span = min(3, len(s_steps) - 1 - k)
+            if span > 0:
+                dw_dl = (widths[k + span] - widths[k]) / (s_steps[k + span] - s_steps[k])
+                if dw_dl >= gradient_threshold:
+                    future_w = widths[k: min(k + 8, len(widths))]
+                    if np.max(future_w) >= max_petiole_width * 1.3:
+                        junction_idx = k
+                        reason = "WIDTH_INFLECTION_JUNCTION_TRIMMED"
+                        break
+        if junction_idx is None:
+            last_narrow = narrow_indices[-1]
+            if last_narrow < len(widths) - 2 and widths[last_narrow + 1] > max_petiole_width:
+                junction_idx = last_narrow
+                reason = "WIDTH_INFLECTION_JUNCTION_TRIMMED"
+
+    if junction_idx is None or junction_idx == 0:
+        meta = {
+            "is_trimmed": False,
+            "trim_distance_px": 0.0,
+            "junction_pt": None,
+            "p_base": cand_base,
+            "p_apex": cand_apex,
+            "original_area": int(np.count_nonzero(mask)),
+            "trimmed_area": int(np.count_nonzero(mask)),
+            "stalk_width_mean": 0.0,
+            "reason": reason or "CLEAN_BLADE_UNCLIPPED",
+        }
+        return (mask.copy(), meta) if return_metadata else mask.copy()
+
+    # 3. Clip mask perpendicularly at detected junction
+    L_junction = s_steps[junction_idx]
+    u_dir = np.array([cand_apex[0] - cand_base[0], cand_apex[1] - cand_base[1]], dtype=np.float64) / axis_len
+    p_junction = np.array(cand_base, dtype=np.float64) + L_junction * u_dir
+    pj_x, pj_y = p_junction[0], p_junction[1]
+
+    Y, X = np.ogrid[:h, :w]
+    proj = (X - pj_x) * u_dir[0] + (Y - pj_y) * u_dir[1]
+    clipped = mask.copy()
+    clipped[proj < 0] = 0
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(clipped, connectivity=8)
+    if num_labels > 1:
+        largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        clipped = np.where(labels == largest_label, 255, 0).astype(np.uint8)
+
+    meta = {
+        "is_trimmed": True,
+        "trim_distance_px": float(L_junction),
+        "junction_pt": (int(round(pj_x)), int(round(pj_y))),
+        "p_base": (int(round(pj_x)), int(round(pj_y))),
+        "p_apex": cand_apex,
+        "original_area": int(np.count_nonzero(mask)),
+        "trimmed_area": int(np.count_nonzero(clipped)),
+        "stalk_width_mean": float(np.mean(widths[s_steps < L_junction])) if np.any(s_steps < L_junction) else 0.0,
+        "reason": reason,
+    }
+    return (clipped, meta) if return_metadata else clipped
+
+
+def homologize_contour_starting_point(
+    contour: np.ndarray,
+    petiole_attachment_pt: Tuple[int, int]
+) -> np.ndarray:
+    """
+    Homologizes the contour starting point to an anatomical anchor (petiole attachment
+    or basal insertion point) and enforces strict clockwise perimeter tracing.
+
+    In Elliptic Fourier Analysis (e.g. Momocs::efourier), if contours start at arbitrary
+    perimeter locations (e.g., base vs. apex), Fourier phase angles shift by ~pi (180 deg),
+    flipping harmonic signs and artificially splitting identical shapes in PCA morphospace.
+
+    Parameters
+    ----------
+    contour : np.ndarray
+        Closed 2D contour array of shape (N, 2) or (N, 1, 2).
+    petiole_attachment_pt : Tuple[int, int]
+        (x, y) coordinates of the petiole-blade junction or base-most point along
+        the primary longitudinal axis.
+
+    Returns
+    -------
+    np.ndarray
+        Homologized 2D contour array of shape (N, 2) starting at the vertex closest
+        to petiole_attachment_pt and tracing strictly clockwise.
+    """
+    if contour is None or len(contour) == 0:
+        return np.empty((0, 2), dtype=np.float32)
+
+    pts_2d = np.asarray(contour).reshape(-1, 2)
+    n_pts = len(pts_2d)
+
+    if n_pts < 3 or petiole_attachment_pt is None:
+        return pts_2d.copy()
+
+    # 1. Calculate Euclidean distances from all contour vertices to petiole_attachment_pt
+    p_anchor = np.array([float(petiole_attachment_pt[0]), float(petiole_attachment_pt[1])], dtype=np.float64)
+    diffs = pts_2d.astype(np.float64) - p_anchor
+    distances = np.hypot(diffs[:, 0], diffs[:, 1])
+
+    # Find closest vertex index to petiole attachment point
+    start_idx = int(np.argmin(distances))
+
+    # Rotate (roll) coordinate array so start_idx becomes Index 0
+    homologized_contour = np.roll(pts_2d, -start_idx, axis=0)
+
+    # 2. Enforce Strict Clockwise Tracing Orientation
+    # In OpenCV, positive area indicates counter-clockwise orientation; negative indicates clockwise.
+    area = cv2.contourArea(homologized_contour.reshape(-1, 1, 2).astype(np.float32), oriented=True)
+
+    # Guard against zero-area or degenerated contours (area == 0.0 remains unchanged)
+    if area > 0:
+        # Invert vertex order while preserving Index 0
+        homologized_contour = np.vstack([homologized_contour[0:1], homologized_contour[1:][::-1]])
+
+    return homologized_contour
+
+
 def resample_normalized_contour(
     mask: np.ndarray,
-    num_points: int = 120
+    num_points: int = 120,
+    petiole_attachment_pt: Optional[Tuple[int, int]] = None
 ) -> Optional[np.ndarray]:
     """
     Extracts resampled, normalized 2D coordinates (x_norm, y_norm) of shape (num_points, 2)
     from a binary mask, with consistent clockwise orientation and min-max normalization.
     """
+    if mask is not None:
+        mask = trim_petiole_tail(mask)
+
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return None
@@ -546,6 +920,11 @@ def resample_normalized_contour(
     largest_cnt = max(contours, key=cv2.contourArea).reshape(-1, 2)
     if len(largest_cnt) < 10:
         return None
+
+    if petiole_attachment_pt is None:
+        _, _, _, _, petiole_attachment_pt = compute_geometric_metrics(mask)
+
+    largest_cnt = homologize_contour_starting_point(largest_cnt, petiole_attachment_pt)
 
     pts = largest_cnt.astype(np.float64)
     if not np.allclose(pts[0], pts[-1]):
@@ -571,11 +950,12 @@ def resample_normalized_contour(
     x_resamp = np.interp(target_distances, cum_dist, pts[:, 0])
     y_resamp = np.interp(target_distances, cum_dist, pts[:, 1])
 
-    # Enforce consistent clockwise contour orientation (positive signed area)
-    signed_area = 0.5 * float(np.sum(x_resamp * np.roll(y_resamp, -1) - np.roll(x_resamp, -1) * y_resamp))
-    if signed_area < 0:
-        x_resamp = x_resamp[::-1]
-        y_resamp = y_resamp[::-1]
+    # Enforce strict clockwise tracing orientation & preserve anchor
+    resampled_homologized = homologize_contour_starting_point(
+        np.column_stack([x_resamp, y_resamp]), petiole_attachment_pt
+    )
+    x_resamp = resampled_homologized[:, 0]
+    y_resamp = resampled_homologized[:, 1]
 
     min_x, max_x = np.min(x_resamp), np.max(x_resamp)
     min_y, max_y = np.min(y_resamp), np.max(y_resamp)
@@ -585,6 +965,7 @@ def resample_normalized_contour(
     x_norm = np.round((x_resamp - min_x) / span_x, 6)
     y_norm = np.round((y_resamp - min_y) / span_y, 6)
     return np.column_stack([x_norm, y_norm])
+
 
 
 @dataclass
@@ -774,6 +1155,9 @@ def classify_and_route_leaf(
             rejection_reason="mask_empty_or_too_small"
         )
 
+    # Width-inflection junction trimming to eliminate petiole tail prior to computing harmonics and solidity
+    mask, trim_meta = trim_petiole_tail(mask, return_metadata=True)
+
     ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(mask)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
@@ -830,6 +1214,7 @@ def classify_and_route_leaf(
         "fold_info": fold_info,
         "reflection_applied": False,
         "taxon_has_lyrate_tendency": taxon_has_lyrate_tendency,
+        "petiole_trim_info": trim_meta,
     }
 
     if is_folded:
@@ -868,7 +1253,7 @@ def classify_and_route_leaf(
 
     # 2. Standard Tier 1 Pristine Check
     if ucs >= min_ucs and solidity >= min_solidity:
-        coords = resample_normalized_contour(mask, num_contour_points) if extract_contours else None
+        coords = resample_normalized_contour(mask, num_contour_points, petiole_attachment_pt=p_base) if extract_contours else None
         meta["reflection_applied"] = False
         return LeafRoutingResult(
             tier="Tier 1",
@@ -896,7 +1281,7 @@ def classify_and_route_leaf(
             min_defect_count=min_bilateral_sinus_count,
         )
         if dissected or taxon_has_lyrate_tendency:
-            coords = resample_normalized_contour(mask, num_contour_points) if extract_contours else None
+            coords = resample_normalized_contour(mask, num_contour_points, petiole_attachment_pt=p_base) if extract_contours else None
             meta["reflection_applied"] = False
             return LeafRoutingResult(
                 tier="Tier 1 (Dissected)",
@@ -1166,21 +1551,35 @@ def export_standardized_contour(
     catalog_number: str,
     leaf_id: int,
     output_dir: Path,
-    num_points: int = 120
+    num_points: int = 120,
+    petiole_attachment_pt: Optional[Tuple[int, int]] = None,
+    contour: Optional[np.ndarray] = None,
 ) -> Optional[str]:
     """
     Extracts vectorized 2D (x, y) boundary coordinates from a binary silhouette mask,
-    enforces consistent clockwise orientation, normalizes coordinates (x_norm, y_norm)
-    for downstream Elliptic Fourier Analysis, and saves to
+    homologizes starting point to the petiole-blade junction anchor, enforces consistent
+    clockwise orientation, normalizes coordinates (x_norm, y_norm) for downstream
+    Elliptic Fourier Analysis, and saves to
     output_dir/contours/{catalogNumber}_leaf{id}.csv.
     """
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
-        return None
+    if contour is not None and len(contour) >= 10:
+        largest_cnt = contour.reshape(-1, 2)
+    else:
+        if mask is not None:
+            mask = trim_petiole_tail(mask)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            return None
+        largest_cnt = max(contours, key=cv2.contourArea).reshape(-1, 2)
+        if len(largest_cnt) < 10:
+            return None
 
-    largest_cnt = max(contours, key=cv2.contourArea).reshape(-1, 2)
-    if len(largest_cnt) < 10:
-        return None
+    # Resolve petiole attachment anchor point if not provided
+    if petiole_attachment_pt is None:
+        _, _, _, _, petiole_attachment_pt = compute_geometric_metrics(mask)
+
+    # Homologize starting point to petiole base & enforce clockwise orientation
+    largest_cnt = homologize_contour_starting_point(largest_cnt, petiole_attachment_pt)
 
     # Resample smoothly along perimeter to standardized point count
     pts = largest_cnt.astype(np.float64)
@@ -1207,11 +1606,12 @@ def export_standardized_contour(
     x_resamp = np.interp(target_distances, cum_dist, pts[:, 0])
     y_resamp = np.interp(target_distances, cum_dist, pts[:, 1])
 
-    # Enforce consistent clockwise contour orientation (in image space, clockwise has positive signed area)
-    signed_area = 0.5 * float(np.sum(x_resamp * np.roll(y_resamp, -1) - np.roll(x_resamp, -1) * y_resamp))
-    if signed_area < 0:
-        x_resamp = x_resamp[::-1]
-        y_resamp = y_resamp[::-1]
+    # Re-verify homologization on resampled contour points
+    resampled_homologized = homologize_contour_starting_point(
+        np.column_stack([x_resamp, y_resamp]), petiole_attachment_pt
+    )
+    x_resamp = resampled_homologized[:, 0]
+    y_resamp = resampled_homologized[:, 1]
 
     min_x, max_x = np.min(x_resamp), np.max(x_resamp)
     min_y, max_y = np.min(y_resamp), np.max(y_resamp)

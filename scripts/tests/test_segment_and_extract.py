@@ -39,6 +39,7 @@ export_standardized_contour = step02.export_standardized_contour
 extract_tier1_pristine = step02.extract_tier1_pristine
 extract_tier2_reflected = step02.extract_tier2_reflected
 compute_capitulum_metrics = step02.compute_capitulum_metrics
+homologize_contour_starting_point = step02.homologize_contour_starting_point
 
 
 class TestSegmentAndExtract(unittest.TestCase):
@@ -183,9 +184,76 @@ class TestSegmentAndExtract(unittest.TestCase):
         metrics_stem = compute_capitulum_metrics(mask_stem, (20, 40, 280, 60))
         self.assertIsNone(metrics_stem, "Excessively elongated stem fragment must be rejected (AR > 2.0).")
 
+    def test_homologize_contour_starting_point_anchoring_and_orientation(self) -> None:
+        """Verify contour start point rolls to closest anchor vertex and enforces clockwise orientation."""
+        # 1. Counter-clockwise oriented polygon (positive area in OpenCV)
+        # Coordinates: bottom (100, 170), left (30, 100), top (100, 30), right (170, 100)
+        pts_ccw = np.array([[100, 170], [30, 100], [100, 30], [170, 100]], dtype=np.float32)
+        self.assertGreater(cv2.contourArea(pts_ccw, oriented=True), 0)
 
+        # Petiole anchor near top (100, 25)
+        homo_top = homologize_contour_starting_point(pts_ccw, (100, 25))
+        self.assertEqual(len(homo_top), len(pts_ccw), "Vertex count must be preserved exactly.")
+        np.testing.assert_array_almost_equal(homo_top[0], [100.0, 30.0], err_msg="Index 0 must be closest to anchor.")
+        self.assertLessEqual(cv2.contourArea(homo_top, oriented=True), 0, "Oriented area must be negative (CW).")
 
-class TestSegmentAndExtractResumption(unittest.TestCase):
+        # Petiole anchor near bottom (100, 180)
+        homo_bottom = homologize_contour_starting_point(pts_ccw, (100, 180))
+        self.assertEqual(len(homo_bottom), len(pts_ccw))
+        np.testing.assert_array_almost_equal(homo_bottom[0], [100.0, 170.0])
+        self.assertLessEqual(cv2.contourArea(homo_bottom, oriented=True), 0)
+
+        # 2. Already clockwise oriented polygon (negative area in OpenCV)
+        pts_cw = np.array([[100, 170], [170, 100], [100, 30], [30, 100]], dtype=np.float32)
+        self.assertLess(cv2.contourArea(pts_cw, oriented=True), 0)
+
+        homo_cw = homologize_contour_starting_point(pts_cw, (25, 100))
+        self.assertEqual(len(homo_cw), len(pts_cw))
+        np.testing.assert_array_almost_equal(homo_cw[0], [30.0, 100.0])
+        self.assertLessEqual(cv2.contourArea(homo_cw, oriented=True), 0)
+
+    def test_homologize_contour_starting_point_guards(self) -> None:
+        """Verify homologize_contour_starting_point gracefully handles empty, degenerate, and edge cases."""
+        # Empty array
+        empty = homologize_contour_starting_point(np.empty((0, 2)), (100, 100))
+        self.assertEqual(len(empty), 0)
+
+        # Single point
+        single = homologize_contour_starting_point(np.array([[50, 50]]), (100, 100))
+        self.assertEqual(len(single), 1)
+
+        # Collinear points (zero area)
+        collinear = np.array([[10, 10], [20, 20], [30, 30]], dtype=np.float32)
+        homo_collinear = homologize_contour_starting_point(collinear, (28, 28))
+        self.assertEqual(len(homo_collinear), 3)
+        np.testing.assert_array_almost_equal(homo_collinear[0], [30.0, 30.0])
+
+        # None anchor
+        unchanged = homologize_contour_starting_point(collinear, None)
+        np.testing.assert_array_almost_equal(unchanged, collinear)
+
+    def test_export_standardized_contour_homologized_start_point(self) -> None:
+        """Verify exported CSV contour begins at the petiole anchor and has clockwise orientation."""
+        mask = np.zeros((300, 300), dtype=np.uint8)
+        # Vertical ellipse: center (150, 150), axes (40, 100) -> apex ~(150, 50), base ~(150, 250)
+        cv2.ellipse(mask, (150, 150), (40, 100), 0, 0, 360, 255, -1)
+
+        p_base = (150, 250)
+        csv_path = export_standardized_contour(
+            mask, "TEST_HOMO", 1, self.temp_dir, num_points=120, petiole_attachment_pt=p_base
+        )
+        self.assertIsNotNone(csv_path)
+        df = pd.read_csv(csv_path)
+
+        # First vertex should be closest to p_base
+        dist_pt0 = np.hypot(df.iloc[0]["x"] - p_base[0], df.iloc[0]["y"] - p_base[1])
+        self.assertLessEqual(dist_pt0, 5.0, "Index 0 must be located at the petiole base.")
+
+        # Resampled contour must trace clockwise: oriented area should be negative
+        pts = df[["x", "y"]].to_numpy(dtype=np.float32)
+        area = cv2.contourArea(pts, oriented=True)
+        self.assertLess(area, 0, "Resampled standardized contour must be strictly clockwise.")
+
     """Test suite for Step 02 inference resumption, artifact skipping, and CLI flags."""
 
     def setUp(self) -> None:

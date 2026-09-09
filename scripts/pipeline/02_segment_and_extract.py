@@ -73,6 +73,7 @@ from scripts.vision.lm2_geometry_utils import (
     export_standardized_contour,
     extract_tier1_pristine,
     extract_tier2_reflected,
+    homologize_contour_starting_point,
     is_botanical_dissection,
     LeafRoutingResult,
 )
@@ -619,6 +620,27 @@ class SegmentAndExtractPipeline:
                     for lyr in self.taxa_with_lyrate_tendency
                 )
 
+            # Helper to extract, homologize, and export standardized contour
+            def _export_homologized(mask_proc: np.ndarray, is_reflected: bool) -> Optional[str]:
+                p_base_pt = routing_res.metadata.get("p_base")
+                if is_reflected or p_base_pt is None or p_base_pt == (0, 0):
+                    _, _, _, _, p_base_pt = compute_geometric_metrics(mask_proc)
+
+                cnts, _ = cv2.findContours(mask_proc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                homologized_c = None
+                if cnts:
+                    raw_c = max(cnts, key=cv2.contourArea).reshape(-1, 2)
+                    homologized_c = homologize_contour_starting_point(raw_c, p_base_pt)
+
+                return export_standardized_contour(
+                    mask_proc,
+                    catalog_number,
+                    inst.leaf_id,
+                    self.output_dir,
+                    petiole_attachment_pt=p_base_pt,
+                    contour=homologized_c,
+                )
+
             # Routing Decision Tree
             # 1. Check for fold: If is_folded == True -> synthesize full blade via reflection -> route to Tier 2
             if is_folded and routing_res.assigned_tier == "tier2":
@@ -638,9 +660,7 @@ class SegmentAndExtractPipeline:
                 cv2.imwrite(str(main_save_path), routing_res.processed_mask)
                 cv2.imwrite(str(tier_save_path), routing_res.processed_mask)
 
-                contour_path = export_standardized_contour(
-                    routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir
-                )
+                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=True)
                 inst.mask_path = str(main_save_path)
                 inst.contour_path = contour_path
 
@@ -650,7 +670,7 @@ class SegmentAndExtractPipeline:
                 assigned_tier = "tier1"
                 reflection_applied = False
                 mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
-                contour_path = export_standardized_contour(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
+                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=False)
                 inst.mask_path = mask_path
                 inst.contour_path = contour_path
 
@@ -661,7 +681,7 @@ class SegmentAndExtractPipeline:
                 is_dissected = True
                 reflection_applied = False
                 mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
-                contour_path = export_standardized_contour(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
+                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=False)
                 inst.mask_path = mask_path
                 inst.contour_path = contour_path
 
@@ -683,9 +703,7 @@ class SegmentAndExtractPipeline:
                 cv2.imwrite(str(main_save_path), routing_res.processed_mask)
                 cv2.imwrite(str(tier_save_path), routing_res.processed_mask)
 
-                contour_path = export_standardized_contour(
-                    routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir
-                )
+                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=True)
                 inst.mask_path = str(main_save_path)
                 inst.contour_path = contour_path
 

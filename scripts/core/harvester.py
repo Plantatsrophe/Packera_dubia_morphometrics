@@ -62,6 +62,8 @@ EXPORT_COLUMNS = [
     "institutionCode",
     "scientificName",
     "species_raw",
+    "recordedBy",
+    "recordNumber",
     "identifiedBy",
     "determiner_raw",
     "determiner_tier",
@@ -79,7 +81,397 @@ EXPORT_COLUMNS = [
     "eventDate",
     "regional_group",
     "image_path",
+    "exsiccatae_key",
+    "is_primary_duplicate",
+    "duplicate_count",
 ]
+
+
+def normalize_collector(recorded_by: Optional[str]) -> str:
+    """
+    Normalizes botanical collector names for exsiccatae collection event fingerprinting:
+    lowercased, non-alphanumeric characters stripped, initials removed, primary surname extracted.
+    e.g., 'J. Brandon Fuller' -> 'fuller', 'Fuller, J. B.' -> 'fuller', 'A. Cronquist' -> 'cronquist'.
+    """
+    if not recorded_by or not isinstance(recorded_by, str):
+        return "unknown"
+    s = str(recorded_by).strip()
+    if not s or s.lower() in {"none", "nan", "null", "unknown", "anonymous", "not evident"}:
+        return "unknown"
+
+    # Separate multiple collectors (e.g. 'J. B. Fuller & R. R. Kowal') -> retain primary collector
+    primary = re.split(r"\s*(?:&|;|\band\b|\bwith\b|\bet\s+al\.?)\s*", s, flags=re.IGNORECASE)[0].strip()
+
+    # Handle 'Fuller, J. Brandon' format
+    if "," in primary:
+        surname_part = primary.split(",")[0].strip()
+        cleaned = re.sub(r"[^a-zA-Z0-9]", "", surname_part).lower()
+        if cleaned:
+            return cleaned
+
+    # Tokenize and remove punctuation
+    tokens = [re.sub(r"[^a-zA-Z0-9]", "", t).lower() for t in primary.split()]
+    tokens = [t for t in tokens if t]
+
+    if not tokens:
+        return "unknown"
+
+    # Remove single-letter initials (e.g. 'j', 'b')
+    non_initials = [t for t in tokens if len(t) > 1]
+    if not non_initials:
+        # All tokens were initials (e.g. 'J. B.')
+        return "".join(tokens)
+
+    # In 'First Middle Last', the surname is the last token
+    return non_initials[-1]
+
+
+def normalize_record_number(record_number: Optional[Any]) -> str:
+    """
+    Normalizes collection number: strips prefixes and suffixes, extracts pure numeric component.
+    e.g., '#1042' -> '1042', 'No. 1042b' -> '1042', 's.n.' -> ''.
+    """
+    if record_number is None:
+        return ""
+    s = str(record_number).strip()
+    if not s or s.lower() in {"none", "nan", "null", "s.n.", "sn", "s. n.", "unnumbered"}:
+        return ""
+    match = re.search(r"\d+", s)
+    return match.group(0) if match else ""
+
+
+def normalize_event_date(
+    event_date_raw: Optional[str] = None,
+    year: Optional[Any] = None,
+    month: Optional[Any] = None,
+    day: Optional[Any] = None,
+) -> str:
+    """
+    Standardizes collection event date to ISO format YYYY-MM-DD.
+    Evaluates explicit year, month, day components or parses date string.
+    """
+    try:
+        if year is not None and month is not None and day is not None:
+            if not (pd.isna(year) or pd.isna(month) or pd.isna(day)):
+                y, m, d = int(year), int(month), int(day)
+                if 1700 <= y <= 2100 and 1 <= m <= 12 and 1 <= d <= 31:
+                    return f"{y:04d}-{m:02d}-{d:02d}"
+    except (ValueError, TypeError):
+        pass
+
+    if event_date_raw and isinstance(event_date_raw, str):
+        s = event_date_raw.strip()
+        match_iso = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", s)
+        if match_iso:
+            y, m, d = int(match_iso.group(1)), int(match_iso.group(2)), int(match_iso.group(3))
+            return f"{y:04d}-{m:02d}-{d:02d}"
+        match_y = re.search(r"\b(1[789]\d{2}|20\d{2})\b", s)
+        if match_y:
+            return f"{match_y.group(1)}-00-00"
+
+    try:
+        if year is not None and not pd.isna(year):
+            y = int(year)
+            if 1700 <= y <= 2100:
+                return f"{y:04d}-00-00"
+    except (ValueError, TypeError):
+        pass
+
+    return "unknown_date"
+
+
+def generate_exsiccatae_key(
+    collector: Optional[str],
+    number: Optional[Any],
+    date: Optional[str] = None,
+    year: Optional[Any] = None,
+    month: Optional[Any] = None,
+    day: Optional[Any] = None,
+) -> str:
+    """
+    Constructs a standardized collection event signature (exsiccatae fingerprint):
+    f"{norm_collector}_{norm_number}_{norm_date}".
+    """
+    norm_collector = normalize_collector(collector)
+    norm_number = normalize_record_number(number)
+    norm_date = normalize_event_date(date, year=year, month=month, day=day)
+    return f"{norm_collector}_{norm_number}_{norm_date}"
+
+
+def haversine_distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculates geodesic distance between two coordinate pairs using the Haversine formula."""
+    r_earth = 6371000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_phi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return r_earth * c
+
+
+def get_image_resolution_score(image_path_str: Optional[str], workspace_dir: Optional[Path] = None) -> float:
+    """Computes a numeric image resolution score (megapixels or pixel count, fallback to byte size)."""
+    if not image_path_str or not isinstance(image_path_str, str):
+        return 0.0
+    p = Path(image_path_str)
+    resolved_path: Optional[Path] = None
+    if p.is_absolute() and p.exists():
+        resolved_path = p
+    elif workspace_dir and (workspace_dir / p).exists():
+        resolved_path = workspace_dir / p
+    elif (PROJECT_ROOT / p).exists():
+        resolved_path = PROJECT_ROOT / p
+
+    if resolved_path and resolved_path.exists():
+        try:
+            with Image.open(resolved_path) as img:
+                w, h = img.size
+                return float(w * h)
+        except Exception:
+            try:
+                return float(resolved_path.stat().st_size)
+            except Exception:
+                return 0.0
+    return 0.0
+
+
+def stratify_duplicates(
+    df: pd.DataFrame,
+    max_distance_meters: float = 50.0,
+    workspace_dir: Optional[Path] = None,
+    logger: Optional[logging.Logger] = None,
+) -> pd.DataFrame:
+    """
+    Identifies duplicate voucher specimens (exsiccatae) representing the same
+    field collection event distributed across multiple herbaria.
+
+    Duplicates are resolved by:
+      1. Standardized exsiccatae fingerprint (norm_collector + norm_number + norm_date).
+      2. If collection number is missing, falls back to geographic coordinate proximity (< 50 m)
+         within identical collection dates.
+
+    Designates exactly one primary voucher per duplicate group using institutional hierarchy:
+      Priority 1: Verified Type Status
+      Priority 2: Home Herbarium (NCU)
+      Priority 3: Tier 1 Specialist determinations
+      Priority 4: Highest specimen image resolution
+
+    Adds/updates columns:
+      - exsiccatae_key: Standardized signature string
+      - is_primary_duplicate: Boolean flag (True for primary specimen, False for duplicates)
+      - duplicate_count: Total sheets in this exsiccatae group
+    """
+    if df.empty:
+        df["exsiccatae_key"] = pd.Series(dtype=str)
+        df["is_primary_duplicate"] = pd.Series(dtype=bool)
+        df["duplicate_count"] = pd.Series(dtype=int)
+        return df
+
+    df = df.copy()
+
+    # Ensure metadata columns exist
+    if "recordedBy" not in df.columns:
+        df["recordedBy"] = df.get("determiner_raw", df.get("identifiedBy", ""))
+    if "recordNumber" not in df.columns:
+        df["recordNumber"] = ""
+    if "image_path" not in df.columns:
+        df["image_path"] = ""
+
+    norm_collectors: List[str] = []
+    norm_numbers: List[str] = []
+    norm_dates: List[str] = []
+    has_coords: List[bool] = []
+    lats: List[Optional[float]] = []
+    lons: List[Optional[float]] = []
+
+    for _, row in df.iterrows():
+        rec_by = str(row.get("recordedBy", "") if not pd.isna(row.get("recordedBy", "")) else "")
+        rec_num = row.get("recordNumber", "") if not pd.isna(row.get("recordNumber", "")) else ""
+        ev_date = str(row.get("eventDate", "") if not pd.isna(row.get("eventDate", "")) else "")
+        yr = row.get("year")
+        mo = row.get("month")
+        dy = row.get("day")
+
+        c_norm = normalize_collector(rec_by)
+        n_norm = normalize_record_number(rec_num)
+        d_norm = normalize_event_date(ev_date, year=yr, month=mo, day=dy)
+
+        lat_val = None
+        lon_val = None
+        for col_lat in ["latitude", "decimalLatitude"]:
+            if col_lat in row and not pd.isna(row[col_lat]):
+                try:
+                    lat_val = float(row[col_lat])
+                    break
+                except (ValueError, TypeError):
+                    pass
+        for col_lon in ["longitude", "decimalLongitude"]:
+            if col_lon in row and not pd.isna(row[col_lon]):
+                try:
+                    lon_val = float(row[col_lon])
+                    break
+                except (ValueError, TypeError):
+                    pass
+
+        norm_collectors.append(c_norm)
+        norm_numbers.append(n_norm)
+        norm_dates.append(d_norm)
+        has_coords.append(lat_val is not None and lon_val is not None)
+        lats.append(lat_val)
+        lons.append(lon_val)
+
+    n_rows = len(df)
+    group_labels: List[Optional[str]] = [None] * n_rows
+
+    # Pass 1: Assign keys for records with explicit collection numbers
+    for idx in range(n_rows):
+        if norm_numbers[idx]:
+            group_labels[idx] = f"{norm_collectors[idx]}_{norm_numbers[idx]}_{norm_dates[idx]}"
+
+    # Pass 2: Missing collection number -> fallback to coordinate proximity (< 50m) on identical dates
+    missing_num_indices = [idx for idx in range(n_rows) if not norm_numbers[idx]]
+    date_to_indices: Dict[str, List[int]] = {}
+    for idx in missing_num_indices:
+        d = norm_dates[idx]
+        date_to_indices.setdefault(d, []).append(idx)
+
+    for d_val, idx_list in date_to_indices.items():
+        if d_val == "unknown_date":
+            for i in idx_list:
+                cat = sanitize_filename(str(df.iloc[i].get("catalogNumber", i)))
+                group_labels[i] = f"{norm_collectors[i]}_sn_{cat}_{d_val}"
+            continue
+
+        coord_indices = [i for i in idx_list if has_coords[i]]
+        no_coord_indices = [i for i in idx_list if not has_coords[i]]
+
+        # Records without coordinates cannot verify < 50m proximity; preserve as unique singletons
+        for i in no_coord_indices:
+            cat = sanitize_filename(str(df.iloc[i].get("catalogNumber", i)))
+            group_labels[i] = f"{norm_collectors[i]}_sn_{cat}_{d_val}"
+
+        # Match unnumbered records to any numbered collection on the same date within max_distance_meters
+        numbered_date_indices = [
+            i for i in range(n_rows)
+            if norm_numbers[i] and norm_dates[i] == d_val and has_coords[i]
+        ]
+
+        matched_to_numbered = set()
+        for i in coord_indices:
+            for num_i in numbered_date_indices:
+                if norm_collectors[i] == norm_collectors[num_i] or norm_collectors[i] == "unknown":
+                    dist = haversine_distance_meters(lats[i], lons[i], lats[num_i], lons[num_i])
+                    if dist <= max_distance_meters:
+                        group_labels[i] = group_labels[num_i]
+                        matched_to_numbered.add(i)
+                        break
+
+        remaining_coord_indices = [i for i in coord_indices if i not in matched_to_numbered]
+        num_rem = len(remaining_coord_indices)
+        if num_rem == 0:
+            continue
+
+        visited = [False] * num_rem
+        for a in range(num_rem):
+            if visited[a]:
+                continue
+            cluster = [a]
+            visited[a] = True
+            q = [a]
+            while q:
+                curr = q.pop(0)
+                curr_idx = remaining_coord_indices[curr]
+                for b in range(num_rem):
+                    if not visited[b]:
+                        b_idx = remaining_coord_indices[b]
+                        same_coll = (
+                            norm_collectors[curr_idx] == norm_collectors[b_idx]
+                            or norm_collectors[curr_idx] == "unknown"
+                            or norm_collectors[b_idx] == "unknown"
+                        )
+                        if same_coll:
+                            dist = haversine_distance_meters(
+                                lats[curr_idx], lons[curr_idx], lats[b_idx], lons[b_idx]
+                            )
+                            if dist <= max_distance_meters:
+                                visited[b] = True
+                                cluster.append(b)
+                                q.append(b)
+
+            actual_indices = [remaining_coord_indices[c_idx] for c_idx in cluster]
+            best_coll = "unknown"
+            for act_i in actual_indices:
+                if norm_collectors[act_i] != "unknown":
+                    best_coll = norm_collectors[act_i]
+                    break
+
+            if len(actual_indices) > 1:
+                anchor_cat = sanitize_filename(str(df.iloc[actual_indices[0]].get("catalogNumber", actual_indices[0])))
+                cluster_key = f"{best_coll}_geo_{anchor_cat}_{d_val}"
+            else:
+                act_i = actual_indices[0]
+                cat = sanitize_filename(str(df.iloc[act_i].get("catalogNumber", act_i)))
+                cluster_key = f"{best_coll}_sn_{cat}_{d_val}"
+
+            for act_i in actual_indices:
+                group_labels[act_i] = cluster_key
+
+    df["exsiccatae_key"] = group_labels
+
+    # Pass 3: Evaluate Institutional Priority and designate is_primary_duplicate
+    grouped = df.groupby("exsiccatae_key", sort=False)
+    df["duplicate_count"] = grouped["catalogNumber"].transform("count")
+
+    is_primary_list = [False] * n_rows
+
+    for key, group_df in grouped:
+        indices = list(group_df.index)
+        if len(indices) == 1:
+            is_primary_list[indices[0]] = True
+            continue
+
+        scored_candidates = []
+        for idx in indices:
+            row = group_df.loc[idx]
+
+            # Priority 1: Verified Type Status
+            type_stat = str(row.get("type_status", "") if not pd.isna(row.get("type_status", "")) else "").strip().lower()
+            has_type = 1 if type_stat and type_stat not in {"none", "not a type", "notatype", "unspecified", "null"} else 0
+
+            # Priority 2: Home Herbarium (NCU)
+            inst = str(row.get("institutionCode", "") if not pd.isna(row.get("institutionCode", "")) else "").strip().upper()
+            is_ncu = 1 if inst == "NCU" else 0
+
+            # Priority 3: Tier 1 Specialist determinations
+            tier = str(row.get("determiner_tier", "") if not pd.isna(row.get("determiner_tier", "")) else "").strip()
+            tier_score = 3 if tier == "Tier_1_Gold" else (2 if tier == "Tier_2_Silver" else 1)
+
+            # Priority 4: Highest specimen image resolution
+            img_path = str(row.get("image_path", "") if not pd.isna(row.get("image_path", "")) else "")
+            res_score = get_image_resolution_score(img_path, workspace_dir=workspace_dir)
+
+            cat_tiebreak = str(row.get("catalogNumber", idx))
+
+            score_tuple = (has_type, is_ncu, tier_score, res_score, cat_tiebreak)
+            scored_candidates.append((score_tuple, idx))
+
+        scored_candidates.sort(key=lambda x: x[0], reverse=True)
+        primary_idx = scored_candidates[0][1]
+        is_primary_list[primary_idx] = True
+
+    df["is_primary_duplicate"] = is_primary_list
+
+    if logger:
+        n_prim = sum(is_primary_list)
+        n_dup = n_rows - n_prim
+        logger.info(
+            f"Duplicate Stratification: Processed {n_rows} vouchers -> "
+            f"{n_prim} primary duplicate vouchers designated ({n_dup} duplicate sheets flagged)."
+        )
+
+    return df
+
 
 
 def setup_logger(log_file_path: Optional[Path] = None, verbose: bool = False) -> logging.Logger:
@@ -577,6 +969,9 @@ def export_curated_table(
             if c not in df.columns:
                 df[c] = ""
 
+        if "exsiccatae_key" not in df.columns or "is_primary_duplicate" not in df.columns:
+            df = stratify_duplicates(df, logger=logger)
+
     cols_to_export = [col for col in EXPORT_COLUMNS if col in df.columns]
     extra_cols = [c for c in df.columns if c not in cols_to_export and not c.startswith("_")]
     final_cols = cols_to_export + extra_cols
@@ -656,6 +1051,18 @@ def print_and_log_summary(
     for inst, cnt in inst_counts.head(10).items():
         pct = (cnt / total_records) * 100.0
         logger.info(f"  * {inst:<15} : {cnt:>5} records ({pct:>5.1f}%)")
+
+    # Exsiccatae & Duplicate Stratification Breakdown
+    if "is_primary_duplicate" in df.columns:
+        n_primary = int(df["is_primary_duplicate"].sum())
+        n_duplicates = total_records - n_primary
+        logger.info("\n--- EXSICCAE & DUPLICATE STRATIFICATION ---")
+        logger.info(f"  * Primary Duplicate Vouchers  : {n_primary:>5} records ({(n_primary / total_records) * 100.0:>5.1f}%)")
+        logger.info(f"  * Secondary Duplicate Sheets  : {n_duplicates:>5} records ({(n_duplicates / total_records) * 100.0:>5.1f}%)")
+        if "duplicate_count" in df.columns:
+            multi_sheets = int((df["duplicate_count"] > 1).sum())
+            logger.info(f"  * Sheets from Multi-Sheet Events: {multi_sheets:>5} records")
+
 
     # Image Download & Quality Summary
     if download_stats:
@@ -835,6 +1242,8 @@ class VoucherHarvester:
                         "institutionCode": inst_code,
                         "scientificName": rec.get("scientificName") or rec.get("species") or taxon,
                         "species_raw": rec.get("scientificName") or rec.get("species") or taxon,
+                        "recordedBy": str(rec.get("recordedBy") or "").strip(),
+                        "recordNumber": str(rec.get("recordNumber") or "").strip(),
                         "identifiedBy": determiner_raw,
                         "determiner_raw": determiner_raw,
                         "determiner_tier": determiner_tier,
@@ -871,7 +1280,10 @@ class VoucherHarvester:
                 f"(Western states excluded: {taxon_western_excluded})."
             )
 
-        return pd.DataFrame(all_curated_records)
+        df = pd.DataFrame(all_curated_records)
+        if not df.empty:
+            df = stratify_duplicates(df, workspace_dir=self.workspace_dir, logger=self.logger)
+        return df
 
     def download_and_validate_media(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """Asynchronously downloads voucher specimen sheets and filters substandard imagery."""
@@ -928,6 +1340,8 @@ class VoucherHarvester:
             f"(Rejected {quality_rejected} substandard/low-res images)."
         )
         df_filtered = df.loc[valid_indices].reset_index(drop=True)
+        if not df_filtered.empty:
+            df_filtered = stratify_duplicates(df_filtered, workspace_dir=self.workspace_dir, logger=self.logger)
         stats["quality_rejected"] = quality_rejected
         if mp_values:
             stats["median_mp"] = float(np.median(mp_values))

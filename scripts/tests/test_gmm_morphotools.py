@@ -206,6 +206,20 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertIn("Pass", str(pc1_row["Batch_Effect_Status"].iloc[0]))
         self.assertIn("Pass", str(pc2_row["Batch_Effect_Status"].iloc[0]))
 
+    def test_voucher_level_voting_weight_support(self):
+        """Verify 04_gmm_morphotools.R enforces 1 row = 1 voucher collection event for 1.0x voting weight."""
+        with open(self.r_script_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("1 row = 1 voucher", content, "04_gmm_morphotools.R must enforce 1 row = 1 voucher")
+        self.assertIn("group_by(catalogNumber)", content, "04_gmm_morphotools.R must group by catalogNumber for voucher weighting")
+
+        # Verify dataset contains valid foliar variance and leaf counts
+        df = pd.read_csv(self.harmonics_path)
+        self.assertIn("foliar_variance", df.columns)
+        self.assertIn("leaf_count", df.columns)
+        self.assertTrue((df["leaf_count"] >= 1).all(), "Every specimen must have >=1 leaf.")
+        self.assertTrue((df["foliar_variance"] >= 0.0).all(), "foliar_variance must be non-negative.")
+
 
 if __name__ == "__main__":
     unittest.main()

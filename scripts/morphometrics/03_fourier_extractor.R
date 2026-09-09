@@ -47,6 +47,8 @@ parse_args_robust <- function() {
       default = "data/tables/curated_vouchers.csv", help = "Curated vouchers CSV [default: %default]"),
     optparse::make_option(c("-o", "--output"), type = "character",
       default = "data/tables/leaf_efa_harmonics.csv", help = "Output harmonics CSV [default: %default]"),
+    optparse::make_option(c("--output-individual"), type = "character",
+      default = "data/tables/leaf_efa_harmonics_individual.csv", help = "Output individual leaf harmonics CSV [default: %default]"),
     optparse::make_option(c("-k", "--harmonics"), type = "integer",
       default = 12, help = "Number of Fourier harmonics (nb.h) [default: %default]"),
     optparse::make_option(c("-p", "--num-pcs"), type = "integer",
@@ -70,7 +72,8 @@ parse_args_robust <- function() {
   opts <- list(
     input = "data/contours/", contours_dir = "data/contours/", manifest = "data/tables/extracted_leaf_manifest.csv",
     masks_dir = "data/masks/", vouchers = "data/tables/curated_vouchers.csv",
-    output = "data/tables/leaf_efa_harmonics.csv", harmonics = 12, num_pcs = 5,
+    output = "data/tables/leaf_efa_harmonics.csv", output_individual = "data/tables/leaf_efa_harmonics_individual.csv",
+    harmonics = 12, num_pcs = 5,
     report_out = "outputs/reports/tier_symmetry_validation.csv",
     plot_out = "outputs/figures/tier1_vs_tier2_density_overlay.pdf",
     permutations = 999, seed = 42
@@ -84,6 +87,7 @@ parse_args_robust <- function() {
     else if (arg %in% c("-m", "--masks-dir") && i < length(raw_args)) { opts$masks_dir <- raw_args[i + 1]; i <- i + 2 }
     else if (arg %in% c("-v", "--vouchers") && i < length(raw_args)) { opts$vouchers <- raw_args[i + 1]; i <- i + 2 }
     else if (arg %in% c("-o", "--output") && i < length(raw_args)) { opts$output <- raw_args[i + 1]; i <- i + 2 }
+    else if (arg == "--output-individual" && i < length(raw_args)) { opts$output_individual <- raw_args[i + 1]; i <- i + 2 }
     else if (arg %in% c("-k", "--harmonics") && i < length(raw_args)) { opts$harmonics <- as.integer(raw_args[i + 1]); i <- i + 2 }
     else if (arg %in% c("-p", "--num-pcs") && i < length(raw_args)) { opts$num_pcs <- as.integer(raw_args[i + 1]); i <- i + 2 }
     else if (arg %in% c("-r", "--report-out") && i < length(raw_args)) { opts$report_out <- raw_args[i + 1]; i <- i + 2 }
@@ -416,9 +420,91 @@ run_fourier_extraction <- function(opts) {
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
 
+  # 5a. Export Disaggregated Individual Leaf Harmonics Archive
+  if (!is.null(opts$output_individual) && nzchar(opts$output_individual)) {
+    dir.create(dirname(opts$output_individual), recursive = TRUE, showWarnings = FALSE)
+    write.csv(efa_df, file = opts$output_individual, row.names = FALSE, na = "")
+    message("Individual leaf EFA harmonics archive exported: ", opts$output_individual, " (Rows: ", nrow(efa_df), ")")
+  }
+
+  # 5b. Compute Specimen-Level Median Harmonic Vectors & Phenotypic Stability Index
+  message("Computing specimen-level median harmonic vectors (grouped by catalogNumber & plant instance)...")
+  valid_closed_mask <- efa_df$assigned_tier %in% c("Tier_1_Direct", "Tier_2_Reflected") & complete.cases(efa_df[, sym_names])
+  closed_leaf_df <- efa_df[valid_closed_mask, , drop = FALSE]
+
+  all_harm_cols <- intersect(c(harmonic_names, grep("Chebyshev", names(efa_df), value = TRUE)), names(efa_df))
+  specimen_records <- list()
+  spec_groups <- split(closed_leaf_df, list(closed_leaf_df$catalogNumber, closed_leaf_df$plant_individual_id), drop = TRUE)
+
+  for (grp in spec_groups) {
+    if (nrow(grp) == 0) next
+    cat_num <- grp$catalogNumber[1]
+    p_id <- grp$plant_individual_id[1]
+    n_leaves <- nrow(grp)
+
+    # Compute median symmetric harmonic vector across valid leaves belonging to this specimen
+    harm_medians <- sapply(grp[, all_harm_cols, drop = FALSE], stats::median, na.rm = TRUE)
+
+    # Within-specimen foliar variance as phenotypic stability index (0.0 for 1 leaf)
+    if (n_leaves > 1) {
+      sym_sub <- as.matrix(grp[, sym_names, drop = FALSE])
+      col_vars_sub <- apply(sym_sub, 2, stats::var, na.rm = TRUE)
+      foliar_var <- round(mean(col_vars_sub, na.rm = TRUE), 8)
+    } else {
+      foliar_var <- 0.0
+    }
+
+    rec <- data.frame(
+      catalogNumber = cat_num,
+      plant_individual_id = p_id,
+      leaf_count = n_leaves,
+      foliar_variance = foliar_var,
+      assigned_tier = grp$assigned_tier[1],
+      reconstruction_tier = grp$reconstruction_tier[1],
+      scientificName = grp$scientificName[1],
+      species_raw = grp$species_raw[1],
+      determiner_tier = grp$determiner_tier[1],
+      stringsAsFactors = FALSE
+    )
+
+    other_meta <- intersect(c("determiner_raw", "county", "stateProvince", "latitude", "longitude",
+                              "pheno_sin", "pheno_cos", "regional_group", "aspect_ratio", "solidity", "area_px"),
+                            names(grp))
+    for (m_col in other_meta) {
+      vals <- stats::na.omit(grp[[m_col]])
+      rec[[m_col]] <- if (length(vals) > 0) vals[1] else NA
+    }
+
+    for (h_name in names(harm_medians)) {
+      rec[[h_name]] <- harm_medians[[h_name]]
+    }
+    specimen_records[[length(specimen_records) + 1]] <- rec
+  }
+
+  specimen_df <- do.call(rbind, specimen_records)
+
+  # Project symmetric morphospace PC1-PC5 for specimen-level median profiles
+  for (p in seq_len(opts$num_pcs)) specimen_df[[paste0("PC", p)]] <- NA_real_
+  if (nrow(specimen_df) >= opts$num_pcs && exists("pca_fit") && !is.null(pca_fit)) {
+    spec_sym <- as.matrix(specimen_df[, active_sym_cols, drop = FALSE])
+    spec_pcs <- scale(spec_sym, center = pca_fit$center, scale = pca_fit$scale) %*% pca_fit$rotation
+    for (p in seq_len(opts$num_pcs)) {
+      if (p <= ncol(spec_pcs)) {
+        specimen_df[[paste0("PC", p)]] <- round(spec_pcs[, p], 6)
+      }
+    }
+  }
+
+  lead_spec_cols <- c("catalogNumber", "plant_individual_id", "leaf_count", "foliar_variance",
+                      "assigned_tier", "reconstruction_tier", "scientificName", "species_raw", "determiner_tier",
+                      "PC1", "PC2", "PC3", "PC4", "PC5",
+                      "aspect_ratio", "solidity", "area_px")
+  lead_spec_cols <- intersect(lead_spec_cols, names(specimen_df))
+  specimen_df <- specimen_df[, c(lead_spec_cols, setdiff(names(specimen_df), lead_spec_cols))]
+
   dir.create(dirname(opts$output), recursive = TRUE, showWarnings = FALSE)
-  write.csv(efa_df, file = opts$output, row.names = FALSE, na = "")
-  message("Master EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(efa_df), ")")
+  write.csv(specimen_df, file = opts$output, row.names = FALSE, na = "")
+  message("Specimen-aggregated EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(specimen_df), ")")
 
   # 6. Empirical Tier Validation Test (PERMANOVA via adonis2 / fallback manova)
   valid_tier_idx <- which(!is.na(efa_df$reconstruction_tier) & complete.cases(sym_harmonics))

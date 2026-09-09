@@ -30,6 +30,7 @@ from scripts.vision.lm2_geometry_utils import (
     compute_geometric_metrics,
     detect_folded_leaf,
     is_botanical_dissection,
+    trim_petiole_tail,
     FoldDetectionResult,
     LeafRoutingResult,
 )
@@ -130,6 +131,49 @@ def create_fixture_4_occluded_damaged_leaf(
     mask = f1_mask.copy()
     cx, cy = center
     cv2.ellipse(mask, (cx - 50, cy - 10), (58, 70), -20, 0, 360, 0, -1)
+    return mask
+
+
+def create_fixture_5_leaf_with_petiole_stalk(
+    f1_mask: np.ndarray,
+    stalk_length: int = 45,
+    stalk_width: int = 10,
+) -> np.ndarray:
+    """
+    Fixture 5: Leaf with Narrow Slender Petiole Stalk.
+    Takes Fixture 1 (ovate leaf terminating at y ~ 320) and appends a narrow linear
+    petiole stalk (W = 10 px, length = 45 px) extending below the lamina down to y = 365.
+    """
+    f5_mask = f1_mask.copy()
+    half_w = stalk_width // 2
+    cv2.rectangle(f5_mask, (200 - half_w, 315), (200 + half_w, 315 + stalk_length), 255, -1)
+    return f5_mask
+
+
+def create_fixture_6_cordate_leaf(
+    canvas_size: Tuple[int, int] = (400, 400),
+    center: Tuple[int, int] = (200, 200),
+    length: int = 240,
+    max_width: int = 160,
+) -> np.ndarray:
+    """
+    Fixture 6: Broad Cordate Leaf with Basal Lobes.
+    Generates a synthetic cordate leaf mask where the blade base is broad (W_base > 50 px)
+    with bilateral lobes, testing the cordate/truncate protection guard.
+    """
+    mask = np.zeros(canvas_size, dtype=np.uint8)
+    cx, cy = center
+    thetas = np.linspace(0, 2 * np.pi, 720, endpoint=False)
+    r_x = (max_width / 2.0) * np.sin(thetas)
+    r_y = - (length / 2.0) * (np.cos(thetas) - 0.2 * np.sin(thetas) ** 2)
+    lobe_notch = 15.0 * np.exp(-((thetas - np.pi) ** 2) / 0.15)
+    r_y += lobe_notch
+    xs = cx + r_x
+    ys = cy + r_y
+    pts = np.column_stack([xs, ys]).astype(np.int32)
+    cv2.fillPoly(mask, [pts], 255)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     return mask
 
 
@@ -260,6 +304,76 @@ class TestGeometryEdgeCases(unittest.TestCase):
             routing.tier, ["Tier 2", "Failed QC"],
             f"Occluded leaf must route to Tier 2 reflection or Failed QC, got {routing.tier}."
         )
+
+    def test_fixture_5_petiole_stalk_trimming_and_restoration(self) -> None:
+        """Fixture 5: Slender petiole stalk trimmed at junction, restoring blade metrics and Tier 1 routing."""
+        f5_mask = create_fixture_5_leaf_with_petiole_stalk(self.f1_mask, stalk_length=45, stalk_width=10)
+        orig_area = np.count_nonzero(self.f1_mask)
+        stalk_area = np.count_nonzero(f5_mask)
+        self.assertGreater(stalk_area, orig_area, "Fixture 5 mask must include attached stalk pixels.")
+
+        # Metric degradation before trimming
+        ucs_stalk, sol_stalk, _, _, _ = compute_geometric_metrics(f5_mask)
+        self.assertLess(sol_stalk, 0.89, f"Untrimmed stalk should degrade solidity (got {sol_stalk:.3f}).")
+
+        # Trim petiole tail
+        trimmed_mask, meta = trim_petiole_tail(f5_mask, return_metadata=True)
+        self.assertTrue(meta["is_trimmed"], "trim_petiole_tail must detect and trim petiole stalk.")
+        self.assertEqual(meta["reason"], "WIDTH_INFLECTION_JUNCTION_TRIMMED")
+        self.assertGreaterEqual(meta["trim_distance_px"], 35.0, "Trim distance must span the narrow stalk length.")
+        self.assertIsNotNone(meta["junction_pt"])
+
+        # Metric restoration after trimming
+        trimmed_area = np.count_nonzero(trimmed_mask)
+        area_diff = abs(trimmed_area - orig_area)
+        self.assertLessEqual(area_diff, 15, f"Trimmed mask must match intact blade area within 15 px (diff={area_diff}).")
+
+        ucs_trimmed, sol_trimmed, _, _, _ = compute_geometric_metrics(trimmed_mask)
+        self.assertGreaterEqual(sol_trimmed, 0.90, f"Trimmed mask solidity ({sol_trimmed:.3f}) must be restored to >= 0.90.")
+        self.assertGreaterEqual(ucs_trimmed, 0.95, f"Trimmed mask UCS ({ucs_trimmed:.3f}) must be restored to >= 0.95.")
+
+        # Tier routing integration assertion: classify_and_route_leaf automatically trims petiole and routes to Tier 1
+        routing = classify_and_route_leaf(f5_mask)
+        self.assertEqual(routing.tier, "Tier 1", "Leaf with trimmed petiole tail must route to Tier 1.")
+        self.assertEqual(routing.assigned_tier, "tier1")
+        self.assertFalse(routing.is_folded)
+        self.assertTrue(routing.metadata.get("petiole_trim_info", {}).get("is_trimmed", False))
+
+    def test_fixture_6_cordate_blade_protection(self) -> None:
+        """Fixture 6: Broad cordate blade base is guarded and 100% protected against false clipping."""
+        f6_mask = create_fixture_6_cordate_leaf()
+        orig_area = np.count_nonzero(f6_mask)
+
+        trimmed_mask, meta = trim_petiole_tail(f6_mask, return_metadata=True)
+        self.assertFalse(meta["is_trimmed"], "Cordate leaf base must NOT be clipped.")
+        self.assertEqual(meta["reason"], "CORDATE_OR_BROAD_BASE_PROTECTED")
+        self.assertEqual(np.count_nonzero(trimmed_mask), orig_area, "Cordate leaf area must be 100% preserved.")
+
+    def test_clean_unfolded_leaf_left_unclipped(self) -> None:
+        """Verify that a cleanly clipped blade without petiole stalk passes fallback check and remains unclipped."""
+        f1_mask = self.f1_mask
+        orig_area = np.count_nonzero(f1_mask)
+
+        trimmed_mask, meta = trim_petiole_tail(f1_mask, return_metadata=True)
+        self.assertFalse(meta["is_trimmed"], "Cleanly clipped blade must NOT be clipped.")
+        self.assertEqual(meta["reason"], "CLEAN_BLADE_UNCLIPPED")
+        self.assertEqual(np.count_nonzero(trimmed_mask), orig_area, "Intact blade area must be 100% preserved.")
+
+    def test_fallback_morphological_linear_protrusion(self) -> None:
+        """Verify that fallback morphological check catches and trims narrow linear protrusions (aspect ratio > 3:1)."""
+        # Create an oval blade with a slender protrusion (length 25 px, width 6 px, aspect ratio ~ 4:1)
+        mask = np.zeros((300, 300), dtype=np.uint8)
+        cv2.ellipse(mask, (150, 130), (50, 90), 0, 0, 360, 255, -1)
+        # Add narrow protrusion at basal tip (y from 220 to 245, width 6)
+        cv2.rectangle(mask, (147, 220), (153, 245), 255, -1)
+
+        trimmed_mask, meta = trim_petiole_tail(mask, return_metadata=True)
+        self.assertTrue(meta["is_trimmed"], "Narrow linear protrusion must be trimmed.")
+        self.assertIn(
+            meta["reason"],
+            ["WIDTH_INFLECTION_JUNCTION_TRIMMED", "FALLBACK_MORPHOLOGICAL_PROTRUSION_TRIMMED"]
+        )
+        self.assertLess(np.count_nonzero(trimmed_mask), np.count_nonzero(mask))
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ import pandas as pd
 mod_xai = importlib.import_module("scripts.analysis.05_cleanlab_vision_xai")
 standardize_packera_taxon = mod_xai.standardize_packera_taxon
 neutralize_mounting_paper = mod_xai.neutralize_mounting_paper
+classify_foliar_surface_orientation = mod_xai.classify_foliar_surface_orientation
 extract_dinov2_embeddings = mod_xai.extract_dinov2_embeddings
 run_confident_learning_audit = mod_xai.run_confident_learning_audit
 compute_out_of_fold_probabilities = mod_xai.compute_out_of_fold_probabilities
@@ -74,6 +75,56 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         res_from_arr = neutralize_mounting_paper(arr)
         np.testing.assert_array_equal(res_from_arr[0, 0], [128, 128, 128])
         np.testing.assert_array_equal(res_from_arr[50, 50], [45, 95, 35])
+
+    def test_classify_foliar_surface_orientation_adaxial(self):
+        """Verify that darker green/brown glabrescent foliar tissue is classified as adaxial."""
+        # Synthetic neutralized patch (RGB 128, 128, 128 background with dark green leaf circle)
+        arr = np.full((120, 120, 3), fill_value=128, dtype=np.uint8)
+        y, x = np.ogrid[:120, :120]
+        mask_leaf = ((x - 60) ** 2 + (y - 60) ** 2) <= 30 ** 2
+        arr[mask_leaf] = [45, 95, 35]  # Dark botanical green
+
+        result = classify_foliar_surface_orientation(arr)
+        self.assertEqual(result["surface_orientation"], "adaxial")
+        self.assertLess(result["mean_luminance"], 68.0)
+        self.assertGreaterEqual(result["mean_saturation"], 0.22)
+        self.assertLessEqual(result["high_brightness_ratio"], 0.1)
+
+    def test_classify_foliar_surface_orientation_abaxial(self):
+        """Verify that bright white arachnoid-woolly tomentum is classified as abaxial."""
+        # Synthetic neutralized patch with dense white/silver arachnoid tomentum
+        arr = np.full((120, 120, 3), fill_value=128, dtype=np.uint8)
+        y, x = np.ogrid[:120, :120]
+        mask_leaf = ((x - 60) ** 2 + (y - 60) ** 2) <= 30 ** 2
+        arr[mask_leaf] = [225, 230, 220]  # Dense white arachnoid tomentum
+
+        result = classify_foliar_surface_orientation(arr)
+        self.assertEqual(result["surface_orientation"], "abaxial")
+        self.assertGreater(result["mean_luminance"], 68.0)
+        self.assertLess(result["mean_saturation"], 0.22)
+        self.assertGreaterEqual(result["high_brightness_ratio"], 0.5)
+
+    def test_foliar_orientation_execution_speed(self):
+        """Verify vectorized calculation executes within the <0.05 seconds per patch budget."""
+        import time
+
+        arr = np.full((224, 224, 3), fill_value=128, dtype=np.uint8)
+        y, x = np.ogrid[:224, :224]
+        mask_leaf = ((x - 112) ** 2 + (y - 112) ** 2) <= 60 ** 2
+        arr[mask_leaf] = [50, 100, 40]
+
+        start_time = time.perf_counter()
+        n_iters = 50
+        for _ in range(n_iters):
+            _ = classify_foliar_surface_orientation(arr)
+        total_time = time.perf_counter() - start_time
+        avg_time = total_time / n_iters
+
+        self.assertLess(
+            avg_time,
+            0.05,
+            f"Execution time {avg_time:.4f}s per patch exceeds maximum budget of 0.05s",
+        )
 
     def test_dinov2_feature_extraction_synthetic(self):
         """Test DINOv2 feature extraction returns (N, 768) embeddings for synthetic records."""
@@ -153,6 +204,41 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         )
         self.assertTrue(audit_35.loc[2, "is_label_corrupted"])
 
+    def test_confident_learning_abaxial_filtering(self):
+        """Test Confident Learning audit filters out candidates flagged solely due to inverted abaxial tomentum."""
+        pred_probs = np.array([
+            [0.05, 0.95, 0.00, 0.00],  # given 0, predicted 1, c_error = 0.95
+            [0.05, 0.95, 0.00, 0.00],  # given 0, predicted 1, c_error = 0.95
+        ])
+        labels = np.array([0, 0])
+        records_df = pd.DataFrame({
+            "catalogNumber": ["ADAXIAL_FLAGGED", "ABAXIAL_FLAGGED"],
+            "patch_path": ["/p1", "/p2"],
+            "species_raw": ["Packera anonyma", "Packera anonyma"],
+            "label_idx": [0, 0],
+            "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold"],
+            "surface_orientation": ["adaxial", "abaxial"],
+        })
+
+        # With filter_abaxial_artifacts=True (default)
+        audit = run_confident_learning_audit(
+            pred_probs=pred_probs,
+            labels=labels,
+            records_df=records_df,
+            class_names=TARGET_TAXA,
+            error_threshold=0.85,
+            filter_abaxial_artifacts=True,
+        )
+
+        # Adaxial record should be flagged as corrupted
+        self.assertTrue(audit.loc[0, "is_label_corrupted"])
+        self.assertIn("Prune & Queue", audit.loc[0, "triage_action"])
+
+        # Abaxial record should be filtered out from corruption and retained as mounting variant
+        self.assertFalse(audit.loc[1, "is_label_corrupted"])
+        self.assertEqual(audit.loc[1, "triage_action"], "Retain (Abaxial Inversion Artifact)")
+        self.assertIn("dense abaxial arachnoid tomentum", audit.loc[1, "discordance_reason"])
+
     def test_compute_out_of_fold_probabilities(self):
         """Test Stratified K-Fold out-of-fold probability computation on synthetic features."""
         np.random.seed(42)
@@ -209,6 +295,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             "is_label_corrupted",
             "triage_action",
             "discordance_reason",
+            "surface_orientation",
         ]
         for col in required_cols:
             self.assertIn(col, df.columns, f"Missing required column '{col}' in audit table.")
@@ -216,13 +303,17 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         # Check values
         self.assertTrue(df["c_error"].between(0.0, 1.0).all(), "c_error contains values outside [0, 1].")
         self.assertTrue(df["label_quality_score"].between(0.0, 1.0).all(), "label_quality_score outside [0, 1].")
+        self.assertTrue(
+            df["surface_orientation"].isin(["adaxial", "abaxial"]).all(),
+            "surface_orientation contains invalid values.",
+        )
 
-        # Check consistency of corrupted flag (threshold 0.85)
-        expected_corrupted = df["c_error"] > 0.85
+        # Check consistency of corrupted flag (threshold 0.85, excluding abaxial tomentum artifacts)
+        expected_corrupted = (df["c_error"] > 0.85) & (df["surface_orientation"].str.lower() != "abaxial")
         np.testing.assert_array_equal(
             df["is_label_corrupted"].values,
             expected_corrupted.values,
-            err_msg="is_label_corrupted flag does not match (c_error > 0.85).",
+            err_msg="is_label_corrupted flag does not match (c_error > 0.85 & not abaxial).",
         )
 
         # Check triage actions

@@ -26,6 +26,7 @@ class TestSymmetricFourierValidation(unittest.TestCase):
     def setUp(self):
         self.r_script_path = PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R"
         self.harmonics_path = PROJECT_ROOT / "data" / "tables" / "leaf_efa_harmonics.csv"
+        self.individual_harmonics_path = PROJECT_ROOT / "data" / "tables" / "leaf_efa_harmonics_individual.csv"
         self.report_path = PROJECT_ROOT / "outputs" / "reports" / "tier_symmetry_validation.csv"
         self.plot_path = PROJECT_ROOT / "outputs" / "figures" / "tier1_vs_tier2_density_overlay.pdf"
 
@@ -47,10 +48,15 @@ class TestSymmetricFourierValidation(unittest.TestCase):
         self.assertIn("--plot-out", content)
         self.assertIn("--permutations", content)
         self.assertIn("--seed", content)
+        self.assertIn("--output-individual", content)
 
         # Check symmetric harmonic extraction (An and Dn)
         self.assertIn("sym_harmonics", content)
         self.assertIn("sym_names", content)
+
+        # Check specimen-level median vector and foliar variance calculation
+        self.assertIn("foliar_variance", content)
+        self.assertIn("plant_individual_id", content)
 
         # Check defensive PERMANOVA handling (vegan and manova fallback)
         self.assertIn("vegan::adonis2", content)
@@ -61,23 +67,31 @@ class TestSymmetricFourierValidation(unittest.TestCase):
         self.assertIn("opts$seed", content)
 
     def test_harmonics_table_symmetric_pca_columns(self):
-        """Verify leaf_efa_harmonics.csv contains symmetric PC scores and metadata."""
+        """Verify leaf_efa_harmonics.csv contains symmetric PC scores, metadata, and foliar variance."""
         self.assertTrue(self.harmonics_path.exists(), "leaf_efa_harmonics.csv must exist.")
         df = pd.read_csv(self.harmonics_path)
 
         # Verify key metadata columns
         required_cols = [
             "catalogNumber", "assigned_tier", "reconstruction_tier",
-            "scientificName", "determiner_tier", "PC1", "PC2", "PC3", "PC4", "PC5"
+            "scientificName", "determiner_tier", "PC1", "PC2", "PC3", "PC4", "PC5",
+            "foliar_variance", "leaf_count"
         ]
         for col in required_cols:
             self.assertIn(col, df.columns, f"Missing column {col} in harmonics table.")
 
-        # Verify closed outlines have valid PC scores
+        # Verify specimen-level closed outlines have valid PC scores and foliar stability
         closed = df[df["reconstruction_tier"].isin(["Tier 1", "Tier 2"])]
-        self.assertGreater(len(closed), 1000, "Expected >1000 closed leaf outlines.")
+        self.assertGreater(len(closed), 50, "Expected >50 specimen-level collection units.")
+        self.assertTrue((closed["foliar_variance"] >= 0.0).all(), "foliar_variance must be non-negative.")
         for p in range(1, 6):
             self.assertFalse(closed[f"PC{p}"].isna().any(), f"Found NaNs in PC{p} for closed outlines.")
+
+        # Verify individual archive contains full disaggregated outlines
+        self.assertTrue(self.individual_harmonics_path.exists(), "leaf_efa_harmonics_individual.csv must exist.")
+        ind_df = pd.read_csv(self.individual_harmonics_path)
+        ind_closed = ind_df[ind_df["reconstruction_tier"].isin(["Tier 1", "Tier 2"])]
+        self.assertGreater(len(ind_closed), 1000, "Expected >1000 individual closed leaf outlines in archive.")
 
         # Verify symmetric harmonic columns are present
         for i in range(1, 13):
