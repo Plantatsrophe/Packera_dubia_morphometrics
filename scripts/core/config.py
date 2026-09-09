@@ -83,6 +83,17 @@ SolidityThresholdsConfig = DissectionConfig
 
 
 @dataclass(frozen=True)
+class CapitulumPhenologyConfig:
+    """Thresholds for capitulum phenology biomarker classification."""
+    min_pappus_luminance: float = 75.0
+    max_pappus_saturation: float = 0.18
+    min_pappus_area_ratio: float = 0.18
+    min_floret_yellow_saturation: float = 0.32
+    min_floret_yellow_ratio: float = 0.12
+    min_anthesis_heads_for_flowering: int = 1
+
+
+@dataclass(frozen=True)
 class ThresholdsConfig:
     """Botanical optical quality, geometry, and detection thresholds."""
     pcd_conf: float = 0.72
@@ -96,6 +107,7 @@ class ThresholdsConfig:
     western_longitude_threshold: float = -106.65
     fold_detection: FoldDetectionConfig = field(default_factory=FoldDetectionConfig)
     dissection: DissectionConfig = field(default_factory=DissectionConfig)
+    capitulum_phenology: CapitulumPhenologyConfig = field(default_factory=CapitulumPhenologyConfig)
 
     @property
     def solidity(self) -> DissectionConfig:
@@ -280,12 +292,27 @@ class PipelineConfig:
         else:
             fold_cfg = FoldDetectionConfig()
 
+        # Parse capitulum phenology parameters with safe fallbacks
+        pheno_dict = thresh_dict.get("capitulum_phenology")
+        if isinstance(pheno_dict, dict):
+            pheno_cfg = CapitulumPhenologyConfig(
+                min_pappus_luminance=float(pheno_dict.get("min_pappus_luminance", 75.0)),
+                max_pappus_saturation=float(pheno_dict.get("max_pappus_saturation", 0.18)),
+                min_pappus_area_ratio=float(pheno_dict.get("min_pappus_area_ratio", 0.18)),
+                min_floret_yellow_saturation=float(pheno_dict.get("min_floret_yellow_saturation", 0.32)),
+                min_floret_yellow_ratio=float(pheno_dict.get("min_floret_yellow_ratio", 0.12)),
+                min_anthesis_heads_for_flowering=int(pheno_dict.get("min_anthesis_heads_for_flowering", 1)),
+            )
+        else:
+            pheno_cfg = CapitulumPhenologyConfig()
+
         thresh_kwargs: Dict[str, Any] = {
             k: float(v) for k, v in thresh_dict.items()
             if k in ThresholdsConfig.__dataclass_fields__ and not isinstance(v, dict)
         }
         thresh_kwargs["fold_detection"] = fold_cfg
         thresh_kwargs["dissection"] = dissection_cfg
+        thresh_kwargs["capitulum_phenology"] = pheno_cfg
         if "min_solidity" not in thresh_kwargs:
             thresh_kwargs["min_solidity"] = dissection_cfg.default
 

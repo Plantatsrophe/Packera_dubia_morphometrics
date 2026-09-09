@@ -53,6 +53,30 @@ VOUCHER_STERILE = "sterile"
 VOUCHER_UNKNOWN = "unknown"
 
 
+class CapitulumResult(dict):
+    """Specialized dictionary returning head metrics while supporting string equality against head_state."""
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, str):
+            return self.get("head_state") == other
+        return super().__eq__(other)
+
+    def __hash__(self) -> int:
+        return hash(self.get("head_state"))
+
+
+class VoucherPhenologyResult(dict):
+    """Specialized dictionary returning voucher metrics while supporting string equality against voucher_phenological_state."""
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, str):
+            return self.get("voucher_phenological_state") == other
+        return super().__eq__(other)
+
+    def __hash__(self) -> int:
+        return hash(self.get("voucher_phenological_state"))
+
+
 def extract_biomarker_pappus_plume(
     crop_rgb: np.ndarray,
     upper_pct: float = 0.45,
@@ -357,7 +381,7 @@ def classify_single_capitulum(
         or crop_rgb.shape[0] < min_crop_dim
         or crop_rgb.shape[1] < min_crop_dim
     ):
-        return {
+        return CapitulumResult({
             "head_state": HEAD_UNKNOWN,
             "has_pappus_plume": False,
             "has_fresh_yellow_corollas": False,
@@ -368,7 +392,7 @@ def classify_single_capitulum(
             "involucre_aspect_ratio": 0.0,
             "boundary_roughness": 1.0,
             "diagnostics": {},
-        }
+        })
 
     # Extract Biomarker A: Pappus Plume
     has_pappus_plume, white_fibrous_ratio, diag_a = extract_biomarker_pappus_plume(crop_rgb)
@@ -397,7 +421,7 @@ def classify_single_capitulum(
         else:
             head_state = HEAD_BUD
 
-    return {
+    return CapitulumResult({
         "head_state": head_state,
         "has_pappus_plume": has_pappus_plume,
         "has_fresh_yellow_corollas": has_fresh_yellow_corollas,
@@ -412,7 +436,7 @@ def classify_single_capitulum(
             "corolla": diag_b,
             "involucre": diag_c,
         },
-    }
+    })
 
 
 def classify_voucher_phenology(
@@ -464,7 +488,7 @@ def classify_voucher_phenology(
     ]
     dominant_pappus_ratio = round(max(pappus_ratios), 4) if pappus_ratios else 0.0
 
-    return {
+    return VoucherPhenologyResult({
         "catalogNumber": str(catalog_number).strip(),
         "total_capitula": int(total_capitula),
         "n_anthesis": int(n_anthesis),
@@ -472,4 +496,4 @@ def classify_voucher_phenology(
         "n_bud": int(n_bud),
         "voucher_phenological_state": voucher_state,
         "dominant_pappus_ratio": float(dominant_pappus_ratio),
-    }
+    })

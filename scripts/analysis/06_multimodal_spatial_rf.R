@@ -44,6 +44,8 @@ parse_args_robust <- function() {
       default = "data/tables/morphometrics_misidentification_flags.csv", help = "Morphometrics flags CSV [default: %default]"),
     optparse::make_option(c("-n", "--vision-audit"), type = "character",
       default = "data/tables/label_noise_audit.csv", help = "Cleanlab vision audit CSV [default: %default]"),
+    optparse::make_option(c("--pheno-states"), type = "character",
+      default = "data/tables/voucher_phenological_states.csv", help = "Voucher phenological states CSV [default: %default]"),
     optparse::make_option(c("-e", "--env-dir"), type = "character",
       default = "data/environmental", help = "Directory with environmental rasters [default: %default]"),
     optparse::make_option(c("-f", "--output-flags"), type = "character",
@@ -76,7 +78,8 @@ parse_args_robust <- function() {
   }
   return(list(
     vouchers = "data/tables/curated_vouchers.csv", morphometrics = "data/tables/morphometrics_misidentification_flags.csv",
-    vision_audit = "data/tables/label_noise_audit.csv", env_dir = "data/environmental",
+    vision_audit = "data/tables/label_noise_audit.csv", pheno_states = "data/tables/voucher_phenological_states.csv",
+    env_dir = "data/environmental",
     output_flags = "data/tables/multimodal_conflict_flags.csv", output_plot = "outputs/figures/spatial_rf_niche_importance.pdf",
     output_summary = "outputs/reports/multimodal_spatial_rf_summary.csv",
     pheno_anomalies = "data/tables/phenological_anomalies.csv",
@@ -450,9 +453,17 @@ extract_doy_robust <- function(df) {
 }
 
 model_latitudinal_spring_baseline <- function(flowering_df) {
-  message("Modeling Latitudinal Spring Baseline (Hopkins' Bioclimatic Law)...")
-  valid <- flowering_df[!is.na(flowering_df$latitude) & !is.na(flowering_df$doy), ]
-  valid <- valid[valid$latitude >= 24.0 & valid$latitude <= 55.0 & valid$doy >= 60 & valid$doy <= 220, ]
+  message("Modeling Latitudinal Spring Baseline (Hopkins' Bioclimatic Law) on verified anthesis cohort...")
+  
+  lat_col <- if ("decimalLatitude" %in% names(flowering_df) && any(!is.na(flowering_df$decimalLatitude))) {
+    flowering_df$decimalLatitude
+  } else {
+    flowering_df$latitude
+  }
+  flowering_df$decimalLatitude <- lat_col
+  
+  valid <- flowering_df[!is.na(flowering_df$decimalLatitude) & !is.na(flowering_df$doy), ]
+  valid <- valid[valid$decimalLatitude >= 24.0 & valid$decimalLatitude <= 55.0 & valid$doy >= 50 & valid$doy <= 220, ]
   
   # Trim extreme 1st and 99th percentiles to guard against outlier collection dates
   p1 <- stats::quantile(valid$doy, 0.01, na.rm = TRUE)
@@ -460,34 +471,114 @@ model_latitudinal_spring_baseline <- function(flowering_df) {
   valid_trimmed <- valid[valid$doy >= p1 & valid$doy <= p99, ]
   
   fit <- if (requireNamespace("MASS", quietly = TRUE)) {
-    tryCatch(MASS::rlm(doy ~ latitude, data = valid_trimmed), error = function(e) stats::lm(doy ~ latitude, data = valid_trimmed))
+    tryCatch(MASS::rlm(doy ~ decimalLatitude, data = valid_trimmed), error = function(e) stats::lm(doy ~ decimalLatitude, data = valid_trimmed))
   } else {
-    stats::lm(doy ~ latitude, data = valid_trimmed)
+    stats::lm(doy ~ decimalLatitude, data = valid_trimmed)
   }
   coefs <- stats::coef(fit)
   b0 <- as.numeric(coefs[1]); b_lat <- as.numeric(coefs[2])
   
-  fit_ols <- stats::lm(doy ~ latitude, data = valid_trimmed)
+  fit_ols <- stats::lm(doy ~ decimalLatitude, data = valid_trimmed)
   s_ols <- summary(fit_ols)
   r2 <- s_ols$r.squared; p_val <- s_ols$coefficients[2, 4]
   
-  message(sprintf("Empirical Baseline: DOY = %.3f + %.3f * Latitude (R2 = %.4f, p = %.4e, N = %d)",
+  message(sprintf("Empirical Baseline: DOY = %.3f + %.3f * decimalLatitude (R2 = %.4f, p = %.4e, N = %d)",
                   b0, b_lat, r2, p_val, nrow(valid_trimmed)))
-  return(list(intercept = b0, slope = b_lat, r_squared = r2, p_value = p_val, n = nrow(valid_trimmed), model = fit))
+  return(list(intercept = b0, slope = b_lat, r_squared = r2, p_value = p_val, n = nrow(valid_trimmed), model = fit_ols))
 }
 
 compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = NULL) {
   message("Computing latitude-adjusted phenological anomalies (Delta DOY)...")
   df$doy <- extract_doy_robust(df)
-  
-  is_flowering <- !is.na(df$doy) & df$doy >= 60 & df$doy <= 220 &
-                  !is.na(df$latitude) & df$latitude >= 24.0 & df$latitude <= 55.0
-  flowering_df <- df[is_flowering, ]
-  baseline <- model_latitudinal_spring_baseline(flowering_df)
+  lat_val <- if ("decimalLatitude" %in% names(df) && any(!is.na(df$decimalLatitude))) df$decimalLatitude else df$latitude
+  df$decimalLatitude <- lat_val
+  df$latitude <- lat_val
+
+  # ----------------------------------------------------------------------------
+  # 3-Tier Anthesis Verification Filter
+  # ----------------------------------------------------------------------------
+  # Tier 1: Calendar gate: 50 <= DOY <= 220 and 24.0 <= Latitude <= 55.0
+  pass_calendar <- !is.na(df$doy) & df$doy >= 50 & df$doy <= 220 &
+                   !is.na(df$decimalLatitude) & df$decimalLatitude >= 24.0 & df$decimalLatitude <= 55.0
+
+  # Tier 2: Darwin Core check: if reproductiveCondition contains "fruit" or "sterile" without "fl", exclude
+  if ("reproductiveCondition" %in% names(df)) {
+    rc <- tolower(trimws(as.character(df$reproductiveCondition)))
+    rc[is.na(rc)] <- ""
+    has_fruit <- grepl("fruit", rc)
+    has_sterile <- grepl("sterile", rc)
+    has_fl <- grepl("fl", rc)
+    dwc_fruit_only <- has_fruit & !has_fl
+    dwc_sterile_only <- has_sterile & !has_fl
+  } else {
+    dwc_fruit_only <- rep(FALSE, nrow(df))
+    dwc_sterile_only <- rep(FALSE, nrow(df))
+  }
+  pass_dwc <- !(dwc_fruit_only | dwc_sterile_only)
+
+  # Tier 3: Computer Vision check: voucher_phenological_state == "anthesis"
+  # Graceful fallback: unreadable crops or missing CV records fall back to Calendar + DwC text
+  if ("voucher_phenological_state" %in% names(df)) {
+    v_state <- tolower(trimws(as.character(df$voucher_phenological_state)))
+    v_state[is.na(v_state)] <- ""
+  } else {
+    v_state <- rep("", nrow(df))
+  }
+
+  if ("total_capitula" %in% names(df)) {
+    tot_caps <- suppressWarnings(as.numeric(df$total_capitula))
+    tot_caps[is.na(tot_caps)] <- 0
+  } else {
+    tot_caps <- rep(0, nrow(df))
+  }
+
+  # Valid CV classification when crops were present and state recorded
+  has_valid_cv <- v_state != "" & v_state != "unknown" & v_state != "na" & tot_caps > 0
+
+  cv_anthesis <- rep(FALSE, nrow(df))
+  cv_fruit <- rep(FALSE, nrow(df))
+  cv_sterile <- rep(FALSE, nrow(df))
+
+  cv_anthesis[has_valid_cv & v_state == "anthesis"] <- TRUE
+  cv_fruit[has_valid_cv & v_state == "fruit"] <- TRUE
+  cv_sterile[has_valid_cv & v_state %in% c("sterile", "bud")] <- TRUE
+
+  # Fallback for missing CV / no readable crops: accept if calendar and DwC pass
+  missing_cv <- !has_valid_cv
+  cv_anthesis[missing_cv & pass_calendar & pass_dwc] <- TRUE
+  cv_fruit[missing_cv & dwc_fruit_only] <- TRUE
+  cv_sterile[missing_cv & dwc_sterile_only] <- TRUE
+
+  # Synthesize 3-tier status
+  is_verified_anthesis <- pass_calendar & pass_dwc & cv_anthesis
+  is_fruit_excluded <- pass_calendar & (cv_fruit | dwc_fruit_only) & !is_verified_anthesis
+  is_sterile_excluded <- pass_calendar & (cv_sterile | dwc_sterile_only) & !is_verified_anthesis & !is_fruit_excluded
+
+  df$is_verified_anthesis <- is_verified_anthesis
+  df$anthesis_filter_status <- "Excluded_Calendar_Gate"
+  df$anthesis_filter_status[pass_calendar] <- "Excluded_Other"
+  df$anthesis_filter_status[is_sterile_excluded] <- "Excluded_Sterile"
+  df$anthesis_filter_status[is_fruit_excluded] <- "Excluded_Fruit_Only"
+  df$anthesis_filter_status[is_verified_anthesis] <- "Verified_Anthesis"
+
+  # Telemetry Logging
+  n_verified <- sum(is_verified_anthesis)
+  n_fruit <- sum(is_fruit_excluded)
+  n_sterile <- sum(is_sterile_excluded)
+  message(sprintf("[INFO] Filtered phenology vouchers: %d verified anthesis, %d fruiting-only (excluded), %d sterile (excluded).",
+                  n_verified, n_fruit, n_sterile))
+
+  # Fit latitudinal cline strictly on verified anthesis cohort
+  anthesis_cohort <- df[df$is_verified_anthesis, ]
+  if (nrow(anthesis_cohort) < 5) {
+    message("[WARN] Verified anthesis cohort has < 5 vouchers; using calendar-gated cohort as baseline fallback.")
+    anthesis_cohort <- df[pass_calendar, ]
+  }
+  baseline <- model_latitudinal_spring_baseline(anthesis_cohort)
   
   df$expected_doy <- NA_real_
-  has_lat <- !is.na(df$latitude)
-  df$expected_doy[has_lat] <- baseline$intercept + baseline$slope * df$latitude[has_lat]
+  has_lat <- !is.na(df$decimalLatitude)
+  df$expected_doy[has_lat] <- baseline$intercept + baseline$slope * df$decimalLatitude[has_lat]
   
   df$delta_doy <- NA_real_
   has_both <- !is.na(df$doy) & !is.na(df$expected_doy)
@@ -503,25 +594,34 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     keep_cols <- c("catalogNumber", "institutionCode", "scientificName", "species_raw",
                    "species_standardized", "decimalLatitude", "decimalLongitude", "latitude", "longitude",
                    "eventDate", "year", "month", "day", "doy", "expected_doy", "delta_doy",
-                   "pheno_timing_category", "regional_group")
+                   "pheno_timing_category", "is_verified_anthesis", "anthesis_filter_status",
+                   "voucher_phenological_state", "regional_group")
     export_df <- df[, intersect(keep_cols, names(df))]
     readr::write_csv(export_df, output_csv)
     message(sprintf("Exported %d voucher phenological anomalies to %s.", nrow(export_df), output_csv))
   }
   
+  # Statistical divergence testing across target taxa strictly on verified anthesis cohort
   target_flowering <- df[df$species_standardized %in% TARGET_TAXA &
-                         !is.na(df$delta_doy) & df$doy >= 60 & df$doy <= 220, ]
+                         !is.na(df$delta_doy) & df$is_verified_anthesis, ]
   
-  aov_fit <- stats::aov(delta_doy ~ species_standardized, data = target_flowering)
-  aov_summary <- summary(aov_fit)[[1]]
-  f_stat <- aov_summary[["F value"]][1]; p_val_aov <- aov_summary[["Pr(>F)"]][1]
-  df_b <- aov_summary[["Df"]][1]; df_w <- aov_summary[["Df"]][2]
-  tukey_res <- stats::TukeyHSD(aov_fit)
-  tukey_mat <- tukey_res$species_standardized
+  if (nrow(target_flowering) >= 5 && length(unique(target_flowering$species_standardized)) > 1) {
+    aov_fit <- stats::aov(delta_doy ~ species_standardized, data = target_flowering)
+    aov_summary <- summary(aov_fit)[[1]]
+    f_stat <- aov_summary[["F value"]][1]; p_val_aov <- aov_summary[["Pr(>F)"]][1]
+    df_b <- aov_summary[["Df"]][1]; df_w <- aov_summary[["Df"]][2]
+    tukey_res <- stats::TukeyHSD(aov_fit)
+    tukey_mat <- tukey_res$species_standardized
+  } else {
+    aov_fit <- NULL
+    tukey_res <- NULL
+    tukey_mat <- matrix(numeric(0), nrow = 0, ncol = 4)
+    f_stat <- NA_real_; p_val_aov <- NA_real_; df_b <- NA_real_; df_w <- NA_real_
+  }
   
   summary_records <- list()
   summary_records[[1]] <- data.frame(
-    Analysis_Section = "Baseline_Regression", Taxon_or_Comparison = "DOY ~ decimalLatitude",
+    Analysis_Section = "Baseline_Regression", Taxon_or_Comparison = "DOY ~ decimalLatitude (Verified Anthesis)",
     Sample_Size = baseline$n, Mean_Delta_DOY = round(baseline$slope, 3), SD_Delta_DOY = round(baseline$intercept, 3),
     Median_Delta_DOY = round(baseline$r_squared, 4), IQR_Delta_DOY = NA_real_, CI_Lower_95 = NA_real_, CI_Upper_95 = NA_real_,
     P_Value = sprintf("%.4e", baseline$p_value),
@@ -529,10 +629,11 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     stringsAsFactors = FALSE
   )
   summary_records[[2]] <- data.frame(
-    Analysis_Section = "One_Way_ANOVA", Taxon_or_Comparison = "Across 4 Target Taxa",
+    Analysis_Section = "One_Way_ANOVA", Taxon_or_Comparison = "Across Target Taxa (Verified Anthesis)",
     Sample_Size = nrow(target_flowering), Mean_Delta_DOY = round(f_stat, 3), SD_Delta_DOY = df_b,
     Median_Delta_DOY = df_w, IQR_Delta_DOY = NA_real_, CI_Lower_95 = NA_real_, CI_Upper_95 = NA_real_,
-    P_Value = sprintf("%.4e", p_val_aov), Interpretation = "Highly significant phenological divergence between taxa",
+    P_Value = if (!is.na(p_val_aov)) sprintf("%.4e", p_val_aov) else "NA",
+    Interpretation = if (!is.na(p_val_aov) && p_val_aov < 0.05) "Significant phenological divergence between taxa" else "No significant divergence or insufficient sample size",
     stringsAsFactors = FALSE
   )
   for (tx in TARGET_TAXA) {
@@ -550,17 +651,19 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
       )
     }
   }
-  for (k in seq_len(nrow(tukey_mat))) {
-    comp_name <- rownames(tukey_mat)[k]
-    diff_val <- tukey_mat[k, "diff"]; lwr <- tukey_mat[k, "lwr"]; upr <- tukey_mat[k, "upr"]; p_adj <- tukey_mat[k, "p adj"]
-    summary_records[[length(summary_records) + 1]] <- data.frame(
-      Analysis_Section = "Tukey_HSD_PostHoc", Taxon_or_Comparison = gsub("-", " vs ", comp_name),
-      Sample_Size = nrow(target_flowering), Mean_Delta_DOY = round(diff_val, 3), SD_Delta_DOY = NA_real_,
-      Median_Delta_DOY = NA_real_, IQR_Delta_DOY = NA_real_, CI_Lower_95 = round(lwr, 3), CI_Upper_95 = round(upr, 3),
-      P_Value = sprintf("%.4e", p_adj),
-      Interpretation = if (p_adj < 0.05) sprintf("Statistically significant temporal separation (%.1f days)", abs(diff_val)) else "Phenologically synchronous / overlapping",
-      stringsAsFactors = FALSE
-    )
+  if (nrow(tukey_mat) > 0) {
+    for (k in seq_len(nrow(tukey_mat))) {
+      comp_name <- rownames(tukey_mat)[k]
+      diff_val <- tukey_mat[k, "diff"]; lwr <- tukey_mat[k, "lwr"]; upr <- tukey_mat[k, "upr"]; p_adj <- tukey_mat[k, "p adj"]
+      summary_records[[length(summary_records) + 1]] <- data.frame(
+        Analysis_Section = "Tukey_HSD_PostHoc", Taxon_or_Comparison = gsub("-", " vs ", comp_name),
+        Sample_Size = nrow(target_flowering), Mean_Delta_DOY = round(diff_val, 3), SD_Delta_DOY = NA_real_,
+        Median_Delta_DOY = NA_real_, IQR_Delta_DOY = NA_real_, CI_Lower_95 = round(lwr, 3), CI_Upper_95 = round(upr, 3),
+        P_Value = sprintf("%.4e", p_adj),
+        Interpretation = if (p_adj < 0.05) sprintf("Statistically significant temporal separation (%.1f days)", abs(diff_val)) else "Phenologically synchronous / overlapping",
+        stringsAsFactors = FALSE
+      )
+    }
   }
   summary_report <- do.call(rbind, summary_records)
   if (!is.null(summary_csv)) {
@@ -574,23 +677,31 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
 export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   message(sprintf("Generating 2-panel phenological latitudinal anomaly figure to %s...", out_pdf))
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
-  target_df <- df[df$species_standardized %in% TARGET_TAXA & !is.na(df$delta_doy) & df$doy >= 60 & df$doy <= 220, ]
+  is_target <- df$species_standardized %in% TARGET_TAXA & !is.na(df$delta_doy)
+  target_df <- if ("is_verified_anthesis" %in% names(df)) {
+    df[is_target & df$is_verified_anthesis, ]
+  } else {
+    df[is_target & df$doy >= 50 & df$doy <= 220, ]
+  }
+  if (nrow(target_df) == 0) target_df <- df[is_target, ]
   
   thm <- ggplot2::theme_bw(base_size = 9) +
          ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 10),
                         panel.grid.minor = ggplot2::element_blank())
   
-  lat_seq <- seq(min(target_df$latitude, na.rm = TRUE), max(target_df$latitude, na.rm = TRUE), length.out = 100)
-  pred_line <- data.frame(latitude = lat_seq, doy = baseline$intercept + baseline$slope * lat_seq)
+  lat_col <- if ("decimalLatitude" %in% names(target_df) && any(!is.na(target_df$decimalLatitude))) target_df$decimalLatitude else target_df$latitude
+  target_df$decimalLatitude <- lat_col
+  lat_seq <- seq(min(target_df$decimalLatitude, na.rm = TRUE), max(target_df$decimalLatitude, na.rm = TRUE), length.out = 100)
+  pred_line <- data.frame(latitude = lat_seq, decimalLatitude = lat_seq, doy = baseline$intercept + baseline$slope * lat_seq)
   
-  p1 <- ggplot2::ggplot(target_df, ggplot2::aes(x = latitude, y = doy, color = species_standardized)) +
+  p1 <- ggplot2::ggplot(target_df, ggplot2::aes(x = decimalLatitude, y = doy, color = species_standardized)) +
     ggplot2::geom_point(alpha = 0.45, size = 1.4) +
-    ggplot2::geom_line(data = pred_line, ggplot2::aes(x = latitude, y = doy),
+    ggplot2::geom_line(data = pred_line, ggplot2::aes(x = decimalLatitude, y = doy),
                        color = "black", linewidth = 1.1, linetype = "dashed", inherit.aes = FALSE) +
     ggplot2::scale_color_manual(values = TAXON_COLORS) +
     thm +
     ggplot2::labs(
-      title = sprintf("A. Latitudinal Spring Cline: DOY ~ Latitude (Slope = +%.2f d/deg, R2 = %.2f)",
+      title = sprintf("A. Verified Latitudinal Spring Cline: DOY ~ Latitude (Slope = +%.2f d/deg, R2 = %.2f)",
                       baseline$slope, baseline$r_squared),
       x = "Decimal Latitude (°N)", y = "Observed Day of Year (DOY)", color = "Taxon"
     )
@@ -621,6 +732,7 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   gridExtra::grid.arrange(p1, p2, ncol = 2)
   dev.off()
 }
+
 
 # ------------------------------------------------------------------------------
 # 3. Cross-Modal Consensus & Conflict Auditing Engine
@@ -914,6 +1026,33 @@ main <- function() {
     v_cols <- intersect(names(vis_df), c("catalogNumber", "predicted_label", "confidence_predicted_class", "c_error", "is_label_corrupted"))
     names(vis_df)[names(vis_df) == "predicted_label"] <- "vision_predicted_label"
     vouchers_df <- dplyr::left_join(vouchers_df, vis_df[, intersect(names(vis_df), c("catalogNumber", "vision_predicted_label", "c_error", "is_label_corrupted"))], by = "catalogNumber")
+  }
+
+  # Ingest Voucher Phenological States (Computer Vision Anthesis Ingestion)
+  if (file.exists(opts$pheno_states)) {
+    message(sprintf("Ingesting voucher phenological states from %s...", opts$pheno_states))
+    pheno_states_df <- readr::read_csv(opts$pheno_states, show_col_types = FALSE)
+    pheno_states_df$catalogNumber <- as.character(pheno_states_df$catalogNumber)
+    vouchers_df$catalogNumber <- as.character(vouchers_df$catalogNumber)
+    p_cols <- intersect(names(pheno_states_df), c("catalogNumber", "total_capitula", "n_anthesis", "n_fruit", "n_bud", "voucher_phenological_state", "dominant_pappus_ratio"))
+    
+    # Inner-join with curated vouchers
+    joined_df <- dplyr::inner_join(vouchers_df, pheno_states_df[, p_cols], by = "catalogNumber")
+    if (nrow(joined_df) > 0) {
+      vouchers_df <- joined_df
+      message(sprintf("Inner-joined %d vouchers with phenological states.", nrow(vouchers_df)))
+    } else {
+      message("[WARN] Inner-join with phenological states yielded 0 matching records. Falling back to left_join / calendar + DwC.")
+      vouchers_df <- dplyr::left_join(vouchers_df, pheno_states_df[, p_cols], by = "catalogNumber")
+    }
+  } else {
+    message(sprintf("[INFO] Phenological states CSV not found at %s. Gracefully falling back to calendar + Darwin Core text.", opts$pheno_states))
+    vouchers_df$voucher_phenological_state <- NA_character_
+    vouchers_df$total_capitula <- NA_real_
+    vouchers_df$n_anthesis <- NA_real_
+    vouchers_df$n_fruit <- NA_real_
+    vouchers_df$n_bud <- NA_real_
+    vouchers_df$dominant_pappus_ratio <- NA_real_
   }
 
   # Filter strictly for primary duplicate vouchers (exsiccatae deduplication)

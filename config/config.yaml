@@ -102,6 +102,15 @@ thresholds:
       - "Packera paupercula var. paupercula"
       - "Packera paupercula var. savannarum"
 
+  # Visual capitulum phenological biomarker classification
+  capitulum_phenology:
+    min_pappus_luminance: 75
+    max_pappus_saturation: 0.18
+    min_pappus_area_ratio: 0.18
+    min_floret_yellow_saturation: 0.32
+    min_floret_yellow_ratio: 0.12
+    min_anthesis_heads_for_flowering: 1
+
 # Phase 1: Voucher Harvesting & Quality Filtering
 harvesting:
   max_records_per_taxon: 5000
