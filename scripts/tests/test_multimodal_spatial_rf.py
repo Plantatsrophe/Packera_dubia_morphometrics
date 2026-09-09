@@ -196,6 +196,84 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertGreater(float(contrast_row["Odds_Ratio"]), 1.0)
         self.assertLess(float(contrast_row["P_Value"]), 0.001)
 
+    def test_phenological_leap_year_doy_extraction(self):
+        """Verify day-of-year calculation accurately accounts for leap years (366 days)."""
+        from scripts.analysis.generate_phenological_artifacts import extract_doy
+        test_df = pd.DataFrame({
+            "eventDate": ["2020-02-29", "2020-03-01", "2021-02-28", "2021-03-01"],
+            "year": [2020, 2020, 2021, 2021],
+            "month": [2, 3, 2, 3],
+            "day": [29, 1, 28, 1]
+        })
+        doys = extract_doy(test_df).tolist()
+        self.assertEqual(doys[0], 60)  # Feb 29 in leap year
+        self.assertEqual(doys[1], 61)  # Mar 01 in leap year
+        self.assertEqual(doys[2], 59)  # Feb 28 in common year
+        self.assertEqual(doys[3], 60)  # Mar 01 in common year
+
+    def test_phenological_baseline_cline_and_hopkins_law(self):
+        """Verify empirical baseline slope matches Hopkins' Bioclimatic Law (3.5 - 4.5 days/deg)."""
+        from scripts.analysis.generate_phenological_artifacts import model_latitudinal_spring_baseline, extract_doy
+        vouchers_path = PROJECT_ROOT / "data" / "tables" / "curated_vouchers.csv"
+        df = pd.read_csv(vouchers_path, low_memory=False)
+        df["doy"] = extract_doy(df)
+        df["decimalLatitude"] = pd.to_numeric(df["decimalLatitude"].combine_first(df["latitude"]), errors="coerce")
+        baseline = model_latitudinal_spring_baseline(df)
+
+        self.assertGreaterEqual(baseline["slope"], 3.5, "Baseline slope must be >= 3.5 days/degree")
+        self.assertLessEqual(baseline["slope"], 4.5, "Baseline slope must be <= 4.5 days/degree")
+        self.assertGreater(baseline["r_squared"], 0.40, "R2 must reflect strong latitudinal cline (> 0.40)")
+        self.assertLess(baseline["p_value"], 1e-15, "Latitudinal cline must be highly significant")
+
+    def test_phenological_anomalies_and_allochronic_divergence(self):
+        """Verify phenological anomalies table and ANOVA / Tukey HSD allochronic separation."""
+        anom_path = PROJECT_ROOT / "data" / "tables" / "phenological_anomalies.csv"
+        sum_path = PROJECT_ROOT / "outputs" / "reports" / "phenological_anomaly_summary.csv"
+        self.assertTrue(anom_path.exists(), "phenological_anomalies.csv must exist.")
+        self.assertTrue(sum_path.exists(), "phenological_anomaly_summary.csv must exist.")
+
+        anom_df = pd.read_csv(anom_path)
+        self.assertIn("expected_doy", anom_df.columns)
+        self.assertIn("delta_doy", anom_df.columns)
+        self.assertIn("pheno_timing_category", anom_df.columns)
+        valid_anom = anom_df.dropna(subset=["delta_doy"])
+        self.assertGreater(len(valid_anom), 2000, "Must have > 2000 valid delta_doy vouchers.")
+
+        sum_df = pd.read_csv(sum_path)
+        anova_row = sum_df[sum_df["Analysis_Section"] == "One_Way_ANOVA"].iloc[0]
+        f_stat = float(anova_row["Mean_Delta_DOY"])
+        p_val = float(anova_row["P_Value"])
+        self.assertGreater(f_stat, 100.0, "ANOVA F-statistic must indicate decisive divergence (F > 100)")
+        self.assertLess(p_val, 1e-50, "ANOVA p-value must be < 1e-50")
+
+        # Tukey HSD: P. anonyma vs P. dubia
+        tukey_dub_ano = sum_df[sum_df["Taxon_or_Comparison"].str.contains("Packera anonyma vs Packera dubia")].iloc[0]
+        gap_days = abs(float(tukey_dub_ano["Mean_Delta_DOY"]))
+        self.assertGreater(gap_days, 15.0, "Allochronic separation between P. dubia and P. anonyma must be > 15 days")
+
+    def test_phenological_diagnostic_figure_artifact(self):
+        """Verify 2-panel publication figure PDF exists and has valid PDF format."""
+        fig_path = PROJECT_ROOT / "outputs" / "figures" / "phenological_latitudinal_anomaly.pdf"
+        self.assertTrue(fig_path.exists(), "phenological_latitudinal_anomaly.pdf must exist.")
+        self.assertGreater(fig_path.stat().st_size, 10000, "Figure PDF must be > 10 KB.")
+        with open(fig_path, "rb") as f:
+            header = f.read(5)
+        self.assertEqual(header, b"%PDF-", "File must have valid PDF magic bytes.")
+
+    def test_r_script_phenological_integration(self):
+        """Verify 06_multimodal_spatial_rf.R integrates phenological baseline and delta_doy."""
+        r_script = PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R"
+        with open(r_script, "r", encoding="utf-8") as f:
+            r_content = f.read()
+        self.assertIn("--pheno-anomalies", r_content)
+        self.assertIn("--pheno-summary", r_content)
+        self.assertIn("--pheno-plot", r_content)
+        self.assertIn("model_latitudinal_spring_baseline", r_content)
+        self.assertIn("compute_phenological_anomalies", r_content)
+        self.assertIn("export_phenological_latitudinal_figures", r_content)
+        self.assertIn("delta_doy", r_content)
+
 
 if __name__ == "__main__":
     unittest.main()
+

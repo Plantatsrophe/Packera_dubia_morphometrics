@@ -157,6 +157,18 @@ compute_efourier_coords_pure <- function(coo, nb_h = 12, norm = TRUE) {
   return(as.vector(rbind(norm_A, norm_B, norm_C, norm_D)))
 }
 
+compute_centsize_robust <- function(coo) {
+  if (is.null(coo) || nrow(coo) < 3) return(NA_real_)
+  if (requireNamespace("Momocs", quietly = TRUE)) {
+    cs <- tryCatch(Momocs::coo_centsize(coo), error = function(e) NA_real_)
+    if (!is.na(cs) && is.finite(cs) && cs > 0) return(cs)
+  }
+  cx <- mean(coo[, 1], na.rm = TRUE)
+  cy <- mean(coo[, 2], na.rm = TRUE)
+  val <- sqrt(sum((coo[, 1] - cx)^2 + (coo[, 2] - cy)^2, na.rm = TRUE))
+  if (is.finite(val) && val > 0) val else NA_real_
+}
+
 # ------------------------------------------------------------------------------
 # 3. Specimen Parsing & Contour Ingestion
 # ------------------------------------------------------------------------------
@@ -286,6 +298,8 @@ run_fourier_extraction <- function(opts) {
     span_y <- diff(range(coo[, 2], na.rm = TRUE))
     aspect_ratio <- if (span_y > 1e-6) round(span_x / span_y, 4) else 1.0
     area_px <- abs(0.5 * sum(coo[, 1] * c(coo[-1, 2], coo[1, 2]) - coo[, 2] * c(coo[-1, 1], coo[1, 1])))
+    centsize <- compute_centsize_robust(coo)
+    log_cs <- if (!is.na(centsize) && centsize > 0) round(log(centsize), 6) else NA_real_
 
     shape_name <- meta$shape_id
     coo_list[[shape_name]] <- coo
@@ -301,6 +315,8 @@ run_fourier_extraction <- function(opts) {
       } else { "Tier_1_Direct" },
       aspect_ratio = aspect_ratio,
       area_px = round(area_px, 1),
+      centroid_size = if (!is.na(centsize)) round(centsize, 4) else NA_real_,
+      log_centsize = log_cs,
       mask_source = f,
       stringsAsFactors = FALSE
     )
@@ -323,6 +339,13 @@ run_fourier_extraction <- function(opts) {
       message("Momocs::Out() note: ", e$message); NULL
     })
     if (!is.null(out_obj)) {
+      # Compute Centroid Size (CS) for each contour using Momocs::coo_centsize(outlines)
+      cs_vals <- tryCatch(Momocs::coo_centsize(out_obj), error = function(e) NULL)
+      if (!is.null(cs_vals) && length(cs_vals) == nrow(fac_df)) {
+        fac_df$centroid_size <- round(as.numeric(cs_vals), 4)
+        fac_df$log_centsize <- ifelse(!is.na(fac_df$centroid_size) & fac_df$centroid_size > 0,
+                                      round(log(fac_df$centroid_size), 6), NA_real_)
+      }
       ef_res <- tryCatch(Momocs::efourier(out_obj, nb.h = opts$harmonics, norm = TRUE), error = function(e) {
         message("Momocs::efourier() note: ", e$message); NULL
       })
@@ -416,7 +439,7 @@ run_fourier_extraction <- function(opts) {
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier",
                  "reconstruction_tier", "scientificName", "species_raw", "determiner_tier",
                  "PC1", "PC2", "PC3", "PC4", "PC5",
-                 "aspect_ratio", "area_px", "mask_source")
+                 "aspect_ratio", "solidity", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
 
@@ -467,6 +490,11 @@ run_fourier_extraction <- function(opts) {
       stringsAsFactors = FALSE
     )
 
+    # Specimen-level median Centroid Size (CS) and log_centsize
+    med_cs <- stats::median(grp$centroid_size, na.rm = TRUE)
+    rec$centroid_size <- if (is.finite(med_cs) && med_cs > 0) round(med_cs, 4) else NA_real_
+    rec$log_centsize <- if (!is.na(rec$centroid_size) && rec$centroid_size > 0) round(log(rec$centroid_size), 6) else NA_real_
+
     other_meta <- intersect(c("determiner_raw", "county", "stateProvince", "latitude", "longitude",
                               "pheno_sin", "pheno_cos", "regional_group", "aspect_ratio", "solidity", "area_px"),
                             names(grp))
@@ -498,7 +526,7 @@ run_fourier_extraction <- function(opts) {
   lead_spec_cols <- c("catalogNumber", "plant_individual_id", "leaf_count", "foliar_variance",
                       "assigned_tier", "reconstruction_tier", "scientificName", "species_raw", "determiner_tier",
                       "PC1", "PC2", "PC3", "PC4", "PC5",
-                      "aspect_ratio", "solidity", "area_px")
+                      "aspect_ratio", "solidity", "area_px", "centroid_size", "log_centsize")
   lead_spec_cols <- intersect(lead_spec_cols, names(specimen_df))
   specimen_df <- specimen_df[, c(lead_spec_cols, setdiff(names(specimen_df), lead_spec_cols))]
 

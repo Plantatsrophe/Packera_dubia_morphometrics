@@ -63,6 +63,12 @@ class TestSymmetricFourierValidation(unittest.TestCase):
         self.assertIn("stats::manova", content)
         self.assertIn("reconstruction_tier", content)
 
+        # Check centroid size calculation & Momocs integration
+        self.assertIn("compute_centsize_robust", content)
+        self.assertIn("centroid_size", content)
+        self.assertIn("log_centsize", content)
+        self.assertIn("Momocs::coo_centsize", content)
+
         # Check random seed reproducibility
         self.assertIn("opts$seed", content)
 
@@ -75,23 +81,28 @@ class TestSymmetricFourierValidation(unittest.TestCase):
         required_cols = [
             "catalogNumber", "assigned_tier", "reconstruction_tier",
             "scientificName", "determiner_tier", "PC1", "PC2", "PC3", "PC4", "PC5",
-            "foliar_variance", "leaf_count"
+            "foliar_variance", "leaf_count", "centroid_size", "log_centsize"
         ]
         for col in required_cols:
             self.assertIn(col, df.columns, f"Missing column {col} in harmonics table.")
 
-        # Verify specimen-level closed outlines have valid PC scores and foliar stability
+        # Verify specimen-level closed outlines have valid PC scores, foliar stability, and centroid size
         closed = df[df["reconstruction_tier"].isin(["Tier 1", "Tier 2"])]
         self.assertGreater(len(closed), 50, "Expected >50 specimen-level collection units.")
         self.assertTrue((closed["foliar_variance"] >= 0.0).all(), "foliar_variance must be non-negative.")
+        self.assertTrue((closed["centroid_size"] > 0.0).all(), "centroid_size must be strictly positive.")
+        self.assertFalse(closed["log_centsize"].isna().any(), "Found NaNs in log_centsize for closed outlines.")
         for p in range(1, 6):
             self.assertFalse(closed[f"PC{p}"].isna().any(), f"Found NaNs in PC{p} for closed outlines.")
 
-        # Verify individual archive contains full disaggregated outlines
+        # Verify individual archive contains full disaggregated outlines with centroid size
         self.assertTrue(self.individual_harmonics_path.exists(), "leaf_efa_harmonics_individual.csv must exist.")
         ind_df = pd.read_csv(self.individual_harmonics_path)
         ind_closed = ind_df[ind_df["reconstruction_tier"].isin(["Tier 1", "Tier 2"])]
         self.assertGreater(len(ind_closed), 1000, "Expected >1000 individual closed leaf outlines in archive.")
+        self.assertIn("centroid_size", ind_df.columns)
+        self.assertIn("log_centsize", ind_df.columns)
+        self.assertTrue((ind_closed["centroid_size"] > 0.0).all(), "Individual closed centroid size must be positive.")
 
         # Verify symmetric harmonic columns are present
         for i in range(1, 13):

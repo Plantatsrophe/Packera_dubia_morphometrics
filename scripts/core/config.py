@@ -121,6 +121,23 @@ class MorphometricsConfig:
     max_k: int = 8
     random_seed: int = 42
     normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
+    correct_allometry: str = "auto"
+    allometry_r2_threshold: float = 0.10
+
+
+@dataclass(frozen=True)
+class PhenologyConfig:
+    """Phenological modeling, latitudinal spring progression, and anomaly detection."""
+    min_flowering_doy: int = 60
+    max_flowering_doy: int = 220
+    robust_regression: bool = True
+
+
+@dataclass(frozen=True)
+class MacroecologyConfig:
+    """Phase 6 Macroecology, spatial random forest, and phenological parameters."""
+    phenology: PhenologyConfig = field(default_factory=PhenologyConfig)
+
 
 
 @dataclass(frozen=True)
@@ -166,6 +183,7 @@ class PipelineConfig:
     harvesting: HarvestingConfig
     segmentation: SegmentationConfig
     models: ModelsConfig = field(default_factory=ModelsConfig)
+    macroecology: MacroecologyConfig = field(default_factory=MacroecologyConfig)
     _raw_dict: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __getitem__(self, key: str) -> Any:
@@ -284,6 +302,8 @@ class PipelineConfig:
             nb_harmonics=nb_h, harmonics=int(m_dict.get("harmonics", nb_h)),
             num_pcs=int(m_dict.get("num_pcs", 5)), max_k=int(m_dict.get("max_k", 8)),
             random_seed=int(m_dict.get("random_seed", 42)), normalization=norm,
+            correct_allometry=str(m_dict.get("correct_allometry", "auto")),
+            allometry_r2_threshold=float(m_dict.get("allometry_r2_threshold", 0.10)),
         )
 
         harv_dict = raw_cfg.get("harvesting", {})
@@ -307,6 +327,15 @@ class PipelineConfig:
             models_kwargs["pcd_weights_sha256"] = str(models_dict["pcd_weights_sha256"])
         models = ModelsConfig(**models_kwargs)
 
+        macro_dict = raw_cfg.get("macroecology", {})
+        pheno_dict = macro_dict.get("phenology", {})
+        phenology_cfg = PhenologyConfig(
+            min_flowering_doy=int(pheno_dict.get("min_flowering_doy", 60)),
+            max_flowering_doy=int(pheno_dict.get("max_flowering_doy", 220)),
+            robust_regression=bool(pheno_dict.get("robust_regression", True)),
+        )
+        macroecology = MacroecologyConfig(phenology=phenology_cfg)
+
         resolved_raw = dict(raw_cfg)
         resolved_raw["resolved_paths"] = {
             k: getattr(paths, k) for k in paths.__dataclass_fields__
@@ -315,7 +344,8 @@ class PipelineConfig:
         return cls(
             paths=paths, taxa=taxa, thresholds=thresholds,
             morphometrics=morph, harvesting=harvesting,
-            segmentation=segmentation, models=models, _raw_dict=resolved_raw,
+            segmentation=segmentation, models=models,
+            macroecology=macroecology, _raw_dict=resolved_raw,
         )
 
 

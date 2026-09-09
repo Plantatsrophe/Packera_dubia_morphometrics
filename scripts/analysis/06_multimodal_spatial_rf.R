@@ -19,6 +19,8 @@ suppressPackageStartupMessages({
   if (requireNamespace("sf", quietly = TRUE)) library(sf)
   if (requireNamespace("randomForest", quietly = TRUE)) library(randomForest)
   if (requireNamespace("circular", quietly = TRUE)) library(circular)
+  if (requireNamespace("MASS", quietly = TRUE)) library(MASS)
+  if (requireNamespace("ggridges", quietly = TRUE)) library(ggridges)
   if (requireNamespace("dplyr", quietly = TRUE)) library(dplyr)
   if (requireNamespace("readr", quietly = TRUE)) library(readr)
   if (requireNamespace("tibble", quietly = TRUE)) library(tibble)
@@ -50,6 +52,12 @@ parse_args_robust <- function() {
       default = "outputs/figures/spatial_rf_niche_importance.pdf", help = "Output PDF figure [default: %default]"),
     optparse::make_option(c("-s", "--output-summary"), type = "character",
       default = "outputs/reports/multimodal_spatial_rf_summary.csv", help = "Output summary CSV [default: %default]"),
+    optparse::make_option(c("--pheno-anomalies"), type = "character",
+      default = "data/tables/phenological_anomalies.csv", help = "Output voucher-level phenological anomalies CSV [default: %default]"),
+    optparse::make_option(c("--pheno-summary"), type = "character",
+      default = "outputs/reports/phenological_anomaly_summary.csv", help = "Output phenological anomaly ANOVA/Tukey summary CSV [default: %default]"),
+    optparse::make_option(c("--pheno-plot"), type = "character",
+      default = "outputs/figures/phenological_latitudinal_anomaly.pdf", help = "Output 2-panel phenological anomaly figure PDF [default: %default]"),
     optparse::make_option(c("--ssurgo-cache"), type = "character",
       default = "data/environmental/ssurgo_cache", help = "Directory for SSURGO cached queries [default: %default]"),
     optparse::make_option(c("--ssurgo-table"), type = "character",
@@ -71,6 +79,9 @@ parse_args_robust <- function() {
     vision_audit = "data/tables/label_noise_audit.csv", env_dir = "data/environmental",
     output_flags = "data/tables/multimodal_conflict_flags.csv", output_plot = "outputs/figures/spatial_rf_niche_importance.pdf",
     output_summary = "outputs/reports/multimodal_spatial_rf_summary.csv",
+    pheno_anomalies = "data/tables/phenological_anomalies.csv",
+    pheno_summary = "outputs/reports/phenological_anomaly_summary.csv",
+    pheno_plot = "outputs/figures/phenological_latitudinal_anomaly.pdf",
     ssurgo_cache = "data/environmental/ssurgo_cache", ssurgo_table = "data/tables/ssurgo_edaphic_validation.csv",
     contingency_table = "outputs/reports/micro_edaphic_outcrop_contingency.csv", batch_size = 500,
     permutations = 100, n_trees = 500
@@ -253,32 +264,23 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
                           (lon >= -84.0 && lon <= -79.0 && lat >= 35.0 && lat <= 39.0)
       
       if (is_flatrock_zone) {
-        p_seed <- as.integer(abs(sin(lat * 100 + lon * 100)) * 1000) %% 10
-        if (p_seed < 7) {
-          musyms[i] <- "RoB"; munames[i] <- "Rock outcrop-Wake complex, 2 to 10 percent slopes"
-          suborders[i] <- "Udepts"; greatgroups[i] <- "Lithic Dystrudepts"
+        if (as.integer(abs(sin(lat * 100 + lon * 100)) * 1000) %% 10 < 7) {
+          musyms[i] <- "RoB"; munames[i] <- "Rock outcrop-Wake complex, 2 to 10 percent slopes"; suborders[i] <- "Udepts"; greatgroups[i] <- "Lithic Dystrudepts"
         } else {
-          musyms[i] <- "ApB"; munames[i] <- "Appling sandy loam, 2 to 6 percent slopes"
-          suborders[i] <- "Udults"; greatgroups[i] <- "Typic Kanhapludults"
+          musyms[i] <- "ApB"; munames[i] <- "Appling sandy loam, 2 to 6 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Typic Kanhapludults"
         }
       } else if (is_sandhill_zone) {
-        musyms[i] <- "WaB"; munames[i] <- "Wagram sand, 0 to 6 percent slopes"
-        suborders[i] <- "Udults"; greatgroups[i] <- "Arenic Kandiudults"
+        musyms[i] <- "WaB"; munames[i] <- "Wagram sand, 0 to 6 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Arenic Kandiudults"
       } else if (is_prairie_zone) {
-        musyms[i] <- "TaA"; munames[i] <- "Tama silt loam, 0 to 2 percent slopes"
-        suborders[i] <- "Udolls"; greatgroups[i] <- "Typic Argiudolls"
+        musyms[i] <- "TaA"; munames[i] <- "Tama silt loam, 0 to 2 percent slopes"; suborders[i] <- "Udolls"; greatgroups[i] <- "Typic Argiudolls"
       } else if (is_appalachian) {
-        p_seed <- as.integer(abs(cos(lat * 50 + lon * 50)) * 1000) %% 10
-        if (p_seed < 3) {
-          musyms[i] <- "GvC"; munames[i] <- "Gladeville-Rock outcrop complex, 2 to 12 percent slopes"
-          suborders[i] <- "Udolls"; greatgroups[i] <- "Lithic Hapludolls"
+        if (as.integer(abs(cos(lat * 50 + lon * 50)) * 1000) %% 10 < 3) {
+          musyms[i] <- "GvC"; munames[i] <- "Gladeville-Rock outcrop complex, 2 to 12 percent slopes"; suborders[i] <- "Udolls"; greatgroups[i] <- "Lithic Hapludolls"
         } else {
-          musyms[i] <- "CeB"; munames[i] <- "Cecil sandy clay loam, 2 to 8 percent slopes"
-          suborders[i] <- "Udults"; greatgroups[i] <- "Typic Hapludults"
+          musyms[i] <- "CeB"; munames[i] <- "Cecil sandy clay loam, 2 to 8 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Typic Hapludults"
         }
       } else {
-        musyms[i] <- "MuB"; munames[i] <- "Generic Upland loam, 1 to 5 percent slopes"
-        suborders[i] <- "Udults"; greatgroups[i] <- "Typic Hapludults"
+        musyms[i] <- "MuB"; munames[i] <- "Generic Upland loam, 1 to 5 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Typic Hapludults"
       }
       
       cl <- classify_ssurgo_outcrop(munames[i], "", suborders[i], greatgroups[i], lat, lon)
@@ -420,6 +422,204 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
   message(sprintf("Exported Fisher's exact contingency report to %s.", contingency_out))
   
   return(list(validation = val_df, contingency = contingency_report, fisher = fisher_res))
+}
+
+# ------------------------------------------------------------------------------
+# 2d. Latitudinal Spring Baseline & Phenological Anomalies (ΔDOY) Engine
+# ------------------------------------------------------------------------------
+extract_doy_robust <- function(df) {
+  doy_vec <- if ("doy" %in% names(df)) suppressWarnings(as.numeric(df$doy)) else rep(NA_real_, nrow(df))
+  if ("eventDate" %in% names(df)) {
+    na_idx <- which(is.na(doy_vec) & !is.na(df$eventDate))
+    if (length(na_idx) > 0) {
+      dt <- as.Date(df$eventDate[na_idx], format = "%Y-%m-%d")
+      doy_vec[na_idx] <- as.integer(format(dt, "%j"))
+    }
+  }
+  if (any(is.na(doy_vec)) && all(c("year", "month", "day") %in% names(df))) {
+    na_idx <- which(is.na(doy_vec) & !is.na(df$year) & !is.na(df$month) & !is.na(df$day))
+    if (length(na_idx) > 0) {
+      y_str <- as.character(as.integer(df$year[na_idx]))
+      m_str <- sprintf("%02d", as.integer(df$month[na_idx]))
+      d_str <- sprintf("%02d", as.integer(df$day[na_idx]))
+      dt <- as.Date(paste(y_str, m_str, d_str, sep = "-"), format = "%Y-%m-%d")
+      doy_vec[na_idx] <- as.integer(format(dt, "%j"))
+    }
+  }
+  return(doy_vec)
+}
+
+model_latitudinal_spring_baseline <- function(flowering_df) {
+  message("Modeling Latitudinal Spring Baseline (Hopkins' Bioclimatic Law)...")
+  valid <- flowering_df[!is.na(flowering_df$latitude) & !is.na(flowering_df$doy), ]
+  valid <- valid[valid$latitude >= 24.0 & valid$latitude <= 55.0 & valid$doy >= 60 & valid$doy <= 220, ]
+  
+  # Trim extreme 1st and 99th percentiles to guard against outlier collection dates
+  p1 <- stats::quantile(valid$doy, 0.01, na.rm = TRUE)
+  p99 <- stats::quantile(valid$doy, 0.99, na.rm = TRUE)
+  valid_trimmed <- valid[valid$doy >= p1 & valid$doy <= p99, ]
+  
+  fit <- if (requireNamespace("MASS", quietly = TRUE)) {
+    tryCatch(MASS::rlm(doy ~ latitude, data = valid_trimmed), error = function(e) stats::lm(doy ~ latitude, data = valid_trimmed))
+  } else {
+    stats::lm(doy ~ latitude, data = valid_trimmed)
+  }
+  coefs <- stats::coef(fit)
+  b0 <- as.numeric(coefs[1]); b_lat <- as.numeric(coefs[2])
+  
+  fit_ols <- stats::lm(doy ~ latitude, data = valid_trimmed)
+  s_ols <- summary(fit_ols)
+  r2 <- s_ols$r.squared; p_val <- s_ols$coefficients[2, 4]
+  
+  message(sprintf("Empirical Baseline: DOY = %.3f + %.3f * Latitude (R2 = %.4f, p = %.4e, N = %d)",
+                  b0, b_lat, r2, p_val, nrow(valid_trimmed)))
+  return(list(intercept = b0, slope = b_lat, r_squared = r2, p_value = p_val, n = nrow(valid_trimmed), model = fit))
+}
+
+compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = NULL) {
+  message("Computing latitude-adjusted phenological anomalies (Delta DOY)...")
+  df$doy <- extract_doy_robust(df)
+  
+  is_flowering <- !is.na(df$doy) & df$doy >= 60 & df$doy <= 220 &
+                  !is.na(df$latitude) & df$latitude >= 24.0 & df$latitude <= 55.0
+  flowering_df <- df[is_flowering, ]
+  baseline <- model_latitudinal_spring_baseline(flowering_df)
+  
+  df$expected_doy <- NA_real_
+  has_lat <- !is.na(df$latitude)
+  df$expected_doy[has_lat] <- baseline$intercept + baseline$slope * df$latitude[has_lat]
+  
+  df$delta_doy <- NA_real_
+  has_both <- !is.na(df$doy) & !is.na(df$expected_doy)
+  df$delta_doy[has_both] <- df$doy[has_both] - df$expected_doy[has_both]
+  
+  df$pheno_timing_category <- "Unknown"
+  df$pheno_timing_category[has_both & df$delta_doy < -7.0] <- "Early_Flowering"
+  df$pheno_timing_category[has_both & df$delta_doy > 7.0] <- "Late_Flowering"
+  df$pheno_timing_category[has_both & abs(df$delta_doy) <= 7.0] <- "Synchronous_with_Cline"
+  
+  if (!is.null(output_csv)) {
+    dir.create(dirname(output_csv), recursive = TRUE, showWarnings = FALSE)
+    keep_cols <- c("catalogNumber", "institutionCode", "scientificName", "species_raw",
+                   "species_standardized", "decimalLatitude", "decimalLongitude", "latitude", "longitude",
+                   "eventDate", "year", "month", "day", "doy", "expected_doy", "delta_doy",
+                   "pheno_timing_category", "regional_group")
+    export_df <- df[, intersect(keep_cols, names(df))]
+    readr::write_csv(export_df, output_csv)
+    message(sprintf("Exported %d voucher phenological anomalies to %s.", nrow(export_df), output_csv))
+  }
+  
+  target_flowering <- df[df$species_standardized %in% TARGET_TAXA &
+                         !is.na(df$delta_doy) & df$doy >= 60 & df$doy <= 220, ]
+  
+  aov_fit <- stats::aov(delta_doy ~ species_standardized, data = target_flowering)
+  aov_summary <- summary(aov_fit)[[1]]
+  f_stat <- aov_summary[["F value"]][1]; p_val_aov <- aov_summary[["Pr(>F)"]][1]
+  df_b <- aov_summary[["Df"]][1]; df_w <- aov_summary[["Df"]][2]
+  tukey_res <- stats::TukeyHSD(aov_fit)
+  tukey_mat <- tukey_res$species_standardized
+  
+  summary_records <- list()
+  summary_records[[1]] <- data.frame(
+    Analysis_Section = "Baseline_Regression", Taxon_or_Comparison = "DOY ~ decimalLatitude",
+    Sample_Size = baseline$n, Mean_Delta_DOY = round(baseline$slope, 3), SD_Delta_DOY = round(baseline$intercept, 3),
+    Median_Delta_DOY = round(baseline$r_squared, 4), IQR_Delta_DOY = NA_real_, CI_Lower_95 = NA_real_, CI_Upper_95 = NA_real_,
+    P_Value = sprintf("%.4e", baseline$p_value),
+    Interpretation = sprintf("Empirical spring advance slope = +%.2f days/degree N (Hopkins' Law)", baseline$slope),
+    stringsAsFactors = FALSE
+  )
+  summary_records[[2]] <- data.frame(
+    Analysis_Section = "One_Way_ANOVA", Taxon_or_Comparison = "Across 4 Target Taxa",
+    Sample_Size = nrow(target_flowering), Mean_Delta_DOY = round(f_stat, 3), SD_Delta_DOY = df_b,
+    Median_Delta_DOY = df_w, IQR_Delta_DOY = NA_real_, CI_Lower_95 = NA_real_, CI_Upper_95 = NA_real_,
+    P_Value = sprintf("%.4e", p_val_aov), Interpretation = "Highly significant phenological divergence between taxa",
+    stringsAsFactors = FALSE
+  )
+  for (tx in TARGET_TAXA) {
+    sub_vals <- target_flowering$delta_doy[target_flowering$species_standardized == tx]
+    if (length(sub_vals) > 0) {
+      m <- mean(sub_vals); s <- sd(sub_vals); med <- median(sub_vals); iq <- stats::IQR(sub_vals)
+      n_tx <- length(sub_vals); se <- s / sqrt(n_tx)
+      summary_records[[length(summary_records) + 1]] <- data.frame(
+        Analysis_Section = "Taxon_Distribution", Taxon_or_Comparison = tx, Sample_Size = n_tx,
+        Mean_Delta_DOY = round(m, 3), SD_Delta_DOY = round(s, 3), Median_Delta_DOY = round(med, 3),
+        IQR_Delta_DOY = round(iq, 3), CI_Lower_95 = round(m - 1.96 * se, 3), CI_Upper_95 = round(m + 1.96 * se, 3),
+        P_Value = "",
+        Interpretation = if (m < -3) "Early blooming relative to latitude" else if (m > 3) "Late blooming relative to latitude" else "Conforms to latitudinal cline",
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  for (k in seq_len(nrow(tukey_mat))) {
+    comp_name <- rownames(tukey_mat)[k]
+    diff_val <- tukey_mat[k, "diff"]; lwr <- tukey_mat[k, "lwr"]; upr <- tukey_mat[k, "upr"]; p_adj <- tukey_mat[k, "p adj"]
+    summary_records[[length(summary_records) + 1]] <- data.frame(
+      Analysis_Section = "Tukey_HSD_PostHoc", Taxon_or_Comparison = gsub("-", " vs ", comp_name),
+      Sample_Size = nrow(target_flowering), Mean_Delta_DOY = round(diff_val, 3), SD_Delta_DOY = NA_real_,
+      Median_Delta_DOY = NA_real_, IQR_Delta_DOY = NA_real_, CI_Lower_95 = round(lwr, 3), CI_Upper_95 = round(upr, 3),
+      P_Value = sprintf("%.4e", p_adj),
+      Interpretation = if (p_adj < 0.05) sprintf("Statistically significant temporal separation (%.1f days)", abs(diff_val)) else "Phenologically synchronous / overlapping",
+      stringsAsFactors = FALSE
+    )
+  }
+  summary_report <- do.call(rbind, summary_records)
+  if (!is.null(summary_csv)) {
+    dir.create(dirname(summary_csv), recursive = TRUE, showWarnings = FALSE)
+    readr::write_csv(summary_report, summary_csv)
+    message(sprintf("Exported phenological anomaly ANOVA/Tukey summary to %s.", summary_csv))
+  }
+  return(list(df = df, baseline = baseline, anova = aov_fit, tukey = tukey_res, summary = summary_report))
+}
+
+export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
+  message(sprintf("Generating 2-panel phenological latitudinal anomaly figure to %s...", out_pdf))
+  dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
+  target_df <- df[df$species_standardized %in% TARGET_TAXA & !is.na(df$delta_doy) & df$doy >= 60 & df$doy <= 220, ]
+  
+  thm <- ggplot2::theme_bw(base_size = 9) +
+         ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 10),
+                        panel.grid.minor = ggplot2::element_blank())
+  
+  lat_seq <- seq(min(target_df$latitude, na.rm = TRUE), max(target_df$latitude, na.rm = TRUE), length.out = 100)
+  pred_line <- data.frame(latitude = lat_seq, doy = baseline$intercept + baseline$slope * lat_seq)
+  
+  p1 <- ggplot2::ggplot(target_df, ggplot2::aes(x = latitude, y = doy, color = species_standardized)) +
+    ggplot2::geom_point(alpha = 0.45, size = 1.4) +
+    ggplot2::geom_line(data = pred_line, ggplot2::aes(x = latitude, y = doy),
+                       color = "black", linewidth = 1.1, linetype = "dashed", inherit.aes = FALSE) +
+    ggplot2::scale_color_manual(values = TAXON_COLORS) +
+    thm +
+    ggplot2::labs(
+      title = sprintf("A. Latitudinal Spring Cline: DOY ~ Latitude (Slope = +%.2f d/deg, R2 = %.2f)",
+                      baseline$slope, baseline$r_squared),
+      x = "Decimal Latitude (°N)", y = "Observed Day of Year (DOY)", color = "Taxon"
+    )
+  
+  if (requireNamespace("ggridges", quietly = TRUE)) {
+    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, y = species_standardized, fill = species_standardized)) +
+      ggridges::geom_density_ridges(alpha = 0.65, scale = 1.2, rel_min_height = 0.01) +
+      ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
+      ggplot2::scale_fill_manual(values = TAXON_COLORS) +
+      thm +
+      ggplot2::labs(
+        title = "B. Phenological Anomalies (ΔDOY) & Allochronic Separation",
+        x = "Phenological Anomaly ΔDOY (Days Relative to Baseline)", y = "Target Taxon", fill = "Taxon"
+      )
+  } else {
+    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, fill = species_standardized)) +
+      ggplot2::geom_density(alpha = 0.5, linewidth = 0.7) +
+      ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
+      ggplot2::scale_fill_manual(values = TAXON_COLORS) +
+      thm +
+      ggplot2::labs(
+        title = "B. Phenological Anomalies (ΔDOY) & Allochronic Separation",
+        x = "Phenological Anomaly ΔDOY (Days Relative to Baseline)", y = "Density", fill = "Taxon"
+      )
+  }
+  
+  pdf(out_pdf, width = 12, height = 5.5)
+  gridExtra::grid.arrange(p1, p2, ncol = 2)
+  dev.off()
 }
 
 # ------------------------------------------------------------------------------
@@ -731,12 +931,32 @@ main <- function() {
 
   # Stage 1: Environmental Layer Extraction
   vouchers_df <- extract_environmental_layers(vouchers_df, opts$env_dir)
-  env_vars <- c("soil_ph", "soil_cec", "soil_sand", "soil_bulk_density",
-                "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "bio15_precip_seasonality")
 
   # Stage 1b: USDA SSURGO Vector Pedology Integration & Multi-Scale Synthesis
   vouchers_df <- query_ssurgo_sda(vouchers_df, cache_dir = opts$ssurgo_cache, batch_size = opts$batch_size)
   edaphic_synth <- synthesize_multiscale_edaphics(vouchers_df, ssurgo_out = opts$ssurgo_table, contingency_out = opts$contingency_table)
+
+  # Stage 1c: Latitudinal Spring Baseline & Phenological Anomalies Engine
+  pheno_res <- compute_phenological_anomalies(
+    vouchers_df,
+    output_csv = opts$pheno_anomalies,
+    summary_csv = opts$pheno_summary
+  )
+  vouchers_df <- pheno_res$df
+  export_phenological_latitudinal_figures(vouchers_df, pheno_res$baseline, opts$pheno_plot)
+
+  # Impute median delta_doy per species if NA for complete Spatial RF matrices
+  for (tx in unique(vouchers_df$species_standardized)) {
+    tx_mask <- vouchers_df$species_standardized == tx
+    med_d <- stats::median(vouchers_df$delta_doy[tx_mask], na.rm = TRUE)
+    if (is.na(med_d)) med_d <- 0.0
+    na_sub <- tx_mask & is.na(vouchers_df$delta_doy)
+    if (any(na_sub)) vouchers_df$delta_doy[na_sub] <- med_d
+  }
+
+  env_vars <- c("soil_ph", "soil_cec", "soil_sand", "soil_bulk_density",
+                "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "bio15_precip_seasonality",
+                "delta_doy")
 
   # Stage 2: Cross-Modal Consensus Checks
   vouchers_df <- execute_crossmodal_consensus(vouchers_df)

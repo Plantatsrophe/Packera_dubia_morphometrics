@@ -29,9 +29,10 @@
 8. [Phase 6: Multi-Modal Spatial Random Forests & Niche Modeling](#phase-6-multi-modal-spatial-random-forests--niche-modeling)
    - [6.1 Multi-Scale Micro-Edaphic Validation: SoilGrids vs. USDA SSURGO](#61-multi-scale-micro-edaphic-validation-regional-soilgrids-250m-vs-usda-ssurgo-124000)
 9. [Phase 7: Multi-Evidence Synthesis & Digital Triage Queue](#phase-7-multi-evidence-synthesis--digital-triage-queue)
-10. [Automated Test Suite Verification](#10-automated-test-suite-verification)
-11. [Troubleshooting & Quality Control Checklist](#11-troubleshooting--quality-control-checklist)
-12. [Key Literature & Citations](#12-key-literature--citations)
+10. [Methodological Highlights](#-methodological-highlights)
+11. [Automated Test Suite Verification](#11-automated-test-suite-verification)
+12. [Troubleshooting & Quality Control Checklist](#12-troubleshooting--quality-control-checklist)
+13. [Key Literature & Citations](#13-key-literature--citations)
 
 ---
 
@@ -476,9 +477,19 @@ python scripts/analysis/07_triage_dashboard_synthesis.py \
 
 ---
 
-## 10. Automated Test Suite Verification
+## 🔬 Methodological Highlights
 
-Run the full automated test suite across all 6 test modules:
+### Allometry-Free Shape Analysis
+Testing multivariate shape coordinates (12-harmonic Elliptic Fourier Analysis coefficients) against log-transformed Centroid Size ($\log(CS)$) to prevent plant stature, environmental vigor, or developmental stage from confounding taxonomic clusters. In natural populations and herbarium collections, larger leaves often display distinct aspect ratios, serration prominence, or lyrate lobing compared to smaller leaves of the same individual. When empirical allometric scaling is detected via multivariate regression ($R^2 \ge 0.10$), size-correlated shape variance is regressed out to yield pure allometry-free shape residuals, ensuring that downstream Gaussian Mixture Models (GMM) and Canonical Discriminant Analysis (CDA) isolate true evolutionary lineage divergence rather than environmental or ontogenetic plasticity (Klingenberg 2016).
+
+### Latitude-Adjusted Flowering Anomalies
+Testing temporal reproductive isolation independent of continental geographic latitudinal clines. Phenological flowering dates advance poleward across eastern North America at approximately 4.0 days per degree of latitude northward, consistent with Hopkins' Bioclimatic Law. By fitting an empirical baseline cline across blooming herbarium vouchers ($\text{DOY} = \beta_0 + \beta_1 \cdot \text{Latitude}$), the pipeline computes standardized phenological anomalies ($\Delta\text{DOY} = \text{DOY}_{\text{obs}} - \text{DOY}_{\text{expected}}$). This eliminates latitudinal confounding and enables rigorous ANOVA and Tukey HSD testing of temporal prezygotic reproductive isolation (allochronic divergence) among sympatric and parapatric taxa (Davis et al. 2015).
+
+---
+
+## 11. Automated Test Suite Verification
+
+Run the full automated test suite across all 7 test modules:
 ```bash
 source .venv/bin/activate
 python -m unittest discover -s scripts/tests
@@ -491,10 +502,11 @@ python -m unittest discover -s scripts/tests
 4. `test_cleanlab_vision_xai.py`: Verifies DINOv2 feature extraction, Cleanlab noise auditing, and Grad-CAM generation.
 5. `test_multimodal_spatial_rf.py`: Verifies SoilGrids/WorldClim feature extraction and cross-modal consensus flags.
 6. `test_triage_dashboard_synthesis.py`: Verifies the taxonomic decision matrix and triage queue generator.
+7. `test_allometry_and_phenology.py`: Verifies Centroid Size linear scaling, scale-invariant normalized EFA harmonics, and empirical latitudinal phenological anomaly mathematics ($\Delta\text{DOY}$).
 
 ---
 
-## 11. Troubleshooting & Quality Control Checklist
+## 12. Troubleshooting & Quality Control Checklist
 
 | Symptom | Cause | Resolution |
 |:---|:---|:---|
@@ -506,15 +518,18 @@ python -m unittest discover -s scripts/tests
 
 ---
 
-## 12. Key Literature & Citations
+## 13. Key Literature & Citations
 
 1. Barkley, T. M. 1988. Variation among the Senecioneae (Asteraceae) in North America. *Brittonia* 40(2): 211–221. doi: 10.2307/2807005
-2. de Queiroz, K. 2007. Species concepts and species delimitation. *Systematic Biology* 56(6): 879–886. doi: 10.1080/10635150701701083
-3. Kowal, R. R. 1975. Systematics of *Senecio aureus* and allied species on the Gaspé Peninsula, Quebec. *Memoirs of the Torrey Botanical Club* 23(2): 1–113.
-4. Kuhl, F. P., and C. R. Giardina. 1982. Elliptic Fourier features of a closed contour. *Computer Graphics and Image Processing* 18(3): 236–258. doi: 10.1016/0146-664X(82)90034-X
-5. Mabberley, D. J., D. K. Trock, and A. S. Weakley. 2020. The nomenclature of *Packera dubia* (Asteraceae: Senecioneae). *Taxon* 69(6): 1334–1337. doi: 10.1002/tax.12351
-6. Northcutt, C. G., L. Jiang, and I. L. Chuang. 2021. Confident Learning: Estimating Uncertainty in Dataset Labels. *Journal of Artificial Intelligence Research* 70: 1373–1411. doi: 10.1613/jair.1.12125
-7. Šlenker, M., P. Koutecký, and P. Marhold. 2022. MorphoTools2: an R package for multivariate morphometric analysis. *Bioinformatics* 38(10): 2954–2955. doi: 10.1093/bioinformatics/btac173
-8. Trock, D. K. 2006. *Packera*. In Flora of North America Editorial Committee (eds.), *Flora of North America North of Mexico*, Vol. 20, 570–602. Oxford University Press, New York.
-9. Weakley, A. S. 2026. *Flora of the Southeastern United States*. University of North Carolina Herbarium (NCU), North Carolina Botanical Garden, Chapel Hill.
-10. Weaver, W. N., P. S. Ng, and R. LaFrance. 2024. LeafMachine2: Using machine learning to rapidly measure plant traits captured in herbarium specimens. *Applications in Plant Sciences* 12(1): e11545. doi: 10.1002/aps3.11545
+2. Davis, C. C., C. G. Willis, B. Connolly, C. Kelly, and A. M. Ellison. 2015. Herbarium records are a viable alternative to traditional phenological data for testing responses to climate change. *Journal of Ecology* 103(5): 1126–1134. doi: 10.1111/1365-2745.12457
+3. de Queiroz, K. 2007. Species concepts and species delimitation. *Systematic Biology* 56(6): 879–886. doi: 10.1080/10635150701701083
+4. Klingenberg, C. P. 2016. Size, shape, and form: concepts of allometry in geometric morphometrics. *Development Genes and Evolution* 226(3): 113–137. doi: 10.1007/s00427-016-0539-8
+5. Kowal, R. R. 1975. Systematics of *Senecio aureus* and allied species on the Gaspé Peninsula, Quebec. *Memoirs of the Torrey Botanical Club* 23(2): 1–113.
+6. Kuhl, F. P., and C. R. Giardina. 1982. Elliptic Fourier features of a closed contour. *Computer Graphics and Image Processing* 18(3): 236–258. doi: 10.1016/0146-664X(82)90034-X
+7. Mabberley, D. J., D. K. Trock, and A. S. Weakley. 2020. The nomenclature of *Packera dubia* (Asteraceae: Senecioneae). *Taxon* 69(6): 1334–1337. doi: 10.1002/tax.12351
+8. Northcutt, C. G., L. Jiang, and I. L. Chuang. 2021. Confident Learning: Estimating Uncertainty in Dataset Labels. *Journal of Artificial Intelligence Research* 70: 1373–1411. doi: 10.1613/jair.1.12125
+9. Šlenker, M., P. Koutecký, and P. Marhold. 2022. MorphoTools2: an R package for multivariate morphometric analysis. *Bioinformatics* 38(10): 2954–2955. doi: 10.1093/bioinformatics/btac173
+10. Trock, D. K. 2006. *Packera*. In Flora of North America Editorial Committee (eds.), *Flora of North America North of Mexico*, Vol. 20, 570–602. Oxford University Press, New York.
+11. Weakley, A. S. 2026. *Flora of the Southeastern United States*. University of North Carolina Herbarium (NCU), North Carolina Botanical Garden, Chapel Hill.
+12. Weaver, W. N., P. S. Ng, and R. LaFrance. 2024. LeafMachine2: Using machine learning to rapidly measure plant traits captured in herbarium specimens. *Applications in Plant Sciences* 12(1): e11545. doi: 10.1002/aps3.11545
+

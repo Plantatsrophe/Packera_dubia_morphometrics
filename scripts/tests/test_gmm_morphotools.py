@@ -220,6 +220,45 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertTrue((df["leaf_count"] >= 1).all(), "Every specimen must have >=1 leaf.")
         self.assertTrue((df["foliar_variance"] >= 0.0).all(), "foliar_variance must be non-negative.")
 
+    def test_allometry_testing_cli_and_functions(self):
+        """Verify 04_gmm_morphotools.R has allometry CLI parameters, functions, and logging."""
+        with open(self.r_script_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("--correct-allometry", content, "Missing --correct-allometry CLI option")
+        self.assertIn("test_and_correct_allometry", content, "Missing test_and_correct_allometry function")
+        self.assertIn("generate_allometry_diagnostic_plot", content, "Missing generate_allometry_diagnostic_plot function")
+        self.assertIn("[INFO] Foliar allometry detected", content, "Missing logging for detected foliar allometry")
+        self.assertIn("[INFO] Foliar allometry negligible", content, "Missing logging for negligible foliar allometry")
+
+    def test_allometry_significance_audit_report(self):
+        """Verify outputs/reports/allometry_significance_audit.csv exists and has correct ANOVA schema."""
+        report_path = PROJECT_ROOT / "outputs" / "reports" / "allometry_significance_audit.csv"
+        self.assertTrue(report_path.exists(), f"Allometry audit report not found at {report_path}")
+        df = pd.read_csv(report_path)
+        expected_cols = ["Term", "Df", "SumOfSqs", "R2", "F", "p_value"]
+        for col in expected_cols:
+            self.assertIn(col, df.columns, f"Missing expected column '{col}' in allometry audit")
+
+        terms = df["Term"].tolist()
+        self.assertIn("log_centsize", terms, "Missing 'log_centsize' term in ANOVA table")
+        self.assertIn("scientificName", terms, "Missing 'scientificName' term in ANOVA table")
+        self.assertIn("Residual", terms, "Missing 'Residual' term in ANOVA table")
+        self.assertIn("Total", terms, "Missing 'Total' term in ANOVA table")
+
+        # R2 values should be valid probabilities
+        for r2 in df["R2"].dropna():
+            self.assertGreaterEqual(r2, 0.0)
+            self.assertLessEqual(r2, 1.0)
+
+    def test_shape_allometry_regression_figure(self):
+        """Verify outputs/figures/shape_allometry_regression.pdf exists and is a valid PDF."""
+        pdf_path = PROJECT_ROOT / "outputs" / "figures" / "shape_allometry_regression.pdf"
+        self.assertTrue(pdf_path.exists(), f"Allometry regression PDF not found at {pdf_path}")
+        self.assertGreater(pdf_path.stat().st_size, 10000, "PDF file is unexpectedly small (< 10 KB)")
+        with open(pdf_path, "rb") as f:
+            header = f.read(5)
+        self.assertEqual(header, b"%PDF-", "File does not have valid PDF magic bytes")
+
 
 if __name__ == "__main__":
     unittest.main()

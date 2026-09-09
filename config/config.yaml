@@ -124,6 +124,8 @@ segmentation:
 # Phase 3: Elliptic Fourier Analysis & Statistical Morphometrics (Momocs / MorphoTools2)
 morphometrics:
   nb_harmonics: 12
+  correct_allometry: "auto"
+  allometry_r2_threshold: 0.10
   harmonics: 12
   num_pcs: 5
   max_k: 8
@@ -133,3 +135,11 @@ morphometrics:
     scale_invariant: true
     rotation_invariant: true
     start_point_invariant: true
+
+# Phase 6: Macroecology & Phenological Spatial Statistics
+macroecology:
+  phenology:
+    min_flowering_doy: 60
+    max_flowering_doy: 220
+    robust_regression: true
+

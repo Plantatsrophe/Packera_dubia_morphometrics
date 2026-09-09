@@ -77,6 +77,10 @@ from scripts.vision.lm2_geometry_utils import (
     is_botanical_dissection,
     LeafRoutingResult,
 )
+from scripts.vision.capitulum_phenology_classifier import (
+    classify_single_capitulum,
+    classify_voucher_phenology,
+)
 
 
 # LeafMachine2 and Detectron2 paths
@@ -392,6 +396,7 @@ class SegmentAndExtractPipeline:
             score_thresh=self.score_thresh
         )
         self.voucher_repro_records: Dict[str, Dict[str, Any]] = {}
+        self.voucher_pheno_records: Dict[str, Dict[str, Any]] = {}
 
         # Preload catalogNumber -> scientificName mapping if available
         self.vouchers_taxa: Dict[str, str] = {}
@@ -479,6 +484,7 @@ class SegmentAndExtractPipeline:
                 "failure_reason": "image_not_found",
                 "details": f"File does not exist at {image_path}"
             }
+            self.voucher_pheno_records[catalog_number] = classify_voucher_phenology(catalog_number, [])
             return [], failure_record
 
         img_bgr = cv2.imread(str(image_path))
@@ -489,6 +495,7 @@ class SegmentAndExtractPipeline:
                 "failure_reason": "corrupted_image",
                 "details": "Failed to decode image with OpenCV"
             }
+            self.voucher_pheno_records[catalog_number] = classify_voucher_phenology(catalog_number, [])
             return [], failure_record
 
         sheet_h, sheet_w = img_bgr.shape[:2]
@@ -522,6 +529,7 @@ class SegmentAndExtractPipeline:
                 "involucre_width_mm": np.nan,
                 "capitulum_aspect_ratio": np.nan,
             }
+            self.voucher_pheno_records[catalog_number] = classify_voucher_phenology(catalog_number, [])
             return [], failure_record
 
         # Separate raw detections into Class 6 capitula and vegetative leaf candidates (class_id != 6)
@@ -530,11 +538,24 @@ class SegmentAndExtractPipeline:
 
         # Extract macro-reproductive metrics from valid cylindrical capitula (0.7 <= H/W <= 2.0)
         valid_capitula: List[Dict[str, Any]] = []
+        head_pheno_results: List[Dict[str, Any]] = []
         for bbox, mask, score, class_id in capitulum_detections:
             metrics = compute_capitulum_metrics(mask, bbox, pixels_per_mm)
             if metrics is not None:
                 metrics["score"] = score
                 valid_capitula.append(metrics)
+
+            # Crop-and-Classify visual phenological biomarker extraction
+            ymin, xmin, ymax, xmax = bbox
+            crop_bgr = img_bgr[max(0, ymin):max(0, ymax), max(0, xmin):max(0, xmax)]
+            if crop_bgr.size > 0 and crop_bgr.shape[0] >= 5 and crop_bgr.shape[1] >= 5:
+                crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+                head_pheno = classify_single_capitulum(crop_rgb)
+                head_pheno_results.append(head_pheno)
+
+        self.voucher_pheno_records[catalog_number] = classify_voucher_phenology(
+            catalog_number, head_pheno_results
+        )
 
         capitula_count = len(valid_capitula)
         if capitula_count > 0:
@@ -803,10 +824,12 @@ class SegmentAndExtractPipeline:
         legacy_manifest_path = self.tables_dir / "extracted_leaves_manifest.csv"
         failed_qc_path = self.tables_dir / "failed_qc_vouchers.csv"
         repro_manifest_path = self.tables_dir / "voucher_reproductive_metrics.csv"
+        pheno_manifest_path = self.tables_dir / "voucher_phenological_states.csv"
 
         existing_extracted_by_cat: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         existing_failed_by_cat: Dict[str, Dict[str, Any]] = {}
         existing_repro_by_cat: Dict[str, Dict[str, Any]] = {}
+        existing_pheno_by_cat: Dict[str, Dict[str, Any]] = {}
 
         if not self.force:
             for path in [manifest_path, legacy_manifest_path]:
@@ -838,6 +861,15 @@ class SegmentAndExtractPipeline:
                 except Exception as e:
                     logger.warning(f"Could not load previous reproductive table at {repro_manifest_path}: {e}")
 
+            if pheno_manifest_path.exists() and pheno_manifest_path.stat().st_size > 0:
+                try:
+                    prev_pheno = pd.read_csv(pheno_manifest_path)
+                    if not prev_pheno.empty and "catalogNumber" in prev_pheno.columns:
+                        for rec in prev_pheno.to_dict(orient="records"):
+                            existing_pheno_by_cat[str(rec["catalogNumber"]).strip()] = rec
+                except Exception as e:
+                    logger.warning(f"Could not load previous phenology table at {pheno_manifest_path}: {e}")
+
         all_extracted_records: List[Dict[str, Any]] = []
         all_failed_records: List[Dict[str, Any]] = []
 
@@ -865,6 +897,8 @@ class SegmentAndExtractPipeline:
 
                 if cat_num in existing_repro_by_cat:
                     self.voucher_repro_records[cat_num] = existing_repro_by_cat[cat_num]
+                if cat_num in existing_pheno_by_cat:
+                    self.voucher_pheno_records[cat_num] = existing_pheno_by_cat[cat_num]
                 continue
 
             processed_count += 1
@@ -941,11 +975,25 @@ class SegmentAndExtractPipeline:
             ]
             repro_df = repro_df[[c for c in repro_cols if c in repro_df.columns]]
 
+        pheno_df = pd.DataFrame(list(self.voucher_pheno_records.values()))
+        if pheno_df.empty:
+            pheno_df = pd.DataFrame(columns=[
+                "catalogNumber", "total_capitula", "n_anthesis", "n_fruit",
+                "n_bud", "voucher_phenological_state", "dominant_pappus_ratio"
+            ])
+        else:
+            pheno_cols = [
+                "catalogNumber", "total_capitula", "n_anthesis", "n_fruit",
+                "n_bud", "voucher_phenological_state", "dominant_pappus_ratio"
+            ]
+            pheno_df = pheno_df[[c for c in pheno_cols if c in pheno_df.columns]]
+
         # Atomically save manifests via temporary files
         self._atomic_save_csv(extracted_df, manifest_path)
         self._atomic_save_csv(extracted_df, legacy_manifest_path)
         self._atomic_save_csv(failed_df, failed_qc_path)
         self._atomic_save_csv(repro_df, repro_manifest_path)
+        self._atomic_save_csv(pheno_df, pheno_manifest_path)
 
         logger.info("==================================================================")
         logger.info(f"Extraction completed!")
@@ -953,6 +1001,7 @@ class SegmentAndExtractPipeline:
         logger.info(f"  Legacy Manifest: {len(extracted_df)} -> {legacy_manifest_path}")
         logger.info(f"  Failed QC Vouchers: {len(failed_df)} -> {failed_qc_path}")
         logger.info(f"  Reproductive Metrics: {len(repro_df)} -> {repro_manifest_path}")
+        logger.info(f"  Phenological States: {len(pheno_df)} -> {pheno_manifest_path}")
         if not extracted_df.empty and "assigned_tier" in extracted_df.columns:
             tier_dist = extracted_df["assigned_tier"].value_counts().to_dict()
             for tier, count in tier_dist.items():
