@@ -37,11 +37,16 @@ flowchart TD
     F -- No --> H["Tier 4: Holistic Rosette Crop\n(DINOv2 768-d Texture Embeddings)"]
 ```
 
-1. **Tier 1 (Direct Pristine Extraction):** Fully intact basal leaves meeting Solidity $\ge 0.72$ and Unoccluded Completeness Score (UCS $\ge 0.85$) are segmented directly into closed binary masks for 12-harmonic Elliptic Fourier Analysis (EFA).
+1. **Tier 1 (Direct Pristine Extraction):** Fully intact basal leaves meeting Solidity $\ge 0.72$ (or $\ge 0.50$ for confirmed lyrately dissected taxa such as *P. paupercula*) and Unoccluded Completeness Score (UCS $\ge 0.85$) are segmented directly into closed binary masks for 12-harmonic Elliptic Fourier Analysis (EFA). Candidate leaves undergo automated fold-detection gatekeeping (evaluating aspect ratio and chord deviation) to filter longitudinal pressing folds.
 2. **Tier 2 (Hemi-Blade Bilateral Symmetry Reflection):** Partially occluded leaves preserving an intact half-blade along the longitudinal midrib are cleaved along the midrib vector and reflected across that axis in OpenCV to reconstruct a synthetic bilateral silhouette.
    - **Symmetric Harmonic Decomposition ($A_n, D_n$):** In standard EFA (Kuhl and Giardina 1982), four coefficients ($A_n, B_n, C_n, D_n$) are estimated per harmonic. Coefficients $A_n$ and $D_n$ encode the mathematically symmetric component of outline variation relative to the midrib, whereas $B_n$ and $C_n$ represent asymmetric components (fluctuating asymmetry, pressing distortions, mechanical shearing). Analyzing the symmetric harmonic component ($A_n, D_n$) eliminates fluctuating asymmetry artifacts and guarantees parity between Tier 1 pristine and Tier 2 reflected leaves.
 3. **Tier 3 (Open-Outline Analysis):** Damaged rosettes lacking a full half-blade are evaluated using orthogonal polynomials (`Momocs::opoly`) and scalar caliper dimensions (petiole length, blade width, apex angle).
 4. **Tier 4 (Holistic Rosette Deep Vision Embeddings):** Unsegmented rosette patches are fed to DINOv2-ViT-B/14 to extract 768-dimensional latent representations capturing tomentum density and rosette compactness.
+
+### Mathematical Alignment & Outline Homologization
+- **Apex-Aligned Contour Homologization:** Raw contours extracted from binary masks are normalized to strict clockwise winding and rotated such that index 0 corresponds to the anatomical leaf apex (identified as the point of maximal Euclidean distance from the petiole-blade junction along the primary longitudinal axis). This ensures that harmonic phase angles are homologous across all specimens.
+- **Specimen-Level Median Aggregation:** To avoid statistical pseudoreplication from vouchers with multiple well-preserved basal leaves, all extracted outline harmonic vectors for a single voucher sheet are downsampled to a single specimen-level median centroid vector prior to GMM clustering and discriminant ordinations.
+- **Empirical Gatekeeper Calibration:** Fold-detection chords and lyrate sinus depth thresholds are calibrated empirically against expert-labeled SAM 2 COCO annotations via `python main.py calibrate-geometry`.
 
 ---
 
@@ -58,7 +63,7 @@ Digital botanical aggregator audits reveal that 20% to 40% of public occurrences
 * **Tier 3 — Passive Sample Projection in CDA (`MorphoTools2`):**
   Unverified Tier 3 specimens are designated as `passiveSamples` in `MorphoTools2::cda.calc()`. Discriminant axes are parameterized strictly on verified Tier 1/2 anchors, preventing aggregator label errors from warping morphospace boundaries.
 * **Tier 4 — Multi-Modal Cross-Modal Consensus Verification:**
-  Morphological clusters are triangulated against circular phenology ($\sin / \cos \text{DOY}$) and macro-/micro-edaphic profiles (SoilGrids 250m and USDA SSURGO vector units).
+  Morphological clusters are triangulated against circular phenology ($\sin / \cos \text{DOY}$), 3-tier anthesis verification (filtering to verified blooming vouchers for Hopkins' latitudinal cline modeling $\Delta\text{DOY}$), and macro-/micro-edaphic profiles (SoilGrids 250m and USDA SSURGO vector units).
 * **Tier 5 — Confident Learning, XAI & Batch-Effect Audits:**
   - **Confident Learning (`cleanlab`):** Estimates the joint distribution matrix of noisy labels versus latent true classes, flagging label errors ($C_{\text{error}} > 0.85$). `Captum` Grad-CAM heatmaps confirm models focus on botanical characters (tomentum, crenations) rather than mounting tape.
   - **Batch-Effect Controls:** Mounting paper background neutralization masks sheet aging and paper stock color from DINOv2 vision encoders. Systematic institutional one-way ANOVA audits across herbarium codes verify that morphological PC axes and vision clusters represent genuine evolutionary variation rather than institutional digitization artifacts.
@@ -81,8 +86,10 @@ Digital botanical aggregator audits reveal that 20% to 40% of public occurrences
 ## 5. Quality Assurance Checklist
 
 - [x] **Taxonomic Authority Verification:** All Tier 1 vouchers authenticated against recognized monographer annotations.
-- [x] **Leaf Extraction Gatekeeping:** Single leaves pass Solidity $\ge 0.72$ and UCS $\ge 0.85$.
-- [x] **Symmetric EFA Invariance:** Fourier harmonics decomposed into symmetric components ($A_n, D_n$) to maintain parity between pristine and reflected leaves.
+- [x] **Leaf Extraction Gatekeeping:** Single leaves pass Solidity $\ge 0.72$ (or lyrate sinus defect thresholds) and UCS $\ge 0.85$; pressing folds detected and pruned.
+- [x] **Outline Homologization & Invariance:** Contours apex-aligned, clockwise oriented, and decomposed into symmetric components ($A_n, D_n$) to maintain parity between pristine and reflected leaves.
+- [x] **Specimen-Level Aggregation:** Multi-leaf vouchers aggregated to median centroid outline profiles to prevent pseudoreplication.
+- [x] **Phenological Verification:** 3-tier optical biomarker classification of floral heads confirms anthesis before calculating latitudinal anomalies ($\Delta\text{DOY}$).
 - [x] **Batch Effect Attenuation:** Rosette background paper neutralized; institutional ANOVA audits confirm absence of herbarium digitizer bias ($F_{\text{inst}} < F_{\text{crit}}$).
 - [x] **Micro-Edaphic Validation:** SoilGrids 250m supplemented with 1:24,000 USDA SSURGO vector units for rock outcrop endemics.
 - [x] **Multi-Evidence Consensus:** Triple-stream discordance logged to `data/tables/triage_queue.csv`.

@@ -123,54 +123,44 @@ Packera\_dubia\_morphometrics/
 │       └── triage\_queue.csv           \# Final ranked expert verification queue
 
 ├── scripts/
-
-│   ├── core/                          \# Consolidated shared utilities
-
-│   │   ├── harvester.py               \# Combined API queries, DwC parsing & media downloads
-
-│   │   ├── config.py                  \# Python-side configuration schema
-
-│   │   └── logger.py                  \# Structured console and file logger
-
-│   ├── annotation\_and\_training/       \# Track A: SAM 2 labeling & LM2 fine-tuning
-
-│   │   ├── annotate\_with\_sam2.py      \# Interactive point/box prompt segmentation tool
-
-│   │   ├── sam2\_annotator\_utils.py    \# Geometry helpers & COCO export utilities
-
-│   │   └── finetune\_lm2\_pcd.py        \# LM2 Plant Component Detector fine-tuning script
-
-│   ├── pipeline/                      \# Track B: Production execution modules
-
-│   │   ├── 01\_voucher\_harvester.py    \# Ingestion & 3-tier authority stratification
-
-│   │   └── 02\_segment\_and\_extract.py  \# LM2 inference, midrib reflection & contour export
-
-│   ├── morphometrics/                 \# Canonical R statistical morphometrics
-
-│   │   ├── 03\_fourier\_extractor.R     \# 12-harmonic normalized EFA & PCA (Momocs)
-
-│   │   └── 04\_gmm\_morphotools.R       \# mclust GMMs & passive sample CDA (MorphoTools2)
-
-│   ├── analysis/                      \# Macroecology and synthesis
-
-│   │   ├── 05\_cleanlab\_vision\_xai.py  \# DINOv2 embeddings & Grad-CAM XAI
-
-│   │   ├── 06\_multimodal\_spatial\_rf.R \# Spatial Random Forests (SoilGrids, WorldClim)
-
-│   │   └── 07\_triage\_dashboard.R      \# Decision matrix & triage queue generation
-
-│   ├── tests/                         \# Unit and integration test suite
-
-│   │   ├── test\_voucher\_harvester.py
-
-│   │   ├── test\_segment\_and\_extract.py
-
-│   │   └── test\_morphometrics.R
-
-│   └── \_archive/                      \# Retired duplicate scripts (e.g., Python Fourier)
-
-│       └── 03\_fourier\_extractor.py
+│   ├── core/                          # Consolidated shared utilities
+│   │   ├── harvester.py               # Combined API queries, DwC parsing & media downloads
+│   │   ├── artifact_manager.py        # Model weight download & integrity verification
+│   │   ├── config.py                  # Python-side configuration schema
+│   │   └── logger.py                  # Structured console and file logger
+│   ├── annotation_and_training/       # Track A: SAM 2 labeling & LM2 fine-tuning
+│   │   ├── annotate_with_sam2.py      # Interactive point/box prompt segmentation tool
+│   │   ├── sam2_annotator_utils.py    # Geometry helpers & COCO export utilities
+│   │   └── finetune_lm2_pcd.py        # LM2 Plant Component Detector fine-tuning script
+│   ├── data_prep/                     # Track B: Data harvesting and pruning
+│   │   ├── 01_voucher_harvester.py    # Ingestion & 3-tier authority stratification
+│   │   └── audit_and_prune_vouchers.py# Dataset integrity and invalid image pruner
+│   ├── pipeline/                      # Track B: Production execution modules
+│   │   └── 02_segment_and_extract.py  # LM2 inference, midrib reflection & contour export
+│   ├── vision/                        # Botanical geometry & phenology classifiers
+│   │   ├── capitulum_phenology_classifier.py # Optical biomarker phenotyping (pappus, corolla)
+│   │   ├── configure_leafmachine2.py  # High-throughput LM2 configuration builder
+│   │   ├── lm2_geometry_utils.py      # Fold gatekeeping, apex homologization & reflection
+│   │   └── tune_geometry_parameters.py# Empirical threshold calibrator (calibrate-geometry)
+│   ├── morphometrics/                 # Canonical R statistical morphometrics
+│   │   ├── 03_fourier_extractor.R     # 12-harmonic normalized EFA & PCA (Momocs)
+│   │   └── 04_gmm_morphotools.R       # mclust GMMs & passive sample CDA (MorphoTools2)
+│   ├── analysis/                      # Macroecology, phenology, and synthesis
+│   │   ├── 05_cleanlab_vision_xai.py  # DINOv2 embeddings & Grad-CAM XAI
+│   │   ├── 06_multimodal_spatial_rf.R # Spatial Random Forests (SoilGrids, SSURGO, WorldClim)
+│   │   ├── 07_triage_dashboard_synthesis.R # Decision matrix & triage queue generation
+│   │   └── generate_phenological_artifacts.py # Anthesis verification & latitudinal clines
+│   ├── tests/                         # Unit and integration test suite (18 test modules)
+│   │   ├── test_voucher_harvester.py
+│   │   ├── test_segment_and_extract.py
+│   │   ├── test_geometry_edge_cases.py
+│   │   ├── test_geometry_tuning.py
+│   │   ├── test_capitulum_phenology.py
+│   │   ├── test_allometry_and_phenology.py
+│   │   ├── test_symmetric_fourier_validation.py
+│   │   └── test_main_pipeline_cli.py
+│   └── _archive/                      # Retired duplicate scripts (e.g., Python Fourier/RF)
+│       └── 03_fourier_extractor.py
 
 ├── outputs/
 
@@ -236,6 +226,9 @@ python main.py check-env
 # Pre-cache / Download Fine-Tuned Model Weights (Automatic on First Run):
 python main.py download-weights
 
+# Empirical Geometric Threshold Calibration (from SAM 2 COCO annotations):
+python main.py calibrate-geometry --annotations data/annotations/packera_train_coco.json --update-config
+
 # Phase 1: Voucher Harvesting & Determiner Authority Stratification
 python main.py harvest --max-records 5000 --download-images
 
@@ -244,6 +237,9 @@ python main.py segment --weights models/lm2_packera_pcd_finetuned.pth
 
 # Phase 3: Morphometrics (12-Harmonic Normalized EFA, GMM, Passive CDA in R)
 python main.py morphometrics --harmonics 12
+
+# Phase 4: Multi-Evidence Synthesis (Vision XAI, Spatial RF, & Triage Dashboard)
+python main.py synthesis
 
 # Run the entire pipeline end-to-end:
 python main.py run-all --download-images
@@ -280,7 +276,10 @@ python main.py run-all --download-images
 5. **Micro-Edaphic Validation:** Regional 250m SoilGrids pedological rasters (pH, CEC, sand fraction, bulk density) are complemented by fine-scale 1:24,000 USDA NRCS SSURGO vector map units, resolving localized edaphic specialization for rock outcrop endemics (granite flatrocks, sandstone glades, and ultramafic barrens).  
 6. **Batch-Effect Controls:** Rosette crops undergo mounting paper background neutralization to eliminate herbarium sheet aging and color artifacts in DINOv2 self-supervised embeddings. Institutional ANOVA audits across contributing herbaria verify that morphometric and latent vision clusters represent genuine biological lineages rather than digitization artifacts.  
 7. **Allometry-Free Shape Analysis:** Testing multivariate shape coordinates (EFA harmonics) against log-transformed Centroid Size ($\log(CS)$) to prevent plant stature, environmental vigor, or developmental stage from confounding taxonomic clusters. When allometric scaling is detected ($R^2 \ge 0.10$), size-dependent variation is regressed out, ensuring that downstream GMM clustering and passive CDA reflect genuine lineage divergence rather than phenotypic plasticity or leaf size variation (Klingenberg 2016).  
-8. **Latitude-Adjusted Flowering Anomalies:** Testing temporal reproductive isolation independent of continental latitudinal clines. Clinal spring progression advances northward at ~4.0 days per degree of latitude (Hopkins' Bioclimatic Law). Calculating phenological anomalies ($\Delta\text{DOY} = \text{DOY}_{\text{obs}} - \text{DOY}_{\text{expected}}$) eliminates latitudinal gradients, enabling unconfounded testing of allochronic speciation and prezygotic isolation across the species complex (Davis et al. 2015).
+8. **Latitude-Adjusted Flowering Anomalies:** Testing temporal reproductive isolation independent of continental latitudinal clines. Clinal spring progression advances northward at ~4.0 days per degree of latitude (Hopkins' Bioclimatic Law). Calculating phenological anomalies ($\Delta\text{DOY} = \text{DOY}_{\text{obs}} - \text{DOY}_{\text{expected}}$) eliminates latitudinal gradients, enabling unconfounded testing of allochronic speciation and prezygotic isolation across the species complex (Davis et al. 2015).  
+9. **Apex-Aligned Contour Homologization & Specimen Aggregation:** Extracted leaf contours are normalized to strict clockwise winding and rotated such that index 0 corresponds to the anatomical apex along the longitudinal midrib axis, ensuring phase angle alignment across all specimens in Fourier morphospace. To prevent individual sheets with many leaves from biasing statistical distributions, multiple leaf outlines per voucher sheet are aggregated into a single specimen-level median centroid profile.  
+10. **Automated Capitulum Phenology & 3-Tier Anthesis Verification:** High-throughput optical biomarker extraction (`scripts/vision/capitulum_phenology_classifier.py`) quantifies pappus plume luminance and corolla yellow saturation from reproductive heads. This establishes a strict 3-tier anthesis verification filter, ensuring that latitudinal cline regressions and phenological anomalies ($\Delta\text{DOY}$) are calculated exclusively on vouchers with confirmed blooming inflorescences.  
+11. **Empirical Gatekeeping & Dynamic Dissection Calibration:** Rather than imposing arbitrary static geometry thresholds, empirical fold-detection chord ratios and lyrate sinus depth cutoffs are calibrated directly from SAM 2 expert annotations via `python main.py calibrate-geometry`. This safeguards the pipeline against pressing fold artifacts while preserving genuine lyrately lobed basal leaves characteristic of *P. paupercula* and *P. plattensis*.
 
 ---
 

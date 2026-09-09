@@ -1,7 +1,7 @@
 ================================================================================
 SAM 2 PRECISION BOTANICAL ANNOTATION & MORPHOMETRICS CALIBRATION GUIDE
 Project: Packera dubia Species Delimitation & Morphometrics Pipeline
-Repository: https://github.com/Plantatsrophe/Packera_dubia_morphometrics (Branch: ubuntu)
+Repository: https://github.com/Plantatsrophe/Packera_dubia_morphometrics (Branch: main)
 Target Taxon: Packera dubia (Spreng.) Trock & Mabb. Complex (Asteraceae: Senecioneae)
 Author: J. Brandon Fuller (University of North Carolina at Chapel Hill / NCU Herbarium)
 ================================================================================

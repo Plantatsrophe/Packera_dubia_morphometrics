@@ -18,16 +18,17 @@
 3. [Phase 1: Voucher Ingestion & Authority Stratification](#phase-1-voucher-ingestion--authority-stratification)
 4. [Phase 2: LeafMachine2 Organ Detection & Geometric Routing](#phase-2-leafmachine2-organ-detection--geometric-routing)
    - [2.0 Track A: SAM 2 Assisted Botanical Annotation & Model Fine-Tuning](#20-track-a-sam-2-assisted-botanical-annotation--model-fine-tuning)
-   - [2.1 LM2 Configuration](#21-lm2-configuration)
-   - [2.2 Execute LeafMachine2](#22-execute-leafmachine2)
-   - [2.3 Post-Processing, DBSCAN Clustering & 4-Tier Routing](#23-post-processing-dbscan-clustering--4-tier-routing)
+   - [2.1 LM2 Configuration & Empirical Geometry Calibration](#21-lm2-configuration--empirical-geometry-calibration)
+   - [2.2 Execute Phase 2: Segmentation, 4-Tier Geometric Routing & Contour Extraction](#22-execute-phase-2-segmentation-4-tier-geometric-routing--contour-extraction)
 5. [Phase 3: Label-Blind Elliptic Fourier Analysis (EFA)](#phase-3-label-blind-elliptic-fourier-analysis-efa)
    - [3.1 Symmetric Elliptic Fourier Analysis ($A_n, D_n$) & Reflection Parity](#31-symmetric-elliptic-fourier-analysis-a_n-d_n--reflection-parity)
+   - [3.2 Apex-Aligned Contour Homologization & Specimen-Level Median Aggregation](#32-apex-aligned-contour-homologization--specimen-level-median-aggregation)
 6. [Phase 4: GMM Clustering & MorphoTools2 Passive Sample CDA](#phase-4-gmm-clustering--morphotools2-passive-sample-cda)
 7. [Phase 5: DINOv2 Deep Vision Embeddings & Cleanlab XAI](#phase-5-dinov2-deep-vision-embeddings--cleanlab-xai)
    - [5.1 Deep Vision Batch-Effect Controls & Mounting Paper Neutralization](#51-deep-vision-batch-effect-controls--mounting-paper-neutralization)
 8. [Phase 6: Multi-Modal Spatial Random Forests & Niche Modeling](#phase-6-multi-modal-spatial-random-forests--niche-modeling)
-   - [6.1 Multi-Scale Micro-Edaphic Validation: SoilGrids vs. USDA SSURGO](#61-multi-scale-micro-edaphic-validation-regional-soilgrids-250m-vs-usda-ssurgo-124000)
+   - [6.1 Multi-Scale Micro-Edaphic Validation: Regional SoilGrids (250m) vs. USDA SSURGO (1:24,000)](#61-multi-scale-micro-edaphic-validation-regional-soilgrids-250m-vs-usda-ssurgo-124000)
+   - [6.2 Automated Capitulum Phenology & 3-Tier Anthesis Verification](#62-automated-capitulum-phenology--3-tier-anthesis-verification)
 9. [Phase 7: Multi-Evidence Synthesis & Digital Triage Queue](#phase-7-multi-evidence-synthesis--digital-triage-queue)
 10. [Methodological Highlights](#-methodological-highlights)
 11. [Automated Test Suite Verification](#11-automated-test-suite-verification)
@@ -116,7 +117,7 @@ flowchart TD
 
     subgraph P2["Phase 2: LM2 & 4-Tier Geometric Routing"]
         B --> C["LM2 Processing & Scale Isolation\n(LeafMachine2.py)"]
-        C --> D["4-Tier Routing & Gatekeeping\n(02_postprocess_lm2_routing.py)"]
+        C --> D["4-Tier Routing & Gatekeeping\n(02_segment_and_extract.py)"]
     end
 
     subgraph P3["Phase 3: Morphometrics (Momocs)"]
@@ -135,12 +136,12 @@ flowchart TD
     end
 
     subgraph P6["Phase 6: Macroecology (SoilGrids & WorldClim)"]
-        B & H & J --> K["Spatial Random Forest & MEMs\n(06_multimodal_spatial_rf.R / .py)"]
+        B & H & J --> K["Spatial Random Forest & MEMs\n(06_multimodal_spatial_rf.R)"]
         K --> L["Multimodal Conflict Flags\n(data/tables/multimodal_conflict_flags.csv)"]
     end
 
     subgraph P7["Phase 7: Decision Matrix & Triage Synthesis"]
-        L --> M["Multi-Evidence Decision Matrix\n(07_triage_dashboard_synthesis.R / .py)"]
+        L --> M["Multi-Evidence Decision Matrix\n(07_triage_dashboard_synthesis.R)"]
         M --> N["Priority Triage Queue & Summary\n(data/tables/triage_queue.csv\noutputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md)"]
     end
 ```
@@ -248,50 +249,51 @@ python scripts/annotation_and_training/finetune_lm2_pcd.py \
 
 ---
 
-### 2.1 LM2 Configuration
-- **Script:** [`scripts/vision/configure_leafmachine2.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/vision/configure_leafmachine2.py)
+### 2.1 LM2 Configuration & Empirical Geometry Calibration
+- **LM2 Builder:** [`scripts/vision/configure_leafmachine2.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/vision/configure_leafmachine2.py)
+- **Geometry Calibrator:** [`scripts/vision/tune_geometry_parameters.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/vision/tune_geometry_parameters.py)
 - **Environment:** `.venv`
 
 ```bash
-# Generate high-performance LM2 configuration (Batch 50, 8 CUDA workers)
+# 1. Generate high-performance LM2 configuration (Batch 50, 8 CUDA workers)
 python scripts/vision/configure_leafmachine2.py --update-main-config
+
+# 2. Calibrate empirical fold-detection and lyrate dissection thresholds from SAM 2 COCO ground truth
+python main.py calibrate-geometry \
+    --annotations data/annotations/packera_train_coco.json \
+    --output-plot outputs/figures/geometry_parameter_distributions.pdf \
+    --update-config
 ```
 
-### 2.2 Execute LeafMachine2
+### 2.2 Execute Phase 2: Segmentation, 4-Tier Geometric Routing & Contour Extraction
 - **Unified Pipeline Runner:** `python main.py segment` (automatically resolves `.venv_LM2` and executes segmentation)
-- **Script (Direct):** [`scripts/pipeline/02_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02_segment_and_extract.py) / [`LeafMachine2/LeafMachine2.py`](file:///home/brandon/Packera_dubia_morphometrics/LeafMachine2/LeafMachine2.py)
-- **Environment:** Automatically resolved to `.venv_LM2` by `main.py`
+- **Script (Direct):** [`scripts/pipeline/02_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02_segment_and_extract.py)
+- **Environment:** Automatically routed to `.venv_LM2` via `main.py`
+
+In the production pipeline, organ detection, geometric gatekeeping, midrib bilateral symmetry reconstruction, and contour export are unified in [`02_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02_segment_and_extract.py):
+1. **Leaf Detection & Masking:** Detects individual basal leaf components using fine-tuned PointRend weights (`models/lm2_packera_pcd_finetuned.pth`).
+2. **Deterministic Geometric Gatekeeping:** Evaluates solidity, unoccluded completeness score (UCS), aspect ratios, chord deviation (fold detection), and lyrate sinus depths.
+3. **Midrib Bilateral Symmetry Reconstruction (Tier 2):** Cleaves partially occluded leaves along the midrib vector and reflects the pristine half across that axis in OpenCV.
+4. **Export & Output Staging:** Exports binary masks (`data/masks/`), 2D contour coordinate matrices (`data/contours/`), whole-rosette contextual crops (`data/cropped_patches/rosettes_dense/`), and updates the extraction log (`data/tables/dataset_manifest.csv`).
 
 ```bash
 # Recommended: Orchestrated directly from primary .venv
 python main.py segment --weights models/lm2_packera_pcd_finetuned.pth
 
-# Manual fallback (standalone):
+# Manual fallback (standalone inside .venv_LM2):
 source .venv_LM2/bin/activate
-cd LeafMachine2
-python LeafMachine2.py
-cd ..
-```
-
-
-### 2.3 Post-Processing, DBSCAN Clustering & 4-Tier Routing
-- **Script:** [`scripts/vision/02_postprocess_lm2_routing.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/vision/02_postprocess_lm2_routing.py)
-- **Environment:** `.venv`
-
-```bash
-source .venv/bin/activate
-python scripts/vision/02_postprocess_lm2_routing.py \
-    --lm2-dir LM2_Project/Data/output/Packera_dubia_LM2/ \
+python scripts/pipeline/02_segment_and_extract.py \
+    --weights models/lm2_packera_pcd_finetuned.pth \
     --vouchers data/tables/curated_vouchers.csv \
-    --raw-images data/raw_vouchers/ \
-    --output-dir data/ \
-    --min-solidity 0.72 \
-    --min-ucs 0.85
+    --output-contours data/contours \
+    --output-masks data/masks
 ```
 
 **Key Outputs:**
-- `data/cropped_patches/rosettes_dense/`: Whole-rosette contextual crops for DINOv2.
-- `data/tables/leaf_extraction_qc.csv`: Morphological routing log for all extracted leaves.
+- `data/masks/*.png`: Standardized binary leaf silhouette masks.
+- `data/contours/*.csv`: 2D $(x, y)$ perimeter coordinate matrices ready for Fourier extraction.
+- `data/cropped_patches/rosettes_dense/`: Whole-rosette contextual crops for DINOv2 embeddings.
+- `data/tables/dataset_manifest.csv`: Morphological routing log across Tiers 1–4.
 
 ---
 
@@ -327,6 +329,10 @@ By isolating and analyzing exclusively the **symmetric harmonic component** ($A_
 1. Eliminates fluctuating asymmetry artifacts and press shear.
 2. Enforces mathematical parity between Tier 1 intact leaves and Tier 2 reflected leaves.
 3. Preserves full diagnostic outline discriminatory power across taxonomic lineages.
+
+### 3.2 Apex-Aligned Contour Homologization & Specimen-Level Median Aggregation
+- **Apex-Aligned Contour Homologization:** Extracted 2D contours undergo automated clockwise winding standardization and Euclidean rotation such that contour index 0 corresponds precisely to the anatomical blade apex. This eliminates arbitrary rotation artifacts and enforces phase-angle homology across all voucher specimens during harmonic decomposition in `Momocs::efourier()`.
+- **Specimen-Level Median Aggregation:** To avoid statistical pseudoreplication from specimens with multiple well-preserved basal leaves, all extracted outline harmonic vectors for a single voucher sheet are downsampled to a single specimen-level median centroid vector prior to GMM clustering and discriminant ordinations.
 
 ---
 
@@ -390,10 +396,15 @@ To prevent non-biological batch effects from confounding taxonomic delimitation,
 
 ## Phase 6: Multi-Modal Spatial Random Forests & Niche Modeling
 
-Available in both **R** (via `spatialRF` / `terra`) and **Python** (via `scipy` / `scikit-learn`):
+- **Script:** [`scripts/analysis/06_multimodal_spatial_rf.R`](file:///home/brandon/Packera_dubia_morphometrics/scripts/analysis/06_multimodal_spatial_rf.R)
+- **Environment:** R 4.3+ (or orchestrate headlessly via `python main.py synthesis`)
+- **Purpose:** Fits spatial random forest models using Moran's Eigenvector Maps (MEMs), bioclimatic rasters (WorldClim 2.1), and pedological variables (SoilGrids 250m & SSURGO) to detect niche divergence and cross-modal consensus discordances.
 
-### R Execution:
 ```bash
+# Recommended: Orchestrated end-to-end via unified CLI
+python main.py synthesis
+
+# Standalone R execution:
 Rscript scripts/analysis/06_multimodal_spatial_rf.R \
     --vouchers data/tables/curated_vouchers.csv \
     --morphometrics data/tables/morphometrics_misidentification_flags.csv \
@@ -404,18 +415,8 @@ Rscript scripts/analysis/06_multimodal_spatial_rf.R \
     --output-summary outputs/reports/multimodal_spatial_rf_summary.csv
 ```
 
-### Python Execution:
-```bash
-source .venv/bin/activate
-python scripts/analysis/06_multimodal_spatial_rf.py \
-    --vouchers data/tables/curated_vouchers.csv \
-    --morphometrics data/tables/morphometrics_misidentification_flags.csv \
-    --vision-audit data/tables/label_noise_audit.csv \
-    --env-dir data/environmental/ \
-    --output-flags data/tables/multimodal_conflict_flags.csv \
-    --output-plot outputs/figures/spatial_rf_niche_importance.pdf \
-    --output-summary outputs/reports/multimodal_spatial_rf_summary.csv
-```
+> [!NOTE]
+> Early Python prototyping scripts for Phase 6 are preserved for archival reference under [`scripts/_archive/analysis/06_multimodal_spatial_rf.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/_archive/analysis/06_multimodal_spatial_rf.py).
 
 **Key Outputs:**
 - `data/tables/multimodal_conflict_flags.csv`: Cross-modal consensus classifications.
@@ -434,15 +435,38 @@ To overcome this spatial mismatch, the pipeline complements regional SoilGrids l
 - **Component Bedrock Properties:** Extracts critical micro-edaphic parameters including depth to restrictive lithic bedrock layer, surface rock fragment volume (%), and local drainage class.
 - **Niche Divergence Validation:** Confirms whether morphological clusters identified by symmetric EFA correlate with genuine micro-edaphic substrate restrictions, distinguishing true edaphic specialists from broadly distributed generalist populations (*Packera dubia* sensu stricto on sandy coastal plains vs. *Packera anonyma* on crystalline rock outcrops).
 
+### 6.2 Automated Capitulum Phenology & 3-Tier Anthesis Verification
+- **Vision Classifier:** [`scripts/vision/capitulum_phenology_classifier.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/vision/capitulum_phenology_classifier.py)
+- **Artifact Generator:** [`scripts/analysis/generate_phenological_artifacts.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/analysis/generate_phenological_artifacts.py)
+- **Environment:** `.venv`
+
+In asteraceous herbarium specimens, collection dates represent phenological snapshots spanning dormant buds, full anthesis, and post-fruiting dispersal. Establishing Hopkins' Bioclimatic Law clines requires verifying genuine anthesis:
+1. **Biomarker Extraction:** Extracts crop-level optical biomarkers:
+   - **Pappus Plumes:** High luminance ($L \ge 75$), low saturation ($S \le 0.18$) fibrous pappus clusters.
+   - **Fresh Corollas:** High yellow saturation ($S \ge 0.32$, yellow hue band) ray and disc florets.
+   - **Involucre Geometry:** Height-to-width ratio ($H/W \approx 0.8 - 1.5$) and phyllary margin roughness.
+2. **3-Tier Anthesis Stratification:** Categorizes vouchers into `anthesis`, `bud`, or `fruiting/sterile`.
+3. **Latitudinal Anomaly Modeling ($\Delta\text{DOY}$):** Fits robust regressions ($\text{DOY} = \beta_0 + \beta_1 \cdot \text{Latitude}$) exclusively on confirmed anthesis vouchers, exporting diagnostic regression plates to `outputs/figures/latitudinal_cline_phenology.pdf`.
+
+```bash
+# Generate phenological cline artifacts & anthesis diagnostic plots
+python scripts/analysis/generate_phenological_artifacts.py \
+    --vouchers data/tables/curated_vouchers.csv \
+    --output-dir outputs/figures/
+```
+
 ---
 
 ## Phase 7: Multi-Evidence Synthesis & Digital Triage Queue
 
-- **Scripts:** [`scripts/analysis/07_triage_dashboard_synthesis.R`](file:///home/brandon/Packera_dubia_morphometrics/scripts/analysis/07_triage_dashboard_synthesis.R) / [`07_triage_dashboard_synthesis.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/analysis/07_triage_dashboard_synthesis.py)
+- **Scripts:** [`scripts/analysis/07_triage_dashboard_synthesis.R`](file:///home/brandon/Packera_dubia_morphometrics/scripts/analysis/07_triage_dashboard_synthesis.R) / `python main.py synthesis`
 - **Purpose:** Synthesizes morphology, vision, pedology, phenology, and geographic evidence streams through the Multi-Evidence Taxonomic Decision Matrix, generates a ranked herbarium triage queue, and produces publication synthesis plates and taxonomic revision reports.
 
-### R Execution:
 ```bash
+# Recommended: Orchestrated end-to-end via main.py CLI
+python main.py synthesis
+
+# Standalone R execution:
 Rscript scripts/analysis/07_triage_dashboard_synthesis.R \
     --vouchers data/tables/curated_vouchers.csv \
     --morphometrics data/tables/morphometrics_misidentification_flags.csv \
@@ -455,20 +479,8 @@ Rscript scripts/analysis/07_triage_dashboard_synthesis.R \
     --output-report outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md
 ```
 
-### Python Execution:
-```bash
-source .venv/bin/activate
-python scripts/analysis/07_triage_dashboard_synthesis.py \
-    --vouchers data/tables/curated_vouchers.csv \
-    --morphometrics data/tables/morphometrics_misidentification_flags.csv \
-    --vision-audit data/tables/label_noise_audit.csv \
-    --multimodal-flags data/tables/multimodal_conflict_flags.csv \
-    --gmm-summary outputs/reports/gmm_bayes_factors_summary.csv \
-    --niche-summary outputs/reports/multimodal_spatial_rf_summary.csv \
-    --output-queue data/tables/triage_queue.csv \
-    --output-plot outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf \
-    --output-report outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md
-```
+> [!NOTE]
+> Early Python prototyping scripts for Phase 7 are preserved for reference under [`scripts/_archive/analysis/07_triage_dashboard_synthesis.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/_archive/analysis/07_triage_dashboard_synthesis.py).
 
 **Key Outputs:**
 - `data/tables/triage_queue.csv`: Ranked digital triage queue with priority scores and recommended determinations.
@@ -485,24 +497,51 @@ Testing multivariate shape coordinates (12-harmonic Elliptic Fourier Analysis co
 ### Latitude-Adjusted Flowering Anomalies
 Testing temporal reproductive isolation independent of continental geographic latitudinal clines. Phenological flowering dates advance poleward across eastern North America at approximately 4.0 days per degree of latitude northward, consistent with Hopkins' Bioclimatic Law. By fitting an empirical baseline cline across blooming herbarium vouchers ($\text{DOY} = \beta_0 + \beta_1 \cdot \text{Latitude}$), the pipeline computes standardized phenological anomalies ($\Delta\text{DOY} = \text{DOY}_{\text{obs}} - \text{DOY}_{\text{expected}}$). This eliminates latitudinal confounding and enables rigorous ANOVA and Tukey HSD testing of temporal prezygotic reproductive isolation (allochronic divergence) among sympatric and parapatric taxa (Davis et al. 2015).
 
+### Apex-Aligned Contour Homologization & Specimen Aggregation
+Extracted 2D perimeter contours are oriented with clockwise winding, and index 0 is anchored to the anatomical apex along the longitudinal midrib axis. This guarantees that harmonic phase angles in `Momocs::efourier()` are homologous across all specimens. Furthermore, all extracted leaf outlines from a single voucher sheet are downsampled to a specimen-level median centroid profile to prevent within-voucher pseudoreplication from distorting downstream GMM clustering or passive CDA ordinations.
+
+### Automated Capitulum Optical Biomarkers & Anthesis Verification
+To ensure that flowering phenology models and Hopkins' Law latitudinal regressions reflect genuine anthesis dates, computer vision biomarker routines (`scripts/vision/capitulum_phenology_classifier.py`) quantify pappus plume luminance and floret yellow saturation from reproductive heads. Vouchers are filtered through a 3-tier anthesis verification filter (`anthesis`, `bud`, `fruiting/sterile`), removing vegetative or post-fruiting records that would otherwise corrupt macroecological cline estimations.
+
+### Empirical Gatekeeping & Dynamic Dissection Calibration
+Rather than enforcing rigid arbitrary geometry cutoffs, optimal chord deviation ratios for fold detection and lyrate sinus depth thresholds are derived empirically from expert-annotated SAM 2 ground truth via `python main.py calibrate-geometry`. This ensures high-precision pruning of pressing folds while preventing false exclusion of naturally lobed or lyrately pinnatifid basal blades (*P. paupercula*, *P. plattensis*).
+
 ---
 
 ## 11. Automated Test Suite Verification
 
-Run the full automated test suite across all 7 test modules:
+Run the comprehensive automated test suite across all 18 test modules:
 ```bash
-source .venv/bin/activate
-python -m unittest discover -s scripts/tests
+# Execute full test suite via pytest
+source .venv_LM2/bin/activate  # or source .venv/bin/activate
+pytest scripts/tests/ -v
+
+# Or execute individual focused test suites:
+pytest scripts/tests/test_pipeline_config.py
+pytest scripts/tests/test_geometry_edge_cases.py
+pytest scripts/tests/test_capitulum_phenology.py
+pytest scripts/tests/test_allometry_and_phenology.py
 ```
 
-**Test Modules:**
-1. `test_voucher_harvester.py`: Verifies GBIF querying, Darwin Core parsing, and Western US state exclusion.
-2. `test_postprocess_lm2_routing.py`: Verifies DBSCAN spatial clustering and geometric gatekeeper metrics.
-3. `test_gmm_morphotools.py`: Verifies EFA harmonics extraction, GMM clustering, and MorphoTools2 CDA.
-4. `test_cleanlab_vision_xai.py`: Verifies DINOv2 feature extraction, Cleanlab noise auditing, and Grad-CAM generation.
-5. `test_multimodal_spatial_rf.py`: Verifies SoilGrids/WorldClim feature extraction and cross-modal consensus flags.
-6. `test_triage_dashboard_synthesis.py`: Verifies the taxonomic decision matrix and triage queue generator.
-7. `test_allometry_and_phenology.py`: Verifies Centroid Size linear scaling, scale-invariant normalized EFA harmonics, and empirical latitudinal phenological anomaly mathematics ($\Delta\text{DOY}$).
+**Core Test Modules:**
+1. [`test_voucher_harvester.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_voucher_harvester.py): GBIF ingestion, Darwin Core parsing, coordinate cleaning, and Western US boundary filtering.
+2. [`test_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_segment_and_extract.py): LeafMachine2 PointRend inference, midrib bilateral symmetry reflection, and contour extraction.
+3. [`test_geometry_edge_cases.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_geometry_edge_cases.py): Robustness testing on severe foliar overlap, crenate margins, and pressing fold geometries.
+4. [`test_geometry_gatekeeper_enhancements.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_geometry_gatekeeper_enhancements.py): Fold detection gatekeeping, chord deviation ratios, and lyrate sinus depth metrics.
+5. [`test_geometry_tuning.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_geometry_tuning.py): Empirical threshold calibration routines against COCO annotations.
+6. [`test_capitulum_phenology.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_capitulum_phenology.py): Optical biomarker extraction (pappus plumes, corolla yellow saturation, involucre aspect ratio).
+7. [`test_anthesis_ingestion.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_anthesis_ingestion.py): 3-tier anthesis verification filter and flowering date ingestion contracts.
+8. [`test_allometry_and_phenology.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_allometry_and_phenology.py): Centroid Size linear scaling, normalized EFA harmonics invariance, and Hopkins' Law phenological anomalies ($\Delta\text{DOY}$).
+9. [`test_symmetric_fourier_validation.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_symmetric_fourier_validation.py): Apex-aligned contour homologization, clockwise orientation, and symmetric harmonic coefficient decomposition ($A_n, D_n$).
+10. [`test_gmm_morphotools.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_gmm_morphotools.py): EFA harmonics extraction, GMM cluster modeling (`mclust`), and `MorphoTools2` passive CDA.
+11. [`test_cleanlab_vision_xai.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_cleanlab_vision_xai.py): DINOv2 768-d feature extraction, background neutralization, Cleanlab noise auditing, and Grad-CAM panels.
+12. [`test_multimodal_spatial_rf.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_multimodal_spatial_rf.py): SoilGrids 250m, SSURGO vector units, WorldClim rasters, and spatial random forest discordance flags.
+13. [`test_triage_dashboard_synthesis.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_triage_dashboard_synthesis.py): Multi-evidence decision matrix, synthesis plate generation, and priority triage queue export.
+14. [`test_pipeline_config.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_pipeline_config.py): Validates YAML configuration schema, path resolution, and parameter types.
+15. [`test_main_pipeline_cli.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_main_pipeline_cli.py): End-to-end integration and parameter validation across all `main.py` CLI subcommands.
+16. [`test_annotate_with_sam2.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_annotate_with_sam2.py): Unit tests for SAM 2 GUI event handling, undo stack, knife tool, and COCO export.
+17. [`test_configure_leafmachine2.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_configure_leafmachine2.py): Validates LeafMachine2 YAML builder and hardware parameter settings.
+18. [`test_phase2_phase3_handshake.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_phase2_phase3_handshake.py): Verifies data contracts and file format interoperability between Phase 2 (Python) and Phase 3 (R).
 
 ---
 
