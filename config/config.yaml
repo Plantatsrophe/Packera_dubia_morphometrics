@@ -72,15 +72,35 @@ taxonomy:
 
 # Pipeline Quality & Morphological Thresholds
 thresholds:
+  # Standard baseline gatekeepers (existing)
   pcd_conf: 0.72
-  min_solidity: 0.72
   min_ucs: 0.85
+  min_solidity: 0.72
   cleanlab_cutoff: 0.85
   min_megapixels: 8.0
   min_file_size_kb: 500.0
   min_sharpness_laplacian: 80.0
   max_uncertainty_meters: 5000.0
   western_longitude_threshold: -106.65
+
+  # Empirical fold-detection parameters (calibrated)
+  fold_detection:
+    enabled: true
+    max_folded_aspect_ratio: 0.42
+    max_chord_deviation_ratio: 0.035
+    min_chord_length_px: 150
+
+  # Empirical dissection & lyrate sinus parameters (calibrated)
+  dissection:
+    enabled: true
+    min_solidity_dissected: 0.50
+    sinus_defect_min_depth_ratio: 0.08
+    min_bilateral_sinus_count: 3
+    taxa_with_lyrate_tendency:
+      - "Packera paupercula"
+      - "Packera plattensis"
+      - "Packera paupercula var. paupercula"
+      - "Packera paupercula var. savannarum"
 
 # Phase 1: Voucher Harvesting & Quality Filtering
 harvesting:

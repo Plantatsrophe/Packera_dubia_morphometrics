@@ -65,12 +65,16 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.core.config import PipelineConfig
 from scripts.vision.lm2_geometry_utils import (
+    classify_and_route_leaf,
     cluster_plant_individuals,
     compute_geometric_metrics,
+    detect_folded_leaf,
     detect_ruler_scale_hough,
     export_standardized_contour,
     extract_tier1_pristine,
     extract_tier2_reflected,
+    is_botanical_dissection,
+    LeafRoutingResult,
 )
 
 
@@ -322,11 +326,12 @@ class SegmentAndExtractPipeline:
         model_weights: Union[str, Path],
         output_dir: Union[str, Path],
         device: str = "cuda",
-        min_solidity: float = 0.72,
-        min_ucs: float = 0.85,
+        min_solidity: Optional[float] = None,
+        min_ucs: Optional[float] = None,
         score_thresh: float = 0.40,
         num_ruler_workers: int = 4,
         force: bool = False,
+        config: Optional[PipelineConfig] = None,
     ) -> None:
         self.vouchers_csv = Path(vouchers_csv)
         self.model_weights = Path(model_weights)
@@ -334,8 +339,40 @@ class SegmentAndExtractPipeline:
         if self.output_dir.name != "data":
             self.output_dir = self.output_dir / "data"
         self.device = device
-        self.min_solidity = min_solidity
-        self.min_ucs = min_ucs
+        self.config = config or PipelineConfig.from_yaml()
+
+        if min_solidity is not None:
+            self.min_solidity = min_solidity
+        else:
+            self.min_solidity = self.config.thresholds.min_solidity
+
+        if min_ucs is not None:
+            self.min_ucs = min_ucs
+        else:
+            self.min_ucs = self.config.thresholds.min_ucs
+
+        dissection_cfg = getattr(self.config.thresholds, "dissection", None) or getattr(self.config.thresholds, "solidity", None)
+        if dissection_cfg is not None:
+            self.min_dissected = getattr(dissection_cfg, "min_solidity_dissected", getattr(dissection_cfg, "min_dissected", 0.50))
+            self.taxa_with_lyrate_tendency = getattr(
+                dissection_cfg,
+                "taxa_with_lyrate_tendency",
+                [
+                    "Packera paupercula",
+                    "Packera plattensis",
+                    "Packera paupercula var. paupercula",
+                    "Packera paupercula var. savannarum",
+                ]
+            )
+        else:
+            self.min_dissected = 0.50
+            self.taxa_with_lyrate_tendency = [
+                "Packera paupercula",
+                "Packera plattensis",
+                "Packera paupercula var. paupercula",
+                "Packera paupercula var. savannarum",
+            ]
+
         self.score_thresh = score_thresh
         self.num_ruler_workers = num_ruler_workers
         self.force = force
@@ -354,6 +391,20 @@ class SegmentAndExtractPipeline:
             score_thresh=self.score_thresh
         )
         self.voucher_repro_records: Dict[str, Dict[str, Any]] = {}
+
+        # Preload catalogNumber -> scientificName mapping if available
+        self.vouchers_taxa: Dict[str, str] = {}
+        if self.vouchers_csv.exists() and self.vouchers_csv.stat().st_size > 0:
+            try:
+                vdf = pd.read_csv(self.vouchers_csv)
+                if "catalogNumber" in vdf.columns:
+                    for _, r in vdf.iterrows():
+                        cat = str(r["catalogNumber"]).strip()
+                        tax = str(r.get("scientificName", r.get("species_raw", ""))).strip()
+                        if tax:
+                            self.vouchers_taxa[cat] = tax
+            except Exception:
+                pass
 
     def shutdown(self) -> None:
         """Cleans up background thread pools."""
@@ -413,9 +464,13 @@ class SegmentAndExtractPipeline:
     def process_voucher(
         self,
         catalog_number: str,
-        image_path: Path
+        image_path: Path,
+        taxon: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Processes a single herbarium voucher specimen sheet."""
+        if taxon is None:
+            taxon = self.vouchers_taxa.get(catalog_number, None)
+
         if not image_path.exists():
             failure_record = {
                 "catalogNumber": catalog_number,
@@ -535,51 +590,146 @@ class SegmentAndExtractPipeline:
         extracted_records: List[Dict[str, Any]] = []
         rejected_instances: List[DetectedInstance] = []
 
-        # 4. 2-Path Botanical Leaf Extraction Logic
+        # 4. Geometric Quality Gatekeeper & Leaf Extraction Logic
         for inst in instances:
-            ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(inst.mask)
-            inst.ucs_score = ucs
-            inst.solidity = solidity
-            inst.midrib_angle_deg = angle_deg
+            routing_res = classify_and_route_leaf(
+                inst.mask,
+                config=self.config,
+                min_ucs=self.min_ucs,
+                min_solidity=self.min_solidity,
+                taxon=taxon,
+            )
+            inst.ucs_score = routing_res.ucs
+            inst.solidity = routing_res.solidity
+            inst.midrib_angle_deg = float(routing_res.metadata.get("midrib_angle_deg", 0.0))
 
-            # Path A: Tier 1 Direct Pristine
-            if ucs >= self.min_ucs and solidity >= self.min_solidity:
-                inst.assigned_tier = "tier1"
-                mask_path = extract_tier1_pristine(inst.mask, catalog_number, inst.leaf_id, self.output_dir)
-                contour_path = export_standardized_contour(inst.mask, catalog_number, inst.leaf_id, self.output_dir)
+            # Diagnostic classification flags
+            is_folded = bool(routing_res.is_folded)
+            is_dissected = bool(routing_res.is_dissected)
+            reflection_applied = False
+            tier: str = "Failed QC"
+            assigned_tier: str = "rejected"
+
+            # Check taxon-level lyrate tendency
+            is_lyrate_taxon = False
+            if taxon and self.taxa_with_lyrate_tendency:
+                t_clean = taxon.strip().lower()
+                is_lyrate_taxon = any(
+                    lyr.strip().lower() in t_clean or t_clean in lyr.strip().lower()
+                    for lyr in self.taxa_with_lyrate_tendency
+                )
+
+            # Routing Decision Tree
+            # 1. Check for fold: If is_folded == True -> synthesize full blade via reflection -> route to Tier 2
+            if is_folded and routing_res.assigned_tier == "tier2":
+                tier = "Tier 2"
+                assigned_tier = "tier2"
+                reflection_applied = True
+                out_base = (self.output_dir / "data") if (self.output_dir.name != "data" and (self.output_dir / "data").is_dir()) else self.output_dir
+                mask_dir = out_base / "masks"
+                tier2_dir = mask_dir / "tier2_reflected"
+                mask_dir.mkdir(parents=True, exist_ok=True)
+                tier2_dir.mkdir(parents=True, exist_ok=True)
+
+                filename = f"{catalog_number}_leaf{inst.leaf_id}.png"
+                main_save_path = mask_dir / filename
+                tier_save_path = tier2_dir / filename
+
+                cv2.imwrite(str(main_save_path), routing_res.processed_mask)
+                cv2.imwrite(str(tier_save_path), routing_res.processed_mask)
+
+                contour_path = export_standardized_contour(
+                    routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir
+                )
+                inst.mask_path = str(main_save_path)
+                inst.contour_path = contour_path
+
+            # 2. Check for pristine whole leaf: If solidity >= min_solidity and ucs >= 0.85 -> route to Tier 1
+            elif routing_res.solidity >= self.min_solidity and routing_res.ucs >= self.min_ucs and routing_res.assigned_tier == "tier1" and not is_dissected:
+                tier = "Tier 1"
+                assigned_tier = "tier1"
+                reflection_applied = False
+                mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
+                contour_path = export_standardized_contour(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
                 inst.mask_path = mask_path
                 inst.contour_path = contour_path
-            else:
-                # Path B: Tier 2 Hemi-Blade Bilateral Reflection
-                mask_path, reflected_mask = extract_tier2_reflected(
-                    inst.mask, catalog_number, inst.leaf_id, p_apex, p_base, self.output_dir
-                )
-                if mask_path and reflected_mask is not None:
-                    inst.assigned_tier = "tier2"
-                    contour_path = export_standardized_contour(
-                        reflected_mask, catalog_number, inst.leaf_id, self.output_dir
-                    )
-                    inst.mask_path = mask_path
-                    inst.contour_path = contour_path
-                else:
-                    inst.assigned_tier = "rejected"
-                    inst.rejection_reason = "clumped_rosette_or_severe_occlusion"
-                    rejected_instances.append(inst)
-                    continue
 
-            # Record successfully extracted leaf with appended specimen-level reproductive metrics
+            # 3. Check for botanical dissection: If solidity < min_solidity but is_botanical_dissection == True (or taxon in lyrate list) -> route to Tier 1 (Dissected)
+            elif (routing_res.solidity < self.min_solidity) and (is_dissected or is_lyrate_taxon) and routing_res.solidity >= self.min_dissected and routing_res.assigned_tier == "tier1":
+                tier = "Tier 1 (Dissected)"
+                assigned_tier = "tier1"
+                is_dissected = True
+                reflection_applied = False
+                mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
+                contour_path = export_standardized_contour(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
+                inst.mask_path = mask_path
+                inst.contour_path = contour_path
+
+            # 4. Check for partial occlusion with intact half-blade -> route to Tier 2
+            elif routing_res.assigned_tier == "tier2":
+                tier = "Tier 2"
+                assigned_tier = "tier2"
+                reflection_applied = True
+                out_base = (self.output_dir / "data") if (self.output_dir.name != "data" and (self.output_dir / "data").is_dir()) else self.output_dir
+                mask_dir = out_base / "masks"
+                tier2_dir = mask_dir / "tier2_reflected"
+                mask_dir.mkdir(parents=True, exist_ok=True)
+                tier2_dir.mkdir(parents=True, exist_ok=True)
+
+                filename = f"{catalog_number}_leaf{inst.leaf_id}.png"
+                main_save_path = mask_dir / filename
+                tier_save_path = tier2_dir / filename
+
+                cv2.imwrite(str(main_save_path), routing_res.processed_mask)
+                cv2.imwrite(str(tier_save_path), routing_res.processed_mask)
+
+                contour_path = export_standardized_contour(
+                    routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir
+                )
+                inst.mask_path = str(main_save_path)
+                inst.contour_path = contour_path
+
+            # 5. Else -> log rejection reason (FAILED_SOLIDITY, IRREGULAR_FOLD, UNRESOLVED_CLUMP) and route to Failed QC
+            else:
+                if routing_res.is_irregular_fold:
+                    rejection_reason = "IRREGULAR_FOLD"
+                elif routing_res.rejection_reason in ["FAILED_SOLIDITY", "IRREGULAR_FOLD", "UNRESOLVED_CLUMP"]:
+                    rejection_reason = routing_res.rejection_reason
+                elif routing_res.solidity < self.min_dissected or routing_res.ucs < 0.60:
+                    rejection_reason = "UNRESOLVED_CLUMP"
+                elif routing_res.solidity < self.min_solidity:
+                    rejection_reason = "FAILED_SOLIDITY"
+                else:
+                    rejection_reason = "UNRESOLVED_CLUMP"
+
+                inst.assigned_tier = "rejected"
+                inst.rejection_reason = rejection_reason
+                logger.debug(
+                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by gatekeeper: {rejection_reason} "
+                    f"(solidity={inst.solidity:.3f}, ucs={inst.ucs_score:.3f})"
+                )
+                rejected_instances.append(inst)
+                continue
+
+            inst.assigned_tier = assigned_tier
+
+            # Record successfully extracted leaf with diagnostic classification flags
             extracted_records.append({
                 "catalogNumber": catalog_number,
-                "plant_individual_id": inst.plant_individual_id,
                 "leaf_id": inst.leaf_id,
-                "tier": "Tier 1" if inst.assigned_tier == "tier1" else "Tier 2",
-                "assigned_tier": inst.assigned_tier,
-                "ucs_score": round(inst.ucs_score, 4),
-                "solidity": round(inst.solidity, 4),
-                "midrib_angle_deg": round(inst.midrib_angle_deg, 2),
-                "pixels_per_mm": round(inst.pixels_per_mm, 4) if inst.pixels_per_mm else np.nan,
-                "mask_path": inst.mask_path,
+                "tier": tier,
+                "solidity": round(float(inst.solidity), 4),
+                "ucs": round(float(inst.ucs_score), 4),
+                "is_folded": is_folded,
+                "is_dissected": is_dissected,
+                "reflection_applied": reflection_applied,
                 "contour_path": inst.contour_path,
+                "plant_individual_id": inst.plant_individual_id,
+                "assigned_tier": inst.assigned_tier,
+                "ucs_score": round(float(inst.ucs_score), 4),
+                "midrib_angle_deg": round(float(inst.midrib_angle_deg), 2),
+                "pixels_per_mm": round(float(inst.pixels_per_mm), 4) if inst.pixels_per_mm else np.nan,
+                "mask_path": inst.mask_path,
                 "capitula_count": capitula_count,
                 "involucre_height_px": repro_summary["involucre_height_px"],
                 "involucre_width_px": repro_summary["involucre_width_px"],
@@ -591,10 +741,16 @@ class SegmentAndExtractPipeline:
         # Route vouchers with 0 valid silhouettes to failed manifest
         failure_record = None
         if not extracted_records:
+            primary_reason = "UNRESOLVED_CLUMP"
+            if rejected_instances:
+                reasons = [inst.rejection_reason for inst in rejected_instances if inst.rejection_reason]
+                if reasons:
+                    from collections import Counter
+                    primary_reason = Counter(reasons).most_common(1)[0][0]
             failure_record = {
                 "catalogNumber": catalog_number,
                 "image_path": str(image_path),
-                "failure_reason": "clumped_rosette_occlusion",
+                "failure_reason": primary_reason,
                 "details": f"{len(rejected_instances)} leaves detected but all rejected by geometric gatekeeping"
             }
 
@@ -694,7 +850,8 @@ class SegmentAndExtractPipeline:
                 continue
 
             processed_count += 1
-            extracted, failure = self.process_voucher(cat_num, raw_img_path)
+            taxon = str(row.get("scientificName", row.get("species_raw", ""))).strip()
+            extracted, failure = self.process_voucher(cat_num, raw_img_path, taxon=taxon)
             all_extracted_records.extend(extracted)
             if failure:
                 all_failed_records.append(failure)
@@ -709,16 +866,41 @@ class SegmentAndExtractPipeline:
             f"Extraction Summary: [Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}]"
         )
 
-        # Build manifest tables
+        # Build manifest tables with diagnostic classification schema
+        manifest_cols = [
+            "catalogNumber", "leaf_id", "tier", "solidity", "ucs",
+            "is_folded", "is_dissected", "reflection_applied", "contour_path"
+        ]
         extracted_df = pd.DataFrame(all_extracted_records)
         if extracted_df.empty:
-            extracted_df = pd.DataFrame(columns=[
-                "catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier",
-                "ucs_score", "solidity", "midrib_angle_deg", "pixels_per_mm",
-                "mask_path", "contour_path", "capitula_count",
+            extracted_df = pd.DataFrame(columns=manifest_cols + [
+                "plant_individual_id", "assigned_tier", "ucs_score",
+                "midrib_angle_deg", "pixels_per_mm", "mask_path", "capitula_count",
                 "involucre_height_px", "involucre_width_px", "involucre_height_mm",
                 "involucre_width_mm", "capitulum_aspect_ratio"
             ])
+        else:
+            # Backfill any missing diagnostic fields for legacy resumption entries
+            if "tier" not in extracted_df.columns:
+                extracted_df["tier"] = extracted_df.get("assigned_tier", "tier1").apply(
+                    lambda x: "Tier 2" if "2" in str(x).lower() else "Tier 1"
+                )
+            if "ucs" not in extracted_df.columns:
+                extracted_df["ucs"] = extracted_df.get("ucs_score", np.nan)
+            if "is_folded" not in extracted_df.columns:
+                extracted_df["is_folded"] = False
+            if "is_dissected" not in extracted_df.columns:
+                extracted_df["is_dissected"] = False
+            if "reflection_applied" not in extracted_df.columns:
+                extracted_df["reflection_applied"] = extracted_df.get("assigned_tier", "tier1").apply(
+                    lambda x: True if "2" in str(x).lower() else False
+                )
+            for c in manifest_cols:
+                if c not in extracted_df.columns:
+                    extracted_df[c] = np.nan
+
+            ordered_cols = manifest_cols + [c for c in extracted_df.columns if c not in manifest_cols]
+            extracted_df = extracted_df[ordered_cols]
 
         failed_df = pd.DataFrame(all_failed_records)
         if failed_df.empty:

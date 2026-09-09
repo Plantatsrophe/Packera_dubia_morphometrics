@@ -3,8 +3,8 @@
 scripts/tests/run_audit.py
 ==========================
 Centralized test runner and QA audit script for Packera dubia morphometrics pipeline.
-Executes all active unit and integration tests via unittest, logs execution results,
-and asserts a 100% pass rate.
+Executes all active unit and integration tests via unittest (including test_geometry_edge_cases.py),
+logs execution results, and asserts a 100% pass rate.
 """
 
 import os

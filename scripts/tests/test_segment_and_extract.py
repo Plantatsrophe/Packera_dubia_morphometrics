@@ -324,5 +324,152 @@ class TestSegmentAndExtractResumption(unittest.TestCase):
             self.assertTrue(args.force)
 
 
+class TestRoutingAndManifestSchema(unittest.TestCase):
+    """Test suite for the 5-step routing decision tree and diagnostic manifest schema."""
+
+    def setUp(self) -> None:
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_routing_"))
+        self.vouchers_csv = self.temp_dir / "vouchers.csv"
+        self.output_dir = self.temp_dir / "data"
+        self.img_path = self.temp_dir / "NCU123.jpg"
+        self.img_path.write_bytes(b"\xff\xd8\xff" + b"0" * 200)
+
+        pd.DataFrame([
+            {"catalogNumber": "NCU123", "image_path": str(self.img_path), "scientificName": "Packera paupercula"}
+        ]).to_csv(self.vouchers_csv, index=False)
+
+        self.pipeline = SegmentAndExtractPipeline(
+            vouchers_csv=self.vouchers_csv,
+            model_weights=Path("models/dummy.pth"),
+            output_dir=self.output_dir,
+            device="cpu",
+            force=True,
+        )
+
+    def tearDown(self) -> None:
+        self.pipeline.shutdown()
+        if self.temp_dir.exists():
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_manifest_schema_columns(self) -> None:
+        """Verify extracted leaf manifest contains required diagnostic classification columns."""
+        # Create a mock extracted record
+        mock_records = [{
+            "catalogNumber": "NCU123",
+            "plant_individual_id": 1,
+            "leaf_id": 1,
+            "tier": "Tier 1",
+            "assigned_tier": "tier1",
+            "solidity": 0.88,
+            "ucs": 0.92,
+            "ucs_score": 0.92,
+            "is_folded": False,
+            "is_dissected": False,
+            "reflection_applied": False,
+            "midrib_angle_deg": 10.0,
+            "pixels_per_mm": 12.0,
+            "mask_path": "data/masks/NCU123_leaf1.png",
+            "contour_path": "data/contours/NCU123_leaf1.csv",
+        }]
+
+        from unittest.mock import patch
+        with patch.object(self.pipeline, "process_voucher", return_value=(mock_records, None)):
+            extracted_df, _ = self.pipeline.run()
+
+        expected_prefix = [
+            "catalogNumber", "leaf_id", "tier", "solidity", "ucs",
+            "is_folded", "is_dissected", "reflection_applied", "contour_path"
+        ]
+        self.assertEqual(list(extracted_df.columns[:9]), expected_prefix)
+        self.assertEqual(extracted_df.iloc[0]["tier"], "Tier 1")
+        self.assertFalse(bool(extracted_df.iloc[0]["reflection_applied"]))
+        self.assertFalse(bool(extracted_df.iloc[0]["is_folded"]))
+        self.assertFalse(bool(extracted_df.iloc[0]["is_dissected"]))
+
+    def test_routing_pristine_whole_leaf(self) -> None:
+        """Verify pristine whole leaf routes to Tier 1 with reflection_applied=False."""
+        # Pristine ellipse (solidity > 0.72, ucs > 0.85, W/L > 0.45)
+        mask = np.zeros((300, 300), dtype=np.uint8)
+        cv2.ellipse(mask, (150, 150), (65, 120), 0, 0, 360, 255, -1)
+
+        from unittest.mock import patch
+        with patch.object(self.pipeline.model_engine, "predict", return_value=[((30, 85, 270, 215), mask, 0.95, 0)]):
+            with patch("cv2.imread", return_value=np.full((400, 400, 3), 200, dtype=np.uint8)):
+                records, failure = self.pipeline.process_voucher("NCU123", self.img_path)
+
+        self.assertIsNone(failure)
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+        self.assertEqual(rec["tier"], "Tier 1")
+        self.assertEqual(rec["assigned_tier"], "tier1")
+        self.assertFalse(rec["reflection_applied"])
+        self.assertFalse(rec["is_folded"])
+        self.assertFalse(rec["is_dissected"])
+
+    def test_routing_folded_leaf_to_tier2(self) -> None:
+        """Verify folded leaf along straight chord routes to Tier 2 with reflection_applied=True."""
+        # Half-ellipse with straight edge along midrib
+        mask = np.zeros((400, 400), dtype=np.uint8)
+        cv2.ellipse(mask, (200, 200), (35, 130), 0, -90, 90, 255, -1)
+
+        from unittest.mock import patch
+        with patch.object(self.pipeline.model_engine, "predict", return_value=[((70, 160, 330, 240), mask, 0.92, 0)]):
+            with patch("cv2.imread", return_value=np.full((400, 400, 3), 200, dtype=np.uint8)):
+                records, failure = self.pipeline.process_voucher("NCU123", self.img_path)
+
+        self.assertIsNone(failure)
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+        self.assertEqual(rec["tier"], "Tier 2")
+        self.assertEqual(rec["assigned_tier"], "tier2")
+        self.assertTrue(rec["reflection_applied"])
+        self.assertTrue(rec["is_folded"])
+        self.assertFalse(rec["is_dissected"])
+
+    def test_routing_botanical_dissection_to_tier1_dissected(self) -> None:
+        """Verify dissected leaf with lyrate taxon routes to Tier 1 (Dissected)."""
+        # Create a synthetic pinnatifid/lyrate leaf
+        mask = np.zeros((400, 400), dtype=np.uint8)
+        cx, cy = 200, 200
+        # Terminal lobe
+        cv2.ellipse(mask, (cx, cy - 70), (35, 45), 0, 0, 360, 255, -1)
+        # Midrib
+        cv2.line(mask, (cx, cy - 100), (cx, cy + 100), 255, thickness=16)
+        # Bilateral lobes
+        for y_off in [-20, 20, 60]:
+            cv2.ellipse(mask, (cx - 35, cy + y_off), (35, 12), -15, 0, 360, 255, -1)
+            cv2.ellipse(mask, (cx + 35, cy + y_off), (35, 12), 15, 0, 360, 255, -1)
+
+        from unittest.mock import patch
+        with patch.object(self.pipeline.model_engine, "predict", return_value=[((100, 160, 300, 240), mask, 0.90, 0)]):
+            with patch("cv2.imread", return_value=np.full((400, 400, 3), 200, dtype=np.uint8)):
+                records, failure = self.pipeline.process_voucher("NCU123", self.img_path, taxon="Packera paupercula")
+
+        self.assertIsNone(failure)
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+        self.assertEqual(rec["tier"], "Tier 1 (Dissected)")
+        self.assertEqual(rec["assigned_tier"], "tier1")
+        self.assertTrue(rec["is_dissected"])
+        self.assertFalse(rec["reflection_applied"])
+        self.assertFalse(rec["is_folded"])
+
+    def test_routing_rejection_reasons(self) -> None:
+        """Verify rejection reasons FAILED_SOLIDITY, IRREGULAR_FOLD, and UNRESOLVED_CLUMP."""
+        # Diagonal fold -> IRREGULAR_FOLD
+        diag_mask = np.zeros((400, 400), dtype=np.uint8)
+        pts = np.array([[190, 60], [230, 180], [200, 320], [160, 200]], dtype=np.int32)
+        cv2.fillPoly(diag_mask, [pts], 255)
+
+        from unittest.mock import patch
+        with patch.object(self.pipeline.model_engine, "predict", return_value=[((60, 160, 320, 230), diag_mask, 0.90, 0)]):
+            with patch("cv2.imread", return_value=np.full((400, 400, 3), 200, dtype=np.uint8)):
+                records, failure = self.pipeline.process_voucher("NCU123", self.img_path)
+
+        self.assertEqual(len(records), 0)
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure["failure_reason"], "IRREGULAR_FOLD")
+
+
 if __name__ == "__main__":
     unittest.main()

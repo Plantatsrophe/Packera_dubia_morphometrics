@@ -660,6 +660,61 @@ def run_all(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     logger.info("==================================================================")
 
 
+def run_calibrate_geometry(args: argparse.Namespace, cfg: PipelineConfig) -> None:
+    """Executes empirical geometry threshold calibration from annotated training leaves."""
+    logger.info("=== Starting Geometric Threshold Calibration ===")
+    calib_script = PROJECT_ROOT / "scripts" / "vision" / "tune_geometry_parameters.py"
+    verify_file_exists(calib_script, "Geometry tuning script")
+
+    ann_path = Path(getattr(args, "annotations", None) or (PROJECT_ROOT / "data" / "annotations" / "packera_train_coco.json"))
+    verify_file_exists(ann_path, "COCO annotations file")
+
+    output_plot = Path(
+        getattr(args, "output_plot", None) or
+        (PROJECT_ROOT / cfg["paths"].get("figures_dir", "outputs/figures") / "geometry_parameter_distributions.pdf")
+    )
+    output_plot.parent.mkdir(parents=True, exist_ok=True)
+
+    config_path = Path(getattr(args, "config_path", None) or getattr(args, "config", None) or (PROJECT_ROOT / "config" / "config.yaml"))
+
+    # Resolve Python interpreter with required dependencies
+    py_candidates = [
+        PROJECT_ROOT / ".venv" / "bin" / "python",
+        PROJECT_ROOT / ".venv_LM2" / "bin" / "python",
+        get_lm2_python_executable(),
+    ]
+    python_bin = sys.executable
+    for cand in py_candidates:
+        if cand.exists():
+            python_bin = str(cand)
+            break
+
+    cmd = [
+        python_bin, str(calib_script),
+        "--annotations", str(ann_path),
+        "--output-plot", str(output_plot),
+        "--config-path", str(config_path),
+    ]
+    if getattr(args, "update_config", False):
+        cmd.append("--update-config")
+    if getattr(args, "min_area", None):
+        cmd.extend(["--min-area", str(args.min_area)])
+    if getattr(args, "category_id", None) is not None:
+        cmd.extend(["--category-id", str(args.category_id)])
+    if getattr(args, "category_name", None):
+        cmd.extend(["--category-name", str(args.category_name)])
+
+    logger.info(f"Running calibration command: {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        logger.error(f"Geometry calibration failed with exit code {exc.returncode}")
+        sys.exit(exc.returncode)
+
+    verify_file_exists(output_plot, "Diagnostic distribution PDF")
+    logger.info("Geometry calibration completed successfully.")
+
+
 # =============================================================================
 # CLI Parser Setup
 # =============================================================================
@@ -827,6 +882,54 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
     p_all.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
 
+    # Subcommand: calibrate-geometry
+    p_calib = subparsers.add_parser(
+        "calibrate-geometry",
+        help="Derive empirical geometric thresholds for fold detection and lyrate dissection from SAM 2 COCO annotations",
+    )
+    p_calib.add_argument(
+        "--annotations",
+        type=Path,
+        default=None,
+        help="Path to COCO JSON annotations (default: data/annotations/packera_train_coco.json)",
+    )
+    p_calib.add_argument(
+        "--output-plot",
+        type=Path,
+        default=None,
+        help="Destination path for 4-panel diagnostic distribution PDF (default: outputs/figures/geometry_parameter_distributions.pdf)",
+    )
+    p_calib.add_argument(
+        "--config-path",
+        type=Path,
+        default=None,
+        help="Target configuration YAML path to update (default: config/config.yaml)",
+    )
+    p_calib.add_argument(
+        "--min-area",
+        type=float,
+        default=150.0,
+        help="Minimum contour area threshold in pixels to filter noise (default: 150.0)",
+    )
+    p_calib.add_argument(
+        "--category-id",
+        type=int,
+        default=None,
+        help="Specific COCO category ID to target (default: auto-detect Class 0 / ideal_leaf)",
+    )
+    p_calib.add_argument(
+        "--category-name",
+        type=str,
+        default=None,
+        help="Specific COCO category name to target (e.g. basal_leaf_blade, ideal_leaf)",
+    )
+    p_calib.add_argument(
+        "--update-config",
+        action="store_true",
+        default=False,
+        help="Update thresholds.fold_detection and thresholds.solidity in config.yaml",
+    )
+
     return parser
 
 
@@ -851,6 +954,7 @@ def main() -> None:
         "morphometrics": run_morphometrics,
         "synthesis": run_synthesis,
         "run-all": run_all,
+        "calibrate-geometry": run_calibrate_geometry,
     }
 
     handler = dispatch.get(args.subcommand)

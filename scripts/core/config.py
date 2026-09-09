@@ -45,6 +45,44 @@ class TaxaConfig:
 
 
 @dataclass(frozen=True)
+class FoldDetectionConfig:
+    """Empirical straight-chord fold detection parameters (calibrated)."""
+    enabled: bool = True
+    max_folded_aspect_ratio: float = 0.42
+    max_chord_deviation_ratio: float = 0.035
+    min_chord_length_px: int = 150
+
+
+@dataclass(frozen=True)
+class DissectionConfig:
+    """Empirical dissection & lyrate sinus parameters (calibrated)."""
+    enabled: bool = True
+    min_solidity_dissected: float = 0.50
+    sinus_defect_min_depth_ratio: float = 0.08
+    min_bilateral_sinus_count: int = 3
+    taxa_with_lyrate_tendency: List[str] = field(default_factory=lambda: [
+        "Packera paupercula",
+        "Packera plattensis",
+        "Packera paupercula var. paupercula",
+        "Packera paupercula var. savannarum",
+    ])
+
+    @property
+    def default(self) -> float:
+        """Backward-compatible alias for standard baseline min_solidity."""
+        return 0.72
+
+    @property
+    def min_dissected(self) -> float:
+        """Backward-compatible alias for min_solidity_dissected."""
+        return self.min_solidity_dissected
+
+
+# Backward-compatibility alias for legacy callers importing SolidityThresholdsConfig
+SolidityThresholdsConfig = DissectionConfig
+
+
+@dataclass(frozen=True)
 class ThresholdsConfig:
     """Botanical optical quality, geometry, and detection thresholds."""
     pcd_conf: float = 0.72
@@ -56,6 +94,13 @@ class ThresholdsConfig:
     min_sharpness_laplacian: float = 80.0
     max_uncertainty_meters: float = 5000.0
     western_longitude_threshold: float = -106.65
+    fold_detection: FoldDetectionConfig = field(default_factory=FoldDetectionConfig)
+    dissection: DissectionConfig = field(default_factory=DissectionConfig)
+
+    @property
+    def solidity(self) -> DissectionConfig:
+        """Backward-compatible alias for dissection thresholds."""
+        return self.dissection
 
 
 @dataclass(frozen=True)
@@ -172,9 +217,61 @@ class PipelineConfig:
         )
 
         thresh_dict = raw_cfg.get("thresholds", {})
-        thresholds = ThresholdsConfig(**{
-            k: float(v) for k, v in thresh_dict.items() if k in ThresholdsConfig.__dataclass_fields__
-        })
+
+        # Parse dissection parameters with safe fallbacks
+        diss_dict = thresh_dict.get("dissection") or thresh_dict.get("solidity")
+        if isinstance(diss_dict, dict):
+            dissection_cfg = DissectionConfig(
+                enabled=bool(diss_dict.get("enabled", True)),
+                min_solidity_dissected=float(
+                    diss_dict.get("min_solidity_dissected", diss_dict.get("min_dissected", 0.50))
+                ),
+                sinus_defect_min_depth_ratio=float(
+                    diss_dict.get("sinus_defect_min_depth_ratio", 0.08)
+                ),
+                min_bilateral_sinus_count=int(
+                    diss_dict.get("min_bilateral_sinus_count", 3)
+                ),
+                taxa_with_lyrate_tendency=list(
+                    diss_dict.get("taxa_with_lyrate_tendency", [
+                        "Packera paupercula",
+                        "Packera plattensis",
+                        "Packera paupercula var. paupercula",
+                        "Packera paupercula var. savannarum",
+                    ])
+                ),
+            )
+        else:
+            dissection_cfg = DissectionConfig()
+
+        # Parse fold detection parameters with safe fallbacks
+        fold_dict = thresh_dict.get("fold_detection")
+        if isinstance(fold_dict, dict):
+            fold_cfg = FoldDetectionConfig(
+                enabled=bool(fold_dict.get("enabled", True)),
+                max_folded_aspect_ratio=float(
+                    fold_dict.get("max_folded_aspect_ratio", 0.42)
+                ),
+                max_chord_deviation_ratio=float(
+                    fold_dict.get("max_chord_deviation_ratio", 0.035)
+                ),
+                min_chord_length_px=int(
+                    fold_dict.get("min_chord_length_px", 150)
+                ),
+            )
+        else:
+            fold_cfg = FoldDetectionConfig()
+
+        thresh_kwargs: Dict[str, Any] = {
+            k: float(v) for k, v in thresh_dict.items()
+            if k in ThresholdsConfig.__dataclass_fields__ and not isinstance(v, dict)
+        }
+        thresh_kwargs["fold_detection"] = fold_cfg
+        thresh_kwargs["dissection"] = dissection_cfg
+        if "min_solidity" not in thresh_kwargs:
+            thresh_kwargs["min_solidity"] = dissection_cfg.default
+
+        thresholds = ThresholdsConfig(**thresh_kwargs)
 
         norm_dict = raw_cfg.get("morphometrics", {}).get("normalization", {})
         norm = NormalizationConfig(**{

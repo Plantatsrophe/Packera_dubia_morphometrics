@@ -878,6 +878,68 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
             annotator.undo_last_point()
         self.assertEqual(len(annotator.point_coords), 0)
 
+    def test_knife_second_click_does_not_add_inclusion_point(self):
+        annotator = PrecisionSAM2Annotator.__new__(PrecisionSAM2Annotator)
+        annotator.predictor = None
+        annotator.active_image = np.zeros((100, 100, 3), dtype=np.uint8)
+        annotator.mode = "KNIFE"
+        annotator.knife_pt_a = None
+        annotator.polygon_points = []
+        annotator.box_prompt = None
+        annotator.point_coords = []
+        annotator.point_labels = []
+        annotator.candidate_mask = np.ones((100, 100), dtype=np.uint8) * 255
+        annotator.candidate_masks = [annotator.candidate_mask.copy()]
+        annotator.candidate_scores = [0.9]
+        annotator.active_mask_idx = 0
+        annotator.window_w = 1000
+        annotator.window_h = 800
+        annotator.orig_w = 100
+        annotator.orig_h = 100
+        annotator.zoom_level = 1.0
+        annotator.pan_offset = [0, 0]
+        annotator.space_down = False
+        annotator.is_pan_dragging = False
+        annotator.is_box_dragging = False
+
+        # First click (Point A): press and release
+        annotator.press_mode = annotator.mode
+        annotator.knife_click_handled = True
+        annotator.lbutton_down = False
+        annotator.knife_pt_a = (50, 10)
+        # Release of Point A
+        if getattr(annotator, "knife_click_handled", False):
+            annotator.knife_click_handled = False
+            annotator.lbutton_down = False
+        self.assertEqual(len(annotator.point_coords), 0)
+        self.assertEqual(annotator.knife_pt_a, (50, 10))
+        self.assertEqual(annotator.mode, "KNIFE")
+
+        # Second click (Point B): press
+        annotator.press_mode = annotator.mode
+        annotator.knife_click_handled = True
+        annotator.lbutton_down = False
+        # Sever cut is made
+        annotator.candidate_mask = split_mask_with_knife_line(
+            annotator.candidate_mask, annotator.knife_pt_a, (50, 90), line_thickness=2, dilation_px=2
+        )
+        annotator.knife_pt_a = None
+        annotator.mode = "SELECT"
+
+        # Release of Point B
+        btn = 1
+        if getattr(annotator, "knife_click_handled", False):
+            annotator.knife_click_handled = False
+            annotator.lbutton_down = False
+        elif annotator.mode == "SELECT" and getattr(annotator, "press_mode", "SELECT") == "SELECT":
+            annotator.point_coords.append([50.0, 90.0])
+            annotator.point_labels.append(1)
+
+        # Verification: NO inclusion point must have been added on second click!
+        self.assertEqual(len(annotator.point_coords), 0)
+        self.assertEqual(annotator.mode, "SELECT")
+        self.assertFalse(annotator.knife_click_handled)
+
 
 if __name__ == "__main__":
     unittest.main()

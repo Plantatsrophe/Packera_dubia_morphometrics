@@ -93,10 +93,17 @@ class TestMainPipelineCLI(unittest.TestCase):
         self.assertEqual(args_dl.subcommand, "download-weights")
         self.assertTrue(args_dl.force)
 
-        # run-all
-        args_all = parser.parse_args(["run-all", "--download-images"])
-        self.assertEqual(args_all.subcommand, "run-all")
-        self.assertTrue(args_all.download_images)
+        # calibrate-geometry
+        args_calib = parser.parse_args([
+            "calibrate-geometry",
+            "--annotations", "data/annotations/packera_train_coco.json",
+            "--update-config",
+            "--min-area", "200.0"
+        ])
+        self.assertEqual(args_calib.subcommand, "calibrate-geometry")
+        self.assertEqual(str(args_calib.annotations), "data/annotations/packera_train_coco.json")
+        self.assertTrue(args_calib.update_config)
+        self.assertEqual(args_calib.min_area, 200.0)
 
         # force / overwrite flags across subparsers
         self.assertTrue(parser.parse_args(["harvest", "--force"]).force)

@@ -855,6 +855,7 @@ class PrecisionSAM2Annotator:
                     if ev_type == "button_press":
                         _, vx, vy, btn, state = ev
                         ix, iy = self._viewport_to_image(vx, vy, scale_x, scale_y, crop_x0, crop_y0)
+                        self.press_mode = self.mode
 
                         if btn == 1:  # Left Button
                             if vy < 70:
@@ -883,6 +884,8 @@ class PrecisionSAM2Annotator:
                                 else:
                                     self.polygon_points.append((ix, iy))
                             elif self.mode == "KNIFE":
+                                self.knife_click_handled = True
+                                self.lbutton_down = False
                                 if self.knife_pt_a is None:
                                     self.knife_pt_a = (ix, iy)
                                     logger.info(f"Knife Point A set at {(ix, iy)}. Click Point B to sever mask.")
@@ -998,13 +1001,17 @@ class PrecisionSAM2Annotator:
                             if getattr(self, "clicked_undo_button", False):
                                 self.clicked_undo_button = False
                                 continue
+                            if getattr(self, "knife_click_handled", False):
+                                self.knife_click_handled = False
+                                self.lbutton_down = False
+                                continue
                             self.lbutton_down = False
                             if self.is_pan_dragging:
                                 self.is_pan_dragging = False
                             elif self.is_box_dragging:
                                 self.is_box_dragging = False
                                 self.run_inference()
-                            elif self.mode == "SELECT":
+                            elif self.mode == "SELECT" and getattr(self, "press_mode", "SELECT") == "SELECT":
                                 self.point_coords.append([float(ix), float(iy)])
                                 self.point_labels.append(1)
                                 self.run_inference()

@@ -22,6 +22,8 @@ from scripts.core.config import (
     PathsConfig,
     TaxaConfig,
     ThresholdsConfig,
+    DissectionConfig,
+    FoldDetectionConfig,
     MorphometricsConfig,
     HarvestingConfig,
     SegmentationConfig,
@@ -61,6 +63,63 @@ class TestPipelineConfig(unittest.TestCase):
         self.assertAlmostEqual(cfg.thresholds.min_megapixels, 8.0)
         self.assertAlmostEqual(cfg.thresholds.min_file_size_kb, 500.0)
         self.assertAlmostEqual(cfg.thresholds.min_sharpness_laplacian, 80.0)
+
+        # Dissection parameters (calibrated)
+        self.assertIsInstance(cfg.thresholds.dissection, DissectionConfig)
+        self.assertTrue(cfg.thresholds.dissection.enabled)
+        self.assertAlmostEqual(cfg.thresholds.dissection.min_solidity_dissected, 0.50)
+        self.assertAlmostEqual(cfg.thresholds.dissection.sinus_defect_min_depth_ratio, 0.08)
+        self.assertEqual(cfg.thresholds.dissection.min_bilateral_sinus_count, 3)
+        self.assertIn("Packera paupercula", cfg.thresholds.dissection.taxa_with_lyrate_tendency)
+        self.assertIn("Packera plattensis", cfg.thresholds.dissection.taxa_with_lyrate_tendency)
+        self.assertIn("Packera paupercula var. paupercula", cfg.thresholds.dissection.taxa_with_lyrate_tendency)
+        self.assertIn("Packera paupercula var. savannarum", cfg.thresholds.dissection.taxa_with_lyrate_tendency)
+
+        # Backward compatibility for solidity property
+        self.assertAlmostEqual(cfg.thresholds.solidity.default, 0.72)
+        self.assertAlmostEqual(cfg.thresholds.solidity.min_dissected, 0.50)
+        self.assertEqual(cfg.thresholds.solidity.taxa_with_lyrate_tendency, cfg.thresholds.dissection.taxa_with_lyrate_tendency)
+
+        # Fold detection parameters (calibrated)
+        self.assertIsInstance(cfg.thresholds.fold_detection, FoldDetectionConfig)
+        self.assertTrue(cfg.thresholds.fold_detection.enabled)
+        self.assertAlmostEqual(cfg.thresholds.fold_detection.max_chord_deviation_ratio, 0.035)
+        self.assertAlmostEqual(cfg.thresholds.fold_detection.max_folded_aspect_ratio, 0.42)
+        self.assertEqual(cfg.thresholds.fold_detection.min_chord_length_px, 150)
+
+    def test_thresholds_safe_fallbacks_when_subkeys_missing(self):
+        """Verify PipelineConfig.from_yaml safely falls back when threshold sub-keys are absent."""
+        minimal_yaml = (
+            "paths:\n"
+            "  workspace_root: \".\"\n"
+            "taxa:\n"
+            "  target_species:\n"
+            "    - \"Packera dubia\"\n"
+            "thresholds:\n"
+            "  pcd_conf: 0.75\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_file = Path(tmp_dir) / "minimal.yaml"
+            cfg_file.write_text(minimal_yaml, encoding="utf-8")
+            cfg = PipelineConfig.from_yaml(cfg_file)
+
+            # Standard baseline defaults
+            self.assertAlmostEqual(cfg.thresholds.pcd_conf, 0.75)
+            self.assertAlmostEqual(cfg.thresholds.min_solidity, 0.72)
+            self.assertAlmostEqual(cfg.thresholds.min_ucs, 0.85)
+
+            # Dissection safe defaults
+            self.assertTrue(cfg.thresholds.dissection.enabled)
+            self.assertAlmostEqual(cfg.thresholds.dissection.min_solidity_dissected, 0.50)
+            self.assertAlmostEqual(cfg.thresholds.dissection.sinus_defect_min_depth_ratio, 0.08)
+            self.assertEqual(cfg.thresholds.dissection.min_bilateral_sinus_count, 3)
+            self.assertIn("Packera paupercula", cfg.thresholds.dissection.taxa_with_lyrate_tendency)
+
+            # Fold detection safe defaults
+            self.assertTrue(cfg.thresholds.fold_detection.enabled)
+            self.assertAlmostEqual(cfg.thresholds.fold_detection.max_folded_aspect_ratio, 0.42)
+            self.assertAlmostEqual(cfg.thresholds.fold_detection.max_chord_deviation_ratio, 0.035)
+            self.assertEqual(cfg.thresholds.fold_detection.min_chord_length_px, 150)
 
     def test_taxa_structure_and_synonyms(self):
         """Verify target species, synonyms dictionary, and outgroups."""
