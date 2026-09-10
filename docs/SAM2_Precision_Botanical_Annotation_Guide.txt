@@ -27,7 +27,7 @@ and inspection mechanisms:
 
 
 Following this protocol, 50-100 vouchers can be cleanly annotated in under 2 hours to provide 
-a gold-standard calibration dataset for LeafMachine2 PCD (PointRend) and YOLOv8/YOLOv11 instance segmentation.
+a gold-standard calibration dataset for Ultralytics YOLO instance segmentation.
 
 
 
@@ -241,31 +241,25 @@ Step F: Save and Advance
 
 7. DATASET BUILDING & MODEL FINE-TUNING
 --------------------------------------------------------------------------------
-Once 50-100 vouchers are annotated in `data/raw_annotations/`, compile or verify the 
-COCO dataset (`data/annotations/packera_train_coco.json`) and fine-tune LeafMachine2's 
-PointRend Plant Component Detector (PCD) or YOLO:
+Once 50-100 vouchers are annotated in `data/raw_annotations/`, export them to YOLO format 
+and train an Ultralytics YOLO model for Plant Component Detection (PCD):
 
-
-# Option A: Fine-tune LeafMachine2 PointRend PCD (Production Pipeline Backbone)
-python scripts/annotation_and_training/finetune_lm2_pcd.py \
-  --coco-annotations data/annotations/packera_train_coco.json \
-  --epochs 30 \
-  --output-weights models/lm2_packera_pcd_finetuned.pth
+python scripts/annotation_and_training/train_yolo.py \
+  --epochs 100 \
+  --batch-size 16 \
+  --dataset-dir data/yolo_dataset
 
 
 8. DOWNSTREAM EXTRACTION & MORPHOMETRIC PIPELINE
 --------------------------------------------------------------------------------
-With the fine-tuned model weights saved at `models/lm2_packera_pcd_finetuned.pth` 
-(or `models/yolov8_leaf_best.pt`), run the master extraction and analysis sequence:
+With the trained YOLO model weights saved at `models/yolo_train_output/packera_seg_model/weights/best.pt`, 
+run the master extraction and analysis sequence:
 
-
-# Step 3: Run 5-Stage Precision Botanical Extraction (with EDT + SAM 2 Rosette Disentangling)
-python scripts/02_hierarchical_leaf_extractor.py \
-  --raw-dir data/raw_vouchers \
-  --model-path models/yolov8_leaf_best.pt \
-  --conf-threshold 0.25 \
-  --use-sam2 \
-  --output-dir data/masks
+  A. Segment & Extract Polygons:
+     python scripts/pipeline/02b_segment_and_extract_yolo.py \
+       --vouchers data/tables/curated_vouchers.csv \
+       --model-weights models/yolo_train_output/packera_seg_model/weights/best.pt \
+       --output-dir data/raw_vouchers
 
 
 # Step 4: Closed 12-Harmonic EFA & Passive Sample Projection CDA (R)

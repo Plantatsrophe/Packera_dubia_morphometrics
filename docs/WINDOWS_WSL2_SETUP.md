@@ -9,7 +9,7 @@
 
 ## 📋 Overview
 
-The computational pipeline couples automated deep learning morphometrics (LeafMachine2 / PointRend), interactive Segment Anything Model 2 (SAM 2) annotation, high-throughput OpenCV geometric symmetry reconstruction, and R statistical morphometrics (`Momocs`, `MorphoTools2`).
+The computational pipeline couples automated deep learning morphometrics (LeafMachine2 / Ultralytics YOLO), interactive Segment Anything Model 2 (SAM 2) annotation, high-throughput OpenCV geometric symmetry reconstruction, and R statistical morphometrics (`Momocs`, `MorphoTools2`).
 
 While developed natively on Linux, **Windows Subsystem for Linux (WSL 2)** provides first-class support for the entire pipeline on Windows machines. With modern WSL 2:
 - **NVIDIA GPU Acceleration:** Direct pass-through of CUDA cores and Tensor cores to PyTorch and LeafMachine2 via the Windows host display driver.

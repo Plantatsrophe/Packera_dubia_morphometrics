@@ -117,7 +117,7 @@ flowchart TD
 
     subgraph P2["Phase 2: LM2 & 4-Tier Geometric Routing"]
         B --> C["LM2 Processing & Scale Isolation\n(LeafMachine2.py)"]
-        C --> D["4-Tier Routing & Gatekeeping\n(02_segment_and_extract.py)"]
+        C --> D["4-Tier Routing & Gatekeeping\n(02b_segment_and_extract_yolo.py)"]
     end
 
     subgraph P3["Phase 3: Morphometrics (Momocs)"]
@@ -176,7 +176,7 @@ python scripts/data_prep/01_voucher_harvester.py \
 ## Phase 2: LeafMachine2 Organ Detection & Geometric Routing
 
 > [!NOTE]
-> Physical image staging via `prepare_lm2_dataset.py` has been archived to `scripts/_archive/data_prep/prepare_lm2_dataset.py`. The modern pipeline script [`scripts/pipeline/02_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02_segment_and_extract.py) reads directly from `data/raw_vouchers/` via paths defined in `data/tables/curated_vouchers.csv`, eliminating redundant symlink copying and disk overhead.
+> Physical image staging via `prepare_lm2_dataset.py` has been archived to `scripts/_archive/data_prep/prepare_lm2_dataset.py`. The modern pipeline script [`scripts/pipeline/02b_segment_and_extract_yolo.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02b_segment_and_extract_yolo.py) reads directly from `data/raw_vouchers/` via paths defined in `data/tables/curated_vouchers.csv`, eliminating redundant symlink copying and disk overhead.
 
 ### 2.0 Track A: SAM 2 Assisted Botanical Annotation & Model Fine-Tuning
 - **Script:** [`scripts/annotation_and_training/annotate_with_sam2.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/annotation_and_training/annotate_with_sam2.py)
@@ -254,12 +254,10 @@ python scripts/annotation_and_training/annotate_with_sam2.py \
 | | **`q` / `Esc` / Window `X`** | Save modified sheet annotations and quit safely (syncs COCO JSON on exit). |
 
 #### Downstream Fine-Tuning:
-Once 50–100 vouchers are annotated, fine-tune LeafMachine2's PointRend Plant Component Detector (PCD):
+Once 50–100 vouchers are annotated, train a new Ultralytics YOLO model for Plant Component Detection (PCD):
+
 ```bash
-python scripts/annotation_and_training/finetune_lm2_pcd.py \
-    --coco-annotations data/annotations/packera_train_coco.json \
-    --epochs 30 \
-    --output-weights models/lm2_packera_pcd_finetuned.pth
+python scripts/annotation_and_training/train_yolo.py --epochs 100 --batch-size 16 --dataset-dir data/yolo_dataset
 ```
 
 ---
@@ -282,11 +280,11 @@ python main.py calibrate-geometry \
 
 ### 2.2 Execute Phase 2: Segmentation, 4-Tier Geometric Routing & Contour Extraction
 - **Unified Pipeline Runner:** `python main.py segment` (automatically resolves `.venv_LM2` and executes segmentation)
-- **Script (Direct):** [`scripts/pipeline/02_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02_segment_and_extract.py)
+- **Script (Direct):** [`scripts/pipeline/02b_segment_and_extract_yolo.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02b_segment_and_extract_yolo.py)
 - **Environment:** Automatically routed to `.venv_LM2` via `main.py`
 
-In the production pipeline, organ detection, geometric gatekeeping, midrib bilateral symmetry reconstruction, and contour export are unified in [`02_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02_segment_and_extract.py):
-1. **Leaf Detection & Masking:** Detects individual basal leaf components using fine-tuned PointRend weights (`models/lm2_packera_pcd_finetuned.pth`).
+In the production pipeline, organ detection, geometric gatekeeping, midrib bilateral symmetry reconstruction, and contour export are unified in [`02b_segment_and_extract_yolo.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/pipeline/02b_segment_and_extract_yolo.py):
+1. **Leaf Detection & Masking:** Detects individual basal leaf components using fine-tuned Ultralytics YOLO weights (`models/yolo_train_output/packera_seg_model/weights/best.pt`).
 2. **Deterministic Geometric Gatekeeping:** Evaluates solidity, unoccluded completeness score (UCS), aspect ratios, chord deviation (fold detection), and lyrate sinus depths.
 3. **Midrib Bilateral Symmetry Reconstruction (Tier 2):** Cleaves partially occluded leaves along the midrib vector and reflects the pristine half across that axis in OpenCV.
 4. **Export & Output Staging:** Exports binary masks (`data/masks/`), 2D contour coordinate matrices (`data/contours/`), whole-rosette contextual crops (`data/cropped_patches/rosettes_dense/`), and updates the extraction log (`data/tables/dataset_manifest.csv`).
@@ -297,11 +295,11 @@ python main.py segment --weights models/lm2_packera_pcd_finetuned.pth
 
 # Manual fallback (standalone inside .venv_LM2):
 source .venv_LM2/bin/activate
-python scripts/pipeline/02_segment_and_extract.py \
-    --weights models/lm2_packera_pcd_finetuned.pth \
+python scripts/pipeline/02b_segment_and_extract_yolo.py \
     --vouchers data/tables/curated_vouchers.csv \
-    --output-contours data/contours \
-    --output-masks data/masks
+    --model-weights models/yolo_train_output/packera_seg_model/weights/best.pt \
+    --output-dir data/ \
+    --device cuda
 ```
 
 **Key Outputs:**
@@ -540,7 +538,7 @@ pytest scripts/tests/test_allometry_and_phenology.py
 
 **Core Test Modules:**
 1. [`test_voucher_harvester.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_voucher_harvester.py): GBIF ingestion, Darwin Core parsing, coordinate cleaning, and Western US boundary filtering.
-2. [`test_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_segment_and_extract.py): LeafMachine2 PointRend inference, midrib bilateral symmetry reflection, and contour extraction.
+2. [`test_segment_and_extract.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_segment_and_extract.py): Ultralytics YOLO inference, midrib bilateral symmetry reflection, and contour extraction.
 3. [`test_geometry_edge_cases.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_geometry_edge_cases.py): Robustness testing on severe foliar overlap, crenate margins, and pressing fold geometries.
 4. [`test_geometry_gatekeeper_enhancements.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_geometry_gatekeeper_enhancements.py): Fold detection gatekeeping, chord deviation ratios, and lyrate sinus depth metrics.
 5. [`test_geometry_tuning.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/tests/test_geometry_tuning.py): Empirical threshold calibration routines against COCO annotations.
