@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -57,6 +59,7 @@ except ImportError:
 from scripts.annotation_and_training.sam2_annotator_utils import (
     CLASS_COLORS,
     CLASS_NAMES,
+    KEYSYM_TO_CLASS,
     PCD_CLASS_MAPPING,
     PCD_COCO_CATEGORIES,
     apply_knife_cut,
@@ -75,11 +78,15 @@ from scripts.annotation_and_training.sam2_annotator_utils import (
     mask_to_polygons,
     mask_to_yolo_bbox,
     overlay_candidate_mask_on_viewport,
+    parse_mask_filename,
     polygon_interior_point,
     polygon_to_bounding_box,
     rasterize_lasso_polygon,
     render_hud_overlay,
     get_undo_button_rect,
+    get_prev_button_rect,
+    get_next_button_rect,
+    get_save_button_rect,
     save_coco_json,
     split_mask_with_knife_line,
     viewport_to_image_coords,
@@ -414,7 +421,12 @@ class PrecisionSAM2Annotator:
         config_path: Union[str, Path] = "sam2_hiera_l.yaml",
         window_w: int = 1280,
         window_h: int = 800,
-        resume_unannotated: bool = True
+        resume_last: bool = False,
+        resume_unannotated: bool = False,
+        target_voucher: Optional[str] = None,
+        target_index: Optional[int] = None,
+        tier: str = "1",
+        vouchers_csv: Union[str, Path] = "data/tables/curated_vouchers.csv",
     ):
         self.project_root = get_project_root()
         self.images_dir = Path(images_dir)
@@ -429,16 +441,68 @@ class PrecisionSAM2Annotator:
 
         self.window_w = window_w
         self.window_h = window_h
+        self.resume_last = resume_last
         self.resume_unannotated = resume_unannotated
+        self.target_voucher = str(target_voucher).strip() if target_voucher else None
+        self.target_index = target_index
+        self.tier = str(tier).strip().lower()
+        self.vouchers_csv = Path(vouchers_csv)
+        self.voucher_tier_map: Dict[str, str] = {}
 
+        if self.vouchers_csv.exists():
+            try:
+                import pandas as pd
+                df_tiers = pd.read_csv(self.vouchers_csv)
+                if "catalogNumber" in df_tiers.columns and "determiner_tier" in df_tiers.columns:
+                    for _, row in df_tiers.iterrows():
+                        cat = str(row["catalogNumber"]).strip()
+                        dt = str(row["determiner_tier"]).strip()
+                        self.voucher_tier_map[cat] = dt
+                        if "image_path" in row and pd.notna(row["image_path"]):
+                            stem = Path(str(row["image_path"])).stem
+                            self.voucher_tier_map[stem] = dt
+            except Exception as e:
+                logger.warning(f"Could not load voucher tiers from {self.vouchers_csv}: {e}")
+
+        self.tier_label: Optional[str] = None
         if single_image:
             self.image_files = [Path(single_image)]
         else:
             exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
-            self.image_files = sorted([
+            all_images = sorted([
                 p for p in self.images_dir.glob("*.*")
                 if p.suffix.lower() in exts and not p.name.startswith(".")
             ])
+            if self.tier in ("1", "tier1", "tier_1", "gold", "tier_1_gold") and self.voucher_tier_map:
+                self.tier_label = "Tier 1 Gold"
+                filtered = [
+                    p for p in all_images
+                    if self.voucher_tier_map.get(p.stem) == "Tier_1_Gold"
+                ]
+                if filtered:
+                    self.image_files = filtered
+                    logger.info(f"Filtered to {len(self.image_files)} Tier 1 (Gold monograph authority) vouchers.")
+                else:
+                    logger.warning("No Tier 1 vouchers matched in metadata table; using all images.")
+                    self.image_files = all_images
+            elif self.tier in ("2", "tier2", "tier_2", "silver") and self.voucher_tier_map:
+                self.tier_label = "Tier 2 Silver"
+                filtered = [p for p in all_images if self.voucher_tier_map.get(p.stem) == "Tier_2_Silver"]
+                self.image_files = filtered if filtered else all_images
+            elif self.tier in ("3", "tier3", "tier_3", "bronze") and self.voucher_tier_map:
+                self.tier_label = "Tier 3 Bronze"
+                filtered = [p for p in all_images if self.voucher_tier_map.get(p.stem) == "Tier_3_Bronze"]
+                self.image_files = filtered if filtered else all_images
+            else:
+                self.tier_label = "All Tiers" if self.tier in ("all", "all_tiers", "0") else None
+                self.image_files = all_images
+
+        # If a specific target voucher was requested outside the active tier filter, include it
+        if self.target_voucher and not any(p.stem == self.target_voucher or self.target_voucher in p.name for p in self.image_files):
+            for p in self.images_dir.glob("*.*"):
+                if p.stem == self.target_voucher or self.target_voucher in p.name:
+                    self.image_files.insert(0, p)
+                    break
 
         self.checkpoint_path = Path(checkpoint_path)
         self.config_path = str(config_path)
@@ -446,7 +510,88 @@ class PrecisionSAM2Annotator:
         self.predictor = None
         self._init_model()
 
+        self.is_dirty: bool = False
         self.current_idx = 0
+        if not single_image and self.image_files:
+            if self.target_voucher:
+                for idx, p in enumerate(self.image_files):
+                    if p.stem == self.target_voucher or self.target_voucher in p.name:
+                        self.current_idx = idx
+                        logger.info(f"Jumped to specified voucher [{self.current_idx + 1}/{len(self.image_files)}]: {p.name}")
+                        break
+                else:
+                    logger.warning(f"Specified voucher '{self.target_voucher}' not found in {self.images_dir}; starting at index 0.")
+            elif self.target_index is not None:
+                self.current_idx = max(0, min(len(self.image_files) - 1, int(self.target_index) - 1))
+                logger.info(f"Jumped to voucher at index [{self.current_idx + 1}/{len(self.image_files)}]: {self.image_files[self.current_idx].name}")
+            elif self.resume_last:
+                target_stem = None
+                state_file = self.output_dir / ".session_state.json"
+                if state_file.exists():
+                    try:
+                        with open(state_file, "r", encoding="utf-8") as f:
+                            state = json.load(f)
+                            target_stem = state.get("last_annotated_voucher") or state.get("current_voucher")
+                    except Exception as e:
+                        logger.warning(f"Failed to read session state: {e}")
+
+                if not target_stem and self.masks_dir.exists():
+                    # Fallback: identify voucher with the most recently modified mask file
+                    mask_files = list(self.masks_dir.glob("*_inst*.png"))
+                    if mask_files:
+                        latest_mask = max(mask_files, key=lambda p: p.stat().st_mtime)
+                        target_stem = latest_mask.stem.split("_inst")[0]
+
+                if not target_stem:
+                    annotated_stems = {
+                        p.stem for p in self.output_dir.glob("*.txt")
+                        if p.stat().st_size > 0
+                    }
+                    if annotated_stems:
+                        for idx in range(len(self.image_files) - 1, -1, -1):
+                            if self.image_files[idx].stem in annotated_stems:
+                                target_stem = self.image_files[idx].stem
+                                break
+
+                found_idx = None
+                if target_stem:
+                    for idx, p in enumerate(self.image_files):
+                        if p.stem == target_stem:
+                            found_idx = idx
+                            break
+
+                if found_idx is None:
+                    annotated_stems = {
+                        p.stem for p in self.output_dir.glob("*.txt")
+                        if p.stat().st_size > 0
+                    }
+                    if self.masks_dir.exists():
+                        for m in self.masks_dir.glob("*_inst*.png"):
+                            annotated_stems.add(m.stem.split("_inst")[0])
+                    for idx in range(len(self.image_files) - 1, -1, -1):
+                        if self.image_files[idx].stem in annotated_stems:
+                            found_idx = idx
+                            break
+
+                if found_idx is not None:
+                    self.current_idx = found_idx
+                    logger.info(
+                        f"Resumed to voucher [{self.current_idx + 1}/{len(self.image_files)}]: {self.image_files[self.current_idx].name}"
+                    )
+                else:
+                    logger.info("No prior annotations found in active tier to resume; starting at index 0.")
+            elif self.resume_unannotated:
+                for idx, p in enumerate(self.image_files):
+                    txt_p = self.output_dir / f"{p.stem}.txt"
+                    if not txt_p.exists() or txt_p.stat().st_size == 0:
+                        self.current_idx = idx
+                        logger.info(
+                            f"Resumed to first unannotated voucher [{self.current_idx + 1}/{len(self.image_files)}]: {p.name}"
+                        )
+                        break
+                else:
+                    logger.info("All vouchers have annotations; starting at index 0.")
+
         self.active_image: Optional[np.ndarray] = None
         self.cached_base_layer: Optional[np.ndarray] = None
         self.orig_h = 1000
@@ -653,11 +798,69 @@ class PrecisionSAM2Annotator:
             self.box_prompt = None
             self.polygon_points = []
             self.knife_pt_a = None
+            self.is_dirty = True
             self._update_cached_base_layer()
             logger.info(f"Committed instance #{len(self.saved_instances)} -> '{label}' (Class {class_id})")
 
-    def save_current_sheet(self) -> None:
-        """Autosaves active sheet's annotations to YOLO txt, PNG masks, and syncs COCO JSON."""
+    def _save_session_state(self) -> None:
+        """Saves current navigation position to session state file."""
+        if not hasattr(self, "image_files") or not self.image_files or self.current_idx >= len(self.image_files):
+            return
+        state_file = self.output_dir / ".session_state.json"
+        try:
+            current_voucher = self.image_files[self.current_idx].stem
+            state = {}
+            if state_file.exists():
+                with open(state_file, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+            state["current_voucher"] = current_voucher
+            state["current_index"] = self.current_idx
+            state["last_active_time"] = time.time()
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.debug(f"Could not write session state: {e}")
+
+    def _save_annotated_state(self, voucher_id: str) -> None:
+        """Records the voucher that was just annotated/saved."""
+        state_file = self.output_dir / ".session_state.json"
+        try:
+            state = {}
+            if state_file.exists():
+                with open(state_file, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+            state["last_annotated_voucher"] = voucher_id
+            state["last_annotated_index"] = self.current_idx
+            state["current_voucher"] = voucher_id
+            state["current_index"] = self.current_idx
+            state["last_annotated_time"] = time.time()
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.debug(f"Could not record annotated state: {e}")
+
+    def prev_voucher(self) -> None:
+        """Navigates to the previous voucher sheet WITHOUT saving or modifying annotations."""
+        if self.current_idx > 0:
+            self.current_idx -= 1
+            self.load_active_image()
+            self._save_session_state()
+            logger.info(f"Navigated to previous voucher [{self.current_idx + 1}/{len(self.image_files)}]: {self.image_files[self.current_idx].name}")
+        else:
+            logger.info("Already at first voucher sheet.")
+
+    def next_voucher(self) -> None:
+        """Navigates to the next voucher sheet WITHOUT saving or modifying annotations."""
+        if self.current_idx + 1 < len(self.image_files):
+            self.current_idx += 1
+            self.load_active_image()
+            self._save_session_state()
+            logger.info(f"Navigated to next voucher [{self.current_idx + 1}/{len(self.image_files)}]: {self.image_files[self.current_idx].name}")
+        else:
+            logger.info("Already at last voucher sheet.")
+
+    def save_current_sheet(self, sync_coco: bool = True) -> None:
+        """Autosaves active sheet's annotations to YOLO txt, PNG masks, and optionally syncs COCO JSON."""
         if not hasattr(self, "image_files") or not self.image_files or self.current_idx >= len(self.image_files):
             return
 
@@ -667,6 +870,11 @@ class PrecisionSAM2Annotator:
         self.masks_dir.mkdir(parents=True, exist_ok=True)
 
         txt_file = self.output_dir / f"{voucher_id}.txt"
+        if not self.saved_instances:
+            if txt_file.exists() and txt_file.stat().st_size > 0:
+                logger.info(f"No new instances committed for voucher {voucher_id}; preserving existing annotations.")
+                return
+
         with open(txt_file, "w", encoding="utf-8") as f:
             for inst in self.saved_instances:
                 poly = inst.get("polygon", [])
@@ -682,17 +890,104 @@ class PrecisionSAM2Annotator:
                 uint8_mask = (b_mask.astype(np.uint8)) * 255 if b_mask.dtype == bool else b_mask.astype(np.uint8)
                 cv2.imwrite(str(mask_dest), uint8_mask)
 
+        # Remove lingering mask files if instances were deleted/undone
+        for old_mask in self.masks_dir.glob(f"{voucher_id}_inst*.png"):
+            m = re.match(rf"^{re.escape(voucher_id)}_inst(\d+)_.+\.png$", old_mask.name)
+            if m and int(m.group(1)) >= len(self.saved_instances):
+                old_mask.unlink(missing_ok=True)
+
+        self.is_dirty = False
+        self._save_annotated_state(voucher_id)
         logger.info(f"Saved {len(self.saved_instances)} instances for voucher {voucher_id}")
 
-        try:
-            export_coco_annotations(
-                masks_dir=self.masks_dir,
-                output_coco_path=self.coco_output,
-                images_dir=self.images_dir,
-            )
-            logger.info(f"Synchronized COCO dataset to {self.coco_output}")
-        except Exception as err:
-            logger.warning(f"COCO synchronization warning: {err}")
+        if sync_coco:
+            try:
+                export_coco_annotations(
+                    masks_dir=self.masks_dir,
+                    output_coco_path=self.coco_output,
+                    images_dir=self.images_dir,
+                )
+                logger.info(f"Synchronized COCO dataset to {self.coco_output}")
+            except Exception as err:
+                logger.warning(f"COCO synchronization warning: {err}")
+
+    def _load_existing_instances(self, voucher_id: str) -> List[Dict[str, Any]]:
+        """
+        Loads pre-existing annotations for the given voucher sheet from raw_annotations (.txt and masks).
+        Populates self.saved_instances so prior annotations render directly in the GUI.
+        """
+        instances: List[Dict[str, Any]] = []
+        txt_path = self.output_dir / f"{voucher_id}.txt"
+
+        # 1. Primary path: load from YOLO polygon text file if present
+        if txt_path.exists() and txt_path.stat().st_size > 0:
+            try:
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    for idx, line in enumerate(f):
+                        parts = line.strip().split()
+                        if len(parts) < 7:
+                            continue
+                        try:
+                            class_id = int(parts[0])
+                            poly = [float(v) for v in parts[1:]]
+                        except ValueError:
+                            continue
+
+                        label = CLASS_NAMES[class_id] if 0 <= class_id < len(CLASS_NAMES) else f"class_{class_id}"
+
+                        mask = None
+                        expected_mask = self.masks_dir / f"{voucher_id}_inst{idx:02d}_{label}.png"
+                        if expected_mask.exists():
+                            mask = cv2.imread(str(expected_mask), cv2.IMREAD_GRAYSCALE)
+                        else:
+                            matches = list(self.masks_dir.glob(f"{voucher_id}_inst{idx:02d}_*.png"))
+                            if matches:
+                                mask = cv2.imread(str(matches[0]), cv2.IMREAD_GRAYSCALE)
+
+                        if mask is not None:
+                            if mask.shape[:2] != (self.orig_h, self.orig_w):
+                                mask = cv2.resize(mask, (self.orig_w, self.orig_h), interpolation=cv2.INTER_NEAREST)
+                        else:
+                            mask = np.zeros((self.orig_h, self.orig_w), dtype=np.uint8)
+                            pts = np.array(poly, dtype=np.float32).reshape(-1, 2)
+                            pts[:, 0] *= self.orig_w
+                            pts[:, 1] *= self.orig_h
+                            cv2.fillPoly(mask, [np.int32(pts)], 255)
+
+                        instances.append({
+                            "class_id": class_id,
+                            "label": label,
+                            "polygon": poly,
+                            "binary_mask": mask > 0,
+                            "mask": mask,
+                        })
+            except Exception as e:
+                logger.warning(f"Failed to load annotations from {txt_path}: {e}")
+
+        # 2. Fallback path: if no txt file (or empty), check if masks exist on disk
+        if not instances and self.masks_dir.exists():
+            mask_files = sorted(self.masks_dir.glob(f"{voucher_id}_inst*.png"))
+            for idx, mask_path in enumerate(mask_files):
+                _, label, _ = parse_mask_filename(mask_path.name)
+                class_id = CLASS_NAMES.index(label) if label in CLASS_NAMES else 0
+                mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                if mask is None:
+                    continue
+                if mask.shape[:2] != (self.orig_h, self.orig_w):
+                    mask = cv2.resize(mask, (self.orig_w, self.orig_h), interpolation=cv2.INTER_NEAREST)
+
+                poly_str = mask_to_normalized_polygon(mask, class_id)
+                poly = [float(val) for val in poly_str.split()[1:]] if poly_str else []
+
+                instances.append({
+                    "class_id": class_id,
+                    "label": label,
+                    "polygon": poly,
+                    "binary_mask": mask > 0,
+                    "mask": mask,
+                })
+
+        return instances
 
     def load_active_image(self) -> bool:
         """Loads current voucher sheet into memory and initializes SAM 2 image embeddings."""
@@ -713,11 +1008,17 @@ class PrecisionSAM2Annotator:
         self.candidate_scores = []
         self.active_mask_idx = 0
         self.candidate_mask = None
-        self.saved_instances = []
         self.zoom_level = 1.0
         self.pan_offset = [0, 0]
         self.polygon_points = []
         self.knife_pt_a = None
+        self.is_dirty = False
+
+        # Repopulate previously completed annotations
+        voucher_id = img_path.stem
+        self.saved_instances = self._load_existing_instances(voucher_id)
+        if self.saved_instances:
+            logger.info(f"Loaded {len(self.saved_instances)} existing instance annotations for voucher {voucher_id}")
 
         self._update_cached_base_layer()
 
@@ -843,6 +1144,8 @@ class PrecisionSAM2Annotator:
                     candidate_iou=active_iou,
                     view_mode=self.view_mode,
                     alpha=self.overlay_alpha,
+                    is_dirty=self.is_dirty,
+                    tier_label=self.tier_label,
                 )
                 win.imshow(hud_display)
 
@@ -859,10 +1162,29 @@ class PrecisionSAM2Annotator:
 
                         if btn == 1:  # Left Button
                             if vy < 70:
+                                # 1. Check Undo Point
                                 bx0, by0, bx1, by1 = get_undo_button_rect(self.window_w)
                                 if bx0 <= vx <= bx1 and by0 <= vy <= by1:
                                     self.clicked_undo_button = True
                                     self.undo_last_point()
+                                    continue
+
+                                # 2. Check Previous Voucher (< Prev)
+                                px0, py0, px1, py1 = get_prev_button_rect(self.window_w)
+                                if px0 <= vx <= px1 and py0 <= vy <= py1:
+                                    self.prev_voucher()
+                                    continue
+
+                                # 3. Check Next Voucher (Next >)
+                                nx0, ny0, nx1, ny1 = get_next_button_rect(self.window_w)
+                                if nx0 <= vx <= nx1 and ny0 <= vy <= ny1:
+                                    self.next_voucher()
+                                    continue
+
+                                # 4. Check Save Voucher (Save)
+                                sx0, sy0, sx1, sy1 = get_save_button_rect(self.window_w)
+                                if sx0 <= vx <= sx1 and sy0 <= vy <= sy1:
+                                    self.save_current_sheet(sync_coco=False)
                                     continue
                             self.lbutton_down = True
                             self.drag_start_screen = (vx, vy)
@@ -1040,21 +1362,22 @@ class PrecisionSAM2Annotator:
                         sym = ev[1]
                         state = ev[2] if len(ev) > 2 else 0
 
-                        # Undo prompt point / constraint (Ctrl+Z, 'z'/'Z', Backspace, Delete)
-                        if sym in (ord('z'), ord('Z'), 0xff08, 0xffff):
+                        # Undo prompt point / constraint (Ctrl+Z, 'z'/'Z', Backspace, Delete, Keypad Del/Decimal)
+                        if sym in (ord('z'), ord('Z'), 0xff08, 0xffff, 0xffae, 0xff9f):
                             self.undo_last_point()
 
-                        # Instant Class Commit (0 through 6)
-                        elif sym in [ord(str(i)) for i in range(len(CLASS_NAMES))]:
-                            class_id = sym - ord('0')
-                            self.commit_active_instance(class_id)
+                        # Instant Class Commit (0 through 6, top-row or numpad)
+                        elif sym in KEYSYM_TO_CLASS:
+                            class_id = KEYSYM_TO_CLASS[sym]
+                            if 0 <= class_id < len(CLASS_NAMES):
+                                self.commit_active_instance(class_id)
 
-                        # Multimask proposal cycling (Tab key)
-                        elif sym == 0xff09:
+                        # Multimask proposal cycling (Tab key or Keypad /)
+                        elif sym in (0xff09, 0xffaf):
                             self.cycle_multimask_proposal()
 
-                        # View mode toggle (Fill vs Contour)
-                        elif sym in (ord('o'), ord('O')):
+                        # View mode toggle (Fill vs Contour) ('o' / 'O' or Keypad *)
+                        elif sym in (ord('o'), ord('O'), 0xffaa):
                             self.view_mode = "CONTOUR" if self.view_mode == "FILL" else "FILL"
                             logger.info(f"Toggled view mode -> {self.view_mode}")
 
@@ -1109,19 +1432,16 @@ class PrecisionSAM2Annotator:
                         elif sym == 0x0020:
                             self.space_down = True
 
-                        # Enter / Space to finalize polygon or save & advance sheet
+                        # Enter to finalize polygon OR save current sheet
                         elif sym in (0xff0d, 0xff8d):
                             if self.mode == "POLYGON" and len(self.polygon_points) >= 3:
                                 self.finalize_polygon_selection()
                             else:
-                                self.save_current_sheet()
-                                self.current_idx += 1
-                                if self.current_idx < len(self.image_files):
-                                    self.load_active_image()
-                                else:
-                                    logger.info("Finished annotating all vouchers in directory.")
-                                    should_exit = True
-                                    break
+                                self.save_current_sheet(sync_coco=False)
+
+                        # Explicit Save key ('s' / 'S')
+                        elif sym in (ord('s'), ord('S')):
+                            self.save_current_sheet(sync_coco=False)
 
                         # Clear current prompts ('c' / 'C')
                         elif sym in (ord('c'), ord('C')):
@@ -1138,29 +1458,22 @@ class PrecisionSAM2Annotator:
                         elif sym in (ord('u'), ord('U')):
                             if self.saved_instances:
                                 popped = self.saved_instances.pop()
+                                self.is_dirty = True
                                 self._update_cached_base_layer()
                                 logger.info(f"Removed instance: {popped.get('label')}")
 
-                        # Next sheet ('n' / 'N')
-                        elif sym in (ord('n'), ord('N')):
-                            self.save_current_sheet()
-                            self.current_idx += 1
-                            if self.current_idx < len(self.image_files):
-                                self.load_active_image()
-                            else:
-                                should_exit = True
-                                break
+                        # Next sheet without saving ('n' / 'N' or Right Arrow)
+                        elif sym in (ord('n'), ord('N'), 0xff53):
+                            self.next_voucher()
 
-                        # Previous sheet ('b' / 'B')
-                        elif sym in (ord('b'), ord('B')):
-                            self.save_current_sheet()
-                            if self.current_idx > 0:
-                                self.current_idx -= 1
-                                self.load_active_image()
+                        # Previous sheet without saving ('b' / 'B' or Left Arrow)
+                        elif sym in (ord('b'), ord('B'), 0xff51):
+                            self.prev_voucher()
 
                         # Quit ('q' / 'Q' / Escape)
                         elif sym in (ord('q'), ord('Q'), 0xff1b):
-                            self.save_current_sheet()
+                            if self.is_dirty:
+                                self.save_current_sheet(sync_coco=True)
                             should_exit = True
                             break
 
@@ -1174,8 +1487,11 @@ class PrecisionSAM2Annotator:
                                 self.is_pan_dragging = False
 
                     elif ev_type == "close":
-                        logger.info("Window close requested (GUI 'X' button) -> saving current sheet and exiting...")
-                        self.save_current_sheet()
+                        if self.is_dirty:
+                            logger.info("Window close requested (GUI 'X' button) -> saving modified sheet before exit...")
+                            self.save_current_sheet(sync_coco=True)
+                        else:
+                            logger.info("Window close requested (GUI 'X' button) -> closing cleanly without modifying annotations.")
                         should_exit = True
                         break
 
@@ -1199,6 +1515,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-coco", action="store_true", help="Compile and export COCO dataset from existing masks in headless mode")
     parser.add_argument("--masks-dir", type=str, default="data/raw_annotations/masks", help="Masks directory for --export-coco")
     parser.add_argument("--val-split", type=float, default=0.0, help="Validation partition fraction (e.g. 0.20)")
+    parser.add_argument("--resume-last", action="store_true", help="Automatically resume from the most recently annotated voucher")
+    parser.add_argument("--resume-unannotated", action="store_true", help="Automatically jump to the first unannotated voucher in sequence")
+    parser.add_argument("--voucher", type=str, default=None, help="Jump directly to a specific voucher ID (e.g. 1048)")
+    parser.add_argument("--index", type=int, default=None, help="Jump directly to a 1-based voucher index (e.g. 5)")
+    parser.add_argument("--tier", type=str, default="1", choices=["1", "2", "3", "all"], help="Filter vouchers by determiner authority tier (default: '1' for Tier 1 Gold monograph authorities; 'all' for all 5347 vouchers)")
+    parser.add_argument("--vouchers-csv", type=str, default="data/tables/curated_vouchers.csv", help="Path to curated vouchers metadata CSV")
     return parser.parse_args()
 
 
@@ -1227,6 +1549,12 @@ def main() -> None:
         single_image=args.single_image,
         checkpoint_path=args.checkpoint,
         config_path=args.config,
+        resume_last=args.resume_last,
+        resume_unannotated=args.resume_unannotated,
+        target_voucher=args.voucher,
+        target_index=args.index,
+        tier=args.tier,
+        vouchers_csv=args.vouchers_csv,
     )
     logger.info("Launching Precision SAM 2 Annotator GUI...")
     annotator.run()

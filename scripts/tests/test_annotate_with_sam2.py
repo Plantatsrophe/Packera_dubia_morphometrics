@@ -22,6 +22,7 @@ import numpy as np
 
 from scripts.annotation_and_training.annotate_with_sam2 import PrecisionSAM2Annotator, CLASS_NAMES
 from scripts.annotation_and_training.sam2_annotator_utils import (
+    KEYSYM_TO_CLASS,
     apply_knife_cut,
     apply_mask_dilation,
     apply_mask_erosion,
@@ -939,6 +940,294 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         self.assertEqual(len(annotator.point_coords), 0)
         self.assertEqual(annotator.mode, "SELECT")
         self.assertFalse(annotator.knife_click_handled)
+
+    def test_resume_last_and_unannotated(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            images_dir = tmp_path / "images"
+            output_dir = tmp_path / "annotations"
+            images_dir.mkdir()
+            output_dir.mkdir()
+
+            img1 = images_dir / "V001.jpg"
+            img2 = images_dir / "V002.jpg"
+            img3 = images_dir / "V003.jpg"
+            for img in (img1, img2, img3):
+                img.touch()
+
+            txt1 = output_dir / "V001.txt"
+            txt1.write_text("0 0.1 0.1 0.2 0.2\n")
+
+            import time
+            time.sleep(0.01)
+            txt2 = output_dir / "V002.txt"
+            txt2.write_text("0 0.3 0.3 0.4 0.4\n")
+
+            orig_init = PrecisionSAM2Annotator._init_model
+            try:
+                PrecisionSAM2Annotator._init_model = lambda self: None
+
+                annotator_last = PrecisionSAM2Annotator(
+                    images_dir=images_dir,
+                    output_dir=output_dir,
+                    resume_last=True,
+                )
+                self.assertEqual(annotator_last.current_idx, 1)
+                self.assertEqual(annotator_last.image_files[annotator_last.current_idx].stem, "V002")
+
+                annotator_unann = PrecisionSAM2Annotator(
+                    images_dir=images_dir,
+                    output_dir=output_dir,
+                    resume_unannotated=True,
+                )
+                self.assertEqual(annotator_unann.current_idx, 2)
+                self.assertEqual(annotator_unann.image_files[annotator_unann.current_idx].stem, "V003")
+
+                # Test save_current_sheet safeguard: empty saved_instances does not overwrite existing file
+                annotator_last.saved_instances = []
+                annotator_last.save_current_sheet()
+                self.assertGreater(txt2.stat().st_size, 0)
+            finally:
+                PrecisionSAM2Annotator._init_model = orig_init
+
+    def test_repopulate_existing_annotations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            images_dir = tmp_path / "images"
+            output_dir = tmp_path / "annotations"
+            masks_dir = output_dir / "masks"
+            images_dir.mkdir()
+            output_dir.mkdir()
+            masks_dir.mkdir()
+
+            # Create dummy test image (100x100 RGB)
+            dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
+            cv2.imwrite(str(images_dir / "NCU001.jpg"), dummy_img)
+
+            # Create an annotation txt file with 2 instances (class 0: basal_leaf_whole, class 6: capitulum)
+            txt_file = output_dir / "NCU001.txt"
+            txt_file.write_text(
+                "0 0.1 0.1 0.2 0.1 0.2 0.2 0.1 0.2\n"
+                "6 0.5 0.5 0.6 0.5 0.6 0.6 0.5 0.6\n"
+            )
+
+            # Create mask for instance 0
+            mask0 = np.zeros((100, 100), dtype=np.uint8)
+            mask0[10:20, 10:20] = 255
+            cv2.imwrite(str(masks_dir / "NCU001_inst00_basal_leaf_whole.png"), mask0)
+
+            orig_init = PrecisionSAM2Annotator._init_model
+            try:
+                PrecisionSAM2Annotator._init_model = lambda self: None
+                annotator = PrecisionSAM2Annotator(
+                    images_dir=images_dir,
+                    output_dir=output_dir,
+                )
+                success = annotator.load_active_image()
+                self.assertTrue(success)
+
+                # Verify 2 instances repopulated
+                self.assertEqual(len(annotator.saved_instances), 2)
+                self.assertEqual(annotator.saved_instances[0]["class_id"], 0)
+                self.assertEqual(annotator.saved_instances[0]["label"], "basal_leaf_whole")
+                self.assertEqual(annotator.saved_instances[1]["class_id"], 6)
+                self.assertEqual(annotator.saved_instances[1]["label"], "capitulum")
+
+                # Verify cached base layer has been composited with non-zero overlays
+                self.assertIsNotNone(annotator.cached_base_layer)
+                self.assertGreater(np.count_nonzero(annotator.cached_base_layer), 0)
+            finally:
+                PrecisionSAM2Annotator._init_model = orig_init
+
+    def test_navigation_next_prev_without_saving(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images_dir = Path(tmpdir) / "images"
+            output_dir = Path(tmpdir) / "annotations"
+            images_dir.mkdir()
+            output_dir.mkdir()
+
+            dummy = np.zeros((100, 100, 3), dtype=np.uint8)
+            cv2.imwrite(str(images_dir / "V001.jpg"), dummy)
+            cv2.imwrite(str(images_dir / "V002.jpg"), dummy)
+
+            # Write existing annotation for V001
+            txt_v1 = output_dir / "V001.txt"
+            txt_v1.write_text("0 0.1 0.1 0.2 0.1 0.2 0.2 0.1 0.2\n")
+
+            orig_init = PrecisionSAM2Annotator._init_model
+            try:
+                PrecisionSAM2Annotator._init_model = lambda self: None
+                annotator = PrecisionSAM2Annotator(images_dir=images_dir, output_dir=output_dir)
+                annotator.load_active_image()
+                self.assertEqual(len(annotator.saved_instances), 1)
+                self.assertFalse(annotator.is_dirty)
+
+                # Move to next voucher
+                annotator.next_voucher()
+                self.assertEqual(annotator.current_idx, 1)
+                self.assertFalse(annotator.is_dirty)
+                # Ensure V002 text file was NOT created or modified by just browsing
+                self.assertFalse((output_dir / "V002.txt").exists())
+
+                # Move back to prev voucher
+                annotator.prev_voucher()
+                self.assertEqual(annotator.current_idx, 0)
+                self.assertEqual(len(annotator.saved_instances), 1)
+                self.assertFalse(annotator.is_dirty)
+            finally:
+                PrecisionSAM2Annotator._init_model = orig_init
+
+    def test_target_voucher_and_index(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images_dir = Path(tmpdir) / "images"
+            output_dir = Path(tmpdir) / "annotations"
+            images_dir.mkdir()
+            output_dir.mkdir()
+
+            dummy = np.zeros((10, 10, 3), dtype=np.uint8)
+            for name in ["A.jpg", "B.jpg", "C.jpg", "D.jpg"]:
+                cv2.imwrite(str(images_dir / name), dummy)
+
+            orig_init = PrecisionSAM2Annotator._init_model
+            try:
+                PrecisionSAM2Annotator._init_model = lambda self: None
+                # Test jump by voucher stem
+                ann_v = PrecisionSAM2Annotator(images_dir=images_dir, output_dir=output_dir, target_voucher="C")
+                self.assertEqual(ann_v.current_idx, 2)
+
+                # Test jump by index (1-based index 4 -> 0-based idx 3)
+                ann_idx = PrecisionSAM2Annotator(images_dir=images_dir, output_dir=output_dir, target_index=4)
+                self.assertEqual(ann_idx.current_idx, 3)
+            finally:
+                PrecisionSAM2Annotator._init_model = orig_init
+
+    def test_hud_button_rects(self):
+        from scripts.annotation_and_training.sam2_annotator_utils import (
+            get_prev_button_rect,
+            get_next_button_rect,
+            get_save_button_rect,
+            get_undo_button_rect,
+        )
+        w = 1280
+        px0, py0, px1, py1 = get_prev_button_rect(w)
+        nx0, ny0, nx1, ny1 = get_next_button_rect(w)
+        sx0, sy0, sx1, sy1 = get_save_button_rect(w)
+        bx0, by0, bx1, by1 = get_undo_button_rect(w)
+
+        # Assert widths and heights are positive
+        self.assertGreater(px1, px0)
+        self.assertGreater(py1, py0)
+        self.assertGreater(nx1, nx0)
+        self.assertGreater(ny1, ny0)
+        self.assertGreater(sx1, sx0)
+        self.assertGreater(sy1, sy0)
+        self.assertGreater(bx1, bx0)
+        self.assertGreater(by1, by0)
+
+        # Row 1 (Prev and Next) must not overlap horizontally
+        self.assertLessEqual(px1, nx0)
+
+        # Row 2 (Save and Undo) must not overlap horizontally
+        self.assertLessEqual(sx1, bx0)
+
+    def test_tier_filtering(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            images_dir = Path(tmpdir) / "images"
+            output_dir = Path(tmpdir) / "annotations"
+            images_dir.mkdir()
+            output_dir.mkdir()
+
+            dummy = np.zeros((10, 10, 3), dtype=np.uint8)
+            cv2.imwrite(str(images_dir / "V_GOLD1.jpg"), dummy)
+            cv2.imwrite(str(images_dir / "V_GOLD2.jpg"), dummy)
+            cv2.imwrite(str(images_dir / "V_SILVER.jpg"), dummy)
+            cv2.imwrite(str(images_dir / "V_BRONZE.jpg"), dummy)
+
+            csv_path = Path(tmpdir) / "curated_vouchers.csv"
+            csv_path.write_text(
+                "catalogNumber,determiner_tier\n"
+                "V_GOLD1,Tier_1_Gold\n"
+                "V_GOLD2,Tier_1_Gold\n"
+                "V_SILVER,Tier_2_Silver\n"
+                "V_BRONZE,Tier_3_Bronze\n"
+            )
+
+            orig_init = PrecisionSAM2Annotator._init_model
+            try:
+                PrecisionSAM2Annotator._init_model = lambda self: None
+                # Tier 1 filtering (default)
+                ann_t1 = PrecisionSAM2Annotator(images_dir=images_dir, output_dir=output_dir, tier="1", vouchers_csv=csv_path)
+                self.assertEqual(len(ann_t1.image_files), 2)
+                self.assertEqual([p.stem for p in ann_t1.image_files], ["V_GOLD1", "V_GOLD2"])
+                self.assertEqual(ann_t1.tier_label, "Tier 1 Gold")
+
+                # Tier 2 filtering
+                ann_t2 = PrecisionSAM2Annotator(images_dir=images_dir, output_dir=output_dir, tier="2", vouchers_csv=csv_path)
+                self.assertEqual(len(ann_t2.image_files), 1)
+                self.assertEqual(ann_t2.image_files[0].stem, "V_SILVER")
+
+                # Tier 'all'
+                ann_all = PrecisionSAM2Annotator(images_dir=images_dir, output_dir=output_dir, tier="all", vouchers_csv=csv_path)
+                self.assertEqual(len(ann_all.image_files), 4)
+            finally:
+                PrecisionSAM2Annotator._init_model = orig_init
+
+    def test_keysym_to_class_mapping(self):
+        # 1. Top row numbers
+        for i in range(len(CLASS_NAMES)):
+            top_row_sym = ord(str(i))
+            self.assertIn(top_row_sym, KEYSYM_TO_CLASS)
+            self.assertEqual(KEYSYM_TO_CLASS[top_row_sym], i)
+
+        # 2. Keypad with NumLock ON (XK_KP_0 to XK_KP_6)
+        numpad_on_keysyms = [0xffb0, 0xffb1, 0xffb2, 0xffb3, 0xffb4, 0xffb5, 0xffb6]
+        for i, sym in enumerate(numpad_on_keysyms):
+            self.assertIn(sym, KEYSYM_TO_CLASS)
+            self.assertEqual(KEYSYM_TO_CLASS[sym], i)
+
+        # 3. Keypad with NumLock OFF / unshifted navigation mode (0 to 6)
+        # 0: Insert, 1: End, 2: Down, 3: Next/PgDn, 4: Left, 5: Begin, 6: Right
+        numpad_off_keysyms = [0xff9e, 0xff9c, 0xff99, 0xff9b, 0xff96, 0xff9d, 0xff98]
+        for i, sym in enumerate(numpad_off_keysyms):
+            self.assertIn(sym, KEYSYM_TO_CLASS)
+            self.assertEqual(KEYSYM_TO_CLASS[sym], i)
+
+    def test_numpad_integration_in_annotator(self):
+        annotator = PrecisionSAM2Annotator.__new__(PrecisionSAM2Annotator)
+        annotator.active_image = np.zeros((200, 200, 3), dtype=np.uint8)
+        annotator.cached_base_layer = annotator.active_image.copy()
+        annotator.overlay_alpha = 0.55
+        annotator.saved_instances = []
+        annotator.point_coords = []
+        annotator.point_labels = []
+        annotator.box_prompt = None
+        annotator.polygon_points = []
+        annotator.knife_pt_a = None
+        annotator.view_mode = "FILL"
+
+        # Verify committing class via keypad keysyms (both NumLock ON and OFF)
+        for class_id in range(len(CLASS_NAMES)):
+            cand = np.zeros((200, 200), dtype=np.uint8)
+            cand[10:50, 10:50] = 255
+            annotator.candidate_mask = cand
+            annotator.candidate_masks = [cand.copy()]
+            annotator.candidate_scores = [0.98]
+            annotator.active_mask_idx = 0
+
+            # Alternate between NumLock ON (0xffb0 + id) and NumLock OFF
+            numpad_off_map = {0: 0xff9e, 1: 0xff9c, 2: 0xff99, 3: 0xff9b, 4: 0xff96, 5: 0xff9d, 6: 0xff98}
+            sym = 0xffb0 + class_id if class_id % 2 == 0 else numpad_off_map[class_id]
+
+            # Simulate key_press logic directly using KEYSYM_TO_CLASS
+            self.assertIn(sym, KEYSYM_TO_CLASS)
+            mapped_cls = KEYSYM_TO_CLASS[sym]
+            self.assertEqual(mapped_cls, class_id)
+            annotator.commit_active_instance(mapped_cls)
+
+            self.assertEqual(len(annotator.saved_instances), class_id + 1)
+            self.assertEqual(annotator.saved_instances[-1]["class_id"], class_id)
+            self.assertEqual(annotator.saved_instances[-1]["label"], CLASS_NAMES[class_id])
+            self.assertIsNone(annotator.candidate_mask)
 
 
 if __name__ == "__main__":

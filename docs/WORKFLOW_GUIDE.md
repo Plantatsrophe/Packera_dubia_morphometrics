@@ -192,6 +192,12 @@ python scripts/annotation_and_training/annotate_with_sam2.py \
     --output-dir data/raw_annotations \
     --output-coco data/annotations/packera_train_coco.json
 
+# Resume annotator from last saved voucher sheet:
+python scripts/annotation_and_training/annotate_with_sam2.py --resume-last
+
+# Resume annotator from the first unannotated voucher sheet:
+python scripts/annotation_and_training/annotate_with_sam2.py --resume-unannotated
+
 # (Optional) Recompile standardized COCO JSON from masks in headless mode:
 python scripts/annotation_and_training/annotate_with_sam2.py \
     --export-coco \
@@ -208,6 +214,12 @@ python scripts/annotation_and_training/annotate_with_sam2.py \
 | `--output-dir` | Path | `data/raw_annotations` | Target directory for polygon text files and PNG masks. |
 | `--output-coco` | Path | `data/annotations/packera_train_coco.json` | Incremental/compiled standardized COCO JSON output. |
 | `--single-image` | Path | `None` | Target a single voucher image file for focused editing. |
+| `--tier` | Choice (`1`, `2`, `3`, `all`) | `1` | Filter vouchers by determiner authority tier (`1`: Tier 1 Gold monograph authorities, `all`: all 5,347 vouchers). |
+| `--vouchers-csv` | Path | `data/tables/curated_vouchers.csv` | Curated voucher dataset containing determinations and metadata. |
+| `--voucher` | String | `None` | Jump directly to a specific voucher ID or filename (e.g. `--voucher 1048`). |
+| `--index` | Integer | `None` | Jump directly to a 1-based voucher sheet number (e.g. `--index 5`). |
+| `--resume-last` | Flag | `False` | Automatically resume from the most recently annotated voucher sheet. |
+| `--resume-unannotated` | Flag | `False` | Automatically jump to the first unannotated voucher sheet in sequence. |
 | `--checkpoint` | Path | `models/checkpoints/sam2_hiera_large.pt` | SAM 2 model weights checkpoint. |
 | `--config` | String | `sam2_hiera_l.yaml` | Model configuration YAML file. |
 | `--export-coco` | Flag | `False` | Compile COCO annotations directly from existing mask directory without GUI. |
@@ -221,22 +233,25 @@ python scripts/annotation_and_training/annotate_with_sam2.py \
 | | **Middle-Click Drag** | Pan viewport across high-resolution voucher sheet. |
 | | **`Space` + Left-Drag** | Alternative viewport pan. |
 | | **`f`** | Fit full herbarium voucher to window ($1.0\times$). |
+| | **`[< Prev (b)]` / `b` / `Left Arrow`** | Navigate to previous voucher sheet **without** saving or changing annotations. |
+| | **`[Next > (n)]` / `n` / `Right Arrow`** | Navigate to next voucher sheet **without** saving or changing annotations. |
 | **Segmentation** | **Left-Click** | Place positive prompt point (green marker). |
 | | **Right-Click** | Place negative exclusion point (red marker). |
+| | **`[Undo Pt (Ctrl+Z)]` / `Ctrl+Z` / `z` / `NumPad .`** | Remove last prompt point / constraint and re-run SAM 2 in real time. |
 | | **Shift + Left-Drag** | Bounding box prompt constraint. |
-| | **`Tab`** | Cycle 3 SAM 2 candidate granularities (sub-lobe vs. blade vs. clump). |
+| | **`Tab` / `NumPad /`** | Cycle 3 SAM 2 candidate granularities (sub-lobe vs. blade vs. clump). |
 | | **`k`** | Two-click knife tool to sever petiole bases from caudex tissue. |
-| | **`+` / `-`** | 1-pixel binary dilation / erosion for tomentum margin tuning. |
+| | **`+` / `-` / `NumPad +/-`** | 1-pixel binary dilation / erosion for tomentum margin tuning. |
 | | **`p`** | Toggle polygon lasso mode (Left-Click points, Enter to finalize). |
-| **Inspection** | **`o`** | Toggle mask fill vs. 1-px boundary contour line (inspect crenations). |
+| **Inspection** | **`o` / `NumPad *`** | Toggle mask fill vs. 1-px boundary contour line (inspect crenations). |
 | | **Hold `v`** | Hold-to-peek: Temporarily hide overlays to view bare pixels. |
 | | **`[` / `]`** | Adjust mask overlay alpha transparency ($0.10$ to $0.90$). |
-| **Commit & Session**| **`0`–`6`** | Instant botanical class commit (`0`: blade, `1`: petiole, `2`: cauline leaf, `3`: cauline stem, `4`: root, `5`: rosette clump, `6`: capitulum). |
+| | **Auto Pre-population** | Prior annotations automatically render with distinct category colors and counts. |
+| **Commit & Session**| **`0`–`6` / `NumPad 0–6`** | Instant botanical class commit (`0`: blade, `1`: petiole, `2`: cauline leaf, `3`: cauline stem, `4`: root, `5`: rosette clump, `6`: capitulum; works NumLock ON/OFF). |
 | | **`u`** | Undo last committed instance on current sheet. |
 | | **`c`** | Clear active candidate prompts and bounding box. |
-| | **`n` / `b`** | Save and advance to Next (`n`) or return to Previous (`b`) voucher sheet. |
-| | **`Enter`** | Finalize polygon lasso OR save sheet annotations and advance. |
-| | **`q` / `Esc`** | Save current sheet annotations and quit safely. |
+| | **`[Save (s)]` / `s` / `Enter` / `NumPad Enter`** | Save current voucher sheet annotations (fast sub-10ms save to YOLO txt and PNG masks). |
+| | **`q` / `Esc` / Window `X`** | Save modified sheet annotations and quit safely (syncs COCO JSON on exit). |
 
 #### Downstream Fine-Tuning:
 Once 50–100 vouchers are annotated, fine-tune LeafMachine2's PointRend Plant Component Detector (PCD):

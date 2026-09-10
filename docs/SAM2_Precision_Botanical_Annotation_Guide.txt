@@ -84,11 +84,25 @@ Launch the tool via:
     --output-dir data/raw_annotations \
     --output-coco data/annotations/packera_train_coco.json
 
+Resume last annotated specimen:
+  python scripts/annotation_and_training/annotate_with_sam2.py \
+    --resume-last
+
+Resume from first unannotated specimen:
+  python scripts/annotation_and_training/annotate_with_sam2.py \
+    --resume-unannotated
+
 CLI Options:
   --images-dir PATH       Input directory containing high-resolution raw herbarium voucher scans (default: data/raw_vouchers)
   --output-dir PATH       Directory for intermediate YOLO-format mask coordinate texts and PNG masks (default: data/raw_annotations)
   --output-coco PATH      Destination path for standardized COCO JSON dataset (default: data/annotations/packera_train_coco.json)
+  --tier {1,2,3,all}      Filter vouchers by determiner authority tier (default: '1' for Tier 1 Gold monograph authorities; 'all' for all 5347 vouchers)
+  --vouchers-csv PATH     Path to curated vouchers metadata table (default: data/tables/curated_vouchers.csv)
   --single-image PATH     Target a specific herbarium voucher image for focused editing
+  --voucher ID            Jump directly to a specific voucher ID or filename (e.g. --voucher 1048)
+  --index NUM             Jump directly to a 1-based voucher sheet number (e.g. --index 5)
+  --resume-last           Automatically resume from the most recently annotated voucher sheet (within active tier)
+  --resume-unannotated    Automatically jump to the first unannotated voucher sheet in sequence (within active tier)
   --checkpoint PATH       Path to SAM 2 Hiera weights (default: models/checkpoints/sam2_hiera_large.pt)
   --config CONFIG         SAM 2 model architecture configuration file (default: sam2_hiera_l.yaml)
   --export-coco           Compile and export COCO dataset from existing masks in headless mode
@@ -100,31 +114,33 @@ Navigation & Viewport Controls:
   - Middle-Click Drag:   Smooth viewport pan across high-resolution herbarium scans.
   - Space + Left-Drag:   Alternative smooth viewport pan.
   - 'f':                 Fit to screen (resets zoom to 1.0x and centers sheet).
+  - Click '[< Prev (b)]' / 'b' / Left Arrow: Navigate to previous voucher sheet WITHOUT saving or modifying annotations.
+  - Click '[Next > (n)]' / 'n' / Right Arrow: Navigate to next voucher sheet WITHOUT saving or modifying annotations.
 
 Segmentation & Prompting:
   - Left-Click:          Add positive foreground prompt point (Green landmark).
   - Right-Click:         Add negative exclusion prompt point (Red landmark).
-  - Ctrl + Z / 'z' / Bksp: Undo last prompt point (removes single inclusion or exclusion point and re-runs SAM 2 in real time; also clickable via the top-right '[Undo Pt (Ctrl+Z)]' HUD button).
+  - Ctrl + Z / 'z' / Bksp / NumPad . / Del: Undo last prompt point (removes single inclusion or exclusion point and re-runs SAM 2 in real time; also clickable via the top-right '[Undo Pt (Ctrl+Z)]' HUD button).
   - Shift + Left-Drag:   Draw bounding box constraint (restricts SAM 2 search space).
-  - Tab:                 Cycle through the 3 SAM 2 multimask candidate granularities (sub-lobe vs. blade vs. clump).
+  - Tab / NumPad /:      Cycle through the 3 SAM 2 multimask candidate granularities (sub-lobe vs. blade vs. clump).
   - 'k':                 Two-click knife tool for petiole/caudex slicing (Click 1: start cut, Click 2: end cut; press 'k' again to toggle off).
-  - '+' / '=':           Single-pixel binary dilation (expands mask margin outward into arachnoid tomentum).
-  - '-' / '_':           Single-pixel binary erosion (contracts mask margin inward from background glare/bleed).
+  - '+' / '=' / NumPad +: Single-pixel binary dilation (expands mask margin outward into arachnoid tomentum).
+  - '-' / '_' / NumPad -: Single-pixel binary erosion (contracts mask margin inward from background glare/bleed).
   - 'p':                 Toggle polygon lasso mode (Left-Click to trace custom vertices, Enter/Right-Click to finalize).
 
 Inspection & Visibility:
-  - 'o':                 Toggle view mode: semi-transparent mask fill vs. 1-pixel boundary contour line (for crenation inspection).
+  - 'o' / NumPad *:      Toggle view mode: semi-transparent mask fill vs. 1-pixel boundary contour line (for crenation inspection).
   - Hold 'v':            Hold-to-peek: Temporarily hides all mask and prompt overlays to reveal bare specimen pixels.
   - '[' and ']':         Decrease / increase mask overlay alpha transparency (steps of 0.1, clamped between 0.10 and 0.90).
+  - Pre-populated Masks: Existing annotations automatically render with distinct colors and counts when moving between sheets.
 
 Commit & Session Management:
-  - Keys '0' through '6': Instant botanical class assignment and instance commit (commits active mask to class ID 0–6).
+  - Keys '0'–'6' / NumPad '0'–'6': Instant botanical class assignment and instance commit (commits active mask to class ID 0–6; works with NumLock ON or OFF).
   - 'u':                 Undo last committed instance on current sheet.
   - 'c':                 Clear current candidate points, bounding box, knife line, and candidate masks.
-  - 'n':                 Save current annotations and advance to next voucher sheet (or skip sheet if unannotated).
-  - 'b':                 Save current annotations and return to previous voucher sheet.
-  - Enter:               Finalize polygon lasso selection OR save sheet annotations and advance to next voucher.
-  - 'q' or Esc:          Save current sheet annotations and quit application cleanly.
+  - Click '[Save (s)]' / 's' / Enter / NumPad Enter: Save current sheet annotations (fast sub-10ms save to YOLO txt and PNG masks).
+  - 'q' or Esc:          Save modified sheet annotations and quit application cleanly (syncs COCO JSON on exit).
+  - Window 'X' Button:   Safely close window (saves if dirty, syncs COCO JSON on exit).
 
 
 
@@ -235,25 +251,6 @@ python scripts/annotation_and_training/finetune_lm2_pcd.py \
   --coco-annotations data/annotations/packera_train_coco.json \
   --epochs 30 \
   --output-weights models/lm2_packera_pcd_finetuned.pth
-
-
-# Option B: Build stratified 70/15/15 YOLO splits with 9% background negatives
-python scripts/build_artifact_robust_dataset.py \
-  --raw-images-dir data/raw_vouchers \
-  --annotations-dir data/raw_annotations \
-  --output-dir data/yolo_dataset \
-  --config-yaml data/dataset_config.yaml \
-  --negative-ratio 0.09
-
-
-# Train YOLOv8/YOLOv11 with botanical-safe augmentations (mosaic=0, mixup=0, cls=1.5)
-python scripts/train_artifact_robust_yolo.py \
-  --config data/dataset_config.yaml \
-  --imgsz 1024 \
-  --epochs 120 \
-  --batch 8
-
-
 
 
 8. DOWNSTREAM EXTRACTION & MORPHOMETRIC PIPELINE

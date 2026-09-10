@@ -87,6 +87,44 @@ CATEGORY_NAME_TO_ID: Dict[str, int] = {
     cat["name"]: cat["id"] for cat in PCD_COCO_CATEGORIES
 }
 
+# KeySym mappings for interactive annotation commit
+# Maps standard top-row number keys, NumLock-ON keypad keys, and NumLock-OFF keypad keys to class IDs
+KEYSYM_TO_CLASS: Dict[int, int] = {
+    # Top-row standard numbers (0-9)
+    0x0030: 0,  # '0'
+    0x0031: 1,  # '1'
+    0x0032: 2,  # '2'
+    0x0033: 3,  # '3'
+    0x0034: 4,  # '4'
+    0x0035: 5,  # '5'
+    0x0036: 6,  # '6'
+    0x0037: 7,  # '7'
+    0x0038: 8,  # '8'
+    0x0039: 9,  # '9'
+    # Keypad with NumLock ON (XK_KP_0 through XK_KP_9)
+    0xffb0: 0,  # XK_KP_0
+    0xffb1: 1,  # XK_KP_1
+    0xffb2: 2,  # XK_KP_2
+    0xffb3: 3,  # XK_KP_3
+    0xffb4: 4,  # XK_KP_4
+    0xffb5: 5,  # XK_KP_5
+    0xffb6: 6,  # XK_KP_6
+    0xffb7: 7,  # XK_KP_7
+    0xffb8: 8,  # XK_KP_8
+    0xffb9: 9,  # XK_KP_9
+    # Keypad with NumLock OFF / unshifted navigation mode (0-9)
+    0xff9e: 0,  # XK_KP_Insert (0)
+    0xff9c: 1,  # XK_KP_End (1)
+    0xff99: 2,  # XK_KP_Down (2)
+    0xff9b: 3,  # XK_KP_Next / Page_Down (3)
+    0xff96: 4,  # XK_KP_Left (4)
+    0xff9d: 5,  # XK_KP_Begin (5)
+    0xff98: 6,  # XK_KP_Right (6)
+    0xff95: 7,  # XK_KP_Home (7)
+    0xff97: 8,  # XK_KP_Up (8)
+    0xff9a: 9,  # XK_KP_Prior / Page_Up (9)
+}
+
 
 # ===============================================================================
 # 2. Geometric & Sub-Pixel Boundary Routines
@@ -479,6 +517,45 @@ def get_undo_button_rect(canvas_w: int, hud_h: int = 70) -> Tuple[int, int, int,
     return x0, y0, x1, y1
 
 
+def get_prev_button_rect(canvas_w: int, hud_h: int = 70) -> Tuple[int, int, int, int]:
+    """
+    Returns (x0, y0, x1, y1) bounding box for the clickable Previous Voucher button in the HUD.
+    """
+    btn_w = 85
+    btn_h = 26
+    x1 = canvas_w - 100
+    x0 = max(10, x1 - btn_w)
+    y0 = 6
+    y1 = y0 + btn_h
+    return x0, y0, x1, y1
+
+
+def get_next_button_rect(canvas_w: int, hud_h: int = 70) -> Tuple[int, int, int, int]:
+    """
+    Returns (x0, y0, x1, y1) bounding box for the clickable Next Voucher button in the HUD.
+    """
+    btn_w = 85
+    btn_h = 26
+    x1 = canvas_w - 10
+    x0 = max(10, x1 - btn_w)
+    y0 = 6
+    y1 = y0 + btn_h
+    return x0, y0, x1, y1
+
+
+def get_save_button_rect(canvas_w: int, hud_h: int = 70) -> Tuple[int, int, int, int]:
+    """
+    Returns (x0, y0, x1, y1) bounding box for the clickable Save button in the HUD.
+    """
+    btn_w = 80
+    btn_h = 26
+    x1 = canvas_w - 195
+    x0 = max(10, x1 - btn_w)
+    y0 = 38
+    y1 = y0 + btn_h
+    return x0, y0, x1, y1
+
+
 def render_hud_overlay(
     display_img: np.ndarray,
     voucher_name: str,
@@ -493,11 +570,13 @@ def render_hud_overlay(
     candidate_iou: Optional[float] = None,
     view_mode: str = "FILL",
     alpha: float = 0.55,
+    is_dirty: bool = False,
+    tier_label: Optional[str] = None,
 ) -> np.ndarray:
     """
     Renders semi-transparent HUD banner at top of window displaying:
-    [Voucher: X/Y | Catalog: NCU... | Instances: N (B:x, P:y) | Zoom: Zx | Mask: C/3 (IoU) | View: Fill/Contour]
-    plus active tool mode, shortcut reminders, and an interactive Undo Point button.
+    [Voucher: X/Y (Tier) | Catalog: NCU... | Instances: N (B:x, P:y) | Zoom: Zx | Mask: C/3 (IoU) | View: Fill/Contour]
+    plus interactive navigation buttons (< Prev, Next >, Save, Undo Pt).
     """
     canvas = display_img.copy()
     h, w = canvas.shape[:2]
@@ -525,43 +604,68 @@ def render_hud_overlay(
     zoom_str = f"Zoom: {zoom_level:.1f}x"
 
     # Line 1: Structured status string
+    v_prefix = f"Voucher: {voucher_idx + 1}/{total_vouchers}"
+    if tier_label:
+        v_prefix += f" ({tier_label})"
     header_text = (
-        f"[Voucher: {voucher_idx + 1}/{total_vouchers} | Catalog: {voucher_name} | "
+        f"[{v_prefix} | Catalog: {voucher_name} | "
         f"{inst_str} | {zoom_str} | {mask_str} | {view_str}]"
     )
-    cv2.putText(canvas, header_text, (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (245, 245, 245), 2, cv2.LINE_AA)
+    cv2.putText(canvas, header_text, (15, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (245, 245, 245), 2, cv2.LINE_AA)
 
-    # Render Clickable "Undo Pt (Ctrl+Z)" button badge in top-right of HUD
+    # Render Clickable Interactive Buttons in top-right of HUD
+    # 1. [< Prev (b)] Button (Row 1)
+    px0, py0, px1, py1 = get_prev_button_rect(w, hud_h)
+    if px0 > 200:
+        btn_overlay = canvas.copy()
+        cv2.rectangle(btn_overlay, (px0, py0), (px1, py1), (45, 45, 45), -1)
+        cv2.addWeighted(btn_overlay, 0.85, canvas, 0.15, 0, canvas)
+        cv2.rectangle(canvas, (px0, py0), (px1, py1), (110, 110, 110), 1)
+        cv2.putText(canvas, "< Prev (b)", (px0 + 8, py0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (235, 235, 235), 1, cv2.LINE_AA)
+
+    # 2. [Next > (n)] Button (Row 1)
+    nx0, ny0, nx1, ny1 = get_next_button_rect(w, hud_h)
+    if nx0 > 200:
+        btn_overlay = canvas.copy()
+        cv2.rectangle(btn_overlay, (nx0, ny0), (nx1, ny1), (45, 45, 45), -1)
+        cv2.addWeighted(btn_overlay, 0.85, canvas, 0.15, 0, canvas)
+        cv2.rectangle(canvas, (nx0, ny0), (nx1, ny1), (110, 110, 110), 1)
+        cv2.putText(canvas, "Next > (n)", (nx0 + 8, ny0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (235, 235, 235), 1, cv2.LINE_AA)
+
+    # 3. [Save (s)] Button (Row 2)
+    sx0, sy0, sx1, sy1 = get_save_button_rect(w, hud_h)
+    if sx0 > 200:
+        save_bg = (30, 95, 40) if is_dirty else (45, 45, 45)
+        save_border = (80, 210, 100) if is_dirty else (110, 110, 110)
+        save_text = "Save (s)*" if is_dirty else "Saved"
+        btn_overlay = canvas.copy()
+        cv2.rectangle(btn_overlay, (sx0, sy0), (sx1, sy1), save_bg, -1)
+        cv2.addWeighted(btn_overlay, 0.85, canvas, 0.15, 0, canvas)
+        cv2.rectangle(canvas, (sx0, sy0), (sx1, sy1), save_border, 1)
+        cv2.putText(canvas, save_text, (sx0 + 8, sy0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (245, 245, 245), 1, cv2.LINE_AA)
+
+    # 4. [Undo Pt (Ctrl+Z)] Button (Row 2)
     bx0, by0, bx1, by1 = get_undo_button_rect(w, hud_h)
     if bx0 > 240:
         btn_overlay = canvas.copy()
         cv2.rectangle(btn_overlay, (bx0, by0), (bx1, by1), (48, 48, 48), -1)
         cv2.addWeighted(btn_overlay, 0.85, canvas, 0.15, 0, canvas)
         cv2.rectangle(canvas, (bx0, by0), (bx1, by1), (110, 110, 110), 1)
-        cv2.putText(
-            canvas,
-            "Undo Pt (Ctrl+Z)",
-            (bx0 + 12, by0 + 18),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.44,
-            (235, 235, 235),
-            1,
-            cv2.LINE_AA,
-        )
+        cv2.putText(canvas, "Undo Pt (Ctrl+Z)", (bx0 + 12, by0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (235, 235, 235), 1, cv2.LINE_AA)
 
     # Line 2: Mode & dynamic shortcut controls
     if mode == "POLYGON":
         mode_color = (0, 220, 255)
         mode_str = "MODE: [POLYGON BOX]"
-        inst_summary = "Left-Click: Vertices | Ctrl+Z / Bksp: Undo | Enter: Finalize | P: Exit"
+        inst_summary = "Left-Click: Vertices | Ctrl+Z: Undo Pt | Enter: Finalize | P: Exit | b/n: Prev/Next"
     elif mode == "KNIFE":
         mode_color = (0, 100, 255)
         mode_str = "MODE: [KNIFE CUT]"
-        inst_summary = "Two-Click: Click Pt A then Pt B across junction | Ctrl+Z: Undo Pt A | K: Exit"
+        inst_summary = "Two-Click: Pt A then Pt B | Ctrl+Z: Undo Pt A | K: Exit | b/n: Prev/Next"
     else:
         mode_color = (0, 255, 0)
         mode_str = "MODE: [SELECT]"
-        inst_summary = "Ctrl+Z: Undo Pt | 0-6: Commit | Tab: Granularity | o: View | +/-: Margin | k: Knife | Enter: Save"
+        inst_summary = "b: Prev Voucher | n: Next Voucher | s / Enter: Save | 0-6/NumPad: Commit | Tab: Granularity"
 
     cv2.putText(canvas, mode_str, (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, mode_color, 2, cv2.LINE_AA)
     cv2.putText(canvas, inst_summary, (205, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (215, 215, 215), 1, cv2.LINE_AA)
