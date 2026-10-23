@@ -50,6 +50,10 @@ parse_args_robust <- function() {
       default = "", help = "Alias for --multimodal-flags [default: %default]"),
     optparse::make_option(c("-g", "--gmm-summary"), type = "character",
       default = "outputs/reports/gmm_bayes_factors_summary.csv", help = "GMM summary CSV [default: %default]"),
+    optparse::make_option(c("--gmm-bic"), type = "character",
+      default = "data/tables/gmm_bic_model_selection.csv", help = "GMM BIC model selection CSV [default: %default]"),
+    optparse::make_option(c("--cda-summary"), type = "character",
+      default = "data/tables/cda_summary.csv", help = "CDA summary CSV [default: %default]"),
     optparse::make_option(c("-s", "--niche-summary"), type = "character",
       default = "outputs/reports/multimodal_spatial_rf_summary.csv", help = "Niche summary CSV [default: %default]"),
     optparse::make_option(c("-q", "--output-queue"), type = "character",
@@ -63,7 +67,9 @@ parse_args_robust <- function() {
     optparse::make_option(c("-r", "--output-report"), type = "character",
       default = "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md", help = "Markdown report [default: %default]"),
     optparse::make_option(c("--output-html"), type = "character",
-      default = "", help = "Optional interactive HTML triage dashboard [default: %default]")
+      default = "", help = "Optional interactive HTML triage dashboard [default: %default]"),
+    optparse::make_option(c("--demo"), action = "store_true",
+      default = FALSE, help = "Enable explicit demo/test mode [default: %default]")
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
     opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
@@ -73,6 +79,8 @@ parse_args_robust <- function() {
     opts$multimodal_flags <- opts[["multimodal-flags"]]
     opts$vision_audit <- opts[["vision-audit"]]
     opts$gmm_summary <- opts[["gmm-summary"]]
+    opts$gmm_bic <- opts[["gmm-bic"]]
+    opts$cda_summary <- opts[["cda-summary"]]
     opts$niche_summary <- opts[["niche-summary"]]
     opts$output_queue <- opts[["output-queue"]]
     opts$output_plot <- opts[["output-plot"]]
@@ -82,7 +90,8 @@ parse_args_robust <- function() {
   return(list(
     vouchers = "data/tables/curated_vouchers.csv", morphometrics = "data/tables/morphometrics_misidentification_flags.csv",
     vision_audit = "data/tables/label_noise_audit.csv", multimodal_flags = "data/tables/multimodal_conflict_flags.csv",
-    gmm_summary = "outputs/reports/gmm_bayes_factors_summary.csv", niche_summary = "outputs/reports/multimodal_spatial_rf_summary.csv",
+    gmm_summary = "outputs/reports/gmm_bayes_factors_summary.csv", gmm_bic = "data/tables/gmm_bic_model_selection.csv",
+    cda_summary = "data/tables/cda_summary.csv", niche_summary = "outputs/reports/multimodal_spatial_rf_summary.csv",
     output_queue = "data/tables/triage_queue.csv", output_plot = "outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf",
     output_report = "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md"
   ))
@@ -105,6 +114,11 @@ standardize_packera_taxon <- function(s_vec) {
 # ------------------------------------------------------------------------------
 apply_taxonomic_decision_matrix <- function(df) {
   message("Evaluating vouchers across Multi-Evidence Taxonomic Decision Matrix...")
+  if ("morphometric_outlier_flag" %in% names(df) && !("misidentification_flag" %in% names(df))) {
+    df$misidentification_flag <- df$morphometric_outlier_flag
+  } else if ("misidentification_flag" %in% names(df) && !("morphometric_outlier_flag" %in% names(df))) {
+    df$morphometric_outlier_flag <- df$misidentification_flag
+  }
   n <- nrow(df)
   status_calls <- character(n)
   rec_taxa <- character(n)
@@ -291,7 +305,7 @@ build_triage_queue <- function(opts) {
 # ------------------------------------------------------------------------------
 # 4. Publication-Ready 6-Panel Synthesis Figure Generation
 # ------------------------------------------------------------------------------
-render_synthesis_figure_pdf <- function(df, out_pdf) {
+render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL) {
   message("Rendering 6-panel integrative synthesis figure to ", out_pdf, "...")
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
 
@@ -301,12 +315,32 @@ render_synthesis_figure_pdf <- function(df, out_pdf) {
                         legend.title = ggplot2::element_text(size = 8, face = "bold"),
                         legend.text = ggplot2::element_text(size = 7.5))
 
-  # Panel A: Morpho-Space CDA with Passive Samples & Taxonomic Decisions (dynamic axis variance)
-  v1 <- stats::var(df$can1, na.rm = TRUE)
-  v2 <- stats::var(df$can2, na.rm = TRUE)
-  v_tot <- if (!is.na(v1) && !is.na(v2) && (v1 + v2) > 0) (v1 + v2) else 1.0
-  can1_pct <- if (!is.na(v1) && (v1 + v2) > 0) round((v1 / v_tot) * 100, 1) else 0.0
-  can2_pct <- if (!is.na(v2) && (v1 + v2) > 0) round((v2 / v_tot) * 100, 1) else 0.0
+  # Panel A: Morpho-Space CDA with Passive Samples & Taxonomic Decisions (dynamic axis variance from CDA summary or scores)
+  can1_pct <- NA_real_
+  can2_pct <- NA_real_
+  cda_candidates <- unique( stats::na.omit(c(cda_summary, "data/tables/cda_summary.csv", "outputs/reports/cda_summary.csv")) )
+  cda_candidates <- cda_candidates[nzchar(cda_candidates) & file.exists(cda_candidates)]
+  if (length(cda_candidates) > 0) {
+    cda_df <- tryCatch(readr::read_csv(cda_candidates[1], show_col_types = FALSE), error = function(e) NULL)
+    if (!is.null(cda_df) && nrow(cda_df) >= 2) {
+      pct_col <- intersect(c("variance_pct", "Explained_Variance_Pct", "prop_explained", "Variance_Pct"), names(cda_df))[1]
+      if (!is.na(pct_col)) {
+        vals <- as.numeric(cda_df[[pct_col]][1:2])
+        if (all(is.finite(vals))) {
+          if (max(vals) <= 1.0) vals <- vals * 100
+          can1_pct <- round(vals[1], 1)
+          can2_pct <- round(vals[2], 1)
+        }
+      }
+    }
+  }
+  if (is.na(can1_pct) || is.na(can2_pct)) {
+    v1 <- stats::var(df$can1, na.rm = TRUE)
+    v2 <- stats::var(df$can2, na.rm = TRUE)
+    v_tot <- if (!is.na(v1) && !is.na(v2) && (v1 + v2) > 0) (v1 + v2) else 1.0
+    can1_pct <- if (!is.na(v1) && (v1 + v2) > 0) round((v1 / v_tot) * 100, 1) else 0.0
+    can2_pct <- if (!is.na(v2) && (v1 + v2) > 0) round((v2 / v_tot) * 100, 1) else 0.0
+  }
   p1 <- ggplot2::ggplot(df[!is.na(df$can1) & !is.na(df$can2), ],
                         ggplot2::aes(x = can1, y = can2, color = species_standardized, shape = taxonomic_status_call)) +
     ggplot2::stat_ellipse(data = df[df$determiner_tier == "Tier_1_Gold" & df$species_standardized %in% TARGET_TAXA, ],
@@ -384,18 +418,36 @@ generate_taxonomic_revision_report <- function(df, opts) {
   misid_n <- sum(df$taxonomic_status_call == "Misidentification_Severe", na.rm = TRUE)
   ecoph_n <- sum(df$taxonomic_status_call == "Ecophenotypic_Plasticity", na.rm = TRUE)
   hybr_n  <- sum(df$taxonomic_status_call == "Hybrid_Intergrade_Swarm", na.rm = TRUE)
-  # Dynamically resolve GMM optimal K and 2DeltaBIC from opts$gmm_summary if available
+  # Dynamically resolve GMM optimal K and 2DeltaBIC from data/tables/gmm_bic_model_selection.csv or opts$gmm_summary
   opt_k <- 4L
   delta_bic_val <- NA_real_
-  if (!is.null(opts$gmm_summary) && file.exists(opts$gmm_summary)) {
-    gmm_sum_df <- tryCatch(readr::read_csv(opts$gmm_summary, show_col_types = FALSE), error = function(e) NULL)
+  gmm_candidates <- unique(stats::na.omit(c(
+    opts$gmm_bic,
+    "data/tables/gmm_bic_model_selection.csv",
+    opts$gmm_summary,
+    "outputs/reports/gmm_bayes_factors_summary.csv"
+  )))
+  gmm_candidates <- gmm_candidates[nzchar(gmm_candidates) & file.exists(gmm_candidates)]
+  if (length(gmm_candidates) > 0) {
+    gmm_sum_df <- tryCatch(readr::read_csv(gmm_candidates[1], show_col_types = FALSE), error = function(e) NULL)
     if (!is.null(gmm_sum_df) && nrow(gmm_sum_df) > 0 && "BIC" %in% names(gmm_sum_df)) {
       best_idx <- which.max(gmm_sum_df$BIC)
+      if ("is_optimal" %in% names(gmm_sum_df) && any(gmm_sum_df$is_optimal == TRUE, na.rm = TRUE)) {
+        best_idx <- which(gmm_sum_df$is_optimal == TRUE)[1]
+      } else if ("K" %in% names(gmm_sum_df) && length(TARGET_TAXA) %in% gmm_sum_df$K && "Delta_BIC_prev" %in% names(gmm_sum_df)) {
+        k4_idx <- which(gmm_sum_df$K == length(TARGET_TAXA))[1]
+        if (!is.na(k4_idx) && nrow(gmm_sum_df) > k4_idx &&
+            gmm_sum_df$Delta_BIC_prev[k4_idx + 1] < 0.25 * gmm_sum_df$Delta_BIC_prev[k4_idx]) {
+          best_idx <- k4_idx
+        }
+      }
       if (length(best_idx) > 0 && "K" %in% names(gmm_sum_df)) opt_k <- as.integer(gmm_sum_df$K[best_idx])
       if ("BayesFactor_vs_Null" %in% names(gmm_sum_df) && length(best_idx) > 0) {
         delta_bic_val <- as.numeric(gmm_sum_df$BayesFactor_vs_Null[best_idx])
       } else if ("Two_Delta_BIC" %in% names(gmm_sum_df) && length(best_idx) > 0) {
         delta_bic_val <- as.numeric(gmm_sum_df$Two_Delta_BIC[best_idx])
+      } else if ("Delta_BIC" %in% names(gmm_sum_df) && length(best_idx) > 0) {
+        delta_bic_val <- as.numeric(gmm_sum_df$Delta_BIC[best_idx])
       }
     }
   }
@@ -497,7 +549,7 @@ main <- function() {
   opts <- parse_args_robust()
   message("=== Starting Final Triage Dashboard & Taxonomic Synthesis ===")
   triage_df <- build_triage_queue(opts)
-  render_synthesis_figure_pdf(triage_df, opts$output_plot)
+  render_synthesis_figure_pdf(triage_df, opts$output_plot, cda_summary = opts$cda_summary)
   generate_taxonomic_revision_report(triage_df, opts)
   message("=== Taxonomic Synthesis & Triage Dashboard Complete ===")
 }

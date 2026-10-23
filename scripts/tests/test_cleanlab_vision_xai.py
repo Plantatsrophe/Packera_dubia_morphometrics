@@ -127,7 +127,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         )
 
     def test_dinov2_feature_extraction_synthetic(self):
-        """Test DINOv2 feature extraction returns (N, 768) embeddings for synthetic records."""
+        """Test DINOv2 feature extraction returns (N, 768) embeddings for synthetic records when demo=True."""
         synthetic_records = [
             {
                 "catalogNumber": f"SYNTH_{i:03d}",
@@ -138,11 +138,21 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             for i in range(12)
         ]
 
+        with self.assertRaises(RuntimeError):
+            extract_dinov2_embeddings(
+                records=synthetic_records,
+                model_name="dinov2_vitb14",
+                device="cpu",
+                batch_size=4,
+                demo=False,
+            )
+
         features, labels, cat_nums = extract_dinov2_embeddings(
             records=synthetic_records,
             model_name="dinov2_vitb14",
             device="cpu",
             batch_size=4,
+            demo=True,
         )
 
         self.assertEqual(features.shape, (12, 768))
@@ -150,6 +160,49 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         self.assertEqual(len(cat_nums), 12)
         self.assertEqual(cat_nums[0], "SYNTH_000")
         self.assertEqual(features.dtype, np.float32)
+
+    def test_compute_vit_patch_saliency_attribution(self):
+        """Verify genuine DINOv2 ViT patch-token attribution via forward_features and clf weight dot product."""
+        import torch
+        from sklearn.linear_model import LogisticRegression
+
+        class DummyDINOv2(torch.nn.Module):
+            def forward_features(self, x: torch.Tensor):
+                b = x.shape[0]
+                # 16x16 = 256 patch tokens of dimension 768
+                patch_tokens = torch.zeros((b, 256, 768), dtype=torch.float32)
+                # Activate top-left quadrant tokens along feature dim 0
+                patch_tokens[:, :64, 0] = 4.0
+                patch_tokens[:, 64:, 0] = -2.0
+                cls_token = torch.zeros((b, 768), dtype=torch.float32)
+                cls_token[:, 0] = 1.0
+                return {
+                    "x_norm_patchtokens": patch_tokens,
+                    "x_norm_clstoken": cls_token,
+                }
+
+        X_train = np.random.RandomState(42).randn(16, 768).astype(np.float32)
+        y_train = np.array([i % 4 for i in range(16)])
+        clf = LogisticRegression(max_iter=200, random_state=42)
+        clf.fit(X_train, y_train)
+        # Set class 1 weight strongly positive on dim 0
+        clf.coef_[:] = 0.0
+        clf.coef_[1, 0] = 5.0
+
+        arr = np.full((224, 224, 3), fill_value=128, dtype=np.uint8)
+        heatmap = mod_xai.compute_vit_patch_saliency(
+            img_arr=arr,
+            model=DummyDINOv2(),
+            classifier=clf,
+            target_class_idx=1,
+            device="cpu",
+        )
+        self.assertEqual(heatmap.shape, (224, 224))
+        self.assertEqual(heatmap.dtype, np.float32)
+        self.assertGreaterEqual(float(heatmap.min()), 0.0)
+        self.assertLessEqual(float(heatmap.max()), 1.0)
+        # Top rows (corresponding to active tokens :64) must have higher attribution than bottom rows
+        self.assertGreater(float(heatmap[:56, :].mean()), float(heatmap[112:, :].mean()))
 
     def test_confident_learning_thresholds_and_triage(self):
         """Test Confident Learning audit flags label noise based on error thresholds."""

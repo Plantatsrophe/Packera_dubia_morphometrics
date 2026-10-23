@@ -100,10 +100,17 @@ parse_args_robust <- function() {
 }
 
 # ------------------------------------------------------------------------------
-# 2. Pure-R Mathematical Engine: Normalized EFA (Kuhl & Giardina 1982 Fallback)
+# 2. Pure-R Mathematical Engine: Homologized EFA (Momocs / Kuhl & Giardina Fallback)
 # ------------------------------------------------------------------------------
-compute_efourier_coords_pure <- function(coo, nb_h = 12, norm = TRUE) {
+compute_efourier_coords_pure <- function(coo, nb_h = 12, norm = FALSE, start = FALSE) {
   if (is.null(coo) || nrow(coo) < 5) return(rep(NA_real_, nb_h * 4))
+  cx <- mean(coo[, 1], na.rm = TRUE)
+  cy <- mean(coo[, 2], na.rm = TRUE)
+  coo[, 1] <- coo[, 1] - cx
+  coo[, 2] <- coo[, 2] - cy
+  cs <- sqrt(sum(coo[, 1]^2 + coo[, 2]^2, na.rm = TRUE))
+  if (is.finite(cs) && cs > 1e-8) coo <- coo / cs
+
   if (coo[1, 1] != coo[nrow(coo), 1] || coo[1, 2] != coo[nrow(coo), 2]) {
     coo <- rbind(coo, coo[1, ])
   }
@@ -131,9 +138,9 @@ compute_efourier_coords_pure <- function(coo, nb_h = 12, norm = TRUE) {
 
   if (!norm) return(as.vector(rbind(A, B, C, D)))
 
-  # Size, orientation, and starting-point invariant normalization
+  # Size, orientation, and starting-point invariant normalization (only when norm = TRUE)
   A1 <- A[1]; B1 <- B[1]; C1 <- C[1]; D1 <- D[1]
-  theta1 <- 0.5 * atan2(2 * (A1 * B1 + C1 * D1), (A1^2 + C1^2 - B1^2 - D1^2))
+  theta1 <- if (start) 0.5 * atan2(2 * (A1 * B1 + C1 * D1), (A1^2 + C1^2 - B1^2 - D1^2)) else 0.0
   A1_star <- A1 * cos(theta1) + B1 * sin(theta1)
   C1_star <- C1 * cos(theta1) + D1 * sin(theta1)
   psi1 <- atan2(C1_star, A1_star)
@@ -155,6 +162,15 @@ compute_efourier_coords_pure <- function(coo, nb_h = 12, norm = TRUE) {
     norm_C[n] <- norm_M[2, 1]; norm_D[n] <- norm_M[2, 2]
   }
   return(as.vector(rbind(norm_A, norm_B, norm_C, norm_D)))
+}
+
+compute_polygon_solidity <- function(coo, area_px) {
+  if (is.null(coo) || nrow(coo) < 3 || is.na(area_px) || area_px <= 0) return(NA_real_)
+  hull_idx <- tryCatch(grDevices::chull(coo[, 1], coo[, 2]), error = function(e) NULL)
+  if (is.null(hull_idx) || length(hull_idx) < 3) return(NA_real_)
+  hx <- coo[hull_idx, 1]; hy <- coo[hull_idx, 2]
+  hull_area <- abs(0.5 * sum(hx * c(hy[-1], hy[1]) - hy * c(hx[-1], hx[1])))
+  if (is.finite(hull_area) && hull_area > 1e-6) round(min(1.0, area_px / hull_area), 4) else NA_real_
 }
 
 compute_centsize_robust <- function(coo) {
@@ -292,50 +308,86 @@ run_fourier_extraction <- function(opts) {
 
     meta <- parse_specimen_id(f)
 
-    # Calculate basic morphometric geometry
-    n_pts <- nrow(coo)
-    span_x <- diff(range(coo[, 1], na.rm = TRUE))
-    span_y <- diff(range(coo[, 2], na.rm = TRUE))
-    aspect_ratio <- if (span_y > 1e-6) round(span_x / span_y, 4) else 1.0
-    area_px <- abs(0.5 * sum(coo[, 1] * c(coo[-1, 2], coo[1, 2]) - coo[, 2] * c(coo[-1, 1], coo[1, 1])))
-    centsize <- compute_centsize_robust(coo)
-    log_cs <- if (!is.na(centsize) && centsize > 0) round(log(centsize), 6) else NA_real_
-
-    shape_name <- meta$shape_id
-    coo_list[[shape_name]] <- coo
-
-    m_match <- if (!is.null(manifest_df)) {
-      manifest_df[manifest_df$catalogNumber == meta$catalogNumber & manifest_df$leaf_id == meta$leaf_id, , drop = FALSE]
-    } else {
-      NULL
+    m_match <- NULL
+    if (!is.null(manifest_df) && nrow(manifest_df) > 0) {
+      m_match <- manifest_df[as.character(manifest_df$catalogNumber) == as.character(meta$catalogNumber) &
+                             as.integer(manifest_df$leaf_id) == as.integer(meta$leaf_id), , drop = FALSE]
+      if (nrow(m_match) > 1 && "contour_path" %in% names(m_match)) {
+        cp_hit <- m_match[basename(m_match$contour_path) == basename(f), , drop = FALSE]
+        if (nrow(cp_hit) > 0) m_match <- cp_hit
+      }
+      if (nrow(m_match) == 0 && "contour_path" %in% names(manifest_df)) {
+        m_match <- manifest_df[basename(manifest_df$contour_path) == basename(f), , drop = FALSE]
+      }
     }
+
     resolved_pid <- if (!is.null(m_match) && nrow(m_match) > 0 && "plant_individual_id" %in% names(m_match) && !is.na(m_match$plant_individual_id[1])) {
       as.integer(m_match$plant_individual_id[1])
     } else {
       meta$plant_id
+    }
+    resolved_tier <- if (!is.null(m_match) && nrow(m_match) > 0 && "assigned_tier" %in% names(m_match) && !is.na(m_match$assigned_tier[1])) {
+      as.character(m_match$assigned_tier[1])
+    } else {
+      "Tier_1_Direct"
     }
     resolved_ppm <- if (!is.null(m_match) && nrow(m_match) > 0 && "pixels_per_mm" %in% names(m_match)) {
       suppressWarnings(as.numeric(m_match$pixels_per_mm[1]))
     } else {
       NA_real_
     }
-    resolved_cal <- if (!is.null(m_match) && nrow(m_match) > 0 && "is_calibrated_mm" %in% names(m_match)) {
-      as.logical(m_match$is_calibrated_mm[1])
+    is_calibrated_mm <- !is.na(resolved_ppm) && is.finite(resolved_ppm) && resolved_ppm > 0
+    if (!is_calibrated_mm) resolved_ppm <- NA_real_
+
+    # Calculate raw pixel area & polygon solidity before coordinate scaling
+    area_px <- abs(0.5 * sum(coo[, 1] * c(coo[-1, 2], coo[1, 2]) - coo[, 2] * c(coo[-1, 1], coo[1, 1])))
+    resolved_solidity <- if (!is.null(m_match) && nrow(m_match) > 0 && "solidity" %in% names(m_match) && !is.na(m_match$solidity[1])) {
+      round(suppressWarnings(as.numeric(m_match$solidity[1])), 4)
     } else {
-      !is.na(resolved_ppm) && is.finite(resolved_ppm) && resolved_ppm > 0
+      compute_polygon_solidity(coo, area_px)
     }
+    resolved_ucs <- if (!is.null(m_match) && nrow(m_match) > 0 && "ucs_score" %in% names(m_match) && !is.na(m_match$ucs_score[1])) {
+      round(suppressWarnings(as.numeric(m_match$ucs_score[1])), 4)
+    } else if (!is.null(m_match) && nrow(m_match) > 0 && "ucs" %in% names(m_match) && !is.na(m_match$ucs[1])) {
+      round(suppressWarnings(as.numeric(m_match$ucs[1])), 4)
+    } else {
+      NA_real_
+    }
+
+    # Calibrate contour coordinates to physical millimeters (mm) when pixels_per_mm > 0
+    if (is_calibrated_mm) {
+      coo <- coo / resolved_ppm
+    }
+
+    # Oriented major-axis length-to-width aspect ratio (Momocs::coo_lw / SVD major-axis alignment)
+    lw <- if (requireNamespace("Momocs", quietly = TRUE)) {
+      tryCatch(Momocs::coo_lw(coo), error = function(e) NULL)
+    } else {
+      NULL
+    }
+    if (is.null(lw) || length(lw) < 2 || is.na(lw[2]) || lw[2] <= 1e-6) {
+      coo_centered <- scale(coo, center = TRUE, scale = FALSE)
+      svd_rot <- coo_centered %*% svd(coo_centered)$v
+      lw <- c(diff(range(svd_rot[, 1], na.rm = TRUE)), diff(range(svd_rot[, 2], na.rm = TRUE)))
+    }
+    aspect_ratio <- round(as.numeric(lw[1] / lw[2]), 4)
+    centsize <- compute_centsize_robust(coo)
+    log_cs <- if (!is.na(centsize) && centsize > 0) round(log(centsize), 6) else NA_real_
+
+    shape_name <- meta$shape_id
+    coo_list[[shape_name]] <- coo
 
     rec <- data.frame(
       shape_id = shape_name,
       catalogNumber = meta$catalogNumber,
       plant_individual_id = resolved_pid,
       leaf_id = meta$leaf_id,
-      assigned_tier = if (!is.null(m_match) && nrow(m_match) > 0 && "assigned_tier" %in% names(m_match)) {
-          m_match$assigned_tier[1]
-      } else { "Tier_1_Direct" },
+      assigned_tier = resolved_tier,
       pixels_per_mm = resolved_ppm,
-      is_calibrated_mm = resolved_cal,
+      is_calibrated_mm = is_calibrated_mm,
       aspect_ratio = aspect_ratio,
+      solidity = resolved_solidity,
+      ucs_score = resolved_ucs,
       area_px = round(area_px, 1),
       centroid_size = if (!is.na(centsize)) round(centsize, 4) else NA_real_,
       log_centsize = log_cs,
@@ -351,8 +403,8 @@ run_fourier_extraction <- function(opts) {
   rownames(fac_df) <- names(coo_list)
   message(sprintf("Assembled %d valid closed contours for Elliptic Fourier Analysis.", length(coo_list)))
 
-  # 3. Perform 12-Harmonic EFA via Momocs::Out() & Momocs::efourier()
-  message("Executing 12-harmonic EFA via Momocs::efourier(nb.h = ", opts$harmonics, ", norm = TRUE)...")
+  # 3. Perform 12-Harmonic EFA via Momocs::Out() & Momocs::efourier(norm = FALSE, start = FALSE)
+  message("Executing 12-harmonic EFA via Momocs::efourier(nb.h = ", opts$harmonics, ", norm = FALSE, start = FALSE)...")
   efa_success <- FALSE
   harm_mat <- NULL
 
@@ -361,14 +413,16 @@ run_fourier_extraction <- function(opts) {
       message("Momocs::Out() note: ", e$message); NULL
     })
     if (!is.null(out_obj)) {
-      # Compute Centroid Size (CS) for each contour using Momocs::coo_centsize(outlines)
+      # Compute Centroid Size (CS) for each contour using Momocs::coo_centsize(outlines) prior to coo_scale()
       cs_vals <- tryCatch(Momocs::coo_centsize(out_obj), error = function(e) NULL)
       if (!is.null(cs_vals) && length(cs_vals) == nrow(fac_df)) {
         fac_df$centroid_size <- round(as.numeric(cs_vals), 4)
         fac_df$log_centsize <- ifelse(!is.na(fac_df$centroid_size) & fac_df$centroid_size > 0,
                                       round(log(fac_df$centroid_size), 6), NA_real_)
       }
-      ef_res <- tryCatch(Momocs::efourier(out_obj, nb.h = opts$harmonics, norm = TRUE), error = function(e) {
+      # Center and scale homologized outlines without 180-degree first-harmonic ellipse flips
+      out_obj <- Momocs::coo_center(out_obj) %>% Momocs::coo_scale()
+      ef_res <- tryCatch(Momocs::efourier(out_obj, nb.h = opts$harmonics, norm = FALSE, start = FALSE), error = function(e) {
         message("Momocs::efourier() note: ", e$message); NULL
       })
       if (!is.null(ef_res) && !is.null(ef_res$coe)) {
@@ -379,10 +433,10 @@ run_fourier_extraction <- function(opts) {
     }
   }
 
-  # Fallback to pure-R vectorized Kuhl & Giardina EFA if Momocs not available
+  # Fallback to pure-R vectorized EFA if Momocs not available
   if (!efa_success || is.null(harm_mat)) {
-    message("Running mathematical Kuhl & Giardina EFA engine...")
-    harm_list <- lapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = opts$harmonics, norm = TRUE))
+    message("Running mathematical homologized EFA engine (norm = FALSE, start = FALSE)...")
+    harm_list <- lapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = opts$harmonics, norm = FALSE, start = FALSE))
     harm_mat <- do.call(rbind, harm_list)
     colnames(harm_mat) <- harmonic_names
   }
@@ -468,7 +522,7 @@ run_fourier_extraction <- function(opts) {
                  "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
                  "scientificName", "species_raw", "determiner_tier",
                  "PC1", "PC2", "PC3", "PC4", "PC5",
-                 "aspect_ratio", "solidity", "area_px", "centroid_size", "log_centsize", "mask_source")
+                 "aspect_ratio", "solidity", "ucs_score", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
 
@@ -483,7 +537,7 @@ run_fourier_extraction <- function(opts) {
 
   # 5b. Compute Specimen-Level Median Harmonic Vectors & Phenotypic Stability Index
   message("Computing specimen-level median harmonic vectors (grouped by catalogNumber & plant instance)...")
-  valid_closed_mask <- efa_df$assigned_tier %in% c("Tier_1_Direct", "Tier_2_Reflected") & complete.cases(efa_df[, sym_names])
+  valid_closed_mask <- grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE) & complete.cases(efa_df[, sym_names])
   closed_leaf_df <- efa_df[valid_closed_mask, , drop = FALSE]
 
   all_harm_cols <- intersect(c(harmonic_names, grep("Chebyshev", names(efa_df), value = TRUE)), names(efa_df))
@@ -527,7 +581,7 @@ run_fourier_extraction <- function(opts) {
     rec$log_centsize <- if (!is.na(rec$centroid_size) && rec$centroid_size > 0) round(log(rec$centroid_size), 6) else NA_real_
 
     other_meta <- intersect(c("pixels_per_mm", "is_calibrated_mm", "determiner_raw", "county", "stateProvince", "latitude", "longitude",
-                              "pheno_sin", "pheno_cos", "regional_group", "aspect_ratio", "solidity", "area_px"),
+                              "pheno_sin", "pheno_cos", "regional_group", "aspect_ratio", "solidity", "ucs_score", "area_px"),
                             names(grp))
     for (m_col in other_meta) {
       vals <- stats::na.omit(grp[[m_col]])
@@ -558,7 +612,7 @@ run_fourier_extraction <- function(opts) {
                       "assigned_tier", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
                       "scientificName", "species_raw", "determiner_tier",
                       "PC1", "PC2", "PC3", "PC4", "PC5",
-                      "aspect_ratio", "solidity", "area_px", "centroid_size", "log_centsize")
+                      "aspect_ratio", "solidity", "ucs_score", "area_px", "centroid_size", "log_centsize")
   lead_spec_cols <- intersect(lead_spec_cols, names(specimen_df))
   specimen_df <- specimen_df[, c(lead_spec_cols, setdiff(names(specimen_df), lead_spec_cols))]
 

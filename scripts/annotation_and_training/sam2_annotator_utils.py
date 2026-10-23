@@ -54,6 +54,15 @@ CLASS_COLORS: Dict[int, Tuple[int, int, int]] = {
     6: (0, 230, 255)      # capitulum: Yellow
 }
 
+# Active interactive HUD basal leaf classes (0: basal_leaf_whole, 1: basal_leaf_partial)
+# Restricts manual and automated pre-labeling strictly to basal leaves so annotators
+# never waste time clicking stems, roots, or cauline leaves that OMITTED_CLASSES discards.
+ACTIVE_BASAL_CLASS_IDS: Tuple[int, int] = (0, 1)
+ACTIVE_CLASS_NAMES: List[str] = [
+    "basal_leaf_whole",
+    "basal_leaf_partial",
+]
+
 # Strict class mapping from SAM 2 botanical annotations to LeafMachine2 PCD taxonomy
 PCD_CLASS_MAPPING: Dict[str, str] = {
     "basal_leaf_whole": "ideal_leaf",
@@ -609,7 +618,7 @@ def render_hud_overlay(
     else:
         mode_color = (0, 255, 0)
         mode_str = "MODE: [SELECT]"
-        inst_summary = "b: Prev Voucher | n: Next Voucher | s / Enter: Save | 0-6/NumPad: Commit | Tab: Granularity"
+        inst_summary = "b: Prev Voucher | n: Next Voucher | s / Enter: Save | 0: Basal Whole | 1: Basal Partial | Tab: Granularity"
 
     cv2.putText(canvas, mode_str, (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, mode_color, 2, cv2.LINE_AA)
     cv2.putText(canvas, inst_summary, (205, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (215, 215, 215), 1, cv2.LINE_AA)

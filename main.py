@@ -453,6 +453,12 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     ]
     if args.limit:
         cmd.extend(["--limit", str(args.limit)])
+    if getattr(args, "sam2_refine", False):
+        cmd.append("--sam2-refine")
+    if getattr(args, "sam2_checkpoint", None):
+        cmd.extend(["--sam2-checkpoint", str(args.sam2_checkpoint)])
+    if getattr(args, "sam2_config", None):
+        cmd.extend(["--sam2-config", str(args.sam2_config)])
     if getattr(args, "force", False):
         cmd.append("--force")
 
@@ -796,6 +802,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_segment.add_argument("--score-thresh", type=float, default=None, help="PCD detection score threshold")
     p_segment.add_argument("--limit", type=int, default=None, help="Limit number of vouchers to process")
     p_segment.add_argument(
+        "--sam2-refine",
+        dest="sam2_refine",
+        action="store_true",
+        default=False,
+        help="Enable automated LM2-guided SAM 2 sub-pixel boundary refinement on Stage 2 leaf crops.",
+    )
+    p_segment.add_argument(
+        "--sam2-checkpoint",
+        type=Path,
+        default=None,
+        help="Path to SAM 2.1 checkpoint for automated boundary refinement.",
+    )
+    p_segment.add_argument(
+        "--sam2-config",
+        type=str,
+        default=None,
+        help="SAM 2 model config path for automated boundary refinement.",
+    )
+    p_segment.add_argument(
         "--force",
         "--overwrite",
         dest="force",
@@ -867,6 +892,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--min-ucs", type=float, default=None, help="Tier 1 min UCS score")
     p_all.add_argument("--score-thresh", type=float, default=None, help="PCD detection score threshold")
     p_all.add_argument("--limit", type=int, default=None, help="Limit number of vouchers to process")
+    p_all.add_argument(
+        "--sam2-refine",
+        dest="sam2_refine",
+        action="store_true",
+        default=False,
+        help="Enable automated LM2-guided SAM 2 sub-pixel boundary refinement on Stage 2 leaf crops.",
+    )
+    p_all.add_argument(
+        "--sam2-checkpoint",
+        type=Path,
+        default=None,
+        help="Path to SAM 2.1 checkpoint for automated boundary refinement.",
+    )
+    p_all.add_argument(
+        "--sam2-config",
+        type=str,
+        default=None,
+        help="SAM 2 model config path for automated boundary refinement.",
+    )
     p_all.add_argument("--input", type=Path, default=None, help="Input contours directory")
     p_all.add_argument("--manifest", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_all.add_argument("--contours-dir", type=Path, default=None, help="Input contours directory")

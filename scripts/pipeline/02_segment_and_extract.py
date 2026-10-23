@@ -88,12 +88,16 @@ from scripts.vision.lm2_geometry_utils import (
     export_standardized_contour,
     extract_tier1_pristine,
     extract_tier2_reflected,
+    generate_sam2_prompts_from_lm2_mask,
     homologize_contour_starting_point,
     is_botanical_dissection,
+    is_topologically_connected_mask,
     LeafRoutingResult,
     normalize_assigned_tier,
+    SAM2PromptBundle,
     TIER_1_DIRECT,
     TIER_2_REFLECTED,
+    trim_petiole_tail,
 )
 from scripts.vision.capitulum_phenology_classifier import (
     classify_single_capitulum,
@@ -541,6 +545,180 @@ def torch_cuda_available() -> bool:
         return False
 
 
+def is_stock_pointrend_weights(weights_path: Union[str, Path]) -> bool:
+    """
+    Returns True when using stock un-finetuned LeafMachine2 PointRend weights
+    (e.g. model_final.pth from leaf_seg_rcnn_v2_1) rather than a Packera-finetuned checkpoint.
+    """
+    name = Path(weights_path).name.lower()
+    if not name:
+        return True
+    return "finetuned" not in name and "packera" not in name
+
+
+# =============================================================================
+# Automated LM2-Guided SAM 2 Boundary Refinement Engine
+# =============================================================================
+
+class SAM2BoundaryRefiner:
+    """
+    Automated zero-shot SAM 2 boundary refiner guided by Stage 2 PointRend initial masks (m_init).
+
+    Given a 12%-padded native-DPI leaf crop and initial binary mask `m_init`:
+      1. Generates positive medial/lobe prompts inside eroded `m_init`, negative corner/concavity
+         prompts outside dilated `m_init`, crop bounding box, and `(1, 256, 256)` low-res logits.
+      2. Queries `SAM2ImagePredictor.predict()` deterministically (`torch.no_grad()`, fixed seeds).
+      3. Validates topological connectedness (`is_topologically_connected_mask`); falls back cleanly
+         to `m_init` if SAM 2 weights are unavailable or if the refined mask violates connectedness.
+    """
+
+    def __init__(
+        self,
+        checkpoint_path: Optional[Union[str, Path]] = None,
+        model_cfg: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
+        device: str = "cuda",
+        predictor: Optional[Any] = None,
+        seed: int = 42,
+    ) -> None:
+        self.checkpoint_path = (
+            Path(checkpoint_path)
+            if checkpoint_path is not None
+            else (PROJECT_ROOT / "models" / "sam2.1_hiera_large.pt")
+        )
+        self.model_cfg = model_cfg
+        self.device = device if (device == "cuda" and torch_cuda_available()) else "cpu"
+        self.seed = int(seed)
+        self.predictor = predictor
+        if self.predictor is None:
+            self._load_predictor()
+
+    def _load_predictor(self) -> None:
+        """Loads SAM2ImagePredictor if checkpoint and sam2 package are available."""
+        if not self.checkpoint_path.exists():
+            logger.debug(
+                f"SAM 2 checkpoint not found at {self.checkpoint_path}; "
+                "SAM2BoundaryRefiner will fall back cleanly to PointRend m_init."
+            )
+            return
+
+        try:
+            import torch
+            from sam2.build_sam import build_sam2
+            from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+            torch.manual_seed(self.seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(self.seed)
+
+            sam2_model = build_sam2(
+                self.model_cfg,
+                str(self.checkpoint_path),
+                device=self.device,
+            )
+            sam2_model.eval()
+            self.predictor = SAM2ImagePredictor(sam2_model)
+            logger.info(f"Loaded SAM 2 boundary refiner from {self.checkpoint_path} on {self.device}")
+        except Exception as e:
+            logger.debug(f"SAM 2 runtime unavailable ({e}); falling back to PointRend m_init.")
+            self.predictor = None
+
+    @property
+    def is_available(self) -> bool:
+        return self.predictor is not None
+
+    def refine_crop_mask(
+        self,
+        crop_bgr: np.ndarray,
+        m_init: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Refines an initial PointRend binary mask `m_init` on `crop_bgr` using automated
+        SAM 2 prompting. Falls back cleanly to `m_init` if SAM 2 is unavailable or if
+        the refined candidate violates topological connectedness.
+        """
+        if m_init is None or m_init.size == 0:
+            return np.zeros((0, 0), dtype=np.uint8)
+
+        fallback_mask = (m_init > 0).astype(np.uint8) * 255
+        if np.count_nonzero(fallback_mask) == 0 or crop_bgr is None or crop_bgr.size == 0:
+            return fallback_mask
+
+        if self.predictor is None:
+            return fallback_mask
+
+        prompt_bundle = generate_sam2_prompts_from_lm2_mask(fallback_mask)
+        if prompt_bundle["point_coords"].shape[0] == 0 or prompt_bundle["positive_points"].shape[0] == 0:
+            return fallback_mask
+
+        try:
+            np.random.seed(self.seed)
+            try:
+                import torch
+                torch.manual_seed(self.seed)
+                grad_ctx = torch.no_grad()
+            except ImportError:
+                from contextlib import nullcontext
+                grad_ctx = nullcontext()
+
+            crop_rgb = (
+                cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+                if (crop_bgr.ndim == 3 and crop_bgr.shape[2] == 3)
+                else crop_bgr
+            )
+
+            with grad_ctx:
+                self.predictor.set_image(crop_rgb)
+                masks, scores, _ = self.predictor.predict(
+                    point_coords=prompt_bundle["point_coords"],
+                    point_labels=prompt_bundle["point_labels"],
+                    box=prompt_bundle["box"],
+                    mask_input=prompt_bundle["mask_input"],
+                    multimask_output=True,
+                )
+
+            if masks is None or len(masks) == 0:
+                return fallback_mask
+
+            scores_arr = np.asarray(scores, dtype=np.float32).reshape(-1)
+            order = np.argsort(scores_arr)[::-1]
+            target_h, target_w = fallback_mask.shape[:2]
+
+            for idx in order:
+                cand = np.asarray(masks[int(idx)])
+                if cand.ndim == 3:
+                    cand = cand[0]
+                cand_u8 = (cand > 0.0).astype(np.uint8) * 255
+                if cand_u8.shape[0] != target_h or cand_u8.shape[1] != target_w:
+                    cand_u8 = cv2.resize(cand_u8, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+
+                if is_topologically_connected_mask(cand_u8, reference_mask=fallback_mask):
+                    return cand_u8
+
+            logger.debug("SAM 2 candidate masks violated topological connectedness; falling back to m_init.")
+            return fallback_mask
+        except Exception as e:
+            logger.debug(f"SAM 2 boundary refinement failed ({e}); falling back to m_init.")
+            return fallback_mask
+
+
+def refine_mask_with_sam2(
+    crop_bgr: np.ndarray,
+    m_init: np.ndarray,
+    predictor: Optional[Any] = None,
+    checkpoint_path: Optional[Union[str, Path]] = None,
+    model_cfg: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
+    device: str = "cuda",
+) -> np.ndarray:
+    """Functional helper for automated LM2 -> SAM 2 mask boundary refinement."""
+    refiner = SAM2BoundaryRefiner(
+        checkpoint_path=checkpoint_path,
+        model_cfg=model_cfg,
+        device=device,
+        predictor=predictor,
+    )
+    return refiner.refine_crop_mask(crop_bgr, m_init)
+
+
 # =============================================================================
 # Core Pipeline Execution Runner
 # =============================================================================
@@ -563,6 +741,10 @@ class SegmentAndExtractPipeline:
         lm2_project_dir: Optional[Union[str, Path]] = None,
         stage1_weights: Optional[Union[str, Path]] = None,
         ruler_confidence_thresh: float = 0.50,
+        sam2_refine: bool = False,
+        sam2_checkpoint: Optional[Union[str, Path]] = None,
+        sam2_config: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
+        sam2_predictor: Optional[Any] = None,
     ) -> None:
         self.vouchers_csv = Path(vouchers_csv)
         self.model_weights = Path(model_weights)
@@ -585,24 +767,8 @@ class SegmentAndExtractPipeline:
         dissection_cfg = getattr(self.config.thresholds, "dissection", None) or getattr(self.config.thresholds, "solidity", None)
         if dissection_cfg is not None:
             self.min_dissected = getattr(dissection_cfg, "min_solidity_dissected", getattr(dissection_cfg, "min_dissected", 0.50))
-            self.taxa_with_lyrate_tendency = getattr(
-                dissection_cfg,
-                "taxa_with_lyrate_tendency",
-                [
-                    "Packera paupercula",
-                    "Packera plattensis",
-                    "Packera paupercula var. paupercula",
-                    "Packera paupercula var. savannarum",
-                ]
-            )
         else:
             self.min_dissected = 0.50
-            self.taxa_with_lyrate_tendency = [
-                "Packera paupercula",
-                "Packera plattensis",
-                "Packera paupercula var. paupercula",
-                "Packera paupercula var. savannarum",
-            ]
 
         self.score_thresh = score_thresh
         self.num_ruler_workers = num_ruler_workers
@@ -667,6 +833,20 @@ class SegmentAndExtractPipeline:
             device=self.device,
             score_thresh=self.score_thresh
         )
+        self.is_stock_pointrend = is_stock_pointrend_weights(self.model_weights)
+        self.sam2_refine = bool(sam2_refine)
+        self.sam2_checkpoint = (
+            Path(sam2_checkpoint)
+            if sam2_checkpoint is not None
+            else (PROJECT_ROOT / "models" / "sam2.1_hiera_large.pt")
+        )
+        self.sam2_config = sam2_config
+        self.sam2_refiner = SAM2BoundaryRefiner(
+            checkpoint_path=self.sam2_checkpoint,
+            model_cfg=self.sam2_config,
+            device=self.device,
+            predictor=sam2_predictor,
+        )
         self.voucher_repro_records: Dict[str, Dict[str, Any]] = {}
         self.voucher_pheno_records: Dict[str, Dict[str, Any]] = {}
 
@@ -683,6 +863,23 @@ class SegmentAndExtractPipeline:
                             self.vouchers_taxa[cat] = tax
             except Exception:
                 pass
+
+    def _should_refine_with_sam2(self, m_init: np.ndarray) -> bool:
+        """
+        Determines whether to invoke automated LM2-guided SAM 2 boundary refinement
+        on an initial PointRend leaf mask `m_init`.
+        Triggered when `--sam2-refine` is enabled or when using stock un-finetuned
+        PointRend weights on dissected leaves.
+        """
+        if self.sam2_refiner is None or not self.sam2_refiner.is_available:
+            return False
+        if self.sam2_refine:
+            return True
+        if not self.is_stock_pointrend:
+            return False
+        if m_init is None or m_init.size == 0 or np.count_nonzero(m_init) == 0:
+            return False
+        return bool(is_botanical_dissection((m_init > 0).astype(np.uint8) * 255))
 
     def shutdown(self) -> None:
         """Cleans up background thread pools."""
@@ -807,8 +1004,11 @@ class SegmentAndExtractPipeline:
                         continue
                     crop_preds = self.model_engine.predict(crop_bgr)
                     for pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
+                        m_refined = pr_mask
+                        if self._should_refine_with_sam2(pr_mask):
+                            m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, pr_mask)
                         sheet_mask, full_bbox = reproject_crop_mask_to_sheet(
-                            pr_mask, crop_box, (sheet_h, sheet_w)
+                            m_refined, crop_box, (sheet_h, sheet_w)
                         )
                         leaf_detections.append((
                             full_bbox,
@@ -824,12 +1024,23 @@ class SegmentAndExtractPipeline:
                 if cls_id in LM2_REPRODUCTIVE_CLASS_IDS:
                     capitulum_detections.append((bbox, mask, float(score), int(cls_id)))
                 elif cls_id in LM2_LEAF_CLASS_IDS:
+                    sheet_mask = mask
+                    full_bbox = bbox
+                    if self._should_refine_with_sam2(mask):
+                        crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, bbox, pad_ratio=0.12)
+                        cy0, cx0, cy1, cx1 = crop_box
+                        if crop_bgr.size > 0 and cy1 > cy0 and cx1 > cx0:
+                            crop_m_init = mask[cy0:cy1, cx0:cx1]
+                            crop_m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, crop_m_init)
+                            sheet_mask, full_bbox = reproject_crop_mask_to_sheet(
+                                crop_m_refined, crop_box, (sheet_h, sheet_w)
+                            )
                     leaf_detections.append((
-                        bbox,
-                        mask,
+                        full_bbox,
+                        sheet_mask,
                         float(score),
                         int(cls_id),
-                        (int(bbox[1]), int(bbox[0])),
+                        (int(full_bbox[1]), int(full_bbox[0])),
                     ))
 
         # Collect asynchronous Hough scale fallback if LM2 ruler calibration was absent
@@ -982,15 +1193,6 @@ class SegmentAndExtractPipeline:
             tier: str = "Failed QC"
             assigned_tier: str = "rejected"
 
-            # Check taxon-level lyrate tendency
-            is_lyrate_taxon = False
-            if taxon and self.taxa_with_lyrate_tendency:
-                t_clean = taxon.strip().lower()
-                is_lyrate_taxon = any(
-                    lyr.strip().lower() in t_clean or t_clean in lyr.strip().lower()
-                    for lyr in self.taxa_with_lyrate_tendency
-                )
-
             # Helper to extract, homologize, and export standardized contour
             def _export_homologized(mask_proc: np.ndarray, is_reflected: bool) -> Optional[str]:
                 p_base_pt = routing_res.metadata.get("p_base")
@@ -1045,8 +1247,8 @@ class SegmentAndExtractPipeline:
                 inst.mask_path = mask_path
                 inst.contour_path = contour_path
 
-            # 3. Check for botanical dissection: If solidity < min_solidity but is_botanical_dissection == True (or taxon in lyrate list) -> route to Tier 1 (Dissected)
-            elif (routing_res.solidity < self.min_solidity) and (is_dissected or is_lyrate_taxon) and routing_res.solidity >= self.min_dissected and routing_res.assigned_tier == "tier1":
+            # 3. Check for botanical dissection: If solidity < min_solidity but is_botanical_dissection == True -> route to Tier 1 (Dissected)
+            elif (routing_res.solidity < self.min_solidity) and is_dissected and routing_res.solidity >= self.min_dissected and routing_res.assigned_tier == "tier1":
                 tier = "Tier 1 (Dissected)"
                 assigned_tier = TIER_1_DIRECT
                 is_dissected = True
@@ -1439,6 +1641,25 @@ def parse_args() -> argparse.Namespace:
         help=f"Detection confidence score threshold (default: {cfg.segmentation.score_thresh})."
     )
     parser.add_argument(
+        "--sam2-refine",
+        dest="sam2_refine",
+        action="store_true",
+        default=False,
+        help="Enable automated LM2-guided SAM 2 sub-pixel boundary refinement on Stage 2 leaf crops.",
+    )
+    parser.add_argument(
+        "--sam2-checkpoint",
+        type=Path,
+        default=cfg.paths.workspace_root / "models" / "sam2.1_hiera_large.pt",
+        help="Path to SAM 2.1 checkpoint for automated boundary refinement.",
+    )
+    parser.add_argument(
+        "--sam2-config",
+        type=str,
+        default="configs/sam2.1/sam2.1_hiera_l.yaml",
+        help="SAM 2 model config path for automated boundary refinement.",
+    )
+    parser.add_argument(
         "--force",
         "--overwrite",
         dest="force",
@@ -1466,6 +1687,9 @@ def main() -> None:
         min_ucs=args.min_ucs,
         score_thresh=args.score_thresh,
         force=args.force,
+        sam2_refine=args.sam2_refine,
+        sam2_checkpoint=args.sam2_checkpoint,
+        sam2_config=args.sam2_config,
     )
     pipeline.run(limit=args.limit)
 

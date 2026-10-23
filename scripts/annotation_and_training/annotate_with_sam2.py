@@ -57,6 +57,8 @@ except ImportError:
     SAM2ImagePredictor = None
 
 from scripts.annotation_and_training.sam2_annotator_utils import (
+    ACTIVE_BASAL_CLASS_IDS,
+    ACTIVE_CLASS_NAMES,
     CLASS_COLORS,
     CLASS_NAMES,
     DEFAULT_CROP_PADDING_RATIO,
@@ -430,6 +432,10 @@ class PrecisionSAM2Annotator:
         vouchers_csv: Union[str, Path] = "data/tables/curated_vouchers.csv",
         crops_dir: Optional[Union[str, Path]] = None,
         full_sheet: bool = False,
+        prelabel_with_lm2: bool = False,
+        lm2_weights: Union[str, Path] = "models/lm2_packera_pcd_finetuned.pth",
+        stage1_weights: Optional[Union[str, Path]] = None,
+        active_class_ids: Tuple[int, ...] = ACTIVE_BASAL_CLASS_IDS,
     ):
         self.project_root = get_project_root()
         self.images_dir = Path(images_dir)
@@ -437,6 +443,13 @@ class PrecisionSAM2Annotator:
         self.coco_output = Path(coco_output)
         self.crops_dir = Path(crops_dir) if crops_dir is not None else None
         self.full_sheet = bool(full_sheet)
+        self.prelabel_with_lm2 = bool(prelabel_with_lm2)
+        self.lm2_weights = Path(lm2_weights)
+        self.stage1_weights = Path(stage1_weights) if stage1_weights is not None else None
+        self.active_class_ids: Tuple[int, ...] = tuple(active_class_ids)
+        self.lm2_stage1_detector: Optional[Any] = None
+        self.lm2_pointrend_engine: Optional[Any] = None
+        self.sam2_boundary_refiner: Optional[Any] = None
         self.masks_dir = self.output_dir / "masks"
         self.labels_dir = self.output_dir / "labels"
 
@@ -643,16 +656,235 @@ class PrecisionSAM2Annotator:
 
     def _init_model(self) -> None:
         """Initializes SAM 2 model weights and image predictor."""
-        if build_sam2 is None or SAM2ImagePredictor is None:
-            return
-
-        if self.checkpoint_path.exists():
+        if build_sam2 is not None and SAM2ImagePredictor is not None and self.checkpoint_path.exists():
             try:
                 sam2_model = build_sam2(self.config_path, str(self.checkpoint_path), device=self.device)
                 self.predictor = SAM2ImagePredictor(sam2_model)
                 logger.info(f"Loaded SAM 2 model ({self.config_path}) onto {self.device}")
             except Exception as e:
                 logger.error(f"Failed to load SAM 2 weights: {e}")
+
+        if getattr(self, "prelabel_with_lm2", False):
+            self._init_lm2_prelabeler()
+
+    def _init_lm2_prelabeler(self) -> None:
+        """Initializes Stage 1 LeafPriority.pt + Stage 2 PointRend + SAM 2 refiner for automated pre-labeling."""
+        if self.lm2_pointrend_engine is not None and self.sam2_boundary_refiner is not None:
+            return
+        try:
+            import importlib
+            step02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
+            if self.lm2_stage1_detector is None:
+                self.lm2_stage1_detector = step02.LM2Stage1Detector(
+                    weights_path=getattr(self, "stage1_weights", None),
+                    device=self.device,
+                    conf_thres=0.25,
+                )
+            if self.lm2_pointrend_engine is None:
+                self.lm2_pointrend_engine = step02.PointRendInferenceEngine(
+                    weights_path=getattr(self, "lm2_weights", "models/lm2_packera_pcd_finetuned.pth"),
+                    device=self.device,
+                    score_thresh=0.40,
+                )
+            if self.sam2_boundary_refiner is None:
+                self.sam2_boundary_refiner = step02.SAM2BoundaryRefiner(
+                    checkpoint_path=self.checkpoint_path,
+                    model_cfg=self.config_path,
+                    device=self.device,
+                    predictor=self.predictor,
+                )
+        except Exception as e:
+            logger.debug(f"Could not initialize LM2 pre-labeler runtime ({e}).")
+
+    def prelabel_current_sheet_with_lm2(self) -> List[Dict[str, Any]]:
+        """
+        Pre-populates `self.saved_instances` on the active voucher sheet using the automated
+        Two-Stage LM2 (LeafPriority.pt + PointRend) -> SAM 2 boundary refinement pipeline.
+        Restricts pre-labeled classes strictly to basal leaves:
+          - 0: basal_leaf_whole
+          - 1: basal_leaf_partial
+        """
+        if self.active_image is None:
+            return []
+
+        self._init_lm2_prelabeler()
+
+        import importlib
+        step02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
+        from scripts.vision.lm2_data_loader import LM2_LEAF_CLASS_IDS
+        from scripts.vision.lm2_geometry_utils import classify_and_route_leaf
+
+        sheet_h, sheet_w = self.active_image.shape[:2]
+        voucher_id = (
+            self.image_files[self.current_idx].stem
+            if (hasattr(self, "image_files") and self.image_files and self.current_idx < len(self.image_files))
+            else "voucher"
+        )
+
+        refiner = getattr(self, "sam2_boundary_refiner", None)
+        if refiner is None:
+            refiner = step02.SAM2BoundaryRefiner(
+                checkpoint_path=getattr(self, "checkpoint_path", None),
+                model_cfg=getattr(self, "config_path", "sam2_hiera_l.yaml"),
+                device=getattr(self, "device", "cpu"),
+                predictor=getattr(self, "predictor", None),
+            )
+            self.sam2_boundary_refiner = refiner
+        elif getattr(self, "predictor", None) is not None and refiner.predictor is None:
+            refiner.predictor = self.predictor
+
+        stage1_dets = []
+        if self.lm2_stage1_detector is not None:
+            stage1_dets = self.lm2_stage1_detector.predict(self.active_image, catalog_number=voucher_id)
+
+        candidate_leaf_masks: List[Tuple[np.ndarray, int]] = []
+
+        if stage1_dets and self.lm2_pointrend_engine is not None:
+            for s1_item in stage1_dets:
+                if len(s1_item) == 4:
+                    s1_bbox, _s1_mask, _s1_score, s1_cls = s1_item
+                else:
+                    s1_bbox, _s1_score, s1_cls = s1_item
+                if int(s1_cls) not in LM2_LEAF_CLASS_IDS:
+                    continue
+                crop_bgr, crop_box = step02.crop_leaf_bbox_with_padding(self.active_image, s1_bbox, pad_ratio=0.12)
+                if crop_bgr.size == 0:
+                    continue
+                crop_preds = self.lm2_pointrend_engine.predict(crop_bgr)
+                for _pr_bbox, pr_mask, _pr_score, _pr_cls in crop_preds:
+                    m_refined = refiner.refine_crop_mask(crop_bgr, pr_mask)
+                    sheet_mask, _full_bbox = step02.reproject_crop_mask_to_sheet(
+                        m_refined, crop_box, (sheet_h, sheet_w)
+                    )
+                    candidate_leaf_masks.append((sheet_mask, int(s1_cls)))
+        elif self.lm2_pointrend_engine is not None:
+            raw_dets = self.lm2_pointrend_engine.predict(self.active_image)
+            for bbox, mask, _score, cls_id in raw_dets:
+                if int(cls_id) not in LM2_LEAF_CLASS_IDS:
+                    continue
+                crop_bgr, crop_box = step02.crop_leaf_bbox_with_padding(self.active_image, bbox, pad_ratio=0.12)
+                cy0, cx0, cy1, cx1 = crop_box
+                sheet_mask = mask
+                if crop_bgr.size > 0 and cy1 > cy0 and cx1 > cx0:
+                    crop_m_init = mask[cy0:cy1, cx0:cx1]
+                    crop_m_refined = refiner.refine_crop_mask(crop_bgr, crop_m_init)
+                    sheet_mask, _ = step02.reproject_crop_mask_to_sheet(
+                        crop_m_refined, crop_box, (sheet_h, sheet_w)
+                    )
+                candidate_leaf_masks.append((sheet_mask, int(cls_id)))
+
+        prelabeled_instances: List[Dict[str, Any]] = []
+        for sheet_mask, s1_cls in candidate_leaf_masks:
+            if sheet_mask is None or np.count_nonzero(sheet_mask) == 0:
+                continue
+            routing_res = classify_and_route_leaf(sheet_mask)
+            # Restrict strictly to basal leaf classes: 0 (basal_leaf_whole) or 1 (basal_leaf_partial)
+            if int(s1_cls) == 0 and routing_res.assigned_tier == "tier1" and not routing_res.is_folded:
+                target_cls = 0
+            else:
+                target_cls = 1
+
+            if target_cls not in getattr(self, "active_class_ids", ACTIVE_BASAL_CLASS_IDS):
+                target_cls = 0
+
+            label = CLASS_NAMES[target_cls]
+            polygons, _, _ = mask_to_polygons(sheet_mask, min_area_px=10.0)
+            if not polygons:
+                continue
+            poly = [
+                round(val / (sheet_w if i % 2 == 0 else sheet_h), 6)
+                for i, val in enumerate(polygons[0])
+            ]
+            prelabeled_instances.append({
+                "class_id": target_cls,
+                "label": label,
+                "polygon": poly,
+                "binary_mask": sheet_mask > 0,
+                "mask": (sheet_mask > 0).astype(np.uint8) * 255,
+                "prelabeled": True,
+            })
+
+        # Restore full-sheet embedding on SAM 2 predictor after crop-level refinements
+        if getattr(self, "predictor", None) is not None and self.active_image is not None:
+            try:
+                img_rgb = cv2.cvtColor(self.active_image, cv2.COLOR_BGR2RGB)
+                self.predictor.set_image(img_rgb)
+            except Exception:
+                pass
+
+        if prelabeled_instances:
+            self.saved_instances = prelabeled_instances
+            self.is_dirty = True
+            self._update_cached_base_layer()
+            logger.info(
+                f"Pre-labeled {len(prelabeled_instances)} basal leaf instances on voucher {voucher_id} "
+                "via automated LM2 + SAM 2 pipeline."
+            )
+
+        return prelabeled_instances
+
+    def apply_knife_to_saved_instances(
+        self,
+        pt_a: Tuple[int, int],
+        pt_b: Tuple[int, int],
+        line_thickness: int = 2,
+        dilation_px: int = 2,
+    ) -> bool:
+        """
+        Applies a 2-click knife cut directly to any pre-labeled / saved instance in
+        `self.saved_instances` intersected by the cut segment `pt_a -> pt_b`, retaining
+        the largest connected component and updating its polygon and cached overlay.
+        """
+        if not self.saved_instances:
+            return False
+
+        h, w = int(getattr(self, "orig_h", 1000)), int(getattr(self, "orig_w", 1000))
+        line_canvas = np.zeros((h, w), dtype=np.uint8)
+        cv2.line(line_canvas, pt_a, pt_b, 255, thickness=max(1, line_thickness + dilation_px))
+
+        modified = False
+        for inst in self.saved_instances:
+            inst_mask = inst.get("mask")
+            if inst_mask is None:
+                b_mask = inst.get("binary_mask")
+                if b_mask is None:
+                    continue
+                inst_mask = (b_mask > 0).astype(np.uint8) * 255
+
+            if inst_mask.shape[:2] != (h, w):
+                continue
+
+            if np.count_nonzero((inst_mask > 0) & (line_canvas > 0)) == 0:
+                continue
+
+            # Compute interior pole of original mask to guide component retention
+            dist = cv2.distanceTransform((inst_mask > 0).astype(np.uint8) * 255, cv2.DIST_L2, 5)
+            _, max_val, _, max_loc = cv2.minMaxLoc(dist)
+            keep_pts = [(float(max_loc[0]), float(max_loc[1]))] if max_val > 0 else None
+
+            severed = split_mask_with_knife_line(
+                inst_mask,
+                pt_a,
+                pt_b,
+                line_thickness=line_thickness,
+                dilation_px=dilation_px,
+                keep_points=keep_pts,
+            )
+            polygons, _, _ = mask_to_polygons(severed, min_area_px=1.0)
+            if polygons:
+                poly = [
+                    round(val / (w if i % 2 == 0 else h), 6)
+                    for i, val in enumerate(polygons[0])
+                ]
+                inst["polygon"] = poly
+            inst["mask"] = severed
+            inst["binary_mask"] = severed > 0
+            modified = True
+
+        if modified:
+            self.is_dirty = True
+            self._update_cached_base_layer()
+        return modified
 
     def _update_cached_base_layer(self) -> None:
         """Pre-composites saved instances onto base image."""
@@ -1035,6 +1267,8 @@ class PrecisionSAM2Annotator:
         self.saved_instances = self._load_existing_instances(voucher_id)
         if self.saved_instances:
             logger.info(f"Loaded {len(self.saved_instances)} existing instance annotations for voucher {voucher_id}")
+        elif getattr(self, "prelabel_with_lm2", False):
+            self.prelabel_current_sheet_with_lm2()
 
         self._update_cached_base_layer()
 
@@ -1258,6 +1492,11 @@ class PrecisionSAM2Annotator:
                                             f"Applied 2-click knife cut from {self.knife_pt_a} to {(ix, iy)} "
                                             f"(retained target prompt component, pruned severed fragment)."
                                         )
+                                    elif self.saved_instances:
+                                        if self.apply_knife_to_saved_instances(self.knife_pt_a, (ix, iy)):
+                                            logger.info(
+                                                f"Applied 2-click knife cut to pre-labeled/saved instance from {self.knife_pt_a} to {(ix, iy)}."
+                                            )
                                     self.knife_pt_a = None
                                     self.mode = "SELECT"
                                     logger.info("Knife cut complete -> switched back to SELECT mode.")
@@ -1382,11 +1621,17 @@ class PrecisionSAM2Annotator:
                         if sym in (ord('z'), ord('Z'), 0xff08, 0xffff, 0xffae, 0xff9f):
                             self.undo_last_point()
 
-                        # Instant Class Commit (0 through 6, top-row or numpad)
+                        # Instant Class Commit (restricted to active basal leaf classes 0 and 1 in HUD)
                         elif sym in KEYSYM_TO_CLASS:
                             class_id = KEYSYM_TO_CLASS[sym]
-                            if 0 <= class_id < len(CLASS_NAMES):
+                            active_ids = getattr(self, "active_class_ids", ACTIVE_BASAL_CLASS_IDS)
+                            if class_id in active_ids and 0 <= class_id < len(CLASS_NAMES):
                                 self.commit_active_instance(class_id)
+                            else:
+                                logger.info(
+                                    f"Ignored non-basal class key {class_id}; active HUD classes are "
+                                    "0 (basal_leaf_whole) and 1 (basal_leaf_partial)."
+                                )
 
                         # Multimask proposal cycling (Tab key or Keypad /)
                         elif sym in (0xff09, 0xffaf):
@@ -1539,6 +1784,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--index", type=int, default=None, help="Jump directly to a 1-based voucher index (e.g. 5)")
     parser.add_argument("--tier", type=str, default="1", choices=["1", "2", "3", "all"], help="Filter vouchers by determiner authority tier (default: '1' for Tier 1 Gold monograph authorities; 'all' for all 5347 vouchers)")
     parser.add_argument("--vouchers-csv", type=str, default="data/tables/curated_vouchers.csv", help="Path to curated vouchers metadata CSV")
+    parser.add_argument(
+        "--prelabel-with-lm2",
+        dest="prelabel_with_lm2",
+        action="store_true",
+        default=False,
+        help="Pre-populate saved_instances on each voucher sheet using automated LM2 + SAM 2 basal leaf segmentation.",
+    )
+    parser.add_argument(
+        "--lm2-weights",
+        type=str,
+        default="models/lm2_packera_pcd_finetuned.pth",
+        help="Stage 2 PointRend weights checkpoint for --prelabel-with-lm2.",
+    )
+    parser.add_argument(
+        "--stage1-weights",
+        type=str,
+        default=None,
+        help="Optional Stage 1 YOLOv5 LeafPriority.pt weights path for --prelabel-with-lm2.",
+    )
     return parser.parse_args()
 
 
@@ -1578,6 +1842,9 @@ def main() -> None:
         vouchers_csv=args.vouchers_csv,
         crops_dir=args.crops_dir,
         full_sheet=args.full_sheet,
+        prelabel_with_lm2=args.prelabel_with_lm2,
+        lm2_weights=args.lm2_weights,
+        stage1_weights=args.stage1_weights,
     )
     logger.info("Launching Precision SAM 2 Annotator GUI...")
     annotator.run()

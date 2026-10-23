@@ -379,6 +379,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 "--output-plot", str(out_plot),
                 "--permutations", "10",
                 "--n-trees", "50",
+                "--demo",
             ]
 
             if shutil.which("Rscript"):
@@ -393,6 +394,12 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             self.assertEqual(res.returncode, 0)
             self.assertTrue(out_flags.exists(), "multimodal_conflict_flags.csv must be generated.")
             self.assertTrue(out_summary.exists(), "niche_identity_tests.csv must be generated.")
+
+            # Verify synthetic SSURGO records are never cached into ssurgo_cache
+            cache_dir = tmp / "ssurgo_cache"
+            if cache_dir.exists():
+                cached_files = list(cache_dir.glob("*.rds")) + list(cache_dir.glob("*.csv"))
+                self.assertEqual(cached_files, [], "Synthetic SSURGO records must never be cached via saveRDS/write_csv.")
 
             flags_df = pd.read_csv(out_flags)
             self.assertEqual(len(flags_df), 24)
@@ -552,10 +559,15 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertIn("--pheno-anomalies", r_content)
         self.assertIn("--pheno-summary", r_content)
         self.assertIn("--pheno-plot", r_content)
+        self.assertIn("--demo", r_content)
         self.assertIn("model_latitudinal_spring_baseline", r_content)
         self.assertIn("compute_phenological_anomalies", r_content)
         self.assertIn("export_phenological_latitudinal_figures", r_content)
         self.assertIn("delta_doy", r_content)
+        self.assertIn('dplyr::left_join(vouchers_df, pheno_states_df, by = "catalogNumber")', r_content)
+        self.assertIn("vegan::varpart", r_content)
+        self.assertNotIn("* 100 - 10", r_content)
+        self.assertNotIn("* 100 - 5", r_content)
 
 
 if __name__ == "__main__":

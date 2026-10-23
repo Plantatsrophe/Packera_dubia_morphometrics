@@ -150,6 +150,7 @@ generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, 
 }
 
 test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permutations = 999, seed = 42,
+                                       r2_threshold = 0.10,
                                        output_report = "outputs/reports/allometry_significance_audit.csv",
                                        output_plot = "outputs/figures/shape_allometry_regression.pdf") {
   message("=== Foliar Allometry Assessment (Multivariate Size vs. Shape Covariation) ===")
@@ -158,14 +159,18 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
     message("Warning: log_centsize or symmetric harmonics not available. Skipping allometry test.")
     return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df))
   }
-  valid_idx <- which(!is.na(morpho_df$log_centsize) & is.finite(morpho_df$log_centsize) & complete.cases(morpho_df[, sym_names]))
+  cal_mask <- if ("is_calibrated_mm" %in% names(morpho_df)) (!is.na(morpho_df$is_calibrated_mm) & as.logical(morpho_df$is_calibrated_mm)) else rep(TRUE, nrow(morpho_df))
+  valid_idx <- which(cal_mask & !is.na(morpho_df$log_centsize) & is.finite(morpho_df$log_centsize) & complete.cases(morpho_df[, sym_names]))
   if (length(valid_idx) < 10) return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df))
 
   sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$scientificName <- factor(sub_df$scientificName)
-  Y <- as.matrix(sub_df[, sym_names, drop = FALSE]); set.seed(seed); allometry_fit <- NULL
+  gold_mask <- if ("determiner_tier" %in% names(sub_df)) (sub_df$determiner_tier == "Tier_1_Gold" & !is.na(sub_df$scientificName)) else rep(TRUE, nrow(sub_df))
+  gold_df <- if (sum(gold_mask) >= 10 && length(unique(sub_df$scientificName[gold_mask])) >= 2) sub_df[gold_mask, , drop = FALSE] else sub_df
+  gold_df$scientificName <- droplevels(factor(gold_df$scientificName))
+  Y <- as.matrix(gold_df[, sym_names, drop = FALSE]); set.seed(seed); allometry_fit <- NULL
 
   if (requireNamespace("vegan", quietly = TRUE)) {
-    allometry_fit <- tryCatch(vegan::adonis2(Y ~ log_centsize * scientificName, data = sub_df,
+    allometry_fit <- tryCatch(vegan::adonis2(Y ~ log_centsize * scientificName, data = gold_df,
                                              permutations = permutations, method = "euclidean", by = "terms"),
                               error = function(e) NULL)
   }
@@ -174,10 +179,10 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
     if ("F.Model" %in% names(anova_df)) anova_df$F <- anova_df$F.Model
     if ("Pr(>F)" %in% names(anova_df)) anova_df$p_value <- anova_df[["Pr(>F)"]]
   } else {
-    Y_cent <- scale(Y, center = TRUE, scale = FALSE); SS_tot <- sum(Y_cent^2); N_obs <- nrow(sub_df)
-    fit1 <- stats::lm(Y_cent ~ log_centsize, data = sub_df); SS_size <- sum(stats::fitted(fit1)^2); df_size <- fit1$rank - 1
-    fit2 <- stats::lm(Y_cent ~ log_centsize + scientificName, data = sub_df); SS_12 <- sum(stats::fitted(fit2)^2); SS_taxa <- SS_12 - SS_size; df_taxa <- fit2$rank - fit1$rank
-    fit3 <- stats::lm(Y_cent ~ log_centsize * scientificName, data = sub_df); SS_123 <- sum(stats::fitted(fit3)^2); SS_int <- SS_123 - SS_12; df_int <- fit3$rank - fit2$rank
+    Y_cent <- scale(Y, center = TRUE, scale = FALSE); SS_tot <- sum(Y_cent^2); N_obs <- nrow(gold_df)
+    fit1 <- stats::lm(Y_cent ~ log_centsize, data = gold_df); SS_size <- sum(stats::fitted(fit1)^2); df_size <- fit1$rank - 1
+    fit2 <- stats::lm(Y_cent ~ log_centsize + scientificName, data = gold_df); SS_12 <- sum(stats::fitted(fit2)^2); SS_taxa <- SS_12 - SS_size; df_taxa <- fit2$rank - fit1$rank
+    fit3 <- stats::lm(Y_cent ~ log_centsize * scientificName, data = gold_df); SS_123 <- sum(stats::fitted(fit3)^2); SS_int <- SS_123 - SS_12; df_int <- fit3$rank - fit2$rank
     SS_res <- SS_tot - SS_123; df_res <- N_obs - fit3$rank; MS_res <- SS_res / max(df_res, 1)
     F_size <- (SS_size / max(df_size, 1)) / MS_res; F_taxa <- (SS_taxa / max(df_taxa, 1)) / MS_res; F_int <- (SS_int / max(df_int, 1)) / MS_res
     anova_df <- data.frame(
@@ -196,7 +201,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   anova_df <- anova_df[, report_cols, drop = FALSE]
   if (!is.null(output_report) && nzchar(output_report)) {
     dir.create(dirname(output_report), recursive = TRUE, showWarnings = FALSE)
-    write.csv(anova_df, file = output_report, row.names = FALSE)
+    tmp_rep <- paste0(output_report, ".tmp"); write.csv(anova_df, file = tmp_rep, row.names = FALSE); file.rename(tmp_rep, output_report)
     message("Allometry significance audit report exported -> ", output_report)
   }
 
@@ -205,31 +210,40 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   p_size <- if (nrow(size_row) > 0 && !is.na(size_row$p_value[1])) size_row$p_value[1] else 0.0
   int_row <- anova_df[grepl("log_centsize:scientificName|scientificName:log_centsize", anova_df$Term, ignore.case = TRUE), ]
   r2_int <- if (nrow(int_row) > 0) int_row$R2[1] else 0.0
+  p_int <- if (nrow(int_row) > 0 && !is.na(int_row$p_value[1])) int_row$p_value[1] else 1.0
 
   correct_flag <- tolower(trimws(as.character(correct_mode)))
-  should_correct <- (correct_flag %in% c("true", "1", "yes")) || (correct_flag == "auto" && !is.na(r2_size) && r2_size >= 0.10)
+  slopes_homogeneous <- is.na(p_int) || (p_int > 0.05)
+  should_correct <- (correct_flag %in% c("true", "1", "yes")) || (correct_flag == "auto" && !is.na(r2_size) && r2_size >= r2_threshold && slopes_homogeneous)
 
+  # Estimate pooled within-species allometric slope beta_within from Tier 1 Gold anchors
+  fit_within <- if (nlevels(gold_df$scientificName) >= 2) stats::lm(Y ~ log_centsize + scientificName, data = gold_df) else stats::lm(Y ~ log_centsize, data = gold_df)
+  beta_within <- stats::coef(fit_within)["log_centsize", ]; beta_within[is.na(beta_within)] <- 0.0
+
+  Y <- as.matrix(sub_df[, sym_names, drop = FALSE]); log_centsize <- sub_df$log_centsize
+  Y_adj <- Y - outer(log_centsize - mean(log_centsize, na.rm = TRUE), beta_within)
+  active_cols <- which(apply(Y_adj, 2, stats::var, na.rm = TRUE) > 1e-8)
+  pca_resids <- stats::prcomp(Y_adj[, active_cols, drop = FALSE], center = TRUE, scale. = TRUE)
   sub_df$PC1_raw <- sub_df$PC1; sub_df$PC2_raw <- sub_df$PC2
-  fit_lm <- stats::lm(Y ~ log_centsize, data = sub_df)
-  shape_residuals <- stats::residuals(fit_lm)
-  pca_resids <- stats::prcomp(shape_residuals, center = TRUE, scale. = TRUE)
   sub_df$PC1_corrected <- round(pca_resids$x[, 1], 6); sub_df$PC2_corrected <- round(pca_resids$x[, 2], 6)
 
   if (should_correct) {
     message(sprintf("[INFO] Foliar allometry detected (R2 = %.2f, p = %.2f). Analyzing allometry-free shape residuals.", r2_size, p_size))
-    morpho_matrix_for_gmm <- shape_residuals
-    for (p in 1:min(5, ncol(pca_resids$x))) {
-      morpho_df[[paste0("PC", p)]] <- NA_real_; morpho_df[valid_idx, paste0("PC", p)] <- round(pca_resids$x[, p], 6)
-    }
+    morpho_matrix_for_gmm <- Y_adj
+    morpho_df[valid_idx, sym_names] <- round(Y_adj, 6)
+    all_sym_idx <- which(complete.cases(morpho_df[, sym_names]))
+    proj_pcs <- scale(as.matrix(morpho_df[all_sym_idx, sym_names[active_cols], drop = FALSE]), center = pca_resids$center, scale = pca_resids$scale) %*% pca_resids$rotation
+    for (p in 1:min(5, ncol(proj_pcs))) morpho_df[all_sym_idx, paste0("PC", p)] <- round(proj_pcs[, p], 6)
   } else {
     message(sprintf("[INFO] Foliar allometry negligible (R2 = %.2f). Analyzing raw symmetric harmonics.", r2_size))
     morpho_matrix_for_gmm <- Y
   }
 
   if (!is.null(output_plot) && nzchar(output_plot)) generate_allometry_diagnostic_plot(sub_df, r2_size, p_size, r2_int, output_plot)
-  return(list(morpho_matrix = morpho_matrix_for_gmm, corrected = should_correct,
-              r2_size = r2_size, p_size = p_size, r2_interaction = r2_int, anova_table = anova_df, df = morpho_df))
+  return(list(morpho_matrix = morpho_matrix_for_gmm, corrected = should_correct, beta_within = beta_within,
+              r2_size = r2_size, p_size = p_size, r2_interaction = r2_int, p_interaction = p_int, anova_table = anova_df, df = morpho_df))
 }
+evaluate_ontogenetic_allometry <- test_and_correct_allometry
 
 # ------------------------------------------------------------------------------
 # 3. Gaussian Mixture Modeling & Bayes Factor Testing (Seed = 42)
@@ -445,7 +459,7 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   )
   if (!is.null(output_csv) && nzchar(output_csv)) {
     dir.create(dirname(output_csv), recursive = TRUE, showWarnings = FALSE)
-    write.csv(anova_df, file = output_csv, row.names = FALSE)
+    tmp_ba <- paste0(output_csv, ".tmp"); write.csv(anova_df, file = tmp_ba, row.names = FALSE); file.rename(tmp_ba, output_csv)
   }
   return(invisible(list(lm_pc1 = lm_pc1, lm_pc2 = lm_pc2, anova_table = anova_df)))
 }
@@ -524,20 +538,23 @@ run_gmm_morphotools_pipeline <- function(opts) {
   pca_cols <- paste0("PC", 1:opts$num_pcs); missing_pca <- setdiff(pca_cols, names(efa_df))
   if (length(missing_pca) > 0) stop("Missing PCA columns in EFA table: ", paste(missing_pca, collapse = ", "))
 
+  closed_mask <- grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE)
   efa_df$assigned_tier <- ifelse(grepl("^tier_?1", efa_df$assigned_tier, ignore.case = TRUE), "Tier_1_Direct",
                                  ifelse(grepl("^tier_?2", efa_df$assigned_tier, ignore.case = TRUE), "Tier_2_Reflected", efa_df$assigned_tier))
-  closed_df <- efa_df[efa_df$assigned_tier %in% c("Tier_1_Direct", "Tier_2_Reflected"), ]
+  closed_df <- efa_df[closed_mask, ]
   valid_idx <- which(complete.cases(closed_df[, pca_cols])); closed_df <- closed_df[valid_idx, ]
 
-  # Ensure primary GMM and CDA run on specimen-level median table (1 row = 1 voucher collection event)
-  if (any(duplicated(closed_df$catalogNumber))) {
+  # Ensure primary GMM and CDA run on specimen-level median table (1 row = 1 voucher collection event; group_by(catalogNumber) & plant_individual_id)
+  if (!"plant_individual_id" %in% names(closed_df)) closed_df$plant_individual_id <- 0L
+  spec_keys <- paste0(closed_df$catalogNumber, "_", closed_df$plant_individual_id)
+  if (any(duplicated(spec_keys))) {
     message("Aggregating to specimen-level median profile (1 row = 1 voucher collection event)...")
-    num_cols <- intersect(c(pca_cols, "foliar_variance", "leaf_count", "aspect_ratio", "area_px", "centroid_size", "log_centsize"), names(closed_df))
-    meta_cols <- setdiff(names(closed_df), c(num_cols, "shape_id", "leaf_id", "mask_source"))
+    num_cols <- intersect(c(pca_cols, "foliar_variance", "leaf_count", "aspect_ratio", "solidity", "ucs_score", "area_px", "centroid_size", "log_centsize"), names(closed_df))
+    meta_cols <- setdiff(names(closed_df), c(num_cols, "catalogNumber", "plant_individual_id", "shape_id", "leaf_id", "mask_source"))
     closed_df <- closed_df %>%
-      dplyr::group_by(catalogNumber) %>%
+      dplyr::group_by(catalogNumber, plant_individual_id) %>%
       dplyr::summarise(dplyr::across(dplyr::all_of(num_cols), ~ stats::median(.x, na.rm = TRUE)),
-                       dplyr::across(dplyr::all_of(meta_cols[meta_cols != "catalogNumber"]), ~ stats::na.omit(.x)[1]),
+                       dplyr::across(dplyr::all_of(meta_cols), ~ stats::na.omit(.x)[1]),
                        .groups = "drop")
   }
   message(sprintf("Specimen-level collection units for morphometric modeling (1 row = 1 voucher): %d", nrow(closed_df)))
@@ -577,7 +594,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   target_taxa <- c("Packera anonyma", "Packera dubia", "Packera plattensis", "Packera paupercula")
   gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k)
   dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE)
-  write.csv(gmm_res$bic_table, file = opts$output_report, row.names = FALSE)
+  tmp_bic <- paste0(opts$output_report, ".tmp"); write.csv(gmm_res$bic_table, file = tmp_bic, row.names = FALSE); file.rename(tmp_bic, opts$output_report)
   message("Bayes Factor (2ΔBIC) summary report saved: ", opts$output_report)
 
   cda_res <- run_cda_with_passive_projection(closed_df, feature_cols, target_taxa)
@@ -590,11 +607,12 @@ run_gmm_morphotools_pipeline <- function(opts) {
   }
   audit_institutional_batch_effects(audited_df, output_csv = opts$output_batch_audit)
 
-  lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "species_raw", "species_standardized",
+  lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "pixels_per_mm", "is_calibrated_mm",
+                 "species_raw", "species_standardized",
                  "determiner_tier", "cda_predicted_taxon", "cda_posterior_prob", "is_passive",
                  "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster",
                  "gmm_uncertainty", "can1", "can2", "pheno_sin", "pheno_cos", "PC1", "PC2", "PC3", "PC4", "PC5",
-                 "centroid_size", "log_centsize",
+                 "centroid_size", "log_centsize", "solidity", "ucs_score",
                  "AR_inv", "AR_inv_std", "reproductive_trait_status", "capitula_count",
                  "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm")
   lead_cols <- intersect(lead_cols, names(audited_df))

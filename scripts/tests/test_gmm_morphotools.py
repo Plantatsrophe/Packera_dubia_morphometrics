@@ -259,6 +259,33 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             header = f.read(5)
         self.assertEqual(header, b"%PDF-", "File does not have valid PDF magic bytes")
 
+    def test_pooled_within_group_allometric_regression_and_zero_dropped_specimens(self):
+        """Verify pooled within-species allometry on calibrated Tier 1 Gold anchors and zero dropped Tier 1/2 specimens."""
+        with open(self.r_script_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("evaluate_ontogenetic_allometry", content)
+        self.assertIn("is_calibrated_mm", content)
+        self.assertIn("Tier_1_Gold", content)
+        self.assertIn("lm(Y ~ log_centsize + scientificName", content)
+        self.assertIn(
+            "Y_adj <- Y - outer(log_centsize - mean(log_centsize, na.rm = TRUE), beta_within)",
+            content,
+        )
+        self.assertIn(
+            'grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE)',
+            content,
+        )
+
+        # Verify zero dropped Tier 1/2 specimens in morphometric_flags.csv
+        flags_path = PROJECT_ROOT / "data" / "tables" / "morphometric_flags.csv"
+        self.assertTrue(flags_path.exists(), f"Missing {flags_path}")
+        efa_df = pd.read_csv(self.harmonics_path)
+        flags_df = pd.read_csv(flags_path)
+        closed_efa = efa_df[efa_df["assigned_tier"].astype(str).str.match(r"^tier_?[12]", case=False, na=False)]
+        expected_keys = set(zip(closed_efa["catalogNumber"].astype(str), closed_efa["plant_individual_id"].astype(int)))
+        actual_keys = set(zip(flags_df["catalogNumber"].astype(str), flags_df["plant_individual_id"].astype(int)))
+        self.assertEqual(expected_keys, actual_keys, "Zero Tier 1/2 specimens may be dropped in 04_gmm_morphotools.R")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -726,6 +726,241 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                     self.assertAlmostEqual(recs_low[0]["pixels_per_mm"], 22.5, places=3)
                     self.assertTrue(recs_low[0]["is_calibrated_mm"])
 
+    @staticmethod
+    def _build_synthetic_lyrate_mask(size: int = 400) -> np.ndarray:
+        """Synthesizes a deeply lyrate-pinnatifid basal leaf mask with terminal + bilateral lobes and deep sinuses."""
+        mask = np.zeros((size, size), dtype=np.uint8)
+        cx, cy = size // 2, size // 2
+        # Terminal lobe
+        cv2.ellipse(mask, (cx, cy - 70), (35, 45), 0, 0, 360, 255, -1)
+        # Central midrib/rachis
+        cv2.line(mask, (cx, cy - 100), (cx, cy + 100), 255, thickness=16)
+        # Bilateral pinnae lobes with deep inter-lobe sinuses
+        for y_off in [-20, 20, 60]:
+            cv2.ellipse(mask, (cx - 35, cy + y_off), (35, 12), -15, 0, 360, 255, -1)
+            cv2.ellipse(mask, (cx + 35, cy + y_off), (35, 12), 15, 0, 360, 255, -1)
+        return mask
+
+    def test_generate_sam2_prompts_from_lm2_mask_on_lyrate_leaf(self) -> None:
+        """Verify automated prompt generation (medial/lobe positive points, corner/concavity negative points, box, logits)."""
+        m_init = self._build_synthetic_lyrate_mask(400)
+        bundle = step02.generate_sam2_prompts_from_lm2_mask(m_init)
+
+        # 1. Verify positive foreground points (pole of inaccessibility + top 2 lobe distance peaks)
+        pos_pts = bundle["positive_points"]
+        self.assertGreaterEqual(pos_pts.shape[0], 2, "Must generate primary interior pole + lobe peak prompts.")
+        self.assertLessEqual(pos_pts.shape[0], 3, "At most 3 positive points (pole + top 2 lobe peaks).")
+        eroded = bundle["eroded_mask"]
+        for px, py in pos_pts:
+            ix, iy = int(round(float(px))), int(round(float(py)))
+            self.assertGreater(
+                eroded[iy, ix],
+                0,
+                f"Positive prompt {(px, py)} must lie strictly inside eroded m_init.",
+            )
+
+        # 2. Verify negative background points (4 exterior corners + deep concavity pockets outside dilated m_init)
+        neg_pts = bundle["negative_points"]
+        corner_pts = bundle["corner_points"]
+        concavity_pts = bundle["concavity_points"]
+        self.assertGreaterEqual(corner_pts.shape[0], 4, "Must include 4 exterior bounding-box corner prompts.")
+        self.assertGreaterEqual(
+            concavity_pts.shape[0],
+            1,
+            "Deeply lyrate leaf mask must yield negative prompt points in deep concavity pockets.",
+        )
+        dilated = bundle["dilated_mask"]
+        for nx, ny in neg_pts:
+            ix, iy = int(round(float(nx))), int(round(float(ny)))
+            self.assertEqual(
+                dilated[iy, ix],
+                0,
+                f"Negative prompt {(nx, ny)} must lie strictly outside dilated m_init.",
+            )
+
+        # 3. Verify combined point_coords, point_labels, box, and (1, 256, 256) low-res logits
+        self.assertEqual(bundle["point_coords"].shape[0], pos_pts.shape[0] + neg_pts.shape[0])
+        self.assertEqual(bundle["point_labels"].shape[0], bundle["point_coords"].shape[0])
+        self.assertEqual(int(np.sum(bundle["point_labels"] == 1)), pos_pts.shape[0])
+        self.assertEqual(int(np.sum(bundle["point_labels"] == 0)), neg_pts.shape[0])
+        self.assertEqual(bundle["box"].shape, (4,))
+        self.assertEqual(bundle["mask_input"].shape, (1, 256, 256))
+        self.assertEqual(bundle["mask_input"].dtype, np.float32)
+        self.assertGreater(float(np.max(bundle["mask_input"])), 0.0)
+        self.assertLess(float(np.min(bundle["mask_input"])), 0.0)
+
+    def test_sam2_boundary_refinement_and_topological_fallback(self) -> None:
+        """Verify SAM2BoundaryRefiner refines sub-pixel margins and falls back cleanly on disconnected masks."""
+        from unittest.mock import MagicMock, patch
+
+        m_init = self._build_synthetic_lyrate_mask(400)
+        crop_bgr = np.full((400, 400, 3), 210, dtype=np.uint8)
+
+        # 1. Clean fallback when SAM 2 weights/predictor are unavailable
+        refiner_no_weights = step02.SAM2BoundaryRefiner(
+            checkpoint_path=self.temp_dir / "nonexistent_sam2.pt",
+            predictor=None,
+        )
+        out_fallback = refiner_no_weights.refine_crop_mask(crop_bgr, m_init)
+        np.testing.assert_array_equal(out_fallback, m_init)
+
+        # 2. Successful refinement when SAM2ImagePredictor returns a connected refined lyrate mask
+        refined_lyrate = cv2.dilate(m_init, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
+        mock_predictor = MagicMock()
+        mock_predictor.predict.return_value = (
+            np.stack([(refined_lyrate > 0).astype(np.float32)], axis=0),
+            np.array([0.97], dtype=np.float32),
+            np.zeros((1, 256, 256), dtype=np.float32),
+        )
+        refiner_ok = step02.SAM2BoundaryRefiner(predictor=mock_predictor)
+        out_refined = refiner_ok.refine_crop_mask(crop_bgr, m_init)
+        self.assertTrue(mock_predictor.set_image.called)
+        self.assertTrue(mock_predictor.predict.called)
+        _, pred_kwargs = mock_predictor.predict.call_args
+        self.assertIn("point_coords", pred_kwargs)
+        self.assertIn("point_labels", pred_kwargs)
+        self.assertIn("box", pred_kwargs)
+        self.assertIn("mask_input", pred_kwargs)
+        self.assertEqual(pred_kwargs["mask_input"].shape, (1, 256, 256))
+        np.testing.assert_array_equal(out_refined, refined_lyrate)
+
+        # Verify trim_petiole_tail() and is_botanical_dissection() run identically on refined mask
+        trimmed_init = step02.trim_petiole_tail(m_init)
+        trimmed_refined = step02.trim_petiole_tail(out_refined)
+        self.assertGreater(np.count_nonzero(trimmed_init), 0)
+        self.assertGreater(np.count_nonzero(trimmed_refined), 0)
+        self.assertTrue(step02.is_botanical_dissection(m_init))
+        self.assertTrue(step02.is_botanical_dissection(out_refined))
+
+        # 3. Topological connectedness violation -> clean fallback to m_init
+        disconnected_mask = np.zeros_like(m_init)
+        cv2.circle(disconnected_mask, (70, 70), 25, 255, -1)
+        cv2.circle(disconnected_mask, (290, 290), 25, 255, -1)
+        self.assertFalse(step02.is_topologically_connected_mask(disconnected_mask, reference_mask=m_init))
+        mock_predictor_bad = MagicMock()
+        mock_predictor_bad.predict.return_value = (
+            np.stack([(disconnected_mask > 0).astype(np.float32)], axis=0),
+            np.array([0.99], dtype=np.float32),
+            np.zeros((1, 256, 256), dtype=np.float32),
+        )
+        refiner_bad = step02.SAM2BoundaryRefiner(predictor=mock_predictor_bad)
+        out_bad_fallback = refiner_bad.refine_crop_mask(crop_bgr, m_init)
+        np.testing.assert_array_equal(
+            out_bad_fallback,
+            m_init,
+            "Refiner must fall back cleanly to m_init when refined mask violates topological connectedness.",
+        )
+
+        # 4. Verify --sam2-refine CLI flag and pipeline integration
+        with patch("sys.argv", ["02_segment_and_extract.py", "--sam2-refine"]):
+            parsed = step02.parse_args()
+            self.assertTrue(parsed.sam2_refine)
+
+    def test_extract_tier2_reflected_45deg_asymmetric_leaf_iou(self) -> None:
+        """
+        Verify a synthetic asymmetric leaf mask oriented at 45 degrees passed into
+        extract_tier2_reflected() produces a bilaterally symmetric mask with >0.95 IoU
+        against the ground-truth unoccluded blade.
+        """
+        from scripts.vision.lm2_geometry_utils import extract_tier2_reflected
+
+        canvas_size = (400, 400)
+        gt_mask = np.zeros(canvas_size, dtype=np.uint8)
+        cx, cy = 200, 200
+        semi_major, semi_minor = 110, 45  # L=220, W=90 oriented at 45 deg
+        cv2.ellipse(gt_mask, (cx, cy), (semi_major, semi_minor), 45.0, 0, 360, 255, -1)
+
+        # Ground-truth apex and base along the 45-degree midrib axis
+        dx = int(round(semi_major * np.cos(np.deg2rad(45.0))))
+        dy = int(round(semi_major * np.sin(np.deg2rad(45.0))))
+        p_apex = (cx - dx, cy - dy)
+        p_base = (cx + dx, cy + dy)
+
+        # Create an asymmetric occluded leaf mask by subtracting an irregular bite on one lateral side
+        asymmetric_mask = gt_mask.copy()
+        # Normal to (+1, +1)/sqrt(2) is (-1, +1)/sqrt(2) -> bite centered on lower-left lateral margin
+        bite_cx = int(round(cx - 32 * np.cos(np.deg2rad(45.0))))
+        bite_cy = int(round(cy + 32 * np.sin(np.deg2rad(45.0))))
+        cv2.circle(asymmetric_mask, (bite_cx, bite_cy), 24, 0, -1)
+
+        _, reflected_mask = extract_tier2_reflected(
+            mask=asymmetric_mask,
+            catalog_number="TEST_45DEG",
+            leaf_id=1,
+            p_apex=p_apex,
+            p_base=p_base,
+            output_dir=None,
+        )
+        self.assertIsNotNone(reflected_mask, "extract_tier2_reflected must return a valid synthesized mask.")
+
+        intersection = float(np.count_nonzero((reflected_mask > 0) & (gt_mask > 0)))
+        union = float(np.count_nonzero((reflected_mask > 0) | (gt_mask > 0)))
+        iou = intersection / max(union, 1.0)
+        self.assertGreater(
+            iou,
+            0.95,
+            f"Reflected 45-deg leaf mask must achieve >0.95 IoU against ground-truth unoccluded blade (got {iou:.4f}).",
+        )
+
+    def test_export_standardized_contour_isotropic_aspect_ratio_preservation(self) -> None:
+        """
+        Verify an oblong leaf with L/W = 3.0 exported via export_standardized_contour()
+        retains (max(x_norm) - min(x_norm)) / (max(y_norm) - min(y_norm)) == 3.0 within 1e-3.
+        """
+        mask = np.zeros((500, 500), dtype=np.uint8)
+        # Oblong leaf with semi-axes a=150 (L=300), b=50 (W=100) -> L/W = 3.0
+        cv2.ellipse(mask, (250, 250), (50, 150), 0.0, 0, 360, 255, -1)
+
+        csv_path = export_standardized_contour(
+            mask,
+            catalog_number="TEST_OBLONG_LW3",
+            leaf_id=1,
+            output_dir=self.temp_dir,
+            num_points=120,
+            petiole_attachment_pt=(250, 400),
+        )
+        self.assertIsNotNone(csv_path)
+        df = pd.read_csv(csv_path)
+
+        span_x_norm = float(df["x_norm"].max() - df["x_norm"].min())
+        span_y_norm = float(df["y_norm"].max() - df["y_norm"].min())
+        lw_ratio = span_x_norm / max(span_y_norm, 1e-9)
+        self.assertAlmostEqual(
+            lw_ratio,
+            3.0,
+            delta=1e-3,
+            msg=f"Isotropically normalized contour must preserve L/W = 3.0 within 1e-3 (got {lw_ratio:.6f}).",
+        )
+
+    def test_base_apex_polarity_disambiguation_and_label_blind_dissection(self) -> None:
+        """
+        Verify compute_geometric_metrics() disambiguates p_base (narrow tapering stalk end)
+        from p_apex (broad lamina tip) regardless of cv2.fitLine sign, and classify_and_route_leaf()
+        never leaks taxonomic label into dissection gatekeeping.
+        """
+        from scripts.vision.lm2_geometry_utils import classify_and_route_leaf
+
+        # 1. Oblanceolate/spathulate leaf with narrow stalk at TOP (y=60) and broad rounded apex at BOTTOM (y=300)
+        mask = np.zeros((400, 400), dtype=np.uint8)
+        cv2.ellipse(mask, (200, 240), (45, 70), 0.0, 0, 360, 255, -1)
+        cv2.rectangle(mask, (194, 60), (206, 185), 255, -1)
+
+        _, _, _, p_apex, p_base = compute_geometric_metrics(mask)
+        self.assertLess(
+            p_base[1],
+            p_apex[1],
+            f"Narrow tapering petiole stalk at top (y~60) must be identified as p_base, got p_base={p_base}, p_apex={p_apex}.",
+        )
+
+        # 2. Unilateral bite on low-solidity leaf with lyrate taxon label must NOT be accepted as dissected
+        bitten = np.zeros((400, 400), dtype=np.uint8)
+        cv2.ellipse(bitten, (200, 200), (65, 110), 0.0, 0, 360, 255, -1)
+        cv2.ellipse(bitten, (145, 200), (58, 65), 0.0, 0, 360, 0, -1)
+        res_paupercula = classify_and_route_leaf(bitten, taxon="Packera paupercula")
+        res_dubia = classify_and_route_leaf(bitten, taxon="Packera dubia")
+        self.assertFalse(res_paupercula.is_dissected)
+        self.assertEqual(res_paupercula.assigned_tier, res_dubia.assigned_tier)
+
 
 if __name__ == "__main__":
     unittest.main()

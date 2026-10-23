@@ -13,6 +13,7 @@ Description:
 ===============================================================================
 """
 
+import argparse
 import sys
 from pathlib import Path
 import numpy as np
@@ -447,13 +448,56 @@ def generate_publication_figure(
     print(f"[INFO] Publication-ready 2-panel figure exported to: {out_pdf}")
 
 
-def main():
-    vouchers_csv = PROJECT_ROOT / "data" / "tables" / "curated_vouchers.csv"
-    anomalies_out = PROJECT_ROOT / "data" / "tables" / "phenological_anomalies.csv"
-    summary_out = PROJECT_ROOT / "outputs" / "reports" / "phenological_anomaly_summary.csv"
-    plot_out = PROJECT_ROOT / "outputs" / "figures" / "phenological_latitudinal_anomaly.pdf"
+def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for phenological artifact generation."""
+    parser = argparse.ArgumentParser(
+        description="Generate phenological cline artifacts, anthesis diagnostics, and ANOVA/Tukey summaries."
+    )
+    parser.add_argument(
+        "--vouchers",
+        type=Path,
+        default=PROJECT_ROOT / "data" / "tables" / "curated_vouchers.csv",
+        help="Path to curated vouchers CSV (default: data/tables/curated_vouchers.csv).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=PROJECT_ROOT / "outputs" / "figures",
+        help="Output directory for diagnostic figures (default: outputs/figures/).",
+    )
+    parser.add_argument(
+        "--anomalies-out",
+        type=Path,
+        default=PROJECT_ROOT / "data" / "tables" / "phenological_anomalies.csv",
+        help="Output path for voucher-level phenological anomalies CSV.",
+    )
+    parser.add_argument(
+        "--summary-out",
+        type=Path,
+        default=PROJECT_ROOT / "outputs" / "reports" / "phenological_anomaly_summary.csv",
+        help="Output path for ANOVA/Tukey summary CSV.",
+    )
+    parser.add_argument(
+        "--plot-out",
+        type=Path,
+        default=None,
+        help="Explicit output PDF path (defaults to <output-dir>/phenological_latitudinal_anomaly.pdf).",
+    )
+    return parser.parse_args()
 
-    res = compute_phenological_anomalies_and_stats(
+
+def main():
+    args = parse_args()
+    vouchers_csv = Path(args.vouchers)
+    anomalies_out = Path(args.anomalies_out)
+    summary_out = Path(args.summary_out)
+    plot_out = (
+        Path(args.plot_out)
+        if args.plot_out is not None
+        else Path(args.output_dir) / "phenological_latitudinal_anomaly.pdf"
+    )
+
+    compute_phenological_anomalies_and_stats(
         vouchers_csv=vouchers_csv,
         anomalies_out=anomalies_out,
         summary_out=summary_out,

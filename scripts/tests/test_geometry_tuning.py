@@ -407,6 +407,81 @@ class TestGeometryTuning(unittest.TestCase):
         self.assertTrue(temp_plot_path.exists())
         self.assertGreater(temp_plot_path.stat().st_size, 2000)
 
+    def test_extract_tier2_reflected_45deg_asymmetric_leaf_iou(self) -> None:
+        """
+        Verify a synthetic asymmetric leaf mask oriented at 45 degrees passed into
+        extract_tier2_reflected() produces a bilaterally symmetric mask with >0.95 IoU
+        against the ground-truth unoccluded blade.
+        """
+        from scripts.vision.lm2_geometry_utils import extract_tier2_reflected
+
+        canvas_size = (400, 400)
+        gt_mask = np.zeros(canvas_size, dtype=np.uint8)
+        cx, cy = 200, 200
+        semi_major, semi_minor = 110, 45
+        cv2.ellipse(gt_mask, (cx, cy), (semi_major, semi_minor), 45.0, 0, 360, 255, -1)
+
+        dx = int(round(semi_major * np.cos(np.deg2rad(45.0))))
+        dy = int(round(semi_major * np.sin(np.deg2rad(45.0))))
+        p_apex = (cx - dx, cy - dy)
+        p_base = (cx + dx, cy + dy)
+
+        asymmetric_mask = gt_mask.copy()
+        bite_cx = int(round(cx - 32 * np.cos(np.deg2rad(45.0))))
+        bite_cy = int(round(cy + 32 * np.sin(np.deg2rad(45.0))))
+        cv2.circle(asymmetric_mask, (bite_cx, bite_cy), 24, 0, -1)
+
+        _, reflected_mask = extract_tier2_reflected(
+            mask=asymmetric_mask,
+            catalog_number="TUNE_45DEG",
+            leaf_id=1,
+            p_apex=p_apex,
+            p_base=p_base,
+            output_dir=None,
+        )
+        self.assertIsNotNone(reflected_mask)
+
+        intersection = float(np.count_nonzero((reflected_mask > 0) & (gt_mask > 0)))
+        union = float(np.count_nonzero((reflected_mask > 0) | (gt_mask > 0)))
+        iou = intersection / max(union, 1.0)
+        self.assertGreater(
+            iou,
+            0.95,
+            f"Reflected 45-deg leaf mask must achieve >0.95 IoU against ground-truth blade (got {iou:.4f}).",
+        )
+
+    def test_export_standardized_contour_oblong_aspect_ratio_preservation(self) -> None:
+        """
+        Verify an oblong leaf with L/W = 3.0 exported via export_standardized_contour()
+        retains (max(x_norm) - min(x_norm)) / (max(y_norm) - min(y_norm)) == 3.0 within 1e-3.
+        """
+        import pandas as pd
+        from scripts.vision.lm2_geometry_utils import export_standardized_contour
+
+        mask = np.zeros((500, 500), dtype=np.uint8)
+        cv2.ellipse(mask, (250, 250), (50, 150), 0.0, 0, 360, 255, -1)
+
+        csv_path = export_standardized_contour(
+            mask,
+            catalog_number="TUNE_OBLONG_LW3",
+            leaf_id=1,
+            output_dir=self.tmp_path,
+            num_points=120,
+            petiole_attachment_pt=(250, 400),
+        )
+        self.assertIsNotNone(csv_path)
+        df = pd.read_csv(csv_path)
+
+        span_x_norm = float(df["x_norm"].max() - df["x_norm"].min())
+        span_y_norm = float(df["y_norm"].max() - df["y_norm"].min())
+        lw_ratio = span_x_norm / max(span_y_norm, 1e-9)
+        self.assertAlmostEqual(
+            lw_ratio,
+            3.0,
+            delta=1e-3,
+            msg=f"Isotropically normalized contour must preserve L/W = 3.0 within 1e-3 (got {lw_ratio:.6f}).",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -37,6 +38,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
@@ -74,6 +76,7 @@ __all__ = [
     "compute_out_of_fold_probabilities",
     "run_confident_learning_audit",
     "blend_heatmap_on_image",
+    "compute_vit_patch_saliency",
     "generate_gradcam_panel",
     "main",
 ]
@@ -324,10 +327,12 @@ class RosettePatchDataset(Dataset):
         records: List[Dict],
         transform: transforms.Compose,
         neutralize_background: bool = True,
+        demo: bool = False,
     ):
         self.records = records
         self.transform = transform
         self.neutralize_background = neutralize_background
+        self.demo = demo
 
     def __len__(self) -> int:
         return len(self.records)
@@ -339,8 +344,14 @@ class RosettePatchDataset(Dataset):
             image = Image.open(image_path).convert("RGB")
             if self.neutralize_background:
                 image = neutralize_mounting_paper(image)
-        else:
+        elif self.demo:
             image = Image.new("RGB", (224, 224), color=(128, 128, 128))
+        else:
+            raise RuntimeError(
+                f"Rosette patch image missing at '{image_path}'. "
+                "Remediation: Run Phase 2 (`python main.py segment`) to extract organ/rosette crops "
+                "into `data/cropped_patches/`, or pass `--demo` explicitly for synthetic testing."
+            )
         tensor = self.transform(image)
         return tensor, rec["label_idx"], rec["catalogNumber"]
 
@@ -348,6 +359,7 @@ class RosettePatchDataset(Dataset):
 def load_and_link_rosette_patches(
     rosette_dir: Path,
     vouchers_csv: Path,
+    demo: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     """Links rosette patch image files with curated herbarium metadata and classifies foliar orientation."""
     rosette_dir = Path(rosette_dir)
@@ -388,6 +400,7 @@ def load_and_link_rosette_patches(
             orient_info = classify_foliar_surface_orientation(p)
             records.append({
                 "catalogNumber": cat_num,
+                "plant_individual_id": int(meta.get("plant_individual_id", 0)),
                 "patch_path": str(p),
                 "taxon": std_taxon,
                 "species_raw": raw_sp,
@@ -398,6 +411,12 @@ def load_and_link_rosette_patches(
                 "mean_saturation": orient_info["mean_saturation"],
                 "high_brightness_ratio": orient_info["high_brightness_ratio"],
             })
+    elif not demo:
+        raise RuntimeError(
+            f"No cropped rosette/leaf patch images found in '{rosette_dir}'. "
+            "Remediation: Run Phase 2 (`python main.py segment`) to populate `data/cropped_patches/`, "
+            "or pass `--demo` explicitly for synthetic demo execution."
+        )
     elif not vouchers_df.empty:
         for _, row in vouchers_df.iterrows():
             raw_sp = str(row.get("species_raw", row.get("species", "Unknown")))
@@ -418,6 +437,7 @@ def load_and_link_rosette_patches(
             )
             records.append({
                 "catalogNumber": cat_num,
+                "plant_individual_id": int(row.get("plant_individual_id", 0)),
                 "patch_path": str(real_path),
                 "taxon": std_taxon,
                 "species_raw": raw_sp,
@@ -444,10 +464,34 @@ def extract_dinov2_embeddings(
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     batch_size: int = 32,
     neutralize_background: bool = True,
+    demo: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    """Extracts 768-dimensional DINOv2 self-supervised [CLS] token representations."""
+    """Extracts 768-dimensional DINOv2 self-supervised [CLS] token representations.
+
+    When `demo=False` (production default), raises a `RuntimeError` if physical
+    patch images are missing or if DINOv2 weights cannot be loaded.
+    """
     torch.manual_seed(42)
     np.random.seed(42)
+
+    has_physical_images = bool(records) and any(Path(r["patch_path"]).exists() for r in records[:5])
+    if not has_physical_images:
+        if not demo:
+            raise RuntimeError(
+                "No physical patch images found in `data/cropped_patches/` (or provided records). "
+                "Remediation: Run Phase 2 (`python main.py segment`) to generate cropped leaf/rosette "
+                "patches before running Phase 5, or pass `--demo` explicitly for synthetic verification."
+            )
+        n = len(records)
+        labels = np.array([r["label_idx"] for r in records])
+        feats = np.random.randn(n, 768).astype(np.float32)
+        for i in range(n):
+            feats[i, labels[i] * 50:(labels[i] + 1) * 50] += 3.0
+            if i % 15 == 0:  # Inject simulated label noise in explicit --demo mode only
+                feats[i, :] = np.random.randn(768)
+                feats[i, ((labels[i] + 1) % 4) * 50:(((labels[i] + 1) % 4) + 1) * 50] += 4.0
+        cat_nums = [r["catalogNumber"] for r in records]
+        return feats, labels, cat_nums
 
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -456,27 +500,20 @@ def extract_dinov2_embeddings(
     ])
 
     dataset = RosettePatchDataset(
-        records, transform=transform, neutralize_background=neutralize_background
+        records, transform=transform, neutralize_background=neutralize_background, demo=demo
     )
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-
-    # Fast reproducible simulation for tests without physical patch crops
-    if not any(Path(r["patch_path"]).exists() for r in records[:5]):
-        n = len(records)
-        labels = np.array([r["label_idx"] for r in records])
-        feats = np.random.randn(n, 768).astype(np.float32)
-        for i in range(n):
-            feats[i, labels[i] * 50:(labels[i] + 1) * 50] += 3.0
-            if i % 15 == 0:  # Inject simulated label noise
-                feats[i, :] = np.random.randn(768)
-                feats[i, ((labels[i] + 1) % 4) * 50:(((labels[i] + 1) % 4) + 1) * 50] += 4.0
-        cat_nums = [r["catalogNumber"] for r in records]
-        return feats, labels, cat_nums
 
     try:
         model = torch.hub.load("facebookresearch/dinov2", model_name)
     except Exception as e:
-        logger.warning(f"Could not load torch.hub dinov2: {e}. Generating simulated features.")
+        if not demo:
+            raise RuntimeError(
+                f"Could not load DINOv2 model weights ('{model_name}') via torch.hub: {e}. "
+                "Remediation: Ensure internet access or pre-cache DINOv2 weights under "
+                "`~/.cache/torch/hub/facebookresearch_dinov2_main`, or pass `--demo` explicitly."
+            ) from e
+        logger.warning(f"Could not load torch.hub dinov2: {e}. Generating demo features (--demo).")
         feats = np.random.randn(len(records), 768).astype(np.float32)
         labels = np.array([r["label_idx"] for r in records])
         cat_nums = [r["catalogNumber"] for r in records]
@@ -687,19 +724,140 @@ def blend_heatmap_on_image(
     return blended
 
 
+class _DemoViTFeatureExtractor:
+    """Explicit `--demo` mode patch-token feature extractor following the DINOv2 ViT contract."""
+
+    def __init__(self, embed_dim: int = 768, patch_size: int = 14):
+        self.embed_dim = embed_dim
+        self.patch_size = patch_size
+
+    def forward_features(self, img_tensor: torch.Tensor) -> Dict[str, torch.Tensor]:
+        b, c, h, w = img_tensor.shape
+        ps = self.patch_size
+        h_p = max(1, h // ps)
+        w_p = max(1, w // ps)
+        # Pool spatial patches into (B, H_p * W_p, C) and deterministically project to 768-dim
+        pooled = F.adaptive_avg_pool2d(img_tensor, (h_p, w_p))  # (B, C, H_p, W_p)
+        patches = pooled.permute(0, 2, 3, 1).reshape(b, h_p * w_p, c)
+        repeats = (self.embed_dim + c - 1) // c
+        patch_tokens = patches.repeat(1, 1, repeats)[:, :, : self.embed_dim]
+        patch_tokens = F.layer_norm(patch_tokens, (self.embed_dim,))
+        cls_token = patch_tokens.mean(dim=1)
+        return {
+            "x_norm_patchtokens": patch_tokens,
+            "x_norm_clstoken": cls_token,
+        }
+
+
+def compute_vit_patch_saliency(
+    img_arr: np.ndarray,
+    model: Any,
+    classifier: Optional[LogisticRegression] = None,
+    target_class_idx: Optional[int] = None,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+) -> np.ndarray:
+    """Computes genuine DINOv2 ViT patch-token saliency attribution heatmap.
+
+    Extracts final-layer DINOv2 ViT patch token features F in R^(H_p x W_p x 768)
+    via `model.forward_features(img_tensor)["x_norm_patchtokens"]`, computes the
+    dot product of each patch token with the fitted LogisticRegression weight
+    vector w_c for the predicted taxon (or [CLS] token self-attention/affinity
+    rollout across tokens when classifier weights are not supplied), applies ReLU,
+    and upsamples via bicubic interpolation to `(H, W)`.
+    """
+    h, w = img_arr.shape[:2]
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    pil_img = Image.fromarray(img_arr.astype(np.uint8)).convert("RGB")
+    img_tensor = transform(pil_img).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        feat_dict = model.forward_features(img_tensor)
+        patch_tokens = feat_dict["x_norm_patchtokens"]  # (1, N_p, 768)
+        cls_token = feat_dict.get("x_norm_clstoken", None)  # (1, 768)
+
+    patch_tokens_t = patch_tokens[0]
+    num_patches, embed_dim = patch_tokens_t.shape
+    h_p = max(1, int(np.round(np.sqrt(num_patches))))
+    w_p = max(1, num_patches // h_p)
+    F_patches = patch_tokens_t[: h_p * w_p].reshape(h_p, w_p, embed_dim)
+
+    w_c: Optional[torch.Tensor] = None
+    if classifier is not None and hasattr(classifier, "coef_"):
+        coef = np.asarray(classifier.coef_, dtype=np.float32)
+        if target_class_idx is None and cls_token is not None:
+            cls_np = cls_token.detach().cpu().numpy()
+            target_class_idx = int(classifier.predict(cls_np)[0])
+        if target_class_idx is not None:
+            classes = list(getattr(classifier, "classes_", range(coef.shape[0])))
+            row_idx = classes.index(target_class_idx) if target_class_idx in classes else (int(target_class_idx) % coef.shape[0])
+            w_vec = coef[row_idx]
+        else:
+            w_vec = coef[0]
+        w_c = torch.as_tensor(w_vec, dtype=F_patches.dtype, device=F_patches.device)
+    elif cls_token is not None:
+        # [CLS] token self-attention / affinity rollout across patch tokens
+        w_c = cls_token[0].to(dtype=F_patches.dtype, device=F_patches.device)
+
+    if w_c is not None:
+        raw_saliency = torch.einsum("hwd,d->hw", F_patches, w_c)
+    else:
+        raw_saliency = torch.norm(F_patches, dim=-1)
+
+    # Apply ReLU activation
+    saliency_relu = torch.relu(raw_saliency)
+    if float(saliency_relu.max().item()) <= 1e-8:
+        saliency_relu = torch.relu(raw_saliency - raw_saliency.min())
+
+    # Upsample to (H, W) via bicubic interpolation
+    saliency_4d = saliency_relu.unsqueeze(0).unsqueeze(0).to(dtype=torch.float32)
+    upsampled = F.interpolate(
+        saliency_4d,
+        size=(h, w),
+        mode="bicubic",
+        align_corners=False,
+    )[0, 0]
+    upsampled = torch.clamp(upsampled, min=0.0)
+    heatmap = upsampled.detach().cpu().numpy().astype(np.float32)
+    heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
+    return heatmap
+
+
 def generate_gradcam_panel(
     flagged_records: List[dict],
     output_path: Path,
     max_samples: int = 8,
+    model: Optional[Any] = None,
+    classifier: Optional[LogisticRegression] = None,
+    model_name: str = "dinov2_vitb14",
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    demo: bool = False,
 ) -> None:
-    """Renders multi-panel diagnostic figure of flagged vouchers with attribution heatmaps."""
+    """Renders multi-panel diagnostic figure of flagged vouchers with DINOv2 ViT patch-token attribution heatmaps."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     samples = flagged_records[:max_samples]
     if not samples:
-        logger.warning("No flagged records available to generate Grad-CAM panel.")
+        logger.warning("No flagged records available to generate ViT attribution panel.")
         return
+
+    if model is None:
+        try:
+            model = torch.hub.load("facebookresearch/dinov2", model_name)
+            model = model.to(device)
+            model.eval()
+        except Exception as e:
+            if not demo:
+                raise RuntimeError(
+                    f"Could not load DINOv2 model ('{model_name}') for ViT patch-token attribution: {e}. "
+                    "Remediation: Ensure DINOv2 weights are cached locally in TORCH_HOME or pass `--demo` explicitly."
+                ) from e
+            logger.warning(f"Using demo ViT patch-token extractor (--demo): {e}")
+            model = _DemoViTFeatureExtractor()
 
     n = len(samples)
     fig, axes = plt.subplots(n, 2, figsize=(8, 3.5 * n))
@@ -712,30 +870,45 @@ def generate_gradcam_panel(
             img = Image.open(img_path).convert("RGB")
             img = neutralize_mounting_paper(img)
             img_arr = np.array(img)
-        else:
-            # Generate representative botanical green patch
+        elif demo:
             img_arr = np.zeros((224, 224, 3), dtype=np.uint8)
             img_arr[:, :, 1] = 120
             img_arr[:, :, 0] = 60
             img_arr[:, :, 2] = 40
+        else:
+            raise RuntimeError(
+                f"Missing patch image at '{img_path}' while generating ViT attribution panel. "
+                "Remediation: Run Phase 2 (`python main.py segment`) to populate `data/cropped_patches/`, "
+                "or pass `--demo` explicitly."
+            )
 
-        # Gaussian center heatmap for XAI demonstration
-        h, w = img_arr.shape[:2]
-        y, x = np.ogrid[:h, :w]
-        center_y, center_x = h / 2.0, w / 2.0
-        mock_heatmap = np.exp(-((x - center_x) ** 2 + (y - center_y) ** 2) / (2 * (min(h, w) / 4) ** 2))
-        mock_heatmap = (mock_heatmap - mock_heatmap.min()) / (mock_heatmap.max() - mock_heatmap.min() + 1e-8)
+        pred_taxon = rec.get("predicted_taxon", rec.get("predicted_label", "Unknown"))
+        if pred_taxon in TARGET_TAXA:
+            target_cls_idx: Optional[int] = TARGET_TAXA.index(pred_taxon)
+        elif "label_idx" in rec and rec["label_idx"] is not None:
+            target_cls_idx = int(rec["label_idx"])
+        else:
+            target_cls_idx = None
 
-        blended = blend_heatmap_on_image(img_arr, mock_heatmap, alpha=0.5)
+        heatmap = compute_vit_patch_saliency(
+            img_arr=img_arr,
+            model=model,
+            classifier=classifier,
+            target_class_idx=target_cls_idx,
+            device=device,
+        )
+        blended = blend_heatmap_on_image(img_arr, heatmap, alpha=0.5)
 
         axes[idx, 0].imshow(img_arr)
-        axes[idx, 0].set_title(f"{rec['catalogNumber']}\nRecorded: {rec.get('taxon', rec.get('species_standardized', 'Unknown'))}", fontsize=9)
+        axes[idx, 0].set_title(
+            f"{rec['catalogNumber']}\nRecorded: {rec.get('taxon', rec.get('species_standardized', 'Unknown'))}",
+            fontsize=9,
+        )
         axes[idx, 0].axis("off")
 
         axes[idx, 1].imshow(blended)
         axes[idx, 1].set_title(
-            f"Predicted: {rec.get('predicted_taxon', rec.get('predicted_label', 'Unknown'))}\n"
-            f"(Quality: {rec.get('label_quality_score', 0):.2f})",
+            f"Predicted: {pred_taxon}\n(Quality: {rec.get('label_quality_score', 0):.2f})",
             fontsize=9,
         )
         axes[idx, 1].axis("off")
@@ -743,7 +916,7 @@ def generate_gradcam_panel(
     plt.tight_layout()
     plt.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close()
-    logger.info(f"Saved Grad-CAM diagnostic audit panel to {output_path}")
+    logger.info(f"Saved ViT patch-token attribution audit panel to {output_path}")
 
 
 # =============================================================================
@@ -838,6 +1011,13 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Stratify cross-validation splits by both taxon and foliar surface orientation",
     )
+    parser.add_argument(
+        "--demo",
+        dest="demo",
+        action="store_true",
+        default=False,
+        help="Enable explicit demo mode with synthetic embeddings when patch images or DINOv2 weights are unavailable (default: False)",
+    )
     return parser.parse_args()
 
 
@@ -849,7 +1029,9 @@ def main() -> None:
     logger.info("=" * 80)
 
     # 1. Load and link rosette crops with voucher metadata
-    df, class_map = load_and_link_rosette_patches(args.rosette_dir, args.vouchers_csv)
+    df, class_map = load_and_link_rosette_patches(
+        args.rosette_dir, args.vouchers_csv, demo=args.demo
+    )
     if df.empty:
         logger.warning("No rosette patch records were matched. Check inputs.")
         return
@@ -859,7 +1041,9 @@ def main() -> None:
 
     # 2. Extract self-supervised DINOv2 embeddings
     features, labels, cat_nums = extract_dinov2_embeddings(
-        records, neutralize_background=args.neutralize_background
+        records,
+        neutralize_background=args.neutralize_background,
+        demo=args.demo,
     )
 
     # 3. Fit out-of-fold cross-validated probabilities
@@ -880,17 +1064,34 @@ def main() -> None:
         filter_abaxial_artifacts=args.filter_abaxial_artifacts,
     )
 
-    # 5. Export table
-    args.output_csv.parent.mkdir(parents=True, exist_ok=True)
-    audit_df.to_csv(args.output_csv, index=False)
-    logger.info(f"Exported label noise audit table -> {args.output_csv}")
+    # 5. Export table atomically (never persist synthetic demo records to canonical production tables)
+    if args.demo:
+        logger.info("[DEMO MODE] Skipping persistence of synthetic audit records to disk.")
+    else:
+        args.output_csv.parent.mkdir(parents=True, exist_ok=True)
+        tmp_csv = args.output_csv.with_suffix(args.output_csv.suffix + ".tmp")
+        with open(tmp_csv, "w", encoding="utf-8", newline="") as f:
+            audit_df.to_csv(f, index=False)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_csv.replace(args.output_csv)
+        logger.info(f"Exported label noise audit table -> {args.output_csv}")
 
-    # 6. Generate Grad-CAM diagnostic figures if enabled
+    # 6. Generate ViT patch-token attribution diagnostic figures if enabled
     if args.export_figures:
         flagged = audit_df[audit_df["is_label_corrupted"]].to_dict("records")
         if not flagged:
             flagged = audit_df[audit_df["is_cleanlab_issue"]].to_dict("records")
-        generate_gradcam_panel(flagged, args.output_figure)
+        clf: Optional[LogisticRegression] = None
+        if len(np.unique(labels)) > 1:
+            clf = LogisticRegression(max_iter=1000, C=1.0, random_state=42)
+            clf.fit(features, labels)
+        generate_gradcam_panel(
+            flagged,
+            args.output_figure,
+            classifier=clf,
+            demo=args.demo,
+        )
     else:
         logger.info("Figure export skipped (--no-export-figures).")
 

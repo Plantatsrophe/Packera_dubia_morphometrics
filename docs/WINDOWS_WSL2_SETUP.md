@@ -13,7 +13,7 @@ The computational pipeline couples automated deep learning morphometrics (LeafMa
 
 While developed natively on Linux, **Windows Subsystem for Linux (WSL 2)** provides first-class support for the entire pipeline on Windows machines. With modern WSL 2:
 - **NVIDIA GPU Acceleration:** Direct pass-through of CUDA cores and Tensor cores to PyTorch and LeafMachine2 via the Windows host display driver.
-- **Native GUI Acceleration (WSLg):** Interactive OpenCV/X11 annotation tools like [`annotate_with_sam2.py`](file:///home/brandon/Packera_dubia_morphometrics/scripts/annotation_and_training/annotate_with_sam2.py) render directly in native Windows desktop windows without requiring external X-servers (such as VcXsrv or Xming).
+- **Native GUI Acceleration (WSLg):** Interactive OpenCV/X11 annotation tools like [`annotate_with_sam2.py`](../scripts/annotation_and_training/annotate_with_sam2.py) render directly in native Windows desktop windows without requiring external X-servers (such as VcXsrv or Xming).
 - **Near-Native Filesystem Performance:** When operating inside native ext4 virtual disks (`~/`), batch processing on thousands of high-resolution herbarium scans achieves near bare-metal Linux speeds.
 
 ---
@@ -192,15 +192,17 @@ You do **not** need to install or configure VcXsrv, Xming, or manual `export DIS
 source .venv/bin/activate
 
 python scripts/annotation_and_training/annotate_with_sam2.py \
-    --images-dir data/raw_vouchers/ \
-    --output-coco data/annotations/packera_train_coco.json
+    --images-dir data/raw_vouchers \
+    --output-dir data/raw_annotations \
+    --output-coco data/annotations/packera_train_coco.json \
+    --prelabel-with-lm2
 ```
 
 ### What to Expect:
-- An OpenCV HighGUI window labeled **"Packera dubia - SAM2 Botanical Annotator"** will open as a native Windows application window.
+- An X11/OpenCV window labeled **"SAM 2 Precision Botanical Annotator"** will open as a native Windows application window.
 - Smooth mouse wheel zooming ($1\times$ to $16\times$) and middle-click panning operate with hardware-accelerated responsiveness.
 - Real-time SAM 2 mask inference will utilize your host NVIDIA GPU via CUDA without latency.
-- Full hotkey reference (`0`–`6` class assignment, `k` knife cut, `o` contour toggle, `Tab` multimask cycling) is documented in the main [`README.md`](file:///home/brandon/Packera_dubia_morphometrics/README.md#sam-2-botanical-annotator-hotkey-cheat-sheet).
+- Full hotkey reference (`0`–`1` basal leaf class assignment, `k` knife cut, `o` contour toggle, `Tab` multimask cycling) is documented in the main [`README.md`](../README.md#sam-2-botanical-annotator-hotkey-cheat-sheet).
 
 ---
 
@@ -253,6 +255,6 @@ Developing inside WSL 2 is completely seamless using Microsoft Visual Studio Cod
 ---
 
 ## 📚 Related Documentation
-- Main Operational Pipeline: [`README.md`](file:///home/brandon/Packera_dubia_morphometrics/README.md)
-- Complete Pipeline Guide: [`docs/WORKFLOW_GUIDE.md`](file:///home/brandon/Packera_dubia_morphometrics/docs/WORKFLOW_GUIDE.md)
-- SAM 2 Botanical Annotation Protocol: [`docs/SAM2_Precision_Botanical_Annotation_Guide.txt`](file:///home/brandon/Packera_dubia_morphometrics/docs/SAM2_Precision_Botanical_Annotation_Guide.txt)
+- Main Operational Pipeline: [`README.md`](../README.md)
+- Complete Pipeline Guide: [`docs/WORKFLOW_GUIDE.md`](WORKFLOW_GUIDE.md)
+- SAM 2 Botanical Annotation Protocol: [`docs/SAM2_Precision_Botanical_Annotation_Guide.txt`](SAM2_Precision_Botanical_Annotation_Guide.txt)

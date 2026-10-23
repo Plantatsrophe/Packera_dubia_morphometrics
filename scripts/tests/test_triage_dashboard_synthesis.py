@@ -397,6 +397,15 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertTrue(figure_pdf.exists(), f"Missing figure at {figure_pdf}")
         self.assertTrue(triage_csv.exists(), f"Missing triage queue at {triage_csv}")
 
+    def test_morphometric_outlier_flag_handshake_and_dynamic_stats(self):
+        """Verify morphometric_outlier_flag maps to misidentification_flag and hardcoded CDA/BIC strings are absent."""
+        r_text = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("morphometric_outlier_flag", r_text)
+        self.assertIn("gmm_bic_model_selection.csv", r_text)
+        self.assertNotIn("Canonical Axis 1 (74.2%)", r_text)
+        self.assertNotIn("Canonical Axis 2 (18.6%)", r_text)
+        self.assertNotIn("10,815.5", r_text)
+
 
 if __name__ == "__main__":
     unittest.main()

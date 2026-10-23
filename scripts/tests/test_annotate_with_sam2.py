@@ -1274,6 +1274,83 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         self.assertFalse(hasattr(annotator_mod, "SAM2_ARCHIVE_PATH"))
         self.assertTrue(hasattr(annotator_mod, "SAM2_THIRD_PARTY_PATH"))
 
+    def test_prelabel_with_lm2_and_active_basal_classes(self):
+        """Verify --prelabel-with-lm2 pre-populates saved_instances with strictly basal leaf classes (0, 1) and supports knife tweaking."""
+        from unittest.mock import MagicMock, patch
+        import scripts.annotation_and_training.annotate_with_sam2 as annotator_mod
+        from scripts.annotation_and_training.sam2_annotator_utils import ACTIVE_BASAL_CLASS_IDS, ACTIVE_CLASS_NAMES
+
+        self.assertEqual(ACTIVE_BASAL_CLASS_IDS, (0, 1))
+        self.assertEqual(ACTIVE_CLASS_NAMES, ["basal_leaf_whole", "basal_leaf_partial"])
+
+        with patch("sys.argv", ["annotate_with_sam2.py", "--prelabel-with-lm2"]):
+            args = annotator_mod.parse_args()
+            self.assertTrue(args.prelabel_with_lm2)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            img_dir = tmp_p / "vouchers"
+            out_dir = tmp_p / "annotations"
+            img_dir.mkdir(parents=True, exist_ok=True)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            sheet = np.full((300, 300, 3), 220, dtype=np.uint8)
+            img_path = img_dir / "NCU_PRELABEL_01.jpg"
+            cv2.imwrite(str(img_path), sheet)
+
+            orig_init = PrecisionSAM2Annotator._init_model
+            try:
+                PrecisionSAM2Annotator._init_model = lambda self: None
+                annotator = PrecisionSAM2Annotator(
+                    images_dir=img_dir,
+                    output_dir=out_dir,
+                    tier="all",
+                    prelabel_with_lm2=True,
+                )
+                self.assertEqual(annotator.active_class_ids, (0, 1))
+
+                # Mock Stage 1 (returns 1 leaf_whole, 1 leaf_partial, and 1 stem/wood class 10 that must be ignored)
+                mock_stage1 = MagicMock()
+                mock_stage1.predict.return_value = [
+                    ((40, 40, 160, 140), 0.95, 0),   # leaf_whole -> class 0
+                    ((170, 170, 270, 260), 0.88, 1), # leaf_partial -> class 1
+                    ((10, 10, 290, 30), 0.90, 10),   # wood/stem -> ignored
+                ]
+                annotator.lm2_stage1_detector = mock_stage1
+
+                # Mock Stage 2 PointRend
+                def fake_s2(crop_bgr):
+                    ch, cw = crop_bgr.shape[:2]
+                    m = np.zeros((ch, cw), dtype=np.uint8)
+                    cv2.ellipse(m, (cw // 2, ch // 2), (max(10, cw // 4), max(15, ch // 3)), 0, 0, 360, 255, -1)
+                    return [((5, 5, ch - 5, cw - 5), m, 0.94, 0)]
+
+                mock_s2 = MagicMock()
+                mock_s2.predict.side_effect = fake_s2
+                annotator.lm2_pointrend_engine = mock_s2
+
+                # Mock SAM 2 boundary refiner
+                mock_refiner = MagicMock()
+                mock_refiner.refine_crop_mask.side_effect = lambda crop_bgr, m_init: m_init
+                annotator.sam2_boundary_refiner = mock_refiner
+
+                loaded = annotator.load_active_image()
+                self.assertTrue(loaded)
+                self.assertEqual(len(annotator.saved_instances), 2)
+                self.assertTrue(all(inst["class_id"] in (0, 1) for inst in annotator.saved_instances))
+                self.assertEqual(annotator.saved_instances[0]["label"], "basal_leaf_whole")
+                self.assertEqual(annotator.saved_instances[1]["label"], "basal_leaf_partial")
+                self.assertTrue(annotator.is_dirty)
+
+                # Test 2-click knife cut tweaking on a pre-labeled instance in saved_instances
+                area_before = np.count_nonzero(annotator.saved_instances[0]["mask"])
+                cut_ok = annotator.apply_knife_to_saved_instances((20, 100), (180, 100))
+                self.assertTrue(cut_ok)
+                area_after = np.count_nonzero(annotator.saved_instances[0]["mask"])
+                self.assertLess(area_after, area_before)
+            finally:
+                PrecisionSAM2Annotator._init_model = orig_init
+
 
 if __name__ == "__main__":
     unittest.main()

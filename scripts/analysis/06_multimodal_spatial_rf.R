@@ -15,6 +15,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("digest", quietly = TRUE)) library(digest)
   if (requireNamespace("spatialRF", quietly = TRUE)) library(spatialRF)
   if (requireNamespace("ENMTools", quietly = TRUE)) library(ENMTools)
+  if (requireNamespace("vegan", quietly = TRUE)) library(vegan)
   if (requireNamespace("terra", quietly = TRUE)) library(terra)
   if (requireNamespace("sf", quietly = TRUE)) library(sf)
   if (requireNamespace("randomForest", quietly = TRUE)) library(randomForest)
@@ -71,7 +72,9 @@ parse_args_robust <- function() {
     optparse::make_option(c("-k", "--permutations"), type = "integer",
       default = 100, help = "Warren's Identity Test permutations [default: %default]"),
     optparse::make_option(c("-t", "--n-trees"), type = "integer",
-      default = 500, help = "Number of trees in Random Forests [default: %default]")
+      default = 500, help = "Number of trees in Random Forests [default: %default]"),
+    optparse::make_option(c("--demo"), action = "store_true",
+      default = FALSE, help = "Enable synthetic fallback data for demonstration/test runs [default: %default]")
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
     return(optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list)))
@@ -87,7 +90,7 @@ parse_args_robust <- function() {
     pheno_plot = "outputs/figures/phenological_latitudinal_anomaly.pdf",
     ssurgo_cache = "data/environmental/ssurgo_cache", ssurgo_table = "data/tables/ssurgo_edaphic_validation.csv",
     contingency_table = "outputs/reports/micro_edaphic_outcrop_contingency.csv", batch_size = 500,
-    permutations = 100, n_trees = 500
+    permutations = 100, n_trees = 500, demo = FALSE
   ))
 }
 
@@ -103,10 +106,30 @@ standardize_packera_taxon <- function(s_vec) {
   }, USE.NAMES = FALSE)
 }
 
+is_canonical_prod_path <- function(p) {
+  if (is.null(p) || !nzchar(p)) return(FALSE)
+  norm_p <- normalizePath(p, mustWork = FALSE)
+  repo_data <- normalizePath("data", mustWork = FALSE)
+  repo_outputs <- normalizePath("outputs", mustWork = FALSE)
+  startsWith(norm_p, paste0(repo_data, "/")) || startsWith(norm_p, paste0(repo_outputs, "/"))
+}
+
+write_csv_atomic <- function(df, target_path, demo = FALSE) {
+  if (isTRUE(demo) && is_canonical_prod_path(target_path)) {
+    message(sprintf("[DEMO MODE] Skipping write of synthetic records to canonical production table: %s", target_path))
+    return(invisible(FALSE))
+  }
+  dir.create(dirname(target_path), recursive = TRUE, showWarnings = FALSE)
+  tmp_path <- paste0(target_path, ".tmp")
+  readr::write_csv(df, tmp_path)
+  file.rename(tmp_path, target_path)
+  return(invisible(TRUE))
+}
+
 # ------------------------------------------------------------------------------
 # 2. Environmental Extraction (SoilGrids 250m & WorldClim v2.1 Integration)
 # ------------------------------------------------------------------------------
-extract_environmental_layers <- function(df, env_dir) {
+extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
   message("Integrating SoilGrids 250m Pedology & WorldClim v2.1 Bioclimatic layers...")
   vars <- c("soil_ph", "soil_cec", "soil_sand", "soil_bulk_density",
             "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual",
@@ -114,17 +137,36 @@ extract_environmental_layers <- function(df, env_dir) {
   
   # Check if GeoTIFF rasters exist in env_dir
   raster_files <- list.files(env_dir, pattern = "\\.(tif|tiff|grd)$", full.names = TRUE, ignore.case = TRUE)
+  extract_err <- NULL
   if (length(raster_files) > 0 && requireNamespace("terra", quietly = TRUE)) {
-    tryCatch({
+    extracted_df <- tryCatch({
       env_stack <- terra::rast(raster_files)
       pts <- terra::vect(df[, c("longitude", "latitude")], geom = c("longitude", "latitude"), crs = "EPSG:4326")
       extracted <- terra::extract(env_stack, pts)
       for (v in names(extracted)[names(extracted) != "ID"]) df[[v]] <- extracted[[v]]
       message(sprintf("Extracted %d raster layers directly from %s.", length(raster_files), env_dir))
-      return(df)
-    }, error = function(e) message("Raster extraction fallback engaged: ", e$message))
+      df
+    }, error = function(e) {
+      extract_err <<- e$message
+      NULL
+    })
+    if (!is.null(extracted_df)) return(extracted_df)
   }
 
+  if (!isTRUE(demo)) {
+    stop(sprintf(
+      paste0(
+        "WorldClim v2.1 / SoilGrids 250m GeoTIFF rasters are missing or unreadable in '%s'%s. ",
+        "Remediation: populate '%s' with valid SoilGrids 250m and WorldClim v2.1 GeoTIFF (.tif) layers, ",
+        "or pass --demo explicitly for synthetic demonstration runs."
+      ),
+      env_dir,
+      if (!is.null(extract_err)) paste0(" (", extract_err, ")") else "",
+      env_dir
+    ))
+  }
+
+  message("[DEMO MODE] Generating synthetic SoilGrids & WorldClim layers...")
   # High-fidelity eco-geographic empirical transfer functions (calibrated on SEUS / Midwest eco-regions)
   set.seed(42)
   lat <- df$latitude; lon <- df$longitude; n <- nrow(df)
@@ -192,7 +234,7 @@ classify_ssurgo_outcrop <- function(muname, compname = "", taxsuborder = "", tax
   return(list(is_rock_outcrop = is_outcrop, outcrop_class = outcrop_class))
 }
 
-query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries = 4) {
+query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries = 4, demo = FALSE) {
   # Build deterministic batch cache key
   pt_str <- paste(batch_df$catalogNumber, batch_df$latitude, batch_df$longitude, collapse = ";")
   batch_hash <- if (requireNamespace("digest", quietly = TRUE)) {
@@ -248,70 +290,89 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
     }
   }
   
-  # Robust deterministic pedological assignment calibrated on official USDA SSURGO data
-  if (!query_success || is.null(res_df)) {
-    musyms <- character(n_pts); munames <- character(n_pts)
-    suborders <- character(n_pts); greatgroups <- character(n_pts)
-    is_outcrops <- logical(n_pts); outcrop_classes <- character(n_pts)
+  if (query_success && !is.null(res_df)) {
+    if (!isTRUE(demo)) {
+      dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+      tmp_csv <- paste0(cache_file_csv, ".tmp")
+      readr::write_csv(res_df, tmp_csv)
+      file.rename(tmp_csv, cache_file_csv)
+      tmp_rds <- paste0(cache_file_rds, ".tmp")
+      saveRDS(res_df, tmp_rds)
+      file.rename(tmp_rds, cache_file_rds)
+    }
+    return(res_df)
+  }
+
+  # Never cache synthetic or failed SSURGO records into data/environmental/ssurgo_cache/ via saveRDS()
+  if (!isTRUE(demo)) {
+    stop(sprintf(
+      paste0(
+        "soilDB::SDA_spatialQuery() failed after %d retries for batch %d and no cached SSURGO records exist in '%s'. ",
+        "Remediation: verify network access to USDA Soil Data Access (SDA), populate '%s' with pre-queried SSURGO batches, ",
+        "or pass --demo explicitly for synthetic demonstration runs."
+      ),
+      max_retries, batch_idx, cache_dir, cache_dir
+    ))
+  }
+
+  message(sprintf("[DEMO MODE] Generating synthetic SSURGO assignments for batch %d (not cached to disk)...", batch_idx))
+  musyms <- character(n_pts); munames <- character(n_pts)
+  suborders <- character(n_pts); greatgroups <- character(n_pts)
+  is_outcrops <- logical(n_pts); outcrop_classes <- character(n_pts)
+  
+  for (i in seq_len(n_pts)) {
+    lat <- pts_df$latitude[i]; lon <- pts_df$longitude[i]
+    reg <- if ("regional_group" %in% names(batch_df)) batch_df$regional_group[i] else "Unknown"
     
-    for (i in seq_len(n_pts)) {
-      lat <- pts_df$latitude[i]; lon <- pts_df$longitude[i]
-      reg <- if ("regional_group" %in% names(batch_df)) batch_df$regional_group[i] else "Unknown"
-      
-      is_flatrock_zone <- grepl("Flatrock", reg, ignore.case = TRUE) ||
-                          (lon > -84.5 && lon < -78.5 && lat > 33.2 && lat < 36.8)
-      is_sandhill_zone <- grepl("Sandhill|Coastal", reg, ignore.case = TRUE) ||
-                          (lon > -82.0 && lon < -75.5 && lat < 36.5)
-      is_prairie_zone  <- grepl("Midwest|Prairie", reg, ignore.case = TRUE) || (lon < -88.0)
-      is_appalachian   <- grepl("Appalachian", reg, ignore.case = TRUE) ||
-                          (lon >= -84.0 && lon <= -79.0 && lat >= 35.0 && lat <= 39.0)
-      
-      if (is_flatrock_zone) {
-        if (as.integer(abs(sin(lat * 100 + lon * 100)) * 1000) %% 10 < 7) {
-          musyms[i] <- "RoB"; munames[i] <- "Rock outcrop-Wake complex, 2 to 10 percent slopes"; suborders[i] <- "Udepts"; greatgroups[i] <- "Lithic Dystrudepts"
-        } else {
-          musyms[i] <- "ApB"; munames[i] <- "Appling sandy loam, 2 to 6 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Typic Kanhapludults"
-        }
-      } else if (is_sandhill_zone) {
-        musyms[i] <- "WaB"; munames[i] <- "Wagram sand, 0 to 6 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Arenic Kandiudults"
-      } else if (is_prairie_zone) {
-        musyms[i] <- "TaA"; munames[i] <- "Tama silt loam, 0 to 2 percent slopes"; suborders[i] <- "Udolls"; greatgroups[i] <- "Typic Argiudolls"
-      } else if (is_appalachian) {
-        if (as.integer(abs(cos(lat * 50 + lon * 50)) * 1000) %% 10 < 3) {
-          musyms[i] <- "GvC"; munames[i] <- "Gladeville-Rock outcrop complex, 2 to 12 percent slopes"; suborders[i] <- "Udolls"; greatgroups[i] <- "Lithic Hapludolls"
-        } else {
-          musyms[i] <- "CeB"; munames[i] <- "Cecil sandy clay loam, 2 to 8 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Typic Hapludults"
-        }
+    is_flatrock_zone <- grepl("Flatrock", reg, ignore.case = TRUE) ||
+                        (lon > -84.5 && lon < -78.5 && lat > 33.2 && lat < 36.8)
+    is_sandhill_zone <- grepl("Sandhill|Coastal", reg, ignore.case = TRUE) ||
+                        (lon > -82.0 && lon < -75.5 && lat < 36.5)
+    is_prairie_zone  <- grepl("Midwest|Prairie", reg, ignore.case = TRUE) || (lon < -88.0)
+    is_appalachian   <- grepl("Appalachian", reg, ignore.case = TRUE) ||
+                        (lon >= -84.0 && lon <= -79.0 && lat >= 35.0 && lat <= 39.0)
+    
+    if (is_flatrock_zone) {
+      if (as.integer(abs(sin(lat * 100 + lon * 100)) * 1000) %% 10 < 7) {
+        musyms[i] <- "RoB"; munames[i] <- "Rock outcrop-Wake complex, 2 to 10 percent slopes"; suborders[i] <- "Udepts"; greatgroups[i] <- "Lithic Dystrudepts"
       } else {
-        musyms[i] <- "MuB"; munames[i] <- "Generic Upland loam, 1 to 5 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Typic Hapludults"
+        musyms[i] <- "ApB"; munames[i] <- "Appling sandy loam, 2 to 6 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Typic Kanhapludults"
       }
-      
-      cl <- classify_ssurgo_outcrop(munames[i], "", suborders[i], greatgroups[i], lat, lon)
-      is_outcrops[i] <- cl$is_rock_outcrop
-      outcrop_classes[i] <- cl$outcrop_class
+    } else if (is_sandhill_zone) {
+      musyms[i] <- "WaB"; munames[i] <- "Wagram sand, 0 to 6 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Arenic Kandiudults"
+    } else if (is_prairie_zone) {
+      musyms[i] <- "TaA"; munames[i] <- "Tama silt loam, 0 to 2 percent slopes"; suborders[i] <- "Udolls"; greatgroups[i] <- "Typic Argiudolls"
+    } else if (is_appalachian) {
+      if (as.integer(abs(cos(lat * 50 + lon * 50)) * 1000) %% 10 < 3) {
+        musyms[i] <- "GvC"; munames[i] <- "Gladeville-Rock outcrop complex, 2 to 12 percent slopes"; suborders[i] <- "Udolls"; greatgroups[i] <- "Lithic Hapludolls"
+      } else {
+        musyms[i] <- "CeB"; munames[i] <- "Cecil sandy clay loam, 2 to 8 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Typic Hapludults"
+      }
+    } else {
+      musyms[i] <- "MuB"; munames[i] <- "Generic Upland loam, 1 to 5 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Typic Hapludults"
     }
     
-    res_df <- data.frame(
-      catalogNumber = pts_df$catalogNumber,
-      latitude = pts_df$latitude,
-      longitude = pts_df$longitude,
-      musym = musyms,
-      muname = munames,
-      taxsuborder = suborders,
-      taxgreatgroup = greatgroups,
-      is_rock_outcrop = is_outcrops,
-      outcrop_class = outcrop_classes,
-      stringsAsFactors = FALSE
-    )
+    cl <- classify_ssurgo_outcrop(munames[i], "", suborders[i], greatgroups[i], lat, lon)
+    is_outcrops[i] <- cl$is_rock_outcrop
+    outcrop_classes[i] <- cl$outcrop_class
   }
   
-  dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
-  readr::write_csv(res_df, cache_file_csv)
-  saveRDS(res_df, cache_file_rds)
+  res_df <- data.frame(
+    catalogNumber = pts_df$catalogNumber,
+    latitude = pts_df$latitude,
+    longitude = pts_df$longitude,
+    musym = musyms,
+    muname = munames,
+    taxsuborder = suborders,
+    taxgreatgroup = greatgroups,
+    is_rock_outcrop = is_outcrops,
+    outcrop_class = outcrop_classes,
+    stringsAsFactors = FALSE
+  )
   return(res_df)
 }
 
-query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", batch_size = 500) {
+query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", batch_size = 500, demo = FALSE) {
   message(sprintf("Initiating USDA SSURGO Vector Pedology SDA Query (cache: %s)...", cache_dir))
   
   is_conus <- !is.na(df$latitude) & !is.na(df$longitude) &
@@ -334,7 +395,7 @@ query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", 
   for (b_idx in seq_along(batch_indices)) {
     idx <- batch_indices[[b_idx]]
     sub_df <- conus_df[idx, ]
-    b_res <- query_ssurgo_sda_batch(sub_df, cache_dir, b_idx)
+    b_res <- query_ssurgo_sda_batch(sub_df, cache_dir, b_idx, demo = demo)
     batch_results[[b_idx]] <- b_res
   }
   
@@ -353,7 +414,8 @@ query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", 
 # 2c. Multi-Scale Edaphic Synthesis & Outcrop Fidelity Contingency Testing
 # ------------------------------------------------------------------------------
 synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_edaphic_validation.csv",
-                                          contingency_out = "outputs/reports/micro_edaphic_outcrop_contingency.csv") {
+                                          contingency_out = "outputs/reports/micro_edaphic_outcrop_contingency.csv",
+                                          demo = FALSE) {
   message("Executing Multi-Scale Edaphic Synthesis & Fisher's Exact Outcrop Fidelity Test...")
   
   val_cols <- c("catalogNumber", "latitude", "longitude", "species_standardized", "regional_group",
@@ -364,9 +426,9 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
   names(val_df)[names(val_df) %in% c("soil_ph", "soil_cec", "soil_sand", "soil_bulk_density")] <-
     paste0(names(val_df)[names(val_df) %in% c("soil_ph", "soil_cec", "soil_sand", "soil_bulk_density")], "_soilgrids")
   
-  dir.create(dirname(ssurgo_out), recursive = TRUE, showWarnings = FALSE)
-  readr::write_csv(val_df, ssurgo_out)
-  message(sprintf("Exported specimen-level SSURGO validation table to %s (%d records).", ssurgo_out, nrow(val_df)))
+  if (write_csv_atomic(val_df, ssurgo_out, demo = demo)) {
+    message(sprintf("Exported specimen-level SSURGO validation table to %s (%d records).", ssurgo_out, nrow(val_df)))
+  }
   
   target_df <- df[df$species_standardized %in% TARGET_TAXA & !is.na(df$is_rock_outcrop), ]
   target_df$taxon_group <- ifelse(target_df$species_standardized %in% c("Packera dubia", "Packera anonyma"),
@@ -420,9 +482,9 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
   )
   
   contingency_report <- rbind(summary_row, sp_test_df)
-  dir.create(dirname(contingency_out), recursive = TRUE, showWarnings = FALSE)
-  readr::write_csv(contingency_report, contingency_out)
-  message(sprintf("Exported Fisher's exact contingency report to %s.", contingency_out))
+  if (write_csv_atomic(contingency_report, contingency_out, demo = demo)) {
+    message(sprintf("Exported Fisher's exact contingency report to %s.", contingency_out))
+  }
   
   return(list(validation = val_df, contingency = contingency_report, fisher = fisher_res))
 }
@@ -487,7 +549,7 @@ model_latitudinal_spring_baseline <- function(flowering_df) {
   return(list(intercept = b0, slope = b_lat, r_squared = r2, p_value = p_val, n = nrow(valid_trimmed), model = fit_ols))
 }
 
-compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = NULL) {
+compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = NULL, demo = FALSE) {
   message("Computing latitude-adjusted phenological anomalies (Delta DOY)...")
   df$doy <- extract_doy_robust(df)
   lat_val <- if ("decimalLatitude" %in% names(df) && any(!is.na(df$decimalLatitude))) df$decimalLatitude else df$latitude
@@ -590,15 +652,15 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   df$pheno_timing_category[has_both & abs(df$delta_doy) <= 7.0] <- "Synchronous_with_Cline"
   
   if (!is.null(output_csv)) {
-    dir.create(dirname(output_csv), recursive = TRUE, showWarnings = FALSE)
     keep_cols <- c("catalogNumber", "institutionCode", "scientificName", "species_raw",
                    "species_standardized", "decimalLatitude", "decimalLongitude", "latitude", "longitude",
                    "eventDate", "year", "month", "day", "doy", "expected_doy", "delta_doy",
                    "pheno_timing_category", "is_verified_anthesis", "anthesis_filter_status",
                    "voucher_phenological_state", "regional_group")
     export_df <- df[, intersect(keep_cols, names(df))]
-    readr::write_csv(export_df, output_csv)
-    message(sprintf("Exported %d voucher phenological anomalies to %s.", nrow(export_df), output_csv))
+    if (write_csv_atomic(export_df, output_csv, demo = demo)) {
+      message(sprintf("Exported %d voucher phenological anomalies to %s.", nrow(export_df), output_csv))
+    }
   }
   
   # Statistical divergence testing across target taxa strictly on verified anthesis cohort
@@ -667,9 +729,9 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   }
   summary_report <- do.call(rbind, summary_records)
   if (!is.null(summary_csv)) {
-    dir.create(dirname(summary_csv), recursive = TRUE, showWarnings = FALSE)
-    readr::write_csv(summary_report, summary_csv)
-    message(sprintf("Exported phenological anomaly ANOVA/Tukey summary to %s.", summary_csv))
+    if (write_csv_atomic(summary_report, summary_csv, demo = demo)) {
+      message(sprintf("Exported phenological anomaly ANOVA/Tukey summary to %s.", summary_csv))
+    }
   }
   return(list(df = df, baseline = baseline, anova = aov_fit, tukey = tukey_res, summary = summary_report))
 }
@@ -864,27 +926,79 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500) {
   rf_spatial <- randomForest::randomForest(x = X_all, y = y, ntree = n_trees, importance = TRUE)
   oob_acc_spatial <- 1 - rf_spatial$err.rate[n_trees, "OOB"]
 
-  # Spatial vs Environmental Variance Partitioning
+  # Spatial vs Environmental Variance Partitioning (vegan::varpart & Normalized Group Permutation Importance)
   imp_mat <- randomForest::importance(rf_spatial, type = 1)
-  imp_df <- data.frame(Predictor = rownames(imp_mat), MeanDecreaseAccuracy = imp_mat[, 1],
-                       Type = ifelse(grepl("^MEM", rownames(imp_mat)), "Spatial (MEMs)", "Environmental"),
-                       stringsAsFactors = FALSE)
+  imp_df <- data.frame(
+    Predictor = rownames(imp_mat),
+    MeanDecreaseAccuracy = imp_mat[, 1],
+    PositiveImportance = pmax(0, imp_mat[, 1]),
+    Type = ifelse(grepl("^MEM", rownames(imp_mat)), "Spatial (MEMs)", "Environmental"),
+    Group = ifelse(
+      grepl("^MEM", rownames(imp_mat)), "Spatial_MEMs",
+      ifelse(
+        grepl("^soil_", rownames(imp_mat)), "Edaphic",
+        ifelse(
+          grepl("^bio", rownames(imp_mat)), "Climate",
+          ifelse(grepl("doy", rownames(imp_mat), ignore.case = TRUE), "Phenology", "Environmental")
+        )
+      )
+    ),
+    stringsAsFactors = FALSE
+  )
   imp_df <- imp_df[order(imp_df$MeanDecreaseAccuracy, decreasing = TRUE), ]
 
-  env_imp_sum <- sum(imp_df$MeanDecreaseAccuracy[imp_df$Type == "Environmental"])
-  spa_imp_sum <- sum(imp_df$MeanDecreaseAccuracy[imp_df$Type == "Spatial (MEMs)"])
-  tot_imp <- env_imp_sum + spa_imp_sum
-  
+  climate_vars <- intersect(env_vars, c("bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual",
+                                        "bio15_precip_seasonality", "bio18_precip_warmest_qt", "bio19_precip_coldest_qt"))
+  edaphic_vars <- intersect(env_vars, c("soil_ph", "soil_cec", "soil_sand", "soil_bulk_density"))
+  pheno_vars   <- intersect(env_vars, c("delta_doy", "doy"))
+
+  varpart_obj <- NULL
+  if (requireNamespace("vegan", quietly = TRUE)) {
+    varpart_obj <- tryCatch({
+      Y_mat <- stats::model.matrix(~ y - 1)
+      vegan::varpart(
+        Y_mat,
+        as.data.frame(X_env[, climate_vars, drop = FALSE]),
+        as.data.frame(X_env[, edaphic_vars, drop = FALSE]),
+        as.data.frame(X_env[, pheno_vars, drop = FALSE]),
+        as.data.frame(MEMs)
+      )
+    }, error = function(e) NULL)
+  }
+
+  grp_names <- c("Climate", "Edaphic", "Phenology", "Spatial_MEMs")
+  grp_sums <- sapply(grp_names, function(g) {
+    sum(imp_df$PositiveImportance[imp_df$Group == g], na.rm = TRUE)
+  })
+  tot_pos <- sum(grp_sums, na.rm = TRUE)
+
+  if (!is.null(varpart_obj) && !is.null(varpart_obj$part$indfract)) {
+    adj_col <- intersect(c("Adj.R.square", "Adj.R.sq"), colnames(varpart_obj$part$indfract))[1]
+    if (!is.na(adj_col)) {
+      vp_pos <- pmax(0, as.numeric(varpart_obj$part$indfract[1:4, adj_col]))
+      if (sum(vp_pos, na.rm = TRUE) > 0) {
+        grp_sums <- vp_pos
+        names(grp_sums) <- grp_names
+        tot_pos <- sum(grp_sums, na.rm = TRUE)
+      }
+    }
+  }
+
+  if (tot_pos <= 0) {
+    var_pct <- rep(100 / length(grp_names), length(grp_names))
+  } else {
+    var_pct <- round((as.numeric(grp_sums) / tot_pos) * 100, 2)
+    var_pct[which.max(var_pct)] <- round(var_pct[which.max(var_pct)] + (100.0 - sum(var_pct)), 2)
+  }
+
   var_part <- data.frame(
-    Component = c("Pure_Environmental", "Pure_Spatial_MEMs", "Shared_Spatial_Env", "Residual_Noise"),
-    Variance_Pct = c(round(max(0, (env_imp_sum / tot_imp) * oob_acc_spatial * 100 - 10), 2),
-                     round(max(0, (spa_imp_sum / tot_imp) * oob_acc_spatial * 100 - 5), 2),
-                     round(max(0, (1 - abs(env_imp_sum - spa_imp_sum) / tot_imp) * 15), 2),
-                     round((1 - oob_acc_spatial) * 100, 2))
+    Component = grp_names,
+    Variance_Pct = var_pct,
+    stringsAsFactors = FALSE
   )
   message(sprintf("Spatial RF OOB Accuracy: %.2f%% (Non-Spatial: %.2f%%)", oob_acc_spatial * 100, oob_acc_nonspatial * 100))
   return(list(rf_spatial = rf_spatial, rf_nonspatial = rf_nonspatial, importance = imp_df,
-              variance_partition = var_part, mems = MEMs))
+              variance_partition = var_part, varpart_model = varpart_obj, mems = MEMs))
 }
 
 # ------------------------------------------------------------------------------
@@ -1045,8 +1159,8 @@ main <- function() {
     pheno_states_df$catalogNumber <- as.character(pheno_states_df$catalogNumber)
     vouchers_df$catalogNumber <- as.character(vouchers_df$catalogNumber)
     p_cols <- intersect(names(pheno_states_df), c("catalogNumber", "total_capitula", "n_anthesis", "n_fruit", "n_bud", "voucher_phenological_state", "dominant_pappus_ratio"))
-    pheno_sub <- pheno_states_df[!duplicated(pheno_states_df$catalogNumber), p_cols, drop = FALSE]
-    vouchers_df <- dplyr::left_join(vouchers_df, pheno_sub, by = "catalogNumber")
+    pheno_states_df <- pheno_states_df[!duplicated(pheno_states_df$catalogNumber), p_cols, drop = FALSE]
+    vouchers_df <- dplyr::left_join(vouchers_df, pheno_states_df, by = "catalogNumber")
     message(sprintf("Left-joined %d vouchers with phenological states.", nrow(vouchers_df)))
   } else {
     message(sprintf("[INFO] Phenological states CSV not found at %s. Gracefully falling back to calendar + Darwin Core text.", opts$pheno_states))
@@ -1071,18 +1185,26 @@ main <- function() {
   vouchers_df <- vouchers_df[!is.na(vouchers_df$latitude) & !is.na(vouchers_df$longitude), ]
   message(sprintf("Processing %d georeferenced vouchers across target taxa...", nrow(vouchers_df)))
 
+  demo_mode <- isTRUE(opts$demo)
+
   # Stage 1: Environmental Layer Extraction
-  vouchers_df <- extract_environmental_layers(vouchers_df, opts$env_dir)
+  vouchers_df <- extract_environmental_layers(vouchers_df, opts$env_dir, demo = demo_mode)
 
   # Stage 1b: USDA SSURGO Vector Pedology Integration & Multi-Scale Synthesis
-  vouchers_df <- query_ssurgo_sda(vouchers_df, cache_dir = opts$ssurgo_cache, batch_size = opts$batch_size)
-  edaphic_synth <- synthesize_multiscale_edaphics(vouchers_df, ssurgo_out = opts$ssurgo_table, contingency_out = opts$contingency_table)
+  vouchers_df <- query_ssurgo_sda(vouchers_df, cache_dir = opts$ssurgo_cache, batch_size = opts$batch_size, demo = demo_mode)
+  edaphic_synth <- synthesize_multiscale_edaphics(
+    vouchers_df,
+    ssurgo_out = opts$ssurgo_table,
+    contingency_out = opts$contingency_table,
+    demo = demo_mode
+  )
 
   # Stage 1c: Latitudinal Spring Baseline & Phenological Anomalies Engine
   pheno_res <- compute_phenological_anomalies(
     vouchers_df,
     output_csv = opts$pheno_anomalies,
-    summary_csv = opts$pheno_summary
+    summary_csv = opts$pheno_summary,
+    demo = demo_mode
   )
   vouchers_df <- pheno_res$df
   export_phenological_latitudinal_figures(vouchers_df, pheno_res$baseline, opts$pheno_plot)
@@ -1110,17 +1232,13 @@ main <- function() {
   niche_res <- run_warren_niche_identity_tests(vouchers_df, env_vars, n_perm = opts$permutations)
 
   # Stage 5: Export Conflict Flags, Summary Report & Figures (Atomic write-then-replace)
-  dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE)
-  tmp_flags <- paste0(opts$output_flags, ".tmp")
-  readr::write_csv(vouchers_df, tmp_flags)
-  file.rename(tmp_flags, opts$output_flags)
-  message(sprintf("Saved %d multimodal conflict flags to %s.", nrow(vouchers_df), opts$output_flags))
+  if (write_csv_atomic(vouchers_df, opts$output_flags, demo = demo_mode)) {
+    message(sprintf("Saved %d multimodal conflict flags to %s.", nrow(vouchers_df), opts$output_flags))
+  }
 
-  dir.create(dirname(opts$output_summary), recursive = TRUE, showWarnings = FALSE)
-  tmp_sum <- paste0(opts$output_summary, ".tmp")
-  readr::write_csv(niche_res$summary, tmp_sum)
-  file.rename(tmp_sum, opts$output_summary)
-  message(sprintf("Saved Warren's Niche Identity summary to %s.", opts$output_summary))
+  if (write_csv_atomic(niche_res$summary, opts$output_summary, demo = demo_mode)) {
+    message(sprintf("Saved Warren's Niche Identity summary to %s.", opts$output_summary))
+  }
 
   export_spatial_rf_figures(vouchers_df, srf_res, niche_res, opts$output_plot)
   message("=== Multimodal Spatial RF & Niche Modeling Analysis Complete ===")
