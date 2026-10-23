@@ -379,10 +379,10 @@ LM2_Project/
 *.sublime-project
 *.sublime-workspace
 
-# AI Agents & Coding Assistants
-.agents/
-AGENTS.md
-agents.md
+# AI Agents & Coding Assistants (Note: AGENTS.md and .agents/ are tracked in VCS)
+!AGENTS.md
+!.agents/
+!.agents/**
 .gemini/
 GEMINI.md
 gemini.md
