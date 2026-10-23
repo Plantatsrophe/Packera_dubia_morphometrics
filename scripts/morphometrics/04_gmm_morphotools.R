@@ -401,7 +401,7 @@ audit_misidentifications <- function(df, cda_res, gmm_res) {
   df$cda_predicted_taxon <- cda_res$predicted_taxon; df$cda_posterior_prob <- round(cda_res$posterior_prob, 4)
   df$can1 <- round(cda_res$canonical_scores[, 1], 5)
   df$can2 <- if (ncol(cda_res$canonical_scores) >= 2) round(cda_res$canonical_scores[, 2], 5) else 0.0
-  df$is_passive <- !cda_res$is_active; df$morphometric_outlier_flag <- flags
+  df$is_passive <- !cda_res$is_active; df$morphometric_outlier_flag <- flags; df$misidentification_flag <- flags
   df$triage_priority <- triage; df$discordance_reason <- reasons
   if ("AR_inv" %in% names(df)) df$reproductive_trait_status <- ifelse(is.na(df$AR_inv), "Unexpanded_or_Absent", "Measured")
   message(sprintf("Audit Complete: %d morphospace outliers/discordances flagged (%d HIGH, %d MEDIUM)",
@@ -524,6 +524,8 @@ run_gmm_morphotools_pipeline <- function(opts) {
   pca_cols <- paste0("PC", 1:opts$num_pcs); missing_pca <- setdiff(pca_cols, names(efa_df))
   if (length(missing_pca) > 0) stop("Missing PCA columns in EFA table: ", paste(missing_pca, collapse = ", "))
 
+  efa_df$assigned_tier <- ifelse(grepl("^tier_?1", efa_df$assigned_tier, ignore.case = TRUE), "Tier_1_Direct",
+                                 ifelse(grepl("^tier_?2", efa_df$assigned_tier, ignore.case = TRUE), "Tier_2_Reflected", efa_df$assigned_tier))
   closed_df <- efa_df[efa_df$assigned_tier %in% c("Tier_1_Direct", "Tier_2_Reflected"), ]
   valid_idx <- which(complete.cases(closed_df[, pca_cols])); closed_df <- closed_df[valid_idx, ]
 
@@ -590,7 +592,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "species_raw", "species_standardized",
                  "determiner_tier", "cda_predicted_taxon", "cda_posterior_prob", "is_passive",
-                 "morphometric_outlier_flag", "triage_priority", "discordance_reason", "gmm_cluster",
+                 "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster",
                  "gmm_uncertainty", "can1", "can2", "pheno_sin", "pheno_cos", "PC1", "PC2", "PC3", "PC4", "PC5",
                  "centroid_size", "log_centsize",
                  "AR_inv", "AR_inv_std", "reproductive_trait_status", "capitula_count",
@@ -599,7 +601,9 @@ run_gmm_morphotools_pipeline <- function(opts) {
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]
 
   dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE)
-  write.csv(out_df, file = opts$output_flags, row.names = FALSE, na = "")
+  tmp_flags <- paste0(opts$output_flags, ".tmp")
+  write.csv(out_df, file = tmp_flags, row.names = FALSE, na = "")
+  file.rename(tmp_flags, opts$output_flags)
   message("Master morphometric flags table exported: ", opts$output_flags, " (Rows: ", nrow(out_df), ")")
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, feature_cols)
   message("==================================================================")

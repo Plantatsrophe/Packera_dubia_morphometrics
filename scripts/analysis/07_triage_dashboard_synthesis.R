@@ -40,23 +40,44 @@ parse_args_robust <- function() {
       default = "data/tables/curated_vouchers.csv", help = "Vouchers CSV [default: %default]"),
     optparse::make_option(c("-m", "--morphometrics"), type = "character",
       default = "data/tables/morphometrics_misidentification_flags.csv", help = "Morpho flags CSV [default: %default]"),
+    optparse::make_option(c("--linear-traits"), type = "character",
+      default = "", help = "Optional linear traits CSV [default: %default]"),
     optparse::make_option(c("-n", "--vision-audit"), type = "character",
       default = "data/tables/label_noise_audit.csv", help = "Vision audit CSV [default: %default]"),
     optparse::make_option(c("-c", "--multimodal-flags"), type = "character",
       default = "data/tables/multimodal_conflict_flags.csv", help = "Multimodal flags CSV [default: %default]"),
+    optparse::make_option(c("--spatial-flags"), type = "character",
+      default = "", help = "Alias for --multimodal-flags [default: %default]"),
     optparse::make_option(c("-g", "--gmm-summary"), type = "character",
       default = "outputs/reports/gmm_bayes_factors_summary.csv", help = "GMM summary CSV [default: %default]"),
     optparse::make_option(c("-s", "--niche-summary"), type = "character",
       default = "outputs/reports/multimodal_spatial_rf_summary.csv", help = "Niche summary CSV [default: %default]"),
     optparse::make_option(c("-q", "--output-queue"), type = "character",
       default = "data/tables/triage_queue.csv", help = "Triage queue output CSV [default: %default]"),
+    optparse::make_option(c("--output-triage"), type = "character",
+      default = "", help = "Alias for --output-queue [default: %default]"),
     optparse::make_option(c("-p", "--output-plot"), type = "character",
       default = "outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf", help = "Synthesis PDF [default: %default]"),
+    optparse::make_option(c("--output-figure"), type = "character",
+      default = "", help = "Alias for --output-plot [default: %default]"),
     optparse::make_option(c("-r", "--output-report"), type = "character",
-      default = "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md", help = "Markdown report [default: %default]")
+      default = "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md", help = "Markdown report [default: %default]"),
+    optparse::make_option(c("--output-html"), type = "character",
+      default = "", help = "Optional interactive HTML triage dashboard [default: %default]")
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
-    return(optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list)))
+    opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
+    if (nzchar(opts[["spatial-flags"]])) opts[["multimodal-flags"]] <- opts[["spatial-flags"]]
+    if (nzchar(opts[["output-triage"]])) opts[["output-queue"]] <- opts[["output-triage"]]
+    if (nzchar(opts[["output-figure"]])) opts[["output-plot"]] <- opts[["output-figure"]]
+    opts$multimodal_flags <- opts[["multimodal-flags"]]
+    opts$vision_audit <- opts[["vision-audit"]]
+    opts$gmm_summary <- opts[["gmm-summary"]]
+    opts$niche_summary <- opts[["niche-summary"]]
+    opts$output_queue <- opts[["output-queue"]]
+    opts$output_plot <- opts[["output-plot"]]
+    opts$output_report <- opts[["output-report"]]
+    return(opts)
   }
   return(list(
     vouchers = "data/tables/curated_vouchers.csv", morphometrics = "data/tables/morphometrics_misidentification_flags.csv",
@@ -103,7 +124,13 @@ apply_taxonomic_decision_matrix <- function(df) {
     vis_sp   <- if ("vision_predicted_label" %in% names(df) && !is.na(df$vision_predicted_label[i])) df$vision_predicted_label[i] else NULL
     c_err    <- if ("c_error" %in% names(df) && !is.na(df$c_error[i])) df$c_error[i] else 0.0
     is_corrupt <- if ("is_label_corrupted" %in% names(df) && !is.na(df$is_label_corrupted[i])) isTRUE(df$is_label_corrupted[i]) else FALSE
-    is_mo_flag <- if ("misidentification_flag" %in% names(df) && !is.na(df$misidentification_flag[i])) isTRUE(df$misidentification_flag[i]) else FALSE
+    is_mo_flag <- if ("misidentification_flag" %in% names(df) && !is.na(df$misidentification_flag[i])) {
+      isTRUE(df$misidentification_flag[i])
+    } else if ("morphometric_outlier_flag" %in% names(df) && !is.na(df$morphometric_outlier_flag[i])) {
+      isTRUE(df$morphometric_outlier_flag[i])
+    } else {
+      FALSE
+    }
     triage_cat <- if ("triage_category" %in% names(df) && !is.na(df$triage_category[i])) df$triage_category[i] else "Clean_MultiModal_Consensus"
 
     edaph_sp <- if ("edaphic_best_fit_taxon" %in% names(df) && !is.na(df$edaphic_best_fit_taxon[i])) df$edaphic_best_fit_taxon[i] else given_sp
@@ -189,28 +216,44 @@ build_triage_queue <- function(opts) {
     vouchers <- dplyr::left_join(vouchers, mm_df[, c("catalogNumber", join_cols)], by = "catalogNumber")
   }
 
-  # Morphometrics flags (CDA / GMM join with voucher-level aggregation)
+  # Morphometrics flags (CDA / GMM join with voucher-level aggregation; resolve morphometric_outlier_flag <-> misidentification_flag)
+  if (!file.exists(opts$morphometrics) && file.exists("data/tables/morphometric_flags.csv")) {
+    opts$morphometrics <- "data/tables/morphometric_flags.csv"
+  }
   if (file.exists(opts$morphometrics)) {
     mo_df <- readr::read_csv(opts$morphometrics, show_col_types = FALSE)
+    if ("morphometric_outlier_flag" %in% names(mo_df) && !("misidentification_flag" %in% names(mo_df))) {
+      mo_df$misidentification_flag <- mo_df$morphometric_outlier_flag
+    } else if ("misidentification_flag" %in% names(mo_df) && !("morphometric_outlier_flag" %in% names(mo_df))) {
+      mo_df$morphometric_outlier_flag <- mo_df$misidentification_flag
+    } else if (!("misidentification_flag" %in% names(mo_df)) && !("morphometric_outlier_flag" %in% names(mo_df))) {
+      mo_df$misidentification_flag <- FALSE
+      mo_df$morphometric_outlier_flag <- FALSE
+    }
+    if (!("plant_individual_id" %in% names(mo_df))) mo_df$plant_individual_id <- 0L
     mo_agg <- mo_df %>%
       dplyr::group_by(catalogNumber) %>%
       dplyr::summarise(
+        plant_individual_id = dplyr::first(stats::na.omit(plant_individual_id)),
         cda_predicted_taxon = dplyr::first(stats::na.omit(cda_predicted_taxon)),
         cda_posterior_prob = mean(cda_posterior_prob, na.rm = TRUE),
         can1 = mean(can1, na.rm = TRUE),
         can2 = mean(can2, na.rm = TRUE),
         gmm_cluster = dplyr::first(stats::na.omit(gmm_cluster)),
         gmm_uncertainty = mean(gmm_uncertainty, na.rm = TRUE),
+        morphometric_outlier_flag = any(morphometric_outlier_flag == TRUE, na.rm = TRUE),
         misidentification_flag = any(misidentification_flag == TRUE, na.rm = TRUE),
         .groups = "drop"
       )
-    vouchers <- dplyr::left_join(vouchers, mo_agg, by = "catalogNumber")
+    join_mo_cols <- setdiff(names(mo_agg), intersect(names(vouchers), setdiff(names(mo_agg), "catalogNumber")))
+    vouchers <- dplyr::left_join(vouchers, mo_agg[, join_mo_cols], by = "catalogNumber")
   }
 
   # Deep vision audit join with voucher-level aggregation
   if (file.exists(opts$vision_audit)) {
     vi_df <- readr::read_csv(opts$vision_audit, show_col_types = FALSE)
     if ("predicted_label" %in% names(vi_df)) vi_df$vision_predicted_label <- vi_df$predicted_label
+    if (!("confidence_predicted_class" %in% names(vi_df))) vi_df$confidence_predicted_class <- NA_real_
     vi_agg <- vi_df %>%
       dplyr::group_by(catalogNumber) %>%
       dplyr::summarise(
@@ -220,7 +263,8 @@ build_triage_queue <- function(opts) {
         is_label_corrupted = any(is_label_corrupted == TRUE, na.rm = TRUE),
         .groups = "drop"
       )
-    vouchers <- dplyr::left_join(vouchers, vi_agg, by = "catalogNumber")
+    join_vi_cols <- setdiff(names(vi_agg), intersect(names(vouchers), setdiff(names(vi_agg), "catalogNumber")))
+    vouchers <- dplyr::left_join(vouchers, vi_agg[, join_vi_cols], by = "catalogNumber")
   }
 
   # Apply decision matrix
@@ -229,11 +273,17 @@ build_triage_queue <- function(opts) {
   # Order by triage priority: CRITICAL > HIGH > MEDIUM > LOW > RESOLVED
   prio_order <- c("CRITICAL" = 1, "HIGH" = 2, "MEDIUM" = 3, "LOW" = 4, "RESOLVED" = 5)
   vouchers$prio_rank <- prio_order[vouchers$synthesis_triage_priority]
-  vouchers <- vouchers[order(vouchers$prio_rank, -vouchers$coordinateUncertainty), ]
+  if ("coordinateUncertainty" %in% names(vouchers)) {
+    vouchers <- vouchers[order(vouchers$prio_rank, -vouchers$coordinateUncertainty), ]
+  } else {
+    vouchers <- vouchers[order(vouchers$prio_rank), ]
+  }
   vouchers$prio_rank <- NULL
 
   dir.create(dirname(opts$output_queue), recursive = TRUE, showWarnings = FALSE)
-  readr::write_csv(vouchers, opts$output_queue)
+  tmp_queue <- paste0(opts$output_queue, ".tmp")
+  readr::write_csv(vouchers, tmp_queue)
+  file.rename(tmp_queue, opts$output_queue)
   message(sprintf("Successfully exported %d triage vouchers to %s.", nrow(vouchers), opts$output_queue))
   return(vouchers)
 }
@@ -251,7 +301,12 @@ render_synthesis_figure_pdf <- function(df, out_pdf) {
                         legend.title = ggplot2::element_text(size = 8, face = "bold"),
                         legend.text = ggplot2::element_text(size = 7.5))
 
-  # Panel A: Morpho-Space CDA with Passive Samples & Taxonomic Decisions
+  # Panel A: Morpho-Space CDA with Passive Samples & Taxonomic Decisions (dynamic axis variance)
+  v1 <- stats::var(df$can1, na.rm = TRUE)
+  v2 <- stats::var(df$can2, na.rm = TRUE)
+  v_tot <- if (!is.na(v1) && !is.na(v2) && (v1 + v2) > 0) (v1 + v2) else 1.0
+  can1_pct <- if (!is.na(v1) && (v1 + v2) > 0) round((v1 / v_tot) * 100, 1) else 0.0
+  can2_pct <- if (!is.na(v2) && (v1 + v2) > 0) round((v2 / v_tot) * 100, 1) else 0.0
   p1 <- ggplot2::ggplot(df[!is.na(df$can1) & !is.na(df$can2), ],
                         ggplot2::aes(x = can1, y = can2, color = species_standardized, shape = taxonomic_status_call)) +
     ggplot2::stat_ellipse(data = df[df$determiner_tier == "Tier_1_Gold" & df$species_standardized %in% TARGET_TAXA, ],
@@ -261,7 +316,8 @@ render_synthesis_figure_pdf <- function(df, out_pdf) {
     ggplot2::scale_color_manual(values = TAXON_COLORS) +
     ggplot2::scale_fill_manual(values = TAXON_COLORS) +
     thm + ggplot2::labs(title = "A. Morphospace CDA & Decision States",
-                        x = "Canonical Axis 1 (74.2%)", y = "Canonical Axis 2 (18.6%)",
+                        x = sprintf("Canonical Axis 1 (%.1f%%)", can1_pct),
+                        y = sprintf("Canonical Axis 2 (%.1f%%)", can2_pct),
                         color = "Taxon", shape = "Taxonomic Status", fill = "Taxon")
 
   # Panel B: Triage Queue Status by Determiner Authority Tier
@@ -328,7 +384,22 @@ generate_taxonomic_revision_report <- function(df, opts) {
   misid_n <- sum(df$taxonomic_status_call == "Misidentification_Severe", na.rm = TRUE)
   ecoph_n <- sum(df$taxonomic_status_call == "Ecophenotypic_Plasticity", na.rm = TRUE)
   hybr_n  <- sum(df$taxonomic_status_call == "Hybrid_Intergrade_Swarm", na.rm = TRUE)
-  subsp_n <- sum(df$taxonomic_status_call == "Subspecies_Ecotype", na.rm = TRUE)
+  # Dynamically resolve GMM optimal K and 2DeltaBIC from opts$gmm_summary if available
+  opt_k <- 4L
+  delta_bic_val <- NA_real_
+  if (!is.null(opts$gmm_summary) && file.exists(opts$gmm_summary)) {
+    gmm_sum_df <- tryCatch(readr::read_csv(opts$gmm_summary, show_col_types = FALSE), error = function(e) NULL)
+    if (!is.null(gmm_sum_df) && nrow(gmm_sum_df) > 0 && "BIC" %in% names(gmm_sum_df)) {
+      best_idx <- which.max(gmm_sum_df$BIC)
+      if (length(best_idx) > 0 && "K" %in% names(gmm_sum_df)) opt_k <- as.integer(gmm_sum_df$K[best_idx])
+      if ("BayesFactor_vs_Null" %in% names(gmm_sum_df) && length(best_idx) > 0) {
+        delta_bic_val <- as.numeric(gmm_sum_df$BayesFactor_vs_Null[best_idx])
+      } else if ("Two_Delta_BIC" %in% names(gmm_sum_df) && length(best_idx) > 0) {
+        delta_bic_val <- as.numeric(gmm_sum_df$Two_Delta_BIC[best_idx])
+      }
+    }
+  }
+  bic_str <- if (!is.na(delta_bic_val) && is.finite(delta_bic_val)) format(round(delta_bic_val, 1), big.mark = ",") else "N/A"
 
   md_lines <- c(
     "# Taxonomic Revision and Integrative Species Delimitation in the *Packera dubia* Complex (Asteraceae: Senecioneae)",
@@ -349,7 +420,7 @@ generate_taxonomic_revision_report <- function(df, opts) {
     "",
     "### Key Statistical Findings:",
     sprintf("- **Total Examined Vouchers:** %s specimens across North American herbaria (NCU, WIS, MIN, WILLI, CSCN, NY, BRIT, LSU, MU).", format(tot_n, big.mark = ",")),
-    "- **GMM Bayes Factors (2ΔBIC):** Decisive statistical evidence for **K = 4 discrete morphological species clusters** ($2\\Delta\\text{BIC} = 10,815.5$ over $K=1$), rejecting single polymorphic megaspecies hypotheses.",
+    sprintf("- **GMM Bayes Factors (2ΔBIC):** Decisive statistical evidence for **K = %d discrete morphological species clusters** ($2\\Delta\\text{BIC} = %s$ over $K=1$), rejecting single polymorphic megaspecies hypotheses.", opt_k, bic_str),
     "- **Warren's Niche Identity Tests:** Statistically significant ecological niche divergence ($p < 0.01$ across all species pairs), confirming discrete environmental envelopes.",
     sprintf("- **Discovered Herbarium Label Errors:** %d vouchers (%0.1f%%) flagged as severe misidentifications and queued for formal re-annotation.", misid_n, (misid_n / tot_n) * 100),
     sprintf("- **Glabrescent Ecophenotypic Variants:** %d vouchers (%0.1f%%) resolved as ontogenetically worn/senescent *P. dubia* rather than *P. anonyma*.", ecoph_n, (ecoph_n / tot_n) * 100),
@@ -412,7 +483,9 @@ generate_taxonomic_revision_report <- function(df, opts) {
     "*Generated automatically by the UNC Herbarium Packera Systematics Pipeline.*"
   )
 
-  writeLines(md_lines, opts$output_report)
+  tmp_rep <- paste0(opts$output_report, ".tmp")
+  writeLines(md_lines, tmp_rep)
+  file.rename(tmp_rep, opts$output_report)
   message("Taxonomic Revision Summary Markdown report exported successfully.")
 }
 

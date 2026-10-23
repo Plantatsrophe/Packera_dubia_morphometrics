@@ -23,6 +23,23 @@ import pandas as pd
 
 logger = logging.getLogger("LM2_PostProcessing")
 
+# LeafMachine2 11-Class Plant Component Detector (LeafPriority.pt) Taxonomy
+LM2_PCD_CLASSES: Dict[int, str] = {
+    0: "leaf_whole",
+    1: "leaf_partial",
+    2: "leaflet",
+    3: "seed_fruit_one",
+    4: "seed_fruit_many",
+    5: "flower_one",
+    6: "flower_many",
+    7: "bud",
+    8: "specimen",
+    9: "roots",
+    10: "wood",
+}
+LM2_LEAF_CLASS_IDS: Tuple[int, ...] = (0, 1)
+LM2_REPRODUCTIVE_CLASS_IDS: Tuple[int, ...] = (3, 4, 5, 6, 7)
+
 
 @dataclass
 class LeafCandidate:
@@ -38,7 +55,7 @@ class LeafCandidate:
     mask_array: Optional[np.ndarray] = None
     scale_mm_per_px: float = 0.04233  # default ~600 DPI fallback (1 inch / 600 px * 25.4)
     plant_individual_id: int = 0
-    assigned_tier: str = "tier3"
+    assigned_tier: str = "Tier_1_Direct"
     ucs_score: float = 0.0
     solidity: float = 0.0
     midrib_angle_deg: float = 0.0
@@ -56,16 +73,25 @@ def parse_bbox_from_filename(filename: str) -> Optional[Tuple[int, int, int, int
     return None
 
 
-def load_ruler_calibrations(lm2_dir: Path) -> Dict[str, float]:
+def load_ruler_calibrations(
+    lm2_dir: Path,
+    min_confidence: float = 0.50,
+) -> Dict[str, float]:
     """
-    Fast loader for ruler scale calibrations across LM2 output directories.
-    Reads master combined CSVs first, then batch files if available.
+    Fast loader for ruler scale calibrations (pixels_per_mm) across LM2 output directories.
+    Reads master combined CSVs first, then batch files if available, filtering out records
+    whose 38-class ruler classifier confidence falls below `min_confidence`.
     """
     calibrations: Dict[str, float] = {}
+    if not lm2_dir or not Path(lm2_dir).exists():
+        return calibrations
 
-    # 1. First check consolidated ruler CSV files
-    master_ruler_files = list(lm2_dir.glob("**/Data/Ruler/*.csv")) + \
-                         list(lm2_dir.glob("**/Data/Batch/Ruler/*.csv"))
+    lm2_path = Path(lm2_dir)
+    master_ruler_files = (
+        list(lm2_path.glob("**/Data/Ruler/*.csv"))
+        + list(lm2_path.glob("**/Data/Batch/Ruler/*.csv"))
+        + list(lm2_path.glob("**/Archival_Components/Ruler_Info/*.csv"))
+    )
 
     if master_ruler_files:
         for rf in master_ruler_files:
@@ -74,10 +100,39 @@ def load_ruler_calibrations(lm2_dir: Path) -> Dict[str, float]:
                 if df.empty:
                     continue
                 for _, row in df.iterrows():
-                    fn = str(row.get("filename", "")).strip()
+                    fn = str(row.get("filename", row.get("catalogNumber", ""))).strip()
                     if not fn or fn.lower() == "nan":
                         continue
                     cat = Path(fn).stem.split("__")[0]
+
+                    # Check 38-class ruler detector confidence if present
+                    conf_raw = row.get(
+                        "ruler_class_confidence",
+                        row.get("ruler_confidence", row.get("confidence", np.nan)),
+                    )
+                    if pd.notna(conf_raw):
+                        try:
+                            conf_val = float(conf_raw)
+                            if conf_val < 0:
+                                continue
+                            if conf_val > 1.0:
+                                conf_val /= 100.0
+                            if conf_val < min_confidence:
+                                continue
+                        except (ValueError, TypeError):
+                            pass
+
+                    # Direct pixels_per_mm column if provided
+                    direct_px_mm = row.get("pixels_per_mm", np.nan)
+                    if pd.notna(direct_px_mm):
+                        try:
+                            val = float(direct_px_mm)
+                            if val > 0:
+                                calibrations[cat] = val
+                                continue
+                        except (ValueError, TypeError):
+                            pass
+
                     success = str(row.get("ruler_success", "False")).strip().lower() == "true"
                     conv_mean = row.get("conversion_mean", np.nan)
                     pred_conv = row.get("predicted_conversion_factor_cm", np.nan)
@@ -91,15 +146,57 @@ def load_ruler_calibrations(lm2_dir: Path) -> Dict[str, float]:
                     except (ValueError, TypeError):
                         pass
 
+                    # LM2 conversion_mean / predicted_conversion_factor_cm is in pixels per cm
                     if success and conversion_val and conversion_val > 0:
-                        calibrations[cat] = 10.0 / conversion_val
+                        calibrations[cat] = conversion_val / 10.0
                     elif conversion_val and conversion_val > 10.0 and cat not in calibrations:
-                        calibrations[cat] = 10.0 / conversion_val
+                        calibrations[cat] = conversion_val / 10.0
             except Exception as e:
                 logger.debug(f"Error reading master ruler {rf}: {e}")
 
     logger.info(f"Loaded {len(calibrations)} specimen ruler scale calibrations from LM2.")
     return calibrations
+
+
+def load_precomputed_pcd_labels(
+    label_path: Path,
+    sheet_width: int,
+    sheet_height: int,
+    min_confidence: float = 0.25,
+) -> List[Tuple[Tuple[int, int, int, int], float, int]]:
+    """
+    Loads precomputed LeafMachine2 YOLOv5 Plant Component Detector (LeafPriority.pt)
+    normalized bounding boxes from a YOLO .txt label file and converts them into
+    full-sheet pixel coordinates: [((ymin, xmin, ymax, xmax), confidence, class_id), ...].
+    """
+    detections: List[Tuple[Tuple[int, int, int, int], float, int]] = []
+    if not label_path or not label_path.exists():
+        return detections
+
+    try:
+        with open(label_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 5:
+                    continue
+                cls_id = int(float(parts[0]))
+                xc = float(parts[1]) * sheet_width
+                yc = float(parts[2]) * sheet_height
+                bw = float(parts[3]) * sheet_width
+                bh = float(parts[4]) * sheet_height
+                conf = float(parts[5]) if len(parts) >= 6 else 1.0
+                if conf < min_confidence:
+                    continue
+                xmin = max(0, int(round(xc - bw / 2.0)))
+                ymin = max(0, int(round(yc - bh / 2.0)))
+                xmax = min(sheet_width, int(round(xc + bw / 2.0)))
+                ymax = min(sheet_height, int(round(yc + bh / 2.0)))
+                if ymax > ymin and xmax > xmin:
+                    detections.append(((ymin, xmin, ymax, xmax), conf, cls_id))
+    except Exception as e:
+        logger.debug(f"Failed to parse precomputed PCD label {label_path}: {e}")
+
+    return detections
 
 
 def discover_lm2_candidates(
@@ -143,7 +240,11 @@ def discover_lm2_candidates(
             bbox = parse_bbox_from_filename(stem) or (0, 0, 0, 0)
             matched_mask = mask_lookup.get(stem)
 
-            scale = ruler_calibs.get(cat_part, 0.04233)
+            raw_calib = ruler_calibs.get(cat_part)
+            if raw_calib is not None and raw_calib > 0:
+                scale = (1.0 / raw_calib) if raw_calib >= 1.0 else raw_calib
+            else:
+                scale = 0.04233
             leaf_counts[cat_part] += 1
 
             candidate = LeafCandidate(

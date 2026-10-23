@@ -304,15 +304,37 @@ run_fourier_extraction <- function(opts) {
     shape_name <- meta$shape_id
     coo_list[[shape_name]] <- coo
 
+    m_match <- if (!is.null(manifest_df)) {
+      manifest_df[manifest_df$catalogNumber == meta$catalogNumber & manifest_df$leaf_id == meta$leaf_id, , drop = FALSE]
+    } else {
+      NULL
+    }
+    resolved_pid <- if (!is.null(m_match) && nrow(m_match) > 0 && "plant_individual_id" %in% names(m_match) && !is.na(m_match$plant_individual_id[1])) {
+      as.integer(m_match$plant_individual_id[1])
+    } else {
+      meta$plant_id
+    }
+    resolved_ppm <- if (!is.null(m_match) && nrow(m_match) > 0 && "pixels_per_mm" %in% names(m_match)) {
+      suppressWarnings(as.numeric(m_match$pixels_per_mm[1]))
+    } else {
+      NA_real_
+    }
+    resolved_cal <- if (!is.null(m_match) && nrow(m_match) > 0 && "is_calibrated_mm" %in% names(m_match)) {
+      as.logical(m_match$is_calibrated_mm[1])
+    } else {
+      !is.na(resolved_ppm) && is.finite(resolved_ppm) && resolved_ppm > 0
+    }
+
     rec <- data.frame(
       shape_id = shape_name,
       catalogNumber = meta$catalogNumber,
-      plant_individual_id = meta$plant_id,
+      plant_individual_id = resolved_pid,
       leaf_id = meta$leaf_id,
-      assigned_tier = if (!is.null(manifest_df) && "assigned_tier" %in% names(manifest_df)) {
-          m_match <- manifest_df[manifest_df$catalogNumber == meta$catalogNumber & manifest_df$leaf_id == meta$leaf_id, ]
-          if (nrow(m_match) > 0) m_match$assigned_tier[1] else "Tier_1_Direct"
+      assigned_tier = if (!is.null(m_match) && nrow(m_match) > 0 && "assigned_tier" %in% names(m_match)) {
+          m_match$assigned_tier[1]
       } else { "Tier_1_Direct" },
+      pixels_per_mm = resolved_ppm,
+      is_calibrated_mm = resolved_cal,
       aspect_ratio = aspect_ratio,
       area_px = round(area_px, 1),
       centroid_size = if (!is.na(centsize)) round(centsize, 4) else NA_real_,
@@ -416,11 +438,17 @@ run_fourier_extraction <- function(opts) {
     efa_df <- merge(efa_df, v_sub, by = "catalogNumber", all.x = TRUE)
   }
 
+  # Normalize assigned_tier to canonical contract ("Tier_1_Direct", "Tier_2_Reflected")
+  efa_df$assigned_tier <- ifelse(
+    grepl("^tier_?1", efa_df$assigned_tier, ignore.case = TRUE),
+    "Tier_1_Direct",
+    ifelse(grepl("^tier_?2", efa_df$assigned_tier, ignore.case = TRUE), "Tier_2_Reflected", efa_df$assigned_tier)
+  )
   # Standardize reconstruction_tier: Tier 1 (Pristine Direct) vs. Tier 2 (Reflected Hemi-blade)
   efa_df$reconstruction_tier <- ifelse(
-    grepl("tier_?1", efa_df$assigned_tier, ignore.case = TRUE),
+    efa_df$assigned_tier == "Tier_1_Direct",
     "Tier 1",
-    ifelse(grepl("tier_?2", efa_df$assigned_tier, ignore.case = TRUE), "Tier 2", NA_character_)
+    ifelse(efa_df$assigned_tier == "Tier_2_Reflected", "Tier 2", NA_character_)
   )
 
   if (!"scientificName" %in% names(efa_df)) {
@@ -437,16 +465,19 @@ run_fourier_extraction <- function(opts) {
   }
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier",
-                 "reconstruction_tier", "scientificName", "species_raw", "determiner_tier",
+                 "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
+                 "scientificName", "species_raw", "determiner_tier",
                  "PC1", "PC2", "PC3", "PC4", "PC5",
                  "aspect_ratio", "solidity", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
 
-  # 5a. Export Disaggregated Individual Leaf Harmonics Archive
+  # 5a. Export Disaggregated Individual Leaf Harmonics Archive (Atomic write-then-replace)
   if (!is.null(opts$output_individual) && nzchar(opts$output_individual)) {
     dir.create(dirname(opts$output_individual), recursive = TRUE, showWarnings = FALSE)
-    write.csv(efa_df, file = opts$output_individual, row.names = FALSE, na = "")
+    tmp_ind <- paste0(opts$output_individual, ".tmp")
+    write.csv(efa_df, file = tmp_ind, row.names = FALSE, na = "")
+    file.rename(tmp_ind, opts$output_individual)
     message("Individual leaf EFA harmonics archive exported: ", opts$output_individual, " (Rows: ", nrow(efa_df), ")")
   }
 
@@ -495,7 +526,7 @@ run_fourier_extraction <- function(opts) {
     rec$centroid_size <- if (is.finite(med_cs) && med_cs > 0) round(med_cs, 4) else NA_real_
     rec$log_centsize <- if (!is.na(rec$centroid_size) && rec$centroid_size > 0) round(log(rec$centroid_size), 6) else NA_real_
 
-    other_meta <- intersect(c("determiner_raw", "county", "stateProvince", "latitude", "longitude",
+    other_meta <- intersect(c("pixels_per_mm", "is_calibrated_mm", "determiner_raw", "county", "stateProvince", "latitude", "longitude",
                               "pheno_sin", "pheno_cos", "regional_group", "aspect_ratio", "solidity", "area_px"),
                             names(grp))
     for (m_col in other_meta) {
@@ -524,14 +555,17 @@ run_fourier_extraction <- function(opts) {
   }
 
   lead_spec_cols <- c("catalogNumber", "plant_individual_id", "leaf_count", "foliar_variance",
-                      "assigned_tier", "reconstruction_tier", "scientificName", "species_raw", "determiner_tier",
+                      "assigned_tier", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
+                      "scientificName", "species_raw", "determiner_tier",
                       "PC1", "PC2", "PC3", "PC4", "PC5",
                       "aspect_ratio", "solidity", "area_px", "centroid_size", "log_centsize")
   lead_spec_cols <- intersect(lead_spec_cols, names(specimen_df))
   specimen_df <- specimen_df[, c(lead_spec_cols, setdiff(names(specimen_df), lead_spec_cols))]
 
   dir.create(dirname(opts$output), recursive = TRUE, showWarnings = FALSE)
-  write.csv(specimen_df, file = opts$output, row.names = FALSE, na = "")
+  tmp_out <- paste0(opts$output, ".tmp")
+  write.csv(specimen_df, file = tmp_out, row.names = FALSE, na = "")
+  file.rename(tmp_out, opts$output)
   message("Specimen-aggregated EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(specimen_df), ")")
 
   # 6. Empirical Tier Validation Test (PERMANOVA via adonis2 / fallback manova)
@@ -634,7 +668,9 @@ run_fourier_extraction <- function(opts) {
     permanova_df <- permanova_df[, report_cols, drop = FALSE]
 
     dir.create(dirname(opts$report_out), recursive = TRUE, showWarnings = FALSE)
-    write.csv(permanova_df, file = opts$report_out, row.names = FALSE)
+    tmp_rep <- paste0(opts$report_out, ".tmp")
+    write.csv(permanova_df, file = tmp_rep, row.names = FALSE)
+    file.rename(tmp_rep, opts$report_out)
     message("PERMANOVA Tier Validation report exported to: ", opts$report_out)
 
     # Verification assertions

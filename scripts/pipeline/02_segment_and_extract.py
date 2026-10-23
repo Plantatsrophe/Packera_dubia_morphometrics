@@ -64,10 +64,25 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.config import PipelineConfig
+from scripts.vision.configure_leafmachine2 import (
+    generate_high_performance_config,
+    resolve_pcd_weights,
+)
+from scripts.vision.lm2_data_loader import (
+    discover_lm2_candidates,
+    LeafCandidate,
+    LM2_LEAF_CLASS_IDS,
+    LM2_PCD_CLASSES,
+    LM2_REPRODUCTIVE_CLASS_IDS,
+    load_precomputed_pcd_labels,
+    load_ruler_calibrations,
+    parse_bbox_from_filename,
+)
 from scripts.vision.lm2_geometry_utils import (
     classify_and_route_leaf,
     cluster_plant_individuals,
     compute_geometric_metrics,
+    crop_dense_rosette_tier4,
     detect_folded_leaf,
     detect_ruler_scale_hough,
     export_standardized_contour,
@@ -76,6 +91,9 @@ from scripts.vision.lm2_geometry_utils import (
     homologize_contour_starting_point,
     is_botanical_dissection,
     LeafRoutingResult,
+    normalize_assigned_tier,
+    TIER_1_DIRECT,
+    TIER_2_REFLECTED,
 )
 from scripts.vision.capitulum_phenology_classifier import (
     classify_single_capitulum,
@@ -101,7 +119,7 @@ logger = logging.getLogger("SegmentAndExtract")
 
 
 # =============================================================================
-# Data Structures
+# Data Structures & Two-Stage Crop Reprojection Utilities
 # =============================================================================
 
 @dataclass
@@ -109,7 +127,7 @@ class DetectedInstance:
     """Represents a segmented botanical instance on a herbarium sheet."""
     catalog_number: str
     leaf_id: int
-    bbox: Tuple[int, int, int, int]  # (ymin, xmin, ymax, xmax)
+    bbox: Tuple[int, int, int, int]  # (ymin, xmin, ymax, xmax) in full-sheet coordinates
     mask: np.ndarray                 # Binary uint8 mask (H, W)
     score: float
     class_id: int
@@ -119,14 +137,81 @@ class DetectedInstance:
     solidity: float = 0.0
     midrib_angle_deg: float = 0.0
     pixels_per_mm: Optional[float] = None
+    is_calibrated_mm: bool = False
+    crop_offset: Tuple[int, int] = (0, 0)  # (x0, y0) crop offset on full sheet
     mask_path: Optional[str] = None
     contour_path: Optional[str] = None
     rejection_reason: Optional[str] = None
 
 
-# Note: Geometric quality gatekeeping, 2-path reflection/extraction, standardized
-# contour export, DBSCAN spatial clustering, and Hough ruler detection are
-# consolidated in scripts.vision.lm2_geometry_utils.
+def crop_leaf_bbox_with_padding(
+    image_bgr: np.ndarray,
+    bbox: Tuple[int, int, int, int],
+    pad_ratio: float = 0.12,
+) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+    """
+    Crops a candidate leaf bounding box (ymin, xmin, ymax, xmax) from the native-DPI
+    voucher sheet with isotropic padding (default 12%), clamped to sheet boundaries.
+    Returns (crop_bgr, (crop_y0, crop_x0, crop_y1, crop_x1)).
+    """
+    sheet_h, sheet_w = image_bgr.shape[:2]
+    ymin, xmin, ymax, xmax = [int(v) for v in bbox]
+    box_h = max(0, ymax - ymin)
+    box_w = max(0, xmax - xmin)
+    pad_h = int(round(box_h * pad_ratio))
+    pad_w = int(round(box_w * pad_ratio))
+
+    crop_y0 = max(0, ymin - pad_h)
+    crop_x0 = max(0, xmin - pad_w)
+    crop_y1 = min(sheet_h, ymax + pad_h)
+    crop_x1 = min(sheet_w, xmax + pad_w)
+
+    if crop_y1 <= crop_y0 or crop_x1 <= crop_x0:
+        return np.zeros((0, 0, 3), dtype=image_bgr.dtype), (crop_y0, crop_x0, crop_y0, crop_x0)
+
+    return image_bgr[crop_y0:crop_y1, crop_x0:crop_x1].copy(), (crop_y0, crop_x0, crop_y1, crop_x1)
+
+
+def reproject_crop_mask_to_sheet(
+    crop_mask: np.ndarray,
+    crop_box: Tuple[int, int, int, int],
+    sheet_shape: Tuple[int, int],
+) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+    """
+    Projects a binary instance mask (crop_h, crop_w) from a padded Stage 1 crop
+    back into full-sheet coordinates (sheet_h, sheet_w) and returns
+    (sheet_mask, full_sheet_bbox).
+    """
+    sheet_h, sheet_w = int(sheet_shape[0]), int(sheet_shape[1])
+    crop_y0, crop_x0, crop_y1, crop_x1 = [int(v) for v in crop_box]
+    crop_y0 = max(0, min(sheet_h, crop_y0))
+    crop_x0 = max(0, min(sheet_w, crop_x0))
+    crop_y1 = max(crop_y0, min(sheet_h, crop_y1))
+    crop_x1 = max(crop_x0, min(sheet_w, crop_x1))
+
+    target_h = crop_y1 - crop_y0
+    target_w = crop_x1 - crop_x0
+    sheet_mask = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
+    if target_h <= 0 or target_w <= 0 or crop_mask is None or crop_mask.size == 0:
+        return sheet_mask, (crop_y0, crop_x0, crop_y1, crop_x1)
+
+    mask_bin = (crop_mask > 0).astype(np.uint8) * 255
+    if mask_bin.shape[0] != target_h or mask_bin.shape[1] != target_w:
+        mask_bin = cv2.resize(mask_bin, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+
+    sheet_mask[crop_y0:crop_y1, crop_x0:crop_x1] = mask_bin
+
+    ys, xs = np.where(mask_bin > 0)
+    if len(ys) > 0 and len(xs) > 0:
+        ymin_s = crop_y0 + int(np.min(ys))
+        ymax_s = crop_y0 + int(np.max(ys)) + 1
+        xmin_s = crop_x0 + int(np.min(xs))
+        xmax_s = crop_x0 + int(np.max(xs)) + 1
+        full_bbox = (ymin_s, xmin_s, min(sheet_h, ymax_s), min(sheet_w, xmax_s))
+    else:
+        full_bbox = (crop_y0, crop_x0, crop_y1, crop_x1)
+
+    return sheet_mask, full_bbox
 
 
 # =============================================================================
@@ -134,7 +219,7 @@ class DetectedInstance:
 # =============================================================================
 
 def compute_capitulum_metrics(
-    mask: np.ndarray,
+    mask: Optional[np.ndarray],
     bbox: Tuple[int, int, int, int],
     pixels_per_mm: Optional[float] = None,
     min_ar: float = 0.7,
@@ -142,7 +227,7 @@ def compute_capitulum_metrics(
 ) -> Optional[Dict[str, Any]]:
     """
     Computes involucre height (H_inv), width (W_inv), and aspect ratio (AR_inv = H/W)
-    for a segmented Class 6 capitulum instance.
+    for a detected reproductive / capitulum instance.
 
     Filters for valid cylindrical capitula where min_ar <= H/W <= max_ar (default 0.7 to 2.0).
     Dimensions are computed via oriented bounding box (cv2.minAreaRect), resolving the longitudinal
@@ -152,7 +237,9 @@ def compute_capitulum_metrics(
     h_inv_px = 0.0
     w_inv_px = 0.0
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = []
+    if mask is not None and isinstance(mask, np.ndarray) and mask.size > 0:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours and cv2.contourArea(max(contours, key=cv2.contourArea)) >= 10:
         main_contour = max(contours, key=cv2.contourArea)
         rect = cv2.minAreaRect(main_contour)
@@ -201,7 +288,143 @@ def compute_capitulum_metrics(
 
 
 # =============================================================================
-# Direct PointRend Model Inference Engine
+# Stage 1 LeafMachine2 Component Detector (LeafPriority.pt, 11 Classes)
+# =============================================================================
+
+class LM2Stage1Detector:
+    """
+    Encapsulates LeafMachine2's Stage 1 YOLOv5 Plant Component Detector (LeafPriority.pt).
+    11 Canonical Classes:
+      0: leaf_whole, 1: leaf_partial, 2: leaflet,
+      3: seed_fruit_one, 4: seed_fruit_many, 5: flower_one, 6: flower_many, 7: bud,
+      8: specimen, 9: roots, 10: wood.
+    """
+
+    CLASSES: Dict[int, str] = LM2_PCD_CLASSES
+    LEAF_CLASS_IDS: Tuple[int, ...] = LM2_LEAF_CLASS_IDS
+    REPRODUCTIVE_CLASS_IDS: Tuple[int, ...] = LM2_REPRODUCTIVE_CLASS_IDS
+
+    def __init__(
+        self,
+        weights_path: Optional[Union[str, Path]] = None,
+        device: str = "cuda",
+        conf_thres: float = 0.25,
+        iou_thres: float = 0.45,
+        img_size: int = 1280,
+        lm2_project_dir: Optional[Path] = None,
+    ) -> None:
+        if weights_path is not None:
+            self.weights_path = Path(weights_path)
+            self.model_name = self.weights_path.stem
+        else:
+            self.model_name, self.weights_path = resolve_pcd_weights("LeafPriority.pt")
+        self.device = device if (device == "cuda" and torch_cuda_available()) else "cpu"
+        self.conf_thres = conf_thres
+        self.iou_thres = iou_thres
+        self.img_size = img_size
+        self.lm2_project_dir = Path(lm2_project_dir) if lm2_project_dir else None
+        self.model = None
+        self.stride = 32
+        self._load_model()
+
+    def _load_model(self) -> None:
+        """Loads YOLOv5 LeafPriority.pt model if available in current environment."""
+        if not self.weights_path.exists():
+            logger.debug(f"Stage 1 YOLOv5 weights not found at {self.weights_path}; using precomputed/fallback mode.")
+            return
+
+        pcd_dir = LM2_DIR / "component_detector"
+        if not pcd_dir.exists():
+            return
+
+        try:
+            import torch
+            if str(pcd_dir) not in sys.path:
+                sys.path.insert(0, str(pcd_dir))
+            from models.common import DetectMultiBackend
+            from utils.torch_utils import select_device
+
+            dev = select_device(self.device if self.device != "cuda" else "0")
+            self.model = DetectMultiBackend(str(self.weights_path), device=dev, dnn=False)
+            self.stride = int(max(getattr(self.model, "stride", 32), 32))
+            logger.info(f"Loaded Stage 1 LM2 YOLOv5 detector ({self.model_name}) from {self.weights_path}")
+        except Exception as e:
+            logger.debug(f"Stage 1 YOLOv5 runtime not loaded in current interpreter ({e}).")
+            self.model = None
+
+    def predict(
+        self,
+        image_bgr: np.ndarray,
+        catalog_number: Optional[str] = None,
+    ) -> List[Tuple[Tuple[int, int, int, int], float, int]]:
+        """
+        Runs Stage 1 full-sheet organ detection on `image_bgr`.
+        Returns list of ((ymin, xmin, ymax, xmax), score, class_id) in 11-class LM2 taxonomy.
+        """
+        sheet_h, sheet_w = image_bgr.shape[:2]
+
+        # 1. Check precomputed LM2 Plant_Components YOLO labels if available
+        if self.lm2_project_dir and catalog_number:
+            label_candidates = [
+                self.lm2_project_dir / "Data" / "precomputed_annotations" / "Plant_Components" / "labels" / f"{catalog_number}.txt",
+                self.lm2_project_dir / "Plant_Components" / "labels" / f"{catalog_number}.txt",
+            ]
+            for lf in label_candidates:
+                if lf.exists():
+                    dets = load_precomputed_pcd_labels(
+                        lf, sheet_w, sheet_h, min_confidence=self.conf_thres
+                    )
+                    if dets:
+                        return dets
+
+        # 2. Run live YOLOv5 LeafPriority.pt inference if model is loaded
+        if self.model is None:
+            return []
+
+        try:
+            import torch
+            from utils.augmentations import letterbox
+            from utils.general import non_max_suppression, scale_coords
+
+            img = letterbox(image_bgr, self.img_size, stride=self.stride, auto=self.model.pt)[0]
+            img = img.transpose((2, 0, 1))[::-1]
+            img = np.ascontiguousarray(img)
+
+            im = torch.from_numpy(img).to(self.model.device)
+            im = im.float() / 255.0
+            if len(im.shape) == 3:
+                im = im[None]
+
+            with torch.no_grad():
+                pred = self.model(im, augment=False, visualize=False)
+                pred = non_max_suppression(
+                    pred,
+                    conf_thres=self.conf_thres,
+                    iou_thres=self.iou_thres,
+                    max_det=1000,
+                )
+
+            results: List[Tuple[Tuple[int, int, int, int], float, int]] = []
+            for det in pred:
+                if len(det):
+                    det[:, :4] = scale_coords(im.shape[2:], det[:, :4], image_bgr.shape).round()
+                    for *xyxy, conf, cls in reversed(det):
+                        xmin, ymin, xmax, ymax = (
+                            max(0, int(xyxy[0].item())),
+                            max(0, int(xyxy[1].item())),
+                            min(sheet_w, int(xyxy[2].item())),
+                            min(sheet_h, int(xyxy[3].item())),
+                        )
+                        if ymax > ymin and xmax > xmin:
+                            results.append(((ymin, xmin, ymax, xmax), float(conf.item()), int(cls.item())))
+            return results
+        except Exception as e:
+            logger.debug(f"Stage 1 YOLOv5 inference error: {e}")
+            return []
+
+
+# =============================================================================
+# Stage 2 Cropped PointRend Model Inference Engine
 # =============================================================================
 
 class PointRendInferenceEngine:
@@ -273,7 +496,7 @@ class PointRendInferenceEngine:
 
     def predict(self, image_bgr: np.ndarray) -> List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]:
         """
-        Runs inference on BGR image.
+        Runs inference on BGR image (cropped leaf patch or full sheet).
         Returns list of (bbox, mask, score, class_id).
         """
         if self.model is None:
@@ -323,7 +546,7 @@ def torch_cuda_available() -> bool:
 # =============================================================================
 
 class SegmentAndExtractPipeline:
-    """Unified runner for leaf segmentation, 2-path extraction, and manifest logging."""
+    """Unified two-stage LM2 detection, cropped PointRend segmentation, and extraction runner."""
 
     def __init__(
         self,
@@ -337,6 +560,9 @@ class SegmentAndExtractPipeline:
         num_ruler_workers: int = 4,
         force: bool = False,
         config: Optional[PipelineConfig] = None,
+        lm2_project_dir: Optional[Union[str, Path]] = None,
+        stage1_weights: Optional[Union[str, Path]] = None,
+        ruler_confidence_thresh: float = 0.50,
     ) -> None:
         self.vouchers_csv = Path(vouchers_csv)
         self.model_weights = Path(model_weights)
@@ -381,15 +607,61 @@ class SegmentAndExtractPipeline:
         self.score_thresh = score_thresh
         self.num_ruler_workers = num_ruler_workers
         self.force = force
+        self.ruler_confidence_thresh = ruler_confidence_thresh
 
+        # Resolve LM2 project directory and build canonical LM2 runtime config
+        if lm2_project_dir is not None:
+            self.lm2_project_dir: Optional[Path] = Path(lm2_project_dir)
+        else:
+            cand_lm2_dir = self.output_dir.parent / "LM2_Project"
+            self.lm2_project_dir = cand_lm2_dir if cand_lm2_dir.exists() else None
+
+        self.lm2_config = generate_high_performance_config(
+            pipeline_cfg=self.config,
+            output_dir=str(self.lm2_project_dir / "Data" / "output") if self.lm2_project_dir else None,
+        )
+
+        # Output artifact directories
         self.masks_dir = self.output_dir / "masks"
         self.contours_dir = self.output_dir / "contours"
         self.tables_dir = self.output_dir / "tables"
+        self.cropped_patches_dir = self.output_dir / "cropped_patches"
+        self.basal_leaves_raw_dir = self.cropped_patches_dir / "basal_leaves_raw"
+        self.capitula_patches_dir = self.cropped_patches_dir / "capitula"
+        self.rosettes_dense_dir = self.cropped_patches_dir / "rosettes_dense"
 
-        for d in [self.masks_dir, self.contours_dir, self.tables_dir]:
+        for d in [
+            self.masks_dir,
+            self.contours_dir,
+            self.tables_dir,
+            self.basal_leaves_raw_dir,
+            self.capitula_patches_dir,
+            self.rosettes_dense_dir,
+        ]:
             d.mkdir(parents=True, exist_ok=True)
 
+        # Preload LM2 38-class ruler scale calibrations (keeping Hough as secondary fallback)
+        self.ruler_calibrations: Dict[str, float] = {}
+        if self.lm2_project_dir and self.lm2_project_dir.exists():
+            self.ruler_calibrations.update(
+                load_ruler_calibrations(self.lm2_project_dir, min_confidence=self.ruler_confidence_thresh)
+            )
+        if self.output_dir.exists():
+            self.ruler_calibrations.update(
+                load_ruler_calibrations(self.output_dir, min_confidence=self.ruler_confidence_thresh)
+            )
+
         self.ruler_executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.num_ruler_workers)
+
+        # Stage 1 Full-Sheet Organ Detector (LeafPriority.pt, 11 classes)
+        self.stage1_detector = LM2Stage1Detector(
+            weights_path=stage1_weights,
+            device=self.device,
+            conf_thres=min(self.score_thresh, 0.25),
+            lm2_project_dir=self.lm2_project_dir,
+        )
+
+        # Stage 2 Cropped Leaf PointRend Segmentation Engine
         self.model_engine = PointRendInferenceEngine(
             weights_path=self.model_weights,
             device=self.device,
@@ -432,7 +704,7 @@ class SegmentAndExtractPipeline:
         if masks and any(m.is_file() and m.stat().st_size > 0 for m in masks):
             return True
 
-        for sub in ["tier1_pristine", "tier2_reflected"]:
+        for sub in ["tier1_pristine", "tier1_intact", "tier2_reflected"]:
             sub_dir = self.masks_dir / sub
             if sub_dir.exists():
                 sub_masks = list(sub_dir.glob(f"{catalog_number}_leaf*.png"))
@@ -473,7 +745,7 @@ class SegmentAndExtractPipeline:
         image_path: Path,
         taxon: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        """Processes a single herbarium voucher specimen sheet."""
+        """Processes a single herbarium voucher specimen sheet using Two-Stage LM2 + PointRend."""
         if taxon is None:
             taxon = self.vouchers_taxa.get(catalog_number, None)
 
@@ -500,20 +772,79 @@ class SegmentAndExtractPipeline:
 
         sheet_h, sheet_w = img_bgr.shape[:2]
 
-        # 1. Asynchronously launch decoupled Hough ruler detection
-        ruler_future = self.ruler_executor.submit(detect_ruler_scale_hough, img_bgr)
-
-        # 2. Run PointRend instance segmentation
-        raw_detections = self.model_engine.predict(img_bgr)
-
-        # Collect asynchronous scale result (with graceful fallback)
-        try:
-            pixels_per_mm = ruler_future.result(timeout=5.0)
-        except Exception as e:
-            logger.debug(f"Ruler detection timeout or exception for {catalog_number}: {e}")
+        # 1. Ruler Scale Calibration: Prefer Stage 1 LM2 Ruler Calibration, fallback to Hough
+        lm2_px_per_mm = self.ruler_calibrations.get(catalog_number)
+        ruler_future = None
+        if lm2_px_per_mm is not None and not np.isnan(lm2_px_per_mm) and lm2_px_per_mm > 0:
+            pixels_per_mm: Optional[float] = (
+                float(1.0 / lm2_px_per_mm) if lm2_px_per_mm < 1.0 else float(lm2_px_per_mm)
+            )
+        else:
             pixels_per_mm = None
+            ruler_future = self.ruler_executor.submit(detect_ruler_scale_hough, img_bgr)
 
-        if not raw_detections:
+        # 2. Stage 1 Full-Sheet Organ Detection (LeafPriority.pt 11-class detector)
+        stage1_detections = self.stage1_detector.predict(img_bgr, catalog_number=catalog_number)
+
+        capitulum_detections: List[Tuple[Tuple[int, int, int, int], Optional[np.ndarray], float, int]] = []
+        leaf_detections: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int, Tuple[int, int]]] = []
+
+        if stage1_detections:
+            # Stage 1 -> Stage 2 Two-Stage Flow
+            for s1_item in stage1_detections:
+                if len(s1_item) == 4:
+                    s1_bbox, s1_mask, s1_score, s1_cls = s1_item
+                else:
+                    s1_bbox, s1_score, s1_cls = s1_item
+                    s1_mask = None
+
+                if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
+                    capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
+                elif s1_cls in LM2_LEAF_CLASS_IDS:
+                    # Crop candidate leaf box with 12% padding and pass to Stage 2 PointRend
+                    crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=0.12)
+                    if crop_bgr.size == 0:
+                        continue
+                    crop_preds = self.model_engine.predict(crop_bgr)
+                    for pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
+                        sheet_mask, full_bbox = reproject_crop_mask_to_sheet(
+                            pr_mask, crop_box, (sheet_h, sheet_w)
+                        )
+                        leaf_detections.append((
+                            full_bbox,
+                            sheet_mask,
+                            float(pr_score),
+                            int(s1_cls),
+                            (crop_box[1], crop_box[0]),
+                        ))
+        else:
+            # Fallback when Stage 1 detector is uninitialized (e.g., direct PointRend unit tests)
+            raw_detections = self.model_engine.predict(img_bgr)
+            for bbox, mask, score, cls_id in raw_detections:
+                if cls_id in LM2_REPRODUCTIVE_CLASS_IDS:
+                    capitulum_detections.append((bbox, mask, float(score), int(cls_id)))
+                elif cls_id in LM2_LEAF_CLASS_IDS:
+                    leaf_detections.append((
+                        bbox,
+                        mask,
+                        float(score),
+                        int(cls_id),
+                        (int(bbox[1]), int(bbox[0])),
+                    ))
+
+        # Collect asynchronous Hough scale fallback if LM2 ruler calibration was absent
+        if ruler_future is not None:
+            try:
+                pixels_per_mm = ruler_future.result(timeout=5.0)
+            except Exception as e:
+                logger.debug(f"Ruler detection timeout or exception for {catalog_number}: {e}")
+                pixels_per_mm = None
+
+        is_calibrated_mm = bool(
+            pixels_per_mm is not None and not np.isnan(pixels_per_mm) and float(pixels_per_mm) > 0.0
+        )
+
+        if not leaf_detections and not capitulum_detections:
             failure_record = {
                 "catalogNumber": catalog_number,
                 "image_path": str(image_path),
@@ -532,26 +863,29 @@ class SegmentAndExtractPipeline:
             self.voucher_pheno_records[catalog_number] = classify_voucher_phenology(catalog_number, [])
             return [], failure_record
 
-        # Separate raw detections into Class 6 capitula and vegetative leaf candidates (class_id != 6)
-        capitulum_detections = [d for d in raw_detections if d[3] == 6]
-        leaf_detections = [d for d in raw_detections if d[3] != 6]
-
-        # Extract macro-reproductive metrics from valid cylindrical capitula (0.7 <= H/W <= 2.0)
+        # 3. Route Reproductive Detections (seed_fruit_one/many, flower_one/many, bud) to Phenology Classifier
         valid_capitula: List[Dict[str, Any]] = []
         head_pheno_results: List[Dict[str, Any]] = []
-        for bbox, mask, score, class_id in capitulum_detections:
+        for cap_idx, (bbox, mask, score, class_id) in enumerate(capitulum_detections, 1):
             metrics = compute_capitulum_metrics(mask, bbox, pixels_per_mm)
             if metrics is not None:
                 metrics["score"] = score
+                metrics["class_id"] = class_id
                 valid_capitula.append(metrics)
 
-            # Crop-and-Classify visual phenological biomarker extraction
-            ymin, xmin, ymax, xmax = bbox
-            crop_bgr = img_bgr[max(0, ymin):max(0, ymax), max(0, xmin):max(0, xmax)]
-            if crop_bgr.size > 0 and crop_bgr.shape[0] >= 5 and crop_bgr.shape[1] >= 5:
-                crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-                head_pheno = classify_single_capitulum(crop_rgb)
-                head_pheno_results.append(head_pheno)
+            ymin, xmin, ymax, xmax = [int(v) for v in bbox]
+            y0, y1 = max(0, ymin), min(sheet_h, max(0, ymax))
+            x0, x1 = max(0, xmin), min(sheet_w, max(0, xmax))
+            crop_bgr = img_bgr[y0:y1, x0:x1]
+            if crop_bgr.size > 0:
+                cap_patch_path = self.capitula_patches_dir / f"{catalog_number}_cap{cap_idx}.jpg"
+                self.capitula_patches_dir.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(cap_patch_path), crop_bgr)
+
+                if crop_bgr.shape[0] >= 5 and crop_bgr.shape[1] >= 5:
+                    crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+                    head_pheno = classify_single_capitulum(crop_rgb)
+                    head_pheno_results.append(head_pheno)
 
         self.voucher_pheno_records[catalog_number] = classify_voucher_phenology(
             catalog_number, head_pheno_results
@@ -595,7 +929,7 @@ class SegmentAndExtractPipeline:
 
         # Build detected leaf instances
         instances: List[DetectedInstance] = []
-        for idx, (bbox, mask, score, class_id) in enumerate(leaf_detections, 1):
+        for idx, (bbox, mask, score, class_id, crop_offset) in enumerate(leaf_detections, 1):
             instances.append(DetectedInstance(
                 catalog_number=catalog_number,
                 leaf_id=idx,
@@ -603,16 +937,32 @@ class SegmentAndExtractPipeline:
                 mask=mask,
                 score=score,
                 class_id=class_id,
-                pixels_per_mm=pixels_per_mm
+                pixels_per_mm=pixels_per_mm,
+                is_calibrated_mm=is_calibrated_mm,
+                crop_offset=crop_offset,
             ))
 
-        # 3. Vectorized Centroid Spatial Clustering
+        # 4. Vectorized Centroid Spatial Clustering (DBSCAN)
         instances = cluster_plant_individuals(instances, sheet_w, sheet_h)
+
+        # 5. Tier 4 Dense Rosette Patch Generation per plant_individual_id
+        clusters_by_pid: Dict[int, List[DetectedInstance]] = defaultdict(list)
+        for inst in instances:
+            clusters_by_pid[inst.plant_individual_id].append(inst)
+        for pid, pid_instances in sorted(clusters_by_pid.items()):
+            crop_dense_rosette_tier4(
+                raw_image_path=image_path,
+                plant_candidates=pid_instances,
+                plant_id=pid,
+                output_dir=self.output_dir,
+                raw_img=img_bgr,
+                catalog_number=catalog_number,
+            )
 
         extracted_records: List[Dict[str, Any]] = []
         rejected_instances: List[DetectedInstance] = []
 
-        # 4. Geometric Quality Gatekeeper & Leaf Extraction Logic
+        # 6. Geometric Quality Gatekeeper, 2-Path Extraction & Basal Leaf RGB Patch Saving
         for inst in instances:
             routing_res = classify_and_route_leaf(
                 inst.mask,
@@ -666,7 +1016,7 @@ class SegmentAndExtractPipeline:
             # 1. Check for fold: If is_folded == True -> synthesize full blade via reflection -> route to Tier 2
             if is_folded and routing_res.assigned_tier == "tier2":
                 tier = "Tier 2"
-                assigned_tier = "tier2"
+                assigned_tier = TIER_2_REFLECTED
                 reflection_applied = True
                 out_base = (self.output_dir / "data") if (self.output_dir.name != "data" and (self.output_dir / "data").is_dir()) else self.output_dir
                 mask_dir = out_base / "masks"
@@ -688,7 +1038,7 @@ class SegmentAndExtractPipeline:
             # 2. Check for pristine whole leaf: If solidity >= min_solidity and ucs >= 0.85 -> route to Tier 1
             elif routing_res.solidity >= self.min_solidity and routing_res.ucs >= self.min_ucs and routing_res.assigned_tier == "tier1" and not is_dissected:
                 tier = "Tier 1"
-                assigned_tier = "tier1"
+                assigned_tier = TIER_1_DIRECT
                 reflection_applied = False
                 mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
                 contour_path = _export_homologized(routing_res.processed_mask, is_reflected=False)
@@ -698,7 +1048,7 @@ class SegmentAndExtractPipeline:
             # 3. Check for botanical dissection: If solidity < min_solidity but is_botanical_dissection == True (or taxon in lyrate list) -> route to Tier 1 (Dissected)
             elif (routing_res.solidity < self.min_solidity) and (is_dissected or is_lyrate_taxon) and routing_res.solidity >= self.min_dissected and routing_res.assigned_tier == "tier1":
                 tier = "Tier 1 (Dissected)"
-                assigned_tier = "tier1"
+                assigned_tier = TIER_1_DIRECT
                 is_dissected = True
                 reflection_applied = False
                 mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
@@ -709,7 +1059,7 @@ class SegmentAndExtractPipeline:
             # 4. Check for partial occlusion with intact half-blade -> route to Tier 2
             elif routing_res.assigned_tier == "tier2":
                 tier = "Tier 2"
-                assigned_tier = "tier2"
+                assigned_tier = TIER_2_REFLECTED
                 reflection_applied = True
                 out_base = (self.output_dir / "data") if (self.output_dir.name != "data" and (self.output_dir / "data").is_dir()) else self.output_dir
                 mask_dir = out_base / "masks"
@@ -752,6 +1102,21 @@ class SegmentAndExtractPipeline:
 
             inst.assigned_tier = assigned_tier
 
+            # Save extracted basal leaf RGB crop to data/cropped_patches/basal_leaves_raw/{catalogNumber}_leaf{leaf_id}.jpg
+            ly0, lx0, ly1, lx1 = [int(v) for v in inst.bbox]
+            ly0, ly1 = max(0, ly0), min(sheet_h, max(0, ly1))
+            lx0, lx1 = max(0, lx0), min(sheet_w, max(0, lx1))
+            if ly1 <= ly0 or lx1 <= lx0:
+                ys_m, xs_m = np.where(inst.mask > 0)
+                if len(ys_m) > 0 and len(xs_m) > 0:
+                    ly0, ly1 = int(np.min(ys_m)), min(sheet_h, int(np.max(ys_m)) + 1)
+                    lx0, lx1 = int(np.min(xs_m)), min(sheet_w, int(np.max(xs_m)) + 1)
+            leaf_rgb_crop = img_bgr[ly0:ly1, lx0:lx1]
+            if leaf_rgb_crop.size > 0:
+                self.basal_leaves_raw_dir.mkdir(parents=True, exist_ok=True)
+                leaf_patch_path = self.basal_leaves_raw_dir / f"{catalog_number}_leaf{inst.leaf_id}.jpg"
+                cv2.imwrite(str(leaf_patch_path), leaf_rgb_crop)
+
             # Record successfully extracted leaf with diagnostic classification flags
             extracted_records.append({
                 "catalogNumber": catalog_number,
@@ -768,6 +1133,7 @@ class SegmentAndExtractPipeline:
                 "ucs_score": round(float(inst.ucs_score), 4),
                 "midrib_angle_deg": round(float(inst.midrib_angle_deg), 2),
                 "pixels_per_mm": round(float(inst.pixels_per_mm), 4) if inst.pixels_per_mm else np.nan,
+                "is_calibrated_mm": bool(inst.is_calibrated_mm),
                 "mask_path": inst.mask_path,
                 "capitula_count": capitula_count,
                 "involucre_height_px": repro_summary["involucre_height_px"],
@@ -927,14 +1293,17 @@ class SegmentAndExtractPipeline:
         if extracted_df.empty:
             extracted_df = pd.DataFrame(columns=manifest_cols + [
                 "plant_individual_id", "assigned_tier", "ucs_score",
-                "midrib_angle_deg", "pixels_per_mm", "mask_path", "capitula_count",
-                "involucre_height_px", "involucre_width_px", "involucre_height_mm",
-                "involucre_width_mm", "capitulum_aspect_ratio"
+                "midrib_angle_deg", "pixels_per_mm", "is_calibrated_mm", "mask_path",
+                "capitula_count", "involucre_height_px", "involucre_width_px",
+                "involucre_height_mm", "involucre_width_mm", "capitulum_aspect_ratio"
             ])
         else:
+            # Normalize assigned_tier to canonical contract ("Tier_1_Direct", "Tier_2_Reflected")
+            if "assigned_tier" in extracted_df.columns:
+                extracted_df["assigned_tier"] = extracted_df["assigned_tier"].apply(normalize_assigned_tier)
             # Backfill any missing diagnostic fields for legacy resumption entries
             if "tier" not in extracted_df.columns:
-                extracted_df["tier"] = extracted_df.get("assigned_tier", "tier1").apply(
+                extracted_df["tier"] = extracted_df.get("assigned_tier", TIER_1_DIRECT).apply(
                     lambda x: "Tier 2" if "2" in str(x).lower() else "Tier 1"
                 )
             if "ucs" not in extracted_df.columns:
@@ -944,8 +1313,12 @@ class SegmentAndExtractPipeline:
             if "is_dissected" not in extracted_df.columns:
                 extracted_df["is_dissected"] = False
             if "reflection_applied" not in extracted_df.columns:
-                extracted_df["reflection_applied"] = extracted_df.get("assigned_tier", "tier1").apply(
+                extracted_df["reflection_applied"] = extracted_df.get("assigned_tier", TIER_1_DIRECT).apply(
                     lambda x: True if "2" in str(x).lower() else False
+                )
+            if "is_calibrated_mm" not in extracted_df.columns:
+                extracted_df["is_calibrated_mm"] = extracted_df.get("pixels_per_mm", pd.Series(dtype=float)).apply(
+                    lambda x: bool(pd.notna(x) and float(x) > 0)
                 )
             for c in manifest_cols:
                 if c not in extracted_df.columns:

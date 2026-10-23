@@ -968,6 +968,35 @@ def resample_normalized_contour(
 
 
 
+TIER_1_DIRECT = "Tier_1_Direct"
+TIER_2_REFLECTED = "Tier_2_Reflected"
+
+CANONICAL_TIER_MAP: Dict[str, str] = {
+    "tier1": TIER_1_DIRECT,
+    "tier_1": TIER_1_DIRECT,
+    "tier 1": TIER_1_DIRECT,
+    "tier 1 (dissected)": TIER_1_DIRECT,
+    "tier_1_direct": TIER_1_DIRECT,
+    "Tier_1_Direct": TIER_1_DIRECT,
+    "tier2": TIER_2_REFLECTED,
+    "tier_2": TIER_2_REFLECTED,
+    "tier 2": TIER_2_REFLECTED,
+    "tier_2_reflected": TIER_2_REFLECTED,
+    "Tier_2_Reflected": TIER_2_REFLECTED,
+}
+
+
+def normalize_assigned_tier(tier_value: str) -> str:
+    """
+    Normalizes routing tier values ('tier1', 'tier2', 'Tier 1', 'Tier 2')
+    to the canonical cross-language CSV contract names ('Tier_1_Direct', 'Tier_2_Reflected').
+    """
+    if not tier_value:
+        return "rejected"
+    clean = str(tier_value).strip()
+    return CANONICAL_TIER_MAP.get(clean, CANONICAL_TIER_MAP.get(clean.lower(), clean))
+
+
 @dataclass
 class LeafRoutingResult:
     """Structured diagnostic and extraction result from geometric quality gatekeeping."""
@@ -982,6 +1011,11 @@ class LeafRoutingResult:
     contour_coords: Optional[np.ndarray] = None
     rejection_reason: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def canonical_tier(self) -> str:
+        """Returns the canonical cross-language CSV tier ('Tier_1_Direct', 'Tier_2_Reflected', or 'rejected')."""
+        return normalize_assigned_tier(self.assigned_tier)
 
 
 def classify_and_route_leaf(
@@ -1928,13 +1962,15 @@ def crop_dense_rosette_tier4(
     raw_image_path: Path,
     plant_candidates: List[Any],
     plant_id: int,
-    output_dir: Path
+    output_dir: Path,
+    raw_img: Optional[np.ndarray] = None,
+    catalog_number: Optional[str] = None,
 ) -> Optional[str]:
     """Tier 4: Dense whole-rosette bounding crop from native-DPI sheet."""
-    if not raw_image_path.exists():
-        return None
-
-    raw_img = cv2.imread(str(raw_image_path))
+    if raw_img is None:
+        if not raw_image_path.exists():
+            return None
+        raw_img = cv2.imread(str(raw_image_path))
     if raw_img is None:
         return None
 
@@ -1966,8 +2002,14 @@ def crop_dense_rosette_tier4(
     if rosette_crop.size == 0:
         return None
 
-    cat = getattr(plant_candidates[0], "catalog_number", "UNKNOWN") if plant_candidates else "UNKNOWN"
-    save_path = output_dir / "cropped_patches" / "rosettes_dense" / f"{cat}_p{plant_id}_rosette.jpg"
+    cat = (
+        catalog_number
+        or (getattr(plant_candidates[0], "catalog_number", None) if plant_candidates else None)
+        or (raw_image_path.stem if raw_image_path else None)
+        or "UNKNOWN"
+    )
+    out_base = (output_dir / "data") if (output_dir.name != "data" and (output_dir / "data").is_dir()) else output_dir
+    save_path = out_base / "cropped_patches" / "rosettes_dense" / f"{cat}_p{plant_id}_rosette.jpg"
     save_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(save_path), rosette_crop)
     return str(save_path)

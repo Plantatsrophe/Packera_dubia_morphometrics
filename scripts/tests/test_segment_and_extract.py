@@ -450,6 +450,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         ]
         self.assertEqual(list(extracted_df.columns[:9]), expected_prefix)
         self.assertEqual(extracted_df.iloc[0]["tier"], "Tier 1")
+        self.assertEqual(extracted_df.iloc[0]["assigned_tier"], "Tier_1_Direct")
         self.assertFalse(bool(extracted_df.iloc[0]["reflection_applied"]))
         self.assertFalse(bool(extracted_df.iloc[0]["is_folded"]))
         self.assertFalse(bool(extracted_df.iloc[0]["is_dissected"]))
@@ -469,7 +470,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertEqual(len(records), 1)
         rec = records[0]
         self.assertEqual(rec["tier"], "Tier 1")
-        self.assertEqual(rec["assigned_tier"], "tier1")
+        self.assertEqual(rec["assigned_tier"], "Tier_1_Direct")
         self.assertFalse(rec["reflection_applied"])
         self.assertFalse(rec["is_folded"])
         self.assertFalse(rec["is_dissected"])
@@ -489,7 +490,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertEqual(len(records), 1)
         rec = records[0]
         self.assertEqual(rec["tier"], "Tier 2")
-        self.assertEqual(rec["assigned_tier"], "tier2")
+        self.assertEqual(rec["assigned_tier"], "Tier_2_Reflected")
         self.assertTrue(rec["reflection_applied"])
         self.assertTrue(rec["is_folded"])
         self.assertFalse(rec["is_dissected"])
@@ -517,7 +518,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertEqual(len(records), 1)
         rec = records[0]
         self.assertEqual(rec["tier"], "Tier 1 (Dissected)")
-        self.assertEqual(rec["assigned_tier"], "tier1")
+        self.assertEqual(rec["assigned_tier"], "Tier_1_Direct")
         self.assertTrue(rec["is_dissected"])
         self.assertFalse(rec["reflection_applied"])
         self.assertFalse(rec["is_folded"])
@@ -537,6 +538,193 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertEqual(len(records), 0)
         self.assertIsNotNone(failure)
         self.assertEqual(failure["failure_reason"], "IRREGULAR_FOLD")
+
+    def test_stage1_to_stage2_crop_reprojection(self) -> None:
+        """Verify Stage 1 (LeafPriority.pt 11-class) -> 12%-padded crop -> Stage 2 PointRend reprojection."""
+        from unittest.mock import patch
+
+        sheet_img = np.full((1000, 800, 3), 220, dtype=np.uint8)
+        # Stage 1 box for leaf_whole (class 0): (ymin=200, xmin=100, ymax=400, xmax=300) -> 200x200 box
+        # 12% padding -> pad_h=24, pad_w=24 -> crop_box = (176, 76, 424, 324) -> size (248, 248)
+        s1_bbox = (200, 100, 400, 300)
+        crop_bgr, crop_box = step02.crop_leaf_bbox_with_padding(sheet_img, s1_bbox, pad_ratio=0.12)
+        self.assertEqual(crop_box, (176, 76, 424, 324))
+        self.assertEqual(crop_bgr.shape[:2], (248, 248))
+
+        # Build a pristine elliptic mask inside the 248x248 crop
+        crop_mask = np.zeros((248, 248), dtype=np.uint8)
+        cv2.ellipse(crop_mask, (124, 124), (55, 95), 0, 0, 360, 255, -1)
+
+        sheet_mask, full_bbox = step02.reproject_crop_mask_to_sheet(crop_mask, crop_box, (1000, 800))
+        self.assertEqual(sheet_mask.shape, (1000, 800))
+        self.assertEqual(np.count_nonzero(sheet_mask), np.count_nonzero(crop_mask))
+        # Verify reprojected mask is positioned at crop_box offset
+        np.testing.assert_array_equal(sheet_mask[176:424, 76:324], crop_mask)
+
+        # Now test full two-stage pipeline execution with mixed 11-class Stage 1 detections:
+        # 0: leaf_whole, 1: leaf_partial, 2: leaflet (ignored), 8: specimen (ignored), 10: wood (ignored)
+        stage1_dets = [
+            ((200, 100, 400, 300), 0.94, 0),  # leaf_whole -> routed to Stage 2
+            ((550, 400, 750, 600), 0.89, 1),  # leaf_partial -> routed to Stage 2
+            ((100, 50, 150, 90), 0.80, 2),    # leaflet -> ignored
+            ((10, 10, 990, 790), 0.99, 8),    # specimen -> ignored
+            ((800, 100, 950, 140), 0.77, 10), # wood -> ignored
+        ]
+
+        def fake_stage2_predict(crop_img: np.ndarray):
+            ch, cw = crop_img.shape[:2]
+            m = np.zeros((ch, cw), dtype=np.uint8)
+            cv2.ellipse(m, (cw // 2, ch // 2), (int(cw * 0.24), int(ch * 0.40)), 0, 0, 360, 255, -1)
+            return [((10, 10, ch - 10, cw - 10), m, 0.96, 0)]
+
+        with patch("cv2.imread", return_value=sheet_img):
+            with patch.object(self.pipeline.stage1_detector, "predict", return_value=stage1_dets):
+                with patch.object(self.pipeline.model_engine, "predict", side_effect=fake_stage2_predict) as mock_s2:
+                    records, failure = self.pipeline.process_voucher("NCU123", self.img_path)
+
+        self.assertIsNone(failure)
+        # Stage 2 PointRend must be called ONLY for class 0 (leaf_whole) and class 1 (leaf_partial)
+        self.assertEqual(mock_s2.call_count, 2)
+        self.assertEqual(len(records), 2)
+        for rec in records:
+            self.assertEqual(rec["assigned_tier"], "Tier_1_Direct")
+            self.assertTrue(Path(rec["contour_path"]).exists())
+            self.assertTrue(Path(rec["mask_path"]).exists())
+
+    def test_reproductive_routing_and_capitula_patch_saving(self) -> None:
+        """Verify Stage 1 reproductive detections (classes 3..7) route to phenology classifier & save capitula crops."""
+        from unittest.mock import patch
+
+        sheet_img = np.full((1000, 800, 3), 230, dtype=np.uint8)
+        # Paint golden-yellow corollas inside the flower_one (class 5) region (50..170, 300..400)
+        # BGR for golden yellow (RGB ~ 240, 200, 20 -> BGR = 20, 200, 240)
+        sheet_img[60:120, 310:390] = (20, 200, 240)
+        # Paint dark green erect involucre at lower half (120..165, 325..375)
+        sheet_img[120:165, 325:375] = (30, 90, 40)
+
+        stage1_dets = [
+            ((300, 200, 550, 420), 0.95, 0),  # 0: leaf_whole
+            ((50, 300, 170, 400), 0.92, 5),   # 5: flower_one (H=120, W=100, AR=1.2)
+            ((60, 450, 170, 550), 0.88, 3),   # 3: seed_fruit_one (H=110, W=100, AR=1.1)
+            ((70, 600, 160, 680), 0.84, 7),   # 7: bud (H=90, W=80, AR=1.125)
+        ]
+
+        def fake_stage2_predict(crop_img: np.ndarray):
+            ch, cw = crop_img.shape[:2]
+            m = np.zeros((ch, cw), dtype=np.uint8)
+            cv2.ellipse(m, (cw // 2, ch // 2), (int(cw * 0.25), int(ch * 0.40)), 0, 0, 360, 255, -1)
+            return [((10, 10, ch - 10, cw - 10), m, 0.95, 0)]
+
+        with patch("cv2.imread", return_value=sheet_img):
+            with patch.object(self.pipeline.stage1_detector, "predict", return_value=stage1_dets):
+                with patch.object(self.pipeline.model_engine, "predict", side_effect=fake_stage2_predict):
+                    extracted_df, failed_df = self.pipeline.run()
+
+        self.assertEqual(len(extracted_df), 1)
+        self.assertEqual(len(failed_df), 0)
+
+        # Verify cropped capitula patches saved to data/cropped_patches/capitula/
+        cap_patches = sorted(self.pipeline.capitula_patches_dir.glob("NCU123_cap*.jpg"))
+        self.assertEqual(len(cap_patches), 3, "All 3 reproductive detections must be saved as capitula crops.")
+
+        # Verify voucher_phenological_states.csv was written and contains total_capitula == 3
+        pheno_csv = self.pipeline.tables_dir / "voucher_phenological_states.csv"
+        self.assertTrue(pheno_csv.exists())
+        pheno_df = pd.read_csv(pheno_csv)
+        self.assertEqual(len(pheno_df), 1)
+        self.assertEqual(int(pheno_df.iloc[0]["total_capitula"]), 3)
+        self.assertIn(
+            pheno_df.iloc[0]["voucher_phenological_state"],
+            {"anthesis", "fruit", "bud"},
+        )
+
+    def test_tier4_rosette_and_basal_leaf_patch_generation(self) -> None:
+        """Verify crop_dense_rosette_tier4() and basal_leaves_raw RGB patch saving per plant_individual_id."""
+        from unittest.mock import patch
+
+        sheet_img = np.full((2000, 2000, 3), 210, dtype=np.uint8)
+        # Two spatially separated plants on the same sheet:
+        # Plant 0 near top-left (100..300, 100..280) and Plant 1 near bottom-right (1500..1700, 1500..1680)
+        stage1_dets = [
+            ((100, 100, 320, 280), 0.95, 0),
+            ((120, 140, 340, 310), 0.93, 0),
+            ((1500, 1500, 1720, 1680), 0.91, 1),
+        ]
+
+        def fake_stage2_predict(crop_img: np.ndarray):
+            ch, cw = crop_img.shape[:2]
+            m = np.zeros((ch, cw), dtype=np.uint8)
+            cv2.ellipse(m, (cw // 2, ch // 2), (int(cw * 0.25), int(ch * 0.40)), 0, 0, 360, 255, -1)
+            return [((10, 10, ch - 10, cw - 10), m, 0.95, 0)]
+
+        with patch("cv2.imread", return_value=sheet_img):
+            with patch.object(self.pipeline.stage1_detector, "predict", return_value=stage1_dets):
+                with patch.object(self.pipeline.model_engine, "predict", side_effect=fake_stage2_predict):
+                    records, failure = self.pipeline.process_voucher("NCU123", self.img_path)
+
+        self.assertIsNone(failure)
+        self.assertEqual(len(records), 3)
+
+        # Verify 2 distinct plant_individual_id clusters were formed
+        plant_ids = sorted({r["plant_individual_id"] for r in records})
+        self.assertEqual(plant_ids, [0, 1])
+
+        # Verify Tier 4 dense rosette patches exist for both plant individuals
+        rosette_p0 = self.pipeline.rosettes_dense_dir / "NCU123_p0_rosette.jpg"
+        rosette_p1 = self.pipeline.rosettes_dense_dir / "NCU123_p1_rosette.jpg"
+        self.assertTrue(rosette_p0.exists(), "Tier 4 rosette crop for plant_individual_id=0 must exist.")
+        self.assertTrue(rosette_p1.exists(), "Tier 4 rosette crop for plant_individual_id=1 must exist.")
+
+        # Verify basal leaf RGB crops exist in data/cropped_patches/basal_leaves_raw/
+        for leaf_id in [1, 2, 3]:
+            leaf_patch = self.pipeline.basal_leaves_raw_dir / f"NCU123_leaf{leaf_id}.jpg"
+            self.assertTrue(leaf_patch.exists(), f"Basal leaf RGB crop {leaf_patch} must exist.")
+
+    def test_lm2_ruler_calibration_with_hough_fallback(self) -> None:
+        """Verify load_ruler_calibrations() primary scale vs. detect_ruler_scale_hough() secondary fallback."""
+        from unittest.mock import patch
+
+        ruler_dir = self.temp_dir / "lm2_ruler_test" / "Data" / "Ruler"
+        ruler_dir.mkdir(parents=True, exist_ok=True)
+        ruler_csv = ruler_dir / "ruler_summary.csv"
+        pd.DataFrame([
+            {
+                "filename": "NCU_HIGH_CONF__R__10-10-100-500",
+                "ruler_success": True,
+                "conversion_mean": 118.11,  # 118.11 px/cm = 11.811 px/mm
+                "ruler_class_confidence": 96.5,
+            },
+            {
+                "filename": "NCU_LOW_CONF__R__10-10-100-500",
+                "ruler_success": True,
+                "conversion_mean": 150.0,
+                "ruler_class_confidence": 20.0,  # Below 0.50 confidence threshold -> should be filtered out
+            },
+        ]).to_csv(ruler_csv, index=False)
+
+        calibs = step02.load_ruler_calibrations(self.temp_dir / "lm2_ruler_test", min_confidence=0.50)
+        self.assertIn("NCU_HIGH_CONF", calibs)
+        self.assertNotIn("NCU_LOW_CONF", calibs)
+        self.assertAlmostEqual(calibs["NCU_HIGH_CONF"], 11.811, places=3)
+
+        # Verify pipeline uses LM2 calibration for NCU_HIGH_CONF without needing Hough fallback,
+        # and falls back to detect_ruler_scale_hough for NCU_LOW_CONF
+        self.pipeline.ruler_calibrations = calibs
+        mask = np.zeros((300, 300), dtype=np.uint8)
+        cv2.ellipse(mask, (150, 150), (65, 120), 0, 0, 360, 255, -1)
+
+        with patch("cv2.imread", return_value=np.full((400, 400, 3), 200, dtype=np.uint8)):
+            with patch.object(self.pipeline.model_engine, "predict", return_value=[((30, 85, 270, 215), mask, 0.95, 0)]):
+                with patch.object(step02, "detect_ruler_scale_hough", return_value=22.5) as mock_hough:
+                    recs_high, _ = self.pipeline.process_voucher("NCU_HIGH_CONF", self.img_path)
+                    self.assertEqual(mock_hough.call_count, 0, "Hough fallback must not run when LM2 ruler is valid.")
+                    self.assertAlmostEqual(recs_high[0]["pixels_per_mm"], 11.811, places=3)
+                    self.assertTrue(recs_high[0]["is_calibrated_mm"])
+
+                    recs_low, _ = self.pipeline.process_voucher("NCU_LOW_CONF", self.img_path)
+                    self.assertEqual(mock_hough.call_count, 1, "Hough fallback must run when LM2 ruler confidence is low.")
+                    self.assertAlmostEqual(recs_low[0]["pixels_per_mm"], 22.5, places=3)
+                    self.assertTrue(recs_low[0]["is_calibrated_mm"])
 
 
 if __name__ == "__main__":

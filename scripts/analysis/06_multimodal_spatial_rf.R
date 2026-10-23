@@ -1013,11 +1013,20 @@ main <- function() {
   vouchers_df <- readr::read_csv(opts$vouchers, show_col_types = FALSE)
   vouchers_df$species_standardized <- standardize_packera_taxon(vouchers_df$species_raw)
 
-  # Merge Morphometrics if present
+  # Merge Morphometrics if present (resolve morphometric_flags.csv <-> morphometrics_misidentification_flags.csv)
+  if (!file.exists(opts$morphometrics) && file.exists("data/tables/morphometric_flags.csv")) {
+    opts$morphometrics <- "data/tables/morphometric_flags.csv"
+  }
   if (file.exists(opts$morphometrics)) {
     morph_df <- readr::read_csv(opts$morphometrics, show_col_types = FALSE)
-    m_cols <- intersect(names(morph_df), c("catalogNumber", "cda_predicted_taxon", "cda_posterior_prob", "can1", "can2", "gmm_cluster"))
-    vouchers_df <- dplyr::left_join(vouchers_df, morph_df[, m_cols], by = "catalogNumber")
+    if ("morphometric_outlier_flag" %in% names(morph_df) && !("misidentification_flag" %in% names(morph_df))) {
+      morph_df$misidentification_flag <- morph_df$morphometric_outlier_flag
+    } else if ("misidentification_flag" %in% names(morph_df) && !("morphometric_outlier_flag" %in% names(morph_df))) {
+      morph_df$morphometric_outlier_flag <- morph_df$misidentification_flag
+    }
+    m_cols <- intersect(names(morph_df), c("catalogNumber", "plant_individual_id", "cda_predicted_taxon", "cda_posterior_prob", "can1", "can2", "gmm_cluster", "morphometric_outlier_flag", "misidentification_flag"))
+    morph_sub <- morph_df[!duplicated(morph_df$catalogNumber), m_cols, drop = FALSE]
+    vouchers_df <- dplyr::left_join(vouchers_df, morph_sub, by = "catalogNumber")
   }
 
   # Merge Cleanlab Vision Audit if present
@@ -1025,26 +1034,20 @@ main <- function() {
     vis_df <- readr::read_csv(opts$vision_audit, show_col_types = FALSE)
     v_cols <- intersect(names(vis_df), c("catalogNumber", "predicted_label", "confidence_predicted_class", "c_error", "is_label_corrupted"))
     names(vis_df)[names(vis_df) == "predicted_label"] <- "vision_predicted_label"
-    vouchers_df <- dplyr::left_join(vouchers_df, vis_df[, intersect(names(vis_df), c("catalogNumber", "vision_predicted_label", "c_error", "is_label_corrupted"))], by = "catalogNumber")
+    vis_sub <- vis_df[!duplicated(vis_df$catalogNumber), intersect(names(vis_df), c("catalogNumber", "vision_predicted_label", "c_error", "is_label_corrupted")), drop = FALSE]
+    vouchers_df <- dplyr::left_join(vouchers_df, vis_sub, by = "catalogNumber")
   }
 
-  # Ingest Voucher Phenological States (Computer Vision Anthesis Ingestion)
+  # Ingest Voucher Phenological States (Computer Vision Anthesis Ingestion via left_join)
   if (file.exists(opts$pheno_states)) {
     message(sprintf("Ingesting voucher phenological states from %s...", opts$pheno_states))
     pheno_states_df <- readr::read_csv(opts$pheno_states, show_col_types = FALSE)
     pheno_states_df$catalogNumber <- as.character(pheno_states_df$catalogNumber)
     vouchers_df$catalogNumber <- as.character(vouchers_df$catalogNumber)
     p_cols <- intersect(names(pheno_states_df), c("catalogNumber", "total_capitula", "n_anthesis", "n_fruit", "n_bud", "voucher_phenological_state", "dominant_pappus_ratio"))
-    
-    # Inner-join with curated vouchers
-    joined_df <- dplyr::inner_join(vouchers_df, pheno_states_df[, p_cols], by = "catalogNumber")
-    if (nrow(joined_df) > 0) {
-      vouchers_df <- joined_df
-      message(sprintf("Inner-joined %d vouchers with phenological states.", nrow(vouchers_df)))
-    } else {
-      message("[WARN] Inner-join with phenological states yielded 0 matching records. Falling back to left_join / calendar + DwC.")
-      vouchers_df <- dplyr::left_join(vouchers_df, pheno_states_df[, p_cols], by = "catalogNumber")
-    }
+    pheno_sub <- pheno_states_df[!duplicated(pheno_states_df$catalogNumber), p_cols, drop = FALSE]
+    vouchers_df <- dplyr::left_join(vouchers_df, pheno_sub, by = "catalogNumber")
+    message(sprintf("Left-joined %d vouchers with phenological states.", nrow(vouchers_df)))
   } else {
     message(sprintf("[INFO] Phenological states CSV not found at %s. Gracefully falling back to calendar + Darwin Core text.", opts$pheno_states))
     vouchers_df$voucher_phenological_state <- NA_character_
@@ -1106,13 +1109,17 @@ main <- function() {
   # Stage 4: Warren's Niche Identity Tests
   niche_res <- run_warren_niche_identity_tests(vouchers_df, env_vars, n_perm = opts$permutations)
 
-  # Stage 5: Export Conflict Flags, Summary Report & Figures
+  # Stage 5: Export Conflict Flags, Summary Report & Figures (Atomic write-then-replace)
   dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE)
-  readr::write_csv(vouchers_df, opts$output_flags)
+  tmp_flags <- paste0(opts$output_flags, ".tmp")
+  readr::write_csv(vouchers_df, tmp_flags)
+  file.rename(tmp_flags, opts$output_flags)
   message(sprintf("Saved %d multimodal conflict flags to %s.", nrow(vouchers_df), opts$output_flags))
 
   dir.create(dirname(opts$output_summary), recursive = TRUE, showWarnings = FALSE)
-  readr::write_csv(niche_res$summary, opts$output_summary)
+  tmp_sum <- paste0(opts$output_summary, ".tmp")
+  readr::write_csv(niche_res$summary, tmp_sum)
+  file.rename(tmp_sum, opts$output_summary)
   message(sprintf("Saved Warren's Niche Identity summary to %s.", opts$output_summary))
 
   export_spatial_rf_figures(vouchers_df, srf_res, niche_res, opts$output_plot)
