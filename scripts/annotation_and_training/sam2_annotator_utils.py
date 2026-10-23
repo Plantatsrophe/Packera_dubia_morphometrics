@@ -384,62 +384,6 @@ def polygon_interior_point(
     return float(polygon_points[0][0]), float(polygon_points[0][1])
 
 
-def mask_to_yolo_bbox(
-    binary_mask: np.ndarray,
-    class_id: int
-) -> Optional[Tuple[int, float, float, float, float]]:
-    """
-    Computes normalized YOLO format bounding box (class_id, x_center, y_center, width, height).
-    """
-    y_indices, x_indices = np.where(binary_mask > 0)
-    if len(x_indices) == 0 or len(y_indices) == 0:
-        return None
-
-    h, w = binary_mask.shape[:2]
-    x_min, x_max = float(np.min(x_indices)), float(np.max(x_indices))
-    y_min, y_max = float(np.min(y_indices)), float(np.max(y_indices))
-
-    box_w = (x_max - x_min + 1.0) / w
-    box_h = (y_max - y_min + 1.0) / h
-    x_center = (x_min + (x_max - x_min) / 2.0) / w
-    y_center = (y_min + (y_max - y_min) / 2.0) / h
-
-    return (
-        class_id,
-        round(x_center, 6),
-        round(y_center, 6),
-        round(box_w, 6),
-        round(box_h, 6),
-    )
-
-
-def mask_to_normalized_polygon(
-    binary_mask: np.ndarray,
-    class_id: int,
-    approx_epsilon: float = 1.0
-) -> Optional[str]:
-    """Converts binary mask to normalized YOLO segmentation string: 'class_id x1 y1 x2 y2 ...'"""
-    contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-
-    largest_cnt = max(contours, key=cv2.contourArea)
-    if approx_epsilon > 0:
-        largest_cnt = cv2.approxPolyDP(largest_cnt, approx_epsilon, True)
-
-    if len(largest_cnt) < 3:
-        return None
-
-    h, w = binary_mask.shape[:2]
-    pts = largest_cnt.reshape(-1, 2)
-    norm_pts = []
-    for x, y in pts:
-        norm_pts.append(f"{round(x / w, 6):.6f}")
-        norm_pts.append(f"{round(y / h, 6):.6f}")
-
-    return f"{class_id} " + " ".join(norm_pts)
-
-
 def mask_to_polygons(
     binary_mask: np.ndarray,
     min_area_px: float = 50.0,

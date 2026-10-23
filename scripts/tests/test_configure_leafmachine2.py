@@ -77,6 +77,9 @@ class TestConfigureLeafMachine2(unittest.TestCase):
         expected_pcd_conf = float(pipe_cfg.thresholds.pcd_conf)
         self.assertAlmostEqual(pcd["minimum_confidence_threshold"], expected_pcd_conf)
         self.assertAlmostEqual(pcd["PCD_confidence"], expected_pcd_conf)
+        self.assertEqual(pcd["detector_type"], "Plant_Detector")
+        self.assertEqual(pcd["detector_version"], "PLANT_LeafPriority")
+        self.assertEqual(pcd["detector_weights"], "LeafPriority.pt")
 
         # Batch size and workers
         self.assertEqual(proj["batch_size"], DEFAULT_BATCH_SIZE)

@@ -1224,10 +1224,19 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
             self.assertEqual(mapped_cls, class_id)
             annotator.commit_active_instance(mapped_cls)
 
-            self.assertEqual(len(annotator.saved_instances), class_id + 1)
+            self.assertEqual( len(annotator.saved_instances), class_id + 1)
             self.assertEqual(annotator.saved_instances[-1]["class_id"], class_id)
             self.assertEqual(annotator.saved_instances[-1]["label"], CLASS_NAMES[class_id])
             self.assertIsNone(annotator.candidate_mask)
+
+    def test_sam2_annotator_decoupled_and_legacy_yolo_helpers_removed(self):
+        import scripts.annotation_and_training.sam2_annotator_utils as utils
+        import scripts.annotation_and_training.annotate_with_sam2 as annotator_mod
+
+        self.assertFalse(hasattr(utils, "mask_to_yolo_bbox"))
+        self.assertFalse(hasattr(utils, "mask_to_normalized_polygon"))
+        self.assertFalse(hasattr(annotator_mod, "SAM2_ARCHIVE_PATH"))
+        self.assertTrue(hasattr(annotator_mod, "SAM2_THIRD_PARTY_PATH"))
 
 
 if __name__ == "__main__":

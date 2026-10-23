@@ -45,9 +45,9 @@ PROJECT_ROOT = get_project_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-SAM2_ARCHIVE_PATH = PROJECT_ROOT / "scripts" / "_archive" / "root_artifacts" / "segment-anything-2"
-if SAM2_ARCHIVE_PATH.exists() and str(SAM2_ARCHIVE_PATH) not in sys.path:
-    sys.path.insert(0, str(SAM2_ARCHIVE_PATH))
+SAM2_THIRD_PARTY_PATH = PROJECT_ROOT / "third_party" / "segment-anything-2"
+if SAM2_THIRD_PARTY_PATH.exists() and str(SAM2_THIRD_PARTY_PATH) not in sys.path:
+    sys.path.insert(0, str(SAM2_THIRD_PARTY_PATH))
 
 try:
     from sam2.build_sam import build_sam2
@@ -74,9 +74,7 @@ from scripts.annotation_and_training.sam2_annotator_utils import (
     convert_masks_to_coco_dataset,
     export_coco_annotations,
     image_to_viewport_coords,
-    mask_to_normalized_polygon,
     mask_to_polygons,
-    mask_to_yolo_bbox,
     overlay_candidate_mask_on_viewport,
     parse_mask_filename,
     polygon_interior_point,
@@ -779,9 +777,13 @@ class PrecisionSAM2Annotator:
             return
 
         label = CLASS_NAMES[class_id]
-        poly_str = mask_to_normalized_polygon(self.candidate_mask, class_id)
-        if poly_str:
-            poly = [float(val) for val in poly_str.split()[1:]]
+        polygons, _, _ = mask_to_polygons(self.candidate_mask, min_area_px=1.0)
+        if polygons:
+            h, w = self.candidate_mask.shape[:2]
+            poly = [
+                round(val / (w if i % 2 == 0 else h), 6)
+                for i, val in enumerate(polygons[0])
+            ]
             self.saved_instances.append({
                 "class_id": class_id,
                 "label": label,
@@ -976,8 +978,12 @@ class PrecisionSAM2Annotator:
                 if mask.shape[:2] != (self.orig_h, self.orig_w):
                     mask = cv2.resize(mask, (self.orig_w, self.orig_h), interpolation=cv2.INTER_NEAREST)
 
-                poly_str = mask_to_normalized_polygon(mask, class_id)
-                poly = [float(val) for val in poly_str.split()[1:]] if poly_str else []
+                polygons, _, _ = mask_to_polygons(mask, min_area_px=1.0)
+                h, w = mask.shape[:2]
+                poly = (
+                    [round(val / (w if i % 2 == 0 else h), 6) for i, val in enumerate(polygons[0])]
+                    if polygons else []
+                )
 
                 instances.append({
                     "class_id": class_id,

@@ -54,7 +54,11 @@ else
 fi
 
 # 7. Explicitly install required package versions with NumPy 1.x and setuptools<70 pinned
+echo "=== Removing conflicting ultralytics / opencv-python-headless packages if present ==="
+pip uninstall -y ultralytics opencv-python-headless 2>/dev/null || true
+
 echo "=== Installing pycocotools, opencv-contrib-python (<=4.10.0.84), vit-pytorch, and setuptools (<70) ==="
+pip install --force-reinstall --no-deps "opencv-contrib-python<=4.10.0.84,>=4.7.0.68"
 pip install "numpy<2.0.0,>=1.26.0" "pycocotools>=2.0.5" "opencv-contrib-python<=4.10.0.84,>=4.7.0.68" "vit-pytorch==0.37.1" "setuptools>=65.5.0,<70.0.0"
 
 # Fix ownership back to user if run with sudo

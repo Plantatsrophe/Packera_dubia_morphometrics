@@ -32,7 +32,7 @@ if str(_script_root) not in sys.path:
 from scripts.core.config import PROJECT_ROOT, PipelineConfig
 
 # Default Packera hyperparameter constants calibrated for dense rosettes
-DEFAULT_PCD_WEIGHTS_NAME = "lm2_packera_pcd_finetuned.pth"
+DEFAULT_PCD_WEIGHTS_NAME = "LeafPriority.pt"
 DEFAULT_SEG_MODEL_NAME = "Packera_LeafPriority"
 DEFAULT_PCD_CONFIDENCE = 0.72
 DEFAULT_NMS_THRESH = 0.75
@@ -250,18 +250,53 @@ def resolve_pcd_weights(
             return p.name, (root / p).resolve()
 
     candidates = [
+        root
+        / "LeafMachine2"
+        / "leafmachine2"
+        / "component_detector"
+        / "runs"
+        / "train"
+        / "Plant_Detector"
+        / "PLANT_LeafPriority"
+        / "PLANT_LeafPriority"
+        / "weights"
+        / target_name,
+        root
+        / "LeafMachine2"
+        / "leafmachine2"
+        / "component_detector"
+        / "runs"
+        / "train"
+        / "Plant_Detector"
+        / "PLANT_LeafPriority"
+        / "PLANT_LeafPriority"
+        / "weights"
+        / "LeafPriority.pt",
         root / "models" / target_name,
+        root / "models" / "LeafPriority.pt",
         root / "models" / "lm2_packera_pcd_finetuned.pth",
         root / "models" / "Packera_LeafPriority.pth",
         root / "models" / "LeafPriority.pth",
-        root / "models" / "LeafPriority.pt",
         root / "LeafMachine2" / "leafmachine2" / "component_detector" / "models" / target_name,
     ]
     for c in candidates:
         if c.exists():
             return c.name, c.resolve()
 
-    return target_name, (root / "models" / target_name).resolve()
+    default_upstream = (
+        root
+        / "LeafMachine2"
+        / "leafmachine2"
+        / "component_detector"
+        / "runs"
+        / "train"
+        / "Plant_Detector"
+        / "PLANT_LeafPriority"
+        / "PLANT_LeafPriority"
+        / "weights"
+        / target_name
+    )
+    return target_name, default_upstream.resolve()
 
 
 def generate_high_performance_config(
@@ -293,8 +328,8 @@ def generate_high_performance_config(
     resolved_batch_size = batch_size if batch_size is not None else DEFAULT_BATCH_SIZE
     resolved_num_workers = num_workers if num_workers is not None else DEFAULT_NUM_WORKERS
 
-    # Model weights resolution
-    target_weights = pcd_weights or pipe_cfg.paths.model_weights or pipe_cfg.segmentation.model_weights
+    # Model weights resolution (defaulting to upstream stock YOLOv5 LeafPriority.pt)
+    target_weights = pcd_weights
     weights_name, weights_path = resolve_pcd_weights(target_weights)
 
     # Base template
@@ -322,6 +357,9 @@ def generate_high_performance_config(
 
     # 2. Plant Component Detector (PCD)
     pcd = lm.setdefault("plant_component_detector", {})
+    pcd["detector_type"] = "Plant_Detector"
+    pcd["detector_version"] = "PLANT_LeafPriority"
+    pcd["detector_iteration"] = "PLANT_LeafPriority"
     pcd["detector_weights"] = weights_name
     pcd["minimum_confidence_threshold"] = resolved_pcd_conf
     pcd["PCD_confidence"] = resolved_pcd_conf

@@ -227,10 +227,11 @@ run_fourier_extraction <- function(opts) {
   }
 
   if (length(contour_files) == 0) {
-      if (dir.exists(opts$input)) {
-        contour_files <- list.files(opts$input, pattern = "\\.csv$", full.names = TRUE)
+      input_dir <- if (!is.null(opts$input_dir)) opts$input_dir else opts$input
+      if (dir.exists(input_dir)) {
+        contour_files <- list.files(input_dir, pattern = "\\.csv$", full.names = TRUE)
         if (length(contour_files) == 0) {
-            mask_files <- list.files(opts$input, pattern = "\\.(png|jpg)$", full.names = TRUE, recursive = TRUE)
+            mask_files <- list.files(input_dir, pattern = "\\.(png|jpg)$", full.names = TRUE, recursive = TRUE)
             if (length(mask_files) > 0) {
                 contour_files <- mask_files
                 use_masks_fallback <- TRUE
@@ -242,19 +243,18 @@ run_fourier_extraction <- function(opts) {
   if (length(contour_files) == 0) {
     message("No contour CSVs in input dir. Checking fallback masks...")
     fallback_dir <- opts$masks_dir
-    if (!dir.exists(fallback_dir) && dir.exists("data/_archive/masks/tier1_intact")) {
-      fallback_dir <- "data/_archive/masks/tier1_intact"
-    }
-    mask_files <- list.files(fallback_dir, pattern = "\\.(png|jpg)$", full.names = TRUE, recursive = TRUE)
-    if (length(mask_files) > 0) {
-      message("Found ", length(mask_files), " fallback mask files.")
-      contour_files <- mask_files
-      use_masks_fallback <- TRUE
+    if (dir.exists(fallback_dir)) {
+      mask_files <- list.files(fallback_dir, pattern = "\\.(png|jpg)$", full.names = TRUE, recursive = TRUE)
+      if (length(mask_files) > 0) {
+        message("Found ", length(mask_files), " fallback mask files.")
+        contour_files <- mask_files
+        use_masks_fallback <- TRUE
+      }
     }
   }
 
   if (length(contour_files) == 0) {
-    stop("No input contour CSVs or mask files found to process.")
+    stop("No contour CSVs or active mask files found in data/contours or data/masks.")
   }
 
   # 2. Build coordinate list and factor metadata for Momocs::Out()
