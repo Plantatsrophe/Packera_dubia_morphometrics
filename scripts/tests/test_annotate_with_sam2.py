@@ -14,9 +14,15 @@ Verifies:
 """
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import cv2
 import numpy as np
 
@@ -32,6 +38,7 @@ from scripts.annotation_and_training.sam2_annotator_utils import (
     clamp_viewport_pan,
     convert_masks_to_coco_dataset,
     export_coco_annotations,
+    export_coco_from_yolo_and_masks,
     get_undo_button_rect,
     image_to_viewport_coords,
     overlay_candidate_mask_on_viewport,
@@ -388,6 +395,7 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_p = Path(tmp_dir)
             masks_dir = tmp_p / "masks"
+            crops_dir = tmp_p / "lm2_leaf_crops"
             masks_dir.mkdir(parents=True, exist_ok=True)
             coco_path = tmp_p / "annotations_packera_train.json"
 
@@ -399,17 +407,45 @@ class TestPrecisionSAM2Annotator(unittest.TestCase):
             cv2.circle(mask_img2, (150, 150), 30, 255, -1)
             cv2.imwrite(str(masks_dir / "VOUCHER001_inst01_basal_leaf_partial.png"), mask_img2)
 
+            # 1. Default single-leaf crop mode (Stage 2 PointRend)
             coco_doc = export_coco_annotations(
                 masks_dir=masks_dir,
                 output_coco_path=coco_path,
+                crops_dir=crops_dir,
                 min_area_px=10.0,
             )
 
             self.assertTrue(coco_path.exists())
-            self.assertEqual(len(coco_doc["images"]), 1)
+            self.assertEqual(len(coco_doc["images"]), 2)
             self.assertEqual(len(coco_doc["annotations"]), 2)
             cat_ids = {ann["category_id"] for ann in coco_doc["annotations"]}
             self.assertEqual(cat_ids, {1, 2})
+
+            img_by_id = {img["id"]: img for img in coco_doc["images"]}
+            for ann in coco_doc["annotations"]:
+                img_meta = img_by_id[ann["image_id"]]
+                crop_w, crop_h = img_meta["width"], img_meta["height"]
+                self.assertTrue((crops_dir / img_meta["file_name"]).exists())
+                for poly in ann["segmentation"]:
+                    xs = poly[0::2]
+                    ys = poly[1::2]
+                    for x in xs:
+                        self.assertGreaterEqual(x, 0.0)
+                        self.assertLessEqual(x, float(crop_w))
+                    for y in ys:
+                        self.assertGreaterEqual(y, 0.0)
+                        self.assertLessEqual(y, float(crop_h))
+
+            # 2. Optional --full-sheet mode
+            coco_full_path = tmp_p / "annotations_full_sheet.json"
+            coco_full = export_coco_annotations(
+                masks_dir=masks_dir,
+                output_coco_path=coco_full_path,
+                min_area_px=10.0,
+                full_sheet=True,
+            )
+            self.assertEqual(len(coco_full["images"]), 1)
+            self.assertEqual(len(coco_full["annotations"]), 2)
 
     def test_viewport_coordinate_transforms_exact_zero_drift(self):
         """

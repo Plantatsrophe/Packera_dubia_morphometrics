@@ -6,10 +6,14 @@ Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-    Fine-tuning runner for LeafMachine2's Plant Component Detector (PCD) using
-    Detectron2 with a PointRend backbone on ground-truth COCO annotations.
-    Features automated CUDA single-GPU batch size fallback, backbone layer freezing,
-    isolated artifact paths, and checkpoint export to `models/lm2_packera_pcd_finetuned.pth`.
+    Fine-tuning runner for LeafMachine2's Stage 2 PointRend Leaf Segmenter
+    (`leaf_seg_rcnn_v2_1`) using Detectron2 with a PointRend ResNet-50 FPN
+    architecture on native-DPI cropped single-leaf COCO annotations.
+    Initializes from LeafMachine2's pre-trained `leaf_seg_rcnn_v2_1` checkpoint,
+    features automated CUDA single-GPU batch size fallback, early ResNet backbone
+    stage freezing (`freeze_backbone_stages`), and atomic checkpoint export to
+    `models/lm2_packera_pointrend_finetuned.pth` (aliasing
+    `models/lm2_packera_pcd_finetuned.pth` for backward compatibility).
 ===============================================================================
 """
 
@@ -20,10 +24,15 @@ import logging
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, List, Optional, Tuple, Union
 
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore[assignment]
 
 # Ensure project root is in sys.path
 _current = Path(__file__).resolve()
@@ -50,7 +59,8 @@ except ImportError:
 
 class PointRendPackeraTrainer(DefaultTrainer):
     """
-    Custom Detectron2 trainer for PointRend fine-tuning on Packera leaf morphology.
+    Custom Detectron2 trainer for fine-tuning LeafMachine2's Stage 2 PointRend
+    Leaf Segmenter (`leaf_seg_rcnn_v2_1`) on cropped Packera leaf patches.
     """
 
     @classmethod
@@ -72,14 +82,81 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger("FineTuneLM2PCD")
+logger = logging.getLogger("FineTuneLM2PointRend")
 
 DEFAULT_THING_CLASSES = ["ideal_leaf", "partial_leaf"]
+DEFAULT_MIN_SIZE_TRAIN: Tuple[int, ...] = (512, 640, 768, 896, 1024)
+DEFAULT_MAX_SIZE_TRAIN: int = 1333
+DEFAULT_POINTREND_OUTPUT_WEIGHTS = Path("models/lm2_packera_pointrend_finetuned.pth")
+LEGACY_PCD_ALIAS_WEIGHTS = Path("models/lm2_packera_pcd_finetuned.pth")
+MODEL_ZOO_FALLBACK_CONFIG = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
+MODEL_ZOO_FALLBACK_WEIGHTS = (
+    "detectron2://COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x/137849600/model_final_f10217.pkl"
+)
+DEFAULT_POINTREND_WEIGHT_REL_PATHS: Tuple[str, ...] = (
+    "LeafMachine2/leafmachine2/segmentation/models/leaf_seg_rcnn_v2_1/model_final.pth",
+    "models/leaf_seg_rcnn_v2_1.pth",
+)
+
+
+def resolve_pointrend_base_weights(
+    base_weights_path: Optional[Union[str, Path]] = None,
+    search_roots: Optional[List[Union[str, Path]]] = None,
+) -> str:
+    """
+    Resolves the initial checkpoint for LeafMachine2 Stage 2 PointRend fine-tuning:
+      1. Explicit `base_weights_path` if provided and existing (or a detectron2:// / https:// URI).
+      2. LeafMachine2's pre-trained PointRend weights:
+         - `LeafMachine2/leafmachine2/segmentation/models/leaf_seg_rcnn_v2_1/model_final.pth`
+         - `models/leaf_seg_rcnn_v2_1.pth`
+      3. Detectron2 model zoo fallback (`COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml`).
+    """
+    if base_weights_path:
+        bw_str = str(base_weights_path)
+        if bw_str.startswith(("detectron2://", "http://", "https://")):
+            logger.info(f"Using explicit remote base weights URI: {bw_str}")
+            return bw_str
+        bw_path = Path(bw_str)
+        if bw_path.exists():
+            logger.info(f"Using explicit PointRend base checkpoint: {bw_path}")
+            return str(bw_path)
+
+    roots: List[Path] = []
+    if search_roots:
+        roots.extend(Path(r) for r in search_roots)
+    else:
+        roots.extend([Path.cwd(), PROJECT_ROOT])
+
+    for root in roots:
+        for rel_candidate in DEFAULT_POINTREND_WEIGHT_REL_PATHS:
+            cand = root / rel_candidate
+            if cand.exists():
+                logger.info(f"Resolved LeafMachine2 pre-trained PointRend weights (`leaf_seg_rcnn_v2_1`): {cand}")
+                return str(cand)
+
+    try:
+        from detectron2 import model_zoo
+        zoo_url = model_zoo.get_checkpoint_url(MODEL_ZOO_FALLBACK_CONFIG)
+        if zoo_url:
+            logger.info(
+                f"LeafMachine2 `leaf_seg_rcnn_v2_1` checkpoint not found locally; "
+                f"falling back to Detectron2 model zoo ({MODEL_ZOO_FALLBACK_CONFIG}): {zoo_url}"
+            )
+            return str(zoo_url)
+    except Exception:
+        pass
+
+    logger.info(
+        f"LeafMachine2 `leaf_seg_rcnn_v2_1` checkpoint not found locally; "
+        f"falling back to Detectron2 model zoo URI: {MODEL_ZOO_FALLBACK_WEIGHTS}"
+    )
+    return MODEL_ZOO_FALLBACK_WEIGHTS
 
 
 def freeze_backbone_stages(model: Any, freeze_stages: int = 2) -> None:
     """
-    Freezes early stages of ResNet / FPN backbone to prevent catastrophic forgetting.
+    Freezes early stages of ResNet / FPN backbone to prevent catastrophic forgetting
+    on small Packera training sets (50-100 sheets).
     """
     if hasattr(model, "backbone") and hasattr(model.backbone, "bottom_up"):
         bottom_up = model.backbone.bottom_up
@@ -97,30 +174,63 @@ def freeze_backbone_stages(model: Any, freeze_stages: int = 2) -> None:
                 logger.info(f"Froze backbone {stage_name} parameters.")
 
 
+def _create_fallback_cfg_node() -> Any:
+    """Creates a Detectron2-compatible fallback CfgNode structure when detectron2 is not compiled."""
+    cfg = SimpleNamespace()
+    cfg.OUTPUT_DIR = "data/annotations/pcd_training_output"
+    cfg.DATASETS = SimpleNamespace(TRAIN=(), TEST=())
+    cfg.DATALOADER = SimpleNamespace(NUM_WORKERS=2)
+    cfg.INPUT = SimpleNamespace(
+        MIN_SIZE_TRAIN=DEFAULT_MIN_SIZE_TRAIN,
+        MAX_SIZE_TRAIN=DEFAULT_MAX_SIZE_TRAIN,
+        MIN_SIZE_TEST=800,
+        MAX_SIZE_TEST=1333,
+    )
+    cfg.MODEL = SimpleNamespace(
+        WEIGHTS="",
+        DEVICE="cuda",
+        ROI_HEADS=SimpleNamespace(NUM_CLASSES=2, BATCH_SIZE_PER_IMAGE=256),
+        POINT_HEAD=SimpleNamespace(NUM_CLASSES=2),
+    )
+    cfg.SOLVER = SimpleNamespace(
+        IMS_PER_BATCH=2,
+        BASE_LR=0.0001,
+        MAX_ITER=1000,
+        STEPS=(600, 800),
+        GAMMA=0.5,
+        WARMUP_ITERS=100,
+        CHECKPOINT_PERIOD=500,
+    )
+    cfg.merge_from_file = lambda *_args, **_kwargs: None
+    return cfg
+
+
 def build_pointrend_cfg(
     train_dataset_name: str,
     val_dataset_name: Optional[str] = None,
     output_dir: Union[str, Path] = "data/annotations/pcd_training_output",
-    base_weights_path: Optional[str] = None,
+    base_weights_path: Optional[Union[str, Path]] = None,
     num_classes: int = 2,
     base_lr: float = 0.0001,
     max_iters: int = 1000,
     batch_size: int = 2,
     num_workers: int = 2,
     device: str = "cuda",
+    search_roots: Optional[List[Union[str, Path]]] = None,
 ) -> Any:
     """
-    Builds a Detectron2 CfgNode configured with the PointRend ResNet-50 FPN architecture.
+    Builds a Detectron2 CfgNode configured for LeafMachine2's Stage 2 PointRend
+    Leaf Segmenter (`leaf_seg_rcnn_v2_1`) operating on single-leaf crops.
     """
     try:
         from detectron2.config import get_cfg
         from detectron2.projects import point_rend
-    except ImportError as e:
-        logger.error(f"Detectron2 / PointRend import failure: {e}")
-        return None
 
-    cfg = get_cfg()
-    point_rend.add_pointrend_config(cfg)
+        cfg = get_cfg()
+        point_rend.add_pointrend_config(cfg)
+    except ImportError as e:
+        logger.warning(f"Detectron2 C++ extension not loaded ({e}); using fallback PointRend CfgNode.")
+        cfg = _create_fallback_cfg_node()
 
     pointrend_yaml = (
         DETECTRON2_PATH
@@ -130,21 +240,29 @@ def build_pointrend_cfg(
         / "InstanceSegmentation"
         / "pointrend_rcnn_R_50_FPN_3x_coco.yaml"
     )
-    if pointrend_yaml.exists():
-        cfg.merge_from_file(str(pointrend_yaml))
-        logger.info(f"Loaded PointRend architecture configuration from {pointrend_yaml.name}")
+    if pointrend_yaml.exists() and hasattr(cfg, "merge_from_file"):
+        try:
+            cfg.merge_from_file(str(pointrend_yaml))
+            logger.info(f"Loaded PointRend architecture configuration from {pointrend_yaml.name}")
+        except Exception as err:
+            logger.debug(f"Could not merge PointRend YAML ({err}); continuing with programmatic config.")
 
     cfg.DATASETS.TRAIN = (train_dataset_name,)
     cfg.DATASETS.TEST = (val_dataset_name,) if val_dataset_name else ()
     cfg.DATALOADER.NUM_WORKERS = num_workers
 
+    # Single-leaf crop input scaling (Stage 2 PointRend Leaf Segmenter)
+    cfg.INPUT.MIN_SIZE_TRAIN = (512, 640, 768, 896, 1024)
+    cfg.INPUT.MAX_SIZE_TRAIN = 1333
+
     cfg.OUTPUT_DIR = str(output_dir)
     Path(cfg.OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
-    if base_weights_path and Path(base_weights_path).exists():
-        cfg.MODEL.WEIGHTS = str(base_weights_path)
-    else:
-        cfg.MODEL.WEIGHTS = "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
+    # Resolve LeafMachine2 `leaf_seg_rcnn_v2_1` checkpoint before falling back to Detectron2 model zoo
+    cfg.MODEL.WEIGHTS = resolve_pointrend_base_weights(
+        base_weights_path=base_weights_path,
+        search_roots=search_roots,
+    )
 
     cfg.MODEL.DEVICE = device
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
@@ -163,13 +281,69 @@ def build_pointrend_cfg(
     return cfg
 
 
+def save_checkpoint_atomically(
+    src_checkpoint: Union[str, Path],
+    output_weights: Union[str, Path] = DEFAULT_POINTREND_OUTPUT_WEIGHTS,
+    alias_weights: Optional[Union[str, Path]] = LEGACY_PCD_ALIAS_WEIGHTS,
+) -> Tuple[Path, Optional[Path]]:
+    """
+    Atomically exports a trained PointRend checkpoint to `output_weights`
+    (default `models/lm2_packera_pointrend_finetuned.pth`) using a temporary staging
+    file and `os.replace`, and atomically writes the backward-compatibility alias
+    `models/lm2_packera_pcd_finetuned.pth`.
+    """
+    src_path = Path(src_checkpoint)
+    if not src_path.exists():
+        raise FileNotFoundError(f"Source checkpoint does not exist: {src_path}")
+
+    primary_dest = Path(output_weights)
+    primary_dest.parent.mkdir(parents=True, exist_ok=True)
+
+    def _atomic_copy(src: Path, dst: Path) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{dst.name}.",
+            suffix=".tmp",
+            dir=str(dst.parent),
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            shutil.copy2(src, tmp_path)
+            with open(tmp_path, "rb") as f_sync:
+                os.fsync(f_sync.fileno())
+            os.replace(tmp_path, dst)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    _atomic_copy(src_path, primary_dest)
+    logger.info(
+        f"Atomically exported Stage 2 PointRend Leaf Segmenter checkpoint -> {primary_dest}"
+    )
+
+    alias_dest: Optional[Path] = None
+    if alias_weights is not None:
+        cand_alias = Path(alias_weights)
+        if cand_alias.resolve() != primary_dest.resolve():
+            _atomic_copy(primary_dest, cand_alias)
+            alias_dest = cand_alias
+            logger.info(
+                f"Atomically updated backward-compatible checkpoint alias -> {alias_dest}"
+            )
+        else:
+            alias_dest = primary_dest
+
+    return primary_dest, alias_dest
+
+
 def register_coco_dataset(
     dataset_name: str,
     coco_json_path: Path,
     images_dir: Path,
     thing_classes: Optional[List[str]] = None,
 ) -> bool:
-    """Registers COCO dataset with Detectron2 dataset catalog."""
+    """Registers single-leaf crop COCO dataset with Detectron2 dataset catalog."""
     try:
         from detectron2.data.datasets import register_coco_instances
         from detectron2.data import MetadataCatalog, DatasetCatalog
@@ -194,37 +368,51 @@ def train_with_batch_fallback(
     initial_batch_size: int = 2,
 ) -> bool:
     """
-    Executes training loop with automated single-GPU CUDA batch size fallback
-    upon encountering OutOfMemoryError.
+    Executes Stage 2 PointRend Leaf Segmenter training loop with automated
+    single-GPU CUDA batch size fallback upon encountering OutOfMemoryError.
     """
     batch_size = initial_batch_size
+    oom_errors: Tuple[ Any, ...] = (
+        (torch.cuda.OutOfMemoryError, RuntimeError)
+        if (torch is not None and hasattr(torch, "cuda") and hasattr(torch.cuda, "OutOfMemoryError"))
+        else (RuntimeError,)
+    )
 
     while batch_size >= 1:
         cfg.SOLVER.IMS_PER_BATCH = batch_size
-        logger.info(f"Attempting PointRend training with IMS_PER_BATCH = {batch_size}...")
+        logger.info(
+            f"Attempting Stage 2 PointRend Leaf Segmenter training with IMS_PER_BATCH = {batch_size}..."
+        )
 
         try:
             trainer = PointRendPackeraTrainer(cfg)
             freeze_backbone_stages(trainer.model, freeze_stages=freeze_stages)
             trainer.resume_or_load(resume=False)
             trainer.train()
-            logger.info(f"Training completed successfully at batch size {batch_size}.")
+            logger.info(f"PointRend Leaf Segmenter training completed at batch size {batch_size}.")
             return True
 
-        except (torch.cuda.OutOfMemoryError, RuntimeError) as err:
+        except oom_errors as err:
             err_msg = str(err).lower()
             if "out of memory" in err_msg or "cuda oom" in err_msg:
                 logger.warning(f"CUDA Out of Memory caught at IMS_PER_BATCH = {batch_size}: {err}")
-                if torch.cuda.is_available():
+                if torch is not None and torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
                 if batch_size > 1:
                     batch_size -= 1
-                    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = max(32, cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE // 2)
-                    logger.info(f"Retrying training with reduced batch size {batch_size} and smaller ROI proposal batch.")
+                    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = max(
+                        32, cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE // 2
+                    )
+                    logger.info(
+                        f"Retrying PointRend training with reduced batch size {batch_size} "
+                        f"and smaller ROI proposal batch."
+                    )
                     continue
                 else:
-                    logger.error("CUDA Out of Memory occurred even at minimum batch size (IMS_PER_BATCH = 1).")
+                    logger.error(
+                        "CUDA Out of Memory occurred even at minimum batch size (IMS_PER_BATCH = 1)."
+                    )
                     raise
             else:
                 raise
@@ -233,15 +421,18 @@ def train_with_batch_fallback(
 
 
 def parse_args() -> argparse.Namespace:
-    """Parses command-line arguments for LM2 PCD fine-tuning runner."""
+    """Parses command-line arguments for LeafMachine2 Stage 2 PointRend Leaf Segmenter fine-tuning."""
     parser = argparse.ArgumentParser(
-        description="Fine-tune LeafMachine2 PointRend PCD on Packera ground-truth annotations."
+        description=(
+            "Fine-tune LeafMachine2's Stage 2 PointRend Leaf Segmenter (`leaf_seg_rcnn_v2_1`) "
+            "on cropped Packera ground-truth leaf patches."
+        )
     )
     parser.add_argument(
         "--coco-json",
         type=Path,
         default=Path("data/annotations/annotations_packera_train.json"),
-        help="Path to training COCO dataset JSON",
+        help="Path to training COCO dataset JSON (cropped single-leaf patches)",
     )
     parser.add_argument(
         "--val-coco-json",
@@ -252,8 +443,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--images-dir",
         type=Path,
-        default=Path("data/raw_vouchers"),
-        help="Directory containing voucher sheets",
+        default=Path("data/annotations/lm2_leaf_crops"),
+        help="Directory containing native-DPI cropped leaf patches (default: data/annotations/lm2_leaf_crops)",
     )
     parser.add_argument(
         "--output-dir",
@@ -264,14 +455,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-weights",
         type=Path,
-        default=Path("models/lm2_packera_pcd_finetuned.pth"),
-        help="Destination path for final fine-tuned model checkpoint",
+        default=DEFAULT_POINTREND_OUTPUT_WEIGHTS,
+        help=(
+            "Destination path for final fine-tuned PointRend checkpoint "
+            "(default: models/lm2_packera_pointrend_finetuned.pth; also aliases "
+            "models/lm2_packera_pcd_finetuned.pth)"
+        ),
     )
     parser.add_argument(
         "--base-weights",
         type=str,
         default=None,
-        help="Path to initial weights (defaults to models/Packera_LeafPriority.pth if present)",
+        help=(
+            "Path to initial PointRend weights (searches LeafMachine2's "
+            "leaf_seg_rcnn_v2_1/model_final.pth and models/leaf_seg_rcnn_v2_1.pth "
+            "before falling back to Detectron2 model zoo)"
+        ),
     )
     parser.add_argument("--iterations", type=int, default=1000, help="Total training iterations")
     parser.add_argument("--lr", type=float, default=0.0001, help="Base learning rate")
@@ -283,35 +482,31 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Main execution flow for LM2 PCD fine-tuning."""
+    """Main execution flow for LeafMachine2 Stage 2 PointRend Leaf Segmenter fine-tuning."""
     args = parse_args()
 
     logger.info("=" * 80)
-    logger.info("       LEAFMACHINE2 PCD / POINTREND FINE-TUNING PIPELINE       ")
+    logger.info("   LEAFMACHINE2 STAGE 2 POINTREND LEAF SEGMENTER FINE-TUNING PIPELINE   ")
     logger.info("=" * 80)
 
     if not args.coco_json.exists():
         logger.error(f"Training COCO annotation file not found: {args.coco_json}")
         sys.exit(1)
 
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    cuda_avail = bool(torch is not None and torch.cuda.is_available())
+    device = args.device or ("cuda" if cuda_avail else "cpu")
     logger.info(f"Target execution device: {device}")
 
-    base_weights = args.base_weights
-    if not base_weights:
-        default_model = Path("models/Packera_LeafPriority.pth")
-        if default_model.exists():
-            base_weights = str(default_model)
-            logger.info(f"Using existing base checkpoint: {base_weights}")
+    base_weights = resolve_pointrend_base_weights(args.base_weights)
 
-    train_ds_name = "packera_pcd_finetune_train"
-    val_ds_name = "packera_pcd_finetune_val" if args.val_coco_json else None
+    train_ds_name = "packera_pointrend_leaf_train"
+    val_ds_name = "packera_pointrend_leaf_val" if args.val_coco_json else None
 
     registered = register_coco_dataset(
         train_ds_name, args.coco_json, args.images_dir, thing_classes=DEFAULT_THING_CLASSES
     )
     if not registered:
-        logger.error("Failed to register COCO dataset with Detectron2.")
+        logger.error("Failed to register single-leaf crop COCO dataset with Detectron2.")
         sys.exit(1)
 
     if val_ds_name:
@@ -332,13 +527,21 @@ def main() -> None:
     )
 
     if cfg is None:
-        logger.error("Failed to construct PointRend configuration.")
+        logger.error("Failed to construct Stage 2 PointRend configuration.")
         sys.exit(1)
 
     if args.dry_run:
-        logger.info("[Dry Run] PointRend fine-tuning configuration validated successfully.")
+        logger.info("[Dry Run] LeafMachine2 Stage 2 PointRend Leaf Segmenter configuration validated.")
+        logger.info(f"[Dry Run] Initial weights: {cfg.MODEL.WEIGHTS}")
+        logger.info(
+            f"[Dry Run] Input crop scales: MIN_SIZE_TRAIN={cfg.INPUT.MIN_SIZE_TRAIN}, "
+            f"MAX_SIZE_TRAIN={cfg.INPUT.MAX_SIZE_TRAIN}"
+        )
         logger.info(f"[Dry Run] Max iterations: {args.iterations}, Device: {device}, Initial batch: {args.batch_size}")
-        logger.info(f"[Dry Run] Target output weight destination: {args.output_weights}")
+        logger.info(
+            f"[Dry Run] Target output weights: {args.output_weights} "
+            f"(backward-compatible alias: {LEGACY_PCD_ALIAS_WEIGHTS})"
+        )
         return
 
     # Execute training with automated single-GPU OOM fallback
@@ -351,9 +554,15 @@ def main() -> None:
     if success:
         final_model_src = Path(cfg.OUTPUT_DIR) / "model_final.pth"
         if final_model_src.exists():
-            args.output_weights.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(final_model_src, args.output_weights)
-            logger.info(f"Successfully exported fine-tuned checkpoint -> {args.output_weights}")
+            alias_target: Optional[Path] = LEGACY_PCD_ALIAS_WEIGHTS
+            if args.output_weights != DEFAULT_POINTREND_OUTPUT_WEIGHTS:
+                # If caller passed custom output path, still alias between pointrend and pcd paths in same dir
+                alias_target = args.output_weights.parent / LEGACY_PCD_ALIAS_WEIGHTS.name
+            save_checkpoint_atomically(
+                src_checkpoint=final_model_src,
+                output_weights=args.output_weights,
+                alias_weights=alias_target,
+            )
         else:
             logger.warning(f"Expected model_final.pth not found in {cfg.OUTPUT_DIR}")
 

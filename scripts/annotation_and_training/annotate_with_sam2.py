@@ -59,6 +59,8 @@ except ImportError:
 from scripts.annotation_and_training.sam2_annotator_utils import (
     CLASS_COLORS,
     CLASS_NAMES,
+    DEFAULT_CROP_PADDING_RATIO,
+    DEFAULT_LEAF_CROPS_DIR,
     KEYSYM_TO_CLASS,
     PCD_CLASS_MAPPING,
     PCD_COCO_CATEGORIES,
@@ -73,6 +75,7 @@ from scripts.annotation_and_training.sam2_annotator_utils import (
     compose_mask_overlay,
     convert_masks_to_coco_dataset,
     export_coco_annotations,
+    export_coco_from_yolo_and_masks,
     image_to_viewport_coords,
     mask_to_polygons,
     overlay_candidate_mask_on_viewport,
@@ -425,11 +428,15 @@ class PrecisionSAM2Annotator:
         target_index: Optional[int] = None,
         tier: str = "1",
         vouchers_csv: Union[str, Path] = "data/tables/curated_vouchers.csv",
+        crops_dir: Optional[Union[str, Path]] = None,
+        full_sheet: bool = False,
     ):
         self.project_root = get_project_root()
         self.images_dir = Path(images_dir)
         self.output_dir = Path(output_dir)
         self.coco_output = Path(coco_output)
+        self.crops_dir = Path(crops_dir) if crops_dir is not None else None
+        self.full_sheet = bool(full_sheet)
         self.masks_dir = self.output_dir / "masks"
         self.labels_dir = self.output_dir / "labels"
 
@@ -904,10 +911,13 @@ class PrecisionSAM2Annotator:
 
         if sync_coco:
             try:
-                export_coco_annotations(
+                export_coco_from_yolo_and_masks(
                     masks_dir=self.masks_dir,
                     output_coco_path=self.coco_output,
                     images_dir=self.images_dir,
+                    crops_dir=getattr(self, "crops_dir", None),
+                    yolo_dir=self.output_dir,
+                    full_sheet=getattr(self, "full_sheet", False),
                 )
                 logger.info(f"Synchronized COCO dataset to {self.coco_output}")
             except Exception as err:
@@ -1520,6 +1530,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default="sam2_hiera_l.yaml", help="SAM 2 model configuration")
     parser.add_argument("--export-coco", action="store_true", help="Compile and export COCO dataset from existing masks in headless mode")
     parser.add_argument("--masks-dir", type=str, default="data/raw_annotations/masks", help="Masks directory for --export-coco")
+    parser.add_argument("--crops-dir", type=str, default="data/annotations/lm2_leaf_crops", help="Directory for native-DPI cropped leaf patches")
+    parser.add_argument("--full-sheet", action="store_true", help="Export full-sheet COCO annotations instead of Stage 2 single-leaf crops")
     parser.add_argument("--val-split", type=float, default=0.0, help="Validation partition fraction (e.g. 0.20)")
     parser.add_argument("--resume-last", action="store_true", help="Automatically resume from the most recently annotated voucher")
     parser.add_argument("--resume-unannotated", action="store_true", help="Automatically jump to the first unannotated voucher in sequence")
@@ -1536,11 +1548,14 @@ def main() -> None:
 
     if args.export_coco:
         logger.info(f"Compiling COCO dataset from {args.masks_dir} -> {args.output_coco}...")
-        coco_doc = export_coco_annotations(
+        coco_doc = export_coco_from_yolo_and_masks(
             masks_dir=args.masks_dir,
             output_coco_path=args.output_coco,
             images_dir=args.images_dir,
+            crops_dir=args.crops_dir,
+            yolo_dir=args.output_dir,
             val_split=args.val_split,
+            full_sheet=args.full_sheet,
         )
         logger.info(
             f"Successfully compiled COCO annotations: {len(coco_doc['images'])} images, "
@@ -1561,6 +1576,8 @@ def main() -> None:
         target_index=args.index,
         tier=args.tier,
         vouchers_csv=args.vouchers_csv,
+        crops_dir=args.crops_dir,
+        full_sheet=args.full_sheet,
     )
     logger.info("Launching Precision SAM 2 Annotator GUI...")
     annotator.run()

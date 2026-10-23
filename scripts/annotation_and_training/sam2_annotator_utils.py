@@ -898,6 +898,10 @@ def overlay_candidate_mask_on_viewport(
 # 4. Standardized COCO 1.0 Dataset Exporter
 # ===============================================================================
 
+DEFAULT_LEAF_CROPS_DIR = Path("data/annotations/lm2_leaf_crops")
+DEFAULT_CROP_PADDING_RATIO = 0.12
+
+
 def parse_mask_filename(mask_filename: str) -> Tuple[str, str, int]:
     """
     Parses catalogNumber / voucher ID, class label, and instance ID from a mask filename.
@@ -935,118 +939,470 @@ def parse_mask_filename(mask_filename: str) -> Tuple[str, str, int]:
     return core, "unknown", inst_id
 
 
-def convert_masks_to_coco_dataset(
-    masks_dir: Union[str, Path],
+def _resolve_voucher_image_and_dims(
+    cat_num: str,
+    images_dir_path: Optional[Path],
+    image_dim_map: Optional[Dict[str, Tuple[int, int]]],
+    default_width: int,
+    default_height: int,
+    image_extension: str = ".jpg",
+    mask_shape: Optional[Tuple[int, int]] = None,
+    sheet_cache: Optional[Dict[str, Optional[np.ndarray]]] = None,
+) -> Tuple[int, int, Optional[Path], Optional[np.ndarray]]:
+    """
+    Resolves full-sheet voucher dimensions (width, height), file path, and cached BGR image array.
+    """
+    w, h = default_width, default_height
+    candidate_img: Optional[Path] = None
+    sheet_bgr: Optional[np.ndarray] = None
+
+    if images_dir_path and images_dir_path.exists():
+        for ext in (image_extension, ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".JPG", ".PNG"):
+            cand = images_dir_path / f"{cat_num}{ext}"
+            if cand.exists():
+                candidate_img = cand
+                break
+
+    if sheet_cache is not None and cat_num in sheet_cache:
+        sheet_bgr = sheet_cache[cat_num]
+        if sheet_bgr is not None:
+            h, w = sheet_bgr.shape[:2]
+            return w, h, candidate_img, sheet_bgr
+
+    if candidate_img is not None and candidate_img.exists():
+        try:
+            sheet_bgr = cv2.imread(str(candidate_img), cv2.IMREAD_COLOR)
+            if sheet_bgr is not None:
+                h, w = sheet_bgr.shape[:2]
+        except Exception:
+            sheet_bgr = None
+
+    if sheet_bgr is None:
+        if image_dim_map and cat_num in image_dim_map:
+            w, h = image_dim_map[cat_num]
+        elif candidate_img is not None and candidate_img.exists():
+            try:
+                from PIL import Image
+                with Image.open(candidate_img) as im:
+                    w, h = im.size
+            except Exception:
+                pass
+        elif mask_shape is not None:
+            h, w = mask_shape[:2]
+
+    if sheet_cache is not None:
+        sheet_cache[cat_num] = sheet_bgr
+
+    return int(w), int(h), candidate_img, sheet_bgr
+
+
+def _compute_padded_crop_and_translate_polygons(
+    polygons: List[List[float]],
+    sheet_w: int,
+    sheet_h: int,
+    padding_ratio: float = DEFAULT_CROP_PADDING_RATIO,
+) -> Tuple[Tuple[int, int, int, int], List[List[float]], List[float]]:
+    """
+    Given instance polygons in full-sheet coordinates:
+      1. Computes tight bounding box (x_min, y_min, w, h) of the instance polygon.
+      2. Expands bounding box isotropically by `padding_ratio` (default 12%) on each side,
+         clamped to sheet image boundaries [0, sheet_w] x [0, sheet_h].
+      3. Translates polygon vertices (x - x0, y - y0) and bounding box into the local
+         coordinate frame of the cropped patch [0, crop_w] x [0, crop_h].
+
+    Returns:
+        Tuple[(x0, y0, x1, y1), local_polygons, local_bbox]
+    """
+    all_xs = [float(x) for poly in polygons for x in poly[0::2]]
+    all_ys = [float(y) for poly in polygons for y in poly[1::2]]
+
+    x_min = max(0.0, min(all_xs))
+    y_min = max(0.0, min(all_ys))
+    x_max = min(float(sheet_w), max(all_xs))
+    y_max = min(float(sheet_h), max(all_ys))
+
+    tight_w = max(1.0, x_max - x_min)
+    tight_h = max(1.0, y_max - y_min)
+
+    pad_x = tight_w * float(padding_ratio)
+    pad_y = tight_h * float(padding_ratio)
+
+    x0 = max(0, int(np.floor(x_min - pad_x)))
+    y0 = max(0, int(np.floor(y_min - pad_y)))
+    x1 = min(int(sheet_w), int(np.ceil(x_min + tight_w + pad_x)))
+    y1 = min(int(sheet_h), int(np.ceil(y_min + tight_h + pad_y)))
+
+    if x1 <= x0:
+        x1 = min(int(sheet_w), x0 + 1)
+    if y1 <= y0:
+        y1 = min(int(sheet_h), y0 + 1)
+
+    crop_w = max(1, x1 - x0)
+    crop_h = max(1, y1 - y0)
+
+    local_polygons: List[List[float]] = []
+    for poly in polygons:
+        translated: List[float] = []
+        for idx_pt in range(0, len(poly) - 1, 2):
+            lx = float(np.clip(poly[idx_pt] - x0, 0.0, float(crop_w)))
+            ly = float(np.clip(poly[idx_pt + 1] - y0, 0.0, float(crop_h)))
+            translated.extend([round(lx, 2), round(ly, 2)])
+        if len(translated) >= 6:
+            local_polygons.append(translated)
+
+    if local_polygons:
+        local_xs = [pt for poly in local_polygons for pt in poly[0::2]]
+        local_ys = [pt for poly in local_polygons for pt in poly[1::2]]
+        lx_min = float(np.clip(min(local_xs), 0.0, float(crop_w)))
+        ly_min = float(np.clip(min(local_ys), 0.0, float(crop_h)))
+        lx_max = float(np.clip(max(local_xs), 0.0, float(crop_w)))
+        ly_max = float(np.clip(max(local_ys), 0.0, float(crop_h)))
+        lw = round(max(0.0, min(float(crop_w) - lx_min, lx_max - lx_min)), 2)
+        lh = round(max(0.0, min(float(crop_h) - ly_min, ly_max - ly_min)), 2)
+        local_bbox = [round(lx_min, 2), round(ly_min, 2), lw, lh]
+    else:
+        local_bbox = [0.0, 0.0, float(crop_w), float(crop_h)]
+
+    return (x0, y0, x1, y1), local_polygons, local_bbox
+
+
+def export_coco_from_yolo_and_masks(
+    masks_dir: Optional[Union[str, Path]] = None,
+    output_coco_path: Optional[Union[str, Path]] = None,
     images_dir: Optional[Union[str, Path]] = None,
+    crops_dir: Optional[Union[str, Path]] = None,
+    yolo_dir: Optional[Union[str, Path]] = None,
+    annotations_dir: Optional[Union[str, Path]] = None,
+    labels_dir: Optional[Union[str, Path]] = None,
     image_dim_map: Optional[Dict[str, Tuple[int, int]]] = None,
     default_width: int = 4000,
     default_height: int = 6000,
     min_area_px: float = 50.0,
+    padding_ratio: float = DEFAULT_CROP_PADDING_RATIO,
+    full_sheet: bool = False,
+    val_split: float = 0.0,
     image_extension: str = ".jpg",
 ) -> Dict[str, Any]:
     """
-    Scans a directory of binary PNG masks and compiles a COCO 1.0 JSON format dictionary.
+    Exports SAM 2 annotations (binary PNG masks and/or YOLO polygon .txt labels) to
+    standardized COCO 1.0 JSON format for LeafMachine2 Stage 2 PointRend fine-tuning.
 
-    Args:
-        masks_dir: Path to directory containing binary PNG masks.
-        images_dir: Optional path to raw voucher images to extract exact image dimensions.
-        image_dim_map: Dict mapping image stems to (width, height).
-        default_width: Fallback width if dimensions cannot be inferred.
-        default_height: Fallback height if dimensions cannot be inferred.
-        min_area_px: Minimum polygon area threshold.
-        image_extension: Target herbarium sheet extension (default .jpg).
+    By default (`full_sheet=False`), operates in LeafMachine2 Stage 2 single-leaf crop mode:
+      For each annotated `basal_leaf_whole` (`ideal_leaf`, category_id=1) and
+      `basal_leaf_partial` (`partial_leaf`, category_id=2) instance on a voucher sheet:
+        1. Computes the tight bounding box `(x_min, y_min, w, h)` of the instance polygon.
+        2. Expands the bounding box isotropically by 12% padding (`padding_ratio=0.12`) on each
+           side, clamped to sheet image boundaries `[0, sheet_w] x [0, sheet_h]`.
+        3. Crops the high-resolution RGB voucher patch `img[y0:y1, x0:x1]` at native DPI and
+           saves it to `data/annotations/lm2_leaf_crops/{catalogNumber}_inst{idx}.jpg`.
+        4. Translates the instance segmentation polygon vertices `(x - x0, y - y0)` and bounding
+           box into the local coordinate frame of the cropped patch, writing COCO `images` and
+           `annotations` entries referencing the cropped patch dimensions `(crop_w, crop_h)`.
 
-    Returns:
-        Dict[str, Any]: Standardized COCO 1.0 format dataset.
+    When `full_sheet=True` is explicitly requested, exports full-sheet images and full-sheet
+    polygon coordinates.
     """
-    masks_dir = Path(masks_dir)
-    if not masks_dir.exists():
-        logger.warning(f"Masks directory not found: {masks_dir}")
-        return {"images": [], "annotations": [], "categories": PCD_COCO_CATEGORIES}
+    # Flexible resolution of directory arguments
+    if masks_dir is None and annotations_dir is not None:
+        ann_path = Path(annotations_dir)
+        if (ann_path / "masks").exists():
+            masks_dir = ann_path / "masks"
+            if yolo_dir is None:
+                yolo_dir = ann_path
+        else:
+            masks_dir = ann_path
 
-    mask_files = sorted([f for f in masks_dir.iterdir() if f.suffix.lower() == ".png"])
-    logger.info(f"Found {len(mask_files)} mask files in {masks_dir}")
+    if yolo_dir is None and labels_dir is not None:
+        yolo_dir = Path(labels_dir)
 
-    images_dir_path = Path(images_dir) if images_dir else None
+    # Handle case where 2nd positional arg (`output_coco_path`) was passed as `images_dir`
+    if output_coco_path is not None and images_dir is None:
+        out_cand = Path(output_coco_path)
+        if out_cand.exists() and out_cand.is_dir():
+            images_dir = out_cand
+            output_coco_path = None
+
+    masks_dir_path: Optional[Path] = Path(masks_dir) if masks_dir is not None else None
+    if masks_dir_path is not None and (masks_dir_path / "masks").exists():
+        if not list(masks_dir_path.glob("*.png")):
+            if yolo_dir is None:
+                yolo_dir = masks_dir_path
+            masks_dir_path = masks_dir_path / "masks"
+
+    if yolo_dir is None and masks_dir_path is not None:
+        if masks_dir_path.name == "masks" and masks_dir_path.parent.exists():
+            yolo_dir = masks_dir_path.parent
+        else:
+            yolo_dir = masks_dir_path
+
+    yolo_dir_path: Optional[Path] = Path(yolo_dir) if yolo_dir is not None else None
+    images_dir_path: Optional[Path] = Path(images_dir) if images_dir is not None else None
+
+    if crops_dir is not None:
+        crops_dir_path = Path(crops_dir)
+    elif output_coco_path is not None:
+        crops_dir_path = Path(output_coco_path).parent / "lm2_leaf_crops"
+    elif masks_dir_path is not None and str(masks_dir_path).startswith("/tmp"):
+        crops_dir_path = masks_dir_path.parent / "lm2_leaf_crops"
+    else:
+        crops_dir_path = DEFAULT_LEAF_CROPS_DIR
+
+    mask_files: List[Path] = []
+    if masks_dir_path is not None and masks_dir_path.exists():
+        mask_files = sorted([f for f in masks_dir_path.iterdir() if f.suffix.lower() == ".png"])
+        logger.info(f"Found {len(mask_files)} mask files in {masks_dir_path}")
+
+    yolo_files: List[Path] = []
+    if yolo_dir_path is not None and yolo_dir_path.exists():
+        yolo_files = sorted([
+            f for f in yolo_dir_path.iterdir()
+            if f.suffix.lower() == ".txt"
+            and not f.name.startswith(".")
+            and f.name.lower() != "classes.txt"
+        ])
+
+    if not mask_files and not yolo_files:
+        logger.warning(f"No mask or YOLO annotation files found in {masks_dir_path} / {yolo_dir_path}")
+        empty_doc = {"images": [], "annotations": [], "categories": PCD_COCO_CATEGORIES}
+        if output_coco_path is not None:
+            save_coco_json(empty_doc, output_coco_path)
+        return empty_doc
+
+    if not full_sheet:
+        crops_dir_path.mkdir(parents=True, exist_ok=True)
+
     images_dict: Dict[str, Dict[str, Any]] = {}
     annotations_list: List[Dict[str, Any]] = []
+    sheet_cache: Dict[str, Optional[np.ndarray]] = {}
+    processed_vouchers_from_masks = set()
 
     image_id_counter = 1
     annotation_id_counter = 1
 
-    for mask_path in mask_files:
-        cat_num, class_label, inst_id = parse_mask_filename(mask_path.name)
+    def _record_instance(
+        cat_num: str,
+        class_label: str,
+        inst_id: int,
+        polygons: List[List[float]],
+        area: float,
+        bbox: List[float],
+        sheet_w: int,
+        sheet_h: int,
+        sheet_bgr: Optional[np.ndarray],
+        mask_img: Optional[np.ndarray] = None,
+    ) -> None:
+        nonlocal image_id_counter, annotation_id_counter
 
         if class_label in OMITTED_CLASSES:
-            continue
-
+            return
         pcd_category = PCD_CLASS_MAPPING.get(class_label)
         if not pcd_category or pcd_category not in CATEGORY_NAME_TO_ID:
-            continue
-
+            return
         category_id = CATEGORY_NAME_TO_ID[pcd_category]
 
-        img_file_name = f"{cat_num}{image_extension}"
-        if img_file_name not in images_dict:
-            w, h = default_width, default_height
-
-            # Resolve actual dimensions if image exists on disk or in dim_map
-            if image_dim_map and cat_num in image_dim_map:
-                w, h = image_dim_map[cat_num]
-            elif images_dir_path:
-                candidate_img = images_dir_path / img_file_name
-                if candidate_img.exists():
-                    try:
-                        from PIL import Image
-                        with Image.open(candidate_img) as im:
-                            w, h = im.size
-                    except Exception:
-                        try:
-                            probe = cv2.imread(str(candidate_img))
-                            if probe is not None:
-                                h, w = probe.shape[:2]
-                        except Exception:
-                            pass
-
-            images_dict[img_file_name] = {
-                "id": image_id_counter,
-                "file_name": img_file_name,
-                "width": w,
-                "height": h,
-            }
-            curr_image_id = image_id_counter
-            image_id_counter += 1
-        else:
-            curr_image_id = images_dict[img_file_name]["id"]
-
-        mask_img = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-        if mask_img is None:
-            continue
-
-        if images_dict[img_file_name]["width"] == default_width:
-            h, w = mask_img.shape[:2]
-            images_dict[img_file_name]["width"] = w
-            images_dict[img_file_name]["height"] = h
-
-        polygons, area, bbox = mask_to_polygons(mask_img, min_area_px=min_area_px)
         if not polygons or area < min_area_px:
-            continue
+            return
+
+        if full_sheet:
+            img_file_name = f"{cat_num}{image_extension}"
+            if img_file_name not in images_dict:
+                images_dict[img_file_name] = {
+                    "id": image_id_counter,
+                    "file_name": img_file_name,
+                    "width": int(sheet_w),
+                    "height": int(sheet_h),
+                }
+                curr_image_id = image_id_counter
+                image_id_counter += 1
+            else:
+                curr_image_id = images_dict[img_file_name]["id"]
+
+            annotations_list.append({
+                "id": annotation_id_counter,
+                "image_id": curr_image_id,
+                "category_id": category_id,
+                "segmentation": polygons,
+                "area": float(area),
+                "bbox": bbox,
+                "iscrowd": 0,
+            })
+            annotation_id_counter += 1
+            return
+
+        # Default Mode: Native-DPI Cropped Single-Leaf Patches (12% isotropic padding)
+        (x0, y0, x1, y1), local_polygons, local_bbox = _compute_padded_crop_and_translate_polygons(
+            polygons=polygons,
+            sheet_w=sheet_w,
+            sheet_h=sheet_h,
+            padding_ratio=padding_ratio,
+        )
+        if not local_polygons:
+            return
+
+        crop_w = x1 - x0
+        crop_h = y1 - y0
+        crop_file_name = f"{cat_num}_inst{inst_id}{image_extension}"
+        crop_dest_path = crops_dir_path / crop_file_name
+
+        if sheet_bgr is not None and sheet_bgr.shape[0] >= y1 and sheet_bgr.shape[1] >= x1:
+            crop_patch = sheet_bgr[y0:y1, x0:x1]
+        elif mask_img is not None and mask_img.shape[0] >= y1 and mask_img.shape[1] >= x1:
+            crop_gray = mask_img[y0:y1, x0:x1]
+            crop_patch = cv2.cvtColor(crop_gray, cv2.COLOR_GRAY2BGR)
+        else:
+            crop_patch = np.zeros((crop_h, crop_w, 3), dtype=np.uint8)
+
+        if crop_patch.size > 0:
+            cv2.imwrite(str(crop_dest_path), crop_patch)
+
+        curr_image_id = image_id_counter
+        images_dict[crop_file_name] = {
+            "id": curr_image_id,
+            "file_name": crop_file_name,
+            "width": int(crop_w),
+            "height": int(crop_h),
+            "source_voucher": cat_num,
+            "crop_bbox_sheet": [int(x0), int(y0), int(crop_w), int(crop_h)],
+        }
+        image_id_counter += 1
 
         annotations_list.append({
             "id": annotation_id_counter,
             "image_id": curr_image_id,
             "category_id": category_id,
-            "segmentation": polygons,
-            "area": area,
-            "bbox": bbox,
+            "segmentation": local_polygons,
+            "area": float(area),
+            "bbox": local_bbox,
             "iscrowd": 0,
         })
         annotation_id_counter += 1
 
-    coco_doc = {
+    # 1. Process binary PNG masks
+    for mask_path in mask_files:
+        cat_num, class_label, inst_id = parse_mask_filename(mask_path.name)
+        processed_vouchers_from_masks.add(cat_num)
+
+        if class_label in OMITTED_CLASSES:
+            continue
+        pcd_category = PCD_CLASS_MAPPING.get(class_label)
+        if not pcd_category or pcd_category not in CATEGORY_NAME_TO_ID:
+            continue
+
+        mask_img = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask_img is None:
+            continue
+
+        sheet_w, sheet_h, _, sheet_bgr = _resolve_voucher_image_and_dims(
+            cat_num=cat_num,
+            images_dir_path=images_dir_path,
+            image_dim_map=image_dim_map,
+            default_width=default_width,
+            default_height=default_height,
+            image_extension=image_extension,
+            mask_shape=mask_img.shape[:2],
+            sheet_cache=sheet_cache,
+        )
+
+        # If mask dimensions differ from default fallback when no raw image was found, trust mask shape
+        if sheet_bgr is None and (not image_dim_map or cat_num not in image_dim_map):
+            mh, mw = mask_img.shape[:2]
+            sheet_w, sheet_h = int(mw), int(mh)
+
+        polygons, area, bbox = mask_to_polygons(mask_img, min_area_px=min_area_px)
+        if not polygons or area < min_area_px:
+            continue
+
+        _record_instance(
+            cat_num=cat_num,
+            class_label=class_label,
+            inst_id=inst_id,
+            polygons=polygons,
+            area=area,
+            bbox=bbox,
+            sheet_w=sheet_w,
+            sheet_h=sheet_h,
+            sheet_bgr=sheet_bgr,
+            mask_img=mask_img,
+        )
+
+    # 2. Process YOLO polygon .txt files for any vouchers without PNG masks
+    for txt_path in yolo_files:
+        cat_num = txt_path.stem
+        if cat_num in processed_vouchers_from_masks:
+            continue
+
+        sheet_w, sheet_h, _, sheet_bgr = _resolve_voucher_image_and_dims(
+            cat_num=cat_num,
+            images_dir_path=images_dir_path,
+            image_dim_map=image_dim_map,
+            default_width=default_width,
+            default_height=default_height,
+            image_extension=image_extension,
+            mask_shape=None,
+            sheet_cache=sheet_cache,
+        )
+
+        try:
+            lines = txt_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            continue
+
+        for inst_idx, line in enumerate(lines):
+            parts = line.strip().split()
+            if len(parts) < 7:
+                continue
+            try:
+                class_id = int(parts[0])
+                coords_norm = [float(v) for v in parts[1:]]
+            except ValueError:
+                continue
+
+            if not (0 <= class_id < len(CLASS_NAMES)):
+                continue
+            class_label = CLASS_NAMES[class_id]
+            if class_label in OMITTED_CLASSES:
+                continue
+
+            abs_poly: List[float] = []
+            pts_int: List[List[int]] = []
+            for i in range(0, len(coords_norm) - 1, 2):
+                px = float(np.clip(coords_norm[i] * sheet_w, 0.0, float(sheet_w)))
+                py = float(np.clip(coords_norm[i + 1] * sheet_h, 0.0, float(sheet_h)))
+                abs_poly.extend([round(px, 2), round(py, 2)])
+                pts_int.append([int(round(px)), int(round(py))])
+
+            if len(pts_int) < 3:
+                continue
+
+            contour = np.array(pts_int, dtype=np.int32).reshape((-1, 1, 2))
+            area = float(cv2.contourArea(contour))
+            if area < min_area_px:
+                continue
+
+            xs = abs_poly[0::2]
+            ys = abs_poly[1::2]
+            bx0, by0 = min(xs), min(ys)
+            bw, bh = max(xs) - bx0, max(ys) - by0
+            bbox = [round(bx0, 2), round(by0, 2), round(bw, 2), round(bh, 2)]
+
+            _record_instance(
+                cat_num=cat_num,
+                class_label=class_label,
+                inst_id=inst_idx,
+                polygons=[abs_poly],
+                area=round(area, 2),
+                bbox=bbox,
+                sheet_w=sheet_w,
+                sheet_h=sheet_h,
+                sheet_bgr=sheet_bgr,
+                mask_img=None,
+            )
+
+    mode_desc = "Full-Sheet" if full_sheet else "Stage 2 Single-Leaf Crops"
+    coco_doc: Dict[str, Any] = {
         "info": {
-            "description": "LeafMachine2 Plant Component Detector - Packera Dataset",
-            "version": "1.0",
+            "description": f"LeafMachine2 PointRend Leaf Segmenter - Packera Dataset ({mode_desc})",
+            "version": "2.1",
             "year": 2026,
             "contributor": "NCU Herbarium / UNC Chapel Hill",
         },
@@ -1057,10 +1413,56 @@ def convert_masks_to_coco_dataset(
     }
 
     logger.info(
-        f"Generated COCO dataset: {len(coco_doc['images'])} images, "
+        f"Generated COCO dataset ({mode_desc}): {len(coco_doc['images'])} images, "
         f"{len(coco_doc['annotations'])} annotations across {len(PCD_COCO_CATEGORIES)} categories."
     )
+
+    if output_coco_path is not None:
+        output_path = Path(output_coco_path)
+        if val_split > 0.0:
+            train_doc, val_doc = split_coco_dataset(coco_data=coco_doc, val_ratio=val_split)
+            stem = output_path.stem
+            train_path = output_path.with_name(f"{stem}_train.json")
+            val_path = output_path.with_name(f"{stem}_val.json")
+            save_coco_json(train_doc, train_path)
+            save_coco_json(val_doc, val_path)
+            save_coco_json(coco_doc, output_path)
+        else:
+            save_coco_json(coco_doc, output_path)
+
     return coco_doc
+
+
+def convert_masks_to_coco_dataset(
+    masks_dir: Union[str, Path],
+    images_dir: Optional[Union[str, Path]] = None,
+    image_dim_map: Optional[Dict[str, Tuple[int, int]]] = None,
+    default_width: int = 4000,
+    default_height: int = 6000,
+    min_area_px: float = 50.0,
+    image_extension: str = ".jpg",
+    crops_dir: Optional[Union[str, Path]] = None,
+    padding_ratio: float = DEFAULT_CROP_PADDING_RATIO,
+    full_sheet: bool = False,
+) -> Dict[str, Any]:
+    """
+    Scans a directory of binary PNG masks (and optional YOLO polygons) and compiles
+    a COCO 1.0 JSON format dictionary. Defaults to single-leaf crops (`full_sheet=False`)
+    with 12% isotropic padding for LeafMachine2 Stage 2 PointRend fine-tuning.
+    """
+    return export_coco_from_yolo_and_masks(
+        masks_dir=masks_dir,
+        output_coco_path=None,
+        images_dir=images_dir,
+        crops_dir=crops_dir,
+        image_dim_map=image_dim_map,
+        default_width=default_width,
+        default_height=default_height,
+        min_area_px=min_area_px,
+        padding_ratio=padding_ratio,
+        full_sheet=full_sheet,
+        image_extension=image_extension,
+    )
 
 
 def split_coco_dataset(
@@ -1122,26 +1524,21 @@ def export_coco_annotations(
     images_dir: Optional[Union[str, Path]] = None,
     val_split: float = 0.0,
     min_area_px: float = 50.0,
+    crops_dir: Optional[Union[str, Path]] = None,
+    padding_ratio: float = DEFAULT_CROP_PADDING_RATIO,
+    full_sheet: bool = False,
 ) -> Dict[str, Any]:
     """
     High-level export helper: converts masks in `masks_dir` directly to COCO JSON format.
+    Defaults to exporting native-DPI cropped single-leaf patches (`full_sheet=False`).
     """
-    output_path = Path(output_coco_path)
-    coco_data = convert_masks_to_coco_dataset(
+    return export_coco_from_yolo_and_masks(
         masks_dir=masks_dir,
+        output_coco_path=output_coco_path,
         images_dir=images_dir,
+        crops_dir=crops_dir,
+        val_split=val_split,
         min_area_px=min_area_px,
+        padding_ratio=padding_ratio,
+        full_sheet=full_sheet,
     )
-
-    if val_split > 0.0:
-        train_doc, val_doc = split_coco_dataset(coco_data, val_ratio=val_split)
-        stem = output_path.stem
-        train_path = output_path.with_name(f"{stem}_train.json")
-        val_path = output_path.with_name(f"{stem}_val.json")
-        save_coco_json(train_doc, train_path)
-        save_coco_json(val_doc, val_path)
-        save_coco_json(coco_data, output_path)
-    else:
-        save_coco_json(coco_data, output_path)
-
-    return coco_data
