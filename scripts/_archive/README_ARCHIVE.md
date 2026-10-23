@@ -24,7 +24,8 @@ All downstream downstream R and Python morphometrics, deep vision XAI, spatial e
 | `data_prep/` | 4 scripts | Precision SAM 2 annotation GUI (`annotate_with_sam2.py`), 7-class YOLO dataset builder (`build_artifact_robust_dataset.py`), voucher image staging runner (`prepare_lm2_dataset.py`), and symlink staging utility (`staging_utils.py`) |
 | `train/` | 6 modules | Custom YOLOv8m-seg fine-tuning engine with mixed-precision AMP, class weighting, and disk caching |
 | `tests/` | 5 test suites | Unit and regression tests for legacy YOLO/SAM2 components |
-| `analysis/` | 7 modules | Redundant Phase 5 micro-modules (`cleanlab_curator.py`, `dinov2_embeddings.py`, `gradcam_visualizer.py`), duplicate Python Phase 6 (`06_multimodal_spatial_rf.py`, `run_multimodal_spatial_rf.py`), and duplicate Python Phase 7 (`07_triage_dashboard_synthesis.py`, `run_triage_dashboard_synthesis.py`) |
+| `analysis/` | 8 modules | Redundant Phase 5 micro-modules (`cleanlab_curator.py`, `dinov2_embeddings.py`, `gradcam_visualizer.py`), duplicate Python Phase 6 (`06_multimodal_spatial_rf.py`, `run_multimodal_spatial_rf.py`, `generate_phenological_artifacts.py`), and duplicate Python Phase 7 (`07_triage_dashboard_synthesis.py`, `run_triage_dashboard_synthesis.py`) |
+| `docs/` | 3 documents | Historical refactoring roadmaps (`REFACTORING_ROADMAP.md`), legacy plain-text SOP drafts (`SOP_ Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex.txt`), and PC transfer instructions (`Transfer pc intrusctions.md`) |
 | `root_artifacts/` | Pre-trained weights & models | Legacy YOLO weight checkpoints (`yolov8m-seg.pt`, `yolov8x-seg.pt`), SAM 2 submodule, and training runs |
 | `../../data/_archive/` | Legacy datasets | Archived YOLO training sets, SAM2 masks, manual annotations, and tiled patches |
 | `../../outputs/_archive/` | Legacy outputs | Historical SAHI detection summaries, tiling logs, synthetic benchmark runs, and GPU profiling logs |
@@ -43,8 +44,9 @@ All downstream downstream R and Python morphometrics, deep vision XAI, spatial e
 | `artifact_filter_gatekeeper.py` | `scripts/vision/lm2_geometry_utils.py` (UCS + Solidity + Midrib Angle) |
 | `prepare_lm2_dataset.py` + `staging_utils.py` | Direct ingestion in `scripts/pipeline/02_segment_and_extract.py` reading directly from `data/raw_vouchers/` via `data/tables/curated_vouchers.csv` |
 | `cleanlab_curator.py`, `dinov2_embeddings.py`, `gradcam_visualizer.py` | Consolidated [`scripts/analysis/05_cleanlab_vision_xai.py`](../analysis/05_cleanlab_vision_xai.py) |
-| `06_multimodal_spatial_rf.py` + `run_multimodal_spatial_rf.py` | Canonical R implementation [`scripts/analysis/06_multimodal_spatial_rf.R`](../analysis/06_multimodal_spatial_rf.R) |
+| `06_multimodal_spatial_rf.py` + `run_multimodal_spatial_rf.py` + `generate_phenological_artifacts.py` | Canonical R implementation [`scripts/analysis/06_multimodal_spatial_rf.R`](../analysis/06_multimodal_spatial_rf.R) (`compute_phenological_anomalies()`) |
 | `07_triage_dashboard_synthesis.py` + `run_triage_dashboard_synthesis.py` | Canonical R implementation [`scripts/analysis/07_triage_dashboard_synthesis.R`](../analysis/07_triage_dashboard_synthesis.R) |
+| `docs/REFACTORING_ROADMAP.md`, `docs/Transfer pc intrusctions.md`, `docs/SOP_ Robust Multimodal Morphometrics, Deep Vision, and Species Delimitation Pipeline for the Packera dubia Complex.txt` | Canonical [`docs/WORKFLOW_GUIDE.md`](../../docs/WORKFLOW_GUIDE.md), [`docs/TAXONOMIC_SOP.md`](../../docs/TAXONOMIC_SOP.md), and [`docs/WINDOWS_WSL2_SETUP.md`](../../docs/WINDOWS_WSL2_SETUP.md) |
 
 ---
 

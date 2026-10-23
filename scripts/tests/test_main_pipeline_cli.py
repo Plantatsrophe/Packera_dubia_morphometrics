@@ -4,6 +4,7 @@ Unit tests for centralized configuration and root CLI runner (main.py).
 Tests argument parsing, preflight checks, dispatch, and dry-run execution.
 """
 
+import argparse
 import sys
 import tempfile
 import unittest
@@ -230,11 +231,23 @@ class TestMainPipelineCLI(unittest.TestCase):
                 return dummy_ver_probe
             return dummy_completed_probe
 
-        with patch("shutil.which", return_value="/usr/bin/Rscript"), \
-             patch("subprocess.run", side_effect=mock_subp_run), \
-             patch("importlib.import_module", return_value=MagicMock(__version__="1.0.0")):
-            result = main.check_environment()
-            self.assertTrue(result)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            dummy_weights = tmp_path / "lm2_packera_pcd_finetuned.pth"
+            dummy_weights.write_bytes(b"MOCK_WEIGHTS_BYTES" * 64)
+            dummy_cfg = tmp_path / "config.yaml"
+            dummy_cfg.write_text(
+                f"paths:\n  model_weights: {dummy_weights}\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(strict=False, config=str(dummy_cfg))
+
+            with patch("shutil.which", return_value="/usr/bin/Rscript"), \
+                 patch("subprocess.run", side_effect=mock_subp_run), \
+                 patch("importlib.import_module", return_value=MagicMock(__version__="1.0.0")), \
+                 patch("main.ensure_model_weights", return_value=dummy_weights):
+                result = main.check_environment(args)
+                self.assertTrue(result)
 
     def test_check_env_cli_exits_cleanly(self):
         """Verify 'main.py check-env' CLI subcommand exits with status code 0 when diagnostics pass."""

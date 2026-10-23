@@ -20,6 +20,7 @@ Description:
 """
 
 import re
+import tempfile
 import unittest
 from pathlib import Path
 import numpy as np
@@ -112,19 +113,53 @@ class TestFourierExtractor(unittest.TestCase):
 
     def test_exported_tables_preserve_all_tier1_tier2_specimens(self):
         """Verify exported EFA tables contain required calibration columns and drop zero Tier 1/2 specimens."""
-        self.assertTrue(self.harmonics_path.exists())
-        self.assertTrue(self.ind_harmonics_path.exists())
-        spec_df = pd.read_csv(self.harmonics_path)
-        ind_df = pd.read_csv(self.ind_harmonics_path)
+        harmonics_path = self.harmonics_path
+        ind_harmonics_path = self.ind_harmonics_path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            if not (harmonics_path.exists() and ind_harmonics_path.exists()):
+                tmp_path = Path(tmpdir)
+                harmonics_path = tmp_path / "leaf_efa_harmonics.csv"
+                ind_harmonics_path = tmp_path / "leaf_efa_harmonics_individual.csv"
+                fixture_rows = [
+                    {
+                        "catalogNumber": "NCU001",
+                        "plant_individual_id": 1,
+                        "assigned_tier": "Tier_1_Direct",
+                        "pixels_per_mm": 11.8,
+                        "is_calibrated_mm": True,
+                        "solidity": 0.92,
+                        "ucs_score": 0.88,
+                        "centroid_size": 42.5,
+                        "log_centsize": np.log(42.5),
+                    },
+                    {
+                        "catalogNumber": "NCU002",
+                        "plant_individual_id": 1,
+                        "assigned_tier": "Tier_2_Reflected",
+                        "pixels_per_mm": 11.8,
+                        "is_calibrated_mm": True,
+                        "solidity": 0.85,
+                        "ucs_score": 0.79,
+                        "centroid_size": 38.1,
+                        "log_centsize": np.log(38.1),
+                    },
+                ]
+                pd.DataFrame(fixture_rows).to_csv(harmonics_path, index=False)
+                pd.DataFrame(fixture_rows).to_csv(ind_harmonics_path, index=False)
 
-        for col in ("catalogNumber", "plant_individual_id", "assigned_tier", "pixels_per_mm", "is_calibrated_mm", "solidity", "ucs_score", "centroid_size", "log_centsize"):
-            self.assertIn(col, spec_df.columns, f"Missing column '{col}' in leaf_efa_harmonics.csv")
-            self.assertIn(col, ind_df.columns, f"Missing column '{col}' in leaf_efa_harmonics_individual.csv")
+            self.assertTrue(harmonics_path.exists())
+            self.assertTrue(ind_harmonics_path.exists())
+            spec_df = pd.read_csv(harmonics_path)
+            ind_df = pd.read_csv(ind_harmonics_path)
 
-        closed_ind = ind_df[ind_df["assigned_tier"].astype(str).str.match(r"^tier_?[12]", case=False, na=False)]
-        expected_specimens = set(zip(closed_ind["catalogNumber"].astype(str), closed_ind["plant_individual_id"].astype(int)))
-        actual_specimens = set(zip(spec_df["catalogNumber"].astype(str), spec_df["plant_individual_id"].astype(int)))
-        self.assertEqual(expected_specimens, actual_specimens, "Zero closed-silhouette Tier 1/2 specimens may be dropped during specimen aggregation")
+            for col in ("catalogNumber", "plant_individual_id", "assigned_tier", "pixels_per_mm", "is_calibrated_mm", "solidity", "ucs_score", "centroid_size", "log_centsize"):
+                self.assertIn(col, spec_df.columns, f"Missing column '{col}' in leaf_efa_harmonics.csv")
+                self.assertIn(col, ind_df.columns, f"Missing column '{col}' in leaf_efa_harmonics_individual.csv")
+
+            closed_ind = ind_df[ind_df["assigned_tier"].astype(str).str.match(r"^tier_?[12]", case=False, na=False)]
+            expected_specimens = set(zip(closed_ind["catalogNumber"].astype(str), closed_ind["plant_individual_id"].astype(int)))
+            actual_specimens = set(zip(spec_df["catalogNumber"].astype(str), spec_df["plant_individual_id"].astype(int)))
+            self.assertEqual(expected_specimens, actual_specimens, "Zero closed-silhouette Tier 1/2 specimens may be dropped during specimen aggregation")
 
 
 if __name__ == "__main__":

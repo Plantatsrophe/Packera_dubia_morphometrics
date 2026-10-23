@@ -28,6 +28,7 @@ from typing import Tuple
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 # Ensure repository root is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -35,9 +36,55 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.config import PipelineConfig
-from scripts.analysis.generate_phenological_artifacts import (
-    model_latitudinal_spring_baseline,
-)
+
+
+def extract_doy(df: pd.DataFrame) -> pd.Series:
+    """Extract Day of Year with accurate leap-year handling (1-366)."""
+    doy_series = pd.to_numeric(df.get("doy", pd.Series(np.nan, index=df.index)), errors="coerce")
+    event_dates = pd.to_datetime(df.get("eventDate", pd.Series(np.nan, index=df.index)), errors="coerce")
+    doy_from_event = event_dates.dt.dayofyear
+
+    if "year" in df.columns and "month" in df.columns and "day" in df.columns:
+        date_str = (
+            df["year"].astype(str).str.replace(r"\.0$", "", regex=True)
+            + "-"
+            + df["month"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(2)
+            + "-"
+            + df["day"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(2)
+        )
+        dates_ymd = pd.to_datetime(date_str, errors="coerce", format="%Y-%m-%d")
+        doy_from_ymd = dates_ymd.dt.dayofyear
+        doy_from_event = doy_from_event.combine_first(doy_from_ymd)
+
+    return doy_series.combine_first(doy_from_event)
+
+
+def model_latitudinal_spring_baseline(flowering_df: pd.DataFrame) -> dict:
+    """
+    Fits empirical latitudinal regression across eastern Packera flowering specimens.
+    Expected slope ~3.5-4.5 days/degree latitude (Hopkins' Bioclimatic Law).
+    """
+    valid = flowering_df.dropna(subset=["decimalLatitude", "doy"]).copy()
+    valid = valid[(valid["decimalLatitude"] >= 24.0) & (valid["decimalLatitude"] <= 55.0)]
+    valid = valid[(valid["doy"] >= 60) & (valid["doy"] <= 220)]
+
+    p1 = valid["doy"].quantile(0.01)
+    p99 = valid["doy"].quantile(0.99)
+    valid_trimmed = valid[(valid["doy"] >= p1) & (valid["doy"] <= p99)]
+
+    x = valid_trimmed["decimalLatitude"].values
+    y = valid_trimmed["doy"].values
+
+    reg = stats.linregress(x, y)
+    return {
+        "slope": float(reg.slope),
+        "intercept": float(reg.intercept),
+        "r_squared": float(reg.rvalue ** 2),
+        "p_value": float(reg.pvalue),
+        "n": len(valid_trimmed),
+        "lat_min": float(x.min()),
+        "lat_max": float(x.max()),
+    }
 
 
 def compute_centroid_size(coords: np.ndarray) -> float:

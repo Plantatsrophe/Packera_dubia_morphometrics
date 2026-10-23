@@ -602,8 +602,8 @@ To overcome this spatial mismatch, the pipeline complements regional SoilGrids l
 
 ### 6.2 Automated Capitulum Phenology & 3-Tier Anthesis Verification
 - **Vision Classifier:** [`scripts/vision/capitulum_phenology_classifier.py`](../scripts/vision/capitulum_phenology_classifier.py)
-- **Artifact Generator:** [`scripts/analysis/generate_phenological_artifacts.py`](../scripts/analysis/generate_phenological_artifacts.py)
-- **Environment:** `.venv`
+- **Canonical Phenological Modeling:** [`scripts/analysis/06_multimodal_spatial_rf.R`](../scripts/analysis/06_multimodal_spatial_rf.R) (`compute_phenological_anomalies()`)
+- **Environment:** `.venv` (Vision Classifier) & R (`06_multimodal_spatial_rf.R`)
 
 In asteraceous herbarium specimens, collection dates represent phenological snapshots spanning dormant buds, full anthesis, and post-fruiting dispersal. Establishing Hopkins' Bioclimatic Law clines requires verifying genuine anthesis:
 1. **Biomarker Extraction:** Extracts crop-level optical biomarkers:
@@ -611,14 +611,7 @@ In asteraceous herbarium specimens, collection dates represent phenological snap
    - **Fresh Corollas:** High yellow saturation ($S \ge 0.32$, yellow hue band) ray and disc florets.
    - **Involucre Geometry:** Height-to-width ratio ($H/W \approx 0.8 - 1.5$) and phyllary posture.
 2. **3-Tier Anthesis Stratification:** Categorizes vouchers into `anthesis`, `bud`, or `fruit`/`sterile` (applying the botanical determinate cyme rule where $\ge 1$ anthesis head qualifies the voucher as `anthesis`).
-3. **Latitudinal Anomaly Modeling ($\Delta\text{DOY}$):** Fits linear regressions ($\text{DOY} = \beta_0 + \beta_1 \cdot \text{Latitude}$) exclusively on confirmed anthesis vouchers, exporting diagnostic regression plates to `outputs/figures/phenological_latitudinal_anomaly.pdf`.
-
-```bash
-# Generate phenological cline artifacts & anthesis diagnostic plots
-python scripts/analysis/generate_phenological_artifacts.py \
-    --vouchers data/tables/curated_vouchers.csv \
-    --output-dir outputs/figures/
-```
+3. **Latitudinal Anomaly Modeling ($\Delta\text{DOY}$):** Fits linear regressions ($\text{DOY} = \beta_0 + \beta_1 \cdot \text{Latitude}$) exclusively on confirmed anthesis vouchers via `compute_phenological_anomalies()` in `06_multimodal_spatial_rf.R`, exporting `data/tables/phenological_anomalies.csv` and diagnostic regression plates to `outputs/figures/phenological_latitudinal_anomaly.pdf`.
 
 ---
 

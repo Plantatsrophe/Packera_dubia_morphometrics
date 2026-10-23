@@ -130,10 +130,9 @@ Packera_dubia_morphometrics/
 │   │   └── 04_gmm_morphotools.R       # Within-species allometry, mclust GMMs & passive CDA (MorphoTools2)
 │   ├── analysis/                      # Macroecology, phenology, and synthesis
 │   │   ├── 05_cleanlab_vision_xai.py  # DINOv2 embeddings, Cleanlab & ViT patch-token saliency XAI
-│   │   ├── 06_multimodal_spatial_rf.R # Spatial Random Forests (SoilGrids, SSURGO, WorldClim)
-│   │   ├── 07_triage_dashboard_synthesis.R # Decision matrix & triage queue generation
-│   │   └── generate_phenological_artifacts.py # Anthesis verification & latitudinal clines
-│   ├── tests/                         # Unit and integration test suite (253 tests across 20 modules)
+│   │   ├── 06_multimodal_spatial_rf.R # Spatial Random Forests & latitudinal phenology (SoilGrids, SSURGO, WorldClim)
+│   │   └── 07_triage_dashboard_synthesis.R # Decision matrix & triage queue generation
+│   ├── tests/                         # Unit and integration test suite (253 tests across 19 modules)
 │   │   ├── run_audit.py               # Central QA test suite runner (asserts 100% pass rate)
 │   │   ├── test_code_hygiene.py       # Enforces strict _archive isolation & AST hygiene
 │   │   ├── test_voucher_harvester.py

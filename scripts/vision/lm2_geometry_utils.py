@@ -75,25 +75,11 @@ def _sample_cross_sectional_widths(
     valid = (gx >= 0) & (gx < w) & (gy >= 0) & (gy < h)
     grid_mask = np.zeros((len(s_steps), len(t_steps)), dtype=bool)
     grid_mask[valid] = mask[gy[valid], gx[valid]] > 0
-    mid_idx = len(t_steps) // 2
     widths = np.zeros(len(s_steps), dtype=np.float64)
     for i in range(len(s_steps)):
         row = grid_mask[i]
-        mid_i = mid_idx
-        if not row[mid_idx]:
-            nz = np.where(row)[0]
-            if len(nz) > 0 and abs(nz[np.argmin(np.abs(nz - mid_idx))] - mid_idx) <= 6:
-                mid_i = int(nz[np.argmin(np.abs(nz - mid_idx))])
-            else:
-                widths[i] = 0.0
-                continue
-        l_idx = mid_i
-        while l_idx > 0 and row[l_idx - 1]:
-            l_idx -= 1
-        r_idx = mid_i
-        while r_idx < len(row) - 1 and row[r_idx + 1]:
-            r_idx += 1
-        widths[i] = float(r_idx - l_idx + 1)
+        nz = np.where(row)[0]
+        widths[i] = float(nz[-1] - nz[0] + 1) if len(nz) > 0 else 0.0
     return s_steps, widths
 
 
@@ -816,25 +802,11 @@ def trim_petiole_tail(
         valid = (gx >= 0) & (gx < w) & (gy >= 0) & (gy < h)
         grid_mask = np.zeros((len(s_steps), len(t_steps)), dtype=bool)
         grid_mask[valid] = mask[gy[valid], gx[valid]] > 0
-        mid_idx = len(t_steps) // 2
         widths = np.zeros(len(s_steps), dtype=np.float64)
         for i in range(len(s_steps)):
             row = grid_mask[i]
-            mid_i = mid_idx
-            if not row[mid_idx]:
-                nz = np.where(row)[0]
-                if len(nz) > 0 and abs(nz[np.argmin(np.abs(nz - mid_idx))] - mid_idx) <= 6:
-                    mid_i = nz[np.argmin(np.abs(nz - mid_idx))]
-                else:
-                    widths[i] = 0.0
-                    continue
-            l = mid_i
-            while l > 0 and row[l - 1]:
-                l -= 1
-            r = mid_i
-            while r < len(row) - 1 and row[r + 1]:
-                r += 1
-            widths[i] = float(r - l + 1)
+            nz = np.where(row)[0]
+            widths[i] = float(nz[-1] - nz[0] + 1) if len(nz) > 0 else 0.0
         return s_steps, widths
 
     # Resolve endpoints and orientation
@@ -893,7 +865,7 @@ def trim_petiole_tail(
 
     # 2. Guard against truncate / cordate leaves: broad base is never clipped
     w_init = np.median(widths[:min(3, len(widths))])
-    if w_init > max_petiole_width:
+    if w_init > max(max_petiole_width, 19.0):
         meta = {
             "is_trimmed": False,
             "trim_distance_px": 0.0,
@@ -958,7 +930,14 @@ def trim_petiole_tail(
                 if dw_dl >= gradient_threshold:
                     future_w = widths[k: min(k + 8, len(widths))]
                     if np.max(future_w) >= max_petiole_width * 1.3:
-                        junction_idx = k
+                        j_idx = max(k, narrow_indices[-1])
+                        if (
+                            j_idx + 2 < len(widths)
+                            and widths[j_idx + 1] <= max_petiole_width * 1.25
+                            and widths[j_idx + 2] >= max_petiole_width * 1.5
+                        ):
+                            j_idx += 2
+                        junction_idx = j_idx
                         reason = "WIDTH_INFLECTION_JUNCTION_TRIMMED"
                         break
         if junction_idx is None:
