@@ -523,26 +523,29 @@ def detect_folded_leaf(
         # Examine if an off-axis straight edge cuts diagonally across the contour
         hull = cv2.convexHull(main_cnt)
         area_hull = float(cv2.contourArea(hull))
-        solidity = float(np.count_nonzero(mask)) / area_hull if area_hull > 0 else 0.0
+        area_mask = float(np.count_nonzero(mask))
+        solidity = area_mask / area_hull if area_hull > 0 else 0.0
 
         approx = cv2.approxPolyDP(pts.reshape(-1, 1, 2), 0.02 * cv2.arcLength(pts.reshape(-1, 1, 2), True), True).reshape(-1, 2)
         has_diagonal_crease = False
+        is_sheared_quad_crease = False
         ang_midrib = math.atan2(chord_dy, chord_dx)
 
         for i in range(len(approx)):
             p_s = approx[i]
             p_e = approx[(i + 1) % len(approx)]
             seg_len = math.hypot(p_e[0] - p_s[0], p_e[1] - p_s[1])
-            if seg_len > 0.35 * chord_len:
-                ang_seg = math.atan2(p_e[1] - p_s[1], p_e[0] - p_s[0])
-                diff_ang = abs((ang_seg - ang_midrib + math.pi) % (2.0 * math.pi) - math.pi)
-                diff_deg = math.degrees(diff_ang)
-                diff_deg = min(diff_deg, 180.0 - diff_deg)
-                if diff_deg > 15.0:
-                    has_diagonal_crease = True
-                    break
+            ang_seg = math.atan2(p_e[1] - p_s[1], p_e[0] - p_s[0])
+            diff_ang = abs((ang_seg - ang_midrib + math.pi) % (2.0 * math.pi) - math.pi)
+            diff_deg = math.degrees(diff_ang)
+            diff_deg = min(diff_deg, 180.0 - diff_deg)
+            if seg_len > 0.55 * chord_len and 20.0 < diff_deg < 70.0:
+                has_diagonal_crease = True
+                break
+            if len(approx) == 4 and seg_len > 0.45 * chord_len and 12.0 < diff_deg < 70.0:
+                is_sheared_quad_crease = True
 
-        if has_diagonal_crease or solidity >= 0.72:
+        if (has_diagonal_crease and solidity < 0.72) or is_sheared_quad_crease:
             default_res["is_irregular_fold"] = True
 
     return default_res
@@ -1527,7 +1530,7 @@ def classify_and_route_leaf(
     # Strictly label-blind: relies solely on intrinsic bilateral sinus geometry via is_botanical_dissection().
     is_high_res_mask = max(mask.shape[:2]) > 500
     allow_dissection = True
-    if is_high_res_mask and (ucs < 0.74 or solidity < max(dissection_min_solidity, 0.65)):
+    if is_high_res_mask and (ucs < 0.70 or solidity < max(dissection_min_solidity, 0.58)):
         allow_dissection = False
 
     if dissection_enabled and (dissection_min_solidity <= solidity < min_solidity) and allow_dissection:
@@ -1541,7 +1544,7 @@ def classify_and_route_leaf(
             defect_depth_ratio=sinus_defect_min_depth_ratio,
             min_defect_count=min_bilateral_sinus_count,
         )
-        if dissected:
+        if dissected and (ucs >= 0.70 or not is_high_res_mask):
             coords = resample_normalized_contour(mask, num_contour_points, petiole_attachment_pt=p_base) if extract_contours else None
             meta["reflection_applied"] = False
             return LeafRoutingResult(

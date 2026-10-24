@@ -73,7 +73,7 @@ parse_args_robust <- function() {
     optparse::make_option(c("--contingency-table"), type = "character",
       default = "outputs/reports/micro_edaphic_outcrop_contingency.csv", help = "Output outcrop contingency CSV [default: %default]"),
     optparse::make_option(c("--batch-size"), type = "integer",
-      default = 500, help = "Batch size for USDA SDA queries [default: %default]"),
+      default = 75, help = "Batch size for USDA SDA queries [default: %default]"),
     optparse::make_option(c("-k", "--permutations"), type = "integer",
       default = 100, help = "Warren's Identity Test permutations [default: %default]"),
     optparse::make_option(c("-t", "--n-trees"), type = "integer",
@@ -96,7 +96,7 @@ parse_args_robust <- function() {
     pheno_summary = "outputs/reports/phenological_anomaly_summary.csv",
     pheno_plot = "outputs/figures/phenological_latitudinal_anomaly.pdf",
     ssurgo_cache = "data/environmental/ssurgo_cache", ssurgo_table = "data/tables/ssurgo_edaphic_validation.csv",
-    contingency_table = "outputs/reports/micro_edaphic_outcrop_contingency.csv", batch_size = 500,
+    contingency_table = "outputs/reports/micro_edaphic_outcrop_contingency.csv", batch_size = 75,
     permutations = 100, n_trees = 500, demo = FALSE
   ))
 }
@@ -270,7 +270,38 @@ classify_ssurgo_outcrop <- function(muname, compname = "", taxsuborder = "", tax
   return(list(is_rock_outcrop = is_outcrop, outcrop_class = outcrop_class))
 }
 
-query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries = 4, demo = FALSE) {
+query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries = 4, demo = FALSE, batch_size = 75) {
+  canonical_cols <- c(
+    "catalogNumber", "latitude", "longitude",
+    "musym", "muname", "taxsuborder", "taxgreatgroup",
+    "is_rock_outcrop", "outcrop_class"
+  )
+  normalize_ssurgo_cols <- function(d) {
+    d <- as.data.frame(d, stringsAsFactors = FALSE)
+    for (col in c("catalogNumber", "musym", "muname", "taxsuborder", "taxgreatgroup", "outcrop_class")) {
+      if (!(col %in% names(d))) {
+        d[[col]] <- if (col == "outcrop_class") "Non-outcrop matrix" else NA_character_
+      } else {
+        d[[col]] <- as.character(d[[col]])
+      }
+    }
+    for (col in c("latitude", "longitude")) {
+      if (!(col %in% names(d))) {
+        d[[col]] <- NA_real_
+      } else {
+        d[[col]] <- as.numeric(d[[col]])
+      }
+    }
+    if (!("is_rock_outcrop" %in% names(d))) {
+      d$is_rock_outcrop <- FALSE
+    } else {
+      d$is_rock_outcrop <- as.logical(d$is_rock_outcrop)
+      d$is_rock_outcrop[is.na(d$is_rock_outcrop)] <- FALSE
+    }
+    d$outcrop_class[is.na(d$outcrop_class) | !nzchar(d$outcrop_class)] <- "Non-outcrop matrix"
+    return(d[, canonical_cols, drop = FALSE])
+  }
+
   # Build deterministic batch cache key
   pt_str <- paste(batch_df$catalogNumber, batch_df$latitude, batch_df$longitude, collapse = ";")
   batch_hash <- if (requireNamespace("digest", quietly = TRUE)) {
@@ -284,11 +315,11 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
   
   if (file.exists(cache_file_rds)) {
     message(sprintf("Loading cached SSURGO batch %d from %s", batch_idx, cache_file_rds))
-    return(readRDS(cache_file_rds))
+    return(normalize_ssurgo_cols(readRDS(cache_file_rds)))
   }
   if (file.exists(cache_file_csv)) {
     message(sprintf("Loading cached SSURGO batch %d from %s", batch_idx, cache_file_csv))
-    return(as.data.frame(readr::read_csv(cache_file_csv, show_col_types = FALSE)))
+    return(normalize_ssurgo_cols(as.data.frame(readr::read_csv(cache_file_csv, show_col_types = FALSE))))
   }
   
   pts_df <- batch_df[, c("catalogNumber", "longitude", "latitude")]
@@ -297,55 +328,82 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
   res_df <- NULL
   delays <- c(1, 2, 4, 8)
   
-  # Attempt live query via soilDB if available
-  if (requireNamespace("soilDB", quietly = TRUE) && requireNamespace("sf", quietly = TRUE)) {
-    for (attempt in seq_len(max_retries)) {
-      tryCatch({
-        message(sprintf("SDA Query Batch %d (n=%d, attempt %d/%d)...", batch_idx, n_pts, attempt, max_retries))
-        pts_df$gid <- seq_len(n_pts)
-        pts_sf <- sf::st_as_sf(pts_df, coords = c("longitude", "latitude"), crs = 4326)
-        sp_res <- soilDB::SDA_spatialQuery(pts_sf, what = "mukey", db = "SSURGO", byFeature = TRUE)
-        if (!is.null(sp_res) && is.data.frame(sp_res) && nrow(sp_res) > 0 && "mukey" %in% names(sp_res)) {
-          pts_sp <- merge(pts_df, sp_res, by = "gid", all.x = TRUE)
-          mukeys <- unique(na.omit(as.character(sp_res$mukey)))
-          if (length(mukeys) > 0) {
-            mukey_str <- paste0(mukeys, collapse = ",")
-            sql <- sprintf("SELECT m.mukey, m.musym, m.muname, c.compname, c.taxsuborder, c.taxgrtgroup AS taxgreatgroup, c.majcompflag FROM mapunit m LEFT JOIN component c ON m.mukey = c.mukey WHERE m.mukey IN (%s)", mukey_str)
-            tab_res <- soilDB::SDA_query(sql)
-            if (is.data.frame(tab_res) && nrow(tab_res) > 0) {
-              dom_comp <- if ("majcompflag" %in% names(tab_res)) tab_res[tab_res$majcompflag == "Yes", ] else tab_res
-              if (nrow(dom_comp) == 0) dom_comp <- tab_res
-              dom_comp <- dom_comp[!duplicated(dom_comp$mukey), ]
-              res_joined <- merge(pts_sp, dom_comp[, intersect(c("mukey", "musym", "compname", "taxsuborder", "taxgreatgroup"), names(dom_comp))], by = "mukey", all.x = TRUE)
-              
-              n_res <- nrow(res_joined)
-              is_outcrops <- logical(n_res)
-              outcrop_classes <- rep("Non-outcrop matrix", n_res)
-              for (k in seq_len(n_res)) {
-                cl <- classify_ssurgo_outcrop(
-                  muname = if (!is.na(res_joined$muname[k])) res_joined$muname[k] else "",
-                  compname = if ("compname" %in% names(res_joined) && !is.na(res_joined$compname[k])) res_joined$compname[k] else "",
-                  taxsuborder = if ("taxsuborder" %in% names(res_joined) && !is.na(res_joined$taxsuborder[k])) res_joined$taxsuborder[k] else "",
-                  taxgreatgroup = if ("taxgreatgroup" %in% names(res_joined) && !is.na(res_joined$taxgreatgroup[k])) res_joined$taxgreatgroup[k] else "",
-                  lat = res_joined$latitude[k],
-                  lon = res_joined$longitude[k]
-                )
-                is_outcrops[k] <- cl$is_rock_outcrop
-                outcrop_classes[k] <- cl$outcrop_class
+  # Attempt live query via soilDB if available (chunked to batch_size = 75 points)
+  if (!isTRUE(demo) && requireNamespace("soilDB", quietly = TRUE) && requireNamespace("sf", quietly = TRUE)) {
+    chunk_size <- max(1L, min(as.integer(batch_size), 75L))
+    chunk_indices <- split(seq_len(n_pts), ceiling(seq_len(n_pts) / chunk_size))
+    chunk_results <- list()
+    all_chunks_ok <- TRUE
+
+    for (c_idx in seq_along(chunk_indices)) {
+      sub_pts <- pts_df[chunk_indices[[c_idx]], , drop = FALSE]
+      n_sub <- nrow(sub_pts)
+      chunk_ok <- FALSE
+      chunk_df <- NULL
+
+      for (attempt in seq_len(max_retries)) {
+        tryCatch({
+          message(sprintf("SDA Query Batch %d chunk %d/%d (n=%d, attempt %d/%d)...",
+                          batch_idx, c_idx, length(chunk_indices), n_sub, attempt, max_retries))
+          sub_pts$gid <- seq_len(n_sub)
+          pts_sf <- sf::st_as_sf(sub_pts, coords = c("longitude", "latitude"), crs = 4326)
+          sp_res <- soilDB::SDA_spatialQuery(pts_sf, what = "mukey", db = "SSURGO", byFeature = TRUE)
+          if (!is.null(sp_res) && is.data.frame(sp_res) && nrow(sp_res) > 0 && "mukey" %in% names(sp_res)) {
+            sp_keep <- intersect(c("gid", "mukey"), names(sp_res))
+            pts_sp <- merge(sub_pts, sp_res[, sp_keep, drop = FALSE], by = "gid", all.x = TRUE)
+            mukeys <- unique(na.omit(as.character(sp_res$mukey)))
+            if (length(mukeys) > 0) {
+              mukey_str <- paste0("'", mukeys, "'", collapse = ",")
+              sql <- sprintf("SELECT m.mukey, m.musym, m.muname, c.compname, c.taxsuborder, c.taxgrtgroup AS taxgreatgroup, c.majcompflag FROM mapunit m LEFT JOIN component c ON m.mukey = c.mukey WHERE m.mukey IN (%s)", mukey_str)
+              tab_res <- soilDB::SDA_query(sql)
+              if (is.data.frame(tab_res) && nrow(tab_res) > 0) {
+                dom_comp <- if ("majcompflag" %in% names(tab_res)) tab_res[tab_res$majcompflag == "Yes", ] else tab_res
+                if (nrow(dom_comp) == 0) dom_comp <- tab_res
+                dom_comp <- dom_comp[!duplicated(dom_comp$mukey), ]
+                comp_cols <- intersect(c("mukey", "musym", "muname", "compname", "taxsuborder", "taxgreatgroup"), names(dom_comp))
+                res_joined <- merge(pts_sp, dom_comp[, comp_cols, drop = FALSE], by = "mukey", all.x = TRUE)
+                
+                n_res <- nrow(res_joined)
+                is_outcrops <- logical(n_res)
+                outcrop_classes <- rep("Non-outcrop matrix", n_res)
+                for (k in seq_len(n_res)) {
+                  cl <- classify_ssurgo_outcrop(
+                    muname = if ("muname" %in% names(res_joined) && !is.na(res_joined$muname[k])) res_joined$muname[k] else "",
+                    compname = if ("compname" %in% names(res_joined) && !is.na(res_joined$compname[k])) res_joined$compname[k] else "",
+                    taxsuborder = if ("taxsuborder" %in% names(res_joined) && !is.na(res_joined$taxsuborder[k])) res_joined$taxsuborder[k] else "",
+                    taxgreatgroup = if ("taxgreatgroup" %in% names(res_joined) && !is.na(res_joined$taxgreatgroup[k])) res_joined$taxgreatgroup[k] else "",
+                    lat = res_joined$latitude[k],
+                    lon = res_joined$longitude[k]
+                  )
+                  is_outcrops[k] <- cl$is_rock_outcrop
+                  outcrop_classes[k] <- cl$outcrop_class
+                }
+                res_joined$is_rock_outcrop <- is_outcrops
+                res_joined$outcrop_class <- outcrop_classes
+                
+                chunk_df <- normalize_ssurgo_cols(res_joined)
+                chunk_ok <- TRUE
+                break
               }
-              res_joined$is_rock_outcrop <- is_outcrops
-              res_joined$outcrop_class <- outcrop_classes
-              
-              res_df <- res_joined
-              query_success <- TRUE
-              break
             }
           }
-        }
-      }, error = function(e) {
-        message(sprintf("Batch %d attempt %d failed: %s", batch_idx, attempt, e$message))
-      })
-      if (attempt < max_retries && !query_success) Sys.sleep(delays[attempt])
+        }, error = function(e) {
+          message(sprintf("Batch %d chunk %d attempt %d failed: %s", batch_idx, c_idx, attempt, e$message))
+        })
+        if (attempt < max_retries && !chunk_ok) Sys.sleep(delays[attempt])
+      }
+
+      if (chunk_ok && !is.null(chunk_df)) {
+        chunk_results[[c_idx]] <- chunk_df
+      } else {
+        all_chunks_ok <- FALSE
+        break
+      }
+    }
+
+    if (all_chunks_ok && length(chunk_results) > 0) {
+      res_df <- normalize_ssurgo_cols(dplyr::bind_rows(chunk_results))
+      query_success <- TRUE
     }
   }
   
@@ -364,14 +422,26 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
 
   # Never cache synthetic or failed SSURGO records into data/environmental/ssurgo_cache/ via saveRDS()
   if (!isTRUE(demo)) {
-    stop(sprintf(
+    warning(sprintf(
       paste0(
-        "soilDB::SDA_spatialQuery() failed after %d retries for batch %d and no cached SSURGO records exist in '%s'. ",
-        "Remediation: verify network access to USDA Soil Data Access (SDA), populate '%s' with pre-queried SSURGO batches, ",
-        "or pass --demo explicitly for synthetic demonstration runs."
+        "soilDB::SDA_spatialQuery() failed or timed out after %d retries for batch %d and no cached SSURGO records exist in '%s'. ",
+        "Retaining already-extracted SoilGrids 250m + WorldClim v2.1 raster covariates with NA SSURGO vector attributes."
       ),
-      max_retries, batch_idx, cache_dir, cache_dir
+      max_retries, batch_idx, cache_dir
     ))
+    fallback_df <- data.frame(
+      catalogNumber = pts_df$catalogNumber,
+      latitude = pts_df$latitude,
+      longitude = pts_df$longitude,
+      musym = rep(NA_character_, n_pts),
+      muname = rep(NA_character_, n_pts),
+      taxsuborder = rep(NA_character_, n_pts),
+      taxgreatgroup = rep(NA_character_, n_pts),
+      is_rock_outcrop = rep(FALSE, n_pts),
+      outcrop_class = rep("Non-outcrop matrix", n_pts),
+      stringsAsFactors = FALSE
+    )
+    return(normalize_ssurgo_cols(fallback_df))
   }
 
   message(sprintf("[DEMO MODE] Generating synthetic SSURGO assignments for batch %d (not cached to disk)...", batch_idx))
@@ -431,8 +501,8 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
   return(res_df)
 }
 
-query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", batch_size = 500, demo = FALSE) {
-  message(sprintf("Initiating USDA SSURGO Vector Pedology SDA Query (cache: %s)...", cache_dir))
+query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", batch_size = 75, demo = FALSE) {
+  message(sprintf("Initiating USDA SSURGO Vector Pedology SDA Query (cache: %s, batch_size: %d)...", cache_dir, batch_size))
   
   is_conus <- !is.na(df$latitude) & !is.na(df$longitude) &
               df$latitude >= 24.5 & df$latitude <= 49.5 &
@@ -448,23 +518,35 @@ query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", 
     return(df)
   }
   
-  batch_indices <- split(seq_len(n_conus), ceiling(seq_len(n_conus) / batch_size))
-  batch_results <- list()
-  
-  for (b_idx in seq_along(batch_indices)) {
-    idx <- batch_indices[[b_idx]]
-    sub_df <- conus_df[idx, ]
-    b_res <- query_ssurgo_sda_batch(sub_df, cache_dir, b_idx, demo = demo)
-    batch_results[[b_idx]] <- b_res
-  }
-  
-  all_ssurgo <- do.call(rbind, batch_results)
-  keep_cols <- c("catalogNumber", "musym", "muname", "taxsuborder", "taxgreatgroup", "is_rock_outcrop", "outcrop_class")
-  all_ssurgo <- all_ssurgo[!duplicated(all_ssurgo$catalogNumber), intersect(names(all_ssurgo), keep_cols)]
-  
-  merged_df <- dplyr::left_join(df, all_ssurgo, by = "catalogNumber")
-  merged_df$is_rock_outcrop[is.na(merged_df$is_rock_outcrop)] <- FALSE
-  merged_df$outcrop_class[is.na(merged_df$outcrop_class)] <- "Non-outcrop matrix"
+  merged_df <- tryCatch({
+    batch_indices <- split(seq_len(n_conus), ceiling(seq_len(n_conus) / batch_size))
+    batch_results <- list()
+    
+    for (b_idx in seq_along(batch_indices)) {
+      idx <- batch_indices[[b_idx]]
+      sub_df <- conus_df[idx, ]
+      b_res <- query_ssurgo_sda_batch(sub_df, cache_dir, b_idx, demo = demo, batch_size = batch_size)
+      batch_results[[b_idx]] <- b_res
+    }
+    
+    all_ssurgo <- as.data.frame(dplyr::bind_rows(batch_results), stringsAsFactors = FALSE)
+    keep_cols <- c("catalogNumber", "musym", "muname", "taxsuborder", "taxgreatgroup", "is_rock_outcrop", "outcrop_class")
+    all_ssurgo <- all_ssurgo[!duplicated(all_ssurgo$catalogNumber), intersect(names(all_ssurgo), keep_cols), drop = FALSE]
+    
+    m_df <- dplyr::left_join(df, all_ssurgo, by = "catalogNumber")
+    m_df$is_rock_outcrop[is.na(m_df$is_rock_outcrop)] <- FALSE
+    m_df$outcrop_class[is.na(m_df$outcrop_class)] <- "Non-outcrop matrix"
+    m_df
+  }, error = function(e) {
+    warning(sprintf(
+      "USDA SSURGO SDA query failed (%s); retaining SoilGrids 250m + WorldClim v2.1 raster covariates.",
+      e$message
+    ))
+    df$musym <- NA_character_; df$muname <- NA_character_
+    df$taxsuborder <- NA_character_; df$taxgreatgroup <- NA_character_
+    df$is_rock_outcrop <- FALSE; df$outcrop_class <- "Non-outcrop matrix"
+    df
+  })
   
   return(merged_df)
 }

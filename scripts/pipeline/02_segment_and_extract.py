@@ -969,7 +969,7 @@ class SegmentAndExtractPipeline:
             return [], failure_record
 
         sheet_h, sheet_w = img_bgr.shape[:2]
-        is_high_dpi = max(sheet_h, sheet_w) > 2000
+        scale_f = max(sheet_h, sheet_w) / 5600.0 if max(sheet_h, sheet_w) > 1000 else 0.0
 
         # 1. Ruler Scale Calibration: Prefer Stage 1 LM2 Ruler Calibration, fallback to Hough
         lm2_px_per_mm = self.ruler_calibrations.get(catalog_number)
@@ -1002,22 +1002,27 @@ class SegmentAndExtractPipeline:
                 if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
                     capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
                 elif s1_cls in LM2_LEAF_CLASS_IDS:
-                    bh = s1_bbox[2] - s1_bbox[0]
-                    bw = s1_bbox[3] - s1_bbox[1]
-                    cy = 0.5 * (s1_bbox[0] + s1_bbox[2])
+                    if s1_cls not in (0, 1):
+                        continue
+                    s1_bh = s1_bbox[2] - s1_bbox[0]
+                    s1_bw = s1_bbox[3] - s1_bbox[1]
+                    s1_cy = 0.5 * (s1_bbox[0] + s1_bbox[2])
 
-                    if is_high_dpi:
-                        if s1_cls != 0:
+                    if scale_f > 0.0:
+                        if max(s1_bh, s1_bw) < int(160 * scale_f) or min(s1_bh, s1_bw) < int(55 * scale_f):
                             continue
-                        if cy < 0.35 * sheet_h:
+                        if max(s1_bh, s1_bw) > int(1300 * scale_f) or (s1_bh * s1_bw) > 0.14 * (sheet_h * sheet_w):
                             continue
-                        if max(bh, bw) < 260:
-                            continue
-                        if not (120 <= min(bh, bw) <= 750):
-                            continue
+                        if scale_f > 0.4:
+                            if s1_cy < 0.22 * sheet_h or (
+                                s1_cy < 0.38 * sheet_h and s1_cls == 1 and max(s1_bh, s1_bw) < int(260 * scale_f)
+                            ):
+                                continue
+                            if s1_cls == 1 and s1_bh == s1_bw and s1_cy < 0.60 * sheet_h:
+                                continue
 
-                    # Crop candidate leaf box with padding (0.06 on high-DPI, 0.12 otherwise) and pass to Stage 2 PointRend
-                    crop_pad = 0.06 if is_high_dpi else 0.12
+                    # Crop candidate leaf box with padding and pass to Stage 2 PointRend
+                    crop_pad = 0.06 if scale_f > 0.4 else 0.12
                     crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
                     if crop_bgr.size == 0:
                         continue
@@ -1025,59 +1030,100 @@ class SegmentAndExtractPipeline:
                     if not crop_preds:
                         continue
 
+                    crop_h, crop_w = crop_bgr.shape[:2]
                     min_blade_area = (
-                        max(8000, int(0.035 * crop_bgr.shape[0] * crop_bgr.shape[1]))
-                        if is_high_dpi
+                        max(int(2200 * (scale_f ** 2)), int(0.03 * crop_h * crop_w))
+                        if scale_f > 0.0
                         else 20
                     )
                     blade_candidates = []
-                    for pr_bbox, pr_mask, pr_score, pr_cls in crop_preds:
-                        if pr_cls != 0:
+                    for _pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
+                        if _pr_cls != 0:
                             continue
                         fg_area = int(np.count_nonzero(pr_mask))
                         if fg_area >= min_blade_area:
-                            blade_candidates.append((fg_area, float(pr_score), pr_bbox, pr_mask))
+                            blade_candidates.append((fg_area, float(pr_score), _pr_bbox, pr_mask))
 
                     if not blade_candidates:
                         continue
 
-                    # Select at most ONE primary leaf blade mask per Stage 1 box (highest area * score)
+                    # Select ONLY the single best mask per Stage 1 box (highest area * pr_score)
                     blade_candidates.sort(key=lambda c: (c[0] * c[1], c[0]), reverse=True)
+                    best_area, best_score, best_bbox, best_mask = blade_candidates[0]
 
-                    selected_candidate = None
-                    for best_area, best_score, best_bbox, best_mask in blade_candidates:
-                        m_refined = best_mask
-                        if self._should_refine_with_sam2(best_mask):
-                            m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, best_mask)
-                        sheet_mask, full_bbox = reproject_crop_mask_to_sheet(
-                            m_refined, crop_box, (sheet_h, sheet_w)
-                        )
-                        sheet_mask, _ = trim_petiole_tail(sheet_mask, return_metadata=True)
-                        ys, xs = np.where(sheet_mask > 0)
-                        if len(ys) == 0:
+                    m_refined = best_mask
+                    if self._should_refine_with_sam2(best_mask):
+                        m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, best_mask)
+                    sheet_mask, full_bbox = reproject_crop_mask_to_sheet(
+                        m_refined, crop_box, (sheet_h, sheet_w)
+                    )
+                    sheet_mask, _ = trim_petiole_tail(sheet_mask, return_metadata=True)
+                    ys, xs = np.where(sheet_mask > 0)
+                    if len(ys) == 0:
+                        continue
+
+                    cnts_m, _ = cv2.findContours(sheet_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if not cnts_m:
+                        continue
+                    main_m_cnt = max(cnts_m, key=cv2.contourArea)
+                    rect_w, rect_h = cv2.minAreaRect(main_m_cnt)[1]
+                    hull_m_area = float(cv2.contourArea(cv2.convexHull(main_m_cnt)))
+                    m_solidity = float(len(ys)) / hull_m_area if hull_m_area > 0 else 0.0
+
+                    if scale_f > 0.4 and min(rect_w, rect_h) > int(520 * scale_f) and (scale_f > 0.65 or m_solidity < 0.92):
+                        continue
+
+                    ymin_s, ymax_s = int(ys.min()), int(ys.max()) + 1
+                    xmin_s, xmax_s = int(xs.min()), int(xs.max()) + 1
+                    full_bbox = (ymin_s, xmin_s, min(sheet_h, ymax_s), min(sheet_w, xmax_s))
+                    leaf_detections.append((
+                        full_bbox,
+                        sheet_mask,
+                        float(best_score),
+                        int(s1_cls),
+                        (crop_box[1], crop_box[0]),
+                    ))
+
+            # Deduplicate leaf_detections on the sheet by mask IoU (IoU > 0.45 keeps the higher-solidity mask)
+            if scale_f > 0.4 and len(leaf_detections) >= 2:
+                scored_dets = []
+                for idx_d, det_item in enumerate(leaf_detections):
+                    d_bbox, d_mask, d_score, d_cls, d_off = det_item
+                    d_cnts, _ = cv2.findContours(d_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if d_cnts:
+                        d_main = max(d_cnts, key=cv2.contourArea)
+                        d_hull = float(cv2.contourArea(cv2.convexHull(d_main)))
+                        d_sol = float(np.count_nonzero(d_mask)) / d_hull if d_hull > 0 else 0.0
+                    else:
+                        d_sol = 0.0
+                    scored_dets.append((d_sol, d_score, idx_d, det_item))
+
+                scored_dets.sort(key=lambda x: (x[0], x[1]), reverse=True)
+                kept_scored = []
+                for d_sol, d_score, idx_d, det_item in scored_dets:
+                    b1 = det_item[0]
+                    m1 = det_item[1]
+                    is_dup = False
+                    for _, _, _, kept_item in kept_scored:
+                        b2 = kept_item[0]
+                        if b1[2] <= b2[0] or b2[2] <= b1[0] or b1[3] <= b2[1] or b2[3] <= b1[1]:
                             continue
-                        m_bh = int(ys.max() - ys.min() + 1)
-                        m_bw = int(xs.max() - xs.min() + 1)
-                        m_area = int(len(ys))
+                        uy0, ux0 = min(b1[0], b2[0]), min(b1[1], b2[1])
+                        uy1, ux1 = max(b1[2], b2[2]), max(b1[3], b2[3])
+                        m2 = kept_item[1]
+                        sub1 = m1[uy0:uy1, ux0:ux1] > 0
+                        sub2 = m2[uy0:uy1, ux0:ux1] > 0
+                        inter = int(np.count_nonzero(sub1 & sub2))
+                        if inter > 0:
+                            union = int(np.count_nonzero(sub1 | sub2))
+                            if float(inter / max(union, 1)) > 0.45:
+                                is_dup = True
+                                break
+                    if not is_dup:
+                        kept_scored.append((d_sol, d_score, idx_d, det_item))
 
-                        if is_high_dpi:
-                            if max(m_bh, m_bw) < 175 or min(m_bh, m_bw) > 420 or m_area < 8500:
-                                continue
-
-                        ymin_s, ymax_s = int(ys.min()), int(ys.max()) + 1
-                        xmin_s, xmax_s = int(xs.min()), int(xs.max()) + 1
-                        full_bbox = (ymin_s, xmin_s, min(sheet_h, ymax_s), min(sheet_w, xmax_s))
-                        selected_candidate = (
-                            full_bbox,
-                            sheet_mask,
-                            float(best_score),
-                            int(s1_cls),
-                            (crop_box[1], crop_box[0]),
-                        )
-                        break
-
-                    if selected_candidate is not None:
-                        leaf_detections.append(selected_candidate)
+                kept_scored.sort(key=lambda x: x[2])
+                leaf_detections = [x[3] for x in kept_scored]
         else:
             # Fallback when Stage 1 detector is uninitialized (e.g., direct PointRend unit tests)
             raw_detections = self.model_engine.predict(img_bgr)
@@ -1240,48 +1286,6 @@ class SegmentAndExtractPipeline:
 
         extracted_records: List[Dict[str, Any]] = []
         rejected_instances: List[DetectedInstance] = []
-
-        # Basal Rosette Relative Area & Cauline Filter (high-DPI sheets)
-        if is_high_dpi and len(instances) >= 2:
-            inst_areas = [int(np.count_nonzero(i.mask)) for i in instances]
-            inst_cys = [0.5 * (i.bbox[0] + i.bbox[2]) for i in instances]
-            max_sheet_area = max(inst_areas)
-            rosette_y = float(np.percentile(inst_cys, 75))
-
-            indexed_instances = list(zip(instances, inst_areas, inst_cys))
-            indexed_instances.sort(key=lambda item: item[1], reverse=True)
-
-            kept_instances: List[DetectedInstance] = []
-            kept_masks: List[np.ndarray] = []
-
-            for inst_item, area, cy in indexed_instances:
-                # (a) area < 0.26 * max_sheet_area
-                if area < 0.26 * max_sheet_area:
-                    continue
-
-                # (b) cy < rosette_y - 0.22 * sheet_h and area < 0.65 * max_sheet_area
-                if cy < (rosette_y - 0.22 * sheet_h) and area < 0.65 * max_sheet_area:
-                    continue
-
-                # (c) Mask IoU with an already-kept larger leaf mask exceeds 0.30
-                is_duplicate = False
-                for km in kept_masks:
-                    intersection = int(np.count_nonzero((inst_item.mask > 0) & (km > 0)))
-                    if intersection > 0:
-                        union = int(np.count_nonzero((inst_item.mask > 0) | (km > 0)))
-                        iou = float(intersection / max(union, 1))
-                        if iou > 0.30:
-                            is_duplicate = True
-                            break
-
-                if is_duplicate:
-                    continue
-
-                kept_instances.append(inst_item)
-                kept_masks.append(inst_item.mask)
-
-            kept_instances.sort(key=lambda i: i.leaf_id)
-            instances = kept_instances
 
         # 6. Geometric Quality Gatekeeper, 2-Path Extraction & Basal Leaf RGB Patch Saving
         for inst in instances:
