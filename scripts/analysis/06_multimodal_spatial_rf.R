@@ -1399,7 +1399,7 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
 
   # Panel E: Variance Partitioning with Percentage Labels
   vp_df <- srf_res$variance_partition
-  vp_df$Label <- ifelse(vp_df$Variance_Pct >= 4, sprintf("\%.1f\%\%", vp_df$Variance_Pct), "")
+  vp_df$Label <- ifelse(vp_df$Variance_Pct >= 4, sprintf("%.1f%%", vp_df$Variance_Pct), "")
   p5 <- ggplot2::ggplot(vp_df, ggplot2::aes(x = "", y = Variance_Pct, fill = Component)) +
     ggplot2::geom_bar(stat = "identity", width = 1, color = "white") +
     ggplot2::coord_polar("y", start = 0) +
