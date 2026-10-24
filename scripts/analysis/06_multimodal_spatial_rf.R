@@ -82,7 +82,9 @@ parse_args_robust <- function() {
       default = FALSE, help = "Enable synthetic fallback data for demonstration/test runs [default: %default]")
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
-    return(optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list), convert_hyphens_to_underscores = TRUE))
+    opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
+    names(opts) <- gsub("-", "_", names(opts))
+    return(opts)
   }
   return(list(
     vouchers = "data/tables/curated_vouchers.csv", morphometrics = "data/tables/morphometrics_misidentification_flags.csv",

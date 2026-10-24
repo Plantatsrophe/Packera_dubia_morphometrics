@@ -73,18 +73,10 @@ parse_args_robust <- function() {
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
     opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
-    if (nzchar(opts[["spatial-flags"]])) opts[["multimodal-flags"]] <- opts[["spatial-flags"]]
-    if (nzchar(opts[["output-triage"]])) opts[["output-queue"]] <- opts[["output-triage"]]
-    if (nzchar(opts[["output-figure"]])) opts[["output-plot"]] <- opts[["output-figure"]]
-    opts$multimodal_flags <- opts[["multimodal-flags"]]
-    opts$vision_audit <- opts[["vision-audit"]]
-    opts$gmm_summary <- opts[["gmm-summary"]]
-    opts$gmm_bic <- opts[["gmm-bic"]]
-    opts$cda_summary <- opts[["cda-summary"]]
-    opts$niche_summary <- opts[["niche-summary"]]
-    opts$output_queue <- opts[["output-queue"]]
-    opts$output_plot <- opts[["output-plot"]]
-    opts$output_report <- opts[["output-report"]]
+    names(opts) <- gsub("-", "_", names(opts))
+    if (!is.null(opts$spatial_flags) && nzchar(opts$spatial_flags)) opts$multimodal_flags <- opts$spatial_flags
+    if (!is.null(opts$output_triage) && nzchar(opts$output_triage)) opts$output_queue <- opts$output_triage
+    if (!is.null(opts$output_figure) && nzchar(opts$output_figure)) opts$output_plot <- opts$output_figure
     return(opts)
   }
   return(list(
@@ -214,6 +206,28 @@ apply_taxonomic_decision_matrix <- function(df) {
   return(df)
 }
 
+validate_upstream_contracts <- function(vouchers_df = NULL, morpho_df = NULL, vision_df = NULL, multimodal_df = NULL) {
+  if (!is.null(vouchers_df)) {
+    req_v <- c("catalogNumber")
+    mis_v <- setdiff(req_v, names(vouchers_df))
+    if (length(mis_v) > 0) warning("Upstream vouchers missing canonical columns: ", paste(mis_v, collapse = ", "))
+  }
+  if (!is.null(morpho_df)) {
+    if (!("plant_individual_id" %in% names(morpho_df))) morpho_df$plant_individual_id <- 0L
+    if ("morphometric_outlier_flag" %in% names(morpho_df) && !("misidentification_flag" %in% names(morpho_df))) {
+      morpho_df$misidentification_flag <- morpho_df$morphometric_outlier_flag
+    } else if ("misidentification_flag" %in% names(morpho_df) && !("morphometric_outlier_flag" %in% names(morpho_df))) {
+      morpho_df$morphometric_outlier_flag <- morpho_df$misidentification_flag
+    }
+  }
+  if (!is.null(vision_df)) {
+    if ("predicted_label" %in% names(vision_df) && !("vision_predicted_label" %in% names(vision_df))) {
+      vision_df$vision_predicted_label <- vision_df$predicted_label
+    }
+  }
+  return(TRUE)
+}
+
 # ------------------------------------------------------------------------------
 # 3. Merging Evidence Streams & Generating Triage Queue
 # ------------------------------------------------------------------------------
@@ -221,6 +235,7 @@ build_triage_queue <- function(opts) {
   message("Ingesting and joining evidence streams...")
   if (!file.exists(opts$vouchers)) stop("Missing vouchers: ", opts$vouchers)
   vouchers <- readr::read_csv(opts$vouchers, show_col_types = FALSE)
+  validate_upstream_contracts(vouchers_df = vouchers)
   vouchers$species_standardized <- standardize_packera_taxon(vouchers$species_raw)
 
   # Multimodal flags (primary spatial/edaphic join)
