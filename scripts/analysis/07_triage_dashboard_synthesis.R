@@ -301,6 +301,25 @@ build_triage_queue <- function(opts) {
     vouchers <- dplyr::left_join(vouchers, vi_agg[, join_vi_cols], by = "catalogNumber")
   }
 
+  # Ensure doy is populated from multimodal_flags, dayOfYear, or eventDate for Panel D
+  if (!("doy" %in% names(vouchers))) vouchers$doy <- NA_real_
+  vouchers$doy <- suppressWarnings(as.numeric(vouchers$doy))
+  if (exists("mm_df") && "doy" %in% names(mm_df)) {
+    mm_doy <- mm_df[!duplicated(mm_df$catalogNumber), c("catalogNumber", "doy")]
+    idx_d <- match(as.character(vouchers$catalogNumber), as.character(mm_doy$catalogNumber))
+    vouchers$doy <- dplyr::coalesce(vouchers$doy, suppressWarnings(as.numeric(mm_doy$doy[idx_d])))
+  }
+  if ("dayOfYear" %in% names(vouchers)) {
+    vouchers$doy <- dplyr::coalesce(vouchers$doy, suppressWarnings(as.numeric(vouchers$dayOfYear)))
+  }
+  if ("eventDate" %in% names(vouchers) && any(is.na(vouchers$doy))) {
+    na_d <- which(is.na(vouchers$doy) & !is.na(vouchers$eventDate))
+    if (length(na_d) > 0) {
+      dt <- suppressWarnings(as.Date(substr(as.character(vouchers$eventDate[na_d]), 1, 10)))
+      vouchers$doy[na_d] <- suppressWarnings(as.numeric(format(dt, "%j")))
+    }
+  }
+
   # Apply decision matrix
   vouchers <- apply_taxonomic_decision_matrix(vouchers)
 
