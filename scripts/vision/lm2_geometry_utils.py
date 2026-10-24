@@ -632,9 +632,23 @@ def is_botanical_dissection(
         if not (min_solidity <= solidity < max_solidity):
             return False
 
+    rect = cv2.minAreaRect(cnt_f)
+    minor_w = float(min(rect[1]))
+    major_l = float(max(rect[1]))
+
+    # Reject multi-leaf overlapping clumps masquerading as dissected leaves on high-DPI scans
+    is_high_dpi = (
+        (contour.ndim == 2 and max(contour.shape[:2]) > 500)
+        or cnt_f[:, 0].max() > 500
+        or cnt_f[:, 1].max() > 500
+        or major_l > 240.0
+        or minor_w > 360.0
+    )
+    if is_high_dpi and major_l > 220.0 and (minor_w > 360.0 or (minor_w / max(major_l, 1.0)) > 0.78):
+        return False
+
     if blade_width is None or blade_width <= 0:
-        rect = cv2.minAreaRect(cnt_f)
-        blade_width = float(min(rect[1]))
+        blade_width = minor_w
     if blade_width <= 0:
         return False
 
@@ -1511,7 +1525,12 @@ def classify_and_route_leaf(
 
     # 3. Botanical Dissection Inspection (min_dissected <= solidity < min_solidity)
     # Strictly label-blind: relies solely on intrinsic bilateral sinus geometry via is_botanical_dissection().
-    if dissection_enabled and (dissection_min_solidity <= solidity < min_solidity):
+    is_high_res_mask = max(mask.shape[:2]) > 500
+    allow_dissection = True
+    if is_high_res_mask and (ucs < 0.74 or solidity < max(dissection_min_solidity, 0.65)):
+        allow_dissection = False
+
+    if dissection_enabled and (dissection_min_solidity <= solidity < min_solidity) and allow_dissection:
         dissected = is_botanical_dissection(
             main_cnt,
             solidity=solidity,
@@ -1589,6 +1608,8 @@ def classify_and_route_leaf(
     # 5. Failed QC: Determine diagnostic rejection reason
     if is_irregular_fold:
         rejection_reason = "IRREGULAR_FOLD"
+    elif is_high_res_mask and (ucs < 0.74 or solidity < max(dissection_min_solidity, 0.65)):
+        rejection_reason = "UNRESOLVED_CLUMP"
     elif solidity < dissection_min_solidity or ucs < 0.60:
         rejection_reason = "UNRESOLVED_CLUMP"
     elif solidity < min_solidity:
@@ -1710,6 +1731,26 @@ def extract_tier2_reflected(
     pad = max(16, int(0.25 * max(bw, bh)))
 
     tight_crop = (mask[y_min:y_max + 1, x_min:x_max + 1] > 0).astype(np.uint8) * 255
+
+    cnts, _ = cv2.findContours(tight_crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None, None
+    in_cnt = max(cnts, key=cv2.contourArea)
+    in_cnt_f = in_cnt.astype(np.float32)
+    in_rect = cv2.minAreaRect(in_cnt_f)
+    in_minor_w = float(min(in_rect[1]))
+    in_major_l = float(max(in_rect[1]))
+    in_ar = in_minor_w / max(in_major_l, 1.0)
+
+    in_area = float(cv2.contourArea(in_cnt_f))
+    in_hull = cv2.convexHull(in_cnt_f)
+    in_hull_area = float(cv2.contourArea(in_hull))
+    in_solidity = float(in_area / in_hull_area) if in_hull_area > 0 else 0.0
+
+    is_high_dpi_mask = max(bw, bh) > 160
+    if is_high_dpi_mask and (in_solidity < 0.68 or in_ar > 0.84):
+        return None, None
+
     crop_mask = cv2.copyMakeBorder(
         tight_crop, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0
     )
@@ -1830,6 +1871,20 @@ def extract_tier2_reflected(
     ref_ucs, ref_solidity, _, _, _ = compute_geometric_metrics(reflected_bin)
     if ref_solidity < min_solidity or ref_ucs < min_ucs:
         return None, None
+
+    if is_high_dpi_mask:
+        ref_cnts, _ = cv2.findContours(reflected_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not ref_cnts:
+            return None, None
+        ref_cnt = max(ref_cnts, key=cv2.contourArea)
+        ref_cnt_f = ref_cnt.astype(np.float32)
+        ref_rect = cv2.minAreaRect(ref_cnt_f)
+        ref_minor_w = float(min(ref_rect[1]))
+        ref_major_l = float(max(ref_rect[1]))
+        ref_ar = ref_minor_w / max(ref_major_l, 1.0)
+
+        if ref_ar > 0.84 or ref_solidity < 0.78 or ref_ucs < 0.82:
+            return None, None
 
     main_save_path = None
     if output_dir is not None:
