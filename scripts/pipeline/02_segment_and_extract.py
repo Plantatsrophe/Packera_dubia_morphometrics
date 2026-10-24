@@ -360,6 +360,7 @@ class LM2Stage1Detector:
         self,
         image_bgr: np.ndarray,
         catalog_number: Optional[str] = None,
+        use_cache: bool = True,
     ) -> List[Tuple[Tuple[int, int, int, int], float, int]]:
         """
         Runs Stage 1 full-sheet organ detection on `image_bgr`.
@@ -368,7 +369,7 @@ class LM2Stage1Detector:
         sheet_h, sheet_w = image_bgr.shape[:2]
 
         # 1. Check precomputed LM2 Plant_Components YOLO labels if available
-        if self.lm2_project_dir and catalog_number:
+        if use_cache and self.lm2_project_dir and catalog_number:
             label_candidates = [
                 self.lm2_project_dir / "Data" / "precomputed_annotations" / "Plant_Components" / "labels" / f"{catalog_number}.txt",
                 self.lm2_project_dir / "Plant_Components" / "labels" / f"{catalog_number}.txt",
@@ -734,7 +735,7 @@ class SegmentAndExtractPipeline:
         device: str = "cuda",
         min_solidity: Optional[float] = None,
         min_ucs: Optional[float] = None,
-        score_thresh: float = 0.40,
+        score_thresh: float = 0.35,
         num_ruler_workers: int = 4,
         force: bool = False,
         config: Optional[PipelineConfig] = None,
@@ -968,6 +969,7 @@ class SegmentAndExtractPipeline:
             return [], failure_record
 
         sheet_h, sheet_w = img_bgr.shape[:2]
+        is_high_dpi = max(sheet_h, sheet_w) > 2000
 
         # 1. Ruler Scale Calibration: Prefer Stage 1 LM2 Ruler Calibration, fallback to Hough
         lm2_px_per_mm = self.ruler_calibrations.get(catalog_number)
@@ -981,7 +983,9 @@ class SegmentAndExtractPipeline:
             ruler_future = self.ruler_executor.submit(detect_ruler_scale_hough, img_bgr)
 
         # 2. Stage 1 Full-Sheet Organ Detection (LeafPriority.pt 11-class detector)
-        stage1_detections = self.stage1_detector.predict(img_bgr, catalog_number=catalog_number)
+        stage1_detections = self.stage1_detector.predict(
+            img_bgr, catalog_number=catalog_number, use_cache=not self.force
+        )
 
         capitulum_detections: List[Tuple[Tuple[int, int, int, int], Optional[np.ndarray], float, int]] = []
         leaf_detections: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int, Tuple[int, int]]] = []
@@ -998,25 +1002,54 @@ class SegmentAndExtractPipeline:
                 if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
                     capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
                 elif s1_cls in LM2_LEAF_CLASS_IDS:
+                    if is_high_dpi and s1_cls != 0:
+                        continue
+                    bh, bw = s1_bbox[2] - s1_bbox[0], s1_bbox[3] - s1_bbox[1]
+                    cy = 0.5 * (s1_bbox[0] + s1_bbox[2])
+                    if is_high_dpi and (max(bh, bw) < 0.045 * sheet_h or cy < 0.28 * sheet_h):
+                        continue
+
                     # Crop candidate leaf box with 12% padding and pass to Stage 2 PointRend
                     crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=0.12)
                     if crop_bgr.size == 0:
                         continue
                     crop_preds = self.model_engine.predict(crop_bgr)
-                    for pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
-                        m_refined = pr_mask
-                        if self._should_refine_with_sam2(pr_mask):
-                            m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, pr_mask)
-                        sheet_mask, full_bbox = reproject_crop_mask_to_sheet(
-                            m_refined, crop_box, (sheet_h, sheet_w)
-                        )
-                        leaf_detections.append((
-                            full_bbox,
-                            sheet_mask,
-                            float(pr_score),
-                            int(s1_cls),
-                            (crop_box[1], crop_box[0]),
-                        ))
+                    if not crop_preds:
+                        continue
+
+                    min_blade_area = (
+                        max(8000, int(0.035 * crop_bgr.shape[0] * crop_bgr.shape[1]))
+                        if is_high_dpi
+                        else 20
+                    )
+                    blade_candidates = []
+                    for pr_bbox, pr_mask, pr_score, pr_cls in crop_preds:
+                        if pr_cls != 0:
+                            continue
+                        fg_area = int(np.count_nonzero(pr_mask))
+                        if fg_area >= min_blade_area:
+                            blade_candidates.append((fg_area, float(pr_score), pr_bbox, pr_mask))
+
+                    if not blade_candidates:
+                        continue
+
+                    # Select at most ONE primary leaf blade mask per Stage 1 box (highest area * score)
+                    blade_candidates.sort(key=lambda c: (c[0] * c[1], c[0]), reverse=True)
+                    best_area, best_score, best_bbox, best_mask = blade_candidates[0]
+
+                    m_refined = best_mask
+                    if self._should_refine_with_sam2(best_mask):
+                        m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, best_mask)
+                    sheet_mask, full_bbox = reproject_crop_mask_to_sheet(
+                        m_refined, crop_box, (sheet_h, sheet_w)
+                    )
+                    leaf_detections.append((
+                        full_bbox,
+                        sheet_mask,
+                        float(best_score),
+                        int(s1_cls),
+                        (crop_box[1], crop_box[0]),
+                    ))
         else:
             # Fallback when Stage 1 detector is uninitialized (e.g., direct PointRend unit tests)
             raw_detections = self.model_engine.predict(img_bgr)

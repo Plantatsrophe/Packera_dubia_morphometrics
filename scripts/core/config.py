@@ -168,8 +168,16 @@ class HarvestingConfig:
 @dataclass(frozen=True)
 class SegmentationConfig:
     """Phase 2 PointRend deep segmentation parameters."""
-    model_weights: Path = PROJECT_ROOT / "models" / "lm2_packera_pcd_finetuned.pth"
-    score_thresh: float = 0.40
+    model_weights: Path = (
+        PROJECT_ROOT
+        / "LeafMachine2"
+        / "leafmachine2"
+        / "segmentation"
+        / "models"
+        / "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR"
+        / "model_final.pth"
+    )
+    score_thresh: float = 0.35
     min_ucs: float = 0.85
     min_solidity: float = 0.72
     device: str = "cuda"

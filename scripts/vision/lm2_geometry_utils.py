@@ -1539,6 +1539,21 @@ def classify_and_route_leaf(
             )
 
     # 4. Fallback: Tier 2 Hemi-Blade Reflection for Occluded/Damaged Margins
+    # Require plausible hemi-blade geometry (solidity >= 0.58 and ucs >= 0.62) to prevent false reflections of stems/clumps
+    if solidity < 0.58 or ucs < 0.62:
+        return LeafRoutingResult(
+            tier="Failed QC",
+            assigned_tier="rejected",
+            solidity=solidity,
+            ucs=ucs,
+            is_folded=False,
+            is_irregular_fold=False,
+            is_dissected=False,
+            processed_mask=mask,
+            rejection_reason="UNRESOLVED_CLUMP",
+            metadata=meta
+        )
+
     path, reflected_mask = extract_tier2_reflected(
         mask=mask,
         catalog_number="TEMP",
@@ -2154,15 +2169,17 @@ def generate_sam2_prompts_from_lm2_mask(
                 work_pdist = pocket_dist.copy()
                 supp_p = max(8, int(round(0.10 * max(span_w, span_h))))
                 for qx_p, qy_p in concavity_pts:
-                    cv2.circle(work_pdist, (int(round(qx_p)), int(round(qy_p))), supp_p, 0.0, -1)
-                while len(concavity_pts) < int(max_concavity_points):
+                    cv2.circle(work_pdist, (int(round(qx_p)), int(round(qy_p))), max(1, supp_p), 0.0, -1)
+                for _ in range(int(max_concavity_points) * 3):
+                    if len(concavity_pts) >= int(max_concavity_points):
+                        break
                     _, p_val, _, p_loc = cv2.minMaxLoc(work_pdist)
                     if p_val < 2.0:
                         break
                     qx_p, qy_p = int(p_loc[0]), int(p_loc[1])
                     if dilated[qy_p, qx_p] == 0:
                         concavity_pts.append((float(qx_p), float(qy_p)))
-                    cv2.circle(work_pdist, (qx_p, qy_p), supp_p, 0.0, -1)
+                    cv2.circle(work_pdist, (qx_p, qy_p), max(1, supp_p), 0.0, -1)
 
     corner_points = (
         np.array(corner_pts, dtype=np.float32).reshape(-1, 2)

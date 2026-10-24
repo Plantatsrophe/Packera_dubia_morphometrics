@@ -47,7 +47,7 @@ class TestMainPipelineCLI(unittest.TestCase):
 
         # Verify key hyperparameters
         self.assertEqual(cfg["harvesting"]["max_records_per_taxon"], 5000)
-        self.assertEqual(cfg["segmentation"]["score_thresh"], 0.40)
+        self.assertEqual(cfg["segmentation"]["score_thresh"], 0.35)
         self.assertEqual(cfg["morphometrics"]["harmonics"], 12)
 
     def test_build_parser_subcommands(self):

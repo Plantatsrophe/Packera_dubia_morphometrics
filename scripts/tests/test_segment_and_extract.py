@@ -18,6 +18,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch, MagicMock
 from pathlib import Path
 
 import cv2
@@ -960,6 +961,120 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         res_dubia = classify_and_route_leaf(bitten, taxon="Packera dubia")
         self.assertFalse(res_paupercula.is_dissected)
         self.assertEqual(res_paupercula.assigned_tier, res_dubia.assigned_tier)
+
+    def test_sam2_concavity_points_bounded_loop_and_suppression(self) -> None:
+        """Verify generate_sam2_prompts_from_lm2_mask terminates within bounded iterations and never visits same pixel."""
+        from scripts.vision.lm2_geometry_utils import generate_sam2_prompts_from_lm2_mask
+
+        # Star-shaped polygon with multiple deep sinuses
+        mask = np.zeros((300, 300), dtype=np.uint8)
+        pts = np.array([
+            [150, 20], [180, 110], [270, 110], [200, 160],
+            [230, 250], [150, 195], [70, 250], [100, 160],
+            [30, 110], [120, 110]
+        ], dtype=np.int32)
+        cv2.fillPoly(mask, [pts], 255)
+
+        bundle = generate_sam2_prompts_from_lm2_mask(mask, max_concavity_points=6)
+        self.assertIsInstance(bundle, dict)
+        self.assertLessEqual(len(bundle["concavity_points"]), 6)
+        if len(bundle["concavity_points"]) > 1:
+            # Check all points are unique
+            pts_arr = bundle["concavity_points"]
+            unique_pts = np.unique(pts_arr, axis=0)
+            self.assertEqual(len(pts_arr), len(unique_pts))
+
+    def test_classify_and_route_stem_clump_rejection_before_reflection(self) -> None:
+        """Verify classify_and_route_leaf rejects stems and clumps (solidity < 0.58 or ucs < 0.62) without Tier 2 reflection."""
+        from scripts.vision.lm2_geometry_utils import classify_and_route_leaf
+
+        # Create a ragged clump/stem mask: thin jagged curve with very low solidity (< 0.50) and low UCS (< 0.60)
+        mask = np.zeros((400, 400), dtype=np.uint8)
+        # Draw a thin meandering C-shape
+        cv2.ellipse(mask, (200, 200), (120, 150), 0, 30, 330, 255, 12)
+        # Add random jagged protrusions
+        cv2.line(mask, (200, 50), (280, 20), 255, 8)
+        cv2.line(mask, (80, 200), (30, 260), 255, 8)
+
+        routing = classify_and_route_leaf(mask)
+        self.assertEqual(routing.tier, "Failed QC")
+        self.assertEqual(routing.assigned_tier, "rejected")
+        self.assertEqual(routing.rejection_reason, "UNRESOLVED_CLUMP")
+
+    def test_stage1_high_dpi_filtering_and_single_primary_blade_selection(self) -> None:
+        """Verify on high-DPI herbarium sheets (>2000px), Stage 1 restricts to Class 0, filters tiny/upper boxes, and selects 1 blade."""
+        sheet_img = np.full((3000, 2400, 3), 230, dtype=np.uint8)
+        self.assertTrue(max(sheet_img.shape[:2]) > 2000)
+
+        # Stage 1 detections:
+        # 1. Class 1 (leaf_partial) -> should be skipped on high-DPI
+        # 2. Class 0, but upper cauline: cy = 600 < 0.28 * 3000 (840) -> should be skipped
+        # 3. Class 0, but tiny box: bh=80, bw=80 < 0.045 * 3000 (135) -> should be skipped
+        # 4. Class 0, valid basal leaf box: ymin=1800, xmin=800, ymax=2400, xmax=1400 (bh=600, bw=600, cy=2100) -> accepted!
+        stage1_dets = [
+            ((1500, 500, 1900, 900), 0.90, 1),   # leaf_partial -> skipped
+            ((400, 800, 800, 1200), 0.92, 0),    # cy=600 < 840 -> skipped
+            ((1600, 600, 1680, 680), 0.88, 0),   # max(bh, bw)=80 < 135 -> skipped
+            ((1800, 800, 2400, 1400), 0.95, 0),  # valid basal leaf!
+        ]
+
+        def fake_high_dpi_stage2(crop_img: np.ndarray):
+            ch, cw = crop_img.shape[:2]
+            # Prediction 1: Class 1 (petiole/stem fragment) -> ignored
+            m1 = np.zeros((ch, cw), dtype=np.uint8)
+            cv2.rectangle(m1, (10, 10), (30, 200), 255, -1)
+
+            # Prediction 2: Class 0, tiny noise fragment (< 8000 px) -> ignored
+            m2 = np.zeros((ch, cw), dtype=np.uint8)
+            cv2.circle(m2, (50, 50), 20, 255, -1)
+
+            # Prediction 3: Class 0, large primary blade (> 8000 px, area ~ 40,000) -> selected!
+            m3 = np.zeros((ch, cw), dtype=np.uint8)
+            cv2.ellipse(m3, (cw // 2, ch // 2), (cw // 3, ch // 3), 0, 0, 360, 255, -1)
+
+            # Prediction 4: Class 0, smaller blade fragment (area ~ 15,000, lower score) -> not selected
+            m4 = np.zeros((ch, cw), dtype=np.uint8)
+            cv2.ellipse(m4, (cw // 2, ch // 2), (cw // 5, ch // 5), 0, 0, 360, 255, -1)
+
+            return [
+                ((10, 10, 200, 30), m1, 0.90, 1),
+                ((30, 30, 70, 70), m2, 0.85, 0),
+                ((50, 50, ch - 50, cw - 50), m3, 0.95, 0),
+                ((100, 100, ch - 100, cw - 100), m4, 0.70, 0),
+            ]
+
+        with patch("cv2.imread", return_value=sheet_img):
+            with patch.object(self.pipeline.stage1_detector, "predict", return_value=stage1_dets):
+                with patch.object(self.pipeline.model_engine, "predict", side_effect=fake_high_dpi_stage2) as mock_s2:
+                    records, failure = self.pipeline.process_voucher("NCU_HIGHDPI", self.img_path)
+
+        self.assertIsNone(failure)
+        # Stage 2 PointRend must be called EXACTLY ONCE (only for valid basal leaf box #4)
+        self.assertEqual(mock_s2.call_count, 1)
+        # Exactly ONE primary blade instance extracted
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["assigned_tier"], "Tier_1_Direct")
+
+    def test_stage1_use_cache_flag(self) -> None:
+        """Verify LM2Stage1Detector.predict respects use_cache flag."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            proj_dir = Path(tmp_dir)
+            labels_dir = proj_dir / "Plant_Components" / "labels"
+            labels_dir.mkdir(parents=True)
+            label_file = labels_dir / "VOUCHER1.txt"
+            label_file.write_text("0 0.5 0.5 0.2 0.2\n")
+
+            detector = step02.LM2Stage1Detector(
+                weights_path="dummy.pt",
+                lm2_project_dir=proj_dir,
+            )
+            # When use_cache=True, loads precomputed labels
+            dets_cached = detector.predict(np.zeros((100, 100, 3), dtype=np.uint8), catalog_number="VOUCHER1", use_cache=True)
+            self.assertEqual(len(dets_cached), 1)
+
+            # When use_cache=False, bypasses precomputed labels (and returns [] since model is None)
+            dets_uncached = detector.predict(np.zeros((100, 100, 3), dtype=np.uint8), catalog_number="VOUCHER1", use_cache=False)
+            self.assertEqual(len(dets_uncached), 0)
 
 
 if __name__ == "__main__":

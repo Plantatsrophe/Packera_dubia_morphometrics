@@ -124,8 +124,8 @@ harvesting:
 
 # Phase 2: PointRend Segmentation & Geometric Leaf Extraction
 segmentation:
-  model_weights: "models/lm2_packera_pcd_finetuned.pth"
-  score_thresh: 0.40
+  model_weights: "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
+  score_thresh: 0.35
   min_ucs: 0.85
   min_solidity: 0.72
   device: "cuda"
