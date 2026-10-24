@@ -623,40 +623,43 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
   tx_clean <- ifelse(tx_col %in% names(OKABE_ITO_TAXA), tx_col, "Packera dubia")
 
   morph_conflict <- if ("cda_predicted_taxon" %in% colnames(triage_df)) {
-    !is.na(triage_df$cda_predicted_taxon) & (as.character(triage_df$cda_predicted_taxon) != tx_clean)
+    ifelse(is.na(triage_df$cda_predicted_taxon), NA, as.character(triage_df$cda_predicted_taxon) != tx_clean)
   } else {
-    rep(FALSE, nrow(triage_df))
+    rep(NA, nrow(triage_df))
   }
-  vis_conflict <- if ("is_label_corrupted" %in% colnames(triage_df)) {
+  vis_conflict <- if ("is_cleanlab_issue" %in% colnames(triage_df)) {
+    as.logical(triage_df$is_cleanlab_issue) | as.logical(triage_df$is_label_corrupted)
+  } else if ("is_label_corrupted" %in% colnames(triage_df)) {
     as.logical(triage_df$is_label_corrupted)
   } else if ("vision_predicted_label" %in% colnames(triage_df)) {
-    !is.na(triage_df$vision_predicted_label) & (as.character(triage_df$vision_predicted_label) != tx_clean)
+    ifelse(is.na(triage_df$vision_predicted_label), NA, as.character(triage_df$vision_predicted_label) != tx_clean)
   } else {
-    rep(FALSE, nrow(triage_df))
+    rep(NA, nrow(triage_df))
   }
-  vis_conflict[is.na(vis_conflict)] <- FALSE
-  eco_conflict <- if ("edaphic_best_fit_taxon" %in% colnames(triage_df)) {
-    !is.na(triage_df$edaphic_best_fit_taxon) & (as.character(triage_df$edaphic_best_fit_taxon) != tx_clean)
-  } else if ("multimodal_conflict_flag" %in% colnames(triage_df)) {
+  eco_conflict <- if ("multimodal_conflict_flag" %in% colnames(triage_df)) {
     as.logical(triage_df$multimodal_conflict_flag)
+  } else if ("edaphic_best_fit_taxon" %in% colnames(triage_df)) {
+    ifelse(is.na(triage_df$edaphic_best_fit_taxon), NA, as.character(triage_df$edaphic_best_fit_taxon) != tx_clean)
   } else {
-    rep(FALSE, nrow(triage_df))
+    rep(NA, nrow(triage_df))
   }
-  eco_conflict[is.na(eco_conflict)] <- FALSE
+
+  safe_pct <- function(x) if (all(is.na(x))) 0.0 else mean(x, na.rm = TRUE) * 100
 
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(5.2, 4.8, 3.4, 1.2))
-    # Panel A: Modality-specific conflict rates (%)
+    # Panel A: Modality-specific conflict rates (% of evaluated vouchers)
     rates <- c(
-      "Morphology (CDA/GMM)" = mean(morph_conflict, na.rm = TRUE) * 100,
-      "DINOv2 Vision (Cleanlab)" = mean(vis_conflict, na.rm = TRUE) * 100,
-      "Ecological Niche (Spatial RF)" = mean(eco_conflict, na.rm = TRUE) * 100
+      "Morphology\n(CDA/GMM)" = safe_pct(morph_conflict),
+      "DINOv2 Vision\n(Cleanlab)" = safe_pct(vis_conflict),
+      "Ecological Niche\n(Spatial RF)" = safe_pct(eco_conflict)
     )
     bp <- graphics::barplot(
       rates,
       col = c("#0072B2", "#D55E00", "#009E73"),
       ylim = c(0, max(c(25, rates), na.rm = TRUE) * 1.25),
-      ylab = "Discordance Rate (% of Vouchers)",
+      cex.names = 0.85,
+      ylab = "Discordance Rate (% of Evaluated Vouchers)",
       main = "A. Modality-Specific Taxonomic Conflict Rates"
     )
     graphics::text(bp, rates + max(c(25, rates)) * 0.04, labels = sprintf("%.1f%%", rates), font = 2, cex = 0.9)
@@ -668,6 +671,7 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
     } else {
       rep("RESOLVED", nrow(triage_df))
     }
+    prio_col[prio_col == "MEDIUM"] <- "MODERATE"
     prio_levels <- c("CRITICAL", "HIGH", "MODERATE", "LOW", "RESOLVED")
     prio_pal <- c(
       "CRITICAL" = "#D55E00",
