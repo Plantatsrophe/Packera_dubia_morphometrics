@@ -132,11 +132,12 @@ write_run_metadata(
 # ------------------------------------------------------------------------------
 # Step 01: Voucher Harvesting & Authority Stratification
 # ------------------------------------------------------------------------------
-if [[ "${SKIP_HARVEST}" == "false" && ! -s "data/tables/curated_vouchers.csv" && ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
-  echo "[Step 01/07] Running Voucher Harvester..."
+if [[ "${SKIP_HARVEST}" == "false" && ( -n "${FORCE_FLAG}" || ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ) ]]; then
+  echo "[Step 01/07] Running Voucher Harvester (with high-res image downloads & quality audit)..."
   "${PYTHON_MAIN}" scripts/data_prep/01_voucher_harvester.py \
     --out-dir "data/raw_vouchers" \
     --output-csv "${RUN_DIR}/data/tables/curated_vouchers.csv" \
+    --download-images \
     ${FORCE_FLAG}
 fi
 
