@@ -633,7 +633,7 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
 }
 
 # ------------------------------------------------------------------------------
-# 2d. Latitudinal Spring Baseline & Phenological Anomalies (ΔDOY) Engine
+# 2d. Latitudinal Spring Baseline & Phenological Anomalies (Delta DOY) Engine
 # ------------------------------------------------------------------------------
 extract_doy_robust <- function(df) {
   doy_vec <- if ("doy" %in% names(df)) suppressWarnings(as.numeric(df$doy)) else rep(NA_real_, nrow(df))
@@ -934,8 +934,8 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
       ggplot2::scale_fill_manual(values = TAXON_COLORS) +
       thm +
       ggplot2::labs(
-        title = "B. Phenological Anomalies (ΔDOY) & Allochronic Separation",
-        x = "Phenological Anomaly ΔDOY (Days Relative to Baseline)", y = "Target Taxon", fill = "Taxon"
+        title = "B. Phenological Anomalies (Delta DOY) & Allochronic Separation",
+        x = "Phenological Anomaly Delta DOY (Days Relative to Baseline)", y = "Target Taxon", fill = "Taxon"
       )
   } else {
     p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, fill = species_standardized)) +
@@ -944,8 +944,8 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
       ggplot2::scale_fill_manual(values = TAXON_COLORS) +
       thm +
       ggplot2::labs(
-        title = "B. Phenological Anomalies (ΔDOY) & Allochronic Separation",
-        x = "Phenological Anomaly ΔDOY (Days Relative to Baseline)", y = "Density", fill = "Taxon"
+        title = "B. Phenological Anomalies (Delta DOY) & Allochronic Separation",
+        x = "Phenological Anomaly Delta DOY (Days Relative to Baseline)", y = "Density", fill = "Taxon"
       )
   }
   
@@ -1003,17 +1003,19 @@ execute_crossmodal_consensus <- function(df) {
       z_cec  <- (df$soil_cec[i] - prof$cec_mean) / prof$cec_sd
       -(z_ph^2 + z_sand^2 + z_cec^2) / 2
     })
-    edaph_sp <- TARGET_TAXA[which.max(edaph_scores)]
-    edaph_z_given <- abs((df$soil_ph[i] - taxa_profiles[[given_sp]]$ph_mean) / taxa_profiles[[given_sp]]$ph_sd)
+    edaph_sp <- if (all(is.na(edaph_scores))) given_sp else TARGET_TAXA[which.max(edaph_scores)][1]
+    edaph_z_given <- if (given_sp %in% names(taxa_profiles)) abs((df$soil_ph[i] - taxa_profiles[[given_sp]]$ph_mean) / taxa_profiles[[given_sp]]$ph_sd) else 0.0
+    if (is.na(edaph_z_given) || !is.finite(edaph_z_given)) edaph_z_given <- 0.0
 
     # Phenological circular divergence
     prof_g <- taxa_profiles[[given_sp]]
-    ang_diff <- abs(atan2(sin(df$pheno_theta[i] - prof_g$mean_theta), cos(df$pheno_theta[i] - prof_g$mean_theta)))
-    pheno_agree <- ang_diff < (pi / 3) # within ~60 days
+    ang_diff <- if (!is.null(prof_g)) abs(atan2(sin(df$pheno_theta[i] - prof_g$mean_theta), cos(df$pheno_theta[i] - prof_g$mean_theta))) else 0.0
+    if (is.na(ang_diff) || !is.finite(ang_diff)) ang_diff <- 0.0
+    pheno_agree <- isTRUE(ang_diff < (pi / 3)) # within ~60 days
 
     # Agreement matrix
     matches <- c(morph_sp == given_sp, vis_sp == given_sp, edaph_sp == given_sp, pheno_agree)
-    concordance <- sum(matches) / 4.0
+    concordance <- sum(matches, na.rm = TRUE) / 4.0
     concordances[i] <- round(concordance, 2)
 
     # Multi-evidence decision triage
@@ -1045,7 +1047,7 @@ execute_crossmodal_consensus <- function(df) {
       p <- taxa_profiles[[tx]]
       -((df$soil_ph[i] - p$ph_mean)^2 / p$ph_sd^2 + (df$soil_sand[i] - p$sand_mean)^2 / p$sand_sd^2)
     })
-    TARGET_TAXA[which.max(scores)]
+    if (all(is.na(scores))) df$species_standardized[i] else TARGET_TAXA[which.max(scores)][1]
   })
   return(df)
 }
@@ -1476,6 +1478,18 @@ main <- function() {
   env_vars <- c("soil_ph", "soil_cec", "soil_sand", "soil_bulk_density",
                 "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "bio15_precip_seasonality",
                 "delta_doy")
+  for (ev in env_vars) {
+    if (ev %in% names(vouchers_df)) {
+      for (tx in unique(vouchers_df$species_standardized)) {
+        tx_m <- vouchers_df$species_standardized == tx
+        med_v <- stats::median(vouchers_df[[ev]][tx_m], na.rm = TRUE)
+        if (is.na(med_v)) med_v <- stats::median(vouchers_df[[ev]], na.rm = TRUE)
+        if (is.na(med_v)) med_v <- 0.0
+        na_m <- tx_m & is.na(vouchers_df[[ev]])
+        if (any(na_m)) vouchers_df[[ev]][na_m] <- med_v
+      }
+    }
+  }
 
   # Stage 2: Cross-Modal Consensus Checks
   vouchers_df <- execute_crossmodal_consensus(vouchers_df)
