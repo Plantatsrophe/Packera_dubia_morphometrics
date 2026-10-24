@@ -347,7 +347,43 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
                           batch_idx, c_idx, length(chunk_indices), n_sub, attempt, max_retries))
           sub_pts$gid <- seq_len(n_sub)
           pts_sf <- sf::st_as_sf(sub_pts, coords = c("longitude", "latitude"), crs = 4326)
-          sp_res <- soilDB::SDA_spatialQuery(pts_sf, what = "mukey", db = "SSURGO", byFeature = TRUE)
+          sp_res <- tryCatch(
+            soilDB::SDA_spatialQuery(pts_sf, what = "mukey", db = "SSURGO", byFeature = TRUE),
+            error = function(e_sp) {
+              if (!grepl("numbers of columns", conditionMessage(e_sp), fixed = TRUE)) stop(e_sp)
+              message(sprintf("  [Batch %d] Unmapped point triggered soilDB rbind mismatch; rescuing valid points via dplyr::bind_rows...", batch_idx))
+              mini_idx <- split(seq_len(n_sub), ceiling(seq_len(n_sub) / 5L))
+              mini_list <- list()
+              for (m_i in seq_along(mini_idx)) {
+                idx_vec <- mini_idx[[m_i]]
+                m_sf <- pts_sf[idx_vec, , drop = FALSE]
+                m_res <- tryCatch({
+                  r_m <- soilDB::SDA_spatialQuery(m_sf, what = "mukey", db = "SSURGO", byFeature = TRUE)
+                  if (is.data.frame(r_m) && nrow(r_m) > 0 && "gid" %in% names(r_m)) {
+                    r_m$gid <- m_sf$gid[as.integer(r_m$gid)]
+                  }
+                  r_m
+                }, error = function(e_m) {
+                  pt_list <- list()
+                  for (p_i in seq_along(idx_vec)) {
+                    r_p <- tryCatch(
+                      soilDB::SDA_spatialQuery(m_sf[p_i, , drop = FALSE], what = "mukey", db = "SSURGO", byFeature = FALSE),
+                      error = function(e_p) NULL
+                    )
+                    if (is.data.frame(r_p) && nrow(r_p) > 0 && "mukey" %in% names(r_p)) {
+                      r_p$gid <- m_sf$gid[p_i]
+                      pt_list[[length(pt_list) + 1L]] <- r_p
+                    }
+                  }
+                  if (length(pt_list) > 0) dplyr::bind_rows(pt_list) else NULL
+                })
+                if (is.data.frame(m_res) && nrow(m_res) > 0) {
+                  mini_list[[length(mini_list) + 1L]] <- m_res
+                }
+              }
+              if (length(mini_list) > 0) dplyr::bind_rows(mini_list) else NULL
+            }
+          )
           if (!is.null(sp_res) && is.data.frame(sp_res) && nrow(sp_res) > 0 && "mukey" %in% names(sp_res)) {
             sp_keep <- intersect(c("gid", "mukey"), names(sp_res))
             pts_sp <- merge(sub_pts, sp_res[, sp_keep, drop = FALSE], by = "gid", all.x = TRUE)
