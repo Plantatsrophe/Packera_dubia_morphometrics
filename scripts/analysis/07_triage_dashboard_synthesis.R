@@ -235,12 +235,14 @@ build_triage_queue <- function(opts) {
   message("Ingesting and joining evidence streams...")
   if (!file.exists(opts$vouchers)) stop("Missing vouchers: ", opts$vouchers)
   vouchers <- readr::read_csv(opts$vouchers, show_col_types = FALSE)
+  vouchers$catalogNumber <- as.character(vouchers$catalogNumber)
   validate_upstream_contracts(vouchers_df = vouchers)
   vouchers$species_standardized <- standardize_packera_taxon(vouchers$species_raw)
 
   # Multimodal flags (primary spatial/edaphic join)
   if (file.exists(opts$multimodal_flags)) {
     mm_df <- readr::read_csv(opts$multimodal_flags, show_col_types = FALSE)
+    mm_df$catalogNumber <- as.character(mm_df$catalogNumber)
     join_cols <- setdiff(names(mm_df), names(vouchers))
     vouchers <- dplyr::left_join(vouchers, mm_df[, c("catalogNumber", join_cols)], by = "catalogNumber")
   }
@@ -251,6 +253,7 @@ build_triage_queue <- function(opts) {
   }
   if (file.exists(opts$morphometrics)) {
     mo_df <- readr::read_csv(opts$morphometrics, show_col_types = FALSE)
+    mo_df$catalogNumber <- as.character(mo_df$catalogNumber)
     if ("morphometric_outlier_flag" %in% names(mo_df) && !("misidentification_flag" %in% names(mo_df))) {
       mo_df$misidentification_flag <- mo_df$morphometric_outlier_flag
     } else if ("misidentification_flag" %in% names(mo_df) && !("morphometric_outlier_flag" %in% names(mo_df))) {
@@ -281,6 +284,7 @@ build_triage_queue <- function(opts) {
   # Deep vision audit join with voucher-level aggregation
   if (file.exists(opts$vision_audit)) {
     vi_df <- readr::read_csv(opts$vision_audit, show_col_types = FALSE)
+    vi_df$catalogNumber <- as.character(vi_df$catalogNumber)
     if ("predicted_label" %in% names(vi_df)) vi_df$vision_predicted_label <- vi_df$predicted_label
     if (!("confidence_predicted_class" %in% names(vi_df))) vi_df$confidence_predicted_class <- NA_real_
     vi_agg <- vi_df %>%

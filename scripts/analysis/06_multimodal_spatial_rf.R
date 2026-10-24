@@ -533,6 +533,8 @@ query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", 
     keep_cols <- c("catalogNumber", "musym", "muname", "taxsuborder", "taxgreatgroup", "is_rock_outcrop", "outcrop_class")
     all_ssurgo <- all_ssurgo[!duplicated(all_ssurgo$catalogNumber), intersect(names(all_ssurgo), keep_cols), drop = FALSE]
     
+    df$catalogNumber <- as.character(df$catalogNumber)
+    all_ssurgo$catalogNumber <- as.character(all_ssurgo$catalogNumber)
     m_df <- dplyr::left_join(df, all_ssurgo, by = "catalogNumber")
     m_df$is_rock_outcrop[is.na(m_df$is_rock_outcrop)] <- FALSE
     m_df$outcrop_class[is.na(m_df$outcrop_class)] <- "Non-outcrop matrix"
@@ -1375,6 +1377,7 @@ main <- function() {
   
   if (!file.exists(opts$vouchers)) stop("Missing vouchers file: ", opts$vouchers)
   vouchers_df <- readr::read_csv(opts$vouchers, show_col_types = FALSE)
+  vouchers_df$catalogNumber <- as.character(vouchers_df$catalogNumber)
   vouchers_df$species_standardized <- standardize_packera_taxon(vouchers_df$species_raw)
 
   # Merge Morphometrics if present (resolve morphometric_flags.csv <-> morphometrics_misidentification_flags.csv)
@@ -1383,6 +1386,7 @@ main <- function() {
   }
   if (file.exists(opts$morphometrics)) {
     morph_df <- readr::read_csv(opts$morphometrics, show_col_types = FALSE)
+    morph_df$catalogNumber <- as.character(morph_df$catalogNumber)
     if ("morphometric_outlier_flag" %in% names(morph_df) && !("misidentification_flag" %in% names(morph_df))) {
       morph_df$misidentification_flag <- morph_df$morphometric_outlier_flag
     } else if ("misidentification_flag" %in% names(morph_df) && !("morphometric_outlier_flag" %in% names(morph_df))) {
@@ -1396,6 +1400,7 @@ main <- function() {
   # Merge Cleanlab Vision Audit if present
   if (file.exists(opts$vision_audit)) {
     vis_df <- readr::read_csv(opts$vision_audit, show_col_types = FALSE)
+    vis_df$catalogNumber <- as.character(vis_df$catalogNumber)
     v_cols <- intersect(names(vis_df), c("catalogNumber", "predicted_label", "confidence_predicted_class", "c_error", "is_label_corrupted"))
     names(vis_df)[names(vis_df) == "predicted_label"] <- "vision_predicted_label"
     vis_sub <- vis_df[!duplicated(vis_df$catalogNumber), intersect(names(vis_df), c("catalogNumber", "vision_predicted_label", "c_error", "is_label_corrupted")), drop = FALSE]
