@@ -148,7 +148,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   valid_idx <- which(cal_mask & !is.na(morpho_df$log_centsize) & is.finite(morpho_df$log_centsize) & complete.cases(morpho_df[, sym_names]))
   if (length(valid_idx) < 10) return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df))
 
-  sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$scientificName <- factor(sub_df$scientificName)
+  sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$scientificName <- factor(standardize_packera_taxon(as.character(if ("species_standardized" %in% names(sub_df)) sub_df$species_standardized else sub_df$scientificName)))
   gold_mask <- if ("determiner_tier" %in% names(sub_df)) (sub_df$determiner_tier == "Tier_1_Gold" & !is.na(sub_df$scientificName)) else rep(TRUE, nrow(sub_df))
   gold_df <- if (sum(gold_mask) >= 10 && length(unique(sub_df$scientificName[gold_mask])) >= 2) sub_df[gold_mask, , drop = FALSE] else sub_df
   gold_df$scientificName <- droplevels(factor(gold_df$scientificName))

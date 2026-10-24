@@ -918,6 +918,16 @@ def trim_petiole_tail(
         else:
             break
 
+    num_l0, lbl0, st0, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
+    if num_l0 > 2:
+        best_l0 = 1 + int(np.argmax(st0[1:, cv2.CC_STAT_AREA]))
+        mask = np.where(lbl0 == best_l0, 255, 0).astype(np.uint8)
+    cnts0, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if cnts0:
+        m_fill = np.zeros_like(mask)
+        cv2.drawContours(m_fill, [max(cnts0, key=cv2.contourArea)], -1, 255, -1)
+        mask = m_fill
+
     if not narrow_indices:
         meta = {
             "is_trimmed": False,
@@ -1006,6 +1016,11 @@ def trim_petiole_tail(
     if num_labels > 1:
         largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
         clipped = np.where(labels == largest_label, 255, 0).astype(np.uint8)
+    cnts_ext, _ = cv2.findContours(clipped, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if cnts_ext:
+        clipped_filled = np.zeros_like(clipped)
+        cv2.drawContours(clipped_filled, [max(cnts_ext, key=cv2.contourArea)], -1, 255, -1)
+        clipped = clipped_filled
 
     meta = {
         "is_trimmed": True,
@@ -1869,6 +1884,16 @@ def extract_tier2_reflected(
         ).astype(np.uint8) * 255
     else:
         reflected_bin = (unaligned_crop > 127).astype(np.uint8) * 255
+
+    num_lr, lbl_r, st_r, _ = cv2.connectedComponentsWithStats((reflected_bin > 0).astype(np.uint8), connectivity=8)
+    if num_lr > 1:
+        best_lr = 1 + int(np.argmax(st_r[1:, cv2.CC_STAT_AREA]))
+        reflected_bin = np.where(lbl_r == best_lr, 255, 0).astype(np.uint8)
+    cnts_r, _ = cv2.findContours(reflected_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if cnts_r:
+        ref_filled = np.zeros_like(reflected_bin)
+        cv2.drawContours(ref_filled, [max(cnts_r, key=cv2.contourArea)], -1, 255, -1)
+        reflected_bin = ref_filled
 
     # Verify synthesized silhouette quality
     ref_ucs, ref_solidity, _, _, _ = compute_geometric_metrics(reflected_bin)

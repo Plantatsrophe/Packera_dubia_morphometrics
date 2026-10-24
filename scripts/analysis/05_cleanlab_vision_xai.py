@@ -383,11 +383,10 @@ def load_and_link_rosette_patches(
 
     patch_files = sorted(rosette_dir.glob("*.jpg")) if rosette_dir.exists() else []
     if not patch_files and rosette_dir.exists():
-        patch_files = sorted(
-            list(rosette_dir.glob("rosettes_dense/*.jpg"))
-            + list(rosette_dir.glob("basal_leaves_raw/*.jpg"))
-            + list(rosette_dir.glob("*/*.jpg"))
-        )
+        rosette_crops = sorted(rosette_dir.glob("rosettes_dense/*.jpg"))
+        leaf_crops = sorted(rosette_dir.glob("basal_leaves_raw/*.jpg"))
+        rosette_cats = {p.stem.split("_")[0] for p in rosette_crops}
+        patch_files = rosette_crops + [p for p in leaf_crops if p.stem.split("_")[0] not in rosette_cats]
 
     if patch_files:
         for p in patch_files:
@@ -856,7 +855,14 @@ def generate_gradcam_panel(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    samples = flagged_records[:max_samples]
+    dedup_records = []
+    seen_cats = set()
+    for r in flagged_records:
+        c_key = str(r.get("catalogNumber", r.get("patch_path", "")))
+        if c_key not in seen_cats:
+            seen_cats.add(c_key)
+            dedup_records.append(r)
+    samples = dedup_records[:max_samples]
     if not samples:
         logger.warning("No flagged records available to generate ViT attribution panel.")
         return

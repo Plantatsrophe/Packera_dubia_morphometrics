@@ -1357,7 +1357,7 @@ class SegmentAndExtractPipeline:
                 reflection_applied = False
 
             # 3. Check for botanical dissection: If solidity < min_solidity but is_botanical_dissection == True -> route to Tier 1 (Dissected)
-            elif (routing_res.solidity < self.min_solidity) and is_dissected and routing_res.solidity >= self.min_dissected and routing_res.assigned_tier == "tier1":
+            elif (routing_res.solidity < self.min_solidity) and (routing_res.ucs >= self.min_ucs) and is_dissected and routing_res.solidity >= self.min_dissected and routing_res.assigned_tier == "tier1":
                 tier = "Tier 1 (Dissected)"
                 assigned_tier = TIER_1_DIRECT
                 is_dissected = True
