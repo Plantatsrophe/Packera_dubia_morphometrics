@@ -68,10 +68,9 @@ bash setup_leafmachine2.sh
 > You do **not** need to manually switch or activate `.venv_LM2` in your shell when executing Phase 2. The unified runner `main.py` includes an automatic Python interpreter resolver (`get_lm2_python_executable()`) that checks for `.venv_LM2/bin/python` (Linux/macOS) or `.venv_LM2/Scripts/python.exe` (Windows). When invoking `python main.py segment` or `python main.py run-all` from your primary `.venv`, `main.py` automatically routes execution to the dedicated `.venv_LM2` interpreter, streams diagnostics to the console and logger, and catches non-zero exit codes to halt subsequent phases on failure.
 
 ### C. R Statistical Computing Environment
-Requires R $\ge 4.3.0$ with `Momocs`, `MorphoTools2`, `mclust`, `spatialRF`, `terra`, and `tidyverse`:
-```R
-install.packages(c("Momocs", "mclust", "terra", "tidyverse", "sf", "ggplot2", "patchwork", "gridExtra", "optparse", "remotes"))
-remotes::install_github(c("V-Z/MorphoTools2", "danlwarren/ENMTools", "blasbenito/spatialRF"))
+Requires R $\ge 4.3.0$ with CRAN statistical and spatial macroecological packages (`remotes`, `tidyverse`, `optparse`, `mclust`, `clustvarsel`, `MorphoTools2`, `RRPP`, `vegan`, `terra`, `sf`, `geodata`, `soilDB`, `spatialRF`, `ranger`, `adespatial`, `blockCV`, `ecospat`, `ENMTools`, `patchwork`, `viridis`) and `Momocs` (installed via `remotes::install_github("MomX/Momocs")` following its March 2026 CRAN archival):
+```bash
+Rscript -e 'install.packages(c("remotes", "tidyverse", "optparse", "mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "terra", "sf", "geodata", "soilDB", "spatialRF", "ranger", "adespatial", "blockCV", "ecospat", "ENMTools", "patchwork", "viridis"), repos="https://cloud.r-project.org"); if (!requireNamespace("Momocs", quietly=TRUE)) remotes::install_github("MomX/Momocs")'
 ```
 
 ### D. Large File & Storage Architecture
@@ -90,13 +89,13 @@ Researchers reproducing the dissertation results without re-harvesting large ima
    ```
    Checkpoints are archived on GitHub Releases (`v1.0-weights`) and Zenodo (DOI: `10.5281/zenodo.xxxxxx`), with integrity validated via SHA256 hashing.
 
-2. **Pre-Computed Environmental Rasters (`data/environmental/`):**
-   Phase 6 (Macroecological Niche Modeling) utilizes 30-arcsecond WorldClim 2.1 bioclimatic rasters and SoilGrids 250m pedological layers (pH in H2O, CEC, sand/clay percentages). A pre-clipped GeoTIFF raster package covering the southeastern and midwestern United States study region is deposited on Zenodo:
+2. **Automated & Pre-Computed Environmental Rasters (`data/environmental/`):**
+   Phase 6 (Macroecological Niche Modeling) utilizes 30-arcsecond WorldClim 2.1 bioclimatic rasters and SoilGrids 250m pedological layers (pH in $\text{H}_2\text{O}$, CEC, sand/clay percentages, bulk density). When local `.tif` files are not pre-staged in `data/environmental/`, `06_multimodal_spatial_rf.R` automatically fetches and caches WorldClim v2.1 bioclimatic rasters (`geodata::worldclim_global`) and SoilGrids 250m pedological rasters (`geodata::soil_world`) directly into `data/environmental/`. Alternatively, a pre-clipped GeoTIFF raster package covering the southeastern and midwestern United States study region can be unpacked from Zenodo:
    ```bash
    # Create target environmental directory
    mkdir -p data/environmental
 
-   # Download and unpack the Zenodo environmental raster archive
+   # (Optional) Download and unpack the Zenodo environmental raster archive
    tar -xzvf packera_environmental_rasters.tar.gz -C data/environmental/
    ```
 
@@ -465,7 +464,7 @@ python scripts/pipeline/02_segment_and_extract.py \
 
 - **Script:** [`scripts/morphometrics/03_fourier_extractor.R`](../scripts/morphometrics/03_fourier_extractor.R)
 - **Environment:** R 4.3+
-- **Purpose:** Ingests pre-homologized 2D contour coordinates from `data/contours/` and calibration metadata from `data/tables/extracted_leaf_manifest.csv`, computes calibrated physical millimeter Centroid Size ($\text{CS}_{\text{mm}}$) and oriented aspect ratio (`Momocs::coo_lw`), centers and scales outlines (`coo_center %>% coo_scale`), fits 12 harmonics of polarity-preserving Elliptic Fourier Analysis via `Momocs::efourier(..., norm = FALSE, start = FALSE)`, isolates the symmetric harmonic component ($A_n, D_n$), and aggregates medians by `(catalogNumber, plant_individual_id)`.
+- **Purpose:** Ingests pre-homologized 2D contour coordinates from `data/contours/` and calibration metadata from `data/tables/extracted_leaf_manifest.csv`, computes calibrated physical millimeter Centroid Size ($\text{CS}_{\text{mm}}$) and oriented aspect ratio (`Momocs::coo_lw`), centers and scales outlines (`coo_center %>% coo_scale`), fits 12 harmonics of polarity-preserving Elliptic Fourier Analysis via `Momocs::efourier(..., norm = FALSE, start = FALSE)`, isolates the symmetric harmonic component ($A_n, D_n$), aggregates medians by `(catalogNumber, plant_individual_id)`, and validates Tier 1 vs. Tier 2 reflection parity via `RRPP::lm.rrpp()` randomized residual permutation PERMANOVA (Collyer & Adams 2018; with automatic fallback to `vegan::adonis2()`).
 
 ```bash
 Rscript scripts/morphometrics/03_fourier_extractor.R \
@@ -480,6 +479,7 @@ Rscript scripts/morphometrics/03_fourier_extractor.R \
 **Key Outputs:**
 - `data/tables/leaf_efa_harmonics.csv`: Specimen-level median harmonic coefficients ($A_1\text{--}D_{12}$), PCA scores (`PC1`–`PC5`), and calibration columns grouped by `(catalogNumber, plant_individual_id)`.
 - `data/tables/leaf_efa_harmonics_individual.csv`: Individual leaf-level harmonic table preserving `leaf_id`, `centroid_size`, `log_centsize`, `pixels_per_mm`, and `is_calibrated_mm`.
+- `outputs/reports/tier_symmetry_validation.csv`: Tier 1 vs. Tier 2 reflection parity PERMANOVA validation report (`RRPP::lm.rrpp` / `vegan::adonis2`).
 
 ### 3.1 Symmetric Elliptic Fourier Analysis ($A_n, D_n$) & Reflection Parity
 Closed outline contours parameterized via Elliptic Fourier Analysis (EFA; Kuhl and Giardina 1982) represent perimeter coordinates as two periodic functions $x(t)$ and $y(t)$ decomposed into $N$ harmonic components:
@@ -490,10 +490,10 @@ When leaf contours are oriented along their longitudinal midrib vector ($\overri
 - **Symmetric Harmonic Coefficients ($A_n, D_n$):** Capture variations that are mathematically symmetric with respect to the midrib reflection axis.
 - **Asymmetric Harmonic Coefficients ($B_n, C_n$):** Capture asymmetric outline distortions, including biological fluctuating asymmetry (FA), developmental left-right skew, pressing shear, and petiole insertion curvature.
 
-**Methodological Mitigation:**
-In Tier 2 geometric routing, unoccluded hemi-blades are reflected across the midrib axis in OpenCV, creating a synthetically bilateral outline where $B_n \approx 0$ and $C_n \approx 0$. By isolating and analyzing exclusively the **symmetric harmonic component** ($A_n, D_n$) for PCA/CDA ordinations, the pipeline:
+**Methodological Mitigation & `RRPP` Permutation Validation:**
+In Tier 2 geometric routing, unoccluded hemi-blades are reflected across the midrib axis in OpenCV, creating a synthetically bilateral outline where $B_n \approx 0$ and $C_n \approx 0$. By isolating and analyzing exclusively the **symmetric harmonic component** ($A_n, D_n$) for PCA/CDA ordinations, and testing `sym_harmonics ~ scientificName + determiner_tier + reconstruction_tier` via high-speed C-level randomized residual permutation (`RRPP::lm.rrpp()`, Collyer & Adams 2018; with automatic fallback to `vegan::adonis2()`), the pipeline:
 1. Eliminates fluctuating asymmetry artifacts and press shear.
-2. Enforces mathematical parity between `"Tier_1_Direct"` intact leaves and `"Tier_2_Reflected"` leaves.
+2. Enforces and empirically verifies mathematical parity between `"Tier_1_Direct"` intact leaves and `"Tier_2_Reflected"` leaves ($R^2_{\text{tier}} < 0.01, p > 0.05$).
 3. Preserves full diagnostic outline discriminatory power across taxonomic lineages.
 
 ### 3.2 Base-to-Apex Contour Homologization, Polarity-Preserving EFA & Multi-Plant Aggregation
@@ -507,7 +507,7 @@ In Tier 2 geometric routing, unoccluded hemi-blades are reflected across the mid
 
 - **Script:** [`scripts/morphometrics/04_gmm_morphotools.R`](../scripts/morphometrics/04_gmm_morphotools.R)
 - **Environment:** R 4.3+
-- **Purpose:** Performs pooled within-species allometric regression (`lm(Y ~ log_centsize + scientificName)`) on ruler-calibrated Tier 1 Gold anchors (`is_calibrated_mm == TRUE`), fits unsupervised Gaussian Mixture Models (`mclust`) to compute Bayes Factors ($2\Delta \text{BIC}$), and projects unverified Tier 3 specimens passively into Canonical Discriminant Analysis space via `MorphoTools2` while enforcing a $1.0\times$ voucher-level voting weight per collection event.
+- **Purpose:** Performs high-speed C-level randomized residual permutation testing (`RRPP::lm.rrpp()` and `RRPP::pairwise()`; Collyer & Adams 2018; with automatic fallback to `vegan::adonis2()`) of `Y ~ log_centsize * scientificName` on ruler-calibrated (`is_calibrated_mm == TRUE`) Tier 1 Gold anchors, exports pairwise allometric trajectory angle ($\theta$) and magnitude comparisons to `outputs/reports/allometry_pairwise_trajectories.csv`, fits a pooled within-species allometric regression (`lm(Y ~ log_centsize + scientificName)`), performs wrapper variable selection via `clustvarsel::clustvarsel()` (Scrucca & Raftery 2018) to isolate the subset of EFA principal components carrying genuine clustering signal prior to fitting unsupervised Gaussian Mixture Models (`mclust::Mclust()`) to compute Bayes Factors ($2\Delta \text{BIC}$), and projects unverified Tier 3 specimens passively into Canonical Discriminant Analysis space via `MorphoTools2` while enforcing a $1.0\times$ voucher-level voting weight per collection event.
 
 ```bash
 Rscript scripts/morphometrics/04_gmm_morphotools.R \
@@ -521,7 +521,8 @@ Rscript scripts/morphometrics/04_gmm_morphotools.R \
 **Key Outputs:**
 - `data/tables/morphometric_flags.csv` (and backward-compatible alias `data/tables/morphometrics_misidentification_flags.csv`): CDA predicted taxa (`cda_predicted_taxon`), posterior probabilities (`cda_posterior_prob`), GMM clusters (`gmm_cluster`), and outlier flags (`morphometric_outlier_flag`).
 - `outputs/figures/cda_passive_projection.pdf` & `outputs/figures/shape_allometry_regression.pdf`: Publication-grade CDA biplot and allometric regression diagnostics.
-- `outputs/reports/gmm_bayes_factors_summary.csv` & `outputs/reports/allometry_significance_audit.csv`: Model selection table across $K=1 \dots 8$ components and ANOVA allometry audit.
+- `outputs/reports/gmm_bayes_factors_summary.csv`: Model selection table across $K=1 \dots 8$ components following `clustvarsel::clustvarsel()` PC subset selection.
+- `outputs/reports/allometry_significance_audit.csv` & `outputs/reports/allometry_pairwise_trajectories.csv`: Multivariate `RRPP::lm.rrpp()` / `vegan::adonis2()` ANOVA allometry audit and `RRPP::pairwise()` allometric trajectory angle ($\theta$) and magnitude comparisons.
 
 ---
 
@@ -565,7 +566,7 @@ To prevent non-biological batch effects from confounding taxonomic delimitation,
 
 - **Script:** [`scripts/analysis/06_multimodal_spatial_rf.R`](../scripts/analysis/06_multimodal_spatial_rf.R)
 - **Environment:** R 4.3+ (or orchestrate headlessly via `python main.py synthesis`)
-- **Purpose:** Merges voucher metadata, morphometric flags (`morphometric_flags.csv`), vision audits (`label_noise_audit.csv`), and optional phenological states (`voucher_phenological_states.csv`) via **`dplyr::left_join`** (preserving vegetative-only vouchers), fits spatial random forest models using Moran's Eigenvector Maps (MEMs), bioclimatic rasters (WorldClim 2.1), and pedological variables (SoilGrids 250m & 1:24,000 USDA SSURGO) to detect niche divergence and cross-modal consensus discordances. Pass `--demo` explicitly for offline synthetic testing (never cached to disk).
+- **Purpose:** Merges voucher metadata, morphometric flags (`morphometric_flags.csv`), vision audits (`label_noise_audit.csv`), and optional phenological states (`voucher_phenological_states.csv`) via **`dplyr::left_join`** (preserving vegetative-only vouchers). Automatically fetches and caches WorldClim v2.1 bioclimatic rasters (`geodata::worldclim_global`) and SoilGrids 250m pedological rasters (`geodata::soil_world`) into `data/environmental/` when local `.tif` files are not pre-staged, complements them with 1:24,000 USDA NRCS SSURGO vector map units (`soilDB`), computes positive-autocorrelation distance-based Moran's Eigenvector Maps via `adespatial::dbmem()`, fits multithreaded C++ Random Forests via `ranger::ranger()` (Wright & Ziegler 2017), partitions variance via `vegan::varpart()`, and evaluates spatially blocked 5-fold cross-validation accuracy via `blockCV::cv_spatial()` (`Spatial_Block_CV_Accuracy` alongside `OOB_Accuracy`; Valavi et al. 2019). Quantifies Schoener's $D$ and Warren's $I$ niche overlap and permutation equivalency tests in 2D kernel-smoothed environmental PCA space (`PCA-env`) corrected for background climate availability via `ecospat::ecospat.grid.clim.dyn()`, `ecospat::ecospat.niche.overlap()`, and `ecospat::ecospat.niche.equivalency.test()` (Broennimann et al. 2012). Pass `--demo` explicitly for offline synthetic testing (never cached to disk).
 
 ```bash
 # Recommended: Orchestrated end-to-end via unified CLI
@@ -585,8 +586,8 @@ Rscript scripts/analysis/06_multimodal_spatial_rf.R \
 **Key Outputs:**
 - `data/tables/multimodal_conflict_flags.csv`: Cross-modal consensus classifications (`edaphic_best_fit_taxon`, `multimodal_concordance`, `triage_category`).
 - `data/tables/ssurgo_edaphic_validation.csv`: Fine-scale 1:24,000 USDA NRCS SSURGO map unit and rock outcrop validation.
-- `outputs/figures/spatial_rf_niche_importance.pdf`: Variable importance and Moran's Eigenvector Maps.
-- `outputs/reports/multimodal_spatial_rf_summary.csv`: Warren's Niche Identity test statistics ($D$ and $I$).
+- `outputs/figures/spatial_rf_niche_importance.pdf`: Variable importance, dbMEMs, and `ecospat` niche equivalency plots.
+- `outputs/reports/multimodal_spatial_rf_summary.csv`: Pairwise `ecospat` `PCA-env` Schoener's $D$ and Warren's $I$ niche equivalency statistics alongside `ranger` `OOB_Accuracy` and `blockCV` `Spatial_Block_CV_Accuracy`.
 
 ### 6.1 Multi-Scale Micro-Edaphic Validation: Regional SoilGrids (250m) vs. USDA SSURGO (1:24,000)
 While regional macroecological modeling relies on 30-arcsecond WorldClim 2.1 bioclimatic rasters and 250m SoilGrids pedological rasters (pH in $\text{H}_2\text{O}$, cation exchange capacity [CEC], sand/clay fractions, bulk density), regional grids are insufficient to characterize localized edaphic endemics.
@@ -646,8 +647,8 @@ Rscript scripts/analysis/07_triage_dashboard_synthesis.R \
 
 ## 🔬 Methodological Highlights
 
-### Calibrated Millimeter Centroid Size & Pooled Within-Species Allometry
-To prevent plant stature, environmental vigor, or developmental stage from confounding taxonomic clusters while preserving true evolutionary size differences among species, Phase 3 computes calibrated physical millimeter Centroid Size ($\text{CS}_{\text{mm}} = \text{CS}_{\text{px}} / \text{pixels\_per\_mm}$) using LeafMachine2's 38-class Ruler Detector (`is_calibrated_mm == TRUE`). In Phase 4 (`04_gmm_morphotools.R`), rather than fitting a naive global regression across all taxa (which erases interspecific size differences via Simpson's paradox), the pipeline tests slope homogeneity (`lm(Y ~ log_centsize * scientificName)`) on calibrated Tier 1 Gold anchors and fits a **pooled within-species allometric regression** (`lm(Y ~ log_centsize + scientificName)`), extracting allometry-free residuals across all Tier 1 and Tier 2 specimens using the common within-group slope $\hat{\beta}_{\text{within}}$ (Klingenberg 2016).
+### Calibrated Millimeter Centroid Size, `RRPP` Allometry, `clustvarsel` GMMs & Pooled Within-Species Regression
+To prevent plant stature, environmental vigor, or developmental stage from confounding taxonomic clusters while preserving true evolutionary size differences among species, Phase 3 computes calibrated physical millimeter Centroid Size ($\text{CS}_{\text{mm}} = \text{CS}_{\text{px}} / \text{pixels\_per\_mm}$) using LeafMachine2's 38-class Ruler Detector (`is_calibrated_mm == TRUE`). In Phase 4 (`04_gmm_morphotools.R`), rather than fitting a naive global regression across all taxa (which erases interspecific size differences via Simpson's paradox), `test_and_correct_allometry()` uses `RRPP::lm.rrpp()` and `RRPP::pairwise()` (Collyer & Adams 2018; with automatic fallback to `vegan::adonis2()`) to test slope homogeneity (`Y ~ log_centsize * scientificName`) on calibrated Tier 1 Gold anchors and export pairwise allometric trajectory angle ($\theta$) and magnitude comparisons to `outputs/reports/allometry_pairwise_trajectories.csv`. It then fits a **pooled within-species allometric regression** (`lm(Y ~ log_centsize + scientificName)`), extracting allometry-free residuals across all Tier 1 and Tier 2 specimens using the common within-group slope $\hat{\beta}_{\text{within}}$ (Klingenberg 2016). Prior to unsupervised Gaussian Mixture Modeling (`mclust::Mclust()`), `clustvarsel::clustvarsel()` (Scrucca & Raftery 2018) selects the subset of EFA principal components carrying genuine clustering signal so uninformative higher-order PCs do not over-penalize `VVV` covariance structures or dilute Bayes Factor ($2\Delta\text{BIC}$) species discovery.
 
 ### Latitude-Adjusted Flowering Anomalies
 Testing temporal reproductive isolation independent of continental geographic latitudinal clines. Phenological flowering dates advance poleward across eastern North America at approximately 4.0 days per degree of latitude northward, consistent with Hopkins' Bioclimatic Law. By fitting an empirical baseline cline across verified blooming herbarium vouchers ($\text{DOY} = \beta_0 + \beta_1 \cdot \text{Latitude}$), the pipeline computes standardized phenological anomalies ($\Delta\text{DOY} = \text{DOY}_{\text{obs}} - \text{DOY}_{\text{expected}}$). This eliminates latitudinal confounding and enables rigorous ANOVA and Tukey HSD testing of temporal prezygotic reproductive isolation (allochronic divergence) among sympatric and parapatric taxa (Davis et al. 2015).
@@ -718,14 +719,19 @@ pytest scripts/tests/test_allometry_and_phenology.py
 ## 13. Key Literature & Citations
 
 1. Barkley, T. M. 1988. Variation among the Senecioneae (Asteraceae) in North America. *Brittonia* 40(2): 211–221. doi: 10.2307/2807005
-2. Davis, C. C., C. G. Willis, B. Connolly, C. Kelly, and A. M. Ellison. 2015. Herbarium records are a viable alternative to traditional phenological data for testing responses to climate change. *Journal of Ecology* 103(5): 1126–1134. doi: 10.1111/1365-2745.12457
-3. de Queiroz, K. 2007. Species concepts and species delimitation. *Systematic Biology* 56(6): 879–886. doi: 10.1080/10635150701701083
-4. Klingenberg, C. P. 2016. Size, shape, and form: concepts of allometry in geometric morphometrics. *Development Genes and Evolution* 226(3): 113–137. doi: 10.1007/s00427-016-0539-8
-5. Kowal, R. R. 1975. Systematics of *Senecio aureus* and allied species on the Gaspé Peninsula, Quebec. *Memoirs of the Torrey Botanical Club* 23(2): 1–113.
-6. Kuhl, F. P., and C. R. Giardina. 1982. Elliptic Fourier features of a closed contour. *Computer Graphics and Image Processing* 18(3): 236–258. doi: 10.1016/0146-664X(82)90034-X
-7. Mabberley, D. J., D. K. Trock, and A. S. Weakley. 2020. The nomenclature of *Packera dubia* (Asteraceae: Senecioneae). *Taxon* 69(6): 1334–1337. doi: 10.1002/tax.12351
-8. Northcutt, C. G., L. Jiang, and I. L. Chuang. 2021. Confident Learning: Estimating Uncertainty in Dataset Labels. *Journal of Artificial Intelligence Research* 70: 1373–1411. doi: 10.1613/jair.1.12125
-9. Šlenker, M., P. Koutecký, and P. Marhold. 2022. MorphoTools2: an R package for multivariate morphometric analysis. *Bioinformatics* 38(10): 2954–2955. doi: 10.1093/bioinformatics/btac173
-10. Trock, D. K. 2006. *Packera*. In Flora of North America Editorial Committee (eds.), *Flora of North America North of Mexico*, Vol. 20, 570–602. Oxford University Press, New York.
-11. Weakley, A. S. 2026. *Flora of the Southeastern United States*. University of North Carolina Herbarium (NCU), North Carolina Botanical Garden, Chapel Hill.
-12. Weaver, W. N., P. S. Ng, and R. LaFrance. 2024. LeafMachine2: Using machine learning to rapidly measure plant traits captured in herbarium specimens. *Applications in Plant Sciences* 12(1): e11545. doi: 10.1002/aps3.11545
+2. Broennimann, O., et al. 2012. Measuring ecological niche overlap from occurrence and spatial environmental data. *Global Ecology and Biogeography* 21(4): 481–497.
+3. Collyer, M. L., and D. C. Adams. 2018. RRPP: An R package for fitting linear models to high-dimensional data using residual randomization. *Methods in Ecology and Evolution* 9(7): 1772–1779.
+4. Davis, C. C., C. G. Willis, B. Connolly, C. Kelly, and A. M. Ellison. 2015. Herbarium records are a viable alternative to traditional phenological data for testing responses to climate change. *Journal of Ecology* 103(5): 1126–1134. doi: 10.1111/1365-2745.12457
+5. de Queiroz, K. 2007. Species concepts and species delimitation. *Systematic Biology* 56(6): 879–886. doi: 10.1080/10635150701701083
+6. Klingenberg, C. P. 2016. Size, shape, and form: concepts of allometry in geometric morphometrics. *Development Genes and Evolution* 226(3): 113–137. doi: 10.1007/s00427-016-0539-8
+7. Kowal, R. R. 1975. Systematics of *Senecio aureus* and allied species on the Gaspé Peninsula, Quebec. *Memoirs of the Torrey Botanical Club* 23(2): 1–113.
+8. Kuhl, F. P., and C. R. Giardina. 1982. Elliptic Fourier features of a closed contour. *Computer Graphics and Image Processing* 18(3): 236–258. doi: 10.1016/0146-664X(82)90034-X
+9. Mabberley, D. J., D. K. Trock, and A. S. Weakley. 2020. The nomenclature of *Packera dubia* (Asteraceae: Senecioneae). *Taxon* 69(6): 1334–1337. doi: 10.1002/tax.12351
+10. Northcutt, C. G., L. Jiang, and I. L. Chuang. 2021. Confident Learning: Estimating Uncertainty in Dataset Labels. *Journal of Artificial Intelligence Research* 70: 1373–1411. doi: 10.1613/jair.1.12125
+11. Scrucca, L., and A. E. Raftery. 2018. clustvarsel: A package implementing variable selection for Gaussian model-based clustering in R. *Journal of Statistical Software* 84(1): 1–28.
+12. Šlenker, M., P. Koutecký, and P. Marhold. 2022. MorphoTools2: an R package for multivariate morphometric analysis. *Bioinformatics* 38(10): 2954–2955. doi: 10.1093/bioinformatics/btac173
+13. Trock, D. K. 2006. *Packera*. In Flora of North America Editorial Committee (eds.), *Flora of North America North of Mexico*, Vol. 20, 570–602. Oxford University Press, New York.
+14. Valavi, R., J. Elith, J. J. Lahoz-Monfort, and G. Guillera-Arroita. 2019. blockCV: An R package for generating spatially or environmentally separated folds for k-fold cross-validation of species distribution models. *Methods in Ecology and Evolution* 10(2): 225–232.
+15. Weakley, A. S. 2026. *Flora of the Southeastern United States*. University of North Carolina Herbarium (NCU), North Carolina Botanical Garden, Chapel Hill.
+16. Weaver, W. N., P. S. Ng, and R. LaFrance. 2024. LeafMachine2: Using machine learning to rapidly measure plant traits captured in herbarium specimens. *Applications in Plant Sciences* 12(1): e11545. doi: 10.1002/aps3.11545
+17. Wright, M. N., and A. Ziegler. 2017. ranger: A fast implementation of random forests for high dimensional data in C++ and R. *Journal of Statistical Software* 77(1): 1–17.

@@ -9,7 +9,7 @@
 
 ## 📋 Overview
 
-The computational pipeline couples automated deep learning morphometrics (LeafMachine2 / PointRend), interactive Segment Anything Model 2 (SAM 2) annotation, high-throughput OpenCV geometric symmetry reconstruction, and R statistical morphometrics (`Momocs`, `MorphoTools2`).
+The computational pipeline couples automated deep learning morphometrics (LeafMachine2 / PointRend), interactive Segment Anything Model 2 (SAM 2) annotation, high-throughput OpenCV geometric symmetry reconstruction, and R statistical morphometrics and spatial macroecology (`Momocs`, `MorphoTools2`, `RRPP`, `mclust`, `clustvarsel`, `geodata`, `ranger`, `adespatial`, `blockCV`, `ecospat`).
 
 While developed natively on Linux, **Windows Subsystem for Linux (WSL 2)** provides first-class support for the entire pipeline on Windows machines. With modern WSL 2:
 - **NVIDIA GPU Acceleration:** Direct pass-through of CUDA cores and Tensor cores to PyTorch and LeafMachine2 via the Windows host display driver.
@@ -28,7 +28,7 @@ While developed natively on Linux, **Windows Subsystem for Linux (WSL 2)** provi
 | **4** | Clone to Native ext4 | Ubuntu (WSL) | `cd ~ && git clone ...` (Avoid `/mnt/c/`) |
 | **5** | Install System Packages | Ubuntu (WSL) | `sudo apt-get install -y libgl1 libglib2.0-0 r-base ...` |
 | **6** | Configure Python & LM2 | Ubuntu (WSL) | `source .venv/bin/activate && bash setup_leafmachine2.sh` |
-| **7** | Configure R Packages | Ubuntu (WSL) | `sudo Rscript -e 'install.packages(...)'` |
+| **7** | Configure R Packages | Ubuntu (WSL) | `Rscript -e 'install.packages(...); remotes::install_github("MomX/Momocs")'` |
 | **8** | Launch in VS Code | Ubuntu (WSL) | `code .` (WSL extension) |
 
 ---
@@ -168,14 +168,10 @@ python main.py check-env
 
 ## Step 6: R Statistical Computing Environment
 
-Install the required R packages for Elliptic Fourier Analysis (`Momocs`), Gaussian Mixture Models (`mclust`), and Canonical Discriminant Analysis (`MorphoTools2`):
+Install the required R packages for Elliptic Fourier Analysis (`Momocs`, installed via `remotes::install_github("MomX/Momocs")` following its March 2026 CRAN archival), randomized residual permutation (`RRPP`), Gaussian Mixture Models with variable selection (`mclust`, `clustvarsel`), Canonical Discriminant Analysis (`MorphoTools2`), and spatial macroecology (`terra`, `sf`, `geodata`, `soilDB`, `spatialRF`, `ranger`, `adespatial`, `blockCV`, `ecospat`, `ENMTools`, `patchwork`, `viridis`):
 
 ```bash
-# Install CRAN dependencies
-sudo Rscript -e 'install.packages(c("Momocs", "mclust", "terra", "tidyverse", "sf", "ggplot2", "patchwork", "gridExtra", "optparse", "remotes"), repos="https://cloud.r-project.org/")'
-
-# Install specialized morphometrics and macroecological packages from GitHub
-sudo Rscript -e 'remotes::install_github(c("V-Z/MorphoTools2", "danlwarren/ENMTools", "blasbenito/spatialRF"))'
+Rscript -e 'install.packages(c("remotes", "tidyverse", "optparse", "mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "terra", "sf", "geodata", "soilDB", "spatialRF", "ranger", "adespatial", "blockCV", "ecospat", "ENMTools", "patchwork", "viridis"), repos="https://cloud.r-project.org"); if (!requireNamespace("Momocs", quietly=TRUE)) remotes::install_github("MomX/Momocs")'
 ```
 
 ---

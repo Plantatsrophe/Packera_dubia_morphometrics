@@ -349,6 +349,10 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             'grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE)',
             content,
         )
+        self.assertIn("RRPP::lm.rrpp", content)
+        self.assertIn("RRPP::pairwise", content)
+        self.assertIn("allometry_pairwise_trajectories.csv", content)
+        self.assertIn("clustvarsel::clustvarsel", content)
 
         # Verify zero dropped Tier 1/2 specimens in morphometric_flags.csv
         flags_path = PROJECT_ROOT / "data" / "tables" / "morphometric_flags.csv"

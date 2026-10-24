@@ -22,6 +22,7 @@
 
 suppressPackageStartupMessages({
   if (requireNamespace("Momocs", quietly = TRUE)) library(Momocs)
+  if (requireNamespace("RRPP", quietly = TRUE)) library(RRPP)
   if (requireNamespace("vegan", quietly = TRUE)) library(vegan)
   if (requireNamespace("ggplot2", quietly = TRUE)) library(ggplot2)
   if (requireNamespace("dplyr", quietly = TRUE)) library(dplyr)
@@ -644,22 +645,43 @@ run_fourier_extraction <- function(opts) {
     set.seed(opts$seed)
     permanova_df <- NULL
 
-    if (requireNamespace("vegan", quietly = TRUE)) {
-      message(sprintf("Executing vegan::adonis2 (permutations = %d, seed = %d)...",
-                      opts$permutations, opts$seed))
-      ad_res <- tryCatch({
-        vegan::adonis2(
-          tier_sym ~ scientificName + determiner_tier + reconstruction_tier,
-          data = tier_manifest,
-          permutations = opts$permutations,
-          method = "euclidean",
-          by = "terms"
+    if (requireNamespace("RRPP", quietly = TRUE)) {
+      message(sprintf("Executing RRPP::lm.rrpp (iter = %d, seed = %d)...", opts$permutations, opts$seed))
+      rrpp_res <- tryCatch({
+        rdf <- RRPP::rrpp.data.frame(
+          tier_sym = as.matrix(tier_sym),
+          scientificName = tier_manifest$scientificName,
+          determiner_tier = tier_manifest$determiner_tier,
+          reconstruction_tier = tier_manifest$reconstruction_tier
         )
+        fit_rrpp <- RRPP::lm.rrpp(
+          tier_sym ~ scientificName + determiner_tier + reconstruction_tier,
+          data = rdf, iter = opts$permutations, print.progress = FALSE
+        )
+        anova(fit_rrpp)$table
+      }, error = function(e) {
+        warning("RRPP::lm.rrpp encountered an issue: ", e$message, ". Falling back to vegan::adonis2().")
+        NULL
+      })
+      if (!is.null(rrpp_res)) {
+        permanova_df <- as.data.frame(rrpp_res)
+        permanova_df$Term <- rownames(permanova_df)
+        rownames(permanova_df) <- NULL
+        if ("SS" %in% names(permanova_df)) permanova_df$SumOfSqs <- permanova_df$SS
+        if ("Rsq" %in% names(permanova_df)) permanova_df$R2 <- permanova_df$Rsq
+        if ("Pr(>F)" %in% names(permanova_df)) permanova_df$p_value <- permanova_df[["Pr(>F)"]]
+      }
+    }
+
+    if (is.null(permanova_df) && requireNamespace("vegan", quietly = TRUE)) {
+      message(sprintf("Executing vegan::adonis2 (permutations = %d, seed = %d)...", opts$permutations, opts$seed))
+      ad_res <- tryCatch({
+        vegan::adonis2(tier_sym ~ scientificName + determiner_tier + reconstruction_tier,
+                       data = tier_manifest, permutations = opts$permutations, method = "euclidean", by = "terms")
       }, error = function(e) {
         warning("vegan::adonis2 encountered an issue: ", e$message, ". Falling back to stats::manova().")
         NULL
       })
-
       if (!is.null(ad_res)) {
         permanova_df <- as.data.frame(ad_res)
         permanova_df$Term <- rownames(permanova_df)
@@ -669,43 +691,22 @@ run_fourier_extraction <- function(opts) {
       }
     }
 
-    # Defensive fallback if vegan is not available or encountered an error
+    # Defensive fallback if RRPP/vegan are not available or encountered an error
     if (is.null(permanova_df)) {
       message("vegan package not available; executing defensive fallback using analytical sequential SS decomposition...")
-      Y <- as.matrix(tier_sym)
-      Y_cent <- scale(Y, center = TRUE, scale = FALSE)
-      SS_tot <- sum(Y_cent^2)
-      N_obs <- nrow(tier_manifest)
-
+      Y <- as.matrix(tier_sym); Y_cent <- scale(Y, center = TRUE, scale = FALSE)
+      SS_tot <- sum(Y_cent^2); N_obs <- nrow(tier_manifest)
       fit1 <- stats::lm(Y_cent ~ scientificName, data = tier_manifest)
-      Y_hat1 <- stats::fitted(fit1)
-      SS_sp <- sum(Y_hat1^2)
-      df_sp <- fit1$rank - 1
-
+      SS_sp <- sum(stats::fitted(fit1)^2); df_sp <- fit1$rank - 1
       fit2 <- stats::lm(Y_cent ~ scientificName + determiner_tier, data = tier_manifest)
-      Y_hat2 <- stats::fitted(fit2)
-      SS_12 <- sum(Y_hat2^2)
-      SS_det <- SS_12 - SS_sp
-      df_det <- fit2$rank - fit1$rank
-
+      SS_12 <- sum(stats::fitted(fit2)^2); SS_det <- SS_12 - SS_sp; df_det <- fit2$rank - fit1$rank
       fit3 <- stats::lm(Y_cent ~ scientificName + determiner_tier + reconstruction_tier, data = tier_manifest)
-      Y_hat3 <- stats::fitted(fit3)
-      SS_123 <- sum(Y_hat3^2)
-      SS_tier <- SS_123 - SS_12
-      df_tier <- fit3$rank - fit2$rank
-
-      SS_res <- SS_tot - SS_123
-      df_res <- N_obs - fit3$rank
-
-      MS_res <- SS_res / max(df_res, 1)
-      F_sp <- (SS_sp / max(df_sp, 1)) / MS_res
-      F_det <- (SS_det / max(df_det, 1)) / MS_res
-      F_tier <- (SS_tier / max(df_tier, 1)) / MS_res
-
+      SS_123 <- sum(stats::fitted(fit3)^2); SS_tier <- SS_123 - SS_12; df_tier <- fit3$rank - fit2$rank
+      SS_res <- SS_tot - SS_123; df_res <- N_obs - fit3$rank; MS_res <- SS_res / max(df_res, 1)
+      F_sp <- (SS_sp / max(df_sp, 1)) / MS_res; F_det <- (SS_det / max(df_det, 1)) / MS_res; F_tier <- (SS_tier / max(df_tier, 1)) / MS_res
       p_sp <- stats::pf(F_sp, df_sp, df_res, lower.tail = FALSE)
       p_det <- stats::pf(F_det, df_det, df_res, lower.tail = FALSE)
       p_tier <- stats::pf(F_tier, df_tier, df_res, lower.tail = FALSE)
-
       permanova_df <- data.frame(
         Term = c("scientificName", "determiner_tier", "reconstruction_tier", "Residual", "Total"),
         Df = c(df_sp, df_det, df_tier, df_res, N_obs - 1),

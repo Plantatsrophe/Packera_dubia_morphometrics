@@ -159,15 +159,26 @@ def check_environment(args: Optional[argparse.Namespace] = None) -> bool:
     print("\n[2/4] R Runtime & Statistical Packages:")
     rscript_bin = shutil.which("Rscript")
     required_r_pkgs = ['Momocs', 'mclust', 'MorphoTools2', 'spatialRF', 'terra', 'tidyverse', 'optparse']
-    r_pkg_str = ", ".join(f"'{p}'" for p in required_r_pkgs)
+    optional_r_pkgs = ['RRPP', 'clustvarsel', 'geodata', 'ranger', 'adespatial', 'blockCV', 'ecospat']
+    cran_r_pkgs = [
+        "remotes", "tidyverse", "optparse", "mclust", "clustvarsel", "MorphoTools2",
+        "RRPP", "vegan", "terra", "sf", "geodata", "soilDB", "spatialRF", "ranger",
+        "adespatial", "blockCV", "ecospat", "ENMTools", "patchwork", "viridis",
+    ]
+    cran_pkg_str = ", ".join(f'"{p}"' for p in cran_r_pkgs)
+    remediation_two_step = (
+        f"Rscript -e 'install.packages(c({cran_pkg_str}), repos=\"https://cloud.r-project.org\"); "
+        "if (!requireNamespace(\"Momocs\", quietly=TRUE)) remotes::install_github(\"MomX/Momocs\")'"
+    )
 
     if not rscript_bin:
         print("  [FAIL] 'Rscript' binary not found in system $PATH.")
         print("         R (>= 4.3) is required for Momocs, MorphoTools2, and spatialRF.")
         print("         Remediation:")
         print("           1. Install R (>= 4.3) via system package manager (e.g., apt-get install r-base r-base-dev).")
-        print(f"           2. Install required packages:")
-        print(f"              Rscript -e \"install.packages(c({r_pkg_str}), repos='https://cloud.r-project.org')\"")
+        print("           2. Install required CRAN packages and Momocs (from GitHub):")
+        print(f"              {remediation_two_step}")
+        print("              Rscript -e 'remotes::install_github(\"MomX/Momocs\")'")
         critical_failure = True
     else:
         try:
@@ -185,7 +196,12 @@ def check_environment(args: Optional[argparse.Namespace] = None) -> bool:
 
         r_probe_cmd = (
             "pkgs <- c('Momocs', 'mclust', 'MorphoTools2', 'spatialRF', 'terra', 'tidyverse', 'optparse'); "
+            "opt_pkgs <- c('RRPP', 'clustvarsel', 'geodata', 'ranger', 'adespatial', 'blockCV', 'ecospat'); "
             "missing <- pkgs[!sapply(pkgs, requireNamespace, quietly=TRUE)]; "
+            "opt_ok <- opt_pkgs[sapply(opt_pkgs, requireNamespace, quietly=TRUE)]; "
+            "opt_miss <- opt_pkgs[!sapply(opt_pkgs, requireNamespace, quietly=TRUE)]; "
+            "cat('OPT_INSTALLED:', paste(opt_ok, collapse=','), fill=TRUE); "
+            "cat('OPT_MISSING:', paste(opt_miss, collapse=','), fill=TRUE); "
             "if(length(missing)>0) { cat('MISSING:', paste(missing, collapse=','), fill=TRUE); quit(status=1) } "
             "else { cat('ALL_INSTALLED', fill=TRUE); quit(status=0) }"
         )
@@ -194,10 +210,28 @@ def check_environment(args: Optional[argparse.Namespace] = None) -> bool:
                 [rscript_bin, "-e", r_probe_cmd],
                 capture_output=True, text=True, timeout=10,
             )
+            combined_out = probe_proc.stdout + "\n" + probe_proc.stderr
+            opt_installed: List[str] = list(optional_r_pkgs)
+            opt_missing: List[str] = []
+            for line in combined_out.splitlines():
+                if "OPT_INSTALLED:" in line:
+                    part = line.split("OPT_INSTALLED:", 1)[1].strip()
+                    opt_installed = [p.strip() for p in part.split(",") if p.strip()]
+                elif "OPT_MISSING:" in line:
+                    part = line.split("OPT_MISSING:", 1)[1].strip()
+                    opt_missing = [p.strip() for p in part.split(",") if p.strip()]
+
             if probe_proc.returncode == 0 and "ALL_INSTALLED" in probe_proc.stdout:
                 print(f"  [PASS] Required R packages verified: {', '.join(required_r_pkgs)}")
+                if not opt_missing:
+                    print(f"  [PASS] Optional high-performance R packages verified: {', '.join(opt_installed)}")
+                else:
+                    print(
+                        f"  [INFO] Optional high-performance R packages installed: "
+                        f"{', '.join(opt_installed) if opt_installed else 'none'} "
+                        f"(optional missing: {', '.join(opt_missing)})"
+                    )
             else:
-                combined_out = probe_proc.stdout + " " + probe_proc.stderr
                 missing_pkgs: List[str] = []
                 for line in combined_out.splitlines():
                     if "MISSING:" in line:
@@ -208,9 +242,14 @@ def check_environment(args: Optional[argparse.Namespace] = None) -> bool:
                     missing_pkgs = required_r_pkgs
 
                 print(f"  [FAIL] Missing R package(s): {', '.join(missing_pkgs)}")
-                missing_quoted = ", ".join(f"'{p}'" for p in missing_pkgs)
-                print("         Remediation:")
-                print(f"           Rscript -e \"install.packages(c({missing_quoted}), repos='https://cloud.r-project.org')\"")
+                print(
+                    f"  [INFO] Optional high-performance R packages installed: "
+                    f"{', '.join(opt_installed) if opt_installed else 'none'}"
+                )
+                print("         Remediation (install CRAN packages, then Momocs from GitHub):")
+                print(f"           {remediation_two_step}")
+                if "Momocs" in missing_pkgs:
+                    print("         Momocs remediation (archived on CRAN): Rscript -e 'remotes::install_github(\"MomX/Momocs\")'")
                 critical_failure = True
         except subprocess.TimeoutExpired:
             print("  [FAIL] R package validation probe timed out (>10s).")

@@ -267,7 +267,8 @@ class TestMainPipelineCLI(unittest.TestCase):
 
     def test_check_environment_missing_rscript(self):
         """Verify check_environment() reports failure when Rscript is missing from PATH."""
-        with patch("shutil.which", return_value=None):
+        with patch("shutil.which", return_value=None), \
+             patch("main.ensure_model_weights", return_value=Path("/tmp/mock.pth")):
             result = main.check_environment()
             self.assertFalse(result)
 
@@ -279,9 +280,13 @@ class TestMainPipelineCLI(unittest.TestCase):
             stderr="",
         )
         with patch("shutil.which", return_value="/usr/bin/Rscript"), \
-             patch("subprocess.run", return_value=missing_probe):
+             patch("subprocess.run", return_value=missing_probe), \
+             patch("main.ensure_model_weights", return_value=Path("/tmp/mock.pth")):
             result = main.check_environment()
             self.assertFalse(result)
+        main_src = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn("remotes::install_github", main_src)
+        self.assertIn("MomX/Momocs", main_src)
 
 
     def test_get_lm2_python_executable_unix(self):

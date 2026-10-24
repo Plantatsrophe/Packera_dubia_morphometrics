@@ -161,6 +161,10 @@ class TestFourierExtractor(unittest.TestCase):
             actual_specimens = set(zip(spec_df["catalogNumber"].astype(str), spec_df["plant_individual_id"].astype(int)))
             self.assertEqual(expected_specimens, actual_specimens, "Zero closed-silhouette Tier 1/2 specimens may be dropped during specimen aggregation")
 
+        r_content = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("RRPP::lm.rrpp", r_content)
+        self.assertIn("RRPP::rrpp.data.frame", r_content)
+
 
 if __name__ == "__main__":
     unittest.main()

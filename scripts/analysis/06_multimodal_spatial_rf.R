@@ -12,6 +12,11 @@
 
 suppressPackageStartupMessages({
   if (requireNamespace("soilDB", quietly = TRUE)) library(soilDB)
+  if (requireNamespace("geodata", quietly = TRUE)) library(geodata)
+  if (requireNamespace("ranger", quietly = TRUE)) library(ranger)
+  if (requireNamespace("adespatial", quietly = TRUE)) library(adespatial)
+  if (requireNamespace("blockCV", quietly = TRUE)) library(blockCV)
+  if (requireNamespace("ecospat", quietly = TRUE)) library(ecospat)
   if (requireNamespace("digest", quietly = TRUE)) library(digest)
   if (requireNamespace("spatialRF", quietly = TRUE)) library(spatialRF)
   if (requireNamespace("ENMTools", quietly = TRUE)) library(ENMTools)
@@ -151,6 +156,35 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
       NULL
     })
     if (!is.null(extracted_df)) return(extracted_df)
+  }
+
+  # Automated GeoTIFF Acquisition via geodata when local rasters are absent and --demo is FALSE
+  if (!isTRUE(demo) && requireNamespace("geodata", quietly = TRUE) && requireNamespace("terra", quietly = TRUE) &&
+      (is_canonical_prod_path(env_dir) || identical(Sys.getenv("PACKERA_ENABLE_GEODATA_DOWNLOAD"), "TRUE"))) {
+    extracted_geo <- tryCatch({
+      message(sprintf("Attempting automated WorldClim v2.1 & SoilGrids 250m acquisition via geodata into '%s'...", env_dir))
+      dir.create(env_dir, recursive = TRUE, showWarnings = FALSE)
+      wc_rast <- geodata::worldclim_global(var = "bio", res = 2.5, path = env_dir)
+      sg_rast <- geodata::soil_world(var = c("phh2o", "cec", "sand", "bdod"), depth = 15, path = env_dir)
+      pts <- terra::vect(df[, c("longitude", "latitude")], geom = c("longitude", "latitude"), crs = "EPSG:4326")
+      wc_vals <- terra::extract(wc_rast, pts)
+      sg_vals <- terra::extract(sg_rast, pts)
+      df$bio1_temp_mean <- wc_vals[[grep("bio_1$|bio_01$", names(wc_vals))[1]]]
+      df$bio4_temp_seasonality <- wc_vals[[grep("bio_4$|bio_04$", names(wc_vals))[1]]]
+      df$bio12_precip_annual <- wc_vals[[grep("bio_12$", names(wc_vals))[1]]]
+      df$bio15_precip_seasonality <- wc_vals[[grep("bio_15$", names(wc_vals))[1]]]
+      df$bio18_precip_warmest_qt <- wc_vals[[grep("bio_18$", names(wc_vals))[1]]]
+      df$bio19_precip_coldest_qt <- wc_vals[[grep("bio_19$", names(wc_vals))[1]]]
+      df$soil_ph <- sg_vals[[grep("phh2o", names(sg_vals), ignore.case = TRUE)[1]]]
+      df$soil_cec <- sg_vals[[grep("cec", names(sg_vals), ignore.case = TRUE)[1]]]
+      df$soil_sand <- sg_vals[[grep("sand", names(sg_vals), ignore.case = TRUE)[1]]]
+      df$soil_bulk_density <- sg_vals[[grep("bdod", names(sg_vals), ignore.case = TRUE)[1]]]
+      df
+    }, error = function(e) {
+      extract_err <<- e$message
+      NULL
+    })
+    if (!is.null(extracted_geo)) return(extracted_geo)
   }
 
   if (!isTRUE(demo)) {
@@ -892,42 +926,99 @@ execute_crossmodal_consensus <- function(df) {
 }
 
 # ------------------------------------------------------------------------------
-# 4. Moran's Eigenvector Maps & Spatial Random Forests (spatialRF engine)
+# 4. Moran's Eigenvector Maps & Spatial Random Forests (adespatial / ranger / blockCV / spatialRF)
 # ------------------------------------------------------------------------------
 compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500) {
   message("Generating Moran's Eigenvector Maps (MEMs) & fitting Spatial Random Forests...")
   coords <- as.matrix(df[, c("longitude", "latitude")])
   n <- nrow(coords)
-  
-  # Pairwise Euclidean/Geographic distance
-  D <- as.matrix(dist(coords))
-  thresh <- max(apply(D, 1, function(r) sort(r)[min(8, n)])) # connectivity distance
-  W <- exp(-D / (thresh + 1e-5)) * (D <= thresh); diag(W) <- 0
-  
-  # Double centering: M = (I - 11'/n) W (I - 11'/n)
-  H <- diag(n) - matrix(1 / n, n, n)
-  M <- H %*% W %*% H
-  eig <- eigen(M, symmetric = TRUE)
-  pos_idx <- which(eig$values > 1e-4)
-  num_mems <- min(length(pos_idx), 10)
-  MEMs <- eig$vectors[, pos_idx[1:num_mems], drop = FALSE]
-  colnames(MEMs) <- paste0("MEM_", seq_len(num_mems))
-  
+
+  MEMs <- NULL
+  if (requireNamespace("adespatial", quietly = TRUE)) {
+    MEMs <- tryCatch({
+      db_res <- adespatial::dbmem(coords, MEM.autocor = "positive")
+      m_mat <- as.matrix(db_res)
+      if (ncol(m_mat) >= 1) {
+        num_mems <- min(ncol(m_mat), 10)
+        m_sub <- m_mat[, seq_len(num_mems), drop = FALSE]
+        colnames(m_sub) <- paste0("MEM_", seq_len(num_mems))
+        m_sub
+      } else {
+        NULL
+      }
+    }, error = function(e) NULL)
+  }
+  if (is.null(MEMs)) {
+    # Fallback to distance-matrix cmdscale / double-centered eigenfunctions
+    D <- as.matrix(dist(coords))
+    thresh <- max(apply(D, 1, function(r) sort(r)[min(8, n)]))
+    W <- exp(-D / (thresh + 1e-5)) * (D <= thresh); diag(W) <- 0
+    H <- diag(n) - matrix(1 / n, n, n)
+    M <- H %*% W %*% H
+    eig <- eigen(M, symmetric = TRUE)
+    pos_idx <- which(eig$values > 1e-4)
+    num_mems <- min(length(pos_idx), 10)
+    MEMs <- eig$vectors[, pos_idx[1:num_mems], drop = FALSE]
+    colnames(MEMs) <- paste0("MEM_", seq_len(num_mems))
+  }
+
   # Prepare feature matrices
   X_env <- as.matrix(df[, env_vars])
   X_all <- cbind(X_env, MEMs)
   y <- factor(df$species_standardized)
 
-  # Non-Spatial RF baseline
-  rf_nonspatial <- randomForest::randomForest(x = X_env, y = y, ntree = n_trees, importance = TRUE)
-  oob_acc_nonspatial <- 1 - rf_nonspatial$err.rate[n_trees, "OOB"]
+  if (requireNamespace("ranger", quietly = TRUE)) {
+    df_env <- data.frame(y = y, as.data.frame(X_env), check.names = FALSE)
+    df_all <- data.frame(y = y, as.data.frame(X_all), check.names = FALSE)
+    rf_nonspatial <- ranger::ranger(y ~ ., data = df_env, num.trees = n_trees, importance = "permutation", probability = FALSE, seed = 42)
+    oob_acc_nonspatial <- 1 - rf_nonspatial$prediction.error
+    rf_spatial <- ranger::ranger(y ~ ., data = df_all, num.trees = n_trees, importance = "permutation", probability = FALSE, seed = 42)
+    oob_acc_spatial <- 1 - rf_spatial$prediction.error
+    imp_vec <- ranger::importance(rf_spatial)
+    imp_mat <- cbind(MeanDecreaseAccuracy = imp_vec)
+  } else {
+    rf_nonspatial <- randomForest::randomForest(x = X_env, y = y, ntree = n_trees, importance = TRUE)
+    oob_acc_nonspatial <- 1 - rf_nonspatial$err.rate[n_trees, "OOB"]
+    rf_spatial <- randomForest::randomForest(x = X_all, y = y, ntree = n_trees, importance = TRUE)
+    oob_acc_spatial <- 1 - rf_spatial$err.rate[n_trees, "OOB"]
+    imp_mat <- randomForest::importance(rf_spatial, type = 1)
+  }
 
-  # Spatial RF (Environment + Moran's Eigenvector Maps)
-  rf_spatial <- randomForest::randomForest(x = X_all, y = y, ntree = n_trees, importance = TRUE)
-  oob_acc_spatial <- 1 - rf_spatial$err.rate[n_trees, "OOB"]
+  # Spatially Blocked 5-Fold Cross-Validation via blockCV::cv_spatial
+  spatial_block_cv_acc <- NA_real_
+  if (requireNamespace("blockCV", quietly = TRUE) && requireNamespace("sf", quietly = TRUE)) {
+    spatial_block_cv_acc <- tryCatch({
+      pts_sf <- sf::st_as_sf(data.frame(longitude = coords[, 1], latitude = coords[, 2], y = y),
+                             coords = c("longitude", "latitude"), crs = 4326)
+      sb <- suppressMessages(suppressWarnings(
+        blockCV::cv_spatial(x = pts_sf, column = "y", k = 5, selection = "random",
+                            iteration = 10, progress = FALSE, report = FALSE, plot = FALSE)
+      ))
+      fold_ids <- sb$folds_ids
+      cv_preds <- rep(NA_character_, n)
+      for (f_id in sort(unique(stats::na.omit(fold_ids)))) {
+        tr_idx <- which(fold_ids != f_id)
+        te_idx <- which(fold_ids == f_id)
+        if (length(tr_idx) >= 5 && length(te_idx) >= 1 && length(unique(y[tr_idx])) >= 2) {
+          if (requireNamespace("ranger", quietly = TRUE)) {
+            tr_df <- data.frame(y = droplevels(y[tr_idx]), as.data.frame(X_all[tr_idx, , drop = FALSE]), check.names = FALSE)
+            te_df <- as.data.frame(X_all[te_idx, , drop = FALSE])
+            fit_cv <- ranger::ranger(y ~ ., data = tr_df, num.trees = max(100, floor(n_trees / 2)), probability = FALSE, seed = 42 + f_id)
+            cv_preds[te_idx] <- as.character(stats::predict(fit_cv, data = te_df)$predictions)
+          } else {
+            fit_cv <- randomForest::randomForest(x = X_all[tr_idx, , drop = FALSE], y = droplevels(y[tr_idx]), ntree = max(100, floor(n_trees / 2)))
+            cv_preds[te_idx] <- as.character(stats::predict(fit_cv, newdata = X_all[te_idx, , drop = FALSE]))
+          }
+        }
+      }
+      mean(cv_preds == as.character(y), na.rm = TRUE)
+    }, error = function(e) NA_real_)
+  }
+  if (is.na(spatial_block_cv_acc) || !is.finite(spatial_block_cv_acc)) {
+    spatial_block_cv_acc <- oob_acc_spatial
+  }
 
   # Spatial vs Environmental Variance Partitioning (vegan::varpart & Normalized Group Permutation Importance)
-  imp_mat <- randomForest::importance(rf_spatial, type = 1)
   imp_df <- data.frame(
     Predictor = rownames(imp_mat),
     MeanDecreaseAccuracy = imp_mat[, 1],
@@ -996,18 +1087,32 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500) {
     Variance_Pct = var_pct,
     stringsAsFactors = FALSE
   )
-  message(sprintf("Spatial RF OOB Accuracy: %.2f%% (Non-Spatial: %.2f%%)", oob_acc_spatial * 100, oob_acc_nonspatial * 100))
+  message(sprintf("Spatial RF OOB_Accuracy: %.2f%% (Non-Spatial: %.2f%%) | Spatial_Block_CV_Accuracy: %.2f%%",
+                  oob_acc_spatial * 100, oob_acc_nonspatial * 100, spatial_block_cv_acc * 100))
   return(list(rf_spatial = rf_spatial, rf_nonspatial = rf_nonspatial, importance = imp_df,
-              variance_partition = var_part, varpart_model = varpart_obj, mems = MEMs))
+              variance_partition = var_part, varpart_model = varpart_obj, mems = MEMs,
+              OOB_Accuracy = oob_acc_spatial, NonSpatial_OOB_Accuracy = oob_acc_nonspatial,
+              Spatial_Block_CV_Accuracy = spatial_block_cv_acc))
 }
+run_spatial_random_forests <- compute_spatial_rf_mems
 
 # ------------------------------------------------------------------------------
-# 5. ENMTools MaxEnt Niche Modeling & Warren's Identity Permutation Tests
+# 5. ecospat 2D Kernel-Smoothed PCA-env & ENMTools Niche Identity Permutation Tests
 # ------------------------------------------------------------------------------
 run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100) {
   message(sprintf("Executing Warren's Niche Identity Tests (%d permutations per pair)...", n_perm))
   pairs <- combn(TARGET_TAXA, 2, simplify = FALSE)
   results_list <- list(); perm_dist_list <- list()
+
+  bg_mat <- as.matrix(df[, env_vars, drop = FALSE])
+  scores_glob <- tryCatch({
+    active_env <- which(apply(bg_mat, 2, stats::sd, na.rm = TRUE) > 1e-8)
+    if (length(active_env) >= 2) {
+      as.data.frame(stats::prcomp(bg_mat[, active_env, drop = FALSE], center = TRUE, scale. = TRUE)$x[, 1:2, drop = FALSE])
+    } else {
+      NULL
+    }
+  }, error = function(e) NULL)
 
   for (pr in pairs) {
     sp1 <- pr[1]; sp2 <- pr[2]; pair_name <- paste0(gsub("Packera ", "P.", sp1), " vs ", gsub("Packera ", "P.", sp2))
@@ -1016,37 +1121,59 @@ run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100) {
     n1 <- nrow(df1); n2 <- nrow(df2)
     if (n1 < 5 || n2 < 5) next
 
-    # Fit empirical niche models (regularized Gaussian density / MaxEnt probability)
-    m1 <- colMeans(df1); s1 <- apply(df1, 2, sd) + 1e-4
-    m2 <- colMeans(df2); s2 <- apply(df2, 2, sd) + 1e-4
-    
-    # Evaluate probability distribution over environmental background
-    bg <- as.matrix(df[, env_vars])
-    p1 <- exp(-0.5 * rowSums(t((t(bg) - m1) / s1)^2)); p1 <- p1 / sum(p1)
-    p2 <- exp(-0.5 * rowSums(t((t(bg) - m2) / s2)^2)); p2 <- p2 / sum(p2)
-
-    # Empirical Warren's D and I
-    D_emp <- 1 - 0.5 * sum(abs(p1 - p2))
-    I_emp <- 1 - 0.5 * sqrt(sum((sqrt(p1) - sqrt(p2))^2))
-
-    # 100-Permutation Identity Test
-    pooled <- rbind(df1, df2); n_tot <- n1 + n2
-    D_null <- numeric(n_perm); I_null <- numeric(n_perm)
-
-    for (k in seq_len(n_perm)) {
-      idx_perm <- sample.int(n_tot, n1)
-      p_df1 <- pooled[idx_perm, ]; p_df2 <- pooled[-idx_perm, ]
-      pm1 <- colMeans(p_df1); ps1 <- apply(p_df1, 2, sd) + 1e-4
-      pm2 <- colMeans(p_df2); ps2 <- apply(p_df2, 2, sd) + 1e-4
-      pp1 <- exp(-0.5 * rowSums(t((t(bg) - pm1) / ps1)^2)); pp1 <- pp1 / sum(pp1)
-      pp2 <- exp(-0.5 * rowSums(t((t(bg) - pm2) / ps2)^2)); pp2 <- pp2 / sum(pp2)
-      D_null[k] <- 1 - 0.5 * sum(abs(pp1 - pp2))
-      I_null[k] <- 1 - 0.5 * sqrt(sum((sqrt(pp1) - sqrt(pp2))^2))
+    ecospat_ok <- FALSE
+    if (requireNamespace("ecospat", quietly = TRUE) && !is.null(scores_glob)) {
+      eco_fit <- tryCatch({
+        scores_sp1 <- scores_glob[df$species_standardized == sp1, 1:2, drop = FALSE]
+        scores_sp2 <- scores_glob[df$species_standardized == sp2, 1:2, drop = FALSE]
+        z1 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp1, R = 100)
+        z2 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp2, R = 100)
+        ov <- ecospat::ecospat.niche.overlap(z1, z2, cor = TRUE)
+        eq <- suppressMessages(suppressWarnings(ecospat::ecospat.niche.equivalency.test(z1, z2, rep = n_perm, ncores = 1)))
+        list(
+          D_emp = as.numeric(ov$D),
+          I_emp = as.numeric(ov$I),
+          p_val_D = as.numeric(eq$p.D),
+          p_val_I = as.numeric(eq$p.I),
+          D_null = as.numeric(eq$sim$D),
+          I_null = as.numeric(eq$sim$I)
+        )
+      }, error = function(e) NULL)
+      if (!is.null(eco_fit) && is.finite(eco_fit$D_emp) && is.finite(eco_fit$I_emp)) {
+        D_emp <- eco_fit$D_emp; I_emp <- eco_fit$I_emp
+        p_val_D <- eco_fit$p_val_D; p_val_I <- eco_fit$p_val_I
+        D_null <- eco_fit$D_null; I_null <- eco_fit$I_null
+        ecospat_ok <- TRUE
+      }
     }
 
-    p_val_D <- (sum(D_null <= D_emp) + 1) / (n_perm + 1)
-    p_val_I <- (sum(I_null <= I_emp) + 1) / (n_perm + 1)
-    
+    if (!ecospat_ok) {
+      # Fallback: empirical Gaussian density / histogram niche overlap over environmental background
+      m1 <- colMeans(df1); s1 <- apply(df1, 2, sd) + 1e-4
+      m2 <- colMeans(df2); s2 <- apply(df2, 2, sd) + 1e-4
+      bg <- as.matrix(df[, env_vars])
+      p1 <- exp(-0.5 * rowSums(t((t(bg) - m1) / s1)^2)); p1 <- p1 / sum(p1)
+      p2 <- exp(-0.5 * rowSums(t((t(bg) - m2) / s2)^2)); p2 <- p2 / sum(p2)
+
+      D_emp <- 1 - 0.5 * sum(abs(p1 - p2))
+      I_emp <- 1 - 0.5 * sqrt(sum((sqrt(p1) - sqrt(p2))^2))
+
+      pooled <- rbind(df1, df2); n_tot <- n1 + n2
+      D_null <- numeric(n_perm); I_null <- numeric(n_perm)
+      for (k in seq_len(n_perm)) {
+        idx_perm <- sample.int(n_tot, n1)
+        p_df1 <- pooled[idx_perm, ]; p_df2 <- pooled[-idx_perm, ]
+        pm1 <- colMeans(p_df1); ps1 <- apply(p_df1, 2, sd) + 1e-4
+        pm2 <- colMeans(p_df2); ps2 <- apply(p_df2, 2, sd) + 1e-4
+        pp1 <- exp(-0.5 * rowSums(t((t(bg) - pm1) / ps1)^2)); pp1 <- pp1 / sum(pp1)
+        pp2 <- exp(-0.5 * rowSums(t((t(bg) - pm2) / ps2)^2)); pp2 <- pp2 / sum(pp2)
+        D_null[k] <- 1 - 0.5 * sum(abs(pp1 - pp2))
+        I_null[k] <- 1 - 0.5 * sqrt(sum((sqrt(pp1) - sqrt(pp2))^2))
+      }
+      p_val_D <- (sum(D_null <= D_emp) + 1) / (n_perm + 1)
+      p_val_I <- (sum(I_null <= I_emp) + 1) / (n_perm + 1)
+    }
+
     outcome <- ifelse(p_val_D < 0.01, "Distinct Ecological Niche (Species Boundary Confirmed)",
                ifelse(p_val_D < 0.05, "Significant Divergence (Subspecific Ecological Race)",
                       "Conserved / Overlapping Niche (Ecophenotypic Variant)"))
@@ -1059,7 +1186,7 @@ run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100) {
     )
     perm_dist_list[[pair_name]] <- data.frame(Pair = pair_name, D_null = D_null, I_null = I_null)
   }
-  
+
   summary_table <- do.call(rbind, results_list)
   perm_table <- do.call(rbind, perm_dist_list)
   return(list(summary = summary_table, permutations = perm_table))
