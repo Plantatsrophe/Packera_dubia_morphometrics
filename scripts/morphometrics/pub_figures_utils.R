@@ -608,10 +608,24 @@ generate_step06_pub_figures <- function(
 # ==============================================================================
 # Step 07 Figures:
 #   - fig07_multimodal_discordance_summary.{pdf,png}
+#   - fig07b_taxonomic_treatment_summary.{pdf,png}
 # ==============================================================================
 generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
   fdir <- resolve_active_figures_dir(reference_path = out_fig_pdf)
   if (is.null(triage_df) || nrow(triage_df) == 0) return(invisible(NULL))
+
+  # Filter strictly to completed vouchers (those with morphometrics or deep vision audit data)
+  if ("is_completed_voucher" %in% colnames(triage_df)) {
+    comp_mask <- as.logical(triage_df$is_completed_voucher)
+    comp_mask[is.na(comp_mask)] <- FALSE
+  } else {
+    has_m <- if ("can1" %in% colnames(triage_df)) !is.na(triage_df$can1) else if ("cda_predicted_taxon" %in% colnames(triage_df)) !is.na(triage_df$cda_predicted_taxon) else rep(FALSE, nrow(triage_df))
+    has_v <- if ("c_error" %in% colnames(triage_df)) !is.na(triage_df$c_error) else rep(FALSE, nrow(triage_df))
+    comp_mask <- has_m | has_v
+  }
+  if (any(comp_mask)) {
+    triage_df <- triage_df[comp_mask, , drop = FALSE]
+  }
 
   tx_col <- if ("species_standardized" %in% colnames(triage_df)) {
     as.character(triage_df$species_standardized)
@@ -622,52 +636,60 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
   }
   tx_clean <- ifelse(tx_col %in% names(OKABE_ITO_TAXA), tx_col, "Packera dubia")
 
-  morph_conflict <- if ("cda_predicted_taxon" %in% colnames(triage_df)) {
+  morph_conflict <- if ("cda_predicted_taxon" %in% colnames(triage_df) && any(!is.na(triage_df$cda_predicted_taxon))) {
     ifelse(is.na(triage_df$cda_predicted_taxon), NA, as.character(triage_df$cda_predicted_taxon) != tx_clean)
   } else {
-    rep(NA, nrow(triage_df))
+    rep(FALSE, nrow(triage_df))
   }
-  vis_conflict <- if ("is_cleanlab_issue" %in% colnames(triage_df)) {
-    as.logical(triage_df$is_cleanlab_issue) | as.logical(triage_df$is_label_corrupted)
-  } else if ("is_label_corrupted" %in% colnames(triage_df)) {
+  vis_conflict <- if ("is_label_corrupted" %in% colnames(triage_df) && any(!is.na(triage_df$is_label_corrupted))) {
     as.logical(triage_df$is_label_corrupted)
-  } else if ("vision_predicted_label" %in% colnames(triage_df)) {
+  } else if ("vision_predicted_label" %in% colnames(triage_df) && any(!is.na(triage_df$vision_predicted_label))) {
     ifelse(is.na(triage_df$vision_predicted_label), NA, as.character(triage_df$vision_predicted_label) != tx_clean)
   } else {
-    rep(NA, nrow(triage_df))
+    rep(FALSE, nrow(triage_df))
   }
-  eco_conflict <- if ("multimodal_conflict_flag" %in% colnames(triage_df)) {
-    as.logical(triage_df$multimodal_conflict_flag)
-  } else if ("edaphic_best_fit_taxon" %in% colnames(triage_df)) {
+  eco_conflict <- if ("edaphic_best_fit_taxon" %in% colnames(triage_df) && any(!is.na(triage_df$edaphic_best_fit_taxon))) {
     ifelse(is.na(triage_df$edaphic_best_fit_taxon), NA, as.character(triage_df$edaphic_best_fit_taxon) != tx_clean)
+  } else if ("multimodal_conflict_flag" %in% colnames(triage_df)) {
+    as.logical(triage_df$multimodal_conflict_flag)
   } else {
-    rep(NA, nrow(triage_df))
+    rep(FALSE, nrow(triage_df))
   }
 
-  safe_pct <- function(x) if (all(is.na(x))) 0.0 else mean(x, na.rm = TRUE) * 100
-
+  # ----------------------------------------------------------------------------
+  # Figure 07a: Modality-Specific Discordance & Curation Priority Breakdown
+  # ----------------------------------------------------------------------------
   atomic_save_dual_plot(function() {
-    graphics::par(mfrow = c(1, 2), mar = c(5.2, 4.8, 3.4, 1.2))
-    # Panel A: Modality-specific conflict rates (% of evaluated vouchers)
+    graphics::par(mfrow = c(1, 2), mar = c(5.4, 4.8, 3.4, 1.2))
+    r_m <- mean(morph_conflict, na.rm = TRUE) * 100
+    r_v <- mean(vis_conflict, na.rm = TRUE) * 100
+    r_e <- mean(eco_conflict, na.rm = TRUE) * 100
     rates <- c(
-      "Morphology\n(CDA/GMM)" = safe_pct(morph_conflict),
-      "DINOv2 Vision\n(Cleanlab)" = safe_pct(vis_conflict),
-      "Ecological Niche\n(Spatial RF)" = safe_pct(eco_conflict)
+      ifelse(is.finite(r_m), r_m, 0),
+      ifelse(is.finite(r_v), r_v, 0),
+      ifelse(is.finite(r_e), r_e, 0)
     )
     bp <- graphics::barplot(
       rates,
+      names.arg = FALSE,
       col = c("#0072B2", "#D55E00", "#009E73"),
-      ylim = c(0, max(c(25, rates), na.rm = TRUE) * 1.25),
-      cex.names = 0.85,
-      ylab = "Discordance Rate (% of Evaluated Vouchers)",
-      main = "A. Modality-Specific Taxonomic Conflict Rates"
+      ylim = c(0, 105),
+      ylab = "Discordance Rate (% of Completed Vouchers)",
+      main = sprintf("A. Modality-Specific Conflict Rates (n = %d)", nrow(triage_df))
     )
-    graphics::text(bp, rates + max(c(25, rates)) * 0.04, labels = sprintf("%.1f%%", rates), font = 2, cex = 0.9)
+    graphics::axis(
+      1, at = bp,
+      labels = c("Morphology
+(CDA/GMM)", "Vision
+(DINOv2/Cleanlab)", "Ecological Niche
+(Spatial RF)"),
+      tick = FALSE, cex.axis = 0.82, line = 0.6
+    )
+    graphics::text(bp, rates + 4.0, labels = sprintf("%.1f%%", rates), font = 2, cex = 0.9)
     graphics::grid(nx = NA, ny = NULL, col = "grey85")
 
-    # Panel B: Consensus Triage Priority Breakdown across Taxa
     prio_col <- if ("synthesis_triage_priority" %in% colnames(triage_df)) {
-      as.character(triage_df$synthesis_triage_priority)
+      toupper(as.character(triage_df$synthesis_triage_priority))
     } else {
       rep("RESOLVED", nrow(triage_df))
     }
@@ -691,7 +713,7 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
       tbl_mat,
       beside = FALSE,
       col = prio_pal[rownames(tbl_mat)],
-      ylab = "Voucher Count",
+      ylab = "Completed Voucher Count",
       font.axis = 3,
       main = "B. Consensus Curation Triage Breakdown by Taxon"
     )
@@ -702,6 +724,126 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
       cex = 0.78, bty = "n"
     )
   }, fdir, "fig07_multimodal_discordance_summary", width = 12.5, height = 5.5, dpi = 300)
+
+  # ----------------------------------------------------------------------------
+  # Figure 07b: Biological Taxonomic Treatments (Overall & By Recorded Species)
+  # ----------------------------------------------------------------------------
+  treat_col <- if ("taxonomic_treatment" %in% colnames(triage_df)) {
+    as.character(triage_df$taxonomic_treatment)
+  } else if ("taxonomic_status_call" %in% colnames(triage_df)) {
+    sc_v <- as.character(triage_df$taxonomic_status_call)
+    ifelse(
+      sc_v == "Species_Confirmed", "Confirmed Species",
+      ifelse(
+        sc_v %in% c("Subspecies_Ecotype", "Ecophenotypic_Plasticity"), "Variety / Ecotype",
+        ifelse(
+          sc_v %in% c("Hybrid_Intergrade_Swarm", "Putative_Hybrid_or_Ecophenotype"), "Hybrid / Introgressant",
+          "Misidentification / Cryptic Species"
+        )
+      )
+    )
+  } else {
+    rep("Confirmed Species", nrow(triage_df))
+  }
+
+  treat_levels <- c(
+    "Confirmed Species",
+    "Variety / Ecotype",
+    "Hybrid / Introgressant",
+    "Misidentification / Cryptic Species"
+  )
+  treat_pal <- c(
+    "Confirmed Species"                   = "#009E73",
+    "Variety / Ecotype"                   = "#56B4E9",
+    "Hybrid / Introgressant"              = "#CC79A7",
+    "Misidentification / Cryptic Species" = "#D55E00"
+  )
+
+  treat_f <- factor(treat_col, levels = treat_levels)
+  treat_counts <- as.numeric(table(treat_f))
+  treat_pcts   <- if (nrow(triage_df) > 0) (treat_counts / nrow(triage_df)) * 100 else rep(0, length(treat_levels))
+
+  n_reassign <- 0L
+  n_cryptic  <- 0L
+  if ("taxonomic_treatment_subtype" %in% colnames(triage_df)) {
+    n_reassign <- sum(triage_df$taxonomic_treatment_subtype == "Misidentification_Reassign", na.rm = TRUE)
+    n_cryptic  <- sum(triage_df$taxonomic_treatment_subtype == "Putative_Cryptic_Species", na.rm = TRUE)
+  } else {
+    n_reassign <- treat_counts[4]
+  }
+
+  atomic_save_dual_plot(function() {
+    graphics::par(mfrow = c(1, 2), mar = c(5.8, 4.8, 3.6, 1.2))
+
+    # Panel A: Complex-wide Taxonomic Treatment Counts & Percentages
+    y_top <- max(c(10, treat_counts), na.rm = TRUE) * 1.28
+    bp_t <- graphics::barplot(
+      treat_counts,
+      names.arg = FALSE,
+      col = treat_pal[treat_levels],
+      ylim = c(0, y_top),
+      ylab = "Completed Voucher Count",
+      main = sprintf("A. Recommended Taxonomic Treatments (n = %d)", nrow(triage_df))
+    )
+    graphics::axis(
+      1, at = bp_t,
+      labels = c(
+        "Confirmed
+Species",
+        "Variety /
+Ecotype",
+        "Hybrid /
+Introgressant",
+        "Misidentification /
+Cryptic Species"
+      ),
+      tick = FALSE, cex.axis = 0.80, line = 0.7
+    )
+    lbl_a <- sprintf("%d (%.1f%%)", treat_counts, treat_pcts)
+    graphics::text(bp_t, treat_counts + y_top * 0.045, labels = lbl_a, font = 2, cex = 0.86)
+    if ((n_reassign + n_cryptic) > 0) {
+      sub_lbl <- sprintf("[Reassign: %d | Cryptic: %d]", n_reassign, n_cryptic)
+      graphics::text(bp_t[4], treat_counts[4] + y_top * 0.115, labels = sub_lbl, cex = 0.72, col = "#802000")
+    }
+    graphics::grid(nx = NA, ny = NULL, col = "grey85")
+
+    # Panel B: Taxonomic Treatment Breakdown by Recorded Species
+    tx_f <- factor(
+      tx_clean,
+      levels = c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis"),
+      labels = c("P. anonyma", "P. dubia", "P. paupercula", "P. plattensis")
+    )
+    tbl_treat_tx <- table(treat_f, tx_f)
+    col_totals <- colSums(tbl_treat_tx)
+    y_top_b <- max(c(5, col_totals), na.rm = TRUE) * 1.25
+    bp_b <- graphics::barplot(
+      tbl_treat_tx,
+      beside = FALSE,
+      col = treat_pal[rownames(tbl_treat_tx)],
+      ylim = c(0, y_top_b),
+      ylab = "Completed Voucher Count",
+      font.axis = 3,
+      cex.names = 0.88,
+      main = "B. Taxonomic Treatments by Recorded Species"
+    )
+    graphics::text(
+      bp_b, col_totals + y_top_b * 0.04,
+      labels = ifelse(col_totals > 0, sprintf("n = %d", col_totals), ""),
+      font = 2, cex = 0.82
+    )
+    graphics::grid(nx = NA, ny = NULL, col = "grey85")
+    graphics::legend(
+      "topright",
+      legend = c(
+        "Confirmed Species",
+        "Variety / Ecotype",
+        "Hybrid / Introgressant",
+        "Misidentification / Cryptic"
+      ),
+      fill = treat_pal[treat_levels],
+      cex = 0.76, bty = "n"
+    )
+  }, fdir, "fig07b_taxonomic_treatment_summary", width = 13.0, height = 5.6, dpi = 300)
 
   invisible(TRUE)
 }

@@ -204,6 +204,40 @@ apply_taxonomic_decision_matrix <- function(df) {
   df$synthesis_triage_priority <- triage_prios
   df$synthesis_triage_action <- triage_acts
   df$synthesis_rationale <- rationales
+
+  has_morph <- if ("can1" %in% names(df)) !is.na(df$can1) else if ("cda_predicted_taxon" %in% names(df)) !is.na(df$cda_predicted_taxon) else rep(TRUE, n)
+  has_vis   <- if ("c_error" %in% names(df)) !is.na(df$c_error) else rep(FALSE, n)
+  df$is_completed_voucher <- has_morph | has_vis
+
+  treat_broad <- character(n)
+  treat_sub   <- character(n)
+  for (i in seq_len(n)) {
+    sc <- status_calls[i]
+    if (sc == "Species_Confirmed") {
+      treat_broad[i] <- "Confirmed Species"
+      treat_sub[i]   <- "Confirmed_Species"
+    } else if (sc %in% c("Subspecies_Ecotype", "Ecophenotypic_Plasticity")) {
+      treat_broad[i] <- "Variety / Ecotype"
+      treat_sub[i]   <- sc
+    } else if (sc == "Hybrid_Intergrade_Swarm") {
+      treat_broad[i] <- "Hybrid / Introgressant"
+      treat_sub[i]   <- "Hybrid_Introgressant"
+    } else if (sc == "Misidentification_Severe") {
+      cda_p <- if ("cda_posterior_prob" %in% names(df) && !is.na(df$cda_posterior_prob[i])) df$cda_posterior_prob[i] else NA_real_
+      m_sp  <- if ("cda_predicted_taxon" %in% names(df) && !is.na(df$cda_predicted_taxon[i])) df$cda_predicted_taxon[i] else ""
+      v_sp  <- if ("vision_predicted_label" %in% names(df) && !is.na(df$vision_predicted_label[i])) df$vision_predicted_label[i] else ""
+      g_cl  <- if ("gmm_cluster" %in% names(df) && !is.na(df$gmm_cluster[i])) as.integer(df$gmm_cluster[i]) else 1L
+      ddoy  <- if ("delta_doy" %in% names(df) && !is.na(df$delta_doy[i])) abs(as.numeric(df$delta_doy[i])) else 0.0
+      is_crypt <- (is.na(cda_p) || cda_p < 0.75) || (nzchar(m_sp) && nzchar(v_sp) && m_sp != v_sp) || (g_cl > 4L) || (ddoy >= 18.0)
+      treat_broad[i] <- "Misidentification / Cryptic Species"
+      treat_sub[i]   <- if (is_crypt) "Putative_Cryptic_Species" else "Misidentification_Reassign"
+    } else {
+      treat_broad[i] <- "Confirmed Species"
+      treat_sub[i]   <- "Confirmed_Species"
+    }
+  }
+  df$taxonomic_treatment <- treat_broad
+  df$taxonomic_treatment_subtype <- treat_sub
   return(df)
 }
 
@@ -410,8 +444,9 @@ render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL) {
                         y = sprintf("Canonical Axis 2 (%.1f%%)", can2_pct),
                         color = "Taxon", shape = "Taxonomic Status", fill = "Taxon")
 
-  # Panel B: Triage Queue Status by Determiner Authority Tier
-  p2 <- ggplot2::ggplot(df, ggplot2::aes(x = determiner_tier, fill = taxonomic_status_call)) +
+  # Panel B: Triage Queue Status by Determiner Authority Tier (Completed Vouchers)
+  df_comp <- if ("is_completed_voucher" %in% names(df) && any(df$is_completed_voucher == TRUE, na.rm = TRUE)) df[which(df$is_completed_voucher == TRUE), , drop = FALSE] else df
+  p2 <- ggplot2::ggplot(df_comp, ggplot2::aes(x = determiner_tier, fill = taxonomic_status_call)) +
     ggplot2::geom_bar(position = "fill", width = 0.65) +
     ggplot2::scale_y_continuous(labels = function(x) paste0(x * 100, "%")) +
     ggplot2::scale_fill_brewer(palette = "Spectral") +
