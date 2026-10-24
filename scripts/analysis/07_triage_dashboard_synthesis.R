@@ -250,11 +250,11 @@ build_triage_queue <- function(opts) {
       dplyr::summarise(
         plant_individual_id = dplyr::first(stats::na.omit(plant_individual_id)),
         cda_predicted_taxon = dplyr::first(stats::na.omit(cda_predicted_taxon)),
-        cda_posterior_prob = mean(cda_posterior_prob, na.rm = TRUE),
-        can1 = mean(can1, na.rm = TRUE),
-        can2 = mean(can2, na.rm = TRUE),
+        cda_posterior_prob = median(cda_posterior_prob, na.rm = TRUE),
+        can1 = median(can1, na.rm = TRUE),
+        can2 = median(can2, na.rm = TRUE),
         gmm_cluster = dplyr::first(stats::na.omit(gmm_cluster)),
-        gmm_uncertainty = mean(gmm_uncertainty, na.rm = TRUE),
+        gmm_uncertainty = median(gmm_uncertainty, na.rm = TRUE),
         morphometric_outlier_flag = any(morphometric_outlier_flag == TRUE, na.rm = TRUE),
         misidentification_flag = any(misidentification_flag == TRUE, na.rm = TRUE),
         .groups = "drop"

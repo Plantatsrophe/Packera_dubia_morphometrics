@@ -108,7 +108,7 @@ generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, 
   par(mfrow = c(1, 2), mar = c(4.5, 4.5, 3.2, 1.5), oma = c(0, 0, 2, 0), family = "sans")
 
   # Panel A: Scatterplot of PC1 vs log(CentroidSize) with linear trendlines
-  plot(sub_df$log_centsize, sub_df$PC1_raw, type = "n", xlab = expression(log(Centroid~Size)~"[pixels]"), ylab = "Raw Symmetric Morphospace PC1",
+  plot(sub_df$log_centsize, sub_df$PC1_raw, type = "n", xlab = expression(log(Centroid~Size)~"[mm]"), ylab = "Raw Symmetric Morphospace PC1",
        main = sprintf("A. Foliar Allometry (R2 = %.3f, p = %.3f)", r2_size, p_size), font.main = 2)
   grid(col = "gray90", lty = "solid")
   for (sp in taxa_in_data) {
@@ -244,7 +244,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   Y <- as.matrix(sub_df[, sym_names, drop = FALSE]); log_centsize <- sub_df$log_centsize
   Y_adj <- Y - outer(log_centsize - mean(log_centsize, na.rm = TRUE), beta_within)
   active_cols <- which(apply(Y_adj, 2, stats::var, na.rm = TRUE) > 1e-8)
-  pca_resids <- stats::prcomp(Y_adj[, active_cols, drop = FALSE], center = TRUE, scale. = TRUE)
+  pca_resids <- stats::prcomp(Y_adj[, active_cols, drop = FALSE], center = TRUE, scale. = FALSE)
   sub_df$PC1_raw <- sub_df$PC1; sub_df$PC2_raw <- sub_df$PC2
   sub_df$PC1_corrected <- round(pca_resids$x[, 1], 6); sub_df$PC2_corrected <- round(pca_resids$x[, 2], 6)
 
@@ -252,7 +252,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
     message(sprintf("[INFO] Foliar allometry detected (R2 = %.2f, p = %.2f). Analyzing allometry-free shape residuals.", r2_size, p_size))
     morpho_matrix_for_gmm <- Y_adj; morpho_df[valid_idx, sym_names] <- round(Y_adj, 6)
     all_sym_idx <- which(complete.cases(morpho_df[, sym_names]))
-    proj_pcs <- scale(as.matrix(morpho_df[all_sym_idx, sym_names[active_cols], drop = FALSE]), center = pca_resids$center, scale = pca_resids$scale) %*% pca_resids$rotation
+    proj_pcs <- scale(as.matrix(morpho_df[all_sym_idx, sym_names[active_cols], drop = FALSE]), center = pca_resids$center, scale = FALSE) %*% pca_resids$rotation
     for (p in 1:min(5, ncol(proj_pcs))) morpho_df[all_sym_idx, paste0("PC", p)] <- round(proj_pcs[, p], 6)
   } else {
     message(sprintf("[INFO] Foliar allometry negligible (R2 = %.2f). Analyzing raw symmetric harmonics.", r2_size))
