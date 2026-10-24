@@ -6,7 +6,7 @@
 # ==============================================================================
 
 suppressPackageStartupMessages({
-  for (pkg in c("mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "dplyr", "readr", "tibble", "ggplot2", "optparse")) {
+  for (pkg in c("MASS", "mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "dplyr", "readr", "tibble", "ggplot2", "optparse")) {
     if (requireNamespace(pkg, quietly = TRUE)) library(pkg, character.only = TRUE)
   }
 })
@@ -325,8 +325,10 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
       message("clustvarsel selected informative subset: ", paste(selected_cols, collapse = ", "))
     }
   }
+  X_pcs <- X; n_samples <- nrow(X_pcs)
+  modelNames <- if ((n_samples / ncol(X_pcs)) < 5.0) c("EII", "VII", "EEI", "VEI", "EVI", "VVI") else NULL
   if (requireNamespace("mclust", quietly = TRUE)) {
-    mc <- tryCatch(mclust::Mclust(X, G = 1:max_k, verbose = FALSE), error = function(e) NULL)
+    mc <- tryCatch(mclust::Mclust(X_pcs, G = 1:max_k, modelNames = modelNames, verbose = FALSE), error = function(e) NULL)
     if (!is.null(mc)) {
       best_k <- mc$G; best_name <- mc$modelName; cls_sub <- mc$classification; unc_sub <- mc$uncertainty
       bic_vals <- apply(mc$BIC, 1, function(row) if (all(is.na(row))) NA_real_ else max(row, na.rm = TRUE))
@@ -355,7 +357,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
 # ------------------------------------------------------------------------------
 # 4. Canonical Discriminant Analysis with Passive Sample Projection
 # ------------------------------------------------------------------------------
-run_cda_with_passive_projection <- function(df, feature_cols, target_taxa) {
+run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa) {
   message("Configuring Canonical Discriminant Analysis in MorphoTools2 Architecture...")
   is_active <- (df$determiner_tier == "Tier_1_Gold") & (df$species_standardized %in% target_taxa) & complete.cases(df[, feature_cols])
   active_idx <- which(is_active); passive_idx <- which(!is_active)
@@ -364,10 +366,16 @@ run_cda_with_passive_projection <- function(df, feature_cols, target_taxa) {
 
   X <- as.matrix(df[, feature_cols, drop = FALSE]); X_a <- X[active_idx, , drop = FALSE]
   y_a <- df$species_standardized[active_idx]; N_a <- nrow(X_a); p <- ncol(X_a)
+  X_mat <- X_a; grp_factor <- droplevels(factor(y_a))
+  lda_cv <- if (requireNamespace("MASS", quietly = TRUE) && nlevels(grp_factor) >= 2) {
+    tryCatch(MASS::lda(x = X_mat, grouping = grp_factor, CV = TRUE), error = function(e) NULL)
+  } else NULL
+  loocv_accuracy <- if (!is.null(lda_cv) && !is.null(lda_cv$class)) round(mean(as.character(lda_cv$class) == as.character(grp_factor), na.rm = TRUE), 4) else NA_real_
+  message(sprintf("CDA Leave-One-Out Cross-Validation Accuracy (loocv_accuracy): %.4f", loocv_accuracy))
+
   g_levels <- target_taxa; g <- length(g_levels); grand_mean <- colMeans(X_a)
   B <- matrix(0, p, p); W <- matrix(0, p, p)
   group_means <- matrix(0, g, p, dimnames = list(g_levels, feature_cols)); group_counts <- integer(g)
-
   for (k in seq_along(g_levels)) {
     grp <- g_levels[k]; sub_x <- X_a[y_a == grp, , drop = FALSE]; group_counts[k] <- nrow(sub_x)
     if (nrow(sub_x) > 0) {
@@ -380,7 +388,6 @@ run_cda_with_passive_projection <- function(df, feature_cols, target_taxa) {
   real_idx <- which(abs(Im(eig$values)) < 1e-6); real_vals <- Re(eig$values[real_idx]); real_vecs <- Re(eig$vectors[, real_idx, drop = FALSE])
   order_idx <- order(real_vals, decreasing = TRUE); num_axes <- min(g - 1, p)
   eig_vals <- real_vals[order_idx][1:num_axes]; eig_vecs <- real_vecs[, order_idx[1:num_axes], drop = FALSE]
-
   for (j in seq_len(num_axes)) {
     v <- eig_vecs[, j]; s <- as.numeric(sqrt(t(v) %*% S_reg %*% v))
     if (s > 1e-8) eig_vecs[, j] <- v / s
@@ -395,7 +402,6 @@ run_cda_with_passive_projection <- function(df, feature_cols, target_taxa) {
     na_mask <- is.na(X_proj[, col_idx])
     if (any(na_mask)) X_proj[na_mask, col_idx] <- grand_mean[col_idx]
   }
-
   Z_all <- t(t(X_proj) - grand_mean) %*% eig_vecs; canonical_centroids <- t(t(group_means) - grand_mean) %*% eig_vecs
   priors <- group_counts / sum(group_counts); post_probs <- matrix(0, nrow(df), g, dimnames = list(NULL, g_levels))
   for (k in seq_along(g_levels)) {
@@ -403,11 +409,11 @@ run_cda_with_passive_projection <- function(df, feature_cols, target_taxa) {
     post_probs[, k] <- priors[k] * exp(-0.5 * rowSums(diff_z^2))
   }
   post_probs <- post_probs / rowSums(post_probs); pred_idx <- apply(post_probs, 1, which.max)
-
-  return(list(eigenvalues = eig_vals, variance_pct = var_pct, canonical_scores = Z_all,
-              centroids = canonical_centroids, predicted_taxon = g_levels[pred_idx],
-              posterior_prob = apply(post_probs, 1, max), is_active = is_active, structure_loadings = struct_corr))
+  return(list(eigenvalues = eig_vals, variance_pct = var_pct, canonical_scores = Z_all, centroids = canonical_centroids,
+              predicted_taxon = g_levels[pred_idx], posterior_prob = apply(post_probs, 1, max), is_active = is_active,
+              structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy))
 }
+run_cda_with_passive_projection <- run_canonical_discriminant_analysis
 
 # ------------------------------------------------------------------------------
 # 5. Outlier Flagging & Herbarium Misidentification Auditing
@@ -416,7 +422,7 @@ audit_misidentifications <- function(df, cda_res, gmm_res) {
   message("Auditing specimens for morphospace outliers & label discordances...")
   n <- nrow(df); flags <- logical(n); triage <- character(n); reasons <- character(n)
 
-  for (i in seq_len(n)) {
+  for (i in seq_len(nrow(df))) {
     raw_sp <- df$species_standardized[i]; pred_sp <- cda_res$predicted_taxon[i]
     post_p <- cda_res$posterior_prob[i]; is_act <- cda_res$is_active[i]
     if (is_act) {
@@ -632,13 +638,8 @@ run_gmm_morphotools_pipeline <- function(opts) {
   tmp_flags <- paste0(opts$output_flags, ".tmp"); write.csv(out_df, file = tmp_flags, row.names = FALSE, na = ""); file.rename(tmp_flags, opts$output_flags)
   message("Master morphometric flags table exported: ", opts$output_flags, " (Rows: ", nrow(out_df), ")")
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, feature_cols)
-  message("==================================================================")
   message("Morphometric Pipeline Complete Successfully.")
-  message("==================================================================")
   return(invisible(out_df))
 }
 
-if (sys.nframe() == 0) {
-  opts <- parse_args_robust()
-  run_gmm_morphotools_pipeline(opts)
-}
+if (sys.nframe() == 0) run_gmm_morphotools_pipeline(parse_args_robust())

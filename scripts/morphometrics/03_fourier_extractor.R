@@ -36,32 +36,19 @@ suppressPackageStartupMessages({
 # ------------------------------------------------------------------------------
 parse_args_robust <- function() {
   option_list <- list(
-    optparse::make_option(c("-i", "--input"), type = "character",
-      default = "data/contours/", help = "Directory containing contour CSVs (alias for --contours-dir) [default: %default]"),
-    optparse::make_option(c("-c", "--contours-dir"), type = "character",
-      default = "data/contours/", help = "Directory containing contour CSVs [default: %default]"),
-    optparse::make_option(c("-f", "--manifest"), type = "character",
-      default = "data/tables/extracted_leaf_manifest.csv", help = "Extracted leaf manifest CSV [default: %default]"),
-    optparse::make_option(c("-m", "--masks-dir"), type = "character",
-      default = "data/masks/", help = "Fallback masks directory [default: %default]"),
-    optparse::make_option(c("-v", "--vouchers"), type = "character",
-      default = "data/tables/curated_vouchers.csv", help = "Curated vouchers CSV [default: %default]"),
-    optparse::make_option(c("-o", "--output"), type = "character",
-      default = "data/tables/leaf_efa_harmonics.csv", help = "Output harmonics CSV [default: %default]"),
-    optparse::make_option(c("--output-individual"), type = "character",
-      default = "data/tables/leaf_efa_harmonics_individual.csv", help = "Output individual leaf harmonics CSV [default: %default]"),
-    optparse::make_option(c("-k", "--harmonics"), type = "integer",
-      default = 12, help = "Number of Fourier harmonics (nb.h) [default: %default]"),
-    optparse::make_option(c("-p", "--num-pcs"), type = "integer",
-      default = 5, help = "Number of PCA dimensions to extract [default: %default]"),
-    optparse::make_option(c("-r", "--report-out"), type = "character",
-      default = "outputs/reports/tier_symmetry_validation.csv", help = "PERMANOVA validation report CSV [default: %default]"),
-    optparse::make_option(c("-g", "--plot-out"), type = "character",
-      default = "outputs/figures/tier1_vs_tier2_density_overlay.pdf", help = "Tier density overlay plot PDF [default: %default]"),
-    optparse::make_option(c("--permutations"), type = "integer",
-      default = 999, help = "Number of permutations for PERMANOVA [default: %default]"),
-    optparse::make_option(c("--seed"), type = "integer",
-      default = 42, help = "Random seed for reproducible permutations [default: %default]")
+    optparse::make_option(c("-i", "--input"), type = "character", default = "data/contours/", help = "Directory containing contour CSVs (alias for --contours-dir) [default: %default]"),
+    optparse::make_option(c("-c", "--contours-dir"), type = "character", default = "data/contours/", help = "Directory containing contour CSVs [default: %default]"),
+    optparse::make_option(c("-f", "--manifest"), type = "character", default = "data/tables/extracted_leaf_manifest.csv", help = "Extracted leaf manifest CSV [default: %default]"),
+    optparse::make_option(c("-m", "--masks-dir"), type = "character", default = "data/masks/", help = "Fallback masks directory [default: %default]"),
+    optparse::make_option(c("-v", "--vouchers"), type = "character", default = "data/tables/curated_vouchers.csv", help = "Curated vouchers CSV [default: %default]"),
+    optparse::make_option(c("-o", "--output"), type = "character", default = "data/tables/leaf_efa_harmonics.csv", help = "Output harmonics CSV [default: %default]"),
+    optparse::make_option(c("--output-individual"), type = "character", default = "data/tables/leaf_efa_harmonics_individual.csv", help = "Output individual leaf harmonics CSV [default: %default]"),
+    optparse::make_option(c("-k", "--harmonics"), type = "integer", default = 12, help = "Number of Fourier harmonics (nb.h) [default: %default]"),
+    optparse::make_option(c("-p", "--num-pcs"), type = "integer", default = 5, help = "Number of PCA dimensions to extract [default: %default]"),
+    optparse::make_option(c("-r", "--report-out"), type = "character", default = "outputs/reports/tier_symmetry_validation.csv", help = "PERMANOVA validation report CSV [default: %default]"),
+    optparse::make_option(c("-g", "--plot-out"), type = "character", default = "outputs/figures/tier1_vs_tier2_density_overlay.pdf", help = "Tier density overlay plot PDF [default: %default]"),
+    optparse::make_option(c("--permutations"), type = "integer", default = 999, help = "Number of permutations for PERMANOVA [default: %default]"),
+    optparse::make_option(c("--seed"), type = "integer", default = 42, help = "Random seed for reproducible permutations [default: %default]")
   )
 
   if (requireNamespace("optparse", quietly = TRUE)) {
@@ -184,6 +171,42 @@ compute_centsize_robust <- function(coo) {
   cy <- mean(coo[, 2], na.rm = TRUE)
   val <- sqrt(sum((coo[, 1] - cx)^2 + (coo[, 2] - cy)^2, na.rm = TRUE))
   if (is.finite(val) && val > 0) val else NA_real_
+}
+
+extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permutations = 999, seed = 42) {
+  raw_coe <- if (is.list(ef) && !is.null(ef$coe)) as.matrix(ef$coe) else as.matrix(ef)
+  if (is.null(fac_df) && is.list(ef) && !is.null(ef$fac)) fac_df <- as.data.frame(ef$fac)
+  row_indices <- seq_len(nrow(raw_coe))
+  sym_raw_cols <- grep("^[AD]_?[0-9]+$", colnames(raw_coe), value = TRUE)
+  asym_raw_cols <- grep("^[BC]_?[0-9]+$", colnames(raw_coe), value = TRUE)
+  sym_var <- if (length(sym_raw_cols) > 0) rowSums(raw_coe[, sym_raw_cols, drop = FALSE]^2, na.rm = TRUE) else rep(0.0, length(row_indices))
+  asym_var <- if (length(asym_raw_cols) > 0) rowSums(raw_coe[, asym_raw_cols, drop = FALSE]^2, na.rm = TRUE) else rep(0.0, length(row_indices))
+  pct_asymmetry <- round(100.0 * asym_var / pmax(sym_var + asym_var, 1e-12), 4)
+
+  ef_sym <- if (requireNamespace("Momocs", quietly = TRUE) && inherits(ef, "OutCoe")) tryCatch(Momocs::rm_asym(ef), error = function(e) ef) else ef
+  coe_sym <- if (is.list(ef_sym) && !is.null(ef_sym$coe)) as.matrix(ef_sym$coe) else as.matrix(ef_sym)
+  sym_cols <- grep("^([AD]_?[0-9]+|C_?1)$", colnames(coe_sym), value = TRUE)
+  sym_mat <- coe_sym[, if (length(sym_cols) > 0) sym_cols else colnames(coe_sym), drop = FALSE]
+  sym_mat[!is.finite(sym_mat)] <- 0.0
+  col_vars <- apply(sym_mat, 2, stats::var, na.rm = TRUE)
+  sym_mat <- sym_mat[, names(col_vars[!is.na(col_vars) & col_vars > 1e-10]), drop = FALSE]
+
+  out_df <- if (!is.null(fac_df)) as.data.frame(fac_df) else data.frame(row_id = row_indices)
+  out_df$sym_var <- round(sym_var, 6); out_df$asym_var <- round(asym_var, 6); out_df$pct_asymmetry <- pct_asymmetry
+  for (pc_col in c("Sym_PC1", "Sym_PC2", "Sym_PC3", "Sym_PC4", "Sym_PC5")) out_df[[pc_col]] <- 0.0
+  pca_sym <- if (nrow(sym_mat) >= 2 && ncol(sym_mat) >= 1) stats::prcomp(sym_mat, center = TRUE, scale. = FALSE) else NULL
+  if (!is.null(pca_sym)) {
+    for (p in seq_len(min(num_pcs, ncol(pca_sym$x)))) out_df[[paste0("Sym_PC", p)]] <- round(pca_sym$x[, p], 6)
+  }
+  permanova_res <- NULL
+  if ("assigned_tier" %in% names(out_df) && requireNamespace("vegan", quietly = TRUE)) {
+    t_idx <- which(out_df$assigned_tier %in% c("Tier_1_Direct", "Tier_2_Reflected"))
+    if (length(t_idx) >= 4 && length(unique(out_df$assigned_tier[t_idx])) >= 2) {
+      set.seed(seed); sym_mat <- sym_mat[t_idx, , drop = FALSE]; tier_df <- out_df[t_idx, , drop = FALSE]
+      permanova_res <- tryCatch(vegan::adonis2(sym_mat ~ assigned_tier, data = tier_df, permutations = permutations, method = "euclidean"), error = function(e) NULL)
+    }
+  }
+  list(df = out_df, sym_mat = sym_mat, pca = pca_sym, permanova = permanova_res)
 }
 
 # ------------------------------------------------------------------------------
@@ -448,37 +471,33 @@ run_fourier_extraction <- function(opts) {
   }
   efa_df <- cbind(fac_df, as.data.frame(harm_mat))
 
-  # 4. Symmetric Fourier Decomposition & PCA (PC1-PC5)
-  # In normalized EFA with major axis horizontal alignment:
-  # - An and Dn capture symmetric outline variance (bilateral symmetry across longitudinal midrib)
-  # - Bn and Cn capture asymmetric variance (fluctuating asymmetry / lateral skew)
-  # Isolating An and Dn guarantees that Tier 1 (pristine) and Tier 2 (reflected) leaves are evaluated
-  # strictly on the symmetric morphological component, eliminating artificial symmetry artifacts.
+  # 4. Symmetric Fourier Decomposition & PCA (PC1-PC5 / Sym_PC1-Sym_PC5)
   message("Extracting symmetric harmonic coefficients (An and Dn harmonics)...")
   sym_names <- c(paste0("A", seq_len(opts$harmonics)), paste0("D", seq_len(opts$harmonics)))
   sym_harmonics <- harm_mat[, sym_names, drop = FALSE]
+  ef_input <- if (exists("ef_res") && !is.null(ef_res)) ef_res else list(coe = harm_mat, fac = fac_df)
+  sym_res <- extract_symmetric_fourier_pcs(ef_input, fac_df = fac_df, num_pcs = opts$num_pcs, permutations = opts$permutations, seed = opts$seed)
+  for (scol in c("sym_var", "asym_var", "pct_asymmetry", paste0("Sym_PC", seq_len(opts$num_pcs)))) {
+    if (scol %in% names(sym_res$df)) efa_df[[scol]] <- sym_res$df[[scol]]
+  }
 
   message("Running PCA strictly on symmetric harmonics (sym_harmonics)...")
   complete_idx <- which(complete.cases(sym_harmonics))
   for (p in seq_len(opts$num_pcs)) efa_df[[paste0("PC", p)]] <- NA_real_
 
   if (length(complete_idx) >= opts$num_pcs) {
-    # Filter constant/zero-variance coefficients (e.g. invariant A1 = 1.0 in normalized EFA)
+    # Filter constant/zero-variance coefficients (variance > 1e-10)
     col_vars <- apply(sym_harmonics[complete_idx, , drop = FALSE], 2, stats::var)
-    active_sym_cols <- names(col_vars[col_vars > 1e-8])
+    active_sym_cols <- names(col_vars[col_vars > 1e-10])
     message(sprintf("Active symmetric harmonic dimensions with non-zero variance: %d / %d",
                     length(active_sym_cols), ncol(sym_harmonics)))
 
-    pca_fit <- stats::prcomp(sym_harmonics[complete_idx, active_sym_cols, drop = FALSE], center = TRUE, scale. = TRUE)
+    pca_fit <- stats::prcomp(sym_harmonics[complete_idx, active_sym_cols, drop = FALSE], center = TRUE, scale. = FALSE)
     var_exp <- round((pca_fit$sdev^2) / sum(pca_fit$sdev^2) * 100, 2)
     message("=== Symmetric Morphospace PCA Variance Explained ===")
-    for (p in seq_len(min(opts$num_pcs, length(var_exp)))) {
-      message(sprintf("  PC%d: %5.2f%% variance", p, var_exp[p]))
-    }
+    for (p in seq_len(min(opts$num_pcs, length(var_exp)))) message(sprintf("  PC%d: %5.2f%% variance", p, var_exp[p]))
     for (p in seq_len(opts$num_pcs)) {
-      if (p <= ncol(pca_fit$x)) {
-        efa_df[complete_idx, paste0("PC", p)] <- round(pca_fit$x[, p], 6)
-      }
+      if (p <= ncol(pca_fit$x)) efa_df[complete_idx, paste0("PC", p)] <- round(pca_fit$x[, p], 6)
     }
   }
 
@@ -557,22 +576,15 @@ run_fourier_extraction <- function(opts) {
     # Within-specimen foliar variance as phenotypic stability index (0.0 for 1 leaf)
     if (n_leaves > 1) {
       sym_sub <- as.matrix(grp[, sym_names, drop = FALSE])
-      col_vars_sub <- apply(sym_sub, 2, stats::var, na.rm = TRUE)
-      foliar_var <- round(mean(col_vars_sub, na.rm = TRUE), 8)
+      foliar_var <- round(mean(apply(sym_sub, 2, stats::var, na.rm = TRUE), na.rm = TRUE), 8)
     } else {
       foliar_var <- 0.0
     }
 
     rec <- data.frame(
-      catalogNumber = cat_num,
-      plant_individual_id = p_id,
-      leaf_count = n_leaves,
-      foliar_variance = foliar_var,
-      assigned_tier = grp$assigned_tier[1],
-      reconstruction_tier = grp$reconstruction_tier[1],
-      scientificName = grp$scientificName[1],
-      species_raw = grp$species_raw[1],
-      determiner_tier = grp$determiner_tier[1],
+      catalogNumber = cat_num, plant_individual_id = p_id, leaf_count = n_leaves, foliar_variance = foliar_var,
+      assigned_tier = grp$assigned_tier[1], reconstruction_tier = grp$reconstruction_tier[1],
+      scientificName = grp$scientificName[1], species_raw = grp$species_raw[1], determiner_tier = grp$determiner_tier[1],
       stringsAsFactors = FALSE
     )
 
@@ -582,30 +594,26 @@ run_fourier_extraction <- function(opts) {
     rec$log_centsize <- if (!is.na(rec$centroid_size) && rec$centroid_size > 0) round(log(rec$centroid_size), 6) else NA_real_
 
     other_meta <- intersect(c("pixels_per_mm", "is_calibrated_mm", "determiner_raw", "county", "stateProvince", "latitude", "longitude",
-                              "pheno_sin", "pheno_cos", "regional_group", "aspect_ratio", "solidity", "ucs_score", "area_px"),
-                            names(grp))
+                              "pheno_sin", "pheno_cos", "regional_group", "aspect_ratio", "solidity", "ucs_score", "area_px",
+                              "sym_var", "asym_var", "pct_asymmetry"), names(grp))
     for (m_col in other_meta) {
       vals <- stats::na.omit(grp[[m_col]])
       rec[[m_col]] <- if (length(vals) > 0) vals[1] else NA
     }
-
-    for (h_name in names(harm_medians)) {
-      rec[[h_name]] <- harm_medians[[h_name]]
-    }
+    for (h_name in names(harm_medians)) rec[[h_name]] <- harm_medians[[h_name]]
     specimen_records[[length(specimen_records) + 1]] <- rec
   }
 
   specimen_df <- do.call(rbind, specimen_records)
 
-  # Project symmetric morphospace PC1-PC5 for specimen-level median profiles
-  for (p in seq_len(opts$num_pcs)) specimen_df[[paste0("PC", p)]] <- NA_real_
+  # Project symmetric morphospace PC1-PC5 and Sym_PC1-Sym_PC5 for specimen-level median profiles
+  for (p in seq_len(opts$num_pcs)) { specimen_df[[paste0("PC", p)]] <- NA_real_; specimen_df[[paste0("Sym_PC", p)]] <- 0.0 }
   if (nrow(specimen_df) >= opts$num_pcs && exists("pca_fit") && !is.null(pca_fit)) {
     spec_sym <- as.matrix(specimen_df[, active_sym_cols, drop = FALSE])
     spec_pcs <- scale(spec_sym, center = pca_fit$center, scale = pca_fit$scale) %*% pca_fit$rotation
-    for (p in seq_len(opts$num_pcs)) {
-      if (p <= ncol(spec_pcs)) {
-        specimen_df[[paste0("PC", p)]] <- round(spec_pcs[, p], 6)
-      }
+    for (p in seq_len(min(opts$num_pcs, ncol(spec_pcs)))) {
+      specimen_df[[paste0("PC", p)]] <- round(spec_pcs[, p], 6)
+      specimen_df[[paste0("Sym_PC", p)]] <- round(spec_pcs[, p], 6)
     }
   }
 
@@ -731,20 +739,12 @@ run_fourier_extraction <- function(opts) {
     # Verification assertions
     tier_row <- permanova_df[grepl("reconstruction_tier", permanova_df$Term, ignore.case = TRUE), ]
     if (nrow(tier_row) > 0) {
-      r2_val <- tier_row$R2[1]
-      p_val <- tier_row$p_value[1]
-      message(sprintf("PERMANOVA Result: reconstruction_tier explains %.4f%% of variance (R2 = %.6f, p = %.4f)",
-                      r2_val * 100, r2_val, p_val))
-      if (r2_val < 0.01) {
-        message("[ASSERTION PASS] reconstruction_tier accounts for <1.0% of total variance (R2 < 0.01).")
-      } else {
-        message("[ASSERTION NOTE] reconstruction_tier R2 = ", round(r2_val, 4))
-      }
-      if (!is.na(p_val) && p_val > 0.05) {
-        message("[ASSERTION PASS] reconstruction_tier is non-significant (p > 0.05).")
-      } else {
-        message("[ASSERTION NOTE] reconstruction_tier p-value = ", p_val)
-      }
+      r2_val <- tier_row$R2[1]; p_val <- tier_row$p_value[1]
+      message(sprintf("PERMANOVA Result: reconstruction_tier explains %.4f%% of variance (R2 = %.6f, p = %.4f)", r2_val * 100, r2_val, p_val))
+      if (r2_val < 0.01) message("[ASSERTION PASS] reconstruction_tier accounts for <1.0% of total variance (R2 < 0.01).")
+      else message("[ASSERTION NOTE] reconstruction_tier R2 = ", round(r2_val, 4))
+      if (!is.na(p_val) && p_val > 0.05) message("[ASSERTION PASS] reconstruction_tier is non-significant (p > 0.05).")
+      else message("[ASSERTION NOTE] reconstruction_tier p-value = ", p_val)
     }
 
     # 7. Diagnostic Comparative Density Plot Export
