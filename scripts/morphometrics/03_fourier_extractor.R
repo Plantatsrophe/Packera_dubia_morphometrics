@@ -53,7 +53,7 @@ parse_args_robust <- function() {
 
   if (requireNamespace("optparse", quietly = TRUE)) {
     parser <- optparse::OptionParser(usage = "%prog [options]", option_list = option_list)
-    return(optparse::parse_args(parser))
+    opts <- optparse::parse_args(parser, convert_hyphens_to_underscores = TRUE); if (!is.null(opts$input) && opts$contours_dir == "data/contours/") opts$contours_dir <- opts$input; return(opts)
   }
 
   raw_args <- commandArgs(trailingOnly = TRUE)

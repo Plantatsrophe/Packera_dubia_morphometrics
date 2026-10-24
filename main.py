@@ -883,7 +883,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_morph.add_argument("--max-k", type=int, default=None, help="Max GMM mixture components")
 
     # Subcommand: synthesis
-    p_synth = subparsers.add_parser("synthesis", help="Phases 5-7: Vision XAI, Spatial RF, & Triage Dashboard")
+    p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Phases 5-7: Vision XAI, Spatial RF, & Triage Dashboard")
     p_synth.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
     p_synth.add_argument("--rosette-dir", type=Path, default=None, help="Directory with cropped rosette patches")
     p_synth.add_argument("--morphometrics", type=Path, default=None, help="Morphometrics flags CSV")
@@ -1036,6 +1036,7 @@ def main() -> None:
         "segment": run_segment,
         "morphometrics": run_morphometrics,
         "synthesis": run_synthesis,
+        "analyze": run_synthesis,
         "run-all": run_all,
         "calibrate-geometry": run_calibrate_geometry,
     }

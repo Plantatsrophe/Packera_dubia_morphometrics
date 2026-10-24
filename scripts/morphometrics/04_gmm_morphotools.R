@@ -35,7 +35,7 @@ parse_args_robust <- function() {
     optparse::make_option(c("--seed"), type = "integer", default = 42, help = "Random seed [default: %default]")
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
-    return(optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list)))
+    return(optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list), convert_hyphens_to_underscores = TRUE))
   }
   raw_args <- commandArgs(trailingOnly = TRUE)
   opts <- list(vouchers = "data/tables/curated_vouchers.csv", harmonics = "data/tables/leaf_efa_harmonics.csv",
