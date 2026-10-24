@@ -121,8 +121,9 @@ apply_taxonomic_decision_matrix <- function(df) {
   for (i in seq_len(n)) {
     given_sp <- df$species_standardized[i]
     raw_sp   <- df$species_raw[i]
-    tier     <- df$determiner_tier[i]
-    doy      <- if (!is.na(df$doy[i])) df$doy[i] else 120
+    tier     <- if ("determiner_tier" %in% names(df) && !is.na(df$determiner_tier[i])) as.character(df$determiner_tier[i]) else "Tier_3_Bronze"
+    doy      <- if ("doy" %in% names(df) && !is.na(df$doy[i]) && is.finite(df$doy[i])) df$doy[i] else 120
+    reg_grp  <- if ("regional_group" %in% names(df) && !is.na(df$regional_group[i])) as.character(df$regional_group[i]) else ""
     
     # Morphometrics flags (CDA / GMM join)
     morph_sp <- if ("cda_predicted_taxon" %in% names(df) && !is.na(df$cda_predicted_taxon[i])) df$cda_predicted_taxon[i] else NULL
@@ -161,7 +162,7 @@ apply_taxonomic_decision_matrix <- function(df) {
 
     # Case 4: Subspecific / Regional Variety (e.g., P. paupercula var. savannarum)
     is_subspecies <- grepl("savannarum|balsamitae|pseudotomentosa|appalachiana", raw_sp, ignore.case = TRUE) ||
-                     (given_sp == "Packera paupercula" && (df$regional_group[i] == "Interior_Prairie_Midwest" || sand_val < 30))
+                     (given_sp == "Packera paupercula" && (reg_grp == "Interior_Prairie_Midwest" || sand_val < 30))
 
     if (is_glabrescent_dubia) {
       status_calls[i] <- "Ecophenotypic_Plasticity"
