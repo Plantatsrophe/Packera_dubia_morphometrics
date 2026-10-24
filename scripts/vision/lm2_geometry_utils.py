@@ -68,7 +68,7 @@ def _sample_cross_sectional_widths(
     if len(s_steps) == 0:
         return np.array([]), np.array([])
     centers = np.array(pt_start, dtype=np.float64)[None, :] + s_steps[:, None] * u[None, :]
-    w_span = min(max(h, w), 350)
+    w_span = max(min(max(h, w), 350), int(0.65 * max(h, w)))
     t_steps = np.arange(-w_span, w_span + 1, 1.0, dtype=np.float64)
     gx = np.round(centers[:, 0, None] + t_steps[None, :] * n[0]).astype(np.int32)
     gy = np.round(centers[:, 1, None] + t_steps[None, :] * n[1]).astype(np.int32)
@@ -116,6 +116,12 @@ def _disambiguate_base_apex_endpoints(
     if axis_len < 10.0:
         return ep1, ep2
 
+    eff_max_petiole_w = (
+        max(float(max_petiole_width), 0.085 * axis_len)
+        if (max_petiole_width == 22.0 and axis_len > 450.0)
+        else float(max_petiole_width)
+    )
+
     probe_dist = max(8.0, 0.20 * axis_len)
     s1, w1 = _sample_cross_sectional_widths(mask, ep1, ep2, probe_dist, step_px=2)
     s2, w2 = _sample_cross_sectional_widths(mask, ep2, ep1, probe_dist, step_px=2)
@@ -126,7 +132,7 @@ def _disambiguate_base_apex_endpoints(
         # Contiguous narrow stalk length from the tip inward
         stalk_len = 0.0
         for idx, w_val in enumerate(w_arr):
-            if w_val <= max_petiole_width:
+            if w_val <= eff_max_petiole_w:
                 stalk_len = float(s_arr[idx])
             elif idx > 1:
                 break
@@ -772,6 +778,14 @@ def trim_petiole_tail(
 
     main_cnt = max(contours, key=cv2.contourArea)
     pts = main_cnt.reshape(-1, 2).astype(np.float32)
+    rect_b = cv2.minAreaRect(pts)
+    blade_width_est = float(min(rect_b[1])) if min(rect_b[1]) > 0 else float(min(h, w))
+    if blade_width_est > 250.0 and min(h, w) > 500:
+        if max_petiole_width == 16.0:
+            max_petiole_width = max(16.0, 0.105 * blade_width_est)
+        cordate_guard_w = max(float(max_petiole_width) * 1.18, 19.0)
+    else:
+        cordate_guard_w = max(float(max_petiole_width), 19.0)
 
     # 1. Medial Longitudinal Axis via cv2.fitLine
     line_params = cv2.fitLine(main_cnt, cv2.DIST_L2, 0, 0.01, 0.01)
@@ -795,7 +809,7 @@ def trim_petiole_tail(
         if len(s_steps) == 0:
             return np.array([]), np.array([])
         centers = np.array(pt_start, dtype=np.float64)[None, :] + s_steps[:, None] * u[None, :]
-        w_span = min(max(h, w), 350)
+        w_span = max(min(max(h, w), 350), int(0.65 * max(h, w)))
         t_steps = np.arange(-w_span, w_span + 1, 1.0, dtype=np.float64)
         gx = np.round(centers[:, 0, None] + t_steps[None, :] * n[0]).astype(np.int32)
         gy = np.round(centers[:, 1, None] + t_steps[None, :] * n[1]).astype(np.int32)
@@ -865,7 +879,7 @@ def trim_petiole_tail(
 
     # 2. Guard against truncate / cordate leaves: broad base is never clipped
     w_init = np.median(widths[:min(3, len(widths))])
-    if w_init > max(max_petiole_width, 19.0):
+    if w_init > cordate_guard_w:
         meta = {
             "is_trimmed": False,
             "trim_distance_px": 0.0,
@@ -1229,6 +1243,7 @@ def classify_and_route_leaf(
     min_chord_length_px: Optional[float] = None,
     fold_detection_enabled: Optional[bool] = None,
     dissection_enabled: Optional[bool] = None,
+    rosette_centroid: Optional[Tuple[float, float]] = None,
 ) -> LeafRoutingResult:
     """
     Comprehensive geometric quality gatekeeper and routing engine:
@@ -1386,7 +1401,9 @@ def classify_and_route_leaf(
     # Width-inflection junction trimming to eliminate petiole tail prior to computing harmonics and solidity
     mask, trim_meta = trim_petiole_tail(mask, return_metadata=True)
 
-    ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(mask)
+    ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(
+        mask, rosette_centroid=rosette_centroid
+    )
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return LeafRoutingResult(
@@ -1439,8 +1456,14 @@ def classify_and_route_leaf(
         # Route folded leaf directly to Tier 2 with synthesized bilateral silhouette
         synth_mask = fold_info["synthesized_mask"]
         if synth_mask is not None and np.count_nonzero(synth_mask) > 0:
-            coords = resample_normalized_contour(synth_mask, num_contour_points) if extract_contours else None
-            synth_ucs, synth_sol, _, _, _ = compute_geometric_metrics(synth_mask)
+            coords = (
+                resample_normalized_contour(synth_mask, num_contour_points, petiole_attachment_pt=p_base)
+                if extract_contours
+                else None
+            )
+            synth_ucs, synth_sol, _, _, _ = compute_geometric_metrics(
+                synth_mask, rosette_centroid=rosette_centroid
+            )
             meta["reflection_applied"] = True
             return LeafRoutingResult(
                 tier="Tier 2",
@@ -1526,8 +1549,14 @@ def classify_and_route_leaf(
     )
 
     if reflected_mask is not None:
-        ref_ucs, ref_sol, _, _, _ = compute_geometric_metrics(reflected_mask)
-        coords = resample_normalized_contour(reflected_mask, num_contour_points) if extract_contours else None
+        ref_ucs, ref_sol, _, _, _ = compute_geometric_metrics(
+            reflected_mask, rosette_centroid=rosette_centroid
+        )
+        coords = (
+            resample_normalized_contour(reflected_mask, num_contour_points, petiole_attachment_pt=p_base)
+            if extract_contours
+            else None
+        )
         meta["reflection_applied"] = True
         return LeafRoutingResult(
             tier="Tier 2",

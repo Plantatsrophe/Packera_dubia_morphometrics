@@ -1160,7 +1160,14 @@ class SegmentAndExtractPipeline:
         clusters_by_pid: Dict[int, List[DetectedInstance]] = defaultdict(list)
         for inst in instances:
             clusters_by_pid[inst.plant_individual_id].append(inst)
+        rosette_centroids_by_pid: Dict[int, Optional[Tuple[float, float]]] = {}
         for pid, pid_instances in sorted(clusters_by_pid.items()):
+            if len(pid_instances) >= 2:
+                rcx = float(np.mean([(i.bbox[1] + i.bbox[3]) / 2.0 for i in pid_instances]))
+                rcy = float(np.mean([(i.bbox[0] + i.bbox[2]) / 2.0 for i in pid_instances]))
+                rosette_centroids_by_pid[pid] = (rcx, rcy)
+            else:
+                rosette_centroids_by_pid[pid] = None
             crop_dense_rosette_tier4(
                 raw_image_path=image_path,
                 plant_candidates=pid_instances,
@@ -1181,6 +1188,7 @@ class SegmentAndExtractPipeline:
                 min_ucs=self.min_ucs,
                 min_solidity=self.min_solidity,
                 taxon=taxon,
+                rosette_centroid=rosette_centroids_by_pid.get(inst.plant_individual_id),
             )
             inst.ucs_score = routing_res.ucs
             inst.solidity = routing_res.solidity

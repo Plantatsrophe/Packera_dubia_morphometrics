@@ -37,6 +37,7 @@ from PIL import Image
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import StandardScaler
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
@@ -549,8 +550,13 @@ def compute_out_of_fold_probabilities(
 ) -> Tuple[np.ndarray, float, float]:
     """Fits stratified cross-validated Logistic Regression to compute out-of-fold probabilities.
 
-    Supports optional compound stratification by both taxon label and foliar surface orientation.
+    L2-normalizes each 768-d embedding vector before fold-internal StandardScaler and fits
+    balanced LogisticRegression. Supports optional compound stratification by both taxon label
+    and foliar surface orientation.
     """
+    X = np.asarray(features, dtype=np.float64)
+    X = X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-8)
+
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     num_classes = len(np.unique(labels))
     pred_probs = np.zeros((len(labels), num_classes), dtype=np.float64)
@@ -568,11 +574,13 @@ def compute_out_of_fold_probabilities(
 
     y_true_all, y_pred_all = [], []
 
-    for train_idx, val_idx in skf.split(features, strat_labels):
-        X_train, y_train = features[train_idx], labels[train_idx]
-        X_val, y_val = features[val_idx], labels[val_idx]
+    for train_idx, val_idx in skf.split(X, strat_labels):
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X[train_idx])
+        X_val = scaler.transform(X[val_idx])
+        y_train, y_val = labels[train_idx], labels[val_idx]
 
-        clf = LogisticRegression(max_iter=1000, C=1.0, random_state=random_state)
+        clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced", random_state=random_state)
         clf.fit(X_train, y_train)
 
         probs = clf.predict_proba(X_val)
@@ -648,6 +656,13 @@ def run_confident_learning_audit(
 
     if "surface_orientation" not in audit_df.columns:
         audit_df["surface_orientation"] = "adaxial"
+
+    audit_df["tomentum_taxon_discordance"] = (
+        (audit_df["surface_orientation"] == "abaxial")
+        & audit_df["given_label"].isin({"Packera anonyma", "Packera paupercula"})
+        & audit_df["predicted_label"].isin({"Packera dubia", "Packera plattensis"})
+        & (audit_df["c_error"] > error_threshold)
+    ).astype(bool)
 
     triage_actions = []
     reasons = []

@@ -573,6 +573,11 @@ model_latitudinal_spring_baseline <- function(flowering_df) {
   }
   coefs <- stats::coef(fit)
   b0 <- as.numeric(coefs[1]); b_lat <- as.numeric(coefs[2])
+  min_lat <- min(valid_trimmed$decimalLatitude, na.rm = TRUE)
+  pred_min_lat <- b0 + b_lat * min_lat
+  decimalLatitude <- valid_trimmed$decimalLatitude
+  hopkins_expected <- pred_min_lat + 4.0 * (decimalLatitude - min_lat)
+  valid_trimmed$hopkins_expected <- hopkins_expected
   
   fit_ols <- stats::lm(doy ~ decimalLatitude, data = valid_trimmed)
   s_ols <- summary(fit_ols)
@@ -580,7 +585,9 @@ model_latitudinal_spring_baseline <- function(flowering_df) {
   
   message(sprintf("Empirical Baseline: DOY = %.3f + %.3f * decimalLatitude (R2 = %.4f, p = %.4e, N = %d)",
                   b0, b_lat, r2, p_val, nrow(valid_trimmed)))
-  return(list(intercept = b0, slope = b_lat, r_squared = r2, p_value = p_val, n = nrow(valid_trimmed), model = fit_ols))
+  return(list(intercept = b0, slope = b_lat, min_lat = min_lat, pred_min_lat = pred_min_lat,
+              hopkins_expected = hopkins_expected, r_squared = r2, p_value = p_val,
+              n = nrow(valid_trimmed), model = fit_ols))
 }
 
 compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = NULL, demo = FALSE) {
@@ -673,8 +680,10 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   baseline <- model_latitudinal_spring_baseline(anthesis_cohort)
   
   df$expected_doy <- NA_real_
+  df$hopkins_expected <- NA_real_
   has_lat <- !is.na(df$decimalLatitude)
   df$expected_doy[has_lat] <- baseline$intercept + baseline$slope * df$decimalLatitude[has_lat]
+  df$hopkins_expected[has_lat] <- baseline$pred_min_lat + 4.0 * (df$decimalLatitude[has_lat] - baseline$min_lat)
   
   df$delta_doy <- NA_real_
   has_both <- !is.na(df$doy) & !is.na(df$expected_doy)
@@ -787,8 +796,15 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   
   lat_col <- if ("decimalLatitude" %in% names(target_df) && any(!is.na(target_df$decimalLatitude))) target_df$decimalLatitude else target_df$latitude
   target_df$decimalLatitude <- lat_col
-  lat_seq <- seq(min(target_df$decimalLatitude, na.rm = TRUE), max(target_df$decimalLatitude, na.rm = TRUE), length.out = 100)
-  pred_line <- data.frame(latitude = lat_seq, decimalLatitude = lat_seq, doy = baseline$intercept + baseline$slope * lat_seq)
+  min_lat <- min(target_df$decimalLatitude, na.rm = TRUE)
+  pred_min_lat <- baseline$intercept + baseline$slope * min_lat
+  lat_seq <- seq(min_lat, max(target_df$decimalLatitude, na.rm = TRUE), length.out = 100)
+  pred_line <- data.frame(
+    latitude = lat_seq,
+    decimalLatitude = lat_seq,
+    doy = baseline$intercept + baseline$slope * lat_seq,
+    hopkins_expected = pred_min_lat + 4.0 * (lat_seq - min_lat)
+  )
   
   p1 <- ggplot2::ggplot(target_df, ggplot2::aes(x = decimalLatitude, y = doy, color = species_standardized)) +
     ggplot2::geom_point(alpha = 0.45, size = 1.4) +
