@@ -360,7 +360,7 @@ class LM2Stage1Detector:
             from utils.torch_utils import select_device
 
             if torch.cuda.is_available():
-                torch.backends.cudnn.benchmark = True
+                torch.backends.cudnn.benchmark = False
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
             dev = select_device(self.device if self.device != "cuda" else "0")
@@ -492,7 +492,7 @@ class PointRendInferenceEngine:
             return
 
         if self.device == "cuda" and torch.cuda.is_available():
-            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.benchmark = False
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
 
@@ -567,7 +567,7 @@ class PointRendInferenceEngine:
         height, width = image_bgr.shape[:2]
         with torch.no_grad():
             img_transformed = self.aug.get_transform(image_bgr).apply_image(image_bgr)
-            tensor_img = torch.from_numpy(np.ascontiguousarray(img_transformed)).to(self.device)
+            tensor_img = torch.from_numpy(np.array(img_transformed, dtype=np.uint8, copy=True)).to(self.device)
             tensor_img = tensor_img.permute(2, 0, 1).contiguous().float()
             inputs = [{"image": tensor_img, "height": height, "width": width}]
             preds = self.model(inputs)[0]
@@ -577,7 +577,7 @@ class PointRendInferenceEngine:
     def predict_batch(
         self,
         images_bgr: List[np.ndarray],
-        batch_size: int = 4,
+        batch_size: int = 2,
     ) -> List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]]:
         """
         Runs batched Stage 2 PointRend inference across multiple candidate leaf crops.
@@ -604,7 +604,7 @@ class PointRendInferenceEngine:
                     for img_bgr in chunk:
                         h, w = img_bgr.shape[:2]
                         img_t = self.aug.get_transform(img_bgr).apply_image(img_bgr)
-                        t_img = torch.from_numpy(np.ascontiguousarray(img_t)).to(self.device)
+                        t_img = torch.from_numpy(np.array(img_t, dtype=np.uint8, copy=True)).to(self.device)
                         t_img = t_img.permute(2, 0, 1).contiguous().float()
                         inputs.append({"image": t_img, "height": h, "width": w})
                     preds_list = self.model(inputs)
@@ -1306,7 +1306,7 @@ class SegmentAndExtractPipeline:
 
                 kept_scored.sort(key=lambda x: x[2])
                 leaf_detections = [x[3] for x in kept_scored]
-        else:
+        elif not is_high_dpi or self.stage1_detector.model is None or "predict" in self.model_engine.__dict__:
             # Fallback when Stage 1 detector is uninitialized (e.g., direct PointRend unit tests)
             raw_detections = self.model_engine.predict(img_bgr)
             for bbox, mask, score, cls_id in raw_detections:
