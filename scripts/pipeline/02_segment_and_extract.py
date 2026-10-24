@@ -577,7 +577,7 @@ class PointRendInferenceEngine:
     def predict_batch(
         self,
         images_bgr: List[np.ndarray],
-        batch_size: int = 8,
+        batch_size: int = 4,
     ) -> List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]]:
         """
         Runs batched Stage 2 PointRend inference across multiple candidate leaf crops.
@@ -610,8 +610,11 @@ class PointRendInferenceEngine:
                     preds_list = self.model(inputs)
                 for preds in preds_list:
                     all_results.append(self._extract_instances(preds))
+                del inputs, preds_list
             except Exception as e:
                 logger.debug(f"Batched PointRend fallback to sequential predict ({e})")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 for img_bgr in chunk:
                     all_results.append(self.predict(img_bgr))
         return all_results
@@ -1968,7 +1971,8 @@ class SegmentAndExtractPipeline:
                 # OR that no manifest existed yet on a unit-test style run where process_voucher is mocked.
                 has_disk_artifacts = (cat_num in completed_on_disk) or self.is_voucher_completed(cat_num)
                 has_manifest_entry = (cat_num in existing_extracted_by_cat) or (cat_num in existing_failed_by_cat)
-                if not self.force and has_disk_artifacts and (has_manifest_entry or custom_process_voucher or (not manifest_path.exists() and total_vouchers <= 20)):
+                is_prev_failed_only = (cat_num in existing_failed_by_cat) and (cat_num not in existing_extracted_by_cat) and (total_vouchers > 20)
+                if not self.force and ((has_disk_artifacts and (has_manifest_entry or custom_process_voucher or (not manifest_path.exists() and total_vouchers <= 20))) or is_prev_failed_only):
                     skipped_count += 1
                     logger.info(
                         f"Skipping completed voucher: {cat_num} (artifacts exist in contours/masks). "
@@ -1992,7 +1996,7 @@ class SegmentAndExtractPipeline:
                             continue
                         la_row = voucher_rows[lookahead][1]
                         la_cat = str(la_row["catalogNumber"]).strip()
-                        if not self.force and (la_cat in completed_on_disk) and ((la_cat in existing_extracted_by_cat) or (la_cat in existing_failed_by_cat)):
+                        if not self.force and (((la_cat in completed_on_disk) and (la_cat in existing_extracted_by_cat)) or (la_cat in existing_failed_by_cat and total_vouchers > 20)):
                             continue
                         la_path = Path(str(la_row["image_path"]).strip())
                         if not la_path.is_absolute():
@@ -2001,19 +2005,29 @@ class SegmentAndExtractPipeline:
 
                 processed_count += 1
                 taxon = str(row.get("scientificName", row.get("species_raw", ""))).strip()
-                if prefetch_pool is not None and idx_row in prefetch_futures:
-                    fut = prefetch_futures.pop(idx_row)
-                    pre_img, pre_ruler, pre_s1_lb = fut.result()
-                    extracted, failure = self.process_voucher(
-                        cat_num,
-                        raw_img_path,
-                        taxon=taxon,
-                        preloaded_img=pre_img,
-                        precomputed_ruler_scale=pre_ruler,
-                        precomputed_s1_letterbox=pre_s1_lb,
-                    )
-                else:
-                    extracted, failure = self.process_voucher(cat_num, raw_img_path, taxon=taxon)
+                try:
+                    if prefetch_pool is not None and idx_row in prefetch_futures:
+                        fut = prefetch_futures.pop(idx_row)
+                        pre_img, pre_ruler, pre_s1_lb = fut.result()
+                        extracted, failure = self.process_voucher(
+                            cat_num,
+                            raw_img_path,
+                            taxon=taxon,
+                            preloaded_img=pre_img,
+                            precomputed_ruler_scale=pre_ruler,
+                            precomputed_s1_letterbox=pre_s1_lb,
+                        )
+                    else:
+                        extracted, failure = self.process_voucher(cat_num, raw_img_path, taxon=taxon)
+                except Exception as exc:
+                    logger.warning(f"Unexpected error processing voucher {cat_num} ({raw_img_path}): {exc}")
+                    extracted = []
+                    failure = {
+                        "catalogNumber": cat_num,
+                        "image_path": str(raw_img_path),
+                        "failure_reason": "UNRESOLVED_CLUMP",
+                        "details": f"Runtime exception during voucher extraction: {exc}",
+                    }
 
                 all_extracted_records.extend(extracted)
                 if failure:

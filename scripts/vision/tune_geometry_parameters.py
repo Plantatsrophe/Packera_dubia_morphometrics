@@ -266,7 +266,14 @@ class COCOGeometryExtractor:
         cnt_cv = cnt.reshape(-1, 1, 2)
         hull_indices = cv2.convexHull(cnt_cv, returnPoints=False)
         if hull_indices is not None and len(hull_indices) >= 3 and blade_width > 0:
-            defects = cv2.convexityDefects(cnt_cv, hull_indices)
+            try:
+                defects = cv2.convexityDefects(cnt_cv, hull_indices)
+            except cv2.error:
+                try:
+                    hull_sorted = np.unique(hull_indices).reshape(-1, 1)
+                    defects = cv2.convexityDefects(cnt_cv, hull_sorted) if len(hull_sorted) >= 3 else None
+                except cv2.error:
+                    defects = None
             if defects is not None and len(defects) > 0:
                 depths = defects.reshape(-1, 4)[:, 3].astype(np.float64) / 256.0
                 max_defect_depth = float(np.max(depths))

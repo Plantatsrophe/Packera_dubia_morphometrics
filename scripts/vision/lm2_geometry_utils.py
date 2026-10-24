@@ -740,7 +740,16 @@ def is_botanical_dissection(
     if hull_indices is None or len(hull_indices) < 3:
         return False
 
-    defects = cv2.convexityDefects(cnt_cv, hull_indices)
+    try:
+        defects = cv2.convexityDefects(cnt_cv, hull_indices)
+    except cv2.error:
+        try:
+            hull_sorted = np.unique(hull_indices).reshape(-1, 1)
+            if len(hull_sorted) < 3:
+                return False
+            defects = cv2.convexityDefects(cnt_cv, hull_sorted)
+        except cv2.error:
+            return False
     if defects is None or len(defects) == 0:
         return False
 
