@@ -32,6 +32,7 @@ Key Capabilities:
 from __future__ import annotations
 
 import math
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -52,6 +53,7 @@ def _sample_cross_sectional_widths(
     pt_end: Tuple[int, int],
     sample_dist: float,
     step_px: int = 2,
+    max_span: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Vectorized helper to sample perpendicular cross-sectional mask widths along
@@ -69,6 +71,8 @@ def _sample_cross_sectional_widths(
         return np.array([]), np.array([])
     centers = np.array(pt_start, dtype=np.float64)[None, :] + s_steps[:, None] * u[None, :]
     w_span = max(min(max(h, w), 350), int(0.65 * max(h, w)))
+    if max_span is not None and max_span > 0:
+        w_span = min(w_span, max_span)
     t_steps = np.arange(-w_span, w_span + 1, 1.0, dtype=np.float64)
     gx = np.round(centers[:, 0, None] + t_steps[None, :] * n[0]).astype(np.int32)
     gy = np.round(centers[:, 1, None] + t_steps[None, :] * n[1]).astype(np.int32)
@@ -194,11 +198,26 @@ def compute_geometric_metrics(
     Tuple[float, float, float, Tuple[int, int], Tuple[int, int]]
         (ucs, solidity, midrib_angle_deg, p_apex, p_base)
     """
-    area_mask = float(np.count_nonzero(mask))
+    if mask is None or mask.size == 0:
+        return 0.0, 0.0, 0.0, (0, 0), (0, 0)
+
+    mask_u8 = mask if mask.dtype == np.uint8 else ((mask > 0).astype(np.uint8) * 255)
+    h_full, w_full = mask_u8.shape[:2]
+    bx, by, bw, bh = cv2.boundingRect(mask_u8)
+    if bw == 0 or bh == 0:
+        return 0.0, 0.0, 0.0, (0, 0), (0, 0)
+
+    x0_pad = max(0, bx - 2)
+    y0_pad = max(0, by - 2)
+    x1_pad = min(w_full, bx + bw + 2)
+    y1_pad = min(h_full, by + bh + 2)
+    sub_mask = mask_u8[y0_pad:y1_pad, x0_pad:x1_pad]
+
+    area_mask = float(np.count_nonzero(sub_mask))
     if area_mask < 30:
         return 0.0, 0.0, 0.0, (0, 0), (0, 0)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    contours, _ = cv2.findContours(sub_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return 0.0, 0.0, 0.0, (0, 0), (0, 0)
 
@@ -218,7 +237,7 @@ def compute_geometric_metrics(
     ucs = min(max(area_mask / expected_area, 0.0), 1.0)
 
     # 3. Longitudinal Midrib Axis (moments principal axis with fitLine fallback)
-    m = cv2.moments(mask, binaryImage=True)
+    m = cv2.moments(sub_mask, binaryImage=True)
     if m["m00"] > 0 and (abs(m["mu20"] - m["mu02"]) > 1e-5 or abs(m["mu11"]) > 1e-5):
         x0 = float(m["m10"] / m["m00"])
         y0 = float(m["m01"] / m["m00"])
@@ -241,13 +260,21 @@ def compute_geometric_metrics(
     min_idx = int(near_min[np.argmin(perp_dist[near_min])]) if len(near_min) > 0 else int(np.argmin(projections))
     max_idx = int(near_max[np.argmin(perp_dist[near_max])]) if len(near_max) > 0 else int(np.argmax(projections))
 
-    ep1 = (int(round(pts[min_idx, 0])), int(round(pts[min_idx, 1])))
-    ep2 = (int(round(pts[max_idx, 0])), int(round(pts[max_idx, 1])))
+    ep1_sub = (int(round(pts[min_idx, 0])), int(round(pts[min_idx, 1])))
+    ep2_sub = (int(round(pts[max_idx, 0])), int(round(pts[max_idx, 1])))
+
+    rc_sub = (
+        (float(rosette_centroid[0]) - x0_pad, float(rosette_centroid[1]) - y0_pad)
+        if rosette_centroid is not None
+        else None
+    )
 
     # Disambiguate p_base vs p_apex polarity via terminal 20% width profile / rosette centroid
-    p_apex, p_base = _disambiguate_base_apex_endpoints(
-        mask, ep1, ep2, rosette_centroid=rosette_centroid
+    p_apex_sub, p_base_sub = _disambiguate_base_apex_endpoints(
+        sub_mask, ep1_sub, ep2_sub, rosette_centroid=rc_sub
     )
+    p_apex = (p_apex_sub[0] + x0_pad, p_apex_sub[1] + y0_pad)
+    p_base = (p_base_sub[0] + x0_pad, p_base_sub[1] + y0_pad)
     angle_deg = math.degrees(
         math.atan2(float(p_base[1] - p_apex[1]), float(p_base[0] - p_apex[0]))
     )
@@ -300,7 +327,12 @@ def reflect_folded_mask(
         Synthesized bilateral silhouette mask (uint8, 0 or 255).
     """
     h, w = mask.shape[:2]
-    if h < 5 or w < 5 or np.count_nonzero(mask) == 0:
+    if h < 5 or w < 5:
+        return mask.copy()
+
+    mask_u8 = mask if mask.dtype == np.uint8 else ((mask > 0).astype(np.uint8) * 255)
+    bx, by, bw, bh = cv2.boundingRect(mask_u8)
+    if bw == 0 or bh == 0:
         return mask.copy()
 
     x1, y1 = float(p1[0]), float(p1[1])
@@ -312,47 +344,93 @@ def reflect_folded_mask(
         return mask.copy()
 
     theta = math.atan2(dy, dx)
-    pad = max(h, w) if padding is None else padding
-    padded = cv2.copyMakeBorder(mask, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
-
-    px1 = x1 + float(pad)
-    py1 = y1 + float(pad)
-
     cos2 = math.cos(2.0 * theta)
     sin2 = math.sin(2.0 * theta)
+    t_x = x1 * (1.0 - cos2) - y1 * sin2
+    t_y = y1 * (1.0 + cos2) - x1 * sin2
 
-    # 2D Affine Reflection Matrix across the line passing through (px1, py1) at angle theta
+    # Compute tight bounding box encompassing both original foreground and its reflection
+    corners_x = np.array([bx, bx + bw, bx, bx + bw], dtype=np.float64)
+    corners_y = np.array([by, by, by + bh, by + bh], dtype=np.float64)
+    ref_x = cos2 * corners_x + sin2 * corners_y + t_x
+    ref_y = sin2 * corners_x - cos2 * corners_y + t_y
+
+    roi_x0 = int(math.floor(min(float(bx), float(np.min(ref_x))))) - 8
+    roi_y0 = int(math.floor(min(float(by), float(np.min(ref_y))))) - 8
+    roi_x1 = int(math.ceil(max(float(bx + bw), float(np.max(ref_x))))) + 8
+    roi_y1 = int(math.ceil(max(float(by + bh), float(np.max(ref_y))))) + 8
+
+    roi_h = max(1, roi_y1 - roi_y0)
+    roi_w = max(1, roi_x1 - roi_x0)
+    local_canvas = np.zeros((roi_h, roi_w), dtype=np.uint8)
+    local_canvas[by - roi_y0 : by - roi_y0 + bh, bx - roi_x0 : bx - roi_x0 + bw] = (
+        mask_u8[by : by + bh, bx : bx + bw]
+    )
+
+    lx1 = x1 - float(roi_x0)
+    ly1 = y1 - float(roi_y0)
+
+    # 2D Affine Reflection Matrix across the line passing through (lx1, ly1) at angle theta
     M = np.array([
-        [cos2, sin2, px1 * (1.0 - cos2) - py1 * sin2],
-        [sin2, -cos2, py1 * (1.0 + cos2) - px1 * sin2]
+        [cos2, sin2, lx1 * (1.0 - cos2) - ly1 * sin2],
+        [sin2, -cos2, ly1 * (1.0 + cos2) - lx1 * sin2]
     ], dtype=np.float32)
 
-    ph, pw = padded.shape[:2]
-    reflected = cv2.warpAffine(padded, M, (pw, ph), flags=cv2.INTER_NEAREST)
-    combined = cv2.bitwise_or(padded, reflected)
+    reflected = cv2.warpAffine(local_canvas, M, (roi_w, roi_h), flags=cv2.INTER_NEAREST)
+    combined = cv2.bitwise_or(local_canvas, reflected)
 
     # Morphological closing to seal the midrib seam
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     sealed = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
 
-    y_indices, x_indices = np.where(sealed > 0)
-    if len(y_indices) == 0:
+    ly_indices, lx_indices = np.where(sealed > 0)
+    if len(ly_indices) == 0:
         return mask.copy()
 
-    # If the synthesized silhouette fits within original bounds, crop back to original frame
-    orig_crop = sealed[pad : pad + h, pad : pad + w]
-    crop_fg = np.count_nonzero(orig_crop > 0)
-    total_fg = len(y_indices)
+    gy_min = int(np.min(ly_indices)) + roi_y0
+    gy_max = int(np.max(ly_indices)) + roi_y0
+    gx_min = int(np.min(lx_indices)) + roi_x0
+    gx_max = int(np.max(lx_indices)) + roi_x0
 
-    if crop_fg == total_fg:
-        return (orig_crop > 127).astype(np.uint8) * 255
+    # If the synthesized silhouette fits within original bounds, place back into original frame
+    if gy_min >= 0 and gy_max < h and gx_min >= 0 and gx_max < w:
+        out = np.zeros((h, w), dtype=np.uint8)
+        sy0 = max(0, -roi_y0)
+        sx0 = max(0, -roi_x0)
+        dy0 = max(0, roi_y0)
+        dx0 = max(0, roi_x0)
+        ch_copy = min(roi_h - sy0, h - dy0)
+        cw_copy = min(roi_w - sx0, w - dx0)
+        if ch_copy > 0 and cw_copy > 0:
+            out[dy0 : dy0 + ch_copy, dx0 : dx0 + cw_copy] = (
+                sealed[sy0 : sy0 + ch_copy, sx0 : sx0 + cw_copy] > 127
+            ).astype(np.uint8) * 255
+        return out
 
-    # Otherwise return tight bounding box with 5px padding
-    min_y = max(0, int(np.min(y_indices)) - 5)
-    max_y = min(ph, int(np.max(y_indices)) + 6)
-    min_x = max(0, int(np.min(x_indices)) - 5)
-    max_x = min(pw, int(np.max(x_indices)) + 6)
-    return (sealed[min_y:max_y, min_x:max_x] > 127).astype(np.uint8) * 255
+    # Otherwise return tight bounding box with 5px padding clamped to padded canvas bounds
+    pad = max(h, w) if padding is None else padding
+    ph = h + 2 * pad
+    pw = w + 2 * pad
+    min_y_p = max(0, gy_min + pad - 5)
+    max_y_p = min(ph, gy_max + pad + 6)
+    min_x_p = max(0, gx_min + pad - 5)
+    max_x_p = min(pw, gx_max + pad + 6)
+    out_h = max(1, max_y_p - min_y_p)
+    out_w = max(1, max_x_p - min_x_p)
+    out_crop = np.zeros((out_h, out_w), dtype=np.uint8)
+    p_roi_y0 = roi_y0 + pad
+    p_roi_x0 = roi_x0 + pad
+    sy0 = max(0, min_y_p - p_roi_y0)
+    sx0 = max(0, min_x_p - p_roi_x0)
+    dy0 = max(0, p_roi_y0 - min_y_p)
+    dx0 = max(0, p_roi_x0 - min_x_p)
+    ch_copy = min(roi_h - sy0, out_h - dy0)
+    cw_copy = min(roi_w - sx0, out_w - dx0)
+    if ch_copy > 0 and cw_copy > 0:
+        out_crop[dy0 : dy0 + ch_copy, dx0 : dx0 + cw_copy] = (
+            sealed[sy0 : sy0 + ch_copy, sx0 : sx0 + cw_copy] > 127
+        ).astype(np.uint8) * 255
+    return out_crop
 
 
 class FoldDetectionResult(dict):
@@ -719,6 +797,7 @@ def trim_petiole_tail(
     min_petiole_length_px: float = 14.0,
     aspect_ratio_protrusion_thresh: float = 3.0,
     return_metadata: bool = False,
+    sheet_shape: Optional[Tuple[int, int]] = None,
 ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, Any]]]:
     """
     Width-Inflection Junction Trimmer.
@@ -756,29 +835,83 @@ def trim_petiole_tail(
         for the fallback morphological width check (default: 3.0).
     return_metadata : bool
         If True, returns a tuple of (trimmed_mask, metadata_dict).
+    sheet_shape : Optional[Tuple[int, int]]
+        Optional (sheet_h, sheet_w) reference dimensions when operating on a cropped mask.
 
     Returns
     -------
     Union[np.ndarray, Tuple[np.ndarray, Dict[str, Any]]]
         Trimmed binary mask, or (trimmed_mask, metadata) if return_metadata=True.
     """
-    if mask is None or np.count_nonzero(mask) < 30:
+    if mask is None or mask.size == 0:
         meta = {
             "is_trimmed": False,
             "trim_distance_px": 0.0,
             "junction_pt": None,
             "p_base": p_base,
             "p_apex": p_apex,
-            "original_area": int(np.count_nonzero(mask)) if mask is not None else 0,
-            "trimmed_area": int(np.count_nonzero(mask)) if mask is not None else 0,
+            "original_area": 0,
+            "trimmed_area": 0,
             "stalk_width_mean": 0.0,
             "reason": "EMPTY_OR_TINY_MASK",
         }
         fallback_mask = mask.copy() if mask is not None else np.zeros((10, 10), dtype=np.uint8)
         return (fallback_mask, meta) if return_metadata else fallback_mask
 
-    h, w = mask.shape[:2]
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    mask_u8 = mask if mask.dtype == np.uint8 else ((mask > 0).astype(np.uint8) * 255)
+    h_full, w_full = mask_u8.shape[:2]
+    orig_h, orig_w = sheet_shape if sheet_shape is not None else (h_full, w_full)
+
+    bx, by, bw, bh = cv2.boundingRect(mask_u8)
+    if bw == 0 or bh == 0:
+        meta = {
+            "is_trimmed": False,
+            "trim_distance_px": 0.0,
+            "junction_pt": None,
+            "p_base": p_base,
+            "p_apex": p_apex,
+            "original_area": 0,
+            "trimmed_area": 0,
+            "stalk_width_mean": 0.0,
+            "reason": "EMPTY_OR_TINY_MASK",
+        }
+        return (mask.copy(), meta) if return_metadata else mask.copy()
+
+    x0_pad = max(0, bx - 2)
+    y0_pad = max(0, by - 2)
+    x1_pad = min(w_full, bx + bw + 2)
+    y1_pad = min(h_full, by + bh + 2)
+    sub_mask = mask_u8[y0_pad:y1_pad, x0_pad:x1_pad].copy()
+    init_area = int(np.count_nonzero(sub_mask))
+    if init_area < 30:
+        meta = {
+            "is_trimmed": False,
+            "trim_distance_px": 0.0,
+            "junction_pt": None,
+            "p_base": p_base,
+            "p_apex": p_apex,
+            "original_area": init_area,
+            "trimmed_area": init_area,
+            "stalk_width_mean": 0.0,
+            "reason": "EMPTY_OR_TINY_MASK",
+        }
+        return (mask.copy(), meta) if return_metadata else mask.copy()
+
+    def _to_full(local_arr: np.ndarray) -> np.ndarray:
+        if x0_pad == 0 and y0_pad == 0 and x1_pad == w_full and y1_pad == h_full:
+            return local_arr.copy()
+        out = np.zeros((h_full, w_full), dtype=np.uint8)
+        out[y0_pad:y1_pad, x0_pad:x1_pad] = local_arr
+        return out
+
+    def _shift_pt(pt: Optional[Tuple[int, int]]) -> Optional[Tuple[int, int]]:
+        return (int(pt[0]) + x0_pad, int(pt[1]) + y0_pad) if pt is not None else None
+
+    p_base_sub = (int(p_base[0]) - x0_pad, int(p_base[1]) - y0_pad) if p_base is not None else None
+    p_apex_sub = (int(p_apex[0]) - x0_pad, int(p_apex[1]) - y0_pad) if p_apex is not None else None
+
+    h, w = sub_mask.shape[:2]
+    contours, _ = cv2.findContours(sub_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         meta = {
             "is_trimmed": False,
@@ -786,8 +919,8 @@ def trim_petiole_tail(
             "junction_pt": None,
             "p_base": p_base,
             "p_apex": p_apex,
-            "original_area": int(np.count_nonzero(mask)),
-            "trimmed_area": int(np.count_nonzero(mask)),
+            "original_area": init_area,
+            "trimmed_area": init_area,
             "stalk_width_mean": 0.0,
             "reason": "NO_CONTOURS",
         }
@@ -796,8 +929,8 @@ def trim_petiole_tail(
     main_cnt = max(contours, key=cv2.contourArea)
     pts = main_cnt.reshape(-1, 2).astype(np.float32)
     rect_b = cv2.minAreaRect(pts)
-    blade_width_est = float(min(rect_b[1])) if min(rect_b[1]) > 0 else float(min(h, w))
-    if blade_width_est > 250.0 and min(h, w) > 500:
+    blade_width_est = float(min(rect_b[1])) if min(rect_b[1]) > 0 else float(min(orig_h, orig_w))
+    if blade_width_est > 250.0 and min(orig_h, orig_w) > 500:
         if max_petiole_width == 16.0:
             max_petiole_width = max(16.0, 0.105 * blade_width_est)
         cordate_guard_w = max(float(max_petiole_width) * 1.18, 19.0)
@@ -814,6 +947,10 @@ def trim_petiole_tail(
     ep1 = (int(pts[min_idx, 0]), int(pts[min_idx, 1]))
     ep2 = (int(pts[max_idx, 0]), int(pts[max_idx, 1]))
 
+    max_local_span = int(math.ceil(math.hypot(h, w))) + 2
+    base_span = max(min(max(orig_h, orig_w), 350), int(0.65 * max(orig_h, orig_w)))
+    w_span_eff = min(base_span, max_local_span)
+
     # Vectorized helper to sample perpendicular cross-sectional widths
     def _sample_widths(pt_start: Tuple[int, int], pt_end: Tuple[int, int], sample_dist: float) -> Tuple[np.ndarray, np.ndarray]:
         v_dir = np.array([pt_end[0] - pt_start[0], pt_end[1] - pt_start[1]], dtype=np.float64)
@@ -826,13 +963,12 @@ def trim_petiole_tail(
         if len(s_steps) == 0:
             return np.array([]), np.array([])
         centers = np.array(pt_start, dtype=np.float64)[None, :] + s_steps[:, None] * u[None, :]
-        w_span = max(min(max(h, w), 350), int(0.65 * max(h, w)))
-        t_steps = np.arange(-w_span, w_span + 1, 1.0, dtype=np.float64)
+        t_steps = np.arange(-w_span_eff, w_span_eff + 1, 1.0, dtype=np.float64)
         gx = np.round(centers[:, 0, None] + t_steps[None, :] * n[0]).astype(np.int32)
         gy = np.round(centers[:, 1, None] + t_steps[None, :] * n[1]).astype(np.int32)
         valid = (gx >= 0) & (gx < w) & (gy >= 0) & (gy < h)
         grid_mask = np.zeros((len(s_steps), len(t_steps)), dtype=bool)
-        grid_mask[valid] = mask[gy[valid], gx[valid]] > 0
+        grid_mask[valid] = sub_mask[gy[valid], gx[valid]] > 0
         widths = np.zeros(len(s_steps), dtype=np.float64)
         for i in range(len(s_steps)):
             row = grid_mask[i]
@@ -841,8 +977,8 @@ def trim_petiole_tail(
         return s_steps, widths
 
     # Resolve endpoints and orientation
-    if p_base is not None and p_apex is not None:
-        cand_base, cand_apex = p_base, p_apex
+    if p_base_sub is not None and p_apex_sub is not None:
+        cand_base, cand_apex = p_base_sub, p_apex_sub
     else:
         # Probe both endpoints along the fitted longitudinal axis
         probe_dist = min(60.0, np.hypot(ep2[0] - ep1[0], ep2[1] - ep1[1]) * 0.35)
@@ -859,8 +995,8 @@ def trim_petiole_tail(
         elif stalk_len_2 >= min_petiole_length_px and stalk_len_2 >= stalk_len_1 + 6.0:
             cand_base, cand_apex = ep2, ep1
         else:
-            cand_base = p_base if p_base is not None else ep2
-            cand_apex = p_apex if p_apex is not None else ep1
+            cand_base = p_base_sub if p_base_sub is not None else ep2
+            cand_apex = p_apex_sub if p_apex_sub is not None else ep1
 
     axis_len = float(math.hypot(cand_apex[0] - cand_base[0], cand_apex[1] - cand_base[1]))
     if axis_len < 15.0:
@@ -868,10 +1004,10 @@ def trim_petiole_tail(
             "is_trimmed": False,
             "trim_distance_px": 0.0,
             "junction_pt": None,
-            "p_base": cand_base,
-            "p_apex": cand_apex,
-            "original_area": int(np.count_nonzero(mask)),
-            "trimmed_area": int(np.count_nonzero(mask)),
+            "p_base": _shift_pt(cand_base),
+            "p_apex": _shift_pt(cand_apex),
+            "original_area": init_area,
+            "trimmed_area": init_area,
             "stalk_width_mean": 0.0,
             "reason": "AXIS_TOO_SHORT",
         }
@@ -885,10 +1021,10 @@ def trim_petiole_tail(
             "is_trimmed": False,
             "trim_distance_px": 0.0,
             "junction_pt": None,
-            "p_base": cand_base,
-            "p_apex": cand_apex,
-            "original_area": int(np.count_nonzero(mask)),
-            "trimmed_area": int(np.count_nonzero(mask)),
+            "p_base": _shift_pt(cand_base),
+            "p_apex": _shift_pt(cand_apex),
+            "original_area": init_area,
+            "trimmed_area": init_area,
             "stalk_width_mean": 0.0,
             "reason": "INSUFFICIENT_STEPS",
         }
@@ -901,10 +1037,10 @@ def trim_petiole_tail(
             "is_trimmed": False,
             "trim_distance_px": 0.0,
             "junction_pt": None,
-            "p_base": cand_base,
-            "p_apex": cand_apex,
-            "original_area": int(np.count_nonzero(mask)),
-            "trimmed_area": int(np.count_nonzero(mask)),
+            "p_base": _shift_pt(cand_base),
+            "p_apex": _shift_pt(cand_apex),
+            "original_area": init_area,
+            "trimmed_area": init_area,
             "stalk_width_mean": 0.0,
             "reason": "CORDATE_OR_BROAD_BASE_PROTECTED",
         }
@@ -918,29 +1054,32 @@ def trim_petiole_tail(
         else:
             break
 
-    num_l0, lbl0, st0, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
+    num_l0, lbl0, st0, _ = cv2.connectedComponentsWithStats((sub_mask > 0).astype(np.uint8), connectivity=8)
     if num_l0 > 2:
         best_l0 = 1 + int(np.argmax(st0[1:, cv2.CC_STAT_AREA]))
-        mask = np.where(lbl0 == best_l0, 255, 0).astype(np.uint8)
-    cnts0, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        sub_mask = np.where(lbl0 == best_l0, 255, 0).astype(np.uint8)
+    cnts0, _ = cv2.findContours(sub_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if cnts0:
-        m_fill = np.zeros_like(mask)
+        m_fill = np.zeros_like(sub_mask)
         cv2.drawContours(m_fill, [max(cnts0, key=cv2.contourArea)], -1, 255, -1)
-        mask = m_fill
+        sub_mask = m_fill
+
+    cleaned_area = int(np.count_nonzero(sub_mask))
 
     if not narrow_indices:
+        out_unclipped = _to_full(sub_mask)
         meta = {
             "is_trimmed": False,
             "trim_distance_px": 0.0,
             "junction_pt": None,
-            "p_base": cand_base,
-            "p_apex": cand_apex,
-            "original_area": int(np.count_nonzero(mask)),
-            "trimmed_area": int(np.count_nonzero(mask)),
+            "p_base": _shift_pt(cand_base),
+            "p_apex": _shift_pt(cand_apex),
+            "original_area": cleaned_area,
+            "trimmed_area": cleaned_area,
             "stalk_width_mean": 0.0,
             "reason": "NO_NARROW_BASE",
         }
-        return (mask.copy(), meta) if return_metadata else mask.copy()
+        return (out_unclipped, meta) if return_metadata else out_unclipped
 
     stalk_len = s_steps[narrow_indices[-1]]
     junction_idx = None
@@ -988,18 +1127,19 @@ def trim_petiole_tail(
                 reason = "WIDTH_INFLECTION_JUNCTION_TRIMMED"
 
     if junction_idx is None or junction_idx == 0:
+        out_unclipped = _to_full(sub_mask)
         meta = {
             "is_trimmed": False,
             "trim_distance_px": 0.0,
             "junction_pt": None,
-            "p_base": cand_base,
-            "p_apex": cand_apex,
-            "original_area": int(np.count_nonzero(mask)),
-            "trimmed_area": int(np.count_nonzero(mask)),
+            "p_base": _shift_pt(cand_base),
+            "p_apex": _shift_pt(cand_apex),
+            "original_area": cleaned_area,
+            "trimmed_area": cleaned_area,
             "stalk_width_mean": 0.0,
             "reason": reason or "CLEAN_BLADE_UNCLIPPED",
         }
-        return (mask.copy(), meta) if return_metadata else mask.copy()
+        return (out_unclipped, meta) if return_metadata else out_unclipped
 
     # 3. Clip mask perpendicularly at detected junction
     L_junction = s_steps[junction_idx]
@@ -1009,7 +1149,7 @@ def trim_petiole_tail(
 
     Y, X = np.ogrid[:h, :w]
     proj = (X - pj_x) * u_dir[0] + (Y - pj_y) * u_dir[1]
-    clipped = mask.copy()
+    clipped = sub_mask.copy()
     clipped[proj < 0] = 0
 
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(clipped, connectivity=8)
@@ -1022,18 +1162,20 @@ def trim_petiole_tail(
         cv2.drawContours(clipped_filled, [max(cnts_ext, key=cv2.contourArea)], -1, 255, -1)
         clipped = clipped_filled
 
+    j_pt_full = (int(round(pj_x)) + x0_pad, int(round(pj_y)) + y0_pad)
+    out_clipped = _to_full(clipped)
     meta = {
         "is_trimmed": True,
         "trim_distance_px": float(L_junction),
-        "junction_pt": (int(round(pj_x)), int(round(pj_y))),
-        "p_base": (int(round(pj_x)), int(round(pj_y))),
-        "p_apex": cand_apex,
-        "original_area": int(np.count_nonzero(mask)),
+        "junction_pt": j_pt_full,
+        "p_base": j_pt_full,
+        "p_apex": _shift_pt(cand_apex),
+        "original_area": cleaned_area,
         "trimmed_area": int(np.count_nonzero(clipped)),
         "stalk_width_mean": float(np.mean(widths[s_steps < L_junction])) if np.any(s_steps < L_junction) else 0.0,
         "reason": reason,
     }
-    return (clipped, meta) if return_metadata else clipped
+    return (out_clipped, meta) if return_metadata else out_clipped
 
 
 def homologize_contour_starting_point(
@@ -1276,6 +1418,9 @@ def classify_and_route_leaf(
     fold_detection_enabled: Optional[bool] = None,
     dissection_enabled: Optional[bool] = None,
     rosette_centroid: Optional[Tuple[float, float]] = None,
+    already_trimmed: bool = False,
+    trim_meta: Optional[Dict[str, Any]] = None,
+    sheet_shape: Optional[Tuple[int, int]] = None,
 ) -> LeafRoutingResult:
     """
     Comprehensive geometric quality gatekeeper and routing engine:
@@ -1291,46 +1436,6 @@ def classify_and_route_leaf(
          - Leaves with UCS >= min_ucs and Solidity >= min_solidity route to Tier 1.
       5. Fallback hemi-blade reflection (Tier 2):
          - Partially occluded leaves attempt 2-path reflection or route to Failed QC.
-
-    Parameters
-    ----------
-    mask : np.ndarray
-        Binary leaf mask.
-    config : Optional[Any]
-        Optional PipelineConfig or configuration object with threshold parameters.
-    min_ucs : float
-        UCS threshold for Tier 1 (default 0.85).
-    min_solidity : float
-        Solidity threshold for Tier 1 (default 0.72).
-    dissection_min_solidity : float
-        Lower solidity bound for botanical dissection inspection (default 0.50).
-    extract_contours : bool
-        Whether to extract resampled normalized contour coordinates (default True).
-    num_contour_points : int
-        Number of standardized contour points (default 120).
-    taxon : Optional[str]
-        Botanical taxon / scientific name for lyrate dissection tendency check.
-    taxa_with_lyrate_tendency : Optional[List[str]]
-        List of taxa with known lyrate/pinnatifid basal leaf dissection tendency.
-    max_chord_deviation_ratio : Optional[float]
-        Fold detection maximum chord deviation ratio (default 0.035).
-    max_folded_aspect_ratio : Optional[float]
-        Fold detection maximum width-to-length ratio (default 0.42).
-    sinus_defect_min_depth_ratio : Optional[float]
-        Sinus convexity defect minimum depth ratio (default 0.08).
-    min_bilateral_sinus_count : Optional[int]
-        Minimum bilateral sinus defect count for botanical dissection (default 3).
-    min_chord_length_px : Optional[float]
-        Minimum chord length in pixels for fold detection (default 150.0).
-    fold_detection_enabled : Optional[bool]
-        Whether fold detection is enabled (default True).
-    dissection_enabled : Optional[bool]
-        Whether dissection inspection is enabled (default True).
-
-    Returns
-    -------
-    LeafRoutingResult
-        Structured metadata and processed mask for downstream extraction.
     """
     if config is not None:
         thresh = getattr(config, "thresholds", config)
@@ -1417,7 +1522,7 @@ def classify_and_route_leaf(
     if min_bilateral_sinus_count is None:
         min_bilateral_sinus_count = 3
 
-    if mask is None or np.count_nonzero(mask) < 20:
+    if mask is None or mask.size == 0 or np.count_nonzero(mask) < 20:
         return LeafRoutingResult(
             tier="Failed QC",
             assigned_tier="rejected",
@@ -1430,13 +1535,49 @@ def classify_and_route_leaf(
             rejection_reason="mask_empty_or_too_small"
         )
 
-    # Width-inflection junction trimming to eliminate petiole tail prior to computing harmonics and solidity
-    mask, trim_meta = trim_petiole_tail(mask, return_metadata=True)
-
+    # Compute initial geometric metrics and disambiguated (p_apex, p_base), then trim petiole tail
     ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(
         mask, rosette_centroid=rosette_centroid
     )
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not already_trimmed or rosette_centroid is not None:
+        trimmed_mask, trim_meta = trim_petiole_tail(
+            mask,
+            p_base=p_base,
+            p_apex=p_apex,
+            return_metadata=True,
+            sheet_shape=sheet_shape,
+        )
+        if trim_meta.get("is_trimmed", False):
+            mask = trimmed_mask
+            ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(
+                mask, rosette_centroid=rosette_centroid
+            )
+    elif trim_meta is None:
+        trim_meta = {"is_trimmed": False, "reason": "PRE_TRIMMED"}
+    mask_u8 = mask if mask.dtype == np.uint8 else ((mask > 0).astype(np.uint8) * 255)
+    bx_m, by_m, bw_m, bh_m = cv2.boundingRect(mask_u8)
+    if bw_m == 0 or bh_m == 0:
+        return LeafRoutingResult(
+            tier="Failed QC",
+            assigned_tier="rejected",
+            solidity=solidity,
+            ucs=ucs,
+            is_folded=False,
+            is_irregular_fold=False,
+            is_dissected=False,
+            processed_mask=mask,
+            rejection_reason="no_contour_found"
+        )
+    x0_c = max(0, bx_m - 2)
+    y0_c = max(0, by_m - 2)
+    x1_c = min(mask_u8.shape[1], bx_m + bw_m + 2)
+    y1_c = min(mask_u8.shape[0], by_m + bh_m + 2)
+    contours, _ = cv2.findContours(
+        mask_u8[y0_c:y1_c, x0_c:x1_c],
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_NONE,
+        offset=(x0_c, y0_c),
+    )
     if not contours:
         return LeafRoutingResult(
             tier="Failed QC",
@@ -1543,7 +1684,8 @@ def classify_and_route_leaf(
 
     # 3. Botanical Dissection Inspection (min_dissected <= solidity < min_solidity)
     # Strictly label-blind: relies solely on intrinsic bilateral sinus geometry via is_botanical_dissection().
-    is_high_res_mask = max(mask.shape[:2]) > 500
+    ref_shape = sheet_shape if sheet_shape is not None else mask.shape[:2]
+    is_high_res_mask = max(ref_shape) > 500
     allow_dissection = True
     if is_high_res_mask and (ucs < 0.70 or solidity < max(dissection_min_solidity, 0.58)):
         allow_dissection = False
@@ -1675,7 +1817,7 @@ def extract_tier1_pristine(
 
     bin_mask = (mask > 0).astype(np.uint8) * 255
     cv2.imwrite(str(main_save_path), bin_mask)
-    cv2.imwrite(str(tier_save_path), bin_mask)
+    shutil.copyfile(str(main_save_path), str(tier_save_path))
     return str(main_save_path)
 
 
@@ -1703,52 +1845,26 @@ def extract_tier2_reflected(
     using NumPy vectorization (no nested pixel loops), applies morphological
     closing to produce a watertight closed silhouette, and inverse-rotates back
     to the original canvas frame.
-
-    Parameters
-    ----------
-    mask : np.ndarray
-        Original binary leaf mask.
-    catalog_number : str
-        Specimen voucher catalog identifier.
-    leaf_id : int
-        Instance index on specimen sheet.
-    p_apex : Tuple[int, int]
-        Apex coordinate (x, y).
-    p_base : Tuple[int, int]
-        Base/petiole coordinate (x, y).
-    output_dir : Optional[Path]
-        Directory to save mask outputs. If None, saves are skipped.
-    threshold_defect : float
-        Maximum defect score to consider a half-blade intact.
-    min_solidity : float
-        Minimum solidity required for the synthesized bilateral silhouette.
-    min_ucs : float
-        Minimum UCS required for the synthesized bilateral silhouette.
-
-    Returns
-    -------
-    Tuple[Optional[str], Optional[np.ndarray]]
-        (saved_path, reflected_mask_binary) or (None, None) if reflection fails QC.
     """
     h, w = mask.shape[:2]
     if h < 15 or w < 15:
         return None, None
 
-    ys, xs = np.where(mask > 0)
-    if len(ys) < 30:
+    mask_u8 = mask if mask.dtype == np.uint8 else ((mask > 0).astype(np.uint8) * 255)
+    bx, by, bw, bh = cv2.boundingRect(mask_u8)
+    if bw == 0 or bh == 0:
+        return None, None
+
+    x_min, x_max = bx, bx + bw - 1
+    y_min, y_max = by, by + bh - 1
+    pad = max(16, int(0.25 * max(bw, bh)))
+
+    tight_crop = (mask_u8[y_min:y_max + 1, x_min:x_max + 1] > 0).astype(np.uint8) * 255
+    if int(np.count_nonzero(tight_crop)) < 30:
         return None, None
 
     if p_apex == p_base or p_apex == (0, 0):
-        _, _, _, p_apex, p_base = compute_geometric_metrics(mask)
-
-    # 1. Crop around tight bounding box with padding (pad = int(0.25 * max(bw, bh)))
-    x_min, x_max = int(np.min(xs)), int(np.max(xs))
-    y_min, y_max = int(np.min(ys)), int(np.max(ys))
-    bw = x_max - x_min + 1
-    bh = y_max - y_min + 1
-    pad = max(16, int(0.25 * max(bw, bh)))
-
-    tight_crop = (mask[y_min:y_max + 1, x_min:x_max + 1] > 0).astype(np.uint8) * 255
+        _, _, _, p_apex, p_base = compute_geometric_metrics(mask_u8)
 
     cnts, _ = cv2.findContours(tight_crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
@@ -1870,8 +1986,7 @@ def extract_tier2_reflected(
     unaligned_crop = cv2.warpAffine(reflected, inv_rot_mat, (cw, ch), flags=cv2.INTER_NEAREST)
     unaligned_crop = cv2.morphologyEx(unaligned_crop, cv2.MORPH_CLOSE, kernel)
 
-    # Unpad back into original (h, w) canvas frame
-    reflected_bin = np.zeros((h, w), dtype=np.uint8)
+    # Evaluate and clean in tight ROI coordinates before allocating full (h, w) canvas
     src_x0 = max(0, pad - x_min)
     src_y0 = max(0, pad - y_min)
     dst_x0 = max(0, x_min - pad)
@@ -1879,29 +1994,29 @@ def extract_tier2_reflected(
     copy_w = min(cw - src_x0, w - dst_x0)
     copy_h = min(ch - src_y0, h - dst_y0)
     if copy_w > 0 and copy_h > 0:
-        reflected_bin[dst_y0:dst_y0 + copy_h, dst_x0:dst_x0 + copy_w] = (
+        roi_bin = (
             unaligned_crop[src_y0:src_y0 + copy_h, src_x0:src_x0 + copy_w] > 127
         ).astype(np.uint8) * 255
     else:
-        reflected_bin = (unaligned_crop > 127).astype(np.uint8) * 255
+        roi_bin = (unaligned_crop > 127).astype(np.uint8) * 255
 
-    num_lr, lbl_r, st_r, _ = cv2.connectedComponentsWithStats((reflected_bin > 0).astype(np.uint8), connectivity=8)
+    num_lr, lbl_r, st_r, _ = cv2.connectedComponentsWithStats((roi_bin > 0).astype(np.uint8), connectivity=8)
     if num_lr > 1:
         best_lr = 1 + int(np.argmax(st_r[1:, cv2.CC_STAT_AREA]))
-        reflected_bin = np.where(lbl_r == best_lr, 255, 0).astype(np.uint8)
-    cnts_r, _ = cv2.findContours(reflected_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        roi_bin = np.where(lbl_r == best_lr, 255, 0).astype(np.uint8)
+    cnts_r, _ = cv2.findContours(roi_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if cnts_r:
-        ref_filled = np.zeros_like(reflected_bin)
+        ref_filled = np.zeros_like(roi_bin)
         cv2.drawContours(ref_filled, [max(cnts_r, key=cv2.contourArea)], -1, 255, -1)
-        reflected_bin = ref_filled
+        roi_bin = ref_filled
 
-    # Verify synthesized silhouette quality
-    ref_ucs, ref_solidity, _, _, _ = compute_geometric_metrics(reflected_bin)
+    # Verify synthesized silhouette quality on tight ROI
+    ref_ucs, ref_solidity, _, _, _ = compute_geometric_metrics(roi_bin)
     if ref_solidity < min_solidity or ref_ucs < min_ucs:
         return None, None
 
     if is_high_dpi_mask:
-        ref_cnts, _ = cv2.findContours(reflected_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        ref_cnts, _ = cv2.findContours(roi_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not ref_cnts:
             return None, None
         ref_cnt = max(ref_cnts, key=cv2.contourArea)
@@ -1913,6 +2028,12 @@ def extract_tier2_reflected(
 
         if ref_ar > 0.84 or ref_solidity < 0.78 or ref_ucs < 0.82:
             return None, None
+
+    if copy_w > 0 and copy_h > 0:
+        reflected_bin = np.zeros((h, w), dtype=np.uint8)
+        reflected_bin[dst_y0:dst_y0 + copy_h, dst_x0:dst_x0 + copy_w] = roi_bin
+    else:
+        reflected_bin = roi_bin
 
     main_save_path = None
     if output_dir is not None:
@@ -1927,7 +2048,7 @@ def extract_tier2_reflected(
         tier_save_path = tier2_dir / filename
 
         cv2.imwrite(str(main_save_path), reflected_bin)
-        cv2.imwrite(str(tier_save_path), reflected_bin)
+        shutil.copyfile(str(main_save_path), str(tier_save_path))
 
     return str(main_save_path) if main_save_path else None, reflected_bin
 
@@ -1967,6 +2088,7 @@ def export_standardized_contour(
     num_points: int = 120,
     petiole_attachment_pt: Optional[Tuple[int, int]] = None,
     contour: Optional[np.ndarray] = None,
+    p_apex_pt: Optional[Tuple[int, int]] = None,
 ) -> Optional[str]:
     """
     Extracts vectorized 2D (x, y) boundary coordinates from a binary silhouette mask,
@@ -1978,7 +2100,9 @@ def export_standardized_contour(
     """
     if contour is not None and len(contour) >= 10:
         largest_cnt = contour.reshape(-1, 2)
-        if mask is not None and np.count_nonzero(mask) >= 30:
+        if petiole_attachment_pt is not None and p_apex_pt is not None:
+            p_apex_m, p_base_m = p_apex_pt, petiole_attachment_pt
+        elif mask is not None and np.count_nonzero(mask) >= 30:
             _, _, _, p_apex_m, p_base_m = compute_geometric_metrics(mask)
         else:
             p_apex_m, p_base_m = (0, 0), (0, 0)
@@ -1996,11 +2120,14 @@ def export_standardized_contour(
     # Resolve petiole attachment anchor point and apex point
     if petiole_attachment_pt is None:
         petiole_attachment_pt = p_base_m
-        p_apex_pt = p_apex_m
+        resolved_apex_pt = p_apex_m if p_apex_pt is None else p_apex_pt
+    elif p_apex_pt is not None:
+        resolved_apex_pt = p_apex_pt
     else:
         d_to_apex = math.hypot(petiole_attachment_pt[0] - p_apex_m[0], petiole_attachment_pt[1] - p_apex_m[1])
         d_to_base = math.hypot(petiole_attachment_pt[0] - p_base_m[0], petiole_attachment_pt[1] - p_base_m[1])
-        p_apex_pt = p_apex_m if d_to_apex >= d_to_base else p_base_m
+        resolved_apex_pt = p_apex_m if d_to_apex >= d_to_base else p_base_m
+    p_apex_pt = resolved_apex_pt
 
     # Homologize starting point to petiole base & enforce clockwise orientation
     largest_cnt = homologize_contour_starting_point(largest_cnt, petiole_attachment_pt)
