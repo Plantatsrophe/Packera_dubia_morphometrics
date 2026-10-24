@@ -577,7 +577,7 @@ class PointRendInferenceEngine:
     def predict_batch(
         self,
         images_bgr: List[np.ndarray],
-        batch_size: int = 2,
+        batch_size: int = 8,
     ) -> List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]]:
         """
         Runs batched Stage 2 PointRend inference across multiple candidate leaf crops.
