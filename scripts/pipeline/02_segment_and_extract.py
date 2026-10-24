@@ -970,6 +970,7 @@ class SegmentAndExtractPipeline:
 
         sheet_h, sheet_w = img_bgr.shape[:2]
         scale_f = max(sheet_h, sheet_w) / 5600.0 if max(sheet_h, sheet_w) > 1000 else 0.0
+        is_high_dpi = max(sheet_h, sheet_w) > 1000 and scale_f > 0.4
 
         # 1. Ruler Scale Calibration: Prefer Stage 1 LM2 Ruler Calibration, fallback to Hough
         lm2_px_per_mm = self.ruler_calibrations.get(catalog_number)
@@ -1013,10 +1014,8 @@ class SegmentAndExtractPipeline:
                             continue
                         if max(s1_bh, s1_bw) > int(1300 * scale_f) or (s1_bh * s1_bw) > 0.14 * (sheet_h * sheet_w):
                             continue
-                        if scale_f > 0.4:
-                            if s1_cy < 0.22 * sheet_h or (
-                                s1_cy < 0.38 * sheet_h and s1_cls == 1 and max(s1_bh, s1_bw) < int(260 * scale_f)
-                            ):
+                        if is_high_dpi:
+                            if s1_cy < 0.40 * sheet_h or max(s1_bh, s1_bw) < int(200 * scale_f):
                                 continue
                             if s1_cls == 1 and s1_bh == s1_bw and s1_cy < 0.60 * sheet_h:
                                 continue
@@ -1286,6 +1285,7 @@ class SegmentAndExtractPipeline:
 
         extracted_records: List[Dict[str, Any]] = []
         rejected_instances: List[DetectedInstance] = []
+        record_areas: Dict[int, int] = {}
 
         # 6. Geometric Quality Gatekeeper, 2-Path Extraction & Basal Leaf RGB Patch Saving
         for inst in instances:
@@ -1335,32 +1335,12 @@ class SegmentAndExtractPipeline:
                 tier = "Tier 2"
                 assigned_tier = TIER_2_REFLECTED
                 reflection_applied = True
-                out_base = (self.output_dir / "data") if (self.output_dir.name != "data" and (self.output_dir / "data").is_dir()) else self.output_dir
-                mask_dir = out_base / "masks"
-                tier2_dir = mask_dir / "tier2_reflected"
-                mask_dir.mkdir(parents=True, exist_ok=True)
-                tier2_dir.mkdir(parents=True, exist_ok=True)
-
-                filename = f"{catalog_number}_leaf{inst.leaf_id}.png"
-                main_save_path = mask_dir / filename
-                tier_save_path = tier2_dir / filename
-
-                cv2.imwrite(str(main_save_path), routing_res.processed_mask)
-                cv2.imwrite(str(tier_save_path), routing_res.processed_mask)
-
-                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=True)
-                inst.mask_path = str(main_save_path)
-                inst.contour_path = contour_path
 
             # 2. Check for pristine whole leaf: If solidity >= min_solidity and ucs >= 0.85 -> route to Tier 1
             elif routing_res.solidity >= self.min_solidity and routing_res.ucs >= self.min_ucs and routing_res.assigned_tier == "tier1" and not is_dissected:
                 tier = "Tier 1"
                 assigned_tier = TIER_1_DIRECT
                 reflection_applied = False
-                mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
-                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=False)
-                inst.mask_path = mask_path
-                inst.contour_path = contour_path
 
             # 3. Check for botanical dissection: If solidity < min_solidity but is_botanical_dissection == True -> route to Tier 1 (Dissected)
             elif (routing_res.solidity < self.min_solidity) and is_dissected and routing_res.solidity >= self.min_dissected and routing_res.assigned_tier == "tier1":
@@ -1368,32 +1348,12 @@ class SegmentAndExtractPipeline:
                 assigned_tier = TIER_1_DIRECT
                 is_dissected = True
                 reflection_applied = False
-                mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
-                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=False)
-                inst.mask_path = mask_path
-                inst.contour_path = contour_path
 
             # 4. Check for partial occlusion with intact half-blade -> route to Tier 2
             elif routing_res.assigned_tier == "tier2":
                 tier = "Tier 2"
                 assigned_tier = TIER_2_REFLECTED
                 reflection_applied = True
-                out_base = (self.output_dir / "data") if (self.output_dir.name != "data" and (self.output_dir / "data").is_dir()) else self.output_dir
-                mask_dir = out_base / "masks"
-                tier2_dir = mask_dir / "tier2_reflected"
-                mask_dir.mkdir(parents=True, exist_ok=True)
-                tier2_dir.mkdir(parents=True, exist_ok=True)
-
-                filename = f"{catalog_number}_leaf{inst.leaf_id}.png"
-                main_save_path = mask_dir / filename
-                tier_save_path = tier2_dir / filename
-
-                cv2.imwrite(str(main_save_path), routing_res.processed_mask)
-                cv2.imwrite(str(tier_save_path), routing_res.processed_mask)
-
-                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=True)
-                inst.mask_path = str(main_save_path)
-                inst.contour_path = contour_path
 
             # 5. Else -> log rejection reason (FAILED_SOLIDITY, IRREGULAR_FOLD, UNRESOLVED_CLUMP) and route to Failed QC
             else:
@@ -1417,7 +1377,57 @@ class SegmentAndExtractPipeline:
                 rejected_instances.append(inst)
                 continue
 
+            m_area = int(np.count_nonzero(routing_res.processed_mask))
+            if is_high_dpi:
+                ys_m, xs_m = np.where(inst.mask > 0)
+                if len(ys_m) == 0 or len(xs_m) == 0:
+                    inst.assigned_tier = "rejected"
+                    inst.rejection_reason = "UNRESOLVED_CLUMP"
+                    rejected_instances.append(inst)
+                    continue
+                cy_rel = float(np.mean(ys_m)) / float(sheet_h)
+                m_bh = int(np.ptp(ys_m))
+                m_bw = int(np.ptp(xs_m))
+                min_area_px = int(12000 * (scale_f ** 2))
+                min_dim_px = int(220 * scale_f)
+
+                if (
+                    cy_rel < 0.42
+                    or m_area < min_area_px
+                    or max(m_bw, m_bh) < min_dim_px
+                    or ((min(m_bw, m_bh) / max(m_bw, m_bh, 1)) > 0.78 and inst.solidity < 0.84)
+                    or (tier == "Tier 2" and (m_area < int(18000 * (scale_f ** 2)) or cy_rel < 0.48))
+                ):
+                    inst.assigned_tier = "rejected"
+                    inst.rejection_reason = "UNRESOLVED_CLUMP"
+                    rejected_instances.append(inst)
+                    continue
+
+            if tier == "Tier 2":
+                out_base = (self.output_dir / "data") if (self.output_dir.name != "data" and (self.output_dir / "data").is_dir()) else self.output_dir
+                mask_dir = out_base / "masks"
+                tier2_dir = mask_dir / "tier2_reflected"
+                mask_dir.mkdir(parents=True, exist_ok=True)
+                tier2_dir.mkdir(parents=True, exist_ok=True)
+
+                filename = f"{catalog_number}_leaf{inst.leaf_id}.png"
+                main_save_path = mask_dir / filename
+                tier_save_path = tier2_dir / filename
+
+                cv2.imwrite(str(main_save_path), routing_res.processed_mask)
+                cv2.imwrite(str(tier_save_path), routing_res.processed_mask)
+
+                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=True)
+                inst.mask_path = str(main_save_path)
+                inst.contour_path = contour_path
+            else:
+                mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
+                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=False)
+                inst.mask_path = mask_path
+                inst.contour_path = contour_path
+
             inst.assigned_tier = assigned_tier
+            record_areas[inst.leaf_id] = m_area
 
             # Save extracted basal leaf RGB crop to data/cropped_patches/basal_leaves_raw/{catalogNumber}_leaf{leaf_id}.jpg
             ly0, lx0, ly1, lx1 = [int(v) for v in inst.bbox]
@@ -1459,6 +1469,42 @@ class SegmentAndExtractPipeline:
                 "involucre_width_mm": repro_summary["involucre_width_mm"],
                 "capitulum_aspect_ratio": repro_summary["capitulum_aspect_ratio"],
             })
+
+        if is_high_dpi and extracted_records:
+            max_sheet_area = max(record_areas.get(int(r["leaf_id"]), 0) for r in extracted_records)
+            kept_with_q: List[Tuple[float, Dict[str, Any]]] = []
+            dropped_records: List[Dict[str, Any]] = []
+            for r in extracted_records:
+                _area = record_areas.get(int(r["leaf_id"]), 0)
+                if _area < 0.28 * max_sheet_area:
+                    dropped_records.append(r)
+                else:
+                    _q = float(r["solidity"]) * float(r["ucs"]) * math.sqrt(_area)
+                    kept_with_q.append((_q, r))
+
+            kept_with_q.sort(key=lambda item: item[0], reverse=True)
+            for _, r in kept_with_q[6:]:
+                dropped_records.append(r)
+            extracted_records = [r for _, r in kept_with_q[:6]]
+
+            for r in dropped_records:
+                mp_str = r.get("mask_path")
+                if mp_str:
+                    mp = Path(str(mp_str))
+                    if mp.exists():
+                        mp.unlink(missing_ok=True)
+                    for sub in ("tier1_intact", "tier1_pristine", "tier2_reflected"):
+                        sub_mp = mp.parent / sub / mp.name
+                        if sub_mp.exists():
+                            sub_mp.unlink(missing_ok=True)
+                cp_str = r.get("contour_path")
+                if cp_str:
+                    cp = Path(str(cp_str))
+                    if cp.exists():
+                        cp.unlink(missing_ok=True)
+                raw_patch = self.basal_leaves_raw_dir / f"{catalog_number}_leaf{r['leaf_id']}.jpg"
+                if raw_patch.exists():
+                    raw_patch.unlink(missing_ok=True)
 
         # Route vouchers with 0 valid silhouettes to failed manifest
         failure_record = None
