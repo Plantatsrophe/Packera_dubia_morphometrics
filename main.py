@@ -18,14 +18,16 @@ Description:
 
 from __future__ import annotations
 
+from datetime import datetime
 import argparse
 import importlib
 import logging
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 
@@ -35,10 +37,52 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.artifact_manager import ensure_model_weights
-from scripts.core.config import PipelineConfig
+from scripts.core.config import (
+    PipelineConfig,
+    ensure_run_curated_vouchers_snapshot,
+    generate_default_run_id,
+    get_active_run_dir,
+    initialize_run_directory,
+    write_run_metadata,
+)
 from scripts.core.logger import setup_logging
 
 logger = setup_logging(name="PackeraPipeline")
+
+
+def _attach_run_log_handler(run_dir: Path) -> None:
+    """Attach a FileHandler writing to `${RUN_DIR}/logs/pipeline.log` if not already attached."""
+    log_path = (run_dir / "logs" / "pipeline.log").resolve()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    for h in logger.handlers:
+        if isinstance(h, logging.FileHandler) and Path(getattr(h, "baseFilename", "")).resolve() == log_path:
+            return
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(fh)
+
+
+def _resolve_active_run_context(
+    args: argparse.Namespace,
+    cfg: Union[PipelineConfig, Dict[str, Any]],
+) -> Tuple[Optional[Path], Union[PipelineConfig, Dict[str, Any]]]:
+    """
+    If `--run-id` is passed on `args` or `PACKERA_RUN_DIR` is set in `os.environ`,
+    initialize the run directory, attach `${RUN_DIR}/logs/pipeline.log`, and return
+    `(run_dir, run_scoped_cfg)`. Otherwise return `(None, cfg)` for backward-compatible
+    direct unit-test invocations.
+    """
+    explicit_run_id = getattr(args, "run_id", None)
+    active_run_dir = get_active_run_dir(run_id=explicit_run_id, workspace_root=PROJECT_ROOT)
+    if active_run_dir is None:
+        return None, cfg
+
+    run_dir = initialize_run_directory(run_id=explicit_run_id, workspace_root=PROJECT_ROOT)
+    _attach_run_log_handler(run_dir)
+    if isinstance(cfg, PipelineConfig):
+        cfg = cfg.with_run_dir(run_dir)
+    return run_dir, cfg
 
 
 
@@ -378,14 +422,21 @@ def run_download_weights(args: argparse.Namespace, cfg: PipelineConfig) -> None:
 def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     """Executes Phase 1: Voucher harvesting and authority tier stratification."""
     logger.info("=== Starting Phase 1: Voucher Ingestion & Authority Stratification ===")
-    
+    start_ts = datetime.now().astimezone().isoformat()
+    run_dir, cfg = _resolve_active_run_context(args, cfg)
+
     script_path = PROJECT_ROOT / "scripts" / "data_prep" / "01_voucher_harvester.py"
     if not script_path.exists():
         script_path = PROJECT_ROOT / "scripts" / "pipeline" / "01_voucher_harvester.py"
     verify_file_exists(script_path, "harvesting script")
 
-    out_dir = Path(args.out_dir or cfg["paths"]["raw_vouchers_dir"])
-    output_csv = Path(args.output_csv or cfg["paths"]["curated_vouchers_csv"])
+    out_dir = Path(args.out_dir or cfg.get("paths", {}).get("raw_vouchers_dir", "data/raw_vouchers"))
+    default_csv = (
+        run_dir / "data" / "tables" / "curated_vouchers.csv"
+        if run_dir is not None
+        else cfg.get("paths", {}).get("curated_vouchers_csv", "data/tables/curated_vouchers.csv")
+    )
+    output_csv = Path(args.output_csv or default_csv)
     out_dir.mkdir(parents=True, exist_ok=True)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
@@ -414,6 +465,8 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     logger.info(f"Running command: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
     verify_file_exists(output_csv, "harvested vouchers CSV output")
+    if run_dir is not None:
+        write_run_metadata(run_dir, start_time=start_ts)
     logger.info("Phase 1 completed successfully.")
 
 
@@ -451,11 +504,16 @@ def get_lm2_python_executable() -> Path:
 def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     """Executes Phase 2: PointRend segmentation, midrib reflection, and contour extraction."""
     logger.info("=== Starting Phase 2: Segmentation & Geometric Leaf Extraction ===")
-    
+    start_ts = datetime.now().astimezone().isoformat()
+    run_dir, cfg = _resolve_active_run_context(args, cfg)
+
     script_path = PROJECT_ROOT / "scripts" / "pipeline" / "02_segment_and_extract.py"
     verify_file_exists(script_path, "segmentation script")
 
-    vouchers_csv = Path(args.vouchers or cfg["paths"]["curated_vouchers_csv"])
+    if run_dir is not None and not args.vouchers:
+        vouchers_csv = ensure_run_curated_vouchers_snapshot(run_dir, workspace_root=PROJECT_ROOT)
+    else:
+        vouchers_csv = Path(args.vouchers or cfg.get("paths", {}).get("curated_vouchers_csv", "data/tables/curated_vouchers.csv"))
     verify_file_exists(vouchers_csv, "curated vouchers metadata table", "python main.py harvest")
 
     if args.weights:
@@ -465,10 +523,10 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
             model_weights = ensure_model_weights(cfg)
         except Exception as exc:
             logger.warning(f"Automated weights acquisition could not complete: {exc}")
-            model_weights = Path(cfg["paths"]["model_weights"])
+            model_weights = Path(cfg.get("paths", {}).get("model_weights", "models/lm2_packera_pcd_finetuned.pth"))
     verify_file_exists(model_weights, "PointRend model weights checkpoint")
 
-    device = args.device or cfg["segmentation"].get("device", "cuda")
+    device = args.device or cfg.get("segmentation", {}).get("device", "cuda")
     if device == "cuda":
         check_gpu_availability(warn_only=True)
 
@@ -479,7 +537,8 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         display_path = str(lm2_python)
     logger.info(f"Executing LeafMachine2 segmentation via: {display_path}")
 
-    out_dir = Path(args.output_dir or (PROJECT_ROOT / "data"))
+    default_out_dir = (run_dir / "data") if run_dir is not None else (PROJECT_ROOT / "data")
+    out_dir = Path(args.output_dir or default_out_dir)
     cmd = [
         str(lm2_python), str(script_path),
         "--vouchers", str(vouchers_csv),
@@ -508,14 +567,18 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         logger.error(f"LeafMachine2 segmentation failed with exit code {exc.returncode}")
         sys.exit(exc.returncode)
 
-    contours_dir = Path(cfg["paths"]["contours_dir"])
+    contours_dir = (run_dir / "data" / "contours") if run_dir is not None else Path(cfg["paths"]["contours_dir"])
     verify_dir_has_files(contours_dir, "*.csv", "extracted leaf contours")
+    if run_dir is not None:
+        write_run_metadata(run_dir, start_time=start_ts)
     logger.info("Phase 2 completed successfully.")
 
 
 def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     """Executes Phase 3: EFA, GMM, and passive sample CDA via R scripts."""
     logger.info("=== Starting Phase 3: Morphometrics, EFA & Discriminant Analysis ===")
+    start_ts = datetime.now().astimezone().isoformat()
+    run_dir, cfg = _resolve_active_run_context(args, cfg)
 
     rscript_bin = shutil.which("Rscript")
     if not rscript_bin:
@@ -525,22 +588,42 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         )
         sys.exit(1)
 
-    contours_dir = Path(getattr(args, "input", None) or args.contours_dir or cfg["paths"]["contours_dir"])
+    default_contours = (
+        (run_dir / "data" / "contours")
+        if run_dir is not None
+        else cfg.get("paths", {}).get("contours_dir", "data/contours")
+    )
+    contours_dir = Path(getattr(args, "input", None) or args.contours_dir or default_contours)
     verify_dir_has_files(contours_dir, "*.csv", "leaf contours", "python main.py segment")
 
-    vouchers_csv = Path(args.vouchers or cfg["paths"]["curated_vouchers_csv"])
+    default_vouchers = (
+        run_dir / "data" / "tables" / "curated_vouchers.csv"
+        if run_dir is not None
+        else cfg.get("paths", {}).get("curated_vouchers_csv", "data/tables/curated_vouchers.csv")
+    )
+    vouchers_csv = Path(args.vouchers or default_vouchers)
     verify_file_exists(vouchers_csv, "curated vouchers table", "python main.py harvest")
 
-    manifest_csv = Path(getattr(args, "manifest", None) or "data/tables/extracted_leaf_manifest.csv")
+    default_manifest = (
+        run_dir / "data" / "tables" / "extracted_leaf_manifest.csv"
+        if run_dir is not None
+        else "data/tables/extracted_leaf_manifest.csv"
+    )
+    manifest_csv = Path(getattr(args, "manifest", None) or default_manifest)
 
     efa_script = PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R"
     verify_file_exists(efa_script, "EFA extractor R script")
 
-    efa_out = Path(args.harmonics_out or cfg["paths"]["leaf_efa_harmonics_csv"])
+    default_efa_out = (
+        run_dir / "data" / "tables" / "leaf_efa_harmonics.csv"
+        if run_dir is not None
+        else cfg.get("paths", {}).get("leaf_efa_harmonics_csv", "data/tables/leaf_efa_harmonics.csv")
+    )
+    efa_out = Path(args.harmonics_out or default_efa_out)
     efa_out.parent.mkdir(parents=True, exist_ok=True)
 
-    harmonics = args.harmonics or cfg["morphometrics"]["harmonics"]
-    num_pcs = args.num_pcs or cfg["morphometrics"]["num_pcs"]
+    harmonics = args.harmonics or cfg.get("morphometrics", {}).get("harmonics", 12)
+    num_pcs = args.num_pcs or cfg.get("morphometrics", {}).get("num_pcs", 5)
 
     # Step 3A: Fourier EFA
     cmd_efa = [
@@ -560,14 +643,29 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     gmm_script = PROJECT_ROOT / "scripts" / "morphometrics" / "04_gmm_morphotools.R"
     verify_file_exists(gmm_script, "GMM / MorphoTools2 R script")
 
-    flags_out = Path(args.flags_out or cfg["paths"]["morphometric_flags_csv"])
-    plot_out = Path(args.plot_out or cfg["paths"]["cda_biplot_pdf"])
-    report_out = Path(args.report_out or cfg["paths"]["gmm_report_csv"])
+    default_flags_out = (
+        run_dir / "data" / "tables" / "morphometric_flags.csv"
+        if run_dir is not None
+        else cfg.get("paths", {}).get("morphometric_flags_csv", "data/tables/morphometric_flags.csv")
+    )
+    default_plot_out = (
+        run_dir / "outputs" / "figures" / "cda_passive_projection.pdf"
+        if run_dir is not None
+        else cfg.get("paths", {}).get("cda_biplot_pdf", "outputs/figures/cda_passive_projection.pdf")
+    )
+    default_report_out = (
+        run_dir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv"
+        if run_dir is not None
+        else cfg.get("paths", {}).get("gmm_report_csv", "outputs/reports/gmm_bayes_factors_summary.csv")
+    )
+    flags_out = Path(args.flags_out or default_flags_out)
+    plot_out = Path(args.plot_out or default_plot_out)
+    report_out = Path(args.report_out or default_report_out)
     flags_out.parent.mkdir(parents=True, exist_ok=True)
     plot_out.parent.mkdir(parents=True, exist_ok=True)
     report_out.parent.mkdir(parents=True, exist_ok=True)
 
-    max_k = args.max_k or cfg["morphometrics"]["max_k"]
+    max_k = args.max_k or cfg.get("morphometrics", {}).get("max_k", 9)
 
     cmd_gmm = [
         rscript_bin, str(gmm_script),
@@ -582,12 +680,16 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     logger.info(f"Running GMM/CDA: {' '.join(cmd_gmm)}")
     subprocess.run(cmd_gmm, check=True)
     verify_file_exists(flags_out, "morphometric flags CSV")
+    if run_dir is not None:
+        write_run_metadata(run_dir, start_time=start_ts)
     logger.info("Phase 3 completed successfully.")
 
 
 def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     """Executes Phases 5, 6, and 7: Vision XAI, Spatial Macroecology, and Synthesis Triage."""
     logger.info("=== Starting Synthesis Workflow (Phases 5, 6, 7) ===")
+    start_ts = datetime.now().astimezone().isoformat()
+    run_dir, cfg = _resolve_active_run_context(args, cfg)
 
     rscript_bin = shutil.which("Rscript")
     if not rscript_bin:
@@ -597,7 +699,12 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         )
         sys.exit(1)
 
-    vouchers_csv = Path(getattr(args, "vouchers", None) or cfg["paths"]["curated_vouchers_csv"])
+    default_vouchers = (
+        run_dir / "data" / "tables" / "curated_vouchers.csv"
+        if run_dir is not None
+        else cfg.get("paths", {}).get("curated_vouchers_csv", "data/tables/curated_vouchers.csv")
+    )
+    vouchers_csv = Path(getattr(args, "vouchers", None) or default_vouchers)
     verify_file_exists(vouchers_csv, "curated vouchers table", "python main.py harvest")
 
     # -------------------------------------------------------------------------
@@ -606,9 +713,18 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     xai_script = PROJECT_ROOT / "scripts" / "analysis" / "05_cleanlab_vision_xai.py"
     verify_file_exists(xai_script, "Cleanlab Vision XAI script")
 
-    rosette_dir = Path(getattr(args, "rosette_dir", None) or "data/cropped_patches")
-    audit_csv = Path(getattr(args, "vision_audit", None) or "data/tables/label_noise_audit.csv")
-    xai_fig = Path(getattr(args, "xai_plot", None) or "outputs/figures/GradCAM_audit_panel.png")
+    rosette_dir = Path(
+        getattr(args, "rosette_dir", None)
+        or ((run_dir / "data" / "cropped_patches") if run_dir is not None else "data/cropped_patches")
+    )
+    audit_csv = Path(
+        getattr(args, "vision_audit", None)
+        or ((run_dir / "data" / "tables" / "label_noise_audit.csv") if run_dir is not None else "data/tables/label_noise_audit.csv")
+    )
+    xai_fig = Path(
+        getattr(args, "xai_plot", None)
+        or ((run_dir / "outputs" / "figures" / "GradCAM_audit_panel.png") if run_dir is not None else "outputs/figures/GradCAM_audit_panel.png")
+    )
     cleanlab_thresh = getattr(args, "cleanlab_threshold", 0.85)
 
     cmd_xai = [
@@ -634,11 +750,25 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     spatial_rf_script = PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R"
     verify_file_exists(spatial_rf_script, "Spatial RF R script")
 
-    morph_flags = Path(getattr(args, "morphometrics", None) or cfg["paths"]["morphometric_flags_csv"])
+    default_morph_flags = (
+        run_dir / "data" / "tables" / "morphometric_flags.csv"
+        if run_dir is not None
+        else cfg.get("paths", {}).get("morphometric_flags_csv", "data/tables/morphometric_flags.csv")
+    )
+    morph_flags = Path(getattr(args, "morphometrics", None) or default_morph_flags)
     env_dir = Path(getattr(args, "env_dir", None) or "data/environmental")
-    conflict_flags = Path(getattr(args, "conflict_flags", None) or "data/tables/multimodal_conflict_flags.csv")
-    spatial_plot = Path(getattr(args, "spatial_plot", None) or "outputs/figures/spatial_rf_niche_importance.pdf")
-    spatial_summary = Path(getattr(args, "spatial_summary", None) or "outputs/reports/multimodal_spatial_rf_summary.csv")
+    conflict_flags = Path(
+        getattr(args, "conflict_flags", None)
+        or ((run_dir / "data" / "tables" / "multimodal_conflict_flags.csv") if run_dir is not None else "data/tables/multimodal_conflict_flags.csv")
+    )
+    spatial_plot = Path(
+        getattr(args, "spatial_plot", None)
+        or ((run_dir / "outputs" / "figures" / "spatial_rf_niche_importance.pdf") if run_dir is not None else "outputs/figures/spatial_rf_niche_importance.pdf")
+    )
+    spatial_summary = Path(
+        getattr(args, "spatial_summary", None)
+        or ((run_dir / "outputs" / "reports" / "multimodal_spatial_rf_summary.csv") if run_dir is not None else "outputs/reports/multimodal_spatial_rf_summary.csv")
+    )
 
     cmd_spatial = [
         rscript_bin, str(spatial_rf_script),
@@ -665,10 +795,24 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     triage_script = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
     verify_file_exists(triage_script, "Triage Dashboard R script")
 
-    gmm_summary = Path(getattr(args, "gmm_summary", None) or cfg["paths"]["gmm_report_csv"])
-    output_queue = Path(getattr(args, "output_queue", None) or "data/tables/triage_queue.csv")
-    synthesis_plot = Path(getattr(args, "synthesis_plot", None) or "outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf")
-    synthesis_report = Path(getattr(args, "synthesis_report", None) or "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md")
+    default_gmm_summary = (
+        run_dir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv"
+        if run_dir is not None
+        else cfg.get("paths", {}).get("gmm_report_csv", "outputs/reports/gmm_bayes_factors_summary.csv")
+    )
+    gmm_summary = Path(getattr(args, "gmm_summary", None) or default_gmm_summary)
+    output_queue = Path(
+        getattr(args, "output_queue", None)
+        or ((run_dir / "outputs" / "reports" / "final_curation_triage.csv") if run_dir is not None else "data/tables/triage_queue.csv")
+    )
+    synthesis_plot = Path(
+        getattr(args, "synthesis_plot", None)
+        or ((run_dir / "outputs" / "figures" / "Figure_Integrative_Packera_dubia_Revision.pdf") if run_dir is not None else "outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf")
+    )
+    synthesis_report = Path(
+        getattr(args, "synthesis_report", None)
+        or ((run_dir / "outputs" / "reports" / "Packera_dubia_Taxonomic_Revision_Summary.md") if run_dir is not None else "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md")
+    )
 
     cmd_triage = [
         rscript_bin, str(triage_script),
@@ -687,19 +831,30 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     verify_file_exists(output_queue, "triage queue CSV")
     verify_file_exists(synthesis_report, "taxonomic revision summary markdown report")
 
+    if run_dir is not None:
+        write_run_metadata(run_dir, start_time=start_ts)
     logger.info("=== Synthesis Workflow (Phases 5, 6, 7) Completed Successfully ===")
 
 
 def run_all(args: argparse.Namespace, cfg: PipelineConfig) -> None:
-    """Executes the end-to-end production workflow sequentially."""
+    """Executes the end-to-end production workflow sequentially inside a run-scoped directory."""
+    start_ts = datetime.now().astimezone().isoformat()
+    run_id = getattr(args, "run_id", None) or os.environ.get("RUN_ID") or generate_default_run_id()
+    setattr(args, "run_id", run_id)
+    run_dir, cfg = _resolve_active_run_context(args, cfg)
+    if run_dir is not None:
+        write_run_metadata(run_dir, run_id=run_dir.name, start_time=start_ts)
+
     logger.info("==================================================================")
-    logger.info("Executing End-to-End Production Pipeline")
+    logger.info(f"Executing End-to-End Production Pipeline (Run: {run_dir.name if run_dir else run_id})")
     logger.info("  (harvest -> segment -> morphometrics -> synthesis)")
     logger.info("==================================================================")
     run_harvest(args, cfg)
     run_segment(args, cfg)
     run_morphometrics(args, cfg)
     run_synthesis(args, cfg)
+    if run_dir is not None:
+        write_run_metadata(run_dir, run_id=run_dir.name, start_time=start_ts, end_time=datetime.now().astimezone().isoformat())
     logger.info("==================================================================")
     logger.info("End-to-End Pipeline Execution Completed Successfully!")
     logger.info("==================================================================")
@@ -781,6 +936,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Enable verbose debugging output.",
     )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional run identifier for isolated run directory under runs/<run_id>/ (default: run_YYYYMMDD_HHMMSS).",
+    )
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True, help="Pipeline phase to execute")
 
@@ -812,6 +973,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Subcommand: harvest
     p_harvest = subparsers.add_parser("harvest", help="Phase 1: Ingest GBIF occurrences & download images")
+    p_harvest.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
     p_harvest.add_argument("--taxa", nargs="+", default=None, help="Target taxonomic binomials")
     p_harvest.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
     p_harvest.add_argument("--output-csv", type=Path, default=None, help="Curated vouchers output CSV")
@@ -832,6 +994,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Subcommand: segment
     p_segment = subparsers.add_parser("segment", help="Phase 2: Segment leaves & export contours")
+    p_segment.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
     p_segment.add_argument("--vouchers", type=Path, default=None, help="Input curated vouchers CSV")
     p_segment.add_argument("--weights", type=Path, default=None, help="Model weights checkpoint (.pth)")
     p_segment.add_argument("--output-dir", type=Path, default=None, help="Root output directory")
@@ -870,6 +1033,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Subcommand: morphometrics
     p_morph = subparsers.add_parser("morphometrics", help="Phase 3: Fourier EFA, GMM, & passive CDA in R")
+    p_morph.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
     p_morph.add_argument("--input", type=Path, default=None, help="Input contours directory")
     p_morph.add_argument("--manifest", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_morph.add_argument("--contours-dir", type=Path, default=None, help="Input contours directory")
@@ -884,6 +1048,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Subcommand: synthesis
     p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Phases 5-7: Vision XAI, Spatial RF, & Triage Dashboard")
+    p_synth.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
     p_synth.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
     p_synth.add_argument("--rosette-dir", type=Path, default=None, help="Directory with cropped rosette patches")
     p_synth.add_argument("--morphometrics", type=Path, default=None, help="Morphometrics flags CSV")
@@ -906,6 +1071,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: run-all
     p_all = subparsers.add_parser("run-all", help="Execute complete pipeline (harvest -> segment -> morphometrics -> synthesis)")
     # Merge key arguments from previous stages
+    p_all.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
     p_all.add_argument("--taxa", nargs="+", default=None, help="Target taxonomic binomials")
     p_all.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
     p_all.add_argument("--output-csv", type=Path, default=None, help="Curated vouchers output CSV")

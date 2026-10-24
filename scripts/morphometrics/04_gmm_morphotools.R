@@ -621,6 +621,12 @@ run_gmm_morphotools_pipeline <- function(opts) {
   tmp_flags <- paste0(opts$output_flags, ".tmp"); write.csv(out_df, file = tmp_flags, row.names = FALSE, na = ""); file.rename(tmp_flags, opts$output_flags)
   message("Master morphometric flags table exported: ", opts$output_flags, " (Rows: ", nrow(out_df), ")")
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, feature_cols)
+  tryCatch({
+    if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+      source("scripts/morphometrics/pub_figures_utils.R")
+      generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot)
+    }
+  }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
   message("Morphometric Pipeline Complete Successfully.")
   return(invisible(out_df))
 }

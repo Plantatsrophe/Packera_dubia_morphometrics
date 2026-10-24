@@ -565,6 +565,20 @@ main <- function() {
   message("=== Starting Final Triage Dashboard & Taxonomic Synthesis ===")
   triage_df <- build_triage_queue(opts)
   render_synthesis_figure_pdf(triage_df, opts$output_plot, cda_summary = opts$cda_summary)
+  tryCatch({
+    if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+      source("scripts/morphometrics/pub_figures_utils.R")
+      generate_step07_pub_figures(triage_df, opts$output_plot)
+    }
+    env_run <- Sys.getenv("PACKERA_RUN_DIR", unset = "")
+    if (nzchar(env_run)) {
+      rep_triage <- file.path(env_run, "outputs", "reports", "final_curation_triage.csv")
+      dir.create(dirname(rep_triage), recursive = TRUE, showWarnings = FALSE)
+      tmp_rt <- paste0(rep_triage, ".tmp")
+      utils::write.csv(triage_df, file = tmp_rt, row.names = FALSE)
+      file.rename(tmp_rt, rep_triage)
+    }
+  }, error = function(e) warning("Step 07 publication figures/triage export warning: ", e$message))
   generate_taxonomic_revision_report(triage_df, opts)
   message("=== Taxonomic Synthesis & Triage Dashboard Complete ===")
 }

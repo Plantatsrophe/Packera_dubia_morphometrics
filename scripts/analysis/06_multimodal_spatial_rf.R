@@ -1491,6 +1491,12 @@ main <- function() {
   }
 
   export_spatial_rf_figures(vouchers_df, srf_res, niche_res, opts$output_plot)
+  tryCatch({
+    if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+      source("scripts/morphometrics/pub_figures_utils.R")
+      generate_step06_pub_figures(vouchers_df, srf_res, niche_res, pheno_res, opts$output_plot)
+    }
+  }, error = function(e) warning("Step 06 publication figures export warning: ", e$message))
   message("=== Multimodal Spatial RF & Niche Modeling Analysis Complete ===")
 }
 

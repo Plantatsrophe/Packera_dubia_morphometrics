@@ -127,6 +127,23 @@ EOF
 
 ---
 
+## Step 2B: Verify Run-Scoped Directory Layout & Publication Figure Suite Contracts
+
+When executing via `./run_pipeline.sh` or `python main.py --run-id <name>` (or `PACKERA_RUN_DIR`), verify that all generated tables, masks, contours, logs, and figures are isolated inside `${RUN_DIR}` (`runs/<run_id>/`):
+
+* **Run-Scoped Tables (`${RUN_DIR}/data/tables/`):** `curated_vouchers.csv` (snapshotted automatically from `data/tables/curated_vouchers.csv` before Step 02 if not yet present), `extracted_leaf_manifest.csv`, `failed_qc_vouchers.csv`, `voucher_reproductive_metrics.csv`, `voucher_phenological_states.csv`, `fourier_pcs.csv`, `symmetric_fourier_pcs.csv`, `morphometric_flags.csv`, `label_noise_audit.csv`, and `multimodal_conflict_flags.csv`.
+* **Run-Scoped Reports & Metadata (`${RUN_DIR}/outputs/reports/`):** `final_curation_triage.csv`, `multimodal_spatial_rf_summary.csv`, and `run_metadata.json` (recording `run_id`, start/end timestamps, `git_commit_sha`, CLI arguments, and table row counts).
+* **Publication Figure Suite (`${RUN_DIR}/outputs/figures/`):** Dual vector `.pdf` and 300-DPI `.png` figures with Okabe-Ito palettes (`#0072B2`, `#D55E00`, `#009E73`, `#CC79A7`) and italicized *Packera* taxon labels:
+  * Step 02: `fig02a_segmentation_qc_distributions.{pdf,png}`, `fig02b_silhouette_montage.{pdf,png}`
+  * Step 03: `fig03a_efa_morphospace_pca.{pdf,png}`, `fig03b_harmonic_power_and_asymmetry.{pdf,png}`
+  * Step 04: `fig04a_gmm_bic_and_uncertainty.{pdf,png}`, `fig04b_cda_biplot_and_allometry.{pdf,png}`
+  * Step 05: `GradCAM_audit_panel.{png,pdf}`, `fig05b_cleanlab_quality_and_tomentum.{pdf,png}`
+  * Step 06: `spatial_rf_niche_importance.{pdf,png}`, `fig06b_geographic_map_and_hopkins_phenology.{pdf,png}`
+  * Step 07: `fig07_multimodal_discordance_summary.{pdf,png}`, `Figure_Integrative_Packera_dubia_Revision.{pdf,png}`
+* **Shared Read-Only Caches:** Raw voucher imagery (`data/raw_vouchers/` / `data/raw_images/`) and environmental rasters (`data/environmental/`) remain in the repository root and are never duplicated per run.
+
+---
+
 ## Step 3: Execute the Central Test Suite (`run_audit.py`)
 
 Always run the centralized QA test suite to verify 100% pass rate across all unit and integration tests:

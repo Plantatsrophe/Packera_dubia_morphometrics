@@ -1,13 +1,242 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import csv
+from dataclasses import dataclass, field, replace
+from datetime import datetime
+import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
+RUNS_ROOT = PROJECT_ROOT / "runs"
+
+# Path fields in PathsConfig that are scoped to the active run directory
+# (shared read-only caches like raw_vouchers_dir, quarantine_dir, models_dir, and model_weights remain at PROJECT_ROOT)
+RUN_SCOPED_PATH_FIELDS: Set[str] = {
+    "curated_vouchers_csv",
+    "failed_qc_vouchers_csv",
+    "extraction_manifest_csv",
+    "contours_dir",
+    "masks_dir",
+    "leaf_efa_harmonics_csv",
+    "morphometric_flags_csv",
+    "cda_biplot_pdf",
+    "gmm_report_csv",
+    "summary_log",
+    "tables_dir",
+    "figures_dir",
+}
+
+
+def generate_default_run_id() -> str:
+    """Generate a timestamped run identifier: run_YYYYMMDD_HHMMSS."""
+    return f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
+def get_active_run_dir(
+    run_id: Optional[str] = None,
+    workspace_root: Path = PROJECT_ROOT,
+) -> Optional[Path]:
+    """
+    Return the resolved run directory if `run_id` is supplied or `PACKERA_RUN_DIR`
+    is set in the environment; otherwise return None (default legacy/test mode).
+    """
+    if run_id is not None and str(run_id).strip():
+        clean_id = str(run_id).strip()
+        p = Path(clean_id)
+        if p.is_absolute():
+            return p.resolve()
+        if p.parts and p.parts[0] == "runs":
+            return (workspace_root / p).resolve()
+        return (workspace_root / "runs" / clean_id).resolve()
+
+    env_run_dir = os.environ.get("PACKERA_RUN_DIR", "").strip()
+    if env_run_dir:
+        p = Path(env_run_dir)
+        return p.resolve() if p.is_absolute() else (workspace_root / p).resolve()
+
+    return None
+
+
+def initialize_run_directory(
+    run_id: Optional[str] = None,
+    workspace_root: Path = PROJECT_ROOT,
+    update_latest_symlink: bool = True,
+    export_env: bool = True,
+) -> Path:
+    """
+    Create the standardized self-contained run directory structure under `runs/<run_id>/`:
+      - data/masks/{tier1_intact,tier2_reflected}
+      - data/contours
+      - data/cropped_patches/{basal_leaves_raw,capitula,rosettes_dense}
+      - data/tables
+      - outputs/{figures,reports}
+      - logs
+    Also maintains the `runs/latest` symlink pointing to the active run directory.
+    """
+    run_dir = get_active_run_dir(run_id=run_id, workspace_root=workspace_root)
+    if run_dir is None:
+        eff_id = os.environ.get("RUN_ID", "").strip() or generate_default_run_id()
+        run_dir = (workspace_root / "runs" / eff_id).resolve()
+
+    subdirs = [
+        run_dir / "data" / "masks" / "tier1_intact",
+        run_dir / "data" / "masks" / "tier2_reflected",
+        run_dir / "data" / "contours",
+        run_dir / "data" / "cropped_patches" / "basal_leaves_raw",
+        run_dir / "data" / "cropped_patches" / "capitula",
+        run_dir / "data" / "cropped_patches" / "rosettes_dense",
+        run_dir / "data" / "tables",
+        run_dir / "outputs" / "figures",
+        run_dir / "outputs" / "reports",
+        run_dir / "logs",
+    ]
+    for d in subdirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+    if update_latest_symlink:
+        runs_parent = workspace_root / "runs"
+        runs_parent.mkdir(parents=True, exist_ok=True)
+        latest_link = runs_parent / "latest"
+        try:
+            tmp_link = runs_parent / f".latest_{os.getpid()}.tmp"
+            if tmp_link.exists() or tmp_link.is_symlink():
+                tmp_link.unlink()
+            target_rel = run_dir.name if run_dir.parent == runs_parent.resolve() else str(run_dir)
+            tmp_link.symlink_to(target_rel)
+            tmp_link.replace(latest_link)
+        except OSError:
+            pass
+
+    if export_env:
+        os.environ["PACKERA_RUN_DIR"] = str(run_dir)
+        os.environ["RUN_ID"] = run_dir.name
+
+    return run_dir
+
+
+def ensure_run_curated_vouchers_snapshot(
+    run_dir: Path,
+    workspace_root: Path = PROJECT_ROOT,
+) -> Path:
+    """
+    Ensure `${RUN_DIR}/data/tables/curated_vouchers.csv` exists before Step 02.
+    If absent in the run directory, copy the shared `data/tables/curated_vouchers.csv`
+    into the run directory atomically so the run folder is a self-contained snapshot.
+    """
+    run_vouchers = run_dir / "data" / "tables" / "curated_vouchers.csv"
+    if run_vouchers.exists() and run_vouchers.stat().st_size > 0:
+        return run_vouchers
+
+    shared_vouchers = workspace_root / "data" / "tables" / "curated_vouchers.csv"
+    if shared_vouchers.exists() and shared_vouchers.stat().st_size > 0:
+        run_vouchers.parent.mkdir(parents=True, exist_ok=True)
+        tmp_vouchers = run_vouchers.with_suffix(".csv.tmp")
+        shutil.copy2(shared_vouchers, tmp_vouchers)
+        tmp_vouchers.replace(run_vouchers)
+
+    return run_vouchers
+
+
+def _count_csv_rows(csv_path: Path) -> int:
+    """Count data rows (excluding header) in a CSV file."""
+    if not csv_path.exists() or csv_path.stat().st_size == 0:
+        return 0
+    try:
+        with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
+            reader = csv.reader(f)
+            total = sum(1 for _ in reader)
+            return max(0, total - 1)
+    except Exception:
+        return 0
+
+
+def write_run_metadata(
+    run_dir: Path,
+    run_id: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    cli_args: Optional[List[str]] = None,
+    workspace_root: Path = PROJECT_ROOT,
+) -> Path:
+    """
+    Atomically write `${RUN_DIR}/outputs/reports/run_metadata.json` recording:
+      - run_id
+      - run_dir
+      - start_timestamp / end_timestamp
+      - git_commit_sha
+      - cli_arguments
+      - table_row_counts (for all generated CSV tables in data/tables and outputs/reports)
+    """
+    reports_dir = run_dir / "outputs" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = reports_dir / "run_metadata.json"
+
+    existing: Dict[str, Any] = {}
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    existing = loaded
+        except Exception:
+            existing = {}
+
+    git_sha = existing.get("git_commit_sha", "unknown")
+    if git_sha == "unknown":
+        try:
+            res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(workspace_root),
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                git_sha = res.stdout.strip()
+        except Exception:
+            pass
+
+    now_iso = datetime.now().astimezone().isoformat()
+    eff_start = start_time or existing.get("start_timestamp") or now_iso
+    eff_end = end_time or now_iso
+    eff_run_id = run_id or existing.get("run_id") or run_dir.name
+    eff_cli = cli_args if cli_args is not None else existing.get("cli_arguments", list(sys.argv))
+
+    table_counts: Dict[str, int] = {}
+    for search_dir in (run_dir / "data" / "tables", run_dir / "outputs" / "reports"):
+        if search_dir.exists():
+            for csv_file in sorted(search_dir.glob("*.csv")):
+                rel_key = str(csv_file.relative_to(run_dir))
+                table_counts[rel_key] = _count_csv_rows(csv_file)
+                table_counts[csv_file.name] = table_counts[rel_key]
+
+    payload = {
+        "run_id": eff_run_id,
+        "run_dir": str(run_dir),
+        "start_timestamp": eff_start,
+        "end_timestamp": eff_end,
+        "git_commit_sha": git_sha,
+        "cli_arguments": eff_cli,
+        "table_row_counts": table_counts,
+    }
+
+    tmp_path = metadata_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=False)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    tmp_path.replace(metadata_path)
+    return metadata_path
 
 
 @dataclass(frozen=True)
@@ -218,9 +447,45 @@ class PipelineConfig:
     def to_dict(self) -> Dict[str, Any]:
         return dict(self._raw_dict)
 
+    def with_run_dir(self, run_dir: Union[str, Path]) -> PipelineConfig:
+        """
+        Return a new PipelineConfig whose run-scoped output/table/figure paths
+        point inside `run_dir`, while shared read-only caches (raw_vouchers_dir,
+        quarantine_dir, models_dir, model_weights) remain anchored at PROJECT_ROOT.
+        """
+        rdir = Path(run_dir).resolve()
+        new_paths = replace(
+            self.paths,
+            curated_vouchers_csv=rdir / "data" / "tables" / "curated_vouchers.csv",
+            failed_qc_vouchers_csv=rdir / "data" / "tables" / "failed_qc_vouchers.csv",
+            extraction_manifest_csv=rdir / "data" / "tables" / "extracted_leaf_manifest.csv",
+            contours_dir=rdir / "data" / "contours",
+            masks_dir=rdir / "data" / "masks",
+            leaf_efa_harmonics_csv=rdir / "data" / "tables" / "leaf_efa_harmonics.csv",
+            morphometric_flags_csv=rdir / "data" / "tables" / "morphometric_flags.csv",
+            cda_biplot_pdf=rdir / "outputs" / "figures" / "cda_passive_projection.pdf",
+            gmm_report_csv=rdir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv",
+            summary_log=rdir / "logs" / "pipeline.log",
+            tables_dir=rdir / "data" / "tables",
+            figures_dir=rdir / "outputs" / "figures",
+        )
+        new_raw = dict(self._raw_dict)
+        raw_paths = dict(new_raw.get("paths", {}))
+        for k in RUN_SCOPED_PATH_FIELDS:
+            raw_paths[k] = str(getattr(new_paths, k))
+        new_raw["paths"] = raw_paths
+        new_raw["resolved_paths"] = {
+            k: getattr(new_paths, k) for k in new_paths.__dataclass_fields__
+        }
+        return replace(self, paths=new_paths, _raw_dict=new_raw)
+
     @classmethod
-    def from_yaml(cls, yaml_path: Optional[Union[str, Path]] = None) -> PipelineConfig:
-        """Dynamically parse YAML and resolve paths relative to project root."""
+    def from_yaml(
+        cls,
+        yaml_path: Optional[Union[str, Path]] = None,
+        run_dir: Optional[Union[str, Path]] = None,
+    ) -> PipelineConfig:
+        """Dynamically parse YAML and resolve paths relative to project root (or active run_dir if supplied)."""
         target = Path(yaml_path) if yaml_path else DEFAULT_CONFIG_PATH
         target = target if target.is_absolute() else (PROJECT_ROOT / target).resolve()
 
@@ -376,12 +641,15 @@ class PipelineConfig:
             k: getattr(paths, k) for k in paths.__dataclass_fields__
         }
 
-        return cls(
+        instance = cls(
             paths=paths, taxa=taxa, thresholds=thresholds,
             morphometrics=morph, harvesting=harvesting,
             segmentation=segmentation, models=models,
             macroecology=macroecology, _raw_dict=resolved_raw,
         )
+        if run_dir is not None:
+            return instance.with_run_dir(run_dir)
+        return instance
 
 
 # Botanical ontology mappings for Packera phenotyping

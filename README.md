@@ -426,7 +426,90 @@ All Python (`scripts/pipeline/`, `scripts/vision/`, `scripts/analysis/`) and R (
 | **`scripts/morphometrics/04_gmm_morphotools.R`** | `data/tables/leaf_efa_harmonics.csv` (or `data/tables/fourier_pcs.csv`), `data/tables/voucher_reproductive_metrics.csv` | `data/tables/morphometric_flags.csv` (and `morphometrics_misidentification_flags.csv`), `outputs/reports/gmm_bayes_factors_summary.csv` | `(catalogNumber, plant_individual_id)`, `determiner_tier`, `species_standardized`, `cda_predicted_taxon`, `cda_posterior_prob`, `can1`, `can2`, `gmm_cluster`, `gmm_uncertainty`, `morphometric_outlier_flag`, `loocv_accuracy` | Within-plant quality-weighted (`leaf_quality_weight`) and medoid-filtered aggregation to `(catalogNumber, plant_individual_id)`; robust Mahalanobis (`MASS::cov.rob`) core fitting; parsimonious covariance family restriction (`EII, VII, EEI, VEI, EVI, VVI` when $N/P < 5$) prior to `mclust::Mclust()`; honest Leave-One-Out Cross-Validation accuracy (`loocv_accuracy`) in CDA; exports `morphometric_outlier_flag` (aliased to `misidentification_flag` for downstream consumers). |
 | **`scripts/analysis/05_cleanlab_vision_xai.py`** | `data/tables/curated_vouchers.csv`, `data/cropped_patches/` | `data/tables/label_noise_audit.csv` | `catalogNumber`, `plant_individual_id`, `predicted_label` (`vision_predicted_label`), `confidence_predicted_class`, `c_error`, `is_label_corrupted`, `surface_orientation`, `tomentum_taxon_discordance` | L2 cosine normalization of 768-d DINOv2 embeddings prior to fold-internal `StandardScaler`, balanced class weights (`class_weight="balanced"`), diagnostic `tomentum_taxon_discordance` flagging; must neutralize mounting paper (`RGB(128,128,128)`) and control for `surface_orientation` (`"abaxial"` vs. `"adaxial"`). Never synthesize random embeddings unless `--demo` is passed. |
 | **`scripts/analysis/06_multimodal_spatial_rf.R`** | `data/tables/curated_vouchers.csv`, `data/tables/morphometric_flags.csv`, `data/tables/label_noise_audit.csv`, `data/tables/voucher_phenological_states.csv` (optional) | `data/tables/multimodal_conflict_flags.csv`, `outputs/reports/multimodal_spatial_rf_summary.csv`, `data/tables/ssurgo_edaphic_validation.csv` | `catalogNumber`, `plant_individual_id`, `misidentification_flag` (resolved from `morphometric_outlier_flag`), `c_error`, `edaphic_best_fit_taxon`, `multimodal_concordance`, `triage_category`, `spatial_block_cv_acc` | Resilient batched `soilDB::SDA_spatialQuery()` chunking with per-batch schema normalization (`dplyr::bind_rows`) and SoilGrids 250m fallback so HTML/HTTP error frames never crash; spatially blocked cross-validation ($0.5^\circ \times 0.5^\circ$ grid blocks, `spatial_block_cv_acc`), centered Hopkins bioclimatic baseline; must use **`dplyr::left_join`** (never `inner_join`) when merging optional phenology tables. Never cache synthetic SSURGO/SoilGrids values to disk. |
-| **`scripts/analysis/07_triage_dashboard_synthesis.R`** | `data/tables/curated_vouchers.csv`, `data/tables/morphometric_flags.csv`, `data/tables/label_noise_audit.csv`, `data/tables/multimodal_conflict_flags.csv`, `outputs/reports/gmm_bayes_factors_summary.csv` | `data/tables/triage_queue.csv`, `outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf`, `outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md` | `(catalogNumber, plant_individual_id)`, `morphometric_outlier_flag` / `misidentification_flag`, `taxonomic_status_call`, `recommended_determination`, `synthesis_triage_priority` | Enforces `validate_upstream_contracts()` schema verification; must resolve `morphometric_outlier_flag` <-> `misidentification_flag` seamlessly, dynamically compute CDA axis variance labels and GMM $2\Delta\text{BIC}$ values from input tables/summaries (never hardcode static percentages or $2\Delta\text{BIC}$ constants), and write outputs atomically. |
+| **`scripts/analysis/07_triage_dashboard_synthesis.R`** | `data/tables/curated_vouchers.csv`, `data/tables/morphometric_flags.csv`, `data/tables/label_noise_audit.csv`, `data/tables/multimodal_conflict_flags.csv`, `outputs/reports/gmm_bayes_factors_summary.csv` | `data/tables/triage_queue.csv`, `outputs/reports/final_curation_triage.csv`, `outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf`, `outputs/figures/fig07_multimodal_discordance_summary.pdf`, `outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md` | `(catalogNumber, plant_individual_id)`, `morphometric_outlier_flag` / `misidentification_flag`, `taxonomic_status_call`, `recommended_determination`, `synthesis_triage_priority` | Enforces `validate_upstream_contracts()` schema verification; must resolve `morphometric_outlier_flag` <-> `misidentification_flag` seamlessly, dynamically compute CDA axis variance labels and GMM $2\Delta\text{BIC}$ values from input tables/summaries (never hardcode static percentages or $2\Delta\text{BIC}$ constants), and write outputs atomically. |
+
+---
+
+## 🗂️ Run-Scoped Directory Structure (`runs/run_<YYYYMMDD_HHMMSS>/`)
+
+Every pipeline execution launched via `./run_pipeline.sh` or `python main.py --run-id <name>` (or `PACKERA_RUN_DIR`) writes all generated artifacts into a self-contained, run-specific directory (`runs/run_<YYYYMMDD_HHMMSS>/` or `runs/<run_id>/`), preventing separate runs from overwriting or mixing outputs in a single shared folder while keeping heavy read-only caches at the repository root:
+
+```text
+Packera_dubia_morphometrics/
+├── data/
+│   ├── raw_vouchers/                          # Shared read-only cache: downloaded herbarium sheets (never duplicated)
+│   └── environmental/                         # Shared read-only cache: WorldClim 2.1 & SoilGrids 250m GeoTIFFs
+├── runs/
+│   ├── latest -> run_20260419_120000          # Symlink pointing to the most recent pipeline run
+│   └── run_20260419_120000/                   # Self-contained run directory (${RUN_DIR})
+│       ├── data/
+│       │   ├── masks/
+│       │   │   ├── tier1_intact/              # Binary masks for pristine Tier 1 basal blades
+│       │   │   └── tier2_reflected/           # Bilaterally reflected Tier 2 binary masks
+│       │   ├── contours/                      # Standardized 200-pt base-to-apex CSV outlines
+│       │   ├── cropped_patches/
+│       │   │   ├── basal_leaves_raw/          # Native-DPI single-leaf RGB crops
+│       │   │   ├── capitula/                  # Flowering head crops for optical phenology
+│       │   │   └── rosettes_dense/            # Whole-rosette crops for DINOv2 ViT-B/14
+│       │   └── tables/
+│       │       ├── curated_vouchers.csv
+│       │       ├── extracted_leaf_manifest.csv
+│       │       ├── failed_qc_vouchers.csv
+│       │       ├── voucher_reproductive_metrics.csv
+│       │       ├── voucher_phenological_states.csv
+│       │       ├── fourier_pcs.csv
+│       │       ├── symmetric_fourier_pcs.csv
+│       │       ├── morphometric_flags.csv
+│       │       ├── label_noise_audit.csv
+│       │       └── multimodal_conflict_flags.csv
+│       ├── outputs/
+│       │   ├── figures/                       # Publication-ready vector (.pdf) & 300-DPI (.png) figures
+│       │   └── reports/
+│       │       ├── final_curation_triage.csv
+│       │       ├── multimodal_spatial_rf_summary.csv
+│       │       └── run_metadata.json          # Provenance: run_id, timestamps, git SHA, CLI args, table row counts
+│       └── logs/
+│           └── pipeline.log                   # Complete timestamped execution log for this run
+```
+
+### Launching & Resuming Run-Scoped Executions
+
+```bash
+# Launch a new timestamped run (creates runs/run_<YYYYMMDD_HHMMSS>/ and updates runs/latest)
+./run_pipeline.sh
+
+# Launch or resume a named run via ./run_pipeline.sh or python main.py
+./run_pipeline.sh --run-id packera_spring_audit
+python main.py run-all --run-id packera_spring_audit
+
+# Resume a specific phase inside an existing run directory (automatically snapshots data/tables/curated_vouchers.csv if needed)
+python main.py segment --run-id packera_spring_audit
+python main.py morphometrics --run-id packera_spring_audit
+python main.py synthesis --run-id packera_spring_audit
+```
+
+* **Backward Compatibility Guard:** When any phase script (`01`–`07`) or `main.py` subcommand is invoked directly by unit tests without `--run-id` or `PACKERA_RUN_DIR`, explicit CLI paths (or default `data/` and `outputs/` paths) are honored unchanged.
+
+---
+
+## 📊 Publication Figure Catalog
+
+Every pipeline run automatically exports publication-ready figures in both vector **`.pdf`** and **300-DPI `.png`** formats inside `${RUN_DIR}/outputs/figures/`, styled with colorblind-safe **Okabe-Ito** palettes (`#0072B2`, `#D55E00`, `#009E73`, `#CC79A7`) and italicized *Packera* taxon labels:
+
+| Figure Filename (`.pdf` & `.png`) | Producing Script | Biological & Statistical Hypothesis Visualized |
+| :--- | :--- | :--- |
+| **`fig02a_segmentation_qc_distributions`** | `scripts/pipeline/02_segment_and_extract.py` | **(A)** Leaf Solidity vs. Unoccluded Completeness Score (UCS) scatter by routing tier (`Tier_1_Direct`, `Tier_2_Reflected`) with dashed gatekeeper thresholds ($\text{Solidity} = 0.72$, $\text{UCS} = 0.85$); **(B)** Retained basal leaf count per voucher and QC rejection reason breakdown. |
+| **`fig02b_silhouette_montage`** | `scripts/pipeline/02_segment_and_extract.py` | 4x4 grid montage of up to 16 representative extracted binary basal leaf silhouettes across `Tier_1_Direct` and `Tier_2_Reflected` with homologized petiole insertion anchor (`p_base`) and directed midrib axis overlaid. |
+| **`fig03a_efa_morphospace_pca`** | `scripts/morphometrics/03_fourier_extractor.R` | 2-panel Elliptic Fourier PCA morphospace biplot comparing **(A)** Full harmonic morphospace (`PC1` vs. `PC2`) and **(B)** Bilateral-symmetric harmonic morphospace (`Sym_PC1` vs. `Sym_PC2`) with 95% confidence ellipses and variance explained across italicized *Packera* taxa. |
+| **`fig03b_harmonic_power_and_asymmetry`** | `scripts/morphometrics/03_fourier_extractor.R` | **(A)** Cumulative Fourier harmonic power spectrum ($n = 1..12$) demonstrating contour convergence; **(B)** Bilateral asymmetry (`pct_asymmetry`) vs. high-frequency roughness (`harmonic_roughness`) highlighting contours gated by `is_contour_outlier`. |
+| **`fig04a_gmm_bic_and_uncertainty`** | `scripts/morphometrics/04_gmm_morphotools.R` | **(A)** Unsupervised Gaussian Mixture Model (`mclust`) BIC selection curves across $G = 1..9$ and parsimonious covariance families; **(B)** Morphospace scatter colored by posterior GMM cluster with point size scaled by taxonomic uncertainty $U_i = 1 - \max(P_{ik})$ (`Cryptic_Candidate` highlighted at $U_i \ge 0.30$). |
+| **`fig04b_cda_biplot_and_allometry`** | `scripts/morphometrics/04_gmm_morphotools.R` | **(A)** Canonical Discriminant Analysis (`CV1` vs. `CV2`) biplot with honest Leave-One-Out Cross-Validation (`loocv_accuracy`) subtitle and 95% taxon ellipses; **(B)** Vegetative-to-reproductive allometric scaling ($\log_{10}$ leaf size vs. $\log_{10}$ involucre aspect ratio) by taxon. |
+| **`GradCAM_audit_panel`** | `scripts/analysis/05_cleanlab_vision_xai.py` | Multi-specimen DINOv2 ViT-B/14 final-layer patch-token attribution heatmaps overlaid on background-neutralized rosette crops for top Cleanlab label-noise candidates. |
+| **`fig05b_cleanlab_quality_and_tomentum`** | `scripts/analysis/05_cleanlab_vision_xai.py` | **(A)** Cleanlab confident learning label quality distribution ($1 - C_{\text{error}}$) stratified by taxon and determiner authority tier (`Gold`, `Silver`, `Bronze`); **(B)** Foliar CIE $L^*$ luminance vs. HSV saturation separating `adaxial` vs. `abaxial` arachnoid-tomentose surfaces and highlighting `tomentum_taxon_discordance`. |
+| **`spatial_rf_niche_importance`** | `scripts/analysis/06_multimodal_spatial_rf.R` | Multi-panel macroecological niche importance (edaphic SoilGrids/SSURGO vs. WorldClim bioclimatic + Moran's Eigenvector Maps) and 2D kernel-smoothed `PCA-env` niche equivalency summary. |
+| **`fig06b_geographic_map_and_hopkins_phenology`** | `scripts/analysis/06_multimodal_spatial_rf.R` | **(A)** Geographic distribution of georeferenced vouchers across eastern/central North America colored by taxon and shaped by `consensus_conflict_flag`; **(B)** Collection Day-of-Year (`DOY`) vs. Latitude with centered Hopkins' Bioclimatic Law baseline ($+4\text{ days}/^\circ\text{N}$) and phenological anomaly residuals ($\Delta\text{DOY}$). |
+| **`fig07_multimodal_discordance_summary`** | `scripts/analysis/07_triage_dashboard_synthesis.R` | **(A)** Modality-specific taxonomic conflict rates across EFA Morphology, DINOv2 Vision, and Ecological Niche; **(B)** Consensus curation triage action breakdown across *Packera* taxa. |
+| **`Figure_Integrative_Packera_dubia_Revision`** | `scripts/analysis/07_triage_dashboard_synthesis.R` | 4-panel integrative revision master figure synthesizing EFA morphospace, unsupervised GMM clustering, Cleanlab DINOv2 label quality, and phenological/edaphic divergence. |
 
 ---
 

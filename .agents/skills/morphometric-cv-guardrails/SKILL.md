@@ -109,6 +109,9 @@ When modifying `scripts/morphometrics/03_fourier_extractor.R` and `scripts/morph
    * Centered Hopkins bioclimatic baseline for flowering anomaly estimation ($\Delta\text{DOY}$).
 3. **Cross-Stream Schema Verification (`07_triage_dashboard_synthesis.R`):**
    * `validate_upstream_contracts()` verifies canonical columns across vouchers, morphometrics, vision, and environmental tables, seamlessly aliasing `morphometric_outlier_flag` and `misidentification_flag`.
+4. **Run-Scoped Execution & Publication Figure Suite (`02`–`07` & `pub_figures_utils.R`):**
+   * When `--run-id <name>` or `PACKERA_RUN_DIR` is active, write all masks (`tier1_intact/`, `tier2_reflected/`), contours, cropped patches, CSV manifests (`fourier_pcs.csv`, `symmetric_fourier_pcs.csv`, etc.), reports (`final_curation_triage.csv`, `run_metadata.json`), logs (`pipeline.log`), and figures into `runs/<run_id>/` while preserving backward-compatible CLI paths when invoked directly by unit tests.
+   * Every phase (`02`–`07`) must export publication-ready figures in both vector `.pdf` and 300-DPI `.png` formats (`fig02a`, `fig02b`, `fig03a`, `fig03b`, `fig04a`, `fig04b`, `GradCAM_audit_panel`, `fig05b`, `spatial_rf_niche_importance`, `fig06b`, `fig07`) using colorblind-safe Okabe-Ito palettes (`#0072B2`, `#D55E00`, `#009E73`, `#CC79A7`), italicized *Packera* taxon labels, and atomic write-then-replace persistence.
 
 ---
 

@@ -47,6 +47,7 @@ parse_args_robust <- function() {
     optparse::make_option(c("-p", "--num-pcs"), type = "integer", default = 5, help = "Number of PCA dimensions to extract [default: %default]"),
     optparse::make_option(c("-r", "--report-out"), type = "character", default = "outputs/reports/tier_symmetry_validation.csv", help = "PERMANOVA validation report CSV [default: %default]"),
     optparse::make_option(c("-g", "--plot-out"), type = "character", default = "outputs/figures/tier1_vs_tier2_density_overlay.pdf", help = "Tier density overlay plot PDF [default: %default]"),
+    optparse::make_option(c("--figures-dir"), type = "character", default = "", help = "Optional output directory for Step 03 publication figures"),
     optparse::make_option(c("--permutations"), type = "integer", default = 999, help = "Number of permutations for PERMANOVA [default: %default]"),
     optparse::make_option(c("--seed"), type = "integer", default = 42, help = "Random seed for reproducible permutations [default: %default]")
   )
@@ -67,7 +68,7 @@ parse_args_robust <- function() {
     harmonics = 12, num_pcs = 5,
     report_out = "outputs/reports/tier_symmetry_validation.csv",
     plot_out = "outputs/figures/tier1_vs_tier2_density_overlay.pdf",
-    permutations = 999, seed = 42
+    figures_dir = "", permutations = 999, seed = 42
   )
   i <- 1
   while (i <= length(raw_args)) {
@@ -83,6 +84,7 @@ parse_args_robust <- function() {
     else if (arg %in% c("-p", "--num-pcs") && i < length(raw_args)) { opts$num_pcs <- as.integer(raw_args[i + 1]); i <- i + 2 }
     else if (arg %in% c("-r", "--report-out") && i < length(raw_args)) { opts$report_out <- raw_args[i + 1]; i <- i + 2 }
     else if (arg %in% c("-g", "--plot-out") && i < length(raw_args)) { opts$plot_out <- raw_args[i + 1]; i <- i + 2 }
+    else if (arg == "--figures-dir" && i < length(raw_args)) { opts$figures_dir <- raw_args[i + 1]; i <- i + 2 }
     else if (arg == "--permutations" && i < length(raw_args)) { opts$permutations <- as.integer(raw_args[i + 1]); i <- i + 2 }
     else if (arg == "--seed" && i < length(raw_args)) { opts$seed <- as.integer(raw_args[i + 1]); i <- i + 2 }
     else { i <- i + 1 }
@@ -605,6 +607,14 @@ run_fourier_extraction <- function(opts) {
   write.csv(specimen_df, file = tmp_out, row.names = FALSE, na = "")
   file.rename(tmp_out, opts$output)
   message("Specimen-aggregated EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(specimen_df), ")")
+
+  tryCatch({
+    if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+      source("scripts/morphometrics/pub_figures_utils.R")
+      export_step03_fourier_pc_tables(specimen_df, efa_df, opts$output)
+      generate_step03_pub_figures(efa_df, specimen_df, harm_mat, pca_full, opts$figures_dir, opts$output)
+    }
+  }, error = function(e) warning("Step 03 publication figures/tables export warning: ", e$message))
 
   # 6. Empirical Tier Validation Test (PERMANOVA via adonis2 / fallback manova)
   valid_tier_idx <- which(!is.na(efa_df$reconstruction_tier) & complete.cases(sym_harmonics))

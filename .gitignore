@@ -321,8 +321,12 @@ models/*
 !models/*.yaml
 !models/*.json
 
-# Experiment tracking and training logs (e.g., Ultralytics YOLO runs, WandB)
+# Run-scoped pipeline execution directories (runs/run_<YYYYMMDD_HHMMSS>/ and runs/latest)
+# and experiment tracking / training logs (e.g., Ultralytics YOLO runs, WandB)
 runs/
+runs/*
+runs/**
+runs/latest
 wandb/
 checkpoints/
 

@@ -63,6 +63,80 @@ All Python (`scripts/pipeline/`, `scripts/vision/`, `scripts/analysis/`) and R (
 
 ---
 
+## 7. Run-Scoped Directory Structure (`runs/run_<YYYYMMDD_HHMMSS>/`)
+
+Every pipeline execution launched via `./run_pipeline.sh` or `python main.py` (with `--run-id <name>` or `PACKERA_RUN_DIR`) writes all generated artifacts into an isolated, self-contained run directory under `runs/${RUN_ID}` (`RUN_ID="${RUN_ID:-run_$(date +%Y%m%d_%H%M%S)}"`), while preserving shared read-only caches (`data/raw_vouchers/`, `data/raw_images/`, and `data/environmental/`) at the repository root:
+
+```text
+Packera_dubia_morphometrics/
+├── data/
+│   ├── raw_vouchers/                        # Shared read-only herbarium sheet cache (never duplicated)
+│   ├── raw_images/                          # Shared read-only raw image cache
+│   ├── environmental/                       # Shared read-only WorldClim v2.1 & SoilGrids 250m rasters
+│   └── tables/curated_vouchers.csv          # Shared master voucher table (snapshotted into each run)
+└── runs/
+    ├── latest -> run_20261024_143000        # Symlink pointing to the most recent run directory
+    └── run_20261024_143000/                 # Self-contained run directory (${RUN_DIR})
+        ├── data/
+        │   ├── masks/
+        │   │   ├── tier1_intact/            # Direct intact & dissected binary leaf silhouettes
+        │   │   └── tier2_reflected/         # Bilaterally reflected half-blade silhouettes
+        │   ├── contours/                    # Standardized 120-vertex clockwise (x, y) CSV contours
+        │   ├── cropped_patches/
+        │   │   ├── basal_leaves_raw/        # Native-DPI RGB crops of extracted basal leaves
+        │   │   ├── capitula/                # Cropped reproductive capitula for phenology scoring
+        │   │   └── rosettes_dense/          # Tier 4 dense basal rosette crops per plant_individual_id
+        │   └── tables/
+        │       ├── curated_vouchers.csv
+        │       ├── extracted_leaf_manifest.csv
+        │       ├── failed_qc_vouchers.csv
+        │       ├── voucher_reproductive_metrics.csv
+        │       ├── voucher_phenological_states.csv
+        │       ├── leaf_efa_harmonics.csv
+        │       ├── fourier_pcs.csv
+        │       ├── symmetric_fourier_pcs.csv
+        │       ├── morphometric_flags.csv
+        │       ├── label_noise_audit.csv
+        │       └── multimodal_conflict_flags.csv
+        ├── outputs/
+        │   ├── figures/                     # Dual vector .pdf and 300-DPI .png publication figures
+        │   └── reports/
+        │       ├── final_curation_triage.csv
+        │       ├── multimodal_spatial_rf_summary.csv
+        │       ├── gmm_bayes_factors_summary.csv
+        │       ├── Packera_dubia_Taxonomic_Revision_Summary.md
+        │       └── run_metadata.json        # Run ID, timestamps, git SHA, CLI args, & table row counts
+        └── logs/
+            └── pipeline.log                 # Complete execution log for the run
+```
+
+* **CLI Execution & Resumption:**
+  * New timestamped run: `./run_pipeline.sh` or `python main.py run-all`
+  * Named or resumed run: `./run_pipeline.sh --run-id revision_v1` or `python main.py segment --run-id revision_v1`
+* **Backward Compatibility Guard:** When any phase script is invoked directly by unit tests without `PACKERA_RUN_DIR` or `--run-id`, it honors explicit CLI path arguments (or default `data/` / `outputs/` paths) so all 253 unit tests pass unchanged.
+
+---
+
+## 8. Publication Figure Catalog
+
+Every pipeline run exports publication-ready figures in both vector `.pdf` and 300-DPI `.png` formats inside `${RUN_DIR}/outputs/figures/` using the colorblind-safe Okabe-Ito palette (`#0072B2` *Packera anonyma*, `#D55E00` *P. dubia*, `#009E73` *P. paupercula*, `#CC79A7` *P. plattensis*) and italicized taxon labels:
+
+| Figure Stem (`.pdf` & `.png`) | Producing Script | Biological / Statistical Hypothesis Visualized |
+| :--- | :--- | :--- |
+| `fig02a_segmentation_qc_distributions` | `scripts/pipeline/02_segment_and_extract.py` | (A) Lamina solidity vs. Unoccluded Completeness Score (UCS) by routing tier (`Tier_1_Direct`, `Tier_2_Reflected`) against gatekeeper thresholds (`0.72`, `0.85`); (B) Basal leaf yield per voucher & QC failure breakdown. |
+| `fig02b_silhouette_montage` | `scripts/pipeline/02_segment_and_extract.py` | 16-tile montage of representative extracted binary basal leaf silhouettes across `Tier_1_Direct` and `Tier_2_Reflected` with homologized petiole base anchor (`p_base`) and midrib axis overlaid. |
+| `fig03a_efa_morphospace_pca` | `scripts/morphometrics/03_fourier_extractor.R` | (A) Full 12-harmonic Elliptic Fourier PCA (`PC1` vs. `PC2`) and (B) bilateral-symmetric (`Momocs::rm_asym`) morphospace (`Sym_PC1` vs. `Sym_PC2`) with 95% taxon confidence ellipses. |
+| `fig03b_harmonic_power_and_asymmetry` | `scripts/morphometrics/03_fourier_extractor.R` | (A) Cumulative Fourier harmonic power spectrum (`n = 1..12`) and (B) bilateral asymmetry (`pct_asymmetry`) vs. high-frequency perimeter roughness (`harmonic_roughness`) gating contour outliers. |
+| `fig04a_gmm_bic_and_uncertainty` | `scripts/morphometrics/04_gmm_morphotools.R` | (A) Unsupervised `mclust` BIC model selection curves across $G = 1..9$ and parsimonious covariance families; (B) Morphospace colored by posterior cluster with point size scaled by taxonomic uncertainty $U_i = 1 - \max(P_{ik})$. |
+| `fig04b_cda_biplot_and_allometry` | `scripts/morphometrics/04_gmm_morphotools.R` | (A) Canonical Discriminant Analysis (`CV1` vs. `CV2`) biplot with honest Leave-One-Out Cross-Validation (`loocv_accuracy`) and (B) vegetative-to-reproductive allometric scaling ($\log_{10}$ leaf size vs. $\log_{10}$ involucre scale). |
+| `GradCAM_audit_panel` | `scripts/analysis/05_cleanlab_vision_xai.py` | Side-by-side neutral-background foliar patches and DINOv2 ViT-B/14 $16 \times 16$ patch-token attribution heatmaps for Cleanlab-flagged label noise candidates. |
+| `fig05b_cleanlab_quality_and_tomentum` | `scripts/analysis/05_cleanlab_vision_xai.py` | (A) Cleanlab label quality ($1 - c_{\text{error}}$) distributions across taxa and determiner authority tiers (`Gold`, `Silver`, `Bronze`); (B) CIE $L^*$ luminance vs. HSV saturation separating adaxial vs. abaxial arachnoid tomentum and `tomentum_taxon_discordance`. |
+| `spatial_rf_niche_importance` | `scripts/analysis/06_multimodal_spatial_rf.R` | Spatial Random Forest variable importance across SoilGrids 250m edaphic predictors, WorldClim bioclimatic variables, and phenological anomaly residuals under $0.5^\circ \times 0.5^\circ$ spatial block CV. |
+| `fig06b_geographic_map_and_hopkins_phenology` | `scripts/analysis/06_multimodal_spatial_rf.R` | (A) Eastern/central North America geographic voucher distribution colored by taxon and shaped by `consensus_conflict_flag`; (B) Collection DOY vs. Latitude against the centered Hopkins Bioclimatic Law baseline ($+4.0\text{ d/}^\circ\text{N}$). |
+| `fig07_multimodal_discordance_summary` | `scripts/analysis/07_triage_dashboard_synthesis.R` | (A) Modality-specific conflict rates across Morphology (CDA/GMM), DINOv2 Vision (Cleanlab), and Ecological Niche (Spatial RF); (B) Consensus curatorial triage priority breakdown across the four *Packera* taxa. |
+
+---
+
 ## Workspace Skills Reference
 
 Activate the repository's specialized skills in `.agents/skills/` whenever working on the corresponding domains:

@@ -117,27 +117,34 @@ python main.py check-env
 python main.py download-weights
 ```
 
-#### B. End-to-End Automated Pipeline (Single Copy-Paste Command)
+#### B. End-to-End Automated Pipeline (Single Copy-Paste Command & Run-Scoped Execution)
+Every pipeline execution via `./run_pipeline.sh` or `python main.py` writes all generated masks, contours, cropped patches, CSV manifests, publication figures (`.pdf` + 300-DPI `.png`), reports, and `run_metadata.json` into an isolated run directory (`runs/run_<YYYYMMDD_HHMMSS>/` or `runs/<run_id>/`) with a `runs/latest` symlink, while sharing read-only `data/raw_vouchers/` and `data/environmental/` caches:
 ```bash
 source .venv/bin/activate
-python main.py run-all --download-images
+
+# Option 1: Launch a self-contained run via run_pipeline.sh (defaults to runs/run_<YYYYMMDD_HHMMSS>/)
+./run_pipeline.sh --run-id packera_full_run
+
+# Option 2: Launch via unified Python orchestrator with --run-id
+python main.py run-all --run-id packera_full_run --download-images
 ```
 
-#### C. Phase-by-Phase Execution via Unified `main.py` CLI
+#### C. Phase-by-Phase Execution via Unified `main.py` CLI (Supports Resuming `--run-id`)
 ```bash
 source .venv/bin/activate
 
 # Phase 1: Harvest GBIF/iDigBio vouchers & stratify determiner authority tiers
-python main.py harvest --max-records 5000 --download-images
+python main.py harvest --run-id packera_full_run --max-records 5000 --download-images
 
 # Phase 2: Two-stage LeafMachine2 (LeafPriority.pt + Ruler) -> Cropped PointRend + Automated SAM 2 Refinement
-python main.py segment --weights models/lm2_packera_pcd_finetuned.pth --sam2-refine
+# (Automatically snapshots data/tables/curated_vouchers.csv into runs/<run_id>/data/tables/ if Phase 1 ran earlier)
+python main.py segment --run-id packera_full_run --weights models/lm2_packera_pcd_finetuned.pth --sam2-refine
 
 # Phase 3 & 4: 12-Harmonic Polarity-Preserving EFA (Momocs), Within-Species Allometry, GMM & Passive CDA
-python main.py morphometrics --harmonics 12
+python main.py morphometrics --run-id packera_full_run --harmonics 12
 
 # Phase 5, 6 & 7: DINOv2 + Cleanlab XAI, Spatial Random Forests (SoilGrids/SSURGO/WorldClim), & Triage Queue
-python main.py synthesis
+python main.py synthesis --run-id packera_full_run
 ```
 
 #### D. Standalone Phase-by-Phase Script Execution (Verified Flags)
