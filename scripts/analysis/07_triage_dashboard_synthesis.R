@@ -240,12 +240,29 @@ build_triage_queue <- function(opts) {
   validate_upstream_contracts(vouchers_df = vouchers)
   vouchers$species_standardized <- standardize_packera_taxon(vouchers$species_raw)
 
-  # Multimodal flags (primary spatial/edaphic join)
+  # Multimodal flags (primary spatial/edaphic join + coalesce shared columns like doy)
   if (file.exists(opts$multimodal_flags)) {
     mm_df <- readr::read_csv(opts$multimodal_flags, show_col_types = FALSE)
     mm_df$catalogNumber <- as.character(mm_df$catalogNumber)
-    join_cols <- setdiff(names(mm_df), names(vouchers))
-    vouchers <- dplyr::left_join(vouchers, mm_df[, c("catalogNumber", join_cols)], by = "catalogNumber")
+    vouchers$catalogNumber <- as.character(vouchers$catalogNumber)
+    mm_sub <- mm_df[!duplicated(mm_df$catalogNumber), , drop = FALSE]
+    join_cols <- setdiff(names(mm_sub), names(vouchers))
+    if (length(join_cols) > 0) {
+      vouchers <- dplyr::left_join(vouchers, mm_sub[, c("catalogNumber", join_cols), drop = FALSE], by = "catalogNumber")
+    }
+    idx_m <- match(vouchers$catalogNumber, mm_sub$catalogNumber)
+    for (sc in intersect(c("doy", "latitude", "longitude", "soil_ph", "soil_sand", "soil_cec", "soil_bulk_density", "delta_doy"), intersect(names(vouchers), names(mm_sub)))) {
+      vouchers[[sc]] <- dplyr::coalesce(suppressWarnings(as.numeric(vouchers[[sc]])), suppressWarnings(as.numeric(mm_sub[[sc]][idx_m])))
+    }
+  }
+  if (!("doy" %in% names(vouchers))) vouchers$doy <- NA_real_
+  vouchers$doy <- suppressWarnings(as.numeric(vouchers$doy))
+  if ("eventDate" %in% names(vouchers) && any(is.na(vouchers$doy))) {
+    na_d <- which(is.na(vouchers$doy) & !is.na(vouchers$eventDate))
+    if (length(na_d) > 0) {
+      dt <- suppressWarnings(as.Date(substr(as.character(vouchers$eventDate[na_d]), 1, 10)))
+      vouchers$doy[na_d] <- suppressWarnings(as.numeric(format(dt, "%j")))
+    }
   }
 
   # Morphometrics flags (CDA / GMM join with voucher-level aggregation; resolve morphometric_outlier_flag <-> misidentification_flag)

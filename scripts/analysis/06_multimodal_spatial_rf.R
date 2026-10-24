@@ -1389,14 +1389,21 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
     ggplot2::scale_fill_manual(values = TAXON_COLORS) +
     thm + ggplot2::labs(title = "C. Circular Phenology (Flowering DOY)", x = "Day of Year (DOY)", y = "Density", fill = "")
 
-  # Panel D: Warren's Niche Identity Permutations
+  # Panel D: Warren's Niche Identity Permutations & Empirical Schoener's D
   p4 <- ggplot2::ggplot(niche_res$permutations, ggplot2::aes(x = D_null, fill = Pair)) +
     ggplot2::geom_histogram(bins = 20, alpha = 0.65, position = "identity") +
-    thm + ggplot2::labs(title = "D. Warren's Niche Identity Tests (100 Perms)", x = "Null Schoener's D", y = "Count", fill = "")
+    ggplot2::geom_vline(data = niche_res$summary, ggplot2::aes(xintercept = Warren_D, color = Pair),
+                        linetype = "dashed", linewidth = 0.9, show.legend = FALSE) +
+    ggplot2::coord_cartesian(xlim = c(0, 1)) +
+    thm + ggplot2::labs(title = "D. Warren's Niche Identity Tests (100 Perms)", x = "Schoener's D (Dashed = Observed, Bars = Null)", y = "Count", fill = "")
 
-  # Panel E: Variance Partitioning
-  p5 <- ggplot2::ggplot(srf_res$variance_partition, ggplot2::aes(x = "", y = Variance_Pct, fill = Component)) +
-    ggplot2::geom_bar(stat = "identity", width = 1, color = "white") + ggplot2::coord_polar("y", start = 0) +
+  # Panel E: Variance Partitioning with Percentage Labels
+  vp_df <- srf_res$variance_partition
+  vp_df$Label <- ifelse(vp_df$Variance_Pct >= 4, sprintf("\%.1f\%\%", vp_df$Variance_Pct), "")
+  p5 <- ggplot2::ggplot(vp_df, ggplot2::aes(x = "", y = Variance_Pct, fill = Component)) +
+    ggplot2::geom_bar(stat = "identity", width = 1, color = "white") +
+    ggplot2::coord_polar("y", start = 0) +
+    ggplot2::geom_text(ggplot2::aes(label = Label), position = ggplot2::position_stack(vjust = 0.5), size = 3, fontface = "bold") +
     ggplot2::scale_fill_brewer(palette = "Set2") +
     thm + ggplot2::theme_void() + ggplot2::labs(title = "E. Spatial Variance Partitioning", fill = "")
 
