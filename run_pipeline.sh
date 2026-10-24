@@ -173,6 +173,9 @@ Rscript scripts/morphometrics/03_fourier_extractor.R \
   --manifest "${RUN_DIR}/data/tables/extracted_leaf_manifest.csv" \
   --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
   --output "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
+  --output-individual "${RUN_DIR}/data/tables/leaf_efa_harmonics_individual.csv" \
+  --report-out "${RUN_DIR}/outputs/reports/tier_symmetry_validation.csv" \
+  --plot-out "${RUN_DIR}/outputs/figures/tier1_vs_tier2_density_overlay.pdf" \
   --figures-dir "${RUN_DIR}/outputs/figures"
 
 # ------------------------------------------------------------------------------
@@ -182,7 +185,11 @@ echo "[Step 04/07] Running GMM Clustering & Passive CDA..."
 Rscript scripts/morphometrics/04_gmm_morphotools.R \
   --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
   --harmonics "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
-  --repro-metrics "${RUN_DIR}/data/tables/voucher_reproductive_metrics.csv" \
+  --reproductive "${RUN_DIR}/data/tables/voucher_reproductive_metrics.csv" \
+  --allometry-report "${RUN_DIR}/outputs/reports/allometry_significance_audit.csv" \
+  --allometry-pairwise "${RUN_DIR}/outputs/reports/allometry_pairwise_trajectories.csv" \
+  --allometry-plot "${RUN_DIR}/outputs/figures/shape_allometry_regression.pdf" \
+  --output-batch-audit "${RUN_DIR}/outputs/reports/institutional_batch_effect_audit.csv" \
   --output-flags "${RUN_DIR}/data/tables/morphometric_flags.csv" \
   --output-plot "${RUN_DIR}/outputs/figures/cda_passive_projection.pdf" \
   --output-report "${RUN_DIR}/outputs/reports/gmm_bayes_factors_summary.csv"
@@ -230,6 +237,7 @@ Rscript scripts/analysis/07_triage_dashboard_synthesis.R \
   --multimodal-flags "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv" \
   --gmm-summary "${RUN_DIR}/outputs/reports/gmm_bayes_factors_summary.csv" \
   --niche-summary "${RUN_DIR}/outputs/reports/multimodal_spatial_rf_summary.csv" \
+  --output-queue "${RUN_DIR}/data/tables/triage_queue.csv" \
   --output-triage "${RUN_DIR}/outputs/reports/final_curation_triage.csv" \
   --output-figure "${RUN_DIR}/outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf" \
   --output-report "${RUN_DIR}/outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md" \

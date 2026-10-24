@@ -170,7 +170,10 @@ generate_step03_pub_figures <- function(
   if (is.null(df) || nrow(df) == 0) return(invisible(NULL))
 
   if (!"taxon" %in% colnames(df)) {
-    df$taxon <- if ("species_standardized" %in% colnames(df)) df$species_standardized else "Packera dubia"
+    raw_tx <- if ("species_standardized" %in% colnames(df)) df$species_standardized else if ("scientificName" %in% colnames(df)) df$scientificName else if ("species_raw" %in% colnames(df)) df$species_raw else rep("Packera dubia", nrow(df))
+    df$taxon <- ifelse(grepl("anonym|smallii|earlei", raw_tx, ignore.case = TRUE), "Packera anonyma",
+                ifelse(grepl("paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", raw_tx, ignore.case = TRUE), "Packera paupercula",
+                ifelse(grepl("plattensis|flavovirens", raw_tx, ignore.case = TRUE), "Packera plattensis", "Packera dubia")))
   }
   df$taxon_clean <- ifelse(
     df$taxon %in% names(OKABE_ITO_TAXA),
