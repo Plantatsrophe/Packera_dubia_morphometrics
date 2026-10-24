@@ -40,14 +40,26 @@ All Python (`scripts/pipeline/`, `scripts/vision/`, `scripts/analysis/`) and R (
 | **Composite Grouping Key** | `(catalogNumber, plant_individual_id)` | Every leaf-level and specimen-level aggregation across Python and R must group by `(catalogNumber, plant_individual_id)`. **Never** collapse multi-plant herbarium sheets to `plant_individual_id = 0` or group by `catalogNumber` alone when aggregating organ traits. |
 | **Routing Tier Column** | `assigned_tier` | Canonical closed-silhouette tiers are `"Tier_1_Direct"` and `"Tier_2_Reflected"` (with shorthand `"tier1"` / `"tier2"` in intermediate routing objects). In R, always match case-insensitively via `grepl("^tier_?[12]", assigned_tier, ignore.case = TRUE)`. |
 | **Scale Calibration Columns** | `pixels_per_mm`, `is_calibrated_mm` | `pixels_per_mm` stores the empirical ruler conversion factor (`float` or `NA`), and `is_calibrated_mm` (`bool` / `logical`) explicitly flags whether absolute millimeter traits ($\text{CS}_{\text{mm}}$, involucre height/width in mm) are calibrated vs. uncalibrated pixel units. |
-| **Morphometric Outlier Flag** | `morphometric_outlier_flag` | Exported by `04_gmm_morphotools.R` (`data/tables/morphometric_flags.csv` / `morphometrics_misidentification_flags.csv`) as `morphometric_outlier_flag` and aliased to `misidentification_flag` when consumed in Phase 6 (`06_multimodal_spatial_rf.R`) and Phase 7 (`07_triage_dashboard_synthesis.R`). |
+| **Fourier Quality & Symmetry** | `harmonic_roughness`, `is_contour_outlier`, `leaf_quality_weight`, `pct_asymmetry`, `sym_var`, `asym_var`, `Sym_PC1`–`Sym_PC5` | Exported by `03_fourier_extractor.R` (`fourier_pcs.csv`, `leaf_efa_harmonics.csv`). Outlier threshold `pct_asymmetry > 0.22 | harmonic_roughness > 0.15` gates PCA fitting (`clean_pca_mask`); `leaf_quality_weight` weights specimen medoid aggregation. Bilateral-symmetric harmonic decomposition via `Momocs::rm_asym(ef)` preserves bilateral symmetry axes across tiers. |
+| **Morphometric Outlier Flag & Validation** | `morphometric_outlier_flag`, `loocv_accuracy` | Exported by `04_gmm_morphotools.R` (`data/tables/morphometric_flags.csv` / `morphometrics_misidentification_flags.csv`) as `morphometric_outlier_flag` and aliased to `misidentification_flag` when consumed in Phase 6 (`06_multimodal_spatial_rf.R`) and Phase 7 (`07_triage_dashboard_synthesis.R`). `loocv_accuracy` records honest Leave-One-Out Cross-Validation accuracy in CDA. Within-plant aggregation uses quality-weighted medoids, `MASS::cov.rob` robust Mahalanobis core fitting, and parsimonious covariance restriction (`EII`..`VVI` when $N/P < 5$). |
+| **Vision Noise & Tomentum Flag** | `c_error`, `is_label_corrupted`, `tomentum_taxon_discordance` | Exported by `05_cleanlab_vision_xai.py` (`data/tables/label_noise_audit.csv`). `tomentum_taxon_discordance` flags candidates where DINOv2 vision predictions diverge due to abaxial/adaxial vestiture and arachnoid tomentum variation. Requires L2 cosine normalization of 768-d embeddings before fold-internal scaling and balanced class weights. |
+| **Spatial Model Validation** | `spatial_block_cv_acc`, `edaphic_best_fit_taxon` | Exported by `06_multimodal_spatial_rf.R` (`multimodal_conflict_flags.csv`, `multimodal_spatial_rf_summary.csv`). Evaluates Random Forest performance under $0.5^\circ \times 0.5^\circ$ spatial block cross-validation. Employs resilient batched `soilDB::SDA_spatialQuery()` chunking with `dplyr::bind_rows` and SoilGrids 250m fallback. |
 
 ---
 
-## 5. Atomic Persistence
+## 5. Atomic Persistence & Schema Verification
 
 * **Write-Then-Replace Pattern:** Every tabular export (`.csv`), JSON manifest (`.json`), and model checkpoint write must write to a temporary `.tmp` file in the target directory, flush buffers (`f.flush()` and `os.fsync(f.fileno())` in Python; atomic `file.rename()` from `.tmp` in R), and atomically replace the destination via `Path.replace()` (or `os.replace()`).
 * **Zero Partial Artifacts:** Never write directly to final output paths in-place where an interrupted process or OOM signal could leave truncated CSVs or corrupted checkpoints.
+* **Upstream Contract Verification:** Synthesis stages (such as `07_triage_dashboard_synthesis.R`) must invoke `validate_upstream_contracts()` at initialization to ensure all upstream tables comply with required primary keys and columns prior to computing downstream triage calls.
+
+---
+
+## 6. Phase 2 Native-DPI Basal Filtering & Geometry Invariants
+
+* **Dual-Class Stage 1 Box Processing:** Stage 1 YOLOv5 (`LeafPriority.pt`) must process both `Class 0` (`leaf_whole`) and `Class 1` (`leaf_partial`) candidate boxes to capture rosette-attached blades on native-DPI scans (`>1000px`), with cauline pre-filtering (`cy < 0.40 * sheet_h`) and fragment rejection (`max(bh, bw) < int(200 * scale_f)`).
+* **Post-Gatekeeper Basal Filtering:** High-DPI basal candidates must strictly enforce `cy_rel >= 0.42`, minimum area floors (`>= 12000 * scale_f^2` for Tier 1, `>= 18000 * scale_f^2` and `cy_rel >= 0.48` for Tier 2), boxy clump rejection (`min(w,h)/max(w,h) > 0.78` when `solidity < 0.84`), sheet-relative area floor (`>= 0.28 * max_sheet_area`), and top-6 cap per voucher ranked by $Q = \text{solidity} \cdot \text{ucs} \cdot \sqrt{\text{area}}$ with automatic cleanup of dropped mask and contour files from disk.
+* **Botanical Geometry Conventions:** Native-DPI petiole junction trimming (`trim_petiole_tail`), rosette centroid polarity disambiguation (`_disambiguate_base_apex_endpoints`), and diagonal-crease fold detection requiring `has_diagonal_crease and solidity < 0.72`.
 
 ---
 
@@ -57,3 +69,4 @@ Activate the repository's specialized skills in `.agents/skills/` whenever worki
 
 * **`/morphometric-cv-guardrails`** (`.agents/skills/morphometric-cv-guardrails/SKILL.md`): Mandatory whenever modifying scripts in `scripts/vision/`, `scripts/pipeline/`, `scripts/annotation_and_training/`, or `scripts/morphometrics/`.
 * **`/pipeline-contract-audit`** (`.agents/skills/pipeline-contract-audit/SKILL.md`): Mandatory before committing code changes or when debugging cross-stage Python/R pipeline handshakes.
+
