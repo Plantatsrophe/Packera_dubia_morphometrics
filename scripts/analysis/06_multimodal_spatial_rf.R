@@ -302,17 +302,40 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
     for (attempt in seq_len(max_retries)) {
       tryCatch({
         message(sprintf("SDA Query Batch %d (n=%d, attempt %d/%d)...", batch_idx, n_pts, attempt, max_retries))
+        pts_df$gid <- seq_len(n_pts)
         pts_sf <- sf::st_as_sf(pts_df, coords = c("longitude", "latitude"), crs = 4326)
-        sp_res <- soilDB::SDA_spatialQuery(pts_sf, what = "mukey", db = "SSURGO")
-        if (!is.null(sp_res) && nrow(sp_res) > 0 && "mukey" %in% names(sp_res)) {
+        sp_res <- soilDB::SDA_spatialQuery(pts_sf, what = "mukey", db = "SSURGO", byFeature = TRUE)
+        if (!is.null(sp_res) && is.data.frame(sp_res) && nrow(sp_res) > 0 && "mukey" %in% names(sp_res)) {
+          pts_sp <- merge(pts_df, sp_res, by = "gid", all.x = TRUE)
           mukeys <- unique(na.omit(as.character(sp_res$mukey)))
           if (length(mukeys) > 0) {
-            mukey_str <- paste0("'", mukeys, "'", collapse = ",")
-            sql <- sprintf("SELECT m.mukey, m.musym, m.muname, c.compname, c.taxsuborder, c.taxgreatgroup, c.majcompflag FROM mapunit m LEFT JOIN component c ON m.mukey = c.mukey WHERE m.mukey IN (%s)", mukey_str)
+            mukey_str <- paste0(mukeys, collapse = ",")
+            sql <- sprintf("SELECT m.mukey, m.musym, m.muname, c.compname, c.taxsuborder, c.taxgrtgroup AS taxgreatgroup, c.majcompflag FROM mapunit m LEFT JOIN component c ON m.mukey = c.mukey WHERE m.mukey IN (%s)", mukey_str)
             tab_res <- soilDB::SDA_query(sql)
-            if (!is.null(tab_res) && nrow(tab_res) > 0) {
-              pts_sp <- sf::st_join(pts_sf, sp_res)
-              res_joined <- merge(as.data.frame(pts_sp), tab_res, by = "mukey", all.x = TRUE)
+            if (is.data.frame(tab_res) && nrow(tab_res) > 0) {
+              dom_comp <- if ("majcompflag" %in% names(tab_res)) tab_res[tab_res$majcompflag == "Yes", ] else tab_res
+              if (nrow(dom_comp) == 0) dom_comp <- tab_res
+              dom_comp <- dom_comp[!duplicated(dom_comp$mukey), ]
+              res_joined <- merge(pts_sp, dom_comp[, intersect(c("mukey", "musym", "compname", "taxsuborder", "taxgreatgroup"), names(dom_comp))], by = "mukey", all.x = TRUE)
+              
+              n_res <- nrow(res_joined)
+              is_outcrops <- logical(n_res)
+              outcrop_classes <- rep("Non-outcrop matrix", n_res)
+              for (k in seq_len(n_res)) {
+                cl <- classify_ssurgo_outcrop(
+                  muname = if (!is.na(res_joined$muname[k])) res_joined$muname[k] else "",
+                  compname = if ("compname" %in% names(res_joined) && !is.na(res_joined$compname[k])) res_joined$compname[k] else "",
+                  taxsuborder = if ("taxsuborder" %in% names(res_joined) && !is.na(res_joined$taxsuborder[k])) res_joined$taxsuborder[k] else "",
+                  taxgreatgroup = if ("taxgreatgroup" %in% names(res_joined) && !is.na(res_joined$taxgreatgroup[k])) res_joined$taxgreatgroup[k] else "",
+                  lat = res_joined$latitude[k],
+                  lon = res_joined$longitude[k]
+                )
+                is_outcrops[k] <- cl$is_rock_outcrop
+                outcrop_classes[k] <- cl$outcrop_class
+              }
+              res_joined$is_rock_outcrop <- is_outcrops
+              res_joined$outcrop_class <- outcrop_classes
+              
               res_df <- res_joined
               query_success <- TRUE
               break

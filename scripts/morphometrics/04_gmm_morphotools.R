@@ -1,19 +1,12 @@
 #!/usr/bin/env Rscript
-# ==============================================================================
-# Script: 04_gmm_morphotools.R
-# Project: Packera dubia Species Delimitation & Morphometrics Pipeline
-# Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
-# ==============================================================================
-
+# Script: 04_gmm_morphotools.R - Packera dubia Morphometrics Pipeline (NCU)
 suppressPackageStartupMessages({
   for (pkg in c("MASS", "mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "dplyr", "readr", "tibble", "ggplot2", "optparse")) {
     if (requireNamespace(pkg, quietly = TRUE)) library(pkg, character.only = TRUE)
   }
 })
 
-# ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing
-# ------------------------------------------------------------------------------
 parse_args_robust <- function() {
   option_list <- list(
     optparse::make_option(c("-v", "--vouchers"), type = "character", default = "data/tables/curated_vouchers.csv", help = "Vouchers metadata CSV [default: %default]"),
@@ -73,9 +66,7 @@ parse_args_robust <- function() {
   return(opts)
 }
 
-# ------------------------------------------------------------------------------
 # 2. Circular Phenology & Taxonomic Concept Standardization
-# ------------------------------------------------------------------------------
 calculate_circular_phenology <- function(df) {
   if ("doy" %in% names(df)) {
     doy_val <- suppressWarnings(as.numeric(df$doy)); valid <- !is.na(doy_val) & doy_val >= 1 & doy_val <= 366
@@ -98,9 +89,7 @@ standardize_packera_taxon <- function(species_vec) {
   }, USE.NAMES = FALSE)
 }
 
-# ------------------------------------------------------------------------------
 # 2b. Foliar Allometry Multivariate Testing & Residual Correction
-# ------------------------------------------------------------------------------
 generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, output_pdf) {
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
   taxon_cols <- c("Packera anonyma" = "#E69F00", "Packera dubia" = "#009E73", "Packera plattensis" = "#56B4E9", "Packera paupercula" = "#CC79A7")
@@ -220,6 +209,8 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
     dir.create(dirname(output_pairwise), recursive = TRUE, showWarnings = FALSE)
     tmp_pw <- paste0(output_pairwise, ".tmp"); write.csv(pw_df, file = tmp_pw, row.names = FALSE); file.rename(tmp_pw, output_pairwise)
   }
+  anova_df$Term <- gsub("^Residuals$", "Residual", anova_df$Term)
+  if ("Total" %in% anova_df$Term) anova_df$R2[anova_df$Term == "Total"] <- 1.0
   report_cols <- intersect(c("Term", "Df", "SumOfSqs", "R2", "F", "p_value"), names(anova_df))
   anova_df <- anova_df[, report_cols, drop = FALSE]
   if (!is.null(output_report) && nzchar(output_report)) {
@@ -255,7 +246,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
     morpho_matrix_for_gmm <- Y_adj; morpho_df[valid_idx, sym_names] <- round(Y_adj, 6)
     all_sym_idx <- which(complete.cases(morpho_df[, sym_names]))
     proj_pcs <- scale(as.matrix(morpho_df[all_sym_idx, sym_names[active_cols], drop = FALSE]), center = pca_resids$center, scale = FALSE) %*% pca_resids$rotation
-    for (p in 1:min(5, ncol(proj_pcs))) morpho_df[all_sym_idx, paste0("PC", p)] <- round(proj_pcs[, p], 6)
+    for (p in seq_len(min(5, ncol(proj_pcs)))) morpho_df[all_sym_idx, paste0("PC", p)] <- round(proj_pcs[, p], 6)
   } else {
     message(sprintf("[INFO] Foliar allometry negligible (R2 = %.2f). Analyzing raw symmetric harmonics.", r2_size))
     morpho_matrix_for_gmm <- Y
@@ -466,7 +457,11 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   if (nrow(valid_df) < 10) return(NULL)
   inst_counts <- table(valid_df$institutionCode); rep_insts <- names(inst_counts[inst_counts >= min_obs])
   audit_subset <- if (length(rep_insts) >= 2) valid_df[valid_df$institutionCode %in% rep_insts, ] else valid_df
-  audit_subset$institutionCode <- factor(audit_subset$institutionCode)
+  audit_subset$institutionCode <- droplevels(factor(audit_subset$institutionCode))
+  if (nlevels(audit_subset$institutionCode) < 2) {
+    message("  [INFO] Fewer than 2 distinct institutions represented; skipping batch-effect ANOVA.")
+    return(NULL)
+  }
   lm_pc1 <- lm(PC1 ~ institutionCode, data = audit_subset); lm_pc2 <- lm(PC2 ~ institutionCode, data = audit_subset)
   s1 <- summary(lm_pc1); s2 <- summary(lm_pc2); aov1 <- anova(lm_pc1); aov2 <- anova(lm_pc2)
   r2_pc1 <- s1$r.squared; r2_pc2 <- s2$r.squared
@@ -504,8 +499,10 @@ generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feat
   is_joint <- !is.null(feature_cols) && ("AR_inv_std" %in% feature_cols)
   cda_title <- if (is_joint) "A. Joint Vegetative + Reproductive CDA (MorphoTools2)" else "A. CDA with Passive Sample Projection (MorphoTools2)"
 
-  plot(audit_df$can1, audit_df$can2, type = "n", xlab = sprintf("Canonical Axis 1 (%.1f%% Between-Group Var)", cda_res$variance_pct[1]),
-       ylab = sprintf("Canonical Axis 2 (%.1f%% Between-Group Var)", cda_res$variance_pct[2]), main = cda_title, font.main = 2)
+  var1 <- if (length(cda_res$variance_pct) >= 1 && !is.na(cda_res$variance_pct[1])) max(0, cda_res$variance_pct[1]) else 0.0
+  var2 <- if (length(cda_res$variance_pct) >= 2 && !is.na(cda_res$variance_pct[2])) max(0, cda_res$variance_pct[2]) else 0.0
+  plot(audit_df$can1, audit_df$can2, type = "n", xlab = sprintf("Canonical Axis 1 (%.1f%% Between-Group Var)", var1),
+       ylab = sprintf("Canonical Axis 2 (%.1f%% Between-Group Var)", var2), main = cda_title, font.main = 2)
   grid(col = "gray90", lty = "solid"); active_sub <- audit_df[!audit_df$is_passive, ]
   for (sp in names(taxon_cols)) {
     sp_idx <- which(active_sub$species_standardized == sp)

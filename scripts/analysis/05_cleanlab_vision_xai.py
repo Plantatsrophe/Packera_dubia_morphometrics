@@ -558,7 +558,7 @@ def compute_out_of_fold_probabilities(
     X = X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-8)
 
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    num_classes = len(np.unique(labels))
+    num_classes = max(len(TARGET_TAXA), int(np.max(labels)) + 1)
     pred_probs = np.zeros((len(labels), num_classes), dtype=np.float64)
 
     # Determine stratification target
@@ -584,10 +584,11 @@ def compute_out_of_fold_probabilities(
         clf.fit(X_train, y_train)
 
         probs = clf.predict_proba(X_val)
-        pred_probs[val_idx] = probs
+        for i_col, c_idx in enumerate(clf.classes_):
+            pred_probs[val_idx, c_idx] = probs[:, i_col]
 
         y_true_all.extend(y_val)
-        y_pred_all.extend(np.argmax(probs, axis=1))
+        y_pred_all.extend(clf.classes_[np.argmax(probs, axis=1)])
 
     acc = accuracy_score(y_true_all, y_pred_all)
     f1 = f1_score(y_true_all, y_pred_all, average="weighted")

@@ -730,6 +730,8 @@ run_fourier_extraction <- function(opts) {
     }
 
     # Format table columns and export report CSV
+    permanova_df$Term <- gsub("^Residuals$", "Residual", permanova_df$Term)
+    if ("Total" %in% permanova_df$Term) permanova_df$R2[permanova_df$Term == "Total"] <- 1.0
     report_cols <- intersect(c("Term", "Df", "SumOfSqs", "R2", "F", "p_value"), names(permanova_df))
     permanova_df <- permanova_df[, report_cols, drop = FALSE]
 
