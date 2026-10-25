@@ -373,14 +373,6 @@ def load_and_link_rosette_patches(
     class_to_idx = {taxon: idx for idx, taxon in enumerate(TARGET_TAXA)}
     records = []
 
-    # Fast lookup of physical patch files across rosette_dir and subdirectories
-    available_patches = {}
-    if rosette_dir.exists():
-        for p in rosette_dir.rglob("*.jpg"):
-            cat = p.stem.split("_")[0]
-            if cat not in available_patches or "rosette" in p.name:
-                available_patches[cat] = p
-
     patch_files = sorted(rosette_dir.glob("*.jpg")) if rosette_dir.exists() else []
     if not patch_files and rosette_dir.exists():
         rosette_crops = sorted(rosette_dir.glob("rosettes_dense/*.jpg"))
@@ -388,13 +380,22 @@ def load_and_link_rosette_patches(
         rosette_cats = {p.stem.split("_")[0] for p in rosette_crops}
         patch_files = rosette_crops + [p for p in leaf_crops if p.stem.split("_")[0] not in rosette_cats]
 
+    # Fast lookup of physical patch files across rosette_dir and subdirectories
+    available_patches = {}
+    for p in patch_files:
+        cat = p.stem.split("_")[0]
+        if cat not in available_patches or "rosette" in p.name:
+            available_patches[cat] = p
+
     if patch_files:
         for p in patch_files:
             cat_num = p.stem.split("_")[0]
+            if voucher_map and cat_num not in voucher_map:
+                continue
             meta = voucher_map.get(cat_num, {})
-            raw_sp = meta.get("species_raw", meta.get("species", "Unknown"))
+            raw_sp = meta.get("species_raw", meta.get("scientificName", meta.get("species", "Unknown")))
             std_taxon = standardize_packera_taxon(raw_sp)
-            if std_taxon not in class_to_idx:
+            if std_taxon not in TARGET_TAXA:
                 continue
 
             orient_info = classify_foliar_surface_orientation(p)
@@ -404,7 +405,7 @@ def load_and_link_rosette_patches(
                 "patch_path": str(p),
                 "taxon": std_taxon,
                 "species_raw": raw_sp,
-                "label_idx": class_to_idx[std_taxon],
+                "label_idx": 0,
                 "determiner_tier": meta.get("determiner_tier", "Tier_3_Bronze"),
                 "surface_orientation": orient_info["surface_orientation"],
                 "mean_luminance": orient_info["mean_luminance"],
@@ -419,9 +420,9 @@ def load_and_link_rosette_patches(
         )
     elif not vouchers_df.empty:
         for _, row in vouchers_df.iterrows():
-            raw_sp = str(row.get("species_raw", row.get("species", "Unknown")))
+            raw_sp = str(row.get("species_raw", row.get("scientificName", row.get("species", "Unknown"))))
             std_taxon = standardize_packera_taxon(raw_sp)
-            if std_taxon not in class_to_idx:
+            if std_taxon not in TARGET_TAXA:
                 continue
             cat_num = str(row.get("catalogNumber", "")).strip()
             real_path = available_patches.get(cat_num, rosette_dir / f"{cat_num}_rosette.jpg")
@@ -441,13 +442,20 @@ def load_and_link_rosette_patches(
                 "patch_path": str(real_path),
                 "taxon": std_taxon,
                 "species_raw": raw_sp,
-                "label_idx": class_to_idx[std_taxon],
+                "label_idx": 0,
                 "determiner_tier": row.get("determiner_tier", "Tier_3_Bronze"),
                 "surface_orientation": orient_info["surface_orientation"],
                 "mean_luminance": orient_info["mean_luminance"],
                 "mean_saturation": orient_info["mean_saturation"],
                 "high_brightness_ratio": orient_info["high_brightness_ratio"],
             })
+
+    present_std_taxa = {r["taxon"] for r in records}
+    active_taxa = [t for t in TARGET_TAXA if t in present_std_taxa]
+    if active_taxa:
+        class_to_idx = {taxon: idx for idx, taxon in enumerate(active_taxa)}
+        for r in records:
+            r["label_idx"] = class_to_idx[r["taxon"]]
 
     df = pd.DataFrame(records)
     logger.info(f"Loaded and linked {len(df)} rosette patch records across {len(class_to_idx)} taxa.")
@@ -1102,12 +1110,12 @@ def generate_step05_publication_figures(
                     ax_a.scatter(
                         np.full(len(sub_tier), idx_t) + jitter,
                         sub_tier["label_quality_score"],
-                        c=col_hex,
+                        facecolors="none",
+                        edgecolors=col_hex,
                         marker=marker_sym,
                         s=36,
-                        alpha=0.85,
-                        edgecolors="white",
-                        linewidths=0.4,
+                        alpha=0.82,
+                        linewidths=0.9,
                         label=f"{tier_name} Authority" if idx_t == 0 else None,
                     )
 
@@ -1141,19 +1149,19 @@ def generate_step05_publication_figures(
     if np.any(adax_mask):
         ax_b.scatter(
             lum_vals[adax_mask], sat_vals[adax_mask],
-            c="#009E73", marker="o", s=40, alpha=0.82, edgecolors="white", linewidths=0.4,
+            facecolors="none", edgecolors="#009E73", marker="o", s=40, alpha=0.80, linewidths=0.9,
             label=f"Adaxial Lamina (n = {int(np.sum(adax_mask))})",
         )
     if np.any(abax_mask):
         ax_b.scatter(
             lum_vals[abax_mask], sat_vals[abax_mask],
-            c="#0072B2", marker="^", s=44, alpha=0.85, edgecolors="white", linewidths=0.4,
+            facecolors="none", edgecolors="#0072B2", marker="^", s=44, alpha=0.82, linewidths=0.9,
             label=f"Abaxial Arachnoid-Tomentose (n = {int(np.sum(abax_mask))})",
         )
     if np.any(discord_flag):
         ax_b.scatter(
             lum_vals[discord_flag], sat_vals[discord_flag],
-            c="#D55E00", marker="D", s=58, alpha=0.95, edgecolors="black", linewidths=0.7,
+            facecolors="none", edgecolors="#D55E00", marker="D", s=54, alpha=0.88, linewidths=1.1,
             label=f"Tomentum-Taxon Discordance (n = {int(np.sum(discord_flag))})",
         )
 
@@ -1338,7 +1346,7 @@ def main() -> None:
         demo=args.demo,
     )
 
-    active_class_names: List[str] = list(TARGET_TAXA)
+    active_class_names: List[str] = [t for t in TARGET_TAXA if t in set(df["taxon"])] or list(TARGET_TAXA)
     unique_labels = np.unique(labels)
     n_splits = 5
     if len(unique_labels) < 2 or args.intraspecific_mode:
@@ -1383,8 +1391,8 @@ def main() -> None:
         if not used_gmm_clusters and len(unique_labels) >= 2 and args.intraspecific_mode:
             # Force single-class centroid cosine-distance mode when intraspecific_mode is active with K=1
             focal_std = standardize_packera_taxon(args.focal_taxon) if args.focal_taxon else "Packera dubia"
-            focal_idx = TARGET_TAXA.index(focal_std) if focal_std in TARGET_TAXA else 1
-            labels = np.full(len(labels), focal_idx, dtype=int)
+            active_class_names = [focal_std]
+            labels = np.zeros(len(labels), dtype=int)
             df["label_idx"] = labels
 
     # 3. Fit out-of-fold cross-validated probabilities

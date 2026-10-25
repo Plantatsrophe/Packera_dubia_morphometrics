@@ -276,9 +276,19 @@ def _simulate_rscript_06(cmd: List[str], **kwargs) -> subprocess.CompletedProces
         vouchers_df = vouchers_df.merge(vis_df, on="catalogNumber", how="left")
 
     vouchers_df = extract_environmental_layers_ref(vouchers_df)
+    vouchers_df["fine_soil_ph"] = vouchers_df["soil_ph"]
+    vouchers_df["fine_soil_sand"] = vouchers_df["soil_sand"]
+    vouchers_df["fine_soil_clay"] = np.clip(100.0 - vouchers_df["soil_sand"] - 22.0, 4.0, 60.0)
+    vouchers_df["fine_bedrock_depth_cm"] = 120.0
+    vouchers_df["ssurgo_rock_outcrop_pct"] = 25.0
+    vouchers_df["ssurgo_aws_0_50cm"] = 4.5
+    vouchers_df["topo_tpi_30m"] = 0.8
+    vouchers_df["topo_twi_30m"] = 6.2
     vouchers_df["doy"] = extract_doy(vouchers_df).fillna(120)
     vouchers_df["delta_doy"] = 0.0
     vouchers_df = execute_crossmodal_consensus_ref(vouchers_df)
+    vouchers_df["edaphic_z_score"] = 0.5
+    vouchers_df["piedmont_outcrop_specialist_flag"] = False
 
     if "--output-flags" in opts:
         out_flags = Path(opts["--output-flags"])
@@ -706,6 +716,51 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertIn("ecospat::ecospat.niche.equivalency.test", r_content)
         self.assertNotIn("* 100 - 10", r_content)
         self.assertNotIn("* 100 - 5", r_content)
+
+    def test_fine_grain_edaphic_and_micro_topography_integration(self):
+        """Verify 10m-30m SSURGO, POLARIS, SOLUS, 3DEP, and fine_grain_edaphic_cache integration."""
+        util_path = PROJECT_ROOT / "scripts" / "analysis" / "edaphic_fine_grain_utils.R"
+        self.assertTrue(util_path.exists(), "edaphic_fine_grain_utils.R must exist.")
+        combined_r = (
+            self.r_script_path.read_text(encoding="utf-8")
+            + "\n"
+            + util_path.read_text(encoding="utf-8")
+        )
+        for token in [
+            "ST_Buffer(ST_Point(",
+            "0.00045",
+            "ssurgo_rock_outcrop_pct",
+            "ssurgo_bedrock_depth_cm",
+            "ssurgo_sand_pct",
+            "ssurgo_clay_pct",
+            "ssurgo_ph",
+            "ssurgo_om_pct",
+            "ssurgo_cec",
+            "ssurgo_aws_0_50cm",
+            "extract_polaris_and_solus_predictors",
+            "polaris_ph_30m",
+            "polaris_sand_30m",
+            "polaris_clay_30m",
+            "polaris_om_30m",
+            "polaris_bd_30m",
+            "polaris_ksat_30m",
+            "fine_soil_ph",
+            "fine_soil_sand",
+            "fine_soil_clay",
+            "fine_bedrock_depth_cm",
+            "fine_rock_outcrop_prob",
+            "topo_tpi_30m",
+            "topo_roughness_30m",
+            "topo_slope_deg",
+            "topo_twi_30m",
+            "fine_grain_edaphic_cache.csv",
+            "[A] Fine-Grain Edaphic & Outcrop Lithology",
+            "[B] Macro-Climate",
+            "[C] Spatial MEMs",
+            "edaphic_z_score",
+            "fill = NA",
+        ]:
+            self.assertIn(token, combined_r, f"Expected fine-grain token '{token}' in Step 06 R code.")
 
 
 if __name__ == "__main__":

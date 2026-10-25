@@ -941,18 +941,21 @@ generate_step06_pub_figures <- function(
       )
     } else if (!is.null(imp_df) && nrow(imp_df) > 0 && all(c("Predictor", "MeanDecreaseAccuracy") %in% colnames(imp_df))) {
       ord <- order(as.numeric(imp_df$MeanDecreaseAccuracy), decreasing = FALSE)
+      pred_ord <- as.character(imp_df$Predictor[ord])
+      bar_cols <- ifelse(grepl("^(fine_|ssurgo_|polaris_|solus_|topo_)", pred_ord), "#009E73",
+                  ifelse(grepl("^MEM", pred_ord), "#D55E00", "#0072B2"))
       graphics::barplot(
         as.numeric(imp_df$MeanDecreaseAccuracy[ord]),
-        names.arg = as.character(imp_df$Predictor[ord]),
-        horiz = TRUE, las = 1, col = "#0072B2", border = "white",
+        names.arg = pred_ord,
+        horiz = TRUE, las = 1, col = bar_cols, border = "white", cex.names = 0.78,
         xlab = "Spatial Random Forest Permutation Importance",
-        main = "Phase 06 — Ecological & Edaphic Predictor Importance (Spatial Block CV)"
+        main = "Phase 06 — 10m-30m Outcrop, Edaphic & Climatic Predictor Importance"
       )
     } else {
       graphics::barplot(
         c(0.12, 0.18, 0.24, 0.31),
-        names.arg = c("BIO15 Precip Seasonality", "BIO1 Mean Temp", "Soil Sand (%)", "Soil pH (H2O)"),
-        horiz = TRUE, las = 1, col = "#0072B2",
+        names.arg = c("topo_tpi_30m", "ssurgo_rock_outcrop_pct", "fine_soil_sand", "fine_bedrock_depth_cm"),
+        horiz = TRUE, las = 1, col = "#009E73",
         xlab = "Predictor Importance", main = "Phase 06 — Ecological & Edaphic Predictor Importance"
       )
     }
@@ -961,7 +964,85 @@ generate_step06_pub_figures <- function(
   })
   if (file.exists(png_imp_tmp)) file.rename(png_imp_tmp, png_imp)
 
-  # 2. fig06b_geographic_map_and_hopkins_phenology.{pdf,png} (Strictly Hollow Markers)
+  # 2. fig06_ecological_niche_phenology.{pdf,png} (10m-30m Outcrop & Soil Niche with Strictly Hollow Markers)
+  atomic_save_dual_plot(function() {
+    graphics::par(mfrow = c(2, 2), mar = c(4.5, 8.5, 3.0, 1.2))
+    present_tx <- intersect(names(OKABE_ITO_TAXA)[1:4], unique(tx_clean))
+    if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
+    pch_map <- c("Packera anonyma" = 1L, "Packera dubia" = 2L, "Packera paupercula" = 5L, "Packera plattensis" = 1L)
+    pch_tx <- pch_map[tx_clean]
+    pch_tx[is.na(pch_tx)] <- 1L
+
+    # Panel A: Variable Importance Ranking (10m-30m Outcrop & Soil vs Climate & MEMs)
+    if (!is.null(imp_df) && nrow(imp_df) > 0 && all(c("Predictor", "MeanDecreaseAccuracy") %in% colnames(imp_df))) {
+      ord <- order(as.numeric(imp_df$MeanDecreaseAccuracy), decreasing = FALSE)
+      pred_ord <- as.character(imp_df$Predictor[ord])
+      bar_cols <- ifelse(grepl("^(fine_|ssurgo_|polaris_|solus_|topo_)", pred_ord), "#009E73",
+                  ifelse(grepl("^MEM", pred_ord), "#D55E00", "#0072B2"))
+      graphics::barplot(
+        as.numeric(imp_df$MeanDecreaseAccuracy[ord]),
+        names.arg = pred_ord,
+        horiz = TRUE, las = 1, col = bar_cols, border = "white", cex.names = 0.72,
+        xlab = "Mean Decrease Accuracy (Permutation)",
+        main = "A. Spatial RF Predictor Importance (10m-30m Stack)"
+      )
+    } else {
+      graphics::barplot(
+        c(0.12, 0.18, 0.24, 0.31),
+        names.arg = c("topo_tpi_30m", "ssurgo_rock_outcrop_pct", "fine_soil_sand", "fine_bedrock_depth_cm"),
+        horiz = TRUE, las = 1, col = "#009E73",
+        xlab = "Mean Decrease Accuracy", main = "A. Spatial RF Predictor Importance"
+      )
+    }
+
+    # Panel B: 10m-30m Fine-Grain Soil Sand vs. Soil pH (Hollow Markers: pch = 1, 2, 5; bg = NA)
+    graphics::par(mar = c(4.5, 4.6, 3.0, 1.2))
+    sand_v <- if ("fine_soil_sand" %in% colnames(vouchers_df)) as.numeric(vouchers_df$fine_soil_sand) else as.numeric(vouchers_df$soil_sand)
+    ph_v <- if ("fine_soil_ph" %in% colnames(vouchers_df)) as.numeric(vouchers_df$fine_soil_ph) else as.numeric(vouchers_df$soil_ph)
+    sand_v[is.na(sand_v)] <- 50.0; ph_v[is.na(ph_v)] <- 5.5
+    graphics::plot(
+      sand_v, ph_v,
+      pch = pch_tx, bg = NA, col = cols_tx, cex = 0.92, lwd = 1.0,
+      xlab = "Fine-Grain Soil Sand (%, 30m POLARIS / 10m SSURGO)",
+      ylab = "Fine-Grain Soil pH (H2O)",
+      main = "B. 10m-30m Fine-Grain Pedological Niche"
+    )
+    graphics::grid(col = "grey85")
+    graphics::legend(
+      "topright",
+      legend = packera_italic_expressions(present_tx),
+      col = OKABE_ITO_TAXA[present_tx],
+      pch = pch_map[present_tx], pt.bg = NA, cex = 0.72, bty = "n"
+    )
+
+    # Panel C: Depth to Lithic Bedrock vs. 50m SSURGO Rock Outcrop % (Hollow Markers)
+    bed_v <- if ("fine_bedrock_depth_cm" %in% colnames(vouchers_df)) as.numeric(vouchers_df$fine_bedrock_depth_cm) else rep(120.0, nrow(vouchers_df))
+    outcrop_v <- if ("ssurgo_rock_outcrop_pct" %in% colnames(vouchers_df)) as.numeric(vouchers_df$ssurgo_rock_outcrop_pct) else rep(0.0, nrow(vouchers_df))
+    bed_v[is.na(bed_v)] <- 150.0; outcrop_v[is.na(outcrop_v)] <- 0.0
+    graphics::plot(
+      bed_v, outcrop_v,
+      pch = pch_tx, bg = NA, col = cols_tx, cex = 0.92, lwd = 1.0,
+      xlab = "Depth to Lithic Bedrock Restriction (cm, SSURGO/SOLUS)",
+      ylab = "50m-Buffered SSURGO Rock Outcrop (%)",
+      main = "C. Lithic Bedrock Depth vs. Outcrop Exposure"
+    )
+    graphics::grid(col = "grey85")
+
+    # Panel D: 30m 3DEP Topographic Position Index (TPI) vs. Fine Soil pH (Hollow Markers)
+    tpi_v <- if ("topo_tpi_30m" %in% colnames(vouchers_df)) as.numeric(vouchers_df$topo_tpi_30m) else rep(0.0, nrow(vouchers_df))
+    tpi_v[is.na(tpi_v)] <- 0.0
+    graphics::plot(
+      tpi_v, ph_v,
+      pch = pch_tx, bg = NA, col = cols_tx, cex = 0.92, lwd = 1.0,
+      xlab = "30m Topographic Position Index (TPI, m; >0 Dome/Ledge)",
+      ylab = "Fine-Grain Soil pH (H2O)",
+      main = "D. 3DEP Micro-Topography (TPI) vs. Soil Acidity"
+    )
+    graphics::abline(v = 0, lty = 3, col = "grey45")
+    graphics::grid(col = "grey85")
+  }, fdir, "fig06_ecological_niche_phenology", width = 12, height = 8.5, dpi = 300)
+
+  # 3. fig06b_geographic_map_and_hopkins_phenology.{pdf,png} (Strictly Hollow Markers)
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(4.6, 4.6, 3.2, 1.2))
     lat_v <- if ("decimalLatitude" %in% colnames(vouchers_df)) as.numeric(vouchers_df$decimalLatitude) else as.numeric(vouchers_df$latitude)

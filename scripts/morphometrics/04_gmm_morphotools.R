@@ -257,7 +257,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   anchor_mask <- if ("determiner_tier" %in% names(df)) (df$determiner_tier[valid_rows] %in% c("Tier_1_Gold", "Tier_2_Silver")) & !mahal_outliers else !mahal_outliers
   core_idx <- if (sum(anchor_mask, na.rm = TRUE) >= 20) which(anchor_mask) else if (any(mahal_outliers) && sum(!mahal_outliers) >= max(10, ncol(X) + 2)) which(!mahal_outliers) else seq_len(nrow(X))
   if (requireNamespace("clustvarsel", quietly = TRUE) && (isTRUE(use_clustvarsel) || ncol(X) >= 4)) {
-    cvs <- tryCatch(clustvarsel::clustvarsel(X[core_idx, , drop = FALSE], G = seq_len(max_k), verbose = FALSE), error = function(e) NULL)
+    cvs <- tryCatch({ set.seed(42); clustvarsel::clustvarsel(X[if (length(core_idx) > 350L) core_idx[seq_len(350L)] else core_idx, , drop = FALSE], G = seq_len(min(max_k, 5L)), verbose = FALSE) }, error = function(e) NULL)
     if (!is.null(cvs) && length(cvs$subset) >= 2) {
       selected_cols <- colnames(X)[cvs$subset]; X <- X[, cvs$subset, drop = FALSE]
       message("clustvarsel selected informative subset: ", paste(selected_cols, collapse = ", "))

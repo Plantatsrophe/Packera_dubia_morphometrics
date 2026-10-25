@@ -2182,15 +2182,17 @@ def generate_step02_publication_figures(
         sub = df_plot[df_plot["norm_tier"] == tier_key]
         if len(sub) > 0:
             label_str = f"{tier_key.replace('_', ' ')} (n = {len(sub)})"
+            marker_sym = "o" if tier_key == "Tier_1_Direct" else "^"
             ax_sc.scatter(
                 sub["sol_val"],
                 sub["ucs_val"],
-                c=color_hex,
+                facecolors="none",
+                edgecolors=color_hex,
+                marker=marker_sym,
                 label=label_str,
                 alpha=0.80,
                 s=38,
-                edgecolors="white",
-                linewidths=0.4,
+                linewidths=0.9,
             )
 
     ax_sc.axvline(0.72, color="#333333", linestyle="--", linewidth=1.2, label="Tier 1 Solidity Floor (0.72)")
@@ -2324,8 +2326,9 @@ def generate_step02_publication_figures(
             ax_t.scatter(
                 [p_base_c[0]],
                 [p_base_c[1]],
-                color="#E69F00",
-                edgecolors="black",
+                facecolors="none",
+                edgecolors="#E69F00",
+                linewidths=1.4,
                 s=52,
                 zorder=5,
                 label="p_base",
@@ -2357,7 +2360,7 @@ def generate_step02_publication_figures(
                 linestyle="--",
                 linewidth=1.5,
             )
-            ax_t.scatter([p_base_pt[0]], [p_base_pt[1]], color="#E69F00", edgecolors="black", s=52, zorder=5)
+            ax_t.scatter([p_base_pt[0]], [p_base_pt[1]], facecolors="none", edgecolors="#E69F00", linewidths=1.4, s=52, zorder=5)
             ax_t.set_aspect("equal", adjustable="datalim")
             ax_t.invert_yaxis()
 

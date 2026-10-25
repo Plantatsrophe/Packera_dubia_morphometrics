@@ -417,6 +417,43 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         self.assertTrue(bool(audit_df.loc[0, "is_label_corrupted"]))
         self.assertEqual(audit_df.loc[0, "species_standardized"], "Packera dubia")
 
+    def test_load_and_link_rosette_patches_subset_filtering_and_contiguous_labels(self):
+        """Verify load_and_link_rosette_patches restricts to vouchers_df and assigns contiguous 0..K-1 labels."""
+        import tempfile
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            rosette_dir = tmp_path / "cropped_patches"
+            (rosette_dir / "rosettes_dense").mkdir(parents=True)
+
+            # Create 4 patches across all 4 TARGET_TAXA on disk
+            for cat in ("CATANON", "CATDUB", "CATPAUP", "CATPLAT"):
+                img = Image.new("RGB", (64, 64), color=(50, 100, 40))
+                img.save(rosette_dir / "rosettes_dense" / f"{cat}_rosette.jpg")
+
+            # Create a 3-taxon vouchers_csv (excluding Packera plattensis / CATPLAT)
+            vouchers_csv = tmp_path / "curated_vouchers.csv"
+            pd.DataFrame({
+                "catalogNumber": ["CATANON", "CATDUB", "CATPAUP"],
+                "species_raw": ["Packera anonyma", "Packera dubia", "Packera paupercula"],
+                "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold", "Tier_2_Silver"],
+            }).to_csv(vouchers_csv, index=False)
+
+            df, class_to_idx = mod_xai.load_and_link_rosette_patches(
+                rosette_dir=rosette_dir,
+                vouchers_csv=vouchers_csv,
+                demo=False,
+            )
+
+            self.assertEqual(len(df), 3)
+            self.assertNotIn("CATPLAT", set(df["catalogNumber"]))
+            self.assertEqual(
+                class_to_idx,
+                {"Packera anonyma": 0, "Packera dubia": 1, "Packera paupercula": 2},
+            )
+            self.assertEqual(sorted(df["label_idx"].unique().tolist()), [0, 1, 2])
+
 
 if __name__ == "__main__":
     unittest.main()
