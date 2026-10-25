@@ -11,6 +11,7 @@ Description:
 ===============================================================================
 """
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -383,6 +384,92 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertIn("n_tier1_leaves", content)
         self.assertIn("n_tier2_leaves", content)
         self.assertIn('"Tier_1_Pure"', content)
+
+    def test_single_taxon_intraspecific_allometry_and_cda_execution(self):
+        """Verify 04_gmm_morphotools.R handles single-taxon (--intraspecific-mode) allometry and partial AR_inv without factor contrast errors."""
+        rng = np.random.default_rng(123)
+        rows = []
+        for j in range(30):
+            c_shift = -2.5 if j < 15 else 2.5
+            row = {
+                "catalogNumber": f"DUB_{j:03d}",
+                "plant_individual_id": 0,
+                "assigned_tier": "Tier_1_Direct" if j % 4 != 3 else "Tier_2_Reflected",
+                "n_tier1_leaves": 3 if j % 4 != 3 else 0,
+                "n_tier2_leaves": 0 if j % 4 != 3 else 2,
+                "morph_tier_source": "Tier_1_Pure" if j % 4 != 3 else "Tier_2_Fallback",
+                "species_raw": "Packera tomentosa C.Jeffrey",
+                "scientificName": "Packera dubia",
+                "determiner_tier": "Tier_1_Gold" if j % 3 == 0 else ("Tier_2_Silver" if j % 3 == 1 else "Tier_3_Bronze"),
+                "PC1": c_shift + rng.normal(0.0, 0.25),
+                "PC2": rng.normal(0.0, 0.25),
+                "PC3": rng.normal(0.0, 0.20),
+                "PC4": rng.normal(0.0, 0.15),
+                "PC5": rng.normal(0.0, 0.15),
+                "foliar_variance": 0.02,
+                "leaf_count": 3,
+                "centroid_size": float(10.0 + 0.2 * j),
+                "log_centsize": float(np.log(10.0 + 0.2 * j)),
+                "is_calibrated_mm": True,
+                "aspect_ratio": 2.1 + rng.normal(0.0, 0.1),
+                "solidity": 0.91,
+                "ucs_score": 0.95,
+                "capitulum_aspect_ratio": np.nan if j % 5 == 0 else float(1.0 + 0.15 * (j >= 15) + rng.normal(0.0, 0.03)),
+            }
+            for k in range(1, 13):
+                row[f"A{k}"] = float(c_shift * (0.1 / k) + rng.normal(0.0, 0.01))
+                row[f"B{k}"] = float(rng.normal(0.0, 0.005))
+                row[f"C{k}"] = float(rng.normal(0.0, 0.005))
+                row[f"D{k}"] = float(rng.normal(0.0, 0.01))
+            rows.append(row)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            harm_csv = tmp_p / "leaf_efa_harmonics.csv"
+            vouch_csv = tmp_p / "curated_vouchers.csv"
+            flags_csv = tmp_p / "morphometric_flags.csv"
+            bic_csv = tmp_p / "gmm_bayes_factors_summary.csv"
+            allom_csv = tmp_p / "allometry_significance_audit.csv"
+            allom_pdf = tmp_p / "shape_allometry_regression.pdf"
+            cda_pdf = tmp_p / "cda_passive_projection.pdf"
+
+            df_harm = pd.DataFrame(rows)
+            df_harm.to_csv(harm_csv, index=False)
+            df_harm[["catalogNumber", "species_raw", "determiner_tier"]].assign(
+                institutionCode=["NCU" if i % 2 == 0 else "US" for i in range(len(df_harm))],
+                stateProvince=["North Carolina" if i < 15 else "Georgia" for i in range(len(df_harm))],
+                regional_group=["Coastal_Plain_Sandhills" if i < 15 else "Piedmont_Granite_Flatrocks" for i in range(len(df_harm))],
+                latitude=35.0,
+                longitude=-78.0,
+                doy=115,
+            ).to_csv(vouch_csv, index=False)
+
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--vouchers", str(vouch_csv),
+                    "--harmonics", str(harm_csv),
+                    "--output-flags", str(flags_csv),
+                    "--output-report", str(bic_csv),
+                    "--output-plot", str(cda_pdf),
+                    "--allometry-report", str(allom_csv),
+                    "--allometry-plot", str(allom_pdf),
+                    "--focal-taxon", "Packera dubia",
+                    "--intraspecific-mode",
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Single-taxon Step 04 failed:\n{proc.stderr}\n{proc.stdout}")
+            self.assertTrue(allom_csv.exists(), "Allometry audit CSV must be exported in single-taxon mode")
+            self.assertTrue(flags_csv.exists(), "Morphometric flags CSV must be exported in single-taxon mode")
+            out_flags = pd.read_csv(flags_csv)
+            self.assertEqual(len(out_flags), 30, "All 30 single-taxon vouchers must be retained")
+            self.assertFalse(out_flags["gmm_cluster"].isna().any(), "No voucher should have NA gmm_cluster when AR_inv is partially missing")
+            self.assertFalse(out_flags["cda_predicted_taxon"].isna().any(), "No voucher should have NA cda_predicted_taxon")
 
 
 if __name__ == "__main__":

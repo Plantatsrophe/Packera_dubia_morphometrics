@@ -72,9 +72,9 @@ standardize_packera_taxon <- function(species_vec) {
     if (is.na(s) || nchar(trimws(s)) == 0) return("Unknown")
     s_clean <- trimws(s)
     if (grepl("anonym|smallii|earlei", s_clean, ignore.case = TRUE)) return("Packera anonyma")
+    if (grepl("paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", s_clean, ignore.case = TRUE)) return("Packera paupercula")
     if (grepl("tomentos|dubia", s_clean, ignore.case = TRUE)) return("Packera dubia")
     if (grepl("plattensis|flavovirens", s_clean, ignore.case = TRUE)) return("Packera plattensis")
-    if (grepl("paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", s_clean, ignore.case = TRUE)) return("Packera paupercula")
     return(trimws(strsplit(s_clean, "\\(")[[1]][1]))
   }, USE.NAMES = FALSE)
 }
@@ -109,7 +109,8 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   sub_df$authority_weight[is.na(sub_df$authority_weight) | sub_df$authority_weight <= 0] <- 0.75
   is_tier1_pure <- if ("morph_tier_source" %in% names(sub_df)) (!is.na(sub_df$morph_tier_source) & sub_df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(sub_df))
   gold_mask <- if ("determiner_tier" %in% names(sub_df)) (sub_df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & !is.na(sub_df$scientificName) & is_tier1_pure) else is_tier1_pure
-  gold_df <- if (sum(gold_mask) >= 10 && length(unique(sub_df$scientificName[gold_mask])) >= 2) sub_df[gold_mask, , drop = FALSE] else if (sum(is_tier1_pure) >= 10) sub_df[is_tier1_pure, , drop = FALSE] else sub_df
+  min_sp <- min(2L, length(unique(stats::na.omit(sub_df$scientificName))))
+  gold_df <- if (sum(gold_mask) >= 10 && length(unique(stats::na.omit(sub_df$scientificName[gold_mask]))) >= min_sp) sub_df[gold_mask, , drop = FALSE] else if (sum(is_tier1_pure) >= 10) sub_df[is_tier1_pure, , drop = FALSE] else sub_df
   gold_df$scientificName <- droplevels(factor(gold_df$scientificName))
   Y <- as.matrix(gold_df[, sym_names, drop = FALSE]); set.seed(seed); anova_df <- NULL; pw_df <- NULL
 
@@ -132,7 +133,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
       }
     }
   }
-  if (is.null(anova_df) && requireNamespace("vegan", quietly = TRUE)) {
+  if (is.null(anova_df) && requireNamespace("vegan", quietly = TRUE) && nlevels(gold_df$scientificName) >= 2) {
     allometry_fit <- tryCatch(vegan::adonis2(Y ~ log_centsize * scientificName, data = gold_df, permutations = permutations, method = "euclidean", by = "terms"), error = function(e) NULL)
     if (!is.null(allometry_fit)) {
       anova_df <- as.data.frame(allometry_fit); anova_df$Term <- rownames(anova_df); rownames(anova_df) <- NULL
@@ -142,17 +143,22 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   if (is.null(anova_df)) {
     Y_cent <- scale(Y, center = TRUE, scale = FALSE); SS_tot <- sum(Y_cent^2); N_obs <- nrow(gold_df)
     fit1 <- stats::lm(Y_cent ~ log_centsize, data = gold_df, weights = authority_weight); SS_size <- sum(stats::fitted(fit1)^2); df_size <- fit1$rank - 1
-    fit2 <- stats::lm(Y_cent ~ log_centsize + scientificName, data = gold_df, weights = authority_weight); SS_12 <- sum(stats::fitted(fit2)^2); SS_taxa <- SS_12 - SS_size; df_taxa <- fit2$rank - fit1$rank
-    fit3 <- stats::lm(Y_cent ~ log_centsize * scientificName, data = gold_df, weights = authority_weight); SS_123 <- sum(stats::fitted(fit3)^2); SS_int <- SS_123 - SS_12; df_int <- fit3$rank - fit2$rank
-    SS_res <- SS_tot - SS_123; df_res <- N_obs - fit3$rank; MS_res <- SS_res / max(df_res, 1)
-    F_size <- (SS_size / max(df_size, 1)) / MS_res; F_taxa <- (SS_taxa / max(df_taxa, 1)) / MS_res; F_int <- (SS_int / max(df_int, 1)) / MS_res
+    if (nlevels(gold_df$scientificName) >= 2) {
+      fit2 <- stats::lm(Y_cent ~ log_centsize + scientificName, data = gold_df, weights = authority_weight); SS_12 <- sum(stats::fitted(fit2)^2); SS_taxa <- SS_12 - SS_size; df_taxa <- fit2$rank - fit1$rank
+      fit3 <- stats::lm(Y_cent ~ log_centsize * scientificName, data = gold_df, weights = authority_weight); SS_123 <- sum(stats::fitted(fit3)^2); SS_int <- SS_123 - SS_12; df_int <- fit3$rank - fit2$rank
+      SS_res <- SS_tot - SS_123; df_res <- N_obs - fit3$rank; MS_res <- SS_res / max(df_res, 1)
+      F_size <- (SS_size / max(df_size, 1)) / MS_res; F_taxa <- (SS_taxa / max(df_taxa, 1)) / MS_res; F_int <- (SS_int / max(df_int, 1)) / MS_res
+      p_taxa <- round(stats::pf(F_taxa, df_taxa, df_res, lower.tail = FALSE), 5); p_int <- round(stats::pf(F_int, df_int, df_res, lower.tail = FALSE), 5)
+    } else {
+      SS_taxa <- 0.0; df_taxa <- 0L; SS_int <- 0.0; df_int <- 0L; SS_res <- SS_tot - SS_size; df_res <- N_obs - fit1$rank; MS_res <- SS_res / max(df_res, 1)
+      F_size <- (SS_size / max(df_size, 1)) / MS_res; F_taxa <- NA_real_; F_int <- NA_real_; p_taxa <- NA_real_; p_int <- NA_real_
+    }
     anova_df <- data.frame(
       Term = c("log_centsize", "scientificName", "log_centsize:scientificName", "Residual", "Total"),
       Df = c(df_size, df_taxa, df_int, df_res, N_obs - 1), SumOfSqs = round(c(SS_size, SS_taxa, SS_int, SS_res, SS_tot), 4),
       R2 = round(c(SS_size / SS_tot, SS_taxa / SS_tot, SS_int / SS_tot, SS_res / SS_tot, 1.0), 6),
       F = c(round(F_size, 4), round(F_taxa, 4), round(F_int, 4), NA_real_, NA_real_),
-      p_value = c(round(stats::pf(F_size, df_size, df_res, lower.tail = FALSE), 5), round(stats::pf(F_taxa, df_taxa, df_res, lower.tail = FALSE), 5),
-                  round(stats::pf(F_int, df_int, df_res, lower.tail = FALSE), 5), NA_real_, NA_real_), stringsAsFactors = FALSE)
+      p_value = c(round(stats::pf(F_size, df_size, df_res, lower.tail = FALSE), 5), p_taxa, p_int, NA_real_, NA_real_), stringsAsFactors = FALSE)
   }
   if (!is.null(output_pairwise) && nzchar(output_pairwise) && !is.null(pw_df)) {
     dir.create(dirname(output_pairwise), recursive = TRUE, showWarnings = FALSE)
@@ -239,16 +245,19 @@ fit_gmm_em_pure <- function(X, max_k = 8, tol = 1e-5, max_iter = 150) {
 }
 
 run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarsel = FALSE) {
-  valid_rows <- which(complete.cases(df[, feature_cols])); N_valid <- length(valid_rows)
+  pc_guard_cols <- intersect(paste0("PC", seq_len(5)), feature_cols)
+  req_cols <- if (length(pc_guard_cols) > 0) pc_guard_cols else feature_cols
+  valid_rows <- which(complete.cases(df[, req_cols, drop = FALSE])); N_valid <- length(valid_rows)
   if (N_valid < 3) {
     message("Warning: Too few complete observations for GMM clustering.")
     return(list(classification = rep(NA_integer_, nrow(df)), uncertainty = rep(NA_real_, nrow(df)), best_k = 1, model_name = "None",
                 selected_features = feature_cols, bic_table = data.frame(K = seq_len(max_k), BIC = NA_real_, Two_Delta_BIC = NA_real_, Evidence = "Inconclusive")))
   }
-  X <- as.matrix(df[valid_rows, feature_cols, drop = FALSE]); selected_cols <- colnames(X)
+  X <- as.matrix(df[valid_rows, feature_cols, drop = FALSE])
+  for (j in seq_len(ncol(X))) if (any(is.na(X[, j]))) X[is.na(X[, j]), j] <- if (any(!is.na(X[, j]))) mean(X[, j], na.rm = TRUE) else 0.0
+  selected_cols <- colnames(X)
   message(sprintf("Fitting Label-Blind Gaussian Mixture Models (K = 1 to %d, N = %d, seed = 42)...", max_k, N_valid))
   set.seed(42); best_k <- 1; best_name <- "Full_Covariance_EM"; bic_table <- NULL; cls_sub <- NULL; unc_sub <- NULL
-  pc_guard_cols <- intersect(paste0("PC", seq_len(5)), colnames(X))
   X_mah <- X[, if (length(pc_guard_cols) > 0) pc_guard_cols else colnames(X), drop = FALSE]
   rob_cov <- if (nrow(X) >= 30 && requireNamespace("MASS", quietly = TRUE)) tryCatch(MASS::cov.rob(X_mah), error = function(e) NULL) else NULL
   m_center <- if (!is.null(rob_cov)) rob_cov$center else colMeans(X_mah)
@@ -300,12 +309,15 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   df$authority_weight[is.na(df$authority_weight)] <- 0.75
   is_tier1_pure <- if ("morph_tier_source" %in% names(df)) (!is.na(df$morph_tier_source) & df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(df))
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
+  pc_req <- intersect(paste0("PC", seq_len(5)), feature_cols)
+  has_pcs <- complete.cases(df[, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE])
   if (is_intra) {
     if (!is.null(gmm_res) && !is.null(gmm_res$best_k) && gmm_res$best_k >= 2 && length(unique(stats::na.omit(gmm_res$classification))) >= 2) {
       df$grouping_col <- ifelse(is.na(gmm_res$classification), NA_character_, paste0("Morphotype_K", gmm_res$classification))
       u_cut <- stats::quantile(gmm_res$uncertainty, 0.60, na.rm = TRUE)
       is_active <- is_tier1_pure & !is.na(df$grouping_col) & !is.na(gmm_res$uncertainty) & (gmm_res$uncertainty <= u_cut) & complete.cases(df[, feature_cols])
-      if (length(unique(df$grouping_col[is_active])) < 2) is_active <- !is.na(df$grouping_col) & complete.cases(df[, feature_cols])
+      if (length(unique(df$grouping_col[is_active])) < 2) is_active <- is_tier1_pure & !is.na(df$grouping_col) & !is.na(gmm_res$uncertainty) & (gmm_res$uncertainty <= u_cut) & has_pcs
+      if (length(unique(df$grouping_col[is_active])) < 2) is_active <- !is.na(df$grouping_col) & has_pcs
     } else {
       rg <- if ("regional_group" %in% names(df)) trimws(as.character(df$regional_group)) else rep("", nrow(df))
       st <- if ("stateProvince" %in% names(df)) trimws(as.character(df$stateProvince)) else rep("", nrow(df))
@@ -318,8 +330,8 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
         p1 <- if ("PC1" %in% names(df)) df$PC1 else df[[feature_cols[1]]]
         df$grouping_col <- ifelse(p1 >= stats::median(p1, na.rm = TRUE), "Morphotype_K2", "Morphotype_K1")
       }
-      g_act <- (df$determiner_tier == "Tier_1_Gold") & is_tier1_pure & !is.na(df$grouping_col) & complete.cases(df[, feature_cols])
-      is_active <- if (length(unique(df$grouping_col[g_act])) >= 2) g_act else (!is.na(df$grouping_col) & complete.cases(df[, feature_cols]))
+      g_act <- (df$determiner_tier == "Tier_1_Gold") & is_tier1_pure & !is.na(df$grouping_col) & has_pcs
+      is_active <- if (length(unique(df$grouping_col[g_act])) >= 2) g_act else (!is.na(df$grouping_col) & has_pcs)
     }
     target_taxa <- sort(unique(stats::na.omit(df$grouping_col[is_active])))
     is_train_cand <- is_active
@@ -330,10 +342,11 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     if (length(unique(df$grouping_col[is_train_cand])) >= 2) target_taxa <- intersect(target_taxa, unique(df$grouping_col[is_train_cand]))
     if (any(table(factor(df$grouping_col[is_train_cand], levels = target_taxa)) < 2)) {
       fallback_cand <- df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & df$species_standardized %in% target_taxa & complete.cases(df[, feature_cols])
-      is_train_cand <- if (all(table(factor(df$grouping_col[fallback_cand], levels = target_taxa)) >= 2)) fallback_cand else (df$grouping_col %in% target_taxa & complete.cases(df[, feature_cols]))
+      is_train_cand <- if (all(table(factor(df$grouping_col[fallback_cand], levels = target_taxa)) >= 2)) fallback_cand else (df$grouping_col %in% target_taxa & has_pcs)
     }
   }
   X <- as.matrix(df[, feature_cols, drop = FALSE]); p <- ncol(X)
+  for (j in seq_len(p)) if (any(is.na(X[, j]))) X[is.na(X[, j]), j] <- if (any(!is.na(X[, j]))) mean(X[, j], na.rm = TRUE) else 0.0
   for (grp in target_taxa) {
     cand_k <- which(is_train_cand & df$grouping_col == grp); n_k <- length(cand_k)
     if (n_k >= 6) {
@@ -435,7 +448,9 @@ audit_misidentifications <- function(df, cda_res, gmm_res) {
     !is.na(d2) & (d2 > stats::qchisq(0.975, df = ncol(Xm)))
   } else rep(FALSE, n)
   for (i in seq_len(nrow(df))) {
-    raw_sp <- grp_vec[i]; pred_sp <- cda_res$predicted_taxon[i]; post_p <- cda_res$posterior_prob[i]; is_act <- cda_res$is_active[i]
+    raw_sp <- as.character(grp_vec[i]); if (is.na(raw_sp) || !nzchar(raw_sp)) raw_sp <- as.character(df$species_standardized[i])
+    pred_sp <- as.character(cda_res$predicted_taxon[i]); if (is.na(pred_sp) || !nzchar(pred_sp)) pred_sp <- raw_sp
+    post_p <- cda_res$posterior_prob[i]; is_act <- isTRUE(cda_res$is_active[i])
     if (is_act) {
       if (raw_sp == pred_sp) { flags[i] <- FALSE; triage[i] <- "CLEAN"; reasons[i] <- "Verified_Tier1_Gold_Anchor" }
       else if (post_p >= 0.85) { flags[i] <- TRUE; triage[i] <- "HIGH"; reasons[i] <- sprintf("Tier_1_Gold_Morphological_Discordance_to_%s", gsub(" ", "_", pred_sp)) }

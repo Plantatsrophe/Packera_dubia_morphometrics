@@ -737,10 +737,18 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
     graphics::abline(h = c(2, 6, 10), lty = 2, col = c("gray60", "gray40", "red3"))
 
     # Panel D: Posterior Confidence of Flagged Outliers
-    graphics::hist(audit_df$cda_posterior_prob[is_out], breaks = 15, col = grDevices::adjustcolor("#D55E00", alpha.f = 0.6), border = "white",
-                   xlab = "CDA Posterior Classification Confidence", ylab = "Specimen Count",
-                   main = "D. Posterior Confidence of Flagged Outliers", font.main = 2)
-    graphics::hist(audit_df$cda_posterior_prob[!is_out], breaks = 20, col = grDevices::adjustcolor("#009E73", alpha.f = 0.35), border = "white", add = TRUE)
+    if (sum(is_out, na.rm = TRUE) > 0) {
+      graphics::hist(audit_df$cda_posterior_prob[is_out], breaks = 15, col = grDevices::adjustcolor("#D55E00", alpha.f = 0.6), border = "white",
+                     xlab = "CDA Posterior Classification Confidence", ylab = "Specimen Count",
+                     main = "D. Posterior Confidence of Flagged Outliers", font.main = 2)
+      if (sum(!is_out, na.rm = TRUE) > 0) {
+        graphics::hist(audit_df$cda_posterior_prob[!is_out], breaks = 20, col = grDevices::adjustcolor("#009E73", alpha.f = 0.35), border = "white", add = TRUE)
+      }
+    } else {
+      graphics::hist(audit_df$cda_posterior_prob, breaks = 20, col = grDevices::adjustcolor("#009E73", alpha.f = 0.35), border = "white",
+                     xlab = "CDA Posterior Classification Confidence", ylab = "Specimen Count",
+                     main = "D. Posterior Classification Confidence", font.main = 2)
+    }
     graphics::legend("topleft", legend = c("Flagged Outliers", "Congruent Vouchers"),
                      fill = c(grDevices::adjustcolor("#D55E00", alpha.f = 0.6), grDevices::adjustcolor("#009E73", alpha.f = 0.35)), bty = "n", cex = 0.8)
     graphics::title(if (is_joint) "Packera dubia Complex: 2D Joint Morphometrics & Passive CDA" else "Packera dubia Complex: 2D Morphometrics & Passive CDA", outer = TRUE, cex.main = 1.35)
