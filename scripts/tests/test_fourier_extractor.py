@@ -165,6 +165,16 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn("RRPP::lm.rrpp", r_content)
         self.assertIn("RRPP::rrpp.data.frame", r_content)
 
+    def test_tier1_pure_priority_and_pca_anchoring_in_step03(self):
+        """Verify Milestone 3 Tier-1 Pure priority rule and Tier_1_Direct PCA anchoring in 03_fourier_extractor.R."""
+        r_content = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("n_tier1_leaves", r_content)
+        self.assertIn("n_tier2_leaves", r_content)
+        self.assertIn("morph_tier_source", r_content)
+        self.assertIn('"Tier_1_Pure"', r_content)
+        self.assertIn('"Tier_2_Fallback"', r_content)
+        self.assertIn('grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]', r_content)
+
 
 if __name__ == "__main__":
     unittest.main()

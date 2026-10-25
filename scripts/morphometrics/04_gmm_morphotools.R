@@ -107,8 +107,9 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$scientificName <- factor(standardize_packera_taxon(as.character(if ("species_standardized" %in% names(sub_df)) sub_df$species_standardized else sub_df$scientificName)))
   sub_df$authority_weight <- if ("authority_weight" %in% names(sub_df)) suppressWarnings(as.numeric(sub_df$authority_weight)) else ifelse(sub_df$determiner_tier == "Tier_1_Gold", 2.0, ifelse(sub_df$determiner_tier == "Tier_2_Silver", 1.25, 0.75))
   sub_df$authority_weight[is.na(sub_df$authority_weight) | sub_df$authority_weight <= 0] <- 0.75
-  gold_mask <- if ("determiner_tier" %in% names(sub_df)) (sub_df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & !is.na(sub_df$scientificName)) else rep(TRUE, nrow(sub_df))
-  gold_df <- if (sum(gold_mask) >= 10 && length(unique(sub_df$scientificName[gold_mask])) >= 2) sub_df[gold_mask, , drop = FALSE] else sub_df
+  is_tier1_pure <- if ("morph_tier_source" %in% names(sub_df)) (!is.na(sub_df$morph_tier_source) & sub_df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(sub_df))
+  gold_mask <- if ("determiner_tier" %in% names(sub_df)) (sub_df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & !is.na(sub_df$scientificName) & is_tier1_pure) else is_tier1_pure
+  gold_df <- if (sum(gold_mask) >= 10 && length(unique(sub_df$scientificName[gold_mask])) >= 2) sub_df[gold_mask, , drop = FALSE] else if (sum(is_tier1_pure) >= 10) sub_df[is_tier1_pure, , drop = FALSE] else sub_df
   gold_df$scientificName <- droplevels(factor(gold_df$scientificName))
   Y <- as.matrix(gold_df[, sym_names, drop = FALSE]); set.seed(seed); anova_df <- NULL; pw_df <- NULL
 
@@ -254,8 +255,9 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   m_cov <- if (!is.null(rob_cov)) rob_cov$cov else stats::cov(X_mah)
   mahal_d2 <- tryCatch(stats::mahalanobis(X_mah, center = m_center, cov = m_cov + diag(1e-6, ncol(X_mah))), error = function(e) rep(0.0, nrow(X)))
   mahal_outliers <- (nrow(X) >= 30) & !is.na(mahal_d2) & (mahal_d2 > stats::qchisq(0.995, df = ncol(X_mah)))
-  anchor_mask <- if ("determiner_tier" %in% names(df)) (df$determiner_tier[valid_rows] %in% c("Tier_1_Gold", "Tier_2_Silver")) & !mahal_outliers else !mahal_outliers
-  core_idx <- if (sum(anchor_mask, na.rm = TRUE) >= 20) which(anchor_mask) else if (any(mahal_outliers) && sum(!mahal_outliers) >= max(10, ncol(X) + 2)) which(!mahal_outliers) else seq_len(nrow(X))
+  is_tier1_pure <- if ("morph_tier_source" %in% names(df)) (!is.na(df$morph_tier_source[valid_rows]) & df$morph_tier_source[valid_rows] == "Tier_1_Pure") else rep(TRUE, length(valid_rows))
+  anchor_mask <- if ("determiner_tier" %in% names(df)) (df$determiner_tier[valid_rows] %in% c("Tier_1_Gold", "Tier_2_Silver")) & is_tier1_pure & !mahal_outliers else is_tier1_pure & !mahal_outliers
+  core_idx <- if (sum(anchor_mask, na.rm = TRUE) >= 10) which(anchor_mask) else if (sum(is_tier1_pure & !mahal_outliers, na.rm = TRUE) >= max(6, ncol(X) + 1)) which(is_tier1_pure & !mahal_outliers) else if (any(mahal_outliers) && sum(!mahal_outliers) >= max(10, ncol(X) + 2)) which(!mahal_outliers) else seq_len(nrow(X))
   if (requireNamespace("clustvarsel", quietly = TRUE) && (isTRUE(use_clustvarsel) || ncol(X) >= 4)) {
     cvs <- tryCatch({ set.seed(42); clustvarsel::clustvarsel(X[if (length(core_idx) > 350L) core_idx[seq_len(350L)] else core_idx, , drop = FALSE], G = seq_len(min(max_k, 5L)), verbose = FALSE) }, error = function(e) NULL)
     if (!is.null(cvs) && length(cvs$subset) >= 2) {
@@ -296,12 +298,13 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   message("Configuring Canonical Discriminant Analysis in MorphoTools2 Architecture...")
   df$authority_weight <- ifelse(df$determiner_tier == "Tier_1_Gold", 2.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.25, 0.75))
   df$authority_weight[is.na(df$authority_weight)] <- 0.75
+  is_tier1_pure <- if ("morph_tier_source" %in% names(df)) (!is.na(df$morph_tier_source) & df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(df))
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   if (is_intra) {
     if (!is.null(gmm_res) && !is.null(gmm_res$best_k) && gmm_res$best_k >= 2 && length(unique(stats::na.omit(gmm_res$classification))) >= 2) {
       df$grouping_col <- ifelse(is.na(gmm_res$classification), NA_character_, paste0("Morphotype_K", gmm_res$classification))
       u_cut <- stats::quantile(gmm_res$uncertainty, 0.60, na.rm = TRUE)
-      is_active <- !is.na(df$grouping_col) & !is.na(gmm_res$uncertainty) & (gmm_res$uncertainty <= u_cut) & complete.cases(df[, feature_cols])
+      is_active <- is_tier1_pure & !is.na(df$grouping_col) & !is.na(gmm_res$uncertainty) & (gmm_res$uncertainty <= u_cut) & complete.cases(df[, feature_cols])
       if (length(unique(df$grouping_col[is_active])) < 2) is_active <- !is.na(df$grouping_col) & complete.cases(df[, feature_cols])
     } else {
       rg <- if ("regional_group" %in% names(df)) trimws(as.character(df$regional_group)) else rep("", nrow(df))
@@ -315,18 +318,19 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
         p1 <- if ("PC1" %in% names(df)) df$PC1 else df[[feature_cols[1]]]
         df$grouping_col <- ifelse(p1 >= stats::median(p1, na.rm = TRUE), "Morphotype_K2", "Morphotype_K1")
       }
-      g_act <- (df$determiner_tier == "Tier_1_Gold") & !is.na(df$grouping_col) & complete.cases(df[, feature_cols])
+      g_act <- (df$determiner_tier == "Tier_1_Gold") & is_tier1_pure & !is.na(df$grouping_col) & complete.cases(df[, feature_cols])
       is_active <- if (length(unique(df$grouping_col[g_act])) >= 2) g_act else (!is.na(df$grouping_col) & complete.cases(df[, feature_cols]))
     }
     target_taxa <- sort(unique(stats::na.omit(df$grouping_col[is_active])))
     is_train_cand <- is_active
   } else {
     df$grouping_col <- df$species_standardized
-    is_active <- (df$determiner_tier == "Tier_1_Gold") & (df$grouping_col %in% target_taxa) & complete.cases(df[, feature_cols])
-    is_train_cand <- df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & df$species_standardized %in% target_taxa & complete.cases(df[, feature_cols])
+    is_active <- (df$determiner_tier == "Tier_1_Gold") & is_tier1_pure & (df$grouping_col %in% target_taxa) & complete.cases(df[, feature_cols])
+    is_train_cand <- df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & is_tier1_pure & df$species_standardized %in% target_taxa & complete.cases(df[, feature_cols])
     if (length(unique(df$grouping_col[is_train_cand])) >= 2) target_taxa <- intersect(target_taxa, unique(df$grouping_col[is_train_cand]))
     if (any(table(factor(df$grouping_col[is_train_cand], levels = target_taxa)) < 2)) {
-      is_train_cand <- if (all(table(factor(df$grouping_col[is_active], levels = target_taxa)) >= 2)) is_active else (df$grouping_col %in% target_taxa & complete.cases(df[, feature_cols]))
+      fallback_cand <- df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & df$species_standardized %in% target_taxa & complete.cases(df[, feature_cols])
+      is_train_cand <- if (all(table(factor(df$grouping_col[fallback_cand], levels = target_taxa)) >= 2)) fallback_cand else (df$grouping_col %in% target_taxa & complete.cases(df[, feature_cols]))
     }
   }
   X <- as.matrix(df[, feature_cols, drop = FALSE]); p <- ncol(X)
@@ -521,9 +525,16 @@ run_gmm_morphotools_pipeline <- function(opts) {
     pc_sym_cols <- intersect(c(pca_cols, paste0("PC", seq_len(5)), paste0("Sym_PC", seq_len(5))), names(closed_df))
     num_cols <- intersect(c(pc_sym_cols, "foliar_variance", "leaf_count", "aspect_ratio", "solidity", "ucs_score", "area_px", "centroid_size", "log_centsize", "harmonic_roughness", "leaf_quality_weight"), names(closed_df))
     other_num <- setdiff(num_cols, pc_sym_cols); has_w <- "leaf_quality_weight" %in% names(closed_df)
-    meta_cols <- setdiff(names(closed_df), c(num_cols, "catalogNumber", "plant_individual_id", "shape_id", "leaf_id", "mask_source"))
+    meta_cols <- setdiff(names(closed_df), c(num_cols, "catalogNumber", "plant_individual_id", "shape_id", "leaf_id", "mask_source", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source"))
     grp_list <- split(closed_df, list(closed_df$catalogNumber, closed_df$plant_individual_id), drop = TRUE)
     closed_df <- do.call(rbind, lapply(grp_list, function(grp) {
+      n_t1 <- sum(grp$assigned_tier == "Tier_1_Direct", na.rm = TRUE)
+      n_t2 <- sum(grp$assigned_tier == "Tier_2_Reflected", na.rm = TRUE)
+      if (n_t1 >= 1L) {
+        grp <- grp[grp$assigned_tier == "Tier_1_Direct", , drop = FALSE]; m_src <- "Tier_1_Pure"
+      } else {
+        m_src <- "Tier_2_Fallback"
+      }
       leaf_quality_weight <- if (has_w) suppressWarnings(as.numeric(grp$leaf_quality_weight)) else rep(1.0, nrow(grp))
       leaf_quality_weight[is.na(leaf_quality_weight) | leaf_quality_weight <= 0] <- 1.0
       is_contour_outlier <- if ("is_contour_outlier" %in% names(grp)) as.logical(grp$is_contour_outlier) else rep(FALSE, nrow(grp)); is_contour_outlier[is.na(is_contour_outlier)] <- FALSE
@@ -538,9 +549,15 @@ run_gmm_morphotools_pipeline <- function(opts) {
       for (col in pc_sym_cols) out[[col]] <- if (has_w) stats::weighted.mean(grp[[col]], w = leaf_quality_weight, na.rm = TRUE) else mean(grp[[col]], na.rm = TRUE)
       for (col in other_num) out[[col]] <- stats::median(grp[[col]], na.rm = TRUE)
       if ("leaf_count" %in% names(out)) out$leaf_count <- nrow(grp)
+      out$n_tier1_leaves <- n_t1; out$n_tier2_leaves <- n_t2; out$morph_tier_source <- m_src
       for (col in meta_cols) { v <- stats::na.omit(grp[[col]]); out[[col]] <- if (length(v) > 0) v[1] else grp[[col]][1] }
       out
     })); rownames(closed_df) <- NULL
+  } else {
+    lc <- if ("leaf_count" %in% names(closed_df) && !any(is.na(closed_df$leaf_count))) as.integer(closed_df$leaf_count) else rep(1L, nrow(closed_df))
+    if (!"n_tier1_leaves" %in% names(closed_df)) closed_df$n_tier1_leaves <- ifelse(closed_df$assigned_tier == "Tier_1_Direct", lc, 0L)
+    if (!"n_tier2_leaves" %in% names(closed_df)) closed_df$n_tier2_leaves <- ifelse(closed_df$assigned_tier == "Tier_2_Reflected", lc, 0L)
+    if (!"morph_tier_source" %in% names(closed_df)) closed_df$morph_tier_source <- ifelse(closed_df$n_tier1_leaves >= 1L | closed_df$assigned_tier == "Tier_1_Direct", "Tier_1_Pure", "Tier_2_Fallback")
   }
   message(sprintf("Specimen-level collection units for morphometric modeling (1 row = 1 voucher): %d", nrow(closed_df)))
   closed_df$species_standardized <- standardize_packera_taxon(closed_df$species_raw)
@@ -586,12 +603,13 @@ run_gmm_morphotools_pipeline <- function(opts) {
   cda_res <- run_cda_with_passive_projection(closed_df, cda_cols, target_taxa, gmm_res = gmm_res, intraspecific_mode = is_intra_mode)
   audited_df <- audit_misidentifications(closed_df, cda_res, gmm_res)
   audit_institutional_batch_effects(audited_df, output_csv = opts$output_batch_audit)
-  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "pixels_per_mm", "is_calibrated_mm",
-                           "species_raw", "species_standardized", "determiner_tier", "authority_weight", "cda_predicted_taxon", "cda_posterior_prob",
-                           "cda_second_posterior_prob", "cda_posterior_margin", "loocv_accuracy", "is_passive", "morphometric_outlier_flag", "misidentification_flag",
-                           "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "pheno_sin", "pheno_cos",
-                           "PC1", "PC2", "PC3", "PC4", "PC5", "centroid_size", "log_centsize", "solidity", "ucs_score", "AR_inv", "AR_inv_std",
-                           "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
+  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source",
+                           "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "determiner_tier", "authority_weight",
+                           "cda_predicted_taxon", "cda_posterior_prob", "cda_second_posterior_prob", "cda_posterior_margin", "loocv_accuracy", "is_passive",
+                           "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty",
+                           "can1", "can2", "can3", "pheno_sin", "pheno_cos", "PC1", "PC2", "PC3", "PC4", "PC5", "centroid_size", "log_centsize",
+                           "solidity", "ucs_score", "AR_inv", "AR_inv_std", "reproductive_trait_status", "capitula_count",
+                           "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]
   dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE)
   tmp_flags <- paste0(opts$output_flags, ".tmp"); write.csv(out_df, file = tmp_flags, row.names = FALSE, na = ""); file.rename(tmp_flags, opts$output_flags)

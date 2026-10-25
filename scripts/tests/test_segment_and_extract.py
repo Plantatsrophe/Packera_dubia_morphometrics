@@ -1076,6 +1076,81 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             dets_uncached = detector.predict(np.zeros((100, 100, 3), dtype=np.uint8), catalog_number="VOUCHER1", use_cache=False)
             self.assertEqual(len(dets_uncached), 0)
 
+    def test_heterophylly_cauline_and_stem_rejection_conditions(self) -> None:
+        """Verify Milestone 1 cauline/bract/stem rejection conditions (a), (b), and (c)."""
+        from scripts.vision.lm2_geometry_utils import is_cauline_or_stem_contaminant
+
+        # Condition (a): capitula_count > 0, cy in upper corymb zone, area < 0.50 * med_area
+        rej_a, reason_a = is_cauline_or_stem_contaminant(
+            cy=220.0,
+            area=400.0,
+            aspect_ratio=2.1,
+            solidity=0.88,
+            basal_cy_med=700.0,
+            med_area=1000.0,
+            img_h=1000.0,
+            capitula_count=2,
+            cap_cy=150.0,
+            has_petiole=True,
+            med_rosette_radius=120.0,
+            radial_dist_from_rosette=480.0,
+        )
+        self.assertTrue(rej_a)
+        self.assertEqual(reason_a, "CAULINE_CORYMB_ZONE")
+
+        # Condition (b): narrow sessile/clasping upper cauline bract or stem segment (capitula_count == 0)
+        rej_b, reason_b = is_cauline_or_stem_contaminant(
+            cy=450.0,
+            area=800.0,
+            aspect_ratio=4.2,
+            solidity=0.72,
+            basal_cy_med=700.0,
+            med_area=1000.0,
+            img_h=1000.0,
+            capitula_count=0,
+            cap_cy=None,
+            has_petiole=False,
+            med_rosette_radius=120.0,
+            radial_dist_from_rosette=250.0,
+        )
+        self.assertTrue(rej_b)
+        self.assertEqual(reason_b, "CAULINE_SESSILE_BRACT_OR_STEM")
+
+        # Condition (c): lacks petiole, displaced > 2.2 * med_rosette_radius above basal rosette, area < 0.35 * med_area
+        rej_c, reason_c = is_cauline_or_stem_contaminant(
+            cy=380.0,
+            area=300.0,
+            aspect_ratio=2.2,
+            solidity=0.86,
+            basal_cy_med=700.0,
+            med_area=1000.0,
+            img_h=1000.0,
+            capitula_count=0,
+            cap_cy=None,
+            has_petiole=False,
+            med_rosette_radius=110.0,
+            radial_dist_from_rosette=320.0,
+        )
+        self.assertTrue(rej_c)
+        self.assertEqual(reason_c, "DISPLACED_SESSILE_CAULINE")
+
+        # Valid basal rosette leaf -> not rejected
+        rej_ok, _ = is_cauline_or_stem_contaminant(
+            cy=710.0,
+            area=1050.0,
+            aspect_ratio=1.9,
+            solidity=0.91,
+            basal_cy_med=700.0,
+            med_area=1000.0,
+            img_h=1000.0,
+            capitula_count=0,
+            cap_cy=None,
+            has_petiole=True,
+            med_rosette_radius=110.0,
+            radial_dist_from_rosette=40.0,
+        )
+        self.assertFalse(rej_ok)
+
 
 if __name__ == "__main__":
     unittest.main()

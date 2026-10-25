@@ -166,9 +166,11 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
 
     morph_is_taxon <- !is.null(morph_sp) && (morph_sp %in% TARGET_TAXA)
     vis_is_taxon   <- !is.null(vis_sp) && (vis_sp %in% TARGET_TAXA)
+    m_tier_src     <- if ("morph_tier_source" %in% names(df) && !is.na(df$morph_tier_source[i])) as.character(df$morph_tier_source[i]) else NA_character_
+    is_tier1_pure_morph <- is.na(m_tier_src) || !nzchar(m_tier_src) || (m_tier_src == "Tier_1_Pure")
 
     if (is_intra) {
-      is_cryptic_intra <- is_mo_flag && (v_cerr > 0.85 || c_err > 0.85) && (abs(ddoy) >= 18.0)
+      is_cryptic_intra <- is_tier1_pure_morph && is_mo_flag && (v_cerr > 0.85 || c_err > 0.85) && (abs(ddoy) >= 18.0)
       has_edaph_pheno_div <- (abs(ddoy) >= 7.0) || mm_conf || (triage_cat != "Clean_MultiModal_Consensus") ||
                              (ph_val > 5.6 || sand_val < 55.0) || grepl("Flatrock|Outcrop|Piedmont|Appalachian", reg_grp, ignore.case = TRUE)
       is_subspecies_intra <- (g_cl > 1L) && has_edaph_pheno_div
@@ -179,6 +181,13 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
         triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"
         triage_acts[i] <- "Flag_Putative_Cryptic_Species"
         rationales[i] <- sprintf("Extreme morphometric outlier + vision discordance (c_err=%.2f) + allochronic shift (delta_DOY=%.1f d)", max(v_cerr, c_err), ddoy)
+        next
+      } else if (!is_tier1_pure_morph && is_mo_flag && (v_cerr > 0.85 || c_err > 0.85)) {
+        status_calls[i] <- "Misidentification_Severe"
+        rec_taxa[i] <- if (vis_is_taxon && vis_sp != given_sp) vis_sp else given_sp
+        triage_prios[i] <- "HIGH"
+        triage_acts[i] <- "Reassign_Determination"
+        rationales[i] <- "Tier_2_Fallback morphology with severe multimodal discordance routed to Misidentification_Reassign"
         next
       } else if (is_subspecies_intra) {
         status_calls[i] <- "Subspecies_Ecotype"
@@ -278,8 +287,11 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
       treat_broad[i] <- "Hybrid / Introgressant"
       treat_sub[i]   <- "Hybrid_Introgressant"
     } else if (sc == "Putative_Cryptic_Species") {
+      m_tier_src_i <- if ("morph_tier_source" %in% names(df) && !is.na(df$morph_tier_source[i])) as.character(df$morph_tier_source[i]) else NA_character_
+      is_tier1_pure_i <- is.na(m_tier_src_i) || !nzchar(m_tier_src_i) || (m_tier_src_i == "Tier_1_Pure")
       treat_broad[i] <- "Misidentification / Cryptic Species"
-      treat_sub[i]   <- "Putative_Cryptic_Species"
+      treat_sub[i]   <- if (is_tier1_pure_i) "Putative_Cryptic_Species" else "Misidentification_Reassign"
+      if (!is_tier1_pure_i) status_calls[i] <- "Misidentification_Severe"
     } else if (sc == "Misidentification_Severe") {
       given_sp <- df$species_standardized[i]
       cda_p <- if ("cda_posterior_prob" %in% names(df) && !is.na(df$cda_posterior_prob[i])) df$cda_posterior_prob[i] else NA_real_
@@ -291,10 +303,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
       g_unc <- if ("gmm_uncertainty" %in% names(df) && !is.na(df$gmm_uncertainty[i])) as.numeric(df$gmm_uncertainty[i]) else 0.05
       ddoy  <- if ("delta_doy" %in% names(df) && !is.na(df$delta_doy[i])) abs(as.numeric(df$delta_doy[i])) else 0.0
       is_mo_out <- if ("morphometric_outlier_flag" %in% names(df) && !is.na(df$morphometric_outlier_flag[i])) isTRUE(df$morphometric_outlier_flag[i]) else FALSE
+      m_tier_src_i <- if ("morph_tier_source" %in% names(df) && !is.na(df$morph_tier_source[i])) as.character(df$morph_tier_source[i]) else NA_character_
+      is_tier1_pure_i <- is.na(m_tier_src_i) || !nzchar(m_tier_src_i) || (m_tier_src_i == "Tier_1_Pure")
       both_agree_known <- (nzchar(m_sp) && nzchar(v_sp) && m_sp == v_sp && m_sp != given_sp) ||
                           (nzchar(m_sp) && m_sp != given_sp && m_sp == e_sp && !is.na(cda_p) && cda_p >= 0.50)
       high_conf_known  <- (!is.na(cda_p) && cda_p >= 0.65 && nzchar(m_sp) && m_sp != given_sp) || (c_err_i >= 0.85 && nzchar(v_sp) && v_sp != given_sp && ddoy < 18.0)
-      is_crypt <- !both_agree_known && !high_conf_known && (is_mo_out || c_err_i >= 0.85) && ((g_cl > 4L && ddoy >= 12.0) || ddoy >= 14.0 || g_unc >= 0.25)
+      is_crypt <- is_tier1_pure_i && !both_agree_known && !high_conf_known && (is_mo_out || c_err_i >= 0.85) && ((g_cl > 4L && ddoy >= 12.0) || ddoy >= 14.0 || g_unc >= 0.25)
       treat_broad[i] <- "Misidentification / Cryptic Species"
       treat_sub[i]   <- if (is_crypt) "Putative_Cryptic_Species" else "Misidentification_Reassign"
     } else {
@@ -302,6 +316,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
       treat_sub[i]   <- "Confirmed_Species"
     }
   }
+  df$taxonomic_status_call <- status_calls
   df$taxonomic_treatment <- treat_broad
   df$taxonomic_treatment_broad <- treat_broad
   df$taxonomic_treatment_subtype <- treat_sub
@@ -390,10 +405,16 @@ build_triage_queue <- function(opts) {
     }
     if (!("plant_individual_id" %in% names(mo_df))) mo_df$plant_individual_id <- 0L
     if (!("can3" %in% names(mo_df))) mo_df$can3 <- if ("PC3" %in% names(mo_df)) suppressWarnings(as.numeric(mo_df$PC3)) else 0.0
+    if (!("morph_tier_source" %in% names(mo_df))) mo_df$morph_tier_source <- NA_character_
+    if (!("n_tier1_leaves" %in% names(mo_df))) mo_df$n_tier1_leaves <- NA_integer_
+    if (!("n_tier2_leaves" %in% names(mo_df))) mo_df$n_tier2_leaves <- NA_integer_
     mo_agg <- mo_df %>%
       dplyr::group_by(catalogNumber) %>%
       dplyr::summarise(
         plant_individual_id = dplyr::first(stats::na.omit(plant_individual_id)),
+        morph_tier_source = dplyr::first(stats::na.omit(as.character(morph_tier_source))),
+        n_tier1_leaves = dplyr::first(stats::na.omit(as.integer(n_tier1_leaves))),
+        n_tier2_leaves = dplyr::first(stats::na.omit(as.integer(n_tier2_leaves))),
         cda_predicted_taxon = dplyr::first(stats::na.omit(cda_predicted_taxon)),
         cda_posterior_prob = median(cda_posterior_prob, na.rm = TRUE),
         can1 = median(can1, na.rm = TRUE),

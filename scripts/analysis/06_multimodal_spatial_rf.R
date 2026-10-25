@@ -1806,7 +1806,7 @@ main <- function() {
     } else if ("misidentification_flag" %in% names(morph_df) && !("morphometric_outlier_flag" %in% names(morph_df))) {
       morph_df$morphometric_outlier_flag <- morph_df$misidentification_flag
     }
-    m_cols <- intersect(names(morph_df), c("catalogNumber", "plant_individual_id", "cda_predicted_taxon", "cda_posterior_prob", "can1", "can2", "can3", "gmm_cluster", "morphometric_outlier_flag", "misidentification_flag"))
+    m_cols <- intersect(names(morph_df), c("catalogNumber", "plant_individual_id", "morph_tier_source", "n_tier1_leaves", "n_tier2_leaves", "cda_predicted_taxon", "cda_posterior_prob", "can1", "can2", "can3", "gmm_cluster", "morphometric_outlier_flag", "misidentification_flag"))
     morph_sub <- morph_df[!duplicated(morph_df$catalogNumber), m_cols, drop = FALSE]
     vouchers_df <- dplyr::left_join(vouchers_df, morph_sub, by = "catalogNumber")
   }

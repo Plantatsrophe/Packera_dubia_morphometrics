@@ -454,6 +454,100 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             )
             self.assertEqual(sorted(df["label_idx"].unique().tolist()), [0, 1, 2])
 
+    def test_manifest_tier1_gating_masking_and_weighted_aggregation(self):
+        """Verify Milestone 2 Tier_1_Direct manifest gating, herbarium paper masking, and weighted multi-leaf aggregation."""
+        import tempfile
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            cropped_dir = tmp / "cropped_patches"
+            rosettes_dense = cropped_dir / "rosettes_dense"
+            basal_raw = cropped_dir / "basal_leaves_raw"
+            tier1_masks = tmp / "masks" / "tier1_intact"
+            tier2_masks = tmp / "masks" / "tier2_reflected"
+            tables_dir = tmp / "tables"
+            for d in (rosettes_dense, basal_raw, tier1_masks, tier2_masks, tables_dir):
+                d.mkdir(parents=True, exist_ok=True)
+
+            # Create whole-clump stem crop in rosettes_dense (must be ignored!)
+            Image.fromarray(np.full((64, 64, 3), 20, dtype=np.uint8)).save(rosettes_dense / "NCU100_rosette.jpg")
+
+            # Create two Tier_1_Direct leaves and one Tier_2_Reflected leaf for NCU100, plus a Tier_2_Reflected-only voucher NCU200
+            rgb_leaf1 = np.full((64, 64, 3), [50, 120, 50], dtype=np.uint8)
+            rgb_leaf1[:10, :10] = [200, 10, 10]  # Exterior background contamination (e.g. stem/label)
+            Image.fromarray(rgb_leaf1).save(basal_raw / "NCU100_leaf1.jpg")
+            Image.fromarray(rgb_leaf1).save(basal_raw / "NCU100_leaf2.jpg")
+            Image.fromarray(rgb_leaf1).save(basal_raw / "NCU100_leaf3.jpg")
+            Image.fromarray(rgb_leaf1).save(basal_raw / "NCU200_leaf1.jpg")
+
+            mask_arr = np.zeros((64, 64), dtype=np.uint8)
+            mask_arr[16:48, 16:48] = 255
+            Image.fromarray(mask_arr).save(tier1_masks / "NCU100_leaf1.png")
+            Image.fromarray(mask_arr).save(tier1_masks / "NCU100_leaf2.png")
+            Image.fromarray(mask_arr).save(tier2_masks / "NCU100_leaf3.png")
+            Image.fromarray(mask_arr).save(tier2_masks / "NCU200_leaf1.png")
+
+            # Test apply_tier1_leaf_mask_to_rgb replaces exterior background with [242, 239, 230]
+            masked_rgb = mod_xai.apply_tier1_leaf_mask_to_rgb(rgb_leaf1, tier1_masks / "NCU100_leaf1.png", pad_px=5)
+            np.testing.assert_array_equal(masked_rgb[0, 0], np.array([242, 239, 230], dtype=np.uint8))
+            np.testing.assert_array_equal(masked_rgb[32, 32], np.array([50, 120, 50], dtype=np.uint8))
+
+            vouchers_csv = tables_dir / "curated_vouchers.csv"
+            pd.DataFrame({
+                "catalogNumber": ["NCU100", "NCU200"],
+                "species_raw": ["Packera dubia", "Packera anonyma"],
+                "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold"],
+            }).to_csv(vouchers_csv, index=False)
+
+            manifest_csv = tables_dir / "extracted_leaf_manifest.csv"
+            pd.DataFrame([
+                {
+                    "catalogNumber": "NCU100",
+                    "leaf_id": 1,
+                    "tier_assignment": "Tier_1_Direct",
+                    "ucs_score": 0.86,
+                    "solidity": 0.82,
+                    "mask_path": str(tier1_masks / "NCU100_leaf1.png"),
+                },
+                {
+                    "catalogNumber": "NCU100",
+                    "leaf_id": 2,
+                    "tier_assignment": "Tier_1_Direct",
+                    "ucs_score": 0.97,
+                    "solidity": 0.94,
+                    "mask_path": str(tier1_masks / "NCU100_leaf2.png"),
+                },
+                {
+                    "catalogNumber": "NCU100",
+                    "leaf_id": 3,
+                    "tier_assignment": "Tier_2_Reflected",
+                    "ucs_score": 0.99,
+                    "solidity": 0.99,
+                    "mask_path": str(tier2_masks / "NCU100_leaf3.png"),
+                },
+                {
+                    "catalogNumber": "NCU200",
+                    "leaf_id": 1,
+                    "tier_assignment": "Tier_2_Reflected",
+                    "ucs_score": 0.91,
+                    "solidity": 0.88,
+                    "mask_path": str(tier2_masks / "NCU200_leaf1.png"),
+                },
+            ]).to_csv(manifest_csv, index=False)
+
+            df, _ = mod_xai.load_and_link_rosette_patches(
+                rosette_dir=cropped_dir,
+                vouchers_csv=vouchers_csv,
+                demo=False,
+            )
+            # Only NCU100 (which has Tier_1_Direct leaves) is loaded; NCU200 (Tier_2_Reflected only) and rosettes_dense are excluded
+            self.assertEqual(len(df), 1)
+            self.assertEqual(df.iloc[0]["catalogNumber"], "NCU100")
+            # Highest-UCS Tier_1_Direct leaf (leaf2, ucs=0.97) selected as representative patch_path for Grad-CAM
+            self.assertTrue(str(df.iloc[0]["patch_path"]).endswith("NCU100_leaf2.jpg"))
+            self.assertEqual(int(df.iloc[0]["n_tier1_leaves"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

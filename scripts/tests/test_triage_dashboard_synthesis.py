@@ -438,6 +438,17 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertNotIn("Canonical Axis 2 (18.6%)", r_text)
         self.assertNotIn("10,815.5", r_text)
 
+    def test_cryptic_species_gated_on_tier1_pure_morphology(self):
+        """Verify Milestone 5 gates Putative_Cryptic_Species on Tier_1_Pure and routes Tier_2_Fallback to Misidentification_Reassign."""
+        r_text = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("morph_tier_source", r_text)
+        self.assertIn("n_tier1_leaves", r_text)
+        self.assertIn("is_tier1_pure_morph", r_text)
+        self.assertIn("is_tier1_pure_i", r_text)
+        r06_text = (PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R").read_text(encoding="utf-8")
+        self.assertIn("morph_tier_source", r06_text)
+        self.assertIn("n_tier1_leaves", r06_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -204,10 +204,14 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
   sym_mat <- coe_sym[, if (length(sym_cols) > 0) sym_cols else colnames(coe_sym), drop = FALSE]
   sym_mat[!is.finite(sym_mat)] <- 0.0
   clean_pca_mask <- if (nrow(sym_mat) >= 10 && sum(!is_contour_outlier) >= 5) !is_contour_outlier else rep(TRUE, nrow(sym_mat))
-  col_vars <- apply(sym_mat[clean_pca_mask, , drop = FALSE], 2, stats::var, na.rm = TRUE)
+  out_df <- if (!is.null(fac_df)) as.data.frame(fac_df) else data.frame(row_id = row_indices)
+  tier_col <- if ("tier_assignment" %in% names(out_df)) as.character(out_df$tier_assignment) else if ("assigned_tier" %in% names(out_df)) as.character(out_df$assigned_tier) else rep("Tier_1_Direct", nrow(out_df))
+  tier_col <- ifelse(grepl("^tier_?1", tier_col, ignore.case = TRUE), "Tier_1_Direct", ifelse(grepl("^tier_?2", tier_col, ignore.case = TRUE), "Tier_2_Reflected", tier_col))
+  t1_pca_mask <- clean_pca_mask & (tier_col == "Tier_1_Direct")
+  fit_pca_mask <- if (sum(t1_pca_mask, na.rm = TRUE) >= 10) t1_pca_mask else clean_pca_mask
+  col_vars <- apply(sym_mat[fit_pca_mask, , drop = FALSE], 2, stats::var, na.rm = TRUE)
   sym_mat <- sym_mat[, names(col_vars[!is.na(col_vars) & col_vars > 1e-10]), drop = FALSE]
 
-  out_df <- if (!is.null(fac_df)) as.data.frame(fac_df) else data.frame(row_id = row_indices)
   solidity <- if ("solidity" %in% names(out_df)) ifelse(is.na(out_df$solidity), 1.0, as.numeric(out_df$solidity)) else rep(1.0, nrow(out_df))
   ucs <- if ("ucs" %in% names(out_df)) ifelse(is.na(out_df$ucs), 1.0, as.numeric(out_df$ucs)) else if ("ucs_score" %in% names(out_df)) ifelse(is.na(out_df$ucs_score), 1.0, as.numeric(out_df$ucs_score)) else rep(1.0, nrow(out_df))
   leaf_quality_weight <- pmax(0.05, solidity * ucs * ((1.0 - pmin(pct_asymmetry, 0.95))^2) * ifelse(is_contour_outlier, 0.10, 1.0))
@@ -222,7 +226,7 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
   for (pc_col in c("Sym_PC1", "Sym_PC2", "Sym_PC3", "Sym_PC4", "Sym_PC5")) out_df[[pc_col]] <- 0.0
   pca_sym <- NULL
   if (nrow(sym_mat) >= 2 && ncol(sym_mat) >= 1) {
-    X_cl <- sym_mat[clean_pca_mask, , drop = FALSE]; w_cl <- combined_wt[clean_pca_mask]
+    X_cl <- sym_mat[fit_pca_mask, , drop = FALSE]; w_cl <- combined_wt[fit_pca_mask]
     if (sum(w_cl, na.rm = TRUE) <= 0) w_cl <- rep(1.0, nrow(X_cl))
     wt_cov <- stats::cov.wt(X_cl, wt = w_cl, center = TRUE)
     eig <- eigen(wt_cov$cov, symmetric = TRUE)
@@ -400,7 +404,8 @@ run_fourier_extraction <- function(opts) {
     }
 
     resolved_pid <- if (!is.null(m_match) && nrow(m_match) > 0 && "plant_individual_id" %in% names(m_match) && !is.na(m_match$plant_individual_id[1])) as.integer(m_match$plant_individual_id[1]) else meta$plant_id
-    resolved_tier <- if (!is.null(m_match) && nrow(m_match) > 0 && "assigned_tier" %in% names(m_match) && !is.na(m_match$assigned_tier[1])) as.character(m_match$assigned_tier[1]) else "Tier_1_Direct"
+    raw_tier <- if (!is.null(m_match) && nrow(m_match) > 0 && "tier_assignment" %in% names(m_match) && !is.na(m_match$tier_assignment[1])) as.character(m_match$tier_assignment[1]) else if (!is.null(m_match) && nrow(m_match) > 0 && "assigned_tier" %in% names(m_match) && !is.na(m_match$assigned_tier[1])) as.character(m_match$assigned_tier[1]) else "Tier_1_Direct"
+    resolved_tier <- ifelse(grepl("^tier_?1", raw_tier, ignore.case = TRUE), "Tier_1_Direct", ifelse(grepl("^tier_?2", raw_tier, ignore.case = TRUE), "Tier_2_Reflected", raw_tier))
     resolved_ppm <- if (!is.null(m_match) && nrow(m_match) > 0 && "pixels_per_mm" %in% names(m_match)) suppressWarnings(as.numeric(m_match$pixels_per_mm[1])) else NA_real_
     is_calibrated_mm <- !is.na(resolved_ppm) && is.finite(resolved_ppm) && resolved_ppm > 0
     if (!is_calibrated_mm) resolved_ppm <- NA_real_
@@ -431,9 +436,9 @@ run_fourier_extraction <- function(opts) {
     shape_name <- meta$shape_id
     rec <- data.frame(
       shape_id = shape_name, catalogNumber = meta$catalogNumber, plant_individual_id = resolved_pid,
-      leaf_id = meta$leaf_id, assigned_tier = resolved_tier, pixels_per_mm = resolved_ppm,
-      is_calibrated_mm = is_calibrated_mm, aspect_ratio = aspect_ratio, solidity = resolved_solidity,
-      ucs_score = resolved_ucs, area_px = round(area_px, 1),
+      leaf_id = meta$leaf_id, assigned_tier = resolved_tier, tier_assignment = resolved_tier,
+      pixels_per_mm = resolved_ppm, is_calibrated_mm = is_calibrated_mm, aspect_ratio = aspect_ratio,
+      solidity = resolved_solidity, ucs_score = resolved_ucs, area_px = round(area_px, 1),
       centroid_size = if (!is.na(centsize)) round(centsize, 4) else NA_real_,
       log_centsize = log_cs, mask_source = f, stringsAsFactors = FALSE
     )
@@ -517,6 +522,9 @@ run_fourier_extraction <- function(opts) {
   else fac_df$determiner_tier <- ifelse(is.na(fac_df$determiner_tier) | fac_df$determiner_tier == "", "Tier_3_Bronze", fac_df$determiner_tier)
   fac_df$authority_weight <- ifelse(fac_df$determiner_tier == "Tier_1_Gold", 2.0, ifelse(fac_df$determiner_tier == "Tier_2_Silver", 1.25, 0.75))
   efa_df <- cbind(fac_df, as.data.frame(harm_mat))
+  efa_df$assigned_tier <- ifelse(grepl("^tier_?1", efa_df$assigned_tier, ignore.case = TRUE), "Tier_1_Direct",
+                                 ifelse(grepl("^tier_?2", efa_df$assigned_tier, ignore.case = TRUE), "Tier_2_Reflected", efa_df$assigned_tier))
+  efa_df$tier_assignment <- efa_df$assigned_tier
 
   # 4. Authority-Tier-Weighted Symmetric Fourier Decomposition & PCA (PC1-PC5 / Sym_PC1-Sym_PC5)
   message("Extracting symmetric harmonic coefficients (An and Dn harmonics)...")
@@ -535,14 +543,16 @@ run_fourier_extraction <- function(opts) {
 
   if (length(complete_idx) >= opts$num_pcs) {
     clean_idx <- if (length(complete_idx) >= 10 && sum(!efa_df$is_contour_outlier[complete_idx]) >= 5) complete_idx[!efa_df$is_contour_outlier[complete_idx]] else complete_idx
-    col_vars <- apply(harm_mat[clean_idx, , drop = FALSE], 2, stats::var, na.rm = TRUE)
+    t1_clean_idx <- clean_idx[efa_df$tier_assignment[clean_idx] == "Tier_1_Direct"]
+    fit_idx <- if (length(t1_clean_idx) >= 10) t1_clean_idx else clean_idx
+    col_vars <- apply(harm_mat[fit_idx, , drop = FALSE], 2, stats::var, na.rm = TRUE)
     active_full_cols <- names(col_vars[!is.na(col_vars) & col_vars > 1e-10])
     message(sprintf("Active full harmonic dimensions with non-zero variance: %d / %d", length(active_full_cols), ncol(harm_mat)))
     if (requireNamespace("Momocs", quietly = TRUE) && exists("ef_res") && !is.null(ef_res)) {
-      ef_clean <- if (nrow(harm_mat) >= 10 && sum(!efa_df$is_contour_outlier) >= 5) tryCatch(Momocs::slice(ef_res, which(!efa_df$is_contour_outlier)), error = function(e) ef_res) else ef_res
+      ef_clean <- if (nrow(harm_mat) >= 10 && sum(!efa_df$is_contour_outlier) >= 5) tryCatch(Momocs::slice(ef_res, fit_idx), error = function(e) ef_res) else ef_res
       momocs_pca <- tryCatch(Momocs::PCA(ef_clean), error = function(e) NULL)
     }
-    wt_cov <- stats::cov.wt(harm_mat[clean_idx, active_full_cols, drop = FALSE], wt = combined_wt[clean_idx], center = TRUE)
+    wt_cov <- stats::cov.wt(harm_mat[fit_idx, active_full_cols, drop = FALSE], wt = combined_wt[fit_idx], center = TRUE)
     eig <- eigen(wt_cov$cov, symmetric = TRUE)
     colnames(eig$vectors) <- paste0("PC", seq_len(ncol(eig$vectors))); rownames(eig$vectors) <- active_full_cols
     pc_scores <- sweep(harm_mat[complete_idx, active_full_cols, drop = FALSE], 2, wt_cov$center, "-") %*% eig$vectors
@@ -556,12 +566,10 @@ run_fourier_extraction <- function(opts) {
   # 5. Darwin Core Metadata Standardization & Export
   harm_mat <- as.matrix(efa_df[, harmonic_names, drop = FALSE])
   sym_harmonics <- as.matrix(efa_df[, sym_names, drop = FALSE])
-  efa_df$assigned_tier <- ifelse(grepl("^tier_?1", efa_df$assigned_tier, ignore.case = TRUE), "Tier_1_Direct",
-                                 ifelse(grepl("^tier_?2", efa_df$assigned_tier, ignore.case = TRUE), "Tier_2_Reflected", efa_df$assigned_tier))
   efa_df$reconstruction_tier <- ifelse(efa_df$assigned_tier == "Tier_1_Direct", "Tier 1",
                                        ifelse(efa_df$assigned_tier == "Tier_2_Reflected", "Tier 2", NA_character_))
 
-  lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
+  lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "tier_assignment", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
                  "scientificName", "species_raw", "determiner_tier", "authority_weight", "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "solidity", "ucs_score",
                  "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
@@ -586,15 +594,24 @@ run_fourier_extraction <- function(opts) {
   for (grp in spec_groups) {
     if (nrow(grp) == 0) next
     spec_idx <- spec_idx + 1L
+    n_tier1_leaves <- sum(grp$tier_assignment == "Tier_1_Direct", na.rm = TRUE)
+    n_tier2_leaves <- sum(grp$tier_assignment == "Tier_2_Reflected", na.rm = TRUE)
+    if (n_tier1_leaves >= 1L) {
+      grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]
+      morph_tier_source <- "Tier_1_Pure"
+    } else {
+      morph_tier_source <- "Tier_2_Fallback"
+    }
     cat_num <- grp$catalogNumber[1]; p_id <- grp$plant_individual_id[1]; n_leaves <- nrow(grp)
     harm_medians <- vapply(grp[, all_harm_cols, drop = FALSE], stats::median, numeric(1), na.rm = TRUE)
     foliar_var <- if (n_leaves > 1) round(mean(apply(as.matrix(grp[, sym_names, drop = FALSE]), 2, stats::var, na.rm = TRUE), na.rm = TRUE), 8) else 0.0
     det_t <- if ("determiner_tier" %in% names(grp) && !is.na(grp$determiner_tier[1])) as.character(grp$determiner_tier[1]) else "Tier_3_Bronze"
     auth_w <- ifelse(det_t == "Tier_1_Gold", 2.0, ifelse(det_t == "Tier_2_Silver", 1.25, 0.75))
-    rec <- data.frame(catalogNumber = cat_num, plant_individual_id = p_id, leaf_count = n_leaves, foliar_variance = foliar_var,
-                      assigned_tier = grp$assigned_tier[1], reconstruction_tier = grp$reconstruction_tier[1],
-                      scientificName = grp$scientificName[1], species_raw = grp$species_raw[1], determiner_tier = det_t,
-                      authority_weight = auth_w, stringsAsFactors = FALSE)
+    rec <- data.frame(catalogNumber = cat_num, plant_individual_id = p_id, leaf_count = n_leaves,
+                      n_tier1_leaves = n_tier1_leaves, n_tier2_leaves = n_tier2_leaves, morph_tier_source = morph_tier_source,
+                      foliar_variance = foliar_var, assigned_tier = grp$assigned_tier[1], tier_assignment = grp$tier_assignment[1],
+                      reconstruction_tier = grp$reconstruction_tier[1], scientificName = grp$scientificName[1],
+                      species_raw = grp$species_raw[1], determiner_tier = det_t, authority_weight = auth_w, stringsAsFactors = FALSE)
     med_cs <- stats::median(grp$centroid_size, na.rm = TRUE)
     rec$centroid_size <- if (is.finite(med_cs) && med_cs > 0) round(med_cs, 4) else NA_real_
     rec$log_centsize <- if (!is.na(rec$centroid_size) && rec$centroid_size > 0) round(log(rec$centroid_size), 6) else NA_real_
@@ -625,7 +642,8 @@ run_fourier_extraction <- function(opts) {
     for (p in seq_len(min(opts$num_pcs, ncol(spec_sym_pcs)))) specimen_df[[paste0("Sym_PC", p)]] <- round(spec_sym_pcs[, p], 6)
   }
 
-  lead_spec_cols <- c("catalogNumber", "plant_individual_id", "leaf_count", "foliar_variance", "assigned_tier", "reconstruction_tier",
+  lead_spec_cols <- c("catalogNumber", "plant_individual_id", "leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source",
+                      "foliar_variance", "assigned_tier", "tier_assignment", "reconstruction_tier",
                       "pixels_per_mm", "is_calibrated_mm", "scientificName", "species_raw", "determiner_tier", "authority_weight",
                       "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "solidity", "ucs_score",
                       "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize")

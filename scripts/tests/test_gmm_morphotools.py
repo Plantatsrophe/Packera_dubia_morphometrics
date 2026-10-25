@@ -375,6 +375,15 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             actual_keys = set(zip(flags_df["catalogNumber"].astype(str), flags_df["plant_individual_id"].astype(int)))
             self.assertEqual(expected_keys, actual_keys, "Zero Tier 1/2 specimens may be dropped in 04_gmm_morphotools.R")
 
+    def test_tier1_pure_training_restriction_and_propagation_in_step04(self):
+        """Verify Milestone 4 restricts allometry, GMM, and CDA training to is_tier1_pure and propagates morph_tier_source."""
+        content = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("is_tier1_pure", content)
+        self.assertIn("morph_tier_source", content)
+        self.assertIn("n_tier1_leaves", content)
+        self.assertIn("n_tier2_leaves", content)
+        self.assertIn('"Tier_1_Pure"', content)
+
 
 if __name__ == "__main__":
     unittest.main()

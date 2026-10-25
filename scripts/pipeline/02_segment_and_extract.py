@@ -92,6 +92,7 @@ from scripts.vision.lm2_geometry_utils import (
     generate_sam2_prompts_from_lm2_mask,
     homologize_contour_starting_point,
     is_botanical_dissection,
+    is_cauline_or_stem_contaminant,
     is_topologically_connected_mask,
     LeafRoutingResult,
     normalize_assigned_tier,
@@ -1453,16 +1454,95 @@ class SegmentAndExtractPipeline:
         # 4. Vectorized Centroid Spatial Clustering (DBSCAN)
         instances = cluster_plant_individuals(instances, sheet_w, sheet_h)
 
-        # 5. Tier 4 Dense Rosette Patch Generation per plant_individual_id
+        # 5. Tier 4 Dense Rosette Patch Generation & Basal Rosette Zone Statistics per plant_individual_id
+        def _inst_sheet_geom(inst_obj: DetectedInstance) -> Tuple[float, float, float, float, float]:
+            ox_i, oy_i = inst_obj.mask_origin
+            m_u8 = inst_obj.mask if inst_obj.mask.dtype == np.uint8 else ((inst_obj.mask > 0).astype(np.uint8) * 255)
+            ys_i, xs_i = np.where(m_u8 > 0)
+            if len(ys_i) > 0 and len(xs_i) > 0:
+                cx_i = float(np.mean(xs_i)) + ox_i
+                cy_i = float(np.mean(ys_i)) + oy_i
+                area_i = float(len(ys_i))
+                bx_i, by_i, bw_i, bh_i = cv2.boundingRect(m_u8)
+                sub_i = m_u8[by_i : by_i + bh_i, bx_i : bx_i + bw_i]
+                cnts_i, _ = cv2.findContours(sub_i, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if cnts_i:
+                    main_c = max(cnts_i, key=cv2.contourArea)
+                    rw, rh = cv2.minAreaRect(main_c)[1]
+                    ar_i = float(max(rw, rh)) / max(float(min(rw, rh)), 1.0)
+                    hull_a = float(cv2.contourArea(cv2.convexHull(main_c)))
+                    sol_i = float(area_i / hull_a) if hull_a > 0 else 1.0
+                else:
+                    ar_i = float(max(bw_i, bh_i)) / max(float(min(bw_i, bh_i)), 1.0)
+                    sol_i = 1.0
+            else:
+                cx_i = 0.5 * float(inst_obj.bbox[1] + inst_obj.bbox[3])
+                cy_i = 0.5 * float(inst_obj.bbox[0] + inst_obj.bbox[2])
+                bh_b = max(1.0, float(inst_obj.bbox[2] - inst_obj.bbox[0]))
+                bw_b = max(1.0, float(inst_obj.bbox[3] - inst_obj.bbox[1]))
+                area_i = bh_b * bw_b
+                ar_i = max(bh_b, bw_b) / max(min(bh_b, bw_b), 1.0)
+                sol_i = 1.0
+            return cx_i, cy_i, area_i, ar_i, sol_i
+
+        inst_geom_map: Dict[int, Tuple[float, float, float, float, float]] = {
+            inst.leaf_id: _inst_sheet_geom(inst) for inst in instances
+        }
+        all_cx = np.array([inst_geom_map[i.leaf_id][0] for i in instances], dtype=np.float64)
+        all_cy = np.array([inst_geom_map[i.leaf_id][1] for i in instances], dtype=np.float64)
+        all_area = np.array([inst_geom_map[i.leaf_id][2] for i in instances], dtype=np.float64)
+        sheet_b_mask = all_cy >= float(np.quantile(all_cy, 0.40)) if len(all_cy) > 0 else np.array([], dtype=bool)
+        if len(sheet_b_mask) > 0 and not np.any(sheet_b_mask):
+            sheet_b_mask = np.ones(len(all_cy), dtype=bool)
+        sheet_basal_cx = float(np.median(all_cx[sheet_b_mask])) if len(all_cx) > 0 else (0.5 * sheet_w)
+        sheet_basal_cy = float(np.median(all_cy[sheet_b_mask])) if len(all_cy) > 0 else (0.75 * sheet_h)
+        sheet_med_area = float(np.median(all_area[sheet_b_mask])) if len(all_area) > 0 else 1.0
+        sheet_radii = np.hypot(all_cx[sheet_b_mask] - sheet_basal_cx, all_cy[sheet_b_mask] - sheet_basal_cy) if len(all_cx) > 0 else np.array([0.0])
+        sheet_rosette_rad = max(float(np.median(sheet_radii)), 0.04 * float(min(sheet_h, sheet_w))) if len(instances) >= 2 else 0.0
+
+        cap_cy: Optional[float] = (
+            float(np.median([0.5 * float(b[0] + b[2]) for b, _, _, _ in capitulum_detections]))
+            if capitulum_detections
+            else None
+        )
+
         clusters_by_pid: Dict[int, List[DetectedInstance]] = defaultdict(list)
         for inst in instances:
             clusters_by_pid[inst.plant_individual_id].append(inst)
         rosette_centroids_by_pid: Dict[int, Optional[Tuple[float, float]]] = {}
+        basal_stats_by_pid: Dict[int, Tuple[float, float, float, float]] = {}
+
         for pid, pid_instances in sorted(clusters_by_pid.items()):
+            p_cx = np.array([inst_geom_map[i.leaf_id][0] for i in pid_instances], dtype=np.float64)
+            p_cy = np.array([inst_geom_map[i.leaf_id][1] for i in pid_instances], dtype=np.float64)
+            p_area = np.array([inst_geom_map[i.leaf_id][2] for i in pid_instances], dtype=np.float64)
+            # Lower 60% vertical quantile of detected leaf centroids (in image coords, larger y = lower on sheet)
+            b_mask = p_cy >= float(np.quantile(p_cy, 0.40))
+            if not np.any(b_mask):
+                b_mask = np.ones(len(pid_instances), dtype=bool)
+            basal_cx_med = float(np.median(p_cx[b_mask]))
+            basal_cy_med = float(np.median(p_cy[b_mask]))
+            med_area = float(np.median(p_area[b_mask]))
+            radii = np.hypot(p_cx[b_mask] - basal_cx_med, p_cy[b_mask] - basal_cy_med)
+            med_rosette_radius = (
+                max(float(np.median(radii)), 0.04 * float(min(sheet_h, sheet_w)))
+                if len(pid_instances) >= 2
+                else 0.0
+            )
+            if (
+                len(pid_instances) == 1
+                and len(instances) >= 2
+                and (
+                    p_cy[0] < (sheet_basal_cy - 0.15 * float(sheet_h))
+                    or p_area[0] < (0.55 * sheet_med_area)
+                )
+            ):
+                basal_stats_by_pid[pid] = (sheet_basal_cx, sheet_basal_cy, sheet_med_area, sheet_rosette_rad)
+            else:
+                basal_stats_by_pid[pid] = (basal_cx_med, basal_cy_med, med_area, med_rosette_radius)
+
             if len(pid_instances) >= 2:
-                rcx = float(np.mean([(i.bbox[1] + i.bbox[3]) / 2.0 for i in pid_instances]))
-                rcy = float(np.mean([(i.bbox[0] + i.bbox[2]) / 2.0 for i in pid_instances]))
-                rosette_centroids_by_pid[pid] = (rcx, rcy)
+                rosette_centroids_by_pid[pid] = (basal_cx_med, basal_cy_med)
             else:
                 rosette_centroids_by_pid[pid] = None
             crop_dense_rosette_tier4(
@@ -1499,6 +1579,42 @@ class SegmentAndExtractPipeline:
             inst.ucs_score = routing_res.ucs
             inst.solidity = routing_res.solidity
             inst.midrib_angle_deg = float(routing_res.metadata.get("midrib_angle_deg", 0.0))
+
+            # Heterophylly / cauline-bract / stem-segment filter (works even when capitula_count == 0)
+            inst_cx, inst_cy, inst_area, inst_ar, inst_raw_sol = inst_geom_map[inst.leaf_id]
+            b_cx_med, b_cy_med, b_med_area, b_med_rad = basal_stats_by_pid.get(
+                inst.plant_individual_id, (sheet_basal_cx, sheet_basal_cy, sheet_med_area, sheet_rosette_rad)
+            )
+            trim_info = inst.trim_meta or routing_res.metadata.get("petiole_trim_info") or {}
+            has_petiole = bool(
+                getattr(inst, "has_petiole", False)
+                or trim_info.get("is_trimmed", False)
+                or float(trim_info.get("stalk_width_mean", 0.0) or 0.0) > 0.0
+            )
+            rad_dist = math.hypot(inst_cx - b_cx_med, inst_cy - b_cy_med)
+            is_cauline_reject, cauline_reason = is_cauline_or_stem_contaminant(
+                cy=inst_cy,
+                area=inst_area,
+                aspect_ratio=inst_ar,
+                solidity=min(float(inst_raw_sol), float(routing_res.solidity)),
+                basal_cy_med=b_cy_med,
+                med_area=b_med_area,
+                img_h=float(sheet_h),
+                capitula_count=max(int(capitula_count), len(capitulum_detections)),
+                cap_cy=cap_cy,
+                has_petiole=has_petiole,
+                med_rosette_radius=b_med_rad,
+                radial_dist_from_rosette=rad_dist,
+            )
+            if is_cauline_reject:
+                inst.assigned_tier = "rejected"
+                inst.rejection_reason = cauline_reason or "CAULINE_LEAF_REJECTED"
+                logger.debug(
+                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by heterophylly/cauline filter: "
+                    f"{inst.rejection_reason} (cy={inst_cy:.1f}, basal_cy_med={b_cy_med:.1f}, area={inst_area:.0f}, med_area={b_med_area:.0f})"
+                )
+                rejected_instances.append(inst)
+                continue
 
             # Diagnostic classification flags
             is_folded = bool(routing_res.is_folded)
@@ -1670,13 +1786,13 @@ class SegmentAndExtractPipeline:
                     cv2.imwrite(str(tier_save_path), routing_res.processed_mask)
 
                 contour_path = _export_homologized(routing_res.processed_mask, is_reflected=True)
-                inst.mask_path = str(main_save_path)
+                inst.mask_path = str(tier_save_path) if tier_save_path.exists() else str(main_save_path)
                 inst.contour_path = contour_path
             else:
                 mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
+                dst_intact = self.tier1_intact_dir / f"{catalog_number}_leaf{inst.leaf_id}.png"
                 try:
                     self.tier1_intact_dir.mkdir(parents=True, exist_ok=True)
-                    dst_intact = self.tier1_intact_dir / f"{catalog_number}_leaf{inst.leaf_id}.png"
                     if Path(mask_path).exists():
                         shutil.copyfile(str(mask_path), str(dst_intact))
                     else:
@@ -1684,7 +1800,7 @@ class SegmentAndExtractPipeline:
                 except Exception:
                     pass
                 contour_path = _export_homologized(routing_res.processed_mask, is_reflected=False)
-                inst.mask_path = mask_path
+                inst.mask_path = str(dst_intact) if dst_intact.exists() else mask_path
                 inst.contour_path = contour_path
 
             # Save extracted basal leaf RGB crop to data/cropped_patches/basal_leaves_raw/{catalogNumber}_leaf{leaf_id}.jpg
@@ -1709,12 +1825,13 @@ class SegmentAndExtractPipeline:
                 "tier": tier,
                 "solidity": round(float(inst.solidity), 4),
                 "ucs": round(float(inst.ucs_score), 4),
-                "is_folded": is_folded,
+                "is_folded": bool(is_folded),
                 "is_dissected": is_dissected,
                 "reflection_applied": reflection_applied,
                 "contour_path": inst.contour_path,
                 "plant_individual_id": inst.plant_individual_id,
                 "assigned_tier": inst.assigned_tier,
+                "tier_assignment": inst.assigned_tier,
                 "ucs_score": round(float(inst.ucs_score), 4),
                 "midrib_angle_deg": round(float(inst.midrib_angle_deg), 2),
                 "pixels_per_mm": round(float(inst.pixels_per_mm), 4) if inst.pixels_per_mm else np.nan,
@@ -1764,7 +1881,7 @@ class SegmentAndExtractPipeline:
         extracted_df = pd.DataFrame(all_extracted_records)
         if extracted_df.empty:
             extracted_df = pd.DataFrame(columns=manifest_cols + [
-                "plant_individual_id", "assigned_tier", "ucs_score",
+                "plant_individual_id", "assigned_tier", "tier_assignment", "ucs_score",
                 "midrib_angle_deg", "pixels_per_mm", "is_calibrated_mm", "mask_path",
                 "capitula_count", "involucre_height_px", "involucre_width_px",
                 "involucre_height_mm", "involucre_width_mm", "capitulum_aspect_ratio"
@@ -1772,6 +1889,12 @@ class SegmentAndExtractPipeline:
         else:
             if "assigned_tier" in extracted_df.columns:
                 extracted_df["assigned_tier"] = extracted_df["assigned_tier"].apply(normalize_assigned_tier)
+            elif "tier_assignment" in extracted_df.columns:
+                extracted_df["assigned_tier"] = extracted_df["tier_assignment"].apply(normalize_assigned_tier)
+            if "tier_assignment" not in extracted_df.columns:
+                extracted_df["tier_assignment"] = extracted_df.get("assigned_tier", TIER_1_DIRECT).apply(normalize_assigned_tier)
+            else:
+                extracted_df["tier_assignment"] = extracted_df["tier_assignment"].apply(normalize_assigned_tier)
             if "tier" not in extracted_df.columns:
                 extracted_df["tier"] = extracted_df.get("assigned_tier", TIER_1_DIRECT).apply(
                     lambda x: "Tier 2" if "2" in str(x).lower() else "Tier 1"

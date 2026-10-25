@@ -70,6 +70,7 @@ __all__ = [
     "TARGET_TAXA",
     "standardize_packera_taxon",
     "neutralize_mounting_paper",
+    "apply_tier1_leaf_mask_to_rgb",
     "classify_foliar_surface_orientation",
     "RosettePatchDataset",
     "load_and_link_rosette_patches",
@@ -171,6 +172,77 @@ def neutralize_mounting_paper(
     return Image.fromarray(neutralized) if was_pil else neutralized
 
 
+def apply_tier1_leaf_mask_to_rgb(
+    rgb_img: np.ndarray,
+    mask_path: Optional[Path],
+    pad_px: int = 5,
+) -> np.ndarray:
+    """Applies a dilated Tier_1_Direct binary leaf mask to an RGB leaf crop.
+
+    If `mask_path` exists and matches (or can be resized to) `rgb_img.shape[:2]`,
+    dilates the binary leaf mask (`mask > 127`) with a `5x5` elliptical structuring
+    element (`cv2.dilate`) so marginal teeth and arachnoid cilia are preserved, and
+    replaces all exterior background pixels (`dilated_mask == 0`, where adjacent stems,
+    cauline leaves, or labels intrude into the bounding box) with neutral herbarium
+    paper RGB (`[242, 239, 230]`).
+    """
+    if isinstance(rgb_img, Image.Image):
+        out = np.array(rgb_img.convert("RGB"), copy=True)
+    else:
+        out = np.array(rgb_img, copy=True)
+        if out.ndim == 2:
+            out = np.stack([out] * 3, axis=-1)
+        elif out.ndim == 3 and out.shape[2] == 4:
+            out = out[:, :, :3]
+
+    if out.size == 0 or mask_path is None:
+        return out
+    mask_p = Path(str(mask_path)) if str(mask_path).strip() else None
+    if mask_p is None or not mask_p.exists() or not mask_p.is_file():
+        return out
+
+    try:
+        if cv2 is not None:
+            mask = cv2.imread(str(mask_p), cv2.IMREAD_GRAYSCALE)
+        else:
+            mask = np.array(Image.open(mask_p).convert("L"))
+    except Exception:
+        return out
+
+    if mask is None or mask.size == 0:
+        return out
+
+    h, w = out.shape[:2]
+    if mask.shape[:2] != (h, w):
+        ys, xs = np.where(mask > 127)
+        if len(ys) > 0 and len(xs) > 0:
+            by0, by1 = int(ys.min()), int(ys.max()) + 1
+            bx0, bx1 = int(xs.min()), int(xs.max()) + 1
+            bh_m, bw_m = by1 - by0, bx1 - bx0
+            if (
+                abs(bh_m - h) <= 4
+                and abs(bw_m - w) <= 4
+                and (mask.shape[0] > h + 8 or mask.shape[1] > w + 8)
+            ):
+                mask = mask[by0:by1, bx0:bx1]
+        if mask.shape[:2] != (h, w):
+            if cv2 is not None:
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            else:
+                mask = np.array(Image.fromarray(mask).resize((w, h), Image.NEAREST))
+
+    bin_mask = ((mask > 127).astype(np.uint8)) * 255
+    k = max(1, int(pad_px))
+    if cv2 is not None:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        dilated_mask = cv2.dilate(bin_mask, kernel, iterations=1)
+    else:
+        dilated_mask = bin_mask
+
+    out[dilated_mask == 0] = np.array([242, 239, 230], dtype=out.dtype)
+    return out
+
+
 def classify_foliar_surface_orientation(
     image: Image.Image | np.ndarray | str | Path,
     plant_mask: Optional[np.ndarray] = None,
@@ -247,17 +319,24 @@ def classify_foliar_surface_orientation(
             else:
                 plant_mask = np.array(Image.fromarray(plant_mask.astype(np.uint8)).resize((new_w, new_h), Image.NEAREST)) > 0
 
-    # Determine segmented leaf mask pixels, ignoring neutralized gray background (RGB = neutral_color)
+    # Determine segmented leaf mask pixels, ignoring neutralized gray or herbarium paper background
     if plant_mask is not None:
         mask = (plant_mask > 0)
     else:
-        # Check for pre-neutralized background pixels
+        # Check for pre-neutralized background pixels or masked herbarium paper [242, 239, 230]
         is_neutral_gray = (
-            (img_arr[:, :, 0] == neutral_color[0])
-            & (img_arr[:, :, 1] == neutral_color[1])
-            & (img_arr[:, :, 2] == neutral_color[2])
+            (
+                (img_arr[:, :, 0] == neutral_color[0])
+                & (img_arr[:, :, 1] == neutral_color[1])
+                & (img_arr[:, :, 2] == neutral_color[2])
+            )
+            | (
+                (img_arr[:, :, 0] == 242)
+                & (img_arr[:, :, 1] == 239)
+                & (img_arr[:, :, 2] == 230)
+            )
         )
-        if np.mean(is_neutral_gray) >= 0.02:
+        if np.mean(is_neutral_gray) >= 0.02 and np.sum(~is_neutral_gray) >= 5:
             mask = ~is_neutral_gray
         else:
             # Segment leaf tissue from background mounting sheet using Otsu
@@ -321,7 +400,7 @@ def classify_foliar_surface_orientation(
 
 
 class RosettePatchDataset(Dataset):
-    """PyTorch Dataset loading dense basal rosette image crops for DINOv2."""
+    """PyTorch Dataset loading Tier_1_Direct basal leaf image crops for DINOv2."""
 
     def __init__(
         self,
@@ -341,9 +420,15 @@ class RosettePatchDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int, str]:
         rec = self.records[idx]
         image_path = Path(rec["patch_path"])
+        mask_path = rec.get("mask_path")
+        has_mask = bool(mask_path and str(mask_path).strip() and Path(str(mask_path)).exists())
         if image_path.exists():
             image = Image.open(image_path).convert("RGB")
-            if self.neutralize_background:
+            img_arr = apply_tier1_leaf_mask_to_rgb(
+                np.array(image), Path(str(mask_path)) if has_mask else None
+            )
+            image = Image.fromarray(img_arr)
+            if self.neutralize_background and not has_mask:
                 image = neutralize_mounting_paper(image)
         elif self.demo:
             image = Image.new("RGB", (224, 224), color=(128, 128, 128))
@@ -357,52 +442,218 @@ class RosettePatchDataset(Dataset):
         return tensor, rec["label_idx"], rec["catalogNumber"]
 
 
+def _is_tier1_direct_value(val: Any) -> bool:
+    """Returns True if a manifest tier value represents Tier_1_Direct."""
+    if val is None or pd.isna(val):
+        return False
+    s = str(val).strip()
+    if s == "Tier_1_Direct":
+        return True
+    s_low = s.lower()
+    if "tier_2" in s_low or "tier2" in s_low or "tier 2" in s_low or "reflected" in s_low or "reject" in s_low:
+        return False
+    return bool(re.match(r"^(tier[_\s]?1|1$)", s_low))
+
+
+def _resolve_manifest_path(
+    rosette_dir: Path,
+    vouchers_csv: Path,
+    manifest_csv: Optional[Path] = None,
+) -> Optional[Path]:
+    """Resolves `extracted_leaf_manifest.csv` or `extracted_leaves_manifest.csv` when present."""
+    if manifest_csv is not None:
+        mp = Path(manifest_csv)
+        return mp if mp.exists() else None
+    v_parent = Path(vouchers_csv).parent
+    r_path = Path(rosette_dir)
+    candidates = [
+        v_parent / "extracted_leaf_manifest.csv",
+        v_parent / "extracted_leaves_manifest.csv",
+        r_path.parent / "tables" / "extracted_leaf_manifest.csv",
+        r_path.parent / "tables" / "extracted_leaves_manifest.csv",
+        r_path / "extracted_leaf_manifest.csv",
+        r_path / "extracted_leaves_manifest.csv",
+    ]
+    for c in candidates:
+        if c.exists() and c.is_file():
+            return c
+    return None
+
+
+def _resolve_tier1_leaf_patch_and_mask(
+    cat_num: str,
+    leaf_id: Any,
+    rosette_dir: Path,
+    manifest_dir: Optional[Path],
+    explicit_mask_path: Optional[Any] = None,
+) -> Tuple[Optional[Path], Optional[Path]]:
+    """Finds the basal leaf RGB patch in `basal_leaves_raw/` and binary mask in `masks/tier1_intact/`."""
+    lid_str = str(int(float(leaf_id))) if pd.notna(leaf_id) and str(leaf_id).strip() != "" else "1"
+    stem = f"{cat_num}_leaf{lid_str}"
+
+    basal_dirs = []
+    if rosette_dir.name == "basal_leaves_raw":
+        basal_dirs.append(rosette_dir)
+    else:
+        basal_dirs.append(rosette_dir / "basal_leaves_raw")
+        basal_dirs.append(rosette_dir)
+    if manifest_dir is not None:
+        basal_dirs.append(manifest_dir.parent / "cropped_patches" / "basal_leaves_raw")
+        basal_dirs.append(manifest_dir / "basal_leaves_raw")
+
+    patch_path: Optional[Path] = None
+    for bdir in basal_dirs:
+        for ext in (".jpg", ".png", ".jpeg"):
+            cand = bdir / f"{stem}{ext}"
+            if cand.exists() and cand.is_file():
+                patch_path = cand
+                break
+        if patch_path is not None:
+            break
+
+    mask_path: Optional[Path] = None
+    if explicit_mask_path is not None and pd.notna(explicit_mask_path) and str(explicit_mask_path).strip():
+        exp_p = Path(str(explicit_mask_path).strip())
+        if exp_p.exists() and exp_p.is_file():
+            mask_path = exp_p
+
+    if mask_path is None:
+        mask_dirs = [
+            rosette_dir.parent / "masks" / "tier1_intact",
+            rosette_dir / "masks" / "tier1_intact",
+        ]
+        if rosette_dir.name == "basal_leaves_raw":
+            mask_dirs.insert(0, rosette_dir.parent.parent / "masks" / "tier1_intact")
+        if manifest_dir is not None:
+            mask_dirs.append(manifest_dir.parent / "masks" / "tier1_intact")
+        for mdir in mask_dirs:
+            cand_m = mdir / f"{stem}.png"
+            if cand_m.exists() and cand_m.is_file():
+                mask_path = cand_m
+                break
+
+    return patch_path, mask_path
+
+
 def load_and_link_rosette_patches(
     rosette_dir: Path,
     vouchers_csv: Path,
     demo: bool = False,
+    manifest_csv: Optional[Path] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
-    """Links rosette patch image files with curated herbarium metadata and classifies foliar orientation."""
+    """Links Tier_1_Direct basal leaf patches with curated herbarium metadata and classifies foliar orientation.
+
+    - Auto-resolves `extracted_leaf_manifest.csv` or `extracted_leaves_manifest.csv` in `vouchers_csv.parent` when present.
+    - Never loads `rosettes_dense/` whole-clump stem crops when `basal_leaves_raw/` or `extracted_leaf_manifest.csv` is present
+      (falling back to `rosette_dir` only when `manifest_csv` does not exist and `basal_leaves_raw/` is absent).
+    - Filters strictly to `Tier_1_Direct` leaves, masks background with `apply_tier1_leaf_mask_to_rgb()` before
+      computing CIE Lab luminance/saturation, and selects the highest-UCS `Tier_1_Direct` leaf crop as the
+      representative image per voucher while preserving all `Tier_1_Direct` leaves for weighted DINOv2 aggregation.
+    """
     rosette_dir = Path(rosette_dir)
-    vouchers_df = pd.read_csv(vouchers_csv) if Path(vouchers_csv).exists() else pd.DataFrame()
-    voucher_map = {}
+    vouchers_csv = Path(vouchers_csv)
+    vouchers_df = pd.read_csv(vouchers_csv) if vouchers_csv.exists() else pd.DataFrame()
+    voucher_map: Dict[str, Dict[str, Any]] = {}
     if not vouchers_df.empty and "catalogNumber" in vouchers_df.columns:
         for _, row in vouchers_df.iterrows():
             voucher_map[str(row["catalogNumber"]).strip()] = row.to_dict()
 
+    resolved_manifest = _resolve_manifest_path(rosette_dir, vouchers_csv, manifest_csv)
+    basal_raw_dir = rosette_dir if rosette_dir.name == "basal_leaves_raw" else (rosette_dir / "basal_leaves_raw")
+    basal_raw_files = (
+        sorted(basal_raw_dir.glob("*.jpg")) + sorted(basal_raw_dir.glob("*.png"))
+        if basal_raw_dir.exists()
+        else []
+    )
+
     class_to_idx = {taxon: idx for idx, taxon in enumerate(TARGET_TAXA)}
-    records = []
+    records: List[Dict[str, Any]] = []
 
-    patch_files = sorted(rosette_dir.glob("*.jpg")) if rosette_dir.exists() else []
-    if not patch_files and rosette_dir.exists():
-        rosette_crops = sorted(rosette_dir.glob("rosettes_dense/*.jpg"))
-        leaf_crops = sorted(rosette_dir.glob("basal_leaves_raw/*.jpg"))
-        rosette_cats = {p.stem.split("_")[0] for p in rosette_crops}
-        patch_files = rosette_crops + [p for p in leaf_crops if p.stem.split("_")[0] not in rosette_cats]
+    if resolved_manifest is not None and resolved_manifest.exists():
+        manifest_df = pd.read_csv(resolved_manifest)
+        tier_col = (
+            "tier_assignment"
+            if "tier_assignment" in manifest_df.columns
+            else ("assigned_tier" if "assigned_tier" in manifest_df.columns else ("tier" if "tier" in manifest_df.columns else None))
+        )
+        if tier_col is not None and not manifest_df.empty:
+            t1_mask = manifest_df[tier_col].apply(_is_tier1_direct_value)
+            manifest_t1 = manifest_df[t1_mask].copy()
+        else:
+            manifest_t1 = manifest_df.copy()
 
-    # Fast lookup of physical patch files across rosette_dir and subdirectories
-    available_patches = {}
-    for p in patch_files:
-        cat = p.stem.split("_")[0]
-        if cat not in available_patches or "rosette" in p.name:
-            available_patches[cat] = p
+        if voucher_map and not manifest_t1.empty and "catalogNumber" in manifest_t1.columns:
+            manifest_t1["catalogNumber"] = manifest_t1["catalogNumber"].astype(str).str.strip()
+            manifest_t1 = manifest_t1[manifest_t1["catalogNumber"].isin(voucher_map.keys())].copy()
 
-    if patch_files:
-        for p in patch_files:
-            cat_num = p.stem.split("_")[0]
-            if voucher_map and cat_num not in voucher_map:
+        grouped_leaves: Dict[str, List[Dict[str, Any]]] = {}
+        for _, mrow in manifest_t1.iterrows():
+            cat_num = str(mrow.get("catalogNumber", "")).strip()
+            if not cat_num:
                 continue
+            lid = mrow.get("leaf_id", 1)
+            p_path, m_path = _resolve_tier1_leaf_patch_and_mask(
+                cat_num,
+                lid,
+                rosette_dir=rosette_dir,
+                manifest_dir=resolved_manifest.parent,
+                explicit_mask_path=mrow.get("mask_path"),
+            )
+            if p_path is None:
+                if demo:
+                    p_path = basal_raw_dir / f"{cat_num}_leaf{lid}.jpg"
+                else:
+                    continue
+            ucs_val = float(mrow.get("ucs_score", mrow.get("ucs", 0.90)) or 0.90)
+            sol_val = float(mrow.get("solidity", 0.85) or 0.85)
+            pid_val = int(mrow.get("plant_individual_id", voucher_map.get(cat_num, {}).get("plant_individual_id", 0)) or 0)
+            grouped_leaves.setdefault(cat_num, []).append({
+                "leaf_id": int(float(lid)) if pd.notna(lid) else 1,
+                "patch_path": p_path,
+                "mask_path": m_path,
+                "ucs_score": ucs_val,
+                "solidity": sol_val,
+                "weight": max(1e-4, ucs_val * sol_val),
+                "plant_individual_id": pid_val,
+            })
+
+        for cat_num, leaf_list in grouped_leaves.items():
             meta = voucher_map.get(cat_num, {})
-            raw_sp = meta.get("species_raw", meta.get("scientificName", meta.get("species", "Unknown")))
+            raw_sp = meta.get("species_raw", meta.get("scientificName", meta.get("species", "Packera dubia")))
             std_taxon = standardize_packera_taxon(raw_sp)
             if std_taxon not in TARGET_TAXA:
                 continue
+            # Sort descending by (ucs_score, weight) so the highest-UCS Tier_1_Direct leaf is representative
+            leaf_list.sort(key=lambda x: (x["ucs_score"], x["weight"]), reverse=True)
+            best_leaf = leaf_list[0]
+            best_patch = best_leaf["patch_path"]
+            best_mask = best_leaf["mask_path"]
 
-            orient_info = classify_foliar_surface_orientation(p)
+            if best_patch is not None and Path(best_patch).exists():
+                rgb_arr = np.array(Image.open(best_patch).convert("RGB"))
+                masked_arr = apply_tier1_leaf_mask_to_rgb(rgb_arr, best_mask)
+                orient_info = classify_foliar_surface_orientation(masked_arr)
+            else:
+                orient_info = {
+                    "surface_orientation": "adaxial",
+                    "mean_luminance": 0.0,
+                    "mean_saturation": 0.0,
+                    "high_brightness_ratio": 0.0,
+                }
+
             records.append({
                 "catalogNumber": cat_num,
-                "plant_individual_id": int(meta.get("plant_individual_id", 0)),
-                "patch_path": str(p),
+                "plant_individual_id": int(meta.get("plant_individual_id", best_leaf["plant_individual_id"])),
+                "leaf_id": best_leaf["leaf_id"],
+                "patch_path": str(best_patch),
+                "mask_path": str(best_mask) if best_mask is not None else "",
+                "tier_assignment": "Tier_1_Direct",
+                "ucs_score": round(float(best_leaf["ucs_score"]), 4),
+                "solidity": round(float(best_leaf["solidity"]), 4),
+                "n_tier1_leaves": len(leaf_list),
+                "tier1_leaf_patches": [str(item["patch_path"]) for item in leaf_list],
+                "tier1_leaf_masks": [str(item["mask_path"]) if item["mask_path"] is not None else "" for item in leaf_list],
+                "tier1_leaf_weights": [float(item["weight"]) for item in leaf_list],
                 "taxon": std_taxon,
                 "species_raw": raw_sp,
                 "label_idx": 0,
@@ -412,43 +663,148 @@ def load_and_link_rosette_patches(
                 "mean_saturation": orient_info["mean_saturation"],
                 "high_brightness_ratio": orient_info["high_brightness_ratio"],
             })
-    elif not demo:
-        raise RuntimeError(
-            f"No cropped rosette/leaf patch images found in '{rosette_dir}'. "
-            "Remediation: Run Phase 2 (`python main.py segment`) to populate `data/cropped_patches/`, "
-            "or pass `--demo` explicitly for synthetic demo execution."
-        )
-    elif not vouchers_df.empty:
-        for _, row in vouchers_df.iterrows():
-            raw_sp = str(row.get("species_raw", row.get("scientificName", row.get("species", "Unknown"))))
+
+        if not records and not demo and manifest_df.empty:
+            raise RuntimeError(
+                f"Manifest '{resolved_manifest}' contains 0 Tier_1_Direct basal leaf records."
+            )
+
+    elif basal_raw_files:
+        # `basal_leaves_raw/` exists without a manifest: load strictly from `basal_leaves_raw/` (never `rosettes_dense/`)
+        grouped_leaves = {}
+        for p in basal_raw_files:
+            stem_parts = p.stem.split("_leaf")
+            cat_num = stem_parts[0].split("_")[0]
+            if voucher_map and cat_num not in voucher_map:
+                continue
+            lid_str = stem_parts[1] if len(stem_parts) > 1 and stem_parts[1].isdigit() else "1"
+            _, m_path = _resolve_tier1_leaf_patch_and_mask(cat_num, lid_str, rosette_dir=rosette_dir, manifest_dir=None)
+            # Exclude if a Tier 2 reflected mask exists and no Tier 1 intact mask exists
+            t2_cand = rosette_dir.parent / "masks" / "tier2_reflected" / f"{p.stem}.png"
+            if m_path is None and t2_cand.exists():
+                continue
+            grouped_leaves.setdefault(cat_num, []).append({
+                "leaf_id": int(lid_str),
+                "patch_path": p,
+                "mask_path": m_path,
+                "ucs_score": 0.90,
+                "solidity": 0.85,
+                "weight": 0.90 * 0.85,
+            })
+
+        for cat_num, leaf_list in grouped_leaves.items():
+            meta = voucher_map.get(cat_num, {})
+            raw_sp = meta.get("species_raw", meta.get("scientificName", meta.get("species", "Unknown")))
             std_taxon = standardize_packera_taxon(raw_sp)
             if std_taxon not in TARGET_TAXA:
                 continue
-            cat_num = str(row.get("catalogNumber", "")).strip()
-            real_path = available_patches.get(cat_num, rosette_dir / f"{cat_num}_rosette.jpg")
-            orient_info = (
-                classify_foliar_surface_orientation(real_path)
-                if Path(real_path).exists()
-                else {
-                    "surface_orientation": "adaxial",
-                    "mean_luminance": 0.0,
-                    "mean_saturation": 0.0,
-                    "high_brightness_ratio": 0.0,
-                }
-            )
+            best_leaf = leaf_list[0]
+            best_patch = best_leaf["patch_path"]
+            best_mask = best_leaf["mask_path"]
+            rgb_arr = np.array(Image.open(best_patch).convert("RGB"))
+            masked_arr = apply_tier1_leaf_mask_to_rgb(rgb_arr, best_mask)
+            orient_info = classify_foliar_surface_orientation(masked_arr)
             records.append({
                 "catalogNumber": cat_num,
-                "plant_individual_id": int(row.get("plant_individual_id", 0)),
-                "patch_path": str(real_path),
+                "plant_individual_id": int(meta.get("plant_individual_id", 0)),
+                "leaf_id": best_leaf["leaf_id"],
+                "patch_path": str(best_patch),
+                "mask_path": str(best_mask) if best_mask is not None else "",
+                "tier_assignment": "Tier_1_Direct",
+                "ucs_score": best_leaf["ucs_score"],
+                "solidity": best_leaf["solidity"],
+                "n_tier1_leaves": len(leaf_list),
+                "tier1_leaf_patches": [str(item["patch_path"]) for item in leaf_list],
+                "tier1_leaf_masks": [str(item["mask_path"]) if item["mask_path"] is not None else "" for item in leaf_list],
+                "tier1_leaf_weights": [float(item["weight"]) for item in leaf_list],
                 "taxon": std_taxon,
                 "species_raw": raw_sp,
                 "label_idx": 0,
-                "determiner_tier": row.get("determiner_tier", "Tier_3_Bronze"),
+                "determiner_tier": meta.get("determiner_tier", "Tier_3_Bronze"),
                 "surface_orientation": orient_info["surface_orientation"],
                 "mean_luminance": orient_info["mean_luminance"],
                 "mean_saturation": orient_info["mean_saturation"],
                 "high_brightness_ratio": orient_info["high_brightness_ratio"],
             })
+
+    else:
+        # Fallback ONLY when `manifest_csv` does not exist AND `basal_leaves_raw/` is absent
+        patch_files = (
+            sorted(rosette_dir.glob("*.jpg")) + sorted(rosette_dir.glob("*.png"))
+            if rosette_dir.exists()
+            else []
+        )
+        if not patch_files and rosette_dir.exists():
+            patch_files = sorted(rosette_dir.rglob("*.jpg")) + sorted(rosette_dir.rglob("*.png"))
+
+        available_patches = {}
+        for p in patch_files:
+            cat = p.stem.split("_")[0]
+            if cat not in available_patches:
+                available_patches[cat] = p
+
+        if patch_files:
+            for p in patch_files:
+                cat_num = p.stem.split("_")[0]
+                if voucher_map and cat_num not in voucher_map:
+                    continue
+                meta = voucher_map.get(cat_num, {})
+                raw_sp = meta.get("species_raw", meta.get("scientificName", meta.get("species", "Unknown")))
+                std_taxon = standardize_packera_taxon(raw_sp)
+                if std_taxon not in TARGET_TAXA:
+                    continue
+
+                orient_info = classify_foliar_surface_orientation(p)
+                records.append({
+                    "catalogNumber": cat_num,
+                    "plant_individual_id": int(meta.get("plant_individual_id", 0)),
+                    "patch_path": str(p),
+                    "taxon": std_taxon,
+                    "species_raw": raw_sp,
+                    "label_idx": 0,
+                    "determiner_tier": meta.get("determiner_tier", "Tier_3_Bronze"),
+                    "surface_orientation": orient_info["surface_orientation"],
+                    "mean_luminance": orient_info["mean_luminance"],
+                    "mean_saturation": orient_info["mean_saturation"],
+                    "high_brightness_ratio": orient_info["high_brightness_ratio"],
+                })
+        elif not demo:
+            raise RuntimeError(
+                f"No cropped rosette/leaf patch images found in '{rosette_dir}'. "
+                "Remediation: Run Phase 2 (`python main.py segment`) to populate `data/cropped_patches/`, "
+                "or pass `--demo` explicitly for synthetic demo execution."
+            )
+        elif not vouchers_df.empty:
+            for _, row in vouchers_df.iterrows():
+                raw_sp = str(row.get("species_raw", row.get("scientificName", row.get("species", "Unknown"))))
+                std_taxon = standardize_packera_taxon(raw_sp)
+                if std_taxon not in TARGET_TAXA:
+                    continue
+                cat_num = str(row.get("catalogNumber", "")).strip()
+                real_path = available_patches.get(cat_num, rosette_dir / f"{cat_num}_rosette.jpg")
+                orient_info = (
+                    classify_foliar_surface_orientation(real_path)
+                    if Path(real_path).exists()
+                    else {
+                        "surface_orientation": "adaxial",
+                        "mean_luminance": 0.0,
+                        "mean_saturation": 0.0,
+                        "high_brightness_ratio": 0.0,
+                    }
+                )
+                records.append({
+                    "catalogNumber": cat_num,
+                    "plant_individual_id": int(row.get("plant_individual_id", 0)),
+                    "patch_path": str(real_path),
+                    "taxon": std_taxon,
+                    "species_raw": raw_sp,
+                    "label_idx": 0,
+                    "determiner_tier": row.get("determiner_tier", "Tier_3_Bronze"),
+                    "surface_orientation": orient_info["surface_orientation"],
+                    "mean_luminance": orient_info["mean_luminance"],
+                    "mean_saturation": orient_info["mean_saturation"],
+                    "high_brightness_ratio": orient_info["high_brightness_ratio"],
+                })
 
     present_std_taxa = {r["taxon"] for r in records}
     active_taxa = [t for t in TARGET_TAXA if t in present_std_taxa]
@@ -458,13 +814,48 @@ def load_and_link_rosette_patches(
             r["label_idx"] = class_to_idx[r["taxon"]]
 
     df = pd.DataFrame(records)
-    logger.info(f"Loaded and linked {len(df)} rosette patch records across {len(class_to_idx)} taxa.")
+    logger.info(f"Loaded and linked {len(df)} Tier_1_Direct / rosette patch records across {len(class_to_idx)} taxa.")
     return df, class_to_idx
 
 
 # =============================================================================
 # 3. DINOv2 Self-Supervised Feature Extraction
 # =============================================================================
+
+def _aggregate_voucher_embeddings(
+    records: List[Dict],
+    raw_feats: np.ndarray,
+    expanded_meta: List[Tuple[int, str, int, float]],
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    """Aggregates leaf-level 768-d DINOv2 embeddings per voucher weighted by `ucs_score * solidity`."""
+    if len(raw_feats) == 0:
+        return np.empty((0, 768), dtype=np.float32), np.array([], dtype=int), []
+
+    # Check if caller passed multiple records with the same catalogNumber or single voucher records with tier1_leaf_patches
+    voucher_groups: Dict[str, List[Tuple[np.ndarray, float, int]]] = {}
+    voucher_order: List[str] = []
+    for feat_vec, (_rec_idx, cat_num, lbl_idx, weight) in zip(raw_feats, expanded_meta):
+        if cat_num not in voucher_groups:
+            voucher_groups[cat_num] = []
+            voucher_order.append(cat_num)
+        voucher_groups[cat_num].append((feat_vec, max(1e-6, float(weight)), int(lbl_idx)))
+
+    # If records already had unique catalogNumbers in exact 1-to-1 correspondence with voucher_order
+    agg_feats = []
+    agg_labels = []
+    for cat_num in voucher_order:
+        items = voucher_groups[cat_num]
+        if len(items) == 1:
+            agg_feats.append(items[0][0])
+        else:
+            mat = np.vstack([it[0] for it in items])
+            wts = np.array([it[1] for it in items], dtype=np.float64)
+            wts = wts / np.sum(wts)
+            agg_feats.append(np.sum(mat * wts[:, None], axis=0).astype(np.float32))
+        agg_labels.append(items[0][2])
+
+    return np.vstack(agg_feats), np.array(agg_labels, dtype=int), voucher_order
+
 
 def extract_dinov2_embeddings(
     records: List[Dict],
@@ -476,13 +867,51 @@ def extract_dinov2_embeddings(
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Extracts 768-dimensional DINOv2 self-supervised [CLS] token representations.
 
+    When multiple `Tier_1_Direct` leaves exist for the same `catalogNumber` (either via
+    `tier1_leaf_patches` from `load_and_link_rosette_patches()` or multiple leaf dicts sharing
+    a `catalogNumber`), aggregates their 768-d embeddings per voucher weighted by `ucs_score * solidity`.
     When `demo=False` (production default), raises a `RuntimeError` if physical
     patch images are missing or if DINOv2 weights cannot be loaded.
     """
     torch.manual_seed(42)
     np.random.seed(42)
 
-    has_physical_images = bool(records) and any(Path(r["patch_path"]).exists() for r in records[:5])
+    if not records:
+        return np.empty((0, 768), dtype=np.float32), np.array([], dtype=int), []
+
+    expanded_records: List[Dict[str, Any]] = []
+    expanded_meta: List[Tuple[int, str, int, float]] = []
+    for r_idx, rec in enumerate(records):
+        cat_num = str(rec["catalogNumber"]).strip()
+        lbl_idx = int(rec.get("label_idx", 0))
+        leaf_patches = rec.get("tier1_leaf_patches")
+        leaf_masks = rec.get("tier1_leaf_masks")
+        leaf_weights = rec.get("tier1_leaf_weights")
+        if isinstance(leaf_patches, list) and len(leaf_patches) > 0:
+            for l_i, lp in enumerate(leaf_patches):
+                lm = leaf_masks[l_i] if isinstance(leaf_masks, list) and l_i < len(leaf_masks) else rec.get("mask_path")
+                lw = (
+                    float(leaf_weights[l_i])
+                    if isinstance(leaf_weights, list) and l_i < len(leaf_weights)
+                    else float(rec.get("ucs_score", rec.get("ucs", 1.0)) or 1.0) * float(rec.get("solidity", 1.0) or 1.0)
+                )
+                expanded_records.append({
+                    "catalogNumber": cat_num,
+                    "label_idx": lbl_idx,
+                    "patch_path": lp,
+                    "mask_path": lm,
+                })
+                expanded_meta.append((r_idx, cat_num, lbl_idx, lw))
+        else:
+            ucs_w = float(rec.get("ucs_score", rec.get("ucs", 1.0)) or 1.0)
+            sol_w = float(rec.get("solidity", 1.0) or 1.0)
+            lw = max(1e-6, ucs_w * sol_w)
+            expanded_records.append(rec)
+            expanded_meta.append((r_idx, cat_num, lbl_idx, lw))
+
+    has_physical_images = bool(expanded_records) and any(
+        Path(r["patch_path"]).exists() for r in expanded_records[:5]
+    )
     if not has_physical_images:
         if not demo:
             raise RuntimeError(
@@ -490,16 +919,15 @@ def extract_dinov2_embeddings(
                 "Remediation: Run Phase 2 (`python main.py segment`) to generate cropped leaf/rosette "
                 "patches before running Phase 5, or pass `--demo` explicitly for synthetic verification."
             )
-        n = len(records)
-        labels = np.array([r["label_idx"] for r in records])
+        n = len(expanded_records)
+        labels = np.array([r["label_idx"] for r in expanded_records])
         feats = np.random.randn(n, 768).astype(np.float32)
         for i in range(n):
             feats[i, labels[i] * 50:(labels[i] + 1) * 50] += 3.0
             if i % 15 == 0:  # Inject simulated label noise in explicit --demo mode only
                 feats[i, :] = np.random.randn(768)
                 feats[i, ((labels[i] + 1) % 4) * 50:(((labels[i] + 1) % 4) + 1) * 50] += 4.0
-        cat_nums = [r["catalogNumber"] for r in records]
-        return feats, labels, cat_nums
+        return _aggregate_voucher_embeddings(records, feats, expanded_meta)
 
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -508,7 +936,7 @@ def extract_dinov2_embeddings(
     ])
 
     dataset = RosettePatchDataset(
-        records, transform=transform, neutralize_background=neutralize_background, demo=demo
+        expanded_records, transform=transform, neutralize_background=neutralize_background, demo=demo
     )
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
@@ -522,25 +950,21 @@ def extract_dinov2_embeddings(
                 "`~/.cache/torch/hub/facebookresearch_dinov2_main`, or pass `--demo` explicitly."
             ) from e
         logger.warning(f"Could not load torch.hub dinov2: {e}. Generating demo features (--demo).")
-        feats = np.random.randn(len(records), 768).astype(np.float32)
-        labels = np.array([r["label_idx"] for r in records])
-        cat_nums = [r["catalogNumber"] for r in records]
-        return feats, labels, cat_nums
+        feats = np.random.randn(len(expanded_records), 768).astype(np.float32)
+        return _aggregate_voucher_embeddings(records, feats, expanded_meta)
 
     model = model.to(device)
     model.eval()
 
-    all_feats, all_labels, all_cats = [], [], []
+    all_feats = []
     with torch.no_grad():
-        for tensors, labels, cats in loader:
+        for tensors, _labels, _cats in loader:
             tensors = tensors.to(device)
             out = model(tensors)
             all_feats.append(out.cpu().numpy())
-            all_labels.extend(labels.numpy())
-            all_cats.extend(cats)
 
-    features = np.vstack(all_feats) if all_feats else np.empty((0, 768))
-    return features, np.array(all_labels), all_cats
+    features = np.vstack(all_feats) if all_feats else np.empty((0, 768), dtype=np.float32)
+    return _aggregate_voucher_embeddings(records, features, expanded_meta)
 
 
 # =============================================================================
@@ -965,10 +1389,15 @@ def generate_gradcam_panel(
 
     for idx, rec in enumerate(samples):
         img_path = Path(rec["patch_path"])
+        mask_path = rec.get("mask_path")
+        has_mask = bool(mask_path and str(mask_path).strip() and Path(str(mask_path)).exists())
         if img_path.exists():
             img = Image.open(img_path).convert("RGB")
-            img = neutralize_mounting_paper(img)
-            img_arr = np.array(img)
+            img_arr = apply_tier1_leaf_mask_to_rgb(
+                np.array(img), Path(str(mask_path)) if has_mask else None
+            )
+            if not has_mask:
+                img_arr = np.array(neutralize_mounting_paper(Image.fromarray(img_arr)))
         elif demo:
             img_arr = np.zeros((224, 224, 3), dtype=np.uint8)
             img_arr[:, :, 1] = 120
@@ -1299,6 +1728,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to morphometric_flags.csv for single-taxon GMM cluster probing",
     )
     parser.add_argument(
+        "--manifest-csv",
+        type=Path,
+        default=None,
+        help="Optional path to extracted_leaf_manifest.csv for Tier_1_Direct basal leaf gating",
+    )
+    parser.add_argument(
         "--intraspecific-mode",
         dest="intraspecific_mode",
         action="store_true",
@@ -1330,7 +1765,7 @@ def main() -> None:
 
     # 1. Load and link rosette crops with voucher metadata
     df, class_map = load_and_link_rosette_patches(
-        args.rosette_dir, args.vouchers_csv, demo=args.demo
+        args.rosette_dir, args.vouchers_csv, demo=args.demo, manifest_csv=args.manifest_csv
     )
     if df.empty:
         logger.warning("No rosette patch records were matched. Check inputs.")
@@ -1421,8 +1856,12 @@ def main() -> None:
     else:
         args.output_csv.parent.mkdir(parents=True, exist_ok=True)
         tmp_csv = args.output_csv.with_suffix(args.output_csv.suffix + ".tmp")
+        export_df = audit_df.drop(
+            columns=["tier1_leaf_patches", "tier1_leaf_masks", "tier1_leaf_weights"],
+            errors="ignore",
+        )
         with open(tmp_csv, "w", encoding="utf-8", newline="") as f:
-            audit_df.to_csv(f, index=False)
+            export_df.to_csv(f, index=False)
             f.flush()
             os.fsync(f.fileno())
         tmp_csv.replace(args.output_csv)

@@ -1399,6 +1399,70 @@ def normalize_assigned_tier(tier_value: str) -> str:
     return CANONICAL_TIER_MAP.get(clean, CANONICAL_TIER_MAP.get(clean.lower(), clean))
 
 
+def is_cauline_or_stem_contaminant(
+    *,
+    cy: float,
+    area: float,
+    aspect_ratio: float,
+    solidity: float,
+    basal_cy_med: float,
+    med_area: float,
+    img_h: float,
+    capitula_count: int = 0,
+    cap_cy: Optional[float] = None,
+    has_petiole: bool = True,
+    med_rosette_radius: float = 0.0,
+    radial_dist_from_rosette: Optional[float] = None,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Heterophylly / cauline-bract / stem-segment filter that operates both when
+    reproductive capitula are detected (`capitula_count > 0`) and on vegetative
+    or non-flowering sheets (`capitula_count == 0`).
+
+    Rejects upper-stem cauline leaves and stem segments before routing to
+    `Tier_1_Direct` or `Tier_2_Reflected` if:
+      (a) `capitula_count > 0` and the leaf centroid lies in the upper corymb/cauline
+          zone (`cy < cap_cy + 0.30 * (basal_cy_med - cap_cy)`) with `area < 0.50 * med_area`, OR
+      (b) the candidate is a narrow, sessile/clasping upper cauline bract or stem segment
+          (`aspect_ratio > 3.8` and `solidity < 0.78` and `cy < basal_cy_med - 0.18 * img_h`), OR
+      (c) the candidate lacks a petiole attachment and is displaced `> 2.2 * med_rosette_radius`
+          above the basal rosette centroid with `area < 0.35 * med_area`.
+    """
+    if (
+        capitula_count > 0
+        and cap_cy is not None
+        and not np.isnan(cap_cy)
+        and basal_cy_med > cap_cy
+        and cy < (cap_cy + 0.30 * (basal_cy_med - cap_cy))
+        and area < (0.50 * med_area)
+    ):
+        return True, "CAULINE_CORYMB_ZONE"
+
+    if (
+        aspect_ratio > 3.8
+        and solidity < 0.78
+        and cy < (basal_cy_med - 0.18 * float(img_h))
+    ):
+        return True, "CAULINE_SESSILE_BRACT_OR_STEM"
+
+    upward_disp = float(basal_cy_med - cy)
+    eff_disp = (
+        max(upward_disp, float(radial_dist_from_rosette))
+        if (radial_dist_from_rosette is not None and upward_disp > 0)
+        else upward_disp
+    )
+    if (
+        (not has_petiole)
+        and med_rosette_radius > 0.0
+        and upward_disp > 0.0
+        and eff_disp > (2.2 * med_rosette_radius)
+        and area < (0.35 * med_area)
+    ):
+        return True, "DISPLACED_SESSILE_CAULINE"
+
+    return False, None
+
+
 @dataclass
 class LeafRoutingResult:
     """Structured diagnostic and extraction result from geometric quality gatekeeping."""
