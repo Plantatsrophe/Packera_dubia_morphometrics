@@ -32,6 +32,8 @@ INTRASPECIFIC_MODE="false"
 GOLD_ANCHORS=30
 GOLD_ONLY=false
 DETERMINER_TIER=""
+EXCLUDE_MISIDENTIFIED=false
+TRIAGE_SOURCE="ALL"
 LIMIT_ARG=()
 SAM2_FLAG=()
 DEMO_FLAG=()
@@ -121,6 +123,31 @@ while [[ $# -gt 0 ]]; do
       ;;
     --determiner-tier=*)
       DETERMINER_TIER="${1#*=}"
+      shift
+      ;;
+    --exclude-misidentified)
+      EXCLUDE_MISIDENTIFIED=true
+      shift
+      ;;
+    --exclude-misidentified=*)
+      EXCLUDE_MISIDENTIFIED="${1#*=}"
+      shift
+      ;;
+    --triage-source)
+      if [[ "${TRIAGE_SOURCE}" == "ALL" || -z "${TRIAGE_SOURCE}" ]]; then
+        TRIAGE_SOURCE="$2"
+      else
+        TRIAGE_SOURCE="${TRIAGE_SOURCE},$2"
+      fi
+      shift 2
+      ;;
+    --triage-source=*)
+      triage_val="${1#*=}"
+      if [[ "${TRIAGE_SOURCE}" == "ALL" || -z "${TRIAGE_SOURCE}" ]]; then
+        TRIAGE_SOURCE="${triage_val}"
+      else
+        TRIAGE_SOURCE="${TRIAGE_SOURCE},${triage_val}"
+      fi
       shift
       ;;
     *)
@@ -249,7 +276,7 @@ if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
       "${HARVEST_TAXON_ARGS[@]}" \
       --download-images \
       ${FORCE_FLAG}
-    if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
+    if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && "${EXCLUDE_MISIDENTIFIED}" != "true" && -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
       mkdir -p "${PROJECT_ROOT}/data/tables"
       cp -f "${RUN_DIR}/data/tables/curated_vouchers.csv" "${PROJECT_ROOT}/data/tables/curated_vouchers.csv.tmp"
       mv -f "${PROJECT_ROOT}/data/tables/curated_vouchers.csv.tmp" "${PROJECT_ROOT}/data/tables/curated_vouchers.csv"
@@ -270,13 +297,13 @@ if [[ ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Preflight Taxon & Determiner-Tier Subset Filter & Cropped Patch Symlinking
-# (--focal-taxon / --exclude-taxon / --gold-only / --determiner-tier)
+# Preflight Taxon, Determiner-Tier & Misidentification Subset Filter & Cropped Patch Symlinking
+# (--focal-taxon / --exclude-taxon / --gold-only / --determiner-tier / --exclude-misidentified / --triage-source)
 # Executed BEFORE running Steps 02-07
 # ------------------------------------------------------------------------------
 run_preflight_subset_filter() {
-  if [[ -n "${FOCAL_TAXON}" || -n "${EXCLUDE_TAXON_CSV}" || -n "${DETERMINER_TIER}" || "${GOLD_ONLY}" == "true" ]]; then
-    echo "[Preflight] Filtering ${RUN_DIR}/data/tables/ and linking cropped_patches for focal='${FOCAL_TAXON}' exclude='${EXCLUDE_TAXON_CSV}' determiner_tier='${DETERMINER_TIER}' (intraspecific_mode=${INTRASPECIFIC_MODE}, gold_anchors=${GOLD_ANCHORS})..."
+  if [[ -n "${FOCAL_TAXON:-}" || -n "${EXCLUDE_TAXON_CSV:-}" || -n "${DETERMINER_TIER:-}" || "${GOLD_ONLY:-false}" == "true" || "${EXCLUDE_MISIDENTIFIED:-false}" == "true" ]]; then
+    echo "[Preflight] Filtering ${RUN_DIR}/data/tables/ and linking cropped_patches for focal='${FOCAL_TAXON:-}' exclude='${EXCLUDE_TAXON_CSV:-}' determiner_tier='${DETERMINER_TIER:-}' exclude_misidentified='${EXCLUDE_MISIDENTIFIED:-false}' triage_source='${TRIAGE_SOURCE:-ALL}' (intraspecific_mode=${INTRASPECIFIC_MODE:-false}, gold_anchors=${GOLD_ANCHORS:-30})..."
     "${PYTHON_MAIN}" -c "
 import importlib
 import os
@@ -293,9 +320,19 @@ exclude_csv = sys.argv[4].strip()
 intraspecific_mode = sys.argv[5].lower() == 'true'
 gold_anchors = int(sys.argv[6])
 determiner_tier_raw = sys.argv[7].strip()
+exclude_misidentified = sys.argv[8].lower() == 'true' if len(sys.argv) > 8 else False
+triage_source_raw = sys.argv[9].strip() if len(sys.argv) > 9 else 'ALL'
 
 mod05 = importlib.import_module('scripts.analysis.05_cleanlab_vision_xai')
 standardize_packera_taxon = mod05.standardize_packera_taxon
+
+ALLOWED_TREATMENT_SUBTYPES = {
+    'Confirmed_Species',
+    'Hybrid_Introgressant',
+    'Subspecies_Ecotype',
+    'Ecophenotypic_Plasticity',
+    'Putative_Cryptic_Species',
+}
 
 tier_map = {
     'tier_1_gold': 'Tier_1_Gold', 'gold': 'Tier_1_Gold', 'tier_1': 'Tier_1_Gold', 'tier1': 'Tier_1_Gold', '1': 'Tier_1_Gold',
@@ -316,6 +353,86 @@ csv_path = tables_dir / 'curated_vouchers.csv'
 df = pd.read_csv(csv_path)
 sp_col = 'species_raw' if 'species_raw' in df.columns else ('scientificName' if 'scientificName' in df.columns else 'species')
 df['species_standardized'] = df[sp_col].apply(standardize_packera_taxon)
+
+misidentified_cats = set()
+if exclude_misidentified:
+    runs_candidates = [run_dir.parent, root_data.parent / 'runs', Path.cwd() / 'runs']
+    runs_base = next(
+        (rc for rc in runs_candidates if rc.is_dir() and any(rc.glob('*/outputs/reports/final_curation_triage.csv'))),
+        run_dir.parent,
+    )
+    triage_files = []
+    seen_resolved = set()
+    self_triage = (run_dir / 'outputs' / 'reports' / 'final_curation_triage.csv').resolve()
+
+    tokens = [t.strip() for t in (triage_source_raw or 'ALL').split(',') if t.strip()]
+    if not tokens:
+        tokens = ['ALL']
+
+    for tok in tokens:
+        if tok.upper() in ('ALL', '*'):
+            for p in sorted(runs_base.glob('*/outputs/reports/final_curation_triage.csv')):
+                rp = p.resolve()
+                if rp != self_triage and rp not in seen_resolved and p.is_file() and p.stat().st_size > 0:
+                    seen_resolved.add(rp)
+                    triage_files.append(p)
+        else:
+            cand_paths = [
+                Path(tok),
+                Path(tok) / 'outputs' / 'reports' / 'final_curation_triage.csv',
+                runs_base / tok / 'outputs' / 'reports' / 'final_curation_triage.csv',
+                root_data.parent / 'runs' / tok / 'outputs' / 'reports' / 'final_curation_triage.csv',
+                Path.cwd() / 'runs' / tok / 'outputs' / 'reports' / 'final_curation_triage.csv',
+            ]
+            matched = next((cp for cp in cand_paths if cp.is_file() and cp.stat().st_size > 0), None)
+            if matched is None:
+                print(
+                    f'[ERROR] --triage-source {tok!r} could not be resolved to an existing final_curation_triage.csv file.',
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            rp = matched.resolve()
+            if rp not in seen_resolved:
+                seen_resolved.add(rp)
+                triage_files.append(matched)
+
+    if not triage_files:
+        print(
+            f'[ERROR] --exclude-misidentified requested (triage_source={triage_source_raw!r}), but no runs/*/outputs/reports/final_curation_triage.csv files were found.',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    for tf in triage_files:
+        tdf_tri = pd.read_csv(tf, low_memory=False)
+        sub_col = (
+            'taxonomic_treatment_subtype'
+            if 'taxonomic_treatment_subtype' in tdf_tri.columns
+            else ('taxonomic_treatment_sub' if 'taxonomic_treatment_sub' in tdf_tri.columns else None)
+        )
+        if sub_col is None or 'catalogNumber' not in tdf_tri.columns:
+            print(
+                f'[ERROR] Triage report {tf} is missing required columns (catalogNumber, taxonomic_treatment_subtype).',
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        sub_series = tdf_tri[sub_col].fillna('').astype(str).str.strip()
+        cat_series = tdf_tri['catalogNumber'].fillna('').astype(str).str.strip()
+        is_misid = (sub_series == 'Misidentification_Reassign') | (
+            ~sub_series.isin(ALLOWED_TREATMENT_SUBTYPES) & (sub_series != '')
+        )
+        for c_val in cat_series[is_misid]:
+            if c_val:
+                misidentified_cats.add(c_val)
+
+    before_misid_n = len(df)
+    df = df[~df['catalogNumber'].astype(str).str.strip().isin(misidentified_cats)].copy()
+    print(
+        f'[Preflight: Exclude Misidentified] Source={triage_source_raw!r} ({len(triage_files)} report(s)): '
+        f'excluded {before_misid_n - len(df)} vouchers with taxonomic_treatment_subtype == \'Misidentification_Reassign\' '
+        f'({len(misidentified_cats)} unique flagged catalogNumbers across reports; retaining only {sorted(ALLOWED_TREATMENT_SUBTYPES)}): '
+        f'retained {len(df)} / {before_misid_n} vouchers.'
+    )
 
 if target_tier and 'determiner_tier' in df.columns:
     before_tier_n = len(df)
@@ -366,6 +483,8 @@ else:
 
 if target_tier and 'determiner_tier' in subset_df.columns:
     subset_df = subset_df[subset_df['determiner_tier'].astype(str).str.strip() == target_tier].copy()
+if exclude_misidentified and misidentified_cats:
+    subset_df = subset_df[~subset_df['catalogNumber'].astype(str).str.strip().isin(misidentified_cats)].copy()
 
 def _write_atomic(df_obj, target_path):
     tmp_p = target_path.with_suffix(target_path.suffix + '.tmp')
@@ -414,7 +533,7 @@ for sub in ('rosettes_dense', 'basal_leaves_raw', 'capitula'):
                     os.symlink(entry.path, dst_sub / entry.name)
                     linked += 1
     print(f'  Linked {linked} patches in cropped_patches/{sub}')
-" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON}" "${EXCLUDE_TAXON_CSV}" "${INTRASPECIFIC_MODE}" "${GOLD_ANCHORS}" "${DETERMINER_TIER}"
+" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}"
   elif [[ "${REUSE_CANONICAL_DATA}" == "true" ]]; then
     mkdir -p "${RUN_DIR}/data/cropped_patches"
     for sub in rosettes_dense basal_leaves_raw capitula; do
@@ -452,7 +571,7 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
   cp -alf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/" 2>/dev/null || cp -rf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/"
   cp -alf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/" 2>/dev/null || cp -rf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/"
   cp -alf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/" 2>/dev/null || cp -rf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/"
-  if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
+  if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && "${EXCLUDE_MISIDENTIFIED}" != "true" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
     "${PYTHON_MAIN}" -c "
 import os
 from pathlib import Path

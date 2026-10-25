@@ -571,6 +571,131 @@ REUSE_CANONICAL_DATA="true"
             self.assertEqual(leaf_files, {"NCU001_leaf1.jpg", "UNCC_49308_leaf2.jpg"})
             self.assertEqual(cap_files, {"NCU001_cap1.jpg"})
 
+    def test_run_pipeline_sh_exclude_misidentified_and_triage_source_filtering(self):
+        """Verify run_pipeline.sh --exclude-misidentified (with default ALL and explicit --triage-source) filters out Misidentification_Reassign while retaining Confirmed_Species, Hybrid_Introgressant, Subspecies_Ecotype, Ecophenotypic_Plasticity, and Putative_Cryptic_Species across curated_vouchers.csv, Step 02 manifests, and cropped_patches."""
+        import subprocess
+        import pandas as pd
+
+        sh_path = PROJECT_ROOT / "run_pipeline.sh"
+        sh_src = sh_path.read_text(encoding="utf-8")
+        self.assertIn("--exclude-misidentified)", sh_src)
+        self.assertIn("--triage-source)", sh_src)
+        self.assertIn("--triage-source=*)", sh_src)
+        self.assertIn("Misidentification_Reassign", sh_src)
+
+        fn_start = sh_src.index("run_preflight_subset_filter() {")
+        fn_end = sh_src.index("\nrun_preflight_subset_filter\n", fn_start)
+        fn_body = sh_src[fn_start:fn_end]
+
+        all_cats = ["CAT_CONF", "CAT_HYB", "CAT_SUB", "CAT_ECO", "CAT_CRYPT", "CAT_MISID_1", "CAT_MISID_2"]
+        expected_keep_all = {"CAT_CONF", "CAT_HYB", "CAT_SUB", "CAT_ECO", "CAT_CRYPT"}
+        expected_keep_run_a = {"CAT_CONF", "CAT_HYB", "CAT_SUB", "CAT_ECO", "CAT_CRYPT", "CAT_MISID_2"}
+
+        for mode, triage_src, expected_keep in [
+            ("all_default", "ALL", expected_keep_all),
+            ("single_run", "run_A", expected_keep_run_a),
+        ]:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                root_data = tmp_path / "root_data"
+                runs_root = tmp_path / "runs"
+                run_dir = runs_root / f"test_{mode}"
+                tables_dir = run_dir / "data" / "tables"
+                tables_dir.mkdir(parents=True, exist_ok=True)
+
+                # Create two historical runs with final_curation_triage.csv
+                run_a_rep = runs_root / "run_A" / "outputs" / "reports"
+                run_b_rep = runs_root / "run_B" / "outputs" / "reports"
+                run_a_rep.mkdir(parents=True, exist_ok=True)
+                run_b_rep.mkdir(parents=True, exist_ok=True)
+
+                pd.DataFrame({
+                    "catalogNumber": ["CAT_CONF", "CAT_HYB", "CAT_SUB", "CAT_ECO", "CAT_CRYPT", "CAT_MISID_1"],
+                    "taxonomic_treatment_subtype": [
+                        "Confirmed_Species",
+                        "Hybrid_Introgressant",
+                        "Subspecies_Ecotype",
+                        "Ecophenotypic_Plasticity",
+                        "Putative_Cryptic_Species",
+                        "Misidentification_Reassign",
+                    ],
+                }).to_csv(run_a_rep / "final_curation_triage.csv", index=False)
+
+                pd.DataFrame({
+                    "catalogNumber": ["CAT_CONF", "CAT_MISID_2"],
+                    "taxonomic_treatment_subtype": [
+                        "Confirmed_Species",
+                        "Misidentification_Reassign",
+                    ],
+                }).to_csv(run_b_rep / "final_curation_triage.csv", index=False)
+
+                for sub in ("rosettes_dense", "basal_leaves_raw", "capitula"):
+                    pdir = root_data / "cropped_patches" / sub
+                    pdir.mkdir(parents=True, exist_ok=True)
+                    for c in all_cats:
+                        suffix = "p0_rosette.jpg" if sub == "rosettes_dense" else ("leaf1.jpg" if sub == "basal_leaves_raw" else "cap1.jpg")
+                        (pdir / f"{c}_{suffix}").write_bytes(b"jpg")
+
+                pd.DataFrame({
+                    "catalogNumber": all_cats,
+                    "scientificName": ["Packera dubia"] * len(all_cats),
+                    "determiner_tier": ["Tier_1_Gold"] * len(all_cats),
+                    "authority_weight": [3.0] * len(all_cats),
+                }).to_csv(tables_dir / "curated_vouchers.csv", index=False)
+
+                for tbl_name in (
+                    "extracted_leaf_manifest.csv",
+                    "extracted_leaves_manifest.csv",
+                    "failed_qc_vouchers.csv",
+                    "voucher_reproductive_metrics.csv",
+                    "voucher_phenological_states.csv",
+                ):
+                    pd.DataFrame({
+                        "catalogNumber": all_cats,
+                        "plant_individual_id": [0] * len(all_cats),
+                    }).to_csv(tables_dir / tbl_name, index=False)
+
+                test_bash = f"""
+set -euo pipefail
+PROJECT_ROOT="{PROJECT_ROOT}"
+RUN_DIR="{run_dir}"
+PYTHON_MAIN="{sys.executable}"
+FOCAL_TAXON=""
+EXCLUDE_TAXON_CSV=""
+INTRASPECIFIC_MODE="false"
+GOLD_ANCHORS=30
+GOLD_ONLY=false
+DETERMINER_TIER=""
+EXCLUDE_MISIDENTIFIED=true
+TRIAGE_SOURCE="{triage_src}"
+REUSE_CANONICAL_DATA="true"
+{fn_body}
+"""
+                test_bash = test_bash.replace('"${PROJECT_ROOT}/data"', f'"{root_data}"')
+                test_bash += "\nrun_preflight_subset_filter\n"
+                res = subprocess.run(["bash", "-c", test_bash], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=True)
+                self.assertIn("[Preflight: Exclude Misidentified]", res.stdout)
+
+                out_vouchers = pd.read_csv(tables_dir / "curated_vouchers.csv")
+                self.assertEqual(set(out_vouchers["catalogNumber"]), expected_keep)
+
+                for tbl_name in (
+                    "extracted_leaf_manifest.csv",
+                    "extracted_leaves_manifest.csv",
+                    "failed_qc_vouchers.csv",
+                    "voucher_reproductive_metrics.csv",
+                    "voucher_phenological_states.csv",
+                ):
+                    tdf = pd.read_csv(tables_dir / tbl_name)
+                    self.assertEqual(set(tdf["catalogNumber"]), expected_keep, f"Failed filter on {tbl_name} in {mode}")
+
+                ros_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "rosettes_dense").iterdir()}
+                leaf_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "basal_leaves_raw").iterdir()}
+                cap_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "capitula").iterdir()}
+                self.assertEqual(ros_files, {f"{c}_p0_rosette.jpg" for c in expected_keep})
+                self.assertEqual(leaf_files, {f"{c}_leaf1.jpg" for c in expected_keep})
+                self.assertEqual(cap_files, {f"{c}_cap1.jpg" for c in expected_keep})
+
 
 if __name__ == "__main__":
     unittest.main()
