@@ -81,34 +81,12 @@ standardize_packera_taxon <- function(species_vec) {
 
 # 2b. Foliar Allometry Multivariate Testing & Residual Correction
 generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, output_pdf) {
-  dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
-  taxon_cols <- c("Packera anonyma" = "#E69F00", "Packera dubia" = "#009E73", "Packera plattensis" = "#56B4E9", "Packera paupercula" = "#CC79A7")
-  taxa_in_data <- intersect(names(taxon_cols), unique(as.character(sub_df$scientificName)))
-  if (length(taxa_in_data) == 0) taxa_in_data <- unique(as.character(sub_df$scientificName))
-  pdf(output_pdf, width = 12, height = 5.5, pointsize = 11); par(mfrow = c(1, 2), mar = c(4.5, 4.5, 3.2, 1.5), oma = c(0, 0, 2, 0), family = "sans")
-  plot(sub_df$log_centsize, sub_df$PC1_raw, type = "n", xlab = expression(log(Centroid~Size)~"[mm]"), ylab = "Raw Symmetric Morphospace PC1",
-       main = sprintf("A. Foliar Allometry (R2 = %.3f, p = %.3f)", r2_size, p_size), font.main = 2); grid(col = "gray90", lty = "solid")
-  for (sp in taxa_in_data) {
-    sp_idx <- which(sub_df$scientificName == sp)
-    if (length(sp_idx) > 0) {
-      pt_col <- if (sp %in% names(taxon_cols)) taxon_cols[sp] else "gray50"
-      points(sub_df$log_centsize[sp_idx], sub_df$PC1_raw[sp_idx], pch = 21, bg = grDevices::adjustcolor(pt_col, alpha.f = 0.65), col = pt_col, cex = 1.1)
-      if (length(sp_idx) >= 3) { sp_lm <- tryCatch(stats::lm(PC1_raw ~ log_centsize, data = sub_df[sp_idx, ]), error = function(e) NULL); if (!is.null(sp_lm)) abline(sp_lm, col = pt_col, lwd = 1.8) }
-    }
+  if (!exists("render_allometry_diagnostic_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+    source("scripts/morphometrics/pub_figures_utils.R")
   }
-  glob_lm <- tryCatch(stats::lm(PC1_raw ~ log_centsize, data = sub_df), error = function(e) NULL); if (!is.null(glob_lm)) abline(glob_lm, col = "black", lwd = 2.2, lty = 2)
-  sp_cols <- sapply(taxa_in_data, function(sp) if (sp %in% names(taxon_cols)) taxon_cols[sp] else "gray50")
-  legend("topleft", legend = c(taxa_in_data, "Global Trendline"), col = c(sp_cols, "black"), pch = c(rep(21, length(taxa_in_data)), NA), lty = c(rep(1, length(taxa_in_data)), 2), pt.bg = c(sp_cols, NA), bty = "n", cex = 0.75)
-  x_lim <- range(c(sub_df$PC1_raw, sub_df$PC1_corrected), na.rm = TRUE); y_lim <- range(c(sub_df$PC2_raw, sub_df$PC2_corrected), na.rm = TRUE)
-  plot(sub_df$PC1_raw, sub_df$PC2_raw, type = "n", xlim = x_lim, ylim = y_lim, xlab = "Morphospace PC1", ylab = "Morphospace PC2", main = "B. Morphospace Before vs. After Allometric Correction", font.main = 2); grid(col = "gray90", lty = "solid")
-  nz_arr <- sqrt((sub_df$PC1_corrected - sub_df$PC1_raw)^2 + (sub_df$PC2_corrected - sub_df$PC2_raw)^2) > 1e-4; if (any(nz_arr, na.rm = TRUE)) arrows(sub_df$PC1_raw[nz_arr], sub_df$PC2_raw[nz_arr], sub_df$PC1_corrected[nz_arr], sub_df$PC2_corrected[nz_arr], length = 0.05, col = grDevices::adjustcolor("gray65", alpha.f = 0.6), lwd = 0.8)
-  points(sub_df$PC1_raw, sub_df$PC2_raw, pch = 1, col = grDevices::adjustcolor("gray40", alpha.f = 0.6), cex = 0.9)
-  for (sp in taxa_in_data) {
-    sp_idx <- which(sub_df$scientificName == sp)
-    if (length(sp_idx) > 0) points(sub_df$PC1_corrected[sp_idx], sub_df$PC2_corrected[sp_idx], pch = 19, col = grDevices::adjustcolor(if (sp %in% names(taxon_cols)) taxon_cols[sp] else "gray50", alpha.f = 0.85), cex = 1.1)
+  if (exists("render_allometry_diagnostic_pdf", mode = "function")) {
+    render_allometry_diagnostic_pdf(sub_df, r2_size, p_size, r2_int, output_pdf)
   }
-  legend("bottomright", legend = c("Before (Raw Harmonic EFA)", "After (Allometric Residuals)", "Shift Vector"), pch = c(1, 19, NA), lty = c(NA, NA, 1), col = c("gray40", "#009E73", "gray65"), bty = "n", cex = 0.8)
-  title("Packera dubia Complex: Foliar Size-Shape Allometry & Morphospace Correction", outer = TRUE, cex.main = 1.3); dev.off()
   message("Shape allometry regression plot saved -> ", output_pdf)
 }
 
@@ -386,7 +364,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
 
   S_reg <- (W / max(sum(w_a) - g, 1)) + diag(1e-7, p); eig <- eigen(solve(S_reg, B))
   real_idx <- which(abs(Im(eig$values)) < 1e-6); real_vals <- Re(eig$values[real_idx]); real_vecs <- Re(eig$vectors[, real_idx, drop = FALSE])
-  order_idx <- order(real_vals, decreasing = TRUE); num_axes <- max(1L, min(g - 1L, p))
+  order_idx <- order(real_vals, decreasing = TRUE); num_axes <- max(1L, min(3L, ncol(X_mat), g - 1L))
   eig_vals <- real_vals[order_idx][seq_len(num_axes)]; eig_vecs <- real_vecs[, order_idx[seq_len(num_axes)], drop = FALSE]
   for (j in seq_len(num_axes)) {
     v <- eig_vecs[, j]; s <- as.numeric(sqrt(t(v) %*% S_reg %*% v))
@@ -409,16 +387,32 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   posterior_prob <- apply(post_probs, 1, max)
   second_posterior_prob <- if (g >= 2) apply(post_probs, 1, function(r) sort(r, decreasing = TRUE)[2]) else rep(0.0, nrow(df))
   posterior_margin <- posterior_prob - second_posterior_prob
-  if (num_axes == 1) {
-    can1_v <- as.numeric(Z_all[, 1]); pc1_v <- if ("PC1" %in% colnames(X_proj)) as.numeric(X_proj[, "PC1"]) else as.numeric(X_proj[, 1])
-    pc1_c <- pc1_v - mean(pc1_v, na.rm = TRUE); can2_v <- pc1_c - (sum(pc1_c * can1_v) / max(sum(can1_v^2), 1e-12)) * can1_v
-    if (stats::sd(can2_v, na.rm = TRUE) < 1e-8 && ncol(X_proj) >= 2) {
-      pc2_c <- as.numeric(X_proj[, 2]) - mean(X_proj[, 2], na.rm = TRUE); can2_v <- pc2_c - (sum(pc2_c * can1_v) / max(sum(can1_v^2), 1e-12)) * can1_v
+  orth_against <- function(vec, basis_mat) {
+    v <- as.numeric(vec) - mean(vec, na.rm = TRUE)
+    for (b_col in seq_len(ncol(basis_mat))) {
+      b <- as.numeric(basis_mat[, b_col]); v <- v - (sum(v * b, na.rm = TRUE) / max(sum(b^2, na.rm = TRUE), 1e-12)) * b
     }
-    Z_all <- cbind(Can1 = can1_v, Can2 = can2_v)
-    canonical_centroids <- cbind(Can1 = canonical_centroids[, 1], Can2 = sapply(g_levels, function(grp) mean(can2_v[active_idx[y_a == grp]], na.rm = TRUE)))
-    rownames(canonical_centroids) <- g_levels
+    v
   }
+  if (ncol(Z_all) == 1L) {
+    src1 <- if ("PC1" %in% colnames(X_proj)) X_proj[, "PC1"] else X_proj[, 1]
+    can2_v <- orth_against(src1, Z_all)
+    if (stats::sd(can2_v, na.rm = TRUE) < 1e-8 && ncol(X_proj) >= 2) can2_v <- orth_against(X_proj[, 2], Z_all)
+    Z_all <- cbind(Z_all, can2_v)
+  }
+  if (ncol(Z_all) == 2L) {
+    src3 <- if ("PC3" %in% colnames(X_proj)) X_proj[, "PC3"] else if ("PC2" %in% colnames(X_proj)) X_proj[, "PC2"] else X_proj[, min(3L, ncol(X_proj))]
+    can3_v <- orth_against(src3, Z_all)
+    if (stats::sd(can3_v, na.rm = TRUE) < 1e-8 && ncol(X_proj) >= 2) can3_v <- orth_against(X_proj[, 2], Z_all)
+    Z_all <- cbind(Z_all, can3_v)
+  }
+  colnames(Z_all) <- paste0("Can", seq_len(ncol(Z_all)))
+  if (ncol(canonical_centroids) < ncol(Z_all)) {
+    for (extra_c in (ncol(canonical_centroids) + 1L):ncol(Z_all)) {
+      canonical_centroids <- cbind(canonical_centroids, sapply(g_levels, function(grp) mean(Z_all[active_idx[y_a == grp], extra_c], na.rm = TRUE)))
+    }
+  }
+  colnames(canonical_centroids) <- colnames(Z_all); rownames(canonical_centroids) <- g_levels
   return(list(eigenvalues = eig_vals, variance_pct = var_pct, canonical_scores = Z_all, centroids = canonical_centroids,
               predicted_taxon = g_levels[pred_idx], posterior_prob = posterior_prob, second_posterior_prob = second_posterior_prob,
               posterior_margin = posterior_margin, is_active = is_active, structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col))
@@ -457,7 +451,9 @@ audit_misidentifications <- function(df, cda_res, gmm_res) {
   df$gmm_cluster <- gmm_res$classification; df$gmm_uncertainty <- round(gmm_res$uncertainty, 4); df$loocv_accuracy <- cda_res$loocv_accuracy
   df$cda_predicted_taxon <- cda_res$predicted_taxon; df$cda_posterior_prob <- round(cda_res$posterior_prob, 4)
   df$cda_second_posterior_prob <- round(cda_res$second_posterior_prob, 4); df$cda_posterior_margin <- round(cda_res$posterior_margin, 4)
-  df$can1 <- round(cda_res$canonical_scores[, 1], 5); df$can2 <- if (ncol(cda_res$canonical_scores) >= 2) round(cda_res$canonical_scores[, 2], 5) else 0.0
+  df$can1 <- round(cda_res$canonical_scores[, 1], 5)
+  df$can2 <- if (ncol(cda_res$canonical_scores) >= 2) round(cda_res$canonical_scores[, 2], 5) else 0.0
+  df$can3 <- if (ncol(cda_res$canonical_scores) >= 3) round(cda_res$canonical_scores[, 3], 5) else 0.0
   df$is_passive <- !cda_res$is_active; df$morphometric_outlier_flag <- flags; df$misidentification_flag <- flags
   df$triage_priority <- triage; df$discordance_reason <- reasons
   if ("AR_inv" %in% names(df)) df$reproductive_trait_status <- ifelse(is.na(df$AR_inv), "Unexpanded_or_Absent", "Measured")
@@ -492,49 +488,15 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   return(invisible(list(lm_pc1 = lm_pc1, lm_pc2 = lm_pc2, anova_table = anova_df)))
 }
 
-# 6. Publication-Quality CDA Biplot Vector Graphic (PDF)
+# 6. Publication-Quality 3D CDA & 3D GMM Biplot Vector Graphic (PDF)
 generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL) {
-  dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
-  pdf(output_pdf, width = 12, height = 10, pointsize = 11); par(mfrow = c(2, 2), mar = c(4.5, 4.5, 3.2, 1.5), oma = c(1, 1, 2, 1), family = "sans")
-  taxon_cols <- c("Packera anonyma" = "#E69F00", "Packera dubia" = "#009E73", "Packera plattensis" = "#56B4E9", "Packera paupercula" = "#CC79A7")
-  cluster_cols <- c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#FFFF33", "#A65628", "#F781BF")
-  is_joint <- !is.null(feature_cols) && ("AR_inv_std" %in% feature_cols)
-  cda_title <- if (is_joint) "A. Joint Vegetative + Reproductive CDA (MorphoTools2)" else "A. CDA with Passive Sample Projection (MorphoTools2)"
-  var1 <- if (length(cda_res$variance_pct) >= 1 && !is.na(cda_res$variance_pct[1])) max(0, cda_res$variance_pct[1]) else 0.0
-  var2 <- if (length(cda_res$variance_pct) >= 2 && !is.na(cda_res$variance_pct[2])) max(0, cda_res$variance_pct[2]) else 0.0
-  plot(audit_df$can1, audit_df$can2, type = "n", xlab = sprintf("Canonical Axis 1 (%.1f%% Between-Group Var)", var1),
-       ylab = sprintf("Canonical Axis 2 (%.1f%% Between-Group Var)", var2), main = cda_title, font.main = 2)
-  grid(col = "gray90", lty = "solid"); active_sub <- audit_df[!audit_df$is_passive, ]
-  for (sp in names(taxon_cols)) {
-    sp_idx <- which(active_sub$species_standardized == sp)
-    if (length(sp_idx) > 0) points(active_sub$can1[sp_idx], active_sub$can2[sp_idx], pch = 21, bg = grDevices::adjustcolor(taxon_cols[sp], alpha.f = 0.65), col = taxon_cols[sp], cex = 0.9)
+  if (!exists("render_cda_biplot_4panel_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+    source("scripts/morphometrics/pub_figures_utils.R")
   }
-  passive_sub <- audit_df[audit_df$is_passive, ]
-  if (nrow(passive_sub) > 0) {
-    clean_p <- passive_sub[!passive_sub$morphometric_outlier_flag, ]; flagged_p <- passive_sub[passive_sub$morphometric_outlier_flag, ]
-    if (nrow(clean_p) > 0) points(clean_p$can1, clean_p$can2, pch = 5, col = grDevices::adjustcolor("gray40", alpha.f = 0.5), cex = 0.8)
-    if (nrow(flagged_p) > 0) points(flagged_p$can1, flagged_p$can2, pch = 23, bg = "#D55E00", col = "black", cex = 1.1, lwd = 1.2)
+  if (exists("render_cda_biplot_4panel_pdf", mode = "function")) {
+    render_cda_biplot_4panel_pdf(audit_df, cda_res, gmm_res, output_pdf, feature_cols)
   }
-  for (k in seq_len(nrow(cda_res$centroids))) {
-    points(cda_res$centroids[k, 1], cda_res$centroids[k, 2], pch = 3, col = "black", cex = 2.2, lwd = 3)
-    text(cda_res$centroids[k, 1], cda_res$centroids[k, 2], labels = rownames(cda_res$centroids)[k], pos = 3, cex = 0.8, font = 4)
-  }
-  legend("topleft", legend = c("Tier 1 Gold Anchors", "Tier 3 Passive Congruent", "Flagged Morphospace Outliers"),
-         pch = c(21, 5, 23), pt.bg = c("#009E73", NA, "#D55E00"), col = c("#009E73", "gray40", "black"), bty = "n", cex = 0.8)
-  col_vec <- ifelse(!is.na(audit_df$gmm_cluster), grDevices::adjustcolor(cluster_cols[(audit_df$gmm_cluster - 1) %% length(cluster_cols) + 1], alpha.f = 0.6), grDevices::adjustcolor("gray70", alpha.f = 0.3))
-  plot(audit_df$PC1, audit_df$PC2, pch = 20, col = col_vec, xlab = "Morphospace PC1", ylab = "Morphospace PC2",
-       main = sprintf("B. Label-Blind GMM Clusters (Optimal K = %d)", gmm_res$best_k), font.main = 2)
-  grid(col = "gray90", lty = "solid")
-  legend("bottomright", legend = paste("Cluster", seq_len(gmm_res$best_k)), col = cluster_cols[seq_len(gmm_res$best_k)], pch = 20, bty = "n", cex = 0.8, ncol = 2)
-  bic_df <- gmm_res$bic_table; delta_bic <- bic_df$Two_Delta_BIC; delta_bic[1] <- 0
-  bar_cols <- ifelse(delta_bic >= 10, "#0072B2", ifelse(delta_bic >= 6, "#56B4E9", ifelse(delta_bic >= 2, "#F0E442", "#999999")))
-  barplot(delta_bic, names.arg = paste0("K=", bic_df$K), col = bar_cols, border = "white", xlab = "Number of Mixture Components (K)", ylab = "Bayes Factor (2*Delta*BIC vs K-1)", main = "C. Species Boundary Evidence (Kass & Raftery 1995)", font.main = 2)
-  abline(h = c(2, 6, 10), lty = 2, col = c("gray60", "gray40", "red3"))
-  hist(audit_df$cda_posterior_prob[audit_df$morphometric_outlier_flag], breaks = 15, col = grDevices::adjustcolor("#D55E00", alpha.f = 0.6), border = "white", xlab = "CDA Posterior Classification Confidence", ylab = "Specimen Count", main = "D. Posterior Confidence of Flagged Outliers", font.main = 2)
-  hist(audit_df$cda_posterior_prob[!audit_df$morphometric_outlier_flag], breaks = 20, col = grDevices::adjustcolor("#009E73", alpha.f = 0.35), border = "white", add = TRUE)
-  legend("topleft", legend = c("Flagged Outliers", "Congruent Vouchers"), fill = c(grDevices::adjustcolor("#D55E00", alpha.f = 0.6), grDevices::adjustcolor("#009E73", alpha.f = 0.35)), bty = "n", cex = 0.8)
-  title(if (is_joint) "Packera dubia Complex: Joint Morphometrics & Passive CDA" else "Packera dubia Complex: Morphometrics & Passive CDA", outer = TRUE, cex.main = 1.4)
-  dev.off(); message("CDA biplot graphic successfully saved to ", output_pdf)
+  message("CDA biplot graphic successfully saved to ", output_pdf)
 }
 
 # 7. Main Workflow Orchestrator
@@ -627,7 +589,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "pixels_per_mm", "is_calibrated_mm",
                            "species_raw", "species_standardized", "determiner_tier", "authority_weight", "cda_predicted_taxon", "cda_posterior_prob",
                            "cda_second_posterior_prob", "cda_posterior_margin", "loocv_accuracy", "is_passive", "morphometric_outlier_flag", "misidentification_flag",
-                           "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "pheno_sin", "pheno_cos",
+                           "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "pheno_sin", "pheno_cos",
                            "PC1", "PC2", "PC3", "PC4", "PC5", "centroid_size", "log_centsize", "solidity", "ucs_score", "AR_inv", "AR_inv_std",
                            "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]

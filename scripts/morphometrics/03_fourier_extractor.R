@@ -640,7 +640,7 @@ run_fourier_extraction <- function(opts) {
     if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
       source("scripts/morphometrics/pub_figures_utils.R")
       export_step03_fourier_pc_tables(specimen_df, efa_df, opts$output)
-      generate_step03_pub_figures(efa_df, specimen_df, harm_mat, if (exists("pca_fit")) pca_fit else NULL, opts$figures_dir, opts$output)
+      generate_step03_pub_figures(efa_df, specimen_df, harm_mat, if (exists("pca_fit")) pca_fit else NULL, opts$figures_dir, opts$output, sym_res$pca)
     }
   }, error = function(e) warning("Step 03 publication figures/tables export warning: ", e$message))
 
@@ -745,40 +745,23 @@ run_fourier_extraction <- function(opts) {
       else message("[ASSERTION NOTE] reconstruction_tier p-value = ", p_val)
     }
 
-    # 7. Diagnostic Comparative Density Plot Export
+    # 7. Diagnostic 3D PCA Morphospace Export (Tier 1 Direct vs. Tier 2 Reflected, Hollow Markers)
     dir.create(dirname(opts$plot_out), recursive = TRUE, showWarnings = FALSE)
-    if (requireNamespace("ggplot2", quietly = TRUE)) {
-      plot_df <- tier_manifest[!is.na(tier_manifest$PC1) & !is.na(tier_manifest$PC2), ]
-      p1 <- ggplot2::ggplot(plot_df, ggplot2::aes(x = PC1, fill = reconstruction_tier, color = reconstruction_tier)) +
-        ggplot2::geom_density(alpha = 0.4, linewidth = 0.8) +
-        ggplot2::scale_fill_manual(values = c("Tier 1" = "#1b9e77", "Tier 2" = "#d95f02")) +
-        ggplot2::scale_color_manual(values = c("Tier 1" = "#1b9e77", "Tier 2" = "#d95f02")) +
-        ggplot2::labs(title = "Empirical Tier Morphological Equivalence",
-                      subtitle = "Symmetric Fourier PC1 Density Distribution (Tier 1 Pristine vs. Tier 2 Reflected)",
-                      x = "Symmetric Morphospace PC1", y = "Density",
-                      fill = "Reconstruction Tier", color = "Reconstruction Tier") +
-        ggplot2::theme_minimal(base_size = 12) +
-        ggplot2::theme(legend.position = "bottom", plot.title = ggplot2::element_text(face = "bold"))
-      ggplot2::ggsave(opts$plot_out, plot = p1, width = 8, height = 5)
+    if (file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+    if (exists("render_tier1_vs_tier2_3d_pdf", mode = "function")) {
+      render_tier1_vs_tier2_3d_pdf(tier_manifest, opts$plot_out, if (exists("pca_fit")) pca_fit else NULL, sym_res$pca)
     } else {
-      pdf(opts$plot_out, width = 8, height = 5)
-      pc1_t1 <- tier_manifest$PC1[tier_manifest$reconstruction_tier == "Tier 1"]
-      pc1_t2 <- tier_manifest$PC1[tier_manifest$reconstruction_tier == "Tier 2"]
-      d1 <- stats::density(pc1_t1, na.rm = TRUE)
-      d2 <- stats::density(pc1_t2, na.rm = TRUE)
-      xlims <- range(c(d1$x, d2$x))
-      ylims <- c(0, max(c(d1$y, d2$y)) * 1.1)
-      plot(d1, xlim = xlims, ylim = ylims, col = "#1b9e77", lwd = 2,
-           main = "Symmetric Fourier PC1 Density: Tier 1 vs Tier 2",
-           xlab = "Symmetric Morphospace PC1", ylab = "Density")
-      lines(d2, col = "#d95f02", lwd = 2, lty = 2)
-      polygon(d1, col = grDevices::adjustcolor("#1b9e77", alpha.f = 0.3), border = NA)
-      polygon(d2, col = grDevices::adjustcolor("#d95f02", alpha.f = 0.3), border = NA)
-      legend("topright", legend = c("Tier 1 (Pristine)", "Tier 2 (Reflected)"),
-             col = c("#1b9e77", "#d95f02"), lwd = 2, lty = c(1, 2), bty = "n")
+      pdf(opts$plot_out, width = 10, height = 5)
+      is_t2 <- grepl("2", as.character(tier_manifest$reconstruction_tier))
+      pmat <- graphics::persp(range(tier_manifest$PC1, na.rm = TRUE), range(tier_manifest$PC2, na.rm = TRUE), matrix(min(tier_manifest$PC3, na.rm = TRUE), 2, 2),
+                              zlim = range(tier_manifest$PC3, na.rm = TRUE), theta = 35, phi = 22, col = NA, border = NA, box = TRUE,
+                              xlab = "PC1", ylab = "PC2", zlab = "PC3", main = "3D EFA Morphospace: Tier 1 vs Tier 2")
+      pt2 <- grDevices::trans3d(tier_manifest$PC1, tier_manifest$PC2, tier_manifest$PC3, pmat)
+      points(pt2$x, pt2$y, pch = ifelse(is_t2, 2, 1), bg = NA, col = ifelse(is_t2, "#D55E00", "#0072B2"), cex = 0.85, lwd = 1.0)
+      legend("topright", legend = c("Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"), col = c("#0072B2", "#D55E00"), pch = c(1, 2), pt.bg = NA, bty = "n")
       dev.off()
     }
-    message("Diagnostic comparative density plot exported: ", opts$plot_out)
+    message("Diagnostic 3D PCA morphospace plot exported: ", opts$plot_out)
   }
 
   return(invisible(efa_df))
