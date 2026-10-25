@@ -24,9 +24,14 @@ CUSTOM_RUN_ID=""
 SKIP_HARVEST=false
 FORCE_FLAG=""
 START_STEP=1
+FOCAL_TAXON=""
+INTRASPECIFIC_MODE="false"
+GOLD_ANCHORS=30
 LIMIT_ARG=()
 SAM2_FLAG=()
 DEMO_FLAG=()
+FOCAL_ARGS=()
+INTRASPECIFIC_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -66,11 +71,38 @@ while [[ $# -gt 0 ]]; do
       DEMO_FLAG=("--demo")
       shift
       ;;
+    --focal-taxon)
+      FOCAL_TAXON="$2"
+      shift 2
+      ;;
+    --focal-taxon=*)
+      FOCAL_TAXON="${1#*=}"
+      shift
+      ;;
+    --intraspecific-mode)
+      INTRASPECIFIC_MODE="true"
+      shift
+      ;;
+    --gold-anchors)
+      GOLD_ANCHORS="$2"
+      shift 2
+      ;;
+    --gold-anchors=*)
+      GOLD_ANCHORS="${1#*=}"
+      shift
+      ;;
     *)
       shift
       ;;
   esac
 done
+
+if [[ -n "${FOCAL_TAXON}" ]]; then
+  FOCAL_ARGS=("--focal-taxon" "${FOCAL_TAXON}")
+fi
+if [[ "${INTRASPECIFIC_MODE}" == "true" ]]; then
+  INTRASPECIFIC_ARGS=("--intraspecific-mode")
+fi
 
 if [[ -n "${CUSTOM_RUN_ID}" ]]; then
   RUN_ID="${CUSTOM_RUN_ID}"
@@ -144,9 +176,18 @@ write_run_metadata(
 if [[ "${START_STEP}" -le 1 ]]; then
   if [[ "${SKIP_HARVEST}" == "false" && ( -n "${FORCE_FLAG}" || ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ) ]]; then
     echo "[Step 01/07] Running Voucher Harvester (with high-res image downloads & quality audit)..."
+    HARVEST_TAXON_ARGS=()
+    if [[ "${INTRASPECIFIC_MODE}" == "true" && -n "${FOCAL_TAXON}" ]]; then
+      if [[ "${FOCAL_TAXON}" == "Packera dubia" ]]; then
+        HARVEST_TAXON_ARGS=(--taxon "Packera dubia" "Senecio tomentosus" "Packera tomentosa")
+      else
+        HARVEST_TAXON_ARGS=(--taxon "${FOCAL_TAXON}")
+      fi
+    fi
     "${PYTHON_MAIN}" scripts/data_prep/01_voucher_harvester.py \
       --out-dir "data/raw_vouchers" \
       --output-csv "${RUN_DIR}/data/tables/curated_vouchers.csv" \
+      "${HARVEST_TAXON_ARGS[@]}" \
       --download-images \
       ${FORCE_FLAG}
   fi
@@ -162,6 +203,70 @@ if [[ ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
     echo "[ERROR] Missing curated_vouchers.csv in both ${RUN_DIR}/data/tables/ and data/tables/." >&2
     exit 1
   fi
+fi
+
+# Focal-Taxon Voucher Subset Builder (Strategy 1: Focal + Gold Anchors; Strategy 2: Pure Intraspecific)
+if [[ -n "${FOCAL_TAXON}" ]]; then
+  echo "[Preflight] Filtering ${RUN_DIR}/data/tables/curated_vouchers.csv for focal taxon '${FOCAL_TAXON}' (intraspecific_mode=${INTRASPECIFIC_MODE}, gold_anchors=${GOLD_ANCHORS})..."
+  "${PYTHON_MAIN}" -c "
+import importlib
+import os
+import sys
+from pathlib import Path
+import pandas as pd
+
+csv_path = Path(sys.argv[1])
+focal_raw = sys.argv[2]
+intraspecific_mode = sys.argv[3].lower() == 'true'
+gold_anchors = int(sys.argv[4])
+
+mod05 = importlib.import_module('scripts.analysis.05_cleanlab_vision_xai')
+standardize_packera_taxon = mod05.standardize_packera_taxon
+focal_taxon = standardize_packera_taxon(focal_raw)
+
+df = pd.read_csv(csv_path)
+sp_col = 'species_raw' if 'species_raw' in df.columns else ('scientificName' if 'scientificName' in df.columns else 'species')
+df['species_standardized'] = df[sp_col].apply(standardize_packera_taxon)
+
+focal_df = df[df['species_standardized'] == focal_taxon].copy()
+if intraspecific_mode:
+    subset_df = focal_df
+    print(f'[Strategy 2: Pure Intraspecific] Retained {len(subset_df)} {focal_taxon} vouchers (0 outgroup anchors).')
+else:
+    outgroup_dfs = []
+    outgroup_counts = {}
+    outgroup_taxa = [t for t in mod05.TARGET_TAXA if t != focal_taxon]
+    for tx in outgroup_taxa:
+        tx_df = df[(df['species_standardized'] == tx) & (df.get('determiner_tier', '') == 'Tier_1_Gold')].copy()
+        if not tx_df.empty:
+            def _has_local(row):
+                img_p = str(row.get('image_path', '')).strip()
+                cat_p = f\"data/raw_vouchers/{str(row.get('catalogNumber', '')).strip()}.jpg\"
+                return (bool(img_p) and Path(img_p).exists()) or Path(cat_p).exists()
+            def _has_url_or_path(row):
+                for c in ('image_path', 'image_url', 'identifier', 'good_quality_AccessURI'):
+                    v = row.get(c, None)
+                    if pd.notna(v) and str(v).strip():
+                        return True
+                return False
+            tx_df['_has_local'] = tx_df.apply(_has_local, axis=1)
+            tx_df['_has_valid'] = tx_df['_has_local'] | tx_df.apply(_has_url_or_path, axis=1)
+            tx_df = tx_df[tx_df['_has_valid']].sort_values(by='_has_local', ascending=False, kind='mergesort')
+            tx_sel = tx_df.head(gold_anchors).drop(columns=['_has_local', '_has_valid'])
+            outgroup_dfs.append(tx_sel)
+            outgroup_counts[tx] = len(tx_sel)
+        else:
+            outgroup_counts[tx] = 0
+    subset_df = pd.concat([focal_df] + outgroup_dfs, ignore_index=True) if outgroup_dfs else focal_df
+    print(f'[Strategy 1: Focal + Outgroup Gold Anchors] Focal {focal_taxon}: {len(focal_df)} | Outgroup Tier_1_Gold anchors: {outgroup_counts} (Total: {len(subset_df)})')
+
+tmp_path = csv_path.with_suffix(csv_path.suffix + '.tmp')
+with open(tmp_path, 'w', encoding='utf-8', newline='') as f:
+    subset_df.to_csv(f, index=False)
+    f.flush()
+    os.fsync(f.fileno())
+tmp_path.replace(csv_path)
+" "${RUN_DIR}/data/tables/curated_vouchers.csv" "${FOCAL_TAXON}" "${INTRASPECIFIC_MODE}" "${GOLD_ANCHORS}"
 fi
 
 # ------------------------------------------------------------------------------
@@ -209,7 +314,9 @@ if [[ "${START_STEP}" -le 4 ]]; then
     --output-batch-audit "${RUN_DIR}/outputs/reports/institutional_batch_effect_audit.csv" \
     --output-flags "${RUN_DIR}/data/tables/morphometric_flags.csv" \
     --output-plot "${RUN_DIR}/outputs/figures/cda_passive_projection.pdf" \
-    --output-report "${RUN_DIR}/outputs/reports/gmm_bayes_factors_summary.csv"
+    --output-report "${RUN_DIR}/outputs/reports/gmm_bayes_factors_summary.csv" \
+    "${FOCAL_ARGS[@]}" \
+    "${INTRASPECIFIC_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------
@@ -220,9 +327,12 @@ if [[ "${START_STEP}" -le 5 ]]; then
   "${PYTHON_MAIN}" scripts/analysis/05_cleanlab_vision_xai.py \
     --rosette-dir "${RUN_DIR}/data/cropped_patches" \
     --vouchers-csv "${RUN_DIR}/data/tables/curated_vouchers.csv" \
+    --morphometrics-csv "${RUN_DIR}/data/tables/morphometric_flags.csv" \
     --output-csv "${RUN_DIR}/data/tables/label_noise_audit.csv" \
     --output-figure "${RUN_DIR}/outputs/figures/GradCAM_audit_panel.png" \
     --export-figures \
+    "${FOCAL_ARGS[@]}" \
+    "${INTRASPECIFIC_ARGS[@]}" \
     "${DEMO_FLAG[@]}"
 fi
 
@@ -245,6 +355,8 @@ if [[ "${START_STEP}" -le 6 ]]; then
     --output-flags "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv" \
     --output-summary "${RUN_DIR}/outputs/reports/multimodal_spatial_rf_summary.csv" \
     --output-plot "${RUN_DIR}/outputs/figures/spatial_rf_niche_importance.pdf" \
+    "${FOCAL_ARGS[@]}" \
+    "${INTRASPECIFIC_ARGS[@]}" \
     "${DEMO_FLAG[@]}"
 fi
 
@@ -264,7 +376,9 @@ if [[ "${START_STEP}" -le 7 ]]; then
     --output-triage "${RUN_DIR}/outputs/reports/final_curation_triage.csv" \
     --output-figure "${RUN_DIR}/outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf" \
     --output-report "${RUN_DIR}/outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md" \
-    --output-html "${RUN_DIR}/outputs/reports/Triage_Dashboard_Interactive.html"
+    --output-html "${RUN_DIR}/outputs/reports/Triage_Dashboard_Interactive.html" \
+    "${FOCAL_ARGS[@]}" \
+    "${INTRASPECIFIC_ARGS[@]}"
 fi
 
 # Finalize run_metadata.json with end timestamp and table row counts

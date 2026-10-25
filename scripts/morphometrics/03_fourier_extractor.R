@@ -387,50 +387,26 @@ run_fourier_extraction <- function(opts) {
       }
     }
 
-    resolved_pid <- if (!is.null(m_match) && nrow(m_match) > 0 && "plant_individual_id" %in% names(m_match) && !is.na(m_match$plant_individual_id[1])) {
-      as.integer(m_match$plant_individual_id[1])
-    } else {
-      meta$plant_id
-    }
-    resolved_tier <- if (!is.null(m_match) && nrow(m_match) > 0 && "assigned_tier" %in% names(m_match) && !is.na(m_match$assigned_tier[1])) {
-      as.character(m_match$assigned_tier[1])
-    } else {
-      "Tier_1_Direct"
-    }
-    resolved_ppm <- if (!is.null(m_match) && nrow(m_match) > 0 && "pixels_per_mm" %in% names(m_match)) {
-      suppressWarnings(as.numeric(m_match$pixels_per_mm[1]))
-    } else {
-      NA_real_
-    }
+    resolved_pid <- if (!is.null(m_match) && nrow(m_match) > 0 && "plant_individual_id" %in% names(m_match) && !is.na(m_match$plant_individual_id[1])) as.integer(m_match$plant_individual_id[1]) else meta$plant_id
+    resolved_tier <- if (!is.null(m_match) && nrow(m_match) > 0 && "assigned_tier" %in% names(m_match) && !is.na(m_match$assigned_tier[1])) as.character(m_match$assigned_tier[1]) else "Tier_1_Direct"
+    resolved_ppm <- if (!is.null(m_match) && nrow(m_match) > 0 && "pixels_per_mm" %in% names(m_match)) suppressWarnings(as.numeric(m_match$pixels_per_mm[1])) else NA_real_
     is_calibrated_mm <- !is.na(resolved_ppm) && is.finite(resolved_ppm) && resolved_ppm > 0
     if (!is_calibrated_mm) resolved_ppm <- NA_real_
 
     # Calculate raw pixel area & polygon solidity before coordinate scaling
     area_px <- abs(0.5 * sum(coo[, 1] * c(coo[-1, 2], coo[1, 2]) - coo[, 2] * c(coo[-1, 1], coo[1, 1])))
-    resolved_solidity <- if (!is.null(m_match) && nrow(m_match) > 0 && "solidity" %in% names(m_match) && !is.na(m_match$solidity[1])) {
-      round(suppressWarnings(as.numeric(m_match$solidity[1])), 4)
-    } else {
-      compute_polygon_solidity(coo, area_px)
-    }
+    resolved_solidity <- if (!is.null(m_match) && nrow(m_match) > 0 && "solidity" %in% names(m_match) && !is.na(m_match$solidity[1])) round(suppressWarnings(as.numeric(m_match$solidity[1])), 4) else compute_polygon_solidity(coo, area_px)
     resolved_ucs <- if (!is.null(m_match) && nrow(m_match) > 0 && "ucs_score" %in% names(m_match) && !is.na(m_match$ucs_score[1])) {
       round(suppressWarnings(as.numeric(m_match$ucs_score[1])), 4)
     } else if (!is.null(m_match) && nrow(m_match) > 0 && "ucs" %in% names(m_match) && !is.na(m_match$ucs[1])) {
       round(suppressWarnings(as.numeric(m_match$ucs[1])), 4)
-    } else {
-      NA_real_
-    }
+    } else NA_real_
 
     # Calibrate contour coordinates to physical millimeters (mm) when pixels_per_mm > 0
-    if (is_calibrated_mm) {
-      coo <- coo / resolved_ppm
-    }
+    if (is_calibrated_mm) coo <- coo / resolved_ppm
 
     # Oriented major-axis length-to-width aspect ratio (Momocs::coo_lw / SVD major-axis alignment)
-    lw <- if (has_momocs) {
-      tryCatch(Momocs::coo_lw(coo), error = function(e) NULL)
-    } else {
-      NULL
-    }
+    lw <- if (has_momocs) tryCatch(Momocs::coo_lw(coo), error = function(e) NULL) else NULL
     if (is.null(lw) || length(lw) < 2 || is.na(lw[2]) || lw[2] <= 1e-6) {
       coo_centered <- scale(coo, center = TRUE, scale = FALSE)
       svd_rot <- coo_centered %*% svd(coo_centered)$v
@@ -442,21 +418,12 @@ run_fourier_extraction <- function(opts) {
 
     shape_name <- meta$shape_id
     rec <- data.frame(
-      shape_id = shape_name,
-      catalogNumber = meta$catalogNumber,
-      plant_individual_id = resolved_pid,
-      leaf_id = meta$leaf_id,
-      assigned_tier = resolved_tier,
-      pixels_per_mm = resolved_ppm,
-      is_calibrated_mm = is_calibrated_mm,
-      aspect_ratio = aspect_ratio,
-      solidity = resolved_solidity,
-      ucs_score = resolved_ucs,
-      area_px = round(area_px, 1),
+      shape_id = shape_name, catalogNumber = meta$catalogNumber, plant_individual_id = resolved_pid,
+      leaf_id = meta$leaf_id, assigned_tier = resolved_tier, pixels_per_mm = resolved_ppm,
+      is_calibrated_mm = is_calibrated_mm, aspect_ratio = aspect_ratio, solidity = resolved_solidity,
+      ucs_score = resolved_ucs, area_px = round(area_px, 1),
       centroid_size = if (!is.na(centsize)) round(centsize, 4) else NA_real_,
-      log_centsize = log_cs,
-      mask_source = f,
-      stringsAsFactors = FALSE
+      log_centsize = log_cs, mask_source = f, stringsAsFactors = FALSE
     )
     list(shape_name = shape_name, coo = coo, rec = rec)
   }

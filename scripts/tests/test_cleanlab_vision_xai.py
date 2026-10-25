@@ -377,6 +377,46 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             "Corrupted vouchers not properly assigned to Prune & Queue.",
         )
 
+    def test_single_taxon_centroid_cosine_outlier_mode(self):
+        """Verify 1-class DINOv2 probing uses L2 medoid cosine distance without calling LogisticRegression.fit on 1 class."""
+        rng = np.random.default_rng(42)
+        n_samples = 25
+        base_vec = rng.normal(0.0, 1.0, (1, 768))
+        features = (base_vec + rng.normal(0.0, 0.05, (n_samples, 768))).astype(np.float32)
+        # Make sample 0 an extreme visual outlier in the opposite direction
+        features[0] = -base_vec[0] * 10.0
+        labels = np.ones(n_samples, dtype=int)  # All Packera dubia (class 1)
+        orientations = ["adaxial"] * n_samples
+
+        pred_probs, acc, f1 = compute_out_of_fold_probabilities(
+            features=features,
+            labels=labels,
+            n_splits=5,
+            surface_orientations=orientations,
+        )
+        self.assertEqual(pred_probs.shape[0], n_samples)
+        self.assertTrue(np.allclose(pred_probs.sum(axis=1), 1.0, atol=1e-4))
+        self.assertLess(pred_probs[0, 1], 0.15, "Extreme cosine outlier must receive low self-class probability.")
+
+        records_df = pd.DataFrame({
+            "catalogNumber": [f"DUB_{i:03d}" for i in range(n_samples)],
+            "patch_path": [f"/p_{i}" for i in range(n_samples)],
+            "species_raw": ["Packera dubia"] * n_samples,
+            "taxon": ["Packera dubia"] * n_samples,
+            "label_idx": labels,
+            "determiner_tier": ["Tier_1_Gold"] * n_samples,
+            "surface_orientation": orientations,
+        })
+        audit_df = run_confident_learning_audit(
+            pred_probs=pred_probs,
+            labels=labels,
+            records_df=records_df,
+            class_names=TARGET_TAXA,
+            error_threshold=0.85,
+        )
+        self.assertTrue(bool(audit_df.loc[0, "is_label_corrupted"]))
+        self.assertEqual(audit_df.loc[0, "species_standardized"], "Packera dubia")
+
 
 if __name__ == "__main__":
     unittest.main()

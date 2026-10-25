@@ -68,6 +68,10 @@ parse_args_robust <- function() {
       default = "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md", help = "Markdown report [default: %default]"),
     optparse::make_option(c("--output-html"), type = "character",
       default = "", help = "Optional interactive HTML triage dashboard [default: %default]"),
+    optparse::make_option(c("--focal-taxon"), type = "character",
+      default = "", help = "Optional focal taxon filter for final curation triage and reports (e.g. 'Packera dubia') [default: %default]"),
+    optparse::make_option(c("--intraspecific-mode"), action = "store_true",
+      default = FALSE, help = "Enable pure single-species intraspecific delimitation mode [default: %default]"),
     optparse::make_option(c("--demo"), action = "store_true",
       default = FALSE, help = "Enable explicit demo/test mode [default: %default]")
   )
@@ -85,7 +89,8 @@ parse_args_robust <- function() {
     gmm_summary = "outputs/reports/gmm_bayes_factors_summary.csv", gmm_bic = "data/tables/gmm_bic_model_selection.csv",
     cda_summary = "data/tables/cda_summary.csv", niche_summary = "outputs/reports/multimodal_spatial_rf_summary.csv",
     output_queue = "data/tables/triage_queue.csv", output_plot = "outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf",
-    output_report = "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md"
+    output_report = "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md",
+    focal_taxon = "", intraspecific_mode = FALSE
   ))
 }
 
@@ -104,13 +109,19 @@ standardize_packera_taxon <- function(s_vec) {
 # ------------------------------------------------------------------------------
 # 2. Multi-Evidence Taxonomic Decision Engine
 # ------------------------------------------------------------------------------
-apply_taxonomic_decision_matrix <- function(df) {
+apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
   message("Evaluating vouchers across Multi-Evidence Taxonomic Decision Matrix...")
   if ("morphometric_outlier_flag" %in% names(df) && !("misidentification_flag" %in% names(df))) {
     df$misidentification_flag <- df$morphometric_outlier_flag
   } else if ("misidentification_flag" %in% names(df) && !("morphometric_outlier_flag" %in% names(df))) {
     df$morphometric_outlier_flag <- df$misidentification_flag
   }
+  if ("vision_c_error" %in% names(df) && !("c_error" %in% names(df))) {
+    df$c_error <- df$vision_c_error
+  } else if ("c_error" %in% names(df) && !("vision_c_error" %in% names(df))) {
+    df$vision_c_error <- df$c_error
+  }
+  is_intra <- isTRUE(intraspecific_mode)
   n <- nrow(df)
   status_calls <- character(n)
   rec_taxa <- character(n)
@@ -126,38 +137,68 @@ apply_taxonomic_decision_matrix <- function(df) {
     reg_grp  <- if ("regional_group" %in% names(df) && !is.na(df$regional_group[i])) as.character(df$regional_group[i]) else ""
     
     # Morphometrics flags (CDA / GMM join)
-    morph_sp <- if ("cda_predicted_taxon" %in% names(df) && !is.na(df$cda_predicted_taxon[i])) df$cda_predicted_taxon[i] else NULL
+    morph_sp <- if ("cda_predicted_taxon" %in% names(df) && !is.na(df$cda_predicted_taxon[i])) as.character(df$cda_predicted_taxon[i]) else NULL
     cda_prob <- if ("cda_posterior_prob" %in% names(df) && !is.na(df$cda_posterior_prob[i])) df$cda_posterior_prob[i] else NA_real_
-    vis_sp   <- if ("vision_predicted_label" %in% names(df) && !is.na(df$vision_predicted_label[i])) df$vision_predicted_label[i] else NULL
-    c_err    <- if ("c_error" %in% names(df) && !is.na(df$c_error[i])) df$c_error[i] else 0.0
+    vis_sp   <- if ("vision_predicted_label" %in% names(df) && !is.na(df$vision_predicted_label[i])) as.character(df$vision_predicted_label[i]) else NULL
+    c_err    <- if ("c_error" %in% names(df) && !is.na(df$c_error[i])) as.numeric(df$c_error[i]) else 0.0
+    v_cerr   <- if ("vision_c_error" %in% names(df) && !is.na(df$vision_c_error[i])) as.numeric(df$vision_c_error[i]) else c_err
     is_corrupt <- if ("is_label_corrupted" %in% names(df) && !is.na(df$is_label_corrupted[i])) isTRUE(df$is_label_corrupted[i]) else FALSE
-    is_mo_flag <- if ("misidentification_flag" %in% names(df) && !is.na(df$misidentification_flag[i])) {
-      isTRUE(df$misidentification_flag[i])
-    } else if ("morphometric_outlier_flag" %in% names(df) && !is.na(df$morphometric_outlier_flag[i])) {
+    is_mo_flag <- if ("morphometric_outlier_flag" %in% names(df) && !is.na(df$morphometric_outlier_flag[i])) {
       isTRUE(df$morphometric_outlier_flag[i])
+    } else if ("misidentification_flag" %in% names(df) && !is.na(df$misidentification_flag[i])) {
+      isTRUE(df$misidentification_flag[i])
     } else {
       FALSE
     }
     triage_cat <- if ("triage_category" %in% names(df) && !is.na(df$triage_category[i])) df$triage_category[i] else "Clean_MultiModal_Consensus"
+    mm_conf    <- if ("multimodal_conflict_flag" %in% names(df) && !is.na(df$multimodal_conflict_flag[i])) isTRUE(df$multimodal_conflict_flag[i]) else FALSE
 
-    edaph_sp <- if ("edaphic_best_fit_taxon" %in% names(df) && !is.na(df$edaphic_best_fit_taxon[i])) df$edaphic_best_fit_taxon[i] else given_sp
+    edaph_sp <- if ("edaphic_best_fit_taxon" %in% names(df) && !is.na(df$edaphic_best_fit_taxon[i])) as.character(df$edaphic_best_fit_taxon[i]) else given_sp
     ph_val   <- if ("soil_ph" %in% names(df) && !is.na(df$soil_ph[i])) df$soil_ph[i] else 5.8
     sand_val <- if ("soil_sand" %in% names(df) && !is.na(df$soil_sand[i])) df$soil_sand[i] else 45.0
     gmm_unc  <- if ("gmm_uncertainty" %in% names(df) && !is.na(df$gmm_uncertainty[i])) df$gmm_uncertainty[i] else 0.05
+    g_cl     <- if ("gmm_cluster" %in% names(df) && !is.na(df$gmm_cluster[i])) as.integer(df$gmm_cluster[i]) else 1L
+    ddoy     <- if ("delta_doy" %in% names(df) && !is.na(df$delta_doy[i])) as.numeric(df$delta_doy[i]) else 0.0
+
+    morph_is_taxon <- !is.null(morph_sp) && (morph_sp %in% TARGET_TAXA)
+    vis_is_taxon   <- !is.null(vis_sp) && (vis_sp %in% TARGET_TAXA)
+
+    if (is_intra) {
+      is_cryptic_intra <- is_mo_flag && (v_cerr > 0.85 || c_err > 0.85) && (abs(ddoy) >= 18.0)
+      has_edaph_pheno_div <- (abs(ddoy) >= 7.0) || mm_conf || (triage_cat != "Clean_MultiModal_Consensus") ||
+                             (ph_val > 5.6 || sand_val < 55.0) || grepl("Flatrock|Outcrop|Piedmont|Appalachian", reg_grp, ignore.case = TRUE)
+      is_subspecies_intra <- (g_cl > 1L) && has_edaph_pheno_div
+
+      if (is_cryptic_intra) {
+        status_calls[i] <- "Putative_Cryptic_Species"
+        rec_taxa[i] <- sprintf("%s (Putative Cryptic Lineage K%d)", given_sp, g_cl)
+        triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"
+        triage_acts[i] <- "Flag_Putative_Cryptic_Species"
+        rationales[i] <- sprintf("Extreme morphometric outlier + vision discordance (c_err=%.2f) + allochronic shift (delta_DOY=%.1f d)", max(v_cerr, c_err), ddoy)
+        next
+      } else if (is_subspecies_intra) {
+        status_calls[i] <- "Subspecies_Ecotype"
+        rec_taxa[i] <- sprintf("%s var. morphotype_K%d", given_sp, g_cl)
+        triage_prios[i] <- "MEDIUM"
+        triage_acts[i] <- "Accept_Subspecific_Treatment"
+        rationales[i] <- sprintf("Secondary GMM morphotype (K%d) with edaphic/phenological divergence (delta_DOY=%.1f d, pH=%.2f, Sand=%.1f%%)", g_cl, ddoy, ph_val, sand_val)
+        next
+      }
+    }
 
     # Case 1: Glabrescent Packera dubia ecophenotype / ontogenetic foliar wear
-    is_glabrescent_dubia <- (given_sp == "Packera dubia" || (!is.null(morph_sp) && morph_sp == "Packera dubia")) &&
-                            ((!is.null(vis_sp) && vis_sp == "Packera anonyma") || (!is.null(morph_sp) && morph_sp == "Packera anonyma")) &&
+    is_glabrescent_dubia <- (given_sp == "Packera dubia" || (morph_is_taxon && morph_sp == "Packera dubia")) &&
+                            ((vis_is_taxon && vis_sp == "Packera anonyma") || (morph_is_taxon && morph_sp == "Packera anonyma")) &&
                             (ph_val <= 5.5 && sand_val >= 60.0) && (doy >= 130)
 
     # Case 2: Severe Misidentification (Consensus against given label)
     is_severe_misid <- is_corrupt || is_mo_flag || triage_cat == "Severe_Triple_Stream_Conflict" ||
-                       (c_err >= 0.85 && !is.null(vis_sp) && vis_sp != given_sp) ||
-                       (!is.null(morph_sp) && morph_sp != given_sp && !is.na(cda_prob) && cda_prob >= 0.75)
+                       (c_err >= 0.85 && vis_is_taxon && vis_sp != given_sp) ||
+                       (morph_is_taxon && morph_sp != given_sp && !is.na(cda_prob) && cda_prob >= 0.75)
 
     # Case 3: Hybrid Swarm / Introgressant (Intermediate morphology & high entropy)
     is_hybrid_swarm <- triage_cat == "Putative_Hybrid_Zone_Intergrade" ||
-                       (!is.na(cda_prob) && cda_prob >= 0.40 && cda_prob <= 0.65 && !is.null(morph_sp) && morph_sp != given_sp) ||
+                       (!is.na(cda_prob) && cda_prob >= 0.40 && cda_prob <= 0.65 && morph_is_taxon && morph_sp != given_sp) ||
                        (gmm_unc >= 0.35)
 
     # Case 4: Subspecific / Regional Variety (e.g., P. paupercula var. savannarum)
@@ -171,7 +212,7 @@ apply_taxonomic_decision_matrix <- function(df) {
       triage_acts[i] <- "Annotate_Glabrescent_Ecophenotype"
       rationales[i] <- sprintf("Late-season foliar wear (DOY %d); indumentum shed in sandy acidic habitat (pH=%.2f, Sand=%.1f%%)", doy, ph_val, sand_val)
     } else if (is_severe_misid) {
-      target_sp <- if (!is.null(morph_sp) && morph_sp != given_sp) morph_sp else if (!is.null(vis_sp) && vis_sp != given_sp) vis_sp else edaph_sp
+      target_sp <- if (morph_is_taxon && morph_sp != given_sp) morph_sp else if (vis_is_taxon && vis_sp != given_sp) vis_sp else edaph_sp
       status_calls[i] <- "Misidentification_Severe"
       rec_taxa[i] <- target_sp
       triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else if (tier == "Tier_2_Silver") "HIGH" else "HIGH"
@@ -179,7 +220,7 @@ apply_taxonomic_decision_matrix <- function(df) {
       rationales[i] <- sprintf("Given %s contradicted across independent streams; reassign to %s", given_sp, target_sp)
     } else if (is_hybrid_swarm) {
       status_calls[i] <- "Hybrid_Intergrade_Swarm"
-      alt_sp <- if (!is.null(morph_sp) && morph_sp != given_sp) morph_sp else if (!is.null(vis_sp) && vis_sp != given_sp) vis_sp else if (edaph_sp != given_sp) edaph_sp else if (given_sp == "Packera dubia") "Packera anonyma" else "Packera plattensis"
+      alt_sp <- if (morph_is_taxon && morph_sp != given_sp) morph_sp else if (vis_is_taxon && vis_sp != given_sp) vis_sp else if (edaph_sp %in% TARGET_TAXA && edaph_sp != given_sp) edaph_sp else if (given_sp == "Packera dubia") "Packera anonyma" else "Packera plattensis"
       rec_taxa[i] <- sprintf("%s x %s", given_sp, alt_sp)
       triage_prios[i] <- if (tier == "Tier_1_Gold") "HIGH" else "MEDIUM"
       triage_acts[i] <- "Flag_Hybrid_Swarm_Intergrade"
@@ -222,6 +263,9 @@ apply_taxonomic_decision_matrix <- function(df) {
     } else if (sc == "Hybrid_Intergrade_Swarm") {
       treat_broad[i] <- "Hybrid / Introgressant"
       treat_sub[i]   <- "Hybrid_Introgressant"
+    } else if (sc == "Putative_Cryptic_Species") {
+      treat_broad[i] <- "Misidentification / Cryptic Species"
+      treat_sub[i]   <- "Putative_Cryptic_Species"
     } else if (sc == "Misidentification_Severe") {
       cda_p <- if ("cda_posterior_prob" %in% names(df) && !is.na(df$cda_posterior_prob[i])) df$cda_posterior_prob[i] else NA_real_
       m_sp  <- if ("cda_predicted_taxon" %in% names(df) && !is.na(df$cda_predicted_taxon[i])) df$cda_predicted_taxon[i] else ""
@@ -300,8 +344,13 @@ build_triage_queue <- function(opts) {
   }
 
   # Morphometrics flags (CDA / GMM join with voucher-level aggregation; resolve morphometric_outlier_flag <-> misidentification_flag)
-  if (!file.exists(opts$morphometrics) && file.exists("data/tables/morphometric_flags.csv")) {
-    opts$morphometrics <- "data/tables/morphometric_flags.csv"
+  if (!file.exists(opts$morphometrics)) {
+    sibling_morph <- file.path(dirname(opts$vouchers), "morphometric_flags.csv")
+    if (file.exists(sibling_morph)) {
+      opts$morphometrics <- sibling_morph
+    } else if (file.exists("data/tables/morphometric_flags.csv")) {
+      opts$morphometrics <- "data/tables/morphometric_flags.csv"
+    }
   }
   if (file.exists(opts$morphometrics)) {
     mo_df <- readr::read_csv(opts$morphometrics, show_col_types = FALSE)
@@ -372,7 +421,21 @@ build_triage_queue <- function(opts) {
   }
 
   # Apply decision matrix
-  vouchers <- apply_taxonomic_decision_matrix(vouchers)
+  vouchers <- apply_taxonomic_decision_matrix(
+    vouchers,
+    intraspecific_mode = isTRUE(opts$intraspecific_mode)
+  )
+
+  # When focal_taxon is specified (Strategy 1 or Strategy 2), filter final exported triage_df to focal taxon
+  if (!is.null(opts$focal_taxon) && nzchar(trimws(opts$focal_taxon))) {
+    focal_std <- standardize_packera_taxon(opts$focal_taxon)
+    n_pre_focal <- nrow(vouchers)
+    vouchers <- vouchers[vouchers$species_standardized == focal_std, , drop = FALSE]
+    message(sprintf(
+      "[Focal Taxon Filter] Retained %d '%s' vouchers in final triage queue (excluded %d outgroup reference anchors).",
+      nrow(vouchers), focal_std, n_pre_focal - nrow(vouchers)
+    ))
+  }
 
   # Order by triage priority: CRITICAL > HIGH > MEDIUM > LOW > RESOLVED
   prio_order <- c("CRITICAL" = 1, "HIGH" = 2, "MEDIUM" = 3, "LOW" = 4, "RESOLVED" = 5)

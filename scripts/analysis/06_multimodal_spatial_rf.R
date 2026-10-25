@@ -78,6 +78,10 @@ parse_args_robust <- function() {
       default = 100, help = "Warren's Identity Test permutations [default: %default]"),
     optparse::make_option(c("-t", "--n-trees"), type = "integer",
       default = 500, help = "Number of trees in Random Forests [default: %default]"),
+    optparse::make_option(c("--intraspecific-mode"), action = "store_true",
+      default = FALSE, help = "Enable pure single-taxon / intraspecific morphotype delimitation mode [default: %default]"),
+    optparse::make_option(c("--focal-taxon"), type = "character",
+      default = "", help = "Optional focal taxon name (e.g. Packera dubia) [default: %default]"),
     optparse::make_option(c("--demo"), action = "store_true",
       default = FALSE, help = "Enable synthetic fallback data for demonstration/test runs [default: %default]")
   )
@@ -97,7 +101,7 @@ parse_args_robust <- function() {
     pheno_plot = "outputs/figures/phenological_latitudinal_anomaly.pdf",
     ssurgo_cache = "data/environmental/ssurgo_cache", ssurgo_table = "data/tables/ssurgo_edaphic_validation.csv",
     contingency_table = "outputs/reports/micro_edaphic_outcrop_contingency.csv", batch_size = 75,
-    permutations = 100, n_trees = 500, demo = FALSE
+    permutations = 100, n_trees = 500, intraspecific_mode = FALSE, focal_taxon = "", demo = FALSE
   ))
 }
 
@@ -994,8 +998,58 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
 # ------------------------------------------------------------------------------
 # 3. Cross-Modal Consensus & Conflict Auditing Engine
 # ------------------------------------------------------------------------------
-execute_crossmodal_consensus <- function(df) {
+resolve_analysis_group <- function(df, intraspecific_mode = FALSE) {
+  is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
+  if (!is_intra) {
+    df$analysis_group <- as.character(df$species_standardized)
+    return(df)
+  }
+  used_gmm <- FALSE
+  if ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster))) {
+    g_raw <- ifelse(is.na(df$gmm_cluster), 1L, as.integer(df$gmm_cluster))
+    grp_cand <- paste0("Morphotype_K", g_raw)
+    tbl <- table(grp_cand)
+    if (length(tbl) >= 2 && sum(tbl >= 5) >= 2) {
+      df$analysis_group <- as.character(grp_cand)
+      used_gmm <- TRUE
+      message(sprintf("[Intraspecific Mode] Using Step 04 GMM morphotypes as analysis_group (%s).",
+                      paste(names(tbl), tbl, sep = "=", collapse = ", ")))
+    }
+  }
+  if (!used_gmm) {
+    sand_col <- if ("soil_sand" %in% names(df)) suppressWarnings(as.numeric(df$soil_sand)) else rep(NA_real_, nrow(df))
+    lat_col <- if ("decimalLatitude" %in% names(df) && any(!is.na(df$decimalLatitude))) {
+      suppressWarnings(as.numeric(df$decimalLatitude))
+    } else if ("latitude" %in% names(df)) {
+      suppressWarnings(as.numeric(df$latitude))
+    } else {
+      rep(NA_real_, nrow(df))
+    }
+    sand_med <- stats::median(sand_col, na.rm = TRUE)
+    lat_med <- stats::median(lat_col, na.rm = TRUE)
+    is_coastal <- (!is.na(sand_col) & !is.na(sand_med) & sand_col >= sand_med) |
+                  ((is.na(sand_col) | is.na(sand_med)) & !is.na(lat_col) & !is.na(lat_med) & lat_col <= lat_med)
+    grp_cand <- ifelse(is_coastal, "Acidic_Sand_Coastal", "Upland_Piedmont_Outcrop")
+    if (length(unique(grp_cand)) < 2 || min(table(grp_cand)) < 2) {
+      idx_half <- seq_len(nrow(df)) <= floor(nrow(df) / 2)
+      grp_cand <- ifelse(idx_half, "Acidic_Sand_Coastal", "Upland_Piedmont_Outcrop")
+    }
+    df$analysis_group <- as.character(grp_cand)
+    tbl <- table(df$analysis_group)
+    message(sprintf("[Intraspecific Mode] Partitioned single-taxon cohort into edaphic/latitudinal ecotypes (%s).",
+                    paste(names(tbl), tbl, sep = "=", collapse = ", ")))
+  }
+  return(df)
+}
+
+execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
   message("Executing 4-way cross-modal consensus checks (Morpho + Vision + Edaphic + Phenology)...")
+  df <- resolve_analysis_group(df, intraspecific_mode = intraspecific_mode)
+  is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
+  active_taxa <- if (is_intra) sort(unique(stats::na.omit(df$analysis_group))) else TARGET_TAXA
+  if (length(active_taxa) == 0) active_taxa <- TARGET_TAXA
+  grp_vec <- if (is_intra) df$analysis_group else df$species_standardized
+
   n <- nrow(df); conflicts <- data.frame(catalogNumber = df$catalogNumber, stringsAsFactors = FALSE)
   
   # Phenological circular stats
@@ -1003,43 +1057,47 @@ execute_crossmodal_consensus <- function(df) {
   theta <- 2 * pi * doy / 365.25
   df$pheno_theta <- theta
   
-  # Compute species-specific circular medians and edaphic envelopes (Tier 1 anchors)
-  is_anchor <- df$determiner_tier == "Tier_1_Gold" & df$species_standardized %in% TARGET_TAXA
+  # Compute species/ecotype-specific circular medians and edaphic envelopes (Tier 1 anchors)
+  is_anchor <- df$determiner_tier == "Tier_1_Gold" & grp_vec %in% active_taxa
   anchor_df <- df[is_anchor, ]
-  if (nrow(anchor_df) < 10) anchor_df <- df[df$species_standardized %in% TARGET_TAXA, ]
+  if (nrow(anchor_df) < 10) anchor_df <- df[grp_vec %in% active_taxa, ]
   
-  taxa_profiles <- lapply(TARGET_TAXA, function(tx) {
-    sub_df <- anchor_df[anchor_df$species_standardized == tx, ]
-    if (nrow(sub_df) < 3) sub_df <- df[df$species_standardized == tx, ]
+  taxa_profiles <- lapply(active_taxa, function(tx) {
+    sub_df <- anchor_df[(if (is_intra) anchor_df$analysis_group else anchor_df$species_standardized) == tx, ]
+    if (nrow(sub_df) < 3) sub_df <- df[grp_vec == tx, ]
     sin_m <- mean(sin(sub_df$pheno_theta), na.rm = TRUE)
     cos_m <- mean(cos(sub_df$pheno_theta), na.rm = TRUE)
     list(
       mean_theta = atan2(sin_m, cos_m), R_bar = sqrt(sin_m^2 + cos_m^2),
-      ph_mean = mean(sub_df$soil_ph, na.rm = TRUE), ph_sd = max(sd(sub_df$soil_ph, na.rm = TRUE), 0.25),
-      sand_mean = mean(sub_df$soil_sand, na.rm = TRUE), sand_sd = max(sd(sub_df$soil_sand, na.rm = TRUE), 4.0),
-      cec_mean = mean(sub_df$soil_cec, na.rm = TRUE), cec_sd = max(sd(sub_df$soil_cec, na.rm = TRUE), 2.0)
+      ph_mean = mean(sub_df$soil_ph, na.rm = TRUE), ph_sd = max(sd(sub_df$soil_ph, na.rm = TRUE), 0.25, na.rm = TRUE),
+      sand_mean = mean(sub_df$soil_sand, na.rm = TRUE), sand_sd = max(sd(sub_df$soil_sand, na.rm = TRUE), 4.0, na.rm = TRUE),
+      cec_mean = mean(sub_df$soil_cec, na.rm = TRUE), cec_sd = max(sd(sub_df$soil_cec, na.rm = TRUE), 2.0, na.rm = TRUE)
     )
   })
-  names(taxa_profiles) <- TARGET_TAXA
+  names(taxa_profiles) <- active_taxa
 
   # Evaluate modal concordance per specimen
   conf_flags <- logical(n); triage_cats <- character(n); concordances <- numeric(n); discord_notes <- character(n)
   
   for (i in seq_len(n)) {
-    given_sp <- df$species_standardized[i]
+    given_sp <- grp_vec[i]
     morph_sp <- if ("cda_predicted_taxon" %in% names(df) && !is.na(df$cda_predicted_taxon[i])) df$cda_predicted_taxon[i] else given_sp
     vis_sp   <- if ("vision_predicted_label" %in% names(df) && !is.na(df$vision_predicted_label[i])) df$vision_predicted_label[i] else given_sp
+    if (is_intra) {
+      if (!(morph_sp %in% active_taxa)) morph_sp <- given_sp
+      if (!(vis_sp %in% active_taxa)) vis_sp <- given_sp
+    }
     c_err    <- if ("c_error" %in% names(df) && !is.na(df$c_error[i])) df$c_error[i] else 0.0
 
     # Edaphic likelihood score
-    edaph_scores <- sapply(TARGET_TAXA, function(tx) {
+    edaph_scores <- sapply(active_taxa, function(tx) {
       prof <- taxa_profiles[[tx]]
       z_ph   <- (df$soil_ph[i] - prof$ph_mean) / prof$ph_sd
       z_sand <- (df$soil_sand[i] - prof$sand_mean) / prof$sand_sd
       z_cec  <- (df$soil_cec[i] - prof$cec_mean) / prof$cec_sd
       -(z_ph^2 + z_sand^2 + z_cec^2) / 2
     })
-    edaph_sp <- if (all(is.na(edaph_scores))) given_sp else TARGET_TAXA[which.max(edaph_scores)][1]
+    edaph_sp <- if (all(is.na(edaph_scores))) given_sp else active_taxa[which.max(edaph_scores)][1]
     edaph_z_given <- if (given_sp %in% names(taxa_profiles)) abs((df$soil_ph[i] - taxa_profiles[[given_sp]]$ph_mean) / taxa_profiles[[given_sp]]$ph_sd) else 0.0
     if (is.na(edaph_z_given) || !is.finite(edaph_z_given)) edaph_z_given <- 0.0
 
@@ -1079,11 +1137,11 @@ execute_crossmodal_consensus <- function(df) {
   df$triage_category <- triage_cats
   df$conflict_discordance_notes <- discord_notes
   df$edaphic_best_fit_taxon <- sapply(seq_len(n), function(i) {
-    scores <- sapply(TARGET_TAXA, function(tx) {
+    scores <- sapply(active_taxa, function(tx) {
       p <- taxa_profiles[[tx]]
       -((df$soil_ph[i] - p$ph_mean)^2 / p$ph_sd^2 + (df$soil_sand[i] - p$sand_mean)^2 / p$sand_sd^2)
     })
-    if (all(is.na(scores))) df$species_standardized[i] else TARGET_TAXA[which.max(scores)][1]
+    if (all(is.na(scores))) grp_vec[i] else active_taxa[which.max(scores)][1]
   })
   return(df)
 }
@@ -1091,8 +1149,11 @@ execute_crossmodal_consensus <- function(df) {
 # ------------------------------------------------------------------------------
 # 4. Moran's Eigenvector Maps & Spatial Random Forests (adespatial / ranger / blockCV / spatialRF)
 # ------------------------------------------------------------------------------
-compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500) {
+compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_mode = FALSE) {
   message("Generating Moran's Eigenvector Maps (MEMs) & fitting Spatial Random Forests...")
+  if (!("analysis_group" %in% names(df)) || isTRUE(intraspecific_mode)) {
+    df <- resolve_analysis_group(df, intraspecific_mode = intraspecific_mode)
+  }
   coords <- as.matrix(df[, c("longitude", "latitude")])
   n <- nrow(coords)
 
@@ -1128,7 +1189,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500) {
   # Prepare feature matrices
   X_env <- as.matrix(df[, env_vars])
   X_all <- cbind(X_env, MEMs)
-  y <- factor(df$species_standardized)
+  y <- factor(df$analysis_group)
 
   if (requireNamespace("ranger", quietly = TRUE)) {
     df_env <- data.frame(y = y, as.data.frame(X_env), check.names = FALSE)
@@ -1258,13 +1319,21 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500) {
               Spatial_Block_CV_Accuracy = spatial_block_cv_acc))
 }
 run_spatial_random_forests <- compute_spatial_rf_mems
+run_spatial_rf_models <- compute_spatial_rf_mems
 
 # ------------------------------------------------------------------------------
 # 5. ecospat 2D Kernel-Smoothed PCA-env & ENMTools Niche Identity Permutation Tests
 # ------------------------------------------------------------------------------
-run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100) {
+run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100, intraspecific_mode = FALSE) {
   message(sprintf("Executing Warren's Niche Identity Tests (%d permutations per pair)...", n_perm))
-  pairs <- combn(TARGET_TAXA, 2, simplify = FALSE)
+  if (!("analysis_group" %in% names(df)) || isTRUE(intraspecific_mode)) {
+    df <- resolve_analysis_group(df, intraspecific_mode = intraspecific_mode)
+  }
+  is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
+  grp_col <- if (is_intra) df$analysis_group else df$species_standardized
+  cand_groups <- if (is_intra) sort(unique(stats::na.omit(grp_col))) else intersect(TARGET_TAXA, unique(stats::na.omit(grp_col)))
+  if (length(cand_groups) < 2) cand_groups <- sort(unique(stats::na.omit(df$analysis_group)))
+  pairs <- if (length(cand_groups) >= 2) combn(cand_groups, 2, simplify = FALSE) else list()
   results_list <- list(); perm_dist_list <- list()
 
   bg_mat <- as.matrix(df[, env_vars, drop = FALSE])
@@ -1279,16 +1348,16 @@ run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100) {
 
   for (pr in pairs) {
     sp1 <- pr[1]; sp2 <- pr[2]; pair_name <- paste0(gsub("Packera ", "P.", sp1), " vs ", gsub("Packera ", "P.", sp2))
-    df1 <- df[df$species_standardized == sp1, env_vars]
-    df2 <- df[df$species_standardized == sp2, env_vars]
+    df1 <- df[grp_col == sp1, env_vars, drop = FALSE]
+    df2 <- df[grp_col == sp2, env_vars, drop = FALSE]
     n1 <- nrow(df1); n2 <- nrow(df2)
     if (n1 < 5 || n2 < 5) next
 
     ecospat_ok <- FALSE
     if (requireNamespace("ecospat", quietly = TRUE) && !is.null(scores_glob)) {
       eco_fit <- tryCatch({
-        scores_sp1 <- scores_glob[df$species_standardized == sp1, 1:2, drop = FALSE]
-        scores_sp2 <- scores_glob[df$species_standardized == sp2, 1:2, drop = FALSE]
+        scores_sp1 <- scores_glob[grp_col == sp1, 1:2, drop = FALSE]
+        scores_sp2 <- scores_glob[grp_col == sp2, 1:2, drop = FALSE]
         z1 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp1, R = 100)
         z2 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp2, R = 100)
         ov <- ecospat::ecospat.niche.overlap(z1, z2, cor = TRUE)
@@ -1354,6 +1423,7 @@ run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100) {
   perm_table <- do.call(rbind, perm_dist_list)
   return(list(summary = summary_table, permutations = perm_table))
 }
+run_niche_identity_tests <- run_warren_niche_identity_tests
 
 # ------------------------------------------------------------------------------
 # 6. Multi-Panel Publication Figure & Summary Export
@@ -1426,8 +1496,13 @@ main <- function() {
   vouchers_df$species_standardized <- standardize_packera_taxon(vouchers_df$species_raw)
 
   # Merge Morphometrics if present (resolve morphometric_flags.csv <-> morphometrics_misidentification_flags.csv)
-  if (!file.exists(opts$morphometrics) && file.exists("data/tables/morphometric_flags.csv")) {
-    opts$morphometrics <- "data/tables/morphometric_flags.csv"
+  if (!file.exists(opts$morphometrics)) {
+    sibling_morph <- file.path(dirname(opts$vouchers), "morphometric_flags.csv")
+    if (file.exists(sibling_morph)) {
+      opts$morphometrics <- sibling_morph
+    } else if (file.exists("data/tables/morphometric_flags.csv")) {
+      opts$morphometrics <- "data/tables/morphometric_flags.csv"
+    }
   }
   if (file.exists(opts$morphometrics)) {
     morph_df <- readr::read_csv(opts$morphometrics, show_col_types = FALSE)
@@ -1534,14 +1609,16 @@ main <- function() {
     }
   }
 
-  # Stage 2: Cross-Modal Consensus Checks
-  vouchers_df <- execute_crossmodal_consensus(vouchers_df)
+  # Stage 2: Resolve single-taxon / intraspecific analysis_group & Cross-Modal Consensus Checks
+  merged_df <- resolve_analysis_group(vouchers_df, intraspecific_mode = isTRUE(opts$intraspecific_mode))
+  vouchers_df <- execute_crossmodal_consensus(merged_df, intraspecific_mode = isTRUE(opts$intraspecific_mode))
 
   # Stage 3: Moran's Eigenvector Maps & Spatial RF
-  srf_res <- compute_spatial_rf_mems(vouchers_df, env_vars, n_trees = opts$n_trees)
+  srf_res <- compute_spatial_rf_mems(vouchers_df, env_vars, n_trees = opts$n_trees, intraspecific_mode = isTRUE(opts$intraspecific_mode))
+  vouchers_df$spatial_block_cv_acc <- round(srf_res$Spatial_Block_CV_Accuracy, 4)
 
   # Stage 4: Warren's Niche Identity Tests
-  niche_res <- run_warren_niche_identity_tests(vouchers_df, env_vars, n_perm = opts$permutations)
+  niche_res <- run_warren_niche_identity_tests(vouchers_df, env_vars, n_perm = opts$permutations, intraspecific_mode = isTRUE(opts$intraspecific_mode))
 
   # Stage 5: Export Conflict Flags, Summary Report & Figures (Atomic write-then-replace)
   if (write_csv_atomic(vouchers_df, opts$output_flags, demo = demo_mode)) {
