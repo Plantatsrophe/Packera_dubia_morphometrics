@@ -178,7 +178,7 @@ compute_centsize_robust <- function(coo) {
   if (is.finite(val) && val > 0) val else NA_real_
 }
 
-extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permutations = 999, seed = 42) {
+extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permutations = 999, seed = 42, run_permanova = TRUE) {
   coe <- if (is.list(ef) && !is.null(ef$coe)) as.matrix(ef$coe) else as.matrix(ef)
   if (is.null(fac_df) && is.list(ef) && !is.null(ef$fac)) fac_df <- as.data.frame(ef$fac)
   row_indices <- seq_len(nrow(coe))
@@ -220,10 +220,14 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
     for (p in seq_len(min(num_pcs, ncol(sym_scores)))) out_df[[paste0("Sym_PC", p)]] <- round(sym_scores[, p], 6)
   }
   permanova_res <- NULL
-  if ("assigned_tier" %in% names(out_df) && requireNamespace("vegan", quietly = TRUE)) {
+  if (isTRUE(run_permanova) && "assigned_tier" %in% names(out_df) && requireNamespace("vegan", quietly = TRUE)) {
     t_idx <- which(out_df$assigned_tier %in% c("Tier_1_Direct", "Tier_2_Reflected"))
     if (length(t_idx) >= 4 && length(unique(out_df$assigned_tier[t_idx])) >= 2) {
-      set.seed(seed); sym_mat <- sym_mat[t_idx, , drop = FALSE]; tier_df <- out_df[t_idx, , drop = FALSE]
+      set.seed(seed)
+      if (length(t_idx) > 1500) {
+        t_idx <- sort(sample(t_idx, 1500))
+      }
+      sym_mat <- sym_mat[t_idx, , drop = FALSE]; tier_df <- out_df[t_idx, , drop = FALSE]
       permanova_res <- tryCatch(vegan::adonis2(sym_mat ~ assigned_tier, data = tier_df, permutations = permutations, method = "euclidean"), error = function(e) NULL)
     }
   }
@@ -276,10 +280,11 @@ run_fourier_extraction <- function(opts) {
   if (!is.null(manifest_df) && nrow(manifest_df) > 0) {
     message("Ingesting via extracted leaf manifest: ", opts$manifest)
     if ("contour_path" %in% names(manifest_df)) {
-        contour_files <- manifest_df$contour_path[file.exists(manifest_df$contour_path)]
+        manifest_df <- manifest_df[!duplicated(manifest_df$contour_path, fromLast = TRUE), , drop = FALSE]
+        contour_files <- unique(manifest_df$contour_path[file.exists(manifest_df$contour_path)])
     }
     if (length(contour_files) == 0 && "mask_path" %in% names(manifest_df)) {
-        mask_files <- manifest_df$mask_path[file.exists(manifest_df$mask_path)]
+        mask_files <- unique(manifest_df$mask_path[file.exists(manifest_df$mask_path)])
         if (length(mask_files) > 0) {
             contour_files <- mask_files
             use_masks_fallback <- TRUE
@@ -318,51 +323,67 @@ run_fourier_extraction <- function(opts) {
     stop("No contour CSVs or active mask files found in data/contours or data/masks.")
   }
 
+  # Deduplicate contour_files by canonical shape_id (stem) so duplicate manifest entries never collide
+  shape_stems <- sub("\\.[^.]+$", "", basename(contour_files))
+  contour_files <- contour_files[!duplicated(shape_stems, fromLast = TRUE)]
+
   # 2. Build coordinate list and factor metadata for Momocs::Out()
-  coo_list <- list()
-  fac_records <- list()
   harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(opts$harmonics), function(x, y) paste0(x, y)))
 
+  # Precompute O(1) lookup indices into manifest_df to avoid O(N^2) linear scans across 14,000+ leaves
+  manifest_by_basename <- NULL
+  manifest_by_cat_leaf <- NULL
+  if (!is.null(manifest_df) && nrow(manifest_df) > 0) {
+    if ("contour_path" %in% names(manifest_df)) {
+      bnames <- basename(as.character(manifest_df$contour_path))
+      manifest_by_basename <- seq_len(nrow(manifest_df))
+      names(manifest_by_basename) <- bnames
+    }
+    if (all(c("catalogNumber", "leaf_id") %in% names(manifest_df))) {
+      cat_leaf_keys <- paste0(as.character(manifest_df$catalogNumber), "__", as.integer(manifest_df$leaf_id))
+      manifest_by_cat_leaf <- seq_len(nrow(manifest_df))
+      names(manifest_by_cat_leaf) <- cat_leaf_keys
+    }
+  }
+
+  has_momocs <- requireNamespace("Momocs", quietly = TRUE)
   message("Ingesting contour coordinates from ", length(contour_files), " files...")
-  for (f in contour_files) {
-    # If mask fallback, attempt to use EBImage/Momocs import functions, though custom logic might be needed
-    # (Assuming Momocs::import_jpg / import_txt can handle or load_contour_file handles basic parsing)
+
+  ingest_single_contour <- function(f) {
     if (use_masks_fallback && grepl("\\.(png|jpg)$", f, ignore.case = TRUE)) {
-        if (requireNamespace("Momocs", quietly = TRUE)) {
-            tryCatch({
-                tmp_coo <- Momocs::import_jpg(f)
-                if (is.list(tmp_coo) && length(tmp_coo) > 0) {
-                    coo <- tmp_coo[[1]]
-                } else {
-                    coo <- NULL
-                }
-            }, error = function(e) { coo <<- NULL })
-        } else {
-            coo <- NULL
-        }
+      if (has_momocs) {
+        coo <- tryCatch({
+          tmp_coo <- Momocs::import_jpg(f)
+          if (is.list(tmp_coo) && length(tmp_coo) > 0) tmp_coo[[1]] else NULL
+        }, error = function(e) NULL)
+      } else {
+        coo <- NULL
+      }
     } else {
-        coo <- load_contour_file(f)
+      coo <- load_contour_file(f)
     }
 
-    if (is.null(coo)) next
+    if (is.null(coo)) return(NULL)
 
     # Enforce clockwise orientation
-    if (requireNamespace("Momocs", quietly = TRUE)) {
-        coo <- tryCatch(Momocs::coo_cw(coo), error = function(e) coo)
+    if (has_momocs) {
+      coo <- tryCatch(Momocs::coo_cw(coo), error = function(e) coo)
     }
 
     meta <- parse_specimen_id(f)
 
     m_match <- NULL
     if (!is.null(manifest_df) && nrow(manifest_df) > 0) {
-      m_match <- manifest_df[as.character(manifest_df$catalogNumber) == as.character(meta$catalogNumber) &
-                             as.integer(manifest_df$leaf_id) == as.integer(meta$leaf_id), , drop = FALSE]
-      if (nrow(m_match) > 1 && "contour_path" %in% names(m_match)) {
-        cp_hit <- m_match[basename(m_match$contour_path) == basename(f), , drop = FALSE]
-        if (nrow(cp_hit) > 0) m_match <- cp_hit
+      idx_hit <- NA_integer_
+      if (!is.null(manifest_by_basename)) {
+        idx_hit <- unname(manifest_by_basename[basename(f)])
       }
-      if (nrow(m_match) == 0 && "contour_path" %in% names(manifest_df)) {
-        m_match <- manifest_df[basename(manifest_df$contour_path) == basename(f), , drop = FALSE]
+      if (is.na(idx_hit) && !is.null(manifest_by_cat_leaf)) {
+        key_lookup <- paste0(as.character(meta$catalogNumber), "__", as.integer(meta$leaf_id))
+        idx_hit <- unname(manifest_by_cat_leaf[key_lookup])
+      }
+      if (!is.na(idx_hit) && idx_hit >= 1L && idx_hit <= nrow(manifest_df)) {
+        m_match <- manifest_df[idx_hit, , drop = FALSE]
       }
     }
 
@@ -405,7 +426,7 @@ run_fourier_extraction <- function(opts) {
     }
 
     # Oriented major-axis length-to-width aspect ratio (Momocs::coo_lw / SVD major-axis alignment)
-    lw <- if (requireNamespace("Momocs", quietly = TRUE)) {
+    lw <- if (has_momocs) {
       tryCatch(Momocs::coo_lw(coo), error = function(e) NULL)
     } else {
       NULL
@@ -420,8 +441,6 @@ run_fourier_extraction <- function(opts) {
     log_cs <- if (!is.na(centsize) && centsize > 0) round(log(centsize), 6) else NA_real_
 
     shape_name <- meta$shape_id
-    coo_list[[shape_name]] <- coo
-
     rec <- data.frame(
       shape_id = shape_name,
       catalogNumber = meta$catalogNumber,
@@ -439,12 +458,29 @@ run_fourier_extraction <- function(opts) {
       mask_source = f,
       stringsAsFactors = FALSE
     )
-    fac_records[[length(fac_records) + 1]] <- rec
+    list(shape_name = shape_name, coo = coo, rec = rec)
   }
 
-  if (length(coo_list) == 0) stop("Failed to extract valid coordinate contours.")
+  if (.Platform$OS.type == "unix" && length(contour_files) >= 100 && requireNamespace("parallel", quietly = TRUE)) {
+    n_cores <- min(16L, max(1L, parallel::detectCores(logical = TRUE) - 1L))
+    ingested_list <- parallel::mclapply(contour_files, ingest_single_contour, mc.cores = n_cores)
+  } else {
+    ingested_list <- lapply(contour_files, ingest_single_contour)
+  }
 
+  valid_ingested <- Filter(Negate(is.null), ingested_list)
+  if (length(valid_ingested) == 0) stop("Failed to extract valid coordinate contours.")
+
+  fac_records <- lapply(valid_ingested, `[[`, "rec")
   fac_df <- do.call(rbind, fac_records)
+  coo_list <- lapply(valid_ingested, `[[`, "coo")
+  shape_names_vec <- vapply(valid_ingested, `[[`, character(1), "shape_name")
+
+  # Ensure strict 1-to-1 uniqueness between fac_df rows and coo_list elements
+  keep_unique <- !duplicated(shape_names_vec, fromLast = TRUE)
+  fac_df <- fac_df[keep_unique, , drop = FALSE]
+  coo_list <- coo_list[keep_unique]
+  names(coo_list) <- shape_names_vec[keep_unique]
   rownames(fac_df) <- names(coo_list)
   message(sprintf("Assembled %d valid closed contours for Elliptic Fourier Analysis.", length(coo_list)))
 
@@ -495,7 +531,7 @@ run_fourier_extraction <- function(opts) {
   sym_names <- c(paste0("A", seq_len(opts$harmonics)), paste0("D", seq_len(opts$harmonics)))
   sym_harmonics <- harm_mat[, sym_names, drop = FALSE]
   ef_input <- if (exists("ef_res") && !is.null(ef_res)) ef_res else list(coe = harm_mat, fac = fac_df)
-  sym_res <- extract_symmetric_fourier_pcs(ef_input, fac_df = fac_df, num_pcs = opts$num_pcs, permutations = opts$permutations, seed = opts$seed)
+  sym_res <- extract_symmetric_fourier_pcs(ef_input, fac_df = fac_df, num_pcs = opts$num_pcs, permutations = opts$permutations, seed = opts$seed, run_permanova = FALSE)
   for (scol in c("sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", paste0("Sym_PC", seq_len(opts$num_pcs)))) {
     if (scol %in% names(sym_res$df)) efa_df[[scol]] <- sym_res$df[[scol]]
   }
@@ -526,8 +562,10 @@ run_fourier_extraction <- function(opts) {
     meta_cols <- intersect(names(vouchers_df), c("catalogNumber", "scientificName", "species_raw", "determiner_raw", "determiner_tier",
                                                  "county", "stateProvince", "latitude", "longitude", "pheno_sin", "pheno_cos", "regional_group"))
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), meta_cols, drop = FALSE]
-    efa_df <- merge(efa_df, v_sub, by = "catalogNumber", all.x = TRUE)
+    efa_df <- merge(efa_df, v_sub, by = "catalogNumber", all.x = TRUE, sort = FALSE)
   }
+  harm_mat <- as.matrix(efa_df[, harmonic_names, drop = FALSE])
+  sym_harmonics <- as.matrix(efa_df[, sym_names, drop = FALSE])
 
   # Normalize assigned_tier to canonical contract ("Tier_1_Direct", "Tier_2_Reflected")
   efa_df$assigned_tier <- ifelse(grepl("^tier_?1", efa_df$assigned_tier, ignore.case = TRUE), "Tier_1_Direct",
@@ -557,13 +595,15 @@ run_fourier_extraction <- function(opts) {
   valid_closed_mask <- grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE) & complete.cases(efa_df[, sym_names])
   closed_leaf_df <- efa_df[valid_closed_mask, , drop = FALSE]
   all_harm_cols <- intersect(c(harmonic_names, grep("Chebyshev", names(efa_df), value = TRUE)), names(efa_df))
-  specimen_records <- list()
   spec_groups <- split(closed_leaf_df, list(closed_leaf_df$catalogNumber, closed_leaf_df$plant_individual_id), drop = TRUE)
+  specimen_records <- vector("list", length(spec_groups))
+  spec_idx <- 0L
 
   for (grp in spec_groups) {
     if (nrow(grp) == 0) next
+    spec_idx <- spec_idx + 1L
     cat_num <- grp$catalogNumber[1]; p_id <- grp$plant_individual_id[1]; n_leaves <- nrow(grp)
-    harm_medians <- sapply(grp[, all_harm_cols, drop = FALSE], stats::median, na.rm = TRUE)
+    harm_medians <- vapply(grp[, all_harm_cols, drop = FALSE], stats::median, numeric(1), na.rm = TRUE)
     foliar_var <- if (n_leaves > 1) round(mean(apply(as.matrix(grp[, sym_names, drop = FALSE]), 2, stats::var, na.rm = TRUE), na.rm = TRUE), 8) else 0.0
     rec <- data.frame(catalogNumber = cat_num, plant_individual_id = p_id, leaf_count = n_leaves, foliar_variance = foliar_var,
                       assigned_tier = grp$assigned_tier[1], reconstruction_tier = grp$reconstruction_tier[1],
@@ -582,9 +622,10 @@ run_fourier_extraction <- function(opts) {
     if ("leaf_quality_weight" %in% names(grp)) rec$leaf_quality_weight <- round(stats::median(grp$leaf_quality_weight, na.rm = TRUE), 6)
     if ("is_contour_outlier" %in% names(grp)) rec$is_contour_outlier <- all(as.logical(grp$is_contour_outlier), na.rm = TRUE)
     for (h_name in names(harm_medians)) rec[[h_name]] <- harm_medians[[h_name]]
-    specimen_records[[length(specimen_records) + 1]] <- rec
+    specimen_records[[spec_idx]] <- rec
   }
 
+  specimen_records <- specimen_records[seq_len(spec_idx)]
   specimen_df <- do.call(rbind, specimen_records)
   for (p in seq_len(opts$num_pcs)) { specimen_df[[paste0("PC", p)]] <- NA_real_; specimen_df[[paste0("Sym_PC", p)]] <- 0.0 }
   if (nrow(specimen_df) >= opts$num_pcs && exists("pca_fit") && !is.null(pca_fit)) {
@@ -612,12 +653,15 @@ run_fourier_extraction <- function(opts) {
     if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
       source("scripts/morphometrics/pub_figures_utils.R")
       export_step03_fourier_pc_tables(specimen_df, efa_df, opts$output)
-      generate_step03_pub_figures(efa_df, specimen_df, harm_mat, pca_full, opts$figures_dir, opts$output)
+      generate_step03_pub_figures(efa_df, specimen_df, harm_mat, if (exists("pca_fit")) pca_fit else NULL, opts$figures_dir, opts$output)
     }
   }, error = function(e) warning("Step 03 publication figures/tables export warning: ", e$message))
 
   # 6. Empirical Tier Validation Test (PERMANOVA via adonis2 / fallback manova)
-  valid_tier_idx <- which(!is.na(efa_df$reconstruction_tier) & complete.cases(sym_harmonics))
+  valid_tier_idx <- which(!is.na(efa_df$reconstruction_tier) &
+                          !is.na(efa_df$scientificName) & nzchar(as.character(efa_df$scientificName)) &
+                          !is.na(efa_df$determiner_tier) & nzchar(as.character(efa_df$determiner_tier)) &
+                          complete.cases(sym_harmonics))
   if (length(valid_tier_idx) >= 10) {
     message("==================================================================")
     message("Executing Empirical Tier Validation Test (PERMANOVA)")
@@ -669,8 +713,9 @@ run_fourier_extraction <- function(opts) {
     if (is.null(permanova_df) && requireNamespace("vegan", quietly = TRUE)) {
       message(sprintf("Executing vegan::adonis2 (permutations = %d, seed = %d)...", opts$permutations, opts$seed))
       ad_res <- tryCatch({
-        vegan::adonis2(tier_sym ~ scientificName + determiner_tier + reconstruction_tier,
-                       data = tier_manifest, permutations = opts$permutations, method = "euclidean", by = "terms")
+        ad_idx <- if (nrow(tier_manifest) > 2000L) sort(sample(seq_len(nrow(tier_manifest)), 2000L)) else seq_len(nrow(tier_manifest))
+        vegan::adonis2(tier_sym[ad_idx, , drop = FALSE] ~ scientificName + determiner_tier + reconstruction_tier,
+                       data = tier_manifest[ad_idx, , drop = FALSE], permutations = opts$permutations, method = "euclidean", by = "terms")
       }, error = function(e) {
         warning("vegan::adonis2 encountered an issue: ", e$message, ". Falling back to stats::manova().")
         NULL
