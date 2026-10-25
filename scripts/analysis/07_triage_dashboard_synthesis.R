@@ -79,7 +79,9 @@ parse_args_robust <- function() {
     opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
     names(opts) <- gsub("-", "_", names(opts))
     if (!is.null(opts$spatial_flags) && nzchar(opts$spatial_flags)) opts$multimodal_flags <- opts$spatial_flags
-    if (!is.null(opts$output_triage) && nzchar(opts$output_triage)) opts$output_queue <- opts$output_triage
+    if (!is.null(opts$output_triage) && nzchar(opts$output_triage) && (is.null(opts$output_queue) || opts$output_queue == "data/tables/triage_queue.csv")) {
+      opts$output_queue <- opts$output_triage
+    }
     if (!is.null(opts$output_figure) && nzchar(opts$output_figure)) opts$output_plot <- opts$output_figure
     return(opts)
   }
@@ -195,10 +197,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
     both_alt_agree <- (!is.null(morph_sp) && !is.null(vis_sp) && morph_sp != given_sp && vis_sp != given_sp && morph_sp == vis_sp)
     morph_edaph_alt_agree <- (!is.null(morph_sp) && morph_sp != given_sp && edaph_sp == morph_sp && (is.na(cda_prob) || cda_prob >= 0.55))
     vis_edaph_alt_agree <- (!is.null(vis_sp) && vis_sp != given_sp && edaph_sp == vis_sp && c_err >= 0.70)
+    vis_cut <- if (tier == "Tier_1_Gold") 0.90 else if (tier == "Tier_2_Silver") 0.84 else 0.80
+    cda_cut <- if (tier == "Tier_1_Gold") 0.85 else if (tier == "Tier_2_Silver") 0.75 else 0.68
     is_severe_misid <- is_corrupt || is_mo_flag || both_alt_agree || morph_edaph_alt_agree || vis_edaph_alt_agree ||
                        triage_cat == "Severe_Triple_Stream_Conflict" ||
-                       (c_err >= 0.80 && vis_is_taxon && vis_sp != given_sp) ||
-                       (morph_is_taxon && morph_sp != given_sp && !is.na(cda_prob) && cda_prob >= 0.68)
+                       (c_err >= vis_cut && vis_is_taxon && vis_sp != given_sp) ||
+                       (morph_is_taxon && morph_sp != given_sp && !is.na(cda_prob) && cda_prob >= cda_cut)
 
     # Case 3: Hybrid Swarm / Introgressant (Strictly gated; never triggers on clear misidentifications or unbacked gmm_unc alone)
     is_hybrid_swarm <- !is_severe_misid && !both_alt_agree && !is_corrupt && (
@@ -280,7 +284,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
       v_sp  <- if ("vision_predicted_label" %in% names(df) && !is.na(df$vision_predicted_label[i])) df$vision_predicted_label[i] else ""
       g_cl  <- if ("gmm_cluster" %in% names(df) && !is.na(df$gmm_cluster[i])) as.integer(df$gmm_cluster[i]) else 1L
       ddoy  <- if ("delta_doy" %in% names(df) && !is.na(df$delta_doy[i])) abs(as.numeric(df$delta_doy[i])) else 0.0
-      is_crypt <- (is.na(cda_p) || cda_p < 0.75) || (nzchar(m_sp) && nzchar(v_sp) && m_sp != v_sp) || (g_cl > 4L) || (ddoy >= 18.0)
+      is_mo_out <- if ("morphometric_outlier_flag" %in% names(df) && !is.na(df$morphometric_outlier_flag[i])) isTRUE(df$morphometric_outlier_flag[i]) else FALSE
+      both_agree_known <- (nzchar(m_sp) && nzchar(v_sp) && m_sp == v_sp && m_sp != given_sp)
+      high_conf_known  <- (!is.na(cda_p) && cda_p >= 0.70) || (v_cerr >= 0.85 && nzchar(v_sp) && v_sp != given_sp)
+      is_crypt <- !both_agree_known && !high_conf_known && is_mo_out && ((g_cl > 4L && ddoy >= 14.0) || (ddoy >= 21.0 && (is.na(cda_p) || cda_p < 0.55)))
       treat_broad[i] <- "Misidentification / Cryptic Species"
       treat_sub[i]   <- if (is_crypt) "Putative_Cryptic_Species" else "Misidentification_Reassign"
     } else {
@@ -289,7 +296,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
     }
   }
   df$taxonomic_treatment <- treat_broad
+  df$taxonomic_treatment_broad <- treat_broad
   df$taxonomic_treatment_subtype <- treat_sub
+  df$taxonomic_treatment_sub <- treat_sub
   return(df)
 }
 
@@ -388,7 +397,18 @@ build_triage_queue <- function(opts) {
         .groups = "drop"
       )
     join_mo_cols <- setdiff(names(mo_agg), intersect(names(vouchers), setdiff(names(mo_agg), "catalogNumber")))
-    vouchers <- dplyr::left_join(vouchers, mo_agg[, join_mo_cols], by = "catalogNumber")
+    if (length(join_mo_cols) > 0) {
+      vouchers <- dplyr::left_join(vouchers, mo_agg[, unique(c("catalogNumber", join_mo_cols)), drop = FALSE], by = "catalogNumber")
+    }
+    idx_mo <- match(vouchers$catalogNumber, mo_agg$catalogNumber)
+    for (mc in setdiff(names(mo_agg), "catalogNumber")) {
+      if (mc %in% names(vouchers)) {
+        na_mask <- is.na(vouchers[[mc]]) & !is.na(idx_mo)
+        vouchers[[mc]][na_mask] <- mo_agg[[mc]][idx_mo[na_mask]]
+      } else {
+        vouchers[[mc]] <- mo_agg[[mc]][idx_mo]
+      }
+    }
   }
 
   # Deep vision audit join with voucher-level aggregation
@@ -407,7 +427,18 @@ build_triage_queue <- function(opts) {
         .groups = "drop"
       )
     join_vi_cols <- setdiff(names(vi_agg), intersect(names(vouchers), setdiff(names(vi_agg), "catalogNumber")))
-    vouchers <- dplyr::left_join(vouchers, vi_agg[, join_vi_cols], by = "catalogNumber")
+    if (length(join_vi_cols) > 0) {
+      vouchers <- dplyr::left_join(vouchers, vi_agg[, unique(c("catalogNumber", join_vi_cols)), drop = FALSE], by = "catalogNumber")
+    }
+    idx_vi <- match(vouchers$catalogNumber, vi_agg$catalogNumber)
+    for (vc in setdiff(names(vi_agg), "catalogNumber")) {
+      if (vc %in% names(vouchers)) {
+        na_mask <- is.na(vouchers[[vc]]) & !is.na(idx_vi)
+        vouchers[[vc]][na_mask] <- vi_agg[[vc]][idx_vi[na_mask]]
+      } else {
+        vouchers[[vc]] <- vi_agg[[vc]][idx_vi]
+      }
+    }
   }
 
   # Ensure doy is populated from multimodal_flags, dayOfYear, or eventDate for Panel D
@@ -461,6 +492,13 @@ build_triage_queue <- function(opts) {
   readr::write_csv(vouchers, tmp_queue)
   file.rename(tmp_queue, opts$output_queue)
   message(sprintf("Successfully exported %d triage vouchers to %s.", nrow(vouchers), opts$output_queue))
+  if (!is.null(opts$output_triage) && nzchar(opts$output_triage) && opts$output_triage != opts$output_queue) {
+    dir.create(dirname(opts$output_triage), recursive = TRUE, showWarnings = FALSE)
+    tmp_tr <- paste0(opts$output_triage, ".tmp")
+    readr::write_csv(vouchers, tmp_tr)
+    file.rename(tmp_tr, opts$output_triage)
+    message(sprintf("Successfully exported %d triage vouchers to %s.", nrow(vouchers), opts$output_triage))
+  }
   return(vouchers)
 }
 
