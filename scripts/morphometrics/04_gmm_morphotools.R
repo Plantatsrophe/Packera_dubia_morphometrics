@@ -492,7 +492,7 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   return(invisible(list(lm_pc1 = lm_pc1, lm_pc2 = lm_pc2, anova_table = anova_df)))
 }
 
-# 6. Publication-Quality 3D CDA & 3D GMM Biplot Vector Graphic (PDF)
+# 6. Publication-Quality 2D CDA & 2D GMM Biplot Vector Graphic (PDF)
 generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL) {
   if (!exists("render_cda_biplot_4panel_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
     source("scripts/morphometrics/pub_figures_utils.R")

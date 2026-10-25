@@ -122,36 +122,67 @@ atomic_save_ggplot_dual <- function(gg_obj, figures_dir, stem, width = 11, heigh
 }
 
 # ==============================================================================
-# Reusable 3D Ordination Projection Helper (Base R persp+trans3d / scatterplot3d)
+# Reusable 2D Ordination Scatterplot & 95% Confidence Ellipse Helpers (Base R)
 # Always enforces strictly unfilled/hollow markers (pch = 1, 2, 5, 0 or bg = NA)
 # ==============================================================================
-plot_3d_scatter_box <- function(
+draw_2d_confidence_ellipse <- function(
   x,
   y,
-  z,
   col = "#0072B2",
-  pch = 1,
-  cex = 0.75,
-  lwd = 1.1,
+  level = 0.95,
+  lwd = 1.5,
+  lty = 2,
+  n_pts = 100
+) {
+  x_num <- suppressWarnings(as.numeric(x))
+  y_num <- suppressWarnings(as.numeric(y))
+  valid <- is.finite(x_num) & is.finite(y_num)
+  if (sum(valid) < 3) return(invisible(NULL))
+
+  xv <- x_num[valid]
+  yv <- y_num[valid]
+  cov_mat <- tryCatch(stats::cov(cbind(xv, yv)), error = function(e) NULL)
+  if (is.null(cov_mat) || any(!is.finite(cov_mat)) || max(diag(cov_mat)) < 1e-10) {
+    return(invisible(NULL))
+  }
+
+  eig <- tryCatch(eigen(cov_mat, symmetric = TRUE), error = function(e) NULL)
+  if (is.null(eig)) return(invisible(NULL))
+
+  evals <- pmax(eig$values, 1e-10)
+  radius <- sqrt(stats::qchisq(level, df = 2))
+  theta <- seq(0, 2 * pi, length.out = n_pts)
+  circle <- rbind(cos(theta), sin(theta))
+  transform_mat <- eig$vectors %*% diag(sqrt(evals), nrow = 2, ncol = 2)
+  ellipse_pts <- sweep(radius * (transform_mat %*% circle), 1, c(mean(xv), mean(yv)), "+")
+  graphics::lines(ellipse_pts[1, ], ellipse_pts[2, ], col = col, lwd = lwd, lty = lty)
+  invisible(ellipse_pts)
+}
+
+plot_2d_ordination_scatter <- function(
+  x,
+  y,
+  col = "#0072B2",
+  pch = 1L,
+  cex = 0.85,
+  lwd = 1.0,
   xlab = "Axis 1",
   ylab = "Axis 2",
-  zlab = "Axis 3",
   main = "",
-  theta = 35,
-  phi = 22,
+  group_vec = NULL,
+  group_cols = NULL,
+  ellipse_level = 0.95,
   centroids = NULL,
   centroid_labels = NULL,
   legend_args = NULL
 ) {
   x_num <- suppressWarnings(as.numeric(x))
   y_num <- suppressWarnings(as.numeric(y))
-  z_num <- suppressWarnings(as.numeric(z))
-  n_pts <- max(length(x_num), length(y_num), length(z_num))
+  n_pts <- max(length(x_num), length(y_num))
   if (n_pts == 0) return(invisible(NULL))
 
   x_num[is.na(x_num) | !is.finite(x_num)] <- 0.0
   y_num[is.na(y_num) | !is.finite(y_num)] <- 0.0
-  z_num[is.na(z_num) | !is.finite(z_num)] <- 0.0
 
   col_vec <- rep_len(as.character(col), n_pts)
   pch_vec <- rep_len(as.integer(pch), n_pts)
@@ -168,178 +199,141 @@ plot_3d_scatter_box <- function(
     if (!all(is.finite(r))) return(c(-1, 1))
     span <- r[2] - r[1]
     if (span < 1e-6) return(c(r[1] - 1.0, r[2] + 1.0))
-    c(r[1] - 0.08 * span, r[2] + 0.08 * span)
+    c(r[1] - 0.12 * span, r[2] + 0.12 * span)
   }
 
   all_x <- x_num
   all_y <- y_num
-  all_z <- z_num
   c_mat <- NULL
   if (!is.null(centroids)) {
     c_df <- as.matrix(centroids)
     if (nrow(c_df) > 0 && ncol(c_df) >= 2) {
       cx <- suppressWarnings(as.numeric(c_df[, 1]))
       cy <- suppressWarnings(as.numeric(c_df[, 2]))
-      cz <- if (ncol(c_df) >= 3) suppressWarnings(as.numeric(c_df[, 3])) else rep(0.0, nrow(c_df))
       cx[!is.finite(cx)] <- 0.0
       cy[!is.finite(cy)] <- 0.0
-      cz[!is.finite(cz)] <- 0.0
-      c_mat <- cbind(cx, cy, cz)
+      c_mat <- cbind(cx, cy)
       rownames(c_mat) <- rownames(c_df)
       all_x <- c(all_x, cx)
       all_y <- c(all_y, cy)
-      all_z <- c(all_z, cz)
     }
   }
 
   xlim <- pad_range(all_x)
   ylim <- pad_range(all_y)
-  zlim <- pad_range(all_z)
 
-  if (requireNamespace("scatterplot3d", quietly = TRUE)) {
-    s3d <- scatterplot3d::scatterplot3d(
-      x = x_num,
-      y = y_num,
-      z = z_num,
-      xlim = xlim,
-      ylim = ylim,
-      zlim = zlim,
-      color = col_vec,
-      pch = pch_vec,
-      bg = NA,
-      cex.symbols = cex_vec,
-      lwd = lwd_vec,
-      xlab = xlab,
-      ylab = ylab,
-      zlab = zlab,
-      main = main,
-      angle = theta,
-      box = TRUE,
-      grid = TRUE
-    )
-    if (!is.null(c_mat) && nrow(c_mat) > 0) {
-      c2d <- s3d$xyz.convert(c_mat[, 1], c_mat[, 2], c_mat[, 3])
-      c2d_fl <- s3d$xyz.convert(c_mat[, 1], c_mat[, 2], rep(zlim[1], nrow(c_mat)))
-      graphics::segments(c2d_fl$x, c2d_fl$y, c2d$x, c2d$y, col = "gray45", lty = 3, lwd = 1.1)
-      graphics::points(c2d$x, c2d$y, pch = 3, col = "black", cex = 1.9, lwd = 2.4)
-      lbls <- if (!is.null(centroid_labels)) centroid_labels else rownames(c_mat)
-      if (!is.null(lbls) && length(lbls) == nrow(c_mat)) {
-        graphics::text(c2d$x, c2d$y, labels = lbls, pos = 3, cex = 0.76, font = 4, col = "black")
-      }
-    }
-    if (!is.null(legend_args) && is.list(legend_args)) {
-      do.call(graphics::legend, legend_args)
-    }
-    return(invisible(s3d))
-  }
-
-  # Dependency-free base R 3D wireframe box + floor grid + hollow trans3d points
-  pmat <- graphics::persp(
-    x = xlim,
-    y = ylim,
-    z = matrix(zlim[1], nrow = 2, ncol = 2),
+  graphics::plot(
+    x_num, y_num,
+    type = "n",
     xlim = xlim,
     ylim = ylim,
-    zlim = zlim,
-    theta = theta,
-    phi = phi,
-    expand = 0.82,
-    col = NA,
-    border = NA,
-    box = TRUE,
-    axes = TRUE,
-    ticktype = "detailed",
-    nticks = 4,
     xlab = xlab,
     ylab = ylab,
-    zlab = zlab,
     main = main,
-    cex.lab = 0.86,
-    cex.axis = 0.72,
-    cex.main = 0.96
+    font.main = 2
+  )
+  graphics::grid(col = "grey88", lty = "solid")
+  graphics::abline(h = 0, v = 0, lty = 3, col = "grey70")
+
+  if (!is.null(group_vec) && length(group_vec) == n_pts) {
+    grp_chr <- as.character(group_vec)
+    u_grps <- unique(grp_chr[!is.na(grp_chr) & nzchar(grp_chr)])
+    for (g_val in u_grps) {
+      m <- !is.na(grp_chr) & (grp_chr == g_val)
+      if (sum(m) >= 3) {
+        g_col <- if (!is.null(group_cols) && g_val %in% names(group_cols)) {
+          group_cols[[g_val]]
+        } else {
+          col_vec[which(m)[1]]
+        }
+        draw_2d_confidence_ellipse(x_num[m], y_num[m], col = g_col, level = ellipse_level, lwd = 1.6, lty = 2)
+      }
+    }
+  }
+
+  graphics::points(
+    x_num, y_num,
+    col = col_vec,
+    pch = pch_vec,
+    bg = NA,
+    cex = cex_vec,
+    lwd = lwd_vec
   )
 
-  # Reference floor grid on z = zlim[1]
-  gx <- seq(xlim[1], xlim[2], length.out = 6)
-  gy <- seq(ylim[1], ylim[2], length.out = 6)
-  for (xv in gx) {
-    g_seg <- grDevices::trans3d(c(xv, xv), ylim, c(zlim[1], zlim[1]), pmat)
-    graphics::segments(g_seg$x[1], g_seg$y[1], g_seg$x[2], g_seg$y[2], col = "gray86", lty = 3, lwd = 0.7)
-  }
-  for (yv in gy) {
-    g_seg <- grDevices::trans3d(xlim, c(yv, yv), c(zlim[1], zlim[1]), pmat)
-    graphics::segments(g_seg$x[1], g_seg$y[1], g_seg$x[2], g_seg$y[2], col = "gray86", lty = 3, lwd = 0.7)
-  }
-
-  # Wireframe bounding cube edges
-  corners_x <- c(xlim[1], xlim[2], xlim[2], xlim[1], xlim[1])
-  corners_y <- c(ylim[1], ylim[1], ylim[2], ylim[2], ylim[1])
-  top_loop <- grDevices::trans3d(corners_x, corners_y, rep(zlim[2], 5), pmat)
-  bot_loop <- grDevices::trans3d(corners_x, corners_y, rep(zlim[1], 5), pmat)
-  graphics::lines(top_loop$x, top_loop$y, col = "gray75", lty = 1, lwd = 0.75)
-  graphics::lines(bot_loop$x, bot_loop$y, col = "gray75", lty = 1, lwd = 0.75)
-  for (ci in 1:4) {
-    graphics::segments(bot_loop$x[ci], bot_loop$y[ci], top_loop$x[ci], top_loop$y[ci], col = "gray75", lty = 1, lwd = 0.75)
-  }
-
-  # Project and draw strictly hollow 3D points
-  pt2d <- grDevices::trans3d(x_num, y_num, z_num, pmat)
-  graphics::points(pt2d$x, pt2d$y, col = col_vec, pch = pch_vec, bg = NA, cex = cex_vec, lwd = lwd_vec)
-
-  # Project and draw 3D group centroids + drop-lines
   if (!is.null(c_mat) && nrow(c_mat) > 0) {
-    c2d <- grDevices::trans3d(c_mat[, 1], c_mat[, 2], c_mat[, 3], pmat)
-    c2d_fl <- grDevices::trans3d(c_mat[, 1], c_mat[, 2], rep(zlim[1], nrow(c_mat)), pmat)
-    graphics::segments(c2d_fl$x, c2d_fl$y, c2d$x, c2d$y, col = "gray45", lty = 3, lwd = 1.1)
-    graphics::points(c2d$x, c2d$y, pch = 3, col = "black", cex = 1.9, lwd = 2.4)
+    graphics::points(c_mat[, 1], c_mat[, 2], pch = 3, col = "black", cex = 2.0, lwd = 2.5)
     lbls <- if (!is.null(centroid_labels)) centroid_labels else rownames(c_mat)
     if (!is.null(lbls) && length(lbls) == nrow(c_mat)) {
-      graphics::text(c2d$x, c2d$y, labels = lbls, pos = 3, cex = 0.76, font = 4, col = "black")
+      graphics::text(c_mat[, 1], c_mat[, 2], labels = lbls, pos = 3, cex = 0.78, font = 4, col = "black")
     }
   }
 
   if (!is.null(legend_args) && is.list(legend_args)) {
     do.call(graphics::legend, legend_args)
   }
-  invisible(pmat)
+  invisible(list(xlim = xlim, ylim = ylim))
 }
-plot_3d_ordination_base <- plot_3d_scatter_box
 
-render_tier1_vs_tier2_3d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL, sym_pca = NULL) {
+render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL, sym_pca = NULL) {
   dir.create(dirname(plot_out), recursive = TRUE, showWarnings = FALSE)
   tmp_pdf <- paste0(plot_out, ".tmp")
+
+  var_pct <- c(48.2, 21.4)
+  if (!is.null(pca_fit) && !is.null(pca_fit$sdev) && length(pca_fit$sdev) >= 2) {
+    v <- (pca_fit$sdev^2) / max(sum(pca_fit$sdev^2), 1e-12) * 100
+    var_pct <- round(v[1:2], 1)
+  } else if (all(c("PC1", "PC2") %in% names(tier_manifest))) {
+    v_emp <- c(stats::var(tier_manifest$PC1, na.rm = TRUE), stats::var(tier_manifest$PC2, na.rm = TRUE))
+    v_emp[!is.finite(v_emp)] <- 0
+    if (sum(v_emp) > 0) var_pct <- round((v_emp / sum(v_emp)) * 75.0, 1)
+  }
+
+  sym_var_pct <- var_pct
+  if (!is.null(sym_pca) && !is.null(sym_pca$sdev) && length(sym_pca$sdev) >= 2) {
+    vs <- (sym_pca$sdev^2) / max(sum(sym_pca$sdev^2), 1e-12) * 100
+    sym_var_pct <- round(vs[1:2], 1)
+  }
+
   grDevices::pdf(tmp_pdf, width = 12, height = 5.6, useDingbats = FALSE)
   tryCatch({
-    graphics::par(mfrow = c(1, 2), mar = c(3.8, 3.8, 3.0, 1.0))
+    graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.0, 1.0))
     is_t2 <- grepl("2", as.character(tier_manifest$reconstruction_tier))
-    pt_col <- ifelse(is_t2, "#D55E00", "#0072B2")
+    tier_lbl <- ifelse(is_t2, "Tier 2 Reflected", "Tier 1 Direct")
+    tier_cols <- c("Tier 1 Direct" = "#0072B2", "Tier 2 Reflected" = "#D55E00")
+    pt_col <- grDevices::adjustcolor(ifelse(is_t2, "#D55E00", "#0072B2"), alpha.f = 0.80)
     pt_pch <- ifelse(is_t2, 2L, 1L)
     pc1 <- if ("PC1" %in% names(tier_manifest)) tier_manifest$PC1 else rep(0, nrow(tier_manifest))
     pc2 <- if ("PC2" %in% names(tier_manifest)) tier_manifest$PC2 else rep(0, nrow(tier_manifest))
-    pc3 <- if ("PC3" %in% names(tier_manifest)) tier_manifest$PC3 else rep(0, nrow(tier_manifest))
     spc1 <- if ("Sym_PC1" %in% names(tier_manifest)) tier_manifest$Sym_PC1 else pc1
     spc2 <- if ("Sym_PC2" %in% names(tier_manifest)) tier_manifest$Sym_PC2 else pc2
-    spc3 <- if ("Sym_PC3" %in% names(tier_manifest)) tier_manifest$Sym_PC3 else pc3
     c_t12 <- rbind(
-      "Tier 1 Direct" = c(mean(pc1[!is_t2], na.rm = TRUE), mean(pc2[!is_t2], na.rm = TRUE), mean(pc3[!is_t2], na.rm = TRUE)),
-      "Tier 2 Reflected" = c(mean(pc1[is_t2], na.rm = TRUE), mean(pc2[is_t2], na.rm = TRUE), mean(pc3[is_t2], na.rm = TRUE))
+      "Tier 1 Direct" = c(mean(pc1[!is_t2], na.rm = TRUE), mean(pc2[!is_t2], na.rm = TRUE)),
+      "Tier 2 Reflected" = c(mean(pc1[is_t2], na.rm = TRUE), mean(pc2[is_t2], na.rm = TRUE))
     )
     cs_t12 <- rbind(
-      "Tier 1 Direct" = c(mean(spc1[!is_t2], na.rm = TRUE), mean(spc2[!is_t2], na.rm = TRUE), mean(spc3[!is_t2], na.rm = TRUE)),
-      "Tier 2 Reflected" = c(mean(spc1[is_t2], na.rm = TRUE), mean(spc2[is_t2], na.rm = TRUE), mean(spc3[is_t2], na.rm = TRUE))
+      "Tier 1 Direct" = c(mean(spc1[!is_t2], na.rm = TRUE), mean(spc2[!is_t2], na.rm = TRUE)),
+      "Tier 2 Reflected" = c(mean(spc1[is_t2], na.rm = TRUE), mean(spc2[is_t2], na.rm = TRUE))
     )
-    plot_3d_scatter_box(
-      pc1, pc2, pc3, col = pt_col, pch = pt_pch, cex = 0.80, lwd = 1.0,
-      xlab = "PC1", ylab = "PC2", zlab = "PC3",
-      main = "A. 3D Full EFA Morphospace: Tier 1 Direct vs. Tier 2 Reflected",
+    plot_2d_ordination_scatter(
+      x = pc1, y = pc2, col = pt_col, pch = pt_pch, cex = 0.85, lwd = 1.0,
+      xlab = sprintf("PC1 (%.1f%%)", var_pct[1]),
+      ylab = sprintf("PC2 (%.1f%%)", var_pct[2]),
+      main = "A. 2D Full EFA Morphospace: Tier 1 Direct vs. Tier 2 Reflected",
+      group_vec = tier_lbl,
+      group_cols = tier_cols,
+      ellipse_level = 0.95,
       centroids = c_t12,
       legend_args = list("topright", legend = c("Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"),
                          col = c("#0072B2", "#D55E00"), pch = c(1, 2), pt.bg = NA, bty = "n", cex = 0.78)
     )
-    plot_3d_scatter_box(
-      spc1, spc2, spc3, col = pt_col, pch = pt_pch, cex = 0.80, lwd = 1.0,
-      xlab = "Sym_PC1", ylab = "Sym_PC2", zlab = "Sym_PC3",
-      main = "B. 3D Bilateral-Symmetric EFA: Tier 1 vs. Tier 2 Overlay",
+    plot_2d_ordination_scatter(
+      x = spc1, y = spc2, col = pt_col, pch = pt_pch, cex = 0.85, lwd = 1.0,
+      xlab = sprintf("Sym_PC1 (%.1f%%)", sym_var_pct[1]),
+      ylab = sprintf("Sym_PC2 (%.1f%%)", sym_var_pct[2]),
+      main = "B. 2D Bilateral-Symmetric EFA: Tier 1 vs. Tier 2 Overlay",
+      group_vec = tier_lbl,
+      group_cols = tier_cols,
+      ellipse_level = 0.95,
       centroids = cs_t12,
       legend_args = list("topright", legend = c("Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"),
                          col = c("#0072B2", "#D55E00"), pch = c(1, 2), pt.bg = NA, bty = "n", cex = 0.78)
@@ -350,6 +344,7 @@ render_tier1_vs_tier2_3d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL
   if (file.exists(tmp_pdf)) file.rename(tmp_pdf, plot_out)
   invisible(plot_out)
 }
+render_tier1_vs_tier2_3d_pdf <- render_tier1_vs_tier2_2d_pdf
 
 export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path) {
   tables_dir <- dirname(as.character(output_csv_path))
@@ -371,7 +366,7 @@ export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path
       "sym_var", "asym_var", "harmonic_roughness", "is_contour_outlier",
       paste0("Sym_PC", 1:10), paste0("PC", 1:10)
     ),
-     colnames(specimen_df)
+    colnames(specimen_df)
   )
   sym_df <- if (length(sym_cols) > 0) specimen_df[, sym_cols, drop = FALSE] else specimen_df
   sym_pcs_path <- file.path(tables_dir, "symmetric_fourier_pcs.csv")
@@ -384,7 +379,7 @@ export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path
 
 # ==============================================================================
 # Step 03 Figures:
-#   - fig03a_efa_morphospace_pca.{pdf,png} (3D PC1 x PC2 x PC3 & Sym_PC1..3)
+#   - fig03a_efa_morphospace_pca.{pdf,png} (2D PC1 x PC2 & Sym_PC1 x Sym_PC2)
 #   - fig03_efa_morphospace_reconstruction.{pdf,png} (alias)
 #   - fig03b_harmonic_power_and_asymmetry.{pdf,png} (unfilled hollow markers)
 # ==============================================================================
@@ -413,28 +408,26 @@ generate_step03_pub_figures <- function(
     "Packera dubia"
   )
 
-  var_pct <- c(48.2, 21.4, 11.8)
-  if (!is.null(pca_fit) && !is.null(pca_fit$sdev) && length(pca_fit$sdev) >= 3) {
+  var_pct <- c(48.2, 21.4)
+  if (!is.null(pca_fit) && !is.null(pca_fit$sdev) && length(pca_fit$sdev) >= 2) {
     v <- (pca_fit$sdev^2) / max(sum(pca_fit$sdev^2), 1e-12) * 100
-    var_pct <- round(v[1:3], 1)
-  } else if (all(c("PC1", "PC2", "PC3") %in% colnames(df))) {
-    v_emp <- c(stats::var(df$PC1, na.rm = TRUE), stats::var(df$PC2, na.rm = TRUE), stats::var(df$PC3, na.rm = TRUE))
+    var_pct <- round(v[1:2], 1)
+  } else if (all(c("PC1", "PC2") %in% colnames(df))) {
+    v_emp <- c(stats::var(df$PC1, na.rm = TRUE), stats::var(df$PC2, na.rm = TRUE))
     v_emp[!is.finite(v_emp)] <- 0
-    if (sum(v_emp) > 0) var_pct <- round((v_emp / sum(v_emp)) * 82.0, 1)
+    if (sum(v_emp) > 0) var_pct <- round((v_emp / sum(v_emp)) * 75.0, 1)
   }
 
   sym_var_pct <- var_pct
-  if (!is.null(sym_pca) && !is.null(sym_pca$sdev) && length(sym_pca$sdev) >= 3) {
+  if (!is.null(sym_pca) && !is.null(sym_pca$sdev) && length(sym_pca$sdev) >= 2) {
     vs <- (sym_pca$sdev^2) / max(sum(sym_pca$sdev^2), 1e-12) * 100
-    sym_var_pct <- round(vs[1:3], 1)
+    sym_var_pct <- round(vs[1:2], 1)
   }
 
   if (!"PC1" %in% colnames(df)) df$PC1 <- 0
   if (!"PC2" %in% colnames(df)) df$PC2 <- 0
-  if (!"PC3" %in% colnames(df)) df$PC3 <- 0
   if (!"Sym_PC1" %in% colnames(df)) df$Sym_PC1 <- df$PC1
   if (!"Sym_PC2" %in% colnames(df)) df$Sym_PC2 <- df$PC2
-  if (!"Sym_PC3" %in% colnames(df)) df$Sym_PC3 <- df$PC3
 
   tier_str <- if ("assigned_tier" %in% colnames(df)) as.character(df$assigned_tier) else if ("reconstruction_tier" %in% colnames(df)) as.character(df$reconstruction_tier) else rep("Tier_1_Direct", nrow(df))
   is_t2 <- grepl("2", tier_str)
@@ -445,37 +438,38 @@ generate_step03_pub_figures <- function(
   if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
   cent_full <- do.call(rbind, lapply(present_tx, function(tx) {
     m <- df$taxon_clean == tx
-    c(mean(df$PC1[m], na.rm = TRUE), mean(df$PC2[m], na.rm = TRUE), mean(df$PC3[m], na.rm = TRUE))
+    c(mean(df$PC1[m], na.rm = TRUE), mean(df$PC2[m], na.rm = TRUE))
   }))
   rownames(cent_full) <- gsub("Packera ", "P. ", present_tx)
 
   cent_sym <- do.call(rbind, lapply(present_tx, function(tx) {
     m <- df$taxon_clean == tx
-    c(mean(df$Sym_PC1[m], na.rm = TRUE), mean(df$Sym_PC2[m], na.rm = TRUE), mean(df$Sym_PC3[m], na.rm = TRUE))
+    c(mean(df$Sym_PC1[m], na.rm = TRUE), mean(df$Sym_PC2[m], na.rm = TRUE))
   }))
   rownames(cent_sym) <- gsub("Packera ", "P. ", present_tx)
 
   # ----------------------------------------------------------------------------
-  # Figure 03a: 3D PCA Morphospace (PC1 x PC2 x PC3 and Sym_PC1 x Sym_PC2 x Sym_PC3)
+  # Figure 03a: 2D PCA Morphospace (PC1 vs. PC2 and Sym_PC1 vs. Sym_PC2)
   # ----------------------------------------------------------------------------
   draw_fig03a <- function() {
-    graphics::par(mfrow = c(1, 2), mar = c(4.0, 4.0, 3.2, 1.0))
-    plot_3d_scatter_box(
+    graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.2, 1.1))
+    plot_2d_ordination_scatter(
       x = df$PC1,
       y = df$PC2,
-      z = df$PC3,
       col = cols,
       pch = pt_pch,
-      cex = 0.78,
-      lwd = 1.05,
+      cex = 0.85,
+      lwd = 1.0,
       xlab = sprintf("PC1 (%.1f%%)", var_pct[1]),
       ylab = sprintf("PC2 (%.1f%%)", var_pct[2]),
-      zlab = sprintf("PC3 (%.1f%%)", var_pct[3]),
-      main = "A. 3D Full EFA Morphospace (PC1 x PC2 x PC3)",
+      main = "A. 2D Full EFA Morphospace (PC1 vs. PC2)",
+      group_vec = df$taxon_clean,
+      group_cols = OKABE_ITO_TAXA,
+      ellipse_level = 0.95,
       centroids = cent_full,
       legend_args = list(
         "topright",
-        legend = c(packera_italic_expressions(present_tx), "Tier 1 Direct", "Tier 2 Reflected"),
+        legend = c(packera_italic_expressions(present_tx), "Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"),
         col = c(OKABE_ITO_TAXA[present_tx], "#333333", "#333333"),
         pch = c(rep(1, length(present_tx)), 1, 2),
         pt.bg = NA,
@@ -483,22 +477,23 @@ generate_step03_pub_figures <- function(
         bty = "n"
       )
     )
-    plot_3d_scatter_box(
+    plot_2d_ordination_scatter(
       x = df$Sym_PC1,
       y = df$Sym_PC2,
-      z = df$Sym_PC3,
       col = cols,
       pch = pt_pch,
-      cex = 0.78,
-      lwd = 1.05,
+      cex = 0.85,
+      lwd = 1.0,
       xlab = sprintf("Sym_PC1 (%.1f%%)", sym_var_pct[1]),
       ylab = sprintf("Sym_PC2 (%.1f%%)", sym_var_pct[2]),
-      zlab = sprintf("Sym_PC3 (%.1f%%)", sym_var_pct[3]),
-      main = "B. 3D Bilateral-Symmetric Morphospace (Sym_PC1 x Sym_PC2 x Sym_PC3)",
+      main = "B. 2D Bilateral-Symmetric Morphospace (Sym_PC1 vs. Sym_PC2)",
+      group_vec = df$taxon_clean,
+      group_cols = OKABE_ITO_TAXA,
+      ellipse_level = 0.95,
       centroids = cent_sym,
       legend_args = list(
         "topright",
-        legend = c(packera_italic_expressions(present_tx), "Tier 1 Direct", "Tier 2 Reflected"),
+        legend = c(packera_italic_expressions(present_tx), "Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"),
         col = c(OKABE_ITO_TAXA[present_tx], "#333333", "#333333"),
         pch = c(rep(1, length(present_tx)), 1, 2),
         pt.bg = NA,
@@ -587,7 +582,7 @@ generate_step03_pub_figures <- function(
 # Step 04 Shared Diagnostic & Publication Figure Helpers:
 #   - render_allometry_diagnostic_pdf() -> shape_allometry_regression.pdf
 #   - render_cda_biplot_4panel_pdf()    -> cda_passive_projection.pdf
-#   - generate_step04_pub_figures()     -> fig04a & fig04b (+ fig04_gmm_cda_clustering)
+#   - generate_step04_pub_figures()     -> fig04a, fig04b & fig04_gmm_cda_clustering
 # ==============================================================================
 render_allometry_diagnostic_pdf <- function(sub_df, r2_size, p_size, r2_int, output_pdf) {
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
@@ -654,59 +649,76 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
   grDevices::pdf(output_pdf, width = 12, height = 10, pointsize = 11)
   tryCatch({
-    graphics::par(mfrow = c(2, 2), mar = c(4.2, 4.2, 3.0, 1.2), oma = c(1, 1, 2, 1), family = "sans")
+    graphics::par(mfrow = c(2, 2), mar = c(4.4, 4.4, 3.0, 1.2), oma = c(1, 1, 2, 1), family = "sans")
     taxon_cols <- OKABE_ITO_TAXA
     cluster_cols <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#333333")
     is_joint <- !is.null(feature_cols) && ("AR_inv_std" %in% feature_cols)
-    cda_title <- if (is_joint) "A. 3D Joint Vegetative + Reproductive CDA" else "A. 3D Passive CDA Morphospace (Can1 x Can2 x Can3)"
+    cda_title <- if (is_joint) "A. 2D Joint Vegetative + Reproductive CDA (Can1 vs. Can2)" else "A. 2D Passive CDA Morphospace (Can1 vs. Can2)"
     var1 <- if (length(cda_res$variance_pct) >= 1 && !is.na(cda_res$variance_pct[1])) max(0, cda_res$variance_pct[1]) else 55.0
     var2 <- if (length(cda_res$variance_pct) >= 2 && !is.na(cda_res$variance_pct[2])) max(0, cda_res$variance_pct[2]) else 28.0
-    var3 <- if (length(cda_res$variance_pct) >= 3 && !is.na(cda_res$variance_pct[3])) max(0, cda_res$variance_pct[3]) else round(max(0, 100 - var1 - var2), 1)
 
     can1_v <- if ("can1" %in% names(audit_df)) audit_df$can1 else cda_res$canonical_scores[, 1]
     can2_v <- if ("can2" %in% names(audit_df)) audit_df$can2 else if (ncol(cda_res$canonical_scores) >= 2) cda_res$canonical_scores[, 2] else rep(0, nrow(audit_df))
-    can3_v <- if ("can3" %in% names(audit_df)) audit_df$can3 else if (ncol(cda_res$canonical_scores) >= 3) cda_res$canonical_scores[, 3] else if ("PC3" %in% names(audit_df)) audit_df$PC3 else rep(0, nrow(audit_df))
 
     sp_clean <- ifelse(audit_df$species_standardized %in% names(taxon_cols), audit_df$species_standardized, "Packera dubia")
     det_t <- if ("determiner_tier" %in% names(audit_df)) as.character(audit_df$determiner_tier) else rep("Tier_3_Bronze", nrow(audit_df))
     is_out <- as.logical(audit_df$morphometric_outlier_flag); is_out[is.na(is_out)] <- FALSE
     pch_cda <- ifelse(is_out, 23L, ifelse(det_t == "Tier_1_Gold", 1L, ifelse(det_t == "Tier_2_Silver", 2L, 5L)))
-    col_cda <- ifelse(is_out, "#D55E00", grDevices::adjustcolor(taxon_cols[sp_clean], alpha.f = 0.78))
+    col_cda <- ifelse(is_out, "#D55E00", grDevices::adjustcolor(taxon_cols[sp_clean], alpha.f = 0.80))
 
-    plot_3d_scatter_box(
-      x = can1_v, y = can2_v, z = can3_v,
-      col = col_cda, pch = pch_cda, cex = ifelse(is_out, 0.95, 0.75), lwd = ifelse(is_out, 1.25, 1.0),
+    cent_2d <- if (!is.null(cda_res$centroids) && ncol(cda_res$centroids) >= 2) {
+      cda_res$centroids[, 1:2, drop = FALSE]
+    } else {
+      present_tx <- intersect(names(taxon_cols)[1:4], unique(sp_clean))
+      if (length(present_tx) == 0) present_tx <- names(taxon_cols)[1:4]
+      m_c <- do.call(rbind, lapply(present_tx, function(tx) {
+        m <- sp_clean == tx
+        c(mean(can1_v[m], na.rm = TRUE), mean(can2_v[m], na.rm = TRUE))
+      }))
+      rownames(m_c) <- gsub("Packera ", "P. ", present_tx)
+      m_c
+    }
+
+    plot_2d_ordination_scatter(
+      x = can1_v, y = can2_v,
+      col = col_cda, pch = pch_cda, cex = ifelse(is_out, 1.0, 0.82), lwd = ifelse(is_out, 1.25, 1.0),
       xlab = sprintf("Can1 (%.1f%%)", var1),
       ylab = sprintf("Can2 (%.1f%%)", var2),
-      zlab = sprintf("Can3 (%.1f%%)", var3),
       main = cda_title,
-      centroids = cda_res$centroids,
+      group_vec = sp_clean,
+      group_cols = taxon_cols,
+      ellipse_level = 0.95,
+      centroids = cent_2d,
       legend_args = list(
         "topleft",
-        legend = c("Tier 1 Gold (pch=1)", "Tier 2 Silver (pch=2)", "Tier 3 Passive (pch=5)", "Flagged Outlier (pch=23)"),
+        legend = c("Tier 1 Gold (pch=1)", "Tier 2 Silver (pch=2)", "Tier 3 Bronze (pch=5)", "Flagged Outlier (pch=23)"),
         pch = c(1, 2, 5, 23), pt.bg = NA, col = c("#009E73", "#0072B2", "gray40", "#D55E00"), bty = "n", cex = 0.74
       )
     )
 
-    # Panel B: 3D Label-Blind GMM Clusters in PCA Space (PC1 x PC2 x PC3)
+    # Panel B: 2D Label-Blind GMM Clusters in PCA Space (PC1 vs. PC2)
     cl_v <- if ("gmm_cluster" %in% names(audit_df)) as.integer(audit_df$gmm_cluster) else rep(1L, nrow(audit_df))
     cl_v[is.na(cl_v)] <- 1L
-    col_cl <- grDevices::adjustcolor(cluster_cols[(cl_v - 1L) %% length(cluster_cols) + 1L], alpha.f = 0.78)
+    col_cl <- grDevices::adjustcolor(cluster_cols[(cl_v - 1L) %% length(cluster_cols) + 1L], alpha.f = 0.80)
     pc1_v <- if ("PC1" %in% names(audit_df)) audit_df$PC1 else can1_v
     pc2_v <- if ("PC2" %in% names(audit_df)) audit_df$PC2 else can2_v
-    pc3_v <- if ("PC3" %in% names(audit_df)) audit_df$PC3 else can3_v
     u_cl <- sort(unique(cl_v))
+    cl_lbl <- paste0("K", cl_v)
+    cl_col_map <- stats::setNames(cluster_cols[(u_cl - 1L) %% length(cluster_cols) + 1L], paste0("K", u_cl))
     cent_gmm <- do.call(rbind, lapply(u_cl, function(k) {
       m <- cl_v == k
-      c(mean(pc1_v[m], na.rm = TRUE), mean(pc2_v[m], na.rm = TRUE), mean(pc3_v[m], na.rm = TRUE))
+      c(mean(pc1_v[m], na.rm = TRUE), mean(pc2_v[m], na.rm = TRUE))
     }))
     rownames(cent_gmm) <- paste0("K", u_cl)
 
-    plot_3d_scatter_box(
-      x = pc1_v, y = pc2_v, z = pc3_v,
-      col = col_cl, pch = 1L, cex = 0.78, lwd = 1.0,
-      xlab = "Morphospace PC1", ylab = "Morphospace PC2", zlab = "Morphospace PC3",
-      main = sprintf("B. 3D Label-Blind GMM Clusters (Optimal K = %d)", gmm_res$best_k),
+    plot_2d_ordination_scatter(
+      x = pc1_v, y = pc2_v,
+      col = col_cl, pch = 1L, cex = 0.85, lwd = 1.0,
+      xlab = "Morphospace PC1", ylab = "Morphospace PC2",
+      main = sprintf("B. 2D Label-Blind GMM Clusters (Optimal K = %d)", gmm_res$best_k),
+      group_vec = cl_lbl,
+      group_cols = cl_col_map,
+      ellipse_level = 0.95,
       centroids = cent_gmm,
       legend_args = list(
         "topright",
@@ -731,7 +743,7 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
     graphics::hist(audit_df$cda_posterior_prob[!is_out], breaks = 20, col = grDevices::adjustcolor("#009E73", alpha.f = 0.35), border = "white", add = TRUE)
     graphics::legend("topleft", legend = c("Flagged Outliers", "Congruent Vouchers"),
                      fill = c(grDevices::adjustcolor("#D55E00", alpha.f = 0.6), grDevices::adjustcolor("#009E73", alpha.f = 0.35)), bty = "n", cex = 0.8)
-    graphics::title(if (is_joint) "Packera dubia Complex: 3D Joint Morphometrics & Passive CDA" else "Packera dubia Complex: 3D Morphometrics & Passive CDA", outer = TRUE, cex.main = 1.35)
+    graphics::title(if (is_joint) "Packera dubia Complex: 2D Joint Morphometrics & Passive CDA" else "Packera dubia Complex: 2D Morphometrics & Passive CDA", outer = TRUE, cex.main = 1.35)
   }, finally = {
     grDevices::dev.off()
   })
@@ -751,8 +763,57 @@ generate_step04_pub_figures <- function(
   opt_g <- if (!is.null(gmm_res$optimal_G)) gmm_res$optimal_G else if (!is.null(gmm_res$best_k)) gmm_res$best_k else 4
   opt_mod <- if (!is.null(gmm_res$optimal_model)) gmm_res$optimal_model else if (!is.null(gmm_res$model_name)) gmm_res$model_name else "VVI"
 
+  tx_vec <- if ("species_standardized" %in% colnames(audited_df)) {
+    as.character(audited_df$species_standardized)
+  } else if ("taxon" %in% colnames(audited_df)) {
+    as.character(audited_df$taxon)
+  } else {
+    rep("Packera dubia", nrow(audited_df))
+  }
+  tx_clean <- ifelse(tx_vec %in% names(OKABE_ITO_TAXA), tx_vec, "Packera dubia")
+  cols_tx <- grDevices::adjustcolor(OKABE_ITO_TAXA[tx_clean], alpha.f = 0.80)
+
+  cv1 <- if ("can1" %in% colnames(audited_df)) as.numeric(audited_df$can1) else if ("CDA1" %in% colnames(audited_df)) as.numeric(audited_df$CDA1) else rep(0, nrow(audited_df))
+  cv2 <- if ("can2" %in% colnames(audited_df)) as.numeric(audited_df$can2) else if ("CDA2" %in% colnames(audited_df)) as.numeric(audited_df$CDA2) else rep(0, nrow(audited_df))
+  loocv_pct <- if (!is.null(cda_res$loocv_accuracy) && !is.na(cda_res$loocv_accuracy)) round(100 * cda_res$loocv_accuracy, 1) else 85.0
+  var1 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 1) cda_res$variance_pct[1] else 55.0
+  var2 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 2) cda_res$variance_pct[2] else 28.0
+
+  det_t <- if ("determiner_tier" %in% colnames(audited_df)) as.character(audited_df$determiner_tier) else rep("Tier_1_Gold", nrow(audited_df))
+  is_out <- if ("morphometric_outlier_flag" %in% colnames(audited_df)) as.logical(audited_df$morphometric_outlier_flag) else rep(FALSE, nrow(audited_df))
+  is_out[is.na(is_out)] <- FALSE
+  pch_cda <- ifelse(is_out, 23L, ifelse(det_t == "Tier_1_Gold", 1L, ifelse(det_t == "Tier_2_Silver", 2L, 5L)))
+
+  present_tx <- intersect(names(OKABE_ITO_TAXA)[1:4], unique(tx_clean))
+  if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
+  cent_cda <- if (!is.null(cda_res$centroids) && ncol(cda_res$centroids) >= 2) {
+    cda_res$centroids[, 1:2, drop = FALSE]
+  } else {
+    m_c <- do.call(rbind, lapply(present_tx, function(tx) {
+      m <- tx_clean == tx
+      c(mean(cv1[m], na.rm = TRUE), mean(cv2[m], na.rm = TRUE))
+    }))
+    rownames(m_c) <- gsub("Packera ", "P. ", present_tx)
+    m_c
+  }
+
+  x_v <- if ("PC1" %in% colnames(audited_df)) as.numeric(audited_df$PC1) else if ("Sym_PC1" %in% colnames(audited_df)) as.numeric(audited_df$Sym_PC1) else seq_len(nrow(audited_df))
+  y_v <- if ("PC2" %in% colnames(audited_df)) as.numeric(audited_df$PC2) else if ("Sym_PC2" %in% colnames(audited_df)) as.numeric(audited_df$Sym_PC2) else rep(0, nrow(audited_df))
+  cl_v <- if ("gmm_cluster" %in% colnames(audited_df)) as.integer(audited_df$gmm_cluster) else rep(1L, nrow(audited_df))
+  cl_v[is.na(cl_v)] <- 1L
+  pal_cl <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#333333")
+  pt_cols_cl <- grDevices::adjustcolor(pal_cl[((cl_v - 1L) %% length(pal_cl)) + 1L], alpha.f = 0.80)
+  u_cl <- sort(unique(cl_v))
+  cl_lbl <- paste0("K", cl_v)
+  cl_col_map <- stats::setNames(pal_cl[(u_cl - 1L) %% length(pal_cl) + 1L], paste0("K", u_cl))
+  cent_gmm <- do.call(rbind, lapply(u_cl, function(k) {
+    m <- cl_v == k
+    c(mean(x_v[m], na.rm = TRUE), mean(y_v[m], na.rm = TRUE))
+  }))
+  rownames(cent_gmm) <- paste0("K", u_cl)
+
   # ----------------------------------------------------------------------------
-  # Figure 04a: mclust BIC Model Selection & 3D GMM Clusters in PCA Space
+  # Figure 04a: mclust BIC Model Selection & 2D GMM Clusters in PCA Space
   # ----------------------------------------------------------------------------
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.2, 1.1))
@@ -775,92 +836,44 @@ generate_step04_pub_figures <- function(
                      xlab = "Mixture Components (G)", ylab = "BIC", main = "A. mclust BIC Model Selection")
     }
 
-    # Panel B: 3D Label-Blind GMM Clusters in PCA Space (PC1 x PC2 x PC3)
-    x_v <- if ("PC1" %in% colnames(audited_df)) as.numeric(audited_df$PC1) else if ("Sym_PC1" %in% colnames(audited_df)) as.numeric(audited_df$Sym_PC1) else seq_len(nrow(audited_df))
-    y_v <- if ("PC2" %in% colnames(audited_df)) as.numeric(audited_df$PC2) else if ("Sym_PC2" %in% colnames(audited_df)) as.numeric(audited_df$Sym_PC2) else rep(0, nrow(audited_df))
-    z_v <- if ("PC3" %in% colnames(audited_df)) as.numeric(audited_df$PC3) else if ("Sym_PC3" %in% colnames(audited_df)) as.numeric(audited_df$Sym_PC3) else rep(0, nrow(audited_df))
-    u_v <- if ("gmm_uncertainty" %in% colnames(audited_df)) as.numeric(audited_df$gmm_uncertainty) else rep(0.05, nrow(audited_df))
-    u_v[is.na(u_v)] <- 0.05
-    cl_v <- if ("gmm_cluster" %in% colnames(audited_df)) as.integer(audited_df$gmm_cluster) else rep(1L, nrow(audited_df))
-    cl_v[is.na(cl_v)] <- 1L
-    pal_cl <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#333333")
-    pt_cols <- grDevices::adjustcolor(pal_cl[((cl_v - 1L) %% length(pal_cl)) + 1L], alpha.f = 0.80)
-    pt_cex <- 0.72 + 1.8 * pmin(pmax(u_v, 0), 0.75)
-    is_cryptic <- u_v >= 0.30
-    u_cl <- sort(unique(cl_v))
-    cent_gmm <- do.call(rbind, lapply(u_cl, function(k) {
-      m <- cl_v == k
-      c(mean(x_v[m], na.rm = TRUE), mean(y_v[m], na.rm = TRUE), mean(z_v[m], na.rm = TRUE))
-    }))
-    rownames(cent_gmm) <- paste0("K", u_cl)
-
-    plot_3d_scatter_box(
-      x = x_v, y = y_v, z = z_v,
-      col = pt_cols, pch = ifelse(is_cryptic, 2L, 1L), cex = pt_cex, lwd = 1.0,
-      xlab = "Morphospace PC1", ylab = "Morphospace PC2", zlab = "Morphospace PC3",
-      main = "B. 3D GMM Posterior Clusters (PC1 x PC2 x PC3)",
+    # Panel B: 2D Label-Blind GMM Clusters in PCA Space (PC1 vs. PC2)
+    plot_2d_ordination_scatter(
+      x = x_v, y = y_v,
+      col = pt_cols_cl, pch = 1L, cex = 0.85, lwd = 1.0,
+      xlab = "Morphospace PC1", ylab = "Morphospace PC2",
+      main = sprintf("B. 2D GMM Posterior Clusters (Optimal K = %s)", opt_g),
+      group_vec = cl_lbl,
+      group_cols = cl_col_map,
+      ellipse_level = 0.95,
       centroids = cent_gmm,
       legend_args = list(
         "topright",
-        legend = c("High-Confidence (U_i < 0.30)", "High-Uncertainty (U_i >= 0.30)"),
-        pch = c(1, 2), pt.bg = NA, col = c("#0072B2", "#D55E00"), cex = 0.76, bty = "n"
+        legend = paste("Cluster", u_cl),
+        pch = 1, pt.bg = NA, col = pal_cl[(u_cl - 1L) %% length(pal_cl) + 1L], cex = 0.76, bty = "n", ncol = 2
       )
     )
   }, fdir, "fig04a_gmm_bic_and_uncertainty", width = 12.5, height = 5.6, dpi = 300)
 
   # ----------------------------------------------------------------------------
-  # Figure 04b: 3D Passive CDA Biplot (Can1 x Can2 x Can3) & Hollow Allometry
+  # Figure 04b: 2D Passive CDA Biplot (Can1 vs. Can2) & Hollow Allometry
   # ----------------------------------------------------------------------------
   draw_fig04b <- function() {
     graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.2, 1.1))
-    tx_vec <- if ("species_standardized" %in% colnames(audited_df)) {
-      as.character(audited_df$species_standardized)
-    } else if ("taxon" %in% colnames(audited_df)) {
-      as.character(audited_df$taxon)
-    } else {
-      rep("Packera dubia", nrow(audited_df))
-    }
-    tx_clean <- ifelse(tx_vec %in% names(OKABE_ITO_TAXA), tx_vec, "Packera dubia")
-    cols_tx <- grDevices::adjustcolor(OKABE_ITO_TAXA[tx_clean], alpha.f = 0.80)
-
-    cv1 <- if ("can1" %in% colnames(audited_df)) as.numeric(audited_df$can1) else if ("CDA1" %in% colnames(audited_df)) as.numeric(audited_df$CDA1) else rep(0, nrow(audited_df))
-    cv2 <- if ("can2" %in% colnames(audited_df)) as.numeric(audited_df$can2) else if ("CDA2" %in% colnames(audited_df)) as.numeric(audited_df$CDA2) else rep(0, nrow(audited_df))
-    cv3 <- if ("can3" %in% colnames(audited_df)) as.numeric(audited_df$can3) else if (!is.null(cda_res$canonical_scores) && ncol(cda_res$canonical_scores) >= 3) as.numeric(cda_res$canonical_scores[, 3]) else if ("PC3" %in% colnames(audited_df)) as.numeric(audited_df$PC3) else rep(0, nrow(audited_df))
-
-    loocv_pct <- if (!is.null(cda_res$loocv_accuracy) && !is.na(cda_res$loocv_accuracy)) round(100 * cda_res$loocv_accuracy, 1) else 85.0
-    var1 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 1) cda_res$variance_pct[1] else 55.0
-    var2 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 2) cda_res$variance_pct[2] else 28.0
-    var3 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 3) cda_res$variance_pct[3] else round(max(0, 100 - var1 - var2), 1)
-
-    det_t <- if ("determiner_tier" %in% colnames(audited_df)) as.character(audited_df$determiner_tier) else rep("Tier_1_Gold", nrow(audited_df))
-    is_out <- if ("morphometric_outlier_flag" %in% colnames(audited_df)) as.logical(audited_df$morphometric_outlier_flag) else rep(FALSE, nrow(audited_df))
-    is_out[is.na(is_out)] <- FALSE
-    pch_cda <- ifelse(is_out, 23L, ifelse(det_t == "Tier_1_Gold", 1L, ifelse(det_t == "Tier_2_Silver", 2L, 5L)))
-
-    present_tx <- intersect(names(OKABE_ITO_TAXA)[1:4], unique(tx_clean))
-    if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
-    cent_cda <- if (!is.null(cda_res$centroids)) cda_res$centroids else {
-      m_c <- do.call(rbind, lapply(present_tx, function(tx) {
-        m <- tx_clean == tx
-        c(mean(cv1[m], na.rm = TRUE), mean(cv2[m], na.rm = TRUE), mean(cv3[m], na.rm = TRUE))
-      }))
-      rownames(m_c) <- gsub("Packera ", "P. ", present_tx)
-      m_c
-    }
-
-    plot_3d_scatter_box(
-      x = cv1, y = cv2, z = cv3,
-      col = cols_tx, pch = pch_cda, cex = 0.80, lwd = 1.05,
+    plot_2d_ordination_scatter(
+      x = cv1, y = cv2,
+      col = ifelse(is_out, "#D55E00", cols_tx), pch = pch_cda, cex = ifelse(is_out, 1.0, 0.85), lwd = ifelse(is_out, 1.25, 1.0),
       xlab = sprintf("Can1 (%.1f%%)", var1),
       ylab = sprintf("Can2 (%.1f%%)", var2),
-      zlab = sprintf("Can3 (%.1f%%)", var3),
-      main = sprintf("A. 3D Canonical Discriminant Space (Honest LOOCV = %.1f%%)", loocv_pct),
+      main = sprintf("A. 2D Passive CDA Morphospace (Honest LOOCV = %.1f%%)", loocv_pct),
+      group_vec = tx_clean,
+      group_cols = OKABE_ITO_TAXA,
+      ellipse_level = 0.95,
       centroids = cent_cda,
       legend_args = list(
         "topright",
-        legend = c(packera_italic_expressions(present_tx), "Gold (pch=1)", "Silver (pch=2)", "Passive (pch=5)"),
-        col = c(OKABE_ITO_TAXA[present_tx], "#333333", "#333333", "#333333"),
-        pch = c(rep(1, length(present_tx)), 1, 2, 5),
+        legend = c(packera_italic_expressions(present_tx), "Gold (pch=1)", "Silver (pch=2)", "Bronze (pch=5)", "Outlier (pch=23)"),
+        col = c(OKABE_ITO_TAXA[present_tx], "#333333", "#333333", "#333333", "#D55E00"),
+        pch = c(rep(1, length(present_tx)), 1, 2, 5, 23),
         pt.bg = NA, cex = 0.72, bty = "n"
       )
     )
@@ -893,7 +906,47 @@ generate_step04_pub_figures <- function(
     graphics::grid(col = "grey85")
   }
   atomic_save_dual_plot(draw_fig04b, fdir, "fig04b_cda_biplot_and_allometry", width = 12.5, height = 5.6, dpi = 300)
-  atomic_save_dual_plot(draw_fig04b, fdir, "fig04_gmm_cda_clustering", width = 12.5, height = 5.6, dpi = 300)
+
+  # ----------------------------------------------------------------------------
+  # Figure 04 Combined: Panel A (2D Passive CDA) & Panel B (2D GMM Clusters)
+  # ----------------------------------------------------------------------------
+  draw_fig04_combined <- function() {
+    graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.2, 1.1))
+    plot_2d_ordination_scatter(
+      x = cv1, y = cv2,
+      col = ifelse(is_out, "#D55E00", cols_tx), pch = pch_cda, cex = ifelse(is_out, 1.0, 0.85), lwd = ifelse(is_out, 1.25, 1.0),
+      xlab = sprintf("Can1 (%.1f%%)", var1),
+      ylab = sprintf("Can2 (%.1f%%)", var2),
+      main = sprintf("A. 2D Passive CDA Morphospace (Honest LOOCV = %.1f%%)", loocv_pct),
+      group_vec = tx_clean,
+      group_cols = OKABE_ITO_TAXA,
+      ellipse_level = 0.95,
+      centroids = cent_cda,
+      legend_args = list(
+        "topright",
+        legend = c(packera_italic_expressions(present_tx), "Gold (pch=1)", "Silver (pch=2)", "Bronze (pch=5)", "Outlier (pch=23)"),
+        col = c(OKABE_ITO_TAXA[present_tx], "#333333", "#333333", "#333333", "#D55E00"),
+        pch = c(rep(1, length(present_tx)), 1, 2, 5, 23),
+        pt.bg = NA, cex = 0.72, bty = "n"
+      )
+    )
+    plot_2d_ordination_scatter(
+      x = x_v, y = y_v,
+      col = pt_cols_cl, pch = 1L, cex = 0.85, lwd = 1.0,
+      xlab = "Morphospace PC1", ylab = "Morphospace PC2",
+      main = sprintf("B. 2D Label-Blind GMM Clusters (Optimal K = %s)", opt_g),
+      group_vec = cl_lbl,
+      group_cols = cl_col_map,
+      ellipse_level = 0.95,
+      centroids = cent_gmm,
+      legend_args = list(
+        "topright",
+        legend = paste("Cluster", u_cl),
+        pch = 1, pt.bg = NA, col = pal_cl[(u_cl - 1L) %% length(pal_cl) + 1L], cex = 0.76, bty = "n", ncol = 2
+      )
+    )
+  }
+  atomic_save_dual_plot(draw_fig04_combined, fdir, "fig04_gmm_cda_clustering", width = 12.5, height = 5.6, dpi = 300)
 
   invisible(TRUE)
 }

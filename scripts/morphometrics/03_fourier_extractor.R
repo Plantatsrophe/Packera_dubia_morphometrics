@@ -763,23 +763,26 @@ run_fourier_extraction <- function(opts) {
       else message("[ASSERTION NOTE] reconstruction_tier p-value = ", p_val)
     }
 
-    # 7. Diagnostic 3D PCA Morphospace Export (Tier 1 Direct vs. Tier 2 Reflected, Hollow Markers)
+    # 7. Diagnostic 2D PCA Morphospace Export (Tier 1 Direct vs. Tier 2 Reflected, Hollow Markers & 95% Ellipses)
     dir.create(dirname(opts$plot_out), recursive = TRUE, showWarnings = FALSE)
     if (file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
-    if (exists("render_tier1_vs_tier2_3d_pdf", mode = "function")) {
-      render_tier1_vs_tier2_3d_pdf(tier_manifest, opts$plot_out, if (exists("pca_fit")) pca_fit else NULL, sym_res$pca)
+    if (exists("render_tier1_vs_tier2_2d_pdf", mode = "function")) {
+      render_tier1_vs_tier2_2d_pdf(tier_manifest, opts$plot_out, if (exists("pca_fit")) pca_fit else NULL, sym_res$pca)
     } else {
       pdf(opts$plot_out, width = 10, height = 5)
+      par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.0, 1.0))
       is_t2 <- grepl("2", as.character(tier_manifest$reconstruction_tier))
-      pmat <- graphics::persp(range(tier_manifest$PC1, na.rm = TRUE), range(tier_manifest$PC2, na.rm = TRUE), matrix(min(tier_manifest$PC3, na.rm = TRUE), 2, 2),
-                              zlim = range(tier_manifest$PC3, na.rm = TRUE), theta = 35, phi = 22, col = NA, border = NA, box = TRUE,
-                              xlab = "PC1", ylab = "PC2", zlab = "PC3", main = "3D EFA Morphospace: Tier 1 vs Tier 2")
-      pt2 <- grDevices::trans3d(tier_manifest$PC1, tier_manifest$PC2, tier_manifest$PC3, pmat)
-      points(pt2$x, pt2$y, pch = ifelse(is_t2, 2, 1), bg = NA, col = ifelse(is_t2, "#D55E00", "#0072B2"), cex = 0.85, lwd = 1.0)
+      plot(tier_manifest$PC1, tier_manifest$PC2, pch = ifelse(is_t2, 2, 1), bg = NA, col = ifelse(is_t2, "#D55E00", "#0072B2"),
+           cex = 0.85, lwd = 1.0, xlab = "PC1 (%)", ylab = "PC2 (%)", main = "A. 2D Full EFA Morphospace: Tier 1 vs Tier 2")
+      grid(col = "grey88"); abline(h = 0, v = 0, lty = 3, col = "grey70")
+      legend("topright", legend = c("Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"), col = c("#0072B2", "#D55E00"), pch = c(1, 2), pt.bg = NA, bty = "n")
+      plot(tier_manifest$Sym_PC1, tier_manifest$Sym_PC2, pch = ifelse(is_t2, 2, 1), bg = NA, col = ifelse(is_t2, "#D55E00", "#0072B2"),
+           cex = 0.85, lwd = 1.0, xlab = "Sym_PC1 (%)", ylab = "Sym_PC2 (%)", main = "B. 2D Symmetric EFA: Tier 1 vs Tier 2")
+      grid(col = "grey88"); abline(h = 0, v = 0, lty = 3, col = "grey70")
       legend("topright", legend = c("Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"), col = c("#0072B2", "#D55E00"), pch = c(1, 2), pt.bg = NA, bty = "n")
       dev.off()
     }
-    message("Diagnostic 3D PCA morphospace plot exported: ", opts$plot_out)
+    message("Diagnostic 2D PCA morphospace plot exported: ", opts$plot_out)
   }
 
   return(invisible(efa_df))

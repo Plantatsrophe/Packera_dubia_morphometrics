@@ -545,11 +545,10 @@ render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL) {
                         legend.title = ggplot2::element_text(size = 8, face = "bold"),
                         legend.text = ggplot2::element_text(size = 7.5))
 
-  # Panel A: 3D Morpho-Space CDA (can1 x can2 x can3 Isometric Projection) & Decision States (Hollow Markers)
+  # Panel A: 2D Morpho-Space CDA (Can1 x Can2) with 95% Confidence Ellipses & Unfilled Markers
   if (!("can3" %in% names(df))) df$can3 <- if ("PC3" %in% names(df)) suppressWarnings(as.numeric(df$PC3)) else 0.0
   can1_pct <- NA_real_
   can2_pct <- NA_real_
-  can3_pct <- NA_real_
   cda_candidates <- unique(stats::na.omit(c(cda_summary, "data/tables/cda_summary.csv", "outputs/reports/cda_summary.csv")))
   cda_candidates <- cda_candidates[nzchar(cda_candidates) & file.exists(cda_candidates)]
   if (length(cda_candidates) > 0) {
@@ -557,12 +556,11 @@ render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL) {
     if (!is.null(cda_df) && nrow(cda_df) >= 2) {
       pct_col <- intersect(c("variance_pct", "Explained_Variance_Pct", "prop_explained", "Variance_Pct"), names(cda_df))[1]
       if (!is.na(pct_col)) {
-        vals <- as.numeric(cda_df[[pct_col]][seq_len(min(3, nrow(cda_df)))])
+        vals <- as.numeric(cda_df[[pct_col]][seq_len(min(2, nrow(cda_df)))])
         if (all(is.finite(vals))) {
           if (max(vals) <= 1.0) vals <- vals * 100
           can1_pct <- round(vals[1], 1)
           can2_pct <- round(vals[2], 1)
-          can3_pct <- if (length(vals) >= 3) round(vals[3], 1) else round(max(0, 100 - can1_pct - can2_pct), 1)
         }
       }
     }
@@ -570,85 +568,38 @@ render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL) {
   if (is.na(can1_pct) || is.na(can2_pct)) {
     v1 <- stats::var(df$can1, na.rm = TRUE)
     v2 <- stats::var(df$can2, na.rm = TRUE)
-    v3 <- stats::var(df$can3, na.rm = TRUE)
-    if (is.na(v3) || !is.finite(v3)) v3 <- 0.0
-    v_tot <- if (!is.na(v1) && !is.na(v2) && (v1 + v2 + v3) > 0) (v1 + v2 + v3) else 1.0
-    can1_pct <- if (!is.na(v1) && v_tot > 0) round((v1 / v_tot) * 100, 1) else 55.0
-    can2_pct <- if (!is.na(v2) && v_tot > 0) round((v2 / v_tot) * 100, 1) else 28.0
-    can3_pct <- if (!is.na(v3) && v_tot > 0) round((v3 / v_tot) * 100, 1) else 17.0
+    v_tot <- if (!is.na(v1) && !is.na(v2) && (v1 + v2) > 0) (v1 + v2) else 1.0
+    can1_pct <- if (!is.na(v1) && v_tot > 0) round((v1 / v_tot) * 100, 1) else 66.2
+    can2_pct <- if (!is.na(v2) && v_tot > 0) round((v2 / v_tot) * 100, 1) else 33.8
   }
 
   cda_sub <- df[!is.na(df$can1) & !is.na(df$can2), , drop = FALSE]
-  cda_sub$can3[is.na(cda_sub$can3) | !is.finite(cda_sub$can3)] <- 0.0
-  norm_axis <- function(v) {
-    s <- stats::sd(v, na.rm = TRUE)
-    if (is.na(s) || !is.finite(s) || s < 1e-6) return(rep(0.0, length(v)))
-    (v - mean(v, na.rm = TRUE)) / s
-  }
-  nx <- norm_axis(cda_sub$can1)
-  ny <- norm_axis(cda_sub$can2)
-  nz <- norm_axis(cda_sub$can3)
-  ang_rad <- 32 * pi / 180
-  iso_proj <- function(x, y, z) {
-    data.frame(
-      iso_x = x - 0.52 * y * cos(ang_rad),
-      iso_y = z + 0.52 * y * sin(ang_rad)
-    )
-  }
-  pts_iso <- iso_proj(nx, ny, nz)
-  cda_sub$iso_x <- pts_iso$iso_x
-  cda_sub$iso_y <- pts_iso$iso_y
 
-  # 3D wireframe bounding cube segments in isometric space
-  xr <- range(nx, na.rm = TRUE); if (!all(is.finite(xr)) || diff(xr) < 1e-4) xr <- c(-2, 2)
-  yr <- range(ny, na.rm = TRUE); if (!all(is.finite(yr)) || diff(yr) < 1e-4) yr <- c(-2, 2)
-  zr <- range(nz, na.rm = TRUE); if (!all(is.finite(zr)) || diff(zr) < 1e-4) zr <- c(-2, 2)
-  cube_edges_3d <- rbind(
-    c(xr[1], yr[1], zr[1], xr[2], yr[1], zr[1]),
-    c(xr[2], yr[1], zr[1], xr[2], yr[2], zr[1]),
-    c(xr[2], yr[2], zr[1], xr[1], yr[2], zr[1]),
-    c(xr[1], yr[2], zr[1], xr[1], yr[1], zr[1]),
-    c(xr[1], yr[1], zr[2], xr[2], yr[1], zr[2]),
-    c(xr[2], yr[1], zr[2], xr[2], yr[2], zr[2]),
-    c(xr[2], yr[2], zr[2], xr[1], yr[2], zr[2]),
-    c(xr[1], yr[2], zr[2], xr[1], yr[1], zr[2]),
-    c(xr[1], yr[1], zr[1], xr[1], yr[1], zr[2]),
-    c(xr[2], yr[1], zr[1], xr[2], yr[1], zr[2]),
-    c(xr[2], yr[2], zr[1], xr[2], yr[2], zr[2]),
-    c(xr[1], yr[2], zr[1], xr[1], yr[2], zr[2])
-  )
-  p_start <- iso_proj(cube_edges_3d[, 1], cube_edges_3d[, 2], cube_edges_3d[, 3])
-  p_end   <- iso_proj(cube_edges_3d[, 4], cube_edges_3d[, 5], cube_edges_3d[, 6])
-  cube_df <- data.frame(x = p_start$iso_x, y = p_start$iso_y, xend = p_end$iso_x, yend = p_end$iso_y)
-
-  # 3D group centroids
+  # 2D group centroids in (Can1, Can2) space
   cent_rows <- lapply(intersect(TARGET_TAXA, unique(cda_sub$species_standardized)), function(tx) {
     m <- cda_sub$species_standardized == tx
-    p_c <- iso_proj(mean(nx[m], na.rm = TRUE), mean(ny[m], na.rm = TRUE), mean(nz[m], na.rm = TRUE))
-    p_f <- iso_proj(mean(nx[m], na.rm = TRUE), mean(ny[m], na.rm = TRUE), zr[1])
-    data.frame(species_standardized = tx, cx = p_c$iso_x, cy = p_c$iso_y, fx = p_f$iso_x, fy = p_f$iso_y,
-               label = gsub("Packera ", "P. ", tx), stringsAsFactors = FALSE)
+    data.frame(
+      species_standardized = tx,
+      cx = mean(cda_sub$can1[m], na.rm = TRUE),
+      cy = mean(cda_sub$can2[m], na.rm = TRUE),
+      label = gsub("Packera ", "P. ", tx),
+      stringsAsFactors = FALSE
+    )
   })
-  cent_df <- if (length(cent_rows) > 0) do.call(rbind, cent_rows) else data.frame(cx = numeric(0), cy = numeric(0), fx = numeric(0), fy = numeric(0), label = character(0))
+  cent_df <- if (length(cent_rows) > 0) do.call(rbind, cent_rows) else data.frame(cx = numeric(0), cy = numeric(0), label = character(0))
 
-  open_shapes <- c(1, 2, 5, 0, 6, 4, 3)
-  status_levels <- unique(as.character(cda_sub$taxonomic_status_call))
-  shape_map <- stats::setNames(open_shapes[((seq_along(status_levels) - 1L) %% length(open_shapes)) + 1L], status_levels)
-
-  p1 <- ggplot2::ggplot(cda_sub, ggplot2::aes(x = iso_x, y = iso_y, color = species_standardized, shape = taxonomic_status_call)) +
-    ggplot2::geom_segment(data = cube_df, ggplot2::aes(x = x, y = y, xend = xend, yend = yend),
-                          color = "grey78", linetype = "dashed", linewidth = 0.35, inherit.aes = FALSE) +
-    ggplot2::geom_point(alpha = 0.78, size = 1.45, stroke = 0.75) +
-    ggplot2::geom_segment(data = cent_df, ggplot2::aes(x = fx, y = fy, xend = cx, yend = cy),
-                          color = "grey40", linetype = "dotted", linewidth = 0.5, inherit.aes = FALSE) +
+  p1 <- ggplot2::ggplot(cda_sub, ggplot2::aes(x = can1, y = can2, color = species_standardized)) +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dotted", color = "grey75", linewidth = 0.4) +
+    ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "grey75", linewidth = 0.4) +
+    ggplot2::stat_ellipse(level = 0.95, linetype = 2, linewidth = 0.65, show.legend = FALSE) +
+    ggplot2::geom_point(shape = 21, fill = NA, stroke = 0.75, alpha = 0.78, size = 1.55) +
     ggplot2::geom_point(data = cent_df, ggplot2::aes(x = cx, y = cy),
                         shape = 3, size = 2.6, stroke = 1.2, color = "black", inherit.aes = FALSE) +
     ggplot2::scale_color_manual(values = TAXON_COLORS) +
-    ggplot2::scale_shape_manual(values = shape_map) +
-    thm + ggplot2::labs(title = "A. 3D Morphospace CDA (Can1 x Can2 x Can3)",
-                        x = sprintf("Can1 (%.1f%%) / Can2 (%.1f%%) Isometric Projection", can1_pct, can2_pct),
-                        y = sprintf("Can3 (%.1f%%) + Depth Projection", can3_pct),
-                        color = "Taxon", shape = "Taxonomic Status")
+    thm + ggplot2::labs(title = "A. 2D Morphospace CDA (Can1 vs. Can2)",
+                        x = sprintf("Canonical Variate 1 (Can1: %.1f%%)", can1_pct),
+                        y = sprintf("Canonical Variate 2 (Can2: %.1f%%)", can2_pct),
+                        color = "Taxon")
 
   # Panel B: Triage Queue Status by Determiner Authority Tier (Completed Vouchers)
   df_comp <- if ("is_completed_voucher" %in% names(df) && any(df$is_completed_voucher == TRUE, na.rm = TRUE)) df[which(df$is_completed_voucher == TRUE), , drop = FALSE] else df
