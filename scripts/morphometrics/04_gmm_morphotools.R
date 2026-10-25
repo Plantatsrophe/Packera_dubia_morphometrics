@@ -101,7 +101,7 @@ generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, 
   legend("topleft", legend = c(taxa_in_data, "Global Trendline"), col = c(sp_cols, "black"), pch = c(rep(21, length(taxa_in_data)), NA), lty = c(rep(1, length(taxa_in_data)), 2), pt.bg = c(sp_cols, NA), bty = "n", cex = 0.75)
   x_lim <- range(c(sub_df$PC1_raw, sub_df$PC1_corrected), na.rm = TRUE); y_lim <- range(c(sub_df$PC2_raw, sub_df$PC2_corrected), na.rm = TRUE)
   plot(sub_df$PC1_raw, sub_df$PC2_raw, type = "n", xlim = x_lim, ylim = y_lim, xlab = "Morphospace PC1", ylab = "Morphospace PC2", main = "B. Morphospace Before vs. After Allometric Correction", font.main = 2); grid(col = "gray90", lty = "solid")
-  arrows(sub_df$PC1_raw, sub_df$PC2_raw, sub_df$PC1_corrected, sub_df$PC2_corrected, length = 0.05, col = grDevices::adjustcolor("gray65", alpha.f = 0.6), lwd = 0.8)
+  nz_arr <- sqrt((sub_df$PC1_corrected - sub_df$PC1_raw)^2 + (sub_df$PC2_corrected - sub_df$PC2_raw)^2) > 1e-4; if (any(nz_arr, na.rm = TRUE)) arrows(sub_df$PC1_raw[nz_arr], sub_df$PC2_raw[nz_arr], sub_df$PC1_corrected[nz_arr], sub_df$PC2_corrected[nz_arr], length = 0.05, col = grDevices::adjustcolor("gray65", alpha.f = 0.6), lwd = 0.8)
   points(sub_df$PC1_raw, sub_df$PC2_raw, pch = 1, col = grDevices::adjustcolor("gray40", alpha.f = 0.6), cex = 0.9)
   for (sp in taxa_in_data) {
     sp_idx <- which(sub_df$scientificName == sp)
@@ -528,7 +528,7 @@ generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feat
   legend("bottomright", legend = paste("Cluster", seq_len(gmm_res$best_k)), col = cluster_cols[seq_len(gmm_res$best_k)], pch = 20, bty = "n", cex = 0.8, ncol = 2)
   bic_df <- gmm_res$bic_table; delta_bic <- bic_df$Two_Delta_BIC; delta_bic[1] <- 0
   bar_cols <- ifelse(delta_bic >= 10, "#0072B2", ifelse(delta_bic >= 6, "#56B4E9", ifelse(delta_bic >= 2, "#F0E442", "#999999")))
-  barplot(delta_bic, names.arg = paste0("K=", bic_df$K), col = bar_cols, border = "white", xlab = "Number of Mixture Components (K)", ylab = "Bayes Factor (2ΔBIC vs K-1)", main = "C. Species Boundary Evidence (Kass & Raftery 1995)", font.main = 2)
+  barplot(delta_bic, names.arg = paste0("K=", bic_df$K), col = bar_cols, border = "white", xlab = "Number of Mixture Components (K)", ylab = "Bayes Factor (2*Delta*BIC vs K-1)", main = "C. Species Boundary Evidence (Kass & Raftery 1995)", font.main = 2)
   abline(h = c(2, 6, 10), lty = 2, col = c("gray60", "gray40", "red3"))
   hist(audit_df$cda_posterior_prob[audit_df$morphometric_outlier_flag], breaks = 15, col = grDevices::adjustcolor("#D55E00", alpha.f = 0.6), border = "white", xlab = "CDA Posterior Classification Confidence", ylab = "Specimen Count", main = "D. Posterior Confidence of Flagged Outliers", font.main = 2)
   hist(audit_df$cda_posterior_prob[!audit_df$morphometric_outlier_flag], breaks = 20, col = grDevices::adjustcolor("#009E73", alpha.f = 0.35), border = "white", add = TRUE)
