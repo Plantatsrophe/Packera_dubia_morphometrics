@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+"""
+Unit tests for Eastern North American Packera N-Taxon Standardization,
+Bipinnatisect Dissection Gate, and Quantitative Taxon-Complex Discovery Engine
+(08_discover_taxon_complexes.R).
+"""
+
+import importlib
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pandas as pd
+
+from scripts.core.harvester import (
+    EASTERN_NA_PACKERA_TAXA,
+    standardize_packera_taxon,
+)
+from scripts.vision.lm2_geometry_utils import (
+    classify_and_route_leaf,
+    evaluate_leaf_quality,
+    is_botanical_dissection,
+)
+
+
+class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
+    """Tests for Milestones 1-5: N-taxon basionym mapping, dissection gate, and complex discovery."""
+
+    def test_standardize_packera_taxon_all_eastern_species_and_basionyms(self):
+        """Verify all Eastern NA Packera species, Senecio basionyms, and dynamic binomials map cleanly."""
+        cases = {
+            # Core 4 taxa & synonyms
+            "Packera anonyma": "Packera anonyma",
+            "Senecio anonymus": "Packera anonyma",
+            "Senecio smallii": "Packera anonyma",
+            "Packera smallii": "Packera anonyma",
+            "Packera dubia": "Packera dubia",
+            "Senecio tomentosus": "Packera dubia",
+            "Packera tomentosa": "Packera dubia",
+            "Senecio dubius": "Packera dubia",
+            "Senecio alabamensis": "Packera dubia",
+            "Packera paupercula": "Packera paupercula",
+            "Senecio pauperculus": "Packera paupercula",
+            "Senecio balsamitae": "Packera paupercula",
+            "Packera paupercula var. appalachiana": "Packera paupercula",
+            "Packera paupercula var. pseudotomentosa": "Packera paupercula",
+            "Packera paupercula var. savannarum": "Packera paupercula",
+            "Packera plattensis": "Packera plattensis",
+            "Senecio plattensis": "Packera plattensis",
+            "Senecio pseudotomentosus": "Packera plattensis",
+            # Expanded Eastern North American Packera species & Senecio basionyms
+            "Packera antennariifolia": "Packera antennariifolia",
+            "Senecio antennariifolius": "Packera antennariifolia",
+            "Packera aurea": "Packera aurea",
+            "Senecio aureus": "Packera aurea",
+            "Senecio gracilis": "Packera aurea",
+            "Packera crawfordii": "Packera crawfordii",
+            "Senecio crawfordii": "Packera crawfordii",
+            "Packera paupercula var. crawfordii": "Packera crawfordii",
+            "Packera glabella": "Packera glabella",
+            "Senecio glabellus": "Packera glabella",
+            "Senecio lobatus": "Packera glabella",
+            "Packera hyperborealis": "Packera hyperborealis",
+            "Packera cymbalaria": "Packera cymbalaria",
+            "Senecio cymbalaria": "Packera cymbalaria",
+            "Senecio resedifolius": "Packera cymbalaria",
+            "Packera indecora": "Packera indecora",
+            "Senecio indecorus": "Packera indecora",
+            "Packera insulanus": "Packera insulanus",
+            "Senecio insulanus": "Packera insulanus",
+            "Packera memmingeri": "Packera memmingeri",
+            "Packera x memmingeri": "Packera memmingeri",
+            "Packeraxmemmingeri": "Packera memmingeri",
+            "Senecio memmingeri": "Packera memmingeri",
+            "Senecio millefolium var. memmingeri": "Packera memmingeri",
+            "Packera millefolium": "Packera millefolium",
+            "Senecio millefolium": "Packera millefolium",
+            "Packera obovata": "Packera obovata",
+            "Senecio obovatus": "Packera obovata",
+            "Senecio rotundus": "Packera obovata",
+            "Senecio elliottii": "Packera obovata",
+            "Packera pseudaurea": "Packera pseudaurea",
+            "Senecio pseudaureus": "Packera pseudaurea",
+            "Packera pseudaurea var. semicordata": "Packera pseudaurea",
+            "Packera schweinitziana": "Packera schweinitziana",
+            "Senecio schweinitzianus": "Packera schweinitziana",
+            "Senecio robbinsii": "Packera schweinitziana",
+            "Packera robbinsii": "Packera schweinitziana",
+            "Packera serpenticola": "Packera serpenticola",
+            "Packera eburnea": "Packera serpenticola",
+            "Packeraeburnea": "Packera serpenticola",
+            "Packera spellenbergii": "Packera spellenbergii",
+            "Packera tampicana": "Packera tampicana",
+            "Senecio tampicanus": "Packera tampicana",
+            "Senecio imparipinnatus": "Packera tampicana",
+            "Packera imparipinnata": "Packera tampicana",
+            "Packera vulgaris": "Packera vulgaris",
+            "Senecio vulgaris": "Packera vulgaris",
+            # Dynamic fallback for any valid Packera binomial
+            "Packera cana": "Packera cana",
+            "Packera streptanthifolia": "Packera streptanthifolia",
+        }
+
+        mod01_pipe = importlib.import_module("scripts.pipeline.01_voucher_harvester")
+        mod05 = importlib.import_module("scripts.analysis.05_cleanlab_vision_xai")
+
+        self.assertGreaterEqual(len(EASTERN_NA_PACKERA_TAXA), 18)
+
+        for raw_name, expected in cases.items():
+            self.assertEqual(standardize_packera_taxon(raw_name), expected, f"Failed for {raw_name!r}")
+            self.assertEqual(mod01_pipe.standardize_packera_taxon(raw_name), expected)
+            self.assertEqual(mod05.standardize_packera_taxon(raw_name), expected)
+
+    def test_r_standardize_taxon_and_dynamic_palette(self):
+        """Verify R standardize_taxon_name() and get_dynamic_packera_palette() handle >4 taxa."""
+        r_code = """
+        source("scripts/morphometrics/pub_figures_utils.R")
+        stopifnot(standardize_taxon_name("Senecio millefolium") == "Packera millefolium")
+        stopifnot(standardize_taxon_name("Senecio aureus") == "Packera aurea")
+        stopifnot(standardize_taxon_name("Senecio tomentosus") == "Packera dubia")
+        stopifnot(standardize_taxon_name("Senecio memmingeri") == "Packera memmingeri")
+        stopifnot(standardize_taxon_name("Packeraeburnea") == "Packera serpenticola")
+        stopifnot(standardize_taxon_name("Packera cana") == "Packera cana")
+
+        taxa8 <- c(
+          "Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis",
+          "Packera aurea", "Packera millefolium", "Packera obovata", "Packera schweinitziana"
+        )
+        pal <- get_dynamic_packera_palette(taxa8)
+        stopifnot(all(taxa8 %in% names(pal)))
+        stopifnot(pal[["Packera anonyma"]] == "#0072B2")
+        stopifnot(pal[["Packera dubia"]] == "#D55E00")
+        stopifnot(pal[["Packera paupercula"]] == "#009E73")
+        stopifnot(pal[["Packera plattensis"]] == "#CC79A7")
+        stopifnot(length(unique(unname(pal[taxa8]))) == 8)
+        """
+        res = subprocess.run(["Rscript", "-e", r_code], capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"R test failed:\n{res.stderr}\n{res.stdout}")
+
+    def test_bipinnatisect_dissection_gate_tier1_routing(self):
+        """Verify finely dissected/bipinnatisect leaf (0.18 <= solidity < 0.48, >=4 deep sinuses) routes to Tier_1_Direct."""
+        mask = np.zeros((400, 400), dtype=np.uint8)
+        # Central rachis along x = 200, y in [60, 340], width = 10 px
+        cv2.rectangle(mask, (195, 60), (205, 340), 255, -1)
+        # 5 pairs of symmetric narrow pinnae creating >= 8 deep bilateral sinuses
+        # with solidity in [0.18, 0.48] and high bilateral symmetry (UCS >= 0.85)
+        pinna_ys = [85, 135, 185, 235, 285]
+        half_spans = [75, 95, 105, 90, 65]
+        for y_c, span in zip(pinna_ys, half_spans):
+            cv2.rectangle(mask, (200 - span, y_c - 6), (200 + span, y_c + 6), 255, -1)
+        # Apical lobe
+        cv2.rectangle(mask, (182, 45), (218, 65), 255, -1)
+
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        self.assertTrue(len(cnts) > 0)
+        cnt = max(cnts, key=cv2.contourArea)
+        area = cv2.contourArea(cnt)
+        hull = cv2.convexHull(cnt)
+        solidity = area / cv2.contourArea(hull)
+        self.assertGreaterEqual(solidity, 0.18)
+        self.assertLess(solidity, 0.48)
+
+        self.assertTrue(
+            is_botanical_dissection(mask, contour=cnt, solidity=solidity),
+            f"Expected bipinnatisect silhouette (solidity={solidity:.3f}) to be recognized as botanical dissection.",
+        )
+
+        res = evaluate_leaf_quality(mask, contour=cnt)
+        self.assertTrue(res["is_dissected"])
+        self.assertEqual(res["assigned_tier"], "tier1")
+        self.assertIn("Tier 1", res["tier"])
+
+        route_res = classify_and_route_leaf(mask)
+        self.assertTrue(route_res["is_dissected"])
+        self.assertEqual(route_res["assigned_tier"], "tier1")
+
+    def test_discover_taxon_complexes_8_species_3_complexes(self):
+        """Verify 08_discover_taxon_complexes.R recovers 3 true complexes across 8 species with 100% accuracy."""
+        rng = np.random.default_rng(20261025)
+
+        complex_map = {
+            "Packera dubia": ("C1", np.array([-4.5, 3.2, 0.4, -0.2, 0.1]), 2.15),
+            "Packera anonyma": ("C1", np.array([-4.1, 2.9, 0.3, -0.1, 0.0]), 1.95),
+            "Packera plattensis": ("C1", np.array([-4.3, 3.0, 0.5, -0.2, 0.1]), 2.05),
+            "Packera millefolium": ("C2", np.array([6.0, 0.2, -2.5, 1.2, -0.4]), 1.80),
+            "Packera memmingeri": ("C2", np.array([5.6, 0.4, -2.3, 1.0, -0.3]), 1.85),
+            "Packera aurea": ("C3", np.array([0.2, -5.2, 1.8, -1.1, 0.5]), 2.40),
+            "Packera obovata": ("C3", np.array([0.5, -4.9, 1.6, -0.9, 0.4]), 2.30),
+            "Packera pseudaurea": ("C3", np.array([0.0, -5.0, 1.7, -1.0, 0.5]), 2.35),
+        }
+
+        complex_members = {
+            "C1": ["Packera dubia", "Packera anonyma", "Packera plattensis"],
+            "C2": ["Packera millefolium", "Packera memmingeri"],
+            "C3": ["Packera aurea", "Packera obovata", "Packera pseudaurea"],
+        }
+
+        vouchers_rows = []
+        harmonics_rows = []
+        morph_rows = []
+        vision_rows = []
+
+        n_per_taxon = 15
+        idx = 1
+        for taxon, (true_cid, center, inv_ratio) in complex_map.items():
+            peers = [t for t in complex_members[true_cid] if t != taxon]
+            for k in range(n_per_taxon):
+                cat = f"NCU-SYN-{idx:04d}"
+                idx += 1
+                det_tier = "Tier_1_Gold" if k < 10 else "Tier_2_Silver"
+                auth_wt = 3.0 if det_tier == "Tier_1_Gold" else 1.5
+                pcs = center + rng.normal(0.0, 0.28, size=5)
+
+                # Within-complex CDA & vision cross-assignment (~20% to complex peers, 0% outside complex)
+                if k % 5 == 0:
+                    cda_pred = peers[k % len(peers)]
+                    cda_post = 0.58
+                    cda_sec = 0.38
+                else:
+                    cda_pred = taxon
+                    cda_post = 0.78
+                    cda_sec = 0.19
+
+                if k % 4 == 0:
+                    vis_pred = peers[(k // 4) % len(peers)]
+                    c_err = 0.62
+                else:
+                    vis_pred = taxon
+                    c_err = 0.12
+
+                vouchers_rows.append(
+                    {
+                        "catalogNumber": cat,
+                        "species_raw": taxon,
+                        "species_standardized": taxon,
+                        "determiner_tier": det_tier,
+                        "authority_weight": auth_wt,
+                    }
+                )
+                harmonics_rows.append(
+                    {
+                        "catalogNumber": cat,
+                        "plant_individual_id": 1,
+                        "species_standardized": taxon,
+                        "determiner_tier": det_tier,
+                        "authority_weight": auth_wt,
+                        "n_tier1_leaves": 3,
+                        "n_tier2_leaves": 0,
+                        "morph_tier_source": "Tier_1_Pure",
+                        "Sym_PC1": float(pcs[0]),
+                        "Sym_PC2": float(pcs[1]),
+                        "Sym_PC3": float(pcs[2]),
+                        "Sym_PC4": float(pcs[3]),
+                        "Sym_PC5": float(pcs[4]),
+                        "PC1": float(pcs[0]),
+                        "PC2": float(pcs[1]),
+                        "PC3": float(pcs[2]),
+                        "PC4": float(pcs[3]),
+                        "PC5": float(pcs[4]),
+                    }
+                )
+                morph_rows.append(
+                    {
+                        "catalogNumber": cat,
+                        "plant_individual_id": 1,
+                        "species": taxon,
+                        "species_standardized": taxon,
+                        "determiner_tier": det_tier,
+                        "authority_weight": auth_wt,
+                        "n_tier1_leaves": 3,
+                        "morph_tier_source": "Tier_1_Pure",
+                        "Sym_PC1": float(pcs[0]),
+                        "Sym_PC2": float(pcs[1]),
+                        "Sym_PC3": float(pcs[2]),
+                        "Sym_PC4": float(pcs[3]),
+                        "Sym_PC5": float(pcs[4]),
+                        "involucre_length_width_ratio": float(inv_ratio + rng.normal(0.0, 0.05)),
+                        "cda_predicted_taxon": cda_pred,
+                        "cda_posterior_prob": cda_post,
+                        "cda_second_posterior_prob": cda_sec,
+                        "cda_posterior_margin": cda_post - cda_sec,
+                        "morphometric_outlier_flag": False,
+                    }
+                )
+                vision_rows.append(
+                    {
+                        "catalogNumber": cat,
+                        "given_label": taxon,
+                        "predicted_label": vis_pred,
+                        "vision_predicted_label": vis_pred,
+                        "c_error": c_err,
+                        "is_label_corrupted": c_err > 0.5,
+                    }
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            vouchers_csv = tmp_path / "curated_vouchers.csv"
+            harmonics_csv = tmp_path / "leaf_efa_harmonics.csv"
+            morph_csv = tmp_path / "morphometric_flags.csv"
+            vision_csv = tmp_path / "label_noise_audit.csv"
+
+            out_complexes = tmp_path / "empirical_taxon_complexes.csv"
+            out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
+            out_neighbors = tmp_path / "focal_auto_neighbors.txt"
+            out_figure = tmp_path / "fig_empirical_taxon_complex_network.pdf"
+
+            pd.DataFrame(vouchers_rows).to_csv(vouchers_csv, index=False)
+            pd.DataFrame(harmonics_rows).to_csv(harmonics_csv, index=False)
+            pd.DataFrame(morph_rows).to_csv(morph_csv, index=False)
+            pd.DataFrame(vision_rows).to_csv(vision_csv, index=False)
+
+            cmd = [
+                "Rscript",
+                "scripts/analysis/08_discover_taxon_complexes.R",
+                "--morphometrics",
+                str(morph_csv),
+                "--harmonics",
+                str(harmonics_csv),
+                "--vision-audit",
+                str(vision_csv),
+                "--vouchers",
+                str(vouchers_csv),
+                "--focal-taxon",
+                "Packera dubia",
+                "--min-affinity",
+                "0.05",
+                "--output-complexes",
+                str(out_complexes),
+                "--output-affinity",
+                str(out_affinity),
+                "--output-neighbors",
+                str(out_neighbors),
+                "--output-figure",
+                str(out_figure),
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            self.assertEqual(
+                res.returncode,
+                0,
+                f"08_discover_taxon_complexes.R failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}",
+            )
+
+            self.assertTrue(out_complexes.exists() and out_complexes.stat().st_size > 0)
+            self.assertTrue(out_affinity.exists() and out_affinity.stat().st_size > 0)
+            self.assertTrue(out_neighbors.exists() and out_neighbors.stat().st_size > 0)
+            self.assertTrue(out_figure.exists() and out_figure.stat().st_size > 0)
+            self.assertTrue(out_figure.with_suffix(".png").exists())
+
+            comp_df = pd.read_csv(out_complexes)
+            self.assertEqual(len(comp_df), 8)
+            for req_col in (
+                "taxon",
+                "n_Pure_Gold_Silver",
+                "leiden_complex_id",
+                "ward_complex_id",
+                "consensus_complex_id",
+                "complex_label",
+                "within_complex_mean_affinity",
+                "nearest_neighbor_taxon",
+                "nearest_neighbor_affinity",
+            ):
+                self.assertIn(req_col, comp_df.columns)
+
+            # Verify exact recovery of the 3 true complexes (100% partition equivalence)
+            grouped = (
+                comp_df.groupby("consensus_complex_id")["taxon"]
+                .apply(lambda s: frozenset(s.tolist()))
+                .tolist()
+            )
+            expected_partitions = {
+                frozenset(["Packera dubia", "Packera anonyma", "Packera plattensis"]),
+                frozenset(["Packera millefolium", "Packera memmingeri"]),
+                frozenset(["Packera aurea", "Packera obovata", "Packera pseudaurea"]),
+            }
+            self.assertEqual(set(grouped), expected_partitions)
+
+            # Verify ego-centric --auto-neighbors for Packera dubia selects strictly its complex peers
+            neighbors = [
+                line.strip()
+                for line in out_neighbors.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(set(neighbors), {"Packera anonyma", "Packera plattensis"})
+
+
+if __name__ == "__main__":
+    unittest.main()

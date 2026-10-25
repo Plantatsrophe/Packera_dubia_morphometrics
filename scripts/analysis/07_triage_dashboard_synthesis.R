@@ -23,10 +23,14 @@ suppressPackageStartupMessages({
   if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
 
+if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+  source("scripts/morphometrics/pub_figures_utils.R")
+}
+
 TARGET_TAXA <- c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis")
 TAXON_COLORS <- c(
-  "Packera anonyma" = "#2b83ba", "Packera dubia" = "#d7191c",
-  "Packera paupercula" = "#238b45", "Packera plattensis" = "#fdae61",
+  "Packera anonyma" = "#0072B2", "Packera dubia" = "#D55E00",
+  "Packera paupercula" = "#009E73", "Packera plattensis" = "#CC79A7",
   "Hybrid_Intergrade" = "#7b3294", "Glabrescent_Ecophenotype" = "#df65b0",
   "Misidentified_Reassigned" = "#e66101"
 )
@@ -98,7 +102,12 @@ parse_args_robust <- function() {
   ))
 }
 
+.base_std_taxon <- if (exists("standardize_taxon_name", mode = "function")) standardize_taxon_name else NULL
 standardize_packera_taxon <- function(s_vec) {
+  if (!is.null(.base_std_taxon)) {
+    res <- .base_std_taxon(s_vec)
+    return(ifelse(is.na(res), "Unknown", res))
+  }
   sapply(s_vec, function(s) {
     if (is.na(s) || nchar(trimws(s)) == 0) return("Unknown")
     sc <- trimws(s)
@@ -573,10 +582,15 @@ render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL) {
     can2_pct <- if (!is.na(v2) && v_tot > 0) round((v2 / v_tot) * 100, 1) else 33.8
   }
 
+  active_tx <- sort(unique(as.character(stats::na.omit(df$species_standardized))))
+  active_tx <- active_tx[nzchar(active_tx) & active_tx != "Unknown" & grepl("^Packera\\s+", active_tx)]
+  if (length(active_tx) == 0) active_tx <- TARGET_TAXA
+  dyn_pal <- if (exists("get_dynamic_packera_palette", mode = "function")) get_dynamic_packera_palette(active_tx) else TAXON_COLORS
+
   cda_sub <- df[!is.na(df$can1) & !is.na(df$can2), , drop = FALSE]
 
   # 2D group centroids in (Can1, Can2) space
-  cent_rows <- lapply(intersect(TARGET_TAXA, unique(cda_sub$species_standardized)), function(tx) {
+  cent_rows <- lapply(intersect(active_tx, unique(cda_sub$species_standardized)), function(tx) {
     m <- cda_sub$species_standardized == tx
     data.frame(
       species_standardized = tx,
@@ -595,7 +609,7 @@ render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL) {
     ggplot2::geom_point(shape = 21, fill = NA, stroke = 0.75, alpha = 0.78, size = 1.55) +
     ggplot2::geom_point(data = cent_df, ggplot2::aes(x = cx, y = cy),
                         shape = 3, size = 2.6, stroke = 1.2, color = "black", inherit.aes = FALSE) +
-    ggplot2::scale_color_manual(values = TAXON_COLORS) +
+    ggplot2::scale_color_manual(values = dyn_pal) +
     thm + ggplot2::labs(title = "A. 2D Morphospace CDA (Can1 vs. Can2)",
                         x = sprintf("Canonical Variate 1 (Can1: %.1f%%)", can1_pct),
                         y = sprintf("Canonical Variate 2 (Can2: %.1f%%)", can2_pct),
@@ -611,19 +625,19 @@ render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL) {
                         x = "Taxonomic Authority Tier", y = "Proportion of Vouchers", fill = "Decision")
 
   # Panel C: Realized Pedological Niche Envelopes (SoilGrids 250m — Hollow Markers)
-  p3 <- ggplot2::ggplot(df[df$species_standardized %in% TARGET_TAXA, ],
+  p3 <- ggplot2::ggplot(df[df$species_standardized %in% active_tx, ],
                         ggplot2::aes(x = soil_sand, y = soil_ph, color = species_standardized)) +
     ggplot2::stat_ellipse(level = 0.80, linewidth = 0.9) +
     ggplot2::geom_point(shape = 21, fill = NA, stroke = 0.72, alpha = 0.75, size = 1.25) +
-    ggplot2::scale_color_manual(values = TAXON_COLORS) +
+    ggplot2::scale_color_manual(values = dyn_pal) +
     thm + ggplot2::labs(title = "C. Pedological Specialization (SoilGrids 250m)",
                         x = "Soil Sand Fraction (%)", y = "Soil pH (H2O)", color = "Taxon")
 
   # Panel D: Circular Flowering Phenology Density
-  p4 <- ggplot2::ggplot(df[df$species_standardized %in% TARGET_TAXA, ],
+  p4 <- ggplot2::ggplot(df[df$species_standardized %in% active_tx, ],
                         ggplot2::aes(x = doy, fill = species_standardized)) +
     ggplot2::geom_density(alpha = 0.45, linewidth = 0.5) +
-    ggplot2::scale_fill_manual(values = TAXON_COLORS) +
+    ggplot2::scale_fill_manual(values = dyn_pal) +
     thm + ggplot2::labs(title = "D. Temporal Phenological Isolation (DOY)",
                         x = "Flowering Day of Year (DOY)", y = "Kernel Density", fill = "Taxon")
 

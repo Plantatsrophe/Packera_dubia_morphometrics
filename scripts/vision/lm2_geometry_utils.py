@@ -630,62 +630,40 @@ def detect_folded_leaf(
 
 
 def is_botanical_dissection(
-    contour: np.ndarray,
+    contour_or_mask: Optional[np.ndarray] = None,
+    /,
     solidity: Optional[float] = None,
     p_apex: Optional[Tuple[int, int]] = None,
     p_base: Optional[Tuple[int, int]] = None,
     blade_width: Optional[float] = None,
-    min_solidity: float = 0.48,
+    min_solidity: float = 0.18,
     max_solidity: float = 0.72,
     defect_depth_ratio: float = 0.08,
     min_defect_count: int = 3,
-    check_solidity_range: bool = True
+    check_solidity_range: bool = True,
+    *,
+    contour: Optional[np.ndarray] = None,
+    mask: Optional[np.ndarray] = None,
 ) -> bool:
     """
-    Evaluates whether a leaf contour with lower solidity (0.48 <= Solidity < 0.72)
-    represents authentic botanical dissection (lyrate/pinnatifid lobes with bilateral sinuses)
-    rather than asymmetric foreign leaf occlusion or damage.
+    Evaluates whether a leaf contour with lower solidity (0.18 <= Solidity < 0.72)
+    represents authentic botanical dissection (bipinnatisect, pinnatifid, or lyrate lobes
+    with bilateral sinuses) rather than asymmetric foreign leaf occlusion or damage.
 
     Detection Rules:
       - Filter out minor crenation noise: retain only significant defects where
         defect depth exceeds 8% of maximum blade width.
       - Evaluate Defect Topology:
         * Foreign leaf occlusion: 1 or 2 large, asymmetric, localized deficits on one side.
-        * Botanical dissection: Multiple (>= 3), alternating, bilaterally distributed
-          sinuses along the margin (present on both sides of the longitudinal midline).
-      - If significant defects are >= 3 and distributed on both sides of midline:
-        Classify as is_botanical_dissection = True.
-
-    Parameters
-    ----------
-    contour : np.ndarray
-        Contour points of the leaf instance.
-    solidity : Optional[float]
-        Calculated solidity of the leaf instance. If None, computed from contour.
-    p_apex : Optional[Tuple[int, int]]
-        Apex coordinate (x, y). If None, estimated via cv2.fitLine along contour.
-    p_base : Optional[Tuple[int, int]]
-        Base/petiole coordinate (x, y). If None, estimated via cv2.fitLine along contour.
-    blade_width : Optional[float]
-        Maximum blade width. If None, computed via cv2.minAreaRect.
-    min_solidity : float
-        Lower bound of solidity range for dissection check (default 0.48).
-    max_solidity : float
-        Upper bound of solidity range for dissection check (default 0.72).
-    defect_depth_ratio : float
-        Defect depth threshold relative to blade width (default 0.08).
-    min_defect_count : int
-        Minimum significant defect count (default 3).
-    check_solidity_range : bool
-        Whether to enforce min_solidity <= solidity < max_solidity (default True).
-
-    Returns
-    -------
-    bool
-        True if the contour exhibits genuine botanical dissection; False otherwise.
+        * Finely dissected / bipinnatisect (0.18 <= solidity < 0.48): >= 4 deep bilateral
+          convexity defects distributed on both sides of the longitudinal midline.
+        * Lyrate / pinnatifid (0.48 <= solidity < 0.72): >= 3 alternating, bilaterally
+          distributed sinuses along the margin.
     """
-    if contour is None or contour.size == 0:
+    active_input = contour if contour is not None else (contour_or_mask if contour_or_mask is not None else mask)
+    if active_input is None or active_input.size == 0:
         return False
+    contour = active_input
 
     if contour.ndim == 2 and contour.shape[1] > 2:
         cnts, _ = cv2.findContours(
@@ -722,10 +700,10 @@ def is_botanical_dissection(
         (contour.ndim == 2 and max(contour.shape[:2]) > 500)
         or cnt_f[:, 0].max() > 500
         or cnt_f[:, 1].max() > 500
-        or major_l > 240.0
+        or (solidity >= 0.48 and major_l > 240.0)
         or minor_w > 360.0
     )
-    if is_high_dpi and major_l > 220.0 and (minor_w > 360.0 or (minor_w / max(major_l, 1.0)) > 0.78):
+    if is_high_dpi and major_l > 220.0 and (minor_w > 360.0 or (solidity >= 0.48 and (minor_w / max(major_l, 1.0)) > 0.78)):
         return False
 
     if blade_width is None or blade_width <= 0:
@@ -766,25 +744,28 @@ def is_botanical_dissection(
         or major_l > 350.0
     )
     sig_mask = depths >= min_defect_depth
-    eff_min_defect_count = (
-        min(min_defect_count, 2)
-        if (is_native_scan and solidity >= 0.52 and np.any(sig_mask) and float(np.max(depths[sig_mask])) >= 0.11 * blade_width)
-        else min_defect_count
-    )
+    if solidity < 0.48:
+        eff_min_defect_count = max(min_defect_count, 4)
+    else:
+        eff_min_defect_count = (
+            min(min_defect_count, 2)
+            if (is_native_scan and solidity >= 0.52 and np.any(sig_mask) and float(np.max(depths[sig_mask])) >= 0.11 * blade_width)
+            else min_defect_count
+        )
     if np.sum(sig_mask) < eff_min_defect_count:
         return False
 
     sig_farthest_pts = cnt[farthest_indices[sig_mask]]
 
     # Longitudinal midline vector from apex to base
-    if p_apex is None or p_base is None:
+    if p_apex is None or p_base is None or solidity < 0.48:
         line_params = cv2.fitLine(cnt_f, cv2.DIST_L2, 0, 0.01, 0.01)
         vx, vy, x0, y0 = [float(v[0]) for v in line_params]
         projections = (cnt_f[:, 0] - x0) * vx + (cnt_f[:, 1] - y0) * vy
-        min_idx = int(np.argmin(projections))
-        max_idx = int(np.argmax(projections))
-        p_apex = (int(cnt_f[min_idx, 0]), int(cnt_f[min_idx, 1]))
-        p_base = (int(cnt_f[max_idx, 0]), int(cnt_f[max_idx, 1]))
+        t_min = float(np.min(projections))
+        t_max = float(np.max(projections))
+        p_apex = (x0 + t_min * vx, y0 + t_min * vy)
+        p_base = (x0 + t_max * vx, y0 + t_max * vy)
 
     dx = float(p_base[0] - p_apex[0])
     dy = float(p_base[1] - p_apex[1])
@@ -1483,6 +1464,19 @@ class LeafRoutingResult:
         """Returns the canonical cross-language CSV tier ('Tier_1_Direct', 'Tier_2_Reflected', or 'rejected')."""
         return normalize_assigned_tier(self.assigned_tier)
 
+    def __getitem__(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        if key in self.metadata:
+            return self.metadata[key]
+        raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
 
 def classify_and_route_leaf(
     mask: np.ndarray,
@@ -1736,18 +1730,31 @@ def classify_and_route_leaf(
             )
 
     if is_irregular_fold:
-        return LeafRoutingResult(
-            tier="Failed QC",
-            assigned_tier="rejected",
+        # Check if finely dissected / bipinnatisect leaf (0.18 <= solidity < 0.48) triggered crease heuristic
+        if dissection_enabled and (0.18 <= solidity < 0.48) and ucs >= 0.55 and is_botanical_dissection(
+            main_cnt,
             solidity=solidity,
-            ucs=ucs,
-            is_folded=False,
-            is_irregular_fold=True,
-            is_dissected=False,
-            processed_mask=mask,
-            rejection_reason="IRREGULAR_FOLD",
-            metadata=meta
-        )
+            p_apex=p_apex,
+            p_base=p_base,
+            min_solidity=0.18,
+            max_solidity=min_solidity,
+            defect_depth_ratio=sinus_defect_min_depth_ratio,
+            min_defect_count=max(min_bilateral_sinus_count, 4),
+        ):
+            is_irregular_fold = False
+        else:
+            return LeafRoutingResult(
+                tier="Failed QC",
+                assigned_tier="rejected",
+                solidity=solidity,
+                ucs=ucs,
+                is_folded=False,
+                is_irregular_fold=True,
+                is_dissected=False,
+                processed_mask=mask,
+                rejection_reason="IRREGULAR_FOLD",
+                metadata=meta
+            )
 
     # 2. Standard Tier 1 Pristine Check
     if ucs >= min_ucs and solidity >= min_solidity:
@@ -1766,33 +1773,47 @@ def classify_and_route_leaf(
             metadata=meta
         )
 
-    # 3. Botanical Dissection Inspection (min_dissected <= solidity < min_solidity)
+    # 3. Botanical Dissection Inspection (0.18 <= solidity < min_solidity)
     # Strictly label-blind: relies solely on intrinsic bilateral sinus geometry via is_botanical_dissection().
     ref_shape = sheet_shape if sheet_shape is not None else mask.shape[:2]
     is_high_res_mask = max(ref_shape) > 500
+    is_bipinnatisect_window = 0.18 <= solidity < 0.48
+    eff_diss_min_sol = min(dissection_min_solidity, 0.18)
+    hull_cnt = cv2.convexHull(main_cnt)
+    rect_cnt = cv2.minAreaRect(main_cnt)
+    hull_ucs = min(
+        1.0,
+        float(cv2.contourArea(hull_cnt)) / max(0.70 * float(rect_cnt[1][0] * rect_cnt[1][1]), 1.0),
+    )
+    eff_diss_ucs = max(ucs, hull_ucs) if is_bipinnatisect_window else ucs
     allow_dissection = True
-    if is_high_res_mask and (ucs < 0.70 or solidity < max(dissection_min_solidity, 0.52)):
+    if is_bipinnatisect_window:
+        if eff_diss_ucs < 0.55:
+            allow_dissection = False
+    elif is_high_res_mask and (ucs < 0.70 or solidity < max(dissection_min_solidity, 0.52)):
         allow_dissection = False
 
-    if dissection_enabled and (dissection_min_solidity <= solidity < min_solidity) and allow_dissection:
+    if dissection_enabled and (eff_diss_min_sol <= solidity < min_solidity) and allow_dissection:
+        req_defects = max(min_bilateral_sinus_count, 4) if is_bipinnatisect_window else min_bilateral_sinus_count
         dissected = is_botanical_dissection(
             main_cnt,
             solidity=solidity,
             p_apex=p_apex,
             p_base=p_base,
-            min_solidity=dissection_min_solidity,
+            min_solidity=eff_diss_min_sol,
             max_solidity=min_solidity,
             defect_depth_ratio=sinus_defect_min_depth_ratio,
-            min_defect_count=min_bilateral_sinus_count,
+            min_defect_count=req_defects,
         )
-        if dissected and (ucs >= 0.70 or not is_high_res_mask):
+        min_req_ucs = 0.55 if is_bipinnatisect_window else 0.70
+        if dissected and (eff_diss_ucs >= min_req_ucs or (not is_high_res_mask and eff_diss_ucs >= 0.55)):
             coords = resample_normalized_contour(mask, num_contour_points, petiole_attachment_pt=p_base) if extract_contours else None
             meta["reflection_applied"] = False
             return LeafRoutingResult(
                 tier="Tier 1 (Dissected)",
                 assigned_tier="tier1",
                 solidity=solidity,
-                ucs=ucs,
+                ucs=eff_diss_ucs,
                 is_folded=False,
                 is_irregular_fold=False,
                 is_dissected=True,
@@ -1873,6 +1894,31 @@ def classify_and_route_leaf(
         rejection_reason=rejection_reason,
         metadata=meta
     )
+
+
+def evaluate_leaf_quality(
+    mask_or_contour: np.ndarray,
+    config: Optional[Any] = None,
+    **kwargs: Any,
+) -> LeafRoutingResult:
+    """
+    Evaluates leaf silhouette quality and botanical dissection geometry, routing intact
+    and bipinnatisect/lyrate leaves (solidity >= 0.18 with >= 4 deep bilateral sinuses
+    and ucs >= 0.55) to Tier_1_Direct (`is_dissected=True`).
+    Accepts either a binary mask `(H, W)` or a contour `(N, 2)` / `(N, 1, 2)`.
+    """
+    arr = np.asarray(mask_or_contour)
+    if arr.ndim >= 2 and (arr.shape[-1] == 2 and (arr.ndim == 3 or arr.shape[0] >= 4 and arr.shape[1] == 2)):
+        pts = arr.reshape(-1, 2).astype(np.int32)
+        max_x = max(400, int(np.max(pts[:, 0])) + 40) if pts.size > 0 else 400
+        max_y = max(400, int(np.max(pts[:, 1])) + 40) if pts.size > 0 else 400
+        mask = np.zeros((max_y, max_x), dtype=np.uint8)
+        if len(pts) >= 3:
+            cv2.fillPoly(mask, [pts], 255)
+    else:
+        mask = arr
+    kwargs.pop("contour", None)
+    return classify_and_route_leaf(mask, config=config, **kwargs)
 
 
 # =============================================================================

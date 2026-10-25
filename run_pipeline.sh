@@ -34,6 +34,10 @@ GOLD_ONLY=false
 DETERMINER_TIER=""
 EXCLUDE_MISIDENTIFIED=false
 TRIAGE_SOURCE="ALL"
+ALL_EASTERN_TAXA=false
+DISCOVER_COMPLEXES=false
+AUTO_NEIGHBORS=false
+MIN_AFFINITY="0.03"
 LIMIT_ARG=()
 SAM2_FLAG=()
 DEMO_FLAG=()
@@ -150,6 +154,27 @@ while [[ $# -gt 0 ]]; do
       fi
       shift
       ;;
+    --all-eastern-taxa)
+      ALL_EASTERN_TAXA=true
+      shift
+      ;;
+    --discover-complexes)
+      DISCOVER_COMPLEXES=true
+      shift
+      ;;
+    --auto-neighbors)
+      AUTO_NEIGHBORS=true
+      DISCOVER_COMPLEXES=true
+      shift
+      ;;
+    --min-affinity)
+      MIN_AFFINITY="$2"
+      shift 2
+      ;;
+    --min-affinity=*)
+      MIN_AFFINITY="${1#*=}"
+      shift
+      ;;
     *)
       shift
       ;;
@@ -263,7 +288,9 @@ if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
   if [[ "${SKIP_HARVEST}" == "false" && ( -n "${FORCE_FLAG}" || ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ) ]]; then
     echo "[Step 01/07] Running Voucher Harvester (with high-res image downloads & quality audit)..."
     HARVEST_TAXON_ARGS=()
-    if [[ "${INTRASPECIFIC_MODE}" == "true" && -n "${FOCAL_TAXON}" ]]; then
+    if [[ "${ALL_EASTERN_TAXA}" == "true" ]]; then
+      HARVEST_TAXON_ARGS=(--all-eastern-taxa)
+    elif [[ "${INTRASPECIFIC_MODE}" == "true" && -n "${FOCAL_TAXON}" ]]; then
       if [[ "${FOCAL_TAXON}" == "Packera dubia" ]]; then
         HARVEST_TAXON_ARGS=(--taxon "Packera dubia" "Senecio tomentosus" "Packera tomentosa")
       else
@@ -452,9 +479,70 @@ if focal_raw:
         subset_df = focal_df
         print(f'[Strategy 2: Pure Intraspecific] Retained {len(subset_df)} {focal_taxon} vouchers (0 outgroup anchors).')
     else:
+        auto_neighbors_flag = sys.argv[10].lower() == 'true' if len(sys.argv) > 10 else False
+        min_affinity_val = float(sys.argv[11]) if len(sys.argv) > 11 and sys.argv[11] else 0.03
+        present_taxa = sorted([t for t in df['species_standardized'].dropna().unique().tolist() if str(t).startswith('Packera ')])
+        base_outgroups = present_taxa if len(present_taxa) > 4 else list(mod05.TARGET_TAXA)
+        outgroup_taxa = [t for t in base_outgroups if t != focal_taxon and t not in exclude_taxa]
+
+        if auto_neighbors_flag:
+            discovered_neighbors = []
+            neigh_candidates = [
+                run_dir / 'outputs' / 'reports' / 'focal_auto_neighbors.txt',
+                run_dir.parent / 'latest' / 'outputs' / 'reports' / 'focal_auto_neighbors.txt',
+            ] + sorted(run_dir.parent.glob('*/outputs/reports/focal_auto_neighbors.txt'), reverse=True)
+            comp_candidates = [
+                run_dir / 'outputs' / 'reports' / 'empirical_taxon_complexes.csv',
+                run_dir.parent / 'latest' / 'outputs' / 'reports' / 'empirical_taxon_complexes.csv',
+            ] + sorted(run_dir.parent.glob('*/outputs/reports/empirical_taxon_complexes.csv'), reverse=True)
+            aff_candidates = [
+                run_dir / 'outputs' / 'reports' / 'pairwise_taxon_affinity_matrix.csv',
+                run_dir.parent / 'latest' / 'outputs' / 'reports' / 'pairwise_taxon_affinity_matrix.csv',
+            ] + sorted(run_dir.parent.glob('*/outputs/reports/pairwise_taxon_affinity_matrix.csv'), reverse=True)
+
+            comp_file = next((p for p in comp_candidates if p.is_file() and p.stat().st_size > 0), None)
+            aff_file = next((p for p in aff_candidates if p.is_file() and p.stat().st_size > 0), None)
+            if comp_file is not None:
+                cdf = pd.read_csv(comp_file)
+                if 'taxon' in cdf.columns and 'consensus_complex_id' in cdf.columns:
+                    cdf['taxon_std'] = cdf['taxon'].apply(standardize_packera_taxon)
+                    focal_rows = cdf[cdf['taxon_std'] == focal_taxon]
+                    if not focal_rows.empty:
+                        f_cid = focal_rows['consensus_complex_id'].iloc[0]
+                        same_c = cdf[(cdf['consensus_complex_id'] == f_cid) & (cdf['taxon_std'] != focal_taxon)]['taxon_std'].tolist()
+                        discovered_neighbors.extend(same_c)
+            if aff_file is not None:
+                adf = pd.read_csv(aff_file)
+                if 'taxon' in adf.columns:
+                    adf['taxon_std'] = adf['taxon'].apply(standardize_packera_taxon)
+                    frow = adf[adf['taxon_std'] == focal_taxon]
+                    if not frow.empty:
+                        for col in adf.columns:
+                            if col in ('taxon', 'taxon_std'):
+                                continue
+                            col_std = standardize_packera_taxon(col)
+                            if col_std != focal_taxon:
+                                try:
+                                    val = float(frow[col].iloc[0])
+                                    if val >= min_affinity_val:
+                                        discovered_neighbors.append(col_std)
+                                except Exception:
+                                    pass
+            if not discovered_neighbors:
+                nf = next((p for p in neigh_candidates if p.is_file() and p.stat().st_size > 0), None)
+                if nf is not None:
+                    discovered_neighbors = [
+                        standardize_packera_taxon(line.strip())
+                        for line in nf.read_text(encoding='utf-8').splitlines()
+                        if line.strip() and standardize_packera_taxon(line.strip()) != focal_taxon
+                    ]
+            if discovered_neighbors:
+                disc_set = set(discovered_neighbors) - exclude_taxa - {focal_taxon}
+                outgroup_taxa = [t for t in outgroup_taxa if t in disc_set] or sorted(disc_set)
+                print(f'[Auto-Neighbors] Empirical complex & affinity neighbors for {focal_taxon}: {outgroup_taxa}')
+
         outgroup_dfs = []
         outgroup_counts = {}
-        outgroup_taxa = [t for t in mod05.TARGET_TAXA if t != focal_taxon and t not in exclude_taxa]
         for tx in outgroup_taxa:
             tx_df = df[(df['species_standardized'] == tx) & (df.get('determiner_tier', '') == 'Tier_1_Gold')].copy()
             if not tx_df.empty:
@@ -533,7 +621,7 @@ for sub in ('rosettes_dense', 'basal_leaves_raw', 'capitula'):
                     os.symlink(entry.path, dst_sub / entry.name)
                     linked += 1
     print(f'  Linked {linked} patches in cropped_patches/{sub}')
-" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}"
+" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}"
   elif [[ "${REUSE_CANONICAL_DATA}" == "true" ]]; then
     mkdir -p "${RUN_DIR}/data/cropped_patches"
     for sub in rosettes_dense basal_leaves_raw capitula; do
@@ -648,6 +736,25 @@ if [[ "${START_STEP}" -le 5 ]]; then
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}" \
     "${DEMO_FLAG[@]}"
+fi
+
+# ------------------------------------------------------------------------------
+# Step 08 (Optional): Unsupervised Quantitative Taxon-Complex Discovery
+# (--discover-complexes / --auto-neighbors)
+# ------------------------------------------------------------------------------
+if [[ "${DISCOVER_COMPLEXES}" == "true" || "${AUTO_NEIGHBORS}" == "true" ]]; then
+  echo "[Step 08] Running Quantitative Taxon-Complex Discovery Engine..."
+  Rscript scripts/analysis/08_discover_taxon_complexes.R \
+    --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
+    --harmonics "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
+    --vision-audit "${RUN_DIR}/data/tables/label_noise_audit.csv" \
+    --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
+    --min-affinity "${MIN_AFFINITY}" \
+    --output-complexes "${RUN_DIR}/outputs/reports/empirical_taxon_complexes.csv" \
+    --output-affinity "${RUN_DIR}/outputs/reports/pairwise_taxon_affinity_matrix.csv" \
+    --output-neighbors "${RUN_DIR}/outputs/reports/focal_auto_neighbors.txt" \
+    --output-figure "${RUN_DIR}/outputs/figures/fig_empirical_taxon_complex_network.pdf" \
+    "${FOCAL_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------

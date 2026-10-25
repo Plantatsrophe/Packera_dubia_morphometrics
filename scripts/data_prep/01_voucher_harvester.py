@@ -25,7 +25,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.config import PipelineConfig
-from scripts.core.harvester import VoucherHarvester, setup_logger
+from scripts.core.harvester import (
+    EASTERN_NA_GBIF_QUERY_TAXA,
+    EASTERN_NA_PACKERA_TAXA,
+    VoucherHarvester,
+    setup_logger,
+    standardize_packera_taxon,
+)
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -41,6 +47,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=cfg.taxa.target_species,
         help="One or more scientific binomials to harvest from GBIF (e.g. 'Packera dubia').",
+    )
+    parser.add_argument(
+        "--all-eastern-taxa",
+        action="store_true",
+        default=False,
+        help="Harvest all Eastern North American Packera species and historical Senecio basionyms.",
     )
     parser.add_argument(
         "--out-dir",
@@ -143,8 +155,10 @@ def main() -> None:
     log_file_path = Path(args.log_file)
     logger = setup_logger(log_file_path=log_file_path, verbose=args.verbose)
 
+    target_taxa = EASTERN_NA_GBIF_QUERY_TAXA if getattr(args, "all_eastern_taxa", False) else args.taxa
+
     harvester = VoucherHarvester(
-        taxa=args.taxa,
+        taxa=target_taxa,
         max_uncertainty_meters=args.max_uncertainty,
         max_records_per_taxon=args.max_records,
         exclude_western=args.exclude_western,

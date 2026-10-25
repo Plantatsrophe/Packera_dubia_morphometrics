@@ -57,6 +57,136 @@ from scripts.core.config import (
 )
 from scripts.core.logger import setup_logging
 
+EASTERN_NA_PACKERA_TAXA: List[str] = [
+    "Packera anonyma",
+    "Packera antennariifolia",
+    "Packera aurea",
+    "Packera crawfordii",
+    "Packera cymbalaria",
+    "Packera dubia",
+    "Packera glabella",
+    "Packera hyperborealis",
+    "Packera indecora",
+    "Packera insulanus",
+    "Packera memmingeri",
+    "Packera millefolium",
+    "Packera obovata",
+    "Packera paupercula",
+    "Packera plattensis",
+    "Packera pseudaurea",
+    "Packera schweinitziana",
+    "Packera serpenticola",
+    "Packera spellenbergii",
+    "Packera tampicana",
+    "Packera vulgaris",
+]
+
+EASTERN_NA_GBIF_QUERY_TAXA: List[str] = EASTERN_NA_PACKERA_TAXA + [
+    "Senecio anonymus",
+    "Senecio smallii",
+    "Packera smallii",
+    "Senecio antennariifolius",
+    "Senecio aureus",
+    "Senecio gracilis",
+    "Senecio crawfordii",
+    "Packera paupercula var. crawfordii",
+    "Senecio tomentosus",
+    "Packera tomentosa",
+    "Senecio dubius",
+    "Senecio alabamensis",
+    "Senecio glabellus",
+    "Senecio lobatus",
+    "Senecio cymbalaria",
+    "Senecio resedifolius",
+    "Senecio indecorus",
+    "Senecio insulanus",
+    "Senecio memmingeri",
+    "Senecio millefolium var. memmingeri",
+    "Senecio millefolium",
+    "Senecio obovatus",
+    "Senecio rotundus",
+    "Senecio elliottii",
+    "Senecio pauperculus",
+    "Senecio balsamitae",
+    "Senecio plattensis",
+    "Senecio pseudotomentosus",
+    "Senecio pseudaureus",
+    "Senecio schweinitzianus",
+    "Senecio robbinsii",
+    "Packera robbinsii",
+    "Packera eburnea",
+    "Senecio tampicanus",
+    "Senecio imparipinnatus",
+    "Packera imparipinnata",
+]
+
+
+def standardize_packera_taxon(raw_name: Any) -> Optional[str]:
+    """
+    Standardizes raw Darwin Core scientific names, varieties, and historical Senecio
+    basionyms/synonyms across all Eastern North American Packera species.
+    Preserves any valid binomial matching ^Packera\\s+[a-z×-]+ dynamically.
+    """
+    if raw_name is None or (isinstance(raw_name, float) and math.isnan(raw_name)):
+        return None
+    s_orig = str(raw_name).strip()
+    if not s_orig or s_orig.lower() in {"none", "nan", "null", "na", "unknown"}:
+        return None
+    s = s_orig.lower()
+
+    # 1. Specific varietal / hybrid / basionym disambiguations (order matters)
+    if any(k in s for k in ("crawfordii", "crawford")):
+        return "Packera crawfordii"
+    if any(k in s for k in ("memmingeri", "memminger", "packera×memmingeri", "packeraxmemmingeri")):
+        return "Packera memmingeri"
+    if any(k in s for k in ("millefolium", "millefolia", "millefolius")):
+        return "Packera millefolium"
+    if any(k in s for k in ("pseudaurea", "pseudaureus", "semicordata", "semicordatus")):
+        return "Packera pseudaurea"
+    if any(k in s for k in ("paupercula", "pauperculus", "balsamitae", "appalachiana", "savannarum")):
+        return "Packera paupercula"
+    if any(k in s for k in ("plattensis", "pseudotomentosus", "pseudotomentosa", "flavovirens")):
+        return "Packera plattensis"
+    if any(k in s for k in ("dubia", "dubius", "tomentosus", "tomentosa", "alabamensis")):
+        return "Packera dubia"
+    if any(k in s for k in ("anonyma", "anonymus", "smallii", "earlei")):
+        return "Packera anonyma"
+    if any(k in s for k in ("antennariifolia", "antennariifolius")):
+        return "Packera antennariifolia"
+    if any(k in s for k in ("aurea", "aureus", "gracilis")):
+        return "Packera aurea"
+    if any(k in s for k in ("glabella", "glabellus", "lobatus", "lobata")):
+        return "Packera glabella"
+    if "hyperboreal" in s:
+        return "Packera hyperborealis"
+    if any(k in s for k in ("cymbalaria", "resedifolius", "resedifolia")):
+        return "Packera cymbalaria"
+    if any(k in s for k in ("indecora", "indecorus")):
+        return "Packera indecora"
+    if any(k in s for k in ("insulanus", "insulana")):
+        return "Packera insulanus"
+    if any(k in s for k in ("obovata", "obovatus", "rotundus", "rotunda", "elliottii")):
+        return "Packera obovata"
+    if any(k in s for k in ("schweinitziana", "schweinitzianus", "robbinsii")):
+        return "Packera schweinitziana"
+    if any(k in s for k in ("serpenticola", "eburnea", "eburneus", "packeraeburnea")):
+        return "Packera serpenticola"
+    if "spellenberg" in s:
+        return "Packera spellenbergii"
+    if any(k in s for k in ("tampicana", "tampicanus", "imparipinnatus", "imparipinnata")):
+        return "Packera tampicana"
+    if "vulgaris" in s:
+        return "Packera vulgaris"
+
+    # 2. Dynamic fallback for any valid Packera binomial (^Packera\s+[a-z×-]+)
+    m = re.match(r"^packera\s*(?:[x×]\s*)?([a-z-]+)", s)
+    if m:
+        epithet = m.group(1).lstrip("x×-")
+        if epithet:
+            return f"Packera {epithet}"
+
+    return None
+
 EXPORT_COLUMNS = [
     "catalogNumber",
     "institutionCode",

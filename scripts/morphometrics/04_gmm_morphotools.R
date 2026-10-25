@@ -67,16 +67,14 @@ calculate_circular_phenology <- function(df) {
   return(df)
 }
 
+if (file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+.base_std_taxon <- if (exists("standardize_taxon_name", mode = "function")) standardize_taxon_name else NULL
 standardize_packera_taxon <- function(species_vec) {
-  sapply(species_vec, function(s) {
-    if (is.na(s) || nchar(trimws(s)) == 0) return("Unknown")
-    s_clean <- trimws(s)
-    if (grepl("anonym|smallii|earlei", s_clean, ignore.case = TRUE)) return("Packera anonyma")
-    if (grepl("paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", s_clean, ignore.case = TRUE)) return("Packera paupercula")
-    if (grepl("tomentos|dubia", s_clean, ignore.case = TRUE)) return("Packera dubia")
-    if (grepl("plattensis|flavovirens", s_clean, ignore.case = TRUE)) return("Packera plattensis")
-    return(trimws(strsplit(s_clean, "\\(")[[1]][1]))
-  }, USE.NAMES = FALSE)
+  if (!is.null(.base_std_taxon)) {
+    res <- .base_std_taxon(species_vec)
+    return(ifelse(is.na(res), "Unknown", res))
+  }
+  as.character(species_vec)
 }
 
 # 2b. Foliar Allometry Multivariate Testing & Residual Correction

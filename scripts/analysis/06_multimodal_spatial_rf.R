@@ -36,6 +36,9 @@ suppressPackageStartupMessages({
   if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
 
+if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+  source("scripts/morphometrics/pub_figures_utils.R")
+}
 if (file.exists("scripts/analysis/edaphic_fine_grain_utils.R")) {
   source("scripts/analysis/edaphic_fine_grain_utils.R")
 } else {
@@ -48,8 +51,12 @@ if (file.exists("scripts/analysis/edaphic_fine_grain_utils.R")) {
 }
 
 TARGET_TAXA <- c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis")
-TAXON_COLORS <- c("Packera anonyma" = "#2b83ba", "Packera dubia" = "#d7191c",
-                  "Packera paupercula" = "#abdda4", "Packera plattensis" = "#fdae61")
+TAXON_COLORS <- if (exists("get_dynamic_packera_palette", mode = "function")) {
+  get_dynamic_packera_palette(TARGET_TAXA)
+} else {
+  c("Packera anonyma" = "#0072B2", "Packera dubia" = "#D55E00",
+    "Packera paupercula" = "#009E73", "Packera plattensis" = "#CC79A7")
+}
 
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing & Taxonomic Standardization
@@ -119,7 +126,12 @@ parse_args_robust <- function() {
   ))
 }
 
+.base_std_taxon <- if (exists("standardize_taxon_name", mode = "function")) standardize_taxon_name else NULL
 standardize_packera_taxon <- function(s_vec) {
+  if (!is.null(.base_std_taxon)) {
+    res <- .base_std_taxon(s_vec)
+    return(ifelse(is.na(res), "Unknown", res))
+  }
   sapply(s_vec, function(s) {
     if (is.na(s) || nchar(trimws(s)) == 0) return("Unknown")
     sc <- trimws(s)
@@ -129,6 +141,13 @@ standardize_packera_taxon <- function(s_vec) {
     if (grepl("paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", sc, ignore.case = TRUE)) return("Packera paupercula")
     return(trimws(strsplit(sc, "\\(")[[1]][1]))
   }, USE.NAMES = FALSE)
+}
+
+get_active_packera_taxa <- function(species_vec) {
+  u_sp <- sort(unique(as.character(stats::na.omit(species_vec))))
+  u_sp <- u_sp[nzchar(u_sp) & u_sp != "Unknown" & grepl("^Packera\\s+", u_sp)]
+  if (length(u_sp) > 0) return(u_sp)
+  TARGET_TAXA
 }
 
 is_canonical_prod_path <- function(p) {
@@ -702,8 +721,9 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
     message(sprintf("Exported specimen-level SSURGO & 10m-30m fine-grain edaphic validation table to %s (%d records).", ssurgo_out, nrow(val_df)))
   }
   
-  target_df <- df[df$species_standardized %in% TARGET_TAXA & !is.na(df$is_rock_outcrop), ]
-  target_df$taxon_group <- ifelse(target_df$species_standardized %in% c("Packera dubia", "Packera anonyma"),
+  active_tx <- get_active_packera_taxa(df$species_standardized)
+  target_df <- df[df$species_standardized %in% active_tx & !is.na(df$is_rock_outcrop), ]
+  target_df$taxon_group <- ifelse(target_df$species_standardized %in% c("Packera dubia", "Packera anonyma", "Packera millefolium", "Packera memmingeri", "Packera antennariifolia", "Packera serpenticola"),
                                   "Outcrop_Specialists", "Generalist_Congeners")
   
   n_spec_outcrop <- sum(target_df$taxon_group == "Outcrop_Specialists" & target_df$is_rock_outcrop)
@@ -726,7 +746,7 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
   }
 
   sp_tests <- list()
-  for (sp in TARGET_TAXA) {
+  for (sp in active_tx) {
     sp_sub <- target_df[target_df$species_standardized == sp, , drop = FALSE]
     sp_out <- sum(target_df$species_standardized == sp & target_df$is_rock_outcrop)
     sp_mat <- sum(target_df$species_standardized == sp & !target_df$is_rock_outcrop)
@@ -968,7 +988,8 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   }
   
   # Statistical divergence testing across target taxa strictly on verified anthesis cohort
-  target_flowering <- df[df$species_standardized %in% TARGET_TAXA &
+  active_tx <- get_active_packera_taxa(df$species_standardized)
+  target_flowering <- df[df$species_standardized %in% active_tx &
                          !is.na(df$delta_doy) & df$is_verified_anthesis, ]
   
   if (nrow(target_flowering) >= 5 && length(unique(target_flowering$species_standardized)) > 1) {
@@ -1002,7 +1023,7 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     Interpretation = if (!is.na(p_val_aov) && p_val_aov < 0.05) "Significant phenological divergence between taxa" else "No significant divergence or insufficient sample size",
     stringsAsFactors = FALSE
   )
-  for (tx in TARGET_TAXA) {
+  for (tx in active_tx) {
     sub_vals <- target_flowering$delta_doy[target_flowering$species_standardized == tx]
     if (length(sub_vals) > 0) {
       m <- mean(sub_vals); s <- sd(sub_vals); med <- median(sub_vals); iq <- stats::IQR(sub_vals)
@@ -1051,7 +1072,9 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
 export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   message(sprintf("Generating 2-panel phenological latitudinal anomaly figure to %s...", out_pdf))
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
-  is_target <- df$species_standardized %in% TARGET_TAXA & !is.na(df$delta_doy)
+  active_tx <- get_active_packera_taxa(df$species_standardized)
+  dyn_pal <- if (exists("get_dynamic_packera_palette", mode = "function")) get_dynamic_packera_palette(active_tx) else TAXON_COLORS
+  is_target <- df$species_standardized %in% active_tx & !is.na(df$delta_doy)
   target_df <- if ("is_verified_anthesis" %in% names(df)) {
     df[is_target & df$is_verified_anthesis, ]
   } else {
@@ -1079,7 +1102,7 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
     ggplot2::geom_point(shape = 21, fill = NA, stroke = 0.75, alpha = 0.78, size = 1.5) +
     ggplot2::geom_line(data = pred_line, ggplot2::aes(x = decimalLatitude, y = doy),
                        color = "black", linewidth = 1.1, linetype = "dashed", inherit.aes = FALSE) +
-    ggplot2::scale_color_manual(values = TAXON_COLORS) +
+    ggplot2::scale_color_manual(values = dyn_pal) +
     thm +
     ggplot2::labs(
       title = sprintf("A. Verified Latitudinal Spring Cline: DOY ~ Latitude (Slope = +%.2f d/deg, R2 = %.2f)",
@@ -1091,7 +1114,7 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
     p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, y = species_standardized, fill = species_standardized)) +
       ggridges::geom_density_ridges(alpha = 0.65, scale = 1.2, rel_min_height = 0.01) +
       ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
-      ggplot2::scale_fill_manual(values = TAXON_COLORS) +
+      ggplot2::scale_fill_manual(values = dyn_pal) +
       thm +
       ggplot2::labs(
         title = "B. Phenological Anomalies (Delta DOY) & Allochronic Separation",
@@ -1101,7 +1124,7 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
     p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, fill = species_standardized)) +
       ggplot2::geom_density(alpha = 0.5, linewidth = 0.7) +
       ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
-      ggplot2::scale_fill_manual(values = TAXON_COLORS) +
+      ggplot2::scale_fill_manual(values = dyn_pal) +
       thm +
       ggplot2::labs(
         title = "B. Phenological Anomalies (Delta DOY) & Allochronic Separation",
@@ -1166,7 +1189,7 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
   message("Executing 4-way cross-modal consensus checks (Morpho + Vision + Fine-Grain Edaphic + Phenology)...")
   df <- resolve_analysis_group(df, intraspecific_mode = intraspecific_mode)
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
-  active_taxa <- if (is_intra) sort(unique(stats::na.omit(df$analysis_group))) else TARGET_TAXA
+  active_taxa <- if (is_intra) sort(unique(stats::na.omit(df$analysis_group))) else get_active_packera_taxa(df$species_standardized)
   if (length(active_taxa) == 0) active_taxa <- TARGET_TAXA
   grp_vec <- if (is_intra) df$analysis_group else df$species_standardized
 
@@ -1564,7 +1587,7 @@ run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100, intraspe
   }
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   grp_col <- if (is_intra) df$analysis_group else df$species_standardized
-  cand_groups <- if (is_intra) sort(unique(stats::na.omit(grp_col))) else intersect(TARGET_TAXA, unique(stats::na.omit(grp_col)))
+  cand_groups <- if (is_intra) sort(unique(stats::na.omit(grp_col))) else get_active_packera_taxa(grp_col)
   if (length(cand_groups) < 2) cand_groups <- sort(unique(stats::na.omit(df$analysis_group)))
   pairs <- if (length(cand_groups) >= 2) combn(cand_groups, 2, simplify = FALSE) else list()
   results_list <- list(); perm_dist_list <- list()
@@ -1687,7 +1710,10 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
     thm + ggplot2::labs(title = "A. Spatial RF Importance (10m-30m Edaphic + Climate + MEMs)", x = "", y = "Mean Decrease Accuracy (OOB)")
 
   # Panel B: 10m-30m Fine-Grain Pedological & Outcrop Envelopes (Hollow Markers)
-  plot_df <- df[df$species_standardized %in% TARGET_TAXA, ]
+  active_tx <- get_active_packera_taxa(df$species_standardized)
+  dyn_pal <- if (exists("get_dynamic_packera_palette", mode = "function")) get_dynamic_packera_palette(active_tx) else TAXON_COLORS
+  dyn_shapes <- stats::setNames(rep_len(c(21, 24, 22, 23, 1, 2, 5, 0, 6, 4), length(active_tx)), active_tx)
+  plot_df <- df[df$species_standardized %in% active_tx, ]
   if (!("fine_soil_sand" %in% names(plot_df))) plot_df$fine_soil_sand <- plot_df$soil_sand
   if (!("fine_soil_ph" %in% names(plot_df))) plot_df$fine_soil_ph <- plot_df$soil_ph
   if (!("fine_bedrock_depth_cm" %in% names(plot_df))) plot_df$fine_bedrock_depth_cm <- 150.0
@@ -1698,11 +1724,8 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
                         ggplot2::aes(x = fine_soil_sand, y = fine_soil_ph, color = species_standardized, shape = species_standardized)) +
     ggplot2::stat_ellipse(level = 0.85, linewidth = 1.0) +
     ggplot2::geom_point(fill = NA, stroke = 0.75, alpha = 0.82, size = 1.55) +
-    ggplot2::scale_shape_manual(values = c(
-      "Packera anonyma" = 21, "Packera dubia" = 24,
-      "Packera paupercula" = 22, "Packera plattensis" = 23
-    )) +
-    ggplot2::scale_color_manual(values = TAXON_COLORS) +
+    ggplot2::scale_shape_manual(values = dyn_shapes) +
+    ggplot2::scale_color_manual(values = dyn_pal) +
     thm + ggplot2::labs(title = "B. 10m-30m Fine-Grain Pedological Envelopes (POLARIS/SSURGO)",
                         x = "Fine-Grain Sand Fraction (%)", y = "Fine-Grain Soil pH (H2O)", color = "", shape = "")
 
@@ -1710,7 +1733,7 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
   p3 <- ggplot2::ggplot(plot_df,
                         ggplot2::aes(x = doy, fill = species_standardized)) +
     ggplot2::geom_density(alpha = 0.45, linewidth = 0.6) +
-    ggplot2::scale_fill_manual(values = TAXON_COLORS) +
+    ggplot2::scale_fill_manual(values = dyn_pal) +
     thm + ggplot2::labs(title = "C. Circular Phenology (Flowering DOY)", x = "Day of Year (DOY)", y = "Density", fill = "")
 
   # Panel D: Warren's Niche Identity Permutations & Empirical Schoener's D
@@ -1741,11 +1764,8 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
                                ggplot2::aes(x = fine_bedrock_depth_cm, y = ssurgo_rock_outcrop_pct,
                                             color = species_standardized, shape = species_standardized)) +
     ggplot2::geom_point(fill = NA, stroke = 0.78, alpha = 0.85, size = 1.65) +
-    ggplot2::scale_shape_manual(values = c(
-      "Packera anonyma" = 21, "Packera dubia" = 24,
-      "Packera paupercula" = 22, "Packera plattensis" = 23
-    )) +
-    ggplot2::scale_color_manual(values = TAXON_COLORS) +
+    ggplot2::scale_shape_manual(values = dyn_shapes) +
+    ggplot2::scale_color_manual(values = dyn_pal) +
     thm + ggplot2::labs(title = "C. Lithic Depth vs. 50m SSURGO Rock Outcrop %",
                         x = "Depth to Lithic Bedrock Restriction (cm)",
                         y = "SSURGO 50m Rock Outcrop Component (%)", color = "", shape = "")
@@ -1755,11 +1775,8 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
                                         color = species_standardized, shape = species_standardized)) +
     ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "grey45") +
     ggplot2::geom_point(fill = NA, stroke = 0.78, alpha = 0.85, size = 1.65) +
-    ggplot2::scale_shape_manual(values = c(
-      "Packera anonyma" = 21, "Packera dubia" = 24,
-      "Packera paupercula" = 22, "Packera plattensis" = 23
-    )) +
-    ggplot2::scale_color_manual(values = TAXON_COLORS) +
+    ggplot2::scale_shape_manual(values = dyn_shapes) +
+    ggplot2::scale_color_manual(values = dyn_pal) +
     thm + ggplot2::labs(title = "D. 3DEP 30m Topographic Position (TPI) vs. Fine Soil pH",
                         x = "30m Topographic Position Index (TPI, m; >0 Monadnock Dome)",
                         y = "Fine-Grain Soil pH (H2O)", color = "", shape = "")

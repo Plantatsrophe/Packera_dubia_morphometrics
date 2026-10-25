@@ -13,6 +13,30 @@
 #       *P. paupercula*, *P. plattensis*)
 # ==============================================================================
 
+EASTERN_NA_PACKERA_TAXA <- c(
+  "Packera anonyma",
+  "Packera antennariifolia",
+  "Packera aurea",
+  "Packera crawfordii",
+  "Packera cymbalaria",
+  "Packera dubia",
+  "Packera glabella",
+  "Packera hyperborealis",
+  "Packera indecora",
+  "Packera insulanus",
+  "Packera memmingeri",
+  "Packera millefolium",
+  "Packera obovata",
+  "Packera paupercula",
+  "Packera plattensis",
+  "Packera pseudaurea",
+  "Packera schweinitziana",
+  "Packera serpenticola",
+  "Packera spellenbergii",
+  "Packera tampicana",
+  "Packera vulgaris"
+)
+
 OKABE_ITO_TAXA <- c(
   "Packera anonyma"    = "#0072B2",
   "Packera dubia"      = "#D55E00",
@@ -20,6 +44,86 @@ OKABE_ITO_TAXA <- c(
   "Packera plattensis" = "#CC79A7",
   "Unknown"            = "#7F7F7F"
 )
+
+EXTENDED_COLORBLIND_HEX <- c(
+  "#E69F00", "#56B4E9", "#882255", "#44AA99", "#999933",
+  "#332288", "#117733", "#AA4499", "#DDCC77", "#661100",
+  "#6699CC", "#D95F02", "#7570B3", "#E7298A", "#66A61E",
+  "#E6AB02", "#A6761D", "#008080"
+)
+
+HOLLOW_PCH_CYCLE <- c(1L, 2L, 5L, 0L, 6L, 4L, 3L, 8L)
+
+standardize_taxon_name <- function(raw_names) {
+  vapply(as.character(raw_names), function(val) {
+    if (is.na(val)) return(NA_character_)
+    s_orig <- trimws(val)
+    if (!nzchar(s_orig) || tolower(s_orig) %in% c("none", "nan", "null", "na", "unknown")) {
+      return(NA_character_)
+    }
+    s <- tolower(s_orig)
+    if (grepl("crawfordii|crawford", s)) return("Packera crawfordii")
+    if (grepl("memmingeri|memminger|packera[x×]memmingeri", s)) return("Packera memmingeri")
+    if (grepl("millefoli", s)) return("Packera millefolium")
+    if (grepl("pseudaure|semicordat", s)) return("Packera pseudaurea")
+    if (grepl("paupercul|balsamitae|savannarum|appalachiana", s)) return("Packera paupercula")
+    if (grepl("plattensis|pseudotomentos|flavovirens", s)) return("Packera plattensis")
+    if (grepl("tomentos|dubia|dubius|alabamensis", s)) return("Packera dubia")
+    if (grepl("anonym|smallii|earlei", s)) return("Packera anonyma")
+    if (grepl("antennariifoli", s)) return("Packera antennariifolia")
+    if (grepl("\\baurea\\b|\\baureus\\b|gracilis", s)) return("Packera aurea")
+    if (grepl("glabell|lobatus|lobata", s)) return("Packera glabella")
+    if (grepl("hyperboreal", s)) return("Packera hyperborealis")
+    if (grepl("cymbalaria|resedifoli", s)) return("Packera cymbalaria")
+    if (grepl("indecor", s)) return("Packera indecora")
+    if (grepl("insulan", s)) return("Packera insulanus")
+    if (grepl("obovat|rotundus|rotunda|elliottii", s)) return("Packera obovata")
+    if (grepl("schweinitzian|robbinsii", s)) return("Packera schweinitziana")
+    if (grepl("serpenticol|eburnea|eburneus|packeraeburnea", s)) return("Packera serpenticola")
+    if (grepl("spellenberg", s)) return("Packera spellenbergii")
+    if (grepl("tampican|imparipinnat", s)) return("Packera tampicana")
+    if (grepl("vulgaris", s)) return("Packera vulgaris")
+    if (grepl("^packera\\s*(?:[x×]\\s*)?[a-z-]+", s)) {
+      ep <- sub("^packera\\s*(?:[x×]\\s*)?([a-z-]+).*$", "\\1", s)
+      ep <- sub("^[x×-]+", "", ep)
+      if (nzchar(ep)) return(paste("Packera", ep))
+    }
+    NA_character_
+  }, character(1), USE.NAMES = FALSE)
+}
+standardize_packera_taxon <- standardize_taxon_name
+
+get_dynamic_packera_palette <- function(taxa_vec = NULL) {
+  base_pal <- OKABE_ITO_TAXA
+  if (is.null(taxa_vec) || length(taxa_vec) == 0) return(base_pal)
+  u_taxa <- sort(unique(as.character(taxa_vec[!is.na(taxa_vec) & nzchar(as.character(taxa_vec))])))
+  extra_taxa <- setdiff(u_taxa, names(base_pal))
+  if (length(extra_taxa) > 0) {
+    extra_cols <- rep_len(EXTENDED_COLORBLIND_HEX, length(extra_taxa))
+    names(extra_cols) <- extra_taxa
+    base_pal <- c(base_pal[1:4], extra_cols, base_pal["Unknown"])
+  }
+  base_pal
+}
+
+get_dynamic_packera_shapes <- function(taxa_vec = NULL) {
+  base_shapes <- c(
+    "Packera anonyma"    = 1L,
+    "Packera dubia"      = 2L,
+    "Packera paupercula" = 5L,
+    "Packera plattensis" = 0L,
+    "Unknown"            = 4L
+  )
+  if (is.null(taxa_vec) || length(taxa_vec) == 0) return(base_shapes)
+  u_taxa <- sort(unique(as.character(taxa_vec[!is.na(taxa_vec) & nzchar(as.character(taxa_vec))])))
+  extra_taxa <- setdiff(u_taxa, names(base_shapes))
+  if (length(extra_taxa) > 0) {
+    extra_pch <- rep_len(HOLLOW_PCH_CYCLE, length(extra_taxa))
+    names(extra_pch) <- extra_taxa
+    base_shapes <- c(base_shapes[1:4], extra_pch, base_shapes["Unknown"])
+  }
+  base_shapes
+}
 
 PACKERA_ITALIC_LABELS <- c(
   "Packera anonyma"    = "*Packera anonyma*",
@@ -30,19 +134,16 @@ PACKERA_ITALIC_LABELS <- c(
 )
 
 packera_italic_expressions <- function(taxa_vec) {
-  sapply(as.character(taxa_vec), function(tx) {
+  as.expression(lapply(as.character(taxa_vec), function(tx) {
     if (grepl("anonyma", tx, ignore.case = TRUE)) {
-      return(expression(italic("Packera anonyma")))
-    } else if (grepl("dubia|tomentosa", tx, ignore.case = TRUE)) {
-      return(expression(italic("P. dubia")))
-    } else if (grepl("paupercula", tx, ignore.case = TRUE)) {
-      return(expression(italic("P. paupercula")))
-    } else if (grepl("plattensis", tx, ignore.case = TRUE)) {
-      return(expression(italic("P. plattensis")))
+      bquote(italic("Packera anonyma"))
+    } else if (grepl("^Packera\\s+", tx)) {
+      short_lbl <- sub("^Packera\\s+", "P. ", tx)
+      bquote(italic(.(short_lbl)))
     } else {
-      return(tx)
+      tx
     }
-  }, USE.NAMES = FALSE)
+  }))
 }
 
 resolve_active_figures_dir <- function(explicit_dir = NULL, reference_path = NULL) {
@@ -398,12 +499,15 @@ generate_step03_pub_figures <- function(
 
   if (!"taxon" %in% colnames(df)) {
     raw_tx <- if ("species_standardized" %in% colnames(df)) df$species_standardized else if ("scientificName" %in% colnames(df)) df$scientificName else if ("species_raw" %in% colnames(df)) df$species_raw else rep("Packera dubia", nrow(df))
-    df$taxon <- ifelse(grepl("anonym|smallii|earlei", raw_tx, ignore.case = TRUE), "Packera anonyma",
-                ifelse(grepl("paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", raw_tx, ignore.case = TRUE), "Packera paupercula",
-                ifelse(grepl("plattensis|flavovirens", raw_tx, ignore.case = TRUE), "Packera plattensis", "Packera dubia")))
+    std_tx <- standardize_taxon_name(raw_tx)
+    df$taxon <- ifelse(!is.na(std_tx), std_tx, "Packera dubia")
+  } else {
+    std_tx <- standardize_taxon_name(df$taxon)
+    df$taxon <- ifelse(!is.na(std_tx), std_tx, as.character(df$taxon))
   }
+  dyn_pal <- get_dynamic_packera_palette(df$taxon)
   df$taxon_clean <- ifelse(
-    df$taxon %in% names(OKABE_ITO_TAXA),
+    df$taxon %in% names(dyn_pal),
     as.character(df$taxon),
     "Packera dubia"
   )
@@ -432,9 +536,9 @@ generate_step03_pub_figures <- function(
   tier_str <- if ("assigned_tier" %in% colnames(df)) as.character(df$assigned_tier) else if ("reconstruction_tier" %in% colnames(df)) as.character(df$reconstruction_tier) else rep("Tier_1_Direct", nrow(df))
   is_t2 <- grepl("2", tier_str)
   pt_pch <- ifelse(is_t2, 2L, 1L)
-  cols <- grDevices::adjustcolor(OKABE_ITO_TAXA[df$taxon_clean], alpha.f = 0.80)
+  cols <- grDevices::adjustcolor(dyn_pal[df$taxon_clean], alpha.f = 0.80)
 
-  present_tx <- intersect(names(OKABE_ITO_TAXA)[1:4], unique(df$taxon_clean))
+  present_tx <- sort(unique(df$taxon_clean[df$taxon_clean != "Unknown"]))
   if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
   cent_full <- do.call(rbind, lapply(present_tx, function(tx) {
     m <- df$taxon_clean == tx
@@ -446,7 +550,7 @@ generate_step03_pub_figures <- function(
     m <- df$taxon_clean == tx
     c(mean(df$Sym_PC1[m], na.rm = TRUE), mean(df$Sym_PC2[m], na.rm = TRUE))
   }))
-  rownames(cent_sym) <- gsub("Packera ", "P. ", present_tx)
+  rownames(cent_sym) <- gsub("Packera ", "P. ", present_sym_tx <- present_tx)
 
   # ----------------------------------------------------------------------------
   # Figure 03a: 2D PCA Morphospace (PC1 vs. PC2 and Sym_PC1 vs. Sym_PC2)
@@ -464,13 +568,13 @@ generate_step03_pub_figures <- function(
       ylab = sprintf("PC2 (%.1f%%)", var_pct[2]),
       main = "A. 2D Full EFA Morphospace (PC1 vs. PC2)",
       group_vec = df$taxon_clean,
-      group_cols = OKABE_ITO_TAXA,
+      group_cols = dyn_pal,
       ellipse_level = 0.95,
       centroids = cent_full,
       legend_args = list(
         "topright",
         legend = c(packera_italic_expressions(present_tx), "Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"),
-        col = c(OKABE_ITO_TAXA[present_tx], "#333333", "#333333"),
+        col = c(dyn_pal[present_tx], "#333333", "#333333"),
         pch = c(rep(1, length(present_tx)), 1, 2),
         pt.bg = NA,
         cex = 0.72,
@@ -488,13 +592,13 @@ generate_step03_pub_figures <- function(
       ylab = sprintf("Sym_PC2 (%.1f%%)", sym_var_pct[2]),
       main = "B. 2D Bilateral-Symmetric Morphospace (Sym_PC1 vs. Sym_PC2)",
       group_vec = df$taxon_clean,
-      group_cols = OKABE_ITO_TAXA,
+      group_cols = dyn_pal,
       ellipse_level = 0.95,
       centroids = cent_sym,
       legend_args = list(
         "topright",
         legend = c(packera_italic_expressions(present_tx), "Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"),
-        col = c(OKABE_ITO_TAXA[present_tx], "#333333", "#333333"),
+        col = c(dyn_pal[present_tx], "#333333", "#333333"),
         pch = c(rep(1, length(present_tx)), 1, 2),
         pt.bg = NA,
         cex = 0.72,
@@ -650,7 +754,7 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
   grDevices::pdf(output_pdf, width = 12, height = 10, pointsize = 11)
   tryCatch({
     graphics::par(mfrow = c(2, 2), mar = c(4.4, 4.4, 3.0, 1.2), oma = c(1, 1, 2, 1), family = "sans")
-    taxon_cols <- OKABE_ITO_TAXA
+    taxon_cols <- get_dynamic_packera_palette(audit_df$species_standardized)
     cluster_cols <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#333333")
     is_joint <- !is.null(feature_cols) && ("AR_inv_std" %in% feature_cols)
     cda_title <- if (is_joint) "A. 2D Joint Vegetative + Reproductive CDA (Can1 vs. Can2)" else "A. 2D Passive CDA Morphospace (Can1 vs. Can2)"
@@ -660,7 +764,7 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
     can1_v <- if ("can1" %in% names(audit_df)) audit_df$can1 else cda_res$canonical_scores[, 1]
     can2_v <- if ("can2" %in% names(audit_df)) audit_df$can2 else if (ncol(cda_res$canonical_scores) >= 2) cda_res$canonical_scores[, 2] else rep(0, nrow(audit_df))
 
-    sp_clean <- ifelse(audit_df$species_standardized %in% names(taxon_cols), audit_df$species_standardized, "Packera dubia")
+    sp_clean <- ifelse(audit_df$species_standardized %in% names(taxon_cols), as.character(audit_df$species_standardized), "Packera dubia")
     det_t <- if ("determiner_tier" %in% names(audit_df)) as.character(audit_df$determiner_tier) else rep("Tier_3_Bronze", nrow(audit_df))
     is_out <- as.logical(audit_df$morphometric_outlier_flag); is_out[is.na(is_out)] <- FALSE
     pch_cda <- ifelse(is_out, 23L, ifelse(det_t == "Tier_1_Gold", 1L, ifelse(det_t == "Tier_2_Silver", 2L, 5L)))
@@ -669,8 +773,8 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
     cent_2d <- if (!is.null(cda_res$centroids) && ncol(cda_res$centroids) >= 2) {
       cda_res$centroids[, 1:2, drop = FALSE]
     } else {
-      present_tx <- intersect(names(taxon_cols)[1:4], unique(sp_clean))
-      if (length(present_tx) == 0) present_tx <- names(taxon_cols)[1:4]
+      present_tx <- sort(unique(sp_clean[sp_clean != "Unknown"]))
+      if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
       m_c <- do.call(rbind, lapply(present_tx, function(tx) {
         m <- sp_clean == tx
         c(mean(can1_v[m], na.rm = TRUE), mean(can2_v[m], na.rm = TRUE))
@@ -778,8 +882,9 @@ generate_step04_pub_figures <- function(
   } else {
     rep("Packera dubia", nrow(audited_df))
   }
-  tx_clean <- ifelse(tx_vec %in% names(OKABE_ITO_TAXA), tx_vec, "Packera dubia")
-  cols_tx <- grDevices::adjustcolor(OKABE_ITO_TAXA[tx_clean], alpha.f = 0.80)
+  dyn_pal <- get_dynamic_packera_palette(tx_vec)
+  tx_clean <- ifelse(tx_vec %in% names(dyn_pal), tx_vec, "Packera dubia")
+  cols_tx <- grDevices::adjustcolor(dyn_pal[tx_clean], alpha.f = 0.80)
 
   cv1 <- if ("can1" %in% colnames(audited_df)) as.numeric(audited_df$can1) else if ("CDA1" %in% colnames(audited_df)) as.numeric(audited_df$CDA1) else rep(0, nrow(audited_df))
   cv2 <- if ("can2" %in% colnames(audited_df)) as.numeric(audited_df$can2) else if ("CDA2" %in% colnames(audited_df)) as.numeric(audited_df$CDA2) else rep(0, nrow(audited_df))
@@ -792,7 +897,7 @@ generate_step04_pub_figures <- function(
   is_out[is.na(is_out)] <- FALSE
   pch_cda <- ifelse(is_out, 23L, ifelse(det_t == "Tier_1_Gold", 1L, ifelse(det_t == "Tier_2_Silver", 2L, 5L)))
 
-  present_tx <- intersect(names(OKABE_ITO_TAXA)[1:4], unique(tx_clean))
+  present_tx <- sort(unique(tx_clean[tx_clean != "Unknown"]))
   if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
   cent_cda <- if (!is.null(cda_res$centroids) && ncol(cda_res$centroids) >= 2) {
     cda_res$centroids[, 1:2, drop = FALSE]
@@ -874,13 +979,13 @@ generate_step04_pub_figures <- function(
       ylab = sprintf("Can2 (%.1f%%)", var2),
       main = sprintf("A. 2D Passive CDA Morphospace (Honest LOOCV = %.1f%%)", loocv_pct),
       group_vec = tx_clean,
-      group_cols = OKABE_ITO_TAXA,
+      group_cols = dyn_pal,
       ellipse_level = 0.95,
       centroids = cent_cda,
       legend_args = list(
         "topright",
         legend = c(packera_italic_expressions(present_tx), "Gold (pch=1)", "Silver (pch=2)", "Bronze (pch=5)", "Outlier (pch=23)"),
-        col = c(OKABE_ITO_TAXA[present_tx], "#333333", "#333333", "#333333", "#D55E00"),
+        col = c(dyn_pal[present_tx], "#333333", "#333333", "#333333", "#D55E00"),
         pch = c(rep(1, length(present_tx)), 1, 2, 5, 23),
         pt.bg = NA, cex = 0.72, bty = "n"
       )
@@ -927,13 +1032,13 @@ generate_step04_pub_figures <- function(
       ylab = sprintf("Can2 (%.1f%%)", var2),
       main = sprintf("A. 2D Passive CDA Morphospace (Honest LOOCV = %.1f%%)", loocv_pct),
       group_vec = tx_clean,
-      group_cols = OKABE_ITO_TAXA,
+      group_cols = dyn_pal,
       ellipse_level = 0.95,
       centroids = cent_cda,
       legend_args = list(
         "topright",
         legend = c(packera_italic_expressions(present_tx), "Gold (pch=1)", "Silver (pch=2)", "Bronze (pch=5)", "Outlier (pch=23)"),
-        col = c(OKABE_ITO_TAXA[present_tx], "#333333", "#333333", "#333333", "#D55E00"),
+        col = c(dyn_pal[present_tx], "#333333", "#333333", "#333333", "#D55E00"),
         pch = c(rep(1, length(present_tx)), 1, 2, 5, 23),
         pt.bg = NA, cex = 0.72, bty = "n"
       )
@@ -981,8 +1086,11 @@ generate_step06_pub_figures <- function(
   } else {
     rep("Packera dubia", nrow(vouchers_df))
   }
-  tx_clean <- ifelse(tx_col %in% names(OKABE_ITO_TAXA), tx_col, "Packera dubia")
-  cols_tx <- grDevices::adjustcolor(OKABE_ITO_TAXA[tx_clean], alpha.f = 0.80)
+  std_tx <- standardize_taxon_name(tx_col)
+  tx_col <- ifelse(!is.na(std_tx), std_tx, tx_col)
+  dyn_pal <- get_dynamic_packera_palette(tx_col)
+  tx_clean <- ifelse(tx_col %in% names(dyn_pal), tx_col, "Packera dubia")
+  cols_tx <- grDevices::adjustcolor(dyn_pal[tx_clean], alpha.f = 0.80)
 
   # 1. Also export 300-DPI PNG for spatial_rf_niche_importance
   imp_df <- if (!is.null(srf_res) && !is.null(srf_res$importance)) srf_res$importance else NULL
@@ -1028,9 +1136,9 @@ generate_step06_pub_figures <- function(
   # 2. fig06_ecological_niche_phenology.{pdf,png} (10m-30m Outcrop & Soil Niche with Strictly Hollow Markers)
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(2, 2), mar = c(4.5, 8.5, 3.0, 1.2))
-    present_tx <- intersect(names(OKABE_ITO_TAXA)[1:4], unique(tx_clean))
+    present_tx <- sort(unique(tx_clean[tx_clean != "Unknown"]))
     if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
-    pch_map <- c("Packera anonyma" = 1L, "Packera dubia" = 2L, "Packera paupercula" = 5L, "Packera plattensis" = 1L)
+    pch_map <- get_dynamic_packera_shapes(present_tx)
     pch_tx <- pch_map[tx_clean]
     pch_tx[is.na(pch_tx)] <- 1L
 
@@ -1072,7 +1180,7 @@ generate_step06_pub_figures <- function(
     graphics::legend(
       "topright",
       legend = packera_italic_expressions(present_tx),
-      col = OKABE_ITO_TAXA[present_tx],
+      col = dyn_pal[present_tx],
       pch = pch_map[present_tx], pt.bg = NA, cex = 0.72, bty = "n"
     )
 
@@ -1130,12 +1238,12 @@ generate_step06_pub_figures <- function(
       main = "A. Geographic Distribution & Multimodal Conflict Map"
     )
     graphics::grid(col = "grey85")
-    present_tx <- intersect(names(OKABE_ITO_TAXA)[1:4], unique(tx_clean))
+    present_tx <- sort(unique(tx_clean[tx_clean != "Unknown"]))
     if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
     graphics::legend(
       "bottomleft",
       legend = c(packera_italic_expressions(present_tx), "Concordant Voucher", "Conflict Flagged"),
-      col = c(OKABE_ITO_TAXA[present_tx], "#333333", "#D55E00"),
+      col = c(dyn_pal[present_tx], "#333333", "#D55E00"),
       pch = c(rep(1, length(present_tx)), 1, 2), pt.bg = NA, cex = 0.75, bty = "n"
     )
 
@@ -1158,7 +1266,7 @@ generate_step06_pub_figures <- function(
     graphics::legend(
       "topleft",
       legend = c("Centered Hopkins Baseline (+4.0 d/deg N)", packera_italic_expressions(present_tx)),
-      col = c("#000000", OKABE_ITO_TAXA[present_tx]),
+      col = c("#000000", dyn_pal[present_tx]),
       lty = c(2, rep(NA, length(present_tx))),
       pch = c(NA, rep(1, length(present_tx))), pt.bg = NA,
       lwd = c(2.2, rep(1.0, length(present_tx))), cex = 0.75, bty = "n"
@@ -1197,7 +1305,13 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
   } else {
     rep("Packera dubia", nrow(triage_df))
   }
-  tx_clean <- ifelse(tx_col %in% names(OKABE_ITO_TAXA), tx_col, "Packera dubia")
+  std_tx <- standardize_taxon_name(tx_col)
+  tx_col <- ifelse(!is.na(std_tx), std_tx, tx_col)
+  dyn_pal <- get_dynamic_packera_palette(tx_col)
+  tx_clean <- ifelse(tx_col %in% names(dyn_pal), tx_col, "Packera dubia")
+  tx_levels <- sort(unique(tx_clean[tx_clean != "Unknown"]))
+  if (length(tx_levels) == 0) tx_levels <- c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis")
+  tx_labels <- sub("^Packera\\s+", "P. ", tx_levels)
 
   morph_conflict <- if ("cda_predicted_taxon" %in% colnames(triage_df) && any(!is.na(triage_df$cda_predicted_taxon))) {
     ifelse(is.na(triage_df$cda_predicted_taxon), NA, as.character(triage_df$cda_predicted_taxon) != tx_clean)
@@ -1268,8 +1382,8 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
     prio_f <- factor(prio_col, levels = prio_levels)
     tx_f <- factor(
       tx_clean,
-      levels = c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis"),
-      labels = c("P. anonyma", "P. dubia", "P. paupercula", "P. plattensis")
+      levels = tx_levels,
+      labels = tx_labels
     )
     tbl_mat <- table(prio_f, tx_f)
     graphics::barplot(
@@ -1373,8 +1487,8 @@ Cryptic Species"
     # Panel B: Taxonomic Treatment Breakdown by Recorded Species
     tx_f <- factor(
       tx_clean,
-      levels = c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis"),
-      labels = c("P. anonyma", "P. dubia", "P. paupercula", "P. plattensis")
+      levels = tx_levels,
+      labels = tx_labels
     )
     tbl_treat_tx <- table(treat_f, tx_f)
     col_totals <- colSums(tbl_treat_tx)

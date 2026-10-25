@@ -66,8 +66,33 @@ TARGET_TAXA: List[str] = [
     "Packera plattensis",
 ]
 
+EASTERN_NA_PACKERA_TAXA: List[str] = [
+    "Packera anonyma",
+    "Packera antennariifolia",
+    "Packera aurea",
+    "Packera crawfordii",
+    "Packera cymbalaria",
+    "Packera dubia",
+    "Packera glabella",
+    "Packera hyperborealis",
+    "Packera indecora",
+    "Packera insulanus",
+    "Packera memmingeri",
+    "Packera millefolium",
+    "Packera obovata",
+    "Packera paupercula",
+    "Packera plattensis",
+    "Packera pseudaurea",
+    "Packera schweinitziana",
+    "Packera serpenticola",
+    "Packera spellenbergii",
+    "Packera tampicana",
+    "Packera vulgaris",
+]
+
 __all__ = [
     "TARGET_TAXA",
+    "EASTERN_NA_PACKERA_TAXA",
     "standardize_packera_taxon",
     "neutralize_mounting_paper",
     "apply_tier1_leaf_mask_to_rgb",
@@ -96,26 +121,77 @@ logger = logging.getLogger("Cleanlab_Vision_XAI")
 # =============================================================================
 
 def standardize_packera_taxon(species_str: Optional[str]) -> str:
-    """Standardize synonymy into the four core Packera dubia complex taxa.
+    """Standardize synonymy across all Eastern North American Packera species and Senecio basionyms.
 
-    Handles historical basionyms and varieties:
-      - Senecio smallii, Senecio earlei -> Packera anonyma
-      - Senecio tomentosus, Packera tomentosa -> Packera dubia
-      - Packera paupercula varieties -> Packera paupercula
-      - Senecio plattensis, Packera flavovirens -> Packera plattensis
+    Also preserves any valid binomial matching ^Packera\\s+[a-z×-]+ dynamically.
     """
     if not species_str or pd.isna(species_str):
         return "Unknown"
-    s = str(species_str).strip()
-    if re.search(r"anonym|smallii|earlei", s, re.I):
-        return "Packera anonyma"
-    if re.search(r"paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", s, re.I):
+    s_orig = str(species_str).strip()
+    if not s_orig or s_orig.lower() in {"none", "nan", "null", "na", "unknown"}:
+        return "Unknown"
+    s = s_orig.lower()
+
+    if re.search(r"crawfordii|crawford", s):
+        return "Packera crawfordii"
+    if re.search(r"memmingeri|memminger|packera[x×]memmingeri", s):
+        return "Packera memmingeri"
+    if re.search(r"millefoli", s):
+        return "Packera millefolium"
+    if re.search(r"pseudaure|semicordat", s):
+        return "Packera pseudaurea"
+    if re.search(r"paupercul|balsamitae|savannarum|appalachiana", s):
         return "Packera paupercula"
-    if re.search(r"tomentos|dubia", s, re.I):
-        return "Packera dubia"
-    if re.search(r"plattensis|flavovirens", s, re.I):
+    if re.search(r"plattensis|pseudotomentos|flavovirens", s):
         return "Packera plattensis"
-    return s.split("(")[0].strip()
+    if re.search(r"tomentos|dubia|dubius|alabamensis", s):
+        return "Packera dubia"
+    if re.search(r"anonym|smallii|earlei", s):
+        return "Packera anonyma"
+    if re.search(r"antennariifoli", s):
+        return "Packera antennariifolia"
+    if re.search(r"\baurea\b|\baureus\b|gracilis", s):
+        return "Packera aurea"
+    if re.search(r"glabell|lobatus|lobata", s):
+        return "Packera glabella"
+    if re.search(r"hyperboreal", s):
+        return "Packera hyperborealis"
+    if re.search(r"cymbalaria|resedifoli", s):
+        return "Packera cymbalaria"
+    if re.search(r"indecor", s):
+        return "Packera indecora"
+    if re.search(r"insulan", s):
+        return "Packera insulanus"
+    if re.search(r"obovat|rotundus|rotunda|elliottii", s):
+        return "Packera obovata"
+    if re.search(r"schweinitzian|robbinsii", s):
+        return "Packera schweinitziana"
+    if re.search(r"serpenticol|eburnea|eburneus|packeraeburnea", s):
+        return "Packera serpenticola"
+    if re.search(r"spellenberg", s):
+        return "Packera spellenbergii"
+    if re.search(r"tampican|imparipinnat", s):
+        return "Packera tampicana"
+    if re.search(r"vulgaris", s):
+        return "Packera vulgaris"
+
+    # Dynamic fallback for any valid Packera binomial (^Packera\s+[a-z×-]+)
+    m = re.match(r"^packera\s*(?:[x×]\s*)?([a-z-]+)", s)
+    if m:
+        epithet = m.group(1).lstrip("x×-")
+        if epithet:
+            return f"Packera {epithet}"
+
+    return s_orig.split("(")[0].strip()
+
+
+def _is_valid_packera_taxon(taxon_str: str) -> bool:
+    """Return True if taxon_str is in EASTERN_NA_PACKERA_TAXA or matches ^Packera\\s+[a-z×-]+."""
+    if not taxon_str or taxon_str == "Unknown":
+        return False
+    if taxon_str in EASTERN_NA_PACKERA_TAXA or taxon_str in TARGET_TAXA:
+        return True
+    return bool(re.match(r"^Packera\s+[a-z×-]+", str(taxon_str)))
 
 
 # =============================================================================
@@ -621,7 +697,7 @@ def load_and_link_rosette_patches(
             meta = voucher_map.get(cat_num, {})
             raw_sp = meta.get("species_raw", meta.get("scientificName", meta.get("species", "Packera dubia")))
             std_taxon = standardize_packera_taxon(raw_sp)
-            if std_taxon not in TARGET_TAXA:
+            if not _is_valid_packera_taxon(std_taxon):
                 continue
             # Sort descending by (ucs_score, weight) so the highest-UCS Tier_1_Direct leaf is representative
             leaf_list.sort(key=lambda x: (x["ucs_score"], x["weight"]), reverse=True)
@@ -696,7 +772,7 @@ def load_and_link_rosette_patches(
             meta = voucher_map.get(cat_num, {})
             raw_sp = meta.get("species_raw", meta.get("scientificName", meta.get("species", "Unknown")))
             std_taxon = standardize_packera_taxon(raw_sp)
-            if std_taxon not in TARGET_TAXA:
+            if not _is_valid_packera_taxon(std_taxon):
                 continue
             best_leaf = leaf_list[0]
             best_patch = best_leaf["patch_path"]
@@ -751,7 +827,7 @@ def load_and_link_rosette_patches(
                 meta = voucher_map.get(cat_num, {})
                 raw_sp = meta.get("species_raw", meta.get("scientificName", meta.get("species", "Unknown")))
                 std_taxon = standardize_packera_taxon(raw_sp)
-                if std_taxon not in TARGET_TAXA:
+                if not _is_valid_packera_taxon(std_taxon):
                     continue
 
                 orient_info = classify_foliar_surface_orientation(p)
@@ -778,7 +854,7 @@ def load_and_link_rosette_patches(
             for _, row in vouchers_df.iterrows():
                 raw_sp = str(row.get("species_raw", row.get("scientificName", row.get("species", "Unknown"))))
                 std_taxon = standardize_packera_taxon(raw_sp)
-                if std_taxon not in TARGET_TAXA:
+                if not _is_valid_packera_taxon(std_taxon):
                     continue
                 cat_num = str(row.get("catalogNumber", "")).strip()
                 real_path = available_patches.get(cat_num, rosette_dir / f"{cat_num}_rosette.jpg")
@@ -806,8 +882,8 @@ def load_and_link_rosette_patches(
                     "high_brightness_ratio": orient_info["high_brightness_ratio"],
                 })
 
-    present_std_taxa = {r["taxon"] for r in records}
-    active_taxa = [t for t in TARGET_TAXA if t in present_std_taxa]
+    present_std_taxa = {r["taxon"] for r in records if _is_valid_packera_taxon(r["taxon"])}
+    active_taxa = sorted(present_std_taxa)
     if active_taxa:
         class_to_idx = {taxon: idx for idx, taxon in enumerate(active_taxa)}
         for r in records:
@@ -1137,7 +1213,7 @@ def run_confident_learning_audit(
     audit_df["species_raw"] = audit_df.get("species_raw", audit_df.get("species", given_classes))
     std_sp = pd.Series(raw_sp_col, index=audit_df.index).apply(standardize_packera_taxon)
     audit_df["species_standardized"] = [
-        sp if sp != "Unknown" else (gc if gc in TARGET_TAXA else "Packera dubia")
+        sp if _is_valid_packera_taxon(sp) else (gc if _is_valid_packera_taxon(gc) else "Packera dubia")
         for sp, gc in zip(std_sp, given_classes)
     ]
     audit_df["given_label"] = given_classes
