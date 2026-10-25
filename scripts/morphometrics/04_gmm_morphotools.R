@@ -9,30 +9,29 @@ suppressPackageStartupMessages({
 # 1. CLI Argument Parsing
 parse_args_robust <- function() {
   option_list <- list(
-    optparse::make_option(c("-v", "--vouchers"), type = "character", default = "data/tables/curated_vouchers.csv", help = "Vouchers metadata CSV [default: %default]"),
-    optparse::make_option(c("-e", "--harmonics"), type = "character", default = "data/tables/leaf_efa_harmonics.csv", help = "Leaf EFA harmonics CSV [default: %default]"),
-    optparse::make_option(c("-m", "--reproductive"), type = "character", default = "data/tables/voucher_reproductive_metrics.csv", help = "Voucher reproductive metrics CSV [default: %default]"),
-    optparse::make_option(c("--outline-only"), action = "store_true", default = FALSE, help = "Evaluate vegetative leaf outlines only [default: %default]"),
-    optparse::make_option(c("--correct-allometry"), type = "character", default = "auto", help = "Foliar allometry correction [auto, true, false] [default: %default]"),
-    optparse::make_option(c("--allometry-report"), type = "character", default = "outputs/reports/allometry_significance_audit.csv", help = "Allometry test audit CSV [default: %default]"),
-    optparse::make_option(c("--allometry-pairwise"), type = "character", default = "outputs/reports/allometry_pairwise_trajectories.csv", help = "Pairwise allometric trajectories CSV [default: %default]"),
-    optparse::make_option(c("--allometry-plot"), type = "character", default = "outputs/figures/shape_allometry_regression.pdf", help = "Allometry regression plot PDF [default: %default]"),
-    optparse::make_option(c("--use-clustvarsel"), action = "store_true", default = FALSE, help = "Use clustvarsel feature selection before Mclust [default: %default]"),
-    optparse::make_option(c("-f", "--output-flags"), type = "character", default = "data/tables/morphometric_flags.csv", help = "Flags output CSV [default: %default]"),
-    optparse::make_option(c("-p", "--output-plot"), type = "character", default = "outputs/figures/cda_passive_projection.pdf", help = "Output CDA PDF [default: %default]"),
-    optparse::make_option(c("-r", "--output-report"), type = "character", default = "outputs/reports/gmm_bayes_factors_summary.csv", help = "BIC report CSV [default: %default]"),
-    optparse::make_option(c("-b", "--output-batch-audit"), type = "character", default = "outputs/reports/institutional_batch_effect_audit.csv", help = "Batch audit CSV [default: %default]"),
-    optparse::make_option(c("-k", "--max-k"), type = "integer", default = 8, help = "Max mixture components for GMM [default: %default]"),
-    optparse::make_option(c("-d", "--num-pcs"), type = "integer", default = 5, help = "Number of PCA dimensions [default: %default]"),
-    optparse::make_option(c("--permutations"), type = "integer", default = 999, help = "PERMANOVA permutations [default: %default]"),
-    optparse::make_option(c("--seed"), type = "integer", default = 42, help = "Random seed [default: %default]"),
-    optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE, help = "Enable single-taxon intraspecific mode [default: %default]"),
-    optparse::make_option(c("--focal-taxon"), type = "character", default = "", help = "Focal taxon name [default: %default]")
+    optparse::make_option(c("-v", "--vouchers"), type = "character", default = "data/tables/curated_vouchers.csv", help = "Vouchers metadata CSV"),
+    optparse::make_option(c("-e", "--harmonics"), type = "character", default = "data/tables/leaf_efa_harmonics.csv", help = "Leaf EFA harmonics CSV"),
+    optparse::make_option(c("-m", "--reproductive"), type = "character", default = "data/tables/voucher_reproductive_metrics.csv", help = "Voucher reproductive metrics CSV"),
+    optparse::make_option(c("--outline-only"), action = "store_true", default = FALSE, help = "Evaluate vegetative leaf outlines only"),
+    optparse::make_option(c("--correct-allometry"), type = "character", default = "auto", help = "Foliar allometry correction [auto, true, false]"),
+    optparse::make_option(c("--allometry-report"), type = "character", default = "outputs/reports/allometry_significance_audit.csv", help = "Allometry test audit CSV"),
+    optparse::make_option(c("--allometry-pairwise"), type = "character", default = "outputs/reports/allometry_pairwise_trajectories.csv", help = "Pairwise allometric trajectories CSV"),
+    optparse::make_option(c("--allometry-plot"), type = "character", default = "outputs/figures/shape_allometry_regression.pdf", help = "Allometry regression plot PDF"),
+    optparse::make_option(c("--use-clustvarsel"), action = "store_true", default = FALSE, help = "Use clustvarsel feature selection before Mclust"),
+    optparse::make_option(c("-f", "--output-flags"), type = "character", default = "data/tables/morphometric_flags.csv", help = "Flags output CSV"),
+    optparse::make_option(c("-p", "--output-plot"), type = "character", default = "outputs/figures/cda_passive_projection.pdf", help = "Output CDA PDF"),
+    optparse::make_option(c("-r", "--output-report"), type = "character", default = "outputs/reports/gmm_bayes_factors_summary.csv", help = "BIC report CSV"),
+    optparse::make_option(c("-b", "--output-batch-audit"), type = "character", default = "outputs/reports/institutional_batch_effect_audit.csv", help = "Batch audit CSV"),
+    optparse::make_option(c("-k", "--max-k"), type = "integer", default = 8, help = "Max mixture components for GMM"),
+    optparse::make_option(c("-d", "--num-pcs"), type = "integer", default = 5, help = "Number of PCA dimensions"),
+    optparse::make_option(c("--permutations"), type = "integer", default = 999, help = "PERMANOVA permutations"),
+    optparse::make_option(c("--seed"), type = "integer", default = 42, help = "Random seed"),
+    optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE, help = "Enable single-taxon intraspecific mode"),
+    optparse::make_option(c("--focal-taxon"), type = "character", default = "", help = "Focal taxon name")
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
     opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
-    names(opts) <- gsub("-", "_", names(opts))
-    return(opts)
+    names(opts) <- gsub("-", "_", names(opts)); return(opts)
   }
   raw_args <- commandArgs(trailingOnly = TRUE)
   opts <- list(vouchers = "data/tables/curated_vouchers.csv", harmonics = "data/tables/leaf_efa_harmonics.csv", reproductive = "data/tables/voucher_reproductive_metrics.csv",
@@ -44,23 +43,15 @@ parse_args_robust <- function() {
   i <- 1
   while (i <= length(raw_args)) {
     a <- raw_args[i]
-    if (a %in% c("-v", "--vouchers") && i < length(raw_args)) { opts$vouchers <- raw_args[i+1]; i <- i+2
-    } else if (a %in% c("-e", "--harmonics") && i < length(raw_args)) { opts$harmonics <- raw_args[i+1]; i <- i+2
-    } else if (a %in% c("-m", "--reproductive") && i < length(raw_args)) { opts$reproductive <- raw_args[i+1]; i <- i+2
-    } else if (a == "--outline-only") { opts$outline_only <- TRUE; i <- i+1 } else if (a == "--use-clustvarsel") { opts$use_clustvarsel <- TRUE; i <- i+1
-    } else if (a == "--intraspecific-mode") { opts$intraspecific_mode <- TRUE; i <- i+1
-    } else if (a == "--focal-taxon" && i < length(raw_args)) { opts$focal_taxon <- raw_args[i+1]; i <- i+2
-    } else if (a == "--correct-allometry" && i < length(raw_args)) { opts$correct_allometry <- raw_args[i+1]; i <- i+2
-    } else if (a == "--allometry-report" && i < length(raw_args)) { opts$allometry_report <- raw_args[i+1]; i <- i+2
-    } else if (a == "--allometry-pairwise" && i < length(raw_args)) { opts$allometry_pairwise <- raw_args[i+1]; i <- i+2
-    } else if (a == "--allometry-plot" && i < length(raw_args)) { opts$allometry_plot <- raw_args[i+1]; i <- i+2
-    } else if (a %in% c("-f", "--output-flags") && i < length(raw_args)) { opts$output_flags <- raw_args[i+1]; i <- i+2
-    } else if (a %in% c("-p", "--output-plot") && i < length(raw_args)) { opts$output_plot <- raw_args[i+1]; i <- i+2
-    } else if (a %in% c("-r", "--output-report") && i < length(raw_args)) { opts$output_report <- raw_args[i+1]; i <- i+2
-    } else if (a %in% c("-b", "--output-batch-audit") && i < length(raw_args)) { opts$output_batch_audit <- raw_args[i+1]; i <- i+2
-    } else if (a %in% c("-k", "--max-k") && i < length(raw_args)) { opts$max_k <- as.integer(raw_args[i+1]); i <- i+2
-    } else if (a %in% c("-d", "--num-pcs") && i < length(raw_args)) { opts$num_pcs <- as.integer(raw_args[i+1]); i <- i+2
-    } else if (a == "--permutations" && i < length(raw_args)) { opts$permutations <- as.integer(raw_args[i+1]); i <- i+2
+    if (a %in% c("-v", "--vouchers") && i < length(raw_args)) { opts$vouchers <- raw_args[i+1]; i <- i+2 } else if (a %in% c("-e", "--harmonics") && i < length(raw_args)) { opts$harmonics <- raw_args[i+1]; i <- i+2
+    } else if (a %in% c("-m", "--reproductive") && i < length(raw_args)) { opts$reproductive <- raw_args[i+1]; i <- i+2 } else if (a == "--outline-only") { opts$outline_only <- TRUE; i <- i+1
+    } else if (a == "--use-clustvarsel") { opts$use_clustvarsel <- TRUE; i <- i+1 } else if (a == "--intraspecific-mode") { opts$intraspecific_mode <- TRUE; i <- i+1
+    } else if (a == "--focal-taxon" && i < length(raw_args)) { opts$focal_taxon <- raw_args[i+1]; i <- i+2 } else if (a == "--correct-allometry" && i < length(raw_args)) { opts$correct_allometry <- raw_args[i+1]; i <- i+2
+    } else if (a == "--allometry-report" && i < length(raw_args)) { opts$allometry_report <- raw_args[i+1]; i <- i+2 } else if (a == "--allometry-pairwise" && i < length(raw_args)) { opts$allometry_pairwise <- raw_args[i+1]; i <- i+2
+    } else if (a == "--allometry-plot" && i < length(raw_args)) { opts$allometry_plot <- raw_args[i+1]; i <- i+2 } else if (a %in% c("-f", "--output-flags") && i < length(raw_args)) { opts$output_flags <- raw_args[i+1]; i <- i+2
+    } else if (a %in% c("-p", "--output-plot") && i < length(raw_args)) { opts$output_plot <- raw_args[i+1]; i <- i+2 } else if (a %in% c("-r", "--output-report") && i < length(raw_args)) { opts$output_report <- raw_args[i+1]; i <- i+2
+    } else if (a %in% c("-b", "--output-batch-audit") && i < length(raw_args)) { opts$output_batch_audit <- raw_args[i+1]; i <- i+2 } else if (a %in% c("-k", "--max-k") && i < length(raw_args)) { opts$max_k <- as.integer(raw_args[i+1]); i <- i+2
+    } else if (a %in% c("-d", "--num-pcs") && i < length(raw_args)) { opts$num_pcs <- as.integer(raw_args[i+1]); i <- i+2 } else if (a == "--permutations" && i < length(raw_args)) { opts$permutations <- as.integer(raw_args[i+1]); i <- i+2
     } else if (a == "--seed" && i < length(raw_args)) { opts$seed <- as.integer(raw_args[i+1]); i <- i+2 } else { i <- i+1 }
   }
   return(opts)
@@ -71,8 +62,7 @@ calculate_circular_phenology <- function(df) {
   if ("doy" %in% names(df)) {
     doy_val <- suppressWarnings(as.numeric(df$doy)); valid <- !is.na(doy_val) & doy_val >= 1 & doy_val <= 366
     df$pheno_sin <- NA_real_; df$pheno_cos <- NA_real_
-    df$pheno_sin[valid] <- round(sin(2 * pi * doy_val[valid] / 365.25), 6)
-    df$pheno_cos[valid] <- round(cos(2 * pi * doy_val[valid] / 365.25), 6)
+    df$pheno_sin[valid] <- round(sin(2 * pi * doy_val[valid] / 365.25), 6); df$pheno_cos[valid] <- round(cos(2 * pi * doy_val[valid] / 365.25), 6)
   }
   return(df)
 }
@@ -95,42 +85,30 @@ generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, 
   taxon_cols <- c("Packera anonyma" = "#E69F00", "Packera dubia" = "#009E73", "Packera plattensis" = "#56B4E9", "Packera paupercula" = "#CC79A7")
   taxa_in_data <- intersect(names(taxon_cols), unique(as.character(sub_df$scientificName)))
   if (length(taxa_in_data) == 0) taxa_in_data <- unique(as.character(sub_df$scientificName))
-  pdf(output_pdf, width = 12, height = 5.5, pointsize = 11)
-  par(mfrow = c(1, 2), mar = c(4.5, 4.5, 3.2, 1.5), oma = c(0, 0, 2, 0), family = "sans")
+  pdf(output_pdf, width = 12, height = 5.5, pointsize = 11); par(mfrow = c(1, 2), mar = c(4.5, 4.5, 3.2, 1.5), oma = c(0, 0, 2, 0), family = "sans")
   plot(sub_df$log_centsize, sub_df$PC1_raw, type = "n", xlab = expression(log(Centroid~Size)~"[mm]"), ylab = "Raw Symmetric Morphospace PC1",
-       main = sprintf("A. Foliar Allometry (R2 = %.3f, p = %.3f)", r2_size, p_size), font.main = 2)
-  grid(col = "gray90", lty = "solid")
+       main = sprintf("A. Foliar Allometry (R2 = %.3f, p = %.3f)", r2_size, p_size), font.main = 2); grid(col = "gray90", lty = "solid")
   for (sp in taxa_in_data) {
     sp_idx <- which(sub_df$scientificName == sp)
     if (length(sp_idx) > 0) {
       pt_col <- if (sp %in% names(taxon_cols)) taxon_cols[sp] else "gray50"
       points(sub_df$log_centsize[sp_idx], sub_df$PC1_raw[sp_idx], pch = 21, bg = grDevices::adjustcolor(pt_col, alpha.f = 0.65), col = pt_col, cex = 1.1)
-      if (length(sp_idx) >= 3) {
-        sp_lm <- tryCatch(stats::lm(PC1_raw ~ log_centsize, data = sub_df[sp_idx, ]), error = function(e) NULL)
-        if (!is.null(sp_lm)) abline(sp_lm, col = pt_col, lwd = 1.8)
-      }
+      if (length(sp_idx) >= 3) { sp_lm <- tryCatch(stats::lm(PC1_raw ~ log_centsize, data = sub_df[sp_idx, ]), error = function(e) NULL); if (!is.null(sp_lm)) abline(sp_lm, col = pt_col, lwd = 1.8) }
     }
   }
-  glob_lm <- tryCatch(stats::lm(PC1_raw ~ log_centsize, data = sub_df), error = function(e) NULL)
-  if (!is.null(glob_lm)) abline(glob_lm, col = "black", lwd = 2.2, lty = 2)
+  glob_lm <- tryCatch(stats::lm(PC1_raw ~ log_centsize, data = sub_df), error = function(e) NULL); if (!is.null(glob_lm)) abline(glob_lm, col = "black", lwd = 2.2, lty = 2)
   sp_cols <- sapply(taxa_in_data, function(sp) if (sp %in% names(taxon_cols)) taxon_cols[sp] else "gray50")
-  legend("topleft", legend = c(taxa_in_data, "Global Trendline"), col = c(sp_cols, "black"),
-         pch = c(rep(21, length(taxa_in_data)), NA), lty = c(rep(1, length(taxa_in_data)), 2), pt.bg = c(sp_cols, NA), bty = "n", cex = 0.75)
-
+  legend("topleft", legend = c(taxa_in_data, "Global Trendline"), col = c(sp_cols, "black"), pch = c(rep(21, length(taxa_in_data)), NA), lty = c(rep(1, length(taxa_in_data)), 2), pt.bg = c(sp_cols, NA), bty = "n", cex = 0.75)
   x_lim <- range(c(sub_df$PC1_raw, sub_df$PC1_corrected), na.rm = TRUE); y_lim <- range(c(sub_df$PC2_raw, sub_df$PC2_corrected), na.rm = TRUE)
-  plot(sub_df$PC1_raw, sub_df$PC2_raw, type = "n", xlim = x_lim, ylim = y_lim, xlab = "Morphospace PC1", ylab = "Morphospace PC2",
-       main = "B. Morphospace Before vs. After Allometric Correction", font.main = 2)
-  grid(col = "gray90", lty = "solid")
+  plot(sub_df$PC1_raw, sub_df$PC2_raw, type = "n", xlim = x_lim, ylim = y_lim, xlab = "Morphospace PC1", ylab = "Morphospace PC2", main = "B. Morphospace Before vs. After Allometric Correction", font.main = 2); grid(col = "gray90", lty = "solid")
   arrows(sub_df$PC1_raw, sub_df$PC2_raw, sub_df$PC1_corrected, sub_df$PC2_corrected, length = 0.05, col = grDevices::adjustcolor("gray65", alpha.f = 0.6), lwd = 0.8)
   points(sub_df$PC1_raw, sub_df$PC2_raw, pch = 1, col = grDevices::adjustcolor("gray40", alpha.f = 0.6), cex = 0.9)
   for (sp in taxa_in_data) {
     sp_idx <- which(sub_df$scientificName == sp)
     if (length(sp_idx) > 0) points(sub_df$PC1_corrected[sp_idx], sub_df$PC2_corrected[sp_idx], pch = 19, col = grDevices::adjustcolor(if (sp %in% names(taxon_cols)) taxon_cols[sp] else "gray50", alpha.f = 0.85), cex = 1.1)
   }
-  legend("bottomright", legend = c("Before (Raw Harmonic EFA)", "After (Allometric Residuals)", "Shift Vector"),
-         pch = c(1, 19, NA), lty = c(NA, NA, 1), col = c("gray40", "#009E73", "gray65"), bty = "n", cex = 0.8)
-  title("Packera dubia Complex: Foliar Size-Shape Allometry & Morphospace Correction", outer = TRUE, cex.main = 1.3)
-  dev.off()
+  legend("bottomright", legend = c("Before (Raw Harmonic EFA)", "After (Allometric Residuals)", "Shift Vector"), pch = c(1, 19, NA), lty = c(NA, NA, 1), col = c("gray40", "#009E73", "gray65"), bty = "n", cex = 0.8)
+  title("Packera dubia Complex: Foliar Size-Shape Allometry & Morphospace Correction", outer = TRUE, cex.main = 1.3); dev.off()
   message("Shape allometry regression plot saved -> ", output_pdf)
 }
 
@@ -149,7 +127,9 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   if (length(valid_idx) < 10) return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df))
 
   sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$scientificName <- factor(standardize_packera_taxon(as.character(if ("species_standardized" %in% names(sub_df)) sub_df$species_standardized else sub_df$scientificName)))
-  gold_mask <- if ("determiner_tier" %in% names(sub_df)) (sub_df$determiner_tier == "Tier_1_Gold" & !is.na(sub_df$scientificName)) else rep(TRUE, nrow(sub_df))
+  sub_df$authority_weight <- if ("authority_weight" %in% names(sub_df)) suppressWarnings(as.numeric(sub_df$authority_weight)) else ifelse(sub_df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(sub_df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
+  sub_df$authority_weight[is.na(sub_df$authority_weight) | sub_df$authority_weight <= 0] <- 0.5
+  gold_mask <- if ("determiner_tier" %in% names(sub_df)) (sub_df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & !is.na(sub_df$scientificName)) else rep(TRUE, nrow(sub_df))
   gold_df <- if (sum(gold_mask) >= 10 && length(unique(sub_df$scientificName[gold_mask])) >= 2) sub_df[gold_mask, , drop = FALSE] else sub_df
   gold_df$scientificName <- droplevels(factor(gold_df$scientificName))
   Y <- as.matrix(gold_df[, sym_names, drop = FALSE]); set.seed(seed); anova_df <- NULL; pw_df <- NULL
@@ -182,9 +162,9 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   }
   if (is.null(anova_df)) {
     Y_cent <- scale(Y, center = TRUE, scale = FALSE); SS_tot <- sum(Y_cent^2); N_obs <- nrow(gold_df)
-    fit1 <- stats::lm(Y_cent ~ log_centsize, data = gold_df); SS_size <- sum(stats::fitted(fit1)^2); df_size <- fit1$rank - 1
-    fit2 <- stats::lm(Y_cent ~ log_centsize + scientificName, data = gold_df); SS_12 <- sum(stats::fitted(fit2)^2); SS_taxa <- SS_12 - SS_size; df_taxa <- fit2$rank - fit1$rank
-    fit3 <- stats::lm(Y_cent ~ log_centsize * scientificName, data = gold_df); SS_123 <- sum(stats::fitted(fit3)^2); SS_int <- SS_123 - SS_12; df_int <- fit3$rank - fit2$rank
+    fit1 <- stats::lm(Y_cent ~ log_centsize, data = gold_df, weights = authority_weight); SS_size <- sum(stats::fitted(fit1)^2); df_size <- fit1$rank - 1
+    fit2 <- stats::lm(Y_cent ~ log_centsize + scientificName, data = gold_df, weights = authority_weight); SS_12 <- sum(stats::fitted(fit2)^2); SS_taxa <- SS_12 - SS_size; df_taxa <- fit2$rank - fit1$rank
+    fit3 <- stats::lm(Y_cent ~ log_centsize * scientificName, data = gold_df, weights = authority_weight); SS_123 <- sum(stats::fitted(fit3)^2); SS_int <- SS_123 - SS_12; df_int <- fit3$rank - fit2$rank
     SS_res <- SS_tot - SS_123; df_res <- N_obs - fit3$rank; MS_res <- SS_res / max(df_res, 1)
     F_size <- (SS_size / max(df_size, 1)) / MS_res; F_taxa <- (SS_taxa / max(df_taxa, 1)) / MS_res; F_int <- (SS_int / max(df_int, 1)) / MS_res
     anova_df <- data.frame(
@@ -215,7 +195,8 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   p_int <- if (nrow(int_row) > 0 && !is.na(int_row$p_value[1])) int_row$p_value[1] else 1.0
   correct_flag <- tolower(trimws(as.character(correct_mode))); slopes_homogeneous <- is.na(p_int) || (p_int > 0.05)
   should_correct <- (correct_flag %in% c("true", "1", "yes")) || (correct_flag == "auto" && !is.na(r2_size) && r2_size >= r2_threshold && slopes_homogeneous)
-  fit_within <- if (nlevels(gold_df$scientificName) >= 2) stats::lm(Y ~ log_centsize + scientificName, data = gold_df) else stats::lm(Y ~ log_centsize, data = gold_df)
+  authority_weight <- gold_df$authority_weight
+  fit_within <- if (nlevels(gold_df$scientificName) >= 2) stats::lm(Y ~ log_centsize + scientificName, data = gold_df, weights = authority_weight) else stats::lm(Y ~ log_centsize, data = gold_df, weights = authority_weight)
   beta_within <- stats::coef(fit_within)["log_centsize", ]; beta_within[is.na(beta_within)] <- 0.0
   Y <- as.matrix(sub_df[, sym_names, drop = FALSE]); log_centsize <- sub_df$log_centsize
   Y_adj <- Y - outer(log_centsize - mean(log_centsize, na.rm = TRUE), beta_within)
@@ -295,7 +276,8 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   m_cov <- if (!is.null(rob_cov)) rob_cov$cov else stats::cov(X_mah)
   mahal_d2 <- tryCatch(stats::mahalanobis(X_mah, center = m_center, cov = m_cov + diag(1e-6, ncol(X_mah))), error = function(e) rep(0.0, nrow(X)))
   mahal_outliers <- (nrow(X) >= 30) & !is.na(mahal_d2) & (mahal_d2 > stats::qchisq(0.995, df = ncol(X_mah)))
-  core_idx <- if (any(mahal_outliers) && sum(!mahal_outliers) >= max(10, ncol(X) + 2)) which(!mahal_outliers) else seq_len(nrow(X))
+  anchor_mask <- if ("determiner_tier" %in% names(df)) (df$determiner_tier[valid_rows] %in% c("Tier_1_Gold", "Tier_2_Silver")) & !mahal_outliers else !mahal_outliers
+  core_idx <- if (sum(anchor_mask, na.rm = TRUE) >= 20) which(anchor_mask) else if (any(mahal_outliers) && sum(!mahal_outliers) >= max(10, ncol(X) + 2)) which(!mahal_outliers) else seq_len(nrow(X))
   if (requireNamespace("clustvarsel", quietly = TRUE) && (isTRUE(use_clustvarsel) || ncol(X) >= 4)) {
     cvs <- tryCatch(clustvarsel::clustvarsel(X[core_idx, , drop = FALSE], G = seq_len(max_k), verbose = FALSE), error = function(e) NULL)
     if (!is.null(cvs) && length(cvs$subset) >= 2) {
@@ -309,13 +291,9 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
     gmm_fit <- tryCatch(mclust::Mclust(X_core, G = seq_len(max_k), modelNames = modelNames, verbose = FALSE), error = function(e) NULL)
     if (!is.null(gmm_fit)) {
       best_k <- gmm_fit$G; best_name <- gmm_fit$modelName
-      if (length(core_idx) < nrow(X_pcs)) {
-        gmm_pred <- predict(gmm_fit, newdata = X_pcs)
-        cls_sub <- as.integer(gmm_pred$classification)
-        unc_sub <- if (!is.null(gmm_pred$uncertainty)) gmm_pred$uncertainty else 1.0 - apply(as.matrix(gmm_pred$z), 1, max)
-      } else {
-        cls_sub <- gmm_fit$classification; unc_sub <- gmm_fit$uncertainty
-      }
+      gmm_pred <- predict(gmm_fit, newdata = X_pcs)
+      cls_sub <- as.integer(gmm_pred$classification)
+      unc_sub <- if (!is.null(gmm_pred$uncertainty)) gmm_pred$uncertainty else 1.0 - apply(as.matrix(gmm_pred$z), 1, max)
       bic_vals <- apply(gmm_fit$BIC, 1, function(row) if (all(is.na(row))) NA_real_ else max(row, na.rm = TRUE))
       bic_table <- data.frame(K = seq_len(max_k), BIC = round(bic_vals[seq_len(max_k)], 2))
     }
@@ -338,6 +316,8 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
 # 4. Canonical Discriminant Analysis with Passive Sample Projection
 run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, gmm_res = NULL, intraspecific_mode = FALSE) {
   message("Configuring Canonical Discriminant Analysis in MorphoTools2 Architecture...")
+  df$authority_weight <- ifelse(df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
+  df$authority_weight[is.na(df$authority_weight)] <- 0.5
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   if (is_intra) {
     if (!is.null(gmm_res) && !is.null(gmm_res$best_k) && gmm_res$best_k >= 2 && length(unique(stats::na.omit(gmm_res$classification))) >= 2) {
@@ -361,36 +341,50 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
       is_active <- if (length(unique(df$grouping_col[g_act])) >= 2) g_act else (!is.na(df$grouping_col) & complete.cases(df[, feature_cols]))
     }
     target_taxa <- sort(unique(stats::na.omit(df$grouping_col[is_active])))
+    is_train_cand <- is_active
   } else {
     df$grouping_col <- df$species_standardized
     is_active <- (df$determiner_tier == "Tier_1_Gold") & (df$grouping_col %in% target_taxa) & complete.cases(df[, feature_cols])
-    if (length(unique(df$grouping_col[is_active])) >= 2) target_taxa <- intersect(target_taxa, unique(df$grouping_col[is_active]))
+    is_train_cand <- df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & df$species_standardized %in% target_taxa & complete.cases(df[, feature_cols])
+    if (length(unique(df$grouping_col[is_train_cand])) >= 2) target_taxa <- intersect(target_taxa, unique(df$grouping_col[is_train_cand]))
+    if (any(table(factor(df$grouping_col[is_train_cand], levels = target_taxa)) < 2)) {
+      is_train_cand <- if (all(table(factor(df$grouping_col[is_active], levels = target_taxa)) >= 2)) is_active else (df$grouping_col %in% target_taxa & complete.cases(df[, feature_cols]))
+    }
   }
-  active_idx <- which(is_active); passive_idx <- which(!is_active)
+  X <- as.matrix(df[, feature_cols, drop = FALSE]); p <- ncol(X)
+  for (grp in target_taxa) {
+    cand_k <- which(is_train_cand & df$grouping_col == grp); n_k <- length(cand_k)
+    if (n_k >= 6) {
+      sub_x <- X[cand_k, , drop = FALSE]
+      d2_k <- tryCatch(stats::mahalanobis(sub_x, colMeans(sub_x), stats::cov(sub_x) + diag(1e-4, p)), error = function(e) rep(0, n_k))
+      drop_k <- !is.na(d2_k) & (d2_k > stats::qchisq(0.95, df = p))
+      if (sum(!drop_k) >= 2) is_train_cand[cand_k[drop_k]] <- FALSE
+    }
+  }
+  active_idx <- which(is_train_cand); passive_idx <- which(!is_active)
   message(sprintf("Active Anchors (Complete): %d | Passive Projected: %d", length(active_idx), length(passive_idx)))
   if (length(active_idx) < length(target_taxa)) stop("Insufficient complete active Tier 1 Gold anchors for CDA.")
 
-  X <- as.matrix(df[, feature_cols, drop = FALSE]); X_a <- X[active_idx, , drop = FALSE]
-  y_a <- df$grouping_col[active_idx]; N_a <- nrow(X_a); p <- ncol(X_a)
+  X_a <- X[active_idx, , drop = FALSE]; y_a <- df$grouping_col[active_idx]; w_a <- df$authority_weight[active_idx]; N_a <- nrow(X_a)
   X_mat <- X_a; grp_factor <- droplevels(factor(y_a))
   lda_cv <- if (requireNamespace("MASS", quietly = TRUE) && nlevels(grp_factor) >= 2) {
-    tryCatch(MASS::lda(x = X_mat, grouping = grp_factor, CV = TRUE), error = function(e) NULL)
+    tryCatch(MASS::lda(x = X_mat, grouping = grp_factor, prior = rep(1.0 / nlevels(grp_factor), nlevels(grp_factor)), CV = TRUE), error = function(e) NULL)
   } else NULL
   loocv_accuracy <- if (!is.null(lda_cv) && !is.null(lda_cv$class)) round(mean(as.character(lda_cv$class) == as.character(grp_factor), na.rm = TRUE), 4) else NA_real_
   message(sprintf("CDA Leave-One-Out Cross-Validation Accuracy (loocv_accuracy): %.4f", loocv_accuracy))
 
-  g_levels <- target_taxa; g <- length(g_levels); grand_mean <- colMeans(X_a)
+  g_levels <- target_taxa; g <- length(g_levels); grand_mean <- colSums(X_a * w_a) / sum(w_a)
   B <- matrix(0, p, p); W <- matrix(0, p, p)
   group_means <- matrix(0, g, p, dimnames = list(g_levels, feature_cols)); group_counts <- integer(g)
   for (k in seq_along(g_levels)) {
-    grp <- g_levels[k]; sub_x <- X_a[y_a == grp, , drop = FALSE]; group_counts[k] <- nrow(sub_x)
+    grp <- g_levels[k]; k_mask <- (y_a == grp); sub_x <- X_a[k_mask, , drop = FALSE]; w_k <- w_a[k_mask]; group_counts[k] <- nrow(sub_x)
     if (nrow(sub_x) > 0) {
-      m_k <- colMeans(sub_x); group_means[k, ] <- m_k; diff_m <- m_k - grand_mean
-      B <- B + group_counts[k] * (diff_m %*% t(diff_m)); diff_x <- t(t(sub_x) - m_k); W <- W + (t(diff_x) %*% diff_x)
+      m_k <- colSums(sub_x * w_k) / sum(w_k); group_means[k, ] <- m_k; diff_m <- m_k - grand_mean
+      B <- B + sum(w_k) * (diff_m %*% t(diff_m)); diff_x <- t(t(sub_x) - m_k); W <- W + (t(diff_x) %*% (diff_x * w_k))
     }
   }
 
-  S_reg <- (W / max(N_a - g, 1)) + diag(1e-7, p); eig <- eigen(solve(S_reg, B))
+  S_reg <- (W / max(sum(w_a) - g, 1)) + diag(1e-7, p); eig <- eigen(solve(S_reg, B))
   real_idx <- which(abs(Im(eig$values)) < 1e-6); real_vals <- Re(eig$values[real_idx]); real_vecs <- Re(eig$vectors[, real_idx, drop = FALSE])
   order_idx <- order(real_vals, decreasing = TRUE); num_axes <- max(1L, min(g - 1L, p))
   eig_vals <- real_vals[order_idx][seq_len(num_axes)]; eig_vecs <- real_vecs[, order_idx[seq_len(num_axes)], drop = FALSE]
@@ -407,11 +401,14 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     na_mask <- is.na(X_proj[, col_idx]); if (any(na_mask)) X_proj[na_mask, col_idx] <- grand_mean[col_idx]
   }
   Z_all <- t(t(X_proj) - grand_mean) %*% eig_vecs; canonical_centroids <- t(t(group_means) - grand_mean) %*% eig_vecs
-  priors <- group_counts / sum(group_counts); post_probs <- matrix(0, nrow(df), g, dimnames = list(NULL, g_levels))
+  priors <- rep(1.0 / g, g); post_probs <- matrix(0, nrow(df), g, dimnames = list(NULL, g_levels))
   for (k in seq_along(g_levels)) {
     diff_z <- t(t(Z_all) - canonical_centroids[k, ]); post_probs[, k] <- priors[k] * exp(-0.5 * rowSums(diff_z^2))
   }
   post_probs <- post_probs / rowSums(post_probs); pred_idx <- apply(post_probs, 1, which.max)
+  posterior_prob <- apply(post_probs, 1, max)
+  second_posterior_prob <- if (g >= 2) apply(post_probs, 1, function(r) sort(r, decreasing = TRUE)[2]) else rep(0.0, nrow(df))
+  posterior_margin <- posterior_prob - second_posterior_prob
   if (num_axes == 1) {
     can1_v <- as.numeric(Z_all[, 1]); pc1_v <- if ("PC1" %in% colnames(X_proj)) as.numeric(X_proj[, "PC1"]) else as.numeric(X_proj[, 1])
     pc1_c <- pc1_v - mean(pc1_v, na.rm = TRUE); can2_v <- pc1_c - (sum(pc1_c * can1_v) / max(sum(can1_v^2), 1e-12)) * can1_v
@@ -423,8 +420,8 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     rownames(canonical_centroids) <- g_levels
   }
   return(list(eigenvalues = eig_vals, variance_pct = var_pct, canonical_scores = Z_all, centroids = canonical_centroids,
-              predicted_taxon = g_levels[pred_idx], posterior_prob = apply(post_probs, 1, max), is_active = is_active,
-              structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col))
+              predicted_taxon = g_levels[pred_idx], posterior_prob = posterior_prob, second_posterior_prob = second_posterior_prob,
+              posterior_margin = posterior_margin, is_active = is_active, structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col))
 }
 run_cda_with_passive_projection <- run_canonical_discriminant_analysis
 
@@ -456,8 +453,10 @@ audit_misidentifications <- function(df, cda_res, gmm_res) {
     }
     if (is_intra_audit && !flags[i] && isTRUE(mahal_out[i])) { flags[i] <- TRUE; triage[i] <- "HIGH"; reasons[i] <- "Intraspecific_Mahalanobis_Morphospace_Outlier" }
   }
+  df$authority_weight <- ifelse(df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
   df$gmm_cluster <- gmm_res$classification; df$gmm_uncertainty <- round(gmm_res$uncertainty, 4)
   df$cda_predicted_taxon <- cda_res$predicted_taxon; df$cda_posterior_prob <- round(cda_res$posterior_prob, 4)
+  df$cda_second_posterior_prob <- round(cda_res$second_posterior_prob, 4); df$cda_posterior_margin <- round(cda_res$posterior_margin, 4)
   df$can1 <- round(cda_res$canonical_scores[, 1], 5); df$can2 <- if (ncol(cda_res$canonical_scores) >= 2) round(cda_res$canonical_scores[, 2], 5) else 0.0
   df$is_passive <- !cda_res$is_active; df$morphometric_outlier_flag <- flags; df$misidentification_flag <- flags
   df$triage_priority <- triage; df$discordance_reason <- reasons
@@ -542,13 +541,11 @@ generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feat
 run_gmm_morphotools_pipeline <- function(opts) {
   message("==================================================================")
   message("Starting Packera Morphometrics GMM & Passive MorphoTools2 CDA")
-  message("Vouchers: ", opts$vouchers, " | Harmonics: ", opts$harmonics)
-  message("Allometry Mode: ", opts$correct_allometry, " | Report: ", opts$allometry_report)
+  message("Vouchers: ", opts$vouchers, " | Harmonics: ", opts$harmonics, " | Allometry Mode: ", opts$correct_allometry)
   message("==================================================================")
   if (!file.exists(opts$harmonics)) stop("Harmonics file not found: ", opts$harmonics)
   efa_df <- read.csv(opts$harmonics, stringsAsFactors = FALSE)
-  vouchers_df <- if (file.exists(opts$vouchers)) read.csv(opts$vouchers, stringsAsFactors = FALSE) else NULL
-  if (!is.null(vouchers_df)) vouchers_df <- calculate_circular_phenology(vouchers_df)
+  vouchers_df <- if (file.exists(opts$vouchers)) calculate_circular_phenology(read.csv(opts$vouchers, stringsAsFactors = FALSE)) else NULL
   pca_cols <- paste0("PC", seq_len(opts$num_pcs)); missing_pca <- setdiff(pca_cols, names(efa_df))
   if (length(missing_pca) > 0) stop("Missing PCA columns in EFA table: ", paste(missing_pca, collapse = ", "))
   closed_mask <- grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE)
@@ -585,6 +582,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   }
   message(sprintf("Specimen-level collection units for morphometric modeling (1 row = 1 voucher): %d", nrow(closed_df)))
   closed_df$species_standardized <- standardize_packera_taxon(closed_df$species_raw)
+  closed_df$authority_weight <- ifelse(closed_df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(closed_df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
   if (!is.null(vouchers_df)) {
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), , drop = FALSE]; v_idx <- match(as.character(closed_df$catalogNumber), as.character(v_sub$catalogNumber))
     for (col in intersect(names(v_sub), c("institutionCode", "county", "stateProvince", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group"))) {
@@ -624,11 +622,11 @@ run_gmm_morphotools_pipeline <- function(opts) {
   audited_df <- audit_misidentifications(closed_df, cda_res, gmm_res)
   audit_institutional_batch_effects(audited_df, output_csv = opts$output_batch_audit)
   lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "pixels_per_mm", "is_calibrated_mm",
-                           "species_raw", "species_standardized", "determiner_tier", "cda_predicted_taxon", "cda_posterior_prob", "is_passive",
-                           "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster",
-                           "gmm_uncertainty", "can1", "can2", "pheno_sin", "pheno_cos", "PC1", "PC2", "PC3", "PC4", "PC5",
-                           "centroid_size", "log_centsize", "solidity", "ucs_score", "AR_inv", "AR_inv_std", "reproductive_trait_status",
-                           "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
+                           "species_raw", "species_standardized", "determiner_tier", "authority_weight", "cda_predicted_taxon", "cda_posterior_prob",
+                           "cda_second_posterior_prob", "cda_posterior_margin", "is_passive", "morphometric_outlier_flag", "misidentification_flag",
+                           "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "pheno_sin", "pheno_cos",
+                           "PC1", "PC2", "PC3", "PC4", "PC5", "centroid_size", "log_centsize", "solidity", "ucs_score", "AR_inv", "AR_inv_std",
+                           "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]
   dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE)
   tmp_flags <- paste0(opts$output_flags, ".tmp"); write.csv(out_df, file = tmp_flags, row.names = FALSE, na = ""); file.rename(tmp_flags, opts$output_flags)
@@ -636,12 +634,10 @@ run_gmm_morphotools_pipeline <- function(opts) {
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, feature_cols)
   tryCatch({
     if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
-      source("scripts/morphometrics/pub_figures_utils.R")
-      generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot)
+      source("scripts/morphometrics/pub_figures_utils.R"); generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot)
     }
   }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
-  message("Morphometric Pipeline Complete Successfully.")
-  return(invisible(out_df))
+  message("Morphometric Pipeline Complete Successfully."); return(invisible(out_df))
 }
 
 if (sys.nframe() == 0) run_gmm_morphotools_pipeline(parse_args_robust())

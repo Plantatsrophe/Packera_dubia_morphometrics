@@ -210,13 +210,24 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
   solidity <- if ("solidity" %in% names(out_df)) ifelse(is.na(out_df$solidity), 1.0, as.numeric(out_df$solidity)) else rep(1.0, nrow(out_df))
   ucs <- if ("ucs" %in% names(out_df)) ifelse(is.na(out_df$ucs), 1.0, as.numeric(out_df$ucs)) else if ("ucs_score" %in% names(out_df)) ifelse(is.na(out_df$ucs_score), 1.0, as.numeric(out_df$ucs_score)) else rep(1.0, nrow(out_df))
   leaf_quality_weight <- pmax(0.05, solidity * ucs * ((1.0 - pmin(pct_asymmetry, 0.95))^2) * ifelse(is_contour_outlier, 0.10, 1.0))
+  det_tier <- if ("determiner_tier" %in% names(out_df)) as.character(out_df$determiner_tier) else rep("Tier_3_Bronze", nrow(out_df))
+  tier_wt <- ifelse(det_tier == "Tier_1_Gold", 3.0, ifelse(det_tier == "Tier_2_Silver", 1.5, 0.5))
+  tier_wt[is.na(tier_wt)] <- 0.5
+  combined_wt <- tier_wt * leaf_quality_weight
 
+  out_df$authority_weight <- tier_wt
   out_df$sym_var <- round(sym_var, 6); out_df$asym_var <- round(asym_var, 6); out_df$pct_asymmetry <- round(pct_asymmetry, 6)
   out_df$harmonic_roughness <- round(harmonic_roughness, 6); out_df$is_contour_outlier <- is_contour_outlier; out_df$leaf_quality_weight <- round(leaf_quality_weight, 6)
   for (pc_col in c("Sym_PC1", "Sym_PC2", "Sym_PC3", "Sym_PC4", "Sym_PC5")) out_df[[pc_col]] <- 0.0
-  pca_sym <- if (nrow(sym_mat) >= 2 && ncol(sym_mat) >= 1) stats::prcomp(sym_mat[clean_pca_mask, , drop = FALSE], center = TRUE, scale. = FALSE) else NULL
-  if (!is.null(pca_sym)) {
-    sym_scores <- stats::predict(pca_sym, newdata = sym_mat); pca_sym$x <- sym_scores
+  pca_sym <- NULL
+  if (nrow(sym_mat) >= 2 && ncol(sym_mat) >= 1) {
+    X_cl <- sym_mat[clean_pca_mask, , drop = FALSE]; w_cl <- combined_wt[clean_pca_mask]
+    if (sum(w_cl, na.rm = TRUE) <= 0) w_cl <- rep(1.0, nrow(X_cl))
+    wt_cov <- stats::cov.wt(X_cl, wt = w_cl, center = TRUE)
+    eig <- eigen(wt_cov$cov, symmetric = TRUE)
+    colnames(eig$vectors) <- paste0("PC", seq_len(ncol(eig$vectors))); rownames(eig$vectors) <- colnames(sym_mat)
+    sym_scores <- sweep(sym_mat, 2, wt_cov$center, "-") %*% eig$vectors
+    pca_sym <- structure(list(sdev = sqrt(pmax(eig$values, 0)), rotation = eig$vectors, center = wt_cov$center, scale = FALSE, x = sym_scores), class = "prcomp")
     for (p in seq_len(min(num_pcs, ncol(sym_scores)))) out_df[[paste0("Sym_PC", p)]] <- round(sym_scores[, p], 6)
   }
   permanova_res <- NULL
@@ -491,19 +502,33 @@ run_fourier_extraction <- function(opts) {
 
   # Harmonize column names to standard A1-D12
   if (ncol(harm_mat) == length(harmonic_names)) colnames(harm_mat) <- harmonic_names
+  if (!is.null(vouchers_df)) {
+    meta_cols <- intersect(names(vouchers_df), c("catalogNumber", "scientificName", "species_raw", "determiner_raw", "determiner_tier",
+                                                 "county", "stateProvince", "latitude", "longitude", "pheno_sin", "pheno_cos", "regional_group"))
+    v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), meta_cols, drop = FALSE]
+    fac_df$.row_ord <- seq_len(nrow(fac_df))
+    fac_df <- merge(fac_df, v_sub, by = "catalogNumber", all.x = TRUE, sort = FALSE)
+    fac_df <- fac_df[order(fac_df$.row_ord), , drop = FALSE]; fac_df$.row_ord <- NULL; rownames(fac_df) <- fac_df$shape_id
+  }
+  if (!"scientificName" %in% names(fac_df)) fac_df$scientificName <- fac_df$species_raw
+  else fac_df$scientificName <- ifelse(is.na(fac_df$scientificName) | fac_df$scientificName == "", fac_df$species_raw, fac_df$scientificName)
+  if (!"determiner_tier" %in% names(fac_df)) fac_df$determiner_tier <- "Tier_3_Bronze"
+  else fac_df$determiner_tier <- ifelse(is.na(fac_df$determiner_tier) | fac_df$determiner_tier == "", "Tier_3_Bronze", fac_df$determiner_tier)
+  fac_df$authority_weight <- ifelse(fac_df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(fac_df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
   efa_df <- cbind(fac_df, as.data.frame(harm_mat))
 
-  # 4. Symmetric Fourier Decomposition & PCA (PC1-PC5 / Sym_PC1-Sym_PC5)
+  # 4. Authority-Tier-Weighted Symmetric Fourier Decomposition & PCA (PC1-PC5 / Sym_PC1-Sym_PC5)
   message("Extracting symmetric harmonic coefficients (An and Dn harmonics)...")
   sym_names <- c(paste0("A", seq_len(opts$harmonics)), paste0("D", seq_len(opts$harmonics)))
   sym_harmonics <- harm_mat[, sym_names, drop = FALSE]
-  ef_input <- if (exists("ef_res") && !is.null(ef_res)) ef_res else list(coe = harm_mat, fac = fac_df)
+  ef_input <- if (exists("ef_res") && !is.null(ef_res)) { ef_res$fac <- fac_df; ef_res } else list(coe = harm_mat, fac = fac_df)
   sym_res <- extract_symmetric_fourier_pcs(ef_input, fac_df = fac_df, num_pcs = opts$num_pcs, permutations = opts$permutations, seed = opts$seed, run_permanova = FALSE)
-  for (scol in c("sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", paste0("Sym_PC", seq_len(opts$num_pcs)))) {
+  for (scol in c("authority_weight", "sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", paste0("Sym_PC", seq_len(opts$num_pcs)))) {
     if (scol %in% names(sym_res$df)) efa_df[[scol]] <- sym_res$df[[scol]]
   }
+  tier_wt <- efa_df$authority_weight; combined_wt <- tier_wt * efa_df$leaf_quality_weight
 
-  message("Running PCA strictly on symmetric harmonics (sym_harmonics)...")
+  message("Running authority-tier-weighted PCA strictly on symmetric harmonics (sym_harmonics)...")
   complete_idx <- which(complete.cases(sym_harmonics))
   for (p in seq_len(opts$num_pcs)) efa_df[[paste0("PC", p)]] <- NA_real_
 
@@ -516,36 +541,27 @@ run_fourier_extraction <- function(opts) {
       ef_clean <- if (nrow(harm_mat) >= 10 && sum(!efa_df$is_contour_outlier) >= 5) tryCatch(Momocs::slice(ef_res, which(!efa_df$is_contour_outlier)), error = function(e) ef_res) else ef_res
       momocs_pca <- tryCatch(Momocs::PCA(ef_clean), error = function(e) NULL)
     }
-    pca_fit <- stats::prcomp(sym_harmonics[clean_idx, active_sym_cols, drop = FALSE], center = TRUE, scale. = FALSE)
-    pc_scores <- stats::predict(pca_fit, newdata = sym_harmonics[complete_idx, active_sym_cols, drop = FALSE])
+    wt_cov <- stats::cov.wt(sym_harmonics[clean_idx, active_sym_cols, drop = FALSE], wt = combined_wt[clean_idx], center = TRUE)
+    eig <- eigen(wt_cov$cov, symmetric = TRUE)
+    colnames(eig$vectors) <- paste0("PC", seq_len(ncol(eig$vectors))); rownames(eig$vectors) <- active_sym_cols
+    pc_scores <- sweep(sym_harmonics[complete_idx, active_sym_cols, drop = FALSE], 2, wt_cov$center, "-") %*% eig$vectors
+    pca_fit <- structure(list(sdev = sqrt(pmax(eig$values, 0)), rotation = eig$vectors, center = wt_cov$center, scale = FALSE, x = pc_scores), class = "prcomp")
     var_exp <- round((pca_fit$sdev^2) / sum(pca_fit$sdev^2) * 100, 2)
     message("=== Symmetric Morphospace PCA Variance Explained ===")
     for (p in seq_len(min(opts$num_pcs, length(var_exp)))) message(sprintf("  PC%d: %5.2f%% variance", p, var_exp[p]))
     for (p in seq_len(min(opts$num_pcs, ncol(pc_scores)))) efa_df[complete_idx, paste0("PC", p)] <- round(pc_scores[, p], 6)
   }
 
-  # 5. Darwin Core Metadata Integration & Standardization
-  if (!is.null(vouchers_df)) {
-    meta_cols <- intersect(names(vouchers_df), c("catalogNumber", "scientificName", "species_raw", "determiner_raw", "determiner_tier",
-                                                 "county", "stateProvince", "latitude", "longitude", "pheno_sin", "pheno_cos", "regional_group"))
-    v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), meta_cols, drop = FALSE]
-    efa_df <- merge(efa_df, v_sub, by = "catalogNumber", all.x = TRUE, sort = FALSE)
-  }
+  # 5. Darwin Core Metadata Standardization & Export
   harm_mat <- as.matrix(efa_df[, harmonic_names, drop = FALSE])
   sym_harmonics <- as.matrix(efa_df[, sym_names, drop = FALSE])
-
-  # Normalize assigned_tier to canonical contract ("Tier_1_Direct", "Tier_2_Reflected")
   efa_df$assigned_tier <- ifelse(grepl("^tier_?1", efa_df$assigned_tier, ignore.case = TRUE), "Tier_1_Direct",
                                  ifelse(grepl("^tier_?2", efa_df$assigned_tier, ignore.case = TRUE), "Tier_2_Reflected", efa_df$assigned_tier))
   efa_df$reconstruction_tier <- ifelse(efa_df$assigned_tier == "Tier_1_Direct", "Tier 1",
                                        ifelse(efa_df$assigned_tier == "Tier_2_Reflected", "Tier 2", NA_character_))
-  if (!"scientificName" %in% names(efa_df)) efa_df$scientificName <- efa_df$species_raw
-  else efa_df$scientificName <- ifelse(is.na(efa_df$scientificName) | efa_df$scientificName == "", efa_df$species_raw, efa_df$scientificName)
-  if (!"determiner_tier" %in% names(efa_df)) efa_df$determiner_tier <- "Tier_3_Bronze"
-  else efa_df$determiner_tier <- ifelse(is.na(efa_df$determiner_tier) | efa_df$determiner_tier == "", "Tier_3_Bronze", efa_df$determiner_tier)
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
-                 "scientificName", "species_raw", "determiner_tier", "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "solidity", "ucs_score",
+                 "scientificName", "species_raw", "determiner_tier", "authority_weight", "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "solidity", "ucs_score",
                  "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
@@ -572,9 +588,12 @@ run_fourier_extraction <- function(opts) {
     cat_num <- grp$catalogNumber[1]; p_id <- grp$plant_individual_id[1]; n_leaves <- nrow(grp)
     harm_medians <- vapply(grp[, all_harm_cols, drop = FALSE], stats::median, numeric(1), na.rm = TRUE)
     foliar_var <- if (n_leaves > 1) round(mean(apply(as.matrix(grp[, sym_names, drop = FALSE]), 2, stats::var, na.rm = TRUE), na.rm = TRUE), 8) else 0.0
+    det_t <- if ("determiner_tier" %in% names(grp) && !is.na(grp$determiner_tier[1])) as.character(grp$determiner_tier[1]) else "Tier_3_Bronze"
+    auth_w <- ifelse(det_t == "Tier_1_Gold", 3.0, ifelse(det_t == "Tier_2_Silver", 1.5, 0.5))
     rec <- data.frame(catalogNumber = cat_num, plant_individual_id = p_id, leaf_count = n_leaves, foliar_variance = foliar_var,
                       assigned_tier = grp$assigned_tier[1], reconstruction_tier = grp$reconstruction_tier[1],
-                      scientificName = grp$scientificName[1], species_raw = grp$species_raw[1], determiner_tier = grp$determiner_tier[1], stringsAsFactors = FALSE)
+                      scientificName = grp$scientificName[1], species_raw = grp$species_raw[1], determiner_tier = det_t,
+                      authority_weight = auth_w, stringsAsFactors = FALSE)
     med_cs <- stats::median(grp$centroid_size, na.rm = TRUE)
     rec$centroid_size <- if (is.finite(med_cs) && med_cs > 0) round(med_cs, 4) else NA_real_
     rec$log_centsize <- if (!is.na(rec$centroid_size) && rec$centroid_size > 0) round(log(rec$centroid_size), 6) else NA_real_
@@ -604,16 +623,14 @@ run_fourier_extraction <- function(opts) {
   }
 
   lead_spec_cols <- c("catalogNumber", "plant_individual_id", "leaf_count", "foliar_variance", "assigned_tier", "reconstruction_tier",
-                      "pixels_per_mm", "is_calibrated_mm", "scientificName", "species_raw", "determiner_tier",
+                      "pixels_per_mm", "is_calibrated_mm", "scientificName", "species_raw", "determiner_tier", "authority_weight",
                       "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "solidity", "ucs_score",
                       "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize")
   lead_spec_cols <- intersect(lead_spec_cols, names(specimen_df))
   specimen_df <- specimen_df[, c(lead_spec_cols, setdiff(names(specimen_df), lead_spec_cols))]
 
   dir.create(dirname(opts$output), recursive = TRUE, showWarnings = FALSE)
-  tmp_out <- paste0(opts$output, ".tmp")
-  write.csv(specimen_df, file = tmp_out, row.names = FALSE, na = "")
-  file.rename(tmp_out, opts$output)
+  tmp_out <- paste0(opts$output, ".tmp"); write.csv(specimen_df, file = tmp_out, row.names = FALSE, na = ""); file.rename(tmp_out, opts$output)
   message("Specimen-aggregated EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(specimen_df), ")")
 
   tryCatch({
@@ -625,52 +642,31 @@ run_fourier_extraction <- function(opts) {
   }, error = function(e) warning("Step 03 publication figures/tables export warning: ", e$message))
 
   # 6. Empirical Tier Validation Test (PERMANOVA via adonis2 / fallback manova)
-  valid_tier_idx <- which(!is.na(efa_df$reconstruction_tier) &
-                          !is.na(efa_df$scientificName) & nzchar(as.character(efa_df$scientificName)) &
-                          !is.na(efa_df$determiner_tier) & nzchar(as.character(efa_df$determiner_tier)) &
-                          complete.cases(sym_harmonics))
+  valid_tier_idx <- which(!is.na(efa_df$reconstruction_tier) & !is.na(efa_df$scientificName) & nzchar(as.character(efa_df$scientificName)) &
+                          !is.na(efa_df$determiner_tier) & nzchar(as.character(efa_df$determiner_tier)) & complete.cases(sym_harmonics))
   if (length(valid_tier_idx) >= 10) {
     message("==================================================================")
     message("Executing Empirical Tier Validation Test (PERMANOVA)")
     message("Model: sym_harmonics ~ scientificName + determiner_tier + reconstruction_tier")
-    message(sprintf("Sample Size: %d outlines (Tier 1: %d | Tier 2: %d)",
-                    length(valid_tier_idx),
-                    sum(efa_df$reconstruction_tier[valid_tier_idx] == "Tier 1"),
-                    sum(efa_df$reconstruction_tier[valid_tier_idx] == "Tier 2")))
+    message(sprintf("Sample Size: %d outlines (Tier 1: %d | Tier 2: %d)", length(valid_tier_idx),
+                    sum(efa_df$reconstruction_tier[valid_tier_idx] == "Tier 1"), sum(efa_df$reconstruction_tier[valid_tier_idx] == "Tier 2")))
     message("==================================================================")
-
-    tier_manifest <- efa_df[valid_tier_idx, , drop = FALSE]
-    tier_sym <- sym_harmonics[valid_tier_idx, , drop = FALSE]
-
+    tier_manifest <- efa_df[valid_tier_idx, , drop = FALSE]; tier_sym <- sym_harmonics[valid_tier_idx, , drop = FALSE]
     tier_manifest$scientificName <- as.factor(tier_manifest$scientificName)
     tier_manifest$determiner_tier <- as.factor(tier_manifest$determiner_tier)
     tier_manifest$reconstruction_tier <- as.factor(tier_manifest$reconstruction_tier)
-
-    set.seed(opts$seed)
-    permanova_df <- NULL
+    set.seed(opts$seed); permanova_df <- NULL
 
     if (requireNamespace("RRPP", quietly = TRUE)) {
       message(sprintf("Executing RRPP::lm.rrpp (iter = %d, seed = %d)...", opts$permutations, opts$seed))
       rrpp_res <- tryCatch({
-        rdf <- RRPP::rrpp.data.frame(
-          tier_sym = as.matrix(tier_sym),
-          scientificName = tier_manifest$scientificName,
-          determiner_tier = tier_manifest$determiner_tier,
-          reconstruction_tier = tier_manifest$reconstruction_tier
-        )
-        fit_rrpp <- RRPP::lm.rrpp(
-          tier_sym ~ scientificName + determiner_tier + reconstruction_tier,
-          data = rdf, iter = opts$permutations, print.progress = FALSE
-        )
+        rdf <- RRPP::rrpp.data.frame(tier_sym = as.matrix(tier_sym), scientificName = tier_manifest$scientificName,
+                                     determiner_tier = tier_manifest$determiner_tier, reconstruction_tier = tier_manifest$reconstruction_tier)
+        fit_rrpp <- RRPP::lm.rrpp(tier_sym ~ scientificName + determiner_tier + reconstruction_tier, data = rdf, iter = opts$permutations, print.progress = FALSE)
         anova(fit_rrpp)$table
-      }, error = function(e) {
-        warning("RRPP::lm.rrpp encountered an issue: ", e$message, ". Falling back to vegan::adonis2().")
-        NULL
-      })
+      }, error = function(e) { warning("RRPP::lm.rrpp encountered an issue: ", e$message, ". Falling back to vegan::adonis2()."); NULL })
       if (!is.null(rrpp_res)) {
-        permanova_df <- as.data.frame(rrpp_res)
-        permanova_df$Term <- rownames(permanova_df)
-        rownames(permanova_df) <- NULL
+        permanova_df <- as.data.frame(rrpp_res); permanova_df$Term <- rownames(permanova_df); rownames(permanova_df) <- NULL
         if ("SS" %in% names(permanova_df)) permanova_df$SumOfSqs <- permanova_df$SS
         if ("Rsq" %in% names(permanova_df)) permanova_df$R2 <- permanova_df$Rsq
         if ("Pr(>F)" %in% names(permanova_df)) permanova_df$p_value <- permanova_df[["Pr(>F)"]]

@@ -1056,29 +1056,48 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
   doy <- ifelse(is.na(df$doy) | df$doy < 1 | df$doy > 366, 120, df$doy)
   theta <- 2 * pi * doy / 365.25
   df$pheno_theta <- theta
-  
-  # Compute species/ecotype-specific circular medians and edaphic envelopes (Tier 1 anchors)
-  is_anchor <- df$determiner_tier == "Tier_1_Gold" & grp_vec %in% active_taxa
+  df$authority_weight <- ifelse(df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
+  df$authority_weight[is.na(df$authority_weight)] <- 0.5
+
+  w_mean <- function(x, w) {
+    if (is.null(x) || length(x) == 0) return(NA_real_)
+    ok <- !is.na(x) & !is.na(w) & is.finite(x) & w > 0
+    if (!any(ok)) return(mean(as.numeric(x), na.rm = TRUE))
+    sum(x[ok] * w[ok]) / sum(w[ok])
+  }
+  w_sd <- function(x, w, min_sd = 0.25) {
+    if (is.null(x) || length(x) == 0) return(min_sd)
+    ok <- !is.na(x) & !is.na(w) & is.finite(x) & w > 0
+    if (sum(ok) < 2) return(max(stats::sd(as.numeric(x), na.rm = TRUE), min_sd, na.rm = TRUE))
+    wm <- sum(x[ok] * w[ok]) / sum(w[ok])
+    denom <- sum(w[ok]) - (sum(w[ok]^2) / sum(w[ok]))
+    wv <- if (denom > 1e-6) sum(w[ok] * (x[ok] - wm)^2) / denom else stats::var(as.numeric(x), na.rm = TRUE)
+    max(sqrt(max(wv, 0, na.rm = TRUE)), min_sd, na.rm = TRUE)
+  }
+
+  # Compute species/ecotype-specific circular means and edaphic envelopes (Tier 1 Gold w=3.0 & Tier 2 Silver w=1.5 anchors)
+  is_anchor <- df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & grp_vec %in% active_taxa
   anchor_df <- df[is_anchor, ]
   if (nrow(anchor_df) < 10) anchor_df <- df[grp_vec %in% active_taxa, ]
-  
+
   taxa_profiles <- lapply(active_taxa, function(tx) {
     sub_df <- anchor_df[(if (is_intra) anchor_df$analysis_group else anchor_df$species_standardized) == tx, ]
     if (nrow(sub_df) < 3) sub_df <- df[grp_vec == tx, ]
-    sin_m <- mean(sin(sub_df$pheno_theta), na.rm = TRUE)
-    cos_m <- mean(cos(sub_df$pheno_theta), na.rm = TRUE)
+    w_sub <- sub_df$authority_weight
+    sin_m <- w_mean(sin(sub_df$pheno_theta), w_sub)
+    cos_m <- w_mean(cos(sub_df$pheno_theta), w_sub)
     list(
       mean_theta = atan2(sin_m, cos_m), R_bar = sqrt(sin_m^2 + cos_m^2),
-      ph_mean = mean(sub_df$soil_ph, na.rm = TRUE), ph_sd = max(sd(sub_df$soil_ph, na.rm = TRUE), 0.25, na.rm = TRUE),
-      sand_mean = mean(sub_df$soil_sand, na.rm = TRUE), sand_sd = max(sd(sub_df$soil_sand, na.rm = TRUE), 4.0, na.rm = TRUE),
-      cec_mean = mean(sub_df$soil_cec, na.rm = TRUE), cec_sd = max(sd(sub_df$soil_cec, na.rm = TRUE), 2.0, na.rm = TRUE)
+      ph_mean = w_mean(sub_df$soil_ph, w_sub), ph_sd = w_sd(sub_df$soil_ph, w_sub, 0.25),
+      sand_mean = w_mean(sub_df$soil_sand, w_sub), sand_sd = w_sd(sub_df$soil_sand, w_sub, 4.0),
+      cec_mean = w_mean(sub_df$soil_cec, w_sub), cec_sd = w_sd(sub_df$soil_cec, w_sub, 2.0)
     )
   })
   names(taxa_profiles) <- active_taxa
 
   # Evaluate modal concordance per specimen
   conf_flags <- logical(n); triage_cats <- character(n); concordances <- numeric(n); discord_notes <- character(n)
-  
+
   for (i in seq_len(n)) {
     given_sp <- grp_vec[i]
     morph_sp <- if ("cda_predicted_taxon" %in% names(df) && !is.na(df$cda_predicted_taxon[i])) df$cda_predicted_taxon[i] else given_sp
@@ -1088,6 +1107,7 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
       if (!(vis_sp %in% active_taxa)) vis_sp <- given_sp
     }
     c_err    <- if ("c_error" %in% names(df) && !is.na(df$c_error[i])) df$c_error[i] else 0.0
+    cda_prob <- if ("cda_posterior_prob" %in% names(df) && !is.na(df$cda_posterior_prob[i])) as.numeric(df$cda_posterior_prob[i]) else NA_real_
 
     # Edaphic likelihood score
     edaph_scores <- sapply(active_taxa, function(tx) {
@@ -1100,6 +1120,9 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
     edaph_sp <- if (all(is.na(edaph_scores))) given_sp else active_taxa[which.max(edaph_scores)][1]
     edaph_z_given <- if (given_sp %in% names(taxa_profiles)) abs((df$soil_ph[i] - taxa_profiles[[given_sp]]$ph_mean) / taxa_profiles[[given_sp]]$ph_sd) else 0.0
     if (is.na(edaph_z_given) || !is.finite(edaph_z_given)) edaph_z_given <- 0.0
+    alt_parent <- if (morph_sp != given_sp) morph_sp else if (vis_sp != given_sp) vis_sp else edaph_sp
+    edaph_z_alt <- if (alt_parent %in% names(taxa_profiles)) abs((df$soil_ph[i] - taxa_profiles[[alt_parent]]$ph_mean) / taxa_profiles[[alt_parent]]$ph_sd) else 0.0
+    if (is.na(edaph_z_alt) || !is.finite(edaph_z_alt)) edaph_z_alt <- 0.0
 
     # Phenological circular divergence
     prof_g <- taxa_profiles[[given_sp]]
@@ -1113,7 +1136,7 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
     concordances[i] <- round(concordance, 2)
 
     # Multi-evidence decision triage
-    if (morph_sp != given_sp && vis_sp != given_sp && (edaph_sp == morph_sp || c_err >= 0.85)) {
+    if (morph_sp != given_sp && vis_sp != given_sp && (morph_sp == vis_sp || edaph_sp == morph_sp || c_err >= 0.85)) {
       conf_flags[i] <- TRUE; triage_cats[i] <- "Severe_Triple_Stream_Conflict"
       discord_notes[i] <- sprintf("Given %s contradicted by Morphology (%s), Vision (%s), and Edaphic (%s)",
                                   given_sp, morph_sp, vis_sp, edaph_sp)
@@ -1124,8 +1147,21 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
       conf_flags[i] <- TRUE; triage_cats[i] <- "Phenological_Anomaly_Outlier"
       discord_notes[i] <- sprintf("Flowering DOY %d diverges from seasonal peak (ang_diff=%.2f rad)", doy[i], ang_diff)
     } else if (concordance == 0.50) {
-      conf_flags[i] <- TRUE; triage_cats[i] <- "Putative_Hybrid_Zone_Intergrade"
-      discord_notes[i] <- sprintf("Intermediate morphometrics & edaphic overlap between %s and %s", given_sp, morph_sp)
+      if (morph_sp != given_sp && vis_sp != given_sp && morph_sp == vis_sp) {
+        conf_flags[i] <- TRUE; triage_cats[i] <- "Severe_Triple_Stream_Conflict"
+        discord_notes[i] <- sprintf("Both Morphology and Vision agree on %s over given %s", morph_sp, given_sp)
+      } else if ((morph_sp != vis_sp || (!is.na(cda_prob) && cda_prob >= 0.40 && cda_prob <= 0.65)) &&
+                 (c_err < 0.80) && (edaph_z_given <= 2.5 && edaph_z_alt <= 2.5)) {
+        conf_flags[i] <- TRUE; triage_cats[i] <- "Putative_Hybrid_Zone_Intergrade"
+        discord_notes[i] <- sprintf("Intermediate morphometrics & edaphic overlap between %s and %s", given_sp, alt_parent)
+      } else if ((morph_sp != given_sp && edaph_sp == morph_sp && (is.na(cda_prob) || cda_prob >= 0.55)) ||
+                 (vis_sp != given_sp && c_err >= 0.80)) {
+        conf_flags[i] <- TRUE; triage_cats[i] <- "Severe_Triple_Stream_Conflict"
+        discord_notes[i] <- sprintf("Cross-modal misidentification signal favoring %s over given %s", alt_parent, given_sp)
+      } else {
+        conf_flags[i] <- FALSE; triage_cats[i] <- "Clean_MultiModal_Consensus"
+        discord_notes[i] <- "Concordant across primary morphological, vision, and ecological axes"
+      }
     } else {
       conf_flags[i] <- FALSE; triage_cats[i] <- "Clean_MultiModal_Consensus"
       discord_notes[i] <- "Concordant across morphological, vision, and ecological axes"
@@ -1145,6 +1181,7 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
   })
   return(df)
 }
+evaluate_multimodal_concordance <- execute_crossmodal_consensus
 
 # ------------------------------------------------------------------------------
 # 4. Moran's Eigenvector Maps & Spatial Random Forests (adespatial / ranger / blockCV / spatialRF)
@@ -1190,13 +1227,15 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   X_env <- as.matrix(df[, env_vars])
   X_all <- cbind(X_env, MEMs)
   y <- factor(df$analysis_group)
+  case_wts <- ifelse(df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
+  case_wts[is.na(case_wts)] <- 0.5
 
   if (requireNamespace("ranger", quietly = TRUE)) {
     df_env <- data.frame(y = y, as.data.frame(X_env), check.names = FALSE)
     df_all <- data.frame(y = y, as.data.frame(X_all), check.names = FALSE)
-    rf_nonspatial <- ranger::ranger(y ~ ., data = df_env, num.trees = n_trees, importance = "permutation", probability = FALSE, seed = 42)
+    rf_nonspatial <- ranger::ranger(y ~ ., data = df_env, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = case_wts, seed = 42)
     oob_acc_nonspatial <- 1 - rf_nonspatial$prediction.error
-    rf_spatial <- ranger::ranger(y ~ ., data = df_all, num.trees = n_trees, importance = "permutation", probability = FALSE, seed = 42)
+    rf_spatial <- ranger::ranger(y ~ ., data = df_all, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = case_wts, seed = 42)
     oob_acc_spatial <- 1 - rf_spatial$prediction.error
     imp_vec <- ranger::importance(rf_spatial)
     imp_mat <- cbind(MeanDecreaseAccuracy = imp_vec)
@@ -1227,7 +1266,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
           if (requireNamespace("ranger", quietly = TRUE)) {
             tr_df <- data.frame(y = droplevels(y[tr_idx]), as.data.frame(X_all[tr_idx, , drop = FALSE]), check.names = FALSE)
             te_df <- as.data.frame(X_all[te_idx, , drop = FALSE])
-            fit_cv <- ranger::ranger(y ~ ., data = tr_df, num.trees = max(100, floor(n_trees / 2)), probability = FALSE, seed = 42 + f_id)
+            fit_cv <- ranger::ranger(y ~ ., data = tr_df, num.trees = max(100, floor(n_trees / 2)), probability = FALSE, case.weights = case_wts[tr_idx], seed = 42 + f_id)
             cv_preds[te_idx] <- as.character(stats::predict(fit_cv, data = te_df)$predictions)
           } else {
             fit_cv <- randomForest::randomForest(x = X_all[tr_idx, , drop = FALSE], y = droplevels(y[tr_idx]), ntree = max(100, floor(n_trees / 2)))

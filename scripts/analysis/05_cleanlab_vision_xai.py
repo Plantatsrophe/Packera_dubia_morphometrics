@@ -546,18 +546,28 @@ def compute_out_of_fold_probabilities(
     random_state: int = 42,
     surface_orientations: Optional[np.ndarray | List[str] | pd.Series] = None,
     stratify_by_orientation: bool = False,
+    determiner_tiers: Optional[np.ndarray | List[str] | pd.Series] = None,
 ) -> Tuple[np.ndarray, float, float]:
     """Fits stratified cross-validated Logistic Regression to compute out-of-fold probabilities.
 
     L2-normalizes each 768-d embedding vector before fold-internal StandardScaler and fits
-    balanced LogisticRegression. Supports optional compound stratification by both taxon label
-    and foliar surface orientation. When only 1 class is present (or a class has fewer than
-    `n_splits` samples), falls back to L2-normalized centroid/medoid cosine distance pseudo-probabilities
-    without calling `LogisticRegression.fit()` on a 1-class vector.
+    balanced LogisticRegression weighted by determiner authority tier (Tier_1_Gold=3.0,
+    Tier_2_Silver=1.5, Tier_3_Bronze=0.5). Supports optional compound stratification by both
+    taxon label and foliar surface orientation. When only 1 class is present (or a class has
+    fewer than `n_splits` samples), falls back to L2-normalized centroid/medoid cosine distance
+    pseudo-probabilities without calling `LogisticRegression.fit()` on a 1-class vector.
     """
     X = np.asarray(features, dtype=np.float64)
     X = X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-8)
     labels = np.asarray(labels, dtype=int)
+    tier_weight_map = {"Tier_1_Gold": 3.0, "Tier_2_Silver": 1.5, "Tier_3_Bronze": 0.5}
+    if determiner_tiers is not None:
+        sample_weights = np.array(
+            [tier_weight_map.get(str(t).strip(), 1.0) for t in determiner_tiers],
+            dtype=np.float64,
+        )
+    else:
+        sample_weights = np.ones(len(labels), dtype=np.float64)
 
     unique_labels, label_counts = np.unique(labels, return_counts=True)
     max_lbl_plus_1 = int(np.max(labels)) + 1 if len(labels) > 0 else 2
@@ -621,9 +631,10 @@ def compute_out_of_fold_probabilities(
         X_train = scaler.fit_transform(X[train_idx])
         X_val = scaler.transform(X[val_idx])
         y_train, y_val = labels[train_idx], labels[val_idx]
+        w_train = sample_weights[train_idx]
 
         clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced", random_state=random_state)
-        clf.fit(X_train, y_train)
+        clf.fit(X_train, y_train, sample_weight=w_train)
 
         probs = clf.predict_proba(X_val)
         for i_col, c_idx in enumerate(clf.classes_):
@@ -1378,6 +1389,7 @@ def main() -> None:
         n_splits=n_splits,
         surface_orientations=df.get("surface_orientation", None),
         stratify_by_orientation=args.stratify_by_orientation,
+        determiner_tiers=df.get("determiner_tier", None),
     )
 
     # 4. Execute Confident Learning label noise audit

@@ -131,7 +131,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
 
   for (i in seq_len(n)) {
     given_sp <- df$species_standardized[i]
-    raw_sp   <- df$species_raw[i]
+    raw_sp   <- if ("species_raw" %in% names(df) && !is.na(df$species_raw[i])) as.character(df$species_raw[i]) else as.character(given_sp)
     tier     <- if ("determiner_tier" %in% names(df) && !is.na(df$determiner_tier[i])) as.character(df$determiner_tier[i]) else "Tier_3_Bronze"
     doy      <- if ("doy" %in% names(df) && !is.na(df$doy[i]) && is.finite(df$doy[i])) df$doy[i] else 120
     reg_grp  <- if ("regional_group" %in% names(df) && !is.na(df$regional_group[i])) as.character(df$regional_group[i]) else ""
@@ -191,15 +191,20 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
                             ((vis_is_taxon && vis_sp == "Packera anonyma") || (morph_is_taxon && morph_sp == "Packera anonyma")) &&
                             (ph_val <= 5.5 && sand_val >= 60.0) && (doy >= 130)
 
-    # Case 2: Severe Misidentification (Consensus against given label)
-    is_severe_misid <- is_corrupt || is_mo_flag || triage_cat == "Severe_Triple_Stream_Conflict" ||
-                       (c_err >= 0.85 && vis_is_taxon && vis_sp != given_sp) ||
-                       (morph_is_taxon && morph_sp != given_sp && !is.na(cda_prob) && cda_prob >= 0.75)
+    # Case 2: Severe Misidentification (Evaluated BEFORE Hybrid Swarm; captures cross-modal misidentifications)
+    both_alt_agree <- (!is.null(morph_sp) && !is.null(vis_sp) && morph_sp != given_sp && vis_sp != given_sp && morph_sp == vis_sp)
+    morph_edaph_alt_agree <- (!is.null(morph_sp) && morph_sp != given_sp && edaph_sp == morph_sp && (is.na(cda_prob) || cda_prob >= 0.55))
+    vis_edaph_alt_agree <- (!is.null(vis_sp) && vis_sp != given_sp && edaph_sp == vis_sp && c_err >= 0.70)
+    is_severe_misid <- is_corrupt || is_mo_flag || both_alt_agree || morph_edaph_alt_agree || vis_edaph_alt_agree ||
+                       triage_cat == "Severe_Triple_Stream_Conflict" ||
+                       (c_err >= 0.80 && vis_is_taxon && vis_sp != given_sp) ||
+                       (morph_is_taxon && morph_sp != given_sp && !is.na(cda_prob) && cda_prob >= 0.68)
 
-    # Case 3: Hybrid Swarm / Introgressant (Intermediate morphology & high entropy)
-    is_hybrid_swarm <- triage_cat == "Putative_Hybrid_Zone_Intergrade" ||
-                       (!is.na(cda_prob) && cda_prob >= 0.40 && cda_prob <= 0.65 && morph_is_taxon && morph_sp != given_sp) ||
-                       (gmm_unc >= 0.35)
+    # Case 3: Hybrid Swarm / Introgressant (Strictly gated; never triggers on clear misidentifications or unbacked gmm_unc alone)
+    is_hybrid_swarm <- !is_severe_misid && !both_alt_agree && !is_corrupt && (
+                       (triage_cat == "Putative_Hybrid_Zone_Intergrade" && c_err < 0.80) ||
+                       (!is.na(cda_prob) && cda_prob >= 0.40 && cda_prob <= 0.65 && morph_is_taxon && morph_sp != given_sp && c_err < 0.75) ||
+                       (gmm_unc >= 0.35 && !is.na(cda_prob) && cda_prob >= 0.40 && cda_prob <= 0.65 && c_err < 0.75))
 
     # Case 4: Subspecific / Regional Variety (e.g., P. paupercula var. savannarum)
     is_subspecies <- grepl("savannarum|balsamitae|pseudotomentosa|appalachiana", raw_sp, ignore.case = TRUE) ||
@@ -212,7 +217,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
       triage_acts[i] <- "Annotate_Glabrescent_Ecophenotype"
       rationales[i] <- sprintf("Late-season foliar wear (DOY %d); indumentum shed in sandy acidic habitat (pH=%.2f, Sand=%.1f%%)", doy, ph_val, sand_val)
     } else if (is_severe_misid) {
-      target_sp <- if (morph_is_taxon && morph_sp != given_sp) morph_sp else if (vis_is_taxon && vis_sp != given_sp) vis_sp else edaph_sp
+      target_sp <- if (both_alt_agree && morph_is_taxon) morph_sp else if (morph_is_taxon && morph_sp != given_sp) morph_sp else if (vis_is_taxon && vis_sp != given_sp) vis_sp else edaph_sp
       status_calls[i] <- "Misidentification_Severe"
       rec_taxa[i] <- target_sp
       triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else if (tier == "Tier_2_Silver") "HIGH" else "HIGH"
@@ -240,6 +245,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
     }
   }
 
+  tier_col <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", n)
+  df$authority_weight <- ifelse(tier_col == "Tier_1_Gold", 3.0, ifelse(tier_col == "Tier_2_Silver", 1.5, 0.5))
+  df$authority_weight[is.na(df$authority_weight)] <- 0.5
   df$taxonomic_status_call <- status_calls
   df$recommended_determination <- rec_taxa
   df$synthesis_triage_priority <- triage_prios
@@ -311,6 +319,7 @@ validate_upstream_contracts <- function(vouchers_df = NULL, morpho_df = NULL, vi
 # 3. Merging Evidence Streams & Generating Triage Queue
 # ------------------------------------------------------------------------------
 build_triage_queue <- function(opts) {
+  if (is.data.frame(opts)) return(apply_taxonomic_decision_matrix(opts))
   message("Ingesting and joining evidence streams...")
   if (!file.exists(opts$vouchers)) stop("Missing vouchers: ", opts$vouchers)
   vouchers <- readr::read_csv(opts$vouchers, show_col_types = FALSE)
