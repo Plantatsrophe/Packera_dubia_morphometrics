@@ -250,8 +250,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
   }
 
   tier_col <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", n)
-  df$authority_weight <- ifelse(tier_col == "Tier_1_Gold", 3.0, ifelse(tier_col == "Tier_2_Silver", 1.5, 0.5))
-  df$authority_weight[is.na(df$authority_weight)] <- 0.5
+  df$authority_weight <- ifelse(tier_col == "Tier_1_Gold", 2.0, ifelse(tier_col == "Tier_2_Silver", 1.25, 0.75))
+  df$authority_weight[is.na(df$authority_weight)] <- 0.75
   df$taxonomic_status_call <- status_calls
   df$recommended_determination <- rec_taxa
   df$synthesis_triage_priority <- triage_prios
@@ -279,15 +279,20 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
       treat_broad[i] <- "Misidentification / Cryptic Species"
       treat_sub[i]   <- "Putative_Cryptic_Species"
     } else if (sc == "Misidentification_Severe") {
+      given_sp <- df$species_standardized[i]
       cda_p <- if ("cda_posterior_prob" %in% names(df) && !is.na(df$cda_posterior_prob[i])) df$cda_posterior_prob[i] else NA_real_
       m_sp  <- if ("cda_predicted_taxon" %in% names(df) && !is.na(df$cda_predicted_taxon[i])) df$cda_predicted_taxon[i] else ""
       v_sp  <- if ("vision_predicted_label" %in% names(df) && !is.na(df$vision_predicted_label[i])) df$vision_predicted_label[i] else ""
+      e_sp  <- if ("edaphic_best_fit_taxon" %in% names(df) && !is.na(df$edaphic_best_fit_taxon[i])) as.character(df$edaphic_best_fit_taxon[i]) else ""
+      c_err_i <- if ("c_error" %in% names(df) && !is.na(df$c_error[i])) as.numeric(df$c_error[i]) else 0.0
       g_cl  <- if ("gmm_cluster" %in% names(df) && !is.na(df$gmm_cluster[i])) as.integer(df$gmm_cluster[i]) else 1L
+      g_unc <- if ("gmm_uncertainty" %in% names(df) && !is.na(df$gmm_uncertainty[i])) as.numeric(df$gmm_uncertainty[i]) else 0.05
       ddoy  <- if ("delta_doy" %in% names(df) && !is.na(df$delta_doy[i])) abs(as.numeric(df$delta_doy[i])) else 0.0
       is_mo_out <- if ("morphometric_outlier_flag" %in% names(df) && !is.na(df$morphometric_outlier_flag[i])) isTRUE(df$morphometric_outlier_flag[i]) else FALSE
-      both_agree_known <- (nzchar(m_sp) && nzchar(v_sp) && m_sp == v_sp && m_sp != given_sp)
-      high_conf_known  <- (!is.na(cda_p) && cda_p >= 0.70) || (v_cerr >= 0.85 && nzchar(v_sp) && v_sp != given_sp)
-      is_crypt <- !both_agree_known && !high_conf_known && is_mo_out && ((g_cl > 4L && ddoy >= 14.0) || (ddoy >= 21.0 && (is.na(cda_p) || cda_p < 0.55)))
+      both_agree_known <- (nzchar(m_sp) && nzchar(v_sp) && m_sp == v_sp && m_sp != given_sp) ||
+                          (nzchar(m_sp) && m_sp != given_sp && m_sp == e_sp && !is.na(cda_p) && cda_p >= 0.50)
+      high_conf_known  <- (!is.na(cda_p) && cda_p >= 0.65 && nzchar(m_sp) && m_sp != given_sp) || (c_err_i >= 0.85 && nzchar(v_sp) && v_sp != given_sp && ddoy < 18.0)
+      is_crypt <- !both_agree_known && !high_conf_known && (is_mo_out || c_err_i >= 0.85) && ((g_cl > 4L && ddoy >= 12.0) || ddoy >= 14.0 || g_unc >= 0.25)
       treat_broad[i] <- "Misidentification / Cryptic Species"
       treat_sub[i]   <- if (is_crypt) "Putative_Cryptic_Species" else "Misidentification_Reassign"
     } else {

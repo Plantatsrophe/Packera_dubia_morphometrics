@@ -551,19 +551,20 @@ def compute_out_of_fold_probabilities(
     """Fits stratified cross-validated Logistic Regression to compute out-of-fold probabilities.
 
     L2-normalizes each 768-d embedding vector before fold-internal StandardScaler and fits
-    balanced LogisticRegression weighted by determiner authority tier (Tier_1_Gold=3.0,
-    Tier_2_Silver=1.5, Tier_3_Bronze=0.5). Supports optional compound stratification by both
-    taxon label and foliar surface orientation. When only 1 class is present (or a class has
-    fewer than `n_splits` samples), falls back to L2-normalized centroid/medoid cosine distance
-    pseudo-probabilities without calling `LogisticRegression.fit()` on a 1-class vector.
+    balanced LogisticRegression weighted by determiner authority tier (Tier_1_Gold=2.0,
+    Tier_2_Silver=1.25, Tier_3_Bronze=0.75) normalized to unit mean per fold. Supports optional
+    compound stratification by both taxon label and foliar surface orientation. When only 1 class
+    is present (or a class has fewer than `n_splits` samples), falls back to L2-normalized
+    centroid/medoid cosine distance pseudo-probabilities without calling `LogisticRegression.fit()`
+    on a 1-class vector.
     """
     X = np.asarray(features, dtype=np.float64)
     X = X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-8)
     labels = np.asarray(labels, dtype=int)
-    tier_weight_map = {"Tier_1_Gold": 3.0, "Tier_2_Silver": 1.5, "Tier_3_Bronze": 0.5}
+    tier_weight_map = {"Tier_1_Gold": 2.0, "Tier_2_Silver": 1.25, "Tier_3_Bronze": 0.75}
     if determiner_tiers is not None:
         sample_weights = np.array(
-            [tier_weight_map.get(str(t).strip(), 1.0) for t in determiner_tiers],
+            [tier_weight_map.get(str(t).strip(), 0.75) for t in determiner_tiers],
             dtype=np.float64,
         )
     else:
@@ -632,8 +633,9 @@ def compute_out_of_fold_probabilities(
         X_val = scaler.transform(X[val_idx])
         y_train, y_val = labels[train_idx], labels[val_idx]
         w_train = sample_weights[train_idx]
+        w_train = w_train / max(float(np.mean(w_train)), 1e-8)
 
-        clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced", random_state=random_state)
+        clf = LogisticRegression(max_iter=2000, C=0.25, class_weight="balanced", random_state=random_state)
         clf.fit(X_train, y_train, sample_weight=w_train)
 
         probs = clf.predict_proba(X_val)
@@ -712,6 +714,9 @@ def run_confident_learning_audit(
     audit_df["confidence_predicted_class"] = np.round(conf_pred, 4)
     audit_df["label_quality_score"] = np.round(quality_scores, 4)
     audit_df["c_error"] = np.round(c_error, 4)
+    if "determiner_tier" in audit_df.columns:
+        tier_map = {"Tier_1_Gold": 2.0, "Tier_2_Silver": 1.25, "Tier_3_Bronze": 0.75}
+        audit_df["authority_weight"] = [tier_map.get(str(t).strip(), 0.75) for t in audit_df["determiner_tier"]]
 
     is_issue = np.zeros(num_records, dtype=bool)
     is_issue[issues] = True

@@ -102,6 +102,12 @@ thresholds:
       - "Packera paupercula var. paupercula"
       - "Packera paupercula var. savannarum"
 
+  # Determiner authority-tier weight schedule (calibrated 2.7:1 ratio, Kish DEFF = 1.073)
+  authority_weights:
+    tier_1_gold: 2.0
+    tier_2_silver: 1.25
+    tier_3_bronze: 0.75
+
   # Visual capitulum phenological biomarker classification
   capitulum_phenology:
     min_pappus_luminance: 75
@@ -128,6 +134,8 @@ segmentation:
   score_thresh: 0.35
   min_ucs: 0.85
   min_solidity: 0.72
+  max_petiole_width_ratio: 0.105
+  cordate_guard_width_ratio: 0.165
   device: "cuda"
 
 # Phase 3: Elliptic Fourier Analysis & Statistical Morphometrics (Momocs / MorphoTools2)

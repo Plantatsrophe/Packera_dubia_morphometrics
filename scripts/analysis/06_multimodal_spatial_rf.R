@@ -1056,8 +1056,8 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
   doy <- ifelse(is.na(df$doy) | df$doy < 1 | df$doy > 366, 120, df$doy)
   theta <- 2 * pi * doy / 365.25
   df$pheno_theta <- theta
-  df$authority_weight <- ifelse(df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
-  df$authority_weight[is.na(df$authority_weight)] <- 0.5
+  df$authority_weight <- ifelse(df$determiner_tier == "Tier_1_Gold", 2.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.25, 0.75))
+  df$authority_weight[is.na(df$authority_weight)] <- 0.75
 
   w_mean <- function(x, w) {
     if (is.null(x) || length(x) == 0) return(NA_real_)
@@ -1075,10 +1075,15 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
     max(sqrt(max(wv, 0, na.rm = TRUE)), min_sd, na.rm = TRUE)
   }
 
-  # Compute species/ecotype-specific circular means and edaphic envelopes (Tier 1 Gold w=3.0 & Tier 2 Silver w=1.5 anchors)
+  # Compute species/ecotype-specific circular means and eco-edaphic envelopes (Tier 1 Gold w=2.0 & Tier 2 Silver w=1.25 anchors)
   is_anchor <- df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & grp_vec %in% active_taxa
   anchor_df <- df[is_anchor, ]
   if (nrow(anchor_df) < 10) anchor_df <- df[grp_vec %in% active_taxa, ]
+
+  cand_eco <- intersect(c("soil_ph", "soil_sand", "soil_cec", "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "delta_doy"), names(df))
+  eco_cols <- cand_eco[sapply(cand_eco, function(cl) sum(is.finite(as.numeric(df[[cl]]))) >= 5 && stats::sd(as.numeric(df[[cl]]), na.rm = TRUE) > 1e-6)]
+  if (length(eco_cols) == 0) eco_cols <- intersect(c("soil_ph", "soil_sand", "soil_cec"), names(df))
+  min_sd_map <- c(soil_ph = 0.25, soil_sand = 4.0, soil_cec = 2.0, bio1_temp_mean = 1.0, bio4_temp_seasonality = 25.0, bio12_precip_annual = 50.0, delta_doy = 5.0)
 
   taxa_profiles <- lapply(active_taxa, function(tx) {
     sub_df <- anchor_df[(if (is_intra) anchor_df$analysis_group else anchor_df$species_standardized) == tx, ]
@@ -1086,17 +1091,25 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
     w_sub <- sub_df$authority_weight
     sin_m <- w_mean(sin(sub_df$pheno_theta), w_sub)
     cos_m <- w_mean(cos(sub_df$pheno_theta), w_sub)
+    eco_m <- sapply(eco_cols, function(cl) w_mean(as.numeric(sub_df[[cl]]), w_sub))
+    eco_s <- sapply(eco_cols, function(cl) w_sd(as.numeric(sub_df[[cl]]), w_sub, ifelse(cl %in% names(min_sd_map), min_sd_map[[cl]], 0.25)))
     list(
       mean_theta = atan2(sin_m, cos_m), R_bar = sqrt(sin_m^2 + cos_m^2),
       ph_mean = w_mean(sub_df$soil_ph, w_sub), ph_sd = w_sd(sub_df$soil_ph, w_sub, 0.25),
       sand_mean = w_mean(sub_df$soil_sand, w_sub), sand_sd = w_sd(sub_df$soil_sand, w_sub, 4.0),
-      cec_mean = w_mean(sub_df$soil_cec, w_sub), cec_sd = w_sd(sub_df$soil_cec, w_sub, 2.0)
+      cec_mean = w_mean(sub_df$soil_cec, w_sub), cec_sd = w_sd(sub_df$soil_cec, w_sub, 2.0),
+      eco_mean = eco_m, eco_sd = eco_s
     )
   })
   names(taxa_profiles) <- active_taxa
+  for (cl in eco_cols) {
+    bar_sd <- mean(sapply(taxa_profiles, function(p) p$eco_sd[[cl]]), na.rm = TRUE)
+    for (tx in active_taxa) taxa_profiles[[tx]]$eco_sd[[cl]] <- 0.5 * taxa_profiles[[tx]]$eco_sd[[cl]] + 0.5 * bar_sd
+  }
 
   # Evaluate modal concordance per specimen
   conf_flags <- logical(n); triage_cats <- character(n); concordances <- numeric(n); discord_notes <- character(n)
+  edaph_best_vec <- character(n)
 
   for (i in seq_len(n)) {
     given_sp <- grp_vec[i]
@@ -1109,15 +1122,18 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
     c_err    <- if ("c_error" %in% names(df) && !is.na(df$c_error[i])) df$c_error[i] else 0.0
     cda_prob <- if ("cda_posterior_prob" %in% names(df) && !is.na(df$cda_posterior_prob[i])) as.numeric(df$cda_posterior_prob[i]) else NA_real_
 
-    # Edaphic likelihood score
+    # Regularized Eco-Edaphic Gaussian log-likelihood score
     edaph_scores <- sapply(active_taxa, function(tx) {
       prof <- taxa_profiles[[tx]]
-      z_ph   <- (df$soil_ph[i] - prof$ph_mean) / prof$ph_sd
-      z_sand <- (df$soil_sand[i] - prof$sand_mean) / prof$sand_sd
-      z_cec  <- (df$soil_cec[i] - prof$cec_mean) / prof$cec_sd
-      -(z_ph^2 + z_sand^2 + z_cec^2) / 2
+      ll <- 0.0
+      for (cl in eco_cols) {
+        xv <- as.numeric(df[[cl]][i]); mv <- prof$eco_mean[[cl]]; sv <- prof$eco_sd[[cl]]
+        if (is.finite(xv) && is.finite(mv) && is.finite(sv) && sv > 0) ll <- ll - 0.5 * (((xv - mv) / sv)^2 + 2.0 * log(sv))
+      }
+      ll
     })
     edaph_sp <- if (all(is.na(edaph_scores))) given_sp else active_taxa[which.max(edaph_scores)][1]
+    edaph_best_vec[i] <- edaph_sp
     edaph_z_given <- if (given_sp %in% names(taxa_profiles)) abs((df$soil_ph[i] - taxa_profiles[[given_sp]]$ph_mean) / taxa_profiles[[given_sp]]$ph_sd) else 0.0
     if (is.na(edaph_z_given) || !is.finite(edaph_z_given)) edaph_z_given <- 0.0
     alt_parent <- if (morph_sp != given_sp) morph_sp else if (vis_sp != given_sp) vis_sp else edaph_sp
@@ -1172,13 +1188,7 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
   df$multimodal_conflict_flag <- conf_flags
   df$triage_category <- triage_cats
   df$conflict_discordance_notes <- discord_notes
-  df$edaphic_best_fit_taxon <- sapply(seq_len(n), function(i) {
-    scores <- sapply(active_taxa, function(tx) {
-      p <- taxa_profiles[[tx]]
-      -((df$soil_ph[i] - p$ph_mean)^2 / p$ph_sd^2 + (df$soil_sand[i] - p$sand_mean)^2 / p$sand_sd^2)
-    })
-    if (all(is.na(scores))) grp_vec[i] else active_taxa[which.max(scores)][1]
-  })
+  df$edaphic_best_fit_taxon <- edaph_best_vec
   return(df)
 }
 evaluate_multimodal_concordance <- execute_crossmodal_consensus
@@ -1227,8 +1237,9 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   X_env <- as.matrix(df[, env_vars])
   X_all <- cbind(X_env, MEMs)
   y <- factor(df$analysis_group)
-  case_wts <- ifelse(df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
-  case_wts[is.na(case_wts)] <- 0.5
+  case_wts <- ifelse(df$determiner_tier == "Tier_1_Gold", 2.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.25, 0.75))
+  case_wts[is.na(case_wts)] <- 0.75
+  case_wts <- case_wts / max(mean(case_wts, na.rm = TRUE), 1e-8)
 
   if (requireNamespace("ranger", quietly = TRUE)) {
     df_env <- data.frame(y = y, as.data.frame(X_env), check.names = FALSE)
@@ -1247,7 +1258,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     imp_mat <- randomForest::importance(rf_spatial, type = 1)
   }
 
-  # Spatially Blocked 5-Fold Cross-Validation via blockCV::cv_spatial
+  # Spatially Blocked 5-Fold Cross-Validation via blockCV::cv_spatial (evaluated on environmental predictors X_env)
   spatial_block_cv_acc <- NA_real_
   if (requireNamespace("blockCV", quietly = TRUE) && requireNamespace("sf", quietly = TRUE)) {
     spatial_block_cv_acc <- tryCatch({
@@ -1264,17 +1275,18 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
         te_idx <- which(fold_ids == f_id)
         if (length(tr_idx) >= 5 && length(te_idx) >= 1 && length(unique(y[tr_idx])) >= 2) {
           if (requireNamespace("ranger", quietly = TRUE)) {
-            tr_df <- data.frame(y = droplevels(y[tr_idx]), as.data.frame(X_all[tr_idx, , drop = FALSE]), check.names = FALSE)
-            te_df <- as.data.frame(X_all[te_idx, , drop = FALSE])
+            tr_df <- data.frame(y = droplevels(y[tr_idx]), as.data.frame(X_env[tr_idx, , drop = FALSE]), check.names = FALSE)
+            te_df <- as.data.frame(X_env[te_idx, , drop = FALSE])
             fit_cv <- ranger::ranger(y ~ ., data = tr_df, num.trees = max(100, floor(n_trees / 2)), probability = FALSE, case.weights = case_wts[tr_idx], seed = 42 + f_id)
             cv_preds[te_idx] <- as.character(stats::predict(fit_cv, data = te_df)$predictions)
           } else {
-            fit_cv <- randomForest::randomForest(x = X_all[tr_idx, , drop = FALSE], y = droplevels(y[tr_idx]), ntree = max(100, floor(n_trees / 2)))
-            cv_preds[te_idx] <- as.character(stats::predict(fit_cv, newdata = X_all[te_idx, , drop = FALSE]))
+            fit_cv <- randomForest::randomForest(x = X_env[tr_idx, , drop = FALSE], y = droplevels(y[tr_idx]), ntree = max(100, floor(n_trees / 2)))
+            cv_preds[te_idx] <- as.character(stats::predict(fit_cv, newdata = X_env[te_idx, , drop = FALSE]))
           }
         }
       }
-      mean(cv_preds == as.character(y), na.rm = TRUE)
+      ok_cv <- !is.na(cv_preds) & !is.na(y)
+      if (any(ok_cv)) sum(case_wts[ok_cv] * (cv_preds[ok_cv] == as.character(y[ok_cv]))) / sum(case_wts[ok_cv]) else NA_real_
     }, error = function(e) NA_real_)
   }
   if (is.na(spatial_block_cv_acc) || !is.finite(spatial_block_cv_acc)) {
@@ -1400,14 +1412,18 @@ run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100, intraspe
         z1 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp1, R = 100)
         z2 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp2, R = 100)
         ov <- ecospat::ecospat.niche.overlap(z1, z2, cor = TRUE)
-        eq <- suppressMessages(suppressWarnings(ecospat::ecospat.niche.equivalency.test(z1, z2, rep = n_perm, ncores = 1)))
+        eq <- tryCatch(
+          suppressMessages(suppressWarnings(ecospat::ecospat.niche.equivalency.test(z1, z2, rep = n_perm, overlap.alternative = "lower", ncores = 1))),
+          error = function(e) suppressMessages(suppressWarnings(ecospat::ecospat.niche.equivalency.test(z1, z2, rep = n_perm, ncores = 1)))
+        )
+        d_sim <- as.numeric(eq$sim$D); i_sim <- as.numeric(eq$sim$I)
         list(
           D_emp = as.numeric(ov$D),
           I_emp = as.numeric(ov$I),
-          p_val_D = as.numeric(eq$p.D),
-          p_val_I = as.numeric(eq$p.I),
-          D_null = as.numeric(eq$sim$D),
-          I_null = as.numeric(eq$sim$I)
+          p_val_D = (sum(d_sim <= as.numeric(ov$D), na.rm = TRUE) + 1) / (length(d_sim) + 1),
+          p_val_I = (sum(i_sim <= as.numeric(ov$I), na.rm = TRUE) + 1) / (length(i_sim) + 1),
+          D_null = d_sim,
+          I_null = i_sim
         )
       }, error = function(e) NULL)
       if (!is.null(eco_fit) && is.finite(eco_fit$D_emp) && is.finite(eco_fit$I_emp)) {

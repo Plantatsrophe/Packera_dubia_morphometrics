@@ -759,8 +759,19 @@ def is_botanical_dissection(
     farthest_indices = def_arr[:, 2].astype(np.int32)
 
     # Filter significant defects exceeding depth threshold
+    is_native_scan = (
+        (contour.ndim == 2 and max(contour.shape[:2]) > 500)
+        or cnt_f[:, 0].max() > 500
+        or cnt_f[:, 1].max() > 500
+        or major_l > 350.0
+    )
     sig_mask = depths >= min_defect_depth
-    if np.sum(sig_mask) < min_defect_count:
+    eff_min_defect_count = (
+        min(min_defect_count, 2)
+        if (is_native_scan and solidity >= 0.52 and np.any(sig_mask) and float(np.max(depths[sig_mask])) >= 0.11 * blade_width)
+        else min_defect_count
+    )
+    if np.sum(sig_mask) < eff_min_defect_count:
         return False
 
     sig_farthest_pts = cnt[farthest_indices[sig_mask]]
@@ -790,8 +801,8 @@ def is_botanical_dissection(
     side_b_count = int(np.sum(cross_vals < -tol))
     total_sig = side_a_count + side_b_count
 
-    # Botanical dissection: >= min_defect_count defects distributed on both sides (side_a >= 1 and side_b >= 1)
-    is_dissected = (total_sig >= min_defect_count) and (side_a_count >= 1) and (side_b_count >= 1)
+    # Botanical dissection: >= eff_min_defect_count defects distributed on both sides (side_a >= 1 and side_b >= 1)
+    is_dissected = (total_sig >= eff_min_defect_count) and (side_a_count >= 1) and (side_b_count >= 1)
     return bool(is_dissected)
 
 
@@ -942,7 +953,7 @@ def trim_petiole_tail(
     if blade_width_est > 250.0 and min(orig_h, orig_w) > 500:
         if max_petiole_width == 16.0:
             max_petiole_width = max(16.0, 0.105 * blade_width_est)
-        cordate_guard_w = max(float(max_petiole_width) * 1.18, 19.0)
+        cordate_guard_w = max(float(max_petiole_width) * 1.18, 22.0, 0.165 * blade_width_est)
     else:
         cordate_guard_w = max(float(max_petiole_width), 19.0)
 
@@ -1696,7 +1707,7 @@ def classify_and_route_leaf(
     ref_shape = sheet_shape if sheet_shape is not None else mask.shape[:2]
     is_high_res_mask = max(ref_shape) > 500
     allow_dissection = True
-    if is_high_res_mask and (ucs < 0.70 or solidity < max(dissection_min_solidity, 0.58)):
+    if is_high_res_mask and (ucs < 0.70 or solidity < max(dissection_min_solidity, 0.52)):
         allow_dissection = False
 
     if dissection_enabled and (dissection_min_solidity <= solidity < min_solidity) and allow_dissection:
