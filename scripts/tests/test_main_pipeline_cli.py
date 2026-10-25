@@ -470,6 +470,107 @@ class TestMainPipelineCLI(unittest.TestCase):
             self.assertEqual(args.subcommand, "download-weights")
             self.assertTrue(args.force)
 
+    def test_run_pipeline_sh_gold_only_and_determiner_tier_filtering(self):
+        """Verify run_pipeline.sh --gold-only and --determiner-tier filter curated_vouchers.csv, Step 02 manifests, and cropped_patches strictly to Tier_1_Gold before Steps 02-07."""
+        import subprocess
+        import pandas as pd
+
+        sh_path = PROJECT_ROOT / "run_pipeline.sh"
+        sh_src = sh_path.read_text(encoding="utf-8")
+        self.assertIn("--gold-only)", sh_src)
+        self.assertIn("--determiner-tier)", sh_src)
+        self.assertIn("--determiner-tier=*)", sh_src)
+        # Verify preflight filter runs before Step 02 segmentation
+        preflight_pos = sh_src.index("\nrun_preflight_subset_filter\n")
+        step02_pos = sh_src.index("02_segment_and_extract.py")
+        self.assertLess(preflight_pos, step02_pos)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            root_data = tmp_path / "root_data"
+            run_dir = tmp_path / "runs" / "test_gold_only"
+            tables_dir = run_dir / "data" / "tables"
+            tables_dir.mkdir(parents=True, exist_ok=True)
+
+            for sub in ("rosettes_dense", "basal_leaves_raw", "capitula"):
+                pdir = root_data / "cropped_patches" / sub
+                pdir.mkdir(parents=True, exist_ok=True)
+
+            vouchers_df = pd.DataFrame({
+                "catalogNumber": ["NCU001", "UNCC_49308", "US002", "NY003"],
+                "scientificName": ["Packera dubia", "Packera anonyma", "Packera paupercula", "Packera plattensis"],
+                "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze"],
+                "authority_weight": [3.0, 3.0, 1.5, 0.5],
+            })
+            vouchers_df.to_csv(tables_dir / "curated_vouchers.csv", index=False)
+
+            for tbl_name in (
+                "extracted_leaf_manifest.csv",
+                "extracted_leaves_manifest.csv",
+                "failed_qc_vouchers.csv",
+                "voucher_reproductive_metrics.csv",
+                "voucher_phenological_states.csv",
+            ):
+                pd.DataFrame({
+                    "catalogNumber": ["NCU001", "UNCC_49308", "US002", "NY003"],
+                    "plant_individual_id": [0, 0, 0, 0],
+                }).to_csv(tables_dir / tbl_name, index=False)
+
+            # Create cropped patches for Gold, Silver, and Bronze vouchers (including underscored catalogNumber)
+            (root_data / "cropped_patches" / "rosettes_dense" / "NCU001_p0_rosette.jpg").write_bytes(b"jpg")
+            (root_data / "cropped_patches" / "rosettes_dense" / "UNCC_49308_p0_rosette.jpg").write_bytes(b"jpg")
+            (root_data / "cropped_patches" / "rosettes_dense" / "US002_p0_rosette.jpg").write_bytes(b"jpg")
+            (root_data / "cropped_patches" / "basal_leaves_raw" / "NCU001_leaf1.jpg").write_bytes(b"jpg")
+            (root_data / "cropped_patches" / "basal_leaves_raw" / "UNCC_49308_leaf2.jpg").write_bytes(b"jpg")
+            (root_data / "cropped_patches" / "basal_leaves_raw" / "NY003_leaf1.jpg").write_bytes(b"jpg")
+            (root_data / "cropped_patches" / "capitula" / "NCU001_cap1.jpg").write_bytes(b"jpg")
+            (root_data / "cropped_patches" / "capitula" / "US002_cap1.jpg").write_bytes(b"jpg")
+
+            # Extract the run_preflight_subset_filter function from run_pipeline.sh and run it
+            fn_start = sh_src.index("run_preflight_subset_filter() {")
+            fn_end = sh_src.index("\nrun_preflight_subset_filter\n", fn_start)
+            fn_body = sh_src[fn_start:fn_end]
+
+            test_bash = f"""
+set -euo pipefail
+PROJECT_ROOT="{PROJECT_ROOT}"
+RUN_DIR="{run_dir}"
+PYTHON_MAIN="{sys.executable}"
+FOCAL_TAXON=""
+EXCLUDE_TAXON_CSV=""
+INTRASPECIFIC_MODE="false"
+GOLD_ANCHORS=30
+GOLD_ONLY=true
+DETERMINER_TIER="Tier_1_Gold"
+REUSE_CANONICAL_DATA="true"
+{fn_body}
+"""
+            test_bash = test_bash.replace('"${PROJECT_ROOT}/data"', f'"{root_data}"')
+            test_bash += "\nrun_preflight_subset_filter\n"
+            res = subprocess.run(["bash", "-c", test_bash], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=True)
+            self.assertIn("Tier_1_Gold", res.stdout)
+
+            out_vouchers = pd.read_csv(tables_dir / "curated_vouchers.csv")
+            self.assertEqual(set(out_vouchers["determiner_tier"].unique()), {"Tier_1_Gold"})
+            self.assertEqual(set(out_vouchers["catalogNumber"]), {"NCU001", "UNCC_49308"})
+
+            for tbl_name in (
+                "extracted_leaf_manifest.csv",
+                "extracted_leaves_manifest.csv",
+                "failed_qc_vouchers.csv",
+                "voucher_reproductive_metrics.csv",
+                "voucher_phenological_states.csv",
+            ):
+                tdf = pd.read_csv(tables_dir / tbl_name)
+                self.assertEqual(set(tdf["catalogNumber"]), {"NCU001", "UNCC_49308"}, f"Failed filter on {tbl_name}")
+
+            ros_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "rosettes_dense").iterdir()}
+            leaf_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "basal_leaves_raw").iterdir()}
+            cap_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "capitula").iterdir()}
+            self.assertEqual(ros_files, {"NCU001_p0_rosette.jpg", "UNCC_49308_p0_rosette.jpg"})
+            self.assertEqual(leaf_files, {"NCU001_leaf1.jpg", "UNCC_49308_leaf2.jpg"})
+            self.assertEqual(cap_files, {"NCU001_cap1.jpg"})
+
 
 if __name__ == "__main__":
     unittest.main()

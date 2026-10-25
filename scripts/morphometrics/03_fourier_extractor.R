@@ -676,14 +676,15 @@ run_fourier_extraction <- function(opts) {
     tier_manifest$scientificName <- as.factor(tier_manifest$scientificName)
     tier_manifest$determiner_tier <- as.factor(tier_manifest$determiner_tier)
     tier_manifest$reconstruction_tier <- as.factor(tier_manifest$reconstruction_tier)
+    act_terms <- c("scientificName", "determiner_tier", "reconstruction_tier")[c(nlevels(tier_manifest$scientificName), nlevels(tier_manifest$determiner_tier), nlevels(tier_manifest$reconstruction_tier)) >= 2L]
     set.seed(opts$seed); permanova_df <- NULL
 
-    if (requireNamespace("RRPP", quietly = TRUE)) {
+    if (length(act_terms) >= 1L && requireNamespace("RRPP", quietly = TRUE)) {
       message(sprintf("Executing RRPP::lm.rrpp (iter = %d, seed = %d)...", opts$permutations, opts$seed))
       rrpp_res <- tryCatch({
         rdf <- RRPP::rrpp.data.frame(tier_sym = as.matrix(tier_sym), scientificName = tier_manifest$scientificName,
                                      determiner_tier = tier_manifest$determiner_tier, reconstruction_tier = tier_manifest$reconstruction_tier)
-        fit_rrpp <- RRPP::lm.rrpp(tier_sym ~ scientificName + determiner_tier + reconstruction_tier, data = rdf, iter = opts$permutations, print.progress = FALSE)
+        fit_rrpp <- RRPP::lm.rrpp(stats::as.formula(paste("tier_sym ~", paste(act_terms, collapse = " + "))), data = rdf, iter = opts$permutations, print.progress = FALSE)
         anova(fit_rrpp)$table
       }, error = function(e) { warning("RRPP::lm.rrpp encountered an issue: ", e$message, ". Falling back to vegan::adonis2()."); NULL })
       if (!is.null(rrpp_res)) {
@@ -694,20 +695,16 @@ run_fourier_extraction <- function(opts) {
       }
     }
 
-    if (is.null(permanova_df) && requireNamespace("vegan", quietly = TRUE)) {
+    if (is.null(permanova_df) && length(act_terms) >= 1L && requireNamespace("vegan", quietly = TRUE)) {
       message(sprintf("Executing vegan::adonis2 (permutations = %d, seed = %d)...", opts$permutations, opts$seed))
       ad_res <- tryCatch({
         ad_idx <- if (nrow(tier_manifest) > 2000L) sort(sample(seq_len(nrow(tier_manifest)), 2000L)) else seq_len(nrow(tier_manifest))
-        vegan::adonis2(tier_sym[ad_idx, , drop = FALSE] ~ scientificName + determiner_tier + reconstruction_tier,
+        tier_sym_sub <- tier_sym[ad_idx, , drop = FALSE]
+        vegan::adonis2(stats::as.formula(paste("tier_sym_sub ~", paste(act_terms, collapse = " + "))),
                        data = tier_manifest[ad_idx, , drop = FALSE], permutations = opts$permutations, method = "euclidean", by = "terms")
-      }, error = function(e) {
-        warning("vegan::adonis2 encountered an issue: ", e$message, ". Falling back to stats::manova().")
-        NULL
-      })
+      }, error = function(e) { warning("vegan::adonis2 encountered an issue: ", e$message, ". Falling back to stats::manova()."); NULL })
       if (!is.null(ad_res)) {
-        permanova_df <- as.data.frame(ad_res)
-        permanova_df$Term <- rownames(permanova_df)
-        rownames(permanova_df) <- NULL
+        permanova_df <- as.data.frame(ad_res); permanova_df$Term <- rownames(permanova_df); rownames(permanova_df) <- NULL
         if ("F.Model" %in% names(permanova_df)) permanova_df$F <- permanova_df$F.Model
         if ("Pr(>F)" %in% names(permanova_df)) permanova_df$p_value <- permanova_df[["Pr(>F)"]]
       }
@@ -718,17 +715,19 @@ run_fourier_extraction <- function(opts) {
       message("vegan package not available; executing defensive fallback using analytical sequential SS decomposition...")
       Y <- as.matrix(tier_sym); Y_cent <- scale(Y, center = TRUE, scale = FALSE)
       SS_tot <- sum(Y_cent^2); N_obs <- nrow(tier_manifest)
-      fit1 <- stats::lm(Y_cent ~ scientificName, data = tier_manifest)
+      fit0 <- stats::lm(Y_cent ~ 1, data = tier_manifest)
+      fit1 <- if ("scientificName" %in% act_terms) stats::lm(Y_cent ~ scientificName, data = tier_manifest) else fit0
       SS_sp <- sum(stats::fitted(fit1)^2); df_sp <- fit1$rank - 1
-      fit2 <- stats::lm(Y_cent ~ scientificName + determiner_tier, data = tier_manifest)
+      t12 <- intersect(c("scientificName", "determiner_tier"), act_terms)
+      fit2 <- if ("determiner_tier" %in% act_terms) stats::lm(stats::as.formula(paste("Y_cent ~", paste(t12, collapse = " + "))), data = tier_manifest) else fit1
       SS_12 <- sum(stats::fitted(fit2)^2); SS_det <- SS_12 - SS_sp; df_det <- fit2$rank - fit1$rank
-      fit3 <- stats::lm(Y_cent ~ scientificName + determiner_tier + reconstruction_tier, data = tier_manifest)
+      fit3 <- if ("reconstruction_tier" %in% act_terms) stats::lm(stats::as.formula(paste("Y_cent ~", paste(act_terms, collapse = " + "))), data = tier_manifest) else fit2
       SS_123 <- sum(stats::fitted(fit3)^2); SS_tier <- SS_123 - SS_12; df_tier <- fit3$rank - fit2$rank
       SS_res <- SS_tot - SS_123; df_res <- N_obs - fit3$rank; MS_res <- SS_res / max(df_res, 1)
-      F_sp <- (SS_sp / max(df_sp, 1)) / MS_res; F_det <- (SS_det / max(df_det, 1)) / MS_res; F_tier <- (SS_tier / max(df_tier, 1)) / MS_res
-      p_sp <- stats::pf(F_sp, df_sp, df_res, lower.tail = FALSE)
-      p_det <- stats::pf(F_det, df_det, df_res, lower.tail = FALSE)
-      p_tier <- stats::pf(F_tier, df_tier, df_res, lower.tail = FALSE)
+      F_sp <- if (df_sp > 0) (SS_sp / df_sp) / MS_res else NA_real_; F_det <- if (df_det > 0) (SS_det / df_det) / MS_res else NA_real_; F_tier <- if (df_tier > 0) (SS_tier / df_tier) / MS_res else NA_real_
+      p_sp <- if (df_sp > 0) stats::pf(F_sp, df_sp, df_res, lower.tail = FALSE) else NA_real_
+      p_det <- if (df_det > 0) stats::pf(F_det, df_det, df_res, lower.tail = FALSE) else NA_real_
+      p_tier <- if (df_tier > 0) stats::pf(F_tier, df_tier, df_res, lower.tail = FALSE) else NA_real_
       permanova_df <- data.frame(
         Term = c("scientificName", "determiner_tier", "reconstruction_tier", "Residual", "Total"),
         Df = c(df_sp, df_det, df_tier, df_res, N_obs - 1),
@@ -745,6 +744,7 @@ run_fourier_extraction <- function(opts) {
     if ("Total" %in% permanova_df$Term) permanova_df$R2[permanova_df$Term == "Total"] <- 1.0
     report_cols <- intersect(c("Term", "Df", "SumOfSqs", "R2", "F", "p_value"), names(permanova_df))
     permanova_df <- permanova_df[, report_cols, drop = FALSE]
+    if (!"determiner_tier" %in% permanova_df$Term && nrow(permanova_df) >= 2L) permanova_df <- rbind(permanova_df[1, , drop = FALSE], data.frame(Term = "determiner_tier", Df = 0, SumOfSqs = 0, R2 = 0, F = NA_real_, p_value = NA_real_, stringsAsFactors = FALSE)[, report_cols, drop = FALSE], permanova_df[-1, , drop = FALSE])
 
     dir.create(dirname(opts$report_out), recursive = TRUE, showWarnings = FALSE)
     tmp_rep <- paste0(opts$report_out, ".tmp")

@@ -30,6 +30,8 @@ FOCAL_TAXON=""
 EXCLUDE_TAXA_RAW=()
 INTRASPECIFIC_MODE="false"
 GOLD_ANCHORS=30
+GOLD_ONLY=false
+DETERMINER_TIER=""
 LIMIT_ARG=()
 SAM2_FLAG=()
 DEMO_FLAG=()
@@ -106,6 +108,19 @@ while [[ $# -gt 0 ]]; do
       ;;
     --gold-anchors=*)
       GOLD_ANCHORS="${1#*=}"
+      shift
+      ;;
+    --gold-only)
+      GOLD_ONLY=true
+      DETERMINER_TIER="Tier_1_Gold"
+      shift
+      ;;
+    --determiner-tier)
+      DETERMINER_TIER="$2"
+      shift 2
+      ;;
+    --determiner-tier=*)
+      DETERMINER_TIER="${1#*=}"
       shift
       ;;
     *)
@@ -234,7 +249,7 @@ if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
       "${HARVEST_TAXON_ARGS[@]}" \
       --download-images \
       ${FORCE_FLAG}
-    if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
+    if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
       mkdir -p "${PROJECT_ROOT}/data/tables"
       cp -f "${RUN_DIR}/data/tables/curated_vouchers.csv" "${PROJECT_ROOT}/data/tables/curated_vouchers.csv.tmp"
       mv -f "${PROJECT_ROOT}/data/tables/curated_vouchers.csv.tmp" "${PROJECT_ROOT}/data/tables/curated_vouchers.csv"
@@ -255,62 +270,17 @@ if [[ ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Step 02: PointRend Segmentation, Geometric Gatekeeper & 2-Tier Leaf Extraction
+# Preflight Taxon & Determiner-Tier Subset Filter & Cropped Patch Symlinking
+# (--focal-taxon / --exclude-taxon / --gold-only / --determiner-tier)
+# Executed BEFORE running Steps 02-07
 # ------------------------------------------------------------------------------
-if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
-  echo "[Step 02/07] Running Segmentation & Organ Extraction..."
-  "${PYTHON_LM2}" scripts/pipeline/02_segment_and_extract.py \
-    --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
-    --output-dir "${RUN_DIR}/data" \
-    ${FORCE_FLAG} \
-    "${LIMIT_ARG[@]}" \
-    "${SAM2_FLAG[@]}"
-
-  # Sync newly extracted masks, contours, cropped patches, and Step 02 manifests back to canonical root data/
-  echo "[Step 02/07] Syncing newly extracted Step 02 assets back to canonical root data/ store..."
-  mkdir -p \
-    "${PROJECT_ROOT}/data/masks/tier1_intact" \
-    "${PROJECT_ROOT}/data/masks/tier2_reflected" \
-    "${PROJECT_ROOT}/data/contours" \
-    "${PROJECT_ROOT}/data/cropped_patches/basal_leaves_raw" \
-    "${PROJECT_ROOT}/data/cropped_patches/capitula" \
-    "${PROJECT_ROOT}/data/cropped_patches/rosettes_dense" \
-    "${PROJECT_ROOT}/data/tables"
-  cp -alf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/" 2>/dev/null || cp -rf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/"
-  cp -alf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/" 2>/dev/null || cp -rf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/"
-  cp -alf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/" 2>/dev/null || cp -rf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/"
-  if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
+run_preflight_subset_filter() {
+  if [[ -n "${FOCAL_TAXON}" || -n "${EXCLUDE_TAXON_CSV}" || -n "${DETERMINER_TIER}" || "${GOLD_ONLY}" == "true" ]]; then
+    echo "[Preflight] Filtering ${RUN_DIR}/data/tables/ and linking cropped_patches for focal='${FOCAL_TAXON}' exclude='${EXCLUDE_TAXON_CSV}' determiner_tier='${DETERMINER_TIER}' (intraspecific_mode=${INTRASPECIFIC_MODE}, gold_anchors=${GOLD_ANCHORS})..."
     "${PYTHON_MAIN}" -c "
-import os
-from pathlib import Path
-run_tables = Path('${RUN_DIR}/data/tables')
-root_tables = Path('${PROJECT_ROOT}/data/tables')
-for tbl in ('extracted_leaf_manifest.csv', 'extracted_leaves_manifest.csv', 'failed_qc_vouchers.csv', 'voucher_reproductive_metrics.csv', 'voucher_phenological_states.csv'):
-    src = run_tables / tbl
-    if not src.exists():
-        continue
-    dst = root_tables / tbl
-    txt = src.read_text(encoding='utf-8')
-    if 'manifest' in tbl:
-        txt = txt.replace('/${RUN_DIR}/data/', '/data/')
-    tmp = dst.with_suffix(dst.suffix + '.tmp')
-    with open(tmp, 'w', encoding='utf-8', newline='') as f:
-        f.write(txt)
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(dst)
-"
-  fi
-fi
-
-# ------------------------------------------------------------------------------
-# Preflight Taxon Subset Filter & Cropped Patch Symlinking (--focal-taxon / --exclude-taxon)
-# ------------------------------------------------------------------------------
-if [[ -n "${FOCAL_TAXON}" || -n "${EXCLUDE_TAXON_CSV}" ]]; then
-  echo "[Preflight] Filtering ${RUN_DIR}/data/tables/ and linking cropped_patches for focal='${FOCAL_TAXON}' exclude='${EXCLUDE_TAXON_CSV}' (intraspecific_mode=${INTRASPECIFIC_MODE}, gold_anchors=${GOLD_ANCHORS})..."
-  "${PYTHON_MAIN}" -c "
 import importlib
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -322,9 +292,17 @@ focal_raw = sys.argv[3].strip()
 exclude_csv = sys.argv[4].strip()
 intraspecific_mode = sys.argv[5].lower() == 'true'
 gold_anchors = int(sys.argv[6])
+determiner_tier_raw = sys.argv[7].strip()
 
 mod05 = importlib.import_module('scripts.analysis.05_cleanlab_vision_xai')
 standardize_packera_taxon = mod05.standardize_packera_taxon
+
+tier_map = {
+    'tier_1_gold': 'Tier_1_Gold', 'gold': 'Tier_1_Gold', 'tier_1': 'Tier_1_Gold', 'tier1': 'Tier_1_Gold', '1': 'Tier_1_Gold',
+    'tier_2_silver': 'Tier_2_Silver', 'silver': 'Tier_2_Silver', 'tier_2': 'Tier_2_Silver', 'tier2': 'Tier_2_Silver', '2': 'Tier_2_Silver',
+    'tier_3_bronze': 'Tier_3_Bronze', 'bronze': 'Tier_3_Bronze', 'tier_3': 'Tier_3_Bronze', 'tier3': 'Tier_3_Bronze', '3': 'Tier_3_Bronze',
+}
+target_tier = tier_map.get(determiner_tier_raw.lower(), determiner_tier_raw) if determiner_tier_raw else ''
 
 exclude_taxa = set()
 if exclude_csv:
@@ -338,6 +316,11 @@ csv_path = tables_dir / 'curated_vouchers.csv'
 df = pd.read_csv(csv_path)
 sp_col = 'species_raw' if 'species_raw' in df.columns else ('scientificName' if 'scientificName' in df.columns else 'species')
 df['species_standardized'] = df[sp_col].apply(standardize_packera_taxon)
+
+if target_tier and 'determiner_tier' in df.columns:
+    before_tier_n = len(df)
+    df = df[df['determiner_tier'].astype(str).str.strip() == target_tier].copy()
+    print(f'[Preflight: Determiner Tier] Filtered strictly to determiner_tier == {target_tier!r}: retained {len(df)} / {before_tier_n} vouchers.')
 
 if exclude_taxa:
     before_n = len(df)
@@ -381,6 +364,9 @@ if focal_raw:
 else:
     subset_df = df
 
+if target_tier and 'determiner_tier' in subset_df.columns:
+    subset_df = subset_df[subset_df['determiner_tier'].astype(str).str.strip() == target_tier].copy()
+
 def _write_atomic(df_obj, target_path):
     tmp_p = target_path.with_suffix(target_path.suffix + '.tmp')
     with open(tmp_p, 'w', encoding='utf-8', newline='') as f:
@@ -422,18 +408,73 @@ for sub in ('rosettes_dense', 'basal_leaves_raw', 'capitula'):
     with os.scandir(src_sub) as it:
         for entry in it:
             if entry.name.endswith('.jpg'):
-                cat = entry.name.split('_')[0]
+                stem_cat = re.sub(r'_(?:p\d+_rosette|rosette|leaf\d+|cap\d+)\.jpg$', '', entry.name)
+                cat = stem_cat if stem_cat in keep_cats else entry.name.split('_')[0]
                 if cat in keep_cats:
                     os.symlink(entry.path, dst_sub / entry.name)
                     linked += 1
     print(f'  Linked {linked} patches in cropped_patches/{sub}')
-" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON}" "${EXCLUDE_TAXON_CSV}" "${INTRASPECIFIC_MODE}" "${GOLD_ANCHORS}"
-elif [[ "${REUSE_CANONICAL_DATA}" == "true" ]]; then
-  mkdir -p "${RUN_DIR}/data/cropped_patches"
-  for sub in rosettes_dense basal_leaves_raw capitula; do
-    rm -rf "${RUN_DIR}/data/cropped_patches/${sub}"
-    ln -sfn "${PROJECT_ROOT}/data/cropped_patches/${sub}" "${RUN_DIR}/data/cropped_patches/${sub}"
-  done
+" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON}" "${EXCLUDE_TAXON_CSV}" "${INTRASPECIFIC_MODE}" "${GOLD_ANCHORS}" "${DETERMINER_TIER}"
+  elif [[ "${REUSE_CANONICAL_DATA}" == "true" ]]; then
+    mkdir -p "${RUN_DIR}/data/cropped_patches"
+    for sub in rosettes_dense basal_leaves_raw capitula; do
+      rm -rf "${RUN_DIR}/data/cropped_patches/${sub}"
+      ln -sfn "${PROJECT_ROOT}/data/cropped_patches/${sub}" "${RUN_DIR}/data/cropped_patches/${sub}"
+    done
+  fi
+}
+
+run_preflight_subset_filter
+
+# ------------------------------------------------------------------------------
+# Step 02: PointRend Segmentation, Geometric Gatekeeper & 2-Tier Leaf Extraction
+# ------------------------------------------------------------------------------
+if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
+  echo "[Step 02/07] Running Segmentation & Organ Extraction..."
+  find "${RUN_DIR}/data/cropped_patches" -type l -delete 2>/dev/null || true
+  "${PYTHON_LM2}" scripts/pipeline/02_segment_and_extract.py \
+    --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
+    --output-dir "${RUN_DIR}/data" \
+    ${FORCE_FLAG} \
+    "${LIMIT_ARG[@]}" \
+    "${SAM2_FLAG[@]}"
+
+  # Sync newly extracted masks, contours, cropped patches, and Step 02 manifests back to canonical root data/
+  echo "[Step 02/07] Syncing newly extracted Step 02 assets back to canonical root data/ store..."
+  mkdir -p \
+    "${PROJECT_ROOT}/data/masks/tier1_intact" \
+    "${PROJECT_ROOT}/data/masks/tier2_reflected" \
+    "${PROJECT_ROOT}/data/contours" \
+    "${PROJECT_ROOT}/data/cropped_patches/basal_leaves_raw" \
+    "${PROJECT_ROOT}/data/cropped_patches/capitula" \
+    "${PROJECT_ROOT}/data/cropped_patches/rosettes_dense" \
+    "${PROJECT_ROOT}/data/tables"
+  cp -alf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/" 2>/dev/null || cp -rf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/"
+  cp -alf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/" 2>/dev/null || cp -rf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/"
+  cp -alf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/" 2>/dev/null || cp -rf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/"
+  if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
+    "${PYTHON_MAIN}" -c "
+import os
+from pathlib import Path
+run_tables = Path('${RUN_DIR}/data/tables')
+root_tables = Path('${PROJECT_ROOT}/data/tables')
+for tbl in ('extracted_leaf_manifest.csv', 'extracted_leaves_manifest.csv', 'failed_qc_vouchers.csv', 'voucher_reproductive_metrics.csv', 'voucher_phenological_states.csv'):
+    src = run_tables / tbl
+    if not src.exists():
+        continue
+    dst = root_tables / tbl
+    txt = src.read_text(encoding='utf-8')
+    if 'manifest' in tbl:
+        txt = txt.replace('/${RUN_DIR}/data/', '/data/')
+    tmp = dst.with_suffix(dst.suffix + '.tmp')
+    with open(tmp, 'w', encoding='utf-8', newline='') as f:
+        f.write(txt)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(dst)
+"
+  fi
+  run_preflight_subset_filter
 fi
 
 # ------------------------------------------------------------------------------

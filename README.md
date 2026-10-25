@@ -14,9 +14,9 @@ Developed as part of doctoral research at the **University of North Carolina at 
 - **Reproductive Macro-Morphology:** Capitulum aspect ratios, phyllary series counts, and ray/disc floret dimensions.
 - **Cytotaxonomic Cytotypes:** Known chromosome numbers and ploidy races ($2n = 44, 46, 88$; Kowal 1975).
 - **Reduced-Representation Phylogenomics:** High-throughput nextRAD single nucleotide polymorphism (SNP) datasets resolving reticulate evolution and lineage boundaries.
-- **Micro-Edaphic Validation:** Regional 250m SoilGrids pedological rasters complemented by fine-scale 1:24,000 USDA NRCS SSURGO vector map units resolving localized rock outcrop endemics.
+- **Fine-Grain (10 m – 30 m) Soil, Bedrock & Outcrop Validation:** A persistent 10 m – 30 m edaphic and rock-outcrop stack (`data/environmental/fine_grain_edaphic_cache.csv`) combining 50 m-buffered 1:24,000 USDA-NRCS SSURGO vector map units (`ssurgo_rock_outcrop_pct`, `ssurgo_bedrock_depth_cm`, `ssurgo_aws_0_50cm`), 30 m POLARIS probabilistic soil grids (`polaris_30m/`), 100 m SOLUS100 bedrock depth and coarse rock fragment volume (`solus_100m/`: `resdept`, `fragvol`), 10 m – 30 m USGS 3DEP micro-topography (`topo_tpi_30m`, `topo_roughness_30m`, `topo_slope_deg`, `topo_twi_30m`), and 250 m SoilGrids gap-free fallback resolving localized rock outcrop endemics.
 
-The computational infrastructure couples two-stage automated organ detection via **LeafMachine2 (LM2)** (Stage 1 full-sheet YOLOv5 `LeafPriority.pt` + 38-class Ruler Detector, followed by Stage 2 native-DPI cropped Detectron2 PointRend `leaf_seg_rcnn_v2_1` and automated prompt-guided **SAM 2** boundary refinement), deterministic label-blind geometric gatekeeping, bilateral symmetry reconstruction, polarity-preserving Elliptic Fourier Analysis (EFA), self-supervised deep vision (DINOv2 ViT-B/14 with patch-token saliency attribution), and confident learning (`cleanlab`) with a formal **Multi-Tiered Herbarium Misidentification Mitigation Architecture**.
+The computational infrastructure couples two-stage automated organ detection via **LeafMachine2 (LM2)** (Stage 1 full-sheet YOLOv5 `LeafPriority.pt` + 38-class Ruler Detector, followed by Stage 2 native-DPI cropped Detectron2 PointRend `leaf_seg_rcnn_v2_1` and automated prompt-guided **SAM 2** boundary refinement), deterministic label-blind geometric gatekeeping and strengthened cauline/stem rejection (`is_cauline_or_stem_contaminant`), bilateral symmetry reconstruction with **Tier-1 Pure Priority** (`morph_tier_source = "Tier_1_Pure"`), polarity-preserving Elliptic Fourier Analysis (EFA), background-masked `Tier_1_Direct` basal-leaf deep vision (DINOv2 ViT-B/14 with patch-token saliency attribution), and confident learning (`cleanlab`) with a formal **Multi-Tiered Herbarium Misidentification Mitigation Architecture**.
 
 - **Principal Investigator:** J. Brandon Fuller (PhD Candidate, Department of Biology, UNC-CH)  
 - **Faculty Advisor:** Dr. Alan S. Weakley (Director, NCU Herbarium; UNC Biology)  
@@ -33,10 +33,10 @@ The pipeline decouples the **model training / assisted-annotation track** from t
    - Uses **Segment Anything Model 2 (SAM 2)** (`annotate_with_sam2.py`, with optional `--prelabel-with-lm2` automated pre-labeling) to interactively annotate ground-truth basal leaf masks (`basal_leaf_whole`, `basal_leaf_partial`) on a representative set of 50–100 challenging *Packera* vouchers (dense rosettes, overlapping blades, arachnoid tomentum).  
    - Exports native-DPI 12%-padded single-leaf crops (`data/annotations/lm2_leaf_crops/`) and standardized COCO JSON annotations (`data/annotations/packera_train_coco.json`) to fine-tune LeafMachine2's Stage 2 Detectron2 PointRend Leaf Segmenter (`leaf_seg_rcnn_v2_1`), producing domain-adapted weights (`models/lm2_packera_pointrend_finetuned.pth`, aliased to `models/lm2_packera_pcd_finetuned.pth`).  
 2. **Production Pipeline & Taxonomic Synthesis (Inference Track B):**  
-   - Orchestrated end-to-end via the run-scoped shell runner (`./run_pipeline.sh`) or unified Python CLI (`main.py`), isolating all generated artifacts inside `runs/<RUN_ID>/` (with automatic `runs/latest` symlink and `outputs/reports/run_metadata.json` provenance logging) while sharing read-only caches (`data/raw_vouchers/`, `data/environmental/`). Supports both multi-taxon complex-wide execution and **Dual-Strategy Single-Taxon CLI modes** (`--focal-taxon "<TAXON>" --gold-anchors 30` Strategy 1 vs. `--focal-taxon "<TAXON>" --intraspecific-mode` Strategy 2).  
+   - Orchestrated end-to-end via the run-scoped shell runner (`./run_pipeline.sh`) or unified Python CLI (`main.py`) under a **Canonical Two-Tier Storage Architecture**: **Tier A (`data/` at repository root)** houses all invariant Step 01 and Step 02 specimen, environmental (`fine_grain_edaphic_cache.csv`), and organ extraction assets (`raw_vouchers/`, `masks/{tier1_intact,tier2_reflected}/`, `contours/`, `cropped_patches/{rosettes_dense,basal_leaves_raw,capitula}/`, and the 5 Step 01–02 CSV manifests in `data/tables/`), while **Tier B (`runs/<RUN_ID>/` with `runs/latest` symlink)** automatically seeds and symlinks Step 01–02 inputs directly from canonical root `data/` without referencing previous `runs/` directories and isolates all Step 03–07 statistical tables, reports, logs, and figures inside `runs/<RUN_ID>/`. Supports complex-wide execution, dynamic taxon exclusion (`--exclude-taxon "<TAXON>"`), and **Dual-Strategy Single-Taxon CLI modes** (`--focal-taxon "<TAXON>" --gold-anchors 30` Strategy 1 vs. `--focal-taxon "<TAXON>" --intraspecific-mode` Strategy 2).  
    - **Stage 1 (Full-Sheet Detection):** Stock LeafMachine2 YOLOv5 `LeafPriority.pt` (11-class organ detector) processing both `Class 0` (`leaf_whole`) and `Class 1` (`leaf_partial`) candidate boxes to capture rosette-attached basal blades on native-DPI scans, with high-DPI upper cauline pre-filtering (`cy < 0.40 * sheet_h`) and fragment rejection (`max(bh, bw) < int(200 * scale_f)`), paired with the 38-class Ruler Detector (`scripts/vision/lm2_data_loader.py`) for physical millimeter scale calibration (`pixels_per_mm`, `is_calibrated_mm`).  
-   - **Stage 2 (Cropped Leaf Segmentation & Refinement):** Native-DPI 12%-padded single-leaf crops segmented via fine-tuned Detectron2 PointRend (`leaf_seg_rcnn_v2_1`) + optional automated prompt-guided SAM 2 boundary refinement (`--sam2-refine`), DBSCAN multi-plant spatial clustering (`plant_individual_id`), spatial rosette centroid wiring (`rosette_centroids_by_pid` passed via `rosette_centroid` into `classify_and_route_leaf()` and `compute_geometric_metrics()`), post-gatekeeper basal-leaf filtering (`cy_rel >= 0.42`, min area floors, boxy clump rejection, sheet area floor `>= 0.28 * max_sheet_area`, top-6 cap per voucher ranked by $Q = \text{solidity} \cdot \text{ucs} \cdot \sqrt{\text{area}}$ with disk cleanup), resolution-adaptive cross-sectional width profiling (`w_span = max(min(max(h, w), 350), int(0.65 * max(h, w)))`), resolution-scaled petiole junction trimming (`trim_petiole_tail` with `max_petiole_width = max(16.0, 0.105 * blade_width_est)` and `cordate_guard_w = max(..., 0.135 * blade_width_est)` when `blade_width_est > 250.0 and min(h, w) > 500`), rosette centroid polarity disambiguation (`_disambiguate_base_apex_endpoints` with `eff_max_petiole_w` when `axis_len > 450.0`), anatomical base homologization (`petiole_attachment_pt=p_base` in all `resample_normalized_contour()` calls across Tier 1, folded, and Tier 2 reflected leaves), midrib symmetry reflection, and Tier 4 contextual cropping (`data/cropped_patches/rosettes_dense/`, `basal_leaves_raw/`, `capitula/`).  
-   - **Downstream Morphometrics & Synthesis:** Propagates the canonical determiner authority weighting hierarchy (`authority_weight`: `Tier_1_Gold = 3.0`, `Tier_2_Silver = 1.5`, `Tier_3_Bronze = 0.5`) across Steps 03–06: 12-harmonic polarity-preserving EFA in R (`Momocs`) with prior voucher metadata merge and weighted covariance eigendecomposition (`stats::cov.wt(..., wt = tier_wt * leaf_quality_weight)`) for both continuous bilateral-symmetric (`Sym_PC1`–`Sym_PC5` via `Momocs::rm_asym(ef)`) and primary (`PC1`–`PC5`) axes; within-plant quality-weighted medoid aggregation to `(catalogNumber, plant_individual_id)`; authority-weighted pooled within-species allometry (`stats::lm(..., weights = authority_weight)`); `clustvarsel` and `mclust::Mclust` fitting on `Tier_1_Gold` + `Tier_2_Silver` anchors (`!mahal_outliers`) with parsimonious covariance restriction (`EII, VII, EEI, VEI, EVI, VVI` when $N/P < 5$) and passive projection of `Tier_3_Bronze` via `predict(gmm_fit, newdata = X_pcs)`; passive CDA trained on `Tier_1_Gold` ($w = 3.0$) and `Tier_2_Silver` ($w = 1.5$) with per-taxon 95% $\chi^2$ Mahalanobis outlier trimming (`qchisq(0.95, df = p)`), uniform class priors (`rep(1/g, g)`), honest Leave-One-Out Cross-Validation (`loocv_accuracy`), and posterior margin export (`cda_predicted_taxon`, `cda_posterior_prob`, `cda_second_posterior_prob`, `cda_posterior_margin`); L2 cosine-normalized 768-d DINOv2 ViT embeddings with fold-internal `StandardScaler`, authority weights (`3.0 / 1.5 / 0.5`) + `class_weight="balanced"` in `LogisticRegression`, and `tomentum_taxon_discordance` auditing; authority-weighted circular phenology & edaphic envelopes, centered Hopkins' Bioclimatic Law baseline (`pred_at_min_lat + 4.0 * (decimalLatitude - min_lat)`), multithreaded `ranger::ranger(..., case.weights = case_wts)` under $0.5^\circ \times 0.5^\circ$ `spatial_block_cv_acc`, non-georeferenced voucher coalescing in Step 07 achieving 98.4% voucher completion (`5,117 / 5,201`), and strict Pure Misidentification (`Misidentification_Reassign`) vs. Hybrid Swarm (`Hybrid_Intergrade_Swarm`) vs. Putative Cryptic Species (`Putative_Cryptic_Species`) disambiguation (`07_triage_dashboard_synthesis.R`).
+   - **Stage 2 (Cropped Leaf Segmentation, Cauline Rejection & Refinement):** Native-DPI 12%-padded single-leaf crops segmented via fine-tuned Detectron2 PointRend (`leaf_seg_rcnn_v2_1`) + optional automated prompt-guided SAM 2 boundary refinement (`--sam2-refine`), DBSCAN multi-plant spatial clustering (`plant_individual_id`), spatial rosette centroid wiring (`rosette_centroids_by_pid` passed via `rosette_centroid` into `classify_and_route_leaf()` and `compute_geometric_metrics()`), post-gatekeeper basal-leaf filtering (`cy_rel >= 0.42`, min area floors, boxy clump rejection, sheet area floor `>= 0.28 * max_sheet_area`, top-6 cap per voucher ranked by $Q = \text{solidity} \cdot \text{ucs} \cdot \sqrt{\text{area}}$ with disk cleanup), strengthened basal-vs.-cauline anatomical filtering (`is_cauline_or_stem_contaminant()` rejecting upper-stem sessile/clasping cauline bracts with `aspect_ratio > 3.8` and `solidity < 0.78`, or displaced `> 2.2 * med_rosette_radius` above the basal rosette zone even when `capitula_count == 0`), resolution-adaptive cross-sectional width profiling (`w_span = max(min(max(h, w), 350), int(0.65 * max(h, w)))`), resolution-scaled petiole junction trimming (`trim_petiole_tail` with `max_petiole_width = max(16.0, 0.105 * blade_width_est)` and `cordate_guard_w = max(..., 0.135 * blade_width_est)` when `blade_width_est > 250.0 and min(h, w) > 500`), rosette centroid polarity disambiguation (`_disambiguate_base_apex_endpoints` with `eff_max_petiole_w` when `axis_len > 450.0`), anatomical base homologization (`petiole_attachment_pt=p_base` in all `resample_normalized_contour()` calls across Tier 1, folded, and Tier 2 reflected leaves), midrib symmetry reflection, and organ patch cropping (`data/cropped_patches/basal_leaves_raw/`, `capitula/`, `rosettes_dense/`).  
+   - **Downstream Morphometrics, Vision XAI, 10m–30m Edaphic ENM & Synthesis:** Propagates the canonical determiner authority weighting hierarchy (`authority_weight`: `Tier_1_Gold = 3.0`, `Tier_2_Silver = 1.5`, `Tier_3_Bronze = 0.5`) across Steps 03–06: 12-harmonic polarity-preserving EFA in R (`Momocs`) with weighted covariance eigendecomposition (`stats::cov.wt(..., wt = tier_wt * leaf_quality_weight)`) fitted **strictly on intact `Tier_1_Direct` contours** and **Tier-1 Pure Priority aggregation** (`n_tier1_leaves >= 1` $\rightarrow$ 100% `Tier_1_Direct` leaves, `morph_tier_source = "Tier_1_Pure"`; `Tier_2_Reflected` used only when `n_tier1_leaves == 0`, `morph_tier_source = "Tier_2_Fallback"`); pooled within-species allometry (`stats::lm(..., weights = authority_weight)`), `clustvarsel`/`mclust::Mclust` GMM fitting, and supervised CDA training anchors restricted strictly to **`Tier_1_Pure` vouchers (`n_tier1_leaves >= 1`)** with passive `predict()` projection for `Tier_2_Fallback` and `Tier_3_Bronze`, exporting 3D canonical axes (`can1`, `can2`, `can3`) and taxon-controlled institutional batch-effect auditing (`audit_institutional_batch_effects`); background-masked `Tier_1_Direct` basal-leaf vision XAI (`05_cleanlab_vision_xai.py` dilating `masks/tier1_intact/` by 5 px via `apply_tier1_leaf_mask_to_rgb` to replace exterior stems, bracts, and labels with `[242, 239, 230]` neutral herbarium paper RGB, never loading whole-clump `rosettes_dense/` when `extracted_leaf_manifest.csv` is present); 10 m – 30 m fine-grain soil, bedrock, and rock-outcrop ENM stack (`data/environmental/fine_grain_edaphic_cache.csv` combining 50 m-buffered USDA-NRCS SSURGO, 30 m POLARIS, 100 m SOLUS100, and 10 m – 30 m USGS 3DEP micro-topography with 250 m SoilGrids fallback) in `ranger::ranger(..., case.weights = case_wts)` under $0.5^\circ \times 0.5^\circ$ `spatial_block_cv_acc`; and Step 07 non-georeferenced voucher coalescing (`98.4%` completion) with strict multi-modal disambiguation (`both_alt_agree` evaluated BEFORE `Hybrid_Intergrade_Swarm`; `Putative_Cryptic_Species` requiring `morph_tier_source == "Tier_1_Pure"`).
 
 ```mermaid
 flowchart TD
@@ -47,20 +47,19 @@ flowchart TD
         A4 --> A5[("Domain-Adapted PointRend Weights:\nmodels/lm2_packera_pcd_finetuned.pth")]
     end
 
-    subgraph TrackB["Track B: Unified Production Pipeline (main.py)"]
-        B1["Phase 1: Ingestion\n(python main.py harvest)"] --> B2["GBIF/iDigBio Ingestion & Determiner Authority Tiers\n(Gold Specialists | Silver Herbaria | Bronze Unverified)"]
+    subgraph TrackB["Track B: Unified Production Pipeline (run_pipeline.sh / main.py)"]
+        B1["Phase 1: Ingestion\n(python main.py harvest)"] --> B2["GBIF/iDigBio Ingestion & Determiner Authority Tiers\n(Gold=3.0 | Silver=1.5 | Bronze=0.5)"]
         B2 --> B3["Phase 2 Stage 1: Full-Sheet Detection\n(Stock LM2 YOLOv5 LeafPriority.pt + 38-Class Ruler Detector)"]
-        B3 --> B3b["Phase 2 Stage 2: 12%-Padded Leaf Crops -> PointRend + SAM 2 Refinement\n(02_segment_and_extract.py --sam2-refine · DBSCAN plant_individual_id)"]
+        B3 --> B3b["Phase 2 Stage 2: 12%-Padded Leaf Crops -> PointRend + SAM 2 Refinement\n(02_segment_and_extract.py · Cauline Filter is_cauline_or_stem_contaminant)"]
         A5 -.-> B3b
         B3b --> B4{"Label-Blind Geometric Routing"}
-        B4 -->|"Tier 1 (Pristine / Dissected: UCS >= 0.85)"| B5["Base-to-Apex Homologized Closed Silhouettes"]
-        B4 -->|"Tier 2 (Hemi-Blade / Folded)"| B6["Midrib Bilateral Reflection"]
-        B6 --> B5
-        B4 -->|"Tier 4 / Reproductive"| B7["Contextual Patch Crops\n(rosettes_dense/ · basal_leaves_raw/ · capitula/)"]
-        B5 --> B8["Phase 3: Polarity-Preserving 12-Harmonic EFA\n(03_fourier_extractor.R · efourier norm=FALSE, start=FALSE)"]
-        B8 --> B9["Phase 4: Within-Species Allometry, GMM & Passive CDA\n(04_gmm_morphotools.R · Grouped by catalogNumber, plant_individual_id)"]
-        B7 --> B10["Phase 5: DINOv2 ViT Patch-Token XAI & Cleanlab Audit\n(05_cleanlab_vision_xai.py)"]
-        B9 & B10 --> B11["Phase 6 & 7: Spatial RF (SoilGrids/SSURGO/WorldClim) & Triage Synthesis\n(06_multimodal_spatial_rf.R · 07_triage_dashboard_synthesis.R)"]
+        B4 -->|"Tier 1 (Tier_1_Direct: Pristine / Dissected)"| B5["100% Priority Closed Silhouettes & 5px-Dilated Masked Basal Crops"]
+        B4 -->|"Tier 2 (Tier_2_Reflected: Hemi-Blade)"| B6["Midrib Bilateral Reflection (Passive Fallback Only When n_tier1 == 0)"]
+        B6 --> B8
+        B5 --> B8["Phase 3: Tier-1 Pure Priority 12-Harmonic EFA\n(03_fourier_extractor.R · cov.wt PCA on Tier_1_Direct · 3D PC1..PC3)"]
+        B8 --> B9["Phase 4: Tier_1_Pure Allometry, GMM & 3D Passive CDA (Can1..Can3)\n(04_gmm_morphotools.R · Taxon-Controlled Institutional Batch Audit)"]
+        B5 --> B10["Phase 5: Masked Tier_1_Direct Basal-Leaf DINOv2 XAI & Cleanlab\n(05_cleanlab_vision_xai.py · [242,239,230] Paper Masking)"]
+        B9 & B10 --> B11["Phase 6 & 7: 10m-30m Spatial RF (SSURGO/POLARIS/SOLUS100/3DEP)\n& Triage Synthesis (06_multimodal_spatial_rf.R · 07_triage_dashboard_synthesis.R)"]
     end
 ```
 
@@ -72,39 +71,41 @@ flowchart TD
 Packera_dubia_morphometrics/
 ├── config/
 │   └── config.yaml                    # Central paths, taxon synonyms & model hyperparameters
-├── main.py                            # Unified CLI runner (check-env, harvest, segment, morphometrics, synthesis, run-all)
+├── run_pipeline.sh                    # Run-scoped orchestrator CLI (--run-id, --start-step, --exclude-taxon, --focal-taxon)
+├── main.py                            # Unified Python CLI runner (check-env, harvest, segment, morphometrics, synthesis, run-all)
 ├── LeafMachine2/                      # Immutable LeafMachine2 engine submodule
 │   ├── LeafMachine2.py
 │   └── leafmachine2/
 ├── models/
 │   ├── lm2_packera_pointrend_finetuned.pth # Fine-tuned Stage 2 PointRend Leaf Segmenter weights
 │   └── lm2_packera_pcd_finetuned.pth  # Backward-compatible PointRend weights alias
-├── data/
+├── data/                              # Tier A: Canonical Shared Store (Invariant Step 01–02 & Environmental Assets)
 │   ├── raw_vouchers/                  # High-resolution specimen sheet imagery (.jpg)
 │   ├── raw_annotations/               # SAM 2 polygon text files & instance PNG masks
 │   ├── annotations/
 │   │   ├── lm2_leaf_crops/            # Native-DPI 12%-padded single-leaf training crops
 │   │   └── packera_train_coco.json    # Standardized Stage 2 cropped COCO JSON dataset
-│   ├── masks/                         # Binary leaf silhouette masks (tier1_pristine/, tier2_reflected/)
-│   ├── contours/                      # Homologized 2D coordinate contours (.csv)
-│   ├── cropped_patches/               # Tier 4 & organ RGB crops for DINOv2 & phenology
-│   │   ├── rosettes_dense/            # DBSCAN per-individual dense rosette crops
-│   │   ├── basal_leaves_raw/          # Cropped basal leaf RGB patches
-│   │   └── capitula/                  # Cropped reproductive head patches
-│   ├── environmental/                 # SoilGrids 250m, WorldClim 2.1 rasters & SSURGO cache
-│   └── tables/
+│   ├── masks/                         # Canonical binary leaf silhouettes (tier1_intact/, tier2_reflected/)
+│   ├── contours/                      # Canonical homologized 2D coordinate contours (.csv)
+│   ├── cropped_patches/               # Canonical organ RGB crops for DINOv2 & phenology
+│   │   ├── basal_leaves_raw/          # Cropped Tier_1_Direct basal leaf RGB patches (masked in Step 05)
+│   │   ├── capitula/                  # Cropped reproductive head patches
+│   │   └── rosettes_dense/            # DBSCAN per-individual dense rosette fallback crops
+│   ├── environmental/                 # 10m–30m Fine-Grain Edaphic Stack & Regional Rasters
+│   │   ├── fine_grain_edaphic_cache.csv # Persistent 10m–30m SSURGO + POLARIS + SOLUS100 + 3DEP cache
+│   │   ├── polaris_30m/               # 30 m POLARIS probabilistic soil rasters (ph, sand, clay, om, bd, ksat)
+│   │   ├── solus_100m/                # 100 m SOLUS100 rasters (resdept bedrock depth, fragvol rock fragments)
+│   │   ├── dem_3dep_30m/              # 10 m – 30 m USGS 3DEP DEM tiles (TPI, roughness, slope, TWI)
+│   │   └── ssurgo_cache/              # 50 m-buffered USDA-NRCS SSURGO SDA query cache
+│   └── tables/                        # Canonical Step 01–02 CSV manifests (seeded into runs/<RUN_ID>/)
 │       ├── curated_vouchers.csv       # Harvested vouchers with Determiner Authority Tiers
 │       ├── extracted_leaf_manifest.csv# Stage 2 leaf routing, DBSCAN plant_individual_id & ruler calibration
+│       ├── failed_qc_vouchers.csv     # Vouchers rejected by Stage 2 basal/cauline quality gatekeeper
 │       ├── voucher_reproductive_metrics.csv # Capitulum counts & involucre dimensions (px & mm)
-│       ├── voucher_phenological_states.csv  # 3-tier optical capitulum phenology classifications
-│       ├── fourier_pcs.csv            # Specimen-level symmetric PCs (Sym_PC1..5), roughness & quality weights
-│       ├── leaf_efa_harmonics.csv     # Specimen-level (catalogNumber, plant_individual_id) EFA medians
-│       ├── leaf_efa_harmonics_individual.csv # Individual leaf-level EFA harmonics & calibrated CS_mm
-│       ├── morphometric_flags.csv     # CDA predictions, GMM cluster assignments & outlier flags
-│       ├── label_noise_audit.csv      # DINOv2 + Cleanlab confident learning audit & tomentum discordance
-│       ├── multimodal_conflict_flags.csv # Cross-modal ecological & morphological concordance flags
-│       ├── ssurgo_edaphic_validation.csv # 1:24,000 USDA NRCS SSURGO lithic & outcrop validation
-│       └── triage_queue.csv           # Final ranked expert verification queue
+│       └── voucher_phenological_states.csv  # 3-tier optical capitulum phenology classifications
+├── runs/                              # Tier B: Run-Scoped Analysis Directories (Steps 03–07)
+│   ├── latest -> run_<YYYYMMDD_HHMMSS># Symlink to most recent run directory
+│   └── <RUN_ID>/                      # Self-contained run directory (data/tables/, outputs/figures/, outputs/reports/, logs/)
 ├── scripts/
 │   ├── core/                          # Consolidated shared utilities
 │   │   ├── harvester.py               # Combined API queries, DwC parsing & media downloads
@@ -126,14 +127,16 @@ Packera_dubia_morphometrics/
 │   │   ├── lm2_data_loader.py         # Stage 1 YOLOv5 LeafPriority.pt & 38-class Ruler loader
 │   │   ├── lm2_geometry_utils.py      # Label-blind gatekeeping, base-to-apex homologization & reflection
 │   │   └── tune_geometry_parameters.py# Empirical threshold calibrator (calibrate-geometry)
-│   ├── morphometrics/                 # Canonical R statistical morphometrics
-│   │   ├── 03_fourier_extractor.R     # 12-harmonic polarity-preserving EFA, PCA & RRPP reflection parity (Momocs, RRPP)
-│   │   └── 04_gmm_morphotools.R       # RRPP within-species allometry, clustvarsel/mclust GMMs & passive CDA (MorphoTools2)
-│   ├── analysis/                      # Macroecology, phenology, and synthesis
-│   │   ├── 05_cleanlab_vision_xai.py  # DINOv2 embeddings, Cleanlab & ViT patch-token saliency XAI
-│   │   ├── 06_multimodal_spatial_rf.R # Spatial RF (ranger, adespatial, blockCV), ecospat PCA-env & geodata/SSURGO
-│   │   └── 07_triage_dashboard_synthesis.R # Decision matrix & triage queue generation
-│   ├── tests/                         # Unit and integration test suite (253 tests across 19 modules)
+│   ├── morphometrics/                 # Canonical R statistical morphometrics & 3D plotting utilities
+│   │   ├── 03_fourier_extractor.R     # Tier-1 Pure Priority 12-harmonic EFA, cov.wt PCA & RRPP parity
+│   │   ├── 04_gmm_morphotools.R       # Tier_1_Pure allometry, clustvarsel/mclust GMMs & 3D passive CDA (can1..can3)
+│   │   └── pub_figures_utils.R        # Okabe-Ito palettes, plot_3d_scatter_box & unfilled marker helpers
+│   ├── analysis/                      # Deep vision, 10m–30m fine-grain macroecology, and synthesis
+│   │   ├── 05_cleanlab_vision_xai.py  # Masked Tier_1_Direct basal-leaf DINOv2 embeddings, Cleanlab & ViT XAI
+│   │   ├── 06_multimodal_spatial_rf.R # 10m–30m Spatial RF (ranger, blockCV), ecospat PCA-env & Hopkins Law
+│   │   ├── edaphic_fine_grain_utils.R # 50m-buffered SSURGO, 30m POLARIS, 100m SOLUS100 & 3DEP extractor
+│   │   └── 07_triage_dashboard_synthesis.R # Non-georeferenced coalescing & multi-modal decision matrix
+│   ├── tests/                         # Unit and integration test suite
 │   │   ├── run_audit.py               # Central QA test suite runner (asserts 100% pass rate)
 │   │   ├── test_code_hygiene.py       # Enforces strict _archive isolation & AST hygiene
 │   │   ├── test_voucher_harvester.py
@@ -146,14 +149,8 @@ Packera_dubia_morphometrics/
 │   │   └── test_main_pipeline_cli.py
 │   └── _archive/                      # Decommissioned scripts (isolated; never imported by active code)
 ├── outputs/
-│   ├── figures/                       # Publication plots, CDA biplots & QC panels
+│   ├── figures/                       # Publication plots, 3D PCA/CDA ordinations & QC panels
 │   └── reports/                       # Taxonomic summaries, BIC tables & manifests
-│       ├── tier_symmetry_validation.csv       # Tier 1 vs. Tier 2 RRPP/adonis2 PERMANOVA validation
-│       ├── allometry_significance_audit.csv   # Multivariate RRPP/adonis2 allometry ANOVA table
-│       ├── allometry_pairwise_trajectories.csv# RRPP::pairwise allometric trajectory angles (theta) & magnitudes
-│       ├── gmm_bayes_factors_summary.csv      # clustvarsel + mclust BIC & 2*Delta_BIC species boundary report
-│       ├── multimodal_spatial_rf_summary.csv  # ranger OOB, blockCV Spatial_Block_CV_Accuracy & ecospat D/I summary
-│       └── Packera_dubia_Taxonomic_Revision_Summary.md # Formal taxonomic treatment & dichotomous key
 ├── requirements.txt                   # Primary Python dependencies
 └── README.md
 ```
@@ -172,7 +169,7 @@ python main.py download-weights
 ```
 
 #### B. End-to-End Automated Pipeline & `run_pipeline.sh` CLI Reference
-Every execution launched via `./run_pipeline.sh` or `python main.py` writes all generated masks, contours, cropped patches, CSV manifests, publication figures (`.pdf` + 300-DPI `.png`), reports, and `outputs/reports/run_metadata.json` provenance logs into an isolated run directory (`runs/<RUN_ID>/`) with an automatic `runs/latest` symlink, while sharing read-only `data/raw_vouchers/` and `data/environmental/` caches at the repository root.
+Every execution launched via `./run_pipeline.sh` or `python main.py` operates under the **Canonical Two-Tier Storage Architecture**: invariant Step 01–02 assets reside in canonical root `data/` and are automatically seeded/symlinked into `runs/<RUN_ID>/` (updating `runs/latest`), while all Step 03–07 statistical tables, reports, logs (`logs/pipeline.log`), and publication figures (`.pdf` + 300-DPI `.png`) are isolated inside `runs/<RUN_ID>/`.
 
 ```bash
 source .venv/bin/activate
@@ -180,41 +177,52 @@ source .venv/bin/activate
 # 1. Default full complex-wide run (creates runs/run_<YYYYMMDD_HHMMSS>/ and updates runs/latest)
 ./run_pipeline.sh
 
-# 2. Custom named run directory (--run-id <NAME>) reusing cached vouchers & images (--skip-harvest)
+# 2. Custom named run directory (--run-id <NAME>) reusing cached vouchers & canonical Step 02 assets (--skip-harvest)
 ./run_pipeline.sh --run-id packera_revision_v1 --skip-harvest
 
-# 3. Resume an existing run from a specific step (--start-step <1..7>, e.g., Step 03 EFA onward)
-./run_pipeline.sh --run-id packera_revision_v1 --start-step 3
+# 3. Resume or launch from any pipeline step (--start-step <1..7>, e.g., Step 03 EFA or Step 06 Spatial RF)
+#    Automatically seeds Step 01–02 tables and symlinks masks/contours/cropped_patches from canonical root data/:
+./run_pipeline.sh --run-id packera_revision_v1 --skip-harvest --start-step 3
+./run_pipeline.sh --run-id packera_revision_v1 --skip-harvest --start-step 6
 
-# 4. Pilot subset execution (--limit <N>) with SAM 2 boundary refinement (--sam2-refine) and forced overwrite (--force / --overwrite)
-./run_pipeline.sh --run-id pilot_50 --skip-harvest --limit 50 --sam2-refine --force
+# 4. Exclude one or more taxa (--exclude-taxon "<TAXON>"):
+#    Filters curated_vouchers.csv, Step 02 manifests, and cropped_patches/ while dynamically remapping
+#    Step 05 DINOv2/Cleanlab class indices to contiguous 0..K-1 (active_taxa):
+./run_pipeline.sh --run-id eastern_3taxa --skip-harvest --start-step 3 --exclude-taxon "Packera plattensis"
 
-# 5. Strategy 1 (Single-Taxon Mode: Focal Taxon + Outgroup Gold Reference Anchors, default --gold-anchors 30)
-#    Processes all focal taxon vouchers plus N Tier_1_Gold anchors per outgroup species for Steps 04-06 calibration,
+# 5. Strategy 1 (Focal Taxon + Outgroup Gold Reference Anchors, default --gold-anchors 30):
+#    Processes all focal taxon vouchers plus N Tier_1_Gold anchors per outgroup species for Steps 04–06 calibration,
 #    then filters Step 07's final triage queue and figures strictly to the focal taxon:
 ./run_pipeline.sh --run-id dubia_triage --skip-harvest --focal-taxon "Packera dubia" --gold-anchors 30
 
-# 6. Strategy 2 (Pure Intraspecific Delimitation Mode: --focal-taxon "<TAXON>" --intraspecific-mode)
-#    Runs strictly on a single species (n_unique_taxa == 1) with zero outgroup specimens, switching Steps 04-06
+# 6. Strategy 2 (Pure Intraspecific Delimitation Mode: --focal-taxon "<TAXON>" --intraspecific-mode):
+#    Runs strictly on a single species (n_unique_taxa == 1) with zero outgroup specimens, switching Steps 04–06
 #    from species_standardized to label-blind GMM morphotypes (Morphotype_K1..K_n or geographic/edaphic ecotypes)
 #    to test for cryptic lineages and granite-outcrop ecotypes:
 ./run_pipeline.sh --run-id dubia_cryptic --skip-harvest --focal-taxon "Packera dubia" --intraspecific-mode
 
-# 7. Equivalent end-to-end execution via unified Python CLI
+# 7. Pilot subset execution (--limit <N>) with SAM 2 boundary refinement (--sam2-refine) and forced overwrite (--force)
+./run_pipeline.sh --run-id pilot_50 --skip-harvest --limit 50 --sam2-refine --force
+
+# 8. Equivalent end-to-end execution via unified Python CLI
 python main.py run-all --run-id packera_revision_v1 --download-images
 ```
 
 | `run_pipeline.sh` CLI Flag | Argument | Default | Operational Behavior |
 | :--- | :--- | :--- | :--- |
-| `--run-id` | `<NAME>` | `run_<YYYYMMDD_HHMMSS>` | Isolates all run outputs inside `runs/<NAME>/` and updates the `runs/latest` symlink. |
-| `--skip-harvest` | *(flag)* | `false` | Skips Step 01 network harvesting and snapshots cached `data/tables/curated_vouchers.csv` and local `data/raw_vouchers/` images. |
-| `--start-step` | `<1..7>` | `1` | Resumes pipeline execution from Step `1`..`7` inside the target run directory without re-running upstream stages. |
-| `--force` / `--overwrite` | *(flag)* | `false` | Forces re-extraction of segmentation masks/contours and overwrites existing run artifacts. |
-| `--limit` | `<N>` | `0` *(all)* | Restricts Step 01/02 execution to a pilot subset of the first `N` vouchers. |
-| `--sam2-refine` | *(flag)* | `false` | Enables automated LM2-guided SAM 2 sub-pixel boundary refinement in Step 02 (`02_segment_and_extract.py`). |
+| `--run-id` | `<NAME>` | `run_<YYYYMMDD_HHMMSS>` | Isolates all Step 03–07 outputs inside `runs/<NAME>/` and updates the `runs/latest` symlink. |
+| `--skip-harvest` | *(flag)* | `false` | Skips Step 01 network harvesting and reuses cached `data/tables/curated_vouchers.csv` and local `data/raw_vouchers/` images. |
+| `--start-step` | `<1..7>` | `1` | Starts or resumes execution from Step `1`..`7` (e.g., `--start-step 3` or `--start-step 6`), automatically seeding Step 01–02 tables and symlinks from canonical root `data/`. |
+| `--exclude-taxon` | `"<TAXON>"` | *(none)* | Excludes one or more taxa (repeatable, e.g., `--exclude-taxon "Packera plattensis"`), filtering `curated_vouchers.csv`, Step 02 manifests, and `cropped_patches/` while dynamically remapping Step 05 class indices to contiguous `0..K-1` (`active_taxa`). |
 | `--focal-taxon` | `"<TAXON>"` | `""` *(all taxa)* | Restricts focal evaluation to a single species (e.g., `"Packera dubia"` or `"Packera anonyma"`). |
 | `--gold-anchors` | `<INT>` | `30` | **Strategy 1 (Focal Taxon + Outgroup Gold Reference Anchors):** Retains `N` `Tier_1_Gold` anchors per outgroup species for Steps 04–06 calibration, then filters Step 07's final triage queue and figures strictly to `--focal-taxon`. |
-| `--intraspecific-mode` | *(flag)* | `false` | **Strategy 2 (Pure Intraspecific Delimitation Mode):** Sets `--gold-anchors 0` (`n_unique_taxa == 1` with zero outgroup specimens), switching Steps 04–06 from `species_standardized` to label-blind GMM morphotypes (`Morphotype_K1..K_n` or geographic/edaphic ecotypes) to test for cryptic lineages and granite-outcrop ecotypes. |
+| `--intraspecific-mode` | *(flag)* | `false` | **Strategy 2 (Pure Intraspecific Delimitation Mode):** Sets `--gold-anchors 0` (`n_unique_taxa == 1` with zero outgroup specimens), switching Steps 04–06 from `species_standardized` to label-blind GMM morphotypes (`Morphotype_K1..K_n` or geographic/edaphic ecotypes). |
+| `--gold-only` | *(flag)* | `false` | Filters `curated_vouchers.csv`, all Step 02 manifests, and `cropped_patches/` in the run directory strictly to rows where `determiner_tier == 'Tier_1_Gold'` prior to running Steps 02–07. |
+| `--determiner-tier` | `<TIER>` | `""` *(all tiers)* | Filters `curated_vouchers.csv`, all Step 02 manifests, and `cropped_patches/` in the run directory strictly to rows matching `<TIER>` (e.g., `Tier_1_Gold`, `Tier_2_Silver`, or `Tier_3_Bronze`) prior to running Steps 02–07. |
+| `--force` / `--overwrite` | *(flag)* | `false` | Forces re-computation and overwrites existing run artifacts. |
+| `--resegment` / `--force-segment` | *(flag)* | `false` | Forces fresh Step 02 LeafMachine2 + PointRend segmentation instead of reusing canonical root `data/masks/` and `data/contours/`. |
+| `--limit` | `<N>` | `0` *(all)* | Restricts execution to a pilot subset of the first `N` vouchers. |
+| `--sam2-refine` | *(flag)* | `false` | Enables automated LM2-guided SAM 2 sub-pixel boundary refinement in Step 02 (`02_segment_and_extract.py`). |
 
 #### C. Phase-by-Phase Execution via Unified `main.py` CLI
 ```bash
