@@ -137,6 +137,24 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Force re-download and overwrite existing cached voucher images.",
     )
     parser.add_argument(
+        "--spatial-thin-km",
+        type=float,
+        default=0.0,
+        help="Minimum spatial grid thinning distance in km per species (default: 0.0, disabled).",
+    )
+    parser.add_argument(
+        "--max-per-state",
+        type=int,
+        default=None,
+        help="Maximum vouchers retained per (species, stateProvince) (default: None, unlimited).",
+    )
+    parser.add_argument(
+        "--max-per-region",
+        type=int,
+        default=None,
+        help="Maximum vouchers retained per (species, regional_group) (default: None, unlimited).",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -172,6 +190,9 @@ def main() -> None:
         workspace_dir=cfg.paths.workspace_root,
         logger=logger,
         force=args.force,
+        spatial_thin_km=args.spatial_thin_km,
+        max_per_state=args.max_per_state,
+        max_per_region=args.max_per_region,
     )
 
     harvester.run(download_images=args.download_images)

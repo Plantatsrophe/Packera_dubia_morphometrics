@@ -78,12 +78,12 @@ standardize_packera_taxon <- function(species_vec) {
 }
 
 # 2b. Foliar Allometry Multivariate Testing & Residual Correction
-generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, output_pdf) {
+generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, output_pdf, p_int = 1.0) {
   if (!exists("render_allometry_diagnostic_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
     source("scripts/morphometrics/pub_figures_utils.R")
   }
   if (exists("render_allometry_diagnostic_pdf", mode = "function")) {
-    render_allometry_diagnostic_pdf(sub_df, r2_size, p_size, r2_int, output_pdf)
+    render_allometry_diagnostic_pdf(sub_df, r2_size, p_size, r2_int, output_pdf, p_int = p_int)
   }
   message("Shape allometry regression plot saved -> ", output_pdf)
 }
@@ -103,8 +103,9 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   if (length(valid_idx) < 10) return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df))
 
   sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$scientificName <- factor(standardize_packera_taxon(as.character(if ("species_standardized" %in% names(sub_df)) sub_df$species_standardized else sub_df$scientificName)))
-  sub_df$authority_weight <- if ("authority_weight" %in% names(sub_df)) suppressWarnings(as.numeric(sub_df$authority_weight)) else ifelse(sub_df$determiner_tier == "Tier_1_Gold", 2.0, ifelse(sub_df$determiner_tier == "Tier_2_Silver", 1.25, 0.75))
-  sub_df$authority_weight[is.na(sub_df$authority_weight) | sub_df$authority_weight <= 0] <- 0.75
+  sub_df$authority_weight <- if ("authority_weight" %in% names(sub_df)) suppressWarnings(as.numeric(sub_df$authority_weight)) else ifelse(sub_df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(sub_df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
+  sub_df$authority_weight[is.na(sub_df$authority_weight) | sub_df$authority_weight <= 0] <- 0.5
+  sub_df$spatial_balance_weight <- compute_spatial_balance_weights(sub_df); sub_df$eff_weight <- sub_df$authority_weight * sub_df$spatial_balance_weight
   is_tier1_pure <- if ("morph_tier_source" %in% names(sub_df)) (!is.na(sub_df$morph_tier_source) & sub_df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(sub_df))
   gold_mask <- if ("determiner_tier" %in% names(sub_df)) (sub_df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & !is.na(sub_df$scientificName) & is_tier1_pure) else is_tier1_pure
   min_sp <- min(2L, length(unique(stats::na.omit(sub_df$scientificName))))
@@ -140,10 +141,10 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   }
   if (is.null(anova_df)) {
     Y_cent <- scale(Y, center = TRUE, scale = FALSE); SS_tot <- sum(Y_cent^2); N_obs <- nrow(gold_df)
-    fit1 <- stats::lm(Y_cent ~ log_centsize, data = gold_df, weights = authority_weight); SS_size <- sum(stats::fitted(fit1)^2); df_size <- fit1$rank - 1
+    fit1 <- stats::lm(Y_cent ~ log_centsize, data = gold_df, weights = eff_weight); SS_size <- sum(stats::fitted(fit1)^2); df_size <- fit1$rank - 1
     if (nlevels(gold_df$scientificName) >= 2) {
-      fit2 <- stats::lm(Y_cent ~ log_centsize + scientificName, data = gold_df, weights = authority_weight); SS_12 <- sum(stats::fitted(fit2)^2); SS_taxa <- SS_12 - SS_size; df_taxa <- fit2$rank - fit1$rank
-      fit3 <- stats::lm(Y_cent ~ log_centsize * scientificName, data = gold_df, weights = authority_weight); SS_123 <- sum(stats::fitted(fit3)^2); SS_int <- SS_123 - SS_12; df_int <- fit3$rank - fit2$rank
+      fit2 <- stats::lm(Y_cent ~ log_centsize + scientificName, data = gold_df, weights = eff_weight); SS_12 <- sum(stats::fitted(fit2)^2); SS_taxa <- SS_12 - SS_size; df_taxa <- fit2$rank - fit1$rank
+      fit3 <- stats::lm(Y_cent ~ log_centsize * scientificName, data = gold_df, weights = eff_weight); SS_123 <- sum(stats::fitted(fit3)^2); SS_int <- SS_123 - SS_12; df_int <- fit3$rank - fit2$rank
       SS_res <- SS_tot - SS_123; df_res <- N_obs - fit3$rank; MS_res <- SS_res / max(df_res, 1)
       F_size <- (SS_size / max(df_size, 1)) / MS_res; F_taxa <- (SS_taxa / max(df_taxa, 1)) / MS_res; F_int <- (SS_int / max(df_int, 1)) / MS_res
       p_taxa <- round(stats::pf(F_taxa, df_taxa, df_res, lower.tail = FALSE), 5); p_int <- round(stats::pf(F_int, df_int, df_res, lower.tail = FALSE), 5)
@@ -178,8 +179,8 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   p_int <- if (nrow(int_row) > 0 && !is.na(int_row$p_value[1])) int_row$p_value[1] else 1.0
   correct_flag <- tolower(trimws(as.character(correct_mode))); slopes_homogeneous <- is.na(p_int) || (p_int > 0.05)
   should_correct <- (correct_flag %in% c("true", "1", "yes")) || (correct_flag == "auto" && !is.na(r2_size) && r2_size >= r2_threshold && slopes_homogeneous)
-  authority_weight <- gold_df$authority_weight
-  fit_within <- if (nlevels(gold_df$scientificName) >= 2) stats::lm(Y ~ log_centsize + scientificName, data = gold_df, weights = authority_weight) else stats::lm(Y ~ log_centsize, data = gold_df, weights = authority_weight)
+  authority_weight <- gold_df$authority_weight; spatial_balance_weight <- gold_df$spatial_balance_weight; eff_weight <- authority_weight * spatial_balance_weight
+  fit_within <- if (nlevels(gold_df$scientificName) >= 2) stats::lm(Y ~ log_centsize + scientificName, data = gold_df, weights = eff_weight) else stats::lm(Y ~ log_centsize, data = gold_df, weights = eff_weight)
   beta_within <- stats::coef(fit_within)["log_centsize", ]; beta_within[is.na(beta_within)] <- 0.0
   Y <- as.matrix(sub_df[, sym_names, drop = FALSE]); log_centsize <- sub_df$log_centsize
   Y_adj <- Y - outer(log_centsize - mean(log_centsize, na.rm = TRUE), beta_within)
@@ -197,7 +198,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
     message(sprintf("[INFO] Foliar allometry negligible (R2 = %.2f). Analyzing raw symmetric harmonics.", r2_size))
     morpho_matrix_for_gmm <- Y
   }
-  if (!is.null(output_plot) && nzchar(output_plot)) generate_allometry_diagnostic_plot(sub_df, r2_size, p_size, r2_int, output_plot)
+  if (!is.null(output_plot) && nzchar(output_plot)) generate_allometry_diagnostic_plot(sub_df, r2_size, p_size, r2_int, output_plot, p_int = p_int)
   return(list(morpho_matrix = morpho_matrix_for_gmm, corrected = should_correct, beta_within = beta_within,
               r2_size = r2_size, p_size = p_size, r2_interaction = r2_int, p_interaction = p_int, anova_table = anova_df, pairwise_table = pw_df, df = morpho_df))
 }
@@ -303,8 +304,9 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
 # 4. Canonical Discriminant Analysis with Passive Sample Projection
 run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, gmm_res = NULL, intraspecific_mode = FALSE) {
   message("Configuring Canonical Discriminant Analysis in MorphoTools2 Architecture...")
-  df$authority_weight <- ifelse(df$determiner_tier == "Tier_1_Gold", 2.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.25, 0.75))
-  df$authority_weight[is.na(df$authority_weight)] <- 0.75
+  df$authority_weight <- ifelse(df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
+  df$authority_weight[is.na(df$authority_weight)] <- 0.5; df$spatial_balance_weight <- compute_spatial_balance_weights(df)
+  authority_weight <- df$authority_weight; spatial_balance_weight <- df$spatial_balance_weight; eff_weight <- authority_weight * spatial_balance_weight
   is_tier1_pure <- if ("morph_tier_source" %in% names(df)) (!is.na(df$morph_tier_source) & df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(df))
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   pc_req <- intersect(paste0("PC", seq_len(5)), feature_cols)
@@ -358,7 +360,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   message(sprintf("Active Anchors (Complete): %d | Passive Projected: %d", length(active_idx), length(passive_idx)))
   if (length(active_idx) < length(target_taxa)) stop("Insufficient complete active Tier 1 Gold anchors for CDA.")
 
-  X_a <- X[active_idx, , drop = FALSE]; y_a <- df$grouping_col[active_idx]; w_a <- df$authority_weight[active_idx]; N_a <- nrow(X_a)
+  X_a <- X[active_idx, , drop = FALSE]; y_a <- df$grouping_col[active_idx]; eff_weight <- eff_weight[active_idx]; w_a <- eff_weight; N_a <- nrow(X_a)
   X_mat <- X_a; grp_factor <- droplevels(factor(y_a))
   lda_cv <- if (requireNamespace("MASS", quietly = TRUE) && nlevels(grp_factor) >= 2) {
     tryCatch(MASS::lda(x = X_mat, grouping = grp_factor, prior = rep(1.0 / nlevels(grp_factor), nlevels(grp_factor)), CV = TRUE), error = function(e) NULL)
@@ -370,7 +372,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   B <- matrix(0, p, p); W <- matrix(0, p, p)
   group_means <- matrix(0, g, p, dimnames = list(g_levels, feature_cols)); group_counts <- integer(g)
   for (k in seq_along(g_levels)) {
-    grp <- g_levels[k]; k_mask <- (y_a == grp); sub_x <- X_a[k_mask, , drop = FALSE]; w_k <- w_a[k_mask]; group_counts[k] <- nrow(sub_x)
+    grp <- g_levels[k]; k_mask <- (y_a == grp); sub_x <- X_a[k_mask, , drop = FALSE]; w_k <- eff_weight[k_mask]; group_counts[k] <- nrow(sub_x)
     if (nrow(sub_x) > 0) {
       m_k <- colSums(sub_x * w_k) / sum(w_k); group_means[k, ] <- m_k; diff_m <- m_k - grand_mean
       B <- B + sum(w_k) * (diff_m %*% t(diff_m)); diff_x <- t(t(sub_x) - m_k); W <- W + (t(diff_x) %*% (diff_x * w_k))
@@ -396,9 +398,10 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   Z_all <- t(t(X_proj) - grand_mean) %*% eig_vecs; canonical_centroids <- t(t(group_means) - grand_mean) %*% eig_vecs
   priors <- rep(1.0 / g, g); post_probs <- matrix(0, nrow(df), g, dimnames = list(NULL, g_levels))
   for (k in seq_along(g_levels)) {
-    diff_z <- t(t(Z_all) - canonical_centroids[k, ]); post_probs[, k] <- priors[k] * exp(-0.5 * rowSums(diff_z^2))
+    diff_z <- t(t(Z_all) - canonical_centroids[k, ]); post_probs[, k] <- log(priors[k]) - 0.5 * rowSums(diff_z^2)
   }
-  post_probs <- post_probs / rowSums(post_probs); pred_idx <- apply(post_probs, 1, which.max)
+  post_probs <- exp(post_probs - apply(post_probs, 1, max, na.rm = TRUE))
+  post_probs <- post_probs / pmax(rowSums(post_probs, na.rm = TRUE), 1e-12); pred_idx <- max.col(post_probs, ties.method = "first")
   posterior_prob <- apply(post_probs, 1, max)
   second_posterior_prob <- if (g >= 2) apply(post_probs, 1, function(r) sort(r, decreasing = TRUE)[2]) else rep(0.0, nrow(df))
   posterior_margin <- posterior_prob - second_posterior_prob
@@ -429,7 +432,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   }
   colnames(canonical_centroids) <- colnames(Z_all); rownames(canonical_centroids) <- g_levels
   return(list(eigenvalues = eig_vals, variance_pct = var_pct, canonical_scores = Z_all, centroids = canonical_centroids,
-              predicted_taxon = g_levels[pred_idx], posterior_prob = posterior_prob, second_posterior_prob = second_posterior_prob,
+              predicted_taxon = g_levels[pred_idx], posterior_prob = posterior_prob, second_posterior_prob = second_posterior_prob, post_probs = post_probs,
               posterior_margin = posterior_margin, is_active = is_active, structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col))
 }
 run_cda_with_passive_projection <- run_canonical_discriminant_analysis
@@ -464,7 +467,7 @@ audit_misidentifications <- function(df, cda_res, gmm_res) {
     }
     if (is_intra_audit && !flags[i] && isTRUE(mahal_out[i])) { flags[i] <- TRUE; triage[i] <- "HIGH"; reasons[i] <- "Intraspecific_Mahalanobis_Morphospace_Outlier" }
   }
-  df$authority_weight <- ifelse(df$determiner_tier == "Tier_1_Gold", 2.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.25, 0.75))
+  df$authority_weight <- ifelse(df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
   df$gmm_cluster <- gmm_res$classification; df$gmm_uncertainty <- round(gmm_res$uncertainty, 4); df$loocv_accuracy <- cda_res$loocv_accuracy
   df$cda_predicted_taxon <- cda_res$predicted_taxon; df$cda_posterior_prob <- round(cda_res$posterior_prob, 4)
   df$cda_second_posterior_prob <- round(cda_res$second_posterior_prob, 4); df$cda_posterior_margin <- round(cda_res$posterior_margin, 4)
@@ -574,13 +577,14 @@ run_gmm_morphotools_pipeline <- function(opts) {
   }
   message(sprintf("Specimen-level collection units for morphometric modeling (1 row = 1 voucher): %d", nrow(closed_df)))
   closed_df$species_standardized <- standardize_packera_taxon(closed_df$species_raw)
-  closed_df$authority_weight <- ifelse(closed_df$determiner_tier == "Tier_1_Gold", 2.0, ifelse(closed_df$determiner_tier == "Tier_2_Silver", 1.25, 0.75))
+  closed_df$authority_weight <- ifelse(closed_df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(closed_df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
   if (!is.null(vouchers_df)) {
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), , drop = FALSE]; v_idx <- match(as.character(closed_df$catalogNumber), as.character(v_sub$catalogNumber))
-    for (col in intersect(names(v_sub), c("institutionCode", "county", "stateProvince", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group"))) {
+    for (col in intersect(names(v_sub), c("institutionCode", "county", "stateProvince", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) {
       if (!col %in% names(closed_df)) closed_df[[col]] <- v_sub[[col]][v_idx]
     }
   }
+  closed_df$spatial_balance_weight <- compute_spatial_balance_weights(closed_df)
   allom_res <- test_and_correct_allometry(closed_df, correct_mode = opts$correct_allometry, permutations = opts$permutations,
                                           seed = opts$seed, output_report = opts$allometry_report, output_plot = opts$allometry_plot, output_pairwise = opts$allometry_pairwise)
   if (!is.null(allom_res$df)) closed_df <- allom_res$df
@@ -617,7 +621,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   audited_df <- audit_misidentifications(closed_df, cda_res, gmm_res)
   audit_institutional_batch_effects(audited_df, output_csv = opts$output_batch_audit)
   lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source",
-                           "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "determiner_tier", "authority_weight",
+                           "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "determiner_tier", "authority_weight", "spatial_balance_weight",
                            "cda_predicted_taxon", "cda_posterior_prob", "cda_second_posterior_prob", "cda_posterior_margin", "loocv_accuracy", "is_passive",
                            "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty",
                            "can1", "can2", "can3", "pheno_sin", "pheno_cos", "PC1", "PC2", "PC3", "PC4", "PC5", "centroid_size", "log_centsize",

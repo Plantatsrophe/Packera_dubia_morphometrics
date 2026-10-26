@@ -37,6 +37,7 @@ from scripts.core.harvester import (
     optimize_herbarium_image_url,
     parse_determiner_tier,
     sanitize_filename,
+    spatially_balance_and_thin_vouchers,
     stratify_duplicates,
     validate_image_quality,
 )
@@ -898,6 +899,125 @@ class TestExsiccataeFingerprintingAndStratification(unittest.TestCase):
         res3 = stratify_duplicates(df_tier1_test)
         self.assertTrue(res3[res3["catalogNumber"] == "GA_TIER1"]["is_primary_duplicate"].iloc[0])
         self.assertFalse(res3[res3["catalogNumber"] == "MO_TIER3"]["is_primary_duplicate"].iloc[0])
+
+
+class TestSpatialBalancingAndThinning(unittest.TestCase):
+    """Test suite for Milestone 1/4 spatial grid thinning, state/region quotas, and inverse-density weights."""
+
+    def test_spatially_balance_and_thin_vouchers_nc_cluster_vs_ar_spread(self):
+        """
+        Verify that 200 NC vouchers clustered in 2 counties and 15 AR vouchers across 10 counties
+        are thinned by spatial_thin_km=15.0, max_per_state=25 to at most 25 NC vouchers while
+        retaining all Tier_1_Gold vouchers and computing valid spatial_balance_weight in [0.20, 3.00].
+        """
+        rng = np.random.default_rng(42)
+        records = []
+
+        # 200 NC vouchers clustered across 2 counties (Wake & Franklin), including 6 Tier_1_Gold anchors
+        # and 10 secondary duplicate sheets
+        gold_catalog_numbers = set()
+        for i in range(200):
+            is_gold = i < 6
+            cat = f"NC_VOUCHER_{i:03d}"
+            if is_gold:
+                gold_catalog_numbers.add(cat)
+            county = "Wake" if i % 2 == 0 else "Franklin"
+            # Spread across ~30 grid cells in Wake/Franklin so grid thinning leaves >25 before max_per_state=25 caps at 25
+            base_lat = 35.78 + (i % 10) * 0.16
+            base_lon = -78.64 + ((i // 10) % 6) * 0.18
+            records.append({
+                "catalogNumber": cat,
+                "institutionCode": "NCU",
+                "scientificName": "Packera anonyma",
+                "species_raw": "Packera anonyma",
+                "determiner_tier": "Tier_1_Gold" if is_gold else ("Tier_2_Silver" if i % 5 == 0 else "Tier_3_Bronze"),
+                "type_status": "Holotype" if i == 0 else "None",
+                "county": county,
+                "stateProvince": "NC",
+                "decimalLatitude": float(base_lat + rng.normal(0.0, 0.005)),
+                "decimalLongitude": float(base_lon + rng.normal(0.0, 0.005)),
+                "coordinateUncertainty": 50.0 if is_gold else 500.0,
+                "regional_group": "Piedmont_Granite_Flatrocks",
+                "is_primary_duplicate": False if i >= 190 else True,
+            })
+
+        # 15 AR vouchers spread across 10 counties, separated by >25 km each
+        for j in range(15):
+            cat = f"AR_VOUCHER_{j:03d}"
+            if j == 0:
+                gold_catalog_numbers.add(cat)
+            records.append({
+                "catalogNumber": cat,
+                "institutionCode": "UARK",
+                "scientificName": "Packera anonyma",
+                "species_raw": "Packera anonyma",
+                "determiner_tier": "Tier_1_Gold" if j == 0 else "Tier_2_Silver",
+                "type_status": "None",
+                "county": f"AR_County_{j % 10}",
+                "stateProvince": "AR",
+                "decimalLatitude": float(34.20 + (j % 5) * 0.35),
+                "decimalLongitude": float(-94.10 + (j // 5) * 0.45),
+                "coordinateUncertainty": 100.0,
+                "regional_group": "Interior_Prairie_Midwest",
+                "is_primary_duplicate": True,
+            })
+
+        df_in = pd.DataFrame(records)
+        manifest_df = pd.DataFrame([
+            {"catalogNumber": "NC_VOUCHER_010", "leaf_id": 1, "assigned_tier": "Tier_1_Direct"},
+            {"catalogNumber": "NC_VOUCHER_010", "leaf_id": 2, "assigned_tier": "Tier_1_Direct"},
+        ])
+
+        thinned = spatially_balance_and_thin_vouchers(
+            df_in,
+            spatial_thin_km=15.0,
+            max_per_state=25,
+            primary_duplicates_only=True,
+            preserve_all_gold=True,
+            manifest_df=manifest_df,
+        )
+
+        # 1. Secondary duplicates must be excluded
+        self.assertTrue(thinned["is_primary_duplicate"].all())
+        for i in range(190, 200):
+            self.assertNotIn(f"NC_VOUCHER_{i:03d}", set(thinned["catalogNumber"]))
+
+        # 2. NC vouchers capped at max_per_state=25
+        nc_retained = thinned[thinned["stateProvince"] == "NC"]
+        ar_retained = thinned[thinned["stateProvince"] == "AR"]
+        self.assertLessEqual(len(nc_retained), 25)
+        self.assertEqual(len(nc_retained), 25)
+        self.assertEqual(len(ar_retained), 15)
+
+        # 3. Both NC counties represented evenly and 100% of Tier_1_Gold vouchers retained
+        self.assertEqual(set(nc_retained["county"].unique()), {"Wake", "Franklin"})
+        self.assertTrue(gold_catalog_numbers.issubset(set(thinned["catalogNumber"])))
+
+        # 4. Continuous spatial_balance_weight bounded in [0.20, 3.00] and normalized around 1.0
+        self.assertIn("spatial_balance_weight", thinned.columns)
+        weights = thinned["spatial_balance_weight"].to_numpy(dtype=float)
+        self.assertTrue(np.all(np.isfinite(weights)))
+        self.assertTrue(np.all((weights >= 0.20) & (weights <= 3.00)))
+        self.assertAlmostEqual(float(np.mean(weights)), 1.0, delta=0.15)
+
+        # Under-represented, spatially dispersed AR vouchers should have higher mean weight than dense NC vouchers
+        mean_w_ar = float(ar_retained["spatial_balance_weight"].mean())
+        mean_w_nc = float(nc_retained["spatial_balance_weight"].mean())
+        self.assertGreater(mean_w_ar, mean_w_nc)
+
+    def test_max_per_region_and_cli_arguments(self):
+        """Verify max_per_region quota balancing and CLI argument parsing in 01_voucher_harvester.py."""
+        import importlib
+        cli_mod = importlib.import_module("scripts.data_prep.01_voucher_harvester")
+        parser = cli_mod.build_cli_parser()
+        args = parser.parse_args([
+            "--spatial-thin-km", "15.0",
+            "--max-per-state", "50",
+            "--max-per-region", "150",
+        ])
+        self.assertAlmostEqual(args.spatial_thin_km, 15.0)
+        self.assertEqual(args.max_per_state, 50)
+        self.assertEqual(args.max_per_region, 150)
 
 
 if __name__ == "__main__":

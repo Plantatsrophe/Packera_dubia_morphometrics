@@ -38,6 +38,10 @@ ALL_EASTERN_TAXA=false
 DISCOVER_COMPLEXES=false
 AUTO_NEIGHBORS=false
 MIN_AFFINITY="0.03"
+SPATIAL_THIN_KM="0"
+MAX_PER_STATE=""
+MAX_PER_REGION=""
+NO_SPATIAL_WEIGHTS=false
 LIMIT_ARG=()
 SAM2_FLAG=()
 DEMO_FLAG=()
@@ -175,6 +179,34 @@ while [[ $# -gt 0 ]]; do
       MIN_AFFINITY="${1#*=}"
       shift
       ;;
+    --spatial-thin-km)
+      SPATIAL_THIN_KM="$2"
+      shift 2
+      ;;
+    --spatial-thin-km=*)
+      SPATIAL_THIN_KM="${1#*=}"
+      shift
+      ;;
+    --max-per-state)
+      MAX_PER_STATE="$2"
+      shift 2
+      ;;
+    --max-per-state=*)
+      MAX_PER_STATE="${1#*=}"
+      shift
+      ;;
+    --max-per-region)
+      MAX_PER_REGION="$2"
+      shift 2
+      ;;
+    --max-per-region=*)
+      MAX_PER_REGION="${1#*=}"
+      shift
+      ;;
+    --no-spatial-weights)
+      NO_SPATIAL_WEIGHTS=true
+      shift
+      ;;
     *)
       shift
       ;;
@@ -297,13 +329,24 @@ if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
         HARVEST_TAXON_ARGS=(--taxon "${FOCAL_TAXON}")
       fi
     fi
+    HARVEST_SPATIAL_ARGS=()
+    if [[ -n "${SPATIAL_THIN_KM}" && "${SPATIAL_THIN_KM}" != "0" && "${SPATIAL_THIN_KM}" != "0.0" ]]; then
+      HARVEST_SPATIAL_ARGS+=(--spatial-thin-km "${SPATIAL_THIN_KM}")
+    fi
+    if [[ -n "${MAX_PER_STATE}" ]]; then
+      HARVEST_SPATIAL_ARGS+=(--max-per-state "${MAX_PER_STATE}")
+    fi
+    if [[ -n "${MAX_PER_REGION}" ]]; then
+      HARVEST_SPATIAL_ARGS+=(--max-per-region "${MAX_PER_REGION}")
+    fi
     "${PYTHON_MAIN}" scripts/data_prep/01_voucher_harvester.py \
       --out-dir "data/raw_vouchers" \
       --output-csv "${RUN_DIR}/data/tables/curated_vouchers.csv" \
       "${HARVEST_TAXON_ARGS[@]}" \
+      "${HARVEST_SPATIAL_ARGS[@]}" \
       --download-images \
       ${FORCE_FLAG}
-    if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && "${EXCLUDE_MISIDENTIFIED}" != "true" && -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
+    if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && "${EXCLUDE_MISIDENTIFIED}" != "true" && ( -z "${SPATIAL_THIN_KM}" || "${SPATIAL_THIN_KM}" == "0" || "${SPATIAL_THIN_KM}" == "0.0" ) && -z "${MAX_PER_STATE}" && -z "${MAX_PER_REGION}" && -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
       mkdir -p "${PROJECT_ROOT}/data/tables"
       cp -f "${RUN_DIR}/data/tables/curated_vouchers.csv" "${PROJECT_ROOT}/data/tables/curated_vouchers.csv.tmp"
       mv -f "${PROJECT_ROOT}/data/tables/curated_vouchers.csv.tmp" "${PROJECT_ROOT}/data/tables/curated_vouchers.csv"
@@ -329,9 +372,8 @@ fi
 # Executed BEFORE running Steps 02-07
 # ------------------------------------------------------------------------------
 run_preflight_subset_filter() {
-  if [[ -n "${FOCAL_TAXON:-}" || -n "${EXCLUDE_TAXON_CSV:-}" || -n "${DETERMINER_TIER:-}" || "${GOLD_ONLY:-false}" == "true" || "${EXCLUDE_MISIDENTIFIED:-false}" == "true" ]]; then
-    echo "[Preflight] Filtering ${RUN_DIR}/data/tables/ and linking cropped_patches for focal='${FOCAL_TAXON:-}' exclude='${EXCLUDE_TAXON_CSV:-}' determiner_tier='${DETERMINER_TIER:-}' exclude_misidentified='${EXCLUDE_MISIDENTIFIED:-false}' triage_source='${TRIAGE_SOURCE:-ALL}' (intraspecific_mode=${INTRASPECIFIC_MODE:-false}, gold_anchors=${GOLD_ANCHORS:-30})..."
-    "${PYTHON_MAIN}" -c "
+  echo "[Preflight] Balancing/filtering ${RUN_DIR}/data/tables/ for focal='${FOCAL_TAXON:-}' exclude='${EXCLUDE_TAXON_CSV:-}' determiner_tier='${DETERMINER_TIER:-}' exclude_misidentified='${EXCLUDE_MISIDENTIFIED:-false}' spatial_thin_km='${SPATIAL_THIN_KM:-0}' max_per_state='${MAX_PER_STATE:-}' max_per_region='${MAX_PER_REGION:-}' no_spatial_weights='${NO_SPATIAL_WEIGHTS:-false}'..."
+  "${PYTHON_MAIN}" -c "
 import importlib
 import os
 import re
@@ -349,7 +391,15 @@ gold_anchors = int(sys.argv[6])
 determiner_tier_raw = sys.argv[7].strip()
 exclude_misidentified = sys.argv[8].lower() == 'true' if len(sys.argv) > 8 else False
 triage_source_raw = sys.argv[9].strip() if len(sys.argv) > 9 else 'ALL'
+auto_neighbors_flag = sys.argv[10].lower() == 'true' if len(sys.argv) > 10 else False
+min_affinity_val = float(sys.argv[11]) if len(sys.argv) > 11 and sys.argv[11] else 0.03
+spatial_thin_km = float(sys.argv[12]) if len(sys.argv) > 12 and sys.argv[12] else 0.0
+max_per_state = int(sys.argv[13]) if len(sys.argv) > 13 and sys.argv[13].strip() else None
+max_per_region = int(sys.argv[14]) if len(sys.argv) > 14 and sys.argv[14].strip() else None
+no_spatial_weights = sys.argv[15].lower() == 'true' if len(sys.argv) > 15 else False
+reuse_canonical = sys.argv[16].lower() == 'true' if len(sys.argv) > 16 else False
 
+from scripts.core.harvester import spatially_balance_and_thin_vouchers
 mod05 = importlib.import_module('scripts.analysis.05_cleanlab_vision_xai')
 standardize_packera_taxon = mod05.standardize_packera_taxon
 
@@ -378,6 +428,7 @@ if exclude_csv:
 tables_dir = run_dir / 'data' / 'tables'
 csv_path = tables_dir / 'curated_vouchers.csv'
 df = pd.read_csv(csv_path)
+initial_voucher_count = len(df)
 sp_col = 'species_raw' if 'species_raw' in df.columns else ('scientificName' if 'scientificName' in df.columns else 'species')
 df['species_standardized'] = df[sp_col].apply(standardize_packera_taxon)
 
@@ -479,8 +530,6 @@ if focal_raw:
         subset_df = focal_df
         print(f'[Strategy 2: Pure Intraspecific] Retained {len(subset_df)} {focal_taxon} vouchers (0 outgroup anchors).')
     else:
-        auto_neighbors_flag = sys.argv[10].lower() == 'true' if len(sys.argv) > 10 else False
-        min_affinity_val = float(sys.argv[11]) if len(sys.argv) > 11 and sys.argv[11] else 0.03
         present_taxa = sorted([t for t in df['species_standardized'].dropna().unique().tolist() if str(t).startswith('Packera ')])
         base_outgroups = present_taxa if len(present_taxa) > 4 else list(mod05.TARGET_TAXA)
         outgroup_taxa = [t for t in base_outgroups if t != focal_taxon and t not in exclude_taxa]
@@ -574,6 +623,41 @@ if target_tier and 'determiner_tier' in subset_df.columns:
 if exclude_misidentified and misidentified_cats:
     subset_df = subset_df[~subset_df['catalogNumber'].astype(str).str.strip().isin(misidentified_cats)].copy()
 
+manifest_path = tables_dir / 'extracted_leaf_manifest.csv'
+manifest_df = pd.read_csv(manifest_path) if manifest_path.exists() and manifest_path.stat().st_size > 0 else None
+
+pre_balance_n = len(subset_df)
+subset_df = spatially_balance_and_thin_vouchers(
+    subset_df,
+    spatial_thin_km=spatial_thin_km,
+    max_per_state=max_per_state,
+    max_per_region=max_per_region,
+    primary_duplicates_only=True,
+    preserve_all_gold=True,
+    manifest_df=manifest_df,
+    workspace_dir=root_data.parent,
+)
+if no_spatial_weights:
+    subset_df['spatial_balance_weight'] = 1.0
+
+has_spatial_thin_or_quota = (
+    spatial_thin_km > 0.0
+    or (max_per_state is not None and max_per_state > 0)
+    or (max_per_region is not None and max_per_region > 0)
+)
+if has_spatial_thin_or_quota or len(subset_df) < pre_balance_n:
+    print(
+        f'[Preflight: Spatial Balancing & Deduplication] Retained {len(subset_df)} / {pre_balance_n} vouchers '
+        f'(spatial_thin_km={spatial_thin_km}, max_per_state={max_per_state}, max_per_region={max_per_region}).'
+    )
+if has_spatial_thin_or_quota and not subset_df.empty:
+    if 'stateProvince' in subset_df.columns:
+        st_summary = subset_df['stateProvince'].fillna('UNKNOWN').astype(str).value_counts().to_dict()
+        print(f'  Retained counts per stateProvince: {st_summary}')
+    if 'regional_group' in subset_df.columns:
+        reg_summary = subset_df['regional_group'].fillna('Other_US').astype(str).value_counts().to_dict()
+        print(f'  Retained counts per regional_group: {reg_summary}')
+
 def _write_atomic(df_obj, target_path):
     tmp_p = target_path.with_suffix(target_path.suffix + '.tmp')
     with open(tmp_p, 'w', encoding='utf-8', newline='') as f:
@@ -585,50 +669,60 @@ def _write_atomic(df_obj, target_path):
 _write_atomic(subset_df, csv_path)
 keep_cats = set(subset_df['catalogNumber'].astype(str).str.strip())
 
-# Filter all Step 02 tables in ${RUN_DIR}/data/tables/ to retained catalogNumbers
-for tbl_name in ('extracted_leaf_manifest.csv', 'extracted_leaves_manifest.csv', 'failed_qc_vouchers.csv', 'voucher_reproductive_metrics.csv', 'voucher_phenological_states.csv'):
-    tp = tables_dir / tbl_name
-    if tp.exists() and tp.stat().st_size > 0:
-        tdf = pd.read_csv(tp)
-        if 'catalogNumber' in tdf.columns:
-            tdf_sub = tdf[tdf['catalogNumber'].astype(str).str.strip().isin(keep_cats)].copy()
-            _write_atomic(tdf_sub, tp)
-            print(f'  Filtered {tbl_name}: {len(tdf_sub)} / {len(tdf)} rows')
+has_subset_filter = bool(
+    focal_raw or exclude_csv or target_tier or exclude_misidentified or has_spatial_thin_or_quota or len(subset_df) < initial_voucher_count
+)
 
-# Symlink matching .jpg patches from canonical root data/cropped_patches/
-run_patches_root = run_dir / 'data' / 'cropped_patches'
-if run_patches_root.is_symlink():
-    run_patches_root.unlink()
-run_patches_root.mkdir(parents=True, exist_ok=True)
+if has_subset_filter:
+    # Filter all Step 02 tables in ${RUN_DIR}/data/tables/ to retained catalogNumbers
+    for tbl_name in ('extracted_leaf_manifest.csv', 'extracted_leaves_manifest.csv', 'failed_qc_vouchers.csv', 'voucher_reproductive_metrics.csv', 'voucher_phenological_states.csv'):
+        tp = tables_dir / tbl_name
+        if tp.exists() and tp.stat().st_size > 0:
+            tdf = pd.read_csv(tp)
+            if 'catalogNumber' in tdf.columns:
+                tdf_sub = tdf[tdf['catalogNumber'].astype(str).str.strip().isin(keep_cats)].copy()
+                _write_atomic(tdf_sub, tp)
+                print(f'  Filtered {tbl_name}: {len(tdf_sub)} / {len(tdf)} rows')
 
-for sub in ('rosettes_dense', 'basal_leaves_raw', 'capitula'):
-    src_sub = root_data / 'cropped_patches' / sub
-    dst_sub = run_patches_root / sub
-    if dst_sub.is_symlink():
-        dst_sub.unlink()
-    elif dst_sub.exists():
-        shutil.rmtree(dst_sub)
-    dst_sub.mkdir(parents=True, exist_ok=True)
-    if not src_sub.exists():
-        continue
-    linked = 0
-    with os.scandir(src_sub) as it:
-        for entry in it:
-            if entry.name.endswith('.jpg'):
-                stem_cat = re.sub(r'_(?:p\d+_rosette|rosette|leaf\d+|cap\d+)\.jpg$', '', entry.name)
-                cat = stem_cat if stem_cat in keep_cats else entry.name.split('_')[0]
-                if cat in keep_cats:
-                    os.symlink(entry.path, dst_sub / entry.name)
-                    linked += 1
-    print(f'  Linked {linked} patches in cropped_patches/{sub}')
-" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}"
-  elif [[ "${REUSE_CANONICAL_DATA}" == "true" ]]; then
-    mkdir -p "${RUN_DIR}/data/cropped_patches"
-    for sub in rosettes_dense basal_leaves_raw capitula; do
-      rm -rf "${RUN_DIR}/data/cropped_patches/${sub}"
-      ln -sfn "${PROJECT_ROOT}/data/cropped_patches/${sub}" "${RUN_DIR}/data/cropped_patches/${sub}"
-    done
-  fi
+if bool(focal_raw or exclude_csv or target_tier or exclude_misidentified or has_spatial_thin_or_quota):
+    # Symlink matching .jpg patches from canonical root data/cropped_patches/
+    run_patches_root = run_dir / 'data' / 'cropped_patches'
+    if run_patches_root.is_symlink():
+        run_patches_root.unlink()
+    run_patches_root.mkdir(parents=True, exist_ok=True)
+
+    for sub in ('rosettes_dense', 'basal_leaves_raw', 'capitula'):
+        src_sub = root_data / 'cropped_patches' / sub
+        dst_sub = run_patches_root / sub
+        if dst_sub.is_symlink():
+            dst_sub.unlink()
+        elif dst_sub.exists():
+            shutil.rmtree(dst_sub)
+        dst_sub.mkdir(parents=True, exist_ok=True)
+        if not src_sub.exists():
+            continue
+        linked = 0
+        with os.scandir(src_sub) as it:
+            for entry in it:
+                if entry.name.endswith('.jpg'):
+                    stem_cat = re.sub(r'_(?:p\d+_rosette|rosette|leaf\d+|cap\d+)\.jpg$', '', entry.name)
+                    cat = stem_cat if stem_cat in keep_cats else entry.name.split('_')[0]
+                    if cat in keep_cats:
+                        os.symlink(entry.path, dst_sub / entry.name)
+                        linked += 1
+        print(f'  Linked {linked} patches in cropped_patches/{sub}')
+elif reuse_canonical:
+    run_patches_root = run_dir / 'data' / 'cropped_patches'
+    run_patches_root.mkdir(parents=True, exist_ok=True)
+    for sub in ('rosettes_dense', 'basal_leaves_raw', 'capitula'):
+        src_sub = root_data / 'cropped_patches' / sub
+        dst_sub = run_patches_root / sub
+        if dst_sub.is_symlink() or dst_sub.is_file():
+            dst_sub.unlink()
+        elif dst_sub.exists():
+            shutil.rmtree(dst_sub)
+        os.symlink(src_sub, dst_sub)
+" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}" "${SPATIAL_THIN_KM:-0}" "${MAX_PER_STATE:-}" "${MAX_PER_REGION:-}" "${NO_SPATIAL_WEIGHTS:-false}" "${REUSE_CANONICAL_DATA:-false}"
 }
 
 run_preflight_subset_filter

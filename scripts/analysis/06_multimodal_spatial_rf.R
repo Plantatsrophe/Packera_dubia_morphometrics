@@ -1074,6 +1074,7 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
   active_tx <- get_active_packera_taxa(df$species_standardized)
   dyn_pal <- if (exists("get_dynamic_packera_palette", mode = "function")) get_dynamic_packera_palette(active_tx) else TAXON_COLORS
+  dyn_shapes <- stats::setNames(rep_len(c(21, 24, 22, 23, 1, 2, 5, 0), length(active_tx)), active_tx)
   is_target <- df$species_standardized %in% active_tx & !is.na(df$delta_doy)
   target_df <- if ("is_verified_anthesis" %in% names(df)) {
     df[is_target & df$is_verified_anthesis, ]
@@ -1082,8 +1083,9 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   }
   if (nrow(target_df) == 0) target_df <- df[is_target, ]
   
-  thm <- ggplot2::theme_bw(base_size = 9) +
+  thm <- ggplot2::theme_bw(base_size = 9.5) +
          ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 10),
+                        plot.subtitle = ggplot2::element_text(size = 8.5, color = "grey25"),
                         panel.grid.minor = ggplot2::element_blank())
   
   lat_col <- if ("decimalLatitude" %in% names(target_df) && any(!is.na(target_df$decimalLatitude))) target_df$decimalLatitude else target_df$latitude
@@ -1098,37 +1100,49 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
     hopkins_expected = pred_min_lat + 4.0 * (lat_seq - min_lat)
   )
   
-  p1 <- ggplot2::ggplot(target_df, ggplot2::aes(x = decimalLatitude, y = doy, color = species_standardized)) +
-    ggplot2::geom_point(shape = 21, fill = NA, stroke = 0.75, alpha = 0.78, size = 1.5) +
+  pt_alpha <- if (nrow(target_df) > 1000) 0.45 else 0.75
+  p1 <- ggplot2::ggplot(target_df, ggplot2::aes(x = decimalLatitude, y = doy, color = species_standardized, shape = species_standardized)) +
+    ggplot2::geom_point(fill = NA, stroke = 0.78, alpha = pt_alpha, size = 1.65) +
     ggplot2::geom_line(data = pred_line, ggplot2::aes(x = decimalLatitude, y = doy),
-                       color = "black", linewidth = 1.1, linetype = "dashed", inherit.aes = FALSE) +
+                       color = "black", linewidth = 1.1, linetype = "solid", inherit.aes = FALSE) +
+    ggplot2::geom_line(data = pred_line, ggplot2::aes(x = decimalLatitude, y = hopkins_expected),
+                       color = "#D55E00", linewidth = 0.95, linetype = "dashed", inherit.aes = FALSE) +
     ggplot2::scale_color_manual(values = dyn_pal) +
+    ggplot2::scale_shape_manual(values = dyn_shapes) +
     thm +
     ggplot2::labs(
       title = sprintf("A. Verified Latitudinal Spring Cline: DOY ~ Latitude (Slope = +%.2f d/deg, R2 = %.2f)",
                       baseline$slope, baseline$r_squared),
-      x = "Decimal Latitude (°N)", y = "Observed Day of Year (DOY)", color = "Taxon"
+      subtitle = "Solid black = Empirical WLS regression; Dashed vermilion = Hopkins' Law (+4.0 d / deg N)",
+      x = "Decimal Latitude (deg N)", y = "Observed Anthesis Day of Year (DOY)", color = "Taxon", shape = "Taxon"
     )
   
+  med_df <- stats::aggregate(delta_doy ~ species_standardized, data = target_df, FUN = function(x) stats::median(x, na.rm = TRUE))
   if (requireNamespace("ggridges", quietly = TRUE)) {
-    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, y = species_standardized, fill = species_standardized)) +
-      ggridges::geom_density_ridges(alpha = 0.65, scale = 1.2, rel_min_height = 0.01) +
+    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, y = species_standardized, fill = species_standardized, color = species_standardized)) +
+      ggridges::geom_density_ridges(alpha = 0.45, scale = 1.15, rel_min_height = 0.01, linewidth = 0.8) +
       ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
       ggplot2::scale_fill_manual(values = dyn_pal) +
+      ggplot2::scale_color_manual(values = dyn_pal) +
       thm +
       ggplot2::labs(
         title = "B. Phenological Anomalies (Delta DOY) & Allochronic Separation",
-        x = "Phenological Anomaly Delta DOY (Days Relative to Baseline)", y = "Target Taxon", fill = "Taxon"
+        subtitle = paste(sprintf("%s: %+.1f d", med_df$species_standardized, med_df$delta_doy), collapse = " | "),
+        x = "Phenological Anomaly Delta DOY (Days Relative to Latitudinal Baseline)", y = "Target Taxon", fill = "Taxon", color = "Taxon"
       )
   } else {
-    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, fill = species_standardized)) +
-      ggplot2::geom_density(alpha = 0.5, linewidth = 0.7) +
-      ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
+    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, fill = species_standardized, color = species_standardized)) +
+      ggplot2::geom_density(alpha = 0.35, linewidth = 0.85) +
+      ggplot2::geom_vline(data = med_df, ggplot2::aes(xintercept = delta_doy, color = species_standardized),
+                          linetype = "dashed", linewidth = 0.85, show.legend = FALSE) +
+      ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "black", linewidth = 0.8) +
       ggplot2::scale_fill_manual(values = dyn_pal) +
+      ggplot2::scale_color_manual(values = dyn_pal) +
       thm +
       ggplot2::labs(
         title = "B. Phenological Anomalies (Delta DOY) & Allochronic Separation",
-        x = "Phenological Anomaly Delta DOY (Days Relative to Baseline)", y = "Density", fill = "Taxon"
+        subtitle = paste(sprintf("%s: %+.1f d", med_df$species_standardized, med_df$delta_doy), collapse = " | "),
+        x = "Phenological Anomaly Delta DOY (Days Relative to Latitudinal Baseline)", y = "Kernel Density", fill = "Taxon", color = "Taxon"
       )
   }
   
@@ -1213,6 +1227,8 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
   df$authority_weight <- ifelse(df$determiner_tier == "Tier_1_Gold", 3.0,
                          ifelse(df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
   df$authority_weight[is.na(df$authority_weight)] <- 0.5
+  df$spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(df) else rep(1.0, nrow(df))
+  df$case_wts <- df$authority_weight * df$spatial_balance_weight
 
   w_mean <- function(x, w) {
     if (is.null(x) || length(x) == 0) return(NA_real_)
@@ -1253,7 +1269,8 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
   taxa_profiles <- lapply(active_taxa, function(tx) {
     sub_df <- anchor_df[(if (is_intra) anchor_df$analysis_group else anchor_df$species_standardized) == tx, ]
     if (nrow(sub_df) < 3) sub_df <- df[grp_vec == tx, ]
-    w_sub <- sub_df$authority_weight
+    case_wts <- sub_df$authority_weight * sub_df$spatial_balance_weight
+    w_sub <- case_wts
     sin_m <- w_mean(sin(sub_df$pheno_theta), w_sub)
     cos_m <- w_mean(cos(sub_df$pheno_theta), w_sub)
     eco_m <- sapply(eco_cols, function(cl) w_mean(as.numeric(sub_df[[cl]]), w_sub))
@@ -1433,9 +1450,11 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   }
   X_all <- cbind(X_env, MEMs)
   y <- factor(df$analysis_group)
+  spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(df) else rep(1.0, nrow(df))
   case_wts <- ifelse(df$determiner_tier == "Tier_1_Gold", 3.0,
               ifelse(df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
   case_wts[is.na(case_wts)] <- 0.5
+  case_wts <- case_wts * spatial_balance_weight
   case_wts <- case_wts / max(mean(case_wts, na.rm = TRUE), 1e-8)
 
   if (requireNamespace("ranger", quietly = TRUE)) {
@@ -1696,18 +1715,31 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
   # Theme setup
   thm <- ggplot2::theme_bw(base_size = 9) +
          ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 10),
+                        plot.subtitle = ggplot2::element_text(size = 8.2, color = "grey25"),
                         panel.grid.minor = ggplot2::element_blank())
 
-  # Panel A: Spatial RF Variable Importance (Highlighting 10m-30m Outcrop & Soil Predictors)
-  p1 <- ggplot2::ggplot(srf_res$importance, ggplot2::aes(x = reorder(Predictor, MeanDecreaseAccuracy),
-                                                         y = MeanDecreaseAccuracy, fill = Type)) +
-    ggplot2::geom_col(width = 0.7) + ggplot2::coord_flip() +
+  # Panel A: Spatial RF Variable Importance (Human-Readable Ecological Labels & Okabe-Ito Palette)
+  imp_df <- srf_res$importance
+  imp_df$Label <- if (exists("format_predictor_labels", mode = "function")) {
+    format_predictor_labels(as.character(imp_df$Predictor))
+  } else {
+    as.character(imp_df$Predictor)
+  }
+  p1 <- ggplot2::ggplot(imp_df, ggplot2::aes(x = stats::reorder(Label, MeanDecreaseAccuracy),
+                                             y = MeanDecreaseAccuracy, fill = Type)) +
+    ggplot2::geom_col(width = 0.72, color = "#222222", linewidth = 0.25) +
+    ggplot2::coord_flip() +
     ggplot2::scale_fill_manual(values = c(
       "Fine-Grain Edaphic & Outcrop (10-30m)" = "#009E73",
-      "Environmental" = "#2c7bb6",
-      "Spatial (MEMs)" = "#d7191c"
+      "Environmental" = "#0072B2",
+      "Spatial (MEMs)" = "#CC79A7"
     )) +
-    thm + ggplot2::labs(title = "A. Spatial RF Importance (10m-30m Edaphic + Climate + MEMs)", x = "", y = "Mean Decrease Accuracy (OOB)")
+    thm + ggplot2::labs(
+      title = "A. Spatial RF Variable Importance (10m-30m Edaphic + Climate + MEMs)",
+      subtitle = sprintf("OOB Accuracy = %.1f%% | Spatial Block CV Accuracy = %.1f%%",
+                         100 * (1 - srf_res$OOB_Error), 100 * srf_res$Spatial_Block_CV_Accuracy),
+      x = NULL, y = "Mean Decrease Accuracy (OOB)", fill = "Predictor Class"
+    )
 
   # Panel B: 10m-30m Fine-Grain Pedological & Outcrop Envelopes (Hollow Markers)
   active_tx <- get_active_packera_taxa(df$species_standardized)
@@ -1720,77 +1752,74 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
   if (!("ssurgo_rock_outcrop_pct" %in% names(plot_df))) plot_df$ssurgo_rock_outcrop_pct <- 0.0
   if (!("topo_tpi_30m" %in% names(plot_df))) plot_df$topo_tpi_30m <- 0.0
 
+  pt_alpha <- if (nrow(plot_df) > 1000) 0.45 else 0.78
   p2 <- ggplot2::ggplot(plot_df,
                         ggplot2::aes(x = fine_soil_sand, y = fine_soil_ph, color = species_standardized, shape = species_standardized)) +
+    ggplot2::annotate("rect", xmin = 60, xmax = 100, ymin = 3.8, ymax = 5.5,
+                      fill = "#D55E00", alpha = 0.08, color = "#D55E00", linetype = "dashed", linewidth = 0.45) +
     ggplot2::stat_ellipse(level = 0.85, linewidth = 1.0) +
-    ggplot2::geom_point(fill = NA, stroke = 0.75, alpha = 0.82, size = 1.55) +
+    ggplot2::geom_point(fill = NA, stroke = 0.75, alpha = pt_alpha, size = 1.55) +
     ggplot2::scale_shape_manual(values = dyn_shapes) +
     ggplot2::scale_color_manual(values = dyn_pal) +
     thm + ggplot2::labs(title = "B. 10m-30m Fine-Grain Pedological Envelopes (POLARIS/SSURGO)",
-                        x = "Fine-Grain Sand Fraction (%)", y = "Fine-Grain Soil pH (H2O)", color = "", shape = "")
+                        subtitle = "Dashed box = Acidic Granite-Flatrock / Sandhill Envelope (pH <= 5.5, Sand >= 60%)",
+                        x = "Fine-Grain Soil Sand Fraction (%)", y = "Fine-Grain Soil pH (H2O)", color = "Taxon", shape = "Taxon")
 
-  # Panel C: Circular Phenology Distributions
+  # Panel C: Fine-Grain Lithic Bedrock Depth & Soil Sand Diagnostic Boxplots
+  kw_bed <- tryCatch(stats::kruskal.test(fine_bedrock_depth_cm ~ factor(species_standardized), data = plot_df)$p.value, error = function(e) NA_real_)
   p3 <- ggplot2::ggplot(plot_df,
-                        ggplot2::aes(x = doy, fill = species_standardized)) +
-    ggplot2::geom_density(alpha = 0.45, linewidth = 0.6) +
+                        ggplot2::aes(x = species_standardized, y = fine_bedrock_depth_cm, fill = species_standardized, color = species_standardized)) +
+    ggplot2::geom_boxplot(alpha = 0.30, outlier.shape = 1, outlier.size = 1.2, width = 0.58) +
     ggplot2::scale_fill_manual(values = dyn_pal) +
-    thm + ggplot2::labs(title = "C. Circular Phenology (Flowering DOY)", x = "Day of Year (DOY)", y = "Density", fill = "")
+    ggplot2::scale_color_manual(values = dyn_pal) +
+    thm + ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 18, hjust = 1, face = "italic"), legend.position = "none") +
+    ggplot2::labs(
+      title = "C. Depth to Lithic Bedrock Restriction (10m-30m SSURGO/SOLUS100)",
+      subtitle = if (!is.na(kw_bed)) sprintf("Kruskal-Wallis p = %.2e across taxa", kw_bed) else "Shallow lithic contact characterizes flatrock habitats",
+      x = NULL, y = "Depth to Lithic Bedrock (cm)"
+    )
 
   # Panel D: Warren's Niche Identity Permutations & Empirical Schoener's D
   p4 <- ggplot2::ggplot(niche_res$permutations, ggplot2::aes(x = D_null, fill = Pair)) +
-    ggplot2::geom_histogram(bins = 20, alpha = 0.65, position = "identity") +
+    ggplot2::geom_histogram(bins = 20, alpha = 0.65, position = "identity", color = "white", linewidth = 0.2) +
     ggplot2::geom_vline(data = niche_res$summary, ggplot2::aes(xintercept = Warren_D, color = Pair),
-                        linetype = "dashed", linewidth = 0.9, show.legend = FALSE) +
+                        linetype = "dashed", linewidth = 0.95, show.legend = FALSE) +
     ggplot2::coord_cartesian(xlim = c(0, 1)) +
-    thm + ggplot2::labs(title = "D. Warren's Niche Identity Tests (100 Perms)", x = "Schoener's D (Dashed = Observed, Bars = Null)", y = "Count", fill = "")
+    thm + ggplot2::labs(
+      title = "D. Pairwise Niche Equivalency (Schoener's D vs. Null Permutations)",
+      subtitle = "Dashed vertical lines = Empirical Schoener's D; Histogram = Null niche identity distribution",
+      x = "Schoener's D Niche Overlap (0 = Disjoint, 1 = Identical)", y = "Permutation Count", fill = "Taxon Pair"
+    )
 
-  # Panel E: Variance Partitioning ([A] Fine-Grain Edaphic & Outcrop, [B] Macro-Climate, [C] Spatial MEMs)
+  # Panel E: Horizontal Stacked Variance-Partitioning Bar Chart (Replaces Pie Chart)
   vp_df <- srf_res$variance_partition
-  vp_df$Label <- ifelse(vp_df$Variance_Pct >= 4, sprintf("%.1f%%", vp_df$Variance_Pct), "")
-  p5 <- ggplot2::ggplot(vp_df, ggplot2::aes(x = "", y = Variance_Pct, fill = Component)) +
-    ggplot2::geom_bar(stat = "identity", width = 1, color = "white") +
-    ggplot2::coord_polar("y", start = 0) +
-    ggplot2::geom_text(ggplot2::aes(label = Label), position = ggplot2::position_stack(vjust = 0.5), size = 3, fontface = "bold") +
-    ggplot2::scale_fill_brewer(palette = "Set2") +
-    thm + ggplot2::theme_void() + ggplot2::labs(title = "E. Spatial Variance Partitioning", fill = "")
+  vp_df$Label <- ifelse(vp_df$Variance_Pct >= 5, sprintf("%.1f%%", vp_df$Variance_Pct), "")
+  vp_df$Component <- factor(vp_df$Component, levels = rev(vp_df$Component))
+  vp_cols <- stats::setNames(c("#009E73", "#56B4E9", "#0072B2", "#CC79A7", "#999999")[seq_len(nrow(vp_df))], levels(vp_df$Component))
+  p5 <- ggplot2::ggplot(vp_df, ggplot2::aes(x = "Variance\nPartition", y = Variance_Pct, fill = Component)) +
+    ggplot2::geom_col(width = 0.52, color = "white", linewidth = 0.6) +
+    ggplot2::coord_flip() +
+    ggplot2::geom_text(ggplot2::aes(label = Label), position = ggplot2::position_stack(vjust = 0.5),
+                       size = 3.1, fontface = "bold", color = "white") +
+    ggplot2::scale_fill_manual(values = vp_cols) +
+    thm + ggplot2::theme(legend.position = "bottom", legend.direction = "vertical") +
+    ggplot2::labs(
+      title = "E. Multi-Scale Variance Partitioning",
+      subtitle = "Relative contribution of [a] Edaphic/Outcrop, [b] Climate & [c] Spatial MEMs",
+      x = NULL, y = "Percentage of Explained Niche Variance (%)", fill = "Variance Component"
+    )
 
-  pdf(out_pdf, width = 12, height = 8)
-  gridExtra::grid.arrange(p1, p2, p3, p4, p5, layout_matrix = rbind(c(1, 2, 5), c(3, 4, 5)))
+  pdf(out_pdf, width = 13, height = 8.5)
+  gridExtra::grid.arrange(p1, p2, p3, p4, p5, layout_matrix = rbind(c(1, 2, 5), c(3, 4, 5)), widths = c(1.15, 1.15, 0.95))
   dev.off()
 
-  # Also export fig06_ecological_niche_phenology.{pdf,png} with hollow markers (shape = 21..24, fill = NA)
-  fig06_stem <- file.path(dirname(out_pdf), "fig06_ecological_niche_phenology")
-  p_outcrop <- ggplot2::ggplot(plot_df,
-                               ggplot2::aes(x = fine_bedrock_depth_cm, y = ssurgo_rock_outcrop_pct,
-                                            color = species_standardized, shape = species_standardized)) +
-    ggplot2::geom_point(fill = NA, stroke = 0.78, alpha = 0.85, size = 1.65) +
-    ggplot2::scale_shape_manual(values = dyn_shapes) +
-    ggplot2::scale_color_manual(values = dyn_pal) +
-    thm + ggplot2::labs(title = "C. Lithic Depth vs. 50m SSURGO Rock Outcrop %",
-                        x = "Depth to Lithic Bedrock Restriction (cm)",
-                        y = "SSURGO 50m Rock Outcrop Component (%)", color = "", shape = "")
-
-  p_tpi <- ggplot2::ggplot(plot_df,
-                           ggplot2::aes(x = topo_tpi_30m, y = fine_soil_ph,
-                                        color = species_standardized, shape = species_standardized)) +
-    ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "grey45") +
-    ggplot2::geom_point(fill = NA, stroke = 0.78, alpha = 0.85, size = 1.65) +
-    ggplot2::scale_shape_manual(values = dyn_shapes) +
-    ggplot2::scale_color_manual(values = dyn_pal) +
-    thm + ggplot2::labs(title = "D. 3DEP 30m Topographic Position (TPI) vs. Fine Soil pH",
-                        x = "30m Topographic Position Index (TPI, m; >0 Monadnock Dome)",
-                        y = "Fine-Grain Soil pH (H2O)", color = "", shape = "")
-
-  tryCatch({
-    pdf(paste0(fig06_stem, ".pdf"), width = 12, height = 8.5)
-    gridExtra::grid.arrange(p1, p2, p_outcrop, p_tpi, ncol = 2)
-    dev.off()
-    png(paste0(fig06_stem, ".png"), width = 12, height = 8.5, units = "in", res = 300)
-    gridExtra::grid.arrange(p1, p2, p_outcrop, p_tpi, ncol = 2)
-    dev.off()
-  }, error = function(e) {
-    try(dev.off(), silent = TRUE)
-  })
+  # Also export fig06_ecological_niche_phenology.{pdf,png} via generate_step06_pub_figures if available
+  if (exists("generate_step06_pub_figures", mode = "function")) {
+    tryCatch(
+      generate_step06_pub_figures(df, srf_res, niche_res, NULL, out_pdf),
+      error = function(e) warning("generate_step06_pub_figures warning: ", e$message)
+    )
+  }
 }
 
 # ------------------------------------------------------------------------------

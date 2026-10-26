@@ -30,6 +30,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("tibble", quietly = TRUE)) library(tibble)
   if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
+if (file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
 
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing
@@ -216,11 +217,12 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
   ucs <- if ("ucs" %in% names(out_df)) ifelse(is.na(out_df$ucs), 1.0, as.numeric(out_df$ucs)) else if ("ucs_score" %in% names(out_df)) ifelse(is.na(out_df$ucs_score), 1.0, as.numeric(out_df$ucs_score)) else rep(1.0, nrow(out_df))
   leaf_quality_weight <- pmax(0.05, solidity * ucs * ((1.0 - pmin(pct_asymmetry, 0.95))^2) * ifelse(is_contour_outlier, 0.10, 1.0))
   det_tier <- if ("determiner_tier" %in% names(out_df)) as.character(out_df$determiner_tier) else rep("Tier_3_Bronze", nrow(out_df))
-  tier_wt <- ifelse(det_tier == "Tier_1_Gold", 2.0, ifelse(det_tier == "Tier_2_Silver", 1.25, 0.75))
-  tier_wt[is.na(tier_wt)] <- 0.75
-  combined_wt <- tier_wt * leaf_quality_weight
+  tier_wt <- ifelse(det_tier == "Tier_1_Gold", 3.0, ifelse(det_tier == "Tier_2_Silver", 1.5, 0.5))
+  tier_wt[is.na(tier_wt)] <- 0.5
+  spatial_wt <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(out_df) else rep(1.0, nrow(out_df))
+  combined_wt <- tier_wt * leaf_quality_weight * spatial_wt
 
-  out_df$authority_weight <- tier_wt
+  out_df$authority_weight <- tier_wt; out_df$spatial_balance_weight <- round(spatial_wt, 6)
   out_df$sym_var <- round(sym_var, 6); out_df$asym_var <- round(asym_var, 6); out_df$pct_asymmetry <- round(pct_asymmetry, 6)
   out_df$harmonic_roughness <- round(harmonic_roughness, 6); out_df$is_contour_outlier <- is_contour_outlier; out_df$leaf_quality_weight <- round(leaf_quality_weight, 6)
   for (pc_col in c("Sym_PC1", "Sym_PC2", "Sym_PC3", "Sym_PC4", "Sym_PC5")) out_df[[pc_col]] <- 0.0
@@ -286,12 +288,23 @@ run_fourier_extraction <- function(opts) {
   message("==================================================================")
 
   vouchers_df <- if (file.exists(opts$vouchers)) read.csv(opts$vouchers, stringsAsFactors = FALSE) else NULL
-  if (!is.null(vouchers_df)) message("Loaded ", nrow(vouchers_df), " curated voucher records.")
+  sec_dup_cats <- character(0)
+  if (!is.null(vouchers_df)) {
+    if ("is_primary_duplicate" %in% names(vouchers_df)) {
+      is_sec <- toupper(trimws(as.character(vouchers_df$is_primary_duplicate))) %in% c("FALSE", "F", "0")
+      sec_dup_cats <- unique(as.character(vouchers_df$catalogNumber[is_sec]))
+      vouchers_df <- vouchers_df[!is_sec, , drop = FALSE]
+    }
+    message("Loaded ", nrow(vouchers_df), " curated primary voucher records.")
+  }
 
   # 1. Discover coordinates via Dual Ingestion Engine
   contour_files <- character(0)
   use_masks_fallback <- FALSE
   manifest_df <- if (file.exists(opts$manifest)) read.csv(opts$manifest, stringsAsFactors = FALSE) else NULL
+  if (!is.null(manifest_df) && length(sec_dup_cats) > 0 && "catalogNumber" %in% names(manifest_df)) {
+    manifest_df <- manifest_df[!as.character(manifest_df$catalogNumber) %in% sec_dup_cats, , drop = FALSE]
+  }
 
   if (!is.null(manifest_df) && nrow(manifest_df) > 0) {
     message("Ingesting via extracted leaf manifest: ", opts$manifest)
@@ -460,57 +473,43 @@ run_fourier_extraction <- function(opts) {
   coo_list <- lapply(valid_ingested, `[[`, "coo")
   shape_names_vec <- vapply(valid_ingested, `[[`, character(1), "shape_name")
 
-  # Ensure strict 1-to-1 uniqueness between fac_df rows and coo_list elements
-  keep_unique <- !duplicated(shape_names_vec, fromLast = TRUE)
-  fac_df <- fac_df[keep_unique, , drop = FALSE]
-  coo_list <- coo_list[keep_unique]
-  names(coo_list) <- shape_names_vec[keep_unique]
-  rownames(fac_df) <- names(coo_list)
+  # Ensure strict 1-to-1 uniqueness between fac_df rows and coo_list elements (and exclude secondary duplicates)
+  keep_unique <- !duplicated(shape_names_vec, fromLast = TRUE) & !(as.character(fac_df$catalogNumber) %in% sec_dup_cats)
+  fac_df <- fac_df[keep_unique, , drop = FALSE]; coo_list <- coo_list[keep_unique]
+  names(coo_list) <- shape_names_vec[keep_unique]; rownames(fac_df) <- names(coo_list)
   message(sprintf("Assembled %d valid closed contours for Elliptic Fourier Analysis.", length(coo_list)))
 
   # 3. Perform 12-Harmonic EFA via Momocs::Out() & Momocs::efourier(norm = FALSE, start = FALSE)
   message("Executing 12-harmonic EFA via Momocs::efourier(nb.h = ", opts$harmonics, ", norm = FALSE, start = FALSE)...")
-  efa_success <- FALSE
-  harm_mat <- NULL
-
+  efa_success <- FALSE; harm_mat <- NULL
   if (requireNamespace("Momocs", quietly = TRUE)) {
-    out_obj <- tryCatch(Momocs::Out(coo_list, fac = fac_df), error = function(e) {
-      message("Momocs::Out() note: ", e$message); NULL
-    })
+    out_obj <- tryCatch(Momocs::Out(coo_list, fac = fac_df), error = function(e) { message("Momocs::Out() note: ", e$message); NULL })
     if (!is.null(out_obj)) {
-      # Compute Centroid Size (CS) for each contour using Momocs::coo_centsize(outlines) prior to coo_scale()
       cs_vals <- tryCatch(Momocs::coo_centsize(out_obj), error = function(e) NULL)
       if (!is.null(cs_vals) && length(cs_vals) == nrow(fac_df)) {
         fac_df$centroid_size <- round(as.numeric(cs_vals), 4)
-        fac_df$log_centsize <- ifelse(!is.na(fac_df$centroid_size) & fac_df$centroid_size > 0,
-                                      round(log(fac_df$centroid_size), 6), NA_real_)
+        fac_df$log_centsize <- ifelse(!is.na(fac_df$centroid_size) & fac_df$centroid_size > 0, round(log(fac_df$centroid_size), 6), NA_real_)
       }
-      # Center and scale homologized outlines without 180-degree first-harmonic ellipse flips
       out_obj <- Momocs::coo_center(out_obj) %>% Momocs::coo_scale()
-      ef_res <- tryCatch(Momocs::efourier(out_obj, nb.h = opts$harmonics, norm = FALSE, start = FALSE), error = function(e) {
-        message("Momocs::efourier() note: ", e$message); NULL
-      })
+      ef_res <- tryCatch(Momocs::efourier(out_obj, nb.h = opts$harmonics, norm = FALSE, start = FALSE), error = function(e) { message("Momocs::efourier() note: ", e$message); NULL })
       if (!is.null(ef_res) && !is.null(ef_res$coe)) {
-        harm_mat <- as.matrix(ef_res$coe)
-        efa_success <- TRUE
+        harm_mat <- as.matrix(ef_res$coe); efa_success <- TRUE
         message("Momocs EFA extraction successful across ", nrow(harm_mat), " outlines.")
       }
     }
   }
 
-  # Fallback to pure-R vectorized EFA if Momocs not available
   if (!efa_success || is.null(harm_mat)) {
     message("Running mathematical homologized EFA engine (norm = FALSE, start = FALSE)...")
     harm_list <- lapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = opts$harmonics, norm = FALSE, start = FALSE))
-    harm_mat <- do.call(rbind, harm_list)
-    colnames(harm_mat) <- harmonic_names
+    harm_mat <- do.call(rbind, harm_list); colnames(harm_mat) <- harmonic_names
   }
 
   # Harmonize column names to standard A1-D12
-  if (ncol(harm_mat) == length(harmonic_names)) colnames(harm_mat) <- harmonic_names
+  if (all(harmonic_names %in% colnames(harm_mat))) harm_mat <- harm_mat[, harmonic_names, drop = FALSE] else if (ncol(harm_mat) == length(harmonic_names)) colnames(harm_mat) <- harmonic_names
   if (!is.null(vouchers_df)) {
     meta_cols <- intersect(names(vouchers_df), c("catalogNumber", "scientificName", "species_raw", "determiner_raw", "determiner_tier",
-                                                 "county", "stateProvince", "latitude", "longitude", "pheno_sin", "pheno_cos", "regional_group"))
+                                                 "county", "stateProvince", "latitude", "longitude", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), meta_cols, drop = FALSE]
     fac_df$.row_ord <- seq_len(nrow(fac_df))
     fac_df <- merge(fac_df, v_sub, by = "catalogNumber", all.x = TRUE, sort = FALSE)
@@ -520,22 +519,24 @@ run_fourier_extraction <- function(opts) {
   else fac_df$scientificName <- ifelse(is.na(fac_df$scientificName) | fac_df$scientificName == "", fac_df$species_raw, fac_df$scientificName)
   if (!"determiner_tier" %in% names(fac_df)) fac_df$determiner_tier <- "Tier_3_Bronze"
   else fac_df$determiner_tier <- ifelse(is.na(fac_df$determiner_tier) | fac_df$determiner_tier == "", "Tier_3_Bronze", fac_df$determiner_tier)
-  fac_df$authority_weight <- ifelse(fac_df$determiner_tier == "Tier_1_Gold", 2.0, ifelse(fac_df$determiner_tier == "Tier_2_Silver", 1.25, 0.75))
+  fac_df$authority_weight <- ifelse(fac_df$determiner_tier == "Tier_1_Gold", 3.0, ifelse(fac_df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
+  fac_df$spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(fac_df) else rep(1.0, nrow(fac_df))
   efa_df <- cbind(fac_df, as.data.frame(harm_mat))
   efa_df$assigned_tier <- ifelse(grepl("^tier_?1", efa_df$assigned_tier, ignore.case = TRUE), "Tier_1_Direct",
                                  ifelse(grepl("^tier_?2", efa_df$assigned_tier, ignore.case = TRUE), "Tier_2_Reflected", efa_df$assigned_tier))
   efa_df$tier_assignment <- efa_df$assigned_tier
 
-  # 4. Authority-Tier-Weighted Symmetric Fourier Decomposition & PCA (PC1-PC5 / Sym_PC1-Sym_PC5)
+  # 4. Authority-Tier & Spatial-Density-Weighted Symmetric Fourier Decomposition & PCA (PC1-PC5 / Sym_PC1-Sym_PC5)
   message("Extracting symmetric harmonic coefficients (An and Dn harmonics)...")
   sym_names <- c(paste0("A", seq_len(opts$harmonics)), paste0("D", seq_len(opts$harmonics)))
   sym_harmonics <- harm_mat[, sym_names, drop = FALSE]
   ef_input <- if (exists("ef_res") && !is.null(ef_res)) { ef_res$fac <- fac_df; ef_res } else list(coe = harm_mat, fac = fac_df)
   sym_res <- extract_symmetric_fourier_pcs(ef_input, fac_df = fac_df, num_pcs = opts$num_pcs, permutations = opts$permutations, seed = opts$seed, run_permanova = FALSE)
-  for (scol in c("authority_weight", "sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", paste0("Sym_PC", seq_len(opts$num_pcs)))) {
+  for (scol in c("authority_weight", "spatial_balance_weight", "sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", paste0("Sym_PC", seq_len(opts$num_pcs)))) {
     if (scol %in% names(sym_res$df)) efa_df[[scol]] <- sym_res$df[[scol]]
   }
-  tier_wt <- efa_df$authority_weight; combined_wt <- tier_wt * efa_df$leaf_quality_weight
+  tier_wt <- efa_df$authority_weight; leaf_quality_weight <- efa_df$leaf_quality_weight; spatial_wt <- efa_df$spatial_balance_weight
+  combined_wt <- tier_wt * leaf_quality_weight * spatial_wt
 
   message("Running authority-tier-weighted full EFA PCA (PC1-PC5) and symmetric PCA (Sym_PC1-Sym_PC5)...")
   complete_idx <- which(complete.cases(harm_mat))
@@ -570,7 +571,7 @@ run_fourier_extraction <- function(opts) {
                                        ifelse(efa_df$assigned_tier == "Tier_2_Reflected", "Tier 2", NA_character_))
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "tier_assignment", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
-                 "scientificName", "species_raw", "determiner_tier", "authority_weight", "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "solidity", "ucs_score",
+                 "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight", "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "solidity", "ucs_score",
                  "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
@@ -606,7 +607,7 @@ run_fourier_extraction <- function(opts) {
     harm_medians <- vapply(grp[, all_harm_cols, drop = FALSE], stats::median, numeric(1), na.rm = TRUE)
     foliar_var <- if (n_leaves > 1) round(mean(apply(as.matrix(grp[, sym_names, drop = FALSE]), 2, stats::var, na.rm = TRUE), na.rm = TRUE), 8) else 0.0
     det_t <- if ("determiner_tier" %in% names(grp) && !is.na(grp$determiner_tier[1])) as.character(grp$determiner_tier[1]) else "Tier_3_Bronze"
-    auth_w <- ifelse(det_t == "Tier_1_Gold", 2.0, ifelse(det_t == "Tier_2_Silver", 1.25, 0.75))
+    auth_w <- ifelse(det_t == "Tier_1_Gold", 3.0, ifelse(det_t == "Tier_2_Silver", 1.5, 0.5))
     rec <- data.frame(catalogNumber = cat_num, plant_individual_id = p_id, leaf_count = n_leaves,
                       n_tier1_leaves = n_tier1_leaves, n_tier2_leaves = n_tier2_leaves, morph_tier_source = morph_tier_source,
                       foliar_variance = foliar_var, assigned_tier = grp$assigned_tier[1], tier_assignment = grp$tier_assignment[1],
@@ -616,7 +617,7 @@ run_fourier_extraction <- function(opts) {
     rec$centroid_size <- if (is.finite(med_cs) && med_cs > 0) round(med_cs, 4) else NA_real_
     rec$log_centsize <- if (!is.na(rec$centroid_size) && rec$centroid_size > 0) round(log(rec$centroid_size), 6) else NA_real_
     other_meta <- intersect(c("pixels_per_mm", "is_calibrated_mm", "determiner_raw", "county", "stateProvince", "latitude", "longitude",
-                              "pheno_sin", "pheno_cos", "regional_group", "aspect_ratio", "solidity", "ucs_score", "area_px",
+                              "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight", "aspect_ratio", "solidity", "ucs_score", "area_px",
                               "sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight"), names(grp))
     for (m_col in other_meta) {
       vals <- stats::na.omit(grp[[m_col]])
@@ -644,7 +645,7 @@ run_fourier_extraction <- function(opts) {
 
   lead_spec_cols <- c("catalogNumber", "plant_individual_id", "leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source",
                       "foliar_variance", "assigned_tier", "tier_assignment", "reconstruction_tier",
-                      "pixels_per_mm", "is_calibrated_mm", "scientificName", "species_raw", "determiner_tier", "authority_weight",
+                      "pixels_per_mm", "is_calibrated_mm", "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight",
                       "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "solidity", "ucs_score",
                       "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize")
   lead_spec_cols <- intersect(lead_spec_cols, names(specimen_df))
@@ -765,9 +766,8 @@ run_fourier_extraction <- function(opts) {
 
     # 7. Diagnostic 2D PCA Morphospace Export (Tier 1 Direct vs. Tier 2 Reflected, Hollow Markers & 95% Ellipses)
     dir.create(dirname(opts$plot_out), recursive = TRUE, showWarnings = FALSE)
-    if (file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
     if (exists("render_tier1_vs_tier2_2d_pdf", mode = "function")) {
-      render_tier1_vs_tier2_2d_pdf(tier_manifest, opts$plot_out, if (exists("pca_fit")) pca_fit else NULL, sym_res$pca)
+      render_tier1_vs_tier2_2d_pdf(tier_manifest, opts$plot_out, if (exists("pca_fit")) pca_fit else NULL, sym_res$pca, permanova_df)
     } else {
       pdf(opts$plot_out, width = 10, height = 5)
       par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.0, 1.0))

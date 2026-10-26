@@ -603,6 +603,384 @@ def stratify_duplicates(
     return df
 
 
+def spatially_balance_and_thin_vouchers(
+    df: pd.DataFrame,
+    spatial_thin_km: float = 0.0,
+    max_per_state: Optional[int] = None,
+    max_per_region: Optional[int] = None,
+    primary_duplicates_only: bool = True,
+    preserve_all_gold: bool = True,
+    manifest_df: Optional[pd.DataFrame] = None,
+    workspace_dir: Optional[Path] = None,
+) -> pd.DataFrame:
+    """
+    Stratifies, deduplicates, spatially thins, and computes continuous inverse
+    spatial-density weights (`spatial_balance_weight`) for botanical vouchers.
+    """
+    if df is None:
+        return pd.DataFrame(columns=EXPORT_COLUMNS + ["spatial_balance_weight"])
+    if df.empty:
+        out_empty = df.copy()
+        out_empty["spatial_balance_weight"] = pd.Series(dtype=float)
+        return out_empty
+
+    out_df = df.copy()
+
+    # Ensure standardized taxon column exists
+    if "species_standardized" not in out_df.columns:
+        src_col = "scientificName" if "scientificName" in out_df.columns else (
+            "species_raw" if "species_raw" in out_df.columns else None
+        )
+        if src_col is not None:
+            out_df["species_standardized"] = out_df[src_col].map(
+                lambda x: standardize_packera_taxon(str(x)) or str(x).strip() or "Unknown"
+                if not pd.isna(x) else "Unknown"
+            )
+        else:
+            out_df["species_standardized"] = "Unknown"
+    else:
+        src_col = "scientificName" if "scientificName" in out_df.columns else (
+            "species_raw" if "species_raw" in out_df.columns else None
+        )
+        def _fill_sp(row: pd.Series) -> str:
+            val = row.get("species_standardized")
+            if val is not None and not pd.isna(val) and str(val).strip():
+                return str(val).strip()
+            if src_col is not None:
+                raw_v = row.get(src_col)
+                if raw_v is not None and not pd.isna(raw_v) and str(raw_v).strip():
+                    return standardize_packera_taxon(str(raw_v)) or str(raw_v).strip()
+            return "Unknown"
+        out_df["species_standardized"] = out_df.apply(_fill_sp, axis=1)
+
+    # Step A: Exsiccatae Deduplication
+    if primary_duplicates_only:
+        if "is_primary_duplicate" not in out_df.columns:
+            if any(c in out_df.columns for c in ("recordedBy", "recordNumber", "exsiccatae_key")):
+                out_df = stratify_duplicates(out_df, workspace_dir=workspace_dir)
+            else:
+                out_df["is_primary_duplicate"] = True
+        prim_mask = out_df["is_primary_duplicate"].map(
+            lambda v: v is True or str(v).strip().lower() in {"true", "1", "t", "yes"}
+        )
+        out_df = out_df.loc[prim_mask].reset_index(drop=True)
+        if out_df.empty:
+            out_df["spatial_balance_weight"] = pd.Series(dtype=float)
+            return out_df
+
+    # Step B: Candidate Priority Ranking
+    t1_leaf_counts: Dict[str, int] = {}
+    if manifest_df is not None and not manifest_df.empty and "catalogNumber" in manifest_df.columns:
+        tier_col = "assigned_tier" if "assigned_tier" in manifest_df.columns else (
+            "tier_assignment" if "tier_assignment" in manifest_df.columns else None
+        )
+        if tier_col is not None:
+            t1_rows = manifest_df[
+                manifest_df[tier_col].astype(str).str.strip().str.lower().str.match(r"^tier_?1")
+            ]
+        else:
+            t1_rows = manifest_df
+        for cat_k, cnt in t1_rows["catalogNumber"].astype(str).value_counts().items():
+            t1_leaf_counts[str(cat_k)] = int(cnt)
+
+    lat_col = "decimalLatitude" if "decimalLatitude" in out_df.columns else (
+        "latitude" if "latitude" in out_df.columns else None
+    )
+    lon_col = "decimalLongitude" if "decimalLongitude" in out_df.columns else (
+        "longitude" if "longitude" in out_df.columns else None
+    )
+
+    n_rows = len(out_df)
+    lats: List[Optional[float]] = [None] * n_rows
+    lons: List[Optional[float]] = [None] * n_rows
+    priority_tuples: List[Tuple[int, int, int, float, float, str]] = []
+    is_gold_flags: List[bool] = []
+
+    for i in range(n_rows):
+        row = out_df.iloc[i]
+        cat_str = str(row.get("catalogNumber", i))
+
+        # 1. has_type_status
+        t_stat = str(row.get("type_status", "") if not pd.isna(row.get("type_status", "")) else "").strip()
+        has_type = 1 if t_stat and t_stat.lower() not in {
+            "", "none", "nan", "null", "not a type", "notatype", "unspecified"
+        } else 0
+
+        # 2. determiner_tier
+        tier_str = str(row.get("determiner_tier", "") if not pd.isna(row.get("determiner_tier", "")) else "").strip()
+        tier_score = 3 if tier_str == "Tier_1_Gold" else (2 if tier_str == "Tier_2_Silver" else 1)
+        is_gold_flags.append(tier_str == "Tier_1_Gold")
+
+        # 3. n_tier1_leaves
+        if cat_str in t1_leaf_counts:
+            n_t1 = t1_leaf_counts[cat_str]
+        elif "n_tier1_leaves" in out_df.columns and not pd.isna(row.get("n_tier1_leaves")):
+            try:
+                n_t1 = int(float(row.get("n_tier1_leaves", 0)))
+            except (ValueError, TypeError):
+                n_t1 = 0
+        else:
+            n_t1 = 0
+
+        # Coordinates & 4. coordinate_precision
+        lat_v: Optional[float] = None
+        lon_v: Optional[float] = None
+        if lat_col and lon_col:
+            try:
+                lv = float(row.get(lat_col))
+                lnv = float(row.get(lon_col))
+                if math.isfinite(lv) and math.isfinite(lnv):
+                    lat_v, lon_v = lv, lnv
+            except (ValueError, TypeError):
+                pass
+        lats[i] = lat_v
+        lons[i] = lon_v
+
+        coord_prec = 0.0
+        if lat_v is not None and lon_v is not None:
+            unc_raw = row.get("coordinateUncertainty")
+            try:
+                unc_f = float(unc_raw)
+                if math.isfinite(unc_f) and unc_f >= 0.0:
+                    coord_prec = 1.0 / (1.0 + unc_f)
+                else:
+                    coord_prec = 1.0 / (1.0 + 5000.0)
+            except (ValueError, TypeError):
+                coord_prec = 1.0 / (1.0 + 5000.0)
+
+        # 5. image_resolution_score
+        img_p = str(row.get("image_path", "") if not pd.isna(row.get("image_path", "")) else "")
+        res_score = get_image_resolution_score(img_p, workspace_dir=workspace_dir)
+
+        priority_tuples.append((has_type, tier_score, n_t1, round(coord_prec, 8), round(res_score, 4), cat_str))
+
+    active_indices = list(range(n_rows))
+
+    # Step C: Spatial Grid Thinning (spatial_thin_km > 0)
+    if spatial_thin_km is not None and float(spatial_thin_km) > 0.0:
+        thin_km = float(spatial_thin_km)
+        dlat = thin_km / 111.32
+        cell_map: Dict[Tuple[str, int, int], List[int]] = {}
+        non_geo_indices: List[int] = []
+
+        for idx in active_indices:
+            lat_v = lats[idx]
+            lon_v = lons[idx]
+            sp_val = str(out_df.iloc[idx]["species_standardized"])
+            if lat_v is None or lon_v is None:
+                non_geo_indices.append(idx)
+                continue
+            cos_lat = max(math.cos(math.radians(lat_v)), 1e-4)
+            dlon = thin_km / (111.32 * cos_lat)
+            lat_bin = int(math.floor(lat_v / dlat))
+            lon_bin = int(math.floor(lon_v / dlon))
+            cell_map.setdefault((sp_val, lat_bin, lon_bin), []).append(idx)
+
+        thinned_indices: List[int] = []
+        for _cell_key, cell_idxs in cell_map.items():
+            cell_idxs_sorted = sorted(cell_idxs, key=lambda i: priority_tuples[i], reverse=True)
+            retained_cell = [cell_idxs_sorted[0]]
+            if preserve_all_gold:
+                for i in cell_idxs_sorted[1:]:
+                    if is_gold_flags[i]:
+                        retained_cell.append(i)
+            thinned_indices.extend(retained_cell)
+
+        thinned_indices.extend(non_geo_indices)
+        active_indices = sorted(set(thinned_indices))
+
+    def _select_spatially_spread_quota(
+        cand_pool: List[int],
+        quota: int,
+        stratum_values: Dict[int, str],
+    ) -> List[int]:
+        """
+        Selects up to `quota` indices from `cand_pool`, preserving all Gold anchors
+        when `preserve_all_gold=True` and spreading remaining selections across
+        `stratum_values` (counties or states) and farthest Haversine distance.
+        """
+        if len(cand_pool) <= quota:
+            return sorted(cand_pool)
+
+        if preserve_all_gold:
+            gold_idxs = [i for i in cand_pool if is_gold_flags[i]]
+            rem_pool = [i for i in cand_pool if not is_gold_flags[i]]
+        else:
+            gold_idxs = []
+            rem_pool = list(cand_pool)
+
+        rem_pool.sort(key=lambda i: priority_tuples[i], reverse=True)
+        selected: List[int] = list(gold_idxs)
+        if len(selected) >= quota:
+            return sorted(selected) if preserve_all_gold else sorted(selected[:quota])
+
+        stratum_counts: Dict[str, int] = {}
+        for i in selected:
+            st_key = stratum_values[i]
+            stratum_counts[st_key] = stratum_counts.get(st_key, 0) + 1
+
+        while len(selected) < quota and rem_pool:
+            min_cnt = min(stratum_counts.get(stratum_values[i], 0) for i in rem_pool)
+            eligible = [i for i in rem_pool if stratum_counts.get(stratum_values[i], 0) == min_cnt]
+
+            sel_geo = [i for i in selected if lats[i] is not None and lons[i] is not None]
+            if not sel_geo:
+                best_i = eligible[0]
+            else:
+                best_i = eligible[0]
+                best_score: Tuple[float, Tuple[int, int, int, float, float, str]] = (-1.0, priority_tuples[best_i])
+                for cand_i in eligible:
+                    if lats[cand_i] is not None and lons[cand_i] is not None:
+                        min_d_km = min(
+                            haversine_distance_meters(
+                                lats[cand_i], lons[cand_i], lats[s_i], lons[s_i]
+                            ) / 1000.0
+                            for s_i in sel_geo
+                        )
+                    else:
+                        min_d_km = 0.0
+                    cand_score = (round(min_d_km, 2), priority_tuples[cand_i])
+                    if cand_score > best_score:
+                        best_score = cand_score
+                        best_i = cand_i
+
+            selected.append(best_i)
+            st_key = stratum_values[best_i]
+            stratum_counts[st_key] = stratum_counts.get(st_key, 0) + 1
+            rem_pool.remove(best_i)
+
+        return sorted(selected)
+
+    # Step D.1: Per-State Quota Balancing (max_per_state > 0)
+    if max_per_state is not None and int(max_per_state) > 0:
+        state_quota = int(max_per_state)
+        state_groups: Dict[Tuple[str, str], List[int]] = {}
+        county_labels: Dict[int, str] = {}
+        for idx in active_indices:
+            row = out_df.iloc[idx]
+            sp_val = str(row["species_standardized"])
+            st_raw = row.get("stateProvince", "")
+            st_val = str(st_raw if not pd.isna(st_raw) else "").strip().upper() or "UNKNOWN_STATE"
+            cnty_raw = row.get("county", "")
+            cnty_val = str(cnty_raw if not pd.isna(cnty_raw) else "").strip().upper()
+            if not cnty_val:
+                if lats[idx] is not None and lons[idx] is not None:
+                    cnty_val = f"GRID_{int(round(lats[idx] * 4.0))}_{int(round(lons[idx] * 4.0))}"
+                else:
+                    cnty_val = f"UNSPECIFIED_{idx}"
+            county_labels[idx] = cnty_val
+            state_groups.setdefault((sp_val, st_val), []).append(idx)
+
+        state_balanced: List[int] = []
+        for _grp_key, grp_idxs in state_groups.items():
+            state_balanced.extend(_select_spatially_spread_quota(grp_idxs, state_quota, county_labels))
+        active_indices = sorted(set(state_balanced))
+
+    # Step D.2: Per-Biogeographic-Region Quota Balancing (max_per_region > 0)
+    if max_per_region is not None and int(max_per_region) > 0:
+        region_quota = int(max_per_region)
+        region_groups: Dict[Tuple[str, str], List[int]] = {}
+        state_labels: Dict[int, str] = {}
+        for idx in active_indices:
+            row = out_df.iloc[idx]
+            sp_val = str(row["species_standardized"])
+            reg_raw = row.get("regional_group", "")
+            reg_val = str(reg_raw if not pd.isna(reg_raw) else "").strip() or "Other_US"
+            st_raw = row.get("stateProvince", "")
+            st_val = str(st_raw if not pd.isna(st_raw) else "").strip().upper() or "UNKNOWN_STATE"
+            state_labels[idx] = st_val
+            region_groups.setdefault((sp_val, reg_val), []).append(idx)
+
+        region_balanced: List[int] = []
+        for _grp_key, grp_idxs in region_groups.items():
+            region_balanced.extend(_select_spatially_spread_quota(grp_idxs, region_quota, state_labels))
+        active_indices = sorted(set(region_balanced))
+
+    out_df = out_df.iloc[active_indices].reset_index(drop=True)
+    if out_df.empty:
+        out_df["spatial_balance_weight"] = pd.Series(dtype=float)
+        return out_df
+
+    # Step E: Compute Continuous `spatial_balance_weight`
+    ret_lats = np.array(
+        [lats[i] if lats[i] is not None else np.nan for i in active_indices],
+        dtype=float,
+    )
+    ret_lons = np.array(
+        [lons[i] if lons[i] is not None else np.nan for i in active_indices],
+        dtype=float,
+    )
+    ret_states = [
+        str(out_df.iloc[k].get("stateProvince", "") if not pd.isna(out_df.iloc[k].get("stateProvince", "")) else "").strip().upper()
+        for k in range(len(out_df))
+    ]
+    ret_taxa = out_df["species_standardized"].astype(str).tolist()
+
+    spatial_weights = np.ones(len(out_df), dtype=float)
+    bandwidth_km = 25.0
+
+    taxon_to_rows: Dict[str, List[int]] = {}
+    for k, sp_name in enumerate(ret_taxa):
+        taxon_to_rows.setdefault(sp_name, []).append(k)
+
+    for _sp_name, t_idxs in taxon_to_rows.items():
+        t_arr = np.array(t_idxs, dtype=int)
+        valid_geo_mask = np.isfinite(ret_lats[t_arr]) & np.isfinite(ret_lons[t_arr])
+        geo_idxs = t_arr[valid_geo_mask]
+        if len(geo_idxs) == 0:
+            continue
+
+        # State frequency factor f_state = N_{taxon, state(i)} / median_s(N_{taxon, s})
+        st_counts: Dict[str, int] = {}
+        for k in t_idxs:
+            st_s = ret_states[k]
+            if st_s:
+                st_counts[st_s] = st_counts.get(st_s, 0) + 1
+        med_state_cnt = float(np.median(list(st_counts.values()))) if st_counts else 1.0
+        med_state_cnt = max(med_state_cnt, 1.0)
+
+        f_state = np.array(
+            [
+                max(st_counts.get(ret_states[k], 0) / med_state_cnt, 1e-6)
+                if ret_states[k] in st_counts else 1.0
+                for k in geo_idxs
+            ],
+            dtype=float,
+        )
+
+        # Local 25 km Gaussian kernel specimen density d_local
+        rad_lat = np.radians(ret_lats[geo_idxs])
+        rad_lon = np.radians(ret_lons[geo_idxs])
+        dlat_mat = rad_lat[:, None] - rad_lat[None, :]
+        dlon_mat = rad_lon[:, None] - rad_lon[None, :]
+        a_mat = (
+            np.sin(dlat_mat / 2.0) ** 2
+            + np.cos(rad_lat[:, None]) * np.cos(rad_lat[None, :]) * (np.sin(dlon_mat / 2.0) ** 2)
+        )
+        dist_km_mat = 2.0 * 6371.0 * np.arcsin(np.clip(np.sqrt(a_mat), 0.0, 1.0))
+        kern_mat = np.exp(-(dist_km_mat ** 2) / (2.0 * (bandwidth_km ** 2)))
+        np.fill_diagonal(kern_mat, 0.0)
+        d_local = 1.0 + np.sum(kern_mat, axis=1)
+
+        w_raw = 1.0 / np.sqrt(np.maximum(d_local * f_state, 1e-8))
+        mean_raw = float(np.mean(w_raw))
+        if mean_raw > 0.0:
+            w_norm = w_raw / mean_raw
+        else:
+            w_norm = np.ones_like(w_raw)
+
+        w_spatial = np.clip(w_norm, 0.20, 3.00)
+        for _ in range(3):
+            m_cur = float(np.mean(w_spatial))
+            if m_cur > 0.0:
+                w_spatial = np.clip(w_spatial / m_cur, 0.20, 3.00)
+
+        spatial_weights[geo_idxs] = np.round(w_spatial, 6)
+
+    out_df["spatial_balance_weight"] = spatial_weights
+    return out_df
+
+
 
 def setup_logger(log_file_path: Optional[Path] = None, verbose: bool = False) -> logging.Logger:
     """Configures or retrieves a formatted logger for voucher harvesting."""
@@ -1230,6 +1608,9 @@ class VoucherHarvester:
         workspace_dir: Path = DEFAULT_WORKSPACE,
         logger: Optional[logging.Logger] = None,
         force: bool = False,
+        spatial_thin_km: float = 0.0,
+        max_per_state: Optional[int] = None,
+        max_per_region: Optional[int] = None,
     ):
         self.taxa = taxa or DEFAULT_TARGET_TAXA
         self.max_uncertainty_meters = max_uncertainty_meters
@@ -1245,6 +1626,9 @@ class VoucherHarvester:
         self.workspace_dir = Path(workspace_dir)
         self.logger = logger or logging.getLogger("VoucherHarvester")
         self.force = force
+        self.spatial_thin_km = float(spatial_thin_km or 0.0)
+        self.max_per_state = max_per_state
+        self.max_per_region = max_per_region
 
     def harvest(self) -> pd.DataFrame:
         """Harvests and normalizes Darwin Core occurrence records across configured taxa."""
@@ -1413,6 +1797,20 @@ class VoucherHarvester:
         df = pd.DataFrame(all_curated_records)
         if not df.empty:
             df = stratify_duplicates(df, workspace_dir=self.workspace_dir, logger=self.logger)
+            has_thin_or_quota = (
+                self.spatial_thin_km > 0.0
+                or (self.max_per_state is not None and self.max_per_state > 0)
+                or (self.max_per_region is not None and self.max_per_region > 0)
+            )
+            df = spatially_balance_and_thin_vouchers(
+                df,
+                spatial_thin_km=self.spatial_thin_km,
+                max_per_state=self.max_per_state,
+                max_per_region=self.max_per_region,
+                primary_duplicates_only=has_thin_or_quota,
+                preserve_all_gold=True,
+                workspace_dir=self.workspace_dir,
+            )
         return df
 
     def download_and_validate_media(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
