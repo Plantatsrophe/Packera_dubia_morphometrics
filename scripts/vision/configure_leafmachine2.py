@@ -274,8 +274,6 @@ def resolve_pcd_weights(
         / "LeafPriority.pt",
         root / "models" / target_name,
         root / "models" / "LeafPriority.pt",
-        root / "models" / "lm2_packera_pcd_finetuned.pth",
-        root / "models" / "Packera_LeafPriority.pth",
         root / "models" / "LeafPriority.pth",
         root / "LeafMachine2" / "leafmachine2" / "component_detector" / "models" / target_name,
     ]

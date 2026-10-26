@@ -96,6 +96,7 @@ MODEL_ZOO_FALLBACK_WEIGHTS = (
 DEFAULT_POINTREND_WEIGHT_REL_PATHS: Tuple[str, ...] = (
     "LeafMachine2/leafmachine2/segmentation/models/leaf_seg_rcnn_v2_1/model_final.pth",
     "models/leaf_seg_rcnn_v2_1.pth",
+    "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth",
 )
 
 

@@ -17,7 +17,7 @@ paths:
   cda_biplot_pdf: "outputs/figures/cda_passive_projection.pdf"
   gmm_report_csv: "outputs/reports/gmm_bayes_factors_summary.csv"
   summary_log: "outputs/reports/voucher_ingestion_summary.log"
-  model_weights: "models/lm2_packera_pcd_finetuned.pth"
+  model_weights: "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
   quarantine_dir: "data/raw_vouchers_quarantine"
   tables_dir: "data/tables"
   figures_dir: "outputs/figures"
@@ -25,7 +25,7 @@ paths:
 
 # Model Checkpoints & Remote Artifacts
 models:
-  pcd_weights_path: "models/lm2_packera_pcd_finetuned.pth"
+  pcd_weights_path: "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
   pcd_weights_url: "https://github.com/Plantatsrophe/Packera_dubia_morphometrics/releases/download/v1.0-weights/lm2_packera_pcd_finetuned.pth"
   pcd_weights_sha256: "" # Optional checksum verification
 

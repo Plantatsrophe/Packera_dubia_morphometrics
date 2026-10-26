@@ -254,7 +254,15 @@ class PathsConfig:
     cda_biplot_pdf: Path = PROJECT_ROOT / "outputs" / "figures" / "cda_passive_projection.pdf"
     gmm_report_csv: Path = PROJECT_ROOT / "outputs" / "reports" / "gmm_bayes_factors_summary.csv"
     summary_log: Path = PROJECT_ROOT / "outputs" / "reports" / "voucher_ingestion_summary.log"
-    model_weights: Path = PROJECT_ROOT / "models" / "lm2_packera_pcd_finetuned.pth"
+    model_weights: Path = (
+        PROJECT_ROOT
+        / "LeafMachine2"
+        / "leafmachine2"
+        / "segmentation"
+        / "models"
+        / "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR"
+        / "model_final.pth"
+    )
     quarantine_dir: Path = PROJECT_ROOT / "data" / "raw_vouchers_quarantine"
     tables_dir: Path = PROJECT_ROOT / "data" / "tables"
     figures_dir: Path = PROJECT_ROOT / "outputs" / "figures"
@@ -415,7 +423,15 @@ class SegmentationConfig:
 @dataclass(frozen=True)
 class ModelsConfig:
     """Model weights checkpoint paths, remote URLs, and integrity hashes."""
-    pcd_weights_path: Path = PROJECT_ROOT / "models" / "lm2_packera_pcd_finetuned.pth"
+    pcd_weights_path: Path = (
+        PROJECT_ROOT
+        / "LeafMachine2"
+        / "leafmachine2"
+        / "segmentation"
+        / "models"
+        / "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR"
+        / "model_final.pth"
+    )
     pcd_weights_url: str = (
         "https://github.com/Plantatsrophe/Packera_dubia_morphometrics/releases/download/v1.0-weights/lm2_packera_pcd_finetuned.pth"
     )

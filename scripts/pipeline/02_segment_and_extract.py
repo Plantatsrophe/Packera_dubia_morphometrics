@@ -387,7 +387,7 @@ class LM2Stage1Detector:
         self,
         image_bgr: np.ndarray,
         catalog_number: Optional[str] = None,
-        use_cache: bool = True,
+        use_cache: bool = False,
         precomputed_letterbox: Optional[np.ndarray] = None,
     ) -> List[Tuple[Tuple[int, int, int, int], float, int]]:
         """
@@ -396,8 +396,8 @@ class LM2Stage1Detector:
         """
         sheet_h, sheet_w = image_bgr.shape[:2]
 
-        # 1. Check precomputed LM2 Plant_Components YOLO labels if available
-        if use_cache and self.lm2_project_dir and catalog_number:
+        # 1. Check precomputed LM2 Plant_Components YOLO labels only when use_cache=True and live model is unavailable
+        if use_cache and self.model is None and self.lm2_project_dir and catalog_number:
             label_candidates = [
                 self.lm2_project_dir / "Data" / "precomputed_annotations" / "Plant_Components" / "labels" / f"{catalog_number}.txt",
                 self.lm2_project_dir / "Plant_Components" / "labels" / f"{catalog_number}.txt",
@@ -503,7 +503,8 @@ class PointRendInferenceEngine:
         # Locate accompanying configuration YAML
         cfg_candidates = [
             self.weights_path.parent / "cfg_output.yaml",
-            PROJECT_ROOT / "LeafMachine2" / "leafmachine2" / "segmentation" / "models" / "Packera_LeafPriority" / "cfg_output.yaml",
+            PROJECT_ROOT / "LeafMachine2" / "leafmachine2" / "segmentation" / "models" / "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR" / "cfg_output.yaml",
+            PROJECT_ROOT / "LeafMachine2" / "leafmachine2" / "segmentation" / "models" / "leaf_seg_rcnn_v2_1" / "cfg_output.yaml",
             PROJECT_ROOT / "models" / "cfg_output.yaml",
         ]
         cfg_yaml = None
@@ -861,11 +862,7 @@ class SegmentAndExtractPipeline:
         self.ruler_confidence_thresh = ruler_confidence_thresh
 
         # Resolve LM2 project directory and build canonical LM2 runtime config
-        if lm2_project_dir is not None:
-            self.lm2_project_dir: Optional[Path] = Path(lm2_project_dir)
-        else:
-            cand_lm2_dir = self.output_dir.parent / "LM2_Project"
-            self.lm2_project_dir = cand_lm2_dir if cand_lm2_dir.exists() else None
+        self.lm2_project_dir: Optional[Path] = Path(lm2_project_dir) if lm2_project_dir is not None else None
 
         self.lm2_config = generate_high_performance_config(
             pipeline_cfg=self.config,
@@ -1119,16 +1116,17 @@ class SegmentAndExtractPipeline:
             ruler_future = self.ruler_executor.submit(detect_ruler_scale_hough, img_bgr)
 
         # 2. Stage 1 Full-Sheet Organ Detection (LeafPriority.pt 11-class detector)
+        use_s1_cache = bool(self.lm2_project_dir is not None and not self.force)
         if precomputed_s1_letterbox is not None:
             stage1_detections = self.stage1_detector.predict(
                 img_bgr,
                 catalog_number=catalog_number,
-                use_cache=not self.force,
+                use_cache=use_s1_cache,
                 precomputed_letterbox=precomputed_s1_letterbox,
             )
         else:
             stage1_detections = self.stage1_detector.predict(
-                img_bgr, catalog_number=catalog_number, use_cache=not self.force
+                img_bgr, catalog_number=catalog_number, use_cache=use_s1_cache
             )
 
         capitulum_detections: List[Tuple[Tuple[int, int, int, int], Optional[np.ndarray], float, int]] = []

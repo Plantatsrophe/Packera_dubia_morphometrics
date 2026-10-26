@@ -135,7 +135,7 @@ def ensure_model_weights(
         raw_path = (
             models_dict.get("pcd_weights_path")
             or paths_dict.get("model_weights")
-            or "models/lm2_packera_pcd_finetuned.pth"
+            or "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
         )
         weights_path = Path(raw_path)
         if not weights_path.is_absolute():

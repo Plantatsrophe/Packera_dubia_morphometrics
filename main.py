@@ -358,10 +358,17 @@ def check_environment(args: Optional[argparse.Namespace] = None) -> bool:
         if strict:
             critical_failure = True
 
+    default_seg_weights = (
+        "LeafMachine2/leafmachine2/segmentation/models/"
+        "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
+    )
     model_rel = (
-        parsed_config.get("paths", {}).get("model_weights", "models/lm2_packera_pcd_finetuned.pth")
+        (
+            parsed_config.get("segmentation", {}).get("model_weights")
+            or parsed_config.get("paths", {}).get("model_weights", default_seg_weights)
+        )
         if parsed_config
-        else "models/lm2_packera_pcd_finetuned.pth"
+        else default_seg_weights
     )
     model_path = PROJECT_ROOT / model_rel
     if not (model_path.exists() and model_path.is_file() and model_path.stat().st_size > 0):
@@ -519,11 +526,27 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     if args.weights:
         model_weights = Path(args.weights)
     else:
-        try:
-            model_weights = ensure_model_weights(cfg)
-        except Exception as exc:
-            logger.warning(f"Automated weights acquisition could not complete: {exc}")
-            model_weights = Path(cfg.get("paths", {}).get("model_weights", "models/lm2_packera_pcd_finetuned.pth"))
+        seg_weights_cand = None
+        if isinstance(cfg, PipelineConfig) and getattr(cfg, "segmentation", None) is not None:
+            seg_weights_cand = Path(cfg.segmentation.model_weights)
+        elif isinstance(cfg, dict) and cfg.get("segmentation", {}).get("model_weights"):
+            cand_p = Path(cfg["segmentation"]["model_weights"])
+            seg_weights_cand = cand_p if cand_p.is_absolute() else (PROJECT_ROOT / cand_p)
+
+        if seg_weights_cand is not None and seg_weights_cand.exists():
+            model_weights = seg_weights_cand
+        else:
+            try:
+                model_weights = ensure_model_weights(cfg)
+            except Exception as exc:
+                logger.warning(f"Automated weights acquisition could not complete: {exc}")
+                default_seg_weights = (
+                    "LeafMachine2/leafmachine2/segmentation/models/"
+                    "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
+                )
+                model_weights = Path(
+                    cfg.get("paths", {}).get("model_weights", default_seg_weights)
+                )
     verify_file_exists(model_weights, "PointRend model weights checkpoint")
 
     device = args.device or cfg.get("segmentation", {}).get("device", "cuda")

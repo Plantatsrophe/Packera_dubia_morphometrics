@@ -433,7 +433,7 @@ class PrecisionSAM2Annotator:
         crops_dir: Optional[Union[str, Path]] = None,
         full_sheet: bool = False,
         prelabel_with_lm2: bool = False,
-        lm2_weights: Union[str, Path] = "models/lm2_packera_pcd_finetuned.pth",
+        lm2_weights: Union[str, Path] = "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth",
         stage1_weights: Optional[Union[str, Path]] = None,
         active_class_ids: Tuple[int, ...] = ACTIVE_BASAL_CLASS_IDS,
     ):
@@ -523,6 +523,14 @@ class PrecisionSAM2Annotator:
                     break
 
         self.checkpoint_path = Path(checkpoint_path)
+        if not self.checkpoint_path.exists() and self.checkpoint_path.name == "sam2_hiera_large.pt":
+            for alt_ckpt in (
+                Path("models/sam2.1_hiera_large.pt"),
+                self.project_root / "models" / "sam2.1_hiera_large.pt",
+            ):
+                if alt_ckpt.exists():
+                    self.checkpoint_path = alt_ckpt
+                    break
         self.config_path = str(config_path)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.predictor = None
@@ -682,7 +690,11 @@ class PrecisionSAM2Annotator:
                 )
             if self.lm2_pointrend_engine is None:
                 self.lm2_pointrend_engine = step02.PointRendInferenceEngine(
-                    weights_path=getattr(self, "lm2_weights", "models/lm2_packera_pcd_finetuned.pth"),
+                    weights_path=getattr(
+                        self,
+                        "lm2_weights",
+                        "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth",
+                    ),
                     device=self.device,
                     score_thresh=0.40,
                 )
@@ -1794,7 +1806,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lm2-weights",
         type=str,
-        default="models/lm2_packera_pcd_finetuned.pth",
+        default="LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth",
         help="Stage 2 PointRend weights checkpoint for --prelabel-with-lm2.",
     )
     parser.add_argument(
