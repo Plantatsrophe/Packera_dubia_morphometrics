@@ -298,6 +298,203 @@ def is_tier1_pristine(
     return bool(ucs >= min_ucs and solidity >= min_solidity)
 
 
+class BoundaryContinuityResult(dict):
+    """
+    Dictionary-compatible and boolean-convertible result from boundary-continuity
+    lobe rejection (`check_boundary_tissue_continuity`).
+    """
+
+    def __bool__(self) -> bool:
+        return bool(self.get("is_severed_lobe", False))
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, bool):
+            return bool(self) == other
+        return super().__eq__(other)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(f"'BoundaryContinuityResult' object has no attribute '{name}'") from exc
+
+
+def check_boundary_tissue_continuity(
+    crop_img: Optional[np.ndarray],
+    binary_mask: Optional[np.ndarray],
+    dilation_px: int = 8,
+    max_tissue_border_ratio: float = 0.15,
+) -> BoundaryContinuityResult:
+    """
+    Verifies whether a candidate leaf segmentation mask is a severed single lateral lobe
+    (or internal sub-lamina fragment) rather than an intact whole leaf blade:
+      1. Dilates the binary PointRend mask by `dilation_px` to extract an exterior
+         perimeter ring immediately outside the segmented contour.
+      2. Segments `crop_img` into dark plant lamina tissue vs. bright herbarium mount
+         paper via Otsu thresholding in CIE LAB (`L` channel) / grayscale space.
+      3. Computes `tissue_border_ratio` = fraction of the exterior perimeter ring
+         that abuts contiguous dark plant tissue.
+      4. If `tissue_border_ratio > max_tissue_border_ratio` (default `0.15`, exceeding
+         normal narrow petiole attachment width), flags `is_severed_lobe = True` so
+         the candidate is rejected from Tier 1 `leaf_whole` routing.
+    """
+    default_res = BoundaryContinuityResult({
+        "is_severed_lobe": False,
+        "tissue_border_ratio": 0.0,
+        "ring_pixel_count": 0,
+        "tissue_ring_pixels": 0,
+        "otsu_threshold": 0.0,
+    })
+    if crop_img is None or binary_mask is None or crop_img.size == 0 or binary_mask.size == 0:
+        return default_res
+
+    mask_u8 = (binary_mask > 0).astype(np.uint8) * 255
+    if int(np.count_nonzero(mask_u8)) == 0:
+        return default_res
+
+    mh, mw = mask_u8.shape[:2]
+    if crop_img.shape[:2] != (mh, mw):
+        img_work = cv2.resize(crop_img, (mw, mh), interpolation=cv2.INTER_AREA)
+    else:
+        img_work = crop_img
+
+    rad = max(1, int(dilation_px))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1))
+    dilated = cv2.dilate(mask_u8, kernel, iterations=1)
+    ring_mask = (dilated > 0) & (mask_u8 == 0)
+    ring_count = int(np.count_nonzero(ring_mask))
+    if ring_count == 0:
+        return default_res
+
+    if img_work.ndim == 3 and img_work.shape[2] >= 3:
+        bgr_u8 = img_work[:, :, :3].astype(np.uint8)
+        lab_l = cv2.cvtColor(bgr_u8, cv2.COLOR_BGR2LAB)[:, :, 0]
+        gray = cv2.cvtColor(bgr_u8, cv2.COLOR_BGR2GRAY)
+        lum = np.minimum(lab_l, gray)
+    else:
+        lum = img_work.astype(np.uint8)
+
+    # Guard against uniform synthetic canvases (e.g., blank 200-gray test backgrounds)
+    dyn_range = float(np.ptp(lum))
+    if dyn_range < 10.0:
+        return default_res
+
+    blurred = cv2.GaussianBlur(lum, (3, 3), 0)
+    int_vals = blurred[mask_u8 > 0]
+    far_ext_vals = blurred[dilated == 0]
+    int_med = float(np.median(int_vals)) if int_vals.size > 0 else 128.0
+    ext_ref = float(np.percentile(far_ext_vals, 75)) if far_ext_vals.size > 0 else float(np.percentile(blurred, 85))
+
+    # If neither interior nor perimeter ring differs from background paper, no plant contrast is rendered
+    ring_vals = blurred[ring_mask]
+    if abs(int_med - ext_ref) < 10.0 and float(np.ptp(ring_vals)) < 10.0:
+        return default_res
+
+    if int_med > ext_ref + 25.0:
+        # Inverted synthetic fixture (bright leaf foreground on dark background)
+        otsu_thresh, tissue_bin = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        tissue_mask = (tissue_bin > 0) & (blurred > (ext_ref + 12.0))
+    else:
+        # Standard herbarium mount sheet (dark plant tissue on bright mount paper)
+        otsu_thresh, tissue_bin = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        paper_floor = max(0.0, ext_ref - 15.0)
+        tissue_mask = (tissue_bin > 0) & (blurred <= min(float(otsu_thresh) + 5.0, paper_floor))
+
+    tissue_ring_px = int(np.count_nonzero(ring_mask & tissue_mask))
+    border_ratio = float(tissue_ring_px) / float(ring_count)
+    is_severed = bool(border_ratio > float(max_tissue_border_ratio))
+
+    return BoundaryContinuityResult({
+        "is_severed_lobe": is_severed,
+        "tissue_border_ratio": round(border_ratio, 6),
+        "ring_pixel_count": ring_count,
+        "tissue_ring_pixels": tissue_ring_px,
+        "otsu_threshold": float(otsu_thresh),
+    })
+
+
+def compute_classical_shape_descriptors(
+    mask: np.ndarray,
+    bbox: Optional[Tuple[int, int, int, int]] = None,
+) -> Dict[str, float]:
+    """
+    Computes classical dimensionless shape descriptors (Krieger 2017; Russ 2011):
+      - Solidity = Area / Convex Hull Area
+      - Circularity (Form Factor) = 4 * pi * Area / Perimeter^2
+      - Extent = Mask Area / Bounding Box Area (uses PCD `bbox` if supplied, else tight mask bbox)
+    """
+    if mask is None or mask.size == 0:
+        return {
+            "area_px": 0.0,
+            "perimeter_px": 0.0,
+            "convex_hull_area_px": 0.0,
+            "bbox_area_px": 0.0,
+            "solidity": 0.0,
+            "circularity": 0.0,
+            "extent": 0.0,
+        }
+
+    mask_u8 = (mask > 0).astype(np.uint8) * 255
+    area_px = float(np.count_nonzero(mask_u8))
+    if area_px <= 0.0:
+        return {
+            "area_px": 0.0,
+            "perimeter_px": 0.0,
+            "convex_hull_area_px": 0.0,
+            "bbox_area_px": 0.0,
+            "solidity": 0.0,
+            "circularity": 0.0,
+            "extent": 0.0,
+        }
+
+    bx, by, bw, bh = cv2.boundingRect(mask_u8)
+    sub = mask_u8[by : by + bh, bx : bx + bw]
+    contours, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return {
+            "area_px": area_px,
+            "perimeter_px": 0.0,
+            "convex_hull_area_px": area_px,
+            "bbox_area_px": float(max(bw * bh, 1)),
+            "solidity": 1.0,
+            "circularity": 0.0,
+            "extent": min(1.0, area_px / float(max(bw * bh, 1))),
+        }
+
+    main_cnt = max(contours, key=cv2.contourArea)
+    cnt_area = max(float(cv2.contourArea(main_cnt)), area_px)
+    perim_px = float(cv2.arcLength(main_cnt, True))
+    hull = cv2.convexHull(main_cnt)
+    hull_area = float(cv2.contourArea(hull))
+
+    solidity = min(max(area_px / hull_area, 0.0), 1.0) if hull_area > 0.0 else 0.0
+    circularity = (
+        min(max((4.0 * math.pi * cnt_area) / (perim_px * perim_px), 0.0), 1.0)
+        if perim_px > 0.0
+        else 0.0
+    )
+
+    if bbox is not None and len(bbox) == 4:
+        ymin, xmin, ymax, xmax = [int(v) for v in bbox]
+        box_h = max(0, ymax - ymin)
+        box_w = max(0, xmax - xmin)
+        bbox_area = float(box_h * box_w) if (box_h > 0 and box_w > 0) else float(max(bw * bh, 1))
+    else:
+        bbox_area = float(max(bw * bh, 1))
+
+    extent = min(max(area_px / max(bbox_area, 1.0), 0.0), 1.0)
+
+    return {
+        "area_px": area_px,
+        "perimeter_px": perim_px,
+        "convex_hull_area_px": hull_area,
+        "bbox_area_px": bbox_area,
+        "solidity": solidity,
+        "circularity": circularity,
+        "extent": extent,
+    }
+
+
 def reflect_folded_mask(
     mask: np.ndarray,
     p1: Tuple[int, int],
@@ -1499,6 +1696,9 @@ def classify_and_route_leaf(
     already_trimmed: bool = False,
     trim_meta: Optional[Dict[str, Any]] = None,
     sheet_shape: Optional[Tuple[int, int]] = None,
+    crop_img: Optional[np.ndarray] = None,
+    boundary_dilation_px: int = 8,
+    max_tissue_border_ratio: float = 0.15,
 ) -> LeafRoutingResult:
     """
     Comprehensive geometric quality gatekeeper and routing engine:
@@ -1701,7 +1901,33 @@ def classify_and_route_leaf(
         "fold_info": fold_info,
         "reflection_applied": False,
         "petiole_trim_info": trim_meta,
+        "is_severed_lobe": False,
+        "tissue_border_ratio": 0.0,
     }
+
+    if crop_img is not None:
+        bc_res = check_boundary_tissue_continuity(
+            crop_img,
+            mask_u8,
+            dilation_px=boundary_dilation_px,
+            max_tissue_border_ratio=max_tissue_border_ratio,
+        )
+        meta["boundary_continuity"] = bc_res
+        meta["is_severed_lobe"] = bool(bc_res["is_severed_lobe"])
+        meta["tissue_border_ratio"] = float(bc_res["tissue_border_ratio"])
+        if bc_res["is_severed_lobe"]:
+            return LeafRoutingResult(
+                tier="Failed QC",
+                assigned_tier="rejected",
+                solidity=solidity,
+                ucs=ucs,
+                is_folded=False,
+                is_irregular_fold=False,
+                is_dissected=False,
+                processed_mask=mask,
+                rejection_reason="SEVERED_LOBE",
+                metadata=meta,
+            )
 
     if is_folded:
         # Route folded leaf directly to Tier 2 with synthesized bilateral silhouette

@@ -31,7 +31,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.vision.lm2_geometry_utils import (
+    BoundaryContinuityResult,
+    check_boundary_tissue_continuity,
     classify_and_route_leaf,
+    compute_classical_shape_descriptors,
     compute_geometric_metrics,
     detect_folded_leaf,
     is_botanical_dissection,
@@ -235,6 +238,59 @@ class TestGeometryGatekeeperEnhancements(unittest.TestCase):
         self.assertEqual(coords.shape, (120, 2))
         self.assertGreaterEqual(np.min(coords), 0.0)
         self.assertLessEqual(np.max(coords), 1.0)
+
+    def test_check_boundary_tissue_continuity_intact_vs_severed_lobe(self) -> None:
+        """Verify check_boundary_tissue_continuity accepts intact leaves on mount paper and rejects severed lobes."""
+        # 1. Intact leaf on bright herbarium mount paper (RGB ~ 235) with dark lamina (RGB ~ 45)
+        crop_intact = np.full((300, 300, 3), 235, dtype=np.uint8)
+        mask_intact = np.zeros((300, 300), dtype=np.uint8)
+        cv2.ellipse(mask_intact, (150, 150), (45, 95), 0, 0, 360, 255, -1)
+        crop_intact[mask_intact > 0] = (45, 65, 45)
+        # Narrow petiole stalk at bottom (< 5% of perimeter ring)
+        cv2.line(crop_intact, (150, 245), (150, 285), (45, 65, 45), thickness=4)
+
+        res_intact = check_boundary_tissue_continuity(
+            crop_intact, mask_intact, dilation_px=8, max_tissue_border_ratio=0.15
+        )
+        self.assertIsInstance(res_intact, BoundaryContinuityResult)
+        self.assertFalse(res_intact["is_severed_lobe"])
+        self.assertLessEqual(res_intact["tissue_border_ratio"], 0.15)
+
+        routing_ok = classify_and_route_leaf(mask_intact, crop_img=crop_intact)
+        self.assertEqual(routing_ok.assigned_tier, "tier1")
+
+        # 2. Severed lateral lobe: PointRend mask covers only 1 lobe while dark plant lamina continues across > 15% of border
+        crop_lobe = np.full((300, 300, 3), 235, dtype=np.uint8)
+        # Draw a large dark pinnatifid lamina across the crop
+        cv2.ellipse(crop_lobe, (150, 150), (95, 120), 0, 0, 360, (40, 60, 40), -1)
+        # PointRend mask only segmented a sub-region (single lobe) inside the dark tissue
+        mask_lobe = np.zeros((300, 300), dtype=np.uint8)
+        cv2.ellipse(mask_lobe, (120, 150), (35, 60), 0, 0, 360, 255, -1)
+
+        res_lobe = check_boundary_tissue_continuity(
+            crop_lobe, mask_lobe, dilation_px=8, max_tissue_border_ratio=0.15
+        )
+        self.assertTrue(res_lobe["is_severed_lobe"])
+        self.assertGreater(res_lobe["tissue_border_ratio"], 0.15)
+
+        routing_rej = classify_and_route_leaf(mask_lobe, crop_img=crop_lobe)
+        self.assertEqual(routing_rej.assigned_tier, "rejected")
+        self.assertEqual(routing_rej.rejection_reason, "SEVERED_LOBE")
+
+    def test_compute_classical_shape_descriptors_solidity_circularity_extent(self) -> None:
+        """Verify compute_classical_shape_descriptors returns accurate Solidity, Circularity, and Extent."""
+        mask = np.zeros((300, 300), dtype=np.uint8)
+        cv2.ellipse(mask, (150, 150), (50, 90), 0, 0, 360, 255, -1)
+
+        # Tight bounding box -> high Extent (> 0.70)
+        desc_tight = compute_classical_shape_descriptors(mask, bbox=(60, 100, 240, 200))
+        self.assertGreaterEqual(desc_tight["solidity"], 0.95)
+        self.assertGreaterEqual(desc_tight["circularity"], 0.65)
+        self.assertGreaterEqual(desc_tight["extent"], 0.70)
+
+        # Oversized PCD bounding box (partial PointRend failure inside 300x300 box) -> low Extent (< 0.35)
+        desc_partial = compute_classical_shape_descriptors(mask, bbox=(0, 0, 300, 300))
+        self.assertLess(desc_partial["extent"], 0.35)
 
 
 if __name__ == "__main__":

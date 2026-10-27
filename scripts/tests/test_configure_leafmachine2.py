@@ -73,13 +73,24 @@ class TestConfigureLeafMachine2(unittest.TestCase):
         seg = lm["leaf_segmentation"]
         proj = lm["project"]
 
-        # Dynamic thresholds wired from config.yaml
-        expected_pcd_conf = float(pipe_cfg.thresholds.pcd_conf)
+        # Dynamic thresholds wired from config.yaml (Weaver & Smith 2023/2024 empirical range 0.50-0.70, default 0.65)
+        expected_pcd_conf = float(getattr(pipe_cfg.segmentation, "minimum_confidence_threshold", DEFAULT_PCD_CONFIDENCE))
+        self.assertGreaterEqual(pcd["minimum_confidence_threshold"], 0.50)
+        self.assertLessEqual(pcd["minimum_confidence_threshold"], 0.70)
         self.assertAlmostEqual(pcd["minimum_confidence_threshold"], expected_pcd_conf)
         self.assertAlmostEqual(pcd["PCD_confidence"], expected_pcd_conf)
         self.assertEqual(pcd["detector_type"], "Plant_Detector")
         self.assertEqual(pcd["detector_version"], "PLANT_LeafPriority")
         self.assertEqual(pcd["detector_weights"], "LeafPriority.pt")
+
+        # Empirical LeafMachine2 v2.2+ lobe/leaflet & raw PointRend contour guardrails
+        self.assertIs(seg["treat_leaflet_as_leaf_whole"], False)
+        self.assertIs(proj["treat_leaflet_as_leaf_whole"], False)
+        self.assertIs(seg["use_efds_for_png_masks"], False)
+        self.assertIs(seg["do_apply_landmarks"], False)
+        self.assertIs(lm["do"]["do_apply_landmarks"], False)
+        self.assertIs(lm["landmark_detector"]["do_apply_landmarks"], False)
+        self.assertIs(lm["landmark_detector"]["landmark_whole_leaves"], False)
 
         # Batch size and workers
         self.assertEqual(proj["batch_size"], DEFAULT_BATCH_SIZE)

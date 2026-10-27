@@ -98,62 +98,36 @@ parse_args_robust <- function() {
 # ------------------------------------------------------------------------------
 compute_efourier_coords_pure <- function(coo, nb_h = 12, norm = FALSE, start = FALSE) {
   if (is.null(coo) || nrow(coo) < 5) return(rep(NA_real_, nb_h * 4))
-  cx <- mean(coo[, 1], na.rm = TRUE)
-  cy <- mean(coo[, 2], na.rm = TRUE)
-  coo[, 1] <- coo[, 1] - cx
-  coo[, 2] <- coo[, 2] - cy
+  coo[, 1] <- coo[, 1] - mean(coo[, 1], na.rm = TRUE); coo[, 2] <- coo[, 2] - mean(coo[, 2], na.rm = TRUE)
   cs <- sqrt(sum(coo[, 1]^2 + coo[, 2]^2, na.rm = TRUE))
   if (is.finite(cs) && cs > 1e-8) coo <- coo / cs
-
-  if (coo[1, 1] != coo[nrow(coo), 1] || coo[1, 2] != coo[nrow(coo), 2]) {
-    coo <- rbind(coo, coo[1, ])
-  }
-
-  dx <- diff(coo[, 1]); dy <- diff(coo[, 2]); dt <- sqrt(dx^2 + dy^2)
-  valid <- dt > 1e-7
+  if (coo[1, 1] != coo[nrow(coo), 1] || coo[1, 2] != coo[nrow(coo), 2]) coo <- rbind(coo, coo[1, ])
+  dx <- diff(coo[, 1]); dy <- diff(coo[, 2]); dt <- sqrt(dx^2 + dy^2); valid <- dt > 1e-7
   if (sum(valid) < 5) return(rep(NA_real_, nb_h * 4))
-
   dx <- dx[valid]; dy <- dy[valid]; dt <- dt[valid]
   t_vals <- c(0, cumsum(dt)); T_perim <- t_vals[length(t_vals)]
   if (T_perim <= 0) return(rep(NA_real_, nb_h * 4))
-
-  two_pi_over_T <- 2 * pi / T_perim
-  A <- numeric(nb_h); B <- numeric(nb_h); C <- numeric(nb_h); D <- numeric(nb_h)
-
+  two_pi_over_T <- 2 * pi / T_perim; A <- B <- C <- D <- numeric(nb_h)
   for (n in seq_len(nb_h)) {
     coeff <- T_perim / (2 * (n^2) * (pi^2))
     cos_diff <- cos(n * two_pi_over_T * t_vals[-1]) - cos(n * two_pi_over_T * t_vals[-length(t_vals)])
     sin_diff <- sin(n * two_pi_over_T * t_vals[-1]) - sin(n * two_pi_over_T * t_vals[-length(t_vals)])
-    A[n] <- coeff * sum((dx / dt) * cos_diff)
-    B[n] <- coeff * sum((dx / dt) * sin_diff)
-    C[n] <- coeff * sum((dy / dt) * cos_diff)
-    D[n] <- coeff * sum((dy / dt) * sin_diff)
+    A[n] <- coeff * sum((dx / dt) * cos_diff); B[n] <- coeff * sum((dx / dt) * sin_diff)
+    C[n] <- coeff * sum((dy / dt) * cos_diff); D[n] <- coeff * sum((dy / dt) * sin_diff)
   }
-
   if (!norm) return(as.vector(rbind(A, B, C, D)))
-
-  # Size, orientation, and starting-point invariant normalization (only when norm = TRUE)
   A1 <- A[1]; B1 <- B[1]; C1 <- C[1]; D1 <- D[1]
   theta1 <- if (start) 0.5 * atan2(2 * (A1 * B1 + C1 * D1), (A1^2 + C1^2 - B1^2 - D1^2)) else 0.0
-  A1_star <- A1 * cos(theta1) + B1 * sin(theta1)
-  C1_star <- C1 * cos(theta1) + D1 * sin(theta1)
-  psi1 <- atan2(C1_star, A1_star)
-  E1 <- sqrt(A1_star^2 + C1_star^2)
+  A1_star <- A1 * cos(theta1) + B1 * sin(theta1); C1_star <- C1 * cos(theta1) + D1 * sin(theta1)
+  psi1 <- atan2(C1_star, A1_star); E1 <- sqrt(A1_star^2 + C1_star^2)
   if (E1 < 1e-7) return(rep(NA_real_, nb_h * 4))
-
-  cos_psi1 <- cos(psi1); sin_psi1 <- sin(psi1)
-  R_psi <- matrix(c(cos_psi1, sin_psi1, -sin_psi1, cos_psi1), nrow = 2, byrow = TRUE)
-
-  norm_A <- numeric(nb_h); norm_B <- numeric(nb_h)
-  norm_C <- numeric(nb_h); norm_D <- numeric(nb_h)
-
+  R_psi <- matrix(c(cos(psi1), sin(psi1), -sin(psi1), cos(psi1)), nrow = 2, byrow = TRUE)
+  norm_A <- norm_B <- norm_C <- norm_D <- numeric(nb_h)
   for (n in seq_len(nb_h)) {
     M_n <- matrix(c(A[n], B[n], C[n], D[n]), nrow = 2, byrow = TRUE)
-    cos_nt <- cos(n * theta1); sin_nt <- sin(n * theta1)
-    R_nt <- matrix(c(cos_nt, -sin_nt, sin_nt, cos_nt), nrow = 2, byrow = TRUE)
+    R_nt <- matrix(c(cos(n * theta1), -sin(n * theta1), sin(n * theta1), cos(n * theta1)), nrow = 2, byrow = TRUE)
     norm_M <- (1 / E1) * (R_psi %*% M_n %*% R_nt)
-    norm_A[n] <- norm_M[1, 1]; norm_B[n] <- norm_M[1, 2]
-    norm_C[n] <- norm_M[2, 1]; norm_D[n] <- norm_M[2, 2]
+    norm_A[n] <- norm_M[1, 1]; norm_B[n] <- norm_M[1, 2]; norm_C[n] <- norm_M[2, 1]; norm_D[n] <- norm_M[2, 2]
   }
   return(as.vector(rbind(norm_A, norm_B, norm_C, norm_D)))
 }
@@ -562,6 +536,22 @@ run_fourier_extraction <- function(opts) {
     message("=== Full 12-Harmonic Morphospace PCA Variance Explained ===")
     for (p in seq_len(min(opts$num_pcs, length(var_exp)))) message(sprintf("  PC%d: %5.2f%% variance", p, var_exp[p]))
     for (p in seq_len(min(opts$num_pcs, ncol(pc_scores)))) efa_df[complete_idx, paste0("PC", p)] <- round(pc_scores[, p], 6)
+    # 4b. Robust Multivariate Outlier Filtering in EFA Space via Minimum Covariance Determinant (MASS::cov.mcd, p < 0.001)
+    cum_var <- cumsum(pca_fit$sdev^2) / sum(pca_fit$sdev^2)
+    k_95 <- which(cum_var >= 0.95)[1]; if (is.na(k_95) || k_95 < 2L) k_95 <- min(opts$num_pcs, ncol(pc_scores))
+    k_95 <- max(2L, min(k_95, ncol(pc_scores), max(2L, floor(nrow(pc_scores) / 3L))))
+    if (nrow(pc_scores) >= (k_95 + 5L) && requireNamespace("MASS", quietly = TRUE)) {
+      pc_sub <- pc_scores[, seq_len(k_95), drop = FALSE]
+      mcd_fit <- tryCatch(MASS::cov.mcd(pc_sub), error = function(e) tryCatch(MASS::cov.rob(pc_sub, method = "mcd"), error = function(e2) NULL))
+      if (!is.null(mcd_fit)) {
+        mcd_d2 <- tryCatch(stats::mahalanobis(pc_sub, center = mcd_fit$center, cov = mcd_fit$cov), error = function(e) rep(0, nrow(pc_sub)))
+        mcd_out <- !is.na(mcd_d2) & (mcd_d2 > stats::qchisq(0.999, df = k_95))
+        if (any(mcd_out) && sum(!mcd_out) >= 5L) {
+          efa_df$is_contour_outlier[complete_idx] <- as.logical(efa_df$is_contour_outlier[complete_idx]) | mcd_out
+          message(sprintf("MCD robust Mahalanobis outlier filter (top %d PCs >=95%% var, p < 0.001): flagged %d contours.", k_95, sum(mcd_out)))
+        }
+      }
+    }
   }
 
   # 5. Darwin Core Metadata Standardization & Export
@@ -586,6 +576,9 @@ run_fourier_extraction <- function(opts) {
   # 5b. Compute Specimen-Level Median Harmonic Vectors & Phenotypic Stability Index
   message("Computing specimen-level median harmonic vectors (grouped by catalogNumber & plant instance)...")
   valid_closed_mask <- grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE) & complete.cases(efa_df[, sym_names])
+  if (nrow(efa_df) >= 15L && "is_contour_outlier" %in% names(efa_df) && sum(valid_closed_mask & !efa_df$is_contour_outlier, na.rm = TRUE) >= 5L) {
+    valid_closed_mask <- valid_closed_mask & !as.logical(efa_df$is_contour_outlier)
+  }
   closed_leaf_df <- efa_df[valid_closed_mask, , drop = FALSE]
   all_harm_cols <- intersect(c(harmonic_names, grep("Chebyshev", names(efa_df), value = TRUE)), names(efa_df))
   spec_groups <- split(closed_leaf_df, list(closed_leaf_df$catalogNumber, closed_leaf_df$plant_individual_id), drop = TRUE)
@@ -594,6 +587,7 @@ run_fourier_extraction <- function(opts) {
 
   for (grp in spec_groups) {
     if (nrow(grp) == 0) next
+    if ("is_contour_outlier" %in% names(grp) && any(!grp$is_contour_outlier, na.rm = TRUE)) grp <- grp[!grp$is_contour_outlier, , drop = FALSE]
     spec_idx <- spec_idx + 1L
     n_tier1_leaves <- sum(grp$tier_assignment == "Tier_1_Direct", na.rm = TRUE)
     n_tier2_leaves <- sum(grp$tier_assignment == "Tier_2_Reflected", na.rm = TRUE)

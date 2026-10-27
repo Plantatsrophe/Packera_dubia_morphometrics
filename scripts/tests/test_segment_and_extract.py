@@ -1151,6 +1151,50 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         )
         self.assertFalse(rej_ok)
 
+    def test_lobe_rejection_min_blade_area_cm2_extent_and_telemetry(self) -> None:
+        """Verify check_boundary_tissue_continuity, min_blade_area_cm2, Extent, and rejection telemetry counters."""
+        from unittest.mock import patch
+
+        # Calibrate sheet at 10.0 px/mm (100.0 px/cm -> 1 cm^2 = 10,000 px, 0.75 cm^2 = 7,500 px)
+        self.pipeline.ruler_calibrations["NCU_TELEM"] = 10.0
+
+        sheet_img = np.full((600, 600, 3), 235, dtype=np.uint8)
+
+        # 1. Severed lobe candidate: mask inside contiguous dark plant lamina (>15% exterior ring is dark tissue)
+        cv2.ellipse(sheet_img, (150, 150), (95, 110), 0, 0, 360, (40, 55, 40), -1)
+        m_severed = np.zeros((600, 600), dtype=np.uint8)
+        cv2.ellipse(m_severed, (130, 150), (45, 70), 0, 0, 360, 255, -1)
+
+        # 2. Tiny fragment candidate (< 0.75 cm^2, e.g., radius 25 -> area ~ 1,963 px = 0.196 cm^2)
+        m_tiny = np.zeros((600, 600), dtype=np.uint8)
+        cv2.circle(m_tiny, (420, 150), 25, 255, -1)
+
+        # 3. Low-Extent candidate: mask area ~ 9,500 px (0.95 cm^2 >= 0.75), but inside a huge 250x250 PCD box (area 62,500 -> Extent = 0.152 < 0.35)
+        m_low_extent = np.zeros((600, 600), dtype=np.uint8)
+        cv2.ellipse(m_low_extent, (420, 420), (40, 75), 0, 0, 360, 255, -1)
+
+        # 4. Leaflet class candidate (class_id == 2 -> rejected_leaflet_class)
+        m_leaflet = np.zeros((600, 600), dtype=np.uint8)
+        cv2.ellipse(m_leaflet, (150, 420), (40, 75), 0, 0, 360, 255, -1)
+
+        dets = [
+            ((80, 85, 220, 175), m_severed, 0.94, 0),
+            ((120, 390, 180, 450), m_tiny, 0.91, 0),
+            ((300, 300, 550, 550), m_low_extent, 0.90, 0),
+            ((340, 100, 500, 200), m_leaflet, 0.89, 2),
+        ]
+
+        with patch("cv2.imread", return_value=sheet_img):
+            with patch.object(self.pipeline.model_engine, "predict", return_value=dets):
+                records, failure = self.pipeline.process_voucher("NCU_TELEM", self.img_path)
+
+        self.assertEqual(len(records), 0)
+        self.assertIsNotNone(failure)
+        self.assertEqual(self.pipeline.rejection_telemetry["rejected_leaflet_class"], 1)
+        self.assertEqual(self.pipeline.rejection_telemetry["rejected_severed_lobe"], 1)
+        self.assertEqual(self.pipeline.rejection_telemetry["rejected_min_area_cm2"], 1)
+        self.assertEqual(self.pipeline.rejection_telemetry["rejected_solidity_extent"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

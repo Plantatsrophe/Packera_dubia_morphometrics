@@ -74,8 +74,13 @@ taxonomy:
 thresholds:
   # Standard baseline gatekeepers (existing)
   pcd_conf: 0.72
+  minimum_confidence_threshold: 0.65
   min_ucs: 0.85
   min_solidity: 0.72
+  min_circularity: 0.25
+  min_extent: 0.35
+  min_blade_area_cm2: 0.75
+  max_tissue_border_ratio: 0.15
   cleanlab_cutoff: 0.85
   min_megapixels: 8.0
   min_file_size_kb: 500.0
@@ -131,12 +136,31 @@ harvesting:
 # Phase 2: PointRend Segmentation & Geometric Leaf Extraction
 segmentation:
   model_weights: "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
+  detector_version: "PLANT_LeafPriority"
+  minimum_confidence_threshold: 0.65
+  treat_leaflet_as_leaf_whole: false
+  use_efds_for_png_masks: false
+  do_apply_landmarks: false
   score_thresh: 0.35
   min_ucs: 0.85
   min_solidity: 0.72
+  min_circularity: 0.25
+  min_extent: 0.35
+  min_blade_area_cm2: 0.75
+  max_tissue_border_ratio: 0.15
   max_petiole_width_ratio: 0.105
   cordate_guard_width_ratio: 0.165
   device: "cuda"
+
+# Empirical LeafMachine2 v2.2+ Component Detector & Segmentation Settings (Weaver & Smith 2023/2024)
+plant_component_detector:
+  detector_version: "PLANT_LeafPriority"
+  minimum_confidence_threshold: 0.65
+
+leaf_segmentation:
+  treat_leaflet_as_leaf_whole: false
+  use_efds_for_png_masks: false
+  do_apply_landmarks: false
 
 # Phase 3: Elliptic Fourier Analysis & Statistical Morphometrics (Momocs / MorphoTools2)
 morphometrics:

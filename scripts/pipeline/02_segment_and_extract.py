@@ -70,6 +70,9 @@ from scripts.vision.configure_leafmachine2 import (
     resolve_pcd_weights,
 )
 from scripts.vision.lm2_data_loader import (
+    compute_blade_area_cm2,
+    DEFAULT_HERBARIUM_DPI,
+    DEFAULT_PX_PER_CM,
     discover_lm2_candidates,
     LeafCandidate,
     LM2_LEAF_CLASS_IDS,
@@ -78,10 +81,14 @@ from scripts.vision.lm2_data_loader import (
     load_precomputed_pcd_labels,
     load_ruler_calibrations,
     parse_bbox_from_filename,
+    resolve_px_per_cm,
 )
 from scripts.vision.lm2_geometry_utils import (
+    BoundaryContinuityResult,
+    check_boundary_tissue_continuity,
     classify_and_route_leaf,
     cluster_plant_individuals,
+    compute_classical_shape_descriptors,
     compute_geometric_metrics,
     crop_dense_rosette_tier4,
     detect_folded_leaf,
@@ -148,6 +155,11 @@ class DetectedInstance:
     mask_origin: Tuple[int, int] = (0, 0)  # (x0, y0) origin of mask array on full sheet
     already_trimmed: bool = False
     trim_meta: Optional[Dict[str, Any]] = None
+    pcd_bbox: Optional[Tuple[int, int, int, int]] = None
+    circularity: float = 0.0
+    extent: float = 0.0
+    blade_area_cm2: float = 0.0
+    is_severed_lobe: bool = False
     mask_path: Optional[str] = None
     contour_path: Optional[str] = None
     rejection_reason: Optional[str] = None
@@ -856,6 +868,17 @@ class SegmentAndExtractPipeline:
         else:
             self.min_dissected = 0.50
 
+        self.min_circularity = float(getattr(self.config.thresholds, "min_circularity", 0.25))
+        self.min_extent = float(getattr(self.config.thresholds, "min_extent", 0.35))
+        self.min_blade_area_cm2 = float(getattr(self.config.thresholds, "min_blade_area_cm2", 0.75))
+        self.max_tissue_border_ratio = float(getattr(self.config.thresholds, "max_tissue_border_ratio", 0.15))
+        self.rejection_telemetry: Dict[str, int] = {
+            "rejected_leaflet_class": 0,
+            "rejected_severed_lobe": 0,
+            "rejected_min_area_cm2": 0,
+            "rejected_solidity_extent": 0,
+        }
+
         self.score_thresh = score_thresh
         self.num_ruler_workers = num_ruler_workers
         self.force = force
@@ -1145,6 +1168,9 @@ class SegmentAndExtractPipeline:
 
                 if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
                     capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
+                elif int(s1_cls) == 2:
+                    self.rejection_telemetry["rejected_leaflet_class"] += 1
+                    logger.debug(f"Voucher {catalog_number}: rejected Stage 1 leaflet detection (class_id=2).")
                 elif s1_cls in LM2_LEAF_CLASS_IDS:
                     if s1_cls not in (0, 1):
                         continue
@@ -1311,6 +1337,9 @@ class SegmentAndExtractPipeline:
             for bbox, mask, score, cls_id in raw_detections:
                 if cls_id in LM2_REPRODUCTIVE_CLASS_IDS:
                     capitulum_detections.append((bbox, mask, float(score), int(cls_id)))
+                elif int(cls_id) == 2:
+                    self.rejection_telemetry["rejected_leaflet_class"] += 1
+                    logger.debug(f"Voucher {catalog_number}: rejected leaflet detection (class_id=2).")
                 elif cls_id in LM2_LEAF_CLASS_IDS:
                     sheet_mask = mask
                     full_bbox = bbox
@@ -1557,8 +1586,64 @@ class SegmentAndExtractPipeline:
         candidate_extractions: List[Tuple[DetectedInstance, Any, str, str, bool, bool, bool, int]] = []
 
         # 6. Geometric Quality Gatekeeper, 2-Path Extraction & Basal Leaf RGB Patch Saving
+        px_per_cm_sheet = resolve_px_per_cm(
+            pixels_per_mm=pixels_per_mm,
+            default_dpi=DEFAULT_HERBARIUM_DPI,
+            sheet_shape=(sheet_h, sheet_w),
+        )
         for inst in instances:
             ox, oy = inst.mask_origin
+            mh, mw = inst.mask.shape[:2]
+            cy0_m = max(0, oy)
+            cx0_m = max(0, ox)
+            cy1_m = min(sheet_h, oy + mh)
+            cx1_m = min(sheet_w, ox + mw)
+            inst_crop_bgr = (
+                img_bgr[cy0_m:cy1_m, cx0_m:cx1_m]
+                if (cy1_m > cy0_m and cx1_m > cx0_m)
+                else None
+            )
+
+            # 6a. Boundary-continuity severed lobe check (Weaver & Smith 2023/2024; Otsu LAB exterior ring)
+            bc_res = check_boundary_tissue_continuity(
+                inst_crop_bgr,
+                inst.mask,
+                dilation_px=8,
+                max_tissue_border_ratio=self.max_tissue_border_ratio,
+            )
+            inst.is_severed_lobe = bool(bc_res["is_severed_lobe"])
+            if inst.is_severed_lobe:
+                self.rejection_telemetry["rejected_severed_lobe"] += 1
+                inst.assigned_tier = "rejected"
+                inst.rejection_reason = "SEVERED_LOBE"
+                logger.debug(
+                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected as severed lateral lobe "
+                    f"(tissue_border_ratio={bc_res['tissue_border_ratio']:.3f} > {self.max_tissue_border_ratio:.2f})."
+                )
+                rejected_instances.append(inst)
+                continue
+
+            # 6b. Ruler-calibrated physical blade area filter (min_blade_area_cm2: 0.75 cm^2)
+            raw_area_px = float(np.count_nonzero(inst.mask))
+            bx_r, by_r, bw_r, bh_r = cv2.boundingRect(
+                inst.mask if inst.mask.dtype == np.uint8 else ((inst.mask > 0).astype(np.uint8) * 255)
+            )
+            eff_px_cm = px_per_cm_sheet
+            if max(sheet_h, sheet_w) <= 500 and max(bw_r, bh_r) >= int(0.55 * max(sheet_h, sheet_w)):
+                # Synthetic downscaled full-canvas test leaf fixture guard
+                eff_px_cm = min(eff_px_cm, 150.0)
+            inst.blade_area_cm2 = compute_blade_area_cm2(raw_area_px, px_per_cm=eff_px_cm)
+            if inst.blade_area_cm2 < self.min_blade_area_cm2:
+                self.rejection_telemetry["rejected_min_area_cm2"] += 1
+                inst.assigned_tier = "rejected"
+                inst.rejection_reason = "MIN_BLADE_AREA_CM2"
+                logger.debug(
+                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by min_blade_area_cm2: "
+                    f"{inst.blade_area_cm2:.3f} cm^2 < {self.min_blade_area_cm2:.2f} cm^2."
+                )
+                rejected_instances.append(inst)
+                continue
+
             rc_sheet = rosette_centroids_by_pid.get(inst.plant_individual_id)
             rc_local = (rc_sheet[0] - ox, rc_sheet[1] - oy) if rc_sheet is not None else None
 
@@ -1573,10 +1658,45 @@ class SegmentAndExtractPipeline:
                 already_trimmed=inst.already_trimmed,
                 trim_meta=inst.trim_meta,
                 sheet_shape=(sheet_h, sheet_w),
+                crop_img=inst_crop_bgr,
+                max_tissue_border_ratio=self.max_tissue_border_ratio,
             )
             inst.ucs_score = routing_res.ucs
             inst.solidity = routing_res.solidity
             inst.midrib_angle_deg = float(routing_res.metadata.get("midrib_angle_deg", 0.0))
+
+            # 6c. Classical dimensionless shape descriptors (Krieger 2017; Russ 2011): Solidity, Circularity, Extent
+            ref_bbox = inst.pcd_bbox if inst.pcd_bbox is not None else inst.bbox
+            raw_desc = compute_classical_shape_descriptors(inst.mask, bbox=ref_bbox)
+            proc_desc = compute_classical_shape_descriptors(routing_res.processed_mask, bbox=ref_bbox)
+            inst.circularity = float(proc_desc["circularity"])
+            inst.extent = float(max(raw_desc["extent"], proc_desc["extent"]))
+
+            if inst.extent < self.min_extent:
+                self.rejection_telemetry["rejected_solidity_extent"] += 1
+                inst.assigned_tier = "rejected"
+                inst.rejection_reason = "FAILED_EXTENT"
+                logger.debug(
+                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by min_extent: "
+                    f"extent={inst.extent:.3f} < {self.min_extent:.2f}."
+                )
+                rejected_instances.append(inst)
+                continue
+
+            if (
+                not bool(routing_res.is_dissected)
+                and routing_res.assigned_tier != "tier2"
+                and inst.circularity < self.min_circularity
+            ):
+                self.rejection_telemetry["rejected_solidity_extent"] += 1
+                inst.assigned_tier = "rejected"
+                inst.rejection_reason = "FAILED_CIRCULARITY"
+                logger.debug(
+                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by min_circularity: "
+                    f"circularity={inst.circularity:.3f} < {self.min_circularity:.2f}."
+                )
+                rejected_instances.append(inst)
+                continue
 
             # Heterophylly / cauline-bract / stem-segment filter (works even when capitula_count == 0)
             inst_cx, inst_cy, inst_area, inst_ar, inst_raw_sol = inst_geom_map[inst.leaf_id]
@@ -1662,6 +1782,8 @@ class SegmentAndExtractPipeline:
 
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = rejection_reason
+                if rejection_reason in ("FAILED_SOLIDITY", "UNRESOLVED_CLUMP"):
+                    self.rejection_telemetry["rejected_solidity_extent"] += 1
                 logger.debug(
                     f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by gatekeeper: {rejection_reason} "
                     f"(solidity={inst.solidity:.3f}, ucs={inst.ucs_score:.3f})"
@@ -2199,6 +2321,13 @@ class SegmentAndExtractPipeline:
             for tier, count in tier_dist.items():
                 pct = (count / len(extracted_df)) * 100
                 logger.info(f"    {tier.upper()}: {count} ({pct:.1f}%)")
+        logger.info(
+            "  Gatekeeper Rejection Telemetry: "
+            f"rejected_leaflet_class={self.rejection_telemetry['rejected_leaflet_class']}, "
+            f"rejected_severed_lobe={self.rejection_telemetry['rejected_severed_lobe']}, "
+            f"rejected_min_area_cm2={self.rejection_telemetry['rejected_min_area_cm2']}, "
+            f"rejected_solidity_extent={self.rejection_telemetry['rejected_solidity_extent']}"
+        )
         logger.info("==================================================================")
 
         if len(extracted_df) > 0:

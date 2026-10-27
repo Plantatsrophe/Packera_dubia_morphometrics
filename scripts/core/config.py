@@ -334,7 +334,12 @@ class CapitulumPhenologyConfig:
 class ThresholdsConfig:
     """Botanical optical quality, geometry, and detection thresholds."""
     pcd_conf: float = 0.72
+    minimum_confidence_threshold: float = 0.65
     min_solidity: float = 0.72
+    min_circularity: float = 0.25
+    min_extent: float = 0.35
+    min_blade_area_cm2: float = 0.75
+    max_tissue_border_ratio: float = 0.15
     min_ucs: float = 0.85
     cleanlab_cutoff: float = 0.85
     min_megapixels: float = 8.0
@@ -414,9 +419,18 @@ class SegmentationConfig:
         / "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR"
         / "model_final.pth"
     )
+    detector_version: str = "PLANT_LeafPriority"
+    minimum_confidence_threshold: float = 0.65
+    treat_leaflet_as_leaf_whole: bool = False
+    use_efds_for_png_masks: bool = False
+    do_apply_landmarks: bool = False
     score_thresh: float = 0.35
     min_ucs: float = 0.85
     min_solidity: float = 0.72
+    min_circularity: float = 0.25
+    min_extent: float = 0.35
+    min_blade_area_cm2: float = 0.75
+    max_tissue_border_ratio: float = 0.15
     device: str = "cuda"
 
 

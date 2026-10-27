@@ -34,7 +34,7 @@ from scripts.core.config import PROJECT_ROOT, PipelineConfig
 # Default Packera hyperparameter constants calibrated for dense rosettes
 DEFAULT_PCD_WEIGHTS_NAME = "LeafPriority.pt"
 DEFAULT_SEG_MODEL_NAME = "Packera_LeafPriority"
-DEFAULT_PCD_CONFIDENCE = 0.72
+DEFAULT_PCD_CONFIDENCE = 0.65
 DEFAULT_NMS_THRESH = 0.75
 DEFAULT_SUBDIVISION_STEPS = 5
 DEFAULT_MIN_LEAF_AREA = 500
@@ -83,12 +83,14 @@ leafmachine:
   do:
     check_for_corrupt_images_make_vertical: false
     check_for_illegal_filenames: false
+    do_apply_landmarks: false
     run_leaf_processing: true
   landmark_detector:
     detector_iteration: Landmarks
     detector_type: Landmark_Detector_YOLO
     detector_version: Landmarks
     detector_weights: best.pt
+    do_apply_landmarks: false
     do_save_QC_images: false
     do_save_final_images: false
     do_save_prediction_overlay_images: false
@@ -96,7 +98,7 @@ leafmachine:
     do_show_final_images: false
     ignore_objects_for_overlay: []
     landmark_partial_leaves: false
-    landmark_whole_leaves: true
+    landmark_whole_leaves: false
     minimum_confidence_threshold: 0.02
     use_existing_landmark_detections: null
   landmark_detector_armature:
@@ -116,6 +118,7 @@ leafmachine:
   leaf_segmentation:
     calculate_elliptic_fourier_descriptors: true
     detector_version: uniform_spaced_oriented_traces_mid15_pet5_clean_640_flipidx_pt2
+    do_apply_landmarks: false
     elliptic_fourier_descriptor_order: 40
     find_minimum_bounding_box: true
     generate_overlay: true
@@ -140,6 +143,7 @@ leafmachine:
     segment_partial_leaves: false
     segment_whole_leaves: true
     segmentation_model: Packera_LeafPriority
+    treat_leaflet_as_leaf_whole: false
     use_efds_for_png_masks: false
   logging:
     log_level: null
@@ -163,7 +167,7 @@ leafmachine:
     save_overlay_to_jpgs: true
     save_overlay_to_pdf: false
     show_archival_detections: true
-    show_landmarks: true
+    show_landmarks: false
     show_plant_detections: true
     show_segmentations: true
   plant_component_detector:
@@ -173,8 +177,8 @@ leafmachine:
     detector_weights: LeafPriority.pt
     do_save_prediction_overlay_images: true
     ignore_objects_for_overlay: []
-    minimum_confidence_threshold: 0.72
-    PCD_confidence: 0.72
+    minimum_confidence_threshold: 0.65
+    PCD_confidence: 0.65
   print:
     optional_warnings: true
     verbose: true
@@ -183,6 +187,7 @@ leafmachine:
     GBIF_mode: all
     accept_only_ideal_leaves: true
     treat_leaflet_as_leaf_whole: false
+    do_apply_landmarks: false
     batch_size: 50
     censor_archival_components: false
     dir_images_local: LM2_Project/Data/images
@@ -320,8 +325,19 @@ def generate_high_performance_config(
     """
     pipe_cfg = pipeline_cfg or PipelineConfig.from_yaml()
 
-    # Dynamic defaults from PipelineConfig
-    resolved_pcd_conf = pcd_confidence if pcd_confidence is not None else float(pipe_cfg.thresholds.pcd_conf)
+    # Dynamic defaults from PipelineConfig (Weaver & Smith 2023/2024 empirical range 0.50-0.70, default 0.65)
+    if pcd_confidence is not None:
+        resolved_pcd_conf = float(pcd_confidence)
+    else:
+        pcd_raw = pipe_cfg.get("plant_component_detector", {}) if hasattr(pipe_cfg, "get") else {}
+        if isinstance(pcd_raw, dict) and "minimum_confidence_threshold" in pcd_raw:
+            resolved_pcd_conf = float(pcd_raw["minimum_confidence_threshold"])
+        elif hasattr(pipe_cfg.segmentation, "minimum_confidence_threshold"):
+            resolved_pcd_conf = float(pipe_cfg.segmentation.minimum_confidence_threshold)
+        elif hasattr(pipe_cfg.thresholds, "minimum_confidence_threshold"):
+            resolved_pcd_conf = float(pipe_cfg.thresholds.minimum_confidence_threshold)
+        else:
+            resolved_pcd_conf = float(pipe_cfg.thresholds.pcd_conf)
     resolved_device = device or pipe_cfg.segmentation.device or "cuda"
     resolved_batch_size = batch_size if batch_size is not None else DEFAULT_BATCH_SIZE
     resolved_num_workers = num_workers if num_workers is not None else DEFAULT_NUM_WORKERS
@@ -350,6 +366,8 @@ def generate_high_performance_config(
     proj["num_workers_ruler"] = resolved_num_workers
     proj["num_workers_seg"] = resolved_num_workers
     proj["use_segmentation"] = True
+    proj["treat_leaflet_as_leaf_whole"] = False
+    proj["do_apply_landmarks"] = False
     proj["use_existing_archival_component_detections"] = str(archival_det.resolve())
     proj["use_existing_plant_component_detections"] = str(plant_det.resolve())
 
@@ -371,6 +389,9 @@ def generate_high_performance_config(
     seg["segmentation_model"] = DEFAULT_SEG_MODEL_NAME
     seg["segmentation_type"] = "Detectron2_PointRend"
     seg["use_pointrend"] = use_pointrend
+    seg["treat_leaflet_as_leaf_whole"] = False
+    seg["use_efds_for_png_masks"] = False
+    seg["do_apply_landmarks"] = False
     seg["minimum_confidence_threshold"] = seg_confidence
     seg["NMS_thresh"] = nms_thresh
     seg["pointrend_subdivision_steps"] = pointrend_subdivision_steps
@@ -381,6 +402,14 @@ def generate_high_performance_config(
     seg["efd_order"] = DEFAULT_EFD_ORDER
     seg["device"] = resolved_device
     seg["num_workers_seg"] = resolved_num_workers
+
+    # Disable 9-point pseudo-landmarking (fails homology on dissected herbaceous leaves)
+    do_cfg = lm.setdefault("do", {})
+    do_cfg["do_apply_landmarks"] = False
+    ld_cfg = lm.setdefault("landmark_detector", {})
+    ld_cfg["do_apply_landmarks"] = False
+    ld_cfg["landmark_whole_leaves"] = False
+    ld_cfg["landmark_partial_leaves"] = False
 
     # 4. Ruler Detection
     ruler = lm.setdefault("ruler_detection", {})
