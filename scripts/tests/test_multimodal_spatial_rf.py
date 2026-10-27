@@ -280,6 +280,26 @@ def _simulate_rscript_06(cmd: List[str], **kwargs) -> subprocess.CompletedProces
     vouchers_df["fine_soil_sand"] = vouchers_df["soil_sand"]
     vouchers_df["fine_soil_clay"] = np.clip(100.0 - vouchers_df["soil_sand"] - 22.0, 4.0, 60.0)
     vouchers_df["fine_bedrock_depth_cm"] = 120.0
+    vouchers_df["bdricm"] = 120.0
+    vouchers_df["resdept_r"] = 120.0
+    vouchers_df["cfvo"] = 14.0
+    vouchers_df["awc"] = 0.12
+    vouchers_df["fine_soil_cec"] = vouchers_df["soil_cec"]
+    vouchers_df["soil_silt_pct"] = np.clip(100.0 - vouchers_df["fine_soil_sand"] - vouchers_df["fine_soil_clay"], 1.0, 80.0)
+    vouchers_df["alr_sand_clay"] = np.log((vouchers_df["fine_soil_sand"] + 0.5) / (vouchers_df["fine_soil_clay"] + 0.5))
+    vouchers_df["alr_silt_clay"] = np.log((vouchers_df["soil_silt_pct"] + 0.5) / (vouchers_df["fine_soil_clay"] + 0.5))
+    vouchers_df["sgmc_lithology_class"] = "Felsic_Granitic_Gneiss"
+    vouchers_df["is_azonal_lithology"] = True
+    vouchers_df["azonal_contact_dist_m"] = 85.0
+    vouchers_df["azonal_proximity_index"] = 0.62
+    vouchers_df["buffer_radius_m"] = 250.0
+    vouchers_df["high_coord_uncertainty_flag"] = False
+    vouchers_df["is_training_eligible_coord"] = True
+    vouchers_df["ph_q10_buffer"] = vouchers_df["fine_soil_ph"] - 0.25
+    vouchers_df["ph_q90_buffer"] = vouchers_df["fine_soil_ph"] + 0.25
+    vouchers_df["min_bedrock_depth_buffer_cm"] = 45.0
+    vouchers_df["max_cfvo_buffer_pct"] = 28.0
+    vouchers_df["azonal_lithology_presence_buffer"] = True
     vouchers_df["ssurgo_rock_outcrop_pct"] = 25.0
     vouchers_df["ssurgo_aws_0_50cm"] = 4.5
     vouchers_df["topo_tpi_30m"] = 0.8
@@ -289,6 +309,15 @@ def _simulate_rscript_06(cmd: List[str], **kwargs) -> subprocess.CompletedProces
     vouchers_df = execute_crossmodal_consensus_ref(vouchers_df)
     vouchers_df["edaphic_z_score"] = 0.5
     vouchers_df["piedmont_outcrop_specialist_flag"] = False
+    vouchers_df["spatial_block_cv_acc"] = 0.82
+    vouchers_df["rf_predicted_taxon"] = vouchers_df["species_standardized"]
+    vouchers_df["rf_predicted_prob"] = 0.85
+    vouchers_df["rf_given_taxon_prob"] = 0.85
+    vouchers_df["rf_prediction_source"] = np.where(
+        vouchers_df.get("determiner_tier", pd.Series("Tier_1_Gold", index=vouchers_df.index)).isin(["Tier_1_Gold", "Tier_2_Silver"]),
+        "Spatial_Block_OOF_Anchor",
+        "Passive_Projection_Bronze",
+    )
 
     if "--output-flags" in opts:
         out_flags = Path(opts["--output-flags"])
@@ -305,10 +334,24 @@ def _simulate_rscript_06(cmd: List[str], **kwargs) -> subprocess.CompletedProces
                 "Taxon2": "Packera dubia",
                 "N1": 10,
                 "N2": 10,
+                "D_clim": 0.52,
+                "I_clim": 0.71,
+                "p_equiv_D_clim": 0.0495,
+                "p_bg_D_clim": 0.0891,
+                "D_edaph": 0.18,
+                "I_edaph": 0.39,
+                "p_equiv_D_edaph": 0.0099,
+                "p_bg_D_edaph": 0.0198,
+                "D_joint": 0.24,
+                "I_joint": 0.48,
+                "Schoener_D": 0.24,
                 "Warren_D": 0.24,
                 "Warren_I": 0.48,
                 "p_value_D": 0.0099,
                 "p_value_I": 0.0099,
+                "p_bg_D_joint": 0.0198,
+                "p_bg_I_joint": 0.0198,
+                "Niche_Divergence_Axis": "Edaphic_Lithological_Divergence",
                 "Taxonomic_Inference": "Distinct Ecological Niche (Species Boundary Confirmed)",
             }
         ]).to_csv(out_sum, index=False)
@@ -768,6 +811,376 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             "hopkins_adjusted_doy",
         ]:
             self.assertIn(token, combined_r, f"Expected fine-grain token '{token}' in Step 06 R code.")
+
+    def test_rhizosphere_0_15cm_trapezoidal_integration_and_outcrop_pedology(self):
+        """Verify 0-15 cm depth-weighted rhizosphere calculation ((5*X_0_5 + 10*X_5_15)/15), outcrop predictors, and log-ratio soil texture."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        r_code = """
+        source("scripts/analysis/edaphic_fine_grain_utils.R")
+        # 1. Verify trapezoidal 0-15 cm depth-weighted rhizosphere formula: (5 * X_0_5 + 10 * X_5_15) / 15
+        v_0_5 <- c(4.5, 6.0, NA, 5.2)
+        v_5_15 <- c(5.1, 6.6, 5.8, NA)
+        rhizo <- compute_rhizosphere_0_15cm(v_0_5, v_5_15)
+        stopifnot(abs(rhizo[1] - ((5 * 4.5 + 10 * 5.1) / 15)) < 1e-8)
+        stopifnot(abs(rhizo[2] - ((5 * 6.0 + 10 * 6.6) / 15)) < 1e-8)
+        stopifnot(abs(rhizo[3] - 5.8) < 1e-8)
+        stopifnot(abs(rhizo[4] - 5.2) < 1e-8)
+
+        # 2. Verify additive log-ratio soil texture (alr_sand_clay, alr_silt_clay)
+        tex <- compute_soil_texture_log_ratios(sand_pct = c(70.0, 30.0), clay_pct = c(10.0, 35.0))
+        stopifnot(all(c("soil_silt_pct", "alr_sand_clay", "alr_silt_clay") %in% names(tex)))
+        stopifnot(tex$alr_sand_clay[1] > 0 && tex$alr_sand_clay[2] < 0)
+
+        # 3. Verify physical outcrop predictors (bdricm, resdept_r, cfvo, awc, fine_soil_cec)
+        df_in <- data.frame(
+          catalogNumber = c("V1", "V2"),
+          latitude = c(35.8, 36.1),
+          longitude = c(-79.1, -86.4),
+          is_rock_outcrop = c(TRUE, FALSE),
+          outcrop_class = c("Granitic flatrock", "Non-outcrop matrix"),
+          ssurgo_rock_outcrop_pct = c(55.0, 0.0),
+          ssurgo_bedrock_depth_cm = c(18.0, 180.0),
+          ssurgo_sand_pct = c(74.0, 32.0),
+          ssurgo_clay_pct = c(8.0, 28.0),
+          ssurgo_ph = c(4.7, 6.5),
+          ssurgo_cec = c(4.2, 19.5),
+          ssurgo_aws_0_50cm = c(2.2, 9.0),
+          stringsAsFactors = FALSE
+        )
+        df_out <- extract_polaris_and_solus_predictors(df_in, env_dir = tempdir(), demo = TRUE)
+        req_cols <- c("bdricm", "resdept_r", "cfvo", "awc", "fine_soil_cec", "alr_sand_clay", "alr_silt_clay")
+        stopifnot(all(req_cols %in% names(df_out)))
+        stopifnot(df_out$bdricm[1] < df_out$bdricm[2])
+        stopifnot(df_out$cfvo[1] > df_out$cfvo[2])
+        cat("RHIZOSPHERE_PEDOLOGY_OK\\n")
+        """
+        res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"Rscript failed: {res.stderr}\n{res.stdout}")
+        self.assertIn("RHIZOSPHERE_PEDOLOGY_OK", res.stdout)
+
+    def test_sgmc_lithological_standardization_and_azonal_contact_proximity(self):
+        """Verify USGS SGMC lithological standardization into 6 geochemical functional classes and azonal contact proximity."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        r_code = """
+        source("scripts/analysis/edaphic_fine_grain_utils.R")
+        stopifnot(length(SGMC_LITHOLOGY_CLASSES) == 6L)
+        expected_classes <- c(
+          "Ultramafic_Serpentine",
+          "Mafic_Igneous_Metamorphic",
+          "Carbonate_Calcareous",
+          "Felsic_Granitic_Gneiss",
+          "Siliciclastic_Consolidated",
+          "Unconsolidated_Sedimentary"
+        )
+        stopifnot(identical(SGMC_LITHOLOGY_CLASSES, expected_classes))
+
+        mapped <- standardize_sgmc_lithology(
+          rocktype1 = c("Serpentinite and peridotite", "Diabase and gabbro", "Limestone and dolostone", "Biotite granite gneiss", "Quartzite and sandstone", "Unconsolidated coastal plain sand"),
+          muname = c("Chrome silt loam", "Iredell loam", "Gladeville-Rock outcrop", "Wake-Rock outcrop complex", "Ramsey sandy loam", "Wagram loamy sand")
+        )
+        stopifnot(identical(as.character(mapped), expected_classes))
+
+        df_geo <- data.frame(
+          catalogNumber = paste0("G", 1:6),
+          latitude = c(39.7, 35.9, 36.1, 35.8, 35.5, 34.2),
+          longitude = c(-76.1, -78.9, -86.4, -80.2, -82.5, -78.1),
+          sgmc_rocktype1 = c("Serpentinite", "Diabase dike", "Ordovician limestone", "Granitic gneiss", "Sandstone", "Alluvial sand"),
+          is_rock_outcrop = c(TRUE, TRUE, TRUE, TRUE, FALSE, FALSE),
+          ssurgo_rock_outcrop_pct = c(45, 35, 50, 65, 5, 0),
+          fine_bedrock_depth_cm = c(25, 35, 18, 12, 95, 200),
+          stringsAsFactors = FALSE
+        )
+        df_geo <- extract_sgmc_lithology(df_geo, env_dir = tempdir(), demo = TRUE)
+        stopifnot(all(c("sgmc_lithology_class", "is_azonal_lithology", "azonal_contact_dist_m", "azonal_proximity_index") %in% names(df_geo)))
+        stopifnot(all(df_geo$is_azonal_lithology[1:4]))
+        stopifnot(!df_geo$is_azonal_lithology[6])
+        stopifnot(df_geo$azonal_contact_dist_m[4] < df_geo$azonal_contact_dist_m[6])
+        stopifnot(df_geo$azonal_proximity_index[4] > df_geo$azonal_proximity_index[6])
+        cat("SGMC_LITHOLOGY_OK\\n")
+        """
+        res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"Rscript failed: {res.stderr}\n{res.stdout}")
+        self.assertIn("SGMC_LITHOLOGY_OK", res.stdout)
+
+    def test_uncertainty_buffered_extraction_and_high_uncertainty_exclusion(self):
+        """Verify adaptive buffer r_i = clamp(coordinateUncertaintyInMeters, 100, 1000), >10000m training exclusion, and buffer extrema."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        r_code = """
+        source("scripts/analysis/edaphic_fine_grain_utils.R")
+        radii <- compute_uncertainty_buffer_radius(c(NA, 25, 250, 600, 3500, 25000))
+        stopifnot(identical(as.numeric(radii), c(250, 100, 250, 600, 1000, 1000)))
+
+        df <- data.frame(
+          catalogNumber = c("U1", "U2", "U3", "U4"),
+          latitude = c(35.8, 35.9, 36.0, 34.5),
+          longitude = c(-80.1, -80.2, -79.8, -78.5),
+          coordinateUncertaintyInMeters = c(NA, 45, 750, 15000),
+          fine_soil_ph = c(4.9, 5.1, 6.2, 5.4),
+          fine_bedrock_depth_cm = c(22, 35, 110, 160),
+          cfvo = c(32, 24, 12, 6),
+          ssurgo_rock_outcrop_pct = c(55, 30, 5, 0),
+          is_rock_outcrop = c(TRUE, TRUE, FALSE, FALSE),
+          stringsAsFactors = FALSE
+        )
+        df_buf <- extract_uncertainty_buffered_predictors(df, env_dir = tempdir(), demo = TRUE)
+        req <- c("buffer_radius_m", "high_coord_uncertainty_flag", "is_training_eligible_coord",
+                 "ph_q10_buffer", "ph_q90_buffer", "min_bedrock_depth_buffer_cm", "max_cfvo_buffer_pct", "azonal_lithology_presence_buffer")
+        stopifnot(all(req %in% names(df_buf)))
+        stopifnot(identical(df_buf$high_coord_uncertainty_flag, c(FALSE, FALSE, FALSE, TRUE)))
+        stopifnot(identical(df_buf$is_training_eligible_coord, c(TRUE, TRUE, TRUE, FALSE)))
+        stopifnot(all(df_buf$ph_q10_buffer <= df_buf$fine_soil_ph))
+        stopifnot(all(df_buf$ph_q90_buffer >= df_buf$fine_soil_ph))
+        stopifnot(all(df_buf$min_bedrock_depth_buffer_cm <= df_buf$fine_bedrock_depth_cm))
+        stopifnot(all(df_buf$max_cfvo_buffer_pct >= df_buf$cfvo))
+        stopifnot(df_buf$azonal_lithology_presence_buffer[1] == TRUE)
+        cat("UNCERTAINTY_BUFFER_OK\\n")
+        """
+        res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"Rscript failed: {res.stderr}\n{res.stdout}")
+        self.assertIn("UNCERTAINTY_BUFFER_OK", res.stdout)
+
+    def test_block_collinearity_pruning_and_partitioned_clim_vs_edaph_niche_tests(self):
+        """Verify block-separate auto_cor/auto_vif collinearity pruning and partitioned D_clim vs D_edaph PCA-env niche tests."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        r_code = """
+        source("scripts/analysis/06_multimodal_spatial_rf.R")
+        set.seed(42)
+        n <- 40
+        sp <- rep(c("Packera anonyma", "Packera dubia"), each = n / 2)
+        is_dub <- sp == "Packera dubia"
+        df <- data.frame(
+          catalogNumber = sprintf("V_%03d", seq_len(n)),
+          species_standardized = sp,
+          analysis_group = sp,
+          determiner_tier = rep(c("Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze"), length.out = n),
+          latitude = ifelse(is_dub, runif(n, 33.5, 36.0), runif(n, 33.8, 36.2)),
+          longitude = ifelse(is_dub, runif(n, -81.0, -78.0), runif(n, -81.2, -78.2)),
+          coordinateUncertaintyInMeters = c(rep(200, n - 2), 18000, 25000),
+          bio1_temp_mean = rnorm(n, 16.5, 0.8),
+          bio4_temp_seasonality = rnorm(n, 620, 25),
+          bio12_precip_annual = rnorm(n, 1250, 60),
+          bio15_precip_seasonality = rnorm(n, 18, 2.0),
+          delta_doy = ifelse(is_dub, rnorm(n, -10, 4), rnorm(n, 8, 4)),
+          fine_soil_ph = ifelse(is_dub, rnorm(n, 4.6, 0.25), rnorm(n, 5.9, 0.30)),
+          fine_soil_sand = ifelse(is_dub, rnorm(n, 78, 5), rnorm(n, 42, 6)),
+          fine_bedrock_depth_cm = ifelse(is_dub, rnorm(n, 22, 6), rnorm(n, 135, 20)),
+          cfvo = ifelse(is_dub, rnorm(n, 38, 6), rnorm(n, 9, 3)),
+          awc = ifelse(is_dub, rnorm(n, 0.06, 0.015), rnorm(n, 0.16, 0.02)),
+          alr_sand_clay = ifelse(is_dub, rnorm(n, 2.1, 0.25), rnorm(n, 0.4, 0.25)),
+          azonal_proximity_index = ifelse(is_dub, rnorm(n, 0.82, 0.08), rnorm(n, 0.15, 0.06)),
+          stringsAsFactors = FALSE
+        )
+        # Add collinear duplicate within climatic block to verify block-wise pruning removes it
+        df$bio1_collinear_dup <- df$bio1_temp_mean * 1.01 + rnorm(n, 0, 0.005)
+        env_vars <- c("bio1_temp_mean", "bio1_collinear_dup", "bio4_temp_seasonality", "bio12_precip_annual",
+                      "bio15_precip_seasonality", "delta_doy", "fine_soil_ph", "fine_soil_sand",
+                      "fine_bedrock_depth_cm", "cfvo", "awc", "alr_sand_clay", "azonal_proximity_index")
+        bs <- screen_collinear_predictors_by_block(df[, env_vars], cor.threshold = 0.70, vif.threshold = 5.0)
+        stopifnot(length(bs$climatic_variables) >= 1)
+        stopifnot(length(bs$edaphic_variables) >= 1)
+        stopifnot(!(all(c("bio1_temp_mean", "bio1_collinear_dup") %in% bs$climatic_variables)))
+
+        niche_out <- run_warren_niche_identity_tests(df, env_vars, n_perm = 20)
+        sum_df <- niche_out$summary
+        req_cols <- c("Pair", "Taxon1", "Taxon2", "N1", "N2",
+                      "D_clim", "I_clim", "p_equiv_D_clim", "p_bg_D_clim",
+                      "D_edaph", "I_edaph", "p_equiv_D_edaph", "p_bg_D_edaph",
+                      "D_joint", "I_joint", "Schoener_D", "Warren_D", "Warren_I",
+                      "p_value_D", "p_value_I", "p_bg_D_joint", "Niche_Divergence_Axis", "Taxonomic_Inference")
+        stopifnot(all(req_cols %in% names(sum_df)))
+        # Ensure high-uncertainty records (2 rows > 10000m) were excluded from N1 + N2 calibration
+        stopifnot((sum_df$N1[1] + sum_df$N2[1]) == (n - 2))
+        # Because climate is shared while edaphics diverge sharply, D_edaph must be lower than D_clim
+        stopifnot(sum_df$D_edaph[1] < sum_df$D_clim[1])
+        cat("PARTITIONED_NICHE_OK\\n")
+        """
+        res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"Rscript failed: {res.stderr}\n{res.stdout}")
+        self.assertIn("PARTITIONED_NICHE_OK", res.stdout)
+
+    def test_authority_anchored_spatial_block_cv_and_step07_contract(self):
+        """Verify authority-anchored Spatial RF training, OOF probabilities, passive Tier_3_Bronze projection, and Step 07 schema compatibility."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            vouchers_csv = tmp / "curated_vouchers.csv"
+            morph_csv = tmp / "morphometric_flags.csv"
+            vision_csv = tmp / "label_noise_audit.csv"
+            pheno_states_csv = tmp / "voucher_phenological_states.csv"
+            out_flags = tmp / "multimodal_conflict_flags.csv"
+            out_summary = tmp / "multimodal_spatial_rf_summary.csv"
+            out_ssurgo = tmp / "ssurgo_edaphic_validation.csv"
+            out_contingency = tmp / "micro_edaphic_outcrop_contingency.csv"
+            out_pheno_anom = tmp / "phenological_anomalies.csv"
+            out_pheno_sum = tmp / "phenological_anomaly_summary.csv"
+            out_plot = tmp / "spatial_rf_niche_summary.pdf"
+            out_pheno_plot = tmp / "phenological_latitudinal_anomaly.pdf"
+
+            rows = []
+            for idx in range(32):
+                sp = TARGET_TAXA[idx % len(TARGET_TAXA)]
+                lat = 33.0 + (idx % 8) * 1.05
+                lon = -84.0 + (idx % 6) * 0.85
+                doy = int(round(-30.0 + 3.9 * lat))
+                tier = "Tier_1_Gold" if idx % 4 in (0, 1) else ("Tier_2_Silver" if idx % 4 == 2 else "Tier_3_Bronze")
+                coord_unc = 16000.0 if idx == 31 else float(120 + (idx % 5) * 150)
+                rows.append({
+                    "catalogNumber": f"ANC_{idx:03d}",
+                    "institutionCode": "NCU",
+                    "scientificName": sp,
+                    "species_raw": sp,
+                    "determiner_tier": tier,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "decimalLatitude": lat,
+                    "decimalLongitude": lon,
+                    "coordinateUncertaintyInMeters": coord_unc,
+                    "eventDate": f"2022-04-{(idx % 20) + 1:02d}",
+                    "year": 2022,
+                    "month": 4,
+                    "day": (idx % 20) + 1,
+                    "doy": doy,
+                    "reproductiveCondition": "fl",
+                    "regional_group": "Piedmont_Granite_Flatrocks" if sp == "Packera anonyma" else "Southeastern_Coastal_Plain",
+                    "is_primary_duplicate": True,
+                })
+            pd.DataFrame(rows).to_csv(vouchers_csv, index=False)
+
+            pd.DataFrame([
+                {
+                    "catalogNumber": r["catalogNumber"],
+                    "plant_individual_id": 1,
+                    "morph_tier_source": "Tier_1_Pure",
+                    "n_tier1_leaves": 3,
+                    "n_tier2_leaves": 0,
+                    "cda_predicted_taxon": r["species_raw"],
+                    "cda_posterior_prob": 0.92,
+                    "can1": 1.1,
+                    "can2": -0.3,
+                    "can3": 0.2,
+                    "gmm_cluster": (i % 4) + 1,
+                    "gmm_uncertainty": 0.05,
+                    "morphometric_outlier_flag": False,
+                    "misidentification_flag": False,
+                }
+                for i, r in enumerate(rows)
+            ]).to_csv(morph_csv, index=False)
+
+            pd.DataFrame([
+                {
+                    "catalogNumber": r["catalogNumber"],
+                    "predicted_label": r["species_raw"],
+                    "confidence_predicted_class": 0.91,
+                    "c_error": 0.08,
+                    "is_label_corrupted": False,
+                }
+                for r in rows
+            ]).to_csv(vision_csv, index=False)
+
+            pd.DataFrame([
+                {
+                    "catalogNumber": r["catalogNumber"],
+                    "total_capitula": 4,
+                    "n_anthesis": 3,
+                    "n_fruit": 1,
+                    "n_bud": 0,
+                    "voucher_phenological_state": "anthesis",
+                    "dominant_pappus_ratio": 0.10,
+                }
+                for r in rows
+            ]).to_csv(pheno_states_csv, index=False)
+
+            cmd = [
+                "Rscript",
+                str(self.r_script_path),
+                "--vouchers", str(vouchers_csv),
+                "--morphometrics", str(morph_csv),
+                "--vision-audit", str(vision_csv),
+                "--pheno-states", str(pheno_states_csv),
+                "--env-dir", str(tmp / "env"),
+                "--ssurgo-cache", str(tmp / "ssurgo_cache"),
+                "--ssurgo-table", str(out_ssurgo),
+                "--contingency-table", str(out_contingency),
+                "--pheno-anomalies", str(out_pheno_anom),
+                "--pheno-summary", str(out_pheno_sum),
+                "--pheno-plot", str(out_pheno_plot),
+                "--output-flags", str(out_flags),
+                "--output-summary", str(out_summary),
+                "--output-plot", str(out_plot),
+                "--permutations", "10",
+                "--n-trees", "50",
+                "--demo",
+            ]
+            res = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0, f"Step 06 Rscript failed: {res.stderr}\n{res.stdout}")
+
+            flags_df = pd.read_csv(out_flags)
+            # All 32 vouchers (including the >10000m record ANC_031) must be retained in multimodal_conflict_flags.csv for Step 07
+            self.assertEqual(len(flags_df), 32)
+            for col in [
+                "rf_predicted_taxon",
+                "rf_predicted_prob",
+                "rf_given_taxon_prob",
+                "rf_prediction_source",
+                "spatial_block_cv_acc",
+                "sgmc_lithology_class",
+                "bdricm",
+                "cfvo",
+                "awc",
+                "alr_sand_clay",
+                "ph_q10_buffer",
+                "ph_q90_buffer",
+                "min_bedrock_depth_buffer_cm",
+                "max_cfvo_buffer_pct",
+                "azonal_lithology_presence_buffer",
+            ]:
+                self.assertIn(col, flags_df.columns, f"Missing column '{col}' in multimodal_conflict_flags.csv")
+
+            # Verify Gold/Silver anchors received Spatial_Block_OOF_Anchor and Bronze received Passive_Projection_Bronze
+            gold_silver_rows = flags_df[
+                flags_df["determiner_tier"].isin(["Tier_1_Gold", "Tier_2_Silver"])
+                & (~flags_df["high_coord_uncertainty_flag"])
+            ]
+            bronze_rows = flags_df[
+                (flags_df["determiner_tier"] == "Tier_3_Bronze")
+                & (~flags_df["high_coord_uncertainty_flag"])
+            ]
+            high_unc_rows = flags_df[flags_df["catalogNumber"] == "ANC_031"]
+            self.assertTrue((gold_silver_rows["rf_prediction_source"] == "Spatial_Block_OOF_Anchor").all())
+            self.assertTrue((bronze_rows["rf_prediction_source"] == "Passive_Projection_Bronze").all())
+            self.assertTrue((high_unc_rows["rf_prediction_source"] == "Passive_Projection_High_Uncertainty").all())
+
+            sum_df = pd.read_csv(out_summary)
+            for col in ["D_clim", "I_clim", "D_edaph", "I_edaph", "D_joint", "I_joint", "Schoener_D", "Warren_D", "Warren_I"]:
+                self.assertIn(col, sum_df.columns, f"Missing column '{col}' in multimodal_spatial_rf_summary.csv")
+
+            # Verify Step 07 07_triage_dashboard_synthesis.R accepts the Step 06 outputs and completes without error
+            step07_script = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
+            out_queue = tmp / "triage_queue.csv"
+            out_report = tmp / "revision_summary.md"
+            out_triage_plot = tmp / "triage_plot.pdf"
+            cmd07 = [
+                "Rscript",
+                str(step07_script),
+                "--vouchers", str(vouchers_csv),
+                "--morphometrics", str(morph_csv),
+                "--vision-audit", str(vision_csv),
+                "--multimodal-flags", str(out_flags),
+                "--niche-summary", str(out_summary),
+                "--output-queue", str(out_queue),
+                "--output-report", str(out_report),
+                "--output-plot", str(out_triage_plot),
+            ]
+            res07 = subprocess.run(cmd07, cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(res07.returncode, 0, f"Step 07 execution failed: {res07.stderr}\n{res07.stdout}")
+            self.assertTrue(out_queue.exists(), "Step 07 triage_queue.csv must be generated from Step 06 outputs.")
+            queue_df = pd.read_csv(out_queue)
+            self.assertEqual(len(queue_df), 32)
 
 
 if __name__ == "__main__":

@@ -171,10 +171,57 @@ write_csv_atomic <- function(df, target_path, demo = FALSE) {
 }
 
 # ------------------------------------------------------------------------------
-# 2. Environmental Extraction (SoilGrids 250m & WorldClim v2.1 Integration)
+# 2. Environmental Extraction (SoilGrids 250m 0-15cm Rhizosphere & Uncertainty-Buffered WorldClim v2.1)
 # ------------------------------------------------------------------------------
+extract_rast_buffered_mean <- function(rast_obj, pts_vect, radii_m) {
+  pt_vals <- terra::extract(rast_obj, pts_vect)
+  buf_vals <- tryCatch({
+    r_num <- suppressWarnings(as.numeric(radii_m))
+    r_num[is.na(r_num) | !is.finite(r_num)] <- 250.0
+    r_num <- pmax(100.0, pmin(1000.0, r_num))
+    pts_buf <- terra::buffer(pts_vect, width = r_num)
+    terra::extract(rast_obj, pts_buf, fun = mean, na.rm = TRUE)
+  }, error = function(e) NULL)
+  if (is.null(buf_vals)) return(pt_vals)
+  for (col_nm in setdiff(names(pt_vals), "ID")) {
+    if (col_nm %in% names(buf_vals)) {
+      bv <- suppressWarnings(as.numeric(buf_vals[[col_nm]]))
+      pv <- suppressWarnings(as.numeric(pt_vals[[col_nm]]))
+      pt_vals[[col_nm]] <- ifelse(is.finite(bv), bv, pv)
+    }
+  }
+  return(pt_vals)
+}
+
+extract_soilgrids_rhizosphere_col <- function(sg_vals, var_pattern) {
+  nms <- names(sg_vals)
+  idx_0_5 <- grep(paste0(var_pattern, ".*(0-5|0_5)"), nms, ignore.case = TRUE)
+  idx_5_15 <- grep(paste0(var_pattern, ".*(5-15|5_15)"), nms, ignore.case = TRUE)
+  if (length(idx_0_5) > 0 && length(idx_5_15) > 0) {
+    v_0_5 <- suppressWarnings(as.numeric(sg_vals[[idx_0_5[1]]]))
+    v_5_15 <- suppressWarnings(as.numeric(sg_vals[[idx_5_15[1]]]))
+    if (exists("compute_rhizosphere_0_15cm", mode = "function")) {
+      return(compute_rhizosphere_0_15cm(v_0_5, v_5_15))
+    }
+    return((5.0 * v_0_5 + 10.0 * v_5_15) / 15.0)
+  }
+  idx_any <- grep(var_pattern, nms, ignore.case = TRUE)
+  if (length(idx_any) > 0) return(suppressWarnings(as.numeric(sg_vals[[idx_any[1]]])))
+  return(rep(NA_real_, nrow(sg_vals)))
+}
+
 extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
-  message("Integrating SoilGrids 250m Pedology & WorldClim v2.1 Bioclimatic layers...")
+  message("Integrating SoilGrids 250m (0-15cm Rhizosphere) & Uncertainty-Buffered WorldClim v2.1 Bioclimatic layers...")
+  if (exists("flag_coordinate_uncertainty", mode = "function")) {
+    df <- flag_coordinate_uncertainty(df, max_uncertainty_m = 10000.0)
+  } else {
+    if (!("coordinateUncertaintyInMeters" %in% names(df))) df$coordinateUncertaintyInMeters <- NA_real_
+    u_m <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
+    df$high_coord_uncertainty_flag <- !is.na(u_m) & u_m > 10000.0
+    df$is_training_eligible_coord <- !df$high_coord_uncertainty_flag
+    df$buffer_radius_m <- ifelse(is.na(u_m) | !is.finite(u_m) | u_m <= 0, 250.0, pmax(100.0, pmin(1000.0, u_m)))
+  }
+
   vars <- c("soil_ph", "soil_cec", "soil_sand", "soil_bulk_density",
             "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual",
             "bio15_precip_seasonality", "bio18_precip_warmest_qt", "bio19_precip_coldest_qt")
@@ -186,9 +233,19 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
     extracted_df <- tryCatch({
       env_stack <- terra::rast(raster_files)
       pts <- terra::vect(df[, c("longitude", "latitude")], geom = c("longitude", "latitude"), crs = "EPSG:4326")
-      extracted <- terra::extract(env_stack, pts)
+      extracted <- extract_rast_buffered_mean(env_stack, pts, df$buffer_radius_m)
       for (v in names(extracted)[names(extracted) != "ID"]) df[[v]] <- extracted[[v]]
-      message(sprintf("Extracted %d raster layers directly from %s.", length(raster_files), env_dir))
+      for (base_v in c("soil_ph", "soil_cec", "soil_sand", "soil_bulk_density")) {
+        c05 <- paste0(base_v, "_0_5cm"); c515 <- paste0(base_v, "_5_15cm")
+        if (all(c(c05, c515) %in% names(df))) {
+          df[[base_v]] <- if (exists("compute_rhizosphere_0_15cm", mode = "function")) {
+            compute_rhizosphere_0_15cm(df[[c05]], df[[c515]])
+          } else {
+            (5.0 * as.numeric(df[[c05]]) + 10.0 * as.numeric(df[[c515]])) / 15.0
+          }
+        }
+      }
+      message(sprintf("Extracted %d raster layers (with adaptive buffer radius r_i in [100, 1000]m) from %s.", length(raster_files), env_dir))
       df
     }, error = function(e) {
       extract_err <<- e$message
@@ -205,19 +262,19 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
       pts <- terra::vect(df[, c("longitude", "latitude")], geom = c("longitude", "latitude"), crs = "EPSG:4326")
       wc_rast <- terra::rast(wc_files)
       sg_rast <- terra::rast(sg_files)
-      wc_vals <- terra::extract(wc_rast, pts)
-      sg_vals <- terra::extract(sg_rast, pts)
+      wc_vals <- extract_rast_buffered_mean(wc_rast, pts, df$buffer_radius_m)
+      sg_vals <- extract_rast_buffered_mean(sg_rast, pts, df$buffer_radius_m)
       df$bio1_temp_mean <- wc_vals[[grep("bio_1$|bio_01$", names(wc_vals))[1]]]
       df$bio4_temp_seasonality <- wc_vals[[grep("bio_4$|bio_04$", names(wc_vals))[1]]]
       df$bio12_precip_annual <- wc_vals[[grep("bio_12$", names(wc_vals))[1]]]
       df$bio15_precip_seasonality <- wc_vals[[grep("bio_15$", names(wc_vals))[1]]]
       df$bio18_precip_warmest_qt <- wc_vals[[grep("bio_18$", names(wc_vals))[1]]]
       df$bio19_precip_coldest_qt <- wc_vals[[grep("bio_19$", names(wc_vals))[1]]]
-      df$soil_ph <- sg_vals[[grep("phh2o", names(sg_vals), ignore.case = TRUE)[1]]]
-      df$soil_cec <- sg_vals[[grep("cec", names(sg_vals), ignore.case = TRUE)[1]]]
-      df$soil_sand <- sg_vals[[grep("sand", names(sg_vals), ignore.case = TRUE)[1]]]
-      df$soil_bulk_density <- sg_vals[[grep("bdod", names(sg_vals), ignore.case = TRUE)[1]]]
-      message(sprintf("Extracted %d WorldClim and %d SoilGrids cached rasters from %s.", length(wc_files), length(sg_files), env_dir))
+      df$soil_ph <- extract_soilgrids_rhizosphere_col(sg_vals, "phh2o")
+      df$soil_cec <- extract_soilgrids_rhizosphere_col(sg_vals, "cec")
+      df$soil_sand <- extract_soilgrids_rhizosphere_col(sg_vals, "sand")
+      df$soil_bulk_density <- extract_soilgrids_rhizosphere_col(sg_vals, "bdod")
+      message(sprintf("Extracted %d WorldClim and %d SoilGrids cached rasters (0-15cm rhizosphere & buffered) from %s.", length(wc_files), length(sg_files), env_dir))
       df
     }, error = function(e) {
       extract_err <<- e$message
@@ -230,23 +287,26 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
   if (!isTRUE(demo) && requireNamespace("geodata", quietly = TRUE) && requireNamespace("terra", quietly = TRUE) &&
       (is_canonical_prod_path(env_dir) || identical(Sys.getenv("PACKERA_ENABLE_GEODATA_DOWNLOAD"), "TRUE"))) {
     extracted_geo <- tryCatch({
-      message(sprintf("Attempting automated WorldClim v2.1 & SoilGrids 250m acquisition via geodata into '%s'...", env_dir))
+      message(sprintf("Attempting automated WorldClim v2.1 & SoilGrids 250m (0-5cm & 5-15cm) acquisition via geodata into '%s'...", env_dir))
       dir.create(env_dir, recursive = TRUE, showWarnings = FALSE)
       wc_rast <- geodata::worldclim_global(var = "bio", res = 2.5, path = env_dir)
-      sg_rast <- terra::rast(lapply(c("phh2o", "cec", "sand", "bdod"), function(v) geodata::soil_world(var = v, depth = 15, path = env_dir)))
+      sg_0_5 <- lapply(c("phh2o", "cec", "sand", "bdod"), function(v) tryCatch(geodata::soil_world(var = v, depth = 5, path = env_dir), error = function(e) NULL))
+      sg_5_15 <- lapply(c("phh2o", "cec", "sand", "bdod"), function(v) geodata::soil_world(var = v, depth = 15, path = env_dir))
+      sg_list <- c(Filter(Negate(is.null), sg_0_5), sg_5_15)
+      sg_rast <- terra::rast(sg_list)
       pts <- terra::vect(df[, c("longitude", "latitude")], geom = c("longitude", "latitude"), crs = "EPSG:4326")
-      wc_vals <- terra::extract(wc_rast, pts)
-      sg_vals <- terra::extract(sg_rast, pts)
+      wc_vals <- extract_rast_buffered_mean(wc_rast, pts, df$buffer_radius_m)
+      sg_vals <- extract_rast_buffered_mean(sg_rast, pts, df$buffer_radius_m)
       df$bio1_temp_mean <- wc_vals[[grep("bio_1$|bio_01$", names(wc_vals))[1]]]
       df$bio4_temp_seasonality <- wc_vals[[grep("bio_4$|bio_04$", names(wc_vals))[1]]]
       df$bio12_precip_annual <- wc_vals[[grep("bio_12$", names(wc_vals))[1]]]
       df$bio15_precip_seasonality <- wc_vals[[grep("bio_15$", names(wc_vals))[1]]]
       df$bio18_precip_warmest_qt <- wc_vals[[grep("bio_18$", names(wc_vals))[1]]]
       df$bio19_precip_coldest_qt <- wc_vals[[grep("bio_19$", names(wc_vals))[1]]]
-      df$soil_ph <- sg_vals[[grep("phh2o", names(sg_vals), ignore.case = TRUE)[1]]]
-      df$soil_cec <- sg_vals[[grep("cec", names(sg_vals), ignore.case = TRUE)[1]]]
-      df$soil_sand <- sg_vals[[grep("sand", names(sg_vals), ignore.case = TRUE)[1]]]
-      df$soil_bulk_density <- sg_vals[[grep("bdod", names(sg_vals), ignore.case = TRUE)[1]]]
+      df$soil_ph <- extract_soilgrids_rhizosphere_col(sg_vals, "phh2o")
+      df$soil_cec <- extract_soilgrids_rhizosphere_col(sg_vals, "cec")
+      df$soil_sand <- extract_soilgrids_rhizosphere_col(sg_vals, "sand")
+      df$soil_bulk_density <- extract_soilgrids_rhizosphere_col(sg_vals, "bdod")
       df
     }, error = function(e) {
       extract_err <<- e$message
@@ -268,30 +328,35 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
     ))
   }
 
-  message("[DEMO MODE] Generating synthetic SoilGrids & WorldClim layers...")
+  message("[DEMO MODE] Generating synthetic SoilGrids (0-15cm rhizosphere) & WorldClim layers...")
   # High-fidelity eco-geographic empirical transfer functions (calibrated on SEUS / Midwest eco-regions)
   set.seed(42)
   lat <- df$latitude; lon <- df$longitude; n <- nrow(df)
   reg <- if ("regional_group" %in% names(df)) df$regional_group else rep("Unknown", n)
   
-  # Pedology (SoilGrids 250m calibrated parameters)
+  # Pedology (SoilGrids 250m 0-5cm and 5-15cm calibrated horizons integrated over 0-15cm rhizosphere)
   is_flatrock <- grepl("Flatrock", reg, ignore.case = TRUE) | (lon > -84 & lon < -79 & lat > 33 & lat < 36.5)
   is_sandhill <- grepl("Sandhill|Coastal", reg, ignore.case = TRUE) | (lon > -82 & lon < -75 & lat < 36.5)
   is_prairie  <- grepl("Midwest|Prairie", reg, ignore.case = TRUE) | (lon < -88)
   
-  df$soil_ph <- round(ifelse(is_sandhill, 4.7 + 0.3 * sin(lat), ifelse(is_flatrock, 5.2 + 0.25 * cos(lon),
-                      ifelse(is_prairie, 7.1 + 0.3 * sin(lat), 6.4 + 0.3 * cos(lat)))) + rnorm(n, 0, 0.18), 2)
-  df$soil_ph <- pmax(3.8, pmin(8.5, df$soil_ph))
+  ph_0_5 <- ifelse(is_sandhill, 4.6 + 0.3 * sin(lat), ifelse(is_flatrock, 5.1 + 0.25 * cos(lon),
+            ifelse(is_prairie, 7.0 + 0.3 * sin(lat), 6.3 + 0.3 * cos(lat)))) + rnorm(n, 0, 0.15)
+  ph_5_15 <- ph_0_5 + 0.15 + rnorm(n, 0, 0.10)
+  df$soil_ph <- round(pmax(3.8, pmin(8.5, (5.0 * ph_0_5 + 10.0 * ph_5_15) / 15.0)), 2)
   
-  df$soil_cec <- round(ifelse(is_sandhill, 5.2 + 1.2 * abs(sin(lat)), ifelse(is_flatrock, 11.5 + 2.0 * cos(lat),
-                       ifelse(is_prairie, 26.5 + 3.5 * sin(lon), 18.0 + 2.5 * cos(lat)))) + rnorm(n, 0, 1.2), 1)
-  df$soil_cec <- pmax(1.5, pmin(50.0, df$soil_cec))
+  cec_0_5 <- ifelse(is_sandhill, 5.6 + 1.2 * abs(sin(lat)), ifelse(is_flatrock, 12.0 + 2.0 * cos(lat),
+             ifelse(is_prairie, 27.2 + 3.5 * sin(lon), 18.6 + 2.5 * cos(lat)))) + rnorm(n, 0, 1.0)
+  cec_5_15 <- cec_0_5 - 0.8 + rnorm(n, 0, 0.8)
+  df$soil_cec <- round(pmax(1.5, pmin(50.0, (5.0 * cec_0_5 + 10.0 * cec_5_15) / 15.0)), 1)
 
-  df$soil_sand <- round(ifelse(is_sandhill, 82.0 + 5.0 * sin(lon), ifelse(is_flatrock, 52.0 + 6.0 * cos(lat),
-                        ifelse(is_prairie, 24.0 + 4.5 * sin(lat), 38.0 + 5.0 * cos(lon)))) + rnorm(n, 0, 3.5), 1)
-  df$soil_sand <- pmax(5.0, pmin(98.0, df$soil_sand))
+  sand_0_5 <- ifelse(is_sandhill, 83.0 + 5.0 * sin(lon), ifelse(is_flatrock, 53.0 + 6.0 * cos(lat),
+              ifelse(is_prairie, 24.5 + 4.5 * sin(lat), 38.5 + 5.0 * cos(lon)))) + rnorm(n, 0, 3.0)
+  sand_5_15 <- sand_0_5 - 1.5 + rnorm(n, 0, 2.5)
+  df$soil_sand <- round(pmax(5.0, pmin(98.0, (5.0 * sand_0_5 + 10.0 * sand_5_15) / 15.0)), 1)
 
-  df$soil_bulk_density <- round(ifelse(is_sandhill, 1.48, ifelse(is_flatrock, 1.32, 1.24)) + rnorm(n, 0, 0.05), 2)
+  bd_0_5 <- ifelse(is_sandhill, 1.44, ifelse(is_flatrock, 1.28, 1.20)) + rnorm(n, 0, 0.04)
+  bd_5_15 <- bd_0_5 + 0.06 + rnorm(n, 0, 0.04)
+  df$soil_bulk_density <- round((5.0 * bd_0_5 + 10.0 * bd_5_15) / 15.0, 2)
 
   # Bioclimatics (WorldClim v2.1 calibrated parameters)
   df$bio1_temp_mean <- round(24.5 - 0.72 * (lat - 28.0) - 0.05 * abs(lon + 82) + rnorm(n, 0, 0.4), 2)
@@ -704,6 +769,7 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
   message("Executing Multi-Scale Edaphic Synthesis & Fisher's Exact Outcrop Fidelity Test...")
   
   val_cols <- c("catalogNumber", "lat_lon_key", "latitude", "longitude", "species_standardized", "regional_group",
+                "coordinateUncertaintyInMeters", "buffer_radius_m", "high_coord_uncertainty_flag", "is_training_eligible_coord",
                 "musym", "muname", "taxsuborder", "taxgreatgroup", "is_rock_outcrop", "outcrop_class",
                 "ssurgo_rock_outcrop_pct", "ssurgo_bedrock_depth_cm",
                 "ssurgo_sand_pct", "ssurgo_clay_pct", "ssurgo_ph", "ssurgo_om_pct", "ssurgo_cec", "ssurgo_aws_0_50cm",
@@ -711,6 +777,9 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
                 "solus_resdept_cm_100m", "solus_fragvol_pct_100m",
                 "topo_elev_m", "topo_tpi_30m", "topo_roughness_30m", "topo_slope_deg", "topo_twi_30m",
                 "fine_soil_ph", "fine_soil_sand", "fine_soil_clay", "fine_bedrock_depth_cm", "fine_rock_outcrop_prob",
+                "bdricm", "resdept_r", "cfvo", "awc", "fine_soil_cec", "soil_silt_pct", "alr_sand_clay", "alr_silt_clay",
+                "sgmc_lithology_class", "is_azonal_lithology", "azonal_contact_dist_m", "azonal_proximity_index",
+                "ph_q10_buffer", "ph_q90_buffer", "min_bedrock_depth_buffer_cm", "max_cfvo_buffer_pct", "azonal_lithology_presence_buffer",
                 "soil_ph", "soil_cec", "soil_sand", "soil_bulk_density")
   present_cols <- intersect(val_cols, names(df))
   val_df <- df[, present_cols, drop = FALSE]
@@ -1228,6 +1297,16 @@ resolve_analysis_group <- function(df, intraspecific_mode = FALSE) {
 
 execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
   message("Executing 4-way cross-modal consensus checks (Morpho + Vision + Fine-Grain Edaphic + Phenology)...")
+  if (exists("flag_coordinate_uncertainty", mode = "function")) {
+    df <- flag_coordinate_uncertainty(df, max_uncertainty_m = 10000.0)
+  } else {
+    if (!("coordinateUncertaintyInMeters" %in% names(df))) df$coordinateUncertaintyInMeters <- NA_real_
+    u_m <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
+    df$high_coord_uncertainty_flag <- !is.na(u_m) & u_m > 10000.0
+    df$is_training_eligible_coord <- !df$high_coord_uncertainty_flag
+    df$buffer_radius_m <- ifelse(is.na(u_m) | !is.finite(u_m) | u_m <= 0, 250.0, pmax(100.0, pmin(1000.0, u_m)))
+  }
+
   df <- resolve_analysis_group(df, intraspecific_mode = intraspecific_mode)
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   active_taxa <- if (is_intra) sort(unique(stats::na.omit(df$analysis_group))) else get_active_packera_taxa(df$species_standardized)
@@ -1245,6 +1324,21 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
   }
   if (!("ssurgo_rock_outcrop_pct" %in% names(df))) {
     df$ssurgo_rock_outcrop_pct <- if ("is_rock_outcrop" %in% names(df)) ifelse(df$is_rock_outcrop, 45.0, 0.0) else rep(0.0, n)
+  }
+  if (!("bdricm" %in% names(df))) df$bdricm <- df$fine_bedrock_depth_cm
+  if (!("resdept_r" %in% names(df))) df$resdept_r <- df$fine_bedrock_depth_cm
+  if (!("cfvo" %in% names(df))) df$cfvo <- ifelse(df$ssurgo_rock_outcrop_pct > 15.0, 28.0, 8.0)
+  if (!("awc" %in% names(df))) df$awc <- if ("ssurgo_aws_0_50cm" %in% names(df)) round(df$ssurgo_aws_0_50cm / 50.0, 4) else rep(0.14, n)
+  if (!("fine_soil_cec" %in% names(df))) df$fine_soil_cec <- if ("soil_cec" %in% names(df)) df$soil_cec else rep(12.0, n)
+  if (!("alr_sand_clay" %in% names(df))) {
+    df$alr_sand_clay <- round(log((pmax(df$fine_soil_sand, 0.5) + 0.5) / (pmax(df$fine_soil_clay, 0.5) + 0.5)), 4)
+  }
+  if (!("ph_q10_buffer" %in% names(df))) df$ph_q10_buffer <- pmax(3.5, df$fine_soil_ph - 0.20)
+  if (!("ph_q90_buffer" %in% names(df))) df$ph_q90_buffer <- pmin(9.0, df$fine_soil_ph + 0.20)
+  if (!("min_bedrock_depth_buffer_cm" %in% names(df))) df$min_bedrock_depth_buffer_cm <- pmax(2.0, df$fine_bedrock_depth_cm * 0.75)
+  if (!("max_cfvo_buffer_pct" %in% names(df))) df$max_cfvo_buffer_pct <- pmin(95.0, df$cfvo * 1.25)
+  if (!("azonal_lithology_presence_buffer" %in% names(df))) {
+    df$azonal_lithology_presence_buffer <- as.integer(df$ssurgo_rock_outcrop_pct >= 15.0 | df$fine_bedrock_depth_cm <= 65.0)
   }
 
   # Phenological circular stats & Canonical Authority-Tier Weights (3.0 / 1.5 / 0.5)
@@ -1273,13 +1367,19 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
     max(sqrt(max(wv, 0, na.rm = TRUE)), min_sd, na.rm = TRUE)
   }
 
-  # Compute species/ecotype-specific circular means and fine-grain eco-edaphic envelopes (Tier 1 Gold w=3.0 & Tier 2 Silver w=1.5 anchors)
-  is_anchor <- df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & grp_vec %in% active_taxa
+  # Compute species/ecotype-specific circular means and fine-grain eco-edaphic envelopes
+  # Strictly on Tier_1_Gold (w=3.0) & Tier_2_Silver (w=1.5) anchors with coordinateUncertaintyInMeters <= 10000
+  elig_coord <- if ("is_training_eligible_coord" %in% names(df)) as.logical(df$is_training_eligible_coord) else rep(TRUE, nrow(df))
+  elig_coord[is.na(elig_coord)] <- TRUE
+  is_anchor <- df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & elig_coord & grp_vec %in% active_taxa
   anchor_df <- df[is_anchor, ]
+  if (nrow(anchor_df) < 10) anchor_df <- df[elig_coord & grp_vec %in% active_taxa, ]
   if (nrow(anchor_df) < 10) anchor_df <- df[grp_vec %in% active_taxa, ]
 
   cand_eco <- intersect(c(
     "fine_soil_ph", "fine_soil_sand", "fine_soil_clay", "fine_bedrock_depth_cm",
+    "bdricm", "cfvo", "awc", "fine_soil_cec", "alr_sand_clay", "azonal_proximity_index",
+    "ph_q10_buffer", "ph_q90_buffer", "min_bedrock_depth_buffer_cm", "max_cfvo_buffer_pct",
     "ssurgo_rock_outcrop_pct", "ssurgo_aws_0_50cm", "topo_tpi_30m", "topo_twi_30m",
     "soil_ph", "soil_sand", "soil_cec",
     "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "delta_doy"
@@ -1288,6 +1388,8 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
   if (length(eco_cols) == 0) eco_cols <- intersect(c("fine_soil_ph", "fine_soil_sand", "soil_ph", "soil_sand", "soil_cec"), names(df))
   min_sd_map <- c(
     fine_soil_ph = 0.25, fine_soil_sand = 4.0, fine_soil_clay = 3.0, fine_bedrock_depth_cm = 15.0,
+    bdricm = 15.0, cfvo = 4.0, awc = 0.02, fine_soil_cec = 2.0, alr_sand_clay = 0.25, azonal_proximity_index = 0.10,
+    ph_q10_buffer = 0.25, ph_q90_buffer = 0.25, min_bedrock_depth_buffer_cm = 15.0, max_cfvo_buffer_pct = 5.0,
     ssurgo_rock_outcrop_pct = 8.0, ssurgo_aws_0_50cm = 1.0, topo_tpi_30m = 1.5, topo_twi_30m = 0.8,
     soil_ph = 0.25, soil_sand = 4.0, soil_cec = 2.0,
     bio1_temp_mean = 1.0, bio4_temp_seasonality = 25.0, bio12_precip_annual = 50.0, delta_doy = 5.0
@@ -1364,7 +1466,10 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
 
     rock_pct_i <- if (!is.na(df$ssurgo_rock_outcrop_pct[i])) as.numeric(df$ssurgo_rock_outcrop_pct[i]) else 0.0
     bed_cm_i <- if (!is.na(df$fine_bedrock_depth_cm[i])) as.numeric(df$fine_bedrock_depth_cm[i]) else 150.0
-    is_outcrop_i <- isTRUE(rock_pct_i >= 15.0 || bed_cm_i <= 65.0 || ("is_rock_outcrop" %in% names(df) && isTRUE(df$is_rock_outcrop[i])))
+    min_bed_buf_i <- if ("min_bedrock_depth_buffer_cm" %in% names(df) && !is.na(df$min_bedrock_depth_buffer_cm[i])) as.numeric(df$min_bedrock_depth_buffer_cm[i]) else bed_cm_i
+    azonal_buf_i <- if ("azonal_lithology_presence_buffer" %in% names(df) && !is.na(df$azonal_lithology_presence_buffer[i])) as.integer(df$azonal_lithology_presence_buffer[i]) > 0L else FALSE
+    is_outcrop_i <- isTRUE(rock_pct_i >= 15.0 || bed_cm_i <= 65.0 || min_bed_buf_i <= 50.0 || azonal_buf_i ||
+                           ("is_rock_outcrop" %in% names(df) && isTRUE(df$is_rock_outcrop[i])))
     outcrop_spec_flags[i] <- is_outcrop_i && (given_sp %in% c("Packera dubia", "Packera anonyma", "Upland_Piedmont_Outcrop") ||
                                               edaph_sp %in% c("Packera dubia", "Packera anonyma", "Upland_Piedmont_Outcrop"))
 
@@ -1425,12 +1530,70 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
 evaluate_multimodal_concordance <- execute_crossmodal_consensus
 
 # ------------------------------------------------------------------------------
-# 4. Moran's Eigenvector Maps & Spatial Random Forests (adespatial / ranger / blockCV / spatialRF)
+# 4. Moran's Eigenvector Maps & Authority-Anchored Spatial Random Forests (Roberts et al. 2017; Valavi et al. 2021)
 # ------------------------------------------------------------------------------
+compute_inverse_class_frequency_weights <- function(y_vec) {
+  y_chr <- as.character(y_vec)
+  tbl <- table(y_chr)
+  n_tot <- length(y_chr)
+  n_cls <- max(length(tbl), 1L)
+  w_map <- n_tot / (n_cls * pmax(as.numeric(tbl), 1.0))
+  names(w_map) <- names(tbl)
+  w_out <- as.numeric(w_map[y_chr])
+  w_out[is.na(w_out) | !is.finite(w_out)] <- 1.0
+  w_out / max(mean(w_out, na.rm = TRUE), 1e-8)
+}
+
+estimate_spatial_autocorrelation_block_size <- function(coords, X_env, default_km = 55.0) {
+  n <- nrow(coords)
+  if (is.null(coords) || n < 10) return(list(range_km = default_km, range_m = default_km * 1000.0, range_deg = default_km / 111.0))
+  range_deg <- tryCatch({
+    d_mat <- as.matrix(stats::dist(coords))
+    d_vec <- d_mat[upper.tri(d_mat)]
+    if (length(d_vec) < 5) return(list(range_km = default_km, range_m = default_km * 1000.0, range_deg = default_km / 111.0))
+    # Empirical variogram range estimation across standardized environmental PC1
+    pc1 <- tryCatch(stats::prcomp(X_env, center = TRUE, scale. = TRUE)$x[, 1], error = function(e) X_env[, 1])
+    v_mat <- outer(pc1, pc1, function(a, b) 0.5 * (a - b)^2)
+    v_vec <- v_mat[upper.tri(v_mat)]
+    sill <- stats::var(pc1, na.rm = TRUE)
+    if (!is.finite(sill) || sill <= 1e-8) return(list(range_km = default_km, range_m = default_km * 1000.0, range_deg = default_km / 111.0))
+    breaks <- stats::quantile(d_vec, probs = seq(0, 0.8, length.out = 9), na.rm = TRUE)
+    breaks <- unique(breaks)
+    if (length(breaks) < 3) return(list(range_km = default_km, range_m = default_km * 1000.0, range_deg = default_km / 111.0))
+    bins <- cut(d_vec, breaks = breaks, include.lowest = TRUE)
+    gamma_bins <- tapply(v_vec, bins, mean, na.rm = TRUE)
+    dist_bins  <- tapply(d_vec, bins, mean, na.rm = TRUE)
+    reach_idx <- which(gamma_bins >= 0.85 * sill)
+    est_deg <- if (length(reach_idx) > 0) as.numeric(dist_bins[reach_idx[1]]) else as.numeric(stats::median(d_vec, na.rm = TRUE) * 0.25)
+    pmax(0.20, pmin(2.50, est_deg))
+  }, error = function(e) default_km / 111.0)
+  if (!is.finite(range_deg) || is.na(range_deg)) range_deg <- default_km / 111.0
+  range_km <- round(range_deg * 111.0, 2)
+  list(range_km = range_km, range_m = round(range_km * 1000.0, 0), range_deg = round(range_deg, 4))
+}
+
+assign_spatial_grid_blocks <- function(coords, block_deg = 0.50, k = 5L) {
+  lon <- as.numeric(coords[, 1]); lat <- as.numeric(coords[, 2])
+  b_deg <- if (is.finite(block_deg) && block_deg > 0.05) block_deg else 0.50
+  gx <- floor((lon - min(lon, na.rm = TRUE)) / b_deg)
+  gy <- floor((lat - min(lat, na.rm = TRUE)) / b_deg)
+  cell_ids <- paste0(gx, "_", gy)
+  u_cells <- unique(cell_ids)
+  if (length(u_cells) < 2) {
+    return(rep(seq_len(k), length.out = length(lon)))
+  }
+  cell_folds <- ((seq_along(u_cells) - 1L) %% k) + 1L
+  names(cell_folds) <- u_cells
+  as.integer(cell_folds[cell_ids])
+}
+
 compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_mode = FALSE) {
-  message("Generating Moran's Eigenvector Maps (MEM1..MEM5) & fitting Spatial Random Forests...")
+  message("Generating Moran's Eigenvector Maps (MEM1..MEM5) & fitting Authority-Anchored Spatial Random Forests...")
   if (!("analysis_group" %in% names(df)) || isTRUE(intraspecific_mode)) {
     df <- resolve_analysis_group(df, intraspecific_mode = intraspecific_mode)
+  }
+  if (exists("flag_coordinate_uncertainty", mode = "function") && !("is_training_eligible_coord" %in% names(df))) {
+    df <- flag_coordinate_uncertainty(df, max_uncertainty_m = 10000.0)
   }
   coords <- as.matrix(df[, c("longitude", "latitude")])
   n <- nrow(coords)
@@ -1464,7 +1627,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     colnames(MEMs) <- paste0("MEM", seq_len(num_mems))
   }
 
-  # Prepare feature matrices (retaining present columns in df) & Collinearity Screening (Dormann et al. 2013; Benito 2021)
+  # Prepare feature matrices & Block-Separate Collinearity Pruning (Dormann et al. 2013: |r| <= 0.70, VIF <= 5.0 separately within climatic and edaphic blocks)
   env_vars <- intersect(env_vars, names(df))
   X_env <- as.matrix(df[, env_vars, drop = FALSE])
   for (j in seq_len(ncol(X_env))) {
@@ -1475,7 +1638,9 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
       X_env[!is.finite(col_v), j] <- med_j
     }
   }
-  col_screen <- if (exists("screen_collinear_predictors", mode = "function")) {
+  col_screen <- if (exists("screen_collinear_predictors_by_block", mode = "function")) {
+    screen_collinear_predictors_by_block(X_env, cor.threshold = 0.70, vif.threshold = 5.0)
+  } else if (exists("screen_collinear_predictors", mode = "function")) {
     screen_collinear_predictors(X_env, cor.threshold = 0.70, vif.threshold = 5.0)
   } else {
     ac <- if (requireNamespace("spatialRF", quietly = TRUE)) tryCatch(spatialRF::auto_cor(x = as.data.frame(X_env), cor.threshold = 0.70), error = function(e) NULL) else NULL
@@ -1485,8 +1650,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     list(selected_variables = s_v, pruned_variables = setdiff(colnames(X_env), s_v))
   }
   if (length(col_screen$selected_variables) >= 2) {
-    # Ensure at least one fine-grain edaphic and one climate predictor remain represented for 3-way variance partitioning
-    fe_c <- grep("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_)", colnames(X_env), value = TRUE)
+    fe_c <- grep("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bdricm|resdept_r|cfvo|awc|alr_|sgmc_|is_azonal|azonal_|ph_q|min_bedrock|max_cfvo)", colnames(X_env), value = TRUE)
     mc_c <- grep("^(bio|delta_doy|doy)", colnames(X_env), value = TRUE, ignore.case = TRUE)
     sel_env <- col_screen$selected_variables
     if (length(fe_c) > 0 && length(intersect(sel_env, fe_c)) == 0) sel_env <- c(sel_env, fe_c[1])
@@ -1496,69 +1660,179 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   }
   X_all <- cbind(X_env, MEMs)
   y <- factor(df$analysis_group)
-  spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(df) else rep(1.0, nrow(df))
-  case_wts <- ifelse(df$determiner_tier == "Tier_1_Gold", 3.0,
-              ifelse(df$determiner_tier == "Tier_2_Silver", 1.5, 0.5))
-  case_wts[is.na(case_wts)] <- 0.5
-  case_wts <- case_wts * spatial_balance_weight
-  case_wts <- case_wts / max(mean(case_wts, na.rm = TRUE), 1e-8)
+
+  # Authority-Anchored Training Cohort Selection:
+  # Strictly Tier_1_Gold + Tier_2_Silver anchors with coordinateUncertaintyInMeters <= 10000
+  elig_coord <- if ("is_training_eligible_coord" %in% names(df)) as.logical(df$is_training_eligible_coord) else rep(TRUE, n)
+  elig_coord[is.na(elig_coord)] <- TRUE
+  if ("coordinateUncertaintyInMeters" %in% names(df)) {
+    u_m <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
+    elig_coord <- elig_coord & (is.na(u_m) | u_m <= 10000.0)
+  }
+  det_tier <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
+  is_gold_silver <- det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")
+  anchor_mask <- is_gold_silver & elig_coord & !is.na(y)
+  if (sum(anchor_mask) < 6 || length(unique(y[anchor_mask])) < 2) {
+    # Fallback for tiny synthetic unit-test fixtures where all rows may lack determiner_tier
+    anchor_mask <- elig_coord & !is.na(y)
+  }
+  if (sum(anchor_mask) < 4 || length(unique(y[anchor_mask])) < 2) {
+    anchor_mask <- !is.na(y)
+  }
+  anchor_idx <- which(anchor_mask)
+  passive_idx <- setdiff(seq_len(n), anchor_idx)
+  y_anchor <- droplevels(y[anchor_idx])
+
+  # Inverse class-frequency weights (Valavi et al. 2021) * Authority weights (3.0 / 1.5 / 0.5) * Spatial declustering weights
+  spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(df) else rep(1.0, n)
+  auth_wts <- ifelse(det_tier == "Tier_1_Gold", 3.0, ifelse(det_tier == "Tier_2_Silver", 1.5, 0.5))
+  auth_wts[is.na(auth_wts)] <- 0.5
+  inv_freq_wts <- rep(1.0, n)
+  inv_freq_wts[anchor_idx] <- compute_inverse_class_frequency_weights(y_anchor)
+  case_wts <- auth_wts * inv_freq_wts * spatial_balance_weight
+  case_wts <- case_wts / max(mean(case_wts[anchor_idx], na.rm = TRUE), 1e-8)
+
+  X_env_anc <- X_env[anchor_idx, , drop = FALSE]
+  X_all_anc <- X_all[anchor_idx, , drop = FALSE]
+  wts_anc   <- case_wts[anchor_idx]
 
   if (requireNamespace("ranger", quietly = TRUE)) {
-    df_env <- data.frame(y = y, as.data.frame(X_env), check.names = FALSE)
-    df_all <- data.frame(y = y, as.data.frame(X_all), check.names = FALSE)
-    rf_nonspatial <- ranger::ranger(y ~ ., data = df_env, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = case_wts, seed = 42)
+    df_env_anc <- data.frame(y = y_anchor, as.data.frame(X_env_anc), check.names = FALSE)
+    df_all_anc <- data.frame(y = y_anchor, as.data.frame(X_all_anc), check.names = FALSE)
+    rf_nonspatial <- ranger::ranger(y ~ ., data = df_env_anc, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_anc, seed = 42)
     oob_acc_nonspatial <- 1 - rf_nonspatial$prediction.error
-    rf_spatial <- ranger::ranger(y ~ ., data = df_all, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = case_wts, seed = 42)
+    rf_spatial <- ranger::ranger(y ~ ., data = df_all_anc, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_anc, seed = 42)
     oob_acc_spatial <- 1 - rf_spatial$prediction.error
+    rf_prob_anchor <- ranger::ranger(y ~ ., data = df_env_anc, num.trees = n_trees, probability = TRUE, case.weights = wts_anc, seed = 42)
     imp_vec <- ranger::importance(rf_spatial)
     imp_mat <- cbind(MeanDecreaseAccuracy = imp_vec)
   } else {
-    rf_nonspatial <- randomForest::randomForest(x = X_env, y = y, ntree = n_trees, importance = TRUE)
+    rf_nonspatial <- randomForest::randomForest(x = X_env_anc, y = y_anchor, ntree = n_trees, importance = TRUE)
     oob_acc_nonspatial <- 1 - rf_nonspatial$err.rate[n_trees, "OOB"]
-    rf_spatial <- randomForest::randomForest(x = X_all, y = y, ntree = n_trees, importance = TRUE)
+    rf_spatial <- randomForest::randomForest(x = X_all_anc, y = y_anchor, ntree = n_trees, importance = TRUE)
     oob_acc_spatial <- 1 - rf_spatial$err.rate[n_trees, "OOB"]
+    rf_prob_anchor <- rf_nonspatial
     imp_mat <- randomForest::importance(rf_spatial, type = 1)
   }
 
-  # Spatially Blocked 5-Fold Cross-Validation via blockCV::cv_spatial (evaluated on environmental predictors X_env)
-  spatial_block_cv_acc <- NA_real_
-  if (requireNamespace("blockCV", quietly = TRUE) && requireNamespace("sf", quietly = TRUE)) {
-    spatial_block_cv_acc <- tryCatch({
-      pts_sf <- sf::st_as_sf(data.frame(longitude = coords[, 1], latitude = coords[, 2], y = y),
+  # Estimate predictor spatial autocorrelation range for Spatial Block Cross-Validation (Roberts et al. 2017)
+  autocorr_info <- estimate_spatial_autocorrelation_block_size(coords[anchor_idx, , drop = FALSE], X_env_anc)
+  n_anc <- length(anchor_idx)
+  fold_ids_anc <- NULL
+  if (requireNamespace("blockCV", quietly = TRUE) && requireNamespace("sf", quietly = TRUE) && n_anc >= 10) {
+    fold_ids_anc <- tryCatch({
+      pts_sf <- sf::st_as_sf(data.frame(longitude = coords[anchor_idx, 1], latitude = coords[anchor_idx, 2], y = y_anchor),
                              coords = c("longitude", "latitude"), crs = 4326)
-      sb <- suppressMessages(suppressWarnings(
-        blockCV::cv_spatial(x = pts_sf, column = "y", k = 5, selection = "random",
-                            iteration = 10, progress = FALSE, report = FALSE, plot = FALSE)
-      ))
-      fold_ids <- sb$folds_ids
-      cv_preds <- rep(NA_character_, n)
-      for (f_id in sort(unique(stats::na.omit(fold_ids)))) {
-        tr_idx <- which(fold_ids != f_id)
-        te_idx <- which(fold_ids == f_id)
-        if (length(tr_idx) >= 5 && length(te_idx) >= 1 && length(unique(y[tr_idx])) >= 2) {
-          if (requireNamespace("ranger", quietly = TRUE)) {
-            tr_df <- data.frame(y = droplevels(y[tr_idx]), as.data.frame(X_env[tr_idx, , drop = FALSE]), check.names = FALSE)
-            te_df <- as.data.frame(X_env[te_idx, , drop = FALSE])
-            fit_cv <- ranger::ranger(y ~ ., data = tr_df, num.trees = max(100, floor(n_trees / 2)), probability = FALSE, case.weights = case_wts[tr_idx], seed = 42 + f_id)
-            cv_preds[te_idx] <- as.character(stats::predict(fit_cv, data = te_df)$predictions)
-          } else {
-            fit_cv <- randomForest::randomForest(x = X_env[tr_idx, , drop = FALSE], y = droplevels(y[tr_idx]), ntree = max(100, floor(n_trees / 2)))
-            cv_preds[te_idx] <- as.character(stats::predict(fit_cv, newdata = X_env[te_idx, , drop = FALSE]))
-          }
+      sb <- tryCatch(
+        suppressMessages(suppressWarnings(
+          blockCV::cv_spatial(x = pts_sf, column = "y", size = autocorr_info$range_m, k = 5, selection = "random",
+                              iteration = 10, progress = FALSE, report = FALSE, plot = FALSE)
+        )),
+        error = function(e) {
+          suppressMessages(suppressWarnings(
+            blockCV::cv_spatial(x = pts_sf, column = "y", k = 5, selection = "random",
+                                iteration = 10, progress = FALSE, report = FALSE, plot = FALSE)
+          ))
         }
+      )
+      sb$folds_ids
+    }, error = function(e) NULL)
+  }
+  if (is.null(fold_ids_anc) || length(unique(stats::na.omit(fold_ids_anc))) < 2) {
+    fold_ids_anc <- assign_spatial_grid_blocks(coords[anchor_idx, , drop = FALSE], block_deg = autocorr_info$range_deg, k = min(5L, max(2L, floor(n_anc / 2))))
+  }
+
+  # Generate Out-of-Fold (OOF) Ecological Probabilities for Gold/Silver Anchors via Spatial Block CV
+  cls_levels <- levels(y_anchor)
+  oof_prob_mat <- matrix(NA_real_, nrow = n_anc, ncol = length(cls_levels), dimnames = list(NULL, cls_levels))
+  oof_preds_anc <- rep(NA_character_, n_anc)
+
+  for (f_id in sort(unique(stats::na.omit(fold_ids_anc)))) {
+    tr_sub <- which(fold_ids_anc != f_id)
+    te_sub <- which(fold_ids_anc == f_id)
+    if (length(tr_sub) >= 4 && length(te_sub) >= 1 && length(unique(y_anchor[tr_sub])) >= 2) {
+      if (requireNamespace("ranger", quietly = TRUE)) {
+        tr_df <- data.frame(y = droplevels(y_anchor[tr_sub]), as.data.frame(X_env_anc[tr_sub, , drop = FALSE]), check.names = FALSE)
+        te_df <- as.data.frame(X_env_anc[te_sub, , drop = FALSE])
+        fit_cv <- ranger::ranger(y ~ ., data = tr_df, num.trees = max(100, floor(n_trees / 2)),
+                                 probability = TRUE, case.weights = wts_anc[tr_sub], seed = 42 + as.integer(f_id))
+        pr_mat <- stats::predict(fit_cv, data = te_df)$predictions
+        if (!is.matrix(pr_mat)) pr_mat <- matrix(pr_mat, nrow = length(te_sub), dimnames = list(NULL, names(pr_mat)))
+        for (cl_nm in intersect(colnames(pr_mat), cls_levels)) {
+          oof_prob_mat[te_sub, cl_nm] <- pr_mat[, cl_nm]
+        }
+        oof_preds_anc[te_sub] <- colnames(pr_mat)[max.col(pr_mat, ties.method = "first")]
+      } else {
+        fit_cv <- randomForest::randomForest(x = X_env_anc[tr_sub, , drop = FALSE], y = droplevels(y_anchor[tr_sub]), ntree = max(100, floor(n_trees / 2)))
+        pr_mat <- stats::predict(fit_cv, newdata = X_env_anc[te_sub, , drop = FALSE], type = "prob")
+        for (cl_nm in intersect(colnames(pr_mat), cls_levels)) {
+          oof_prob_mat[te_sub, cl_nm] <- pr_mat[, cl_nm]
+        }
+        oof_preds_anc[te_sub] <- as.character(stats::predict(fit_cv, newdata = X_env_anc[te_sub, , drop = FALSE]))
       }
-      ok_cv <- !is.na(cv_preds) & !is.na(y)
-      if (any(ok_cv)) sum(case_wts[ok_cv] * (cv_preds[ok_cv] == as.character(y[ok_cv]))) / sum(case_wts[ok_cv]) else NA_real_
-    }, error = function(e) NA_real_)
+    }
   }
-  if (is.na(spatial_block_cv_acc) || !is.finite(spatial_block_cv_acc)) {
-    spatial_block_cv_acc <- oob_acc_spatial
+
+  # Fill any unassigned OOF rows (e.g. if a tiny fold had only 1 class) from OOB predictions of rf_prob_anchor
+  missing_oof <- which(is.na(oof_preds_anc))
+  if (length(missing_oof) > 0 && requireNamespace("ranger", quietly = TRUE)) {
+    oob_p <- rf_prob_anchor$predictions
+    if (is.matrix(oob_p)) {
+      for (cl_nm in intersect(colnames(oob_p), cls_levels)) {
+        oof_prob_mat[missing_oof, cl_nm] <- oob_p[missing_oof, cl_nm]
+      }
+      oof_preds_anc[missing_oof] <- colnames(oob_p)[max.col(oob_p[missing_oof, , drop = FALSE], ties.method = "first")]
+    }
   }
+
+  ok_cv <- !is.na(oof_preds_anc) & !is.na(y_anchor)
+  spatial_block_cv_acc <- if (any(ok_cv)) {
+    sum(wts_anc[ok_cv] * (oof_preds_anc[ok_cv] == as.character(y_anchor[ok_cv]))) / sum(wts_anc[ok_cv])
+  } else {
+    oob_acc_spatial
+  }
+  if (is.na(spatial_block_cv_acc) || !is.finite(spatial_block_cv_acc)) spatial_block_cv_acc <- oob_acc_spatial
+
+  # Assemble full specimen-level ecological probabilities:
+  # - Out-of-fold (OOF) spatial block CV probabilities for Tier_1_Gold + Tier_2_Silver anchors
+  # - Passive projection via predict(rf_prob_anchor) for Tier_3_Bronze & high-coordinate-uncertainty records
+  full_prob_mat <- matrix(NA_real_, nrow = n, ncol = length(cls_levels), dimnames = list(NULL, cls_levels))
+  full_prob_mat[anchor_idx, ] <- oof_prob_mat
+  full_preds <- rep(NA_character_, n)
+  full_preds[anchor_idx] <- oof_preds_anc
+  full_block_id <- rep(NA_integer_, n)
+  full_block_id[anchor_idx] <- as.integer(fold_ids_anc)
+
+  if (length(passive_idx) > 0) {
+    if (requireNamespace("ranger", quietly = TRUE)) {
+      pass_df <- as.data.frame(X_env[passive_idx, , drop = FALSE])
+      pass_pr <- stats::predict(rf_prob_anchor, data = pass_df)$predictions
+      if (!is.matrix(pass_pr)) pass_pr <- matrix(pass_pr, nrow = length(passive_idx), dimnames = list(NULL, names(pass_pr)))
+      for (cl_nm in intersect(colnames(pass_pr), cls_levels)) {
+        full_prob_mat[passive_idx, cl_nm] <- pass_pr[, cl_nm]
+      }
+      full_preds[passive_idx] <- colnames(pass_pr)[max.col(pass_pr, ties.method = "first")]
+    } else {
+      pass_pr <- stats::predict(rf_prob_anchor, newdata = X_env[passive_idx, , drop = FALSE], type = "prob")
+      for (cl_nm in intersect(colnames(pass_pr), cls_levels)) {
+        full_prob_mat[passive_idx, cl_nm] <- pass_pr[, cl_nm]
+      }
+      full_preds[passive_idx] <- as.character(stats::predict(rf_prob_anchor, newdata = X_env[passive_idx, , drop = FALSE]))
+    }
+  }
+
+  rf_pred_prob <- apply(full_prob_mat, 1, function(r) if (all(is.na(r))) NA_real_ else max(r, na.rm = TRUE))
+  rf_given_prob <- sapply(seq_len(n), function(i) {
+    g_i <- as.character(y[i])
+    if (!is.na(g_i) && g_i %in% colnames(full_prob_mat)) full_prob_mat[i, g_i] else NA_real_
+  })
+  rf_pred_source <- ifelse(!elig_coord, "Passive_Projection_High_Uncertainty",
+                    ifelse(seq_len(n) %in% anchor_idx, "Spatial_Block_OOF_Anchor", "Passive_Projection_Bronze"))
 
   # Spatial vs Environmental Variance Partitioning (vegan::varpart across [A] Fine-Grain Edaphic & Outcrop Lithology, [B] Macro-Climate, [C] Spatial MEMs)
   pred_names <- rownames(imp_mat)
   is_mem_pred <- grepl("^MEM", pred_names)
-  is_fine_edaphic_pred <- grepl("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_)", pred_names)
+  is_fine_edaphic_pred <- grepl("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bdricm|resdept_r|cfvo|awc|alr_|sgmc_|is_azonal|azonal_|ph_q|min_bedrock|max_cfvo)", pred_names)
   is_climate_pred <- grepl("^(bio|delta_doy|doy)", pred_names, ignore.case = TRUE)
 
   imp_df <- data.frame(
@@ -1566,7 +1840,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     MeanDecreaseAccuracy = imp_mat[, 1],
     PositiveImportance = pmax(0, imp_mat[, 1]),
     Type = ifelse(is_mem_pred, "Spatial (MEMs)",
-           ifelse(grepl("^(fine_|ssurgo_|polaris_|solus_|topo_)", pred_names), "Fine-Grain Edaphic & Outcrop (10-30m)", "Environmental")),
+           ifelse(is_fine_edaphic_pred, "Fine-Grain Edaphic & Outcrop (10-30m)", "Environmental")),
     Group = ifelse(
       is_mem_pred, "[C] Spatial MEMs",
       ifelse(
@@ -1578,26 +1852,18 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   )
   imp_df <- imp_df[order(imp_df$MeanDecreaseAccuracy, decreasing = TRUE), ]
 
-  fine_edaphic_vars <- intersect(env_vars, c(
-    "fine_soil_ph", "fine_soil_sand", "fine_soil_clay", "fine_bedrock_depth_cm",
-    "ssurgo_rock_outcrop_pct", "ssurgo_aws_0_50cm", "topo_tpi_30m", "topo_twi_30m",
-    "soil_ph", "soil_cec", "soil_sand", "soil_bulk_density"
-  ))
-  macro_climate_vars <- intersect(env_vars, c(
-    "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual",
-    "bio15_precip_seasonality", "bio18_precip_warmest_qt", "bio19_precip_coldest_qt",
-    "delta_doy", "doy"
-  ))
+  fine_edaphic_vars <- intersect(env_vars, grep("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bdricm|resdept_r|cfvo|awc|alr_|sgmc_|is_azonal|azonal_|ph_q|min_bedrock|max_cfvo)", env_vars, value = TRUE))
+  macro_climate_vars <- intersect(env_vars, grep("^(bio|delta_doy|doy)", env_vars, value = TRUE, ignore.case = TRUE))
 
   varpart_obj <- NULL
   if (requireNamespace("vegan", quietly = TRUE) && length(fine_edaphic_vars) >= 1 && length(macro_climate_vars) >= 1) {
     varpart_obj <- tryCatch({
-      Y_mat <- stats::model.matrix(~ y - 1)
+      Y_mat <- stats::model.matrix(~ y_anchor - 1)
       vegan::varpart(
         Y_mat,
-        as.data.frame(X_env[, fine_edaphic_vars, drop = FALSE]),
-        as.data.frame(X_env[, macro_climate_vars, drop = FALSE]),
-        as.data.frame(MEMs)
+        as.data.frame(X_env_anc[, fine_edaphic_vars, drop = FALSE]),
+        as.data.frame(X_env_anc[, macro_climate_vars, drop = FALSE]),
+        as.data.frame(MEMs[anchor_idx, , drop = FALSE])
       )
     }, error = function(e) NULL)
   }
@@ -1635,138 +1901,294 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
 
   # Moran's I spatial autocorrelation check on model residuals (Dormann et al. 2013; Benito 2021)
   oob_pred_sp <- if (requireNamespace("ranger", quietly = TRUE)) as.character(rf_spatial$predictions) else as.character(rf_spatial$predicted)
-  res_vec <- as.numeric(oob_pred_sp != as.character(y)) - mean(oob_pred_sp != as.character(y), na.rm = TRUE)
+  res_vec <- as.numeric(oob_pred_sp != as.character(y_anchor)) - mean(oob_pred_sp != as.character(y_anchor), na.rm = TRUE)
   res_vec[!is.finite(res_vec)] <- 0.0
   moran_i <- 0.0; moran_p <- 1.0
-  if (n >= 5 && sum(res_vec^2) > 1e-10) {
-    D_sp <- as.matrix(stats::dist(coords)); W_sp <- 1.0 / (D_sp + 0.05); diag(W_sp) <- 0.0
+  if (n_anc >= 5 && sum(res_vec^2) > 1e-10) {
+    D_sp <- as.matrix(stats::dist(coords[anchor_idx, , drop = FALSE])); W_sp <- 1.0 / (D_sp + 0.05); diag(W_sp) <- 0.0
     w_sum <- sum(W_sp)
     if (w_sum > 1e-8) {
-      moran_i <- as.numeric((n / w_sum) * (t(res_vec) %*% W_sp %*% res_vec) / sum(res_vec^2))
-      e_i <- -1.0 / (n - 1)
-      z_m <- (moran_i - e_i) / max(sqrt(2.0 / max(n, 4)), 1e-6)
+      moran_i <- as.numeric((n_anc / w_sum) * (t(res_vec) %*% W_sp %*% res_vec) / sum(res_vec^2))
+      e_i <- -1.0 / (n_anc - 1)
+      z_m <- (moran_i - e_i) / max(sqrt(2.0 / max(n_anc, 4)), 1e-6)
       moran_p <- 2.0 * stats::pnorm(-abs(z_m))
     }
   }
-  message(sprintf("Spatial RF OOB_Accuracy: %.2f%% (Non-Spatial: %.2f%%) | Spatial_Block_CV_Accuracy: %.2f%% | Residual Moran's I = %.4f (p = %.4f)",
-                  oob_acc_spatial * 100, oob_acc_nonspatial * 100, spatial_block_cv_acc * 100, moran_i, moran_p))
-  return(list(rf_spatial = rf_spatial, rf_nonspatial = rf_nonspatial, importance = imp_df,
-              variance_partition = var_part, varpart_model = varpart_obj, mems = MEMs,
-              OOB_Accuracy = oob_acc_spatial, NonSpatial_OOB_Accuracy = oob_acc_nonspatial,
-              Spatial_Block_CV_Accuracy = spatial_block_cv_acc,
-              residual_moran_i = round(moran_i, 4), residual_moran_p = round(moran_p, 4)))
+  message(sprintf(
+    "Authority-Anchored Spatial RF (%d Gold/Silver anchors, %d passive projections | Block Range = %.1f km): OOB_Acc = %.2f%% | Spatial_Block_CV_Acc = %.2f%% | Residual Moran's I = %.4f (p = %.4f)",
+    n_anc, length(passive_idx), autocorr_info$range_km, oob_acc_spatial * 100, spatial_block_cv_acc * 100, moran_i, moran_p
+  ))
+  return(list(
+    rf_spatial = rf_spatial, rf_nonspatial = rf_nonspatial, rf_prob_anchor = rf_prob_anchor,
+    importance = imp_df, variance_partition = var_part, varpart_model = varpart_obj, mems = MEMs,
+    OOB_Accuracy = oob_acc_spatial, OOB_Error = 1 - oob_acc_spatial,
+    NonSpatial_OOB_Accuracy = oob_acc_nonspatial,
+    Spatial_Block_CV_Accuracy = spatial_block_cv_acc,
+    spatial_autocorr_range_km = autocorr_info$range_km,
+    rf_predicted_taxon = full_preds,
+    rf_predicted_prob = round(rf_pred_prob, 4),
+    rf_given_taxon_prob = round(rf_given_prob, 4),
+    rf_prediction_source = rf_pred_source,
+    spatial_block_id = full_block_id,
+    collinearity_screening = col_screen,
+    residual_moran_i = round(moran_i, 4), residual_moran_p = round(moran_p, 4)
+  ))
 }
 run_spatial_random_forests <- compute_spatial_rf_mems
 run_spatial_rf_models <- compute_spatial_rf_mems
 
 # ------------------------------------------------------------------------------
-# 5. ecospat 2D Kernel-Smoothed PCA-env & ENMTools Niche Identity Permutation Tests
+# 5. Partitioned PCA-env Niche Overlap: Climatic vs. Edaphic-Geologic vs. Joint
+#    (Broennimann et al. 2012; Warren et al. 2008; Dormann et al. 2013)
 # ------------------------------------------------------------------------------
-run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100, intraspecific_mode = FALSE) {
-  message(sprintf("Executing Warren's Niche Identity Tests (%d permutations per pair)...", n_perm))
-  if (!("analysis_group" %in% names(df)) || isTRUE(intraspecific_mode)) {
-    df <- resolve_analysis_group(df, intraspecific_mode = intraspecific_mode)
+compute_pca_env_partition_overlap <- function(bg_mat, grp_col, sp1, sp2, n_perm = 100) {
+  if (is.null(bg_mat) || ncol(bg_mat) == 0 || nrow(bg_mat) < 6) {
+    return(list(D_emp = NA_real_, I_emp = NA_real_, p_equiv_D = NA_real_, p_equiv_I = NA_real_,
+                p_bg_D = NA_real_, p_bg_I = NA_real_, D_null = rep(NA_real_, n_perm), I_null = rep(NA_real_, n_perm)))
   }
-  is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
-  grp_col <- if (is_intra) df$analysis_group else df$species_standardized
-  cand_groups <- if (is_intra) sort(unique(stats::na.omit(grp_col))) else get_active_packera_taxa(grp_col)
-  if (length(cand_groups) < 2) cand_groups <- sort(unique(stats::na.omit(df$analysis_group)))
-  pairs <- if (length(cand_groups) >= 2) combn(cand_groups, 2, simplify = FALSE) else list()
-  results_list <- list(); perm_dist_list <- list()
-
-  env_vars <- intersect(env_vars, names(df))
-  bg_mat <- as.matrix(df[, env_vars, drop = FALSE])
+  for (j in seq_len(ncol(bg_mat))) {
+    col_v <- bg_mat[, j]
+    if (any(!is.finite(col_v))) {
+      med_j <- stats::median(col_v[is.finite(col_v)], na.rm = TRUE)
+      if (!is.finite(med_j)) med_j <- 0.0
+      bg_mat[!is.finite(col_v), j] <- med_j
+    }
+  }
+  active_cols <- which(apply(bg_mat, 2, stats::sd, na.rm = TRUE) > 1e-8)
+  if (length(active_cols) == 0) {
+    return(list(D_emp = NA_real_, I_emp = NA_real_, p_equiv_D = NA_real_, p_equiv_I = NA_real_,
+                p_bg_D = NA_real_, p_bg_I = NA_real_, D_null = rep(NA_real_, n_perm), I_null = rep(NA_real_, n_perm)))
+  }
+  bg_sub <- bg_mat[, active_cols, drop = FALSE]
   scores_glob <- tryCatch({
-    active_env <- which(apply(bg_mat, 2, stats::sd, na.rm = TRUE) > 1e-8)
-    if (length(active_env) >= 2) {
-      as.data.frame(stats::prcomp(bg_mat[, active_env, drop = FALSE], center = TRUE, scale. = TRUE)$x[, 1:2, drop = FALSE])
+    if (ncol(bg_sub) >= 2) {
+      as.data.frame(stats::prcomp(bg_sub, center = TRUE, scale. = TRUE)$x[, 1:2, drop = FALSE])
     } else {
-      NULL
+      z1 <- as.numeric(scale(bg_sub[, 1]))
+      data.frame(PC1 = z1, PC2 = 0.05 * seq_along(z1) / length(z1))
     }
   }, error = function(e) NULL)
 
-  for (pr in pairs) {
-    sp1 <- pr[1]; sp2 <- pr[2]; pair_name <- paste0(gsub("Packera ", "P.", sp1), " vs ", gsub("Packera ", "P.", sp2))
-    df1 <- df[grp_col == sp1, env_vars, drop = FALSE]
-    df2 <- df[grp_col == sp2, env_vars, drop = FALSE]
-    n1 <- nrow(df1); n2 <- nrow(df2)
-    if (n1 < 5 || n2 < 5) next
+  idx1 <- which(grp_col == sp1)
+  idx2 <- which(grp_col == sp2)
+  n1 <- length(idx1); n2 <- length(idx2)
 
-    ecospat_ok <- FALSE
-    if (requireNamespace("ecospat", quietly = TRUE) && !is.null(scores_glob)) {
-      eco_fit <- tryCatch({
-        scores_sp1 <- scores_glob[grp_col == sp1, 1:2, drop = FALSE]
-        scores_sp2 <- scores_glob[grp_col == sp2, 1:2, drop = FALSE]
-        z1 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp1, R = 100)
-        z2 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp2, R = 100)
-        ov <- ecospat::ecospat.niche.overlap(z1, z2, cor = TRUE)
+  ecospat_ok <- FALSE
+  if (requireNamespace("ecospat", quietly = TRUE) && !is.null(scores_glob) && n1 >= 5 && n2 >= 5) {
+    eco_fit <- tryCatch({
+      scores_sp1 <- scores_glob[idx1, 1:2, drop = FALSE]
+      scores_sp2 <- scores_glob[idx2, 1:2, drop = FALSE]
+      grid_R <- if (n_perm < 99) 50 else 100
+      z1 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp1, R = grid_R)
+      z2 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp2, R = grid_R)
+      ov <- ecospat::ecospat.niche.overlap(z1, z2, cor = TRUE)
+      if (n_perm >= 99) {
         eq <- tryCatch(
           suppressMessages(suppressWarnings(ecospat::ecospat.niche.equivalency.test(z1, z2, rep = n_perm, overlap.alternative = "lower", ncores = 1))),
           error = function(e) suppressMessages(suppressWarnings(ecospat::ecospat.niche.equivalency.test(z1, z2, rep = n_perm, ncores = 1)))
         )
+        bg_sim <- tryCatch(
+          suppressMessages(suppressWarnings(ecospat::ecospat.niche.similarity.test(z1, z2, rep = n_perm, overlap.alternative = "lower", rand.type = 2, ncores = 1))),
+          error = function(e) tryCatch(
+            suppressMessages(suppressWarnings(ecospat::ecospat.niche.similarity.test(z1, z2, rep = n_perm, rand.type = 2, ncores = 1))),
+            error = function(e2) NULL
+          )
+        )
         d_sim <- as.numeric(eq$sim$D); i_sim <- as.numeric(eq$sim$I)
+        p_bg_d <- if (!is.null(bg_sim) && !is.null(bg_sim$sim$D)) {
+          d_bg <- as.numeric(bg_sim$sim$D)
+          (sum(d_bg <= as.numeric(ov$D), na.rm = TRUE) + 1) / (length(d_bg) + 1)
+        } else {
+          NA_real_
+        }
+        p_bg_i <- if (!is.null(bg_sim) && !is.null(bg_sim$sim$I)) {
+          i_bg <- as.numeric(bg_sim$sim$I)
+          (sum(i_bg <= as.numeric(ov$I), na.rm = TRUE) + 1) / (length(i_bg) + 1)
+        } else {
+          NA_real_
+        }
         list(
           D_emp = as.numeric(ov$D),
           I_emp = as.numeric(ov$I),
-          p_val_D = (sum(d_sim <= as.numeric(ov$D), na.rm = TRUE) + 1) / (length(d_sim) + 1),
-          p_val_I = (sum(i_sim <= as.numeric(ov$I), na.rm = TRUE) + 1) / (length(i_sim) + 1),
+          p_equiv_D = (sum(d_sim <= as.numeric(ov$D), na.rm = TRUE) + 1) / (length(d_sim) + 1),
+          p_equiv_I = (sum(i_sim <= as.numeric(ov$I), na.rm = TRUE) + 1) / (length(i_sim) + 1),
+          p_bg_D = p_bg_d,
+          p_bg_I = p_bg_i,
           D_null = d_sim,
-          I_null = i_sim
+          I_null = i_sim,
+          has_perm = TRUE
         )
-      }, error = function(e) NULL)
-      if (!is.null(eco_fit) && is.finite(eco_fit$D_emp) && is.finite(eco_fit$I_emp)) {
-        D_emp <- eco_fit$D_emp; I_emp <- eco_fit$I_emp
-        p_val_D <- eco_fit$p_val_D; p_val_I <- eco_fit$p_val_I
+      } else {
+        list(
+          D_emp = as.numeric(ov$D),
+          I_emp = as.numeric(ov$I),
+          has_perm = FALSE
+        )
+      }
+    }, error = function(e) NULL)
+    if (!is.null(eco_fit) && is.finite(eco_fit$D_emp) && is.finite(eco_fit$I_emp)) {
+      D_emp <- eco_fit$D_emp; I_emp <- eco_fit$I_emp
+      if (isTRUE(eco_fit$has_perm)) {
+        p_equiv_D <- eco_fit$p_equiv_D; p_equiv_I <- eco_fit$p_equiv_I
+        p_bg_D <- eco_fit$p_bg_D; p_bg_I <- eco_fit$p_bg_I
         D_null <- eco_fit$D_null; I_null <- eco_fit$I_null
         ecospat_ok <- TRUE
       }
     }
+  }
 
-    if (!ecospat_ok) {
-      # Fallback: PCA-env 2D environmental ordination kernel density overlap (Broennimann et al. 2012; Warren et al. 2008)
-      ord_bg <- if (!is.null(scores_glob)) as.matrix(scores_glob) else as.matrix(df[, env_vars, drop = FALSE])
-      ord_df1 <- ord_bg[grp_col == sp1, , drop = FALSE]
-      ord_df2 <- ord_bg[grp_col == sp2, , drop = FALSE]
-      m1 <- colMeans(ord_df1); s1 <- apply(ord_df1, 2, sd) + 1e-4
-      m2 <- colMeans(ord_df2); s2 <- apply(ord_df2, 2, sd) + 1e-4
-      p1 <- exp(-0.5 * rowSums(t((t(ord_bg) - m1) / s1)^2)); p1 <- p1 / sum(p1)
-      p2 <- exp(-0.5 * rowSums(t((t(ord_bg) - m2) / s2)^2)); p2 <- p2 / sum(p2)
+  # Calibrated 2D PCA-env Kernel Density & Equivalency / Background Similarity Tests (Broennimann et al. 2012; Warren et al. 2008)
+  ord_bg <- if (!is.null(scores_glob)) as.matrix(scores_glob) else as.matrix(bg_sub)
+  ord_df1 <- ord_bg[idx1, , drop = FALSE]
+  ord_df2 <- ord_bg[idx2, , drop = FALSE]
+  m1 <- colMeans(ord_df1); s1 <- apply(ord_df1, 2, stats::sd) + 1e-4
+  m2 <- colMeans(ord_df2); s2 <- apply(ord_df2, 2, stats::sd) + 1e-4
+  p1 <- exp(-0.5 * rowSums(t((t(ord_bg) - m1) / s1)^2)); p1 <- p1 / max(sum(p1), 1e-12)
+  p2 <- exp(-0.5 * rowSums(t((t(ord_bg) - m2) / s2)^2)); p2 <- p2 / max(sum(p2), 1e-12)
 
+  if (!ecospat_ok) {
+    if (!exists("D_emp", inherits = FALSE) || !is.finite(D_emp)) {
       D_emp <- 1 - 0.5 * sum(abs(p1 - p2))
       I_emp <- 1 - 0.5 * sqrt(sum((sqrt(p1) - sqrt(p2))^2))
-
-      pooled <- rbind(ord_df1, ord_df2); n_tot <- n1 + n2
-      D_null <- numeric(n_perm); I_null <- numeric(n_perm)
-      for (k in seq_len(n_perm)) {
-        idx_perm <- sample.int(n_tot, n1)
-        p_df1 <- pooled[idx_perm, , drop = FALSE]; p_df2 <- pooled[-idx_perm, , drop = FALSE]
-        pm1 <- colMeans(p_df1); ps1 <- apply(p_df1, 2, sd) + 1e-4
-        pm2 <- colMeans(p_df2); ps2 <- apply(p_df2, 2, sd) + 1e-4
-        pp1 <- exp(-0.5 * rowSums(t((t(ord_bg) - pm1) / ps1)^2)); pp1 <- pp1 / sum(pp1)
-        pp2 <- exp(-0.5 * rowSums(t((t(ord_bg) - pm2) / ps2)^2)); pp2 <- pp2 / sum(pp2)
-        D_null[k] <- 1 - 0.5 * sum(abs(pp1 - pp2))
-        I_null[k] <- 1 - 0.5 * sqrt(sum((sqrt(pp1) - sqrt(pp2))^2))
-      }
-      p_val_D <- (sum(D_null <= D_emp) + 1) / (n_perm + 1)
-      p_val_I <- (sum(I_null <= I_emp) + 1) / (n_perm + 1)
     }
 
-    outcome <- ifelse(p_val_D < 0.01, "Distinct Ecological Niche (Species Boundary Confirmed)",
-               ifelse(p_val_D < 0.05, "Significant Divergence (Subspecific Ecological Race)",
+    pooled <- rbind(ord_df1, ord_df2); n_tot <- n1 + n2
+    D_null <- numeric(n_perm); I_null <- numeric(n_perm)
+    for (k in seq_len(n_perm)) {
+      idx_perm <- sample.int(n_tot, n1)
+      p_df1 <- pooled[idx_perm, , drop = FALSE]; p_df2 <- pooled[-idx_perm, , drop = FALSE]
+      pm1 <- colMeans(p_df1); ps1 <- apply(p_df1, 2, stats::sd) + 1e-4
+      pm2 <- colMeans(p_df2); ps2 <- apply(p_df2, 2, stats::sd) + 1e-4
+      pp1 <- exp(-0.5 * rowSums(t((t(ord_bg) - pm1) / ps1)^2)); pp1 <- pp1 / max(sum(pp1), 1e-12)
+      pp2 <- exp(-0.5 * rowSums(t((t(ord_bg) - pm2) / ps2)^2)); pp2 <- pp2 / max(sum(pp2), 1e-12)
+      D_null[k] <- 1 - 0.5 * sum(abs(pp1 - pp2))
+      I_null[k] <- 1 - 0.5 * sqrt(sum((sqrt(pp1) - sqrt(pp2))^2))
+    }
+    p_equiv_D <- (sum(D_null <= D_emp) + 1) / (n_perm + 1)
+    p_equiv_I <- (sum(I_null <= I_emp) + 1) / (n_perm + 1)
+    p_bg_D <- NA_real_; p_bg_I <- NA_real_
+  }
+
+  # Background Similarity Permutation Test (Warren et al. 2008: random background niche shifts across regional PCA-env)
+  if (is.na(p_bg_D) || !is.finite(p_bg_D)) {
+    n_bg_tot <- nrow(ord_bg)
+    D_bg_null <- numeric(n_perm); I_bg_null <- numeric(n_perm)
+    for (k in seq_len(n_perm)) {
+      bg_idx2 <- sample.int(n_bg_tot, size = min(n2, n_bg_tot), replace = TRUE)
+      bg_df2 <- ord_bg[bg_idx2, , drop = FALSE]
+      bm2 <- colMeans(bg_df2); bs2 <- apply(bg_df2, 2, stats::sd) + 1e-4
+      bp2 <- exp(-0.5 * rowSums(t((t(ord_bg) - bm2) / bs2)^2)); bp2 <- bp2 / max(sum(bp2), 1e-12)
+      D_bg_null[k] <- 1 - 0.5 * sum(abs(p1 - bp2))
+      I_bg_null[k] <- 1 - 0.5 * sqrt(sum((sqrt(p1) - sqrt(bp2))^2))
+    }
+    p_bg_D <- (sum(D_bg_null <= D_emp) + 1) / (n_perm + 1)
+    p_bg_I <- (sum(I_bg_null <= I_emp) + 1) / (n_perm + 1)
+  }
+
+  return(list(
+    D_emp = D_emp, I_emp = I_emp,
+    p_equiv_D = p_equiv_D, p_equiv_I = p_equiv_I,
+    p_bg_D = p_bg_D, p_bg_I = p_bg_I,
+    D_null = D_null, I_null = I_null
+  ))
+}
+
+run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100, intraspecific_mode = FALSE) {
+  message(sprintf("Executing Partitioned PCA-env Niche Equivalency & Background Similarity Tests (%d permutations per pair)...", n_perm))
+  if (!("analysis_group" %in% names(df)) || isTRUE(intraspecific_mode)) {
+    df <- resolve_analysis_group(df, intraspecific_mode = intraspecific_mode)
+  }
+  # Exclude records with coordinateUncertaintyInMeters > 10000 from calibrating PCA-env niche envelopes
+  elig_mask <- if ("is_training_eligible_coord" %in% names(df)) as.logical(df$is_training_eligible_coord) else rep(TRUE, nrow(df))
+  elig_mask[is.na(elig_mask)] <- TRUE
+  if ("coordinateUncertaintyInMeters" %in% names(df)) {
+    u_m <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
+    elig_mask <- elig_mask & (is.na(u_m) | u_m <= 10000.0)
+  }
+  df_calib <- if (sum(elig_mask) >= 10) df[elig_mask, , drop = FALSE] else df
+
+  is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df_calib$species_standardized))) < 2)
+  grp_col <- if (is_intra) df_calib$analysis_group else df_calib$species_standardized
+  cand_groups <- if (is_intra) sort(unique(stats::na.omit(grp_col))) else get_active_packera_taxa(grp_col)
+  if (length(cand_groups) < 2) cand_groups <- sort(unique(stats::na.omit(df_calib$analysis_group)))
+  pairs <- if (length(cand_groups) >= 2) combn(cand_groups, 2, simplify = FALSE) else list()
+  results_list <- list(); perm_dist_list <- list()
+
+  env_vars <- intersect(env_vars, names(df_calib))
+  X_raw <- as.matrix(df_calib[, env_vars, drop = FALSE])
+  block_screen <- if (exists("screen_collinear_predictors_by_block", mode = "function")) {
+    screen_collinear_predictors_by_block(X_raw, cor.threshold = 0.70, vif.threshold = 5.0)
+  } else {
+    clim_c <- grep("^(bio|delta_doy|doy)", env_vars, value = TRUE, ignore.case = TRUE)
+    edaph_c <- setdiff(env_vars, clim_c)
+    list(climatic_variables = clim_c, edaphic_variables = edaph_c, selected_variables = env_vars)
+  }
+
+  clim_vars <- intersect(block_screen$climatic_variables, colnames(X_raw))
+  if (length(clim_vars) == 0) clim_vars <- intersect(grep("^(bio|delta_doy|doy)", colnames(X_raw), value = TRUE, ignore.case = TRUE), colnames(X_raw))
+  edaph_vars <- intersect(block_screen$edaphic_variables, colnames(X_raw))
+  if (length(edaph_vars) == 0) edaph_vars <- setdiff(colnames(X_raw), clim_vars)
+  joint_vars <- unique(c(clim_vars, edaph_vars))
+
+  for (pr in pairs) {
+    sp1 <- pr[1]; sp2 <- pr[2]; pair_name <- paste0(gsub("Packera ", "P.", sp1), " vs ", gsub("Packera ", "P.", sp2))
+    n1 <- sum(grp_col == sp1, na.rm = TRUE)
+    n2 <- sum(grp_col == sp2, na.rm = TRUE)
+    if (n1 < 5 || n2 < 5) next
+
+    # (a) Climatic Niche Partition (D_clim, I_clim)
+    clim_res <- compute_pca_env_partition_overlap(
+      if (length(clim_vars) > 0) X_raw[, clim_vars, drop = FALSE] else X_raw,
+      grp_col, sp1, sp2, n_perm = n_perm
+    )
+    # (b) Edaphic-Geologic Niche Partition (D_edaph, I_edaph)
+    edaph_res <- compute_pca_env_partition_overlap(
+      if (length(edaph_vars) > 0) X_raw[, edaph_vars, drop = FALSE] else X_raw,
+      grp_col, sp1, sp2, n_perm = n_perm
+    )
+    # (c) Joint Climato-Edaphic Niche Partition
+    joint_res <- compute_pca_env_partition_overlap(
+      X_raw[, joint_vars, drop = FALSE],
+      grp_col, sp1, sp2, n_perm = n_perm
+    )
+
+    D_emp <- joint_res$D_emp; I_emp <- joint_res$I_emp
+    p_val_D <- joint_res$p_equiv_D; p_val_I <- joint_res$p_equiv_I
+    D_clim <- clim_res$D_emp; I_clim <- clim_res$I_emp
+    D_edaph <- edaph_res$D_emp; I_edaph <- edaph_res$I_emp
+
+    div_axis <- ifelse(!is.na(D_edaph) && !is.na(D_clim) && (D_edaph + 0.08 < D_clim), "Edaphic_Lithological_Divergence",
+                ifelse(!is.na(D_clim) && !is.na(D_edaph) && (D_clim + 0.08 < D_edaph), "Macroclimatic_Divergence",
+                       "Joint_Climato_Edaphic"))
+
+    min_p <- min(c(p_val_D, edaph_res$p_equiv_D, clim_res$p_equiv_D), na.rm = TRUE)
+    outcome <- ifelse(min_p < 0.01, "Distinct Ecological Niche (Species Boundary Confirmed)",
+               ifelse(min_p < 0.05, "Significant Divergence (Subspecific Ecological Race)",
                       "Conserved / Overlapping Niche (Ecophenotypic Variant)"))
 
     results_list[[pair_name]] <- data.frame(
       Pair = pair_name, Taxon1 = sp1, Taxon2 = sp2, N1 = n1, N2 = n2,
+      D_clim = round(D_clim, 4), I_clim = round(I_clim, 4),
+      p_equiv_D_clim = round(clim_res$p_equiv_D, 4), p_bg_D_clim = round(clim_res$p_bg_D, 4),
+      D_edaph = round(D_edaph, 4), I_edaph = round(I_edaph, 4),
+      p_equiv_D_edaph = round(edaph_res$p_equiv_D, 4), p_bg_D_edaph = round(edaph_res$p_bg_D, 4),
+      D_joint = round(D_emp, 4), I_joint = round(I_emp, 4),
       Schoener_D = round(D_emp, 4), Warren_D = round(D_emp, 4), Warren_I = round(I_emp, 4),
       p_value_D = round(p_val_D, 4), p_value_I = round(p_val_I, 4),
+      p_bg_D_joint = round(joint_res$p_bg_D, 4), p_bg_I_joint = round(joint_res$p_bg_I, 4),
+      Niche_Divergence_Axis = div_axis,
       Taxonomic_Inference = outcome, stringsAsFactors = FALSE
     )
-    perm_dist_list[[pair_name]] <- data.frame(Pair = pair_name, D_null = D_null, I_null = I_null)
+    perm_dist_list[[pair_name]] <- data.frame(
+      Pair = pair_name,
+      D_null = joint_res$D_null, I_null = joint_res$I_null,
+      D_clim_null = clim_res$D_null, D_edaph_null = edaph_res$D_null
+    )
   }
 
   summary_table <- do.call(rbind, results_list)
   perm_table <- do.call(rbind, perm_dist_list)
-  return(list(summary = summary_table, permutations = perm_table))
+  return(list(summary = summary_table, permutations = perm_table, collinearity_blocks = block_screen))
 }
 run_niche_identity_tests <- run_warren_niche_identity_tests
 
@@ -1970,7 +2392,7 @@ main <- function() {
   # Stage 1: Environmental Layer Extraction (250m SoilGrids & WorldClim v2.1)
   vouchers_df <- extract_environmental_layers(vouchers_df, opts$env_dir, demo = demo_mode)
 
-  # Stage 1b: 10m/50m-Buffered USDA SSURGO Vector Pedology, 30m POLARIS, 100m SOLUS100 & 30m 3DEP Micro-Topography
+  # Stage 1b: 10m/50m-Buffered USDA SSURGO Vector Pedology, 30m POLARIS/gSSURGO, 100m SOLUS100, SGMC Lithology & 30m 3DEP Micro-Topography
   if (exists("load_and_update_fine_grain_cache", mode = "function")) {
     fine_cache_csv <- file.path(opts$env_dir, "fine_grain_edaphic_cache.csv")
     vouchers_df <- load_and_update_fine_grain_cache(
@@ -1984,6 +2406,12 @@ main <- function() {
     )
   } else {
     vouchers_df <- query_ssurgo_sda(vouchers_df, cache_dir = opts$ssurgo_cache, batch_size = opts$batch_size, demo = demo_mode)
+    if (exists("extract_sgmc_lithology", mode = "function")) {
+      vouchers_df <- extract_sgmc_lithology(vouchers_df, env_dir = opts$env_dir, demo = demo_mode)
+    }
+    if (exists("extract_uncertainty_buffered_predictors", mode = "function")) {
+      vouchers_df <- extract_uncertainty_buffered_predictors(vouchers_df, env_dir = opts$env_dir, demo = demo_mode)
+    }
   }
 
   edaphic_synth <- synthesize_multiscale_edaphics(
@@ -2014,6 +2442,9 @@ main <- function() {
 
   env_vars <- c(
     "fine_soil_ph", "fine_soil_sand", "fine_soil_clay", "fine_bedrock_depth_cm",
+    "bdricm", "resdept_r", "cfvo", "awc", "fine_soil_cec", "alr_sand_clay", "alr_silt_clay",
+    "is_azonal_lithology", "azonal_contact_dist_m", "azonal_proximity_index",
+    "ph_q10_buffer", "ph_q90_buffer", "min_bedrock_depth_buffer_cm", "max_cfvo_buffer_pct", "azonal_lithology_presence_buffer",
     "ssurgo_rock_outcrop_pct", "ssurgo_aws_0_50cm", "topo_tpi_30m", "topo_twi_30m",
     "soil_ph", "soil_cec", "soil_sand", "soil_bulk_density",
     "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "bio15_precip_seasonality",
@@ -2022,6 +2453,7 @@ main <- function() {
   env_vars <- intersect(env_vars, names(vouchers_df))
   for (ev in env_vars) {
     if (ev %in% names(vouchers_df)) {
+      vouchers_df[[ev]] <- suppressWarnings(as.numeric(vouchers_df[[ev]]))
       for (tx in unique(vouchers_df$species_standardized)) {
         tx_m <- vouchers_df$species_standardized == tx
         med_v <- stats::median(vouchers_df[[ev]][tx_m], na.rm = TRUE)
@@ -2037,11 +2469,17 @@ main <- function() {
   merged_df <- resolve_analysis_group(vouchers_df, intraspecific_mode = isTRUE(opts$intraspecific_mode))
   vouchers_df <- execute_crossmodal_consensus(merged_df, intraspecific_mode = isTRUE(opts$intraspecific_mode))
 
-  # Stage 3: Moran's Eigenvector Maps (MEM1..MEM5) & Spatial RF
+  # Stage 3: Moran's Eigenvector Maps (MEM1..MEM5) & Authority-Anchored Spatial RF
   srf_res <- compute_spatial_rf_mems(vouchers_df, env_vars, n_trees = opts$n_trees, intraspecific_mode = isTRUE(opts$intraspecific_mode))
   vouchers_df$spatial_block_cv_acc <- round(srf_res$Spatial_Block_CV_Accuracy, 4)
+  vouchers_df$spatial_autocorr_range_km <- srf_res$spatial_autocorr_range_km
+  vouchers_df$rf_predicted_taxon <- srf_res$rf_predicted_taxon
+  vouchers_df$rf_predicted_prob <- srf_res$rf_predicted_prob
+  vouchers_df$rf_given_taxon_prob <- srf_res$rf_given_taxon_prob
+  vouchers_df$rf_prediction_source <- srf_res$rf_prediction_source
+  vouchers_df$spatial_block_id <- srf_res$spatial_block_id
 
-  # Stage 4: Warren's Niche Identity Tests
+  # Stage 4: Partitioned PCA-env Niche Equivalency & Background Similarity Tests
   niche_res <- run_warren_niche_identity_tests(vouchers_df, env_vars, n_perm = opts$permutations, intraspecific_mode = isTRUE(opts$intraspecific_mode))
 
   # Stage 5: Export Conflict Flags, Summary Report & Figures (Atomic write-then-replace)
@@ -2063,4 +2501,4 @@ main <- function() {
   message("=== Multimodal Spatial RF & Niche Modeling Analysis Complete ===")
 }
 
-if (!interactive()) main()
+if (!interactive() && sys.nframe() == 0L) main()

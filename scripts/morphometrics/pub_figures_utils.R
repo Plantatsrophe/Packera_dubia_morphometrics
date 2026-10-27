@@ -52,7 +52,39 @@ EXTENDED_COLORBLIND_HEX <- c(
   "#E7298A", "#66A61E", "#E6AB02", "#A6761D", "#008080"
 )
 
-HOLLOW_PCH_CYCLE <- c(1L, 2L, 0L, 5L, 6L, 4L)
+HOLLOW_PCH_CYCLE <- c(1L, 2L, 5L, 0L, 6L, 4L)
+
+apply_bh_fdr_correction <- function(df_or_p, p_col = NULL) {
+  if (is.null(df_or_p)) return(NULL)
+  if (is.numeric(df_or_p)) {
+    dims <- dim(df_or_p)
+    dnames <- dimnames(df_or_p)
+    adj <- stats::p.adjust(as.numeric(df_or_p), method = "BH")
+    if (!is.null(dims)) {
+      dim(adj) <- dims
+      dimnames(adj) <- dnames
+    }
+    return(adj)
+  }
+  if (is.data.frame(df_or_p)) {
+    cand_cols <- if (!is.null(p_col)) p_col else intersect(
+      c("p_value", "P_value", "P_Value", "Equivalency_p_value", "p_value_D", "p_value_I", "Pr(>F)"),
+      colnames(df_or_p)
+    )
+    for (col in cand_cols) {
+      if (col %in% colnames(df_or_p)) {
+        raw_p <- suppressWarnings(as.numeric(df_or_p[[col]]))
+        adj_p <- stats::p.adjust(raw_p, method = "BH")
+        df_or_p[[paste0(col, "_bh")]] <- signif(adj_p, 4)
+        if (!("p_adj_bh" %in% colnames(df_or_p))) {
+          df_or_p$p_adj_bh <- signif(adj_p, 4)
+        }
+      }
+    }
+    return(df_or_p)
+  }
+  df_or_p
+}
 
 TAXONOMIC_TREATMENT_PALETTE <- c(
   "Confirmed Species"                   = "#009E73",
@@ -230,8 +262,8 @@ get_dynamic_packera_shapes <- function(taxa_vec = NULL) {
   base_shapes <- c(
     "Packera anonyma"    = 1L,
     "Packera dubia"      = 2L,
-    "Packera paupercula" = 0L,
-    "Packera plattensis" = 5L,
+    "Packera paupercula" = 5L,
+    "Packera plattensis" = 0L,
     "Unknown"            = 4L
   )
   if (is.null(taxa_vec) || length(taxa_vec) == 0) return(base_shapes)
@@ -696,6 +728,132 @@ plot_2d_ordination_scatter <- function(
     do.call(graphics::legend, legend_args)
   }
   invisible(list(xlim = xlim, ylim = ylim))
+}
+
+plot_3d_scatter_box <- function(
+  x,
+  y,
+  z,
+  col = "#0072B2",
+  pch = 1L,
+  cex = 0.85,
+  lwd = 1.0,
+  xlab = "PC1",
+  ylab = "PC2",
+  zlab = "PC3",
+  main = "",
+  theta = -38,
+  phi = 22,
+  drop_lines = TRUE,
+  centroids = NULL,
+  centroid_labels = NULL,
+  legend_args = NULL
+) {
+  x_num <- suppressWarnings(as.numeric(x))
+  y_num <- suppressWarnings(as.numeric(y))
+  z_num <- suppressWarnings(as.numeric(z))
+  n_pts <- max(length(x_num), length(y_num), length(z_num))
+  if (n_pts == 0) return(invisible(NULL))
+
+  x_num[is.na(x_num) | !is.finite(x_num)] <- 0.0
+  y_num[is.na(y_num) | !is.finite(y_num)] <- 0.0
+  z_num[is.na(z_num) | !is.finite(z_num)] <- 0.0
+
+  col_vec <- rep_len(as.character(col), n_pts)
+  pch_vec <- rep_len(as.integer(pch), n_pts)
+  # Strictly enforce unfilled/hollow point markers (pch = 1, 2, 5, 0; bg = NA)
+  pch_vec[pch_vec %in% c(16L, 19L, 20L)] <- 1L
+  pch_vec[pch_vec == 17L] <- 2L
+  pch_vec[pch_vec == 18L] <- 5L
+  pch_vec[pch_vec == 15L] <- 0L
+  cex_vec <- rep_len(as.numeric(cex), n_pts)
+  lwd_vec <- rep_len(as.numeric(lwd), n_pts)
+
+  pad_3d <- function(v) {
+    r <- range(v, na.rm = TRUE)
+    if (!all(is.finite(r))) return(c(-1, 1))
+    sp <- r[2] - r[1]
+    if (sp < 1e-6) return(c(r[1] - 1.0, r[2] + 1.0))
+    c(r[1] - 0.12 * sp, r[2] + 0.12 * sp)
+  }
+
+  xlim <- pad_3d(x_num)
+  ylim <- pad_3d(y_num)
+  zlim <- pad_3d(z_num)
+
+  pmat <- tryCatch(
+    graphics::persp(
+      x = xlim, y = ylim, z = matrix(zlim[1], nrow = 2, ncol = 2),
+      zlim = zlim, theta = theta, phi = phi, expand = 0.72,
+      col = NA, border = "grey65", ticktype = "detailed", nticks = 4,
+      xlab = xlab, ylab = ylab, zlab = zlab, main = main,
+      cex.axis = 0.70, cex.lab = 0.80, font.main = 2
+    ),
+    error = function(e) NULL
+  )
+
+  if (is.null(pmat)) {
+    return(plot_2d_ordination_scatter(
+      x = x_num, y = y_num, col = col_vec, pch = pch_vec, cex = cex_vec, lwd = lwd_vec,
+      xlab = xlab, ylab = ylab, main = main, centroids = centroids,
+      centroid_labels = centroid_labels, legend_args = legend_args
+    ))
+  }
+
+  # Draw subtle floor grid on z = zlim[1]
+  gx <- seq(xlim[1], xlim[2], length.out = 5)
+  gy <- seq(ylim[1], ylim[2], length.out = 5)
+  for (xv in gx) {
+    g_line <- grDevices::trans3d(c(xv, xv), ylim, c(zlim[1], zlim[1]), pmat)
+    graphics::lines(g_line$x, g_line$y, col = "grey90", lty = 3, lwd = 0.6)
+  }
+  for (yv in gy) {
+    g_line <- grDevices::trans3d(xlim, c(yv, yv), c(zlim[1], zlim[1]), pmat)
+    graphics::lines(g_line$x, g_line$y, col = "grey90", lty = 3, lwd = 0.6)
+  }
+
+  pts_3d <- grDevices::trans3d(x_num, y_num, z_num, pmat)
+  if (isTRUE(drop_lines)) {
+    flr_3d <- grDevices::trans3d(x_num, y_num, rep(zlim[1], n_pts), pmat)
+    step_dl <- if (n_pts > 400L) max(1L, floor(n_pts / 250L)) else 1L
+    dl_idx <- seq(1L, n_pts, by = step_dl)
+    graphics::segments(
+      flr_3d$x[dl_idx], flr_3d$y[dl_idx],
+      pts_3d$x[dl_idx], pts_3d$y[dl_idx],
+      col = grDevices::adjustcolor(col_vec[dl_idx], alpha.f = 0.22),
+      lwd = 0.45
+    )
+  }
+
+  graphics::points(
+    pts_3d$x, pts_3d$y,
+    col = col_vec,
+    pch = pch_vec,
+    bg = NA,
+    cex = cex_vec,
+    lwd = lwd_vec
+  )
+
+  if (!is.null(centroids)) {
+    c_df <- tryCatch(as.matrix(centroids), error = function(e) NULL)
+    if (!is.null(c_df) && nrow(c_df) > 0 && ncol(c_df) >= 2) {
+      cx <- suppressWarnings(as.numeric(c_df[, 1])); cx[!is.finite(cx)] <- 0.0
+      cy <- suppressWarnings(as.numeric(c_df[, 2])); cy[!is.finite(cy)] <- 0.0
+      cz <- if (ncol(c_df) >= 3) suppressWarnings(as.numeric(c_df[, 3])) else rep(mean(z_num, na.rm = TRUE), nrow(c_df))
+      cz[!is.finite(cz)] <- 0.0
+      c_3d <- grDevices::trans3d(cx, cy, cz, pmat)
+      graphics::points(c_3d$x, c_3d$y, pch = 3L, bg = NA, col = "black", cex = 1.6, lwd = 2.2)
+      lbls <- if (!is.null(centroid_labels)) centroid_labels else rownames(c_df)
+      if (!is.null(lbls) && length(lbls) == nrow(c_df)) {
+        graphics::text(c_3d$x, c_3d$y, labels = lbls, pos = 3, cex = 0.74, font = 4, col = "black")
+      }
+    }
+  }
+
+  if (!is.null(legend_args) && is.list(legend_args)) {
+    do.call(graphics::legend, legend_args)
+  }
+  invisible(pmat)
 }
 
 render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL, sym_pca = NULL, permanova_df = NULL) {
