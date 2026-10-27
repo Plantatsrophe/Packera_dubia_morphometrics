@@ -377,6 +377,7 @@ class MorphometricsConfig:
     normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
     correct_allometry: str = "auto"
     allometry_r2_threshold: float = 0.10
+    symmetrize_efa_harmonics: bool = True
 
 
 @dataclass(frozen=True)
@@ -634,6 +635,7 @@ class PipelineConfig:
             random_seed=int(m_dict.get("random_seed", 42)), normalization=norm,
             correct_allometry=str(m_dict.get("correct_allometry", "auto")),
             allometry_r2_threshold=float(m_dict.get("allometry_r2_threshold", 0.10)),
+            symmetrize_efa_harmonics=bool(m_dict.get("symmetrize_efa_harmonics", True)),
         )
 
         harv_dict = raw_cfg.get("harvesting", {})

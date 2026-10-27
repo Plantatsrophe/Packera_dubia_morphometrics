@@ -477,7 +477,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertFalse(rec["is_dissected"])
 
     def test_routing_folded_leaf_to_tier2(self) -> None:
-        """Verify folded leaf along straight chord routes to Tier 2 with reflection_applied=True."""
+        """Verify folded/partial leaf is excluded from closed-outline EFA and routed exclusively to rosette crops."""
         # Half-ellipse with straight edge along midrib
         mask = np.zeros((400, 400), dtype=np.uint8)
         cv2.ellipse(mask, (200, 200), (35, 130), 0, -90, 90, 255, -1)
@@ -487,14 +487,11 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             with patch("cv2.imread", return_value=np.full((400, 400, 3), 200, dtype=np.uint8)):
                 records, failure = self.pipeline.process_voucher("NCU123", self.img_path)
 
-        self.assertIsNone(failure)
-        self.assertEqual(len(records), 1)
-        rec = records[0]
-        self.assertEqual(rec["tier"], "Tier 2")
-        self.assertEqual(rec["assigned_tier"], "Tier_2_Reflected")
-        self.assertTrue(rec["reflection_applied"])
-        self.assertTrue(rec["is_folded"])
-        self.assertFalse(rec["is_dissected"])
+        self.assertEqual(len(records), 0, "Mirrored Tier 2 hemi-blades must not enter closed-outline EFA records.")
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure["failure_reason"], "PARTIAL_OR_FOLDED_ROUTED_TO_ROSETTE")
+        rosette_crop = self.pipeline.rosettes_dense_dir / "NCU123_p0_rosette.jpg"
+        self.assertTrue(rosette_crop.exists(), "Partial/folded leaf must still generate whole-rosette crop for Phase 5 DINOv2.")
 
     def test_routing_botanical_dissection_to_tier1_dissected(self) -> None:
         """Verify dissected leaf with lyrate taxon routes to Tier 1 (Dissected)."""

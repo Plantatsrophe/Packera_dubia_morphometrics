@@ -107,11 +107,15 @@ thresholds:
       - "Packera paupercula var. paupercula"
       - "Packera paupercula var. savannarum"
 
-  # Determiner authority-tier weight schedule (calibrated 2.7:1 ratio, Kish DEFF = 1.073)
+  # Strict active/passive reference split & Dawid-Skene empirical precision weights (Slenker et al. 2022; Dawid & Skene 1979)
+  # Tier_3_Bronze has weight 0.0 (passive projection only); Tier_1_Gold and Tier_2_Silver are weighted 1.0
+  # (after within-taxon Mahalanobis outlier pruning at chi-square 0.95) or by empirical Dawid-Skene precision (w_k = 1 - error_rate_k).
   authority_weights:
-    tier_1_gold: 2.0
-    tier_2_silver: 1.25
-    tier_3_bronze: 0.75
+    mode: "dawid_skene_or_equal_active"
+    mahalanobis_pruning_chisq_quantile: 0.95
+    tier_1_gold: 1.0
+    tier_2_silver: 1.0
+    tier_3_bronze: 0.0
 
   # Visual capitulum phenological biomarker classification
   capitulum_phenology:
@@ -165,6 +169,7 @@ leaf_segmentation:
 # Phase 3: Elliptic Fourier Analysis & Statistical Morphometrics (Momocs / MorphoTools2)
 morphometrics:
   nb_harmonics: 12
+  symmetrize_efa_harmonics: true
   correct_allometry: "auto"
   allometry_r2_threshold: 0.10
   harmonics: 12

@@ -462,7 +462,9 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "--output-flags", str(flags_csv),
                     "--output-report", str(bic_csv),
                     "--output-plot", str(cda_pdf),
+                    "--output-batch-audit", str(tmp_p / "batch_audit.csv"),
                     "--allometry-report", str(allom_csv),
+                    "--allometry-pairwise", str(tmp_p / "pairwise.csv"),
                     "--allometry-plot", str(allom_pdf),
                     "--focal-taxon", "Packera dubia",
                     "--intraspecific-mode",
@@ -479,6 +481,136 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertEqual(len(out_flags), 30, "All 30 single-taxon vouchers must be retained")
             self.assertFalse(out_flags["gmm_cluster"].isna().any(), "No voucher should have NA gmm_cluster when AR_inv is partially missing")
             self.assertFalse(out_flags["cda_predicted_taxon"].isna().any(), "No voucher should have NA cda_predicted_taxon")
+
+    def test_tier3_bronze_zero_influence_on_allometry_gmm_and_cda(self):
+        """Verify Tier_3_Bronze has authority_weight == 0.0 and zero influence on reference allometry, GMM, and CDA fits."""
+        rng = np.random.default_rng(99)
+        taxa = ["Packera anonyma", "Packera dubia", "Packera paupercula"]
+        centers = [-4.0, 4.0, 0.0]
+        rows = []
+        for idx, (sp, c1) in enumerate(zip(taxa, centers)):
+            for j in range(12):
+                tier = "Tier_1_Gold" if j < 5 else ("Tier_2_Silver" if j < 9 else "Tier_3_Bronze")
+                cs = float(25.0 + 1.5 * j)
+                log_cs = float(np.log(cs))
+                row = {
+                    "catalogNumber": f"REF_{idx}_{j:02d}",
+                    "plant_individual_id": 0,
+                    "assigned_tier": "Tier_1_Direct",
+                    "n_tier1_leaves": 2,
+                    "n_tier2_leaves": 0,
+                    "morph_tier_source": "Tier_1_Pure",
+                    "species_raw": sp,
+                    "scientificName": sp,
+                    "determiner_tier": tier,
+                    "PC1": float(c1 + 0.3 * log_cs + rng.normal(0.0, 0.15)),
+                    "PC2": float((idx - 1) * 1.2 + rng.normal(0.0, 0.15)),
+                    "PC3": float(rng.normal(0.0, 0.12)),
+                    "PC4": float(rng.normal(0.0, 0.10)),
+                    "PC5": float(rng.normal(0.0, 0.10)),
+                    "foliar_variance": 0.02,
+                    "leaf_count": 2,
+                    "centroid_size": cs,
+                    "log_centsize": log_cs,
+                    "is_calibrated_mm": True,
+                    "aspect_ratio": float(2.0 + 0.2 * idx + rng.normal(0.0, 0.05)),
+                    "solidity": 0.92,
+                    "ucs_score": 0.94,
+                }
+                for k in range(1, 13):
+                    row[f"A{k}"] = float((c1 * 0.08 + 0.04 * log_cs) / k + rng.normal(0.0, 0.004))
+                    row[f"B{k}"] = 0.0
+                    row[f"C{k}"] = 0.0
+                    row[f"D{k}"] = float(((idx - 1) * 0.06 + 0.03 * log_cs) / k + rng.normal(0.0, 0.004))
+                rows.append(row)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            df_base = pd.DataFrame(rows)
+
+            def run_step04_df(df_in: pd.DataFrame, tag: str):
+                harm_csv = tmp_p / f"harm_{tag}.csv"
+                vouch_csv = tmp_p / f"vouch_{tag}.csv"
+                flags_csv = tmp_p / f"flags_{tag}.csv"
+                bic_csv = tmp_p / f"bic_{tag}.csv"
+                allom_csv = tmp_p / f"allom_{tag}.csv"
+                allom_pdf = tmp_p / f"allom_{tag}.pdf"
+                cda_pdf = tmp_p / f"cda_{tag}.pdf"
+                df_in.to_csv(harm_csv, index=False)
+                df_in[["catalogNumber", "species_raw", "determiner_tier"]].assign(
+                    institutionCode="NCU",
+                    stateProvince="North Carolina",
+                    latitude=35.5,
+                    longitude=-79.0,
+                    doy=120,
+                ).to_csv(vouch_csv, index=False)
+                proc = subprocess.run(
+                    [
+                        "Rscript",
+                        str(self.r_script_path),
+                        "--vouchers", str(vouch_csv),
+                        "--harmonics", str(harm_csv),
+                        "--output-flags", str(flags_csv),
+                        "--output-report", str(bic_csv),
+                        "--output-plot", str(cda_pdf),
+                        "--output-batch-audit", str(tmp_p / f"batch_audit_{tag}.csv"),
+                        "--allometry-report", str(allom_csv),
+                        "--allometry-pairwise", str(tmp_p / f"pairwise_{tag}.csv"),
+                        "--allometry-plot", str(allom_pdf),
+                        "--correct-allometry", "true",
+                        "--permutations", "99",
+                    ],
+                    cwd=str(PROJECT_ROOT),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, 0, f"Step 04 failed ({tag}):\n{proc.stderr}\n{proc.stdout}")
+                return pd.read_csv(flags_csv), pd.read_csv(bic_csv), pd.read_csv(allom_csv)
+
+            flags1, bic1, allom1 = run_step04_df(df_base, "base")
+
+            # Verify Tier_3_Bronze has authority_weight == 0.0 and is_passive == True, while Gold/Silver have 1.0
+            bronze_rows = flags1[flags1["determiner_tier"] == "Tier_3_Bronze"]
+            active_rows = flags1[flags1["determiner_tier"].isin(["Tier_1_Gold", "Tier_2_Silver"])]
+            self.assertTrue((bronze_rows["authority_weight"] == 0.0).all())
+            self.assertTrue((bronze_rows["is_passive"] == True).all())
+            self.assertTrue((active_rows["authority_weight"] == 1.0).all())
+
+            # Drastically perturb all Tier_3_Bronze rows in PC space, size, and harmonics
+            df_pert = df_base.copy()
+            b_mask = df_pert["determiner_tier"] == "Tier_3_Bronze"
+            df_pert.loc[b_mask, "PC1"] += 25.0
+            df_pert.loc[b_mask, "PC2"] -= 18.0
+            df_pert.loc[b_mask, "log_centsize"] += 2.5
+            for k in range(1, 13):
+                df_pert.loc[b_mask, f"A{k}"] += 0.5
+                df_pert.loc[b_mask, f"D{k}"] -= 0.5
+
+            flags2, bic2, allom2 = run_step04_df(df_pert, "perturbed")
+
+            # Allometry ANOVA table, GMM BIC table, and active Gold/Silver CDA scores must be strictly identical
+            np.testing.assert_allclose(
+                allom1.select_dtypes(include=[np.number]).fillna(0.0).to_numpy(),
+                allom2.select_dtypes(include=[np.number]).fillna(0.0).to_numpy(),
+                atol=1e-6,
+                err_msg="Tier_3_Bronze perturbation must have zero influence on reference allometry ANOVA.",
+            )
+            np.testing.assert_allclose(
+                bic1.select_dtypes(include=[np.number]).fillna(0.0).to_numpy(),
+                bic2.select_dtypes(include=[np.number]).fillna(0.0).to_numpy(),
+                atol=1e-6,
+                err_msg="Tier_3_Bronze perturbation must have zero influence on reference GMM BIC table.",
+            )
+            act1 = flags1[flags1["determiner_tier"].isin(["Tier_1_Gold", "Tier_2_Silver"])].sort_values("catalogNumber")
+            act2 = flags2[flags2["determiner_tier"].isin(["Tier_1_Gold", "Tier_2_Silver"])].sort_values("catalogNumber")
+            for col in ["can1", "can2", "cda_posterior_prob", "PC1", "PC2"]:
+                np.testing.assert_allclose(
+                    act1[col].to_numpy(),
+                    act2[col].to_numpy(),
+                    atol=1e-6,
+                    err_msg=f"Tier_3_Bronze perturbation must not alter reference {col}.",
+                )
 
 
 if __name__ == "__main__":

@@ -1751,33 +1751,35 @@ class SegmentAndExtractPipeline:
             tier: str = "Failed QC"
             assigned_tier: str = "rejected"
 
-            # Routing Decision Tree
-            # 1. Check for fold: If is_folded == True -> synthesize full blade via reflection -> route to Tier 2
-            if is_folded and routing_res.assigned_tier == "tier2":
-                tier = "Tier 2"
-                assigned_tier = TIER_2_REFLECTED
-                reflection_applied = True
-
-            # 2. Check for pristine whole leaf: If solidity >= min_solidity and ucs >= 0.85 -> route to Tier 1
-            elif routing_res.solidity >= self.min_solidity and routing_res.ucs >= self.min_ucs and routing_res.assigned_tier == "tier1" and not is_dissected:
+            # Routing Decision Tree (Klingenberg et al. 2002; Claude 2008; Slenker et al. 2022)
+            # Closed-outline EFA is restricted strictly to Tier 1 intact basal blades.
+            # Mirrored Tier 2 hemi-blades and Tier 3 open curves are NEVER pooled into EFA;
+            # partial/occluded or folded leaves are routed exclusively to whole-rosette contextual crops
+            # (rosettes_dense/) for Phase 5 DINOv2 analysis.
+            if not is_folded and routing_res.solidity >= self.min_solidity and routing_res.ucs >= self.min_ucs and routing_res.assigned_tier == "tier1" and not is_dissected:
                 tier = "Tier 1"
                 assigned_tier = TIER_1_DIRECT
                 reflection_applied = False
 
-            # 3. Check for botanical dissection: If solidity < min_solidity but is_botanical_dissection == True -> route to Tier 1 (Dissected)
-            elif (routing_res.solidity < self.min_solidity) and is_dissected and routing_res.solidity >= self.min_dissected and routing_res.assigned_tier == "tier1":
+            elif not is_folded and (routing_res.solidity < self.min_solidity) and is_dissected and routing_res.solidity >= self.min_dissected and routing_res.assigned_tier == "tier1":
                 tier = "Tier 1 (Dissected)"
                 assigned_tier = TIER_1_DIRECT
                 is_dissected = True
                 reflection_applied = False
 
-            # 4. Check for partial occlusion with intact half-blade -> route to Tier 2
-            elif routing_res.assigned_tier == "tier2":
-                tier = "Tier 2"
-                assigned_tier = TIER_2_REFLECTED
-                reflection_applied = True
+            elif is_folded or routing_res.assigned_tier == "tier2":
+                rejection_reason = "PARTIAL_OR_FOLDED_ROUTED_TO_ROSETTE"
+                inst.assigned_tier = "rejected"
+                inst.rejection_reason = rejection_reason
+                logger.debug(
+                    f"Voucher {catalog_number} leaf {inst.leaf_id} excluded from closed-outline EFA "
+                    f"({rejection_reason}; is_folded={is_folded}, routing={routing_res.assigned_tier}) "
+                    f"and routed to whole-rosette contextual crop for Phase 5 DINOv2."
+                )
+                rejected_instances.append(inst)
+                continue
 
-            # 5. Else -> log rejection reason (FAILED_SOLIDITY, IRREGULAR_FOLD, UNRESOLVED_CLUMP) and route to Failed QC
+            # Else -> log rejection reason (FAILED_SOLIDITY, IRREGULAR_FOLD, UNRESOLVED_CLUMP) and route to Failed QC
             else:
                 if routing_res.is_irregular_fold:
                     rejection_reason = "IRREGULAR_FOLD"

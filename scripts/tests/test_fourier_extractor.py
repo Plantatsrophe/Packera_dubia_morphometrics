@@ -20,6 +20,7 @@ Description:
 """
 
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -185,6 +186,139 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn("calibrate_harmonicpower_efourier", r_content)
         self.assertIn("heteroblasty_index", r_content)
         self.assertIn("otu_t1_idx", r_content)
+        self.assertIn("symmetrize_efa_harmonics", r_content)
+        self.assertIn("compute_authority_precision_weights", r_content)
+
+    def test_tier1_only_efa_unweighted_median_and_tier3_passive_pca_invariance(self):
+        """Verify only Tier 1 intact contours enter EFA, OTU aggregation uses unweighted median, and Tier_3_Bronze has zero influence on reference PCA."""
+        rng = np.random.default_rng(2026)
+        t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
+
+        def write_contour_csv(path: Path, cat: str, lid: int, a: float, b: float, d2_mod: float = 0.0):
+            x = a * np.cos(t)
+            y = b * np.sin(t) * (1.0 + d2_mod * np.cos(t))
+            df_c = pd.DataFrame({
+                "catalogNumber": cat,
+                "leaf_id": lid,
+                "point_index": np.arange(120),
+                "x": x + 200.0,
+                "y": y + 200.0,
+            })
+            df_c.to_csv(path, index=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            contours_dir = tmp_p / "contours"
+            contours_dir.mkdir(parents=True, exist_ok=True)
+            vouchers_csv = tmp_p / "curated_vouchers.csv"
+            manifest_csv = tmp_p / "extracted_leaf_manifest.csv"
+
+            vouchers = [
+                {"catalogNumber": "G1", "species_raw": "Packera dubia", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "G2", "species_raw": "Packera dubia", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "G3", "species_raw": "Packera anonyma", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "S1", "species_raw": "Packera anonyma", "determiner_tier": "Tier_2_Silver"},
+                {"catalogNumber": "S2", "species_raw": "Packera paupercula", "determiner_tier": "Tier_2_Silver"},
+                {"catalogNumber": "B1", "species_raw": "Packera dubia", "determiner_tier": "Tier_3_Bronze"},
+                {"catalogNumber": "T2_ONLY", "species_raw": "Packera dubia", "determiner_tier": "Tier_1_Gold"},
+            ]
+            pd.DataFrame(vouchers).to_csv(vouchers_csv, index=False)
+
+            # G1 has 3 Tier_1_Direct leaves with distinct shapes + 1 Tier_2_Reflected leaf (must be excluded)
+            write_contour_csv(contours_dir / "G1_leaf1.csv", "G1", 1, 90.0, 35.0, -0.15)
+            write_contour_csv(contours_dir / "G1_leaf2.csv", "G1", 2, 90.0, 45.0, 0.00)
+            write_contour_csv(contours_dir / "G1_leaf3.csv", "G1", 3, 90.0, 60.0, 0.20)
+            write_contour_csv(contours_dir / "G1_leaf4.csv", "G1", 4, 90.0, 85.0, 0.45)
+
+            write_contour_csv(contours_dir / "G2_leaf1.csv", "G2", 1, 85.0, 42.0, -0.10)
+            write_contour_csv(contours_dir / "G3_leaf1.csv", "G3", 1, 95.0, 30.0, 0.18)
+            write_contour_csv(contours_dir / "S1_leaf1.csv", "S1", 1, 92.0, 32.0, 0.12)
+            write_contour_csv(contours_dir / "S2_leaf1.csv", "S2", 1, 100.0, 28.0, -0.22)
+            write_contour_csv(contours_dir / "B1_leaf1.csv", "B1", 1, 88.0, 40.0, 0.05)
+            write_contour_csv(contours_dir / "T2_ONLY_leaf1.csv", "T2_ONLY", 1, 80.0, 50.0, 0.10)
+
+            manifest_rows = [
+                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.95, "ucs_score": 0.95, "contour_path": str(contours_dir / "G1_leaf1.csv")},
+                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 2, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.90, "ucs_score": 0.90, "contour_path": str(contours_dir / "G1_leaf2.csv")},
+                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 3, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.85, "ucs_score": 0.85, "contour_path": str(contours_dir / "G1_leaf3.csv")},
+                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 4, "assigned_tier": "Tier_2_Reflected", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.92, "ucs_score": 0.92, "contour_path": str(contours_dir / "G1_leaf4.csv")},
+                {"catalogNumber": "G2", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.93, "ucs_score": 0.93, "contour_path": str(contours_dir / "G2_leaf1.csv")},
+                {"catalogNumber": "G3", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.91, "ucs_score": 0.91, "contour_path": str(contours_dir / "G3_leaf1.csv")},
+                {"catalogNumber": "S1", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.92, "ucs_score": 0.92, "contour_path": str(contours_dir / "S1_leaf1.csv")},
+                {"catalogNumber": "S2", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.90, "ucs_score": 0.90, "contour_path": str(contours_dir / "S2_leaf1.csv")},
+                {"catalogNumber": "B1", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.91, "ucs_score": 0.91, "contour_path": str(contours_dir / "B1_leaf1.csv")},
+                {"catalogNumber": "T2_ONLY", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_2_Reflected", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.89, "ucs_score": 0.89, "contour_path": str(contours_dir / "T2_ONLY_leaf1.csv")},
+            ]
+            pd.DataFrame(manifest_rows).to_csv(manifest_csv, index=False)
+
+            def run_step03(tag: str):
+                out_spec = tmp_p / f"leaf_efa_harmonics_{tag}.csv"
+                out_ind = tmp_p / f"leaf_efa_harmonics_ind_{tag}.csv"
+                out_rep = tmp_p / f"tier_report_{tag}.csv"
+                out_fig = tmp_p / f"fig_{tag}.pdf"
+                proc = subprocess.run(
+                    [
+                        "Rscript",
+                        str(self.r_script_path),
+                        "--contours-dir", str(contours_dir),
+                        "--masks-dir", str(tmp_p / "masks"),
+                        "--vouchers", str(vouchers_csv),
+                        "--manifest", str(manifest_csv),
+                        "--output", str(out_spec),
+                        "--output-individual", str(out_ind),
+                        "--report-out", str(out_rep),
+                        "--plot-out", str(out_fig),
+                    ],
+                    cwd=str(PROJECT_ROOT),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, 0, f"Step 03 Rscript failed ({tag}):\n{proc.stderr}\n{proc.stdout}")
+                return pd.read_csv(out_spec), pd.read_csv(out_ind)
+
+            spec1, ind1 = run_step03("run1")
+
+            # 1. Only intact Tier_1_Direct contours enter leaf_efa_harmonics.csv
+            self.assertTrue((ind1["assigned_tier"] == "Tier_1_Direct").all(), "Only Tier_1_Direct leaves may enter individual EFA table.")
+            self.assertTrue((spec1["assigned_tier"] == "Tier_1_Direct").all(), "Only Tier_1_Direct leaves may enter specimen EFA table.")
+            self.assertNotIn("T2_ONLY", set(spec1["catalogNumber"]), "Tier_2_Reflected-only specimen must not enter EFA table.")
+            self.assertEqual(int(spec1.loc[spec1["catalogNumber"] == "G1", "n_tier2_leaves"].iloc[0]), 0)
+
+            # 2. Unweighted coordinate-wise median per harmonic coefficient for G1
+            g1_ind = ind1[ind1["catalogNumber"] == "G1"]
+            g1_spec = spec1[spec1["catalogNumber"] == "G1"].iloc[0]
+            for h_col in ["A1", "A2", "A3", "D1", "D2", "D3"]:
+                expected_med = float(np.median(g1_ind[h_col].to_numpy()))
+                self.assertAlmostEqual(float(g1_spec[h_col]), expected_med, places=5)
+
+            # 3. Tier_3_Bronze has authority_weight == 0.0 and zero influence on reference PCA
+            b1_row = spec1[spec1["catalogNumber"] == "B1"].iloc[0]
+            self.assertEqual(float(b1_row["authority_weight"]), 0.0)
+
+            # Perturb B1's contour drastically and re-run Step 03
+            write_contour_csv(contours_dir / "B1_leaf1.csv", "B1", 1, 130.0, 22.0, -0.38)
+            spec2, ind2 = run_step03("run2")
+
+            # Active Gold/Silver PC scores and Sym_PC scores must be strictly identical
+            ref1 = spec1[spec1["catalogNumber"] != "B1"].sort_values("catalogNumber")
+            ref2 = spec2[spec2["catalogNumber"] != "B1"].sort_values("catalogNumber")
+            for pc_col in ["PC1", "PC2", "PC3", "Sym_PC1", "Sym_PC2"]:
+                np.testing.assert_allclose(
+                    ref1[pc_col].to_numpy(),
+                    ref2[pc_col].to_numpy(),
+                    atol=1e-6,
+                    err_msg=f"Tier_3_Bronze perturbation must not alter reference {pc_col} scores.",
+                )
+            ref_ind1 = ind1[ind1["catalogNumber"] != "B1"].sort_values(["catalogNumber", "leaf_id"])
+            ref_ind2 = ind2[ind2["catalogNumber"] != "B1"].sort_values(["catalogNumber", "leaf_id"])
+            for pc_col in ["PC1", "PC2", "PC3", "Sym_PC1", "Sym_PC2"]:
+                np.testing.assert_allclose(
+                    ref_ind1[pc_col].to_numpy(),
+                    ref_ind2[pc_col].to_numpy(),
+                    atol=1e-6,
+                    err_msg=f"Tier_3_Bronze perturbation must not alter individual reference {pc_col} scores.",
+                )
 
 
 if __name__ == "__main__":
