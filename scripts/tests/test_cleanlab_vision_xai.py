@@ -316,6 +316,19 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         self.assertTrue(np.allclose(pred_probs.sum(axis=1), 1.0, atol=1e-4))
         self.assertGreaterEqual(acc, 0.5)
 
+        # Also verify herbarium-grouped StratifiedGroupKFold via institution_codes (Gaem et al. 2025)
+        inst_codes = ["NCU" if (i // 4) % 2 == 0 else "US" for i in range(n_samples)]
+        pred_probs_grp, acc_grp, _ = compute_out_of_fold_probabilities(
+            features=features,
+            labels=labels,
+            n_splits=2,
+            random_state=42,
+            institution_codes=inst_codes,
+        )
+        self.assertEqual(pred_probs_grp.shape, (n_samples, n_classes))
+        self.assertTrue(np.allclose(pred_probs_grp.sum(axis=1), 1.0, atol=1e-4))
+        self.assertGreaterEqual(acc_grp, 0.5)
+
     def test_output_artifacts_exist(self):
         """Verify that label noise audit CSV and Grad-CAM figure exist if produced."""
         if not self.audit_csv.exists() or not self.figure_png.exists():

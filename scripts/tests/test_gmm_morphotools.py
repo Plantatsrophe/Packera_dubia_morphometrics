@@ -385,6 +385,15 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertIn("n_tier2_leaves", content)
         self.assertIn('"Tier_1_Pure"', content)
 
+    def test_klingenberg_slope_homogeneity_subspace_selection_and_kass_raftery_bf(self):
+        """Verify Klingenberg (2016) slope homogeneity, Horn/Broken-Stick + Williams & Titus (1988) P<=floor(N_min/3), uniform priors, and Kass & Raftery (1995) BF."""
+        content = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("PC1 ~ log_centsize * scientificName", content)
+        self.assertIn("select_morphometric_subspace", content)
+        self.assertIn("floor(N_min / 3", content)
+        self.assertIn("rep(1/g, g)", content)
+        self.assertIn("Kass & Raftery", content)
+
     def test_single_taxon_intraspecific_allometry_and_cda_execution(self):
         """Verify 04_gmm_morphotools.R handles single-taxon (--intraspecific-mode) allometry and partial AR_inv without factor contrast errors."""
         rng = np.random.default_rng(123)

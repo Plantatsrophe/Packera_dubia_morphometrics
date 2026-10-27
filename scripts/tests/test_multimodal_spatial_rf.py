@@ -759,6 +759,13 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             "[C] Spatial MEMs",
             "edaphic_z_score",
             "fill = NA",
+            "spatialRF::auto_cor",
+            "spatialRF::auto_vif",
+            "screen_collinear_predictors",
+            "Schoener_D",
+            "Warren_I",
+            "residual_moran_i",
+            "hopkins_adjusted_doy",
         ]:
             self.assertIn(token, combined_r, f"Expected fine-grain token '{token}' in Step 06 R code.")
 

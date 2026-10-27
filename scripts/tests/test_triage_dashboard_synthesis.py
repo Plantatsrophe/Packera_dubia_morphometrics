@@ -449,6 +449,16 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertIn("morph_tier_source", r06_text)
         self.assertIn("n_tier1_leaves", r06_text)
 
+    def test_hopkins_adjusted_phenology_and_integrative_congruence_in_step07(self):
+        """Verify Step 07 adjusts phenology for latitude/elevation/MAT (Hopkins 1918) and enforces Padial et al. (2010) >= 2 modalities."""
+        r_text = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("compute_hopkins_adjusted_phenology", r_text)
+        self.assertIn("hopkins_adjusted_doy", r_text)
+        self.assertIn("sin_doy", r_text)
+        self.assertIn("cos_doy", r_text)
+        self.assertIn("n_cryptic_modalities >= 2L", r_text)
+        self.assertIn("Padial et al. 2010", r_text)
+
 
 if __name__ == "__main__":
     unittest.main()

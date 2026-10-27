@@ -830,7 +830,7 @@ extract_doy_robust <- function(df) {
 }
 
 model_latitudinal_spring_baseline <- function(flowering_df) {
-  message("Modeling Latitudinal Spring Baseline (Hopkins' Bioclimatic Law) on verified anthesis cohort...")
+  message("Modeling Latitudinal Spring Baseline (Hopkins' Bioclimatic Law, Hopkins 1918) on verified anthesis cohort...")
   
   lat_col <- if ("decimalLatitude" %in% names(flowering_df) && any(!is.na(flowering_df$decimalLatitude))) {
     flowering_df$decimalLatitude
@@ -860,13 +860,30 @@ model_latitudinal_spring_baseline <- function(flowering_df) {
   hopkins_expected <- pred_min_lat + 4.0 * (decimalLatitude - min_lat)
   valid_trimmed$hopkins_expected <- hopkins_expected
   
+  # Multivariate bioclimatic adjustment for latitude, elevation, and MAT (Hopkins 1918) when covariates are available
+  elev_col <- if ("topo_elev_m" %in% names(valid_trimmed)) suppressWarnings(as.numeric(valid_trimmed$topo_elev_m)) else if ("elevation" %in% names(valid_trimmed)) suppressWarnings(as.numeric(valid_trimmed$elevation)) else rep(NA_real_, nrow(valid_trimmed))
+  mat_col <- if ("bio1_temp_mean" %in% names(valid_trimmed)) suppressWarnings(as.numeric(valid_trimmed$bio1_temp_mean)) else rep(NA_real_, nrow(valid_trimmed))
+  b_elev <- 0.0; ref_elev <- 0.0; b_mat <- 0.0; ref_mat <- 0.0
+  if (sum(is.finite(elev_col)) >= 10 && stats::sd(elev_col, na.rm = TRUE) > 5.0) {
+    ref_elev <- stats::median(elev_col, na.rm = TRUE)
+    b_elev <- 0.0125 # Hopkins' Bioclimatic Law: +1.25 days per +100 m elevation (+0.0125 d/m)
+  }
+  if (sum(is.finite(mat_col)) >= 10 && stats::sd(mat_col, na.rm = TRUE) > 0.5) {
+    ref_mat <- stats::median(mat_col, na.rm = TRUE)
+    fit_mat <- tryCatch(stats::lm(I(doy - (b0 + b_lat * decimalLatitude)) ~ mat_col, data = valid_trimmed), error = function(e) NULL)
+    if (!is.null(fit_mat) && length(stats::coef(fit_mat)) >= 2 && is.finite(stats::coef(fit_mat)[2])) {
+      b_mat <- max(-2.5, min(2.5, as.numeric(stats::coef(fit_mat)[2])))
+    }
+  }
+  
   fit_ols <- stats::lm(doy ~ decimalLatitude, data = valid_trimmed)
   s_ols <- summary(fit_ols)
   r2 <- s_ols$r.squared; p_val <- s_ols$coefficients[2, 4]
   
-  message(sprintf("Empirical Baseline: DOY = %.3f + %.3f * decimalLatitude (R2 = %.4f, p = %.4e, N = %d)",
-                  b0, b_lat, r2, p_val, nrow(valid_trimmed)))
-  return(list(intercept = b0, slope = b_lat, min_lat = min_lat, pred_min_lat = pred_min_lat,
+  message(sprintf("Empirical Baseline (Hopkins 1918): DOY = %.3f + %.3f * decimalLatitude (b_elev = %.4f d/m, b_mat = %.3f d/C, R2 = %.4f, p = %.4e, N = %d)",
+                  b0, b_lat, b_elev, b_mat, r2, p_val, nrow(valid_trimmed)))
+  return(list(intercept = b0, slope = b_lat, b_elev = b_elev, ref_elev = ref_elev, b_mat = b_mat, ref_mat = ref_mat,
+              min_lat = min_lat, pred_min_lat = pred_min_lat,
               hopkins_expected = hopkins_expected, r_squared = r2, p_value = p_val,
               n = nrow(valid_trimmed), model = fit_ols))
 }
@@ -963,12 +980,22 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   df$expected_doy <- NA_real_
   df$hopkins_expected <- NA_real_
   has_lat <- !is.na(df$decimalLatitude)
-  df$expected_doy[has_lat] <- baseline$intercept + baseline$slope * df$decimalLatitude[has_lat]
-  df$hopkins_expected[has_lat] <- baseline$pred_min_lat + 4.0 * (df$decimalLatitude[has_lat] - baseline$min_lat)
+  elev_v <- if ("topo_elev_m" %in% names(df)) suppressWarnings(as.numeric(df$topo_elev_m)) else if ("elevation" %in% names(df)) suppressWarnings(as.numeric(df$elevation)) else rep(NA_real_, nrow(df))
+  mat_v <- if ("bio1_temp_mean" %in% names(df)) suppressWarnings(as.numeric(df$bio1_temp_mean)) else rep(NA_real_, nrow(df))
+  elev_adj <- ifelse(is.finite(elev_v) & !is.null(baseline$b_elev) & baseline$b_elev != 0, baseline$b_elev * (elev_v - baseline$ref_elev), 0.0)
+  mat_adj <- ifelse(is.finite(mat_v) & !is.null(baseline$b_mat) & baseline$b_mat != 0, baseline$b_mat * (mat_v - baseline$ref_mat), 0.0)
+  df$expected_doy[has_lat] <- baseline$intercept + baseline$slope * df$decimalLatitude[has_lat] + elev_adj[has_lat] + mat_adj[has_lat]
+  df$hopkins_expected[has_lat] <- baseline$pred_min_lat + 4.0 * (df$decimalLatitude[has_lat] - baseline$min_lat) + elev_adj[has_lat]
   
   df$delta_doy <- NA_real_
   has_both <- !is.na(df$doy) & !is.na(df$expected_doy)
   df$delta_doy[has_both] <- df$doy[has_both] - df$expected_doy[has_both]
+  # Hopkins-adjusted flowering DOY & circular coordinates (sin_doy, cos_doy) standardized to reference latitude/elevation/MAT (Hopkins 1918)
+  ref_doy_base <- baseline$intercept + baseline$slope * stats::median(df$decimalLatitude[has_lat], na.rm = TRUE)
+  df$hopkins_adjusted_doy <- ifelse(has_both, ref_doy_base + df$delta_doy, df$doy)
+  valid_hdoy <- !is.na(df$hopkins_adjusted_doy) & is.finite(df$hopkins_adjusted_doy)
+  df$sin_doy <- ifelse(valid_hdoy, round(sin(2 * pi * df$hopkins_adjusted_doy / 365.25), 6), NA_real_)
+  df$cos_doy <- ifelse(valid_hdoy, round(cos(2 * pi * df$hopkins_adjusted_doy / 365.25), 6), NA_real_)
   
   df$pheno_timing_category <- "Unknown"
   df$pheno_timing_category[has_both & df$delta_doy < -7.0] <- "Early_Flowering"
@@ -1437,7 +1464,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     colnames(MEMs) <- paste0("MEM", seq_len(num_mems))
   }
 
-  # Prepare feature matrices (retaining present columns in df)
+  # Prepare feature matrices (retaining present columns in df) & Collinearity Screening (Dormann et al. 2013; Benito 2021)
   env_vars <- intersect(env_vars, names(df))
   X_env <- as.matrix(df[, env_vars, drop = FALSE])
   for (j in seq_len(ncol(X_env))) {
@@ -1447,6 +1474,25 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
       if (!is.finite(med_j)) med_j <- 0.0
       X_env[!is.finite(col_v), j] <- med_j
     }
+  }
+  col_screen <- if (exists("screen_collinear_predictors", mode = "function")) {
+    screen_collinear_predictors(X_env, cor.threshold = 0.70, vif.threshold = 5.0)
+  } else {
+    ac <- if (requireNamespace("spatialRF", quietly = TRUE)) tryCatch(spatialRF::auto_cor(x = as.data.frame(X_env), cor.threshold = 0.70), error = function(e) NULL) else NULL
+    X_s <- if (!is.null(ac) && !is.null(ac$selected.variables)) X_env[, ac$selected.variables, drop = FALSE] else X_env
+    av <- if (requireNamespace("spatialRF", quietly = TRUE)) tryCatch(spatialRF::auto_vif(x = as.data.frame(X_s), vif.threshold = 5.0), error = function(e) NULL) else NULL
+    s_v <- if (!is.null(av) && !is.null(av$selected.variables)) av$selected.variables else colnames(X_s)
+    list(selected_variables = s_v, pruned_variables = setdiff(colnames(X_env), s_v))
+  }
+  if (length(col_screen$selected_variables) >= 2) {
+    # Ensure at least one fine-grain edaphic and one climate predictor remain represented for 3-way variance partitioning
+    fe_c <- grep("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_)", colnames(X_env), value = TRUE)
+    mc_c <- grep("^(bio|delta_doy|doy)", colnames(X_env), value = TRUE, ignore.case = TRUE)
+    sel_env <- col_screen$selected_variables
+    if (length(fe_c) > 0 && length(intersect(sel_env, fe_c)) == 0) sel_env <- c(sel_env, fe_c[1])
+    if (length(mc_c) > 0 && length(intersect(sel_env, mc_c)) == 0) sel_env <- c(sel_env, mc_c[1])
+    env_vars <- intersect(colnames(X_env), unique(sel_env))
+    X_env <- X_env[, env_vars, drop = FALSE]
   }
   X_all <- cbind(X_env, MEMs)
   y <- factor(df$analysis_group)
@@ -1586,12 +1632,29 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     Variance_Pct = var_pct,
     stringsAsFactors = FALSE
   )
-  message(sprintf("Spatial RF OOB_Accuracy: %.2f%% (Non-Spatial: %.2f%%) | Spatial_Block_CV_Accuracy: %.2f%%",
-                  oob_acc_spatial * 100, oob_acc_nonspatial * 100, spatial_block_cv_acc * 100))
+
+  # Moran's I spatial autocorrelation check on model residuals (Dormann et al. 2013; Benito 2021)
+  oob_pred_sp <- if (requireNamespace("ranger", quietly = TRUE)) as.character(rf_spatial$predictions) else as.character(rf_spatial$predicted)
+  res_vec <- as.numeric(oob_pred_sp != as.character(y)) - mean(oob_pred_sp != as.character(y), na.rm = TRUE)
+  res_vec[!is.finite(res_vec)] <- 0.0
+  moran_i <- 0.0; moran_p <- 1.0
+  if (n >= 5 && sum(res_vec^2) > 1e-10) {
+    D_sp <- as.matrix(stats::dist(coords)); W_sp <- 1.0 / (D_sp + 0.05); diag(W_sp) <- 0.0
+    w_sum <- sum(W_sp)
+    if (w_sum > 1e-8) {
+      moran_i <- as.numeric((n / w_sum) * (t(res_vec) %*% W_sp %*% res_vec) / sum(res_vec^2))
+      e_i <- -1.0 / (n - 1)
+      z_m <- (moran_i - e_i) / max(sqrt(2.0 / max(n, 4)), 1e-6)
+      moran_p <- 2.0 * stats::pnorm(-abs(z_m))
+    }
+  }
+  message(sprintf("Spatial RF OOB_Accuracy: %.2f%% (Non-Spatial: %.2f%%) | Spatial_Block_CV_Accuracy: %.2f%% | Residual Moran's I = %.4f (p = %.4f)",
+                  oob_acc_spatial * 100, oob_acc_nonspatial * 100, spatial_block_cv_acc * 100, moran_i, moran_p))
   return(list(rf_spatial = rf_spatial, rf_nonspatial = rf_nonspatial, importance = imp_df,
               variance_partition = var_part, varpart_model = varpart_obj, mems = MEMs,
               OOB_Accuracy = oob_acc_spatial, NonSpatial_OOB_Accuracy = oob_acc_nonspatial,
-              Spatial_Block_CV_Accuracy = spatial_block_cv_acc))
+              Spatial_Block_CV_Accuracy = spatial_block_cv_acc,
+              residual_moran_i = round(moran_i, 4), residual_moran_p = round(moran_p, 4)))
 }
 run_spatial_random_forests <- compute_spatial_rf_mems
 run_spatial_rf_models <- compute_spatial_rf_mems
@@ -1660,25 +1723,27 @@ run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100, intraspe
     }
 
     if (!ecospat_ok) {
-      # Fallback: empirical Gaussian density / histogram niche overlap over environmental background
-      m1 <- colMeans(df1); s1 <- apply(df1, 2, sd) + 1e-4
-      m2 <- colMeans(df2); s2 <- apply(df2, 2, sd) + 1e-4
-      bg <- as.matrix(df[, env_vars])
-      p1 <- exp(-0.5 * rowSums(t((t(bg) - m1) / s1)^2)); p1 <- p1 / sum(p1)
-      p2 <- exp(-0.5 * rowSums(t((t(bg) - m2) / s2)^2)); p2 <- p2 / sum(p2)
+      # Fallback: PCA-env 2D environmental ordination kernel density overlap (Broennimann et al. 2012; Warren et al. 2008)
+      ord_bg <- if (!is.null(scores_glob)) as.matrix(scores_glob) else as.matrix(df[, env_vars, drop = FALSE])
+      ord_df1 <- ord_bg[grp_col == sp1, , drop = FALSE]
+      ord_df2 <- ord_bg[grp_col == sp2, , drop = FALSE]
+      m1 <- colMeans(ord_df1); s1 <- apply(ord_df1, 2, sd) + 1e-4
+      m2 <- colMeans(ord_df2); s2 <- apply(ord_df2, 2, sd) + 1e-4
+      p1 <- exp(-0.5 * rowSums(t((t(ord_bg) - m1) / s1)^2)); p1 <- p1 / sum(p1)
+      p2 <- exp(-0.5 * rowSums(t((t(ord_bg) - m2) / s2)^2)); p2 <- p2 / sum(p2)
 
       D_emp <- 1 - 0.5 * sum(abs(p1 - p2))
       I_emp <- 1 - 0.5 * sqrt(sum((sqrt(p1) - sqrt(p2))^2))
 
-      pooled <- rbind(df1, df2); n_tot <- n1 + n2
+      pooled <- rbind(ord_df1, ord_df2); n_tot <- n1 + n2
       D_null <- numeric(n_perm); I_null <- numeric(n_perm)
       for (k in seq_len(n_perm)) {
         idx_perm <- sample.int(n_tot, n1)
-        p_df1 <- pooled[idx_perm, ]; p_df2 <- pooled[-idx_perm, ]
+        p_df1 <- pooled[idx_perm, , drop = FALSE]; p_df2 <- pooled[-idx_perm, , drop = FALSE]
         pm1 <- colMeans(p_df1); ps1 <- apply(p_df1, 2, sd) + 1e-4
         pm2 <- colMeans(p_df2); ps2 <- apply(p_df2, 2, sd) + 1e-4
-        pp1 <- exp(-0.5 * rowSums(t((t(bg) - pm1) / ps1)^2)); pp1 <- pp1 / sum(pp1)
-        pp2 <- exp(-0.5 * rowSums(t((t(bg) - pm2) / ps2)^2)); pp2 <- pp2 / sum(pp2)
+        pp1 <- exp(-0.5 * rowSums(t((t(ord_bg) - pm1) / ps1)^2)); pp1 <- pp1 / sum(pp1)
+        pp2 <- exp(-0.5 * rowSums(t((t(ord_bg) - pm2) / ps2)^2)); pp2 <- pp2 / sum(pp2)
         D_null[k] <- 1 - 0.5 * sum(abs(pp1 - pp2))
         I_null[k] <- 1 - 0.5 * sqrt(sum((sqrt(pp1) - sqrt(pp2))^2))
       }
@@ -1692,7 +1757,7 @@ run_warren_niche_identity_tests <- function(df, env_vars, n_perm = 100, intraspe
 
     results_list[[pair_name]] <- data.frame(
       Pair = pair_name, Taxon1 = sp1, Taxon2 = sp2, N1 = n1, N2 = n2,
-      Warren_D = round(D_emp, 4), Warren_I = round(I_emp, 4),
+      Schoener_D = round(D_emp, 4), Warren_D = round(D_emp, 4), Warren_I = round(I_emp, 4),
       p_value_D = round(p_val_D, 4), p_value_I = round(p_val_I, 4),
       Taxonomic_Inference = outcome, stringsAsFactors = FALSE
     )

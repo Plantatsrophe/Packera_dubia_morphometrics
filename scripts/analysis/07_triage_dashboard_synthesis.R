@@ -123,8 +123,58 @@ standardize_packera_taxon <- function(s_vec) {
 }
 
 # ------------------------------------------------------------------------------
-# 2. Multi-Evidence Taxonomic Decision Engine
+# 2. Multi-Evidence Taxonomic Decision Engine (Padial et al. 2010; Hopkins 1918)
 # ------------------------------------------------------------------------------
+compute_hopkins_adjusted_phenology <- function(df) {
+  # Adjusts flowering phenology (doy / circular sin_doy, cos_doy) for latitude,
+  # elevation, and MAT (Hopkins' Bioclimatic Law, Hopkins 1918: +4.0 d/deg N,
+  # +1.25 d/100 m elevation) so delta_doy measures sympatric allochronic isolation.
+  n <- nrow(df)
+  if (n == 0L) return(df)
+  doy_vec <- if ("doy" %in% names(df)) suppressWarnings(as.numeric(df$doy)) else rep(120.0, n)
+  doy_vec[!is.finite(doy_vec)] <- 120.0
+
+  lat_col <- intersect(c("decimalLatitude", "latitude"), names(df))
+  lat_vec <- if (length(lat_col) > 0L) suppressWarnings(as.numeric(df[[lat_col[1L]]])) else rep(NA_real_, n)
+  elev_col <- intersect(c("topo_elev_m", "elevation_m", "elevation"), names(df))
+  elev_vec <- if (length(elev_col) > 0L) suppressWarnings(as.numeric(df[[elev_col[1L]]])) else rep(0.0, n)
+  elev_vec[!is.finite(elev_vec)] <- 0.0
+  mat_col <- intersect(c("bio1_temp_mean", "mat_c"), names(df))
+  mat_vec <- if (length(mat_col) > 0L) suppressWarnings(as.numeric(df[[mat_col[1L]]])) else rep(NA_real_, n)
+
+  ref_lat <- if (any(is.finite(lat_vec))) stats::median(lat_vec, na.rm = TRUE) else 35.0
+  ref_elev <- if (any(is.finite(elev_vec))) stats::median(elev_vec, na.rm = TRUE) else 150.0
+  ref_mat <- if (any(is.finite(mat_vec))) stats::median(mat_vec, na.rm = TRUE) else 15.0
+
+  lat_shift <- ifelse(is.finite(lat_vec), 4.0 * (lat_vec - ref_lat), 0.0)
+  elev_shift <- 1.25 * ((elev_vec - ref_elev) / 100.0)
+  mat_shift <- ifelse(is.finite(mat_vec), -1.5 * (mat_vec - ref_mat), 0.0)
+  hopkins_shift <- 0.70 * (lat_shift + elev_shift) + 0.30 * mat_shift
+
+  adj_doy <- doy_vec - hopkins_shift
+  rad_adj <- 2.0 * pi * (adj_doy / 365.25)
+  df$hopkins_adjusted_doy <- round(adj_doy, 2)
+  if (!("sin_doy" %in% names(df))) df$sin_doy <- round(sin(rad_adj), 4)
+  if (!("cos_doy" %in% names(df))) df$cos_doy <- round(cos(rad_adj), 4)
+
+  if (!("delta_doy" %in% names(df))) df$delta_doy <- NA_real_
+  ddoy_cur <- suppressWarnings(as.numeric(df$delta_doy))
+  if (any(!is.finite(ddoy_cur)) && "species_standardized" %in% names(df)) {
+    sp_vec <- as.character(df$species_standardized)
+    for (tx in unique(sp_vec[!is.na(sp_vec)])) {
+      idx_tx <- which(sp_vec == tx & !is.finite(ddoy_cur))
+      if (length(idx_tx) > 0L) {
+        tx_med <- stats::median(adj_doy[sp_vec == tx], na.rm = TRUE)
+        if (!is.finite(tx_med)) tx_med <- 120.0
+        ddoy_cur[idx_tx] <- round(adj_doy[idx_tx] - tx_med, 2)
+      }
+    }
+  }
+  ddoy_cur[!is.finite(ddoy_cur)] <- 0.0
+  df$delta_doy <- ddoy_cur
+  return(df)
+}
+
 apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
   message("Evaluating vouchers across Multi-Evidence Taxonomic Decision Matrix...")
   if ("morphometric_outlier_flag" %in% names(df) && !("misidentification_flag" %in% names(df))) {
@@ -137,6 +187,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
   } else if ("c_error" %in% names(df) && !("vision_c_error" %in% names(df))) {
     df$vision_c_error <- df$c_error
   }
+  df <- compute_hopkins_adjusted_phenology(df)
   is_intra <- isTRUE(intraspecific_mode)
   n <- nrow(df)
   status_calls <- character(n)
@@ -182,7 +233,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
     is_tier1_pure_morph <- is.na(m_tier_src) || !nzchar(m_tier_src) || (m_tier_src == "Tier_1_Pure")
 
     if (is_intra) {
-      is_cryptic_intra <- is_tier1_pure_morph && is_mo_flag && (v_cerr > 0.85 || c_err > 0.85) && (abs(ddoy) >= 18.0)
+      # Integrative Taxonomy Congruence Rule (Padial et al. 2010; Schlick-Steiner et al. 2010):
+      # Require concordance across >= 2 independent modalities to flag Putative_Cryptic_Species
+      n_intra_modalities <- as.integer(is_tier1_pure_morph && is_mo_flag) +
+                            as.integer(v_cerr > 0.85 || c_err > 0.85) +
+                            as.integer(abs(ddoy) >= 18.0)
+      is_cryptic_intra <- is_tier1_pure_morph && is_mo_flag && (v_cerr > 0.85 || c_err > 0.85) && (abs(ddoy) >= 18.0) && (n_intra_modalities >= 2L)
       has_edaph_pheno_div <- (abs(ddoy) >= 7.0) || mm_conf || (triage_cat != "Clean_MultiModal_Consensus") ||
                              (ph_val > 5.6 || sand_val < 55.0) || grepl("Flatrock|Outcrop|Piedmont|Appalachian", reg_grp, ignore.case = TRUE)
       is_subspecies_intra <- (g_cl > 1L) && has_edaph_pheno_div
@@ -216,7 +272,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
                             ((vis_is_taxon && vis_sp == "Packera anonyma") || (morph_is_taxon && morph_sp == "Packera anonyma")) &&
                             (ph_val <= 5.5 && sand_val >= 60.0) && (doy >= 130)
 
-    # Case 2: Severe Misidentification (Evaluated BEFORE Hybrid Swarm; captures cross-modal misidentifications)
+    # Case 2: Severe Misidentification (Evaluated BEFORE Hybrid Swarm per Padial et al. 2010 integrative congruence)
     both_alt_agree <- (!is.null(morph_sp) && !is.null(vis_sp) && morph_sp != given_sp && vis_sp != given_sp && morph_sp == vis_sp)
     morph_edaph_alt_agree <- (!is.null(morph_sp) && morph_sp != given_sp && edaph_sp == morph_sp && (is.na(cda_prob) || cda_prob >= 0.55))
     vis_edaph_alt_agree <- (!is.null(vis_sp) && vis_sp != given_sp && edaph_sp == vis_sp && c_err >= 0.70)
@@ -273,8 +329,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
   }
 
   tier_col <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", n)
-  df$authority_weight <- ifelse(tier_col == "Tier_1_Gold", 2.0, ifelse(tier_col == "Tier_2_Silver", 1.25, 0.75))
-  df$authority_weight[is.na(df$authority_weight)] <- 0.75
+  df$authority_weight <- ifelse(tier_col == "Tier_1_Gold", 3.0, ifelse(tier_col == "Tier_2_Silver", 1.5, 0.5))
+  df$authority_weight[is.na(df$authority_weight)] <- 0.5
   df$taxonomic_status_call <- status_calls
   df$recommended_determination <- rec_taxa
   df$synthesis_triage_priority <- triage_prios
@@ -320,7 +376,17 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE) {
       both_agree_known <- (nzchar(m_sp) && nzchar(v_sp) && m_sp == v_sp && m_sp != given_sp) ||
                           (nzchar(m_sp) && m_sp != given_sp && m_sp == e_sp && !is.na(cda_p) && cda_p >= 0.50)
       high_conf_known  <- (!is.na(cda_p) && cda_p >= 0.65 && nzchar(m_sp) && m_sp != given_sp) || (c_err_i >= 0.85 && nzchar(v_sp) && v_sp != given_sp && ddoy < 18.0)
-      is_crypt <- is_tier1_pure_i && !both_agree_known && !high_conf_known && (is_mo_out || c_err_i >= 0.85) && ((g_cl > 4L && ddoy >= 12.0) || ddoy >= 14.0 || g_unc >= 0.25)
+      # Integrative Taxonomy Congruence Rule (Padial et al. 2010; Schlick-Steiner et al. 2010):
+      # Require concordance across >= 2 independent modalities to flag Putative_Cryptic_Species
+      mod_morph <- is_tier1_pure_i && (is_mo_out || g_cl > 4L || g_unc >= 0.25)
+      mod_vis   <- (c_err_i >= 0.85) || (!is.na(cda_p) && cda_p < 0.70)
+      mod_pheno <- ddoy >= 12.0
+      mod_edaph <- nzchar(e_sp) && e_sp != given_sp
+      n_cryptic_modalities <- as.integer(mod_morph) + as.integer(mod_vis) + as.integer(mod_pheno) + as.integer(mod_edaph)
+      is_crypt <- is_tier1_pure_i && !both_agree_known && !high_conf_known &&
+                  (n_cryptic_modalities >= 2L) &&
+                  (is_mo_out || c_err_i >= 0.85) &&
+                  ((g_cl > 4L && ddoy >= 12.0) || ddoy >= 14.0 || g_unc >= 0.25)
       treat_broad[i] <- "Misidentification / Cryptic Species"
       treat_sub[i]   <- if (is_crypt) "Putative_Cryptic_Species" else "Misidentification_Reassign"
     } else {

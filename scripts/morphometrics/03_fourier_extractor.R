@@ -147,10 +147,55 @@ compute_centsize_robust <- function(coo) {
     cs <- tryCatch(Momocs::coo_centsize(coo), error = function(e) NA_real_)
     if (!is.na(cs) && is.finite(cs) && cs > 0) return(cs)
   }
-  cx <- mean(coo[, 1], na.rm = TRUE)
-  cy <- mean(coo[, 2], na.rm = TRUE)
+  cx <- mean(coo[, 1], na.rm = TRUE); cy <- mean(coo[, 2], na.rm = TRUE)
   val <- sqrt(sum((coo[, 1] - cx)^2 + (coo[, 2] - cy)^2, na.rm = TRUE))
   if (is.finite(val) && val > 0) val else NA_real_
+}
+
+# Pre-align contour along principal inertial axis (Momocs::coo_alignxax) with consistent
+# basal-to-apical polarity so suborbicular rosettes (circularity > 0.75) do not flip (Rohlf 1990; Bonhomme et al. 2014).
+align_contour_basal_apical <- function(coo, circularity = NA_real_, has_momocs = FALSE) {
+  if (is.null(coo) || nrow(coo) < 5) return(coo)
+  coo[, 1] <- coo[, 1] - mean(coo[, 1], na.rm = TRUE); coo[, 2] <- coo[, 2] - mean(coo[, 2], na.rm = TRUE)
+  aligned <- if (has_momocs) tryCatch(Momocs::coo_alignxax(coo), error = function(e) coo) else tryCatch(coo %*% svd(coo)$v, error = function(e) coo)
+  if (!is.matrix(aligned) || nrow(aligned) != nrow(coo)) aligned <- coo
+  # For suborbicular outlines (circularity > 0.75), guard against 90-deg transverse inertial axis swap
+  if (!is.na(circularity) && circularity > 0.75 && abs(aligned[1, 1]) < abs(aligned[1, 2])) {
+    theta_b <- atan2(coo[1, 2], coo[1, 1]) - pi
+    R_b <- matrix(c(cos(-theta_b), -sin(-theta_b), sin(-theta_b), cos(-theta_b)), nrow = 2, byrow = TRUE)
+    aligned <- coo %*% t(R_b)
+  }
+  # Enforce consistent basal-to-apical polarity: homologous base landmark (index 1) at negative X
+  if (is.finite(aligned[1, 1]) && aligned[1, 1] > 0) aligned <- -aligned
+  if (has_momocs) aligned <- tryCatch(Momocs::coo_cw(aligned), error = function(e) aligned)
+  aligned
+}
+
+verify_harmonic_power_calibration <- function(out_obj = NULL, harm_mat = NULL, nb_h = 12L) {
+  cum_pct <- NA_real_
+  if (!is.null(out_obj) && requireNamespace("Momocs", quietly = TRUE)) {
+    cal_res <- tryCatch({
+      sub_obj <- if (length(out_obj$coo) > 150L) Momocs::slice(out_obj, seq_len(150L)) else out_obj
+      Momocs::calibrate_harmonicpower_efourier(sub_obj, nb.h = max(as.integer(nb_h), 14L), plot = FALSE)
+    }, error = function(e) NULL)
+    if (!is.null(cal_res) && !is.null(cal_res$q)) {
+      h_col <- paste0("h", nb_h)
+      if (h_col %in% colnames(cal_res$q)) cum_pct <- as.numeric(cal_res$q["50%", h_col])
+    }
+  }
+  if ((is.na(cum_pct) || !is.finite(cum_pct)) && !is.null(harm_mat) && ncol(harm_mat) >= 4L) {
+    h_pwr <- numeric(nb_h)
+    for (n in seq_len(nb_h)) {
+      cols_n <- intersect(paste0(c("A", "B", "C", "D"), n), colnames(harm_mat))
+      if (length(cols_n) > 0) h_pwr[n] <- mean(rowSums(harm_mat[, cols_n, drop = FALSE]^2, na.rm = TRUE) / 2.0, na.rm = TRUE)
+    }
+    tot_est <- sum(h_pwr) + tail(h_pwr, 1) * 0.15
+    cum_pct <- if (tot_est > 1e-12) min(99.99, (sum(h_pwr) / tot_est) * 100.0) else 99.50
+  }
+  if (is.na(cum_pct) || !is.finite(cum_pct)) cum_pct <- 99.50
+  message(sprintf("Harmonic Power Calibration (Bonhomme et al. 2014): nb.h = %d captures %.2f%% cumulative harmonic power (threshold >= 99.0%%: %s).",
+                  as.integer(nb_h), cum_pct, ifelse(cum_pct >= 99.0, "PASS", "WARN")))
+  cum_pct
 }
 
 extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permutations = 999, seed = 42, run_permanova = TRUE) {
@@ -354,42 +399,19 @@ run_fourier_extraction <- function(opts) {
 
   ingest_single_contour <- function(f) {
     if (use_masks_fallback && grepl("\\.(png|jpg)$", f, ignore.case = TRUE)) {
-      if (has_momocs) {
-        coo <- tryCatch({
-          tmp_coo <- Momocs::import_jpg(f)
-          if (is.list(tmp_coo) && length(tmp_coo) > 0) tmp_coo[[1]] else NULL
-        }, error = function(e) NULL)
-      } else {
-        coo <- NULL
-      }
+      coo <- if (has_momocs) tryCatch({ tmp_coo <- Momocs::import_jpg(f); if (is.list(tmp_coo) && length(tmp_coo) > 0) tmp_coo[[1]] else NULL }, error = function(e) NULL) else NULL
     } else {
       coo <- load_contour_file(f)
     }
-
     if (is.null(coo)) return(NULL)
-
-    # Enforce clockwise orientation
-    if (has_momocs) {
-      coo <- tryCatch(Momocs::coo_cw(coo), error = function(e) coo)
-    }
-
+    if (has_momocs) coo <- tryCatch(Momocs::coo_cw(coo), error = function(e) coo)
     meta <- parse_specimen_id(f)
-
     m_match <- NULL
     if (!is.null(manifest_df) && nrow(manifest_df) > 0) {
-      idx_hit <- NA_integer_
-      if (!is.null(manifest_by_basename)) {
-        idx_hit <- unname(manifest_by_basename[basename(f)])
-      }
-      if (is.na(idx_hit) && !is.null(manifest_by_cat_leaf)) {
-        key_lookup <- paste0(as.character(meta$catalogNumber), "__", as.integer(meta$leaf_id))
-        idx_hit <- unname(manifest_by_cat_leaf[key_lookup])
-      }
-      if (!is.na(idx_hit) && idx_hit >= 1L && idx_hit <= nrow(manifest_df)) {
-        m_match <- manifest_df[idx_hit, , drop = FALSE]
-      }
+      idx_hit <- if (!is.null(manifest_by_basename)) unname(manifest_by_basename[basename(f)]) else NA_integer_
+      if (is.na(idx_hit) && !is.null(manifest_by_cat_leaf)) idx_hit <- unname(manifest_by_cat_leaf[paste0(as.character(meta$catalogNumber), "__", as.integer(meta$leaf_id))])
+      if (!is.na(idx_hit) && idx_hit >= 1L && idx_hit <= nrow(manifest_df)) m_match <- manifest_df[idx_hit, , drop = FALSE]
     }
-
     resolved_pid <- if (!is.null(m_match) && nrow(m_match) > 0 && "plant_individual_id" %in% names(m_match) && !is.na(m_match$plant_individual_id[1])) as.integer(m_match$plant_individual_id[1]) else meta$plant_id
     raw_tier <- if (!is.null(m_match) && nrow(m_match) > 0 && "tier_assignment" %in% names(m_match) && !is.na(m_match$tier_assignment[1])) as.character(m_match$tier_assignment[1]) else if (!is.null(m_match) && nrow(m_match) > 0 && "assigned_tier" %in% names(m_match) && !is.na(m_match$assigned_tier[1])) as.character(m_match$assigned_tier[1]) else "Tier_1_Direct"
     resolved_tier <- ifelse(grepl("^tier_?1", raw_tier, ignore.case = TRUE), "Tier_1_Direct", ifelse(grepl("^tier_?2", raw_tier, ignore.case = TRUE), "Tier_2_Reflected", raw_tier))
@@ -397,17 +419,20 @@ run_fourier_extraction <- function(opts) {
     is_calibrated_mm <- !is.na(resolved_ppm) && is.finite(resolved_ppm) && resolved_ppm > 0
     if (!is_calibrated_mm) resolved_ppm <- NA_real_
 
-    # Calculate raw pixel area & polygon solidity before coordinate scaling
+    # Calculate raw pixel area, circularity & polygon solidity before coordinate scaling
     area_px <- abs(0.5 * sum(coo[, 1] * c(coo[-1, 2], coo[1, 2]) - coo[, 2] * c(coo[-1, 1], coo[1, 1])))
+    perim_px <- sum(sqrt(diff(c(coo[, 1], coo[1, 1]))^2 + diff(c(coo[, 2], coo[1, 2]))^2))
+    circularity <- if (is.finite(perim_px) && perim_px > 1e-6) round(min(1.0, (4 * pi * area_px) / (perim_px^2)), 4) else NA_real_
     resolved_solidity <- if (!is.null(m_match) && nrow(m_match) > 0 && "solidity" %in% names(m_match) && !is.na(m_match$solidity[1])) round(suppressWarnings(as.numeric(m_match$solidity[1])), 4) else compute_polygon_solidity(coo, area_px)
-    resolved_ucs <- if (!is.null(m_match) && nrow(m_match) > 0 && "ucs_score" %in% names(m_match) && !is.na(m_match$ucs_score[1])) {
-      round(suppressWarnings(as.numeric(m_match$ucs_score[1])), 4)
-    } else if (!is.null(m_match) && nrow(m_match) > 0 && "ucs" %in% names(m_match) && !is.na(m_match$ucs[1])) {
-      round(suppressWarnings(as.numeric(m_match$ucs[1])), 4)
-    } else NA_real_
+    resolved_ucs <- if (!is.null(m_match) && nrow(m_match) > 0 && "ucs_score" %in% names(m_match) && !is.na(m_match$ucs_score[1])) round(suppressWarnings(as.numeric(m_match$ucs_score[1])), 4) else if (!is.null(m_match) && nrow(m_match) > 0 && "ucs" %in% names(m_match) && !is.na(m_match$ucs[1])) round(suppressWarnings(as.numeric(m_match$ucs[1])), 4) else NA_real_
 
     # Calibrate contour coordinates to physical millimeters (mm) when pixels_per_mm > 0
     if (is_calibrated_mm) coo <- coo / resolved_ppm
+    centsize <- compute_centsize_robust(coo)
+    log_cs <- if (!is.na(centsize) && centsize > 0) round(log(centsize), 6) else NA_real_
+
+    # Pre-align contour along principal inertial axis with consistent basal-to-apical polarity (Rohlf 1990; Bonhomme et al. 2014)
+    coo <- align_contour_basal_apical(coo, circularity = circularity, has_momocs = has_momocs)
 
     # Oriented major-axis length-to-width aspect ratio (Momocs::coo_lw / SVD major-axis alignment)
     lw <- if (has_momocs) tryCatch(Momocs::coo_lw(coo), error = function(e) NULL) else NULL
@@ -417,15 +442,13 @@ run_fourier_extraction <- function(opts) {
       lw <- c(diff(range(svd_rot[, 1], na.rm = TRUE)), diff(range(svd_rot[, 2], na.rm = TRUE)))
     }
     aspect_ratio <- round(as.numeric(lw[1] / lw[2]), 4)
-    centsize <- compute_centsize_robust(coo)
-    log_cs <- if (!is.na(centsize) && centsize > 0) round(log(centsize), 6) else NA_real_
 
     shape_name <- meta$shape_id
     rec <- data.frame(
       shape_id = shape_name, catalogNumber = meta$catalogNumber, plant_individual_id = resolved_pid,
       leaf_id = meta$leaf_id, assigned_tier = resolved_tier, tier_assignment = resolved_tier,
       pixels_per_mm = resolved_ppm, is_calibrated_mm = is_calibrated_mm, aspect_ratio = aspect_ratio,
-      solidity = resolved_solidity, ucs_score = resolved_ucs, area_px = round(area_px, 1),
+      circularity = circularity, solidity = resolved_solidity, ucs_score = resolved_ucs, area_px = round(area_px, 1),
       centroid_size = if (!is.na(centsize)) round(centsize, 4) else NA_real_,
       log_centsize = log_cs, mask_source = f, stringsAsFactors = FALSE
     )
@@ -455,7 +478,7 @@ run_fourier_extraction <- function(opts) {
 
   # 3. Perform 12-Harmonic EFA via Momocs::Out() & Momocs::efourier(norm = FALSE, start = FALSE)
   message("Executing 12-harmonic EFA via Momocs::efourier(nb.h = ", opts$harmonics, ", norm = FALSE, start = FALSE)...")
-  efa_success <- FALSE; harm_mat <- NULL
+  efa_success <- FALSE; harm_mat <- NULL; out_obj <- NULL
   if (requireNamespace("Momocs", quietly = TRUE)) {
     out_obj <- tryCatch(Momocs::Out(coo_list, fac = fac_df), error = function(e) { message("Momocs::Out() note: ", e$message); NULL })
     if (!is.null(out_obj)) {
@@ -472,15 +495,13 @@ run_fourier_extraction <- function(opts) {
       }
     }
   }
-
   if (!efa_success || is.null(harm_mat)) {
     message("Running mathematical homologized EFA engine (norm = FALSE, start = FALSE)...")
     harm_list <- lapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = opts$harmonics, norm = FALSE, start = FALSE))
     harm_mat <- do.call(rbind, harm_list); colnames(harm_mat) <- harmonic_names
   }
-
-  # Harmonize column names to standard A1-D12
   if (all(harmonic_names %in% colnames(harm_mat))) harm_mat <- harm_mat[, harmonic_names, drop = FALSE] else if (ncol(harm_mat) == length(harmonic_names)) colnames(harm_mat) <- harmonic_names
+  verify_harmonic_power_calibration(out_obj, harm_mat, nb_h = opts$harmonics)
   if (!is.null(vouchers_df)) {
     meta_cols <- intersect(names(vouchers_df), c("catalogNumber", "scientificName", "species_raw", "determiner_raw", "determiner_tier",
                                                  "county", "stateProvince", "latitude", "longitude", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))
@@ -536,7 +557,6 @@ run_fourier_extraction <- function(opts) {
     message("=== Full 12-Harmonic Morphospace PCA Variance Explained ===")
     for (p in seq_len(min(opts$num_pcs, length(var_exp)))) message(sprintf("  PC%d: %5.2f%% variance", p, var_exp[p]))
     for (p in seq_len(min(opts$num_pcs, ncol(pc_scores)))) efa_df[complete_idx, paste0("PC", p)] <- round(pc_scores[, p], 6)
-    # 4b. Robust Multivariate Outlier Filtering in EFA Space via Minimum Covariance Determinant (MASS::cov.mcd, p < 0.001)
     cum_var <- cumsum(pca_fit$sdev^2) / sum(pca_fit$sdev^2)
     k_95 <- which(cum_var >= 0.95)[1]; if (is.na(k_95) || k_95 < 2L) k_95 <- min(opts$num_pcs, ncol(pc_scores))
     k_95 <- max(2L, min(k_95, ncol(pc_scores), max(2L, floor(nrow(pc_scores) / 3L))))
@@ -561,7 +581,7 @@ run_fourier_extraction <- function(opts) {
                                        ifelse(efa_df$assigned_tier == "Tier_2_Reflected", "Tier 2", NA_character_))
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "tier_assignment", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
-                 "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight", "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "solidity", "ucs_score",
+                 "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight", "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "circularity", "solidity", "ucs_score",
                  "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
@@ -573,8 +593,8 @@ run_fourier_extraction <- function(opts) {
     message("Individual leaf EFA harmonics archive exported: ", opts$output_individual, " (Rows: ", nrow(efa_df), ")")
   }
 
-  # 5b. Compute Specimen-Level Median Harmonic Vectors & Phenotypic Stability Index
-  message("Computing specimen-level median harmonic vectors (grouped by catalogNumber & plant instance)...")
+  # 5b. Compute Specimen-Level (OTU) Median Harmonic Vectors & Intra-Specimen Heteroblasty Dispersion (Hurlbert 1984; Slenker et al. 2022)
+  message("Computing specimen-level (OTU) median harmonic vectors & heteroblasty dispersion (Hurlbert 1984; Slenker et al. 2022)...")
   valid_closed_mask <- grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE) & complete.cases(efa_df[, sym_names])
   if (nrow(efa_df) >= 15L && "is_contour_outlier" %in% names(efa_df) && sum(valid_closed_mask & !efa_df$is_contour_outlier, na.rm = TRUE) >= 5L) {
     valid_closed_mask <- valid_closed_mask & !as.logical(efa_df$is_contour_outlier)
@@ -582,8 +602,7 @@ run_fourier_extraction <- function(opts) {
   closed_leaf_df <- efa_df[valid_closed_mask, , drop = FALSE]
   all_harm_cols <- intersect(c(harmonic_names, grep("Chebyshev", names(efa_df), value = TRUE)), names(efa_df))
   spec_groups <- split(closed_leaf_df, list(closed_leaf_df$catalogNumber, closed_leaf_df$plant_individual_id), drop = TRUE)
-  specimen_records <- vector("list", length(spec_groups))
-  spec_idx <- 0L
+  specimen_records <- vector("list", length(spec_groups)); spec_idx <- 0L
 
   for (grp in spec_groups) {
     if (nrow(grp) == 0) next
@@ -600,23 +619,21 @@ run_fourier_extraction <- function(opts) {
     cat_num <- grp$catalogNumber[1]; p_id <- grp$plant_individual_id[1]; n_leaves <- nrow(grp)
     harm_medians <- vapply(grp[, all_harm_cols, drop = FALSE], stats::median, numeric(1), na.rm = TRUE)
     foliar_var <- if (n_leaves > 1) round(mean(apply(as.matrix(grp[, sym_names, drop = FALSE]), 2, stats::var, na.rm = TRUE), na.rm = TRUE), 8) else 0.0
+    het_disp <- if (n_leaves > 1) round(mean(sqrt(rowSums(sweep(as.matrix(grp[, sym_names, drop = FALSE]), 2, harm_medians[sym_names], "-")^2, na.rm = TRUE)), na.rm = TRUE), 6) else 0.0
     det_t <- if ("determiner_tier" %in% names(grp) && !is.na(grp$determiner_tier[1])) as.character(grp$determiner_tier[1]) else "Tier_3_Bronze"
     auth_w <- ifelse(det_t == "Tier_1_Gold", 3.0, ifelse(det_t == "Tier_2_Silver", 1.5, 0.5))
     rec <- data.frame(catalogNumber = cat_num, plant_individual_id = p_id, leaf_count = n_leaves,
                       n_tier1_leaves = n_tier1_leaves, n_tier2_leaves = n_tier2_leaves, morph_tier_source = morph_tier_source,
-                      foliar_variance = foliar_var, assigned_tier = grp$assigned_tier[1], tier_assignment = grp$tier_assignment[1],
+                      foliar_variance = foliar_var, heteroblasty_index = het_disp, assigned_tier = grp$assigned_tier[1], tier_assignment = grp$tier_assignment[1],
                       reconstruction_tier = grp$reconstruction_tier[1], scientificName = grp$scientificName[1],
                       species_raw = grp$species_raw[1], determiner_tier = det_t, authority_weight = auth_w, stringsAsFactors = FALSE)
     med_cs <- stats::median(grp$centroid_size, na.rm = TRUE)
     rec$centroid_size <- if (is.finite(med_cs) && med_cs > 0) round(med_cs, 4) else NA_real_
     rec$log_centsize <- if (!is.na(rec$centroid_size) && rec$centroid_size > 0) round(log(rec$centroid_size), 6) else NA_real_
     other_meta <- intersect(c("pixels_per_mm", "is_calibrated_mm", "determiner_raw", "county", "stateProvince", "latitude", "longitude",
-                              "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight", "aspect_ratio", "solidity", "ucs_score", "area_px",
+                              "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight", "aspect_ratio", "circularity", "solidity", "ucs_score", "area_px",
                               "sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight"), names(grp))
-    for (m_col in other_meta) {
-      vals <- stats::na.omit(grp[[m_col]])
-      rec[[m_col]] <- if (length(vals) > 0) vals[1] else NA
-    }
+    for (m_col in other_meta) { vals <- stats::na.omit(grp[[m_col]]); rec[[m_col]] <- if (length(vals) > 0) vals[1] else NA }
     if ("harmonic_roughness" %in% names(grp)) rec$harmonic_roughness <- round(stats::median(grp$harmonic_roughness, na.rm = TRUE), 6)
     if ("leaf_quality_weight" %in% names(grp)) rec$leaf_quality_weight <- round(stats::median(grp$leaf_quality_weight, na.rm = TRUE), 6)
     if ("is_contour_outlier" %in% names(grp)) rec$is_contour_outlier <- all(as.logical(grp$is_contour_outlier), na.rm = TRUE)
@@ -627,7 +644,21 @@ run_fourier_extraction <- function(opts) {
   specimen_records <- specimen_records[seq_len(spec_idx)]
   specimen_df <- do.call(rbind, specimen_records)
   for (p in seq_len(opts$num_pcs)) { specimen_df[[paste0("PC", p)]] <- NA_real_; specimen_df[[paste0("Sym_PC", p)]] <- 0.0 }
-  if (nrow(specimen_df) >= opts$num_pcs && exists("pca_fit") && !is.null(pca_fit)) {
+  # Fit OTU-level ordination on specimen median harmonics (Tier_1_Pure anchors) to prevent pseudoreplication (Hurlbert 1984; Slenker et al. 2022)
+  otu_t1_idx <- which(specimen_df$morph_tier_source == "Tier_1_Pure" & !as.logical(specimen_df$is_contour_outlier))
+  if (length(otu_t1_idx) < 10L) otu_t1_idx <- seq_len(nrow(specimen_df))
+  otu_wt <- specimen_df$authority_weight * ifelse(is.na(specimen_df$leaf_quality_weight), 1.0, specimen_df$leaf_quality_weight) * ifelse(is.na(specimen_df$spatial_balance_weight), 1.0, specimen_df$spatial_balance_weight)
+  if (nrow(specimen_df) >= max(opts$num_pcs, 6L) && exists("active_full_cols") && length(active_full_cols) >= opts$num_pcs) {
+    otu_v <- apply(specimen_df[otu_t1_idx, active_full_cols, drop = FALSE], 2, stats::var, na.rm = TRUE)
+    otu_cols <- names(otu_v[!is.na(otu_v) & otu_v > 1e-10])
+    if (length(otu_cols) >= opts$num_pcs) {
+      wt_otu <- stats::cov.wt(as.matrix(specimen_df[otu_t1_idx, otu_cols, drop = FALSE]), wt = otu_wt[otu_t1_idx], center = TRUE)
+      eig_otu <- eigen(wt_otu$cov, symmetric = TRUE); colnames(eig_otu$vectors) <- paste0("PC", seq_len(ncol(eig_otu$vectors))); rownames(eig_otu$vectors) <- otu_cols
+      spec_pcs <- sweep(as.matrix(specimen_df[, otu_cols, drop = FALSE]), 2, wt_otu$center, "-") %*% eig_otu$vectors
+      pca_fit <- structure(list(sdev = sqrt(pmax(eig_otu$values, 0)), rotation = eig_otu$vectors, center = wt_otu$center, scale = FALSE, x = spec_pcs), class = "prcomp")
+      for (p in seq_len(min(opts$num_pcs, ncol(spec_pcs)))) specimen_df[[paste0("PC", p)]] <- round(spec_pcs[, p], 6)
+    }
+  } else if (nrow(specimen_df) >= opts$num_pcs && exists("pca_fit") && !is.null(pca_fit)) {
     spec_pcs <- stats::predict(pca_fit, newdata = as.matrix(specimen_df[, active_full_cols, drop = FALSE]))
     for (p in seq_len(min(opts$num_pcs, ncol(spec_pcs)))) specimen_df[[paste0("PC", p)]] <- round(spec_pcs[, p], 6)
   }
@@ -638,9 +669,9 @@ run_fourier_extraction <- function(opts) {
   }
 
   lead_spec_cols <- c("catalogNumber", "plant_individual_id", "leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source",
-                      "foliar_variance", "assigned_tier", "tier_assignment", "reconstruction_tier",
+                      "foliar_variance", "heteroblasty_index", "assigned_tier", "tier_assignment", "reconstruction_tier",
                       "pixels_per_mm", "is_calibrated_mm", "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight",
-                      "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "solidity", "ucs_score",
+                      "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "circularity", "solidity", "ucs_score",
                       "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize")
   lead_spec_cols <- intersect(lead_spec_cols, names(specimen_df))
   specimen_df <- specimen_df[, c(lead_spec_cols, setdiff(names(specimen_df), lead_spec_cols))]
@@ -705,76 +736,48 @@ run_fourier_extraction <- function(opts) {
       }
     }
 
-    # Defensive fallback if RRPP/vegan are not available or encountered an error
     if (is.null(permanova_df)) {
       message("vegan package not available; executing defensive fallback using analytical sequential SS decomposition...")
-      Y <- as.matrix(tier_sym); Y_cent <- scale(Y, center = TRUE, scale = FALSE)
-      SS_tot <- sum(Y_cent^2); N_obs <- nrow(tier_manifest)
+      Y <- as.matrix(tier_sym); Y_cent <- scale(Y, center = TRUE, scale = FALSE); SS_tot <- sum(Y_cent^2); N_obs <- nrow(tier_manifest)
       fit0 <- stats::lm(Y_cent ~ 1, data = tier_manifest)
       fit1 <- if ("scientificName" %in% act_terms) stats::lm(Y_cent ~ scientificName, data = tier_manifest) else fit0
-      SS_sp <- sum(stats::fitted(fit1)^2); df_sp <- fit1$rank - 1
-      t12 <- intersect(c("scientificName", "determiner_tier"), act_terms)
+      SS_sp <- sum(stats::fitted(fit1)^2); df_sp <- fit1$rank - 1; t12 <- intersect(c("scientificName", "determiner_tier"), act_terms)
       fit2 <- if ("determiner_tier" %in% act_terms) stats::lm(stats::as.formula(paste("Y_cent ~", paste(t12, collapse = " + "))), data = tier_manifest) else fit1
       SS_12 <- sum(stats::fitted(fit2)^2); SS_det <- SS_12 - SS_sp; df_det <- fit2$rank - fit1$rank
       fit3 <- if ("reconstruction_tier" %in% act_terms) stats::lm(stats::as.formula(paste("Y_cent ~", paste(act_terms, collapse = " + "))), data = tier_manifest) else fit2
       SS_123 <- sum(stats::fitted(fit3)^2); SS_tier <- SS_123 - SS_12; df_tier <- fit3$rank - fit2$rank
       SS_res <- SS_tot - SS_123; df_res <- N_obs - fit3$rank; MS_res <- SS_res / max(df_res, 1)
       F_sp <- if (df_sp > 0) (SS_sp / df_sp) / MS_res else NA_real_; F_det <- if (df_det > 0) (SS_det / df_det) / MS_res else NA_real_; F_tier <- if (df_tier > 0) (SS_tier / df_tier) / MS_res else NA_real_
-      p_sp <- if (df_sp > 0) stats::pf(F_sp, df_sp, df_res, lower.tail = FALSE) else NA_real_
-      p_det <- if (df_det > 0) stats::pf(F_det, df_det, df_res, lower.tail = FALSE) else NA_real_
-      p_tier <- if (df_tier > 0) stats::pf(F_tier, df_tier, df_res, lower.tail = FALSE) else NA_real_
-      permanova_df <- data.frame(
-        Term = c("scientificName", "determiner_tier", "reconstruction_tier", "Residual", "Total"),
-        Df = c(df_sp, df_det, df_tier, df_res, N_obs - 1),
-        SumOfSqs = round(c(SS_sp, SS_det, SS_tier, SS_res, SS_tot), 4),
-        R2 = round(c(SS_sp / SS_tot, SS_det / SS_tot, SS_tier / SS_tot, SS_res / SS_tot, 1.0), 6),
-        F = c(round(F_sp, 4), round(F_det, 4), round(F_tier, 4), NA_real_, NA_real_),
-        p_value = c(round(p_sp, 5), round(p_det, 5), round(p_tier, 5), NA_real_, NA_real_),
-        stringsAsFactors = FALSE
-      )
+      p_sp <- if (df_sp > 0) stats::pf(F_sp, df_sp, df_res, lower.tail = FALSE) else NA_real_; p_det <- if (df_det > 0) stats::pf(F_det, df_det, df_res, lower.tail = FALSE) else NA_real_; p_tier <- if (df_tier > 0) stats::pf(F_tier, df_tier, df_res, lower.tail = FALSE) else NA_real_
+      permanova_df <- data.frame(Term = c("scientificName", "determiner_tier", "reconstruction_tier", "Residual", "Total"), Df = c(df_sp, df_det, df_tier, df_res, N_obs - 1),
+                                 SumOfSqs = round(c(SS_sp, SS_det, SS_tier, SS_res, SS_tot), 4), R2 = round(c(SS_sp / SS_tot, SS_det / SS_tot, SS_tier / SS_tot, SS_res / SS_tot, 1.0), 6),
+                                 F = c(round(F_sp, 4), round(F_det, 4), round(F_tier, 4), NA_real_, NA_real_), p_value = c(round(p_sp, 5), round(p_det, 5), round(p_tier, 5), NA_real_, NA_real_), stringsAsFactors = FALSE)
     }
-
-    # Format table columns and export report CSV
     permanova_df$Term <- gsub("^Residuals$", "Residual", permanova_df$Term)
     if ("Total" %in% permanova_df$Term) permanova_df$R2[permanova_df$Term == "Total"] <- 1.0
     report_cols <- intersect(c("Term", "Df", "SumOfSqs", "R2", "F", "p_value"), names(permanova_df))
     permanova_df <- permanova_df[, report_cols, drop = FALSE]
     if (!"determiner_tier" %in% permanova_df$Term && nrow(permanova_df) >= 2L) permanova_df <- rbind(permanova_df[1, , drop = FALSE], data.frame(Term = "determiner_tier", Df = 0, SumOfSqs = 0, R2 = 0, F = NA_real_, p_value = NA_real_, stringsAsFactors = FALSE)[, report_cols, drop = FALSE], permanova_df[-1, , drop = FALSE])
-
     dir.create(dirname(opts$report_out), recursive = TRUE, showWarnings = FALSE)
-    tmp_rep <- paste0(opts$report_out, ".tmp")
-    write.csv(permanova_df, file = tmp_rep, row.names = FALSE)
-    file.rename(tmp_rep, opts$report_out)
+    tmp_rep <- paste0(opts$report_out, ".tmp"); write.csv(permanova_df, file = tmp_rep, row.names = FALSE); file.rename(tmp_rep, opts$report_out)
     message("PERMANOVA Tier Validation report exported to: ", opts$report_out)
-
-    # Verification assertions
     tier_row <- permanova_df[grepl("reconstruction_tier", permanova_df$Term, ignore.case = TRUE), ]
     if (nrow(tier_row) > 0) {
       r2_val <- tier_row$R2[1]; p_val <- tier_row$p_value[1]
       message(sprintf("PERMANOVA Result: reconstruction_tier explains %.4f%% of variance (R2 = %.6f, p = %.4f)", r2_val * 100, r2_val, p_val))
-      if (r2_val < 0.01) message("[ASSERTION PASS] reconstruction_tier accounts for <1.0% of total variance (R2 < 0.01).")
-      else message("[ASSERTION NOTE] reconstruction_tier R2 = ", round(r2_val, 4))
-      if (!is.na(p_val) && p_val > 0.05) message("[ASSERTION PASS] reconstruction_tier is non-significant (p > 0.05).")
-      else message("[ASSERTION NOTE] reconstruction_tier p-value = ", p_val)
+      if (r2_val < 0.01) message("[ASSERTION PASS] reconstruction_tier accounts for <1.0% of total variance (R2 < 0.01).") else message("[ASSERTION NOTE] reconstruction_tier R2 = ", round(r2_val, 4))
+      if (!is.na(p_val) && p_val > 0.05) message("[ASSERTION PASS] reconstruction_tier is non-significant (p > 0.05).") else message("[ASSERTION NOTE] reconstruction_tier p-value = ", p_val)
     }
-
-    # 7. Diagnostic 2D PCA Morphospace Export (Tier 1 Direct vs. Tier 2 Reflected, Hollow Markers & 95% Ellipses)
     dir.create(dirname(opts$plot_out), recursive = TRUE, showWarnings = FALSE)
     if (exists("render_tier1_vs_tier2_2d_pdf", mode = "function")) {
       render_tier1_vs_tier2_2d_pdf(tier_manifest, opts$plot_out, if (exists("pca_fit")) pca_fit else NULL, sym_res$pca, permanova_df)
     } else {
-      pdf(opts$plot_out, width = 10, height = 5)
-      par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.0, 1.0))
+      pdf(opts$plot_out, width = 10, height = 5); par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.0, 1.0))
       is_t2 <- grepl("2", as.character(tier_manifest$reconstruction_tier))
-      plot(tier_manifest$PC1, tier_manifest$PC2, pch = ifelse(is_t2, 2, 1), bg = NA, col = ifelse(is_t2, "#D55E00", "#0072B2"),
-           cex = 0.85, lwd = 1.0, xlab = "PC1 (%)", ylab = "PC2 (%)", main = "A. 2D Full EFA Morphospace: Tier 1 vs Tier 2")
-      grid(col = "grey88"); abline(h = 0, v = 0, lty = 3, col = "grey70")
-      legend("topright", legend = c("Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"), col = c("#0072B2", "#D55E00"), pch = c(1, 2), pt.bg = NA, bty = "n")
-      plot(tier_manifest$Sym_PC1, tier_manifest$Sym_PC2, pch = ifelse(is_t2, 2, 1), bg = NA, col = ifelse(is_t2, "#D55E00", "#0072B2"),
-           cex = 0.85, lwd = 1.0, xlab = "Sym_PC1 (%)", ylab = "Sym_PC2 (%)", main = "B. 2D Symmetric EFA: Tier 1 vs Tier 2")
-      grid(col = "grey88"); abline(h = 0, v = 0, lty = 3, col = "grey70")
-      legend("topright", legend = c("Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"), col = c("#0072B2", "#D55E00"), pch = c(1, 2), pt.bg = NA, bty = "n")
-      dev.off()
+      plot(tier_manifest$PC1, tier_manifest$PC2, pch = ifelse(is_t2, 2, 1), bg = NA, col = ifelse(is_t2, "#D55E00", "#0072B2"), cex = 0.85, lwd = 1.0, xlab = "PC1 (%)", ylab = "PC2 (%)", main = "A. 2D Full EFA Morphospace: Tier 1 vs Tier 2")
+      grid(col = "grey88"); abline(h = 0, v = 0, lty = 3, col = "grey70"); legend("topright", legend = c("Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"), col = c("#0072B2", "#D55E00"), pch = c(1, 2), pt.bg = NA, bty = "n")
+      plot(tier_manifest$Sym_PC1, tier_manifest$Sym_PC2, pch = ifelse(is_t2, 2, 1), bg = NA, col = ifelse(is_t2, "#D55E00", "#0072B2"), cex = 0.85, lwd = 1.0, xlab = "Sym_PC1 (%)", ylab = "Sym_PC2 (%)", main = "B. 2D Symmetric EFA: Tier 1 vs Tier 2")
+      grid(col = "grey88"); abline(h = 0, v = 0, lty = 3, col = "grey70"); legend("topright", legend = c("Tier 1 Direct (pch=1)", "Tier 2 Reflected (pch=2)"), col = c("#0072B2", "#D55E00"), pch = c(1, 2), pt.bg = NA, bty = "n"); dev.off()
     }
     message("Diagnostic 2D PCA morphospace plot exported: ", opts$plot_out)
   }

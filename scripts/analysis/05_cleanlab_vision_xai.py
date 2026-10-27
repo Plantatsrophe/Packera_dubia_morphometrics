@@ -36,7 +36,7 @@ import pandas as pd
 from PIL import Image
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 import torch
 import torch.nn.functional as F
@@ -815,6 +815,7 @@ def load_and_link_rosette_patches(
                 "taxon": std_taxon,
                 "species_raw": raw_sp,
                 "label_idx": 0,
+                "institutionCode": str(meta.get("institutionCode", "UNKNOWN") or "UNKNOWN").strip(),
                 "determiner_tier": meta.get("determiner_tier", "Tier_3_Bronze"),
                 "spatial_balance_weight": float(
                     meta.get("spatial_balance_weight", 1.0)
@@ -862,6 +863,7 @@ def load_and_link_rosette_patches(
                     "taxon": std_taxon,
                     "species_raw": raw_sp,
                     "label_idx": 0,
+                    "institutionCode": str(meta.get("institutionCode", "UNKNOWN") or "UNKNOWN").strip(),
                     "determiner_tier": meta.get("determiner_tier", "Tier_3_Bronze"),
                     "spatial_balance_weight": float(
                         meta.get("spatial_balance_weight", 1.0)
@@ -904,6 +906,7 @@ def load_and_link_rosette_patches(
                     "taxon": std_taxon,
                     "species_raw": raw_sp,
                     "label_idx": 0,
+                    "institutionCode": str(row.get("institutionCode", "UNKNOWN") or "UNKNOWN").strip(),
                     "determiner_tier": row.get("determiner_tier", "Tier_3_Bronze"),
                     "spatial_balance_weight": float(
                         row.get("spatial_balance_weight", 1.0)
@@ -1090,17 +1093,16 @@ def compute_out_of_fold_probabilities(
     stratify_by_orientation: bool = False,
     determiner_tiers: Optional[np.ndarray | List[str] | pd.Series] = None,
     spatial_balance_weights: Optional[np.ndarray | List[float] | pd.Series] = None,
+    institution_codes: Optional[np.ndarray | List[str] | pd.Series] = None,
 ) -> Tuple[np.ndarray, float, float]:
-    """Fits stratified cross-validated Logistic Regression to compute out-of-fold probabilities.
+    """Fits herbarium-grouped or stratified cross-validated Logistic Regression to compute out-of-fold probabilities.
 
     L2-normalizes each 768-d embedding vector before fold-internal StandardScaler and fits
     balanced LogisticRegression weighted by determiner authority tier (Tier_1_Gold=3.0,
     Tier_2_Silver=1.5, Tier_3_Bronze=0.5) multiplied by continuous `spatial_balance_weight`
-    and normalized to unit mean per fold. Supports optional
-    compound stratification by both taxon label and foliar surface orientation. When only 1 class
-    is present (or a class has fewer than `n_splits` samples), falls back to L2-normalized
-    centroid/medoid cosine distance pseudo-probabilities without calling `LogisticRegression.fit()`
-    on a 1-class vector.
+    and normalized to unit mean per fold. Uses `StratifiedGroupKFold` grouped by `institutionCode`
+    (with `StratifiedKFold` fallback for small/singleton herbaria) to prevent institutional
+    background shortcut learning (Gaem et al. 2025).
     """
     X = np.asarray(features, dtype=np.float64)
     X = X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-8)
@@ -1162,8 +1164,6 @@ def compute_out_of_fold_probabilities(
         acc = float(np.mean(~is_outlier))
         return pred_probs, acc, acc
 
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-
     # Determine stratification target
     strat_labels = labels
     if stratify_by_orientation and surface_orientations is not None:
@@ -1175,9 +1175,35 @@ def compute_out_of_fold_probabilities(
         else:
             logger.info("Some compound taxon-orientation classes have fewer samples than n_splits; stratifying by taxon.")
 
+    # Use StratifiedGroupKFold grouped by institutionCode when sufficient herbarium diversity exists (Gaem et al. 2025)
+    cv_splits = None
+    if institution_codes is not None and len(institution_codes) == len(labels):
+        groups = np.asarray([
+            str(g).strip() if pd.notna(g) and str(g).strip() and str(g).strip().upper() != "UNKNOWN" else f"SINGLETON_{idx}"
+            for idx, g in enumerate(institution_codes)
+        ])
+        if len(np.unique(groups)) >= n_splits:
+            try:
+                sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+                candidate_splits = list(sgkf.split(X, strat_labels, groups))
+                if all(len(val_idx) > 0 and len(np.unique(labels[train_idx])) == len(unique_labels) for train_idx, val_idx in candidate_splits):
+                    cv_splits = candidate_splits
+                    logger.info(
+                        f"Using herbarium-grouped StratifiedGroupKFold across {len(np.unique(groups))} institutions "
+                        "to prevent institutional background shortcut learning (Gaem et al. 2025)."
+                    )
+                else:
+                    logger.info("Small/singleton herbaria caused incomplete class coverage in group folds; falling back to StratifiedKFold.")
+            except Exception as exc:
+                logger.info(f"StratifiedGroupKFold fallback to StratifiedKFold: {exc}")
+
+    if cv_splits is None:
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+        cv_splits = list(skf.split(X, strat_labels))
+
     y_true_all, y_pred_all = [], []
 
-    for train_idx, val_idx in skf.split(X, strat_labels):
+    for train_idx, val_idx in cv_splits:
         scaler = StandardScaler()
         X_train = scaler.fit_transform(X[train_idx])
         X_val = scaler.transform(X[val_idx])
@@ -1212,9 +1238,19 @@ def run_confident_learning_audit(
 ) -> pd.DataFrame:
     """Applies Confident Learning algorithms to identify potential herbarium label noise.
 
-    Filters out candidates flagged solely due to inverted abaxial tomentum (botanical
-    mounting variant) when filter_abaxial_artifacts is True.
+    Computes per-class expected self-confidence thresholds t_j (Northcutt et al. 2021) and uses
+    `cleanlab.filter.find_label_issues(..., filter_by="prune_by_noise_rate")` alongside
+    `get_label_quality_scores()`, while using `--cleanlab-threshold 0.85` as a high-severity
+    triage flag on `c_error`. Filters out candidates flagged solely due to inverted abaxial
+    tomentum (botanical mounting variant) when `filter_abaxial_artifacts` is True.
     """
+    num_classes = pred_probs.shape[1] if pred_probs.ndim == 2 and pred_probs.shape[1] > 0 else max(1, len(class_names))
+    class_thresholds = np.full(num_classes, 1.0 - error_threshold, dtype=np.float64)
+    for c_j in range(num_classes):
+        mask_j = labels == c_j
+        if np.any(mask_j):
+            class_thresholds[c_j] = float(np.mean(pred_probs[mask_j, c_j]))
+
     try:
         if len(np.unique(labels)) < 2 or pred_probs.shape[1] != len(np.unique(labels)):
             raise ValueError("Single-class or non-contiguous label set; using direct probability margins.")
@@ -1226,13 +1262,16 @@ def run_confident_learning_audit(
         issues = find_label_issues(
             labels=labels,
             pred_probs=pred_probs,
+            filter_by="prune_by_noise_rate",
             return_indices_ranked_by="self_confidence",
         )
     except Exception:
-        logger.info("Using direct self-confidence probability margins for label quality scoring.")
+        logger.info("Using Northcutt et al. (2021) per-class self-confidence thresholds and probability margins for label quality scoring.")
         predicted_classes = np.argmax(pred_probs, axis=1)
         quality_scores = np.array([pred_probs[i, labels[i]] for i in range(len(labels))])
-        issues = np.where((predicted_classes != labels) & (1.0 - quality_scores > error_threshold))[0]
+        pred_conf = np.max(pred_probs, axis=1)
+        thresh_for_pred = np.array([class_thresholds[min(int(c), num_classes - 1)] for c in predicted_classes])
+        issues = np.where((predicted_classes != labels) & ((pred_conf >= thresh_for_pred) | (1.0 - quality_scores > error_threshold)))[0]
 
     audit_df = records_df.copy()
     num_records = len(audit_df)
@@ -1262,11 +1301,14 @@ def run_confident_learning_audit(
     audit_df["predicted_label"] = pred_classes
     audit_df["confidence_given_class"] = np.round(conf_given, 4)
     audit_df["confidence_predicted_class"] = np.round(conf_pred, 4)
+    audit_df["class_self_confidence_threshold"] = np.round(
+        [class_thresholds[min(int(l), num_classes - 1)] for l in labels], 4
+    )
     audit_df["label_quality_score"] = np.round(quality_scores, 4)
     audit_df["c_error"] = np.round(c_error, 4)
     if "determiner_tier" in audit_df.columns:
-        tier_map = {"Tier_1_Gold": 2.0, "Tier_2_Silver": 1.25, "Tier_3_Bronze": 0.75}
-        audit_df["authority_weight"] = [tier_map.get(str(t).strip(), 0.75) for t in audit_df["determiner_tier"]]
+        tier_map = {"Tier_1_Gold": 3.0, "Tier_2_Silver": 1.5, "Tier_3_Bronze": 0.5}
+        audit_df["authority_weight"] = [tier_map.get(str(t).strip(), 0.5) for t in audit_df["determiner_tier"]]
 
     is_issue = np.zeros(num_records, dtype=bool)
     is_issue[issues] = True
@@ -2037,6 +2079,7 @@ def main() -> None:
         stratify_by_orientation=args.stratify_by_orientation,
         determiner_tiers=df.get("determiner_tier", None),
         spatial_balance_weights=df.get("spatial_balance_weight", None),
+        institution_codes=df.get("institutionCode", None),
     )
 
     # 4. Execute Confident Learning label noise audit

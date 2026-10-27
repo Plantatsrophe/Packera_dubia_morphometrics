@@ -386,6 +386,13 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             ]
             self.assertEqual(set(neighbors), {"Packera anonyma", "Packera plattensis"})
 
+            # Verify Hopkins-adjusted phenology & integrative congruence columns and R implementation
+            self.assertIn("hopkins_pheno_overlap", comp_df.columns)
+            self.assertIn("integrative_congruence", comp_df.columns)
+            r08_text = (Path(__file__).resolve().parents[2] / "scripts" / "analysis" / "08_discover_taxon_complexes.R").read_text(encoding="utf-8")
+            self.assertIn("compute_hopkins_phenological_affinity", r08_text)
+            self.assertIn("Padial et al. 2010", r08_text)
+
 
 if __name__ == "__main__":
     unittest.main()

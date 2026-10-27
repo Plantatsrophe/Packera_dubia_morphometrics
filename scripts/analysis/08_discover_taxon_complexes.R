@@ -438,7 +438,67 @@ compute_visual_affinity <- function(vis_df, taxa) {
 }
 
 # ------------------------------------------------------------------------------
+# 4b. Step C2: Hopkins-Adjusted Phenological Overlap Matrix (Hopkins 1918)
+# ------------------------------------------------------------------------------
+compute_hopkins_phenological_affinity <- function(morph_df, taxa) {
+  # Adjusts flowering phenology (doy / circular sin_doy, cos_doy) for latitude,
+  # elevation, and MAT (Hopkins' Bioclimatic Law, Hopkins 1918: +4.0 d/deg N,
+  # +1.25 d/100 m elevation) so sympatric phenological overlap reflects true
+  # allochronic isolation rather than latitudinal gradient effects.
+  n_taxa <- length(taxa)
+  S_pheno <- matrix(0.0, nrow = n_taxa, ncol = n_taxa, dimnames = list(taxa, taxa))
+  if (!("doy" %in% names(morph_df))) {
+    return(list(S_pheno = S_pheno, has_pheno = FALSE))
+  }
+  doy_vec <- suppressWarnings(as.numeric(morph_df$doy))
+  if (sum(is.finite(doy_vec)) < 4L) {
+    return(list(S_pheno = S_pheno, has_pheno = FALSE))
+  }
+  lat_col <- intersect(c("decimalLatitude", "latitude"), names(morph_df))
+  lat_vec <- if (length(lat_col) > 0L) suppressWarnings(as.numeric(morph_df[[lat_col[1L]]])) else rep(NA_real_, nrow(morph_df))
+  elev_col <- intersect(c("topo_elev_m", "elevation_m", "elevation"), names(morph_df))
+  elev_vec <- if (length(elev_col) > 0L) suppressWarnings(as.numeric(morph_df[[elev_col[1L]]])) else rep(0.0, nrow(morph_df))
+  elev_vec[!is.finite(elev_vec)] <- 0.0
+  mat_col <- intersect(c("bio1_temp_mean", "mat_c"), names(morph_df))
+  mat_vec <- if (length(mat_col) > 0L) suppressWarnings(as.numeric(morph_df[[mat_col[1L]]])) else rep(NA_real_, nrow(morph_df))
+
+  ref_lat <- if (any(is.finite(lat_vec))) stats::median(lat_vec, na.rm = TRUE) else 35.0
+  ref_elev <- if (any(is.finite(elev_vec))) stats::median(elev_vec, na.rm = TRUE) else 150.0
+  ref_mat <- if (any(is.finite(mat_vec))) stats::median(mat_vec, na.rm = TRUE) else 15.0
+
+  lat_shift <- ifelse(is.finite(lat_vec), 4.0 * (lat_vec - ref_lat), 0.0)
+  elev_shift <- 1.25 * ((elev_vec - ref_elev) / 100.0)
+  mat_shift <- ifelse(is.finite(mat_vec), -1.5 * (mat_vec - ref_mat), 0.0)
+  hopkins_shift <- 0.70 * (lat_shift + elev_shift) + 0.30 * mat_shift
+
+  adj_doy <- doy_vec - hopkins_shift
+  rad_adj <- 2.0 * pi * (adj_doy / 365.25)
+  sin_doy <- sin(rad_adj)
+  cos_doy <- cos(rad_adj)
+
+  med_doy <- numeric(n_taxa)
+  names(med_doy) <- taxa
+  for (tx in taxa) {
+    idx_tx <- which(morph_df$species_standardized == tx & is.finite(adj_doy))
+    med_doy[tx] <- if (length(idx_tx) > 0L) stats::median(adj_doy[idx_tx], na.rm = TRUE) else 120.0
+  }
+
+  for (i in seq_len(n_taxa)) {
+    for (j in seq_len(n_taxa)) {
+      if (i != j) {
+        delta_ij <- abs(med_doy[i] - med_doy[j])
+        delta_circ <- min(delta_ij, 365.25 - delta_ij)
+        S_pheno[i, j] <- exp(-(delta_circ^2) / (2.0 * (21.0^2)))
+      }
+    }
+  }
+  diag(S_pheno) <- 0.0
+  list(S_pheno = S_pheno, has_pheno = TRUE, sin_doy = sin_doy, cos_doy = cos_doy)
+}
+
+# ------------------------------------------------------------------------------
 # 5. Step D: Consensus Affinity Matrix & Unsupervised Graph / Ward Partitioning
+#    (Integrative Congruence Rule: Padial et al. 2010; Schlick-Steiner et al. 2010)
 # ------------------------------------------------------------------------------
 relabel_clusters_sequential <- function(cl_vec, taxa) {
   u_ord <- unique(cl_vec[order(taxa)])
@@ -813,6 +873,7 @@ main <- function() {
 
   morph_res <- compute_morphometric_affinity(morph_df, anc$anchor_df, taxa)
   vis_res <- compute_visual_affinity(vis_df, taxa)
+  pheno_res <- compute_hopkins_phenological_affinity(morph_df, taxa)
 
   if (!is.null(vis_df) && nrow(vis_df) > 0L && any(vis_res$S_vis > 0)) {
     W <- 0.55 * morph_res$S_morph + 0.45 * vis_res$S_vis
@@ -828,6 +889,22 @@ main <- function() {
     n_vouchers_vec = n_vouchers_vec,
     n_gs_vec = anc$n_gold_silver
   )
+  # Record Hopkins-adjusted phenological overlap & integrative congruence (Padial et al. 2010; Schlick-Steiner et al. 2010)
+  cdf <- part_res$complexes_df
+  hop_ov <- numeric(n_taxa)
+  int_cong <- logical(n_taxa)
+  for (i in seq_len(n_taxa)) {
+    nn_tx <- cdf$nearest_neighbor_taxon[i]
+    if (nzchar(nn_tx) && nn_tx %in% taxa) {
+      hop_ov[i] <- if (isTRUE(pheno_res$has_pheno)) round(pheno_res$S_pheno[taxa[i], nn_tx], 4) else NA_real_
+      n_mod <- as.integer(morph_res$S_morph[taxa[i], nn_tx] >= opts$min_affinity) +
+               as.integer(vis_res$S_vis[taxa[i], nn_tx] >= opts$min_affinity) +
+               as.integer(isTRUE(pheno_res$has_pheno) && pheno_res$S_pheno[taxa[i], nn_tx] >= 0.25)
+      int_cong[i] <- n_mod >= 2L
+    }
+  }
+  part_res$complexes_df$hopkins_pheno_overlap <- hop_ov
+  part_res$complexes_df$integrative_congruence <- int_cong
 
   # Export empirical_taxon_complexes.csv and pairwise_taxon_affinity_matrix.csv atomically
   atomic_write_csv(part_res$complexes_df, opts$output_complexes)

@@ -847,3 +847,50 @@ load_and_update_fine_grain_cache <- function(
 
   return(df)
 }
+
+# ------------------------------------------------------------------------------
+# 6. Collinearity Pruning for WorldClim & SoilGrids Predictors (Dormann et al. 2013; Benito 2021)
+# ------------------------------------------------------------------------------
+screen_collinear_predictors <- function(X_env, cor.threshold = 0.70, vif.threshold = 5.0) {
+  X_df <- as.data.frame(X_env, check.names = FALSE)
+  if (ncol(X_df) <= 2) return(list(selected_variables = colnames(X_df), pruned_variables = character(0)))
+  sds <- sapply(X_df, function(v) stats::sd(as.numeric(v), na.rm = TRUE))
+  keep_cols <- names(sds[!is.na(sds) & sds > 1e-8])
+  if (length(keep_cols) <= 2) return(list(selected_variables = colnames(X_df), pruned_variables = character(0)))
+  X_sub <- X_df[, keep_cols, drop = FALSE]
+  sel_vars <- NULL
+  if (requireNamespace("spatialRF", quietly = TRUE)) {
+    ac <- tryCatch(spatialRF::auto_cor(x = X_sub, cor.threshold = cor.threshold), error = function(e) NULL)
+    if (!is.null(ac) && !is.null(ac$selected.variables) && length(ac$selected.variables) >= 2) {
+      X_sub <- X_sub[, ac$selected.variables, drop = FALSE]
+    }
+    av <- tryCatch(spatialRF::auto_vif(x = X_sub, vif.threshold = vif.threshold), error = function(e) NULL)
+    if (!is.null(av) && !is.null(av$selected.variables) && length(av$selected.variables) >= 2) {
+      sel_vars <- av$selected.variables
+    }
+  }
+  if (is.null(sel_vars)) {
+    # Analytical Dormann et al. (2013) pairwise |r| <= cor.threshold & stepwise VIF <= vif.threshold
+    cmat <- abs(stats::cor(X_sub, use = "pairwise.complete.obs")); cmat[is.na(cmat)] <- 0; diag(cmat) <- 0
+    cand <- colnames(X_sub)
+    while (length(cand) > 2 && max(cmat[cand, cand], na.rm = TRUE) > cor.threshold) {
+      sub_c <- cmat[cand, cand, drop = FALSE]
+      ij <- which(sub_c == max(sub_c, na.rm = TRUE), arr.ind = TRUE)[1, ]
+      v1 <- cand[ij[1]]; v2 <- cand[ij[2]]
+      drop_v <- if (mean(sub_c[v1, ]) >= mean(sub_c[v2, ])) v1 else v2
+      cand <- setdiff(cand, drop_v)
+    }
+    while (length(cand) > 2) {
+      R_sub <- stats::cor(X_sub[, cand, drop = FALSE], use = "pairwise.complete.obs")
+      R_sub[is.na(R_sub)] <- 0; diag(R_sub) <- 1
+      vifs <- tryCatch(diag(solve(R_sub + diag(1e-6, length(cand)))), error = function(e) rep(1.0, length(cand)))
+      if (max(vifs, na.rm = TRUE) <= vif.threshold) break
+      cand <- setdiff(cand, cand[which.max(vifs)])
+    }
+    sel_vars <- cand
+  }
+  pruned_vars <- setdiff(colnames(X_df), sel_vars)
+  message(sprintf("Collinearity Screening (Dormann et al. 2013; Benito 2021; |r| <= %.2f, VIF <= %.1f): retained %d / %d predictors.",
+                  cor.threshold, vif.threshold, length(sel_vars), ncol(X_df)))
+  list(selected_variables = sel_vars, pruned_variables = pruned_vars)
+}

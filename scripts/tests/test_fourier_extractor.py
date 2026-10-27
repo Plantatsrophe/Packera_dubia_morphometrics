@@ -175,6 +175,17 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn('"Tier_2_Fallback"', r_content)
         self.assertIn('grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]', r_content)
 
+    def test_empirical_efa_alignment_harmonic_power_and_otu_aggregation(self):
+        """Verify Phase 3 empirical EFA protocol: coo_alignxax, calibrate_harmonicpower_efourier, and OTU-level PCA."""
+        r_content = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("align_contour_basal_apical", r_content)
+        self.assertIn("Momocs::coo_alignxax", r_content)
+        self.assertIn("circularity > 0.75", r_content)
+        self.assertIn("verify_harmonic_power_calibration", r_content)
+        self.assertIn("calibrate_harmonicpower_efourier", r_content)
+        self.assertIn("heteroblasty_index", r_content)
+        self.assertIn("otu_t1_idx", r_content)
+
 
 if __name__ == "__main__":
     unittest.main()

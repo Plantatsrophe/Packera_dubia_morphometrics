@@ -9,52 +9,36 @@ suppressPackageStartupMessages({
 # 1. CLI Argument Parsing
 parse_args_robust <- function() {
   option_list <- list(
-    optparse::make_option(c("-v", "--vouchers"), type = "character", default = "data/tables/curated_vouchers.csv", help = "Vouchers metadata CSV"),
-    optparse::make_option(c("-e", "--harmonics"), type = "character", default = "data/tables/leaf_efa_harmonics.csv", help = "Leaf EFA harmonics CSV"),
-    optparse::make_option(c("-m", "--reproductive"), type = "character", default = "data/tables/voucher_reproductive_metrics.csv", help = "Voucher reproductive metrics CSV"),
-    optparse::make_option(c("--outline-only"), action = "store_true", default = FALSE, help = "Evaluate vegetative leaf outlines only"),
-    optparse::make_option(c("--correct-allometry"), type = "character", default = "auto", help = "Foliar allometry correction [auto, true, false]"),
-    optparse::make_option(c("--allometry-report"), type = "character", default = "outputs/reports/allometry_significance_audit.csv", help = "Allometry test audit CSV"),
-    optparse::make_option(c("--allometry-pairwise"), type = "character", default = "outputs/reports/allometry_pairwise_trajectories.csv", help = "Pairwise allometric trajectories CSV"),
-    optparse::make_option(c("--allometry-plot"), type = "character", default = "outputs/figures/shape_allometry_regression.pdf", help = "Allometry regression plot PDF"),
-    optparse::make_option(c("--use-clustvarsel"), action = "store_true", default = FALSE, help = "Use clustvarsel feature selection before Mclust"),
-    optparse::make_option(c("-f", "--output-flags"), type = "character", default = "data/tables/morphometric_flags.csv", help = "Flags output CSV"),
-    optparse::make_option(c("-p", "--output-plot"), type = "character", default = "outputs/figures/cda_passive_projection.pdf", help = "Output CDA PDF"),
-    optparse::make_option(c("-r", "--output-report"), type = "character", default = "outputs/reports/gmm_bayes_factors_summary.csv", help = "BIC report CSV"),
-    optparse::make_option(c("-b", "--output-batch-audit"), type = "character", default = "outputs/reports/institutional_batch_effect_audit.csv", help = "Batch audit CSV"),
-    optparse::make_option(c("-k", "--max-k"), type = "integer", default = 8, help = "Max mixture components for GMM"),
-    optparse::make_option(c("-d", "--num-pcs"), type = "integer", default = 5, help = "Number of PCA dimensions"),
-    optparse::make_option(c("--permutations"), type = "integer", default = 999, help = "PERMANOVA permutations"),
-    optparse::make_option(c("--seed"), type = "integer", default = 42, help = "Random seed"),
-    optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE, help = "Enable single-taxon intraspecific mode"),
-    optparse::make_option(c("--focal-taxon"), type = "character", default = "", help = "Focal taxon name")
+    optparse::make_option(c("-v", "--vouchers"), type = "character", default = "data/tables/curated_vouchers.csv"),
+    optparse::make_option(c("-e", "--harmonics"), type = "character", default = "data/tables/leaf_efa_harmonics.csv"),
+    optparse::make_option(c("-m", "--reproductive"), type = "character", default = "data/tables/voucher_reproductive_metrics.csv"),
+    optparse::make_option(c("--outline-only"), action = "store_true", default = FALSE),
+    optparse::make_option(c("--correct-allometry"), type = "character", default = "auto"),
+    optparse::make_option(c("--allometry-report"), type = "character", default = "outputs/reports/allometry_significance_audit.csv"),
+    optparse::make_option(c("--allometry-pairwise"), type = "character", default = "outputs/reports/allometry_pairwise_trajectories.csv"),
+    optparse::make_option(c("--allometry-plot"), type = "character", default = "outputs/figures/shape_allometry_regression.pdf"),
+    optparse::make_option(c("--use-clustvarsel"), action = "store_true", default = FALSE),
+    optparse::make_option(c("-f", "--output-flags"), type = "character", default = "data/tables/morphometric_flags.csv"),
+    optparse::make_option(c("-p", "--output-plot"), type = "character", default = "outputs/figures/cda_passive_projection.pdf"),
+    optparse::make_option(c("-r", "--output-report"), type = "character", default = "outputs/reports/gmm_bayes_factors_summary.csv"),
+    optparse::make_option(c("-b", "--output-batch-audit"), type = "character", default = "outputs/reports/institutional_batch_effect_audit.csv"),
+    optparse::make_option(c("-k", "--max-k"), type = "integer", default = 8),
+    optparse::make_option(c("-d", "--num-pcs"), type = "integer", default = 5),
+    optparse::make_option(c("--permutations"), type = "integer", default = 999),
+    optparse::make_option(c("--seed"), type = "integer", default = 42),
+    optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE),
+    optparse::make_option(c("--focal-taxon"), type = "character", default = "")
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
     opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
     names(opts) <- gsub("-", "_", names(opts)); return(opts)
   }
-  raw_args <- commandArgs(trailingOnly = TRUE)
-  opts <- list(vouchers = "data/tables/curated_vouchers.csv", harmonics = "data/tables/leaf_efa_harmonics.csv", reproductive = "data/tables/voucher_reproductive_metrics.csv",
-               outline_only = FALSE, correct_allometry = "auto", allometry_report = "outputs/reports/allometry_significance_audit.csv",
-               allometry_pairwise = "outputs/reports/allometry_pairwise_trajectories.csv", allometry_plot = "outputs/figures/shape_allometry_regression.pdf",
-               use_clustvarsel = FALSE, output_flags = "data/tables/morphometric_flags.csv", output_plot = "outputs/figures/cda_passive_projection.pdf",
-               output_report = "outputs/reports/gmm_bayes_factors_summary.csv", output_batch_audit = "outputs/reports/institutional_batch_effect_audit.csv",
-               max_k = 8, num_pcs = 5, permutations = 999, seed = 42, intraspecific_mode = FALSE, focal_taxon = "")
-  i <- 1
-  while (i <= length(raw_args)) {
-    a <- raw_args[i]
-    if (a %in% c("-v", "--vouchers") && i < length(raw_args)) { opts$vouchers <- raw_args[i+1]; i <- i+2 } else if (a %in% c("-e", "--harmonics") && i < length(raw_args)) { opts$harmonics <- raw_args[i+1]; i <- i+2
-    } else if (a %in% c("-m", "--reproductive") && i < length(raw_args)) { opts$reproductive <- raw_args[i+1]; i <- i+2 } else if (a == "--outline-only") { opts$outline_only <- TRUE; i <- i+1
-    } else if (a == "--use-clustvarsel") { opts$use_clustvarsel <- TRUE; i <- i+1 } else if (a == "--intraspecific-mode") { opts$intraspecific_mode <- TRUE; i <- i+1
-    } else if (a == "--focal-taxon" && i < length(raw_args)) { opts$focal_taxon <- raw_args[i+1]; i <- i+2 } else if (a == "--correct-allometry" && i < length(raw_args)) { opts$correct_allometry <- raw_args[i+1]; i <- i+2
-    } else if (a == "--allometry-report" && i < length(raw_args)) { opts$allometry_report <- raw_args[i+1]; i <- i+2 } else if (a == "--allometry-pairwise" && i < length(raw_args)) { opts$allometry_pairwise <- raw_args[i+1]; i <- i+2
-    } else if (a == "--allometry-plot" && i < length(raw_args)) { opts$allometry_plot <- raw_args[i+1]; i <- i+2 } else if (a %in% c("-f", "--output-flags") && i < length(raw_args)) { opts$output_flags <- raw_args[i+1]; i <- i+2
-    } else if (a %in% c("-p", "--output-plot") && i < length(raw_args)) { opts$output_plot <- raw_args[i+1]; i <- i+2 } else if (a %in% c("-r", "--output-report") && i < length(raw_args)) { opts$output_report <- raw_args[i+1]; i <- i+2
-    } else if (a %in% c("-b", "--output-batch-audit") && i < length(raw_args)) { opts$output_batch_audit <- raw_args[i+1]; i <- i+2 } else if (a %in% c("-k", "--max-k") && i < length(raw_args)) { opts$max_k <- as.integer(raw_args[i+1]); i <- i+2
-    } else if (a %in% c("-d", "--num-pcs") && i < length(raw_args)) { opts$num_pcs <- as.integer(raw_args[i+1]); i <- i+2 } else if (a == "--permutations" && i < length(raw_args)) { opts$permutations <- as.integer(raw_args[i+1]); i <- i+2
-    } else if (a == "--seed" && i < length(raw_args)) { opts$seed <- as.integer(raw_args[i+1]); i <- i+2 } else { i <- i+1 }
-  }
-  return(opts)
+  list(vouchers = "data/tables/curated_vouchers.csv", harmonics = "data/tables/leaf_efa_harmonics.csv", reproductive = "data/tables/voucher_reproductive_metrics.csv",
+       outline_only = FALSE, correct_allometry = "auto", allometry_report = "outputs/reports/allometry_significance_audit.csv",
+       allometry_pairwise = "outputs/reports/allometry_pairwise_trajectories.csv", allometry_plot = "outputs/figures/shape_allometry_regression.pdf",
+       use_clustvarsel = FALSE, output_flags = "data/tables/morphometric_flags.csv", output_plot = "outputs/figures/cda_passive_projection.pdf",
+       output_report = "outputs/reports/gmm_bayes_factors_summary.csv", output_batch_audit = "outputs/reports/institutional_batch_effect_audit.csv",
+       max_k = 8, num_pcs = 5, permutations = 999, seed = 42, intraspecific_mode = FALSE, focal_taxon = "")
 }
 
 # 2. Circular Phenology & Taxonomic Concept Standardization
@@ -177,9 +161,17 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   int_row <- anova_df[grepl("log_centsize:scientificName|scientificName:log_centsize", anova_df$Term, ignore.case = TRUE), ]
   r2_int <- if (nrow(int_row) > 0) int_row$R2[1] else 0.0
   p_int <- if (nrow(int_row) > 0 && !is.na(int_row$p_value[1])) int_row$p_value[1] else 1.0
-  correct_flag <- tolower(trimws(as.character(correct_mode))); slopes_homogeneous <- is.na(p_int) || (p_int > 0.05)
-  should_correct <- (correct_flag %in% c("true", "1", "yes")) || (correct_flag == "auto" && !is.na(r2_size) && r2_size >= r2_threshold && slopes_homogeneous)
   authority_weight <- gold_df$authority_weight; spatial_balance_weight <- gold_df$spatial_balance_weight; eff_weight <- authority_weight * spatial_balance_weight
+  # Test homogeneity of allometric slopes (PC ~ log_centsize * taxon, Klingenberg 2016) on weighted anchor vouchers
+  if (nlevels(gold_df$scientificName) >= 2 && "PC1" %in% names(gold_df)) {
+    pc_slope_fit <- tryCatch(stats::lm(PC1 ~ log_centsize * scientificName, data = gold_df, weights = eff_weight), error = function(e) NULL)
+    if (!is.null(pc_slope_fit) && is.na(p_int)) {
+      aov_pc <- stats::anova(pc_slope_fit); p_int <- aov_pc[["Pr(>F)"]][grep(":", rownames(aov_pc))[1]]
+    }
+  }
+  correct_flag <- tolower(trimws(as.character(correct_mode))); slopes_homogeneous <- is.na(p_int) || (p_int > 0.05)
+  message(sprintf("Klingenberg (2016) Homogeneity of Allometric Slopes (PC ~ log_centsize * taxon): R2_int = %.4f, p_int = %.4f (homogeneous = %s)", r2_int, p_int, slopes_homogeneous))
+  should_correct <- (correct_flag %in% c("true", "1", "yes")) || (correct_flag == "auto" && !is.na(r2_size) && r2_size >= r2_threshold && slopes_homogeneous)
   fit_within <- if (nlevels(gold_df$scientificName) >= 2) stats::lm(Y ~ log_centsize + scientificName, data = gold_df, weights = eff_weight) else stats::lm(Y ~ log_centsize, data = gold_df, weights = eff_weight)
   beta_within <- stats::coef(fit_within)["log_centsize", ]; beta_within[is.na(beta_within)] <- 0.0
   Y <- as.matrix(sub_df[, sym_names, drop = FALSE]); log_centsize <- sub_df$log_centsize
@@ -204,9 +196,26 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
 }
 evaluate_ontogenetic_allometry <- test_and_correct_allometry
 
-# ------------------------------------------------------------------------------
+# Subspace Selection: Horn's Parallel Analysis / Broken-Stick & Williams & Titus (1988) Rule (P <= floor(N_min / 3))
+select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L) {
+  M <- ncol(X); N <- nrow(X); if (M <= min_p) return(colnames(X))
+  pc_idx <- grep("^PC[0-9]+$", colnames(X))
+  if (length(pc_idx) >= 3L) {
+    v_obs <- apply(X[, pc_idx, drop = FALSE], 2, stats::var, na.rm = TRUE); v_prop <- v_obs / max(sum(v_obs), 1e-12)
+    k_m <- length(pc_idx); bs_prop <- sapply(seq_len(k_m), function(j) sum(1 / (j:k_m)) / k_m)
+    horn_thr <- (1 + sqrt(k_m / max(N, k_m + 1)))^2 / k_m
+    keep_pc <- which(v_prop >= pmin(bs_prop * 0.55, horn_thr * 0.55))
+    if (length(keep_pc) < min_p) keep_pc <- seq_len(min(min_p, k_m))
+    X <- X[, c(pc_idx[keep_pc], setdiff(seq_len(M), pc_idx)), drop = FALSE]
+  }
+  N_min <- if (!is.null(group_vec) && length(unique(stats::na.omit(group_vec))) >= 2) min(as.integer(table(droplevels(factor(group_vec))))) else N
+  P_max <- if (N_min >= 6L) max(min_p, floor(N_min / 3)) else ncol(X) # Williams & Titus (1988): P <= floor(N_min / 3)
+  sel <- colnames(X)[seq_len(min(ncol(X), P_max))]
+  message(sprintf("Subspace Selection (Horn Parallel Analysis / Broken-Stick & Williams & Titus 1988 P <= floor(N_min / 3)): retained P = %d / %d features (N_min = %d).", length(sel), M, N_min))
+  sel
+}
+
 # 3. Gaussian Mixture Modeling & Bayes Factor Testing (Seed = 42)
-# ------------------------------------------------------------------------------
 fit_gmm_em_pure <- function(X, max_k = 8, tol = 1e-5, max_iter = 150) {
   N <- nrow(X); p <- ncol(X); best_bic <- -Inf; best_model <- NULL
   bic_table <- data.frame(K = seq_len(max_k), LogLik = NA_real_, n_params = NA_integer_, BIC = NA_real_)
@@ -254,10 +263,10 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   }
   X <- as.matrix(df[valid_rows, feature_cols, drop = FALSE])
   for (j in seq_len(ncol(X))) if (any(is.na(X[, j]))) X[is.na(X[, j]), j] <- if (any(!is.na(X[, j]))) mean(X[, j], na.rm = TRUE) else 0.0
-  selected_cols <- colnames(X)
+  selected_cols <- select_morphometric_subspace(X); X <- X[, selected_cols, drop = FALSE]
   message(sprintf("Fitting Label-Blind Gaussian Mixture Models (K = 1 to %d, N = %d, seed = 42)...", max_k, N_valid))
   set.seed(42); best_k <- 1; best_name <- "Full_Covariance_EM"; bic_table <- NULL; cls_sub <- NULL; unc_sub <- NULL
-  X_mah <- X[, if (length(pc_guard_cols) > 0) pc_guard_cols else colnames(X), drop = FALSE]
+  X_mah <- X[, if (length(intersect(pc_guard_cols, colnames(X))) > 0) intersect(pc_guard_cols, colnames(X)) else colnames(X), drop = FALSE]
   rob_cov <- if (nrow(X) >= 30 && requireNamespace("MASS", quietly = TRUE)) tryCatch(MASS::cov.rob(X_mah), error = function(e) NULL) else NULL
   m_center <- if (!is.null(rob_cov)) rob_cov$center else colMeans(X_mah)
   m_cov <- if (!is.null(rob_cov)) rob_cov$cov else stats::cov(X_mah)
@@ -291,7 +300,8 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
     cls_sub <- pure_res$best$classification; unc_sub <- pure_res$best$uncertainty; bic_table <- pure_res$bic_table
   }
   cls <- rep(NA_integer_, nrow(df)); unc <- rep(NA_real_, nrow(df)); cls[valid_rows] <- cls_sub; unc[valid_rows] <- unc_sub
-  bic_table$Delta_BIC_prev <- c(0, diff(bic_table$BIC)); bic_table$Two_Delta_BIC <- round(bic_table$Delta_BIC_prev, 2)
+  # Kass & Raftery (1995) Bayes Factor thresholds (2 * delta_BIC >= 6 strong, >= 10 decisive)
+  delta_BIC <- c(0, diff(bic_table$BIC)); bic_table$Delta_BIC_prev <- delta_BIC; bic_table$Two_Delta_BIC <- round(delta_BIC, 2)
   bic_table$BayesFactor_vs_Null <- round(bic_table$BIC - bic_table$BIC[1], 2)
   bic_table$Evidence <- sapply(bic_table$Two_Delta_BIC, function(val) {
     if (is.na(val) || val < 0) return("Negative (favors K-1)")
@@ -345,8 +355,10 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
       is_train_cand <- if (all(table(factor(df$grouping_col[fallback_cand], levels = target_taxa)) >= 2)) fallback_cand else (df$grouping_col %in% target_taxa & has_pcs)
     }
   }
-  X <- as.matrix(df[, feature_cols, drop = FALSE]); p <- ncol(X)
-  for (j in seq_len(p)) if (any(is.na(X[, j]))) X[is.na(X[, j]), j] <- if (any(!is.na(X[, j]))) mean(X[, j], na.rm = TRUE) else 0.0
+  X_full <- as.matrix(df[, feature_cols, drop = FALSE])
+  for (j in seq_len(ncol(X_full))) if (any(is.na(X_full[, j]))) X_full[is.na(X_full[, j]), j] <- if (any(!is.na(X_full[, j]))) mean(X_full[, j], na.rm = TRUE) else 0.0
+  feature_cols <- select_morphometric_subspace(X_full[is_train_cand, , drop = FALSE], group_vec = df$grouping_col[is_train_cand])
+  X <- X_full[, feature_cols, drop = FALSE]; p <- ncol(X)
   for (grp in target_taxa) {
     cand_k <- which(is_train_cand & df$grouping_col == grp); n_k <- length(cand_k)
     if (n_k >= 6) {
@@ -396,7 +408,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     na_mask <- is.na(X_proj[, col_idx]); if (any(na_mask)) X_proj[na_mask, col_idx] <- grand_mean[col_idx]
   }
   Z_all <- t(t(X_proj) - grand_mean) %*% eig_vecs; canonical_centroids <- t(t(group_means) - grand_mean) %*% eig_vecs
-  priors <- rep(1.0 / g, g); post_probs <- matrix(0, nrow(df), g, dimnames = list(NULL, g_levels))
+  priors <- rep(1/g, g); post_probs <- matrix(0, nrow(df), g, dimnames = list(NULL, g_levels))
   for (k in seq_along(g_levels)) {
     diff_z <- t(t(Z_all) - canonical_centroids[k, ]); post_probs[, k] <- log(priors[k]) - 0.5 * rowSums(diff_z^2)
   }
@@ -407,20 +419,16 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   posterior_margin <- posterior_prob - second_posterior_prob
   orth_against <- function(vec, basis_mat) {
     v <- as.numeric(vec) - mean(vec, na.rm = TRUE)
-    for (b_col in seq_len(ncol(basis_mat))) {
-      b <- as.numeric(basis_mat[, b_col]); v <- v - (sum(v * b, na.rm = TRUE) / max(sum(b^2, na.rm = TRUE), 1e-12)) * b
-    }
+    for (b_col in seq_len(ncol(basis_mat))) { b <- as.numeric(basis_mat[, b_col]); v <- v - (sum(v * b, na.rm = TRUE) / max(sum(b^2, na.rm = TRUE), 1e-12)) * b }
     v
   }
   if (ncol(Z_all) == 1L) {
-    src1 <- if ("PC1" %in% colnames(X_proj)) X_proj[, "PC1"] else X_proj[, 1]
-    can2_v <- orth_against(src1, Z_all)
+    src1 <- if ("PC1" %in% colnames(X_proj)) X_proj[, "PC1"] else X_proj[, 1]; can2_v <- orth_against(src1, Z_all)
     if (stats::sd(can2_v, na.rm = TRUE) < 1e-8 && ncol(X_proj) >= 2) can2_v <- orth_against(X_proj[, 2], Z_all)
     Z_all <- cbind(Z_all, can2_v)
   }
   if (ncol(Z_all) == 2L) {
-    src3 <- if ("PC3" %in% colnames(X_proj)) X_proj[, "PC3"] else if ("PC2" %in% colnames(X_proj)) X_proj[, "PC2"] else X_proj[, min(3L, ncol(X_proj))]
-    can3_v <- orth_against(src3, Z_all)
+    src3 <- if ("PC3" %in% colnames(X_proj)) X_proj[, "PC3"] else if ("PC2" %in% colnames(X_proj)) X_proj[, "PC2"] else X_proj[, min(3L, ncol(X_proj))]; can3_v <- orth_against(src3, Z_all)
     if (stats::sd(can3_v, na.rm = TRUE) < 1e-8 && ncol(X_proj) >= 2) can3_v <- orth_against(X_proj[, 2], Z_all)
     Z_all <- cbind(Z_all, can3_v)
   }
@@ -510,12 +518,8 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
 
 # 6. Publication-Quality 2D CDA & 2D GMM Biplot Vector Graphic (PDF)
 generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL) {
-  if (!exists("render_cda_biplot_4panel_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
-    source("scripts/morphometrics/pub_figures_utils.R")
-  }
-  if (exists("render_cda_biplot_4panel_pdf", mode = "function")) {
-    render_cda_biplot_4panel_pdf(audit_df, cda_res, gmm_res, output_pdf, feature_cols)
-  }
+  if (!exists("render_cda_biplot_4panel_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+  if (exists("render_cda_biplot_4panel_pdf", mode = "function")) render_cda_biplot_4panel_pdf(audit_df, cda_res, gmm_res, output_pdf, feature_cols)
   message("CDA biplot graphic successfully saved to ", output_pdf)
 }
 
@@ -544,13 +548,8 @@ run_gmm_morphotools_pipeline <- function(opts) {
     meta_cols <- setdiff(names(closed_df), c(num_cols, "catalogNumber", "plant_individual_id", "shape_id", "leaf_id", "mask_source", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source"))
     grp_list <- split(closed_df, list(closed_df$catalogNumber, closed_df$plant_individual_id), drop = TRUE)
     closed_df <- do.call(rbind, lapply(grp_list, function(grp) {
-      n_t1 <- sum(grp$assigned_tier == "Tier_1_Direct", na.rm = TRUE)
-      n_t2 <- sum(grp$assigned_tier == "Tier_2_Reflected", na.rm = TRUE)
-      if (n_t1 >= 1L) {
-        grp <- grp[grp$assigned_tier == "Tier_1_Direct", , drop = FALSE]; m_src <- "Tier_1_Pure"
-      } else {
-        m_src <- "Tier_2_Fallback"
-      }
+      n_t1 <- sum(grp$assigned_tier == "Tier_1_Direct", na.rm = TRUE); n_t2 <- sum(grp$assigned_tier == "Tier_2_Reflected", na.rm = TRUE)
+      if (n_t1 >= 1L) { grp <- grp[grp$assigned_tier == "Tier_1_Direct", , drop = FALSE]; m_src <- "Tier_1_Pure" } else { m_src <- "Tier_2_Fallback" }
       leaf_quality_weight <- if (has_w) suppressWarnings(as.numeric(grp$leaf_quality_weight)) else rep(1.0, nrow(grp))
       leaf_quality_weight[is.na(leaf_quality_weight) | leaf_quality_weight <= 0] <- 1.0
       is_contour_outlier <- if ("is_contour_outlier" %in% names(grp)) as.logical(grp$is_contour_outlier) else rep(FALSE, nrow(grp)); is_contour_outlier[is.na(is_contour_outlier)] <- FALSE
