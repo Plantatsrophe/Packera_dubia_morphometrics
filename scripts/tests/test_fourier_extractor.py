@@ -236,6 +236,7 @@ class TestFourierExtractor(unittest.TestCase):
             write_contour_csv(contours_dir / "S2_leaf1.csv", "S2", 1, 100.0, 28.0, -0.22)
             write_contour_csv(contours_dir / "B1_leaf1.csv", "B1", 1, 88.0, 40.0, 0.05)
             write_contour_csv(contours_dir / "T2_ONLY_leaf1.csv", "T2_ONLY", 1, 80.0, 50.0, 0.10)
+            write_contour_csv(contours_dir / "EXCL_PLAT_leaf1.csv", "EXCL_PLAT", 1, 85.0, 45.0, 0.08)
 
             manifest_rows = [
                 {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.95, "ucs_score": 0.95, "contour_path": str(contours_dir / "G1_leaf1.csv")},
@@ -248,6 +249,7 @@ class TestFourierExtractor(unittest.TestCase):
                 {"catalogNumber": "S2", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.90, "ucs_score": 0.90, "contour_path": str(contours_dir / "S2_leaf1.csv")},
                 {"catalogNumber": "B1", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.91, "ucs_score": 0.91, "contour_path": str(contours_dir / "B1_leaf1.csv")},
                 {"catalogNumber": "T2_ONLY", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_2_Reflected", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.89, "ucs_score": 0.89, "contour_path": str(contours_dir / "T2_ONLY_leaf1.csv")},
+                {"catalogNumber": "EXCL_PLAT", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.94, "ucs_score": 0.94, "contour_path": str(contours_dir / "EXCL_PLAT_leaf1.csv")},
             ]
             pd.DataFrame(manifest_rows).to_csv(manifest_csv, index=False)
 
@@ -279,10 +281,14 @@ class TestFourierExtractor(unittest.TestCase):
 
             spec1, ind1 = run_step03("run1")
 
-            # 1. Only intact Tier_1_Direct contours enter leaf_efa_harmonics.csv
+            # 1. Only intact Tier_1_Direct contours present in vouchers_df enter leaf_efa_harmonics.csv
             self.assertTrue((ind1["assigned_tier"] == "Tier_1_Direct").all(), "Only Tier_1_Direct leaves may enter individual EFA table.")
             self.assertTrue((spec1["assigned_tier"] == "Tier_1_Direct").all(), "Only Tier_1_Direct leaves may enter specimen EFA table.")
             self.assertNotIn("T2_ONLY", set(spec1["catalogNumber"]), "Tier_2_Reflected-only specimen must not enter EFA table.")
+            self.assertNotIn("EXCL_PLAT", set(ind1["catalogNumber"]), "Excluded taxon absent from vouchers_df must not be ingested into individual EFA table.")
+            self.assertNotIn("EXCL_PLAT", set(spec1["catalogNumber"]), "Excluded taxon absent from vouchers_df must not enter specimen EFA table.")
+            pub_utils_content = (PROJECT_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R").read_text(encoding="utf-8")
+            self.assertNotIn("if (length(disp_tx) < 4) disp_tx <- unique(c(disp_tx, focal_4))[1:4]", pub_utils_content)
             self.assertEqual(int(spec1.loc[spec1["catalogNumber"] == "G1", "n_tier2_leaves"].iloc[0]), 0)
 
             # 2. Unweighted coordinate-wise median per harmonic coefficient for G1

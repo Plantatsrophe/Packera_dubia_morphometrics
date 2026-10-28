@@ -302,9 +302,7 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
     t_idx <- which(out_df$assigned_tier %in% c("Tier_1_Direct", "Tier_2_Reflected"))
     if (length(t_idx) >= 4 && length(unique(out_df$assigned_tier[t_idx])) >= 2) {
       set.seed(seed)
-      if (length(t_idx) > 1500) {
-        t_idx <- sort(sample(t_idx, 1500))
-      }
+      if (length(t_idx) > 1500) t_idx <- sort(sample(t_idx, 1500))
       sym_mat <- sym_mat[t_idx, , drop = FALSE]; tier_df <- out_df[t_idx, , drop = FALSE]
       permanova_res <- tryCatch(vegan::adonis2(sym_mat ~ assigned_tier, data = tier_df, permutations = permutations, method = "euclidean"), error = function(e) NULL)
     }
@@ -348,22 +346,23 @@ run_fourier_extraction <- function(opts) {
   message("==================================================================")
 
   vouchers_df <- if (file.exists(opts$vouchers)) read.csv(opts$vouchers, stringsAsFactors = FALSE) else NULL
-  sec_dup_cats <- character(0)
+  sec_dup_cats <- character(0); active_voucher_cats <- character(0)
   if (!is.null(vouchers_df)) {
     if ("is_primary_duplicate" %in% names(vouchers_df)) {
       is_sec <- toupper(trimws(as.character(vouchers_df$is_primary_duplicate))) %in% c("FALSE", "F", "0")
       sec_dup_cats <- unique(as.character(vouchers_df$catalogNumber[is_sec]))
       vouchers_df <- vouchers_df[!is_sec, , drop = FALSE]
     }
+    if ("catalogNumber" %in% names(vouchers_df)) active_voucher_cats <- unique(trimws(as.character(vouchers_df$catalogNumber)))
     message("Loaded ", nrow(vouchers_df), " curated primary voucher records.")
   }
 
   # 1. Discover coordinates via Dual Ingestion Engine
-  contour_files <- character(0)
-  use_masks_fallback <- FALSE
+  contour_files <- character(0); use_masks_fallback <- FALSE
   manifest_df <- if (file.exists(opts$manifest)) read.csv(opts$manifest, stringsAsFactors = FALSE) else NULL
-  if (!is.null(manifest_df) && length(sec_dup_cats) > 0 && "catalogNumber" %in% names(manifest_df)) {
-    manifest_df <- manifest_df[!as.character(manifest_df$catalogNumber) %in% sec_dup_cats, , drop = FALSE]
+  if (!is.null(manifest_df) && "catalogNumber" %in% names(manifest_df)) {
+    if (length(sec_dup_cats) > 0) manifest_df <- manifest_df[!as.character(manifest_df$catalogNumber) %in% sec_dup_cats, , drop = FALSE]
+    if (length(active_voucher_cats) > 0) manifest_df <- manifest_df[trimws(as.character(manifest_df$catalogNumber)) %in% active_voucher_cats, , drop = FALSE]
   }
 
   if (!is.null(manifest_df) && nrow(manifest_df) > 0) {
@@ -396,13 +395,13 @@ run_fourier_extraction <- function(opts) {
   # Deduplicate contour_files by canonical shape_id (stem) so duplicate manifest entries never collide
   shape_stems <- sub("\\.[^.]+$", "", basename(contour_files))
   contour_files <- contour_files[!duplicated(shape_stems, fromLast = TRUE)]
+  if (length(active_voucher_cats) > 0) contour_files <- contour_files[vapply(contour_files, function(f) trimws(as.character(parse_specimen_id(f)$catalogNumber)), character(1)) %in% active_voucher_cats]
 
   # 2. Build coordinate list and factor metadata for Momocs::Out()
   harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(opts$harmonics), function(x, y) paste0(x, y)))
 
   # Precompute O(1) lookup indices into manifest_df to avoid O(N^2) linear scans across 14,000+ leaves
-  manifest_by_basename <- NULL
-  manifest_by_cat_leaf <- NULL
+  manifest_by_basename <- NULL; manifest_by_cat_leaf <- NULL
   if (!is.null(manifest_df) && nrow(manifest_df) > 0) {
     if ("contour_path" %in% names(manifest_df)) {
       bnames <- basename(as.character(manifest_df$contour_path))
@@ -489,8 +488,8 @@ run_fourier_extraction <- function(opts) {
   coo_list <- lapply(valid_ingested, `[[`, "coo")
   shape_names_vec <- vapply(valid_ingested, `[[`, character(1), "shape_name")
 
-  # Ensure strict 1-to-1 uniqueness and restrict strictly to Tier 1 intact basal blades (no Tier 2 reflection or Tier 3 open curves)
-  keep_unique <- !duplicated(shape_names_vec, fromLast = TRUE) & !(as.character(fac_df$catalogNumber) %in% sec_dup_cats) & (fac_df$assigned_tier == "Tier_1_Direct")
+  # Ensure strict 1-to-1 uniqueness and restrict strictly to Tier 1 intact basal blades in vouchers_df
+  keep_unique <- !duplicated(shape_names_vec, fromLast = TRUE) & !(as.character(fac_df$catalogNumber) %in% sec_dup_cats) & (fac_df$assigned_tier == "Tier_1_Direct") & (length(active_voucher_cats) == 0L | trimws(as.character(fac_df$catalogNumber)) %in% active_voucher_cats)
   fac_df <- fac_df[keep_unique, , drop = FALSE]; coo_list <- coo_list[keep_unique]
   names(coo_list) <- shape_names_vec[keep_unique]; rownames(fac_df) <- names(coo_list)
   message(sprintf("Assembled %d valid Tier 1 intact closed contours for Elliptic Fourier Analysis.", length(coo_list)))

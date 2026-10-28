@@ -1,35 +1,17 @@
 #!/usr/bin/env Rscript
 # ==============================================================================
 # Script: scripts/analysis/08_discover_taxon_complexes.R
-# Project: Packera dubia Species Delimitation & Morphometrics Pipeline
-# Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
-#
+# Project: Packera dubia Species Delimitation & Morphometrics Pipeline (NCU)
 # Description:
 #   Unsupervised Quantitative Taxon-Complex Discovery & Integrative Delimitation
-#   Engine (Phase 08).
-#   1. Reliability-Weighted Taxon Affinity Matrix (W_ij): Fuses Morphospace
-#      Overlap (S^morph_ij) and Visual Confusion (S^vis_ij) weighted by out-of-fold
-#      Cohen's kappa (w_m = max(0.05, kappa_m)) on Tier_1_Pure Gold/Silver
-#      anchors with dynamic missing-modality renormalization (Dawid & Skene 1979;
-#      Kuncheva 2014).
-#   2. Hopkins-Corrected Circular Anthesis Phenology: Gates phenological
-#      divergence strictly on active anthesis (capitulum_phenology_classifier.py)
-#      and computes shortest-arc circular residuals (atan2) from a Hopkins
-#      bioclimatic model (sin_doy, cos_doy ~ decimalLatitude + elevation + bio1;
-#      Hopkins 1918; Pewsey et al. 2013) with Benjamini-Hochberg ("BH") FDR.
-#   3. Five-Stage Hierarchical Integrative Decision Matrix: Enforces strict
-#      precedence (Padial et al. 2010; Schlick-Steiner et al. 2010):
-#        Stage 1: Misidentification_Reassign (both_alt_agree BEFORE hybridity)
-#        Stage 2: Hybrid_Introgressant (inter-modal mosaicism or margin < 0.25;
-#                 Rieseberg 1995; Slenker et al. 2022)
-#        Stage 3: Putative_Cryptic_Species (Integration by Congruence:
-#                 cda_posterior_prob < 0.70, c_error < 0.75, morphometric outlier
-#                 or K > g with 2 * delta_BIC >= 6, plus |delta_doy_resid| >= 18 d
-#                 or D_edaph < 0.30)
-#        Stage 4: Subspecies_Ecotype vs. Ecophenotypic_Plasticity
-#        Stage 5: Confirmed_Species
-#   4. Unsupervised Graph Modularity (Leiden/Louvain) & Ward.D2 Clustering with
-#      ego-centric --auto-neighbors selection and offloaded publication figures.
+#   Engine (Phase 08): (1) Reliability-Weighted Taxon Affinity Matrix (W_ij) with
+#   out-of-fold Cohen's kappa weights (w_m = max(0.05, kappa_m)) and missing-
+#   modality renormalization; (2) Hopkins-Corrected Circular Anthesis Phenology
+#   with BH FDR; (3) 5-Stage Hierarchical Integrative Decision Matrix (Stage 1
+#   Misidentification_Reassign -> Stage 2 Hybrid_Introgressant -> Stage 3
+#   Putative_Cryptic_Species -> Stage 4 Subspecies_Ecotype/Plasticity -> Stage 5
+#   Confirmed_Species); and (4) Leiden/Louvain & Ward.D2 clustering across taxa
+#   or Taxon x Morphotype subclusters ('P. dubia [K1]', 'P. dubia [K2]', etc.).
 # ==============================================================================
 
 suppressPackageStartupMessages({
@@ -511,52 +493,34 @@ evaluate_hierarchical_complex_delimitation <- function(morph_df, vis_df, pheno_r
   inter_modal_mosaic <- morph_disagrees & vis_disagrees & (cda_pred != vis_pred)
   single_strong_reassign <- !inter_modal_mosaic & (
     (morph_disagrees & cda_prob >= 0.80 & (!vis_disagrees | cda_pred == vis_pred)) |
-    (vis_disagrees & c_err >= 0.85 & (!morph_disagrees | cda_pred == vis_pred))
-  )
-
+    (vis_disagrees & c_err >= 0.85 & (!morph_disagrees | cda_pred == vis_pred)))
   # Stage 1: Misidentification_Reassign (evaluated BEFORE hybridity)
   is_stage1_misid <- both_alt_agree | single_strong_reassign
   # Stage 2: Hybrid_Introgressant (Rieseberg 1995; Slenker et al. 2022)
-  is_stage2_hybrid <- !is_stage1_misid & (
-    inter_modal_mosaic | (cda_margin < 0.25 & (morph_disagrees | vis_disagrees) & d_edaph >= 0.30)
-  )
+  is_stage2_hybrid <- !is_stage1_misid & (inter_modal_mosaic | (cda_margin < 0.25 & (morph_disagrees | vis_disagrees) & d_edaph >= 0.30))
   # Stage 3: Putative_Cryptic_Species via Integration by Congruence (Padial et al. 2010)
   has_evol_barrier <- (!is.na(d_doy) & d_doy >= 18.0) | (d_edaph < 0.30)
-  is_stage3_cryptic <- !is_stage1_misid & !is_stage2_hybrid & is_t1_pure &
-    (cda_prob < 0.70) & (c_err < 0.75) &
-    (m_flag | (gmm_cl > length(unique(sp_given)) & gmm_bf >= 6.0)) &
-    has_evol_barrier
+  is_stage3_cryptic <- !is_stage1_misid & !is_stage2_hybrid & is_t1_pure & (cda_prob < 0.70) & (c_err < 0.75) &
+    (m_flag | (gmm_cl > length(unique(sp_given)) & gmm_bf >= 6.0)) & has_evol_barrier
   # Stage 4: Subspecies_Ecotype vs. Ecophenotypic_Plasticity
   is_stage4_ecotype <- !is_stage1_misid & !is_stage2_hybrid & !is_stage3_cryptic &
     ((d_edaph < 0.30) | (!is.na(d_doy) & d_doy >= 14.0)) & (m_flag | gmm_cl > 1L)
   is_stage4_plastic <- !is_stage1_misid & !is_stage2_hybrid & !is_stage3_cryptic & !is_stage4_ecotype & m_flag
 
-  ifelse(
-    is_stage1_misid, "Misidentification_Reassign",
-    ifelse(
-      is_stage2_hybrid, "Hybrid_Introgressant",
-      ifelse(
-        is_stage3_cryptic, "Putative_Cryptic_Species",
-        ifelse(
-          is_stage4_ecotype, "Subspecies_Ecotype",
-          ifelse(is_stage4_plastic, "Ecophenotypic_Plasticity", "Confirmed_Species")
-        )
-      )
-    )
-  )
+  ifelse(is_stage1_misid, "Misidentification_Reassign",
+    ifelse(is_stage2_hybrid, "Hybrid_Introgressant",
+      ifelse(is_stage3_cryptic, "Putative_Cryptic_Species",
+        ifelse(is_stage4_ecotype, "Subspecies_Ecotype",
+          ifelse(is_stage4_plastic, "Ecophenotypic_Plasticity", "Confirmed_Species")))))
 }
 
 # ------------------------------------------------------------------------------
 # 7. Step F: Consensus Affinity Matrix & Unsupervised Graph / Ward Partitioning
 # ------------------------------------------------------------------------------
-relabel_clusters_sequential <- function(cl_vec, taxa) {
-  u_ord <- unique(cl_vec[order(taxa)])
-  match(cl_vec, u_ord)
-}
+relabel_clusters_sequential <- function(cl_vec, taxa) match(cl_vec, unique(cl_vec[order(taxa)]))
 
 partition_taxon_complexes <- function(W, taxa, n_vouchers_vec, n_gs_vec) {
-  n_taxa <- length(taxa)
-  diag(W) <- 0.0
+  n_taxa <- length(taxa); diag(W) <- 0.0
   D_mat <- 1.0 - pmin(pmax(W, 0.0), 1.0); diag(D_mat) <- 0.0
   dist_obj <- stats::as.dist(D_mat)
 
@@ -566,30 +530,20 @@ partition_taxon_complexes <- function(W, taxa, n_vouchers_vec, n_gs_vec) {
   W_adj <- W; W_adj[W_adj < tau] <- 0.0
   for (i in seq_len(n_taxa)) {
     if (sum(W_adj[i, ] > 0) == 0L && max(W[i, ]) > 0) {
-      best_j <- which.max(W[i, ])
-      W_adj[i, best_j] <- W[i, best_j]; W_adj[best_j, i] <- W[best_j, i]
+      best_j <- which.max(W[i, ]); W_adj[i, best_j] <- W[i, best_j]; W_adj[best_j, i] <- W[best_j, i]
     }
   }
 
-  leiden_comm <- rep(1L, n_taxa)
-  best_mod <- -Inf
+  leiden_comm <- rep(1L, n_taxa); best_mod <- -Inf
   if (requireNamespace("igraph", quietly = TRUE) && sum(W_adj > 0) > 0) {
     g <- igraph::graph_from_adjacency_matrix(W_adj, mode = "undirected", weighted = TRUE, diag = FALSE)
     for (gm in c(0.6, 0.8, 1.0, 1.2)) {
-      cl_try <- tryCatch(
-        suppressWarnings(igraph::cluster_leiden(g, objective_function = "modularity", weights = igraph::E(g)$weight, resolution = gm, n_iterations = 10)),
-        error = function(e) tryCatch(
-          suppressWarnings(igraph::cluster_leiden(g, objective_function = "modularity", weights = igraph::E(g)$weight, resolution_parameter = gm, n_iterations = 10)),
-          error = function(e2) NULL
-        )
-      )
+      cl_try <- tryCatch(suppressWarnings(igraph::cluster_leiden(g, objective_function = "modularity", weights = igraph::E(g)$weight, resolution = gm, n_iterations = 10)),
+        error = function(e) tryCatch(suppressWarnings(igraph::cluster_leiden(g, objective_function = "modularity", weights = igraph::E(g)$weight, resolution_parameter = gm, n_iterations = 10)), error = function(e2) NULL))
       if (!is.null(cl_try)) {
-        memb <- as.integer(igraph::membership(cl_try))
-        k_m <- length(unique(memb))
+        memb <- as.integer(igraph::membership(cl_try)); k_m <- length(unique(memb))
         q_val <- tryCatch(igraph::modularity(g, memb, weights = igraph::E(g)$weight), error = function(e) -1.0)
-        if (k_m >= 2L && k_m <= min(8L, n_taxa - 1L) && is.finite(q_val) && q_val > best_mod) {
-          best_mod <- q_val; leiden_comm <- memb
-        }
+        if (k_m >= 2L && k_m <= min(8L, n_taxa - 1L) && is.finite(q_val) && q_val > best_mod) { best_mod <- q_val; leiden_comm <- memb }
       }
     }
     if (length(unique(leiden_comm)) < 2L) {
@@ -599,16 +553,12 @@ partition_taxon_complexes <- function(W, taxa, n_vouchers_vec, n_gs_vec) {
   }
   leiden_comm <- relabel_clusters_sequential(leiden_comm, taxa)
 
-  hc <- stats::hclust(dist_obj, method = "ward.D2")
-  k_max <- min(8L, n_taxa - 1L)
+  hc <- stats::hclust(dist_obj, method = "ward.D2"); k_max <- min(8L, n_taxa - 1L)
   ward_cluster <- rep(1L, n_taxa); best_sil_mean <- -Inf; best_sil_vec <- rep(0.0, n_taxa)
   if (n_taxa >= 3L && k_max >= 2L) {
     k_candidates <- 2L:k_max
-    sil_scores <- vapply(k_candidates, function(kv) {
-      mean(cluster::silhouette(stats::cutree(hc, k = kv), dist_obj)[, "sil_width"], na.rm = TRUE)
-    }, numeric(1))
-    best_idx <- which.max(sil_scores)
-    best_k <- k_candidates[best_idx]; best_sil_mean <- sil_scores[best_idx]
+    sil_scores <- vapply(k_candidates, function(kv) mean(cluster::silhouette(stats::cutree(hc, k = kv), dist_obj)[, "sil_width"], na.rm = TRUE), numeric(1))
+    best_idx <- which.max(sil_scores); best_k <- k_candidates[best_idx]; best_sil_mean <- sil_scores[best_idx]
     ward_cluster <- relabel_clusters_sequential(as.integer(stats::cutree(hc, k = best_k)), taxa)
     best_sil_vec <- as.numeric(cluster::silhouette(ward_cluster, dist_obj)[, "sil_width"])
   }
@@ -616,70 +566,110 @@ partition_taxon_complexes <- function(W, taxa, n_vouchers_vec, n_gs_vec) {
   leiden_sil_mean <- -Inf; leiden_sil_vec <- best_sil_vec
   if (length(unique(leiden_comm)) >= 2L && length(unique(leiden_comm)) < n_taxa) {
     l_sil <- cluster::silhouette(leiden_comm, dist_obj)
-    leiden_sil_mean <- mean(l_sil[, "sil_width"], na.rm = TRUE)
-    leiden_sil_vec <- as.numeric(l_sil[, "sil_width"])
+    leiden_sil_mean <- mean(l_sil[, "sil_width"], na.rm = TRUE); leiden_sil_vec <- as.numeric(l_sil[, "sil_width"])
   }
-
-  if (leiden_sil_mean > best_sil_mean + 0.02) {
-    complex_id <- leiden_comm; sil_width_vec <- leiden_sil_vec
-  } else {
-    complex_id <- ward_cluster; sil_width_vec <- best_sil_vec
-  }
+  if (leiden_sil_mean > best_sil_mean + 0.02) { complex_id <- leiden_comm; sil_width_vec <- leiden_sil_vec }
+  else { complex_id <- ward_cluster; sil_width_vec <- best_sil_vec }
   complex_id <- relabel_clusters_sequential(complex_id, taxa)
 
-  complex_labels <- character(n_taxa)
-  deg_vec <- rowSums(W)
+  complex_labels <- character(n_taxa); deg_vec <- rowSums(W)
   for (cid in sort(unique(complex_id))) {
     m_idx <- which(complex_id == cid)
     ord <- m_idx[order(-deg_vec[m_idx], -n_vouchers_vec[m_idx], taxa[m_idx])]
-    top_ep <- sub("^Packera\\s+", "", taxa[ord[seq_len(min(2L, length(ord)))]])
+    top_ep <- gsub("\\s*\\[K([0-9]+)\\]", "_K\\1", sub("^(?:Packera|P\\.)\\s+", "", taxa[ord[seq_len(min(2L, length(ord)))]]))
     complex_labels[m_idx] <- paste0("Complex_", cid, "_", paste(top_ep, collapse = "_"))
   }
 
-  top_n1 <- character(n_taxa); top_a1 <- numeric(n_taxa)
-  top_n2 <- character(n_taxa); top_a2 <- numeric(n_taxa)
-  within_mean_aff <- numeric(n_taxa)
+  top_n1 <- character(n_taxa); top_a1 <- numeric(n_taxa); top_n2 <- character(n_taxa); top_a2 <- numeric(n_taxa); within_mean_aff <- numeric(n_taxa)
   for (i in seq_len(n_taxa)) {
-    w_row <- W[i, ]; w_row[i] <- -1.0
-    ord_n <- order(w_row, decreasing = TRUE)
-    top_n1[i] <- if (length(ord_n) >= 1L) taxa[ord_n[1L]] else ""
-    top_a1[i] <- if (length(ord_n) >= 1L) round(max(0.0, W[i, ord_n[1L]]), 4) else 0.0
-    top_n2[i] <- if (length(ord_n) >= 2L) taxa[ord_n[2L]] else ""
-    top_a2[i] <- if (length(ord_n) >= 2L) round(max(0.0, W[i, ord_n[2L]]), 4) else 0.0
+    w_row <- W[i, ]; w_row[i] <- -1.0; ord_n <- order(w_row, decreasing = TRUE)
+    top_n1[i] <- if (length(ord_n) >= 1L) taxa[ord_n[1L]] else ""; top_a1[i] <- if (length(ord_n) >= 1L) round(max(0.0, W[i, ord_n[1L]]), 4) else 0.0
+    top_n2[i] <- if (length(ord_n) >= 2L) taxa[ord_n[2L]] else ""; top_a2[i] <- if (length(ord_n) >= 2L) round(max(0.0, W[i, ord_n[2L]]), 4) else 0.0
     peers_i <- which(complex_id == complex_id[i] & seq_len(n_taxa) != i)
     within_mean_aff[i] <- if (length(peers_i) > 0L) round(mean(W[i, peers_i], na.rm = TRUE), 4) else 0.0
   }
 
   complexes_df <- data.frame(
-    species_standardized         = taxa,
-    taxon                        = taxa,
-    n_vouchers                   = as.integer(n_vouchers_vec[taxa]),
-    n_gold_silver_anchors        = as.integer(n_gs_vec[taxa]),
-    n_Pure_Gold_Silver           = as.integer(n_gs_vec[taxa]),
-    complex_id                   = as.integer(complex_id),
-    consensus_complex_id         = as.integer(complex_id),
-    complex_label                = complex_labels,
-    leiden_community             = as.integer(leiden_comm),
-    leiden_complex_id            = as.integer(leiden_comm),
-    ward_silhouette_cluster      = as.integer(ward_cluster),
-    ward_complex_id              = as.integer(ward_cluster),
-    silhouette_width             = round(sil_width_vec, 4),
-    within_complex_mean_affinity = within_mean_aff,
-    top_neighbor_1               = top_n1,
-    nearest_neighbor_taxon       = top_n1,
-    top_neighbor_1_affinity      = top_a1,
-    nearest_neighbor_affinity    = top_a1,
-    top_neighbor_2               = top_n2,
-    top_neighbor_2_affinity      = top_a2,
-    stringsAsFactors             = FALSE
+    species_standardized = taxa, taxon = taxa,
+    n_vouchers = as.integer(n_vouchers_vec[taxa]), n_gold_silver_anchors = as.integer(n_gs_vec[taxa]), n_Pure_Gold_Silver = as.integer(n_gs_vec[taxa]),
+    complex_id = as.integer(complex_id), consensus_complex_id = as.integer(complex_id), complex_label = complex_labels,
+    leiden_community = as.integer(leiden_comm), leiden_complex_id = as.integer(leiden_comm),
+    ward_silhouette_cluster = as.integer(ward_cluster), ward_complex_id = as.integer(ward_cluster),
+    silhouette_width = round(sil_width_vec, 4), within_complex_mean_affinity = within_mean_aff,
+    top_neighbor_1 = top_n1, nearest_neighbor_taxon = top_n1, top_neighbor_1_affinity = top_a1, nearest_neighbor_affinity = top_a1,
+    top_neighbor_2 = top_n2, top_neighbor_2_affinity = top_a2, stringsAsFactors = FALSE
   )
-
   list(complexes_df = complexes_df, hc = hc, dist_obj = dist_obj)
 }
 
 # ------------------------------------------------------------------------------
-# 8. Step G: Offloaded 2-Panel Publication Figure Wrapper
+# 8. Step G: Taxon x Morphotype Subcluster Builder & Publication Figure Wrapper
 # ------------------------------------------------------------------------------
+build_taxon_morphotype_subclusters <- function(morph_df, vis_df = NULL, min_vouchers = 5L) {
+  raw_sp <- as.character(morph_df$species_standardized)
+  u_sp <- sort(unique(raw_sp[!is.na(raw_sp) & nzchar(raw_sp)]))
+  n_sp <- length(u_sp)
+  has_gmm <- "gmm_cluster" %in% names(morph_df) && length(unique(stats::na.omit(morph_df$gmm_cluster))) >= 2L
+  within_sp_gmm <- if (has_gmm) any(vapply(u_sp, function(sp) {
+    ks <- stats::na.omit(as.integer(morph_df$gmm_cluster[raw_sp == sp]))
+    length(unique(ks)) >= 2L && sum(table(ks) >= min_vouchers) >= 2L
+  }, logical(1))) else FALSE
+  if (n_sp > 2L && !within_sp_gmm) return(list(morph_df = morph_df, vis_df = vis_df, subcluster_mode = FALSE))
+
+  k_vec <- if (has_gmm) ifelse(is.na(morph_df$gmm_cluster), 1L, as.integer(morph_df$gmm_cluster)) else rep(1L, nrow(morph_df))
+  short_sp <- sub("^Packera\\s+", "P. ", raw_sp)
+  cand_lbl <- sprintf("%s [K%d]", short_sp, k_vec)
+  if (sum(table(cand_lbl) >= min_vouchers) < 3L && nrow(morph_df) >= 3L * min_vouchers) {
+    fcols <- extract_morph_feature_cols(morph_df)
+    X_m <- scale(as.matrix(morph_df[, fcols, drop = FALSE])); X_m[!is.finite(X_m)] <- 0.0
+    for (sp in u_sp) {
+      idx_s <- which(raw_sp == sp)
+      k_s <- if (n_sp == 1L) min(3L, max(2L, floor(length(idx_s) / min_vouchers))) else min(2L, max(1L, floor(length(idx_s) / min_vouchers)))
+      if (k_s >= 2L && length(unique(k_vec[idx_s])) < k_s) {
+        km <- tryCatch(stats::kmeans(X_m[idx_s, , drop = FALSE], centers = k_s, nstart = 10L), error = function(e) NULL)
+        if (!is.null(km)) k_vec[idx_s] <- as.integer(km$cluster)
+      }
+    }
+    cand_lbl <- sprintf("%s [K%d]", short_sp, k_vec)
+  }
+  tab_c <- table(cand_lbl)
+  valid_c <- names(tab_c)[tab_c >= min_vouchers]
+  if (length(valid_c) < 2L) valid_c <- names(tab_c)[tab_c >= max(1L, min(tab_c))]
+  keep_m <- cand_lbl %in% valid_c
+  morph_df <- morph_df[keep_m, , drop = FALSE]
+  morph_df$base_species <- raw_sp[keep_m]
+  morph_df$species_standardized <- cand_lbl[keep_m]
+  if ("cda_predicted_taxon" %in% names(morph_df)) {
+    cp <- std_taxon(morph_df$cda_predicted_taxon); cp_short <- sub("^Packera\\s+", "P. ", cp)
+    morph_df$cda_predicted_taxon <- vapply(seq_len(nrow(morph_df)), function(i) {
+      if (!is.na(cp[i]) && cp[i] %in% valid_c) return(cp[i])
+      if (!is.na(cp[i]) && cp[i] == morph_df$base_species[i]) return(morph_df$species_standardized[i])
+      m_alt <- valid_c[startsWith(valid_c, paste0(cp_short[i], " ["))]
+      if (length(m_alt) > 0L) m_alt[1L] else morph_df$species_standardized[i]
+    }, character(1))
+  }
+  if (!is.null(vis_df) && nrow(vis_df) > 0L && "key" %in% names(vis_df)) {
+    vis_df <- vis_df[vis_df$key %in% morph_df$key, , drop = FALSE]
+    if (nrow(vis_df) > 0L) {
+      key_map <- stats::setNames(morph_df$species_standardized, morph_df$key)
+      base_map <- stats::setNames(morph_df$base_species, morph_df$key)
+      vis_df$species_standardized <- unname(key_map[vis_df$key])
+      if ("vision_predicted_label" %in% names(vis_df)) {
+        vp <- std_taxon(vis_df$vision_predicted_label); vp_short <- sub("^Packera\\s+", "P. ", vp)
+        vis_df$vision_predicted_label <- vapply(seq_len(nrow(vis_df)), function(i) {
+          if (!is.na(vp[i]) && vp[i] %in% valid_c) return(vp[i])
+          if (!is.na(vp[i]) && vp[i] == unname(base_map[vis_df$key[i]])) return(vis_df$species_standardized[i])
+          m_alt <- valid_c[startsWith(valid_c, paste0(vp_short[i], " ["))]
+          if (length(m_alt) > 0L) m_alt[1L] else vis_df$species_standardized[i]
+        }, character(1))
+      }
+    }
+  }
+  message(sprintf("[Subcluster Mode] Built %d Taxon x Morphotype clusters (>= %d vouchers): %s",
+                  length(valid_c), min_vouchers, paste(valid_c, collapse = ", ")))
+  list(morph_df = morph_df, vis_df = vis_df, subcluster_mode = TRUE)
+}
+
 render_complex_discovery_figure <- function(W, part_res, morph_res, vis_res, out_pdf) {
   if (exists("render_step08_complex_discovery_pdf", mode = "function")) {
     return(render_step08_complex_discovery_pdf(W = W, part_res = part_res, out_pdf = out_pdf))
@@ -696,20 +686,21 @@ main <- function() {
   message("=== Phase 08: Unsupervised Quantitative Taxon-Complex Discovery Engine ===")
 
   inputs <- load_and_merge_inputs(opts)
-  morph_df <- inputs$morph_df
-  vis_df <- inputs$vis_df
+  sub_res <- build_taxon_morphotype_subclusters(inputs$morph_df, inputs$vis_df, min_vouchers = 5L)
+  morph_df <- sub_res$morph_df
+  vis_df <- sub_res$vis_df
 
   taxa <- sort(unique(morph_df$species_standardized))
   n_taxa <- length(taxa)
   if (n_taxa < 2L) {
-    stop("At least 2 distinct Packera taxa are required for taxon-complex discovery (found ", n_taxa, ").")
+    stop("At least 2 distinct Packera taxa or morphotype clusters are required for discovery (found ", n_taxa, ").")
   }
 
   n_vouchers_vec <- table(morph_df$species_standardized)[taxa]
   anc <- select_taxon_anchors(morph_df)
   kappa_wts <- compute_modality_kappa_weights(morph_df, vis_df, anc$anchor_mask)
   message(sprintf(
-    "Evaluated %d vouchers across %d Packera taxa (%d Tier_1_Pure Gold/Silver anchors; kappa weights: morph=%.3f, vis=%.3f).",
+    "Evaluated %d vouchers across %d Packera groups (%d Tier_1_Pure Gold/Silver anchors; kappa weights: morph=%.3f, vis=%.3f).",
     nrow(morph_df), n_taxa, nrow(anc$anchor_df), kappa_wts$w_morph, kappa_wts$w_vis
   ))
 
@@ -762,12 +753,15 @@ main <- function() {
   focal_raw <- trimws(as.character(opts$focal_taxon))
   if (nzchar(focal_raw)) {
     focal_std <- std_taxon(focal_raw)
-    if (focal_std %in% taxa) {
+    focal_short <- sub("^Packera\\s+", "P. ", focal_std)
+    focal_nodes <- taxa[taxa == focal_std | startsWith(taxa, paste0(focal_short, " ["))]
+    if (length(focal_nodes) > 0L) {
       cdf <- part_res$complexes_df
-      focal_cid <- cdf$complex_id[cdf$species_standardized == focal_std][1L]
-      same_complex <- cdf$species_standardized[cdf$complex_id == focal_cid]
-      aff_neighbors <- taxa[(morph_res$C_morph_sym[focal_std, ] >= opts$min_affinity) | (vis_res$S_vis[focal_std, ] >= opts$min_affinity)]
-      selected_neighbors <- sort(setdiff(union(same_complex, aff_neighbors), focal_std))
+      focal_cids <- unique(cdf$complex_id[cdf$species_standardized %in% focal_nodes])
+      same_complex <- cdf$species_standardized[cdf$complex_id %in% focal_cids]
+      aff_mask <- apply(morph_res$C_morph_sym[focal_nodes, , drop = FALSE] >= opts$min_affinity |
+                        vis_res$S_vis[focal_nodes, , drop = FALSE] >= opts$min_affinity, 2, any)
+      selected_neighbors <- sort(setdiff(union(same_complex, taxa[aff_mask]), focal_nodes))
     } else selected_neighbors <- character(0)
     atomic_write_lines(selected_neighbors, opts$output_neighbors)
     message("Saved focal auto-neighbors (", length(selected_neighbors), " taxa) -> ", opts$output_neighbors)

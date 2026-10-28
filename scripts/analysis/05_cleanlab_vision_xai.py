@@ -616,7 +616,7 @@ def compute_vit_patch_saliency(img_arr: np.ndarray, model: Any, classifier: Opti
     return (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
 
 
-def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_samples: int = 8, model: Optional[Any] = None, classifier: Optional[Any] = None, model_name: str = "dinov2_vitb14_reg", device: str = "cuda" if torch.cuda.is_available() else "cpu", demo: bool = False, class_names: Optional[List[str]] = None) -> None:
+def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_samples: int = 8, model: Optional[Any] = None, classifier: Optional[Any] = None, model_name: str = "dinov2_vitb14_reg", device: str = "cuda" if torch.cuda.is_available() else "cpu", demo: bool = False, class_names: Optional[List[str]] = None, active_taxa: Optional[List[str]] = None) -> None:
     """Renders multi-panel diagnostic figure with 224x224 ViT patch attribution & foreground ratio."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -629,6 +629,8 @@ def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_s
     samples = dedup_records[:max_samples]
     if not samples:
         return
+    obs_taxa = {standardize_packera_taxon(str(r.get(k, ""))) for r in flagged_records for k in ("taxon", "species_standardized", "given_label", "species_raw", "predicted_taxon", "predicted_label", "vision_predicted_label") if r.get(k) and _is_valid_packera_taxon(standardize_packera_taxon(str(r.get(k, ""))))}
+    active_taxa = [t for t in (active_taxa or class_names or []) if _is_valid_packera_taxon(t)] or ([t for t in TARGET_TAXA if t in obs_taxa] + sorted(t for t in obs_taxa if t not in TARGET_TAXA)) or ["Packera dubia"]
     if model is None:
         last_err = None
         for cand in (model_name, "dinov2_vitb14"):
@@ -655,12 +657,12 @@ def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_s
         else:
             raise RuntimeError(f"Missing patch image at '{img_path}'.")
         fg_mask, _ = compute_foreground_tissue_mask(img_arr, grid_size=(16, 16))
-        rec_taxon = standardize_packera_taxon(str(rec.get("taxon", rec.get("species_standardized", rec.get("given_label", "Packera dubia")))))
-        pred_taxon = standardize_packera_taxon(str(rec.get("predicted_taxon", rec.get("predicted_label", "Packera anonyma"))))
-        panel_taxa = list(class_names) if class_names else list(TARGET_TAXA)
-        if pred_taxon and pred_taxon not in panel_taxa and _is_valid_packera_taxon(pred_taxon):
-            panel_taxa.append(pred_taxon)
-        target_cls_idx = panel_taxa.index(pred_taxon) if pred_taxon in panel_taxa else (TARGET_TAXA.index(pred_taxon) if pred_taxon in TARGET_TAXA else rec.get("label_idx"))
+        rec_taxon = standardize_packera_taxon(str(rec.get("taxon", rec.get("species_standardized", rec.get("given_label", active_taxa[0])))))
+        rec_taxon = rec_taxon if _is_valid_packera_taxon(rec_taxon) else active_taxa[0]
+        raw_pred = rec.get("predicted_taxon", rec.get("predicted_label", rec.get("vision_predicted_label", rec_taxon)))
+        pred_taxon = standardize_packera_taxon(str(raw_pred)) if raw_pred else rec_taxon
+        pred_taxon = pred_taxon if pred_taxon in active_taxa else (rec_taxon if rec_taxon in active_taxa else active_taxa[0])
+        target_cls_idx = active_taxa.index(pred_taxon) if pred_taxon in active_taxa else int(rec.get("label_idx", 0) or 0)
         heatmap = compute_vit_patch_saliency(img_arr, model=model, classifier=classifier, target_class_idx=target_cls_idx, device=device)
         fg_ratio = compute_foreground_attention_ratio(heatmap, fg_mask)
         rec["foreground_attention_ratio"] = round(fg_ratio, 4)
@@ -673,13 +675,15 @@ def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_s
         axes[idx, 1].imshow(blended)
         axes[idx, 1].set_title(f"[2] 16x16 ViT Saliency (FG={fg_ratio:.2f})\nPredicted: {pred_taxon.replace('Packera ', 'P. ')} (c_err={c_err_val:.2f})", fontsize=8.8, fontweight="bold")
         axes[idx, 1].axis("off")
-        ax_bar, probs = axes[idx, 2], np.full(len(panel_taxa), (1.0 - conf_val) / max(len(panel_taxa) - 1, 1), dtype=float)
-        if pred_taxon in panel_taxa:
-            probs[panel_taxa.index(pred_taxon)] = conf_val
-        probs, y_pos = probs / max(probs.sum(), 1e-8), np.arange(len(panel_taxa))
-        ax_bar.barh(y_pos, probs * 100.0, color=[OKABE_ITO.get(tx, "#0072B2") for tx in panel_taxa], edgecolor="#222222", height=0.58, alpha=0.88)
+        ax_bar = axes[idx, 2]
+        probs = np.array([float(np.clip(1.0 - c_err_val, 0.01, 0.99))], dtype=float) if len(active_taxa) == 1 else np.full(len(active_taxa), (1.0 - conf_val) / max(len(active_taxa) - 1, 1), dtype=float)
+        if len(active_taxa) > 1 and pred_taxon in active_taxa:
+            probs[active_taxa.index(pred_taxon)] = conf_val
+            probs = probs / max(probs.sum(), 1e-8)
+        y_pos = np.arange(len(active_taxa))
+        ax_bar.barh(y_pos, probs * 100.0, color=[OKABE_ITO.get(tx, "#0072B2") for tx in active_taxa], edgecolor="#222222", height=0.58, alpha=0.88)
         ax_bar.set_yticks(y_pos)
-        ax_bar.set_yticklabels([tx.replace("Packera ", "P. ") for tx in panel_taxa], fontsize=8.2, fontstyle="italic")
+        ax_bar.set_yticklabels([tx.replace("Packera ", "P. ") for tx in active_taxa], fontsize=8.2, fontstyle="italic")
         ax_bar.set_xlim(0, 112)
         ax_bar.invert_yaxis()
         ax_bar.set_title("[3] Calibrated Posteriors", fontsize=8.8, fontweight="bold")
@@ -706,7 +710,8 @@ def generate_step05_publication_figures(audit_df: pd.DataFrame, output_figure_pa
     sp_col, pred_col = ("species_standardized" if "species_standardized" in df.columns else "given_label"), ("predicted_label" if "predicted_label" in df.columns else "vision_predicted_label")
     df["taxon_clean"] = df.get(sp_col, pd.Series("Packera dubia", index=df.index)).astype(str).apply(standardize_packera_taxon)
     df["pred_clean"] = df.get(pred_col, df["taxon_clean"]).astype(str).apply(standardize_packera_taxon)
-    taxa_order = [t for t in TARGET_TAXA if (t in set(df["taxon_clean"]) or t in set(df["pred_clean"]))] or list(TARGET_TAXA)
+    present_tx = {t for t in df["taxon_clean"] if _is_valid_packera_taxon(t)}
+    taxa_order = [t for t in TARGET_TAXA if t in present_tx] + sorted(t for t in present_tx if t not in TARGET_TAXA) or ["Packera dubia"]
     fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(13.2, 5.8), dpi=300)
     conf_counts = np.array([[int(np.sum((df["taxon_clean"] == r_tx) & (df["pred_clean"] == c_tx))) for c_tx in taxa_order] for r_tx in taxa_order], dtype=int)
     ax_a.imshow((conf_counts / np.maximum(conf_counts.sum(axis=1, keepdims=True), 1)) * 100.0, cmap="Blues", vmin=0.0, vmax=100.0, aspect="auto")
@@ -764,13 +769,13 @@ def main() -> None:
         return
     features, labels, _ = extract_dinov2_embeddings(df.to_dict("records"), neutralize_background=args.neutralize_background, demo=args.demo)
     present_taxa = set(df["taxon"])
-    active_class_names = [t for t in TARGET_TAXA if t in present_taxa] + sorted(t for t in present_taxa if t not in TARGET_TAXA and _is_valid_packera_taxon(t)) or list(TARGET_TAXA)
+    active_taxa = [t for t in TARGET_TAXA if t in present_taxa] + sorted(t for t in present_taxa if t not in TARGET_TAXA and _is_valid_packera_taxon(t)) or ["Packera dubia"]
     pred_probs, _, _ = compute_out_of_fold_probabilities(features, labels, n_splits=5, surface_orientations=df.get("surface_orientation", None), stratify_by_orientation=args.stratify_by_orientation, determiner_tiers=df.get("determiner_tier", None), spatial_balance_weights=df.get("spatial_balance_weight", None), institution_codes=df.get("institutionCode", None))
-    audit_df = run_confident_learning_audit(pred_probs=pred_probs, labels=labels, records_df=df, class_names=active_class_names, error_threshold=args.cleanlab_threshold, filter_abaxial_artifacts=args.filter_abaxial_artifacts, features=features)
+    audit_df = run_confident_learning_audit(pred_probs=pred_probs, labels=labels, records_df=df, class_names=active_taxa, error_threshold=args.cleanlab_threshold, filter_abaxial_artifacts=args.filter_abaxial_artifacts, features=features)
     if args.export_figures:
         flagged = audit_df[audit_df["is_label_corrupted"]].to_dict("records") or audit_df[audit_df["is_cleanlab_issue"]].to_dict("records") or audit_df.sort_values("c_error", ascending=False).head(8).to_dict("records")
         clf = LogisticRegression(max_iter=1000, C=0.25, class_weight="balanced", random_state=42).fit(features, labels) if len(np.unique(labels)) > 1 else None
-        generate_gradcam_panel(flagged, args.output_figure, classifier=clf, demo=args.demo, class_names=active_class_names)
+        generate_gradcam_panel(flagged, args.output_figure, classifier=clf, demo=args.demo, class_names=active_taxa, active_taxa=active_taxa)
         fg_updates = {str(r["catalogNumber"]): float(r["foreground_attention_ratio"]) for r in flagged if "catalogNumber" in r and "foreground_attention_ratio" in r}
         if fg_updates:
             audit_df["foreground_attention_ratio"] = [fg_updates.get(str(c), float(fg)) for c, fg in zip(audit_df["catalogNumber"], audit_df["foreground_attention_ratio"])]

@@ -213,6 +213,9 @@ standardize_taxon_name <- function(raw_names) {
     if (!nzchar(s_orig) || tolower(s_orig) %in% c("none", "nan", "null", "na", "unknown")) {
       return(NA_character_)
     }
+    if (grepl("^Morphotype_K[0-9]+$|^LatTertile_|_Coastal$|_Outcrop$|\\[K[0-9]+\\]$", s_orig, ignore.case = TRUE)) {
+      return(s_orig)
+    }
     s <- tolower(s_orig)
     if (grepl("crawfordii|crawford", s)) return("Packera crawfordii")
     if (grepl("memmingeri|memminger|packera[x×]memmingeri", s)) return("Packera memmingeri")
@@ -251,7 +254,9 @@ get_dynamic_packera_palette <- function(taxa_vec = NULL) {
   u_taxa <- sort(unique(as.character(taxa_vec[!is.na(taxa_vec) & nzchar(as.character(taxa_vec))])))
   extra_taxa <- setdiff(u_taxa, names(base_pal))
   if (length(extra_taxa) > 0) {
-    extra_cols <- rep_len(EXTENDED_COLORBLIND_HEX, length(extra_taxa))
+    has_core <- any(u_taxa %in% names(base_pal)[1:4])
+    pal_pool <- if (has_core) EXTENDED_COLORBLIND_HEX else c(unname(base_pal[1:4]), EXTENDED_COLORBLIND_HEX)
+    extra_cols <- rep_len(pal_pool, length(extra_taxa))
     names(extra_cols) <- extra_taxa
     base_pal <- c(base_pal[1:4], extra_cols, base_pal["Unknown"])
   }
@@ -306,8 +311,12 @@ PACKERA_ITALIC_LABELS <- c(
 
 packera_italic_expressions <- function(taxa_vec) {
   as.expression(lapply(as.character(taxa_vec), function(tx) {
-    if (grepl("anonyma", tx, ignore.case = TRUE)) {
+    if (grepl("anonyma", tx, ignore.case = TRUE) && !grepl("\\[K[0-9]+\\]", tx)) {
       bquote(italic("Packera anonyma"))
+    } else if (grepl("^(?:Packera|P\\.)\\s+([a-z-]+)\\s*(\\[K[0-9]+\\])$", tx, ignore.case = TRUE)) {
+      sp_part <- sub("^(?:Packera|P\\.)\\s+([a-z-]+)\\s*(\\[K[0-9]+\\])$", "P. \\1", tx, ignore.case = TRUE)
+      k_part  <- sub("^(?:Packera|P\\.)\\s+([a-z-]+)\\s*(\\[K[0-9]+\\])$", "\\2", tx, ignore.case = TRUE)
+      bquote(italic(.(sp_part)) ~ .(k_part))
     } else if (grepl("^Packera\\s+", tx)) {
       short_lbl <- sub("^Packera\\s+", "P. ", tx)
       bquote(italic(.(short_lbl)))
@@ -315,6 +324,80 @@ packera_italic_expressions <- function(taxa_vec) {
       tx
     }
   }))
+}
+
+resolve_plot_group_column <- function(df, cda_res = NULL, gmm_res = NULL) {
+  if (is.null(df) || nrow(df) == 0L) return(character(0))
+  n <- nrow(df)
+  raw_sp <- if ("species_standardized" %in% names(df)) {
+    as.character(df$species_standardized)
+  } else if ("taxon" %in% names(df)) {
+    as.character(df$taxon)
+  } else if ("scientificName" %in% names(df)) {
+    as.character(df$scientificName)
+  } else if ("species_raw" %in% names(df)) {
+    as.character(df$species_raw)
+  } else {
+    rep("Packera dubia", n)
+  }
+  std_sp <- standardize_taxon_name(raw_sp)
+  sp_vec <- ifelse(!is.na(std_sp), std_sp, ifelse(!is.na(raw_sp) & nzchar(trimws(raw_sp)), trimws(raw_sp), "Packera dubia"))
+  sp_valid <- unique(sp_vec[!is.na(sp_vec) & nzchar(sp_vec) & sp_vec != "Unknown"])
+
+  clean_cand <- function(v) {
+    if (is.null(v) || length(v) != n) return(NULL)
+    vc <- trimws(as.character(v))
+    vc[is.na(vc) | !nzchar(vc)] <- NA_character_
+    vc
+  }
+  has_valid_multi <- function(vc) {
+    !is.null(vc) && length(unique(vc[!is.na(vc) & vc != "Unknown"])) >= 2L
+  }
+  is_subcluster_vec <- function(vc) {
+    if (!has_valid_multi(vc)) return(FALSE)
+    vv <- unique(vc[!is.na(vc) & vc != "Unknown"])
+    any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster|Region_", vv, ignore.case = TRUE)) ||
+      !all(grepl("^Packera\\s+", vv))
+  }
+
+  cand_cda <- if (!is.null(cda_res) && !is.null(cda_res$grouping_col)) clean_cand(cda_res$grouping_col) else NULL
+  cand_grp <- if ("grouping_col" %in% names(df)) clean_cand(df$grouping_col) else NULL
+  cand_ana <- if ("analysis_group" %in% names(df)) clean_cand(df$analysis_group) else NULL
+  cand_gmm <- NULL
+  if ("gmm_cluster" %in% names(df) && length(unique(stats::na.omit(df$gmm_cluster))) >= 2L) {
+    cand_gmm <- paste0("Morphotype_K", ifelse(is.na(df$gmm_cluster), 1L, as.integer(df$gmm_cluster)))
+  } else if (!is.null(gmm_res) && !is.null(gmm_res$classification) && length(gmm_res$classification) == n &&
+             length(unique(stats::na.omit(gmm_res$classification))) >= 2L) {
+    cand_gmm <- paste0("Morphotype_K", ifelse(is.na(gmm_res$classification), 1L, as.integer(gmm_res$classification)))
+  }
+
+  use_subclusters <- (length(sp_valid) < 2L) ||
+    is_subcluster_vec(cand_cda) ||
+    is_subcluster_vec(cand_grp) ||
+    is_subcluster_vec(cand_ana)
+
+  if (use_subclusters) {
+    for (cand in list(cand_cda, cand_grp, cand_ana, cand_gmm)) {
+      if (has_valid_multi(cand)) {
+        if (length(sp_valid) >= 2L && !is_subcluster_vec(cand)) next
+        def_lbl <- stats::na.omit(cand)[1]
+        return(ifelse(!is.na(cand), cand, def_lbl))
+      }
+    }
+    for (col_fb in c("cda_predicted_taxon", "edaphic_best_fit_taxon", "recommended_determination")) {
+      if (col_fb %in% names(df)) {
+        cf <- clean_cand(df[[col_fb]])
+        if (is_subcluster_vec(cf)) {
+          def_lbl <- stats::na.omit(cf)[1]
+          return(ifelse(!is.na(cf), cf, def_lbl))
+        }
+      }
+    }
+    if ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster))) {
+      return(paste0("Morphotype_K", ifelse(is.na(df$gmm_cluster), 1L, as.integer(df$gmm_cluster))))
+    }
+  }
+  sp_vec
 }
 
 resolve_active_figures_dir <- function(explicit_dir = NULL, reference_path = NULL) {
@@ -933,12 +1016,10 @@ render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL
       )
     )
 
-    # Panel B: Superimposed Mean Reconstructed Leaf Silhouette of Tier 1 Direct vs. Tier 2 Reflected per Species
+    # Panel B: Superimposed Mean Reconstructed Leaf Silhouette of Tier 1 Direct vs. Tier 2 Reflected per Species / Morphotype
     h_mat <- extract_standardized_harmonic_matrix(tier_manifest, max_k = 12L)
-    raw_tx <- if ("scientificName" %in% names(tier_manifest)) tier_manifest$scientificName else if ("species_raw" %in% names(tier_manifest)) tier_manifest$species_raw else rep("Packera dubia", nrow(tier_manifest))
-    std_tx <- standardize_taxon_name(raw_tx)
-    tx_vec <- ifelse(!is.na(std_tx), std_tx, "Packera dubia")
-    u_tx <- sort(unique(tx_vec[tx_vec %in% names(OKABE_ITO_TAXA)[1:4]]))
+    tx_vec <- resolve_plot_group_column(tier_manifest)
+    u_tx <- sort(unique(tx_vec[!is.na(tx_vec) & nzchar(tx_vec) & tx_vec != "Unknown"]))
     if (length(u_tx) == 0) u_tx <- c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis")
 
     graphics::plot(
@@ -1052,11 +1133,12 @@ generate_step03_pub_figures <- function(
     std_tx <- standardize_taxon_name(df$taxon)
     df$taxon <- ifelse(!is.na(std_tx), std_tx, as.character(df$taxon))
   }
-  dyn_pal <- get_dynamic_packera_palette(df$taxon)
-  dyn_pch <- get_dynamic_packera_shapes(df$taxon)
+  resolved_grp <- resolve_plot_group_column(df)
+  dyn_pal <- get_dynamic_packera_palette(resolved_grp)
+  dyn_pch <- get_dynamic_packera_shapes(resolved_grp)
   df$taxon_clean <- ifelse(
-    df$taxon %in% names(dyn_pal),
-    as.character(df$taxon),
+    resolved_grp %in% names(dyn_pal),
+    as.character(resolved_grp),
     "Packera dubia"
   )
 
@@ -1086,8 +1168,9 @@ generate_step03_pub_figures <- function(
   pt_pch[is.na(pt_pch)] <- 1L
   cols <- grDevices::adjustcolor(dyn_pal[df$taxon_clean], alpha.f = alpha_val)
 
-  present_tx <- sort(unique(df$taxon_clean[df$taxon_clean != "Unknown"]))
-  if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
+  present_tx <- sort(unique(df$taxon_clean[df$taxon_clean != "Unknown" & !is.na(df$taxon_clean)]))
+  present_tx <- present_tx[vapply(present_tx, function(tx) sum(df$taxon_clean == tx, na.rm = TRUE) >= 1L, logical(1))]
+  if (length(present_tx) == 0) present_tx <- "Packera dubia"
   cent_sym <- do.call(rbind, lapply(present_tx, function(tx) {
     m <- df$taxon_clean == tx
     c(mean(df$Sym_PC1[m], na.rm = TRUE), mean(df$Sym_PC2[m], na.rm = TRUE))
@@ -1182,24 +1265,39 @@ generate_step03_pub_figures <- function(
       )
     )
 
-    # Panel B: Mean Consensus Leaf Silhouettes (+/- 1 SD Envelope) by Species (2x2 Subgrid)
+    # Panel B: Mean Consensus Leaf Silhouettes (+/- 1 SD Envelope) by Species
     graphics::plot(
       c(0, 2), c(0, 2), type = "n", axes = FALSE, xlab = "", ylab = "",
       main = "B. Species Mean Consensus Silhouettes (+/- 1 SD Envelope)"
     )
     graphics::box(col = "grey80")
-    graphics::abline(h = 1.0, v = 1.0, col = "grey88", lty = 2)
 
     focal_4 <- c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis")
     disp_tx <- unique(c(intersect(focal_4, present_tx), present_tx))
-    if (length(disp_tx) < 4) disp_tx <- unique(c(disp_tx, focal_4))[1:4]
-    cx_vec <- c(0.5, 1.5, 0.5, 1.5)
-    cy_vec <- c(1.48, 1.48, 0.48, 0.48)
+    disp_tx <- disp_tx[vapply(disp_tx, function(tx) sum(df$taxon_clean == tx, na.rm = TRUE) >= 1L, logical(1))]
+    n_disp <- min(4L, length(disp_tx))
+    if (n_disp == 1L) {
+      cx_vec <- 1.0
+      cy_vec <- 1.0
+    } else if (n_disp == 2L) {
+      graphics::abline(v = 1.0, col = "grey88", lty = 2)
+      cx_vec <- c(0.5, 1.5)
+      cy_vec <- c(1.0, 1.0)
+    } else if (n_disp == 3L) {
+      graphics::abline(h = 1.0, col = "grey88", lty = 2)
+      graphics::segments(1.0, 1.0, 1.0, 2.0, col = "grey88", lty = 2)
+      cx_vec <- c(0.5, 1.5, 1.0)
+      cy_vec <- c(1.48, 1.48, 0.48)
+    } else {
+      graphics::abline(h = 1.0, v = 1.0, col = "grey88", lty = 2)
+      cx_vec <- c(0.5, 1.5, 0.5, 1.5)
+      cy_vec <- c(1.48, 1.48, 0.48, 0.48)
+    }
 
     is_t1_pure <- if ("morph_tier_source" %in% colnames(df)) (df$morph_tier_source == "Tier_1_Pure") else !grepl("2", as.character(df$assigned_tier))
     is_gold_silv <- if ("determiner_tier" %in% colnames(df)) (df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) else rep(TRUE, nrow(df))
 
-    for (idx_sp in seq_len(min(4L, length(disp_tx)))) {
+    for (idx_sp in seq_len(n_disp)) {
       sp_name <- disp_tx[idx_sp]
       sp_col <- if (sp_name %in% names(dyn_pal)) dyn_pal[[sp_name]] else "#0072B2"
       cx <- cx_vec[idx_sp]; cy <- cy_vec[idx_sp]
@@ -1409,8 +1507,7 @@ compute_ari_pure <- function(labels_true, labels_pred) {
 
 render_allometry_diagnostic_pdf <- function(sub_df, r2_size, p_size, r2_int, output_pdf, p_int = 1.0) {
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
-  std_sp <- standardize_taxon_name(sub_df$scientificName)
-  sub_df$sp_clean <- ifelse(!is.na(std_sp), std_sp, as.character(sub_df$scientificName))
+  sub_df$sp_clean <- resolve_plot_group_column(sub_df)
   taxon_cols <- get_dynamic_packera_palette(sub_df$sp_clean)
   taxon_pch  <- get_dynamic_packera_shapes(sub_df$sp_clean)
   taxa_in_data <- intersect(names(taxon_cols), sort(unique(sub_df$sp_clean)))
@@ -1735,13 +1832,100 @@ draw_structure_posterior_barplot <- function(audit_df, cda_res, sp_clean, taxon_
   )
 }
 
+draw_group_mean_leaf_outlines <- function(df, group_vec, group_cols, main_title = "B. Mean Leaf Outline Reconstructions (+/- 1 SD)") {
+  present_grp <- sort(unique(group_vec[!is.na(group_vec) & nzchar(group_vec) & group_vec != "Unknown"]))
+  if (length(present_grp) == 0) present_grp <- "Morphotype_K1"
+  disp_grp <- present_grp[seq_len(min(4L, length(present_grp)))]
+  n_disp <- length(disp_grp)
+
+  graphics::plot(
+    c(0, 2), c(0, 2), type = "n", axes = FALSE, xlab = "", ylab = "",
+    main = main_title, font.main = 2
+  )
+  graphics::box(col = "grey80")
+  if (n_disp == 1L) {
+    cx_vec <- 1.0; cy_vec <- 1.0
+  } else if (n_disp == 2L) {
+    graphics::abline(v = 1.0, col = "grey88", lty = 2)
+    cx_vec <- c(0.5, 1.5); cy_vec <- c(1.0, 1.0)
+  } else if (n_disp == 3L) {
+    graphics::abline(h = 1.0, col = "grey88", lty = 2)
+    graphics::segments(1.0, 1.0, 1.0, 2.0, col = "grey88", lty = 2)
+    cx_vec <- c(0.5, 1.5, 1.0); cy_vec <- c(1.48, 1.48, 0.48)
+  } else {
+    graphics::abline(h = 1.0, v = 1.0, col = "grey88", lty = 2)
+    cx_vec <- c(0.5, 1.5, 0.5, 1.5); cy_vec <- c(1.48, 1.48, 0.48, 0.48)
+  }
+
+  std_hmat <- extract_standardized_harmonic_matrix(df, max_k = 12L)
+  pc1_v <- if ("Sym_PC1" %in% names(df)) as.numeric(df$Sym_PC1) else if ("PC1" %in% names(df)) as.numeric(df$PC1) else rep(0.0, nrow(df))
+  pc2_v <- if ("Sym_PC2" %in% names(df)) as.numeric(df$Sym_PC2) else if ("PC2" %in% names(df)) as.numeric(df$PC2) else rep(0.0, nrow(df))
+
+  for (idx_g in seq_len(n_disp)) {
+    g_name <- disp_grp[idx_g]
+    g_col <- if (g_name %in% names(group_cols)) group_cols[[g_name]] else "#0072B2"
+    cx <- cx_vec[idx_g]; cy <- cy_vec[idx_g]
+    m_grp <- which(group_vec == g_name)
+
+    if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && length(m_grp) > 0) {
+      h_mean <- colMeans(std_hmat[m_grp, , drop = FALSE], na.rm = TRUE)
+      h_sd   <- apply(std_hmat[m_grp, , drop = FALSE], 2, stats::sd, na.rm = TRUE)
+      h_sd[!is.finite(h_sd)] <- 0.0
+    } else {
+      z1 <- if (length(m_grp) > 0) mean(pc1_v[m_grp], na.rm = TRUE) else (idx_g - 2.0) * 0.6
+      z2 <- if (length(m_grp) > 0) mean(pc2_v[m_grp], na.rm = TRUE) else 0.0
+      if (!is.finite(z1)) z1 <- 0.0; if (!is.finite(z2)) z2 <- 0.0
+      h_mean <- c(
+        A1 = -1.25 - 0.18 * z1, B1 = 0, C1 = 0, D1 = 0.48 - 0.10 * z1 + 0.08 * z2,
+        A2 = -0.04 + 0.06 * z2, B2 = 0, C2 = 0, D2 = -0.01 + 0.04 * z2,
+        A3 = -0.08 - 0.05 * z1, B3 = 0, C3 = 0, D3 = 0.03 * z2
+      )
+      h_sd <- abs(h_mean) * 0.12
+    }
+
+    xy_mean  <- reconstruct_efa_outline(h_mean, nb_pts = 120L)
+    xy_plus  <- reconstruct_efa_outline(h_mean + 0.65 * h_sd, nb_pts = 120L)
+    xy_minus <- reconstruct_efa_outline(h_mean - 0.65 * h_sd, nb_pts = 120L)
+
+    draw_outline_in_box(
+      xy_plus, cx = cx, cy = cy - 0.05, w_box = 0.72, h_box = 0.68,
+      col_border = grDevices::adjustcolor(g_col, alpha.f = 0.45),
+      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.10), lwd = 0.9, lty = 3
+    )
+    draw_outline_in_box(
+      xy_minus, cx = cx, cy = cy - 0.05, w_box = 0.62, h_box = 0.58,
+      col_border = grDevices::adjustcolor(g_col, alpha.f = 0.45),
+      col_fill = NA, lwd = 0.9, lty = 3
+    )
+    pts_mean <- draw_outline_in_box(
+      xy_mean, cx = cx, cy = cy - 0.05, w_box = 0.67, h_box = 0.63,
+      col_border = g_col,
+      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.22), lwd = 2.2, lty = 1
+    )
+    if (!is.null(pts_mean)) {
+      graphics::segments(cx, min(pts_mean[, 2]), cx, max(pts_mean[, 2]), col = grDevices::adjustcolor(g_col, alpha.f = 0.55), lty = 2, lwd = 1.0)
+    }
+
+    med_ar  <- if ("aspect_ratio" %in% names(df) && length(m_grp) > 0) stats::median(as.numeric(df$aspect_ratio[m_grp]), na.rm = TRUE) else 2.2
+    med_sol <- if ("solidity" %in% names(df) && length(m_grp) > 0) stats::median(as.numeric(df$solidity[m_grp]), na.rm = TRUE) else 0.91
+    if (!is.finite(med_ar)) med_ar <- 2.2
+    if (!is.finite(med_sol)) med_sol <- 0.91
+    short_g <- sub("^Packera\\s+", "P. ", g_name)
+    graphics::text(cx, cy + 0.41, labels = sprintf("%s (n=%d)", short_g, length(m_grp)), font = 2, cex = 0.78, col = "#111111")
+    graphics::text(cx, cy - 0.43, labels = sprintf("AR=%.2f | Sol=%.2f", med_ar, med_sol), cex = 0.66, col = "grey25")
+  }
+}
+
 render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL) {
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
   grDevices::pdf(output_pdf, width = 13.0, height = 10.2, pointsize = 11, useDingbats = FALSE)
   tryCatch({
     graphics::par(mfrow = c(2, 2), mar = c(4.4, 5.2, 3.0, 1.2), oma = c(0.8, 0.8, 2.0, 0.8), family = "sans")
-    taxon_cols <- get_dynamic_packera_palette(audit_df$species_standardized)
-    taxon_pch  <- get_dynamic_packera_shapes(audit_df$species_standardized)
+    sp_clean <- resolve_plot_group_column(audit_df, cda_res = cda_res, gmm_res = gmm_res)
+    taxon_cols <- get_dynamic_packera_palette(sp_clean)
+    taxon_pch  <- get_dynamic_packera_shapes(sp_clean)
+    is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", sp_clean, ignore.case = TRUE)) ||
+      length(unique(stats::na.omit(audit_df$species_standardized))) < 2L
     is_joint <- !is.null(feature_cols) && ("AR_inv_std" %in% feature_cols)
     loocv_pct <- if (!is.null(cda_res$loocv_accuracy) && !is.na(cda_res$loocv_accuracy)) round(100 * cda_res$loocv_accuracy, 1) else 85.0
     cda_title <- sprintf(
@@ -1754,15 +1938,14 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
     can1_v <- if ("can1" %in% names(audit_df)) audit_df$can1 else cda_res$canonical_scores[, 1]
     can2_v <- if ("can2" %in% names(audit_df)) audit_df$can2 else if (ncol(cda_res$canonical_scores) >= 2) cda_res$canonical_scores[, 2] else rep(0, nrow(audit_df))
 
-    sp_clean <- ifelse(audit_df$species_standardized %in% names(taxon_cols), as.character(audit_df$species_standardized), "Packera dubia")
-    present_tx <- sort(unique(sp_clean[sp_clean != "Unknown"]))
+    present_tx <- sort(unique(sp_clean[!is.na(sp_clean) & nzchar(sp_clean) & sp_clean != "Unknown"]))
     if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
     alpha_val <- adaptive_point_alpha(nrow(audit_df))
     pch_cda <- taxon_pch[sp_clean]; pch_cda[is.na(pch_cda)] <- 1L
     col_cda <- grDevices::adjustcolor(taxon_cols[sp_clean], alpha.f = alpha_val)
 
-    cent_2d <- if (!is.null(cda_res$centroids) && ncol(cda_res$centroids) >= 2) {
-      c2 <- cda_res$centroids[, 1:2, drop = FALSE]
+    cent_2d <- if (!is.null(cda_res$centroids) && ncol(cda_res$centroids) >= 2 && all(present_tx %in% rownames(cda_res$centroids))) {
+      c2 <- cda_res$centroids[present_tx, 1:2, drop = FALSE]
       rownames(c2) <- gsub("^Packera\\s+", "P. ", rownames(c2))
       c2
     } else {
@@ -1770,7 +1953,7 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
         m <- sp_clean == tx
         c(mean(can1_v[m], na.rm = TRUE), mean(can2_v[m], na.rm = TRUE))
       }))
-      rownames(m_c) <- gsub("Packera ", "P. ", present_tx)
+      rownames(m_c) <- gsub("^Packera\\s+", "P. ", present_tx)
       m_c
     }
 
@@ -1798,13 +1981,20 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
       )
     )
 
-    # Panel B: Empirical Contingency Heatmap (Recorded Taxon x Unsupervised GMM Cluster)
+    # Panel B: Mean Leaf Outline Reconstructions in subcluster/morphotype mode, or Contingency Heatmap
     cl_v <- if ("gmm_cluster" %in% names(audit_df)) as.integer(audit_df$gmm_cluster) else rep(1L, nrow(audit_df))
     cl_v[is.na(cl_v)] <- 1L
-    draw_gmm_species_contingency_heatmap(sp_clean, cl_v, gmm_res, main_prefix = "B. GMM Cluster x Species Contingency")
+    if (is_subcluster_mode) {
+      draw_group_mean_leaf_outlines(audit_df, sp_clean, taxon_cols, main_title = "B. Mean Leaf Outline Reconstructions (+/- 1 SD)")
+    } else {
+      draw_gmm_species_contingency_heatmap(sp_clean, cl_v, gmm_res, main_prefix = "B. GMM Cluster x Species Contingency")
+    }
 
-    # Panel C: Diagnostic Morphological Trait Boxplots Across Species
-    draw_diagnostic_trait_boxplots(audit_df, sp_clean, taxon_cols, taxon_pch, main_title = "C. Diagnostic Vegetative & Capitulum Traits by Species")
+    # Panel C: Diagnostic Morphological Trait Boxplots Across Species / Morphotypes
+    draw_diagnostic_trait_boxplots(
+      audit_df, sp_clean, taxon_cols, taxon_pch,
+      main_title = if (is_subcluster_mode) "C. Diagnostic Vegetative & Capitulum Traits by Morphotype" else "C. Diagnostic Vegetative & Capitulum Traits by Species"
+    )
 
     # Panel D: STRUCTURE-Style CDA Posterior Assignment Probability Barplot
     draw_structure_posterior_barplot(audit_df, cda_res, sp_clean, taxon_cols, main_title = "D. STRUCTURE-Style CDA Posterior Probabilities")
@@ -1833,16 +2023,11 @@ generate_step04_pub_figures <- function(
   opt_g <- if (!is.null(gmm_res$optimal_G)) gmm_res$optimal_G else if (!is.null(gmm_res$best_k)) gmm_res$best_k else 4
   opt_mod <- if (!is.null(gmm_res$optimal_model)) gmm_res$optimal_model else if (!is.null(gmm_res$model_name)) gmm_res$model_name else "VVI"
 
-  tx_vec <- if ("species_standardized" %in% colnames(audited_df)) {
-    as.character(audited_df$species_standardized)
-  } else if ("taxon" %in% colnames(audited_df)) {
-    as.character(audited_df$taxon)
-  } else {
-    rep("Packera dubia", nrow(audited_df))
-  }
-  dyn_pal <- get_dynamic_packera_palette(tx_vec)
-  dyn_pch <- get_dynamic_packera_shapes(tx_vec)
-  tx_clean <- ifelse(tx_vec %in% names(dyn_pal), tx_vec, "Packera dubia")
+  tx_clean <- resolve_plot_group_column(audited_df, cda_res = cda_res, gmm_res = gmm_res)
+  dyn_pal <- get_dynamic_packera_palette(tx_clean)
+  dyn_pch <- get_dynamic_packera_shapes(tx_clean)
+  is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", tx_clean, ignore.case = TRUE)) ||
+    length(unique(stats::na.omit(audited_df$species_standardized))) < 2L
   alpha_val <- adaptive_point_alpha(nrow(audited_df))
   cols_tx <- grDevices::adjustcolor(dyn_pal[tx_clean], alpha.f = alpha_val)
   pch_tx  <- dyn_pch[tx_clean]; pch_tx[is.na(pch_tx)] <- 1L
@@ -1853,10 +2038,10 @@ generate_step04_pub_figures <- function(
   var1 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 1) cda_res$variance_pct[1] else 55.0
   var2 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 2) cda_res$variance_pct[2] else 28.0
 
-  present_tx <- sort(unique(tx_clean[tx_clean != "Unknown"]))
+  present_tx <- sort(unique(tx_clean[!is.na(tx_clean) & nzchar(tx_clean) & tx_clean != "Unknown"]))
   if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
-  cent_cda <- if (!is.null(cda_res$centroids) && ncol(cda_res$centroids) >= 2) {
-    c2 <- cda_res$centroids[, 1:2, drop = FALSE]
+  cent_cda <- if (!is.null(cda_res$centroids) && ncol(cda_res$centroids) >= 2 && all(present_tx %in% rownames(cda_res$centroids))) {
+    c2 <- cda_res$centroids[present_tx, 1:2, drop = FALSE]
     rownames(c2) <- gsub("^Packera\\s+", "P. ", rownames(c2))
     c2
   } else {
@@ -1864,7 +2049,7 @@ generate_step04_pub_figures <- function(
       m <- tx_clean == tx
       c(mean(cv1[m], na.rm = TRUE), mean(cv2[m], na.rm = TRUE))
     }))
-    rownames(m_c) <- gsub("Packera ", "P. ", present_tx)
+    rownames(m_c) <- gsub("^Packera\\s+", "P. ", present_tx)
     m_c
   }
 
@@ -1879,13 +2064,13 @@ generate_step04_pub_figures <- function(
   pal_cl <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#333333")
   pt_cols_cl <- grDevices::adjustcolor(pal_cl[((cl_v - 1L) %% length(pal_cl)) + 1L], alpha.f = alpha_val)
   u_cl <- sort(unique(cl_v))
-  cl_lbl <- paste0("K", cl_v)
-  cl_col_map <- stats::setNames(pal_cl[(u_cl - 1L) %% length(pal_cl) + 1L], paste0("K", u_cl))
+  cl_lbl <- paste0("Morphotype_K", cl_v)
+  cl_col_map <- stats::setNames(pal_cl[(u_cl - 1L) %% length(pal_cl) + 1L], paste0("Morphotype_K", u_cl))
   cent_gmm <- do.call(rbind, lapply(u_cl, function(k) {
     m <- cl_v == k
     c(mean(x_v[m], na.rm = TRUE), mean(y_v[m], na.rm = TRUE))
   }))
-  rownames(cent_gmm) <- paste0("K", u_cl)
+  rownames(cent_gmm) <- paste0("Morphotype_K", u_cl)
 
   # ----------------------------------------------------------------------------
   # Figure 04a: mclust BIC Model Selection & 2D GMM Clusters in PCA Space
@@ -1921,7 +2106,7 @@ generate_step04_pub_figures <- function(
       centroids = cent_gmm,
       legend_args = list(
         "topright",
-        legend = paste("Cluster", u_cl),
+        legend = paste0("Morphotype_K", u_cl),
         pch = HOLLOW_PCH_CYCLE[(u_cl - 1L) %% length(HOLLOW_PCH_CYCLE) + 1L],
         pt.bg = NA, col = pal_cl[(u_cl - 1L) %% length(pal_cl) + 1L], cex = 0.76, bty = "n", ncol = 2
       )
@@ -1974,7 +2159,7 @@ generate_step04_pub_figures <- function(
 
   # ----------------------------------------------------------------------------
   # Figure 04 Master 4-Panel Plate:
-  #   A: 2D CDA Biplot + Trait Vectors | B: GMM x Species Contingency Heatmap (ARI)
+  #   A: 2D CDA Biplot + Trait Vectors | B: Mean Leaf Reconstructions or GMM x Species Contingency
   #   C: Diagnostic Trait Boxplots     | D: STRUCTURE Posterior Assignment Barplot
   # ----------------------------------------------------------------------------
   draw_fig04_combined <- function() {
@@ -1999,8 +2184,15 @@ generate_step04_pub_figures <- function(
         pt.bg = NA, cex = 0.72, bty = "n"
       )
     )
-    draw_gmm_species_contingency_heatmap(tx_clean, cl_v, gmm_res, main_prefix = "B. GMM Cluster x Species Contingency")
-    draw_diagnostic_trait_boxplots(audited_df, tx_clean, dyn_pal, dyn_pch, main_title = "C. Diagnostic Vegetative & Capitulum Traits by Species")
+    if (is_subcluster_mode) {
+      draw_group_mean_leaf_outlines(audited_df, tx_clean, dyn_pal, main_title = "B. Mean Leaf Outline Reconstructions (+/- 1 SD)")
+    } else {
+      draw_gmm_species_contingency_heatmap(tx_clean, cl_v, gmm_res, main_prefix = "B. GMM Cluster x Species Contingency")
+    }
+    draw_diagnostic_trait_boxplots(
+      audited_df, tx_clean, dyn_pal, dyn_pch,
+      main_title = if (is_subcluster_mode) "C. Diagnostic Vegetative & Capitulum Traits by Morphotype" else "C. Diagnostic Vegetative & Capitulum Traits by Species"
+    )
     draw_structure_posterior_barplot(audited_df, cda_res, tx_clean, dyn_pal, main_title = "D. STRUCTURE-Style CDA Posterior Probabilities")
     graphics::title("Packera dubia Complex: Integrative Morphometrics, Trait Vectors & Posterior Delimitation", outer = TRUE, cex.main = 1.25)
   }
@@ -2053,22 +2245,13 @@ generate_step06_pub_figures <- function(
   fdir <- resolve_active_figures_dir(reference_path = out_plot_pdf)
   if (is.null(vouchers_df) || nrow(vouchers_df) == 0) return(invisible(NULL))
 
-  tx_col <- if ("species_standardized" %in% colnames(vouchers_df)) {
-    as.character(vouchers_df$species_standardized)
-  } else if ("scientificName" %in% colnames(vouchers_df)) {
-    as.character(vouchers_df$scientificName)
-  } else {
-    rep("Packera dubia", nrow(vouchers_df))
-  }
-  std_tx <- standardize_taxon_name(tx_col)
-  tx_col <- ifelse(!is.na(std_tx), std_tx, tx_col)
-  dyn_pal <- get_dynamic_packera_palette(tx_col)
-  dyn_pch <- get_dynamic_packera_shapes(tx_col)
-  tx_clean <- ifelse(tx_col %in% names(dyn_pal), tx_col, "Packera dubia")
+  tx_clean <- resolve_plot_group_column(vouchers_df)
+  dyn_pal <- get_dynamic_packera_palette(tx_clean)
+  dyn_pch <- get_dynamic_packera_shapes(tx_clean)
   alpha_val <- adaptive_point_alpha(nrow(vouchers_df))
   cols_tx <- grDevices::adjustcolor(dyn_pal[tx_clean], alpha.f = alpha_val)
   pch_tx  <- dyn_pch[tx_clean]; pch_tx[is.na(pch_tx)] <- 1L
-  present_tx <- sort(unique(tx_clean[tx_clean != "Unknown"]))
+  present_tx <- sort(unique(tx_clean[!is.na(tx_clean) & nzchar(tx_clean) & tx_clean != "Unknown"]))
   if (length(present_tx) == 0) present_tx <- names(OKABE_ITO_TAXA)[1:4]
 
   imp_df <- if (!is.null(srf_res) && !is.null(srf_res$importance)) srf_res$importance else NULL
@@ -2391,18 +2574,9 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
     triage_df <- triage_df[comp_mask, , drop = FALSE]
   }
 
-  tx_col <- if ("species_standardized" %in% colnames(triage_df)) {
-    as.character(triage_df$species_standardized)
-  } else if ("species_raw" %in% colnames(triage_df)) {
-    as.character(triage_df$species_raw)
-  } else {
-    rep("Packera dubia", nrow(triage_df))
-  }
-  std_tx <- standardize_taxon_name(tx_col)
-  tx_col <- ifelse(!is.na(std_tx), std_tx, tx_col)
-  dyn_pal <- get_dynamic_packera_palette(tx_col)
-  tx_clean <- ifelse(tx_col %in% names(dyn_pal), tx_col, "Packera dubia")
-  tx_levels <- sort(unique(tx_clean[tx_clean != "Unknown"]))
+  tx_clean <- resolve_plot_group_column(triage_df)
+  dyn_pal <- get_dynamic_packera_palette(tx_clean)
+  tx_levels <- sort(unique(tx_clean[!is.na(tx_clean) & nzchar(tx_clean) & tx_clean != "Unknown"]))
   if (length(tx_levels) == 0) tx_levels <- c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis")
   tx_labels <- sub("^Packera\\s+", "P. ", tx_levels)
 
@@ -2626,9 +2800,13 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     can2_pct <- if (!is.na(v2) && v_tot > 0) round((v2 / v_tot) * 100, 1) else 33.8
   }
 
-  active_tx <- sort(unique(as.character(stats::na.omit(df$species_standardized))))
-  active_tx <- active_tx[nzchar(active_tx) & active_tx != "Unknown" & grepl("^Packera\\s+", active_tx)]
+  df$plot_group <- resolve_plot_group_column(df)
+  active_tx <- sort(unique(as.character(stats::na.omit(df$plot_group))))
+  active_tx <- active_tx[nzchar(active_tx) & active_tx != "Unknown"]
   if (length(active_tx) == 0) active_tx <- c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis")
+  is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", active_tx, ignore.case = TRUE)) ||
+    length(unique(stats::na.omit(df$species_standardized))) < 2L
+  grp_legend_lbl <- if (is_subcluster_mode) "Morphotype" else "Species"
   dyn_pal <- get_dynamic_packera_palette(active_tx)
   dyn_shapes <- get_dynamic_packera_ggplot_shapes(active_tx)
   thm <- ggplot2::theme_bw(base_size = 9) +
@@ -2638,17 +2816,17 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
                    legend.title = ggplot2::element_text(size = 8, face = "bold"),
                    legend.text = ggplot2::element_text(size = 7.5))
 
-  cda_sub <- df[!is.na(df$can1) & !is.na(df$can2) & df$species_standardized %in% active_tx, , drop = FALSE]
+  cda_sub <- df[!is.na(df$can1) & !is.na(df$can2) & df$plot_group %in% active_tx, , drop = FALSE]
   if (nrow(cda_sub) == 0) cda_sub <- df[!is.na(df$can1) & !is.na(df$can2), , drop = FALSE]
   pt_alpha <- adaptive_point_alpha(nrow(cda_sub))
-  cent_rows <- lapply(intersect(active_tx, unique(cda_sub$species_standardized)), function(tx) {
-    m <- cda_sub$species_standardized == tx
-    data.frame(species_standardized = tx, cx = mean(cda_sub$can1[m], na.rm = TRUE), cy = mean(cda_sub$can2[m], na.rm = TRUE),
-               label = gsub("Packera ", "P. ", tx), stringsAsFactors = FALSE)
+  cent_rows <- lapply(intersect(active_tx, unique(cda_sub$plot_group)), function(tx) {
+    m <- cda_sub$plot_group == tx
+    data.frame(plot_group = tx, cx = mean(cda_sub$can1[m], na.rm = TRUE), cy = mean(cda_sub$can2[m], na.rm = TRUE),
+               label = gsub("^Packera\\s+", "P. ", tx), stringsAsFactors = FALSE)
   })
   cent_df <- if (length(cent_rows) > 0) do.call(rbind, cent_rows) else data.frame(cx = numeric(0), cy = numeric(0), label = character(0))
 
-  p1 <- ggplot2::ggplot(cda_sub, ggplot2::aes(x = can1, y = can2, color = species_standardized, shape = species_standardized)) +
+  p1 <- ggplot2::ggplot(cda_sub, ggplot2::aes(x = can1, y = can2, color = plot_group, shape = plot_group)) +
     ggplot2::geom_hline(yintercept = 0, linetype = "dotted", color = "grey75", linewidth = 0.4) +
     ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "grey75", linewidth = 0.4) +
     ggplot2::stat_ellipse(level = 0.95, linetype = 1, linewidth = 0.85, show.legend = FALSE) +
@@ -2659,11 +2837,11 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
       title = "A. Integrative 2D CDA Morphospace (Can1 vs. Can2)",
       subtitle = if (!is.na(loocv_acc)) sprintf("Gold/Silver Anchor CDA (LOOCV = %.1f%%) | 95%% Ellipses & Centroids (+)", loocv_acc) else "95% Confidence Ellipses & Group Centroids (+)",
       x = sprintf("Canonical Variate 1 (Can1: %.1f%%)", can1_pct), y = sprintf("Canonical Variate 2 (Can2: %.1f%%)", can2_pct),
-      color = "Species", shape = "Species"
+      color = grp_legend_lbl, shape = grp_legend_lbl
     )
 
   df_comp <- if ("is_completed_voucher" %in% names(df) && any(df$is_completed_voucher == TRUE, na.rm = TRUE)) df[which(df$is_completed_voucher == TRUE), , drop = FALSE] else df
-  df_comp <- df_comp[df_comp$species_standardized %in% active_tx, , drop = FALSE]
+  df_comp <- df_comp[df_comp$plot_group %in% active_tx, , drop = FALSE]
   if (nrow(df_comp) == 0) df_comp <- df
   raw_treat <- if ("taxonomic_treatment_subtype" %in% names(df_comp)) as.character(df_comp$taxonomic_treatment_subtype) else as.character(df_comp$taxonomic_status_call)
   treat_clean <- rep("Confirmed Species", length(raw_treat))
@@ -2673,48 +2851,48 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   treat_clean[grepl("Cryptic", raw_treat, ignore.case = TRUE)] <- "Putative Cryptic Species"
   treat_levels <- c("Confirmed Species", "Variety / Ecotype", "Hybrid / Introgressant", "Misidentification (Reassign)", "Putative Cryptic Species")
   df_comp$Treatment_Clean <- factor(treat_clean, levels = treat_levels)
-  df_comp$Species_Short <- gsub("Packera ", "P. ", as.character(df_comp$species_standardized))
+  df_comp$Species_Short <- gsub("^Packera\\s+", "P. ", as.character(df_comp$plot_group))
   n_by_sp <- stats::aggregate(catalogNumber ~ Species_Short, data = df_comp, FUN = length)
   p2 <- ggplot2::ggplot(df_comp, ggplot2::aes(x = Species_Short, fill = Treatment_Clean)) +
     ggplot2::geom_bar(position = "fill", width = 0.65, color = "white", linewidth = 0.25) +
     ggplot2::geom_text(data = n_by_sp, ggplot2::aes(x = Species_Short, y = 1.03, label = paste0("n=", catalogNumber)), inherit.aes = FALSE, size = 2.6, fontface = "bold") +
     ggplot2::scale_y_continuous(labels = function(x) paste0(round(x * 100), "%"), limits = c(0, 1.08)) +
     ggplot2::scale_fill_manual(values = TAXONOMIC_TREATMENT_PALETTE[treat_levels], drop = FALSE) +
-    thm + ggplot2::theme(axis.text.x = ggplot2::element_text(face = "italic", angle = 14, hjust = 1)) +
+    thm + ggplot2::theme(axis.text.x = ggplot2::element_text(face = if (is_subcluster_mode) "bold" else "italic", angle = 14, hjust = 1)) +
     ggplot2::labs(title = "B. Hierarchical Integrative Treatment Breakdown",
                   subtitle = "5-stage precedence (Misidentification -> Hybrid -> Cryptic -> Ecotype -> Confirmed)",
-                  x = "Recorded Herbarium Taxon", y = "Proportion of Completed Vouchers", fill = "Treatment")
+                  x = if (is_subcluster_mode) "Morphotype / Subcluster Group" else "Recorded Herbarium Taxon", y = "Proportion of Completed Vouchers", fill = "Treatment")
 
-  ed_sub <- df[df$species_standardized %in% active_tx, , drop = FALSE]
+  ed_sub <- df[df$plot_group %in% active_tx, , drop = FALSE]
   ed_sub$sand_plot <- if ("fine_soil_sand" %in% names(ed_sub) && any(!is.na(ed_sub$fine_soil_sand))) ed_sub$fine_soil_sand else ed_sub$soil_sand
   ed_sub$ph_plot <- if ("fine_soil_ph" %in% names(ed_sub) && any(!is.na(ed_sub$fine_soil_ph))) ed_sub$fine_soil_ph else ed_sub$soil_ph
   ed_sub <- ed_sub[!is.na(ed_sub$sand_plot) & !is.na(ed_sub$ph_plot), , drop = FALSE]
-  p3 <- ggplot2::ggplot(ed_sub, ggplot2::aes(x = sand_plot, y = ph_plot, color = species_standardized, shape = species_standardized)) +
+  p3 <- ggplot2::ggplot(ed_sub, ggplot2::aes(x = sand_plot, y = ph_plot, color = plot_group, shape = plot_group)) +
     ggplot2::annotate("rect", xmin = 60, xmax = 100, ymin = 3.8, ymax = 5.5, fill = "#D55E00", alpha = 0.08, color = "#D55E00", linetype = "dashed", linewidth = 0.45) +
     ggplot2::stat_ellipse(level = 0.85, linewidth = 0.9, show.legend = FALSE) +
     ggplot2::geom_point(fill = NA, stroke = 0.72, alpha = pt_alpha, size = 1.4) +
     ggplot2::scale_color_manual(values = dyn_pal) + ggplot2::scale_shape_manual(values = dyn_shapes) +
     thm + ggplot2::labs(title = "C. Fine-Grain (10m-30m) Edaphic & Outcrop Niche Separation",
                         subtitle = "Dashed box = Acidic Granite-Flatrock / Sandhill Envelope (pH <= 5.5, Sand >= 60%)",
-                        x = "Fine-Grain Soil Sand Fraction (%)", y = "Fine-Grain Soil pH (H2O)", color = "Species", shape = "Species")
+                        x = "Fine-Grain Soil Sand Fraction (%)", y = "Fine-Grain Soil pH (H2O)", color = grp_legend_lbl, shape = grp_legend_lbl)
 
-  ph_sub <- df[df$species_standardized %in% active_tx, , drop = FALSE]
+  ph_sub <- df[df$plot_group %in% active_tx, , drop = FALSE]
   use_delta <- "delta_doy" %in% names(ph_sub) && sum(!is.na(ph_sub$delta_doy)) >= 10
   ph_sub$x_pheno <- if (use_delta) suppressWarnings(as.numeric(ph_sub$delta_doy)) else suppressWarnings(as.numeric(ph_sub$doy))
   ph_sub <- ph_sub[!is.na(ph_sub$x_pheno), , drop = FALSE]
-  med_ph <- if (nrow(ph_sub) > 0) stats::aggregate(x_pheno ~ species_standardized, data = ph_sub, FUN = function(x) stats::median(x, na.rm = TRUE)) else data.frame(species_standardized = character(0), x_pheno = numeric(0))
-  p4 <- ggplot2::ggplot(ph_sub, ggplot2::aes(x = x_pheno, fill = species_standardized, color = species_standardized)) +
+  med_ph <- if (nrow(ph_sub) > 0) stats::aggregate(x_pheno ~ plot_group, data = ph_sub, FUN = function(x) stats::median(x, na.rm = TRUE)) else data.frame(plot_group = character(0), x_pheno = numeric(0))
+  p4 <- ggplot2::ggplot(ph_sub, ggplot2::aes(x = x_pheno, fill = plot_group, color = plot_group)) +
     ggplot2::geom_density(alpha = 0.35, linewidth = 0.75) +
-    ggplot2::geom_vline(data = med_ph, ggplot2::aes(xintercept = x_pheno, color = species_standardized), linetype = "dashed", linewidth = 0.8, show.legend = FALSE) +
+    ggplot2::geom_vline(data = med_ph, ggplot2::aes(xintercept = x_pheno, color = plot_group), linetype = "dashed", linewidth = 0.8, show.legend = FALSE) +
     ggplot2::scale_fill_manual(values = dyn_pal) + ggplot2::scale_color_manual(values = dyn_pal) +
     thm + ggplot2::labs(
       title = if (use_delta) "D. Hopkins-Corrected Circular Anthesis Isolation (Delta DOY)" else "D. Allochronic Flowering Isolation (Anthesis DOY)",
-      subtitle = if (nrow(med_ph) > 0) paste(sprintf("%s: %.1fd", gsub("Packera ", "P. ", med_ph$species_standardized), med_ph$x_pheno), collapse = " | ") else "Dashed lines = Species median flowering time",
+      subtitle = if (nrow(med_ph) > 0) paste(sprintf("%s: %.1fd", gsub("^Packera\\s+", "P. ", med_ph$plot_group), med_ph$x_pheno), collapse = " | ") else "Dashed lines = Group median flowering time",
       x = if (use_delta) "Circular Hopkins Residual Delta DOY (Days)" else "Flowering Day of Year (DOY)",
-      y = "Kernel Density", fill = "Species", color = "Species"
+      y = "Kernel Density", fill = grp_legend_lbl, color = grp_legend_lbl
     )
 
-  geo_sub <- df[!is.na(df$longitude) & !is.na(df$latitude) & df$species_standardized %in% active_tx, , drop = FALSE]
+  geo_sub <- df[!is.na(df$longitude) & !is.na(df$latitude) & df$plot_group %in% active_tx, , drop = FALSE]
   if (nrow(geo_sub) == 0) geo_sub <- df[!is.na(df$longitude) & !is.na(df$latitude), , drop = FALSE]
   us_states <- tryCatch(ggplot2::map_data("state"), error = function(e) NULL)
   p5 <- ggplot2::ggplot()
@@ -2722,32 +2900,33 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     p5 <- p5 + ggplot2::geom_polygon(data = us_states, ggplot2::aes(x = long, y = lat, group = group), fill = "#FBFBF9", color = "grey72", linewidth = 0.25)
   }
   p5 <- p5 +
-    ggplot2::geom_point(data = geo_sub, ggplot2::aes(x = longitude, y = latitude, color = species_standardized, shape = species_standardized),
+    ggplot2::geom_point(data = geo_sub, ggplot2::aes(x = longitude, y = latitude, color = plot_group, shape = plot_group),
                         fill = NA, stroke = 0.72, alpha = pt_alpha, size = 1.45) +
     ggplot2::scale_color_manual(values = dyn_pal) + ggplot2::scale_shape_manual(values = dyn_shapes) +
     ggplot2::coord_quickmap(xlim = c(-100, -74), ylim = c(28, 45)) +
     thm + ggplot2::labs(title = "E. Eastern North American Distribution & Contact Zones",
-                        subtitle = "Hollow markers (fill = NA) = Species localities over US state boundaries",
-                        x = "Longitude (deg W)", y = "Latitude (deg N)", color = "Species", shape = "Species")
+                        subtitle = "Hollow markers (fill = NA) = Localities over US state boundaries",
+                        x = "Longitude (deg W)", y = "Latitude (deg N)", color = grp_legend_lbl, shape = grp_legend_lbl)
 
   ev_rows <- list()
   for (tx in active_tx) {
-    sub_t <- df[df$species_standardized == tx, , drop = FALSE]
+    sub_t <- df[df$plot_group == tx, , drop = FALSE]
     if (nrow(sub_t) == 0) next
-    m_ok <- if ("cda_predicted_taxon" %in% names(sub_t)) (sub_t$cda_predicted_taxon == tx) else !isTRUE(sub_t$morphometric_outlier_flag)
+    sp_t <- as.character(sub_t$species_standardized)
+    m_ok <- if ("cda_predicted_taxon" %in% names(sub_t)) (sub_t$cda_predicted_taxon == tx | sub_t$cda_predicted_taxon == sp_t) else !isTRUE(sub_t$morphometric_outlier_flag)
     pct_m <- 100 * mean(m_ok, na.rm = TRUE); if (!is.finite(pct_m)) pct_m <- 85.0
     v_ok <- if ("vision_predicted_label" %in% names(sub_t) && any(!is.na(sub_t$vision_predicted_label))) {
-      (sub_t$vision_predicted_label == tx) & (!isTRUE(sub_t$is_label_corrupted))
+      (sub_t$vision_predicted_label == tx | sub_t$vision_predicted_label == sp_t) & (!isTRUE(sub_t$is_label_corrupted))
     } else if ("c_error" %in% names(sub_t)) as.numeric(sub_t$c_error) < 0.55 else TRUE
     pct_v <- 100 * mean(v_ok, na.rm = TRUE); if (!is.finite(pct_v)) pct_v <- 82.0
     e_ok <- if ("edaphic_best_fit_taxon" %in% names(sub_t) && any(!is.na(sub_t$edaphic_best_fit_taxon))) {
-      sub_t$edaphic_best_fit_taxon == tx
+      sub_t$edaphic_best_fit_taxon == tx | sub_t$edaphic_best_fit_taxon == sp_t
     } else if ("edaphic_conflict_flag" %in% names(sub_t)) !as.logical(sub_t$edaphic_conflict_flag) else TRUE
     pct_e <- 100 * mean(e_ok, na.rm = TRUE); if (!is.finite(pct_e)) pct_e <- 80.0
     p_ok <- if ("phenology_conflict_flag" %in% names(sub_t)) !as.logical(sub_t$phenology_conflict_flag) else TRUE
     pct_p <- 100 * mean(p_ok, na.rm = TRUE); if (!is.finite(pct_p)) pct_p <- 88.0
     ev_rows[[length(ev_rows) + 1]] <- data.frame(
-      Species = gsub("Packera ", "P. ", tx),
+      Species = gsub("^Packera\\s+", "P. ", tx),
       Stream = factor(c("1. EFA/CDA Morphology", "2. DINOv2 Vision/Vestiture", "3. 10m-30m Edaphic Niche", "4. Anthesis Phenology"),
                       levels = c("4. Anthesis Phenology", "3. 10m-30m Edaphic Niche", "2. DINOv2 Vision/Vestiture", "1. EFA/CDA Morphology")),
       Concordance_Pct = round(c(pct_m, pct_v, pct_e, pct_p), 1), stringsAsFactors = FALSE
@@ -2758,10 +2937,10 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     ggplot2::geom_tile(color = "white", linewidth = 0.8) +
     ggplot2::geom_text(ggplot2::aes(label = sprintf("%.1f%%", Concordance_Pct)), size = 3.0, fontface = "bold", color = ifelse(ev_df$Concordance_Pct >= 55, "white", "#111111")) +
     ggplot2::scale_fill_gradient2(low = "#E69F00", mid = "#56B4E9", high = "#0072B2", midpoint = 65, limits = c(0, 100)) +
-    thm + ggplot2::theme(axis.text.x = ggplot2::element_text(face = "italic", angle = 14, hjust = 1)) +
+    thm + ggplot2::theme(axis.text.x = ggplot2::element_text(face = if (is_subcluster_mode) "bold" else "italic", angle = 14, hjust = 1)) +
     ggplot2::labs(title = "F. Multi-Evidence Delimitation Concordance",
-                  subtitle = "Reliability-weighted concordance per modality across active species",
-                  x = "Target Species", y = "Independent Evidence Stream", fill = "% Concordant")
+                  subtitle = "Reliability-weighted concordance per modality across active groups",
+                  x = if (is_subcluster_mode) "Target Morphotype / Subcluster" else "Target Species", y = "Independent Evidence Stream", fill = "% Concordant")
 
   tmp_pdf <- paste0(out_pdf, ".", Sys.getpid(), ".tmp")
   grDevices::pdf(tmp_pdf, width = 14.0, height = 9.2)

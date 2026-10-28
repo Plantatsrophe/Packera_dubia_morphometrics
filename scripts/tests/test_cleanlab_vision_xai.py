@@ -376,6 +376,24 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             self.assertEqual(cats, ["CATANON", "CATDUB", "CATPAUP"])
             np.testing.assert_allclose(np.linalg.norm(feats, axis=1), np.ones(3), atol=1e-4)
 
+            # Verify generate_gradcam_panel plots probability bars only for active_taxa present in the run
+            from unittest.mock import patch as mock_patch
+            captured_yticks = []
+            orig_savefig = mod_xai.plt.savefig
+            def _spy_savefig(*args, **kwargs):
+                fig = mod_xai.plt.gcf()
+                if len(fig.axes) >= 3:
+                    captured_yticks.append([t.get_text() for t in fig.axes[2].get_yticklabels()])
+                return orig_savefig(*args, **kwargs)
+            with mock_patch.object(mod_xai.plt, "savefig", side_effect=_spy_savefig):
+                mod_xai.generate_gradcam_panel(
+                    df.to_dict("records"),
+                    tmp_path / "gradcam_3taxa.png",
+                    demo=True,
+                )
+            self.assertTrue(captured_yticks)
+            self.assertEqual(captured_yticks[0], ["P. anonyma", "P. dubia", "P. paupercula"])
+
 
 if __name__ == "__main__":
     unittest.main()

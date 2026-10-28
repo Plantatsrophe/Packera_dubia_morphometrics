@@ -1168,10 +1168,24 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
 export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   message(sprintf("Generating 2-panel phenological latitudinal anomaly figure to %s...", out_pdf))
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
-  active_tx <- get_active_packera_taxa(df$species_standardized)
+  df$plot_group <- if (exists("resolve_plot_group_column", mode = "function")) {
+    resolve_plot_group_column(df)
+  } else {
+    sp_v <- as.character(df$species_standardized)
+    if (length(unique(stats::na.omit(sp_v))) < 2L ||
+        ("analysis_group" %in% names(df) && any(grepl("Morphotype_K|^LatTertile_|_Coastal|_Outcrop", df$analysis_group, ignore.case = TRUE)))) {
+      if ("analysis_group" %in% names(df) && length(unique(stats::na.omit(df$analysis_group))) >= 2L) as.character(df$analysis_group)
+      else if ("grouping_col" %in% names(df) && length(unique(stats::na.omit(df$grouping_col))) >= 2L) as.character(df$grouping_col)
+      else if ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster))) paste0("Morphotype_K", ifelse(is.na(df$gmm_cluster), 1L, as.integer(df$gmm_cluster)))
+      else sp_v
+    } else sp_v
+  }
+  active_tx <- sort(unique(stats::na.omit(df$plot_group)))
+  active_tx <- active_tx[nzchar(active_tx) & active_tx != "Unknown"]
+  if (length(active_tx) == 0) active_tx <- get_active_packera_taxa(df$species_standardized)
   dyn_pal <- if (exists("get_dynamic_packera_palette", mode = "function")) get_dynamic_packera_palette(active_tx) else TAXON_COLORS
   dyn_shapes <- stats::setNames(rep_len(c(21, 24, 22, 23, 1, 2, 5, 0), length(active_tx)), active_tx)
-  is_target <- df$species_standardized %in% active_tx & !is.na(df$delta_doy)
+  is_target <- df$plot_group %in% active_tx & !is.na(df$delta_doy)
   target_df <- if ("is_verified_anthesis" %in% names(df)) {
     df[is_target & df$is_verified_anthesis, ]
   } else {
@@ -1197,7 +1211,7 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   )
   
   pt_alpha <- if (nrow(target_df) > 1000) 0.45 else 0.75
-  p1 <- ggplot2::ggplot(target_df, ggplot2::aes(x = decimalLatitude, y = doy, color = species_standardized, shape = species_standardized)) +
+  p1 <- ggplot2::ggplot(target_df, ggplot2::aes(x = decimalLatitude, y = doy, color = plot_group, shape = plot_group)) +
     ggplot2::geom_point(fill = NA, stroke = 0.78, alpha = pt_alpha, size = 1.65) +
     ggplot2::geom_line(data = pred_line, ggplot2::aes(x = decimalLatitude, y = doy),
                        color = "black", linewidth = 1.1, linetype = "solid", inherit.aes = FALSE) +
@@ -1210,12 +1224,12 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
       title = sprintf("A. Verified Latitudinal Spring Cline: DOY ~ Latitude (Slope = +%.2f d/deg, R2 = %.2f)",
                       baseline$slope, baseline$r_squared),
       subtitle = "Solid black = Empirical WLS regression; Dashed vermilion = Hopkins' Law (+4.0 d / deg N)",
-      x = "Decimal Latitude (deg N)", y = "Observed Anthesis Day of Year (DOY)", color = "Taxon", shape = "Taxon"
+      x = "Decimal Latitude (deg N)", y = "Observed Anthesis Day of Year (DOY)", color = "Group", shape = "Group"
     )
   
-  med_df <- stats::aggregate(delta_doy ~ species_standardized, data = target_df, FUN = function(x) stats::median(x, na.rm = TRUE))
+  med_df <- stats::aggregate(delta_doy ~ plot_group, data = target_df, FUN = function(x) stats::median(x, na.rm = TRUE))
   if (requireNamespace("ggridges", quietly = TRUE)) {
-    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, y = species_standardized, fill = species_standardized, color = species_standardized)) +
+    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, y = plot_group, fill = plot_group, color = plot_group)) +
       ggridges::geom_density_ridges(alpha = 0.45, scale = 1.15, rel_min_height = 0.01, linewidth = 0.8) +
       ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
       ggplot2::scale_fill_manual(values = dyn_pal) +
@@ -1223,13 +1237,13 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
       thm +
       ggplot2::labs(
         title = "B. Phenological Anomalies (Delta DOY) & Allochronic Separation",
-        subtitle = paste(sprintf("%s: %+.1f d", med_df$species_standardized, med_df$delta_doy), collapse = " | "),
-        x = "Phenological Anomaly Delta DOY (Days Relative to Latitudinal Baseline)", y = "Target Taxon", fill = "Taxon", color = "Taxon"
+        subtitle = paste(sprintf("%s: %+.1f d", med_df$plot_group, med_df$delta_doy), collapse = " | "),
+        x = "Phenological Anomaly Delta DOY (Days Relative to Latitudinal Baseline)", y = "Target Group", fill = "Group", color = "Group"
       )
   } else {
-    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, fill = species_standardized, color = species_standardized)) +
+    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, fill = plot_group, color = plot_group)) +
       ggplot2::geom_density(alpha = 0.35, linewidth = 0.85) +
-      ggplot2::geom_vline(data = med_df, ggplot2::aes(xintercept = delta_doy, color = species_standardized),
+      ggplot2::geom_vline(data = med_df, ggplot2::aes(xintercept = delta_doy, color = plot_group),
                           linetype = "dashed", linewidth = 0.85, show.legend = FALSE) +
       ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "black", linewidth = 0.8) +
       ggplot2::scale_fill_manual(values = dyn_pal) +
@@ -1237,8 +1251,8 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
       thm +
       ggplot2::labs(
         title = "B. Phenological Anomalies (Delta DOY) & Allochronic Separation",
-        subtitle = paste(sprintf("%s: %+.1f d", med_df$species_standardized, med_df$delta_doy), collapse = " | "),
-        x = "Phenological Anomaly Delta DOY (Days Relative to Latitudinal Baseline)", y = "Kernel Density", fill = "Taxon", color = "Taxon"
+        subtitle = paste(sprintf("%s: %+.1f d", med_df$plot_group, med_df$delta_doy), collapse = " | "),
+        x = "Phenological Anomaly Delta DOY (Days Relative to Latitudinal Baseline)", y = "Kernel Density", fill = "Group", color = "Group"
       )
   }
   
@@ -2234,10 +2248,28 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
     )
 
   # Panel B: 10m-30m Fine-Grain Pedological & Outcrop Envelopes (Hollow Markers)
-  active_tx <- get_active_packera_taxa(df$species_standardized)
-  dyn_pal <- if (exists("get_dynamic_packera_palette", mode = "function")) get_dynamic_packera_palette(active_tx) else TAXON_COLORS
+  df$plot_group <- if (exists("resolve_plot_group_column", mode = "function")) {
+    resolve_plot_group_column(df)
+  } else {
+    sp_v <- as.character(df$species_standardized)
+    if (length(unique(stats::na.omit(sp_v))) < 2L ||
+        ("analysis_group" %in% names(df) && any(grepl("Morphotype_K|^LatTertile_|_Coastal|_Outcrop", df$analysis_group, ignore.case = TRUE))) ||
+        ("grouping_col" %in% names(df) && any(grepl("Morphotype_K|^LatTertile_|_Coastal|_Outcrop", df$grouping_col, ignore.case = TRUE)))) {
+      if ("analysis_group" %in% names(df) && length(unique(stats::na.omit(df$analysis_group))) >= 2L) as.character(df$analysis_group)
+      else if ("grouping_col" %in% names(df) && length(unique(stats::na.omit(df$grouping_col))) >= 2L) as.character(df$grouping_col)
+      else if ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster))) paste0("Morphotype_K", ifelse(is.na(df$gmm_cluster), 1L, as.integer(df$gmm_cluster)))
+      else sp_v
+    } else sp_v
+  }
+  active_tx <- sort(unique(stats::na.omit(df$plot_group)))
+  active_tx <- active_tx[nzchar(active_tx) & active_tx != "Unknown"]
+  if (length(active_tx) == 0) active_tx <- get_active_packera_taxa(df$species_standardized)
+  is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", active_tx, ignore.case = TRUE)) ||
+    length(unique(stats::na.omit(df$species_standardized))) < 2L
+  grp_lbl <- if (is_subcluster_mode) "Morphotype" else "Taxon"
+  dyn_pal <- if (exists("get_dynamic_packera_palette", mode = "function")) get_dynamic_packera_palette(active_tx) else stats::setNames(rep_len(c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9"), length(active_tx)), active_tx)
   dyn_shapes <- stats::setNames(rep_len(c(21, 24, 22, 23, 1, 2, 5, 0, 6, 4), length(active_tx)), active_tx)
-  plot_df <- df[df$species_standardized %in% active_tx, ]
+  plot_df <- df[df$plot_group %in% active_tx, ]
   if (!("fine_soil_sand" %in% names(plot_df))) plot_df$fine_soil_sand <- plot_df$soil_sand
   if (!("fine_soil_ph" %in% names(plot_df))) plot_df$fine_soil_ph <- plot_df$soil_ph
   if (!("fine_bedrock_depth_cm" %in% names(plot_df))) plot_df$fine_bedrock_depth_cm <- 150.0
@@ -2246,7 +2278,7 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
 
   pt_alpha <- if (nrow(plot_df) > 1000) 0.45 else 0.78
   p2 <- ggplot2::ggplot(plot_df,
-                        ggplot2::aes(x = fine_soil_sand, y = fine_soil_ph, color = species_standardized, shape = species_standardized)) +
+                        ggplot2::aes(x = fine_soil_sand, y = fine_soil_ph, color = plot_group, shape = plot_group)) +
     ggplot2::annotate("rect", xmin = 60, xmax = 100, ymin = 3.8, ymax = 5.5,
                       fill = "#D55E00", alpha = 0.08, color = "#D55E00", linetype = "dashed", linewidth = 0.45) +
     ggplot2::stat_ellipse(level = 0.85, linewidth = 1.0) +
@@ -2255,19 +2287,19 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
     ggplot2::scale_color_manual(values = dyn_pal) +
     thm + ggplot2::labs(title = "B. 10m-30m Fine-Grain Pedological Envelopes (POLARIS/SSURGO)",
                         subtitle = "Dashed box = Acidic Granite-Flatrock / Sandhill Envelope (pH <= 5.5, Sand >= 60%)",
-                        x = "Fine-Grain Soil Sand Fraction (%)", y = "Fine-Grain Soil pH (H2O)", color = "Taxon", shape = "Taxon")
+                        x = "Fine-Grain Soil Sand Fraction (%)", y = "Fine-Grain Soil pH (H2O)", color = grp_lbl, shape = grp_lbl)
 
   # Panel C: Fine-Grain Lithic Bedrock Depth & Soil Sand Diagnostic Boxplots
-  kw_bed <- tryCatch(stats::kruskal.test(fine_bedrock_depth_cm ~ factor(species_standardized), data = plot_df)$p.value, error = function(e) NA_real_)
+  kw_bed <- tryCatch(stats::kruskal.test(fine_bedrock_depth_cm ~ factor(plot_group), data = plot_df)$p.value, error = function(e) NA_real_)
   p3 <- ggplot2::ggplot(plot_df,
-                        ggplot2::aes(x = species_standardized, y = fine_bedrock_depth_cm, fill = species_standardized, color = species_standardized)) +
+                        ggplot2::aes(x = plot_group, y = fine_bedrock_depth_cm, fill = plot_group, color = plot_group)) +
     ggplot2::geom_boxplot(alpha = 0.30, outlier.shape = 1, outlier.size = 1.2, width = 0.58) +
     ggplot2::scale_fill_manual(values = dyn_pal) +
     ggplot2::scale_color_manual(values = dyn_pal) +
-    thm + ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 18, hjust = 1, face = "italic"), legend.position = "none") +
+    thm + ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 18, hjust = 1, face = if (is_subcluster_mode) "bold" else "italic"), legend.position = "none") +
     ggplot2::labs(
       title = "C. Depth to Lithic Bedrock Restriction (10m-30m SSURGO/SOLUS100)",
-      subtitle = if (!is.na(kw_bed)) sprintf("Kruskal-Wallis p = %.2e across taxa", kw_bed) else "Shallow lithic contact characterizes flatrock habitats",
+      subtitle = if (!is.na(kw_bed)) sprintf("Kruskal-Wallis p = %.2e across groups", kw_bed) else "Shallow lithic contact characterizes flatrock habitats",
       x = NULL, y = "Depth to Lithic Bedrock (cm)"
     )
 

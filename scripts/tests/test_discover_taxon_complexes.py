@@ -25,6 +25,10 @@ from scripts.vision.lm2_geometry_utils import (
     is_botanical_dissection,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DISCOVERY_R_SCRIPT = REPO_ROOT / "scripts" / "analysis" / "08_discover_taxon_complexes.R"
+PUB_FIG_R_SCRIPT = REPO_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R"
+
 
 class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
     """Tests for Milestones 1-5: N-taxon basionym mapping, dissection gate, and complex discovery."""
@@ -457,6 +461,184 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         """
         res = subprocess.run(["Rscript", "-e", r_code], capture_output=True, text=True, check=False)
         self.assertEqual(res.returncode, 0, f"R hierarchical test failed:\n{res.stderr}\n{res.stdout}")
+
+    def test_subcluster_network_when_2_species_or_within_species_gmm_clusters(self) -> None:
+        """Verify 08_discover_taxon_complexes.R (<=800 lines) builds Taxon x Morphotype subcluster network when <=2 species."""
+        line_count = len(DISCOVERY_R_SCRIPT.read_text(encoding="utf-8").splitlines())
+        self.assertLessEqual(
+            line_count, 800,
+            f"08_discover_taxon_complexes.R has {line_count} lines; must be <= 800 lines.",
+        )
+
+        rng = np.random.default_rng(20261028)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            morph_csv = tmp_path / "morphometric_flags.csv"
+            vis_csv = tmp_path / "label_noise_audit.csv"
+            out_complexes = tmp_path / "empirical_taxon_complexes.csv"
+            out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
+            out_neighbors = tmp_path / "focal_auto_neighbors.txt"
+            out_fig = tmp_path / "fig_empirical_taxon_complex_network.pdf"
+
+            # 2 species with within-species morphotypes K1, K2 (>=5 vouchers each) + rare K3 (2 vouchers, should be filtered out)
+            subclusters = [
+                ("Packera dubia", 1, 8, np.array([-2.2, -1.5, 0.0, 0.0, 0.0])),
+                ("Packera dubia", 2, 7, np.array([-1.8, -1.2, 0.2, 0.0, 0.0])),
+                ("Packera dubia", 3, 2, np.array([0.0, 0.0, 0.0, 0.0, 0.0])),
+                ("Packera paupercula", 1, 8, np.array([2.2, 1.5, 0.0, 0.0, 0.0])),
+                ("Packera paupercula", 2, 6, np.array([1.9, 1.3, -0.2, 0.0, 0.0])),
+            ]
+            morph_rows = []
+            vis_rows = []
+            v_idx = 0
+            for sp_name, k_id, count, center in subclusters:
+                for _ in range(count):
+                    v_idx += 1
+                    cat_no = f"SUB_{v_idx:04d}"
+                    vec = center + rng.normal(0.0, 0.25, size=5)
+                    morph_rows.append({
+                        "catalogNumber": cat_no,
+                        "plant_individual_id": 1,
+                        "species_standardized": sp_name,
+                        "determiner_tier": "Tier_1_Gold",
+                        "n_tier1_leaves": 3,
+                        "morph_tier_source": "Tier_1_Pure",
+                        "gmm_cluster": k_id,
+                        "Sym_PC1": float(vec[0]),
+                        "Sym_PC2": float(vec[1]),
+                        "Sym_PC3": float(vec[2]),
+                        "Sym_PC4": float(vec[3]),
+                        "Sym_PC5": float(vec[4]),
+                        "cda_predicted_taxon": sp_name,
+                        "cda_posterior_prob": 0.90,
+                        "cda_second_posterior_prob": 0.08,
+                    })
+                    vis_rows.append({
+                        "catalogNumber": cat_no,
+                        "plant_individual_id": 1,
+                        "species_standardized": sp_name,
+                        "determiner_tier": "Tier_1_Gold",
+                        "vision_predicted_label": sp_name,
+                        "c_error": 0.08,
+                        "is_label_corrupted": False,
+                    })
+
+            pd.DataFrame(morph_rows).to_csv(morph_csv, index=False)
+            pd.DataFrame(vis_rows).to_csv(vis_csv, index=False)
+
+            res = subprocess.run(
+                [
+                    "Rscript", str(DISCOVERY_R_SCRIPT),
+                    "--morphometrics", str(morph_csv),
+                    "--vision-audit", str(vis_csv),
+                    "--focal-taxon", "Packera dubia",
+                    "--output-complexes", str(out_complexes),
+                    "--output-affinity", str(out_affinity),
+                    "--output-neighbors", str(out_neighbors),
+                    "--output-figure", str(out_fig),
+                ],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(res.returncode, 0, f"Subcluster discovery failed:\n{res.stderr}\n{res.stdout}")
+            comp_df = pd.read_csv(out_complexes)
+            expected_nodes = {"P. dubia [K1]", "P. dubia [K2]", "P. paupercula [K1]", "P. paupercula [K2]"}
+            self.assertEqual(set(comp_df["species_standardized"]), expected_nodes)
+            self.assertTrue((comp_df["n_vouchers"] >= 5).all())
+            self.assertTrue(out_fig.exists() and out_fig.stat().st_size > 1000)
+
+    def test_intraspecific_morphotype_cluster_visualization_across_r_figures(self) -> None:
+        """Verify pub_figures_utils.R and 06_multimodal_spatial_rf.R use morphotype clusters when <2 species."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            r_code = f"""
+            source("{PUB_FIG_R_SCRIPT.as_posix()}")
+            source("{(REPO_ROOT / 'scripts' / 'analysis' / '06_multimodal_spatial_rf.R').as_posix()}")
+            set.seed(123)
+            n <- 24
+            df <- data.frame(
+              catalogNumber = sprintf("INTRA_%03d", seq_len(n)),
+              plant_individual_id = 1L,
+              species_standardized = rep("Packera dubia", n),
+              scientificName = rep("Packera dubia", n),
+              gmm_cluster = rep(1:3, each = 8),
+              analysis_group = paste0("Morphotype_K", rep(1:3, each = 8)),
+              grouping_col = paste0("Morphotype_K", rep(1:3, each = 8)),
+              can1 = c(rnorm(8, -2), rnorm(8, 0), rnorm(8, 2)),
+              can2 = c(rnorm(8, 1), rnorm(8, -1.5), rnorm(8, 1)),
+              can3 = rnorm(n),
+              PC1 = c(rnorm(8, -2), rnorm(8, 0), rnorm(8, 2)),
+              PC2 = c(rnorm(8, 1), rnorm(8, -1.5), rnorm(8, 1)),
+              PC3 = rnorm(n),
+              Sym_PC1 = c(rnorm(8, -2), rnorm(8, 0), rnorm(8, 2)),
+              Sym_PC2 = c(rnorm(8, 1), rnorm(8, -1.5), rnorm(8, 1)),
+              aspect_ratio = runif(n, 1.5, 3.2),
+              solidity = runif(n, 0.75, 0.95),
+              log_centsize = runif(n, 2.0, 3.5),
+              AR_inv = runif(n, 0.9, 1.4),
+              cda_predicted_taxon = paste0("Morphotype_K", rep(1:3, each = 8)),
+              cda_posterior_prob = runif(n, 0.75, 0.98),
+              cda_second_posterior_prob = runif(n, 0.01, 0.20),
+              fine_soil_sand = runif(n, 40, 85),
+              fine_soil_ph = runif(n, 4.2, 6.8),
+              fine_bedrock_depth_cm = runif(n, 20, 150),
+              ssurgo_rock_outcrop_pct = runif(n, 0, 30),
+              topo_tpi_30m = rnorm(n),
+              bio1_temp_mean = runif(n, 12, 18),
+              bio12_precip_annual = runif(n, 1000, 1400),
+              decimalLatitude = runif(n, 32, 38),
+              decimalLongitude = runif(n, -84, -77),
+              latitude = runif(n, 32, 38),
+              longitude = runif(n, -84, -77),
+              doy = runif(n, 85, 145),
+              delta_doy = rnorm(n, 0, 8),
+              is_completed_voucher = TRUE,
+              taxonomic_treatment_subtype = rep(c("Confirmed_Species", "Subspecies_Ecotype", "Hybrid_Introgressant"), 8),
+              stringsAsFactors = FALSE
+            )
+            grp <- resolve_plot_group_column(df)
+            stopifnot(identical(sort(unique(grp)), c("Morphotype_K1", "Morphotype_K2", "Morphotype_K3")))
+
+            cda_res <- list(
+              grouping_col = df$grouping_col,
+              loocv_accuracy = 0.91,
+              variance_pct = c(64.0, 36.0),
+              canonical_scores = cbind(Can1 = df$can1, Can2 = df$can2, Can3 = df$can3)
+            )
+            gmm_res <- list(optimal_G = 3, best_k = 3, optimal_model = "VVI", classification = df$gmm_cluster)
+
+            f_cda <- file.path("{tmpdir}", "cda_passive_projection.pdf")
+            render_cda_biplot_4panel_pdf(df, cda_res, gmm_res, f_cda)
+            stopifnot(file.exists(f_cda) && file.info(f_cda)$size > 1000)
+
+            generate_step04_pub_figures(df, cda_res, gmm_res, NULL, f_cda)
+            stopifnot(file.exists(file.path("{tmpdir}", "fig04_gmm_cda_clustering.pdf")))
+
+            f_srf <- file.path("{tmpdir}", "spatial_rf_niche_importance.pdf")
+            srf_mock <- list(
+              OOB_Error = 0.12,
+              Spatial_Block_CV_Accuracy = 0.86,
+              importance = data.frame(
+                Predictor = c("fine_soil_sand", "fine_soil_ph", "MEM1"),
+                MeanDecreaseAccuracy = c(0.28, 0.21, 0.12),
+                Type = c("Fine-Grain Edaphic & Outcrop (10-30m)", "Fine-Grain Edaphic & Outcrop (10-30m)", "Spatial (MEMs)")
+              ),
+              variance_partition = data.frame(
+                Component = c("[a] Pure Fine-Grain Edaphic", "[b] Pure Macro-Climatic", "[c] Pure Spatial (MEMs)", "[d] Shared Env-Spatial", "[e] Unexplained"),
+                Variance_Pct = c(38, 22, 15, 10, 15)
+              )
+            )
+            niche_mock <- list(
+              summary = data.frame(Pair = "Morphotype_K1 vs Morphotype_K2", Taxon_1 = "Morphotype_K1", Taxon_2 = "Morphotype_K2", Warren_D = 0.42, Schoeners_D = 0.42, Equivalency_p_value = 0.02),
+              permutations = data.frame(Pair = rep("Morphotype_K1 vs Morphotype_K2", 10), D_null = runif(10, 0.4, 0.9))
+            )
+            export_spatial_rf_figures(df, srf_mock, niche_mock, f_srf)
+            stopifnot(file.exists(f_srf) && file.info(f_srf)$size > 1000)
+
+            f_s07 <- file.path("{tmpdir}", "integrative_ taxonomic_synthesis.pdf")
+            render_step07_synthesis_plate_pdf(df, f_s07)
+            stopifnot(file.exists(f_s07) && file.info(f_s07)$size > 1000)
+            """
+            res = subprocess.run(["Rscript", "-e", r_code], capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0, f"Intraspecific figure test failed:\n{res.stderr}\n{res.stdout}")
 
 
 if __name__ == "__main__":
