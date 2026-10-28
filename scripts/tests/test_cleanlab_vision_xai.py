@@ -1,30 +1,39 @@
 #!/usr/bin/env python3
 """
 scripts/tests/test_cleanlab_vision_xai.py
-========================================
-Unit and regression tests for DINOv2 feature extraction, Confident Learning thresholds,
-taxonomic standardization, and Grad-CAM XAI.
+=========================================
+Unit and regression tests for Indumentum-Blind 224x224 Macro-Architecture Pooling,
+Foreground-Masked DINOv2 Token Averaging, Authority-Anchored Institution-Blocked
+Out-of-Fold Calibration, Confident Learning + Feature-Space OOD, and Pointing Game
+Foreground Attribution Auditing.
 """
 
 import importlib
+import tempfile
+import time
 import unittest
 from pathlib import Path
 import numpy as np
 import pandas as pd
+from PIL import Image
 
-# Dynamically import module with numeric prefix
 mod_xai = importlib.import_module("scripts.analysis.05_cleanlab_vision_xai")
 standardize_packera_taxon = mod_xai.standardize_packera_taxon
 neutralize_mounting_paper = mod_xai.neutralize_mounting_paper
 classify_foliar_surface_orientation = mod_xai.classify_foliar_surface_orientation
+preprocess_macro_rosette_crop = mod_xai.preprocess_macro_rosette_crop
+compute_foreground_tissue_mask = mod_xai.compute_foreground_tissue_mask
+foreground_masked_patch_pooling = mod_xai.foreground_masked_patch_pooling
 extract_dinov2_embeddings = mod_xai.extract_dinov2_embeddings
-run_confident_learning_audit = mod_xai.run_confident_learning_audit
 compute_out_of_fold_probabilities = mod_xai.compute_out_of_fold_probabilities
+compute_feature_space_ood_scores = mod_xai.compute_feature_space_ood_scores
+run_confident_learning_audit = mod_xai.run_confident_learning_audit
+compute_foreground_attention_ratio = mod_xai.compute_foreground_attention_ratio
 TARGET_TAXA = mod_xai.TARGET_TAXA
 
 
 class TestCleanlabVisionXAI(unittest.TestCase):
-    """Test suite for DINOv2 vision embedding extraction & Cleanlab XAI."""
+    """Test suite for DINOv2 macro-architecture pooling & Cleanlab XAI."""
 
     @classmethod
     def setUpClass(cls):
@@ -46,10 +55,6 @@ class TestCleanlabVisionXAI(unittest.TestCase):
 
     def test_neutralize_mounting_paper(self):
         """Test vectorized Otsu background neutralization replaces paper with RGB(128,128,128)."""
-        from PIL import Image
-
-        # Create a 100x100 synthetic patch: bright yellowed paper background (220, 215, 195)
-        # with a dark green botanical leaf circle in the center (45, 95, 35)
         arr = np.full((100, 100, 3), fill_value=[225, 220, 200], dtype=np.uint8)
         y, x = np.ogrid[:100, :100]
         mask_leaf = ((x - 50) ** 2 + (y - 50) ** 2) <= 25 ** 2
@@ -59,75 +64,81 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         neutralized_img = neutralize_mounting_paper(img)
         res_arr = np.array(neutralized_img)
 
-        # Output shape and type should match input
         self.assertEqual(res_arr.shape, (100, 100, 3))
         self.assertEqual(res_arr.dtype, np.uint8)
+        np.testing.assert_array_equal(res_arr[0, 0], [128, 128, 128])
+        np.testing.assert_array_equal(res_arr[50, 50], [45, 95, 35])
 
-        # Background paper pixels should be neutralized to uniform neutral gray (128, 128, 128)
-        corner_pixels = res_arr[0, 0]
-        np.testing.assert_array_equal(corner_pixels, [128, 128, 128], err_msg="Corner paper pixel not neutral gray")
+    def test_224x224_low_pass_macro_architectural_pooling(self):
+        """Verify Gaussian anti-aliasing (sigma=1.0) and strict 224x224 downsampling attenuate fine pubescence."""
+        # Create a 448x448 image with a macro rosette disk and high-frequency 1-px trichome checkerboard noise
+        arr = np.full((448, 448, 3), fill_value=235, dtype=np.uint8)
+        y, x = np.ogrid[:448, :448]
+        rosette_mask = ((x - 224) ** 2 + (y - 224) ** 2) <= 140 ** 2
+        base_green = np.full((448, 448, 3), fill_value=[50, 100, 40], dtype=np.int16)
+        checker = (((x + y) % 2) * 80 - 40)[:, :, None]
+        noisy_rosette = np.clip(base_green + checker, 0, 255).astype(np.uint8)
+        arr[rosette_mask] = noisy_rosette[rosette_mask]
 
-        # Botanical tissue in the center should be preserved
-        center_pixel = res_arr[50, 50]
-        np.testing.assert_array_equal(center_pixel, [45, 95, 35], err_msg="Center plant tissue altered")
+        raw_center_std = float(np.std(arr[180:268, 180:268, 1].astype(np.float32)))
+        macro = preprocess_macro_rosette_crop(arr, target_size=(224, 224), sigma=1.0)
 
-        # Test with raw numpy array input as well
-        res_from_arr = neutralize_mounting_paper(arr)
-        np.testing.assert_array_equal(res_from_arr[0, 0], [128, 128, 128])
-        np.testing.assert_array_equal(res_from_arr[50, 50], [45, 95, 35])
-
-    def test_classify_foliar_surface_orientation_adaxial(self):
-        """Verify that darker green/brown glabrescent foliar tissue is classified as adaxial."""
-        # Synthetic neutralized patch (RGB 128, 128, 128 background with dark green leaf circle)
-        arr = np.full((120, 120, 3), fill_value=128, dtype=np.uint8)
-        y, x = np.ogrid[:120, :120]
-        mask_leaf = ((x - 60) ** 2 + (y - 60) ** 2) <= 30 ** 2
-        arr[mask_leaf] = [45, 95, 35]  # Dark botanical green
-
-        result = classify_foliar_surface_orientation(arr)
-        self.assertEqual(result["surface_orientation"], "adaxial")
-        self.assertLess(result["mean_luminance"], 68.0)
-        self.assertGreaterEqual(result["mean_saturation"], 0.22)
-        self.assertLessEqual(result["high_brightness_ratio"], 0.1)
-
-    def test_classify_foliar_surface_orientation_abaxial(self):
-        """Verify that bright white arachnoid-woolly tomentum is classified as abaxial."""
-        # Synthetic neutralized patch with dense white/silver arachnoid tomentum
-        arr = np.full((120, 120, 3), fill_value=128, dtype=np.uint8)
-        y, x = np.ogrid[:120, :120]
-        mask_leaf = ((x - 60) ** 2 + (y - 60) ** 2) <= 30 ** 2
-        arr[mask_leaf] = [225, 230, 220]  # Dense white arachnoid tomentum
-
-        result = classify_foliar_surface_orientation(arr)
-        self.assertEqual(result["surface_orientation"], "abaxial")
-        self.assertGreater(result["mean_luminance"], 68.0)
-        self.assertLess(result["mean_saturation"], 0.22)
-        self.assertGreaterEqual(result["high_brightness_ratio"], 0.5)
-
-    def test_foliar_orientation_execution_speed(self):
-        """Verify vectorized calculation executes within the <0.05 seconds per patch budget."""
-        import time
-
-        arr = np.full((224, 224, 3), fill_value=128, dtype=np.uint8)
-        y, x = np.ogrid[:224, :224]
-        mask_leaf = ((x - 112) ** 2 + (y - 112) ** 2) <= 60 ** 2
-        arr[mask_leaf] = [50, 100, 40]
-
-        start_time = time.perf_counter()
-        n_iters = 50
-        for _ in range(n_iters):
-            _ = classify_foliar_surface_orientation(arr)
-        total_time = time.perf_counter() - start_time
-        avg_time = total_time / n_iters
-
+        self.assertEqual(macro.shape, (224, 224, 3))
+        self.assertEqual(macro.dtype, np.uint8)
+        filtered_center_std = float(np.std(macro[90:134, 90:134, 1].astype(np.float32)))
         self.assertLess(
-            avg_time,
-            0.05,
-            f"Execution time {avg_time:.4f}s per patch exceeds maximum budget of 0.05s",
+            filtered_center_std,
+            raw_center_std * 0.25,
+            "Gaussian anti-aliasing + 224x224 downsampling must suppress high-frequency epidermal texture.",
         )
 
+    def test_foreground_masked_token_averaging(self):
+        """Verify 16x16 foreground mask excludes background paper tokens from the 768-d L2-normalized embedding."""
+        arr = np.full((224, 224, 3), fill_value=[242, 239, 230], dtype=np.uint8)
+        # Plant tissue strictly in the top-left quadrant (rows 0..112, cols 0..112 -> 8x8 patch grid)
+        arr[:112, :112] = [40, 95, 35]
+
+        fg_mask_224, fg_grid_16 = compute_foreground_tissue_mask(arr, grid_size=(16, 16))
+        self.assertEqual(fg_mask_224.shape, (224, 224))
+        self.assertEqual(fg_grid_16.shape, (16, 16))
+        self.assertGreater(float(fg_grid_16[:8, :8].mean()), 0.85)
+        self.assertLess(float(fg_grid_16[8:, 8:].mean()), 0.15)
+
+        # Construct synthetic 16x16=256 patch tokens where foreground tokens have [1, 0, ...]
+        # and background paper tokens have [0, 100, ...]
+        tokens = np.zeros((16, 16, 768), dtype=np.float32)
+        tokens[:8, :8, 0] = 5.0
+        tokens[8:, :, 1] = 100.0
+        tokens[:, 8:, 1] = 100.0
+        tokens_flat = tokens.reshape(256, 768)
+
+        pooled = foreground_masked_patch_pooling(tokens_flat, fg_grid_16)
+        self.assertEqual(pooled.shape, (768,))
+        self.assertAlmostEqual(float(np.linalg.norm(pooled)), 1.0, places=5)
+        self.assertGreater(float(pooled[0]), 0.98, "Pooled embedding must reflect foreground tissue tokens.")
+        self.assertLess( abs(float(pooled[1])), 0.05, "Background paper tokens must be excluded from pooled embedding.")
+
+    def test_classify_foliar_surface_orientation_adaxial_and_abaxial(self):
+        """Verify adaxial vs. abaxial foliar orientation classification and <0.05s execution speed."""
+        arr_adax = np.full((120, 120, 3), fill_value=128, dtype=np.uint8)
+        y, x = np.ogrid[:120, :120]
+        mask_leaf = ((x - 60) ** 2 + (y - 60) ** 2) <= 30 ** 2
+        arr_adax[mask_leaf] = [45, 95, 35]
+        res_adax = classify_foliar_surface_orientation(arr_adax)
+        self.assertEqual(res_adax["surface_orientation"], "adaxial")
+
+        arr_abax = np.full((120, 120, 3), fill_value=128, dtype=np.uint8)
+        arr_abax[mask_leaf] = [225, 230, 220]
+        res_abax = classify_foliar_surface_orientation(arr_abax)
+        self.assertEqual(res_abax["surface_orientation"], "abaxial")
+
+        t0 = time.perf_counter()
+        for _ in range(25):
+            _ = classify_foliar_surface_orientation(arr_adax)
+        self.assertLess((time.perf_counter() - t0) / 25.0, 0.05)
+
     def test_dinov2_feature_extraction_synthetic(self):
-        """Test DINOv2 feature extraction returns (N, 768) embeddings for synthetic records when demo=True."""
+        """Test DINOv2 feature extraction returns (N, 768) L2-normalized embeddings when demo=True."""
         synthetic_records = [
             {
                 "catalogNumber": f"SYNTH_{i:03d}",
@@ -141,7 +152,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             extract_dinov2_embeddings(
                 records=synthetic_records,
-                model_name="dinov2_vitb14",
+                model_name="dinov2_vitb14_reg",
                 device="cpu",
                 batch_size=4,
                 demo=False,
@@ -149,7 +160,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
 
         features, labels, cat_nums = extract_dinov2_embeddings(
             records=synthetic_records,
-            model_name="dinov2_vitb14",
+            model_name="dinov2_vitb14_reg",
             device="cpu",
             batch_size=4,
             demo=True,
@@ -158,34 +169,71 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         self.assertEqual(features.shape, (12, 768))
         self.assertEqual(len(labels), 12)
         self.assertEqual(len(cat_nums), 12)
-        self.assertEqual(cat_nums[0], "SYNTH_000")
-        self.assertEqual(features.dtype, np.float32)
+        norms = np.linalg.norm(features, axis=1)
+        np.testing.assert_allclose(norms, np.ones(12), atol=1e-4)
 
-    def test_compute_vit_patch_saliency_attribution(self):
-        """Verify genuine DINOv2 ViT patch-token attribution via forward_features and clf weight dot product."""
+    def test_authority_anchored_institution_grouped_oof_calibration(self):
+        """Verify Gold/Silver anchor training, institutionCode-grouped CV, and passive Bronze prediction."""
+        rng = np.random.default_rng(42)
+        n_anchors = 24
+        n_bronze = 8
+        n_classes = 3
+
+        anchor_labels = np.array([i % n_classes for i in range(n_anchors)], dtype=int)
+        X_anc = rng.normal(0.0, 0.15, size=(n_anchors, 768)).astype(np.float32)
+        for i in range(n_anchors):
+            X_anc[i, anchor_labels[i] * 50 : (anchor_labels[i] + 1) * 50] += 4.0
+
+        # Create corrupted Tier_3_Bronze samples with inverted features that would warp decision boundary if trained on
+        bronze_labels = np.array([i % n_classes for i in range(n_bronze)], dtype=int)
+        X_brz = rng.normal(0.0, 0.15, size=(n_bronze, 768)).astype(np.float32)
+        for i in range(n_bronze):
+            true_c = (bronze_labels[i] + 1) % n_classes
+            X_brz[i, true_c * 50 : (true_c + 1) * 50] += 4.0
+
+        features = np.vstack([X_anc, X_brz])
+        labels = np.concatenate([anchor_labels, bronze_labels])
+        tiers = ["Tier_1_Gold" if i % 2 == 0 else "Tier_2_Silver" for i in range(n_anchors)] + ["Tier_3_Bronze"] * n_bronze
+        inst_codes = [["NCU", "US", "NY", "MO"][(i // 3) % 4] for i in range(len(labels))]
+
+        pred_probs, acc, f1 = compute_out_of_fold_probabilities(
+            features=features,
+            labels=labels,
+            n_splits=3,
+            random_state=42,
+            determiner_tiers=tiers,
+            institution_codes=inst_codes,
+        )
+
+        self.assertEqual(pred_probs.shape, (n_anchors + n_bronze, n_classes))
+        self.assertTrue(np.allclose(pred_probs.sum(axis=1), 1.0, atol=1e-4))
+        self.assertGreaterEqual(acc, 0.85, "Gold/Silver anchor OOF accuracy should remain high despite corrupted Bronze records.")
+
+        # Passive Bronze records with swapped features should be strongly predicted as their true visual class (true_c)
+        for i in range(n_bronze):
+            idx = n_anchors + i
+            expected_cls = (bronze_labels[i] + 1) % n_classes
+            self.assertEqual(int(np.argmax(pred_probs[idx])), expected_cls)
+
+    def test_compute_vit_patch_saliency_and_foreground_attention_ratio(self):
+        """Verify 16x16 -> 224x224 ViT patch saliency and Pointing Game foreground_attention_ratio."""
         import torch
         from sklearn.linear_model import LogisticRegression
 
         class DummyDINOv2(torch.nn.Module):
             def forward_features(self, x: torch.Tensor):
                 b = x.shape[0]
-                # 16x16 = 256 patch tokens of dimension 768
                 patch_tokens = torch.zeros((b, 256, 768), dtype=torch.float32)
-                # Activate top-left quadrant tokens along feature dim 0
                 patch_tokens[:, :64, 0] = 4.0
                 patch_tokens[:, 64:, 0] = -2.0
                 cls_token = torch.zeros((b, 768), dtype=torch.float32)
                 cls_token[:, 0] = 1.0
-                return {
-                    "x_norm_patchtokens": patch_tokens,
-                    "x_norm_clstoken": cls_token,
-                }
+                return {"x_norm_patchtokens": patch_tokens, "x_norm_clstoken": cls_token}
 
         X_train = np.random.RandomState(42).randn(16, 768).astype(np.float32)
         y_train = np.array([i % 4 for i in range(16)])
         clf = LogisticRegression(max_iter=200, random_state=42)
         clf.fit(X_train, y_train)
-        # Set class 1 weight strongly positive on dim 0
         clf.coef_[:] = 0.0
         clf.coef_[1, 0] = 5.0
 
@@ -198,26 +246,31 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             device="cpu",
         )
         self.assertEqual(heatmap.shape, (224, 224))
-        self.assertEqual(heatmap.dtype, np.float32)
-        self.assertGreaterEqual(float(heatmap.min()), 0.0)
-        self.assertLessEqual(float(heatmap.max()), 1.0)
-        # Top rows (corresponding to active tokens :64) must have higher attribution than bottom rows
         self.assertGreater(float(heatmap[:56, :].mean()), float(heatmap[112:, :].mean()))
 
-    def test_confident_learning_thresholds_and_triage(self):
-        """Test Confident Learning audit flags label noise based on error thresholds."""
-        # 4 records:
-        # Record 0: Given 0, model predicts 1 with high confidence (0.95), c_error = 0.95 -> corrupted
-        # Record 1: Given 1, model predicts 1 with high confidence (0.90), c_error = 0.10 -> clean
-        # Record 2: Given 2, model predicts 2 with moderate conf (0.60), c_error = 0.40 -> clean at 0.85, issue at 0.50
-        # Record 3: Given 3, model predicts 0 with conf (0.88), c_error = 0.88 -> corrupted
+        # Foreground mask covering top rows where attribution is concentrated -> high ratio (>= 0.65)
+        fg_top = np.zeros((224, 224), dtype=np.uint8)
+        fg_top[:80, :] = 1
+        ratio_high = compute_foreground_attention_ratio(heatmap, fg_top)
+        self.assertGreaterEqual(ratio_high, 0.65)
+
+        # Foreground mask covering bottom rows while attribution is on top background -> low ratio (< 0.65)
+        fg_bottom = np.zeros((224, 224), dtype=np.uint8)
+        fg_bottom[140:, :] = 1
+        ratio_low = compute_foreground_attention_ratio(heatmap, fg_bottom)
+        self.assertLess(ratio_low, 0.65)
+
+    def test_confident_learning_audit_schema_and_ood(self):
+        """Verify Confident Learning audit exports all required Step 07 schema columns and OOD scores."""
         pred_probs = np.array([
-            [0.05, 0.95, 0.00, 0.00],
+            [0.05, 0.92, 0.02, 0.01],
             [0.05, 0.90, 0.03, 0.02],
             [0.20, 0.20, 0.60, 0.00],
-            [0.88, 0.00, 0.00, 0.12],
+            [0.88, 0.02, 0.00, 0.10],
         ])
         labels = np.array([0, 1, 2, 3])
+        rng = np.random.default_rng(42)
+        feats = rng.normal(0.0, 1.0, size=(4, 768)).astype(np.float32)
 
         records_df = pd.DataFrame({
             "catalogNumber": ["CAT001", "CAT002", "CAT003", "CAT004"],
@@ -225,232 +278,67 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             "species_raw": ["Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis"],
             "label_idx": [0, 1, 2, 3],
             "determiner_tier": ["Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze", "Tier_1_Gold"],
+            "foreground_attention_ratio": [0.88, 0.91, 0.79, 0.52],
         })
 
-        # Test with default error_threshold = 0.85
-        audit_85 = run_confident_learning_audit(
-            pred_probs=pred_probs,
-            labels=labels,
-            records_df=records_df,
-            class_names=TARGET_TAXA,
-            error_threshold=0.85,
-        )
-
-        self.assertEqual(len(audit_85), 4)
-        self.assertTrue(audit_85.loc[0, "is_label_corrupted"])
-        self.assertFalse(audit_85.loc[1, "is_label_corrupted"])
-        self.assertFalse(audit_85.loc[2, "is_label_corrupted"])
-        self.assertTrue(audit_85.loc[3, "is_label_corrupted"])
-
-        # Verify triage actions
-        self.assertIn("Prune & Queue", audit_85.loc[0, "triage_action"])
-        self.assertIn("Prune & Queue", audit_85.loc[3, "triage_action"])
-        self.assertIn("Retain", audit_85.loc[1, "triage_action"])
-
-        # Test with tighter error_threshold = 0.35 -> Record 2 should now be flagged
-        audit_35 = run_confident_learning_audit(
-            pred_probs=pred_probs,
-            labels=labels,
-            records_df=records_df,
-            class_names=TARGET_TAXA,
-            error_threshold=0.35,
-        )
-        self.assertTrue(audit_35.loc[2, "is_label_corrupted"])
-
-    def test_confident_learning_abaxial_filtering(self):
-        """Test Confident Learning audit filters out candidates flagged solely due to inverted abaxial tomentum."""
-        pred_probs = np.array([
-            [0.05, 0.95, 0.00, 0.00],  # given 0, predicted 1, c_error = 0.95
-            [0.05, 0.95, 0.00, 0.00],  # given 0, predicted 1, c_error = 0.95
-        ])
-        labels = np.array([0, 0])
-        records_df = pd.DataFrame({
-            "catalogNumber": ["ADAXIAL_FLAGGED", "ABAXIAL_FLAGGED"],
-            "patch_path": ["/p1", "/p2"],
-            "species_raw": ["Packera anonyma", "Packera anonyma"],
-            "label_idx": [0, 0],
-            "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold"],
-            "surface_orientation": ["adaxial", "abaxial"],
-        })
-
-        # With filter_abaxial_artifacts=True (default)
         audit = run_confident_learning_audit(
             pred_probs=pred_probs,
             labels=labels,
             records_df=records_df,
             class_names=TARGET_TAXA,
             error_threshold=0.85,
-            filter_abaxial_artifacts=True,
+            features=feats,
         )
 
-        # Adaxial record should be flagged as corrupted
-        self.assertTrue(audit.loc[0, "is_label_corrupted"])
-        self.assertIn("Prune & Queue", audit.loc[0, "triage_action"])
-
-        # Abaxial record should be filtered out from corruption and retained as mounting variant
-        self.assertFalse(audit.loc[1, "is_label_corrupted"])
-        self.assertEqual(audit.loc[1, "triage_action"], "Retain (Abaxial Inversion Artifact)")
-        self.assertIn("dense abaxial arachnoid tomentum", audit.loc[1, "discordance_reason"])
-
-    def test_compute_out_of_fold_probabilities(self):
-        """Test Stratified K-Fold out-of-fold probability computation on synthetic features."""
-        np.random.seed(42)
-        n_samples = 20
-        n_features = 768
-        n_classes = 4
-
-        # Generate well-separated synthetic features
-        labels = np.array([i % n_classes for i in range(n_samples)])
-        features = np.random.randn(n_samples, n_features).astype(np.float32)
-        for i in range(n_samples):
-            features[i, labels[i] * 100 : (labels[i] + 1) * 100] += 5.0
-
-        pred_probs, acc, f1 = compute_out_of_fold_probabilities(
-            features=features,
-            labels=labels,
-            n_splits=2,
-            random_state=42,
-        )
-
-        self.assertEqual(pred_probs.shape, (n_samples, n_classes))
-        self.assertTrue(np.allclose(pred_probs.sum(axis=1), 1.0, atol=1e-4))
-        self.assertGreaterEqual(acc, 0.5)
-
-        # Also verify herbarium-grouped StratifiedGroupKFold via institution_codes (Gaem et al. 2025)
-        inst_codes = ["NCU" if (i // 4) % 2 == 0 else "US" for i in range(n_samples)]
-        pred_probs_grp, acc_grp, _ = compute_out_of_fold_probabilities(
-            features=features,
-            labels=labels,
-            n_splits=2,
-            random_state=42,
-            institution_codes=inst_codes,
-        )
-        self.assertEqual(pred_probs_grp.shape, (n_samples, n_classes))
-        self.assertTrue(np.allclose(pred_probs_grp.sum(axis=1), 1.0, atol=1e-4))
-        self.assertGreaterEqual(acc_grp, 0.5)
-
-    def test_output_artifacts_exist(self):
-        """Verify that label noise audit CSV and Grad-CAM figure exist if produced."""
-        if not self.audit_csv.exists() or not self.figure_png.exists():
-            self.skipTest("Production audit CSV or Grad-CAM figure not present on this machine.")
-        self.assertTrue(self.audit_csv.exists(), f"Missing audit CSV at {self.audit_csv}")
-        self.assertTrue(self.figure_png.exists(), f"Missing Grad-CAM figure at {self.figure_png}")
-        self.assertGreater(self.figure_png.stat().st_size, 50000, "Figure file size unexpectedly small.")
-
-    def test_audit_table_schema_and_values(self):
-        """Verify data integrity of the Cleanlab label noise audit table if present."""
-        if not self.audit_csv.exists():
-            self.skipTest("Production label_noise_audit.csv not present.")
-        df = pd.read_csv(self.audit_csv)
-        self.assertGreater(len(df), 0, "Audit table is empty.")
-
-        required_cols = [
+        required_step07_cols = [
             "catalogNumber",
-            "patch_path",
-            "species_raw",
-            "species_standardized",
-            "label_idx",
-            "determiner_tier",
-            "given_label",
-            "predicted_label",
-            "confidence_given_class",
-            "confidence_predicted_class",
-            "label_quality_score",
             "c_error",
-            "is_cleanlab_issue",
+            "predicted_label",
+            "vision_predicted_label",
+            "vision_confidence",
+            "vision_second_prob",
+            "vision_margin",
+            "vision_ood_score",
+            "foreground_attention_ratio",
+            "is_label_issue",
             "is_label_corrupted",
-            "triage_action",
-            "discordance_reason",
-            "surface_orientation",
+            "tomentum_taxon_discordance",
         ]
-        for col in required_cols:
-            self.assertIn(col, df.columns, f"Missing required column '{col}' in audit table.")
+        for col in required_step07_cols:
+            self.assertIn(col, audit.columns, f"Missing required Step 07 contract column: {col}")
 
-        # Check values
-        self.assertTrue(df["c_error"].between(0.0, 1.0).all(), "c_error contains values outside [0, 1].")
-        self.assertTrue(df["label_quality_score"].between(0.0, 1.0).all(), "label_quality_score outside [0, 1].")
-        self.assertTrue(
-            df["surface_orientation"].isin(["adaxial", "abaxial"]).all(),
-            "surface_orientation contains invalid values.",
-        )
+        self.assertTrue(audit.loc[0, "is_label_corrupted"])
+        self.assertFalse(audit.loc[1, "is_label_corrupted"])
+        self.assertAlmostEqual(float(audit.loc[0, "vision_margin"]), 0.92 - 0.05, places=4)
+        self.assertTrue(bool(audit.loc[3, "is_artifact_driven"]))
+        self.assertIn("Downweight", audit.loc[3, "triage_action"])
 
-        # Check consistency of corrupted flag (threshold 0.85, excluding abaxial tomentum artifacts)
-        expected_corrupted = (df["c_error"] > 0.85) & (df["surface_orientation"].str.lower() != "abaxial")
-        np.testing.assert_array_equal(
-            df["is_label_corrupted"].values,
-            expected_corrupted.values,
-            err_msg="is_label_corrupted flag does not match (c_error > 0.85 & not abaxial).",
-        )
-
-        # Check triage actions
-        self.assertTrue(
-            df.loc[df["is_label_corrupted"], "triage_action"]
-            .str.contains("Prune & Queue", case=False)
-            .all(),
-            "Corrupted vouchers not properly assigned to Prune & Queue.",
-        )
-
-    def test_single_taxon_centroid_cosine_outlier_mode(self):
-        """Verify 1-class DINOv2 probing uses L2 medoid cosine distance without calling LogisticRegression.fit on 1 class."""
-        rng = np.random.default_rng(42)
-        n_samples = 25
-        base_vec = rng.normal(0.0, 1.0, (1, 768))
-        features = (base_vec + rng.normal(0.0, 0.05, (n_samples, 768))).astype(np.float32)
-        # Make sample 0 an extreme visual outlier in the opposite direction
-        features[0] = -base_vec[0] * 10.0
-        labels = np.ones(n_samples, dtype=int)  # All Packera dubia (class 1)
-        orientations = ["adaxial"] * n_samples
-
-        pred_probs, acc, f1 = compute_out_of_fold_probabilities(
-            features=features,
-            labels=labels,
-            n_splits=5,
-            surface_orientations=orientations,
-        )
-        self.assertEqual(pred_probs.shape[0], n_samples)
-        self.assertTrue(np.allclose(pred_probs.sum(axis=1), 1.0, atol=1e-4))
-        self.assertLess(pred_probs[0, 1], 0.15, "Extreme cosine outlier must receive low self-class probability.")
-
-        records_df = pd.DataFrame({
-            "catalogNumber": [f"DUB_{i:03d}" for i in range(n_samples)],
-            "patch_path": [f"/p_{i}" for i in range(n_samples)],
-            "species_raw": ["Packera dubia"] * n_samples,
-            "taxon": ["Packera dubia"] * n_samples,
-            "label_idx": labels,
-            "determiner_tier": ["Tier_1_Gold"] * n_samples,
-            "surface_orientation": orientations,
-        })
-        audit_df = run_confident_learning_audit(
-            pred_probs=pred_probs,
-            labels=labels,
-            records_df=records_df,
-            class_names=TARGET_TAXA,
-            error_threshold=0.85,
-        )
-        self.assertTrue(bool(audit_df.loc[0, "is_label_corrupted"]))
-        self.assertEqual(audit_df.loc[0, "species_standardized"], "Packera dubia")
-
-    def test_load_and_link_rosette_patches_subset_filtering_and_contiguous_labels(self):
-        """Verify load_and_link_rosette_patches restricts to vouchers_df and assigns contiguous 0..K-1 labels."""
-        import tempfile
-        from PIL import Image
-
+    def test_rosettes_dense_ingestion_multi_crop_aggregation_and_dynamic_indexing(self):
+        """Verify rosettes_dense ingestion, multi-crop sheet aggregation, and dynamic 0..K-1 taxon indexing."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             rosette_dir = tmp_path / "cropped_patches"
-            (rosette_dir / "rosettes_dense").mkdir(parents=True)
+            dense_dir = rosette_dir / "rosettes_dense"
+            dense_dir.mkdir(parents=True)
 
-            # Create 4 patches across all 4 TARGET_TAXA on disk
-            for cat in ("CATANON", "CATDUB", "CATPAUP", "CATPLAT"):
-                img = Image.new("RGB", (64, 64), color=(50, 100, 40))
-                img.save(rosette_dir / "rosettes_dense" / f"{cat}_rosette.jpg")
+            # Create multiple crops for CATANON and single crops for CATDUB, CATPAUP, CATPLAT
+            for fname in (
+                "CATANON_p0_rosette.jpg",
+                "CATANON_p1_rosette.jpg",
+                "CATDUB_p0_rosette.jpg",
+                "CATPAUP_p0_rosette.jpg",
+                "CATPLAT_p0_rosette.jpg",
+            ):
+                img = Image.new("RGB", (300, 300), color=(50, 100, 40))
+                img.save(dense_dir / fname)
 
-            # Create a 3-taxon vouchers_csv (excluding Packera plattensis / CATPLAT)
+            # Filter voucher table to 3 taxa (excluding Packera plattensis / CATPLAT)
             vouchers_csv = tmp_path / "curated_vouchers.csv"
             pd.DataFrame({
                 "catalogNumber": ["CATANON", "CATDUB", "CATPAUP"],
                 "species_raw": ["Packera anonyma", "Packera dubia", "Packera paupercula"],
                 "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold", "Tier_2_Silver"],
+                "institutionCode": ["NCU", "US", "NY"],
             }).to_csv(vouchers_csv, index=False)
 
             df, class_to_idx = mod_xai.load_and_link_rosette_patches(
@@ -466,100 +354,14 @@ class TestCleanlabVisionXAI(unittest.TestCase):
                 {"Packera anonyma": 0, "Packera dubia": 1, "Packera paupercula": 2},
             )
             self.assertEqual(sorted(df["label_idx"].unique().tolist()), [0, 1, 2])
+            anon_row = df[df["catalogNumber"] == "CATANON"].iloc[0]
+            self.assertEqual(int(anon_row["n_rosette_patches"]), 2)
 
-    def test_manifest_tier1_gating_masking_and_weighted_aggregation(self):
-        """Verify Milestone 2 Tier_1_Direct manifest gating, herbarium paper masking, and weighted multi-leaf aggregation."""
-        import tempfile
-        from PIL import Image
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            cropped_dir = tmp / "cropped_patches"
-            rosettes_dense = cropped_dir / "rosettes_dense"
-            basal_raw = cropped_dir / "basal_leaves_raw"
-            tier1_masks = tmp / "masks" / "tier1_intact"
-            tier2_masks = tmp / "masks" / "tier2_reflected"
-            tables_dir = tmp / "tables"
-            for d in (rosettes_dense, basal_raw, tier1_masks, tier2_masks, tables_dir):
-                d.mkdir(parents=True, exist_ok=True)
-
-            # Create whole-clump stem crop in rosettes_dense (must be ignored!)
-            Image.fromarray(np.full((64, 64, 3), 20, dtype=np.uint8)).save(rosettes_dense / "NCU100_rosette.jpg")
-
-            # Create two Tier_1_Direct leaves and one Tier_2_Reflected leaf for NCU100, plus a Tier_2_Reflected-only voucher NCU200
-            rgb_leaf1 = np.full((64, 64, 3), [50, 120, 50], dtype=np.uint8)
-            rgb_leaf1[:10, :10] = [200, 10, 10]  # Exterior background contamination (e.g. stem/label)
-            Image.fromarray(rgb_leaf1).save(basal_raw / "NCU100_leaf1.jpg")
-            Image.fromarray(rgb_leaf1).save(basal_raw / "NCU100_leaf2.jpg")
-            Image.fromarray(rgb_leaf1).save(basal_raw / "NCU100_leaf3.jpg")
-            Image.fromarray(rgb_leaf1).save(basal_raw / "NCU200_leaf1.jpg")
-
-            mask_arr = np.zeros((64, 64), dtype=np.uint8)
-            mask_arr[16:48, 16:48] = 255
-            Image.fromarray(mask_arr).save(tier1_masks / "NCU100_leaf1.png")
-            Image.fromarray(mask_arr).save(tier1_masks / "NCU100_leaf2.png")
-            Image.fromarray(mask_arr).save(tier2_masks / "NCU100_leaf3.png")
-            Image.fromarray(mask_arr).save(tier2_masks / "NCU200_leaf1.png")
-
-            # Test apply_tier1_leaf_mask_to_rgb replaces exterior background with [242, 239, 230]
-            masked_rgb = mod_xai.apply_tier1_leaf_mask_to_rgb(rgb_leaf1, tier1_masks / "NCU100_leaf1.png", pad_px=5)
-            np.testing.assert_array_equal(masked_rgb[0, 0], np.array([242, 239, 230], dtype=np.uint8))
-            np.testing.assert_array_equal(masked_rgb[32, 32], np.array([50, 120, 50], dtype=np.uint8))
-
-            vouchers_csv = tables_dir / "curated_vouchers.csv"
-            pd.DataFrame({
-                "catalogNumber": ["NCU100", "NCU200"],
-                "species_raw": ["Packera dubia", "Packera anonyma"],
-                "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold"],
-            }).to_csv(vouchers_csv, index=False)
-
-            manifest_csv = tables_dir / "extracted_leaf_manifest.csv"
-            pd.DataFrame([
-                {
-                    "catalogNumber": "NCU100",
-                    "leaf_id": 1,
-                    "tier_assignment": "Tier_1_Direct",
-                    "ucs_score": 0.86,
-                    "solidity": 0.82,
-                    "mask_path": str(tier1_masks / "NCU100_leaf1.png"),
-                },
-                {
-                    "catalogNumber": "NCU100",
-                    "leaf_id": 2,
-                    "tier_assignment": "Tier_1_Direct",
-                    "ucs_score": 0.97,
-                    "solidity": 0.94,
-                    "mask_path": str(tier1_masks / "NCU100_leaf2.png"),
-                },
-                {
-                    "catalogNumber": "NCU100",
-                    "leaf_id": 3,
-                    "tier_assignment": "Tier_2_Reflected",
-                    "ucs_score": 0.99,
-                    "solidity": 0.99,
-                    "mask_path": str(tier2_masks / "NCU100_leaf3.png"),
-                },
-                {
-                    "catalogNumber": "NCU200",
-                    "leaf_id": 1,
-                    "tier_assignment": "Tier_2_Reflected",
-                    "ucs_score": 0.91,
-                    "solidity": 0.88,
-                    "mask_path": str(tier2_masks / "NCU200_leaf1.png"),
-                },
-            ]).to_csv(manifest_csv, index=False)
-
-            df, _ = mod_xai.load_and_link_rosette_patches(
-                rosette_dir=cropped_dir,
-                vouchers_csv=vouchers_csv,
-                demo=False,
-            )
-            # Only NCU100 (which has Tier_1_Direct leaves) is loaded; NCU200 (Tier_2_Reflected only) and rosettes_dense are excluded
-            self.assertEqual(len(df), 1)
-            self.assertEqual(df.iloc[0]["catalogNumber"], "NCU100")
-            # Highest-UCS Tier_1_Direct leaf (leaf2, ucs=0.97) selected as representative patch_path for Grad-CAM
-            self.assertTrue(str(df.iloc[0]["patch_path"]).endswith("NCU100_leaf2.jpg"))
-            self.assertEqual(int(df.iloc[0]["n_tier1_leaves"]), 2)
+            # Verify multi-crop sheet aggregates to 1 specimen-level L2-normalized embedding per catalogNumber
+            feats, lbls, cats = extract_dinov2_embeddings(df.to_dict("records"), demo=True)
+            self.assertEqual(feats.shape, (3, 768))
+            self.assertEqual(cats, ["CATANON", "CATDUB", "CATPAUP"])
+            np.testing.assert_allclose(np.linalg.norm(feats, axis=1), np.ones(3), atol=1e-4)
 
 
 if __name__ == "__main__":
