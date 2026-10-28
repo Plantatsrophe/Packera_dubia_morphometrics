@@ -1270,7 +1270,13 @@ resolve_analysis_group <- function(df, intraspecific_mode = FALSE) {
     }
   }
   if (!used_gmm) {
-    sand_col <- if ("soil_sand" %in% names(df)) suppressWarnings(as.numeric(df$soil_sand)) else rep(NA_real_, nrow(df))
+    sand_col <- if ("fine_soil_sand" %in% names(df) && any(!is.na(df$fine_soil_sand))) {
+      suppressWarnings(as.numeric(df$fine_soil_sand))
+    } else if ("soil_sand" %in% names(df)) {
+      suppressWarnings(as.numeric(df$soil_sand))
+    } else {
+      rep(NA_real_, nrow(df))
+    }
     lat_col <- if ("decimalLatitude" %in% names(df) && any(!is.na(df$decimalLatitude))) {
       suppressWarnings(as.numeric(df$decimalLatitude))
     } else if ("latitude" %in% names(df)) {
@@ -1381,17 +1387,15 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
     "bdricm", "cfvo", "awc", "fine_soil_cec", "alr_sand_clay", "azonal_proximity_index",
     "ph_q10_buffer", "ph_q90_buffer", "min_bedrock_depth_buffer_cm", "max_cfvo_buffer_pct",
     "ssurgo_rock_outcrop_pct", "ssurgo_aws_0_50cm", "topo_tpi_30m", "topo_twi_30m",
-    "soil_ph", "soil_sand", "soil_cec",
     "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "delta_doy"
   ), names(df))
   eco_cols <- cand_eco[sapply(cand_eco, function(cl) sum(is.finite(as.numeric(df[[cl]]))) >= 5 && stats::sd(as.numeric(df[[cl]]), na.rm = TRUE) > 1e-6)]
-  if (length(eco_cols) == 0) eco_cols <- intersect(c("fine_soil_ph", "fine_soil_sand", "soil_ph", "soil_sand", "soil_cec"), names(df))
+  if (length(eco_cols) == 0) eco_cols <- intersect(c("fine_soil_ph", "fine_soil_sand", "fine_soil_cec"), names(df))
   min_sd_map <- c(
     fine_soil_ph = 0.25, fine_soil_sand = 4.0, fine_soil_clay = 3.0, fine_bedrock_depth_cm = 15.0,
     bdricm = 15.0, cfvo = 4.0, awc = 0.02, fine_soil_cec = 2.0, alr_sand_clay = 0.25, azonal_proximity_index = 0.10,
     ph_q10_buffer = 0.25, ph_q90_buffer = 0.25, min_bedrock_depth_buffer_cm = 15.0, max_cfvo_buffer_pct = 5.0,
     ssurgo_rock_outcrop_pct = 8.0, ssurgo_aws_0_50cm = 1.0, topo_tpi_30m = 1.5, topo_twi_30m = 0.8,
-    soil_ph = 0.25, soil_sand = 4.0, soil_cec = 2.0,
     bio1_temp_mean = 1.0, bio4_temp_seasonality = 25.0, bio12_precip_annual = 50.0, delta_doy = 5.0
   )
 
@@ -1404,12 +1408,13 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
     cos_m <- w_mean(cos(sub_df$pheno_theta), w_sub)
     eco_m <- sapply(eco_cols, function(cl) w_mean(as.numeric(sub_df[[cl]]), w_sub))
     eco_s <- sapply(eco_cols, function(cl) w_sd(as.numeric(sub_df[[cl]]), w_sub, ifelse(cl %in% names(min_sd_map), min_sd_map[[cl]], 0.25)))
+    cec_vec <- if ("fine_soil_cec" %in% names(sub_df)) sub_df$fine_soil_cec else sub_df$soil_cec
     list(
       mean_theta = atan2(sin_m, cos_m), R_bar = sqrt(sin_m^2 + cos_m^2),
       ph_mean = w_mean(sub_df$fine_soil_ph, w_sub), ph_sd = w_sd(sub_df$fine_soil_ph, w_sub, 0.25),
       sand_mean = w_mean(sub_df$fine_soil_sand, w_sub), sand_sd = w_sd(sub_df$fine_soil_sand, w_sub, 4.0),
       bedrock_mean = w_mean(sub_df$fine_bedrock_depth_cm, w_sub), bedrock_sd = w_sd(sub_df$fine_bedrock_depth_cm, w_sub, 15.0),
-      cec_mean = w_mean(sub_df$soil_cec, w_sub), cec_sd = w_sd(sub_df$soil_cec, w_sub, 2.0),
+      cec_mean = w_mean(cec_vec, w_sub), cec_sd = w_sd(cec_vec, w_sub, 2.0),
       eco_mean = eco_m, eco_sd = eco_s
     )
   })
@@ -2446,7 +2451,6 @@ main <- function() {
     "is_azonal_lithology", "azonal_contact_dist_m", "azonal_proximity_index",
     "ph_q10_buffer", "ph_q90_buffer", "min_bedrock_depth_buffer_cm", "max_cfvo_buffer_pct", "azonal_lithology_presence_buffer",
     "ssurgo_rock_outcrop_pct", "ssurgo_aws_0_50cm", "topo_tpi_30m", "topo_twi_30m",
-    "soil_ph", "soil_cec", "soil_sand", "soil_bulk_density",
     "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "bio15_precip_seasonality",
     "delta_doy"
   )

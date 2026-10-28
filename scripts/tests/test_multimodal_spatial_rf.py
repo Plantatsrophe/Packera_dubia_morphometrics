@@ -833,19 +833,23 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         stopifnot(tex$alr_sand_clay[1] > 0 && tex$alr_sand_clay[2] < 0)
 
         # 3. Verify physical outcrop predictors (bdricm, resdept_r, cfvo, awc, fine_soil_cec)
+        #    and strict non-blended coalesce hierarchy (100% SSURGO when non-NA; sg_* fallback ONLY when both SSURGO and POLARIS are NA)
         df_in <- data.frame(
-          catalogNumber = c("V1", "V2"),
-          latitude = c(35.8, 36.1),
-          longitude = c(-79.1, -86.4),
-          is_rock_outcrop = c(TRUE, FALSE),
-          outcrop_class = c("Granitic flatrock", "Non-outcrop matrix"),
-          ssurgo_rock_outcrop_pct = c(55.0, 0.0),
-          ssurgo_bedrock_depth_cm = c(18.0, 180.0),
-          ssurgo_sand_pct = c(74.0, 32.0),
-          ssurgo_clay_pct = c(8.0, 28.0),
-          ssurgo_ph = c(4.7, 6.5),
-          ssurgo_cec = c(4.2, 19.5),
-          ssurgo_aws_0_50cm = c(2.2, 9.0),
+          catalogNumber = c("V1", "V2", "V3"),
+          latitude = c(35.8, 36.1, 50.5),
+          longitude = c(-79.1, -86.4, -85.0),
+          is_rock_outcrop = c(TRUE, FALSE, FALSE),
+          outcrop_class = c("Granitic flatrock", "Non-outcrop matrix", "Non-outcrop matrix"),
+          ssurgo_rock_outcrop_pct = c(55.0, 0.0, NA),
+          ssurgo_bedrock_depth_cm = c(18.0, 180.0, NA),
+          ssurgo_sand_pct = c(74.0, 32.0, NA),
+          ssurgo_clay_pct = c(8.0, 28.0, NA),
+          ssurgo_ph = c(4.7, 6.5, NA),
+          ssurgo_cec = c(4.2, 19.5, NA),
+          ssurgo_aws_0_50cm = c(2.2, 9.0, NA),
+          soil_ph = c(6.9, 4.1, 5.8),
+          soil_sand = c(20.0, 85.0, 62.0),
+          soil_cec = c(30.0, 3.0, 14.5),
           stringsAsFactors = FALSE
         )
         df_out <- extract_polaris_and_solus_predictors(df_in, env_dir = tempdir(), demo = TRUE)
@@ -853,6 +857,10 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         stopifnot(all(req_cols %in% names(df_out)))
         stopifnot(df_out$bdricm[1] < df_out$bdricm[2])
         stopifnot(df_out$cfvo[1] > df_out$cfvo[2])
+        # Verify zero 250m SoilGrids blending when SSURGO is non-NA (V1, V2) and fallback to SoilGrids ONLY when NA (V3)
+        stopifnot(abs(df_out$fine_soil_ph[1] - 4.7) < 1e-6 && abs(df_out$fine_soil_ph[2] - 6.5) < 1e-6 && abs(df_out$fine_soil_ph[3] - 5.8) < 1e-6)
+        stopifnot(abs(df_out$fine_soil_sand[1] - 74.0) < 1e-6 && abs(df_out$fine_soil_sand[2] - 32.0) < 1e-6 && abs(df_out$fine_soil_sand[3] - 62.0) < 1e-6)
+        stopifnot(abs(df_out$fine_soil_cec[1] - 4.2) < 1e-6 && abs(df_out$fine_soil_cec[2] - 19.5) < 1e-6 && abs(df_out$fine_soil_cec[3] - 14.5) < 1e-6)
         cat("RHIZOSPHERE_PEDOLOGY_OK\\n")
         """
         res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)

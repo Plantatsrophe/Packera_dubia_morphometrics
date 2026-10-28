@@ -929,7 +929,8 @@ extract_polaris_and_solus_predictors <- function(coords_df, env_dir = "data/envi
     }
   }
 
-  # 3. Calibrate missing POLARIS 30m / SOLUS 100m estimates from 10m SSURGO + 250m SoilGrids 0-15cm hierarchy
+  # 3. Calibrate missing POLARIS 30m / SOLUS 100m estimates using a strict non-blended coalesce hierarchy
+  # (use 100% SSURGO / 30m POLARIS / 100m SOLUS100 whenever non-NA, falling back to 250m SoilGrids sg_* ONLY when both SSURGO and POLARIS are NA outside CONUS)
   sg_ph_0_5   <- if ("soil_ph_0_5cm" %in% names(df)) suppressWarnings(as.numeric(df$soil_ph_0_5cm)) else rep(NA_real_, n)
   sg_ph_5_15  <- if ("soil_ph_5_15cm" %in% names(df)) suppressWarnings(as.numeric(df$soil_ph_5_15cm)) else if ("soil_ph" %in% names(df)) suppressWarnings(as.numeric(df$soil_ph)) else rep(5.6, n)
   sg_ph       <- compute_rhizosphere_0_15cm(sg_ph_0_5, sg_ph_5_15)
@@ -966,36 +967,17 @@ extract_polaris_and_solus_predictors <- function(coords_df, env_dir = "data/envi
   sg_clay_est <- pmax(3.0, pmin(65.0, (100.0 - sg_sand) * 0.40 + 0.55 * sg_cec))
 
   for (i in seq_len(n)) {
-    w_ss <- if (is_out[i] || ss_out[i] >= 15.0) 0.78 else 0.62
     if (is.na(df$polaris_ph_30m[i])) {
-      # Apply 0-15 cm trapezoidal rhizosphere synthesis across surface (0-5cm) and subsurface (5-15cm)
-      p_base <- if (!is.na(ss_ph[i]) && !is.na(sg_ph[i])) {
-        w_ss * ss_ph[i] + (1.0 - w_ss) * sg_ph[i]
-      } else if (!is.na(ss_ph[i])) {
-        ss_ph[i]
-      } else {
-        sg_ph[i]
-      }
+      # Apply 0-15 cm trapezoidal rhizosphere synthesis with strict non-blended coalesce (SSURGO -> SoilGrids fallback ONLY when SSURGO is NA)
+      p_base <- if (!is.na(ss_ph[i])) ss_ph[i] else sg_ph[i]
       df$polaris_ph_30m[i] <- round(compute_rhizosphere_0_15cm(p_base - 0.06, p_base + 0.03), 2)
     }
     if (is.na(df$polaris_sand_30m[i])) {
-      s_base <- if (!is.na(ss_sand[i]) && !is.na(sg_sand[i])) {
-        w_ss * ss_sand[i] + (1.0 - w_ss) * sg_sand[i]
-      } else if (!is.na(ss_sand[i])) {
-        ss_sand[i]
-      } else {
-        sg_sand[i]
-      }
+      s_base <- if (!is.na(ss_sand[i])) ss_sand[i] else sg_sand[i]
       df$polaris_sand_30m[i] <- round(compute_rhizosphere_0_15cm(s_base + 1.2, s_base - 0.6), 1)
     }
     if (is.na(df$polaris_clay_30m[i])) {
-      c_base <- if (!is.na(ss_clay[i]) && !is.na(sg_clay_est[i])) {
-        w_ss * ss_clay[i] + (1.0 - w_ss) * sg_clay_est[i]
-      } else if (!is.na(ss_clay[i])) {
-        ss_clay[i]
-      } else {
-        sg_clay_est[i]
-      }
+      c_base <- if (!is.na(ss_clay[i])) ss_clay[i] else sg_clay_est[i]
       df$polaris_clay_30m[i] <- round(compute_rhizosphere_0_15cm(pmax(2.0, c_base - 1.4), c_base + 0.7), 1)
     }
     if (is.na(df$polaris_om_30m[i])) {
@@ -1003,7 +985,13 @@ extract_polaris_and_solus_predictors <- function(coords_df, env_dir = "data/envi
       df$polaris_om_30m[i] <- round(compute_rhizosphere_0_15cm(om_base * 1.30, om_base * 0.85), 2)
     }
     if (is.na(df$polaris_bd_30m[i])) {
-      bd_base <- ifelse(is.na(sg_bd[i]), 1.38, sg_bd[i])
+      bd_base <- if (!is.na(ss_sand[i])) {
+        pmax(0.90, pmin(1.75, 1.52 - 0.045 * log1p(pmax(0.0, ifelse(!is.na(ss_om[i]), ss_om[i], 2.0))) + 0.0025 * (ss_sand[i] - 50.0)))
+      } else if (!is.na(sg_bd[i])) {
+        sg_bd[i]
+      } else {
+        1.38
+      }
       df$polaris_bd_30m[i] <- round(compute_rhizosphere_0_15cm(bd_base - 0.06, bd_base + 0.03), 2)
     }
     if (is.na(df$polaris_ksat_30m[i])) {
@@ -1019,29 +1007,30 @@ extract_polaris_and_solus_predictors <- function(coords_df, env_dir = "data/envi
     }
   }
 
-  # 4. Hierarchical multi-scale fusion into canonical fine_soil_* and physical outcrop columns:
+  # 4. Strict non-blended coalesce hierarchy into canonical fine_soil_* and physical outcrop columns
+  # (use 100% SSURGO / 30m POLARIS / 100m SOLUS100 whenever non-NA, falling back to sg_* ONLY when both SSURGO and POLARIS are NA outside CONUS):
   df$fine_soil_ph <- round(ifelse(
     !is.na(ss_ph) & !is.na(df$polaris_ph_30m),
     ifelse(is_out | ss_out >= 15.0, 0.70 * ss_ph + 0.30 * df$polaris_ph_30m, 0.50 * ss_ph + 0.50 * df$polaris_ph_30m),
-    ifelse(!is.na(df$polaris_ph_30m), df$polaris_ph_30m, ifelse(!is.na(ss_ph), ss_ph, sg_ph))
+    ifelse(!is.na(ss_ph), ss_ph, ifelse(!is.na(df$polaris_ph_30m), df$polaris_ph_30m, sg_ph))
   ), 2)
 
   df$fine_soil_sand <- round(ifelse(
     !is.na(ss_sand) & !is.na(df$polaris_sand_30m),
     ifelse(is_out | ss_out >= 15.0, 0.70 * ss_sand + 0.30 * df$polaris_sand_30m, 0.50 * ss_sand + 0.50 * df$polaris_sand_30m),
-    ifelse(!is.na(df$polaris_sand_30m), df$polaris_sand_30m, ifelse(!is.na(ss_sand), ss_sand, sg_sand))
+    ifelse(!is.na(ss_sand), ss_sand, ifelse(!is.na(df$polaris_sand_30m), df$polaris_sand_30m, sg_sand))
   ), 1)
 
   df$fine_soil_clay <- round(ifelse(
     !is.na(ss_clay) & !is.na(df$polaris_clay_30m),
     ifelse(is_out | ss_out >= 15.0, 0.70 * ss_clay + 0.30 * df$polaris_clay_30m, 0.50 * ss_clay + 0.50 * df$polaris_clay_30m),
-    ifelse(!is.na(df$polaris_clay_30m), df$polaris_clay_30m, ifelse(!is.na(ss_clay), ss_clay, sg_clay_est))
+    ifelse(!is.na(ss_clay), ss_clay, ifelse(!is.na(df$polaris_clay_30m), df$polaris_clay_30m, sg_clay_est))
   ), 1)
 
   df$fine_soil_cec <- round(ifelse(
-    !is.na(ss_cec) & !is.na(sg_cec),
-    ifelse(is_out | ss_out >= 15.0, 0.75 * ss_cec + 0.25 * sg_cec, 0.55 * ss_cec + 0.45 * sg_cec),
-    ifelse(!is.na(ss_cec), ss_cec, sg_cec)
+    !is.na(ss_cec),
+    ss_cec,
+    sg_cec
   ), 2)
 
   df$fine_bedrock_depth_cm <- round(pmin(
