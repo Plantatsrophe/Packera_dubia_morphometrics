@@ -260,6 +260,19 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         ratio_low = compute_foreground_attention_ratio(heatmap, fg_bottom)
         self.assertLess(ratio_low, 0.65)
 
+        # Binary (2-class) LogisticRegression where coef_.shape == (1, 768) and classes_ == [0, 1]
+        y_bin = np.array([i % 2 for i in range(16)])
+        clf_bin = LogisticRegression(max_iter=200, random_state=42).fit(X_train, y_bin)
+        self.assertEqual(clf_bin.coef_.shape, (1, 768))
+        clf_bin.coef_[:] = 0.0
+        clf_bin.coef_[0, 0] = 5.0
+        hm_cls1 = mod_xai.compute_vit_patch_saliency(arr, model=DummyDINOv2(), classifier=clf_bin, target_class_idx=1, device="cpu")
+        hm_cls0 = mod_xai.compute_vit_patch_saliency(arr, model=DummyDINOv2(), classifier=clf_bin, target_class_idx=0, device="cpu")
+        self.assertEqual(hm_cls1.shape, (224, 224))
+        self.assertEqual(hm_cls0.shape, (224, 224))
+        self.assertGreater(float(hm_cls1[:56, :].mean()), float(hm_cls1[112:, :].mean()))
+        self.assertGreater(float(hm_cls0[112:, :].mean()), float(hm_cls0[:56, :].mean()))
+
     def test_confident_learning_audit_schema_and_ood(self):
         """Verify Confident Learning audit exports all required Step 07 schema columns and OOD scores."""
         pred_probs = np.array([

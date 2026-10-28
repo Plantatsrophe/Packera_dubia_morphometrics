@@ -2011,7 +2011,7 @@ def classify_and_route_leaf(
         1.0,
         float(cv2.contourArea(hull_cnt)) / max(0.70 * float(rect_cnt[1][0] * rect_cnt[1][1]), 1.0),
     )
-    eff_diss_ucs = max(ucs, hull_ucs) if is_bipinnatisect_window else ucs
+    eff_diss_ucs = max(ucs, hull_ucs) if (is_bipinnatisect_window or not is_high_res_mask) else ucs
     allow_dissection = True
     if is_bipinnatisect_window:
         if eff_diss_ucs < 0.55:

@@ -813,6 +813,12 @@ if [[ "${START_STEP}" -le 4 ]]; then
     --output-report "${RUN_DIR}/outputs/reports/gmm_bayes_factors_summary.csv" \
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}"
+
+  echo "[Step 04/07] Regenerating post-QC Step 02 publication figures..."
+  "${PYTHON_MAIN}" scripts/pipeline/02_segment_and_extract.py \
+    --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
+    --output-dir "${RUN_DIR}/data" \
+    --regenerate-figures-only
 fi
 
 # ------------------------------------------------------------------------------

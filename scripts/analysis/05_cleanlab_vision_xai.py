@@ -421,7 +421,8 @@ def compute_out_of_fold_probabilities(features: np.ndarray, labels: np.ndarray, 
         y_train, y_val = y_anc[train_sub], y_anc[val_sub]
         w_train = w_anc[train_sub] / max(float(np.mean(w_anc[train_sub])), 1e-8)
         min_cls = int(np.min(np.unique(y_train, return_counts=True)[1]))
-        base_clf: Any = LogisticRegressionCV(Cs=np.logspace(-2, 1, 6), cv=max(2, min(3, min_cls)), class_weight="balanced", max_iter=2000, random_state=random_state) if min_cls >= 2 else LogisticRegression(max_iter=2000, C=0.25, class_weight="balanced", random_state=random_state)
+        lrcv_kw: Dict[str, Any] = {"use_legacy_attributes": False, "l1_ratios": (0.0,), "scoring": "accuracy"} if "use_legacy_attributes" in LogisticRegressionCV.__init__.__code__.co_varnames else {}
+        base_clf: Any = LogisticRegressionCV(Cs=np.logspace(-2, 1, 6), cv=max(2, min(3, min_cls)), class_weight="balanced", max_iter=2000, random_state=random_state, **lrcv_kw) if min_cls >= 2 else LogisticRegression(max_iter=2000, C=0.25, class_weight="balanced", random_state=random_state)
         base_clf.fit(X_train, y_train, sample_weight=w_train)
         active_clf: Any = base_clf
         if min_cls >= 3:
@@ -598,20 +599,24 @@ def compute_vit_patch_saliency(img_arr: np.ndarray, model: Any, classifier: Opti
         est = classifier if hasattr(classifier, "coef_") else (getattr(classifier.calibrated_classifiers_[0], "estimator", None) if getattr(classifier, "calibrated_classifiers_", None) else None)
         if est is not None and hasattr(est, "coef_"):
             coef_arr, classes_list = np.asarray(est.coef_, dtype=np.float32), list(getattr(est, "classes_", range(est.coef_.shape[0])))
-    if coef_arr is not None:
+            if coef_arr.ndim == 1:
+                coef_arr = coef_arr[None, :]
+            if coef_arr.shape[0] == 1 and len(classes_list) == 2:
+                coef_arr = np.vstack([-coef_arr, coef_arr])
+    if coef_arr is not None and coef_arr.shape[0] > 0:
         if target_class_idx is None and cls_token is not None and hasattr(classifier, "predict"):
             target_class_idx = int(classifier.predict(cls_token.detach().cpu().numpy())[0])
-        row_idx = (classes_list.index(target_class_idx) if target_class_idx in classes_list else (int(target_class_idx) % coef_arr.shape[0])) if target_class_idx is not None else 0
-        w_c = torch.as_tensor(coef_arr[row_idx], dtype=F_patches.dtype, device=F_patches.device)
+        row_idx = (classes_list.index(target_class_idx) if target_class_idx in classes_list else int(target_class_idx)) if target_class_idx is not None else 0
+        w_c = torch.as_tensor(coef_arr[row_idx % coef_arr.shape[0]], dtype=F_patches.dtype, device=F_patches.device)
     elif cls_token is not None:
         w_c = cls_token[0].to(dtype=F_patches.dtype, device=F_patches.device)
-    raw_saliency = torch.einsum("hwd,d->hw", F_patches, w_c) if w_c is not None else torch.norm(F_patches, dim=-1)
+    raw_saliency = torch.einsum("hwd,d->hw", F_patches, w_c) if (w_c is not None and w_c.numel() == embed_dim) else torch.norm(F_patches, dim=-1)
     saliency_relu = torch.relu(raw_saliency) if float(torch.relu(raw_saliency).max().item()) > 1e-8 else torch.relu(raw_saliency - raw_saliency.min())
     heatmap = torch.clamp(F.interpolate(saliency_relu.unsqueeze(0).unsqueeze(0).to(dtype=torch.float32), size=(h, w), mode="bicubic", align_corners=False)[0, 0], min=0.0).detach().cpu().numpy().astype(np.float32)
     return (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
 
 
-def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_samples: int = 8, model: Optional[Any] = None, classifier: Optional[Any] = None, model_name: str = "dinov2_vitb14_reg", device: str = "cuda" if torch.cuda.is_available() else "cpu", demo: bool = False) -> None:
+def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_samples: int = 8, model: Optional[Any] = None, classifier: Optional[Any] = None, model_name: str = "dinov2_vitb14_reg", device: str = "cuda" if torch.cuda.is_available() else "cpu", demo: bool = False, class_names: Optional[List[str]] = None) -> None:
     """Renders multi-panel diagnostic figure with 224x224 ViT patch attribution & foreground ratio."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -652,7 +657,10 @@ def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_s
         fg_mask, _ = compute_foreground_tissue_mask(img_arr, grid_size=(16, 16))
         rec_taxon = standardize_packera_taxon(str(rec.get("taxon", rec.get("species_standardized", rec.get("given_label", "Packera dubia")))))
         pred_taxon = standardize_packera_taxon(str(rec.get("predicted_taxon", rec.get("predicted_label", "Packera anonyma"))))
-        target_cls_idx = TARGET_TAXA.index(pred_taxon) if pred_taxon in TARGET_TAXA else rec.get("label_idx")
+        panel_taxa = list(class_names) if class_names else list(TARGET_TAXA)
+        if pred_taxon and pred_taxon not in panel_taxa and _is_valid_packera_taxon(pred_taxon):
+            panel_taxa.append(pred_taxon)
+        target_cls_idx = panel_taxa.index(pred_taxon) if pred_taxon in panel_taxa else (TARGET_TAXA.index(pred_taxon) if pred_taxon in TARGET_TAXA else rec.get("label_idx"))
         heatmap = compute_vit_patch_saliency(img_arr, model=model, classifier=classifier, target_class_idx=target_cls_idx, device=device)
         fg_ratio = compute_foreground_attention_ratio(heatmap, fg_mask)
         rec["foreground_attention_ratio"] = round(fg_ratio, 4)
@@ -665,13 +673,13 @@ def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_s
         axes[idx, 1].imshow(blended)
         axes[idx, 1].set_title(f"[2] 16x16 ViT Saliency (FG={fg_ratio:.2f})\nPredicted: {pred_taxon.replace('Packera ', 'P. ')} (c_err={c_err_val:.2f})", fontsize=8.8, fontweight="bold")
         axes[idx, 1].axis("off")
-        ax_bar, probs = axes[idx, 2], np.full(len(TARGET_TAXA), (1.0 - conf_val) / max(len(TARGET_TAXA) - 1, 1), dtype=float)
-        if pred_taxon in TARGET_TAXA:
-            probs[TARGET_TAXA.index(pred_taxon)] = conf_val
-        probs, y_pos = probs / max(probs.sum(), 1e-8), np.arange(len(TARGET_TAXA))
-        ax_bar.barh(y_pos, probs * 100.0, color=[OKABE_ITO.get(tx, "#0072B2") for tx in TARGET_TAXA], edgecolor="#222222", height=0.58, alpha=0.88)
+        ax_bar, probs = axes[idx, 2], np.full(len(panel_taxa), (1.0 - conf_val) / max(len(panel_taxa) - 1, 1), dtype=float)
+        if pred_taxon in panel_taxa:
+            probs[panel_taxa.index(pred_taxon)] = conf_val
+        probs, y_pos = probs / max(probs.sum(), 1e-8), np.arange(len(panel_taxa))
+        ax_bar.barh(y_pos, probs * 100.0, color=[OKABE_ITO.get(tx, "#0072B2") for tx in panel_taxa], edgecolor="#222222", height=0.58, alpha=0.88)
         ax_bar.set_yticks(y_pos)
-        ax_bar.set_yticklabels([tx.replace("Packera ", "P. ") for tx in TARGET_TAXA], fontsize=8.2, fontstyle="italic")
+        ax_bar.set_yticklabels([tx.replace("Packera ", "P. ") for tx in panel_taxa], fontsize=8.2, fontstyle="italic")
         ax_bar.set_xlim(0, 112)
         ax_bar.invert_yaxis()
         ax_bar.set_title("[3] Calibrated Posteriors", fontsize=8.8, fontweight="bold")
@@ -760,9 +768,9 @@ def main() -> None:
     pred_probs, _, _ = compute_out_of_fold_probabilities(features, labels, n_splits=5, surface_orientations=df.get("surface_orientation", None), stratify_by_orientation=args.stratify_by_orientation, determiner_tiers=df.get("determiner_tier", None), spatial_balance_weights=df.get("spatial_balance_weight", None), institution_codes=df.get("institutionCode", None))
     audit_df = run_confident_learning_audit(pred_probs=pred_probs, labels=labels, records_df=df, class_names=active_class_names, error_threshold=args.cleanlab_threshold, filter_abaxial_artifacts=args.filter_abaxial_artifacts, features=features)
     if args.export_figures:
-        flagged = audit_df[audit_df["is_label_corrupted"]].to_dict("records") or audit_df[audit_df["is_cleanlab_issue"]].to_dict("records")
+        flagged = audit_df[audit_df["is_label_corrupted"]].to_dict("records") or audit_df[audit_df["is_cleanlab_issue"]].to_dict("records") or audit_df.sort_values("c_error", ascending=False).head(8).to_dict("records")
         clf = LogisticRegression(max_iter=1000, C=0.25, class_weight="balanced", random_state=42).fit(features, labels) if len(np.unique(labels)) > 1 else None
-        generate_gradcam_panel(flagged, args.output_figure, classifier=clf, demo=args.demo)
+        generate_gradcam_panel(flagged, args.output_figure, classifier=clf, demo=args.demo, class_names=active_class_names)
         fg_updates = {str(r["catalogNumber"]): float(r["foreground_attention_ratio"]) for r in flagged if "catalogNumber" in r and "foreground_attention_ratio" in r}
         if fg_updates:
             audit_df["foreground_attention_ratio"] = [fg_updates.get(str(c), float(fg)) for c, fg in zip(audit_df["catalogNumber"], audit_df["foreground_attention_ratio"])]

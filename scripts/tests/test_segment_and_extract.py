@@ -1192,6 +1192,259 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertEqual(self.pipeline.rejection_telemetry["rejected_min_area_cm2"], 1)
         self.assertEqual(self.pipeline.rejection_telemetry["rejected_solidity_extent"], 1)
 
+    def test_dissected_tier1_routing_enforces_min_ucs(self) -> None:
+        """Verify dissected candidates with ucs < 0.80 (and < min_ucs) are rejected rather than routed to Tier_1_Direct."""
+        from unittest.mock import patch
+        from scripts.vision.lm2_geometry_utils import LeafRoutingResult
+
+        sheet_img = np.full((600, 600, 3), 235, dtype=np.uint8)
+        m_dissected_low_ucs = self._build_synthetic_lyrate_mask(400)
+        m_full = np.zeros((600, 600), dtype=np.uint8)
+        m_full[100:500, 100:500] = m_dissected_low_ucs
+
+        dets = [((100, 100, 500, 500), m_full, 0.95, 0)]
+        low_ucs_routing = LeafRoutingResult(
+            assigned_tier="tier1",
+            processed_mask=m_dissected_low_ucs,
+            solidity=0.64,
+            ucs=0.71,
+            is_folded=False,
+            is_dissected=True,
+            is_irregular_fold=False,
+            rejection_reason=None,
+            tier="Tier 1",
+            metadata={"p_base": (200, 340), "p_apex": (200, 55)},
+        )
+
+        with patch("cv2.imread", return_value=sheet_img):
+            with patch.object(self.pipeline.model_engine, "predict", return_value=dets):
+                with patch.object(step02, "classify_and_route_leaf", return_value=low_ucs_routing):
+                    records, failure = self.pipeline.process_voucher("NCU_LOW_UCS_DISS", self.img_path)
+
+        self.assertEqual(len(records), 0, "Dissected leaf with ucs < 0.80 must not enter Tier_1_Direct.")
+        self.assertIsNotNone(failure)
+
+    def test_step02_figures_downstream_qc_filtering_and_active_species_montage(self) -> None:
+        """
+        Verify generate_step02_publication_figures() and regenerate_step02_figures_from_tables():
+          1. Exclude segments with is_contour_outlier=True, pct_asymmetry > 0.15, or harmonic_roughness > 0.10
+             in leaf_efa_harmonics_individual.csv, or misidentification_flag=True in morphometric_flags.csv.
+          2. Dynamically restrict montage rows to active species present in df_plot without cross-species fallback.
+          3. Rank quantile-window (q +/- 0.08) candidates by Gold/Silver authority, mm calibration, and leaf_quality_weight,
+             while rejecting masks with internal holes or clipped border edges.
+        """
+        from unittest.mock import patch
+        import matplotlib.pyplot as plt
+
+        run_dir = Path(self.temp_dir) / "run_qc_test"
+        tables_dir = run_dir / "data" / "tables"
+        masks_dir = run_dir / "data" / "masks" / "tier1_intact"
+        figures_dir = run_dir / "outputs" / "figures"
+        tables_dir.mkdir(parents=True, exist_ok=True)
+        masks_dir.mkdir(parents=True, exist_ok=True)
+        figures_dir.mkdir(parents=True, exist_ok=True)
+
+        def _write_smooth_mask(path: Path, ar: float, clipped: bool = False, with_hole: bool = False) -> None:
+            canvas = np.zeros((300, 300), dtype=np.uint8)
+            minor_ax = 36
+            major_ax = max(40, min(125, int(round(minor_ax * ar))))
+            cv2.ellipse(canvas, (150, 150), (minor_ax, major_ax), 0.0, 0, 360, 255, -1)
+            if clipped:
+                canvas[0, 120:180] = 255
+            if with_hole:
+                cv2.circle(canvas, (150, 150), 12, 0, -1)
+            cv2.imwrite(str(path), canvas)
+
+        voucher_rows = []
+        manifest_rows = []
+        ind_efa_rows = []
+        otu_efa_rows = []
+        mflag_rows = []
+
+        # Only 2 active species: Packera dubia and Packera paupercula (anonyma & plattensis excluded)
+        active_species = ["Packera dubia", "Packera paupercula"]
+        ar_grid = [1.30, 1.45, 1.50, 1.75, 1.80, 2.05, 2.10, 2.35, 2.40, 2.75]
+
+        for sp_idx, sp_name in enumerate(active_species):
+            sp_code = "DUB" if sp_idx == 0 else "PAU"
+            for i, ar_v in enumerate(ar_grid):
+                cat = f"{sp_code}_V{i:02d}"
+                is_gold = (i % 2 == 1)
+                det_tier = "Tier_1_Gold" if is_gold else "Tier_3_Bronze"
+                is_cal = is_gold
+                lqw = 0.96 if is_gold else 0.72
+                m_path = masks_dir / f"{cat}_leaf1.png"
+                _write_smooth_mask(m_path, min(2.8, ar_v))
+
+                voucher_rows.append({
+                    "catalogNumber": cat,
+                    "species_standardized": sp_name,
+                    "determiner_tier": det_tier,
+                })
+                manifest_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 1,
+                    "leaf_id": 1,
+                    "assigned_tier": "Tier_1_Direct",
+                    "solidity": 0.90,
+                    "ucs_score": 0.94,
+                    "aspect_ratio": ar_v,
+                    "pixels_per_mm": 12.0 if is_cal else np.nan,
+                    "is_calibrated_mm": is_cal,
+                    "mask_path": str(m_path),
+                    "contour_path": "",
+                })
+                ind_efa_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 1,
+                    "leaf_id": 1,
+                    "species_standardized": sp_name,
+                    "determiner_tier": det_tier,
+                    "assigned_tier": "Tier_1_Direct",
+                    "is_calibrated_mm": "TRUE" if is_cal else "FALSE",
+                    "pixels_per_mm": 12.0 if is_cal else np.nan,
+                    "solidity": 0.90,
+                    "ucs_score": 0.94,
+                    "aspect_ratio": ar_v,
+                    "pct_asymmetry": 0.04,
+                    "harmonic_roughness": 0.01,
+                    "is_contour_outlier": "FALSE",
+                    "leaf_quality_weight": lqw,
+                })
+                otu_efa_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 1,
+                    "is_contour_outlier": "FALSE",
+                })
+                mflag_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 1,
+                    "misidentification_flag": "FALSE",
+                })
+
+            # Add contaminated leaves that MUST be excluded despite having top quality scores:
+            # (a) Contour outlier in leaf_efa_harmonics_individual.csv
+            cat_out = f"{sp_code}_OUTLIER"
+            m_out = masks_dir / f"{cat_out}_leaf1.png"
+            _write_smooth_mask(m_out, 1.48)
+            voucher_rows.append({"catalogNumber": cat_out, "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold"})
+            manifest_rows.append({
+                "catalogNumber": cat_out, "plant_individual_id": 1, "leaf_id": 1,
+                "assigned_tier": "Tier_1_Direct", "solidity": 0.95, "ucs_score": 0.98,
+                "aspect_ratio": 1.48, "pixels_per_mm": 12.0, "is_calibrated_mm": True,
+                "mask_path": str(m_out), "contour_path": "",
+            })
+            ind_efa_rows.append({
+                "catalogNumber": cat_out, "plant_individual_id": 1, "leaf_id": 1,
+                "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold",
+                "assigned_tier": "Tier_1_Direct", "is_calibrated_mm": "TRUE", "pixels_per_mm": 12.0,
+                "solidity": 0.95, "ucs_score": 0.98, "aspect_ratio": 1.48,
+                "pct_asymmetry": 0.02, "harmonic_roughness": 0.01,
+                "is_contour_outlier": "TRUE", "leaf_quality_weight": 0.999,
+            })
+            otu_efa_rows.append({"catalogNumber": cat_out, "plant_individual_id": 1, "is_contour_outlier": "FALSE"})
+            mflag_rows.append({"catalogNumber": cat_out, "plant_individual_id": 1, "misidentification_flag": "FALSE"})
+
+            # (b) Misidentified voucher in morphometric_flags.csv
+            cat_mis = f"{sp_code}_MISID"
+            m_mis = masks_dir / f"{cat_mis}_leaf1.png"
+            _write_smooth_mask(m_mis, 1.78)
+            voucher_rows.append({"catalogNumber": cat_mis, "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold"})
+            manifest_rows.append({
+                "catalogNumber": cat_mis, "plant_individual_id": 1, "leaf_id": 1,
+                "assigned_tier": "Tier_1_Direct", "solidity": 0.95, "ucs_score": 0.98,
+                "aspect_ratio": 1.78, "pixels_per_mm": 12.0, "is_calibrated_mm": True,
+                "mask_path": str(m_mis), "contour_path": "",
+            })
+            ind_efa_rows.append({
+                "catalogNumber": cat_mis, "plant_individual_id": 1, "leaf_id": 1,
+                "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold",
+                "assigned_tier": "Tier_1_Direct", "is_calibrated_mm": "TRUE", "pixels_per_mm": 12.0,
+                "solidity": 0.95, "ucs_score": 0.98, "aspect_ratio": 1.78,
+                "pct_asymmetry": 0.02, "harmonic_roughness": 0.01,
+                "is_contour_outlier": "FALSE", "leaf_quality_weight": 0.999,
+            })
+            otu_efa_rows.append({"catalogNumber": cat_mis, "plant_individual_id": 1, "is_contour_outlier": "FALSE"})
+            mflag_rows.append({"catalogNumber": cat_mis, "plant_individual_id": 1, "misidentification_flag": "TRUE"})
+
+            # (c) Clipped border mask (should be rejected by _is_valid_smooth_closed_mask)
+            cat_clip = f"{sp_code}_CLIPPED"
+            m_clip = masks_dir / f"{cat_clip}_leaf1.png"
+            _write_smooth_mask(m_clip, 2.08, clipped=True)
+            voucher_rows.append({"catalogNumber": cat_clip, "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold"})
+            manifest_rows.append({
+                "catalogNumber": cat_clip, "plant_individual_id": 1, "leaf_id": 1,
+                "assigned_tier": "Tier_1_Direct", "solidity": 0.95, "ucs_score": 0.98,
+                "aspect_ratio": 2.08, "pixels_per_mm": 12.0, "is_calibrated_mm": True,
+                "mask_path": str(m_clip), "contour_path": "",
+            })
+            ind_efa_rows.append({
+                "catalogNumber": cat_clip, "plant_individual_id": 1, "leaf_id": 1,
+                "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold",
+                "assigned_tier": "Tier_1_Direct", "is_calibrated_mm": "TRUE", "pixels_per_mm": 12.0,
+                "solidity": 0.95, "ucs_score": 0.98, "aspect_ratio": 2.08,
+                "pct_asymmetry": 0.02, "harmonic_roughness": 0.01,
+                "is_contour_outlier": "FALSE", "leaf_quality_weight": 0.999,
+            })
+            otu_efa_rows.append({"catalogNumber": cat_clip, "plant_individual_id": 1, "is_contour_outlier": "FALSE"})
+            mflag_rows.append({"catalogNumber": cat_clip, "plant_individual_id": 1, "misidentification_flag": "FALSE"})
+
+        pd.DataFrame(voucher_rows).to_csv(tables_dir / "curated_vouchers.csv", index=False)
+        pd.DataFrame(manifest_rows).to_csv(tables_dir / "extracted_leaf_manifest.csv", index=False)
+        pd.DataFrame(ind_efa_rows).to_csv(tables_dir / "leaf_efa_harmonics_individual.csv", index=False)
+        pd.DataFrame(otu_efa_rows).to_csv(tables_dir / "leaf_efa_harmonics.csv", index=False)
+        pd.DataFrame(mflag_rows).to_csv(tables_dir / "morphometric_flags.csv", index=False)
+
+        captured_titles: list[str] = []
+        captured_ylabels: list[str] = []
+        captured_grid_shapes: list[tuple[int, int]] = []
+        orig_save = step02._atomic_save_matplotlib_fig
+
+        def _spy_save(fig, out_base_path, dpi=300):
+            if Path(out_base_path).name == "fig02b_silhouette_montage":
+                axes = fig.axes
+                captured_grid_shapes.append((len(axes) // 4, 4))
+                for ax in axes:
+                    captured_titles.append(ax.get_title())
+                    if ax.get_ylabel():
+                        captured_ylabels.append(ax.get_ylabel())
+            return orig_save(fig, out_base_path, dpi=dpi)
+
+        with patch.object(step02, "_atomic_save_matplotlib_fig", side_effect=_spy_save):
+            saved = step02.regenerate_step02_figures_from_tables(
+                output_dir=run_dir / "data",
+                vouchers_csv=tables_dir / "curated_vouchers.csv",
+            )
+
+        for k in ("fig02a_pdf", "fig02a_png", "fig02b_pdf", "fig02b_png"):
+            self.assertIn(k, saved)
+            self.assertTrue(Path(saved[k]).exists())
+
+        # 1. Montage grid must have exactly 2 rows (for Packera dubia & P. paupercula) x 4 cols = 8 tiles
+        self.assertEqual(captured_grid_shapes[-1], (2, 4))
+        self.assertEqual(len(captured_ylabels), 2)
+        self.assertTrue(any("dubia" in yl for yl in captured_ylabels))
+        self.assertTrue(any("paupercula" in yl for yl in captured_ylabels))
+        self.assertFalse(any("anonyma" in yl or "plattensis" in yl for yl in captured_ylabels))
+
+        # 2. Outlier, misidentified, and clipped-border candidates must NEVER appear in montage titles
+        joined_titles = " | ".join(captured_titles)
+        self.assertNotIn("OUTLIER", joined_titles)
+        self.assertNotIn("MISID", joined_titles)
+        self.assertNotIn("CLIPPED", joined_titles)
+
+        # 3. Within the 40th %ile window [0.32, 0.48] (containing V03 [q=0.333, Gold] and V04 [q=0.444, Bronze])
+        #    and 60th %ile window [0.52, 0.68] (containing V05 [q=0.556, Gold] and V06 [q=0.667, Bronze]),
+        #    Gold + calibrated leaves (_V03, _V05, _V07) must be prioritized over Bronze (_V04, _V06)
+        self.assertIn("DUB_V03", joined_titles)
+        self.assertIn("DUB_V05", joined_titles)
+        self.assertIn("DUB_V07", joined_titles)
+        self.assertNotIn("DUB_V04", joined_titles)
+        self.assertNotIn("DUB_V06", joined_titles)
+        self.assertIn("PAU_V03", joined_titles)
+        self.assertIn("PAU_V05", joined_titles)
+        self.assertIn("PAU_V07", joined_titles)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1761,7 +1761,14 @@ class SegmentAndExtractPipeline:
                 assigned_tier = TIER_1_DIRECT
                 reflection_applied = False
 
-            elif not is_folded and (routing_res.solidity < self.min_solidity) and is_dissected and routing_res.solidity >= self.min_dissected and routing_res.assigned_tier == "tier1":
+            elif (
+                not is_folded
+                and (routing_res.solidity < self.min_solidity)
+                and is_dissected
+                and routing_res.solidity >= self.min_dissected
+                and (routing_res.ucs >= self.min_ucs or routing_res.ucs >= 0.80)
+                and routing_res.assigned_tier == "tier1"
+            ):
                 tier = "Tier 1 (Dissected)"
                 assigned_tier = TIER_1_DIRECT
                 is_dissected = True
@@ -2385,9 +2392,17 @@ def _atomic_save_matplotlib_fig(fig: Any, out_base_path: Path, dpi: int = 300) -
 
 
 def _standardize_packera_species_py(raw_val: Any) -> str:
-    s = str(raw_val or "").strip().lower()
-    if not s or s in {"none", "nan", "null", "na", "unknown"}:
+    s_raw = str(raw_val or "").strip()
+    if not s_raw or s_raw.lower() in {"none", "nan", "null", "na", "unknown"}:
         return "Packera dubia"
+    try:
+        from scripts.core.harvester import standardize_packera_taxon
+        std = standardize_packera_taxon(s_raw)
+        if std:
+            return std
+    except Exception:
+        pass
+    s = s_raw.lower()
     if "paupercul" in s or "balsamitae" in s:
         return "Packera paupercula"
     if "plattensis" in s or "pseudotomentos" in s:
@@ -2396,7 +2411,150 @@ def _standardize_packera_species_py(raw_val: Any) -> str:
         return "Packera dubia"
     if "anonym" in s or "smallii" in s:
         return "Packera anonyma"
+    if s_raw.startswith("Packera ") and len(s_raw.split()) >= 2:
+        parts = s_raw.split()
+        return f"Packera {parts[1].lower()}"
     return "Packera dubia"
+
+
+def _parse_bool_val(val: Any, default: bool = False) -> bool:
+    """Parse boolean flags exported by Python or R ('TRUE'/'FALSE', True/False, 1/0)."""
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return default
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    s = str(val).strip().upper()
+    if s in {"TRUE", "T", "1", "1.0", "YES"}:
+        return True
+    if s in {"FALSE", "F", "0", "0.0", "NO"}:
+        return False
+    return default
+
+
+def _resolve_asset_path(p_str: Any, out_dir: Path) -> Optional[Path]:
+    """Resolve mask or contour asset path across absolute, run-scoped, and workspace-root paths."""
+    raw = str(p_str or "").strip()
+    if not raw or raw.lower() in {"nan", "none", "na"}:
+        return None
+    p = Path(raw)
+    if p.exists():
+        return p
+    for base in (out_dir.parent.parent, out_dir.parent, PROJECT_ROOT):
+        cand = base / raw
+        if cand.exists():
+            return cand
+    return None
+
+
+def _is_valid_smooth_closed_mask(m_path_str: Any, out_dir: Path) -> bool:
+    """
+    Verify that a binary silhouette mask has a single smooth closed contour
+    without internal holes or clipped border edges.
+    Returns True if no on-disk mask path is configured (e.g., synthetic contour-only fixtures).
+    """
+    resolved = _resolve_asset_path(m_path_str, out_dir)
+    raw_str = str(m_path_str or "").strip()
+    if resolved is None:
+        # If an explicit path was provided on a real dataset but is missing on disk, only allow
+        # fallback when no mask file exists in synthetic test environments.
+        return not bool(raw_str)
+    mask_img = cv2.imread(str(resolved), cv2.IMREAD_GRAYSCALE)
+    if mask_img is None:
+        return False
+    if mask_img.ndim == 3:
+        mask_img = mask_img[:, :, 0]
+    fg = (mask_img > 0).astype(np.uint8)
+    total_fg = int(np.count_nonzero(fg))
+    if total_fg < 50:
+        return False
+
+    h_m, w_m = fg.shape[:2]
+    # 1. Reject masks with clipped border edges along the canvas boundary
+    max_edge_touch = max(3, int(0.02 * max(h_m, w_m)))
+    if (
+        int(np.count_nonzero(fg[0, :])) > max_edge_touch
+        or int(np.count_nonzero(fg[-1, :])) > max_edge_touch
+        or int(np.count_nonzero(fg[:, 0])) > max_edge_touch
+        or int(np.count_nonzero(fg[:, -1])) > max_edge_touch
+    ):
+        return False
+
+    # 2. Require a single significant connected component
+    num_l, _, stats_cc, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
+    if num_l <= 1:
+        return False
+    min_sig_area = max(25, int(0.01 * total_fg))
+    sig_comps = int(np.sum(stats_cc[1:, cv2.CC_STAT_AREA] >= min_sig_area))
+    if sig_comps != 1:
+        return False
+
+    # 3. Reject internal holes using 2-level contour hierarchy (RETR_CCOMP)
+    cnts, hier = cv2.findContours(fg, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+    if not cnts or hier is None:
+        return False
+    min_hole_area = max(12.0, 0.002 * float(total_fg))
+    outer_cnts = []
+    for idx_c, c in enumerate(cnts):
+        parent_idx = int(hier[0][idx_c][3])
+        c_area = float(cv2.contourArea(c))
+        if parent_idx != -1:
+            if c_area >= min_hole_area:
+                return False
+        elif c_area >= min_sig_area:
+            outer_cnts.append(c)
+    if len(outer_cnts) != 1:
+        return False
+
+    # 4. Require smooth closed contour geometry
+    main_cnt = outer_cnts[0]
+    if len(main_cnt) < 12:
+        return False
+    area_c = float(cv2.contourArea(main_cnt))
+    perim_c = float(cv2.arcLength(main_cnt, True))
+    if area_c <= 0.0 or perim_c <= 0.0:
+        return False
+    circ = (4.0 * math.pi * area_c) / (perim_c * perim_c)
+    if circ < 0.12:
+        return False
+    return True
+
+
+def _discover_downstream_table(filename: str, out_dir: Path, active_cats: Set[str]) -> Optional[Path]:
+    """
+    Locate a table in `out_dir.parent.parent / 'data' / 'tables'` (or run-local table dirs),
+    falling back to `PROJECT_ROOT / 'data' / 'tables'` when `out_dir` resides under `PROJECT_ROOT`
+    or when the table shares catalogNumbers with `active_cats`.
+    """
+    local_dirs = [
+        out_dir.parent.parent / "data" / "tables",
+        out_dir.parent / "data" / "tables",
+        out_dir.parent / "tables",
+        out_dir / "tables",
+    ]
+    for d in local_dirs:
+        cand = d / filename
+        if cand.exists() and cand.stat().st_size > 0:
+            return cand
+
+    root_cand = PROJECT_ROOT / "data" / "tables" / filename
+    if root_cand.exists() and root_cand.stat().st_size > 0:
+        try:
+            out_resolved = out_dir.resolve()
+            root_resolved = PROJECT_ROOT.resolve()
+            if out_resolved == root_resolved or root_resolved in out_resolved.parents:
+                return root_cand
+        except Exception:
+            pass
+        if active_cats:
+            try:
+                tdf = pd.read_csv(root_cand, usecols=lambda c: c == "catalogNumber", dtype=str)
+                if "catalogNumber" in tdf.columns:
+                    tcats = set(tdf["catalogNumber"].astype(str).str.strip())
+                    if tcats & active_cats:
+                        return root_cand
+            except Exception:
+                pass
+    return None
 
 
 def generate_step02_publication_figures(
@@ -2416,10 +2574,11 @@ def generate_step02_publication_figures(
              (B1) Involucre Aspect Ratio (L/W) boxplots + hollow jittered points by species.
              (B2) Anthesis Phenological State proportions across species.
       2. fig02b_silhouette_montage.{pdf,png}:
-         4x4 taxon-stratified grid (4 rows = Packera anonyma, P. dubia, P. paupercula, P. plattensis;
+         Taxon-stratified grid (rows = active Packera species present in df_plot;
          4 representative Tier_1_Direct leaves per row spanning the 20th, 40th, 60th, and 80th
-         percentiles of blade aspect ratio/dissection), with 10 mm physical scale bar on calibrated
-         tiles, homologized p_base attachment point, and midrib axis.
+         percentiles of blade aspect ratio/dissection within q +/- 0.08 quantile windows),
+         with 10 mm physical scale bar on calibrated tiles, homologized p_base attachment point,
+         and midrib axis.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -2454,59 +2613,203 @@ def generate_step02_publication_figures(
     }
     FOCAL_TAXA = list(SPECIES_PALETTE.keys())
 
-    # Resolve voucher -> standardized species map from curated_vouchers.csv if available
-    cat_to_species: Dict[str, str] = {}
-    cand_voucher_paths = [
-        out_dir.parent.parent / "data" / "tables" / "curated_vouchers.csv",
-        PROJECT_ROOT / "data" / "tables" / "curated_vouchers.csv",
-    ]
-    for vp in cand_voucher_paths:
-        if vp.exists():
-            try:
-                vdf = pd.read_csv(vp, dtype=str)
-                if "catalogNumber" in vdf.columns:
-                    tx_col = (
-                        "species_standardized"
-                        if "species_standardized" in vdf.columns
-                        else ("scientificName" if "scientificName" in vdf.columns else "species_raw")
-                    )
-                    if tx_col in vdf.columns:
-                        for c_val, s_val in zip(vdf["catalogNumber"], vdf[tx_col]):
-                            cat_to_species[str(c_val).strip()] = _standardize_packera_species_py(s_val)
-                break
-            except Exception:
-                pass
-
     df_plot = extracted_df.copy()
     df_plot["cat_str"] = df_plot.get("catalogNumber", pd.Series("", index=df_plot.index)).astype(str).str.strip()
-    if "species_standardized" in df_plot.columns:
+    df_plot["leaf_id_int"] = pd.to_numeric(df_plot.get("leaf_id", 1), errors="coerce").fillna(1).astype(int)
+    active_cats = set(df_plot["cat_str"].unique()) - {""}
+
+    # Resolve voucher -> standardized species & determiner_tier map from curated_vouchers.csv if available
+    cat_to_species: Dict[str, str] = {}
+    cat_to_det_tier: Dict[str, str] = {}
+    vp = _discover_downstream_table("curated_vouchers.csv", out_dir, active_cats)
+    if vp is not None and vp.exists():
+        try:
+            vdf = pd.read_csv(vp, dtype=str)
+            if "catalogNumber" in vdf.columns:
+                tx_col = (
+                    "species_standardized"
+                    if "species_standardized" in vdf.columns
+                    else ("scientificName" if "scientificName" in vdf.columns else "species_raw")
+                )
+                for _, vrow in vdf.iterrows():
+                    c_val = str(vrow.get("catalogNumber", "")).strip()
+                    if not c_val:
+                        continue
+                    if tx_col in vdf.columns and pd.notna(vrow.get(tx_col)):
+                        cat_to_species[c_val] = _standardize_packera_species_py(vrow.get(tx_col))
+                    if "determiner_tier" in vdf.columns and pd.notna(vrow.get("determiner_tier")):
+                        cat_to_det_tier[c_val] = str(vrow.get("determiner_tier")).strip()
+        except Exception:
+            pass
+
+    # 1. Enforce assigned_tier == "Tier_1_Direct"
+    tier_series = df_plot.get("assigned_tier", pd.Series("Tier_1_Direct", index=df_plot.index)).astype(str).str.strip()
+    df_plot["norm_tier"] = tier_series.apply(
+        lambda t: "Tier_1_Direct"
+        if t.lower() in {"tier_1_direct", "tier1", "tier 1", "tier 1 (dissected)"}
+        else ("Tier_2_Reflected" if "2" in t else t)
+    )
+    df_plot = df_plot[df_plot["norm_tier"] == "Tier_1_Direct"].copy()
+
+    # 2. Inner-join / filter against downstream Step 03 & Step 04 QC tables when present
+    ind_efa_path = _discover_downstream_table("leaf_efa_harmonics_individual.csv", out_dir, active_cats)
+    if ind_efa_path is not None and ind_efa_path.exists():
+        try:
+            ind_df = pd.read_csv(ind_efa_path)
+            if "catalogNumber" in ind_df.columns and "leaf_id" in ind_df.columns:
+                ind_df["cat_str"] = ind_df["catalogNumber"].astype(str).str.strip()
+                ind_df["leaf_id_int"] = pd.to_numeric(ind_df["leaf_id"], errors="coerce").fillna(-1).astype(int)
+                if "assigned_tier" in ind_df.columns:
+                    ind_tier = ind_df["assigned_tier"].astype(str).str.strip().str.lower()
+                    ind_df = ind_df[ind_tier.isin({"tier_1_direct", "tier1", "tier 1"})]
+                if "is_contour_outlier" in ind_df.columns:
+                    ind_df = ind_df[~ind_df["is_contour_outlier"].apply(_parse_bool_val)]
+                if "pct_asymmetry" in ind_df.columns:
+                    ind_asym = pd.to_numeric(ind_df["pct_asymmetry"], errors="coerce")
+                    ind_df = ind_df[ind_asym.isna() | (ind_asym <= 0.15)]
+                if "harmonic_roughness" in ind_df.columns:
+                    ind_hr = pd.to_numeric(ind_df["harmonic_roughness"], errors="coerce")
+                    ind_df = ind_df[ind_hr.isna() | (ind_hr <= 0.10)]
+
+                enrich_cols = [
+                    c for c in (
+                        "leaf_quality_weight",
+                        "aspect_ratio",
+                        "determiner_tier",
+                        "species_standardized",
+                        "is_calibrated_mm",
+                        "pixels_per_mm",
+                        "solidity",
+                        "ucs_score",
+                        "pct_asymmetry",
+                        "harmonic_roughness",
+                        "is_contour_outlier",
+                    )
+                    if c in ind_df.columns
+                ]
+                ind_sub = ind_df[["cat_str", "leaf_id_int"] + enrich_cols].drop_duplicates(
+                    subset=["cat_str", "leaf_id_int"]
+                )
+                df_plot = df_plot.merge(
+                    ind_sub,
+                    on=["cat_str", "leaf_id_int"],
+                    how="inner",
+                    suffixes=("", "_efa"),
+                )
+                for col_e in enrich_cols:
+                    efa_col = f"{col_e}_efa"
+                    if efa_col in df_plot.columns:
+                        if col_e not in df_plot.columns:
+                            df_plot[col_e] = df_plot[efa_col]
+                        else:
+                            df_plot[col_e] = df_plot[col_e].where(df_plot[col_e].notna(), df_plot[efa_col])
+                        df_plot.drop(columns=[efa_col], inplace=True)
+        except Exception as e_ind:
+            logger.warning(f"Could not apply leaf_efa_harmonics_individual.csv filter: {e_ind}")
+
+    # Also apply Step 03 leaf-level QC columns if directly present on df_plot
+    if "is_contour_outlier" in df_plot.columns:
+        df_plot = df_plot[~df_plot["is_contour_outlier"].apply(_parse_bool_val)].copy()
+    if "pct_asymmetry" in df_plot.columns:
+        asym_s = pd.to_numeric(df_plot["pct_asymmetry"], errors="coerce")
+        df_plot = df_plot[asym_s.isna() | (asym_s <= 0.15)].copy()
+    if "harmonic_roughness" in df_plot.columns:
+        hr_s = pd.to_numeric(df_plot["harmonic_roughness"], errors="coerce")
+        df_plot = df_plot[hr_s.isna() | (hr_s <= 0.10)].copy()
+
+    # Filter to vouchers retained in leaf_efa_harmonics.csv when present
+    otu_efa_path = _discover_downstream_table("leaf_efa_harmonics.csv", out_dir, active_cats)
+    if otu_efa_path is not None and otu_efa_path.exists():
+        try:
+            otu_df = pd.read_csv(
+                otu_efa_path,
+                usecols=lambda c: c in {"catalogNumber", "is_contour_outlier"},
+            )
+            if "catalogNumber" in otu_df.columns:
+                if "is_contour_outlier" in otu_df.columns:
+                    otu_df = otu_df[~otu_df["is_contour_outlier"].apply(_parse_bool_val)]
+                retained_cats = set(otu_df["catalogNumber"].astype(str).str.strip())
+                df_plot = df_plot[df_plot["cat_str"].isin(retained_cats)].copy()
+        except Exception as e_otu:
+            logger.warning(f"Could not apply leaf_efa_harmonics.csv filter: {e_otu}")
+
+    # Filter out vouchers flagged as misidentified in Step 04 morphometric_flags.csv when present
+    mflags_path = _discover_downstream_table("morphometric_flags.csv", out_dir, active_cats)
+    misid_cats: Set[str] = set()
+    valid_mflag_cats: Optional[Set[str]] = None
+    if mflags_path is not None and mflags_path.exists():
+        try:
+            mf_df = pd.read_csv(
+                mflags_path,
+                usecols=lambda c: c in {"catalogNumber", "misidentification_flag"},
+            ).copy()
+            if "catalogNumber" in mf_df.columns:
+                mf_df["cat_str"] = mf_df["catalogNumber"].astype(str).str.strip()
+                if "misidentification_flag" in mf_df.columns:
+                    is_misid = mf_df["misidentification_flag"].apply(_parse_bool_val)
+                    misid_cats = set(mf_df.loc[is_misid, "cat_str"])
+                    valid_mflag_cats = set(mf_df.loc[~is_misid, "cat_str"])
+                else:
+                    valid_mflag_cats = set(mf_df["cat_str"])
+                df_plot = df_plot[
+                    df_plot["cat_str"].isin(valid_mflag_cats) & (~df_plot["cat_str"].isin(misid_cats))
+                ].copy()
+        except Exception as e_mf:
+            logger.warning(f"Could not apply morphometric_flags.csv filter: {e_mf}")
+
+    if "misidentification_flag" in df_plot.columns:
+        df_plot = df_plot[~df_plot["misidentification_flag"].apply(_parse_bool_val)].copy()
+
+    if len(df_plot) == 0:
+        return saved_paths
+
+    if "species_standardized" in df_plot.columns and df_plot["species_standardized"].notna().any():
         df_plot["species_clean"] = df_plot["species_standardized"].apply(_standardize_packera_species_py)
-    elif "scientificName" in df_plot.columns:
+    elif "scientificName" in df_plot.columns and df_plot["scientificName"].notna().any():
         df_plot["species_clean"] = df_plot["scientificName"].apply(_standardize_packera_species_py)
     elif cat_to_species:
-        df_plot["species_clean"] = df_plot["cat_str"].map(lambda c: cat_to_species.get(c, "Packera dubia"))
+        df_plot["species_clean"] = df_plot["cat_str"].map(lambda c: cat_to_species.get(c, "")).replace("", np.nan)
+        if df_plot["species_clean"].isna().any():
+            df_plot = df_plot[df_plot["species_clean"].notna()].copy()
     else:
         # Deterministic assignment across focal species when synthetic test fixture lacks voucher table
         df_plot["species_clean"] = [FOCAL_TAXA[i % len(FOCAL_TAXA)] for i in range(len(df_plot))]
 
+    if len(df_plot) == 0:
+        return saved_paths
+
+    if "determiner_tier" not in df_plot.columns or df_plot["determiner_tier"].isna().all():
+        df_plot["determiner_tier"] = df_plot["cat_str"].map(lambda c: cat_to_det_tier.get(c, "Tier_3_Bronze"))
+    else:
+        df_plot["determiner_tier"] = df_plot["determiner_tier"].fillna(
+            df_plot["cat_str"].map(lambda c: cat_to_det_tier.get(c, "Tier_3_Bronze"))
+        )
+
     df_plot["sol_val"] = pd.to_numeric(df_plot.get("solidity", 0.86), errors="coerce").fillna(0.86)
-    tier_series = df_plot.get("assigned_tier", pd.Series("Tier_1_Direct", index=df_plot.index)).astype(str)
-    df_plot["norm_tier"] = tier_series.apply(lambda t: "Tier_2_Reflected" if "2" in t else "Tier_1_Direct")
+    ucs_col = "ucs_score" if "ucs_score" in df_plot.columns else ("ucs" if "ucs" in df_plot.columns else None)
+    df_plot["ucs_val"] = (
+        pd.to_numeric(df_plot[ucs_col], errors="coerce").fillna(0.90)
+        if ucs_col is not None
+        else pd.Series(0.90, index=df_plot.index)
+    )
 
     if "aspect_ratio" in df_plot.columns:
         df_plot["ar_val"] = pd.to_numeric(df_plot["aspect_ratio"], errors="coerce")
     else:
         df_plot["ar_val"] = np.nan
 
-    if df_plot["ar_val"].isna().all():
-        # Estimate aspect ratio from contour/mask if available or smooth morphological proxy
+    if df_plot["ar_val"].isna().any():
         ar_est = []
         for idx_r, row_r in df_plot.iterrows():
-            c_path = str(row_r.get("contour_path", "") or "")
+            existing_ar = row_r.get("ar_val", np.nan)
+            if pd.notna(existing_ar) and np.isfinite(float(existing_ar)) and float(existing_ar) > 0:
+                ar_est.append(float(existing_ar))
+                continue
+            c_path_res = _resolve_asset_path(row_r.get("contour_path", ""), out_dir)
             ar_v = np.nan
-            if c_path and Path(c_path).exists():
+            if c_path_res is not None and c_path_res.exists():
                 try:
-                    cdf = pd.read_csv(c_path)
+                    cdf = pd.read_csv(c_path_res)
                     if {"x", "y"}.issubset(cdf.columns) and len(cdf) >= 5:
                         pts = cdf[["x", "y"]].to_numpy(dtype=float)
                         pts = pts - pts.mean(axis=0)
@@ -2522,8 +2825,22 @@ def generate_step02_publication_figures(
                 ar_v = float(np.clip(base_ar + 1.8 * (0.90 - sol_i), 1.15, 5.2))
             ar_est.append(ar_v)
         df_plot["ar_val"] = ar_est
-    else:
-        df_plot["ar_val"] = df_plot["ar_val"].fillna(2.2)
+
+    # Dynamically resolve active species present in df_plot (never substituting excluded taxa)
+    present_sp = [sp for sp in FOCAL_TAXA if (df_plot["species_clean"] == sp).any()]
+    extra_sp = sorted(
+        str(sp)
+        for sp in df_plot["species_clean"].dropna().unique()
+        if str(sp) not in present_sp and str(sp).startswith("Packera ")
+    )
+    for sp_extra in extra_sp:
+        present_sp.append(sp_extra)
+        SPECIES_PALETTE.setdefault(sp_extra, "#56B4E9")
+        SPECIES_MARKERS.setdefault(sp_extra, "o")
+        sp_short = sp_extra.replace("Packera ", "P. ").replace(" ", r"\ ")
+        SPECIES_ITALIC.setdefault(sp_extra, rf"$\it{{{sp_short}}}$")
+    if not present_sp:
+        present_sp = FOCAL_TAXA
 
     alpha_pt = 0.45 if len(df_plot) > 1000 else 0.75
 
@@ -2554,7 +2871,7 @@ def generate_step02_publication_figures(
         )
     )
 
-    for sp_name in FOCAL_TAXA:
+    for sp_name in present_sp:
         sub = df_plot[df_plot["species_clean"] == sp_name]
         if len(sub) > 0:
             ax_sc.scatter(
@@ -2589,15 +2906,20 @@ def generate_step02_publication_figures(
     gs_b = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs_a[0, 1], height_ratios=[1.15, 1.0], hspace=0.52)
     ax_repro = fig_a.add_subplot(gs_b[0, 0])
 
+    qc_voucher_cats = set(df_plot["cat_str"].unique())
     rep_df = repro_df.copy() if (repro_df is not None and len(repro_df) > 0) else pd.DataFrame()
     if len(rep_df) > 0 and "catalogNumber" in rep_df.columns:
         rep_df["cat_str"] = rep_df["catalogNumber"].astype(str).str.strip()
+        if misid_cats:
+            rep_df = rep_df[~rep_df["cat_str"].isin(misid_cats)].copy()
+        if (rep_df["cat_str"].isin(qc_voucher_cats)).any():
+            rep_df = rep_df[rep_df["cat_str"].isin(qc_voucher_cats)].copy()
         if "species_standardized" in rep_df.columns:
             rep_df["sp_clean"] = rep_df["species_standardized"].apply(_standardize_packera_species_py)
         elif cat_to_species:
             rep_df["sp_clean"] = rep_df["cat_str"].map(lambda c: cat_to_species.get(c, "Packera dubia"))
         else:
-            rep_df["sp_clean"] = [FOCAL_TAXA[i % len(FOCAL_TAXA)] for i in range(len(rep_df))]
+            rep_df["sp_clean"] = [present_sp[i % len(present_sp)] for i in range(len(rep_df))]
         ar_col = (
             "capitulum_aspect_ratio"
             if "capitulum_aspect_ratio" in rep_df.columns
@@ -2608,7 +2930,6 @@ def generate_step02_publication_figures(
     else:
         rep_valid = pd.DataFrame()
 
-    present_sp = [sp for sp in FOCAL_TAXA if sp in set(df_plot["species_clean"])] or FOCAL_TAXA
     rng_jit = np.random.default_rng(42)
     box_vals = []
     for idx_s, sp_name in enumerate(present_sp):
@@ -2660,6 +2981,10 @@ def generate_step02_publication_figures(
     ph_df = pheno_df.copy() if (pheno_df is not None and len(pheno_df) > 0) else pd.DataFrame()
     if len(ph_df) > 0 and "catalogNumber" in ph_df.columns:
         ph_df["cat_str"] = ph_df["catalogNumber"].astype(str).str.strip()
+        if misid_cats:
+            ph_df = ph_df[~ph_df["cat_str"].isin(misid_cats)].copy()
+        if (ph_df["cat_str"].isin(qc_voucher_cats)).any():
+            ph_df = ph_df[ph_df["cat_str"].isin(qc_voucher_cats)].copy()
         ph_df["sp_clean"] = ph_df["cat_str"].map(lambda c: cat_to_species.get(c, "Packera dubia"))
         st_col = (
             "voucher_phenological_state"
@@ -2704,39 +3029,110 @@ def generate_step02_publication_figures(
     saved_paths["fig02a_png"] = fig02a_png
 
     # -------------------------------------------------------------------------
-    # Figure 02b: 4x4 Taxon-Stratified Basal Leaf Silhouette Montage
-    #             (Rows = 4 Focal Species; Cols = 20th, 40th, 60th, 80th %ile Aspect Ratio)
+    # Figure 02b: Taxon-Stratified Basal Leaf Silhouette Montage
+    #             (Rows = Active Species; Cols = 20th, 40th, 60th, 80th %ile Aspect Ratio)
     # -------------------------------------------------------------------------
-    fig_b, axes_b = plt.subplots(4, 4, figsize=(12.2, 12.0), dpi=300)
+    n_sp_rows = max(1, len(present_sp))
+    fig_b, axes_b = plt.subplots(
+        n_sp_rows, 4, figsize=(12.2, max(3.6, 3.0 * n_sp_rows)), dpi=300, squeeze=False
+    )
     pct_labels = ["20th %ile (Broad)", "40th %ile (Median-Low)", "60th %ile (Median-High)", "80th %ile (Elongate)"]
+    target_quantiles = (0.20, 0.40, 0.60, 0.80)
 
-    t1_pool = df_plot[(df_plot["norm_tier"] == "Tier_1_Direct") & (df_plot["sol_val"] >= 0.78) & (df_plot["sol_val"] < 0.992)].copy()
-    if len(t1_pool) < 8:
-        t1_pool = df_plot[df_plot["norm_tier"] == "Tier_1_Direct"].copy()
+    t1_pool = df_plot[df_plot["norm_tier"] == "Tier_1_Direct"].copy()
     if len(t1_pool) == 0:
         t1_pool = df_plot.copy()
 
-    for row_idx, sp_name in enumerate(FOCAL_TAXA):
-        sp_col = SPECIES_PALETTE[sp_name]
-        sp_sub = t1_pool[t1_pool["species_clean"] == sp_name].sort_values("ar_val")
-        if len(sp_sub) == 0:
-            sp_sub = df_plot[df_plot["species_clean"] == sp_name].sort_values("ar_val")
-        if len(sp_sub) == 0:
-            sp_sub = t1_pool.sort_values("ar_val")
+    # Precompute mask smoothness/closure validity and ranking attributes on t1_pool
+    t1_pool["mask_valid"] = [
+        _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir)
+        for _, r in t1_pool.iterrows()
+    ]
+    t1_pool["is_gold_silver"] = t1_pool["determiner_tier"].astype(str).str.strip().isin(
+        {"Tier_1_Gold", "Tier_2_Silver"}
+    )
+    if "is_calibrated_mm" in t1_pool.columns:
+        t1_pool["is_cal_bool"] = t1_pool["is_calibrated_mm"].apply(_parse_bool_val)
+    else:
+        ppm_s = pd.to_numeric(t1_pool.get("pixels_per_mm", np.nan), errors="coerce")
+        t1_pool["is_cal_bool"] = ppm_s.notna() & (ppm_s > 0)
 
-        n_avail = len(sp_sub)
-        q_indices = [
-            min(n_avail - 1, max(0, int(round(q * (n_avail - 1)))))
-            for q in (0.20, 0.40, 0.60, 0.80)
-        ] if n_avail > 0 else [0, 0, 0, 0]
+    lqw_num = (
+        pd.to_numeric(t1_pool["leaf_quality_weight"], errors="coerce")
+        if "leaf_quality_weight" in t1_pool.columns
+        else pd.Series(np.nan, index=t1_pool.index)
+    )
+    fallback_qw = t1_pool["sol_val"] * t1_pool["ucs_val"]
+    t1_pool["qual_weight"] = lqw_num.where(lqw_num.notna() & (lqw_num > 0), fallback_qw)
+
+    for row_idx, sp_name in enumerate(present_sp):
+        sp_col = SPECIES_PALETTE[sp_name]
+        # Strictly restrict to this species; never substitute another species' leaves
+        sp_all = t1_pool[t1_pool["species_clean"] == sp_name].copy()
+        sp_hq = sp_all[
+            (sp_all["ucs_val"] >= 0.88)
+            & (sp_all["sol_val"] >= 0.80)
+            & (sp_all["sol_val"] < 0.995)
+            & (sp_all["mask_valid"])
+        ].sort_values("ar_val").copy()
+        if len(sp_hq) < 4:
+            # Fallback within the SAME species only (e.g. small synthetic unit test fixture)
+            sp_hq = sp_all[sp_all["mask_valid"]].sort_values("ar_val").copy()
+        if len(sp_hq) == 0:
+            sp_hq = sp_all.sort_values("ar_val").copy()
+
+        n_avail = len(sp_hq)
+        if n_avail > 1:
+            sp_hq["q_rank"] = np.linspace(0.0, 1.0, n_avail)
+        elif n_avail == 1:
+            sp_hq["q_rank"] = [0.5]
+
+        selected_rows: List[Optional[pd.Series]] = []
+        used_keys: Set[Tuple[str, int]] = set()
+        for q_target in target_quantiles:
+            if n_avail == 0:
+                selected_rows.append(None)
+                continue
+            # Primary window: q +/- 0.08
+            win_df = sp_hq[(sp_hq["q_rank"] >= q_target - 0.08 - 1e-9) & (sp_hq["q_rank"] <= q_target + 0.08 + 1e-9)]
+            win_unused = [
+                r for _, r in win_df.iterrows()
+                if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
+            ]
+            if not win_unused:
+                # Secondary wider window within the same species if n_avail is small
+                win_df2 = sp_hq[(sp_hq["q_rank"] >= q_target - 0.18 - 1e-9) & (sp_hq["q_rank"] <= q_target + 0.18 + 1e-9)]
+                win_unused = [
+                    r for _, r in win_df2.iterrows()
+                    if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
+                ]
+            if not win_unused:
+                win_unused = [
+                    r for _, r in sp_hq.iterrows()
+                    if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
+                ]
+            if not win_unused:
+                win_unused = [sp_hq.iloc[min(n_avail - 1, max(0, int(round(q_target * (n_avail - 1)))))]]
+
+            best_row = max(
+                win_unused,
+                key=lambda r: (
+                    int(bool(r.get("is_gold_silver", False))),
+                    int(bool(r.get("is_cal_bool", False))),
+                    float(r.get("qual_weight", 0.0)),
+                    -abs(float(r.get("q_rank", q_target)) - q_target),
+                ),
+            )
+            used_keys.add((str(best_row.get("cat_str", "")), int(best_row.get("leaf_id_int", 1))))
+            selected_rows.append(best_row)
 
         for col_idx in range(4):
             ax_t = axes_b[row_idx, col_idx]
-            if n_avail == 0:
+            row = selected_rows[col_idx]
+            if row is None:
                 ax_t.axis("off")
                 continue
 
-            row = sp_sub.iloc[q_indices[col_idx]]
             cat_num = str(row.get("catalogNumber", f"V{row_idx * 4 + col_idx + 1}"))
             leaf_id = int(row.get("leaf_id", 1)) if pd.notna(row.get("leaf_id", 1)) else 1
             sol_v = float(row.get("sol_val", 0.88))
@@ -2745,9 +3141,9 @@ def generate_step02_publication_figures(
             ppm_val = float(ppm_raw) if pd.notna(ppm_raw) and str(ppm_raw).strip() != "" else np.nan
 
             mask_img: Optional[np.ndarray] = None
-            m_path_str = str(row.get("mask_path", "") or "")
-            if m_path_str and Path(m_path_str).exists():
-                mask_img = cv2.imread(m_path_str, cv2.IMREAD_GRAYSCALE)
+            m_path_res = _resolve_asset_path(row.get("mask_path", ""), out_dir)
+            if m_path_res is not None and m_path_res.exists():
+                mask_img = cv2.imread(str(m_path_res), cv2.IMREAD_GRAYSCALE)
                 if mask_img is not None and mask_img.ndim == 3:
                     mask_img = mask_img[:, :, 0]
                 if mask_img is not None and np.count_nonzero(mask_img) > 0:
@@ -2795,11 +3191,11 @@ def generate_step02_publication_figures(
                     ax_t.plot([bx0, bx0 + bar_px], [by0, by0], color="#111111", linewidth=2.2)
                     ax_t.text(bx0 + bar_px / 2.0, by0 - max(4.0, h_c * 0.04), "10 mm", fontsize=6.5, fontweight="bold", ha="center", va="bottom", color="#111111")
             else:
-                c_path_str = str(row.get("contour_path", "") or "")
+                c_path_res = _resolve_asset_path(row.get("contour_path", ""), out_dir)
                 pts_xy = None
-                if c_path_str and Path(c_path_str).exists():
+                if c_path_res is not None and c_path_res.exists():
                     try:
-                        cdf = pd.read_csv(c_path_str)
+                        cdf = pd.read_csv(c_path_res)
                         if {"x", "y"}.issubset(cdf.columns) and len(cdf) >= 3:
                             pts_xy = cdf[["x", "y"]].to_numpy(dtype=float)
                     except Exception:
@@ -2847,6 +3243,54 @@ def generate_step02_publication_figures(
 
     logger.info(f"Step 02 publication figures exported to: {out_dir}")
     return saved_paths
+
+
+def regenerate_step02_figures_from_tables(
+    output_dir: Union[str, Path],
+    vouchers_csv: Optional[Union[str, Path]] = None,
+) -> Dict[str, Path]:
+    """
+    Reload Step 02 manifest tables (`extracted_leaf_manifest.csv`, `failed_qc_vouchers.csv`,
+    `voucher_reproductive_metrics.csv`, `voucher_phenological_states.csv`) from `output_dir / 'tables'`
+    alongside downstream Step 03 (`leaf_efa_harmonics_individual.csv`, `leaf_efa_harmonics.csv`) and
+    Step 04 (`morphometric_flags.csv`) tables, and re-render `fig02a_segmentation_qc_distributions.{pdf,png}`
+    and `fig02b_silhouette_montage.{pdf,png}` into `output_dir.parent / 'outputs' / 'figures'`.
+    """
+    out_data_dir = Path(output_dir)
+    tables_dir = out_data_dir / "tables" if (out_data_dir / "tables").exists() else out_data_dir
+    figures_dir = out_data_dir.parent / "outputs" / "figures"
+
+    def _safe_read_csv(p: Path) -> pd.DataFrame:
+        if p.exists() and p.stat().st_size > 0:
+            try:
+                return pd.read_csv(p)
+            except Exception as e_csv:
+                logger.warning(f"Failed to read {p}: {e_csv}")
+        return pd.DataFrame()
+
+    extracted_df = _safe_read_csv(tables_dir / "extracted_leaf_manifest.csv")
+    failed_df = _safe_read_csv(tables_dir / "failed_qc_vouchers.csv")
+    repro_df = _safe_read_csv(tables_dir / "voucher_reproductive_metrics.csv")
+    pheno_df = _safe_read_csv(tables_dir / "voucher_phenological_states.csv")
+
+    if vouchers_csv is not None and Path(vouchers_csv).exists() and len(extracted_df) > 0:
+        try:
+            vdf = pd.read_csv(vouchers_csv, dtype=str)
+            if "catalogNumber" in vdf.columns and "catalogNumber" in extracted_df.columns:
+                active_vcats = set(vdf["catalogNumber"].astype(str).str.strip())
+                extracted_df = extracted_df[
+                    extracted_df["catalogNumber"].astype(str).str.strip().isin(active_vcats)
+                ].copy()
+        except Exception:
+            pass
+
+    return generate_step02_publication_figures(
+        extracted_df=extracted_df,
+        failed_df=failed_df,
+        repro_df=repro_df,
+        pheno_df=pheno_df,
+        figures_dir=figures_dir,
+    )
 
 
 # =============================================================================
@@ -2934,11 +3378,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional limit on number of vouchers to process."
     )
+    parser.add_argument(
+        "--regenerate-figures-only",
+        dest="regenerate_figures_only",
+        action="store_true",
+        default=False,
+        help="Reload Step 02–04 tables and regenerate post-QC Step 02 publication figures without running segmentation.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if getattr(args, "regenerate_figures_only", False):
+        regenerate_step02_figures_from_tables(
+            output_dir=args.output_dir,
+            vouchers_csv=args.vouchers,
+        )
+        return
     pipeline = SegmentAndExtractPipeline(
         vouchers_csv=args.vouchers,
         model_weights=args.model_weights,

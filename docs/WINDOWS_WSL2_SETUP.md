@@ -3,17 +3,18 @@
 ### Running the *Packera dubia* Morphometrics & Species Delimitation Pipeline on Windows
 **Author:** J. Brandon Fuller (PhD Candidate, Department of Biology, University of North Carolina at Chapel Hill)  
 **Affiliation:** University of North Carolina Herbarium (NCU)  
+**Standard Operating Procedure:** `UNC-BOT-SOP-2026-04-REV5`  
 **Target Environment:** Windows 10 (Build 19044+) or Windows 11 with WSL 2 (Ubuntu 22.04 / 24.04 LTS)
 
 ---
 
 ## 📋 Overview
 
-The computational pipeline couples automated deep learning morphometrics (LeafMachine2 / PointRend), interactive Segment Anything Model 2 (SAM 2) annotation, high-throughput OpenCV geometric symmetry reconstruction, and R statistical morphometrics and spatial macroecology (`Momocs`, `MorphoTools2`, `RRPP`, `mclust`, `clustvarsel`, `geodata`, `ranger`, `adespatial`, `blockCV`, `ecospat`).
+The computational pipeline couples automated deep learning organ segmentation (stock LeafMachine2 v2.2+ `PLANT_LeafPriority` + 38-class Ruler Detector + `leaf_seg_rcnn_v2_1` PointRend), classical dimensionless geometric gatekeeping (`Tier_1_Direct`), R statistical morphometrics (`Momocs`, `MorphoTools2`, `RRPP`, `mclust`, `clustvarsel`, `igraph`), taphonomic indumentum-blind `dinov2_vitb14_reg` foreground patch-token pooling with Cleanlab confident learning, and $0\text{–}15\text{ cm}$ rhizosphere / USGS SGMC bedrock spatial macroecology (`geodata`, `soilDB`, `ranger`, `adespatial`, `blockCV`, `ecospat`).
 
-While developed natively on Linux, **Windows Subsystem for Linux (WSL 2)** provides first-class support for the entire pipeline on Windows machines. With modern WSL 2:
-- **NVIDIA GPU Acceleration:** Direct pass-through of CUDA cores and Tensor cores to PyTorch and LeafMachine2 via the Windows host display driver.
-- **Native GUI Acceleration (WSLg):** Interactive OpenCV/X11 annotation tools like [`annotate_with_sam2.py`](../scripts/annotation_and_training/annotate_with_sam2.py) render directly in native Windows desktop windows without requiring external X-servers (such as VcXsrv or Xming).
+While developed natively on Linux, **Windows Subsystem for Linux (WSL 2)** provides first-class support for the entire pipeline on Windows machines:
+- **NVIDIA GPU Acceleration:** Direct pass-through of CUDA cores and Tensor cores to PyTorch, DINOv2, and LeafMachine2 via the Windows host display driver.
+- **Native GUI Acceleration (WSLg):** X11/Wayland graphics render directly in native Windows desktop windows without requiring external X-servers.
 - **Near-Native Filesystem Performance:** When operating inside native ext4 virtual disks (`~/`), batch processing on thousands of high-resolution herbarium scans achieves near bare-metal Linux speeds.
 
 ---
@@ -29,7 +30,7 @@ While developed natively on Linux, **Windows Subsystem for Linux (WSL 2)** provi
 | **5** | Install System Packages | Ubuntu (WSL) | `sudo apt-get install -y libgl1 libglib2.0-0 r-base ...` |
 | **6** | Configure Python & LM2 | Ubuntu (WSL) | `source .venv/bin/activate && bash setup_leafmachine2.sh` |
 | **7** | Configure R Packages | Ubuntu (WSL) | `Rscript -e 'install.packages(...); remotes::install_github("MomX/Momocs")'` |
-| **8** | Launch in VS Code | Ubuntu (WSL) | `code .` (WSL extension) |
+| **8** | Launch Pipeline | Ubuntu (WSL) | `./run_pipeline.sh` |
 
 ---
 
@@ -47,7 +48,7 @@ While developed natively on Linux, **Windows Subsystem for Linux (WSL 2)** provi
    > wsl --set-default-version 2
    > ```
 3. **Reboot your PC** if prompted by Windows.
-4. Upon reboot, Ubuntu will launch automatically to finalize initialization. Follow the prompt to create your Linux username and password.
+4. Upon reboot, Ubuntu will launch automatically to finalize initialization.
 
 ---
 
@@ -57,17 +58,14 @@ WSL 2 uses virtual GPU pass-through (WSL-DirectX) provided directly by the Windo
 
 > [!CAUTION]
 > ### 🛑 DO NOT Install Linux NVIDIA Display Drivers Inside WSL!
-> A common and destructive error is running `apt-get install nvidia-driver-...` or executing an NVIDIA `.run` driver installer inside the Ubuntu terminal. 
-> - **Never** install Linux display drivers inside WSL 2. Doing so overwrites WSL's synthetic Direct3D GPU linkage and **breaks both CUDA pass-through and WSLg desktop graphics**.
+> - **Never** install Linux display drivers (`apt-get install nvidia-driver-...`) inside WSL 2. Doing so overwrites WSL's synthetic Direct3D GPU linkage.
 > - The Linux environment automatically accesses GPU hardware via `/usr/lib/wsl/drivers` mapped from the Windows host.
 
-### Instructions:
 1. **Windows Host:** Download and install the latest Game Ready or Studio Driver for your GPU from the [official NVIDIA Driver Download page](https://www.nvidia.com/Download/index.aspx).
 2. **Ubuntu Terminal (WSL):** Verify that CUDA pass-through is active by running:
    ```bash
    nvidia-smi
    ```
-   **Expected Output:** A standard NVIDIA System Management Interface table displaying your GPU model (e.g., RTX 3080/4080/A6000), driver version, and CUDA version (e.g., 12.x).
 
 ---
 
@@ -75,37 +73,17 @@ WSL 2 uses virtual GPU pass-through (WSL-DirectX) provided directly by the Windo
 
 > [!WARNING]
 > ### ⚠️ Always Clone into `~/` (Native Linux ext4) — Avoid `/mnt/c/`!
-> The *Packera dubia* pipeline processes **>6,600 high-resolution herbarium vouchers (>25 GB)** and generates tens of thousands of intermediate image patches, binary masks, and contour coordinate files.
-> 
-> - **The Problem:** Accessing Windows filesystem drives via `/mnt/c/` or mounted cloud drives (e.g., `/mnt/g/My Drive/...`) passes through the WSL 9P network translation protocol. This causes a **10$\times$ to 50$\times$ reduction in disk I/O performance**, turning a 5-minute batch segmentation into hours.
-> - **The Solution:** Always clone and execute the repository inside your Ubuntu home directory (`~` or `/home/<username>/`), which resides on a native high-speed ext4 virtual disk (`ext4.vhdx`).
+> Accessing Windows filesystem drives via `/mnt/c/` passes through the WSL 9P network translation protocol, causing a $10\times$ to $50\times$ reduction in disk I/O performance. Always clone and execute the repository inside your Ubuntu home directory (`~` or `/home/<username>/`).
 
-### Clone the Repository:
 ```bash
-# Navigate to your native Linux home directory
 cd ~
-
-# Clone the repository
 git clone https://github.com/Plantatsrophe/Packera_dubia_morphometrics.git
 cd Packera_dubia_morphometrics
 ```
 
-### Accessing Project Files from Windows File Explorer:
-You can seamlessly view or copy files between Windows and WSL at any time:
-- In your Ubuntu terminal, run:
-  ```bash
-  explorer.exe .
-  ```
-- Or open Windows File Explorer and enter the network path:
-  ```text
-  \\wsl$\Ubuntu\home\<your_username>\Packera_dubia_morphometrics
-  ```
-
 ---
 
 ## Step 4: Install Required System apt Packages
-
-Update your package repositories and install essential compilers, graphic libraries for OpenCV GUI rendering, R, and geospatial dependencies for environmental rasters (`terra` and `sf`):
 
 ```bash
 sudo apt-get update && sudo apt-get install -y \
@@ -134,31 +112,24 @@ sudo apt-get update && sudo apt-get install -y \
 
 ---
 
-## Step 5: Python Environments & LeafMachine2 Setup
+## Step 5: Python Environments & Stock LeafMachine2 v2.2+ Setup
 
-The pipeline uses two virtual environments to decouple modern PyTorch / SAM 2 dependencies from legacy LeafMachine2 requirements:
+The pipeline uses two virtual environments to decouple modern PyTorch / `dinov2_vitb14_reg` / Cleanlab dependencies (`.venv`) from stock LeafMachine2 v2.2+ and Detectron2 PointRend ABI pins (`.venv_LM2`):
 
 ### A. Create and Populate Primary Pipeline Environment (`.venv`):
 ```bash
-# From the project root: ~/Packera_dubia_morphometrics
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Upgrade packaging tools
 pip install --upgrade pip setuptools wheel
-
-# Install core pipeline dependencies
 pip install -r requirements.txt
 ```
 
 ### B. Configure LeafMachine2 Virtual Environment (`.venv_LM2`):
-Execute the automated setup script to provision `.venv_LM2` and configure LeafMachine2:
 ```bash
 bash setup_leafmachine2.sh
 ```
 
 ### C. Run Preflight Diagnostic:
-Verify that all system libraries, Python modules, CUDA availability, and R binaries are correctly configured:
 ```bash
 source .venv/bin/activate
 python main.py check-env
@@ -168,89 +139,35 @@ python main.py check-env
 
 ## Step 6: R Statistical Computing Environment
 
-Install the required R packages for Elliptic Fourier Analysis (`Momocs`, installed via `remotes::install_github("MomX/Momocs")` following its March 2026 CRAN archival), randomized residual permutation (`RRPP`), Gaussian Mixture Models with variable selection (`mclust`, `clustvarsel`), Canonical Discriminant Analysis (`MorphoTools2`), and spatial macroecology (`terra`, `sf`, `geodata`, `soilDB`, `spatialRF`, `ranger`, `adespatial`, `blockCV`, `ecospat`, `ENMTools`, `patchwork`, `viridis`):
+Install the required R ($\ge 4.3$) packages for Elliptic Fourier Analysis (`Momocs`), Klingenberg allometric testing, Gaussian Mixture Models (`mclust`, `clustvarsel`), Canonical Discriminant Analysis (`MorphoTools2`), spatial macroecology (`terra`, `sf`, `geodata`, `soilDB`, `spatialRF`, `ranger`, `adespatial`, `blockCV`, `ecospat`, `ENMTools`), and unsupervised taxon-complex discovery (`igraph`):
 
 ```bash
-Rscript -e 'install.packages(c("remotes", "tidyverse", "optparse", "mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "terra", "sf", "geodata", "soilDB", "spatialRF", "ranger", "adespatial", "blockCV", "ecospat", "ENMTools", "patchwork", "viridis"), repos="https://cloud.r-project.org"); if (!requireNamespace("Momocs", quietly=TRUE)) remotes::install_github("MomX/Momocs")'
+Rscript -e 'install.packages(c("remotes", "tidyverse", "optparse", "mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "terra", "sf", "geodata", "soilDB", "spatialRF", "ranger", "adespatial", "blockCV", "ecospat", "ENMTools", "igraph", "patchwork", "viridis"), repos="https://cloud.r-project.org"); if (!requireNamespace("Momocs", quietly=TRUE)) remotes::install_github("MomX/Momocs")'
 ```
 
 ---
 
-## Step 7: Running `annotate_with_sam2.py` via Native WSLg Graphics
+## Step 7: Running the Automated Pipeline (`run_pipeline.sh`)
 
-Windows 11 and updated Windows 10 include **WSLg (Windows Subsystem for Linux GUI)** built-in. WSLg integrates an automated Wayland/X11 display server with GPU acceleration directly into the Windows desktop compositor.
+The production pipeline runs completely headlessly using stock LeafMachine2 v2.2+ weights (`PLANT_LeafPriority` and `leaf_seg_rcnn_v2_1`) without requiring manual interactive annotation:
 
-### No Third-Party X-Server Needed!
-You do **not** need to install or configure VcXsrv, Xming, or manual `export DISPLAY` IP forwarding. WSLg sets up `$DISPLAY` (typically `:0`) and `$WAYLAND_DISPLAY` automatically.
-
-### Running the Interactive SAM 2 Annotator:
 ```bash
 source .venv/bin/activate
 
-python scripts/annotation_and_training/annotate_with_sam2.py \
-    --images-dir data/raw_vouchers \
-    --output-dir data/raw_annotations \
-    --output-coco data/annotations/packera_train_coco.json \
-    --prelabel-with-lm2
+# Full complex-wide run
+./run_pipeline.sh --run-id packera_wsl_run --skip-harvest
+
+# Run the complete unit test suite
+python3 -m unittest discover -s scripts/tests -p "test_*.py" -v
 ```
 
-### What to Expect:
-- An X11/OpenCV window labeled **"SAM 2 Precision Botanical Annotator"** will open as a native Windows application window.
-- Smooth mouse wheel zooming ($1\times$ to $16\times$) and middle-click panning operate with hardware-accelerated responsiveness.
-- Real-time SAM 2 mask inference will utilize your host NVIDIA GPU via CUDA without latency.
-- Full hotkey reference (`0`–`1` basal leaf class assignment, `k` knife cut, `o` contour toggle, `Tab` multimask cycling) is documented in the main [`README.md`](../README.md#sam-2-botanical-annotator-hotkey-cheat-sheet).
-
----
-
-## Step 8: Launching Visual Studio Code with the WSL Extension
-
-Developing inside WSL 2 is completely seamless using Microsoft Visual Studio Code:
-
-1. **Install VS Code on Windows** from [code.visualstudio.com](https://code.visualstudio.com/).
-2. In VS Code, open the Extensions view (`Ctrl+Shift+X`) and install the **WSL** extension (Identifier: `ms-vscode-remote.remote-wsl`).
-3. Inside your Ubuntu WSL terminal, navigate to the repository directory and type:
-   ```bash
-   cd ~/Packera_dubia_morphometrics
-   code .
-   ```
-4. VS Code will launch on your Windows desktop, connected directly to your Ubuntu WSL environment:
-   - The bottom-left status bar will display `WSL: Ubuntu`.
-   - The integrated terminal (`Ctrl+\``) defaults to bash inside your ext4 repository.
-   - You can select `.venv/bin/python` as your active Python interpreter for full linting, autocompletion, and debugging.
-
----
-
-## 🛠️ Troubleshooting & FAQ
-
-### 1. `nvidia-smi` returns `command not found` or fails inside WSL
-- **Solution:** Verify that your Windows host has the latest NVIDIA drivers installed. Ensure your WSL instance is running version 2 by opening Windows PowerShell and checking:
-  ```powershell
-  wsl -l -v
-  ```
-  If the VERSION column displays `1`, convert it to WSL 2:
-  ```powershell
-  wsl --set-version Ubuntu 2
-  ```
-
-### 2. GUI Window does not appear when running `annotate_with_sam2.py`
-- Check that `$DISPLAY` is set:
-  ```bash
-  echo $DISPLAY
-  ```
-  It should print `:0`.
-- Verify WSLg health by testing a lightweight X11 app:
-  ```bash
-  sudo apt-get install -y x11-apps
-  xclock
-  ```
-  If `xclock` does not appear, update WSL from PowerShell (`wsl --update`) and restart WSL (`wsl --shutdown`).
-
-### 3. Extremely slow processing or high disk activity
-- Ensure that `pwd` shows `/home/...` and **not** `/mnt/c/...`. Always execute from the ext4 filesystem.
+> [!NOTE]
+> **Optional Standalone SAM 2 Utility (`annotate_with_sam2.py`):**  
+> While not used by the automated production pipeline, if you ever wish to launch the optional standalone SAM 2 GUI (`scripts/annotation_and_training/annotate_with_sam2.py`), WSLg renders its OpenCV window natively on the Windows desktop without requiring VcXsrv or Xming.
 
 ---
 
 ## 📚 Related Documentation
 - Main Operational Pipeline: [`README.md`](../README.md)
+- Taxonomic Standard Operating Procedure: [`docs/TAXONOMIC_SOP.md`](TAXONOMIC_SOP.md)
 - Complete Pipeline Guide: [`docs/WORKFLOW_GUIDE.md`](WORKFLOW_GUIDE.md)
-- SAM 2 Botanical Annotation Protocol: [`docs/SAM2_Precision_Botanical_Annotation_Guide.txt`](SAM2_Precision_Botanical_Annotation_Guide.txt)
