@@ -861,6 +861,20 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         stopifnot(abs(df_out$fine_soil_ph[1] - 4.7) < 1e-6 && abs(df_out$fine_soil_ph[2] - 6.5) < 1e-6 && abs(df_out$fine_soil_ph[3] - 5.8) < 1e-6)
         stopifnot(abs(df_out$fine_soil_sand[1] - 74.0) < 1e-6 && abs(df_out$fine_soil_sand[2] - 32.0) < 1e-6 && abs(df_out$fine_soil_sand[3] - 62.0) < 1e-6)
         stopifnot(abs(df_out$fine_soil_cec[1] - 4.2) < 1e-6 && abs(df_out$fine_soil_cec[2] - 19.5) < 1e-6 && abs(df_out$fine_soil_cec[3] - 14.5) < 1e-6)
+
+        # 4. Verify aggregate_ssurgo_tabular_to_points works both with and without explicit classify_fn
+        sub_pts <- data.frame(gid = 1L, catalogNumber = "V1", latitude = 35.8, longitude = -79.1, stringsAsFactors = FALSE)
+        tab_res <- data.frame(
+          gid = 1L, mukey = "101", musym = "WkB", muname = "Wake-Rock outcrop complex",
+          brockdepmin = 18.0, aws050wta = 2.4, cokey = "101_1", compname = "Wake",
+          comppct_r = 65.0, compkind = "Series", majcompflag = "Yes",
+          taxsuborder = "Udipsamments", taxgreatgroup = "Quartzipsamments",
+          hzdept_r = 0.0, hzdepb_r = 15.0, sandtotal_r = 76.0, claytotal_r = 8.0,
+          ph1to1h2o_r = 4.8, om_r = 1.7, cec7_r = 4.1, awc_r = 0.05,
+          resdept_r = 18.0, reskind = "Lithic bedrock", stringsAsFactors = FALSE
+        )
+        agg1 <- aggregate_ssurgo_tabular_to_points(sub_pts, tab_res)
+        stopifnot(nrow(agg1) == 1 && isTRUE(agg1$is_rock_outcrop[1]) && agg1$outcrop_class[1] == "Granitic flatrock")
         cat("RHIZOSPHERE_PEDOLOGY_OK\\n")
         """
         res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)

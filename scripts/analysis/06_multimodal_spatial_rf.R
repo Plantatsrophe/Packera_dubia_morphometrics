@@ -499,7 +499,7 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
             buf_sql <- build_ssurgo_buffered_sda_sql(sub_pts, buffer_deg = 0.00045)
             buf_tab <- tryCatch(soilDB::SDA_query(buf_sql), error = function(e_b) NULL)
             if (is.data.frame(buf_tab) && nrow(buf_tab) > 0 && "mukey" %in% names(buf_tab)) {
-              agg_df <- aggregate_ssurgo_tabular_to_points(sub_pts, buf_tab)
+              agg_df <- aggregate_ssurgo_tabular_to_points(sub_pts, buf_tab, classify_fn = classify_ssurgo_outcrop)
               chunk_df <- normalize_ssurgo_cols(agg_df)
               chunk_ok <- TRUE
               break
@@ -569,7 +569,7 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
               if (is.data.frame(tab_res) && nrow(tab_res) > 0) {
                 tab_joined <- merge(sp_res[, sp_keep, drop = FALSE], tab_res, by = "mukey", all.x = TRUE)
                 if (exists("aggregate_ssurgo_tabular_to_points", mode = "function")) {
-                  agg_df <- aggregate_ssurgo_tabular_to_points(sub_pts, tab_joined)
+                  agg_df <- aggregate_ssurgo_tabular_to_points(sub_pts, tab_joined, classify_fn = classify_ssurgo_outcrop)
                   chunk_df <- normalize_ssurgo_cols(agg_df)
                 } else {
                   pts_sp <- merge(sub_pts, sp_res[!duplicated(sp_res$gid), sp_keep, drop = FALSE], by = "gid", all.x = TRUE)

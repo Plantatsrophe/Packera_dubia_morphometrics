@@ -623,7 +623,32 @@ build_ssurgo_buffered_sda_sql <- function(sub_pts, buffer_deg = 0.00045) {
   return(sql)
 }
 
-aggregate_ssurgo_tabular_to_points <- function(sub_pts, tab_res, classify_fn) {
+aggregate_ssurgo_tabular_to_points <- function(sub_pts, tab_res, classify_fn = NULL) {
+  if (is.null(classify_fn) || !is.function(classify_fn)) {
+    if (exists("classify_ssurgo_outcrop", mode = "function")) {
+      classify_fn <- get("classify_ssurgo_outcrop", mode = "function")
+    } else {
+      classify_fn <- function(muname = "", compname = "", taxsuborder = "", taxgreatgroup = "", compkind = "", lat = NA, lon = NA) {
+        desc <- tolower(paste(muname, compname, taxsuborder, taxgreatgroup, compkind))
+        is_out <- grepl(SSURGO_OUTCROP_SERIES_REGEX, paste(muname, compname), perl = TRUE) ||
+                  grepl("rock outcrop|flatrock|glade|lithic", desc)
+        ocl <- if (grepl("gladeville|barfield|cedars|talbott|limestone|dolomite|glade", desc)) {
+          "Limestone glade"
+        } else if (grepl("ramsey|lily|sewanee|sandstone|siliceous|chert|shale", desc)) {
+          "Sandstone/Siliceous"
+        } else if (grepl("chrome|trego|serpentine|ultramafic", desc)) {
+          "Serpentine"
+        } else if (grepl("iredell|mecklenburg|wilkes|enon|poindexter|diabase", desc)) {
+          "Diabase/Mafic glade"
+        } else if (is_out) {
+          "Granitic flatrock"
+        } else {
+          "Non-outcrop matrix"
+        }
+        list(is_rock_outcrop = is_out, outcrop_class = ocl)
+      }
+    }
+  }
   n_sub <- nrow(sub_pts)
   out_list <- vector("list", n_sub)
 
