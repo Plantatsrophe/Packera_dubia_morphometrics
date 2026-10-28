@@ -24,9 +24,10 @@ paths:
   models_dir: "models"
 
 # Model Checkpoints & Remote Artifacts
+# Note: The pipeline uses stock LeafMachine2 v2.2+ PLANT_LeafPriority weights by default without requiring custom fine-tuned PCD checkpoints.
 models:
   pcd_weights_path: "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
-  pcd_weights_url: "https://github.com/Plantatsrophe/Packera_dubia_morphometrics/releases/download/v1.0-weights/lm2_packera_pcd_finetuned.pth"
+  pcd_weights_url: "" # Stock LeafMachine2 v2.2+ PLANT_LeafPriority weights are used by default without requiring custom fine-tuned PCD checkpoints
   pcd_weights_sha256: "" # Optional checksum verification
 
 # Target Focal Taxa, Synonyms, and Outgroups

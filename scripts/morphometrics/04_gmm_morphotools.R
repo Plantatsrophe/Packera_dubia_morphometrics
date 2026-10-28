@@ -500,7 +500,7 @@ audit_misidentifications <- function(df, cda_res, gmm_res) {
   return(df)
 }
 
-# 5b. Institutional Batch-Effect Audit (ANOVA & Variance Explained)
+# 5b. Institutional Batch-Effect Audit (Taxon-Adjusted Marginal ANCOVA & Partial R-Squared)
 audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/reports/institutional_batch_effect_audit.csv", min_obs = 15) {
   if (!("institutionCode" %in% names(morpho_df))) return(NULL)
   valid_df <- morpho_df[!is.na(morpho_df$institutionCode) & trimws(morpho_df$institutionCode) != "" & !is.na(morpho_df$PC1) & !is.na(morpho_df$PC2), ]
@@ -508,14 +508,19 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   inst_counts <- table(valid_df$institutionCode); rep_insts <- names(inst_counts[inst_counts >= min_obs])
   audit_subset <- if (length(rep_insts) >= 2) valid_df[valid_df$institutionCode %in% rep_insts, ] else valid_df
   audit_subset$institutionCode <- droplevels(factor(audit_subset$institutionCode))
+  if (!("species_standardized" %in% names(audit_subset))) audit_subset$species_standardized <- if ("scientificName" %in% names(audit_subset)) audit_subset$scientificName else "Packera dubia"
+  audit_subset$species_standardized <- droplevels(factor(audit_subset$species_standardized))
   if (nlevels(audit_subset$institutionCode) < 2) return(NULL)
-  lm_pc1 <- lm(PC1 ~ institutionCode, data = audit_subset); lm_pc2 <- lm(PC2 ~ institutionCode, data = audit_subset)
-  s1 <- summary(lm_pc1); s2 <- summary(lm_pc2); aov1 <- anova(lm_pc1); aov2 <- anova(lm_pc2); r2_pc1 <- s1$r.squared; r2_pc2 <- s2$r.squared
+  has_multi_taxa <- nlevels(audit_subset$species_standardized) >= 2
+  lm_pc1 <- if (has_multi_taxa) lm(PC1 ~ species_standardized + institutionCode, data = audit_subset) else lm(PC1 ~ institutionCode, data = audit_subset)
+  lm_pc2 <- if (has_multi_taxa) lm(PC2 ~ species_standardized + institutionCode, data = audit_subset) else lm(PC2 ~ institutionCode, data = audit_subset)
+  s1 <- summary(lm_pc1); s2 <- summary(lm_pc2); aov1 <- anova(lm_pc1); aov2 <- anova(lm_pc2); i1 <- which(rownames(aov1) == "institutionCode")[1]; r1 <- which(rownames(aov1) == "Residuals")[1]
+  i2 <- which(rownames(aov2) == "institutionCode")[1]; r2 <- which(rownames(aov2) == "Residuals")[1]; r2_pc1 <- aov1$`Sum Sq`[i1] / max(aov1$`Sum Sq`[i1] + aov1$`Sum Sq`[r1], 1e-12); r2_pc2 <- aov2$`Sum Sq`[i2] / max(aov2$`Sum Sq`[i2] + aov2$`Sum Sq`[r2], 1e-12)
   anova_df <- data.frame(
     Response = c("PC1", "PC1", "PC2", "PC2"), Term = c("institutionCode", "Residuals", "institutionCode", "Residuals"),
-    Df = c(aov1$Df[1], aov1$Df[2], aov2$Df[1], aov2$Df[2]), Sum_Sq = round(c(aov1$`Sum Sq`[1], aov1$`Sum Sq`[2], aov2$`Sum Sq`[1], aov2$`Sum Sq`[2]), 4),
-    Mean_Sq = round(c(aov1$`Mean Sq`[1], aov1$`Mean Sq`[2], aov2$`Mean Sq`[1], aov2$`Mean Sq`[2]), 4),
-    F_value = c(round(aov1$`F value`[1], 4), NA, round(aov2$`F value`[1], 4), NA), P_value = c(signif(aov1$`Pr(>F)`[1], 4), NA, signif(aov2$`Pr(>F)`[1], 4), NA),
+    Df = c(aov1$Df[i1], aov1$Df[r1], aov2$Df[i2], aov2$Df[r2]), Sum_Sq = round(c(aov1$`Sum Sq`[i1], aov1$`Sum Sq`[r1], aov2$`Sum Sq`[i2], aov2$`Sum Sq`[r2]), 4),
+    Mean_Sq = round(c(aov1$`Mean Sq`[i1], aov1$`Mean Sq`[r1], aov2$`Mean Sq`[i2], aov2$`Mean Sq`[r2]), 4),
+    F_value = c(round(aov1$`F value`[i1], 4), NA, round(aov2$`F value`[i2], 4), NA), P_value = c(signif(aov1$`Pr(>F)`[i1], 4), NA, signif(aov2$`Pr(>F)`[i2], 4), NA),
     R_squared = round(c(r2_pc1, NA, r2_pc2, NA), 4), Adj_R_squared = round(c(s1$adj.r.squared, NA, s2$adj.r.squared, NA), 4),
     Batch_Effect_Status = c(ifelse(r2_pc1 < 0.05, "Pass (<0.05)", "Exceeds 0.05"), NA, ifelse(r2_pc2 < 0.05, "Pass (<0.05)", "Exceeds 0.05"), NA), stringsAsFactors = FALSE)
   if (!is.null(output_csv) && nzchar(output_csv)) {
