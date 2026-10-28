@@ -358,11 +358,11 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     is_train_cand <- is_active
   } else {
     df$grouping_col <- df$species_standardized
-    is_active <- (df$determiner_tier == "Tier_1_Gold") & is_tier1_pure & (df$grouping_col %in% target_taxa) & complete.cases(df[, feature_cols])
-    is_train_cand <- (df$authority_weight > 0) & is_tier1_pure & df$species_standardized %in% target_taxa & complete.cases(df[, feature_cols])
+    is_active <- (df$determiner_tier == "Tier_1_Gold") & is_tier1_pure & (df$grouping_col %in% target_taxa) & has_pcs
+    is_train_cand <- (df$authority_weight > 0) & is_tier1_pure & df$species_standardized %in% target_taxa & has_pcs
     if (length(unique(df$grouping_col[is_train_cand])) >= 2) target_taxa <- intersect(target_taxa, unique(df$grouping_col[is_train_cand]))
     if (any(table(factor(df$grouping_col[is_train_cand], levels = target_taxa)) < 2)) {
-      fallback_cand <- (df$authority_weight > 0) & df$species_standardized %in% target_taxa & complete.cases(df[, feature_cols])
+      fallback_cand <- (df$authority_weight > 0) & df$species_standardized %in% target_taxa & has_pcs
       is_train_cand <- if (all(table(factor(df$grouping_col[fallback_cand], levels = target_taxa)) >= 2)) fallback_cand else (df$grouping_col %in% target_taxa & has_pcs)
     }
   }
@@ -550,8 +550,9 @@ run_gmm_morphotools_pipeline <- function(opts) {
   spec_keys <- paste0(closed_df$catalogNumber, "_", closed_df$plant_individual_id)
   if (any(duplicated(spec_keys))) {
     pc_sym_cols <- intersect(c(pca_cols, paste0("PC", seq_len(5)), paste0("Sym_PC", seq_len(5))), names(closed_df))
-    num_cols <- intersect(c(pc_sym_cols, "foliar_variance", "leaf_count", "aspect_ratio", "solidity", "ucs_score", "area_px", "centroid_size", "log_centsize", "harmonic_roughness", "leaf_quality_weight"), names(closed_df))
-    other_num <- setdiff(num_cols, pc_sym_cols); has_w <- "leaf_quality_weight" %in% names(closed_df)
+    pet_cols <- intersect(c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"), names(closed_df))
+    num_cols <- intersect(c(pc_sym_cols, pet_cols, "plant_height_cm", "scape_to_basal_leaf_ratio", "foliar_variance", "leaf_count", "aspect_ratio", "solidity", "ucs_score", "area_px", "centroid_size", "log_centsize", "harmonic_roughness", "leaf_quality_weight"), names(closed_df))
+    other_num <- setdiff(num_cols, c(pc_sym_cols, pet_cols)); has_w <- "leaf_quality_weight" %in% names(closed_df)
     meta_cols <- setdiff(names(closed_df), c(num_cols, "catalogNumber", "plant_individual_id", "shape_id", "leaf_id", "mask_source", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source"))
     grp_list <- split(closed_df, list(closed_df$catalogNumber, closed_df$plant_individual_id), drop = TRUE)
     closed_df <- do.call(rbind, lapply(grp_list, function(grp) {
@@ -569,6 +570,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
       }
       out <- grp[1, , drop = FALSE]
       for (col in c(pc_sym_cols, other_num)) out[[col]] <- stats::median(grp[[col]], na.rm = TRUE)
+      for (col in pet_cols) out[[col]] <- stats::quantile(suppressWarnings(as.numeric(grp[[col]])), probs = 0.75, na.rm = TRUE, names = FALSE)
       if ("leaf_count" %in% names(out)) out$leaf_count <- nrow(grp)
       out$n_tier1_leaves <- n_t1; out$n_tier2_leaves <- n_t2; out$morph_tier_source <- m_src
       for (col in meta_cols) { v <- stats::na.omit(grp[[col]]); out[[col]] <- if (length(v) > 0) v[1] else grp[[col]][1] }
@@ -580,68 +582,64 @@ run_gmm_morphotools_pipeline <- function(opts) {
     if (!"n_tier2_leaves" %in% names(closed_df)) closed_df$n_tier2_leaves <- ifelse(closed_df$assigned_tier == "Tier_2_Reflected", lc, 0L)
     if (!"morph_tier_source" %in% names(closed_df)) closed_df$morph_tier_source <- ifelse(closed_df$n_tier1_leaves >= 1L | closed_df$assigned_tier == "Tier_1_Direct", "Tier_1_Pure", "Tier_2_Fallback")
   }
-  closed_df$species_standardized <- standardize_packera_taxon(closed_df$species_raw)
-  closed_df$authority_weight <- compute_authority_precision_weights(closed_df)
+  closed_df$species_standardized <- standardize_packera_taxon(closed_df$species_raw); closed_df$authority_weight <- compute_authority_precision_weights(closed_df)
   if (!is.null(vouchers_df)) {
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), , drop = FALSE]; v_idx <- match(as.character(closed_df$catalogNumber), as.character(v_sub$catalogNumber))
-    for (col in intersect(names(v_sub), c("institutionCode", "county", "stateProvince", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) {
-      if (!col %in% names(closed_df)) closed_df[[col]] <- v_sub[[col]][v_idx]
-    }
+    for (col in intersect(names(v_sub), c("institutionCode", "county", "stateProvince", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) if (!col %in% names(closed_df)) closed_df[[col]] <- v_sub[[col]][v_idx]
   }
   closed_df$spatial_balance_weight <- compute_spatial_balance_weights(closed_df)
-  allom_res <- test_and_correct_allometry(closed_df, correct_mode = opts$correct_allometry, permutations = opts$permutations,
-                                          seed = opts$seed, output_report = opts$allometry_report, output_plot = opts$allometry_plot, output_pairwise = opts$allometry_pairwise)
+  allom_res <- test_and_correct_allometry(closed_df, correct_mode = opts$correct_allometry, permutations = opts$permutations, seed = opts$seed, output_report = opts$allometry_report, output_plot = opts$allometry_plot, output_pairwise = opts$allometry_pairwise)
   if (!is.null(allom_res$df)) closed_df <- allom_res$df
   include_repro <- FALSE; feature_cols <- pca_cols
   if (!isTRUE(opts$outline_only)) {
     if ("capitulum_aspect_ratio" %in% names(closed_df)) closed_df$AR_inv <- suppressWarnings(as.numeric(closed_df$capitulum_aspect_ratio))
     else if ("AR_inv" %in% names(closed_df)) closed_df$AR_inv <- suppressWarnings(as.numeric(closed_df$AR_inv))
-    else if (!is.null(opts$reproductive) && file.exists(opts$reproductive)) {
+    if (!is.null(opts$reproductive) && file.exists(opts$reproductive)) {
       repro_df <- read.csv(opts$reproductive, stringsAsFactors = FALSE)
-      if ("capitulum_aspect_ratio" %in% names(repro_df)) repro_df$AR_inv <- suppressWarnings(as.numeric(repro_df$capitulum_aspect_ratio))
-      r_cols <- intersect(names(repro_df), c("catalogNumber", "AR_inv", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"))
-      closed_df <- merge(closed_df, repro_df[!duplicated(repro_df$catalogNumber), r_cols, drop = FALSE], by = "catalogNumber", all.x = TRUE)
+      if ("capitulum_aspect_ratio" %in% names(repro_df) && !"AR_inv" %in% names(repro_df)) repro_df$AR_inv <- suppressWarnings(as.numeric(repro_df$capitulum_aspect_ratio))
+      r_cols <- c("catalogNumber", setdiff(intersect(names(repro_df), c("AR_inv", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm", "plant_height_cm", "scape_to_basal_leaf_ratio", "is_bent_stem", "petiole_to_blade_ratio")), names(closed_df)))
+      if (length(r_cols) > 1L) closed_df <- merge(closed_df, repro_df[!duplicated(repro_df$catalogNumber), r_cols, drop = FALSE], by = "catalogNumber", all.x = TRUE)
     }
-    if ("AR_inv" %in% names(closed_df)) {
-      valid_repro <- which(!is.na(closed_df$AR_inv) & is.finite(closed_df$AR_inv))
-      ref_repro <- intersect(valid_repro, which(closed_df$authority_weight > 0))
-      if (length(ref_repro) < 3L) ref_repro <- valid_repro
-      if (length(valid_repro) >= 5) {
-        closed_df$AR_inv_std <- NA_real_; m_ar <- mean(closed_df$AR_inv[ref_repro]); s_ar <- stats::sd(closed_df$AR_inv[ref_repro])
-        closed_df$AR_inv_std[valid_repro] <- if (is.finite(s_ar) && s_ar > 1e-6) round((closed_df$AR_inv[valid_repro] - m_ar) / s_ar, 5) else 0.0
-        include_repro <- TRUE; feature_cols <- c(pca_cols, "AR_inv_std")
+    man_cand <- file.path(dirname(opts$harmonics), "extracted_leaf_manifest.csv")
+    if (!"petiole_to_blade_ratio" %in% names(closed_df) && file.exists(man_cand)) {
+      man_df <- tryCatch(read.csv(man_cand, stringsAsFactors = FALSE), error = function(e) NULL)
+      if (!is.null(man_df) && all(c("catalogNumber", "petiole_to_blade_ratio") %in% names(man_df))) {
+        p_cols <- intersect(c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"), names(man_df))
+        agg_m <- stats::aggregate(man_df[, p_cols, drop = FALSE], by = list(catalogNumber = man_df$catalogNumber), FUN = function(x) stats::quantile(suppressWarnings(as.numeric(x)), probs = 0.75, na.rm = TRUE, names = FALSE))
+        closed_df <- merge(closed_df, agg_m[, c("catalogNumber", setdiff(p_cols, names(closed_df))), drop = FALSE], by = "catalogNumber", all.x = TRUE)
+      }
+    }
+    for (tr_col in c("AR_inv", "petiole_to_blade_ratio", "plant_height_cm")) if (tr_col %in% names(closed_df)) {
+      closed_df[[tr_col]] <- suppressWarnings(as.numeric(closed_df[[tr_col]])); valid_tr <- which(!is.na(closed_df[[tr_col]]) & is.finite(closed_df[[tr_col]]))
+      ref_tr <- intersect(valid_tr, which(closed_df$authority_weight > 0)); if (length(ref_tr) < 3L) ref_tr <- valid_tr
+      if (length(valid_tr) >= 5) {
+        std_col <- paste0(tr_col, "_std"); closed_df[[std_col]] <- NA_real_; m_tr <- mean(closed_df[[tr_col]][ref_tr]); s_tr <- stats::sd(closed_df[[tr_col]][ref_tr])
+        closed_df[[std_col]][valid_tr] <- if (is.finite(s_tr) && s_tr > 1e-6) round((closed_df[[tr_col]][valid_tr] - m_tr) / s_tr, 5) else 0.0
+        include_repro <- TRUE; feature_cols <- unique(c(feature_cols, std_col))
       }
     }
   }
   target_taxa <- c("Packera anonyma", "Packera dubia", "Packera plattensis", "Packera paupercula")
   gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel))
-  dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE)
-  tmp_bic <- paste0(opts$output_report, ".tmp"); write.csv(gmm_res$bic_table, file = tmp_bic, row.names = FALSE); file.rename(tmp_bic, opts$output_report)
-  veg_extra <- intersect(c("log_centsize", "aspect_ratio", "solidity"), names(closed_df))
-  ref_std_idx <- which(closed_df$authority_weight > 0); if (length(ref_std_idx) < 3L) ref_std_idx <- seq_len(nrow(closed_df))
+  dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE); tmp_bic <- paste0(opts$output_report, ".tmp"); write.csv(gmm_res$bic_table, file = tmp_bic, row.names = FALSE); file.rename(tmp_bic, opts$output_report)
+  veg_extra <- intersect(c("log_centsize", "aspect_ratio", "solidity"), names(closed_df)); ref_std_idx <- which(closed_df$authority_weight > 0); if (length(ref_std_idx) < 3L) ref_std_idx <- seq_len(nrow(closed_df))
   for (vc in veg_extra) if (all(is.finite(closed_df[[vc]])) && stats::sd(closed_df[[vc]][ref_std_idx]) > 1e-6) closed_df[[paste0(vc, "_std")]] <- (closed_df[[vc]] - mean(closed_df[[vc]][ref_std_idx])) / stats::sd(closed_df[[vc]][ref_std_idx])
   cda_cols <- c(feature_cols, if (!isTRUE(opts$outline_only)) intersect(paste0(veg_extra, "_std"), names(closed_df)) else character(0))
   is_intra_mode <- isTRUE(opts$intraspecific_mode) || (length(unique(closed_df$species_standardized)) < 2)
   cda_res <- run_cda_with_passive_projection(closed_df, cda_cols, target_taxa, gmm_res = gmm_res, intraspecific_mode = is_intra_mode)
-  audited_df <- audit_misidentifications(closed_df, cda_res, gmm_res)
-  audit_institutional_batch_effects(audited_df, output_csv = opts$output_batch_audit)
+  audited_df <- audit_misidentifications(closed_df, cda_res, gmm_res); audit_institutional_batch_effects(audited_df, output_csv = opts$output_batch_audit)
   lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source",
                            "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "determiner_tier", "authority_weight", "spatial_balance_weight",
                            "cda_predicted_taxon", "cda_posterior_prob", "cda_second_posterior_prob", "cda_posterior_margin", "loocv_accuracy", "is_passive",
                            "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty",
                            "can1", "can2", "can3", "pheno_sin", "pheno_cos", "PC1", "PC2", "PC3", "PC4", "PC5", "centroid_size", "log_centsize",
-                           "solidity", "ucs_score", "AR_inv", "AR_inv_std", "reproductive_trait_status", "capitula_count",
-                           "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
+                           "solidity", "ucs_score", "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std",
+                           "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem",
+                           "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]
-  dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE)
-  tmp_flags <- paste0(opts$output_flags, ".tmp"); write.csv(out_df, file = tmp_flags, row.names = FALSE, na = ""); file.rename(tmp_flags, opts$output_flags)
+  dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".tmp"); write.csv(out_df, file = tmp_flags, row.names = FALSE, na = ""); file.rename(tmp_flags, opts$output_flags)
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, feature_cols)
-  tryCatch({
-    if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
-      source("scripts/morphometrics/pub_figures_utils.R"); generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot)
-    }
-  }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
+  tryCatch({ if (file.exists("scripts/morphometrics/pub_figures_utils.R")) { source("scripts/morphometrics/pub_figures_utils.R"); generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot) } }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
   return(invisible(out_df))
 }
-
 if (sys.nframe() == 0) run_gmm_morphotools_pipeline(parse_args_robust())

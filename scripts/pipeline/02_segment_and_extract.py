@@ -84,6 +84,7 @@ from scripts.vision.lm2_data_loader import (
     resolve_px_per_cm,
 )
 from scripts.vision.lm2_geometry_utils import (
+    approximate_petiole_and_scape_metrics,
     BoundaryContinuityResult,
     check_boundary_tissue_continuity,
     classify_and_route_leaf,
@@ -93,6 +94,7 @@ from scripts.vision.lm2_geometry_utils import (
     crop_dense_rosette_tier4,
     detect_folded_leaf,
     detect_ruler_scale_hough,
+    estimate_rosette_crown_point,
     export_standardized_contour,
     extract_tier1_pristine,
     extract_tier2_reflected,
@@ -1160,6 +1162,8 @@ class SegmentAndExtractPipeline:
             )
 
         capitulum_detections: List[Tuple[Tuple[int, int, int, int], Optional[np.ndarray], float, int]] = []
+        root_detections: List[Tuple[int, int, int, int]] = []
+        upper_cauline_pts: List[Tuple[float, float]] = []
         # Each tuple: (full_bbox, mask, score, cls_id, crop_offset, mask_origin, already_trimmed, trim_meta, m_solidity, fg_area)
         leaf_detections: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int, Tuple[int, int], Tuple[int, int], bool, Optional[Dict[str, Any]], float, int]] = []
 
@@ -1175,6 +1179,8 @@ class SegmentAndExtractPipeline:
 
                 if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
                     capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
+                elif int(s1_cls) == 9:
+                    root_detections.append(s1_bbox)
                 elif int(s1_cls) == 2:
                     self.rejection_telemetry["rejected_leaflet_class"] += 1
                     logger.debug(f"Voucher {catalog_number}: rejected Stage 1 leaflet detection (class_id=2).")
@@ -1191,7 +1197,10 @@ class SegmentAndExtractPipeline:
                         if max(s1_bh, s1_bw) > int(1300 * scale_f) or (s1_bh * s1_bw) > 0.14 * (sheet_h * sheet_w):
                             continue
                         if is_high_dpi:
-                            if s1_cy < 0.40 * sheet_h or max(s1_bh, s1_bw) < int(200 * scale_f):
+                            if s1_cy < 0.40 * sheet_h:
+                                upper_cauline_pts.append((0.5 * float(s1_bbox[1] + s1_bbox[3]), float(s1_cy)))
+                                continue
+                            if max(s1_bh, s1_bw) < int(200 * scale_f):
                                 continue
                             if s1_cls == 1 and s1_bh == s1_bw and s1_cy < 0.60 * sheet_h:
                                 continue
@@ -1344,6 +1353,8 @@ class SegmentAndExtractPipeline:
             for bbox, mask, score, cls_id in raw_detections:
                 if cls_id in LM2_REPRODUCTIVE_CLASS_IDS:
                     capitulum_detections.append((bbox, mask, float(score), int(cls_id)))
+                elif int(cls_id) == 9:
+                    root_detections.append(bbox)
                 elif int(cls_id) == 2:
                     self.rejection_telemetry["rejected_leaflet_class"] += 1
                     logger.debug(f"Voucher {catalog_number}: rejected leaflet detection (class_id=2).")
@@ -1399,6 +1410,9 @@ class SegmentAndExtractPipeline:
                 "involucre_height_mm": np.nan,
                 "involucre_width_mm": np.nan,
                 "capitulum_aspect_ratio": np.nan,
+                "plant_height_cm": np.nan,
+                "scape_to_basal_leaf_ratio": np.nan,
+                "is_bent_stem": False,
             }
             self.voucher_pheno_records[catalog_number] = classify_voucher_phenology(catalog_number, [])
             return [], failure_record
@@ -1455,6 +1469,9 @@ class SegmentAndExtractPipeline:
             "involucre_height_mm": round(med_h_mm, 3) if not np.isnan(med_h_mm) else np.nan,
             "involucre_width_mm": round(med_w_mm, 3) if not np.isnan(med_w_mm) else np.nan,
             "capitulum_aspect_ratio": round(med_ar, 4) if not np.isnan(med_ar) else np.nan,
+            "plant_height_cm": np.nan,
+            "scape_to_basal_leaf_ratio": np.nan,
+            "is_bent_stem": False,
         }
         self.voucher_repro_records[catalog_number] = repro_summary
 
@@ -1735,6 +1752,8 @@ class SegmentAndExtractPipeline:
                 radial_dist_from_rosette=rad_dist,
             )
             if is_cauline_reject:
+                if inst_cy < b_cy_med:
+                    upper_cauline_pts.append((float(inst_cx), float(inst_cy)))
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = cauline_reason or "CAULINE_LEAF_REJECTED"
                 logger.debug(
@@ -1867,6 +1886,46 @@ class SegmentAndExtractPipeline:
             kept_with_q_cand.sort(key=lambda x: x[0], reverse=True)
             candidate_extractions = [x[1] for x in kept_with_q_cand[:6]]
 
+        # Compute empirical rosette crown (p_crown), 75th-percentile outer-rosette petiole metrics,
+        # and piecewise flowering scape height metrics across candidate_extractions
+        pose_inputs: List[Dict[str, Any]] = []
+        for _inst, _rres, _tier, _atier, _fold, _diss, _refl, _area in candidate_extractions:
+            _ox, _oy = _inst.mask_origin
+            _pb = _rres.metadata.get("p_base")
+            _pa = _rres.metadata.get("p_apex")
+            if _pb is None or _pa is None or _pb == (0, 0):
+                _, _, _, _pa, _pb = compute_geometric_metrics(_rres.processed_mask)
+            _pb_sheet = (float(_pb[0] + _ox), float(_pb[1] + _oy))
+            _pa_sheet = (float(_pa[0] + _ox), float(_pa[1] + _oy))
+            _trim_info = _inst.trim_meta or _rres.metadata.get("petiole_trim_info") or {}
+            _geod_px = float(_trim_info.get("trim_distance_px", 0.0) or 0.0)
+            pose_inputs.append({
+                "leaf_id": _inst.leaf_id,
+                "plant_individual_id": _inst.plant_individual_id,
+                "p_base_sheet": _pb_sheet,
+                "p_apex_sheet": _pa_sheet,
+                "geodesic_petiole_skeleton_px": _geod_px,
+            })
+
+        crowns_by_pid = estimate_rosette_crown_point(
+            pose_inputs,
+            root_boxes=root_detections,
+            return_by_plant=True,
+        )
+        petiole_scape_res = approximate_petiole_and_scape_metrics(
+            basal_leaves=pose_inputs,
+            p_crown=crowns_by_pid,
+            px_per_cm=px_per_cm_sheet,
+            upper_cauline_detections=upper_cauline_pts,
+            root_boxes=root_detections,
+            capitula_detections=[b for b, _, _, _ in capitulum_detections],
+        )
+        repro_summary["plant_height_cm"] = petiole_scape_res.get("plant_height_cm", np.nan)
+        repro_summary["scape_to_basal_leaf_ratio"] = petiole_scape_res.get("scape_to_basal_leaf_ratio", np.nan)
+        repro_summary["is_bent_stem"] = bool(petiole_scape_res.get("is_bent_stem", False))
+        self.voucher_repro_records[catalog_number] = repro_summary
+        by_plant_petiole = petiole_scape_res.get("by_plant", {})
+
         for inst, routing_res, tier, assigned_tier, is_folded, is_dissected, reflection_applied, m_area in candidate_extractions:
             ox, oy = inst.mask_origin
 
@@ -1957,6 +2016,7 @@ class SegmentAndExtractPipeline:
                 leaf_patch_path = self.basal_leaves_raw_dir / f"{catalog_number}_leaf{inst.leaf_id}.jpg"
                 cv2.imwrite(str(leaf_patch_path), leaf_rgb_crop)
 
+            pid_pet = by_plant_petiole.get(int(inst.plant_individual_id), petiole_scape_res)
             # Record successfully extracted leaf with diagnostic classification flags
             extracted_records.append({
                 "catalogNumber": catalog_number,
@@ -1976,6 +2036,9 @@ class SegmentAndExtractPipeline:
                 "pixels_per_mm": round(float(inst.pixels_per_mm), 4) if inst.pixels_per_mm else np.nan,
                 "is_calibrated_mm": bool(inst.is_calibrated_mm),
                 "mask_path": inst.mask_path,
+                "petiole_length_mm": pid_pet.get("petiole_length_mm", np.nan),
+                "blade_length_mm": pid_pet.get("blade_length_mm", np.nan),
+                "petiole_to_blade_ratio": pid_pet.get("petiole_to_blade_ratio", np.nan),
                 "capitula_count": capitula_count,
                 "involucre_height_px": repro_summary["involucre_height_px"],
                 "involucre_width_px": repro_summary["involucre_width_px"],
@@ -2022,6 +2085,7 @@ class SegmentAndExtractPipeline:
             extracted_df = pd.DataFrame(columns=manifest_cols + [
                 "plant_individual_id", "assigned_tier", "tier_assignment", "ucs_score",
                 "midrib_angle_deg", "pixels_per_mm", "is_calibrated_mm", "mask_path",
+                "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
                 "capitula_count", "involucre_height_px", "involucre_width_px",
                 "involucre_height_mm", "involucre_width_mm", "capitulum_aspect_ratio"
             ])
@@ -2052,6 +2116,22 @@ class SegmentAndExtractPipeline:
                 extracted_df["is_calibrated_mm"] = extracted_df.get("pixels_per_mm", pd.Series(dtype=float)).apply(
                     lambda x: bool(pd.notna(x) and float(x) > 0)
                 )
+            if "plant_individual_id" not in extracted_df.columns:
+                extracted_df["plant_individual_id"] = 0
+            for pet_col in ("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"):
+                if pet_col not in extracted_df.columns:
+                    extracted_df[pet_col] = np.nan
+                else:
+                    extracted_df[pet_col] = pd.to_numeric(extracted_df[pet_col], errors="coerce")
+            # Enforce 75th-percentile outer-rosette aggregation per specimen (catalogNumber, plant_individual_id)
+            if "catalogNumber" in extracted_df.columns and len(extracted_df) > 1:
+                grp_keys = [extracted_df["catalogNumber"].astype(str), extracted_df["plant_individual_id"].fillna(0).astype(int)]
+                for pet_col, r_dig in (("petiole_length_mm", 3), ("blade_length_mm", 3), ("petiole_to_blade_ratio", 4)):
+                    if extracted_df[pet_col].notna().any():
+                        extracted_df[pet_col] = (
+                            extracted_df.groupby(grp_keys)[pet_col]
+                            .transform(lambda s: round(float(np.nanpercentile(s, 75)), r_dig) if s.notna().any() else np.nan)
+                        )
             for c in manifest_cols:
                 if c not in extracted_df.columns:
                     extracted_df[c] = np.nan
@@ -2065,19 +2145,22 @@ class SegmentAndExtractPipeline:
                 "catalogNumber", "image_path", "failure_reason", "details"
             ])
 
+        repro_cols = [
+            "catalogNumber", "capitula_count", "involucre_height_px",
+            "involucre_width_px", "involucre_height_mm", "involucre_width_mm",
+            "capitulum_aspect_ratio", "plant_height_cm",
+            "scape_to_basal_leaf_ratio", "is_bent_stem"
+        ]
         repro_df = pd.DataFrame(list(self.voucher_repro_records.values()))
         if repro_df.empty:
-            repro_df = pd.DataFrame(columns=[
-                "catalogNumber", "capitula_count", "involucre_height_px",
-                "involucre_width_px", "involucre_height_mm", "involucre_width_mm",
-                "capitulum_aspect_ratio"
-            ])
+            repro_df = pd.DataFrame(columns=repro_cols)
         else:
-            repro_cols = [
-                "catalogNumber", "capitula_count", "involucre_height_px",
-                "involucre_width_px", "involucre_height_mm", "involucre_width_mm",
-                "capitulum_aspect_ratio"
-            ]
+            if "plant_height_cm" not in repro_df.columns:
+                repro_df["plant_height_cm"] = np.nan
+            if "scape_to_basal_leaf_ratio" not in repro_df.columns:
+                repro_df["scape_to_basal_leaf_ratio"] = np.nan
+            if "is_bent_stem" not in repro_df.columns:
+                repro_df["is_bent_stem"] = False
             repro_df = repro_df[[c for c in repro_cols if c in repro_df.columns]]
 
         pheno_df = pd.DataFrame(list(self.voucher_pheno_records.values()))

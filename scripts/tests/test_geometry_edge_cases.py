@@ -26,9 +26,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.vision.lm2_geometry_utils import (
+    approximate_petiole_and_scape_metrics,
     classify_and_route_leaf,
     compute_geometric_metrics,
     detect_folded_leaf,
+    estimate_rosette_crown_point,
     is_botanical_dissection,
     trim_petiole_tail,
     FoldDetectionResult,
@@ -374,6 +376,100 @@ class TestGeometryEdgeCases(unittest.TestCase):
             ["WIDTH_INFLECTION_JUNCTION_TRIMMED", "FALLBACK_MORPHOLOGICAL_PROTRUSION_TRIMMED"]
         )
         self.assertLess(np.count_nonzero(trimmed_mask), np.count_nonzero(mask))
+
+    def test_estimate_rosette_crown_point_midrib_intersection_and_root_anchor(self) -> None:
+        """Verify estimate_rosette_crown_point() intersects inward basal midrib rays and anchors on Class 9 roots."""
+        # Three basal leaves whose inward midrib rays (p_apex -> p_base) converge at (200.0, 350.0)
+        basal_leaves = [
+            {"leaf_id": 1, "plant_individual_id": 0, "p_apex": (120.0, 190.0), "p_base": (160.0, 270.0)},
+            {"leaf_id": 2, "plant_individual_id": 0, "p_apex": (200.0, 170.0), "p_base": (200.0, 260.0)},
+            {"leaf_id": 3, "plant_individual_id": 0, "p_apex": (280.0, 190.0), "p_base": (240.0, 270.0)},
+        ]
+        crown_pt = estimate_rosette_crown_point(basal_leaves)
+        self.assertAlmostEqual(crown_pt[0], 200.0, delta=1.5)
+        self.assertAlmostEqual(crown_pt[1], 350.0, delta=1.5)
+
+        # Single-leaf / parallel-ray case anchored by Stage 1 Class 9 root box (ymin=340, xmin=190, ymax=380, xmax=210)
+        single_leaf = [{"leaf_id": 1, "plant_individual_id": 0, "p_apex": (200.0, 180.0), "p_base": (200.0, 280.0)}]
+        crown_anchored = estimate_rosette_crown_point(
+            single_leaf,
+            root_boxes=[((340, 190, 380, 210), 0.92, 9)],
+        )
+        self.assertAlmostEqual(crown_anchored[0], 200.0, delta=2.0)
+        self.assertGreater(crown_anchored[1], 310.0, "Stage 1 Class 9 root box must anchor p_crown below p_base.")
+
+        # Multi-plant return_by_plant dictionary
+        multi_leaves = basal_leaves + [
+            {"leaf_id": 4, "plant_individual_id": 1, "p_apex": (520.0, 190.0), "p_base": (560.0, 270.0)},
+            {"leaf_id": 5, "plant_individual_id": 1, "p_apex": (680.0, 190.0), "p_base": (640.0, 270.0)},
+        ]
+        by_pid = estimate_rosette_crown_point(multi_leaves, return_by_plant=True)
+        self.assertIn(0, by_pid)
+        self.assertIn(1, by_pid)
+        self.assertAlmostEqual(by_pid[0][0], 200.0, delta=1.5)
+        self.assertAlmostEqual(by_pid[1][0], 600.0, delta=1.5)
+
+    def test_approximate_petiole_and_scape_metrics_straight_and_bent_stem(self) -> None:
+        """Verify per-leaf petiole_length_px = max(geodesic, ||p_base - p_crown||_2), 75th-%ile aggregation, and bent scape height."""
+        # px_per_cm = 100.0 -> px_per_mm = 10.0
+        # p_crown = (200, 800)
+        # Leaf 1: p_base=(200, 740) -> ||p_base - p_crown|| = 60 px, geodesic = 35 px -> petiole = 60 px (6.0 mm), blade = 120 px (12.0 mm), ratio = 0.50
+        # Leaf 2: p_base=(200, 760) -> ||p_base - p_crown|| = 40 px, geodesic = 90 px -> petiole = 90 px (9.0 mm), blade = 100 px (10.0 mm), ratio = 0.90
+        leaves = [
+            {
+                "leaf_id": 1,
+                "plant_individual_id": 0,
+                "p_base": (200.0, 740.0),
+                "p_apex": (200.0, 620.0),
+                "geodesic_petiole_skeleton_px": 35.0,
+            },
+            {
+                "leaf_id": 2,
+                "plant_individual_id": 0,
+                "p_base": (200.0, 760.0),
+                "p_apex": (200.0, 660.0),
+                "geodesic_petiole_skeleton_px": 90.0,
+            },
+        ]
+        # Straight scape from p_crown=(200, 800) to p_corymb=(200, 200) -> 600 px = 6.0 cm
+        res_straight = approximate_petiole_and_scape_metrics(
+            basal_leaves=leaves,
+            p_crown=(200.0, 800.0),
+            px_per_cm=100.0,
+            p_corymb=(200.0, 200.0),
+        )
+        self.assertEqual(len(res_straight["leaf_metrics"]), 2)
+        m1, m2 = res_straight["leaf_metrics"]
+        self.assertAlmostEqual(m1["petiole_length_px"], 60.0, places=3)
+        self.assertAlmostEqual(m1["blade_length_px"], 120.0, places=3)
+        self.assertAlmostEqual(m1["petiole_to_blade_ratio"], 0.50, places=3)
+        self.assertAlmostEqual(m1["petiole_length_mm"], 6.0, places=3)
+        self.assertAlmostEqual(m2["petiole_length_px"], 90.0, places=3)
+        self.assertAlmostEqual(m2["petiole_to_blade_ratio"], 0.90, places=3)
+        self.assertAlmostEqual(m2["petiole_length_mm"], 9.0, places=3)
+
+        # 75th-percentile outer-rosette aggregation across [6.0, 9.0] mm -> 8.25 mm; [0.50, 0.90] -> 0.80
+        self.assertAlmostEqual(res_straight["petiole_length_mm"], 8.25, places=2)
+        self.assertAlmostEqual(res_straight["petiole_to_blade_ratio"], 0.80, places=3)
+        self.assertFalse(res_straight["is_bent_stem"])
+        self.assertAlmostEqual(res_straight["plant_height_cm"], 6.0, places=3)
+        self.assertGreater(res_straight["scape_to_basal_leaf_ratio"], 2.5)
+
+        # Bent stem with upper cauline bend apex p_bend=(200, 100) and folded corymb at p_corymb=(500, 500):
+        # Segment 1: (200, 800) -> (200, 100) = 700 px
+        # Segment 2: (200, 100) -> (500, 500) = 500 px
+        # Total piecewise path = 1200 px -> 12.0 cm (much longer than straight chord 424.26 px)
+        res_bent = approximate_petiole_and_scape_metrics(
+            basal_leaves=leaves,
+            p_crown=(200.0, 800.0),
+            px_per_cm=100.0,
+            p_corymb=(500.0, 500.0),
+            upper_cauline_detections=[(200.0, 100.0)],
+        )
+        self.assertTrue(res_bent["is_bent_stem"])
+        self.assertAlmostEqual(res_bent["scape_length_px"], 1200.0, places=2)
+        self.assertAlmostEqual(res_bent["plant_height_cm"], 12.0, places=2)
+        self.assertGreater(res_bent["plant_height_cm"], res_straight["plant_height_cm"])
 
 
 if __name__ == "__main__":
