@@ -7,8 +7,13 @@ Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
     Unit and integration tests for Step 07 (scripts/analysis/07_triage_dashboard_synthesis.R):
-    Multi-Evidence Taxonomic Decision Matrix, Triage Queue Generation,
-    Priority Categorization, Taxonomic Revision Report Synthesis, and archive isolation.
+    - Safe Relational Joins & Non-Georeferenced Voucher Coalescing
+    - Reliability-Weighted Probabilistic Consensus Score (Dawid & Skene 1979)
+      with Dynamic Missing-Modality Weight Renormalization
+    - Five-Stage Hierarchical Integrative Decision Matrix (Padial et al. 2010;
+      Schlick-Steiner et al. 2010; Rieseberg 1995; Slenker et al. 2022)
+    - Hopkins-Corrected Circular Anthesis Phenology (Hopkins 1918; Pewsey et al. 2013)
+    - Taxon-Adjusted Marginal ANCOVA Batch Audit (partial eta-squared + BH FDR)
 ===============================================================================
 """
 
@@ -55,11 +60,12 @@ def standardize_packera_taxon(s: str) -> str:
 
 
 def apply_taxonomic_decision_matrix_ref(df: pd.DataFrame) -> pd.DataFrame:
-    """Reference implementation matching apply_taxonomic_decision_matrix in 07_triage_dashboard_synthesis.R."""
+    """Reference implementation matching the Five-Stage Hierarchical Integrative Decision Matrix in 07_triage_dashboard_synthesis.R."""
     out = df.copy()
     priorities: List[str] = []
     actions: List[str] = []
     status_calls: List[str] = []
+    subtypes: List[str] = []
     rec_taxa: List[str] = []
     justifications: List[str] = []
 
@@ -69,41 +75,126 @@ def apply_taxonomic_decision_matrix_ref(df: pd.DataFrame) -> pd.DataFrame:
         morph_sp = str(row.get("cda_predicted_taxon") or given_sp)
         vis_sp = str(row.get("vision_predicted_label") or given_sp)
         edaph_sp = str(row.get("edaphic_best_fit_taxon") or given_sp)
+        cda_prob = float(row.get("cda_posterior_prob", 0.90))
+        cda_sec = float(row.get("cda_second_posterior_prob", max(0.0, 1.0 - cda_prob)))
+        cda_margin = float(row.get("cda_posterior_margin", abs(cda_prob - cda_sec)))
         c_err = float(row.get("c_error", 0.10))
-        is_corrupt = bool(row.get("is_label_corrupted", False)) or bool(row.get("misidentification_flag", False))
+        is_corrupt = bool(row.get("is_label_corrupted", False)) or bool(row.get("misidentification_flag", False)) or bool(row.get("morphometric_outlier_flag", False))
         gmm_unc = float(row.get("gmm_uncertainty", 0.05))
+        gmm_cl = int(row.get("gmm_cluster", 1))
+        gmm_bf = float(row.get("gmm_2_delta_bic", 8.0 if gmm_cl > 4 else 0.0))
+        d_edaph = float(row.get("edaphic_schoener_d", 0.65))
+        d_doy = row.get("delta_doy_resid", np.nan)
         triage_cat = str(row.get("triage_category", "Clean_MultiModal_Consensus"))
+        n_t1 = int(row.get("n_tier1_leaves", 1))
+        is_t1_pure = n_t1 >= 1 and str(row.get("morph_tier_source", "Tier_1_Pure")) == "Tier_1_Pure"
 
         is_t1 = "Tier_1" in tier or "Tier 1" in tier or "Specialist" in tier
         is_t3 = "Tier_3" in tier or "Tier 3" in tier or "Unverified" in tier
 
-        if is_t1 and (triage_cat == "Severe_Triple_Stream_Conflict" or (is_corrupt and c_err >= 0.88 and morph_sp != given_sp)):
+        morph_disagrees = (morph_sp != given_sp) and (is_corrupt or cda_prob >= 0.60)
+        vis_disagrees = (vis_sp != given_sp) and (c_err >= 0.55 or bool(row.get("is_label_corrupted", False)))
+        edaph_disagrees = (edaph_sp != given_sp) and (triage_cat in ("Severe_Triple_Stream_Conflict", "Edaphic_Envelope_Violation") or d_edaph < 0.30)
+
+        both_alt_agree = morph_disagrees and vis_disagrees and (morph_sp == vis_sp)
+        morph_edaph_alt_agree = morph_disagrees and edaph_disagrees and (morph_sp == edaph_sp)
+        vis_edaph_alt_agree = vis_disagrees and edaph_disagrees and (vis_sp == edaph_sp)
+        inter_modal_mosaic = morph_disagrees and vis_disagrees and (morph_sp != vis_sp)
+
+        single_strong_reassign = (not inter_modal_mosaic) and (
+            (morph_disagrees and cda_prob >= 0.80 and (not vis_disagrees or vis_sp == morph_sp))
+            or (vis_disagrees and c_err >= 0.85 and (not morph_disagrees or morph_sp == vis_sp))
+            or (is_t3 and morph_disagrees)
+        )
+
+        # Stage 1: Misidentification_Reassign (evaluated BEFORE Hybrid_Introgressant)
+        is_stage1_misid = (
+            both_alt_agree
+            or morph_edaph_alt_agree
+            or vis_edaph_alt_agree
+            or single_strong_reassign
+            or (triage_cat == "Severe_Triple_Stream_Conflict" and not inter_modal_mosaic)
+        )
+        # Stage 2: Hybrid_Introgressant
+        is_stage2_hybrid = (not is_stage1_misid) and (
+            inter_modal_mosaic
+            or triage_cat in ("Putative_Hybrid_Zone_Intergrade", "Hybrid_Intergrade_Swarm")
+            or ((cda_margin < 0.25 or gmm_unc > 0.35) and (morph_disagrees or vis_disagrees or gmm_unc > 0.35) and d_edaph >= 0.25)
+        )
+        # Stage 3: Putative_Cryptic_Species via Integration by Congruence
+        has_barrier = (pd.notna(d_doy) and abs(float(d_doy)) >= 18.0) or (d_edaph < 0.30)
+        is_stage3_cryptic = (
+            (not is_stage1_misid)
+            and (not is_stage2_hybrid)
+            and is_t1_pure
+            and (cda_prob < 0.70)
+            and (c_err < 0.75)
+            and (is_corrupt or (gmm_cl > 4 and gmm_bf >= 6.0))
+            and has_barrier
+        )
+        # Stage 4: Subspecies_Ecotype vs. Ecophenotypic_Plasticity
+        is_stage4_ecotype = (
+            (not is_stage1_misid)
+            and (not is_stage2_hybrid)
+            and (not is_stage3_cryptic)
+            and (edaph_disagrees or (pd.notna(d_doy) and abs(float(d_doy)) >= 14.0))
+        )
+        is_stage4_plastic = (
+            (not is_stage1_misid)
+            and (not is_stage2_hybrid)
+            and (not is_stage3_cryptic)
+            and (not is_stage4_ecotype)
+            and is_corrupt
+        )
+
+        if is_stage1_misid:
+            alt_sp = morph_sp if morph_sp != given_sp else (vis_sp if vis_sp != given_sp else edaph_sp)
+            subtypes.append("Misidentification_Reassign")
+            rec_taxa.append(alt_sp)
+            if is_t1 and (both_alt_agree or triage_cat == "Severe_Triple_Stream_Conflict" or c_err >= 0.88):
+                priorities.append("CRITICAL")
+                status_calls.append("Misidentification_Severe")
+                actions.append("Immediate_Physical_Loan_&_Annotation_Slip_Update")
+            elif is_t3 and not both_alt_agree and c_err < 0.85:
+                priorities.append("LOW")
+                status_calls.append("Legacy_Unverified_Reassign")
+                actions.append("Automated_Batch_Determination_Update")
+            else:
+                priorities.append("HIGH")
+                status_calls.append("Misidentification_High_Confidence")
+                actions.append("Curatorial_Image_Audit_&_Georeference_Check")
+            justifications.append(f"Stage 1 Misidentification_Reassign ({given_sp} -> {alt_sp}).")
+        elif is_stage3_cryptic:
+            subtypes.append("Putative_Cryptic_Species")
             priorities.append("CRITICAL")
-            status_calls.append("Misidentification_Severe")
-            rec_taxa.append(morph_sp)
-            actions.append("Immediate_Physical_Loan_&_Annotation_Slip_Update")
-            justifications.append(
-                f"Specialist voucher ({given_sp}) contradicted by CDA ({morph_sp}), Cleanlab Vision ({vis_sp}, c_err={c_err:.2f}), and Edaphics ({edaph_sp})."
-            )
-        elif (is_corrupt and c_err >= 0.85) or triage_cat in ("Severe_Triple_Stream_Conflict", "Edaphic_Envelope_Violation"):
-            priorities.append("HIGH")
-            status_calls.append("Misidentification_High_Confidence" if morph_sp != given_sp else "Ecological_Outlier_Verify_Locality")
-            rec_taxa.append(morph_sp if morph_sp != given_sp else edaph_sp)
-            actions.append("Curatorial_Image_Audit_&_Georeference_Check")
-            justifications.append(f"Cross-modal conflict ({triage_cat}).")
-        elif triage_cat == "Putative_Hybrid_Zone_Intergrade" or gmm_unc > 0.35:
+            status_calls.append("Putative_Cryptic_Species")
+            rec_taxa.append(f"{given_sp} [Putative Cryptic Lineage K{gmm_cl}]")
+            actions.append("Cytological_Ploidy_&_Targeted_Sequencing_Priority")
+            justifications.append("Stage 3 Integration by Congruence cryptic lineage.")
+        elif is_stage2_hybrid:
+            p2 = morph_sp if morph_sp != given_sp else vis_sp
+            subtypes.append("Hybrid_Introgressant")
             priorities.append("MODERATE")
             status_calls.append("Putative_Hybrid_or_Ecophenotype")
-            rec_taxa.append(f"{given_sp} x {morph_sp}")
+            rec_taxa.append(f"{given_sp} x {p2}")
             actions.append("Cytological_Ploidy_Check_&_MicroMorphology_Review")
-            justifications.append(f"Intermediate morphospace position (GMM uncertainty={gmm_unc:.2f}).")
-        elif is_t3 and morph_sp != given_sp:
+            justifications.append(f"Stage 2 Hybrid_Introgressant (margin={cda_margin:.2f}).")
+        elif is_stage4_ecotype:
+            subtypes.append("Subspecies_Ecotype")
+            priorities.append("HIGH" if edaph_disagrees else "MODERATE")
+            status_calls.append("Ecological_Outlier_Verify_Locality" if edaph_disagrees else "Subspecies_Ecotype_Candidate")
+            rec_taxa.append(edaph_sp if edaph_disagrees else f"{given_sp} [Ecotype]")
+            actions.append("Curatorial_Image_Audit_&_Georeference_Check")
+            justifications.append("Stage 4 Subspecies_Ecotype.")
+        elif is_stage4_plastic:
+            subtypes.append("Ecophenotypic_Plasticity")
             priorities.append("LOW")
-            status_calls.append("Legacy_Unverified_Reassign")
-            rec_taxa.append(morph_sp)
-            actions.append("Automated_Batch_Determination_Update")
-            justifications.append(f"Unverified Tier 3 determination ({given_sp}) aligns with {morph_sp}.")
+            status_calls.append("Ecophenotypic_Plasticity")
+            rec_taxa.append(given_sp)
+            actions.append("Retain_Determination_Plastic_Variant")
+            justifications.append("Stage 4 Ecophenotypic_Plasticity.")
         else:
+            subtypes.append("Confirmed_Species")
             priorities.append("RESOLVED")
             status_calls.append("Species_Confirmed")
             rec_taxa.append(given_sp)
@@ -112,6 +203,7 @@ def apply_taxonomic_decision_matrix_ref(df: pd.DataFrame) -> pd.DataFrame:
 
     out["synthesis_triage_priority"] = priorities
     out["taxonomic_status_call"] = status_calls
+    out["taxonomic_treatment_subtype"] = subtypes
     out["recommended_determination"] = rec_taxa
     out["synthesis_triage_action"] = actions
     out["triage_justification"] = justifications
@@ -355,6 +447,244 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             self.assertEqual(row1["synthesis_triage_priority"], "RESOLVED")
             self.assertEqual(row2["synthesis_triage_priority"], "CRITICAL")
 
+    def test_non_georeferenced_voucher_coalescing_and_missing_modality_renormalization(self):
+        """Verify non-georeferenced historic/type vouchers absent from Step 06 are coalesced from Steps 04-05 and weights renormalize over non-NA modalities."""
+        r_text = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn('unique(c("catalogNumber"', r_text)
+        self.assertIn("safe_left_join_and_coalesce", r_text)
+
+        if not shutil.which("Rscript"):
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            vouchers_csv = tmp / "curated_vouchers.csv"
+            morph_csv = tmp / "morphometric_flags.csv"
+            vision_csv = tmp / "label_noise_audit.csv"
+            spatial_csv = tmp / "multimodal_conflict_flags.csv"
+            out_triage = tmp / "triage_queue.csv"
+            out_report = tmp / "report.md"
+            out_figure = tmp / "fig.pdf"
+
+            # NCU-GEO-1 has GPS and is in spatial_csv; NCU-HIST-2 lacks GPS and is omitted from spatial_csv
+            pd.DataFrame([
+                {
+                    "catalogNumber": "NCU-GEO-1",
+                    "institutionCode": "NCU",
+                    "species_standardized": "Packera dubia",
+                    "determiner_tier": "Tier_1_Gold",
+                    "latitude": 35.2,
+                    "longitude": -78.6,
+                    "doy": 115,
+                    "voucher_phenological_state": "anthesis",
+                },
+                {
+                    "catalogNumber": "NCU-HIST-2",
+                    "institutionCode": "PH",
+                    "species_standardized": "Packera dubia",
+                    "determiner_tier": "Tier_2_Silver",
+                    "latitude": np.nan,
+                    "longitude": np.nan,
+                    "doy": np.nan,
+                    "voucher_phenological_state": "sterile",
+                },
+            ]).to_csv(vouchers_csv, index=False)
+
+            pd.DataFrame([
+                {
+                    "catalogNumber": "NCU-GEO-1",
+                    "PC1": -1.1, "PC2": 0.2, "PC3": 0.1,
+                    "can1": -1.9, "can2": 0.3, "can3": 0.1,
+                    "n_tier1_leaves": 3, "morph_tier_source": "Tier_1_Pure",
+                    "cda_predicted_taxon": "Packera dubia",
+                    "cda_posterior_prob": 0.95,
+                    "cda_second_posterior_prob": 0.04,
+                    "cda_posterior_margin": 0.91,
+                    "morphometric_outlier_flag": False,
+                },
+                {
+                    "catalogNumber": "NCU-HIST-2",
+                    "PC1": 1.6, "PC2": -0.4, "PC3": -0.2,
+                    "can1": 2.2, "can2": -0.5, "can3": -0.1,
+                    "n_tier1_leaves": 2, "morph_tier_source": "Tier_1_Pure",
+                    "cda_predicted_taxon": "Packera anonyma",
+                    "cda_posterior_prob": 0.92,
+                    "cda_second_posterior_prob": 0.06,
+                    "cda_posterior_margin": 0.86,
+                    "morphometric_outlier_flag": True,
+                },
+            ]).to_csv(morph_csv, index=False)
+
+            pd.DataFrame([
+                {
+                    "catalogNumber": "NCU-GEO-1",
+                    "vision_predicted_label": "Packera dubia",
+                    "c_error": 0.05,
+                    "is_label_corrupted": False,
+                },
+                {
+                    "catalogNumber": "NCU-HIST-2",
+                    "vision_predicted_label": "Packera anonyma",
+                    "c_error": 0.91,
+                    "is_label_corrupted": True,
+                },
+            ]).to_csv(vision_csv, index=False)
+
+            # Spatial table contains ONLY the georeferenced specimen NCU-GEO-1
+            pd.DataFrame([
+                {
+                    "catalogNumber": "NCU-GEO-1",
+                    "edaphic_best_fit_taxon": "Packera dubia",
+                    "triage_category": "Clean_MultiModal_Consensus",
+                    "multimodal_concordance": 1.0,
+                    "soil_ph": 5.0,
+                    "soil_sand": 72.0,
+                }
+            ]).to_csv(spatial_csv, index=False)
+
+            cmd = [
+                "Rscript", str(self.r_script_path),
+                "--vouchers", str(vouchers_csv),
+                "--morphometrics", str(morph_csv),
+                "--vision-audit", str(vision_csv),
+                "--spatial-flags", str(spatial_csv),
+                "--output-triage", str(out_triage),
+                "--output-report", str(out_report),
+                "--output-figure", str(out_figure),
+            ]
+            res = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0, f"Step 07 failed:\n{res.stderr}\n{res.stdout}")
+
+            tdf = pd.read_csv(out_triage)
+            self.assertEqual(len(tdf), 2, "Non-georeferenced specimen must be retained in triage_queue.csv.")
+            hist_row = tdf[tdf["catalogNumber"] == "NCU-HIST-2"].iloc[0]
+            self.assertTrue(bool(hist_row["is_completed_voucher"]))
+            self.assertEqual(hist_row["cda_predicted_taxon"], "Packera anonyma")
+            self.assertEqual(hist_row["vision_predicted_label"], "Packera anonyma")
+            self.assertEqual(hist_row["taxonomic_treatment_subtype"], "Misidentification_Reassign")
+            self.assertEqual(hist_row["n_available_modalities"], 2)
+            self.assertGreater(float(hist_row["composite_conflict_score"]), 0.80)
+
+    def test_five_stage_hierarchical_precedence_and_cryptic_congruence(self):
+        """Test Stage 1 (Misidentification_Reassign BEFORE Hybrid_Introgressant), Stage 2 (Hybrid), and Stage 3 (Putative_Cryptic_Species Congruence)."""
+        df = pd.DataFrame([
+            # Row 0: Sympatric misidentification where BOTH Morphology & Vision agree on Packera anonyma,
+            # even though cda_posterior_margin (0.18) is < 0.25 -> MUST be Stage 1 Misidentification_Reassign, NOT Hybrid!
+            {
+                "catalogNumber": "STAGE1-MISID-OVER-HYB",
+                "species_standardized": "Packera dubia",
+                "determiner_tier": "Tier_2_Silver",
+                "cda_predicted_taxon": "Packera anonyma",
+                "cda_posterior_prob": 0.58,
+                "cda_second_posterior_prob": 0.40,
+                "cda_posterior_margin": 0.18,
+                "vision_predicted_label": "Packera anonyma",
+                "c_error": 0.82,
+                "is_label_corrupted": True,
+                "morphometric_outlier_flag": True,
+                "edaphic_best_fit_taxon": "Packera dubia",
+                "edaphic_schoener_d": 0.55,
+                "delta_doy_resid": 3.0,
+                "gmm_cluster": 2,
+                "gmm_uncertainty": 0.42,
+                "n_tier1_leaves": 3,
+                "morph_tier_source": "Tier_1_Pure",
+            },
+            # Row 1: Genuine inter-modal character mosaic (CDA -> P. anonyma, Vision -> P. paupercula, Label -> P. dubia) -> Stage 2 Hybrid_Introgressant
+            {
+                "catalogNumber": "STAGE2-MOSAIC-HYBRID",
+                "species_standardized": "Packera dubia",
+                "determiner_tier": "Tier_2_Silver",
+                "cda_predicted_taxon": "Packera anonyma",
+                "cda_posterior_prob": 0.65,
+                "cda_second_posterior_prob": 0.30,
+                "cda_posterior_margin": 0.35,
+                "vision_predicted_label": "Packera paupercula",
+                "c_error": 0.72,
+                "is_label_corrupted": True,
+                "morphometric_outlier_flag": True,
+                "edaphic_best_fit_taxon": "Packera dubia",
+                "edaphic_schoener_d": 0.52,
+                "delta_doy_resid": 4.0,
+                "gmm_cluster": 2,
+                "gmm_uncertainty": 0.38,
+                "n_tier1_leaves": 3,
+                "morph_tier_source": "Tier_1_Pure",
+            },
+            # Row 2: True Putative_Cryptic_Species meeting all 3 Integration by Congruence criteria:
+            # (a) cda_posterior_prob < 0.70 & c_error < 0.75, (b) morphometric outlier & K=5 (2*delta_BIC=12 >= 6),
+            # (c) Hopkins allochronic isolation |delta_doy_resid| = 24 >= 18 days
+            {
+                "catalogNumber": "STAGE3-TRUE-CRYPTIC",
+                "species_standardized": "Packera dubia",
+                "determiner_tier": "Tier_1_Gold",
+                "cda_predicted_taxon": "Packera dubia",
+                "cda_posterior_prob": 0.46,
+                "cda_second_posterior_prob": 0.28,
+                "cda_posterior_margin": 0.18,
+                "vision_predicted_label": "Packera dubia",
+                "c_error": 0.32,
+                "is_label_corrupted": False,
+                "morphometric_outlier_flag": True,
+                "edaphic_best_fit_taxon": "Packera dubia",
+                "edaphic_schoener_d": 0.18,
+                "delta_doy_resid": 24.0,
+                "gmm_cluster": 5,
+                "gmm_2_delta_bic": 12.4,
+                "gmm_uncertainty": 0.08,
+                "n_tier1_leaves": 4,
+                "morph_tier_source": "Tier_1_Pure",
+            },
+            # Row 3: Morphometric outlier in K=5 but WITHOUT any evolutionary barrier (|delta_doy_resid|=3 < 18, D_edaph=0.68 >= 0.30)
+            # -> Must NOT be called Putative_Cryptic_Species (routes to Stage 4 Ecophenotypic_Plasticity)
+            {
+                "catalogNumber": "STAGE4-NO-BARRIER-PLASTIC",
+                "species_standardized": "Packera dubia",
+                "determiner_tier": "Tier_1_Gold",
+                "cda_predicted_taxon": "Packera dubia",
+                "cda_posterior_prob": 0.48,
+                "cda_second_posterior_prob": 0.25,
+                "cda_posterior_margin": 0.23,
+                "vision_predicted_label": "Packera dubia",
+                "c_error": 0.25,
+                "is_label_corrupted": False,
+                "morphometric_outlier_flag": True,
+                "edaphic_best_fit_taxon": "Packera dubia",
+                "edaphic_schoener_d": 0.68,
+                "delta_doy_resid": 3.0,
+                "gmm_cluster": 5,
+                "gmm_2_delta_bic": 12.4,
+                "gmm_uncertainty": 0.08,
+                "n_tier1_leaves": 4,
+                "morph_tier_source": "Tier_1_Pure",
+            },
+        ])
+
+        res_ref = apply_taxonomic_decision_matrix_ref(df)
+        self.assertEqual(res_ref.loc[0, "taxonomic_treatment_subtype"], "Misidentification_Reassign")
+        self.assertEqual(res_ref.loc[1, "taxonomic_treatment_subtype"], "Hybrid_Introgressant")
+        self.assertEqual(res_ref.loc[2, "taxonomic_treatment_subtype"], "Putative_Cryptic_Species")
+        self.assertEqual(res_ref.loc[3, "taxonomic_treatment_subtype"], "Ecophenotypic_Plasticity")
+
+        if shutil.which("Rscript") is not None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                in_csv = Path(tmpdir) / "in_df.csv"
+                out_csv = Path(tmpdir) / "out_df.csv"
+                df.to_csv(in_csv, index=False)
+                r_cmd = (
+                    f'source("{self.r_script_path.as_posix()}"); '
+                    f'd <- readr::read_csv("{in_csv.as_posix()}", show_col_types = FALSE); '
+                    f'r <- apply_taxonomic_decision_matrix(d, gmm_two_delta_bic = 12.4); '
+                    f'readr::write_csv(r, "{out_csv.as_posix()}")'
+                )
+                proc = subprocess.run(["Rscript", "-e", r_cmd], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+                self.assertEqual(proc.returncode, 0, f"R apply_taxonomic_decision_matrix failed:\n{proc.stderr}")
+                r_out = pd.read_csv(out_csv)
+                self.assertEqual(r_out.loc[0, "taxonomic_treatment_subtype"], "Misidentification_Reassign")
+                self.assertEqual(r_out.loc[1, "taxonomic_treatment_subtype"], "Hybrid_Introgressant")
+                self.assertEqual(r_out.loc[2, "taxonomic_treatment_subtype"], "Putative_Cryptic_Species")
+                self.assertEqual(r_out.loc[3, "taxonomic_treatment_subtype"], "Ecophenotypic_Plasticity")
+
     def test_decision_matrix_concordant(self):
         """Verify that fully concordant vouchers receive RESOLVED priority."""
         df = pd.DataFrame([{
@@ -450,14 +780,21 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertIn("n_tier1_leaves", r06_text)
 
     def test_hopkins_adjusted_phenology_and_integrative_congruence_in_step07(self):
-        """Verify Step 07 adjusts phenology for latitude/elevation/MAT (Hopkins 1918) and enforces Padial et al. (2010) >= 2 modalities."""
+        """Verify Step 07 adjusts phenology for latitude/elevation/MAT (Hopkins 1918), gates on active anthesis, and runs taxon-adjusted ANCOVA batch audit."""
         r_text = self.r_script_path.read_text(encoding="utf-8")
         self.assertIn("compute_hopkins_adjusted_phenology", r_text)
         self.assertIn("hopkins_adjusted_doy", r_text)
         self.assertIn("sin_doy", r_text)
         self.assertIn("cos_doy", r_text)
+        self.assertIn("atan2", r_text)
         self.assertIn("n_cryptic_modalities >= 2L", r_text)
         self.assertIn("Padial et al. 2010", r_text)
+        self.assertIn("Dawid & Skene 1979", r_text)
+        self.assertIn("Schlick-Steiner et al. 2010", r_text)
+        self.assertIn("Pewsey et al. 2013", r_text)
+        self.assertIn("audit_institutional_batch_effects_ancova", r_text)
+        self.assertIn("PC1 ~ species_standardized + institutionCode", r_text)
+        self.assertIn("partial_eta_sq", r_text)
 
 
 if __name__ == "__main__":

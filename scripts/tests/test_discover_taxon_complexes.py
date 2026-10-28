@@ -389,9 +389,74 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             # Verify Hopkins-adjusted phenology & integrative congruence columns and R implementation
             self.assertIn("hopkins_pheno_overlap", comp_df.columns)
             self.assertIn("integrative_congruence", comp_df.columns)
+            self.assertIn("kappa_morph_weight", comp_df.columns)
+            self.assertIn("kappa_vis_weight", comp_df.columns)
             r08_text = (Path(__file__).resolve().parents[2] / "scripts" / "analysis" / "08_discover_taxon_complexes.R").read_text(encoding="utf-8")
             self.assertIn("compute_hopkins_phenological_affinity", r08_text)
+            self.assertIn("compute_modality_kappa_weights", r08_text)
+            self.assertIn("evaluate_hierarchical_complex_delimitation", r08_text)
             self.assertIn("Padial et al. 2010", r08_text)
+            self.assertIn("Dawid & Skene 1979", r08_text)
+            self.assertIn("Schlick-Steiner et al. 2010", r08_text)
+
+    def test_hierarchical_precedence_missing_modality_and_3d_hollow_ordinations(self):
+        """Verify Stage 1-5 precedence in 08_discover_taxon_complexes.R, missing-modality weight renormalization, and 3D hollow ordinations + BH FDR in pub_figures_utils.R."""
+        r_code = """
+        source("scripts/morphometrics/pub_figures_utils.R")
+        source("scripts/analysis/08_discover_taxon_complexes.R")
+
+        # 1. Verify BH FDR correction helper in pub_figures_utils.R
+        fdr_in <- data.frame(Pair = c("A_vs_B", "A_vs_C", "B_vs_C"), p_value = c(0.002, 0.030, 0.250))
+        fdr_out <- apply_bh_fdr_correction(fdr_in)
+        stopifnot("p_adj_bh" %in% names(fdr_out))
+        stopifnot(all(abs(fdr_out$p_adj_bh - stats::p.adjust(fdr_in$p_value, method = "BH")) < 1e-9))
+
+        # 2. Verify hollow marker enforcement (pch = 1, 2, 5, 0) in get_dynamic_packera_shapes
+        sh <- get_dynamic_packera_shapes(c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis"))
+        stopifnot(all(unname(sh) %in% c(1L, 2L, 5L, 0L)))
+
+        # 3. Verify missing-modality weight renormalization (when vis_df is NULL -> w_morph = 1.0, w_vis = 0.0)
+        mdf <- data.frame(
+          catalogNumber = c("V1", "V2", "V3", "V4", "V5", "V6"),
+          species_standardized = c("Packera dubia", "Packera dubia", "Packera dubia", "Packera anonyma", "Packera anonyma", "Packera anonyma"),
+          determiner_tier = rep("Tier_1_Gold", 6),
+          cda_predicted_taxon = c("Packera dubia", "Packera anonyma", "Packera anonyma", "Packera dubia", "Packera anonyma", "Packera anonyma"),
+          cda_posterior_prob = c(0.95, 0.62, 0.65, 0.44, 0.48, 0.92),
+          cda_second_posterior_prob = c(0.03, 0.36, 0.30, 0.28, 0.25, 0.05),
+          cda_posterior_margin = c(0.92, 0.26, 0.35, 0.16, 0.23, 0.87),
+          morphometric_outlier_flag = c(FALSE, TRUE, TRUE, TRUE, TRUE, FALSE),
+          gmm_cluster = c(1L, 2L, 2L, 5L, 5L, 2L),
+          gmm_2_delta_bic = c(0, 0, 0, 12.0, 12.0, 0),
+          edaphic_schoener_d = c(0.75, 0.60, 0.55, 0.18, 0.72, 0.80),
+          n_tier1_leaves = rep(3L, 6),
+          stringsAsFactors = FALSE
+        )
+        kw_missing <- compute_modality_kappa_weights(mdf, NULL, rep(TRUE, 6))
+        stopifnot(abs(kw_missing$w_morph - 1.0) < 1e-9 && kw_missing$w_vis == 0.0)
+
+        vdf <- data.frame(
+          catalogNumber = c("V1", "V2", "V3", "V4", "V5", "V6"),
+          species_standardized = mdf$species_standardized,
+          determiner_tier = rep("Tier_1_Gold", 6),
+          vision_predicted_label = c("Packera dubia", "Packera anonyma", "Packera paupercula", "Packera anonyma", "Packera anonyma", "Packera anonyma"),
+          c_error = c(0.04, 0.82, 0.75, 0.28, 0.25, 0.05),
+          stringsAsFactors = FALSE
+        )
+        pheno_mock <- list(delta_doy_resid = c(2.0, 3.0, 4.0, 22.0, 3.0, 1.0))
+        calls <- evaluate_hierarchical_complex_delimitation(mdf, vdf, pheno_mock)
+        # V1: Concordant -> Confirmed_Species
+        stopifnot(calls[1] == "Confirmed_Species")
+        # V2: Both Morphology & Vision agree on Packera anonyma -> Stage 1 Misidentification_Reassign (before hybridity)
+        stopifnot(calls[2] == "Misidentification_Reassign")
+        # V3: Inter-modal mosaic (CDA=P. anonyma, Vision=P. paupercula) -> Stage 2 Hybrid_Introgressant
+        stopifnot(calls[3] == "Hybrid_Introgressant")
+        # V4: Low known-taxon prob, K=5 (2*delta_BIC=12 >= 6), |delta_doy_resid|=22 >= 18 & D_edaph=0.18 < 0.30 -> Stage 3 Putative_Cryptic_Species
+        stopifnot(calls[4] == "Putative_Cryptic_Species")
+        # V5: Same outlier/K=5 but NO evolutionary barrier (delta_doy=3, D_edaph=0.72) -> Stage 4 Ecophenotypic_Plasticity (NOT cryptic)
+        stopifnot(calls[5] == "Ecophenotypic_Plasticity")
+        """
+        res = subprocess.run(["Rscript", "-e", r_code], capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"R hierarchical test failed:\n{res.stderr}\n{res.stdout}")
 
 
 if __name__ == "__main__":
