@@ -75,32 +75,38 @@ Every pipeline execution via `./run_pipeline.sh` or `python main.py` operates un
 ```bash
 source .venv/bin/activate
 
-# 1. Launch a new timestamped Eastern NA baseline run (creates runs/run_<YYYYMMDD_HHMMSS>/ and updates runs/latest)
+# 1. Default zero-flag genus-wide run (creates runs/run_<YYYYMMDD_HHMMSS>/ and updates runs/latest)
+#    Running with NO taxon flags dynamically queries and harvests ALL Packera species across the entire
+#    genus from GBIF (discover_genus_packera_species_gbif(), target_species: []):
 ./run_pipeline.sh
 
-# 2. Launch a custom named run (--run-id <NAME>) reusing cached vouchers & local images (--skip-harvest)
+# 2. User-specified taxon subset mode (--taxon "Packera <sp1>" "Packera <sp2>" ...):
+#    Analyzes strictly the species specified by the user with zero hardcoded default species or injected outgroups:
+./run_pipeline.sh --run-id packera_subset --taxon "Packera dubia" "Packera anonyma" "Packera paupercula"
+
+# 3. Launch a custom named run (--run-id <NAME>) reusing cached vouchers & local images (--skip-harvest)
 ./run_pipeline.sh --run-id packera_full_run --skip-harvest
 
-# 3. Resume an existing run from any step (--start-step <1..7>, e.g., Step 03 EFA or Step 04 GMM/CDA onward)
+# 4. Resume an existing run from any step (--start-step <1..7>, e.g., Step 03 EFA or Step 04 GMM/CDA onward)
 ./run_pipeline.sh --run-id packera_full_run --skip-harvest --start-step 3
 
-# 4. Strategy 1: Focal Taxon + Outgroup Gold Reference Anchors (--focal-taxon "<TAXON>" --gold-anchors 30)
+# 5. Strategy 1: Focal Taxon + Outgroup Gold Reference Anchors (--focal-taxon "<TAXON>" --gold-anchors 30)
 # (Cascades Gold -> Silver -> Bronze anchors when an outgroup taxon lacks Tier_1_Gold vouchers)
 ./run_pipeline.sh --run-id dubia_triage --skip-harvest --focal-taxon "Packera dubia" --gold-anchors 30
 
-# 5. Strategy 2: Pure Intraspecific Delimitation Mode (--focal-taxon "<TAXON>" --intraspecific-mode)
+# 6. Strategy 2: Pure Intraspecific Delimitation Mode (--focal-taxon "<TAXON>" --intraspecific-mode)
 ./run_pipeline.sh --run-id dubia_cryptic --skip-harvest --focal-taxon "Packera dubia" --intraspecific-mode
 
-# 6. Continent-wide North American expansion across US, Canada, and Mexico with dynamic synonym expansion
+# 7. Continent-wide North American expansion across US, Canada, and Mexico with dynamic synonym expansion
 ./run_pipeline.sh --run-id na_wide_run --geographic-scope north_america --include-western --countries "US,CA,MX" --expand-synonyms
 
-# 7. Harvest and process all Eastern North American taxa with graph modularity complex discovery
-./run_pipeline.sh --run-id eastern_complexes --all-eastern-taxa --discover-complexes --spatial-thin-km 5.0
+# 8. Unsupervised North American taxon-complex discovery across harvested vouchers
+./run_pipeline.sh --run-id eastern_complexes --discover-complexes --spatial-thin-km 5.0
 
-# 8. Post-QC Step 02 montage regeneration (called automatically after Step 04)
+# 9. Post-QC Step 02 montage regeneration (called automatically after Step 04)
 python scripts/pipeline/02_segment_and_extract.py --regenerate-figures-only
 
-# 9. Step 08: Standalone North American Taxon-Complex Discovery
+# 10. Step 08: Standalone North American Taxon-Complex Discovery
 Rscript scripts/analysis/08_discover_taxon_complexes.R \
     --harmonics data/tables/leaf_efa_harmonics.csv \
     --vouchers data/tables/curated_vouchers.csv \
@@ -117,11 +123,11 @@ To execute a complete, rigorous systematic revision of *Packera dubia* and allie
 
 | Stage | Objective | Production Command |
 | :--- | :--- | :--- |
-| **Stage 1: Baseline Harmonization** | Full 4-taxon harvest, ruler calibration, LeafMachine2 segmentation, EFA, GMM/CDA, DINOv2 XAI, and multimodal random forests. | `./run_pipeline.sh --run-id stage1_baseline` |
+| **Stage 1: Baseline Harmonization** | Full genus-wide (or user-specified `--taxon`) harvest, ruler calibration, LeafMachine2 segmentation, EFA, GMM/CDA, DINOv2 XAI, and multimodal random forests. | `./run_pipeline.sh --run-id stage1_baseline` |
 | **Stage 2: Promote Manifests** | Verify and promote generated manifests into canonical shared store `data/tables/`. | `cp runs/stage1_baseline/data/tables/*.csv data/tables/` |
 | **Stage 3: Pure Intraspecific Mode** | Delimit cryptic lineages and morphotypes within *P. dubia* strictly (`n_unique_taxa == 1`), gating Step 04–06 on GMM clusters and `PCA-env` ecotypes. | `./run_pipeline.sh --run-id stage3_dubia_cryptic --skip-harvest --focal-taxon "Packera dubia" --intraspecific-mode` |
 | **Stage 4: Outgroup Gold Anchors** | Calibrate *P. dubia* against 30 reference anchors per outgroup species (cascading Gold -> Silver -> Bronze) for definitive curation triage. | `./run_pipeline.sh --run-id stage4_dubia_triage --skip-harvest --focal-taxon "Packera dubia" --gold-anchors 30` |
-| **Stage 5: Full Tree Discovery** | Expand harvest across Eastern North America or continent-wide (`--geographic-scope north_america`) and perform unsupervised network community discovery. | `./run_pipeline.sh --run-id stage5_eastern_tree --all-eastern-taxa --discover-complexes` |
+| **Stage 5: Full Tree Discovery** | Expand harvest across Eastern North America or continent-wide (`--geographic-scope north_america`) and perform unsupervised network community discovery. | `./run_pipeline.sh --run-id stage5_eastern_tree --discover-complexes` |
 
 ---
 
@@ -171,7 +177,7 @@ flowchart TD
 
 - **Scripts:** [`scripts/data_prep/01_voucher_harvester.py`](../scripts/data_prep/01_voucher_harvester.py), [`scripts/core/harvester.py`](../scripts/core/harvester.py), [`scripts/core/config.py`](../scripts/core/config.py)
 - **Empirical Protocol:**
-  1. **Dynamic Taxon Standardization & GBIF Synonym Expansion (`standardize_packera_taxon`):** Harmonizes binomials and basionyms across all 24+ Eastern North American *Packera* taxa (e.g., *Senecio pauperculus*, *Senecio smallii*, *Senecio plattensis*, *Senecio anonymous*, *Senecio obovatus*, *Senecio aureus*, etc.) into valid accepted binomials while handling arbitrary dynamic North American, boreal, and Mexican *Packera* species via `expand_taxon_synonyms_gbif()`. Configurable geographic filtering via `--geographic-scope {eastern_na,north_america,global}` (default: `eastern_na`, excluding longitudes $< -106.65$; `north_america` and `global` disable the western longitude boundary), `--include-western` (retaining occurrences west of $-106.65$), and `--countries` (default `["US"]`, expandable to `["US", "CA", "MX"]`).
+  1. **Dynamic Taxon Standardization & GBIF Synonym Expansion (`standardize_packera_taxon`):** Harmonizes binomials and basionyms across all North American *Packera* taxa (e.g., *Senecio pauperculus*, *Senecio smallii*, *Senecio plattensis*, *Senecio anonymous*, *Senecio obovatus*, *Senecio aureus*, etc.) into valid accepted binomials while handling arbitrary dynamic North American, boreal, and Mexican *Packera* species via `expand_taxon_synonyms_gbif()`. Running with no taxon flags dynamically queries and harvests all *Packera* species across the entire genus (`discover_genus_packera_species_gbif()`, `target_species: []`), whereas `--taxon "<sp1>" "<sp2>" ...` (or `--focal-taxon "<sp>"`) analyzes strictly the species specified by the user with zero hardcoded default species or injected outgroups. Configurable geographic filtering via `--geographic-scope {eastern_na,north_america,global}` (default: `eastern_na`, excluding longitudes $< -106.65$; `north_america` and `global` disable the western longitude boundary), `--include-western` (retaining occurrences west of $-106.65$), and `--countries` (default `["US"]`, expandable to `["US", "CA", "MX"]`).
   2. **Canonical 26 Darwin Core Columns:** Exports `data/tables/curated_vouchers.csv` with exactly: `catalogNumber`, `institutionCode`, `scientificName`, `species_raw`, `recordedBy`, `recordNumber`, `identifiedBy`, `determiner_raw`, `determiner_tier`, `type_status`, `county`, `stateProvince`, `decimalLatitude`, `latitude`, `decimalLongitude`, `longitude`, `coordinateUncertainty`, `year`, `month`, `day`, `eventDate`, `regional_group`, `image_path`, `exsiccatae_key`, `is_primary_duplicate`, `duplicate_count`.
   3. **Official US EPA Level III Ecoregion Attribution (`regional_group`):** Points are evaluated against official Level III polygons (`data/environmental/epa_ecoregions_l3/`, Omernik & Griffith 2014). For ungeoreferenced sheets with valid county metadata, the county polygon is checked for containment: if $\ge 95\%$ of county area resides in a single Level III ecoregion, that ecoregion is assigned; otherwise `NA`.
   4. **3-Layer Dynamic Expert & Herbarium Authority Engine (`parse_determiner_tier`):**
@@ -267,7 +273,7 @@ flowchart TD
      - **Stage 3 (`Subspecies_Ecotype`):** Evaluates `is_cohesive_ecotype` (infraspecific rank or secondary GMM cluster with cohesive edaphic/geographic divergence).
      - **Stage 4 (`Ecophenotypic_Plasticity`):** Evaluates `is_taphonomic_plasticity` (edaphic $z$-score $\le 2.0$ with chromatic discordance or late-season $\text{DOY} \ge Q_{75}$ with single-modality divergence).
      - **Stage 5 (`Putative_Cryptic_Species`):** Requires multi-modal **Integration by Congruence** (Padial et al. 2010).
-  5. **Dynamic Taxonomic Revision Summaries & Publication Figures:** Generates empirical treatments for every taxon in `active_taxa`, exporting `<Focal_Taxon>_Taxonomic_Revision_Summary.md` and `Figure_Integrative_<Focal_Taxon>_Revision.pdf` when `--focal-taxon` is specified. Publication figures dynamically assign Okabe-Ito colors (`get_dynamic_packera_palette`) and hollow shapes (`get_dynamic_packera_shapes`), formats dynamic complex titles (`format_active_complex_title`), and computes dynamic North American map bounding boxes (`xlim_map`, `ylim_map` padded by 12%).
+  5. **Dynamic Taxonomic Revision Summaries & Publication Figures:** Generates empirical treatments for every taxon in `active_taxa`, exporting `Packera_Taxonomic_Revision_Summary.md` and `Figure_Integrative_Packera_Revision.pdf` (or `<Focal_Taxon>_Taxonomic_Revision_Summary.md` and `Figure_Integrative_<Focal_Taxon>_Revision.pdf` when `--focal-taxon` is specified). Publication figures dynamically assign Okabe-Ito colors (`get_dynamic_packera_palette`) and hollow shapes (`get_dynamic_packera_shapes`), format dynamic complex titles (`format_active_complex_title`, e.g., *Packera Taxon Complex (N Taxa)*), and compute dynamic North American map bounding boxes (`xlim_map`, `ylim_map` padded by 12%).
   6. **Step 08 Unsupervised North American Taxon-Complex Discovery (`scripts/analysis/08_discover_taxon_complexes.R`):** Fuses pairwise morphological ($D_{\text{Mahal}}$), environmental ($1 - D_{\text{Schoener}}$), phenological ($d_{\text{circ}}$), and vision centroid distances across all regional *Packera* species and partitions them via $k$-NN graph modularity (Leiden/Louvain) and Ward.D2 clustering (`outputs/reports/discovered_taxon_complexes.csv`).
   7. **Taxon x GMM Morphotype Subcluster Network:** When $\le 2$ species are analyzed, Step 08 automatically constructs a Taxon x GMM Morphotype subcluster network, resolving cryptic within-taxon structure (`outputs/figures/fig_empirical_taxon_complex_network.{pdf,png}`).
 

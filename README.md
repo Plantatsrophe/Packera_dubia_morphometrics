@@ -184,34 +184,40 @@ Every execution launched via `./run_pipeline.sh` or `python main.py` operates un
 ```bash
 source .venv/bin/activate
 
-# 1. Default full complex-wide run (creates runs/run_<YYYYMMDD_HHMMSS>/ and updates runs/latest)
+# 1. Default zero-flag genus-wide run (creates runs/run_<YYYYMMDD_HHMMSS>/ and updates runs/latest)
+#    Running with NO taxon flags dynamically queries and harvests ALL Packera species across the entire
+#    genus from GBIF (discover_genus_packera_species_gbif(), target_species: []):
 ./run_pipeline.sh
 
-# 2. Custom named run directory (--run-id <NAME>) reusing cached vouchers & canonical Step 02 assets (--skip-harvest)
+# 2. User-specified taxon subset mode (--taxon "Packera <sp1>" "Packera <sp2>" ...):
+#    Analyzes strictly the species specified by the user with zero hardcoded default species or injected outgroups:
+./run_pipeline.sh --run-id packera_subset --taxon "Packera dubia" "Packera anonyma" "Packera paupercula"
+
+# 3. Custom named run directory (--run-id <NAME>) reusing cached vouchers & canonical Step 02 assets (--skip-harvest)
 ./run_pipeline.sh --run-id packera_revision_v1 --skip-harvest
 
-# 3. Resume or launch from any pipeline step (--start-step <1..7>, e.g., Step 03 EFA or Step 06 Spatial RF)
+# 4. Resume or launch from any pipeline step (--start-step <1..7>, e.g., Step 03 EFA or Step 06 Spatial RF)
 #    Automatically seeds Step 01–02 tables and symlinks masks/contours/cropped_patches from canonical root data/:
 ./run_pipeline.sh --run-id packera_revision_v1 --skip-harvest --start-step 3
 ./run_pipeline.sh --run-id packera_revision_v1 --skip-harvest --start-step 6
 
-# 4. Exclude one or more taxa (--exclude-taxon "<TAXON>"):
+# 5. Exclude one or more taxa (--exclude-taxon "<TAXON>"):
 #    Filters curated_vouchers.csv, Step 02 manifests, and cropped_patches/ while dynamically remapping
 #    Step 05 DINOv2/Cleanlab class indices to contiguous 0..K-1 (active_taxa):
 ./run_pipeline.sh --run-id eastern_3taxa --skip-harvest --start-step 3 --exclude-taxon "Packera plattensis"
 
-# 5. Strategy 1 (Focal Taxon + Outgroup Gold Reference Anchors, default --gold-anchors 30):
+# 6. Strategy 1 (Focal Taxon + Outgroup Gold Reference Anchors, default --gold-anchors 30):
 #    Processes all focal taxon vouchers plus N Tier_1_Gold anchors per outgroup species for Steps 04–06 calibration,
 #    then filters Step 07's final triage queue and figures strictly to the focal taxon:
 ./run_pipeline.sh --run-id dubia_triage --skip-harvest --focal-taxon "Packera dubia" --gold-anchors 30
 
-# 6. Strategy 2 (Pure Intraspecific Delimitation Mode: --focal-taxon "<TAXON>" --intraspecific-mode):
+# 7. Strategy 2 (Pure Intraspecific Delimitation Mode: --focal-taxon "<TAXON>" --intraspecific-mode):
 #    Runs strictly on a single species (n_unique_taxa == 1) with zero outgroup specimens, switching Steps 04–06
 #    from species_standardized to label-blind GMM morphotypes (Morphotype_K1..K_n or geographic/edaphic ecotypes)
 #    to test for cryptic lineages and granite-outcrop ecotypes:
 ./run_pipeline.sh --run-id dubia_cryptic --skip-harvest --focal-taxon "Packera dubia" --intraspecific-mode
 
-# 7. Step 08: Unsupervised Eastern North American Taxon-Complex Discovery (Leiden/Louvain + Ward.D2)
+# 8. Step 08: Unsupervised North American Taxon-Complex Discovery (Leiden/Louvain + Ward.D2)
 Rscript scripts/analysis/08_discover_taxon_complexes.R \
     --harmonics data/tables/leaf_efa_harmonics.csv \
     --vouchers data/tables/curated_vouchers.csv \
@@ -225,8 +231,9 @@ Rscript scripts/analysis/08_discover_taxon_complexes.R \
 | `--run-id` | `<NAME>` | `run_<YYYYMMDD_HHMMSS>` | Isolates all Step 03–08 outputs inside `runs/<NAME>/` and updates the `runs/latest` symlink. |
 | `--skip-harvest` | *(flag)* | `false` | Skips Step 01 network harvesting and reuses cached `data/tables/curated_vouchers.csv` and local `data/raw_vouchers/` images. |
 | `--start-step` | `<1..7>` | `1` | Starts or resumes execution from Step `1`..`7` (e.g., `--start-step 3` or `--start-step 6`), automatically seeding Step 01–02 tables and symlinks from canonical root `data/`. |
+| `--taxon` | `"<SP1>" "<SP2>" ...` | *(none / genus-wide)* | Analyzes strictly the species specified by the user with zero hardcoded default species or injected outgroups. When omitted, the pipeline dynamically queries and harvests all *Packera* species across the entire genus from GBIF (`discover_genus_packera_species_gbif()`, `target_species: []`). |
 | `--exclude-taxon` | `"<TAXON>"` | *(none)* | Excludes one or more taxa (repeatable, e.g., `--exclude-taxon "Packera plattensis"`), filtering `curated_vouchers.csv`, Step 02 manifests, and `cropped_patches/` while dynamically remapping Step 05 class indices to contiguous `0..K-1` (`active_taxa`). |
-| `--focal-taxon` | `"<TAXON>"` | `""` *(all taxa)* | Restricts focal evaluation to a single species (e.g., `"Packera dubia"` or `"Packera anonyma"`). |
+| `--focal-taxon` | `"<TAXON>"` | `""` *(all taxa)* | Restricts focal evaluation strictly to the specified species with zero injected outgroups (unless `--gold-anchors <INT>` is specified for Strategy 1). |
 | `--gold-anchors` | `<INT>` | `30` | **Strategy 1 (Focal Taxon + Outgroup Reference Anchors):** Retains `N` anchors per outgroup species for Steps 04–06 calibration (cascading fallback across `Tier_1_Gold` -> `Tier_2_Silver` -> `Tier_3_Bronze` when an outgroup taxon lacks `Tier_1_Gold` vouchers), then filters Step 07's final triage queue and figures strictly to `--focal-taxon`. |
 | `--intraspecific-mode` | *(flag)* | `false` | **Strategy 2 (Pure Intraspecific Delimitation Mode):** Sets `--gold-anchors 0` (`n_unique_taxa == 1` with zero outgroup specimens), switching Steps 04–06 from `species_standardized` to label-blind GMM morphotypes (`Morphotype_K1..K_n` or geographic/edaphic ecotypes). |
 | `--geographic-scope` | `{eastern_na,north_america,global}` | `eastern_na` | Ingestion boundary scope: `eastern_na` enforces the $\ge -106.65$ Eastern North America longitude filter; `north_america` and `global` disable the western cutoff for continent-wide runs. |
@@ -237,7 +244,6 @@ Rscript scripts/analysis/08_discover_taxon_complexes.R \
 | `--determiner-tier` | `<TIER>` | `""` *(all tiers)* | Filters `curated_vouchers.csv`, all Step 02 manifests, and `cropped_patches/` in the run directory strictly to rows matching `<TIER>` (e.g., `Tier_1_Gold`, `Tier_2_Silver`, or `Tier_3_Bronze`) prior to running Steps 02–07. |
 | `--exclude-misidentified` | *(flag)* | `false` | Filters out any `catalogNumber` with `taxonomic_treatment_subtype == 'Misidentification_Reassign'` (retaining only `Confirmed_Species`, `Hybrid_Introgressant`, `Subspecies_Ecotype`, `Ecophenotypic_Plasticity`, and `Putative_Cryptic_Species`) across `curated_vouchers.csv`, Step 02 manifests, and `cropped_patches/` during preflight. |
 | `--triage-source` | `<RUN_ID_OR_ALL>` | `ALL` | Specifies the triage report source(s) for `--exclude-misidentified` (defaults to `ALL` existing `runs/*/outputs/reports/final_curation_triage.csv`, or accepts a specific `<RUN_ID>` / comma-separated list of run IDs). |
-| `--all-eastern-taxa` | *(flag)* | `false` | Expands ingestion and processing across all Eastern North American *Packera* taxa and basionyms. |
 | `--discover-complexes` | *(flag)* | `false` | Triggers Step 08 quantitative taxon-complex discovery engine (Leiden/Louvain graph modularity + Ward.D2). |
 | `--auto-neighbors` | *(flag)* | `false` | Automatically discovers nearest phylogenetic/morphological congeners for focal taxon and generates affinity matrix. |
 | `--min-affinity` | `<FLOAT>` | `0.03` | Minimum multi-modal affinity threshold for connecting species nodes in the taxon-complex network graph. |
@@ -314,10 +320,10 @@ To execute rigorous species delimitation across Eastern North American *Packera*
      ./run_pipeline.sh --run-id run3_dubia_gold_anchors --skip-harvest --focal-taxon "Packera dubia" --gold-anchors 30
      ```
    - Steps 04–06 train strictly on `Tier_1_Gold` outgroup anchors and focal anchors, unmasking historical herbarium misidentifications and hybrid introgressants before filtering Step 07 curatorial queues strictly to the focal taxon.
-5. **Stage 5 — Full Phylogenetic Tree & Unsupervised Complex Discovery (`--all-eastern-taxa --discover-complexes`):**
-   - Launch macro-evolutionary synthesis across all Eastern North American taxa:
+5. **Stage 5 — Full Genus Macro-Evolutionary Synthesis & Unsupervised Complex Discovery (`--discover-complexes`):**
+   - Launch macro-evolutionary synthesis across the entire harvested genus or active taxon set:
      ```bash
-     ./run_pipeline.sh --run-id run4_complex_discovery --skip-harvest --all-eastern-taxa --discover-complexes --auto-neighbors
+     ./run_pipeline.sh --run-id run4_complex_discovery --skip-harvest --discover-complexes --auto-neighbors
      ```
    - Builds pairwise multi-modal distance matrices across vegetative morphology, DINOv2 vision embeddings, $0\text{–}15\text{ cm}$ edaphics, and circular phenology, partitioning species into objective complexes and resolving fine-scale Taxon x GMM Morphotype subclusters.
 
@@ -325,7 +331,7 @@ To execute rigorous species delimitation across Eastern North American *Packera*
 
 ## 📊 Publication Figure Suite Inventory
 
-Every pipeline run exports publication-ready figures in both vector `.pdf` and 300-DPI `.png` formats inside `${RUN_DIR}/outputs/figures/` using the colorblind-safe Okabe-Ito palette (`#0072B2` *P. anonyma*, `#D55E00` *P. dubia*, `#009E73` *P. paupercula*, `#CC79A7` *P. plattensis*) and italicized taxon labels, enforcing universal unfilled hollow markers (`facecolors='none'` / `fill=NA`) and 3D ordinations with vertical drop-lines:
+Every pipeline run exports publication-ready figures in both vector `.pdf` and 300-DPI `.png` formats inside `${RUN_DIR}/outputs/figures/` using dynamically derived Okabe-Ito colorblind-safe palettes (`get_dynamic_packera_palette()`, with colors and hollow point markers assigned dynamically from the active species in the run), dynamic complex titles (`format_active_complex_title()`, e.g., *Packera Taxon Complex (N Taxa)*), and italicized taxon labels, enforcing universal unfilled hollow markers (`facecolors='none'` / `fill=NA`) and 3D ordinations with vertical drop-lines:
 
 | Figure Stem (`.pdf` & `.png`) | Script Source | Biological / Statistical Hypothesis Visualized |
 | :--- | :--- | :--- |
@@ -345,7 +351,7 @@ Every pipeline run exports publication-ready figures in both vector `.pdf` and 3
 | `fig06_ecological_niche_phenology` | `scripts/analysis/06_multimodal_spatial_rf.R` | 4-panel ecological niche plate displaying partitioned climatic vs. edaphic niche overlap ($D_{\text{clim}}$ vs. $D_{\text{edaph}}$), SGMC lithology affinity, and anthesis phenology. |
 | `fig06b_geographic_map_and_hopkins_phenology` | `scripts/analysis/06_multimodal_spatial_rf.R` | (A) Eastern North America geographic voucher distribution colored by taxon and shaped by conflict flag; (B) Anthesis collection DOY vs. Latitude against Hopkins Bioclimatic Law. |
 | `fig07_multimodal_discordance_summary` | `scripts/analysis/07_triage_dashboard_synthesis.R` | (A) Modality-specific conflict rates weighted by out-of-fold Cohen's $\kappa$; (B) Consensus curatorial triage priority breakdown across active *Packera* taxa. |
-| `Figure_Integrative_Packera_dubia_Revision` | `scripts/analysis/07_triage_dashboard_synthesis.R` | 4-panel synthesis dashboard combining (A) 3D CDA morphospace, (B) DINOv2 confidence vs. morphological distance, (C) Hopkins circular anthesis residuals, and (D) 5-stage taxonomic treatment summary. |
+| `Figure_Integrative_Packera_Revision` (or `Figure_Integrative_<Focal_Taxon>_Revision`) | `scripts/analysis/07_triage_dashboard_synthesis.R` | 4-panel synthesis dashboard combining (A) 3D CDA morphospace, (B) DINOv2 confidence vs. morphological distance, (C) Hopkins circular anthesis residuals, and (D) 5-stage taxonomic treatment summary. Paired with `Packera_Taxonomic_Revision_Summary.md` (or `<Focal_Taxon>_Taxonomic_Revision_Summary.md`). |
 | `fig_empirical_taxon_complex_network` | `scripts/analysis/08_discover_taxon_complexes.R` | Unsupervised multi-modal affinity network graph depicting species complexes, Taxon x GMM Morphotype subclusters, and inter-species affinities. |
 
 ---
