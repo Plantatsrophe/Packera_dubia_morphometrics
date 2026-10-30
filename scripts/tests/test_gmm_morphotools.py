@@ -612,6 +612,218 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     err_msg=f"Tier_3_Bronze perturbation must not alter reference {col}.",
                 )
 
+    def test_dynamic_non_default_packera_taxa_discovery_and_classification(self):
+        """Verify 04_gmm_morphotools.R dynamically discovers and classifies non-default Packera species in cda_predicted_taxon and passively projects singleton taxa."""
+        r_src = self.r_script_path.read_text(encoding="utf-8")
+        self.assertNotIn(
+            'target_taxa <- c("Packera anonyma", "Packera dubia", "Packera plattensis", "Packera paupercula")',
+            r_src,
+            "04_gmm_morphotools.R must not hardcode the 4-species target_taxa vector.",
+        )
+
+        rng = np.random.default_rng(2026)
+        non_default_specs = [
+            ("Packera schweinitziana", "Senecio schweinitzianus", (-4.5, -2.5, 0.5)),
+            ("Packera serpenticola", "Packera eburnea", (4.5, -2.0, -0.5)),
+            ("Packera millefolium", "Senecio millefolium", (-1.5, 4.0, -2.0)),
+            ("Packera aurea", "Senecio aureus", (2.5, 3.5, 2.5)),
+        ]
+        rows = []
+        for idx, (canon_sp, raw_syn, (c1, c2, c3)) in enumerate(non_default_specs):
+            for j in range(10):
+                tier = "Tier_1_Gold" if j < 6 else ("Tier_2_Silver" if j < 8 else "Tier_3_Bronze")
+                cs = float(28.0 + 1.2 * j)
+                log_cs = float(np.log(cs))
+                row = {
+                    "catalogNumber": f"ENA_{idx}_{j:02d}",
+                    "plant_individual_id": 0,
+                    "assigned_tier": "Tier_1_Direct",
+                    "n_tier1_leaves": 3,
+                    "n_tier2_leaves": 0,
+                    "morph_tier_source": "Tier_1_Pure",
+                    "species_raw": raw_syn if j % 2 == 0 else canon_sp,
+                    "scientificName": canon_sp,
+                    "determiner_tier": tier,
+                    "PC1": float(c1 + rng.normal(0.0, 0.15)),
+                    "PC2": float(c2 + rng.normal(0.0, 0.15)),
+                    "PC3": float(c3 + rng.normal(0.0, 0.12)),
+                    "PC4": float(rng.normal(0.0, 0.10)),
+                    "PC5": float(rng.normal(0.0, 0.10)),
+                    "foliar_variance": 0.02,
+                    "leaf_count": 3,
+                    "centroid_size": cs,
+                    "log_centsize": log_cs,
+                    "is_calibrated_mm": True,
+                    "aspect_ratio": float(1.8 + 0.25 * idx + rng.normal(0.0, 0.04)),
+                    "solidity": float(0.42 if canon_sp == "Packera millefolium" else 0.89),
+                    "ucs_score": 0.94,
+                }
+                for k in range(1, 13):
+                    row[f"A{k}"] = float((c1 * 0.06) / k + rng.normal(0.0, 0.003))
+                    row[f"B{k}"] = 0.0
+                    row[f"C{k}"] = 0.0
+                    row[f"D{k}"] = float((c2 * 0.06) / k + rng.normal(0.0, 0.003))
+                rows.append(row)
+
+        # Add a singleton rare outgroup row (n = 1) to verify passive projection without singular W
+        singleton_row = dict(rows[0])
+        singleton_row.update({
+            "catalogNumber": "ENA_SINGLETON_01",
+            "species_raw": "Senecio glabellus",
+            "scientificName": "Packera glabella",
+            "determiner_tier": "Tier_1_Gold",
+            "PC1": 0.0,
+            "PC2": 0.0,
+            "PC3": 0.0,
+        })
+        rows.append(singleton_row)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            harm_csv = tmp_p / "leaf_efa_harmonics.csv"
+            vouch_csv = tmp_p / "curated_vouchers.csv"
+            flags_csv = tmp_p / "morphometric_flags.csv"
+            bic_csv = tmp_p / "gmm_bayes_factors_summary.csv"
+            allom_csv = tmp_p / "allometry_significance_audit.csv"
+            allom_pdf = tmp_p / "shape_allometry_regression.pdf"
+            cda_pdf = tmp_p / "cda_passive_projection.pdf"
+
+            df_in = pd.DataFrame(rows)
+            df_in.to_csv(harm_csv, index=False)
+            df_in[["catalogNumber", "species_raw", "determiner_tier"]].assign(
+                institutionCode=["NCU" if i % 2 == 0 else "NY" for i in range(len(df_in))],
+                stateProvince="North Carolina",
+                latitude=35.6,
+                longitude=-82.5,
+                doy=132,
+            ).to_csv(vouch_csv, index=False)
+
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--vouchers", str(vouch_csv),
+                    "--harmonics", str(harm_csv),
+                    "--output-flags", str(flags_csv),
+                    "--output-report", str(bic_csv),
+                    "--output-plot", str(cda_pdf),
+                    "--output-batch-audit", str(tmp_p / "batch_audit.csv"),
+                    "--allometry-report", str(allom_csv),
+                    "--allometry-pairwise", str(tmp_p / "pairwise.csv"),
+                    "--allometry-plot", str(allom_pdf),
+                    "--permutations", "99",
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 04 failed on non-default Packera taxa:\n{proc.stderr}\n{proc.stdout}")
+
+            flags_df = pd.read_csv(flags_csv)
+            self.assertEqual(len(flags_df), len(df_in), "All vouchers including singleton outgroup must be retained.")
+
+            expected_four = {
+                "Packera schweinitziana",
+                "Packera serpenticola",
+                "Packera millefolium",
+                "Packera aurea",
+            }
+            pred_taxa = set(flags_df["cda_predicted_taxon"].dropna().unique())
+            self.assertEqual(pred_taxa, expected_four)
+            self.assertTrue(
+                pred_taxa.isdisjoint({"Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis"}),
+                f"Default 4-species names must not appear when absent from dataset: {pred_taxa}",
+            )
+
+            # Verify high classification accuracy on the 4 well-separated species
+            core_rows = flags_df[flags_df["species_standardized"].isin(expected_four)]
+            acc = float((core_rows["species_standardized"] == core_rows["cda_predicted_taxon"]).mean())
+            self.assertGreaterEqual(acc, 0.95, f"Expected >=95% CDA classification accuracy on 4 distinct taxa, got {acc:.3f}")
+
+            # Verify singleton Packera glabella row was projected passively with finite 3D canonical scores
+            sing_out = flags_df[flags_df["catalogNumber"] == "ENA_SINGLETON_01"]
+            self.assertEqual(len(sing_out), 1)
+            self.assertEqual(sing_out["species_standardized"].iloc[0], "Packera glabella")
+            self.assertTrue(bool(sing_out["is_passive"].iloc[0]))
+            for col in ("can1", "can2", "can3", "cda_posterior_prob"):
+                self.assertTrue(np.isfinite(float(sing_out[col].iloc[0])), f"Singleton {col} must be finite.")
+
+    def test_step02_and_preflight_dynamic_non_default_packera_support(self):
+        """Verify Step 02 standardization/figures, config.yaml, and run_pipeline.sh support non-default Packera species."""
+        import importlib
+        from scripts.core.config import PipelineConfig
+
+        seg_mod = importlib.import_module("scripts.pipeline.02_segment_and_extract")
+        std_fn = seg_mod._standardize_packera_species_py
+        expected_map = {
+            "Packera schweinitziana": "Packera schweinitziana",
+            "Senecio schweinitzianus": "Packera schweinitziana",
+            "Senecio robbinsii": "Packera schweinitziana",
+            "Packera serpenticola": "Packera serpenticola",
+            "Packera eburnea": "Packera serpenticola",
+            "Packera millefolium": "Packera millefolium",
+            "Senecio millefolium": "Packera millefolium",
+            "Packera aurea": "Packera aurea",
+            "Senecio aureus": "Packera aurea",
+        }
+        for raw_name, canon_name in expected_map.items():
+            self.assertEqual(std_fn(raw_name), canon_name, f"Step 02 failed to standardize {raw_name!r}")
+
+        # Verify Step 02 publication figures render 8 species (core 4 + 4 additional) with distinct colors/markers
+        taxa_8 = [
+            "Packera anonyma",
+            "Packera dubia",
+            "Packera paupercula",
+            "Packera plattensis",
+            "Packera aurea",
+            "Packera millefolium",
+            "Packera schweinitziana",
+            "Packera serpenticola",
+        ]
+        fig_rows = []
+        for idx, sp in enumerate(taxa_8):
+            for k in range(4):
+                fig_rows.append({
+                    "catalogNumber": f"FIG_{idx}_{k}",
+                    "plant_individual_id": 0,
+                    "leaf_id": 1,
+                    "assigned_tier": "Tier_1_Direct",
+                    "scientificName": sp,
+                    "solidity": 0.35 + 0.05 * k if sp == "Packera millefolium" else 0.80 + 0.03 * k,
+                    "ucs_score": 0.92,
+                    "aspect_ratio": 1.4 + 0.3 * k,
+                    "pixels_per_mm": 10.0,
+                    "is_calibrated_mm": True,
+                })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved = seg_mod.generate_step02_publication_figures(
+                extracted_df=pd.DataFrame(fig_rows),
+                failed_df=pd.DataFrame(),
+                repro_df=pd.DataFrame(),
+                pheno_df=pd.DataFrame(),
+                figures_dir=Path(tmpdir) / "figures",
+            )
+            self.assertTrue(Path(saved["fig02a_pdf"]).exists())
+            self.assertTrue(Path(saved["fig02b_pdf"]).exists())
+
+        # Verify config.yaml synonyms & outgroups and run_pipeline.sh >= 2 outgroup condition
+        cfg = PipelineConfig.from_yaml()
+        for sp_key, req_syn in [
+            ("Packera schweinitziana", "Senecio schweinitzianus"),
+            ("Packera schweinitziana", "Senecio robbinsii"),
+            ("Packera serpenticola", "Packera eburnea"),
+            ("Packera millefolium", "Senecio millefolium"),
+            ("Packera aurea", "Senecio aureus"),
+        ]:
+            self.assertIn(sp_key, cfg.taxa.synonyms)
+            self.assertIn(req_syn, cfg.taxa.synonyms[sp_key])
+        for out_sp in ("Packera schweinitziana", "Packera serpenticola", "Packera millefolium", "Packera aurea"):
+            self.assertIn(out_sp, cfg.taxa.outgroups)
+
+        sh_src = (PROJECT_ROOT / "run_pipeline.sh").read_text(encoding="utf-8")
+        self.assertIn("base_outgroups = present_taxa if len(present_taxa) >= 2 else list(mod05.TARGET_TAXA)", sh_src)
+
 
 if __name__ == "__main__":
     unittest.main()

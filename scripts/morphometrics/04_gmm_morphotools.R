@@ -360,8 +360,10 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     df$grouping_col <- df$species_standardized
     is_active <- (df$determiner_tier == "Tier_1_Gold") & is_tier1_pure & (df$grouping_col %in% target_taxa) & has_pcs
     is_train_cand <- (df$authority_weight > 0) & is_tier1_pure & df$species_standardized %in% target_taxa & has_pcs
-    if (length(unique(df$grouping_col[is_train_cand])) >= 2) target_taxa <- intersect(target_taxa, unique(df$grouping_col[is_train_cand]))
-    if (any(table(factor(df$grouping_col[is_train_cand], levels = target_taxa)) < 2)) {
+    tr_tab <- table(factor(df$grouping_col[is_train_cand], levels = target_taxa))
+    if (sum(tr_tab >= 2L) >= 2L) { target_taxa <- names(tr_tab[tr_tab >= 2L]); is_train_cand <- is_train_cand & (df$grouping_col %in% target_taxa); is_active <- is_active & (df$grouping_col %in% target_taxa)
+    } else if (any(tr_tab < 2L)) {
+      if (length(unique(df$grouping_col[is_train_cand])) >= 2) target_taxa <- intersect(target_taxa, unique(df$grouping_col[is_train_cand]))
       fallback_cand <- (df$authority_weight > 0) & df$species_standardized %in% target_taxa & has_pcs
       is_train_cand <- if (all(table(factor(df$grouping_col[fallback_cand], levels = target_taxa)) >= 2)) fallback_cand else (df$grouping_col %in% target_taxa & has_pcs)
     }
@@ -582,7 +584,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
     if (!"n_tier2_leaves" %in% names(closed_df)) closed_df$n_tier2_leaves <- ifelse(closed_df$assigned_tier == "Tier_2_Reflected", lc, 0L)
     if (!"morph_tier_source" %in% names(closed_df)) closed_df$morph_tier_source <- ifelse(closed_df$n_tier1_leaves >= 1L | closed_df$assigned_tier == "Tier_1_Direct", "Tier_1_Pure", "Tier_2_Fallback")
   }
-  closed_df$species_standardized <- standardize_packera_taxon(closed_df$species_raw); closed_df$authority_weight <- compute_authority_precision_weights(closed_df)
+  raw_sp_col <- if ("species_raw" %in% names(closed_df) && any(!is.na(closed_df$species_raw))) closed_df$species_raw else if ("scientificName" %in% names(closed_df)) closed_df$scientificName else closed_df$species_standardized; closed_df$species_standardized <- standardize_packera_taxon(raw_sp_col); closed_df$authority_weight <- compute_authority_precision_weights(closed_df)
   if (!is.null(vouchers_df)) {
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), , drop = FALSE]; v_idx <- match(as.character(closed_df$catalogNumber), as.character(v_sub$catalogNumber))
     for (col in intersect(names(v_sub), c("institutionCode", "county", "stateProvince", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) if (!col %in% names(closed_df)) closed_df[[col]] <- v_sub[[col]][v_idx]
@@ -619,13 +621,14 @@ run_gmm_morphotools_pipeline <- function(opts) {
       }
     }
   }
-  target_taxa <- c("Packera anonyma", "Packera dubia", "Packera plattensis", "Packera paupercula")
+  cand_taxa <- sort(unique(closed_df$species_standardized[!is.na(closed_df$species_standardized) & grepl("^Packera\\s+", closed_df$species_standardized)]))
+  tx_n <- table(factor(closed_df$species_standardized, levels = cand_taxa)); target_taxa <- if (sum(tx_n >= 2L) >= 2L) names(tx_n[tx_n >= 2L]) else if (length(cand_taxa) > 0L) cand_taxa else sort(unique(stats::na.omit(closed_df$species_standardized)))
   gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel))
   dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE); tmp_bic <- paste0(opts$output_report, ".tmp"); write.csv(gmm_res$bic_table, file = tmp_bic, row.names = FALSE); file.rename(tmp_bic, opts$output_report)
   veg_extra <- intersect(c("log_centsize", "aspect_ratio", "solidity"), names(closed_df)); ref_std_idx <- which(closed_df$authority_weight > 0); if (length(ref_std_idx) < 3L) ref_std_idx <- seq_len(nrow(closed_df))
   for (vc in veg_extra) if (all(is.finite(closed_df[[vc]])) && stats::sd(closed_df[[vc]][ref_std_idx]) > 1e-6) closed_df[[paste0(vc, "_std")]] <- (closed_df[[vc]] - mean(closed_df[[vc]][ref_std_idx])) / stats::sd(closed_df[[vc]][ref_std_idx])
   cda_cols <- c(feature_cols, if (!isTRUE(opts$outline_only)) intersect(paste0(veg_extra, "_std"), names(closed_df)) else character(0))
-  is_intra_mode <- isTRUE(opts$intraspecific_mode) || (length(unique(closed_df$species_standardized)) < 2)
+  is_intra_mode <- isTRUE(opts$intraspecific_mode) || (length(target_taxa) < 2L)
   cda_res <- run_cda_with_passive_projection(closed_df, cda_cols, target_taxa, gmm_res = gmm_res, intraspecific_mode = is_intra_mode)
   audited_df <- audit_misidentifications(closed_df, cda_res, gmm_res); audit_institutional_batch_effects(audited_df, output_csv = opts$output_batch_audit)
   lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source",

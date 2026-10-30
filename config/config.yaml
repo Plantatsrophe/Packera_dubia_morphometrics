@@ -56,10 +56,24 @@ taxa:
     "Packera plattensis":
       - "Senecio plattensis"
       - "Packera flavovirens"
+    "Packera schweinitziana":
+      - "Senecio schweinitzianus"
+      - "Senecio robbinsii"
+      - "Packera robbinsii"
+    "Packera serpenticola":
+      - "Packera eburnea"
+    "Packera millefolium":
+      - "Senecio millefolium"
+    "Packera aurea":
+      - "Senecio aureus"
+      - "Senecio gracilis"
   outgroups:
     - "Packera glabella"
     - "Packera aurea"
     - "Packera obovata"
+    - "Packera schweinitziana"
+    - "Packera serpenticola"
+    - "Packera millefolium"
 
 # Backward compatibility: Target focal taxa for GBIF & Morphological Demarcation
 taxonomy:

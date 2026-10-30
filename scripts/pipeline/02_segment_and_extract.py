@@ -2475,28 +2475,52 @@ def _atomic_save_matplotlib_fig(fig: Any, out_base_path: Path, dpi: int = 300) -
 
 
 def _standardize_packera_species_py(raw_val: Any) -> str:
-    s_raw = str(raw_val or "").strip()
+    """Delegate taxonomic standardization to scripts.core.harvester.standardize_packera_taxon."""
+    if raw_val is None or (isinstance(raw_val, float) and np.isnan(raw_val)):
+        return "Packera dubia"
+    s_raw = str(raw_val).strip()
     if not s_raw or s_raw.lower() in {"none", "nan", "null", "na", "unknown"}:
         return "Packera dubia"
     try:
         from scripts.core.harvester import standardize_packera_taxon
+
         std = standardize_packera_taxon(s_raw)
         if std:
             return std
     except Exception:
-        pass
-    s = s_raw.lower()
-    if "paupercul" in s or "balsamitae" in s:
-        return "Packera paupercula"
-    if "plattensis" in s or "pseudotomentos" in s:
-        return "Packera plattensis"
-    if "tomentos" in s or "dubia" in s or "dubius" in s:
-        return "Packera dubia"
-    if "anonym" in s or "smallii" in s:
-        return "Packera anonyma"
-    if s_raw.startswith("Packera ") and len(s_raw.split()) >= 2:
-        parts = s_raw.split()
-        return f"Packera {parts[1].lower()}"
+        # Environment-isolated fallback (e.g., .venv_LM2 without pygbif/aiohttp) mirroring harvester rules
+        s = s_raw.lower()
+        rules = (
+            (r"crawfordii|crawford", "Packera crawfordii"),
+            (r"memmingeri|memminger|packera[x×]memmingeri", "Packera memmingeri"),
+            (r"millefoli", "Packera millefolium"),
+            (r"pseudaure|semicordat", "Packera pseudaurea"),
+            (r"paupercul|balsamitae|savannarum|appalachiana", "Packera paupercula"),
+            (r"plattensis|pseudotomentos|flavovirens", "Packera plattensis"),
+            (r"tomentos|dubia|dubius|alabamensis", "Packera dubia"),
+            (r"anonym|smallii|earlei", "Packera anonyma"),
+            (r"antennariifoli", "Packera antennariifolia"),
+            (r"\baurea\b|\baureus\b|gracilis", "Packera aurea"),
+            (r"glabell|lobatus|lobata", "Packera glabella"),
+            (r"hyperboreal", "Packera hyperborealis"),
+            (r"cymbalaria|resedifoli", "Packera cymbalaria"),
+            (r"indecor", "Packera indecora"),
+            (r"insulan", "Packera insulanus"),
+            (r"obovat|rotundus|rotunda|elliottii", "Packera obovata"),
+            (r"schweinitzian|robbinsii", "Packera schweinitziana"),
+            (r"serpenticol|eburnea|eburneus|packeraeburnea", "Packera serpenticola"),
+            (r"spellenberg", "Packera spellenbergii"),
+            (r"tampican|imparipinnat", "Packera tampicana"),
+            (r"vulgaris", "Packera vulgaris"),
+        )
+        for pat, canonical in rules:
+            if re.search(pat, s):
+                return canonical
+    m = re.match(r"^packera\s*(?:[x×]\s*)?([a-z-]+)", s_raw.lower())
+    if m:
+        epithet = m.group(1).lstrip("x×-")
+        if epithet:
+            return f"Packera {epithet}"
     return "Packera dubia"
 
 
@@ -2676,6 +2700,17 @@ def generate_step02_publication_figures(
     if extracted_df is None or len(extracted_df) == 0:
         return saved_paths
 
+    EXTENDED_OKABE_ITO = (
+        "#0072B2",
+        "#D55E00",
+        "#009E73",
+        "#CC79A7",
+        "#E69F00",
+        "#56B4E9",
+        "#882255",
+        "#44AA99",
+    )
+    HOLLOW_MARKER_CYCLE = ("o", "^", "s", "D", "v", "P", "X", "<")
     SPECIES_PALETTE = {
         "Packera anonyma": "#0072B2",
         "Packera dubia": "#D55E00",
@@ -2694,7 +2729,8 @@ def generate_step02_publication_figures(
         "Packera paupercula": r"$\it{P.\ paupercula}$",
         "Packera plattensis": r"$\it{P.\ plattensis}$",
     }
-    FOCAL_TAXA = list(SPECIES_PALETTE.keys())
+    BASE_TAXA = list(SPECIES_PALETTE.keys())
+    FOCAL_TAXA = list(BASE_TAXA)
 
     df_plot = extracted_df.copy()
     df_plot["cat_str"] = df_plot.get("catalogNumber", pd.Series("", index=df_plot.index)).astype(str).str.strip()
@@ -2909,21 +2945,29 @@ def generate_step02_publication_figures(
             ar_est.append(ar_v)
         df_plot["ar_val"] = ar_est
 
-    # Dynamically resolve active species present in df_plot (never substituting excluded taxa)
-    present_sp = [sp for sp in FOCAL_TAXA if (df_plot["species_clean"] == sp).any()]
+    # Dynamically resolve active species present in df_plot and extend palette/markers/labels
+    has_base_sp = any((df_plot["species_clean"] == sp).any() for sp in BASE_TAXA)
+    present_sp = [sp for sp in BASE_TAXA if (df_plot["species_clean"] == sp).any()]
     extra_sp = sorted(
         str(sp)
         for sp in df_plot["species_clean"].dropna().unique()
         if str(sp) not in present_sp and str(sp).startswith("Packera ")
     )
-    for sp_extra in extra_sp:
+    color_pool = EXTENDED_OKABE_ITO[4:] + EXTENDED_OKABE_ITO[:4] if has_base_sp else EXTENDED_OKABE_ITO
+    marker_pool = HOLLOW_MARKER_CYCLE[4:] + HOLLOW_MARKER_CYCLE[:4] if has_base_sp else HOLLOW_MARKER_CYCLE
+    for idx_extra, sp_extra in enumerate(extra_sp):
         present_sp.append(sp_extra)
-        SPECIES_PALETTE.setdefault(sp_extra, "#56B4E9")
-        SPECIES_MARKERS.setdefault(sp_extra, "o")
-        sp_short = sp_extra.replace("Packera ", "P. ").replace(" ", r"\ ")
-        SPECIES_ITALIC.setdefault(sp_extra, rf"$\it{{{sp_short}}}$")
+        SPECIES_PALETTE[sp_extra] = color_pool[idx_extra % len(color_pool)]
+        SPECIES_MARKERS[sp_extra] = marker_pool[idx_extra % len(marker_pool)]
+        sp_short = (
+            sp_extra.replace(" ", r"\ ")
+            if idx_extra == 0 and not has_base_sp
+            else sp_extra.replace("Packera ", "P. ").replace(" ", r"\ ")
+        )
+        SPECIES_ITALIC[sp_extra] = rf"$\it{{{sp_short}}}$"
+    FOCAL_TAXA = list(present_sp) if present_sp else list(BASE_TAXA)
     if not present_sp:
-        present_sp = FOCAL_TAXA
+        present_sp = list(FOCAL_TAXA)
 
     alpha_pt = 0.45 if len(df_plot) > 1000 else 0.75
 
@@ -2935,7 +2979,7 @@ def generate_step02_publication_figures(
 
     # Panel A: Lamina Solidity vs. Blade Aspect Ratio colored and shaped by Species
     ax_sc = fig_a.add_subplot(gs_a[0, 0])
-    x_min = max(0.38, float(df_plot["sol_val"].min()) - 0.04)
+    x_min = max(0.15, min(0.48, float(df_plot["sol_val"].min()) - 0.04))
     y_max = min(6.0, max(4.2, float(df_plot["ar_val"].max()) + 0.35))
 
     # Shaded gatekeeper zones
@@ -3000,7 +3044,7 @@ def generate_step02_publication_figures(
         if "species_standardized" in rep_df.columns:
             rep_df["sp_clean"] = rep_df["species_standardized"].apply(_standardize_packera_species_py)
         elif cat_to_species:
-            rep_df["sp_clean"] = rep_df["cat_str"].map(lambda c: cat_to_species.get(c, "Packera dubia"))
+            rep_df["sp_clean"] = rep_df["cat_str"].map(lambda c: cat_to_species.get(c, present_sp[0]))
         else:
             rep_df["sp_clean"] = [present_sp[i % len(present_sp)] for i in range(len(rep_df))]
         ar_col = (
@@ -3068,7 +3112,12 @@ def generate_step02_publication_figures(
             ph_df = ph_df[~ph_df["cat_str"].isin(misid_cats)].copy()
         if (ph_df["cat_str"].isin(qc_voucher_cats)).any():
             ph_df = ph_df[ph_df["cat_str"].isin(qc_voucher_cats)].copy()
-        ph_df["sp_clean"] = ph_df["cat_str"].map(lambda c: cat_to_species.get(c, "Packera dubia"))
+        if "species_standardized" in ph_df.columns:
+            ph_df["sp_clean"] = ph_df["species_standardized"].apply(_standardize_packera_species_py)
+        elif cat_to_species:
+            ph_df["sp_clean"] = ph_df["cat_str"].map(lambda c: cat_to_species.get(c, present_sp[0]))
+        else:
+            ph_df["sp_clean"] = [present_sp[i % len(present_sp)] for i in range(len(ph_df))]
         st_col = (
             "voucher_phenological_state"
             if "voucher_phenological_state" in ph_df.columns

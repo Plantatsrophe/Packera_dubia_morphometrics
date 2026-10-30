@@ -531,7 +531,7 @@ if focal_raw:
         print(f'[Strategy 2: Pure Intraspecific] Retained {len(subset_df)} {focal_taxon} vouchers (0 outgroup anchors).')
     else:
         present_taxa = sorted([t for t in df['species_standardized'].dropna().unique().tolist() if str(t).startswith('Packera ')])
-        base_outgroups = present_taxa if len(present_taxa) > 4 else list(mod05.TARGET_TAXA)
+        base_outgroups = present_taxa if len(present_taxa) >= 2 else list(mod05.TARGET_TAXA)
         outgroup_taxa = [t for t in base_outgroups if t != focal_taxon and t not in exclude_taxa]
 
         if auto_neighbors_flag:
@@ -655,7 +655,7 @@ if has_spatial_thin_or_quota and not subset_df.empty:
         st_summary = subset_df['stateProvince'].fillna('UNKNOWN').astype(str).value_counts().to_dict()
         print(f'  Retained counts per stateProvince: {st_summary}')
     if 'regional_group' in subset_df.columns:
-        reg_summary = subset_df['regional_group'].fillna('Other_US').astype(str).value_counts().to_dict()
+        reg_summary = subset_df['regional_group'].fillna('NA').astype(str).value_counts().to_dict()
         print(f'  Retained counts per regional_group: {reg_summary}')
 
 def _write_atomic(df_obj, target_path):
