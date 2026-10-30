@@ -427,6 +427,8 @@ run_fourier_extraction <- function(opts) {
     circularity <- if (is.finite(perim_px) && perim_px > 1e-6) round(min(1.0, (4 * pi * area_px) / (perim_px^2)), 4) else NA_real_
     resolved_solidity <- if (!is.null(m_match) && nrow(m_match) > 0 && "solidity" %in% names(m_match) && !is.na(m_match$solidity[1])) round(suppressWarnings(as.numeric(m_match$solidity[1])), 4) else compute_polygon_solidity(coo, area_px)
     resolved_ucs <- if (!is.null(m_match) && nrow(m_match) > 0 && "ucs_score" %in% names(m_match) && !is.na(m_match$ucs_score[1])) round(suppressWarnings(as.numeric(m_match$ucs_score[1])), 4) else if (!is.null(m_match) && nrow(m_match) > 0 && "ucs" %in% names(m_match) && !is.na(m_match$ucs[1])) round(suppressWarnings(as.numeric(m_match$ucs[1])), 4) else NA_real_
+    m_num <- function(cn) if (!is.null(m_match) && nrow(m_match) > 0 && cn %in% names(m_match) && !is.na(m_match[[cn]][1])) suppressWarnings(as.numeric(m_match[[cn]][1])) else NA_real_
+    m_dis <- if (!is.null(m_match) && nrow(m_match) > 0 && "is_dissected" %in% names(m_match) && !is.na(m_match$is_dissected[1])) as.logical(m_match$is_dissected[1]) else NA
 
     # Calibrate contour coordinates to physical millimeters (mm) when pixels_per_mm > 0
     if (is_calibrated_mm) coo <- coo / resolved_ppm
@@ -446,7 +448,9 @@ run_fourier_extraction <- function(opts) {
       shape_id = shape_name, catalogNumber = meta$catalogNumber, plant_individual_id = resolved_pid,
       leaf_id = meta$leaf_id, assigned_tier = resolved_tier, tier_assignment = resolved_tier,
       pixels_per_mm = resolved_ppm, is_calibrated_mm = is_calibrated_mm, aspect_ratio = aspect_ratio,
-      circularity = circularity, solidity = resolved_solidity, ucs_score = resolved_ucs, area_px = round(area_px, 1),
+      circularity = circularity, solidity = resolved_solidity, ucs_score = resolved_ucs,
+      petiole_length_mm = m_num("petiole_length_mm"), blade_length_mm = m_num("blade_length_mm"),
+      petiole_to_blade_ratio = m_num("petiole_to_blade_ratio"), is_dissected = m_dis, area_px = round(area_px, 1),
       centroid_size = if (!is.na(centsize)) round(centsize, 4) else NA_real_,
       log_centsize = log_cs, mask_source = f, stringsAsFactors = FALSE
     )
@@ -501,17 +505,20 @@ run_fourier_extraction <- function(opts) {
   if (all(harmonic_names %in% colnames(harm_mat))) harm_mat <- harm_mat[, harmonic_names, drop = FALSE] else if (ncol(harm_mat) == length(harmonic_names)) colnames(harm_mat) <- harmonic_names
   verify_harmonic_power_calibration(out_obj, harm_mat, nb_h = opts$harmonics)
   if (!is.null(vouchers_df)) {
-    meta_cols <- intersect(names(vouchers_df), c("catalogNumber", "scientificName", "species_raw", "determiner_raw", "determiner_tier",
-                                                 "dawid_skene_error_rate", "label_error_rate", "county", "stateProvince", "latitude", "longitude", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))
+    meta_cols <- intersect(colnames(vouchers_df), c("catalogNumber", "taxon", "scientificName", "species_raw", "institutionCode",
+      "determiner_raw", "determiner_tier", "authority_tier", "type_status", "dawid_skene_error_rate", "label_error_rate",
+      "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude", "latitude", "longitude",
+      "coordinateUncertainty", "year", "month", "day", "eventDate", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), meta_cols, drop = FALSE]
     fac_df$.row_ord <- seq_len(nrow(fac_df))
     fac_df <- merge(fac_df, v_sub, by = "catalogNumber", all.x = TRUE, sort = FALSE)
     fac_df <- fac_df[order(fac_df$.row_ord), , drop = FALSE]; fac_df$.row_ord <- NULL; rownames(fac_df) <- fac_df$shape_id
   }
+  if (!"species_raw" %in% names(fac_df)) fac_df$species_raw <- if ("taxon" %in% names(fac_df)) fac_df$taxon else NA_character_
   if (!"scientificName" %in% names(fac_df)) fac_df$scientificName <- fac_df$species_raw
   else fac_df$scientificName <- ifelse(is.na(fac_df$scientificName) | fac_df$scientificName == "", fac_df$species_raw, fac_df$scientificName)
-  if (!"determiner_tier" %in% names(fac_df)) fac_df$determiner_tier <- "Tier_3_Bronze"
-  else fac_df$determiner_tier <- ifelse(is.na(fac_df$determiner_tier) | fac_df$determiner_tier == "", "Tier_3_Bronze", fac_df$determiner_tier)
+  if (!"determiner_tier" %in% names(fac_df)) fac_df$determiner_tier <- if ("authority_tier" %in% names(fac_df)) as.character(fac_df$authority_tier) else "Tier_3_Bronze"
+  else fac_df$determiner_tier <- ifelse(is.na(fac_df$determiner_tier) | fac_df$determiner_tier == "", if ("authority_tier" %in% names(fac_df)) ifelse(is.na(fac_df$authority_tier) | fac_df$authority_tier == "", "Tier_3_Bronze", as.character(fac_df$authority_tier)) else "Tier_3_Bronze", fac_df$determiner_tier)
   fac_df$authority_weight <- compute_authority_precision_weights(fac_df)
   fac_df$spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(fac_df) else rep(1.0, nrow(fac_df))
 
@@ -594,6 +601,7 @@ run_fourier_extraction <- function(opts) {
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "tier_assignment", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
                  "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight", "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "circularity", "solidity", "ucs_score",
+                 "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
                  "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
@@ -637,13 +645,17 @@ run_fourier_extraction <- function(opts) {
     med_cs <- stats::median(grp$centroid_size, na.rm = TRUE)
     rec$centroid_size <- if (is.finite(med_cs) && med_cs > 0) round(med_cs, 4) else NA_real_
     rec$log_centsize <- if (!is.na(rec$centroid_size) && rec$centroid_size > 0) round(log(rec$centroid_size), 6) else NA_real_
-    other_meta <- intersect(c("pixels_per_mm", "is_calibrated_mm", "determiner_raw", "county", "stateProvince", "latitude", "longitude",
-                              "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight", "aspect_ratio", "circularity", "solidity", "ucs_score", "area_px",
+    other_meta <- intersect(c("pixels_per_mm", "is_calibrated_mm", "taxon", "institutionCode", "determiner_raw", "authority_tier", "type_status",
+                              "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "coordinateUncertainty",
+                              "year", "month", "day", "eventDate", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight",
+                              "aspect_ratio", "circularity", "solidity", "ucs_score", "area_px",
                               "sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight"), names(grp))
     for (m_col in other_meta) { vals <- stats::na.omit(grp[[m_col]]); rec[[m_col]] <- if (length(vals) > 0) vals[1] else NA }
-    if ("harmonic_roughness" %in% names(grp)) rec$harmonic_roughness <- round(stats::median(grp$harmonic_roughness, na.rm = TRUE), 6)
-    if ("leaf_quality_weight" %in% names(grp)) rec$leaf_quality_weight <- round(stats::median(grp$leaf_quality_weight, na.rm = TRUE), 6)
-    if ("is_contour_outlier" %in% names(grp)) rec$is_contour_outlier <- all(as.logical(grp$is_contour_outlier), na.rm = TRUE)
+    for (p_col in intersect(c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"), names(grp))) {
+      pv <- suppressWarnings(as.numeric(grp[[p_col]])); pv <- pv[is.finite(pv)]; rec[[p_col]] <- if (length(pv) > 0L) round(stats::quantile(pv, probs = 0.75, na.rm = TRUE, names = FALSE), 4) else NA_real_
+    }
+    if ("is_dissected" %in% names(grp)) rec$is_dissected <- if (any(!is.na(grp$is_dissected))) any(as.logical(grp$is_dissected), na.rm = TRUE) else NA
+    if ("harmonic_roughness" %in% names(grp)) rec$harmonic_roughness <- round(stats::median(grp$harmonic_roughness, na.rm = TRUE), 6); if ("leaf_quality_weight" %in% names(grp)) rec$leaf_quality_weight <- round(stats::median(grp$leaf_quality_weight, na.rm = TRUE), 6); if ("is_contour_outlier" %in% names(grp)) rec$is_contour_outlier <- all(as.logical(grp$is_contour_outlier), na.rm = TRUE)
     for (h_name in names(harm_medians)) rec[[h_name]] <- harm_medians[[h_name]]
     specimen_records[[spec_idx]] <- rec
   }
@@ -685,6 +697,7 @@ run_fourier_extraction <- function(opts) {
                       "foliar_variance", "heteroblasty_index", "assigned_tier", "tier_assignment", "reconstruction_tier",
                       "pixels_per_mm", "is_calibrated_mm", "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight",
                       "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "circularity", "solidity", "ucs_score",
+                      "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
                       "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize")
   lead_spec_cols <- intersect(lead_spec_cols, names(specimen_df))
   specimen_df <- specimen_df[, c(lead_spec_cols, setdiff(names(specimen_df), lead_spec_cols))]

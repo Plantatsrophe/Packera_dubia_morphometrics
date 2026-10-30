@@ -37,6 +37,7 @@ parse_discovery_args <- function() {
     harmonics        = rp("data/tables/leaf_efa_harmonics.csv"),
     vision_audit     = rp("data/tables/label_noise_audit.csv"),
     vouchers         = rp("data/tables/curated_vouchers.csv"),
+    multimodal       = rp("data/tables/multimodal_conflict_flags.csv"),
     focal_taxon      = "",
     min_affinity     = 0.03,
     output_complexes = rp("outputs/reports/empirical_taxon_complexes.csv"),
@@ -55,6 +56,7 @@ parse_discovery_args <- function() {
     "-e" = "harmonics", "--harmonics" = "harmonics",
     "-n" = "vision_audit", "--vision-audit" = "vision_audit",
     "-v" = "vouchers", "--vouchers" = "vouchers",
+    "-c" = "multimodal", "--multimodal" = "multimodal",
     "--focal-taxon" = "focal_taxon",
     "--output-complexes" = "output_complexes",
     "--output-affinity" = "output_affinity",
@@ -138,6 +140,25 @@ load_and_merge_inputs <- function(opts) {
       if (length(add_ph) > 0) {
         idx_p <- match(morph_df$catalogNumber, ph_sub$catalogNumber)
         for (cl in add_ph) morph_df[[cl]] <- ph_sub[[cl]][idx_p]
+      }
+    }
+  }
+
+  if (!is.null(opts$multimodal) && nzchar(opts$multimodal) && file.exists(opts$multimodal)) {
+    mm_df <- tryCatch(utils::read.csv(opts$multimodal, stringsAsFactors = FALSE), error = function(e) NULL)
+    if (!is.null(mm_df) && nrow(mm_df) > 0 && "catalogNumber" %in% names(mm_df)) {
+      mm_df$catalogNumber <- as.character(mm_df$catalogNumber)
+      eco_cols <- intersect(c("fine_soil_ph", "fine_soil_sand", "fine_bedrock_depth_cm", "ssurgo_rock_outcrop_pct",
+        "soil_ph", "soil_sand", "soil_cec", "soil_bulk_density", "bio1_temp_mean", "bio4_temp_seasonality",
+        "bio12_precip_annual", "bio15_precip_seasonality", "edaphic_schoener_d", "schoener_d"), names(mm_df))
+      has_pid <- ("plant_individual_id" %in% names(morph_df)) && ("plant_individual_id" %in% names(mm_df))
+      idx_mm <- if (has_pid) match(paste0(morph_df$catalogNumber, "__", morph_df$plant_individual_id), paste0(mm_df$catalogNumber, "__", mm_df$plant_individual_id)) else rep(NA_integer_, nrow(morph_df))
+      mm_cat <- mm_df[!duplicated(mm_df$catalogNumber), , drop = FALSE]; idx_mc <- match(morph_df$catalogNumber, mm_cat$catalogNumber)
+      for (cl in eco_cols) {
+        cur <- if (cl %in% names(morph_df)) morph_df[[cl]] else rep(NA, nrow(morph_df))
+        hp <- is.na(cur) & !is.na(idx_mm); if (any(hp)) cur[hp] <- mm_df[[cl]][idx_mm[hp]]
+        hc <- is.na(cur) & !is.na(idx_mc); if (any(hc)) cur[hc] <- mm_cat[[cl]][idx_mc[hc]]
+        morph_df[[cl]] <- cur
       }
     }
   }

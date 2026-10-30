@@ -1504,6 +1504,120 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertEqual(eb_proc.returncode, 0, f"Direct EB authority weighting check failed:\n{eb_proc.stderr}")
             self.assertIn("EB_OK", eb_proc.stdout)
 
+    def test_cda_second_taxon_export_and_multi_plant_petiole_aggregation_and_line_limit(self):
+        """Verify 04_gmm_morphotools.R (<=650 lines) exports cda_second_taxon and aggregates petiole traits by (catalogNumber, plant_individual_id)."""
+        import shutil
+        line_count = len(self.r_script_path.read_text(encoding="utf-8").splitlines())
+        self.assertLessEqual(line_count, 650, f"04_gmm_morphotools.R has {line_count} lines; must remain <= 650.")
+
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        rng = np.random.default_rng(20261030)
+        rows = []
+        vouch_rows = []
+        man_rows = []
+        species_specs = [
+            ("Packera aurea", -3.0, 0.2, 32.0, 28.0),
+            ("Packera obovata", 3.0, -0.3, 12.0, 30.0),
+            ("Packera schweinitziana", 0.1, 2.8, 22.0, 26.0),
+        ]
+        for s_idx, (sp, pc1_mu, pc2_mu, pet_mm, bld_mm) in enumerate(species_specs):
+            for j in range(6):
+                cat = "MULTI_SHEET_01" if (s_idx < 2 and j == 0) else f"SP{s_idx}_{j:02d}"
+                pid = (s_idx + 1) if cat == "MULTI_SHEET_01" else 1
+                rec = {
+                    "catalogNumber": cat,
+                    "plant_individual_id": pid,
+                    "assigned_tier": "Tier_1_Direct",
+                    "n_tier1_leaves": 2,
+                    "n_tier2_leaves": 0,
+                    "morph_tier_source": "Tier_1_Pure",
+                    "species_raw": sp,
+                    "scientificName": sp,
+                    "determiner_tier": "Tier_1_Gold",
+                    "PC1": float(pc1_mu + rng.normal(0.0, 0.18)),
+                    "PC2": float(pc2_mu + rng.normal(0.0, 0.18)),
+                    "PC3": float(rng.normal(0.0, 0.10)),
+                    "PC4": float(rng.normal(0.0, 0.08)),
+                    "PC5": float(rng.normal(0.0, 0.08)),
+                    "Sym_PC1": float(pc1_mu + rng.normal(0.0, 0.15)),
+                    "Sym_PC2": float(pc2_mu + rng.normal(0.0, 0.15)),
+                    "centroid_size": float(22.0 + 1.2 * j),
+                    "log_centsize": float(np.log(22.0 + 1.2 * j)),
+                    "is_calibrated_mm": True,
+                }
+                for h in range(1, 13):
+                    rec[f"A{h}"] = float((pc1_mu * 0.05) / h)
+                    rec[f"B{h}"] = 0.0
+                    rec[f"C{h}"] = 0.0
+                    rec[f"D{h}"] = float((pc2_mu * 0.05) / h)
+                rows.append(rec)
+                if not any(v["catalogNumber"] == cat for v in vouch_rows):
+                    vouch_rows.append({
+                        "catalogNumber": cat,
+                        "species_raw": sp,
+                        "scientificName": sp,
+                        "determiner_tier": "Tier_1_Gold",
+                        "institutionCode": "NCU",
+                    })
+                for lf in (1, 2):
+                    man_rows.append({
+                        "catalogNumber": cat,
+                        "plant_individual_id": pid,
+                        "leaf_id": lf,
+                        "assigned_tier": "Tier_1_Direct",
+                        "petiole_length_mm": pet_mm,
+                        "blade_length_mm": bld_mm,
+                        "petiole_to_blade_ratio": round(pet_mm / bld_mm, 4),
+                    })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            harm_csv = tmp_p / "leaf_efa_harmonics.csv"
+            vouch_csv = tmp_p / "curated_vouchers.csv"
+            man_csv = tmp_p / "extracted_leaf_manifest.csv"
+            flags_csv = tmp_p / "morphometric_flags.csv"
+            pd.DataFrame(rows).to_csv(harm_csv, index=False)
+            pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
+            pd.DataFrame(man_rows).to_csv(man_csv, index=False)
+
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--vouchers", str(vouch_csv),
+                    "--harmonics", str(harm_csv),
+                    "--output-flags", str(flags_csv),
+                    "--output-report", str(tmp_p / "gmm_bic.csv"),
+                    "--output-plot", str(tmp_p / "cda.pdf"),
+                    "--output-batch-audit", str(tmp_p / "batch.csv"),
+                    "--allometry-report", str(tmp_p / "allom.csv"),
+                    "--allometry-pairwise", str(tmp_p / "allom_pw.csv"),
+                    "--allometry-plot", str(tmp_p / "allom.pdf"),
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 04 run failed:\n{proc.stderr}\n{proc.stdout}")
+            flags_df = pd.read_csv(flags_csv)
+            self.assertIn("cda_second_taxon", flags_df.columns)
+            self.assertTrue(flags_df["cda_second_taxon"].notna().all())
+            self.assertTrue((flags_df["cda_second_taxon"] != flags_df["cda_predicted_taxon"]).all())
+            self.assertTrue(
+                set(flags_df["cda_second_taxon"].unique()).issubset(
+                    {"Packera aurea", "Packera obovata", "Packera schweinitziana"}
+                )
+            )
+            multi_rows = flags_df[flags_df["catalogNumber"] == "MULTI_SHEET_01"].sort_values("plant_individual_id")
+            self.assertEqual(len(multi_rows), 2, "Multi-plant sheet individuals (pid=1, pid=2) must not be collapsed.")
+            self.assertAlmostEqual(float(multi_rows.iloc[0]["petiole_length_mm"]), 32.0, places=2)
+            self.assertAlmostEqual(float(multi_rows.iloc[1]["petiole_length_mm"]), 12.0, places=2)
+            self.assertAlmostEqual(float(multi_rows.iloc[0]["petiole_to_blade_ratio"]), round(32.0 / 28.0, 4), places=3)
+            self.assertAlmostEqual(float(multi_rows.iloc[1]["petiole_to_blade_ratio"]), round(12.0 / 30.0, 4), places=3)
+
 
 if __name__ == "__main__":
     unittest.main()

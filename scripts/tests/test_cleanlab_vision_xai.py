@@ -365,6 +365,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
 
         required_step07_cols = [
             "catalogNumber",
+            "plant_individual_id",
             "c_error",
             "predicted_label",
             "vision_predicted_label",
@@ -372,7 +373,9 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             "vision_second_prob",
             "vision_margin",
             "vision_ood_score",
+            "vision_is_ood",
             "foreground_attention_ratio",
+            "is_artifact_driven",
             "is_label_issue",
             "is_label_corrupted",
             "tomentum_taxon_discordance",
@@ -380,6 +383,9 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         for col in required_step07_cols:
             self.assertIn(col, audit.columns, f"Missing required Step 07 contract column: {col}")
 
+        self.assertEqual(audit["plant_individual_id"].tolist(), [0, 0, 0, 0])
+        self.assertEqual(audit["vision_is_ood"].dtype, np.dtype(bool))
+        self.assertEqual(audit["is_artifact_driven"].dtype, np.dtype(bool))
         self.assertTrue(audit.loc[0, "is_label_corrupted"])
         self.assertFalse(audit.loc[1, "is_label_corrupted"])
         self.assertAlmostEqual(float(audit.loc[0, "vision_margin"]), 0.92 - 0.05, places=4)
@@ -387,17 +393,17 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         self.assertIn("Downweight", audit.loc[3, "triage_action"])
 
     def test_rosettes_dense_ingestion_multi_crop_aggregation_and_dynamic_indexing(self):
-        """Verify rosettes_dense ingestion, multi-crop sheet aggregation, and dynamic 0..K-1 taxon indexing."""
+        """Verify rosettes_dense ingestion, multi-crop individual aggregation, and dynamic 0..K-1 taxon indexing."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             rosette_dir = tmp_path / "cropped_patches"
             dense_dir = rosette_dir / "rosettes_dense"
             dense_dir.mkdir(parents=True)
 
-            # Create multiple crops for CATANON and single crops for CATDUB, CATPAUP, CATPLAT
+            # Create multiple crops for (CATANON, p0) and single crops for CATDUB, CATPAUP, CATPLAT
             for fname in (
                 "CATANON_p0_rosette.jpg",
-                "CATANON_p1_rosette.jpg",
+                "CATANON_p0_rosette_crop2.jpg",
                 "CATDUB_p0_rosette.jpg",
                 "CATPAUP_p0_rosette.jpg",
                 "CATPLAT_p0_rosette.jpg",
@@ -925,6 +931,203 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             self.assertEqual(set(exported["given_label"]), {"Morphotype_K1", "Morphotype_K2"})
             self.assertTrue(set(exported["predicted_label"]).issubset({"Morphotype_K1", "Morphotype_K2"}))
             self.assertNotIn("oof_probs", exported.columns)
+
+    def test_multi_individual_sheet_composite_key_preservation_and_manifest_matching(self):
+        """Verify (catalogNumber, plant_individual_id) preservation across multi-plant sheets in Step 05."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            data_dir = tmp_path / "data"
+            basal_dir = data_dir / "cropped_patches" / "basal_leaves_raw"
+            dense_dir = data_dir / "cropped_patches" / "rosettes_dense"
+            tier1_mask_dir = data_dir / "masks" / "tier1_intact"
+            tables_dir = data_dir / "tables"
+            for d in (basal_dir, dense_dir, tier1_mask_dir, tables_dir):
+                d.mkdir(parents=True, exist_ok=True)
+
+            # Multi-individual sheet CAT_MULTI (p0 has 2 Tier_1_Direct leaves; p1 has 1 Tier_1_Direct leaf)
+            for stem, rgb_col in (
+                ("CAT_MULTI_p0_leaf1", (45, 110, 42)),
+                ("CAT_MULTI_p0_leaf2", (48, 112, 44)),
+                ("CAT_MULTI_p1_leaf1", (95, 130, 52)),
+            ):
+                Image.new("RGB", (224, 224), color=rgb_col).save(basal_dir / f"{stem}.jpg")
+                m_arr = np.zeros((224, 224), dtype=np.uint8)
+                m_arr[20:190, 20:190] = 255
+                Image.fromarray(m_arr).save(tier1_mask_dir / f"{stem}.png")
+
+            for r_stem, r_col in (
+                ("CAT_MULTI_p0_rosette", (45, 110, 42)),
+                ("CAT_MULTI_p1_rosette", (95, 130, 52)),
+                ("CAT_S1_p0_rosette", (50, 105, 45)),
+                ("CAT_S2_p0_rosette", (92, 128, 50)),
+            ):
+                Image.new("RGB", (224, 224), color=r_col).save(dense_dir / f"{r_stem}.jpg")
+
+            # curated_vouchers.csv intentionally omits plant_individual_id (sheet-level table)
+            vouchers_csv = tables_dir / "curated_vouchers.csv"
+            pd.DataFrame({
+                "catalogNumber": ["CAT_MULTI", "CAT_S1", "CAT_S2"],
+                "species_raw": ["Packera aurea", "Packera aurea", "Packera obovata"],
+                "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold"],
+                "institutionCode": ["NCU", "NY", "US"],
+            }).to_csv(vouchers_csv, index=False)
+
+            manifest_csv = tables_dir / "extracted_leaf_manifest.csv"
+            pd.DataFrame({
+                "catalogNumber": ["CAT_MULTI", "CAT_MULTI", "CAT_MULTI"],
+                "plant_individual_id": [0, 0, 1],
+                "leaf_id": [1, 2, 1],
+                "assigned_tier": ["Tier_1_Direct", "Tier_1_Direct", "Tier_1_Direct"],
+                "solidity": [0.90, 0.88, 0.91],
+                "ucs_score": [0.95, 0.92, 0.94],
+            }).to_csv(manifest_csv, index=False)
+
+            df, _ = mod_xai.load_and_link_rosette_patches(
+                rosette_dir=data_dir / "cropped_patches",
+                vouchers_csv=vouchers_csv,
+                demo=False,
+                manifest_csv=manifest_csv,
+            )
+            self.assertEqual(len(df), 4)
+            self.assertTrue(pd.api.types.is_integer_dtype(df["plant_individual_id"]))
+            observed_keys = list(zip(df["catalogNumber"], df["plant_individual_id"]))
+            self.assertEqual(
+                observed_keys,
+                [("CAT_MULTI", 0), ("CAT_MULTI", 1), ("CAT_S1", 0), ("CAT_S2", 0)],
+            )
+
+            # Verify Tier_1_Direct leaves matched strictly per (catalogNumber, plant_individual_id)
+            row_p0 = df[(df["catalogNumber"] == "CAT_MULTI") & (df["plant_individual_id"] == 0)].iloc[0]
+            row_p1 = df[(df["catalogNumber"] == "CAT_MULTI") & (df["plant_individual_id"] == 1)].iloc[0]
+            self.assertEqual(len(row_p0["tier1_leaf_patches"]), 2)
+            self.assertTrue(all("CAT_MULTI_p0_leaf" in p for p in row_p0["tier1_leaf_patches"]))
+            self.assertEqual(len(row_p1["tier1_leaf_patches"]), 1)
+            self.assertIn("CAT_MULTI_p1_leaf1", row_p1["tier1_leaf_patches"][0])
+
+            # Verify multi-patch embedding aggregation preserves both individuals on CAT_MULTI
+            with mock_patch("torch.hub.load", return_value=mod_xai._DemoViTFeatureExtractor()):
+                feats, lbls, key_ord, fg_ratios = extract_dinov2_embeddings(
+                    df.to_dict("records"), device="cpu", return_fg_ratios=True
+                )
+            self.assertEqual(feats.shape, (4, 768))
+            self.assertEqual(len(lbls), 4)
+            self.assertEqual(len(fg_ratios), 4)
+            self.assertEqual(
+                key_ord,
+                [("CAT_MULTI", 0), ("CAT_MULTI", 1), ("CAT_S1", 0), ("CAT_S2", 0)],
+            )
+
+            # Verify end-to-end main() exports label_noise_audit.csv preserving plant_individual_id and vision_is_ood
+            out_csv = tables_dir / "label_noise_audit.csv"
+            out_fig = tmp_path / "outputs" / "figures" / "GradCAM_audit_panel.png"
+            with mock_patch("torch.hub.load", return_value=mod_xai._DemoViTFeatureExtractor()):
+                with mock_patch("sys.argv", [
+                    "05_cleanlab_vision_xai.py",
+                    "--rosette-dir", str(data_dir / "cropped_patches"),
+                    "--vouchers-csv", str(vouchers_csv),
+                    "--manifest-csv", str(manifest_csv),
+                    "--output-csv", str(out_csv),
+                    "--output-figure", str(out_fig),
+                    "--no-export-figures",
+                ]):
+                    mod_xai.main()
+
+            exported = pd.read_csv(out_csv)
+            self.assertEqual(len(exported), 4)
+            self.assertEqual(
+                list(zip(exported["catalogNumber"], exported["plant_individual_id"])),
+                [("CAT_MULTI", 0), ("CAT_MULTI", 1), ("CAT_S1", 0), ("CAT_S2", 0)],
+            )
+            for req_col in ("plant_individual_id", "vision_ood_score", "vision_is_ood", "foreground_attention_ratio", "is_artifact_driven"):
+                self.assertIn(req_col, exported.columns)
+            self.assertEqual(exported["vision_is_ood"].dtype, np.dtype(bool))
+            self.assertEqual(exported["is_artifact_driven"].dtype, np.dtype(bool))
+
+            # Verify intraspecific-mode joins morphometrics_csv on ["catalogNumber", "plant_individual_id"]
+            vouchers_intra = tables_dir / "vouchers_intra.csv"
+            pd.DataFrame({
+                "catalogNumber": ["CAT_MULTI", "CAT_S1", "CAT_S2"],
+                "species_raw": ["Packera aurea", "Packera aurea", "Packera aurea"],
+                "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold"],
+                "institutionCode": ["NCU", "NY", "US"],
+            }).to_csv(vouchers_intra, index=False)
+            morph_intra = tables_dir / "morphometric_flags.csv"
+            pd.DataFrame({
+                "catalogNumber": ["CAT_MULTI", "CAT_MULTI", "CAT_S1", "CAT_S2"],
+                "plant_individual_id": [0, 1, 0, 0],
+                "gmm_cluster": [1, 2, 1, 2],
+            }).to_csv(morph_intra, index=False)
+            out_intra_csv = tables_dir / "label_noise_audit_intra.csv"
+            with mock_patch("torch.hub.load", return_value=mod_xai._DemoViTFeatureExtractor()):
+                with mock_patch("sys.argv", [
+                    "05_cleanlab_vision_xai.py",
+                    "--rosette-dir", str(data_dir / "cropped_patches"),
+                    "--vouchers-csv", str(vouchers_intra),
+                    "--manifest-csv", str(manifest_csv),
+                    "--morphometrics-csv", str(morph_intra),
+                    "--intraspecific-mode",
+                    "--output-csv", str(out_intra_csv),
+                    "--output-figure", str(out_fig),
+                    "--no-export-figures",
+                ]):
+                    mod_xai.main()
+            exp_intra = pd.read_csv(out_intra_csv)
+            self.assertEqual(len(exp_intra), 4)
+            lbl_by_key = dict(zip(zip(exp_intra["catalogNumber"], exp_intra["plant_individual_id"]), exp_intra["given_label"]))
+            self.assertEqual(lbl_by_key[("CAT_MULTI", 0)], "Morphotype_K1")
+            self.assertEqual(lbl_by_key[("CAT_MULTI", 1)], "Morphotype_K2")
+
+    def test_vision_is_ood_and_artifact_boolean_thresholds_and_backward_compat(self):
+        """Verify run_confident_learning_audit exports boolean vision_is_ood (>= 0.65) and preserves plant_individual_id."""
+        pred_probs = np.array([
+            [0.90, 0.10],
+            [0.85, 0.15],
+            [0.15, 0.85],
+            [0.10, 0.90],
+        ])
+        labels = np.array([0, 0, 1, 1])
+
+        # Multi-individual sheet CAT_SHEET1 (pid 0 and 1) + boundary tests at 0.65
+        records_df = pd.DataFrame({
+            "catalogNumber": ["CAT_SHEET1", "CAT_SHEET1", "CAT_SHEET2", "CAT_SHEET3"],
+            "plant_individual_id": [0, 1, 0, 0],
+            "species_raw": ["Packera aurea", "Packera aurea", "Packera obovata", "Packera obovata"],
+            "vision_ood_score": [0.20, 0.6499, 0.65, 0.82],
+            "foreground_attention_ratio": [0.92, 0.65, 0.6499, 0.42],
+        })
+        audit = run_confident_learning_audit(
+            pred_probs=pred_probs,
+            labels=labels,
+            records_df=records_df,
+            class_names=["Packera aurea", "Packera obovata"],
+        )
+        self.assertEqual(len(audit), 4)
+        self.assertTrue(pd.api.types.is_integer_dtype(audit["plant_individual_id"]))
+        self.assertEqual(
+            list(zip(audit["catalogNumber"], audit["plant_individual_id"])),
+            [("CAT_SHEET1", 0), ("CAT_SHEET1", 1), ("CAT_SHEET2", 0), ("CAT_SHEET3", 0)],
+        )
+        self.assertEqual(audit["vision_is_ood"].dtype, np.dtype(bool))
+        self.assertEqual(audit["vision_is_ood"].tolist(), [False, False, True, True])
+        self.assertEqual(audit["is_artifact_driven"].dtype, np.dtype(bool))
+        self.assertEqual(audit["is_artifact_driven"].tolist(), [False, False, True, True])
+
+        # Backward compatibility when plant_individual_id is omitted from records_df
+        legacy_df = pd.DataFrame({
+            "catalogNumber": ["LEG_1", "LEG_2"],
+            "species_raw": ["Packera aurea", "Packera obovata"],
+        })
+        legacy_audit = run_confident_learning_audit(
+            pred_probs=np.array([[0.9, 0.1], [0.1, 0.9]]),
+            labels=np.array([0, 1]),
+            records_df=legacy_df,
+            class_names=["Packera aurea", "Packera obovata"],
+        )
+        self.assertIn("plant_individual_id", legacy_audit.columns)
+        self.assertTrue(pd.api.types.is_integer_dtype(legacy_audit["plant_individual_id"]))
+        self.assertEqual(legacy_audit["plant_individual_id"].tolist(), [0, 0])
+        self.assertIn("vision_is_ood", legacy_audit.columns)
+        self.assertEqual(legacy_audit["vision_is_ood"].dtype, np.dtype(bool))
 
 
 if __name__ == "__main__":

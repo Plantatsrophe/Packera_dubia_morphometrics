@@ -2938,6 +2938,82 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
 # ------------------------------------------------------------------------------
 # 7. Main Execution Pipeline
 # ------------------------------------------------------------------------------
+left_join_by_voucher_individual <- function(base_df, mod_df, keep_cols) {
+  if (is.null(mod_df) || nrow(mod_df) == 0L || !("catalogNumber" %in% names(mod_df))) return(base_df)
+  base_df$catalogNumber <- as.character(base_df$catalogNumber)
+  mod_df$catalogNumber <- as.character(mod_df$catalogNumber)
+  k_cols <- intersect(names(mod_df), keep_cols)
+  val_cols <- setdiff(k_cols, c("catalogNumber", "plant_individual_id"))
+  overlap_cols <- intersect(val_cols, names(base_df))
+  add_cols <- setdiff(val_cols, overlap_cols)
+
+  has_mod_pid <- "plant_individual_id" %in% k_cols
+  if (has_mod_pid) {
+    mpid <- ifelse(is.na(mod_df$plant_individual_id), 0L, suppressWarnings(as.integer(mod_df$plant_individual_id)))
+    mpid[is.na(mpid)] <- 0L
+    mod_df$plant_individual_id <- mpid
+    mod_sub <- mod_df[!duplicated(paste0(mod_df$catalogNumber, "__", mod_df$plant_individual_id)), k_cols, drop = FALSE]
+  } else {
+    mod_sub <- mod_df[!duplicated(mod_df$catalogNumber), k_cols, drop = FALSE]
+  }
+
+  has_base_pid <- "plant_individual_id" %in% names(base_df)
+  if (has_base_pid && has_mod_pid) {
+    bpid <- ifelse(is.na(base_df$plant_individual_id), 0L, suppressWarnings(as.integer(base_df$plant_individual_id)))
+    bpid[is.na(bpid)] <- 0L
+    base_df$plant_individual_id <- bpid
+
+    b_counts <- table(base_df$catalogNumber)
+    single_zero_cats <- unique(base_df$catalogNumber[base_df$plant_individual_id == 0L & as.integer(b_counts[base_df$catalogNumber]) == 1L])
+    mod_nz <- mod_sub[mod_sub$catalogNumber %in% single_zero_cats & mod_sub$plant_individual_id != 0L, c("catalogNumber", "plant_individual_id"), drop = FALSE]
+    if (nrow(mod_nz) > 0L) {
+      keep_b <- !(base_df$catalogNumber %in% unique(mod_nz$catalogNumber))
+      exp_b <- dplyr::left_join(base_df[!keep_b, setdiff(names(base_df), "plant_individual_id"), drop = FALSE], mod_nz, by = "catalogNumber")
+      base_df <- dplyr::bind_rows(base_df[keep_b, , drop = FALSE], exp_b[, names(base_df), drop = FALSE])
+    }
+
+    join_sub <- mod_sub[, unique(c("catalogNumber", "plant_individual_id", add_cols)), drop = FALSE]
+    out_df <- dplyr::left_join(base_df, join_sub, by = c("catalogNumber", "plant_individual_id"))
+
+    m_counts <- table(mod_sub$catalogNumber)
+    sheet_lvl_sub <- mod_sub[mod_sub$plant_individual_id == 0L & as.integer(m_counts[mod_sub$catalogNumber]) == 1L, , drop = FALSE]
+    idx_exact <- match(paste0(out_df$catalogNumber, "__", out_df$plant_individual_id), paste0(mod_sub$catalogNumber, "__", mod_sub$plant_individual_id))
+    idx_sheet <- if (nrow(sheet_lvl_sub) > 0L) match(out_df$catalogNumber, sheet_lvl_sub$catalogNumber) else rep(NA_integer_, nrow(out_df))
+    b_cnt2 <- table(out_df$catalogNumber)
+    s_cats <- intersect(names(b_cnt2[b_cnt2 == 1L]), names(m_counts[m_counts == 1L]))
+    idx_single_cat <- ifelse(out_df$catalogNumber %in% s_cats, match(out_df$catalogNumber, mod_sub$catalogNumber), NA_integer_)
+
+    for (cl in add_cols) {
+      na_m <- is.na(out_df[[cl]]) & is.na(idx_exact)
+      if (any(na_m & !is.na(idx_sheet))) { hit <- na_m & !is.na(idx_sheet); out_df[[cl]][hit] <- sheet_lvl_sub[[cl]][idx_sheet[hit]] }
+      na_m2 <- is.na(out_df[[cl]]) & is.na(idx_exact) & !is.na(idx_single_cat)
+      if (any(na_m2)) out_df[[cl]][na_m2] <- mod_sub[[cl]][idx_single_cat[na_m2]]
+    }
+    for (cl in overlap_cols) {
+      na_o <- is.na(out_df[[cl]])
+      if (any(na_o & !is.na(idx_exact))) { h1 <- na_o & !is.na(idx_exact); out_df[[cl]][h1] <- mod_sub[[cl]][idx_exact[h1]] }
+      na_o2 <- is.na(out_df[[cl]])
+      if (any(na_o2 & !is.na(idx_sheet))) { h2 <- na_o2 & !is.na(idx_sheet); out_df[[cl]][h2] <- sheet_lvl_sub[[cl]][idx_sheet[h2]] }
+      na_o3 <- is.na(out_df[[cl]]) & !is.na(idx_single_cat)
+      if (any(na_o3)) out_df[[cl]][na_o3] <- mod_sub[[cl]][idx_single_cat[na_o3]]
+    }
+    return(out_df)
+  } else {
+    join_cols <- unique(c("catalogNumber", if (has_mod_pid && !has_base_pid) "plant_individual_id" else character(0), add_cols))
+    out_df <- dplyr::left_join(base_df, mod_sub[, join_cols, drop = FALSE], by = "catalogNumber")
+    if (length(overlap_cols) > 0L) {
+      idx_c <- if (has_mod_pid && "plant_individual_id" %in% names(out_df)) {
+        match(paste0(out_df$catalogNumber, "__", out_df$plant_individual_id), paste0(mod_sub$catalogNumber, "__", mod_sub$plant_individual_id))
+      } else match(out_df$catalogNumber, mod_sub$catalogNumber)
+      for (cl in overlap_cols) {
+        na_o <- is.na(out_df[[cl]]) & !is.na(idx_c)
+        if (any(na_o)) out_df[[cl]][na_o] <- mod_sub[[cl]][idx_c[na_o]]
+      }
+    }
+    return(out_df)
+  }
+}
+
 main <- function() {
   set.seed(42)
   opts <- parse_args_robust()
@@ -2966,24 +3042,63 @@ main <- function() {
   if (file.exists(opts$morphometrics)) {
     morph_df <- readr::read_csv(opts$morphometrics, show_col_types = FALSE)
     morph_df$catalogNumber <- as.character(morph_df$catalogNumber)
+    if ("cda_predicted" %in% names(morph_df) && !("cda_predicted_taxon" %in% names(morph_df))) {
+      morph_df$cda_predicted_taxon <- morph_df$cda_predicted
+    }
+    if ("is_outlier" %in% names(morph_df) && !("morphometric_outlier_flag" %in% names(morph_df))) {
+      morph_df$morphometric_outlier_flag <- as.logical(morph_df$is_outlier)
+    }
     if ("morphometric_outlier_flag" %in% names(morph_df) && !("misidentification_flag" %in% names(morph_df))) {
       morph_df$misidentification_flag <- morph_df$morphometric_outlier_flag
     } else if ("misidentification_flag" %in% names(morph_df) && !("morphometric_outlier_flag" %in% names(morph_df))) {
       morph_df$morphometric_outlier_flag <- morph_df$misidentification_flag
     }
-    m_cols <- intersect(names(morph_df), c("catalogNumber", "plant_individual_id", "morph_tier_source", "n_tier1_leaves", "n_tier2_leaves", "cda_predicted_taxon", "cda_posterior_prob", "can1", "can2", "can3", "gmm_cluster", "morphometric_outlier_flag", "misidentification_flag"))
-    morph_sub <- morph_df[!duplicated(morph_df$catalogNumber), m_cols, drop = FALSE]
-    vouchers_df <- dplyr::left_join(vouchers_df, morph_sub, by = "catalogNumber")
+    if ("plant_height_mm" %in% names(morph_df) && !("plant_height_cm" %in% names(morph_df))) {
+      morph_df$plant_height_cm <- round(suppressWarnings(as.numeric(morph_df$plant_height_mm)) / 10.0, 2)
+    }
+    if ("is_promoted_anchor" %in% names(morph_df) && !("is_promoted_bronze" %in% names(morph_df))) {
+      morph_df$is_promoted_bronze <- as.logical(morph_df$is_promoted_anchor)
+    }
+    m_cols <- intersect(names(morph_df), c(
+      "catalogNumber", "plant_individual_id", "morph_tier_source", "n_tier1_leaves", "n_tier2_leaves",
+      "gmm_cluster", "gmm_uncertainty", "is_novel_morphotype",
+      "cda_predicted_taxon", "cda_predicted", "cda_posterior_prob",
+      "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin",
+      "loocv_accuracy", "mahalanobis_d2", "mahalanobis_pval",
+      "is_outlier", "morphometric_outlier_flag", "misidentification_flag",
+      "can1", "can2", "can3", "PC1", "PC2", "PC3", "Sym_PC1", "Sym_PC2", "Asym_PC1", "Asym_PC2",
+      "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
+      "plant_height_mm", "plant_height_cm", "scape_to_basal_leaf_ratio", "is_bent_stem",
+      "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv",
+      "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob",
+      "is_promoted_bronze", "is_promoted_anchor", "authority_weight"
+    ))
+    vouchers_df <- left_join_by_voucher_individual(vouchers_df, morph_df, m_cols)
   }
 
   # Merge Cleanlab Vision Audit if present
   if (file.exists(opts$vision_audit)) {
     vis_df <- readr::read_csv(opts$vision_audit, show_col_types = FALSE)
     vis_df$catalogNumber <- as.character(vis_df$catalogNumber)
-    v_cols <- intersect(names(vis_df), c("catalogNumber", "predicted_label", "confidence_predicted_class", "c_error", "is_label_corrupted"))
-    names(vis_df)[names(vis_df) == "predicted_label"] <- "vision_predicted_label"
-    vis_sub <- vis_df[!duplicated(vis_df$catalogNumber), intersect(names(vis_df), c("catalogNumber", "vision_predicted_label", "c_error", "is_label_corrupted")), drop = FALSE]
-    vouchers_df <- dplyr::left_join(vouchers_df, vis_sub, by = "catalogNumber")
+    if ("predicted_label" %in% names(vis_df) && !("vision_predicted_label" %in% names(vis_df))) {
+      names(vis_df)[names(vis_df) == "predicted_label"] <- "vision_predicted_label"
+    }
+    if (!("is_artifact_driven" %in% names(vis_df))) {
+      if ("is_background_shortcut" %in% names(vis_df)) {
+        vis_df$is_artifact_driven <- as.logical(vis_df$is_background_shortcut)
+      } else if ("foreground_attention_ratio" %in% names(vis_df)) {
+        fg_r <- suppressWarnings(as.numeric(vis_df$foreground_attention_ratio))
+        vis_df$is_artifact_driven <- ifelse(is.finite(fg_r), fg_r < 0.65, NA)
+      }
+    }
+    v_cols <- intersect(names(vis_df), c(
+      "catalogNumber", "plant_individual_id", "vision_predicted_label",
+      "confidence_predicted_class", "vision_second_prob", "vision_margin",
+      "c_error", "is_label_corrupted", "vision_ood_score", "vision_is_ood",
+      "foreground_attention_ratio", "is_artifact_driven", "is_background_shortcut",
+      "surface_orientation", "mean_luminance", "mean_saturation", "tomentum_taxon_discordance"
+    ))
+    vouchers_df <- left_join_by_voucher_individual(vouchers_df, vis_df, v_cols)
   }
 
   # Ingest Voucher Phenological States (Computer Vision Anthesis Ingestion via left_join)
@@ -2992,7 +3107,7 @@ main <- function() {
     pheno_states_df <- readr::read_csv(opts$pheno_states, show_col_types = FALSE)
     pheno_states_df$catalogNumber <- as.character(pheno_states_df$catalogNumber)
     vouchers_df$catalogNumber <- as.character(vouchers_df$catalogNumber)
-    p_cols <- intersect(names(pheno_states_df), c("catalogNumber", "total_capitula", "n_anthesis", "n_fruit", "n_bud", "voucher_phenological_state", "dominant_pappus_ratio"))
+    p_cols <- intersect(names(pheno_states_df), c("catalogNumber", "total_capitula", "n_anthesis", "n_fruit", "n_fruiting", "n_bud", "n_senescent", "voucher_phenological_state", "reproductive_stage_confidence", "dominant_pappus_ratio"))
     pheno_states_df <- pheno_states_df[!duplicated(pheno_states_df$catalogNumber), p_cols, drop = FALSE]
     vouchers_df <- dplyr::left_join(vouchers_df, pheno_states_df, by = "catalogNumber")
     message(sprintf("Left-joined %d vouchers with phenological states.", nrow(vouchers_df)))

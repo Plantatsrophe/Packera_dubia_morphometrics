@@ -1046,9 +1046,10 @@ export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path
   # 2. symmetric_fourier_pcs.csv
   sym_cols <- intersect(
     c(
-      "catalogNumber", "plant_individual_id", "taxon", "determiner_tier",
+      "catalogNumber", "plant_individual_id", "taxon", "scientificName", "determiner_tier",
       "assigned_tier", "n_leaves", "leaf_quality_weight", "pct_asymmetry",
       "sym_var", "asym_var", "harmonic_roughness", "is_contour_outlier",
+      "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
       paste0("Sym_PC", 1:10), paste0("PC", 1:10)
     ),
     colnames(specimen_df)
@@ -4539,4 +4540,147 @@ render_step08_complex_discovery_pdf <- function(W, part_res, morph_res, vis_res,
     if (file.exists(png_tmp)) file.rename(png_tmp, out_png)
   }
   invisible(out_pdf)
+}
+
+# ==============================================================================
+# Shared Cross-Stage Morphometric Helpers (GMM EM Fallback & Composite-Key Joins)
+# ==============================================================================
+fit_gmm_em_pure <- function(X, max_k = 8, tol = 1e-5, max_iter = 150, X_eval = NULL) {
+  if (is.null(X_eval)) X_eval <- X
+  N <- nrow(X); p <- ncol(X); best_bic <- -Inf; best_model <- NULL
+  bic_table <- data.frame(K = seq_len(max_k), LogLik = NA_real_, n_params = NA_integer_, BIC = NA_real_)
+  for (k in seq_len(max_k)) {
+    set.seed(42 + k)
+    if (k == 1) {
+      mu <- matrix(colMeans(X), nrow = 1); sigma <- list(stats::cov(X) + diag(1e-6, p)); pi_k <- c(1.0)
+    } else {
+      km <- stats::kmeans(X, centers = k, nstart = 10, iter.max = 30); mu <- km$centers
+      pi_k <- as.vector(table(factor(km$cluster, levels = seq_len(k)))) / N
+      sigma <- lapply(seq_len(k), function(c) {
+        sub_x <- X[km$cluster == c, , drop = FALSE]
+        if (nrow(sub_x) > p) stats::cov(sub_x) + diag(1e-5, p) else diag(1e-2, p)
+      })
+    }
+    loglik_old <- -Inf; resp <- matrix(0, nrow = N, ncol = k)
+    for (iter in seq_len(max_iter)) {
+      log_dens <- matrix(0, nrow = N, ncol = k)
+      for (c in seq_len(k)) {
+        diff_x <- t(t(X) - mu[c, ]); sig_inv <- tryCatch(solve(sigma[[c]]), error = function(e) diag(1 / diag(sigma[[c]])))
+        quad <- rowSums((diff_x %*% sig_inv) * diff_x)
+        log_dens[, c] <- log(max(pi_k[c], 1e-12)) - 0.5 * (p * log(2 * pi) + log(max(det(sigma[[c]]), 1e-12)) + quad)
+      }
+      max_l <- apply(log_dens, 1, max); log_sum_exp <- max_l + log(rowSums(exp(log_dens - max_l)))
+      resp <- exp(log_dens - log_sum_exp); loglik <- sum(log_sum_exp)
+      if (abs(loglik - loglik_old) < tol) break
+      loglik_old <- loglik; N_k <- colSums(resp); pi_k <- N_k / N
+      for (c in seq_len(k)) if (N_k[c] > 1e-6) {
+        mu[c, ] <- colSums(resp[, c] * X) / N_k[c]; diff_x <- t(t(X) - mu[c, ])
+        sigma[[c]] <- (t(diff_x) %*% (resp[, c] * diff_x)) / N_k[c] + diag(1e-5, p)
+      }
+    }
+    n_params <- (k - 1) + k * p + k * (p * (p + 1) / 2); bic_val <- 2 * loglik - n_params * log(N)
+    bic_table$LogLik[k] <- round(loglik, 2); bic_table$n_params[k] <- n_params; bic_table$BIC[k] <- round(bic_val, 2)
+    if (bic_val > best_bic) {
+      best_bic <- bic_val
+      ld_ev <- matrix(0, nrow = nrow(X_eval), ncol = k)
+      for (c in seq_len(k)) {
+        dx_e <- t(t(X_eval) - mu[c, ]); si_e <- tryCatch(solve(sigma[[c]]), error = function(e) diag(1 / diag(sigma[[c]])))
+        ld_ev[, c] <- log(max(pi_k[c], 1e-12)) - 0.5 * (p * log(2 * pi) + log(max(det(sigma[[c]]), 1e-12)) + rowSums((dx_e %*% si_e) * dx_e))
+      }
+      ml_e <- apply(ld_ev, 1, max); resp_ev <- exp(ld_ev - (ml_e + log(rowSums(exp(ld_ev - ml_e)))))
+      best_model <- list(k = k, classification = apply(resp_ev, 1, which.max), uncertainty = 1 - apply(resp_ev, 1, max), bic = bic_val)
+    }
+  }
+  return(list(best = best_model, bic_table = bic_table))
+}
+
+merge_manifest_petiole_traits_by_individual <- function(agg_df, man_cand) {
+  if (is.null(agg_df) || nrow(agg_df) == 0L || is.null(man_cand) || !nzchar(man_cand) || !file.exists(man_cand)) return(agg_df)
+  target_pcols <- c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio")
+  need_cols <- target_pcols[vapply(target_pcols, function(cl) !(cl %in% names(agg_df)) || all(is.na(agg_df[[cl]])), logical(1))]
+  if (length(need_cols) == 0L) return(agg_df)
+  man_df <- tryCatch(utils::read.csv(man_cand, stringsAsFactors = FALSE), error = function(e) NULL)
+  if (is.null(man_df) || nrow(man_df) == 0L || !("catalogNumber" %in% names(man_df))) return(agg_df)
+  p_cols <- intersect(target_pcols, names(man_df))
+  if (length(p_cols) == 0L) return(agg_df)
+  man_df$catalogNumber <- as.character(man_df$catalogNumber)
+  agg_df$catalogNumber <- as.character(agg_df$catalogNumber)
+  q75_fn <- function(x) {
+    v <- suppressWarnings(as.numeric(x)); v <- v[is.finite(v)]
+    if (length(v) > 0L) round(stats::quantile(v, probs = 0.75, na.rm = TRUE, names = FALSE), 4) else NA_real_
+  }
+  has_pid <- ("plant_individual_id" %in% names(man_df)) && ("plant_individual_id" %in% names(agg_df))
+  agg_cat <- stats::aggregate(man_df[, p_cols, drop = FALSE], by = list(catalogNumber = man_df$catalogNumber), FUN = q75_fn)
+  agg_pid <- if (has_pid) {
+    mpid <- ifelse(is.na(man_df$plant_individual_id), 0L, suppressWarnings(as.integer(man_df$plant_individual_id)))
+    mpid[is.na(mpid)] <- 0L
+    stats::aggregate(man_df[, p_cols, drop = FALSE], by = list(catalogNumber = man_df$catalogNumber, plant_individual_id = mpid), FUN = q75_fn)
+  } else NULL
+  idx_pid <- if (has_pid && !is.null(agg_pid)) {
+    apid <- ifelse(is.na(agg_df$plant_individual_id), 0L, suppressWarnings(as.integer(agg_df$plant_individual_id)))
+    apid[is.na(apid)] <- 0L
+    match(paste0(agg_df$catalogNumber, "__", apid), paste0(agg_pid$catalogNumber, "__", agg_pid$plant_individual_id))
+  } else rep(NA_integer_, nrow(agg_df))
+  idx_cat <- match(agg_df$catalogNumber, agg_cat$catalogNumber)
+  single_cat_in_man <- if (has_pid) {
+    mpid_all <- ifelse(is.na(man_df$plant_individual_id), 0L, suppressWarnings(as.integer(man_df$plant_individual_id)))
+    mpid_all[is.na(mpid_all)] <- 0L
+    n_pids <- tapply(mpid_all, man_df$catalogNumber, function(z) length(unique(z)))
+    !(agg_df$catalogNumber %in% names(n_pids[n_pids > 1L]))
+  } else rep(TRUE, nrow(agg_df))
+  for (cl in intersect(need_cols, p_cols)) {
+    val_out <- if (cl %in% names(agg_df)) suppressWarnings(as.numeric(agg_df[[cl]])) else rep(NA_real_, nrow(agg_df))
+    if (!is.null(agg_pid)) {
+      hit_p <- is.na(val_out) & !is.na(idx_pid)
+      if (any(hit_p)) val_out[hit_p] <- agg_pid[[cl]][idx_pid[hit_p]]
+    }
+    hit_c <- is.na(val_out) & !is.na(idx_cat) & single_cat_in_man
+    if (any(hit_c)) val_out[hit_c] <- agg_cat[[cl]][idx_cat[hit_c]]
+    agg_df[[cl]] <- val_out
+  }
+  agg_df
+}
+
+merge_reproductive_traits_by_individual <- function(agg_df, repro_path) {
+  if (is.null(agg_df) || nrow(agg_df) == 0L || is.null(repro_path) || !nzchar(repro_path) || !file.exists(repro_path)) return(agg_df)
+  repro_df <- tryCatch(utils::read.csv(repro_path, stringsAsFactors = FALSE), error = function(e) NULL)
+  if (is.null(repro_df) || nrow(repro_df) == 0L || !("catalogNumber" %in% names(repro_df))) return(agg_df)
+  if ("capitulum_aspect_ratio" %in% names(repro_df) && !("AR_inv" %in% names(repro_df))) {
+    repro_df$AR_inv <- suppressWarnings(as.numeric(repro_df$capitulum_aspect_ratio))
+  }
+  if ("plant_height_mm" %in% names(repro_df) && !("plant_height_cm" %in% names(repro_df))) {
+    repro_df$plant_height_cm <- round(suppressWarnings(as.numeric(repro_df$plant_height_mm)) / 10.0, 2)
+  }
+  cand_r <- c("AR_inv", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm",
+              "involucre_width_mm", "plant_height_mm", "plant_height_cm", "scape_to_basal_leaf_ratio", "is_bent_stem", "petiole_to_blade_ratio")
+  r_val_cols <- intersect(names(repro_df), cand_r)
+  r_val_cols <- r_val_cols[vapply(r_val_cols, function(cl) !(cl %in% names(agg_df)) || all(is.na(agg_df[[cl]])), logical(1))]
+  if (length(r_val_cols) == 0L) return(agg_df)
+  repro_df$catalogNumber <- as.character(repro_df$catalogNumber)
+  agg_df$catalogNumber <- as.character(agg_df$catalogNumber)
+  has_pid <- ("plant_individual_id" %in% names(repro_df)) && ("plant_individual_id" %in% names(agg_df))
+  if (has_pid) {
+    rpid <- ifelse(is.na(repro_df$plant_individual_id), 0L, suppressWarnings(as.integer(repro_df$plant_individual_id))); rpid[is.na(rpid)] <- 0L
+    apid <- ifelse(is.na(agg_df$plant_individual_id), 0L, suppressWarnings(as.integer(agg_df$plant_individual_id))); apid[is.na(apid)] <- 0L
+    r_sub_pid <- repro_df[!duplicated(paste0(repro_df$catalogNumber, "__", rpid)), , drop = FALSE]
+    rpid_sub <- ifelse(is.na(r_sub_pid$plant_individual_id), 0L, suppressWarnings(as.integer(r_sub_pid$plant_individual_id))); rpid_sub[is.na(rpid_sub)] <- 0L
+    idx_pid <- match(paste0(agg_df$catalogNumber, "__", apid), paste0(r_sub_pid$catalogNumber, "__", rpid_sub))
+    n_pids <- tapply(rpid, repro_df$catalogNumber, function(z) length(unique(z)))
+    single_cat <- !(agg_df$catalogNumber %in% names(n_pids[n_pids > 1L]))
+  } else {
+    r_sub_pid <- NULL; idx_pid <- rep(NA_integer_, nrow(agg_df)); single_cat <- rep(TRUE, nrow(agg_df))
+  }
+  r_sub_cat <- repro_df[!duplicated(repro_df$catalogNumber), , drop = FALSE]
+  idx_cat <- match(agg_df$catalogNumber, r_sub_cat$catalogNumber)
+  for (cl in r_val_cols) {
+    cur <- if (cl %in% names(agg_df)) agg_df[[cl]] else rep(NA, nrow(agg_df))
+    if (!is.null(r_sub_pid)) {
+      hit_p <- is.na(cur) & !is.na(idx_pid)
+      if (any(hit_p)) cur[hit_p] <- r_sub_pid[[cl]][idx_pid[hit_p]]
+    }
+    hit_c <- is.na(cur) & !is.na(idx_cat) & single_cat
+    if (any(hit_c)) cur[hit_c] <- r_sub_cat[[cl]][idx_cat[hit_c]]
+    agg_df[[cl]] <- cur
+  }
+  agg_df
 }

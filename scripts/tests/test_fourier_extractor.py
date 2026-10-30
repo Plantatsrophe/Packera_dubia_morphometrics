@@ -429,6 +429,110 @@ class TestFourierExtractor(unittest.TestCase):
             active_w = spec_df.loc[spec_df["authority_weight"] > 0.0, "authority_weight"]
             self.assertAlmostEqual(float(active_w.mean()), 1.0, places=4)
 
+    def test_step01_metadata_and_step02_petiole_dissection_handoff_and_line_limit(self):
+        """Verify 03_fourier_extractor.R (<=800 lines) retains Step 02 petiole/dissection traits and full Step 01 voucher locality/date metadata."""
+        import shutil
+        line_count = len(self.r_script_path.read_text(encoding="utf-8").splitlines())
+        self.assertLessEqual(line_count, 800, f"03_fourier_extractor.R has {line_count} lines; must remain <= 800.")
+
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            contours_dir = tmp_p / "contours"
+            contours_dir.mkdir(parents=True, exist_ok=True)
+            vouchers_csv = tmp_p / "curated_vouchers.csv"
+            manifest_csv = tmp_p / "extracted_leaf_manifest.csv"
+
+            theta = np.linspace(0.0, 2.0 * np.pi, 120, endpoint=False)
+            vouch_rows = []
+            man_rows = []
+            for idx in range(6):
+                cat = f"HANDOFF_{idx:02d}"
+                sp = "Packera aurea" if idx < 3 else "Packera millefolium"
+                cpath = contours_dir / f"{cat}_leaf1.csv"
+                x_c = (20.0 + idx) * np.cos(theta)
+                y_c = (12.0 + 0.5 * idx) * np.sin(theta)
+                pd.DataFrame({"x": x_c, "y": y_c, "catalogNumber": cat, "leaf_id": 1}).to_csv(cpath, index=False)
+
+                vouch_rows.append({
+                    "catalogNumber": cat,
+                    "taxon": sp,
+                    "scientificName": sp,
+                    "species_raw": sp,
+                    "institutionCode": "NCU",
+                    "determiner_tier": "Tier_1_Gold",
+                    "authority_tier": "Tier_1_Gold",
+                    "type_status": "Holotype" if idx == 0 else "",
+                    "stateProvince": "North Carolina",
+                    "county": "Macon",
+                    "locality": "Whiteside Mountain granitic dome",
+                    "decimalLatitude": 35.081,
+                    "decimalLongitude": -83.138,
+                    "coordinateUncertainty": 120.0,
+                    "year": 2021,
+                    "month": 5,
+                    "day": 14,
+                    "eventDate": "2021-05-14",
+                })
+                man_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 1,
+                    "leaf_id": 1,
+                    "assigned_tier": "Tier_1_Direct",
+                    "pixels_per_mm": 10.0,
+                    "is_calibrated_mm": True,
+                    "solidity": 0.42 if sp == "Packera millefolium" else 0.91,
+                    "ucs_score": 0.93,
+                    "petiole_length_mm": 18.5 + idx,
+                    "blade_length_mm": 24.0 + idx,
+                    "petiole_to_blade_ratio": round((18.5 + idx) / (24.0 + idx), 4),
+                    "is_dissected": sp == "Packera millefolium",
+                    "contour_path": str(cpath),
+                })
+
+            pd.DataFrame(vouch_rows).to_csv(vouchers_csv, index=False)
+            pd.DataFrame(man_rows).to_csv(manifest_csv, index=False)
+
+            out_spec = tmp_p / "leaf_efa_harmonics.csv"
+            out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--contours-dir", str(contours_dir),
+                    "--masks-dir", str(tmp_p / "masks"),
+                    "--vouchers", str(vouchers_csv),
+                    "--manifest", str(manifest_csv),
+                    "--output", str(out_spec),
+                    "--output-individual", str(out_ind),
+                    "--report-out", str(tmp_p / "tier_rep.csv"),
+                    "--plot-out", str(tmp_p / "tier_fig.pdf"),
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 03 handoff run failed:\n{proc.stderr}\n{proc.stdout}")
+            ind_df = pd.read_csv(out_ind)
+            spec_df = pd.read_csv(out_spec)
+            for df_chk in (ind_df, spec_df):
+                for req_col in (
+                    "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
+                    "locality", "decimalLatitude", "decimalLongitude", "coordinateUncertainty",
+                    "year", "month", "day", "eventDate", "type_status",
+                ):
+                    self.assertIn(req_col, df_chk.columns)
+            row0 = spec_df[spec_df["catalogNumber"] == "HANDOFF_00"].iloc[0]
+            self.assertAlmostEqual(float(row0["petiole_length_mm"]), 18.5, places=3)
+            self.assertAlmostEqual(float(row0["blade_length_mm"]), 24.0, places=3)
+            self.assertEqual(str(row0["locality"]), "Whiteside Mountain granitic dome")
+            self.assertEqual(str(row0["eventDate"]), "2021-05-14")
+            row_diss = spec_df[spec_df["catalogNumber"] == "HANDOFF_04"].iloc[0]
+            self.assertTrue(bool(row_diss["is_dissected"]))
+
 
 if __name__ == "__main__":
     unittest.main()

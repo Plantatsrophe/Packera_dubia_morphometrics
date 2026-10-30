@@ -1368,6 +1368,85 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             self.assertTrue((tmp / "fig06_ecological_niche_phenology.pdf").exists(), "fig06_ecological_niche_phenology.pdf must be generated.")
             self.assertTrue((tmp / "fig06_ecological_niche_phenology.png").exists(), "fig06_ecological_niche_phenology.png must be generated.")
 
+    def test_composite_key_multi_plant_join_and_expanded_morph_vision_columns(self):
+        """Verify Step 06 preserves (catalogNumber, plant_individual_id) and retains Step 02/04/05 morphometric and vision XAI/OOD columns."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        r_code = """
+        source("scripts/analysis/edaphic_fine_grain_utils.R")
+        source("scripts/analysis/06_multimodal_spatial_rf.R")
+
+        vouchers_df <- data.frame(
+          catalogNumber = c("NCU_MULTI", "NCU_SINGLE"),
+          species_standardized = c("Packera aurea", "Packera obovata"),
+          latitude = c(35.6, 36.1),
+          longitude = c(-82.5, -79.1),
+          stringsAsFactors = FALSE
+        )
+        morph_df <- data.frame(
+          catalogNumber = c("NCU_MULTI", "NCU_MULTI", "NCU_SINGLE"),
+          plant_individual_id = c(1L, 2L, 1L),
+          morph_tier_source = rep("Tier_1_Pure", 3),
+          n_tier1_leaves = c(3L, 2L, 4L),
+          gmm_cluster = c(1L, 2L, 1L),
+          gmm_uncertainty = c(0.04, 0.18, 0.03),
+          cda_predicted_taxon = c("Packera aurea", "Packera obovata", "Packera obovata"),
+          cda_posterior_prob = c(0.94, 0.88, 0.96),
+          cda_second_taxon = c("Packera obovata", "Packera aurea", "Packera aurea"),
+          cda_second_posterior_prob = c(0.06, 0.12, 0.04),
+          cda_posterior_margin = c(0.88, 0.76, 0.92),
+          Sym_PC1 = c(-1.4, 1.3, 1.5),
+          Sym_PC2 = c(0.2, -0.3, -0.1),
+          petiole_length_mm = c(28.0, 11.5, 10.0),
+          blade_length_mm = c(25.0, 29.0, 30.0),
+          petiole_to_blade_ratio = c(1.12, 0.3966, 0.3333),
+          plant_height_cm = c(42.0, 35.0, 38.0),
+          scape_to_basal_leaf_ratio = c(7.9, 8.6, 9.5),
+          is_bent_stem = c(FALSE, TRUE, FALSE),
+          capitula_count = c(12L, 8L, 10L),
+          involucre_height_mm = c(6.5, 5.8, 6.0),
+          involucre_width_mm = c(5.2, 4.9, 5.0),
+          AR_inv = c(1.25, 1.18, 1.20),
+          ecoregion_cda_predicted = c("Blue_Ridge", "Piedmont", "Piedmont"),
+          ecoregion_cda_posterior_prob = c(0.84, 0.79, 0.91),
+          stringsAsFactors = FALSE
+        )
+        vis_df <- data.frame(
+          catalogNumber = c("NCU_MULTI", "NCU_SINGLE"),
+          plant_individual_id = c(0L, 0L),
+          vision_predicted_label = c("Packera aurea", "Packera obovata"),
+          confidence_predicted_class = c(0.91, 0.95),
+          vision_second_prob = c(0.09, 0.05),
+          vision_margin = c(0.82, 0.90),
+          c_error = c(0.08, 0.04),
+          is_label_corrupted = c(FALSE, FALSE),
+          vision_ood_score = c(0.21, 0.72),
+          vision_is_ood = c(FALSE, TRUE),
+          foreground_attention_ratio = c(0.83, 0.51),
+          is_artifact_driven = c(FALSE, TRUE),
+          surface_orientation = c("adaxial", "abaxial"),
+          mean_luminance = c(54.2, 71.8),
+          mean_saturation = c(0.32, 0.14),
+          tomentum_taxon_discordance = c(FALSE, TRUE),
+          stringsAsFactors = FALSE
+        )
+
+        m_joined <- left_join_by_voucher_individual(vouchers_df, morph_df, names(morph_df))
+        mv_joined <- left_join_by_voucher_individual(m_joined, vis_df, names(vis_df))
+        stopifnot(nrow(mv_joined) == 3L)
+        multi_sub <- mv_joined[mv_joined$catalogNumber == "NCU_MULTI", ]
+        stopifnot(identical(sort(as.integer(multi_sub$plant_individual_id)), c(1L, 2L)))
+        stopifnot(all(c("cda_second_taxon", "Sym_PC1", "petiole_to_blade_ratio", "plant_height_cm",
+                        "AR_inv", "ecoregion_cda_predicted", "vision_ood_score", "vision_is_ood",
+                        "foreground_attention_ratio", "is_artifact_driven", "surface_orientation",
+                        "tomentum_taxon_discordance") %in% names(mv_joined)))
+        stopifnot(all(multi_sub$foreground_attention_ratio == 0.83))
+        cat("STEP06_COMPOSITE_HANDOFF_OK\\n")
+        """
+        res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"Step 06 composite handoff failed:\n{res.stderr}\n{res.stdout}")
+        self.assertIn("STEP06_COMPOSITE_HANDOFF_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

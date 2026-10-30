@@ -655,6 +655,63 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             res = subprocess.run(["Rscript", "-e", r_code], capture_output=True, text=True, check=False)
             self.assertEqual(res.returncode, 0, f"Intraspecific figure test failed:\n{res.stderr}\n{res.stdout}")
 
+    def test_multimodal_cli_flag_and_ecological_edaphic_left_join(self) -> None:
+        """Verify 08_discover_taxon_complexes.R (<=800 lines) parses --multimodal and merges Step 06 ecological/edaphic columns onto morph_df."""
+        line_count = len(DISCOVERY_R_SCRIPT.read_text(encoding="utf-8").splitlines())
+        self.assertLessEqual(
+            line_count, 800,
+            f"08_discover_taxon_complexes.R has {line_count} lines; must be <= 800 lines.",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            morph_csv = tmp / "morphometric_flags.csv"
+            mm_csv = tmp / "multimodal_conflict_flags.csv"
+            pd.DataFrame([
+                {"catalogNumber": "MM_01", "plant_individual_id": 1, "species_standardized": "Packera aurea", "determiner_tier": "Tier_1_Gold", "n_tier1_leaves": 3, "Sym_PC1": -1.2, "Sym_PC2": 0.3},
+                {"catalogNumber": "MM_02", "plant_individual_id": 1, "species_standardized": "Packera obovata", "determiner_tier": "Tier_1_Gold", "n_tier1_leaves": 3, "Sym_PC1": 1.4, "Sym_PC2": -0.2},
+            ]).to_csv(morph_csv, index=False)
+            pd.DataFrame([
+                {
+                    "catalogNumber": "MM_01", "plant_individual_id": 1,
+                    "fine_soil_ph": 5.9, "fine_soil_sand": 34.5, "fine_bedrock_depth_cm": 98.0,
+                    "ssurgo_rock_outcrop_pct": 3.5, "soil_ph": 5.8, "soil_sand": 35.0,
+                    "soil_cec": 14.2, "soil_bulk_density": 1.31,
+                    "bio1_temp_mean": 13.4, "bio4_temp_seasonality": 712.0,
+                    "bio12_precip_annual": 1340.0, "bio15_precip_seasonality": 18.0,
+                    "edaphic_schoener_d": 0.41, "schoener_d": 0.44,
+                },
+                {
+                    "catalogNumber": "MM_02", "plant_individual_id": 1,
+                    "fine_soil_ph": 6.8, "fine_soil_sand": 52.0, "fine_bedrock_depth_cm": 42.0,
+                    "ssurgo_rock_outcrop_pct": 24.0, "soil_ph": 6.7, "soil_sand": 50.0,
+                    "soil_cec": 18.5, "soil_bulk_density": 1.42,
+                    "bio1_temp_mean": 14.8, "bio4_temp_seasonality": 745.0,
+                    "bio12_precip_annual": 1180.0, "bio15_precip_seasonality": 21.0,
+                    "edaphic_schoener_d": 0.41, "schoener_d": 0.44,
+                },
+            ]).to_csv(mm_csv, index=False)
+
+            r_code = f"""
+            source("scripts/analysis/08_discover_taxon_complexes.R")
+            commandArgs <- function(trailingOnly = TRUE) c("--morphometrics", "{morph_csv.as_posix()}", "--multimodal", "{mm_csv.as_posix()}")
+            opts <- parse_discovery_args()
+            stopifnot(opts$multimodal == "{mm_csv.as_posix()}")
+            inp <- load_and_merge_inputs(opts)
+            mdf <- inp$morph_df
+            req <- c("fine_soil_ph", "fine_soil_sand", "fine_bedrock_depth_cm", "ssurgo_rock_outcrop_pct",
+                     "soil_ph", "soil_sand", "soil_cec", "soil_bulk_density",
+                     "bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "bio15_precip_seasonality",
+                     "edaphic_schoener_d", "schoener_d")
+            stopifnot(all(req %in% names(mdf)))
+            stopifnot(abs(mdf$fine_soil_ph[mdf$catalogNumber == "MM_01"] - 5.9) < 1e-6)
+            stopifnot(abs(mdf$ssurgo_rock_outcrop_pct[mdf$catalogNumber == "MM_02"] - 24.0) < 1e-6)
+            cat("STEP08_MULTIMODAL_JOIN_OK\\n")
+            """
+            res = subprocess.run(["Rscript", "-e", r_code], capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0, f"Step 08 multimodal CLI/join test failed:\n{res.stderr}\n{res.stdout}")
+            self.assertIn("STEP08_MULTIMODAL_JOIN_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -86,6 +86,28 @@ def _resolve_active_run_context(
     return run_dir, cfg
 
 
+def _resolve_focal_and_intraspecific(
+    args: argparse.Namespace,
+    cfg: Union[PipelineConfig, Dict[str, Any]],
+) -> Tuple[Optional[str], bool]:
+    """Resolve optional focal taxon and intraspecific mode from CLI args or configuration."""
+    taxa_cfg = cfg.get("taxa", {}) if hasattr(cfg, "get") else {}
+    if not isinstance(taxa_cfg, dict):
+        taxa_cfg = {}
+    focal_raw = (
+        getattr(args, "focal_taxon", None)
+        or taxa_cfg.get("focal_taxon")
+        or (cfg.get("focal_taxon") if hasattr(cfg, "get") else None)
+    )
+    focal_clean = str(focal_raw).strip() if focal_raw else None
+    intraspecific = bool(
+        getattr(args, "intraspecific_mode", False)
+        or taxa_cfg.get("intraspecific_mode", False)
+        or (cfg.get("intraspecific_mode", False) if hasattr(cfg, "get") else False)
+    )
+    return (focal_clean or None), intraspecific
+
+
 
 # =============================================================================
 # Defensive Preflight Sanity Checks
@@ -679,13 +701,26 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     gmm_script = PROJECT_ROOT / "scripts" / "morphometrics" / "04_gmm_morphotools.R"
     verify_file_exists(gmm_script, "GMM / MorphoTools2 R script")
 
-    default_flags_out = (
-        run_dir / "data" / "tables" / "morphometric_flags.csv"
+    tables_dir = (
+        run_dir / "data" / "tables"
         if run_dir is not None
-        else cfg.get("paths", {}).get("morphometric_flags_csv", "data/tables/morphometric_flags.csv")
+        else Path(cfg.get("paths", {}).get("tables_dir", "data/tables"))
+    )
+    figures_dir = (
+        run_dir / "outputs" / "figures"
+        if run_dir is not None
+        else Path(cfg.get("paths", {}).get("figures_dir", "outputs/figures"))
+    )
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    default_flags_out = (
+        tables_dir / "morphometric_flags.csv"
+        if run_dir is not None
+        else cfg.get("paths", {}).get("morphometric_flags_csv", str(tables_dir / "morphometric_flags.csv"))
     )
     default_plot_out = (
-        run_dir / "outputs" / "figures" / "cda_passive_projection.pdf"
+        figures_dir / "cda_passive_projection.pdf"
         if run_dir is not None
         else cfg.get("paths", {}).get("cda_biplot_pdf", "outputs/figures/Figure_Integrative_Packera_Revision.pdf")
     )
@@ -697,6 +732,11 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     flags_out = Path(args.flags_out or default_flags_out)
     plot_out = Path(args.plot_out or default_plot_out)
     report_out = Path(args.report_out or default_report_out)
+    reproductive_csv = Path(getattr(args, "reproductive", None) or (tables_dir / "voucher_reproductive_metrics.csv"))
+    allometry_report = Path(getattr(args, "allometry_report", None) or (tables_dir / "allometry_permanova_summary.csv"))
+    allometry_pairwise = Path(getattr(args, "allometry_pairwise", None) or (tables_dir / "allometry_pairwise_slopes.csv"))
+    allometry_plot = Path(getattr(args, "allometry_plot", None) or (figures_dir / "Allometry_Lamina_Dissection_Trajectory.pdf"))
+    batch_audit_out = Path(getattr(args, "output_batch_audit", None) or (tables_dir / "batch_variance_audit.csv"))
     flags_out.parent.mkdir(parents=True, exist_ok=True)
     plot_out.parent.mkdir(parents=True, exist_ok=True)
     report_out.parent.mkdir(parents=True, exist_ok=True)
@@ -707,15 +747,21 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         rscript_bin, str(gmm_script),
         "--vouchers", str(vouchers_csv),
         "--harmonics", str(efa_out),
+        "--reproductive", str(reproductive_csv),
+        "--allometry-report", str(allometry_report),
+        "--allometry-pairwise", str(allometry_pairwise),
+        "--allometry-plot", str(allometry_plot),
+        "--output-batch-audit", str(batch_audit_out),
         "--output-flags", str(flags_out),
         "--output-plot", str(plot_out),
         "--output-report", str(report_out),
         "--max-k", str(max_k),
         "--num-pcs", str(num_pcs),
     ]
-    if getattr(args, "focal_taxon", None):
-        cmd_gmm.extend(["--focal-taxon", str(args.focal_taxon)])
-    if getattr(args, "intraspecific_mode", False):
+    focal_taxon, intraspecific_mode = _resolve_focal_and_intraspecific(args, cfg)
+    if focal_taxon:
+        cmd_gmm.extend(["--focal-taxon", focal_taxon])
+    if intraspecific_mode:
         cmd_gmm.append("--intraspecific-mode")
     logger.info(f"Running GMM/CDA: {' '.join(cmd_gmm)}")
     subprocess.run(cmd_gmm, check=True)
@@ -739,13 +785,38 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         )
         sys.exit(1)
 
-    default_vouchers = (
-        run_dir / "data" / "tables" / "curated_vouchers.csv"
+    tables_dir = (
+        run_dir / "data" / "tables"
         if run_dir is not None
-        else cfg.get("paths", {}).get("curated_vouchers_csv", "data/tables/curated_vouchers.csv")
+        else Path(cfg.get("paths", {}).get("tables_dir", "data/tables"))
+    )
+    figures_dir = (
+        run_dir / "outputs" / "figures"
+        if run_dir is not None
+        else Path(cfg.get("paths", {}).get("figures_dir", "outputs/figures"))
+    )
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    focal_taxon, intraspecific_mode = _resolve_focal_and_intraspecific(args, cfg)
+
+    default_vouchers = (
+        tables_dir / "curated_vouchers.csv"
+        if run_dir is not None
+        else cfg.get("paths", {}).get("curated_vouchers_csv", str(tables_dir / "curated_vouchers.csv"))
     )
     vouchers_csv = Path(getattr(args, "vouchers", None) or default_vouchers)
     verify_file_exists(vouchers_csv, "curated vouchers table", "python main.py harvest")
+
+    manifest_csv = Path(
+        getattr(args, "manifest_csv", None)
+        or getattr(args, "manifest", None)
+        or (tables_dir / "extracted_leaf_manifest.csv")
+    )
+    morph_flags = Path(
+        getattr(args, "morphometrics_csv", None)
+        or getattr(args, "morphometrics", None)
+        or (tables_dir / "morphometric_flags.csv")
+    )
 
     # -------------------------------------------------------------------------
     # Stage 5: DINOv2 Deep Vision Feature Extraction & Cleanlab XAI Audit
@@ -759,11 +830,11 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     )
     audit_csv = Path(
         getattr(args, "vision_audit", None)
-        or ((run_dir / "data" / "tables" / "label_noise_audit.csv") if run_dir is not None else "data/tables/label_noise_audit.csv")
+        or (tables_dir / "label_noise_audit.csv")
     )
     xai_fig = Path(
         getattr(args, "xai_plot", None)
-        or ((run_dir / "outputs" / "figures" / "GradCAM_audit_panel.png") if run_dir is not None else "outputs/figures/GradCAM_audit_panel.png")
+        or (figures_dir / "GradCAM_audit_panel.png")
     )
     cleanlab_thresh = getattr(args, "cleanlab_threshold", 0.85)
 
@@ -771,6 +842,8 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         sys.executable, str(xai_script),
         "--rosette-dir", str(rosette_dir),
         "--vouchers-csv", str(vouchers_csv),
+        "--manifest-csv", str(manifest_csv),
+        "--morphometrics-csv", str(morph_flags),
         "--output-csv", str(audit_csv),
         "--output-figure", str(xai_fig),
         "--cleanlab-threshold", str(cleanlab_thresh),
@@ -779,9 +852,9 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd_xai.append("--export-figures")
     else:
         cmd_xai.append("--no-export-figures")
-    if getattr(args, "focal_taxon", None):
-        cmd_xai.extend(["--focal-taxon", str(args.focal_taxon)])
-    if getattr(args, "intraspecific_mode", False):
+    if focal_taxon:
+        cmd_xai.extend(["--focal-taxon", focal_taxon])
+    if intraspecific_mode:
         cmd_xai.append("--intraspecific-mode")
 
     logger.info(f"Running Phase 5 Cleanlab Vision XAI: {' '.join(cmd_xai)}")
@@ -794,20 +867,20 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     spatial_rf_script = PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R"
     verify_file_exists(spatial_rf_script, "Spatial RF R script")
 
-    default_morph_flags = (
-        run_dir / "data" / "tables" / "morphometric_flags.csv"
-        if run_dir is not None
-        else cfg.get("paths", {}).get("morphometric_flags_csv", "data/tables/morphometric_flags.csv")
-    )
-    morph_flags = Path(getattr(args, "morphometrics", None) or default_morph_flags)
     env_dir = Path(getattr(args, "env_dir", None) or "data/environmental")
+    pheno_states = Path(getattr(args, "pheno_states", None) or (tables_dir / "voucher_phenological_states.csv"))
+    ssurgo_table = Path(getattr(args, "ssurgo_table", None) or (tables_dir / "ssurgo_edaphic_metrics.csv"))
+    contingency_table = Path(getattr(args, "contingency_table", None) or (tables_dir / "lithology_taxon_contingency_audit.csv"))
+    pheno_anomalies = Path(getattr(args, "pheno_anomalies", None) or (tables_dir / "phenological_allochrony_anomalies.csv"))
+    pheno_summary = Path(getattr(args, "pheno_summary", None) or (tables_dir / "phenological_model_summary.csv"))
+    pheno_plot = Path(getattr(args, "pheno_plot", None) or (figures_dir / "Phenological_Allochrony_SpaceTime.pdf"))
     conflict_flags = Path(
         getattr(args, "conflict_flags", None)
-        or ((run_dir / "data" / "tables" / "multimodal_conflict_flags.csv") if run_dir is not None else "data/tables/multimodal_conflict_flags.csv")
+        or (tables_dir / "multimodal_conflict_flags.csv")
     )
     spatial_plot = Path(
         getattr(args, "spatial_plot", None)
-        or ((run_dir / "outputs" / "figures" / "spatial_rf_niche_importance.pdf") if run_dir is not None else "outputs/figures/spatial_rf_niche_importance.pdf")
+        or (figures_dir / "spatial_rf_niche_importance.pdf")
     )
     spatial_summary = Path(
         getattr(args, "spatial_summary", None)
@@ -819,7 +892,13 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         "--vouchers", str(vouchers_csv),
         "--morphometrics", str(morph_flags),
         "--vision-audit", str(audit_csv),
+        "--pheno-states", str(pheno_states),
         "--env-dir", str(env_dir),
+        "--ssurgo-table", str(ssurgo_table),
+        "--contingency-table", str(contingency_table),
+        "--pheno-anomalies", str(pheno_anomalies),
+        "--pheno-summary", str(pheno_summary),
+        "--pheno-plot", str(pheno_plot),
         "--output-flags", str(conflict_flags),
         "--output-plot", str(spatial_plot),
         "--output-summary", str(spatial_summary),
@@ -828,9 +907,9 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd_spatial.extend(["--permutations", str(args.permutations)])
     if getattr(args, "n_trees", None) is not None:
         cmd_spatial.extend(["--n-trees", str(args.n_trees)])
-    if getattr(args, "focal_taxon", None):
-        cmd_spatial.extend(["--focal-taxon", str(args.focal_taxon)])
-    if getattr(args, "intraspecific_mode", False):
+    if focal_taxon:
+        cmd_spatial.extend(["--focal-taxon", focal_taxon])
+    if intraspecific_mode:
         cmd_spatial.append("--intraspecific-mode")
 
     logger.info(f"Running Phase 6 Multimodal Spatial RF: {' '.join(cmd_spatial)}")
@@ -851,24 +930,24 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     gmm_summary = Path(getattr(args, "gmm_summary", None) or default_gmm_summary)
     output_queue = Path(
         getattr(args, "output_queue", None)
-        or ((run_dir / "outputs" / "reports" / "final_curation_triage.csv") if run_dir is not None else "data/tables/triage_queue.csv")
+        or ((run_dir / "outputs" / "reports" / "final_curation_triage.csv") if run_dir is not None else str(tables_dir / "triage_queue.csv"))
     )
-    focal_taxon_raw = str(getattr(args, "focal_taxon", "") or "").strip()
+    focal_taxon_raw = focal_taxon or ""
     if focal_taxon_raw:
         focal_slug = re.sub(r"[^A-Za-z0-9]+", "_", focal_taxon_raw).strip("_") or "Packera"
         default_fig_name = f"Figure_Integrative_{focal_slug}_Revision.pdf"
         default_rep_name = f"{focal_slug}_Taxonomic_Revision_Summary.md"
-        fallback_fig = f"outputs/figures/{default_fig_name}"
+        fallback_fig = str(figures_dir / default_fig_name)
         fallback_rep = f"outputs/reports/{default_rep_name}"
     else:
         default_fig_name = "Figure_Integrative_Packera_Revision.pdf"
         default_rep_name = "Packera_Taxonomic_Revision_Summary.md"
-        fallback_fig = cfg.get("paths", {}).get("cda_biplot_pdf", f"outputs/figures/{default_fig_name}")
+        fallback_fig = cfg.get("paths", {}).get("cda_biplot_pdf", str(figures_dir / default_fig_name))
         fallback_rep = cfg.get("paths", {}).get("revision_report_md", f"outputs/reports/{default_rep_name}")
 
     synthesis_plot = Path(
         getattr(args, "synthesis_plot", None)
-        or ((run_dir / "outputs" / "figures" / default_fig_name) if run_dir is not None else fallback_fig)
+        or ((figures_dir / default_fig_name) if run_dir is not None else fallback_fig)
     )
     synthesis_report = Path(
         getattr(args, "synthesis_report", None)
@@ -887,9 +966,9 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         "--output-plot", str(synthesis_plot),
         "--output-report", str(synthesis_report),
     ]
-    if getattr(args, "focal_taxon", None):
-        cmd_triage.extend(["--focal-taxon", str(args.focal_taxon)])
-    if getattr(args, "intraspecific_mode", False):
+    if focal_taxon:
+        cmd_triage.extend(["--focal-taxon", focal_taxon])
+    if intraspecific_mode:
         cmd_triage.append("--intraspecific-mode")
     logger.info(f"Running Phase 7 Triage Dashboard Synthesis: {' '.join(cmd_triage)}")
     subprocess.run(cmd_triage, check=True)
@@ -1110,10 +1189,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_morph.add_argument("--manifest", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_morph.add_argument("--contours-dir", type=Path, default=None, help="Input contours directory")
     p_morph.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
+    p_morph.add_argument("--reproductive", type=Path, default=None, help="Voucher reproductive metrics CSV")
     p_morph.add_argument("--harmonics-out", type=Path, default=None, help="Output harmonics CSV")
     p_morph.add_argument("--flags-out", type=Path, default=None, help="Output morphometric flags CSV")
     p_morph.add_argument("--plot-out", type=Path, default=None, help="Output CDA biplot PDF")
     p_morph.add_argument("--report-out", type=Path, default=None, help="Output BIC summary report")
+    p_morph.add_argument("--allometry-report", type=Path, default=None, help="Output allometry PERMANOVA summary CSV")
+    p_morph.add_argument("--allometry-pairwise", type=Path, default=None, help="Output allometry pairwise slopes CSV")
+    p_morph.add_argument("--allometry-plot", type=Path, default=None, help="Output allometry trajectory PDF")
+    p_morph.add_argument("--output-batch-audit", type=Path, default=None, help="Output institutional batch variance audit CSV")
     p_morph.add_argument("--harmonics", type=int, default=None, help="Number of Fourier harmonics (k)")
     p_morph.add_argument("--num-pcs", type=int, default=None, help="Number of PCA dimensions")
     p_morph.add_argument("--max-k", type=int, default=None, help="Max GMM mixture components")
@@ -1124,13 +1208,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Phases 5-7: Vision XAI, Spatial RF, & Triage Dashboard")
     p_synth.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
     p_synth.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
+    p_synth.add_argument("--manifest", "--manifest-csv", dest="manifest_csv", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_synth.add_argument("--rosette-dir", type=Path, default=None, help="Directory with cropped rosette patches")
-    p_synth.add_argument("--morphometrics", type=Path, default=None, help="Morphometrics flags CSV")
+    p_synth.add_argument("--morphometrics", "--morphometrics-csv", dest="morphometrics", type=Path, default=None, help="Morphometrics flags CSV")
+    p_synth.add_argument("--pheno-states", type=Path, default=None, help="Voucher phenological states CSV")
     p_synth.add_argument("--vision-audit", type=Path, default=None, help="Output vision audit CSV")
     p_synth.add_argument("--cleanlab-threshold", type=float, default=0.85, help="Cleanlab noise cutoff threshold")
     p_synth.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
     p_synth.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
     p_synth.add_argument("--env-dir", type=Path, default=None, help="Directory containing environmental rasters")
+    p_synth.add_argument("--ssurgo-table", type=Path, default=None, help="Output SSURGO edaphic metrics CSV")
+    p_synth.add_argument("--contingency-table", type=Path, default=None, help="Output lithology-taxon contingency audit CSV")
+    p_synth.add_argument("--pheno-anomalies", type=Path, default=None, help="Output phenological allochrony anomalies CSV")
+    p_synth.add_argument("--pheno-summary", type=Path, default=None, help="Output phenological model summary CSV")
+    p_synth.add_argument("--pheno-plot", type=Path, default=None, help="Output phenological allochrony space-time PDF")
     p_synth.add_argument("--conflict-flags", type=Path, default=None, help="Output multimodal conflict flags CSV")
     p_synth.add_argument("--spatial-plot", type=Path, default=None, help="Output spatial RF PDF plot")
     p_synth.add_argument("--spatial-summary", type=Path, default=None, help="Output Warren's identity summary CSV")

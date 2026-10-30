@@ -915,6 +915,7 @@ if [[ "${START_STEP}" -le 5 ]]; then
   "${PYTHON_MAIN}" scripts/analysis/05_cleanlab_vision_xai.py \
     --rosette-dir "${RUN_DIR}/data/cropped_patches" \
     --vouchers-csv "${RUN_DIR}/data/tables/curated_vouchers.csv" \
+    --manifest-csv "${RUN_DIR}/data/tables/extracted_leaf_manifest.csv" \
     --morphometrics-csv "${RUN_DIR}/data/tables/morphometric_flags.csv" \
     --output-csv "${RUN_DIR}/data/tables/label_noise_audit.csv" \
     --output-figure "${RUN_DIR}/outputs/figures/GradCAM_audit_panel.png" \
@@ -922,25 +923,6 @@ if [[ "${START_STEP}" -le 5 ]]; then
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}" \
     "${DEMO_FLAG[@]}"
-fi
-
-# ------------------------------------------------------------------------------
-# Step 08 (Optional): Unsupervised Quantitative Taxon-Complex Discovery
-# (--discover-complexes / --auto-neighbors)
-# ------------------------------------------------------------------------------
-if [[ "${DISCOVER_COMPLEXES}" == "true" || "${AUTO_NEIGHBORS}" == "true" ]]; then
-  echo "[Step 08] Running Quantitative Taxon-Complex Discovery Engine..."
-  Rscript scripts/analysis/08_discover_taxon_complexes.R \
-    --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
-    --harmonics "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
-    --vision-audit "${RUN_DIR}/data/tables/label_noise_audit.csv" \
-    --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
-    --min-affinity "${MIN_AFFINITY}" \
-    --output-complexes "${RUN_DIR}/outputs/reports/empirical_taxon_complexes.csv" \
-    --output-affinity "${RUN_DIR}/outputs/reports/pairwise_taxon_affinity_matrix.csv" \
-    --output-neighbors "${RUN_DIR}/outputs/reports/focal_auto_neighbors.txt" \
-    --output-figure "${RUN_DIR}/outputs/figures/fig_empirical_taxon_complex_network.pdf" \
-    "${FOCAL_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------
@@ -965,6 +947,26 @@ if [[ "${START_STEP}" -le 6 ]]; then
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}" \
     "${DEMO_FLAG[@]}"
+fi
+
+# ------------------------------------------------------------------------------
+# Step 08 (Optional): Unsupervised Quantitative Taxon-Complex Discovery
+# (--discover-complexes / --auto-neighbors)
+# ------------------------------------------------------------------------------
+if [[ "${DISCOVER_COMPLEXES}" == "true" || "${AUTO_NEIGHBORS}" == "true" ]]; then
+  echo "[Step 08] Running Quantitative Taxon-Complex Discovery Engine..."
+  Rscript scripts/analysis/08_discover_taxon_complexes.R \
+    --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
+    --harmonics "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
+    --vision-audit "${RUN_DIR}/data/tables/label_noise_audit.csv" \
+    --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
+    --multimodal "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv" \
+    --min-affinity "${MIN_AFFINITY}" \
+    --output-complexes "${RUN_DIR}/outputs/reports/empirical_taxon_complexes.csv" \
+    --output-affinity "${RUN_DIR}/outputs/reports/pairwise_taxon_affinity_matrix.csv" \
+    --output-neighbors "${RUN_DIR}/outputs/reports/focal_auto_neighbors.txt" \
+    --output-figure "${RUN_DIR}/outputs/figures/fig_empirical_taxon_complex_network.pdf" \
+    "${FOCAL_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------

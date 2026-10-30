@@ -1828,6 +1828,117 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             parsed_all_empty = main_parser.parse_args(["run-all"])
             self.assertIsNone(parsed_all_empty.taxa)
 
+    def test_cross_stage_cli_table_handoffs_in_main_and_run_pipeline(self):
+        """Verify main.py and run_pipeline.sh wire all cross-stage CLI table handoffs across Steps 04, 05, 06, 07, and 08."""
+        import os
+        import subprocess
+        import main as root_main
+
+        def _arg_value(cmd_list, flag_name):
+            self.assertIn(flag_name, cmd_list, f"Missing CLI flag {flag_name!r} in command: {cmd_list}")
+            idx = cmd_list.index(flag_name)
+            self.assertLess(idx + 1, len(cmd_list), f"Flag {flag_name!r} has no value in command: {cmd_list}")
+            return cmd_list[idx + 1]
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            tmp_run = Path(tmp_d) / "run_handoff_audit"
+            tables_dir = tmp_run / "data" / "tables"
+            figures_dir = tmp_run / "outputs" / "figures"
+            contours_dir = tmp_run / "data" / "contours"
+            tables_dir.mkdir(parents=True, exist_ok=True)
+            figures_dir.mkdir(parents=True, exist_ok=True)
+            contours_dir.mkdir(parents=True, exist_ok=True)
+            (contours_dir / "NCU001_leaf1.csv").write_text("x,y\n0,0\n1,1\n", encoding="utf-8")
+
+            cfg_scoped = root_main.PipelineConfig.from_yaml().with_run_dir(tmp_run)
+            parser = root_main.build_parser()
+
+            # 1. Verify Step 03 -> Step 04 handoff in main.run_morphometrics()
+            morph_args = parser.parse_args([
+                "morphometrics",
+                "--focal-taxon", "Packera aurea",
+                "--intraspecific-mode",
+            ])
+            with patch.dict(os.environ, {"PACKERA_RUN_DIR": ""}, clear=False), \
+                 patch.object(root_main.shutil, "which", return_value="/usr/bin/Rscript"), \
+                 patch.object(root_main, "verify_file_exists"), \
+                 patch.object(root_main, "verify_dir_has_files"), \
+                 patch.object(root_main.subprocess, "run") as mock_morph_sub:
+                root_main.run_morphometrics(morph_args, cfg_scoped)
+                self.assertEqual(mock_morph_sub.call_count, 2)
+                cmd_step04 = mock_morph_sub.call_args_list[1][0][0]
+
+            self.assertTrue(any("04_gmm_morphotools.R" in tok for tok in cmd_step04))
+            self.assertEqual(_arg_value(cmd_step04, "--reproductive"), str(tables_dir / "voucher_reproductive_metrics.csv"))
+            self.assertEqual(_arg_value(cmd_step04, "--allometry-report"), str(tables_dir / "allometry_permanova_summary.csv"))
+            self.assertEqual(_arg_value(cmd_step04, "--allometry-pairwise"), str(tables_dir / "allometry_pairwise_slopes.csv"))
+            self.assertEqual(_arg_value(cmd_step04, "--allometry-plot"), str(figures_dir / "Allometry_Lamina_Dissection_Trajectory.pdf"))
+            self.assertEqual(_arg_value(cmd_step04, "--output-batch-audit"), str(tables_dir / "batch_variance_audit.csv"))
+            self.assertEqual(_arg_value(cmd_step04, "--focal-taxon"), "Packera aurea")
+            self.assertIn("--intraspecific-mode", cmd_step04)
+
+            # 2. Verify Step 05, Step 06, and Step 07 handoffs in main.run_synthesis()
+            synth_args = parser.parse_args([
+                "synthesis",
+                "--focal-taxon", "Packera aurea",
+                "--intraspecific-mode",
+            ])
+            with patch.dict(os.environ, {"PACKERA_RUN_DIR": ""}, clear=False), \
+                 patch.object(root_main.shutil, "which", return_value="/usr/bin/Rscript"), \
+                 patch.object(root_main, "verify_file_exists"), \
+                 patch.object(root_main.subprocess, "run") as mock_synth_sub:
+                root_main.run_synthesis(synth_args, cfg_scoped)
+                self.assertEqual(mock_synth_sub.call_count, 3)
+                cmd_step05 = mock_synth_sub.call_args_list[0][0][0]
+                cmd_step06 = mock_synth_sub.call_args_list[1][0][0]
+                cmd_step07 = mock_synth_sub.call_args_list[2][0][0]
+
+            # Step 05 assertions
+            self.assertTrue(any("05_cleanlab_vision_xai.py" in tok for tok in cmd_step05))
+            self.assertEqual(_arg_value(cmd_step05, "--manifest-csv"), str(tables_dir / "extracted_leaf_manifest.csv"))
+            self.assertEqual(_arg_value(cmd_step05, "--morphometrics-csv"), str(tables_dir / "morphometric_flags.csv"))
+            self.assertEqual(_arg_value(cmd_step05, "--focal-taxon"), "Packera aurea")
+            self.assertIn("--intraspecific-mode", cmd_step05)
+
+            # Step 06 assertions
+            self.assertTrue(any("06_multimodal_spatial_rf.R" in tok for tok in cmd_step06))
+            self.assertEqual(_arg_value(cmd_step06, "--pheno-states"), str(tables_dir / "voucher_phenological_states.csv"))
+            self.assertEqual(_arg_value(cmd_step06, "--ssurgo-table"), str(tables_dir / "ssurgo_edaphic_metrics.csv"))
+            self.assertEqual(_arg_value(cmd_step06, "--contingency-table"), str(tables_dir / "lithology_taxon_contingency_audit.csv"))
+            self.assertEqual(_arg_value(cmd_step06, "--pheno-anomalies"), str(tables_dir / "phenological_allochrony_anomalies.csv"))
+            self.assertEqual(_arg_value(cmd_step06, "--pheno-summary"), str(tables_dir / "phenological_model_summary.csv"))
+            self.assertEqual(_arg_value(cmd_step06, "--pheno-plot"), str(figures_dir / "Phenological_Allochrony_SpaceTime.pdf"))
+            self.assertEqual(_arg_value(cmd_step06, "--focal-taxon"), "Packera aurea")
+            self.assertIn("--intraspecific-mode", cmd_step06)
+
+            # Step 07 assertions
+            self.assertTrue(any("07_triage_dashboard_synthesis.R" in tok for tok in cmd_step07))
+            self.assertEqual(_arg_value(cmd_step07, "--focal-taxon"), "Packera aurea")
+            self.assertIn("--intraspecific-mode", cmd_step07)
+
+        # 3. Verify run_pipeline.sh Step 05 --manifest-csv handoff and Step 08 ordering + --multimodal handoff
+        run_sh = Path(__file__).resolve().parents[2] / "run_pipeline.sh"
+        sh_text = run_sh.read_text(encoding="utf-8")
+
+        pos_step05 = sh_text.index("scripts/analysis/05_cleanlab_vision_xai.py")
+        pos_step06 = sh_text.index("scripts/analysis/06_multimodal_spatial_rf.R")
+        pos_step08 = sh_text.index("scripts/analysis/08_discover_taxon_complexes.R")
+        pos_step07 = sh_text.index("scripts/analysis/07_triage_dashboard_synthesis.R")
+
+        self.assertLess(pos_step05, pos_step06, "Step 05 must run before Step 06 in run_pipeline.sh")
+        self.assertLess(pos_step06, pos_step08, "Step 08 must run AFTER Step 06 completes in run_pipeline.sh")
+        self.assertLess(pos_step08, pos_step07, "Step 08 must run before Step 07 synthesis in run_pipeline.sh")
+
+        step05_block = sh_text[pos_step05:pos_step06]
+        self.assertIn('--manifest-csv "${RUN_DIR}/data/tables/extracted_leaf_manifest.csv"', step05_block)
+        self.assertIn('--morphometrics-csv "${RUN_DIR}/data/tables/morphometric_flags.csv"', step05_block)
+
+        step08_block = sh_text[pos_step08:pos_step07]
+        self.assertIn('--multimodal "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv"', step08_block)
+
+        proc = subprocess.run(["bash", "-n", str(run_sh)], capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0, f"bash -n run_pipeline.sh failed: {proc.stderr}")
+
 
 if __name__ == "__main__":
     unittest.main()
