@@ -6,6 +6,10 @@
 # Core Filesystem Paths (relative to project root)
 paths:
   workspace_root: "."
+  # Central transactional SQLite database (WAL mode) housing Tier A shared entities (vouchers, plant_individuals,
+  # extracted_leaves, voucher_reproductive_phenology, dinov2_feature_cache, environmental_cache + R*Tree) and
+  # Tier B run-scoped analyses (pipeline_runs, run_active_cohort, leaf_efa_harmonics, otu_morphometrics,
+  # vision_xai_audit, spatial_rf_predictions, curation_triage, v_integrative_triage_master).
   db_path: "data/packera_pipeline.sqlite"
   raw_vouchers_dir: "data/raw_vouchers"
   curated_vouchers_csv: "data/tables/curated_vouchers.csv"

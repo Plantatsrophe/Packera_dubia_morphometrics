@@ -55,9 +55,9 @@ bash setup_leafmachine2.sh
 > The automated production pipeline uses stock LeafMachine2 v2.2+ `PLANT_LeafPriority` and `leaf_seg_rcnn_v2_1` weights out of the box. The standalone utilities in `scripts/annotation_and_training/` and `docs/SAM2_Precision_Botanical_Annotation_Guide.txt` are archived/optional tools not required by the automated pipeline.
 
 ### C. R Statistical Computing Environment
-Requires R $\ge 4.3$ with CRAN statistical and spatial macroecological packages (`remotes`, `tidyverse`, `optparse`, `mclust`, `clustvarsel`, `MorphoTools2`, `RRPP`, `vegan`, `terra`, `sf`, `geodata`, `soilDB`, `spatialRF`, `ranger`, `adespatial`, `blockCV`, `ecospat`, `ENMTools`, `igraph`, `patchwork`, `viridis`) and `Momocs` (`remotes::install_github("MomX/Momocs")`):
+Requires R $\ge 4.3$ with database packages (`DBI`, `RSQLite`), CRAN statistical and spatial macroecological packages (`remotes`, `tidyverse`, `optparse`, `mclust`, `clustvarsel`, `MorphoTools2`, `RRPP`, `vegan`, `terra`, `sf`, `geodata`, `soilDB`, `spatialRF`, `ranger`, `adespatial`, `blockCV`, `ecospat`, `ENMTools`, `igraph`, `patchwork`, `viridis`) and `Momocs` (`remotes::install_github("MomX/Momocs")`):
 ```bash
-Rscript -e 'install.packages(c("remotes", "tidyverse", "optparse", "mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "terra", "sf", "geodata", "soilDB", "spatialRF", "ranger", "adespatial", "blockCV", "ecospat", "ENMTools", "igraph", "patchwork", "viridis"), repos="https://cloud.r-project.org"); if (!requireNamespace("Momocs", quietly=TRUE)) remotes::install_github("MomX/Momocs")'
+Rscript -e 'install.packages(c("DBI", "RSQLite", "remotes", "tidyverse", "optparse", "mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "terra", "sf", "geodata", "soilDB", "spatialRF", "ranger", "adespatial", "blockCV", "ecospat", "ENMTools", "igraph", "patchwork", "viridis"), repos="https://cloud.r-project.org"); if (!requireNamespace("Momocs", quietly=TRUE)) remotes::install_github("MomX/Momocs")'
 ```
 
 ---
@@ -124,7 +124,7 @@ To execute a complete, rigorous systematic revision of *Packera dubia* and allie
 | Stage | Objective | Production Command |
 | :--- | :--- | :--- |
 | **Stage 1: Baseline Harmonization** | Full genus-wide (or user-specified `--taxon`) harvest, ruler calibration, LeafMachine2 segmentation, EFA, GMM/CDA, DINOv2 XAI, and multimodal random forests. | `./run_pipeline.sh --run-id stage1_baseline` |
-| **Stage 2: Promote Manifests** | Verify and promote generated manifests into canonical shared store `data/tables/`. | `cp runs/stage1_baseline/data/tables/*.csv data/tables/` |
+| **Stage 2: Promote Manifests** | Step 01–02 manifests, 120-vertex contours, and edaphic/embedding caches are automatically persisted into `data/packera_pipeline.sqlite`. Optionally promote CSV tables into canonical `data/tables/` via `cp` or `export_table_or_view_to_csv_atomic()`. | `cp runs/stage1_baseline/data/tables/*.csv data/tables/` |
 | **Stage 3: Pure Intraspecific Mode** | Delimit cryptic lineages and morphotypes within *P. dubia* strictly (`n_unique_taxa == 1`), gating Step 04–06 on GMM clusters and `PCA-env` ecotypes. | `./run_pipeline.sh --run-id stage3_dubia_cryptic --skip-harvest --focal-taxon "Packera dubia" --intraspecific-mode` |
 | **Stage 4: Outgroup Gold Anchors** | Calibrate *P. dubia* against 30 reference anchors per outgroup species (cascading Gold -> Silver -> Bronze) for definitive curation triage. | `./run_pipeline.sh --run-id stage4_dubia_triage --skip-harvest --focal-taxon "Packera dubia" --gold-anchors 30` |
 | **Stage 5: Full Tree Discovery** | Expand harvest across Eastern North America or continent-wide (`--geographic-scope north_america`) and perform unsupervised network community discovery. | `./run_pipeline.sh --run-id stage5_eastern_tree --discover-complexes` |
@@ -135,9 +135,12 @@ To execute a complete, rigorous systematic revision of *Packera dubia* and allie
 
 ```mermaid
 flowchart TD
+    DB[(data/packera_pipeline.sqlite<br/>WAL Mode Relational Store<br/>Tier A Shared · Tier B Run-Scoped · Views)]
+
     subgraph P1["Phase 1: Ingestion, EPA Ecoregions & 3-Layer Authority Engine"]
         A["GBIF / iDigBio Harvesting (01_voucher_harvester.py)\n+ 26-col Darwin Core Schema · Dynamic Synonyms"] --> B["EPA Level III Ecoregions + Centroid Fallback (>= 95%)\n3-Layer Authority: Protologue + Specialists + Herbaria"]
     end
+    A -.->|Cache Synonyms & UPSERT Vouchers| DB
 
     subgraph P2["Phase 2: Stock LeafMachine2 v2.2+ & Classical Gatekeeping"]
         B --> C["Stock YOLOv5 PLANT_LeafPriority (Conf >= 0.65)\n+ 38-Class Ruler Calibration (lm2_data_loader.py)"]
@@ -145,30 +148,41 @@ flowchart TD
         D --> D1["Intact Tier_1_Direct Contours (Solidity >= 0.72)\n+ 100% Label-Blind Dissection Gates & Petiole/Height"]
         D --> D2["Organ RGB Crops (rosettes_dense · basal_leaves_raw · capitula)\n+ Post-QC Montage (--regenerate-figures-only)"]
     end
+    D1 -.->|Atomic Per-Voucher Commit\nplant_individuals + extracted_leaves| DB
+    D2 -.->|voucher_reproductive_phenology| DB
 
     subgraph P3["Phase 3: Strict Tier-1 Closed-Contour EFA (Momocs)"]
         D1 --> E["Inertial Axis Alignment (coo_alignxax), >=99% Power (H=12),\nUniform Symmetrization (rm_asym) & MCD Outlier Gating (p < 0.001)"]
         E --> F["Unweighted OTU Median Harmonics & PCs\n(data/tables/leaf_efa_harmonics.csv · Tier_1_Pure)"]
     end
+    DB -.->|Single Batch SQL Query\n120-pt Contours| E
+    F -.->|leaf_efa_harmonics| DB
 
     subgraph P4["Phase 4: Klingenberg Allometry, Dual CDA & Parametric MANOVA"]
         F --> G["Slope Homogeneity Test (PC ~ log_centsize * taxon),\nAdaptive Bronze Promotion + Empirical Bayes Shrinkage (alpha0=5.0)"]
         G --> H["Track 1: Unsupervised Morphotype CDA (fig04)\nTrack 2: Supervised EPA Level III CDA (fig04c) + MANOVA Reports"]
     end
+    H -.->|otu_morphometrics| DB
 
     subgraph P5["Phase 5: Indumentum-Blind Vision XAI & Cleanlab"]
         D2 --> I["224x224 Low-Pass (sigma=1.0) & 5-px Dilated Neutral Paper Masking\nForeground 16x16 Patch Pooling (dinov2_vitb14_reg), GroupKFold(institutionCode)"]
         I --> J["Platt/Temp Calibration, Class-Conditional Cleanlab & Pointing Game >= 0.65\nEmpirical CIE L* / HSV S Indumentum Discordance Audit"]
     end
+    DB <-.->|dinov2_feature_cache\n768-d Vectors & FG Ratio| I
+    J -.->|vision_xai_audit| DB
 
     subgraph P6["Phase 6: 0-15cm Non-Blended Edaphic Stack & Partitioned Niche"]
         B & H & J --> K["0-15cm Trapezoidal Depth Weighting, Non-Blended Hierarchy\n(100% SSURGO / 30m POLARIS / 100m SOLUS100 vs SoilGrids Fallback)"]
         K --> L["30m 3DEP Microtopography, SGMC Bedrock, Uncertainty Buffers\nAll-Class SGMC/SSURGO Fisher BH-FDR + Organic PCA-env Ecotypes"]
     end
+    DB <-.->|environmental_cache + rtree| K
+    L -.->|spatial_rf_predictions| DB
 
     subgraph P7["Phase 7 & 8: Consensus Triage & Complex Discovery"]
         L --> M["Out-of-Fold Kappa Consensus & Hopkins Circular Anthesis Residuals\nTaxon-Agnostic 5-Stage Decision Matrix & North American Leiden/Ward.D2"]
     end
+    DB -.->|v_integrative_triage_master\nLeft-Join Master View| M
+    M -.->|curation_triage| DB
 ```
 
 ---
@@ -176,6 +190,9 @@ flowchart TD
 ## Phase 1: Voucher Ingestion & Strict Active/Passive Authority Stratification
 
 - **Scripts:** [`scripts/data_prep/01_voucher_harvester.py`](../scripts/data_prep/01_voucher_harvester.py), [`scripts/core/harvester.py`](../scripts/core/harvester.py), [`scripts/core/config.py`](../scripts/core/config.py)
+- **Relational DB & Manifest Contracts:**
+  - **SQLite Tables Read / Written:** Reads & writes `taxon_synonyms` (cached synonyms); writes `vouchers` (PK: `catalogNumber`, atomic UPSERT) in `data/packera_pipeline.sqlite`.
+  - **Synchronized CSV Outputs:** Canonical Darwin Core manifest `data/tables/curated_vouchers.csv` (26 canonical columns).
 - **Empirical Protocol:**
   1. **Dynamic Taxon Standardization & GBIF Synonym Expansion (`standardize_packera_taxon`):** Harmonizes binomials and basionyms across all North American *Packera* taxa (e.g., *Senecio pauperculus*, *Senecio smallii*, *Senecio plattensis*, *Senecio anonymous*, *Senecio obovatus*, *Senecio aureus*, etc.) into valid accepted binomials while handling arbitrary dynamic North American, boreal, and Mexican *Packera* species via `expand_taxon_synonyms_gbif()`. Running with no taxon flags dynamically queries and harvests all *Packera* species across the entire genus (`discover_genus_packera_species_gbif()`, `target_species: []`), whereas `--taxon "<sp1>" "<sp2>" ...` (or `--focal-taxon "<sp>"`) analyzes strictly the species specified by the user with zero hardcoded default species or injected outgroups. Configurable geographic filtering via `--geographic-scope {eastern_na,north_america,global}` (default: `eastern_na`, excluding longitudes $< -106.65$; `north_america` and `global` disable the western longitude boundary), `--include-western` (retaining occurrences west of $-106.65$), and `--countries` (default `["US"]`, expandable to `["US", "CA", "MX"]`).
   2. **Canonical 26 Darwin Core Columns:** Exports `data/tables/curated_vouchers.csv` with exactly: `catalogNumber`, `institutionCode`, `scientificName`, `species_raw`, `recordedBy`, `recordNumber`, `identifiedBy`, `determiner_raw`, `determiner_tier`, `type_status`, `county`, `stateProvince`, `decimalLatitude`, `latitude`, `decimalLongitude`, `longitude`, `coordinateUncertainty`, `year`, `month`, `day`, `eventDate`, `regional_group`, `image_path`, `exsiccatae_key`, `is_primary_duplicate`, `duplicate_count`.
@@ -190,6 +207,9 @@ flowchart TD
 ## Phase 2: Stock LeafMachine2 v2.2+ Segmentation, Boundary-Continuity Lobe Rejection & Classical Gatekeeping
 
 - **Scripts:** [`scripts/pipeline/02_segment_and_extract.py`](../scripts/pipeline/02_segment_and_extract.py), [`scripts/vision/configure_leafmachine2.py`](../scripts/vision/configure_leafmachine2.py), [`scripts/vision/lm2_geometry_utils.py`](../scripts/vision/lm2_geometry_utils.py)
+- **Relational DB & Manifest Contracts:**
+  - **SQLite Tables Read / Written:** Reads `vouchers`; writes `plant_individuals` (PK: `(catalogNumber, plant_individual_id)`), `extracted_leaves` (PK: `(catalogNumber, plant_individual_id, leaf_id)`, storing 120-vertex `contour_xy_json` alongside dimensionless descriptors), and `voucher_reproductive_phenology` (PK: `(catalogNumber, plant_individual_id)`) inside per-voucher atomic SQLite transactions with $O(1)$ SQL resumption checks (`qc_status IN ('PASS', 'FAILED_QC')`).
+  - **Synchronized CSV Outputs:** `data/tables/extracted_leaf_manifest.csv`, `data/tables/failed_qc_vouchers.csv`, `data/tables/voucher_reproductive_metrics.csv`, `data/tables/voucher_phenological_states.csv`.
 - **Empirical Protocol:**
   1. **Stock LeafMachine2 v2.2+ Configuration (`configure_leafmachine2.py`):** Uses stock `PLANT_LeafPriority` (`minimum_confidence_threshold: 0.65`) and compiled Detectron2 PointRend (`leaf_seg_rcnn_v2_1`) weights with `treat_leaflet_as_leaf_whole: False`, `use_efds_for_png_masks: False`, and `do_apply_landmarks: False`.
   2. **Otsu Boundary-Continuity Lobe Rejection (`is_truncated_lobe_or_leaflet`):** Rejects severed lobes or unattached leaf fragments where non-paper plant tissue occupies $> 15\%$ of the bounding-box perimeter (`max_tissue_border_ratio: 0.15`).
@@ -206,6 +226,9 @@ flowchart TD
 ## Phase 3: Strict Tier-1 Closed-Contour EFA, Inertial Alignment, Symmetrization & OTU Medians
 
 - **Script:** [`scripts/morphometrics/03_fourier_extractor.R`](../scripts/morphometrics/03_fourier_extractor.R)
+- **Relational DB & Manifest Contracts:**
+  - **SQLite Tables Read / Written:** Reads `extracted_leaves` (single-query batch SQL contour ingestion of 120-point coordinates, eliminating 14,000+ CSV reads, with directory CSV fallback for unit tests), `vouchers`, and `plant_individuals`; writes `leaf_efa_harmonics` (run-scoped).
+  - **Synchronized CSV Outputs:** `data/tables/leaf_efa_harmonics.csv`, `outputs/reports/fourier_pcs.csv`, `outputs/reports/symmetric_fourier_pcs.csv`.
 - **Empirical Protocol:**
   1. **Strict `Tier_1_Direct` Closed-Contour Scope:** Only intact `Tier_1_Direct` basal leaf contours enter `Momocs::efourier` (mirrored hemi-blades or open-curve approximations are strictly excluded).
   2. **Inertial Axis Pre-Alignment (`Momocs::coo_alignxax`) with Suborbicular Guard:** Aligns contours along their major inertial axis when blade circularity $\le 0.75$, protecting suborbicular blades ($>0.75$) from $90^\circ$ rotation artifacts while locking base-to-apex polarity.
@@ -218,6 +241,9 @@ flowchart TD
 ## Phase 4: Klingenberg Allometry, Dual CDA & Parametric MANOVA
 
 - **Scripts:** [`scripts/morphometrics/04_gmm_morphotools.R`](../scripts/morphometrics/04_gmm_morphotools.R), [`scripts/morphometrics/authority_weighting_utils.R`](../scripts/morphometrics/authority_weighting_utils.R)
+- **Relational DB & Manifest Contracts:**
+  - **SQLite Tables Read / Written:** Reads `vouchers`, `plant_individuals`, and `leaf_efa_harmonics`; writes `otu_morphometrics` (run-scoped).
+  - **Synchronized CSV Outputs:** `data/tables/morphometric_flags.csv`, `outputs/reports/allometry_homogeneity_test.csv`, `outputs/reports/gmm_bayes_factors_summary.csv`, `outputs/reports/institutional_batch_effect_audit.csv`, `outputs/reports/ecoregion_supervised_cda_summary.csv`, `outputs/reports/manova_group_significance.csv`, `outputs/reports/manova_pairwise_posthoc.csv`.
 - **Empirical Protocol:**
   1. **Empirical Bayes Weighting & Adaptive Reference Anchor Selection (`authority_weighting_utils.R`):**
      - **`select_adaptive_reference_anchors()`:** Initializes reference anchors with `Tier_1_Gold` and `Tier_2_Silver` `Tier_1_Pure` vouchers pruned at Mahalanobis $\chi^2_{0.95, p}$. When an under-annotated or rare *Packera* taxon has fewer than `min_anchors_per_taxon` (default 8, or $< 3$) clean Gold+Silver anchors, it automatically promotes the most central `Tier_3_Bronze` `Tier_1_Pure` vouchers within $\chi^2_{0.80, p}$ of the taxon medoid (`is_promoted_anchor = TRUE`), ensuring GMM and CDA never drop Gold-poor taxa.
@@ -238,6 +264,9 @@ flowchart TD
 ## Phase 5: Taphonomic Indumentum-Blind Vision XAI, Foreground Patch Pooling & OOD Scoring
 
 - **Script:** [`scripts/analysis/05_cleanlab_vision_xai.py`](../scripts/analysis/05_cleanlab_vision_xai.py)
+- **Relational DB & Manifest Contracts:**
+  - **SQLite Tables Read / Written:** Reads `vouchers`, `plant_individuals`, and `dinov2_feature_cache` (PK: `(catalogNumber, plant_individual_id, model_name, sigma)`, caching 768-d float32 embeddings and `foreground_attention_ratio` to avoid redundant GPU forward passes); writes new entries into `dinov2_feature_cache` and `vision_xai_audit` (run-scoped).
+  - **Synchronized CSV Outputs:** `data/tables/label_noise_audit.csv`.
 - **Empirical Protocol:**
   1. **`Tier_1_Direct` Basal Leaf Linking & Masking (`load_and_link_rosette_patches`):** Links each specimen `(catalogNumber, plant_individual_id)` to verified `Tier_1_Direct` basal leaf crops (`data/cropped_patches/basal_leaves_raw/`) and binary masks (`data/masks/tier1_intact/` via `--manifest-csv data/tables/extracted_leaf_manifest.csv`), falling back to masked `rosettes_dense` crops with companion masks (`<cat>_p<pid>_rosette_mask.png`).
   2. **Indumentum-Blind Gaussian Low-Pass Filter ($\sigma = 1.0\text{ px}$ at $224 \times 224$):** `apply_indumentum_blind_lowpass()` attenuates taphonomically abraded trichome/tomentum textures on $224 \times 224$ whole-rosette and basal-leaf crops while preserving macro-architectural venation and lobing. Non-leaf pixels are composited onto neutral herbarium paper RGB `[242, 239, 230]`. Foliar surface orientation (`classify_foliar_surface_orientation()`), CIE $L^*$ luminance, and HSV saturation are computed strictly within the verified leaf lamina mask.
@@ -250,6 +279,9 @@ flowchart TD
 ## Phase 6: 0–15 cm Rhizosphere/Outcrop ENM Stack, Uncertainty Buffers & Partitioned Niche Equivalency
 
 - **Scripts:** [`scripts/analysis/06_multimodal_spatial_rf.R`](../scripts/analysis/06_multimodal_spatial_rf.R), [`scripts/analysis/edaphic_fine_grain_utils.R`](../scripts/analysis/edaphic_fine_grain_utils.R)
+- **Relational DB & Manifest Contracts:**
+  - **SQLite Tables Read / Written:** Reads `vouchers`, `plant_individuals`, `otu_morphometrics`, and `vision_xai_audit`; queries & populates `environmental_cache` (PK: `lat_lon_key`) and `environmental_rtree` spatial index; writes `spatial_rf_predictions` (run-scoped).
+  - **Synchronized CSV Outputs:** `data/tables/multimodal_conflict_flags.csv`, `outputs/reports/multimodal_spatial_rf_summary.csv`, `outputs/reports/edaphic_niche_equivalency.csv`, `outputs/reports/micro_edaphic_outcrop_contingency.csv`.
 - **Empirical Protocol:**
   1. **$0\text{–}15\text{ cm}$ Trapezoidal Rhizosphere Depth-Weighting:** Integrates $(5 \cdot v_{0\text{–}5} + 10 \cdot v_{5\text{–}15}) / 15$ depth-weighted pedological horizons.
   2. **Strict Non-Blended Edaphic Hierarchy:** CONUS occurrences query 100% SSURGO, 30m POLARIS, and 100m SOLUS100; 250m SoilGrids is restricted strictly to non-CONUS vouchers where POLARIS/SOLUS100 evaluate to `NA`. Raw `soil_*` predictors are excluded from active `env_vars`.
@@ -264,6 +296,9 @@ flowchart TD
 ## Phase 7 & 8: Reliability-Weighted Consensus, 5-Stage Decision Matrix & Complex Discovery
 
 - **Scripts:** [`scripts/analysis/07_triage_dashboard_synthesis.R`](../scripts/analysis/07_triage_dashboard_synthesis.R), [`scripts/analysis/08_discover_taxon_complexes.R`](../scripts/analysis/08_discover_taxon_complexes.R), [`scripts/morphometrics/pub_figures_utils.R`](../scripts/morphometrics/pub_figures_utils.R)
+- **Relational DB & Manifest Contracts:**
+  - **SQLite Tables Read / Written:** Queries pre-joined master SQL view `v_integrative_triage_master` (left-joining all modalities onto `plant_individuals` ensuring non-georeferenced sheets are 100% retained); writes consensus calls into `curation_triage` (run-scoped). Step 08 reads `multimodal_conflict_flags.csv` / `v_integrative_triage_master` to discover taxon complexes.
+  - **Synchronized CSV Outputs:** `data/tables/triage_queue.csv`, `data/tables/final_curation_triage.csv`, `outputs/reports/Packera_Taxonomic_Revision_Summary.md`, publication figures (`Figure_Integrative_Packera_Revision.pdf`), and `outputs/reports/discovered_taxon_complexes.csv` (Step 08).
 - **Empirical Protocol:**
   1. **Composite Specimen Key `(catalogNumber, plant_individual_id)` Invariant:** All cross-stage joins and aggregations strictly preserve `(catalogNumber, plant_individual_id)` so multi-plant herbarium sheets are never collapsed.
   2. **Out-of-Fold Cohen's $\kappa$ Reliability Weighting:** Weights each modality by out-of-fold validation Cohen's $\kappa_m$ ($w_m = \max(0.05, \kappa_m)$), dynamically renormalized over observed modalities $\mathcal{O}_i$ on each specimen (`98.4%` voucher completion across georeferenced and non-georeferenced sheets).

@@ -5,13 +5,14 @@
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
-#   End-to-end run-scoped orchestrator for the 7-phase Packera morphometrics pipeline.
-#   Every execution writes all generated artifacts (masks, contours, cropped
-#   patches, CSV tables, reports, logs, and publication figures) into a
-#   self-contained run directory:
+#   End-to-end run-scoped orchestrator for the Packera morphometrics pipeline.
+#   Orchestrates Phases 1 through 8 across transactional SQLite (WAL mode)
+#   database storage (data/packera_pipeline.sqlite) and synchronized CSV snapshots.
+#   Every execution seeds and records artifacts into a self-contained run directory:
 #       runs/<RUN_ID>/   (default: runs/run_<YYYYMMDD_HHMMSS>/)
-#   while preserving shared read-only caches (data/raw_vouchers/, data/raw_images/,
-#   and data/environmental/) in the repository root.
+#   while linking shared read-only caches and maintaining Tier A / Tier B relational
+#   tables. Supports `--db <path>` for custom database overrides and `--demo` for
+#   ephemeral SQLite test isolation.
 # ==============================================================================
 
 set -euo pipefail

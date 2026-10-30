@@ -73,7 +73,9 @@ WSL 2 uses virtual GPU pass-through (WSL-DirectX) provided directly by the Windo
 
 > [!WARNING]
 > ### ⚠️ Always Clone into `~/` (Native Linux ext4) — Avoid `/mnt/c/`!
-> Accessing Windows filesystem drives via `/mnt/c/` passes through the WSL 9P network translation protocol, causing a $10\times$ to $50\times$ reduction in disk I/O performance. Always clone and execute the repository inside your Ubuntu home directory (`~` or `/home/<username>/`).
+> Accessing Windows filesystem drives via `/mnt/c/` passes through the WSL 9P network translation protocol (DrvFs), causing a $10\times$ to $50\times$ reduction in disk I/O performance.
+> 
+> Furthermore, the pipeline's central database (`data/packera_pipeline.sqlite`) operates in **SQLite Write-Ahead Logging (WAL) mode**. WAL mode relies on POSIX shared-memory memory-mapped (`mmap`) files (`data/packera_pipeline.sqlite-shm`) and advisory file locking protocols (`data/packera_pipeline.sqlite-wal`). The 9P DrvFs mount does not fully support POSIX advisory locks and shared memory across the Windows/Linux boundary, which will result in `database is locked` errors or severe SQLite database corruption. Always clone and execute the repository inside your Ubuntu home directory (`~` or `/home/<username>/`) on native `ext4`.
 
 ```bash
 cd ~
@@ -90,6 +92,8 @@ sudo apt-get update && sudo apt-get install -y \
     build-essential \
     curl \
     git \
+    sqlite3 \
+    libsqlite3-dev \
     libgl1 \
     libglib2.0-0 \
     python3-dev \
@@ -139,10 +143,10 @@ python main.py check-env
 
 ## Step 6: R Statistical Computing Environment
 
-Install the required R ($\ge 4.3$) packages for Elliptic Fourier Analysis (`Momocs`), Klingenberg allometric testing, Gaussian Mixture Models (`mclust`, `clustvarsel`), Canonical Discriminant Analysis (`MorphoTools2`), spatial macroecology (`terra`, `sf`, `geodata`, `soilDB`, `spatialRF`, `ranger`, `adespatial`, `blockCV`, `ecospat`, `ENMTools`), and unsupervised taxon-complex discovery (`igraph`):
+Install the required R ($\ge 4.3$) packages for Elliptic Fourier Analysis (`Momocs`), Klingenberg allometric testing, Gaussian Mixture Models (`mclust`, `clustvarsel`), Canonical Discriminant Analysis (`MorphoTools2`), spatial macroecology (`terra`, `sf`, `geodata`, `soilDB`, `spatialRF`, `ranger`, `adespatial`, `blockCV`, `ecospat`, `ENMTools`), database connectivity (`DBI`, `RSQLite`), and unsupervised taxon-complex discovery (`igraph`):
 
 ```bash
-Rscript -e 'install.packages(c("remotes", "tidyverse", "optparse", "mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "terra", "sf", "geodata", "soilDB", "spatialRF", "ranger", "adespatial", "blockCV", "ecospat", "ENMTools", "igraph", "patchwork", "viridis"), repos="https://cloud.r-project.org"); if (!requireNamespace("Momocs", quietly=TRUE)) remotes::install_github("MomX/Momocs")'
+Rscript -e 'install.packages(c("DBI", "RSQLite", "remotes", "tidyverse", "optparse", "mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "terra", "sf", "geodata", "soilDB", "spatialRF", "ranger", "adespatial", "blockCV", "ecospat", "ENMTools", "igraph", "patchwork", "viridis"), repos="https://cloud.r-project.org"); if (!requireNamespace("Momocs", quietly=TRUE)) remotes::install_github("MomX/Momocs")'
 ```
 
 ---

@@ -7,12 +7,21 @@ Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
     Unified command-line interface (CLI) runner orchestrating the end-to-end
-    botanical morphometrics pipeline:
-      - harvest: Queries GBIF occurrences, scores determiner tiers, downloads imagery.
-      - segment: PointRend deep segmentation, bilateral midrib reflection, contour export.
-      - morphometrics: Rscript EFA (Momocs) and GMM/CDA clustering (MorphoTools2).
-      - synthesis: Canonical Phases 5-7 (Vision XAI, Spatial RF, & Triage Dashboard).
+    botanical morphometrics pipeline across transactional SQLite (WAL mode)
+    storage (`data/packera_pipeline.sqlite`) and synchronized CSV snapshots:
+      - harvest: Queries GBIF occurrences, scores determiner tiers, downloads imagery,
+                 persists vouchers and taxon synonyms to SQLite and CSV.
+      - segment: PointRend deep segmentation, bilateral midrib reflection, contour export,
+                 storing 120-vertex JSON contours in extracted_leaves and CSVs.
+      - morphometrics: Rscript EFA (Momocs) and GMM/CDA clustering (MorphoTools2),
+                       querying extracted_leaves in batch and persisting OTUs.
+      - synthesis: Canonical Phases 5-7 (Vision XAI, Spatial RF, & Triage Dashboard),
+                   leveraging dinov2_feature_cache and v_integrative_triage_master.
       - run-all: Executes the complete production workflow sequentially.
+
+    CLI Flags & Environment Overrides:
+      - `--db <path>`: Optional override path to the SQLite database (sets `PACKERA_DB_PATH`).
+      - `--demo`: Uses an ephemeral in-memory (`:memory:`) or run-local database for testing.
 ===============================================================================
 """
 
