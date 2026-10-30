@@ -22,17 +22,11 @@ parse_args_robust <- function() {
     optparse::make_option(c("-p", "--output-plot"), type = "character", default = "outputs/figures/cda_passive_projection.pdf"),
     optparse::make_option(c("-r", "--output-report"), type = "character", default = "outputs/reports/gmm_bayes_factors_summary.csv"),
     optparse::make_option(c("-b", "--output-batch-audit"), type = "character", default = "outputs/reports/institutional_batch_effect_audit.csv"),
-    optparse::make_option(c("-k", "--max-k"), type = "integer", default = 8),
-    optparse::make_option(c("-d", "--num-pcs"), type = "integer", default = 5),
-    optparse::make_option(c("--permutations"), type = "integer", default = 999),
-    optparse::make_option(c("--seed"), type = "integer", default = 42),
-    optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE),
-    optparse::make_option(c("--focal-taxon"), type = "character", default = "")
+    optparse::make_option(c("-k", "--max-k"), type = "integer", default = 8), optparse::make_option(c("-d", "--num-pcs"), type = "integer", default = 5),
+    optparse::make_option(c("--permutations"), type = "integer", default = 999), optparse::make_option(c("--seed"), type = "integer", default = 42),
+    optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE), optparse::make_option(c("--focal-taxon"), type = "character", default = "")
   )
-  if (requireNamespace("optparse", quietly = TRUE)) {
-    opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
-    names(opts) <- gsub("-", "_", names(opts)); return(opts)
-  }
+  if (requireNamespace("optparse", quietly = TRUE)) { opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list)); names(opts) <- gsub("-", "_", names(opts)); return(opts) }
   list(vouchers = "data/tables/curated_vouchers.csv", harmonics = "data/tables/leaf_efa_harmonics.csv", reproductive = "data/tables/voucher_reproductive_metrics.csv",
        outline_only = FALSE, correct_allometry = "auto", allometry_report = "outputs/reports/allometry_significance_audit.csv",
        allometry_pairwise = "outputs/reports/allometry_pairwise_trajectories.csv", allometry_plot = "outputs/figures/shape_allometry_regression.pdf",
@@ -267,7 +261,7 @@ fit_gmm_em_pure <- function(X, max_k = 8, tol = 1e-5, max_iter = 150, X_eval = N
   return(list(best = best_model, bic_table = bic_table))
 }
 
-run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarsel = FALSE) {
+run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarsel = FALSE, intraspecific_mode = FALSE) {
   pc_guard_cols <- intersect(paste0("PC", seq_len(5)), feature_cols)
   req_cols <- if (length(pc_guard_cols) > 0) pc_guard_cols else feature_cols
   valid_rows <- which(complete.cases(df[, req_cols, drop = FALSE])); N_valid <- length(valid_rows)
@@ -285,45 +279,55 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   set.seed(42); best_k <- 1; best_name <- "Full_Covariance_EM"; bic_table <- NULL; cls_sub <- NULL; unc_sub <- NULL
   X_mah <- X[, if (length(intersect(pc_guard_cols, colnames(X))) > 0) intersect(pc_guard_cols, colnames(X)) else colnames(X), drop = FALSE]
   X_mah_ref <- X_mah[ref_cand, , drop = FALSE]
-  rob_cov <- if (nrow(X_mah_ref) >= 30 && requireNamespace("MASS", quietly = TRUE)) tryCatch(MASS::cov.rob(X_mah_ref), error = function(e) NULL) else NULL
-  m_center <- if (!is.null(rob_cov)) rob_cov$center else colMeans(X_mah_ref)
-  m_cov <- if (!is.null(rob_cov)) rob_cov$cov else stats::cov(X_mah_ref)
+  q_mcd <- max(floor(0.85 * nrow(X_mah_ref)), floor((nrow(X_mah_ref) + ncol(X_mah) + 1L) / 2L))
+  rob_cov <- if (nrow(X_mah_ref) >= 30 && requireNamespace("MASS", quietly = TRUE)) tryCatch(MASS::cov.rob(X_mah_ref, quantile.used = min(nrow(X_mah_ref) - 1L, q_mcd)), error = function(e) NULL) else NULL
+  m_center <- if (!is.null(rob_cov)) rob_cov$center else colMeans(X_mah_ref); m_cov <- if (!is.null(rob_cov)) rob_cov$cov else stats::cov(X_mah_ref)
   mahal_d2 <- tryCatch(stats::mahalanobis(X_mah, center = m_center, cov = m_cov + diag(1e-6, ncol(X_mah))), error = function(e) rep(0.0, nrow(X)))
-  mahal_outliers <- (nrow(X_mah_ref) >= 10) & !is.na(mahal_d2) & (mahal_d2 > stats::qchisq(0.95, df = ncol(X_mah)))
+  mahal_outliers <- (nrow(X_mah_ref) >= 10) & !is.na(mahal_d2) & (mahal_d2 > stats::qchisq(0.995, df = ncol(X_mah)))
   anchor_mask <- ref_cand & !mahal_outliers
   core_idx <- if (sum(anchor_mask, na.rm = TRUE) >= 6) which(anchor_mask) else which(ref_cand)
   if (requireNamespace("clustvarsel", quietly = TRUE) && (isTRUE(use_clustvarsel) || ncol(X) >= 4)) {
     cvs <- tryCatch({ set.seed(42); clustvarsel::clustvarsel(X[if (length(core_idx) > 350L) core_idx[seq_len(350L)] else core_idx, , drop = FALSE], G = seq_len(min(max_k, 5L)), verbose = FALSE) }, error = function(e) NULL)
     if (!is.null(cvs) && length(cvs$subset) >= 2) { selected_cols <- colnames(X)[cvs$subset]; X <- X[, cvs$subset, drop = FALSE] }
   }
-  X_pcs <- X; X_core <- X_pcs[core_idx, , drop = FALSE]; eff_k <- if (nrow(X_core) > 100 && max_k >= 7L) 6L else max_k
+  X_pcs <- X; X_core <- X_pcs[core_idx, , drop = FALSE]; eff_k <- max(2L, min(if (nrow(X_core) > 100 && max_k >= 7L) 6L else max_k, nrow(X_core) - 1L))
   modelNames <- if ((nrow(X_core) / ncol(X_pcs)) < 5.0) c("EII", "VII", "EEI", "VEI", "EVI", "VVI") else NULL
+  is_intra_gmm <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2L)
   if (requireNamespace("mclust", quietly = TRUE)) {
     gmm_fit <- tryCatch(mclust::Mclust(X_core, G = seq_len(eff_k), modelNames = modelNames, verbose = FALSE), error = function(e) NULL)
     if (!is.null(gmm_fit)) {
-      best_k <- gmm_fit$G; best_name <- gmm_fit$modelName; gmm_pred <- predict(gmm_fit, newdata = X_pcs)
-      cls_sub <- as.integer(gmm_pred$classification)
-      unc_sub <- if (!is.null(gmm_pred$uncertainty)) gmm_pred$uncertainty else 1.0 - apply(as.matrix(gmm_pred$z), 1, max)
       bic_vals <- apply(gmm_fit$BIC, 1, function(row) if (all(is.na(row))) NA_real_ else max(row, na.rm = TRUE))
       bic_table <- data.frame(K = seq_len(eff_k), BIC = round(bic_vals[seq_len(eff_k)], 2))
+      use_fit <- if (is_intra_gmm && gmm_fit$G < 2L) tryCatch(mclust::Mclust(X_core, G = 2:eff_k, modelNames = modelNames, verbose = FALSE), error = function(e) NULL) else gmm_fit
+      if (!is.null(use_fit)) {
+        best_k <- use_fit$G; best_name <- use_fit$modelName; gmm_pred <- predict(use_fit, newdata = X_pcs)
+        cls_sub <- as.integer(gmm_pred$classification)
+        unc_sub <- if (!is.null(gmm_pred$uncertainty)) gmm_pred$uncertainty else 1.0 - apply(as.matrix(gmm_pred$z), 1, max)
+      }
     }
   }
   if (is.null(bic_table)) {
-    pure_res <- fit_gmm_em_pure(X_core, max_k = max_k, X_eval = X_pcs); best_k <- pure_res$best$k
-    cls_sub <- pure_res$best$classification; unc_sub <- pure_res$best$uncertainty; bic_table <- pure_res$bic_table
+    pure_res <- fit_gmm_em_pure(X_core, max_k = eff_k, X_eval = X_pcs); bic_table <- pure_res$bic_table
+    if (!is_intra_gmm || pure_res$best$k >= 2L) { best_k <- pure_res$best$k; cls_sub <- pure_res$best$classification; unc_sub <- pure_res$best$uncertainty }
+  }
+  if (is.null(cls_sub) || (is_intra_gmm && length(unique(stats::na.omit(cls_sub))) < 2L)) {
+    set.seed(42); km <- stats::kmeans(X_core, centers = 2L, nstart = 20L); best_k <- 2L; best_name <- "kmeans_K2_fallback"
+    d1 <- sqrt(rowSums(sweep(X_pcs, 2, km$centers[1, ], "-")^2)); d2 <- sqrt(rowSums(sweep(X_pcs, 2, km$centers[2, ], "-")^2))
+    cls_sub <- ifelse(d1 <= d2, 1L, 2L); unc_sub <- pmin(d1, d2) / pmax(d1 + d2, 1e-9)
   }
   cls <- rep(NA_integer_, nrow(df)); unc <- rep(NA_real_, nrow(df)); cls[valid_rows] <- cls_sub; unc[valid_rows] <- unc_sub
-  delta_BIC <- c(0, diff(bic_table$BIC)); bic_table$Delta_BIC_prev <- delta_BIC; bic_table$Two_Delta_BIC <- round(delta_BIC, 2)
-  bic_table$BayesFactor_vs_Null <- round(bic_table$BIC - bic_table$BIC[1], 2)
-  bic_table$Evidence <- sapply(bic_table$Two_Delta_BIC, function(val) { # Kass & Raftery (1995) 2 * Delta_BIC thresholds
-    if (is.na(val) || val < 0) return("Negative (favors K-1)")
+  bic_table$Delta_BIC_prev <- c(0, diff(bic_table$BIC)); bic_table$Two_Delta_BIC <- round(bic_table$BIC - bic_table$BIC[1], 2)
+  bic_table$BayesFactor_vs_Null <- bic_table$Two_Delta_BIC
+  bic_table$Evidence <- sapply(seq_len(nrow(bic_table)), function(idx_b) { # Kass & Raftery (1995) 2 * Delta_BIC vs G = 1
+    if (idx_b == 1L) return("Null Model (G = 1)"); val <- bic_table$Two_Delta_BIC[idx_b]
+    if (is.na(val) || val < 0) return("Negative (favors G = 1)")
     if (val < 2) return("Weak / Inconclusive"); if (val < 6) return("Positive Evidence"); if (val < 10) return("Strong Evidence")
     return("Decisive Evidence (Species Boundary)")
   })
   return(list(classification = cls, uncertainty = unc, best_k = best_k, model_name = best_name, selected_features = selected_cols, bic_table = bic_table))
 }
 
-# 4. Canonical Discriminant Analysis with Passive Sample Projection
+# 4. Canonical Discriminant Analysis with Passive Sample Projection (Track 1: Unsupervised Morphotype_K1..Kn or Multi-Species)
 run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, gmm_res = NULL, intraspecific_mode = FALSE) {
   message("Configuring Canonical Discriminant Analysis in MorphoTools2 Architecture (Tier_3_Bronze weight = 0.0)...")
   df$authority_weight <- compute_authority_precision_weights(df); df$spatial_balance_weight <- compute_spatial_balance_weights(df)
@@ -333,29 +337,21 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   pc_req <- intersect(paste0("PC", seq_len(5)), feature_cols)
   has_pcs <- complete.cases(df[, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE])
   if (is_intra) {
-    if (!is.null(gmm_res) && !is.null(gmm_res$best_k) && gmm_res$best_k >= 2 && length(unique(stats::na.omit(gmm_res$classification))) >= 2) {
-      df$grouping_col <- ifelse(is.na(gmm_res$classification), NA_character_, paste0("Morphotype_K", gmm_res$classification))
-      u_cut <- stats::quantile(gmm_res$uncertainty, 0.60, na.rm = TRUE)
-      is_active <- (df$authority_weight > 0) & is_tier1_pure & !is.na(df$grouping_col) & !is.na(gmm_res$uncertainty) & (gmm_res$uncertainty <= u_cut) & complete.cases(df[, feature_cols])
-      if (length(unique(df$grouping_col[is_active])) < 2) is_active <- is_tier1_pure & !is.na(df$grouping_col) & !is.na(gmm_res$uncertainty) & (gmm_res$uncertainty <= u_cut) & has_pcs
-      if (length(unique(df$grouping_col[is_active])) < 2) is_active <- !is.na(df$grouping_col) & has_pcs
-    } else {
-      rg <- if ("regional_group" %in% names(df)) trimws(as.character(df$regional_group)) else rep("", nrow(df))
-      st <- if ("stateProvince" %in% names(df)) trimws(as.character(df$stateProvince)) else rep("", nrow(df))
-      if (length(unique(rg[!is.na(rg) & nzchar(rg)])) >= 2) df$grouping_col <- ifelse(is.na(rg) | !nzchar(rg), "Other_Region", rg)
-      else if (length(unique(st[!is.na(st) & nzchar(st)])) >= 2) df$grouping_col <- ifelse(is.na(st) | !nzchar(st), "Other_State", st)
-      else if ("latitude" %in% names(df) && length(unique(stats::na.omit(df$latitude))) >= 3) {
-        q_l <- unique(stats::quantile(df$latitude, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE))
-        df$grouping_col <- paste0("LatTertile_", as.integer(cut(df$latitude, breaks = q_l, include.lowest = TRUE)))
-      } else {
-        p1 <- if ("PC1" %in% names(df)) df$PC1 else df[[feature_cols[1]]]
-        df$grouping_col <- ifelse(p1 >= stats::median(p1, na.rm = TRUE), "Morphotype_K2", "Morphotype_K1")
-      }
-      g_act <- (df$authority_weight > 0) & is_tier1_pure & !is.na(df$grouping_col) & has_pcs
-      is_active <- if (length(unique(df$grouping_col[g_act])) >= 2) g_act else (!is.na(df$grouping_col) & has_pcs)
+    cl_u <- if (!is.null(gmm_res) && length(unique(stats::na.omit(gmm_res$classification))) >= 2L) as.integer(gmm_res$classification) else NULL
+    if (is.null(cl_u)) {
+      set.seed(42); km_fb <- stats::kmeans(as.matrix(df[has_pcs, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE]), centers = 2L, nstart = 20L)
+      cl_u <- rep(NA_integer_, nrow(df)); cl_u[has_pcs] <- as.integer(km_fb$cluster)
     }
-    target_taxa <- sort(unique(stats::na.omit(df$grouping_col[is_active])))
-    is_train_cand <- is_active
+    df$grouping_col <- ifelse(is.na(cl_u), NA_character_, paste0("Morphotype_K", cl_u))
+    unc_v <- if (!is.null(gmm_res) && !is.null(gmm_res$uncertainty)) gmm_res$uncertainty else rep(0.0, nrow(df))
+    u_cut <- stats::quantile(unc_v, 0.70, na.rm = TRUE)
+    is_active <- (df$authority_weight > 0) & is_tier1_pure & !is.na(df$grouping_col) & !is.na(unc_v) & (unc_v <= u_cut) & has_pcs
+    if (sum(table(df$grouping_col[is_active]) >= 2L) < 2L) is_active <- (df$authority_weight > 0) & is_tier1_pure & !is.na(df$grouping_col) & has_pcs
+    if (sum(table(df$grouping_col[is_active]) >= 2L) < 2L) is_active <- is_tier1_pure & !is.na(df$grouping_col) & has_pcs
+    if (sum(table(df$grouping_col[is_active]) >= 2L) < 2L) is_active <- !is.na(df$grouping_col) & has_pcs
+    act_tab <- table(df$grouping_col[is_active]); target_taxa <- sort(names(act_tab[act_tab >= 2L]))
+    if (length(target_taxa) < 2L) target_taxa <- sort(unique(stats::na.omit(df$grouping_col[is_active])))
+    is_active <- is_active & (df$grouping_col %in% target_taxa); is_train_cand <- is_active
   } else {
     df$grouping_col <- df$species_standardized
     is_active <- (df$determiner_tier == "Tier_1_Gold") & is_tier1_pure & (df$grouping_col %in% target_taxa) & has_pcs
@@ -587,15 +583,15 @@ run_gmm_morphotools_pipeline <- function(opts) {
   raw_sp_col <- if ("species_raw" %in% names(closed_df) && any(!is.na(closed_df$species_raw))) closed_df$species_raw else if ("scientificName" %in% names(closed_df)) closed_df$scientificName else closed_df$species_standardized; closed_df$species_standardized <- standardize_packera_taxon(raw_sp_col); closed_df$authority_weight <- compute_authority_precision_weights(closed_df)
   if (!is.null(vouchers_df)) {
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), , drop = FALSE]; v_idx <- match(as.character(closed_df$catalogNumber), as.character(v_sub$catalogNumber))
-    for (col in intersect(names(v_sub), c("institutionCode", "county", "stateProvince", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) if (!col %in% names(closed_df)) closed_df[[col]] <- v_sub[[col]][v_idx]
+    for (col in intersect(names(v_sub), c("institutionCode", "county", "stateProvince", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) if (!col %in% names(closed_df)) closed_df[[col]] <- v_sub[[col]][v_idx]
   }
+  if ("regional_group" %in% names(closed_df) && exists("standardize_epa_l3_label_r", mode = "function")) closed_df$regional_group <- standardize_epa_l3_label_r(closed_df$regional_group)
   closed_df$spatial_balance_weight <- compute_spatial_balance_weights(closed_df)
   allom_res <- test_and_correct_allometry(closed_df, correct_mode = opts$correct_allometry, permutations = opts$permutations, seed = opts$seed, output_report = opts$allometry_report, output_plot = opts$allometry_plot, output_pairwise = opts$allometry_pairwise)
   if (!is.null(allom_res$df)) closed_df <- allom_res$df
   include_repro <- FALSE; feature_cols <- pca_cols
   if (!isTRUE(opts$outline_only)) {
-    if ("capitulum_aspect_ratio" %in% names(closed_df)) closed_df$AR_inv <- suppressWarnings(as.numeric(closed_df$capitulum_aspect_ratio))
-    else if ("AR_inv" %in% names(closed_df)) closed_df$AR_inv <- suppressWarnings(as.numeric(closed_df$AR_inv))
+    if ("capitulum_aspect_ratio" %in% names(closed_df)) closed_df$AR_inv <- suppressWarnings(as.numeric(closed_df$capitulum_aspect_ratio)) else if ("AR_inv" %in% names(closed_df)) closed_df$AR_inv <- suppressWarnings(as.numeric(closed_df$AR_inv))
     if (!is.null(opts$reproductive) && file.exists(opts$reproductive)) {
       repro_df <- read.csv(opts$reproductive, stringsAsFactors = FALSE)
       if ("capitulum_aspect_ratio" %in% names(repro_df) && !"AR_inv" %in% names(repro_df)) repro_df$AR_inv <- suppressWarnings(as.numeric(repro_df$capitulum_aspect_ratio))
@@ -623,26 +619,30 @@ run_gmm_morphotools_pipeline <- function(opts) {
   }
   cand_taxa <- sort(unique(closed_df$species_standardized[!is.na(closed_df$species_standardized) & grepl("^Packera\\s+", closed_df$species_standardized)]))
   tx_n <- table(factor(closed_df$species_standardized, levels = cand_taxa)); target_taxa <- if (sum(tx_n >= 2L) >= 2L) names(tx_n[tx_n >= 2L]) else if (length(cand_taxa) > 0L) cand_taxa else sort(unique(stats::na.omit(closed_df$species_standardized)))
-  gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel))
+  is_intra_mode <- isTRUE(opts$intraspecific_mode) || (length(target_taxa) < 2L)
+  gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel), intraspecific_mode = is_intra_mode)
   dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE); tmp_bic <- paste0(opts$output_report, ".tmp"); write.csv(gmm_res$bic_table, file = tmp_bic, row.names = FALSE); file.rename(tmp_bic, opts$output_report)
   veg_extra <- intersect(c("log_centsize", "aspect_ratio", "solidity"), names(closed_df)); ref_std_idx <- which(closed_df$authority_weight > 0); if (length(ref_std_idx) < 3L) ref_std_idx <- seq_len(nrow(closed_df))
   for (vc in veg_extra) if (all(is.finite(closed_df[[vc]])) && stats::sd(closed_df[[vc]][ref_std_idx]) > 1e-6) closed_df[[paste0(vc, "_std")]] <- (closed_df[[vc]] - mean(closed_df[[vc]][ref_std_idx])) / stats::sd(closed_df[[vc]][ref_std_idx])
   cda_cols <- c(feature_cols, if (!isTRUE(opts$outline_only)) intersect(paste0(veg_extra, "_std"), names(closed_df)) else character(0))
-  is_intra_mode <- isTRUE(opts$intraspecific_mode) || (length(target_taxa) < 2L)
-  cda_res <- run_cda_with_passive_projection(closed_df, cda_cols, target_taxa, gmm_res = gmm_res, intraspecific_mode = is_intra_mode)
+  cda_unsupervised <- run_cda_with_passive_projection(closed_df, cda_cols, target_taxa, gmm_res = gmm_res, intraspecific_mode = is_intra_mode); cda_res <- cda_unsupervised
   audited_df <- audit_misidentifications(closed_df, cda_res, gmm_res); audit_institutional_batch_effects(audited_df, output_csv = opts$output_batch_audit)
-  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source",
-                           "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "determiner_tier", "authority_weight", "spatial_balance_weight",
-                           "cda_predicted_taxon", "cda_posterior_prob", "cda_second_posterior_prob", "cda_posterior_margin", "loocv_accuracy", "is_passive",
-                           "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty",
-                           "can1", "can2", "can3", "pheno_sin", "pheno_cos", "PC1", "PC2", "PC3", "PC4", "PC5", "centroid_size", "log_centsize",
-                           "solidity", "ucs_score", "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std",
-                           "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem",
-                           "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
+  eco_sum_csv <- file.path(dirname(opts$output_report), "ecoregion_supervised_cda_summary.csv")
+  eco_cda_res <- if (exists("run_supervised_ecoregion_cda", mode = "function")) run_supervised_ecoregion_cda(audited_df, cda_cols, gmm_res = gmm_res, output_summary_csv = eco_sum_csv, permutations = opts$permutations, seed = opts$seed) else NULL
+  if (!is.null(eco_cda_res)) {
+    audited_df$regional_group <- eco_cda_res$ecoregion_vec; audited_df$ecoregion_cda_predicted <- eco_cda_res$ecoregion_cda_predicted
+    audited_df$ecoregion_cda_posterior_prob <- eco_cda_res$ecoregion_cda_posterior_prob; audited_df$ecoregion_can1 <- eco_cda_res$ecoregion_can1; audited_df$ecoregion_can2 <- eco_cda_res$ecoregion_can2
+  }
+  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm",
+                           "species_raw", "species_standardized", "determiner_tier", "authority_weight", "spatial_balance_weight", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_posterior_prob",
+                           "cda_posterior_margin", "loocv_accuracy", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty",
+                           "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", "pheno_sin", "pheno_cos", "PC1", "PC2", "PC3", "PC4", "PC5",
+                           "centroid_size", "log_centsize", "solidity", "ucs_score", "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std",
+                           "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]
   dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".tmp"); write.csv(out_df, file = tmp_flags, row.names = FALSE, na = ""); file.rename(tmp_flags, opts$output_flags)
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, feature_cols)
-  tryCatch({ if (file.exists("scripts/morphometrics/pub_figures_utils.R")) { source("scripts/morphometrics/pub_figures_utils.R"); generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot) } }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
+  tryCatch({ if (exists("generate_step04_pub_figures", mode = "function")) generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot, eco_cda_res = eco_cda_res) }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
   return(invisible(out_df))
 }
 if (sys.nframe() == 0) run_gmm_morphotools_pipeline(parse_args_robust())

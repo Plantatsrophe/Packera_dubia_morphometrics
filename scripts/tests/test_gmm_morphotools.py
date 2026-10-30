@@ -824,6 +824,225 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         sh_src = (PROJECT_ROOT / "run_pipeline.sh").read_text(encoding="utf-8")
         self.assertIn("base_outgroups = present_taxa if len(present_taxa) >= 2 else list(mod05.TARGET_TAXA)", sh_src)
 
+    def test_dual_unsupervised_morphotype_and_supervised_epa_ecoregion_cda(self):
+        """Verify Step 04 runs BOTH Track 1 unsupervised Morphotype_K* CDA and Track 2 supervised EPA Level III Ecoregion CDA."""
+        rng = np.random.default_rng(202610)
+        # Three distinct EPA Level III Ecoregions + ungeoreferenced NA vouchers projected passively
+        eco_specs = [
+            ("Piedmont", 35.9132, -79.0558, "North Carolina", "Orange", -3.2, -1.6),
+            ("Middle_Atlantic_Coastal_Plain", 34.2257, -77.9447, "North Carolina", "New Hanover", 3.2, -1.4),
+            ("South_Central_Plains", 31.6035, -94.6555, "Texas", "Nacogdoches", 0.2, 3.0),
+        ]
+        rows = []
+        vouch_rows = []
+        idx_counter = 0
+        for eco_name, lat, lon, st_name, co_name, c1, c2 in eco_specs:
+            for j in range(12):
+                cat = f"DUAL_{idx_counter:03d}"
+                idx_counter += 1
+                tier = "Tier_1_Gold" if j < 6 else ("Tier_2_Silver" if j < 9 else "Tier_3_Bronze")
+                cs = float(24.0 + 1.1 * j)
+                log_cs = float(np.log(cs))
+                rec = {
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "assigned_tier": "Tier_1_Direct",
+                    "n_tier1_leaves": 3,
+                    "n_tier2_leaves": 0,
+                    "morph_tier_source": "Tier_1_Pure",
+                    "species_raw": "Packera anonyma",
+                    "scientificName": "Packera anonyma",
+                    "determiner_tier": tier,
+                    "PC1": float(c1 + rng.normal(0.0, 0.22)),
+                    "PC2": float(c2 + rng.normal(0.0, 0.22)),
+                    "PC3": float(rng.normal(0.0, 0.15)),
+                    "PC4": float(rng.normal(0.0, 0.12)),
+                    "PC5": float(rng.normal(0.0, 0.12)),
+                    "foliar_variance": 0.02,
+                    "leaf_count": 3,
+                    "centroid_size": cs,
+                    "log_centsize": log_cs,
+                    "is_calibrated_mm": True,
+                    "aspect_ratio": float(1.9 + 0.25 * (c1 > 0) + rng.normal(0.0, 0.05)),
+                    "solidity": float(0.88 + rng.normal(0.0, 0.02)),
+                    "ucs_score": 0.94,
+                }
+                for k in range(1, 13):
+                    rec[f"A{k}"] = float((c1 * 0.06) / k + rng.normal(0.0, 0.003))
+                    rec[f"B{k}"] = 0.0
+                    rec[f"C{k}"] = 0.0
+                    rec[f"D{k}"] = float((c2 * 0.06) / k + rng.normal(0.0, 0.003))
+                rows.append(rec)
+                vouch_rows.append({
+                    "catalogNumber": cat,
+                    "species_raw": "Packera anonyma",
+                    "determiner_tier": tier,
+                    "institutionCode": "NCU" if j % 2 == 0 else "TEX",
+                    "stateProvince": st_name,
+                    "county": co_name,
+                    "decimalLatitude": lat if j < 10 else np.nan,
+                    "decimalLongitude": lon if j < 10 else np.nan,
+                    "latitude": lat if j < 10 else np.nan,
+                    "longitude": lon if j < 10 else np.nan,
+                    "regional_group": eco_name,
+                    "doy": 118 + j,
+                })
+
+        # Add 4 ungeoreferenced Fall Line straddling-county vouchers (regional_group = NA) to verify passive projection
+        for u_i in range(4):
+            cat = f"DUAL_NA_{u_i:02d}"
+            rec_na = dict(rows[u_i])
+            rec_na.update({
+                "catalogNumber": cat,
+                "PC1": float(-2.9 + 0.2 * u_i),
+                "PC2": float(-1.5 + 0.1 * u_i),
+            })
+            rows.append(rec_na)
+            vouch_rows.append({
+                "catalogNumber": cat,
+                "species_raw": "Packera anonyma",
+                "determiner_tier": "Tier_1_Gold",
+                "institutionCode": "NCU",
+                "stateProvince": "North Carolina",
+                "county": "Wake",
+                "decimalLatitude": np.nan,
+                "decimalLongitude": np.nan,
+                "latitude": np.nan,
+                "longitude": np.nan,
+                "regional_group": np.nan,
+                "doy": 122,
+            })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            fig_dir = tmp_p / "figures"
+            rep_dir = tmp_p / "reports"
+            fig_dir.mkdir(parents=True, exist_ok=True)
+            rep_dir.mkdir(parents=True, exist_ok=True)
+
+            harm_csv = tmp_p / "leaf_efa_harmonics.csv"
+            vouch_csv = tmp_p / "curated_vouchers.csv"
+            flags_csv = tmp_p / "morphometric_flags.csv"
+            bic_csv = rep_dir / "gmm_bayes_factors_summary.csv"
+            eco_sum_csv = rep_dir / "ecoregion_supervised_cda_summary.csv"
+            cda_pdf = fig_dir / "cda_passive_projection.pdf"
+
+            pd.DataFrame(rows).to_csv(harm_csv, index=False)
+            pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
+
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--vouchers", str(vouch_csv),
+                    "--harmonics", str(harm_csv),
+                    "--output-flags", str(flags_csv),
+                    "--output-report", str(bic_csv),
+                    "--output-plot", str(cda_pdf),
+                    "--output-batch-audit", str(rep_dir / "batch_audit.csv"),
+                    "--allometry-report", str(rep_dir / "allometry.csv"),
+                    "--allometry-pairwise", str(rep_dir / "pairwise.csv"),
+                    "--allometry-plot", str(fig_dir / "allometry.pdf"),
+                    "--focal-taxon", "Packera anonyma",
+                    "--intraspecific-mode",
+                    "--permutations", "199",
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Dual Step 04 failed:\n{proc.stderr}\n{proc.stdout}")
+
+            # 1. Track 1: Unsupervised GMM BIC table evaluates G = 1:eff_k with Two_Delta_BIC vs G = 1
+            self.assertTrue(bic_csv.exists())
+            bic_df = pd.read_csv(bic_csv)
+            self.assertEqual(int(bic_df["K"].iloc[0]), 1)
+            self.assertAlmostEqual(float(bic_df["Two_Delta_BIC"].iloc[0]), 0.0, places=5)
+            self.assertAlmostEqual(
+                float(bic_df["Two_Delta_BIC"].iloc[2]),
+                round(float(bic_df["BIC"].iloc[2] - bic_df["BIC"].iloc[0]), 2),
+                places=2,
+            )
+
+            # 2. Track 1: cda_predicted_taxon is strictly Morphotype_K1..Kn (never regional_group)
+            flags_df = pd.read_csv(flags_csv)
+            self.assertEqual(len(flags_df), 40)
+            pred_morphs = set(flags_df["cda_predicted_taxon"].dropna().astype(str))
+            self.assertGreaterEqual(len(pred_morphs), 2)
+            for m_lbl in pred_morphs:
+                self.assertRegex(m_lbl, r"^Morphotype_K[0-9]+$")
+
+            # 3. Track 2: Supervised EPA Level III Ecoregion CDA columns in morphometric_flags.csv
+            for req_col in ("ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2"):
+                self.assertIn(req_col, flags_df.columns)
+                self.assertFalse(flags_df[req_col].isna().any(), f"{req_col} must be populated for active + NA-projected rows")
+            pred_ecos = set(flags_df["ecoregion_cda_predicted"].dropna().astype(str))
+            self.assertEqual(pred_ecos, {"Piedmont", "Middle_Atlantic_Coastal_Plain", "South_Central_Plains"})
+            # NA-ecoregion rows keep regional_group == NA while receiving projected ecoregion_cda_predicted
+            na_rows = flags_df[flags_df["catalogNumber"].str.startswith("DUAL_NA_")]
+            self.assertEqual(len(na_rows), 4)
+            self.assertTrue(na_rows["regional_group"].isna().all())
+            self.assertTrue((na_rows["ecoregion_cda_predicted"] == "Piedmont").all())
+
+            # 4. Track 2 summary report & fig04c_supervised_ecoregion_cda.{pdf,png}
+            self.assertTrue(eco_sum_csv.exists(), "ecoregion_supervised_cda_summary.csv must be generated")
+            sum_df = pd.read_csv(eco_sum_csv)
+            self.assertEqual(set(sum_df["ecoregion"]), {"Piedmont", "Middle_Atlantic_Coastal_Plain", "South_Central_Plains"})
+            for s_col in (
+                "n_total_vouchers",
+                "n_active_anchors",
+                "loocv_accuracy",
+                "permanova_r2",
+                "permanova_p_value",
+                "ari_morphotype_vs_ecoregion",
+                "fisher_exact_p_value",
+            ):
+                self.assertIn(s_col, sum_df.columns)
+            self.assertGreater(float(sum_df["loocv_accuracy"].iloc[0]), 0.85)
+            self.assertGreater(float(sum_df["permanova_r2"].iloc[0]), 0.50)
+            self.assertGreater(float(sum_df["ari_morphotype_vs_ecoregion"].iloc[0]), 0.50)
+            self.assertLess(float(sum_df["fisher_exact_p_value"].iloc[0]), 0.01)
+
+            for stem in (
+                "fig04a_gmm_bic_and_uncertainty",
+                "fig04b_cda_biplot_and_allometry",
+                "fig04_gmm_cda_clustering",
+                "fig04c_supervised_ecoregion_cda",
+            ):
+                pdf_f = fig_dir / f"{stem}.pdf"
+                png_f = fig_dir / f"{stem}.png"
+                self.assertTrue(pdf_f.exists() and pdf_f.stat().st_size > 3000, f"Missing/empty {pdf_f}")
+                self.assertTrue(png_f.exists() and png_f.stat().st_size > 10000, f"Missing/empty {png_f}")
+
+    def test_r_epa_level3_ecoregion_spatial_helper_agreement(self):
+        """Verify R infer_epa_level3_ecoregion() in pub_figures_utils.R matches Python EPA Level III rules."""
+        r_cmd = (
+            'source("scripts/morphometrics/pub_figures_utils.R"); '
+            'res <- infer_epa_level3_ecoregion('
+            '  lat = c(35.9132, 34.2257, 32.5404, 31.6035, NA, NA, NA), '
+            '  lon = c(-79.0558, -77.9447, -82.9037, -94.6555, NA, NA, NA), '
+            '  state_province = c("NC", "NC", "GA", "TX", "North Carolina", "North Carolina", "NC"), '
+            '  county = c("", "", "", "", "Orange County", "Wake County", "")'
+            '); '
+            'cat(paste(ifelse(is.na(res), "NA", res), collapse = "|"))'
+        )
+        proc = subprocess.run(["Rscript", "-e", r_cmd], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0, f"R spatial helper failed:\n{proc.stderr}")
+        got = proc.stdout.strip().split("|")
+        self.assertEqual(
+            got,
+            [
+                "Piedmont",
+                "Middle_Atlantic_Coastal_Plain",
+                "Southeastern_Plains",
+                "South_Central_Plains",
+                "Piedmont",
+                "NA",
+                "NA",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

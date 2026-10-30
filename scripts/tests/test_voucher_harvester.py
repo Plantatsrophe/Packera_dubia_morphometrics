@@ -1020,6 +1020,117 @@ class TestSpatialBalancingAndThinning(unittest.TestCase):
         self.assertEqual(args.max_per_region, 150)
 
 
+class TestEPALevel3EcoregionAssignment(unittest.TestCase):
+    """Test suite for official US EPA Level III Ecoregion polygon assignment & county-containment fallback."""
+
+    def test_point_in_polygon_epa_level3_ecoregion_assignment(self):
+        """Verify georeferenced points map strictly by polygon intersection across Atlantic, Gulf, TX/AR, and Interior ecoregions."""
+        cases = [
+            # (label, lat, lon, expected_ecoregion)
+            ("Chapel Hill, NC (Piedmont)", 35.9132, -79.0558, "Piedmont"),
+            ("Wilmington, NC (Middle Atlantic Coastal Plain)", 34.2257, -77.9447, "Middle_Atlantic_Coastal_Plain"),
+            ("Dublin, GA (Southeastern Plains)", 32.5404, -82.9037, "Southeastern_Plains"),
+            ("Gainesville, FL (Southern Coastal Plain)", 29.6516, -82.3248, "Southern_Coastal_Plain"),
+            ("Nacogdoches, TX (South Central Plains)", 31.6035, -94.6555, "South_Central_Plains"),
+            ("Camden, AR (South Central Plains)", 33.5846, -92.8343, "South_Central_Plains"),
+            ("College Station, TX (East Central Texas Plains)", 30.6280, -96.3344, "East_Central_Texas_Plains"),
+            ("Greenville, MS (Mississippi Alluvial Plain)", 33.4101, -91.0618, "Mississippi_Alluvial_Plain"),
+            ("Asheville, NC (Blue Ridge)", 35.5951, -82.5515, "Blue_Ridge"),
+            ("Knoxville, TN (Ridge and Valley)", 35.9606, -83.9207, "Ridge_and_Valley"),
+            ("Sewanee, TN (Southwestern Appalachians)", 35.2031, -85.9211, "Southwestern_Appalachians"),
+            ("Nashville, TN (Interior Plateau)", 36.1627, -86.7816, "Interior_Plateau"),
+            ("Harrison, AR (Ozark Highlands)", 36.2298, -93.1077, "Ozark_Highlands"),
+            ("Hot Springs, AR (Ouachita Mountains)", 34.5037, -93.0552, "Ouachita_Mountains"),
+        ]
+        for desc, lat, lon, expected in cases:
+            with self.subTest(desc=desc):
+                # Also pass misleading habitat/state text to prove text heuristics and state lumping are ignored
+                got = infer_regional_group(
+                    lat=lat,
+                    lon=lon,
+                    state_province="Florida",
+                    habitat="sandhills granite flatrock",
+                    locality="Blue Ridge mountains",
+                )
+                self.assertEqual(got, expected, f"Failed for {desc}: got {got!r}, expected {expected!r}")
+                self.assertNotEqual(got, "Other_US")
+
+        # Offshore / Null Island points outside all US EPA Level III polygons must return None (NA), never 'Other_US'
+        self.assertIsNone(infer_regional_group(0.0, 0.0, state_province="Tennessee", county="Cheatham"))
+        self.assertIsNone(infer_regional_group(35.16, -22.28, state_province="South Carolina", county="Greenville"))
+
+    def test_county_containment_fallback_and_straddling_county_na(self):
+        """Verify ungeoreferenced single-ecoregion counties resolve via centroid while straddling/missing counties return None (NA)."""
+        # Single-ecoregion (>= 95% share) counties
+        self.assertEqual(
+            infer_regional_group(None, None, state_province="North Carolina", county="Orange County"),
+            "Piedmont",
+        )
+        self.assertEqual(
+            infer_regional_group(np.nan, np.nan, state_province="NC", county="New Hanover"),
+            "Middle_Atlantic_Coastal_Plain",
+        )
+        self.assertEqual(
+            infer_regional_group(None, None, state_province="TX", county="Nacogdoches Co."),
+            "South_Central_Plains",
+        )
+        self.assertEqual(
+            infer_regional_group(None, None, state_province="Arkansas", county="Baxter County"),
+            "Ozark_Highlands",
+        )
+        self.assertEqual(
+            infer_regional_group(None, None, state_province="AR", county="Garland"),
+            "Ouachita_Mountains",
+        )
+
+        # Multi-ecoregion straddling counties (Fall Line & Blue Ridge Escarpment) must return None (NA)
+        self.assertIsNone(infer_regional_group(None, None, state_province="North Carolina", county="Wake County"))
+        self.assertIsNone(infer_regional_group(None, None, state_province="South Carolina", county="Richland"))
+        self.assertIsNone(infer_regional_group(None, None, state_province="Georgia", county="Bibb County"))
+        self.assertIsNone(infer_regional_group(None, None, state_province="North Carolina", county="Burke"))
+
+        # Missing, ambiguous, or unmatched counties must return None (NA), never 'Other_US'
+        self.assertIsNone(infer_regional_group(None, None, state_province="North Carolina", county=None))
+        self.assertIsNone(infer_regional_group(None, None, state_province="Texas", county=""))
+        self.assertIsNone(infer_regional_group(None, None, state_province="Tennessee", county="Sevier or Blount"))
+        self.assertIsNone(infer_regional_group(None, None, state_province="Ontario", county="Bruce"))
+
+    def test_deterministic_offline_fallback_and_curated_vouchers_integrity(self):
+        """Verify deterministic offline polygon mode and zero 'Other_US' in curated_vouchers.csv."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing_eco = Path(tmpdir) / "nonexistent_eco.geojson"
+            missing_cnty = Path(tmpdir) / "nonexistent_cnty.geojson"
+            self.assertEqual(
+                infer_regional_group(35.91, -79.05, ecoregion_path=missing_eco, county_path=missing_cnty),
+                "Piedmont",
+            )
+            self.assertEqual(
+                infer_regional_group(31.60, -94.65, ecoregion_path=missing_eco, county_path=missing_cnty),
+                "South_Central_Plains",
+            )
+            self.assertEqual(
+                infer_regional_group(None, None, state_province="NC", county="Orange", ecoregion_path=missing_eco, county_path=missing_cnty),
+                "Piedmont",
+            )
+            self.assertIsNone(
+                infer_regional_group(None, None, state_province="NC", county="Wake", ecoregion_path=missing_eco, county_path=missing_cnty),
+            )
+            # Offline fallback must never write synthetic files to disk
+            self.assertFalse(missing_eco.exists())
+            self.assertFalse(missing_cnty.exists())
+
+        prod_csv = Path(__file__).resolve().parents[2] / "data" / "tables" / "curated_vouchers.csv"
+        if prod_csv.exists():
+            df = pd.read_csv(prod_csv, low_memory=False)
+            vals = set(df["regional_group"].dropna().astype(str))
+            self.assertNotIn("Other_US", vals)
+            self.assertNotIn("Coastal_Plain_Sandhills", vals)
+            self.assertNotIn("Piedmont_Granite_Flatrocks", vals)
+            self.assertIn("Piedmont", vals)
+            self.assertIn("Middle_Atlantic_Coastal_Plain", vals)
+            self.assertIn("South_Central_Plains", vals)
+
+
 if __name__ == "__main__":
     unittest.main()
 
