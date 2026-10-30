@@ -125,6 +125,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         stopifnot(standardize_taxon_name("Packera cana (Hook.) W.A.Weber & Á.Löve") == "Packera cana")
         stopifnot(standardize_taxon_name("Packera sanguisorbae (DC.) C.Jeffrey") == "Packera sanguisorbae")
         stopifnot(standardize_taxon_name("Packera hyperborealis") == "Packera hyperborealis")
+        stopifnot(standardize_taxon_name("Packera xylorrhiza") == "Packera xylorrhiza")
 
         taxa8 <- c(
           "Packera streptanthifolia", "Packera aurea", "Packera sanguisorbae", "Packera cymbalaria",

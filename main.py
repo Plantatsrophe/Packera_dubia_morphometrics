@@ -468,6 +468,10 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
             or []
         )
     explicit_taxa = list(args.taxa) if args.taxa else cfg_target_species
+    if not explicit_taxa and getattr(args, "intraspecific_mode", False) and getattr(args, "focal_taxon", None):
+        focal_clean = str(args.focal_taxon).strip()
+        if focal_clean:
+            explicit_taxa = [focal_clean]
     if explicit_taxa:
         cmd.extend(["--taxa", *explicit_taxa])
 
@@ -709,6 +713,10 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         "--max-k", str(max_k),
         "--num-pcs", str(num_pcs),
     ]
+    if getattr(args, "focal_taxon", None):
+        cmd_gmm.extend(["--focal-taxon", str(args.focal_taxon)])
+    if getattr(args, "intraspecific_mode", False):
+        cmd_gmm.append("--intraspecific-mode")
     logger.info(f"Running GMM/CDA: {' '.join(cmd_gmm)}")
     subprocess.run(cmd_gmm, check=True)
     verify_file_exists(flags_out, "morphometric flags CSV")
@@ -771,6 +779,10 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd_xai.append("--export-figures")
     else:
         cmd_xai.append("--no-export-figures")
+    if getattr(args, "focal_taxon", None):
+        cmd_xai.extend(["--focal-taxon", str(args.focal_taxon)])
+    if getattr(args, "intraspecific_mode", False):
+        cmd_xai.append("--intraspecific-mode")
 
     logger.info(f"Running Phase 5 Cleanlab Vision XAI: {' '.join(cmd_xai)}")
     subprocess.run(cmd_xai, check=True)
@@ -816,6 +828,10 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd_spatial.extend(["--permutations", str(args.permutations)])
     if getattr(args, "n_trees", None) is not None:
         cmd_spatial.extend(["--n-trees", str(args.n_trees)])
+    if getattr(args, "focal_taxon", None):
+        cmd_spatial.extend(["--focal-taxon", str(args.focal_taxon)])
+    if getattr(args, "intraspecific_mode", False):
+        cmd_spatial.append("--intraspecific-mode")
 
     logger.info(f"Running Phase 6 Multimodal Spatial RF: {' '.join(cmd_spatial)}")
     subprocess.run(cmd_spatial, check=True)
@@ -1023,7 +1039,14 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: harvest
     p_harvest = subparsers.add_parser("harvest", help="Phase 1: Ingest GBIF occurrences & download images")
     p_harvest.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
-    p_harvest.add_argument("--taxa", nargs="+", default=None, help="Target taxonomic binomials")
+    p_harvest.add_argument(
+        "--taxon",
+        "--taxa",
+        dest="taxa",
+        nargs="+",
+        default=None,
+        help="Target taxonomic binomials (omit to harvest all Packera species genus-wide)",
+    )
     p_harvest.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
     p_harvest.add_argument("--output-csv", type=Path, default=None, help="Curated vouchers output CSV")
     p_harvest.add_argument("--max-records", type=int, default=None, help="Max records per taxon")
@@ -1094,6 +1117,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_morph.add_argument("--harmonics", type=int, default=None, help="Number of Fourier harmonics (k)")
     p_morph.add_argument("--num-pcs", type=int, default=None, help="Number of PCA dimensions")
     p_morph.add_argument("--max-k", type=int, default=None, help="Max GMM mixture components")
+    p_morph.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted morphometric CDA")
+    p_morph.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
 
     # Subcommand: synthesis
     p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Phases 5-7: Vision XAI, Spatial RF, & Triage Dashboard")
@@ -1123,7 +1148,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_all = subparsers.add_parser("run-all", help="Execute complete pipeline (harvest -> segment -> morphometrics -> synthesis)")
     # Merge key arguments from previous stages
     p_all.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
-    p_all.add_argument("--taxa", nargs="+", default=None, help="Target taxonomic binomials")
+    p_all.add_argument(
+        "--taxon",
+        "--taxa",
+        dest="taxa",
+        nargs="+",
+        default=None,
+        help="Target taxonomic binomials (omit to harvest all Packera species genus-wide)",
+    )
     p_all.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
     p_all.add_argument("--output-csv", type=Path, default=None, help="Curated vouchers output CSV")
     p_all.add_argument("--max-records", type=int, default=None, help="Max records per taxon")

@@ -74,7 +74,9 @@ from scripts.core.config import (
 from scripts.core.logger import setup_logging
 
 _SYNONYM_GENERA: Set[str] = {"Packera", "Senecio", "Cineraria"}
-_OPEN_NOMENCLATURE_EPITHETS: Set[str] = {"sp", "spp", "cf", "aff", "indet", "hybrid", "unknown"}
+_OPEN_NOMENCLATURE_EPITHETS: Set[str] = {
+    "sp", "spp", "cf", "aff", "indet", "hybrid", "unknown", "na", "x", "×",
+}
 
 
 def _extract_canonical_binomial(
@@ -92,7 +94,7 @@ def _extract_canonical_binomial(
         return None
     genus = m.group(1).capitalize()
     epithet = m.group(2).lower().strip("-")
-    if not epithet or epithet in _OPEN_NOMENCLATURE_EPITHETS:
+    if len(epithet) < 2 or epithet in _OPEN_NOMENCLATURE_EPITHETS:
         return None
     if allowed_genera is not None and genus not in allowed_genera:
         return None
@@ -266,6 +268,7 @@ def discover_genus_packera_species_gbif(limit: int = 1000) -> List[str]:
             "HOMOTYPIC_SYNONYM",
             "PROPARTE_SYNONYM",
             "MISAPPLIED",
+            "DOUBTFUL",
         }
         discovered: Set[str] = set()
         for item in raw_items:
@@ -524,7 +527,7 @@ def standardize_packera_taxon(raw_name: Any) -> Optional[str]:
     m = re.match(r"^packera(?:\s*×\s*|\s+[x×]\s+|\s+)([a-z][a-z-]*)", s_compact, flags=re.IGNORECASE)
     if m:
         epithet = m.group(1).lower().strip("-")
-        if epithet and epithet not in _OPEN_NOMENCLATURE_EPITHETS:
+        if len(epithet) >= 2 and epithet not in _OPEN_NOMENCLATURE_EPITHETS:
             return f"Packera {epithet}"
         return None
 

@@ -748,12 +748,19 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             self.assertTrue(triage_csv.exists(), f"Missing triage queue at {triage_csv}")
 
     def test_morphometric_outlier_flag_handshake_and_dynamic_stats(self):
-        """Verify morphometric_outlier_flag maps to misidentification_flag and hardcoded CDA/BIC strings are absent."""
+        """Verify morphometric_outlier_flag maps to misidentification_flag and hardcoded CDA/BIC/species constants are absent."""
         r_text = self.r_script_path.read_text(encoding="utf-8")
         self.assertIn("morphometric_outlier_flag", r_text)
         self.assertIn("gmm_bic_model_selection.csv", r_text)
         self.assertIn("--focal-taxon", r_text)
         self.assertIn("--intraspecific-mode", r_text)
+        self.assertIn("outputs/figures/Figure_Integrative_Packera_Revision.pdf", r_text)
+        self.assertIn("outputs/reports/Packera_Taxonomic_Revision_Summary.md", r_text)
+        self.assertNotIn("TARGET_TAXA", r_text)
+        self.assertNotIn("TAXON_COLORS", r_text)
+        self.assertNotIn("nomen_citations", r_text)
+        self.assertNotIn("Packera_dubia_Taxonomic_Revision_Summary.md", r_text)
+        self.assertNotIn("Figure_Integrative_Packera_dubia_Revision.pdf", r_text)
         self.assertNotIn("Canonical Axis 1 (74.2%)", r_text)
         self.assertNotIn("Canonical Axis 2 (18.6%)", r_text)
         self.assertNotIn("10,815.5", r_text)
@@ -1177,6 +1184,12 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             helper_check_csv = tmp / "pub_fig_helpers.csv"
             pd.DataFrame(rows).to_csv(in_csv, index=False)
 
+            dubia_dir = tmp / "dubia_focal"
+            dubia_dir.mkdir(parents=True, exist_ok=True)
+            dubia_rep_def = dubia_dir / "Packera_Taxonomic_Revision_Summary.md"
+            dubia_fig_def = dubia_dir / "Figure_Integrative_Packera_Revision.pdf"
+            dubia_fig_def.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
             r_code = (
                 f'source("{self.r_script_path.as_posix()}"); '
                 f'df <- readr::read_csv("{in_csv.as_posix()}", show_col_types = FALSE); '
@@ -1190,6 +1203,10 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                 f'output_plot = "{focal_plot_default.as_posix()}", focal_taxon = "Packera aurea", '
                 f'gmm_bic = "", gmm_summary = ""); '
                 f'generate_taxonomic_revision_report(res[res$species_standardized == "Packera aurea", , drop = FALSE], opts_focal); '
+                f'opts_dub <- list(output_report = "{dubia_rep_def.as_posix()}", '
+                f'output_plot = "{dubia_fig_def.as_posix()}", focal_taxon = "Packera dubia", '
+                f'gmm_bic = "", gmm_summary = ""); '
+                f'generate_taxonomic_revision_report(res[1:2, , drop = FALSE], opts_dub); '
                 f'pal <- get_dynamic_packera_palette(c("Packera aurea", "Packera obovata", "Packera schweinitziana")); '
                 f't_multi <- format_active_complex_title(c("Packera aurea", "Packera obovata", "Packera schweinitziana"), "CDA Morphospace"); '
                 f't_single <- format_active_complex_title(c("Packera aurea"), "CDA Morphospace"); '
@@ -1251,11 +1268,13 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             self.assertIn("Verified Anthesis Window:", md_multi)
             self.assertNotIn("Packera dubia", md_multi)
 
-            # Verify focal-taxon named copies of report & synthesis figure
+            # Verify focal-taxon named copies of report & synthesis figure (for ANY focal taxon, including Packera aurea and Packera dubia)
             focal_named_md = tmp / "Packera_aurea_Taxonomic_Revision_Summary.md"
             focal_named_pdf = tmp / "Figure_Integrative_Packera_aurea_Revision.pdf"
             self.assertTrue(focal_named_md.exists(), "Expected taxon-named focal Markdown report copy")
             self.assertTrue(focal_named_pdf.exists(), "Expected taxon-named focal PDF synthesis plate copy")
+            self.assertTrue((dubia_dir / "Packera_dubia_Taxonomic_Revision_Summary.md").exists(), "Expected Packera_dubia focal Markdown copy alongside taxon-neutral default")
+            self.assertTrue((dubia_dir / "Figure_Integrative_Packera_dubia_Revision.pdf").exists(), "Expected Packera_dubia focal PDF copy alongside taxon-neutral default")
             md_focal = focal_named_md.read_text(encoding="utf-8")
             self.assertIn(
                 "# Taxonomic Revision and Integrative Species Delimitation in the *Packera aurea* Complex (Asteraceae: Senecioneae)",

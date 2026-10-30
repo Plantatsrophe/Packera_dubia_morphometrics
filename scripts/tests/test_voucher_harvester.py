@@ -1597,6 +1597,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             "results": [
                 {"canonicalName": "Packera franciscana", "rank": "SPECIES", "taxonomicStatus": "ACCEPTED"},
                 {"canonicalName": "Senecio bolanderi", "rank": "SPECIES", "taxonomicStatus": "SYNONYM"},
+                {"canonicalName": "Packera dubitabilis", "rank": "SPECIES", "taxonomicStatus": "DOUBTFUL"},
             ]
         }
 
@@ -1722,6 +1723,24 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
         self.assertEqual(card_row["scientificName"], "Packera cardamine")
         self.assertEqual(card_row["species_raw"], "Senecio cardamine Greene")
 
+        # 3. Fallback when taxa=[] and species discovery returns empty: queries genus-level Packera directly
+        mock_direct_species.name_lookup.return_value = {"results": []}
+        direct_search_calls.clear()
+        with patch("scripts.core.harvester.species", mock_direct_species), \
+             patch("scripts.core.harvester.occ.search", side_effect=_fake_direct_genus_occ):
+            harvester_fallback = VoucherHarvester(taxa=[], max_records_per_taxon=10)
+            self.assertEqual(harvester_fallback.taxa, ["Packera"])
+            df_fb = harvester_fallback.harvest()
+        self.assertEqual(direct_search_calls[0].get("taxonKey"), 3109225)
+        self.assertEqual(set(df_fb["catalogNumber"]), {"TEX_HART_01", "TEX_CARD_02"})
+
+        # 4. Dynamic genus-wide standardize_packera_taxon edge cases (hybrid markers & open nomenclature)
+        self.assertEqual(core_harv.standardize_packera_taxon("Packera ×memmingeri (Britton) Weakley"), "Packera memmingeri")
+        self.assertEqual(core_harv.standardize_packera_taxon("Packera x memmingeri"), "Packera memmingeri")
+        self.assertIsNone(core_harv.standardize_packera_taxon("Packera x"))
+        self.assertIsNone(core_harv.standardize_packera_taxon("Packera ×"))
+        self.assertIsNone(core_harv.standardize_packera_taxon("Packera sp."))
+
     def test_explicit_taxa_harvests_strictly_requested_species(self):
         """Running VoucherHarvester with explicit taxa harvests strictly those species without injecting Packera dubia."""
         queried_taxa = []
@@ -1802,6 +1821,12 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                 taxa_idx = cmd_explicit.index("--taxa")
                 self.assertEqual(cmd_explicit[taxa_idx + 1 : taxa_idx + 3], ["Packera aurea", "Packera obovata"])
                 self.assertNotIn("Packera dubia", cmd_explicit)
+
+            main_parser = root_main.build_parser()
+            parsed_harvest = main_parser.parse_args(["harvest", "--taxon", "Packera aurea", "Packera obovata"])
+            self.assertEqual(parsed_harvest.taxa, ["Packera aurea", "Packera obovata"])
+            parsed_all_empty = main_parser.parse_args(["run-all"])
+            self.assertIsNone(parsed_all_empty.taxa)
 
 
 if __name__ == "__main__":

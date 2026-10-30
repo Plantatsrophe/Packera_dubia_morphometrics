@@ -317,6 +317,25 @@ CUSTOM_GEO_SCOPE=false
 if [[ ( -n "${GEOGRAPHIC_SCOPE}" && "${GEOGRAPHIC_SCOPE}" != "eastern_na" ) || "${INCLUDE_WESTERN}" == "true" || ${#COUNTRIES_RAW[@]} -gt 0 || ${#CUSTOM_TAXA_RAW[@]} -gt 0 ]]; then
   CUSTOM_GEO_SCOPE=true
 fi
+if [[ "${CUSTOM_GEO_SCOPE}" == "false" && -n "${FOCAL_TAXON}" && "${SKIP_HARVEST}" == "false" && "${START_STEP}" -le 1 && -s "${PROJECT_ROOT}/data/tables/curated_vouchers.csv" ]]; then
+  if ! "${PYTHON_MAIN}" -c "
+import sys
+import pandas as pd
+from scripts.core.harvester import standardize_packera_taxon
+csv_p, focal_raw = sys.argv[1], sys.argv[2]
+target = standardize_packera_taxon(focal_raw)
+if not target:
+    sys.exit(1)
+df = pd.read_csv(csv_p, usecols=lambda c: c in ('scientificName', 'species_raw'))
+present = set()
+for col in ('scientificName', 'species_raw'):
+    if col in df.columns:
+        present.update(df[col].dropna().map(standardize_packera_taxon).dropna())
+sys.exit(0 if target in present else 1)
+" "${PROJECT_ROOT}/data/tables/curated_vouchers.csv" "${FOCAL_TAXON}" 2>/dev/null; then
+    CUSTOM_GEO_SCOPE=true
+  fi
+fi
 
 # Determine whether to reuse canonical root data/ store for Steps 01-02
 REUSE_CANONICAL_DATA=false

@@ -100,7 +100,7 @@ standardize_packera_taxon <- function(s_vec) {
     sl <- tolower(sc)
     if (grepl("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?[a-z-]+", sl)) {
       ep <- sub("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?([a-z-]+).*$", "\\1", sl)
-      ep <- sub("^[x×-]+", "", ep)
+      ep <- sub("^[×-]+", "", ep)
       if (nzchar(ep) && !(ep %in% c("sp", "spp", "cf", "aff", "indet", "unknown", "na"))) return(paste("Packera", ep))
     }
     "Unknown"

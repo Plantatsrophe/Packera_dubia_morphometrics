@@ -79,13 +79,22 @@ class TestCleanlabVisionXAI(unittest.TestCase):
 
     def test_taxonomic_standardization(self):
         """Test dynamic species synonymy standardizer and taxon pattern validator across arbitrary Packera species."""
-        self.assertEqual(standardize_packera_taxon("Packera aurea (L.) Á.Löve & D.Löve"), "Packera aurea")
-        self.assertEqual(standardize_packera_taxon("Senecio obovatus Muhl. ex Willd."), "Packera obovata")
-        self.assertEqual(standardize_packera_taxon("Senecio robbinsii Oakes"), "Packera schweinitziana")
-        self.assertEqual(standardize_packera_taxon("Senecio resedifolius Less."), "Packera cymbalaria")
-        self.assertEqual(standardize_packera_taxon("Packera cana (Hook.) W.A.Weber & Á.Löve"), "Packera cana")
-        self.assertEqual(standardize_packera_taxon("Packera streptanthifolia (Greene) W.A.Weber & Á.Löve"), "Packera streptanthifolia")
-        self.assertEqual(standardize_packera_taxon(None), "Unknown")
+        gbif_mock_map = {
+            "Senecio obovatus": {"matchType": "EXACT", "species": "Packera obovata", "usageKey": 101},
+            "Senecio robbinsii": {"matchType": "EXACT", "species": "Packera schweinitziana", "usageKey": 102},
+            "Senecio resedifolius": {"matchType": "EXACT", "species": "Packera cymbalaria", "usageKey": 103},
+        }
+        with mock_patch(
+            "pygbif.species.name_backbone",
+            side_effect=lambda name="", **kw: gbif_mock_map.get(str(name).strip(), {"matchType": "NONE"}),
+        ), mock_patch("pygbif.species.name_usage", return_value={"results": []}):
+            self.assertEqual(standardize_packera_taxon("Packera aurea (L.) Á.Löve & D.Löve"), "Packera aurea")
+            self.assertEqual(standardize_packera_taxon("Senecio obovatus Muhl. ex Willd."), "Packera obovata")
+            self.assertEqual(standardize_packera_taxon("Senecio robbinsii Oakes"), "Packera schweinitziana")
+            self.assertEqual(standardize_packera_taxon("Senecio resedifolius Less."), "Packera cymbalaria")
+            self.assertEqual(standardize_packera_taxon("Packera cana (Hook.) W.A.Weber & Á.Löve"), "Packera cana")
+            self.assertEqual(standardize_packera_taxon("Packera streptanthifolia (Greene) W.A.Weber & Á.Löve"), "Packera streptanthifolia")
+            self.assertEqual(standardize_packera_taxon(None), "Unknown")
 
         for valid_tx in (
             "Packera aurea",
@@ -578,7 +587,15 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         self.assertEqual(step02._standardize_packera_species_py("Unknown"), "Unassigned_Packera")
         self.assertEqual(step02._standardize_packera_species_py("Morphotype_K1"), "Morphotype_K1")
         self.assertEqual(step02._standardize_packera_species_py("Packera aurea (L.) Á.Löve & D.Löve"), "Packera aurea")
-        self.assertEqual(step02._standardize_packera_species_py("Senecio robbinsii Oakes"), "Packera schweinitziana")
+        with mock_patch(
+            "pygbif.species.name_backbone",
+            side_effect=lambda name="", **kw: (
+                {"matchType": "EXACT", "species": "Packera schweinitziana", "usageKey": 102}
+                if "robbinsii" in str(name)
+                else {"matchType": "NONE"}
+            ),
+        ), mock_patch("pygbif.species.name_usage", return_value={"results": []}):
+            self.assertEqual(step02._standardize_packera_species_py("Senecio robbinsii Oakes"), "Packera schweinitziana")
 
         # 2. Label-blind pinnatifid (0.48 <= Solidity < 0.72 -> Tier 1 (Dissected)) across any species name
         pinn_mask = np.zeros((400, 400), dtype=np.uint8)
@@ -663,6 +680,251 @@ class TestCleanlabVisionXAI(unittest.TestCase):
                 r"A. Foliar Solidity vs. Blade Elongation ($\it{Packera\ obovata}$)",
             )
             self.assertNotIn("dubia", captured_title_a[-1])
+
+    def test_step02_post_qc_rosette_masking_excludes_roots_stems_and_cauline_leaves(self):
+        """Verify Step 02 runs crop_dense_rosette_tier4 post-QC, masks non-leaf pixels to [242,239,230], and saves companion mask."""
+        import cv2
+        step02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            vouchers_csv = tmp_path / "curated_vouchers.csv"
+            pd.DataFrame({"catalogNumber": ["NCU_MASK1"], "species_raw": ["Packera aurea"]}).to_csv(vouchers_csv, index=False)
+            weights_p = tmp_path / "dummy.pth"
+            weights_p.write_bytes(b"0")
+            sheet_p = tmp_path / "NCU_MASK1.jpg"
+
+            # Synthetic 600x500 BGR sheet with dark roots at bottom and dark stem/cauline bract at top
+            basal_mask = np.zeros((600, 500), dtype=np.uint8)
+            cv2.ellipse(basal_mask, (250, 370), (65, 85), 0, 0, 360, 255, -1)
+
+            cauline_mask = np.zeros((600, 500), dtype=np.uint8)
+            pts_caul = np.array([[250, 35], [262, 100], [250, 175], [238, 100]], dtype=np.int32)
+            cv2.fillPoly(cauline_mask, [pts_caul], 255)
+
+            sheet_bgr = np.full((600, 500, 3), 215, dtype=np.uint8)
+            sheet_bgr[464:580, 180:320] = (20, 30, 45)    # dark fibrous root mass right below basal leaf (inside 15% crop pad)
+            sheet_bgr[cauline_mask > 0] = (25, 45, 30)    # upper stem/cauline bract
+            sheet_bgr[basal_mask > 0] = (40, 105, 50)     # green basal leaf lamina
+            cv2.imwrite(str(sheet_p), sheet_bgr)
+
+            pipeline = step02.SegmentAndExtractPipeline(
+                vouchers_csv=vouchers_csv,
+                model_weights=weights_p,
+                stage1_weights=weights_p,
+                output_dir=tmp_path / "data",
+                device="cpu",
+            )
+            preds = [
+                ((280, 180, 460, 320), basal_mask, 0.96, 0),
+                ((30, 235, 180, 265), cauline_mask, 0.88, 0),
+            ]
+            with mock_patch.object(pipeline.model_engine, "predict", return_value=preds):
+                records, failure = pipeline.process_voucher("NCU_MASK1", sheet_p, taxon="Packera aurea")
+
+            self.assertIsNone(failure)
+            self.assertEqual(len(records), 1)
+            rosette_jpg = pipeline.rosettes_dense_dir / "NCU_MASK1_p0_rosette.jpg"
+            rosette_mask_png = pipeline.rosettes_dense_dir / "NCU_MASK1_p0_rosette_mask.png"
+            self.assertTrue(rosette_jpg.exists())
+            self.assertTrue(rosette_mask_png.exists())
+
+            with Image.open(rosette_jpg) as _r_im:
+                rosette_rgb = np.array(_r_im.convert("RGB"))
+            with Image.open(rosette_mask_png) as _m_im:
+                rmask = np.array(_m_im.convert("L"))
+            self.assertEqual(rosette_rgb.shape[:2], rmask.shape[:2])
+            # Crop height must cover only the basal leaf + 15% pad (~230 px), NOT the rejected upper cauline bract at y=35
+            self.assertLess(rosette_rgb.shape[0], 300)
+            # Corner / exterior root region outside dilated mask must be neutral herbarium paper [242, 239, 230]
+            np.testing.assert_allclose(rosette_rgb[-2, 2], [242, 239, 230], atol=4)
+
+    def test_tier1_mask_linking_gradcam_leaf_saliency_empirical_fg_ratio_and_oof_probs(self):
+        """Verify Tier_1_Direct basal leaf mask linking, root/stem masking, empirical FG ratios, and true OOF posteriors."""
+        import torch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            data_dir = tmp_path / "data"
+            basal_dir = data_dir / "cropped_patches" / "basal_leaves_raw"
+            dense_dir = data_dir / "cropped_patches" / "rosettes_dense"
+            tier1_mask_dir = data_dir / "masks" / "tier1_intact"
+            tables_dir = data_dir / "tables"
+            for d in (basal_dir, dense_dir, tier1_mask_dir, tables_dir):
+                d.mkdir(parents=True, exist_ok=True)
+
+            # Create 224x224 crops where top-left quadrant is leaf blade and bottom-right has dark brown roots
+            for idx_c, (cat, sp) in enumerate([
+                ("CAT_A", "Packera aurea"),
+                ("CAT_B", "Packera obovata"),
+                ("CAT_C", "Packera cymbalaria"),
+            ]):
+                rgb = np.full((224, 224, 3), fill_value=[235, 232, 222], dtype=np.uint8)
+                rgb[14:110, 14:110] = [45, 110, 40]     # verified basal leaf lamina (top-left)
+                rgb[126:215, 126:215] = [22, 18, 15]    # dark root/stem contaminant (bottom-right)
+                Image.fromarray(rgb).save(basal_dir / f"{cat}_leaf1.jpg")
+
+                exact_m = np.zeros((224, 224), dtype=np.uint8)
+                exact_m[14:110, 14:110] = 255
+                Image.fromarray(exact_m).save(tier1_mask_dir / f"{cat}_leaf1.png")
+
+                # Also drop a companion rosette_mask.png in rosettes_dense to verify *_mask.png is never ingested as RGB
+                Image.fromarray(exact_m).save(dense_dir / f"{cat}_p0_rosette_mask.png")
+
+            # Verify 35%-padded tier1_intact mask window aligns cleanly to a tight 120x100 basal_leaves_raw RGB crop
+            tight_rgb = np.full((120, 100, 3), fill_value=[30, 20, 15], dtype=np.uint8)
+            padded_win_m = np.zeros((204, 170), dtype=np.uint8)
+            padded_win_m[42:162, 35:135] = 255
+            padded_mp = tmp_path / "padded_tier1.png"
+            Image.fromarray(padded_win_m).save(padded_mp)
+            masked_tight = mod_xai.apply_tier1_leaf_mask_to_rgb(tight_rgb, padded_mp, pad_px=0)
+            self.assertEqual(masked_tight.shape, (120, 100, 3))
+            np.testing.assert_array_equal(masked_tight[0, 0], [30, 20, 15])
+            np.testing.assert_array_equal(masked_tight[119, 99], [30, 20, 15])
+
+            vouchers_csv = tables_dir / "curated_vouchers.csv"
+            pd.DataFrame({
+                "catalogNumber": ["CAT_A", "CAT_B", "CAT_C"],
+                "species_raw": ["Packera aurea", "Packera obovata", "Packera cymbalaria"],
+                "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold", "Tier_2_Silver"],
+                "institutionCode": ["NCU", "NY", "US"],
+            }).to_csv(vouchers_csv, index=False)
+
+            manifest_csv = tables_dir / "extracted_leaf_manifest.csv"
+            pd.DataFrame({
+                "catalogNumber": ["CAT_A", "CAT_B", "CAT_C"],
+                "leaf_id": [1, 1, 1],
+                "assigned_tier": ["Tier_1_Direct", "Tier_1_Direct", "Tier_1_Direct"],
+                "solidity": [0.89, 0.91, 0.87],
+                "ucs_score": [0.94, 0.93, 0.92],
+            }).to_csv(manifest_csv, index=False)
+
+            df, _ = mod_xai.load_and_link_rosette_patches(
+                rosette_dir=data_dir / "cropped_patches",
+                vouchers_csv=vouchers_csv,
+                demo=False,
+            )
+            self.assertEqual(len(df), 3)
+            for _, row in df.iterrows():
+                self.assertIn("basal_leaves_raw", str(row["patch_path"]))
+                self.assertTrue(Path(str(row["mask_path"])).is_file())
+                self.assertNotIn("_mask.png", str(row["patch_path"]))
+
+            # Verify RosettePatchDataset masks out dark roots in bottom-right to [242,239,230] and zeroes fg_grid there
+            ds = mod_xai.RosettePatchDataset(df.to_dict("records"))
+            _tensor0, fg_grid0, _, _ = ds[0]
+            self.assertGreater(float(fg_grid0[1:7, 1:7].mean()), 0.85)
+            self.assertEqual(float(fg_grid0[10:15, 10:15].sum()), 0.0, "Dark root quadrant outside Tier_1_Direct mask must have 0 fg_grid weight.")
+
+            # Verify empirical foreground_attention_ratio in extract_dinov2_embeddings across ALL vouchers (not hardcoded 0.85)
+            class MockEnergyViT(torch.nn.Module):
+                def forward_features(self, x: torch.Tensor):
+                    b = x.shape[0]
+                    pt = torch.zeros((b, 256, 768), dtype=torch.float32)
+                    grid = pt.view(b, 16, 16, 768)
+                    grid[:, 2:6, 2:6, 0] = 9.0    # energy 9*16 = 144 inside top-left leaf mask
+                    grid[:, 11:13, 11:13, 0] = 3.0  # energy 3*4 = 12 outside leaf mask -> ratio = 144 / 156 = 0.9231
+                    return {"x_norm_patchtokens": pt, "x_norm_clstoken": pt.mean(dim=1)}
+
+            recs = df.to_dict("records")
+            with mock_patch("torch.hub.load", return_value=MockEnergyViT()):
+                feats, lbls, cats, fg_ratios = extract_dinov2_embeddings(recs, device="cpu", return_fg_ratios=True)
+            self.assertEqual(len(fg_ratios), 3)
+            for fg_v, r_d in zip(fg_ratios, recs):
+                self.assertAlmostEqual(float(fg_v), 144.0 / 156.0, places=3)
+                self.assertAlmostEqual(float(r_d["foreground_attention_ratio"]), 144.0 / 156.0, places=3)
+                self.assertNotAlmostEqual(float(fg_v), 0.85, places=2)
+
+            # Verify generate_gradcam_panel masks roots to [242,239,230], zeroes background saliency, and plots true oof_probs
+            true_oof = [0.17, 0.59, 0.24]
+            recs[0]["oof_probs"] = true_oof
+            recs[0]["predicted_label"] = "Packera obovata"
+            recs[0]["c_error"] = 0.83
+
+            captured_panel = {}
+            orig_savefig = mod_xai.plt.savefig
+
+            def _spy_gradcam(*args, **kwargs):
+                fig = mod_xai.plt.gcf()
+                if len(fig.axes) >= 3:
+                    im0 = np.asarray(fig.axes[0].images[0].get_array())[:, :, :3]
+                    im1 = np.asarray(fig.axes[1].images[0].get_array())[:, :, :3]
+                    bar_widths = [float(p.get_width()) for p in fig.axes[2].patches]
+                    captured_panel["im0"] = im0
+                    captured_panel["im1"] = im1
+                    captured_panel["bars"] = bar_widths
+                return orig_savefig(*args, **kwargs)
+
+            active_tx = ["Packera aurea", "Packera obovata", "Packera cymbalaria"]
+            with mock_patch.object(mod_xai.plt, "savefig", side_effect=_spy_gradcam):
+                mod_xai.generate_gradcam_panel(
+                    [recs[0]],
+                    tmp_path / "gradcam_masked.png",
+                    model=MockEnergyViT(),
+                    active_taxa=active_tx,
+                    class_names=active_tx,
+                    device="cpu",
+                )
+
+            self.assertIn("im0", captured_panel)
+            # Bottom-right root region (e.g. [180, 180]) must be masked to neutral paper [242, 239, 230] in Panel [1] and Panel [2]
+            np.testing.assert_allclose(captured_panel["im0"][180, 180], [242, 239, 230], atol=3)
+            np.testing.assert_array_equal(captured_panel["im1"][180, 180], captured_panel["im0"][180, 180])
+            self.assertAlmostEqual(float(recs[0]["foreground_attention_ratio"]), 144.0 / 156.0, places=2)
+            # Panel [3] bars must match true calibrated oof_probs * 100 = [17.0, 59.0, 24.0] (not synthetic equal-split bars!)
+            np.testing.assert_allclose(captured_panel["bars"], [17.0, 59.0, 24.0], atol=0.2)
+
+    def test_intraspecific_mode_morphotype_cluster_remapping_in_main(self):
+        """Verify --intraspecific-mode and --morphometrics-csv audit Morphotype_K1..Kn clusters in single-species runs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            dense_dir = tmp_path / "data" / "cropped_patches" / "rosettes_dense"
+            tables_dir = tmp_path / "data" / "tables"
+            dense_dir.mkdir(parents=True)
+            tables_dir.mkdir(parents=True)
+
+            cats = [f"INTRA_{i}" for i in range(6)]
+            for idx_i, c in enumerate(cats):
+                col = (45, 105, 40) if idx_i < 3 else (90, 130, 55)
+                Image.new("RGB", (224, 224), color=col).save(dense_dir / f"{c}_p0_rosette.jpg")
+
+            vouchers_csv = tables_dir / "curated_vouchers.csv"
+            pd.DataFrame({
+                "catalogNumber": cats,
+                "species_raw": ["Packera aurea"] * 6,
+                "determiner_tier": ["Tier_1_Gold"] * 6,
+                "institutionCode": ["NCU", "NY", "US", "NCU", "NY", "US"],
+            }).to_csv(vouchers_csv, index=False)
+
+            morph_csv = tables_dir / "morphometric_flags.csv"
+            pd.DataFrame({
+                "catalogNumber": cats,
+                "plant_individual_id": [0] * 6,
+                "gmm_cluster": [1, 1, 1, 2, 2, 2],
+            }).to_csv(morph_csv, index=False)
+
+            out_csv = tables_dir / "label_noise_audit.csv"
+            out_fig = tmp_path / "outputs" / "figures" / "GradCAM_audit_panel.png"
+
+            with mock_patch("torch.hub.load", return_value=mod_xai._DemoViTFeatureExtractor()):
+                with mock_patch("sys.argv", [
+                    "05_cleanlab_vision_xai.py",
+                    "--rosette-dir", str(tmp_path / "data" / "cropped_patches"),
+                    "--vouchers-csv", str(vouchers_csv),
+                    "--morphometrics-csv", str(morph_csv),
+                    "--intraspecific-mode",
+                    "--output-csv", str(out_csv),
+                    "--output-figure", str(out_fig),
+                    "--no-export-figures",
+                ]):
+                    mod_xai.main()
+
+            self.assertTrue(out_csv.exists())
+            exported = pd.read_csv(out_csv)
+            self.assertEqual(len(exported), 6)
+            self.assertEqual(set(exported["given_label"]), {"Morphotype_K1", "Morphotype_K2"})
+            self.assertTrue(set(exported["predicted_label"]).issubset({"Morphotype_K1", "Morphotype_K2"}))
+            self.assertNotIn("oof_probs", exported.columns)
 
 
 if __name__ == "__main__":
