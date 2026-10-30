@@ -29,6 +29,7 @@ from scripts.core.harvester import (
     EASTERN_NA_GBIF_QUERY_TAXA,
     EASTERN_NA_PACKERA_TAXA,
     VoucherHarvester,
+    resolve_geographic_scope_settings,
     setup_logger,
     standardize_packera_taxon,
 )
@@ -38,7 +39,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     """Constructs command-line argument parser for the voucher harvester."""
     cfg = PipelineConfig.from_yaml()
     parser = argparse.ArgumentParser(
-        description="Automated GBIF Voucher Harvester & Determiner Authority Scorer for Packera dubia complex."
+        description="Automated GBIF Voucher Harvester & Determiner Authority Scorer for genus Packera."
     )
     parser.add_argument(
         "--taxon",
@@ -53,6 +54,36 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Harvest all Eastern North American Packera species and historical Senecio basionyms.",
+    )
+    parser.add_argument(
+        "--expand-synonyms",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Dynamically expand target Packera binomials to historical Senecio/Cineraria synonyms via built-in + GBIF Backbone taxonomy (default: True).",
+    )
+    parser.add_argument(
+        "--geographic-scope",
+        choices=["eastern_na", "north_america", "global"],
+        default=cfg.harvesting.geographic_scope,
+        help=f"Geographic scope for GBIF harvesting and longitudinal filtering (default: {cfg.harvesting.geographic_scope}).",
+    )
+    parser.add_argument(
+        "--include-western",
+        action="store_true",
+        default=False,
+        help="Include western North American occurrences (< -106.65 longitude and western US/CA/MX provinces).",
+    )
+    parser.add_argument(
+        "--countries",
+        nargs="+",
+        default=None,
+        help="ISO-2 country codes to query in GBIF (e.g., --countries US CA MX). Defaults to config countries for eastern_na or US CA MX for north_america.",
+    )
+    parser.add_argument(
+        "--home-herbarium",
+        type=str,
+        default=cfg.harvesting.home_herbarium,
+        help=f"Home herbarium institution code prioritized during duplicate exsiccatae selection (default: {cfg.harvesting.home_herbarium}).",
     )
     parser.add_argument(
         "--out-dir",
@@ -175,11 +206,29 @@ def main() -> None:
 
     target_taxa = EASTERN_NA_GBIF_QUERY_TAXA if getattr(args, "all_eastern_taxa", False) else args.taxa
 
+    explicit_countries = getattr(args, "countries", None)
+    arg_scope = getattr(args, "geographic_scope", cfg.harvesting.geographic_scope)
+    arg_include_western = bool(getattr(args, "include_western", False))
+    if (
+        explicit_countries is None
+        and arg_scope == cfg.harvesting.geographic_scope
+        and not arg_include_western
+        and arg_scope == "eastern_na"
+    ):
+        explicit_countries = cfg.harvesting.countries
+
+    eff_scope, eff_exclude_western, eff_countries = resolve_geographic_scope_settings(
+        geographic_scope=arg_scope,
+        exclude_western=args.exclude_western,
+        include_western=arg_include_western,
+        countries=explicit_countries,
+    )
+
     harvester = VoucherHarvester(
         taxa=target_taxa,
         max_uncertainty_meters=args.max_uncertainty,
         max_records_per_taxon=args.max_records,
-        exclude_western=args.exclude_western,
+        exclude_western=eff_exclude_western,
         min_megapixels=args.min_megapixels,
         min_file_size_kb=args.min_file_size_kb,
         check_sharpness=args.check_sharpness,
@@ -193,6 +242,13 @@ def main() -> None:
         spatial_thin_km=args.spatial_thin_km,
         max_per_state=args.max_per_state,
         max_per_region=args.max_per_region,
+        geographic_scope=eff_scope,
+        countries=eff_countries,
+        include_western=arg_include_western,
+        western_longitude_threshold=cfg.thresholds.western_longitude_threshold,
+        expand_synonyms=bool(getattr(args, "expand_synonyms", True)),
+        cfg_synonyms=cfg.taxa.synonyms,
+        home_herbarium=getattr(args, "home_herbarium", cfg.harvesting.home_herbarium),
     )
 
     harvester.run(download_images=args.download_images)

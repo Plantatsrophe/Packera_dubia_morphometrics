@@ -841,6 +841,7 @@ def is_botanical_dissection(
     *,
     contour: Optional[np.ndarray] = None,
     mask: Optional[np.ndarray] = None,
+    bipinnatisect_min_solidity: Optional[float] = None,
 ) -> bool:
     """
     Evaluates whether a leaf contour with lower solidity (0.18 <= Solidity < 0.72)
@@ -884,8 +885,13 @@ def is_botanical_dissection(
         hull_area = float(cv2.contourArea(hull))
         solidity = float(area / hull_area) if hull_area > 0 else 0.0
 
+    eff_min_solidity = (
+        float(bipinnatisect_min_solidity)
+        if bipinnatisect_min_solidity is not None
+        else float(min_solidity)
+    )
     if check_solidity_range:
-        if not (min_solidity <= solidity < max_solidity):
+        if not (eff_min_solidity <= solidity < max_solidity):
             return False
 
     rect = cv2.minAreaRect(cnt_f)
@@ -946,7 +952,7 @@ def is_botanical_dissection(
     else:
         eff_min_defect_count = (
             min(min_defect_count, 2)
-            if (is_native_scan and solidity >= 0.52 and np.any(sig_mask) and float(np.max(depths[sig_mask])) >= 0.11 * blade_width)
+            if (is_native_scan and solidity >= 0.48 and np.any(sig_mask) and float(np.max(depths[sig_mask])) >= 0.11 * blade_width)
             else min_defect_count
         )
     if np.sum(sig_mask) < eff_min_defect_count:
@@ -1556,6 +1562,7 @@ CANONICAL_TIER_MAP: Dict[str, str] = {
     "tier_1": TIER_1_DIRECT,
     "tier 1": TIER_1_DIRECT,
     "tier 1 (dissected)": TIER_1_DIRECT,
+    "tier 1 (bipinnatisect)": TIER_1_DIRECT,
     "tier_1_direct": TIER_1_DIRECT,
     "Tier_1_Direct": TIER_1_DIRECT,
     "tier2": TIER_2_REFLECTED,
@@ -1680,7 +1687,7 @@ def classify_and_route_leaf(
     config: Optional[Any] = None,
     min_ucs: float = 0.85,
     min_solidity: float = 0.72,
-    dissection_min_solidity: float = 0.50,
+    dissection_min_solidity: float = 0.48,
     extract_contours: bool = True,
     num_contour_points: int = 120,
     taxon: Optional[str] = None,
@@ -1701,20 +1708,25 @@ def classify_and_route_leaf(
     max_tissue_border_ratio: float = 0.15,
 ) -> LeafRoutingResult:
     """
-    Comprehensive geometric quality gatekeeper and routing engine:
+    Comprehensive 100% label-blind geometric quality gatekeeper and routing engine:
       1. Evaluates midrib pose and initial solidity/UCS metrics.
       2. Straight-chord fold detection:
          - If folded along midrib (is_folded = True), symmetrically reflects hemi-blade
            into synthesized bilateral silhouette and routes to Tier 2.
          - If irregular/diagonal fold (is_irregular_fold = True), routes to Failed QC.
-      3. Botanical dissection inspection:
-         - If min_dissected <= solidity < min_solidity and bilateral convexity defects indicate
-           botanical lobing/dissection (or taxon has lyrate tendency), accepts leaf into Tier 1 (Dissected).
+      3. Botanical dissection inspection (strictly intrinsic bilateral sinus geometry):
+         - If 0.48 <= solidity < min_solidity and bilateral convexity defects indicate
+           pinnatifid/lyrate lobing via is_botanical_dissection(), accepts into Tier 1 (Dissected).
+         - If 0.18 <= solidity < 0.48 with >= 4 deep bilateral convexity-hull sinuses,
+           accepts into Tier 1 (Bipinnatisect).
+         - Note: `taxon` and `taxa_with_lyrate_tendency` are retained strictly as deprecated
+           no-ops for backward compatibility and never influence routing.
       4. Standard pristine gatekeeping:
          - Leaves with UCS >= min_ucs and Solidity >= min_solidity route to Tier 1.
       5. Fallback hemi-blade reflection (Tier 2):
          - Partially occluded leaves attempt 2-path reflection or route to Failed QC.
     """
+    _ = (taxon, taxa_with_lyrate_tendency)  # Deprecated no-ops; routing is 100% label-blind
     if config is not None:
         thresh = getattr(config, "thresholds", config)
         if hasattr(thresh, "min_ucs"):
@@ -1727,7 +1739,7 @@ def classify_and_route_leaf(
         elif isinstance(thresh, dict) and "min_solidity" in thresh:
             min_solidity = thresh.get("min_solidity", min_solidity)
 
-        # Dissection configuration
+        # Dissection configuration (strictly geometric; no species-name overrides)
         diss_cfg = getattr(thresh, "dissection", None) or getattr(thresh, "solidity", None)
         if diss_cfg is not None and not isinstance(diss_cfg, dict):
             if dissection_enabled is None:
@@ -1739,8 +1751,6 @@ def classify_and_route_leaf(
                 sinus_defect_min_depth_ratio = getattr(diss_cfg, "sinus_defect_min_depth_ratio", 0.08)
             if min_bilateral_sinus_count is None:
                 min_bilateral_sinus_count = getattr(diss_cfg, "min_bilateral_sinus_count", 3)
-            if taxa_with_lyrate_tendency is None:
-                taxa_with_lyrate_tendency = getattr(diss_cfg, "taxa_with_lyrate_tendency", None)
         elif isinstance(thresh, dict):
             diss_dict = thresh.get("dissection") or thresh.get("solidity")
             if isinstance(diss_dict, dict):
@@ -1753,8 +1763,6 @@ def classify_and_route_leaf(
                     sinus_defect_min_depth_ratio = diss_dict.get("sinus_defect_min_depth_ratio", 0.08)
                 if min_bilateral_sinus_count is None:
                     min_bilateral_sinus_count = diss_dict.get("min_bilateral_sinus_count", 3)
-                if taxa_with_lyrate_tendency is None:
-                    taxa_with_lyrate_tendency = diss_dict.get("taxa_with_lyrate_tendency")
 
         # Fold detection configuration
         fold_cfg = getattr(thresh, "fold_detection", None)
@@ -1778,13 +1786,6 @@ def classify_and_route_leaf(
             if min_chord_length_px is None:
                 min_chord_length_px = fold_dict.get("min_chord_length_px")
 
-    if taxa_with_lyrate_tendency is None:
-        taxa_with_lyrate_tendency = [
-            "Packera paupercula",
-            "Packera plattensis",
-            "Packera paupercula var. paupercula",
-            "Packera paupercula var. savannarum",
-        ]
     if max_chord_deviation_ratio is None:
         max_chord_deviation_ratio = 0.035
     if max_folded_aspect_ratio is None:
@@ -2016,7 +2017,7 @@ def classify_and_route_leaf(
     if is_bipinnatisect_window:
         if eff_diss_ucs < 0.55:
             allow_dissection = False
-    elif is_high_res_mask and (ucs < 0.70 or solidity < max(dissection_min_solidity, 0.52)):
+    elif is_high_res_mask and (ucs < 0.70 or solidity < max(dissection_min_solidity, 0.48)):
         allow_dissection = False
 
     if dissection_enabled and (eff_diss_min_sol <= solidity < min_solidity) and allow_dissection:
@@ -2035,8 +2036,9 @@ def classify_and_route_leaf(
         if dissected and (eff_diss_ucs >= min_req_ucs or (not is_high_res_mask and eff_diss_ucs >= 0.55)):
             coords = resample_normalized_contour(mask, num_contour_points, petiole_attachment_pt=p_base) if extract_contours else None
             meta["reflection_applied"] = False
+            dissected_tier = "Tier 1 (Bipinnatisect)" if is_bipinnatisect_window else "Tier 1 (Dissected)"
             return LeafRoutingResult(
-                tier="Tier 1 (Dissected)",
+                tier=dissected_tier,
                 assigned_tier="tier1",
                 solidity=solidity,
                 ucs=eff_diss_ucs,

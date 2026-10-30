@@ -394,6 +394,207 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             self.assertTrue(captured_yticks)
             self.assertEqual(captured_yticks[0], ["P. anonyma", "P. dubia", "P. paupercula"])
 
+    def test_dynamic_non_dubia_species_audit_tomentum_discordance_and_figures(self):
+        """Verify dynamic non-dubia taxa indexing, empirical chromatic tomentum discordance, and Step 05 figures."""
+        from unittest.mock import patch as mock_patch
+
+        non_dubia_taxa = ["Packera aurea", "Packera obovata", "Packera schweinitziana"]
+        palette = mod_xai._get_dynamic_okabe_ito_map(non_dubia_taxa)
+        self.assertEqual(len(set(palette.values())), 3)
+        self.assertEqual(palette["Packera aurea"], "#0072B2")
+        self.assertEqual(palette["Packera obovata"], "#D55E00")
+        self.assertEqual(palette["Packera schweinitziana"], "#009E73")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            rosette_dir = tmp_path / "cropped_patches"
+            dense_dir = rosette_dir / "rosettes_dense"
+            dense_dir.mkdir(parents=True)
+
+            voucher_rows = []
+            # 3 species x 4 vouchers = 12 sheets (zero Packera dubia records)
+            for idx_sp, sp_name in enumerate(non_dubia_taxa):
+                for j in range(4):
+                    cat = f"NONDUB_{idx_sp}_{j}"
+                    is_abax = (idx_sp == 0 and j == 3)
+                    # Bright desaturated RGB for abaxial sheet; darker green for adaxial sheets;
+                    # slightly brighter adaxial baseline for P. schweinitziana (idx_sp == 2)
+                    rgb_color = (228, 232, 224) if is_abax else ((155, 165, 150) if idx_sp == 2 else (45, 95, 35))
+                    Image.new("RGB", (240, 240), color=rgb_color).save(dense_dir / f"{cat}_p0_rosette.jpg")
+                    voucher_rows.append({
+                        "catalogNumber": cat,
+                        "species_raw": sp_name,
+                        "determiner_tier": "Tier_1_Gold" if j < 3 else "Tier_2_Silver",
+                        "institutionCode": ["NCU", "NY", "US", "MO"][j],
+                    })
+
+            vouchers_csv = tmp_path / "curated_vouchers.csv"
+            pd.DataFrame(voucher_rows).to_csv(vouchers_csv, index=False)
+
+            df, class_to_idx = mod_xai.load_and_link_rosette_patches(
+                rosette_dir=rosette_dir,
+                vouchers_csv=vouchers_csv,
+                demo=False,
+            )
+            self.assertEqual(
+                class_to_idx,
+                {"Packera aurea": 0, "Packera obovata": 1, "Packera schweinitziana": 2},
+            )
+            self.assertNotIn("Packera dubia", set(df["taxon"]))
+            self.assertNotIn("Packera dubia", class_to_idx)
+
+            # Construct probabilities where the abaxial P. aurea sheet (NONDUB_0_3, label 0) is strongly
+            # mispredicted as higher-luminance P. schweinitziana (class 2) with c_error = 0.94 > 0.85
+            labels = df["label_idx"].to_numpy(dtype=int)
+            pred_probs = np.zeros((len(df), 3), dtype=np.float64)
+            for i, lbl in enumerate(labels):
+                if df.loc[i, "catalogNumber"] == "NONDUB_0_3":
+                    pred_probs[i] = [0.04, 0.02, 0.94]
+                else:
+                    pred_probs[i] = [0.04, 0.04, 0.04]
+                    pred_probs[i, lbl] = 0.92
+
+            active_names = ["Packera aurea", "Packera obovata", "Packera schweinitziana"]
+            audit = run_confident_learning_audit(
+                pred_probs=pred_probs,
+                labels=labels,
+                records_df=df,
+                class_names=active_names,
+                error_threshold=0.85,
+            )
+
+            for col_chk in ("species_standardized", "given_label", "predicted_label", "vision_predicted_label"):
+                self.assertNotIn("Packera dubia", set(audit[col_chk]))
+
+            abax_row = audit[audit["catalogNumber"] == "NONDUB_0_3"].iloc[0]
+            self.assertEqual(abax_row["surface_orientation"], "abaxial")
+            self.assertTrue(bool(abax_row["tomentum_taxon_discordance"]))
+            adax_rows = audit[audit["catalogNumber"] != "NONDUB_0_3"]
+            self.assertFalse(bool(adax_rows["tomentum_taxon_discordance"].any()))
+
+            # Also verify graceful constant-luminance (0.0) fallback on synthetic unit-test fixtures
+            synth_df = pd.DataFrame({
+                "catalogNumber": ["S1", "S2"],
+                "species_raw": ["Packera anonyma", "Packera dubia"],
+                "surface_orientation": ["abaxial", "adaxial"],
+                "mean_luminance": [0.0, 0.0],
+                "mean_saturation": [0.0, 0.0],
+            })
+            synth_audit = run_confident_learning_audit(
+                pred_probs=np.array([[0.05, 0.95], [0.05, 0.95]]),
+                labels=np.array([0, 1]),
+                records_df=synth_df,
+                class_names=["Packera anonyma", "Packera dubia"],
+                error_threshold=0.85,
+            )
+            self.assertTrue(bool(synth_audit.loc[0, "tomentum_taxon_discordance"]))
+            self.assertFalse(bool(synth_audit.loc[1, "tomentum_taxon_discordance"]))
+
+            # Verify generate_step05_publication_figures renders without injecting Packera dubia
+            captured_fig05b_labels = []
+            orig_fig_savefig = mod_xai.plt.Figure.savefig
+
+            def _spy_fig_savefig(fig_self, *args, **kwargs):
+                if len(fig_self.axes) >= 2:
+                    xt = [t.get_text() for t in fig_self.axes[0].get_xticklabels()]
+                    _, leg_lbls = fig_self.axes[1].get_legend_handles_labels()
+                    captured_fig05b_labels.append((xt, leg_lbls))
+                return orig_fig_savefig(fig_self, *args, **kwargs)
+
+            with mock_patch.dict("os.environ", {"PACKERA_RUN_DIR": ""}, clear=False):
+                with mock_patch.object(mod_xai.plt.Figure, "savefig", _spy_fig_savefig):
+                    fig_paths = mod_xai.generate_step05_publication_figures(
+                        audit, tmp_path / "figures" / "GradCAM_audit_panel.png"
+                    )
+            self.assertTrue(fig_paths["pdf"].exists())
+            self.assertTrue(fig_paths["png"].exists())
+            self.assertTrue(captured_fig05b_labels)
+            xt_labels, leg_labels = captured_fig05b_labels[0]
+            self.assertEqual(xt_labels, ["P. aurea", "P. obovata", "P. schweinitziana"])
+            self.assertEqual(leg_labels, ["P. aurea", "P. obovata", "P. schweinitziana"])
+            self.assertNotIn("P. dubia", xt_labels)
+
+    def test_step02_label_blind_dissection_and_dynamic_taxon_figures(self):
+        """Verify Phase 2 label-blind Dissected/Bipinnatisect routing and non-dubia dynamic Step 02 figures."""
+        import cv2
+        from unittest.mock import patch as mock_patch
+        from scripts.vision.lm2_geometry_utils import classify_and_route_leaf
+
+        step02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
+
+        # 1. _standardize_packera_species_py preserves valid binomials/morphotypes without forcing Packera dubia
+        self.assertEqual(step02._standardize_packera_species_py(None), "Unassigned_Packera")
+        self.assertEqual(step02._standardize_packera_species_py("Unknown"), "Unassigned_Packera")
+        self.assertEqual(step02._standardize_packera_species_py("Morphotype_K1"), "Morphotype_K1")
+        self.assertEqual(step02._standardize_packera_species_py("Packera aurea (L.) Á.Löve & D.Löve"), "Packera aurea")
+        self.assertEqual(step02._standardize_packera_species_py("Senecio robbinsii Oakes"), "Packera schweinitziana")
+
+        # 2. Label-blind pinnatifid (0.48 <= Solidity < 0.72 -> Tier 1 (Dissected)) across any species name
+        pinn_mask = np.zeros((400, 400), dtype=np.uint8)
+        cx, cy = 200, 200
+        cv2.ellipse(pinn_mask, (cx, cy - 70), (35, 45), 0, 0, 360, 255, -1)
+        cv2.line(pinn_mask, (cx, cy - 100), (cx, cy + 100), 255, thickness=16)
+        for y_off in (-20, 20, 60):
+            cv2.ellipse(pinn_mask, (cx - 35, cy + y_off), (35, 12), -15, 0, 360, 255, -1)
+            cv2.ellipse(pinn_mask, (cx + 35, cy + y_off), (35, 12), 15, 0, 360, 255, -1)
+        res_aurea = classify_and_route_leaf(pinn_mask, taxon="Packera aurea")
+        res_obovata = classify_and_route_leaf(pinn_mask, taxon="Packera obovata", taxa_with_lyrate_tendency=[])
+        self.assertEqual(res_aurea.tier, "Tier 1 (Dissected)")
+        self.assertEqual(res_obovata.tier, "Tier 1 (Dissected)")
+        self.assertEqual(res_aurea.canonical_tier, "Tier_1_Direct")
+
+        # 3. Label-blind bipinnatisect (0.18 <= Solidity < 0.48 with >= 4 sinuses -> Tier 1 (Bipinnatisect))
+        bipinn_mask = np.zeros((400, 400), dtype=np.uint8)
+        cv2.line(bipinn_mask, (cx, 80), (cx, 320), 255, thickness=8)
+        for y_off in (-90, -45, 0, 45, 90):
+            cv2.line(bipinn_mask, (cx - 58, cy + y_off), (cx + 58, cy + y_off), 255, thickness=7)
+        res_mille = classify_and_route_leaf(bipinn_mask, taxon="Packera millefolium")
+        self.assertGreaterEqual(res_mille.solidity, 0.18)
+        self.assertLess(res_mille.solidity, 0.48)
+        self.assertEqual(res_mille.tier, "Tier 1 (Bipinnatisect)")
+        self.assertEqual(res_mille.canonical_tier, "Tier_1_Direct")
+
+        # 4. Step 02 figures dynamically title & style non-dubia species without injecting Packera dubia
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_fig_dir = Path(tmpdir) / "outputs" / "figures"
+            df_multi = pd.DataFrame({
+                "catalogNumber": [f"V{i}" for i in range(6)],
+                "leaf_id": [1] * 6,
+                "assigned_tier": ["Tier_1_Direct"] * 6,
+                "species_standardized": [
+                    "Packera aurea", "Packera aurea",
+                    "Packera obovata", "Packera obovata",
+                    "Packera schweinitziana", "Packera schweinitziana",
+                ],
+                "solidity": [0.85, 0.88, 0.90, 0.87, 0.62, np.nan],
+                "ucs_score": [0.92] * 6,
+                "aspect_ratio": [1.45, np.nan, 1.80, 1.90, 2.50, np.nan],
+            })
+            captured_title_a = []
+            orig_save02 = step02._atomic_save_matplotlib_fig
+
+            def _spy_save02(fig, out_base_path, dpi=300):
+                if Path(out_base_path).name == "fig02a_segmentation_qc_distributions":
+                    captured_title_a.append(fig.axes[0].get_title(loc="left") or fig.axes[0].get_title())
+                return orig_save02(fig, out_base_path, dpi=dpi)
+
+            with mock_patch.dict("os.environ", {"PACKERA_FOCAL_TAXON": ""}, clear=False):
+                with mock_patch.object(step02, "_atomic_save_matplotlib_fig", side_effect=_spy_save02):
+                    saved_multi = step02.generate_step02_publication_figures(
+                        df_multi, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), tmp_fig_dir
+                    )
+            self.assertTrue(saved_multi["fig02a_png"].exists())
+            self.assertIn("$N = 3$ Taxa", captured_title_a[-1])
+            self.assertNotIn("dubia", captured_title_a[-1])
+
+            with mock_patch.dict("os.environ", {"PACKERA_FOCAL_TAXON": "Packera aurea"}, clear=False):
+                with mock_patch.object(step02, "_atomic_save_matplotlib_fig", side_effect=_spy_save02):
+                    step02.generate_step02_publication_figures(
+                        df_multi, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), tmp_fig_dir
+                    )
+            self.assertIn(r"$\it{Packera\ aurea}$ Complex", captured_title_a[-1])
+            self.assertNotIn("dubia", captured_title_a[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -326,6 +326,109 @@ class TestFourierExtractor(unittest.TestCase):
                     err_msg=f"Tier_3_Bronze perturbation must not alter individual reference {pc_col} scores.",
                 )
 
+    def test_zero_gold_silver_species_adaptive_anchor_promotion_in_step03(self):
+        """Verify Step 03 promotes clean Tier_3_Bronze anchors for 0-Gold/Silver species into EFA PCA covariance."""
+        t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
+
+        def write_contour_csv(path: Path, cat: str, lid: int, a: float, b: float, d2_mod: float = 0.0):
+            x = a * np.cos(t)
+            y = b * np.sin(t) * (1.0 + d2_mod * np.cos(t))
+            pd.DataFrame({
+                "catalogNumber": cat,
+                "leaf_id": lid,
+                "point_index": np.arange(120),
+                "x": x + 200.0,
+                "y": y + 200.0,
+            }).to_csv(path, index=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            contours_dir = tmp_p / "contours"
+            contours_dir.mkdir(parents=True, exist_ok=True)
+            vouchers_csv = tmp_p / "curated_vouchers.csv"
+            manifest_csv = tmp_p / "extracted_leaf_manifest.csv"
+
+            vouchers = [
+                {"catalogNumber": "D_G1", "species_raw": "Packera dubia", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "D_G2", "species_raw": "Packera dubia", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "D_B1", "species_raw": "Packera dubia", "determiner_tier": "Tier_3_Bronze"},
+                {"catalogNumber": "A_S1", "species_raw": "Packera anonyma", "determiner_tier": "Tier_2_Silver"},
+                {"catalogNumber": "A_S2", "species_raw": "Packera anonyma", "determiner_tier": "Tier_2_Silver"},
+                # Rare endemic Packera serpenticola with ZERO Gold and ZERO Silver vouchers (only Bronze)
+                {"catalogNumber": "R_B1", "species_raw": "Packera serpenticola", "determiner_tier": "Tier_3_Bronze"},
+                {"catalogNumber": "R_B2", "species_raw": "Packera serpenticola", "determiner_tier": "Tier_3_Bronze"},
+                {"catalogNumber": "R_B3", "species_raw": "Packera serpenticola", "determiner_tier": "Tier_3_Bronze"},
+            ]
+            pd.DataFrame(vouchers).to_csv(vouchers_csv, index=False)
+
+            specs = [
+                ("D_G1", 92.0, 38.0, -0.14),
+                ("D_G2", 90.0, 40.0, -0.12),
+                ("D_B1", 89.0, 41.0, -0.10),
+                ("A_S1", 96.0, 28.0, 0.16),
+                ("A_S2", 94.0, 30.0, 0.14),
+                ("R_B1", 72.0, 58.0, 0.28),
+                ("R_B2", 74.0, 56.0, 0.26),
+                ("R_B3", 73.0, 57.0, 0.27),
+            ]
+            manifest_rows = []
+            for cat, a_v, b_v, d2_v in specs:
+                cpath = contours_dir / f"{cat}_leaf1.csv"
+                write_contour_csv(cpath, cat, 1, a_v, b_v, d2_v)
+                manifest_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "leaf_id": 1,
+                    "assigned_tier": "Tier_1_Direct",
+                    "pixels_per_mm": 10.0,
+                    "is_calibrated_mm": True,
+                    "solidity": 0.93,
+                    "ucs_score": 0.94,
+                    "contour_path": str(cpath),
+                })
+            pd.DataFrame(manifest_rows).to_csv(manifest_csv, index=False)
+
+            out_spec = tmp_p / "leaf_efa_harmonics.csv"
+            out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--contours-dir", str(contours_dir),
+                    "--masks-dir", str(tmp_p / "masks"),
+                    "--vouchers", str(vouchers_csv),
+                    "--manifest", str(manifest_csv),
+                    "--output", str(out_spec),
+                    "--output-individual", str(out_ind),
+                    "--report-out", str(tmp_p / "tier_rep.csv"),
+                    "--plot-out", str(tmp_p / "tier_fig.pdf"),
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 03 failed on 0-Gold/Silver species:\n{proc.stderr}\n{proc.stdout}")
+            spec_df = pd.read_csv(out_spec)
+            self.assertEqual(len(spec_df), 8)
+
+            # Gold-covered Packera dubia's Bronze voucher remains strictly passive (authority_weight == 0.0)
+            self.assertEqual(float(spec_df.loc[spec_df["catalogNumber"] == "D_B1", "authority_weight"].iloc[0]), 0.0)
+
+            # 0-Gold/Silver Packera serpenticola promotes clean Bronze anchors with positive Empirical Bayes weights
+            rare_rows = spec_df[spec_df["catalogNumber"].isin(["R_B1", "R_B2", "R_B3"])]
+            self.assertGreaterEqual(int((rare_rows["authority_weight"] > 0.0).sum()), 2)
+
+            # Hierarchical Empirical Bayes active weight ordering: Gold > Silver > Promoted Bronze > 0
+            w_gold = float(spec_df.loc[spec_df["catalogNumber"] == "D_G1", "authority_weight"].iloc[0])
+            w_silver = float(spec_df.loc[spec_df["catalogNumber"] == "A_S1", "authority_weight"].iloc[0])
+            w_promo = float(rare_rows.loc[rare_rows["authority_weight"] > 0.0, "authority_weight"].iloc[0])
+            self.assertGreater(w_gold, w_silver)
+            self.assertGreater(w_silver, w_promo)
+            self.assertGreater(w_promo, 0.0)
+            active_w = spec_df.loc[spec_df["authority_weight"] > 0.0, "authority_weight"]
+            self.assertAlmostEqual(float(active_w.mean()), 1.0, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()

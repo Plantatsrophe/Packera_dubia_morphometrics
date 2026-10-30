@@ -571,12 +571,16 @@ class TestGMMAndMorphoTools(unittest.TestCase):
 
             flags1, bic1, allom1 = run_step04_df(df_base, "base")
 
-            # Verify Tier_3_Bronze has authority_weight == 0.0 and is_passive == True, while Gold/Silver have 1.0
+            # Verify Tier_3_Bronze has authority_weight == 0.0 and is_passive == True, while Gold/Silver have EB active weights (mean == 1.0, Gold > Silver)
             bronze_rows = flags1[flags1["determiner_tier"] == "Tier_3_Bronze"]
             active_rows = flags1[flags1["determiner_tier"].isin(["Tier_1_Gold", "Tier_2_Silver"])]
+            gold_rows = flags1[flags1["determiner_tier"] == "Tier_1_Gold"]
+            silver_rows = flags1[flags1["determiner_tier"] == "Tier_2_Silver"]
             self.assertTrue((bronze_rows["authority_weight"] == 0.0).all())
             self.assertTrue((bronze_rows["is_passive"] == True).all())
-            self.assertTrue((active_rows["authority_weight"] == 1.0).all())
+            self.assertTrue((active_rows["authority_weight"] > 0.0).all())
+            self.assertAlmostEqual(float(active_rows["authority_weight"].mean()), 1.0, places=4)
+            self.assertGreater(float(gold_rows["authority_weight"].mean()), float(silver_rows["authority_weight"].mean()))
 
             # Drastically perturb all Tier_3_Bronze rows in PC space, size, and harmonics
             df_pert = df_base.copy()
@@ -1334,6 +1338,168 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertEqual(len(p_df), 1)
             self.assertEqual(p_df["contrast"].iloc[0], "Morphotype_K1 vs Morphotype_K2")
             self.assertGreater(float(p_df["hotelling_t2"].iloc[0]), 20.0)
+
+    def test_zero_gold_species_adaptive_anchor_promotion_and_empirical_bayes_weights(self):
+        """Verify multi-species GMM and CDA succeed via Adaptive Anchor Promotion when species have 0 Tier_1_Gold vouchers."""
+        r_src = self.r_script_path.read_text(encoding="utf-8")
+        self.assertNotIn("Glabrescent_P_dubia_Misidentified_as_P_anonyma", r_src)
+        self.assertIn("Unassigned_Packera", r_src)
+
+        rng = np.random.default_rng(202604)
+        rows = []
+        vouch_rows = []
+
+        # Species 1: Packera dubia (has Gold, Silver, and Bronze + 1 discordant Bronze misidentified near P. anonyma)
+        # Species 2: Packera anonyma (0 Tier_1_Gold — only 3 Tier_2_Silver + 7 Tier_3_Bronze including 1 extreme outlier)
+        # Species 3: Packera serpenticola (0 Tier_1_Gold and 0 Tier_2_Silver — only 10 Tier_3_Bronze including 1 extreme outlier)
+        species_specs = [
+            ("Packera dubia", (-5.0, -1.8, 0.4), ["Tier_1_Gold"] * 5 + ["Tier_2_Silver"] * 4 + ["Tier_3_Bronze"] * 3),
+            ("Packera anonyma", (5.0, -1.5, -0.4), ["Tier_2_Silver"] * 3 + ["Tier_3_Bronze"] * 7),
+            ("Packera serpenticola", (0.0, 4.8, 0.8), ["Tier_3_Bronze"] * 10),
+        ]
+
+        for s_idx, (sp, (c1, c2, c3), tiers) in enumerate(species_specs):
+            for j, tier in enumerate(tiers):
+                cat = f"ADAPT_{s_idx}_{j:02d}"
+                pc1 = float(c1 + rng.normal(0.0, 0.16))
+                pc2 = float(c2 + rng.normal(0.0, 0.16))
+                pc3 = float(c3 + rng.normal(0.0, 0.12))
+                # Inject discordant / outlier Bronze rows to test Mahalanobis screening & generalized discordance_reason
+                if sp == "Packera dubia" and j == len(tiers) - 1:
+                    pc1, pc2, pc3 = 5.05, -1.45, -0.38  # Misidentified P. dubia sitting inside P. anonyma morphospace
+                elif sp == "Packera anonyma" and j == len(tiers) - 1:
+                    pc1, pc2, pc3 = -18.0, 16.0, 9.0    # Extreme Bronze outlier -> must NOT be promoted
+                elif sp == "Packera serpenticola" and j == len(tiers) - 1:
+                    pc1, pc2, pc3 = 19.0, -17.0, -8.0   # Extreme Bronze outlier -> must NOT be promoted
+
+                cs = float(26.0 + 0.9 * j)
+                log_cs = float(np.log(cs))
+                row = {
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "assigned_tier": "Tier_1_Direct",
+                    "n_tier1_leaves": 3,
+                    "n_tier2_leaves": 0,
+                    "morph_tier_source": "Tier_1_Pure",
+                    "species_raw": sp,
+                    "scientificName": sp,
+                    "determiner_tier": tier,
+                    "PC1": pc1,
+                    "PC2": pc2,
+                    "PC3": pc3,
+                    "PC4": float(rng.normal(0.0, 0.10)),
+                    "PC5": float(rng.normal(0.0, 0.10)),
+                    "foliar_variance": 0.02,
+                    "leaf_count": 3,
+                    "centroid_size": cs,
+                    "log_centsize": log_cs,
+                    "is_calibrated_mm": True,
+                    "aspect_ratio": float(1.9 + 0.2 * s_idx + rng.normal(0.0, 0.04)),
+                    "solidity": 0.90,
+                    "ucs_score": 0.94,
+                }
+                for k in range(1, 13):
+                    row[f"A{k}"] = float((pc1 * 0.06) / k + rng.normal(0.0, 0.002))
+                    row[f"B{k}"] = 0.0
+                    row[f"C{k}"] = 0.0
+                    row[f"D{k}"] = float((pc2 * 0.06) / k + rng.normal(0.0, 0.002))
+                rows.append(row)
+                vouch_rows.append({
+                    "catalogNumber": cat,
+                    "species_raw": sp,
+                    "determiner_tier": tier,
+                    "institutionCode": "NCU" if j % 2 == 0 else "DUKE",
+                    "stateProvince": "NC",
+                    "county": "Orange",
+                    "decimalLatitude": 35.91,
+                    "decimalLongitude": -79.05,
+                    "regional_group": "Piedmont",
+                    "doy": 115 + j,
+                })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            harm_csv = tmp_p / "leaf_efa_harmonics.csv"
+            vouch_csv = tmp_p / "curated_vouchers.csv"
+            flags_csv = tmp_p / "morphometric_flags.csv"
+            bic_csv = tmp_p / "gmm_bayes_factors_summary.csv"
+            cda_pdf = tmp_p / "cda_passive_projection.pdf"
+
+            pd.DataFrame(rows).to_csv(harm_csv, index=False)
+            pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
+
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--vouchers", str(vouch_csv),
+                    "--harmonics", str(harm_csv),
+                    "--output-flags", str(flags_csv),
+                    "--output-report", str(bic_csv),
+                    "--output-plot", str(cda_pdf),
+                    "--output-batch-audit", str(tmp_p / "batch_audit.csv"),
+                    "--allometry-report", str(tmp_p / "allometry.csv"),
+                    "--allometry-pairwise", str(tmp_p / "pairwise.csv"),
+                    "--allometry-plot", str(tmp_p / "allometry.pdf"),
+                    "--permutations", "99",
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 04 failed with 0-Gold species:\n{proc.stderr}\n{proc.stdout}")
+
+            flags_df = pd.read_csv(flags_csv)
+            self.assertEqual(len(flags_df), len(rows))
+            # All 3 species (including 0-Gold Packera anonyma and 0-Gold/0-Silver Packera serpenticola) retained in CDA
+            self.assertEqual(
+                set(flags_df["cda_predicted_taxon"].dropna().unique()),
+                {"Packera dubia", "Packera anonyma", "Packera serpenticola"},
+            )
+
+            # Packera anonyma (3 Silver + 7 Bronze): promotes clean Bronze anchors, rejects extreme outlier ADAPT_1_09
+            anon_df = flags_df[flags_df["species_standardized"] == "Packera anonyma"]
+            anon_promo = anon_df[(anon_df["determiner_tier"] == "Tier_3_Bronze") & (anon_df["authority_weight"] > 0.0)]
+            self.assertGreaterEqual(len(anon_promo), 3, "Expected clean Bronze anchors promoted for 0-Gold Packera anonyma")
+            anon_outlier = flags_df[flags_df["catalogNumber"] == "ADAPT_1_09"].iloc[0]
+            self.assertEqual(float(anon_outlier["authority_weight"]), 0.0)
+            self.assertTrue(bool(anon_outlier["is_passive"]))
+
+            # Packera serpenticola (0 Gold, 0 Silver, 10 Bronze): promotes clean Bronze anchors, rejects outlier ADAPT_2_09
+            serp_df = flags_df[flags_df["species_standardized"] == "Packera serpenticola"]
+            serp_promo = serp_df[serp_df["authority_weight"] > 0.0]
+            self.assertGreaterEqual(len(serp_promo), 5, "Expected clean Bronze anchors promoted for 0-Gold/0-Silver species")
+            serp_outlier = flags_df[flags_df["catalogNumber"] == "ADAPT_2_09"].iloc[0]
+            self.assertEqual(float(serp_outlier["authority_weight"]), 0.0)
+            self.assertTrue(bool(serp_outlier["is_passive"]))
+
+            # Generalized taxon-agnostic discordance_reason (no hardcoded Glabrescent_P_dubia_Misidentified_as_P_anonyma)
+            dub_misid = flags_df[flags_df["catalogNumber"] == "ADAPT_0_11"].iloc[0]
+            self.assertEqual(str(dub_misid["cda_predicted_taxon"]), "Packera anonyma")
+            self.assertEqual(str(dub_misid["discordance_reason"]), "Packera_dubia_Discordant_to_Packera_anonyma")
+
+            # Verify continuous_prior_posterior mode [0.5, 3.0] and Beta-Binomial Empirical Bayes shrinkage directly in R
+            r_eb_check = """
+            source("scripts/morphometrics/authority_weighting_utils.R")
+            df_t <- data.frame(
+              species_standardized = rep("Packera aurea", 8),
+              determiner_tier = c("Tier_1_Gold", "Tier_1_Gold", "Tier_2_Silver", "Tier_2_Silver",
+                                  "Tier_3_Bronze", "Tier_3_Bronze", "Tier_3_Bronze", "Tier_3_Bronze"),
+              is_promoted_bronze = c(FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, FALSE, FALSE),
+              c_error = c(0.02, 0.04, 0.12, 0.14, 0.25, 0.30, 0.55, 0.65),
+              stringsAsFactors = FALSE
+            )
+            w_ap <- compute_empirical_bayes_authority_weights(df_t, mode = "active_passive")
+            w_cp <- compute_empirical_bayes_authority_weights(df_t, mode = "continuous_prior_posterior")
+            stopifnot(all(w_ap[7:8] == 0.0), abs(mean(w_ap[1:6]) - 1.0) < 1e-5)
+            stopifnot(w_ap[1] > w_ap[3], w_ap[3] > w_ap[5], w_ap[5] > 0.0)
+            stopifnot(abs(max(w_cp) - 3.0) < 1e-5, min(w_cp) >= 0.5, w_cp[1] > w_cp[3], w_cp[3] > w_cp[5], w_cp[5] > w_cp[7])
+            cat("EB_OK")
+            """
+            eb_proc = subprocess.run(["Rscript", "-e", r_eb_check], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(eb_proc.returncode, 0, f"Direct EB authority weighting check failed:\n{eb_proc.stderr}")
+            self.assertIn("EB_OK", eb_proc.stdout)
 
 
 if __name__ == "__main__":

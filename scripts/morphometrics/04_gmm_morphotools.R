@@ -46,19 +46,17 @@ calculate_circular_phenology <- function(df) {
 }
 
 if (file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "authority_weighting_utils.R"))) {
+  if (!is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
+}
 .base_std_taxon <- if (exists("standardize_taxon_name", mode = "function")) standardize_taxon_name else NULL
 standardize_packera_taxon <- function(species_vec) {
   if (!is.null(.base_std_taxon)) { res <- .base_std_taxon(species_vec); return(ifelse(is.na(res), "Unknown", res)) }
   as.character(species_vec)
 }
 
-# Strict active/passive reference authority weights (Slenker et al. 2022; Dawid & Skene 1979): Tier_3_Bronze = 0.0; Tier_1_Gold/Silver = 1.0 or w_k = 1 - error_rate_k
-compute_authority_precision_weights <- function(df) {
-  det_tier <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", nrow(df))
-  err_col <- intersect(c("dawid_skene_error_rate", "label_error_rate", "error_rate_k"), names(df))
-  prec_w <- if (length(err_col) > 0) pmax(0.0, pmin(1.0, 1.0 - suppressWarnings(as.numeric(df[[err_col[1]]])))) else rep(1.0, nrow(df))
-  prec_w[is.na(prec_w)] <- 1.0; w <- ifelse(det_tier %in% c("Tier_1_Gold", "Tier_2_Silver"), prec_w, 0.0); w[is.na(w)] <- 0.0; w
-}
+# Empirical Bayes / Dawid-Skene hierarchical active/passive reference authority weights (Slenker et al. 2022; Dawid & Skene 1979)
+compute_authority_precision_weights <- function(df, active_mask = NULL) compute_empirical_bayes_authority_weights(df, mode = "active_passive", active_mask = active_mask)
 
 # 2b. Foliar Allometry Multivariate Testing & Residual Correction
 generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, output_pdf, p_int = 1.0) {
@@ -81,19 +79,11 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   valid_idx <- which(cal_mask & !is.na(morpho_df$log_centsize) & is.finite(morpho_df$log_centsize) & complete.cases(morpho_df[, sym_names]))
   if (length(valid_idx) < 10) return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df))
   sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$scientificName <- factor(standardize_packera_taxon(as.character(if ("species_standardized" %in% names(sub_df)) sub_df$species_standardized else sub_df$scientificName)))
-  sub_df$authority_weight <- compute_authority_precision_weights(sub_df); sub_df$spatial_balance_weight <- compute_spatial_balance_weights(sub_df); sub_df$eff_weight <- sub_df$authority_weight
   is_tier1_pure <- if ("morph_tier_source" %in% names(sub_df)) (!is.na(sub_df$morph_tier_source) & sub_df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(sub_df))
-  gold_mask <- (sub_df$authority_weight > 0) & !is.na(sub_df$scientificName) & is_tier1_pure
-  if (sum(gold_mask) >= 6L) {
-    for (sp in unique(as.character(sub_df$scientificName[gold_mask]))) {
-      idx_k <- which(gold_mask & as.character(sub_df$scientificName) == sp)
-      if (length(idx_k) >= 5L) {
-        p_k <- min(4L, length(sym_names), length(idx_k) - 2L); Xk <- as.matrix(sub_df[idx_k, sym_names[seq_len(p_k)], drop = FALSE])
-        d2k <- tryCatch(stats::mahalanobis(Xk, colMeans(Xk), stats::cov(Xk) + diag(1e-6, ncol(Xk))), error = function(e) rep(0, length(idx_k)))
-        drop_k <- !is.na(d2k) & (d2k > stats::qchisq(0.95, df = ncol(Xk))); if (sum(!drop_k) >= 3L) gold_mask[idx_k[drop_k]] <- FALSE
-      }
-    }
-  }
+  anc_allom <- select_adaptive_reference_anchors(sub_df, feature_matrix = as.matrix(sub_df[, sym_names[seq_len(min(4L, length(sym_names)))], drop = FALSE]), taxon_col = "scientificName")
+  sub_df$is_promoted_bronze <- anc_allom$is_promoted_bronze; sub_df$authority_weight <- compute_authority_precision_weights(sub_df)
+  sub_df$spatial_balance_weight <- compute_spatial_balance_weights(sub_df); sub_df$eff_weight <- sub_df$authority_weight
+  gold_mask <- anc_allom$active_mask & !is.na(sub_df$scientificName) & is_tier1_pure
   min_sp <- min(2L, length(unique(stats::na.omit(sub_df$scientificName))))
   gold_df <- if (sum(gold_mask) >= 6 && length(unique(stats::na.omit(sub_df$scientificName[gold_mask]))) >= min_sp) sub_df[gold_mask, , drop = FALSE] else if (sum(is_tier1_pure) >= 6) sub_df[is_tier1_pure, , drop = FALSE] else sub_df
   if (all(gold_df$eff_weight <= 0)) gold_df$eff_weight <- 1.0
@@ -269,9 +259,10 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
     return(list(classification = rep(NA_integer_, nrow(df)), uncertainty = rep(NA_real_, nrow(df)), best_k = 1, model_name = "None",
                 selected_features = feature_cols, bic_table = data.frame(K = seq_len(max_k), BIC = NA_real_, Two_Delta_BIC = NA_real_, Evidence = "Inconclusive")))
   }
-  sub_v <- df[valid_rows, , drop = FALSE]; auth_v <- compute_authority_precision_weights(sub_v)
+  sub_v <- df[valid_rows, , drop = FALSE]
   is_tier1_pure <- if ("morph_tier_source" %in% names(sub_v)) (!is.na(sub_v$morph_tier_source) & sub_v$morph_tier_source == "Tier_1_Pure") else rep(TRUE, N_valid)
-  ref_cand <- (auth_v > 0) & is_tier1_pure
+  anc_gmm <- select_adaptive_reference_anchors(sub_v, feature_matrix = as.matrix(sub_v[, req_cols, drop = FALSE]), taxon_col = "species_standardized")
+  ref_cand <- anc_gmm$active_mask & is_tier1_pure
   if (sum(ref_cand, na.rm = TRUE) < 6L) ref_cand <- if (sum(is_tier1_pure) >= 6L) is_tier1_pure else rep(TRUE, N_valid)
   X <- as.matrix(sub_v[, feature_cols, drop = FALSE])
   for (j in seq_len(ncol(X))) if (any(is.na(X[, j]))) X[is.na(X[, j]), j] <- if (any(!is.na(X[ref_cand, j]))) mean(X[ref_cand, j], na.rm = TRUE) else 0.0
@@ -354,15 +345,18 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     is_active <- is_active & (df$grouping_col %in% target_taxa); is_train_cand <- is_active
   } else {
     df$grouping_col <- df$species_standardized
-    is_active <- (df$determiner_tier == "Tier_1_Gold") & is_tier1_pure & (df$grouping_col %in% target_taxa) & has_pcs
-    is_train_cand <- (df$authority_weight > 0) & is_tier1_pure & df$species_standardized %in% target_taxa & has_pcs
+    anc_cda <- select_adaptive_reference_anchors(df, feature_matrix = as.matrix(df[, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE]), taxon_col = "grouping_col")
+    df$is_promoted_bronze <- anc_cda$is_promoted_bronze; df$anchor_tier_source <- anc_cda$anchor_tier_source
+    df$authority_weight <- compute_authority_precision_weights(df); authority_weight <- df$authority_weight; eff_weight <- authority_weight
+    is_train_cand <- anc_cda$active_mask & is_tier1_pure & (df$grouping_col %in% target_taxa) & has_pcs
     tr_tab <- table(factor(df$grouping_col[is_train_cand], levels = target_taxa))
-    if (sum(tr_tab >= 2L) >= 2L) { target_taxa <- names(tr_tab[tr_tab >= 2L]); is_train_cand <- is_train_cand & (df$grouping_col %in% target_taxa); is_active <- is_active & (df$grouping_col %in% target_taxa)
+    if (sum(tr_tab >= 2L) >= 2L) { target_taxa <- names(tr_tab[tr_tab >= 2L]); is_train_cand <- is_train_cand & (df$grouping_col %in% target_taxa)
     } else if (any(tr_tab < 2L)) {
-      if (length(unique(df$grouping_col[is_train_cand])) >= 2) target_taxa <- intersect(target_taxa, unique(df$grouping_col[is_train_cand]))
-      fallback_cand <- (df$authority_weight > 0) & df$species_standardized %in% target_taxa & has_pcs
-      is_train_cand <- if (all(table(factor(df$grouping_col[fallback_cand], levels = target_taxa)) >= 2)) fallback_cand else (df$grouping_col %in% target_taxa & has_pcs)
+      if (length(unique(df$grouping_col[is_train_cand])) >= 2L) target_taxa <- intersect(target_taxa, unique(df$grouping_col[is_train_cand]))
+      fallback_cand <- anc_cda$active_mask & (df$species_standardized %in% target_taxa) & has_pcs
+      is_train_cand <- if (all(table(factor(df$grouping_col[fallback_cand], levels = target_taxa)) >= 2L)) fallback_cand else (df$grouping_col %in% target_taxa & has_pcs)
     }
+    is_active <- is_train_cand
   }
   X_full <- as.matrix(df[, feature_cols, drop = FALSE])
   for (j in seq_len(ncol(X_full))) if (any(is.na(X_full[, j]))) X_full[is.na(X_full[, j]), j] <- if (any(!is.na(X_full[is_train_cand, j]))) mean(X_full[is_train_cand, j], na.rm = TRUE) else 0.0
@@ -377,6 +371,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
       if (sum(!drop_k) >= 2) is_train_cand[cand_k[drop_k]] <- FALSE
     }
   }
+  if (!is_intra) is_active <- is_train_cand
   active_idx <- which(is_train_cand); passive_idx <- which(!is_active)
   message(sprintf("Active Anchors (Complete): %d | Passive Projected: %d", length(active_idx), length(passive_idx)))
   if (length(active_idx) < length(target_taxa)) stop("Insufficient complete active Tier 1 Gold anchors for CDA.")
@@ -450,7 +445,8 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   colnames(canonical_centroids) <- colnames(Z_all); rownames(canonical_centroids) <- g_levels
   return(list(eigenvalues = eig_vals, variance_pct = var_pct, canonical_scores = Z_all, centroids = canonical_centroids,
               predicted_taxon = g_levels[pred_idx], posterior_prob = posterior_prob, second_posterior_prob = second_posterior_prob, post_probs = post_probs,
-              posterior_margin = posterior_margin, is_active = is_active, structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col))
+              posterior_margin = posterior_margin, is_active = is_active, is_promoted_bronze = df$is_promoted_bronze, anchor_tier_source = df$anchor_tier_source,
+              authority_weight = df$authority_weight, structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col))
 }
 run_cda_with_passive_projection <- run_canonical_discriminant_analysis
 
@@ -476,15 +472,16 @@ audit_misidentifications <- function(df, cda_res, gmm_res) {
     } else {
       if (raw_sp == pred_sp && post_p >= 0.75) { flags[i] <- FALSE; triage[i] <- "CLEAN"; reasons[i] <- "Congruent_Bronze_Determination" }
       else if (raw_sp != pred_sp && post_p >= 0.70) {
-        flags[i] <- TRUE; triage[i] <- "HIGH"
-        reasons[i] <- if (grepl("dubia|tomentos", raw_sp, ignore.case = TRUE) && pred_sp == "Packera anonyma") "Glabrescent_P_dubia_Misidentified_as_P_anonyma" else sprintf("Tier_3_Bronze_Misidentified_as_%s", gsub(" ", "_", pred_sp))
+        flags[i] <- TRUE; triage[i] <- "HIGH"; reasons[i] <- sprintf("%s_Discordant_to_%s", gsub(" ", "_", raw_sp), gsub(" ", "_", pred_sp))
       } else if (post_p < 0.60) { flags[i] <- FALSE; triage[i] <- "MEDIUM"; reasons[i] <- "Morphological_Intermediate_Ambiguous" }
       else { flags[i] <- (raw_sp != pred_sp); triage[i] <- if (raw_sp != pred_sp) "MEDIUM" else "LOW"
              reasons[i] <- if (raw_sp != pred_sp) "Candidate_Discordance_Moderate_Posterior" else "Minor_Uncertainty" }
     }
     if (is_intra_audit && !flags[i] && isTRUE(mahal_out[i])) { flags[i] <- TRUE; triage[i] <- "HIGH"; reasons[i] <- "Intraspecific_Mahalanobis_Morphospace_Outlier" }
   }
-  df$authority_weight <- compute_authority_precision_weights(df)
+  if (!is.null(cda_res$is_promoted_bronze)) df$is_promoted_bronze <- cda_res$is_promoted_bronze
+  if (!is.null(cda_res$anchor_tier_source)) df$anchor_tier_source <- cda_res$anchor_tier_source
+  df$authority_weight <- if (!is.null(cda_res$authority_weight)) cda_res$authority_weight else compute_authority_precision_weights(df)
   df$gmm_cluster <- gmm_res$classification; df$gmm_uncertainty <- round(gmm_res$uncertainty, 4); df$loocv_accuracy <- cda_res$loocv_accuracy
   df$cda_predicted_taxon <- cda_res$predicted_taxon; df$cda_posterior_prob <- round(cda_res$posterior_prob, 4)
   df$cda_second_posterior_prob <- round(cda_res$second_posterior_prob, 4); df$cda_posterior_margin <- round(cda_res$posterior_margin, 4)
@@ -506,7 +503,7 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   inst_counts <- table(valid_df$institutionCode); rep_insts <- names(inst_counts[inst_counts >= min_obs])
   audit_subset <- if (length(rep_insts) >= 2) valid_df[valid_df$institutionCode %in% rep_insts, ] else valid_df
   audit_subset$institutionCode <- droplevels(factor(audit_subset$institutionCode))
-  if (!("species_standardized" %in% names(audit_subset))) audit_subset$species_standardized <- if ("scientificName" %in% names(audit_subset)) audit_subset$scientificName else "Packera dubia"
+  if (!("species_standardized" %in% names(audit_subset))) audit_subset$species_standardized <- if ("scientificName" %in% names(audit_subset)) audit_subset$scientificName else "Unassigned_Packera"
   audit_subset$species_standardized <- droplevels(factor(audit_subset$species_standardized))
   if (nlevels(audit_subset$institutionCode) < 2) return(NULL)
   has_multi_taxa <- nlevels(audit_subset$species_standardized) >= 2

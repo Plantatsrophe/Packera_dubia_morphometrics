@@ -31,6 +31,9 @@ suppressPackageStartupMessages({
   if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
 if (file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "authority_weighting_utils.R"))) {
+  if (!is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
+}
 
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing
@@ -200,44 +203,20 @@ verify_harmonic_power_calibration <- function(out_obj = NULL, harm_mat = NULL, n
   cum_pct
 }
 
-# Strict active/passive reference authority weights (Slenker et al. 2022; Dawid & Skene 1979):
-# Tier_3_Bronze = 0.0 (passive projection only); Tier_1_Gold & Tier_2_Silver = 1.0 (or empirical Dawid-Skene precision w_k = 1 - error_rate_k).
-compute_authority_precision_weights <- function(df) {
-  det_tier <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", nrow(df))
-  err_col <- intersect(c("dawid_skene_error_rate", "label_error_rate", "error_rate_k"), names(df))
-  prec_w <- if (length(err_col) > 0) pmax(0.0, pmin(1.0, 1.0 - suppressWarnings(as.numeric(df[[err_col[1]]])))) else rep(1.0, nrow(df))
-  prec_w[is.na(prec_w)] <- 1.0
-  w <- ifelse(det_tier %in% c("Tier_1_Gold", "Tier_2_Silver"), prec_w, 0.0)
-  w[is.na(w)] <- 0.0
-  w
+# Empirical Bayes / Dawid-Skene hierarchical active/passive reference authority weights (Slenker et al. 2022; Dawid & Skene 1979)
+compute_authority_precision_weights <- function(df, active_mask = NULL) {
+  compute_empirical_bayes_authority_weights(df, mode = "active_passive", active_mask = active_mask)
 }
 
-# Within-taxon Mahalanobis outlier pruning at chi-square 0.95 for active reference anchors (Tier_1_Gold & Tier_2_Silver)
-prune_within_taxon_mahalanobis <- function(X, df, ref_mask, q = 0.95) {
-  keep <- as.logical(ref_mask); keep[is.na(keep)] <- FALSE
-  if (sum(keep) < 4L || is.null(X) || ncol(X) < 1L) return(keep)
-  sp_col <- if ("scientificName" %in% names(df)) as.character(df$scientificName) else if ("species_raw" %in% names(df)) as.character(df$species_raw) else rep("taxon", nrow(df))
-  sp_col[is.na(sp_col) | !nzchar(sp_col)] <- "taxon"
-  for (sp in unique(sp_col[keep])) {
-    idx <- which(keep & sp_col == sp)
-    if (length(idx) >= 5L) {
-      p_use <- min(ncol(X), 5L, length(idx) - 2L)
-      if (p_use >= 1L) {
-        X_sub <- as.matrix(X[idx, seq_len(p_use), drop = FALSE])
-        v_ok <- apply(X_sub, 2, stats::var, na.rm = TRUE) > 1e-10
-        if (any(v_ok)) {
-          X_sub <- X_sub[, v_ok, drop = FALSE]; p_eff <- ncol(X_sub)
-          cov_sp <- tryCatch(stats::cov(X_sub) + diag(1e-6, p_eff), error = function(e) NULL)
-          if (!is.null(cov_sp)) {
-            d2 <- tryCatch(stats::mahalanobis(X_sub, colMeans(X_sub), cov_sp), error = function(e) rep(0, nrow(X_sub)))
-            out_sp <- !is.na(d2) & (d2 > stats::qchisq(q, df = p_eff))
-            if (sum(!out_sp) >= 3L) keep[idx[out_sp]] <- FALSE
-          }
-        }
-      }
-    }
-  }
-  keep
+# Within-taxon Mahalanobis outlier pruning + Adaptive Anchor Promotion for Gold/Silver-poor taxa
+prune_within_taxon_mahalanobis <- function(X, df, ref_mask = NULL, q = 0.95, min_anchors_per_taxon = 2L) {
+  elig <- if (!is.null(ref_mask) && length(ref_mask) == nrow(df)) { m <- as.logical(ref_mask); m[is.na(m)] <- FALSE; m } else rep(TRUE, nrow(df))
+  if (sum(elig) < 2L || is.null(X) || ncol(X) < 1L) return(elig)
+  anc <- select_adaptive_reference_anchors(df[elig, , drop = FALSE], feature_matrix = as.matrix(X[elig, , drop = FALSE]),
+                                           taxon_col = "scientificName", min_anchors_per_taxon = min_anchors_per_taxon, mahal_q_gold_silver = q, mahal_q_bronze_promo = 0.80)
+  out <- rep(FALSE, nrow(df)); out[elig] <- anc$active_mask
+  attr(out, "is_promoted_bronze") <- { p <- rep(FALSE, nrow(df)); p[elig] <- anc$is_promoted_bronze; p }
+  out
 }
 
 extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permutations = 999, seed = 42, run_permanova = TRUE) {
@@ -275,10 +254,11 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
   solidity <- if ("solidity" %in% names(out_df)) ifelse(is.na(out_df$solidity), 1.0, as.numeric(out_df$solidity)) else rep(1.0, nrow(out_df))
   ucs <- if ("ucs" %in% names(out_df)) ifelse(is.na(out_df$ucs), 1.0, as.numeric(out_df$ucs)) else if ("ucs_score" %in% names(out_df)) ifelse(is.na(out_df$ucs_score), 1.0, as.numeric(out_df$ucs_score)) else rep(1.0, nrow(out_df))
   leaf_quality_weight <- pmax(0.05, solidity * ucs * ((1.0 - pmin(pct_asymmetry, 0.95))^2) * ifelse(is_contour_outlier, 0.10, 1.0))
-  tier_wt <- compute_authority_precision_weights(out_df)
   spatial_wt <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(out_df) else rep(1.0, nrow(out_df))
-  active_ref_mask <- fit_pca_mask & (tier_wt > 0)
-  active_ref_mask <- if (sum(active_ref_mask, na.rm = TRUE) >= 2L) prune_within_taxon_mahalanobis(sym_mat, out_df, active_ref_mask, q = 0.95) else fit_pca_mask
+  active_ref_mask <- if (sum(fit_pca_mask, na.rm = TRUE) >= 2L) prune_within_taxon_mahalanobis(sym_mat, out_df, fit_pca_mask, q = 0.95) else fit_pca_mask
+  out_df$is_promoted_bronze <- if (!is.null(attr(active_ref_mask, "is_promoted_bronze"))) attr(active_ref_mask, "is_promoted_bronze") else rep(FALSE, nrow(out_df))
+  tier_wt <- compute_authority_precision_weights(out_df)
+  if (sum(active_ref_mask, na.rm = TRUE) < 2L) active_ref_mask <- fit_pca_mask
   col_vars <- apply(sym_mat[active_ref_mask, , drop = FALSE], 2, stats::var, na.rm = TRUE)
   sym_mat <- sym_mat[, names(col_vars[!is.na(col_vars) & col_vars > 1e-10]), drop = FALSE]
 
@@ -567,8 +547,11 @@ run_fourier_extraction <- function(opts) {
     clean_idx <- if (length(complete_idx) >= 10 && sum(!efa_df$is_contour_outlier[complete_idx]) >= 5) complete_idx[!efa_df$is_contour_outlier[complete_idx]] else complete_idx
     t1_clean_idx <- clean_idx[efa_df$tier_assignment[clean_idx] == "Tier_1_Direct"]
     base_fit_idx <- if (length(t1_clean_idx) >= 2L) t1_clean_idx else clean_idx
-    ref_mask <- (seq_len(nrow(efa_df)) %in% base_fit_idx) & (tier_wt > 0)
-    ref_mask <- if (sum(ref_mask, na.rm = TRUE) >= 2L) prune_within_taxon_mahalanobis(harm_mat, efa_df, ref_mask, q = 0.95) else (seq_len(nrow(efa_df)) %in% base_fit_idx)
+    base_mask <- seq_len(nrow(efa_df)) %in% base_fit_idx
+    ref_mask <- if (sum(base_mask, na.rm = TRUE) >= 2L) prune_within_taxon_mahalanobis(harm_mat, efa_df, base_mask, q = 0.95) else base_mask
+    efa_df$is_promoted_bronze <- if (!is.null(attr(ref_mask, "is_promoted_bronze"))) attr(ref_mask, "is_promoted_bronze") else rep(FALSE, nrow(efa_df))
+    efa_df$authority_weight <- compute_authority_precision_weights(efa_df); tier_wt <- efa_df$authority_weight
+    if (sum(ref_mask, na.rm = TRUE) < 2L) ref_mask <- base_mask
     fit_idx <- which(ref_mask)
     col_vars <- apply(harm_mat[fit_idx, , drop = FALSE], 2, stats::var, na.rm = TRUE)
     active_full_cols <- names(col_vars[!is.na(col_vars) & col_vars > 1e-10])
@@ -668,12 +651,15 @@ run_fourier_extraction <- function(opts) {
   specimen_records <- specimen_records[seq_len(spec_idx)]
   specimen_df <- do.call(rbind, specimen_records)
   for (p in seq_len(opts$num_pcs)) { specimen_df[[paste0("PC", p)]] <- NA_real_; specimen_df[[paste0("Sym_PC", p)]] <- 0.0 }
-  # Fit OTU-level ordination strictly on active reference anchors (Tier_1_Gold & Tier_2_Silver, Tier_3_Bronze weight = 0.0)
+  # Fit OTU-level ordination on Empirical Bayes active reference anchors (with Adaptive Anchor Promotion for 0-Gold/Silver taxa)
   otu_base_mask <- (specimen_df$morph_tier_source == "Tier_1_Pure") & !as.logical(specimen_df$is_contour_outlier)
   if (sum(otu_base_mask, na.rm = TRUE) < 2L) otu_base_mask <- rep(TRUE, nrow(specimen_df))
-  otu_ref_mask <- otu_base_mask & (specimen_df$authority_weight > 0)
+  otu_h_cols <- intersect(if (exists("active_full_cols") && length(active_full_cols) >= 1L) active_full_cols else sym_names, names(specimen_df))
+  otu_ref_mask <- if (sum(otu_base_mask, na.rm = TRUE) >= 2L && length(otu_h_cols) >= 1L) prune_within_taxon_mahalanobis(as.matrix(specimen_df[, otu_h_cols, drop = FALSE]), specimen_df, otu_base_mask, q = 0.95) else otu_base_mask
+  specimen_df$is_promoted_bronze <- if (!is.null(attr(otu_ref_mask, "is_promoted_bronze"))) attr(otu_ref_mask, "is_promoted_bronze") else rep(FALSE, nrow(specimen_df))
+  specimen_df$authority_weight <- compute_authority_precision_weights(specimen_df)
+  if (sum(otu_ref_mask, na.rm = TRUE) < 2L) otu_ref_mask <- otu_base_mask
   if (nrow(specimen_df) >= max(opts$num_pcs, 6L) && exists("active_full_cols") && length(active_full_cols) >= opts$num_pcs) {
-    otu_ref_mask <- if (sum(otu_ref_mask, na.rm = TRUE) >= 2L) prune_within_taxon_mahalanobis(as.matrix(specimen_df[, active_full_cols, drop = FALSE]), specimen_df, otu_ref_mask, q = 0.95) else otu_base_mask
     otu_t1_idx <- which(otu_ref_mask)
     otu_v <- apply(specimen_df[otu_t1_idx, active_full_cols, drop = FALSE], 2, stats::var, na.rm = TRUE)
     otu_cols <- names(otu_v[!is.na(otu_v) & otu_v > 1e-10])

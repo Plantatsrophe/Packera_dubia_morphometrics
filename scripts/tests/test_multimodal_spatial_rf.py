@@ -620,7 +620,9 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             self.assertTrue(con_path.exists(), "micro_edaphic_outcrop_contingency.csv must exist.")
 
             con_df = pd.read_csv(con_path)
-            contrast_row = con_df[con_df["Taxon"].str.contains("Contrast")].iloc[0]
+            contrast_row = con_df[
+                con_df["Taxon"].str.contains("Omnibus_Substrate_Contingency|Contrast", regex=True, na=False)
+            ].iloc[0]
             val_df = pd.read_csv(val_path)
             if len(val_df) > 100:
                 self.assertGreater(float(contrast_row["Odds_Ratio"]), 1.0)
@@ -1203,6 +1205,169 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             self.assertTrue(out_queue.exists(), "Step 07 triage_queue.csv must be generated from Step 06 outputs.")
             queue_df = pd.read_csv(out_queue)
             self.assertEqual(len(queue_df), 32)
+
+    def test_multiclass_lithology_substrate_contingency_non_dubia_species(self):
+        """Verify synthesize_multiscale_edaphics and execute_crossmodal_consensus organically evaluate non-dubia species across SGMC & SSURGO classes."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            ssurgo_out = tmp / "ssurgo_val.csv"
+            con_out = tmp / "contingency.csv"
+            r_code = f"""
+            source("scripts/analysis/edaphic_fine_grain_utils.R")
+            source("scripts/analysis/06_multimodal_spatial_rf.R")
+
+            df <- data.frame(
+              catalogNumber = sprintf("ND_%03d", 1:45),
+              latitude = c(rep(36.15, 15), rep(35.80, 15), rep(42.20, 15)),
+              longitude = c(rep(-81.65, 15), rep(-79.10, 15), rep(-72.80, 15)),
+              species_standardized = c(
+                rep("Packera serpenticola", 15),
+                rep("Packera aurea", 15),
+                rep("Packera schweinitziana", 15)
+              ),
+              determiner_tier = rep(c("Tier_1_Gold", "Tier_2_Silver", "Tier_1_Gold"), 15),
+              coordinateUncertaintyInMeters = rep(150.0, 45),
+              is_rock_outcrop = c(rep(TRUE, 14), FALSE, rep(FALSE, 15), rep(FALSE, 14), TRUE),
+              outcrop_class = c(
+                rep("Serpentine", 14), "Non-outcrop matrix",
+                rep("Non-outcrop matrix", 15),
+                rep("Non-outcrop matrix", 14), "Sandstone/Siliceous"
+              ),
+              taxsuborder = c(
+                rep("Udepts", 15),
+                rep("Aquults", 14), "Udults",
+                rep("Orthents", 15)
+              ),
+              sgmc_lithology_class = c(
+                rep("Ultramafic_Serpentine", 14), "Mafic_Igneous_Metamorphic",
+                rep("Unconsolidated_Sedimentary", 15),
+                rep("Siliciclastic_Consolidated", 14), "Carbonate_Calcareous"
+              ),
+              is_azonal_lithology = c(rep(TRUE, 15), rep(FALSE, 15), rep(FALSE, 14), TRUE),
+              ssurgo_rock_outcrop_pct = c(rep(55.0, 14), 5.0, rep(0.0, 15), rep(2.0, 14), 22.0),
+              fine_bedrock_depth_cm = c(rep(24.0, 14), 85.0, rep(180.0, 15), rep(135.0, 14), 45.0),
+              fine_soil_sand = c(rep(42.0, 15), rep(28.0, 15), rep(51.0, 15)),
+              fine_soil_ph = c(rep(6.8, 15), rep(5.4, 15), rep(4.9, 15)),
+              ssurgo_aws_0_50cm = c(rep(3.1, 15), rep(9.4, 15), rep(6.8, 15)),
+              topo_tpi_30m = c(rep(3.6, 15), rep(-1.8, 15), rep(0.4, 15)),
+              topo_twi_30m = c(rep(4.1, 15), rep(9.8, 15), rep(6.2, 15)),
+              doy = rep(132, 45),
+              stringsAsFactors = FALSE
+            )
+
+            res <- synthesize_multiscale_edaphics(
+              df,
+              ssurgo_out = "{ssurgo_out.as_posix()}",
+              contingency_out = "{con_out.as_posix()}",
+              demo = FALSE
+            )
+            con_df <- res$contingency
+            mc_df <- res$multiclass_contingency
+            stopifnot(nrow(con_df) == 4)
+            stopifnot(con_df$Taxon[1] == "Omnibus_Substrate_Contingency_Across_Active_Groups")
+            stopifnot(!any(grepl("dubia|anonyma|paupercula|plattensis", con_df$Taxon, ignore.case = TRUE)))
+
+            req_cols <- c("Taxon", "Outcrop_Count", "Matrix_Count", "Total_Vouchers",
+                          "Outcrop_Affinity_Pct", "Odds_Ratio", "CI_Lower", "CI_Upper",
+                          "P_Value", "P_Value_BH", "Dominant_Lithology_Class",
+                          "Dominant_Substrate_Class", "Top_Enriched_Lithology", "Top_Substrate_Odds_Ratio")
+            stopifnot(all(req_cols %in% names(con_df)))
+
+            serp_row <- con_df[con_df$Taxon == "Packera serpenticola", ]
+            stopifnot(serp_row$Dominant_Lithology_Class == "Ultramafic_Serpentine")
+            stopifnot(as.numeric(serp_row$Top_Substrate_Odds_Ratio) > 10.0)
+            stopifnot(as.numeric(serp_row$P_Value_BH) < 0.01)
+
+            aurea_row <- con_df[con_df$Taxon == "Packera aurea", ]
+            stopifnot(aurea_row$Dominant_Lithology_Class == "Unconsolidated_Sedimentary")
+            stopifnot(aurea_row$Dominant_Substrate_Class %in% c("Unconsolidated_Sedimentary", "Aquults"))
+
+            # Verify SGMC lithology and SSURGO outcrop/drainage domains were evaluated with BH FDR
+            stopifnot(all(c("SGMC_Lithology", "SSURGO_Outcrop", "SSURGO_Drainage_Suborder") %in% unique(mc_df$Substrate_Domain)))
+            stopifnot("P_Value_BH" %in% names(mc_df))
+
+            # Verify execute_crossmodal_consensus dynamically flags non-dubia substrate specialist
+            cons_df <- execute_crossmodal_consensus(df, intraspecific_mode = FALSE)
+            stopifnot("substrate_specialist_flag" %in% names(cons_df))
+            stopifnot("piedmont_outcrop_specialist_flag" %in% names(cons_df))
+            stopifnot(sum(cons_df$substrate_specialist_flag[cons_df$species_standardized == "Packera serpenticola"]) >= 14)
+            stopifnot(sum(cons_df$substrate_specialist_flag[cons_df$species_standardized == "Packera aurea"]) == 0)
+            cat("NON_DUBIA_CONTINGENCY_OK\\n")
+            """
+            res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0, f"Rscript failed: {res.stderr}\n{res.stdout}")
+            self.assertIn("NON_DUBIA_CONTINGENCY_OK", res.stdout)
+            con_csv_df = pd.read_csv(con_out)
+            self.assertEqual(con_csv_df.loc[0, "Taxon"], "Omnibus_Substrate_Contingency_Across_Active_Groups")
+            self.assertIn("Dominant_Lithology_Class", con_csv_df.columns)
+            self.assertIn("P_Value_BH", con_csv_df.columns)
+
+    def test_organic_pca_env_intraspecific_ecotypes_and_dynamic_rf_plots(self):
+        """Verify resolve_analysis_group partitions intraspecific cohorts via PCA-env without hardcoded Coastal/Piedmont names and plots top RF predictors."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            out_pdf = tmp / "spatial_rf_niche_importance.pdf"
+            r_code = f"""
+            source("scripts/analysis/edaphic_fine_grain_utils.R")
+            source("scripts/analysis/06_multimodal_spatial_rf.R")
+
+            set.seed(123)
+            n <- 28
+            # Single non-dubia species without gmm_cluster; strong gradient driven by fine_bedrock_depth_cm & bio1_temp_mean
+            df <- data.frame(
+              catalogNumber = sprintf("INTRA_%03d", seq_len(n)),
+              species_standardized = rep("Packera aurea", n),
+              determiner_tier = rep(c("Tier_1_Gold", "Tier_2_Silver"), length.out = n),
+              latitude = c(seq(34.0, 35.4, length.out = 14), seq(40.0, 41.8, length.out = 14)),
+              longitude = c(seq(-83.0, -81.6, length.out = 14), seq(-76.0, -74.2, length.out = 14)),
+              coordinateUncertaintyInMeters = rep(200.0, n),
+              fine_bedrock_depth_cm = c(rnorm(14, mean = 25, sd = 3), rnorm(14, mean = 175, sd = 5)),
+              bio1_temp_mean = c(rnorm(14, mean = 16.5, sd = 0.4), rnorm(14, mean = 8.2, sd = 0.4)),
+              fine_soil_ph = rnorm(n, mean = 5.8, sd = 0.05),
+              fine_soil_sand = rnorm(n, mean = 45.0, sd = 0.5),
+              topo_twi_30m = c(rnorm(14, mean = 4.5, sd = 0.3), rnorm(14, mean = 9.5, sd = 0.3)),
+              doy = rep(130, n),
+              delta_doy = rnorm(n, mean = 0, sd = 2),
+              stringsAsFactors = FALSE
+            )
+
+            resolved <- resolve_analysis_group(df, intraspecific_mode = TRUE)
+            u_grps <- sort(unique(resolved$analysis_group))
+            stopifnot(length(u_grps) == 2)
+            stopifnot(!any(grepl("Acidic_Sand_Coastal|Upland_Piedmont_Outcrop", u_grps)))
+            stopifnot(all(grepl("^Ecotype_[12]_[A-Za-z0-9_]+_(Low|High)$", u_grps)))
+
+            # Verify zero-variance fallback yields Ecotype_Cluster_1 / Ecotype_Cluster_2
+            df_flat <- data.frame(
+              catalogNumber = sprintf("FLAT_%02d", 1:8),
+              species_standardized = rep("Packera aurea", 8),
+              fine_soil_ph = rep(6.0, 8),
+              stringsAsFactors = FALSE
+            )
+            res_flat <- resolve_analysis_group(df_flat, intraspecific_mode = TRUE)
+            stopifnot(identical(sort(unique(res_flat$analysis_group)), c("Ecotype_Cluster_1", "Ecotype_Cluster_2")))
+
+            # Verify Spatial RF top-importance predictor selection & dynamic figure export
+            env_vars <- c("fine_bedrock_depth_cm", "bio1_temp_mean", "fine_soil_ph", "fine_soil_sand", "topo_twi_30m")
+            srf_res <- compute_spatial_rf_mems(resolved, env_vars, n_trees = 60, intraspecific_mode = TRUE)
+            top_sel <- select_top_rf_predictors(srf_res$importance, resolved)
+            stopifnot(top_sel$top_env_1 %in% c("fine_bedrock_depth_cm", "bio1_temp_mean", "topo_twi_30m"))
+            stopifnot(top_sel$top_edaph_1 %in% c("fine_bedrock_depth_cm", "topo_twi_30m"))
+
+            niche_res <- run_warren_niche_identity_tests(resolved, env_vars, n_perm = 10, intraspecific_mode = TRUE)
+            export_spatial_rf_figures(resolved, srf_res, niche_res, "{out_pdf.as_posix()}")
+            cat("ORGANIC_PCA_ENV_AND_PLOTS_OK\\n")
+            """
+            res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0, f"Rscript failed: {res.stderr}\n{res.stdout}")
+            self.assertIn("ORGANIC_PCA_ENV_AND_PLOTS_OK", res.stdout)
+            self.assertTrue(out_pdf.exists(), "spatial_rf_niche_importance.pdf must be generated.")
+            self.assertTrue((tmp / "fig06_ecological_niche_phenology.pdf").exists(), "fig06_ecological_niche_phenology.pdf must be generated.")
+            self.assertTrue((tmp / "fig06_ecological_niche_phenology.png").exists(), "fig06_ecological_niche_phenology.png must be generated.")
 
 
 if __name__ == "__main__":

@@ -330,6 +330,32 @@ class CapitulumPhenologyConfig:
     min_anthesis_heads_for_flowering: int = 1
 
 
+VALID_GEOGRAPHIC_SCOPES: Set[str] = {"eastern_na", "north_america", "global"}
+
+
+def normalize_countries_list(raw_countries: Any, default: Optional[List[str]] = None) -> List[str]:
+    """Normalize country configuration values (list or comma/whitespace-separated string) to uppercase ISO-2 codes."""
+    if raw_countries is None:
+        return list(default) if default is not None else ["US"]
+    items: List[str] = []
+    if isinstance(raw_countries, str):
+        raw_items = [tok for part in raw_countries.split(",") for tok in part.strip().split()]
+    elif isinstance(raw_countries, (list, tuple, set)):
+        raw_items = [
+            tok
+            for elem in raw_countries
+            for part in str(elem).split(",")
+            for tok in part.strip().split()
+        ]
+    else:
+        raw_items = [str(raw_countries).strip()]
+    for tok in raw_items:
+        code = tok.strip().upper()
+        if code and code not in items:
+            items.append(code)
+    return items
+
+
 @dataclass(frozen=True)
 class ThresholdsConfig:
     """Botanical optical quality, geometry, and detection thresholds."""
@@ -347,6 +373,8 @@ class ThresholdsConfig:
     min_sharpness_laplacian: float = 80.0
     max_uncertainty_meters: float = 5000.0
     western_longitude_threshold: float = -106.65
+    geographic_scope: str = "eastern_na"
+    countries: List[str] = field(default_factory=lambda: ["US"])
     fold_detection: FoldDetectionConfig = field(default_factory=FoldDetectionConfig)
     dissection: DissectionConfig = field(default_factory=DissectionConfig)
     capitulum_phenology: CapitulumPhenologyConfig = field(default_factory=CapitulumPhenologyConfig)
@@ -400,8 +428,11 @@ class HarvestingConfig:
     """Phase 1 GBIF query, download, and filtration hyperparameters."""
     max_records_per_taxon: int = 5000
     max_uncertainty_meters: float = 5000.0
+    geographic_scope: str = "eastern_na"
+    countries: List[str] = field(default_factory=lambda: ["US"])
     exclude_western: bool = True
     western_longitude_threshold: float = -106.65
+    home_herbarium: str = "NCU"
     min_megapixels: float = 8.0
     min_file_size_kb: float = 500.0
     min_sharpness_laplacian: float = 80.0
@@ -610,10 +641,27 @@ class PipelineConfig:
         else:
             pheno_cfg = CapitulumPhenologyConfig()
 
-        thresh_kwargs: Dict[str, Any] = {
-            k: float(v) for k, v in thresh_dict.items()
-            if k in ThresholdsConfig.__dataclass_fields__ and not isinstance(v, dict)
+        harv_dict = raw_cfg.get("harvesting", {})
+        non_float_thresh_fields = {
+            "fold_detection",
+            "dissection",
+            "capitulum_phenology",
+            "geographic_scope",
+            "countries",
         }
+        thresh_kwargs: Dict[str, Any] = {
+            k: float(v)
+            for k, v in thresh_dict.items()
+            if k in ThresholdsConfig.__dataclass_fields__
+            and k not in non_float_thresh_fields
+            and not isinstance(v, (dict, list))
+        }
+        raw_t_scope = str(thresh_dict.get("geographic_scope", harv_dict.get("geographic_scope", "eastern_na"))).strip().lower()
+        thresh_kwargs["geographic_scope"] = raw_t_scope if raw_t_scope in VALID_GEOGRAPHIC_SCOPES else "eastern_na"
+        thresh_kwargs["countries"] = normalize_countries_list(
+            thresh_dict.get("countries", harv_dict.get("countries", ["US"])),
+            default=["US"],
+        )
         thresh_kwargs["fold_detection"] = fold_cfg
         thresh_kwargs["dissection"] = dissection_cfg
         thresh_kwargs["capitulum_phenology"] = pheno_cfg
@@ -638,10 +686,20 @@ class PipelineConfig:
             symmetrize_efa_harmonics=bool(m_dict.get("symmetrize_efa_harmonics", True)),
         )
 
-        harv_dict = raw_cfg.get("harvesting", {})
-        harvesting = HarvestingConfig(**{
+        harv_kwargs: Dict[str, Any] = {
             k: v for k, v in harv_dict.items() if k in HarvestingConfig.__dataclass_fields__
-        })
+        }
+        raw_h_scope = str(harv_kwargs.get("geographic_scope", thresh_kwargs["geographic_scope"])).strip().lower()
+        harv_kwargs["geographic_scope"] = raw_h_scope if raw_h_scope in VALID_GEOGRAPHIC_SCOPES else "eastern_na"
+        if "countries" in harv_kwargs:
+            harv_kwargs["countries"] = normalize_countries_list(harv_kwargs["countries"], default=["US"])
+        elif harv_kwargs["geographic_scope"] == "north_america":
+            harv_kwargs["countries"] = ["US", "CA", "MX"]
+        elif harv_kwargs["geographic_scope"] == "global":
+            harv_kwargs["countries"] = []
+        if "home_herbarium" in harv_kwargs:
+            harv_kwargs["home_herbarium"] = str(harv_kwargs["home_herbarium"]).strip().upper() or "NCU"
+        harvesting = HarvestingConfig(**harv_kwargs)
 
         seg_dict = raw_cfg.get("segmentation", {})
         seg_kwargs = {k: v for k, v in seg_dict.items() if k in SegmentationConfig.__dataclass_fields__}
@@ -695,7 +753,7 @@ CLASS_COLORS_BGR: Dict[int, Tuple[int, int, int]] = {
     3: (0, 215, 255), 4: (50, 100, 200), 5: (0, 140, 70), 6: (230, 30, 230),
 }
 
-# Monographic specialists, herbaria, and type statuses
+# Layer 1: Genus-wide North American Packera / Senecioneae monographers & flora authors
 SPECIALIST_PATTERNS: List[str] = [
     r"\bBarkley\b", r"\bT\.?\s*M\.?\s*Barkley\b", r"\bTheodore\s+M\.?\s+Barkley\b",
     r"\bTrock\b", r"\bD\.?\s*K\.?\s*Trock\b", r"\bDebra\s+K\.?\s+Trock\b",
@@ -704,9 +762,29 @@ SPECIALIST_PATTERNS: List[str] = [
     r"\bBain\b", r"\bJ\.?\s*F\.?\s*Bain\b", r"\bJohn\s+F\.?\s+Bain\b",
     r"\bMahoney\b", r"\bA\.?\s*M\.?\s*Mahoney\b", r"\bAlison\s+M\.?\s+Mahoney\b",
     r"\bFuller\b", r"\bJ\.?\s*B\.?\s*Fuller\b", r"\bBrandon\s+Fuller\b",
+    r"\bFreeman\b", r"\bC\.?\s*C\.?\s*Freeman\b", r"\bCraig\s+(?:C\.?\s+)?Freeman\b",
+    r"\bCronquist\b", r"\bA\.?\s*Cronquist\b", r"\bArthur\s+(?:J\.?\s+)?Cronquist\b",
+    r"\bGreenman\b", r"\bJ\.?\s*M\.?\s*Greenman\b", r"\bJesse\s+M(?:ore)?\.?\s+Greenman\b",
+    r"\bWeber\b", r"\bW\.?\s*A\.?\s*Weber\b", r"\bWilliam\s+A\.?\s+Weber\b",
+    r"\bL[öo]ve\b", r"(?:^|[\s|,;(])[ÁA]\.?\s*L[öo]ve\b", r"\bD\.?\s*L[öo]ve\b",
+    r"\b[ÁA]skell\s+L[öo]ve\b", r"\bDoris\s+L[öo]ve\b",
+    r"\bSpellenberg\b", r"\bR\.?\s*(?:W\.?\s*)?Spellenberg\b", r"\bRichard\s+Spellenberg\b",
+    r"\bPippen\b", r"\bR\.?\s*W\.?\s*Pippen\b", r"\bRichard\s+W\.?\s+Pippen\b",
+    r"\bUttal\b", r"\bL\.?\s*J\.?\s*Uttal\b", r"\bLeonard\s+J\.?\s+Uttal\b",
+    r"\bFernald\b", r"\bM\.?\s*L\.?\s*Fernald\b", r"\bMerritt\s+L(?:yndon)?\.?\s+Fernald\b",
+    r"\bRydberg\b", r"\bP\.?\s*A\.?\s*Rydberg\b", r"\bPer\s+Axel\s+Rydberg\b",
+    r"\bHeller\b", r"\bA\.?\s*A\.?\s*Heller\b", r"\bAmos\s+A(?:rthur)?\.?\s+Heller\b",
+    r"\bKral\b", r"\bR\.?\s*Kral\b", r"\bRobert\s+Kral\b",
+    r"\bGodfrey\b", r"\bR\.?\s*K\.?\s*Godfrey\b", r"\bRobert\s+K\.?\s+Godfrey\b",
+    r"\bSorrie\b", r"\bB\.?\s*A\.?\s*Sorrie\b", r"\bBruce\s+A\.?\s+Sorrie\b",
+    r"\bNesom\b", r"\bG\.?\s*L\.?\s*Nesom\b", r"\bGuy\s+L\.?\s+Nesom\b",
+    r"\bStrother\b", r"\bJ\.?\s*L\.?\s*Strother\b", r"\bJohn\s+L\.?\s+Strother\b",
+    r"\bTurner\b", r"\bB\.?\s*L\.?\s*Turner\b", r"\bBillie\s+L(?:ee)?\.?\s+Turner\b",
+    r"\bGolden\b", r"\bJ\.?\s*L\.?\s*Golden\b", r"\bJudith\s+L\.?\s+Golden\b",
 ]
 MAJOR_HERBARIA_CODES: Set[str] = {
-    "NCU", "GA", "US", "NY", "BRIT", "MO", "WIS", "VDB", "FLAS", "TEX", "LL", "TENN", "F"
+    "NCU", "GA", "US", "NY", "BRIT", "MO", "WIS", "VDB", "FLAS", "TEX", "LL", "TENN", "F",
+    "GH", "PH", "KANU", "MSC", "COLO", "RM", "UC", "JEPS", "CAS", "DAO", "CAN", "MEXU",
 }
 VALID_TYPE_STATUSES: Set[str] = {
     "HOLOTYPE", "ISOTYPE", "LECTOTYPE", "ISOLECTOTYPE", "SYNTYPE", "ISOSYNTYPE",
@@ -731,3 +809,6 @@ DEFAULT_MIN_FILE_SIZE_KB = _DEFAULT_CONFIG.thresholds.min_file_size_kb
 DEFAULT_MIN_SHARPNESS_LAPLACIAN = _DEFAULT_CONFIG.thresholds.min_sharpness_laplacian
 DEFAULT_TARGET_TAXA = _DEFAULT_CONFIG.taxa.target_species
 WESTERN_LONGITUDE_THRESHOLD = _DEFAULT_CONFIG.thresholds.western_longitude_threshold
+DEFAULT_GEOGRAPHIC_SCOPE = _DEFAULT_CONFIG.harvesting.geographic_scope
+DEFAULT_COUNTRIES = _DEFAULT_CONFIG.harvesting.countries
+DEFAULT_HOME_HERBARIUM = _DEFAULT_CONFIG.harvesting.home_herbarium

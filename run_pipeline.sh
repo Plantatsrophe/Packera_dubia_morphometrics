@@ -27,6 +27,7 @@ RESEGMENT=false
 START_STEP=1
 START_STEP_EXPLICIT=false
 FOCAL_TAXON=""
+CUSTOM_TAXA_RAW=()
 EXCLUDE_TAXA_RAW=()
 INTRASPECIFIC_MODE="false"
 GOLD_ANCHORS=30
@@ -35,6 +36,10 @@ DETERMINER_TIER=""
 EXCLUDE_MISIDENTIFIED=false
 TRIAGE_SOURCE="ALL"
 ALL_EASTERN_TAXA=false
+GEOGRAPHIC_SCOPE=""
+INCLUDE_WESTERN=false
+COUNTRIES_RAW=()
+EXPAND_SYNONYMS_FLAG="--expand-synonyms"
 DISCOVER_COMPLEXES=false
 AUTO_NEIGHBORS=false
 MIN_AFFINITY="0.03"
@@ -162,6 +167,48 @@ while [[ $# -gt 0 ]]; do
       ALL_EASTERN_TAXA=true
       shift
       ;;
+    --taxon|--taxa)
+      shift
+      while [[ $# -gt 0 && "$1" != -* ]]; do
+        CUSTOM_TAXA_RAW+=("$1")
+        shift
+      done
+      ;;
+    --taxon=*|--taxa=*)
+      CUSTOM_TAXA_RAW+=("${1#*=}")
+      shift
+      ;;
+    --geographic-scope)
+      GEOGRAPHIC_SCOPE="$2"
+      shift 2
+      ;;
+    --geographic-scope=*)
+      GEOGRAPHIC_SCOPE="${1#*=}"
+      shift
+      ;;
+    --include-western|--no-exclude-western)
+      INCLUDE_WESTERN=true
+      shift
+      ;;
+    --countries)
+      shift
+      while [[ $# -gt 0 && "$1" != -* ]]; do
+        COUNTRIES_RAW+=("$1")
+        shift
+      done
+      ;;
+    --countries=*)
+      COUNTRIES_RAW+=("${1#*=}")
+      shift
+      ;;
+    --expand-synonyms)
+      EXPAND_SYNONYMS_FLAG="--expand-synonyms"
+      shift
+      ;;
+    --no-expand-synonyms)
+      EXPAND_SYNONYMS_FLAG="--no-expand-synonyms"
+      shift
+      ;;
     --discover-complexes)
       DISCOVER_COMPLEXES=true
       shift
@@ -269,11 +316,17 @@ else
   PYTHON_LM2="${PYTHON_MAIN}"
 fi
 
+# Determine whether a non-default geographic scope or custom taxon harvest was requested
+CUSTOM_GEO_SCOPE=false
+if [[ ( -n "${GEOGRAPHIC_SCOPE}" && "${GEOGRAPHIC_SCOPE}" != "eastern_na" ) || "${INCLUDE_WESTERN}" == "true" || ${#COUNTRIES_RAW[@]} -gt 0 || ${#CUSTOM_TAXA_RAW[@]} -gt 0 ]]; then
+  CUSTOM_GEO_SCOPE=true
+fi
+
 # Determine whether to reuse canonical root data/ store for Steps 01-02
 REUSE_CANONICAL_DATA=false
 if [[ -s "${PROJECT_ROOT}/data/tables/curated_vouchers.csv" && -s "${PROJECT_ROOT}/data/tables/extracted_leaf_manifest.csv" ]]; then
   if [[ "${RESEGMENT}" == "false" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
-    if [[ -z "${FORCE_FLAG}" ]] || [[ "${START_STEP}" -ge 3 ]]; then
+    if [[ "${START_STEP}" -ge 3 ]] || [[ -z "${FORCE_FLAG}" && ( "${CUSTOM_GEO_SCOPE}" == "false" || "${SKIP_HARVEST}" == "true" ) ]]; then
       REUSE_CANONICAL_DATA=true
     fi
   fi
@@ -321,13 +374,25 @@ if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
     echo "[Step 01/07] Running Voucher Harvester (with high-res image downloads & quality audit)..."
     HARVEST_TAXON_ARGS=()
     if [[ "${ALL_EASTERN_TAXA}" == "true" ]]; then
-      HARVEST_TAXON_ARGS=(--all-eastern-taxa)
+      HARVEST_TAXON_ARGS=(--all-eastern-taxa "${EXPAND_SYNONYMS_FLAG}")
+    elif [[ ${#CUSTOM_TAXA_RAW[@]} -gt 0 ]]; then
+      HARVEST_TAXON_ARGS=(--taxon "${CUSTOM_TAXA_RAW[@]}" "${EXPAND_SYNONYMS_FLAG}")
     elif [[ "${INTRASPECIFIC_MODE}" == "true" && -n "${FOCAL_TAXON}" ]]; then
-      if [[ "${FOCAL_TAXON}" == "Packera dubia" ]]; then
-        HARVEST_TAXON_ARGS=(--taxon "Packera dubia" "Senecio tomentosus" "Packera tomentosa")
-      else
-        HARVEST_TAXON_ARGS=(--taxon "${FOCAL_TAXON}")
-      fi
+      HARVEST_TAXON_ARGS=(--taxon "${FOCAL_TAXON}" "${EXPAND_SYNONYMS_FLAG}")
+    elif [[ -n "${FOCAL_TAXON}" ]]; then
+      HARVEST_TAXON_ARGS=(--taxon "${FOCAL_TAXON}" "Packera dubia" "Packera anonyma" "Packera paupercula" "Packera plattensis" "${EXPAND_SYNONYMS_FLAG}")
+    else
+      HARVEST_TAXON_ARGS=("${EXPAND_SYNONYMS_FLAG}")
+    fi
+    HARVEST_GEO_ARGS=()
+    if [[ -n "${GEOGRAPHIC_SCOPE}" ]]; then
+      HARVEST_GEO_ARGS+=(--geographic-scope "${GEOGRAPHIC_SCOPE}")
+    fi
+    if [[ "${INCLUDE_WESTERN}" == "true" ]]; then
+      HARVEST_GEO_ARGS+=(--include-western)
+    fi
+    if [[ ${#COUNTRIES_RAW[@]} -gt 0 ]]; then
+      HARVEST_GEO_ARGS+=(--countries "${COUNTRIES_RAW[@]}")
     fi
     HARVEST_SPATIAL_ARGS=()
     if [[ -n "${SPATIAL_THIN_KM}" && "${SPATIAL_THIN_KM}" != "0" && "${SPATIAL_THIN_KM}" != "0.0" ]]; then
@@ -343,10 +408,11 @@ if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
       --out-dir "data/raw_vouchers" \
       --output-csv "${RUN_DIR}/data/tables/curated_vouchers.csv" \
       "${HARVEST_TAXON_ARGS[@]}" \
+      "${HARVEST_GEO_ARGS[@]}" \
       "${HARVEST_SPATIAL_ARGS[@]}" \
       --download-images \
       ${FORCE_FLAG}
-    if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && "${EXCLUDE_MISIDENTIFIED}" != "true" && ( -z "${SPATIAL_THIN_KM}" || "${SPATIAL_THIN_KM}" == "0" || "${SPATIAL_THIN_KM}" == "0.0" ) && -z "${MAX_PER_STATE}" && -z "${MAX_PER_REGION}" && -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
+    if [[ "${CUSTOM_GEO_SCOPE}" != "true" && -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && "${EXCLUDE_MISIDENTIFIED}" != "true" && ( -z "${SPATIAL_THIN_KM}" || "${SPATIAL_THIN_KM}" == "0" || "${SPATIAL_THIN_KM}" == "0.0" ) && -z "${MAX_PER_STATE}" && -z "${MAX_PER_REGION}" && -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
       mkdir -p "${PROJECT_ROOT}/data/tables"
       cp -f "${RUN_DIR}/data/tables/curated_vouchers.csv" "${PROJECT_ROOT}/data/tables/curated_vouchers.csv.tmp"
       mv -f "${PROJECT_ROOT}/data/tables/curated_vouchers.csv.tmp" "${PROJECT_ROOT}/data/tables/curated_vouchers.csv"
@@ -399,9 +465,14 @@ max_per_region = int(sys.argv[14]) if len(sys.argv) > 14 and sys.argv[14].strip(
 no_spatial_weights = sys.argv[15].lower() == 'true' if len(sys.argv) > 15 else False
 reuse_canonical = sys.argv[16].lower() == 'true' if len(sys.argv) > 16 else False
 
-from scripts.core.harvester import spatially_balance_and_thin_vouchers
+from scripts.core.harvester import (
+    select_cascading_outgroup_anchors,
+    spatially_balance_and_thin_vouchers,
+    standardize_packera_taxon as _harvester_std_taxon,
+)
 mod05 = importlib.import_module('scripts.analysis.05_cleanlab_vision_xai')
-standardize_packera_taxon = mod05.standardize_packera_taxon
+def standardize_packera_taxon(raw_val):
+    return _harvester_std_taxon(raw_val) or mod05.standardize_packera_taxon(raw_val)
 
 ALLOWED_TREATMENT_SUBTYPES = {
     'Confirmed_Species',
@@ -590,31 +661,18 @@ if focal_raw:
                 outgroup_taxa = [t for t in outgroup_taxa if t in disc_set] or sorted(disc_set)
                 print(f'[Auto-Neighbors] Empirical complex & affinity neighbors for {focal_taxon}: {outgroup_taxa}')
 
-        outgroup_dfs = []
-        outgroup_counts = {}
-        for tx in outgroup_taxa:
-            tx_df = df[(df['species_standardized'] == tx) & (df.get('determiner_tier', '') == 'Tier_1_Gold')].copy()
-            if not tx_df.empty:
-                def _has_local(row):
-                    img_p = str(row.get('image_path', '')).strip()
-                    cat_p = f\"data/raw_vouchers/{str(row.get('catalogNumber', '')).strip()}.jpg\"
-                    return (bool(img_p) and Path(img_p).exists()) or Path(cat_p).exists()
-                def _has_url_or_path(row):
-                    for c in ('image_path', 'image_url', 'identifier', 'good_quality_AccessURI'):
-                        v = row.get(c, None)
-                        if pd.notna(v) and str(v).strip():
-                            return True
-                    return False
-                tx_df['_has_local'] = tx_df.apply(_has_local, axis=1)
-                tx_df['_has_valid'] = tx_df['_has_local'] | tx_df.apply(_has_url_or_path, axis=1)
-                tx_df = tx_df[tx_df['_has_valid']].sort_values(by='_has_local', ascending=False, kind='mergesort')
-                tx_sel = tx_df.head(gold_anchors).drop(columns=['_has_local', '_has_valid'])
-                outgroup_dfs.append(tx_sel)
-                outgroup_counts[tx] = len(tx_sel)
-            else:
-                outgroup_counts[tx] = 0
+        outgroup_dfs, outgroup_counts, outgroup_tiers = select_cascading_outgroup_anchors(
+            df,
+            outgroup_taxa,
+            max_anchors=gold_anchors,
+            workspace_dir=root_data.parent,
+        )
         subset_df = pd.concat([focal_df] + outgroup_dfs, ignore_index=True) if outgroup_dfs else focal_df
-        print(f'[Strategy 1: Focal + Outgroup Gold Anchors] Focal {focal_taxon}: {len(focal_df)} | Outgroup Tier_1_Gold anchors: {outgroup_counts} (Total: {len(subset_df)})')
+        print(
+            f'[Strategy 1: Focal + Outgroup Cascading Anchors] Focal {focal_taxon}: {len(focal_df)} | '
+            f'Outgroup anchors (Gold->Silver->Bronze): {outgroup_counts} | Tier breakdown: {outgroup_tiers} '
+            f'(Total: {len(subset_df)})'
+        )
 else:
     subset_df = df
 
@@ -753,7 +811,7 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
   cp -alf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/" 2>/dev/null || cp -rf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/"
   cp -alf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/" 2>/dev/null || cp -rf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/"
   cp -alf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/" 2>/dev/null || cp -rf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/"
-  if [[ -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && "${EXCLUDE_MISIDENTIFIED}" != "true" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
+  if [[ "${CUSTOM_GEO_SCOPE}" != "true" && -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && "${EXCLUDE_MISIDENTIFIED}" != "true" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
     "${PYTHON_MAIN}" -c "
 import os
 from pathlib import Path

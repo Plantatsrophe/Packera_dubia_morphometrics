@@ -849,6 +849,10 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         "--output-plot", str(synthesis_plot),
         "--output-report", str(synthesis_report),
     ]
+    if getattr(args, "focal_taxon", None):
+        cmd_triage.extend(["--focal-taxon", str(args.focal_taxon)])
+    if getattr(args, "intraspecific_mode", False):
+        cmd_triage.append("--intraspecific-mode")
     logger.info(f"Running Phase 7 Triage Dashboard Synthesis: {' '.join(cmd_triage)}")
     subprocess.run(cmd_triage, check=True)
     verify_file_exists(output_queue, "triage queue CSV")
@@ -1090,6 +1094,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_synth.add_argument("--synthesis-plot", type=Path, default=None, help="Output 6-panel synthesis plate PDF")
     p_synth.add_argument("--synthesis-report", type=Path, default=None, help="Output revision summary Markdown")
     p_synth.add_argument("--xai-plot", type=Path, default=None, help="Output Grad-CAM panel PNG")
+    p_synth.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")
+    p_synth.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
 
     # Subcommand: run-all
     p_all = subparsers.add_parser("run-all", help="Execute complete pipeline (harvest -> segment -> morphometrics -> synthesis)")
@@ -1153,6 +1159,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--cleanlab-threshold", type=float, default=0.85, help="Cleanlab noise cutoff threshold")
     p_all.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
     p_all.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
+    p_all.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")
+    p_all.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
 
     # Subcommand: calibrate-geometry
     p_calib = subparsers.add_parser(

@@ -475,8 +475,9 @@ evaluate_hierarchical_complex_delimitation <- function(morph_df, vis_df, pheno_r
   m_flag[is.na(m_flag)] <- FALSE
   gmm_cl <- if ("gmm_cluster" %in% names(morph_df)) suppressWarnings(as.integer(morph_df$gmm_cluster)) else rep(1L, n)
   gmm_cl[is.na(gmm_cl)] <- 1L
-  gmm_bf <- if ("gmm_2_delta_bic" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$gmm_2_delta_bic)) else ifelse(gmm_cl > 4L, 8.0, 0.0)
-  gmm_bf[!is.finite(gmm_bf)] <- ifelse(gmm_cl[!is.finite(gmm_bf)] > 4L, 8.0, 0.0)
+  n_known_sp <- max(2L, length(unique(sp_given)))
+  gmm_bf <- if ("gmm_2_delta_bic" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$gmm_2_delta_bic)) else ifelse(gmm_cl > n_known_sp, 8.0, 0.0)
+  gmm_bf[!is.finite(gmm_bf)] <- ifelse(gmm_cl[!is.finite(gmm_bf)] > n_known_sp, 8.0, 0.0)
   d_edaph <- if ("edaphic_schoener_d" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$edaphic_schoener_d)) else rep(0.65, n)
   d_edaph[!is.finite(d_edaph)] <- 0.65
   d_doy <- pheno_res$delta_doy_resid
@@ -620,7 +621,7 @@ build_taxon_morphotype_subclusters <- function(morph_df, vis_df = NULL, min_vouc
   short_sp <- sub("^Packera\\s+", "P. ", raw_sp)
   cand_lbl <- sprintf("%s [K%d]", short_sp, k_vec)
   if (sum(table(cand_lbl) >= min_vouchers) < 3L && nrow(morph_df) >= 3L * min_vouchers) {
-    fcols <- extract_morph_feature_cols(morph_df)
+    fcols <- intersect(c(paste0("Sym_PC", 1:5), paste0("PC", 1:5), "can1", "can2", "can3"), names(morph_df))
     X_m <- scale(as.matrix(morph_df[, fcols, drop = FALSE])); X_m[!is.finite(X_m)] <- 0.0
     for (sp in u_sp) {
       idx_s <- which(raw_sp == sp)

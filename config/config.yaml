@@ -102,6 +102,9 @@ thresholds:
   min_sharpness_laplacian: 80.0
   max_uncertainty_meters: 5000.0
   western_longitude_threshold: -106.65
+  geographic_scope: "eastern_na"
+  countries:
+    - "US"
 
   # Empirical fold-detection parameters (calibrated)
   fold_detection:
@@ -145,8 +148,12 @@ thresholds:
 harvesting:
   max_records_per_taxon: 5000
   max_uncertainty_meters: 5000.0
+  geographic_scope: "eastern_na"
+  countries:
+    - "US"
   exclude_western: true
   western_longitude_threshold: -106.65
+  home_herbarium: "NCU"
   min_megapixels: 8.0
   min_file_size_kb: 500.0
   min_sharpness_laplacian: 80.0

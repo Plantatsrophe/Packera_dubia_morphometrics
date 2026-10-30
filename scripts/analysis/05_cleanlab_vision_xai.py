@@ -8,8 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np, pandas as pd, torch
-import torch.nn.functional as F
+import numpy as np, pandas as pd, torch, torch.nn.functional as F
 from PIL import Image, ImageFilter
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
@@ -19,28 +18,29 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-try:
-    import cv2
-except ImportError:
-    cv2 = None
+try: import cv2
+except ImportError: cv2 = None
 
-torch.manual_seed(42)
-np.random.seed(42)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
+torch.manual_seed(42); np.random.seed(42)
+if torch.cuda.is_available(): torch.cuda.manual_seed_all(42)
 
 _script_root = Path(__file__).resolve().parents[2]
-if str(_script_root) not in sys.path:
-    sys.path.insert(0, str(_script_root))
+if str(_script_root) not in sys.path: sys.path.insert(0, str(_script_root))
 
 TARGET_TAXA: List[str] = ["Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis"]
 EASTERN_NA_PACKERA_TAXA: List[str] = ["Packera anonyma", "Packera antennariifolia", "Packera aurea", "Packera crawfordii", "Packera cymbalaria", "Packera dubia", "Packera glabella", "Packera hyperborealis", "Packera indecora", "Packera insulanus", "Packera memmingeri", "Packera millefolium", "Packera obovata", "Packera paupercula", "Packera plattensis", "Packera pseudaurea", "Packera schweinitziana", "Packera serpenticola", "Packera spellenbergii", "Packera tampicana", "Packera vulgaris"]
 FOREGROUND_ATTENTION_MIN_RATIO: float = 0.65
+DYNAMIC_OKABE_ITO_HEX: List[str] = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#882255", "#44AA99", "#332288", "#117733"]
 OKABE_ITO: Dict[str, str] = {"Packera anonyma": "#0072B2", "Packera dubia": "#D55E00", "Packera paupercula": "#009E73", "Packera plattensis": "#CC79A7"}
-__all__ = ["TARGET_TAXA", "EASTERN_NA_PACKERA_TAXA", "FOREGROUND_ATTENTION_MIN_RATIO", "standardize_packera_taxon", "neutralize_mounting_paper", "apply_tier1_leaf_mask_to_rgb", "classify_foliar_surface_orientation", "preprocess_macro_rosette_crop", "compute_foreground_tissue_mask", "foreground_masked_patch_pooling", "RosettePatchDataset", "load_and_link_rosette_patches", "extract_dinov2_embeddings", "compute_out_of_fold_probabilities", "compute_feature_space_ood_scores", "run_confident_learning_audit", "compute_foreground_attention_ratio", "blend_heatmap_on_image", "compute_vit_patch_saliency", "generate_gradcam_panel", "generate_step05_publication_figures", "main"]
+__all__ = ["TARGET_TAXA", "EASTERN_NA_PACKERA_TAXA", "FOREGROUND_ATTENTION_MIN_RATIO", "DYNAMIC_OKABE_ITO_HEX", "_get_dynamic_okabe_ito_map", "standardize_packera_taxon", "neutralize_mounting_paper", "apply_tier1_leaf_mask_to_rgb", "classify_foliar_surface_orientation", "preprocess_macro_rosette_crop", "compute_foreground_tissue_mask", "foreground_masked_patch_pooling", "RosettePatchDataset", "load_and_link_rosette_patches", "extract_dinov2_embeddings", "compute_out_of_fold_probabilities", "compute_feature_space_ood_scores", "run_confident_learning_audit", "compute_foreground_attention_ratio", "blend_heatmap_on_image", "compute_vit_patch_saliency", "generate_gradcam_panel", "generate_step05_publication_figures", "main"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger("Cleanlab_Vision_XAI")
+
+
+def _get_dynamic_okabe_ito_map(taxa_list: List[str]) -> Dict[str, str]:
+    """Assigns distinct colorblind-safe hex colors deterministically across any active Packera species set."""
+    return {str(tx): DYNAMIC_OKABE_ITO_HEX[i % len(DYNAMIC_OKABE_ITO_HEX)] for i, tx in enumerate(taxa_list)}
 
 
 def standardize_packera_taxon(species_str: Optional[str]) -> str:
@@ -60,7 +60,7 @@ def standardize_packera_taxon(species_str: Optional[str]) -> str:
 
 
 def _is_valid_packera_taxon(taxon_str: str) -> bool:
-    return bool(taxon_str and taxon_str != "Unknown" and (taxon_str in EASTERN_NA_PACKERA_TAXA or taxon_str in TARGET_TAXA or re.match(r"^Packera\s+[a-z×-]+", str(taxon_str))))
+    return bool(taxon_str and taxon_str not in {"Unknown", "Unassigned_Packera"} and (taxon_str in EASTERN_NA_PACKERA_TAXA or re.match(r"^(?:Packera\s+[a-z×-]+|Morphotype_[A-Za-z0-9_]+)$", str(taxon_str))))
 
 
 def _to_rgb_uint8(image: Image.Image | np.ndarray) -> np.ndarray:
@@ -256,13 +256,10 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
     known_cats = set(voucher_map.keys()) if voucher_map else None
     dense_dir = rosette_dir if rosette_dir.name == "rosettes_dense" else (rosette_dir / "rosettes_dense")
     dense_files: List[Path] = []
-    for search_dir in (dense_dir, rosette_dir):
+    for search_dir, use_rglob in ((dense_dir, False), (rosette_dir, False), (rosette_dir, True)):
         if not dense_files and search_dir.exists():
             for ext in ("*.jpg", "*.png", "*.jpeg"):
-                dense_files.extend(sorted(search_dir.glob(ext)))
-    if not dense_files and rosette_dir.exists():
-        for ext in ("*.jpg", "*.png", "*.jpeg"):
-            dense_files.extend(sorted(rosette_dir.rglob(ext)))
+                dense_files.extend(sorted(search_dir.rglob(ext) if use_rglob else search_dir.glob(ext)))
     grouped_patches: Dict[str, List[Path]] = {}
     for p in dense_files:
         cat_num = _extract_catalog_number(p.stem, known_cats)
@@ -272,7 +269,7 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
     if grouped_patches:
         for cat_num, p_list in grouped_patches.items():
             meta = voucher_map.get(cat_num, {})
-            raw_sp = meta.get("species_raw", meta.get("scientificName", meta.get("species", "Packera dubia")))
+            raw_sp = meta.get("species_raw", meta.get("species_standardized", meta.get("scientificName", meta.get("species", "Unknown"))))
             std_taxon = standardize_packera_taxon(raw_sp)
             if _is_valid_packera_taxon(std_taxon):
                 records.append({"catalogNumber": cat_num, "plant_individual_id": int(meta.get("plant_individual_id", 0) or 0), "patch_path": str(p_list[0]), "rosette_patches": [str(x) for x in p_list], "n_rosette_patches": len(p_list), "taxon": std_taxon, "species_raw": raw_sp, "label_idx": 0, "institutionCode": str(meta.get("institutionCode", "UNKNOWN") or "UNKNOWN").strip(), "determiner_tier": str(meta.get("determiner_tier", "Tier_3_Bronze") or "Tier_3_Bronze"), "spatial_balance_weight": float(meta.get("spatial_balance_weight", 1.0) if pd.notna(meta.get("spatial_balance_weight", 1.0)) else 1.0), **classify_foliar_surface_orientation(p_list[0])})
@@ -280,15 +277,15 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
         raise RuntimeError(f"No whole-rosette patch images found in '{dense_dir}' or '{rosette_dir}'.")
     elif not vouchers_df.empty:
         for _, row in vouchers_df.iterrows():
-            raw_sp = str(row.get("species_raw", row.get("scientificName", row.get("species", "Unknown"))))
+            raw_sp = str(row.get("species_raw", row.get("species_standardized", row.get("scientificName", row.get("species", "Unknown")))))
             std_taxon = standardize_packera_taxon(raw_sp)
             if _is_valid_packera_taxon(std_taxon):
                 cat_num = str(row.get("catalogNumber", "")).strip()
                 synth_p = str(dense_dir / f"{cat_num}_rosette.jpg")
                 records.append({"catalogNumber": cat_num, "plant_individual_id": int(row.get("plant_individual_id", 0) or 0), "patch_path": synth_p, "rosette_patches": [synth_p], "n_rosette_patches": 1, "taxon": std_taxon, "species_raw": raw_sp, "label_idx": 0, "institutionCode": str(row.get("institutionCode", "UNKNOWN") or "UNKNOWN").strip(), "determiner_tier": str(row.get("determiner_tier", "Tier_3_Bronze") or "Tier_3_Bronze"), "spatial_balance_weight": 1.0, "surface_orientation": "adaxial", "mean_luminance": 0.0, "mean_saturation": 0.0, "high_brightness_ratio": 0.0})
     present_taxa = {r["taxon"] for r in records if _is_valid_packera_taxon(r["taxon"])}
-    active_taxa = [t for t in TARGET_TAXA if t in present_taxa] + sorted(t for t in present_taxa if t not in TARGET_TAXA)
-    class_to_idx = {taxon: idx for idx, taxon in enumerate(active_taxa)} if active_taxa else {t: i for i, t in enumerate(TARGET_TAXA)}
+    active_taxa = sorted(t for t in present_taxa if _is_valid_packera_taxon(t))
+    class_to_idx = {taxon: idx for idx, taxon in enumerate(active_taxa)}
     for r in records:
         r["label_idx"] = class_to_idx.get(r["taxon"], 0)
     return pd.DataFrame(records), class_to_idx
@@ -332,17 +329,14 @@ def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "
             raise RuntimeError("No physical patch images found in `data/cropped_patches/rosettes_dense/`. Run Phase 2 or pass `--demo`.")
         feats = np.random.randn(len(expanded_records), 768).astype(np.float32)
         for i, r in enumerate(expanded_records):
-            c_idx = int(r.get("label_idx", 0)) % 4
+            c_idx = int(r.get("label_idx", 0)) % 15
             feats[i, c_idx * 50 : (c_idx + 1) * 50] += 3.0
         return _aggregate_voucher_embeddings(feats, expanded_meta)
     loader = DataLoader(RosettePatchDataset(expanded_records, neutralize_background=neutralize_background, sigma=1.0, demo=demo), batch_size=batch_size, shuffle=False, num_workers=0)
     model, last_err = None, None
     for candidate_name in (model_name, "dinov2_vitb14"):
-        try:
-            model = torch.hub.load("facebookresearch/dinov2", candidate_name)
-            break
-        except Exception as exc:
-            last_err = exc
+        try: model = torch.hub.load("facebookresearch/dinov2", candidate_name); break
+        except Exception as exc: last_err = exc
     if model is None:
         if not demo:
             raise RuntimeError(f"Could not load DINOv2 model weights ('{model_name}'): {last_err}") from last_err
@@ -376,7 +370,7 @@ def compute_out_of_fold_probabilities(features: np.ndarray, labels: np.ndarray, 
         sample_weights = sample_weights * np.where(np.isfinite(sp_w) & (sp_w > 0.0), np.clip(sp_w, 0.20, 3.00), 1.0)
     unique_labels, label_counts = np.unique(labels, return_counts=True)
     max_lbl_plus_1 = int(np.max(labels)) + 1 if len(labels) > 0 else 2
-    num_classes = max(2, max_lbl_plus_1) if (len(unique_labels) >= 2 and len(unique_labels) == max_lbl_plus_1) else max(2, len(TARGET_TAXA), max_lbl_plus_1)
+    num_classes = max(2, max_lbl_plus_1)
     pred_probs = np.zeros((len(labels), num_classes), dtype=np.float64)
     if len(unique_labels) < 2 or int(np.min(label_counts)) < 2:
         if len(X) == 0:
@@ -399,8 +393,7 @@ def compute_out_of_fold_probabilities(features: np.ndarray, labels: np.ndarray, 
     strat_anc = y_anc
     if stratify_by_orientation and surface_orientations is not None:
         compound = np.array([f"{l}_{o}" for l, o in zip(y_anc, np.asarray(surface_orientations)[anchor_idx])])
-        if all(c >= eff_splits for c in np.unique(compound, return_counts=True)[1]):
-            strat_anc = compound
+        if all(c >= eff_splits for c in np.unique(compound, return_counts=True)[1]): strat_anc = compound
     cv_splits = None
     if institution_codes is not None and len(institution_codes) == len(labels):
         inst_anc = np.asarray(institution_codes)[anchor_idx]
@@ -408,17 +401,14 @@ def compute_out_of_fold_probabilities(features: np.ndarray, labels: np.ndarray, 
         if len(np.unique(groups)) >= eff_splits:
             try:
                 cand = list(StratifiedGroupKFold(n_splits=eff_splits, shuffle=True, random_state=random_state).split(X_anc, strat_anc, groups))
-                if all(len(vi) > 0 and len(np.unique(y_anc[ti])) == len(unique_labels) for ti, vi in cand):
-                    cv_splits = cand
-            except Exception:
-                cv_splits = None
+                if all(len(vi) > 0 and len(np.unique(y_anc[ti])) == len(unique_labels) for ti, vi in cand): cv_splits = cand
+            except Exception: cv_splits = None
     if cv_splits is None:
         cv_splits = list(StratifiedKFold(n_splits=eff_splits, shuffle=True, random_state=random_state).split(X_anc, strat_anc))
     bronze_accum, n_valid_folds, y_true_anc, y_pred_anc = np.zeros((len(bronze_idx), num_classes), dtype=np.float64), 0, [], []
     for train_sub, val_sub in cv_splits:
         scaler = StandardScaler()
-        X_train, X_val = scaler.fit_transform(X_anc[train_sub]), scaler.transform(X_anc[val_sub])
-        y_train, y_val = y_anc[train_sub], y_anc[val_sub]
+        X_train, X_val, y_train, y_val = scaler.fit_transform(X_anc[train_sub]), scaler.transform(X_anc[val_sub]), y_anc[train_sub], y_anc[val_sub]
         w_train = w_anc[train_sub] / max(float(np.mean(w_anc[train_sub])), 1e-8)
         min_cls = int(np.min(np.unique(y_train, return_counts=True)[1]))
         lrcv_kw: Dict[str, Any] = {"use_legacy_attributes": False, "l1_ratios": (0.0,), "scoring": "accuracy"} if "use_legacy_attributes" in LogisticRegressionCV.__init__.__code__.co_varnames else {}
@@ -428,20 +418,15 @@ def compute_out_of_fold_probabilities(features: np.ndarray, labels: np.ndarray, 
         if min_cls >= 3:
             try:
                 cal_clf = CalibratedClassifierCV(estimator=LogisticRegression(max_iter=2000, C=0.25, class_weight="balanced", random_state=random_state), method="sigmoid", cv=min(3, min_cls))
-                cal_clf.fit(X_train, y_train, sample_weight=w_train)
-                active_clf = cal_clf
-            except Exception:
-                active_clf = base_clf
+                cal_clf.fit(X_train, y_train, sample_weight=w_train); active_clf = cal_clf
+            except Exception: active_clf = base_clf
         val_probs, classes_arr = active_clf.predict_proba(X_val), np.asarray(active_clf.classes_, dtype=int)
-        for col_i, c_idx in enumerate(classes_arr):
-            pred_probs[anchor_idx[val_sub], c_idx] = val_probs[:, col_i]
+        for col_i, c_idx in enumerate(classes_arr): pred_probs[anchor_idx[val_sub], c_idx] = val_probs[:, col_i]
         if len(bronze_idx) > 0:
             brz_probs = active_clf.predict_proba(scaler.transform(X[bronze_idx]))
-            for col_i, c_idx in enumerate(classes_arr):
-                bronze_accum[:, c_idx] += brz_probs[:, col_i]
+            for col_i, c_idx in enumerate(classes_arr): bronze_accum[:, c_idx] += brz_probs[:, col_i]
             n_valid_folds += 1
-        y_true_anc.extend(y_val)
-        y_pred_anc.extend(classes_arr[np.argmax(val_probs, axis=1)])
+        y_true_anc.extend(y_val); y_pred_anc.extend(classes_arr[np.argmax(val_probs, axis=1)])
     if len(bronze_idx) > 0 and n_valid_folds > 0:
         brz_mean = bronze_accum / float(n_valid_folds)
         pred_probs[bronze_idx, :] = brz_mean / np.maximum(brz_mean.sum(axis=1, keepdims=True), 1e-8)
@@ -472,6 +457,36 @@ def compute_feature_space_ood_scores(features: np.ndarray, labels: np.ndarray, p
         return np.round(centroid_ood, 4)
 
 
+def _compute_tomentum_taxon_discordance(audit_df: pd.DataFrame, error_threshold: float) -> pd.Series:
+    """Organic, taxon-agnostic chromatic vestiture discordance rule in CIE L* luminance & HSV saturation space."""
+    abax_mm = (audit_df["surface_orientation"].astype(str).str.lower() == "abaxial") & (audit_df["given_label"] != audit_df["predicted_label"]) & (audit_df["c_error"] > error_threshold)
+    lum_s = pd.to_numeric(audit_df.get("mean_luminance", pd.Series(np.nan, index=audit_df.index)), errors="coerce")
+    sat_s = pd.to_numeric(audit_df.get("mean_saturation", pd.Series(np.nan, index=audit_df.index)), errors="coerce")
+    valid_l = lum_s.dropna()
+    if len(valid_l) == 0 or float(valid_l.max() - valid_l.min()) <= 1e-6:
+        return abax_mm.astype(bool)
+    adax = audit_df["surface_orientation"].astype(str).str.lower() != "abaxial"
+    anc = audit_df["determiner_tier"].astype(str).str.strip().isin({"Tier_1_Gold", "Tier_2_Silver"}) if "determiner_tier" in audit_df.columns else pd.Series(True, index=audit_df.index)
+    med_L, med_S, q75_L = {}, {}, {}
+    for tx in set(audit_df["given_label"].dropna().unique()):
+        tx_m = audit_df["given_label"] == tx
+        ref_m = (tx_m & adax & anc) if np.any(tx_m & adax & anc & lum_s.notna()) else ((tx_m & adax) if np.any(tx_m & adax & lum_s.notna()) else tx_m)
+        if np.any(ref_m & lum_s.notna()):
+            med_L[tx], q75_L[tx] = float(np.nanmedian(lum_s[ref_m])), float(np.nanpercentile(lum_s[tx_m & lum_s.notna()], 75))
+        if np.any(ref_m & sat_s.notna()):
+            med_S[tx] = float(np.nanmedian(sat_s[ref_m]))
+    flags = []
+    for idx_i, is_cand in enumerate(abax_mm.to_numpy(dtype=bool)):
+        if not is_cand:
+            flags.append(False); continue
+        g_tx, p_tx = audit_df.at[idx_i, "given_label"], audit_df.at[idx_i, "predicted_label"]
+        l_i = float(lum_s.iat[idx_i]) if pd.notna(lum_s.iat[idx_i]) else np.nan
+        cond_a = (p_tx in med_L and g_tx in med_L and med_L[p_tx] >= med_L[g_tx] + 2.0) or (p_tx in med_S and g_tx in med_S and med_S[p_tx] <= med_S[g_tx] - 0.02)
+        cond_b = bool(np.isfinite(l_i) and g_tx in q75_L and l_i > q75_L[g_tx])
+        flags.append(bool(cond_a or cond_b))
+    return pd.Series(flags, index=audit_df.index, dtype=bool)
+
+
 def run_confident_learning_audit(pred_probs: np.ndarray, labels: np.ndarray, records_df: pd.DataFrame, class_names: List[str], error_threshold: float = 0.85, filter_abaxial_artifacts: bool = True, features: Optional[np.ndarray] = None) -> pd.DataFrame:
     """Runs class-conditional Confident Learning (`prune_by_noise_rate`) & OOD audit."""
     labels, pred_probs = np.asarray(labels, dtype=int), np.asarray(pred_probs, dtype=np.float64)
@@ -499,7 +514,7 @@ def run_confident_learning_audit(pred_probs: np.ndarray, labels: np.ndarray, rec
     raw_sp_col = audit_df.get("taxon", audit_df.get("species_raw", audit_df.get("species", pd.Series(given_classes, index=audit_df.index))))
     audit_df["species_raw"] = audit_df.get("species_raw", audit_df.get("species", given_classes))
     std_sp = pd.Series(raw_sp_col, index=audit_df.index).apply(standardize_packera_taxon)
-    audit_df["species_standardized"] = [sp if _is_valid_packera_taxon(sp) else (gc if _is_valid_packera_taxon(gc) else "Packera dubia") for sp, gc in zip(std_sp, given_classes)]
+    audit_df["species_standardized"] = [sp if _is_valid_packera_taxon(sp) else (gc if _is_valid_packera_taxon(gc) else "Unassigned_Packera") for sp, gc in zip(std_sp, given_classes)]
     audit_df["given_label"], audit_df["predicted_label"], audit_df["vision_predicted_label"] = given_classes, pred_classes, pred_classes
     audit_df["confidence_given_class"], audit_df["confidence_predicted_class"] = np.round(conf_given, 4), np.round(conf_pred, 4)
     audit_df["vision_confidence"], audit_df["vision_second_prob"] = np.round(conf_pred, 4), np.round(second_prob, 4)
@@ -513,32 +528,27 @@ def run_confident_learning_audit(pred_probs: np.ndarray, labels: np.ndarray, rec
     if "determiner_tier" in audit_df.columns:
         tier_map = {"Tier_1_Gold": 3.0, "Tier_2_Silver": 1.5, "Tier_3_Bronze": 0.5}
         audit_df["authority_weight"] = [tier_map.get(str(t).strip(), 0.5) for t in audit_df["determiner_tier"]]
-    is_issue = np.zeros(num_records, dtype=bool)
-    is_issue[issues] = True
+    is_issue = np.zeros(num_records, dtype=bool); is_issue[issues] = True
     audit_df["is_cleanlab_issue"], audit_df["is_label_corrupted"] = is_issue, audit_df["c_error"] > error_threshold
     audit_df["is_label_issue"] = (audit_df["is_cleanlab_issue"] | audit_df["is_label_corrupted"]).astype(bool)
     if "surface_orientation" not in audit_df.columns:
         audit_df["surface_orientation"] = "adaxial"
-    audit_df["tomentum_taxon_discordance"] = ((audit_df["surface_orientation"] == "abaxial") & audit_df["given_label"].isin({"Packera anonyma", "Packera paupercula"}) & audit_df["predicted_label"].isin({"Packera dubia", "Packera plattensis"}) & (audit_df["c_error"] > error_threshold)).astype(bool)
+    audit_df["tomentum_taxon_discordance"] = _compute_tomentum_taxon_discordance(audit_df, error_threshold)
     triage_actions, reasons = [], []
     for _, row in audit_df.iterrows():
         is_corrupted, is_issue_flag = bool(row["is_label_corrupted"]), bool(row["is_cleanlab_issue"])
         orient, fg_ratio = str(row.get("surface_orientation", "adaxial")).lower(), float(row.get("foreground_attention_ratio", 0.85))
         if filter_abaxial_artifacts and orient == "abaxial" and (is_corrupted or is_issue_flag):
-            triage_actions.append("Retain (Abaxial Inversion Artifact)")
-            reasons.append("Visual divergence driven by dense abaxial arachnoid tomentum (mounting variant); retained as valid voucher.")
+            act, rsn = "Retain (Abaxial Inversion Artifact)", "Visual divergence driven by dense abaxial arachnoid tomentum (mounting variant); retained as valid voucher."
         elif fg_ratio < FOREGROUND_ATTENTION_MIN_RATIO and (is_corrupted or is_issue_flag):
-            triage_actions.append("Downweight (Background Artifact Attribution)")
-            reasons.append(f"Low foreground attention ratio ({fg_ratio:.2f} < {FOREGROUND_ATTENTION_MIN_RATIO:.2f}); prediction driven by sheet background.")
+            act, rsn = "Downweight (Background Artifact Attribution)", f"Low foreground attention ratio ({fg_ratio:.2f} < {FOREGROUND_ATTENTION_MIN_RATIO:.2f}); prediction driven by sheet background."
         elif is_corrupted:
-            triage_actions.append("Prune & Queue for Annotation Triage")
-            reasons.append(f"Deep vision DINOv2 predicts {row['predicted_label']} (conf: {row['confidence_predicted_class']:.2f}) vs recorded {row['given_label']}")
+            act, rsn = "Prune & Queue for Annotation Triage", f"Deep vision DINOv2 predicts {row['predicted_label']} (conf: {row['confidence_predicted_class']:.2f}) vs recorded {row['given_label']}"
         elif is_issue_flag:
-            triage_actions.append("Flag for Morphometric Review")
-            reasons.append(f"Confident learning flags potential discordance (quality: {row['label_quality_score']:.2f})")
+            act, rsn = "Flag for Morphometric Review", f"Confident learning flags potential discordance (quality: {row['label_quality_score']:.2f})"
         else:
-            triage_actions.append("Retain")
-            reasons.append("High label consistency across visual self-supervised embeddings")
+            act, rsn = "Retain", "High label consistency across visual self-supervised embeddings"
+        triage_actions.append(act); reasons.append(rsn)
     audit_df["triage_action"], audit_df["discordance_reason"] = triage_actions, reasons
     if filter_abaxial_artifacts:
         audit_df.loc[audit_df["surface_orientation"].str.lower() == "abaxial", ["is_label_corrupted", "is_label_issue"]] = False
@@ -630,18 +640,15 @@ def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_s
     if not samples:
         return
     obs_taxa = {standardize_packera_taxon(str(r.get(k, ""))) for r in flagged_records for k in ("taxon", "species_standardized", "given_label", "species_raw", "predicted_taxon", "predicted_label", "vision_predicted_label") if r.get(k) and _is_valid_packera_taxon(standardize_packera_taxon(str(r.get(k, ""))))}
-    active_taxa = [t for t in (active_taxa or class_names or []) if _is_valid_packera_taxon(t)] or ([t for t in TARGET_TAXA if t in obs_taxa] + sorted(t for t in obs_taxa if t not in TARGET_TAXA)) or ["Packera dubia"]
+    active_taxa = [t for t in (active_taxa or class_names or []) if _is_valid_packera_taxon(t)] or sorted(t for t in obs_taxa if _is_valid_packera_taxon(t)) or ["Unassigned_Packera"]
+    palette_map = _get_dynamic_okabe_ito_map(active_taxa)
     if model is None:
         last_err = None
         for cand in (model_name, "dinov2_vitb14"):
-            try:
-                model = torch.hub.load("facebookresearch/dinov2", cand).to(device).eval()
-                break
-            except Exception as exc:
-                last_err = exc
+            try: model = torch.hub.load("facebookresearch/dinov2", cand).to(device).eval(); break
+            except Exception as exc: last_err = exc
         if model is None:
-            if not demo:
-                raise RuntimeError(f"Could not load DINOv2 model ('{model_name}'): {last_err}") from last_err
+            if not demo: raise RuntimeError(f"Could not load DINOv2 model ('{model_name}'): {last_err}") from last_err
             model = _DemoViTFeatureExtractor()
     n = len(samples)
     fig, axes = plt.subplots(n, 3, figsize=(11.8, 3.2 * n), gridspec_kw={"width_ratios": [1.0, 1.0, 1.25], "wspace": 0.28})
@@ -681,21 +688,18 @@ def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_s
             probs[active_taxa.index(pred_taxon)] = conf_val
             probs = probs / max(probs.sum(), 1e-8)
         y_pos = np.arange(len(active_taxa))
-        ax_bar.barh(y_pos, probs * 100.0, color=[OKABE_ITO.get(tx, "#0072B2") for tx in active_taxa], edgecolor="#222222", height=0.58, alpha=0.88)
+        ax_bar.barh(y_pos, probs * 100.0, color=[palette_map.get(tx, "#0072B2") for tx in active_taxa], edgecolor="#222222", height=0.58, alpha=0.88)
         ax_bar.set_yticks(y_pos)
         ax_bar.set_yticklabels([tx.replace("Packera ", "P. ") for tx in active_taxa], fontsize=8.2, fontstyle="italic")
-        ax_bar.set_xlim(0, 112)
-        ax_bar.invert_yaxis()
+        ax_bar.set_xlim(0, 112); ax_bar.invert_yaxis()
         ax_bar.set_title("[3] Calibrated Posteriors", fontsize=8.8, fontweight="bold")
     fig.subplots_adjust(hspace=0.38, wspace=0.24)
     tmp_out = output_path.with_name(f".{output_path.stem}_{os.getpid()}_tmp{output_path.suffix}")
-    plt.savefig(tmp_out, dpi=300, bbox_inches="tight")
-    tmp_out.replace(output_path)
+    plt.savefig(tmp_out, dpi=300, bbox_inches="tight"); tmp_out.replace(output_path)
     pdf_companion = output_path.with_suffix(".pdf")
     if pdf_companion != output_path:
         tmp_pdf = output_path.with_name(f".{output_path.stem}_{os.getpid()}_tmp.pdf")
-        plt.savefig(tmp_pdf, format="pdf", bbox_inches="tight")
-        tmp_pdf.replace(pdf_companion)
+        plt.savefig(tmp_pdf, format="pdf", bbox_inches="tight"); tmp_pdf.replace(pdf_companion)
     plt.close()
 
 
@@ -708,29 +712,34 @@ def generate_step05_publication_figures(audit_df: pd.DataFrame, output_figure_pa
     figures_dir.mkdir(parents=True, exist_ok=True)
     df = audit_df.copy()
     sp_col, pred_col = ("species_standardized" if "species_standardized" in df.columns else "given_label"), ("predicted_label" if "predicted_label" in df.columns else "vision_predicted_label")
-    df["taxon_clean"] = df.get(sp_col, pd.Series("Packera dubia", index=df.index)).astype(str).apply(standardize_packera_taxon)
+    df["taxon_clean"] = df.get(sp_col, pd.Series("Unassigned_Packera", index=df.index)).astype(str).apply(standardize_packera_taxon)
     df["pred_clean"] = df.get(pred_col, df["taxon_clean"]).astype(str).apply(standardize_packera_taxon)
     present_tx = {t for t in df["taxon_clean"] if _is_valid_packera_taxon(t)}
-    taxa_order = [t for t in TARGET_TAXA if t in present_tx] + sorted(t for t in present_tx if t not in TARGET_TAXA) or ["Packera dubia"]
+    taxa_order = sorted(present_tx) or sorted({t for t in df["pred_clean"] if _is_valid_packera_taxon(t)}) or ["Unassigned_Packera"]
+    palette_map = _get_dynamic_okabe_ito_map(taxa_order)
+    short_labels = [tx.replace("Packera ", "P. ") for tx in taxa_order]
     fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(13.2, 5.8), dpi=300)
     conf_counts = np.array([[int(np.sum((df["taxon_clean"] == r_tx) & (df["pred_clean"] == c_tx))) for c_tx in taxa_order] for r_tx in taxa_order], dtype=int)
     ax_a.imshow((conf_counts / np.maximum(conf_counts.sum(axis=1, keepdims=True), 1)) * 100.0, cmap="Blues", vmin=0.0, vmax=100.0, aspect="auto")
+    ax_a.set_xticks(range(len(taxa_order))); ax_a.set_xticklabels(short_labels, rotation=30, ha="right", fontsize=8.5, fontstyle="italic")
+    ax_a.set_yticks(range(len(taxa_order))); ax_a.set_yticklabels(short_labels, fontsize=8.5, fontstyle="italic")
     ax_a.set_title("A. Cross-Species Visual Confusion Matrix", fontsize=10.5, fontweight="bold", loc="left")
     lum_vals = pd.to_numeric(df.get("mean_luminance", pd.Series(52.0, index=df.index)), errors="coerce").fillna(52.0).to_numpy(dtype=float)
     sat_vals = pd.to_numeric(df.get("mean_saturation", pd.Series(0.30, index=df.index)), errors="coerce").fillna(0.30).to_numpy(dtype=float)
-    for sp_name in taxa_order:
+    hollow_markers = ("o", "^", "s", "D", "v", "P", "X", "<", ">", "h")
+    for idx_sp, sp_name in enumerate(taxa_order):
         sp_mask = (df["taxon_clean"] == sp_name).to_numpy()
         if np.any(sp_mask):
-            ax_b.scatter(lum_vals[sp_mask], sat_vals[sp_mask], facecolors="none", edgecolors=OKABE_ITO.get(sp_name, "#0072B2"), marker="o", s=36, alpha=0.7, label=sp_name)
+            ax_b.scatter(lum_vals[sp_mask], sat_vals[sp_mask], facecolors="none", edgecolors=palette_map.get(sp_name, "#0072B2"), marker=hollow_markers[idx_sp % len(hollow_markers)], s=36, alpha=0.75, label=sp_name.replace("Packera ", "P. "))
+    ax_b.set_xlabel("Mean Foliar CIE L* Luminance", fontsize=9.5, fontweight="bold"); ax_b.set_ylabel("Mean Foliar HSV Saturation", fontsize=9.5, fontweight="bold")
+    if len(taxa_order) > 0: ax_b.legend(loc="best", fontsize=8.0, frameon=True)
     ax_b.set_title("B. Foliar Chromatic Space & Species Ellipses", fontsize=10.5, fontweight="bold", loc="left")
     fig.tight_layout()
     pdf_out, png_out = figures_dir / "fig05b_cleanlab_quality_and_tomentum.pdf", figures_dir / "fig05b_cleanlab_quality_and_tomentum.png"
     tmp_pdf, tmp_png = figures_dir / f".fig05b_{os.getpid()}_tmp.pdf", figures_dir / f".fig05b_{os.getpid()}_tmp.png"
     try:
-        fig.savefig(tmp_pdf, format="pdf", bbox_inches="tight")
-        tmp_pdf.replace(pdf_out)
-        fig.savefig(tmp_png, format="png", dpi=300, bbox_inches="tight")
-        tmp_png.replace(png_out)
+        fig.savefig(tmp_pdf, format="pdf", bbox_inches="tight"); tmp_pdf.replace(pdf_out)
+        fig.savefig(tmp_png, format="png", dpi=300, bbox_inches="tight"); tmp_png.replace(png_out)
     finally:
         plt.close(fig)
     return {"pdf": pdf_out, "png": png_out}
@@ -743,14 +752,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--vouchers-csv", type=Path, default=Path("data/tables/curated_vouchers.csv"))
     p.add_argument("--output-csv", type=Path, default=Path("data/tables/label_noise_audit.csv"))
     p.add_argument("--output-figure", type=Path, default=Path("outputs/figures/GradCAM_audit_panel.png"))
-    p.add_argument("--cleanlab-threshold", dest="cleanlab_threshold", type=float, default=0.85)
-    p.add_argument("--error-threshold", dest="cleanlab_threshold", type=float)
-    p.add_argument("--neutralize-background", dest="neutralize_background", action="store_true", default=True)
-    p.add_argument("--no-neutralize-background", dest="neutralize_background", action="store_false")
-    p.add_argument("--export-figures", dest="export_figures", action="store_true", default=True)
-    p.add_argument("--no-export-figures", dest="export_figures", action="store_false")
-    p.add_argument("--filter-abaxial-artifacts", dest="filter_abaxial_artifacts", action="store_true", default=True)
-    p.add_argument("--no-filter-abaxial-artifacts", dest="filter_abaxial_artifacts", action="store_false")
+    p.add_argument("--cleanlab-threshold", dest="cleanlab_threshold", type=float, default=0.85); p.add_argument("--error-threshold", dest="cleanlab_threshold", type=float)
+    p.add_argument("--neutralize-background", dest="neutralize_background", action="store_true", default=True); p.add_argument("--no-neutralize-background", dest="neutralize_background", action="store_false")
+    p.add_argument("--export-figures", dest="export_figures", action="store_true", default=True); p.add_argument("--no-export-figures", dest="export_figures", action="store_false")
+    p.add_argument("--filter-abaxial-artifacts", dest="filter_abaxial_artifacts", action="store_true", default=True); p.add_argument("--no-filter-abaxial-artifacts", dest="filter_abaxial_artifacts", action="store_false")
     p.add_argument("--stratify-by-orientation", dest="stratify_by_orientation", action="store_true", default=False)
     p.add_argument("--morphometrics-csv", type=Path, default=None)
     p.add_argument("--manifest-csv", type=Path, default=None)
@@ -765,11 +770,9 @@ def main() -> None:
     args = parse_args()
     df, _ = load_and_link_rosette_patches(args.rosette_dir, args.vouchers_csv, demo=args.demo, manifest_csv=args.manifest_csv)
     if df.empty:
-        logger.warning("No rosette patch records were matched. Check inputs.")
-        return
+        logger.warning("No rosette patch records were matched. Check inputs."); return
     features, labels, _ = extract_dinov2_embeddings(df.to_dict("records"), neutralize_background=args.neutralize_background, demo=args.demo)
-    present_taxa = set(df["taxon"])
-    active_taxa = [t for t in TARGET_TAXA if t in present_taxa] + sorted(t for t in present_taxa if t not in TARGET_TAXA and _is_valid_packera_taxon(t)) or ["Packera dubia"]
+    active_taxa = sorted(t for t in set(df["taxon"]) if _is_valid_packera_taxon(t)) or ["Unassigned_Packera"]
     pred_probs, _, _ = compute_out_of_fold_probabilities(features, labels, n_splits=5, surface_orientations=df.get("surface_orientation", None), stratify_by_orientation=args.stratify_by_orientation, determiner_tiers=df.get("determiner_tier", None), spatial_balance_weights=df.get("spatial_balance_weight", None), institution_codes=df.get("institutionCode", None))
     audit_df = run_confident_learning_audit(pred_probs=pred_probs, labels=labels, records_df=df, class_names=active_taxa, error_threshold=args.cleanlab_threshold, filter_abaxial_artifacts=args.filter_abaxial_artifacts, features=features)
     if args.export_figures:
@@ -780,18 +783,14 @@ def main() -> None:
         if fg_updates:
             audit_df["foreground_attention_ratio"] = [fg_updates.get(str(c), float(fg)) for c, fg in zip(audit_df["catalogNumber"], audit_df["foreground_attention_ratio"])]
             audit_df["is_artifact_driven"] = (audit_df["foreground_attention_ratio"] < FOREGROUND_ATTENTION_MIN_RATIO).astype(bool)
-        try:
-            generate_step05_publication_figures(audit_df, args.output_figure)
-        except Exception as fig_exc:
-            logger.warning(f"Step 05 publication figure generation skipped: {fig_exc}")
+        try: generate_step05_publication_figures(audit_df, args.output_figure)
+        except Exception as fig_exc: logger.warning(f"Step 05 publication figure generation skipped: {fig_exc}")
     if not args.demo:
         args.output_csv.parent.mkdir(parents=True, exist_ok=True)
         tmp_csv = args.output_csv.with_suffix(args.output_csv.suffix + ".tmp")
         export_df = audit_df.drop(columns=["rosette_patches", "tier1_leaf_patches", "tier1_leaf_masks", "tier1_leaf_weights"], errors="ignore")
         with open(tmp_csv, "w", encoding="utf-8", newline="") as f:
-            export_df.to_csv(f, index=False)
-            f.flush()
-            os.fsync(f.fileno())
+            export_df.to_csv(f, index=False); f.flush(); os.fsync(f.fileno())
         tmp_csv.replace(args.output_csv)
 
 

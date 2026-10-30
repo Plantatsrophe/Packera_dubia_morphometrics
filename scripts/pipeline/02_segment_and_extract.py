@@ -46,6 +46,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -866,9 +867,9 @@ class SegmentAndExtractPipeline:
 
         dissection_cfg = getattr(self.config.thresholds, "dissection", None) or getattr(self.config.thresholds, "solidity", None)
         if dissection_cfg is not None:
-            self.min_dissected = getattr(dissection_cfg, "min_solidity_dissected", getattr(dissection_cfg, "min_dissected", 0.50))
+            self.min_dissected = getattr(dissection_cfg, "min_solidity_dissected", getattr(dissection_cfg, "min_dissected", 0.48))
         else:
-            self.min_dissected = 0.50
+            self.min_dissected = 0.48
 
         self.min_circularity = float(getattr(self.config.thresholds, "min_circularity", 0.25))
         self.min_extent = float(getattr(self.config.thresholds, "min_extent", 0.35))
@@ -1784,11 +1785,18 @@ class SegmentAndExtractPipeline:
                 not is_folded
                 and (routing_res.solidity < self.min_solidity)
                 and is_dissected
-                and routing_res.solidity >= self.min_dissected
-                and (routing_res.ucs >= self.min_ucs or routing_res.ucs >= 0.80)
+                and routing_res.solidity >= min(self.min_dissected, 0.18)
+                and (
+                    routing_res.ucs >= self.min_ucs
+                    or routing_res.ucs >= (0.55 if routing_res.solidity < 0.48 else 0.80)
+                )
                 and routing_res.assigned_tier == "tier1"
             ):
-                tier = "Tier 1 (Dissected)"
+                tier = (
+                    routing_res.tier
+                    if routing_res.tier in ("Tier 1 (Dissected)", "Tier 1 (Bipinnatisect)")
+                    else ("Tier 1 (Bipinnatisect)" if routing_res.solidity < 0.48 else "Tier 1 (Dissected)")
+                )
                 assigned_tier = TIER_1_DIRECT
                 is_dissected = True
                 reflection_applied = False
@@ -2475,12 +2483,12 @@ def _atomic_save_matplotlib_fig(fig: Any, out_base_path: Path, dpi: int = 300) -
 
 
 def _standardize_packera_species_py(raw_val: Any) -> str:
-    """Delegate taxonomic standardization to scripts.core.harvester.standardize_packera_taxon."""
-    if raw_val is None or (isinstance(raw_val, float) and np.isnan(raw_val)):
-        return "Packera dubia"
+    """Delegate taxonomic standardization to scripts.core.harvester.standardize_packera_taxon without forcing 'Packera dubia'."""
+    if raw_val is None or pd.isna(raw_val):
+        return "Unassigned_Packera"
     s_raw = str(raw_val).strip()
     if not s_raw or s_raw.lower() in {"none", "nan", "null", "na", "unknown"}:
-        return "Packera dubia"
+        return "Unassigned_Packera"
     try:
         from scripts.core.harvester import standardize_packera_taxon
 
@@ -2521,7 +2529,13 @@ def _standardize_packera_species_py(raw_val: Any) -> str:
         epithet = m.group(1).lstrip("x×-")
         if epithet:
             return f"Packera {epithet}"
-    return "Packera dubia"
+    cleaned = s_raw.split("(")[0].strip()
+    m_binom = re.match(r"^([A-Za-z][a-z]+)\s+(?:([x×])\s+)?([a-z][a-z-]+)\b", cleaned)
+    if m_binom:
+        genus = m_binom.group(1).capitalize()
+        hyb = "× " if m_binom.group(2) else ""
+        return f"{genus} {hyb}{m_binom.group(3).lower()}"
+    return cleaned if cleaned else "Unassigned_Packera"
 
 
 def _parse_bool_val(val: Any, default: bool = False) -> bool:
@@ -2709,28 +2723,13 @@ def generate_step02_publication_figures(
         "#56B4E9",
         "#882255",
         "#44AA99",
+        "#332288",
+        "#117733",
     )
-    HOLLOW_MARKER_CYCLE = ("o", "^", "s", "D", "v", "P", "X", "<")
-    SPECIES_PALETTE = {
-        "Packera anonyma": "#0072B2",
-        "Packera dubia": "#D55E00",
-        "Packera paupercula": "#009E73",
-        "Packera plattensis": "#CC79A7",
-    }
-    SPECIES_MARKERS = {
-        "Packera anonyma": "o",
-        "Packera dubia": "^",
-        "Packera paupercula": "s",
-        "Packera plattensis": "D",
-    }
-    SPECIES_ITALIC = {
-        "Packera anonyma": r"$\it{Packera\ anonyma}$",
-        "Packera dubia": r"$\it{P.\ dubia}$",
-        "Packera paupercula": r"$\it{P.\ paupercula}$",
-        "Packera plattensis": r"$\it{P.\ plattensis}$",
-    }
-    BASE_TAXA = list(SPECIES_PALETTE.keys())
-    FOCAL_TAXA = list(BASE_TAXA)
+    HOLLOW_MARKER_CYCLE = ("o", "^", "s", "D", "v", "P", "X", "<", ">", "h")
+    SPECIES_PALETTE: Dict[str, str] = {}
+    SPECIES_MARKERS: Dict[str, str] = {}
+    SPECIES_ITALIC: Dict[str, str] = {}
 
     df_plot = extracted_df.copy()
     df_plot["cat_str"] = df_plot.get("catalogNumber", pd.Series("", index=df_plot.index)).astype(str).str.strip()
@@ -2765,7 +2764,7 @@ def generate_step02_publication_figures(
     tier_series = df_plot.get("assigned_tier", pd.Series("Tier_1_Direct", index=df_plot.index)).astype(str).str.strip()
     df_plot["norm_tier"] = tier_series.apply(
         lambda t: "Tier_1_Direct"
-        if t.lower() in {"tier_1_direct", "tier1", "tier 1", "tier 1 (dissected)"}
+        if t.lower() in {"tier_1_direct", "tier1", "tier 1", "tier 1 (dissected)", "tier 1 (bipinnatisect)"}
         else ("Tier_2_Reflected" if "2" in t else t)
     )
     df_plot = df_plot[df_plot["norm_tier"] == "Tier_1_Direct"].copy()
@@ -2886,13 +2885,15 @@ def generate_step02_publication_figures(
         df_plot["species_clean"] = df_plot["species_standardized"].apply(_standardize_packera_species_py)
     elif "scientificName" in df_plot.columns and df_plot["scientificName"].notna().any():
         df_plot["species_clean"] = df_plot["scientificName"].apply(_standardize_packera_species_py)
+    elif "species_raw" in df_plot.columns and df_plot["species_raw"].notna().any():
+        df_plot["species_clean"] = df_plot["species_raw"].apply(_standardize_packera_species_py)
     elif cat_to_species:
         df_plot["species_clean"] = df_plot["cat_str"].map(lambda c: cat_to_species.get(c, "")).replace("", np.nan)
         if df_plot["species_clean"].isna().any():
             df_plot = df_plot[df_plot["species_clean"].notna()].copy()
     else:
-        # Deterministic assignment across focal species when synthetic test fixture lacks voucher table
-        df_plot["species_clean"] = [FOCAL_TAXA[i % len(FOCAL_TAXA)] for i in range(len(df_plot))]
+        # Fallback label when synthetic unit-test fixture lacks voucher metadata
+        df_plot["species_clean"] = "Unassigned_Packera"
 
     if len(df_plot) == 0:
         return saved_paths
@@ -2904,7 +2905,11 @@ def generate_step02_publication_figures(
             df_plot["cat_str"].map(lambda c: cat_to_det_tier.get(c, "Tier_3_Bronze"))
         )
 
-    df_plot["sol_val"] = pd.to_numeric(df_plot.get("solidity", 0.86), errors="coerce").fillna(0.86)
+    df_plot["sol_val"] = (
+        pd.to_numeric(df_plot["solidity"], errors="coerce").fillna(0.86)
+        if "solidity" in df_plot.columns
+        else pd.Series(0.86, index=df_plot.index)
+    )
     ucs_col = "ucs_score" if "ucs_score" in df_plot.columns else ("ucs" if "ucs" in df_plot.columns else None)
     df_plot["ucs_val"] = (
         pd.to_numeric(df_plot[ucs_col], errors="coerce").fillna(0.90)
@@ -2918,11 +2923,12 @@ def generate_step02_publication_figures(
         df_plot["ar_val"] = np.nan
 
     if df_plot["ar_val"].isna().any():
-        ar_est = []
-        for idx_r, row_r in df_plot.iterrows():
+        # Pass 1: derive SVD aspect ratio from contour coordinates where available
+        ar_pass1 = []
+        for _, row_r in df_plot.iterrows():
             existing_ar = row_r.get("ar_val", np.nan)
             if pd.notna(existing_ar) and np.isfinite(float(existing_ar)) and float(existing_ar) > 0:
-                ar_est.append(float(existing_ar))
+                ar_pass1.append(float(existing_ar))
                 continue
             c_path_res = _resolve_asset_path(row_r.get("contour_path", ""), out_dir)
             ar_v = np.nan
@@ -2937,37 +2943,45 @@ def generate_step02_publication_figures(
                             ar_v = float(np.clip(s_vals[0] / s_vals[1], 1.05, 5.8))
                 except Exception:
                     pass
-            if not np.isfinite(ar_v):
-                sol_i = float(row_r["sol_val"])
-                sp_i = str(row_r["species_clean"])
-                base_ar = 1.65 if sp_i == "Packera dubia" else (2.75 if sp_i == "Packera paupercula" else 2.25)
-                ar_v = float(np.clip(base_ar + 1.8 * (0.90 - sol_i), 1.15, 5.2))
-            ar_est.append(ar_v)
-        df_plot["ar_val"] = ar_est
+            ar_pass1.append(ar_v)
+        df_plot["ar_val"] = ar_pass1
 
-    # Dynamically resolve active species present in df_plot and extend palette/markers/labels
-    has_base_sp = any((df_plot["species_clean"] == sp).any() for sp in BASE_TAXA)
-    present_sp = [sp for sp in BASE_TAXA if (df_plot["species_clean"] == sp).any()]
-    extra_sp = sorted(
-        str(sp)
-        for sp in df_plot["species_clean"].dropna().unique()
-        if str(sp) not in present_sp and str(sp).startswith("Packera ")
-    )
-    color_pool = EXTENDED_OKABE_ITO[4:] + EXTENDED_OKABE_ITO[:4] if has_base_sp else EXTENDED_OKABE_ITO
-    marker_pool = HOLLOW_MARKER_CYCLE[4:] + HOLLOW_MARKER_CYCLE[:4] if has_base_sp else HOLLOW_MARKER_CYCLE
-    for idx_extra, sp_extra in enumerate(extra_sp):
-        present_sp.append(sp_extra)
-        SPECIES_PALETTE[sp_extra] = color_pool[idx_extra % len(color_pool)]
-        SPECIES_MARKERS[sp_extra] = marker_pool[idx_extra % len(marker_pool)]
-        sp_short = (
-            sp_extra.replace(" ", r"\ ")
-            if idx_extra == 0 and not has_base_sp
-            else sp_extra.replace("Packera ", "P. ").replace(" ", r"\ ")
-        )
-        SPECIES_ITALIC[sp_extra] = rf"$\it{{{sp_short}}}$"
-    FOCAL_TAXA = list(present_sp) if present_sp else list(BASE_TAXA)
+        # Pass 2: impute remaining missing values from empirical species median (fallback global median or 2.15)
+        if df_plot["ar_val"].isna().any():
+            valid_ar_mask = df_plot["ar_val"].notna() & np.isfinite(df_plot["ar_val"]) & (df_plot["ar_val"] > 0)
+            global_med_ar = float(df_plot.loc[valid_ar_mask, "ar_val"].median()) if valid_ar_mask.any() else 2.15
+            sp_med_ar: Dict[str, float] = {}
+            for sp_k in df_plot["species_clean"].dropna().unique():
+                sp_vals = df_plot.loc[valid_ar_mask & (df_plot["species_clean"] == sp_k), "ar_val"]
+                sp_med_ar[str(sp_k)] = float(sp_vals.median()) if len(sp_vals) > 0 else global_med_ar
+            ar_final = []
+            for _, row_r in df_plot.iterrows():
+                cur_ar = row_r.get("ar_val", np.nan)
+                if pd.notna(cur_ar) and np.isfinite(float(cur_ar)) and float(cur_ar) > 0:
+                    ar_final.append(float(cur_ar))
+                else:
+                    sol_i = float(row_r["sol_val"])
+                    base_ar = sp_med_ar.get(str(row_r["species_clean"]), global_med_ar)
+                    ar_final.append(float(np.clip(base_ar + 1.8 * (0.90 - sol_i), 1.15, 5.2)))
+            df_plot["ar_val"] = ar_final
+
+    # Dynamically resolve active species present in df_plot and assign Okabe-Ito colors + hollow markers
+    present_sp = sorted(str(sp) for sp in df_plot["species_clean"].dropna().unique() if str(sp).strip())
     if not present_sp:
-        present_sp = list(FOCAL_TAXA)
+        present_sp = ["Unassigned_Packera"]
+    for idx_sp, sp_name in enumerate(present_sp):
+        SPECIES_PALETTE[sp_name] = EXTENDED_OKABE_ITO[idx_sp % len(EXTENDED_OKABE_ITO)]
+        SPECIES_MARKERS[sp_name] = HOLLOW_MARKER_CYCLE[idx_sp % len(HOLLOW_MARKER_CYCLE)]
+        if sp_name.startswith("Packera "):
+            ep_tex = sp_name[len("Packera "):].strip().replace("_", r"\ ").replace(" ", r"\ ")
+            SPECIES_ITALIC[sp_name] = (
+                rf"$\it{{Packera\ {ep_tex}}}$" if idx_sp == 0 else rf"$\it{{P.\ {ep_tex}}}$"
+            )
+        elif re.match(r"^[A-Z][a-z]+\s+[a-z-]+$", sp_name):
+            sp_tex = sp_name.replace(" ", r"\ ")
+            SPECIES_ITALIC[sp_name] = rf"$\it{{{sp_tex}}}$"
+        else:
+            SPECIES_ITALIC[sp_name] = sp_name.replace("_", " ")
 
     alpha_pt = 0.45 if len(df_plot) > 1000 else 0.75
 
@@ -2992,9 +3006,9 @@ def generate_step02_publication_figures(
     )
     ax_sc.add_patch(
         Rectangle(
-            (0.52, 1.0), 0.72 - 0.52, y_max - 1.0,
+            (0.48, 1.0), 0.72 - 0.48, y_max - 1.0,
             facecolor="#CC79A7", alpha=0.08, edgecolor="none", zorder=0,
-            label="Pinnatifid Dissection Zone (0.52-0.72)"
+            label="Pinnatifid Dissection Zone (0.48-0.72)"
         )
     )
 
@@ -3014,12 +3028,22 @@ def generate_step02_publication_figures(
                 zorder=3,
             )
 
+    env_focal = os.environ.get("PACKERA_FOCAL_TAXON", "").strip()
+    focal_std = _standardize_packera_species_py(env_focal) if env_focal else (present_sp[0] if len(present_sp) == 1 else "")
+    if focal_std and focal_std.startswith("Packera "):
+        focal_ep = focal_std[len("Packera "):].strip().replace("_", r"\ ").replace(" ", r"\ ")
+        panel_a_title = rf"A. Foliar Solidity vs. Blade Elongation ($\it{{Packera\ {focal_ep}}}$ Complex)"
+    elif len(present_sp) == 1:
+        panel_a_title = f"A. Foliar Solidity vs. Blade Elongation ({present_sp[0].replace('_', ' ')} Complex)"
+    else:
+        panel_a_title = rf"A. Foliar Solidity vs. Blade Elongation ($\it{{Packera}}$ Taxon Complex ($N = {len(present_sp)}$ Taxa))"
+
     ax_sc.axvline(0.72, color="#222222", linestyle="--", linewidth=1.3)
-    ax_sc.axvline(0.52, color="#CC79A7", linestyle=":", linewidth=1.2)
+    ax_sc.axvline(0.48, color="#CC79A7", linestyle=":", linewidth=1.2)
     ax_sc.set_xlabel("Lamina Solidity (Area / Convex Hull Area)", fontsize=10, fontweight="bold")
     ax_sc.set_ylabel("Blade Aspect Ratio (Length / Width)", fontsize=10, fontweight="bold")
     ax_sc.set_title(
-        r"A. Foliar Solidity vs. Blade Elongation ($\it{Packera\ dubia}$ Complex)",
+        panel_a_title,
         fontsize=10.8,
         fontweight="bold",
         loc="left",
@@ -3052,7 +3076,11 @@ def generate_step02_publication_figures(
             if "capitulum_aspect_ratio" in rep_df.columns
             else ("AR_inv" if "AR_inv" in rep_df.columns else "involucre_width_mm")
         )
-        rep_df["trait_v"] = pd.to_numeric(rep_df.get(ar_col, np.nan), errors="coerce")
+        rep_df["trait_v"] = (
+            pd.to_numeric(rep_df[ar_col], errors="coerce")
+            if ar_col in rep_df.columns
+            else pd.Series(np.nan, index=rep_df.index)
+        )
         rep_valid = rep_df[rep_df["trait_v"].notna() & (rep_df["trait_v"] > 0)].copy()
     else:
         rep_valid = pd.DataFrame()
@@ -3185,9 +3213,11 @@ def generate_step02_publication_figures(
     )
     if "is_calibrated_mm" in t1_pool.columns:
         t1_pool["is_cal_bool"] = t1_pool["is_calibrated_mm"].apply(_parse_bool_val)
-    else:
-        ppm_s = pd.to_numeric(t1_pool.get("pixels_per_mm", np.nan), errors="coerce")
+    elif "pixels_per_mm" in t1_pool.columns:
+        ppm_s = pd.to_numeric(t1_pool["pixels_per_mm"], errors="coerce")
         t1_pool["is_cal_bool"] = ppm_s.notna() & (ppm_s > 0)
+    else:
+        t1_pool["is_cal_bool"] = False
 
     lqw_num = (
         pd.to_numeric(t1_pool["leaf_quality_weight"], errors="coerce")

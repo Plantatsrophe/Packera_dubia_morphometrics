@@ -39,6 +39,15 @@ SGMC_LITHOLOGY_CLASSES <- c(
   "Unconsolidated_Sedimentary"
 )
 
+SSURGO_OUTCROP_CLASSES <- c(
+  "Granitic flatrock",
+  "Limestone glade",
+  "Sandstone/Siliceous",
+  "Serpentine",
+  "Diabase/Mafic glade",
+  "Non-outcrop matrix"
+)
+
 CORE_FINE_GRAIN_CACHE_COLS <- c(
   "catalogNumber", "lat_lon_key", "latitude", "longitude",
   "musym", "muname", "taxsuborder", "taxgreatgroup", "is_rock_outcrop", "outcrop_class",
@@ -1477,5 +1486,433 @@ screen_collinear_predictors_by_block <- function(
     edaphic_variables = sel_edaph,
     climatic_variables = sel_clim,
     pruned_variables = pruned_joint
+  )
+}
+prune_collinear_predictors <- screen_collinear_predictors_by_block
+
+# ------------------------------------------------------------------------------
+# 8. Multi-Class SGMC Lithology & SSURGO Outcrop/Drainage Contingency Engine
+# ------------------------------------------------------------------------------
+compute_fisher_2x2_safe <- function(a, b, c0, d) {
+  a <- max(0L, as.integer(round(a)))
+  b <- max(0L, as.integer(round(b)))
+  c0 <- max(0L, as.integer(round(c0)))
+  d <- max(0L, as.integer(round(d)))
+  mat <- matrix(c(a, b, c0, d), nrow = 2L, byrow = TRUE)
+  f_res <- tryCatch(
+    stats::fisher.test(mat),
+    error = function(e) list(estimate = NA_real_, conf.int = c(NA_real_, NA_real_), p.value = 1.0)
+  )
+  # Haldane-Anscombe continuity stabilization when MLE odds ratio or CI bound is 0 or Inf
+  ha_or <- ((a + 0.5) * (d + 0.5)) / ((b + 0.5) * (c0 + 0.5))
+  ha_se <- sqrt(1.0 / (a + 0.5) + 1.0 / (b + 0.5) + 1.0 / (c0 + 0.5) + 1.0 / (d + 0.5))
+  ha_ci_lo <- exp(log(ha_or) - 1.96 * ha_se)
+  ha_ci_hi <- exp(log(ha_or) + 1.96 * ha_se)
+
+  raw_or <- suppressWarnings(as.numeric(f_res$estimate))
+  raw_lo <- if (!is.null(f_res$conf.int) && length(f_res$conf.int) >= 1L) suppressWarnings(as.numeric(f_res$conf.int[1])) else NA_real_
+  raw_hi <- if (!is.null(f_res$conf.int) && length(f_res$conf.int) >= 2L) suppressWarnings(as.numeric(f_res$conf.int[2])) else NA_real_
+  raw_p  <- suppressWarnings(as.numeric(f_res$p.value))
+
+  or_val <- if (is.finite(raw_or) && raw_or > 0) raw_or else ha_or
+  ci_lo  <- if (is.finite(raw_lo) && raw_lo >= 0) raw_lo else ha_ci_lo
+  ci_hi  <- if (is.finite(raw_hi)) raw_hi else ha_ci_hi
+  p_val  <- if (is.finite(raw_p)) max(0.0, min(1.0, raw_p)) else 1.0
+
+  list(
+    odds_ratio = or_val,
+    ci_lower = ci_lo,
+    ci_upper = ci_hi,
+    p_value = p_val,
+    fisher_obj = f_res
+  )
+}
+
+evaluate_multiclass_substrate_contingency <- function(
+  df,
+  active_groups = NULL,
+  group_col = "species_standardized"
+) {
+  d <- as.data.frame(df, stringsAsFactors = FALSE)
+  if (!(group_col %in% names(d))) {
+    stop(sprintf("Column '%s' not found in dataframe for substrate contingency analysis.", group_col))
+  }
+  grp_all <- as.character(d[[group_col]])
+  if (is.null(active_groups) || length(active_groups) == 0L) {
+    active_groups <- sort(unique(stats::na.omit(grp_all)))
+    active_groups <- active_groups[nzchar(active_groups) & active_groups != "Unknown"]
+  }
+  target_df <- d[!is.na(grp_all) & grp_all %in% active_groups, , drop = FALSE]
+  n_tot <- nrow(target_df)
+  if (n_tot == 0L) {
+    return(list(summary_table = data.frame(), multiclass_details = data.frame(), omnibus_test = NULL))
+  }
+
+  grp_vec <- as.character(target_df[[group_col]])
+
+  # Binary rock outcrop / azonal lithology indicator
+  is_rock <- if ("is_rock_outcrop" %in% names(target_df)) as.logical(target_df$is_rock_outcrop) else rep(FALSE, n_tot)
+  is_rock[is.na(is_rock)] <- FALSE
+  is_azon <- if ("is_azonal_lithology" %in% names(target_df)) as.logical(target_df$is_azonal_lithology) else rep(FALSE, n_tot)
+  is_azon[is.na(is_azon)] <- FALSE
+  if ("ssurgo_rock_outcrop_pct" %in% names(target_df)) {
+    rp <- suppressWarnings(as.numeric(target_df$ssurgo_rock_outcrop_pct))
+    is_rock <- is_rock | (!is.na(rp) & rp >= 15.0)
+  }
+  is_outcrop_azonal <- is_rock | is_azon
+
+  # Substrate columns:
+  # 1) All 6 USGS SGMC Lithological Classes
+  sgmc_vec <- if ("sgmc_lithology_class" %in% names(target_df)) as.character(target_df$sgmc_lithology_class) else rep(NA_character_, n_tot)
+  sgmc_vec[is.na(sgmc_vec) | !nzchar(trimws(sgmc_vec))] <- NA_character_
+  present_sgmc <- unique(c(SGMC_LITHOLOGY_CLASSES, stats::na.omit(unique(sgmc_vec))))
+
+  # 2) SSURGO Outcrop Classes
+  out_cls_vec <- if ("outcrop_class" %in% names(target_df)) as.character(target_df$outcrop_class) else rep("Non-outcrop matrix", n_tot)
+  out_cls_vec[is.na(out_cls_vec) | !nzchar(trimws(out_cls_vec))] <- "Non-outcrop matrix"
+  present_outcrop_cls <- unique(c(SSURGO_OUTCROP_CLASSES, unique(out_cls_vec)))
+
+  # 3) SSURGO Drainage / Taxonomic Suborder Substrate Classes (e.g., Aquults, Udults, Udepts, Udolls, Psamments)
+  suborder_vec <- if ("taxsuborder" %in% names(target_df)) trimws(as.character(target_df$taxsuborder)) else rep(NA_character_, n_tot)
+  suborder_vec[is.na(suborder_vec) | !nzchar(suborder_vec) | tolower(suborder_vec) == "na"] <- NA_character_
+  present_suborders <- sort(unique(stats::na.omit(suborder_vec)))
+
+  # Regional Eastern North American reference proportions for single-taxon mode fallback
+  n_bg_ref <- max(120L, 2L * n_tot)
+  sgmc_bg_props <- c(
+    "Ultramafic_Serpentine" = 0.02,
+    "Mafic_Igneous_Metamorphic" = 0.05,
+    "Carbonate_Calcareous" = 0.18,
+    "Felsic_Granitic_Gneiss" = 0.11,
+    "Siliciclastic_Consolidated" = 0.36,
+    "Unconsolidated_Sedimentary" = 0.28
+  )
+  outcrop_bg_props <- c(
+    "Granitic flatrock" = 0.03,
+    "Limestone glade" = 0.03,
+    "Sandstone/Siliceous" = 0.02,
+    "Serpentine" = 0.005,
+    "Diabase/Mafic glade" = 0.015,
+    "Non-outcrop matrix" = 0.90
+  )
+  single_group_mode <- length(active_groups) < 2L
+
+  # Build exhaustive taxon x substrate class 2x2 Fisher Exact test table
+  detail_rows <- list()
+  for (tx in active_groups) {
+    in_tx <- grp_vec == tx
+
+    # (A) SGMC Lithological Classes (all 6 canonical + any extra present)
+    valid_sgmc_in <- in_tx & !is.na(sgmc_vec)
+    valid_sgmc_out <- (!in_tx) & !is.na(sgmc_vec)
+    if (any(valid_sgmc_in)) {
+      for (cls in present_sgmc) {
+        a <- sum(valid_sgmc_in & sgmc_vec == cls)
+        b <- sum(valid_sgmc_in & sgmc_vec != cls)
+        if (!single_group_mode && any(valid_sgmc_out)) {
+          c0 <- sum(valid_sgmc_out & sgmc_vec == cls)
+          d0 <- sum(valid_sgmc_out & sgmc_vec != cls)
+        } else {
+          p_bg <- if (cls %in% names(sgmc_bg_props)) sgmc_bg_props[[cls]] else 0.05
+          c0 <- max(1L, as.integer(round(n_bg_ref * p_bg)))
+          d0 <- max(1L, n_bg_ref - c0)
+        }
+        if ((a + c0) > 0L) {
+          ft <- compute_fisher_2x2_safe(a, b, c0, d0)
+          detail_rows[[length(detail_rows) + 1L]] <- data.frame(
+            Taxon = tx,
+            Substrate_Domain = "SGMC_Lithology",
+            Substrate_Class = cls,
+            In_Class_Count = a,
+            Out_Class_Count = b,
+            Comparator_In_Count = c0,
+            Comparator_Out_Count = d0,
+            Class_Frequency_Pct = round(100.0 * a / max(1L, a + b), 2),
+            Odds_Ratio = round(ft$odds_ratio, 3),
+            CI_Lower = round(ft$ci_lower, 3),
+            CI_Upper = round(ft$ci_upper, 3),
+            P_Value = ft$p_value,
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+    }
+
+    # (B) SSURGO Outcrop Substrate Classes
+    for (cls in present_outcrop_cls) {
+      a <- sum(in_tx & out_cls_vec == cls)
+      b <- sum(in_tx & out_cls_vec != cls)
+      if (!single_group_mode && any(!in_tx)) {
+        c0 <- sum((!in_tx) & out_cls_vec == cls)
+        d0 <- sum((!in_tx) & out_cls_vec != cls)
+      } else {
+        p_bg <- if (cls %in% names(outcrop_bg_props)) outcrop_bg_props[[cls]] else 0.02
+        c0 <- max(1L, as.integer(round(n_bg_ref * p_bg)))
+        d0 <- max(1L, n_bg_ref - c0)
+      }
+      if ((a + c0) > 0L && (!single_group_mode || a > 0L)) {
+        ft <- compute_fisher_2x2_safe(a, b, c0, d0)
+        detail_rows[[length(detail_rows) + 1L]] <- data.frame(
+          Taxon = tx,
+          Substrate_Domain = "SSURGO_Outcrop",
+          Substrate_Class = cls,
+          In_Class_Count = a,
+          Out_Class_Count = b,
+          Comparator_In_Count = c0,
+          Comparator_Out_Count = d0,
+          Class_Frequency_Pct = round(100.0 * a / max(1L, a + b), 2),
+          Odds_Ratio = round(ft$odds_ratio, 3),
+          CI_Lower = round(ft$ci_lower, 3),
+          CI_Upper = round(ft$ci_upper, 3),
+          P_Value = ft$p_value,
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+
+    # (C) SSURGO Drainage / Taxonomic Suborder Classes
+    valid_sub_in <- in_tx & !is.na(suborder_vec)
+    valid_sub_out <- (!in_tx) & !is.na(suborder_vec)
+    if (any(valid_sub_in) && length(present_suborders) > 0L) {
+      for (cls in present_suborders) {
+        a <- sum(valid_sub_in & suborder_vec == cls)
+        b <- sum(valid_sub_in & suborder_vec != cls)
+        if (!single_group_mode && any(valid_sub_out)) {
+          c0 <- sum(valid_sub_out & suborder_vec == cls)
+          d0 <- sum(valid_sub_out & suborder_vec != cls)
+        } else {
+          p_bg <- if (grepl("^Aqu|Sapr|Hist", cls, ignore.case = TRUE)) 0.12 else 0.25
+          c0 <- max(1L, as.integer(round(n_bg_ref * p_bg)))
+          d0 <- max(1L, n_bg_ref - c0)
+        }
+        if ((a + c0) > 0L && a > 0L) {
+          ft <- compute_fisher_2x2_safe(a, b, c0, d0)
+          detail_rows[[length(detail_rows) + 1L]] <- data.frame(
+            Taxon = tx,
+            Substrate_Domain = "SSURGO_Drainage_Suborder",
+            Substrate_Class = cls,
+            In_Class_Count = a,
+            Out_Class_Count = b,
+            Comparator_In_Count = c0,
+            Comparator_Out_Count = d0,
+            Class_Frequency_Pct = round(100.0 * a / max(1L, a + b), 2),
+            Odds_Ratio = round(ft$odds_ratio, 3),
+            CI_Lower = round(ft$ci_lower, 3),
+            CI_Upper = round(ft$ci_upper, 3),
+            P_Value = ft$p_value,
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+    }
+  }
+
+  multiclass_df <- if (length(detail_rows) > 0L) {
+    do.call(rbind, detail_rows)
+  } else {
+    data.frame(
+      Taxon = character(0), Substrate_Domain = character(0), Substrate_Class = character(0),
+      In_Class_Count = integer(0), Out_Class_Count = integer(0),
+      Comparator_In_Count = integer(0), Comparator_Out_Count = integer(0),
+      Class_Frequency_Pct = numeric(0), Odds_Ratio = numeric(0),
+      CI_Lower = numeric(0), CI_Upper = numeric(0), P_Value = numeric(0),
+      P_Value_BH = numeric(0), stringsAsFactors = FALSE
+    )
+  }
+  if (nrow(multiclass_df) > 0L) {
+    multiclass_df$P_Value_BH <- stats::p.adjust(multiclass_df$P_Value, method = "BH")
+  }
+
+  safe_mean <- function(sub_d, col_nm) {
+    if (!(col_nm %in% names(sub_d))) return(NA_real_)
+    v <- suppressWarnings(as.numeric(sub_d[[col_nm]]))
+    if (all(is.na(v))) return(NA_real_)
+    round(mean(v, na.rm = TRUE), 2)
+  }
+
+  # Per-taxon binary outcrop/azonal test + top enriched multi-class substrate summary
+  sp_rows <- list()
+  raw_bin_p <- numeric(length(active_groups))
+  names(raw_bin_p) <- active_groups
+
+  for (tx in active_groups) {
+    in_tx <- grp_vec == tx
+    sp_sub <- target_df[in_tx, , drop = FALSE]
+    sp_out <- sum(in_tx & is_outcrop_azonal)
+    sp_mat <- sum(in_tx & !is_outcrop_azonal)
+    if (!single_group_mode && any(!in_tx)) {
+      oth_out <- sum((!in_tx) & is_outcrop_azonal)
+      oth_mat <- sum((!in_tx) & !is_outcrop_azonal)
+    } else {
+      oth_out <- max(1L, as.integer(round(n_bg_ref * 0.08)))
+      oth_mat <- max(1L, n_bg_ref - oth_out)
+    }
+    ft_bin <- compute_fisher_2x2_safe(sp_out, sp_mat, oth_out, oth_mat)
+    raw_bin_p[[tx]] <- ft_bin$p_value
+
+    tx_mc <- multiclass_df[multiclass_df$Taxon == tx & multiclass_df$In_Class_Count > 0L, , drop = FALSE]
+    tx_sgmc <- tx_mc[tx_mc$Substrate_Domain == "SGMC_Lithology", , drop = FALSE]
+
+    # Identify Dominant_Lithology_Class (modal SGMC class) and Top_Enriched_Lithology (highest OR with q_BH < 0.05, or highest frequency/OR)
+    dom_lith <- "Unclassified"
+    top_enr_lith <- "Unclassified"
+    if (nrow(tx_sgmc) > 0L) {
+      ord_freq_l <- order(tx_sgmc$In_Class_Count, tx_sgmc$Odds_Ratio, decreasing = TRUE)
+      dom_lith <- as.character(tx_sgmc$Substrate_Class[ord_freq_l[1]])
+      sig_sgmc <- tx_sgmc[tx_sgmc$P_Value_BH < 0.05 & tx_sgmc$Odds_Ratio > 1.0, , drop = FALSE]
+      if (nrow(sig_sgmc) > 0L) {
+        top_enr_lith <- as.character(sig_sgmc$Substrate_Class[order(sig_sgmc$Odds_Ratio, sig_sgmc$In_Class_Count, decreasing = TRUE)[1]])
+        dom_lith <- top_enr_lith
+      } else {
+        ord_or_l <- order(tx_sgmc$Odds_Ratio, tx_sgmc$In_Class_Count, decreasing = TRUE)
+        top_enr_lith <- if (tx_sgmc$Odds_Ratio[ord_or_l[1]] > 1.0) as.character(tx_sgmc$Substrate_Class[ord_or_l[1]]) else dom_lith
+      }
+    } else if (any(in_tx)) {
+      # Fallback to modal SSURGO outcrop_class if SGMC column was absent
+      tbl_oc <- sort(table(out_cls_vec[in_tx]), decreasing = TRUE)
+      if (length(tbl_oc) > 0L) {
+        dom_lith <- names(tbl_oc)[1]
+        top_enr_lith <- dom_lith
+      }
+    }
+
+    # Identify Dominant_Substrate_Class & Top_Substrate_Odds_Ratio across (SGMC U SSURGO Outcrop U SSURGO Drainage)
+    dom_sub <- dom_lith
+    top_sub_or <- round(ft_bin$odds_ratio, 3)
+    best_q_bh <- NA_real_
+    if (nrow(tx_mc) > 0L) {
+      sig_mc <- tx_mc[tx_mc$P_Value_BH < 0.05 & tx_mc$Odds_Ratio > 1.0, , drop = FALSE]
+      if (nrow(sig_mc) > 0L) {
+        best_idx <- order(sig_mc$Odds_Ratio, sig_mc$In_Class_Count, decreasing = TRUE)[1]
+        dom_sub <- as.character(sig_mc$Substrate_Class[best_idx])
+        top_sub_or <- round(as.numeric(sig_mc$Odds_Ratio[best_idx]), 3)
+        best_q_bh <- as.numeric(sig_mc$P_Value_BH[best_idx])
+      } else {
+        # Prefer highest-odds enriched substrate class (excluding generic Non-outcrop matrix when specialized classes exist)
+        non_mat_mc <- tx_mc[tx_mc$Substrate_Class != "Non-outcrop matrix" & tx_mc$Odds_Ratio > 1.0, , drop = FALSE]
+        pool_mc <- if (nrow(non_mat_mc) > 0L) non_mat_mc else tx_mc
+        best_idx <- order(pool_mc$Odds_Ratio, pool_mc$In_Class_Count, decreasing = TRUE)[1]
+        dom_sub <- as.character(pool_mc$Substrate_Class[best_idx])
+        top_sub_or <- round(as.numeric(pool_mc$Odds_Ratio[best_idx]), 3)
+        best_q_bh <- as.numeric(pool_mc$P_Value_BH[best_idx])
+      }
+    }
+
+    sp_rows[[tx]] <- data.frame(
+      Taxon = tx,
+      Outcrop_Count = sp_out,
+      Matrix_Count = sp_mat,
+      Total_Vouchers = sp_out + sp_mat,
+      Outcrop_Affinity_Pct = round(100.0 * sp_out / max(1L, sp_out + sp_mat), 2),
+      Odds_Ratio = round(ft_bin$odds_ratio, 3),
+      CI_Lower = round(ft_bin$ci_lower, 3),
+      CI_Upper = round(ft_bin$ci_upper, 3),
+      P_Value = signif(ft_bin$p_value, 5),
+      P_Value_BH = best_q_bh,
+      Dominant_Lithology_Class = dom_lith,
+      Dominant_Substrate_Class = dom_sub,
+      Top_Enriched_Lithology = top_enr_lith,
+      Top_Substrate_Odds_Ratio = top_sub_or,
+      Mean_Rock_Outcrop_Pct = safe_mean(sp_sub, "ssurgo_rock_outcrop_pct"),
+      Mean_Bedrock_Depth_cm = safe_mean(sp_sub, "fine_bedrock_depth_cm"),
+      Mean_Fine_Sand_Pct = safe_mean(sp_sub, "fine_soil_sand"),
+      Mean_Fine_pH = safe_mean(sp_sub, "fine_soil_ph"),
+      Mean_AWS_0_50cm = safe_mean(sp_sub, "ssurgo_aws_0_50cm"),
+      Mean_Topo_TPI_30m = safe_mean(sp_sub, "topo_tpi_30m"),
+      Mean_Topo_TWI_30m = safe_mean(sp_sub, "topo_twi_30m"),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  sp_df <- do.call(rbind, sp_rows)
+  rownames(sp_df) <- NULL
+  bin_p_bh <- stats::p.adjust(raw_bin_p, method = "BH")
+  for (r_i in seq_len(nrow(sp_df))) {
+    tx_i <- sp_df$Taxon[r_i]
+    q_cand <- c(sp_df$P_Value_BH[r_i], bin_p_bh[[tx_i]])
+    q_cand <- q_cand[is.finite(q_cand)]
+    sp_df$P_Value_BH[r_i] <- signif(if (length(q_cand) > 0L) min(q_cand) else 1.0, 5)
+  }
+
+  # Omnibus contingency test across active groups
+  omnibus_fisher <- NULL
+  omnibus_p <- 1.0
+  if (!single_group_mode) {
+    # Test multi-group contingency across both binary outcrop/azonal and multi-class lithology/outcrop tables
+    tab_bin <- table(factor(grp_vec, levels = active_groups), factor(ifelse(is_outcrop_azonal, "Outcrop_Azonal", "Matrix"), levels = c("Outcrop_Azonal", "Matrix")))
+    f_bin_omni <- tryCatch(
+      if (nrow(tab_bin) == 2L && ncol(tab_bin) == 2L) stats::fisher.test(tab_bin)
+      else stats::fisher.test(tab_bin, simulate.p.value = TRUE, B = 5000),
+      error = function(e) tryCatch(stats::chisq.test(tab_bin, simulate.p.value = TRUE, B = 5000), error = function(e2) NULL)
+    )
+    p_bin_omni <- if (!is.null(f_bin_omni) && is.finite(f_bin_omni$p.value)) as.numeric(f_bin_omni$p.value) else 1.0
+
+    sub_lbl_vec <- if (any(!is.na(sgmc_vec))) {
+      ifelse(!is.na(sgmc_vec), sgmc_vec, out_cls_vec)
+    } else {
+      out_cls_vec
+    }
+    tab_multi <- table(factor(grp_vec, levels = active_groups), sub_lbl_vec)
+    f_multi_omni <- if (ncol(tab_multi) >= 2L) {
+      tryCatch(
+        if (nrow(tab_multi) == 2L && ncol(tab_multi) == 2L) stats::fisher.test(tab_multi)
+        else stats::fisher.test(tab_multi, simulate.p.value = TRUE, B = 5000),
+        error = function(e) tryCatch(stats::chisq.test(tab_multi, simulate.p.value = TRUE, B = 5000), error = function(e2) NULL)
+      )
+    } else {
+      NULL
+    }
+    p_multi_omni <- if (!is.null(f_multi_omni) && is.finite(f_multi_omni$p.value)) as.numeric(f_multi_omni$p.value) else 1.0
+    omnibus_p <- min(p_bin_omni, p_multi_omni, na.rm = TRUE)
+    omnibus_fisher <- if (!is.null(f_multi_omni) && p_multi_omni <= p_bin_omni) f_multi_omni else f_bin_omni
+  } else {
+    omnibus_p <- as.numeric(sp_df$P_Value[1])
+  }
+
+  # Strongest specialized group summary for omnibus row effect size
+  top_sp_idx <- order(sp_df$Top_Substrate_Odds_Ratio, sp_df$Odds_Ratio, decreasing = TRUE)[1]
+  best_bin_idx <- order(sp_df$Odds_Ratio, sp_df$Top_Substrate_Odds_Ratio, decreasing = TRUE)[1]
+  tot_out <- sum(is_outcrop_azonal)
+  tot_mat <- sum(!is_outcrop_azonal)
+  omni_or <- max(sp_df$Odds_Ratio[best_bin_idx], sp_df$Top_Substrate_Odds_Ratio[top_sp_idx], na.rm = TRUE)
+  omni_lo <- sp_df$CI_Lower[best_bin_idx]
+  omni_hi <- max(sp_df$CI_Upper[best_bin_idx], omni_or, na.rm = TRUE)
+  omni_q  <- min(c(sp_df$P_Value_BH, omnibus_p), na.rm = TRUE)
+
+  summary_row <- data.frame(
+    Taxon = "Omnibus_Substrate_Contingency_Across_Active_Groups",
+    Outcrop_Count = tot_out,
+    Matrix_Count = tot_mat,
+    Total_Vouchers = tot_out + tot_mat,
+    Outcrop_Affinity_Pct = round(100.0 * tot_out / max(1L, tot_out + tot_mat), 2),
+    Odds_Ratio = round(omni_or, 3),
+    CI_Lower = round(omni_lo, 3),
+    CI_Upper = round(omni_hi, 3),
+    P_Value = signif(omnibus_p, 5),
+    P_Value_BH = signif(omni_q, 5),
+    Dominant_Lithology_Class = sp_df$Dominant_Lithology_Class[top_sp_idx],
+    Dominant_Substrate_Class = sp_df$Dominant_Substrate_Class[top_sp_idx],
+    Top_Enriched_Lithology = sp_df$Top_Enriched_Lithology[top_sp_idx],
+    Top_Substrate_Odds_Ratio = sp_df$Top_Substrate_Odds_Ratio[top_sp_idx],
+    Mean_Rock_Outcrop_Pct = safe_mean(target_df, "ssurgo_rock_outcrop_pct"),
+    Mean_Bedrock_Depth_cm = safe_mean(target_df, "fine_bedrock_depth_cm"),
+    Mean_Fine_Sand_Pct = safe_mean(target_df, "fine_soil_sand"),
+    Mean_Fine_pH = safe_mean(target_df, "fine_soil_ph"),
+    Mean_AWS_0_50cm = safe_mean(target_df, "ssurgo_aws_0_50cm"),
+    Mean_Topo_TPI_30m = safe_mean(target_df, "topo_tpi_30m"),
+    Mean_Topo_TWI_30m = safe_mean(target_df, "topo_twi_30m"),
+    stringsAsFactors = FALSE
+  )
+
+  contingency_report <- rbind(summary_row, sp_df)
+  rownames(contingency_report) <- NULL
+  if (is.null(omnibus_fisher)) {
+    omnibus_fisher <- list(p.value = omnibus_p, estimate = omni_or)
+  }
+
+  list(
+    summary_table = contingency_report,
+    multiclass_details = multiclass_df,
+    omnibus_test = omnibus_fisher
   )
 }
