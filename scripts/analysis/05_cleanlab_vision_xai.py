@@ -2,7 +2,7 @@
 """Phase 5 Indumentum-Blind Deep Vision & Explainable AI Pipeline (05_cleanlab_vision_xai.py)."""
 
 from __future__ import annotations
-import argparse, logging, os, re, sys
+import argparse, hashlib, logging, os, re, sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import matplotlib; matplotlib.use("Agg")
@@ -17,11 +17,11 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 try: import cv2
 except ImportError: cv2 = None
-
 torch.manual_seed(42); np.random.seed(42)
 if torch.cuda.is_available(): torch.cuda.manual_seed_all(42)
 _script_root = Path(__file__).resolve().parents[2]
 if str(_script_root) not in sys.path: sys.path.insert(0, str(_script_root))
+from scripts.core.db import compute_file_sha256, fetch_cached_dinov2_features, get_db_connection, is_canonical_or_explicit_db_context, persist_vision_xai_audit, store_dinov2_features_cache
 
 FOREGROUND_ATTENTION_MIN_RATIO: float = 0.65
 DYNAMIC_OKABE_ITO_HEX: List[str] = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#882255", "#44AA99", "#332288", "#117733"]
@@ -29,11 +29,9 @@ __all__ = ["FOREGROUND_ATTENTION_MIN_RATIO", "DYNAMIC_OKABE_ITO_HEX", "_get_dyna
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger("Cleanlab_Vision_XAI")
-
 def _get_dynamic_okabe_ito_map(taxa_list: List[str]) -> Dict[str, str]:
     """Assigns distinct colorblind-safe hex colors deterministically across any active Packera species set."""
     return {str(tx): DYNAMIC_OKABE_ITO_HEX[i % len(DYNAMIC_OKABE_ITO_HEX)] for i, tx in enumerate(taxa_list)}
-
 def standardize_packera_taxon(species_str: Optional[str]) -> str:
     """Standardize Packera scientific names and historical basionyms via scripts.core.harvester."""
     s_orig = "" if (not species_str or pd.isna(species_str)) else str(species_str).strip()
@@ -45,14 +43,11 @@ def standardize_packera_taxon(species_str: Optional[str]) -> str:
     except Exception: pass
     m = re.match(r"^packera\s*(?:([x×])(?=\s)|([×]))?\s*([a-z-]+)", s_orig.lower()); epithet = m.group(3).lstrip("×-") if m else ""
     return f"Packera {'× ' if (m.group(1) or m.group(2)) else ''}{epithet}" if (m and epithet) else s_orig.split("(")[0].strip()
-
 def _is_valid_packera_taxon(taxon_str: str) -> bool:
     return bool(taxon_str and taxon_str not in {"Unknown", "Unassigned_Packera"} and re.match(r"^(?:Packera\s+(?:[x×]\s*)?[a-z-]+|Morphotype_[A-Za-z0-9_]+|Ecotype_[A-Za-z0-9_]+)$", str(taxon_str)))
-
 def _to_rgb_uint8(image: Image.Image | np.ndarray) -> np.ndarray:
     arr = np.array(image.convert("RGB"), dtype=np.uint8) if isinstance(image, Image.Image) else np.array(image, copy=True, dtype=np.uint8)
     return np.stack([arr] * 3, axis=-1) if arr.ndim == 2 else (arr[:, :, :3] if (arr.ndim == 3 and arr.shape[2] == 4) else arr)
-
 def neutralize_mounting_paper(image: Image.Image | np.ndarray, neutral_color: Tuple[int, int, int] = (128, 128, 128)) -> Image.Image | np.ndarray:
     """Neutralizes herbarium mounting paper background to uniform neutral gray RGB(128, 128, 128)."""
     was_pil, img_arr = isinstance(image, Image.Image), _to_rgb_uint8(image)
@@ -64,7 +59,6 @@ def neutralize_mounting_paper(image: Image.Image | np.ndarray, neutral_color: Tu
         gray = 0.2989 * img_arr[:, :, 0] + 0.5870 * img_arr[:, :, 1] + 0.1140 * img_arr[:, :, 2]; bg_mask = gray > np.percentile(gray, 60)
     neutralized = img_arr.copy(); neutralized[bg_mask] = neutral_color
     return Image.fromarray(neutralized) if was_pil else neutralized
-
 def _load_aligned_binary_mask(mask_path: Optional[Path], target_hw: Tuple[int, int], orig_hw: Optional[Tuple[int, int]] = None) -> Optional[np.ndarray]:
     """Loads a binary leaf mask and strips zero-border window padding when paired with a tight leaf RGB crop."""
     if mask_path is None or not str(mask_path).strip() or not Path(str(mask_path).strip()).is_file(): return None
@@ -78,7 +72,6 @@ def _load_aligned_binary_mask(mask_path: Optional[Path], target_hw: Tuple[int, i
     th, tw = int(target_hw[0]), int(target_hw[1])
     if bin_m.shape[:2] != (th, tw): bin_m = (cv2.resize(bin_m, (tw, th), interpolation=cv2.INTER_NEAREST) > 0).astype(np.uint8) if cv2 is not None else (np.array(Image.fromarray(bin_m * 255).resize((tw, th), Image.NEAREST)) > 127).astype(np.uint8)
     return bin_m
-
 def apply_tier1_leaf_mask_to_rgb(rgb_img: np.ndarray | Image.Image, mask_path: Optional[Path], pad_px: int = 5) -> np.ndarray:
     """Applies a dilated binary mask to an RGB crop, replacing background with [242, 239, 230]."""
     out = _to_rgb_uint8(rgb_img); bin_m = _load_aligned_binary_mask(mask_path, out.shape[:2]) if out.size > 0 else None
@@ -87,7 +80,6 @@ def apply_tier1_leaf_mask_to_rgb(rgb_img: np.ndarray | Image.Image, mask_path: O
     dilated = cv2.dilate(bin_u8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * p + 1, 2 * p + 1)), iterations=1) if (cv2 is not None and p > 0) else bin_u8
     out[dilated == 0] = np.array([242, 239, 230], dtype=out.dtype)
     return out
-
 def preprocess_macro_rosette_crop(image: Image.Image | np.ndarray, target_size: Tuple[int, int] = (224, 224), sigma: float = 1.0) -> np.ndarray:
     """Applies Gaussian anti-aliasing (sigma=1.0) and downsamples strictly to 224x224."""
     arr, (tw, th) = _to_rgb_uint8(image), (int(target_size[0]), int(target_size[1]))
@@ -97,7 +89,6 @@ def preprocess_macro_rosette_crop(image: Image.Image | np.ndarray, target_size: 
     if arr.shape[:2] != (th, tw):
         interp = cv2.INTER_AREA if (arr.shape[0] >= th and arr.shape[1] >= tw) else cv2.INTER_LINEAR; arr = cv2.resize(arr, (tw, th), interpolation=interp) if cv2 is not None else np.array(Image.fromarray(arr).resize((tw, th), Image.BILINEAR))
     return arr.astype(np.uint8)
-
 def compute_foreground_tissue_mask(rgb_img: Image.Image | np.ndarray, mask_path: Optional[Path] = None, grid_size: Tuple[int, int] = (16, 16), orig_hw: Optional[Tuple[int, int]] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Computes binary plant tissue mask at image resolution and downsampled 16x16 patch grid."""
     arr, (gh, gw) = _to_rgb_uint8(rgb_img), (int(grid_size[0]), int(grid_size[1])); h, w = arr.shape[:2]
@@ -180,17 +171,14 @@ def _parse_pid(val: Any, default: int = 0) -> int:
     if not s or s.lower() in {"nan", "na", "none", "null", "<na>"}: return default
     try: return int(float(s))
     except Exception: return default
-
 def _extract_catalog_number(stem: str, known_catalogs: Optional[set] = None) -> str:
     cleaned = re.sub(r"_(?:p\d+_)?(?:rosette|leaf|patch|crop).*$", "", stem, flags=re.IGNORECASE)
     if known_catalogs and (stem in known_catalogs or cleaned in known_catalogs): return stem if stem in known_catalogs else cleaned
     return cleaned if cleaned else stem.split("_")[0]
-
 def _extract_pid_from_stem(stem: str, known_catalogs: Optional[set] = None) -> Optional[int]:
     if known_catalogs and stem in known_catalogs: return None
     m = re.search(r"_p(\d+)_(?:rosette|leaf|patch|crop)", stem, flags=re.IGNORECASE)
     return int(m.group(1)) if m else None
-
 def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: bool = False, manifest_csv: Optional[Path] = None) -> Tuple[pd.DataFrame, Dict[str, int]]:
     """Links vouchers per `(catalogNumber, plant_individual_id)` to verified `Tier_1_Direct` basal leaf crops/masks (or `rosettes_dense` fallbacks) and maps taxa to `0..K-1`."""
     rosette_dir, vouchers_csv = Path(rosette_dir), Path(vouchers_csv)
@@ -309,23 +297,26 @@ def _aggregate_voucher_embeddings(raw_feats: np.ndarray, expanded_meta: List[Any
         fg_map[g_key] = round(float(np.sum(np.array([it[3] for it in items], dtype=np.float64) * nwts)), 4)
     return np.vstack(agg_feats), np.array(agg_labels, dtype=int), voucher_order, fg_map
 
-def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "dinov2_vitb14_reg", device: str = "cuda" if torch.cuda.is_available() else "cpu", batch_size: int = 32, neutralize_background: bool = True, demo: bool = False, return_fg_ratios: bool = False) -> Any:
-    """Extracts 768-d DINOv2 embeddings & empirical foreground patch-energy ratios on 224x224 crops per `(catalogNumber, plant_individual_id)`."""
+def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "dinov2_vitb14_reg", device: str = "cuda" if torch.cuda.is_available() else "cpu", batch_size: int = 32, neutralize_background: bool = True, demo: bool = False, return_fg_ratios: bool = False, db_path: Optional[Path] = None, sigma: float = 1.0) -> Any:
+    """Extracts 768-d DINOv2 embeddings & foreground patch-energy ratios per `(catalogNumber, plant_individual_id)` with SQLite feature caching."""
     torch.manual_seed(42); np.random.seed(42)
     if not records:
         empty = (np.empty((0, 768), dtype=np.float32), np.array([], dtype=int), [])
         return (*empty, np.array([], dtype=np.float64)) if return_fg_ratios else empty
-    expanded_records, expanded_meta = [], []
-    for rec in records:
-        cat_num, pid, lbl_idx = str(rec["catalogNumber"]).strip(), _parse_pid(rec.get("plant_individual_id", 0), 0), int(rec.get("label_idx", 0))
-        t1_p, ros_p = rec.get("tier1_leaf_patches"), rec.get("rosette_patches")
-        if isinstance(t1_p, list) and t1_p: p_list, m_list, w_list = t1_p, (rec.get("tier1_leaf_masks") or []), (rec.get("tier1_leaf_weights") or [])
-        elif isinstance(ros_p, list) and ros_p: p_list, m_list, w_list = ros_p, (rec.get("rosette_masks") or []), []
-        else: p_list, m_list, w_list = [rec.get("patch_path", "")], [rec.get("mask_path", "")], []
-        for idx_p, p_str in enumerate(p_list):
-            m_str = m_list[idx_p] if idx_p < len(m_list) else rec.get("mask_path", "")
-            expanded_records.append({**rec, "catalogNumber": cat_num, "plant_individual_id": pid, "label_idx": lbl_idx, "patch_path": p_str, "mask_path": m_str})
-            expanded_meta.append(((cat_num, pid), lbl_idx, float(w_list[idx_p]) if idx_p < len(w_list) else 1.0))
+    def _expand(recs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Any], Dict[Tuple[str, int], List[str]]]:
+        exp_r, exp_m, patches_by_k = [], [], {}
+        for rec in recs:
+            cat_num, pid, lbl_idx = str(rec["catalogNumber"]).strip(), _parse_pid(rec.get("plant_individual_id", 0), 0), int(rec.get("label_idx", 0))
+            t1_p, ros_p = rec.get("tier1_leaf_patches"), rec.get("rosette_patches")
+            if isinstance(t1_p, list) and t1_p: p_list, m_list, w_list = t1_p, (rec.get("tier1_leaf_masks") or []), (rec.get("tier1_leaf_weights") or [])
+            elif isinstance(ros_p, list) and ros_p: p_list, m_list, w_list = ros_p, (rec.get("rosette_masks") or []), []
+            else: p_list, m_list, w_list = [rec.get("patch_path", "")], [rec.get("mask_path", "")], []
+            patches_by_k.setdefault((cat_num, pid), []).extend(str(p) for p in p_list)
+            for idx_p, p_str in enumerate(p_list):
+                m_str = m_list[idx_p] if idx_p < len(m_list) else rec.get("mask_path", "")
+                exp_r.append({**rec, "catalogNumber": cat_num, "plant_individual_id": pid, "label_idx": lbl_idx, "patch_path": p_str, "mask_path": m_str})
+                exp_m.append(((cat_num, pid), lbl_idx, float(w_list[idx_p]) if idx_p < len(w_list) else 1.0))
+        return exp_r, exp_m, patches_by_k
     def _finalize(agg_f: np.ndarray, agg_l: np.ndarray, v_ord: List[Tuple[str, int]], fg_map: Dict[Tuple[str, int], float]) -> Any:
         for rec in records:
             gk = (str(rec["catalogNumber"]).strip(), _parse_pid(rec.get("plant_individual_id", 0), 0))
@@ -333,41 +324,63 @@ def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "
         has_multi_pid = any(p != 0 for _, p in v_ord) or len({c for c, _ in v_ord}) < len(v_ord)
         out_ord = list(v_ord) if has_multi_pid else [c for c, _ in v_ord]
         return (agg_f, agg_l, out_ord, np.array([fg_map.get(k, 0.85) for k in v_ord], dtype=np.float64)) if return_fg_ratios else (agg_f, agg_l, out_ord)
-    if not any(Path(str(r["patch_path"])).exists() for r in expanded_records[:5]):
+    all_exp_r, all_exp_m, patches_by_key = _expand(records)
+    if not any(Path(str(r["patch_path"])).exists() for r in all_exp_r[:5]):
         if not demo: raise RuntimeError("No physical patch images found in `data/cropped_patches/`. Run Phase 2 or pass `--demo`.")
-        feats = np.random.randn(len(expanded_records), 768).astype(np.float32)
-        for i, r in enumerate(expanded_records):
+        feats = np.random.randn(len(all_exp_r), 768).astype(np.float32)
+        for i, r in enumerate(all_exp_r):
             c_idx = int(r.get("label_idx", 0)) % 15; feats[i, c_idx * 50 : (c_idx + 1) * 50] += 3.0
-        synth_fg = np.array([float(r.get("foreground_attention_ratio", 0.85)) for r in expanded_records], dtype=np.float64)
-        return _finalize(*_aggregate_voucher_embeddings(feats, expanded_meta, synth_fg))
-    loader = DataLoader(RosettePatchDataset(expanded_records, neutralize_background=neutralize_background, sigma=1.0, demo=demo), batch_size=batch_size, shuffle=False, num_workers=0)
-    model, last_err = None, None
-    for candidate_name in (model_name, "dinov2_vitb14"):
-        try: model = torch.hub.load("facebookresearch/dinov2", candidate_name); break
-        except Exception as exc: last_err = exc
-    if model is None:
-        if not demo: raise RuntimeError(f"Could not load DINOv2 model weights ('{model_name}'): {last_err}") from last_err
-        model = _DemoViTFeatureExtractor()
-    model = model.to(device).eval() if hasattr(model, "to") else model
-    all_feats, all_fg_ratios = [], []
-    with torch.no_grad():
-        for tensors, fg_grids, _labels, _cats in loader:
-            tensors = tensors.to(device)
-            if hasattr(model, "forward_features"):
-                ptoks = model.forward_features(tensors)["x_norm_patchtokens"]
-                pooled = foreground_masked_patch_pooling(ptoks, fg_grids)
-                tnorms = torch.norm(ptoks.detach().cpu().float(), dim=-1)
-                fg_flat = (fg_grids.detach().cpu().float().reshape(tnorms.shape[0], -1) > 0).float()
-                if fg_flat.shape[1] != tnorms.shape[1]:
-                    fg_flat = (F.interpolate(fg_flat.unsqueeze(1), size=tnorms.shape[1], mode="nearest")[:, 0] > 0).float()
-                b_fg = torch.clamp((tnorms * fg_flat).sum(dim=1) / torch.clamp(tnorms.sum(dim=1), min=1e-8), 0.0, 1.0).numpy()
-            else:
-                out = model(tensors).cpu().numpy()
-                pooled = (out / np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-8)).astype(np.float32)
-                b_fg = (fg_grids.detach().cpu().float().reshape(len(pooled), -1) > 0).float().mean(dim=1).numpy()
-            all_feats.append(pooled); all_fg_ratios.append(b_fg)
-    return _finalize(*_aggregate_voucher_embeddings(np.vstack(all_feats) if all_feats else np.empty((0, 768), dtype=np.float32), expanded_meta, np.concatenate(all_fg_ratios) if all_fg_ratios else None))
-
+        synth_fg = np.array([float(r.get("foreground_attention_ratio", 0.85)) for r in all_exp_r], dtype=np.float64)
+        return _finalize(*_aggregate_voucher_embeddings(feats, all_exp_m, synth_fg))
+    spec_order, spec_lbl, spec_rec = [], {}, {}
+    for rec in records:
+        gk = (str(rec["catalogNumber"]).strip(), _parse_pid(rec.get("plant_individual_id", 0), 0))
+        if gk not in spec_lbl: spec_order.append(gk); spec_lbl[gk] = int(rec.get("label_idx", 0)); spec_rec[gk] = rec
+    use_cache, db_conn, cache_hits, sha_by_key = ((not demo) and (db_path is not None or is_canonical_or_explicit_db_context(all_exp_r[0].get("patch_path")))), None, {}, {}
+    if use_cache:
+        try:
+            db_conn = get_db_connection(db_path=db_path, init_schema=True)
+            sha_by_key = {gk: (compute_file_sha256(ps[0]) if len(ps) == 1 else hashlib.sha256("|".join(compute_file_sha256(p) or "" for p in ps).encode()).hexdigest()) for gk in spec_order for ps in (patches_by_key.get(gk, []),)}
+            cache_hits = fetch_cached_dinov2_features(db_conn, [(c, p, sha_by_key.get((c, p))) for c, p in spec_order], model_name, sigma)
+        except Exception: db_conn, cache_hits = None, {}
+    uncached_recs, computed_feats, computed_fg = [rec for rec in records if (str(rec["catalogNumber"]).strip(), _parse_pid(rec.get("plant_individual_id", 0), 0)) not in cache_hits], {}, {}
+    try:
+        if uncached_recs:
+            exp_r, exp_m, _ = _expand(uncached_recs)
+            loader = DataLoader(RosettePatchDataset(exp_r, neutralize_background=neutralize_background, sigma=sigma, demo=demo), batch_size=batch_size, shuffle=False, num_workers=0)
+            model, last_err = None, None
+            for candidate_name in (model_name, "dinov2_vitb14"):
+                try: model = torch.hub.load("facebookresearch/dinov2", candidate_name); break
+                except Exception as exc: last_err = exc
+            if model is None:
+                if not demo: raise RuntimeError(f"Could not load DINOv2 model weights ('{model_name}'): {last_err}") from last_err
+                model = _DemoViTFeatureExtractor()
+            model, all_feats, all_fg_ratios = (model.to(device).eval() if hasattr(model, "to") else model), [], []
+            with torch.no_grad():
+                for tensors, fg_grids, _labels, _cats in loader:
+                    tensors = tensors.to(device)
+                    if hasattr(model, "forward_features"):
+                        ptoks = model.forward_features(tensors)["x_norm_patchtokens"]
+                        pooled, tnorms = foreground_masked_patch_pooling(ptoks, fg_grids), torch.norm(ptoks.detach().cpu().float(), dim=-1)
+                        fg_flat = (fg_grids.detach().cpu().float().reshape(tnorms.shape[0], -1) > 0).float()
+                        if fg_flat.shape[1] != tnorms.shape[1]: fg_flat = (F.interpolate(fg_flat.unsqueeze(1), size=tnorms.shape[1], mode="nearest")[:, 0] > 0).float()
+                        b_fg = torch.clamp((tnorms * fg_flat).sum(dim=1) / torch.clamp(tnorms.sum(dim=1), min=1e-8), 0.0, 1.0).numpy()
+                    else:
+                        out = model(tensors).cpu().numpy()
+                        pooled = (out / np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-8)).astype(np.float32)
+                        b_fg = (fg_grids.detach().cpu().float().reshape(len(pooled), -1) > 0).float().mean(dim=1).numpy()
+                    all_feats.append(pooled); all_fg_ratios.append(b_fg)
+            new_f, _, new_ord, new_fg = _aggregate_voucher_embeddings(np.vstack(all_feats) if all_feats else np.empty((0, 768), dtype=np.float32), exp_m, np.concatenate(all_fg_ratios) if all_fg_ratios else None)
+            cache_rows = []
+            for idx_n, gk in enumerate(new_ord):
+                computed_feats[gk], computed_fg[gk], r_meta = new_f[idx_n], new_fg.get(gk, 0.85), spec_rec.get(gk, {})
+                cache_rows.append({"catalogNumber": gk[0], "plant_individual_id": gk[1], "patch_sha256": sha_by_key.get(gk), "embedding": new_f[idx_n].tolist(), "foreground_attention_ratio": computed_fg[gk], "is_artifact_driven": computed_fg[gk] < FOREGROUND_ATTENTION_MIN_RATIO, "surface_orientation": r_meta.get("surface_orientation"), "mean_luminance": r_meta.get("mean_luminance"), "mean_saturation": r_meta.get("mean_saturation"), "high_brightness_ratio": r_meta.get("high_brightness_ratio")})
+            if db_conn is not None and not demo and cache_rows: store_dinov2_features_cache(db_conn, cache_rows, model_name, sigma, demo=demo)
+    finally:
+        if db_conn is not None: db_conn.close()
+    final_f = np.vstack([np.asarray(cache_hits[gk]["embedding"], dtype=np.float32) if gk in cache_hits else computed_feats[gk] for gk in spec_order])
+    final_fg = {gk: (float(cache_hits[gk]["foreground_attention_ratio"]) if (gk in cache_hits and cache_hits[gk].get("foreground_attention_ratio") is not None) else computed_fg.get(gk, 0.85)) for gk in spec_order}
+    return _finalize(final_f, np.array([spec_lbl[gk] for gk in spec_order], dtype=int), spec_order, final_fg)
 def compute_out_of_fold_probabilities(features: np.ndarray, labels: np.ndarray, n_splits: int = 5, random_state: int = 42, surface_orientations: Optional[np.ndarray | List[str] | pd.Series] = None, stratify_by_orientation: bool = False, determiner_tiers: Optional[np.ndarray | List[str] | pd.Series] = None, spatial_balance_weights: Optional[np.ndarray | List[float] | pd.Series] = None, institution_codes: Optional[np.ndarray | List[str] | pd.Series] = None) -> Tuple[np.ndarray, float, float]:
     """Computes calibrated out-of-fold probabilities anchored on Gold/Silver reference specimens."""
     X = np.asarray(features, dtype=np.float64)
@@ -711,7 +724,6 @@ def generate_step05_publication_figures(audit_df: pd.DataFrame, output_figure_pa
         fig.savefig(tmp_png, format="png", dpi=300, bbox_inches="tight"); tmp_png.replace(png_out)
     finally: plt.close(fig)
     return {"pdf": pdf_out, "png": png_out}
-
 def parse_args() -> argparse.Namespace:
     """Parses command-line arguments for Phase 5 analysis."""
     p = argparse.ArgumentParser(description="Phase 5: Indumentum-Blind DINOv2 Macro-Architecture & Cleanlab XAI Audit")
@@ -721,12 +733,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--neutralize-background", dest="neutralize_background", action="store_true", default=True); p.add_argument("--no-neutralize-background", dest="neutralize_background", action="store_false")
     p.add_argument("--export-figures", dest="export_figures", action="store_true", default=True); p.add_argument("--no-export-figures", dest="export_figures", action="store_false")
     p.add_argument("--filter-abaxial-artifacts", dest="filter_abaxial_artifacts", action="store_true", default=True); p.add_argument("--no-filter-abaxial-artifacts", dest="filter_abaxial_artifacts", action="store_false")
-    p.add_argument("--stratify-by-orientation", dest="stratify_by_orientation", action="store_true", default=False)
+    p.add_argument("--stratify-by-orientation", dest="stratify_by_orientation", action="store_true", default=False); p.add_argument("--intraspecific-mode", dest="intraspecific_mode", action="store_true", default=False)
     p.add_argument("--morphometrics-csv", type=Path, default=None); p.add_argument("--manifest-csv", type=Path, default=None)
-    p.add_argument("--intraspecific-mode", dest="intraspecific_mode", action="store_true", default=False)
-    p.add_argument("--focal-taxon", type=str, default=""); p.add_argument("--demo", dest="demo", action="store_true", default=False)
+    p.add_argument("--focal-taxon", type=str, default=""); p.add_argument("--demo", dest="demo", action="store_true", default=False); p.add_argument("--db", type=Path, default=None)
     return p.parse_args()
-
 def _apply_intraspecific_morphotype_labels(df: pd.DataFrame, morphometrics_csv: Optional[Path], vouchers_csv: Optional[Path] = None, intraspecific_mode: bool = False) -> pd.DataFrame:
     """Remaps `taxon` and `label_idx` to Step 04 `Morphotype_K1..Kn` clusters when single-species or `--intraspecific-mode`."""
     if df.empty or (not intraspecific_mode and df["taxon"].nunique() >= 2): return df
@@ -737,32 +747,25 @@ def _apply_intraspecific_morphotype_labels(df: pd.DataFrame, morphometrics_csv: 
     def _fmt(v: Any) -> Optional[str]:
         s = "" if (v is None or pd.isna(v)) else str(v).strip()
         if not s or s.lower() in {"nan", "na", "none"}: return None
-        if s.startswith("Morphotype_"): return s
         m_num = re.search(r"(\d+)", s)
-        return f"Morphotype_K{int(m_num.group(1))}" if m_num else f"Morphotype_{re.sub(r'[^A-Za-z0-9_]', '_', s)}"
+        return s if s.startswith("Morphotype_") else (f"Morphotype_K{int(m_num.group(1))}" if m_num else f"Morphotype_{re.sub(r'[^A-Za-z0-9_]', '_', s)}")
     m_sub, left = m_df.copy(), df.copy()
     m_sub["catalogNumber"], left["catalogNumber"] = m_sub["catalogNumber"].astype(str).str.strip(), left["catalogNumber"].astype(str).str.strip()
     m_sub["_m_lbl"] = m_sub["gmm_cluster"].map(_fmt); m_sub = m_sub[m_sub["_m_lbl"].notna()]
     join_keys = ["catalogNumber", "plant_individual_id"] if ("plant_individual_id" in m_sub.columns and "plant_individual_id" in left.columns) else ["catalogNumber"]
-    if "plant_individual_id" in join_keys:
-        m_sub["plant_individual_id"], left["plant_individual_id"] = [_parse_pid(v, 0) for v in m_sub["plant_individual_id"]], [_parse_pid(v, 0) for v in left["plant_individual_id"]]
+    if "plant_individual_id" in join_keys: m_sub["plant_individual_id"], left["plant_individual_id"] = [_parse_pid(v, 0) for v in m_sub["plant_individual_id"]], [_parse_pid(v, 0) for v in left["plant_individual_id"]]
     merged = left.merge(m_sub.drop_duplicates(subset=join_keys, keep="first")[join_keys + ["_m_lbl"]], on=join_keys, how="left")
     if merged["_m_lbl"].dropna().nunique() < 2: return df
-    out = merged[merged["_m_lbl"].notna()].copy().reset_index(drop=True)
-    out["taxon"] = out.pop("_m_lbl")
-    c2i = {tx: i for i, tx in enumerate(sorted(out["taxon"].unique()))}
-    out["label_idx"] = [c2i[tx] for tx in out["taxon"]]
+    out = merged[merged["_m_lbl"].notna()].copy().reset_index(drop=True); out["taxon"] = out.pop("_m_lbl")
+    c2i = {tx: i for i, tx in enumerate(sorted(out["taxon"].unique()))}; out["label_idx"] = [c2i[tx] for tx in out["taxon"]]
     return out
-
 def main() -> None:
     """Orchestrates Phase 5 Indumentum-Blind Deep Vision & Confident Learning workflow."""
-    args = parse_args()
-    df, _ = load_and_link_rosette_patches(args.rosette_dir, args.vouchers_csv, demo=args.demo, manifest_csv=args.manifest_csv)
+    args = parse_args(); df, _ = load_and_link_rosette_patches(args.rosette_dir, args.vouchers_csv, demo=args.demo, manifest_csv=args.manifest_csv)
     if df.empty: logger.warning("No rosette patch records were matched. Check inputs."); return
-    if "plant_individual_id" not in df.columns: df["plant_individual_id"] = 0
-    df["plant_individual_id"] = [_parse_pid(v, 0) for v in df["plant_individual_id"]]
+    df["plant_individual_id"] = [_parse_pid(v, 0) for v in df["plant_individual_id"]] if "plant_individual_id" in df.columns else 0
     df = _apply_intraspecific_morphotype_labels(df, args.morphometrics_csv, vouchers_csv=args.vouchers_csv, intraspecific_mode=args.intraspecific_mode)
-    features, labels, key_order, fg_ratios = extract_dinov2_embeddings(df.to_dict("records"), neutralize_background=args.neutralize_background, demo=args.demo, return_fg_ratios=True)
+    features, labels, key_order, fg_ratios = extract_dinov2_embeddings(df.to_dict("records"), neutralize_background=args.neutralize_background, demo=args.demo, return_fg_ratios=True, db_path=args.db)
     fg_by_key = {(k if isinstance(k, tuple) else (str(k).strip(), 0)): float(fg) for k, fg in zip(key_order, fg_ratios)}
     df["foreground_attention_ratio"] = [round(fg_by_key.get((str(c).strip(), _parse_pid(p, 0)), 0.85), 4) for c, p in zip(df["catalogNumber"], df["plant_individual_id"])]
     active_taxa = sorted(t for t in set(df["taxon"]) if _is_valid_packera_taxon(t)) or ["Unassigned_Packera"]
@@ -775,17 +778,19 @@ def main() -> None:
         fg_updates = {(str(r["catalogNumber"]).strip(), _parse_pid(r.get("plant_individual_id", 0), 0)): float(r["foreground_attention_ratio"]) for r in flagged if "catalogNumber" in r and "foreground_attention_ratio" in r}
         if fg_updates:
             audit_df["foreground_attention_ratio"] = [fg_updates.get((str(c).strip(), _parse_pid(p, 0)), float(fg)) for c, p, fg in zip(audit_df["catalogNumber"], audit_df["plant_individual_id"], audit_df["foreground_attention_ratio"])]
-            audit_df["is_artifact_driven"] = (audit_df["foreground_attention_ratio"] < FOREGROUND_ATTENTION_MIN_RATIO).astype(bool)
-            audit_df["is_background_shortcut"] = audit_df["is_artifact_driven"].astype(bool)
+            audit_df["is_artifact_driven"] = (audit_df["foreground_attention_ratio"] < FOREGROUND_ATTENTION_MIN_RATIO).astype(bool); audit_df["is_background_shortcut"] = audit_df["is_artifact_driven"].astype(bool)
         try: generate_step05_publication_figures(audit_df, args.output_figure)
         except Exception as fig_exc: logger.warning(f"Step 05 publication figure generation skipped: {fig_exc}")
     if not args.demo:
-        args.output_csv.parent.mkdir(parents=True, exist_ok=True)
-        tmp_csv = args.output_csv.with_suffix(args.output_csv.suffix + ".tmp")
+        args.output_csv.parent.mkdir(parents=True, exist_ok=True); tmp_csv = args.output_csv.with_suffix(args.output_csv.suffix + ".tmp")
         export_df = audit_df.drop(columns=["oof_probs", "rosette_patches", "rosette_masks", "tier1_leaf_patches", "tier1_leaf_masks", "tier1_leaf_weights"], errors="ignore")
-        with open(tmp_csv, "w", encoding="utf-8", newline="") as f:
-            export_df.to_csv(f, index=False); f.flush(); os.fsync(f.fileno())
+        with open(tmp_csv, "w", encoding="utf-8", newline="") as f: export_df.to_csv(f, index=False); f.flush(); os.fsync(f.fileno())
         tmp_csv.replace(args.output_csv)
-
+        if args.db is not None or is_canonical_or_explicit_db_context(args.output_csv):
+            try:
+                conn = get_db_connection(db_path=args.db, init_schema=True)
+                try: persist_vision_xai_audit(conn, os.environ.get("RUN_ID", "canonical"), export_df.to_dict("records"), demo=args.demo)
+                finally: conn.close()
+            except Exception as db_exc: logger.warning(f"SQLite vision_xai_audit persistence warning: {db_exc}")
 if __name__ == "__main__":
     main()

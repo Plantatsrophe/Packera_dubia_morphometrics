@@ -66,6 +66,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.config import PipelineConfig
+from scripts.core.db import (
+    get_completed_qc_vouchers,
+    get_db_connection,
+    is_canonical_or_explicit_db_context,
+    load_step02_records_from_db,
+    record_voucher_segmentation_transaction,
+    upsert_vouchers_records,
+)
 from scripts.vision.configure_leafmachine2 import (
     generate_high_performance_config,
     resolve_pcd_weights,
@@ -846,7 +854,9 @@ class SegmentAndExtractPipeline:
         sam2_checkpoint: Optional[Union[str, Path]] = None,
         sam2_config: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
         sam2_predictor: Optional[Any] = None,
+        db_path: Optional[Union[str, Path]] = None,
     ) -> None:
+        self.db_path = db_path
         self.vouchers_csv = Path(vouchers_csv)
         self.model_weights = Path(model_weights)
         self.output_dir = Path(output_dir).resolve()
@@ -971,6 +981,9 @@ class SegmentAndExtractPipeline:
         )
         self.voucher_repro_records: Dict[str, Dict[str, Any]] = {}
         self.voucher_pheno_records: Dict[str, Dict[str, Any]] = {}
+        self.voucher_crowns_by_pid: Dict[str, Dict[int, Tuple[float, float]]] = {}
+        self.voucher_rosette_centroids_by_pid: Dict[str, Dict[int, Tuple[float, float]]] = {}
+        self.voucher_petiole_by_pid: Dict[str, Dict[int, Dict[str, Any]]] = {}
 
         # Preload catalogNumber -> scientificName mapping if available
         self.vouchers_taxa: Dict[str, str] = {}
@@ -2008,6 +2021,23 @@ class SegmentAndExtractPipeline:
         repro_summary["is_bent_stem"] = bool(petiole_scape_res.get("is_bent_stem", False))
         self.voucher_repro_records[catalog_number] = repro_summary
         by_plant_petiole = petiole_scape_res.get("by_plant", {})
+        self.voucher_rosette_centroids_by_pid[catalog_number] = {
+            int(k): (float(v[0]), float(v[1]))
+            for k, v in rosette_centroids_by_pid.items()
+            if v is not None
+        }
+        if isinstance(crowns_by_pid, dict):
+            self.voucher_crowns_by_pid[catalog_number] = {
+                int(k): (float(v[0]), float(v[1]))
+                for k, v in crowns_by_pid.items()
+                if isinstance(v, (tuple, list)) and len(v) >= 2
+            }
+        if isinstance(by_plant_petiole, dict):
+            self.voucher_petiole_by_pid[catalog_number] = {
+                int(k): dict(v)
+                for k, v in by_plant_petiole.items()
+                if isinstance(v, dict)
+            }
 
         for inst, routing_res, tier, assigned_tier, is_folded, is_dissected, reflection_applied, m_area in candidate_extractions:
             ox, oy = inst.mask_origin
@@ -2323,14 +2353,42 @@ class SegmentAndExtractPipeline:
         existing_repro_by_cat: Dict[str, Dict[str, Any]] = {}
         existing_pheno_by_cat: Dict[str, Dict[str, Any]] = {}
 
+        use_db = (self.db_path is not None) or is_canonical_or_explicit_db_context(self.output_dir)
+        db_conn = None
+        if use_db:
+            try:
+                db_conn = get_db_connection(db_path=self.db_path, init_schema=True)
+                if not df_vouchers.empty:
+                    upsert_vouchers_records(db_conn, df_vouchers.to_dict(orient="records"))
+            except Exception as db_init_exc:
+                logger.warning(f"SQLite initialization skipped ({db_init_exc}); falling back to CSV manifests.")
+                db_conn = None
+
+        completed_in_db: Set[str] = set()
         if not self.force:
+            if db_conn is not None:
+                try:
+                    target_cats = df_vouchers["catalogNumber"].astype(str).str.strip().tolist()
+                    completed_in_db = get_completed_qc_vouchers(db_conn, catalog_filter=target_cats)
+                    if completed_in_db:
+                        db_ext, db_fail, db_rep, db_phe = load_step02_records_from_db(db_conn, list(completed_in_db))
+                        for k_cat, recs in db_ext.items():
+                            existing_extracted_by_cat[k_cat].extend(recs)
+                        existing_failed_by_cat.update(db_fail)
+                        existing_repro_by_cat.update(db_rep)
+                        existing_pheno_by_cat.update(db_phe)
+                except Exception as db_load_exc:
+                    logger.warning(f"Could not query completed vouchers from SQLite: {db_load_exc}")
+
             for path in [manifest_path, legacy_manifest_path]:
                 if path.exists() and path.stat().st_size > 0:
                     try:
                         prev_manifest = pd.read_csv(path)
                         if not prev_manifest.empty and "catalogNumber" in prev_manifest.columns:
                             for rec in prev_manifest.to_dict(orient="records"):
-                                existing_extracted_by_cat[str(rec["catalogNumber"]).strip()].append(rec)
+                                c_key = str(rec["catalogNumber"]).strip()
+                                if c_key not in existing_extracted_by_cat:
+                                    existing_extracted_by_cat[c_key].append(rec)
                         break  # Found a valid manifest, don't need to check the legacy one
                     except Exception as e:
                         logger.warning(f"Could not load previous manifest at {path}: {e}")
@@ -2340,7 +2398,7 @@ class SegmentAndExtractPipeline:
                     prev_failed = pd.read_csv(failed_qc_path)
                     if not prev_failed.empty and "catalogNumber" in prev_failed.columns:
                         for rec in prev_failed.to_dict(orient="records"):
-                            existing_failed_by_cat[str(rec["catalogNumber"]).strip()] = rec
+                            existing_failed_by_cat.setdefault(str(rec["catalogNumber"]).strip(), rec)
                 except Exception as e:
                     logger.warning(f"Could not load previous failed QC table at {failed_qc_path}: {e}")
 
@@ -2349,7 +2407,7 @@ class SegmentAndExtractPipeline:
                     prev_repro = pd.read_csv(repro_manifest_path)
                     if not prev_repro.empty and "catalogNumber" in prev_repro.columns:
                         for rec in prev_repro.to_dict(orient="records"):
-                            existing_repro_by_cat[str(rec["catalogNumber"]).strip()] = rec
+                            existing_repro_by_cat.setdefault(str(rec["catalogNumber"]).strip(), rec)
                 except Exception as e:
                     logger.warning(f"Could not load previous reproductive table at {repro_manifest_path}: {e}")
 
@@ -2358,7 +2416,7 @@ class SegmentAndExtractPipeline:
                     prev_pheno = pd.read_csv(pheno_manifest_path)
                     if not prev_pheno.empty and "catalogNumber" in prev_pheno.columns:
                         for rec in prev_pheno.to_dict(orient="records"):
-                            existing_pheno_by_cat[str(rec["catalogNumber"]).strip()] = rec
+                            existing_pheno_by_cat.setdefault(str(rec["catalogNumber"]).strip(), rec)
                 except Exception as e:
                     logger.warning(f"Could not load previous phenology table at {pheno_manifest_path}: {e}")
 
@@ -2369,7 +2427,11 @@ class SegmentAndExtractPipeline:
         processed_count = 0
         skipped_count = 0
 
-        completed_on_disk = self._index_completed_vouchers() if not self.force else set()
+        if not self.force:
+            disk_scan = self._index_completed_vouchers() if len(completed_in_db) < total_vouchers else set()
+            completed_on_disk = completed_in_db | disk_scan
+        else:
+            completed_on_disk = set()
         custom_process_voucher = "process_voucher" in self.__dict__
         use_prefetch = (not custom_process_voucher) and (total_vouchers > 4)
 
@@ -2482,24 +2544,37 @@ class SegmentAndExtractPipeline:
                 if failure:
                     all_failed_records.append(failure)
 
+                if db_conn is not None:
+                    try:
+                        record_voucher_segmentation_transaction(
+                            conn=db_conn,
+                            catalog_number=cat_num,
+                            extracted_records=extracted,
+                            failure_record=failure,
+                            repro_record=self.voucher_repro_records.get(cat_num),
+                            pheno_record=self.voucher_pheno_records.get(cat_num),
+                            crowns_by_pid=self.voucher_crowns_by_pid.get(cat_num),
+                            rosette_centroids_by_pid=self.voucher_rosette_centroids_by_pid.get(cat_num),
+                            by_plant_petiole=self.voucher_petiole_by_pid.get(cat_num),
+                            output_dir=self.output_dir,
+                            image_path=str(raw_img_path),
+                        )
+                    except Exception as db_tx_exc:
+                        logger.warning(f"Per-voucher SQLite transaction failed for {cat_num}: {db_tx_exc}")
+
                 if processed_count % 25 == 0 or (processed_count + skipped_count) == total_vouchers:
                     logger.info(
                         f"Progress: [Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}] "
                         f"({len(all_extracted_records)} leaves extracted, {len(all_failed_records)} failed QC)."
                     )
-                if processed_count % 50 == 0:
-                    self._flush_manifests(
-                        all_extracted_records,
-                        all_failed_records,
-                        manifest_path,
-                        legacy_manifest_path,
-                        failed_qc_path,
-                        repro_manifest_path,
-                        pheno_manifest_path,
-                    )
         finally:
             if prefetch_pool is not None:
                 prefetch_pool.shutdown(wait=False, cancel_futures=True)
+            if db_conn is not None:
+                try:
+                    db_conn.close()
+                except Exception:
+                    pass
 
         logger.info(
             f"Extraction Summary: [Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}]"
@@ -3608,6 +3683,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional limit on number of vouchers to process."
     )
     parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="Optional SQLite database path override (default: data/packera_pipeline.sqlite).",
+    )
+    parser.add_argument(
         "--regenerate-figures-only",
         dest="regenerate_figures_only",
         action="store_true",
@@ -3637,6 +3718,7 @@ def main() -> None:
         sam2_refine=args.sam2_refine,
         sam2_checkpoint=args.sam2_checkpoint,
         sam2_config=args.sam2_config,
+        db_path=getattr(args, "db", None),
     )
     pipeline.run(limit=args.limit)
 

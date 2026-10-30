@@ -24,6 +24,9 @@ suppressPackageStartupMessages({
 if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
   source("scripts/morphometrics/pub_figures_utils.R")
 }
+for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
+  if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+}
 
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parser & Atomic Export Helpers
@@ -104,81 +107,7 @@ std_taxon <- function(x) {
 # 2. Step A: Load & Filter Tier_1_Pure Gold/Silver Anchor Specimens
 # ------------------------------------------------------------------------------
 load_and_merge_inputs <- function(opts) {
-  morph_path <- opts$morphometrics
-  if (!file.exists(morph_path)) {
-    alt_m <- file.path(dirname(morph_path), "morphometrics_misidentification_flags.csv")
-    if (file.exists(alt_m)) morph_path <- alt_m
-  }
-  if (!file.exists(morph_path)) {
-    stop("Morphometrics table not found at: ", opts$morphometrics)
-  }
-  morph_df <- utils::read.csv(morph_path, stringsAsFactors = FALSE)
-  morph_df$catalogNumber <- as.character(morph_df$catalogNumber)
-
-  for (supp_path in c(opts$harmonics, opts$vouchers)) {
-    if (file.exists(supp_path)) {
-      s_df <- tryCatch(utils::read.csv(supp_path, stringsAsFactors = FALSE), error = function(e) NULL)
-      if (!is.null(s_df) && nrow(s_df) > 0 && "catalogNumber" %in% names(s_df)) {
-        s_df$catalogNumber <- as.character(s_df$catalogNumber)
-        s_sub <- s_df[!duplicated(s_df$catalogNumber), , drop = FALSE]
-        add_cols <- setdiff(names(s_sub), names(morph_df))
-        if (length(add_cols) > 0) {
-          idx_s <- match(morph_df$catalogNumber, s_sub$catalogNumber)
-          for (cl in add_cols) morph_df[[cl]] <- s_sub[[cl]][idx_s]
-        }
-      }
-    }
-  }
-
-  pheno_path <- file.path(dirname(morph_path), "voucher_phenological_states.csv")
-  if (file.exists(pheno_path)) {
-    ph_df <- tryCatch(utils::read.csv(pheno_path, stringsAsFactors = FALSE), error = function(e) NULL)
-    if (!is.null(ph_df) && nrow(ph_df) > 0 && "catalogNumber" %in% names(ph_df)) {
-      ph_df$catalogNumber <- as.character(ph_df$catalogNumber)
-      ph_sub <- ph_df[!duplicated(ph_df$catalogNumber), , drop = FALSE]
-      add_ph <- setdiff(names(ph_sub), names(morph_df))
-      if (length(add_ph) > 0) {
-        idx_p <- match(morph_df$catalogNumber, ph_sub$catalogNumber)
-        for (cl in add_ph) morph_df[[cl]] <- ph_sub[[cl]][idx_p]
-      }
-    }
-  }
-
-  if (!is.null(opts$multimodal) && nzchar(opts$multimodal) && file.exists(opts$multimodal)) {
-    mm_df <- tryCatch(utils::read.csv(opts$multimodal, stringsAsFactors = FALSE), error = function(e) NULL)
-    if (!is.null(mm_df) && nrow(mm_df) > 0 && "catalogNumber" %in% names(mm_df)) {
-      mm_df$catalogNumber <- as.character(mm_df$catalogNumber)
-      eco_cols <- intersect(c("fine_soil_ph", "fine_soil_sand", "fine_bedrock_depth_cm", "ssurgo_rock_outcrop_pct",
-        "soil_ph", "soil_sand", "soil_cec", "soil_bulk_density", "bio1_temp_mean", "bio4_temp_seasonality",
-        "bio12_precip_annual", "bio15_precip_seasonality", "edaphic_schoener_d", "schoener_d"), names(mm_df))
-      has_pid <- ("plant_individual_id" %in% names(morph_df)) && ("plant_individual_id" %in% names(mm_df))
-      idx_mm <- if (has_pid) match(paste0(morph_df$catalogNumber, "__", morph_df$plant_individual_id), paste0(mm_df$catalogNumber, "__", mm_df$plant_individual_id)) else rep(NA_integer_, nrow(morph_df))
-      mm_cat <- mm_df[!duplicated(mm_df$catalogNumber), , drop = FALSE]; idx_mc <- match(morph_df$catalogNumber, mm_cat$catalogNumber)
-      for (cl in eco_cols) {
-        cur <- if (cl %in% names(morph_df)) morph_df[[cl]] else rep(NA, nrow(morph_df))
-        hp <- is.na(cur) & !is.na(idx_mm); if (any(hp)) cur[hp] <- mm_df[[cl]][idx_mm[hp]]
-        hc <- is.na(cur) & !is.na(idx_mc); if (any(hc)) cur[hc] <- mm_cat[[cl]][idx_mc[hc]]
-        morph_df[[cl]] <- cur
-      }
-    }
-  }
-
-  raw_sp <- if ("species_standardized" %in% names(morph_df)) morph_df$species_standardized else if ("scientificName" %in% names(morph_df)) morph_df$scientificName else if ("species_raw" %in% names(morph_df)) morph_df$species_raw else if ("taxon" %in% names(morph_df)) morph_df$taxon else rep("Unknown", nrow(morph_df))
-  morph_df$species_standardized <- std_taxon(raw_sp)
-  morph_df <- morph_df[!is.na(morph_df$species_standardized) & nzchar(morph_df$species_standardized) & morph_df$species_standardized != "Unknown", , drop = FALSE]
-  if ("cda_predicted_taxon" %in% names(morph_df)) morph_df$cda_predicted_taxon <- std_taxon(morph_df$cda_predicted_taxon)
-
-  vis_df <- NULL
-  if (file.exists(opts$vision_audit)) {
-    vis_df <- tryCatch(utils::read.csv(opts$vision_audit, stringsAsFactors = FALSE), error = function(e) NULL)
-    if (!is.null(vis_df) && nrow(vis_df) > 0) {
-      vis_sp <- if ("species_standardized" %in% names(vis_df)) vis_df$species_standardized else if ("given_label" %in% names(vis_df)) vis_df$given_label else if ("taxon" %in% names(vis_df)) vis_df$taxon else vis_df$species_raw
-      vis_df$species_standardized <- std_taxon(vis_sp)
-      pred_col <- if ("vision_predicted_label" %in% names(vis_df)) vis_df$vision_predicted_label else if ("predicted_label" %in% names(vis_df)) vis_df$predicted_label else vis_df$species_standardized
-      vis_df$vision_predicted_label <- std_taxon(pred_col)
-    }
-  }
-  list(morph_df = morph_df, vis_df = vis_df)
+  load_step08_merged_inputs(opts, std_taxon)
 }
 
 select_taxon_anchors <- function(morph_df) {

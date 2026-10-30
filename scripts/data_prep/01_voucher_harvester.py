@@ -184,6 +184,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Maximum vouchers retained per (species, regional_group) (default: None, unlimited).",
     )
     parser.add_argument(
+        "--db",
+        type=str,
+        default=None,
+        help=f"Optional SQLite database path override (default: {cfg.paths.db_path}).",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -247,6 +253,7 @@ def main() -> None:
         expand_synonyms=bool(getattr(args, "expand_synonyms", True)),
         cfg_synonyms=cfg.taxa.synonyms,
         home_herbarium=getattr(args, "home_herbarium", cfg.harvesting.home_herbarium),
+        db_path=getattr(args, "db", None),
     )
 
     harvester.run(download_images=args.download_images)

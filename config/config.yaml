@@ -6,6 +6,7 @@
 # Core Filesystem Paths (relative to project root)
 paths:
   workspace_root: "."
+  db_path: "data/packera_pipeline.sqlite"
   raw_vouchers_dir: "data/raw_vouchers"
   curated_vouchers_csv: "data/tables/curated_vouchers.csv"
   failed_qc_vouchers_csv: "data/tables/failed_qc_vouchers.csv"

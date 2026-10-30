@@ -1,23 +1,9 @@
 #!/usr/bin/env Rscript
 # ==============================================================================
 # Script: 03_fourier_extractor.R
-# Project: Packera dubia Species Delimitation & Morphometrics Pipeline
-# Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
-#
-# Description:
-#   Label-blind Elliptic Fourier Analysis (EFA) on leaf boundary contours.
-#   1. Ingests 2D contour coordinate CSVs from data/contours/.
-#   2. Builds a standardized Momocs::Out() outline object with specimen metadata.
-#   3. Performs 12-harmonic EFA via Momocs::efourier(nb.h = 12, norm = TRUE).
-#   4. Executes PCA decomposition on harmonic coefficients (PC1-PC5).
-#   5. Merges curated Darwin Core voucher metadata and exports to
-#      data/tables/leaf_efa_harmonics.csv.
-#
-# Usage:
-#   Rscript scripts/morphometrics/03_fourier_extractor.R \
-#       --contours-dir data/contours/ \
-#       --vouchers data/tables/curated_vouchers.csv \
-#       --output data/tables/leaf_efa_harmonics.csv --harmonics 12 --num-pcs 5
+# Project: Packera dubia Species Delimitation & Morphometrics Pipeline (NCU)
+# Description: Label-blind 12-harmonic Elliptic Fourier Analysis (Momocs::efourier)
+#              with SQLite 120-vertex contour ingestion & OTU median aggregation.
 # ==============================================================================
 
 suppressPackageStartupMessages({
@@ -33,6 +19,9 @@ suppressPackageStartupMessages({
 if (file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
 for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "authority_weighting_utils.R"))) {
   if (!is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
+}
+for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
+  if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
 
 # ------------------------------------------------------------------------------
@@ -337,14 +326,19 @@ run_fourier_extraction <- function(opts) {
     message("Loaded ", nrow(vouchers_df), " curated primary voucher records.")
   }
 
-  # 1. Discover coordinates via Dual Ingestion Engine
+  # 1. Discover coordinates via SQLite extracted_leaves or Dual Filesystem Ingestion Engine
+  harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(opts$harmonics), function(x, y) paste0(x, y)))
+  db_ing <- if (exists("fetch_step03_contours_from_db", mode = "function")) fetch_step03_contours_from_db(opts$vouchers, opts$manifest, opts$contours_dir, active_catalogs = if (length(active_voucher_cats) > 0L) setdiff(active_voucher_cats, sec_dup_cats) else NULL, align_fn = align_contour_basal_apical, centsize_fn = compute_centsize_robust) else NULL
+  if (!is.null(db_ing)) {
+    coo_list <- db_ing$coords_list; fac_df <- db_ing$meta_df; shape_names_vec <- names(coo_list)
+    message("Ingested ", length(coo_list), " Tier 1 intact 120-vertex contours directly from SQLite extracted_leaves.")
+  } else {
   contour_files <- character(0); use_masks_fallback <- FALSE
   manifest_df <- if (file.exists(opts$manifest)) read.csv(opts$manifest, stringsAsFactors = FALSE) else NULL
   if (!is.null(manifest_df) && "catalogNumber" %in% names(manifest_df)) {
     if (length(sec_dup_cats) > 0) manifest_df <- manifest_df[!as.character(manifest_df$catalogNumber) %in% sec_dup_cats, , drop = FALSE]
     if (length(active_voucher_cats) > 0) manifest_df <- manifest_df[trimws(as.character(manifest_df$catalogNumber)) %in% active_voucher_cats, , drop = FALSE]
   }
-
   if (!is.null(manifest_df) && nrow(manifest_df) > 0) {
     message("Ingesting via extracted leaf manifest: ", opts$manifest)
     if ("contour_path" %in% names(manifest_df)) {
@@ -371,27 +365,18 @@ run_fourier_extraction <- function(opts) {
     if (length(mask_files) > 0) { contour_files <- mask_files; use_masks_fallback <- TRUE }
   }
   if (length(contour_files) == 0) stop("No contour CSVs or active mask files found in data/contours or data/masks.")
-
-  # Deduplicate contour_files by canonical shape_id (stem) so duplicate manifest entries never collide
   shape_stems <- sub("\\.[^.]+$", "", basename(contour_files))
   contour_files <- contour_files[!duplicated(shape_stems, fromLast = TRUE)]
   if (length(active_voucher_cats) > 0) contour_files <- contour_files[vapply(contour_files, function(f) trimws(as.character(parse_specimen_id(f)$catalogNumber)), character(1)) %in% active_voucher_cats]
-
-  # 2. Build coordinate list and factor metadata for Momocs::Out()
-  harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(opts$harmonics), function(x, y) paste0(x, y)))
-
-  # Precompute O(1) lookup indices into manifest_df to avoid O(N^2) linear scans across 14,000+ leaves
   manifest_by_basename <- NULL; manifest_by_cat_leaf <- NULL
   if (!is.null(manifest_df) && nrow(manifest_df) > 0) {
     if ("contour_path" %in% names(manifest_df)) {
       bnames <- basename(as.character(manifest_df$contour_path))
-      manifest_by_basename <- seq_len(nrow(manifest_df))
-      names(manifest_by_basename) <- bnames
+      manifest_by_basename <- seq_len(nrow(manifest_df)); names(manifest_by_basename) <- bnames
     }
     if (all(c("catalogNumber", "leaf_id") %in% names(manifest_df))) {
       cat_leaf_keys <- paste0(as.character(manifest_df$catalogNumber), "__", as.integer(manifest_df$leaf_id))
-      manifest_by_cat_leaf <- seq_len(nrow(manifest_df))
-      names(manifest_by_cat_leaf) <- cat_leaf_keys
+      manifest_by_cat_leaf <- seq_len(nrow(manifest_df)); names(manifest_by_cat_leaf) <- cat_leaf_keys
     }
   }
 
@@ -471,6 +456,7 @@ run_fourier_extraction <- function(opts) {
   fac_df <- do.call(rbind, fac_records)
   coo_list <- lapply(valid_ingested, `[[`, "coo")
   shape_names_vec <- vapply(valid_ingested, `[[`, character(1), "shape_name")
+  }
 
   # Ensure strict 1-to-1 uniqueness and restrict strictly to Tier 1 intact basal blades in vouchers_df
   keep_unique <- !duplicated(shape_names_vec, fromLast = TRUE) & !(as.character(fac_df$catalogNumber) %in% sec_dup_cats) & (fac_df$assigned_tier == "Tier_1_Direct") & (length(active_voucher_cats) == 0L | trimws(as.character(fac_df$catalogNumber)) %in% active_voucher_cats)
@@ -705,6 +691,7 @@ run_fourier_extraction <- function(opts) {
   dir.create(dirname(opts$output), recursive = TRUE, showWarnings = FALSE)
   tmp_out <- paste0(opts$output, ".tmp"); write.csv(specimen_df, file = tmp_out, row.names = FALSE, na = ""); file.rename(tmp_out, opts$output)
   message("Specimen-aggregated EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(specimen_df), ")")
+  if (exists("persist_step03_to_sqlite", mode = "function")) tryCatch(persist_step03_to_sqlite(efa_df, specimen_df, opts$vouchers), error = function(e) warning("SQLite Step 03 persistence note: ", e$message))
 
   tryCatch({
     if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {

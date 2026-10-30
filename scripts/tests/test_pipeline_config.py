@@ -64,16 +64,13 @@ class TestPipelineConfig(unittest.TestCase):
         self.assertAlmostEqual(cfg.thresholds.min_file_size_kb, 500.0)
         self.assertAlmostEqual(cfg.thresholds.min_sharpness_laplacian, 80.0)
 
-        # Dissection parameters (calibrated)
+        # Dissection parameters (calibrated; genus-wide dynamic defaults have zero hardcoded taxa)
         self.assertIsInstance(cfg.thresholds.dissection, DissectionConfig)
         self.assertTrue(cfg.thresholds.dissection.enabled)
         self.assertAlmostEqual(cfg.thresholds.dissection.min_solidity_dissected, 0.50)
         self.assertAlmostEqual(cfg.thresholds.dissection.sinus_defect_min_depth_ratio, 0.08)
         self.assertEqual(cfg.thresholds.dissection.min_bilateral_sinus_count, 3)
-        self.assertIn("Packera paupercula", cfg.thresholds.dissection.taxa_with_lyrate_tendency)
-        self.assertIn("Packera plattensis", cfg.thresholds.dissection.taxa_with_lyrate_tendency)
-        self.assertIn("Packera paupercula var. paupercula", cfg.thresholds.dissection.taxa_with_lyrate_tendency)
-        self.assertIn("Packera paupercula var. savannarum", cfg.thresholds.dissection.taxa_with_lyrate_tendency)
+        self.assertEqual(cfg.thresholds.dissection.taxa_with_lyrate_tendency, [])
 
         # Backward compatibility for solidity property
         self.assertAlmostEqual(cfg.thresholds.solidity.default, 0.72)
@@ -113,7 +110,7 @@ class TestPipelineConfig(unittest.TestCase):
             self.assertAlmostEqual(cfg.thresholds.dissection.min_solidity_dissected, 0.50)
             self.assertAlmostEqual(cfg.thresholds.dissection.sinus_defect_min_depth_ratio, 0.08)
             self.assertEqual(cfg.thresholds.dissection.min_bilateral_sinus_count, 3)
-            self.assertIn("Packera paupercula", cfg.thresholds.dissection.taxa_with_lyrate_tendency)
+            self.assertEqual(cfg.thresholds.dissection.taxa_with_lyrate_tendency, [])
 
             # Fold detection safe defaults
             self.assertTrue(cfg.thresholds.fold_detection.enabled)
@@ -122,27 +119,46 @@ class TestPipelineConfig(unittest.TestCase):
             self.assertEqual(cfg.thresholds.fold_detection.min_chord_length_px, 150)
 
     def test_taxa_structure_and_synonyms(self):
-        """Verify target species, synonyms dictionary, and outgroups."""
+        """Verify dynamic genus-wide empty defaults and explicit YAML taxa/synonyms parsing."""
         cfg = PipelineConfig.from_yaml()
-        self.assertIn("Packera dubia", cfg.taxa.target_species)
-        self.assertIn("Packera tomentosa", cfg.taxa.target_species)
-        self.assertIn("Packera anonyma", cfg.taxa.target_species)
-        self.assertIn("Packera plattensis", cfg.taxa.target_species)
-        self.assertIn("Packera paupercula", cfg.taxa.target_species)
-
-        # Backward-compatible property alias
+        self.assertEqual(cfg.taxa.target_species, [])
         self.assertEqual(cfg.taxa.target_taxa, cfg.taxa.target_species)
+        self.assertEqual(cfg.taxa.synonyms, {})
+        self.assertEqual(cfg.taxa.outgroups, [])
 
-        # Synonyms mapping
-        self.assertIsInstance(cfg.taxa.synonyms, dict)
-        self.assertIn("Packera dubia", cfg.taxa.synonyms)
-        self.assertIn("Senecio tomentosus", cfg.taxa.synonyms["Packera dubia"])
-        self.assertIn("Packera anonyma", cfg.taxa.synonyms)
-        self.assertIn("Senecio smallii", cfg.taxa.synonyms["Packera anonyma"])
+        custom_yaml = (
+            "paths:\n"
+            "  workspace_root: \".\"\n"
+            "taxa:\n"
+            "  target_species:\n"
+            "    - \"Packera dubia\"\n"
+            "    - \"Packera anonyma\"\n"
+            "  synonyms:\n"
+            "    \"Packera dubia\":\n"
+            "      - \"Senecio tomentosus\"\n"
+            "    \"Packera anonyma\":\n"
+            "      - \"Senecio smallii\"\n"
+            "  outgroups:\n"
+            "    - \"Packera aurea\"\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_file = Path(tmp_dir) / "custom_taxa.yaml"
+            cfg_file.write_text(custom_yaml, encoding="utf-8")
+            custom_cfg = PipelineConfig.from_yaml(cfg_file)
+            self.assertEqual(custom_cfg.taxa.target_species, ["Packera dubia", "Packera anonyma"])
+            self.assertEqual(custom_cfg.taxa.target_taxa, custom_cfg.taxa.target_species)
+            self.assertIn("Senecio tomentosus", custom_cfg.taxa.synonyms["Packera dubia"])
+            self.assertIn("Senecio smallii", custom_cfg.taxa.synonyms["Packera anonyma"])
+            self.assertEqual(custom_cfg.taxa.outgroups, ["Packera aurea"])
 
-        # Outgroups
-        self.assertIsInstance(cfg.taxa.outgroups, list)
-        self.assertGreater(len(cfg.taxa.outgroups), 0)
+    def test_db_path_anchored_across_runs(self):
+        """Verify db_path resolves to data/packera_pipeline.sqlite and stays anchored across run_dir."""
+        cfg = PipelineConfig.from_yaml()
+        expected_db = (CONFIG_ROOT / "data" / "packera_pipeline.sqlite").resolve()
+        self.assertEqual(cfg.paths.db_path, expected_db)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scoped = cfg.with_run_dir(tmp_dir)
+            self.assertEqual(scoped.paths.db_path, expected_db)
 
     def test_morphometrics_parameters(self):
         """Verify Fourier harmonics count and normalization invariants."""

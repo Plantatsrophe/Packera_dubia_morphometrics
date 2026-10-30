@@ -45,6 +45,9 @@ suppressPackageStartupMessages({
 if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
   source("scripts/morphometrics/pub_figures_utils.R")
 }
+for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
+  if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+}
 
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing & Taxonomic Normalization
@@ -888,7 +891,15 @@ build_triage_queue <- function(opts) {
     sp_cand[m] <- v[m]
   }
   vouchers$species_standardized <- sp_cand
-
+  sql_master <- if (!isTRUE(opts$demo) && exists("try_fetch_master_view_for_cohort", mode = "function")) {
+    tryCatch(try_fetch_master_view_for_cohort(vouchers_df = vouchers, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo), require_step04 = file.exists(opts$morphometrics), require_step05 = file.exists(opts$vision_audit), require_step06 = file.exists(opts$multimodal_flags)), error = function(e) NULL)
+  } else NULL
+  if (!is.null(sql_master) && nrow(sql_master) > 0L) {
+    vouchers <- sql_master
+    if ("plant_height_mm" %in% names(vouchers) && !("plant_height_cm" %in% names(vouchers))) vouchers$plant_height_cm <- round(suppressWarnings(as.numeric(vouchers$plant_height_mm)) / 10.0, 2)
+    if (!("can3" %in% names(vouchers))) vouchers$can3 <- if ("PC3" %in% names(vouchers)) suppressWarnings(as.numeric(vouchers$PC3)) else 0.0
+    message(sprintf("Hydrated %d specimen rows from SQLite v_integrative_triage_master.", nrow(vouchers)))
+  } else {
   mm_numeric_coalesce <- c(
     "doy", "latitude", "longitude", "decimalLatitude", "decimalLongitude",
     "soil_ph", "soil_sand", "soil_cec", "soil_bulk_density", "delta_doy",
@@ -1108,6 +1119,7 @@ build_triage_queue <- function(opts) {
       vouchers <- safe_left_join_and_coalesce(vouchers, lt_df, append_missing = FALSE)
     }
   }
+  }
 
   if (any(is.na(vouchers$species_standardized) | vouchers$species_standardized == "Unknown")) {
     for (sc in intersect(c("species_standardized", "scientificName", "species_raw", "taxon"), names(vouchers))) {
@@ -1140,6 +1152,9 @@ build_triage_queue <- function(opts) {
   if (!is.null(opts$output_triage) && nzchar(opts$output_triage) && opts$output_triage != opts$output_queue) {
     dir.create(dirname(opts$output_triage), recursive = TRUE, showWarnings = FALSE)
     tmp_tr <- paste0(opts$output_triage, ".tmp"); readr::write_csv(vouchers, tmp_tr); file.rename(tmp_tr, opts$output_triage)
+  }
+  if (!isTRUE(opts$demo) && exists("persist_step07_to_sqlite", mode = "function")) {
+    tryCatch(persist_step07_to_sqlite(vouchers, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo)), error = function(e) warning("SQLite Step 07 persistence note: ", e$message))
   }
   return(vouchers)
 }

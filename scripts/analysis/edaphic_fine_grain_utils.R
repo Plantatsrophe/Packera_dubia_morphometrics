@@ -29,6 +29,9 @@
 # ==============================================================================
 
 SSURGO_OUTCROP_SERIES_REGEX <- "(?i)(rock outcrop|wake|louisburg|ashlar|rion|wateree|wilkes|iredell|mecklenburg|poindexter|enon|goldston|manteo|boulders|granite|diabase)"
+for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
+  if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+}
 
 SGMC_LITHOLOGY_CLASSES <- c(
   "Ultramafic_Serpentine",
@@ -1279,6 +1282,9 @@ load_and_update_fine_grain_cache <- function(
 
   req_core_cols <- setdiff(CORE_FINE_GRAIN_CACHE_COLS, c("catalogNumber", "lat_lon_key", "latitude", "longitude"))
   cached_df <- NULL
+  sql_cached <- if (!isTRUE(demo) && exists("query_environmental_cache_sqlite", mode = "function")) {
+    tryCatch(query_environmental_cache_sqlite(catalog_numbers = df$catalogNumber, lat_lon_keys = df$lat_lon_key, cache_path = cache_csv_path, demo = demo), error = function(e) NULL)
+  } else NULL
 
   if (!isTRUE(demo) && file.exists(cache_csv_path)) {
     cached_df <- tryCatch({
@@ -1289,6 +1295,11 @@ load_and_update_fine_grain_cache <- function(
       }
       c_raw
     }, error = function(e) NULL)
+  }
+  if (!is.null(sql_cached) && nrow(sql_cached) > 0L) {
+    sql_cached$catalogNumber <- as.character(sql_cached$catalogNumber)
+    if (!("lat_lon_key" %in% names(sql_cached))) sql_cached$lat_lon_key <- format_lat_lon_key(sql_cached$latitude, sql_cached$longitude)
+    cached_df <- if (!is.null(cached_df) && nrow(cached_df) > 0L) dplyr::bind_rows(sql_cached, cached_df) else sql_cached
   }
 
   # Match rows already present in fine_grain_edaphic_cache.csv
@@ -1376,6 +1387,9 @@ load_and_update_fine_grain_cache <- function(
     tmp_cache <- paste0(cache_csv_path, ".tmp")
     readr::write_csv(combined_cache, tmp_cache)
     file.rename(tmp_cache, cache_csv_path)
+    if (exists("upsert_environmental_cache_sqlite", mode = "function")) {
+      tryCatch(upsert_environmental_cache_sqlite(combined_cache, cache_path = cache_csv_path, demo = demo), error = function(e) NULL)
+    }
     message(sprintf("Persisted %d fine-grain edaphic & micro-topographic records to %s.", nrow(combined_cache), cache_csv_path))
   }
 

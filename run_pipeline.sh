@@ -21,6 +21,7 @@ cd "${PROJECT_ROOT}"
 
 ORIG_ARGS=("$@")
 CUSTOM_RUN_ID=""
+CUSTOM_DB_PATH=""
 SKIP_HARVEST=false
 FORCE_FLAG=""
 RESEGMENT=false
@@ -60,6 +61,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --run-id=*)
       CUSTOM_RUN_ID="${1#*=}"
+      shift
+      ;;
+    --db)
+      CUSTOM_DB_PATH="$2"
+      shift 2
+      ;;
+    --db=*)
+      CUSTOM_DB_PATH="${1#*=}"
       shift
       ;;
     --start-step)
@@ -274,6 +283,12 @@ fi
 RUN_DIR="runs/${RUN_ID}"
 export RUN_ID
 export PACKERA_RUN_DIR="${PROJECT_ROOT}/${RUN_DIR}"
+if [[ ${#DEMO_FLAG[@]} -gt 0 ]]; then
+  export PACKERA_DEMO_MODE=1
+  export PACKERA_DB_PATH="${CUSTOM_DB_PATH:-${PROJECT_ROOT}/${RUN_DIR}/data/demo_ephemeral.sqlite}"
+else
+  export PACKERA_DB_PATH="${CUSTOM_DB_PATH:-${PROJECT_ROOT}/data/packera_pipeline.sqlite}"
+fi
 
 # 1. Create standardized run-scoped directory hierarchy
 mkdir -p \
@@ -295,6 +310,7 @@ echo "==========================================================================
 echo "Packera Morphometrics Pipeline — Run-Scoped Execution"
 echo "  Run ID          : ${RUN_ID}"
 echo "  Run Directory   : ${RUN_DIR}"
+echo "  SQLite Database : ${PACKERA_DB_PATH}"
 echo "  Start Timestamp : ${START_TIME}"
 echo "  Git Commit SHA  : ${GIT_SHA}"
 echo "=============================================================================="
@@ -358,6 +374,22 @@ if [[ "${REUSE_CANONICAL_DATA}" == "true" ]]; then
   rm -rf "${RUN_DIR}/data/masks" "${RUN_DIR}/data/contours"
   ln -sfn "${PROJECT_ROOT}/data/masks" "${RUN_DIR}/data/masks"
   ln -sfn "${PROJECT_ROOT}/data/contours" "${RUN_DIR}/data/contours"
+  if [[ ${#DEMO_FLAG[@]} -eq 0 ]]; then
+    "${PYTHON_MAIN}" -c "
+from pathlib import Path
+from scripts.core.db import get_db_connection, ingest_existing_csvs_to_db
+ws = Path('${PROJECT_ROOT}').resolve()
+conn = get_db_connection(init_schema=True, workspace_root=ws)
+try:
+    v_n = conn.execute('SELECT COUNT(*) FROM vouchers;').fetchone()[0]
+    el_n = conn.execute('SELECT COUNT(*) FROM extracted_leaves;').fetchone()[0]
+finally:
+    conn.close()
+if v_n == 0 or el_n == 0:
+    counts = ingest_existing_csvs_to_db(ws)
+    print(f'[Preflight: SQLite Bootstrap] Synchronized canonical assets into SQLite: {counts}')
+"
+  fi
 else
   mkdir -p \
     "${RUN_DIR}/data/masks/tier1_intact" \
@@ -531,8 +563,37 @@ if custom_taxa:
     df = df[df['species_standardized'].isin(custom_taxa)].copy()
     print(f'[Preflight: Custom Taxa] Restricted strictly to {sorted(custom_taxa)}: retained {len(df)} / {before_custom_n} vouchers.')
 
+from scripts.core.db import (
+    ensure_pipeline_run,
+    get_db_connection,
+    populate_run_active_cohort,
+    query_misidentified_vouchers_from_db,
+)
+target_db_path = os.environ.get('PACKERA_DB_PATH') or str(root_data / 'packera_pipeline.sqlite')
+
 misidentified_cats = set()
 if exclude_misidentified:
+    tokens = [t.strip() for t in (triage_source_raw or 'ALL').split(',') if t.strip()]
+    if not tokens:
+        tokens = ['ALL']
+
+    db_run_count = 0
+    if os.environ.get('PACKERA_DEMO_MODE') != '1':
+        try:
+            conn_mis = get_db_connection(db_path=target_db_path, init_schema=True, workspace_root=root_data.parent)
+            try:
+                db_flagged, db_run_count = query_misidentified_vouchers_from_db(
+                    conn_mis,
+                    triage_sources=tokens,
+                    exclude_run_id=os.environ.get('RUN_ID') or run_dir.name,
+                    allowed_subtypes=ALLOWED_TREATMENT_SUBTYPES,
+                )
+                misidentified_cats.update(db_flagged)
+            finally:
+                conn_mis.close()
+        except Exception:
+            db_run_count = 0
+
     runs_candidates = [run_dir.parent, root_data.parent / 'runs', Path.cwd() / 'runs']
     runs_base = next(
         (rc for rc in runs_candidates if rc.is_dir() and any(rc.glob('*/outputs/reports/final_curation_triage.csv'))),
@@ -541,10 +602,6 @@ if exclude_misidentified:
     triage_files = []
     seen_resolved = set()
     self_triage = (run_dir / 'outputs' / 'reports' / 'final_curation_triage.csv').resolve()
-
-    tokens = [t.strip() for t in (triage_source_raw or 'ALL').split(',') if t.strip()]
-    if not tokens:
-        tokens = ['ALL']
 
     for tok in tokens:
         if tok.upper() in ('ALL', '*'):
@@ -562,20 +619,21 @@ if exclude_misidentified:
                 Path.cwd() / 'runs' / tok / 'outputs' / 'reports' / 'final_curation_triage.csv',
             ]
             matched = next((cp for cp in cand_paths if cp.is_file() and cp.stat().st_size > 0), None)
-            if matched is None:
+            if matched is None and db_run_count == 0:
                 print(
-                    f'[ERROR] --triage-source {tok!r} could not be resolved to an existing final_curation_triage.csv file.',
+                    f'[ERROR] --triage-source {tok!r} could not be resolved to a SQLite curation_triage run or final_curation_triage.csv file.',
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            rp = matched.resolve()
-            if rp not in seen_resolved:
-                seen_resolved.add(rp)
-                triage_files.append(matched)
+            if matched is not None:
+                rp = matched.resolve()
+                if rp not in seen_resolved:
+                    seen_resolved.add(rp)
+                    triage_files.append(matched)
 
-    if not triage_files:
+    if db_run_count == 0 and not triage_files:
         print(
-            f'[ERROR] --exclude-misidentified requested (triage_source={triage_source_raw!r}), but no runs/*/outputs/reports/final_curation_triage.csv files were found.',
+            f'[ERROR] --exclude-misidentified requested (triage_source={triage_source_raw!r}), but no SQLite curation_triage rows or runs/*/outputs/reports/final_curation_triage.csv files were found.',
             file=sys.stderr,
         )
         sys.exit(1)
@@ -605,9 +663,9 @@ if exclude_misidentified:
     before_misid_n = len(df)
     df = df[~df['catalogNumber'].astype(str).str.strip().isin(misidentified_cats)].copy()
     print(
-        f'[Preflight: Exclude Misidentified] Source={triage_source_raw!r} ({len(triage_files)} report(s)): '
+        f'[Preflight: Exclude Misidentified] Source={triage_source_raw!r} (SQLite runs={db_run_count}, CSV reports={len(triage_files)}): '
         f'excluded {before_misid_n - len(df)} vouchers with taxonomic_treatment_subtype == \'Misidentification_Reassign\' '
-        f'({len(misidentified_cats)} unique flagged catalogNumbers across reports; retaining only {sorted(ALLOWED_TREATMENT_SUBTYPES)}): '
+        f'({len(misidentified_cats)} unique flagged catalogNumbers; retaining only {sorted(ALLOWED_TREATMENT_SUBTYPES)}): '
         f'retained {len(df)} / {before_misid_n} vouchers.'
     )
 
@@ -770,35 +828,34 @@ if has_subset_filter:
                 _write_atomic(tdf_sub, tp)
                 print(f'  Filtered {tbl_name}: {len(tdf_sub)} / {len(tdf)} rows')
 
-if bool(custom_taxa_csv or focal_raw or exclude_csv or target_tier or exclude_misidentified or has_spatial_thin_or_quota):
-    # Symlink matching .jpg patches from canonical root data/cropped_patches/
+# Register pipeline_runs and populate run_active_cohort in SQLite (skipping canonical DB under --demo)
+if os.environ.get('PACKERA_DEMO_MODE') != '1':
+    run_id_val = os.environ.get('RUN_ID') or run_dir.name
+    conn_coh = get_db_connection(db_path=target_db_path, init_schema=True, workspace_root=root_data.parent)
+    try:
+        ensure_pipeline_run(
+            conn_coh,
+            run_id=run_id_val,
+            run_dir=run_dir,
+            focal_taxon=standardize_packera_taxon(focal_raw) if focal_raw else None,
+            intraspecific_mode=intraspecific_mode,
+        )
+        n_cohort = populate_run_active_cohort(
+            conn_coh,
+            run_id=run_id_val,
+            voucher_rows=subset_df.to_dict(orient='records'),
+            clear_existing=True,
+        )
+        print(f'[Preflight: SQLite Cohort] Registered run_id={run_id_val!r} with {n_cohort} active (catalogNumber, plant_individual_id) rows.')
+    finally:
+        conn_coh.close()
+
+# Use directory-level symlinks to canonical data/cropped_patches/{rosettes_dense,basal_leaves_raw,capitula}
+# instead of creating thousands of per-voucher .jpg symlinks (SQLite run_active_cohort & CSV snapshots filter the cohort)
+if reuse_canonical:
     run_patches_root = run_dir / 'data' / 'cropped_patches'
     if run_patches_root.is_symlink():
         run_patches_root.unlink()
-    run_patches_root.mkdir(parents=True, exist_ok=True)
-
-    for sub in ('rosettes_dense', 'basal_leaves_raw', 'capitula'):
-        src_sub = root_data / 'cropped_patches' / sub
-        dst_sub = run_patches_root / sub
-        if dst_sub.is_symlink():
-            dst_sub.unlink()
-        elif dst_sub.exists():
-            shutil.rmtree(dst_sub)
-        dst_sub.mkdir(parents=True, exist_ok=True)
-        if not src_sub.exists():
-            continue
-        linked = 0
-        with os.scandir(src_sub) as it:
-            for entry in it:
-                if entry.name.endswith('.jpg'):
-                    stem_cat = re.sub(r'_(?:p\d+_rosette|rosette|leaf\d+|cap\d+)\.jpg$', '', entry.name)
-                    cat = stem_cat if stem_cat in keep_cats else entry.name.split('_')[0]
-                    if cat in keep_cats:
-                        os.symlink(entry.path, dst_sub / entry.name)
-                        linked += 1
-        print(f'  Linked {linked} patches in cropped_patches/{sub}')
-elif reuse_canonical:
-    run_patches_root = run_dir / 'data' / 'cropped_patches'
     run_patches_root.mkdir(parents=True, exist_ok=True)
     for sub in ('rosettes_dense', 'basal_leaves_raw', 'capitula'):
         src_sub = root_data / 'cropped_patches' / sub
@@ -807,7 +864,8 @@ elif reuse_canonical:
             dst_sub.unlink()
         elif dst_sub.exists():
             shutil.rmtree(dst_sub)
-        os.symlink(src_sub, dst_sub)
+        if src_sub.exists():
+            os.symlink(src_sub, dst_sub)
 " "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}" "${SPATIAL_THIN_KM:-0}" "${MAX_PER_STATE:-}" "${MAX_PER_REGION:-}" "${NO_SPATIAL_WEIGHTS:-false}" "${REUSE_CANONICAL_DATA:-false}" "${CUSTOM_TAXA_CSV:-}"
 }
 
@@ -998,19 +1056,36 @@ if [[ "${START_STEP}" -le 7 ]]; then
     "${INTRASPECIFIC_ARGS[@]}"
 fi
 
-# Finalize run_metadata.json with end timestamp and table row counts
+# Finalize run_metadata.json and SQLite pipeline_runs with end timestamp and table row counts
 END_TIME="$(date -Iseconds)"
 "${PYTHON_MAIN}" -c "
+import os
 import sys
 from pathlib import Path
 from scripts.core.config import write_run_metadata
+from scripts.core.db import ensure_pipeline_run, get_db_connection
+rdir = Path('${RUN_DIR}').resolve()
 write_run_metadata(
-    run_dir=Path('${RUN_DIR}').resolve(),
+    run_dir=rdir,
     run_id='${RUN_ID}',
     start_time='${START_TIME}',
     end_time='${END_TIME}',
     cli_args=sys.argv[1:],
 )
+if os.environ.get('PACKERA_DEMO_MODE') != '1':
+    conn = get_db_connection(init_schema=True, workspace_root=Path('${PROJECT_ROOT}').resolve())
+    try:
+        ensure_pipeline_run(
+            conn,
+            run_id='${RUN_ID}',
+            run_dir=rdir,
+            start_timestamp='${START_TIME}',
+            end_timestamp='${END_TIME}',
+            git_commit_sha='${GIT_SHA}',
+            cli_arguments=sys.argv[1:],
+        )
+    finally:
+        conn.close()
 " -- "${ORIG_ARGS[@]}"
 
 echo "=============================================================================="

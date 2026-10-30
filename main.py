@@ -46,9 +46,86 @@ from scripts.core.config import (
     initialize_run_directory,
     write_run_metadata,
 )
+from scripts.core.db import (
+    _read_csv_dicts,
+    ensure_pipeline_run,
+    get_db_connection,
+    is_canonical_or_explicit_db_context,
+    populate_run_active_cohort,
+)
 from scripts.core.logger import setup_logging
 
 logger = setup_logging(name="PackeraPipeline")
+
+
+def _apply_explicit_db_arg(args: Optional[argparse.Namespace]) -> None:
+    """Export optional `--db` CLI override to `PACKERA_DB_PATH` for all Python/R stages."""
+    if args is None:
+        return
+    db_arg = getattr(args, "db", None)
+    if db_arg is not None and str(db_arg).strip():
+        raw = str(db_arg).strip()
+        os.environ["PACKERA_DB_PATH"] = raw if raw == ":memory:" else str(Path(raw).resolve())
+
+
+def _db_has_extracted_contours(contours_dir: Path) -> bool:
+    """Return True if SQLite `extracted_leaves` already holds 120-vertex contours for this workspace/DB."""
+    if not is_canonical_or_explicit_db_context(contours_dir, workspace_root=PROJECT_ROOT):
+        return False
+    try:
+        conn = get_db_connection(read_only=True, workspace_root=PROJECT_ROOT)
+        try:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM extracted_leaves WHERE contour_xy_json IS NOT NULL AND LENGTH(contour_xy_json) > 2;"
+            )
+            return int((cur.fetchone() or [0])[0] or 0) > 0
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def _sync_run_cohort_in_db(
+    run_dir: Path,
+    args: Optional[argparse.Namespace] = None,
+    cfg: Optional[Union[PipelineConfig, Dict[str, Any]]] = None,
+    end_timestamp: Optional[str] = None,
+) -> None:
+    """Register `pipeline_runs` and synchronize `run_active_cohort` in SQLite when active."""
+    if os.environ.get("PACKERA_DEMO_MODE") == "1":
+        return
+    if not is_canonical_or_explicit_db_context(run_dir, workspace_root=PROJECT_ROOT):
+        return
+    focal_taxon, intraspecific_mode = (
+        _resolve_focal_and_intraspecific(args, cfg or {})
+        if args is not None
+        else (None, False)
+    )
+    try:
+        conn = get_db_connection(init_schema=True, workspace_root=PROJECT_ROOT)
+        try:
+            ensure_pipeline_run(
+                conn,
+                run_id=run_dir.name,
+                run_dir=run_dir,
+                end_timestamp=end_timestamp,
+                focal_taxon=focal_taxon,
+                intraspecific_mode=intraspecific_mode,
+            )
+            vouchers_csv = run_dir / "data" / "tables" / "curated_vouchers.csv"
+            if vouchers_csv.is_file() and vouchers_csv.stat().st_size > 0:
+                v_rows = _read_csv_dicts(vouchers_csv)
+                if v_rows:
+                    populate_run_active_cohort(
+                        conn,
+                        run_id=run_dir.name,
+                        voucher_rows=v_rows,
+                        clear_existing=True,
+                    )
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("SQLite cohort registration skipped for %s: %s", run_dir, exc)
 
 
 def _attach_run_log_handler(run_dir: Path) -> None:
@@ -74,6 +151,7 @@ def _resolve_active_run_context(
     `(run_dir, run_scoped_cfg)`. Otherwise return `(None, cfg)` for backward-compatible
     direct unit-test invocations.
     """
+    _apply_explicit_db_arg(args)
     explicit_run_id = getattr(args, "run_id", None)
     active_run_dir = get_active_run_dir(run_id=explicit_run_id, workspace_root=PROJECT_ROOT)
     if active_run_dir is None:
@@ -83,6 +161,7 @@ def _resolve_active_run_context(
     _attach_run_log_handler(run_dir)
     if isinstance(cfg, PipelineConfig):
         cfg = cfg.with_run_dir(run_dir)
+    _sync_run_cohort_in_db(run_dir, args=args, cfg=cfg)
     return run_dir, cfg
 
 
@@ -508,6 +587,7 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     subprocess.run(cmd, check=True)
     verify_file_exists(output_csv, "harvested vouchers CSV output")
     if run_dir is not None:
+        _sync_run_cohort_in_db(run_dir, args=args, cfg=cfg)
         write_run_metadata(run_dir, start_time=start_ts)
     logger.info("Phase 1 completed successfully.")
 
@@ -626,8 +706,10 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         sys.exit(exc.returncode)
 
     contours_dir = (run_dir / "data" / "contours") if run_dir is not None else Path(cfg["paths"]["contours_dir"])
-    verify_dir_has_files(contours_dir, "*.csv", "extracted leaf contours")
+    if not _db_has_extracted_contours(contours_dir):
+        verify_dir_has_files(contours_dir, "*.csv", "extracted leaf contours")
     if run_dir is not None:
+        _sync_run_cohort_in_db(run_dir, args=args, cfg=cfg)
         write_run_metadata(run_dir, start_time=start_ts)
     logger.info("Phase 2 completed successfully.")
 
@@ -652,7 +734,8 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         else cfg.get("paths", {}).get("contours_dir", "data/contours")
     )
     contours_dir = Path(getattr(args, "input", None) or args.contours_dir or default_contours)
-    verify_dir_has_files(contours_dir, "*.csv", "leaf contours", "python main.py segment")
+    if not _db_has_extracted_contours(contours_dir):
+        verify_dir_has_files(contours_dir, "*.csv", "leaf contours", "python main.py segment")
 
     default_vouchers = (
         run_dir / "data" / "tables" / "curated_vouchers.csv"
@@ -998,7 +1081,9 @@ def run_all(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     run_morphometrics(args, cfg)
     run_synthesis(args, cfg)
     if run_dir is not None:
-        write_run_metadata(run_dir, run_id=run_dir.name, start_time=start_ts, end_time=datetime.now().astimezone().isoformat())
+        end_ts = datetime.now().astimezone().isoformat()
+        _sync_run_cohort_in_db(run_dir, args=args, cfg=cfg, end_timestamp=end_ts)
+        write_run_metadata(run_dir, run_id=run_dir.name, start_time=start_ts, end_time=end_ts)
     logger.info("==================================================================")
     logger.info("End-to-End Pipeline Execution Completed Successfully!")
     logger.info("==================================================================")
@@ -1086,6 +1171,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional run identifier for isolated run directory under runs/<run_id>/ (default: run_YYYYMMDD_HHMMSS).",
     )
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="Optional override path to SQLite database (default: data/packera_pipeline.sqlite).",
+    )
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True, help="Pipeline phase to execute")
 
@@ -1118,6 +1209,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: harvest
     p_harvest = subparsers.add_parser("harvest", help="Phase 1: Ingest GBIF occurrences & download images")
     p_harvest.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
+    p_harvest.add_argument("--db", type=Path, default=argparse.SUPPRESS, help="Optional override path to SQLite database")
     p_harvest.add_argument(
         "--taxon",
         "--taxa",
@@ -1146,6 +1238,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: segment
     p_segment = subparsers.add_parser("segment", help="Phase 2: Segment leaves & export contours")
     p_segment.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
+    p_segment.add_argument("--db", type=Path, default=argparse.SUPPRESS, help="Optional override path to SQLite database")
     p_segment.add_argument("--vouchers", type=Path, default=None, help="Input curated vouchers CSV")
     p_segment.add_argument("--weights", type=Path, default=None, help="Model weights checkpoint (.pth)")
     p_segment.add_argument("--output-dir", type=Path, default=None, help="Root output directory")
@@ -1185,6 +1278,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: morphometrics
     p_morph = subparsers.add_parser("morphometrics", help="Phase 3: Fourier EFA, GMM, & passive CDA in R")
     p_morph.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
+    p_morph.add_argument("--db", type=Path, default=argparse.SUPPRESS, help="Optional override path to SQLite database")
     p_morph.add_argument("--input", type=Path, default=None, help="Input contours directory")
     p_morph.add_argument("--manifest", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_morph.add_argument("--contours-dir", type=Path, default=None, help="Input contours directory")
@@ -1207,6 +1301,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: synthesis
     p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Phases 5-7: Vision XAI, Spatial RF, & Triage Dashboard")
     p_synth.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
+    p_synth.add_argument("--db", type=Path, default=argparse.SUPPRESS, help="Optional override path to SQLite database")
     p_synth.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
     p_synth.add_argument("--manifest", "--manifest-csv", dest="manifest_csv", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_synth.add_argument("--rosette-dir", type=Path, default=None, help="Directory with cropped rosette patches")
@@ -1239,6 +1334,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_all = subparsers.add_parser("run-all", help="Execute complete pipeline (harvest -> segment -> morphometrics -> synthesis)")
     # Merge key arguments from previous stages
     p_all.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
+    p_all.add_argument("--db", type=Path, default=argparse.SUPPRESS, help="Optional override path to SQLite database")
     p_all.add_argument(
         "--taxon",
         "--taxa",
@@ -1361,6 +1457,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    _apply_explicit_db_arg(args)
 
     if args.verbose:
         logger.setLevel(logging.DEBUG)

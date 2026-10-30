@@ -71,6 +71,14 @@ from scripts.core.config import (
     _DEFAULT_CONFIG,
     normalize_countries_list,
 )
+from scripts.core.db import (
+    get_db_connection,
+    is_canonical_or_explicit_db_context,
+    load_taxon_synonyms,
+    resolve_db_path,
+    upsert_taxon_synonyms,
+    upsert_vouchers_records,
+)
 from scripts.core.logger import setup_logging
 
 _SYNONYM_GENERA: Set[str] = {"Packera", "Senecio", "Cineraria"}
@@ -115,6 +123,25 @@ for _cfg_canon, _cfg_syns in (_DEFAULT_CONFIG.taxa.synonyms or {}).items():
                 _DYNAMIC_SYNONYM_TO_CANONICAL[_cs_bin.lower()] = _canon_norm
 
 _DYNAMIC_TAXON_AUTHOR_STRINGS: Dict[str, Set[str]] = {}
+
+
+def _hydrate_synonyms_from_sqlite(db_path: Optional[Union[str, Path]] = None) -> None:
+    """Hydrate in-memory synonym mappings from persisted `taxon_synonyms` when SQLite exists."""
+    try:
+        resolved = resolve_db_path(db_path=db_path)
+        if resolved != ":memory:" and Path(resolved).is_file():
+            conn = get_db_connection(db_path=resolved, read_only=True)
+            try:
+                for raw_low, canon in load_taxon_synonyms(conn).items():
+                    if raw_low and canon:
+                        _DYNAMIC_SYNONYM_TO_CANONICAL.setdefault(raw_low, canon)
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+
+_hydrate_synonyms_from_sqlite()
 _GBIF_SYNONYM_CACHE: Dict[str, Tuple[Optional[str], List[str], List[str]]] = {}
 _GBIF_GENUS_KEY_CACHE: Dict[str, Optional[int]] = {}
 _GBIF_GENUS_SPECIES_CACHE: Dict[int, List[str]] = {}
@@ -2675,8 +2702,9 @@ def export_curated_table(
     output_path: Path,
     logger: Optional[logging.Logger] = None,
     home_herbarium: str = DEFAULT_HOME_HERBARIUM,
+    db_path: Optional[Union[str, Path]] = None,
 ) -> Path:
-    """Atomically exports the curated vouchers DataFrame to CSV via temporary file replacement."""
+    """Atomically exports the curated vouchers DataFrame to CSV and synchronizes SQLite (`taxon_synonyms`, `vouchers`)."""
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2765,6 +2793,24 @@ def export_curated_table(
         temp_path.replace(output_path)
         if logger:
             logger.info(f"Atomically saved curated vouchers table ({len(df_export)} records) to: {output_path}")
+        if db_path is not None or is_canonical_or_explicit_db_context(output_path):
+            try:
+                conn = get_db_connection(db_path=db_path, init_schema=True)
+                try:
+                    upsert_taxon_synonyms(conn, _DYNAMIC_SYNONYM_TO_CANONICAL, _DYNAMIC_TAXON_AUTHOR_STRINGS)
+                    if not df_export.empty:
+                        db_records = df_export.to_dict(orient="records")
+                        for rec in db_records:
+                            if not rec.get("species_standardized"):
+                                rec["species_standardized"] = standardize_packera_taxon(
+                                    rec.get("scientificName") or rec.get("species_raw")
+                                )
+                        upsert_vouchers_records(conn, db_records)
+                finally:
+                    conn.close()
+            except Exception as db_exc:
+                if logger:
+                    logger.warning(f"SQLite synchronization warning for {output_path}: {db_exc}")
         return output_path
     except Exception as e:
         if temp_path.exists():
@@ -2882,7 +2928,11 @@ class VoucherHarvester:
         expand_synonyms: bool = False,
         cfg_synonyms: Optional[Dict[str, List[str]]] = None,
         home_herbarium: str = DEFAULT_HOME_HERBARIUM,
+        db_path: Optional[Union[str, Path]] = None,
     ):
+        self.db_path = db_path
+        if self.db_path is not None:
+            _hydrate_synonyms_from_sqlite(self.db_path)
         raw_input_taxa = [str(t).strip() for t in (taxa if taxa is not None else DEFAULT_TARGET_TAXA) if str(t).strip()]
         self.expand_synonyms = bool(expand_synonyms)
         self.cfg_synonyms = cfg_synonyms if cfg_synonyms is not None else dict(_DEFAULT_CONFIG.taxa.synonyms or {})
@@ -3262,8 +3312,14 @@ class VoucherHarvester:
         return df_filtered, stats
 
     def export(self, df: pd.DataFrame) -> Path:
-        """Atomically persists the curated vouchers table to CSV."""
-        return export_curated_table(df, self.output_csv, logger=self.logger, home_herbarium=self.home_herbarium)
+        """Atomically persists the curated vouchers table to CSV and SQLite."""
+        return export_curated_table(
+            df,
+            self.output_csv,
+            logger=self.logger,
+            home_herbarium=self.home_herbarium,
+            db_path=self.db_path,
+        )
 
     def run(
         self,

@@ -244,6 +244,7 @@ def write_run_metadata(
 class PathsConfig:
     """Strongly-typed, project-root anchored filesystem paths."""
     workspace_root: Path = PROJECT_ROOT
+    db_path: Path = PROJECT_ROOT / "data" / "packera_pipeline.sqlite"
     raw_vouchers_dir: Path = PROJECT_ROOT / "data" / "raw_vouchers"
     curated_vouchers_csv: Path = PROJECT_ROOT / "data" / "tables" / "curated_vouchers.csv"
     failed_qc_vouchers_csv: Path = PROJECT_ROOT / "data" / "tables" / "failed_qc_vouchers.csv"
@@ -790,6 +791,7 @@ EXCLUDED_WESTERN_STATES: Set[str] = {
 # Module-level defaults instantiated dynamically from configuration YAML
 _DEFAULT_CONFIG = PipelineConfig.from_yaml()
 DEFAULT_WORKSPACE = _DEFAULT_CONFIG.paths.workspace_root
+DEFAULT_DB_PATH = _DEFAULT_CONFIG.paths.db_path
 DEFAULT_RAW_DIR = _DEFAULT_CONFIG.paths.raw_vouchers_dir
 DEFAULT_CURATED_CSV = _DEFAULT_CONFIG.paths.curated_vouchers_csv
 DEFAULT_OUTPUT_CSV = _DEFAULT_CONFIG.paths.curated_vouchers_csv

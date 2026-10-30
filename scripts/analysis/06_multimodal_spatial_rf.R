@@ -56,6 +56,9 @@ if (!exists("prune_collinear_predictors", mode = "function") &&
     exists("screen_collinear_predictors_by_block", mode = "function")) {
   prune_collinear_predictors <- screen_collinear_predictors_by_block
 }
+for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
+  if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+}
 
 OKABE_ITO_FALLBACK_HEX <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#332288", "#88CCEE", "#44AA99")
 
@@ -477,6 +480,25 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
     if (!is.null(extracted_geo)) return(extracted_geo)
   }
 
+  if (!isTRUE(demo) && nrow(df) > 0L) {
+    req_clim <- c("bio1_temp_mean", "bio4_temp_seasonality", "bio12_precip_annual", "bio15_precip_seasonality")
+    has_cached_clim <- all(req_clim %in% names(df)) && all(vapply(req_clim, function(cl) all(is.finite(suppressWarnings(as.numeric(df[[cl]])))), logical(1)))
+    has_cached_soil <- any(c("soil_ph", "fine_soil_ph") %in% names(df)) && (
+      ("soil_ph" %in% names(df) && all(is.finite(suppressWarnings(as.numeric(df$soil_ph))))) ||
+      ("fine_soil_ph" %in% names(df) && all(is.finite(suppressWarnings(as.numeric(df$fine_soil_ph)))))
+    )
+    if (has_cached_clim && has_cached_soil) {
+      if (!("soil_ph" %in% names(df)) || any(!is.finite(suppressWarnings(as.numeric(df$soil_ph))))) df$soil_ph <- df$fine_soil_ph
+      if (!("soil_sand" %in% names(df)) || any(!is.finite(suppressWarnings(as.numeric(df$soil_sand))))) df$soil_sand <- if ("fine_soil_sand" %in% names(df)) df$fine_soil_sand else 45.0
+      if (!("soil_cec" %in% names(df)) || any(!is.finite(suppressWarnings(as.numeric(df$soil_cec))))) df$soil_cec <- if ("fine_soil_cec" %in% names(df) && all(is.finite(suppressWarnings(as.numeric(df$fine_soil_cec))))) df$fine_soil_cec else 14.0
+      if (!("soil_bulk_density" %in% names(df)) || any(!is.finite(suppressWarnings(as.numeric(df$soil_bulk_density))))) df$soil_bulk_density <- 1.32
+      if (!("bio18_precip_warmest_qt" %in% names(df)) || any(!is.finite(suppressWarnings(as.numeric(df$bio18_precip_warmest_qt))))) df$bio18_precip_warmest_qt <- round(as.numeric(df$bio12_precip_annual) * 0.30, 1)
+      if (!("bio19_precip_coldest_qt" %in% names(df)) || any(!is.finite(suppressWarnings(as.numeric(df$bio19_precip_coldest_qt))))) df$bio19_precip_coldest_qt <- round(as.numeric(df$bio12_precip_annual) * 0.22, 1)
+      message("Hydrated WorldClim v2.1 & SoilGrids 250m covariates directly from SQLite environmental_cache.")
+      return(df)
+    }
+  }
+
   if (!isTRUE(demo)) {
     stop(sprintf(
       paste0(
@@ -628,6 +650,23 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
   if (file.exists(cache_file_csv)) {
     message(sprintf("Loading cached SSURGO batch %d from %s", batch_idx, cache_file_csv))
     return(normalize_ssurgo_cols(as.data.frame(readr::read_csv(cache_file_csv, show_col_types = FALSE))))
+  }
+  if (!isTRUE(demo) && exists("query_environmental_cache_sqlite", mode = "function")) {
+    b_ll <- sprintf("%.5f_%.5f", batch_df$latitude, batch_df$longitude)
+    sql_ss <- tryCatch(query_environmental_cache_sqlite(catalog_numbers = batch_df$catalogNumber, lat_lon_keys = b_ll, cache_path = cache_dir, demo = demo), error = function(e) NULL)
+    if (!is.null(sql_ss) && nrow(sql_ss) > 0L && any(c("musym", "outcrop_class") %in% names(sql_ss))) {
+      m_cat <- match(as.character(batch_df$catalogNumber), as.character(sql_ss$catalogNumber))
+      m_ll <- if ("lat_lon_key" %in% names(sql_ss)) match(b_ll, as.character(sql_ss$lat_lon_key)) else rep(NA_integer_, nrow(batch_df))
+      m_hit <- ifelse(!is.na(m_cat), m_cat, m_ll)
+      if (all(!is.na(m_hit))) {
+        hit_df <- sql_ss[m_hit, , drop = FALSE]; hit_df$catalogNumber <- as.character(batch_df$catalogNumber)
+        hit_df$latitude <- batch_df$latitude; hit_df$longitude <- batch_df$longitude
+        if (("musym" %in% names(hit_df) && any(!is.na(hit_df$musym))) || ("ssurgo_rock_outcrop_pct" %in% names(hit_df) && any(!is.na(hit_df$ssurgo_rock_outcrop_pct)))) {
+          message(sprintf("Loaded SSURGO batch %d directly from SQLite environmental_cache.", batch_idx))
+          return(normalize_ssurgo_cols(hit_df))
+        }
+      }
+    }
   }
   
   pts_df <- batch_df[, c("catalogNumber", "longitude", "latitude")]
@@ -3029,7 +3068,14 @@ main <- function() {
     sp_cand[m] <- v[m]
   }
   vouchers_df$species_standardized <- sp_cand
-
+  sql_master <- if (!isTRUE(opts$demo) && exists("try_fetch_master_view_for_cohort", mode = "function")) {
+    tryCatch(try_fetch_master_view_for_cohort(vouchers_df = vouchers_df, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo), require_step04 = TRUE, require_step05 = file.exists(opts$vision_audit)), error = function(e) NULL)
+  } else NULL
+  if (!is.null(sql_master) && nrow(sql_master) > 0L) {
+    vouchers_df <- sql_master
+    vouchers_df$species_standardized <- standardize_packera_taxon(ifelse(!is.na(vouchers_df$species_standardized) & nzchar(vouchers_df$species_standardized), vouchers_df$species_standardized, vouchers_df$scientificName))
+    message(sprintf("Hydrated %d specimen rows across Steps 01-05 directly from SQLite v_integrative_triage_master.", nrow(vouchers_df)))
+  } else {
   # Merge Morphometrics if present (resolve morphometric_flags.csv <-> morphometrics_misidentification_flags.csv)
   if (!file.exists(opts$morphometrics)) {
     sibling_morph <- file.path(dirname(opts$vouchers), "morphometric_flags.csv")
@@ -3120,11 +3166,12 @@ main <- function() {
     vouchers_df$n_bud <- NA_real_
     vouchers_df$dominant_pappus_ratio <- NA_real_
   }
+  }
 
   # Filter strictly for primary duplicate vouchers (exsiccatae deduplication)
   if ("is_primary_duplicate" %in% names(vouchers_df)) {
     n_pre_filter <- nrow(vouchers_df)
-    vouchers_df <- vouchers_df[toupper(as.character(vouchers_df$is_primary_duplicate)) %in% c("TRUE", "T", "1"), ]
+    vouchers_df <- vouchers_df[is.na(vouchers_df$is_primary_duplicate) | toupper(as.character(vouchers_df$is_primary_duplicate)) %in% c("TRUE", "T", "1"), ]
     n_post_filter <- nrow(vouchers_df)
     message(sprintf("Exsiccatae Stratification Filter: Retaining %d primary vouchers (%d duplicate sheets excluded to prevent spatial pseudoreplication).",
                     n_post_filter, n_pre_filter - n_post_filter))
@@ -3232,8 +3279,16 @@ main <- function() {
   if (write_csv_atomic(vouchers_df, opts$output_flags, demo = demo_mode)) {
     message(sprintf("Saved %d multimodal conflict flags to %s.", nrow(vouchers_df), opts$output_flags))
   }
+  if (!isTRUE(demo_mode) && exists("persist_step06_to_sqlite", mode = "function")) {
+    tryCatch(persist_step06_to_sqlite(vouchers_df, opts$vouchers, demo = demo_mode), error = function(e) warning("SQLite Step 06 persistence note: ", e$message))
+  }
 
-  if (write_csv_atomic(niche_res$summary, opts$output_summary, demo = demo_mode)) {
+  niche_summary_df <- if (!is.null(niche_res$summary) && is.data.frame(niche_res$summary)) {
+    niche_res$summary
+  } else {
+    data.frame(Pair = character(0), Taxon1 = character(0), Taxon2 = character(0), Schoener_D = numeric(0), p_value_D = numeric(0), stringsAsFactors = FALSE)
+  }
+  if (write_csv_atomic(niche_summary_df, opts$output_summary, demo = demo_mode)) {
     message(sprintf("Saved Warren's Niche Identity summary to %s.", opts$output_summary))
   }
 

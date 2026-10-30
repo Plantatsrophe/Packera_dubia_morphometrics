@@ -274,6 +274,10 @@ class TestMainPipelineCLI(unittest.TestCase):
 
     def test_check_environment_missing_r_packages_remediation(self):
         """Verify check_environment() identifies missing R packages and prints remediation command."""
+        try:
+            import pygbif  # noqa: F401
+        except Exception:
+            pass
         missing_probe = MagicMock(
             returncode=1,
             stdout="MISSING: Momocs,MorphoTools2\n",
@@ -564,12 +568,21 @@ REUSE_CANONICAL_DATA="true"
                 tdf = pd.read_csv(tables_dir / tbl_name)
                 self.assertEqual(set(tdf["catalogNumber"]), {"NCU001", "UNCC_49308"}, f"Failed filter on {tbl_name}")
 
-            ros_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "rosettes_dense").iterdir()}
-            leaf_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "basal_leaves_raw").iterdir()}
-            cap_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "capitula").iterdir()}
-            self.assertEqual(ros_files, {"NCU001_p0_rosette.jpg", "UNCC_49308_p0_rosette.jpg"})
-            self.assertEqual(leaf_files, {"NCU001_leaf1.jpg", "UNCC_49308_leaf2.jpg"})
-            self.assertEqual(cap_files, {"NCU001_cap1.jpg"})
+            for sub in ("rosettes_dense", "basal_leaves_raw", "capitula"):
+                link_p = run_dir / "data" / "cropped_patches" / sub
+                self.assertTrue(link_p.is_symlink(), f"Expected directory-level symlink for {sub}")
+                self.assertEqual(link_p.resolve(), (root_data / "cropped_patches" / sub).resolve())
+
+            import sqlite3
+            db_file = root_data / "packera_pipeline.sqlite"
+            self.assertTrue(db_file.is_file())
+            with sqlite3.connect(db_file) as conn:
+                cohort_rows = conn.execute(
+                    "SELECT catalogNumber, determiner_tier FROM run_active_cohort WHERE run_id = ?;",
+                    (run_dir.name,),
+                ).fetchall()
+            self.assertEqual({r[0] for r in cohort_rows}, {"NCU001", "UNCC_49308"})
+            self.assertEqual({r[1] for r in cohort_rows}, {"Tier_1_Gold"})
 
     def test_run_pipeline_sh_exclude_misidentified_and_triage_source_filtering(self):
         """Verify run_pipeline.sh --exclude-misidentified (with default ALL and explicit --triage-source) filters out Misidentification_Reassign while retaining Confirmed_Species, Hybrid_Introgressant, Subspecies_Ecotype, Ecophenotypic_Plasticity, and Putative_Cryptic_Species across curated_vouchers.csv, Step 02 manifests, and cropped_patches."""
@@ -689,12 +702,83 @@ REUSE_CANONICAL_DATA="true"
                     tdf = pd.read_csv(tables_dir / tbl_name)
                     self.assertEqual(set(tdf["catalogNumber"]), expected_keep, f"Failed filter on {tbl_name} in {mode}")
 
-                ros_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "rosettes_dense").iterdir()}
-                leaf_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "basal_leaves_raw").iterdir()}
-                cap_files = {p.name for p in (run_dir / "data" / "cropped_patches" / "capitula").iterdir()}
-                self.assertEqual(ros_files, {f"{c}_p0_rosette.jpg" for c in expected_keep})
-                self.assertEqual(leaf_files, {f"{c}_leaf1.jpg" for c in expected_keep})
-                self.assertEqual(cap_files, {f"{c}_cap1.jpg" for c in expected_keep})
+                for sub in ("rosettes_dense", "basal_leaves_raw", "capitula"):
+                    link_p = run_dir / "data" / "cropped_patches" / sub
+                    self.assertTrue(link_p.is_symlink(), f"Expected directory-level symlink for {sub}")
+                    self.assertEqual(link_p.resolve(), (root_data / "cropped_patches" / sub).resolve())
+
+                import sqlite3
+                db_file = root_data / "packera_pipeline.sqlite"
+                self.assertTrue(db_file.is_file())
+                with sqlite3.connect(db_file) as conn:
+                    cohort_cats = {
+                        r[0]
+                        for r in conn.execute(
+                            "SELECT catalogNumber FROM run_active_cohort WHERE run_id = ?;",
+                            (run_dir.name,),
+                        ).fetchall()
+                    }
+                self.assertEqual(cohort_cats, expected_keep)
+
+        # Also verify pure-SQLite --exclude-misidentified (with zero CSV triage reports on disk)
+        with tempfile.TemporaryDirectory() as tmpdir_sql:
+            tmp_sql = Path(tmpdir_sql)
+            root_data_sql = tmp_sql / "root_data"
+            root_data_sql.mkdir(parents=True, exist_ok=True)
+            run_dir_sql = tmp_sql / "runs" / "test_sql_only"
+            tables_dir_sql = run_dir_sql / "data" / "tables"
+            tables_dir_sql.mkdir(parents=True, exist_ok=True)
+
+            from scripts.core.db import ensure_pipeline_run, get_db_connection, upsert_rows_generic, upsert_vouchers_records
+
+            conn_seed = get_db_connection(db_path=root_data_sql / "packera_pipeline.sqlite", init_schema=True)
+            try:
+                upsert_vouchers_records(
+                    conn_seed,
+                    [{"catalogNumber": c, "scientificName": "Packera dubia", "determiner_tier": "Tier_1_Gold"} for c in all_cats],
+                )
+                ensure_pipeline_run(conn_seed, run_id="hist_sql_run")
+                upsert_rows_generic(
+                    conn_seed,
+                    table_name="curation_triage",
+                    rows=[
+                        {"run_id": "hist_sql_run", "catalogNumber": "CAT_CONF", "plant_individual_id": 0, "taxonomic_treatment_subtype": "Confirmed_Species"},
+                        {"run_id": "hist_sql_run", "catalogNumber": "CAT_MISID_1", "plant_individual_id": 0, "taxonomic_treatment_subtype": "Misidentification_Reassign"},
+                    ],
+                    pk_cols=("run_id", "catalogNumber", "plant_individual_id"),
+                )
+            finally:
+                conn_seed.close()
+
+            pd.DataFrame({
+                "catalogNumber": all_cats,
+                "scientificName": ["Packera dubia"] * len(all_cats),
+                "determiner_tier": ["Tier_1_Gold"] * len(all_cats),
+                "authority_weight": [3.0] * len(all_cats),
+            }).to_csv(tables_dir_sql / "curated_vouchers.csv", index=False)
+
+            test_bash_sql = f"""
+set -euo pipefail
+PROJECT_ROOT="{PROJECT_ROOT}"
+RUN_DIR="{run_dir_sql}"
+PYTHON_MAIN="{sys.executable}"
+FOCAL_TAXON=""
+EXCLUDE_TAXON_CSV=""
+INTRASPECIFIC_MODE="false"
+GOLD_ANCHORS=30
+GOLD_ONLY=false
+DETERMINER_TIER=""
+EXCLUDE_MISIDENTIFIED=true
+TRIAGE_SOURCE="hist_sql_run"
+REUSE_CANONICAL_DATA="false"
+{fn_body}
+"""
+            test_bash_sql = test_bash_sql.replace('"${PROJECT_ROOT}/data"', f'"{root_data_sql}"')
+            test_bash_sql += "\nrun_preflight_subset_filter\n"
+            res_sql = subprocess.run(["bash", "-c", test_bash_sql], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=True)
+            self.assertIn("SQLite runs=1", res_sql.stdout)
+            out_v_sql = pd.read_csv(tables_dir_sql / "curated_vouchers.csv")
+            self.assertEqual(set(out_v_sql["catalogNumber"]), expected_keep_run_a)
 
 
 if __name__ == "__main__":
