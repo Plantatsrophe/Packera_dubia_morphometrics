@@ -27,12 +27,9 @@ if torch.cuda.is_available(): torch.cuda.manual_seed_all(42)
 _script_root = Path(__file__).resolve().parents[2]
 if str(_script_root) not in sys.path: sys.path.insert(0, str(_script_root))
 
-TARGET_TAXA: List[str] = ["Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis"]
-EASTERN_NA_PACKERA_TAXA: List[str] = ["Packera anonyma", "Packera antennariifolia", "Packera aurea", "Packera crawfordii", "Packera cymbalaria", "Packera dubia", "Packera glabella", "Packera hyperborealis", "Packera indecora", "Packera insulanus", "Packera memmingeri", "Packera millefolium", "Packera obovata", "Packera paupercula", "Packera plattensis", "Packera pseudaurea", "Packera schweinitziana", "Packera serpenticola", "Packera spellenbergii", "Packera tampicana", "Packera vulgaris"]
 FOREGROUND_ATTENTION_MIN_RATIO: float = 0.65
 DYNAMIC_OKABE_ITO_HEX: List[str] = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#882255", "#44AA99", "#332288", "#117733"]
-OKABE_ITO: Dict[str, str] = {"Packera anonyma": "#0072B2", "Packera dubia": "#D55E00", "Packera paupercula": "#009E73", "Packera plattensis": "#CC79A7"}
-__all__ = ["TARGET_TAXA", "EASTERN_NA_PACKERA_TAXA", "FOREGROUND_ATTENTION_MIN_RATIO", "DYNAMIC_OKABE_ITO_HEX", "_get_dynamic_okabe_ito_map", "standardize_packera_taxon", "neutralize_mounting_paper", "apply_tier1_leaf_mask_to_rgb", "classify_foliar_surface_orientation", "preprocess_macro_rosette_crop", "compute_foreground_tissue_mask", "foreground_masked_patch_pooling", "RosettePatchDataset", "load_and_link_rosette_patches", "extract_dinov2_embeddings", "compute_out_of_fold_probabilities", "compute_feature_space_ood_scores", "run_confident_learning_audit", "compute_foreground_attention_ratio", "blend_heatmap_on_image", "compute_vit_patch_saliency", "generate_gradcam_panel", "generate_step05_publication_figures", "main"]
+__all__ = ["FOREGROUND_ATTENTION_MIN_RATIO", "DYNAMIC_OKABE_ITO_HEX", "_get_dynamic_okabe_ito_map", "standardize_packera_taxon", "neutralize_mounting_paper", "apply_tier1_leaf_mask_to_rgb", "classify_foliar_surface_orientation", "preprocess_macro_rosette_crop", "compute_foreground_tissue_mask", "foreground_masked_patch_pooling", "RosettePatchDataset", "load_and_link_rosette_patches", "extract_dinov2_embeddings", "compute_out_of_fold_probabilities", "compute_feature_space_ood_scores", "run_confident_learning_audit", "compute_foreground_attention_ratio", "blend_heatmap_on_image", "compute_vit_patch_saliency", "generate_gradcam_panel", "generate_step05_publication_figures", "main"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger("Cleanlab_Vision_XAI")
@@ -44,23 +41,24 @@ def _get_dynamic_okabe_ito_map(taxa_list: List[str]) -> Dict[str, str]:
 
 
 def standardize_packera_taxon(species_str: Optional[str]) -> str:
-    """Standardize synonymy across Eastern North American Packera species and Senecio basionyms."""
-    if not species_str or pd.isna(species_str):
-        return "Unknown"
-    s_orig = str(species_str).strip()
+    """Standardize Packera scientific names and historical basionyms via scripts.core.harvester."""
+    s_orig = "" if (not species_str or pd.isna(species_str)) else str(species_str).strip()
     if not s_orig or s_orig.lower() in {"none", "nan", "null", "na", "unknown"}:
         return "Unknown"
-    s = s_orig.lower()
-    rules = [(r"crawfordii|crawford", "Packera crawfordii"), (r"memmingeri|memminger|packera[x×]memmingeri", "Packera memmingeri"), (r"millefoli", "Packera millefolium"), (r"pseudaure|semicordat", "Packera pseudaurea"), (r"paupercul|balsamitae|savannarum|appalachiana", "Packera paupercula"), (r"plattensis|pseudotomentos|flavovirens", "Packera plattensis"), (r"tomentos|dubia|dubius|alabamensis", "Packera dubia"), (r"anonym|smallii|earlei", "Packera anonyma"), (r"antennariifoli", "Packera antennariifolia"), (r"\baurea\b|\baureus\b|gracilis", "Packera aurea"), (r"glabell|lobatus|lobata", "Packera glabella"), (r"hyperboreal", "Packera hyperborealis"), (r"cymbalaria|resedifoli", "Packera cymbalaria"), (r"indecor", "Packera indecora"), (r"insulan", "Packera insulanus"), (r"obovat|rotundus|rotunda|elliottii", "Packera obovata"), (r"schweinitzian|robbinsii", "Packera schweinitziana"), (r"serpenticol|eburnea|eburneus|packeraeburnea", "Packera serpenticola"), (r"spellenberg", "Packera spellenbergii"), (r"tampican|imparipinnat", "Packera tampicana"), (r"vulgaris", "Packera vulgaris")]
-    for pattern, canonical in rules:
-        if re.search(pattern, s):
-            return canonical
-    m = re.match(r"^packera\s*(?:[x×]\s*)?([a-z-]+)", s)
-    return f"Packera {m.group(1).lstrip('x×-')}" if (m and m.group(1).lstrip("x×-")) else s_orig.split("(")[0].strip()
+    try:
+        from scripts.core.harvester import standardize_packera_taxon as _harvester_std
+        std = _harvester_std(s_orig)
+        if std and str(std).strip() and str(std).strip().lower() not in {"none", "nan", "null", "na", "unknown", "unassigned_packera"}:
+            return str(std).strip()
+    except Exception:
+        pass
+    m = re.match(r"^packera\s*(?:([x×])(?=\s)|([×]))?\s*([a-z-]+)", s_orig.lower())
+    epithet = m.group(3).lstrip("×-") if m else ""
+    return f"Packera {'× ' if (m.group(1) or m.group(2)) else ''}{epithet}" if (m and epithet) else s_orig.split("(")[0].strip()
 
 
 def _is_valid_packera_taxon(taxon_str: str) -> bool:
-    return bool(taxon_str and taxon_str not in {"Unknown", "Unassigned_Packera"} and (taxon_str in EASTERN_NA_PACKERA_TAXA or re.match(r"^(?:Packera\s+[a-z×-]+|Morphotype_[A-Za-z0-9_]+)$", str(taxon_str))))
+    return bool(taxon_str and taxon_str not in {"Unknown", "Unassigned_Packera"} and re.match(r"^(?:Packera\s+(?:[x×]\s*)?[a-z-]+|Morphotype_[A-Za-z0-9_]+|Ecotype_[A-Za-z0-9_]+)$", str(taxon_str)))
 
 
 def _to_rgb_uint8(image: Image.Image | np.ndarray) -> np.ndarray:

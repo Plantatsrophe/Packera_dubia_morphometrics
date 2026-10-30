@@ -2,14 +2,16 @@
 """
 ===============================================================================
 Script: 01_voucher_harvester.py
-Project: Packera dubia Species Delimitation & Morphometrics Pipeline
+Project: Packera Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
     CLI entry point to execute the botanical voucher harvesting pipeline.
-    Queries GBIF occurrences, downloads high-resolution herbarium specimen
-    imagery, applies 3-tier determiner authority scoring and geographic
-    exclusion filters, and atomically generates curated datasets.
+    Queries GBIF occurrences (dynamically across all Packera species genus-wide
+    by default, or strictly for user-specified --taxon binomials), downloads
+    high-resolution herbarium specimen imagery, applies 3-tier determiner
+    authority scoring and geographic exclusion filters, and atomically
+    generates curated datasets.
 ===============================================================================
 """
 
@@ -26,9 +28,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.core.config import PipelineConfig
 from scripts.core.harvester import (
-    EASTERN_NA_GBIF_QUERY_TAXA,
-    EASTERN_NA_PACKERA_TAXA,
     VoucherHarvester,
+    discover_genus_packera_species_gbif,
     resolve_geographic_scope_settings,
     setup_logger,
     standardize_packera_taxon,
@@ -46,20 +47,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--taxa",
         dest="taxa",
         nargs="+",
-        default=cfg.taxa.target_species,
-        help="One or more scientific binomials to harvest from GBIF (e.g. 'Packera dubia').",
-    )
-    parser.add_argument(
-        "--all-eastern-taxa",
-        action="store_true",
-        default=False,
-        help="Harvest all Eastern North American Packera species and historical Senecio basionyms.",
+        default=list(cfg.taxa.target_species),
+        help=(
+            "One or more scientific binomials to harvest strictly from GBIF. "
+            "When omitted (empty), dynamically harvests all Packera species across the genus."
+        ),
     )
     parser.add_argument(
         "--expand-synonyms",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Dynamically expand target Packera binomials to historical Senecio/Cineraria synonyms via built-in + GBIF Backbone taxonomy (default: True).",
+        help="Dynamically expand target Packera binomials to historical Senecio/Cineraria synonyms via GBIF Backbone taxonomy (default: True).",
     )
     parser.add_argument(
         "--geographic-scope",
@@ -204,7 +202,7 @@ def main() -> None:
     log_file_path = Path(args.log_file)
     logger = setup_logger(log_file_path=log_file_path, verbose=args.verbose)
 
-    target_taxa = EASTERN_NA_GBIF_QUERY_TAXA if getattr(args, "all_eastern_taxa", False) else args.taxa
+    target_taxa = list(args.taxa) if args.taxa else []
 
     explicit_countries = getattr(args, "countries", None)
     arg_scope = getattr(args, "geographic_scope", cfg.harvesting.geographic_scope)

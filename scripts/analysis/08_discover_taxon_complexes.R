@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 # ==============================================================================
 # Script: scripts/analysis/08_discover_taxon_complexes.R
-# Project: Packera dubia Species Delimitation & Morphometrics Pipeline (NCU)
+# Project: Packera Species Delimitation & Morphometrics Pipeline (NCU)
 # Description:
 #   Unsupervised Quantitative Taxon-Complex Discovery & Integrative Delimitation
 #   Engine (Phase 08): (1) Reliability-Weighted Taxon Affinity Matrix (W_ij) with
@@ -11,7 +11,7 @@
 #   Misidentification_Reassign -> Stage 2 Hybrid_Introgressant -> Stage 3
 #   Putative_Cryptic_Species -> Stage 4 Subspecies_Ecotype/Plasticity -> Stage 5
 #   Confirmed_Species); and (4) Leiden/Louvain & Ward.D2 clustering across taxa
-#   or Taxon x Morphotype subclusters ('P. dubia [K1]', 'P. dubia [K2]', etc.).
+#   or Taxon x Morphotype subclusters ('P. <epithet> [K1]', 'P. <epithet> [K2]').
 # ==============================================================================
 
 suppressPackageStartupMessages({

@@ -2,7 +2,7 @@
 """
 ===============================================================================
 Script: main.py
-Project: Packera dubia Species Delimitation & Morphometrics Pipeline
+Project: Packera Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
@@ -23,6 +23,7 @@ import argparse
 import importlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -144,7 +145,7 @@ def check_environment(args: Optional[argparse.Namespace] = None) -> bool:
     warning_count = 0
 
     print("=" * 79)
-    print("Packera dubia Morphometrics Pipeline: Environment & Dependency Diagnostic")
+    print("Packera Morphometrics Pipeline: Environment & Dependency Diagnostic")
     print("=" * 79)
 
     # -------------------------------------------------------------------------
@@ -457,10 +458,18 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         "--min-file-size-kb", str(args.min_file_size_kb or cfg["harvesting"]["min_file_size_kb"]),
         "--concurrency", str(args.concurrency or cfg["harvesting"]["download_concurrency"]),
     ]
-    if args.taxa:
-        cmd.extend(["--taxa", *args.taxa])
-    elif "taxonomy" in cfg and "target_taxa" in cfg["taxonomy"]:
-        cmd.extend(["--taxa", *cfg["taxonomy"]["target_taxa"]])
+    cfg_target_species: List[str] = []
+    if isinstance(cfg, PipelineConfig):
+        cfg_target_species = list(cfg.taxa.target_species or [])
+    elif isinstance(cfg, dict):
+        cfg_target_species = list(
+            (cfg.get("taxa") or {}).get("target_species")
+            or (cfg.get("taxonomy") or {}).get("target_taxa")
+            or []
+        )
+    explicit_taxa = list(args.taxa) if args.taxa else cfg_target_species
+    if explicit_taxa:
+        cmd.extend(["--taxa", *explicit_taxa])
 
     if args.download_images:
         cmd.append("--download-images")
@@ -674,7 +683,7 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     default_plot_out = (
         run_dir / "outputs" / "figures" / "cda_passive_projection.pdf"
         if run_dir is not None
-        else cfg.get("paths", {}).get("cda_biplot_pdf", "outputs/figures/cda_passive_projection.pdf")
+        else cfg.get("paths", {}).get("cda_biplot_pdf", "outputs/figures/Figure_Integrative_Packera_Revision.pdf")
     )
     default_report_out = (
         run_dir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv"
@@ -828,13 +837,26 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         getattr(args, "output_queue", None)
         or ((run_dir / "outputs" / "reports" / "final_curation_triage.csv") if run_dir is not None else "data/tables/triage_queue.csv")
     )
+    focal_taxon_raw = str(getattr(args, "focal_taxon", "") or "").strip()
+    if focal_taxon_raw:
+        focal_slug = re.sub(r"[^A-Za-z0-9]+", "_", focal_taxon_raw).strip("_") or "Packera"
+        default_fig_name = f"Figure_Integrative_{focal_slug}_Revision.pdf"
+        default_rep_name = f"{focal_slug}_Taxonomic_Revision_Summary.md"
+        fallback_fig = f"outputs/figures/{default_fig_name}"
+        fallback_rep = f"outputs/reports/{default_rep_name}"
+    else:
+        default_fig_name = "Figure_Integrative_Packera_Revision.pdf"
+        default_rep_name = "Packera_Taxonomic_Revision_Summary.md"
+        fallback_fig = cfg.get("paths", {}).get("cda_biplot_pdf", f"outputs/figures/{default_fig_name}")
+        fallback_rep = cfg.get("paths", {}).get("revision_report_md", f"outputs/reports/{default_rep_name}")
+
     synthesis_plot = Path(
         getattr(args, "synthesis_plot", None)
-        or ((run_dir / "outputs" / "figures" / "Figure_Integrative_Packera_dubia_Revision.pdf") if run_dir is not None else "outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf")
+        or ((run_dir / "outputs" / "figures" / default_fig_name) if run_dir is not None else fallback_fig)
     )
     synthesis_report = Path(
         getattr(args, "synthesis_report", None)
-        or ((run_dir / "outputs" / "reports" / "Packera_dubia_Taxonomic_Revision_Summary.md") if run_dir is not None else "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md")
+        or ((run_dir / "outputs" / "reports" / default_rep_name) if run_dir is not None else fallback_rep)
     )
 
     cmd_triage = [
@@ -949,7 +971,7 @@ def run_calibrate_geometry(args: argparse.Namespace, cfg: PipelineConfig) -> Non
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description="Packera dubia Species Delimitation & Morphometrics Production Pipeline.",
+        description="Packera Species Delimitation & Morphometrics Production Pipeline.",
     )
     parser.add_argument(
         "-c", "--config",

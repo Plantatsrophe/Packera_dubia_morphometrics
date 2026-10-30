@@ -19,6 +19,7 @@ Description:
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -35,28 +36,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-TARGET_TAXA = [
-    "Packera anonyma",
-    "Packera dubia",
-    "Packera paupercula",
-    "Packera plattensis",
-]
-
-
 def standardize_packera_taxon(s: str) -> str:
-    """Standardize raw taxon strings to canonical Packera binomials."""
+    """Standardize raw taxon strings generically to canonical Packera binomials."""
     if not isinstance(s, str) or not s.strip():
         return "Unknown"
     sc = s.strip().lower()
-    if any(k in sc for k in ["anonym", "smallii", "earlei"]):
-        return "Packera anonyma"
-    if any(k in sc for k in ["tomentos", "dubia"]):
-        return "Packera dubia"
-    if any(k in sc for k in ["plattensis", "flavovirens"]):
-        return "Packera plattensis"
-    if any(k in sc for k in ["paupercul", "balsamitae", "savannarum", "pseudotomentosa", "appalachiana"]):
-        return "Packera paupercula"
-    return s.split("(")[0].strip()
+    m = re.match(r"^(?:packera|p\.)\s*(?:(?:cf\.?|aff\.?)\s+)?(?:x\s+|×\s*)?([a-z-]+)", sc)
+    if m:
+        ep = m.group(1).lstrip("×-")
+        if ep and ep not in {"sp", "spp", "cf", "aff", "indet", "unknown", "na"}:
+            return f"Packera {ep}"
+    return "Unknown"
 
 
 def apply_taxonomic_decision_matrix_ref(df: pd.DataFrame) -> pd.DataFrame:
@@ -290,8 +280,8 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             spatial_csv = tmp / "multimodal_conflict_flags.csv"
             niche_csv = tmp / "niche_identity_tests.csv"
             out_triage = tmp / "triage_queue.csv"
-            out_report = tmp / "Packera_dubia_Taxonomic_Revision_Summary.md"
-            out_figure = tmp / "Figure_Integrative_Packera_dubia_Revision.pdf"
+            out_report = tmp / "Packera_Taxonomic_Revision_Summary.md"
+            out_figure = tmp / "Figure_Integrative_Packera_Revision.pdf"
             out_html = tmp / "Triage_Dashboard_Interactive.html"
 
             pd.DataFrame([
@@ -737,15 +727,15 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
 
     def test_output_artifacts_exist(self):
         """Verify that synthesis report and figure artifacts exist in outputs/ (or synthetic fixture on clean checkout)."""
-        report_path = PROJECT_ROOT / "outputs" / "reports" / "Packera_dubia_Taxonomic_Revision_Summary.md"
-        figure_pdf = PROJECT_ROOT / "outputs" / "figures" / "Figure_Integrative_Packera_dubia_Revision.pdf"
+        report_path = PROJECT_ROOT / "outputs" / "reports" / "Packera_Taxonomic_Revision_Summary.md"
+        figure_pdf = PROJECT_ROOT / "outputs" / "figures" / "Figure_Integrative_Packera_Revision.pdf"
         triage_csv = PROJECT_ROOT / "data" / "tables" / "triage_queue.csv"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             if not (report_path.exists() and figure_pdf.exists() and triage_csv.exists()):
                 tmp_path = Path(tmpdir)
-                report_path = tmp_path / "Packera_dubia_Taxonomic_Revision_Summary.md"
-                figure_pdf = tmp_path / "Figure_Integrative_Packera_dubia_Revision.pdf"
+                report_path = tmp_path / "Packera_Taxonomic_Revision_Summary.md"
+                figure_pdf = tmp_path / "Figure_Integrative_Packera_Revision.pdf"
                 triage_csv = tmp_path / "triage_queue.csv"
                 report_path.write_text("# Taxonomic Revision Summary\n", encoding="utf-8")
                 figure_pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
@@ -905,6 +895,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             {
                 "catalogNumber": "OBO-GOLD-2",
                 "institutionCode": "TENN",
+                "scientificName": "Packera obovata (Muhl. ex Willd.) W.A.Weber & Á.Löve",
                 "species_raw": "Packera obovata",
                 "species_standardized": "Packera obovata",
                 "determiner_tier": "Tier_1_Gold",
@@ -1181,8 +1172,8 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             in_csv = tmp / "non_dubia_input.csv"
             out_csv = tmp / "non_dubia_triage.csv"
             multi_report = tmp / "multi_species_report.md"
-            focal_report_default = tmp / "Packera_dubia_Taxonomic_Revision_Summary.md"
-            focal_plot_default = tmp / "Figure_Integrative_Packera_dubia_Revision.pdf"
+            focal_report_default = tmp / "Packera_Taxonomic_Revision_Summary.md"
+            focal_plot_default = tmp / "Figure_Integrative_Packera_Revision.pdf"
             helper_check_csv = tmp / "pub_fig_helpers.csv"
             pd.DataFrame(rows).to_csv(in_csv, index=False)
 
@@ -1254,7 +1245,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                 md_multi,
             )
             self.assertIn("- ***Packera aurea***", md_multi)
-            self.assertIn("- ***Packera obovata***", md_multi)
+            self.assertIn("- ***Packera obovata*** (Muhl. ex Willd.) W.A.Weber & Á.Löve", md_multi)
             self.assertIn("- ***Packera schweinitziana***", md_multi)
             self.assertIn("Dominant US EPA Level III Ecoregions:", md_multi)
             self.assertIn("Verified Anthesis Window:", md_multi)
@@ -1279,7 +1270,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             self.assertEqual(int(helpers_df.loc[0, "n_unique_cols"]), 3)
             self.assertEqual(
                 str(helpers_df.loc[0, "title_multi"]),
-                "Packera Species Complex (3 Taxa): CDA Morphospace",
+                "Packera Taxon Complex (3 Taxa): CDA Morphospace",
             )
             self.assertEqual(
                 str(helpers_df.loc[0, "title_single"]),

@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# Script: 04_gmm_morphotools.R - Packera dubia Morphometrics Pipeline (NCU)
+# Script: 04_gmm_morphotools.R - Packera Morphometrics Pipeline (NCU)
 suppressPackageStartupMessages({
   for (pkg in c("MASS", "mclust", "clustvarsel", "MorphoTools2", "RRPP", "vegan", "dplyr", "readr", "tibble", "ggplot2", "optparse")) {
     if (requireNamespace(pkg, quietly = TRUE)) library(pkg, character.only = TRUE)
@@ -577,11 +577,12 @@ run_gmm_morphotools_pipeline <- function(opts) {
     if (!"n_tier2_leaves" %in% names(closed_df)) closed_df$n_tier2_leaves <- ifelse(closed_df$assigned_tier == "Tier_2_Reflected", lc, 0L)
     if (!"morph_tier_source" %in% names(closed_df)) closed_df$morph_tier_source <- ifelse(closed_df$n_tier1_leaves >= 1L | closed_df$assigned_tier == "Tier_1_Direct", "Tier_1_Pure", "Tier_2_Fallback")
   }
-  raw_sp_col <- if ("species_raw" %in% names(closed_df) && any(!is.na(closed_df$species_raw))) closed_df$species_raw else if ("scientificName" %in% names(closed_df)) closed_df$scientificName else closed_df$species_standardized; closed_df$species_standardized <- standardize_packera_taxon(raw_sp_col); closed_df$authority_weight <- compute_authority_precision_weights(closed_df)
   if (!is.null(vouchers_df)) {
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), , drop = FALSE]; v_idx <- match(as.character(closed_df$catalogNumber), as.character(v_sub$catalogNumber))
-    for (col in intersect(names(v_sub), c("institutionCode", "county", "stateProvince", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) if (!col %in% names(closed_df)) closed_df[[col]] <- v_sub[[col]][v_idx]
+    for (col in intersect(names(v_sub), c("scientificName", "species_standardized", "institutionCode", "county", "stateProvince", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) if (!col %in% names(closed_df)) closed_df[[col]] <- v_sub[[col]][v_idx]
   }
+  sp_cand <- rep("Unknown", nrow(closed_df)); for (sc in intersect(c("species_standardized", "scientificName", "species_raw"), names(closed_df))) { v <- standardize_packera_taxon(closed_df[[sc]]); m <- sp_cand == "Unknown" & !is.na(v) & v != "Unknown"; sp_cand[m] <- v[m] }
+  closed_df$species_standardized <- sp_cand; closed_df$authority_weight <- compute_authority_precision_weights(closed_df)
   if ("regional_group" %in% names(closed_df) && exists("standardize_epa_l3_label_r", mode = "function")) closed_df$regional_group <- standardize_epa_l3_label_r(closed_df$regional_group)
   closed_df$spatial_balance_weight <- compute_spatial_balance_weights(closed_df)
   allom_res <- test_and_correct_allometry(closed_df, correct_mode = opts$correct_allometry, permutations = opts$permutations, seed = opts$seed, output_report = opts$allometry_report, output_plot = opts$allometry_plot, output_pairwise = opts$allometry_pairwise)

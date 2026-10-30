@@ -46,17 +46,6 @@ if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
   source("scripts/morphometrics/pub_figures_utils.R")
 }
 
-TARGET_TAXA <- c("Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis")
-TAXON_COLORS <- c(
-  "Packera anonyma" = "#0072B2", "Packera dubia" = "#D55E00",
-  "Packera paupercula" = "#009E73", "Packera plattensis" = "#CC79A7",
-  "Confirmed Species" = "#009E73", "Variety / Ecotype" = "#56B4E9",
-  "Hybrid / Introgressant" = "#CC79A7", "Misidentification (Reassign)" = "#E69F00",
-  "Putative Cryptic Species" = "#D55E00",
-  "Hybrid_Intergrade" = "#CC79A7", "Glabrescent_Ecophenotype" = "#56B4E9",
-  "Misidentified_Reassigned" = "#E69F00"
-)
-
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing & Taxonomic Normalization
 # ------------------------------------------------------------------------------
@@ -76,9 +65,9 @@ parse_args_robust <- function() {
     optparse::make_option(c("-s", "--niche-summary"), type = "character", default = rp("outputs/reports/multimodal_spatial_rf_summary.csv")),
     optparse::make_option(c("-q", "--output-queue"), type = "character", default = rp("data/tables/triage_queue.csv")),
     optparse::make_option(c("--output-triage"), type = "character", default = ""),
-    optparse::make_option(c("-p", "--output-plot"), type = "character", default = rp("outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf")),
+    optparse::make_option(c("-p", "--output-plot"), type = "character", default = rp("outputs/figures/Figure_Integrative_Packera_Revision.pdf")),
     optparse::make_option(c("--output-figure"), type = "character", default = ""),
-    optparse::make_option(c("-r", "--output-report"), type = "character", default = rp("outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md")),
+    optparse::make_option(c("-r", "--output-report"), type = "character", default = rp("outputs/reports/Packera_Taxonomic_Revision_Summary.md")),
     optparse::make_option(c("--output-html"), type = "character", default = ""),
     optparse::make_option(c("--focal-taxon"), type = "character", default = ""),
     optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE),
@@ -96,26 +85,26 @@ parse_args_robust <- function() {
        vision_audit = "data/tables/label_noise_audit.csv", multimodal_flags = "data/tables/multimodal_conflict_flags.csv",
        gmm_summary = "outputs/reports/gmm_bayes_factors_summary.csv", gmm_bic = "data/tables/gmm_bic_model_selection.csv",
        cda_summary = "data/tables/cda_summary.csv", niche_summary = "outputs/reports/multimodal_spatial_rf_summary.csv",
-       output_queue = "data/tables/triage_queue.csv", output_plot = "outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf",
-       output_report = "outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md", focal_taxon = "", intraspecific_mode = FALSE)
+       output_queue = "data/tables/triage_queue.csv", output_plot = "outputs/figures/Figure_Integrative_Packera_Revision.pdf",
+       output_report = "outputs/reports/Packera_Taxonomic_Revision_Summary.md", focal_taxon = "", intraspecific_mode = FALSE)
 }
 
 .base_std_taxon <- if (exists("standardize_taxon_name", mode = "function")) standardize_taxon_name else NULL
 standardize_packera_taxon <- function(s_vec) {
   if (!is.null(.base_std_taxon)) { res <- .base_std_taxon(s_vec); return(ifelse(is.na(res), "Unknown", res)) }
-  sapply(s_vec, function(s) {
-    if (is.na(s) || nchar(trimws(s)) == 0) return("Unknown")
+  vapply(as.character(s_vec), function(s) {
+    if (is.na(s) || !nzchar(trimws(s))) return("Unknown")
     sc <- trimws(s)
-    if (grepl("anonym|smallii|earlei", sc, ignore.case = TRUE)) return("Packera anonyma")
-    if (grepl("tomentos|dubia", sc, ignore.case = TRUE)) return("Packera dubia")
-    if (grepl("plattensis|flavovirens", sc, ignore.case = TRUE)) return("Packera plattensis")
-    if (grepl("paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", sc, ignore.case = TRUE)) return("Packera paupercula")
-    if (grepl("^packera\\s*(?:[x×]\\s*)?[a-z-]+", sc, ignore.case = TRUE)) {
-      ep <- sub("^packera\\s*(?:[x×]\\s*)?([a-z-]+).*$", "\\1", tolower(sc))
-      if (nzchar(ep)) return(paste("Packera", ep))
+    if (tolower(sc) %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_packera")) return("Unknown")
+    if (grepl("^Morphotype_K[0-9]+$|^Ecotype_|^LatTertile_|_Coastal$|_Outcrop$|\\[K[0-9]+\\]$", sc, ignore.case = TRUE)) return(sc)
+    sl <- tolower(sc)
+    if (grepl("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?[a-z-]+", sl)) {
+      ep <- sub("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?([a-z-]+).*$", "\\1", sl)
+      ep <- sub("^[x×-]+", "", ep)
+      if (nzchar(ep) && !(ep %in% c("sp", "spp", "cf", "aff", "indet", "unknown", "na"))) return(paste("Packera", ep))
     }
-    trimws(strsplit(sc, "\\(")[[1]][1])
-  }, USE.NAMES = FALSE)
+    "Unknown"
+  }, character(1), USE.NAMES = FALSE)
 }
 
 # ------------------------------------------------------------------------------
@@ -480,7 +469,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     is_anth  <- if ("is_active_anthesis" %in% names(df)) isTRUE(df$is_active_anthesis[i]) else TRUE
     bf_val   <- if ("two_delta_bic" %in% names(df) && is.finite(df$two_delta_bic[i])) as.numeric(df$two_delta_bic[i]) else if ("gmm_2_delta_bic" %in% names(df) && is.finite(df$gmm_2_delta_bic[i])) as.numeric(df$gmm_2_delta_bic[i]) else gmm_two_delta_bic
 
-    is_valid_taxon_str <- function(s) !is.null(s) && !is.na(s) && nzchar(s) && s != "Unknown" && (s %in% active_taxa || s %in% TARGET_TAXA || grepl("^(Packera|P\\.|Senecio)\\s+", s))
+    is_valid_taxon_str <- function(s) !is.null(s) && !is.na(s) && nzchar(s) && s != "Unknown" && (s %in% active_taxa || grepl("^(Packera|P\\.)\\s+", s))
     morph_is_taxon <- is_valid_taxon_str(morph_sp)
     vis_is_taxon   <- is_valid_taxon_str(vis_sp)
     edaph_is_taxon <- is_valid_taxon_str(edaph_sp)
@@ -776,8 +765,13 @@ build_triage_queue <- function(opts) {
   vouchers <- readr::read_csv(opts$vouchers, show_col_types = FALSE)
   vouchers$catalogNumber <- as.character(vouchers$catalogNumber)
   validate_upstream_contracts(vouchers_df = vouchers)
-  raw_sp_col <- if ("species_raw" %in% names(vouchers)) vouchers$species_raw else if ("scientificName" %in% names(vouchers)) vouchers$scientificName else vouchers$species_standardized
-  vouchers$species_standardized <- standardize_packera_taxon(raw_sp_col)
+  sp_cand <- rep("Unknown", nrow(vouchers))
+  for (sc in intersect(c("species_standardized", "scientificName", "species_raw"), names(vouchers))) {
+    v <- standardize_packera_taxon(vouchers[[sc]])
+    m <- sp_cand == "Unknown" & !is.na(v) & v != "Unknown"
+    sp_cand[m] <- v[m]
+  }
+  vouchers$species_standardized <- sp_cand
 
   if (file.exists(opts$multimodal_flags)) {
     mm_df <- readr::read_csv(opts$multimodal_flags, show_col_types = FALSE)
@@ -922,7 +916,7 @@ render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL, focal_t
     render_step07_synthesis_plate_pdf(df, out_pdf, cda_summary = cda_summary)
   }
   f_info <- .resolve_focal_taxon_slug(focal_taxon)
-  if (nzchar(f_info$taxon) && f_info$taxon != "Packera dubia" && nzchar(f_info$slug) && !is.null(out_pdf) && nzchar(out_pdf)) {
+  if (nzchar(f_info$taxon) && nzchar(f_info$slug) && !is.null(out_pdf) && nzchar(out_pdf)) {
     focal_pdf <- file.path(dirname(out_pdf), sprintf("Figure_Integrative_%s_Revision.pdf", f_info$slug))
     .copy_focal_taxon_artifact(out_pdf, focal_pdf)
     src_png <- sub("\\.pdf$", ".png", out_pdf, ignore.case = TRUE)
@@ -976,13 +970,6 @@ generate_taxonomic_revision_report <- function(df, opts) {
     sprintf("Taxon-adjusted marginal ANCOVA (`lm(PC1 ~ species_standardized + institutionCode)`): partial $\\eta^2 = %.4f$ ($q_{\\text{BH}} = %s$, %s).", batch_df$partial_eta_sq[1], as.character(batch_df$p_adj_bh[1]), batch_df$Batch_Effect_Status[1])
   } else "Taxon-adjusted marginal ANCOVA (`lm(PC1 ~ species_standardized + institutionCode)`): partial $\\eta^2 < 0.05$ across major herbaria."
 
-  nomen_citations <- c(
-    "Packera dubia"      = "(Spreng.) Trock & Mabb., Taxon 69(6): 1335 (2020). Basionym: *Senecio tomentosus* Michx. (1803).",
-    "Packera anonyma"    = "(Alph.Wood) W.A.Weber & Á.Löve, Phytologia 49(1): 44 (1981). Basionym: *Senecio anonymus* Alph.Wood (1870).",
-    "Packera paupercula" = "(Michx.) Á.Löve & D.Löve, Phytologia 33(5): 442 (1976). Basionym: *Senecio pauperculus* Michx. (1803).",
-    "Packera plattensis" = "(Nutt.) W.A.Weber & Á.Löve, Phytologia 49(1): 48 (1981). Basionym: *Senecio plattensis* Nutt. (1841)."
-  )
-
   fmt_med_iqr <- function(primary_vec, fallback_vec = NULL, digits = 1, unit_str = "") {
     v <- suppressWarnings(as.numeric(primary_vec))
     if (!is.null(fallback_vec)) {
@@ -1027,11 +1014,15 @@ generate_taxonomic_revision_report <- function(df, opts) {
 
     st_sp <- if ("taxonomic_treatment_subtype" %in% names(sub_sp)) as.character(sub_sp$taxonomic_treatment_subtype) else rep("Confirmed_Species", n_sp)
     cnt_sub <- function(lbl) sum(!is.na(st_sp) & st_sp == lbl)
-    head_sp <- if (sp %in% names(nomen_citations)) {
-      sprintf("- ***%s*** %s", sp, nomen_citations[[sp]])
-    } else {
-      sprintf("- ***%s***", sp)
-    }
+    sci_vals <- if ("scientificName" %in% names(sub_sp)) trimws(as.character(sub_sp$scientificName)) else character(0)
+    sci_vals <- sci_vals[!is.na(sci_vals) & nzchar(sci_vals) & !(tolower(sci_vals) %in% c("na", "unknown", "none", "null"))]
+    sp_esc <- gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", sp)
+    sci_with_auth <- sci_vals[grepl(paste0("^", sp_esc, "\\s+.+"), sci_vals, ignore.case = TRUE)]
+    auth_str <- if (length(sci_with_auth) > 0L) {
+      best_sci <- names(sort(table(sci_with_auth), decreasing = TRUE))[1L]
+      trimws(sub(paste0("^", sp_esc), "", best_sci, ignore.case = TRUE))
+    } else ""
+    head_sp <- if (nzchar(auth_str)) sprintf("- ***%s*** %s", sp, auth_str) else sprintf("- ***%s***", sp)
     treatment_lines <- c(
       treatment_lines,
       head_sp,
@@ -1081,7 +1072,7 @@ generate_taxonomic_revision_report <- function(df, opts) {
   )
   tmp_rep <- paste0(opts$output_report, ".tmp"); writeLines(md_lines, tmp_rep); file.rename(tmp_rep, opts$output_report)
 
-  if (nzchar(f_info$taxon) && f_info$taxon != "Packera dubia" && nzchar(f_info$slug)) {
+  if (nzchar(f_info$taxon) && nzchar(f_info$slug)) {
     focal_rep <- file.path(dirname(opts$output_report), sprintf("%s_Taxonomic_Revision_Summary.md", f_info$slug))
     if (normalizePath(focal_rep, mustWork = FALSE) != normalizePath(opts$output_report, mustWork = FALSE)) {
       tmp_frep <- paste0(focal_rep, ".tmp"); writeLines(md_lines, tmp_frep); file.rename(tmp_frep, focal_rep)

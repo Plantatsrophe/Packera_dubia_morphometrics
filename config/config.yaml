@@ -1,5 +1,5 @@
 # ==============================================================================
-# Configuration: Packera dubia Species Delimitation & Morphometrics Pipeline
+# Configuration: Packera Species Delimitation & Morphometrics Pipeline
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 # ==============================================================================
 
@@ -14,7 +14,8 @@ paths:
   masks_dir: "data/masks"
   leaf_efa_harmonics_csv: "data/tables/leaf_efa_harmonics.csv"
   morphometric_flags_csv: "data/tables/morphometric_flags.csv"
-  cda_biplot_pdf: "outputs/figures/cda_passive_projection.pdf"
+  cda_biplot_pdf: "outputs/figures/Figure_Integrative_Packera_Revision.pdf"
+  revision_report_md: "outputs/reports/Packera_Taxonomic_Revision_Summary.md"
   gmm_report_csv: "outputs/reports/gmm_bayes_factors_summary.csv"
   summary_log: "outputs/reports/voucher_ingestion_summary.log"
   model_weights: "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
@@ -30,60 +31,15 @@ models:
   pcd_weights_url: "" # Stock LeafMachine2 v2.2+ PLANT_LeafPriority weights are used by default without requiring custom fine-tuned PCD checkpoints
   pcd_weights_sha256: "" # Optional checksum verification
 
-# Target Focal Taxa, Synonyms, and Outgroups
+# Target Focal Taxa, Synonyms, and Outgroups (empty = dynamic genus-wide Packera discovery via GBIF)
 taxa:
-  target_species:
-    - "Packera dubia"
-    - "Packera tomentosa"
-    - "Packera anonyma"
-    - "Packera plattensis"
-    - "Packera paupercula"
-  synonyms:
-    "Packera dubia":
-      - "Senecio tomentosus"
-      - "Packera tomentosa"
-      - "Cineraria tomentosa"
-    "Packera anonyma":
-      - "Senecio smallii"
-      - "Senecio earlei"
-    "Packera paupercula":
-      - "Packera paupercula var. savannarum"
-      - "Packera paupercula var. pseudotomentosa"
-      - "Packera paupercula var. balsamitae"
-      - "Packera paupercula var. appalachiana"
-      - "Senecio pauperculus"
-      - "Senecio balsamitae"
-    "Packera plattensis":
-      - "Senecio plattensis"
-      - "Packera flavovirens"
-    "Packera schweinitziana":
-      - "Senecio schweinitzianus"
-      - "Senecio robbinsii"
-      - "Packera robbinsii"
-    "Packera serpenticola":
-      - "Packera eburnea"
-    "Packera millefolium":
-      - "Senecio millefolium"
-    "Packera aurea":
-      - "Senecio aureus"
-      - "Senecio gracilis"
-  outgroups:
-    - "Packera glabella"
-    - "Packera aurea"
-    - "Packera obovata"
-    - "Packera schweinitziana"
-    - "Packera serpenticola"
-    - "Packera millefolium"
+  target_species: []
+  synonyms: {}
+  outgroups: []
 
-# Backward compatibility: Target focal taxa for GBIF & Morphological Demarcation
+# Backward compatibility: Target focal taxa (empty = dynamic genus-wide Packera discovery)
 taxonomy:
-  target_taxa:
-    - "Packera dubia"
-    - "Packera tomentosa"
-    - "Senecio tomentosus"
-    - "Packera anonyma"
-    - "Packera plattensis"
-    - "Packera paupercula"
+  target_taxa: []
 
 # Pipeline Quality & Morphological Thresholds
 thresholds:
@@ -119,11 +75,6 @@ thresholds:
     min_solidity_dissected: 0.50
     sinus_defect_min_depth_ratio: 0.08
     min_bilateral_sinus_count: 3
-    taxa_with_lyrate_tendency:
-      - "Packera paupercula"
-      - "Packera plattensis"
-      - "Packera paupercula var. paupercula"
-      - "Packera paupercula var. savannarum"
 
   # Strict active/passive reference split & Dawid-Skene empirical precision weights (Slenker et al. 2022; Dawid & Skene 1979)
   # Tier_3_Bronze has weight 0.0 (passive projection only); Tier_1_Gold and Tier_2_Silver are weighted 1.0

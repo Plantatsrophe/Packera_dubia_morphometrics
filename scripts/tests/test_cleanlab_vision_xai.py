@@ -9,10 +9,12 @@ Foreground Attribution Auditing.
 """
 
 import importlib
+import inspect
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch as mock_patch
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -29,7 +31,13 @@ compute_out_of_fold_probabilities = mod_xai.compute_out_of_fold_probabilities
 compute_feature_space_ood_scores = mod_xai.compute_feature_space_ood_scores
 run_confident_learning_audit = mod_xai.run_confident_learning_audit
 compute_foreground_attention_ratio = mod_xai.compute_foreground_attention_ratio
-TARGET_TAXA = mod_xai.TARGET_TAXA
+
+TEST_SPECIES = [
+    "Packera aurea",
+    "Packera obovata",
+    "Packera schweinitziana",
+    "Packera cymbalaria",
+]
 
 
 class TestCleanlabVisionXAI(unittest.TestCase):
@@ -41,17 +49,60 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         cls.audit_csv = cls.repo_root / "data" / "tables" / "label_noise_audit.csv"
         cls.figure_png = cls.repo_root / "outputs" / "figures" / "GradCAM_audit_panel.png"
 
+    def test_zero_hardcoded_species_lists_in_phase2_and_phase5(self):
+        """Verify Phase 5 and Phase 2 helpers contain zero static species lists or hardcoded epithets."""
+        self.assertFalse(hasattr(mod_xai, "TARGET_TAXA"))
+        self.assertFalse(hasattr(mod_xai, "EASTERN_NA_PACKERA_TAXA"))
+        self.assertFalse(hasattr(mod_xai, "OKABE_ITO"))
+        self.assertNotIn("TARGET_TAXA", mod_xai.__all__)
+        self.assertNotIn("EASTERN_NA_PACKERA_TAXA", mod_xai.__all__)
+
+        xai_path = self.repo_root / "scripts" / "analysis" / "05_cleanlab_vision_xai.py"
+        xai_src = xai_path.read_text(encoding="utf-8")
+        self.assertLessEqual(len(xai_src.splitlines()), 800, "05_cleanlab_vision_xai.py must remain <= 800 lines.")
+
+        forbidden_epithets = (
+            "anonyma", "antennariifolia", "aurea", "crawfordii", "cymbalaria",
+            "dubia", "glabella", "hyperborealis", "indecora", "insulanus",
+            "memmingeri", "millefolium", "obovata", "paupercula", "plattensis",
+            "pseudaurea", "schweinitziana", "serpenticola", "spellenbergii", "tampicana",
+        )
+        for ep in forbidden_epithets:
+            self.assertNotIn(ep, xai_src.lower(), f"Hardcoded epithet '{ep}' must not appear in 05_cleanlab_vision_xai.py")
+
+        step02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
+        std02_src = inspect.getsource(step02._standardize_packera_species_py).lower()
+        fig02_src = inspect.getsource(step02.generate_step02_publication_figures).lower()
+        for ep in forbidden_epithets:
+            self.assertNotIn(ep, std02_src, f"Hardcoded epithet '{ep}' must not appear in _standardize_packera_species_py")
+            self.assertNotIn(ep, fig02_src, f"Hardcoded epithet '{ep}' must not appear in generate_step02_publication_figures")
+
     def test_taxonomic_standardization(self):
-        """Test species synonymy standardizer for the 4 core complex taxa."""
-        self.assertEqual(standardize_packera_taxon("Senecio smallii Britton"), "Packera anonyma")
-        self.assertEqual(standardize_packera_taxon("Packera anonyma (Alph.Wood) W.A.Weber"), "Packera anonyma")
-        self.assertEqual(standardize_packera_taxon("Senecio tomentosus Michx."), "Packera dubia")
-        self.assertEqual(standardize_packera_taxon("Packera tomentosa C.Jeffrey"), "Packera dubia")
-        self.assertEqual(standardize_packera_taxon("Packera dubia (Spreng.) Trock & Mabb."), "Packera dubia")
-        self.assertEqual(standardize_packera_taxon("Packera paupercula var. savannarum"), "Packera paupercula")
-        self.assertEqual(standardize_packera_taxon("Packera paupercula var. pseudotomentosa"), "Packera paupercula")
-        self.assertEqual(standardize_packera_taxon("Senecio plattensis Nutt."), "Packera plattensis")
+        """Test dynamic species synonymy standardizer and taxon pattern validator across arbitrary Packera species."""
+        self.assertEqual(standardize_packera_taxon("Packera aurea (L.) Á.Löve & D.Löve"), "Packera aurea")
+        self.assertEqual(standardize_packera_taxon("Senecio obovatus Muhl. ex Willd."), "Packera obovata")
+        self.assertEqual(standardize_packera_taxon("Senecio robbinsii Oakes"), "Packera schweinitziana")
+        self.assertEqual(standardize_packera_taxon("Senecio resedifolius Less."), "Packera cymbalaria")
+        self.assertEqual(standardize_packera_taxon("Packera cana (Hook.) W.A.Weber & Á.Löve"), "Packera cana")
+        self.assertEqual(standardize_packera_taxon("Packera streptanthifolia (Greene) W.A.Weber & Á.Löve"), "Packera streptanthifolia")
         self.assertEqual(standardize_packera_taxon(None), "Unknown")
+
+        for valid_tx in (
+            "Packera aurea",
+            "Packera cana",
+            "Packera × memmingeri",
+            "Packera x hybrida",
+            "Morphotype_K1",
+            "Ecotype_1_fine_soil_ph_Low",
+        ):
+            self.assertTrue(mod_xai._is_valid_packera_taxon(valid_tx), f"Expected valid taxon pattern: {valid_tx}")
+        for invalid_tx in ("", "Unknown", "Unassigned_Packera", "Senecio sp."):
+            self.assertFalse(mod_xai._is_valid_packera_taxon(invalid_tx), f"Expected invalid taxon pattern: {invalid_tx}")
+
+        # Verify lightweight regex fallback when harvester raises an exception
+        with mock_patch("scripts.core.harvester.standardize_packera_taxon", side_effect=RuntimeError("offline")):
+            self.assertEqual(standardize_packera_taxon("Packera cana (Hook.)"), "Packera cana")
+            self.assertEqual(standardize_packera_taxon("Packera x hybrida"), "Packera × hybrida")
 
     def test_neutralize_mounting_paper(self):
         """Test vectorized Otsu background neutralization replaces paper with RGB(128,128,128)."""
@@ -143,8 +194,8 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             {
                 "catalogNumber": f"SYNTH_{i:03d}",
                 "patch_path": f"/nonexistent/path/patch_{i}.jpg",
-                "label_idx": i % 4,
-                "taxon": TARGET_TAXA[i % 4],
+                "label_idx": i % len(TEST_SPECIES),
+                "taxon": TEST_SPECIES[i % len(TEST_SPECIES)],
             }
             for i in range(12)
         ]
@@ -288,7 +339,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         records_df = pd.DataFrame({
             "catalogNumber": ["CAT001", "CAT002", "CAT003", "CAT004"],
             "patch_path": ["/p1", "/p2", "/p3", "/p4"],
-            "species_raw": ["Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis"],
+            "species_raw": TEST_SPECIES,
             "label_idx": [0, 1, 2, 3],
             "determiner_tier": ["Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze", "Tier_1_Gold"],
             "foreground_attention_ratio": [0.88, 0.91, 0.79, 0.52],
@@ -298,7 +349,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             pred_probs=pred_probs,
             labels=labels,
             records_df=records_df,
-            class_names=TARGET_TAXA,
+            class_names=TEST_SPECIES,
             error_threshold=0.85,
             features=feats,
         )
@@ -584,7 +635,10 @@ class TestCleanlabVisionXAI(unittest.TestCase):
                         df_multi, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), tmp_fig_dir
                     )
             self.assertTrue(saved_multi["fig02a_png"].exists())
-            self.assertIn("$N = 3$ Taxa", captured_title_a[-1])
+            self.assertEqual(
+                captured_title_a[-1],
+                "A. Foliar Solidity vs. Blade Elongation ($N = 3$ Taxa)",
+            )
             self.assertNotIn("dubia", captured_title_a[-1])
 
             with mock_patch.dict("os.environ", {"PACKERA_FOCAL_TAXON": "Packera aurea"}, clear=False):
@@ -592,7 +646,22 @@ class TestCleanlabVisionXAI(unittest.TestCase):
                     step02.generate_step02_publication_figures(
                         df_multi, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), tmp_fig_dir
                     )
-            self.assertIn(r"$\it{Packera\ aurea}$ Complex", captured_title_a[-1])
+            self.assertEqual(
+                captured_title_a[-1],
+                r"A. Foliar Solidity vs. Blade Elongation ($\it{Packera\ aurea}$)",
+            )
+            self.assertNotIn("dubia", captured_title_a[-1])
+
+            df_single = df_multi[df_multi["species_standardized"] == "Packera obovata"].copy()
+            with mock_patch.dict("os.environ", {"PACKERA_FOCAL_TAXON": ""}, clear=False):
+                with mock_patch.object(step02, "_atomic_save_matplotlib_fig", side_effect=_spy_save02):
+                    step02.generate_step02_publication_figures(
+                        df_single, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), tmp_fig_dir
+                    )
+            self.assertEqual(
+                captured_title_a[-1],
+                r"A. Foliar Solidity vs. Blade Elongation ($\it{Packera\ obovata}$)",
+            )
             self.assertNotIn("dubia", captured_title_a[-1])
 
 

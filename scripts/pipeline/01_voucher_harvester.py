@@ -2,12 +2,12 @@
 """
 ===============================================================================
 Script: 01_voucher_harvester.py (Pipeline Alias)
-Project: Packera dubia Species Delimitation & Morphometrics Pipeline
+Project: Packera Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
     Pipeline module entry point re-exporting the voucher harvester CLI,
-    Eastern North American Packera taxon definitions, and Senecio basionym
+    dynamic genus-wide GBIF Packera species discovery, and dynamic taxon
     standardizer from scripts.data_prep.01_voucher_harvester and
     scripts.core.harvester.
 ===============================================================================
@@ -25,9 +25,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.core.config import PipelineConfig
 from scripts.core.harvester import (
-    EASTERN_NA_GBIF_QUERY_TAXA,
-    EASTERN_NA_PACKERA_TAXA,
     VoucherHarvester,
+    discover_genus_packera_species_gbif,
     setup_logger,
     standardize_packera_taxon,
 )

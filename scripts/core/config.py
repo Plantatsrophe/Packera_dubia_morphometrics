@@ -28,6 +28,7 @@ RUN_SCOPED_PATH_FIELDS: Set[str] = {
     "leaf_efa_harmonics_csv",
     "morphometric_flags_csv",
     "cda_biplot_pdf",
+    "revision_report_md",
     "gmm_report_csv",
     "summary_log",
     "tables_dir",
@@ -251,7 +252,8 @@ class PathsConfig:
     masks_dir: Path = PROJECT_ROOT / "data" / "masks"
     leaf_efa_harmonics_csv: Path = PROJECT_ROOT / "data" / "tables" / "leaf_efa_harmonics.csv"
     morphometric_flags_csv: Path = PROJECT_ROOT / "data" / "tables" / "morphometric_flags.csv"
-    cda_biplot_pdf: Path = PROJECT_ROOT / "outputs" / "figures" / "cda_passive_projection.pdf"
+    cda_biplot_pdf: Path = PROJECT_ROOT / "outputs" / "figures" / "Figure_Integrative_Packera_Revision.pdf"
+    revision_report_md: Path = PROJECT_ROOT / "outputs" / "reports" / "Packera_Taxonomic_Revision_Summary.md"
     gmm_report_csv: Path = PROJECT_ROOT / "outputs" / "reports" / "gmm_bayes_factors_summary.csv"
     summary_log: Path = PROJECT_ROOT / "outputs" / "reports" / "voucher_ingestion_summary.log"
     model_weights: Path = (
@@ -297,12 +299,7 @@ class DissectionConfig:
     min_solidity_dissected: float = 0.50
     sinus_defect_min_depth_ratio: float = 0.08
     min_bilateral_sinus_count: int = 3
-    taxa_with_lyrate_tendency: List[str] = field(default_factory=lambda: [
-        "Packera paupercula",
-        "Packera plattensis",
-        "Packera paupercula var. paupercula",
-        "Packera paupercula var. savannarum",
-    ])
+    taxa_with_lyrate_tendency: List[str] = field(default_factory=list)
 
     @property
     def default(self) -> float:
@@ -478,15 +475,13 @@ class ModelsConfig:
         / "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR"
         / "model_final.pth"
     )
-    pcd_weights_url: str = (
-        "https://github.com/Plantatsrophe/Packera_dubia_morphometrics/releases/download/v1.0-weights/lm2_packera_pcd_finetuned.pth"
-    )
+    pcd_weights_url: str = ""
     pcd_weights_sha256: str = ""
 
 
 @dataclass
 class PipelineConfig:
-    """Centralized, type-hinted configuration for Packera dubia pipeline."""
+    """Centralized, type-hinted configuration for Packera morphometrics pipeline."""
     paths: PathsConfig
     taxa: TaxaConfig
     thresholds: ThresholdsConfig
@@ -525,7 +520,8 @@ class PipelineConfig:
             masks_dir=rdir / "data" / "masks",
             leaf_efa_harmonics_csv=rdir / "data" / "tables" / "leaf_efa_harmonics.csv",
             morphometric_flags_csv=rdir / "data" / "tables" / "morphometric_flags.csv",
-            cda_biplot_pdf=rdir / "outputs" / "figures" / "cda_passive_projection.pdf",
+            cda_biplot_pdf=rdir / "outputs" / "figures" / "Figure_Integrative_Packera_Revision.pdf",
+            revision_report_md=rdir / "outputs" / "reports" / "Packera_Taxonomic_Revision_Summary.md",
             gmm_report_csv=rdir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv",
             summary_log=rdir / "logs" / "pipeline.log",
             tables_dir=rdir / "data" / "tables",
@@ -573,12 +569,12 @@ class PipelineConfig:
         }
         paths = PathsConfig(**p_kwargs)
 
-        taxa_dict = raw_cfg.get("taxa", {})
-        legacy_taxa = raw_cfg.get("taxonomy", {}).get("target_taxa", [])
+        taxa_dict = raw_cfg.get("taxa", {}) or {}
+        legacy_taxa = (raw_cfg.get("taxonomy") or {}).get("target_taxa", [])
         taxa = TaxaConfig(
-            target_species=taxa_dict.get("target_species", legacy_taxa),
-            synonyms=taxa_dict.get("synonyms", {}),
-            outgroups=taxa_dict.get("outgroups", []),
+            target_species=list(taxa_dict.get("target_species", legacy_taxa) or []),
+            synonyms=dict(taxa_dict.get("synonyms", {}) or {}),
+            outgroups=list(taxa_dict.get("outgroups", []) or []),
         )
 
         thresh_dict = raw_cfg.get("thresholds", {})
@@ -598,12 +594,7 @@ class PipelineConfig:
                     diss_dict.get("min_bilateral_sinus_count", 3)
                 ),
                 taxa_with_lyrate_tendency=list(
-                    diss_dict.get("taxa_with_lyrate_tendency", [
-                        "Packera paupercula",
-                        "Packera plattensis",
-                        "Packera paupercula var. paupercula",
-                        "Packera paupercula var. savannarum",
-                    ])
+                    diss_dict.get("taxa_with_lyrate_tendency", [])
                 ),
             )
         else:
@@ -807,7 +798,7 @@ DEFAULT_QUARANTINE_DIR = _DEFAULT_CONFIG.paths.quarantine_dir
 DEFAULT_MIN_MEGAPIXELS = _DEFAULT_CONFIG.thresholds.min_megapixels
 DEFAULT_MIN_FILE_SIZE_KB = _DEFAULT_CONFIG.thresholds.min_file_size_kb
 DEFAULT_MIN_SHARPNESS_LAPLACIAN = _DEFAULT_CONFIG.thresholds.min_sharpness_laplacian
-DEFAULT_TARGET_TAXA = _DEFAULT_CONFIG.taxa.target_species
+DEFAULT_TARGET_TAXA: List[str] = list(_DEFAULT_CONFIG.taxa.target_species)
 WESTERN_LONGITUDE_THRESHOLD = _DEFAULT_CONFIG.thresholds.western_longitude_threshold
 DEFAULT_GEOGRAPHIC_SCOPE = _DEFAULT_CONFIG.harvesting.geographic_scope
 DEFAULT_COUNTRIES = _DEFAULT_CONFIG.harvesting.countries

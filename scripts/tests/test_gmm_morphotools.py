@@ -83,22 +83,19 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertTrue(harmonics_path.exists(), "leaf_efa_harmonics.csv not found.")
 
     def test_taxonomic_standardization(self):
-        """Test standardization regex for synonymy in Packera dubia complex."""
+        """Test generic Packera binomial standardization across North American taxa."""
         def standardize_taxon(s):
-            if pd.isna(s): return "Unknown"
-            s = str(s).strip()
-            if re.search(r"anonym|smallii|earlei", s, re.I): return "Packera anonyma"
-            if re.search(r"tomentos|dubia", s, re.I): return "Packera dubia"
-            if re.search(r"plattensis|flavovirens", s, re.I): return "Packera plattensis"
-            if re.search(r"paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", s, re.I): return "Packera paupercula"
-            return s.split("(")[0].strip()
+            if pd.isna(s):
+                return "Unknown"
+            m = re.match(r"^(?:packera|p\.)\s*(?:x\s+|×\s*)?([a-z-]+)", str(s).strip().lower())
+            return f"Packera {m.group(1).lstrip('×-')}" if m else "Unknown"
 
-        self.assertEqual(standardize_taxon("Senecio tomentosus Michx."), "Packera dubia")
-        self.assertEqual(standardize_taxon("Packera tomentosa C.Jeffrey"), "Packera dubia")
         self.assertEqual(standardize_taxon("Packera dubia (Spreng.) Trock & Mabb."), "Packera dubia")
-        self.assertEqual(standardize_taxon("Senecio smallii Britton, 1893"), "Packera anonyma")
+        self.assertEqual(standardize_taxon("Packera anonyma (Alph.Wood) W.A.Weber"), "Packera anonyma")
         self.assertEqual(standardize_taxon("Packera paupercula var. savannarum R.R.Kowal"), "Packera paupercula")
-        self.assertEqual(standardize_taxon("Senecio plattensis Nutt."), "Packera plattensis")
+        self.assertEqual(standardize_taxon("Packera streptanthifolia (Greene) W.A.Weber & Á.Löve"), "Packera streptanthifolia")
+        self.assertEqual(standardize_taxon("P. sanguisorbae (DC.) C.Jeffrey"), "Packera sanguisorbae")
+        self.assertEqual(standardize_taxon("Packera x memmingeri"), "Packera memmingeri")
 
     def test_cda_mathematics_and_eigenvalues(self):
         """Verify Canonical Discriminant Analysis generalized eigenvalue decomposition."""
@@ -113,28 +110,30 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         valid = closed_df.dropna(subset=pca_cols).copy()
 
         def standardize_taxon(s):
-            if pd.isna(s): return "Unknown"
-            s = str(s).strip()
-            if re.search(r"anonym|smallii|earlei", s, re.I): return "Packera anonyma"
-            if re.search(r"tomentos|dubia", s, re.I): return "Packera dubia"
-            if re.search(r"plattensis|flavovirens", s, re.I): return "Packera plattensis"
-            if re.search(r"paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", s, re.I): return "Packera paupercula"
-            return s.split("(")[0].strip()
+            if pd.isna(s):
+                return "Unknown"
+            m = re.match(r"^(?:packera|p\.)\s*(?:x\s+|×\s*)?([a-z-]+)", str(s).strip().lower())
+            return f"Packera {m.group(1).lstrip('×-')}" if m else "Unknown"
 
-        valid["species_std"] = valid["species_raw"].apply(standardize_taxon)
-        target_taxa = ["Packera anonyma", "Packera dubia", "Packera plattensis", "Packera paupercula"]
-        is_active = (valid["determiner_tier"] == "Tier_1_Gold") & (valid["species_std"].isin(target_taxa))
+        sp_col = (
+            "species_standardized"
+            if "species_standardized" in valid.columns
+            else ("scientificName" if "scientificName" in valid.columns else "species_raw")
+        )
+        valid["species_std"] = valid[sp_col].apply(standardize_taxon)
+        active_taxa = sorted([t for t in valid["species_std"].unique() if str(t).startswith("Packera ")])
+        is_active = (valid["determiner_tier"] == "Tier_1_Gold") & (valid["species_std"].isin(active_taxa))
 
         X_a = valid.loc[is_active, pca_cols].values
         y_a = valid.loc[is_active, "species_std"].values
         N_a, p = X_a.shape
-        g = len(target_taxa)
+        g = len(active_taxa)
 
         grand_mean = np.mean(X_a, axis=0)
         B = np.zeros((p, p))
         W = np.zeros((p, p))
 
-        for grp in target_taxa:
+        for grp in active_taxa:
             sub_x = X_a[y_a == grp]
             if len(sub_x) > 0:
                 m_k = np.mean(sub_x, axis=0)
@@ -187,28 +186,30 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         valid = closed_df.dropna(subset=feature_cols).copy()
 
         def standardize_taxon(s):
-            if pd.isna(s): return "Unknown"
-            s = str(s).strip()
-            if re.search(r"anonym|smallii|earlei", s, re.I): return "Packera anonyma"
-            if re.search(r"tomentos|dubia", s, re.I): return "Packera dubia"
-            if re.search(r"plattensis|flavovirens", s, re.I): return "Packera plattensis"
-            if re.search(r"paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", s, re.I): return "Packera paupercula"
-            return s.split("(")[0].strip()
+            if pd.isna(s):
+                return "Unknown"
+            m = re.match(r"^(?:packera|p\.)\s*(?:x\s+|×\s*)?([a-z-]+)", str(s).strip().lower())
+            return f"Packera {m.group(1).lstrip('×-')}" if m else "Unknown"
 
-        valid["species_std"] = valid["species_raw"].apply(standardize_taxon)
-        target_taxa = ["Packera anonyma", "Packera dubia", "Packera plattensis", "Packera paupercula"]
-        is_active = (valid["determiner_tier"] == "Tier_1_Gold") & (valid["species_std"].isin(target_taxa))
+        sp_col = (
+            "species_standardized"
+            if "species_standardized" in valid.columns
+            else ("scientificName" if "scientificName" in valid.columns else "species_raw")
+        )
+        valid["species_std"] = valid[sp_col].apply(standardize_taxon)
+        active_taxa = sorted([t for t in valid["species_std"].unique() if str(t).startswith("Packera ")])
+        is_active = (valid["determiner_tier"] == "Tier_1_Gold") & (valid["species_std"].isin(active_taxa))
 
         X_a = valid.loc[is_active, feature_cols].values
         y_a = valid.loc[is_active, "species_std"].values
         N_a, p = X_a.shape
-        g = len(target_taxa)
+        g = len(active_taxa)
 
         grand_mean = np.mean(X_a, axis=0)
         B = np.zeros((p, p))
         W = np.zeros((p, p))
 
-        for grp in target_taxa:
+        for grp in active_taxa:
             sub_x = X_a[y_a == grp]
             if len(sub_x) > 0:
                 m_k = np.mean(sub_x, axis=0)
@@ -755,36 +756,46 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 self.assertTrue(np.isfinite(float(sing_out[col].iloc[0])), f"Singleton {col} must be finite.")
 
     def test_step02_and_preflight_dynamic_non_default_packera_support(self):
-        """Verify Step 02 standardization/figures, config.yaml, and run_pipeline.sh support non-default Packera species."""
+        """Verify Step 02 standardization/figures, config.yaml, and run_pipeline.sh support dynamic genus-wide Packera species."""
         import importlib
+        from unittest.mock import patch
         from scripts.core.config import PipelineConfig
 
         seg_mod = importlib.import_module("scripts.pipeline.02_segment_and_extract")
         std_fn = seg_mod._standardize_packera_species_py
         expected_map = {
             "Packera schweinitziana": "Packera schweinitziana",
-            "Senecio schweinitzianus": "Packera schweinitziana",
-            "Senecio robbinsii": "Packera schweinitziana",
             "Packera serpenticola": "Packera serpenticola",
-            "Packera eburnea": "Packera serpenticola",
-            "Packera millefolium": "Packera millefolium",
-            "Senecio millefolium": "Packera millefolium",
-            "Packera aurea": "Packera aurea",
-            "Senecio aureus": "Packera aurea",
+            "Packera millefolium (Torr. & A.Gray) W.A.Weber & Á.Löve": "Packera millefolium",
+            "Packera aurea (L.) Á.Löve & D.Löve": "Packera aurea",
+            "Packera streptanthifolia (Greene) W.A.Weber & Á.Löve": "Packera streptanthifolia",
+            "Packera cymbalaria (Pursh) W.A.Weber & Á.Löve": "Packera cymbalaria",
+            "Packera sanguisorbae (DC.) C.Jeffrey": "Packera sanguisorbae",
         }
         for raw_name, canon_name in expected_map.items():
             self.assertEqual(std_fn(raw_name), canon_name, f"Step 02 failed to standardize {raw_name!r}")
 
-        # Verify Step 02 publication figures render 8 species (core 4 + 4 additional) with distinct colors/markers
+        with patch(
+            "scripts.core.harvester.species.name_backbone",
+            return_value={
+                "matchType": "EXACT",
+                "status": "SYNONYM",
+                "species": "Packera schweinitziana",
+                "canonicalName": "Senecio robbinsii",
+            },
+        ), patch("scripts.core.harvester.species.name_usage", return_value={"results": []}):
+            self.assertEqual(std_fn("Senecio robbinsii"), "Packera schweinitziana")
+
+        # Verify Step 02 publication figures render 8 diverse North American species with distinct colors/markers
         taxa_8 = [
-            "Packera anonyma",
-            "Packera dubia",
-            "Packera paupercula",
-            "Packera plattensis",
             "Packera aurea",
+            "Packera cana",
+            "Packera cymbalaria",
             "Packera millefolium",
+            "Packera sanguisorbae",
             "Packera schweinitziana",
             "Packera serpenticola",
+            "Packera streptanthifolia",
         ]
         fig_rows = []
         for idx, sp in enumerate(taxa_8):
@@ -812,22 +823,14 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertTrue(Path(saved["fig02a_pdf"]).exists())
             self.assertTrue(Path(saved["fig02b_pdf"]).exists())
 
-        # Verify config.yaml synonyms & outgroups and run_pipeline.sh >= 2 outgroup condition
+        # Verify config.yaml dynamic genus-wide mode and run_pipeline.sh dynamic outgroups
         cfg = PipelineConfig.from_yaml()
-        for sp_key, req_syn in [
-            ("Packera schweinitziana", "Senecio schweinitzianus"),
-            ("Packera schweinitziana", "Senecio robbinsii"),
-            ("Packera serpenticola", "Packera eburnea"),
-            ("Packera millefolium", "Senecio millefolium"),
-            ("Packera aurea", "Senecio aureus"),
-        ]:
-            self.assertIn(sp_key, cfg.taxa.synonyms)
-            self.assertIn(req_syn, cfg.taxa.synonyms[sp_key])
-        for out_sp in ("Packera schweinitziana", "Packera serpenticola", "Packera millefolium", "Packera aurea"):
-            self.assertIn(out_sp, cfg.taxa.outgroups)
+        self.assertEqual(cfg.taxa.target_species, [])
+        self.assertEqual(cfg.taxa.outgroups, [])
 
         sh_src = (PROJECT_ROOT / "run_pipeline.sh").read_text(encoding="utf-8")
-        self.assertIn("base_outgroups = present_taxa if len(present_taxa) >= 2 else list(mod05.TARGET_TAXA)", sh_src)
+        self.assertIn("base_outgroups = present_taxa", sh_src)
+        self.assertNotIn("mod05.TARGET_TAXA", sh_src)
 
     def test_dual_unsupervised_morphotype_and_supervised_epa_ecoregion_cda(self):
         """Verify Step 04 runs BOTH Track 1 unsupervised Morphotype_K* CDA and Track 2 supervised EPA Level III Ecoregion CDA."""

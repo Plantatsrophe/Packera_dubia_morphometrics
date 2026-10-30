@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script: run_pipeline.sh
-# Project: Packera dubia Species Delimitation & Morphometrics Pipeline
+# Project: Packera Species Delimitation & Morphometrics Pipeline
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
-#   End-to-end run-scoped orchestrator for the 7-phase Packera dubia pipeline.
+#   End-to-end run-scoped orchestrator for the 7-phase Packera morphometrics pipeline.
 #   Every execution writes all generated artifacts (masks, contours, cropped
 #   patches, CSV tables, reports, logs, and publication figures) into a
 #   self-contained run directory:
@@ -35,7 +35,6 @@ GOLD_ONLY=false
 DETERMINER_TIER=""
 EXCLUDE_MISIDENTIFIED=false
 TRIAGE_SOURCE="ALL"
-ALL_EASTERN_TAXA=false
 GEOGRAPHIC_SCOPE=""
 INCLUDE_WESTERN=false
 COUNTRIES_RAW=()
@@ -163,10 +162,6 @@ while [[ $# -gt 0 ]]; do
       fi
       shift
       ;;
-    --all-eastern-taxa)
-      ALL_EASTERN_TAXA=true
-      shift
-      ;;
     --taxon|--taxa)
       shift
       while [[ $# -gt 0 && "$1" != -* ]]; do
@@ -260,6 +255,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+CUSTOM_TAXA_CSV="$(IFS=,; echo "${CUSTOM_TAXA_RAW[*]:-}")"
 EXCLUDE_TAXON_CSV="$(IFS=,; echo "${EXCLUDE_TAXA_RAW[*]:-}")"
 
 if [[ -n "${FOCAL_TAXON}" ]]; then
@@ -296,7 +292,7 @@ START_TIME="$(date -Iseconds)"
 GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
 
 echo "=============================================================================="
-echo "Packera dubia Morphometrics Pipeline — Run-Scoped Execution"
+echo "Packera Morphometrics Pipeline — Run-Scoped Execution"
 echo "  Run ID          : ${RUN_ID}"
 echo "  Run Directory   : ${RUN_DIR}"
 echo "  Start Timestamp : ${START_TIME}"
@@ -373,14 +369,10 @@ if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
   if [[ "${SKIP_HARVEST}" == "false" && ( -n "${FORCE_FLAG}" || ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ) ]]; then
     echo "[Step 01/07] Running Voucher Harvester (with high-res image downloads & quality audit)..."
     HARVEST_TAXON_ARGS=()
-    if [[ "${ALL_EASTERN_TAXA}" == "true" ]]; then
-      HARVEST_TAXON_ARGS=(--all-eastern-taxa "${EXPAND_SYNONYMS_FLAG}")
-    elif [[ ${#CUSTOM_TAXA_RAW[@]} -gt 0 ]]; then
+    if [[ ${#CUSTOM_TAXA_RAW[@]} -gt 0 ]]; then
       HARVEST_TAXON_ARGS=(--taxon "${CUSTOM_TAXA_RAW[@]}" "${EXPAND_SYNONYMS_FLAG}")
-    elif [[ "${INTRASPECIFIC_MODE}" == "true" && -n "${FOCAL_TAXON}" ]]; then
+    elif [[ -n "${FOCAL_TAXON}" && "${INTRASPECIFIC_MODE}" == "true" ]]; then
       HARVEST_TAXON_ARGS=(--taxon "${FOCAL_TAXON}" "${EXPAND_SYNONYMS_FLAG}")
-    elif [[ -n "${FOCAL_TAXON}" ]]; then
-      HARVEST_TAXON_ARGS=(--taxon "${FOCAL_TAXON}" "Packera dubia" "Packera anonyma" "Packera paupercula" "Packera plattensis" "${EXPAND_SYNONYMS_FLAG}")
     else
       HARVEST_TAXON_ARGS=("${EXPAND_SYNONYMS_FLAG}")
     fi
@@ -438,9 +430,8 @@ fi
 # Executed BEFORE running Steps 02-07
 # ------------------------------------------------------------------------------
 run_preflight_subset_filter() {
-  echo "[Preflight] Balancing/filtering ${RUN_DIR}/data/tables/ for focal='${FOCAL_TAXON:-}' exclude='${EXCLUDE_TAXON_CSV:-}' determiner_tier='${DETERMINER_TIER:-}' exclude_misidentified='${EXCLUDE_MISIDENTIFIED:-false}' spatial_thin_km='${SPATIAL_THIN_KM:-0}' max_per_state='${MAX_PER_STATE:-}' max_per_region='${MAX_PER_REGION:-}' no_spatial_weights='${NO_SPATIAL_WEIGHTS:-false}'..."
+  echo "[Preflight] Balancing/filtering ${RUN_DIR}/data/tables/ for taxa='${CUSTOM_TAXA_CSV:-}' focal='${FOCAL_TAXON:-}' exclude='${EXCLUDE_TAXON_CSV:-}' determiner_tier='${DETERMINER_TIER:-}' exclude_misidentified='${EXCLUDE_MISIDENTIFIED:-false}' spatial_thin_km='${SPATIAL_THIN_KM:-0}' max_per_state='${MAX_PER_STATE:-}' max_per_region='${MAX_PER_REGION:-}' no_spatial_weights='${NO_SPATIAL_WEIGHTS:-false}'..."
   "${PYTHON_MAIN}" -c "
-import importlib
 import os
 import re
 import shutil
@@ -464,15 +455,13 @@ max_per_state = int(sys.argv[13]) if len(sys.argv) > 13 and sys.argv[13].strip()
 max_per_region = int(sys.argv[14]) if len(sys.argv) > 14 and sys.argv[14].strip() else None
 no_spatial_weights = sys.argv[15].lower() == 'true' if len(sys.argv) > 15 else False
 reuse_canonical = sys.argv[16].lower() == 'true' if len(sys.argv) > 16 else False
+custom_taxa_csv = sys.argv[17].strip() if len(sys.argv) > 17 else ''
 
 from scripts.core.harvester import (
     select_cascading_outgroup_anchors,
     spatially_balance_and_thin_vouchers,
-    standardize_packera_taxon as _harvester_std_taxon,
+    standardize_packera_taxon,
 )
-mod05 = importlib.import_module('scripts.analysis.05_cleanlab_vision_xai')
-def standardize_packera_taxon(raw_val):
-    return _harvester_std_taxon(raw_val) or mod05.standardize_packera_taxon(raw_val)
 
 ALLOWED_TREATMENT_SUBTYPES = {
     'Confirmed_Species',
@@ -489,6 +478,15 @@ tier_map = {
 }
 target_tier = tier_map.get(determiner_tier_raw.lower(), determiner_tier_raw) if determiner_tier_raw else ''
 
+custom_taxa = set()
+if custom_taxa_csv:
+    for item in custom_taxa_csv.split(','):
+        item = item.strip()
+        if item:
+            std_item = standardize_packera_taxon(item)
+            if std_item:
+                custom_taxa.add(std_item)
+
 exclude_taxa = set()
 if exclude_csv:
     for item in exclude_csv.split(','):
@@ -500,8 +498,19 @@ tables_dir = run_dir / 'data' / 'tables'
 csv_path = tables_dir / 'curated_vouchers.csv'
 df = pd.read_csv(csv_path)
 initial_voucher_count = len(df)
-sp_col = 'species_raw' if 'species_raw' in df.columns else ('scientificName' if 'scientificName' in df.columns else 'species')
-df['species_standardized'] = df[sp_col].apply(standardize_packera_taxon)
+if 'scientificName' in df.columns and 'species_raw' in df.columns:
+    df['species_standardized'] = [
+        standardize_packera_taxon(sn) or standardize_packera_taxon(sr)
+        for sn, sr in zip(df['scientificName'], df['species_raw'])
+    ]
+else:
+    sp_col = 'scientificName' if 'scientificName' in df.columns else ('species_raw' if 'species_raw' in df.columns else 'species')
+    df['species_standardized'] = df[sp_col].apply(standardize_packera_taxon)
+
+if custom_taxa:
+    before_custom_n = len(df)
+    df = df[df['species_standardized'].isin(custom_taxa)].copy()
+    print(f'[Preflight: Custom Taxa] Restricted strictly to {sorted(custom_taxa)}: retained {len(df)} / {before_custom_n} vouchers.')
 
 misidentified_cats = set()
 if exclude_misidentified:
@@ -602,7 +611,7 @@ if focal_raw:
         print(f'[Strategy 2: Pure Intraspecific] Retained {len(subset_df)} {focal_taxon} vouchers (0 outgroup anchors).')
     else:
         present_taxa = sorted([t for t in df['species_standardized'].dropna().unique().tolist() if str(t).startswith('Packera ')])
-        base_outgroups = present_taxa if len(present_taxa) >= 2 else list(mod05.TARGET_TAXA)
+        base_outgroups = present_taxa
         outgroup_taxa = [t for t in base_outgroups if t != focal_taxon and t not in exclude_taxa]
 
         if auto_neighbors_flag:
@@ -728,7 +737,7 @@ _write_atomic(subset_df, csv_path)
 keep_cats = set(subset_df['catalogNumber'].astype(str).str.strip())
 
 has_subset_filter = bool(
-    focal_raw or exclude_csv or target_tier or exclude_misidentified or has_spatial_thin_or_quota or len(subset_df) < initial_voucher_count
+    custom_taxa_csv or focal_raw or exclude_csv or target_tier or exclude_misidentified or has_spatial_thin_or_quota or len(subset_df) < initial_voucher_count
 )
 
 if has_subset_filter:
@@ -742,7 +751,7 @@ if has_subset_filter:
                 _write_atomic(tdf_sub, tp)
                 print(f'  Filtered {tbl_name}: {len(tdf_sub)} / {len(tdf)} rows')
 
-if bool(focal_raw or exclude_csv or target_tier or exclude_misidentified or has_spatial_thin_or_quota):
+if bool(custom_taxa_csv or focal_raw or exclude_csv or target_tier or exclude_misidentified or has_spatial_thin_or_quota):
     # Symlink matching .jpg patches from canonical root data/cropped_patches/
     run_patches_root = run_dir / 'data' / 'cropped_patches'
     if run_patches_root.is_symlink():
@@ -780,7 +789,7 @@ elif reuse_canonical:
         elif dst_sub.exists():
             shutil.rmtree(dst_sub)
         os.symlink(src_sub, dst_sub)
-" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}" "${SPATIAL_THIN_KM:-0}" "${MAX_PER_STATE:-}" "${MAX_PER_REGION:-}" "${NO_SPATIAL_WEIGHTS:-false}" "${REUSE_CANONICAL_DATA:-false}"
+" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}" "${SPATIAL_THIN_KM:-0}" "${MAX_PER_STATE:-}" "${MAX_PER_REGION:-}" "${NO_SPATIAL_WEIGHTS:-false}" "${REUSE_CANONICAL_DATA:-false}" "${CUSTOM_TAXA_CSV:-}"
 }
 
 run_preflight_subset_filter
@@ -944,6 +953,14 @@ fi
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 7 ]]; then
   echo "[Step 07/07] Running Triage Dashboard Synthesis..."
+  if [[ -n "${FOCAL_TAXON}" ]]; then
+    FOCAL_TAXON_SLUG="$(printf '%s' "${FOCAL_TAXON}" | sed -E 's/[^A-Za-z0-9]+/_/g; s/^_+|_+$//g')"
+    STEP07_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_${FOCAL_TAXON_SLUG}_Revision.pdf"
+    STEP07_REPORT="${RUN_DIR}/outputs/reports/${FOCAL_TAXON_SLUG}_Taxonomic_Revision_Summary.md"
+  else
+    STEP07_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_Packera_Revision.pdf"
+    STEP07_REPORT="${RUN_DIR}/outputs/reports/Packera_Taxonomic_Revision_Summary.md"
+  fi
   Rscript scripts/analysis/07_triage_dashboard_synthesis.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
@@ -953,8 +970,8 @@ if [[ "${START_STEP}" -le 7 ]]; then
     --niche-summary "${RUN_DIR}/outputs/reports/multimodal_spatial_rf_summary.csv" \
     --output-queue "${RUN_DIR}/data/tables/triage_queue.csv" \
     --output-triage "${RUN_DIR}/outputs/reports/final_curation_triage.csv" \
-    --output-figure "${RUN_DIR}/outputs/figures/Figure_Integrative_Packera_dubia_Revision.pdf" \
-    --output-report "${RUN_DIR}/outputs/reports/Packera_dubia_Taxonomic_Revision_Summary.md" \
+    --output-figure "${STEP07_FIGURE}" \
+    --output-report "${STEP07_REPORT}" \
     --output-html "${RUN_DIR}/outputs/reports/Triage_Dashboard_Interactive.html" \
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}"

@@ -258,7 +258,7 @@ parse_args_robust <- function() {
     optparse::make_option(c("--intraspecific-mode"), action = "store_true",
       default = FALSE, help = "Enable pure single-taxon / intraspecific morphotype delimitation mode [default: %default]"),
     optparse::make_option(c("--focal-taxon"), type = "character",
-      default = "", help = "Optional focal taxon name (e.g. Packera dubia) [default: %default]"),
+      default = "", help = "Optional focal Packera taxon name [default: %default]"),
     optparse::make_option(c("--demo"), action = "store_true",
       default = FALSE, help = "Enable synthetic fallback data for demonstration/test runs [default: %default]")
   )
@@ -288,22 +288,19 @@ standardize_packera_taxon <- function(s_vec) {
     res <- .base_std_taxon(s_vec)
     return(ifelse(is.na(res), "Unknown", res))
   }
-  sapply(s_vec, function(s) {
-    if (is.na(s) || nchar(trimws(s)) == 0) return("Unknown")
+  vapply(as.character(s_vec), function(s) {
+    if (is.na(s) || !nzchar(trimws(s))) return("Unknown")
     sc <- trimws(s)
-    if (grepl("anonym|smallii|earlei", sc, ignore.case = TRUE)) return("Packera anonyma")
-    if (grepl("tomentos|dubia", sc, ignore.case = TRUE)) return("Packera dubia")
-    if (grepl("plattensis|flavovirens", sc, ignore.case = TRUE)) return("Packera plattensis")
-    if (grepl("paupercul|balsamitae|savannarum|pseudotomentosa|appalachiana", sc, ignore.case = TRUE)) return("Packera paupercula")
-    if (grepl("aureus|aurea", sc, ignore.case = TRUE)) return("Packera aurea")
-    if (grepl("robbinsii|schweinitz", sc, ignore.case = TRUE)) return("Packera schweinitziana")
-    if (grepl("serpenticol", sc, ignore.case = TRUE)) return("Packera serpenticola")
-    if (grepl("^(Packera|Senecio)\\s+[a-z-]+", sc, ignore.case = TRUE)) {
-      ep <- tolower(sub("^(?:Packera|Senecio)\\s+([a-z-]+).*$", "\\1", sc, ignore.case = TRUE))
-      return(paste("Packera", ep))
+    if (tolower(sc) %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_packera")) return("Unknown")
+    if (grepl("^Morphotype_K[0-9]+$|^Ecotype_|^LatTertile_|_Coastal$|_Outcrop$|\\[K[0-9]+\\]$", sc, ignore.case = TRUE)) return(sc)
+    sl <- tolower(sc)
+    if (grepl("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?[a-z-]+", sl)) {
+      ep <- sub("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?([a-z-]+).*$", "\\1", sl)
+      ep <- sub("^[x×-]+", "", ep)
+      if (nzchar(ep) && !(ep %in% c("sp", "spp", "cf", "aff", "indet", "unknown", "na"))) return(paste("Packera", ep))
     }
-    return(trimws(strsplit(sc, "\\(")[[1]][1]))
-  }, USE.NAMES = FALSE)
+    "Unknown"
+  }, character(1), USE.NAMES = FALSE)
 }
 
 get_active_packera_taxa <- function(species_vec) {
@@ -2949,7 +2946,13 @@ main <- function() {
   if (!file.exists(opts$vouchers)) stop("Missing vouchers file: ", opts$vouchers)
   vouchers_df <- readr::read_csv(opts$vouchers, show_col_types = FALSE)
   vouchers_df$catalogNumber <- as.character(vouchers_df$catalogNumber)
-  vouchers_df$species_standardized <- standardize_packera_taxon(vouchers_df$species_raw)
+  sp_cand <- rep("Unknown", nrow(vouchers_df))
+  for (sc in intersect(c("species_standardized", "scientificName", "species_raw"), names(vouchers_df))) {
+    v <- standardize_packera_taxon(vouchers_df[[sc]])
+    m <- sp_cand == "Unknown" & !is.na(v) & v != "Unknown"
+    sp_cand[m] <- v[m]
+  }
+  vouchers_df$species_standardized <- sp_cand
 
   # Merge Morphometrics if present (resolve morphometric_flags.csv <-> morphometrics_misidentification_flags.csv)
   if (!file.exists(opts$morphometrics)) {

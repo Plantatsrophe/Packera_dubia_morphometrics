@@ -2483,58 +2483,32 @@ def _atomic_save_matplotlib_fig(fig: Any, out_base_path: Path, dpi: int = 300) -
 
 
 def _standardize_packera_species_py(raw_val: Any) -> str:
-    """Delegate taxonomic standardization to scripts.core.harvester.standardize_packera_taxon without forcing 'Packera dubia'."""
+    """Delegate taxonomic standardization to scripts.core.harvester.standardize_packera_taxon with generic binomial fallback."""
     if raw_val is None or pd.isna(raw_val):
         return "Unassigned_Packera"
     s_raw = str(raw_val).strip()
-    if not s_raw or s_raw.lower() in {"none", "nan", "null", "na", "unknown"}:
+    if not s_raw or s_raw.lower() in {"none", "nan", "null", "na", "unknown", "unassigned_packera"}:
         return "Unassigned_Packera"
     try:
         from scripts.core.harvester import standardize_packera_taxon
 
         std = standardize_packera_taxon(s_raw)
-        if std:
-            return std
+        if std and str(std).strip() and str(std).strip().lower() not in {"none", "nan", "null", "na", "unknown", "unassigned_packera"}:
+            return str(std).strip()
     except Exception:
-        # Environment-isolated fallback (e.g., .venv_LM2 without pygbif/aiohttp) mirroring harvester rules
-        s = s_raw.lower()
-        rules = (
-            (r"crawfordii|crawford", "Packera crawfordii"),
-            (r"memmingeri|memminger|packera[x×]memmingeri", "Packera memmingeri"),
-            (r"millefoli", "Packera millefolium"),
-            (r"pseudaure|semicordat", "Packera pseudaurea"),
-            (r"paupercul|balsamitae|savannarum|appalachiana", "Packera paupercula"),
-            (r"plattensis|pseudotomentos|flavovirens", "Packera plattensis"),
-            (r"tomentos|dubia|dubius|alabamensis", "Packera dubia"),
-            (r"anonym|smallii|earlei", "Packera anonyma"),
-            (r"antennariifoli", "Packera antennariifolia"),
-            (r"\baurea\b|\baureus\b|gracilis", "Packera aurea"),
-            (r"glabell|lobatus|lobata", "Packera glabella"),
-            (r"hyperboreal", "Packera hyperborealis"),
-            (r"cymbalaria|resedifoli", "Packera cymbalaria"),
-            (r"indecor", "Packera indecora"),
-            (r"insulan", "Packera insulanus"),
-            (r"obovat|rotundus|rotunda|elliottii", "Packera obovata"),
-            (r"schweinitzian|robbinsii", "Packera schweinitziana"),
-            (r"serpenticol|eburnea|eburneus|packeraeburnea", "Packera serpenticola"),
-            (r"spellenberg", "Packera spellenbergii"),
-            (r"tampican|imparipinnat", "Packera tampicana"),
-            (r"vulgaris", "Packera vulgaris"),
-        )
-        for pat, canonical in rules:
-            if re.search(pat, s):
-                return canonical
-    m = re.match(r"^packera\s*(?:[x×]\s*)?([a-z-]+)", s_raw.lower())
-    if m:
-        epithet = m.group(1).lstrip("x×-")
-        if epithet:
-            return f"Packera {epithet}"
+        pass
     cleaned = s_raw.split("(")[0].strip()
     m_binom = re.match(r"^([A-Za-z][a-z]+)\s+(?:([x×])\s+)?([a-z][a-z-]+)\b", cleaned)
     if m_binom:
         genus = m_binom.group(1).capitalize()
         hyb = "× " if m_binom.group(2) else ""
         return f"{genus} {hyb}{m_binom.group(3).lower()}"
+    m_pack = re.match(r"^packera\s*(?:([x×])(?=\s)|([×]))?\s*([a-z][a-z-]*)", s_raw.lower())
+    if m_pack:
+        hyb = "× " if (m_pack.group(1) or m_pack.group(2)) else ""
+        epithet = m_pack.group(3).lstrip("×-")
+        if epithet:
+            return f"Packera {hyb}{epithet}"
     return cleaned if cleaned else "Unassigned_Packera"
 
 
@@ -2973,7 +2947,7 @@ def generate_step02_publication_figures(
         SPECIES_PALETTE[sp_name] = EXTENDED_OKABE_ITO[idx_sp % len(EXTENDED_OKABE_ITO)]
         SPECIES_MARKERS[sp_name] = HOLLOW_MARKER_CYCLE[idx_sp % len(HOLLOW_MARKER_CYCLE)]
         if sp_name.startswith("Packera "):
-            ep_tex = sp_name[len("Packera "):].strip().replace("_", r"\ ").replace(" ", r"\ ")
+            ep_tex = sp_name[len("Packera "):].strip().replace("_", " ").replace(" ", r"\ ")
             SPECIES_ITALIC[sp_name] = (
                 rf"$\it{{Packera\ {ep_tex}}}$" if idx_sp == 0 else rf"$\it{{P.\ {ep_tex}}}$"
             )
@@ -3030,13 +3004,14 @@ def generate_step02_publication_figures(
 
     env_focal = os.environ.get("PACKERA_FOCAL_TAXON", "").strip()
     focal_std = _standardize_packera_species_py(env_focal) if env_focal else (present_sp[0] if len(present_sp) == 1 else "")
-    if focal_std and focal_std.startswith("Packera "):
-        focal_ep = focal_std[len("Packera "):].strip().replace("_", r"\ ").replace(" ", r"\ ")
-        panel_a_title = rf"A. Foliar Solidity vs. Blade Elongation ($\it{{Packera\ {focal_ep}}}$ Complex)"
-    elif len(present_sp) == 1:
-        panel_a_title = f"A. Foliar Solidity vs. Blade Elongation ({present_sp[0].replace('_', ' ')} Complex)"
+    if focal_std and focal_std != "Unassigned_Packera":
+        sp_title = focal_std.replace("_", " ").replace(" ", r"\ ")
+        panel_a_title = r"A. Foliar Solidity vs. Blade Elongation ($\it{" + sp_title + r"}$)"
+    elif len(present_sp) == 1 and present_sp[0] != "Unassigned_Packera":
+        sp_title = present_sp[0].replace("_", " ").replace(" ", r"\ ")
+        panel_a_title = r"A. Foliar Solidity vs. Blade Elongation ($\it{" + sp_title + r"}$)"
     else:
-        panel_a_title = rf"A. Foliar Solidity vs. Blade Elongation ($\it{{Packera}}$ Taxon Complex ($N = {len(present_sp)}$ Taxa))"
+        panel_a_title = f"A. Foliar Solidity vs. Blade Elongation ($N = {len(present_sp)}$ Taxa)"
 
     ax_sc.axvline(0.72, color="#222222", linestyle="--", linewidth=1.3)
     ax_sc.axvline(0.48, color="#CC79A7", linestyle=":", linewidth=1.2)

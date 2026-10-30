@@ -18,7 +18,6 @@ from PIL import Image
 
 from scripts.core.config import (
     DEFAULT_MIN_MEGAPIXELS,
-    DEFAULT_TARGET_TAXA,
     EXCLUDED_WESTERN_STATES,
     WESTERN_LONGITUDE_THRESHOLD,
 )
@@ -449,7 +448,10 @@ class TestVoucherHarvesterCLI(unittest.TestCase):
         args = parser.parse_args([])
 
         self.assertIsInstance(args.taxa, list)
-        self.assertGreater(len(args.taxa), 0)
+        self.assertEqual(args.taxa, [])
+        self.assertFalse(hasattr(args, "all_eastern_taxa"))
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--all-eastern-taxa"])
         self.assertEqual(args.max_records, 5000)
         self.assertEqual(args.min_megapixels, 8.0)
         self.assertEqual(args.min_file_size_kb, 500.0)
@@ -1349,8 +1351,24 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
         # Harvested synonyms must map back to canonical Packera <epithet>
         self.assertEqual(standardize_packera_taxon("Senecio neomexicanus A.Gray"), "Packera neomexicana")
         self.assertEqual(standardize_packera_taxon("Cineraria neomexicana"), "Packera neomexicana")
-        self.assertEqual(standardize_packera_taxon("Senecio streptanthifolius Greene"), "Packera streptanthifolia")
         self.assertEqual(standardize_packera_taxon("Packera cana (Hook.) W.A.Weber & Á.Löve"), "Packera cana")
+
+        # Unseen historical Senecio synonym resolves dynamically via GBIF Backbone lookup
+        mock_strep = MagicMock()
+        mock_strep.name_backbone.return_value = {
+            "usageKey": 888456,
+            "acceptedUsageKey": 888000,
+            "canonicalName": "Senecio streptanthifolius",
+            "species": "Packera streptanthifolia",
+            "accepted": "Packera streptanthifolia (Greene) W.A.Weber & Á.Löve",
+        }
+        mock_strep.name_usage.return_value = {"results": []}
+        _GBIF_SYNONYM_CACHE.pop("senecio streptanthifolius", None)
+        with patch("scripts.core.harvester.species", mock_strep):
+            self.assertEqual(
+                standardize_packera_taxon("Senecio streptanthifolius Greene"),
+                "Packera streptanthifolia",
+            )
 
     def test_geographic_scope_north_america_and_include_western_retain_western_vouchers(self):
         """Verify north_america / include_western retain < -106.65 western records while eastern_na excludes them."""
@@ -1533,12 +1551,257 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
         run_sh = Path(__file__).resolve().parents[2] / "run_pipeline.sh"
         sh_text = run_sh.read_text(encoding="utf-8")
         self.assertNotIn('if [[ "${FOCAL_TAXON}" == "Packera dubia" ]]', sh_text)
+        self.assertNotIn("--all-eastern-taxa", sh_text)
+        self.assertNotIn("ALL_EASTERN_TAXA", sh_text)
+        self.assertNotIn("mod05.TARGET_TAXA", sh_text)
+        self.assertNotIn('"Packera dubia" "Packera anonyma" "Packera paupercula" "Packera plattensis"', sh_text)
+        self.assertIn("Packera_Taxonomic_Revision_Summary.md", sh_text)
+        self.assertIn("Figure_Integrative_Packera_Revision.pdf", sh_text)
         self.assertIn("select_cascading_outgroup_anchors", sh_text)
         self.assertIn("--geographic-scope", sh_text)
         self.assertIn("--include-western", sh_text)
 
         proc = subprocess.run(["bash", "-n", str(run_sh)], capture_output=True, text=True, check=False)
         self.assertEqual(proc.returncode, 0, f"bash -n run_pipeline.sh failed: {proc.stderr}")
+
+    def test_genus_wide_packera_harvest_when_taxa_empty(self):
+        """Running VoucherHarvester with taxa=[] dynamically discovers and harvests genus-wide Packera species."""
+        import scripts.core.config as core_cfg
+        import scripts.core.harvester as core_harv
+        from scripts.core.harvester import discover_genus_packera_species_gbif
+
+        self.assertEqual(core_cfg.DEFAULT_TARGET_TAXA, [])
+        cfg = core_cfg.PipelineConfig.from_yaml()
+        self.assertEqual(cfg.taxa.target_species, [])
+        self.assertEqual(cfg.taxa.synonyms, {})
+        self.assertEqual(cfg.taxa.outgroups, [])
+        self.assertEqual(cfg.thresholds.dissection.taxa_with_lyrate_tendency, [])
+        self.assertFalse(hasattr(core_harv, "EASTERN_NA_PACKERA_TAXA"))
+        self.assertFalse(hasattr(core_harv, "EASTERN_NA_GBIF_QUERY_TAXA"))
+
+        # 1. Dynamic genus-wide species discovery via GBIF Species Backbone + name_lookup/name_usage
+        mock_species = MagicMock()
+        mock_species.name_backbone.return_value = {
+            "usageKey": 3109225,
+            "canonicalName": "Packera",
+            "rank": "GENUS",
+            "matchType": "EXACT",
+        }
+        mock_species.name_lookup.return_value = {
+            "results": [
+                {"canonicalName": "Packera bolanderi", "rank": "SPECIES", "taxonomicStatus": "ACCEPTED"},
+                {"canonicalName": "Packera cardamine", "rank": "SPECIES", "taxonomicStatus": "ACCEPTED"},
+            ]
+        }
+        mock_species.name_usage.return_value = {
+            "results": [
+                {"canonicalName": "Packera franciscana", "rank": "SPECIES", "taxonomicStatus": "ACCEPTED"},
+                {"canonicalName": "Senecio bolanderi", "rank": "SPECIES", "taxonomicStatus": "SYNONYM"},
+            ]
+        }
+
+        queried_names = []
+
+        def _fake_occ_by_species(**kwargs):
+            sci = kwargs.get("scientificName")
+            queried_names.append(sci)
+            return {
+                "results": [
+                    {
+                        "key": abs(hash(sci)) % 100000 + 1,
+                        "scientificName": f"{sci} Auth.",
+                        "stateProvince": "Texas",
+                        "decimalLatitude": 31.20,
+                        "decimalLongitude": -98.50,
+                        "coordinateUncertaintyInMeters": 100.0,
+                        "year": 2021,
+                        "month": 5,
+                        "day": 14,
+                        "media": [{"identifier": f"https://example.com/{sci.replace(' ', '_')}.jpg", "type": "StillImage", "format": "image/jpeg"}],
+                        "catalogNumber": f"CAT_{sci.replace(' ', '_').upper()}",
+                        "institutionCode": "TEX",
+                    }
+                ],
+                "count": 1,
+            }
+
+        with patch("scripts.core.harvester.species", mock_species), \
+             patch("scripts.core.harvester.occ.search", side_effect=_fake_occ_by_species):
+            discovered = discover_genus_packera_species_gbif()
+            self.assertEqual(discovered, ["Packera bolanderi", "Packera cardamine", "Packera franciscana"])
+
+            harvester = VoucherHarvester(taxa=[], max_records_per_taxon=5, expand_synonyms=False)
+            self.assertEqual(harvester.taxa, ["Packera bolanderi", "Packera cardamine", "Packera franciscana"])
+            df_genus = harvester.harvest()
+
+        self.assertEqual(queried_names, ["Packera bolanderi", "Packera cardamine", "Packera franciscana"])
+        self.assertEqual(len(df_genus), 3)
+        for unrequested in ("Packera dubia", "Packera anonyma", "Packera paupercula", "Packera plattensis"):
+            self.assertNotIn(unrequested, queried_names)
+
+        # 2. Direct genus-level GBIF occurrence query (taxa=["Packera"]) filters indets and resolves Senecio synonyms
+        mock_direct_species = MagicMock()
+
+        def _backbone_dispatch(**kwargs):
+            if kwargs.get("rank") == "genus":
+                return {"usageKey": 3109225, "canonicalName": "Packera", "matchType": "EXACT"}
+            if "cardamine" in str(kwargs.get("name", "")).lower():
+                return {
+                    "usageKey": 777111,
+                    "canonicalName": "Senecio cardamine",
+                    "species": "Packera cardamine",
+                    "accepted": "Packera cardamine (Greene) W.A.Weber & Á.Löve",
+                }
+            return {}
+
+        mock_direct_species.name_backbone.side_effect = _backbone_dispatch
+        mock_direct_species.name_usage.return_value = {"results": []}
+
+        direct_search_calls = []
+
+        def _fake_direct_genus_occ(**kwargs):
+            direct_search_calls.append(dict(kwargs))
+            return {
+                "results": [
+                    {
+                        "key": 9001,
+                        "scientificName": "Packera hartiana (A.Heller) W.A.Weber & Á.Löve",
+                        "stateProvince": "Texas",
+                        "decimalLatitude": 31.1,
+                        "decimalLongitude": -99.1,
+                        "coordinateUncertaintyInMeters": 50.0,
+                        "year": 2020,
+                        "month": 4,
+                        "day": 20,
+                        "media": [{"identifier": "https://example.com/hartiana.jpg", "type": "StillImage", "format": "image/jpeg"}],
+                        "catalogNumber": "TEX_HART_01",
+                        "institutionCode": "TEX",
+                    },
+                    {
+                        "key": 9002,
+                        "scientificName": "Senecio cardamine Greene",
+                        "stateProvince": "Texas",
+                        "decimalLatitude": 31.3,
+                        "decimalLongitude": -99.3,
+                        "coordinateUncertaintyInMeters": 50.0,
+                        "year": 2020,
+                        "month": 4,
+                        "day": 22,
+                        "media": [{"identifier": "https://example.com/cardamine.jpg", "type": "StillImage", "format": "image/jpeg"}],
+                        "catalogNumber": "TEX_CARD_02",
+                        "institutionCode": "TEX",
+                    },
+                    {
+                        "key": 9003,
+                        "scientificName": "Packera sp.",
+                        "stateProvince": "Texas",
+                        "decimalLatitude": 31.4,
+                        "decimalLongitude": -99.4,
+                        "coordinateUncertaintyInMeters": 50.0,
+                        "year": 2020,
+                        "month": 4,
+                        "day": 25,
+                        "media": [{"identifier": "https://example.com/indet.jpg", "type": "StillImage", "format": "image/jpeg"}],
+                        "catalogNumber": "TEX_INDET_03",
+                        "institutionCode": "TEX",
+                    },
+                ],
+                "count": 3,
+            }
+
+        core_harv._DYNAMIC_SYNONYM_TO_CANONICAL.pop("senecio cardamine", None)
+        core_harv._GBIF_SYNONYM_CACHE.pop("senecio cardamine", None)
+        with patch("scripts.core.harvester.species", mock_direct_species), \
+             patch("scripts.core.harvester.occ.search", side_effect=_fake_direct_genus_occ):
+            harvester_direct = VoucherHarvester(taxa=["Packera"], max_records_per_taxon=10)
+            df_direct = harvester_direct.harvest()
+
+        self.assertEqual(direct_search_calls[0].get("taxonKey"), 3109225)
+        self.assertEqual(set(df_direct["catalogNumber"]), {"TEX_HART_01", "TEX_CARD_02"})
+        card_row = df_direct[df_direct["catalogNumber"] == "TEX_CARD_02"].iloc[0]
+        self.assertEqual(card_row["scientificName"], "Packera cardamine")
+        self.assertEqual(card_row["species_raw"], "Senecio cardamine Greene")
+
+    def test_explicit_taxa_harvests_strictly_requested_species(self):
+        """Running VoucherHarvester with explicit taxa harvests strictly those species without injecting Packera dubia."""
+        queried_taxa = []
+
+        def _fake_occ(**kwargs):
+            sci = kwargs.get("scientificName")
+            queried_taxa.append(sci)
+            return {
+                "results": [
+                    {
+                        "key": 7101 if "aurea" in str(sci) else 7102,
+                        "scientificName": sci,
+                        "stateProvince": "North Carolina",
+                        "decimalLatitude": 35.91,
+                        "decimalLongitude": -79.05,
+                        "coordinateUncertaintyInMeters": 50.0,
+                        "year": 2022,
+                        "month": 4,
+                        "day": 18,
+                        "media": [{"identifier": f"https://example.com/{sci.replace(' ', '_')}.jpg", "type": "StillImage", "format": "image/jpeg"}],
+                        "catalogNumber": f"NCU_{sci.split()[-1].upper()}_01",
+                        "institutionCode": "NCU",
+                    }
+                ],
+                "count": 1,
+            }
+
+        with patch("scripts.core.harvester.occ.search", side_effect=_fake_occ):
+            harvester = VoucherHarvester(
+                taxa=["Packera aurea", "Packera obovata"],
+                max_records_per_taxon=5,
+                expand_synonyms=False,
+            )
+            self.assertEqual(harvester.taxa, ["Packera aurea", "Packera obovata"])
+            df = harvester.harvest()
+
+        self.assertEqual(queried_taxa, ["Packera aurea", "Packera obovata"])
+        self.assertEqual(set(df["scientificName"]), {"Packera aurea", "Packera obovata"})
+        for forbidden in ("Packera dubia", "Packera anonyma", "Packera paupercula", "Packera plattensis"):
+            self.assertNotIn(forbidden, queried_taxa)
+            self.assertNotIn(forbidden, set(df["scientificName"]))
+
+        # Verify main.run_harvest omits --taxa when none supplied and passes strictly explicit --taxa
+        import argparse
+        import main as root_main
+
+        cfg_default = root_main.PipelineConfig.from_yaml()
+        with tempfile.TemporaryDirectory() as tmp_d:
+            tmp_csv = Path(tmp_d) / "curated_vouchers.csv"
+            tmp_csv.write_text("catalogNumber,scientificName\nNCU1,Packera aurea\n", encoding="utf-8")
+            base_ns = dict(
+                run_id=None,
+                out_dir=Path(tmp_d) / "raw",
+                output_csv=tmp_csv,
+                max_records=10,
+                max_uncertainty=1000.0,
+                min_megapixels=8.0,
+                min_file_size_kb=500.0,
+                concurrency=4,
+                download_images=False,
+                force=False,
+                verbose=False,
+            )
+
+            with patch.object(root_main.subprocess, "run") as mock_sub_empty:
+                root_main.run_harvest(argparse.Namespace(taxa=None, **base_ns), cfg_default)
+                cmd_empty = mock_sub_empty.call_args[0][0]
+                self.assertNotIn("--taxa", cmd_empty)
+                self.assertNotIn("--taxon", cmd_empty)
+
+            with patch.object(root_main.subprocess, "run") as mock_sub_explicit:
+                root_main.run_harvest(
+                    argparse.Namespace(taxa=["Packera aurea", "Packera obovata"], **base_ns),
+                    cfg_default,
+                )
+                cmd_explicit = mock_sub_explicit.call_args[0][0]
+                self.assertIn("--taxa", cmd_explicit)
+                taxa_idx = cmd_explicit.index("--taxa")
+                self.assertEqual(cmd_explicit[taxa_idx + 1 : taxa_idx + 3], ["Packera aurea", "Packera obovata"])
+                self.assertNotIn("Packera dubia", cmd_explicit)
 
 
 if __name__ == "__main__":

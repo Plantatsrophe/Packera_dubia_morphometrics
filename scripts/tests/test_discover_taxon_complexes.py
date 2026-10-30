@@ -11,14 +11,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from unittest.mock import patch
+
 import cv2
 import numpy as np
 import pandas as pd
 
-from scripts.core.harvester import (
-    EASTERN_NA_PACKERA_TAXA,
-    standardize_packera_taxon,
-)
+from scripts.core.harvester import standardize_packera_taxon
 from scripts.vision.lm2_geometry_utils import (
     classify_and_route_leaf,
     evaluate_leaf_quality,
@@ -34,112 +33,127 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
     """Tests for Milestones 1-5: N-taxon basionym mapping, dissection gate, and complex discovery."""
 
     def test_standardize_packera_taxon_all_eastern_species_and_basionyms(self):
-        """Verify all Eastern NA Packera species, Senecio basionyms, and dynamic binomials map cleanly."""
+        """Verify North American Packera species (Eastern, Western, Boreal, Mexican) map cleanly."""
         cases = {
-            # Core 4 taxa & synonyms
-            "Packera anonyma": "Packera anonyma",
-            "Senecio anonymus": "Packera anonyma",
-            "Senecio smallii": "Packera anonyma",
-            "Packera smallii": "Packera anonyma",
-            "Packera dubia": "Packera dubia",
-            "Senecio tomentosus": "Packera dubia",
-            "Packera tomentosa": "Packera dubia",
-            "Senecio dubius": "Packera dubia",
-            "Senecio alabamensis": "Packera dubia",
-            "Packera paupercula": "Packera paupercula",
-            "Senecio pauperculus": "Packera paupercula",
-            "Senecio balsamitae": "Packera paupercula",
-            "Packera paupercula var. appalachiana": "Packera paupercula",
-            "Packera paupercula var. pseudotomentosa": "Packera paupercula",
-            "Packera paupercula var. savannarum": "Packera paupercula",
-            "Packera plattensis": "Packera plattensis",
-            "Senecio plattensis": "Packera plattensis",
-            "Senecio pseudotomentosus": "Packera plattensis",
-            # Expanded Eastern North American Packera species & Senecio basionyms
-            "Packera antennariifolia": "Packera antennariifolia",
-            "Senecio antennariifolius": "Packera antennariifolia",
-            "Packera aurea": "Packera aurea",
-            "Senecio aureus": "Packera aurea",
-            "Senecio gracilis": "Packera aurea",
-            "Packera crawfordii": "Packera crawfordii",
-            "Senecio crawfordii": "Packera crawfordii",
-            "Packera paupercula var. crawfordii": "Packera crawfordii",
-            "Packera glabella": "Packera glabella",
-            "Senecio glabellus": "Packera glabella",
-            "Senecio lobatus": "Packera glabella",
-            "Packera hyperborealis": "Packera hyperborealis",
-            "Packera cymbalaria": "Packera cymbalaria",
-            "Senecio cymbalaria": "Packera cymbalaria",
-            "Senecio resedifolius": "Packera cymbalaria",
-            "Packera indecora": "Packera indecora",
-            "Senecio indecorus": "Packera indecora",
-            "Packera insulanus": "Packera insulanus",
-            "Senecio insulanus": "Packera insulanus",
+            # Eastern North American Packera species, varieties, hybrids, and authority strings
+            "Packera anonyma (Alph.Wood) W.A.Weber & Á.Löve": "Packera anonyma",
+            "Packera antennariifolia (Britton) W.A.Weber & Á.Löve": "Packera antennariifolia",
+            "Packera aurea (L.) Á.Löve & D.Löve": "Packera aurea",
+            "Packera crawfordii (Britton) A.M.Mahoney & R.R.Kowal": "Packera crawfordii",
+            "Packera dubia (Spreng.) Trock & Mabb.": "Packera dubia",
+            "Packera glabella (Poir.) C.Jeffrey": "Packera glabella",
+            "Packera insulanus (C.L.Hitchc.) W.A.Weber & Á.Löve": "Packera insulanus",
             "Packera memmingeri": "Packera memmingeri",
             "Packera x memmingeri": "Packera memmingeri",
-            "Packeraxmemmingeri": "Packera memmingeri",
-            "Senecio memmingeri": "Packera memmingeri",
-            "Senecio millefolium var. memmingeri": "Packera memmingeri",
-            "Packera millefolium": "Packera millefolium",
-            "Senecio millefolium": "Packera millefolium",
-            "Packera obovata": "Packera obovata",
-            "Senecio obovatus": "Packera obovata",
-            "Senecio rotundus": "Packera obovata",
-            "Senecio elliottii": "Packera obovata",
-            "Packera pseudaurea": "Packera pseudaurea",
-            "Senecio pseudaureus": "Packera pseudaurea",
+            "Packera × memmingeri": "Packera memmingeri",
+            "Packera millefolium (Torr. & A.Gray) W.A.Weber & Á.Löve": "Packera millefolium",
+            "Packera obovata (Muhl. ex Willd.) W.A.Weber & Á.Löve": "Packera obovata",
+            "Packera paupercula var. appalachiana": "Packera paupercula",
+            "Packera plattensis (Nutt.) W.A.Weber & Á.Löve": "Packera plattensis",
             "Packera pseudaurea var. semicordata": "Packera pseudaurea",
-            "Packera schweinitziana": "Packera schweinitziana",
-            "Senecio schweinitzianus": "Packera schweinitziana",
-            "Senecio robbinsii": "Packera schweinitziana",
-            "Packera robbinsii": "Packera schweinitziana",
-            "Packera serpenticola": "Packera serpenticola",
-            "Packera eburnea": "Packera serpenticola",
-            "Packeraeburnea": "Packera serpenticola",
-            "Packera spellenbergii": "Packera spellenbergii",
-            "Packera tampicana": "Packera tampicana",
-            "Senecio tampicanus": "Packera tampicana",
-            "Senecio imparipinnatus": "Packera tampicana",
-            "Packera imparipinnata": "Packera tampicana",
-            "Packera vulgaris": "Packera vulgaris",
-            "Senecio vulgaris": "Packera vulgaris",
-            # Dynamic fallback for any valid Packera binomial
-            "Packera cana": "Packera cana",
-            "Packera streptanthifolia": "Packera streptanthifolia",
+            "Packera schweinitziana (Nutt.) W.A.Weber & Á.Löve": "Packera schweinitziana",
+            "Packera serpenticola Boufford, Kartesz, Shiuchi & R.Zhou": "Packera serpenticola",
+            "Packera spellenbergii (T.M.Barkley) C.Jeffrey": "Packera spellenbergii",
+            "Packera tampicana (DC.) C.Jeffrey": "Packera tampicana",
+            # Western North American Packera species
+            "Packera bernardina (Greene) W.A.Weber & Á.Löve": "Packera bernardina",
+            "Packera cana (Hook.) W.A.Weber & Á.Löve": "Packera cana",
+            "Packera fendleri (A.Gray) W.A.Weber & Á.Löve": "Packera fendleri",
+            "Packera multilobata (Torr. & A.Gray ex A.Gray) W.A.Weber & Á.Löve": "Packera multilobata",
+            "Packera streptanthifolia (Greene) W.A.Weber & Á.Löve": "Packera streptanthifolia",
+            "Packera werneriifolia (A.Gray) W.A.Weber & Á.Löve": "Packera werneriifolia",
+            # Boreal & Arctic North American Packera species
+            "Packera cymbalaria (Pursh) W.A.Weber & Á.Löve": "Packera cymbalaria",
+            "Packera hyperborealis (Greenm.) Á.Löve & D.Löve": "Packera hyperborealis",
+            "Packera indecora (Greene) Á.Löve & D.Löve": "Packera indecora",
+            "Packera ogotorukensis (Packer) Á.Löve & D.Löve": "Packera ogotorukensis",
+            "Packera pauciflora (Pursh) Á.Löve & D.Löve": "Packera pauciflora",
+            # Mexican & Madrean Packera species
+            "Packera bellidifolia (Kunth) W.A.Weber & Á.Löve": "Packera bellidifolia",
+            "Packera coahuilensis (Greenm.) C.Jeffrey": "Packera coahuilensis",
+            "Packera sanguisorbae (DC.) C.Jeffrey": "Packera sanguisorbae",
+            "Packera toluccana (DC.) W.A.Weber & Á.Löve": "Packera toluccana",
+            "Packera zimapanica (Hemsl.) C.C.Freeman & T.M.Barkley": "Packera zimapanica",
         }
 
         mod01_pipe = importlib.import_module("scripts.pipeline.01_voucher_harvester")
         mod05 = importlib.import_module("scripts.analysis.05_cleanlab_vision_xai")
-
-        self.assertGreaterEqual(len(EASTERN_NA_PACKERA_TAXA), 18)
 
         for raw_name, expected in cases.items():
             self.assertEqual(standardize_packera_taxon(raw_name), expected, f"Failed for {raw_name!r}")
             self.assertEqual(mod01_pipe.standardize_packera_taxon(raw_name), expected)
             self.assertEqual(mod05.standardize_packera_taxon(raw_name), expected)
 
+        # Also verify dynamic GBIF backbone resolution for historical Senecio basionyms across regions
+        basionym_backbone = {
+            "senecio millefolium": "Packera millefolium",
+            "senecio streptanthifolius": "Packera streptanthifolia",
+            "senecio cymbalaria": "Packera cymbalaria",
+            "senecio sanguisorbae": "Packera sanguisorbae",
+        }
+
+        def _fake_backbone(name, **kwargs):
+            acc = basionym_backbone.get(str(name).strip().lower())
+            if acc:
+                return {"matchType": "EXACT", "status": "SYNONYM", "species": acc, "canonicalName": str(name)}
+            return {"matchType": "NONE"}
+
+        with patch("scripts.core.harvester.species.name_backbone", side_effect=_fake_backbone), patch(
+            "scripts.core.harvester.species.name_usage", return_value={"results": []}
+        ):
+            for raw_syn, expected in [
+                ("Senecio millefolium Torr. & A.Gray", "Packera millefolium"),
+                ("Senecio streptanthifolius Greene", "Packera streptanthifolia"),
+                ("Senecio cymbalaria Pursh", "Packera cymbalaria"),
+                ("Senecio sanguisorbae DC.", "Packera sanguisorbae"),
+            ]:
+                self.assertEqual(standardize_packera_taxon(raw_syn), expected)
+                self.assertEqual(mod05.standardize_packera_taxon(raw_syn), expected)
+
     def test_r_standardize_taxon_and_dynamic_palette(self):
-        """Verify R standardize_taxon_name() and get_dynamic_packera_palette() handle >4 taxa."""
+        """Verify R standardize_taxon_name(), get_dynamic_packera_palette(), shapes, titles, and italic expressions are 100% species-agnostic."""
         r_code = """
         source("scripts/morphometrics/pub_figures_utils.R")
-        stopifnot(standardize_taxon_name("Senecio millefolium") == "Packera millefolium")
-        stopifnot(standardize_taxon_name("Senecio aureus") == "Packera aurea")
-        stopifnot(standardize_taxon_name("Senecio tomentosus") == "Packera dubia")
-        stopifnot(standardize_taxon_name("Senecio memmingeri") == "Packera memmingeri")
-        stopifnot(standardize_taxon_name("Packeraeburnea") == "Packera serpenticola")
-        stopifnot(standardize_taxon_name("Packera cana") == "Packera cana")
+        stopifnot(!exists("EASTERN_NA_PACKERA_TAXA"))
+        stopifnot(!exists("OKABE_ITO_TAXA"))
+        stopifnot(!exists("PACKERA_ITALIC_LABELS"))
+
+        stopifnot(standardize_taxon_name("Packera millefolium (Torr. & A.Gray) W.A.Weber & Á.Löve") == "Packera millefolium")
+        stopifnot(standardize_taxon_name("P. aurea") == "Packera aurea")
+        stopifnot(standardize_taxon_name("Packera x memmingeri") == "Packera memmingeri")
+        stopifnot(standardize_taxon_name("Packera × memmingeri") == "Packera memmingeri")
+        stopifnot(standardize_taxon_name("Packera cana (Hook.) W.A.Weber & Á.Löve") == "Packera cana")
+        stopifnot(standardize_taxon_name("Packera sanguisorbae (DC.) C.Jeffrey") == "Packera sanguisorbae")
+        stopifnot(standardize_taxon_name("Packera hyperborealis") == "Packera hyperborealis")
 
         taxa8 <- c(
-          "Packera anonyma", "Packera dubia", "Packera paupercula", "Packera plattensis",
-          "Packera aurea", "Packera millefolium", "Packera obovata", "Packera schweinitziana"
+          "Packera streptanthifolia", "Packera aurea", "Packera sanguisorbae", "Packera cymbalaria",
+          "Packera millefolium", "Packera cana", "Packera obovata", "Packera fendleri"
         )
+        sorted8 <- sort(taxa8)
         pal <- get_dynamic_packera_palette(taxa8)
-        stopifnot(all(taxa8 %in% names(pal)))
-        stopifnot(pal[["Packera anonyma"]] == "#0072B2")
-        stopifnot(pal[["Packera dubia"]] == "#D55E00")
-        stopifnot(pal[["Packera paupercula"]] == "#009E73")
-        stopifnot(pal[["Packera plattensis"]] == "#CC79A7")
-        stopifnot(length(unique(unname(pal[taxa8]))) == 8)
+        stopifnot(identical(names(pal), c(sorted8, "Unknown")))
+        stopifnot(pal[[sorted8[1]]] == "#0072B2")
+        stopifnot(pal[[sorted8[2]]] == "#D55E00")
+        stopifnot(pal[[sorted8[3]]] == "#009E73")
+        stopifnot(pal[[sorted8[4]]] == "#CC79A7")
+        stopifnot(pal[["Unknown"]] == "#7F7F7F")
+        stopifnot(length(unique(unname(pal[sorted8]))) == 8)
+
+        shps <- get_dynamic_packera_shapes(taxa8)
+        stopifnot(identical(unname(shps[sorted8[1:4]]), c(1L, 2L, 5L, 0L)))
+        gg_shps <- get_dynamic_packera_ggplot_shapes(taxa8)
+        stopifnot(identical(unname(gg_shps[sorted8[1:5]]), c(21, 24, 22, 23, 25)))
+
+        Sys.setenv(PACKERA_FOCAL_TAXON = "")
+        stopifnot(format_active_complex_title(c("Packera cana", "Packera fendleri", "Packera streptanthifolia"), "CDA") == "Packera Taxon Complex (3 Taxa): CDA")
+        stopifnot(format_active_complex_title(c("Packera sanguisorbae"), "CDA") == "Packera sanguisorbae: CDA")
+        Sys.setenv(PACKERA_FOCAL_TAXON = "Packera streptanthifolia")
+        stopifnot(format_active_complex_title(c("Packera cana", "Packera streptanthifolia"), "CDA") == "Packera streptanthifolia Complex: CDA")
+        Sys.unsetenv("PACKERA_FOCAL_TAXON")
+
+        expr_tx <- format_italic_taxon_expr("Packera sanguisorbae")
+        stopifnot(is.call(expr_tx) && identical(deparse(expr_tx), 'italic("Packera sanguisorbae")'))
         """
         res = subprocess.run(["Rscript", "-e", r_code], capture_output=True, text=True, check=False)
         self.assertEqual(res.returncode, 0, f"R test failed:\n{res.stderr}\n{res.stdout}")

@@ -33,28 +33,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-TARGET_TAXA = [
-    "Packera anonyma",
-    "Packera dubia",
-    "Packera paupercula",
-    "Packera plattensis",
-]
-
-
 def standardize_packera_taxon(s: str) -> str:
-    """Standardize raw taxon strings to canonical Packera binomials."""
+    """Standardize raw taxon strings generically to canonical Packera binomials."""
     if not isinstance(s, str) or not s.strip():
         return "Unknown"
     sc = s.strip().lower()
-    if any(k in sc for k in ["anonym", "smallii", "earlei"]):
-        return "Packera anonyma"
-    if any(k in sc for k in ["tomentos", "dubia"]):
-        return "Packera dubia"
-    if any(k in sc for k in ["plattensis", "flavovirens"]):
-        return "Packera plattensis"
-    if any(k in sc for k in ["paupercul", "balsamitae", "savannarum", "pseudotomentosa", "appalachiana"]):
-        return "Packera paupercula"
-    return s.split("(")[0].strip()
+    m = re.match(r"^(?:packera|p\.)\s*(?:(?:cf\.?|aff\.?)\s+)?(?:x\s+|×\s*)?([a-z-]+)", sc)
+    if m:
+        ep = m.group(1).lstrip("×-")
+        if ep and ep not in {"sp", "spp", "cf", "aff", "indet", "unknown", "na"}:
+            return f"Packera {ep}"
+    return "Unknown"
 
 
 def extract_doy(df: pd.DataFrame) -> pd.Series:
@@ -415,9 +404,10 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             out_plot = tmp / "spatial_rf_niche_summary.pdf"
             out_pheno_plot = tmp / "phenological_latitudinal_anomaly.pdf"
 
+            fixture_taxa = ["Packera aurea", "Packera millefolium", "Packera obovata", "Packera schweinitziana"]
             rows = []
             for idx in range(24):
-                sp = TARGET_TAXA[idx % len(TARGET_TAXA)]
+                sp = fixture_taxa[idx % len(fixture_taxa)]
                 lat = 33.0 + (idx % 8) * 1.1
                 lon = -84.0 + (idx % 6) * 0.8
                 doy = int(round(-30.0 + 3.9 * lat))
@@ -526,14 +516,22 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             self.assertIn("edaphic_best_fit_taxon", flags_df.columns)
 
     def test_taxonomic_standardization(self):
-        """Verify standardization of raw species names to core taxa."""
-        self.assertEqual(standardize_packera_taxon("Senecio tomentosus Michx."), "Packera dubia")
-        self.assertEqual(standardize_packera_taxon("Packera tomentosa (Michx.) C.Jeffrey"), "Packera dubia")
+        """Verify generic species-agnostic standardization across North American Packera binomials in Python and R."""
         self.assertEqual(standardize_packera_taxon("Packera dubia (Spreng.) Trock & Mabb."), "Packera dubia")
-        self.assertEqual(standardize_packera_taxon("Senecio smallii Britton"), "Packera anonyma")
         self.assertEqual(standardize_packera_taxon("Packera anonyma (Alph.Wood) W.A.Weber"), "Packera anonyma")
         self.assertEqual(standardize_packera_taxon("Packera paupercula var. savannarum"), "Packera paupercula")
-        self.assertEqual(standardize_packera_taxon("Senecio plattensis Nutt."), "Packera plattensis")
+        self.assertEqual(standardize_packera_taxon("Packera streptanthifolia (Greene) W.A.Weber & Á.Löve"), "Packera streptanthifolia")
+        self.assertEqual(standardize_packera_taxon("P. sanguisorbae (DC.) C.Jeffrey"), "Packera sanguisorbae")
+        self.assertEqual(standardize_packera_taxon("Packera x memmingeri"), "Packera memmingeri")
+
+        r_code = (
+            f'source("{self.r_script_path.as_posix()}"); '
+            'stopifnot(standardize_packera_taxon("Packera streptanthifolia (Greene) W.A.Weber & Á.Löve") == "Packera streptanthifolia"); '
+            'stopifnot(standardize_packera_taxon("P. sanguisorbae (DC.) C.Jeffrey") == "Packera sanguisorbae"); '
+            'stopifnot(standardize_packera_taxon("Packera x memmingeri") == "Packera memmingeri")'
+        )
+        proc = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, f"Rscript standardization check failed:\n{proc.stderr}")
 
     def test_environmental_layer_extraction(self):
         """Verify extraction and imputation of edaphic and bioclimatic layers."""
@@ -1045,9 +1043,10 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             out_plot = tmp / "spatial_rf_niche_summary.pdf"
             out_pheno_plot = tmp / "phenological_latitudinal_anomaly.pdf"
 
+            fixture_taxa = ["Packera aurea", "Packera millefolium", "Packera obovata", "Packera schweinitziana"]
             rows = []
             for idx in range(32):
-                sp = TARGET_TAXA[idx % len(TARGET_TAXA)]
+                sp = fixture_taxa[idx % len(fixture_taxa)]
                 lat = 33.0 + (idx % 8) * 1.05
                 lon = -84.0 + (idx % 6) * 0.85
                 doy = int(round(-30.0 + 3.9 * lat))
