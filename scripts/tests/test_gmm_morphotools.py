@@ -19,6 +19,7 @@ import pandas as pd
 import numpy as np
 import scipy.linalg as la
 import re
+import zlib
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -1042,6 +1043,297 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 "NA",
             ],
         )
+
+    @staticmethod
+    def _extract_pdf_text_streams(pdf_path: Path) -> str:
+        """Decompress all FlateDecode streams in an R-generated vector PDF for text verification."""
+        raw = pdf_path.read_bytes()
+        chunks = [raw.decode("latin1", errors="ignore")]
+        for m in re.finditer(rb"stream\r?\n(.*?)endstream", raw, flags=re.DOTALL):
+            payload = m.group(1).rstrip(b"\r\n")
+            for cand in (payload, m.group(1)):
+                try:
+                    txt = zlib.decompress(cand).decode("latin1", errors="ignore")
+                    txt = re.sub(r"\)\s*-?\d+(?:\.\d+)?\s*\(", "", txt)
+                    txt = txt.replace(r"\(", "(").replace(r"\)", ")")
+                    chunks.append(txt)
+                    break
+                except zlib.error:
+                    continue
+        return "\n".join(chunks)
+
+    def test_multivariate_manova_audit_three_factors_and_cda_subtitles(self):
+        """Verify parametric MANOVA (Pillai/Wilks), pairwise Hotelling T2 contrasts, Tier_3_Bronze invariance, and CDA biplot subtitles."""
+        rng = np.random.default_rng(314)
+        specs = [
+            ("Packera anonyma", "Piedmont", 35.9132, -79.0558, "NC", -5.5, -1.5, 11),
+            ("Packera dubia", "Middle_Atlantic_Coastal_Plain", 34.2257, -77.9447, "NC", 5.5, -1.5, 11),
+            ("Packera paupercula", "South_Central_Plains", 31.6035, -94.6555, "TX", 0.0, 5.0, 11),
+        ]
+        rows = []
+        vouch_rows = []
+        for s_idx, (sp, eco_name, lat0, lon0, st_code, c1, c2, n_v) in enumerate(specs):
+            for j in range(n_v):
+                cat = f"MANOVA_{s_idx}_{j:02d}"
+                det_tier = "Tier_1_Gold" if j < 6 else ("Tier_2_Silver" if j < 9 else "Tier_3_Bronze")
+                pc1 = float(c1 + rng.normal(0.0, 0.25))
+                pc2 = float(c2 + rng.normal(0.0, 0.25))
+                row = {
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "assigned_tier": "Tier_1_Direct",
+                    "n_tier1_leaves": 3,
+                    "n_tier2_leaves": 0,
+                    "morph_tier_source": "Tier_1_Pure",
+                    "species_raw": sp,
+                    "scientificName": sp,
+                    "determiner_tier": det_tier,
+                    "PC1": pc1,
+                    "PC2": pc2,
+                    "PC3": float(0.4 * s_idx + rng.normal(0.0, 0.15)),
+                    "PC4": float(rng.normal(0.0, 0.12)),
+                    "PC5": float(rng.normal(0.0, 0.10)),
+                    "foliar_variance": 0.02,
+                    "leaf_count": 3,
+                    "centroid_size": float(28.0 + 0.4 * j),
+                    "log_centsize": float(np.log(28.0 + 0.4 * j)),
+                    "is_calibrated_mm": True,
+                    "aspect_ratio": float(2.0 + 0.3 * s_idx + rng.normal(0.0, 0.05)),
+                    "solidity": float(0.89 + 0.02 * s_idx),
+                    "ucs_score": 0.94,
+                }
+                for k in range(1, 13):
+                    row[f"A{k}"] = float((-1.25 - 0.06 * pc1) / k + rng.normal(0.0, 0.003))
+                    row[f"B{k}"] = 0.0
+                    row[f"C{k}"] = 0.0
+                    row[f"D{k}"] = float((0.46 + 0.05 * pc2) / k + rng.normal(0.0, 0.003))
+                rows.append(row)
+                vouch_rows.append(
+                    {
+                        "catalogNumber": cat,
+                        "species_raw": sp,
+                        "determiner_tier": det_tier,
+                        "institutionCode": "NCU" if j % 2 == 0 else "BRIT",
+                        "stateProvince": st_code,
+                        "county": "",
+                        "regional_group": eco_name,
+                        "decimalLatitude": float(lat0 + rng.normal(0.0, 0.03)),
+                        "decimalLongitude": float(lon0 + rng.normal(0.0, 0.03)),
+                        "doy": 115 + j,
+                    }
+                )
+
+        # Add 2 Blue_Ridge Gold vouchers (< 3 threshold -> excluded from regional_group MANOVA) and 2 NA-ecoregion vouchers
+        for extra_idx, (rg_val, lat_v, lon_v) in enumerate(
+            [
+                ("Blue_Ridge", 35.5951, -82.5515),
+                ("Blue_Ridge", 35.6100, -82.5400),
+                ("", np.nan, np.nan),
+                ("", np.nan, np.nan),
+            ]
+        ):
+            cat = f"MANOVA_EXTRA_{extra_idx:02d}"
+            row = dict(rows[0])
+            row["catalogNumber"] = cat
+            row["determiner_tier"] = "Tier_1_Gold"
+            row["PC1"] = float(-5.4 + 0.1 * extra_idx)
+            row["PC2"] = float(-1.4 - 0.1 * extra_idx)
+            rows.append(row)
+            vouch_rows.append(
+                {
+                    "catalogNumber": cat,
+                    "species_raw": "Packera anonyma",
+                    "determiner_tier": "Tier_1_Gold",
+                    "institutionCode": "NCU",
+                    "stateProvince": "NC",
+                    "county": "",
+                    "regional_group": rg_val,
+                    "decimalLatitude": lat_v,
+                    "decimalLongitude": lon_v,
+                    "doy": 120,
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+
+            def _run_case(sub_name: str, perturb_bronze: bool = False):
+                case_dir = tmp_p / sub_name
+                fig_dir = case_dir / "outputs" / "figures"
+                rep_dir = case_dir / "outputs" / "reports"
+                tbl_dir = case_dir / "data" / "tables"
+                for d in (fig_dir, rep_dir, tbl_dir):
+                    d.mkdir(parents=True, exist_ok=True)
+                df_h = pd.DataFrame(rows).copy()
+                df_v = pd.DataFrame(vouch_rows).copy()
+                if perturb_bronze:
+                    b_mask = df_h["determiner_tier"] == "Tier_3_Bronze"
+                    df_h.loc[b_mask, ["PC1", "PC2", "PC3"]] += 45.0
+                    df_v.loc[df_v["determiner_tier"] == "Tier_3_Bronze", "regional_group"] = "Blue_Ridge"
+                harm_csv = tbl_dir / "leaf_efa_harmonics.csv"
+                vouch_csv = tbl_dir / "curated_vouchers.csv"
+                flags_csv = tbl_dir / "morphometric_flags.csv"
+                bic_csv = rep_dir / "gmm_bayes_factors_summary.csv"
+                cda_pdf = fig_dir / "cda_passive_projection.pdf"
+                df_h.to_csv(harm_csv, index=False)
+                df_v.to_csv(vouch_csv, index=False)
+                proc = subprocess.run(
+                    [
+                        "Rscript",
+                        str(self.r_script_path),
+                        "--vouchers", str(vouch_csv),
+                        "--harmonics", str(harm_csv),
+                        "--output-flags", str(flags_csv),
+                        "--output-report", str(bic_csv),
+                        "--output-plot", str(cda_pdf),
+                        "--output-batch-audit", str(rep_dir / "batch_audit.csv"),
+                        "--allometry-report", str(rep_dir / "allometry.csv"),
+                        "--allometry-pairwise", str(rep_dir / "pairwise.csv"),
+                        "--allometry-plot", str(fig_dir / "allometry.pdf"),
+                        "--permutations", "99",
+                    ],
+                    cwd=str(PROJECT_ROOT),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, 0, f"Step 04 MANOVA run failed:\n{proc.stderr}\n{proc.stdout}")
+                return rep_dir, fig_dir
+
+            rep_base, fig_base = _run_case("base", perturb_bronze=False)
+            grp_csv = rep_base / "manova_group_significance.csv"
+            pw_csv = rep_base / "manova_pairwise_posthoc.csv"
+            self.assertTrue(grp_csv.exists(), "manova_group_significance.csv must be exported")
+            self.assertTrue(pw_csv.exists(), "manova_pairwise_posthoc.csv must be exported")
+
+            grp_df = pd.read_csv(grp_csv)
+            pw_df = pd.read_csv(pw_csv)
+
+            req_grp_cols = {
+                "grouping_factor",
+                "pillai_trace",
+                "wilks_lambda",
+                "approx_F",
+                "num_df",
+                "den_df",
+                "partial_eta2",
+                "p_value",
+                "q_value",
+            }
+            self.assertTrue(req_grp_cols.issubset(set(grp_df.columns)))
+            self.assertEqual(
+                set(grp_df["grouping_factor"]),
+                {"species_standardized", "gmm_cluster", "regional_group"},
+            )
+
+            for _, r in grp_df.iterrows():
+                self.assertGreater(float(r["pillai_trace"]), 0.20)
+                self.assertGreater(float(r["wilks_lambda"]), 0.0)
+                self.assertLess(float(r["wilks_lambda"]), 0.90)
+                self.assertGreater(float(r["approx_F"]), 3.0)
+                self.assertGreaterEqual(float(r["num_df"]), 1.0)
+                self.assertGreaterEqual(float(r["den_df"]), 2.0)
+                self.assertGreater(float(r["partial_eta2"]), 0.10)
+                self.assertLessEqual(float(r["partial_eta2"]), 1.0)
+                self.assertGreaterEqual(float(r["p_value"]), 0.0)
+                self.assertLess(float(r["p_value"]), 0.01)
+                self.assertGreaterEqual(float(r["q_value"]) + 1e-12, float(r["p_value"]))
+                self.assertLessEqual(float(r["q_value"]), 1.0)
+
+            # Confirm Blue_Ridge (n=2 < 3) and NA were excluded from regional_group MANOVA
+            rg_row = grp_df[grp_df["grouping_factor"] == "regional_group"].iloc[0]
+            self.assertEqual(int(rg_row["n_groups"]), 3)
+
+            req_pw_cols = {
+                "grouping_factor",
+                "group_1",
+                "group_2",
+                "contrast",
+                "hotelling_t2",
+                "pillai_trace",
+                "wilks_lambda",
+                "approx_F",
+                "num_df",
+                "den_df",
+                "partial_eta2",
+                "p_value",
+                "q_value",
+            }
+            self.assertTrue(req_pw_cols.issubset(set(pw_df.columns)))
+            sp_pw = pw_df[pw_df["grouping_factor"] == "species_standardized"]
+            rg_pw = pw_df[pw_df["grouping_factor"] == "regional_group"]
+            cl_pw = pw_df[pw_df["grouping_factor"] == "gmm_cluster"]
+            self.assertEqual(len(sp_pw), 3)
+            self.assertEqual(len(rg_pw), 3)
+            self.assertGreaterEqual(len(cl_pw), 1)
+            for m_lbl in set(cl_pw["group_1"]).union(set(cl_pw["group_2"])):
+                self.assertRegex(str(m_lbl), r"^Morphotype_K[0-9]+$")
+            self.assertNotIn("Blue_Ridge", set(rg_pw["group_1"]).union(set(rg_pw["group_2"])))
+
+            for _, pr in pw_df.iterrows():
+                self.assertGreater(float(pr["hotelling_t2"]), 0.0)
+                # Exact 2-group identity: Pillai V + Wilks Lambda == 1 and partial_eta2 == Pillai V
+                self.assertAlmostEqual(float(pr["pillai_trace"] + pr["wilks_lambda"]), 1.0, places=4)
+                self.assertAlmostEqual(float(pr["partial_eta2"]), float(pr["pillai_trace"]), places=4)
+                self.assertGreaterEqual(float(pr["q_value"]) + 1e-12, float(pr["p_value"]))
+
+            # Verify omnibus Pillai's Trace F and p-value subtitles in both CDA biplot PDFs
+            fig04_txt = self._extract_pdf_text_streams(fig_base / "fig04_gmm_cda_clustering.pdf")
+            fig04c_txt = self._extract_pdf_text_streams(fig_base / "fig04c_supervised_ecoregion_cda.pdf")
+            sp_row = grp_df[grp_df["grouping_factor"] == "species_standardized"].iloc[0]
+            self.assertIn("Omnibus MANOVA: Pillai's Trace V =", fig04_txt)
+            self.assertIn(f"= {float(sp_row['approx_F']):.2f}, p =", fig04_txt)
+            self.assertIn("Omnibus MANOVA: Pillai's Trace V =", fig04c_txt)
+            self.assertIn(f"= {float(rg_row['approx_F']):.2f}, p =", fig04c_txt)
+
+            # Verify Tier_3_Bronze zero-influence invariance on both MANOVA CSVs
+            rep_pert, _ = _run_case("perturbed_bronze", perturb_bronze=True)
+            pd.testing.assert_frame_equal(grp_df, pd.read_csv(rep_pert / "manova_group_significance.csv"))
+            pd.testing.assert_frame_equal(pw_df, pd.read_csv(rep_pert / "manova_pairwise_posthoc.csv"))
+
+    def test_run_multivariate_manova_audit_direct_r_single_species_and_collinearity(self):
+        """Verify direct run_multivariate_manova_audit(df, feature_cols, gmm_res) factor gating & collinearity safety."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            grp_out = tmp_p / "manova_group_significance.csv"
+            pw_out = tmp_p / "manova_pairwise_posthoc.csv"
+            r_code = f"""
+            source("scripts/morphometrics/pub_figures_utils.R")
+            set.seed(17)
+            df <- data.frame(
+              catalogNumber = sprintf("V%02d", 1:18),
+              species_standardized = rep("Packera dubia", 18),
+              determiner_tier = rep("Tier_1_Gold", 18),
+              morph_tier_source = rep("Tier_1_Pure", 18),
+              regional_group = c(rep("Piedmont", 10), rep("Blue_Ridge", 2), rep(NA_character_, 6)),
+              PC1 = c(rnorm(9, -3.0, 0.3), rnorm(9, 3.0, 0.3)),
+              PC2 = c(rnorm(9, 1.5, 0.3), rnorm(9, -1.5, 0.3)),
+              stringsAsFactors = FALSE
+            )
+            df$PC3_collinear <- df$PC1 + df$PC2
+            df$PC4_const <- 0.0
+            gmm_res <- list(classification = c(rep(1L, 9), rep(2L, 9)))
+            res <- run_multivariate_manova_audit(
+              df,
+              c("PC1", "PC2", "PC3_collinear", "PC4_const"),
+              gmm_res,
+              output_group_csv = "{grp_out.as_posix()}",
+              output_pairwise_csv = "{pw_out.as_posix()}"
+            )
+            stopifnot(nrow(res$group_table) == 1L)
+            stopifnot(res$group_table$grouping_factor[1] == "gmm_cluster")
+            """
+            proc = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 0, f"Direct R run_multivariate_manova_audit failed:\n{proc.stderr}")
+            self.assertTrue(grp_out.exists())
+            self.assertTrue(pw_out.exists())
+            g_df = pd.read_csv(grp_out)
+            p_df = pd.read_csv(pw_out)
+            self.assertEqual(list(g_df["grouping_factor"]), ["gmm_cluster"])
+            self.assertEqual(int(g_df["n_features"].iloc[0]), 2)
+            self.assertEqual(len(p_df), 1)
+            self.assertEqual(p_df["contrast"].iloc[0], "Morphotype_K1 vs Morphotype_K2")
+            self.assertGreater(float(p_df["hotelling_t2"].iloc[0]), 20.0)
 
 
 if __name__ == "__main__":

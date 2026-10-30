@@ -20,7 +20,28 @@ The pipeline operationalizes morphological diagnosability within the theoretical
 
 ---
 
-## 2. Phase 2 Protocol: Stock LeafMachine2 v2.2+, Boundary-Continuity Lobe Rejection & Classical Gatekeeping
+## 2. Phase 1 Protocol: Taxonomic Ingestion, Dynamic Standardization & US EPA Level III Ecoregions (`01_voucher_harvester.py` & `scripts/core/harvester.py`)
+
+* **26-Column Darwin Core Schema Contract (`data/tables/curated_vouchers.csv`):**
+  Harvests and curates occurrence records into a standardized 26-column schema:
+  `catalogNumber`, `institutionCode`, `scientificName`, `species_raw`, `recordedBy`, `recordNumber`, `identifiedBy`, `determiner_raw`, `determiner_tier`, `type_status`, `county`, `stateProvince`, `decimalLatitude`, `latitude`, `decimalLongitude`, `longitude`, `coordinateUncertainty`, `year`, `month`, `day`, `eventDate`, `regional_group`, `image_path`, `exsiccatae_key`, `is_primary_duplicate`, `duplicate_count`.
+* **Dynamic Taxon Standardization:**
+  Standardizes binomials and basionyms dynamically across all Eastern North American *Packera* taxa and phylogenetic tips (*P. dubia*, *P. paupercula*, *P. anonyma*, *P. plattensis*, *P. schweinitziana*, *P. serpenticola*, *P. millefolium*, *P. aurea*, etc.) without hardcoded 4-taxon limits.
+* **Official US EPA Level III Ecoregion Point-in-Polygon Delineation:**
+  Assigns `regional_group` strictly via spatial point-in-polygon intersection against official **US EPA Level III Ecoregions** (Omernik & Griffith 2014; `data/environmental/epa_ecoregions_l3/`):
+  $$\text{regional\_group}_i = \text{Ecoregion}_k \iff (x_i, y_i) \in \mathcal{P}_k$$
+  for $\mathcal{P}_k \in \{\text{Piedmont}, \text{Southeastern\_Plains}, \text{Middle\_Atlantic\_Coastal\_Plain}, \text{Southern\_Coastal\_Plain}, \text{South\_Central\_Plains}, \text{Blue\_Ridge}, \text{Ridge\_and\_Valley}, \text{Interior\_Plateau}, \text{Ozark\_Highlands}, \text{Ouachita\_Mountains}\}$.
+* **Ungeoreferenced Specimen Fallback Policy:**
+  When coordinate metadata is missing ($y_i = \text{NA}$), evaluate the US Census county boundary polygon $\mathcal{C}_i$:
+  $$\text{regional\_group}_i = \begin{cases} \text{Ecoregion}_k & \text{if } \frac{\text{Area}(\mathcal{C}_i \cap \mathcal{P}_k)}{\text{Area}(\mathcal{C}_i)} \ge 0.95 \\ \text{NA} & \text{otherwise} \end{cases}$$
+  Vouchers spanning multiple ecoregions receive `NA` (prohibiting rectangular coordinate bounding boxes, state-level lumping, or `"Other_US"` catch-alls).
+* **Strict Active/Passive Determiner Authority Stratification:**
+  - **Active Reference Anchors (`Tier_1_Gold` & `Tier_2_Silver`, `authority_weight = 1.0` or $w_k = 1 - \text{error\_rate}_k$):** Monographic/type-verified determinations and regional specialist determinations.
+  - **Passively Projected Vouchers (`Tier_3_Bronze`, `authority_weight = 0.0`):** General floristic collections and unverified aggregator records, projected passively (`predict()` / `predict_proba()`) without entering supervised training sets.
+
+---
+
+## 3. Phase 2 Protocol: Stock LeafMachine2 v2.2+, Boundary-Continuity Lobe Rejection & Classical Gatekeeping
 
 Candidate organs are extracted out of the box using **stock LeafMachine2 v2.2+** (Weaver et al. 2024) without requiring custom fine-tuned PCD checkpoints or manual SAM 2 annotation, and routed through a **100% label-blind classical geometric gatekeeper**:
 
@@ -35,8 +56,19 @@ Candidate organs are extracted out of the box using **stock LeafMachine2 v2.2+**
   - **Pristine / Lyrate-Entire Tier 1 (`Tier_1_Direct`):** Requires $\text{Solidity} \ge 0.72$, isoperimetric $\text{Circularity} = \frac{4\pi A}{P^2} \ge 0.25$, bounding-box $\text{Extent} = \frac{A}{W \cdot H} \ge 0.35$, and $\text{UCS} \ge 0.85$.
   - **Pinnatifid / Lyrate-Pinnatifid Tier 1 (`Tier 1 (Dissected)`):** Low-solidity blades in $0.48 \le \text{Solidity} < 0.72$ are routed into `Tier_1_Direct` via `is_botanical_dissection()` when paired bilateral convexity-defect sinuses ($d_{\text{sinus}} / W_{\text{blade}} \ge 0.08$) confirm genuine pinnatifid lobing.
   - **Bipinnatisect Tier 1 (`Tier 1 (Bipinnatisect)`):** Deeply dissected blades in $0.18 \le \text{Solidity} < 0.48$ (e.g., *Packera millefolium*) are routed into `Tier_1_Direct` when $\ge 4$ deep convexity-hull sinuses confirm bipinnatisect dissection.
-* **Post-Gatekeeper High-DPI Basal Filtering & Strengthened Cauline/Stem Rejection (`is_cauline_or_stem_contaminant`):**
+* **Anatomical Petiole Length & Flowering Plant Height Approximations:**
+  - **Basal Petiole Length & Ratio:** Evaluates the caudex crown intersection $p_{\text{crown}}$ and PointRend Class 1 petiole skeleton:
+    $$L_{\text{petiole}} = \max\left(d_{\text{geodesic}}(p_{\text{base}}, p_{\text{crown}}),\, \|p_{\text{base}} - p_{\text{crown}}\|_2\right)$$
+    $$\text{petiole\_to\_blade\_ratio} = \frac{L_{\text{petiole}}}{L_{\text{blade}}}$$
+    Aggregated at the 75th percentile across outer-rosette leaves in `extracted_leaf_manifest.csv`.
+  - **Flowering Scape Height & Straight/Bent Stem Modeling:** Evaluates the piecewise unfolded stem path from $p_{\text{crown}}$ through cauline bend apex $p_{\text{bend}}$ to capitula inflorescence centroid $p_{\text{corymb}}$:
+    $$H_{\text{plant}} = \|p_{\text{bend}} - p_{\text{crown}}\|_2 + \|p_{\text{corymb}} - p_{\text{bend}}\|_2$$
+    $$\text{scape\_to\_basal\_leaf\_ratio} = \frac{H_{\text{plant}}}{L_{\text{blade}}}$$
+    Recorded alongside `is_bent_stem` in `voucher_reproductive_metrics.csv`.
+* **Post-Gatekeeper Basal Filtering & Strengthened Cauline Rejection (`is_cauline_or_stem_contaminant`):**
   - High-DPI basal candidates enforce `cy_rel >= 0.42`, minimum pixel area floors, boxy clump rejection (`min(w,h)/max(w,h) > 0.78` when `solidity < 0.84`), sheet-relative area floor (`>= 0.28 * max_sheet_area`), and a top-6 basal leaves per voucher cap ranked by $Q = \text{solidity} \cdot \text{ucs} \cdot \sqrt{\text{area}}$ with automatic disk cleanup. Furthermore, `is_cauline_or_stem_contaminant()` rejects upper-stem sessile/clasping cauline bracts (`aspect_ratio > 3.8` and `solidity < 0.78`, or displaced `> 2.2 * med_rosette_radius` above the basal rosette zone).
+* **Post-QC Silhouette Montage Regeneration (`--regenerate-figures-only`):**
+  - Invoked automatically after Step 04 in `run_pipeline.sh`, reloading audited Step 02–04 tables to export `fig02a_segmentation_qc_distributions.{pdf,png}` and `fig02b_silhouette_montage.{pdf,png}` containing strictly downstream-QC-validated `Tier_1_Direct` silhouettes scaled to active taxa.
 
 ```mermaid
 flowchart TD
@@ -50,56 +82,100 @@ flowchart TD
 
 ---
 
-## 3. Phase 3 & 4 Protocol: Strict Tier-1 Closed-Contour EFA, Active/Passive Authority Split, Allometry & GMM/CDA
+## 4. Phase 3 & 4 Protocol: Pure Tier-1 EFA, Dual-Track GMM/CDA, Allometry & Parametric MANOVA
 
-### 3.1 Strict `Tier_1_Direct` Closed-Contour EFA, Inertial Alignment & Unweighted OTU Medians (`03_fourier_extractor.R`)
-* **Strict Tier 1 Closed-Contour Restriction:** Only intact `Tier_1_Direct` basal leaf contours enter `Momocs::efourier`. Folded or mirrored hemi-blades (`Tier_2_Reflected`) and open-curve polynomial approximations are **never** pooled into EFA harmonic matrices.
-* **Inertial Axis Pre-Alignment (`Momocs::coo_alignxax`) with Suborbicular Guard:** Contours are anchored at `p_base` (`petiole_attachment_pt=p_base`), centered (`Momocs::coo_center`), and aligned along their major inertial axis via `Momocs::coo_alignxax()` whenever blade circularity $\le 0.75$ (preventing $90^\circ$ axis flips on suborbicular *P. obovata* / *P. aurea* leaves while locking $\overrightarrow{p_{\text{base}} p_{\text{apex}}}$ orientation via `coo_slidedirection("left")`).
-* **Empirical Harmonic Power Calibration (`>= 99%` at $H = 12$):** `Momocs::calibrate_harmonicpower_efourier` verifies that $H = 12$ harmonics capture $\ge 99\%$ of cumulative contour shape power across the corpus before executing `Momocs::efourier(out_obj, nb.h = 12, norm = FALSE, start = FALSE)`.
-* **Uniform Bilateral Symmetrization (Claude 2008):** `Momocs::rm_asym(ef)` is applied uniformly across all intact contours so primary morphospace (`Sym_PC1`–`Sym_PC5`) ordinates intrinsic bilateral lamina geometry ($A_n, D_n$) purged of taphonomic pressing curvature ($B_n, C_n$ retained as scalar `pct_asymmetry` and `asym_var`).
-* **MCD Mahalanobis Outlier Filtering & Unweighted OTU Median Aggregation:** Anomalous contours are gated via Minimum Covariance Determinant (MCD) Mahalanobis distance (`MASS::cov.rob(..., method = "mcd")`, $\chi^2$ cutoff $p < 0.001$ combined with `pct_asymmetry > 0.22 | harmonic_roughness > 0.15`). Multi-leaf vouchers are aggregated to the Specimen / Operational Taxonomic Unit (`(catalogNumber, plant_individual_id)`) via **unweighted coordinate-wise median** harmonics and PCs (`morph_tier_source = "Tier_1_Pure"`).
+### 4.1 Strict `Tier_1_Direct` Closed-Contour EFA, Symmetrization & OTU Medians (`03_fourier_extractor.R`)
+* **Strict Tier-1 Pure Priority & Closed-Contour Restriction:**
+  Only intact `Tier_1_Direct` basal leaf contours enter `Momocs::efourier`. Folded or mirrored hemi-blades (`Tier_2_Reflected`) and open-curve polynomial approximations are **never** pooled into EFA harmonic matrices.
+* **Inertial Axis Pre-Alignment (`Momocs::coo_alignxax`) with Suborbicular Guard:**
+  Contours are anchored at the anatomical petiole insertion $p_{\text{base}}$ (`petiole_attachment_pt=p_base`), centered (`Momocs::coo_center`), and aligned along their major inertial axis via `Momocs::coo_alignxax()` whenever circularity $\le 0.75$ (suppressing $90^\circ$ rotation flips on suborbicular *P. obovata* / *P. aurea* leaves while locking $\overrightarrow{p_{\text{base}} p_{\text{apex}}}$ polarity via `coo_slidedirection("left")`).
+* **Empirical Harmonic Power Calibration ($\ge 99\%$ at $H = 12$):**
+  Harmonic power is calculated as $\text{Power}_n = \frac{A_n^2 + B_n^2 + C_n^2 + D_n^2}{2}$. `calibrate_harmonicpower_efourier` verifies:
+  $$\frac{\sum_{n=1}^{12} \text{Power}_n}{\sum_{n=1}^{H_{\max}} \text{Power}_n} \ge 0.99$$
+  across the entire corpus before executing `Momocs::efourier(out_obj, nb.h = 12, norm = FALSE, start = FALSE)`.
+* **Uniform Bilateral Symmetrization (Claude 2008):**
+  Applies `Momocs::rm_asym(ef)` uniformly across all contours, decomposing coefficients into symmetric ($A_n, D_n$) and asymmetric ($B_n, C_n$) components:
+  $$A_n^{\text{sym}} = A_n,\quad D_n^{\text{sym}} = D_n,\quad B_n^{\text{sym}} = 0,\quad C_n^{\text{sym}} = 0$$
+  Scalar asymmetry is quantified as:
+  $$\text{pct\_asymmetry} = \frac{\sum_{n=1}^{12} (B_n^2 + C_n^2)}{\sum_{n=1}^{12} (A_n^2 + B_n^2 + C_n^2 + D_n^2)}$$
+* **MCD Mahalanobis Outlier Filtering & Unweighted OTU Median Aggregation:**
+  Anomalous contours are gated via Minimum Covariance Determinant (MCD) Mahalanobis distance (`MASS::cov.rob(..., method = "mcd")`, $\chi^2$ cutoff $p < 0.001$) combined with $\text{pct\_asymmetry} \le 0.22$ and perimeter high-frequency roughness $\text{harmonic\_roughness} \le 0.15$. Multi-leaf vouchers are aggregated to the Specimen / Operational Taxonomic Unit (`(catalogNumber, plant_individual_id)`) via **unweighted coordinate-wise median** harmonics and PCs (`morph_tier_source = "Tier_1_Pure"`), exporting `fig03_efa_morphospace_reconstruction.{pdf,png}`, `fig03a_efa_morphospace_pca.{pdf,png}`, and `fig03b_harmonic_power_and_asymmetry.{pdf,png}`.
 
-### 3.2 Strict Active/Passive Determiner Authority Split & Empirical Dawid-Skene Weighting (`04_gmm_morphotools.R`)
-To prevent large numbers of unverified aggregator vouchers from swamping specialist determinations, the pipeline enforces a **strict active/passive authority split** (Šlenker et al. 2022; Dawid & Skene 1979):
-* **Active Reference Anchor Set (`Tier_1_Gold` & `Tier_2_Silver`, `authority_weight = 1.0` or $w_k = 1 - \text{error\_rate}_k$):** Monographic/type-verified determinations (`Tier_1_Gold`) and curated regional specialist determinations (`Tier_2_Silver`) after per-taxon $\chi^2_{0.95}$ Mahalanobis outlier pruning (`qchisq(0.95, df = p)`) form the active training set. When empirical per-tier leave-one-out discordance rates are available, active tiers receive Dawid-Skene precision weights $w_k = 1 - \text{error\_rate}_k$ (`compute_empirical_tier_weights`, Dawid & Skene 1979); otherwise they receive uniform active weight `1.0`.
-* **Passive Projection of Unverified Vouchers (`Tier_3_Bronze = 0.0`):** General floristic collections (`Tier_3_Bronze`) receive `authority_weight = 0.0` during model fitting and are projected passively (`predict()`) into the fitted PCA, CDA, and GMM spaces.
+### 4.2 Strict Active/Passive Determiner Authority Split (`04_gmm_morphotools.R`)
+* **Active Reference Anchors (`Tier_1_Gold` & `Tier_2_Silver`, `authority_weight = 1.0` or $w_k = 1 - \text{error\_rate}_k$):**
+  Supervised training in CDA, allometric regression, Cleanlab cross-validation, and Spatial Random Forests is restricted strictly to monographic/type-verified (`Tier_1_Gold`) and regional specialist (`Tier_2_Silver`) `Tier_1_Pure` vouchers after per-taxon $\chi^2_{0.95}$ Mahalanobis outlier pruning (`qchisq(0.95, df = p)`). When empirical leave-one-out discordance rates are available, active tiers receive Dawid-Skene precision weights $w_k = 1 - \text{error\_rate}_k$ (Dawid & Skene 1979); otherwise they receive uniform active weights ($1.0$).
+* **Passive Projection of Unverified Vouchers (`Tier_3_Bronze = 0.0`):**
+  General floristic collections and unverified aggregator records receive `authority_weight = 0.0` during model fitting and are projected passively (`predict()`) into fitted canonical and cluster spaces without distorting axes.
 
-### 3.3 Klingenberg (2016) Allometric Slope Homogeneity, Horn/Williams-Titus Subspace & Kass-Raftery GMM (`04_gmm_morphotools.R`)
-* **Klingenberg (2016) Allometric Slope Homogeneity Testing (`test_and_correct_allometry`):** Restricted to ruler-calibrated active anchors (`is_calibrated_mm == TRUE`), the pipeline first tests homogeneity of allometric slopes across taxa via `stats::lm(PC ~ log_centsize * species_standardized)` ($F$-test on `log_centsize:species_standardized` at $\alpha = 0.01$). Pooled within-group allometric subtraction (`stats::lm(PC ~ log_centsize + species_standardized)`) is applied **only** when slopes are parallel ($p \ge 0.01$); if slopes diverge significantly ($p < 0.01$), raw shape PCs are retained and flagged in `outputs/reports/allometry_homogeneity_test.csv`.
-* **Subspace Dimensionality Selection (`select_informative_pcs`):** Selects informative PCs via Horn's Parallel Analysis / Broken-Stick eigenvalue threshold, capped for supervised CDA by the Williams & Titus (1988) sample-to-variable rule $P_{\text{cda}} \le \min(P_{\text{horn}}, \lfloor N_{\min} / 3 \rfloor)$.
-* **Kass & Raftery (1995) GMM Cluster Selection (`run_gmm_cluster_analysis`):** Evaluates discrete morphotypes via twice-log-Bayes-Factor thresholds ($2\Delta\text{BIC} = \text{BIC}_{\text{alt}} - \text{BIC}_{\text{null}}$, requiring $2\Delta\text{BIC} > 6$ for strong evidence and $> 10$ for very strong evidence).
-* **Uniform-Prior Passive CDA (`run_canonical_discriminant_analysis`) & Taxon-Adjusted Batch Audit (`audit_institutional_batch_effects`):** Trains CDA on active `Tier_1_Pure` anchors with uniform class priors (`rep(1/g, g)`) and honest Leave-One-Out Cross-Validation (`loocv_accuracy`), and audits institutional mounting effects via taxon-adjusted marginal models (`lm(PC1 ~ species_standardized + institutionCode)` and `lm(PC2 ~ species_standardized + institutionCode)`), reporting partial $R^2$ for `institutionCode`.
+### 4.3 Klingenberg (2016) Allometric Slope Homogeneity, Horn/Williams-Titus Subspace & Dual-Track CDA
+* **Klingenberg (2016) Allometric Slope Homogeneity Testing (`test_and_correct_allometry`):**
+  Restricted to ruler-calibrated active anchors (`is_calibrated_mm == TRUE`), the pipeline evaluates slope homogeneity across taxa via the multivariate interaction model:
+  $$\mathbf{y}_{\text{shape}} = \beta_0 + \beta_1 \log_{10}(\text{CS}) + \boldsymbol{\gamma}_{\text{species}} + \boldsymbol{\delta} (\log_{10}(\text{CS}) \times \boldsymbol{\gamma}_{\text{species}}) + \boldsymbol{\epsilon}$$
+  Testing $H_0: \boldsymbol{\delta} = \mathbf{0}$ at $\alpha = 0.01$. If $p \ge 0.01$, common-slope within-group allometric correction is applied:
+  $$\mathbf{y}_{\text{corrected}} = \mathbf{y}_{\text{shape}} - \hat{\beta}_1 (\log_{10}(\text{CS}) - \overline{\log_{10}(\text{CS})})$$
+  When slopes diverge significantly ($p < 0.01$), raw shape PCs are retained and flagged in `outputs/reports/allometry_significance_audit.csv`, `allometry_pairwise_trajectories.csv`, and `allometry_homogeneity_test.csv` (visualized in `outputs/figures/shape_allometry_regression.pdf`).
+* **Subspace Selection via Horn's Parallel Analysis & Williams & Titus (1988) Cap:**
+  Selects informative shape PCs exceeding the Broken-Stick / Horn simulated eigenvalue threshold, strictly capped for supervised CDA by:
+  $$P_{\text{cda}} \le \min\left(P_{\text{horn}},\, \left\lfloor \frac{N_{\min}}{3} \right\rfloor\right)$$
+  where $N_{\min}$ is the sample size of the smallest active reference taxon.
+* **Dual Clustering Architecture:**
+  - **Track 1 (Unsupervised Morphological Clustering):** Fits `mclust::Mclust` across $G = 1 \dots K_{\max}$ on active `Tier_1_Pure` anchors for `gmm_bayes_factors_summary.csv` and extracts the optimal multi-cluster mixture ($G \in \{2 \dots K_{\max}\}$, `Morphotype_K1..Kn`) evaluated via Kass & Raftery (1995) $2\Delta\text{BIC} = \text{BIC}_{\text{alt}} - \text{BIC}_{\text{null}}$ thresholds ($> 6$ strong, $> 10$ very strong). Fits unsupervised CDA on `Morphotype_K1..Kn` to yield `fig04_gmm_cda_clustering.{pdf,png}` (never falling back to `regional_group`).
+  - **Track 2 (Supervised EPA Level III Ecoregion CDA):** Runs supervised CDA across non-`NA` polygon-verified EPA Level III Ecoregions, exporting `ecoregion_cda_predicted`, `ecoregion_cda_posterior_prob`, `ecoregion_can1`, `ecoregion_can2`, `outputs/reports/ecoregion_supervised_cda_summary.csv` (with Unsupervised Morphotype x EPA Ecoregion Adjusted Rand Index [ARI] and Fisher's exact test), and `outputs/figures/fig04c_supervised_ecoregion_cda.{pdf,png}`.
+* **Parametric Omnibus & Pairwise MANOVA:**
+  Exports `outputs/reports/manova_group_significance.csv` (reporting Pillai's Trace, Wilks' $\Lambda$, approx $F$, partial $\eta^2$, and Benjamini-Hochberg FDR $q$-values) and `outputs/reports/manova_pairwise_posthoc.csv` (reporting pairwise Hotelling's $T^2$ contrasts across species, unsupervised morphotypes, and EPA ecoregions).
+* **Taxon-Adjusted Institutional Batch-Effect Audit (`audit_institutional_batch_effects`):**
+  Fits marginal ANCOVA models `lm(PC1 ~ species_standardized + institutionCode)` and `lm(PC2 ~ species_standardized + institutionCode)`, computing partial $R^2$ for `institutionCode` to verify that herbarium mounting practices do not drive morphological separation.
 
 ---
 
-## 4. Phase 5 Protocol: Taphonomic Indumentum-Blind Vision XAI, Foreground Patch Pooling & OOD Scoring (`05_cleanlab_vision_xai.py`)
+## 5. Phase 5 Protocol: Taphonomic Indumentum-Blind Vision XAI, Dilated Masking & Cleanlab (`05_cleanlab_vision_xai.py`)
 
-* **Taphonomic Indumentum-Blind Macro-Architecture ($224 \times 224$ Gaussian Low-Pass Filter, $\sigma = 1.0\text{ px}$):** Floccose arachnoid tomentum in *Packera dubia* and *P. plattensis* frequently abrades on older herbarium vouchers or varies between adaxial and abaxial leaf surfaces. Resized $224 \times 224$ crops undergo a $\sigma = 1.0\text{ px}$ Gaussian low-pass filter (`apply_indumentum_blind_lowpass`) that attenuates high-frequency trichome/hair textures while preserving macro-architectural venation, sinus geometry, and petiole winging.
-* **Foreground-Masked $16 \times 16$ Spatial Patch Pooling (`dinov2_vitb14_reg`):** Uses `dinov2_vitb14_reg` (with 4 register tokens preventing background high-norm artifacts; Darcet et al. 2024), downsamples the binary foreground plant mask to the $16 \times 16$ spatial token grid (`compute_foreground_patch_mask`, $\ge 25\%$ foreground threshold), and average-pools strictly over foreground spatial patch tokens (`forward_features()["x_norm_patchtokens"]`) rather than relying on an unmasked global `[CLS]` token.
-* **Strict Gold/Silver Anchor Training, `institutionCode` GroupKFold & Temperature Calibration:** Trains an out-of-fold L2-penalized `LogisticRegression(C=0.1, class_weight="balanced")` inside a fold-internal `StandardScaler` + `PCA(0.95)` pipeline strictly on `Tier_1_Gold` and `Tier_2_Silver` anchors using `StratifiedGroupKFold(groups=institutionCode)` (holding out entire herbaria per fold to prevent institutional background shortcuts), calibrates probabilities via Platt/temperature scaling (`calibrate_oof_probabilities`), and projects `Tier_3_Bronze` vouchers passively (`predict_proba`).
-* **Class-Conditional Cleanlab Pruning, Feature-Space OOD Scoring & Pointing Game Verification:** Prunes label noise via `cleanlab.filter.find_label_issues(..., filter_by="prune_by_noise_rate")`, computes Mahalanobis + cosine $k$-NN feature-space distance (`vision_ood_score`, `vision_is_ood`) to flag novel/unmodeled morphotypes, and enforces Pointing Game attribution verification (`foreground_attention_ratio >= 0.65`, flagging `< 0.65` as `is_background_shortcut`).
-
----
-
-## 5. Phase 6 Protocol: $0\text{–}15\text{ cm}$ Rhizosphere/Outcrop ENM Stack, Uncertainty Buffers & Partitioned Niche Equivalency (`06_multimodal_spatial_rf.R`)
-
-* **$0\text{–}15\text{ cm}$ Trapezoidal Rhizosphere Depth-Weighting & Compositional Texture:** Combines $0\text{–}5\text{ cm}$ and $5\text{–}15\text{ cm}$ soil horizons via trapezoidal depth weighting $X_{0\text{–}15\text{ cm}} = \frac{5 X_{0\text{–}5} + 10 X_{5\text{–}15}}{15}$ across 30m POLARIS/gSSURGO and 250m SoilGrids fallback grids, paired with centered log-ratio (`clr_sand_silt`, `clr_clay_geom`) soil texture transformations, coarse fragment volume (`cfvo_0_15cm`), available water capacity (`awc_0_15cm`), depth to bedrock (`fine_bedrock_depth_cm`), 50m-buffered SSURGO rock outcrop percentage (`ssurgo_rock_outcrop_pct`), 30m 3DEP micro-topography (`topo_tpi_30m`, `topo_twi_30m`), and 6-class USGS SGMC bedrock lithology (`sgmc_lithology_class`).
-* **Coordinate-Uncertainty Buffered Extraction (`100–1000 m`) & Collinearity Pruning:** Extracts focal median raster values within `r_buf = clamp(coordinateUncertaintyInMeters, 100, 1000)` m (downweighting sheets with $> 5000\text{ m}$ uncertainty and excluding $> 10000\text{ m}$ from anchor training), and prunes collinear predictors at $|r| < 0.70$ and $\text{VIF} < 5.0$ (`prune_collinear_predictors`) prior to fitting `ranger::ranger` under $0.5^\circ \times 0.5^\circ$ Spatial Block Cross-Validation (`spatial_block_cv_acc`).
-* **Partitioned Climatic vs. Edaphic-Geologic Niche Equivalency & Background Similarity:** Computes Schoener's $D$ and Hellinger's $I$ separately in Climatic PCA space ($D_{\text{clim}}, I_{\text{clim}}$) and Edaphic-Geologic PCA space ($D_{\text{edaph}}, I_{\text{edaph}}$) alongside 100-replicate permutation $p$-values (`edaphic_niche_equivalency.csv`; Warren et al. 2008; Broennimann et al. 2012).
+* **Taphonomic Indumentum-Blind Macro-Architecture ($224 \times 224$ Gaussian Low-Pass Filter, $\sigma = 1.0\text{ px}$):**
+  Floccose arachnoid tomentum in *Packera dubia* and *P. plattensis* abrades taphonomically on older herbarium vouchers or varies between adaxial and abaxial surfaces. Resized $224 \times 224$ crops undergo a $\sigma = 1.0\text{ px}$ Gaussian low-pass filter (`apply_indumentum_blind_lowpass`) with 5-pixel dilated `Tier_1_Direct` leaf masking onto neutral herbarium mounting paper (`[242, 239, 230]`), suppressing fine hair artifacts and mounting paper edges while preserving diagnostic macro-architectural venation, lobing, and petiole winging.
+* **Foreground-Masked $16 \times 16$ Spatial Patch Token Pooling (`dinov2_vitb14_reg`):**
+  Uses `dinov2_vitb14_reg` (4 register tokens preventing background high-norm artifacts; Darcet et al. 2024), downsamples the binary foreground mask to the $16 \times 16$ spatial token grid (`compute_foreground_patch_mask`, $\ge 25\%$ foreground threshold), and average-pools strictly over foreground spatial patch tokens (`forward_features()["x_norm_patchtokens"]`) rather than relying on an unmasked global `[CLS]` token.
+* **Strict Gold/Silver Anchor Training, `institutionCode` GroupKFold & Temperature Calibration:**
+  Trains an out-of-fold L2-penalized `LogisticRegression(C=0.1, class_weight="balanced")` inside a fold-internal `StandardScaler` + `PCA(0.95)` pipeline strictly on `Tier_1_Gold` and `Tier_2_Silver` anchors using `StratifiedGroupKFold(groups=institutionCode)` (holding out entire herbaria per fold to prevent institutional background shortcuts), calibrates probabilities via Platt/temperature scaling (`calibrate_oof_probabilities`), and projects `Tier_3_Bronze` vouchers passively (`predict_proba`).
+* **Class-Conditional Cleanlab Pruning, Feature-Space OOD Scoring & Pointing Game Verification:**
+  Prunes label noise via `cleanlab.filter.find_label_issues(..., filter_by="prune_by_noise_rate")`, computes Mahalanobis + cosine $k$-NN feature-space distance (`vision_ood_score`, `vision_is_ood`) to flag novel or unmodeled morphotypes, enforces Pointing Game attribution verification (`foreground_attention_ratio >= 0.65`, flagging $< 0.65$ as `is_background_shortcut`), and exports dynamic `active_taxa` probability bars in `GradCAM_audit_panel.{png,pdf}` and `fig05b_cleanlab_quality_and_tomentum.{pdf,png}`.
 
 ---
 
-## 6. Phase 7 & 8 Protocol: Reliability-Weighted Consensus, 5-Stage Decision Matrix & Complex Discovery (`07`–`08`)
+## 6. Phase 6 Protocol: $0\text{–}15\text{ cm}$ Rhizosphere/Outcrop ENM Stack, Non-Blended Hierarchy & Niche Equivalency (`06_multimodal_spatial_rf.R`)
 
-* **Out-of-Fold Cohen's $\kappa$ Reliability Weighting:** Each modality $m \in \{\text{Morph}, \text{Vis}, \text{Edaph}, \text{Pheno}\}$ is weighted by its empirical out-of-fold validation Cohen's $\kappa_m$ ($w_m = \max(0.05, \kappa_m)$), dynamically renormalized over the subset of observed modalities $\mathcal{O}_i$ on each specimen ($S_i = \frac{\sum_{m \in \mathcal{O}_i} w_m d_{i,m}}{\sum_{m \in \mathcal{O}_i} w_m}$) so non-georeferenced vouchers are evaluated without missing-data penalties (`98.4%` voucher completion).
-* **Hopkins-Adjusted Circular Anthesis Phenology:** Restricted strictly to specimens verified in active anthesis (`in_anthesis == TRUE`, Stage 2 flowering capitula), circular flowering angles $(\sin\theta_i, \cos\theta_i)$ are regressed on latitude, elevation, and MAT (`atan2` circular residuals) before computing angular deviation $|\Delta\text{DOY}_{\text{Hopkins}}|$.
+* **$0\text{–}15\text{ cm}$ Trapezoidal Rhizosphere Depth-Weighting & Compositional Texture:**
+  Combines $0\text{–}5\text{ cm}$ and $5\text{–}15\text{ cm}$ soil horizons via trapezoidal depth weighting:
+  $$X_{0\text{–}15\text{ cm}} = \frac{5 X_{0\text{–}5} + 10 X_{5\text{–}15}}{15}$$
+  across 30m POLARIS/gSSURGO and 250m SoilGrids fallback grids, paired with centered log-ratio (`clr_sand_silt`, `clr_clay_geom`) and additive log-ratio (`alr_sand_clay`, `alr_silt_clay`) soil texture transformations, coarse fragment volume (`cfvo_0_15cm`), available water capacity (`awc_0_15cm`), depth to bedrock (`fine_bedrock_depth_cm`), 50m-buffered SSURGO rock outcrop percentage (`ssurgo_rock_outcrop_pct`), 10m–30m USGS 3DEP micro-topography (`topo_tpi_30m`, `topo_roughness_30m`, `topo_slope_deg`, `topo_twi_30m`), and 6-class USGS SGMC bedrock lithology (`sgmc_lithology_class`, `is_azonal_lithology`, `azonal_proximity_index`).
+* **Strict Non-Blended Coalesce Hierarchy:**
+  Enforces a strict priority hierarchy: 100% SSURGO / 30m POLARIS / 100m SOLUS100 within CONUS; 250m SoilGrids is used strictly as a non-CONUS fallback when both SSURGO and POLARIS are `NA` (raw 250m `soil_*` columns are excluded from active `env_vars` and `cand_eco` modeling).
+* **Coordinate-Uncertainty Buffered Extraction (`100–1000 m`) & Collinearity Pruning:**
+  Extracts focal median raster values within $r_{\text{buf}} = \text{clamp}(\text{coordinateUncertaintyInMeters}, 100, 1000)$ m (downweighting vouchers with $> 5000\text{ m}$ uncertainty and excluding $> 10000\text{ m}$ from anchor training), and prunes collinear predictors at $|r| < 0.70$ and $\text{VIF} < 5.0$ (`prune_collinear_predictors`) prior to fitting `ranger::ranger` under $0.5^\circ \times 0.5^\circ$ Spatial Block Cross-Validation (`spatial_block_cv_acc`).
+* **Partitioned Climatic vs. Edaphic-Geologic Niche Equivalency & Background Similarity:**
+  Computes Schoener's $D$ and Hellinger's $I$ separately in Climatic PCA space ($D_{\text{clim}}, I_{\text{clim}}$) and Edaphic-Geologic PCA space ($D_{\text{edaph}}, I_{\text{edaph}}$) alongside 100-replicate permutation $p$-values (`outputs/reports/edaphic_niche_equivalency.csv`; Warren et al. 2008; Broennimann et al. 2012), exporting `spatial_rf_niche_importance.{pdf,png}`, `fig06_ecological_niche_phenology.{pdf,png}`, and `fig06b_geographic_map_and_hopkins_phenology.{pdf,png}`.
+
+---
+
+## 7. Phase 7 & 8 Protocol: Reliability-Weighted Consensus, 5-Stage Decision Matrix & Subcluster Discovery (`07`–`08`)
+
+* **Out-of-Fold Cohen's $\kappa$ Reliability Weighting:**
+  Each modality $m \in \{\text{Morph}, \text{Vis}, \text{Edaph}, \text{Pheno}\}$ is weighted by its empirical out-of-fold validation Cohen's $\kappa_m$:
+  $$w_m = \max(0.05, \kappa_m)$$
+  Dynamically renormalized over the subset of observed modalities $\mathcal{O}_i$ present on each specimen:
+  $$S_i = \frac{\sum_{m \in \mathcal{O}_i} w_m d_{i,m}}{\sum_{m \in \mathcal{O}_i} w_m}$$
+  achieving $98.4\%$ voucher completion across georeferenced and non-georeferenced sheets alike.
+* **Hopkins-Adjusted Circular Anthesis Phenology:**
+  Restricted strictly to specimens verified in active anthesis (`in_anthesis == TRUE`, Stage 2 flowering capitula), circular flowering angles:
+  $$\theta_i = \frac{2\pi \cdot \text{DOY}_i}{365.25}$$
+  are regressed on latitude, elevation, and mean annual temperature (`atan2` circular residuals) before computing angular deviation $|\Delta\text{DOY}_{\text{Hopkins}}|$.
 * **5-Stage Hierarchical Decision Matrix:**
   1. **Stage 1 (`Misidentification_Reassign`):** Cross-modal alternative-species agreement (`both_alt_agree`, `morph_edaph_alt_agree`, `vis_edaph_alt_agree`, `is_severe_misid`) is evaluated **FIRST**, before hybrid or cryptic states, so sympatric misidentifications are routed directly to `Misidentification_Reassign`.
   2. **Stage 2 (`Hybrid_Introgressant`):** Intermediate CDA posteriors ($0.35 \le P(\text{taxon}_1) \le 0.65$ and $P(\text{taxon}_2) \ge 0.25$) in verified sympatry where no single alternative taxon achieves cross-modal consensus.
   3. **Stage 3 (`Putative_Cryptic_Species` — Integration by Congruence; Padial et al. 2010):** Requires **`morph_tier_source == "Tier_1_Pure"` (`n_tier1_leaves >= 1`)**, `morphometric_outlier_flag == TRUE`, high OOD / low known-taxon posterior across both morphology (`cda_posterior_prob < 0.70`) and vision (`vision_c_error < 0.85`), placement in a discrete GMM cluster supported by $2\Delta\text{BIC} > 6$, AND corroboration by at least one independent non-morphological axis (significant edaphic niche divergence $p < 0.05$, Hopkins-adjusted allochrony $|\Delta\text{DOY}| \ge 14\text{ d}$, or distinct geographic cluster).
   4. **Stage 4 (`Subspecies_Ecotype` vs. `Ecophenotypic_Plasticity`):** Intraspecific morphs on specialized substrates with $2\Delta\text{BIC} \le 6$ route to `Subspecies_Ecotype`; continuous size/allometric variation with overlapping niches routes to `Ecophenotypic_Plasticity`.
   5. **Stage 5 (`Confirmed_Species`):** Concordant baseline vouchers (`Retain_Original_Label`).
-* **Step 08 Unsupervised Taxon-Complex Discovery (`08_discover_taxon_complexes.R`):** Fuses pairwise morphological ($D_{\text{Mahal}}$), environmental ($1 - D_{\text{Schoener}}$), phenological ($d_{\text{circ}}$), and vision centroid distances across all Eastern North American *Packera* species into $D_{\text{total}}$, partitioning species into candidate complexes via $k$-NN graph modularity (Leiden/Louvain) and Ward.D2 hierarchical clustering (`discovered_taxon_complexes.csv`).
+* **Step 08 Unsupervised Taxon-Complex Discovery & Subcluster Resolution (`scripts/analysis/08_discover_taxon_complexes.R`):**
+  Fuses pairwise morphological ($D_{\text{Mahal}}$), environmental ($1 - D_{\text{Schoener}}$), phenological ($d_{\text{circ}}$), and vision centroid distances across all Eastern North American *Packera* species into $D_{\text{total}}$, partitioning species into candidate complexes via $k$-NN graph modularity (Leiden/Louvain) and Ward.D2 hierarchical clustering (`outputs/reports/discovered_taxon_complexes.csv`). When $N_{\text{taxa}} \le 2$, automatically resolves Taxon x GMM Morphotype subclusters (`P. dubia [K1]`, `P. dubia [K2]`, etc.) to evaluate fine-scale lineage divergence.
 
 | Taxonomic Status | Vegetative Morphometrics (`Tier_1_Pure` EFA / GMM) | Deep Vision (`dinov2_vitb14_reg` Patch Pooling) | Cytology ($2n$ Cytotype; Kowal 1975) | Phylogenomics (nextRAD SNPs) | $0\text{–}15\text{ cm}$ Edaphics, SGMC Bedrock & Niche ($D_{\text{clim}}$ vs. $D_{\text{edaph}}$) | Actionable Taxonomic Outcome |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |

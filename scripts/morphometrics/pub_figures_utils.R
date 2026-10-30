@@ -646,6 +646,7 @@ plot_2d_ordination_scatter <- function(
   xlab = "Axis 1",
   ylab = "Axis 2",
   main = "",
+  subtitle = NULL,
   group_vec = NULL,
   group_cols = NULL,
   ellipse_level = 0.95,
@@ -701,6 +702,7 @@ plot_2d_ordination_scatter <- function(
 
   xlim <- pad_range(all_x)
   ylim <- pad_range(all_y)
+  has_sub <- !is.null(subtitle) && length(subtitle) > 0L && !is.na(subtitle[1]) && nzchar(trimws(as.character(subtitle[1])))
 
   graphics::plot(
     x_num, y_num,
@@ -709,9 +711,15 @@ plot_2d_ordination_scatter <- function(
     ylim = ylim,
     xlab = xlab,
     ylab = ylab,
-    main = main,
+    main = if (has_sub) "" else main,
     font.main = 2
   )
+  if (has_sub) {
+    if (!is.null(main) && nzchar(trimws(as.character(main)))) {
+      graphics::title(main = main, line = 1.45, font.main = 2)
+    }
+    graphics::mtext(trimws(as.character(subtitle[1])), side = 3, line = 0.28, cex = 0.73, col = "grey20", font = 1)
+  }
   graphics::grid(col = "grey88", lty = "solid")
   graphics::abline(h = 0, v = 0, lty = 3, col = "grey70")
 
@@ -1916,16 +1924,33 @@ draw_group_mean_leaf_outlines <- function(df, group_vec, group_cols, main_title 
   }
 }
 
-render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL) {
+render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL, manova_res = NULL) {
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
+  if (is.null(manova_res) && exists("run_multivariate_manova_audit", mode = "function")) {
+    manova_res <- tryCatch(
+      run_multivariate_manova_audit(
+        audit_df,
+        .resolve_default_manova_features(audit_df, feature_cols),
+        gmm_res = gmm_res,
+        output_group_csv = NULL,
+        output_pairwise_csv = NULL
+      ),
+      error = function(e) NULL
+    )
+  }
   grDevices::pdf(output_pdf, width = 13.0, height = 10.2, pointsize = 11, useDingbats = FALSE)
   tryCatch({
-    graphics::par(mfrow = c(2, 2), mar = c(4.4, 5.2, 3.0, 1.2), oma = c(0.8, 0.8, 2.0, 0.8), family = "sans")
+    graphics::par(mfrow = c(2, 2), mar = c(4.4, 5.2, 3.2, 1.2), oma = c(0.8, 0.8, 2.0, 0.8), family = "sans")
     sp_clean <- resolve_plot_group_column(audit_df, cda_res = cda_res, gmm_res = gmm_res)
     taxon_cols <- get_dynamic_packera_palette(sp_clean)
     taxon_pch  <- get_dynamic_packera_shapes(sp_clean)
     is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", sp_clean, ignore.case = TRUE)) ||
       length(unique(stats::na.omit(audit_df$species_standardized))) < 2L
+    cda_sub <- format_manova_pillai_subtitle(
+      manova_res,
+      factor_name = if (is_subcluster_mode) "gmm_cluster" else "species_standardized",
+      alt_factor = if (is_subcluster_mode) "species_standardized" else "gmm_cluster"
+    )
     is_joint <- !is.null(feature_cols) && ("AR_inv_std" %in% feature_cols)
     loocv_pct <- if (!is.null(cda_res$loocv_accuracy) && !is.na(cda_res$loocv_accuracy)) round(100 * cda_res$loocv_accuracy, 1) else 85.0
     cda_title <- sprintf(
@@ -1968,6 +1993,7 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
       xlab = sprintf("Can1 (%.1f%%)", var1),
       ylab = sprintf("Can2 (%.1f%%)", var2),
       main = cda_title,
+      subtitle = cda_sub,
       group_vec = sp_clean,
       group_cols = taxon_cols,
       ellipse_level = 0.95,
@@ -2016,10 +2042,24 @@ generate_step04_pub_figures <- function(
   gmm_res,
   allom_res = NULL,
   output_plot_path = NULL,
-  eco_cda_res = NULL
+  eco_cda_res = NULL,
+  manova_res = NULL
 ) {
   fdir <- resolve_active_figures_dir(reference_path = output_plot_path)
   if (is.null(audited_df) || nrow(audited_df) == 0) return(invisible(NULL))
+
+  if (is.null(manova_res) && exists("run_multivariate_manova_audit", mode = "function")) {
+    manova_res <- tryCatch(
+      run_multivariate_manova_audit(
+        audited_df,
+        .resolve_default_manova_features(audited_df, NULL),
+        gmm_res = gmm_res,
+        output_group_csv = NULL,
+        output_pairwise_csv = NULL
+      ),
+      error = function(e) NULL
+    )
+  }
 
   opt_g <- if (!is.null(gmm_res$optimal_G)) gmm_res$optimal_G else if (!is.null(gmm_res$best_k)) gmm_res$best_k else 4
   opt_mod <- if (!is.null(gmm_res$optimal_model)) gmm_res$optimal_model else if (!is.null(gmm_res$model_name)) gmm_res$model_name else "VVI"
@@ -2029,6 +2069,11 @@ generate_step04_pub_figures <- function(
   dyn_pch <- get_dynamic_packera_shapes(tx_clean)
   is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", tx_clean, ignore.case = TRUE)) ||
     length(unique(stats::na.omit(audited_df$species_standardized))) < 2L
+  cda_manova_sub <- format_manova_pillai_subtitle(
+    manova_res,
+    factor_name = if (is_subcluster_mode) "gmm_cluster" else "species_standardized",
+    alt_factor = if (is_subcluster_mode) "species_standardized" else "gmm_cluster"
+  )
   alpha_val <- adaptive_point_alpha(nrow(audited_df))
   cols_tx <- grDevices::adjustcolor(dyn_pal[tx_clean], alpha.f = alpha_val)
   pch_tx  <- dyn_pch[tx_clean]; pch_tx[is.na(pch_tx)] <- 1L
@@ -2120,13 +2165,14 @@ generate_step04_pub_figures <- function(
   cv3 <- if ("can3" %in% colnames(audited_df)) as.numeric(audited_df$can3) else if ("PC3" %in% colnames(audited_df)) as.numeric(audited_df$PC3) else rep(0.0, nrow(audited_df))
   cent_cda_3d <- cbind(cent_cda, vapply(present_tx, function(tx) mean(cv3[tx_clean == tx], na.rm = TRUE), numeric(1)))
   draw_fig04b <- function() {
-    graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.2, 1.1))
+    graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.3, 1.1))
     plot_2d_ordination_scatter(
       x = cv1, y = cv2,
       col = cols_tx, pch = pch_tx, cex = 0.85, lwd = 1.0,
       xlab = sprintf("Can1 (%.1f%%)", var1),
       ylab = sprintf("Can2 (%.1f%%)", var2),
       main = sprintf("A. 2D Passive CDA Biplot & Trait Vectors (LOOCV = %.1f%%)", loocv_pct),
+      subtitle = cda_manova_sub,
       group_vec = tx_clean,
       group_cols = dyn_pal,
       ellipse_level = 0.95,
@@ -2164,13 +2210,14 @@ generate_step04_pub_figures <- function(
   #   C: Diagnostic Trait Boxplots     | D: STRUCTURE Posterior Assignment Barplot
   # ----------------------------------------------------------------------------
   draw_fig04_combined <- function() {
-    graphics::par(mfrow = c(2, 2), mar = c(4.4, 5.2, 3.0, 1.2), oma = c(0.6, 0.6, 1.8, 0.6))
+    graphics::par(mfrow = c(2, 2), mar = c(4.4, 5.2, 3.2, 1.2), oma = c(0.6, 0.6, 1.8, 0.6))
     plot_2d_ordination_scatter(
       x = cv1, y = cv2,
       col = cols_tx, pch = pch_tx, cex = 0.85, lwd = 1.0,
       xlab = sprintf("Can1 (%.1f%%)", var1),
       ylab = sprintf("Can2 (%.1f%%)", var2),
       main = sprintf("A. 2D Passive CDA Biplot & Trait Vectors (LOOCV = %.1f%%)", loocv_pct),
+      subtitle = cda_manova_sub,
       group_vec = tx_clean,
       group_cols = dyn_pal,
       ellipse_level = 0.95,
@@ -2204,7 +2251,8 @@ generate_step04_pub_figures <- function(
       audited_df = audited_df,
       eco_cda_res = eco_cda_res,
       gmm_res = gmm_res,
-      output_plot_path = output_plot_path
+      output_plot_path = output_plot_path,
+      manova_res = manova_res
     )
   }
 
@@ -2742,6 +2790,511 @@ run_supervised_ecoregion_cda <- function(
   )
 }
 
+# ==============================================================================
+# Formal Parametric Multivariate MANOVA (Pillai's Trace & Wilks' Lambda) and
+# Pairwise Post-Hoc Hotelling's T^2 / MANOVA Contrast Audit
+# ==============================================================================
+.resolve_default_manova_features <- function(df, feature_cols = NULL) {
+  if (is.null(df) || nrow(df) == 0L) return(character(0))
+  cand <- if (!is.null(feature_cols) && length(feature_cols) > 0L) {
+    as.character(feature_cols)
+  } else {
+    c(
+      paste0("PC", seq_len(5)),
+      "AR_inv_std",
+      "petiole_to_blade_ratio_std",
+      "plant_height_cm_std",
+      "log_centsize_std",
+      "aspect_ratio_std",
+      "solidity_std"
+    )
+  }
+  avail <- intersect(unique(cand), names(df))
+  if (length(avail) == 0L) avail <- intersect(c(paste0("PC", seq_len(5)), paste0("Sym_PC", seq_len(5))), names(df))
+  avail
+}
+
+format_manova_pillai_subtitle <- function(
+  manova_res,
+  factor_name,
+  alt_factor = NULL,
+  fallback_label = NULL
+) {
+  gt <- if (!is.null(manova_res) && is.list(manova_res) && !is.null(manova_res$group_table)) {
+    manova_res$group_table
+  } else if (is.data.frame(manova_res)) {
+    manova_res
+  } else {
+    NULL
+  }
+  if (!is.null(gt) && nrow(gt) > 0L && "grouping_factor" %in% names(gt)) {
+    idx <- which(gt$grouping_factor == factor_name)
+    if (length(idx) == 0L && !is.null(alt_factor)) {
+      idx <- which(gt$grouping_factor == alt_factor)
+    }
+    if (length(idx) > 0L) {
+      r <- gt[idx[1], , drop = FALSE]
+      v_val <- suppressWarnings(as.numeric(r$pillai_trace[1]))
+      f_val <- suppressWarnings(as.numeric(r$approx_F[1]))
+      ndf <- suppressWarnings(as.numeric(r$num_df[1]))
+      ddf <- suppressWarnings(as.numeric(r$den_df[1]))
+      p_val <- suppressWarnings(as.numeric(r$p_value[1]))
+      if (is.finite(v_val) && is.finite(f_val)) {
+        ndf_s <- if (is.finite(ndf) && abs(ndf - round(ndf)) < 1e-5) sprintf("%d", as.integer(round(ndf))) else sprintf("%.1f", ndf)
+        ddf_s <- if (is.finite(ddf) && abs(ddf - round(ddf)) < 1e-5) sprintf("%d", as.integer(round(ddf))) else sprintf("%.1f", ddf)
+        p_s <- if (!is.finite(p_val)) "NA" else if (p_val < 1e-4) sprintf("%.2e", p_val) else sprintf("%.4f", p_val)
+        return(sprintf("Omnibus MANOVA: Pillai's Trace V = %.3f, F(%s, %s) = %.2f, p = %s", v_val, ndf_s, ddf_s, f_val, p_s))
+      }
+    }
+  }
+  fallback_label
+}
+
+.fit_weighted_manova_stats <- function(Y_mat, grp_vec, w_vec) {
+  grp_fac <- droplevels(factor(as.character(grp_vec)))
+  g_k <- nlevels(grp_fac)
+  n_obs <- nrow(Y_mat)
+  df_res <- n_obs - g_k
+  if (g_k < 2L || df_res < 1L || ncol(Y_mat) < 1L) return(NULL)
+
+  w_pos <- suppressWarnings(as.numeric(w_vec))
+  w_pos[!is.finite(w_pos) | w_pos <= 0] <- 1.0
+  w_pos <- w_pos / max(mean(w_pos), 1e-12)
+
+  sds <- apply(Y_mat, 2, stats::sd, na.rm = TRUE)
+  keep_sd <- is.finite(sds) & (sds > 1e-7)
+  if (!any(keep_sd)) return(NULL)
+  Y_use <- Y_mat[, keep_sd, drop = FALSE]
+
+  p_cap <- max(1L, df_res - 1L)
+  if (ncol(Y_use) > p_cap) {
+    Y_use <- Y_use[, seq_len(p_cap), drop = FALSE]
+  }
+
+  lm_pre <- tryCatch(stats::lm(Y_use ~ grp_fac, weights = w_pos), error = function(e) NULL)
+  if (is.null(lm_pre)) return(NULL)
+  res_mat <- as.matrix(stats::residuals(lm_pre)) * sqrt(w_pos)
+  qr_e <- qr(res_mat, tol = 1e-6)
+  if (qr_e$rank < 1L) return(NULL)
+  if (qr_e$rank < ncol(Y_use)) {
+    piv <- sort(qr_e$pivot[seq_len(qr_e$rank)])
+    Y_use <- Y_use[, piv, drop = FALSE]
+  }
+
+  p_dim <- ncol(Y_use)
+  s_rank <- min(p_dim, g_k - 1L)
+
+  if (p_dim >= 2L) {
+    m_fit <- tryCatch(stats::manova(Y_use ~ grp_fac, weights = w_pos), error = function(e) NULL)
+    if (is.null(m_fit)) return(NULL)
+    s_pil <- tryCatch(summary(m_fit, test = "Pillai")$stats, error = function(e) NULL)
+    s_wlk <- tryCatch(summary(m_fit, test = "Wilks")$stats, error = function(e) NULL)
+    s_hl  <- tryCatch(summary(m_fit, test = "Hotelling-Lawley")$stats, error = function(e) NULL)
+    if (is.null(s_pil) || is.null(s_wlk) || nrow(s_pil) < 1L) return(NULL)
+
+    pillai_v <- pmax(0.0, as.numeric(s_pil[1, "Pillai"]))
+    wilks_l  <- pmin(1.0, pmax(0.0, as.numeric(s_wlk[1, "Wilks"])))
+    hl_u     <- if (!is.null(s_hl) && "Hotelling-Lawley" %in% colnames(s_hl)) {
+      pmax(0.0, as.numeric(s_hl[1, "Hotelling-Lawley"]))
+    } else {
+      pillai_v / max(1.0 - min(pillai_v, 1.0 - 1e-12), 1e-12)
+    }
+    approx_f <- pmax(0.0, as.numeric(s_pil[1, "approx F"]))
+    num_df   <- as.numeric(s_pil[1, "num Df"])
+    den_df   <- as.numeric(s_pil[1, "den Df"])
+    p_val    <- pmin(1.0, pmax(0.0, as.numeric(s_pil[1, "Pr(>F)"])))
+  } else {
+    aov_1 <- tryCatch(stats::anova(stats::lm(Y_use[, 1] ~ grp_fac, weights = w_pos)), error = function(e) NULL)
+    if (is.null(aov_1) || nrow(aov_1) < 2L) return(NULL)
+    ss_eff <- pmax(0.0, as.numeric(aov_1[1, "Sum Sq"]))
+    ss_res <- pmax(1e-12, as.numeric(aov_1[2, "Sum Sq"]))
+    ss_tot <- ss_eff + ss_res
+    pillai_v <- ss_eff / ss_tot
+    wilks_l  <- ss_res / ss_tot
+    hl_u     <- ss_eff / ss_res
+    approx_f <- pmax(0.0, as.numeric(aov_1[1, "F value"]))
+    num_df   <- as.numeric(aov_1[1, "Df"])
+    den_df   <- as.numeric(aov_1[2, "Df"])
+    p_val    <- pmin(1.0, pmax(0.0, as.numeric(aov_1[1, "Pr(>F)"])))
+  }
+
+  p_eta2 <- min(1.0, max(0.0, pillai_v / max(1L, s_rank)))
+  hot_t2 <- pmax(0.0, df_res * hl_u)
+  mahal_d <- NA_real_
+  if (g_k == 2L) {
+    lvls <- levels(grp_fac)
+    w1_sum <- sum(w_pos[grp_fac == lvls[1]])
+    w2_sum <- sum(w_pos[grp_fac == lvls[2]])
+    mahal_d <- sqrt(max(0.0, hot_t2 * (w1_sum + w2_sum) / max(w1_sum * w2_sum, 1e-12)))
+  }
+
+  list(
+    n_groups = g_k,
+    n_obs = n_obs,
+    n_features = p_dim,
+    active_features = colnames(Y_use),
+    pillai_trace = pillai_v,
+    wilks_lambda = wilks_l,
+    hotelling_t2 = hot_t2,
+    mahalanobis_d = mahal_d,
+    approx_F = approx_f,
+    num_df = num_df,
+    den_df = den_df,
+    partial_eta2 = p_eta2,
+    p_value = p_val
+  )
+}
+
+run_multivariate_manova_audit <- function(
+  df,
+  feature_cols,
+  gmm_res = NULL,
+  output_group_csv = "outputs/reports/manova_group_significance.csv",
+  output_pairwise_csv = "outputs/reports/manova_pairwise_posthoc.csv"
+) {
+  run_dir <- trimws(Sys.getenv("PACKERA_RUN_DIR", unset = ""))
+  if (nzchar(run_dir)) {
+    if (missing(output_group_csv) && !is.null(output_group_csv)) {
+      output_group_csv <- file.path(run_dir, "outputs/reports/manova_group_significance.csv")
+    }
+    if (missing(output_pairwise_csv) && !is.null(output_pairwise_csv)) {
+      output_pairwise_csv <- file.path(run_dir, "outputs/reports/manova_pairwise_posthoc.csv")
+    }
+  }
+
+  empty_group_df <- data.frame(
+    grouping_factor = character(0),
+    factor_label = character(0),
+    n_groups = integer(0),
+    n_active_vouchers = integer(0),
+    n_features = integer(0),
+    active_features = character(0),
+    pillai_trace = numeric(0),
+    wilks_lambda = numeric(0),
+    approx_F = numeric(0),
+    num_df = numeric(0),
+    den_df = numeric(0),
+    partial_eta2 = numeric(0),
+    p_value = numeric(0),
+    q_value = numeric(0),
+    stringsAsFactors = FALSE
+  )
+  empty_pairwise_df <- data.frame(
+    grouping_factor = character(0),
+    group_1 = character(0),
+    group_2 = character(0),
+    contrast = character(0),
+    n_1 = integer(0),
+    n_2 = integer(0),
+    n_features = integer(0),
+    hotelling_t2 = numeric(0),
+    mahalanobis_d = numeric(0),
+    pillai_trace = numeric(0),
+    wilks_lambda = numeric(0),
+    approx_F = numeric(0),
+    num_df = numeric(0),
+    den_df = numeric(0),
+    partial_eta2 = numeric(0),
+    p_value = numeric(0),
+    q_value = numeric(0),
+    stringsAsFactors = FALSE
+  )
+
+  atomic_write_manova_csv <- function(tbl, path) {
+    if (!is.null(path) && nzchar(path)) {
+      dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+      tmp_p <- paste0(path, ".", Sys.getpid(), ".tmp")
+      utils::write.csv(tbl, file = tmp_p, row.names = FALSE)
+      file.rename(tmp_p, path)
+    }
+  }
+
+  if (is.null(df) || !is.data.frame(df) || nrow(df) < 4L) {
+    atomic_write_manova_csv(empty_group_df, output_group_csv)
+    atomic_write_manova_csv(empty_pairwise_df, output_pairwise_csv)
+    return(list(
+      group_table = empty_group_df,
+      pairwise_table = empty_pairwise_df,
+      output_group_csv = output_group_csv,
+      output_pairwise_csv = output_pairwise_csv
+    ))
+  }
+
+  n <- nrow(df)
+  avail_cols <- .resolve_default_manova_features(df, feature_cols)
+  avail_cols <- avail_cols[vapply(avail_cols, function(cn) {
+    sum(is.finite(suppressWarnings(as.numeric(df[[cn]])))) >= 3L
+  }, logical(1))]
+
+  if (length(avail_cols) == 0L) {
+    atomic_write_manova_csv(empty_group_df, output_group_csv)
+    atomic_write_manova_csv(empty_pairwise_df, output_pairwise_csv)
+    return(list(
+      group_table = empty_group_df,
+      pairwise_table = empty_pairwise_df,
+      output_group_csv = output_group_csv,
+      output_pairwise_csv = output_pairwise_csv
+    ))
+  }
+
+  # Strict active/passive authority weighting (Tier_1_Gold & Tier_2_Silver active; Tier_3_Bronze = 0.0)
+  if ("authority_weight" %in% names(df)) {
+    auth_w <- suppressWarnings(as.numeric(df$authority_weight))
+    auth_w[is.na(auth_w) | !is.finite(auth_w)] <- 0.0
+  } else if ("determiner_tier" %in% names(df)) {
+    if (exists("compute_authority_precision_weights", mode = "function")) {
+      auth_w <- compute_authority_precision_weights(df)
+    } else {
+      det_tier <- as.character(df$determiner_tier)
+      err_col <- intersect(c("dawid_skene_error_rate", "label_error_rate", "error_rate_k"), names(df))
+      prec_w <- if (length(err_col) > 0L) pmax(0.0, pmin(1.0, 1.0 - suppressWarnings(as.numeric(df[[err_col[1]]])))) else rep(1.0, n)
+      prec_w[is.na(prec_w) | !is.finite(prec_w)] <- 1.0
+      auth_w <- ifelse(det_tier %in% c("Tier_1_Gold", "Tier_2_Silver"), prec_w, 0.0)
+    }
+  } else {
+    auth_w <- rep(1.0, n)
+  }
+  has_positive_anchors <- any(auth_w > 0)
+
+  is_t1 <- if ("morph_tier_source" %in% names(df)) {
+    !is.na(df$morph_tier_source) & (as.character(df$morph_tier_source) == "Tier_1_Pure")
+  } else if ("assigned_tier" %in% names(df)) {
+    grepl("^tier_?1", as.character(df$assigned_tier), ignore.case = TRUE)
+  } else {
+    rep(TRUE, n)
+  }
+
+  pc_req <- intersect(paste0("PC", seq_len(5)), avail_cols)
+  req_cols <- if (length(pc_req) > 0L) pc_req else avail_cols
+  has_pcs <- stats::complete.cases(df[, req_cols, drop = FALSE])
+
+  # 1. species_standardized (>= 2 species)
+  sp_raw <- if ("species_standardized" %in% names(df)) {
+    as.character(df$species_standardized)
+  } else if ("scientificName" %in% names(df)) {
+    standardize_taxon_name(df$scientificName)
+  } else if ("species_raw" %in% names(df)) {
+    standardize_taxon_name(df$species_raw)
+  } else {
+    rep(NA_character_, n)
+  }
+  sp_vec <- trimws(as.character(sp_raw))
+  sp_vec[is.na(sp_vec) | !nzchar(sp_vec) | tolower(sp_vec) == "unknown"] <- NA_character_
+
+  # 2. Unsupervised Morphotype_K1..Kn from gmm_cluster / gmm_res (>= 2 clusters)
+  cl_raw <- if (!is.null(gmm_res) && !is.null(gmm_res$classification) && length(gmm_res$classification) == n) {
+    gmm_res$classification
+  } else if ("gmm_cluster" %in% names(df)) {
+    df$gmm_cluster
+  } else {
+    rep(NA_character_, n)
+  }
+  cl_chr <- trimws(as.character(cl_raw))
+  cl_num <- suppressWarnings(as.integer(gsub("[^0-9]", "", cl_chr)))
+  cl_vec <- ifelse(
+    is.na(cl_chr) | !nzchar(cl_chr) | cl_chr == "NA",
+    NA_character_,
+    ifelse(grepl("^Morphotype_K[0-9]+$", cl_chr), cl_chr, ifelse(is.na(cl_num), NA_character_, paste0("Morphotype_K", cl_num)))
+  )
+
+  # 3. Non-NA regional_group US EPA Level III Ecoregions (>= 2 regions with >= 3 vouchers)
+  rg_vec <- if ("regional_group" %in% names(df)) standardize_epa_l3_label_r(df$regional_group) else rep(NA_character_, n)
+  if (all(is.na(rg_vec))) {
+    lat_col <- intersect(c("decimalLatitude", "latitude"), names(df))
+    lon_col <- intersect(c("decimalLongitude", "longitude"), names(df))
+    if ((length(lat_col) > 0L && length(lon_col) > 0L) || any(c("stateProvince", "county") %in% names(df))) {
+      lat_v <- if (length(lat_col) > 0L) df[[lat_col[1]]] else rep(NA_real_, n)
+      lon_v <- if (length(lon_col) > 0L) df[[lon_col[1]]] else rep(NA_real_, n)
+      st_v <- if ("stateProvince" %in% names(df)) df$stateProvince else NULL
+      co_v <- if ("county" %in% names(df)) df$county else NULL
+      rg_vec <- tryCatch(infer_epa_level3_ecoregion(lat_v, lon_v, state_province = st_v, county = co_v), error = function(e) rg_vec)
+    }
+  }
+  rg_vec[is.na(rg_vec) | !nzchar(trimws(rg_vec))] <- NA_character_
+
+  sort_group_levels <- function(lvls) {
+    if (length(lvls) > 0L && all(grepl("^Morphotype_K[0-9]+$", lvls))) {
+      lvls[order(as.integer(sub("^Morphotype_K", "", lvls)))]
+    } else {
+      sort(lvls)
+    }
+  }
+
+  factor_specs <- list(
+    list(name = "species_standardized", label = "Taxonomic Species (species_standardized)", vec = sp_vec, min_n = 2L),
+    list(name = "gmm_cluster", label = "Unsupervised GMM Morphotype (Morphotype_K1..Kn)", vec = cl_vec, min_n = 2L),
+    list(name = "regional_group", label = "US EPA Level III Ecoregion (regional_group)", vec = rg_vec, min_n = 3L)
+  )
+
+  group_rows <- list()
+  pairwise_rows <- list()
+
+  for (spec in factor_specs) {
+    g_raw <- spec$vec
+    min_n <- as.integer(spec$min_n)
+    if (length(unique(g_raw[!is.na(g_raw)])) < 2L) next
+
+    # Enforce strict Tier_1/Tier_2 authority anchor split when positive anchors exist
+    if (has_positive_anchors) {
+      cand_mask <- !is.na(g_raw) & has_pcs & is_t1 & (auth_w > 0)
+      tab_c <- table(g_raw[cand_mask])
+      act_lvls <- sort_group_levels(names(tab_c[tab_c >= min_n]))
+      if (length(act_lvls) < 2L) {
+        cand_alt <- !is.na(g_raw) & has_pcs & (auth_w > 0)
+        tab_alt <- table(g_raw[cand_alt])
+        if (sum(tab_alt >= min_n) >= 2L) {
+          cand_mask <- cand_alt
+          act_lvls <- sort_group_levels(names(tab_alt[tab_alt >= min_n]))
+        }
+      }
+      w_use <- auth_w
+    } else {
+      cand_mask <- !is.na(g_raw) & has_pcs & is_t1
+      tab_c <- table(g_raw[cand_mask])
+      act_lvls <- sort_group_levels(names(tab_c[tab_c >= min_n]))
+      if (length(act_lvls) < 2L) {
+        cand_alt <- !is.na(g_raw) & has_pcs
+        tab_alt <- table(g_raw[cand_alt])
+        if (sum(tab_alt >= min_n) >= 2L) {
+          cand_mask <- cand_alt
+          act_lvls <- sort_group_levels(names(tab_alt[tab_alt >= min_n]))
+        }
+      }
+      w_use <- rep(1.0, n)
+    }
+
+    if (length(act_lvls) < 2L) next
+    is_train <- cand_mask & (g_raw %in% act_lvls)
+
+    X_full <- as.matrix(df[, avail_cols, drop = FALSE])
+    storage.mode(X_full) <- "double"
+    for (j in seq_len(ncol(X_full))) {
+      na_j <- !is.finite(X_full[, j])
+      if (any(na_j)) {
+        tr_ok <- is_train & !na_j
+        fill_v <- if (any(tr_ok)) stats::weighted.mean(X_full[tr_ok, j], w = pmax(w_use[tr_ok], 1e-6)) else 0.0
+        X_full[na_j, j] <- fill_v
+      }
+    }
+
+    sel_cols <- if (exists("select_morphometric_subspace", mode = "function")) {
+      suppressMessages(select_morphometric_subspace(X_full[is_train, , drop = FALSE], group_vec = g_raw[is_train]))
+    } else {
+      n_min_g <- min(as.integer(table(g_raw[is_train])))
+      p_max_wt <- if (n_min_g >= 6L) max(2L, floor(n_min_g / 3L)) else ncol(X_full)
+      avail_cols[seq_len(min(length(avail_cols), p_max_wt))]
+    }
+    X_sub <- X_full[, sel_cols, drop = FALSE]
+    p_sub <- ncol(X_sub)
+
+    # Per-group 95% chi-square Mahalanobis outlier pruning on active anchors
+    for (lvl in act_lvls) {
+      idx_g <- which(is_train & g_raw == lvl)
+      if (length(idx_g) >= 5L) {
+        sub_g <- X_sub[idx_g, , drop = FALSE]
+        d2_g <- tryCatch(stats::mahalanobis(sub_g, colMeans(sub_g), stats::cov(sub_g) + diag(1e-4, p_sub)), error = function(e) rep(0.0, length(idx_g)))
+        drop_g <- !is.na(d2_g) & (d2_g > stats::qchisq(0.95, df = p_sub))
+        if (sum(!drop_g) >= max(3L, min_n)) is_train[idx_g[drop_g]] <- FALSE
+      }
+    }
+
+    tab_post <- table(g_raw[is_train])
+    act_lvls <- sort_group_levels(names(tab_post[tab_post >= min_n]))
+    if (length(act_lvls) < 2L) next
+    is_train <- is_train & (g_raw %in% act_lvls)
+
+    act_idx <- which(is_train)
+    Y_act <- X_sub[act_idx, , drop = FALSE]
+    g_act <- factor(g_raw[act_idx], levels = act_lvls)
+    w_act <- w_use[act_idx]
+
+    omni <- .fit_weighted_manova_stats(Y_act, g_act, w_act)
+    if (is.null(omni)) next
+
+    group_rows[[length(group_rows) + 1L]] <- data.frame(
+      grouping_factor = spec$name,
+      factor_label = spec$label,
+      n_groups = as.integer(omni$n_groups),
+      n_active_vouchers = as.integer(omni$n_obs),
+      n_features = as.integer(omni$n_features),
+      active_features = paste(omni$active_features, collapse = ";"),
+      pillai_trace = round(omni$pillai_trace, 6),
+      wilks_lambda = round(omni$wilks_lambda, 6),
+      approx_F = round(omni$approx_F, 5),
+      num_df = round(omni$num_df, 3),
+      den_df = round(omni$den_df, 3),
+      partial_eta2 = round(omni$partial_eta2, 6),
+      p_value = signif(omni$p_value, 6),
+      q_value = NA_real_,
+      stringsAsFactors = FALSE
+    )
+
+    pair_list_factor <- list()
+    for (i1 in seq_len(length(act_lvls) - 1L)) {
+      for (i2 in seq.int(i1 + 1L, length(act_lvls))) {
+        g1 <- act_lvls[i1]
+        g2 <- act_lvls[i2]
+        m_pair <- (g_act == g1) | (g_act == g2)
+        n1 <- sum(g_act == g1)
+        n2 <- sum(g_act == g2)
+        pw_stat <- .fit_weighted_manova_stats(
+          Y_act[m_pair, omni$active_features, drop = FALSE],
+          droplevels(g_act[m_pair]),
+          w_act[m_pair]
+        )
+        if (!is.null(pw_stat)) {
+          pair_list_factor[[length(pair_list_factor) + 1L]] <- data.frame(
+            grouping_factor = spec$name,
+            group_1 = g1,
+            group_2 = g2,
+            contrast = paste(g1, "vs", g2),
+            n_1 = as.integer(n1),
+            n_2 = as.integer(n2),
+            n_features = as.integer(pw_stat$n_features),
+            hotelling_t2 = round(pw_stat$hotelling_t2, 5),
+            mahalanobis_d = round(pw_stat$mahalanobis_d, 5),
+            pillai_trace = round(pw_stat$pillai_trace, 6),
+            wilks_lambda = round(pw_stat$wilks_lambda, 6),
+            approx_F = round(pw_stat$approx_F, 5),
+            num_df = round(pw_stat$num_df, 3),
+            den_df = round(pw_stat$den_df, 3),
+            partial_eta2 = round(pw_stat$partial_eta2, 6),
+            p_value = signif(pw_stat$p_value, 6),
+            q_value = NA_real_,
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+    }
+    if (length(pair_list_factor) > 0L) {
+      pw_fac_df <- do.call(rbind, pair_list_factor)
+      pw_fac_df$q_value <- signif(stats::p.adjust(pw_fac_df$p_value, method = "BH"), 6)
+      pairwise_rows[[length(pairwise_rows) + 1L]] <- pw_fac_df
+    }
+  }
+
+  group_df <- if (length(group_rows) > 0L) do.call(rbind, group_rows) else empty_group_df
+  if (nrow(group_df) > 0L) {
+    group_df$q_value <- signif(stats::p.adjust(group_df$p_value, method = "BH"), 6)
+    rownames(group_df) <- NULL
+  }
+
+  pairwise_df <- if (length(pairwise_rows) > 0L) do.call(rbind, pairwise_rows) else empty_pairwise_df
+  if (nrow(pairwise_df) > 0L) {
+    rownames(pairwise_df) <- NULL
+  }
+
+  atomic_write_manova_csv(group_df, output_group_csv)
+  atomic_write_manova_csv(pairwise_df, output_pairwise_csv)
+
+  list(
+    group_table = group_df,
+    pairwise_table = pairwise_df,
+    output_group_csv = output_group_csv,
+    output_pairwise_csv = output_pairwise_csv
+  )
+}
+
 .short_epa_ecoregion_label <- function(eco_vec) {
   gsub("_", " ", as.character(eco_vec))
 }
@@ -2904,10 +3457,33 @@ render_fig04c_supervised_ecoregion_cda <- function(
   audited_df,
   eco_cda_res,
   gmm_res,
-  output_plot_path = NULL
+  output_plot_path = NULL,
+  manova_res = NULL
 ) {
   fdir <- resolve_active_figures_dir(reference_path = output_plot_path)
   if (is.null(audited_df) || nrow(audited_df) == 0L || is.null(eco_cda_res)) return(invisible(NULL))
+
+  if (is.null(manova_res) && exists("run_multivariate_manova_audit", mode = "function")) {
+    df_m <- audited_df
+    if (!is.null(eco_cda_res$ecoregion_vec) && length(eco_cda_res$ecoregion_vec) == nrow(df_m)) {
+      df_m$regional_group <- eco_cda_res$ecoregion_vec
+    }
+    manova_res <- tryCatch(
+      run_multivariate_manova_audit(
+        df_m,
+        .resolve_default_manova_features(df_m, NULL),
+        gmm_res = gmm_res,
+        output_group_csv = NULL,
+        output_pairwise_csv = NULL
+      ),
+      error = function(e) NULL
+    )
+  }
+  eco_manova_sub <- format_manova_pillai_subtitle(
+    manova_res,
+    factor_name = "regional_group",
+    fallback_label = "Omnibus MANOVA (Pillai's Trace): Insufficient EPA Ecoregions (<2 regions with >=3 vouchers)"
+  )
 
   n <- nrow(audited_df)
   rg_vec <- eco_cda_res$ecoregion_vec
@@ -2918,10 +3494,10 @@ render_fig04c_supervised_ecoregion_cda <- function(
   eco_pch <- if (length(all_ecos) > 0L) stats::setNames(rep_len(HOLLOW_PCH_CYCLE, length(all_ecos)), all_ecos) else c("Unassigned" = 1L)
 
   draw_fig04c <- function() {
-    graphics::par(mfrow = c(2, 2), mar = c(4.4, 7.6, 3.0, 1.2), oma = c(0.6, 0.4, 2.0, 0.6), family = "sans")
+    graphics::par(mfrow = c(2, 2), mar = c(4.4, 7.6, 3.2, 1.2), oma = c(0.6, 0.4, 2.0, 0.6), family = "sans")
 
     # Panel A: 2D Supervised CDA Biplot & Trait Vectors across EPA Level III Ecoregions (excluding NA from ellipses)
-    graphics::par(mar = c(4.4, 4.6, 3.0, 1.2))
+    graphics::par(mar = c(4.4, 4.6, 3.2, 1.2))
     has_2d_cda <- length(active_ecos) >= 2L && any(is.finite(eco_cda_res$ecoregion_can1))
     x_a <- if (has_2d_cda) eco_cda_res$ecoregion_can1 else if ("PC1" %in% names(audited_df)) as.numeric(audited_df$PC1) else seq_len(n)
     y_a <- if (has_2d_cda) eco_cda_res$ecoregion_can2 else if ("PC2" %in% names(audited_df)) as.numeric(audited_df$PC2) else rep(0.0, n)
@@ -2968,6 +3544,7 @@ render_fig04c_supervised_ecoregion_cda <- function(
       xlab = if (has_2d_cda) sprintf("Ecoregion Can1 (%.1f%%)", var1_e) else "Morphospace PC1",
       ylab = if (has_2d_cda) sprintf("Ecoregion Can2 (%.1f%%)", var2_e) else "Morphospace PC2",
       main = sprintf("A. 2D Supervised EPA Ecoregion CDA (%s%s)", loocv_txt, r2_txt),
+      subtitle = eco_manova_sub,
       group_vec = ellipse_grp,
       group_cols = eco_cols,
       ellipse_level = 0.95,

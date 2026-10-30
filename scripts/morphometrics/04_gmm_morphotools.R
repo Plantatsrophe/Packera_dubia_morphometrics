@@ -528,9 +528,9 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
 }
 
 # 6. Publication-Quality 2D CDA & 2D GMM Biplot Vector Graphic (PDF)
-generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL) {
+generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL, manova_res = NULL) {
   if (!exists("render_cda_biplot_4panel_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
-  if (exists("render_cda_biplot_4panel_pdf", mode = "function")) render_cda_biplot_4panel_pdf(audit_df, cda_res, gmm_res, output_pdf, feature_cols)
+  if (exists("render_cda_biplot_4panel_pdf", mode = "function")) render_cda_biplot_4panel_pdf(audit_df, cda_res, gmm_res, output_pdf, feature_cols, manova_res = manova_res)
 }
 
 # 7. Main Workflow Orchestrator
@@ -627,22 +627,22 @@ run_gmm_morphotools_pipeline <- function(opts) {
   cda_cols <- c(feature_cols, if (!isTRUE(opts$outline_only)) intersect(paste0(veg_extra, "_std"), names(closed_df)) else character(0))
   cda_unsupervised <- run_cda_with_passive_projection(closed_df, cda_cols, target_taxa, gmm_res = gmm_res, intraspecific_mode = is_intra_mode); cda_res <- cda_unsupervised
   audited_df <- audit_misidentifications(closed_df, cda_res, gmm_res); audit_institutional_batch_effects(audited_df, output_csv = opts$output_batch_audit)
-  eco_sum_csv <- file.path(dirname(opts$output_report), "ecoregion_supervised_cda_summary.csv")
+  rep_dir <- dirname(opts$output_report); eco_sum_csv <- file.path(rep_dir, "ecoregion_supervised_cda_summary.csv")
   eco_cda_res <- if (exists("run_supervised_ecoregion_cda", mode = "function")) run_supervised_ecoregion_cda(audited_df, cda_cols, gmm_res = gmm_res, output_summary_csv = eco_sum_csv, permutations = opts$permutations, seed = opts$seed) else NULL
   if (!is.null(eco_cda_res)) {
     audited_df$regional_group <- eco_cda_res$ecoregion_vec; audited_df$ecoregion_cda_predicted <- eco_cda_res$ecoregion_cda_predicted
     audited_df$ecoregion_cda_posterior_prob <- eco_cda_res$ecoregion_cda_posterior_prob; audited_df$ecoregion_can1 <- eco_cda_res$ecoregion_can1; audited_df$ecoregion_can2 <- eco_cda_res$ecoregion_can2
   }
+  manova_res <- if (exists("run_multivariate_manova_audit", mode = "function")) run_multivariate_manova_audit(audited_df, cda_cols, gmm_res, output_group_csv = file.path(rep_dir, "manova_group_significance.csv"), output_pairwise_csv = file.path(rep_dir, "manova_pairwise_posthoc.csv")) else NULL
   lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm",
                            "species_raw", "species_standardized", "determiner_tier", "authority_weight", "spatial_balance_weight", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_posterior_prob",
                            "cda_posterior_margin", "loocv_accuracy", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty",
                            "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", "pheno_sin", "pheno_cos", "PC1", "PC2", "PC3", "PC4", "PC5",
                            "centroid_size", "log_centsize", "solidity", "ucs_score", "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std",
                            "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
-  out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]
-  dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".tmp"); write.csv(out_df, file = tmp_flags, row.names = FALSE, na = ""); file.rename(tmp_flags, opts$output_flags)
-  generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, feature_cols)
-  tryCatch({ if (exists("generate_step04_pub_figures", mode = "function")) generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot, eco_cda_res = eco_cda_res) }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
+  out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]; dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".tmp"); write.csv(out_df, file = tmp_flags, row.names = FALSE, na = ""); file.rename(tmp_flags, opts$output_flags)
+  generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, feature_cols, manova_res = manova_res)
+  tryCatch({ if (exists("generate_step04_pub_figures", mode = "function")) generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot, eco_cda_res = eco_cda_res, manova_res = manova_res) }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
   return(invisible(out_df))
 }
 if (sys.nframe() == 0) run_gmm_morphotools_pipeline(parse_args_robust())
