@@ -1373,6 +1373,8 @@ class TestCleanlabVisionXAI(unittest.TestCase):
                 "tier1_leaf_masks": [str(narrow_msk)],
                 "tier1_leaf_weights": [1.0],
             }]
+            from unittest.mock import patch
+
             with patch("torch.hub.load", return_value=PinnaDINOv2()):
                 emb, _, _ = extract_dinov2_embeddings(rec, demo=False, db_path=tmp_path / "ephem.sqlite")
             # Foreground patch (0,0) must dominate dim 0 rather than falling back to background global average (dim 1)
