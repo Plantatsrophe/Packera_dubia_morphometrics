@@ -334,7 +334,7 @@ def _has_artificial_straight_occlusion_cut(
         >= 18% of perimeter (>= 75 px) with orthogonal RMS line-fit error <= 1.40 px.
     """
     bx, by, bw, bh = cv2.boundingRect(mask_u8)
-    if max(bw, bh) < 220 or min(bw, bh) < 40:
+    if max(bw, bh) < 140 or min(bw, bh) < 40:
         return False, 0.0
 
     cnts, _ = cv2.findContours(
@@ -369,7 +369,10 @@ def _has_artificial_straight_occlusion_cut(
 
     max_dim = float(max(bw, bh))
     min_dim = float(min(bw, bh))
-    eps_poly = max(2.2, 0.006 * max_dim)
+    # Physical straight edges (ColorChecker rims, paper labels, barcode stickers, canvas clips)
+    # exhibit fixed pixel-level linearity regardless of leaf size, whereas curved biological
+    # margins accumulate larger chord sagitta on 1000-2500 px leaves.
+    eps_poly = 2.4
     poly = cv2.approxPolyDP(raw_cnt, epsilon=eps_poly, closed=True).reshape(-1, 2).astype(np.float64)
     if len(poly) < 3:
         return False, 0.0
@@ -380,13 +383,15 @@ def _has_artificial_straight_occlusion_cut(
         d2 = (pts[:, 0] - pv[0]) ** 2 + (pts[:, 1] - pv[1]) ** 2
         poly_indices.append(int(np.argmin(d2)))
 
-    min_seg_len = max(55.0, 0.13 * max_dim)
-    rms_tol = max(1.45, 0.0024 * max_dim)
-    max_tol = max(3.2, 0.0052 * max_dim)
-    trans_rms_tol = max(1.25, 0.0020 * max_dim)
-    trans_max_tol = max(2.8, 0.0046 * max_dim)
+    min_seg_len = max(55.0, 0.16 * max_dim)
+    rms_tol = 1.25
+    max_tol = 2.75
+    trans_rms_tol = 1.15
+    trans_max_tol = 2.50
     straight_angles: List[float] = []
     straight_len_total = 0.0
+    max_off_axis_deg = 0.0
+    has_frame_aligned_cut = False
     has_transverse_cut = False
 
     for k in range(len(poly_indices)):
@@ -402,16 +407,16 @@ def _has_artificial_straight_occlusion_cut(
         if chord_len < min_seg_len:
             continue
 
-        if i1 > i0:
-            arc_pts = pts[i0 : i1 + 1]
-        else:
-            arc_pts = np.vstack([pts[i0:], pts[: i1 + 1]])
+        lo_i, hi_i = (i0, i1) if i0 < i1 else (i1, i0)
+        arc_direct = pts[lo_i : hi_i + 1]
+        arc_wrap = np.vstack([pts[hi_i:], pts[: lo_i + 1]])
+        arc_pts = arc_direct if len(arc_direct) <= len(arc_wrap) else arc_wrap
         if len(arc_pts) < 12:
             continue
         # Ensure we picked the direct arc along the polygon edge rather than the complementary loop
         arc_steps = np.hypot(np.diff(arc_pts[:, 0]), np.diff(arc_pts[:, 1]))
         arc_len = float(np.sum(arc_steps))
-        if arc_len > 1.15 * chord_len:
+        if arc_len > 1.12 * chord_len:
             continue
 
         ux, uy = dx / chord_len, dy / chord_len
@@ -429,11 +434,17 @@ def _has_artificial_straight_occlusion_cut(
             ):
                 straight_angles.append(seg_angle)
 
+            deg_mod_90 = math.degrees(seg_angle) % 90.0
+            if min(deg_mod_90, 90.0 - deg_mod_90) <= 6.0:
+                has_frame_aligned_cut = True
+
             cos_align = min(1.0, abs(ux * ax_vx + uy * ax_vy))
             angle_off_axis = math.degrees(math.acos(cos_align))
+            if angle_off_axis > max_off_axis_deg:
+                max_off_axis_deg = angle_off_axis
             if (
-                angle_off_axis >= 38.0
-                and chord_len >= max(90.0, 0.34 * min_dim)
+                angle_off_axis >= 40.0
+                and chord_len >= max(85.0, 0.34 * min_dim)
                 and rms_dev <= trans_rms_tol
                 and max_dev <= trans_max_tol
             ):
@@ -441,7 +452,11 @@ def _has_artificial_straight_occlusion_cut(
 
     straight_ratio = straight_len_total / max(2.0 * (max_dim + min_dim), 1.0)
     is_cut = bool(
-        (len(straight_angles) >= 2 and straight_len_total >= 0.42 * max_dim)
+        (
+            len(straight_angles) >= 2
+            and straight_len_total >= 0.44 * max_dim
+            and (has_frame_aligned_cut or max_off_axis_deg >= 35.0)
+        )
         or has_transverse_cut
     )
     return is_cut, round(min(1.0, straight_ratio), 6)
@@ -621,11 +636,11 @@ def check_boundary_tissue_continuity(
 
     straight_cut_flag = False
     straight_cut_ratio = 0.0
-    if not is_severed and max_dim >= 220:
+    if not is_severed and max_dim >= 140:
         straight_cut_flag, straight_cut_ratio = _has_artificial_straight_occlusion_cut(mask_u8)
         if straight_cut_flag:
             fold_chk = detect_folded_leaf(mask_u8)
-            if not fold_chk.get("is_folded", False) and not fold_chk.get("is_irregular_fold", False):
+            if not fold_chk.get("is_folded", False):
                 is_severed = True
                 border_ratio = max(border_ratio, straight_cut_ratio)
 

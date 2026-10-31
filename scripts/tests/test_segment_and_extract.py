@@ -414,9 +414,18 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             device="cpu",
             force=True,
         )
+        self.qc_pipeline = SegmentAndExtractPipeline(
+            vouchers_csv=self.vouchers_csv,
+            model_weights=Path("models/dummy.pth"),
+            output_dir=self.temp_dir / "data_qc",
+            device="cpu",
+            force=True,
+            enable_geometric_qc=True,
+        )
 
     def tearDown(self) -> None:
         self.pipeline.shutdown()
+        self.qc_pipeline.shutdown()
         if self.temp_dir.exists():
             shutil.rmtree(self.temp_dir, ignore_errors=True)
 
@@ -477,20 +486,20 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertFalse(rec["is_dissected"])
 
     def test_routing_folded_leaf_to_tier2(self) -> None:
-        """Verify folded/partial leaf is excluded from closed-outline EFA and routed exclusively to rosette crops."""
+        """Verify folded/partial leaf is excluded from closed-outline EFA and routed exclusively to rosette crops under opt-in geometric QC."""
         # Half-ellipse with straight edge along midrib
         mask = np.zeros((400, 400), dtype=np.uint8)
         cv2.ellipse(mask, (200, 200), (35, 130), 0, -90, 90, 255, -1)
 
         from unittest.mock import patch
-        with patch.object(self.pipeline.model_engine, "predict", return_value=[((70, 160, 330, 240), mask, 0.92, 0)]):
+        with patch.object(self.qc_pipeline.model_engine, "predict", return_value=[((70, 160, 330, 240), mask, 0.92, 0)]):
             with patch("cv2.imread", return_value=np.full((400, 400, 3), 200, dtype=np.uint8)):
-                records, failure = self.pipeline.process_voucher("NCU123", self.img_path)
+                records, failure = self.qc_pipeline.process_voucher("NCU123", self.img_path)
 
         self.assertEqual(len(records), 0, "Mirrored Tier 2 hemi-blades must not enter closed-outline EFA records.")
         self.assertIsNotNone(failure)
         self.assertEqual(failure["failure_reason"], "PARTIAL_OR_FOLDED_ROUTED_TO_ROSETTE")
-        rosette_crop = self.pipeline.rosettes_dense_dir / "NCU123_p0_rosette.jpg"
+        rosette_crop = self.qc_pipeline.rosettes_dense_dir / "NCU123_p0_rosette.jpg"
         self.assertTrue(rosette_crop.exists(), "Partial/folded leaf must still generate whole-rosette crop for Phase 5 DINOv2.")
 
     def test_routing_botanical_dissection_to_tier1_dissected(self) -> None:
@@ -522,16 +531,16 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertFalse(rec["is_folded"])
 
     def test_routing_rejection_reasons(self) -> None:
-        """Verify rejection reasons FAILED_SOLIDITY, IRREGULAR_FOLD, and UNRESOLVED_CLUMP."""
+        """Verify rejection reasons FAILED_SOLIDITY, IRREGULAR_FOLD, and UNRESOLVED_CLUMP under opt-in geometric QC."""
         # Diagonal fold -> IRREGULAR_FOLD
         diag_mask = np.zeros((400, 400), dtype=np.uint8)
         pts = np.array([[190, 60], [230, 180], [200, 320], [160, 200]], dtype=np.int32)
         cv2.fillPoly(diag_mask, [pts], 255)
 
         from unittest.mock import patch
-        with patch.object(self.pipeline.model_engine, "predict", return_value=[((60, 160, 320, 230), diag_mask, 0.90, 0)]):
+        with patch.object(self.qc_pipeline.model_engine, "predict", return_value=[((60, 160, 320, 230), diag_mask, 0.90, 0)]):
             with patch("cv2.imread", return_value=np.full((400, 400, 3), 200, dtype=np.uint8)):
-                records, failure = self.pipeline.process_voucher("NCU123", self.img_path)
+                records, failure = self.qc_pipeline.process_voucher("NCU123", self.img_path)
 
         self.assertEqual(len(records), 0)
         self.assertIsNotNone(failure)
@@ -563,7 +572,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         # 0: leaf_whole, 1: leaf_partial, 2: leaflet (ignored), 8: specimen (ignored), 10: wood (ignored)
         stage1_dets = [
             ((200, 100, 400, 300), 0.94, 0),  # leaf_whole -> routed to Stage 2
-            ((550, 400, 750, 600), 0.89, 1),  # leaf_partial -> routed to Stage 2
+            ((550, 400, 750, 600), 0.89, 1),  # leaf_partial -> routed to Stage 2 under qc_pipeline
             ((100, 50, 150, 90), 0.80, 2),    # leaflet -> ignored
             ((10, 10, 990, 790), 0.99, 8),    # specimen -> ignored
             ((800, 100, 950, 140), 0.77, 10), # wood -> ignored
@@ -576,9 +585,9 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             return [((10, 10, ch - 10, cw - 10), m, 0.96, 0)]
 
         with patch("cv2.imread", return_value=sheet_img):
-            with patch.object(self.pipeline.stage1_detector, "predict", return_value=stage1_dets):
-                with patch.object(self.pipeline.model_engine, "predict", side_effect=fake_stage2_predict) as mock_s2:
-                    records, failure = self.pipeline.process_voucher("NCU123", self.img_path)
+            with patch.object(self.qc_pipeline.stage1_detector, "predict", return_value=stage1_dets):
+                with patch.object(self.qc_pipeline.model_engine, "predict", side_effect=fake_stage2_predict) as mock_s2:
+                    records, failure = self.qc_pipeline.process_voucher("NCU123", self.img_path)
 
         self.assertIsNone(failure)
         # Stage 2 PointRend must be called ONLY for class 0 (leaf_whole) and class 1 (leaf_partial)
@@ -646,7 +655,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         stage1_dets = [
             ((100, 100, 320, 280), 0.95, 0),
             ((120, 140, 340, 310), 0.93, 0),
-            ((1500, 1500, 1720, 1680), 0.91, 1),
+            ((1500, 1500, 1720, 1680), 0.91, 0),
         ]
 
         def fake_stage2_predict(crop_img: np.ndarray):
@@ -1041,9 +1050,9 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             ]
 
         with patch("cv2.imread", return_value=sheet_img):
-            with patch.object(self.pipeline.stage1_detector, "predict", return_value=stage1_dets):
-                with patch.object(self.pipeline.model_engine, "predict", side_effect=fake_high_dpi_stage2) as mock_s2:
-                    records, failure = self.pipeline.process_voucher("NCU_HIGHDPI", self.img_path)
+            with patch.object(self.qc_pipeline.stage1_detector, "predict", return_value=stage1_dets):
+                with patch.object(self.qc_pipeline.model_engine, "predict", side_effect=fake_high_dpi_stage2) as mock_s2:
+                    records, failure = self.qc_pipeline.process_voucher("NCU_HIGHDPI", self.img_path)
 
         self.assertIsNone(failure)
         # Stage 2 PointRend must be called EXACTLY ONCE (only for valid basal leaf box #4)
@@ -1149,11 +1158,11 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertFalse(rej_ok)
 
     def test_lobe_rejection_min_blade_area_cm2_extent_and_telemetry(self) -> None:
-        """Verify check_boundary_tissue_continuity, min_blade_area_cm2, Extent, and rejection telemetry counters."""
+        """Verify check_boundary_tissue_continuity, min_blade_area_cm2, Extent, and rejection telemetry counters under opt-in QC."""
         from unittest.mock import patch
 
         # Calibrate sheet at 10.0 px/mm (100.0 px/cm -> 1 cm^2 = 10,000 px, 0.75 cm^2 = 7,500 px)
-        self.pipeline.ruler_calibrations["NCU_TELEM"] = 10.0
+        self.qc_pipeline.ruler_calibrations["NCU_TELEM"] = 10.0
 
         sheet_img = np.full((600, 600, 3), 235, dtype=np.uint8)
 
@@ -1182,18 +1191,18 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         ]
 
         with patch("cv2.imread", return_value=sheet_img):
-            with patch.object(self.pipeline.model_engine, "predict", return_value=dets):
-                records, failure = self.pipeline.process_voucher("NCU_TELEM", self.img_path)
+            with patch.object(self.qc_pipeline.model_engine, "predict", return_value=dets):
+                records, failure = self.qc_pipeline.process_voucher("NCU_TELEM", self.img_path)
 
         self.assertEqual(len(records), 0)
         self.assertIsNotNone(failure)
-        self.assertEqual(self.pipeline.rejection_telemetry["rejected_leaflet_class"], 1)
-        self.assertEqual(self.pipeline.rejection_telemetry["rejected_severed_lobe"], 1)
-        self.assertEqual(self.pipeline.rejection_telemetry["rejected_min_area_cm2"], 1)
-        self.assertEqual(self.pipeline.rejection_telemetry["rejected_solidity_extent"], 1)
+        self.assertEqual(self.qc_pipeline.rejection_telemetry["rejected_leaflet_class"], 1)
+        self.assertEqual(self.qc_pipeline.rejection_telemetry["rejected_severed_lobe"], 1)
+        self.assertEqual(self.qc_pipeline.rejection_telemetry["rejected_min_area_cm2"], 1)
+        self.assertEqual(self.qc_pipeline.rejection_telemetry["rejected_solidity_extent"], 1)
 
     def test_dissected_tier1_routing_enforces_min_ucs(self) -> None:
-        """Verify dissected candidates with ucs < 0.80 (and < min_ucs) are rejected rather than routed to Tier_1_Direct."""
+        """Verify dissected candidates with ucs < 0.80 (and < min_ucs) are rejected under opt-in geometric QC."""
         from unittest.mock import patch
         from scripts.vision.lm2_geometry_utils import LeafRoutingResult
 
@@ -1217,11 +1226,11 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         )
 
         with patch("cv2.imread", return_value=sheet_img):
-            with patch.object(self.pipeline.model_engine, "predict", return_value=dets):
+            with patch.object(self.qc_pipeline.model_engine, "predict", return_value=dets):
                 with patch.object(step02, "classify_and_route_leaf", return_value=low_ucs_routing):
-                    records, failure = self.pipeline.process_voucher("NCU_LOW_UCS_DISS", self.img_path)
+                    records, failure = self.qc_pipeline.process_voucher("NCU_LOW_UCS_DISS", self.img_path)
 
-        self.assertEqual(len(records), 0, "Dissected leaf with ucs < 0.80 must not enter Tier_1_Direct.")
+        self.assertEqual(len(records), 0, "Dissected leaf with ucs < 0.80 must not enter Tier_1_Direct under opt-in QC.")
         self.assertIsNotNone(failure)
 
     def test_step02_figures_downstream_qc_filtering_and_active_species_montage(self) -> None:
@@ -1546,6 +1555,89 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertAlmostEqual(float(row_fail_v["pixels_per_mm"]), 11.8, places=3)
         self.assertEqual(int(row_fail_v["is_calibrated_mm"]), 1)
         conn.close()
+
+    def test_raw_unconstrained_lm2_native_leaf_and_petiole_segmentation(self) -> None:
+        """
+        Verify default 100% Raw Unconstrained LeafMachine2 Mode (`enable_geometric_qc=False`):
+          1. Stage 1 (`LeafPriority.pt`) unpacks all Class 0 (`leaf_whole`) boxes regardless of size
+             or vertical sheet position, while natively excluding `leaf_partial` (1), `leaflet` (2),
+             `specimen` (8), and `wood`/stems (10).
+          2. Stage 2 PointRend (`thing_classes = ['leaf', 'petiole', 'hole']`) retains the top-scoring
+             `'leaf'` (`class_id == 0`) mask 100% pixel-identical (zero `trim_petiole_tail()` clipping),
+             pairs the top-scoring `'petiole'` (`class_id == 1`) mask via `_extract_native_lm2_petiole_anchor()`
+             to locate `p_base` and native petiole length, and retains >6 leaves without any post-hoc
+             geometric/photometric rejections or top-6 cap.
+        """
+        self.assertFalse(self.pipeline.enable_geometric_qc)
+        with patch("sys.argv", ["02_segment_and_extract.py"]):
+            parsed_default = step02.parse_args()
+            self.assertFalse(parsed_default.enable_geometric_qc)
+
+        sheet_h, sheet_w = 3600, 2600
+        sheet_img = np.full((sheet_h, sheet_w, 3), (225, 232, 236), dtype=np.uint8)
+        self.pipeline.ruler_calibrations["NCU_RAW_LM2"] = 10.0  # 10 px/mm = 100 px/cm
+
+        # 7 Stage 1 Class 0 (`leaf_whole`) boxes across top, middle, and bottom of sheet
+        # (including small alpine-sized boxes and >6 leaves) plus native LM2 non-leaf classes:
+        s1_dets = [
+            ((250, 300, 420, 460), 0.94, 0),    # 1. small upper Class 0 leaf_whole
+            ((650, 350, 1050, 750), 0.95, 0),   # 2. upper-mid Class 0 leaf_whole
+            ((1200, 400, 1750, 920), 0.96, 0),  # 3. mid-sheet cordate/suborbicular Class 0 leaf_whole
+            ((1850, 450, 2400, 950), 0.97, 0),  # 4. lower-mid Class 0 leaf_whole
+            ((2450, 400, 3000, 920), 0.95, 0),  # 5. basal Class 0 leaf_whole
+            ((2450, 1050, 3000, 1550), 0.93, 0),# 6. basal Class 0 leaf_whole
+            ((2450, 1650, 3000, 2150), 0.92, 0),# 7. 7th Class 0 leaf_whole (verifies no top-6 cap)
+            ((1400, 1800, 1900, 2200), 0.89, 1),# leaf_partial -> natively ignored by Stage 1
+            ((1100, 1800, 1250, 1950), 0.85, 2),# leaflet -> natively ignored by Stage 1
+            ((50, 50, 3500, 2500), 0.99, 8),    # specimen -> natively ignored by Stage 1
+            ((900, 1200, 2600, 1280), 0.91, 10),# wood/stem -> natively ignored by Stage 1
+        ]
+
+        expected_fg_counts: list[int] = []
+
+        def fake_raw_lm2_stage2(crops):
+            out = []
+            for idx, crop_img in enumerate(crops):
+                ch, cw = crop_img.shape[:2]
+                leaf_m = np.zeros((ch, cw), dtype=np.uint8)
+                cx, cy = cw // 2, int(ch * 0.42)
+                rx, ry = max(18, int(cw * 0.30)), max(22, int(ch * 0.28))
+                cv2.ellipse(leaf_m, (cx, cy), (rx, ry), 0.0, 0, 360, 255, -1)
+                if idx == 2:
+                    # Cordate basal sinus + crenate indent (low solidity) that raw LM2 must keep untouched
+                    cv2.ellipse(leaf_m, (cx, cy + ry - 4), (int(rx * 0.38), int(ry * 0.35)), 0.0, 0, 360, 0, -1)
+                expected_fg_counts.append(int(np.count_nonzero(leaf_m)))
+
+                # Native PointRend class_id == 1 (`petiole`) mask extending below lamina base
+                pet_m = np.zeros((ch, cw), dtype=np.uint8)
+                pet_y0 = min(ch - 6, cy + ry - 2)
+                pet_y1 = min(ch - 2, pet_y0 + max(25, int(ch * 0.22)))
+                cv2.line(pet_m, (cx, pet_y0), (cx, pet_y1), 255, thickness=7)
+
+                out.append([
+                    ((10, 10, ch - 10, cw - 10), leaf_m, 0.96, 0),
+                    ((pet_y0, max(0, cx - 5), pet_y1, min(cw, cx + 5)), pet_m, 0.91, 1),
+                ])
+            return out
+
+        with patch("cv2.imread", return_value=sheet_img):
+            with patch.object(self.pipeline.stage1_detector, "predict", return_value=s1_dets):
+                with patch.object(self.pipeline.model_engine, "predict_batch", side_effect=fake_raw_lm2_stage2) as mock_s2:
+                    records, failure = self.pipeline.process_voucher("NCU_RAW_LM2", self.img_path)
+
+        self.assertIsNone(failure)
+        # Only the 7 Class 0 (`leaf_whole`) boxes enter Stage 2; all 7 are retained with zero rejections and zero top-6 cap
+        self.assertEqual(len(mock_s2.call_args[0][0]), 7)
+        self.assertEqual(len(records), 7)
+        for idx, rec in enumerate(records):
+            self.assertEqual(rec["assigned_tier"], "Tier_1_Direct")
+            self.assertFalse(bool(rec["reflection_applied"]))
+            self.assertFalse(bool(rec["is_folded"]))
+            # Saved binary mask foreground pixel count must equal raw PointRend leaf_m 100% identically (zero petiole trimming!)
+            saved_m = cv2.imread(str(rec["mask_path"]), cv2.IMREAD_GRAYSCALE)
+            self.assertIsNotNone(saved_m)
+            self.assertEqual(int(np.count_nonzero(saved_m > 0)), expected_fg_counts[idx])
+            self.assertGreater(float(rec["petiole_length_mm"]), 0.0)
 
 
 if __name__ == "__main__":

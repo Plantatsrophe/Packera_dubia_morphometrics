@@ -829,6 +829,68 @@ def refine_mask_with_sam2(
     return refiner.refine_crop_mask(crop_bgr, m_init)
 
 
+def _extract_native_lm2_petiole_anchor(
+    leaf_mask: np.ndarray,
+    petiole_mask: Optional[np.ndarray],
+) -> Optional[Dict[str, Any]]:
+    """
+    Uses LeafMachine2's native Stage 2 PointRend `petiole` (`class_id == 1`) mask alongside
+    the raw `leaf` (`class_id == 0`) mask to locate the anatomical petiole-lamina junction
+    `p_base_crop`, distal lamina apex `p_apex_crop`, and native petiole pixel span without
+    clipping or modifying `leaf_mask`.
+    """
+    if (
+        petiole_mask is None
+        or leaf_mask is None
+        or leaf_mask.size == 0
+        or petiole_mask.size == 0
+        or petiole_mask.shape[:2] != leaf_mask.shape[:2]
+    ):
+        return None
+    if int(np.count_nonzero(petiole_mask)) == 0 or int(np.count_nonzero(leaf_mask)) == 0:
+        return None
+
+    bx_l, by_l, bw_l, bh_l = cv2.boundingRect(leaf_mask)
+    if bw_l == 0 or bh_l == 0:
+        return None
+    cnts_l, _ = cv2.findContours(
+        leaf_mask[by_l : by_l + bh_l, bx_l : bx_l + bw_l],
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_NONE,
+        offset=(bx_l, by_l),
+    )
+    if not cnts_l:
+        return None
+    leaf_pts = max(cnts_l, key=cv2.contourArea).reshape(-1, 2)
+    if len(leaf_pts) == 0:
+        return None
+
+    inv_pet = (petiole_mask == 0).astype(np.uint8)
+    dt_pet = cv2.distanceTransform(inv_pet, cv2.DIST_L2, 3)
+    dists_to_pet = dt_pet[leaf_pts[:, 1], leaf_pts[:, 0]]
+    min_idx = int(np.argmin(dists_to_pet))
+    min_dist = float(dists_to_pet[min_idx])
+    if min_dist > max(28.0, 0.30 * float(max(bw_l, bh_l))):
+        return None
+
+    p_base_crop = (int(leaf_pts[min_idx, 0]), int(leaf_pts[min_idx, 1]))
+    dists_from_base = np.hypot(leaf_pts[:, 0] - p_base_crop[0], leaf_pts[:, 1] - p_base_crop[1])
+    apex_idx = int(np.argmax(dists_from_base))
+    p_apex_crop = (int(leaf_pts[apex_idx, 0]), int(leaf_pts[apex_idx, 1]))
+
+    pet_ys, pet_xs = np.where(petiole_mask > 0)
+    pet_span_dists = np.hypot(pet_xs - p_base_crop[0], pet_ys - p_base_crop[1])
+    petiole_len_px = float(np.max(pet_span_dists)) if len(pet_span_dists) > 0 else 0.0
+
+    return {
+        "is_trimmed": False,
+        "native_lm2_petiole": True,
+        "trim_distance_px": round(petiole_len_px, 2),
+        "p_base_crop": p_base_crop,
+        "p_apex_crop": p_apex_crop,
+    }
+
+
 # =============================================================================
 # Core Pipeline Execution Runner
 # =============================================================================
@@ -856,8 +918,10 @@ class SegmentAndExtractPipeline:
         sam2_config: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
         sam2_predictor: Optional[Any] = None,
         db_path: Optional[Union[str, Path]] = None,
+        enable_geometric_qc: bool = False,
     ) -> None:
         self.db_path = db_path
+        self.enable_geometric_qc = bool(enable_geometric_qc)
         self.vouchers_csv = Path(vouchers_csv)
         self.model_weights = Path(model_weights)
         self.output_dir = Path(output_dir).resolve()
@@ -1004,13 +1068,15 @@ class SegmentAndExtractPipeline:
         """
         Determines whether to invoke automated LM2-guided SAM 2 boundary refinement
         on an initial PointRend leaf mask `m_init`.
-        Triggered when `--sam2-refine` is enabled or when using stock un-finetuned
-        PointRend weights on dissected leaves.
+        Triggered only when `--sam2-refine` is explicitly enabled (or when opt-in
+        geometric QC is active on stock PointRend weights).
         """
         if self.sam2_refiner is None or not self.sam2_refiner.is_available:
             return False
         if self.sam2_refine:
             return True
+        if not self.enable_geometric_qc:
+            return False
         if not self.is_stock_pointrend:
             return False
         if m_init is None or m_init.size == 0 or np.count_nonzero(m_init) == 0:
@@ -1205,275 +1271,415 @@ class SegmentAndExtractPipeline:
                 else 0.0
             )
 
-            # Stage 1 -> Stage 2 Two-Stage Flow (batched PointRend inference + crop-local geometry)
+            # Stage 1 -> Stage 2 Two-Stage Flow
             candidate_s1_crops: List[Tuple[Tuple[int, int, int, int], float, int, np.ndarray, Tuple[int, int, int, int]]] = []
             s1_plant_boxes: List[Tuple[int, int, int, int]] = []
-            s1_raw_leaf_items: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
-            for s1_item in stage1_detections:
-                if len(s1_item) == 4:
-                    s1_bbox, s1_mask, s1_score, s1_cls = s1_item
-                else:
-                    s1_bbox, s1_score, s1_cls = s1_item
-                    s1_mask = None
-
-                if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
-                    capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
-                    s1_plant_boxes.append(s1_bbox)
-                elif int(s1_cls) == 9:
-                    root_detections.append(s1_bbox)
-                    s1_plant_boxes.append(s1_bbox)
-                elif int(s1_cls) == 2:
-                    self.rejection_telemetry["rejected_leaflet_class"] += 1
-                    logger.debug(f"Voucher {catalog_number}: rejected Stage 1 leaflet detection (class_id=2).")
-                elif s1_cls in LM2_LEAF_CLASS_IDS:
-                    s1_plant_boxes.append(s1_bbox)
-                    if s1_cls not in (0, 1):
-                        continue
-                    s1_bh = int(s1_bbox[2] - s1_bbox[0])
-                    s1_bw = int(s1_bbox[3] - s1_bbox[1])
-                    s1_cy = 0.5 * float(s1_bbox[0] + s1_bbox[2])
-                    s1_raw_leaf_items.append((s1_bbox, float(s1_score), int(s1_cls), s1_bh, s1_bw, s1_cy))
-
-            max_s1_major = max(
-                int(0.78 * max(sheet_h, sheet_w)),
-                int(38.0 * s1_px_per_cm) if (s1_is_calibrated_mm and s1_px_per_cm > 0.0) else 0,
-            )
-            max_s1_area = 0.45 * float(sheet_h * sheet_w)
-
-            if s1_is_calibrated_mm and s1_px_per_cm > 0.0:
-                _s1_est_cm2 = [
-                    0.72 * float(_bh * _bw) / (s1_px_per_cm ** 2)
-                    for (_bb, _sc, _cl, _bh, _bw, _cy) in s1_raw_leaf_items
-                    if _bh > 0
-                    and _bw > 0
-                    and (
-                        scale_f <= 0.0
-                        or (
-                            max(_bh, _bw) <= max_s1_major
-                            and (_bh * _bw) <= max_s1_area
-                        )
-                    )
-                ]
-                s1_eff_min_cm2 = compute_sheet_adaptive_min_blade_area_cm2(
-                    _s1_est_cm2,
-                    config_min_blade_area_cm2=self.min_blade_area_cm2,
-                    absolute_floor_cm2=0.15,
-                )
-                _s1_phys_lin = math.sqrt(max(1.0, s1_eff_min_cm2 * (s1_px_per_cm ** 2)))
-            else:
-                s1_eff_min_cm2 = float(self.min_blade_area_cm2)
-                _s1_phys_lin = 0.0
-
             crop_pad = 0.06 if scale_f > 0.4 else 0.12
-            s1_vertical_fallback_items: List[Tuple[Tuple[int, int, int, int], float, int, float]] = []
-            s1_pending_upper_pts: List[Tuple[float, float]] = []
 
-            for s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy in s1_raw_leaf_items:
-                if scale_f > 0.0:
-                    min_s1_major = int(160 * scale_f)
-                    min_s1_minor = int(55 * scale_f)
-                    min_s1_hd_major = int(200 * scale_f)
-                    if s1_is_calibrated_mm and _s1_phys_lin > 0.0:
-                        min_s1_major = min(min_s1_major, max(16, int(0.85 * _s1_phys_lin)))
-                        min_s1_minor = min(min_s1_minor, max(10, int(0.45 * _s1_phys_lin)))
-                        min_s1_hd_major = min(min_s1_hd_major, max(18, int(0.95 * _s1_phys_lin)))
-
-                    if max(s1_bh, s1_bw) < min_s1_major or min(s1_bh, s1_bw) < min_s1_minor:
-                        continue
-                    if max(s1_bh, s1_bw) > max_s1_major or (s1_bh * s1_bw) > max_s1_area:
-                        continue
-                    if is_high_dpi:
-                        if max(s1_bh, s1_bw) < min_s1_hd_major:
-                            continue
-                        _is_macro_or_veg_basal = (
-                            max(s1_bh, s1_bw) >= int(0.22 * sheet_h)
-                            or (not capitulum_detections and s1_cy >= 0.28 * sheet_h)
-                        )
-                        if s1_cy < 0.40 * sheet_h and not _is_macro_or_veg_basal:
-                            s1_pending_upper_pts.append((0.5 * float(s1_bbox[1] + s1_bbox[3]), float(s1_cy)))
-                            s1_vertical_fallback_items.append((s1_bbox, s1_score, s1_cls, s1_cy))
-                            continue
-                        if s1_cls == 1 and s1_bh == s1_bw and s1_cy < 0.60 * sheet_h:
-                            s1_vertical_fallback_items.append((s1_bbox, s1_score, s1_cls, s1_cy))
-                            continue
-
-                crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
-                if crop_bgr.size == 0:
-                    continue
-                candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
-
-            if candidate_s1_crops:
-                upper_cauline_pts.extend(s1_pending_upper_pts)
-            elif s1_vertical_fallback_items:
-                _all_s1_boxes = s1_plant_boxes if s1_plant_boxes else [it[0] for it in s1_vertical_fallback_items]
-                _ymin_p_s1 = float(min(b[0] for b in _all_s1_boxes))
-                _ymax_p_s1 = float(max(b[2] for b in _all_s1_boxes))
-                _span_p_s1 = max(1.0, _ymax_p_s1 - _ymin_p_s1)
-                for fb_bbox, fb_score, fb_cls, fb_cy in s1_vertical_fallback_items:
-                    _cy_rel_p = (float(fb_cy) - _ymin_p_s1) / _span_p_s1
-                    if _cy_rel_p >= 0.40:
-                        crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, fb_bbox, pad_ratio=crop_pad)
-                        if crop_bgr.size > 0:
-                            candidate_s1_crops.append((fb_bbox, float(fb_score), int(fb_cls), crop_bgr, crop_box))
-                            rosette_bbox_fallback_used = True
+            if not self.enable_geometric_qc:
+                # 100% Raw Unconstrained LeafMachine2 Two-Stage Handshake:
+                #   Stage 1 (`LeafPriority.pt` 11-class YOLOv5) natively separates `0: leaf_whole`
+                #   from `1: leaf_partial`, `2: leaflet`, `3..7: reproductive`, `8: specimen`,
+                #   `9: roots`, and `10: wood` (stems). Unpack `leaf_whole` boxes directly to
+                #   Stage 2 PointRend with zero bounding-box size or vertical-position cutoffs.
+                seg_partial_cfg = bool(
+                    self.lm2_config.get("leafmachine", {})
+                    .get("leaf_segmentation", {})
+                    .get("segment_partial_leaves", False)
+                )
+                raw_s1_leaf_classes = (0, 1) if seg_partial_cfg else (0,)
+                for s1_item in stage1_detections:
+                    if len(s1_item) == 4:
+                        s1_bbox, s1_mask, s1_score, s1_cls = s1_item
                     else:
-                        upper_cauline_pts.append((0.5 * float(fb_bbox[1] + fb_bbox[3]), float(fb_cy)))
+                        s1_bbox, s1_score, s1_cls = s1_item
+                        s1_mask = None
 
-            all_crop_preds = (
-                self.model_engine.predict_batch([c[3] for c in candidate_s1_crops])
-                if candidate_s1_crops
-                else []
-            )
+                    if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
+                        capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
+                        s1_plant_boxes.append(s1_bbox)
+                    elif int(s1_cls) == 9:
+                        root_detections.append(s1_bbox)
+                        s1_plant_boxes.append(s1_bbox)
+                    elif int(s1_cls) == 2:
+                        self.rejection_telemetry["rejected_leaflet_class"] += 1
+                    elif int(s1_cls) in raw_s1_leaf_classes:
+                        s1_plant_boxes.append(s1_bbox)
+                        crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
+                        if crop_bgr.size > 0:
+                            candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
 
-            for (s1_bbox, s1_score, s1_cls, crop_bgr, crop_box), crop_preds in zip(candidate_s1_crops, all_crop_preds):
-                if not crop_preds:
-                    continue
+                all_crop_preds = (
+                    self.model_engine.predict_batch([c[3] for c in candidate_s1_crops])
+                    if candidate_s1_crops
+                    else []
+                )
 
-                crop_h, crop_w = crop_bgr.shape[:2]
-                if scale_f > 0.0:
-                    raw_s2_floor = int(2200 * (scale_f ** 2))
-                    if s1_is_calibrated_mm and s1_px_per_cm > 0.0:
-                        raw_s2_floor = min(raw_s2_floor, max(20, int(0.85 * s1_eff_min_cm2 * (s1_px_per_cm ** 2))))
-                    min_blade_area = max(raw_s2_floor, int(0.03 * crop_h * crop_w))
-                else:
-                    min_blade_area = 20
-                blade_candidates = []
-                for _pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
-                    if _pr_cls != 0:
+                # Stage 2 Detectron2 PointRend (`thing_classes = ['leaf', 'petiole', 'hole']`)
+                # Stock LeafMachine2 `keep_only_best_one_leaf_one_petiole`: pick highest-confidence
+                # `leaf` (`_pr_cls == 0`) untouched + highest-confidence `petiole` (`_pr_cls == 1`).
+                for (s1_bbox, s1_score, s1_cls, crop_bgr, crop_box), crop_preds in zip(candidate_s1_crops, all_crop_preds):
+                    if not crop_preds:
                         continue
-                    fg_area = int(np.count_nonzero(pr_mask))
-                    if fg_area >= min_blade_area:
-                        blade_candidates.append((fg_area, float(pr_score), _pr_bbox, pr_mask))
 
-                if not blade_candidates:
-                    continue
-
-                # Select ONLY the single best mask per Stage 1 box (highest area * pr_score)
-                blade_candidates.sort(key=lambda c: (c[0] * c[1], c[0]), reverse=True)
-                best_area, best_score, best_bbox, best_mask = blade_candidates[0]
-
-                m_refined = best_mask
-                if self._should_refine_with_sam2(best_mask):
-                    m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, best_mask)
-
-                # Trim petiole tail directly on the compact crop mask using sheet_shape for high-res scaling
-                m_trimmed, trim_meta = trim_petiole_tail(
-                    m_refined, return_metadata=True, sheet_shape=(sheet_h, sheet_w)
-                )
-                fg_area = int(np.count_nonzero(m_trimmed))
-                if fg_area == 0:
-                    continue
-
-                bx_c, by_c, bw_c, bh_c = cv2.boundingRect(m_trimmed)
-                if bw_c == 0 or bh_c == 0:
-                    continue
-                sub_trimmed = m_trimmed[by_c : by_c + bh_c, bx_c : bx_c + bw_c]
-                cnts_m, _ = cv2.findContours(sub_trimmed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if not cnts_m:
-                    continue
-                main_m_cnt = max(cnts_m, key=cv2.contourArea)
-                rect_w, rect_h = cv2.minAreaRect(main_m_cnt)[1]
-                hull_m_area = float(cv2.contourArea(cv2.convexHull(main_m_cnt)))
-                m_solidity = float(fg_area) / hull_m_area if hull_m_area > 0 else 0.0
-
-                max_s2_minor = max(
-                    int(1600 * scale_f),
-                    int(0.42 * min(sheet_h, sheet_w)),
-                    int(16.0 * s1_px_per_cm) if (s1_is_calibrated_mm and s1_px_per_cm > 0.0) else 0,
-                )
-                if scale_f > 0.4 and min(rect_w, rect_h) > max_s2_minor and m_solidity < 0.85:
-                    continue
-
-                cy0, cx0, cy1, cx1 = crop_box
-                ymin_s = max(0, cy0 + by_c)
-                ymax_s = min(sheet_h, cy0 + by_c + bh_c)
-                xmin_s = max(0, cx0 + bx_c)
-                xmax_s = min(sheet_w, cx0 + bx_c + bw_c)
-                if ymax_s <= ymin_s or xmax_s <= xmin_s:
-                    continue
-                full_bbox = (ymin_s, xmin_s, ymax_s, xmax_s)
-
-                # Store mask in a compact padded local window instead of a 67 MP full-sheet canvas
-                margin = max(24, int(0.35 * max(bw_c, bh_c)))
-                win_y0 = max(0, ymin_s - margin)
-                win_x0 = max(0, xmin_s - margin)
-                win_y1 = min(sheet_h, ymax_s + margin)
-                win_x1 = min(sheet_w, xmax_s + margin)
-                local_mask = np.zeros((win_y1 - win_y0, win_x1 - win_x0), dtype=np.uint8)
-                dst_y0 = ymin_s - win_y0
-                dst_x0 = xmin_s - win_x0
-                eff_h = min(bh_c, win_y1 - ymin_s)
-                eff_w = min(bw_c, win_x1 - xmin_s)
-                local_mask[dst_y0 : dst_y0 + eff_h, dst_x0 : dst_x0 + eff_w] = sub_trimmed[:eff_h, :eff_w]
-
-                leaf_detections.append((
-                    full_bbox,
-                    local_mask,
-                    float(best_score),
-                    int(s1_cls),
-                    (crop_box[1], crop_box[0]),
-                    (win_x0, win_y0),
-                    True,
-                    trim_meta,
-                    m_solidity,
-                    fg_area,
-                ))
-
-            # Deduplicate leaf_detections on the sheet by mask IoU (IoU > 0.45 keeps the higher-solidity mask)
-            if scale_f > 0.4 and len(leaf_detections) >= 2:
-                scored_dets = [
-                    (det_item[8], det_item[2], idx_d, det_item)
-                    for idx_d, det_item in enumerate(leaf_detections)
-                ]
-                scored_dets.sort(key=lambda x: (x[0], x[1]), reverse=True)
-                kept_scored = []
-                for d_sol, d_score, idx_d, det_item in scored_dets:
-                    b1 = det_item[0]
-                    m1 = det_item[1]
-                    ox1, oy1 = det_item[5]
-                    area1 = det_item[9]
-                    is_dup = False
-                    for _, _, _, kept_item in kept_scored:
-                        b2 = kept_item[0]
-                        if b1[2] <= b2[0] or b2[2] <= b1[0] or b1[3] <= b2[1] or b2[3] <= b1[1]:
+                    leaf_cands = []
+                    petiole_cands = []
+                    for _pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
+                        fg_area_cand = int(np.count_nonzero(pr_mask))
+                        if fg_area_cand <= 0:
                             continue
-                        iy0, ix0 = max(b1[0], b2[0]), max(b1[1], b2[1])
-                        iy1, ix1 = min(b1[2], b2[2]), min(b1[3], b2[3])
-                        if iy1 <= iy0 or ix1 <= ix0:
-                            continue
-                        m2 = kept_item[1]
-                        ox2, oy2 = kept_item[5]
-                        area2 = kept_item[9]
-                        sub1 = m1[iy0 - oy1 : iy1 - oy1, ix0 - ox1 : ix1 - ox1] > 0
-                        sub2 = m2[iy0 - oy2 : iy1 - oy2, ix0 - ox2 : ix1 - ox2] > 0
-                        if sub1.shape != sub2.shape:
-                            sh = min(sub1.shape[0], sub2.shape[0])
-                            sw = min(sub1.shape[1], sub2.shape[1])
-                            sub1 = sub1[:sh, :sw]
-                            sub2 = sub2[:sh, :sw]
-                        inter = int(np.count_nonzero(sub1 & sub2))
-                        if inter > 0:
-                            union = max(area1 + area2 - inter, 1)
-                            if float(inter / union) > 0.45:
-                                is_dup = True
-                                break
-                    if not is_dup:
-                        kept_scored.append((d_sol, d_score, idx_d, det_item))
+                        if int(_pr_cls) == 0:
+                            leaf_cands.append((float(pr_score), fg_area_cand, _pr_bbox, pr_mask))
+                        elif int(_pr_cls) == 1:
+                            petiole_cands.append((float(pr_score), fg_area_cand, _pr_bbox, pr_mask))
 
-                kept_scored.sort(key=lambda x: x[2])
-                leaf_detections = [x[3] for x in kept_scored]
+                    if not leaf_cands:
+                        continue
+
+                    leaf_cands.sort(key=lambda c: (c[0], c[1]), reverse=True)
+                    best_score, _, _, best_mask = leaf_cands[0]
+
+                    best_petiole_mask: Optional[np.ndarray] = None
+                    if petiole_cands:
+                        petiole_cands.sort(key=lambda c: (c[0], c[1]), reverse=True)
+                        best_petiole_mask = petiole_cands[0][3]
+
+                    m_raw = best_mask
+                    if self._should_refine_with_sam2(best_mask):
+                        m_raw = self.sam2_refiner.refine_crop_mask(crop_bgr, best_mask)
+
+                    fg_area = int(np.count_nonzero(m_raw))
+                    if fg_area <= 0:
+                        continue
+
+                    bx_c, by_c, bw_c, bh_c = cv2.boundingRect(m_raw)
+                    if bw_c == 0 or bh_c == 0:
+                        continue
+                    sub_raw = m_raw[by_c : by_c + bh_c, bx_c : bx_c + bw_c]
+                    cnts_m, _ = cv2.findContours(sub_raw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if not cnts_m:
+                        continue
+                    main_m_cnt = max(cnts_m, key=cv2.contourArea)
+                    hull_m_area = float(cv2.contourArea(cv2.convexHull(main_m_cnt)))
+                    m_solidity = float(fg_area) / hull_m_area if hull_m_area > 0 else 1.0
+
+                    cy0, cx0, cy1, cx1 = crop_box
+                    ymin_s = max(0, cy0 + by_c)
+                    ymax_s = min(sheet_h, cy0 + by_c + bh_c)
+                    xmin_s = max(0, cx0 + bx_c)
+                    xmax_s = min(sheet_w, cx0 + bx_c + bw_c)
+                    if ymax_s <= ymin_s or xmax_s <= xmin_s:
+                        continue
+                    full_bbox = (ymin_s, xmin_s, ymax_s, xmax_s)
+
+                    margin = max(24, int(0.35 * max(bw_c, bh_c)))
+                    win_y0 = max(0, ymin_s - margin)
+                    win_x0 = max(0, xmin_s - margin)
+                    win_y1 = min(sheet_h, ymax_s + margin)
+                    win_x1 = min(sheet_w, xmax_s + margin)
+                    local_mask = np.zeros((win_y1 - win_y0, win_x1 - win_x0), dtype=np.uint8)
+                    dst_y0 = ymin_s - win_y0
+                    dst_x0 = xmin_s - win_x0
+                    eff_h = min(bh_c, win_y1 - ymin_s)
+                    eff_w = min(bw_c, win_x1 - xmin_s)
+                    local_mask[dst_y0 : dst_y0 + eff_h, dst_x0 : dst_x0 + eff_w] = sub_raw[:eff_h, :eff_w]
+
+                    native_pet_meta = _extract_native_lm2_petiole_anchor(m_raw, best_petiole_mask)
+                    if native_pet_meta is not None:
+                        p_bc = native_pet_meta["p_base_crop"]
+                        p_ac = native_pet_meta["p_apex_crop"]
+                        native_pet_meta["p_base"] = (
+                            int(cx0 + p_bc[0] - win_x0),
+                            int(cy0 + p_bc[1] - win_y0),
+                        )
+                        native_pet_meta["p_apex"] = (
+                            int(cx0 + p_ac[0] - win_x0),
+                            int(cy0 + p_ac[1] - win_y0),
+                        )
+
+                    leaf_detections.append((
+                        full_bbox,
+                        local_mask,
+                        float(best_score),
+                        int(s1_cls),
+                        (crop_box[1], crop_box[0]),
+                        (win_x0, win_y0),
+                        False,
+                        native_pet_meta,
+                        m_solidity,
+                        fg_area,
+                    ))
+            else:
+                s1_raw_leaf_items: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
+                for s1_item in stage1_detections:
+                    if len(s1_item) == 4:
+                        s1_bbox, s1_mask, s1_score, s1_cls = s1_item
+                    else:
+                        s1_bbox, s1_score, s1_cls = s1_item
+                        s1_mask = None
+
+                    if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
+                        capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
+                        s1_plant_boxes.append(s1_bbox)
+                    elif int(s1_cls) == 9:
+                        root_detections.append(s1_bbox)
+                        s1_plant_boxes.append(s1_bbox)
+                    elif int(s1_cls) == 2:
+                        self.rejection_telemetry["rejected_leaflet_class"] += 1
+                        logger.debug(f"Voucher {catalog_number}: rejected Stage 1 leaflet detection (class_id=2).")
+                    elif s1_cls in LM2_LEAF_CLASS_IDS:
+                        s1_plant_boxes.append(s1_bbox)
+                        if s1_cls not in (0, 1):
+                            continue
+                        s1_bh = int(s1_bbox[2] - s1_bbox[0])
+                        s1_bw = int(s1_bbox[3] - s1_bbox[1])
+                        s1_cy = 0.5 * float(s1_bbox[0] + s1_bbox[2])
+                        s1_raw_leaf_items.append((s1_bbox, float(s1_score), int(s1_cls), s1_bh, s1_bw, s1_cy))
+
+                max_s1_major = max(
+                    int(0.78 * max(sheet_h, sheet_w)),
+                    int(38.0 * s1_px_per_cm) if (s1_is_calibrated_mm and s1_px_per_cm > 0.0) else 0,
+                )
+                max_s1_area = 0.45 * float(sheet_h * sheet_w)
+
+                if s1_is_calibrated_mm and s1_px_per_cm > 0.0:
+                    _s1_est_cm2 = [
+                        0.72 * float(_bh * _bw) / (s1_px_per_cm ** 2)
+                        for (_bb, _sc, _cl, _bh, _bw, _cy) in s1_raw_leaf_items
+                        if _bh > 0
+                        and _bw > 0
+                        and (
+                            scale_f <= 0.0
+                            or (
+                                max(_bh, _bw) <= max_s1_major
+                                and (_bh * _bw) <= max_s1_area
+                            )
+                        )
+                    ]
+                    s1_eff_min_cm2 = compute_sheet_adaptive_min_blade_area_cm2(
+                        _s1_est_cm2,
+                        config_min_blade_area_cm2=self.min_blade_area_cm2,
+                        absolute_floor_cm2=0.15,
+                    )
+                    _s1_phys_lin = math.sqrt(max(1.0, s1_eff_min_cm2 * (s1_px_per_cm ** 2)))
+                else:
+                    s1_eff_min_cm2 = float(self.min_blade_area_cm2)
+                    _s1_phys_lin = 0.0
+
+                s1_vertical_fallback_items: List[Tuple[Tuple[int, int, int, int], float, int, float]] = []
+                s1_pending_upper_pts: List[Tuple[float, float]] = []
+
+                for s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy in s1_raw_leaf_items:
+                    if scale_f > 0.0:
+                        min_s1_major = int(160 * scale_f)
+                        min_s1_minor = int(55 * scale_f)
+                        min_s1_hd_major = int(200 * scale_f)
+                        if s1_is_calibrated_mm and _s1_phys_lin > 0.0:
+                            min_s1_major = min(min_s1_major, max(16, int(0.85 * _s1_phys_lin)))
+                            min_s1_minor = min(min_s1_minor, max(10, int(0.45 * _s1_phys_lin)))
+                            min_s1_hd_major = min(min_s1_hd_major, max(18, int(0.95 * _s1_phys_lin)))
+
+                        if max(s1_bh, s1_bw) < min_s1_major or min(s1_bh, s1_bw) < min_s1_minor:
+                            continue
+                        if max(s1_bh, s1_bw) > max_s1_major or (s1_bh * s1_bw) > max_s1_area:
+                            continue
+                        if is_high_dpi:
+                            if max(s1_bh, s1_bw) < min_s1_hd_major:
+                                continue
+                            _is_macro_or_veg_basal = (
+                                max(s1_bh, s1_bw) >= int(0.22 * sheet_h)
+                                or (not capitulum_detections and s1_cy >= 0.28 * sheet_h)
+                            )
+                            if s1_cy < 0.40 * sheet_h and not _is_macro_or_veg_basal:
+                                s1_pending_upper_pts.append((0.5 * float(s1_bbox[1] + s1_bbox[3]), float(s1_cy)))
+                                s1_vertical_fallback_items.append((s1_bbox, s1_score, s1_cls, s1_cy))
+                                continue
+                            if s1_cls == 1 and s1_bh == s1_bw and s1_cy < 0.60 * sheet_h:
+                                s1_vertical_fallback_items.append((s1_bbox, s1_score, s1_cls, s1_cy))
+                                continue
+
+                    crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
+                    if crop_bgr.size == 0:
+                        continue
+                    candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
+
+                if candidate_s1_crops:
+                    upper_cauline_pts.extend(s1_pending_upper_pts)
+                elif s1_vertical_fallback_items:
+                    _all_s1_boxes = s1_plant_boxes if s1_plant_boxes else [it[0] for it in s1_vertical_fallback_items]
+                    _ymin_p_s1 = float(min(b[0] for b in _all_s1_boxes))
+                    _ymax_p_s1 = float(max(b[2] for b in _all_s1_boxes))
+                    _span_p_s1 = max(1.0, _ymax_p_s1 - _ymin_p_s1)
+                    for fb_bbox, fb_score, fb_cls, fb_cy in s1_vertical_fallback_items:
+                        _cy_rel_p = (float(fb_cy) - _ymin_p_s1) / _span_p_s1
+                        if _cy_rel_p >= 0.40:
+                            crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, fb_bbox, pad_ratio=crop_pad)
+                            if crop_bgr.size > 0:
+                                candidate_s1_crops.append((fb_bbox, float(fb_score), int(fb_cls), crop_bgr, crop_box))
+                                rosette_bbox_fallback_used = True
+                        else:
+                            upper_cauline_pts.append((0.5 * float(fb_bbox[1] + fb_bbox[3]), float(fb_cy)))
+
+                all_crop_preds = (
+                    self.model_engine.predict_batch([c[3] for c in candidate_s1_crops])
+                    if candidate_s1_crops
+                    else []
+                )
+
+                for (s1_bbox, s1_score, s1_cls, crop_bgr, crop_box), crop_preds in zip(candidate_s1_crops, all_crop_preds):
+                    if not crop_preds:
+                        continue
+
+                    crop_h, crop_w = crop_bgr.shape[:2]
+                    if scale_f > 0.0:
+                        raw_s2_floor = int(2200 * (scale_f ** 2))
+                        if s1_is_calibrated_mm and s1_px_per_cm > 0.0:
+                            raw_s2_floor = min(raw_s2_floor, max(20, int(0.85 * s1_eff_min_cm2 * (s1_px_per_cm ** 2))))
+                        min_blade_area = max(raw_s2_floor, int(0.03 * crop_h * crop_w))
+                    else:
+                        min_blade_area = 20
+                    blade_candidates = []
+                    for _pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
+                        if _pr_cls != 0:
+                            continue
+                        fg_area = int(np.count_nonzero(pr_mask))
+                        if fg_area >= min_blade_area:
+                            blade_candidates.append((fg_area, float(pr_score), _pr_bbox, pr_mask))
+
+                    if not blade_candidates:
+                        continue
+
+                    # Select ONLY the single best mask per Stage 1 box (highest area * pr_score)
+                    blade_candidates.sort(key=lambda c: (c[0] * c[1], c[0]), reverse=True)
+                    best_area, best_score, best_bbox, best_mask = blade_candidates[0]
+
+                    m_refined = best_mask
+                    if self._should_refine_with_sam2(best_mask):
+                        m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, best_mask)
+
+                    # Trim petiole tail directly on the compact crop mask using sheet_shape for high-res scaling
+                    m_trimmed, trim_meta = trim_petiole_tail(
+                        m_refined, return_metadata=True, sheet_shape=(sheet_h, sheet_w)
+                    )
+                    fg_area = int(np.count_nonzero(m_trimmed))
+                    if fg_area == 0:
+                        continue
+
+                    bx_c, by_c, bw_c, bh_c = cv2.boundingRect(m_trimmed)
+                    if bw_c == 0 or bh_c == 0:
+                        continue
+                    sub_trimmed = m_trimmed[by_c : by_c + bh_c, bx_c : bx_c + bw_c]
+                    cnts_m, _ = cv2.findContours(sub_trimmed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if not cnts_m:
+                        continue
+                    main_m_cnt = max(cnts_m, key=cv2.contourArea)
+                    rect_w, rect_h = cv2.minAreaRect(main_m_cnt)[1]
+                    hull_m_area = float(cv2.contourArea(cv2.convexHull(main_m_cnt)))
+                    m_solidity = float(fg_area) / hull_m_area if hull_m_area > 0 else 0.0
+
+                    max_s2_minor = max(
+                        int(1600 * scale_f),
+                        int(0.42 * min(sheet_h, sheet_w)),
+                        int(16.0 * s1_px_per_cm) if (s1_is_calibrated_mm and s1_px_per_cm > 0.0) else 0,
+                    )
+                    if scale_f > 0.4 and min(rect_w, rect_h) > max_s2_minor and m_solidity < 0.85:
+                        continue
+
+                    cy0, cx0, cy1, cx1 = crop_box
+                    ymin_s = max(0, cy0 + by_c)
+                    ymax_s = min(sheet_h, cy0 + by_c + bh_c)
+                    xmin_s = max(0, cx0 + bx_c)
+                    xmax_s = min(sheet_w, cx0 + bx_c + bw_c)
+                    if ymax_s <= ymin_s or xmax_s <= xmin_s:
+                        continue
+                    full_bbox = (ymin_s, xmin_s, ymax_s, xmax_s)
+
+                    # Store mask in a compact padded local window instead of a 67 MP full-sheet canvas
+                    margin = max(24, int(0.35 * max(bw_c, bh_c)))
+                    win_y0 = max(0, ymin_s - margin)
+                    win_x0 = max(0, xmin_s - margin)
+                    win_y1 = min(sheet_h, ymax_s + margin)
+                    win_x1 = min(sheet_w, xmax_s + margin)
+                    local_mask = np.zeros((win_y1 - win_y0, win_x1 - win_x0), dtype=np.uint8)
+                    dst_y0 = ymin_s - win_y0
+                    dst_x0 = xmin_s - win_x0
+                    eff_h = min(bh_c, win_y1 - ymin_s)
+                    eff_w = min(bw_c, win_x1 - xmin_s)
+                    local_mask[dst_y0 : dst_y0 + eff_h, dst_x0 : dst_x0 + eff_w] = sub_trimmed[:eff_h, :eff_w]
+
+                    leaf_detections.append((
+                        full_bbox,
+                        local_mask,
+                        float(best_score),
+                        int(s1_cls),
+                        (crop_box[1], crop_box[0]),
+                        (win_x0, win_y0),
+                        True,
+                        trim_meta,
+                        m_solidity,
+                        fg_area,
+                    ))
+
+                # Deduplicate leaf_detections on the sheet by mask IoU (IoU > 0.45 keeps the higher-solidity mask)
+                if scale_f > 0.4 and len(leaf_detections) >= 2:
+                    scored_dets = [
+                        (det_item[8], det_item[2], idx_d, det_item)
+                        for idx_d, det_item in enumerate(leaf_detections)
+                    ]
+                    scored_dets.sort(key=lambda x: (x[0], x[1]), reverse=True)
+                    kept_scored = []
+                    for d_sol, d_score, idx_d, det_item in scored_dets:
+                        b1 = det_item[0]
+                        m1 = det_item[1]
+                        ox1, oy1 = det_item[5]
+                        area1 = det_item[9]
+                        is_dup = False
+                        for _, _, _, kept_item in kept_scored:
+                            b2 = kept_item[0]
+                            if b1[2] <= b2[0] or b2[2] <= b1[0] or b1[3] <= b2[1] or b2[3] <= b1[1]:
+                                continue
+                            iy0, ix0 = max(b1[0], b2[0]), max(b1[1], b2[1])
+                            iy1, ix1 = min(b1[2], b2[2]), min(b1[3], b2[3])
+                            if iy1 <= iy0 or ix1 <= ix0:
+                                continue
+                            m2 = kept_item[1]
+                            ox2, oy2 = kept_item[5]
+                            area2 = kept_item[9]
+                            sub1 = m1[iy0 - oy1 : iy1 - oy1, ix0 - ox1 : ix1 - ox1] > 0
+                            sub2 = m2[iy0 - oy2 : iy1 - oy2, ix0 - ox2 : ix1 - ox2] > 0
+                            if sub1.shape != sub2.shape:
+                                sh = min(sub1.shape[0], sub2.shape[0])
+                                sw = min(sub1.shape[1], sub2.shape[1])
+                                sub1 = sub1[:sh, :sw]
+                                sub2 = sub2[:sh, :sw]
+                            inter = int(np.count_nonzero(sub1 & sub2))
+                            if inter > 0:
+                                union = max(area1 + area2 - inter, 1)
+                                if float(inter / union) > 0.45:
+                                    is_dup = True
+                                    break
+                        if not is_dup:
+                            kept_scored.append((d_sol, d_score, idx_d, det_item))
+
+                    kept_scored.sort(key=lambda x: x[2])
+                    leaf_detections = [x[3] for x in kept_scored]
         elif not is_high_dpi or self.stage1_detector.model is None or "predict" in self.model_engine.__dict__:
             # Fallback when Stage 1 detector is uninitialized (e.g., direct PointRend unit tests)
             raw_detections = self.model_engine.predict(img_bgr)
-            for bbox, mask, score, cls_id in raw_detections:
-                if cls_id in LM2_REPRODUCTIVE_CLASS_IDS:
-                    capitulum_detections.append((bbox, mask, float(score), int(cls_id)))
-                elif int(cls_id) == 9:
-                    root_detections.append(bbox)
-                elif int(cls_id) == 2:
-                    self.rejection_telemetry["rejected_leaflet_class"] += 1
-                    logger.debug(f"Voucher {catalog_number}: rejected leaflet detection (class_id=2).")
-                elif cls_id in LM2_LEAF_CLASS_IDS:
+            if not self.enable_geometric_qc:
+                raw_s2_leaves: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]] = []
+                raw_s2_petioles: List[Tuple[Tuple[int, int, int, int], np.ndarray, float]] = []
+                for bbox, mask, score, cls_id in raw_detections:
+                    if cls_id in LM2_REPRODUCTIVE_CLASS_IDS:
+                        capitulum_detections.append((bbox, mask, float(score), int(cls_id)))
+                    elif int(cls_id) == 9:
+                        root_detections.append(bbox)
+                    elif int(cls_id) == 0:
+                        raw_s2_leaves.append((bbox, mask, float(score), int(cls_id)))
+                    elif int(cls_id) == 1:
+                        raw_s2_petioles.append((bbox, mask, float(score)))
+
+                for bbox, mask, score, cls_id in raw_s2_leaves:
                     sheet_mask = mask
                     full_bbox = bbox
                     if self._should_refine_with_sam2(mask):
@@ -1485,6 +1691,44 @@ class SegmentAndExtractPipeline:
                             sheet_mask, full_bbox = reproject_crop_mask_to_sheet(
                                 crop_m_refined, crop_box, (sheet_h, sheet_w)
                             )
+                    fg_area = int(np.count_nonzero(sheet_mask))
+                    if fg_area <= 0:
+                        continue
+
+                    native_pet_meta: Optional[Dict[str, Any]] = None
+                    if raw_s2_petioles and sheet_mask.shape[:2] == (sheet_h, sheet_w):
+                        ly0, lx0, ly1, lx1 = [int(v) for v in full_bbox]
+                        prox = max(32, int(0.35 * max(ly1 - ly0, lx1 - lx0, 1)))
+                        nearby_pets = [
+                            (pscore, pbbox, pmask)
+                            for pbbox, pmask, pscore in raw_s2_petioles
+                            if pmask is not None
+                            and pmask.shape[:2] == sheet_mask.shape[:2]
+                            and not (
+                                int(pbbox[2]) < ly0 - prox
+                                or int(pbbox[0]) > ly1 + prox
+                                or int(pbbox[3]) < lx0 - prox
+                                or int(pbbox[1]) > lx1 + prox
+                            )
+                        ]
+                        if nearby_pets:
+                            nearby_pets.sort(key=lambda item: item[0], reverse=True)
+                            _, pbbox_best, pmask_best = nearby_pets[0]
+                            jy0 = max(0, min(ly0, int(pbbox_best[0])) - 8)
+                            jx0 = max(0, min(lx0, int(pbbox_best[1])) - 8)
+                            jy1 = min(sheet_h, max(ly1, int(pbbox_best[2])) + 8)
+                            jx1 = min(sheet_w, max(lx1, int(pbbox_best[3])) + 8)
+                            if jy1 > jy0 and jx1 > jx0:
+                                native_pet_meta = _extract_native_lm2_petiole_anchor(
+                                    sheet_mask[jy0:jy1, jx0:jx1],
+                                    pmask_best[jy0:jy1, jx0:jx1],
+                                )
+                                if native_pet_meta is not None:
+                                    p_bc = native_pet_meta["p_base_crop"]
+                                    p_ac = native_pet_meta["p_apex_crop"]
+                                    native_pet_meta["p_base"] = (int(jx0 + p_bc[0]), int(jy0 + p_bc[1]))
+                                    native_pet_meta["p_apex"] = (int(jx0 + p_ac[0]), int(jy0 + p_ac[1]))
+
                     leaf_detections.append((
                         full_bbox,
                         sheet_mask,
@@ -1493,10 +1737,43 @@ class SegmentAndExtractPipeline:
                         (int(full_bbox[1]), int(full_bbox[0])),
                         (0, 0),
                         False,
-                        None,
+                        native_pet_meta,
                         0.0,
-                        int(np.count_nonzero(sheet_mask)),
+                        fg_area,
                     ))
+            else:
+                for bbox, mask, score, cls_id in raw_detections:
+                    if cls_id in LM2_REPRODUCTIVE_CLASS_IDS:
+                        capitulum_detections.append((bbox, mask, float(score), int(cls_id)))
+                    elif int(cls_id) == 9:
+                        root_detections.append(bbox)
+                    elif int(cls_id) == 2:
+                        self.rejection_telemetry["rejected_leaflet_class"] += 1
+                        logger.debug(f"Voucher {catalog_number}: rejected leaflet detection (class_id=2).")
+                    elif cls_id in LM2_LEAF_CLASS_IDS:
+                        sheet_mask = mask
+                        full_bbox = bbox
+                        if self._should_refine_with_sam2(mask):
+                            crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, bbox, pad_ratio=0.12)
+                            cy0, cx0, cy1, cx1 = crop_box
+                            if crop_bgr.size > 0 and cy1 > cy0 and cx1 > cx0:
+                                crop_m_init = mask[cy0:cy1, cx0:cx1]
+                                crop_m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, crop_m_init)
+                                sheet_mask, full_bbox = reproject_crop_mask_to_sheet(
+                                    crop_m_refined, crop_box, (sheet_h, sheet_w)
+                                )
+                        leaf_detections.append((
+                            full_bbox,
+                            sheet_mask,
+                            float(score),
+                            int(cls_id),
+                            (int(full_bbox[1]), int(full_bbox[0])),
+                            (0, 0),
+                            False,
+                            None,
+                            0.0,
+                            int(np.count_nonzero(sheet_mask)),
+                        ))
 
         # Collect asynchronous Hough scale fallback if LM2 ruler calibration was absent
         if ruler_future is not None:
@@ -1770,7 +2047,9 @@ class SegmentAndExtractPipeline:
             _raw_px_by_leaf_id[_inst_pre.leaf_id] = _rpx
             _inst_pre.blade_area_cm2 = _acm2
 
-        if is_calibrated_mm:
+        if not self.enable_geometric_qc:
+            effective_min_blade_area_cm2 = 0.0
+        elif is_calibrated_mm:
             _cls0_areas_cm2 = [
                 _i.blade_area_cm2
                 for _i in instances
@@ -1795,6 +2074,84 @@ class SegmentAndExtractPipeline:
 
         _neighbor_dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         for inst in instances:
+            if not self.enable_geometric_qc:
+                # 100% Raw Unconstrained LeafMachine2 Mode:
+                # Retain every LeafMachine2 PointRend `leaf` mask untouched with zero post-hoc
+                # geometric/photometric rejections, computing passive shape descriptors and
+                # pairing native PointRend `petiole` (`class_id == 1`) attachment endpoints.
+                m_area = int(np.count_nonzero(inst.mask))
+                if m_area <= 0:
+                    continue
+                ox, oy = inst.mask_origin
+                rc_sheet = rosette_centroids_by_pid.get(inst.plant_individual_id)
+                rc_local = (rc_sheet[0] - ox, rc_sheet[1] - oy) if rc_sheet is not None else None
+                raw_ucs, raw_sol, raw_ang, raw_pa, raw_pb = compute_geometric_metrics(
+                    inst.mask, rosette_centroid=rc_local
+                )
+                ref_bbox = inst.pcd_bbox if inst.pcd_bbox is not None else inst.bbox
+                raw_desc = compute_classical_shape_descriptors(inst.mask, bbox=ref_bbox)
+                if (
+                    isinstance(inst.trim_meta, dict)
+                    and inst.trim_meta.get("native_lm2_petiole")
+                    and inst.trim_meta.get("p_base") is not None
+                    and inst.trim_meta.get("p_apex") is not None
+                ):
+                    p_base_use = inst.trim_meta["p_base"]
+                    p_apex_use = inst.trim_meta["p_apex"]
+                    midrib_ang_use = float(
+                        math.degrees(math.atan2(p_apex_use[1] - p_base_use[1], p_apex_use[0] - p_base_use[0]))
+                    )
+                else:
+                    p_base_use = raw_pb
+                    p_apex_use = raw_pa
+                    midrib_ang_use = float(raw_ang)
+
+                inst.ucs_score = float(raw_ucs)
+                inst.solidity = float(raw_sol)
+                inst.midrib_angle_deg = midrib_ang_use
+                inst.circularity = float(raw_desc["circularity"])
+                inst.extent = float(raw_desc["extent"])
+                inst.is_severed_lobe = False
+
+                is_dissected = bool(inst.solidity < self.min_solidity and is_botanical_dissection(inst.mask))
+                if is_dissected:
+                    tier = "Tier 1 (Bipinnatisect)" if inst.solidity < 0.48 else "Tier 1 (Dissected)"
+                else:
+                    tier = "Tier 1"
+                assigned_tier = TIER_1_DIRECT
+                is_folded = False
+                reflection_applied = False
+                inst.assigned_tier = assigned_tier
+
+                routing_res = LeafRoutingResult(
+                    tier=tier,
+                    assigned_tier="tier1",
+                    solidity=inst.solidity,
+                    ucs=inst.ucs_score,
+                    is_folded=False,
+                    is_irregular_fold=False,
+                    is_dissected=is_dissected,
+                    processed_mask=inst.mask,
+                    metadata={
+                        "p_base": p_base_use,
+                        "p_apex": p_apex_use,
+                        "midrib_angle_deg": midrib_ang_use,
+                        "reflection_applied": False,
+                        "petiole_trim_info": inst.trim_meta or {"is_trimmed": False},
+                    },
+                )
+                candidate_extractions.append((
+                    inst,
+                    routing_res,
+                    tier,
+                    assigned_tier,
+                    is_folded,
+                    is_dissected,
+                    reflection_applied,
+                    m_area,
+                ))
+                continue
+
             ox, oy = inst.mask_origin
             mh, mw = inst.mask.shape[:2]
             cy0_m = max(0, oy)
@@ -1851,14 +2208,51 @@ class SegmentAndExtractPipeline:
                     dst_slice = neighbor_mask[iy0 - oy : iy1 - oy, ix0 - ox : ix1 - ox]
                     dst_slice[sub_other] = 255
                 if neighbor_mask is not None and np.any(neighbor_mask > 0):
-                    neighbor_mask = cv2.dilate(neighbor_mask, _neighbor_dilate_k, iterations=1)
+                    _nd_rad = max(3, min(16, int(round(0.007 * max(mh, mw)))))
+                    _nd_k = (
+                        _neighbor_dilate_k
+                        if _nd_rad == 3
+                        else cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * _nd_rad + 1, 2 * _nd_rad + 1))
+                    )
+                    neighbor_mask = cv2.dilate(neighbor_mask, _nd_k, iterations=1)
 
-            # 6a. Boundary-continuity severed lobe check (Weaver & Smith 2023/2024; Otsu LAB exterior ring)
+            _, _, _inst_area_pre, _inst_ar_pre, _inst_sol_pre = inst_geom_map.get(
+                inst.leaf_id, (0.0, 0.0, 0.0, 1.0, 0.0)
+            )
+            # Approach 1 (Trust LM2 leaf_whole + Minimal Botanical Hygiene):
+            # Two-stage LeafMachine2 Class 0 (`leaf_whole`) PointRend masks are trusted without
+            # hair-trigger Otsu shadow/neighbor vetoes or rigid ucs/solidity/fold rejections,
+            # while enforcing physical scan-border clipping, artificial straight-object occlusion,
+            # adaptive minimum blade area, and basal-vs.-cauline / bare-stem botanical hygiene.
+            is_trusted_lm2_whole = bool(is_high_dpi and inst.already_trimmed and int(inst.class_id) == 0)
+
+            if is_high_dpi:
+                _ys_bchk, _xs_bchk = np.where(inst.mask > 0)
+                if len(_ys_bchk) > 0:
+                    _ys_s = _ys_bchk + int(oy)
+                    _xs_s = _xs_bchk + int(ox)
+                    _min_span_b = max(40, int(0.16 * max(1, min(int(np.ptp(_xs_bchk)), int(np.ptp(_ys_bchk))))))
+                    _border_touch = max(
+                        int(np.count_nonzero(_ys_s <= 1)),
+                        int(np.count_nonzero(_ys_s >= sheet_h - 2)),
+                        int(np.count_nonzero(_xs_s <= 1)),
+                        int(np.count_nonzero(_xs_s >= sheet_w - 2)),
+                    )
+                    if _border_touch >= _min_span_b:
+                        self.rejection_telemetry["rejected_severed_lobe"] += 1
+                        inst.assigned_tier = "rejected"
+                        inst.rejection_reason = "SEVERED_LOBE"
+                        rejected_instances.append(inst)
+                        continue
+
+            eff_max_border_ratio = 0.42 if is_trusted_lm2_whole else float(self.max_tissue_border_ratio)
+
+            # 6a. Boundary-continuity severed lobe / straight artificial occlusion check
             bc_res = check_boundary_tissue_continuity(
                 inst_crop_bgr,
                 inst.mask,
                 dilation_px=8,
-                max_tissue_border_ratio=self.max_tissue_border_ratio,
+                max_tissue_border_ratio=eff_max_border_ratio,
                 exclude_mask=neighbor_mask,
                 petiole_base_pt=p_base_hint,
             )
@@ -1868,8 +2262,8 @@ class SegmentAndExtractPipeline:
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = "SEVERED_LOBE"
                 logger.debug(
-                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected as severed lateral lobe "
-                    f"(tissue_border_ratio={bc_res['tissue_border_ratio']:.3f} > {self.max_tissue_border_ratio:.2f})."
+                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected as severed/occluded fragment "
+                    f"(tissue_border_ratio={bc_res['tissue_border_ratio']:.3f} > {eff_max_border_ratio:.2f})."
                 )
                 rejected_instances.append(inst)
                 continue
@@ -1899,9 +2293,37 @@ class SegmentAndExtractPipeline:
                 trim_meta=inst.trim_meta,
                 sheet_shape=(sheet_h, sheet_w),
                 crop_img=inst_crop_bgr,
-                max_tissue_border_ratio=self.max_tissue_border_ratio,
+                max_tissue_border_ratio=eff_max_border_ratio,
                 exclude_mask=neighbor_mask,
             )
+            if is_trusted_lm2_whole and (
+                routing_res.is_folded
+                or bool(routing_res.metadata.get("reflection_applied", False))
+                or routing_res.processed_mask is None
+                or routing_res.processed_mask.shape[:2] != inst.mask.shape[:2]
+            ):
+                _t_ucs, _t_sol, _t_ang, _t_pa, _t_pb = compute_geometric_metrics(
+                    inst.mask, rosette_centroid=rc_local
+                )
+                _t_meta = dict(routing_res.metadata)
+                _t_meta.update({
+                    "p_base": _t_pb,
+                    "p_apex": _t_pa,
+                    "midrib_angle_deg": _t_ang,
+                    "reflection_applied": False,
+                })
+                routing_res = LeafRoutingResult(
+                    tier="Tier 1",
+                    assigned_tier="tier1",
+                    solidity=_t_sol,
+                    ucs=_t_ucs,
+                    is_folded=False,
+                    is_irregular_fold=False,
+                    is_dissected=bool(routing_res.is_dissected or _t_sol < self.min_solidity),
+                    processed_mask=inst.mask,
+                    metadata=_t_meta,
+                )
+
             inst.ucs_score = routing_res.ucs
             inst.solidity = routing_res.solidity
             inst.midrib_angle_deg = float(routing_res.metadata.get("midrib_angle_deg", 0.0))
@@ -1910,22 +2332,24 @@ class SegmentAndExtractPipeline:
             ref_bbox = inst.pcd_bbox if inst.pcd_bbox is not None else inst.bbox
             raw_desc = compute_classical_shape_descriptors(inst.mask, bbox=ref_bbox)
             proc_desc = compute_classical_shape_descriptors(routing_res.processed_mask, bbox=ref_bbox)
-            inst.circularity = float(proc_desc["circularity"])
+            inst.circularity = float(raw_desc["circularity"] if is_trusted_lm2_whole else proc_desc["circularity"])
             inst.extent = float(max(raw_desc["extent"], proc_desc["extent"]))
 
-            if inst.extent < self.min_extent:
+            min_req_extent = 0.20 if is_trusted_lm2_whole else self.min_extent
+            if inst.extent < min_req_extent:
                 self.rejection_telemetry["rejected_solidity_extent"] += 1
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = "FAILED_EXTENT"
                 logger.debug(
                     f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by min_extent: "
-                    f"extent={inst.extent:.3f} < {self.min_extent:.2f}."
+                    f"extent={inst.extent:.3f} < {min_req_extent:.2f}."
                 )
                 rejected_instances.append(inst)
                 continue
 
             if (
-                not bool(routing_res.is_dissected)
+                not is_trusted_lm2_whole
+                and not bool(routing_res.is_dissected)
                 and routing_res.assigned_tier != "tier2"
                 and inst.circularity < self.min_circularity
             ):
@@ -1977,19 +2401,47 @@ class SegmentAndExtractPipeline:
                 rejected_instances.append(inst)
                 continue
 
+            # Bare stem / fibrous root stick sanity check (applies anywhere on sheet, including below rosette)
+            if is_trusted_lm2_whole:
+                _is_bare_stem_or_artifact = (
+                    inst.solidity < 0.20
+                    or inst.circularity < 0.035
+                    or (inst_ar > 4.4 and inst.solidity < 0.65 and not bool(routing_res.is_dissected))
+                    or (inst.solidity < 0.48 and inst.ucs_score < 0.52 and not bool(routing_res.is_dissected))
+                )
+                if _is_bare_stem_or_artifact:
+                    self.rejection_telemetry["rejected_solidity_extent"] += 1
+                    inst.assigned_tier = "rejected"
+                    inst.rejection_reason = "UNRESOLVED_CLUMP"
+                    rejected_instances.append(inst)
+                    continue
+
             # Diagnostic classification flags
-            is_folded = bool(routing_res.is_folded)
+            is_folded = False if is_trusted_lm2_whole else bool(routing_res.is_folded)
             is_dissected = bool(routing_res.is_dissected)
             reflection_applied = False
             tier: str = "Failed QC"
             assigned_tier: str = "rejected"
 
-            # Routing Decision Tree (Klingenberg et al. 2002; Claude 2008; Slenker et al. 2022)
-            # Closed-outline EFA is restricted strictly to Tier 1 intact basal blades.
-            # Mirrored Tier 2 hemi-blades and Tier 3 open curves are NEVER pooled into EFA;
-            # partial/occluded or folded leaves are routed exclusively to whole-rosette contextual crops
-            # (rosettes_dense/) for Phase 5 DINOv2 analysis.
-            if not is_folded and routing_res.solidity >= self.min_solidity and routing_res.ucs >= self.min_ucs and routing_res.assigned_tier == "tier1" and not is_dissected:
+            # Routing Decision Tree:
+            # Under Approach 1, trusted two-stage LM2 Class 0 (`leaf_whole`) basal leaf masks enter
+            # Tier_1_Direct directly (letting Step 03 Momocs::rm_asym + MCD Mahalanobis outlier pruning
+            # filter subtle harmonic outliers statistically), while Class 1 (`leaf_partial`) and
+            # single-stage masks continue through strict geometric wholeness verification.
+            if is_trusted_lm2_whole:
+                if inst.solidity < 0.48:
+                    tier = "Tier 1 (Bipinnatisect)"
+                    is_dissected = True
+                elif inst.solidity < self.min_solidity or is_dissected:
+                    tier = "Tier 1 (Dissected)"
+                    is_dissected = True
+                else:
+                    tier = "Tier 1"
+                    is_dissected = False
+                assigned_tier = TIER_1_DIRECT
+                reflection_applied = False
+
+            elif not is_folded and routing_res.solidity >= self.min_solidity and routing_res.ucs >= self.min_ucs and routing_res.assigned_tier == "tier1" and not is_dissected:
                 tier = "Tier 1"
                 assigned_tier = TIER_1_DIRECT
                 reflection_applied = False
@@ -2094,8 +2546,8 @@ class SegmentAndExtractPipeline:
                 inst_cy_rel_plant_bbox[inst.leaf_id] = cy_rel_p_m
                 m_bh = int(np.ptp(ys_m))
                 m_bw = int(np.ptp(xs_m))
-                min_area_px = int(12000 * (scale_f ** 2))
-                min_dim_px = int(220 * scale_f)
+                min_area_px = int((6500 if is_trusted_lm2_whole else 12000) * (scale_f ** 2))
+                min_dim_px = int((160 if is_trusted_lm2_whole else 220) * scale_f)
                 min_t2_area_px = int(18000 * (scale_f ** 2))
                 if is_calibrated_mm and px_per_cm_sheet > 0:
                     _phys_area_px = max(20, int(effective_min_blade_area_cm2 * (px_per_cm_sheet ** 2)))
@@ -2107,7 +2559,11 @@ class SegmentAndExtractPipeline:
                 if (
                     m_area < min_area_px
                     or max(m_bw, m_bh) < min_dim_px
-                    or ((min(m_bw, m_bh) / max(m_bw, m_bh, 1)) > 0.78 and inst.solidity < 0.84)
+                    or (
+                        not is_trusted_lm2_whole
+                        and (min(m_bw, m_bh) / max(m_bw, m_bh, 1)) > 0.78
+                        and inst.solidity < 0.84
+                    )
                     or (tier == "Tier 2" and m_area < min_t2_area_px)
                 ):
                     inst.assigned_tier = "rejected"
@@ -2117,7 +2573,11 @@ class SegmentAndExtractPipeline:
 
                 req_cy_rel = 0.48 if tier == "Tier 2" else 0.42
                 _is_veg_or_macro_rosette_blade = (
-                    (not capitulum_detections and m_area >= int(0.45 * sheet_med_area) and cy_rel >= 0.20)
+                    (
+                        not capitulum_detections
+                        and (is_trusted_lm2_whole or m_area >= int(0.45 * sheet_med_area))
+                        and cy_rel >= 0.20
+                    )
                     or (max(m_bw, m_bh) >= int(0.22 * sheet_h) and cy_rel >= 0.20)
                 )
                 if cy_rel < req_cy_rel and not _is_veg_or_macro_rosette_blade:
@@ -2171,12 +2631,13 @@ class SegmentAndExtractPipeline:
                     tier2_rosette_fallback_by_pid[_fb_pid].extend(_fb_list)
 
         # Apply high-DPI sheet-relative area floor and top-6 quality cap BEFORE writing PNGs/CSVs to disk
-        if is_high_dpi and candidate_extractions:
+        if self.enable_geometric_qc and is_high_dpi and candidate_extractions:
             max_sheet_area = max(item[7] for item in candidate_extractions)
             kept_with_q_cand: List[Tuple[float, Tuple[DetectedInstance, Any, str, str, bool, bool, bool, int]]] = []
             for item in candidate_extractions:
                 _inst, _rres, _tier, _atier, _fold, _diss, _refl, _area = item
-                if _area >= 0.28 * max_sheet_area:
+                _rel_floor = 0.16 if (_inst.already_trimmed and int(_inst.class_id) == 0) else 0.28
+                if _area >= _rel_floor * max_sheet_area:
                     _q = round(float(_inst.solidity), 4) * round(float(_inst.ucs_score), 4) * math.sqrt(_area)
                     kept_with_q_cand.append((_q, item))
             kept_with_q_cand.sort(key=lambda x: x[0], reverse=True)
@@ -2610,7 +3071,16 @@ class SegmentAndExtractPipeline:
         logger.info(f"Output Directory: {self.output_dir}")
         logger.info(f"Device: {self.device}")
         logger.info(f"Force Overwrite: {self.force}")
-        logger.info(f"Gatekeeper Thresholds: Min Solidity={self.min_solidity}, Min UCS={self.min_ucs}")
+        if self.enable_geometric_qc:
+            logger.info(
+                f"Segmentation Mode: Opt-in Geometric QC Gatekeeper "
+                f"(Min Solidity={self.min_solidity}, Min UCS={self.min_ucs})"
+            )
+        else:
+            logger.info(
+                "Segmentation Mode: 100% Raw Unconstrained LeafMachine2 "
+                "(native leaf/petiole/stem detection, zero post-hoc geometric QC constraints)"
+            )
         logger.info("==================================================================")
 
         if not self.vouchers_csv.exists():
@@ -3953,6 +4423,16 @@ def parse_args() -> argparse.Namespace:
         help="SAM 2 model config path for automated boundary refinement.",
     )
     parser.add_argument(
+        "--enable-geometric-qc",
+        dest="enable_geometric_qc",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt in to legacy post-hoc OpenCV geometric/photometric gatekeeping. "
+            "Disabled by default so Step 02 runs 100%% raw unconstrained LeafMachine2 segmentation."
+        ),
+    )
+    parser.add_argument(
         "--force",
         "--overwrite",
         dest="force",
@@ -4003,6 +4483,7 @@ def main() -> None:
         sam2_checkpoint=args.sam2_checkpoint,
         sam2_config=args.sam2_config,
         db_path=getattr(args, "db", None),
+        enable_geometric_qc=getattr(args, "enable_geometric_qc", False),
     )
     pipeline.run(limit=args.limit)
 

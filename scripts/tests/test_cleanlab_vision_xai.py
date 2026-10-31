@@ -720,6 +720,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
                 stage1_weights=weights_p,
                 output_dir=tmp_path / "data",
                 device="cpu",
+                enable_geometric_qc=True,
             )
             preds = [
                 ((280, 180, 460, 320), basal_mask, 0.96, 0),

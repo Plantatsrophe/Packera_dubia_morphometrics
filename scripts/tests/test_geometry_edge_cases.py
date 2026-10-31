@@ -629,13 +629,13 @@ class TestGeometryEdgeCases(unittest.TestCase):
     def test_high_res_pinnatifid_leaf_hull_ucs_routing(self) -> None:
         """Verify label-blind high-res pinnatifid basal leaf routes to Tier 1 (Dissected) with ucs >= 0.80."""
         mask = np.zeros((500, 500), dtype=np.uint8)
-        cx = 250
+        cx, cy = 250, 250
         # Central rachis + terminal lobe + 3 pairs of symmetric lateral lobes (solidity ~ 0.56-0.66)
-        cv2.ellipse(mask, (cx, 115), (44, 54), 0, 0, 360, 255, -1)
-        cv2.line(mask, (cx, 115), (cx, 395), 255, thickness=26)
-        for ly, rx_lobe, ry_lobe in ((200, 68, 24), (275, 60, 22), (345, 48, 19)):
-            cv2.ellipse(mask, (cx - 42, ly), (rx_lobe, ry_lobe), 0, 0, 360, 255, -1)
-            cv2.ellipse(mask, (cx + 42, ly), (rx_lobe, ry_lobe), 0, 0, 360, 255, -1)
+        cv2.ellipse(mask, (cx, cy - 95), (44, 54), 0, 0, 360, 255, -1)
+        cv2.line(mask, (cx, cy - 125), (cx, cy + 135), 255, thickness=22)
+        for y_off in (-30, 25, 80):
+            cv2.ellipse(mask, (cx - 46, cy + y_off), (52, 16), -15, 0, 360, 255, -1)
+            cv2.ellipse(mask, (cx + 46, cy + y_off), (52, 16), 15, 0, 360, 255, -1)
 
         res = classify_and_route_leaf(
             mask,
