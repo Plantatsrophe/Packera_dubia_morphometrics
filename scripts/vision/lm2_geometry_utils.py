@@ -3296,15 +3296,20 @@ def detect_ruler_scale_hough(image: np.ndarray) -> Optional[float]:
     for region in margins:
         if region.size == 0:
             continue
-        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY) if len(region.shape) == 3 else region
-
-        # Downscale if extremely large for rapid Hough transform
-        rh, rw = gray.shape[:2]
+        # Downscale before grayscale conversion if extremely large for rapid Hough transform
+        rh, rw = region.shape[:2]
         max_dim = max(rh, rw)
         scale_factor = 1.0
         if max_dim > 1500:
             scale_factor = 1500.0 / max_dim
-            gray = cv2.resize(gray, (int(rw * scale_factor), int(rh * scale_factor)), interpolation=cv2.INTER_AREA)
+            region_small = cv2.resize(
+                region,
+                (int(rw * scale_factor), int(rh * scale_factor)),
+                interpolation=cv2.INTER_AREA,
+            )
+            gray = cv2.cvtColor(region_small, cv2.COLOR_BGR2GRAY) if len(region_small.shape) == 3 else region_small
+        else:
+            gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY) if len(region.shape) == 3 else region
 
         # Bilateral / Gaussian blur + Canny edge detection
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)

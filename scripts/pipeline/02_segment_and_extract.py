@@ -402,7 +402,7 @@ class LM2Stage1Detector:
             from utils.torch_utils import select_device
 
             if torch.cuda.is_available():
-                torch.backends.cudnn.benchmark = True
+                torch.backends.cudnn.benchmark = False
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
             dev = select_device(self.device if self.device != "cuda" else "0")
@@ -627,7 +627,7 @@ class PointRendInferenceEngine:
             return
 
         if self.device == "cuda" and torch.cuda.is_available():
-            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.benchmark = False
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             self.use_amp = True
@@ -704,24 +704,31 @@ class PointRendInferenceEngine:
 
     def _extract_instances(self, preds: Dict[str, Any]) -> List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]:
         """Extracts (bbox, mask_uint8, score, class_id) from a single Detectron2 prediction dict."""
+        import torch
         instances = preds["instances"]
         if not instances.has("pred_masks") or len(instances) == 0:
             return []
         keep = instances.scores >= self.score_thresh
         if not bool(keep.any()):
             return []
-        instances = instances[keep].to("cpu")
-        scores = instances.scores.numpy()
-        classes = instances.pred_classes.numpy()
-        boxes = instances.pred_boxes.tensor.numpy()
-        masks = instances.pred_masks.numpy()
+        instances = instances[keep]
+        if torch.is_tensor(instances.pred_masks):
+            masks_u8 = (instances.pred_masks.to(dtype=torch.uint8) * 255).cpu().numpy()
+            scores = instances.scores.cpu().numpy()
+            classes = instances.pred_classes.cpu().numpy()
+            boxes = instances.pred_boxes.tensor.cpu().numpy()
+        else:
+            instances = instances.to("cpu")
+            scores = instances.scores.numpy()
+            classes = instances.pred_classes.numpy()
+            boxes = instances.pred_boxes.tensor.numpy()
+            masks_u8 = (instances.pred_masks.numpy() > 0).astype(np.uint8) * 255
 
         results: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]] = []
         for i in range(len(scores)):
             box = boxes[i]
             ymin, xmin, ymax, xmax = int(box[1]), int(box[0]), int(box[3]), int(box[2])
-            mask_uint8 = (masks[i] > 0).astype(np.uint8) * 255
-            results.append(((ymin, xmin, ymax, xmax), mask_uint8, float(scores[i]), int(classes[i])))
+            results.append(((ymin, xmin, ymax, xmax), masks_u8[i], float(scores[i]), int(classes[i])))
         return results
 
     def predict(
@@ -758,38 +765,69 @@ class PointRendInferenceEngine:
     def predict_batch(
         self,
         images_bgr: List[np.ndarray],
-        batch_size: int = 24,
+        batch_size: int = 10,
         pretransformed: Optional[Sequence[Optional[Tuple[np.ndarray, int, int]]]] = None,
     ) -> List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]]:
         """
         Runs batched Stage 2 PointRend inference across multiple candidate leaf crops
         (including cross-voucher crop waves on high-VRAM GPUs).
+        Sorts crops by orientation and aspect ratio before batching so Detectron2's
+        `ImageList` minimizes zero-padding and VRAM footprint, restoring original crop order.
         Automatically delegates to `self.predict(img)` if `predict` is mocked in unit tests
         or if `len(images_bgr) <= 1`.
         """
         if not images_bgr:
             return []
+        has_pre = pretransformed is not None and len(pretransformed) == len(images_bgr)
         if (
             self.model is None
             or "predict" in self.__dict__
             or getattr(self.predict, "__func__", None) is not PointRendInferenceEngine.predict
             or len(images_bgr) <= 1
         ):
+            if (
+                has_pre
+                and len(images_bgr) == 1
+                and "predict" not in self.__dict__
+                and getattr(self.predict, "__func__", None) is PointRendInferenceEngine.predict
+            ):
+                return [self.predict(images_bgr[0], pretransformed=pretransformed[0])]  # type: ignore[index]
             return [self.predict(img) for img in images_bgr]
 
         import torch
-        all_results: List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]] = []
+        n_imgs = len(images_bgr)
+        all_results: List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]] = [
+            [] for _ in range(n_imgs)
+        ]
         eff_bs = max(1, int(batch_size))
-        has_pre = pretransformed is not None and len(pretransformed) == len(images_bgr)
-        for start in range(0, len(images_bgr), eff_bs):
-            end = min(len(images_bgr), start + eff_bs)
-            chunk = images_bgr[start:end]
-            pre_chunk = pretransformed[start:end] if has_pre else None
+
+        def _aspect_sort_key(idx: int) -> Tuple[int, float]:
+            pre_it = pretransformed[idx] if has_pre else None  # type: ignore[index]
+            if pre_it is not None:
+                _, h_i, w_i = pre_it
+            else:
+                h_i, w_i = images_bgr[idx].shape[:2]
+            is_land = 1 if w_i > h_i else 0
+            return (is_land, round(float(h_i) / float(max(w_i, 1)), 2))
+
+        sorted_indices = sorted(range(n_imgs), key=_aspect_sort_key)
+        pending_chunks: List[List[int]] = [
+            sorted_indices[s : s + eff_bs] for s in range(0, n_imgs, eff_bs)
+        ]
+
+        while pending_chunks:
+            chunk_idx_list = pending_chunks.pop(0)
+            if len(chunk_idx_list) == 1:
+                only_i = chunk_idx_list[0]
+                pre_only = pretransformed[only_i] if has_pre else None  # type: ignore[index]
+                all_results[only_i] = self.predict(images_bgr[only_i], pretransformed=pre_only)
+                continue
             try:
                 with torch.no_grad():
                     inputs = []
-                    for idx_c, img_bgr in enumerate(chunk):
-                        pre_item = pre_chunk[idx_c] if pre_chunk is not None else None
+                    for orig_i in chunk_idx_list:
+                        img_bgr = images_bgr[orig_i]
+                        pre_item = pretransformed[orig_i] if has_pre else None  # type: ignore[index]
                         if pre_item is not None:
                             chw_u8, h, w = pre_item
                         else:
@@ -803,15 +841,15 @@ class PointRendInferenceEngine:
                             preds_list = self.model(inputs)
                     else:
                         preds_list = self.model(inputs)
-                for preds in preds_list:
-                    all_results.append(self._extract_instances(preds))
+                for orig_i, preds in zip(chunk_idx_list, preds_list):
+                    all_results[orig_i] = self._extract_instances(preds)
                 del inputs, preds_list
             except Exception as e:
-                logger.debug(f"Batched PointRend fallback to sequential predict ({e})")
+                logger.debug(f"Batched PointRend halving backoff from chunk={len(chunk_idx_list)} ({e})")
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                for img_bgr in chunk:
-                    all_results.append(self.predict(img_bgr))
+                mid = max(1, len(chunk_idx_list) // 2)
+                pending_chunks = [chunk_idx_list[:mid], chunk_idx_list[mid:]] + pending_chunks
         return all_results
 
 
@@ -1020,7 +1058,8 @@ def _extract_native_lm2_petiole_anchor(
         return None
 
     bx_l, by_l, bw_l, bh_l = cv2.boundingRect(leaf_mask)
-    if bw_l == 0 or bh_l == 0:
+    bx_p, by_p, bw_p, bh_p = cv2.boundingRect(petiole_mask)
+    if bw_l == 0 or bh_l == 0 or bw_p == 0 or bh_p == 0:
         return None
     cnts_l, _ = cv2.findContours(
         leaf_mask[by_l : by_l + bh_l, bx_l : bx_l + bw_l],
@@ -1034,9 +1073,14 @@ def _extract_native_lm2_petiole_anchor(
     if len(leaf_pts) == 0:
         return None
 
-    inv_pet = (petiole_mask == 0).astype(np.uint8)
-    dt_pet = cv2.distanceTransform(inv_pet, cv2.DIST_L2, 3)
-    dists_to_pet = dt_pet[leaf_pts[:, 1], leaf_pts[:, 0]]
+    h_full, w_full = leaf_mask.shape[:2]
+    ux0 = max(0, min(bx_l, bx_p) - 2)
+    uy0 = max(0, min(by_l, by_p) - 2)
+    ux1 = min(w_full, max(bx_l + bw_l, bx_p + bw_p) + 2)
+    uy1 = min(h_full, max(by_l + bh_l, by_p + bh_p) + 2)
+    inv_pet_sub = (petiole_mask[uy0:uy1, ux0:ux1] == 0).astype(np.uint8)
+    dt_pet = cv2.distanceTransform(inv_pet_sub, cv2.DIST_L2, 3)
+    dists_to_pet = dt_pet[leaf_pts[:, 1] - uy0, leaf_pts[:, 0] - ux0]
     min_idx = int(np.argmin(dists_to_pet))
     min_dist = float(dists_to_pet[min_idx])
     if min_dist > max(28.0, 0.30 * float(max(bw_l, bh_l))):
@@ -1047,9 +1091,18 @@ def _extract_native_lm2_petiole_anchor(
     apex_idx = int(np.argmax(dists_from_base))
     p_apex_crop = (int(leaf_pts[apex_idx, 0]), int(leaf_pts[apex_idx, 1]))
 
-    pet_ys, pet_xs = np.where(petiole_mask > 0)
-    pet_span_dists = np.hypot(pet_xs - p_base_crop[0], pet_ys - p_base_crop[1])
-    petiole_len_px = float(np.max(pet_span_dists)) if len(pet_span_dists) > 0 else 0.0
+    cnts_p, _ = cv2.findContours(
+        petiole_mask[by_p : by_p + bh_p, bx_p : bx_p + bw_p],
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_NONE,
+        offset=(bx_p, by_p),
+    )
+    if cnts_p:
+        pet_pts = np.vstack([c.reshape(-1, 2) for c in cnts_p])
+        pet_span_dists = np.hypot(pet_pts[:, 0] - p_base_crop[0], pet_pts[:, 1] - p_base_crop[1])
+        petiole_len_px = float(np.max(pet_span_dists)) if len(pet_span_dists) > 0 else 0.0
+    else:
+        petiole_len_px = 0.0
 
     return {
         "is_trimmed": False,
@@ -1220,7 +1273,7 @@ class SegmentAndExtractPipeline:
         self.voucher_petiole_by_pid: Dict[str, Dict[int, Dict[str, Any]]] = {}
         self.voucher_contour_coords_by_leaf: Dict[str, Dict[int, List[List[float]]]] = {}
         self.stage1_wave_size: int = 16
-        self.stage2_batch_size: int = 24 if self.device == "cuda" else 8
+        self.stage2_batch_size: int = 10 if self.device == "cuda" else 8
 
         # Preload catalogNumber -> scientificName mapping if available
         self.vouchers_taxa: Dict[str, str] = {}
@@ -2209,13 +2262,18 @@ class SegmentAndExtractPipeline:
         def _inst_sheet_geom(inst_obj: DetectedInstance) -> Tuple[float, float, float, float, float]:
             ox_i, oy_i = inst_obj.mask_origin
             m_u8 = inst_obj.mask if inst_obj.mask.dtype == np.uint8 else ((inst_obj.mask > 0).astype(np.uint8) * 255)
-            ys_i, xs_i = np.where(m_u8 > 0)
-            if len(ys_i) > 0 and len(xs_i) > 0:
-                cx_i = float(np.mean(xs_i)) + ox_i
-                cy_i = float(np.mean(ys_i)) + oy_i
-                area_i = float(len(ys_i))
-                bx_i, by_i, bw_i, bh_i = cv2.boundingRect(m_u8)
+            bx_i, by_i, bw_i, bh_i = cv2.boundingRect(m_u8)
+            if bw_i > 0 and bh_i > 0:
                 sub_i = m_u8[by_i : by_i + bh_i, bx_i : bx_i + bw_i]
+                mom_i = cv2.moments(sub_i, binaryImage=True)
+                area_i = float(mom_i["m00"])
+            else:
+                sub_i = None
+                mom_i = None
+                area_i = 0.0
+            if sub_i is not None and mom_i is not None and area_i > 0.0:
+                cx_i = float(mom_i["m10"] / area_i) + float(bx_i + ox_i)
+                cy_i = float(mom_i["m01"] / area_i) + float(by_i + oy_i)
                 cnts_i, _ = cv2.findContours(sub_i, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if cnts_i:
                     main_c = max(cnts_i, key=cv2.contourArea)
@@ -3619,12 +3677,14 @@ class SegmentAndExtractPipeline:
         voucher_rows = list(df_vouchers.iterrows())
         prev_cv2_threads: Optional[int] = None
         prefetch_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+        prep_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
         post_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
         try:
             if use_wave_engine:
                 n_cpu = os.cpu_count() or 8
-                prefetch_workers = min(16, max(4, n_cpu // 4))
+                prefetch_workers = min(12, max(4, n_cpu // 5))
+                prep_workers = min(12, max(4, n_cpu // 5))
                 post_workers = min(16, max(4, n_cpu // 4))
                 wave_size = max(1, int(self.stage1_wave_size))
                 prefetch_window = max(wave_size * 2, prefetch_workers * 2)
@@ -3693,9 +3753,10 @@ class SegmentAndExtractPipeline:
                     logger.info(
                         f"3-Stage Wave Engine active: {len(active_tasks)} vouchers queued "
                         f"(wave_size={wave_size}, s2_batch={self.stage2_batch_size}, "
-                        f"prefetch_workers={prefetch_workers}, post_workers={post_workers})."
+                        f"prefetch_workers={prefetch_workers}, prep_workers={prep_workers}, post_workers={post_workers})."
                     )
                     prefetch_pool = concurrent.futures.ThreadPoolExecutor(max_workers=prefetch_workers)
+                    prep_pool = concurrent.futures.ThreadPoolExecutor(max_workers=prep_workers)
                     post_pool = concurrent.futures.ThreadPoolExecutor(max_workers=post_workers)
                     prefetch_futures: Dict[int, concurrent.futures.Future] = {}
                     in_flight_waves: List[List[Tuple[int, str, Path, concurrent.futures.Future]]] = []
@@ -3817,7 +3878,7 @@ class SegmentAndExtractPipeline:
                                 return local_i, None, ss_pre, needs_ss
 
                             ppm_v: Optional[float] = ruler_v[1] if ruler_v[0] else None
-                            if ppm_v is None:
+                            if not ruler_v[0]:
                                 try:
                                     ppm_v = detect_ruler_scale_hough(img_v)
                                 except Exception:
@@ -3836,7 +3897,7 @@ class SegmentAndExtractPipeline:
                         precrops_by_local: Dict[int, List[Optional[Tuple[np.ndarray, int, int]]]] = {}
                         ss_Fallback_locals: List[int] = []
                         if len(valid_indices) >= 2:
-                            for loc_i, unp, pre_c, needs_ss in post_pool.map(_prep_s2_voucher, valid_indices):
+                            for loc_i, unp, pre_c, needs_ss in prep_pool.map(_prep_s2_voucher, valid_indices):
                                 if unp is not None:
                                     unpacked_by_local[loc_i] = unp
                                     precrops_by_local[loc_i] = pre_c
@@ -4031,6 +4092,8 @@ class SegmentAndExtractPipeline:
         finally:
             if post_pool is not None:
                 post_pool.shutdown(wait=True)
+            if prep_pool is not None:
+                prep_pool.shutdown(wait=False, cancel_futures=True)
             if prefetch_pool is not None:
                 prefetch_pool.shutdown(wait=False, cancel_futures=True)
             if prev_cv2_threads is not None:
