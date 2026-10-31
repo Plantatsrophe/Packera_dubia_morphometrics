@@ -1875,7 +1875,8 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE, rf_res 
       diff_tx <- sweep(Z_all, 2L, mu_pca[tx, ], "-")
       d2_maha[, tx] <- pmax(0.0, rowSums((diff_tx %*% S_inv_pca) * diff_tx))
     }
-    ll_maha <- -0.5 * (d2_maha / max(1.0, 0.5 * k_pca))
+    nu_df <- max(3.0, k_pca + 2.0)
+    ll_maha <- -0.5 * (nu_df + k_pca) * log1p(d2_maha / nu_df)
     ll_max <- apply(ll_maha, 1L, max)
     p_maha_unnorm <- exp(sweep(ll_maha, 1L, ll_max, "-"))
     maha_prob_mat <- sweep(p_maha_unnorm, 1L, pmax(rowSums(p_maha_unnorm), 1e-12), "/")
@@ -1884,7 +1885,7 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE, rf_res 
   rf_prob_mat <- NULL
   rf_acc_est <- NA_real_
   if (!is.null(rf_res) && is.list(rf_res)) {
-    for (acc_nm in c("Spatial_Block_CV_Accuracy", "block_cv_acc", "OOB_Accuracy")) {
+    for (acc_nm in c("Spatial_Block_CV_Accuracy", "Spatial_Block_CV_Acc", "spatial_block_cv_acc", "block_cv_acc", "OOB_Accuracy")) {
       if (!is.null(rf_res[[acc_nm]]) && is.finite(suppressWarnings(as.numeric(rf_res[[acc_nm]][1])))) {
         rf_acc_est <- suppressWarnings(as.numeric(rf_res[[acc_nm]][1]))
         break
@@ -1894,7 +1895,9 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE, rf_res 
     if (is.matrix(cand_mat) && nrow(cand_mat) == n && K_tx >= 2L && length(intersect(colnames(cand_mat), active_taxa)) >= 1L) {
       rf_prob_mat <- matrix(NA_real_, nrow = n, ncol = K_tx, dimnames = list(NULL, active_taxa))
       common_tx <- intersect(colnames(cand_mat), active_taxa)
-      rf_prob_mat[, common_tx] <- suppressWarnings(as.numeric(cand_mat[, common_tx]))
+      for (ctx in common_tx) {
+        rf_prob_mat[, ctx] <- suppressWarnings(as.numeric(cand_mat[, ctx]))
+      }
     } else {
       rf_p_tx <- if (!is.null(rf_res$rf_predicted_taxon)) rf_res$rf_predicted_taxon else rf_res$predicted_taxon
       rf_p_pr <- if (!is.null(rf_res$rf_predicted_prob)) rf_res$rf_predicted_prob else rf_res$predicted_prob
