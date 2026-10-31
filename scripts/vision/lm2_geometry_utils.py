@@ -2468,8 +2468,14 @@ def extract_tier1_pristine(
     tier_save_path = tier1_dir / filename
 
     bin_mask = (mask > 0).astype(np.uint8) * 255
-    cv2.imwrite(str(main_save_path), bin_mask)
-    shutil.copyfile(str(main_save_path), str(tier_save_path))
+    ok, png_buf = cv2.imencode(".png", bin_mask)
+    if ok:
+        png_bytes = png_buf.tobytes()
+        main_save_path.write_bytes(png_bytes)
+        tier_save_path.write_bytes(png_bytes)
+    else:
+        cv2.imwrite(str(main_save_path), bin_mask)
+        shutil.copyfile(str(main_save_path), str(tier_save_path))
     return str(main_save_path)
 
 
@@ -2741,7 +2747,8 @@ def export_standardized_contour(
     petiole_attachment_pt: Optional[Tuple[int, int]] = None,
     contour: Optional[np.ndarray] = None,
     p_apex_pt: Optional[Tuple[int, int]] = None,
-) -> Optional[str]:
+    return_coords: bool = False,
+) -> Any:
     """
     Extracts vectorized 2D (x, y) boundary coordinates from a binary silhouette mask,
     homologizes starting point to the petiole-blade junction anchor, enforces consistent
@@ -2750,6 +2757,7 @@ def export_standardized_contour(
     downstream Elliptic Fourier Analysis, and saves to
     output_dir/contours/{catalogNumber}_leaf{id}.csv.
     """
+    empty_ret: Any = (None, None) if return_coords else None
     if contour is not None and len(contour) >= 10:
         largest_cnt = contour.reshape(-1, 2)
         if petiole_attachment_pt is not None and p_apex_pt is not None:
@@ -2763,10 +2771,10 @@ def export_standardized_contour(
             mask = trim_petiole_tail(mask)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         if not contours:
-            return None
+            return empty_ret
         largest_cnt = max(contours, key=cv2.contourArea).reshape(-1, 2)
         if len(largest_cnt) < 10:
-            return None
+            return empty_ret
         _, _, _, p_apex_m, p_base_m = compute_geometric_metrics(mask)
 
     # Resolve petiole attachment anchor point and apex point
@@ -2794,7 +2802,7 @@ def export_standardized_contour(
     dt = np.hypot(dx, dy)
     valid = dt > 1e-7
     if np.sum(valid) < 5:
-        return None
+        return empty_ret
 
     pts = pts[np.concatenate([[True], valid])]
     dx = np.diff(pts[:, 0])
@@ -2803,7 +2811,7 @@ def export_standardized_contour(
     cum_dist = np.concatenate([[0.0], np.cumsum(dt)])
     total_len = cum_dist[-1]
     if total_len <= 0:
-        return None
+        return empty_ret
 
     target_distances = np.linspace(0.0, total_len, num_points, endpoint=False)
     x_resamp = np.interp(target_distances, cum_dist, pts[:, 0])
@@ -2821,21 +2829,25 @@ def export_standardized_contour(
         x_resamp, y_resamp, petiole_attachment_pt, p_apex_pt
     )
 
-    contour_df = pd.DataFrame({
-        "catalogNumber": catalog_number,
-        "leaf_id": leaf_id,
-        "point_index": np.arange(num_points),
-        "x": np.round(x_rot, 2),
-        "y": np.round(y_rot, 2),
-        "x_norm": x_norm,
-        "y_norm": y_norm,
-    })
+    x_r = np.round(x_rot, 2).tolist()
+    y_r = np.round(y_rot, 2).tolist()
+    xn_l = np.asarray(x_norm, dtype=np.float64).tolist()
+    yn_l = np.asarray(y_norm, dtype=np.float64).tolist()
 
     out_base = (output_dir / "data") if (output_dir.name != "data" and (output_dir / "data").is_dir()) else output_dir
     contour_dir = out_base / "contours"
     contour_dir.mkdir(parents=True, exist_ok=True)
     out_csv = contour_dir / f"{catalog_number}_leaf{leaf_id}.csv"
-    contour_df.to_csv(out_csv, index=False)
+    prefix = f"{catalog_number},{leaf_id},"
+    lines = ["catalogNumber,leaf_id,point_index,x,y,x_norm,y_norm\n"]
+    lines.extend(
+        f"{prefix}{idx},{xv},{yv},{xnv},{ynv}\n"
+        for idx, (xv, yv, xnv, ynv) in enumerate(zip(x_r, y_r, xn_l, yn_l))
+    )
+    out_csv.write_text("".join(lines), encoding="utf-8")
+    if return_coords:
+        xy_coords = [[round(float(xv), 4), round(float(yv), 4)] for xv, yv in zip(x_r, y_r)]
+        return str(out_csv), xy_coords
     return str(out_csv)
 
 
@@ -3443,40 +3455,44 @@ def crop_dense_rosette_tier4(
     output_dir: Path,
     raw_img: Optional[np.ndarray] = None,
     catalog_number: Optional[str] = None,
+    precropped_rosette_bgr: Optional[np.ndarray] = None,
 ) -> Optional[str]:
     """Tier 4: Dense whole-rosette bounding crop from native-DPI sheet."""
-    if raw_img is None:
-        if not raw_image_path.exists():
-            return None
-        raw_img = cv2.imread(str(raw_image_path))
-    if raw_img is None:
-        return None
-
-    img_h, img_w = raw_img.shape[:2]
-
-    all_ymin, all_xmin, all_ymax, all_xmax = [], [], [], []
-    for cand in plant_candidates:
-        ymin, xmin, ymax, xmax = cand.bbox
-        if ymax > ymin and xmax > xmin:
-            all_ymin.append(ymin)
-            all_xmin.append(xmin)
-            all_ymax.append(ymax)
-            all_xmax.append(xmax)
-
-    if not all_ymin:
-        ymin, ymax = int(img_h * 0.40), int(img_h * 0.85)
-        xmin, xmax = int(img_w * 0.20), int(img_w * 0.80)
+    if precropped_rosette_bgr is not None:
+        rosette_crop = precropped_rosette_bgr
     else:
-        min_y, max_y = min(all_ymin), max(all_ymax)
-        min_x, max_x = min(all_xmin), max(all_xmax)
-        pad_y = int(0.15 * (max_y - min_y + 10))
-        pad_x = int(0.15 * (max_x - min_x + 10))
-        ymin = max(0, min_y - pad_y)
-        ymax = min(img_h, max_y + pad_y)
-        xmin = max(0, min_x - pad_x)
-        xmax = min(img_w, max_x + pad_x)
+        if raw_img is None:
+            if not raw_image_path.exists():
+                return None
+            raw_img = cv2.imread(str(raw_image_path))
+        if raw_img is None:
+            return None
 
-    rosette_crop = raw_img[ymin:ymax, xmin:xmax]
+        img_h, img_w = raw_img.shape[:2]
+
+        all_ymin, all_xmin, all_ymax, all_xmax = [], [], [], []
+        for cand in plant_candidates:
+            ymin, xmin, ymax, xmax = cand.bbox
+            if ymax > ymin and xmax > xmin:
+                all_ymin.append(ymin)
+                all_xmin.append(xmin)
+                all_ymax.append(ymax)
+                all_xmax.append(xmax)
+
+        if not all_ymin:
+            ymin, ymax = int(img_h * 0.40), int(img_h * 0.85)
+            xmin, xmax = int(img_w * 0.20), int(img_w * 0.80)
+        else:
+            min_y, max_y = min(all_ymin), max(all_ymax)
+            min_x, max_x = min(all_xmin), max(all_xmax)
+            pad_y = int(0.15 * (max_y - min_y + 10))
+            pad_x = int(0.15 * (max_x - min_x + 10))
+            ymin = max(0, min_y - pad_y)
+            ymax = min(img_h, max_y + pad_y)
+            xmin = max(0, min_x - pad_x)
+            xmax = min(img_w, max_x + pad_x)
+
+        rosette_crop = raw_img[ymin:ymax, xmin:xmax]
     if rosette_crop.size == 0:
         return None
 

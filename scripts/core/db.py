@@ -1657,6 +1657,7 @@ def record_voucher_segmentation_transaction(
     output_dir: Optional[Path] = None,
     image_path: Optional[str] = None,
     workspace_root: Path = PROJECT_ROOT,
+    commit: bool = True,
 ) -> None:
     """
     Persist a single voucher's Step 02 segmentation results in one atomic SQLite
@@ -1928,7 +1929,7 @@ def record_voucher_segmentation_transaction(
         qc_status = "FAILED_QC"
         fail_reason = fail_reason or "MISSING_CONTOUR_COORDINATES"
 
-    with conn:
+    def _apply_sql() -> None:
         conn.execute(
             """
             INSERT INTO vouchers (catalogNumber, image_path, pixels_per_mm, is_calibrated_mm, qc_status, failure_reason, failure_details)
@@ -1990,6 +1991,12 @@ def record_voucher_segmentation_transaction(
                 """,
                 leaf_rows,
             )
+
+    if commit:
+        with conn:
+            _apply_sql()
+    else:
+        _apply_sql()
 
 
 def load_step02_records_from_db(

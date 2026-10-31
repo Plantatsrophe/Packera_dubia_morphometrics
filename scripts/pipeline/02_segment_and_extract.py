@@ -50,10 +50,11 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import cv2
 import numpy as np
@@ -175,6 +176,22 @@ class DetectedInstance:
     mask_path: Optional[str] = None
     contour_path: Optional[str] = None
     rejection_reason: Optional[str] = None
+
+
+@dataclass
+class _VoucherFinalizeBundle:
+    """Thread-safe per-voucher post-processing result bundle for wave-pipelined execution."""
+    catalog_number: str
+    image_path: str
+    extracted_records: List[Dict[str, Any]]
+    failure_record: Optional[Dict[str, Any]]
+    repro_record: Optional[Dict[str, Any]] = None
+    pheno_record: Optional[Dict[str, Any]] = None
+    crowns_by_pid: Dict[int, Tuple[float, float]] = field(default_factory=dict)
+    rosette_centroids_by_pid: Dict[int, Tuple[float, float]] = field(default_factory=dict)
+    by_plant_petiole: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    contour_coords_by_leaf: Dict[int, List[List[float]]] = field(default_factory=dict)
+    telemetry_deltas: Dict[str, int] = field(default_factory=dict)
 
 
 def crop_leaf_bbox_with_padding(
@@ -385,14 +402,18 @@ class LM2Stage1Detector:
             from utils.torch_utils import select_device
 
             if torch.cuda.is_available():
-                torch.backends.cudnn.benchmark = False
+                torch.backends.cudnn.benchmark = True
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
             dev = select_device(self.device if self.device != "cuda" else "0")
-            self.model = DetectMultiBackend(str(self.weights_path), device=dev, dnn=False)
+            use_fp16 = bool(getattr(dev, "type", "cpu") != "cpu" and torch.cuda.is_available())
+            self.model = DetectMultiBackend(str(self.weights_path), device=dev, dnn=False, fp16=use_fp16)
             self.stride = int(max(getattr(self.model, "stride", 32), 32))
             LM2Stage1Detector._MODEL_CACHE[cache_key] = (self.model, self.stride)
-            logger.info(f"Loaded Stage 1 LM2 YOLOv5 detector ({self.model_name}) from {self.weights_path}")
+            logger.info(
+                f"Loaded Stage 1 LM2 YOLOv5 detector ({self.model_name}, fp16={getattr(self.model, 'fp16', False)}) "
+                f"from {self.weights_path}"
+            )
         except Exception as e:
             logger.debug(f"Stage 1 YOLOv5 runtime not loaded in current interpreter ({e}).")
             self.model = None
@@ -448,8 +469,9 @@ class LM2Stage1Detector:
             else:
                 img = letterbox(image_bgr, self.img_size, stride=self.stride, auto=self.model.pt)[0]
 
-            im = torch.from_numpy(img).to(self.model.device)
-            im = im.permute(2, 0, 1).flip(0).contiguous().float().div_(255.0)
+            target_dtype = torch.float16 if getattr(self.model, "fp16", False) else torch.float32
+            im = torch.from_numpy(np.ascontiguousarray(img)).to(self.model.device, non_blocking=True)
+            im = im.permute(2, 0, 1).flip(0).contiguous().to(dtype=target_dtype).div_(255.0)
             if len(im.shape) == 3:
                 im = im[None]
 
@@ -480,6 +502,93 @@ class LM2Stage1Detector:
             logger.debug(f"Stage 1 YOLOv5 inference error: {e}")
             return []
 
+    def predict_batch(
+        self,
+        items: Sequence[Tuple[np.ndarray, Optional[str], Optional[np.ndarray]]],
+        use_cache: bool = False,
+        max_batch_size: int = 16,
+    ) -> List[List[Tuple[Tuple[int, int, int, int], float, int]]]:
+        """
+        Runs batched FP16/FP32 Stage 1 YOLOv5 organ detection across a wave of herbarium sheets,
+        grouping precomputed letterbox arrays by exact (H, W) shape so letterbox padding
+        remains 100% identical to single-sheet `predict()`.
+        """
+        if not items:
+            return []
+        if (
+            self.model is None
+            or "predict" in self.__dict__
+            or getattr(self.predict, "__func__", None) is not LM2Stage1Detector.predict
+            or len(items) <= 1
+        ):
+            return [
+                self.predict(img, catalog_number=cat, use_cache=use_cache, precomputed_letterbox=lb)
+                for img, cat, lb in items
+            ]
+
+        try:
+            import torch
+            from utils.augmentations import letterbox
+            from utils.general import non_max_suppression, scale_coords
+
+            out_results: List[List[Tuple[Tuple[int, int, int, int], float, int]]] = [[] for _ in items]
+            buckets: Dict[Tuple[int, int], List[Tuple[int, np.ndarray, np.ndarray]]] = defaultdict(list)
+            for idx, (img_bgr, _cat, pre_lb) in enumerate(items):
+                if img_bgr is None or img_bgr.size == 0:
+                    continue
+                lb = (
+                    pre_lb
+                    if pre_lb is not None
+                    else letterbox(img_bgr, self.img_size, stride=self.stride, auto=self.model.pt)[0]
+                )
+                buckets[(int(lb.shape[0]), int(lb.shape[1]))].append((idx, img_bgr, lb))
+
+            target_dtype = torch.float16 if getattr(self.model, "fp16", False) else torch.float32
+            step = max(1, int(max_batch_size))
+            for _shape_hw, group in buckets.items():
+                for start in range(0, len(group), step):
+                    chunk = group[start : start + step]
+                    if len(chunk) == 1:
+                        c_idx, c_img, c_lb = chunk[0]
+                        out_results[c_idx] = self.predict(
+                            c_img, use_cache=use_cache, precomputed_letterbox=c_lb
+                        )
+                        continue
+                    stacked = np.stack([c[2] for c in chunk], axis=0)
+                    im = torch.from_numpy(stacked).to(self.model.device, non_blocking=True)
+                    im = im.permute(0, 3, 1, 2).flip(1).contiguous().to(dtype=target_dtype).div_(255.0)
+                    with torch.no_grad():
+                        pred = self.model(im, augment=False, visualize=False)
+                        preds_nms = non_max_suppression(
+                            pred,
+                            conf_thres=self.conf_thres,
+                            iou_thres=self.iou_thres,
+                            max_det=1000,
+                        )
+                    for (c_idx, c_img, _), det in zip(chunk, preds_nms):
+                        sh, sw = c_img.shape[:2]
+                        img_dets: List[Tuple[Tuple[int, int, int, int], float, int]] = []
+                        if len(det):
+                            det[:, :4] = scale_coords(im.shape[2:], det[:, :4], c_img.shape).round()
+                            for *xyxy, conf, cls in reversed(det):
+                                xmin, ymin, xmax, ymax = (
+                                    max(0, int(xyxy[0].item())),
+                                    max(0, int(xyxy[1].item())),
+                                    min(sw, int(xyxy[2].item())),
+                                    min(sh, int(xyxy[3].item())),
+                                )
+                                if ymax > ymin and xmax > xmin:
+                                    img_dets.append(((ymin, xmin, ymax, xmax), float(conf.item()), int(cls.item())))
+                        out_results[c_idx] = img_dets
+                    del im, pred, preds_nms
+            return out_results
+        except Exception as e:
+            logger.debug(f"Batched Stage 1 YOLOv5 fallback to sequential predict ({e})")
+            return [
+                self.predict(img, catalog_number=cat, use_cache=use_cache, precomputed_letterbox=lb)
+                for img, cat, lb in items
+            ]
+
 
 # =============================================================================
 # Stage 2 Cropped PointRend Model Inference Engine
@@ -501,6 +610,7 @@ class PointRendInferenceEngine:
         self.model = None
         self.cfg = None
         self.aug = None
+        self.use_amp = False
         self._load_model()
 
     def _load_model(self) -> None:
@@ -517,9 +627,10 @@ class PointRendInferenceEngine:
             return
 
         if self.device == "cuda" and torch.cuda.is_available():
-            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.benchmark = True
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
+            self.use_amp = True
 
         cfg = get_cfg()
         point_rend.add_pointrend_config(cfg)
@@ -554,10 +665,42 @@ class PointRendInferenceEngine:
         else:
             logger.warning(f"Weights file not found at {self.weights_path}, running with uninitialized weights for testing.")
 
+        # Keep PointRendMaskHead sub-pixel `F.grid_sample` / `point_sample` subdivision in exact FP32
+        # while ResNet-101 + FPN + RPN + Box Head execute in FP16 Tensor Core autocast.
+        if self.use_amp and hasattr(model, "roi_heads") and getattr(model.roi_heads, "mask_head", None) is not None:
+            _orig_mask_forward = model.roi_heads.mask_head.forward
+
+            def _fp32_mask_forward(features: Any, instances: Any) -> Any:
+                with torch.amp.autocast("cuda", enabled=False):
+                    if isinstance(features, dict):
+                        fp32_feats = {
+                            k: (v.float() if torch.is_tensor(v) and v.is_floating_point() and v.dtype != torch.float32 else v)
+                            for k, v in features.items()
+                        }
+                    elif torch.is_tensor(features) and features.is_floating_point() and features.dtype != torch.float32:
+                        fp32_feats = features.float()
+                    else:
+                        fp32_feats = features
+                    return _orig_mask_forward(fp32_feats, instances)
+
+            model.roi_heads.mask_head.forward = _fp32_mask_forward
+
         self.cfg = cfg
         self.model = model
         self.aug = T.ResizeShortestEdge([cfg.INPUT.MIN_SIZE_TEST, cfg.INPUT.MIN_SIZE_TEST], cfg.INPUT.MAX_SIZE_TEST)
-        logger.info(f"Loaded PointRend model from {self.weights_path} on {self.device}")
+        logger.info(f"Loaded PointRend model from {self.weights_path} on {self.device} (amp_fp16={self.use_amp})")
+
+    def prepare_transformed_crop(self, image_bgr: np.ndarray) -> Optional[Tuple[np.ndarray, int, int]]:
+        """
+        Thread-safe CPU helper that applies Detectron2 `ResizeShortestEdge` and CHW
+        transposition on worker threads so GPU `predict_batch` transfers compact `uint8` tensors.
+        """
+        if self.aug is None or image_bgr is None or image_bgr.size == 0:
+            return None
+        h, w = image_bgr.shape[:2]
+        img_t = self.aug.get_transform(image_bgr).apply_image(image_bgr)
+        chw_u8 = np.ascontiguousarray(np.transpose(img_t, (2, 0, 1)), dtype=np.uint8)
+        return chw_u8, h, w
 
     def _extract_instances(self, preds: Dict[str, Any]) -> List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]:
         """Extracts (bbox, mask_uint8, score, class_id) from a single Detectron2 prediction dict."""
@@ -581,7 +724,11 @@ class PointRendInferenceEngine:
             results.append(((ymin, xmin, ymax, xmax), mask_uint8, float(scores[i]), int(classes[i])))
         return results
 
-    def predict(self, image_bgr: np.ndarray) -> List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]:
+    def predict(
+        self,
+        image_bgr: np.ndarray,
+        pretransformed: Optional[Tuple[np.ndarray, int, int]] = None,
+    ) -> List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]:
         """
         Runs inference on BGR image (cropped leaf patch or full sheet).
         Returns list of (bbox, mask, score, class_id).
@@ -590,23 +737,33 @@ class PointRendInferenceEngine:
             return []
 
         import torch
-        height, width = image_bgr.shape[:2]
         with torch.no_grad():
-            img_transformed = self.aug.get_transform(image_bgr).apply_image(image_bgr)
-            tensor_img = torch.from_numpy(np.array(img_transformed, dtype=np.uint8, copy=True)).to(self.device)
-            tensor_img = tensor_img.permute(2, 0, 1).contiguous().float()
+            if pretransformed is not None:
+                chw_u8, height, width = pretransformed
+                tensor_img = torch.from_numpy(chw_u8).to(self.device, non_blocking=True).float()
+            else:
+                height, width = image_bgr.shape[:2]
+                img_transformed = self.aug.get_transform(image_bgr).apply_image(image_bgr)
+                chw_u8 = np.ascontiguousarray(np.transpose(img_transformed, (2, 0, 1)), dtype=np.uint8)
+                tensor_img = torch.from_numpy(chw_u8).to(self.device, non_blocking=True).float()
             inputs = [{"image": tensor_img, "height": height, "width": width}]
-            preds = self.model(inputs)[0]
+            if self.use_amp and self.device == "cuda":
+                with torch.amp.autocast("cuda", dtype=torch.float16):
+                    preds = self.model(inputs)[0]
+            else:
+                preds = self.model(inputs)[0]
 
         return self._extract_instances(preds)
 
     def predict_batch(
         self,
         images_bgr: List[np.ndarray],
-        batch_size: int = 8,
+        batch_size: int = 24,
+        pretransformed: Optional[Sequence[Optional[Tuple[np.ndarray, int, int]]]] = None,
     ) -> List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]]:
         """
-        Runs batched Stage 2 PointRend inference across multiple candidate leaf crops.
+        Runs batched Stage 2 PointRend inference across multiple candidate leaf crops
+        (including cross-voucher crop waves on high-VRAM GPUs).
         Automatically delegates to `self.predict(img)` if `predict` is mocked in unit tests
         or if `len(images_bgr) <= 1`.
         """
@@ -622,18 +779,30 @@ class PointRendInferenceEngine:
 
         import torch
         all_results: List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]] = []
-        for start in range(0, len(images_bgr), max(1, batch_size)):
-            chunk = images_bgr[start : start + max(1, batch_size)]
+        eff_bs = max(1, int(batch_size))
+        has_pre = pretransformed is not None and len(pretransformed) == len(images_bgr)
+        for start in range(0, len(images_bgr), eff_bs):
+            end = min(len(images_bgr), start + eff_bs)
+            chunk = images_bgr[start:end]
+            pre_chunk = pretransformed[start:end] if has_pre else None
             try:
                 with torch.no_grad():
                     inputs = []
-                    for img_bgr in chunk:
-                        h, w = img_bgr.shape[:2]
-                        img_t = self.aug.get_transform(img_bgr).apply_image(img_bgr)
-                        t_img = torch.from_numpy(np.array(img_t, dtype=np.uint8, copy=True)).to(self.device)
-                        t_img = t_img.permute(2, 0, 1).contiguous().float()
+                    for idx_c, img_bgr in enumerate(chunk):
+                        pre_item = pre_chunk[idx_c] if pre_chunk is not None else None
+                        if pre_item is not None:
+                            chw_u8, h, w = pre_item
+                        else:
+                            h, w = img_bgr.shape[:2]
+                            img_t = self.aug.get_transform(img_bgr).apply_image(img_bgr)
+                            chw_u8 = np.ascontiguousarray(np.transpose(img_t, (2, 0, 1)), dtype=np.uint8)
+                        t_img = torch.from_numpy(chw_u8).to(self.device, non_blocking=True).float()
                         inputs.append({"image": t_img, "height": h, "width": w})
-                    preds_list = self.model(inputs)
+                    if self.use_amp and self.device == "cuda":
+                        with torch.amp.autocast("cuda", dtype=torch.float16):
+                            preds_list = self.model(inputs)
+                    else:
+                        preds_list = self.model(inputs)
                 for preds in preds_list:
                     all_results.append(self._extract_instances(preds))
                 del inputs, preds_list
@@ -1049,6 +1218,9 @@ class SegmentAndExtractPipeline:
         self.voucher_crowns_by_pid: Dict[str, Dict[int, Tuple[float, float]]] = {}
         self.voucher_rosette_centroids_by_pid: Dict[str, Dict[int, Tuple[float, float]]] = {}
         self.voucher_petiole_by_pid: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        self.voucher_contour_coords_by_leaf: Dict[str, Dict[int, List[List[float]]]] = {}
+        self.stage1_wave_size: int = 16
+        self.stage2_batch_size: int = 24 if self.device == "cuda" else 8
 
         # Preload catalogNumber -> scientificName mapping if available
         self.vouchers_taxa: Dict[str, str] = {}
@@ -1063,6 +1235,25 @@ class SegmentAndExtractPipeline:
                             self.vouchers_taxa[cat] = tax
             except Exception:
                 pass
+
+    def _apply_finalize_bundle(self, bundle: _VoucherFinalizeBundle) -> None:
+        """Merges a completed per-voucher bundle into pipeline state on the coordinator thread."""
+        cat = bundle.catalog_number
+        if bundle.repro_record is not None:
+            self.voucher_repro_records[cat] = bundle.repro_record
+        if bundle.pheno_record is not None:
+            self.voucher_pheno_records[cat] = bundle.pheno_record
+        if bundle.crowns_by_pid:
+            self.voucher_crowns_by_pid[cat] = bundle.crowns_by_pid
+        if bundle.rosette_centroids_by_pid:
+            self.voucher_rosette_centroids_by_pid[cat] = bundle.rosette_centroids_by_pid
+        if bundle.by_plant_petiole:
+            self.voucher_petiole_by_pid[cat] = bundle.by_plant_petiole
+        if bundle.contour_coords_by_leaf:
+            self.voucher_contour_coords_by_leaf[cat] = bundle.contour_coords_by_leaf
+        for k_tel, v_tel in bundle.telemetry_deltas.items():
+            if v_tel and k_tel in self.rejection_telemetry:
+                self.rejection_telemetry[k_tel] += int(v_tel)
 
     def _should_refine_with_sam2(self, m_init: np.ndarray) -> bool:
         """
@@ -1167,6 +1358,212 @@ class SegmentAndExtractPipeline:
                     pass
             raise
 
+    def _unpack_stage1_candidates(
+        self,
+        catalog_number: str,
+        img_bgr: np.ndarray,
+        stage1_detections: Sequence[Any],
+        pixels_per_mm: Optional[float],
+    ) -> Tuple[
+        List[Tuple[Tuple[int, int, int, int], float, int, np.ndarray, Tuple[int, int, int, int]]],
+        List[Tuple[Tuple[int, int, int, int], Optional[np.ndarray], float, int]],
+        List[Tuple[int, int, int, int]],
+        List[Tuple[float, float]],
+        bool,
+        int,
+        bool,
+        float,
+        float,
+    ]:
+        """
+        Thread-safe CPU Stage 1 -> Stage 2 candidate crop extractor.
+        Returns:
+          (candidate_s1_crops, capitulum_detections, root_detections, upper_cauline_pts,
+           rosette_bbox_fallback_used, rejected_leaflet_delta, s1_is_calibrated_mm,
+           s1_px_per_cm, s1_eff_min_cm2)
+        """
+        sheet_h, sheet_w = img_bgr.shape[:2]
+        scale_f = max(sheet_h, sheet_w) / 5600.0 if max(sheet_h, sheet_w) > 1000 else 0.0
+        is_high_dpi = max(sheet_h, sheet_w) > 1000 and scale_f > 0.4
+
+        s1_is_calibrated_mm = bool(
+            pixels_per_mm is not None and not np.isnan(pixels_per_mm) and float(pixels_per_mm) > 0.0
+        )
+        s1_px_per_cm = (
+            resolve_px_per_cm(
+                pixels_per_mm=pixels_per_mm,
+                default_dpi=DEFAULT_HERBARIUM_DPI,
+                sheet_shape=(sheet_h, sheet_w),
+            )
+            if s1_is_calibrated_mm
+            else 0.0
+        )
+
+        candidate_s1_crops: List[Tuple[Tuple[int, int, int, int], float, int, np.ndarray, Tuple[int, int, int, int]]] = []
+        capitulum_detections: List[Tuple[Tuple[int, int, int, int], Optional[np.ndarray], float, int]] = []
+        root_detections: List[Tuple[int, int, int, int]] = []
+        upper_cauline_pts: List[Tuple[float, float]] = []
+        s1_plant_boxes: List[Tuple[int, int, int, int]] = []
+        rosette_bbox_fallback_used = False
+        rejected_leaflet_delta = 0
+        crop_pad = 0.06 if scale_f > 0.4 else 0.12
+
+        if not self.enable_geometric_qc:
+            # 100% Raw Unconstrained LeafMachine2 Two-Stage Handshake:
+            #   Stage 1 (`LeafPriority.pt` 11-class YOLOv5) natively separates `0: leaf_whole`
+            #   from `1: leaf_partial`, `2: leaflet`, `3..7: reproductive`, `8: specimen`,
+            #   `9: roots`, and `10: wood` (stems). Unpack `leaf_whole` boxes directly to
+            #   Stage 2 PointRend with zero bounding-box size or vertical-position cutoffs.
+            seg_partial_cfg = bool(
+                self.lm2_config.get("leafmachine", {})
+                .get("leaf_segmentation", {})
+                .get("segment_partial_leaves", False)
+            )
+            raw_s1_leaf_classes = (0, 1) if seg_partial_cfg else (0,)
+            for s1_item in stage1_detections:
+                if len(s1_item) == 4:
+                    s1_bbox, s1_mask, s1_score, s1_cls = s1_item
+                else:
+                    s1_bbox, s1_score, s1_cls = s1_item
+                    s1_mask = None
+
+                if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
+                    capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
+                    s1_plant_boxes.append(s1_bbox)
+                elif int(s1_cls) == 9:
+                    root_detections.append(s1_bbox)
+                    s1_plant_boxes.append(s1_bbox)
+                elif int(s1_cls) == 2:
+                    rejected_leaflet_delta += 1
+                elif int(s1_cls) in raw_s1_leaf_classes:
+                    s1_plant_boxes.append(s1_bbox)
+                    crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
+                    if crop_bgr.size > 0:
+                        candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
+            s1_eff_min_cm2 = 0.0
+        else:
+            s1_raw_leaf_items: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
+            for s1_item in stage1_detections:
+                if len(s1_item) == 4:
+                    s1_bbox, s1_mask, s1_score, s1_cls = s1_item
+                else:
+                    s1_bbox, s1_score, s1_cls = s1_item
+                    s1_mask = None
+
+                if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
+                    capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
+                    s1_plant_boxes.append(s1_bbox)
+                elif int(s1_cls) == 9:
+                    root_detections.append(s1_bbox)
+                    s1_plant_boxes.append(s1_bbox)
+                elif int(s1_cls) == 2:
+                    rejected_leaflet_delta += 1
+                    logger.debug(f"Voucher {catalog_number}: rejected Stage 1 leaflet detection (class_id=2).")
+                elif s1_cls in LM2_LEAF_CLASS_IDS:
+                    s1_plant_boxes.append(s1_bbox)
+                    if s1_cls not in (0, 1):
+                        continue
+                    s1_bh = int(s1_bbox[2] - s1_bbox[0])
+                    s1_bw = int(s1_bbox[3] - s1_bbox[1])
+                    s1_cy = 0.5 * float(s1_bbox[0] + s1_bbox[2])
+                    s1_raw_leaf_items.append((s1_bbox, float(s1_score), int(s1_cls), s1_bh, s1_bw, s1_cy))
+
+            max_s1_major = max(
+                int(0.78 * max(sheet_h, sheet_w)),
+                int(38.0 * s1_px_per_cm) if (s1_is_calibrated_mm and s1_px_per_cm > 0.0) else 0,
+            )
+            max_s1_area = 0.45 * float(sheet_h * sheet_w)
+
+            if s1_is_calibrated_mm and s1_px_per_cm > 0.0:
+                _s1_est_cm2 = [
+                    0.72 * float(_bh * _bw) / (s1_px_per_cm ** 2)
+                    for (_bb, _sc, _cl, _bh, _bw, _cy) in s1_raw_leaf_items
+                    if _bh > 0
+                    and _bw > 0
+                    and (
+                        scale_f <= 0.0
+                        or (
+                            max(_bh, _bw) <= max_s1_major
+                            and (_bh * _bw) <= max_s1_area
+                        )
+                    )
+                ]
+                s1_eff_min_cm2 = compute_sheet_adaptive_min_blade_area_cm2(
+                    _s1_est_cm2,
+                    config_min_blade_area_cm2=self.min_blade_area_cm2,
+                    absolute_floor_cm2=0.15,
+                )
+                _s1_phys_lin = math.sqrt(max(1.0, s1_eff_min_cm2 * (s1_px_per_cm ** 2)))
+            else:
+                s1_eff_min_cm2 = float(self.min_blade_area_cm2)
+                _s1_phys_lin = 0.0
+
+            s1_vertical_fallback_items: List[Tuple[Tuple[int, int, int, int], float, int, float]] = []
+            s1_pending_upper_pts: List[Tuple[float, float]] = []
+
+            for s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy in s1_raw_leaf_items:
+                if scale_f > 0.0:
+                    min_s1_major = int(160 * scale_f)
+                    min_s1_minor = int(55 * scale_f)
+                    min_s1_hd_major = int(200 * scale_f)
+                    if s1_is_calibrated_mm and _s1_phys_lin > 0.0:
+                        min_s1_major = min(min_s1_major, max(16, int(0.85 * _s1_phys_lin)))
+                        min_s1_minor = min(min_s1_minor, max(10, int(0.45 * _s1_phys_lin)))
+                        min_s1_hd_major = min(min_s1_hd_major, max(18, int(0.95 * _s1_phys_lin)))
+
+                    if max(s1_bh, s1_bw) < min_s1_major or min(s1_bh, s1_bw) < min_s1_minor:
+                        continue
+                    if max(s1_bh, s1_bw) > max_s1_major or (s1_bh * s1_bw) > max_s1_area:
+                        continue
+                    if is_high_dpi:
+                        if max(s1_bh, s1_bw) < min_s1_hd_major:
+                            continue
+                        _is_macro_or_veg_basal = (
+                            max(s1_bh, s1_bw) >= int(0.22 * sheet_h)
+                            or (not capitulum_detections and s1_cy >= 0.28 * sheet_h)
+                        )
+                        if s1_cy < 0.40 * sheet_h and not _is_macro_or_veg_basal:
+                            s1_pending_upper_pts.append((0.5 * float(s1_bbox[1] + s1_bbox[3]), float(s1_cy)))
+                            s1_vertical_fallback_items.append((s1_bbox, s1_score, s1_cls, s1_cy))
+                            continue
+                        if s1_cls == 1 and s1_bh == s1_bw and s1_cy < 0.60 * sheet_h:
+                            s1_vertical_fallback_items.append((s1_bbox, s1_score, s1_cls, s1_cy))
+                            continue
+
+                crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
+                if crop_bgr.size == 0:
+                    continue
+                candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
+
+            if candidate_s1_crops:
+                upper_cauline_pts.extend(s1_pending_upper_pts)
+            elif s1_vertical_fallback_items:
+                _all_s1_boxes = s1_plant_boxes if s1_plant_boxes else [it[0] for it in s1_vertical_fallback_items]
+                _ymin_p_s1 = float(min(b[0] for b in _all_s1_boxes))
+                _ymax_p_s1 = float(max(b[2] for b in _all_s1_boxes))
+                _span_p_s1 = max(1.0, _ymax_p_s1 - _ymin_p_s1)
+                for fb_bbox, fb_score, fb_cls, fb_cy in s1_vertical_fallback_items:
+                    _cy_rel_p = (float(fb_cy) - _ymin_p_s1) / _span_p_s1
+                    if _cy_rel_p >= 0.40:
+                        crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, fb_bbox, pad_ratio=crop_pad)
+                        if crop_bgr.size > 0:
+                            candidate_s1_crops.append((fb_bbox, float(fb_score), int(fb_cls), crop_bgr, crop_box))
+                            rosette_bbox_fallback_used = True
+                    else:
+                        upper_cauline_pts.append((0.5 * float(fb_bbox[1] + fb_bbox[3]), float(fb_cy)))
+
+        return (
+            candidate_s1_crops,
+            capitulum_detections,
+            root_detections,
+            upper_cauline_pts,
+            rosette_bbox_fallback_used,
+            rejected_leaflet_delta,
+            s1_is_calibrated_mm,
+            s1_px_per_cm,
+            s1_eff_min_cm2,
+        )
+
     def process_voucher(
         self,
         catalog_number: str,
@@ -1175,10 +1572,49 @@ class SegmentAndExtractPipeline:
         preloaded_img: Optional[np.ndarray] = None,
         precomputed_ruler_scale: Optional[Tuple[bool, Optional[float]]] = None,
         precomputed_s1_letterbox: Optional[np.ndarray] = None,
-    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        precomputed_s1_detections: Optional[List[Any]] = None,
+        precomputed_s2_payload: Optional[Tuple[Any, ...]] = None,
+        precomputed_single_stage_detections: Optional[Tuple[List[Any], bool]] = None,
+        _return_bundle: bool = False,
+    ) -> Any:
         """Processes a single herbarium voucher specimen sheet using Two-Stage LM2 + PointRend."""
         if taxon is None:
             taxon = self.vouchers_taxa.get(catalog_number, None)
+
+        _telem_deltas: Dict[str, int] = {
+            "rejected_leaflet_class": 0,
+            "rejected_severed_lobe": 0,
+            "rejected_min_area_cm2": 0,
+            "rejected_solidity_extent": 0,
+        }
+
+        def _finish(
+            ext_recs: List[Dict[str, Any]],
+            fail_rec: Optional[Dict[str, Any]],
+            repro_rec: Optional[Dict[str, Any]] = None,
+            pheno_rec: Optional[Dict[str, Any]] = None,
+            crowns_out: Optional[Dict[int, Tuple[float, float]]] = None,
+            centroids_out: Optional[Dict[int, Tuple[float, float]]] = None,
+            petiole_out: Optional[Dict[int, Dict[str, Any]]] = None,
+            contours_out: Optional[Dict[int, List[List[float]]]] = None,
+        ) -> Any:
+            bundle = _VoucherFinalizeBundle(
+                catalog_number=catalog_number,
+                image_path=str(image_path),
+                extracted_records=ext_recs,
+                failure_record=fail_rec,
+                repro_record=repro_rec,
+                pheno_record=pheno_rec,
+                crowns_by_pid=crowns_out or {},
+                rosette_centroids_by_pid=centroids_out or {},
+                by_plant_petiole=petiole_out or {},
+                contour_coords_by_leaf=contours_out or {},
+                telemetry_deltas=_telem_deltas,
+            )
+            if _return_bundle:
+                return bundle
+            self._apply_finalize_bundle(bundle)
+            return bundle.extracted_records, bundle.failure_record
 
         if preloaded_img is not None:
             img_bgr = preloaded_img
@@ -1190,8 +1626,7 @@ class SegmentAndExtractPipeline:
                     "failure_reason": "image_not_found",
                     "details": f"File does not exist at {image_path}"
                 }
-                self.voucher_pheno_records[catalog_number] = classify_voucher_phenology(catalog_number, [])
-                return [], failure_record
+                return _finish([], failure_record, pheno_rec=classify_voucher_phenology(catalog_number, []))
 
             img_bgr = cv2.imread(str(image_path))
             if img_bgr is None:
@@ -1201,8 +1636,7 @@ class SegmentAndExtractPipeline:
                     "failure_reason": "corrupted_image",
                     "details": "Failed to decode image with OpenCV"
                 }
-                self.voucher_pheno_records[catalog_number] = classify_voucher_phenology(catalog_number, [])
-                return [], failure_record
+                return _finish([], failure_record, pheno_rec=classify_voucher_phenology(catalog_number, []))
 
         sheet_h, sheet_w = img_bgr.shape[:2]
         scale_f = max(sheet_h, sheet_w) / 5600.0 if max(sheet_h, sheet_w) > 1000 else 0.0
@@ -1228,7 +1662,9 @@ class SegmentAndExtractPipeline:
             and "predict" not in getattr(self.stage1_detector, "__dict__", {})
             and "predict_batch" not in getattr(self.model_engine, "__dict__", {})
         )
-        if direct_s2_mock:
+        if precomputed_s1_detections is not None:
+            stage1_detections = precomputed_s1_detections
+        elif direct_s2_mock:
             stage1_detections = []
         elif precomputed_s1_letterbox is not None:
             stage1_detections = self.stage1_detector.predict(
@@ -1258,63 +1694,47 @@ class SegmentAndExtractPipeline:
                     pixels_per_mm = None
                 ruler_future = None
 
-            s1_is_calibrated_mm = bool(
-                pixels_per_mm is not None and not np.isnan(pixels_per_mm) and float(pixels_per_mm) > 0.0
-            )
-            s1_px_per_cm = (
-                resolve_px_per_cm(
+            _sam2_already_done = False
+            if precomputed_s2_payload is not None:
+                (
+                    candidate_s1_crops,
+                    capitulum_detections,
+                    root_detections,
+                    upper_cauline_pts,
+                    rosette_bbox_fallback_used,
+                    _rej_lflt,
+                    s1_is_calibrated_mm,
+                    s1_px_per_cm,
+                    s1_eff_min_cm2,
+                    all_crop_preds,
+                    _sam2_already_done,
+                ) = precomputed_s2_payload
+                _telem_deltas["rejected_leaflet_class"] += int(_rej_lflt)
+            else:
+                (
+                    candidate_s1_crops,
+                    capitulum_detections,
+                    root_detections,
+                    upper_cauline_pts,
+                    rosette_bbox_fallback_used,
+                    _rej_lflt,
+                    s1_is_calibrated_mm,
+                    s1_px_per_cm,
+                    s1_eff_min_cm2,
+                ) = self._unpack_stage1_candidates(
+                    catalog_number=catalog_number,
+                    img_bgr=img_bgr,
+                    stage1_detections=stage1_detections,
                     pixels_per_mm=pixels_per_mm,
-                    default_dpi=DEFAULT_HERBARIUM_DPI,
-                    sheet_shape=(sheet_h, sheet_w),
                 )
-                if s1_is_calibrated_mm
-                else 0.0
-            )
-
-            # Stage 1 -> Stage 2 Two-Stage Flow
-            candidate_s1_crops: List[Tuple[Tuple[int, int, int, int], float, int, np.ndarray, Tuple[int, int, int, int]]] = []
-            s1_plant_boxes: List[Tuple[int, int, int, int]] = []
-            crop_pad = 0.06 if scale_f > 0.4 else 0.12
-
-            if not self.enable_geometric_qc:
-                # 100% Raw Unconstrained LeafMachine2 Two-Stage Handshake:
-                #   Stage 1 (`LeafPriority.pt` 11-class YOLOv5) natively separates `0: leaf_whole`
-                #   from `1: leaf_partial`, `2: leaflet`, `3..7: reproductive`, `8: specimen`,
-                #   `9: roots`, and `10: wood` (stems). Unpack `leaf_whole` boxes directly to
-                #   Stage 2 PointRend with zero bounding-box size or vertical-position cutoffs.
-                seg_partial_cfg = bool(
-                    self.lm2_config.get("leafmachine", {})
-                    .get("leaf_segmentation", {})
-                    .get("segment_partial_leaves", False)
-                )
-                raw_s1_leaf_classes = (0, 1) if seg_partial_cfg else (0,)
-                for s1_item in stage1_detections:
-                    if len(s1_item) == 4:
-                        s1_bbox, s1_mask, s1_score, s1_cls = s1_item
-                    else:
-                        s1_bbox, s1_score, s1_cls = s1_item
-                        s1_mask = None
-
-                    if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
-                        capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
-                        s1_plant_boxes.append(s1_bbox)
-                    elif int(s1_cls) == 9:
-                        root_detections.append(s1_bbox)
-                        s1_plant_boxes.append(s1_bbox)
-                    elif int(s1_cls) == 2:
-                        self.rejection_telemetry["rejected_leaflet_class"] += 1
-                    elif int(s1_cls) in raw_s1_leaf_classes:
-                        s1_plant_boxes.append(s1_bbox)
-                        crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
-                        if crop_bgr.size > 0:
-                            candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
-
+                _telem_deltas["rejected_leaflet_class"] += int(_rej_lflt)
                 all_crop_preds = (
                     self.model_engine.predict_batch([c[3] for c in candidate_s1_crops])
                     if candidate_s1_crops
                     else []
                 )
 
+            if not self.enable_geometric_qc:
                 # Stage 2 Detectron2 PointRend (`thing_classes = ['leaf', 'petiole', 'hole']`)
                 # Stock LeafMachine2 `keep_only_best_one_leaf_one_petiole`: pick highest-confidence
                 # `leaf` (`_pr_cls == 0`) untouched + highest-confidence `petiole` (`_pr_cls == 1`).
@@ -1345,7 +1765,7 @@ class SegmentAndExtractPipeline:
                         best_petiole_mask = petiole_cands[0][3]
 
                     m_raw = best_mask
-                    if self._should_refine_with_sam2(best_mask):
+                    if (not _sam2_already_done) and self._should_refine_with_sam2(best_mask):
                         m_raw = self.sam2_refiner.refine_crop_mask(crop_bgr, best_mask)
 
                     fg_area = int(np.count_nonzero(m_raw))
@@ -1410,122 +1830,6 @@ class SegmentAndExtractPipeline:
                         fg_area,
                     ))
             else:
-                s1_raw_leaf_items: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
-                for s1_item in stage1_detections:
-                    if len(s1_item) == 4:
-                        s1_bbox, s1_mask, s1_score, s1_cls = s1_item
-                    else:
-                        s1_bbox, s1_score, s1_cls = s1_item
-                        s1_mask = None
-
-                    if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
-                        capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
-                        s1_plant_boxes.append(s1_bbox)
-                    elif int(s1_cls) == 9:
-                        root_detections.append(s1_bbox)
-                        s1_plant_boxes.append(s1_bbox)
-                    elif int(s1_cls) == 2:
-                        self.rejection_telemetry["rejected_leaflet_class"] += 1
-                        logger.debug(f"Voucher {catalog_number}: rejected Stage 1 leaflet detection (class_id=2).")
-                    elif s1_cls in LM2_LEAF_CLASS_IDS:
-                        s1_plant_boxes.append(s1_bbox)
-                        if s1_cls not in (0, 1):
-                            continue
-                        s1_bh = int(s1_bbox[2] - s1_bbox[0])
-                        s1_bw = int(s1_bbox[3] - s1_bbox[1])
-                        s1_cy = 0.5 * float(s1_bbox[0] + s1_bbox[2])
-                        s1_raw_leaf_items.append((s1_bbox, float(s1_score), int(s1_cls), s1_bh, s1_bw, s1_cy))
-
-                max_s1_major = max(
-                    int(0.78 * max(sheet_h, sheet_w)),
-                    int(38.0 * s1_px_per_cm) if (s1_is_calibrated_mm and s1_px_per_cm > 0.0) else 0,
-                )
-                max_s1_area = 0.45 * float(sheet_h * sheet_w)
-
-                if s1_is_calibrated_mm and s1_px_per_cm > 0.0:
-                    _s1_est_cm2 = [
-                        0.72 * float(_bh * _bw) / (s1_px_per_cm ** 2)
-                        for (_bb, _sc, _cl, _bh, _bw, _cy) in s1_raw_leaf_items
-                        if _bh > 0
-                        and _bw > 0
-                        and (
-                            scale_f <= 0.0
-                            or (
-                                max(_bh, _bw) <= max_s1_major
-                                and (_bh * _bw) <= max_s1_area
-                            )
-                        )
-                    ]
-                    s1_eff_min_cm2 = compute_sheet_adaptive_min_blade_area_cm2(
-                        _s1_est_cm2,
-                        config_min_blade_area_cm2=self.min_blade_area_cm2,
-                        absolute_floor_cm2=0.15,
-                    )
-                    _s1_phys_lin = math.sqrt(max(1.0, s1_eff_min_cm2 * (s1_px_per_cm ** 2)))
-                else:
-                    s1_eff_min_cm2 = float(self.min_blade_area_cm2)
-                    _s1_phys_lin = 0.0
-
-                s1_vertical_fallback_items: List[Tuple[Tuple[int, int, int, int], float, int, float]] = []
-                s1_pending_upper_pts: List[Tuple[float, float]] = []
-
-                for s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy in s1_raw_leaf_items:
-                    if scale_f > 0.0:
-                        min_s1_major = int(160 * scale_f)
-                        min_s1_minor = int(55 * scale_f)
-                        min_s1_hd_major = int(200 * scale_f)
-                        if s1_is_calibrated_mm and _s1_phys_lin > 0.0:
-                            min_s1_major = min(min_s1_major, max(16, int(0.85 * _s1_phys_lin)))
-                            min_s1_minor = min(min_s1_minor, max(10, int(0.45 * _s1_phys_lin)))
-                            min_s1_hd_major = min(min_s1_hd_major, max(18, int(0.95 * _s1_phys_lin)))
-
-                        if max(s1_bh, s1_bw) < min_s1_major or min(s1_bh, s1_bw) < min_s1_minor:
-                            continue
-                        if max(s1_bh, s1_bw) > max_s1_major or (s1_bh * s1_bw) > max_s1_area:
-                            continue
-                        if is_high_dpi:
-                            if max(s1_bh, s1_bw) < min_s1_hd_major:
-                                continue
-                            _is_macro_or_veg_basal = (
-                                max(s1_bh, s1_bw) >= int(0.22 * sheet_h)
-                                or (not capitulum_detections and s1_cy >= 0.28 * sheet_h)
-                            )
-                            if s1_cy < 0.40 * sheet_h and not _is_macro_or_veg_basal:
-                                s1_pending_upper_pts.append((0.5 * float(s1_bbox[1] + s1_bbox[3]), float(s1_cy)))
-                                s1_vertical_fallback_items.append((s1_bbox, s1_score, s1_cls, s1_cy))
-                                continue
-                            if s1_cls == 1 and s1_bh == s1_bw and s1_cy < 0.60 * sheet_h:
-                                s1_vertical_fallback_items.append((s1_bbox, s1_score, s1_cls, s1_cy))
-                                continue
-
-                    crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
-                    if crop_bgr.size == 0:
-                        continue
-                    candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
-
-                if candidate_s1_crops:
-                    upper_cauline_pts.extend(s1_pending_upper_pts)
-                elif s1_vertical_fallback_items:
-                    _all_s1_boxes = s1_plant_boxes if s1_plant_boxes else [it[0] for it in s1_vertical_fallback_items]
-                    _ymin_p_s1 = float(min(b[0] for b in _all_s1_boxes))
-                    _ymax_p_s1 = float(max(b[2] for b in _all_s1_boxes))
-                    _span_p_s1 = max(1.0, _ymax_p_s1 - _ymin_p_s1)
-                    for fb_bbox, fb_score, fb_cls, fb_cy in s1_vertical_fallback_items:
-                        _cy_rel_p = (float(fb_cy) - _ymin_p_s1) / _span_p_s1
-                        if _cy_rel_p >= 0.40:
-                            crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, fb_bbox, pad_ratio=crop_pad)
-                            if crop_bgr.size > 0:
-                                candidate_s1_crops.append((fb_bbox, float(fb_score), int(fb_cls), crop_bgr, crop_box))
-                                rosette_bbox_fallback_used = True
-                        else:
-                            upper_cauline_pts.append((0.5 * float(fb_bbox[1] + fb_bbox[3]), float(fb_cy)))
-
-                all_crop_preds = (
-                    self.model_engine.predict_batch([c[3] for c in candidate_s1_crops])
-                    if candidate_s1_crops
-                    else []
-                )
-
                 for (s1_bbox, s1_score, s1_cls, crop_bgr, crop_box), crop_preds in zip(candidate_s1_crops, all_crop_preds):
                     if not crop_preds:
                         continue
@@ -1554,7 +1858,7 @@ class SegmentAndExtractPipeline:
                     best_area, best_score, best_bbox, best_mask = blade_candidates[0]
 
                     m_refined = best_mask
-                    if self._should_refine_with_sam2(best_mask):
+                    if (not _sam2_already_done) and self._should_refine_with_sam2(best_mask):
                         m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, best_mask)
 
                     # Trim petiole tail directly on the compact crop mask using sheet_shape for high-res scaling
@@ -1665,7 +1969,11 @@ class SegmentAndExtractPipeline:
                     leaf_detections = [x[3] for x in kept_scored]
         elif not is_high_dpi or self.stage1_detector.model is None or "predict" in self.model_engine.__dict__:
             # Fallback when Stage 1 detector is uninitialized (e.g., direct PointRend unit tests)
-            raw_detections = self.model_engine.predict(img_bgr)
+            _ss_sam2_done = False
+            if precomputed_single_stage_detections is not None:
+                raw_detections, _ss_sam2_done = precomputed_single_stage_detections
+            else:
+                raw_detections = self.model_engine.predict(img_bgr)
             if not self.enable_geometric_qc:
                 raw_s2_leaves: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]] = []
                 raw_s2_petioles: List[Tuple[Tuple[int, int, int, int], np.ndarray, float]] = []
@@ -1682,7 +1990,7 @@ class SegmentAndExtractPipeline:
                 for bbox, mask, score, cls_id in raw_s2_leaves:
                     sheet_mask = mask
                     full_bbox = bbox
-                    if self._should_refine_with_sam2(mask):
+                    if (not _ss_sam2_done) and self._should_refine_with_sam2(mask):
                         crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, bbox, pad_ratio=0.12)
                         cy0, cx0, cy1, cx1 = crop_box
                         if crop_bgr.size > 0 and cy1 > cy0 and cx1 > cx0:
@@ -1748,12 +2056,12 @@ class SegmentAndExtractPipeline:
                     elif int(cls_id) == 9:
                         root_detections.append(bbox)
                     elif int(cls_id) == 2:
-                        self.rejection_telemetry["rejected_leaflet_class"] += 1
+                        _telem_deltas["rejected_leaflet_class"] += 1
                         logger.debug(f"Voucher {catalog_number}: rejected leaflet detection (class_id=2).")
                     elif cls_id in LM2_LEAF_CLASS_IDS:
                         sheet_mask = mask
                         full_bbox = bbox
-                        if self._should_refine_with_sam2(mask):
+                        if (not _ss_sam2_done) and self._should_refine_with_sam2(mask):
                             crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, bbox, pad_ratio=0.12)
                             cy0, cx0, cy1, cx1 = crop_box
                             if crop_bgr.size > 0 and cy1 > cy0 and cx1 > cx0:
@@ -1796,7 +2104,7 @@ class SegmentAndExtractPipeline:
                 "pixels_per_mm": round(float(pixels_per_mm), 4) if is_calibrated_mm else np.nan,
                 "is_calibrated_mm": bool(is_calibrated_mm),
             }
-            self.voucher_repro_records[catalog_number] = {
+            empty_repro = {
                 "catalogNumber": catalog_number,
                 "capitula_count": 0,
                 "involucre_height_px": np.nan,
@@ -1808,8 +2116,8 @@ class SegmentAndExtractPipeline:
                 "scape_to_basal_leaf_ratio": np.nan,
                 "is_bent_stem": False,
             }
-            self.voucher_pheno_records[catalog_number] = classify_voucher_phenology(catalog_number, [])
-            return [], failure_record
+            empty_pheno = classify_voucher_phenology(catalog_number, [])
+            return _finish([], failure_record, repro_rec=empty_repro, pheno_rec=empty_pheno)
 
         # 3. Route Reproductive Detections (seed_fruit_one/many, flower_one/many, bud) to Phenology Classifier
         valid_capitula: List[Dict[str, Any]] = []
@@ -1827,7 +2135,6 @@ class SegmentAndExtractPipeline:
             crop_bgr = img_bgr[y0:y1, x0:x1]
             if crop_bgr.size > 0:
                 cap_patch_path = self.capitula_patches_dir / f"{catalog_number}_cap{cap_idx}.jpg"
-                self.capitula_patches_dir.mkdir(parents=True, exist_ok=True)
                 cv2.imwrite(str(cap_patch_path), crop_bgr)
 
                 if crop_bgr.shape[0] >= 5 and crop_bgr.shape[1] >= 5:
@@ -1835,9 +2142,7 @@ class SegmentAndExtractPipeline:
                     head_pheno = classify_single_capitulum(crop_rgb)
                     head_pheno_results.append(head_pheno)
 
-        self.voucher_pheno_records[catalog_number] = classify_voucher_phenology(
-            catalog_number, head_pheno_results
-        )
+        _pheno_rec = classify_voucher_phenology(catalog_number, head_pheno_results)
 
         capitula_count = len(valid_capitula)
         if capitula_count > 0:
@@ -1867,7 +2172,6 @@ class SegmentAndExtractPipeline:
             "scape_to_basal_leaf_ratio": np.nan,
             "is_bent_stem": False,
         }
-        self.voucher_repro_records[catalog_number] = repro_summary
 
         if not leaf_detections:
             failure_record = {
@@ -1878,7 +2182,7 @@ class SegmentAndExtractPipeline:
                 "pixels_per_mm": round(float(pixels_per_mm), 4) if is_calibrated_mm else np.nan,
                 "is_calibrated_mm": bool(is_calibrated_mm),
             }
-            return [], failure_record
+            return _finish([], failure_record, repro_rec=repro_summary, pheno_rec=_pheno_rec)
 
         # Build detected leaf instances
         instances: List[DetectedInstance] = []
@@ -2239,7 +2543,7 @@ class SegmentAndExtractPipeline:
                         int(np.count_nonzero(_xs_s >= sheet_w - 2)),
                     )
                     if _border_touch >= _min_span_b:
-                        self.rejection_telemetry["rejected_severed_lobe"] += 1
+                        _telem_deltas["rejected_severed_lobe"] += 1
                         inst.assigned_tier = "rejected"
                         inst.rejection_reason = "SEVERED_LOBE"
                         rejected_instances.append(inst)
@@ -2258,7 +2562,7 @@ class SegmentAndExtractPipeline:
             )
             inst.is_severed_lobe = bool(bc_res["is_severed_lobe"])
             if inst.is_severed_lobe:
-                self.rejection_telemetry["rejected_severed_lobe"] += 1
+                _telem_deltas["rejected_severed_lobe"] += 1
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = "SEVERED_LOBE"
                 logger.debug(
@@ -2271,7 +2575,7 @@ class SegmentAndExtractPipeline:
             # 6b. Cohort/sheet-adaptive ruler-calibrated physical blade area filter
             raw_area_px = _raw_px_by_leaf_id.get(inst.leaf_id, float(np.count_nonzero(inst.mask)))
             if inst.blade_area_cm2 < effective_min_blade_area_cm2:
-                self.rejection_telemetry["rejected_min_area_cm2"] += 1
+                _telem_deltas["rejected_min_area_cm2"] += 1
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = "MIN_BLADE_AREA_CM2"
                 logger.debug(
@@ -2337,7 +2641,7 @@ class SegmentAndExtractPipeline:
 
             min_req_extent = 0.20 if is_trusted_lm2_whole else self.min_extent
             if inst.extent < min_req_extent:
-                self.rejection_telemetry["rejected_solidity_extent"] += 1
+                _telem_deltas["rejected_solidity_extent"] += 1
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = "FAILED_EXTENT"
                 logger.debug(
@@ -2353,7 +2657,7 @@ class SegmentAndExtractPipeline:
                 and routing_res.assigned_tier != "tier2"
                 and inst.circularity < self.min_circularity
             ):
-                self.rejection_telemetry["rejected_solidity_extent"] += 1
+                _telem_deltas["rejected_solidity_extent"] += 1
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = "FAILED_CIRCULARITY"
                 logger.debug(
@@ -2410,7 +2714,7 @@ class SegmentAndExtractPipeline:
                     or (inst.solidity < 0.48 and inst.ucs_score < 0.52 and not bool(routing_res.is_dissected))
                 )
                 if _is_bare_stem_or_artifact:
-                    self.rejection_telemetry["rejected_solidity_extent"] += 1
+                    _telem_deltas["rejected_solidity_extent"] += 1
                     inst.assigned_tier = "rejected"
                     inst.rejection_reason = "UNRESOLVED_CLUMP"
                     rejected_instances.append(inst)
@@ -2517,7 +2821,7 @@ class SegmentAndExtractPipeline:
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = rejection_reason
                 if rejection_reason in ("FAILED_SOLIDITY", "UNRESOLVED_CLUMP"):
-                    self.rejection_telemetry["rejected_solidity_extent"] += 1
+                    _telem_deltas["rejected_solidity_extent"] += 1
                 logger.debug(
                     f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by gatekeeper: {rejection_reason} "
                     f"(solidity={inst.solidity:.3f}, ucs={inst.ucs_score:.3f})"
@@ -2664,55 +2968,70 @@ class SegmentAndExtractPipeline:
             if not _pid_pairs:
                 continue
             _pid_insts = [p[0] for p in _pid_pairs]
-            _union_mask = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
+            _ys_b, _xs_b, _ye_b, _xe_b = [], [], [], []
+            for _ci in _pid_insts:
+                _by0, _bx0, _by1, _bx1 = _ci.bbox
+                if _by1 > _by0 and _bx1 > _bx0:
+                    _ys_b.append(_by0)
+                    _xs_b.append(_bx0)
+                    _ye_b.append(_by1)
+                    _xe_b.append(_bx1)
+            if _ys_b:
+                _min_y, _max_y = min(_ys_b), max(_ye_b)
+                _min_x, _max_x = min(_xs_b), max(_xe_b)
+                _pad_y = int(0.15 * (_max_y - _min_y + 10))
+                _pad_x = int(0.15 * (_max_x - _min_x + 10))
+                _ry0, _ry1 = max(0, _min_y - _pad_y), min(sheet_h, _max_y + _pad_y)
+                _rx0, _rx1 = max(0, _min_x - _pad_x), min(sheet_w, _max_x + _pad_x)
+            else:
+                _ry0, _ry1 = int(sheet_h * 0.40), int(sheet_h * 0.85)
+                _rx0, _rx1 = int(sheet_w * 0.20), int(sheet_w * 0.80)
+            if _ry1 <= _ry0 or _rx1 <= _rx0:
+                continue
+
+            # ROI-scoped haloed union masking: avoids 67 MP full-sheet allocations + 195 MB BGR copy
+            _hy0, _hy1 = max(0, _ry0 - 6), min(sheet_h, _ry1 + 6)
+            _hx0, _hx1 = max(0, _rx0 - 6), min(sheet_w, _rx1 + 6)
+            _halo_union = np.zeros((_hy1 - _hy0, _hx1 - _hx0), dtype=np.uint8)
             for _p_inst, _p_mask in _pid_pairs:
                 if _p_mask is None or _p_mask.size == 0:
                     continue
                 _ox_u, _oy_u = int(_p_inst.mask_origin[0]), int(_p_inst.mask_origin[1])
                 _mh_u, _mw_u = _p_mask.shape[:2]
-                _sy0, _sx0 = max(0, _oy_u), max(0, _ox_u)
-                _sy1, _sx1 = min(sheet_h, _oy_u + _mh_u), min(sheet_w, _ox_u + _mw_u)
+                _sy0, _sx0 = max(_hy0, _oy_u), max(_hx0, _ox_u)
+                _sy1, _sx1 = min(_hy1, _oy_u + _mh_u), min(_hx1, _ox_u + _mw_u)
                 if _sy1 > _sy0 and _sx1 > _sx0:
                     _ly0_u, _lx0_u = _sy0 - _oy_u, _sx0 - _ox_u
-                    _sub_u = ((_p_mask[_ly0_u : _ly0_u + (_sy1 - _sy0), _lx0_u : _lx0_u + (_sx1 - _sx0)] > 0).astype(np.uint8)) * 255
-                    _union_mask[_sy0:_sy1, _sx0:_sx1] = np.maximum(_union_mask[_sy0:_sy1, _sx0:_sx1], _sub_u)
-            _dilated_union = cv2.dilate(_union_mask, _rosette_dilate_k, iterations=1)
-            _masked_sheet_bgr = img_bgr.copy()
-            _masked_sheet_bgr[_dilated_union == 0] = (230, 239, 242)
+                    _hy_s, _hx_s = _sy0 - _hy0, _sx0 - _hx0
+                    _sub_u = (
+                        (_p_mask[_ly0_u : _ly0_u + (_sy1 - _sy0), _lx0_u : _lx0_u + (_sx1 - _sx0)] > 0).astype(np.uint8)
+                    ) * 255
+                    _dst_h = _halo_union[_hy_s : _hy_s + (_sy1 - _sy0), _hx_s : _hx_s + (_sx1 - _sx0)]
+                    np.maximum(_dst_h, _sub_u, out=_dst_h)
+
+            _dilated_halo = cv2.dilate(_halo_union, _rosette_dilate_k, iterations=1)
+            _ry_off, _rx_off = _ry0 - _hy0, _rx0 - _hx0
+            _rh, _rw = _ry1 - _ry0, _rx1 - _rx0
+            _rosette_mask_crop = _halo_union[_ry_off : _ry_off + _rh, _rx_off : _rx_off + _rw]
+            _dilated_roi = _dilated_halo[_ry_off : _ry_off + _rh, _rx_off : _rx_off + _rw]
+            _rosette_bgr = img_bgr[_ry0:_ry1, _rx0:_rx1].copy()
+            _rosette_bgr[_dilated_roi == 0] = (230, 239, 242)
+
             _saved_rosette = crop_dense_rosette_tier4(
                 raw_image_path=image_path,
                 plant_candidates=_pid_insts,
                 plant_id=_pid,
                 output_dir=self.output_dir,
-                raw_img=_masked_sheet_bgr,
                 catalog_number=catalog_number,
+                precropped_rosette_bgr=_rosette_bgr,
             )
-            if _saved_rosette:
-                _ys_b, _xs_b, _ye_b, _xe_b = [], [], [], []
-                for _ci in _pid_insts:
-                    _by0, _bx0, _by1, _bx1 = _ci.bbox
-                    if _by1 > _by0 and _bx1 > _bx0:
-                        _ys_b.append(_by0)
-                        _xs_b.append(_bx0)
-                        _ye_b.append(_by1)
-                        _xe_b.append(_bx1)
-                if _ys_b:
-                    _min_y, _max_y = min(_ys_b), max(_ye_b)
-                    _min_x, _max_x = min(_xs_b), max(_xe_b)
-                    _pad_y = int(0.15 * (_max_y - _min_y + 10))
-                    _pad_x = int(0.15 * (_max_x - _min_x + 10))
-                    _ry0, _ry1 = max(0, _min_y - _pad_y), min(sheet_h, _max_y + _pad_y)
-                    _rx0, _rx1 = max(0, _min_x - _pad_x), min(sheet_w, _max_x + _pad_x)
-                else:
-                    _ry0, _ry1 = int(sheet_h * 0.40), int(sheet_h * 0.85)
-                    _rx0, _rx1 = int(sheet_w * 0.20), int(sheet_w * 0.80)
-                _rosette_mask_crop = _union_mask[_ry0:_ry1, _rx0:_rx1]
-                if _rosette_mask_crop.size > 0:
-                    self.rosettes_dense_dir.mkdir(parents=True, exist_ok=True)
-                    _rmask_dst = self.rosettes_dense_dir / f"{catalog_number}_p{_pid}_rosette_mask.png"
-                    _rmask_tmp = self.rosettes_dense_dir / f".{catalog_number}_p{_pid}_rosette_mask_{os.getpid()}_tmp.png"
-                    cv2.imwrite(str(_rmask_tmp), _rosette_mask_crop)
-                    _rmask_tmp.replace(_rmask_dst)
+            if _saved_rosette and _rosette_mask_crop.size > 0:
+                _rmask_dst = self.rosettes_dense_dir / f"{catalog_number}_p{_pid}_rosette_mask.png"
+                _rmask_tmp = self.rosettes_dense_dir / (
+                    f".{catalog_number}_p{_pid}_rosette_mask_{os.getpid()}_{threading.get_ident()}_tmp.png"
+                )
+                cv2.imwrite(str(_rmask_tmp), _rosette_mask_crop)
+                _rmask_tmp.replace(_rmask_dst)
 
         # Compute empirical rosette crown (p_crown), 75th-percentile outer-rosette petiole metrics,
         # and piecewise flowering scape height metrics across candidate_extractions
@@ -2751,25 +3070,31 @@ class SegmentAndExtractPipeline:
         repro_summary["plant_height_cm"] = petiole_scape_res.get("plant_height_cm", np.nan)
         repro_summary["scape_to_basal_leaf_ratio"] = petiole_scape_res.get("scape_to_basal_leaf_ratio", np.nan)
         repro_summary["is_bent_stem"] = bool(petiole_scape_res.get("is_bent_stem", False))
-        self.voucher_repro_records[catalog_number] = repro_summary
         by_plant_petiole = petiole_scape_res.get("by_plant", {})
-        self.voucher_rosette_centroids_by_pid[catalog_number] = {
+        _centroids_out = {
             int(k): (float(v[0]), float(v[1]))
             for k, v in rosette_centroids_by_pid.items()
             if v is not None
         }
-        if isinstance(crowns_by_pid, dict):
-            self.voucher_crowns_by_pid[catalog_number] = {
+        _crowns_out: Dict[int, Tuple[float, float]] = (
+            {
                 int(k): (float(v[0]), float(v[1]))
                 for k, v in crowns_by_pid.items()
                 if isinstance(v, (tuple, list)) and len(v) >= 2
             }
-        if isinstance(by_plant_petiole, dict):
-            self.voucher_petiole_by_pid[catalog_number] = {
+            if isinstance(crowns_by_pid, dict)
+            else {}
+        )
+        _petiole_out: Dict[int, Dict[str, Any]] = (
+            {
                 int(k): dict(v)
                 for k, v in by_plant_petiole.items()
                 if isinstance(v, dict)
             }
+            if isinstance(by_plant_petiole, dict)
+            else {}
+        )
+        _contours_by_leaf: Dict[int, List[List[float]]] = {}
 
         for inst, routing_res, tier, assigned_tier, is_folded, is_dissected, reflection_applied, m_area in candidate_extractions:
             ox, oy = inst.mask_origin
@@ -2801,7 +3126,7 @@ class SegmentAndExtractPipeline:
                             if p_apex_pt is not None:
                                 p_apex_export = (int(p_apex_pt[0] + ox), int(p_apex_pt[1] + oy))
 
-                return export_standardized_contour(
+                c_res = export_standardized_contour(
                     mask_proc,
                     catalog_number,
                     inst.leaf_id,
@@ -2809,7 +3134,14 @@ class SegmentAndExtractPipeline:
                     petiole_attachment_pt=p_base_export,
                     contour=homologized_c,
                     p_apex_pt=p_apex_export,
+                    return_coords=True,
                 )
+                if isinstance(c_res, tuple):
+                    c_path, c_xy = c_res
+                    if c_xy:
+                        _contours_by_leaf[int(inst.leaf_id)] = c_xy
+                    return c_path
+                return c_res
 
             if tier == "Tier 2":
                 out_base = (self.output_dir / "data") if (self.output_dir.name != "data" and (self.output_dir / "data").is_dir()) else self.output_dir
@@ -2822,10 +3154,13 @@ class SegmentAndExtractPipeline:
                 main_save_path = mask_dir / filename
                 tier_save_path = tier2_dir / filename
 
-                cv2.imwrite(str(main_save_path), routing_res.processed_mask)
-                try:
-                    shutil.copyfile(str(main_save_path), str(tier_save_path))
-                except Exception:
+                ok_enc, enc_buf = cv2.imencode(".png", routing_res.processed_mask)
+                if ok_enc:
+                    png_bytes = enc_buf.tobytes()
+                    main_save_path.write_bytes(png_bytes)
+                    tier_save_path.write_bytes(png_bytes)
+                else:
+                    cv2.imwrite(str(main_save_path), routing_res.processed_mask)
                     cv2.imwrite(str(tier_save_path), routing_res.processed_mask)
 
                 contour_path = _export_homologized(routing_res.processed_mask, is_reflected=True)
@@ -2834,14 +3169,15 @@ class SegmentAndExtractPipeline:
             else:
                 mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
                 dst_intact = self.tier1_intact_dir / f"{catalog_number}_leaf{inst.leaf_id}.png"
-                try:
-                    self.tier1_intact_dir.mkdir(parents=True, exist_ok=True)
-                    if Path(mask_path).exists():
-                        shutil.copyfile(str(mask_path), str(dst_intact))
-                    else:
-                        cv2.imwrite(str(dst_intact), routing_res.processed_mask)
-                except Exception:
-                    pass
+                if not dst_intact.exists():
+                    try:
+                        self.tier1_intact_dir.mkdir(parents=True, exist_ok=True)
+                        if Path(mask_path).exists():
+                            shutil.copyfile(str(mask_path), str(dst_intact))
+                        else:
+                            cv2.imwrite(str(dst_intact), routing_res.processed_mask)
+                    except Exception:
+                        pass
                 contour_path = _export_homologized(routing_res.processed_mask, is_reflected=False)
                 inst.mask_path = str(dst_intact) if dst_intact.exists() else mask_path
                 inst.contour_path = contour_path
@@ -2941,7 +3277,16 @@ class SegmentAndExtractPipeline:
                 "is_calibrated_mm": bool(is_calibrated_mm),
             }
 
-        return extracted_records, failure_record
+        return _finish(
+            extracted_records,
+            failure_record,
+            repro_rec=repro_summary,
+            pheno_rec=_pheno_rec,
+            crowns_out=_crowns_out,
+            centroids_out=_centroids_out,
+            petiole_out=_petiole_out,
+            contours_out=_contours_by_leaf,
+        )
 
     def _flush_manifests(
         self,
@@ -3187,7 +3532,18 @@ class SegmentAndExtractPipeline:
         else:
             completed_on_disk = set()
         custom_process_voucher = "process_voucher" in self.__dict__
-        use_prefetch = (not custom_process_voucher) and (total_vouchers > 4)
+        custom_is_completed = (
+            "is_voucher_completed" in self.__dict__
+            or getattr(self.is_voucher_completed, "__func__", None) is not SegmentAndExtractPipeline.is_voucher_completed
+        )
+        custom_hooks = (
+            custom_process_voucher
+            or "predict" in getattr(self.stage1_detector, "__dict__", {})
+            or "predict_batch" in getattr(self.stage1_detector, "__dict__", {})
+            or "predict" in getattr(self.model_engine, "__dict__", {})
+            or "predict_batch" in getattr(self.model_engine, "__dict__", {})
+        )
+        use_wave_engine = (not custom_hooks) and (total_vouchers > 4)
 
         def _prefetch_voucher_data(cat: str, img_p: Path) -> Tuple[Optional[np.ndarray], Tuple[bool, Optional[float]], Optional[np.ndarray]]:
             if not img_p.exists():
@@ -3218,112 +3574,470 @@ class SegmentAndExtractPipeline:
                     s1_lb = None
             return img, ruler_res, s1_lb
 
+        def _should_skip_voucher(cat_num: str) -> bool:
+            if self.force:
+                return False
+            has_disk_artifacts = (
+                (cat_num in completed_on_disk)
+                or (self.is_voucher_completed(cat_num) if custom_is_completed else False)
+            )
+            has_manifest_entry = (cat_num in existing_extracted_by_cat) or (cat_num in existing_failed_by_cat)
+            is_prev_failed_only = (
+                (cat_num in existing_failed_by_cat)
+                and (cat_num not in existing_extracted_by_cat)
+                and (total_vouchers > 20)
+            )
+            return bool(
+                (
+                    has_disk_artifacts
+                    and (
+                        has_manifest_entry
+                        or custom_process_voucher
+                        or (not manifest_path.exists() and total_vouchers <= 20)
+                    )
+                )
+                or is_prev_failed_only
+            )
+
+        def _retire_skipped_voucher(cat_num: str) -> None:
+            nonlocal skipped_count
+            skipped_count += 1
+            logger.info(
+                f"Skipping completed voucher: {cat_num} (artifacts exist in contours/masks). "
+                f"[Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}]"
+            )
+            if cat_num in existing_extracted_by_cat:
+                all_extracted_records.extend(existing_extracted_by_cat[cat_num])
+            elif cat_num in existing_failed_by_cat:
+                all_failed_records.append(existing_failed_by_cat[cat_num])
+
+            if cat_num in existing_repro_by_cat:
+                self.voucher_repro_records[cat_num] = existing_repro_by_cat[cat_num]
+            if cat_num in existing_pheno_by_cat:
+                self.voucher_pheno_records[cat_num] = existing_pheno_by_cat[cat_num]
+
         voucher_rows = list(df_vouchers.iterrows())
-        prefetch_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8) if use_prefetch else None
-        prefetch_futures: Dict[int, concurrent.futures.Future] = {}
-        prefetch_window = 16
+        prev_cv2_threads: Optional[int] = None
+        prefetch_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+        post_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
         try:
-            for idx_row, (_, row) in enumerate(voucher_rows):
-                cat_num = str(row["catalogNumber"]).strip()
-                raw_img_path = Path(str(row["image_path"]).strip())
-                if not raw_img_path.is_absolute():
-                    raw_img_path = PROJECT_ROOT / raw_img_path
+            if use_wave_engine:
+                n_cpu = os.cpu_count() or 8
+                prefetch_workers = min(16, max(4, n_cpu // 4))
+                post_workers = min(16, max(4, n_cpu // 4))
+                wave_size = max(1, int(self.stage1_wave_size))
+                prefetch_window = max(wave_size * 2, prefetch_workers * 2)
 
-                # Check if specimen already processed and resumption is enabled.
-                # Note: When resuming a real run (not a mocked process_voucher test), require that
-                # the voucher also exists in existing_extracted_by_cat or existing_failed_by_cat
-                # OR that no manifest existed yet on a unit-test style run where process_voucher is mocked.
-                has_disk_artifacts = (cat_num in completed_on_disk) or self.is_voucher_completed(cat_num)
-                has_manifest_entry = (cat_num in existing_extracted_by_cat) or (cat_num in existing_failed_by_cat)
-                is_prev_failed_only = (cat_num in existing_failed_by_cat) and (cat_num not in existing_extracted_by_cat) and (total_vouchers > 20)
-                if not self.force and ((has_disk_artifacts and (has_manifest_entry or custom_process_voucher or (not manifest_path.exists() and total_vouchers <= 20))) or is_prev_failed_only):
-                    skipped_count += 1
-                    logger.info(
-                        f"Skipping completed voucher: {cat_num} (artifacts exist in contours/masks). "
-                        f"[Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}]"
-                    )
-                    if cat_num in existing_extracted_by_cat:
-                        all_extracted_records.extend(existing_extracted_by_cat[cat_num])
-                    elif cat_num in existing_failed_by_cat:
-                        all_failed_records.append(existing_failed_by_cat[cat_num])
-
-                    if cat_num in existing_repro_by_cat:
-                        self.voucher_repro_records[cat_num] = existing_repro_by_cat[cat_num]
-                    if cat_num in existing_pheno_by_cat:
-                        self.voucher_pheno_records[cat_num] = existing_pheno_by_cat[cat_num]
-                    continue
-
-                if prefetch_pool is not None:
-                    # Ensure sliding window of upcoming non-completed vouchers is prefetched
-                    for lookahead in range(idx_row, min(total_vouchers, idx_row + prefetch_window)):
-                        if lookahead in prefetch_futures:
-                            continue
-                        la_row = voucher_rows[lookahead][1]
-                        la_cat = str(la_row["catalogNumber"]).strip()
-                        if not self.force and (((la_cat in completed_on_disk) and (la_cat in existing_extracted_by_cat)) or (la_cat in existing_failed_by_cat and total_vouchers > 20)):
-                            continue
-                        la_path = Path(str(la_row["image_path"]).strip())
-                        if not la_path.is_absolute():
-                            la_path = PROJECT_ROOT / la_path
-                        prefetch_futures[lookahead] = prefetch_pool.submit(_prefetch_voucher_data, la_cat, la_path)
-
-                processed_count += 1
-                taxon = str(row.get("scientificName", row.get("species_raw", ""))).strip()
                 try:
-                    if prefetch_pool is not None and idx_row in prefetch_futures:
-                        fut = prefetch_futures.pop(idx_row)
-                        pre_img, pre_ruler, pre_s1_lb = fut.result()
-                        extracted, failure = self.process_voucher(
-                            cat_num,
-                            raw_img_path,
-                            taxon=taxon,
-                            preloaded_img=pre_img,
-                            precomputed_ruler_scale=pre_ruler,
-                            precomputed_s1_letterbox=pre_s1_lb,
-                        )
+                    prev_cv2_threads = cv2.getNumThreads()
+                    cv2.setNumThreads(2)
+                except Exception:
+                    prev_cv2_threads = None
+
+                # Build deterministic ordered retirement plan separating completed skips from active GPU/CPU work
+                ordered_plan: List[Tuple[str, Any]] = []
+                active_tasks: List[Tuple[int, str, Path, str]] = []
+                seen_active_cats: Set[str] = set()
+                for _, row in voucher_rows:
+                    cat_num = str(row["catalogNumber"]).strip()
+                    raw_img_path = Path(str(row["image_path"]).strip())
+                    if not raw_img_path.is_absolute():
+                        raw_img_path = PROJECT_ROOT / raw_img_path
+                    if _should_skip_voucher(cat_num) or (not self.force and cat_num in seen_active_cats):
+                        ordered_plan.append(("skip", cat_num))
                     else:
-                        extracted, failure = self.process_voucher(cat_num, raw_img_path, taxon=taxon)
-                except Exception as exc:
-                    logger.warning(f"Unexpected error processing voucher {cat_num} ({raw_img_path}): {exc}")
-                    extracted = []
-                    failure = {
-                        "catalogNumber": cat_num,
-                        "image_path": str(raw_img_path),
-                        "failure_reason": "UNRESOLVED_CLUMP",
-                        "details": f"Runtime exception during voucher extraction: {exc}",
-                    }
+                        a_idx = len(active_tasks)
+                        taxon = str(row.get("scientificName", row.get("species_raw", ""))).strip()
+                        active_tasks.append((a_idx, cat_num, raw_img_path, taxon))
+                        ordered_plan.append(("active", a_idx))
+                        seen_active_cats.add(cat_num)
 
-                all_extracted_records.extend(extracted)
-                if failure:
-                    all_failed_records.append(failure)
+                plan_cursor = 0
+                completed_bundles: Dict[int, _VoucherFinalizeBundle] = {}
 
-                if db_conn is not None:
-                    try:
-                        record_voucher_segmentation_transaction(
-                            conn=db_conn,
-                            catalog_number=cat_num,
-                            extracted_records=extracted,
-                            failure_record=failure,
-                            repro_record=self.voucher_repro_records.get(cat_num),
-                            pheno_record=self.voucher_pheno_records.get(cat_num),
-                            crowns_by_pid=self.voucher_crowns_by_pid.get(cat_num),
-                            rosette_centroids_by_pid=self.voucher_rosette_centroids_by_pid.get(cat_num),
-                            by_plant_petiole=self.voucher_petiole_by_pid.get(cat_num),
-                            output_dir=self.output_dir,
-                            image_path=str(raw_img_path),
-                        )
-                    except Exception as db_tx_exc:
-                        logger.warning(f"Per-voucher SQLite transaction failed for {cat_num}: {db_tx_exc}")
+                def _drain_ordered_plan() -> None:
+                    nonlocal plan_cursor, processed_count
+                    while plan_cursor < len(ordered_plan):
+                        kind, payload = ordered_plan[plan_cursor]
+                        if kind == "skip":
+                            _retire_skipped_voucher(payload)
+                            plan_cursor += 1
+                            if (processed_count + skipped_count) == total_vouchers and processed_count > 0:
+                                logger.info(
+                                    f"Progress: [Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}] "
+                                    f"({len(all_extracted_records)} leaves extracted, {len(all_failed_records)} failed QC)."
+                                )
+                        else:
+                            if payload not in completed_bundles:
+                                break
+                            bundle = completed_bundles.pop(payload)
+                            plan_cursor += 1
+                            processed_count += 1
+                            self._apply_finalize_bundle(bundle)
+                            if bundle.extracted_records:
+                                completed_on_disk.add(bundle.catalog_number)
+                            all_extracted_records.extend(bundle.extracted_records)
+                            if bundle.failure_record:
+                                all_failed_records.append(bundle.failure_record)
+                            if processed_count % 25 == 0 or (processed_count + skipped_count) == total_vouchers:
+                                logger.info(
+                                    f"Progress: [Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}] "
+                                    f"({len(all_extracted_records)} leaves extracted, {len(all_failed_records)} failed QC)."
+                                )
 
-                if processed_count % 25 == 0 or (processed_count + skipped_count) == total_vouchers:
+                # Flush any leading skipped vouchers before spinning up thread pools
+                _drain_ordered_plan()
+
+                if active_tasks:
                     logger.info(
-                        f"Progress: [Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}] "
-                        f"({len(all_extracted_records)} leaves extracted, {len(all_failed_records)} failed QC)."
+                        f"3-Stage Wave Engine active: {len(active_tasks)} vouchers queued "
+                        f"(wave_size={wave_size}, s2_batch={self.stage2_batch_size}, "
+                        f"prefetch_workers={prefetch_workers}, post_workers={post_workers})."
                     )
+                    prefetch_pool = concurrent.futures.ThreadPoolExecutor(max_workers=prefetch_workers)
+                    post_pool = concurrent.futures.ThreadPoolExecutor(max_workers=post_workers)
+                    prefetch_futures: Dict[int, concurrent.futures.Future] = {}
+                    in_flight_waves: List[List[Tuple[int, str, Path, concurrent.futures.Future]]] = []
+                    use_s1_cache = bool(self.lm2_project_dir is not None and not self.force)
+                    sam2_active = bool(
+                        self.sam2_refiner is not None
+                        and self.sam2_refiner.is_available
+                        and (self.sam2_refine or (self.enable_geometric_qc and self.is_stock_pointrend))
+                    )
+
+                    def _retire_oldest_wave() -> None:
+                        if not in_flight_waves:
+                            return
+                        oldest_wave = in_flight_waves.pop(0)
+                        wave_bundles: List[_VoucherFinalizeBundle] = []
+                        for a_idx_w, cat_w, path_w, fut_w in oldest_wave:
+                            try:
+                                bundle = fut_w.result()
+                            except Exception as exc_w:
+                                logger.warning(f"Unexpected error processing voucher {cat_w} ({path_w}): {exc_w}")
+                                bundle = _VoucherFinalizeBundle(
+                                    catalog_number=cat_w,
+                                    image_path=str(path_w),
+                                    extracted_records=[],
+                                    failure_record={
+                                        "catalogNumber": cat_w,
+                                        "image_path": str(path_w),
+                                        "failure_reason": "UNRESOLVED_CLUMP",
+                                        "details": f"Runtime exception during voucher extraction: {exc_w}",
+                                    },
+                                )
+                            completed_bundles[a_idx_w] = bundle
+                            wave_bundles.append(bundle)
+
+                        _drain_ordered_plan()
+
+                        if db_conn is not None and wave_bundles:
+                            try:
+                                with db_conn:
+                                    for idx_b, b_item in enumerate(wave_bundles):
+                                        sp_name = f"sp_v_{idx_b}"
+                                        try:
+                                            db_conn.execute(f"SAVEPOINT {sp_name};")
+                                            record_voucher_segmentation_transaction(
+                                                conn=db_conn,
+                                                catalog_number=b_item.catalog_number,
+                                                extracted_records=b_item.extracted_records,
+                                                failure_record=b_item.failure_record,
+                                                repro_record=b_item.repro_record,
+                                                pheno_record=b_item.pheno_record,
+                                                crowns_by_pid=b_item.crowns_by_pid,
+                                                rosette_centroids_by_pid=b_item.rosette_centroids_by_pid,
+                                                by_plant_petiole=b_item.by_plant_petiole,
+                                                contour_coords_by_leaf=b_item.contour_coords_by_leaf,
+                                                output_dir=self.output_dir,
+                                                image_path=b_item.image_path,
+                                                commit=False,
+                                            )
+                                            db_conn.execute(f"RELEASE SAVEPOINT {sp_name};")
+                                        except Exception as v_db_exc:
+                                            try:
+                                                db_conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name};")
+                                                db_conn.execute(f"RELEASE SAVEPOINT {sp_name};")
+                                            except Exception:
+                                                pass
+                                            logger.warning(
+                                                f"Per-voucher SQLite transaction failed for {b_item.catalog_number}: {v_db_exc}"
+                                            )
+                            except Exception as wave_db_exc:
+                                logger.warning(f"Wave SQLite WAL commit failed: {wave_db_exc}")
+
+                    n_active = len(active_tasks)
+                    for w_start in range(0, n_active, wave_size):
+                        w_end = min(n_active, w_start + wave_size)
+                        # Stage A: Keep bounded lookahead window of high-DPI sheets prefetched in RAM
+                        la_limit = min(n_active, w_end + prefetch_window)
+                        for la_idx in range(w_start, la_limit):
+                            if la_idx not in prefetch_futures:
+                                _, la_cat, la_path, _ = active_tasks[la_idx]
+                                prefetch_futures[la_idx] = prefetch_pool.submit(_prefetch_voucher_data, la_cat, la_path)
+
+                        wave_slice = active_tasks[w_start:w_end]
+                        wave_prefetched: List[Tuple[int, str, Path, str, Optional[np.ndarray], Tuple[bool, Optional[float]], Optional[np.ndarray]]] = []
+                        valid_indices: List[int] = []
+                        valid_s1_inputs: List[Tuple[np.ndarray, Optional[str], Optional[np.ndarray]]] = []
+                        for local_i, (a_idx, cat_num, raw_img_path, taxon) in enumerate(wave_slice):
+                            pre_img, pre_ruler, pre_s1_lb = prefetch_futures.pop(a_idx).result()
+                            wave_prefetched.append((a_idx, cat_num, raw_img_path, taxon, pre_img, pre_ruler, pre_s1_lb))
+                            if pre_img is not None:
+                                valid_indices.append(local_i)
+                                valid_s1_inputs.append((pre_img, cat_num, pre_s1_lb))
+
+                        # Stage B1: Batched FP16 Stage 1 YOLOv5 organ detection on GPU thread
+                        s1_dets_by_local: Dict[int, List[Any]] = {}
+                        if valid_s1_inputs:
+                            s1_batch_out = self.stage1_detector.predict_batch(
+                                valid_s1_inputs,
+                                use_cache=use_s1_cache,
+                                max_batch_size=wave_size,
+                            )
+                            for local_i, dets in zip(valid_indices, s1_batch_out):
+                                s1_dets_by_local[local_i] = dets
+
+                        # Stage B2: Parallel CPU crop extraction + PointRend resize transform across Threadripper pool
+                        def _prep_s2_voucher(local_i: int) -> Tuple[int, Optional[Tuple[Any, ...]], List[Optional[Tuple[np.ndarray, int, int]]], bool]:
+                            _, cat_v, _, _, img_v, ruler_v, _ = wave_prefetched[local_i]
+                            dets_v = s1_dets_by_local.get(local_i, [])
+                            assert img_v is not None
+                            sh_v, sw_v = img_v.shape[:2]
+                            sf_v = max(sh_v, sw_v) / 5600.0 if max(sh_v, sw_v) > 1000 else 0.0
+                            hd_v = max(sh_v, sw_v) > 1000 and sf_v > 0.4
+                            if not dets_v:
+                                needs_ss = (not hd_v) or (self.stage1_detector.model is None)
+                                ss_pre = (
+                                    [self.model_engine.prepare_transformed_crop(img_v)]
+                                    if (needs_ss and self.model_engine.model is not None)
+                                    else []
+                                )
+                                return local_i, None, ss_pre, needs_ss
+
+                            ppm_v: Optional[float] = ruler_v[1] if ruler_v[0] else None
+                            if ppm_v is None:
+                                try:
+                                    ppm_v = detect_ruler_scale_hough(img_v)
+                                except Exception:
+                                    ppm_v = None
+                            unpacked = self._unpack_stage1_candidates(
+                                catalog_number=cat_v,
+                                img_bgr=img_v,
+                                stage1_detections=dets_v,
+                                pixels_per_mm=ppm_v,
+                            )
+                            cand_crops = unpacked[0]
+                            pre_crops = [self.model_engine.prepare_transformed_crop(c[3]) for c in cand_crops]
+                            return local_i, unpacked, pre_crops, False
+
+                        unpacked_by_local: Dict[int, Tuple[Any, ...]] = {}
+                        precrops_by_local: Dict[int, List[Optional[Tuple[np.ndarray, int, int]]]] = {}
+                        ss_Fallback_locals: List[int] = []
+                        if len(valid_indices) >= 2:
+                            for loc_i, unp, pre_c, needs_ss in post_pool.map(_prep_s2_voucher, valid_indices):
+                                if unp is not None:
+                                    unpacked_by_local[loc_i] = unp
+                                    precrops_by_local[loc_i] = pre_c
+                                elif needs_ss:
+                                    ss_Fallback_locals.append(loc_i)
+                                    precrops_by_local[loc_i] = pre_c
+                        else:
+                            for loc_i in valid_indices:
+                                _, unp, pre_c, needs_ss = _prep_s2_voucher(loc_i)
+                                if unp is not None:
+                                    unpacked_by_local[loc_i] = unp
+                                    precrops_by_local[loc_i] = pre_c
+                                elif needs_ss:
+                                    ss_Fallback_locals.append(loc_i)
+                                    precrops_by_local[loc_i] = pre_c
+
+                        # Stage B3: Cross-voucher batched FP16-Autocast Stage 2 PointRend on GPU thread
+                        flat_crops: List[np.ndarray] = []
+                        flat_pre: List[Optional[Tuple[np.ndarray, int, int]]] = []
+                        slice_ranges: List[Tuple[int, int, int]] = []
+                        for loc_i in valid_indices:
+                            if loc_i not in unpacked_by_local:
+                                continue
+                            cands = unpacked_by_local[loc_i][0]
+                            if not cands:
+                                slice_ranges.append((loc_i, 0, 0))
+                                continue
+                            s_idx = len(flat_crops)
+                            for c_item in cands:
+                                flat_crops.append(c_item[3])
+                            flat_pre.extend(precrops_by_local.get(loc_i, [None] * len(cands)))
+                            slice_ranges.append((loc_i, s_idx, len(flat_crops)))
+
+                        flat_preds = (
+                            self.model_engine.predict_batch(
+                                flat_crops,
+                                batch_size=self.stage2_batch_size,
+                                pretransformed=flat_pre,
+                            )
+                            if flat_crops
+                            else []
+                        )
+
+                        s2_payload_by_local: Dict[int, Tuple[Any, ...]] = {}
+                        for loc_i, s_idx, e_idx in slice_ranges:
+                            unp = unpacked_by_local[loc_i]
+                            v_preds = list(flat_preds[s_idx:e_idx]) if e_idx > s_idx else []
+                            sam2_done_flag = not sam2_active
+                            if sam2_active and v_preds:
+                                # Keep optional SAM 2 refinement strictly on the single GPU thread
+                                cands_v = unp[0]
+                                for idx_cp, (c_item, cp_list) in enumerate(zip(cands_v, v_preds)):
+                                    if not cp_list:
+                                        continue
+                                    crop_bgr_v = c_item[3]
+                                    best_k = -1
+                                    best_metric = (-1.0, -1)
+                                    for k_p, (_pb, pm, ps, pcl) in enumerate(cp_list):
+                                        if int(pcl) != 0:
+                                            continue
+                                        fga = int(np.count_nonzero(pm))
+                                        if fga <= 0:
+                                            continue
+                                        key_m = (float(ps), fga) if not self.enable_geometric_qc else (fga * float(ps), fga)
+                                        if key_m > best_metric:
+                                            best_metric = key_m
+                                            best_k = k_p
+                                    if best_k >= 0 and self._should_refine_with_sam2(cp_list[best_k][1]):
+                                        pb0, pm0, ps0, pcl0 = cp_list[best_k]
+                                        pm_ref = self.sam2_refiner.refine_crop_mask(crop_bgr_v, pm0)
+                                        new_cp = list(cp_list)
+                                        new_cp[best_k] = (pb0, pm_ref, ps0, pcl0)
+                                        v_preds[idx_cp] = new_cp
+                                sam2_done_flag = True
+                            s2_payload_by_local[loc_i] = (*unp, v_preds, sam2_done_flag)
+
+                        ss_payload_by_local: Dict[int, Tuple[List[Any], bool]] = {}
+                        if ss_Fallback_locals:
+                            ss_imgs = [wave_prefetched[loc_i][4] for loc_i in ss_Fallback_locals]  # type: ignore[misc]
+                            ss_pre_list = [
+                                (precrops_by_local[loc_i][0] if precrops_by_local.get(loc_i) else None)
+                                for loc_i in ss_Fallback_locals
+                            ]
+                            ss_preds_batch = self.model_engine.predict_batch(
+                                ss_imgs,  # type: ignore[arg-type]
+                                batch_size=self.stage2_batch_size,
+                                pretransformed=ss_pre_list,
+                            )
+                            for loc_i, ss_raw in zip(ss_Fallback_locals, ss_preds_batch):
+                                ss_done = not sam2_active
+                                if sam2_active and ss_raw:
+                                    img_ss = wave_prefetched[loc_i][4]
+                                    assert img_ss is not None
+                                    sh_ss, sw_ss = img_ss.shape[:2]
+                                    upd_ss = []
+                                    for b_ss, m_ss, sc_ss, cl_ss in ss_raw:
+                                        if int(cl_ss) in LM2_LEAF_CLASS_IDS and self._should_refine_with_sam2(m_ss):
+                                            cb_ss, cbox_ss = crop_leaf_bbox_with_padding(img_ss, b_ss, pad_ratio=0.12)
+                                            cy0_s, cx0_s, cy1_s, cx1_s = cbox_ss
+                                            if cb_ss.size > 0 and cy1_s > cy0_s and cx1_s > cx0_s:
+                                                cm_ref = self.sam2_refiner.refine_crop_mask(
+                                                    cb_ss, m_ss[cy0_s:cy1_s, cx0_s:cx1_s]
+                                                )
+                                                m_ss, b_ss = reproject_crop_mask_to_sheet(
+                                                    cm_ref, cbox_ss, (sh_ss, sw_ss)
+                                                )
+                                        upd_ss.append((b_ss, m_ss, sc_ss, cl_ss))
+                                    ss_raw = upd_ss
+                                    ss_done = True
+                                ss_payload_by_local[loc_i] = (ss_raw, ss_done)
+
+                        # Stage C: Submit parallel CPU contour/mask/rosette post-processing while GPU moves to next wave
+                        wave_post_tasks: List[Tuple[int, str, Path, concurrent.futures.Future]] = []
+                        for local_i, (a_idx, cat_num, raw_img_path, taxon, pre_img, pre_ruler, _pre_lb) in enumerate(wave_prefetched):
+                            fut_post = post_pool.submit(
+                                self.process_voucher,
+                                cat_num,
+                                raw_img_path,
+                                taxon,
+                                pre_img,
+                                pre_ruler,
+                                None,
+                                s1_dets_by_local.get(local_i, []) if pre_img is not None else None,
+                                s2_payload_by_local.get(local_i),
+                                ss_payload_by_local.get(local_i),
+                                True,
+                            )
+                            wave_post_tasks.append((a_idx, cat_num, raw_img_path, fut_post))
+
+                        in_flight_waves.append(wave_post_tasks)
+                        if len(in_flight_waves) >= 2:
+                            _retire_oldest_wave()
+
+                    while in_flight_waves:
+                        _retire_oldest_wave()
+                _drain_ordered_plan()
+            else:
+                for _, row in voucher_rows:
+                    cat_num = str(row["catalogNumber"]).strip()
+                    raw_img_path = Path(str(row["image_path"]).strip())
+                    if not raw_img_path.is_absolute():
+                        raw_img_path = PROJECT_ROOT / raw_img_path
+
+                    if _should_skip_voucher(cat_num):
+                        _retire_skipped_voucher(cat_num)
+                        continue
+
+                    processed_count += 1
+                    taxon = str(row.get("scientificName", row.get("species_raw", ""))).strip()
+                    try:
+                        extracted, failure = self.process_voucher(cat_num, raw_img_path, taxon=taxon)
+                    except Exception as exc:
+                        logger.warning(f"Unexpected error processing voucher {cat_num} ({raw_img_path}): {exc}")
+                        extracted = []
+                        failure = {
+                            "catalogNumber": cat_num,
+                            "image_path": str(raw_img_path),
+                            "failure_reason": "UNRESOLVED_CLUMP",
+                            "details": f"Runtime exception during voucher extraction: {exc}",
+                        }
+
+                    if extracted:
+                        completed_on_disk.add(cat_num)
+                    all_extracted_records.extend(extracted)
+                    if failure:
+                        all_failed_records.append(failure)
+
+                    if db_conn is not None:
+                        try:
+                            record_voucher_segmentation_transaction(
+                                conn=db_conn,
+                                catalog_number=cat_num,
+                                extracted_records=extracted,
+                                failure_record=failure,
+                                repro_record=self.voucher_repro_records.get(cat_num),
+                                pheno_record=self.voucher_pheno_records.get(cat_num),
+                                crowns_by_pid=self.voucher_crowns_by_pid.get(cat_num),
+                                rosette_centroids_by_pid=self.voucher_rosette_centroids_by_pid.get(cat_num),
+                                by_plant_petiole=self.voucher_petiole_by_pid.get(cat_num),
+                                contour_coords_by_leaf=self.voucher_contour_coords_by_leaf.get(cat_num),
+                                output_dir=self.output_dir,
+                                image_path=str(raw_img_path),
+                            )
+                        except Exception as db_tx_exc:
+                            logger.warning(f"Per-voucher SQLite transaction failed for {cat_num}: {db_tx_exc}")
+
+                    if processed_count % 25 == 0 or (processed_count + skipped_count) == total_vouchers:
+                        logger.info(
+                            f"Progress: [Processed: {processed_count} | Skipped: {skipped_count} | Total: {total_vouchers}] "
+                            f"({len(all_extracted_records)} leaves extracted, {len(all_failed_records)} failed QC)."
+                        )
         finally:
+            if post_pool is not None:
+                post_pool.shutdown(wait=True)
             if prefetch_pool is not None:
                 prefetch_pool.shutdown(wait=False, cancel_futures=True)
+            if prev_cv2_threads is not None:
+                try:
+                    cv2.setNumThreads(prev_cv2_threads)
+                except Exception:
+                    pass
             if db_conn is not None:
                 try:
                     db_conn.close()

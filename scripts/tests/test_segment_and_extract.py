@@ -1639,6 +1639,139 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             self.assertEqual(int(np.count_nonzero(saved_m > 0)), expected_fg_counts[idx])
             self.assertGreater(float(rec["petiole_length_mm"]), 0.0)
 
+    def test_three_stage_wave_engine_parity_and_sqlite_wave_commit(self) -> None:
+        """
+        Verify 3-Stage Asynchronous Wave Engine (`run()` across >4 vouchers with wave_size=4)
+        produces 100% identical extracted leaf records, binary masks, 120-vertex contours,
+        ROI-scoped rosette patches/masks, and SQLite `contour_xy_json` records compared to
+        sequential single-voucher execution.
+        """
+        import json
+        from scripts.core.db import get_db_connection
+
+        wave_root = self.temp_dir / "wave_run"
+        seq_root = self.temp_dir / "seq_run"
+        img_dir = self.temp_dir / "wave_imgs"
+        img_dir.mkdir(parents=True, exist_ok=True)
+
+        vouchers_rows = []
+        for idx in range(6):
+            cat = f"NCU_WAVE_{idx:02d}"
+            img_p = img_dir / f"{cat}.jpg"
+            sheet = np.full((1200, 900, 3), (225, 232, 236), dtype=np.uint8)
+            # Draw two green foliar patches so real JPEG decode works across prefetch workers
+            cv2.ellipse(sheet, (300, 760), (75, 110), 0.0, 0, 360, (60, 125, 70), -1)
+            cv2.ellipse(sheet, (600, 780), (70, 105), 0.0, 0, 360, (55, 120, 65), -1)
+            cv2.imwrite(str(img_p), sheet)
+            vouchers_rows.append({
+                "catalogNumber": cat,
+                "scientificName": "Packera anonyma",
+                "image_path": str(img_p),
+            })
+
+        vouchers_csv = self.temp_dir / "wave_vouchers.csv"
+        pd.DataFrame(vouchers_rows).to_csv(vouchers_csv, index=False)
+
+        s1_boxes = [
+            ((610, 190, 910, 410), 0.96, 0),
+            ((630, 490, 930, 710), 0.94, 0),
+        ]
+
+        def fake_s1_predict_batch(_self_s1, items, use_cache=False, max_batch_size=16):
+            return [list(s1_boxes) for _ in items]
+
+        def fake_s1_predict(_self_s1, _img_bgr, catalog_number=None, use_cache=False, precomputed_letterbox=None):
+            return list(s1_boxes)
+
+        def fake_s2_predict_batch(_self_s2, images_bgr, batch_size=24, pretransformed=None):
+            out = []
+            for crop_img in images_bgr:
+                ch, cw = crop_img.shape[:2]
+                leaf_m = np.zeros((ch, cw), dtype=np.uint8)
+                cx, cy = cw // 2, int(ch * 0.46)
+                rx, ry = max(16, int(cw * 0.28)), max(22, int(ch * 0.30))
+                cv2.ellipse(leaf_m, (cx, cy), (rx, ry), 0.0, 0, 360, 255, -1)
+                pet_m = np.zeros((ch, cw), dtype=np.uint8)
+                py0 = min(ch - 6, cy + ry - 2)
+                py1 = min(ch - 2, py0 + max(18, int(ch * 0.16)))
+                cv2.line(pet_m, (cx, py0), (cx, py1), 255, thickness=5)
+                out.append([
+                    ((8, 8, ch - 8, cw - 8), leaf_m, 0.97, 0),
+                    ((py0, max(0, cx - 4), py1, min(cw, cx + 4)), pet_m, 0.90, 1),
+                ])
+            return out
+
+        wave_db = self.temp_dir / "wave_ephemeral.sqlite"
+        seq_db = self.temp_dir / "seq_ephemeral.sqlite"
+
+        dummy_s1_weights = self.temp_dir / "dummy_s1.pt"
+        with patch.object(step02.LM2Stage1Detector, "predict_batch", fake_s1_predict_batch), \
+             patch.object(step02.LM2Stage1Detector, "predict", fake_s1_predict), \
+             patch.object(step02.PointRendInferenceEngine, "predict_batch", fake_s2_predict_batch):
+            pipe_wave = step02.SegmentAndExtractPipeline(
+                vouchers_csv=vouchers_csv,
+                model_weights=self.pipeline.model_weights,
+                stage1_weights=dummy_s1_weights,
+                output_dir=wave_root,
+                device="cpu",
+                db_path=wave_db,
+            )
+            pipe_wave.stage1_wave_size = 4  # Exercises 2 cross-voucher waves (4 + 2)
+            for r in vouchers_rows:
+                pipe_wave.ruler_calibrations[r["catalogNumber"]] = 10.0
+            df_wave, fail_wave = pipe_wave.run()
+
+            pipe_seq = step02.SegmentAndExtractPipeline(
+                vouchers_csv=vouchers_csv,
+                model_weights=self.pipeline.model_weights,
+                stage1_weights=dummy_s1_weights,
+                output_dir=seq_root,
+                device="cpu",
+                db_path=seq_db,
+            )
+            # Instance attribute hook forces sequential single-voucher fallback in run()
+            pipe_seq.stage1_detector.predict = lambda img, **kw: list(s1_boxes)  # type: ignore[method-assign]
+            for r in vouchers_rows:
+                pipe_seq.ruler_calibrations[r["catalogNumber"]] = 10.0
+            df_seq, fail_seq = pipe_seq.run()
+
+        self.assertTrue(fail_wave.empty)
+        self.assertTrue(fail_seq.empty)
+        self.assertEqual(len(df_wave), 12)
+        self.assertEqual(len(df_seq), 12)
+
+        compare_cols = [
+            "catalogNumber", "leaf_id", "plant_individual_id", "assigned_tier",
+            "solidity", "ucs_score", "circularity", "extent", "area_px",
+            "blade_area_cm2", "petiole_length_mm", "blade_length_mm",
+        ]
+        pd.testing.assert_frame_equal(
+            df_wave[compare_cols].reset_index(drop=True),
+            df_seq[compare_cols].reset_index(drop=True),
+        )
+
+        # Verify ROI-scoped rosette masks & binary leaf masks match pixel-for-pixel and SQLite stores 120-pt contours
+        conn = get_db_connection(wave_db, init_schema=False)
+        try:
+            rows_db = conn.execute(
+                "SELECT catalogNumber, leaf_id, contour_n_pts, contour_xy_json FROM extracted_leaves ORDER BY catalogNumber, leaf_id"
+            ).fetchall()
+            self.assertEqual(len(rows_db), 12)
+            for row_db in rows_db:
+                self.assertEqual(int(row_db["contour_n_pts"]), 120)
+                coords = json.loads(row_db["contour_xy_json"])
+                self.assertEqual(len(coords), 120)
+        finally:
+            conn.close()
+
+        for r in vouchers_rows:
+            cat = r["catalogNumber"]
+            w_rmask = cv2.imread(str(pipe_wave.rosettes_dense_dir / f"{cat}_p0_rosette_mask.png"), cv2.IMREAD_GRAYSCALE)
+            s_rmask = cv2.imread(str(pipe_seq.rosettes_dense_dir / f"{cat}_p0_rosette_mask.png"), cv2.IMREAD_GRAYSCALE)
+            self.assertIsNotNone(w_rmask)
+            self.assertIsNotNone(s_rmask)
+            np.testing.assert_array_equal(w_rmask, s_rmask)
+
 
 if __name__ == "__main__":
     unittest.main()
