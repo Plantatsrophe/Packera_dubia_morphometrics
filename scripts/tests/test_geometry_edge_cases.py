@@ -26,15 +26,19 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.vision.lm2_geometry_utils import (
+    BoundaryContinuityResult,
+    FoldDetectionResult,
+    LeafRoutingResult,
     approximate_petiole_and_scape_metrics,
+    check_boundary_tissue_continuity,
     classify_and_route_leaf,
+    compute_classical_shape_descriptors,
     compute_geometric_metrics,
     detect_folded_leaf,
     estimate_rosette_crown_point,
     is_botanical_dissection,
+    resample_normalized_contour,
     trim_petiole_tail,
-    FoldDetectionResult,
-    LeafRoutingResult,
 )
 
 
@@ -470,6 +474,98 @@ class TestGeometryEdgeCases(unittest.TestCase):
         self.assertAlmostEqual(res_bent["scape_length_px"], 1200.0, places=2)
         self.assertAlmostEqual(res_bent["plant_height_cm"], 12.0, places=2)
         self.assertGreater(res_bent["plant_height_cm"], res_straight["plant_height_cm"])
+
+    def test_irregular_diagonal_fold_routes_to_failed_qc(self) -> None:
+        """Verify that a leaf folded diagonally or irregularly routes to Failed QC."""
+        mask = np.zeros((400, 400), dtype=np.uint8)
+        pts = np.array(
+            [
+                [190, 60],   # Apex
+                [230, 180],  # Diagonal crease endpoint 1
+                [200, 320],  # Base
+                [160, 200],  # Curved side point
+            ],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(mask, [pts], 255)
+
+        fold_res = detect_folded_leaf(mask)
+        self.assertTrue(fold_res["is_irregular_fold"], "Diagonal crease must trigger is_irregular_fold.")
+        self.assertFalse(fold_res["is_folded"])
+
+        result: LeafRoutingResult = classify_and_route_leaf(mask)
+        self.assertEqual(result.tier, "Failed QC")
+        self.assertEqual(result.assigned_tier, "rejected")
+        self.assertTrue(result.is_irregular_fold)
+
+    def test_empty_and_degenerate_mask_handling(self) -> None:
+        """Verify numerical stability on empty or tiny masks."""
+        empty_mask = np.zeros((100, 100), dtype=np.uint8)
+        result = classify_and_route_leaf(empty_mask)
+        self.assertEqual(result.tier, "Failed QC")
+        self.assertEqual(result.assigned_tier, "rejected")
+
+        tiny_mask = np.zeros((50, 50), dtype=np.uint8)
+        tiny_mask[24:26, 24:26] = 255
+        res_tiny = classify_and_route_leaf(tiny_mask)
+        self.assertEqual(res_tiny.tier, "Failed QC")
+
+    def test_resample_normalized_contour(self) -> None:
+        """Verify resampled contour normalization coordinates."""
+        mask = np.zeros((200, 200), dtype=np.uint8)
+        cv2.circle(mask, (100, 100), 40, 255, -1)
+
+        coords = resample_normalized_contour(mask, num_points=120)
+        self.assertIsNotNone(coords)
+        self.assertEqual(coords.shape, (120, 2))
+        self.assertGreaterEqual(np.min(coords), 0.0)
+        self.assertLessEqual(np.max(coords), 1.0)
+
+    def test_check_boundary_tissue_continuity_intact_vs_severed_lobe(self) -> None:
+        """Verify check_boundary_tissue_continuity accepts intact leaves on mount paper and rejects severed lobes."""
+        crop_intact = np.full((300, 300, 3), 235, dtype=np.uint8)
+        mask_intact = np.zeros((300, 300), dtype=np.uint8)
+        cv2.ellipse(mask_intact, (150, 150), (45, 95), 0, 0, 360, 255, -1)
+        crop_intact[mask_intact > 0] = (45, 65, 45)
+        cv2.line(crop_intact, (150, 245), (150, 285), (45, 65, 45), thickness=4)
+
+        res_intact = check_boundary_tissue_continuity(
+            crop_intact, mask_intact, dilation_px=8, max_tissue_border_ratio=0.15
+        )
+        self.assertIsInstance(res_intact, BoundaryContinuityResult)
+        self.assertFalse(res_intact["is_severed_lobe"])
+        self.assertLessEqual(res_intact["tissue_border_ratio"], 0.15)
+
+        routing_ok = classify_and_route_leaf(mask_intact, crop_img=crop_intact)
+        self.assertEqual(routing_ok.assigned_tier, "tier1")
+
+        crop_lobe = np.full((300, 300, 3), 235, dtype=np.uint8)
+        cv2.ellipse(crop_lobe, (150, 150), (95, 120), 0, 0, 360, (40, 60, 40), -1)
+        mask_lobe = np.zeros((300, 300), dtype=np.uint8)
+        cv2.ellipse(mask_lobe, (120, 150), (35, 60), 0, 0, 360, 255, -1)
+
+        res_lobe = check_boundary_tissue_continuity(
+            crop_lobe, mask_lobe, dilation_px=8, max_tissue_border_ratio=0.15
+        )
+        self.assertTrue(res_lobe["is_severed_lobe"])
+        self.assertGreater(res_lobe["tissue_border_ratio"], 0.15)
+
+        routing_rej = classify_and_route_leaf(mask_lobe, crop_img=crop_lobe)
+        self.assertEqual(routing_rej.assigned_tier, "rejected")
+        self.assertEqual(routing_rej.rejection_reason, "SEVERED_LOBE")
+
+    def test_compute_classical_shape_descriptors_solidity_circularity_extent(self) -> None:
+        """Verify compute_classical_shape_descriptors returns accurate Solidity, Circularity, and Extent."""
+        mask = np.zeros((300, 300), dtype=np.uint8)
+        cv2.ellipse(mask, (150, 150), (50, 90), 0, 0, 360, 255, -1)
+
+        desc_tight = compute_classical_shape_descriptors(mask, bbox=(60, 100, 240, 200))
+        self.assertGreaterEqual(desc_tight["solidity"], 0.95)
+        self.assertGreaterEqual(desc_tight["circularity"], 0.65)
+        self.assertGreaterEqual(desc_tight["extent"], 0.70)
+
+        desc_partial = compute_classical_shape_descriptors(mask, bbox=(0, 0, 300, 300))
+        self.assertLess(desc_partial["extent"], 0.35)
 
 
 if __name__ == "__main__":

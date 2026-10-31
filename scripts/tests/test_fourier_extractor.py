@@ -15,15 +15,17 @@ Description:
     4. Elimination of 180-degree first-harmonic ellipse flips via
        Momocs::coo_center(out_obj) %>% Momocs::coo_scale() and
        Momocs::efourier(..., norm = FALSE, start = FALSE).
-    5. Zero dropped Tier 1/2 specimens in specimen-level EFA aggregation.
+    5. Strict Tier_1_Direct EFA filtering, unweighted OTU median aggregation,
+       adaptive anchor promotion for 0-Gold/Silver taxa, and Step 01/02 metadata handoff.
 ===============================================================================
 """
 
-import re
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -35,8 +37,6 @@ class TestFourierExtractor(unittest.TestCase):
 
     def setUp(self):
         self.r_script_path = PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R"
-        self.harmonics_path = PROJECT_ROOT / "data" / "tables" / "leaf_efa_harmonics.csv"
-        self.ind_harmonics_path = PROJECT_ROOT / "data" / "tables" / "leaf_efa_harmonics_individual.csv"
 
     def test_r_script_exists_and_line_bounds(self):
         """Verify 03_fourier_extractor.R exists and adheres to modular line limits (350-800 lines)."""
@@ -110,61 +110,11 @@ class TestFourierExtractor(unittest.TestCase):
 
         d2_ovate = second_harmonic_d(ovate_x, ovate_y)
         d2_obovate = second_harmonic_d(obovate_x, obovate_y)
-        self.assertLess(d2_ovate * d2_obovate, 0.0, "Ovate and obovate leaves must have opposite-sign D2 harmonics without 180-deg flip")
-
-    def test_exported_tables_preserve_all_tier1_tier2_specimens(self):
-        """Verify exported EFA tables contain required calibration columns and drop zero Tier 1/2 specimens."""
-        harmonics_path = self.harmonics_path
-        ind_harmonics_path = self.ind_harmonics_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            if not (harmonics_path.exists() and ind_harmonics_path.exists()):
-                tmp_path = Path(tmpdir)
-                harmonics_path = tmp_path / "leaf_efa_harmonics.csv"
-                ind_harmonics_path = tmp_path / "leaf_efa_harmonics_individual.csv"
-                fixture_rows = [
-                    {
-                        "catalogNumber": "NCU001",
-                        "plant_individual_id": 1,
-                        "assigned_tier": "Tier_1_Direct",
-                        "pixels_per_mm": 11.8,
-                        "is_calibrated_mm": True,
-                        "solidity": 0.92,
-                        "ucs_score": 0.88,
-                        "centroid_size": 42.5,
-                        "log_centsize": np.log(42.5),
-                    },
-                    {
-                        "catalogNumber": "NCU002",
-                        "plant_individual_id": 1,
-                        "assigned_tier": "Tier_2_Reflected",
-                        "pixels_per_mm": 11.8,
-                        "is_calibrated_mm": True,
-                        "solidity": 0.85,
-                        "ucs_score": 0.79,
-                        "centroid_size": 38.1,
-                        "log_centsize": np.log(38.1),
-                    },
-                ]
-                pd.DataFrame(fixture_rows).to_csv(harmonics_path, index=False)
-                pd.DataFrame(fixture_rows).to_csv(ind_harmonics_path, index=False)
-
-            self.assertTrue(harmonics_path.exists())
-            self.assertTrue(ind_harmonics_path.exists())
-            spec_df = pd.read_csv(harmonics_path)
-            ind_df = pd.read_csv(ind_harmonics_path)
-
-            for col in ("catalogNumber", "plant_individual_id", "assigned_tier", "pixels_per_mm", "is_calibrated_mm", "solidity", "ucs_score", "centroid_size", "log_centsize"):
-                self.assertIn(col, spec_df.columns, f"Missing column '{col}' in leaf_efa_harmonics.csv")
-                self.assertIn(col, ind_df.columns, f"Missing column '{col}' in leaf_efa_harmonics_individual.csv")
-
-            closed_ind = ind_df[ind_df["assigned_tier"].astype(str).str.match(r"^tier_?[12]", case=False, na=False)]
-            expected_specimens = set(zip(closed_ind["catalogNumber"].astype(str), closed_ind["plant_individual_id"].astype(int)))
-            actual_specimens = set(zip(spec_df["catalogNumber"].astype(str), spec_df["plant_individual_id"].astype(int)))
-            self.assertEqual(expected_specimens, actual_specimens, "Zero closed-silhouette Tier 1/2 specimens may be dropped during specimen aggregation")
-
-        r_content = self.r_script_path.read_text(encoding="utf-8")
-        self.assertIn("RRPP::lm.rrpp", r_content)
-        self.assertIn("RRPP::rrpp.data.frame", r_content)
+        self.assertLess(
+            d2_ovate * d2_obovate,
+            0.0,
+            "Ovate and obovate leaves must have opposite-sign D2 harmonics without 180-deg flip",
+        )
 
     def test_tier1_pure_priority_and_pca_anchoring_in_step03(self):
         """Verify Milestone 3 Tier-1 Pure priority rule and Tier_1_Direct PCA anchoring in 03_fourier_extractor.R."""
@@ -177,7 +127,7 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn('grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]', r_content)
 
     def test_empirical_efa_alignment_harmonic_power_and_otu_aggregation(self):
-        """Verify Phase 3 empirical EFA protocol: coo_alignxax, calibrate_harmonicpower_efourier, and OTU-level PCA."""
+        """Verify Phase 3 empirical EFA protocol: coo_alignxax, calibrate_harmonicpower_efourier, RRPP, and OTU-level PCA."""
         r_content = self.r_script_path.read_text(encoding="utf-8")
         self.assertIn("align_contour_basal_apical", r_content)
         self.assertIn("Momocs::coo_alignxax", r_content)
@@ -188,23 +138,25 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn("otu_t1_idx", r_content)
         self.assertIn("symmetrize_efa_harmonics", r_content)
         self.assertIn("compute_authority_precision_weights", r_content)
+        self.assertIn("RRPP::lm.rrpp", r_content)
+        self.assertIn("RRPP::rrpp.data.frame", r_content)
 
     def test_tier1_only_efa_unweighted_median_and_tier3_passive_pca_invariance(self):
         """Verify only Tier 1 intact contours enter EFA, OTU aggregation uses unweighted median, and Tier_3_Bronze has zero influence on reference PCA."""
-        rng = np.random.default_rng(2026)
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
         t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
 
         def write_contour_csv(path: Path, cat: str, lid: int, a: float, b: float, d2_mod: float = 0.0):
             x = a * np.cos(t)
             y = b * np.sin(t) * (1.0 + d2_mod * np.cos(t))
-            df_c = pd.DataFrame({
+            pd.DataFrame({
                 "catalogNumber": cat,
                 "leaf_id": lid,
                 "point_index": np.arange(120),
                 "x": x + 200.0,
                 "y": y + 200.0,
-            })
-            df_c.to_csv(path, index=False)
+            }).to_csv(path, index=False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_p = Path(tmpdir)
@@ -224,7 +176,6 @@ class TestFourierExtractor(unittest.TestCase):
             ]
             pd.DataFrame(vouchers).to_csv(vouchers_csv, index=False)
 
-            # G1 has 3 Tier_1_Direct leaves with distinct shapes + 1 Tier_2_Reflected leaf (must be excluded)
             write_contour_csv(contours_dir / "G1_leaf1.csv", "G1", 1, 90.0, 35.0, -0.15)
             write_contour_csv(contours_dir / "G1_leaf2.csv", "G1", 2, 90.0, 45.0, 0.00)
             write_contour_csv(contours_dir / "G1_leaf3.csv", "G1", 3, 90.0, 60.0, 0.20)
@@ -270,6 +221,7 @@ class TestFourierExtractor(unittest.TestCase):
                         "--output-individual", str(out_ind),
                         "--report-out", str(out_rep),
                         "--plot-out", str(out_fig),
+                        "--permutations", "19",
                     ],
                     cwd=str(PROJECT_ROOT),
                     capture_output=True,
@@ -291,6 +243,10 @@ class TestFourierExtractor(unittest.TestCase):
             self.assertNotIn("if (length(disp_tx) < 4) disp_tx <- unique(c(disp_tx, focal_4))[1:4]", pub_utils_content)
             self.assertEqual(int(spec1.loc[spec1["catalogNumber"] == "G1", "n_tier2_leaves"].iloc[0]), 0)
 
+            for col in ("catalogNumber", "plant_individual_id", "assigned_tier", "pixels_per_mm", "is_calibrated_mm", "solidity", "ucs_score", "centroid_size", "log_centsize"):
+                self.assertIn(col, spec1.columns)
+                self.assertIn(col, ind1.columns)
+
             # 2. Unweighted coordinate-wise median per harmonic coefficient for G1
             g1_ind = ind1[ind1["catalogNumber"] == "G1"]
             g1_spec = spec1[spec1["catalogNumber"] == "G1"].iloc[0]
@@ -306,7 +262,6 @@ class TestFourierExtractor(unittest.TestCase):
             write_contour_csv(contours_dir / "B1_leaf1.csv", "B1", 1, 130.0, 22.0, -0.38)
             spec2, ind2 = run_step03("run2")
 
-            # Active Gold/Silver PC scores and Sym_PC scores must be strictly identical
             ref1 = spec1[spec1["catalogNumber"] != "B1"].sort_values("catalogNumber")
             ref2 = spec2[spec2["catalogNumber"] != "B1"].sort_values("catalogNumber")
             for pc_col in ["PC1", "PC2", "PC3", "Sym_PC1", "Sym_PC2"]:
@@ -326,8 +281,10 @@ class TestFourierExtractor(unittest.TestCase):
                     err_msg=f"Tier_3_Bronze perturbation must not alter individual reference {pc_col} scores.",
                 )
 
-    def test_zero_gold_silver_species_adaptive_anchor_promotion_in_step03(self):
-        """Verify Step 03 promotes clean Tier_3_Bronze anchors for 0-Gold/Silver species into EFA PCA covariance."""
+    def test_zero_gold_silver_adaptive_anchor_promotion_and_step01_step02_handoff(self):
+        """Verify Step 03 promotes clean Bronze anchors for 0-Gold/Silver species and preserves Step 01/02 metadata and petiole/dissection traits."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
         t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
 
         def write_contour_csv(path: Path, cat: str, lid: int, a: float, b: float, d2_mod: float = 0.0):
@@ -348,31 +305,54 @@ class TestFourierExtractor(unittest.TestCase):
             vouchers_csv = tmp_p / "curated_vouchers.csv"
             manifest_csv = tmp_p / "extracted_leaf_manifest.csv"
 
-            vouchers = [
-                {"catalogNumber": "D_G1", "species_raw": "Packera dubia", "determiner_tier": "Tier_1_Gold"},
-                {"catalogNumber": "D_G2", "species_raw": "Packera dubia", "determiner_tier": "Tier_1_Gold"},
-                {"catalogNumber": "D_B1", "species_raw": "Packera dubia", "determiner_tier": "Tier_3_Bronze"},
-                {"catalogNumber": "A_S1", "species_raw": "Packera anonyma", "determiner_tier": "Tier_2_Silver"},
-                {"catalogNumber": "A_S2", "species_raw": "Packera anonyma", "determiner_tier": "Tier_2_Silver"},
+            voucher_defs = [
+                ("D_G1", "Packera dubia", "Tier_1_Gold", "Holotype"),
+                ("D_G2", "Packera dubia", "Tier_1_Gold", ""),
+                ("D_B1", "Packera dubia", "Tier_3_Bronze", ""),
+                ("A_S1", "Packera anonyma", "Tier_2_Silver", ""),
+                ("A_S2", "Packera anonyma", "Tier_2_Silver", ""),
                 # Rare endemic Packera serpenticola with ZERO Gold and ZERO Silver vouchers (only Bronze)
-                {"catalogNumber": "R_B1", "species_raw": "Packera serpenticola", "determiner_tier": "Tier_3_Bronze"},
-                {"catalogNumber": "R_B2", "species_raw": "Packera serpenticola", "determiner_tier": "Tier_3_Bronze"},
-                {"catalogNumber": "R_B3", "species_raw": "Packera serpenticola", "determiner_tier": "Tier_3_Bronze"},
+                ("R_B1", "Packera serpenticola", "Tier_3_Bronze", ""),
+                ("R_B2", "Packera serpenticola", "Tier_3_Bronze", ""),
+                ("R_B3", "Packera serpenticola", "Tier_3_Bronze", ""),
+            ]
+            vouchers = [
+                {
+                    "catalogNumber": cat,
+                    "taxon": sp,
+                    "scientificName": sp,
+                    "species_raw": sp,
+                    "institutionCode": "NCU",
+                    "determiner_tier": tier,
+                    "authority_tier": tier,
+                    "type_status": t_stat,
+                    "stateProvince": "North Carolina",
+                    "county": "Macon",
+                    "locality": "Whiteside Mountain granitic dome",
+                    "decimalLatitude": 35.081,
+                    "decimalLongitude": -83.138,
+                    "coordinateUncertainty": 120.0,
+                    "year": 2021,
+                    "month": 5,
+                    "day": 14,
+                    "eventDate": "2021-05-14",
+                }
+                for cat, sp, tier, t_stat in voucher_defs
             ]
             pd.DataFrame(vouchers).to_csv(vouchers_csv, index=False)
 
             specs = [
-                ("D_G1", 92.0, 38.0, -0.14),
-                ("D_G2", 90.0, 40.0, -0.12),
-                ("D_B1", 89.0, 41.0, -0.10),
-                ("A_S1", 96.0, 28.0, 0.16),
-                ("A_S2", 94.0, 30.0, 0.14),
-                ("R_B1", 72.0, 58.0, 0.28),
-                ("R_B2", 74.0, 56.0, 0.26),
-                ("R_B3", 73.0, 57.0, 0.27),
+                ("D_G1", 92.0, 38.0, -0.14, False),
+                ("D_G2", 90.0, 40.0, -0.12, False),
+                ("D_B1", 89.0, 41.0, -0.10, False),
+                ("A_S1", 96.0, 28.0, 0.16, True),
+                ("A_S2", 94.0, 30.0, 0.14, True),
+                ("R_B1", 72.0, 58.0, 0.28, False),
+                ("R_B2", 74.0, 56.0, 0.26, False),
+                ("R_B3", 73.0, 57.0, 0.27, False),
             ]
             manifest_rows = []
-            for cat, a_v, b_v, d2_v in specs:
+            for idx, (cat, a_v, b_v, d2_v, is_diss) in enumerate(specs):
                 cpath = contours_dir / f"{cat}_leaf1.csv"
                 write_contour_csv(cpath, cat, 1, a_v, b_v, d2_v)
                 manifest_rows.append({
@@ -382,8 +362,12 @@ class TestFourierExtractor(unittest.TestCase):
                     "assigned_tier": "Tier_1_Direct",
                     "pixels_per_mm": 10.0,
                     "is_calibrated_mm": True,
-                    "solidity": 0.93,
+                    "solidity": 0.42 if is_diss else 0.93,
                     "ucs_score": 0.94,
+                    "petiole_length_mm": 18.5 + idx,
+                    "blade_length_mm": 24.0 + idx,
+                    "petiole_to_blade_ratio": round((18.5 + idx) / (24.0 + idx), 4),
+                    "is_dissected": is_diss,
                     "contour_path": str(cpath),
                 })
             pd.DataFrame(manifest_rows).to_csv(manifest_csv, index=False)
@@ -402,24 +386,23 @@ class TestFourierExtractor(unittest.TestCase):
                     "--output-individual", str(out_ind),
                     "--report-out", str(tmp_p / "tier_rep.csv"),
                     "--plot-out", str(tmp_p / "tier_fig.pdf"),
+                    "--permutations", "19",
                 ],
                 cwd=str(PROJECT_ROOT),
                 capture_output=True,
                 text=True,
                 check=False,
             )
-            self.assertEqual(proc.returncode, 0, f"Step 03 failed on 0-Gold/Silver species:\n{proc.stderr}\n{proc.stdout}")
+            self.assertEqual(proc.returncode, 0, f"Step 03 failed on 0-Gold/Silver & handoff run:\n{proc.stderr}\n{proc.stdout}")
+            ind_df = pd.read_csv(out_ind)
             spec_df = pd.read_csv(out_spec)
             self.assertEqual(len(spec_df), 8)
 
-            # Gold-covered Packera dubia's Bronze voucher remains strictly passive (authority_weight == 0.0)
+            # 1. Adaptive Anchor Promotion & Empirical Bayes active weight ordering: Gold > Silver > Promoted Bronze > 0
             self.assertEqual(float(spec_df.loc[spec_df["catalogNumber"] == "D_B1", "authority_weight"].iloc[0]), 0.0)
-
-            # 0-Gold/Silver Packera serpenticola promotes clean Bronze anchors with positive Empirical Bayes weights
             rare_rows = spec_df[spec_df["catalogNumber"].isin(["R_B1", "R_B2", "R_B3"])]
             self.assertGreaterEqual(int((rare_rows["authority_weight"] > 0.0).sum()), 2)
 
-            # Hierarchical Empirical Bayes active weight ordering: Gold > Silver > Promoted Bronze > 0
             w_gold = float(spec_df.loc[spec_df["catalogNumber"] == "D_G1", "authority_weight"].iloc[0])
             w_silver = float(spec_df.loc[spec_df["catalogNumber"] == "A_S1", "authority_weight"].iloc[0])
             w_promo = float(rare_rows.loc[rare_rows["authority_weight"] > 0.0, "authority_weight"].iloc[0])
@@ -429,95 +412,7 @@ class TestFourierExtractor(unittest.TestCase):
             active_w = spec_df.loc[spec_df["authority_weight"] > 0.0, "authority_weight"]
             self.assertAlmostEqual(float(active_w.mean()), 1.0, places=4)
 
-    def test_step01_metadata_and_step02_petiole_dissection_handoff_and_line_limit(self):
-        """Verify 03_fourier_extractor.R (<=800 lines) retains Step 02 petiole/dissection traits and full Step 01 voucher locality/date metadata."""
-        import shutil
-        line_count = len(self.r_script_path.read_text(encoding="utf-8").splitlines())
-        self.assertLessEqual(line_count, 800, f"03_fourier_extractor.R has {line_count} lines; must remain <= 800.")
-
-        if not shutil.which("Rscript"):
-            self.skipTest("Rscript not installed.")
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_p = Path(tmpdir)
-            contours_dir = tmp_p / "contours"
-            contours_dir.mkdir(parents=True, exist_ok=True)
-            vouchers_csv = tmp_p / "curated_vouchers.csv"
-            manifest_csv = tmp_p / "extracted_leaf_manifest.csv"
-
-            theta = np.linspace(0.0, 2.0 * np.pi, 120, endpoint=False)
-            vouch_rows = []
-            man_rows = []
-            for idx in range(6):
-                cat = f"HANDOFF_{idx:02d}"
-                sp = "Packera aurea" if idx < 3 else "Packera millefolium"
-                cpath = contours_dir / f"{cat}_leaf1.csv"
-                x_c = (20.0 + idx) * np.cos(theta)
-                y_c = (12.0 + 0.5 * idx) * np.sin(theta)
-                pd.DataFrame({"x": x_c, "y": y_c, "catalogNumber": cat, "leaf_id": 1}).to_csv(cpath, index=False)
-
-                vouch_rows.append({
-                    "catalogNumber": cat,
-                    "taxon": sp,
-                    "scientificName": sp,
-                    "species_raw": sp,
-                    "institutionCode": "NCU",
-                    "determiner_tier": "Tier_1_Gold",
-                    "authority_tier": "Tier_1_Gold",
-                    "type_status": "Holotype" if idx == 0 else "",
-                    "stateProvince": "North Carolina",
-                    "county": "Macon",
-                    "locality": "Whiteside Mountain granitic dome",
-                    "decimalLatitude": 35.081,
-                    "decimalLongitude": -83.138,
-                    "coordinateUncertainty": 120.0,
-                    "year": 2021,
-                    "month": 5,
-                    "day": 14,
-                    "eventDate": "2021-05-14",
-                })
-                man_rows.append({
-                    "catalogNumber": cat,
-                    "plant_individual_id": 1,
-                    "leaf_id": 1,
-                    "assigned_tier": "Tier_1_Direct",
-                    "pixels_per_mm": 10.0,
-                    "is_calibrated_mm": True,
-                    "solidity": 0.42 if sp == "Packera millefolium" else 0.91,
-                    "ucs_score": 0.93,
-                    "petiole_length_mm": 18.5 + idx,
-                    "blade_length_mm": 24.0 + idx,
-                    "petiole_to_blade_ratio": round((18.5 + idx) / (24.0 + idx), 4),
-                    "is_dissected": sp == "Packera millefolium",
-                    "contour_path": str(cpath),
-                })
-
-            pd.DataFrame(vouch_rows).to_csv(vouchers_csv, index=False)
-            pd.DataFrame(man_rows).to_csv(manifest_csv, index=False)
-
-            out_spec = tmp_p / "leaf_efa_harmonics.csv"
-            out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
-            proc = subprocess.run(
-                [
-                    "Rscript",
-                    str(self.r_script_path),
-                    "--contours-dir", str(contours_dir),
-                    "--masks-dir", str(tmp_p / "masks"),
-                    "--vouchers", str(vouchers_csv),
-                    "--manifest", str(manifest_csv),
-                    "--output", str(out_spec),
-                    "--output-individual", str(out_ind),
-                    "--report-out", str(tmp_p / "tier_rep.csv"),
-                    "--plot-out", str(tmp_p / "tier_fig.pdf"),
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(proc.returncode, 0, f"Step 03 handoff run failed:\n{proc.stderr}\n{proc.stdout}")
-            ind_df = pd.read_csv(out_ind)
-            spec_df = pd.read_csv(out_spec)
+            # 2. Step 01 locality/date metadata & Step 02 petiole/dissection trait handoff
             for df_chk in (ind_df, spec_df):
                 for req_col in (
                     "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
@@ -525,12 +420,12 @@ class TestFourierExtractor(unittest.TestCase):
                     "year", "month", "day", "eventDate", "type_status",
                 ):
                     self.assertIn(req_col, df_chk.columns)
-            row0 = spec_df[spec_df["catalogNumber"] == "HANDOFF_00"].iloc[0]
+            row0 = spec_df[spec_df["catalogNumber"] == "D_G1"].iloc[0]
             self.assertAlmostEqual(float(row0["petiole_length_mm"]), 18.5, places=3)
             self.assertAlmostEqual(float(row0["blade_length_mm"]), 24.0, places=3)
             self.assertEqual(str(row0["locality"]), "Whiteside Mountain granitic dome")
             self.assertEqual(str(row0["eventDate"]), "2021-05-14")
-            row_diss = spec_df[spec_df["catalogNumber"] == "HANDOFF_04"].iloc[0]
+            row_diss = spec_df[spec_df["catalogNumber"] == "A_S1"].iloc[0]
             self.assertTrue(bool(row_diss["is_dissected"]))
 
 
