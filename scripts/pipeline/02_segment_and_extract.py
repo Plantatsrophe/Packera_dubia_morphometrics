@@ -1234,6 +1234,12 @@ class SegmentAndExtractPipeline:
                     s1_cy = 0.5 * float(s1_bbox[0] + s1_bbox[2])
                     s1_raw_leaf_items.append((s1_bbox, float(s1_score), int(s1_cls), s1_bh, s1_bw, s1_cy))
 
+            max_s1_major = max(
+                int(0.78 * max(sheet_h, sheet_w)),
+                int(38.0 * s1_px_per_cm) if (s1_is_calibrated_mm and s1_px_per_cm > 0.0) else 0,
+            )
+            max_s1_area = 0.45 * float(sheet_h * sheet_w)
+
             if s1_is_calibrated_mm and s1_px_per_cm > 0.0:
                 _s1_est_cm2 = [
                     0.72 * float(_bh * _bw) / (s1_px_per_cm ** 2)
@@ -1243,8 +1249,8 @@ class SegmentAndExtractPipeline:
                     and (
                         scale_f <= 0.0
                         or (
-                            max(_bh, _bw) <= int(1300 * scale_f)
-                            and (_bh * _bw) <= 0.14 * (sheet_h * sheet_w)
+                            max(_bh, _bw) <= max_s1_major
+                            and (_bh * _bw) <= max_s1_area
                         )
                     )
                 ]
@@ -1274,12 +1280,16 @@ class SegmentAndExtractPipeline:
 
                     if max(s1_bh, s1_bw) < min_s1_major or min(s1_bh, s1_bw) < min_s1_minor:
                         continue
-                    if max(s1_bh, s1_bw) > int(1300 * scale_f) or (s1_bh * s1_bw) > 0.14 * (sheet_h * sheet_w):
+                    if max(s1_bh, s1_bw) > max_s1_major or (s1_bh * s1_bw) > max_s1_area:
                         continue
                     if is_high_dpi:
                         if max(s1_bh, s1_bw) < min_s1_hd_major:
                             continue
-                        if s1_cy < 0.40 * sheet_h:
+                        _is_macro_or_veg_basal = (
+                            max(s1_bh, s1_bw) >= int(0.22 * sheet_h)
+                            or (not capitulum_detections and s1_cy >= 0.28 * sheet_h)
+                        )
+                        if s1_cy < 0.40 * sheet_h and not _is_macro_or_veg_basal:
                             s1_pending_upper_pts.append((0.5 * float(s1_bbox[1] + s1_bbox[3]), float(s1_cy)))
                             s1_vertical_fallback_items.append((s1_bbox, s1_score, s1_cls, s1_cy))
                             continue
@@ -1366,7 +1376,12 @@ class SegmentAndExtractPipeline:
                 hull_m_area = float(cv2.contourArea(cv2.convexHull(main_m_cnt)))
                 m_solidity = float(fg_area) / hull_m_area if hull_m_area > 0 else 0.0
 
-                if scale_f > 0.4 and min(rect_w, rect_h) > int(520 * scale_f) and (scale_f > 0.65 or m_solidity < 0.92):
+                max_s2_minor = max(
+                    int(1600 * scale_f),
+                    int(0.42 * min(sheet_h, sheet_w)),
+                    int(16.0 * s1_px_per_cm) if (s1_is_calibrated_mm and s1_px_per_cm > 0.0) else 0,
+                )
+                if scale_f > 0.4 and min(rect_w, rect_h) > max_s2_minor and m_solidity < 0.85:
                     continue
 
                 cy0, cx0, cy1, cx1 = crop_box
@@ -1500,7 +1515,9 @@ class SegmentAndExtractPipeline:
                 "catalogNumber": catalog_number,
                 "image_path": str(image_path),
                 "failure_reason": "no_leaves_detected",
-                "details": "Model produced 0 candidate leaf segmentations"
+                "details": "Model produced 0 candidate leaf segmentations",
+                "pixels_per_mm": round(float(pixels_per_mm), 4) if is_calibrated_mm else np.nan,
+                "is_calibrated_mm": bool(is_calibrated_mm),
             }
             self.voucher_repro_records[catalog_number] = {
                 "catalogNumber": catalog_number,
@@ -1580,7 +1597,9 @@ class SegmentAndExtractPipeline:
                 "catalogNumber": catalog_number,
                 "image_path": str(image_path),
                 "failure_reason": "no_leaves_detected",
-                "details": f"Model produced 0 candidate leaf segmentations ({capitula_count} capitula detected)"
+                "details": f"Model produced 0 candidate leaf segmentations ({capitula_count} capitula detected)",
+                "pixels_per_mm": round(float(pixels_per_mm), 4) if is_calibrated_mm else np.nan,
+                "is_calibrated_mm": bool(is_calibrated_mm),
             }
             return [], failure_record
 
@@ -1774,6 +1793,7 @@ class SegmentAndExtractPipeline:
         else:
             effective_min_blade_area_cm2 = float(self.min_blade_area_cm2)
 
+        _neighbor_dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         for inst in instances:
             ox, oy = inst.mask_origin
             mh, mw = inst.mask.shape[:2]
@@ -1787,12 +1807,60 @@ class SegmentAndExtractPipeline:
                 else None
             )
 
+            rc_sheet = rosette_centroids_by_pid.get(inst.plant_individual_id)
+            rc_local = (rc_sheet[0] - ox, rc_sheet[1] - oy) if rc_sheet is not None else None
+            _, _, _, _, p_base_hint = compute_geometric_metrics(inst.mask, rosette_centroid=rc_local)
+
+            # Build distinct neighboring leaf exclusion mask in inst.mask coordinates so crowded basal
+            # rosettes do not penalize intact blades touching sibling leaves, while preventing parent
+            # masks from shielding internal sub-lobes (overlap_frac < 0.30) or thin stem segments.
+            neighbor_mask: Optional[np.ndarray] = None
+            if len(instances) >= 2 and mh > 0 and mw > 0:
+                _, _, inst_area_g, _, _ = inst_geom_map.get(inst.leaf_id, (0.0, 0.0, 1.0, 1.0, 1.0))
+                inst_bool_local = inst.mask > 0
+                for other in instances:
+                    if other.leaf_id == inst.leaf_id:
+                        continue
+                    ob0, ob1, ob2, ob3 = other.bbox
+                    if ob2 + 24 <= oy or oy + mh <= ob0 - 24 or ob3 + 24 <= ox or ox + mw <= ob1 - 24:
+                        continue
+                    _, _, other_area_g, other_ar_g, other_sol_g = inst_geom_map.get(
+                        other.leaf_id, (0.0, 0.0, 0.0, 1.0, 0.0)
+                    )
+                    if other_area_g < 0.18 * max(inst_area_g, 1.0) or other_sol_g < 0.42:
+                        continue
+                    if other_ar_g >= 4.2 and other_sol_g < 0.72:
+                        continue
+                    oox, ooy = other.mask_origin
+                    omh, omw = other.mask.shape[:2]
+                    iy0 = max(oy, ooy)
+                    ix0 = max(ox, oox)
+                    iy1 = min(oy + mh, ooy + omh)
+                    ix1 = min(ox + mw, oox + omw)
+                    if iy1 <= iy0 or ix1 <= ix0:
+                        continue
+                    sub_inst = inst_bool_local[iy0 - oy : iy1 - oy, ix0 - ox : ix1 - ox]
+                    sub_other = other.mask[iy0 - ooy : iy1 - ooy, ix0 - oox : ix1 - oox] > 0
+                    if not np.any(sub_other):
+                        continue
+                    overlap_px = float(np.count_nonzero(sub_inst & sub_other))
+                    if (overlap_px / max(inst_area_g, 1.0)) >= 0.65:
+                        continue
+                    if neighbor_mask is None:
+                        neighbor_mask = np.zeros((mh, mw), dtype=np.uint8)
+                    dst_slice = neighbor_mask[iy0 - oy : iy1 - oy, ix0 - ox : ix1 - ox]
+                    dst_slice[sub_other] = 255
+                if neighbor_mask is not None and np.any(neighbor_mask > 0):
+                    neighbor_mask = cv2.dilate(neighbor_mask, _neighbor_dilate_k, iterations=1)
+
             # 6a. Boundary-continuity severed lobe check (Weaver & Smith 2023/2024; Otsu LAB exterior ring)
             bc_res = check_boundary_tissue_continuity(
                 inst_crop_bgr,
                 inst.mask,
                 dilation_px=8,
                 max_tissue_border_ratio=self.max_tissue_border_ratio,
+                exclude_mask=neighbor_mask,
+                petiole_base_pt=p_base_hint,
             )
             inst.is_severed_lobe = bool(bc_res["is_severed_lobe"])
             if inst.is_severed_lobe:
@@ -1819,9 +1887,6 @@ class SegmentAndExtractPipeline:
                 rejected_instances.append(inst)
                 continue
 
-            rc_sheet = rosette_centroids_by_pid.get(inst.plant_individual_id)
-            rc_local = (rc_sheet[0] - ox, rc_sheet[1] - oy) if rc_sheet is not None else None
-
             routing_res = classify_and_route_leaf(
                 inst.mask,
                 config=self.config,
@@ -1835,6 +1900,7 @@ class SegmentAndExtractPipeline:
                 sheet_shape=(sheet_h, sheet_w),
                 crop_img=inst_crop_bgr,
                 max_tissue_border_ratio=self.max_tissue_border_ratio,
+                exclude_mask=neighbor_mask,
             )
             inst.ucs_score = routing_res.ucs
             inst.solidity = routing_res.solidity
@@ -2050,7 +2116,11 @@ class SegmentAndExtractPipeline:
                     continue
 
                 req_cy_rel = 0.48 if tier == "Tier 2" else 0.42
-                if cy_rel < req_cy_rel:
+                _is_veg_or_macro_rosette_blade = (
+                    (not capitulum_detections and m_area >= int(0.45 * sheet_med_area) and cy_rel >= 0.20)
+                    or (max(m_bw, m_bh) >= int(0.22 * sheet_h) and cy_rel >= 0.20)
+                )
+                if cy_rel < req_cy_rel and not _is_veg_or_macro_rosette_blade:
                     if cy_rel_p_m >= 0.40:
                         rosette_vertical_fallback_extractions.append((
                             inst,
@@ -2352,6 +2422,8 @@ class SegmentAndExtractPipeline:
                 cv2.imwrite(str(leaf_patch_path), leaf_rgb_crop)
 
             pid_pet = by_plant_petiole.get(int(inst.plant_individual_id), petiole_scape_res)
+            _inst_ar_val = inst_geom_map.get(inst.leaf_id, (0.0, 0.0, 0.0, np.nan, 1.0))[3]
+            _inst_area_px_val = _raw_px_by_leaf_id.get(inst.leaf_id, np.nan)
             # Record successfully extracted leaf with diagnostic classification flags
             extracted_records.append({
                 "catalogNumber": catalog_number,
@@ -2367,6 +2439,11 @@ class SegmentAndExtractPipeline:
                 "assigned_tier": inst.assigned_tier,
                 "tier_assignment": inst.assigned_tier,
                 "ucs_score": round(float(inst.ucs_score), 4),
+                "circularity": round(float(inst.circularity), 4) if np.isfinite(inst.circularity) else np.nan,
+                "extent": round(float(inst.extent), 4) if np.isfinite(inst.extent) else np.nan,
+                "aspect_ratio": round(float(_inst_ar_val), 4) if np.isfinite(_inst_ar_val) else np.nan,
+                "area_px": round(float(_inst_area_px_val), 1) if np.isfinite(_inst_area_px_val) else np.nan,
+                "blade_area_cm2": round(float(inst.blade_area_cm2), 4) if np.isfinite(inst.blade_area_cm2) else np.nan,
                 "midrib_angle_deg": round(float(inst.midrib_angle_deg), 2),
                 "pixels_per_mm": round(float(inst.pixels_per_mm), 4) if inst.pixels_per_mm else np.nan,
                 "is_calibrated_mm": bool(inst.is_calibrated_mm),
@@ -2398,7 +2475,9 @@ class SegmentAndExtractPipeline:
                 "catalogNumber": catalog_number,
                 "image_path": str(image_path),
                 "failure_reason": primary_reason,
-                "details": f"{len(rejected_instances)} leaves detected but all rejected by geometric gatekeeping"
+                "details": f"{len(rejected_instances)} leaves detected but all rejected by geometric gatekeeping",
+                "pixels_per_mm": round(float(pixels_per_mm), 4) if is_calibrated_mm else np.nan,
+                "is_calibrated_mm": bool(is_calibrated_mm),
             }
 
         return extracted_records, failure_record
@@ -2422,6 +2501,7 @@ class SegmentAndExtractPipeline:
         if extracted_df.empty:
             extracted_df = pd.DataFrame(columns=manifest_cols + [
                 "plant_individual_id", "assigned_tier", "tier_assignment", "ucs_score",
+                "circularity", "extent", "aspect_ratio", "area_px", "blade_area_cm2",
                 "midrib_angle_deg", "pixels_per_mm", "is_calibrated_mm", "mask_path",
                 "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
                 "capitula_count", "involucre_height_px", "involucre_width_px",

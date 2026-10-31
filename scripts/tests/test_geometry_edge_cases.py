@@ -567,6 +567,89 @@ class TestGeometryEdgeCases(unittest.TestCase):
         desc_partial = compute_classical_shape_descriptors(mask, bbox=(0, 0, 300, 300))
         self.assertLess(desc_partial["extent"], 0.35)
 
+    def test_boundary_continuity_drop_shadow_neighbor_exclusion_and_straight_cut(self) -> None:
+        """Verify drop-shadow/neighbor-mask/petiole-base immunity and multi-edge straight artificial occlusion rejection."""
+        canvas = np.full((420, 420, 3), (235, 238, 240), dtype=np.uint8)
+        leaf_mask = np.zeros((420, 420), dtype=np.uint8)
+        cv2.ellipse(leaf_mask, (185, 200), (65, 130), 0, 0, 360, 255, -1)
+
+        # Neutral mounting-paper drop shadow shifted +9 px right (same neutral chroma as paper, darker luminance)
+        shadow_mask = np.zeros((420, 420), dtype=np.uint8)
+        cv2.ellipse(shadow_mask, (194, 204), (66, 130), 0, 0, 360, 255, -1)
+        canvas[(shadow_mask > 0) & (leaf_mask == 0)] = (158, 160, 162)
+
+        # Distinct neighboring rosette leaf touching the left margin
+        neighbor_mask = np.zeros((420, 420), dtype=np.uint8)
+        cv2.ellipse(neighbor_mask, (92, 205), (50, 115), 0, 0, 360, 255, -1)
+        canvas[neighbor_mask > 0] = (42, 78, 48)
+
+        # Foreground green leaf lamina + thick petiole continuation at base (185, 330)
+        canvas[leaf_mask > 0] = (40, 82, 46)
+        cv2.line(canvas, (185, 328), (185, 405), (40, 82, 46), thickness=12)
+
+        res_ok = check_boundary_tissue_continuity(
+            canvas,
+            leaf_mask,
+            dilation_px=8,
+            max_tissue_border_ratio=0.15,
+            exclude_mask=neighbor_mask,
+            petiole_base_pt=(185.0, 330.0),
+        )
+        self.assertFalse(res_ok["is_severed_lobe"])
+        self.assertLessEqual(res_ok["tissue_border_ratio"], 0.15)
+
+        # Artificial multi-edge straight occlusion (e.g., leaf clipped behind ColorChecker + barcode sticker)
+        occl_canvas = np.full((420, 420, 3), (236, 238, 240), dtype=np.uint8)
+        occl_mask = np.zeros((420, 420), dtype=np.uint8)
+        cv2.ellipse(occl_mask, (190, 180), (95, 155), 18, 0, 360, 255, -1)
+        # Clip top horizontally and right vertically with straight artificial edges
+        occl_mask[:155, :] = 0
+        occl_mask[:, 235:] = 0
+        occl_canvas[occl_mask > 0] = (45, 75, 50)
+
+        res_cut = check_boundary_tissue_continuity(
+            occl_canvas, occl_mask, dilation_px=8, max_tissue_border_ratio=0.15
+        )
+        self.assertTrue(res_cut["is_severed_lobe"])
+        self.assertTrue(res_cut.get("straight_occlusion_cut", False))
+
+    def test_rotation_invariant_extent_preserves_oversized_bbox_penalty(self) -> None:
+        """Verify 45-degree rotated leaves achieve high oriented Extent while oversized external bboxes still fail."""
+        mask_rot = np.zeros((400, 400), dtype=np.uint8)
+        cv2.ellipse(mask_rot, (200, 200), (36, 130), 45, 0, 360, 255, -1)
+        bx, by, bw, bh = cv2.boundingRect(mask_rot)
+        tight_bbox = (by, bx, by + bh, bx + bw)
+
+        desc_rot = compute_classical_shape_descriptors(mask_rot, bbox=tight_bbox)
+        self.assertGreaterEqual(desc_rot["extent"], 0.72)
+
+        desc_oversized = compute_classical_shape_descriptors(mask_rot, bbox=(0, 0, 400, 400))
+        self.assertLess(desc_oversized["extent"], 0.35)
+
+    def test_high_res_pinnatifid_leaf_hull_ucs_routing(self) -> None:
+        """Verify label-blind high-res pinnatifid basal leaf routes to Tier 1 (Dissected) with ucs >= 0.80."""
+        mask = np.zeros((500, 500), dtype=np.uint8)
+        cx = 250
+        # Central rachis + terminal lobe + 3 pairs of symmetric lateral lobes (solidity ~ 0.56-0.66)
+        cv2.ellipse(mask, (cx, 115), (44, 54), 0, 0, 360, 255, -1)
+        cv2.line(mask, (cx, 115), (cx, 395), 255, thickness=26)
+        for ly, rx_lobe, ry_lobe in ((200, 68, 24), (275, 60, 22), (345, 48, 19)):
+            cv2.ellipse(mask, (cx - 42, ly), (rx_lobe, ry_lobe), 0, 0, 360, 255, -1)
+            cv2.ellipse(mask, (cx + 42, ly), (rx_lobe, ry_lobe), 0, 0, 360, 255, -1)
+
+        res = classify_and_route_leaf(
+            mask,
+            taxon=None,
+            sheet_shape=(3753, 5634),
+            already_trimmed=True,
+        )
+        self.assertGreaterEqual(res.solidity, 0.48)
+        self.assertLess(res.solidity, 0.72)
+        self.assertTrue(res.is_dissected)
+        self.assertEqual(res.assigned_tier, "tier1")
+        self.assertIn("Dissected", res.tier)
+        self.assertGreaterEqual(res.ucs, 0.80)
+
 
 if __name__ == "__main__":
     unittest.main()

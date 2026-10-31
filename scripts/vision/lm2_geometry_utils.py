@@ -319,24 +319,157 @@ class BoundaryContinuityResult(dict):
             raise AttributeError(f"'BoundaryContinuityResult' object has no attribute '{name}'") from exc
 
 
+def _has_artificial_straight_occlusion_cut(
+    mask_u8: np.ndarray,
+) -> Tuple[bool, float]:
+    """
+    Detects razor-straight non-biological truncation edges (e.g., leaf blades partially
+    hidden behind a ColorChecker Passport case, herbarium label, barcode sticker, or
+    mounting-tape strip) on native-DPI candidate masks.
+
+    Single longitudinal fold creases are NOT flagged here (those have 1 axial straight
+    chord and are handled by `detect_folded_leaf`); this check specifically flags:
+      - >= 2 distinct non-collinear razor-straight edges totaling >= 26% of perimeter, OR
+      - a transverse razor-straight cut (>= 32 deg off the longitudinal axis) spanning
+        >= 18% of perimeter (>= 75 px) with orthogonal RMS line-fit error <= 1.40 px.
+    """
+    bx, by, bw, bh = cv2.boundingRect(mask_u8)
+    if max(bw, bh) < 220 or min(bw, bh) < 40:
+        return False, 0.0
+
+    cnts, _ = cv2.findContours(
+        mask_u8[by : by + bh, bx : bx + bw],
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_NONE,
+    )
+    if not cnts:
+        return False, 0.0
+    raw_cnt = max(cnts, key=cv2.contourArea)
+    n_pts = len(raw_cnt)
+    if n_pts < 80:
+        return False, 0.0
+
+    area_px = float(cv2.contourArea(raw_cnt))
+    hull_area = float(cv2.contourArea(cv2.convexHull(raw_cnt)))
+    solidity = (area_px / hull_area) if hull_area > 0.0 else 0.0
+    if solidity < 0.62:
+        return False, 0.0
+
+    perim = float(cv2.arcLength(raw_cnt, True))
+    if perim <= 1.0:
+        return False, 0.0
+
+    pts = raw_cnt.reshape(-1, 2).astype(np.float64)
+    m = cv2.moments(raw_cnt)
+    if abs(m["mu20"] - m["mu02"]) > 1e-5 or abs(m["mu11"]) > 1e-5:
+        axis_theta = 0.5 * math.atan2(2.0 * m["mu11"], m["mu20"] - m["mu02"])
+    else:
+        axis_theta = 0.0
+    ax_vx, ax_vy = math.cos(axis_theta), math.sin(axis_theta)
+
+    max_dim = float(max(bw, bh))
+    min_dim = float(min(bw, bh))
+    eps_poly = max(2.2, 0.006 * max_dim)
+    poly = cv2.approxPolyDP(raw_cnt, epsilon=eps_poly, closed=True).reshape(-1, 2).astype(np.float64)
+    if len(poly) < 3:
+        return False, 0.0
+
+    # Map each approxPolyDP vertex back to its exact index in raw_cnt
+    poly_indices: List[int] = []
+    for pv in poly:
+        d2 = (pts[:, 0] - pv[0]) ** 2 + (pts[:, 1] - pv[1]) ** 2
+        poly_indices.append(int(np.argmin(d2)))
+
+    min_seg_len = max(55.0, 0.13 * max_dim)
+    rms_tol = max(1.45, 0.0024 * max_dim)
+    max_tol = max(3.2, 0.0052 * max_dim)
+    trans_rms_tol = max(1.25, 0.0020 * max_dim)
+    trans_max_tol = max(2.8, 0.0046 * max_dim)
+    straight_angles: List[float] = []
+    straight_len_total = 0.0
+    has_transverse_cut = False
+
+    for k in range(len(poly_indices)):
+        i0 = poly_indices[k]
+        i1 = poly_indices[(k + 1) % len(poly_indices)]
+        if i0 == i1:
+            continue
+        p0 = pts[i0]
+        p1 = pts[i1]
+        dx = float(p1[0] - p0[0])
+        dy = float(p1[1] - p0[1])
+        chord_len = math.hypot(dx, dy)
+        if chord_len < min_seg_len:
+            continue
+
+        if i1 > i0:
+            arc_pts = pts[i0 : i1 + 1]
+        else:
+            arc_pts = np.vstack([pts[i0:], pts[: i1 + 1]])
+        if len(arc_pts) < 12:
+            continue
+        # Ensure we picked the direct arc along the polygon edge rather than the complementary loop
+        arc_steps = np.hypot(np.diff(arc_pts[:, 0]), np.diff(arc_pts[:, 1]))
+        arc_len = float(np.sum(arc_steps))
+        if arc_len > 1.15 * chord_len:
+            continue
+
+        ux, uy = dx / chord_len, dy / chord_len
+        perp = (arc_pts[:, 0] - p0[0]) * (-uy) + (arc_pts[:, 1] - p0[1]) * ux
+        rms_dev = float(np.sqrt(np.mean(perp * perp)))
+        max_dev = float(np.max(np.abs(perp)))
+
+        if rms_dev <= rms_tol and max_dev <= max_tol:
+            straight_len_total += chord_len
+            seg_angle = math.atan2(dy, dx) % math.pi
+            # Count distinct non-collinear straight cut directions (>= 15 deg apart)
+            if not any(
+                min(abs(seg_angle - prev_a), math.pi - abs(seg_angle - prev_a)) < math.radians(15.0)
+                for prev_a in straight_angles
+            ):
+                straight_angles.append(seg_angle)
+
+            cos_align = min(1.0, abs(ux * ax_vx + uy * ax_vy))
+            angle_off_axis = math.degrees(math.acos(cos_align))
+            if (
+                angle_off_axis >= 38.0
+                and chord_len >= max(90.0, 0.34 * min_dim)
+                and rms_dev <= trans_rms_tol
+                and max_dev <= trans_max_tol
+            ):
+                has_transverse_cut = True
+
+    straight_ratio = straight_len_total / max(2.0 * (max_dim + min_dim), 1.0)
+    is_cut = bool(
+        (len(straight_angles) >= 2 and straight_len_total >= 0.42 * max_dim)
+        or has_transverse_cut
+    )
+    return is_cut, round(min(1.0, straight_ratio), 6)
+
+
 def check_boundary_tissue_continuity(
     crop_img: Optional[np.ndarray],
     binary_mask: Optional[np.ndarray],
     dilation_px: int = 8,
     max_tissue_border_ratio: float = 0.15,
+    exclude_mask: Optional[np.ndarray] = None,
+    petiole_base_pt: Optional[Tuple[float, float]] = None,
+    inner_gap_px: Optional[int] = None,
 ) -> BoundaryContinuityResult:
     """
     Verifies whether a candidate leaf segmentation mask is a severed single lateral lobe
-    (or internal sub-lamina fragment) rather than an intact whole leaf blade:
-      1. Dilates the binary PointRend mask by `dilation_px` to extract an exterior
-         perimeter ring immediately outside the segmented contour.
-      2. Segments `crop_img` into dark plant lamina tissue vs. bright herbarium mount
-         paper via Otsu thresholding in CIE LAB (`L` channel) / grayscale space.
-      3. Computes `tissue_border_ratio` = fraction of the exterior perimeter ring
-         that abuts contiguous dark plant tissue.
-      4. If `tissue_border_ratio > max_tissue_border_ratio` (default `0.15`, exceeding
-         normal narrow petiole attachment width), flags `is_severed_lobe = True` so
-         the candidate is rejected from Tier 1 `leaf_whole` routing.
+    (or internal sub-lamina / stem-chunk / label-clipped fragment) rather than an intact
+    whole leaf blade:
+      1. Extracts a buffered exterior perimeter ring `(dilated_outer > 0) & (dilated_inner == 0)`
+         so 1-3 px PointRend serration margin conservatism and boundary anti-aliasing are not
+         misclassified as exterior tissue.
+      2. Masks out the trimmed petiole insertion sector around `petiole_base_pt` and any
+         separately segmented distinct neighboring organ masks (`exclude_mask`).
+      3. Matches exterior pixels against the candidate mask's interior lamina luminance and
+         CIE L*a*b* chromaticity envelope (preventing neutral grey paper drop-shadows and
+         photometrically distinct background organs from inflating `tissue_border_ratio`).
+      4. Also flags multi-edge / transverse razor-straight artificial occlusions (e.g., leaves
+         clipped behind ColorChecker rims, barcode stickers, or herbarium labels).
     """
     default_res = BoundaryContinuityResult({
         "is_severed_lobe": False,
@@ -358,17 +491,56 @@ def check_boundary_tissue_continuity(
     else:
         img_work = crop_img
 
-    rad = max(1, int(dilation_px))
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1))
-    dilated = cv2.dilate(mask_u8, kernel, iterations=1)
-    ring_mask = (dilated > 0) & (mask_u8 == 0)
+    bx_m, by_m, bw_m, bh_m = cv2.boundingRect(mask_u8)
+    max_dim = max(bw_m, bh_m)
+    if inner_gap_px is None:
+        gap_px = 1 if max_dim < 280 else max(3, min(14, int(round(0.006 * max_dim))))
+    else:
+        gap_px = max(0, int(inner_gap_px))
+
+    outer_rad = max(1, int(dilation_px), gap_px + max(5, int(dilation_px) - 2))
+    if gap_px > 0:
+        k_inner = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * gap_px + 1, 2 * gap_px + 1))
+        dilated_inner = cv2.dilate(mask_u8, k_inner, iterations=1)
+    else:
+        dilated_inner = mask_u8
+
+    k_outer = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * outer_rad + 1, 2 * outer_rad + 1))
+    dilated_outer = cv2.dilate(mask_u8, k_outer, iterations=1)
+    ring_mask = (dilated_outer > 0) & (dilated_inner == 0)
+
+    if petiole_base_pt is not None and len(petiole_base_pt) >= 2:
+        px_b = int(round(float(petiole_base_pt[0])))
+        py_b = int(round(float(petiole_base_pt[1])))
+        if 0 <= px_b < mw and 0 <= py_b < mh and (px_b, py_b) != (0, 0):
+            pet_rad = max(10, int(round(0.08 * max_dim)))
+            pet_excl = np.zeros((mh, mw), dtype=np.uint8)
+            cv2.circle(pet_excl, (px_b, py_b), pet_rad, 255, -1)
+            trimmed_ring = ring_mask & (pet_excl == 0)
+            if int(np.count_nonzero(trimmed_ring)) >= int(0.50 * np.count_nonzero(ring_mask)):
+                ring_mask = trimmed_ring
+
     ring_count = int(np.count_nonzero(ring_mask))
     if ring_count == 0:
         return default_res
 
+    excl_bool: Optional[np.ndarray] = None
+    if exclude_mask is not None and exclude_mask.size > 0:
+        if exclude_mask.shape[:2] != (mh, mw):
+            excl_rs = cv2.resize(
+                (exclude_mask > 0).astype(np.uint8) * 255,
+                (mw, mh),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            excl_bool = (excl_rs > 0) & (mask_u8 == 0)
+        else:
+            excl_bool = (exclude_mask > 0) & (mask_u8 == 0)
+
+    lab_img: Optional[np.ndarray] = None
     if img_work.ndim == 3 and img_work.shape[2] >= 3:
         bgr_u8 = img_work[:, :, :3].astype(np.uint8)
-        lab_l = cv2.cvtColor(bgr_u8, cv2.COLOR_BGR2LAB)[:, :, 0]
+        lab_img = cv2.cvtColor(bgr_u8, cv2.COLOR_BGR2LAB)
+        lab_l = lab_img[:, :, 0]
         gray = cv2.cvtColor(bgr_u8, cv2.COLOR_BGR2GRAY)
         lum = np.minimum(lab_l, gray)
     else:
@@ -381,9 +553,14 @@ def check_boundary_tissue_continuity(
 
     blurred = cv2.GaussianBlur(lum, (3, 3), 0)
     int_vals = blurred[mask_u8 > 0]
-    far_ext_vals = blurred[dilated == 0]
+    far_bg_mask = dilated_outer == 0
+    if excl_bool is not None:
+        clean_far_bg = far_bg_mask & (~excl_bool)
+        if int(np.count_nonzero(clean_far_bg)) >= 64:
+            far_bg_mask = clean_far_bg
+    far_ext_vals = blurred[far_bg_mask]
     int_med = float(np.median(int_vals)) if int_vals.size > 0 else 128.0
-    ext_ref = float(np.percentile(far_ext_vals, 75)) if far_ext_vals.size > 0 else float(np.percentile(blurred, 85))
+    ext_ref = float(np.percentile(far_ext_vals, 75)) if far_ext_vals.size >= 32 else float(np.percentile(blurred, 85))
 
     # If neither interior nor perimeter ring differs from background paper, no plant contrast is rendered
     ring_vals = blurred[ring_mask]
@@ -398,11 +575,59 @@ def check_boundary_tissue_continuity(
         # Standard herbarium mount sheet (dark plant tissue on bright mount paper)
         otsu_thresh, tissue_bin = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         paper_floor = max(0.0, ext_ref - 15.0)
-        tissue_mask = (tissue_bin > 0) & (blurred <= min(float(otsu_thresh) + 5.0, paper_floor))
+        int_p80 = float(np.percentile(int_vals, 80)) if int_vals.size > 0 else int_med
+        contrast = max(0.0, ext_ref - int_med)
+        lamina_ceil = min(float(otsu_thresh) + 3.0, paper_floor, int_p80 + 0.25 * contrast)
+        tissue_mask = (tissue_bin > 0) & (blurred <= lamina_ceil)
+
+        if lab_img is not None and np.any(tissue_mask & ring_mask):
+            lab_f = lab_img.astype(np.float32)
+            # 1. Neutral paper drop-shadow filter: cast shadows retain background paper (a*, b*) chromaticity
+            paper_sample_mask = far_bg_mask & (blurred >= float(np.percentile(far_ext_vals, 55))) if far_ext_vals.size >= 32 else far_bg_mask
+            if int(np.count_nonzero(paper_sample_mask)) >= 32:
+                ext_a = float(np.median(lab_f[:, :, 1][paper_sample_mask]))
+                ext_b = float(np.median(lab_f[:, :, 2][paper_sample_mask]))
+                int_a = float(np.median(lab_f[:, :, 1][mask_u8 > 0]))
+                int_b = float(np.median(lab_f[:, :, 2][mask_u8 > 0]))
+                leaf_paper_chroma = math.hypot(int_a - ext_a, int_b - ext_b)
+                if leaf_paper_chroma >= 6.5:
+                    px_paper_chroma = np.hypot(lab_f[:, :, 1] - ext_a, lab_f[:, :, 2] - ext_b)
+                    is_paper_shadow = (blurred > int_med) & (px_paper_chroma < (0.42 * leaf_paper_chroma))
+                    tissue_mask = tissue_mask & (~is_paper_shadow)
+
+            # 2. Same-organ interior margin LAB continuity match (distinguishes foreground leaf from
+            #    photometrically distinct background rosette leaves, woody stems, or color targets)
+            rim_rad = max(3, min(12, int(round(0.08 * min(bw_m, bh_m)))))
+            k_rim = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rim_rad + 1, 2 * rim_rad + 1))
+            eroded_m = cv2.erode(mask_u8, k_rim, iterations=1)
+            inner_rim = (mask_u8 > 0) & (eroded_m == 0)
+            if int(np.count_nonzero(inner_rim)) < 24:
+                inner_rim = mask_u8 > 0
+            rim_pixels = lab_f[inner_rim]
+            if rim_pixels.shape[0] >= 16:
+                med_lab = np.median(rim_pixels, axis=0)
+                rim_dists = np.linalg.norm(rim_pixels - med_lab, axis=1)
+                rim_p90 = float(np.percentile(rim_dists, 90))
+                max_lab_dist = max(24.0, 1.85 * rim_p90)
+                ring_lab_dist = np.linalg.norm(lab_f - med_lab, axis=2)
+                tissue_mask = tissue_mask & (ring_lab_dist <= max_lab_dist)
+
+    if excl_bool is not None:
+        tissue_mask = tissue_mask & (~excl_bool)
 
     tissue_ring_px = int(np.count_nonzero(ring_mask & tissue_mask))
     border_ratio = float(tissue_ring_px) / float(ring_count)
     is_severed = bool(border_ratio > float(max_tissue_border_ratio))
+
+    straight_cut_flag = False
+    straight_cut_ratio = 0.0
+    if not is_severed and max_dim >= 220:
+        straight_cut_flag, straight_cut_ratio = _has_artificial_straight_occlusion_cut(mask_u8)
+        if straight_cut_flag:
+            fold_chk = detect_folded_leaf(mask_u8)
+            if not fold_chk.get("is_folded", False) and not fold_chk.get("is_irregular_fold", False):
+                is_severed = True
+                border_ratio = max(border_ratio, straight_cut_ratio)
 
     return BoundaryContinuityResult({
         "is_severed_lobe": is_severed,
@@ -410,6 +635,7 @@ def check_boundary_tissue_continuity(
         "ring_pixel_count": ring_count,
         "tissue_ring_pixels": tissue_ring_px,
         "otsu_threshold": float(otsu_thresh),
+        "straight_occlusion_cut": straight_cut_flag,
     })
 
 
@@ -421,7 +647,9 @@ def compute_classical_shape_descriptors(
     Computes classical dimensionless shape descriptors (Krieger 2017; Russ 2011):
       - Solidity = Area / Convex Hull Area
       - Circularity (Form Factor) = 4 * pi * Area / Perimeter^2
-      - Extent = Mask Area / Bounding Box Area (uses PCD `bbox` if supplied, else tight mask bbox)
+      - Extent = Mask Area / Oriented Bounding Box Area (scaled by external PCD `bbox`
+        inflation so 45-degree mounted leaves remain rotation-invariant while tiny
+        fragments inside oversized PCD boxes remain penalized)
     """
     if mask is None or mask.size == 0:
         return {
@@ -474,13 +702,19 @@ def compute_classical_shape_descriptors(
         else 0.0
     )
 
+    tight_axis_area = float(max(bw * bh, 1))
+    rect_w, rect_h = cv2.minAreaRect(main_cnt)[1]
+    oriented_area = min(tight_axis_area, float(max(rect_w * rect_h, 1.0)))
+
     if bbox is not None and len(bbox) == 4:
         ymin, xmin, ymax, xmax = [int(v) for v in bbox]
         box_h = max(0, ymax - ymin)
         box_w = max(0, xmax - xmin)
-        bbox_area = float(box_h * box_w) if (box_h > 0 and box_w > 0) else float(max(bw * bh, 1))
+        ext_bbox_area = float(box_h * box_w) if (box_h > 0 and box_w > 0) else tight_axis_area
+        inflation = max(1.0, ext_bbox_area / tight_axis_area)
+        bbox_area = oriented_area * inflation
     else:
-        bbox_area = float(max(bw * bh, 1))
+        bbox_area = oriented_area
 
     extent = min(max(area_px / max(bbox_area, 1.0), 0.0), 1.0)
 
@@ -1740,6 +1974,7 @@ def classify_and_route_leaf(
     crop_img: Optional[np.ndarray] = None,
     boundary_dilation_px: int = 8,
     max_tissue_border_ratio: float = 0.15,
+    exclude_mask: Optional[np.ndarray] = None,
 ) -> LeafRoutingResult:
     """
     Comprehensive 100% label-blind geometric quality gatekeeper and routing engine:
@@ -1946,11 +2181,16 @@ def classify_and_route_leaf(
             mask_u8,
             dilation_px=boundary_dilation_px,
             max_tissue_border_ratio=max_tissue_border_ratio,
+            exclude_mask=exclude_mask,
+            petiole_base_pt=p_base,
         )
         meta["boundary_continuity"] = bc_res
-        meta["is_severed_lobe"] = bool(bc_res["is_severed_lobe"])
+        is_bc_severed = bool(bc_res["is_severed_lobe"])
+        if is_bc_severed and bc_res.get("straight_occlusion_cut", False) and (is_folded or is_irregular_fold):
+            is_bc_severed = False
+        meta["is_severed_lobe"] = is_bc_severed
         meta["tissue_border_ratio"] = float(bc_res["tissue_border_ratio"])
-        if bc_res["is_severed_lobe"]:
+        if is_bc_severed:
             return LeafRoutingResult(
                 tier="Failed QC",
                 assigned_tier="rejected",
@@ -2046,12 +2286,17 @@ def classify_and_route_leaf(
         1.0,
         float(cv2.contourArea(hull_cnt)) / max(0.70 * float(rect_cnt[1][0] * rect_cnt[1][1]), 1.0),
     )
-    eff_diss_ucs = max(ucs, hull_ucs) if (is_bipinnatisect_window or not is_high_res_mask) else ucs
+    eff_diss_ucs = (
+        max(ucs, hull_ucs)
+        if (is_bipinnatisect_window or not is_high_res_mask or (ucs >= 0.52 and hull_ucs >= 0.80))
+        else ucs
+    )
+    meta["hull_ucs"] = round(float(hull_ucs), 4)
     allow_dissection = True
     if is_bipinnatisect_window:
         if eff_diss_ucs < 0.55:
             allow_dissection = False
-    elif is_high_res_mask and (ucs < 0.70 or solidity < max(dissection_min_solidity, 0.48)):
+    elif is_high_res_mask and (eff_diss_ucs < 0.80 or ucs < 0.52 or solidity < max(dissection_min_solidity, 0.48)):
         allow_dissection = False
 
     if dissection_enabled and (eff_diss_min_sol <= solidity < min_solidity) and allow_dissection:
@@ -2066,7 +2311,7 @@ def classify_and_route_leaf(
             defect_depth_ratio=sinus_defect_min_depth_ratio,
             min_defect_count=req_defects,
         )
-        min_req_ucs = 0.55 if is_bipinnatisect_window else 0.70
+        min_req_ucs = 0.55 if is_bipinnatisect_window else (0.80 if is_high_res_mask else 0.70)
         if dissected and (eff_diss_ucs >= min_req_ucs or (not is_high_res_mask and eff_diss_ucs >= 0.55)):
             coords = resample_normalized_contour(mask, num_contour_points, petiole_attachment_pt=p_base) if extract_contours else None
             meta["reflection_applied"] = False

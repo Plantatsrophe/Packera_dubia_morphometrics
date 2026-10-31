@@ -1473,6 +1473,80 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertIn("cy_rel_plant_bbox", step02_src)
         self.assertIn("rosette_bbox_fallback_used", step02_src)
 
+    def test_macro_basal_leaf_survival_and_sqlite_descriptor_persistence(self) -> None:
+        """Verify macro-basal leaves survive high-DPI Stage 1/2 bounds and SQLite persists shape descriptors & failed calibration."""
+        from scripts.core.db import get_db_connection, record_voucher_segmentation_transaction
+
+        sheet_h, sheet_w = 5600, 3800
+        sheet_img = np.full((sheet_h, sheet_w, 3), 232, dtype=np.uint8)
+        # Macro-basal leaf bbox: height=2500 px, width=1050 px (exceeds legacy 1300*scale_f and 520*scale_f limits)
+        s1_dets = [((2700, 1200, 5200, 2250), 0.96, 0)]
+
+        def fake_macro_stage2(crops):
+            out = []
+            for crop_img in crops:
+                ch, cw = crop_img.shape[:2]
+                m = np.zeros((ch, cw), dtype=np.uint8)
+                cv2.ellipse(m, (cw // 2, ch // 2), (int(cw * 0.38), int(ch * 0.43)), 0, 0, 360, 255, -1)
+                out.append([((20, 20, ch - 20, cw - 20), m, 0.97, 0)])
+            return out
+
+        self.pipeline.ruler_calibrations["NCU_MACRO"] = 12.5
+        self.pipeline.ruler_calibrations["NCU_FAIL_CAL"] = 11.8
+        with patch("cv2.imread", return_value=sheet_img):
+            with patch.object(self.pipeline.stage1_detector, "predict", return_value=s1_dets):
+                with patch.object(self.pipeline.model_engine, "predict_batch", side_effect=fake_macro_stage2):
+                    records, failure = self.pipeline.process_voucher("NCU_MACRO", self.img_path)
+
+            with patch.object(self.pipeline.stage1_detector, "predict", return_value=[]):
+                with patch.object(self.pipeline.model_engine, "predict", return_value=[]):
+                    fail_records, fail_rec = self.pipeline.process_voucher("NCU_FAIL_CAL", self.img_path)
+
+        self.assertIsNone(failure)
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+        for col in ("circularity", "extent", "aspect_ratio", "area_px", "blade_area_cm2"):
+            self.assertIn(col, rec)
+            self.assertTrue(np.isfinite(float(rec[col])), f"{col} should be finite, got {rec[col]}")
+
+        self.assertEqual(len(fail_records), 0)
+        self.assertIsNotNone(fail_rec)
+        self.assertAlmostEqual(float(fail_rec["pixels_per_mm"]), 11.8, places=3)
+        self.assertTrue(bool(fail_rec["is_calibrated_mm"]))
+
+        conn = get_db_connection(db_path=":memory:", init_schema=True)
+        record_voucher_segmentation_transaction(
+            conn,
+            catalog_number="NCU_MACRO",
+            image_path=str(self.img_path),
+            extracted_records=records,
+            failure_record=None,
+            output_dir=self.pipeline.output_dir,
+        )
+        record_voucher_segmentation_transaction(
+            conn,
+            catalog_number="NCU_FAIL_CAL",
+            image_path=str(self.img_path),
+            extracted_records=[],
+            failure_record=fail_rec,
+            output_dir=self.pipeline.output_dir,
+        )
+        row_leaf = conn.execute(
+            "SELECT circularity, extent, aspect_ratio, area_px, blade_area_cm2 FROM extracted_leaves WHERE catalogNumber = 'NCU_MACRO'"
+        ).fetchone()
+        self.assertIsNotNone(row_leaf)
+        for col in ("circularity", "extent", "aspect_ratio", "area_px", "blade_area_cm2"):
+            self.assertIsNotNone(row_leaf[col], f"SQLite extracted_leaves.{col} must not be NULL")
+
+        row_fail_v = conn.execute(
+            "SELECT qc_status, pixels_per_mm, is_calibrated_mm FROM vouchers WHERE catalogNumber = 'NCU_FAIL_CAL'"
+        ).fetchone()
+        self.assertIsNotNone(row_fail_v)
+        self.assertEqual(row_fail_v["qc_status"], "FAILED_QC")
+        self.assertAlmostEqual(float(row_fail_v["pixels_per_mm"]), 11.8, places=3)
+        self.assertEqual(int(row_fail_v["is_calibrated_mm"]), 1)
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

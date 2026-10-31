@@ -1686,6 +1686,15 @@ def record_voucher_segmentation_transaction(
         c_flag = _to_bool_int(r.get("is_calibrated_mm"))
         if c_flag is not None and is_cal_val is None:
             is_cal_val = c_flag
+    if ppm_val is None and failure_record:
+        p_fail = _to_float(failure_record.get("pixels_per_mm"))
+        if p_fail is not None and p_fail > 0:
+            ppm_val = p_fail
+            is_cal_val = 1
+        elif is_cal_val is None:
+            c_fail = _to_bool_int(failure_record.get("is_calibrated_mm"))
+            if c_fail is not None:
+                is_cal_val = c_fail
 
     qc_status = "PASS" if len(extracted_records) > 0 else "FAILED_QC"
     fail_reason = _to_str(failure_record.get("failure_reason")) if failure_record else None
