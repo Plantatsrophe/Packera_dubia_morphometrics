@@ -828,6 +828,89 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             queue_df = pd.read_csv(out_queue)
             self.assertEqual(len(queue_df), 32)
 
+    def test_cohort_adaptive_19_bioclim_rf_primary_gating_arctic_phenology_and_coord_free_lithology(self):
+        """Verify Tasks 2A-2E: all 19 WorldClim bio1..bio19, anchor-ranked 3-block VIF + RF primary predictor gating, RF-weighted edaphic/climatic z-scores, Arctic late-summer circular phenology, and coordinate-free non-demo lithology/outcrop classification."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        r_code = """
+        suppressPackageStartupMessages({ library(readr); library(dplyr) })
+        source("scripts/core/db_utils.R")
+        source("scripts/morphometrics/authority_weighting_utils.R")
+        source("scripts/analysis/edaphic_fine_grain_utils.R")
+        source("scripts/analysis/06_multimodal_spatial_rf.R")
+
+        # 2A: All 19 WorldClim bioclimatic variables present and aligned with SQLite schema
+        stopifnot(length(WC_BIO_LOOKUP) == 19L)
+        stopifnot(identical(unname(WC_BIO_LOOKUP), PACKERA_DB_WC_BIO_COLS))
+
+        # 2E: Coordinate-free non-demo SGMC & SSURGO classification (Carolina/Georgia coords must NOT trigger outcrop/granitic without attributes)
+        sg_nd <- standardize_sgmc_lithology(c("", ""), lat = c(34.7, 35.9), lon = c(-80.5, -79.1), is_demo = FALSE)
+        stopifnot(all(sg_nd == "Unknown_Lithology"))
+        ss_nd <- classify_ssurgo_outcrop(muname = "", compname = "", lat = 34.7, lon = -80.5, is_demo = FALSE)
+        stopifnot(ss_nd$outcrop_class == "Non-outcrop matrix" && !isTRUE(ss_nd$is_rock_outcrop))
+        ss_ak <- classify_ssurgo_outcrop(muname = "Rock outcrop", compname = "Wake", soil_sand = 82, soil_ph = 5.1, bedrock_depth_cm = 22, rock_outcrop_pct = 28, lat = 64.5, lon = -148.0, is_demo = FALSE)
+        stopifnot(ss_ak$outcrop_class == "Granitic flatrock" && isTRUE(ss_ak$is_rock_outcrop))
+
+        # 2D: Cohort-adaptive circular anthesis gate for Arctic/alpine late-summer cohort (DOY 228..255, Lat 62..67.5)
+        arctic_df <- data.frame(
+          catalogNumber = paste0("ARC_", 1:12),
+          species_standardized = rep(c("Packera hyperborea", "Packera contermina"), each = 6),
+          determiner_tier = "Tier_1_Gold",
+          latitude = seq(62.0, 67.5, length.out = 12),
+          longitude = seq(-149.0, -138.0, length.out = 12),
+          doy = c(228, 232, 235, 238, 241, 245, 236, 240, 244, 248, 252, 255),
+          n_anthesis = c(4, 3, 5, 2, 4, 3, 3, 5, 4, 2, 0, 0),
+          total_capitula = rep(5, 12),
+          voucher_phenological_state = c(rep("Peak_Anthesis", 10), "Unknown", "Unknown"),
+          stringsAsFactors = FALSE
+        )
+        ph_res <- evaluate_circular_phenology(arctic_df, demo = FALSE)
+        stopifnot(sum(ph_res$df$is_verified_anthesis, na.rm = TRUE) >= 10L)
+        stopifnot(all(is.finite(ph_res$df$delta_doy)))
+
+        # 2B & 2C: Anchor-separated tie-breaking in screen_collinear_predictors_by_block + RF-importance-weighted z-scores
+        set.seed(42)
+        n <- 24
+        sp <- rep(c("Packera hyperborea", "Packera contermina"), each = 12)
+        # bio10 separates taxa strongly, while collinear bio1 is mostly shared + noise -> anchor tie-breaking must keep bio10 over bio1!
+        base_t <- seq(-4, 4, length.out = n)
+        df_tb <- data.frame(
+          catalogNumber = paste0("TB_", seq_len(n)),
+          species_standardized = sp,
+          determiner_tier = "Tier_1_Gold",
+          latitude = seq(61.0, 66.0, length.out = n),
+          longitude = seq(-150.0, -140.0, length.out = n),
+          bio10_mean_temp_warmest_qtr = base_t + ifelse(sp == "Packera hyperborea", -2.5, 2.5),
+          bio1_temp_mean = base_t + ifelse(sp == "Packera hyperborea", -0.2, 0.2) + rnorm(n, 0, 0.05),
+          fine_soil_cec = ifelse(sp == "Packera hyperborea", 8.0, 24.0) + rnorm(n, 0, 0.8),
+          topo_tpi_30m = rnorm(n, 0, 1.0),
+          stringsAsFactors = FALSE
+        )
+        # Ensure high collinearity between bio10 and bio1 (|r| > 0.75) while bio10 has much higher anchor F/KW statistic
+        df_tb$bio1_temp_mean <- 0.92 * df_tb$bio10_mean_temp_warmest_qtr + rnorm(n, 0, 0.9)
+        anc_g <- resolve_active_anchor_groups(df_tb)
+        cand_tb <- c("bio1_temp_mean", "bio10_mean_temp_warmest_qtr", "fine_soil_cec", "topo_tpi_30m")
+        blk_tb <- screen_collinear_predictors_by_block(df_tb[, cand_tb], cor.threshold = 0.70, vif.threshold = 5.0, anchor_groups = anc_g)
+        stopifnot("bio10_mean_temp_warmest_qtr" %in% blk_tb$climatic_variables)
+
+        rf_tb <- compute_spatial_rf_mems(df_tb, blk_tb$kept_vars, n_trees = 60, vif_res = blk_tb)
+        prim_tb <- select_primary_predictors_from_rf(rf_tb, blk_tb, df_tb)
+        stopifnot(length(prim_tb$primary_env_vars) >= 1L)
+        cons_tb <- execute_crossmodal_consensus(
+          df_tb, rf_res = rf_tb,
+          primary_env_vars = prim_tb$primary_env_vars,
+          primary_clim_vars = prim_tb$primary_clim_vars,
+          primary_edaph_vars = prim_tb$primary_edaph_vars,
+          rf_var_weights = prim_tb$rf_var_weights
+        )
+        stopifnot(all(c("edaphic_z_score", "climatic_z_score", "primary_env_predictors", "primary_clim_predictors", "primary_edaph_predictors") %in% names(cons_tb)))
+        stopifnot(all(is.finite(cons_tb$edaphic_z_score)))
+        cat("STEP06_COHORT_ADAPTIVE_OK\\n")
+        """
+        res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"Step 06 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
+        self.assertIn("STEP06_COHORT_ADAPTIVE_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

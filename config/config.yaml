@@ -116,7 +116,12 @@ harvesting:
   download_concurrency: 15
 
 # Phase 2: PointRend Segmentation & Geometric Leaf Extraction
+# Cohort-adaptive mode derives empirical organ geometry bounds from verified Gold/Silver
+# anchors when N_anchor >= min_anchor_n_for_empirical (5); scalar thresholds below serve
+# as physical safety bounds and low-sample fallbacks when N_anchor < 5.
 segmentation:
+  cohort_adaptive_mode: true
+  min_anchor_n_for_empirical: 5
   model_weights: "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
   detector_version: "PLANT_LeafPriority"
   minimum_confidence_threshold: 0.65
@@ -129,6 +134,8 @@ segmentation:
   min_circularity: 0.25
   min_extent: 0.35
   min_blade_area_cm2: 0.75
+  min_blade_area_floor_cm2: 0.15
+  rosette_plant_bbox_lower_fraction: 0.60
   max_tissue_border_ratio: 0.15
   max_petiole_width_ratio: 0.105
   cordate_guard_width_ratio: 0.165
@@ -144,8 +151,14 @@ leaf_segmentation:
   use_efds_for_png_masks: false
   do_apply_landmarks: false
 
-# Phase 3: Elliptic Fourier Analysis & Statistical Morphometrics (Momocs / MorphoTools2)
+# Phase 3 & 4: Elliptic Fourier Analysis & Statistical Morphometrics (Momocs / MorphoTools2)
+# Cohort-adaptive mode dynamically calibrates EFD harmonic order (A1..D24, >=99% cumulative
+# harmonic power within [min_harmonics, max_harmonics]) and retained PCA dimensionality
+# (PC1..PC15 / Sym_PC1..Sym_PC15, >=95% variance within [min_export_pcs, max_export_pcs]);
+# scalar defaults below act as safety bounds and low-sample fallbacks when N_anchor < 5.
 morphometrics:
+  cohort_adaptive_mode: true
+  min_anchor_n_for_empirical: 5
   nb_harmonics: 12
   symmetrize_efa_harmonics: true
   correct_allometry: "auto"
@@ -154,16 +167,68 @@ morphometrics:
   num_pcs: 5
   max_k: 8
   random_seed: 42
+  fourier:
+    cohort_adaptive_mode: true
+    min_anchor_n_for_empirical: 5
+    min_harmonics: 6
+    max_harmonics: 24
+    target_harmonic_power: 0.99
+    target_pca_variance: 0.95
+    min_export_pcs: 5
+    max_export_pcs: 15
+  gmm:
+    cohort_adaptive_mode: true
+    min_anchor_n_for_empirical: 5
   normalization:
     align_major_axis: true
     scale_invariant: true
     rotation_invariant: true
     start_point_invariant: true
 
-# Phase 6: Macroecology & Phenological Spatial Statistics
+# Phase 6: Macroecology, 19-Variable Bioclimatic/Edaphic Spatial RF & Hopkins Phenology
+# Cohort-adaptive mode derives empirical flowering DOY/latitude envelopes and prunes
+# collinear predictors (|r| < cor_threshold, VIF < vif_threshold) across all 19 WorldClim
+# bioclimatic rasters and 0-15 cm rhizosphere/outcrop layers when N_anchor >= 5; configured
+# bounds below act as safety floors/ceilings and low-sample fallbacks when N_anchor < 5.
 macroecology:
+  cohort_adaptive_mode: true
+  min_anchor_n_for_empirical: 5
   phenology:
+    cohort_adaptive_mode: true
+    min_anchor_n_for_empirical: 5
     min_flowering_doy: 60
     max_flowering_doy: 220
+    min_flowering_lat: 24.0
+    max_flowering_lat: 55.0
     robust_regression: true
+  spatial_rf:
+    cohort_adaptive_mode: true
+    min_anchor_n_for_empirical: 5
+    cor_threshold: 0.70
+    vif_threshold: 5.0
+    cumulative_importance_cutoff: 0.85
+
+# Top-level Spatial RF mirror section for direct stage configuration lookup
+spatial_rf:
+  cohort_adaptive_mode: true
+  min_anchor_n_for_empirical: 5
+  cor_threshold: 0.70
+  vif_threshold: 5.0
+  cumulative_importance_cutoff: 0.85
+
+# Phase 7: Integrative Taxonomic Triage & Consensus Decision Matrix
+# Cohort-adaptive mode derives empirical Hopkins-adjusted phenological residual cutoffs
+# from anchor dispersion when N_anchor >= 5; ecotype_ddoy_cutoff_days (14.0) and
+# cryptic_ddoy_cutoff_days (18.0) serve as safety bounds / fallbacks when N_anchor < 5.
+triage:
+  cohort_adaptive_mode: true
+  min_anchor_n_for_empirical: 5
+  ecotype_ddoy_cutoff_days: 14.0
+  cryptic_ddoy_cutoff_days: 18.0
+
+synthesis:
+  cohort_adaptive_mode: true
+  min_anchor_n_for_empirical: 5
+  ecotype_ddoy_cutoff_days: 14.0
+  cryptic_ddoy_cutoff_days: 18.0
 

@@ -1584,6 +1584,40 @@ def normalize_assigned_tier(tier_value: str) -> str:
     return CANONICAL_TIER_MAP.get(clean, CANONICAL_TIER_MAP.get(clean.lower(), clean))
 
 
+def compute_sheet_adaptive_min_blade_area_cm2(
+    candidate_areas_cm2: Any,
+    config_min_blade_area_cm2: float = 0.75,
+    absolute_floor_cm2: float = 0.15,
+) -> float:
+    """
+    Computes a cohort/sheet-adaptive physical minimum blade area threshold (cm^2)
+    for calibrated herbarium sheets so mature basal leaves of dwarf/alpine Packera
+    taxa (e.g., ~0.25-0.45 cm^2) pass while tiny noise fragments on standard
+    macro-leaved sheets remain rejected:
+        effective_min_area_cm2 = min(config_min_blade_area_cm2, max(0.15, 0.25 * median_sheet_leaf_area_cm2))
+    Falls back to `config_min_blade_area_cm2` when `candidate_areas_cm2` is empty
+    or contains no positive finite areas.
+    """
+    cfg_floor = float(config_min_blade_area_cm2)
+    abs_floor = float(absolute_floor_cm2)
+    if candidate_areas_cm2 is None:
+        return cfg_floor
+    valid_areas: List[float] = []
+    for val in candidate_areas_cm2:
+        if val is None:
+            continue
+        try:
+            fval = float(val)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(fval) and fval > 0.0:
+            valid_areas.append(fval)
+    if not valid_areas:
+        return cfg_floor
+    median_sheet_leaf_area_cm2 = float(np.median(valid_areas))
+    return float(min(cfg_floor, max(abs_floor, 0.25 * median_sheet_leaf_area_cm2)))
+
+
 def is_cauline_or_stem_contaminant(
     *,
     cy: float,

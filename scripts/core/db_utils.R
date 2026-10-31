@@ -30,6 +30,175 @@ PACKERA_DB_LOGICAL_COLS <- c(
   "is_completed_voucher"
 )
 
+PACKERA_DB_HARMONIC_COLS <- as.vector(vapply(
+  1:24,
+  function(i) paste0(c("A", "B", "C", "D"), i),
+  character(4)
+))
+PACKERA_DB_PC_COLS <- paste0("PC", 1:15)
+PACKERA_DB_SYM_PC_COLS <- paste0("Sym_PC", 1:15)
+PACKERA_DB_WC_BIO_COLS <- c(
+  "bio1_temp_mean",
+  "bio2_mean_diurnal_range",
+  "bio3_isothermality",
+  "bio4_temp_seasonality",
+  "bio5_max_temp_warmest_month",
+  "bio6_min_temp_coldest_month",
+  "bio7_temp_annual_range",
+  "bio8_mean_temp_wettest_qtr",
+  "bio9_mean_temp_driest_qtr",
+  "bio10_mean_temp_warmest_qtr",
+  "bio11_mean_temp_coldest_qtr",
+  "bio12_precip_annual",
+  "bio13_precip_wettest_month",
+  "bio14_precip_driest_month",
+  "bio15_precip_seasonality",
+  "bio16_precip_wettest_qtr",
+  "bio17_precip_driest_qtr",
+  "bio18_precip_warmest_qtr",
+  "bio19_precip_coldest_qtr"
+)
+
+.coalesce_wc_bio_qt_qtr_df <- function(df) {
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(df)
+  pairs <- list(
+    c("bio18_precip_warmest_qtr", "bio18_precip_warmest_qt"),
+    c("bio19_precip_coldest_qtr", "bio19_precip_coldest_qt")
+  )
+  for (pr in pairs) {
+    qtr_c <- pr[1]
+    qt_c <- pr[2]
+    has_qtr <- qtr_c %in% names(df)
+    has_qt <- qt_c %in% names(df)
+    if (!has_qtr && !has_qt) next
+    v_qtr <- if (has_qtr) suppressWarnings(as.numeric(df[[qtr_c]])) else rep(NA_real_, nrow(df))
+    v_qt <- if (has_qt) suppressWarnings(as.numeric(df[[qt_c]])) else rep(NA_real_, nrow(df))
+    v_qtr[!is.finite(v_qtr)] <- NA_real_
+    v_qt[!is.finite(v_qt)] <- NA_real_
+    df[[qtr_c]] <- ifelse(!is.na(v_qtr), v_qtr, v_qt)
+    df[[qt_c]] <- ifelse(!is.na(v_qt), v_qt, v_qtr)
+  }
+  df
+}
+
+.normalize_semicolon_col_r <- function(v) {
+  if (is.null(v)) return(NULL)
+  if (is.list(v)) {
+    return(vapply(v, function(el) {
+      if (is.null(el) || length(el) == 0L) return(NA_character_)
+      toks <- trimws(as.character(unlist(el)))
+      toks <- toks[!is.na(toks) & nzchar(toks)]
+      if (length(toks) == 0L) NA_character_ else paste(toks, collapse = ";")
+    }, character(1)))
+  }
+  as.character(v)
+}
+
+.dynamic_sqlite_table_specs_r <- function(table_name) {
+  if (identical(table_name, "leaf_efa_harmonics")) {
+    return(c(
+      stats::setNames(rep("REAL", length(PACKERA_DB_HARMONIC_COLS)), PACKERA_DB_HARMONIC_COLS),
+      stats::setNames(rep("REAL", length(PACKERA_DB_PC_COLS)), PACKERA_DB_PC_COLS),
+      stats::setNames(rep("REAL", length(PACKERA_DB_SYM_PC_COLS)), PACKERA_DB_SYM_PC_COLS),
+      c(efd_harmonic_opt = "INTEGER", efd_k95_pcs = "INTEGER")
+    ))
+  }
+  if (identical(table_name, "otu_morphometrics")) {
+    return(c(
+      stats::setNames(rep("REAL", length(PACKERA_DB_HARMONIC_COLS)), PACKERA_DB_HARMONIC_COLS),
+      stats::setNames(rep("REAL", length(PACKERA_DB_PC_COLS)), PACKERA_DB_PC_COLS),
+      stats::setNames(rep("REAL", length(PACKERA_DB_SYM_PC_COLS)), PACKERA_DB_SYM_PC_COLS),
+      c(
+        efd_harmonic_opt = "INTEGER",
+        efd_k95_pcs = "INTEGER",
+        selected_morph_features = "TEXT"
+      )
+    ))
+  }
+  if (identical(table_name, "spatial_rf_predictions")) {
+    return(c(
+      stats::setNames(rep("REAL", length(PACKERA_DB_WC_BIO_COLS)), PACKERA_DB_WC_BIO_COLS),
+      c(
+        bio18_precip_warmest_qt = "REAL",
+        bio19_precip_coldest_qt = "REAL",
+        climatic_z_score = "REAL",
+        primary_env_predictors = "TEXT",
+        primary_clim_predictors = "TEXT",
+        primary_edaph_predictors = "TEXT"
+      )
+    ))
+  }
+  if (identical(table_name, "environmental_cache")) {
+    return(c(
+      stats::setNames(rep("REAL", length(PACKERA_DB_WC_BIO_COLS)), PACKERA_DB_WC_BIO_COLS),
+      c(
+        bio18_precip_warmest_qt = "REAL",
+        bio19_precip_coldest_qt = "REAL"
+      )
+    ))
+  }
+  character(0)
+}
+
+.migrate_dynamic_sqlite_table_r <- function(conn, table_name) {
+  if (is.null(conn) || !db_table_exists_safe(conn, table_name)) return(FALSE)
+  specs <- .dynamic_sqlite_table_specs_r(table_name)
+  if (length(specs) == 0L) return(FALSE)
+  existing <- tryCatch(DBI::dbListFields(conn, table_name), error = function(e) character(0))
+  if (length(existing) == 0L) return(FALSE)
+  missing_cols <- setdiff(names(specs), existing)
+  if (length(missing_cols) == 0L) return(FALSE)
+
+  q_tbl <- as.character(DBI::dbQuoteIdentifier(conn, table_name))
+  added_any <- FALSE
+  for (cn in missing_cols) {
+    col_type <- specs[[cn]]
+    q_col <- as.character(DBI::dbQuoteIdentifier(conn, cn))
+    ok <- tryCatch({
+      DBI::dbExecute(conn, sprintf("ALTER TABLE %s ADD COLUMN %s %s;", q_tbl, q_col, col_type))
+      TRUE
+    }, error = function(e) FALSE)
+    if (isTRUE(ok)) added_any <- TRUE
+  }
+
+  updated_fields <- tryCatch(DBI::dbListFields(conn, table_name), error = function(e) existing)
+  if (all(c("bio18_precip_warmest_qtr", "bio18_precip_warmest_qt",
+            "bio19_precip_coldest_qtr", "bio19_precip_coldest_qt") %in% updated_fields)) {
+    tryCatch(
+      DBI::dbExecute(
+        conn,
+        sprintf(
+          paste0(
+            "UPDATE %s SET ",
+            "bio18_precip_warmest_qtr = COALESCE(bio18_precip_warmest_qtr, bio18_precip_warmest_qt), ",
+            "bio18_precip_warmest_qt = COALESCE(bio18_precip_warmest_qt, bio18_precip_warmest_qtr), ",
+            "bio19_precip_coldest_qtr = COALESCE(bio19_precip_coldest_qtr, bio19_precip_coldest_qt), ",
+            "bio19_precip_coldest_qt = COALESCE(bio19_precip_coldest_qt, bio19_precip_coldest_qtr) ",
+            "WHERE (bio18_precip_warmest_qtr IS NULL AND bio18_precip_warmest_qt IS NOT NULL) ",
+            "   OR (bio18_precip_warmest_qt IS NULL AND bio18_precip_warmest_qtr IS NOT NULL) ",
+            "   OR (bio19_precip_coldest_qtr IS NULL AND bio19_precip_coldest_qt IS NOT NULL) ",
+            "   OR (bio19_precip_coldest_qt IS NULL AND bio19_precip_coldest_qtr IS NOT NULL);"
+          ),
+          q_tbl
+        )
+      ),
+      error = function(e) NULL
+    )
+  }
+  added_any
+}
+
+.migrate_dynamic_sqlite_schema_r <- function(conn) {
+  if (is.null(conn)) return(FALSE)
+  changed <- FALSE
+  for (tbl in c("leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "environmental_cache")) {
+    if (isTRUE(.migrate_dynamic_sqlite_table_r(conn, tbl))) {
+      changed <- TRUE
+    }
+  }
+  changed
+}
+
 resolve_packera_run_id <- function(run_id = NULL) {
   if (!is.null(run_id) && nzchar(trimws(as.character(run_id)[1]))) {
     return(trimws(as.character(run_id)[1]))
@@ -92,6 +261,25 @@ is_sqlite_active_for_inputs <- function(input_paths = character(0), demo = FALSE
   TRUE
 }
 
+.run_python_db_init_schema <- function(eff_path) {
+  if (identical(eff_path, ":memory:")) return(invisible(FALSE))
+  py_bin <- if (file.exists(".venv/bin/python")) ".venv/bin/python" else Sys.which("python3")
+  if (!nzchar(py_bin)) return(invisible(FALSE))
+  tryCatch({
+    system2(
+      py_bin,
+      args = c(
+        "-c",
+        "import sys; from scripts.core.db import get_db_connection; c = get_db_connection(sys.argv[1], init_schema=True); c.close()",
+        eff_path
+      ),
+      stdout = FALSE,
+      stderr = FALSE
+    )
+    TRUE
+  }, error = function(e) FALSE)
+}
+
 connect_packera_db <- function(
   db_path = Sys.getenv("PACKERA_DB_PATH", ""),
   read_only = FALSE,
@@ -123,17 +311,7 @@ connect_packera_db <- function(
     dir.create(dirname(eff_path), recursive = TRUE, showWarnings = FALSE)
     if (!file.exists(eff_path)) {
       # Initialize full schema via Python scripts.core.db if creating a fresh DB file from R
-      py_bin <- if (file.exists(".venv/bin/python")) ".venv/bin/python" else Sys.which("python3")
-      if (nzchar(py_bin)) {
-        tryCatch(
-          system2(
-            py_bin,
-            args = c("-c", "import sys; from scripts.core.db import get_db_connection; c = get_db_connection(sys.argv[1], init_schema=True); c.close()", eff_path),
-            stdout = FALSE, stderr = FALSE
-          ),
-          error = function(e) NULL
-        )
-      }
+      .run_python_db_init_schema(eff_path)
     }
   }
 
@@ -148,6 +326,33 @@ connect_packera_db <- function(
     DBI::dbExecute(conn, "PRAGMA foreign_keys = ON;")
     DBI::dbExecute(conn, "PRAGMA busy_timeout = 30000;")
   }, error = function(e) NULL)
+
+  schema_migrated <- .migrate_dynamic_sqlite_schema_r(conn)
+  if (!identical(eff_path, ":memory:")) {
+    view_needs_refresh <- schema_migrated
+    if (!view_needs_refresh && db_table_exists_safe(conn, "v_integrative_triage_master")) {
+      v_cols <- tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0))
+      if (length(v_cols) > 0L && !all(c("PC15", "Sym_PC15", "selected_morph_features", "climatic_z_score", "bio19_precip_coldest_qtr") %in% v_cols)) {
+        view_needs_refresh <- TRUE
+      }
+    }
+    if (isTRUE(view_needs_refresh)) {
+      disconnect_packera_db(conn)
+      .run_python_db_init_schema(eff_path)
+      conn <- tryCatch(
+        DBI::dbConnect(RSQLite::SQLite(), dbname = eff_path),
+        error = function(e) NULL
+      )
+      if (!is.null(conn)) {
+        tryCatch({
+          DBI::dbExecute(conn, "PRAGMA journal_mode = WAL;")
+          DBI::dbExecute(conn, "PRAGMA synchronous = NORMAL;")
+          DBI::dbExecute(conn, "PRAGMA foreign_keys = ON;")
+          DBI::dbExecute(conn, "PRAGMA busy_timeout = 30000;")
+        }, error = function(e) NULL)
+      }
+    }
+  }
   conn
 }
 
@@ -219,6 +424,7 @@ db_upsert_dataframe <- function(
   if (is.null(conn) || is.null(df) || nrow(df) == 0L) return(0L)
   if (!db_table_exists_safe(conn, table_name)) return(0L)
 
+  .migrate_dynamic_sqlite_table_r(conn, table_name)
   tbl_fields <- DBI::dbListFields(conn, table_name)
   keep_cols <- intersect(names(df), tbl_fields)
   if (!all(pk_cols %in% keep_cols)) {
@@ -229,6 +435,10 @@ db_upsert_dataframe <- function(
   sub_df <- as.data.frame(df[, keep_cols, drop = FALSE], stringsAsFactors = FALSE)
   for (cn in keep_cols) {
     col_v <- sub_df[[cn]]
+    if (is.list(col_v)) {
+      col_v <- .normalize_semicolon_col_r(col_v)
+      sub_df[[cn]] <- col_v
+    }
     if (is.factor(col_v)) {
       sub_df[[cn]] <- as.character(col_v)
     } else if (is.logical(col_v)) {
@@ -514,6 +724,24 @@ fetch_step03_contours_from_db <- function(
   )
 }
 
+.normalize_morph_dynamic_cols_r <- function(df) {
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(df)
+  for (ic in intersect(c("plant_individual_id", "leaf_id", "efd_harmonic_opt", "efd_k95_pcs"), names(df))) {
+    df[[ic]] <- suppressWarnings(as.integer(df[[ic]]))
+  }
+  if ("selected_morph_features" %in% names(df)) {
+    df[["selected_morph_features"]] <- .normalize_semicolon_col_r(df[["selected_morph_features"]])
+  }
+  dyn_num_cols <- intersect(
+    c(PACKERA_DB_HARMONIC_COLS, PACKERA_DB_PC_COLS, PACKERA_DB_SYM_PC_COLS),
+    names(df)
+  )
+  for (nc in dyn_num_cols) {
+    df[[nc]] <- suppressWarnings(as.numeric(df[[nc]]))
+  }
+  df
+}
+
 persist_step03_to_sqlite <- function(
   efa_df,
   specimen_df,
@@ -529,7 +757,7 @@ persist_step03_to_sqlite <- function(
   ensure_pipeline_run_r(conn, run_id = rid)
 
   if (!is.null(efa_df) && nrow(efa_df) > 0L) {
-    ind_out <- as.data.frame(efa_df, stringsAsFactors = FALSE)
+    ind_out <- .normalize_morph_dynamic_cols_r(as.data.frame(efa_df, stringsAsFactors = FALSE))
     ind_out$run_id <- rid
     if (!("plant_individual_id" %in% names(ind_out))) ind_out$plant_individual_id <- 0L
     ind_out$plant_individual_id[is.na(ind_out$plant_individual_id)] <- 0L
@@ -543,7 +771,7 @@ persist_step03_to_sqlite <- function(
   }
 
   if (!is.null(specimen_df) && nrow(specimen_df) > 0L) {
-    otu_out <- as.data.frame(specimen_df, stringsAsFactors = FALSE)
+    otu_out <- .normalize_morph_dynamic_cols_r(as.data.frame(specimen_df, stringsAsFactors = FALSE))
     otu_out$run_id <- rid
     if (!("plant_individual_id" %in% names(otu_out))) otu_out$plant_individual_id <- 0L
     otu_out$plant_individual_id[is.na(otu_out$plant_individual_id)] <- 0L
@@ -644,7 +872,7 @@ persist_step04_to_sqlite <- function(
   rid <- resolve_packera_run_id(run_id)
   ensure_pipeline_run_r(conn, run_id = rid, focal_taxon = focal_taxon, intraspecific_mode = intraspecific_mode)
 
-  df_db <- as.data.frame(out_df, stringsAsFactors = FALSE)
+  df_db <- .normalize_morph_dynamic_cols_r(as.data.frame(out_df, stringsAsFactors = FALSE))
   df_db$run_id <- rid
   if (!("plant_individual_id" %in% names(df_db))) df_db$plant_individual_id <- 0L
   df_db$plant_individual_id[is.na(df_db$plant_individual_id)] <- 0L
@@ -716,7 +944,8 @@ query_environmental_cache_sqlite <- function(
       ),
       error = function(e) NULL
     )
-    return(coerce_sqlite_logical_cols(res))
+    if (is.null(res) || nrow(res) == 0L) return(NULL)
+    return(.coalesce_wc_bio_qt_qtr_df(coerce_sqlite_logical_cols(res)))
   }
 
   clauses <- character(0)
@@ -744,7 +973,25 @@ query_environmental_cache_sqlite <- function(
   }
   res <- tryCatch(DBI::dbGetQuery(conn, sql), error = function(e) NULL)
   if (is.null(res) || nrow(res) == 0L) return(NULL)
-  coerce_sqlite_logical_cols(res)
+  .coalesce_wc_bio_qt_qtr_df(coerce_sqlite_logical_cols(res))
+}
+
+load_environmental_cache_sqlite <- function(
+  cache_path = NULL,
+  db_path = NULL,
+  catalog_numbers = NULL,
+  lat_lon_keys = NULL,
+  bbox = NULL,
+  demo = FALSE
+) {
+  query_environmental_cache_sqlite(
+    catalog_numbers = catalog_numbers,
+    lat_lon_keys = lat_lon_keys,
+    bbox = bbox,
+    cache_path = cache_path,
+    db_path = db_path,
+    demo = demo
+  )
 }
 
 upsert_environmental_cache_sqlite <- function(
@@ -760,7 +1007,10 @@ upsert_environmental_cache_sqlite <- function(
   on.exit(disconnect_packera_db(conn), add = TRUE)
   if (!db_table_exists_safe(conn, "environmental_cache")) return(invisible(0L))
 
-  env_df <- as.data.frame(df, stringsAsFactors = FALSE)
+  env_df <- .coalesce_wc_bio_qt_qtr_df(as.data.frame(df, stringsAsFactors = FALSE))
+  for (bc in intersect(c(PACKERA_DB_WC_BIO_COLS, "bio18_precip_warmest_qt", "bio19_precip_coldest_qt"), names(env_df))) {
+    env_df[[bc]] <- suppressWarnings(as.numeric(env_df[[bc]]))
+  }
   if (!("latitude" %in% names(env_df)) && "decimalLatitude" %in% names(env_df)) {
     env_df$latitude <- suppressWarnings(as.numeric(env_df$decimalLatitude))
   }
@@ -801,7 +1051,8 @@ persist_step06_to_sqlite <- function(
   if (isTRUE(demo) || is.null(vouchers_df) || nrow(vouchers_df) == 0L) return(invisible(FALSE))
   if (!is_sqlite_active_for_inputs(vouchers_path, demo = demo)) return(invisible(FALSE))
 
-  upsert_environmental_cache_sqlite(vouchers_df, cache_path = vouchers_path, demo = demo)
+  srf_df <- .coalesce_wc_bio_qt_qtr_df(as.data.frame(vouchers_df, stringsAsFactors = FALSE))
+  upsert_environmental_cache_sqlite(srf_df, cache_path = vouchers_path, demo = demo)
 
   conn <- connect_packera_db(read_only = FALSE, demo = FALSE)
   if (is.null(conn)) return(invisible(FALSE))
@@ -810,17 +1061,28 @@ persist_step06_to_sqlite <- function(
   rid <- resolve_packera_run_id(run_id)
   ensure_pipeline_run_r(conn, run_id = rid)
 
-  srf_df <- as.data.frame(vouchers_df, stringsAsFactors = FALSE)
   srf_df$run_id <- rid
   if (!("plant_individual_id" %in% names(srf_df))) srf_df$plant_individual_id <- 0L
+  srf_df$plant_individual_id <- suppressWarnings(as.integer(srf_df$plant_individual_id))
   srf_df$plant_individual_id[is.na(srf_df$plant_individual_id)] <- 0L
 
-  if (!("lat_lon_key" %in% names(srf_df)) && all(c("latitude", "longitude") %in% names(srf_df))) {
-    lat_n <- suppressWarnings(as.numeric(srf_df$latitude))
-    lon_n <- suppressWarnings(as.numeric(srf_df$longitude))
-    ok_ll <- !is.na(lat_n) & !is.na(lon_n)
-    srf_df$lat_lon_key <- NA_character_
-    srf_df$lat_lon_key[ok_ll] <- sprintf("%.5f_%.5f", lat_n[ok_ll], lon_n[ok_ll])
+  for (pc in intersect(c("primary_env_predictors", "primary_clim_predictors", "primary_edaph_predictors"), names(srf_df))) {
+    srf_df[[pc]] <- .normalize_semicolon_col_r(srf_df[[pc]])
+  }
+  for (nc in intersect(c("edaphic_z_score", "climatic_z_score", PACKERA_DB_WC_BIO_COLS, "bio18_precip_warmest_qt", "bio19_precip_coldest_qt"), names(srf_df))) {
+    srf_df[[nc]] <- suppressWarnings(as.numeric(srf_df[[nc]]))
+  }
+
+  if (!("lat_lon_key" %in% names(srf_df))) {
+    lat_src <- if ("latitude" %in% names(srf_df)) srf_df$latitude else if ("decimalLatitude" %in% names(srf_df)) srf_df$decimalLatitude else NULL
+    lon_src <- if ("longitude" %in% names(srf_df)) srf_df$longitude else if ("decimalLongitude" %in% names(srf_df)) srf_df$decimalLongitude else NULL
+    if (!is.null(lat_src) && !is.null(lon_src)) {
+      lat_n <- suppressWarnings(as.numeric(lat_src))
+      lon_n <- suppressWarnings(as.numeric(lon_src))
+      ok_ll <- !is.na(lat_n) & !is.na(lon_n) & is.finite(lat_n) & is.finite(lon_n)
+      srf_df$lat_lon_key <- NA_character_
+      srf_df$lat_lon_key[ok_ll] <- sprintf("%.5f_%.5f", lat_n[ok_ll], lon_n[ok_ll])
+    }
   }
 
   db_upsert_dataframe(
@@ -850,7 +1112,7 @@ fetch_run_master_view <- function(conn, run_id = resolve_packera_run_id()) {
   )
   if (is.null(res) || nrow(res) == 0L) return(NULL)
   res$run_id <- NULL
-  coerce_sqlite_logical_cols(res)
+  .coalesce_wc_bio_qt_qtr_df(coerce_sqlite_logical_cols(res))
 }
 
 try_fetch_master_view_for_cohort <- function(
@@ -935,6 +1197,59 @@ persist_step07_to_sqlite <- function(
   invisible(TRUE)
 }
 
+.discover_step08_eco_cols <- function(col_names) {
+  if (is.null(col_names) || length(col_names) == 0L) return(character(0))
+  eco_pattern <- paste0(
+    "^(bio[0-9]+_|fine_|ssurgo_|soil_|topo_|polaris_|solus_|sgmc_|primary_.*_predictors$)",
+    "|(^|_)(schoener_d|edaphic_z_score|climatic_z_score|delta_doy|hopkins_)"
+  )
+  setdiff(
+    grep(eco_pattern, col_names, value = TRUE, ignore.case = TRUE),
+    c("catalogNumber", "plant_individual_id")
+  )
+}
+
+.discover_step08_dynamic_morph_cols <- function(col_names) {
+  if (is.null(col_names) || length(col_names) == 0L) return(character(0))
+  morph_pattern <- "^(Sym_PC[0-9]+|PC[0-9]+|[ABCD][0-9]+|efd_harmonic_opt|efd_k95_pcs|selected_morph_features)$"
+  grep(morph_pattern, col_names, value = TRUE)
+}
+
+.backfill_cols_by_composite_key <- function(target_df, src_df, cols_to_merge) {
+  if (is.null(target_df) || nrow(target_df) == 0L || is.null(src_df) || nrow(src_df) == 0L) {
+    return(target_df)
+  }
+  if (!("catalogNumber" %in% names(target_df)) || !("catalogNumber" %in% names(src_df))) {
+    return(target_df)
+  }
+  cols_eff <- intersect(setdiff(cols_to_merge, c("catalogNumber", "plant_individual_id")), names(src_df))
+  if (length(cols_eff) == 0L) return(target_df)
+
+  src_df$catalogNumber <- as.character(src_df$catalogNumber)
+  has_pid <- ("plant_individual_id" %in% names(target_df)) && ("plant_individual_id" %in% names(src_df))
+  idx_pid <- if (has_pid) {
+    t_pid <- ifelse(is.na(target_df$plant_individual_id), 0L, as.integer(target_df$plant_individual_id))
+    s_pid <- ifelse(is.na(src_df$plant_individual_id), 0L, as.integer(src_df$plant_individual_id))
+    match(paste0(target_df$catalogNumber, "__", t_pid), paste0(src_df$catalogNumber, "__", s_pid))
+  } else {
+    rep(NA_integer_, nrow(target_df))
+  }
+  src_cat <- src_df[!duplicated(src_df$catalogNumber), , drop = FALSE]
+  idx_cat <- match(target_df$catalogNumber, src_cat$catalogNumber)
+
+  for (cl in cols_eff) {
+    cur <- if (cl %in% names(target_df)) target_df[[cl]] else rep(NA, nrow(target_df))
+    miss_cur <- is.na(cur) | (is.character(cur) & !nzchar(trimws(cur)))
+    hp <- miss_cur & !is.na(idx_pid)
+    if (any(hp)) cur[hp] <- src_df[[cl]][idx_pid[hp]]
+    miss_cur2 <- is.na(cur) | (is.character(cur) & !nzchar(trimws(cur)))
+    hc <- miss_cur2 & !is.na(idx_cat)
+    if (any(hc)) cur[hc] <- src_cat[[cl]][idx_cat[hc]]
+    target_df[[cl]] <- cur
+  }
+  target_df
+}
+
 load_step08_merged_inputs <- function(opts, standardize_fn) {
   in_paths <- c(opts$morphometrics, opts$harmonics, opts$vision_audit, opts$vouchers, opts$multimodal)
   active_cats <- NULL
@@ -952,8 +1267,32 @@ load_step08_merged_inputs <- function(opts, standardize_fn) {
   )
 
   if (!is.null(master_df) && nrow(master_df) > 0L) {
-    morph_df <- as.data.frame(master_df, stringsAsFactors = FALSE)
+    morph_df <- .coalesce_wc_bio_qt_qtr_df(as.data.frame(master_df, stringsAsFactors = FALSE))
     morph_df$catalogNumber <- as.character(morph_df$catalogNumber)
+
+    # Backfill any dynamic morphometric or ecological columns from disk snapshots if absent/NA in view
+    for (supp_m in c(opts$morphometrics, opts$harmonics)) {
+      if (!is.null(supp_m) && nzchar(supp_m) && file.exists(supp_m)) {
+        sm_df <- tryCatch(utils::read.csv(supp_m, stringsAsFactors = FALSE), error = function(e) NULL)
+        if (!is.null(sm_df) && nrow(sm_df) > 0L) {
+          dyn_m_cols <- union(
+            setdiff(names(sm_df), names(morph_df)),
+            .discover_step08_dynamic_morph_cols(names(sm_df))
+          )
+          morph_df <- .backfill_cols_by_composite_key(morph_df, sm_df, dyn_m_cols)
+        }
+      }
+    }
+    if (!is.null(opts$multimodal) && nzchar(opts$multimodal) && file.exists(opts$multimodal)) {
+      mm_disk <- tryCatch(utils::read.csv(opts$multimodal, stringsAsFactors = FALSE), error = function(e) NULL)
+      if (!is.null(mm_disk) && nrow(mm_disk) > 0L) {
+        mm_disk <- .coalesce_wc_bio_qt_qtr_df(mm_disk)
+        eco_cols_disk <- .discover_step08_eco_cols(names(mm_disk))
+        morph_df <- .backfill_cols_by_composite_key(morph_df, mm_disk, eco_cols_disk)
+        morph_df <- .coalesce_wc_bio_qt_qtr_df(morph_df)
+      }
+    }
+
     raw_sp <- if ("species_standardized" %in% names(morph_df)) morph_df$species_standardized else if ("scientificName" %in% names(morph_df)) morph_df$scientificName else morph_df$species_raw
     morph_df$species_standardized <- standardize_fn(raw_sp)
     morph_df <- morph_df[!is.na(morph_df$species_standardized) & nzchar(morph_df$species_standardized) & morph_df$species_standardized != "Unknown", , drop = FALSE]
@@ -987,13 +1326,11 @@ load_step08_merged_inputs <- function(opts, standardize_fn) {
     if (!is.null(supp_path) && nzchar(supp_path) && file.exists(supp_path)) {
       s_df <- tryCatch(utils::read.csv(supp_path, stringsAsFactors = FALSE), error = function(e) NULL)
       if (!is.null(s_df) && nrow(s_df) > 0 && "catalogNumber" %in% names(s_df)) {
-        s_df$catalogNumber <- as.character(s_df$catalogNumber)
-        s_sub <- s_df[!duplicated(s_df$catalogNumber), , drop = FALSE]
-        add_cols <- setdiff(names(s_sub), names(morph_df))
-        if (length(add_cols) > 0) {
-          idx_s <- match(morph_df$catalogNumber, s_sub$catalogNumber)
-          for (cl in add_cols) morph_df[[cl]] <- s_sub[[cl]][idx_s]
-        }
+        merge_cols <- union(
+          setdiff(names(s_df), names(morph_df)),
+          .discover_step08_dynamic_morph_cols(names(s_df))
+        )
+        morph_df <- .backfill_cols_by_composite_key(morph_df, s_df, merge_cols)
       }
     }
   }
@@ -1002,32 +1339,18 @@ load_step08_merged_inputs <- function(opts, standardize_fn) {
   if (file.exists(pheno_path)) {
     ph_df <- tryCatch(utils::read.csv(pheno_path, stringsAsFactors = FALSE), error = function(e) NULL)
     if (!is.null(ph_df) && nrow(ph_df) > 0 && "catalogNumber" %in% names(ph_df)) {
-      ph_df$catalogNumber <- as.character(ph_df$catalogNumber)
-      ph_sub <- ph_df[!duplicated(ph_df$catalogNumber), , drop = FALSE]
-      add_ph <- setdiff(names(ph_sub), names(morph_df))
-      if (length(add_ph) > 0) {
-        idx_p <- match(morph_df$catalogNumber, ph_sub$catalogNumber)
-        for (cl in add_ph) morph_df[[cl]] <- ph_sub[[cl]][idx_p]
-      }
+      add_ph <- setdiff(names(ph_df), names(morph_df))
+      morph_df <- .backfill_cols_by_composite_key(morph_df, ph_df, add_ph)
     }
   }
 
   if (!is.null(opts$multimodal) && nzchar(opts$multimodal) && file.exists(opts$multimodal)) {
     mm_df <- tryCatch(utils::read.csv(opts$multimodal, stringsAsFactors = FALSE), error = function(e) NULL)
     if (!is.null(mm_df) && nrow(mm_df) > 0 && "catalogNumber" %in% names(mm_df)) {
-      mm_df$catalogNumber <- as.character(mm_df$catalogNumber)
-      eco_cols <- intersect(c("fine_soil_ph", "fine_soil_sand", "fine_bedrock_depth_cm", "ssurgo_rock_outcrop_pct",
-        "soil_ph", "soil_sand", "soil_cec", "soil_bulk_density", "bio1_temp_mean", "bio4_temp_seasonality",
-        "bio12_precip_annual", "bio15_precip_seasonality", "edaphic_schoener_d", "schoener_d"), names(mm_df))
-      has_pid <- ("plant_individual_id" %in% names(morph_df)) && ("plant_individual_id" %in% names(mm_df))
-      idx_mm <- if (has_pid) match(paste0(morph_df$catalogNumber, "__", morph_df$plant_individual_id), paste0(mm_df$catalogNumber, "__", mm_df$plant_individual_id)) else rep(NA_integer_, nrow(morph_df))
-      mm_cat <- mm_df[!duplicated(mm_df$catalogNumber), , drop = FALSE]; idx_mc <- match(morph_df$catalogNumber, mm_cat$catalogNumber)
-      for (cl in eco_cols) {
-        cur <- if (cl %in% names(morph_df)) morph_df[[cl]] else rep(NA, nrow(morph_df))
-        hp <- is.na(cur) & !is.na(idx_mm); if (any(hp)) cur[hp] <- mm_df[[cl]][idx_mm[hp]]
-        hc <- is.na(cur) & !is.na(idx_mc); if (any(hc)) cur[hc] <- mm_cat[[cl]][idx_mc[hc]]
-        morph_df[[cl]] <- cur
-      }
+      mm_df <- .coalesce_wc_bio_qt_qtr_df(mm_df)
+      eco_cols <- .discover_step08_eco_cols(names(mm_df))
+      morph_df <- .backfill_cols_by_composite_key(morph_df, mm_df, eco_cols)
+      morph_df <- .coalesce_wc_bio_qt_qtr_df(morph_df)
     }
   }
 

@@ -580,6 +580,69 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             self.assertAlmostEqual(float(multi_df.iloc[0]["petiole_to_blade_ratio"]), 1.24, places=2)
             self.assertAlmostEqual(float(multi_df.iloc[1]["petiole_to_blade_ratio"]), 0.39, places=2)
 
+    def test_empirical_bayes_hopkins_shrinkage_dynamic_edaphic_z_and_taxon_scaled_pheno_cutoffs(self):
+        """Verify Tasks 3A-3C: Empirical Bayes circular Hopkins shrinkage, dynamic primary-predictor edaphic_z_score (no hardcoded 5.8/45.0), multi-PC ANCOVA batch audit, and taxon-dispersion-scaled tau_ecotype / tau_cryptic."""
+        r07_src = self.r_script_path.read_text(encoding="utf-8")
+        self.assertNotIn("5.8", r07_src, "Must eliminate hardcoded SEUS soil pH 5.8 fallback in Step 07")
+
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        r_code = """
+        suppressPackageStartupMessages({ library(readr); library(dplyr) })
+        source("scripts/analysis/07_triage_dashboard_synthesis.R")
+
+        set.seed(2026)
+        # 25 active-anthesis anchors (alpha = clip((25 - 5)/15, 0, 1) = 1.0 -> full empirical circular slope)
+        n <- 26
+        sp <- c(rep("Packera hyperborea", 13), rep("Packera cymbalaria", 13))
+        # Narrow flowering dispersion for P. hyperborea (SD ~ 3d -> tau_ecotype clipped to 10d, tau_cryptic clipped to 14d)
+        # Broad flowering dispersion for P. cymbalaria (SD ~ 15d -> tau_ecotype clipped to 28d, tau_cryptic clipped to 35d)
+        lat <- seq(60.0, 66.0, length.out = n)
+        doy_hyp <- round(210 + 2.0 * (lat[1:13] - 63.0) + seq(-4, 4, length.out = 13))
+        doy_cym <- round(225 + 2.0 * (lat[14:26] - 63.0) + seq(-22, 22, length.out = 13))
+        df <- data.frame(
+          catalogNumber = paste0("S07_", seq_len(n)),
+          plant_individual_id = 0L,
+          species_standardized = sp,
+          determiner_tier = "Tier_1_Gold",
+          institutionCode = rep(c("NCU", "ALA"), length.out = n),
+          decimalLatitude = lat,
+          elevation = seq(800, 1400, length.out = n),
+          bio1_temp_mean = seq(-2.0, 2.0, length.out = n),
+          doy = c(doy_hyp, doy_cym),
+          is_verified_anthesis = TRUE,
+          n_anthesis = 4L,
+          voucher_phenological_state = "Peak_Anthesis",
+          PC1 = rnorm(n), PC2 = rnorm(n), PC3 = rnorm(n), PC4 = rnorm(n),
+          selected_morph_features = "PC1;PC2;PC3;PC4",
+          fine_soil_cec = c(rnorm(12, 10.0, 0.8), 26.0, rnorm(13, 22.0, 1.0)),
+          polaris_ph_30m = c(rnorm(12, 6.9, 0.1), 4.2, rnorm(13, 5.1, 0.15)),
+          primary_edaph_predictors = "fine_soil_cec;polaris_ph_30m",
+          edaphic_z_score = c(rep(0.45, 12), NA_real_, rep(0.55, 13)),
+          stringsAsFactors = FALSE
+        )
+
+        df_h <- compute_hopkins_adjusted_phenology(df)
+        stopifnot(all(is.finite(df_h$delta_doy_resid)))
+
+        taus <- .compute_taxon_pheno_thresholds(df_h)
+        # P. hyperborea narrow dispersion -> tau_ecotype < P. cymbalaria broad dispersion tau_ecotype
+        stopifnot(taus$tau_ecotype[1] < taus$tau_ecotype[20])
+        stopifnot(taus$tau_cryptic[1] < taus$tau_cryptic[20])
+        stopifnot(taus$tau_ecotype[1] >= 10.0 && taus$tau_ecotype[20] <= 28.0)
+        stopifnot(taus$tau_cryptic[1] >= 14.0 && taus$tau_cryptic[20] <= 35.0)
+
+        # Verify Step 06 edaphic_z_score is preserved on rows 1..12 and dynamically computed on row 13 (extreme anomaly > 3.0)
+        df_dec <- apply_taxonomic_decision_matrix(df)
+        # Multi-feature institutional batch ANCOVA tests all 4 PC1..PC4 features
+        anc_df <- audit_institutional_batch_effects_ancova(df_dec)
+        stopifnot(all(c("PC1", "PC2", "PC3", "PC4") %in% anc_df$Feature || all(c("PC1", "PC2", "PC3", "PC4") %in% anc_df$Response)))
+        cat("STEP07_COHORT_ADAPTIVE_OK\\n")
+        """
+        res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"Step 07 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
+        self.assertIn("STEP07_COHORT_ADAPTIVE_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -171,7 +171,20 @@ standardize_sgmc_lithology <- function(
   muname = "",
   outcrop_class = "",
   lat = NA_real_,
-  lon = NA_real_
+  lon = NA_real_,
+  is_demo = FALSE,
+  demo = NULL,
+  generalize = "",
+  rock_type = "",
+  compname = "",
+  taxsuborder = "",
+  taxgreatgroup = "",
+  reskind = "",
+  soil_ph = NA_real_,
+  soil_sand = NA_real_,
+  soil_cec = NA_real_,
+  bedrock_depth_cm = NA_real_,
+  rock_outcrop_pct = NA_real_
 ) {
   # Standardizes raw USGS SGMC lithology attributes and/or SSURGO parent-material
   # descriptors into 6 canonical geochemical functional classes (Horton et al. 2017):
@@ -181,9 +194,16 @@ standardize_sgmc_lithology <- function(
   #   4. Felsic_Granitic_Gneiss
   #   5. Siliciclastic_Consolidated
   #   6. Unconsolidated_Sedimentary
+  # In non-demo runs (is_demo = FALSE), never uses coordinate bounding boxes;
+  # returns "Unknown_Lithology" when both text descriptors and diagnostic physical
+  # soil indicators are absent.
+  eff_demo <- if (!is.null(demo)) isTRUE(demo) else isTRUE(is_demo)
   n <- max(
     length(rocktype1), length(rocktype2), length(major1), length(major2),
-    length(minor1), length(unit_name), length(muname), length(outcrop_class),
+    length(minor1), length(unit_name), length(generalize), length(rock_type),
+    length(muname), length(compname), length(taxsuborder), length(taxgreatgroup),
+    length(reskind), length(outcrop_class), length(soil_ph), length(soil_sand),
+    length(soil_cec), length(bedrock_depth_cm), length(rock_outcrop_pct),
     length(lat), length(lon), 1L
   )
   rep_str <- function(x) {
@@ -192,52 +212,91 @@ standardize_sgmc_lithology <- function(
     y[is.na(y)] <- ""
     rep_len(y, n)
   }
+  rep_num <- function(x) {
+    if (is.null(x) || length(x) == 0L) return(rep(NA_real_, n))
+    rep_len(suppressWarnings(as.numeric(x)), n)
+  }
   r1 <- rep_str(rocktype1); r2 <- rep_str(rocktype2)
   m1 <- rep_str(major1);    m2 <- rep_str(major2); mn1 <- rep_str(minor1)
-  un <- rep_str(unit_name); mu <- rep_str(muname); oc  <- rep_str(outcrop_class)
-  lat_v <- rep_len(suppressWarnings(as.numeric(lat)), n)
-  lon_v <- rep_len(suppressWarnings(as.numeric(lon)), n)
+  un <- rep_str(unit_name); gn <- rep_str(generalize); rt <- rep_str(rock_type)
+  mu <- rep_str(muname);    cn <- rep_str(compname)
+  so <- rep_str(taxsuborder); gg <- rep_str(taxgreatgroup); rk <- rep_str(reskind)
+  oc <- rep_str(outcrop_class)
+
+  ph_v   <- rep_num(soil_ph)
+  sand_v <- rep_num(soil_sand)
+  cec_v  <- rep_num(soil_cec)
+  bed_v  <- rep_num(bedrock_depth_cm)
+  ro_v   <- rep_num(rock_outcrop_pct)
+  lat_v  <- rep_num(lat)
+  lon_v  <- rep_num(lon)
 
   out_cls <- character(n)
   for (i in seq_len(n)) {
-    geol_txt <- tolower(trimws(paste(r1[i], r2[i], m1[i], m2[i], mn1[i], un[i])))
-    soil_txt <- tolower(trimws(paste(mu[i], oc[i])))
-    combined <- paste(geol_txt, soil_txt)
+    geol_txt <- tolower(trimws(paste(r1[i], r2[i], m1[i], m2[i], mn1[i], un[i], gn[i], rt[i])))
+    oc_clean <- tolower(trimws(oc[i]))
+    oc_diag <- if (oc_clean == "non-outcrop matrix") "" else oc_clean
+    soil_txt <- tolower(trimws(paste(mu[i], cn[i], so[i], gg[i], rk[i], oc_diag)))
+    combined <- trimws(paste(geol_txt, soil_txt))
 
     if (grepl("ultramafic|serpentin|peridotit|dunit|pyroxenit|soapstone|talc|ophiolit|chrome|conowingo|aldino", combined, perl = TRUE) ||
-        tolower(oc[i]) == "serpentine") {
+        oc_clean == "serpentine") {
       out_cls[i] <- "Ultramafic_Serpentine"
     } else if (grepl("mafic|diabas|gabbro|basalt|amphibolit|greenstone|metavolcanic|metadiorit|norite|anorthosit|trap rock|iredell|mecklenburg|wilkes|poindexter|enon", combined, perl = TRUE) ||
-               tolower(oc[i]) == "diabase/mafic glade") {
+               oc_clean == "diabase/mafic glade") {
       out_cls[i] <- "Mafic_Igneous_Metamorphic"
-    } else if (grepl("carbonat|limeston|dolostone|dolomit|marble|chalk|marl|calcarenit|travertin|karst|coquina|alvar|gladeville|barfield|talbott|colbert|rendolls", combined, perl = TRUE) ||
-               tolower(oc[i]) == "limestone glade") {
+    } else if (grepl("carbonat|limeston|dolostone|dolomit|marble|chalk|marl|calcarenit|travertin|karst|coquina|alvar|gladeville|barfield|talbott|colbert|rendolls|calciustolls|calciudolls", combined, perl = TRUE) ||
+               oc_clean == "limestone glade") {
       out_cls[i] <- "Carbonate_Calcareous"
-    } else if (grepl("felsic|granit|granodiorit|monzonit|quartz monzonit|gneiss|pegmatit|rhyolit|aplit|dacit|migmatit|wake|louisburg|ashlar|rion|wateree|pacolet|appling|cecil|wedowee|madison", combined, perl = TRUE) ||
-               tolower(oc[i]) == "granitic flatrock") {
+    } else if (grepl("felsic|crystalline|granit|granodiorit|monzonit|quartz monzonit|gneiss|pegmatit|rhyolit|aplit|dacit|migmatit|wake|louisburg|ashlar|rion|wateree|pacolet|appling|cecil|wedowee|madison", combined, perl = TRUE) ||
+               oc_clean == "granitic flatrock") {
       out_cls[i] <- "Felsic_Granitic_Gneiss"
-    } else if (grepl("siliciclastic|sandstone|quartzit|arkos|conglomerat|greywack|graywack|siltston|shale|slate|phyllit|mudston|argillit|chert|novaculit|schist|ramsey|lily|sewanee|goldston|manteo|wallen|dekab", combined, perl = TRUE) ||
-               tolower(oc[i]) == "sandstone/siliceous") {
+    } else if (grepl("siliciclastic|consolidated|sandstone|quartzit|arkos|conglomerat|greywack|graywack|siltston|shale|slate|phyllit|mudston|argillit|chert|novaculit|schist|ramsey|lily|sewanee|goldston|manteo|wallen|dekab", combined, perl = TRUE) ||
+               oc_clean == "sandstone/siliceous") {
       out_cls[i] <- "Siliciclastic_Consolidated"
-    } else if (grepl("unconsolidated|alluvi|colluvi|coastal plain|terrace|loess|till|outwash|glacial|dune|eolian|sandhill|muck|peat|saprist|psamment|wagram|lakeland|plainfield|goldsboro|norfolk|myatt|rains|lynchburg|tama", combined, perl = TRUE)) {
+    } else if (grepl("unconsolidated|alluvi|colluvi|coastal plain|terrace|loess|till|outwash|glacial|dune|eolian|sandhill|muck|peat|saprist|psamment|aquult|aquoll|aquept|fluvent|wagram|lakeland|plainfield|goldsboro|norfolk|myatt|rains|lynchburg|tama", combined, perl = TRUE)) {
       out_cls[i] <- "Unconsolidated_Sedimentary"
     } else {
-      # Physiographic province fallback when no text descriptor is present
-      la <- lat_v[i]; lo <- lon_v[i]
-      if (!is.na(la) && !is.na(lo)) {
-        if (lo > -81.5 && la < 36.8 && (lo > -79.2 || la < 33.2)) {
-          out_cls[i] <- "Unconsolidated_Sedimentary"
-        } else if (lo >= -84.5 && lo <= -77.5 && la >= 32.5 && la <= 37.5) {
-          out_cls[i] <- "Felsic_Granitic_Gneiss"
-        } else if (lo >= -88.5 && lo < -83.0 && la >= 34.5 && la <= 38.5) {
-          out_cls[i] <- "Carbonate_Calcareous"
-        } else if (lo >= -84.0 && lo <= -78.0 && la > 35.0 && la <= 41.0) {
-          out_cls[i] <- "Siliciclastic_Consolidated"
+      # Diagnostic physical soil/bedrock inference (strictly coordinate-free)
+      ph_i <- ph_v[i]; sand_i <- sand_v[i]; cec_i <- cec_v[i]
+      bed_i <- bed_v[i]; ro_i <- ro_v[i]
+      is_shallow_lithic <- (is.finite(bed_i) && bed_i <= 50.0) ||
+                           (is.finite(ro_i) && ro_i >= 15.0) ||
+                           grepl("lithic|paralithic|bedrock|rock outcrop", combined, perl = TRUE)
+      if (is_shallow_lithic && is.finite(ph_i) && ph_i >= 7.0) {
+        out_cls[i] <- "Carbonate_Calcareous"
+      } else if (is_shallow_lithic && is.finite(ph_i) && ph_i >= 6.2 &&
+                 is.finite(cec_i) && cec_i >= 20.0 && (!is.finite(sand_i) || sand_i < 45.0)) {
+        out_cls[i] <- "Mafic_Igneous_Metamorphic"
+      } else if (is_shallow_lithic && is.finite(ph_i) && ph_i <= 5.3 &&
+                 is.finite(sand_i) && sand_i >= 60.0) {
+        out_cls[i] <- "Felsic_Granitic_Gneiss"
+      } else if (is_shallow_lithic) {
+        out_cls[i] <- "Siliciclastic_Consolidated"
+      } else if (is.finite(bed_i) && bed_i >= 150.0 &&
+                 (!is.finite(ro_i) || ro_i < 5.0) &&
+                 ((is.finite(sand_i) && sand_i >= 70.0) || nzchar(combined))) {
+        out_cls[i] <- "Unconsolidated_Sedimentary"
+      } else if (isTRUE(eff_demo)) {
+        # Synthetic demonstration fallback gated strictly behind demo == TRUE
+        la <- lat_v[i]; lo <- lon_v[i]
+        if (!is.na(la) && !is.na(lo)) {
+          if (lo > -81.5 && la < 36.8 && (lo > -79.2 || la < 33.2)) {
+            out_cls[i] <- "Unconsolidated_Sedimentary"
+          } else if (lo >= -84.5 && lo <= -77.5 && la >= 32.5 && la <= 37.5) {
+            out_cls[i] <- "Felsic_Granitic_Gneiss"
+          } else if (lo >= -88.5 && lo < -83.0 && la >= 34.5 && la <= 38.5) {
+            out_cls[i] <- "Carbonate_Calcareous"
+          } else if (lo >= -84.0 && lo <= -78.0 && la > 35.0 && la <= 41.0) {
+            out_cls[i] <- "Siliciclastic_Consolidated"
+          } else {
+            out_cls[i] <- "Unconsolidated_Sedimentary"
+          }
         } else {
           out_cls[i] <- "Unconsolidated_Sedimentary"
         }
       } else {
-        out_cls[i] <- "Unconsolidated_Sedimentary"
+        out_cls[i] <- "Unknown_Lithology"
       }
     }
   }
@@ -251,10 +310,14 @@ extract_sgmc_lithology <- function(df, env_dir = "data/environmental", demo = FA
   if (n == 0L) return(df)
 
   sgmc_dir <- file.path(env_dir, "sgmc")
-  raw_rock1 <- if ("sgmc_rocktype1" %in% names(df)) as.character(df$sgmc_rocktype1) else rep("", n)
-  raw_rock2 <- if ("sgmc_rocktype2" %in% names(df)) as.character(df$sgmc_rocktype2) else rep("", n)
-  raw_maj1  <- if ("sgmc_major1" %in% names(df)) as.character(df$sgmc_major1) else rep("", n)
-  raw_unit  <- if ("sgmc_unit_name" %in% names(df)) as.character(df$sgmc_unit_name) else rep("", n)
+  raw_rock1 <- if ("sgmc_rocktype1" %in% names(df)) as.character(df$sgmc_rocktype1) else if ("rocktype1" %in% names(df)) as.character(df$rocktype1) else rep("", n)
+  raw_rock2 <- if ("sgmc_rocktype2" %in% names(df)) as.character(df$sgmc_rocktype2) else if ("rocktype2" %in% names(df)) as.character(df$rocktype2) else rep("", n)
+  raw_maj1  <- if ("sgmc_major1" %in% names(df)) as.character(df$sgmc_major1) else if ("major1" %in% names(df)) as.character(df$major1) else rep("", n)
+  raw_unit  <- if ("sgmc_unit_name" %in% names(df)) as.character(df$sgmc_unit_name) else if ("unit_name" %in% names(df)) as.character(df$unit_name) else rep("", n)
+  raw_gen   <- if ("sgmc_generalize" %in% names(df)) as.character(df$sgmc_generalize) else if ("GENERALIZE" %in% names(df)) as.character(df$GENERALIZE) else rep("", n)
+  raw_rtype <- if ("sgmc_rock_type" %in% names(df)) as.character(df$sgmc_rock_type) else if ("ROCK_TYPE" %in% names(df)) as.character(df$ROCK_TYPE) else rep("", n)
+  prev_sgmc <- if ("sgmc_lithology_class" %in% names(df)) as.character(df$sgmc_lithology_class) else rep("", n)
+  prev_sgmc[is.na(prev_sgmc) | tolower(trimws(prev_sgmc)) %in% c("na", "unknown", "unknown_lithology")] <- ""
   contact_dist_vec <- rep(NA_real_, n)
 
   lat_v <- suppressWarnings(as.numeric(df$latitude))
@@ -281,6 +344,8 @@ extract_sgmc_lithology <- function(df, env_dir = "data/environmental", demo = FA
         col_r2 <- names(sgmc_sf)[match("ROCKTYPE2", cn_up)]
         col_m1 <- names(sgmc_sf)[match("MAJOR1", cn_up)]
         col_un <- names(sgmc_sf)[match("UNIT_NAME", cn_up)]
+        col_gn <- names(sgmc_sf)[match("GENERALIZE", cn_up)]
+        col_rt <- names(sgmc_sf)[match("ROCK_TYPE", cn_up)]
         for (k in seq_along(v_idx)) {
           h_k <- hits[[k]]
           if (length(h_k) > 0L) {
@@ -289,6 +354,8 @@ extract_sgmc_lithology <- function(df, env_dir = "data/environmental", demo = FA
             if (!is.na(col_r2)) raw_rock2[v_idx[k]] <- as.character(sgmc_sf[[col_r2]][row_g])
             if (!is.na(col_m1)) raw_maj1[v_idx[k]]  <- as.character(sgmc_sf[[col_m1]][row_g])
             if (!is.na(col_un)) raw_unit[v_idx[k]]  <- as.character(sgmc_sf[[col_un]][row_g])
+            if (!is.na(col_gn)) raw_gen[v_idx[k]]   <- as.character(sgmc_sf[[col_gn]][row_g])
+            if (!is.na(col_rt)) raw_rtype[v_idx[k]] <- as.character(sgmc_sf[[col_rt]][row_g])
           }
         }
       }, error = function(e) NULL)
@@ -296,8 +363,18 @@ extract_sgmc_lithology <- function(df, env_dir = "data/environmental", demo = FA
   }
 
   muname_v <- if ("muname" %in% names(df)) as.character(df$muname) else rep("", n)
+  comp_v   <- if ("compname" %in% names(df)) as.character(df$compname) else rep("", n)
+  subord_v <- if ("taxsuborder" %in% names(df)) as.character(df$taxsuborder) else rep("", n)
+  grtgrp_v <- if ("taxgreatgroup" %in% names(df)) as.character(df$taxgreatgroup) else rep("", n)
+  resk_v   <- if ("reskind" %in% names(df)) as.character(df$reskind) else rep("", n)
   ocl_v    <- if ("outcrop_class" %in% names(df)) as.character(df$outcrop_class) else rep("", n)
+  ph_col   <- if ("fine_soil_ph" %in% names(df)) df$fine_soil_ph else if ("soil_ph" %in% names(df)) df$soil_ph else rep(NA_real_, n)
+  sand_col <- if ("fine_soil_sand" %in% names(df)) df$fine_soil_sand else if ("soil_sand" %in% names(df)) df$soil_sand else rep(NA_real_, n)
+  cec_col  <- if ("fine_soil_cec" %in% names(df)) df$fine_soil_cec else if ("soil_cec" %in% names(df)) df$soil_cec else rep(NA_real_, n)
+  bed_col  <- if ("fine_bedrock_depth_cm" %in% names(df)) df$fine_bedrock_depth_cm else if ("ssurgo_bedrock_depth_cm" %in% names(df)) df$ssurgo_bedrock_depth_cm else rep(NA_real_, n)
+  ro_col   <- if ("ssurgo_rock_outcrop_pct" %in% names(df)) df$ssurgo_rock_outcrop_pct else rep(NA_real_, n)
 
+  gen_combined <- ifelse(nzchar(trimws(raw_gen)), raw_gen, prev_sgmc)
   lith_cls <- standardize_sgmc_lithology(
     rocktype1 = raw_rock1,
     rocktype2 = raw_rock2,
@@ -306,7 +383,19 @@ extract_sgmc_lithology <- function(df, env_dir = "data/environmental", demo = FA
     muname = muname_v,
     outcrop_class = ocl_v,
     lat = lat_v,
-    lon = lon_v
+    lon = lon_v,
+    is_demo = isTRUE(demo),
+    generalize = gen_combined,
+    rock_type = raw_rtype,
+    compname = comp_v,
+    taxsuborder = subord_v,
+    taxgreatgroup = grtgrp_v,
+    reskind = resk_v,
+    soil_ph = ph_col,
+    soil_sand = sand_col,
+    soil_cec = cec_col,
+    bedrock_depth_cm = bed_col,
+    rock_outcrop_pct = ro_col
   )
   df$sgmc_lithology_class <- lith_cls
 
@@ -635,25 +724,41 @@ build_ssurgo_buffered_sda_sql <- function(sub_pts, buffer_deg = 0.00045) {
   return(sql)
 }
 
-aggregate_ssurgo_tabular_to_points <- function(sub_pts, tab_res, classify_fn = NULL) {
+aggregate_ssurgo_tabular_to_points <- function(sub_pts, tab_res, classify_fn = NULL, is_demo = FALSE) {
   if (is.null(classify_fn) || !is.function(classify_fn)) {
     if (exists("classify_ssurgo_outcrop", mode = "function")) {
       classify_fn <- get("classify_ssurgo_outcrop", mode = "function")
     } else {
-      classify_fn <- function(muname = "", compname = "", taxsuborder = "", taxgreatgroup = "", compkind = "", lat = NA, lon = NA) {
-        desc <- tolower(paste(muname, compname, taxsuborder, taxgreatgroup, compkind))
+      classify_fn <- function(
+        muname = "", compname = "", taxsuborder = "", taxgreatgroup = "", compkind = "",
+        lat = NA, lon = NA, is_demo = FALSE, demo = NULL, reskind = "",
+        soil_ph = NA_real_, soil_sand = NA_real_, soil_cec = NA_real_,
+        bedrock_depth_cm = NA_real_, rock_outcrop_pct = NA_real_
+      ) {
+        desc <- tolower(paste(muname, compname, taxsuborder, taxgreatgroup, compkind, reskind))
         is_out <- grepl(SSURGO_OUTCROP_SERIES_REGEX, paste(muname, compname), perl = TRUE) ||
-                  grepl("rock outcrop|flatrock|glade|lithic", desc)
-        ocl <- if (grepl("gladeville|barfield|cedars|talbott|limestone|dolomite|glade", desc)) {
+                  grepl("rock outcrop|flatrock|glade|lithic", desc) ||
+                  (is.finite(rock_outcrop_pct) && rock_outcrop_pct >= 15.0)
+        ocl <- if (grepl("gladeville|barfield|cedars|talbott|limestone|dolomite|dolostone|calcareous|alvar|karst|rendolls|glade", desc)) {
           "Limestone glade"
-        } else if (grepl("ramsey|lily|sewanee|sandstone|siliceous|chert|shale", desc)) {
+        } else if (grepl("ramsey|lily|sewanee|goldston|manteo|wallen|dekab|sandstone|quartzite|siliceous|chert|shale", desc)) {
           "Sandstone/Siliceous"
-        } else if (grepl("chrome|trego|serpentine|ultramafic", desc)) {
+        } else if (grepl("chrome|trego|conowingo|aldino|serpentine|ultramafic|peridotite", desc)) {
           "Serpentine"
-        } else if (grepl("iredell|mecklenburg|wilkes|enon|poindexter|diabase", desc)) {
+        } else if (grepl("iredell|mecklenburg|wilkes|enon|poindexter|diabase|gabbro|basalt|amphibolite|mafic", desc)) {
           "Diabase/Mafic glade"
-        } else if (is_out) {
+        } else if (grepl("wake|louisburg|ashlar|rion|wateree|granit|gneiss|felsic|flatrock", desc)) {
           "Granitic flatrock"
+        } else if (is_out) {
+          if (is.finite(soil_ph) && soil_ph >= 6.8) {
+            "Limestone glade"
+          } else if (is.finite(soil_cec) && soil_cec >= 20.0 && (!is.finite(soil_sand) || soil_sand < 50.0)) {
+            "Diabase/Mafic glade"
+          } else if (is.finite(soil_sand) && soil_sand >= 60.0 && (!is.finite(soil_ph) || soil_ph <= 5.5)) {
+            "Granitic flatrock"
+          } else {
+            "Sandstone/Siliceous"
+          }
         } else {
           "Non-outcrop matrix"
         }
@@ -661,6 +766,9 @@ aggregate_ssurgo_tabular_to_points <- function(sub_pts, tab_res, classify_fn = N
       }
     }
   }
+  fn_formals <- names(formals(classify_fn))
+  has_dots <- "..." %in% fn_formals
+
   n_sub <- nrow(sub_pts)
   out_list <- vector("list", n_sub)
 
@@ -727,17 +835,6 @@ aggregate_ssurgo_tabular_to_points <- function(sub_pts, tab_res, classify_fn = N
     )
     rep_row <- rep_pool[ord_idx[1], , drop = FALSE]
 
-    cl <- classify_fn(
-      muname = ifelse(!is.na(rep_row$muname[1]), as.character(rep_row$muname[1]), ""),
-      compname = ifelse(!is.na(rep_row$compname[1]), as.character(rep_row$compname[1]), ""),
-      taxsuborder = ifelse(!is.na(rep_row$taxsuborder[1]), as.character(rep_row$taxsuborder[1]), ""),
-      taxgreatgroup = ifelse(!is.na(rep_row$taxgreatgroup[1]), as.character(rep_row$taxgreatgroup[1]), ""),
-      lat = lat_i,
-      lon = lon_i
-    )
-    is_outcrop_final <- isTRUE(cl$is_rock_outcrop) || (rock_outcrop_pct >= 15.0)
-    outcrop_cls_final <- if (is_outcrop_final && cl$outcrop_class == "Non-outcrop matrix") "Granitic flatrock" else cl$outcrop_class
-
     # Minimum depth to bedrock restriction (resdept_r from corestrictions or brockdepmin from muaggatt, capped at 200 cm)
     res_depths <- c(
       suppressWarnings(as.numeric(rows_i$resdept_r)),
@@ -786,6 +883,51 @@ aggregate_ssurgo_tabular_to_points <- function(sub_pts, tab_res, classify_fn = N
     om_pct   <- w_avg_rhizo(hz_rows$om_r)
     cec_val  <- w_avg_rhizo(hz_rows$cec7_r)
     aws_val  <- w_avg_comp(comp_df$aws050wta, comp_pct)
+
+    reskind_val <- if ("reskind" %in% names(rows_i)) {
+      rk_v <- stats::na.omit(unique(trimws(as.character(rows_i$reskind))))
+      rk_v <- rk_v[nzchar(rk_v)]
+      if (length(rk_v) > 0L) paste(rk_v, collapse = "; ") else ""
+    } else ""
+
+    call_args <- list(
+      muname = ifelse(!is.na(rep_row$muname[1]), as.character(rep_row$muname[1]), ""),
+      compname = ifelse(!is.na(rep_row$compname[1]), as.character(rep_row$compname[1]), ""),
+      taxsuborder = ifelse(!is.na(rep_row$taxsuborder[1]), as.character(rep_row$taxsuborder[1]), ""),
+      taxgreatgroup = ifelse(!is.na(rep_row$taxgreatgroup[1]), as.character(rep_row$taxgreatgroup[1]), ""),
+      lat = lat_i,
+      lon = lon_i
+    )
+    extra_args <- list(
+      compkind = if ("compkind" %in% names(rep_row) && !is.na(rep_row$compkind[1])) as.character(rep_row$compkind[1]) else "",
+      is_demo = isTRUE(is_demo),
+      reskind = reskind_val,
+      soil_ph = ph_val,
+      soil_sand = sand_pct,
+      soil_cec = cec_val,
+      bedrock_depth_cm = bedrock_depth_cm,
+      rock_outcrop_pct = rock_outcrop_pct
+    )
+    for (arg_nm in names(extra_args)) {
+      if (has_dots || (arg_nm %in% fn_formals)) {
+        call_args[[arg_nm]] <- extra_args[[arg_nm]]
+      }
+    }
+    cl <- do.call(classify_fn, call_args)
+    is_outcrop_final <- isTRUE(cl$is_rock_outcrop) || (rock_outcrop_pct >= 15.0)
+    outcrop_cls_final <- if (is_outcrop_final && cl$outcrop_class == "Non-outcrop matrix") {
+      if (is.finite(ph_val) && ph_val >= 6.8) {
+        "Limestone glade"
+      } else if (is.finite(cec_val) && cec_val >= 20.0 && (!is.finite(sand_pct) || sand_pct < 50.0)) {
+        "Diabase/Mafic glade"
+      } else if (is.finite(sand_pct) && sand_pct >= 60.0 && (!is.finite(ph_val) || ph_val <= 5.5)) {
+        "Granitic flatrock"
+      } else {
+        "Sandstone/Siliceous"
+      }
+    } else {
+      cl$outcrop_class
+    }
 
     rec_df <- data.frame(
       catalogNumber = cat_i, latitude = lat_i, longitude = lon_i,
@@ -1164,10 +1306,10 @@ extract_micro_topography_3dep <- function(coords_df, env_dir = "data/environment
         dem_rast <- tryCatch({
           r_b1 <- terra::rast(wc_bio1[1])
           ext_box <- terra::ext(
-            max(-130.0, min(lon_v[valid_pts], na.rm = TRUE) - 1.0),
-            min(-60.0, max(lon_v[valid_pts], na.rm = TRUE) + 1.0),
-            max(20.0, min(lat_v[valid_pts], na.rm = TRUE) - 1.0),
-            min(55.0, max(lat_v[valid_pts], na.rm = TRUE) + 1.0)
+            max(-180.0, min(lon_v[valid_pts], na.rm = TRUE) - 1.0),
+            min(180.0, max(lon_v[valid_pts], na.rm = TRUE) + 1.0),
+            max(-90.0, min(lat_v[valid_pts], na.rm = TRUE) - 1.0),
+            min(90.0, max(lat_v[valid_pts], na.rm = TRUE) + 1.0)
           )
           r_crop <- terra::crop(r_b1, ext_box)
           lat_grid <- terra::init(r_crop, "y")
@@ -1397,50 +1539,205 @@ load_and_update_fine_grain_cache <- function(
 }
 
 # ------------------------------------------------------------------------------
-# 7. Collinearity Pruning within Climatic & Edaphic Blocks (Dormann et al. 2013)
+# 7. Collinearity Pruning Across Climatic, Edaphic & Topographic Blocks
+#    (Dormann et al. 2013; Empirical Anchor Separation Tie-Breaking)
 # ------------------------------------------------------------------------------
-screen_collinear_predictors <- function(X_env, cor.threshold = 0.70, vif.threshold = 5.0) {
-  X_df <- as.data.frame(X_env, check.names = FALSE)
-  if (ncol(X_df) <= 2) return(list(selected_variables = colnames(X_df), pruned_variables = character(0)))
-  sds <- sapply(X_df, function(v) stats::sd(as.numeric(v), na.rm = TRUE))
-  keep_cols <- names(sds[!is.na(sds) & sds > 1e-8])
-  if (length(keep_cols) <= 2) return(list(selected_variables = colnames(X_df), pruned_variables = character(0)))
-  X_sub <- X_df[, keep_cols, drop = FALSE]
-  sel_vars <- NULL
-  if (requireNamespace("spatialRF", quietly = TRUE)) {
-    ac <- tryCatch(spatialRF::auto_cor(x = X_sub, cor.threshold = cor.threshold), error = function(e) NULL)
-    if (!is.null(ac) && !is.null(ac$selected.variables) && length(ac$selected.variables) >= 2) {
-      X_sub <- X_sub[, ac$selected.variables, drop = FALSE]
+compute_anchor_separation_scores <- function(X_df, anchor_groups = NULL) {
+  X_d <- as.data.frame(X_df, check.names = FALSE)
+  cols <- colnames(X_d)
+  if (length(cols) == 0L) return(numeric(0))
+  n_rows <- nrow(X_d)
+  has_grp <- !is.null(anchor_groups) && (length(anchor_groups) == n_rows)
+  g_all <- if (has_grp) trimws(as.character(anchor_groups)) else character(0)
+
+  scores <- vapply(cols, function(cl) {
+    v <- suppressWarnings(as.numeric(X_d[[cl]]))
+    fin <- is.finite(v)
+    fin_frac <- if (n_rows > 0L) sum(fin) / n_rows else 0.0
+    if (sum(fin) < 3L) return(0.0)
+    sd_v <- stats::sd(v[fin])
+    if (!is.finite(sd_v) || sd_v <= 1e-8) return(0.0)
+
+    if (has_grp) {
+      ok <- fin & !is.na(g_all) & nzchar(g_all) & !(tolower(g_all) %in% c("unknown", "na", "none"))
+      if (sum(ok) >= 4L) {
+        tbl_g <- table(g_all[ok])
+        valid_g <- names(tbl_g[tbl_g >= 2L])
+        if (length(valid_g) >= 2L) {
+          m_g <- ok & (g_all %in% valid_g)
+          v_g <- v[m_g]
+          f_g <- factor(g_all[m_g])
+          kw_stat <- tryCatch(
+            suppressWarnings(as.numeric(stats::kruskal.test(v_g ~ f_g)$statistic[1])),
+            error = function(e) NA_real_
+          )
+          f_stat <- tryCatch({
+            af <- summary(stats::aov(v_g ~ f_g))[[1]]
+            suppressWarnings(as.numeric(af[["F value"]][1]))
+          }, error = function(e) NA_real_)
+          if (is.finite(kw_stat) && kw_stat >= 0.0) {
+            f_tie <- if (is.finite(f_stat) && f_stat >= 0.0) 1e-4 * f_stat else 0.0
+            return(kw_stat + f_tie + 1e-6 * fin_frac)
+          }
+          if (is.finite(f_stat) && f_stat >= 0.0) {
+            return(f_stat + 1e-6 * fin_frac)
+          }
+        }
+      }
     }
-    av <- tryCatch(spatialRF::auto_vif(x = X_sub, vif.threshold = vif.threshold), error = function(e) NULL)
-    if (!is.null(av) && !is.null(av$selected.variables) && length(av$selected.variables) >= 2) {
-      sel_vars <- av$selected.variables
+    fin_frac
+  }, numeric(1))
+  names(scores) <- cols
+  scores
+}
+
+screen_collinear_predictors <- function(
+  X_env,
+  cor.threshold = 0.70,
+  vif.threshold = 5.0,
+  anchor_groups = NULL,
+  var_scores = NULL
+) {
+  X_df <- as.data.frame(X_env, check.names = FALSE)
+  all_cols <- colnames(X_df)
+  if (length(all_cols) == 0L) {
+    return(list(
+      selected_variables = character(0),
+      kept_vars = character(0),
+      pruned_variables = character(0),
+      anchor_scores = numeric(0)
+    ))
+  }
+  if (length(all_cols) == 1L) {
+    return(list(
+      selected_variables = all_cols,
+      kept_vars = all_cols,
+      pruned_variables = character(0),
+      anchor_scores = stats::setNames(1.0, all_cols)
+    ))
+  }
+
+  sds <- vapply(X_df, function(v) stats::sd(suppressWarnings(as.numeric(v)), na.rm = TRUE), numeric(1))
+  keep_cols <- names(sds[is.finite(sds) & sds > 1e-8])
+  if (length(keep_cols) == 0L) {
+    return(list(
+      selected_variables = all_cols[1],
+      kept_vars = all_cols[1],
+      pruned_variables = setdiff(all_cols, all_cols[1]),
+      anchor_scores = stats::setNames(rep(0.0, length(all_cols)), all_cols)
+    ))
+  }
+  if (length(keep_cols) == 1L) {
+    return(list(
+      selected_variables = keep_cols,
+      kept_vars = keep_cols,
+      pruned_variables = setdiff(all_cols, keep_cols),
+      anchor_scores = stats::setNames(1.0, keep_cols)
+    ))
+  }
+
+  scores_sub <- if (!is.null(var_scores) && all(keep_cols %in% names(var_scores))) {
+    var_scores[keep_cols]
+  } else {
+    compute_anchor_separation_scores(X_df[, keep_cols, drop = FALSE], anchor_groups = anchor_groups)
+  }
+  scores_sub[!is.finite(scores_sub)] <- 0.0
+  ranked_cols <- keep_cols[order(scores_sub[keep_cols], decreasing = TRUE)]
+
+  X_imp <- as.data.frame(lapply(ranked_cols, function(cl) {
+    v <- suppressWarnings(as.numeric(X_df[[cl]]))
+    if (any(!is.finite(v))) {
+      med_v <- stats::median(v[is.finite(v)], na.rm = TRUE)
+      v[!is.finite(v)] <- if (is.finite(med_v)) med_v else 0.0
+    }
+    v
+  }), stringsAsFactors = FALSE)
+  colnames(X_imp) <- ranked_cols
+
+  sel_vars <- NULL
+  if (requireNamespace("spatialRF", quietly = TRUE) && ncol(X_imp) >= 3L) {
+    ac <- tryCatch(
+      spatialRF::auto_cor(x = X_imp, cor.threshold = cor.threshold, preference.order = ranked_cols),
+      error = function(e) tryCatch(spatialRF::auto_cor(x = X_imp, cor.threshold = cor.threshold), error = function(e2) NULL)
+    )
+    X_ac <- if (!is.null(ac) && !is.null(ac$selected.variables) && length(ac$selected.variables) >= 1L) {
+      X_imp[, ac$selected.variables, drop = FALSE]
+    } else {
+      X_imp
+    }
+    if (ncol(X_ac) >= 2L) {
+      pref_ac <- intersect(ranked_cols, colnames(X_ac))
+      av <- tryCatch(
+        spatialRF::auto_vif(x = X_ac, vif.threshold = vif.threshold, preference.order = pref_ac),
+        error = function(e) tryCatch(spatialRF::auto_vif(x = X_ac, vif.threshold = vif.threshold), error = function(e2) NULL)
+      )
+      if (!is.null(av) && !is.null(av$selected.variables) && length(av$selected.variables) >= 1L) {
+        sel_vars <- av$selected.variables
+      }
+    } else if (ncol(X_ac) == 1L) {
+      sel_vars <- colnames(X_ac)
     }
   }
-  if (is.null(sel_vars)) {
-    # Analytical Dormann et al. (2013) pairwise |r| <= cor.threshold & stepwise VIF <= vif.threshold
-    cmat <- abs(stats::cor(X_sub, use = "pairwise.complete.obs")); cmat[is.na(cmat)] <- 0; diag(cmat) <- 0
-    cand <- colnames(X_sub)
-    while (length(cand) > 2 && max(cmat[cand, cand], na.rm = TRUE) > cor.threshold) {
+
+  # Verify |r| <= cor.threshold and VIF <= vif.threshold via analytical Dormann et al. (2013)
+  # tie-broken strictly by empirical anchor separation score (Kruskal-Wallis chi^2 / ANOVA F)
+  cmat <- abs(stats::cor(X_imp, use = "pairwise.complete.obs"))
+  cmat[!is.finite(cmat)] <- 0.0
+  diag(cmat) <- 0.0
+  needs_analytical <- is.null(sel_vars) || length(sel_vars) == 0L
+  if (!needs_analytical && length(sel_vars) >= 2L) {
+    max_r_sel <- max(cmat[sel_vars, sel_vars, drop = FALSE], na.rm = TRUE)
+    if (is.finite(max_r_sel) && max_r_sel > (cor.threshold + 1e-6)) {
+      needs_analytical <- TRUE
+    }
+  }
+
+  if (needs_analytical) {
+    cand <- ranked_cols
+    while (length(cand) > 1L && max(cmat[cand, cand, drop = FALSE], na.rm = TRUE) > cor.threshold) {
       sub_c <- cmat[cand, cand, drop = FALSE]
       ij <- which(sub_c == max(sub_c, na.rm = TRUE), arr.ind = TRUE)[1, ]
-      v1 <- cand[ij[1]]; v2 <- cand[ij[2]]
-      drop_v <- if (mean(sub_c[v1, ]) >= mean(sub_c[v2, ])) v1 else v2
+      v1 <- cand[ij[1]]
+      v2 <- cand[ij[2]]
+      s1 <- scores_sub[[v1]]
+      s2 <- scores_sub[[v2]]
+      if (is.finite(s1) && is.finite(s2) && abs(s1 - s2) > 1e-9) {
+        drop_v <- if (s1 < s2) v1 else v2
+      } else {
+        drop_v <- if (mean(sub_c[v1, ]) >= mean(sub_c[v2, ])) v1 else v2
+      }
       cand <- setdiff(cand, drop_v)
     }
-    while (length(cand) > 2) {
-      R_sub <- stats::cor(X_sub[, cand, drop = FALSE], use = "pairwise.complete.obs")
-      R_sub[is.na(R_sub)] <- 0; diag(R_sub) <- 1
+    while (length(cand) > 2L) {
+      R_sub <- stats::cor(X_imp[, cand, drop = FALSE], use = "pairwise.complete.obs")
+      R_sub[!is.finite(R_sub)] <- 0.0
+      diag(R_sub) <- 1.0
       vifs <- tryCatch(diag(solve(R_sub + diag(1e-6, length(cand)))), error = function(e) rep(1.0, length(cand)))
-      if (max(vifs, na.rm = TRUE) <= vif.threshold) break
-      cand <- setdiff(cand, cand[which.max(vifs)])
+      names(vifs) <- cand
+      max_vif <- max(vifs, na.rm = TRUE)
+      if (!is.finite(max_vif) || max_vif <= vif.threshold) break
+      over_v <- names(vifs[vifs >= (max_vif - 1e-9)])
+      drop_v <- if (length(over_v) > 1L) {
+        over_v[order(scores_sub[over_v], decreasing = FALSE)][1]
+      } else {
+        over_v[1]
+      }
+      cand <- setdiff(cand, drop_v)
     }
     sel_vars <- cand
   }
-  pruned_vars <- setdiff(colnames(X_df), sel_vars)
-  message(sprintf("Collinearity Screening (Dormann et al. 2013; Benito 2021; |r| <= %.2f, VIF <= %.1f): retained %d / %d predictors.",
-                  cor.threshold, vif.threshold, length(sel_vars), ncol(X_df)))
-  list(selected_variables = sel_vars, pruned_variables = pruned_vars)
+
+  pruned_vars <- setdiff(all_cols, sel_vars)
+  message(sprintf(
+    "Collinearity Screening (Dormann et al. 2013; Benito 2021; |r| <= %.2f, VIF <= %.1f): retained %d / %d predictors.",
+    cor.threshold, vif.threshold, length(sel_vars), ncol(X_df)
+  ))
+  list(
+    selected_variables = sel_vars,
+    kept_vars = sel_vars,
+    pruned_variables = pruned_vars,
+    anchor_scores = scores_sub
+  )
 }
 
 screen_collinear_predictors_by_block <- function(
@@ -1448,29 +1745,71 @@ screen_collinear_predictors_by_block <- function(
   clim_vars = NULL,
   edaph_vars = NULL,
   cor.threshold = 0.70,
-  vif.threshold = 5.0
+  vif.threshold = 5.0,
+  topo_vars = NULL,
+  anchor_groups = NULL
 ) {
   # Applies spatialRF::auto_cor(cor.threshold = 0.70) and
-  # spatialRF::auto_vif(vif.threshold = 5.0) separately within Climatic and
-  # Edaphic-Geologic blocks before joint modeling (Dormann et al. 2013).
+  # spatialRF::auto_vif(vif.threshold = 5.0) separately within 3 ecological blocks:
+  #   1. Climatic block (bio1..bio19 + phenology if passed)
+  #   2. Edaphic-Lithic block (fine_* + ssurgo_* + polaris_* + solus_* + soil_* + lithic)
+  #   3. Topographic block (topo_*)
+  # Within-block tie-breaking ranks variables empirically by Kruskal-Wallis chi^2 /
+  # ANOVA F separating active reference anchors (anchor_groups) in the current run.
   X_df <- as.data.frame(X_env, check.names = FALSE)
   all_cols <- colnames(X_df)
+  if (length(all_cols) == 0L) {
+    return(list(
+      selected_variables = character(0),
+      kept_vars = character(0),
+      selected_edaphic = character(0),
+      selected_climatic = character(0),
+      selected_topo = character(0),
+      edaphic_variables = character(0),
+      climatic_variables = character(0),
+      topo_variables = character(0),
+      pruned_variables = character(0),
+      anchor_scores = numeric(0)
+    ))
+  }
+
   if (is.null(clim_vars)) {
-    clim_vars <- grep("^(bio[0-9]*_|delta_doy|doy|hopkins_)", all_cols, value = TRUE, ignore.case = TRUE)
+    clim_vars <- grep("^(bio[0-9]*_|delta_doy|doy|hopkins_|sin_doy|cos_doy)", all_cols, value = TRUE, ignore.case = TRUE)
   } else {
     clim_vars <- intersect(clim_vars, all_cols)
   }
-  if (is.null(edaph_vars)) {
-    edaph_vars <- setdiff(all_cols, clim_vars)
+
+  if (is.null(topo_vars)) {
+    if (is.null(edaph_vars)) {
+      topo_vars <- setdiff(
+        grep("^(topo_|elevation$|elev_)", all_cols, value = TRUE, ignore.case = TRUE),
+        clim_vars
+      )
+    } else {
+      topo_vars <- setdiff(
+        grep("^(topo_|elevation$|elev_)", all_cols, value = TRUE, ignore.case = TRUE),
+        unique(c(clim_vars, edaph_vars))
+      )
+    }
   } else {
-    edaph_vars <- intersect(edaph_vars, all_cols)
+    topo_vars <- setdiff(intersect(topo_vars, all_cols), clim_vars)
   }
+
+  if (is.null(edaph_vars)) {
+    edaph_vars <- setdiff(all_cols, unique(c(clim_vars, topo_vars)))
+  } else {
+    edaph_vars <- setdiff(intersect(edaph_vars, all_cols), unique(c(clim_vars, topo_vars)))
+  }
+
+  scores_all <- compute_anchor_separation_scores(X_df, anchor_groups = anchor_groups)
 
   sel_clim <- if (length(clim_vars) > 0L) {
     screen_collinear_predictors(
       X_df[, clim_vars, drop = FALSE],
       cor.threshold = cor.threshold,
-      vif.threshold = vif.threshold
+      vif.threshold = vif.threshold,
+      anchor_groups = anchor_groups,
+      var_scores = scores_all
     )$selected_variables
   } else {
     character(0)
@@ -1480,26 +1819,45 @@ screen_collinear_predictors_by_block <- function(
     screen_collinear_predictors(
       X_df[, edaph_vars, drop = FALSE],
       cor.threshold = cor.threshold,
-      vif.threshold = vif.threshold
+      vif.threshold = vif.threshold,
+      anchor_groups = anchor_groups,
+      var_scores = scores_all
     )$selected_variables
   } else {
     character(0)
   }
 
-  sel_joint <- unique(c(sel_edaph, sel_clim))
+  sel_topo <- if (length(topo_vars) > 0L) {
+    screen_collinear_predictors(
+      X_df[, topo_vars, drop = FALSE],
+      cor.threshold = cor.threshold,
+      vif.threshold = vif.threshold,
+      anchor_groups = anchor_groups,
+      var_scores = scores_all
+    )$selected_variables
+  } else {
+    character(0)
+  }
+
+  sel_joint <- unique(c(sel_edaph, sel_topo, sel_clim))
   pruned_joint <- setdiff(all_cols, sel_joint)
   message(sprintf(
-    "Partitioned Collinearity Pruning: retained %d Edaphic-Geologic (%s) and %d Climatic (%s) predictors.",
+    "Partitioned 3-Block Collinearity Pruning: retained %d Edaphic-Lithic (%s), %d Topographic (%s), and %d Climatic (%s) predictors.",
     length(sel_edaph), paste(sel_edaph, collapse = ", "),
+    length(sel_topo), paste(sel_topo, collapse = ", "),
     length(sel_clim), paste(sel_clim, collapse = ", ")
   ))
   list(
     selected_variables = sel_joint,
+    kept_vars = sel_joint,
     selected_edaphic = sel_edaph,
     selected_climatic = sel_clim,
+    selected_topo = sel_topo,
     edaphic_variables = sel_edaph,
     climatic_variables = sel_clim,
-    pruned_variables = pruned_joint
+    topo_variables = sel_topo,
+    pruned_variables = pruned_joint,
+    anchor_scores = scores_all
   )
 }
 prune_collinear_predictors <- screen_collinear_predictors_by_block

@@ -428,6 +428,98 @@ class TestFourierExtractor(unittest.TestCase):
             row_diss = spec_df[spec_df["catalogNumber"] == "A_S1"].iloc[0]
             self.assertTrue(bool(row_diss["is_dissected"]))
 
+    def test_dynamic_harmonic_calibration_and_dynamic_pc_export(self):
+        """Verify Task 1B dynamic H_opt in [6, 24] harmonic calibration and dynamic PC1..PC{k_export} / Sym_PC1..Sym_PC{k_export} export (>5 PCs when k_95 > 5)."""
+        content = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("Momocs::efourier(out_obj, nb.h = h_opt, norm = FALSE, start = FALSE)", content)
+        self.assertIn("efd_harmonic_opt", content)
+        self.assertIn("efd_k95_pcs", content)
+
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
+        rng = np.random.default_rng(20260430)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            contours_dir = tmp_p / "contours"
+            contours_dir.mkdir(parents=True, exist_ok=True)
+            vouchers_csv = tmp_p / "curated_vouchers.csv"
+            manifest_csv = tmp_p / "extracted_leaf_manifest.csv"
+
+            vouchers = []
+            manifest_rows = []
+            # Create 18 outlines with 8 orthogonal symmetric harmonic variation modes so k_95 >= 6
+            freqs = [2, 3, 4, 5, 6, 7, 8, 9]
+            for i in range(18):
+                cat = f"DYN_H_{i:02d}"
+                sp = "Packera millefolium" if i < 9 else "Packera schweinitziana"
+                coefs = rng.normal(0.0, 0.055, size=len(freqs))
+                x = 85.0 * np.cos(t) + sum(85.0 * coefs[m] * np.cos(freqs[m] * t) for m in range(len(freqs)))
+                y = 42.0 * np.sin(t) + sum(42.0 * coefs[m] * np.sin(freqs[m] * t) for m in range(len(freqs)))
+                cpath = contours_dir / f"{cat}_leaf1.csv"
+                pd.DataFrame({
+                    "catalogNumber": cat,
+                    "leaf_id": 1,
+                    "point_index": np.arange(120),
+                    "x": x + 250.0,
+                    "y": y + 250.0,
+                }).to_csv(cpath, index=False)
+                vouchers.append({
+                    "catalogNumber": cat,
+                    "species_raw": sp,
+                    "scientificName": sp,
+                    "determiner_tier": "Tier_1_Gold",
+                })
+                manifest_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "leaf_id": 1,
+                    "assigned_tier": "Tier_1_Direct",
+                    "pixels_per_mm": 10.0,
+                    "is_calibrated_mm": True,
+                    "solidity": 0.62,
+                    "ucs_score": 0.94,
+                    "is_dissected": True,
+                    "contour_path": str(cpath),
+                })
+
+            pd.DataFrame(vouchers).to_csv(vouchers_csv, index=False)
+            pd.DataFrame(manifest_rows).to_csv(manifest_csv, index=False)
+
+            out_spec = tmp_p / "leaf_efa_harmonics.csv"
+            out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--contours-dir", str(contours_dir),
+                    "--masks-dir", str(tmp_p / "masks"),
+                    "--vouchers", str(vouchers_csv),
+                    "--manifest", str(manifest_csv),
+                    "--output", str(out_spec),
+                    "--output-individual", str(out_ind),
+                    "--report-out", str(tmp_p / "tier_rep.csv"),
+                    "--plot-out", str(tmp_p / "tier_fig.pdf"),
+                    "--permutations", "19",
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Dynamic H_opt Step 03 failed:\n{proc.stderr}\n{proc.stdout}")
+            spec_df = pd.read_csv(out_spec)
+            self.assertIn("efd_harmonic_opt", spec_df.columns)
+            self.assertIn("efd_k95_pcs", spec_df.columns)
+            h_opt_val = int(spec_df["efd_harmonic_opt"].iloc[0])
+            k95_val = int(spec_df["efd_k95_pcs"].iloc[0])
+            self.assertGreaterEqual(h_opt_val, 6)
+            self.assertLessEqual(h_opt_val, 24)
+            self.assertGreaterEqual(k95_val, 6, f"Expected k_95 >= 6 on 8-mode outlines, got {k95_val}")
+            self.assertIn("PC6", spec_df.columns)
+            self.assertIn("Sym_PC6", spec_df.columns)
+
 
 if __name__ == "__main__":
     unittest.main()

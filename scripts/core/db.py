@@ -74,10 +74,32 @@ DWC_VOUCHER_COLUMNS: Tuple[str, ...] = (
 )
 
 HARMONIC_COLS: Tuple[str, ...] = tuple(
-    f"{coef}{idx}" for idx in range(1, 13) for coef in ("A", "B", "C", "D")
+    f"{coef}{idx}" for idx in range(1, 25) for coef in ("A", "B", "C", "D")
 )
-PC_COLS: Tuple[str, ...] = ("PC1", "PC2", "PC3", "PC4", "PC5")
-SYM_PC_COLS: Tuple[str, ...] = ("Sym_PC1", "Sym_PC2", "Sym_PC3", "Sym_PC4", "Sym_PC5")
+PC_COLS: Tuple[str, ...] = tuple(f"PC{idx}" for idx in range(1, 16))
+SYM_PC_COLS: Tuple[str, ...] = tuple(f"Sym_PC{idx}" for idx in range(1, 16))
+
+WC_BIO_COLUMNS: Tuple[str, ...] = (
+    "bio1_temp_mean",
+    "bio2_mean_diurnal_range",
+    "bio3_isothermality",
+    "bio4_temp_seasonality",
+    "bio5_max_temp_warmest_month",
+    "bio6_min_temp_coldest_month",
+    "bio7_temp_annual_range",
+    "bio8_mean_temp_wettest_qtr",
+    "bio9_mean_temp_driest_qtr",
+    "bio10_mean_temp_warmest_qtr",
+    "bio11_mean_temp_coldest_qtr",
+    "bio12_precip_annual",
+    "bio13_precip_wettest_month",
+    "bio14_precip_driest_month",
+    "bio15_precip_seasonality",
+    "bio16_precip_wettest_qtr",
+    "bio17_precip_driest_qtr",
+    "bio18_precip_warmest_qtr",
+    "bio19_precip_coldest_qtr",
+)
 
 ENVIRONMENTAL_CACHE_COLUMNS: Tuple[str, ...] = (
     "lat_lon_key",
@@ -138,10 +160,7 @@ ENVIRONMENTAL_CACHE_COLUMNS: Tuple[str, ...] = (
     "min_bedrock_depth_buffer_cm",
     "max_cfvo_buffer_pct",
     "azonal_lithology_presence_buffer",
-    "bio1_temp_mean",
-    "bio4_temp_seasonality",
-    "bio12_precip_annual",
-    "bio15_precip_seasonality",
+    *WC_BIO_COLUMNS,
     "bio18_precip_warmest_qt",
     "bio19_precip_coldest_qt",
     "soil_ph",
@@ -392,10 +411,292 @@ def get_duckdb_connection(
 # Two-Tier Relational Schema DDL (Tier A + Tier B + R*Tree + Master View)
 # =============================================================================
 
+def _build_master_view_ddl() -> str:
+    wc_excluded_from_env: Set[str] = {
+        "lat_lon_key",
+        "catalogNumber",
+        "latitude",
+        "longitude",
+        "bio18_precip_warmest_qt",
+        "bio19_precip_coldest_qt",
+        *WC_BIO_COLUMNS,
+    }
+    env_view_selects = ",\n        ".join(
+        f"ec.{col} AS {col}"
+        for col in ENVIRONMENTAL_CACHE_COLUMNS
+        if col not in wc_excluded_from_env
+    )
+
+    wc_select_parts: List[str] = []
+    for col in WC_BIO_COLUMNS:
+        if col == "bio18_precip_warmest_qtr":
+            wc_select_parts.append(
+                "COALESCE(srf.bio18_precip_warmest_qtr, srf.bio18_precip_warmest_qt, "
+                "ec.bio18_precip_warmest_qtr, ec.bio18_precip_warmest_qt) AS bio18_precip_warmest_qtr"
+            )
+        elif col == "bio19_precip_coldest_qtr":
+            wc_select_parts.append(
+                "COALESCE(srf.bio19_precip_coldest_qtr, srf.bio19_precip_coldest_qt, "
+                "ec.bio19_precip_coldest_qtr, ec.bio19_precip_coldest_qt) AS bio19_precip_coldest_qtr"
+            )
+        else:
+            wc_select_parts.append(f"COALESCE(srf.{col}, ec.{col}) AS {col}")
+    wc_select_parts.append(
+        "COALESCE(srf.bio18_precip_warmest_qt, ec.bio18_precip_warmest_qt, "
+        "srf.bio18_precip_warmest_qtr, ec.bio18_precip_warmest_qtr) AS bio18_precip_warmest_qt"
+    )
+    wc_select_parts.append(
+        "COALESCE(srf.bio19_precip_coldest_qt, ec.bio19_precip_coldest_qt, "
+        "srf.bio19_precip_coldest_qtr, ec.bio19_precip_coldest_qtr) AS bio19_precip_coldest_qt"
+    )
+    wc_view_selects = ",\n        ".join(wc_select_parts)
+
+    harm_view_selects = ",\n        ".join(f"om.{h} AS {h}" for h in HARMONIC_COLS)
+    pc_view_selects = ",\n        ".join(f"om.{p} AS {p}" for p in PC_COLS)
+    sym_pc_view_selects = ",\n        ".join(f"om.{sp} AS {sp}" for sp in SYM_PC_COLS)
+
+    return f"""
+    DROP VIEW IF EXISTS v_integrative_triage_master;
+    CREATE VIEW v_integrative_triage_master AS
+    SELECT
+        rac.run_id AS run_id,
+        rac.catalogNumber AS catalogNumber,
+        rac.plant_individual_id AS plant_individual_id,
+        v.institutionCode AS institutionCode,
+        v.scientificName AS scientificName,
+        v.species_raw AS species_raw,
+        v.recordedBy AS recordedBy,
+        v.recordNumber AS recordNumber,
+        v.identifiedBy AS identifiedBy,
+        v.determiner_raw AS determiner_raw,
+        COALESCE(rac.determiner_tier, om.determiner_tier, v.determiner_tier) AS determiner_tier,
+        v.type_status AS type_status,
+        v.county AS county,
+        v.stateProvince AS stateProvince,
+        v.locality AS locality,
+        COALESCE(v.decimalLatitude, v.latitude) AS decimalLatitude,
+        COALESCE(v.latitude, v.decimalLatitude) AS latitude,
+        COALESCE(v.decimalLongitude, v.longitude) AS decimalLongitude,
+        COALESCE(v.longitude, v.decimalLongitude) AS longitude,
+        v.coordinateUncertainty AS coordinateUncertainty,
+        v.year AS year,
+        v.month AS month,
+        v.day AS day,
+        v.eventDate AS eventDate,
+        v.regional_group AS regional_group,
+        v.image_path AS image_path,
+        v.exsiccatae_key AS exsiccatae_key,
+        v.is_primary_duplicate AS is_primary_duplicate,
+        v.duplicate_count AS duplicate_count,
+        COALESCE(rac.species_standardized, om.species_standardized, v.species_standardized) AS species_standardized,
+        COALESCE(rac.is_promoted_bronze, om.is_promoted_anchor, 0) AS is_promoted_anchor,
+        COALESCE(rac.authority_weight, om.authority_weight) AS authority_weight,
+        COALESCE(rac.spatial_balance_weight, 1.0) AS spatial_balance_weight,
+        COALESCE(om.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm,
+        COALESCE(om.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm,
+        v.qc_status AS qc_status,
+        -- Plant individual & linear petiole/scape traits
+        pi.rosette_centroid_x AS rosette_centroid_x,
+        pi.rosette_centroid_y AS rosette_centroid_y,
+        pi.crown_x AS crown_x,
+        pi.crown_y AS crown_y,
+        pi.plant_height_px AS plant_height_px,
+        pi.plant_height_mm AS plant_height_mm,
+        pi.plant_height_cm AS plant_height_cm,
+        pi.is_bent_stem AS is_bent_stem,
+        pi.petiole_length_px AS petiole_length_px,
+        COALESCE(om.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm,
+        pi.blade_length_px AS blade_length_px,
+        COALESCE(om.blade_length_mm, pi.blade_length_mm) AS blade_length_mm,
+        COALESCE(om.petiole_to_blade_ratio, pi.petiole_to_blade_ratio) AS petiole_to_blade_ratio,
+        pi.scape_to_basal_leaf_ratio AS scape_to_basal_leaf_ratio,
+        pi.rosette_patch_path AS rosette_patch_path,
+        pi.rosette_mask_path AS rosette_mask_path,
+        -- Reproductive & phenological traits (with sheet-level pid=0 fallback)
+        COALESCE(vrp.capitula_count, vrp0.capitula_count) AS capitula_count,
+        COALESCE(vrp.involucre_height_px, vrp0.involucre_height_px) AS involucre_height_px,
+        COALESCE(vrp.involucre_width_px, vrp0.involucre_width_px) AS involucre_width_px,
+        COALESCE(vrp.involucre_height_mm, vrp0.involucre_height_mm) AS involucre_height_mm,
+        COALESCE(vrp.involucre_width_mm, vrp0.involucre_width_mm) AS involucre_width_mm,
+        COALESCE(om.AR_inv, vrp.AR_inv, vrp.capitulum_aspect_ratio, vrp0.AR_inv, vrp0.capitulum_aspect_ratio) AS AR_inv,
+        COALESCE(vrp.capitulum_aspect_ratio, vrp.AR_inv, vrp0.capitulum_aspect_ratio, vrp0.AR_inv) AS capitulum_aspect_ratio,
+        COALESCE(vrp.total_capitula, vrp0.total_capitula, vrp.capitula_count, vrp0.capitula_count) AS total_capitula,
+        COALESCE(vrp.n_anthesis, vrp0.n_anthesis) AS n_anthesis,
+        COALESCE(vrp.n_bud, vrp0.n_bud) AS n_bud,
+        COALESCE(vrp.n_fruiting, vrp.n_fruit, vrp0.n_fruiting, vrp0.n_fruit) AS n_fruiting,
+        COALESCE(vrp.n_fruit, vrp.n_fruiting, vrp0.n_fruit, vrp0.n_fruiting) AS n_fruit,
+        COALESCE(vrp.n_senescent, vrp0.n_senescent) AS n_senescent,
+        COALESCE(vrp.voucher_phenological_state, vrp0.voucher_phenological_state) AS voucher_phenological_state,
+        COALESCE(vrp.is_verified_anthesis, vrp0.is_verified_anthesis) AS is_verified_anthesis,
+        COALESCE(vrp.reproductive_stage_confidence, vrp0.reproductive_stage_confidence) AS reproductive_stage_confidence,
+        COALESCE(vrp.dominant_pappus_ratio, vrp0.dominant_pappus_ratio) AS dominant_pappus_ratio,
+        -- Step 03 & Step 04 OTU Morphometrics & CDA
+        om.assigned_tier AS assigned_tier,
+        om.solidity AS solidity,
+        om.ucs_score AS ucs_score,
+        om.aspect_ratio AS aspect_ratio,
+        om.area_px AS area_px,
+        om.is_dissected AS is_dissected,
+        om.centroid_size AS centroid_size,
+        om.log_centsize AS log_centsize,
+        {harm_view_selects},
+        om.sym_var AS sym_var,
+        om.asym_var AS asym_var,
+        om.pct_asymmetry AS pct_asymmetry,
+        om.harmonic_roughness AS harmonic_roughness,
+        om.is_contour_outlier AS is_contour_outlier,
+        om.leaf_quality_weight AS leaf_quality_weight,
+        om.leaf_count AS leaf_count,
+        om.n_tier1_leaves AS n_tier1_leaves,
+        om.n_tier2_leaves AS n_tier2_leaves,
+        om.morph_tier_source AS morph_tier_source,
+        om.foliar_variance AS foliar_variance,
+        om.heteroblasty_index AS heteroblasty_index,
+        om.efd_harmonic_opt AS efd_harmonic_opt,
+        om.efd_k95_pcs AS efd_k95_pcs,
+        om.selected_morph_features AS selected_morph_features,
+        {pc_view_selects},
+        {sym_pc_view_selects},
+        om.gmm_cluster AS gmm_cluster,
+        om.gmm_uncertainty AS gmm_uncertainty,
+        om.cda_predicted_taxon AS cda_predicted_taxon,
+        om.cda_posterior_prob AS cda_posterior_prob,
+        om.cda_second_taxon AS cda_second_taxon,
+        om.cda_second_posterior_prob AS cda_second_posterior_prob,
+        om.cda_posterior_margin AS cda_posterior_margin,
+        om.loocv_accuracy AS loocv_accuracy,
+        om.can1 AS can1,
+        om.can2 AS can2,
+        om.can3 AS can3,
+        om.ecoregion_cda_predicted AS ecoregion_cda_predicted,
+        om.ecoregion_cda_posterior_prob AS ecoregion_cda_posterior_prob,
+        om.morphometric_outlier_flag AS morphometric_outlier_flag,
+        COALESCE(om.misidentification_flag, om.morphometric_outlier_flag) AS misidentification_flag,
+        om.triage_priority AS triage_priority,
+        om.discordance_reason AS morph_discordance_reason,
+        -- Step 05 Vision XAI & Cleanlab Audit
+        COALESCE(vx.vision_predicted_label, vx.predicted_label) AS vision_predicted_label,
+        COALESCE(vx.predicted_label, vx.vision_predicted_label) AS predicted_label,
+        vx.confidence_given_class AS confidence_given_class,
+        vx.confidence_predicted_class AS confidence_predicted_class,
+        vx.vision_second_prob AS vision_second_prob,
+        vx.vision_margin AS vision_margin,
+        vx.label_quality_score AS label_quality_score,
+        vx.c_error AS c_error,
+        vx.is_cleanlab_issue AS is_cleanlab_issue,
+        vx.is_label_corrupted AS is_label_corrupted,
+        vx.vision_ood_score AS vision_ood_score,
+        vx.vision_is_ood AS vision_is_ood,
+        vx.foreground_attention_ratio AS foreground_attention_ratio,
+        vx.is_artifact_driven AS is_artifact_driven,
+        vx.is_background_shortcut AS is_background_shortcut,
+        vx.surface_orientation AS surface_orientation,
+        vx.mean_luminance AS mean_luminance,
+        vx.mean_saturation AS mean_saturation,
+        vx.high_brightness_ratio AS high_brightness_ratio,
+        vx.tomentum_taxon_discordance AS tomentum_taxon_discordance,
+        -- Step 06 Spatial RF & Hopkins Phenology
+        COALESCE(srf.lat_lon_key, ec.lat_lon_key) AS lat_lon_key,
+        srf.rf_predicted_taxon AS rf_predicted_taxon,
+        srf.rf_predicted_prob AS rf_predicted_prob,
+        srf.rf_given_taxon_prob AS rf_given_taxon_prob,
+        srf.edaphic_best_fit_taxon AS edaphic_best_fit_taxon,
+        srf.spatial_block_cv_acc AS spatial_block_cv_acc,
+        srf.spatial_autocorr_range_km AS spatial_autocorr_range_km,
+        srf.spatial_block_id AS spatial_block_id,
+        COALESCE(srf.doy, v.doy) AS doy,
+        v.pheno_sin AS pheno_sin,
+        v.pheno_cos AS pheno_cos,
+        srf.expected_doy AS expected_doy,
+        srf.hopkins_expected AS hopkins_expected,
+        srf.delta_doy AS delta_doy,
+        srf.pheno_timing_category AS pheno_timing_category,
+        srf.anthesis_filter_status AS anthesis_filter_status,
+        srf.edaphic_z_score AS edaphic_z_score,
+        srf.climatic_z_score AS climatic_z_score,
+        srf.primary_env_predictors AS primary_env_predictors,
+        srf.primary_clim_predictors AS primary_clim_predictors,
+        srf.primary_edaph_predictors AS primary_edaph_predictors,
+        srf.substrate_specialist_flag AS substrate_specialist_flag,
+        srf.piedmont_outcrop_specialist_flag AS piedmont_outcrop_specialist_flag,
+        srf.multimodal_concordance AS multimodal_concordance,
+        srf.multimodal_conflict_flag AS multimodal_conflict_flag,
+        srf.triage_category AS triage_category,
+        srf.conflict_discordance_notes AS conflict_discordance_notes,
+        -- Environmental Cache (Fine-grain SSURGO / POLARIS / SOLUS / 3DEP / SGMC & 19 WorldClim Rasters)
+        {env_view_selects},
+        {wc_view_selects},
+        -- Step 07 Curation Triage
+        ct.w_morph_kappa AS w_morph_kappa,
+        ct.w_vision_kappa AS w_vision_kappa,
+        ct.w_edaphic_kappa AS w_edaphic_kappa,
+        ct.w_pheno_kappa AS w_pheno_kappa,
+        ct.n_active_modalities AS n_active_modalities,
+        ct.n_available_modalities AS n_available_modalities,
+        ct.probabilistic_consensus_conflict AS probabilistic_consensus_conflict,
+        ct.composite_conflict_score AS composite_conflict_score,
+        ct.probabilistic_consensus_score AS probabilistic_consensus_score,
+        COALESCE(ct.hopkins_adjusted_doy, srf.hopkins_adjusted_doy) AS hopkins_adjusted_doy,
+        ct.delta_doy_resid AS delta_doy_resid,
+        ct.taxonomic_status_call AS taxonomic_status_call,
+        ct.recommended_determination AS recommended_determination,
+        ct.taxonomic_treatment AS taxonomic_treatment,
+        ct.taxonomic_treatment_broad AS taxonomic_treatment_broad,
+        ct.taxonomic_treatment_subtype AS taxonomic_treatment_subtype,
+        ct.synthesis_triage_priority AS synthesis_triage_priority,
+        ct.synthesis_triage_action AS synthesis_triage_action,
+        ct.synthesis_rationale AS synthesis_rationale,
+        ct.is_completed_voucher AS is_completed_voucher
+    FROM run_active_cohort rac
+    LEFT JOIN vouchers v
+        ON v.catalogNumber = rac.catalogNumber
+    LEFT JOIN plant_individuals pi
+        ON pi.catalogNumber = rac.catalogNumber
+       AND pi.plant_individual_id = rac.plant_individual_id
+    LEFT JOIN voucher_reproductive_phenology vrp
+        ON vrp.catalogNumber = rac.catalogNumber
+       AND vrp.plant_individual_id = rac.plant_individual_id
+    LEFT JOIN voucher_reproductive_phenology vrp0
+        ON vrp0.catalogNumber = rac.catalogNumber
+       AND vrp0.plant_individual_id = 0
+    LEFT JOIN otu_morphometrics om
+        ON om.run_id = rac.run_id
+       AND om.catalogNumber = rac.catalogNumber
+       AND om.plant_individual_id = rac.plant_individual_id
+    LEFT JOIN vision_xai_audit vx
+        ON vx.run_id = rac.run_id
+       AND vx.catalogNumber = rac.catalogNumber
+       AND vx.plant_individual_id = rac.plant_individual_id
+    LEFT JOIN spatial_rf_predictions srf
+        ON srf.run_id = rac.run_id
+       AND srf.catalogNumber = rac.catalogNumber
+       AND srf.plant_individual_id = rac.plant_individual_id
+    LEFT JOIN environmental_cache ec
+        ON ec.lat_lon_key = COALESCE(
+            srf.lat_lon_key,
+            CASE
+                WHEN COALESCE(v.latitude, v.decimalLatitude) IS NOT NULL
+                 AND COALESCE(v.longitude, v.decimalLongitude) IS NOT NULL
+                THEN printf('%.5f_%.5f', COALESCE(v.latitude, v.decimalLatitude), COALESCE(v.longitude, v.decimalLongitude))
+                ELSE NULL
+            END,
+            (SELECT ec2.lat_lon_key FROM environmental_cache ec2 WHERE ec2.catalogNumber = rac.catalogNumber LIMIT 1)
+        )
+    LEFT JOIN curation_triage ct
+        ON ct.run_id = rac.run_id
+       AND ct.catalogNumber = rac.catalogNumber
+       AND ct.plant_individual_id = rac.plant_individual_id;
+    """
+
+
 def _build_schema_ddl() -> str:
     harm_ddl = ",\n        ".join(f"{h} REAL" for h in HARMONIC_COLS)
     pc_ddl = ",\n        ".join(f"{p} REAL" for p in PC_COLS)
     sym_pc_ddl = ",\n        ".join(f"{sp} REAL" for sp in SYM_PC_COLS)
+    wc_srf_ddl = ",\n        ".join(
+        f"{col} REAL"
+        for col in (*WC_BIO_COLUMNS, "bio18_precip_warmest_qt", "bio19_precip_coldest_qt")
+    )
 
     env_col_defs: List[str] = ["lat_lon_key TEXT PRIMARY KEY"]
     for col in ENVIRONMENTAL_CACHE_COLUMNS:
@@ -409,12 +710,7 @@ def _build_schema_ddl() -> str:
             env_col_defs.append(f"{col} REAL")
     env_ddl = ",\n        ".join(env_col_defs)
 
-    env_view_selects = ",\n        ".join(
-        f"ec.{col} AS {col}"
-        for col in ENVIRONMENTAL_CACHE_COLUMNS
-        if col not in {"lat_lon_key", "catalogNumber", "latitude", "longitude"}
-    )
-    harm_view_selects = ",\n        ".join(f"om.{h} AS {h}" for h in HARMONIC_COLS)
+    master_view_ddl = _build_master_view_ddl()
 
     return f"""
     -- =========================================================================
@@ -669,6 +965,8 @@ def _build_schema_ddl() -> str:
         leaf_quality_weight REAL,
         centroid_size REAL,
         log_centsize REAL,
+        efd_harmonic_opt INTEGER,
+        efd_k95_pcs INTEGER,
         {pc_ddl},
         {sym_pc_ddl},
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id, leaf_id),
@@ -713,6 +1011,9 @@ def _build_schema_ddl() -> str:
         morph_tier_source TEXT,
         foliar_variance REAL,
         heteroblasty_index REAL,
+        efd_harmonic_opt INTEGER,
+        efd_k95_pcs INTEGER,
+        selected_morph_features TEXT,
         {pc_ddl},
         {sym_pc_ddl},
         gmm_cluster TEXT,
@@ -790,6 +1091,11 @@ def _build_schema_ddl() -> str:
         pheno_timing_category TEXT,
         anthesis_filter_status TEXT,
         edaphic_z_score REAL,
+        climatic_z_score REAL,
+        primary_env_predictors TEXT,
+        primary_clim_predictors TEXT,
+        primary_edaph_predictors TEXT,
+        {wc_srf_ddl},
         substrate_specialist_flag INTEGER,
         piedmont_outcrop_specialist_flag INTEGER,
         multimodal_concordance TEXT,
@@ -828,244 +1134,71 @@ def _build_schema_ddl() -> str:
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
 
-    DROP VIEW IF EXISTS v_integrative_triage_master;
-    CREATE VIEW v_integrative_triage_master AS
-    SELECT
-        rac.run_id AS run_id,
-        rac.catalogNumber AS catalogNumber,
-        rac.plant_individual_id AS plant_individual_id,
-        v.institutionCode AS institutionCode,
-        v.scientificName AS scientificName,
-        v.species_raw AS species_raw,
-        v.recordedBy AS recordedBy,
-        v.recordNumber AS recordNumber,
-        v.identifiedBy AS identifiedBy,
-        v.determiner_raw AS determiner_raw,
-        COALESCE(rac.determiner_tier, om.determiner_tier, v.determiner_tier) AS determiner_tier,
-        v.type_status AS type_status,
-        v.county AS county,
-        v.stateProvince AS stateProvince,
-        v.locality AS locality,
-        COALESCE(v.decimalLatitude, v.latitude) AS decimalLatitude,
-        COALESCE(v.latitude, v.decimalLatitude) AS latitude,
-        COALESCE(v.decimalLongitude, v.longitude) AS decimalLongitude,
-        COALESCE(v.longitude, v.decimalLongitude) AS longitude,
-        v.coordinateUncertainty AS coordinateUncertainty,
-        v.year AS year,
-        v.month AS month,
-        v.day AS day,
-        v.eventDate AS eventDate,
-        v.regional_group AS regional_group,
-        v.image_path AS image_path,
-        v.exsiccatae_key AS exsiccatae_key,
-        v.is_primary_duplicate AS is_primary_duplicate,
-        v.duplicate_count AS duplicate_count,
-        COALESCE(rac.species_standardized, om.species_standardized, v.species_standardized) AS species_standardized,
-        COALESCE(rac.is_promoted_bronze, om.is_promoted_anchor, 0) AS is_promoted_anchor,
-        COALESCE(rac.authority_weight, om.authority_weight) AS authority_weight,
-        COALESCE(rac.spatial_balance_weight, 1.0) AS spatial_balance_weight,
-        COALESCE(om.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm,
-        COALESCE(om.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm,
-        v.qc_status AS qc_status,
-        -- Plant individual & linear petiole/scape traits
-        pi.rosette_centroid_x AS rosette_centroid_x,
-        pi.rosette_centroid_y AS rosette_centroid_y,
-        pi.crown_x AS crown_x,
-        pi.crown_y AS crown_y,
-        pi.plant_height_px AS plant_height_px,
-        pi.plant_height_mm AS plant_height_mm,
-        pi.plant_height_cm AS plant_height_cm,
-        pi.is_bent_stem AS is_bent_stem,
-        pi.petiole_length_px AS petiole_length_px,
-        COALESCE(om.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm,
-        pi.blade_length_px AS blade_length_px,
-        COALESCE(om.blade_length_mm, pi.blade_length_mm) AS blade_length_mm,
-        COALESCE(om.petiole_to_blade_ratio, pi.petiole_to_blade_ratio) AS petiole_to_blade_ratio,
-        pi.scape_to_basal_leaf_ratio AS scape_to_basal_leaf_ratio,
-        pi.rosette_patch_path AS rosette_patch_path,
-        pi.rosette_mask_path AS rosette_mask_path,
-        -- Reproductive & phenological traits (with sheet-level pid=0 fallback)
-        COALESCE(vrp.capitula_count, vrp0.capitula_count) AS capitula_count,
-        COALESCE(vrp.involucre_height_px, vrp0.involucre_height_px) AS involucre_height_px,
-        COALESCE(vrp.involucre_width_px, vrp0.involucre_width_px) AS involucre_width_px,
-        COALESCE(vrp.involucre_height_mm, vrp0.involucre_height_mm) AS involucre_height_mm,
-        COALESCE(vrp.involucre_width_mm, vrp0.involucre_width_mm) AS involucre_width_mm,
-        COALESCE(om.AR_inv, vrp.AR_inv, vrp.capitulum_aspect_ratio, vrp0.AR_inv, vrp0.capitulum_aspect_ratio) AS AR_inv,
-        COALESCE(vrp.capitulum_aspect_ratio, vrp.AR_inv, vrp0.capitulum_aspect_ratio, vrp0.AR_inv) AS capitulum_aspect_ratio,
-        COALESCE(vrp.total_capitula, vrp0.total_capitula, vrp.capitula_count, vrp0.capitula_count) AS total_capitula,
-        COALESCE(vrp.n_anthesis, vrp0.n_anthesis) AS n_anthesis,
-        COALESCE(vrp.n_bud, vrp0.n_bud) AS n_bud,
-        COALESCE(vrp.n_fruiting, vrp.n_fruit, vrp0.n_fruiting, vrp0.n_fruit) AS n_fruiting,
-        COALESCE(vrp.n_fruit, vrp.n_fruiting, vrp0.n_fruit, vrp0.n_fruiting) AS n_fruit,
-        COALESCE(vrp.n_senescent, vrp0.n_senescent) AS n_senescent,
-        COALESCE(vrp.voucher_phenological_state, vrp0.voucher_phenological_state) AS voucher_phenological_state,
-        COALESCE(vrp.is_verified_anthesis, vrp0.is_verified_anthesis) AS is_verified_anthesis,
-        COALESCE(vrp.reproductive_stage_confidence, vrp0.reproductive_stage_confidence) AS reproductive_stage_confidence,
-        COALESCE(vrp.dominant_pappus_ratio, vrp0.dominant_pappus_ratio) AS dominant_pappus_ratio,
-        -- Step 03 & Step 04 OTU Morphometrics & CDA
-        om.assigned_tier AS assigned_tier,
-        om.solidity AS solidity,
-        om.ucs_score AS ucs_score,
-        om.aspect_ratio AS aspect_ratio,
-        om.area_px AS area_px,
-        om.is_dissected AS is_dissected,
-        om.centroid_size AS centroid_size,
-        om.log_centsize AS log_centsize,
-        {harm_view_selects},
-        om.sym_var AS sym_var,
-        om.asym_var AS asym_var,
-        om.pct_asymmetry AS pct_asymmetry,
-        om.harmonic_roughness AS harmonic_roughness,
-        om.is_contour_outlier AS is_contour_outlier,
-        om.leaf_quality_weight AS leaf_quality_weight,
-        om.leaf_count AS leaf_count,
-        om.n_tier1_leaves AS n_tier1_leaves,
-        om.n_tier2_leaves AS n_tier2_leaves,
-        om.morph_tier_source AS morph_tier_source,
-        om.foliar_variance AS foliar_variance,
-        om.heteroblasty_index AS heteroblasty_index,
-        om.PC1 AS PC1,
-        om.PC2 AS PC2,
-        om.PC3 AS PC3,
-        om.PC4 AS PC4,
-        om.PC5 AS PC5,
-        om.Sym_PC1 AS Sym_PC1,
-        om.Sym_PC2 AS Sym_PC2,
-        om.Sym_PC3 AS Sym_PC3,
-        om.Sym_PC4 AS Sym_PC4,
-        om.Sym_PC5 AS Sym_PC5,
-        om.gmm_cluster AS gmm_cluster,
-        om.gmm_uncertainty AS gmm_uncertainty,
-        om.cda_predicted_taxon AS cda_predicted_taxon,
-        om.cda_posterior_prob AS cda_posterior_prob,
-        om.cda_second_taxon AS cda_second_taxon,
-        om.cda_second_posterior_prob AS cda_second_posterior_prob,
-        om.cda_posterior_margin AS cda_posterior_margin,
-        om.loocv_accuracy AS loocv_accuracy,
-        om.can1 AS can1,
-        om.can2 AS can2,
-        om.can3 AS can3,
-        om.ecoregion_cda_predicted AS ecoregion_cda_predicted,
-        om.ecoregion_cda_posterior_prob AS ecoregion_cda_posterior_prob,
-        om.morphometric_outlier_flag AS morphometric_outlier_flag,
-        COALESCE(om.misidentification_flag, om.morphometric_outlier_flag) AS misidentification_flag,
-        om.triage_priority AS triage_priority,
-        om.discordance_reason AS morph_discordance_reason,
-        -- Step 05 Vision XAI & Cleanlab Audit
-        COALESCE(vx.vision_predicted_label, vx.predicted_label) AS vision_predicted_label,
-        COALESCE(vx.predicted_label, vx.vision_predicted_label) AS predicted_label,
-        vx.confidence_given_class AS confidence_given_class,
-        vx.confidence_predicted_class AS confidence_predicted_class,
-        vx.vision_second_prob AS vision_second_prob,
-        vx.vision_margin AS vision_margin,
-        vx.label_quality_score AS label_quality_score,
-        vx.c_error AS c_error,
-        vx.is_cleanlab_issue AS is_cleanlab_issue,
-        vx.is_label_corrupted AS is_label_corrupted,
-        vx.vision_ood_score AS vision_ood_score,
-        vx.vision_is_ood AS vision_is_ood,
-        vx.foreground_attention_ratio AS foreground_attention_ratio,
-        vx.is_artifact_driven AS is_artifact_driven,
-        vx.is_background_shortcut AS is_background_shortcut,
-        vx.surface_orientation AS surface_orientation,
-        vx.mean_luminance AS mean_luminance,
-        vx.mean_saturation AS mean_saturation,
-        vx.high_brightness_ratio AS high_brightness_ratio,
-        vx.tomentum_taxon_discordance AS tomentum_taxon_discordance,
-        -- Step 06 Spatial RF & Hopkins Phenology
-        COALESCE(srf.lat_lon_key, ec.lat_lon_key) AS lat_lon_key,
-        srf.rf_predicted_taxon AS rf_predicted_taxon,
-        srf.rf_predicted_prob AS rf_predicted_prob,
-        srf.rf_given_taxon_prob AS rf_given_taxon_prob,
-        srf.edaphic_best_fit_taxon AS edaphic_best_fit_taxon,
-        srf.spatial_block_cv_acc AS spatial_block_cv_acc,
-        srf.spatial_autocorr_range_km AS spatial_autocorr_range_km,
-        srf.spatial_block_id AS spatial_block_id,
-        COALESCE(srf.doy, v.doy) AS doy,
-        v.pheno_sin AS pheno_sin,
-        v.pheno_cos AS pheno_cos,
-        srf.expected_doy AS expected_doy,
-        srf.hopkins_expected AS hopkins_expected,
-        srf.delta_doy AS delta_doy,
-        srf.pheno_timing_category AS pheno_timing_category,
-        srf.anthesis_filter_status AS anthesis_filter_status,
-        srf.edaphic_z_score AS edaphic_z_score,
-        srf.substrate_specialist_flag AS substrate_specialist_flag,
-        srf.piedmont_outcrop_specialist_flag AS piedmont_outcrop_specialist_flag,
-        srf.multimodal_concordance AS multimodal_concordance,
-        srf.multimodal_conflict_flag AS multimodal_conflict_flag,
-        srf.triage_category AS triage_category,
-        srf.conflict_discordance_notes AS conflict_discordance_notes,
-        -- Environmental Cache (Fine-grain SSURGO / POLARIS / SOLUS / 3DEP / SGMC / WorldClim)
-        {env_view_selects},
-        -- Step 07 Curation Triage
-        ct.w_morph_kappa AS w_morph_kappa,
-        ct.w_vision_kappa AS w_vision_kappa,
-        ct.w_edaphic_kappa AS w_edaphic_kappa,
-        ct.w_pheno_kappa AS w_pheno_kappa,
-        ct.n_active_modalities AS n_active_modalities,
-        ct.n_available_modalities AS n_available_modalities,
-        ct.probabilistic_consensus_conflict AS probabilistic_consensus_conflict,
-        ct.composite_conflict_score AS composite_conflict_score,
-        ct.probabilistic_consensus_score AS probabilistic_consensus_score,
-        COALESCE(ct.hopkins_adjusted_doy, srf.hopkins_adjusted_doy) AS hopkins_adjusted_doy,
-        ct.delta_doy_resid AS delta_doy_resid,
-        ct.taxonomic_status_call AS taxonomic_status_call,
-        ct.recommended_determination AS recommended_determination,
-        ct.taxonomic_treatment AS taxonomic_treatment,
-        ct.taxonomic_treatment_broad AS taxonomic_treatment_broad,
-        ct.taxonomic_treatment_subtype AS taxonomic_treatment_subtype,
-        ct.synthesis_triage_priority AS synthesis_triage_priority,
-        ct.synthesis_triage_action AS synthesis_triage_action,
-        ct.synthesis_rationale AS synthesis_rationale,
-        ct.is_completed_voucher AS is_completed_voucher
-    FROM run_active_cohort rac
-    LEFT JOIN vouchers v
-        ON v.catalogNumber = rac.catalogNumber
-    LEFT JOIN plant_individuals pi
-        ON pi.catalogNumber = rac.catalogNumber
-       AND pi.plant_individual_id = rac.plant_individual_id
-    LEFT JOIN voucher_reproductive_phenology vrp
-        ON vrp.catalogNumber = rac.catalogNumber
-       AND vrp.plant_individual_id = rac.plant_individual_id
-    LEFT JOIN voucher_reproductive_phenology vrp0
-        ON vrp0.catalogNumber = rac.catalogNumber
-       AND vrp0.plant_individual_id = 0
-    LEFT JOIN otu_morphometrics om
-        ON om.run_id = rac.run_id
-       AND om.catalogNumber = rac.catalogNumber
-       AND om.plant_individual_id = rac.plant_individual_id
-    LEFT JOIN vision_xai_audit vx
-        ON vx.run_id = rac.run_id
-       AND vx.catalogNumber = rac.catalogNumber
-       AND vx.plant_individual_id = rac.plant_individual_id
-    LEFT JOIN spatial_rf_predictions srf
-        ON srf.run_id = rac.run_id
-       AND srf.catalogNumber = rac.catalogNumber
-       AND srf.plant_individual_id = rac.plant_individual_id
-    LEFT JOIN environmental_cache ec
-        ON ec.lat_lon_key = COALESCE(
-            srf.lat_lon_key,
-            CASE
-                WHEN COALESCE(v.latitude, v.decimalLatitude) IS NOT NULL
-                 AND COALESCE(v.longitude, v.decimalLongitude) IS NOT NULL
-                THEN printf('%.5f_%.5f', COALESCE(v.latitude, v.decimalLatitude), COALESCE(v.longitude, v.decimalLongitude))
-                ELSE NULL
-            END,
-            (SELECT ec2.lat_lon_key FROM environmental_cache ec2 WHERE ec2.catalogNumber = rac.catalogNumber LIMIT 1)
-        )
-    LEFT JOIN curation_triage ct
-        ON ct.run_id = rac.run_id
-       AND ct.catalogNumber = rac.catalogNumber
-       AND ct.plant_individual_id = rac.plant_individual_id;
+    {master_view_ddl}
     """
 
 
+MASTER_VIEW_DDL: str = _build_master_view_ddl()
 SCHEMA_DDL: str = _build_schema_ddl()
 
 _VOUCHERS_MIGRATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("exsiccatae_taxonomic_conflict", "INTEGER DEFAULT 0"),
     ("exsiccatae_gold_taxon", "TEXT"),
+)
+
+_DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
+    "leaf_efa_harmonics": tuple(
+        [
+            *((h, "REAL") for h in HARMONIC_COLS),
+            *((p, "REAL") for p in PC_COLS),
+            *((sp, "REAL") for sp in SYM_PC_COLS),
+            ("efd_harmonic_opt", "INTEGER"),
+            ("efd_k95_pcs", "INTEGER"),
+        ]
+    ),
+    "otu_morphometrics": tuple(
+        [
+            *((h, "REAL") for h in HARMONIC_COLS),
+            *((p, "REAL") for p in PC_COLS),
+            *((sp, "REAL") for sp in SYM_PC_COLS),
+            ("efd_harmonic_opt", "INTEGER"),
+            ("efd_k95_pcs", "INTEGER"),
+            ("selected_morph_features", "TEXT"),
+        ]
+    ),
+    "spatial_rf_predictions": tuple(
+        [
+            *((col, "REAL") for col in WC_BIO_COLUMNS),
+            ("bio18_precip_warmest_qt", "REAL"),
+            ("bio19_precip_coldest_qt", "REAL"),
+            ("climatic_z_score", "REAL"),
+            ("primary_env_predictors", "TEXT"),
+            ("primary_clim_predictors", "TEXT"),
+            ("primary_edaph_predictors", "TEXT"),
+        ]
+    ),
+    "environmental_cache": tuple(
+        (
+            col,
+            "TEXT"
+            if col in ENVIRONMENTAL_TEXT_COLS
+            else ("INTEGER" if col in ENVIRONMENTAL_BOOL_COLS else "REAL"),
+        )
+        for col in ENVIRONMENTAL_CACHE_COLUMNS
+        if col != "lat_lon_key"
+    ),
+}
+
+_MASTER_VIEW_REQUIRED_TABLES: Tuple[str, ...] = (
+    "run_active_cohort",
+    "vouchers",
+    "plant_individuals",
+    "voucher_reproductive_phenology",
+    "otu_morphometrics",
+    "vision_xai_audit",
+    "spatial_rf_predictions",
+    "environmental_cache",
+    "curation_triage",
 )
 
 
@@ -1082,11 +1215,74 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
+def _migrate_dynamic_schema_columns(conn: sqlite3.Connection) -> None:
+    """
+    Idempotently upgrade existing SQLite databases in-place:
+      1. Inspects `PRAGMA table_info(...)` on `leaf_efa_harmonics`, `otu_morphometrics`,
+         `spatial_rf_predictions`, and `environmental_cache`.
+      2. Issues `ALTER TABLE ... ADD COLUMN ...` for any missing dynamic harmonic (`A1..D24`),
+         PCA (`PC1..PC15`, `Sym_PC1..Sym_PC15`), adaptive EFD metadata (`efd_harmonic_opt`,
+         `efd_k95_pcs`, `selected_morph_features`), 19-variable WorldClim (`bio1..bio19`),
+         `climatic_z_score`, or `primary_*_predictors` columns.
+      3. Backfills bidirectional `bio18_precip_warmest_qtr <-> bio18_precip_warmest_qt` and
+         `bio19_precip_coldest_qtr <-> bio19_precip_coldest_qt` values on existing tables.
+      4. Drops and recreates `v_integrative_triage_master` whenever all base tables exist.
+    """
+    existing_tables: Set[str] = {
+        str(r[0])
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table';"
+        ).fetchall()
+    }
+    if not existing_tables:
+        return
+
+    conn.execute("DROP VIEW IF EXISTS v_integrative_triage_master;")
+
+    for table_name, col_specs in _DYNAMIC_TABLE_MIGRATION_SPECS.items():
+        if table_name not in existing_tables:
+            continue
+        existing_cols = {
+            str(r[1]) for r in conn.execute(f"PRAGMA table_info({table_name});").fetchall()
+        }
+        if not existing_cols:
+            continue
+        for col_name, col_ddl in col_specs:
+            if col_name not in existing_cols:
+                conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_ddl};")
+                existing_cols.add(col_name)
+
+        if {
+            "bio18_precip_warmest_qtr",
+            "bio18_precip_warmest_qt",
+            "bio19_precip_coldest_qtr",
+            "bio19_precip_coldest_qt",
+        }.issubset(existing_cols):
+            conn.execute(
+                f"""
+                UPDATE {table_name}
+                SET bio18_precip_warmest_qtr = COALESCE(bio18_precip_warmest_qtr, bio18_precip_warmest_qt),
+                    bio18_precip_warmest_qt = COALESCE(bio18_precip_warmest_qt, bio18_precip_warmest_qtr),
+                    bio19_precip_coldest_qtr = COALESCE(bio19_precip_coldest_qtr, bio19_precip_coldest_qt),
+                    bio19_precip_coldest_qt = COALESCE(bio19_precip_coldest_qt, bio19_precip_coldest_qtr)
+                WHERE (bio18_precip_warmest_qtr IS NULL AND bio18_precip_warmest_qt IS NOT NULL)
+                   OR (bio18_precip_warmest_qt IS NULL AND bio18_precip_warmest_qtr IS NOT NULL)
+                   OR (bio19_precip_coldest_qtr IS NULL AND bio19_precip_coldest_qt IS NOT NULL)
+                   OR (bio19_precip_coldest_qt IS NULL AND bio19_precip_coldest_qtr IS NOT NULL);
+                """
+            )
+
+    if set(_MASTER_VIEW_REQUIRED_TABLES).issubset(existing_tables):
+        conn.executescript(MASTER_VIEW_DDL)
+
+
 def init_db_schema(conn: sqlite3.Connection) -> None:
-    """Create all Tier A and Tier B tables, indexes, triggers, R*Tree, and master view."""
+    """Create or idempotently migrate all Tier A and Tier B tables, indexes, triggers, R*Tree, and master view."""
     _migrate_vouchers_schema_columns(conn)
+    _migrate_dynamic_schema_columns(conn)
     conn.executescript(SCHEMA_DDL)
     _migrate_vouchers_schema_columns(conn)
+    _migrate_dynamic_schema_columns(conn)
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.commit()
 
@@ -2293,18 +2489,58 @@ def query_misidentified_vouchers_from_db(
 # Environmental Cache Upsert & R*Tree Spatial Bounding-Box Query
 # =============================================================================
 
+def _coalesce_wc_bio_fields(src: Mapping[str, Any], dst: Dict[str, Any]) -> None:
+    """
+    Bidirectionally coalesce canonical WorldClim `_qtr` (`bio18_precip_warmest_qtr`,
+    `bio19_precip_coldest_qtr`) and legacy `_qt` (`bio18_precip_warmest_qt`,
+    `bio19_precip_coldest_qt`) fields so 19-variable runs and legacy 6-variable
+    offline cache fixtures interoperate seamlessly.
+    """
+    for qtr_col, qt_col in (
+        ("bio18_precip_warmest_qtr", "bio18_precip_warmest_qt"),
+        ("bio19_precip_coldest_qtr", "bio19_precip_coldest_qt"),
+    ):
+        if qtr_col in src or qt_col in src or qtr_col in dst or qt_col in dst:
+            v_qtr = _to_float(dst.get(qtr_col) if qtr_col in dst else src.get(qtr_col))
+            v_qt = _to_float(dst.get(qt_col) if qt_col in dst else src.get(qt_col))
+            resolved_qtr = v_qtr if v_qtr is not None else v_qt
+            resolved_qt = v_qt if v_qt is not None else v_qtr
+            if resolved_qtr is not None or qtr_col in src or qt_col in src:
+                dst[qtr_col] = resolved_qtr
+                dst[qt_col] = resolved_qt
+
+
+def _normalize_semicolon_list_str(val: Any) -> Optional[str]:
+    if val is None:
+        return None
+    if isinstance(val, (list, tuple, set)):
+        items = [str(x).strip() for x in val if not _is_missing(x) and str(x).strip()]
+        return ";".join(items) if items else None
+    return _to_str(val)
+
+
+def _ensure_dynamic_table_migrated(conn: sqlite3.Connection, table_name: str) -> None:
+    specs = _DYNAMIC_TABLE_MIGRATION_SPECS.get(table_name)
+    if not specs:
+        return
+    existing = set(get_table_columns(conn, table_name))
+    if existing and any(col not in existing for col, _ in specs):
+        _migrate_dynamic_schema_columns(conn)
+
+
 def upsert_environmental_cache_records(
     conn: sqlite3.Connection,
     records: Sequence[Mapping[str, Any]],
     demo: bool = False,
 ) -> int:
     """
-    UPSERT fine-grain SSURGO / POLARIS / SOLUS100 / 3DEP / SGMC / WorldClim rows into
-    `environmental_cache` (automatically updating `environmental_rtree` via triggers).
-    Strictly no-ops when `demo=True`.
+    UPSERT fine-grain SSURGO / POLARIS / SOLUS100 / 3DEP / SGMC / 19-variable WorldClim
+    rows into `environmental_cache` (automatically updating `environmental_rtree` via
+    triggers and coalescing `bio18/19` `_qtr <-> _qt`). Strictly no-ops when `demo=True`.
     """
     if demo or not records:
         return 0
+    _ensure_dynamic_table_migrated(conn, "environmental_cache")
     norm_rows: List[Dict[str, Any]] = []
     for r in records:
         lat = _to_float(r.get("latitude") if "latitude" in r else r.get("decimalLatitude"))
@@ -2329,6 +2565,7 @@ def upsert_environmental_cache_records(
                 d[col] = _to_bool_int(r.get(col))
             else:
                 d[col] = _to_float(r.get(col))
+        _coalesce_wc_bio_fields(r, d)
         norm_rows.append(d)
 
     return upsert_rows_generic(
@@ -2358,7 +2595,324 @@ def query_environmental_bbox(
         """,
         (float(min_lon), float(max_lon), float(min_lat), float(max_lat)),
     )
-    return [dict(r) for r in cur.fetchall()]
+    out: List[Dict[str, Any]] = []
+    for r in cur.fetchall():
+        d = dict(r)
+        _coalesce_wc_bio_fields(d, d)
+        out.append(d)
+    return out
+
+
+# =============================================================================
+# Steps 03, 04 & 06: Dynamic Morphometric & Spatial RF Persistence Helpers
+# =============================================================================
+
+_LEAF_EFA_BOOL_COLS: Tuple[str, ...] = (
+    "is_dissected",
+    "is_calibrated_mm",
+    "is_contour_outlier",
+)
+_LEAF_EFA_INT_COLS: Tuple[str, ...] = (
+    "efd_harmonic_opt",
+    "efd_k95_pcs",
+)
+_LEAF_EFA_STR_COLS: Tuple[str, ...] = ("assigned_tier",)
+_LEAF_EFA_FLOAT_COLS: Tuple[str, ...] = (
+    "solidity",
+    "ucs_score",
+    "aspect_ratio",
+    "area_px",
+    "pixels_per_mm",
+    "petiole_length_mm",
+    "blade_length_mm",
+    "petiole_to_blade_ratio",
+    *HARMONIC_COLS,
+    "sym_var",
+    "asym_var",
+    "pct_asymmetry",
+    "harmonic_roughness",
+    "leaf_quality_weight",
+    "centroid_size",
+    "log_centsize",
+    *PC_COLS,
+    *SYM_PC_COLS,
+)
+
+
+def persist_leaf_efa_harmonics(
+    conn: sqlite3.Connection,
+    run_id: str,
+    efa_rows: Sequence[Mapping[str, Any]],
+    demo: bool = False,
+) -> int:
+    """
+    Persist Step 03 leaf-level Elliptic Fourier harmonics (`A1..D24`), leaf PCs
+    (`PC1..PC15`, `Sym_PC1..Sym_PC15`), and adaptive calibration metadata
+    (`efd_harmonic_opt`, `efd_k95_pcs`) into `leaf_efa_harmonics`.
+    """
+    if demo or not efa_rows:
+        return 0
+    _ensure_dynamic_table_migrated(conn, "leaf_efa_harmonics")
+    eff_run_id = str(run_id or os.environ.get("RUN_ID") or "canonical").strip()
+    ensure_pipeline_run(conn, run_id=eff_run_id)
+
+    norm_rows: List[Dict[str, Any]] = []
+    for idx, r in enumerate(efa_rows, start=1):
+        cat = _to_str(r.get("catalogNumber"))
+        if not cat:
+            continue
+        pid = _to_int(r.get("plant_individual_id"), default=0) or 0
+        lid = _to_int(r.get("leaf_id"), default=idx) or idx
+        d: Dict[str, Any] = {
+            "run_id": eff_run_id,
+            "catalogNumber": cat,
+            "plant_individual_id": pid,
+            "leaf_id": lid,
+        }
+        for col in _LEAF_EFA_STR_COLS:
+            if col in r:
+                d[col] = _to_str(r.get(col))
+        for col in _LEAF_EFA_BOOL_COLS:
+            if col in r:
+                d[col] = _to_bool_int(r.get(col))
+        for col in _LEAF_EFA_INT_COLS:
+            if col in r:
+                d[col] = _to_int(r.get(col))
+        for col in _LEAF_EFA_FLOAT_COLS:
+            if col in r:
+                d[col] = _to_float(r.get(col))
+        norm_rows.append(d)
+
+    return upsert_rows_generic(
+        conn,
+        table_name="leaf_efa_harmonics",
+        rows=norm_rows,
+        pk_cols=("run_id", "catalogNumber", "plant_individual_id", "leaf_id"),
+        preserve_existing_on_null=False,
+    )
+
+
+_OTU_MORPH_BOOL_COLS: Tuple[str, ...] = (
+    "is_promoted_anchor",
+    "is_passive",
+    "is_calibrated_mm",
+    "is_dissected",
+    "is_contour_outlier",
+    "morphometric_outlier_flag",
+    "misidentification_flag",
+)
+_OTU_MORPH_INT_COLS: Tuple[str, ...] = (
+    "leaf_count",
+    "n_tier1_leaves",
+    "n_tier2_leaves",
+    "efd_harmonic_opt",
+    "efd_k95_pcs",
+)
+_OTU_MORPH_STR_COLS: Tuple[str, ...] = (
+    "assigned_tier",
+    "species_standardized",
+    "determiner_tier",
+    "reproductive_trait_status",
+    "morph_tier_source",
+    "gmm_cluster",
+    "cda_predicted_taxon",
+    "cda_second_taxon",
+    "ecoregion_cda_predicted",
+    "triage_priority",
+    "discordance_reason",
+)
+_OTU_MORPH_FLOAT_COLS: Tuple[str, ...] = (
+    "authority_weight",
+    "pixels_per_mm",
+    "solidity",
+    "ucs_score",
+    "aspect_ratio",
+    "area_px",
+    "petiole_length_mm",
+    "blade_length_mm",
+    "petiole_to_blade_ratio",
+    "centroid_size",
+    "log_centsize",
+    "AR_inv",
+    "AR_inv_std",
+    *HARMONIC_COLS,
+    "sym_var",
+    "asym_var",
+    "pct_asymmetry",
+    "harmonic_roughness",
+    "leaf_quality_weight",
+    "foliar_variance",
+    "heteroblasty_index",
+    *PC_COLS,
+    *SYM_PC_COLS,
+    "gmm_uncertainty",
+    "cda_posterior_prob",
+    "cda_second_posterior_prob",
+    "cda_posterior_margin",
+    "loocv_accuracy",
+    "can1",
+    "can2",
+    "can3",
+    "ecoregion_cda_posterior_prob",
+    "ecoregion_can1",
+    "ecoregion_can2",
+)
+
+
+def persist_otu_morphometrics(
+    conn: sqlite3.Connection,
+    run_id: str,
+    otu_rows: Sequence[Mapping[str, Any]],
+    demo: bool = False,
+    preserve_existing_on_null: bool = True,
+) -> int:
+    """
+    Persist Step 03/04 specimen-level OTU medians (`A1..D24`, `PC1..PC15`,
+    `Sym_PC1..Sym_PC15`), adaptive EFD/feature metadata (`efd_harmonic_opt`,
+    `efd_k95_pcs`, `selected_morph_features`), GMM clusters, and CDA scores
+    into `otu_morphometrics`.
+    """
+    if demo or not otu_rows:
+        return 0
+    _ensure_dynamic_table_migrated(conn, "otu_morphometrics")
+    eff_run_id = str(run_id or os.environ.get("RUN_ID") or "canonical").strip()
+    ensure_pipeline_run(conn, run_id=eff_run_id)
+
+    norm_rows: List[Dict[str, Any]] = []
+    for r in otu_rows:
+        cat = _to_str(r.get("catalogNumber"))
+        if not cat:
+            continue
+        pid = _to_int(r.get("plant_individual_id"), default=0) or 0
+        d: Dict[str, Any] = {
+            "run_id": eff_run_id,
+            "catalogNumber": cat,
+            "plant_individual_id": pid,
+        }
+        for col in _OTU_MORPH_STR_COLS:
+            if col in r:
+                d[col] = _to_str(r.get(col))
+        if "selected_morph_features" in r:
+            d["selected_morph_features"] = _normalize_semicolon_list_str(
+                r.get("selected_morph_features")
+            )
+        for col in _OTU_MORPH_BOOL_COLS:
+            if col in r:
+                d[col] = _to_bool_int(r.get(col))
+        for col in _OTU_MORPH_INT_COLS:
+            if col in r:
+                d[col] = _to_int(r.get(col))
+        for col in _OTU_MORPH_FLOAT_COLS:
+            if col in r:
+                d[col] = _to_float(r.get(col))
+        norm_rows.append(d)
+
+    return upsert_rows_generic(
+        conn,
+        table_name="otu_morphometrics",
+        rows=norm_rows,
+        pk_cols=("run_id", "catalogNumber", "plant_individual_id"),
+        preserve_existing_on_null=preserve_existing_on_null,
+    )
+
+
+_SRF_BOOL_COLS: Tuple[str, ...] = (
+    "substrate_specialist_flag",
+    "piedmont_outcrop_specialist_flag",
+    "multimodal_conflict_flag",
+)
+_SRF_STR_COLS: Tuple[str, ...] = (
+    "rf_predicted_taxon",
+    "edaphic_best_fit_taxon",
+    "spatial_block_id",
+    "pheno_timing_category",
+    "anthesis_filter_status",
+    "multimodal_concordance",
+    "triage_category",
+    "conflict_discordance_notes",
+)
+_SRF_LIST_STR_COLS: Tuple[str, ...] = (
+    "primary_env_predictors",
+    "primary_clim_predictors",
+    "primary_edaph_predictors",
+)
+_SRF_FLOAT_COLS: Tuple[str, ...] = (
+    "rf_predicted_prob",
+    "rf_given_taxon_prob",
+    "spatial_block_cv_acc",
+    "spatial_autocorr_range_km",
+    "doy",
+    "expected_doy",
+    "hopkins_expected",
+    "delta_doy",
+    "hopkins_adjusted_doy",
+    "edaphic_z_score",
+    "climatic_z_score",
+    *WC_BIO_COLUMNS,
+    "bio18_precip_warmest_qt",
+    "bio19_precip_coldest_qt",
+)
+
+
+def persist_spatial_rf_predictions(
+    conn: sqlite3.Connection,
+    run_id: str,
+    srf_rows: Sequence[Mapping[str, Any]],
+    demo: bool = False,
+    also_upsert_env_cache: bool = False,
+) -> int:
+    """
+    Persist Step 06 Spatial Random Forest predictions, Hopkins phenology residuals,
+    all 19 WorldClim bioclimatic variables (with `_qtr <-> _qt` coalescing),
+    `climatic_z_score`, and `primary_*_predictors` into `spatial_rf_predictions`.
+    """
+    if demo or not srf_rows:
+        return 0
+    _ensure_dynamic_table_migrated(conn, "spatial_rf_predictions")
+    if also_upsert_env_cache:
+        upsert_environmental_cache_records(conn, srf_rows, demo=demo)
+
+    eff_run_id = str(run_id or os.environ.get("RUN_ID") or "canonical").strip()
+    ensure_pipeline_run(conn, run_id=eff_run_id)
+
+    norm_rows: List[Dict[str, Any]] = []
+    for r in srf_rows:
+        cat = _to_str(r.get("catalogNumber"))
+        if not cat:
+            continue
+        pid = _to_int(r.get("plant_individual_id"), default=0) or 0
+        lat = _to_float(r.get("latitude") if "latitude" in r else r.get("decimalLatitude"))
+        lon = _to_float(r.get("longitude") if "longitude" in r else r.get("decimalLongitude"))
+        ll_key = _to_str(r.get("lat_lon_key")) or format_lat_lon_key(lat, lon)
+        d: Dict[str, Any] = {
+            "run_id": eff_run_id,
+            "catalogNumber": cat,
+            "plant_individual_id": pid,
+        }
+        if ll_key is not None or "lat_lon_key" in r:
+            d["lat_lon_key"] = ll_key
+        for col in _SRF_STR_COLS:
+            if col in r:
+                d[col] = _to_str(r.get(col))
+        for col in _SRF_LIST_STR_COLS:
+            if col in r:
+                d[col] = _normalize_semicolon_list_str(r.get(col))
+        for col in _SRF_BOOL_COLS:
+            if col in r:
+                d[col] = _to_bool_int(r.get(col))
+        for col in _SRF_FLOAT_COLS:
+            if col in r:
+                d[col] = _to_float(r.get(col))
+        _coalesce_wc_bio_fields(r, d)
+        norm_rows.append(d)
+
+    return upsert_rows_generic(
+        conn,
+        table_name="spatial_rf_predictions",
+        rows=norm_rows,
+        pk_cols=("run_id", "catalogNumber", "plant_individual_id"),
+        preserve_existing_on_null=False,
+    )
 
 
 # =============================================================================
@@ -2370,6 +2924,82 @@ def _read_csv_dicts(csv_path: Path) -> List[Dict[str, str]]:
         return []
     with open(csv_path, "r", encoding="utf-8", errors="replace", newline="") as f:
         return list(csv.DictReader(f))
+
+
+def ingest_existing_run_tables_into_db(
+    conn: sqlite3.Connection,
+    tables_dir: Union[str, Path],
+    run_id: str = "canonical",
+    demo: bool = False,
+) -> Dict[str, int]:
+    """
+    Ingest Step 03-07 run-scoped CSV outputs (`leaf_efa_harmonics_individual.csv`,
+    `leaf_efa_harmonics.csv`, `morphometric_flags.csv`, `label_noise_audit.csv`,
+    `multimodal_conflict_flags.csv`, `triage_queue.csv` / `final_curation_triage.csv`)
+    into Tier B SQLite tables with full dynamic `A1..D24`, `PC1..PC15`,
+    `Sym_PC1..Sym_PC15`, and 19-variable `bio1..bio19` (`_qtr <-> _qt`) support.
+    """
+    if demo:
+        return {}
+    t_dir = Path(tables_dir).resolve()
+    eff_run = str(run_id).strip() or "canonical"
+    ensure_pipeline_run(conn, run_id=eff_run, run_dir=t_dir.parent)
+    run_counts: Dict[str, int] = {}
+
+    ind_efa = _read_csv_dicts(t_dir / "leaf_efa_harmonics_individual.csv")
+    if ind_efa:
+        run_counts["leaf_efa_harmonics"] = persist_leaf_efa_harmonics(
+            conn, eff_run, ind_efa, demo=False
+        )
+
+    step03_otu = _read_csv_dicts(t_dir / "leaf_efa_harmonics.csv")
+    step04_otu = _read_csv_dicts(t_dir / "morphometric_flags.csv")
+    n_otu = 0
+    if step03_otu:
+        n_otu = persist_otu_morphometrics(
+            conn, eff_run, step03_otu, demo=False, preserve_existing_on_null=True
+        )
+    if step04_otu:
+        n_otu = persist_otu_morphometrics(
+            conn, eff_run, step04_otu, demo=False, preserve_existing_on_null=True
+        )
+    if step03_otu or step04_otu:
+        run_counts["otu_morphometrics"] = n_otu
+
+    vis_rows = _read_csv_dicts(t_dir / "label_noise_audit.csv")
+    if vis_rows:
+        run_counts["vision_xai_audit"] = persist_vision_xai_audit(
+            conn, eff_run, vis_rows, demo=False
+        )
+
+    srf_rows = _read_csv_dicts(t_dir / "multimodal_conflict_flags.csv")
+    if srf_rows:
+        run_counts["spatial_rf_predictions"] = persist_spatial_rf_predictions(
+            conn, eff_run, srf_rows, demo=False, also_upsert_env_cache=False
+        )
+
+    tri_path = t_dir / "triage_queue.csv"
+    if not tri_path.is_file():
+        tri_path = t_dir.parent / "outputs" / "reports" / "final_curation_triage.csv"
+    tri_rows = _read_csv_dicts(tri_path)
+    if tri_rows:
+        norm_tri: List[Dict[str, Any]] = []
+        for r in tri_rows:
+            cat = _to_str(r.get("catalogNumber"))
+            if not cat:
+                continue
+            d_tri: Dict[str, Any] = dict(r)
+            d_tri["run_id"] = eff_run
+            d_tri["catalogNumber"] = cat
+            d_tri["plant_individual_id"] = _to_int(r.get("plant_individual_id"), default=0) or 0
+            if "is_completed_voucher" in d_tri:
+                d_tri["is_completed_voucher"] = _to_bool_int(d_tri.get("is_completed_voucher"))
+            norm_tri.append(d_tri)
+        run_counts["curation_triage"] = upsert_rows_generic(
+            conn, "curation_triage", norm_tri, ("run_id", "catalogNumber", "plant_individual_id")
+        )
+
+    return run_counts
 
 
 def ingest_existing_csvs_to_db(
@@ -2554,57 +3184,11 @@ def ingest_existing_csvs_to_db(
             )
 
         # 6. Optional downstream run-scoped tables if present in `t_dir`
-        ind_efa = _read_csv_dicts(t_dir / "leaf_efa_harmonics_individual.csv")
-        if ind_efa:
-            for r in ind_efa:
-                r["run_id"] = eff_run
-                r["plant_individual_id"] = _to_int(r.get("plant_individual_id"), default=0) or 0
-                r["leaf_id"] = _to_int(r.get("leaf_id"), default=1) or 1
-            counts["leaf_efa_harmonics"] = upsert_rows_generic(
-                conn, "leaf_efa_harmonics", ind_efa, ("run_id", "catalogNumber", "plant_individual_id", "leaf_id")
+        counts.update(
+            ingest_existing_run_tables_into_db(
+                conn=conn, tables_dir=t_dir, run_id=eff_run, demo=False
             )
-
-        otu_rows = _read_csv_dicts(t_dir / "morphometric_flags.csv") or _read_csv_dicts(t_dir / "leaf_efa_harmonics.csv")
-        if otu_rows:
-            for r in otu_rows:
-                r["run_id"] = eff_run
-                r["plant_individual_id"] = _to_int(r.get("plant_individual_id"), default=0) or 0
-                for bcol in ("is_calibrated_mm", "is_dissected", "is_contour_outlier", "morphometric_outlier_flag", "misidentification_flag", "is_passive", "is_promoted_anchor"):
-                    if bcol in r:
-                        r[bcol] = _to_bool_int(r.get(bcol))
-            counts["otu_morphometrics"] = upsert_rows_generic(
-                conn, "otu_morphometrics", otu_rows, ("run_id", "catalogNumber", "plant_individual_id")
-            )
-
-        vis_rows = _read_csv_dicts(t_dir / "label_noise_audit.csv")
-        if vis_rows:
-            counts["vision_xai_audit"] = persist_vision_xai_audit(conn, eff_run, vis_rows, demo=False)
-
-        srf_rows = _read_csv_dicts(t_dir / "multimodal_conflict_flags.csv")
-        if srf_rows:
-            for r in srf_rows:
-                r["run_id"] = eff_run
-                r["plant_individual_id"] = _to_int(r.get("plant_individual_id"), default=0) or 0
-                for bcol in ("multimodal_conflict_flag", "substrate_specialist_flag", "piedmont_outcrop_specialist_flag"):
-                    if bcol in r:
-                        r[bcol] = _to_bool_int(r.get(bcol))
-            counts["spatial_rf_predictions"] = upsert_rows_generic(
-                conn, "spatial_rf_predictions", srf_rows, ("run_id", "catalogNumber", "plant_individual_id")
-            )
-
-        tri_path = t_dir / "triage_queue.csv"
-        if not tri_path.is_file():
-            tri_path = t_dir.parent / "outputs" / "reports" / "final_curation_triage.csv"
-        tri_rows = _read_csv_dicts(tri_path)
-        if tri_rows:
-            for r in tri_rows:
-                r["run_id"] = eff_run
-                r["plant_individual_id"] = _to_int(r.get("plant_individual_id"), default=0) or 0
-                if "is_completed_voucher" in r:
-                    r["is_completed_voucher"] = _to_bool_int(r.get("is_completed_voucher"))
-            counts["curation_triage"] = upsert_rows_generic(
-                conn, "curation_triage", tri_rows, ("run_id", "catalogNumber", "plant_individual_id")
-            )
+        )
 
         logger.info("SQLite migration summary (%s): %s", eff_run, counts)
         return counts

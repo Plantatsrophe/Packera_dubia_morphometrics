@@ -1,20 +1,12 @@
 #!/usr/bin/env Rscript
-# ==============================================================================
-# Script: 03_fourier_extractor.R
-# Project: Packera dubia Species Delimitation & Morphometrics Pipeline (NCU)
-# Description: Label-blind 12-harmonic Elliptic Fourier Analysis (Momocs::efourier)
-#              with SQLite 120-vertex contour ingestion & OTU median aggregation.
-# ==============================================================================
+# Script: 03_fourier_extractor.R - Packera Morphometrics Pipeline (NCU)
+# Label-blind dynamic-harmonic Elliptic Fourier Analysis (Momocs::efourier) & OTU median aggregation.
 
 suppressPackageStartupMessages({
-  if (requireNamespace("Momocs", quietly = TRUE)) library(Momocs)
-  if (requireNamespace("RRPP", quietly = TRUE)) library(RRPP)
-  if (requireNamespace("vegan", quietly = TRUE)) library(vegan)
-  if (requireNamespace("ggplot2", quietly = TRUE)) library(ggplot2)
-  if (requireNamespace("dplyr", quietly = TRUE)) library(dplyr)
-  if (requireNamespace("readr", quietly = TRUE)) library(readr)
-  if (requireNamespace("tibble", quietly = TRUE)) library(tibble)
-  if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
+  if (requireNamespace("Momocs", quietly = TRUE)) library(Momocs); if (requireNamespace("RRPP", quietly = TRUE)) library(RRPP)
+  if (requireNamespace("vegan", quietly = TRUE)) library(vegan); if (requireNamespace("ggplot2", quietly = TRUE)) library(ggplot2)
+  if (requireNamespace("dplyr", quietly = TRUE)) library(dplyr); if (requireNamespace("readr", quietly = TRUE)) library(readr)
+  if (requireNamespace("tibble", quietly = TRUE)) library(tibble); if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
 if (file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
 for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "authority_weighting_utils.R"))) {
@@ -24,9 +16,7 @@ for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "
   if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
 
-# ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing
-# ------------------------------------------------------------------------------
 parse_args_robust <- function() {
   option_list <- list(
     optparse::make_option(c("-i", "--input"), type = "character", default = "data/contours/", help = "Directory containing contour CSVs (alias for --contours-dir) [default: %default]"),
@@ -45,25 +35,17 @@ parse_args_robust <- function() {
     optparse::make_option(c("--permutations"), type = "integer", default = 999, help = "Number of permutations for PERMANOVA [default: %default]"),
     optparse::make_option(c("--seed"), type = "integer", default = 42, help = "Random seed for reproducible permutations [default: %default]")
   )
-
   if (requireNamespace("optparse", quietly = TRUE)) {
-    parser <- optparse::OptionParser(usage = "%prog [options]", option_list = option_list)
-    opts <- optparse::parse_args(parser)
+    opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
     names(opts) <- gsub("-", "_", names(opts))
     if (!is.null(opts$contours_dir) && opts$contours_dir != "data/contours/") opts$input <- opts$contours_dir else if (!is.null(opts$input) && opts$contours_dir == "data/contours/") opts$contours_dir <- opts$input
     return(opts)
   }
-
   raw_args <- commandArgs(trailingOnly = TRUE)
-  opts <- list(
-    input = "data/contours/", contours_dir = "data/contours/", manifest = "data/tables/extracted_leaf_manifest.csv",
-    masks_dir = "data/masks/", vouchers = "data/tables/curated_vouchers.csv",
-    output = "data/tables/leaf_efa_harmonics.csv", output_individual = "data/tables/leaf_efa_harmonics_individual.csv",
-    harmonics = 12, num_pcs = 5, symmetrize_efa_harmonics = TRUE,
-    report_out = "outputs/reports/tier_symmetry_validation.csv",
-    plot_out = "outputs/figures/tier1_vs_tier2_density_overlay.pdf",
-    figures_dir = "", permutations = 999, seed = 42
-  )
+  opts <- list(input = "data/contours/", contours_dir = "data/contours/", manifest = "data/tables/extracted_leaf_manifest.csv",
+               masks_dir = "data/masks/", vouchers = "data/tables/curated_vouchers.csv", output = "data/tables/leaf_efa_harmonics.csv",
+               output_individual = "data/tables/leaf_efa_harmonics_individual.csv", harmonics = 12, num_pcs = 5, symmetrize_efa_harmonics = TRUE,
+               report_out = "outputs/reports/tier_symmetry_validation.csv", plot_out = "outputs/figures/tier1_vs_tier2_density_overlay.pdf", figures_dir = "", permutations = 999, seed = 42)
   i <- 1
   while (i <= length(raw_args)) {
     arg <- raw_args[i]
@@ -87,9 +69,7 @@ parse_args_robust <- function() {
   return(opts)
 }
 
-# ------------------------------------------------------------------------------
 # 2. Pure-R Mathematical Engine: Homologized EFA (Momocs / Kuhl & Giardina Fallback)
-# ------------------------------------------------------------------------------
 compute_efourier_coords_pure <- function(coo, nb_h = 12, norm = FALSE, start = FALSE) {
   if (is.null(coo) || nrow(coo) < 5) return(rep(NA_real_, nb_h * 4))
   coo[, 1] <- coo[, 1] - mean(coo[, 1], na.rm = TRUE); coo[, 2] <- coo[, 2] - mean(coo[, 2], na.rm = TRUE)
@@ -166,30 +146,40 @@ align_contour_basal_apical <- function(coo, circularity = NA_real_, has_momocs =
 }
 
 verify_harmonic_power_calibration <- function(out_obj = NULL, harm_mat = NULL, nb_h = 12L) {
-  cum_pct <- NA_real_
+  fb_h <- max(6L, min(24L, as.integer(if (is.null(nb_h) || is.na(nb_h)) 12L else nb_h)))
+  h_opt <- fb_h; cum_pct <- NA_real_
   if (!is.null(out_obj) && requireNamespace("Momocs", quietly = TRUE)) {
     cal_res <- tryCatch({
       sub_obj <- if (length(out_obj$coo) > 150L) Momocs::slice(out_obj, seq_len(150L)) else out_obj
-      Momocs::calibrate_harmonicpower_efourier(sub_obj, nb.h = max(as.integer(nb_h), 14L), plot = FALSE)
+      Momocs::calibrate_harmonicpower_efourier(sub_obj, nb.h = 24L, plot = FALSE)
     }, error = function(e) NULL)
-    if (!is.null(cal_res) && !is.null(cal_res$q)) {
-      h_col <- paste0("h", nb_h)
-      if (h_col %in% colnames(cal_res$q) && "50%" %in% rownames(cal_res$q)) cum_pct <- as.numeric(cal_res$q["50%", h_col])
+    if (!is.null(cal_res) && !is.null(cal_res$q) && length(cal_res$q) > 0L) {
+      q_mat <- as.matrix(cal_res$q)
+      q_vec <- if ("50%" %in% rownames(q_mat)) as.numeric(q_mat["50%", ]) else apply(q_mat, 2, stats::median, na.rm = TRUE)
+      if (any(is.finite(q_vec))) {
+        if (max(q_vec, na.rm = TRUE) <= 1.05) q_vec <- q_vec * 100.0
+        h_nums <- suppressWarnings(as.integer(gsub("[^0-9]", "", colnames(q_mat))))
+        if (length(h_nums) != length(q_vec) || any(is.na(h_nums))) h_nums <- seq_along(q_vec)
+        hit_idx <- which(is.finite(q_vec) & q_vec >= 99.0)
+        pick_i <- if (length(hit_idx) > 0L) hit_idx[1] else which.max(h_nums)
+        h_opt <- max(6L, min(24L, as.integer(h_nums[pick_i])))
+        col_m <- match(h_opt, h_nums); cum_pct <- as.numeric(q_vec[if (!is.na(col_m)) col_m else pick_i])
+      }
     }
   }
   if ((is.na(cum_pct) || !is.finite(cum_pct)) && !is.null(harm_mat) && ncol(harm_mat) >= 4L) {
-    h_pwr <- numeric(nb_h)
-    for (n in seq_len(nb_h)) {
+    max_hm <- max(suppressWarnings(as.integer(gsub("[^0-9]", "", colnames(harm_mat)))), fb_h, na.rm = TRUE)
+    h_pwr <- vapply(seq_len(max_hm), function(n) {
       cols_n <- intersect(paste0(c("A", "B", "C", "D"), n), colnames(harm_mat))
-      if (length(cols_n) > 0) h_pwr[n] <- mean(rowSums(harm_mat[, cols_n, drop = FALSE]^2, na.rm = TRUE) / 2.0, na.rm = TRUE)
-    }
+      if (length(cols_n) > 0L) mean(rowSums(harm_mat[, cols_n, drop = FALSE]^2, na.rm = TRUE) / 2.0, na.rm = TRUE) else 0.0
+    }, numeric(1))
     tot_est <- sum(h_pwr) + tail(h_pwr, 1) * 0.15
-    cum_pct <- if (tot_est > 1e-12) min(99.99, (sum(h_pwr) / tot_est) * 100.0) else 99.50
+    cum_pct <- if (tot_est > 1e-12) min(99.99, (sum(h_pwr[seq_len(min(h_opt, length(h_pwr)))]) / tot_est) * 100.0) else 99.50
   }
   if (is.na(cum_pct) || !is.finite(cum_pct)) cum_pct <- 99.50
-  message(sprintf("Harmonic Power Calibration (Bonhomme et al. 2014): nb.h = %d captures %.2f%% cumulative harmonic power (threshold >= 99.0%%: %s).",
-                  as.integer(nb_h), cum_pct, ifelse(cum_pct >= 99.0, "PASS", "WARN")))
-  cum_pct
+  message(sprintf("Harmonic Power Calibration (Bonhomme et al. 2014): H_opt = %d captures %.2f%% cumulative harmonic power (threshold >= 99.0%%: %s).",
+                  as.integer(h_opt), cum_pct, ifelse(cum_pct >= 99.0, "PASS", "WARN")))
+  as.integer(h_opt)
 }
 
 # Empirical Bayes / Dawid-Skene hierarchical active/passive reference authority weights (Slenker et al. 2022; Dawid & Skene 1979)
@@ -254,17 +244,17 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
   out_df$authority_weight <- tier_wt; out_df$spatial_balance_weight <- round(spatial_wt, 6)
   out_df$sym_var <- round(sym_var, 6); out_df$asym_var <- round(asym_var, 6); out_df$pct_asymmetry <- round(pct_asymmetry, 6)
   out_df$harmonic_roughness <- round(harmonic_roughness, 6); out_df$is_contour_outlier <- is_contour_outlier; out_df$leaf_quality_weight <- round(leaf_quality_weight, 6)
-  for (pc_col in c("Sym_PC1", "Sym_PC2", "Sym_PC3", "Sym_PC4", "Sym_PC5")) out_df[[pc_col]] <- 0.0
-  pca_sym <- NULL
+  for (pc_col in paste0("Sym_PC", seq_len(5L))) out_df[[pc_col]] <- 0.0
+  pca_sym <- NULL; k_95_sym <- 5L
   if (nrow(sym_mat) >= 2 && ncol(sym_mat) >= 1) {
-    X_cl <- sym_mat[active_ref_mask, , drop = FALSE]; w_cl <- tier_wt[active_ref_mask]
-    if (sum(w_cl, na.rm = TRUE) <= 0) w_cl <- rep(1.0, nrow(X_cl))
-    wt_cov <- stats::cov.wt(X_cl, wt = w_cl, center = TRUE)
-    eig <- eigen(wt_cov$cov, symmetric = TRUE)
+    X_cl <- sym_mat[active_ref_mask, , drop = FALSE]; w_cl <- tier_wt[active_ref_mask]; if (sum(w_cl, na.rm = TRUE) <= 0) w_cl <- rep(1.0, nrow(X_cl))
+    wt_cov <- stats::cov.wt(X_cl, wt = w_cl, center = TRUE); eig <- eigen(wt_cov$cov, symmetric = TRUE)
     colnames(eig$vectors) <- paste0("PC", seq_len(ncol(eig$vectors))); rownames(eig$vectors) <- colnames(sym_mat)
     sym_scores <- sweep(sym_mat, 2, wt_cov$center, "-") %*% eig$vectors
     pca_sym <- structure(list(sdev = sqrt(pmax(eig$values, 0)), rotation = eig$vectors, center = wt_cov$center, scale = FALSE, x = sym_scores), class = "prcomp")
-    for (p in seq_len(min(num_pcs, ncol(sym_scores)))) out_df[[paste0("Sym_PC", p)]] <- round(sym_scores[, p], 6)
+    sv2 <- pca_sym$sdev^2; k_95_sym <- which((cumsum(sv2) / max(sum(sv2), 1e-12)) >= 0.95)[1]; if (is.na(k_95_sym)) k_95_sym <- ncol(sym_scores)
+    k_sym_exp <- max(5L, min(max(as.integer(num_pcs), as.integer(k_95_sym)), 15L, ncol(sym_scores)))
+    for (p in seq_len(k_sym_exp)) out_df[[paste0("Sym_PC", p)]] <- if (p <= ncol(sym_scores)) round(sym_scores[, p], 6) else 0.0
   }
   permanova_res <- NULL
   if (isTRUE(run_permanova) && "assigned_tier" %in% names(out_df) && requireNamespace("vegan", quietly = TRUE)) {
@@ -276,7 +266,7 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
       permanova_res <- tryCatch(vegan::adonis2(sym_mat ~ assigned_tier, data = tier_df, permutations = permutations, method = "euclidean"), error = function(e) NULL)
     }
   }
-  list(df = out_df, sym_mat = sym_mat, pca = pca_sym, permanova = permanova_res)
+  list(df = out_df, sym_mat = sym_mat, pca = pca_sym, k_95 = as.integer(k_95_sym), permanova = permanova_res)
 }
 
 # ------------------------------------------------------------------------------
@@ -464,9 +454,8 @@ run_fourier_extraction <- function(opts) {
   names(coo_list) <- shape_names_vec[keep_unique]; rownames(fac_df) <- names(coo_list)
   message(sprintf("Assembled %d valid Tier 1 intact closed contours for Elliptic Fourier Analysis.", length(coo_list)))
 
-  # 3. Perform 12-Harmonic EFA via Momocs::Out() & Momocs::efourier(norm = FALSE, start = FALSE)
-  message("Executing 12-harmonic EFA via Momocs::efourier(nb.h = ", opts$harmonics, ", norm = FALSE, start = FALSE)...")
-  efa_success <- FALSE; harm_mat <- NULL; out_obj <- NULL
+  # 3. Dynamic Harmonic Power Calibration (H_opt in [6, 24], >=99% power) & Homologized EFA
+  efa_success <- FALSE; harm_mat <- NULL; out_obj <- NULL; h_opt <- max(6L, min(24L, as.integer(opts$harmonics)))
   if (requireNamespace("Momocs", quietly = TRUE)) {
     out_obj <- tryCatch(Momocs::Out(coo_list, fac = fac_df), error = function(e) { message("Momocs::Out() note: ", e$message); NULL })
     if (!is.null(out_obj)) {
@@ -476,20 +465,25 @@ run_fourier_extraction <- function(opts) {
         fac_df$log_centsize <- ifelse(!is.na(fac_df$centroid_size) & fac_df$centroid_size > 0, round(log(fac_df$centroid_size), 6), NA_real_)
       }
       out_obj <- Momocs::coo_center(out_obj) %>% Momocs::coo_scale()
-      ef_res <- tryCatch(Momocs::efourier(out_obj, nb.h = opts$harmonics, norm = FALSE, start = FALSE), error = function(e) { message("Momocs::efourier() note: ", e$message); NULL })
+      h_opt <- verify_harmonic_power_calibration(out_obj, nb_h = opts$harmonics)
+      harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(h_opt), function(x, y) paste0(x, y)))
+      message("Executing ", h_opt, "-harmonic EFA via Momocs::efourier(nb.h = ", h_opt, ", norm = FALSE, start = FALSE)...")
+      # Baseline homologous signature: Momocs::efourier(out_obj, nb.h = opts$harmonics, norm = FALSE, start = FALSE)
+      ef_res <- tryCatch(Momocs::efourier(out_obj, nb.h = h_opt, norm = FALSE, start = FALSE), error = function(e) { message("Momocs::efourier() note: ", e$message); NULL })
       if (!is.null(ef_res) && !is.null(ef_res$coe)) {
         harm_mat <- as.matrix(ef_res$coe); efa_success <- TRUE
-        message("Momocs EFA extraction successful across ", nrow(harm_mat), " outlines.")
+        message("Momocs EFA extraction successful across ", nrow(harm_mat), " outlines (H_opt = ", h_opt, ").")
       }
     }
   }
   if (!efa_success || is.null(harm_mat)) {
-    message("Running mathematical homologized EFA engine (norm = FALSE, start = FALSE)...")
-    harm_list <- lapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = opts$harmonics, norm = FALSE, start = FALSE))
+    h_opt <- verify_harmonic_power_calibration(out_obj, nb_h = opts$harmonics)
+    harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(h_opt), function(x, y) paste0(x, y)))
+    message("Running mathematical homologized EFA engine (nb_h = ", h_opt, ", norm = FALSE, start = FALSE)...")
+    harm_list <- lapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = h_opt, norm = FALSE, start = FALSE))
     harm_mat <- do.call(rbind, harm_list); colnames(harm_mat) <- harmonic_names
   }
   if (all(harmonic_names %in% colnames(harm_mat))) harm_mat <- harm_mat[, harmonic_names, drop = FALSE] else if (ncol(harm_mat) == length(harmonic_names)) colnames(harm_mat) <- harmonic_names
-  verify_harmonic_power_calibration(out_obj, harm_mat, nb_h = opts$harmonics)
   if (!is.null(vouchers_df)) {
     meta_cols <- intersect(colnames(vouchers_df), c("catalogNumber", "taxon", "scientificName", "species_raw", "institutionCode",
       "determiner_raw", "determiner_tier", "authority_tier", "type_status", "dawid_skene_error_rate", "label_error_rate",
@@ -509,11 +503,11 @@ run_fourier_extraction <- function(opts) {
   fac_df$spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(fac_df) else rep(1.0, nrow(fac_df))
 
   # 4. Symmetric Fourier Decomposition, Optional Uniform Tier-1 Symmetrization (Momocs::rm_asym) & Reference/Passive PCA
-  message("Extracting symmetric harmonic coefficients (An and Dn harmonics)...")
-  sym_names <- c(paste0("A", seq_len(opts$harmonics)), paste0("D", seq_len(opts$harmonics)))
-  asym_names <- c(paste0("B", seq_len(opts$harmonics)), paste0("C", seq_len(opts$harmonics)))
+  message("Extracting symmetric harmonic coefficients (A1..A", h_opt, " and D1..D", h_opt, " harmonics)...")
+  sym_names <- c(paste0("A", seq_len(h_opt)), paste0("D", seq_len(h_opt)))
+  asym_names <- c(paste0("B", seq_len(h_opt)), paste0("C", seq_len(h_opt)))
   ef_input <- if (exists("ef_res") && !is.null(ef_res)) { ef_res$fac <- fac_df; ef_res } else list(coe = harm_mat, fac = fac_df)
-  sym_res <- extract_symmetric_fourier_pcs(ef_input, fac_df = fac_df, num_pcs = opts$num_pcs, permutations = opts$permutations, seed = opts$seed, run_permanova = FALSE)
+  sym_res <- extract_symmetric_fourier_pcs(ef_input, fac_df = fac_df, num_pcs = max(5L, min(15L, as.integer(opts$num_pcs))), permutations = opts$permutations, seed = opts$seed, run_permanova = FALSE)
 
   if (isTRUE(opts$symmetrize_efa_harmonics)) {
     message("Applying uniform Tier 1 harmonic symmetrization via Momocs::rm_asym() to remove herbarium pressing bend artifacts...")
@@ -527,16 +521,18 @@ run_fourier_extraction <- function(opts) {
   sym_harmonics <- harm_mat[, sym_names, drop = FALSE]
   efa_df <- cbind(fac_df, as.data.frame(harm_mat))
   efa_df$assigned_tier <- "Tier_1_Direct"; efa_df$tier_assignment <- "Tier_1_Direct"
-  for (scol in c("authority_weight", "spatial_balance_weight", "sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", paste0("Sym_PC", seq_len(opts$num_pcs)))) {
+  for (scol in c("authority_weight", "spatial_balance_weight", "sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight")) {
     if (scol %in% names(sym_res$df)) efa_df[[scol]] <- sym_res$df[[scol]]
   }
   tier_wt <- efa_df$authority_weight
 
   message("Running strict reference/passive authority-split EFA PCA (Tier_3_Bronze weight = 0.0)...")
   complete_idx <- which(complete.cases(harm_mat))
-  for (p in seq_len(opts$num_pcs)) efa_df[[paste0("PC", p)]] <- NA_real_
+  k_95 <- if (!is.null(sym_res$k_95) && is.finite(sym_res$k_95)) as.integer(sym_res$k_95) else 5L
+  k_export <- max(5L, min(k_95, 15L))
+  for (p in seq_len(k_export)) { efa_df[[paste0("PC", p)]] <- NA_real_; efa_df[[paste0("Sym_PC", p)]] <- if (paste0("Sym_PC", p) %in% names(sym_res$df)) sym_res$df[[paste0("Sym_PC", p)]] else 0.0 }
 
-  if (length(complete_idx) >= opts$num_pcs) {
+  if (length(complete_idx) >= 2L) {
     clean_idx <- if (length(complete_idx) >= 10 && sum(!efa_df$is_contour_outlier[complete_idx]) >= 5) complete_idx[!efa_df$is_contour_outlier[complete_idx]] else complete_idx
     t1_clean_idx <- clean_idx[efa_df$tier_assignment[clean_idx] == "Tier_1_Direct"]
     base_fit_idx <- if (length(t1_clean_idx) >= 2L) t1_clean_idx else clean_idx
@@ -548,6 +544,7 @@ run_fourier_extraction <- function(opts) {
     fit_idx <- which(ref_mask)
     col_vars <- apply(harm_mat[fit_idx, , drop = FALSE], 2, stats::var, na.rm = TRUE)
     active_full_cols <- names(col_vars[!is.na(col_vars) & col_vars > 1e-10])
+    if (length(active_full_cols) == 0L) active_full_cols <- sym_names[seq_len(min(length(sym_names), ncol(harm_mat)))]
     message(sprintf("Active harmonic dimensions with non-zero variance: %d / %d", length(active_full_cols), ncol(harm_mat)))
     if (requireNamespace("Momocs", quietly = TRUE) && exists("ef_res") && !is.null(ef_res)) {
       ef_clean <- if (nrow(harm_mat) >= 10 && length(fit_idx) >= 5) tryCatch(Momocs::slice(ef_res, fit_idx), error = function(e) ef_res) else ef_res
@@ -559,22 +556,29 @@ run_fourier_extraction <- function(opts) {
     colnames(eig$vectors) <- paste0("PC", seq_len(ncol(eig$vectors))); rownames(eig$vectors) <- active_full_cols
     pc_scores <- sweep(harm_mat[complete_idx, active_full_cols, drop = FALSE], 2, wt_cov$center, "-") %*% eig$vectors
     pca_fit <- structure(list(sdev = sqrt(pmax(eig$values, 0)), rotation = eig$vectors, center = wt_cov$center, scale = FALSE, x = pc_scores), class = "prcomp")
-    var_exp <- round((pca_fit$sdev^2) / sum(pca_fit$sdev^2) * 100, 2)
-    message("=== Full 12-Harmonic Morphospace PCA Variance Explained ===")
-    for (p in seq_len(min(opts$num_pcs, length(var_exp)))) message(sprintf("  PC%d: %5.2f%% variance", p, var_exp[p]))
-    for (p in seq_len(min(opts$num_pcs, ncol(pc_scores)))) efa_df[complete_idx, paste0("PC", p)] <- round(pc_scores[, p], 6)
-    cum_var <- cumsum(pca_fit$sdev^2) / sum(pca_fit$sdev^2)
-    k_95 <- which(cum_var >= 0.95)[1]; if (is.na(k_95) || k_95 < 2L) k_95 <- min(opts$num_pcs, ncol(pc_scores))
-    k_95 <- max(2L, min(k_95, ncol(pc_scores), max(2L, floor(nrow(pc_scores) / 3L))))
-    if (length(fit_idx) >= 20L && nrow(pc_scores) >= (k_95 + 5L) && requireNamespace("MASS", quietly = TRUE)) {
-      pc_sub <- pc_scores[, seq_len(k_95), drop = FALSE]; set.seed(opts$seed)
+    tot_ev <- max(sum(pca_fit$sdev^2), 1e-12); var_exp <- round((pca_fit$sdev^2) / tot_ev * 100, 2); cum_var <- cumsum(pca_fit$sdev^2) / tot_ev
+    k_95_full <- which(cum_var >= 0.95)[1]; if (is.na(k_95_full) || k_95_full < 1L) k_95_full <- ncol(pc_scores)
+    k_95_sym <- if (!is.null(sym_res$k_95) && is.finite(sym_res$k_95)) as.integer(sym_res$k_95) else k_95_full
+    k_95 <- as.integer(max(k_95_full, k_95_sym, na.rm = TRUE))
+    k_export <- max(5L, min(as.integer(k_95), 15L, ncol(pc_scores)))
+    message(sprintf("=== Dynamic %d-Harmonic Morphospace PCA (k_95 = %d, k_export = %d) ===", h_opt, k_95, k_export))
+    for (p in seq_len(min(k_export, length(var_exp)))) message(sprintf("  PC%d: %5.2f%% variance", p, var_exp[p]))
+    sym_sc_m <- if (!is.null(sym_res$pca) && !is.null(sym_res$pca$x)) sym_res$pca$x else NULL
+    for (p in seq_len(k_export)) {
+      efa_df[[paste0("PC", p)]] <- NA_real_
+      efa_df[complete_idx, paste0("PC", p)] <- if (p <= ncol(pc_scores)) round(pc_scores[, p], 6) else 0.0
+      efa_df[[paste0("Sym_PC", p)]] <- if (!is.null(sym_sc_m) && p <= ncol(sym_sc_m)) round(sym_sc_m[, p], 6) else if (paste0("Sym_PC", p) %in% names(sym_res$df)) sym_res$df[[paste0("Sym_PC", p)]] else 0.0
+    }
+    k_mcd <- max(2L, min(k_95_full, ncol(pc_scores), max(2L, floor(nrow(pc_scores) / 3L))))
+    if (length(fit_idx) >= 20L && nrow(pc_scores) >= (k_mcd + 5L) && requireNamespace("MASS", quietly = TRUE)) {
+      pc_sub <- pc_scores[, seq_len(k_mcd), drop = FALSE]; set.seed(opts$seed)
       mcd_fit <- tryCatch(MASS::cov.mcd(pc_sub[match(fit_idx, complete_idx), , drop = FALSE]), error = function(e) NULL)
       if (!is.null(mcd_fit)) {
         mcd_d2 <- tryCatch(stats::mahalanobis(pc_sub, center = mcd_fit$center, cov = mcd_fit$cov), error = function(e) rep(0, nrow(pc_sub)))
-        mcd_out <- !is.na(mcd_d2) & (mcd_d2 > stats::qchisq(0.999, df = k_95))
+        mcd_out <- !is.na(mcd_d2) & (mcd_d2 > stats::qchisq(0.999, df = k_mcd))
         if (any(mcd_out) && sum(!mcd_out) >= 5L) {
           efa_df$is_contour_outlier[complete_idx] <- as.logical(efa_df$is_contour_outlier[complete_idx]) | mcd_out
-          message(sprintf("MCD robust Mahalanobis outlier filter (top %d PCs >=95%% var, p < 0.001): flagged %d contours.", k_95, sum(mcd_out)))
+          message(sprintf("MCD robust Mahalanobis outlier filter (top %d PCs, k_95=%d, p < 0.001): flagged %d contours.", k_mcd, k_95, sum(mcd_out)))
         }
       }
     }
@@ -583,10 +587,11 @@ run_fourier_extraction <- function(opts) {
   # 5. Darwin Core Metadata Standardization & Export
   harm_mat <- as.matrix(efa_df[, harmonic_names, drop = FALSE])
   sym_harmonics <- as.matrix(efa_df[, sym_names, drop = FALSE])
-  efa_df$reconstruction_tier <- "Tier 1"
+  efa_df$reconstruction_tier <- "Tier 1"; efa_df$efd_harmonic_opt <- as.integer(h_opt); efa_df$efd_k95_pcs <- as.integer(k_95)
+  exp_pc_cols <- paste0("PC", seq_len(k_export))
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "tier_assignment", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
-                 "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight", "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "circularity", "solidity", "ucs_score",
+                 "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "aspect_ratio", "circularity", "solidity", "ucs_score",
                  "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
                  "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
@@ -648,7 +653,8 @@ run_fourier_extraction <- function(opts) {
 
   specimen_records <- specimen_records[seq_len(spec_idx)]
   specimen_df <- do.call(rbind, specimen_records)
-  for (p in seq_len(opts$num_pcs)) { specimen_df[[paste0("PC", p)]] <- NA_real_; specimen_df[[paste0("Sym_PC", p)]] <- 0.0 }
+  specimen_df$efd_harmonic_opt <- as.integer(h_opt); specimen_df$efd_k95_pcs <- as.integer(k_95)
+  for (p in seq_len(k_export)) { specimen_df[[paste0("PC", p)]] <- NA_real_; specimen_df[[paste0("Sym_PC", p)]] <- 0.0 }
   # Fit OTU-level ordination on Empirical Bayes active reference anchors (with Adaptive Anchor Promotion for 0-Gold/Silver taxa)
   otu_base_mask <- (specimen_df$morph_tier_source == "Tier_1_Pure") & !as.logical(specimen_df$is_contour_outlier)
   if (sum(otu_base_mask, na.rm = TRUE) < 2L) otu_base_mask <- rep(TRUE, nrow(specimen_df))
@@ -657,32 +663,35 @@ run_fourier_extraction <- function(opts) {
   specimen_df$is_promoted_bronze <- if (!is.null(attr(otu_ref_mask, "is_promoted_bronze"))) attr(otu_ref_mask, "is_promoted_bronze") else rep(FALSE, nrow(specimen_df))
   specimen_df$authority_weight <- compute_authority_precision_weights(specimen_df)
   if (sum(otu_ref_mask, na.rm = TRUE) < 2L) otu_ref_mask <- otu_base_mask
-  if (nrow(specimen_df) >= max(opts$num_pcs, 6L) && exists("active_full_cols") && length(active_full_cols) >= opts$num_pcs) {
+  otu_fitted <- FALSE
+  if (nrow(specimen_df) >= max(opts$num_pcs, 6L) && exists("active_full_cols") && length(active_full_cols) >= 2L) {
     otu_t1_idx <- which(otu_ref_mask)
     otu_v <- apply(specimen_df[otu_t1_idx, active_full_cols, drop = FALSE], 2, stats::var, na.rm = TRUE)
     otu_cols <- names(otu_v[!is.na(otu_v) & otu_v > 1e-10])
-    if (length(otu_cols) >= opts$num_pcs) {
+    if (length(otu_cols) >= 2L) {
       w_otu <- specimen_df$authority_weight[otu_t1_idx]; if (sum(w_otu, na.rm = TRUE) <= 0) w_otu <- rep(1.0, length(otu_t1_idx))
       wt_otu <- stats::cov.wt(as.matrix(specimen_df[otu_t1_idx, otu_cols, drop = FALSE]), wt = w_otu, center = TRUE)
       eig_otu <- eigen(wt_otu$cov, symmetric = TRUE); colnames(eig_otu$vectors) <- paste0("PC", seq_len(ncol(eig_otu$vectors))); rownames(eig_otu$vectors) <- otu_cols
       spec_pcs <- sweep(as.matrix(specimen_df[, otu_cols, drop = FALSE]), 2, wt_otu$center, "-") %*% eig_otu$vectors
       pca_fit <- structure(list(sdev = sqrt(pmax(eig_otu$values, 0)), rotation = eig_otu$vectors, center = wt_otu$center, scale = FALSE, x = spec_pcs), class = "prcomp")
-      for (p in seq_len(min(opts$num_pcs, ncol(spec_pcs)))) specimen_df[[paste0("PC", p)]] <- round(spec_pcs[, p], 6)
+      for (p in seq_len(k_export)) specimen_df[[paste0("PC", p)]] <- if (p <= ncol(spec_pcs)) round(spec_pcs[, p], 6) else 0.0
+      otu_fitted <- TRUE
     }
-  } else if (nrow(specimen_df) >= opts$num_pcs && exists("pca_fit") && !is.null(pca_fit)) {
-    spec_pcs <- stats::predict(pca_fit, newdata = as.matrix(specimen_df[, active_full_cols, drop = FALSE]))
-    for (p in seq_len(min(opts$num_pcs, ncol(spec_pcs)))) specimen_df[[paste0("PC", p)]] <- round(spec_pcs[, p], 6)
   }
-  if (nrow(specimen_df) >= opts$num_pcs && !is.null(sym_res$pca)) {
+  if (!otu_fitted && nrow(specimen_df) >= 1L && exists("pca_fit") && !is.null(pca_fit)) {
+    spec_pcs <- stats::predict(pca_fit, newdata = as.matrix(specimen_df[, active_full_cols, drop = FALSE]))
+    for (p in seq_len(k_export)) specimen_df[[paste0("PC", p)]] <- if (p <= ncol(spec_pcs)) round(spec_pcs[, p], 6) else 0.0
+  }
+  if (nrow(specimen_df) >= 1L && !is.null(sym_res$pca)) {
     sym_cols_p <- rownames(sym_res$pca$rotation)
     spec_sym_pcs <- stats::predict(sym_res$pca, newdata = as.matrix(specimen_df[, sym_cols_p, drop = FALSE]))
-    for (p in seq_len(min(opts$num_pcs, ncol(spec_sym_pcs)))) specimen_df[[paste0("Sym_PC", p)]] <- round(spec_sym_pcs[, p], 6)
+    for (p in seq_len(k_export)) specimen_df[[paste0("Sym_PC", p)]] <- if (p <= ncol(spec_sym_pcs)) round(spec_sym_pcs[, p], 6) else 0.0
   }
 
   lead_spec_cols <- c("catalogNumber", "plant_individual_id", "leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source",
                       "foliar_variance", "heteroblasty_index", "assigned_tier", "tier_assignment", "reconstruction_tier",
                       "pixels_per_mm", "is_calibrated_mm", "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight",
-                      "PC1", "PC2", "PC3", "PC4", "PC5", "aspect_ratio", "circularity", "solidity", "ucs_score",
+                      "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "aspect_ratio", "circularity", "solidity", "ucs_score",
                       "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
                       "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize")
   lead_spec_cols <- intersect(lead_spec_cols, names(specimen_df))

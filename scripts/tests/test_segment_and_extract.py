@@ -1445,6 +1445,34 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertIn("PAU_V05", joined_titles)
         self.assertIn("PAU_V07", joined_titles)
 
+    def test_sheet_adaptive_min_blade_area_and_rosette_bbox_vertical_fallback(self):
+        """Verify Task 1A cohort-adaptive min_blade_area_cm2 floor for dwarf/alpine Packera and upper-sheet rosette plant-bbox relaxation."""
+        # 1. Dwarf alpine rosette (e.g., Packera cymbalaria / P. hyperborea) with ~0.30 cm^2 mature leaves:
+        #    0.25 * median(0.30) = 0.075 -> clamped to absolute_floor_cm2 = 0.15 cm^2 so 0.30 cm^2 blades pass!
+        eff_dwarf = step02.compute_sheet_adaptive_min_blade_area_cm2([0.28, 0.30, 0.32, 0.31], config_min_blade_area_cm2=0.75)
+        self.assertAlmostEqual(eff_dwarf, 0.15, places=4)
+        self.assertLess(eff_dwarf, 0.28)
+
+        # 2. Compact subalpine rosette with ~1.20 cm^2 leaves:
+        #    0.25 * 1.20 = 0.30 cm^2 (< 0.75 cm^2)
+        eff_compact = step02.compute_sheet_adaptive_min_blade_area_cm2([1.10, 1.20, 1.30], config_min_blade_area_cm2=0.75)
+        self.assertAlmostEqual(eff_compact, 0.30, places=4)
+
+        # 3. Large-leaved temperate sheet (~4.0 cm^2 median):
+        #    0.25 * 4.0 = 1.00 -> capped at config_min_blade_area_cm2 = 0.75 so ~0.19 cm^2 fragments still fail!
+        eff_large = step02.compute_sheet_adaptive_min_blade_area_cm2([3.8, 4.0, 4.2, 0.19], config_min_blade_area_cm2=0.75)
+        self.assertAlmostEqual(eff_large, 0.75, places=4)
+
+        # 4. Empty / uncalibrated candidate list falls back safely to config_min_blade_area_cm2
+        eff_empty = step02.compute_sheet_adaptive_min_blade_area_cm2([], config_min_blade_area_cm2=0.75)
+        self.assertAlmostEqual(eff_empty, 0.75, places=4)
+
+        # 5. Verify plant-bbox vertical rosette fallback tokens & telemetry exist in 02_segment_and_extract.py
+        step02_src = (PROJECT_ROOT / "scripts" / "pipeline" / "02_segment_and_extract.py").read_text(encoding="utf-8")
+        self.assertIn("compute_sheet_adaptive_min_blade_area_cm2", step02_src)
+        self.assertIn("cy_rel_plant_bbox", step02_src)
+        self.assertIn("rosette_bbox_fallback_used", step02_src)
+
 
 if __name__ == "__main__":
     unittest.main()

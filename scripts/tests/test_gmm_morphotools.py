@@ -1170,6 +1170,107 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertEqual(str(dub_misid["cda_predicted_taxon"]), "Packera anonyma")
             self.assertEqual(str(dub_misid["discordance_reason"]), "Packera_dubia_Discordant_to_Packera_anonyma")
 
+    def test_dynamic_subspace_beyond_five_pcs_and_multipc_bh_batch_audit(self):
+        """Verify Task 1C dynamic subspace selection (>5 PCs when informative), selected_morph_features export, and multi-feature BH institutional batch audit."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        rng = np.random.default_rng(20260431)
+        rows = []
+        vouch_rows = []
+        # 2 taxa x 24 Gold anchors each (N_min = 24 -> Williams & Titus ceiling = 8 >= 6)
+        taxa = ["Packera cymbalaria", "Packera hyperborea"]
+        for s_idx, sp in enumerate(taxa):
+            for j in range(24):
+                cat = f"HI_DIM_{s_idx}_{j:02d}"
+                cs = float(18.0 + 0.3 * j)
+                row = {
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "assigned_tier": "Tier_1_Direct",
+                    "n_tier1_leaves": 3,
+                    "n_tier2_leaves": 0,
+                    "morph_tier_source": "Tier_1_Pure",
+                    "species_raw": sp,
+                    "scientificName": sp,
+                    "determiner_tier": "Tier_1_Gold",
+                    "foliar_variance": 0.015,
+                    "leaf_count": 3,
+                    "centroid_size": cs,
+                    "log_centsize": float(np.log(cs)),
+                    "is_calibrated_mm": True,
+                    "aspect_ratio": float(1.55 + rng.normal(0.0, 0.02)),
+                    "solidity": 0.91,
+                    "ucs_score": 0.95,
+                }
+                # 6 orthogonal high-variance signal PCs (PC1..PC6, Sym_PC1..Sym_PC6) + 2 low-noise PCs (PC7..PC8)
+                for p in range(1, 7):
+                    val = float(rng.normal(2.5 if (s_idx == 0 and p == 1) else (-2.5 if (s_idx == 1 and p == 1) else 0.0), 4.0))
+                    row[f"PC{p}"] = val
+                    row[f"Sym_PC{p}"] = val
+                for p in range(7, 9):
+                    val = float(rng.normal(0.0, 0.03))
+                    row[f"PC{p}"] = val
+                    row[f"Sym_PC{p}"] = val
+                for k in range(1, 13):
+                    row[f"A{k}"] = float(0.05 / k + rng.normal(0.0, 0.002))
+                    row[f"B{k}"] = 0.0
+                    row[f"C{k}"] = 0.0
+                    row[f"D{k}"] = float(0.04 / k + rng.normal(0.0, 0.002))
+                rows.append(row)
+                vouch_rows.append({
+                    "catalogNumber": cat,
+                    "species_raw": sp,
+                    "determiner_tier": "Tier_1_Gold",
+                    "institutionCode": "NCU" if j % 2 == 0 else "ALA",
+                    "stateProvince": "Alaska",
+                    "decimalLatitude": 63.4,
+                    "decimalLongitude": -148.9,
+                    "regional_group": "Alaska_Range",
+                    "doy": 210,
+                })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            harm_csv = tmp_p / "leaf_efa_harmonics.csv"
+            vouch_csv = tmp_p / "curated_vouchers.csv"
+            flags_csv = tmp_p / "morphometric_flags.csv"
+            batch_csv = tmp_p / "batch_audit.csv"
+            pd.DataFrame(rows).to_csv(harm_csv, index=False)
+            pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
+
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--vouchers", str(vouch_csv),
+                    "--harmonics", str(harm_csv),
+                    "--output-flags", str(flags_csv),
+                    "--output-report", str(tmp_p / "bic.csv"),
+                    "--output-plot", str(tmp_p / "cda.pdf"),
+                    "--output-batch-audit", str(batch_csv),
+                    "--allometry-report", str(tmp_p / "allom.csv"),
+                    "--allometry-pairwise", str(tmp_p / "pw.csv"),
+                    "--allometry-plot", str(tmp_p / "allom.pdf"),
+                    "--permutations", "19",
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 04 dynamic >5 PC test failed:\n{proc.stderr}\n{proc.stdout}")
+            flags_df = pd.read_csv(flags_csv)
+            batch_df = pd.read_csv(batch_csv)
+
+            self.assertIn("selected_morph_features", flags_df.columns)
+            sel_feats = [t for t in str(flags_df["selected_morph_features"].iloc[0]).split(";") if t]
+            self.assertGreaterEqual(len(sel_feats), 6, f"Expected >= 6 dynamically retained morphometric features without max_p=5 cap, got {sel_feats}")
+
+            inst_rows = batch_df[batch_df["Term"] == "institutionCode"]
+            self.assertGreaterEqual(len(inst_rows), len(sel_feats))
+            self.assertIn("p_value_bh", batch_df.columns)
+            self.assertTrue(inst_rows["p_value_bh"].notna().all())
+
 
 if __name__ == "__main__":
     unittest.main()

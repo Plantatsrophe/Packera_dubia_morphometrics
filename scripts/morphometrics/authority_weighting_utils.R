@@ -97,18 +97,53 @@
   is_t1
 }
 
-.prepare_anchor_feature_matrix <- function(df, feature_matrix = NULL, max_p = 5L) {
+.discover_numeric_sorted_cols <- function(nms, pattern) {
+  hits <- grep(pattern, nms, value = TRUE)
+  if (length(hits) <= 1L) return(hits)
+  nums <- suppressWarnings(as.integer(gsub("[^0-9]", "", hits)))
+  hits[order(nums, hits)]
+}
+
+select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL) {
+  X <- as.matrix(X)
+  M <- ncol(X); N <- nrow(X)
+  if (is.null(colnames(X))) colnames(X) <- paste0("V", seq_len(M))
+  if (M <= min_p) return(colnames(X))
+  pc_idx <- grep("^(Sym_)?PC[0-9]+$", colnames(X))
+  if (length(pc_idx) >= 3L) {
+    v_obs <- apply(X[, pc_idx, drop = FALSE], 2, stats::var, na.rm = TRUE)
+    v_prop <- v_obs / max(sum(v_obs, na.rm = TRUE), 1e-12)
+    k_m <- length(pc_idx)
+    bs_prop <- vapply(seq_len(k_m), function(j) sum(1 / (j:k_m)) / k_m, numeric(1))
+    horn_thr <- (1 + sqrt(k_m / max(N, k_m + 1)))^2 / k_m
+    keep_pc <- which(is.finite(v_prop) & (v_prop >= pmin(bs_prop * 0.55, horn_thr * 0.55)))
+    if (length(keep_pc) < min_p) keep_pc <- seq_len(min(min_p, k_m))
+    X <- X[, c(pc_idx[keep_pc], setdiff(seq_len(M), pc_idx)), drop = FALSE]
+  }
+  valid_g <- if (!is.null(group_vec)) stats::na.omit(as.character(group_vec)) else character(0)
+  valid_g <- valid_g[nzchar(valid_g) & !(valid_g %in% c("Unassigned_Packera", "Unknown"))]
+  g_tab <- table(valid_g); g_tab_multi <- g_tab[g_tab >= 2L]
+  N_min <- if (length(g_tab_multi) >= 2L) min(as.integer(g_tab_multi)) else N
+  P_max <- if (N_min >= 6L) max(min_p, floor(N_min / 3)) else ncol(X)
+  if (!is.null(max_p) && length(max_p) == 1L && is.finite(as.numeric(max_p)) && as.numeric(max_p) >= 1) {
+    P_max <- min(P_max, as.integer(max_p))
+  }
+  colnames(X)[seq_len(min(ncol(X), P_max))]
+}
+
+.prepare_anchor_feature_matrix <- function(df, feature_matrix = NULL, max_p = NULL, group_vec = NULL) {
   n <- nrow(df)
   if (is.null(feature_matrix)) {
-    auto_cols <- intersect(paste0("PC", seq_len(5)), names(df))
-    if (length(auto_cols) == 0L) auto_cols <- intersect(paste0("Sym_PC", seq_len(5)), names(df))
-    if (length(auto_cols) == 0L) auto_cols <- intersect(c(paste0("A", seq_len(12)), paste0("D", seq_len(12))), names(df))
+    auto_cols <- .discover_numeric_sorted_cols(names(df), "^PC[0-9]+$")
+    if (length(auto_cols) == 0L) auto_cols <- .discover_numeric_sorted_cols(names(df), "^Sym_PC[0-9]+$")
+    if (length(auto_cols) == 0L) auto_cols <- .discover_numeric_sorted_cols(names(df), "^[AD][0-9]+$")
     if (length(auto_cols) == 0L) return(NULL)
     feature_matrix <- df[, auto_cols, drop = FALSE]
   }
   X <- as.matrix(feature_matrix)
   storage.mode(X) <- "double"
   if (nrow(X) != n || ncol(X) == 0L) return(NULL)
+  if (is.null(colnames(X))) colnames(X) <- paste0("V", seq_len(ncol(X)))
 
   primary_cols <- grep("^(Sym_)?PC[0-9]+$|^[AD]_?[0-9]+$", colnames(X))
   if (length(primary_cols) == 0L) primary_cols <- seq_len(ncol(X))
@@ -124,7 +159,6 @@
   }, logical(1)))
   if (length(keep_cols) == 0L) return(list(X = NULL, has_feat = has_feat))
 
-  keep_cols <- keep_cols[seq_len(min(length(keep_cols), as.integer(max_p)))]
   X_use <- X[, keep_cols, drop = FALSE]
   for (j in seq_len(ncol(X_use))) {
     bad_j <- !is.finite(X_use[, j])
@@ -132,6 +166,24 @@
       med_j <- stats::median(X_use[!bad_j, j], na.rm = TRUE)
       X_use[bad_j, j] <- if (is.finite(med_j)) med_j else 0.0
     }
+  }
+  if (!any(grepl("^(Sym_)?PC[0-9]+$", colnames(X_use))) && all(grepl("^[ABCD]_?[0-9]+$", colnames(X_use)))) {
+    h_nums <- suppressWarnings(as.integer(gsub("[^0-9]", "", colnames(X_use))))
+    if (!any(is.na(h_nums))) X_use <- X_use[, order(h_nums, colnames(X_use)), drop = FALSE]
+    raw_cap <- if (!is.null(max_p) && length(max_p) == 1L && is.finite(as.numeric(max_p)) && as.numeric(max_p) >= 1) {
+      as.integer(max_p)
+    } else {
+      max(2L, min(ncol(X_use), floor(max(sum(has_feat), 4L) / 2L), 10L))
+    }
+    X_use <- X_use[, seq_len(min(ncol(X_use), raw_cap)), drop = FALSE]
+  } else {
+    sel_cols <- select_morphometric_subspace(
+      X_use[has_feat, , drop = FALSE],
+      group_vec = if (!is.null(group_vec)) group_vec[has_feat] else NULL,
+      min_p = min(2L, ncol(X_use)),
+      max_p = max_p
+    )
+    X_use <- X_use[, sel_cols, drop = FALSE]
   }
   list(X = X_use, has_feat = has_feat)
 }
@@ -236,7 +288,7 @@ select_adaptive_reference_anchors <- function(
   is_t1_pure <- .identify_tier1_pure_mask(df)
   if (sum(is_t1_pure) == 0L) is_t1_pure <- rep(TRUE, n)
 
-  feat_prep <- .prepare_anchor_feature_matrix(df, feature_matrix = feature_matrix, max_p = 5L)
+  feat_prep <- .prepare_anchor_feature_matrix(df, feature_matrix = feature_matrix, max_p = NULL, group_vec = taxa_vec)
   X_use <- if (!is.null(feat_prep)) feat_prep$X else NULL
   has_feat <- if (!is.null(feat_prep)) feat_prep$has_feat else rep(TRUE, n)
   valid_pool <- is_t1_pure & has_feat
@@ -519,8 +571,8 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
   G <- length(valid_taxa)
   if (G < 2L) return(NULL)
 
-  pc_cols <- intersect(paste0("PC", seq_len(5)), names(df))
-  sym_cols <- intersect(paste0("Sym_PC", seq_len(5)), names(df))
+  pc_cols <- .discover_numeric_sorted_cols(names(df), "^PC[0-9]+$")
+  sym_cols <- .discover_numeric_sorted_cols(names(df), "^Sym_PC[0-9]+$")
   use_cols <- if (length(pc_cols) >= 2L) {
     pc_cols
   } else if (length(sym_cols) >= 2L) {
@@ -530,14 +582,21 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
   } else {
     sym_cols
   }
+  if (length(use_cols) > 0L) {
+    use_cols <- use_cols[vapply(use_cols, function(col) sum(is.finite(suppressWarnings(as.numeric(df[[col]])))) >= 3L, logical(1))]
+  }
   if (length(use_cols) == 0L) return(NULL)
 
   X_pc <- do.call(cbind, lapply(use_cols, function(col) suppressWarnings(as.numeric(df[[col]]))))
   colnames(X_pc) <- use_cols
-  p <- ncol(X_pc)
   finite_pc <- apply(X_pc, 1L, function(r) all(is.finite(r)))
   eval_pc <- eval_mask & finite_pc & (taxa_vec %in% valid_taxa)
   if (sum(eval_pc) < 3L) return(NULL)
+  if (ncol(X_pc) > 2L) {
+    sel_pc <- select_morphometric_subspace(X_pc[eval_pc, , drop = FALSE], group_vec = taxa_vec[eval_pc], min_p = 2L, max_p = NULL)
+    X_pc <- X_pc[, sel_pc, drop = FALSE]
+  }
+  p <- ncol(X_pc)
 
   is_high_tier <- (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_promoted
   ref_idx_by_k <- vector("list", G)

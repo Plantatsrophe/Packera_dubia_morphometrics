@@ -100,6 +100,7 @@ from scripts.vision.lm2_geometry_utils import (
     cluster_plant_individuals,
     compute_classical_shape_descriptors,
     compute_geometric_metrics,
+    compute_sheet_adaptive_min_blade_area_cm2,
     crop_dense_rosette_tier4,
     detect_folded_leaf,
     detect_ruler_scale_hough,
@@ -1178,12 +1179,36 @@ class SegmentAndExtractPipeline:
         capitulum_detections: List[Tuple[Tuple[int, int, int, int], Optional[np.ndarray], float, int]] = []
         root_detections: List[Tuple[int, int, int, int]] = []
         upper_cauline_pts: List[Tuple[float, float]] = []
+        rosette_bbox_fallback_used: bool = False
         # Each tuple: (full_bbox, mask, score, cls_id, crop_offset, mask_origin, already_trimmed, trim_meta, m_solidity, fg_area)
         leaf_detections: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int, Tuple[int, int], Tuple[int, int], bool, Optional[Dict[str, Any]], float, int]] = []
 
         if stage1_detections:
+            if ruler_future is not None and (is_high_dpi or scale_f > 0.0):
+                try:
+                    pixels_per_mm = ruler_future.result(timeout=5.0)
+                except Exception as e:
+                    logger.debug(f"Ruler detection timeout or exception for {catalog_number}: {e}")
+                    pixels_per_mm = None
+                ruler_future = None
+
+            s1_is_calibrated_mm = bool(
+                pixels_per_mm is not None and not np.isnan(pixels_per_mm) and float(pixels_per_mm) > 0.0
+            )
+            s1_px_per_cm = (
+                resolve_px_per_cm(
+                    pixels_per_mm=pixels_per_mm,
+                    default_dpi=DEFAULT_HERBARIUM_DPI,
+                    sheet_shape=(sheet_h, sheet_w),
+                )
+                if s1_is_calibrated_mm
+                else 0.0
+            )
+
             # Stage 1 -> Stage 2 Two-Stage Flow (batched PointRend inference + crop-local geometry)
             candidate_s1_crops: List[Tuple[Tuple[int, int, int, int], float, int, np.ndarray, Tuple[int, int, int, int]]] = []
+            s1_plant_boxes: List[Tuple[int, int, int, int]] = []
+            s1_raw_leaf_items: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
             for s1_item in stage1_detections:
                 if len(s1_item) == 4:
                     s1_bbox, s1_mask, s1_score, s1_cls = s1_item
@@ -1193,37 +1218,96 @@ class SegmentAndExtractPipeline:
 
                 if s1_cls in LM2_REPRODUCTIVE_CLASS_IDS:
                     capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
+                    s1_plant_boxes.append(s1_bbox)
                 elif int(s1_cls) == 9:
                     root_detections.append(s1_bbox)
+                    s1_plant_boxes.append(s1_bbox)
                 elif int(s1_cls) == 2:
                     self.rejection_telemetry["rejected_leaflet_class"] += 1
                     logger.debug(f"Voucher {catalog_number}: rejected Stage 1 leaflet detection (class_id=2).")
                 elif s1_cls in LM2_LEAF_CLASS_IDS:
+                    s1_plant_boxes.append(s1_bbox)
                     if s1_cls not in (0, 1):
                         continue
-                    s1_bh = s1_bbox[2] - s1_bbox[0]
-                    s1_bw = s1_bbox[3] - s1_bbox[1]
-                    s1_cy = 0.5 * (s1_bbox[0] + s1_bbox[2])
+                    s1_bh = int(s1_bbox[2] - s1_bbox[0])
+                    s1_bw = int(s1_bbox[3] - s1_bbox[1])
+                    s1_cy = 0.5 * float(s1_bbox[0] + s1_bbox[2])
+                    s1_raw_leaf_items.append((s1_bbox, float(s1_score), int(s1_cls), s1_bh, s1_bw, s1_cy))
 
-                    if scale_f > 0.0:
-                        if max(s1_bh, s1_bw) < int(160 * scale_f) or min(s1_bh, s1_bw) < int(55 * scale_f):
-                            continue
-                        if max(s1_bh, s1_bw) > int(1300 * scale_f) or (s1_bh * s1_bw) > 0.14 * (sheet_h * sheet_w):
-                            continue
-                        if is_high_dpi:
-                            if s1_cy < 0.40 * sheet_h:
-                                upper_cauline_pts.append((0.5 * float(s1_bbox[1] + s1_bbox[3]), float(s1_cy)))
-                                continue
-                            if max(s1_bh, s1_bw) < int(200 * scale_f):
-                                continue
-                            if s1_cls == 1 and s1_bh == s1_bw and s1_cy < 0.60 * sheet_h:
-                                continue
+            if s1_is_calibrated_mm and s1_px_per_cm > 0.0:
+                _s1_est_cm2 = [
+                    0.72 * float(_bh * _bw) / (s1_px_per_cm ** 2)
+                    for (_bb, _sc, _cl, _bh, _bw, _cy) in s1_raw_leaf_items
+                    if _bh > 0
+                    and _bw > 0
+                    and (
+                        scale_f <= 0.0
+                        or (
+                            max(_bh, _bw) <= int(1300 * scale_f)
+                            and (_bh * _bw) <= 0.14 * (sheet_h * sheet_w)
+                        )
+                    )
+                ]
+                s1_eff_min_cm2 = compute_sheet_adaptive_min_blade_area_cm2(
+                    _s1_est_cm2,
+                    config_min_blade_area_cm2=self.min_blade_area_cm2,
+                    absolute_floor_cm2=0.15,
+                )
+                _s1_phys_lin = math.sqrt(max(1.0, s1_eff_min_cm2 * (s1_px_per_cm ** 2)))
+            else:
+                s1_eff_min_cm2 = float(self.min_blade_area_cm2)
+                _s1_phys_lin = 0.0
 
-                    crop_pad = 0.06 if scale_f > 0.4 else 0.12
-                    crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
-                    if crop_bgr.size == 0:
+            crop_pad = 0.06 if scale_f > 0.4 else 0.12
+            s1_vertical_fallback_items: List[Tuple[Tuple[int, int, int, int], float, int, float]] = []
+            s1_pending_upper_pts: List[Tuple[float, float]] = []
+
+            for s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy in s1_raw_leaf_items:
+                if scale_f > 0.0:
+                    min_s1_major = int(160 * scale_f)
+                    min_s1_minor = int(55 * scale_f)
+                    min_s1_hd_major = int(200 * scale_f)
+                    if s1_is_calibrated_mm and _s1_phys_lin > 0.0:
+                        min_s1_major = min(min_s1_major, max(16, int(0.85 * _s1_phys_lin)))
+                        min_s1_minor = min(min_s1_minor, max(10, int(0.45 * _s1_phys_lin)))
+                        min_s1_hd_major = min(min_s1_hd_major, max(18, int(0.95 * _s1_phys_lin)))
+
+                    if max(s1_bh, s1_bw) < min_s1_major or min(s1_bh, s1_bw) < min_s1_minor:
                         continue
-                    candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
+                    if max(s1_bh, s1_bw) > int(1300 * scale_f) or (s1_bh * s1_bw) > 0.14 * (sheet_h * sheet_w):
+                        continue
+                    if is_high_dpi:
+                        if max(s1_bh, s1_bw) < min_s1_hd_major:
+                            continue
+                        if s1_cy < 0.40 * sheet_h:
+                            s1_pending_upper_pts.append((0.5 * float(s1_bbox[1] + s1_bbox[3]), float(s1_cy)))
+                            s1_vertical_fallback_items.append((s1_bbox, s1_score, s1_cls, s1_cy))
+                            continue
+                        if s1_cls == 1 and s1_bh == s1_bw and s1_cy < 0.60 * sheet_h:
+                            s1_vertical_fallback_items.append((s1_bbox, s1_score, s1_cls, s1_cy))
+                            continue
+
+                crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
+                if crop_bgr.size == 0:
+                    continue
+                candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
+
+            if candidate_s1_crops:
+                upper_cauline_pts.extend(s1_pending_upper_pts)
+            elif s1_vertical_fallback_items:
+                _all_s1_boxes = s1_plant_boxes if s1_plant_boxes else [it[0] for it in s1_vertical_fallback_items]
+                _ymin_p_s1 = float(min(b[0] for b in _all_s1_boxes))
+                _ymax_p_s1 = float(max(b[2] for b in _all_s1_boxes))
+                _span_p_s1 = max(1.0, _ymax_p_s1 - _ymin_p_s1)
+                for fb_bbox, fb_score, fb_cls, fb_cy in s1_vertical_fallback_items:
+                    _cy_rel_p = (float(fb_cy) - _ymin_p_s1) / _span_p_s1
+                    if _cy_rel_p >= 0.40:
+                        crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, fb_bbox, pad_ratio=crop_pad)
+                        if crop_bgr.size > 0:
+                            candidate_s1_crops.append((fb_bbox, float(fb_score), int(fb_cls), crop_bgr, crop_box))
+                            rosette_bbox_fallback_used = True
+                    else:
+                        upper_cauline_pts.append((0.5 * float(fb_bbox[1] + fb_bbox[3]), float(fb_cy)))
 
             all_crop_preds = (
                 self.model_engine.predict_batch([c[3] for c in candidate_s1_crops])
@@ -1236,11 +1320,13 @@ class SegmentAndExtractPipeline:
                     continue
 
                 crop_h, crop_w = crop_bgr.shape[:2]
-                min_blade_area = (
-                    max(int(2200 * (scale_f ** 2)), int(0.03 * crop_h * crop_w))
-                    if scale_f > 0.0
-                    else 20
-                )
+                if scale_f > 0.0:
+                    raw_s2_floor = int(2200 * (scale_f ** 2))
+                    if s1_is_calibrated_mm and s1_px_per_cm > 0.0:
+                        raw_s2_floor = min(raw_s2_floor, max(20, int(0.85 * s1_eff_min_cm2 * (s1_px_per_cm ** 2))))
+                    min_blade_area = max(raw_s2_floor, int(0.03 * crop_h * crop_w))
+                else:
+                    min_blade_area = 20
                 blade_candidates = []
                 for _pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
                     if _pr_cls != 0:
@@ -1614,7 +1700,9 @@ class SegmentAndExtractPipeline:
         extracted_records: List[Dict[str, Any]] = []
         rejected_instances: List[DetectedInstance] = []
         candidate_extractions: List[Tuple[DetectedInstance, Any, str, str, bool, bool, bool, int]] = []
+        rosette_vertical_fallback_extractions: List[Tuple[DetectedInstance, Any, str, str, bool, bool, bool, int]] = []
         tier2_rosette_fallback_by_pid: Dict[int, List[DetectedInstance]] = defaultdict(list)
+        tier2_upper_rosette_fallback_by_pid: Dict[int, List[DetectedInstance]] = defaultdict(list)
 
         # 6. Geometric Quality Gatekeeper, 2-Path Extraction & Basal Leaf RGB Patch Saving
         px_per_cm_sheet = resolve_px_per_cm(
@@ -1622,6 +1710,70 @@ class SegmentAndExtractPipeline:
             default_dpi=DEFAULT_HERBARIUM_DPI,
             sheet_shape=(sheet_h, sheet_w),
         )
+
+        # Detected whole-plant vertical bounding box [ymin_plant, ymax_plant] across all detected plant organs
+        _plant_ymins: List[float] = [float(i.bbox[0]) for i in instances]
+        _plant_ymaxs: List[float] = [float(i.bbox[2]) for i in instances]
+        for _cap_b, _, _, _ in capitulum_detections:
+            _plant_ymins.append(float(_cap_b[0]))
+            _plant_ymaxs.append(float(_cap_b[2]))
+        for _root_b in root_detections:
+            _plant_ymins.append(float(_root_b[0]))
+            _plant_ymaxs.append(float(_root_b[2]))
+        for _uc_x, _uc_y in upper_cauline_pts:
+            _plant_ymins.append(float(_uc_y))
+            _plant_ymaxs.append(float(_uc_y))
+        ymin_plant = float(min(_plant_ymins)) if _plant_ymins else 0.0
+        ymax_plant = float(max(_plant_ymaxs)) if _plant_ymaxs else float(sheet_h)
+        plant_bbox_span = max(1.0, ymax_plant - ymin_plant)
+        inst_cy_rel_plant_bbox: Dict[int, float] = {
+            i.leaf_id: max(0.0, min(1.0, (inst_geom_map[i.leaf_id][1] - ymin_plant) / plant_bbox_span))
+            for i in instances
+        }
+
+        def _compute_inst_blade_area_cm2(inst_obj: DetectedInstance) -> Tuple[float, float]:
+            _raw_px = float(np.count_nonzero(inst_obj.mask))
+            _bx, _by, _bw, _bh = cv2.boundingRect(
+                inst_obj.mask if inst_obj.mask.dtype == np.uint8 else ((inst_obj.mask > 0).astype(np.uint8) * 255)
+            )
+            _eff_px_cm = px_per_cm_sheet
+            if max(sheet_h, sheet_w) <= 500 and max(_bw, _bh) >= int(0.55 * max(sheet_h, sheet_w)):
+                # Synthetic downscaled full-canvas test leaf fixture guard
+                _eff_px_cm = min(_eff_px_cm, 150.0)
+            elif not is_calibrated_mm and max(sheet_h, sheet_w) <= 2000:
+                # Uncalibrated synthetic unit-test sheet scale guard
+                _eff_px_cm = min(_eff_px_cm, 85.0)
+            return _raw_px, compute_blade_area_cm2(_raw_px, px_per_cm=_eff_px_cm)
+
+        _raw_px_by_leaf_id: Dict[int, float] = {}
+        for _inst_pre in instances:
+            _rpx, _acm2 = _compute_inst_blade_area_cm2(_inst_pre)
+            _raw_px_by_leaf_id[_inst_pre.leaf_id] = _rpx
+            _inst_pre.blade_area_cm2 = _acm2
+
+        if is_calibrated_mm:
+            _cls0_areas_cm2 = [
+                _i.blade_area_cm2
+                for _i in instances
+                if int(_i.class_id) == 0 and np.isfinite(_i.blade_area_cm2) and _i.blade_area_cm2 > 0.0
+            ]
+            _sheet_cand_areas_cm2 = (
+                _cls0_areas_cm2
+                if _cls0_areas_cm2
+                else [
+                    _i.blade_area_cm2
+                    for _i in instances
+                    if np.isfinite(_i.blade_area_cm2) and _i.blade_area_cm2 > 0.0
+                ]
+            )
+            effective_min_blade_area_cm2 = compute_sheet_adaptive_min_blade_area_cm2(
+                _sheet_cand_areas_cm2,
+                config_min_blade_area_cm2=self.min_blade_area_cm2,
+                absolute_floor_cm2=0.15,
+            )
+        else:
+            effective_min_blade_area_cm2 = float(self.min_blade_area_cm2)
+
         for inst in instances:
             ox, oy = inst.mask_origin
             mh, mw = inst.mask.shape[:2]
@@ -1654,26 +1806,15 @@ class SegmentAndExtractPipeline:
                 rejected_instances.append(inst)
                 continue
 
-            # 6b. Ruler-calibrated physical blade area filter (min_blade_area_cm2: 0.75 cm^2)
-            raw_area_px = float(np.count_nonzero(inst.mask))
-            bx_r, by_r, bw_r, bh_r = cv2.boundingRect(
-                inst.mask if inst.mask.dtype == np.uint8 else ((inst.mask > 0).astype(np.uint8) * 255)
-            )
-            eff_px_cm = px_per_cm_sheet
-            if max(sheet_h, sheet_w) <= 500 and max(bw_r, bh_r) >= int(0.55 * max(sheet_h, sheet_w)):
-                # Synthetic downscaled full-canvas test leaf fixture guard
-                eff_px_cm = min(eff_px_cm, 150.0)
-            elif not is_calibrated_mm and max(sheet_h, sheet_w) <= 2000:
-                # Uncalibrated synthetic unit-test sheet scale guard
-                eff_px_cm = min(eff_px_cm, 85.0)
-            inst.blade_area_cm2 = compute_blade_area_cm2(raw_area_px, px_per_cm=eff_px_cm)
-            if inst.blade_area_cm2 < self.min_blade_area_cm2:
+            # 6b. Cohort/sheet-adaptive ruler-calibrated physical blade area filter
+            raw_area_px = _raw_px_by_leaf_id.get(inst.leaf_id, float(np.count_nonzero(inst.mask)))
+            if inst.blade_area_cm2 < effective_min_blade_area_cm2:
                 self.rejection_telemetry["rejected_min_area_cm2"] += 1
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = "MIN_BLADE_AREA_CM2"
                 logger.debug(
-                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by min_blade_area_cm2: "
-                    f"{inst.blade_area_cm2:.3f} cm^2 < {self.min_blade_area_cm2:.2f} cm^2."
+                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by effective_min_blade_area_cm2: "
+                    f"{inst.blade_area_cm2:.3f} cm^2 < {effective_min_blade_area_cm2:.3f} cm^2."
                 )
                 rejected_instances.append(inst)
                 continue
@@ -1812,16 +1953,28 @@ class SegmentAndExtractPipeline:
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = rejection_reason
                 keep_for_rosette_fallback = True
+                keep_as_upper_rosette_fb = False
                 if is_high_dpi:
                     ys_fb, xs_fb = np.where(inst.mask > 0)
                     if len(ys_fb) == 0 or len(xs_fb) == 0:
                         keep_for_rosette_fallback = False
                     else:
-                        cy_rel_fb = (float(np.mean(ys_fb)) + oy) / float(sheet_h)
-                        if cy_rel_fb < 0.48 or raw_area_px < float(18000 * (scale_f ** 2)):
+                        min_t2_fb_px = float(18000 * (scale_f ** 2))
+                        if is_calibrated_mm and px_per_cm_sheet > 0:
+                            min_t2_fb_px = min(min_t2_fb_px, float(effective_min_blade_area_cm2 * (px_per_cm_sheet ** 2)))
+                        cy_fb_sheet = float(np.mean(ys_fb)) + oy
+                        cy_rel_fb = cy_fb_sheet / float(sheet_h)
+                        cy_rel_p_fb = (cy_fb_sheet - ymin_plant) / plant_bbox_span
+                        if raw_area_px < min_t2_fb_px:
                             keep_for_rosette_fallback = False
+                        elif cy_rel_fb < 0.48:
+                            keep_for_rosette_fallback = False
+                            if cy_rel_p_fb >= 0.40:
+                                keep_as_upper_rosette_fb = True
                 if keep_for_rosette_fallback:
                     tier2_rosette_fallback_by_pid[int(inst.plant_individual_id)].append(inst)
+                elif keep_as_upper_rosette_fb:
+                    tier2_upper_rosette_fallback_by_pid[int(inst.plant_individual_id)].append(inst)
                 logger.debug(
                     f"Voucher {catalog_number} leaf {inst.leaf_id} excluded from closed-outline EFA "
                     f"({rejection_reason}; is_folded={is_folded}, routing={routing_res.assigned_tier}) "
@@ -1869,22 +2022,50 @@ class SegmentAndExtractPipeline:
                     inst.rejection_reason = "UNRESOLVED_CLUMP"
                     rejected_instances.append(inst)
                     continue
-                cy_rel = (float(np.mean(ys_m)) + by_i + oy) / float(sheet_h)
+                cy_sheet_m = float(np.mean(ys_m)) + by_i + oy
+                cy_rel = cy_sheet_m / float(sheet_h)
+                cy_rel_p_m = max(0.0, min(1.0, (cy_sheet_m - ymin_plant) / plant_bbox_span))
+                inst_cy_rel_plant_bbox[inst.leaf_id] = cy_rel_p_m
                 m_bh = int(np.ptp(ys_m))
                 m_bw = int(np.ptp(xs_m))
                 min_area_px = int(12000 * (scale_f ** 2))
                 min_dim_px = int(220 * scale_f)
+                min_t2_area_px = int(18000 * (scale_f ** 2))
+                if is_calibrated_mm and px_per_cm_sheet > 0:
+                    _phys_area_px = max(20, int(effective_min_blade_area_cm2 * (px_per_cm_sheet ** 2)))
+                    _phys_dim_px = max(16, int(0.85 * math.sqrt(float(_phys_area_px))))
+                    min_area_px = min(min_area_px, _phys_area_px)
+                    min_dim_px = min(min_dim_px, _phys_dim_px)
+                    min_t2_area_px = min(min_t2_area_px, _phys_area_px)
 
                 if (
-                    cy_rel < 0.42
-                    or m_area < min_area_px
+                    m_area < min_area_px
                     or max(m_bw, m_bh) < min_dim_px
                     or ((min(m_bw, m_bh) / max(m_bw, m_bh, 1)) > 0.78 and inst.solidity < 0.84)
-                    or (tier == "Tier 2" and (m_area < int(18000 * (scale_f ** 2)) or cy_rel < 0.48))
+                    or (tier == "Tier 2" and m_area < min_t2_area_px)
                 ):
                     inst.assigned_tier = "rejected"
                     inst.rejection_reason = "UNRESOLVED_CLUMP"
                     rejected_instances.append(inst)
+                    continue
+
+                req_cy_rel = 0.48 if tier == "Tier 2" else 0.42
+                if cy_rel < req_cy_rel:
+                    if cy_rel_p_m >= 0.40:
+                        rosette_vertical_fallback_extractions.append((
+                            inst,
+                            routing_res,
+                            tier,
+                            assigned_tier,
+                            is_folded,
+                            is_dissected,
+                            reflection_applied,
+                            m_area,
+                        ))
+                    else:
+                        inst.assigned_tier = "rejected"
+                        inst.rejection_reason = "UNRESOLVED_CLUMP"
+                        rejected_instances.append(inst)
                     continue
 
             inst.assigned_tier = assigned_tier
@@ -1898,6 +2079,26 @@ class SegmentAndExtractPipeline:
                 reflection_applied,
                 m_area,
             ))
+
+        # Vertical Rosette Position Relaxation: if no candidate basal leaf satisfied the static sheet vertical gate
+        # (cy_rel >= 0.42), relax to the lower 60% of the detected plant bounding box (cy_rel_plant_bbox >= 0.40)
+        if not candidate_extractions and rosette_vertical_fallback_extractions:
+            rosette_bbox_fallback_used = True
+            for _fb_item in rosette_vertical_fallback_extractions:
+                _fb_item[0].assigned_tier = _fb_item[3]
+                candidate_extractions.append(_fb_item)
+            for _fb_pid, _fb_list in tier2_upper_rosette_fallback_by_pid.items():
+                tier2_rosette_fallback_by_pid[_fb_pid].extend(_fb_list)
+        else:
+            for _fb_item in rosette_vertical_fallback_extractions:
+                _fb_inst = _fb_item[0]
+                _fb_inst.assigned_tier = "rejected"
+                _fb_inst.rejection_reason = "UNRESOLVED_CLUMP"
+                rejected_instances.append(_fb_inst)
+            if not candidate_extractions and not tier2_rosette_fallback_by_pid and tier2_upper_rosette_fallback_by_pid:
+                rosette_bbox_fallback_used = True
+                for _fb_pid, _fb_list in tier2_upper_rosette_fallback_by_pid.items():
+                    tier2_rosette_fallback_by_pid[_fb_pid].extend(_fb_list)
 
         # Apply high-DPI sheet-relative area floor and top-6 quality cap BEFORE writing PNGs/CSVs to disk
         if is_high_dpi and candidate_extractions:
@@ -2179,6 +2380,9 @@ class SegmentAndExtractPipeline:
                 "involucre_height_mm": repro_summary["involucre_height_mm"],
                 "involucre_width_mm": repro_summary["involucre_width_mm"],
                 "capitulum_aspect_ratio": repro_summary["capitulum_aspect_ratio"],
+                "effective_min_blade_area_cm2": round(float(effective_min_blade_area_cm2), 4),
+                "cy_rel_plant_bbox": round(float(inst_cy_rel_plant_bbox.get(inst.leaf_id, np.nan)), 4),
+                "rosette_bbox_fallback_used": bool(rosette_bbox_fallback_used),
             })
 
         # Route vouchers with 0 valid silhouettes to failed manifest

@@ -743,6 +743,109 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         )
         self.assertIn("STEP08_MULTIMODAL_JOIN_OK", self._require_batched_r())
 
+    def test_dynamic_morph_and_primary_env_predictor_discovery_in_step08(self) -> None:
+        """Verify Task 3D + 3A: 08_discover_taxon_complexes.R dynamically discovers >5 PCs via selected_morph_features and Step 06 primary_env_predictors without hardcoded 4-variable eco caps."""
+        rng = np.random.default_rng(20261031)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            morph_csv = tmp_path / "morphometric_flags.csv"
+            vis_csv = tmp_path / "label_noise_audit.csv"
+            mm_csv = tmp_path / "multimodal_conflict_flags.csv"
+            out_complexes = tmp_path / "discovered_taxon_complexes.csv"
+            out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
+            out_neighbors = tmp_path / "focal_auto_neighbors.txt"
+            out_fig = tmp_path / "fig_empirical_taxon_complex_network.pdf"
+
+            # 3 taxa separated ONLY on Sym_PC6..Sym_PC7 and bio10_mean_temp_warmest_qtr + polaris_ksat_30m
+            # (proving Step 08 does not truncate at Sym_PC1..5 or hardcode only bio1/bio4/bio12/bio15!)
+            taxa_specs = [
+                ("Packera hyperborea", (-3.5, -3.0), (5.5, 1.8)),
+                ("Packera contermina", (-3.2, -2.8), (5.8, 1.9)),
+                ("Packera cymbalaria", (4.5, 4.2), (13.5, 9.2)),
+            ]
+            morph_rows = []
+            vis_rows = []
+            mm_rows = []
+            v_idx = 0
+            for sp_name, (pc6_mu, pc7_mu), (b10_mu, ksat_mu) in taxa_specs:
+                for j in range(8):
+                    v_idx += 1
+                    cat_no = f"DYN08_{v_idx:03d}"
+                    lat_v = 61.0 + 0.4 * j
+                    morph_rows.append({
+                        "catalogNumber": cat_no,
+                        "plant_individual_id": 0,
+                        "species_standardized": sp_name,
+                        "determiner_tier": "Tier_1_Gold",
+                        "n_tier1_leaves": 3,
+                        "morph_tier_source": "Tier_1_Pure",
+                        "gmm_cluster": 1,
+                        "Sym_PC1": float(rng.normal(0.0, 0.15)),
+                        "Sym_PC2": float(rng.normal(0.0, 0.15)),
+                        "Sym_PC3": float(rng.normal(0.0, 0.15)),
+                        "Sym_PC4": float(rng.normal(0.0, 0.15)),
+                        "Sym_PC5": float(rng.normal(0.0, 0.15)),
+                        "Sym_PC6": float(pc6_mu + rng.normal(0.0, 0.20)),
+                        "Sym_PC7": float(pc7_mu + rng.normal(0.0, 0.20)),
+                        "selected_morph_features": "Sym_PC1;Sym_PC2;Sym_PC3;Sym_PC4;Sym_PC5;Sym_PC6;Sym_PC7",
+                        "cda_predicted_taxon": sp_name,
+                        "cda_posterior_prob": 0.92,
+                        "cda_second_posterior_prob": 0.05,
+                    })
+                    vis_rows.append({
+                        "catalogNumber": cat_no,
+                        "plant_individual_id": 0,
+                        "species_standardized": sp_name,
+                        "determiner_tier": "Tier_1_Gold",
+                        "vision_predicted_label": sp_name,
+                        "c_error": 0.06,
+                        "is_label_corrupted": False,
+                    })
+                    mm_rows.append({
+                        "catalogNumber": cat_no,
+                        "plant_individual_id": 0,
+                        "species_standardized": sp_name,
+                        "decimalLatitude": lat_v,
+                        "latitude": lat_v,
+                        "decimalLongitude": -148.0 + 0.3 * j,
+                        "longitude": -148.0 + 0.3 * j,
+                        "doy": int(215 + 3.0 * (lat_v - 61.0)),
+                        "is_verified_anthesis": True,
+                        "voucher_phenological_state": "Peak_Anthesis",
+                        "bio10_mean_temp_warmest_qtr": float(b10_mu + rng.normal(0.0, 0.25)),
+                        "polaris_ksat_30m": float(ksat_mu + rng.normal(0.0, 0.25)),
+                        "primary_env_predictors": "bio10_mean_temp_warmest_qtr;polaris_ksat_30m",
+                        "primary_clim_predictors": "bio10_mean_temp_warmest_qtr",
+                        "primary_edaph_predictors": "polaris_ksat_30m",
+                    })
+
+            pd.DataFrame(morph_rows).to_csv(morph_csv, index=False)
+            pd.DataFrame(vis_rows).to_csv(vis_csv, index=False)
+            pd.DataFrame(mm_rows).to_csv(mm_csv, index=False)
+
+            res = subprocess.run(
+                [
+                    "Rscript", str(DISCOVERY_R_SCRIPT),
+                    "--morphometrics", str(morph_csv),
+                    "--vision-audit", str(vis_csv),
+                    "--multimodal", str(mm_csv),
+                    "--focal-taxon", "Packera hyperborea",
+                    "--output-complexes", str(out_complexes),
+                    "--output-affinity", str(out_affinity),
+                    "--output-neighbors", str(out_neighbors),
+                    "--output-figure", str(out_fig),
+                ],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(res.returncode, 0, f"Step 08 dynamic feature test failed:\n{res.stderr}\n{res.stdout}")
+            comp_df = pd.read_csv(out_complexes)
+            self.assertEqual(len(comp_df), 3)
+            hyp_nn = str(comp_df.loc[comp_df["taxon"] == "Packera hyperborea", "nearest_neighbor_taxon"].iloc[0])
+            self.assertEqual(hyp_nn, "Packera contermina")
+
 
 if __name__ == "__main__":
     unittest.main()
