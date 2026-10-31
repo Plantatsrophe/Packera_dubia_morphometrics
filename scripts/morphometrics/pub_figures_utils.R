@@ -20,6 +20,11 @@ EXTENDED_COLORBLIND_HEX <- c(
 )
 
 HOLLOW_PCH_CYCLE <- c(1L, 2L, 5L, 0L)
+if (!exists("fast_euclidean_permanova_trace", mode = "function")) {
+  for (.dl_p in c("scripts/morphometrics/dissected_leaf_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "dissected_leaf_utils.R"))) {
+    if (!is.na(.dl_p) && nzchar(.dl_p) && file.exists(.dl_p)) { source(.dl_p); break }
+  }
+}
 
 apply_bh_fdr_correction <- function(df_or_p, p_col = NULL) {
   if (is.null(df_or_p)) return(NULL)
@@ -499,8 +504,15 @@ reconstruct_efa_outline <- function(harm_vec, nb_pts = 120L) {
   cbind(x = x_centered, y = y_centered)
 }
 
-extract_standardized_harmonic_matrix <- function(df, max_k = 12L) {
+extract_standardized_harmonic_matrix <- function(df, max_k = NULL) {
   if (is.null(df) || nrow(df) == 0) return(NULL)
+  if (is.null(max_k) || is.na(max_k)) {
+    h_cols <- grep("^[ABCD][0-9]+$", colnames(df), value = TRUE)
+    h_nums <- suppressWarnings(as.integer(gsub("[^0-9]", "", h_cols)))
+    max_k <- if (any(is.finite(h_nums))) max(12L, min(24L, max(h_nums, na.rm = TRUE))) else 12L
+  } else {
+    max_k <- max(6L, min(24L, as.integer(max_k)))
+  }
   interleaved_nms <- as.vector(outer(c("A", "B", "C", "D"), seq_len(max_k), paste0))
   avail <- intersect(interleaved_nms, colnames(df))
   if (length(avail) < 8L) return(NULL)
@@ -1141,9 +1153,9 @@ generate_step03_pub_figures <- function(
   }))
   rownames(cent_sym) <- gsub("Packera ", "P. ", present_tx)
 
-  std_hmat <- extract_standardized_harmonic_matrix(df, max_k = 12L)
+  std_hmat <- extract_standardized_harmonic_matrix(df, max_k = NULL)
   if (is.null(std_hmat) && !is.null(efa_df)) {
-    std_hmat <- extract_standardized_harmonic_matrix(efa_df, max_k = 12L)
+    std_hmat <- extract_standardized_harmonic_matrix(efa_df, max_k = NULL)
   }
 
   # Helper to synthesize harmonic vector at any (pc1_val, pc2_val) coordinate
@@ -1268,39 +1280,64 @@ generate_step03_pub_figures <- function(
       if (sum(m_anchor, na.rm = TRUE) < 3) m_anchor <- (df$taxon_clean == sp_name) & is_t1_pure
       if (sum(m_anchor, na.rm = TRUE) < 1) m_anchor <- (df$taxon_clean == sp_name)
 
-      if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && any(m_anchor)) {
-        h_mean <- colMeans(std_hmat[m_anchor, , drop = FALSE], na.rm = TRUE)
-        h_sd   <- apply(std_hmat[m_anchor, , drop = FALSE], 2, stats::sd, na.rm = TRUE)
-        h_sd[!is.finite(h_sd)] <- 0.0
+      sol_col_b <- if ("q25_solidity" %in% colnames(df)) suppressWarnings(as.numeric(df$q25_solidity)) else if ("solidity" %in% colnames(df)) suppressWarnings(as.numeric(df$solidity)) else rep(NA_real_, nrow(df))
+      m_dis_sub <- m_anchor & is.finite(sol_col_b) & (sol_col_b < 0.72)
+      m_ent_sub <- m_anchor & (!is.finite(sol_col_b) | (sol_col_b >= 0.72))
+      is_bimodal_sp <- !is.null(std_hmat) && nrow(std_hmat) == nrow(df) &&
+        sum(m_dis_sub, na.rm = TRUE) >= 2L && sum(m_ent_sub, na.rm = TRUE) >= 2L &&
+        (sum(m_dis_sub, na.rm = TRUE) / max(1L, sum(m_anchor, na.rm = TRUE))) >= 0.20 &&
+        (sum(m_ent_sub, na.rm = TRUE) / max(1L, sum(m_anchor, na.rm = TRUE))) >= 0.20
+
+      if (is_bimodal_sp) {
+        h_ent <- colMeans(std_hmat[m_ent_sub, , drop = FALSE], na.rm = TRUE)
+        h_dis <- colMeans(std_hmat[m_dis_sub, , drop = FALSE], na.rm = TRUE)
+        xy_ent <- reconstruct_efa_outline(h_ent, nb_pts = 120L)
+        xy_dis <- reconstruct_efa_outline(h_dis, nb_pts = 120L)
+        pts_ent <- draw_outline_in_box(
+          xy_ent, cx = cx - 0.17, cy = cy - 0.05, w_box = 0.36, h_box = 0.60,
+          col_border = sp_col, col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.18), lwd = 1.9, lty = 1
+        )
+        pts_dis <- draw_outline_in_box(
+          xy_dis, cx = cx + 0.17, cy = cy - 0.05, w_box = 0.38, h_box = 0.60,
+          col_border = sp_col, col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.28), lwd = 2.1, lty = 1
+        )
+        if (!is.null(pts_ent)) graphics::segments(cx - 0.17, min(pts_ent[, 2]), cx - 0.17, max(pts_ent[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.50), lty = 2, lwd = 0.9)
+        if (!is.null(pts_dis)) graphics::segments(cx + 0.17, min(pts_dis[, 2]), cx + 0.17, max(pts_dis[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.50), lty = 2, lwd = 0.9)
       } else {
-        z_sp <- if (any(m_anchor)) c(mean(df$Sym_PC1[m_anchor], na.rm = TRUE), mean(df$Sym_PC2[m_anchor], na.rm = TRUE)) else c((idx_sp - 2.5) * 0.5, 0)
-        h_mean <- project_grid_harmonics(z_sp[1], z_sp[2])
-        h_sd   <- abs(h_mean) * 0.12
-      }
+        if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && any(m_anchor)) {
+          h_mean <- colMeans(std_hmat[m_anchor, , drop = FALSE], na.rm = TRUE)
+          h_sd   <- apply(std_hmat[m_anchor, , drop = FALSE], 2, stats::sd, na.rm = TRUE)
+          h_sd[!is.finite(h_sd)] <- 0.0
+        } else {
+          z_sp <- if (any(m_anchor)) c(mean(df$Sym_PC1[m_anchor], na.rm = TRUE), mean(df$Sym_PC2[m_anchor], na.rm = TRUE)) else c((idx_sp - 2.5) * 0.5, 0)
+          h_mean <- project_grid_harmonics(z_sp[1], z_sp[2])
+          h_sd   <- abs(h_mean) * 0.12
+        }
 
-      xy_mean  <- reconstruct_efa_outline(h_mean, nb_pts = 120L)
-      xy_plus  <- reconstruct_efa_outline(h_mean + 0.65 * h_sd, nb_pts = 120L)
-      xy_minus <- reconstruct_efa_outline(h_mean - 0.65 * h_sd, nb_pts = 120L)
+        xy_mean  <- reconstruct_efa_outline(h_mean, nb_pts = 120L)
+        xy_plus  <- reconstruct_efa_outline(h_mean + 0.65 * h_sd, nb_pts = 120L)
+        xy_minus <- reconstruct_efa_outline(h_mean - 0.65 * h_sd, nb_pts = 120L)
 
-      # Draw +1 SD and -1 SD marginal envelopes + bold mean consensus outline
-      draw_outline_in_box(
-        xy_plus, cx = cx, cy = cy - 0.05, w_box = 0.72, h_box = 0.68,
-        col_border = grDevices::adjustcolor(sp_col, alpha.f = 0.45),
-        col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.10), lwd = 0.9, lty = 3
-      )
-      draw_outline_in_box(
-        xy_minus, cx = cx, cy = cy - 0.05, w_box = 0.62, h_box = 0.58,
-        col_border = grDevices::adjustcolor(sp_col, alpha.f = 0.45),
-        col_fill = NA, lwd = 0.9, lty = 3
-      )
-      pts_mean <- draw_outline_in_box(
-        xy_mean, cx = cx, cy = cy - 0.05, w_box = 0.67, h_box = 0.63,
-        col_border = sp_col,
-        col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.22), lwd = 2.2, lty = 1
-      )
-      # Midrib axis line inside reconstructed leaf
-      if (!is.null(pts_mean)) {
-        graphics::segments(cx, min(pts_mean[, 2]), cx, max(pts_mean[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.55), lty = 2, lwd = 1.0)
+        # Draw +1 SD and -1 SD marginal envelopes + bold mean consensus outline
+        draw_outline_in_box(
+          xy_plus, cx = cx, cy = cy - 0.05, w_box = 0.72, h_box = 0.68,
+          col_border = grDevices::adjustcolor(sp_col, alpha.f = 0.45),
+          col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.10), lwd = 0.9, lty = 3
+        )
+        draw_outline_in_box(
+          xy_minus, cx = cx, cy = cy - 0.05, w_box = 0.62, h_box = 0.58,
+          col_border = grDevices::adjustcolor(sp_col, alpha.f = 0.45),
+          col_fill = NA, lwd = 0.9, lty = 3
+        )
+        pts_mean <- draw_outline_in_box(
+          xy_mean, cx = cx, cy = cy - 0.05, w_box = 0.67, h_box = 0.63,
+          col_border = sp_col,
+          col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.22), lwd = 2.2, lty = 1
+        )
+        # Midrib axis line inside reconstructed leaf
+        if (!is.null(pts_mean)) {
+          graphics::segments(cx, min(pts_mean[, 2]), cx, max(pts_mean[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.55), lty = 2, lwd = 1.0)
+        }
       }
 
       med_ar  <- if ("aspect_ratio" %in% colnames(df) && any(m_anchor)) stats::median(df$aspect_ratio[m_anchor], na.rm = TRUE) else 2.2
@@ -1351,11 +1388,11 @@ generate_step03_pub_figures <- function(
   # ----------------------------------------------------------------------------
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(4.6, 4.6, 3.2, 1.2))
-    n_harm <- 12
+    n_harm <- 12L
     harm_pwr <- numeric(n_harm)
     h_source <- if (!is.null(std_hmat)) std_hmat else harm_mat
     if (!is.null(h_source) && ncol(h_source) >= 4) {
-      n_harm <- min(12, floor(ncol(h_source) / 4))
+      n_harm <- min(24L, max(6L, floor(ncol(h_source) / 4L)))
       harm_pwr <- numeric(n_harm)
       for (k in seq_len(n_harm)) {
         c_idx <- c(paste0("A", k), paste0("B", k), paste0("C", k), paste0("D", k))
@@ -1375,7 +1412,7 @@ generate_step03_pub_figures <- function(
     graphics::plot(
       seq_len(n_harm), cum_pwr, type = "b", pch = 1, bg = NA, lwd = 2.0, col = "#0072B2",
       ylim = c(min(cum_pwr) * 0.95, 101),
-      xlab = "Elliptic Fourier Harmonic Order (n = 1..12)",
+      xlab = sprintf("Elliptic Fourier Harmonic Order (n = 1..%d)", n_harm),
       ylab = "Cumulative Shape Variance Explained (%)",
       main = "A. Cumulative EFA Harmonic Power Spectrum"
     )
@@ -1441,9 +1478,15 @@ format_cda_loading_labels <- function(raw_vars) {
     "log_centsize_std" = "CS [Leaf Size]",
     "aspect_ratio"     = "AR [Blade L/W]",
     "aspect_ratio_std" = "AR [Blade L/W]",
-    "solidity"         = "Solidity [Dissection]",
-    "solidity_std"     = "Solidity [Dissection]",
-    "pheno_sin"        = "pheno_sin",
+    "solidity"               = "Solidity [Dissection]",
+    "solidity_std"           = "Solidity [Dissection]",
+    "q25_solidity"           = "Q25 Solidity [Basal Lobing]",
+    "q25_solidity_std"       = "Q25 Solidity [Basal Lobing]",
+    "dissection_index"       = "DI [Margin Complexity]",
+    "dissection_index_std"   = "DI [Margin Complexity]",
+    "heteroblasty_index"     = "Heteroblasty [Rosette Disp.]",
+    "heteroblasty_index_std" = "Heteroblasty [Rosette Disp.]",
+    "pheno_sin"              = "pheno_sin",
     "pheno_cos"        = "pheno_cos"
   )
   vapply(as.character(raw_vars), function(v) {
@@ -2668,7 +2711,17 @@ run_supervised_ecoregion_cda <- function(
 
     # Euclidean PERMANOVA across active EPA Level III Ecoregions
     set.seed(seed)
-    if (requireNamespace("vegan", quietly = TRUE) && g_n >= 2L) {
+    if (g_n >= 2L && exists("fast_euclidean_permanova_trace", mode = "function")) {
+      ad_fast <- tryCatch(
+        fast_euclidean_permanova_trace(X_a, grp_a, permutations = as.integer(permutations), seed = seed),
+        error = function(e) NULL
+      )
+      if (!is.null(ad_fast) && is.finite(ad_fast$R2)) {
+        perm_r2 <- round(as.numeric(ad_fast$R2), 4)
+        perm_f <- round(as.numeric(ad_fast$F), 4)
+        perm_p <- signif(as.numeric(ad_fast$p_value), 4)
+      }
+    } else if (requireNamespace("vegan", quietly = TRUE) && g_n >= 2L) {
       ad_res <- tryCatch(
         vegan::adonis2(X_a ~ grp_a, permutations = as.integer(permutations), method = "euclidean"),
         error = function(e) NULL

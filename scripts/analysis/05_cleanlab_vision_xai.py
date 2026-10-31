@@ -22,6 +22,7 @@ if torch.cuda.is_available(): torch.cuda.manual_seed_all(42)
 _script_root = Path(__file__).resolve().parents[2]
 if str(_script_root) not in sys.path: sys.path.insert(0, str(_script_root))
 from scripts.core.db import compute_file_sha256, fetch_cached_dinov2_features, get_db_connection, is_canonical_or_explicit_db_context, persist_vision_xai_audit, store_dinov2_features_cache
+from scripts.analysis.vision_dissection_utils import compute_dissection_neutral_leaf_weight, compute_weighted_patch_set_sha256, filter_basal_manifest_rows_py, order_basal_leaves_by_median_solidity
 
 FOREGROUND_ATTENTION_MIN_RATIO: float = 0.65
 DYNAMIC_OKABE_ITO_HEX: List[str] = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#882255", "#44AA99", "#332288", "#117733"]
@@ -105,7 +106,7 @@ def compute_foreground_tissue_mask(rgb_img: Image.Image | np.ndarray, mask_path:
         else: fg_mask = ((0.2989 * arr[:, :, 0] + 0.5870 * arr[:, :, 1] + 0.1140 * arr[:, :, 2]) <= np.percentile(arr.mean(axis=2), 60)).astype(np.uint8)
     if int(fg_mask.sum()) == 0: fg_mask = np.ones((h, w), dtype=np.uint8)
     patch_frac = cv2.resize(fg_mask.astype(np.float32), (gw, gh), interpolation=cv2.INTER_AREA) if cv2 is not None else F.adaptive_avg_pool2d(torch.as_tensor(fg_mask, dtype=torch.float32).unsqueeze(0).unsqueeze(0), (gh, gw))[0, 0].numpy()
-    fg_grid = (patch_frac >= 0.15).astype(np.float32)
+    fg_grid = np.where(patch_frac >= 0.05, patch_frac, 0.0).astype(np.float32)
     return fg_mask.astype(np.uint8), (np.where(patch_frac > 0.0, patch_frac, 1.0).astype(np.float32) if float(fg_grid.sum()) <= 0.0 else fg_grid)
 
 def foreground_masked_patch_pooling(patch_tokens: torch.Tensor | np.ndarray, patch_mask_16x16: torch.Tensor | np.ndarray) -> np.ndarray:
@@ -214,19 +215,19 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
     tier1_mask_dir = next((d for d in (data_root / "masks" / "tier1_intact", vouchers_csv.parent.parent / "masks" / "tier1_intact") if d.is_dir()), data_root / "masks" / "tier1_intact")
     if manifest_csv is None: manifest_csv = next((p for p in (vouchers_csv.parent / "extracted_leaf_manifest.csv", data_root / "tables" / "extracted_leaf_manifest.csv") if p.is_file()), None)
     cand_morph = Path(morphometrics_csv) if (morphometrics_csv is not None and Path(morphometrics_csv).is_file()) else next((p for p in (vouchers_csv.parent / "morphometric_flags.csv", data_root / "tables" / "morphometric_flags.csv") if p.is_file()), None)
-    tier1_by_key, tier1_by_cat, man_pids_by_cat, man_has_pid, seen_basal = {}, {}, {}, False, set()
+    tier1_by_key, tier1_by_cat, man_pids_by_cat, man_has_pid, seen_basal, man_cov_keys, man_cov_cats = {}, {}, {}, False, set(), set(), set()
     if manifest_csv is not None and Path(manifest_csv).is_file():
         man_df = pd.read_csv(manifest_csv); man_has_pid = "plant_individual_id" in man_df.columns
         tier_col = "assigned_tier" if "assigned_tier" in man_df.columns else ("tier" if "tier" in man_df.columns else "")
         if not man_df.empty and "catalogNumber" in man_df.columns:
-            if man_has_pid:
-                for c_r, p_r in zip(man_df["catalogNumber"], man_df["plant_individual_id"]):
-                    c_s = str(c_r).strip()
-                    if c_s and (not voucher_map or c_s in voucher_map): man_pids_by_cat.setdefault(c_s, set()).add(_parse_pid(p_r, 0))
+            for idx_m, c_r in enumerate(man_df["catalogNumber"]):
+                c_s = str(c_r).strip(); p_i = _parse_pid(man_df["plant_individual_id"].iloc[idx_m], 0) if man_has_pid else 0
+                if c_s and (not voucher_map or c_s in voucher_map):
+                    man_cov_cats.add(c_s); man_cov_keys.add((c_s, p_i))
+                    if man_has_pid: man_pids_by_cat.setdefault(c_s, set()).add(p_i)
             if tier_col:
-                for _, mrow in man_df[man_df[tier_col].astype(str).str.match(r"^tier[_\s]*1", case=False, na=False)].iterrows():
+                for _, mrow in filter_basal_manifest_rows_py(man_df, tier_col, voucher_map=voucher_map).iterrows():
                     c_num = str(mrow["catalogNumber"]).strip()
-                    if voucher_map and c_num not in voucher_map: continue
                     m_pid, lid_raw = (_parse_pid(mrow.get("plant_individual_id"), 0) if man_has_pid else 0), mrow.get("leaf_id", "")
                     lid = str(int(float(lid_raw))) if (pd.notna(lid_raw) and str(lid_raw).strip().replace(".", "", 1).isdigit()) else str(lid_raw).strip()
                     stems = (f"{c_num}_p{m_pid}_leaf{lid}", f"{c_num}_leaf{lid}") if man_has_pid else (f"{c_num}_leaf{lid}",)
@@ -235,19 +236,18 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
                     mp_cand = ([Path(mp_raw), data_root.parent / mp_raw, _script_root / mp_raw] if (mp_raw and mp_raw.lower() != "nan") else []) + [tier1_mask_dir / f"{st}.png" for st in stems]
                     mp = next((cand for cand in mp_cand if cand.is_file()), None)
                     if cp is not None and mp is not None:
-                        sol = float(mrow.get("solidity", 0.85) if pd.notna(mrow.get("solidity", 0.85)) else 0.85)
-                        ucs = float(mrow.get("ucs_score", mrow.get("ucs", 0.90)) if pd.notna(mrow.get("ucs_score", mrow.get("ucs", 0.90))) else 0.90)
-                        qw = float(mrow.get("leaf_quality_weight", sol * ucs) if pd.notna(mrow.get("leaf_quality_weight", np.nan)) else (sol * ucs))
-                        seen_basal.add(cp.resolve()); (tier1_by_key.setdefault((c_num, m_pid), []) if man_has_pid else tier1_by_cat.setdefault(c_num, [])).append((qw, cp, mp))
+                        qw, sol = compute_dissection_neutral_leaf_weight(mrow)
+                        seen_basal.add(cp.resolve()); (tier1_by_key.setdefault((c_num, m_pid), []) if man_has_pid else tier1_by_cat.setdefault(c_num, [])).append((qw, cp, mp, sol))
     if basal_dir.is_dir() and tier1_mask_dir.is_dir():
         for ext in ("*.jpg", "*.png", "*.jpeg"):
             for bp in sorted(basal_dir.glob(ext)):
                 if bp.stem.lower().endswith("_mask") or bp.resolve() in seen_basal: continue
                 c_num, s_pid, mp = _extract_catalog_number(bp.stem, known_cats), _extract_pid_from_stem(bp.stem, known_cats), tier1_mask_dir / f"{bp.stem}.png"
+                if ((c_num, s_pid) in man_cov_keys if (man_has_pid and s_pid is not None) else (c_num in man_cov_cats)): continue
                 if (not voucher_map or c_num in voucher_map) and mp.is_file():
-                    (tier1_by_key.setdefault((c_num, s_pid), []) if s_pid is not None else tier1_by_cat.setdefault(c_num, [])).append((0.75, bp, mp))
+                    (tier1_by_key.setdefault((c_num, s_pid), []) if s_pid is not None else tier1_by_cat.setdefault(c_num, [])).append((0.75, bp, mp, 0.85))
     for d_t1 in (tier1_by_key, tier1_by_cat):
-        for k_t1 in d_t1: d_t1[k_t1].sort(key=lambda it: (-it[0], str(it[1])))
+        for k_t1 in d_t1: d_t1[k_t1] = order_basal_leaves_by_median_solidity(d_t1[k_t1])
     dense_files: List[Path] = []
     for search_dir, use_rglob in ((dense_dir, False), (rosette_dir, False), (rosette_dir, True)):
         if not dense_files and search_dir.exists():
@@ -322,8 +322,8 @@ def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "
     if not records:
         empty = (np.empty((0, 768), dtype=np.float32), np.array([], dtype=int), [])
         return (*empty, np.array([], dtype=np.float64)) if return_fg_ratios else empty
-    def _expand(recs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Any], Dict[Tuple[str, int], List[str]]]:
-        exp_r, exp_m, patches_by_k = [], [], {}
+    def _expand(recs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Any], Dict[Tuple[str, int], List[str]], Dict[Tuple[str, int], List[float]]]:
+        exp_r, exp_m, patches_by_k, weights_by_k = [], [], {}, {}
         for rec in recs:
             cat_num, pid, lbl_idx = str(rec["catalogNumber"]).strip(), _parse_pid(rec.get("plant_individual_id", 0), 0), int(rec.get("label_idx", 0))
             t1_p, ros_p = rec.get("tier1_leaf_patches"), rec.get("rosette_patches")
@@ -333,9 +333,11 @@ def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "
             patches_by_k.setdefault((cat_num, pid), []).extend(str(p) for p in p_list)
             for idx_p, p_str in enumerate(p_list):
                 m_str = m_list[idx_p] if idx_p < len(m_list) else rec.get("mask_path", "")
+                w_val = float(w_list[idx_p]) if idx_p < len(w_list) else 1.0
+                weights_by_k.setdefault((cat_num, pid), []).append(w_val)
                 exp_r.append({**rec, "catalogNumber": cat_num, "plant_individual_id": pid, "label_idx": lbl_idx, "patch_path": p_str, "mask_path": m_str})
-                exp_m.append(((cat_num, pid), lbl_idx, float(w_list[idx_p]) if idx_p < len(w_list) else 1.0))
-        return exp_r, exp_m, patches_by_k
+                exp_m.append(((cat_num, pid), lbl_idx, w_val))
+        return exp_r, exp_m, patches_by_k, weights_by_k
     def _finalize(agg_f: np.ndarray, agg_l: np.ndarray, v_ord: List[Tuple[str, int]], fg_map: Dict[Tuple[str, int], float]) -> Any:
         for rec in records:
             gk = (str(rec["catalogNumber"]).strip(), _parse_pid(rec.get("plant_individual_id", 0), 0))
@@ -343,7 +345,7 @@ def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "
         has_multi_pid = any(p != 0 for _, p in v_ord) or len({c for c, _ in v_ord}) < len(v_ord)
         out_ord = list(v_ord) if has_multi_pid else [c for c, _ in v_ord]
         return (agg_f, agg_l, out_ord, np.array([fg_map.get(k, 0.85) for k in v_ord], dtype=np.float64)) if return_fg_ratios else (agg_f, agg_l, out_ord)
-    all_exp_r, all_exp_m, patches_by_key = _expand(records)
+    all_exp_r, all_exp_m, patches_by_key, weights_by_key = _expand(records)
     if not any(Path(str(r["patch_path"])).exists() for r in all_exp_r[:5]):
         if not demo: raise RuntimeError("No physical patch images found in `data/cropped_patches/`. Run Phase 2 or pass `--demo`.")
         feats = np.random.randn(len(all_exp_r), 768).astype(np.float32)
@@ -359,13 +361,13 @@ def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "
     if use_cache:
         try:
             db_conn = get_db_connection(db_path=db_path, init_schema=True)
-            sha_by_key = {gk: (compute_file_sha256(ps[0]) if len(ps) == 1 else hashlib.sha256("|".join(compute_file_sha256(p) or "" for p in ps).encode()).hexdigest()) for gk in spec_order for ps in (patches_by_key.get(gk, []),)}
+            sha_by_key = {gk: compute_weighted_patch_set_sha256(patches_by_key.get(gk, []), weights_by_key.get(gk, []), compute_file_sha256) for gk in spec_order}
             cache_hits = fetch_cached_dinov2_features(db_conn, [(c, p, sha_by_key.get((c, p))) for c, p in spec_order], model_name, sigma)
         except Exception: db_conn, cache_hits = None, {}
     uncached_recs, computed_feats, computed_fg = [rec for rec in records if (str(rec["catalogNumber"]).strip(), _parse_pid(rec.get("plant_individual_id", 0), 0)) not in cache_hits], {}, {}
     try:
         if uncached_recs:
-            exp_r, exp_m, _ = _expand(uncached_recs)
+            exp_r, exp_m, _, _ = _expand(uncached_recs)
             loader = DataLoader(RosettePatchDataset(exp_r, neutralize_background=neutralize_background, sigma=sigma, demo=demo), batch_size=batch_size, shuffle=False, num_workers=0)
             model, last_err = None, None
             for candidate_name in (model_name, "dinov2_vitb14"):

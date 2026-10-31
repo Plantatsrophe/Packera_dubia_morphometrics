@@ -104,12 +104,37 @@
   hits[order(nums, hits)]
 }
 
-select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL) {
+if (!exists("prune_collinear_dissection_scalars", mode = "function")) {
+  for (.dl_p in c("scripts/morphometrics/dissected_leaf_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "dissected_leaf_utils.R"))) {
+    if (!is.na(.dl_p) && nzchar(.dl_p) && file.exists(.dl_p)) { source(.dl_p); break }
+  }
+}
+
+.select_morphometric_subspace_core <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL, aux_df = NULL) {
   X <- as.matrix(X)
   M <- ncol(X); N <- nrow(X)
   if (is.null(colnames(X))) colnames(X) <- paste0("V", seq_len(M))
   if (M <= min_p) return(colnames(X))
+  valid_g <- if (!is.null(group_vec)) stats::na.omit(as.character(group_vec)) else character(0)
+  valid_g <- valid_g[nzchar(valid_g) & !(valid_g %in% c("Unassigned_Packera", "Unknown"))]
+  g_tab <- table(valid_g); g_tab_multi <- g_tab[g_tab >= 2L]
+  N_min <- if (length(g_tab_multi) >= 2L) min(as.integer(g_tab_multi)) else N
+  P_max <- if (N_min >= 6L) max(min_p, floor(N_min / 3)) else M
+  if (!is.null(max_p) && length(max_p) == 1L && is.finite(as.numeric(max_p)) && as.numeric(max_p) >= 1) {
+    P_max <- min(P_max, as.integer(max_p))
+  }
+
+  g_fac <- NULL
+  if (!is.null(group_vec) && length(group_vec) == N && length(g_tab_multi) >= 2L) {
+    g_chr <- as.character(group_vec)
+    g_chr[!(g_chr %in% names(g_tab_multi))] <- NA_character_
+    g_fac <- droplevels(factor(g_chr))
+    if (nlevels(g_fac) < 2L) g_fac <- NULL
+  }
+
   pc_idx <- grep("^(Sym_)?PC[0-9]+$", colnames(X))
+  non_pc_idx <- setdiff(seq_len(M), pc_idx)
+  kept_pc_cols <- pc_idx
   if (length(pc_idx) >= 3L) {
     v_obs <- apply(X[, pc_idx, drop = FALSE], 2, stats::var, na.rm = TRUE)
     v_prop <- v_obs / max(sum(v_obs, na.rm = TRUE), 1e-12)
@@ -117,18 +142,63 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
     bs_prop <- vapply(seq_len(k_m), function(j) sum(1 / (j:k_m)) / k_m, numeric(1))
     horn_thr <- (1 + sqrt(k_m / max(N, k_m + 1)))^2 / k_m
     keep_pc <- which(is.finite(v_prop) & (v_prop >= pmin(bs_prop * 0.55, horn_thr * 0.55)))
+    rem_pc <- setdiff(which(is.finite(v_prop) & v_prop >= 0.004), keep_pc)
+    if (length(rem_pc) > 0L) {
+      rescued <- integer(0)
+      if (!is.null(aux_df) && is.data.frame(aux_df) && nrow(aux_df) == N) {
+        dis_aux_cols <- intersect(c("solidity", "q25_solidity", "dissection_index"), names(aux_df))
+        for (rp in rem_pc) {
+          v_p <- X[, pc_idx[rp]]
+          hit_r <- any(vapply(dis_aux_cols, function(ac) {
+            va <- suppressWarnings(as.numeric(aux_df[[ac]]))
+            ok <- is.finite(v_p) & is.finite(va)
+            if (sum(ok) >= 8L && stats::sd(v_p[ok]) > 1e-8 && stats::sd(va[ok]) > 1e-8) {
+              abs(suppressWarnings(stats::cor(v_p[ok], va[ok]))) >= 0.25
+            } else FALSE
+          }, logical(1)))
+          if (isTRUE(hit_r)) rescued <- c(rescued, rp)
+        }
+      }
+      if (!is.null(g_fac)) {
+        p_rem <- vapply(rem_pc, function(rp) {
+          v_p <- X[, pc_idx[rp]]
+          ok <- is.finite(v_p) & !is.na(g_fac)
+          if (sum(ok) < 8L || nlevels(droplevels(g_fac[ok])) < 2L) return(1.0)
+          pv <- tryCatch(summary(stats::aov(v_p[ok] ~ droplevels(g_fac[ok])))[[1]][["Pr(>F)"]][1L], error = function(e) 1.0)
+          if (is.finite(pv)) as.numeric(pv) else 1.0
+        }, numeric(1))
+        rescued <- union(rescued, rem_pc[stats::p.adjust(p_rem, method = "BH") < 0.01])
+      }
+      if (length(rescued) > 0L) keep_pc <- sort(unique(c(keep_pc, rescued)))
+    }
     if (length(keep_pc) < min_p) keep_pc <- seq_len(min(min_p, k_m))
-    X <- X[, c(pc_idx[keep_pc], setdiff(seq_len(M), pc_idx)), drop = FALSE]
+    kept_pc_cols <- pc_idx[keep_pc]
   }
-  valid_g <- if (!is.null(group_vec)) stats::na.omit(as.character(group_vec)) else character(0)
-  valid_g <- valid_g[nzchar(valid_g) & !(valid_g %in% c("Unassigned_Packera", "Unknown"))]
-  g_tab <- table(valid_g); g_tab_multi <- g_tab[g_tab >= 2L]
-  N_min <- if (length(g_tab_multi) >= 2L) min(as.integer(g_tab_multi)) else N
-  P_max <- if (N_min >= 6L) max(min_p, floor(N_min / 3)) else ncol(X)
-  if (!is.null(max_p) && length(max_p) == 1L && is.finite(as.numeric(max_p)) && as.numeric(max_p) >= 1) {
-    P_max <- min(P_max, as.integer(max_p))
+
+  cand_idx <- c(kept_pc_cols, non_pc_idx)
+  if (length(cand_idx) <= P_max) return(colnames(X)[cand_idx])
+  if (!is.null(g_fac)) {
+    core_n <- min(length(kept_pc_cols), min(2L, P_max))
+    core_idx <- if (core_n > 0L) kept_pc_cols[seq_len(core_n)] else integer(0)
+    pool_idx <- setdiff(cand_idx, core_idx)
+    if (length(pool_idx) > 0L && length(core_idx) < P_max) {
+      f_pool <- vapply(pool_idx, function(ci) {
+        v_c <- X[, ci]; ok <- is.finite(v_c) & !is.na(g_fac)
+        if (sum(ok) < 6L || nlevels(droplevels(g_fac[ok])) < 2L) return(0.0)
+        fv <- tryCatch(summary(stats::aov(v_c[ok] ~ droplevels(g_fac[ok])))[[1]][["F value"]][1L], error = function(e) 0.0)
+        if (is.finite(fv)) as.numeric(fv) else 0.0
+      }, numeric(1))
+      pick_pool <- pool_idx[order(f_pool, decreasing = TRUE)][seq_len(min(length(pool_idx), P_max - length(core_idx)))]
+      # Preserve original column order among selected features
+      final_idx <- cand_idx[cand_idx %in% c(core_idx, pick_pool)]
+      return(colnames(X)[final_idx])
+    }
   }
-  colnames(X)[seq_len(min(ncol(X), P_max))]
+  colnames(X)[cand_idx[seq_len(P_max)]]
+}
+
+select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL, aux_df = NULL) {
+  .select_morphometric_subspace_core(X, group_vec = group_vec, min_p = min_p, max_p = max_p, aux_df = aux_df)
 }
 
 .prepare_anchor_feature_matrix <- function(df, feature_matrix = NULL, max_p = NULL, group_vec = NULL) {
@@ -301,28 +371,64 @@ select_adaptive_reference_anchors <- function(
     NULL
   }
 
+  q25_v <- if ("q25_solidity" %in% names(df)) suppressWarnings(as.numeric(df$q25_solidity)) else rep(NA_real_, n)
+  sol_v <- if ("solidity" %in% names(df)) suppressWarnings(as.numeric(df$solidity)) else rep(NA_real_, n)
+  dlf_v <- if ("dissected_leaf_fraction" %in% names(df)) suppressWarnings(as.numeric(df$dissected_leaf_fraction)) else rep(NA_real_, n)
+  dis_b <- if ("is_dissected" %in% names(df)) (!is.na(df$is_dissected) & as.logical(df$is_dissected)) else rep(FALSE, n)
+  eff_sol <- ifelse(is.finite(q25_v), q25_v, sol_v)
+  is_dis_mode <- (is.finite(eff_sol) & eff_sol < 0.72) | (is.finite(dlf_v) & dlf_v >= 0.50) | (!is.finite(eff_sol) & dis_b)
+
   unique_taxa <- unique(taxa_vec[valid_pool])
   for (tx in unique_taxa) {
     idx_gs <- which(is_gs & (taxa_vec == tx))
 
     # Step 1: Within-taxon robust MCD / medoid Mahalanobis pruning of Gold + Silver (chi-sq_0.95, p)
+    # Heteroblasty-aware: when a taxon has >= 3 entire AND >= 3 dissected Gold+Silver anchors,
+    # screen each biological sub-mode around its own sub-mode medoid so unimodal MCD never wipes out the minor leaf-form mode.
     if (!is.null(X_use) && length(idx_gs) >= 5L) {
       p_use <- min(ncol(X_use), length(idx_gs) - 2L)
       if (p_use >= 1L) {
-        X_gs <- X_use[idx_gs, seq_len(p_use), drop = FALSE]
-        v_ok <- apply(X_gs, 2, stats::var, na.rm = TRUE) > 1e-10
+        X_gs_raw <- X_use[idx_gs, seq_len(p_use), drop = FALSE]
+        v_ok <- apply(X_gs_raw, 2, stats::var, na.rm = TRUE) > 1e-10
         if (any(v_ok)) {
-          X_gs <- X_gs[, v_ok, drop = FALSE]
+          col_sub <- which(v_ok)
+          X_gs <- X_gs_raw[, col_sub, drop = FALSE]
           p_eff <- ncol(X_gs)
-          rob_gs <- NULL; q_mcd <- nrow(X_gs)
-          if (nrow(X_gs) >= 15L && requireNamespace("MASS", quietly = TRUE)) {
-            q_mcd <- min(nrow(X_gs) - 1L, max(floor(0.80 * nrow(X_gs)), floor((nrow(X_gs) + p_eff + 1L) / 2L)))
-            rob_gs <- tryCatch(MASS::cov.rob(X_gs, method = "mcd", quantile.used = q_mcd), error = function(e) NULL)
+          gs_dis_pos <- which(is_dis_mode[idx_gs])
+          gs_ent_pos <- which(!is_dis_mode[idx_gs])
+          if (length(gs_dis_pos) >= 3L && length(gs_ent_pos) >= 3L) {
+            drop_gs <- rep(FALSE, nrow(X_gs))
+            S_sub_pool <- if (!is.null(S_pool)) S_pool[col_sub, col_sub, drop = FALSE] else (stats::cov(X_gs) + diag(1e-4, nrow = p_eff, ncol = p_eff))
+            for (pos_m in list(gs_ent_pos, gs_dis_pos)) {
+              Xm <- X_gs[pos_m, , drop = FALSE]
+              rob_m <- NULL; q_m <- nrow(Xm)
+              if (nrow(Xm) >= max(12L, p_eff + 4L) && requireNamespace("MASS", quietly = TRUE)) {
+                q_m <- min(nrow(Xm) - 1L, max(floor(0.80 * nrow(Xm)), floor((nrow(Xm) + p_eff + 1L) / 2L)))
+                rob_m <- tryCatch(MASS::cov.rob(Xm, method = "mcd", quantile.used = q_m), error = function(e) NULL)
+              }
+              cent_m <- if (!is.null(rob_m)) rob_m$center else .compute_robust_taxon_medoid(Xm)
+              cov_m <- if (!is.null(rob_m)) {
+                .mcd_consistency_factor(q_m / nrow(Xm), p_eff) * rob_m$cov + diag(1e-5, nrow = p_eff, ncol = p_eff)
+              } else if (nrow(Xm) >= (p_eff + 3L)) {
+                0.65 * stats::cov(Xm) + 0.35 * S_sub_pool + diag(1e-5, nrow = p_eff, ncol = p_eff)
+              } else {
+                S_sub_pool + diag(1e-4, nrow = p_eff, ncol = p_eff)
+              }
+              d2_m <- tryCatch(stats::mahalanobis(Xm, center = cent_m, cov = cov_m), error = function(e) rep(0.0, nrow(Xm)))
+              dr_m <- is.finite(d2_m) & (d2_m > stats::qchisq(mahal_q_gold_silver, df = p_eff))
+              if (any(dr_m) && sum(!dr_m) >= 2L) drop_gs[pos_m[dr_m]] <- TRUE
+            }
+          } else {
+            rob_gs <- NULL; q_mcd <- nrow(X_gs)
+            if (nrow(X_gs) >= 15L && requireNamespace("MASS", quietly = TRUE)) {
+              q_mcd <- min(nrow(X_gs) - 1L, max(floor(0.80 * nrow(X_gs)), floor((nrow(X_gs) + p_eff + 1L) / 2L)))
+              rob_gs <- tryCatch(MASS::cov.rob(X_gs, method = "mcd", quantile.used = q_mcd), error = function(e) NULL)
+            }
+            center_gs <- if (!is.null(rob_gs)) rob_gs$center else .compute_robust_taxon_medoid(X_gs)
+            cov_gs <- if (!is.null(rob_gs)) (.mcd_consistency_factor(q_mcd / nrow(X_gs), p_eff) * rob_gs$cov + diag(1e-5, nrow = p_eff, ncol = p_eff)) else (stats::cov(X_gs) + diag(1e-4, nrow = p_eff, ncol = p_eff))
+            d2_gs <- tryCatch(stats::mahalanobis(X_gs, center = center_gs, cov = cov_gs), error = function(e) rep(0.0, nrow(X_gs)))
+            drop_gs <- is.finite(d2_gs) & (d2_gs > stats::qchisq(mahal_q_gold_silver, df = p_eff))
           }
-          center_gs <- if (!is.null(rob_gs)) rob_gs$center else .compute_robust_taxon_medoid(X_gs)
-          cov_gs <- if (!is.null(rob_gs)) (.mcd_consistency_factor(q_mcd / nrow(X_gs), p_eff) * rob_gs$cov + diag(1e-5, nrow = p_eff, ncol = p_eff)) else (stats::cov(X_gs) + diag(1e-4, nrow = p_eff, ncol = p_eff))
-          d2_gs <- tryCatch(stats::mahalanobis(X_gs, center = center_gs, cov = cov_gs), error = function(e) rep(0.0, nrow(X_gs)))
-          drop_gs <- is.finite(d2_gs) & (d2_gs > stats::qchisq(mahal_q_gold_silver, df = p_eff))
           if (any(drop_gs) && sum(!drop_gs) >= 3L) {
             pruned_ids <- idx_gs[drop_gs]
             is_gs[pruned_ids] <- FALSE
@@ -350,7 +456,8 @@ select_adaptive_reference_anchors <- function(
           is_promoted_bronze[promo_ids] <- TRUE
         } else {
           p_eff <- ncol(X_use)
-          X_ref <- if (n_gs >= 1L) X_use[idx_gs_clean, , drop = FALSE] else X_use[idx_br, , drop = FALSE]
+          ref_ids <- if (n_gs >= 1L) idx_gs_clean else idx_br
+          X_ref <- X_use[ref_ids, , drop = FALSE]
           medoid_tx <- .compute_robust_taxon_medoid(X_ref, S_inv = S_pool_inv)
           base_cov_tx <- if (n_gs >= (p_eff + 3L)) {
             0.75 * stats::cov(X_use[idx_gs_clean, , drop = FALSE]) + 0.25 * S_pool + diag(1e-5, nrow = p_eff, ncol = p_eff)
@@ -365,6 +472,15 @@ select_adaptive_reference_anchors <- function(
             stats::mahalanobis(X_use[idx_br, , drop = FALSE], center = medoid_tx, cov = cov_tx),
             error = function(e) rowSums(sweep(X_use[idx_br, , drop = FALSE], 2, medoid_tx, "-")^2)
           )
+          ref_dis <- ref_ids[is_dis_mode[ref_ids]]
+          ref_ent <- ref_ids[!is_dis_mode[ref_ids]]
+          if (length(ref_dis) >= 2L && length(ref_ent) >= 2L) {
+            med_dis <- .compute_robust_taxon_medoid(X_use[ref_dis, , drop = FALSE], S_inv = S_pool_inv)
+            med_ent <- .compute_robust_taxon_medoid(X_use[ref_ent, , drop = FALSE], S_inv = S_pool_inv)
+            d2_dis <- tryCatch(stats::mahalanobis(X_use[idx_br, , drop = FALSE], center = med_dis, cov = cov_tx), error = function(e) d2_br)
+            d2_ent <- tryCatch(stats::mahalanobis(X_use[idx_br, , drop = FALSE], center = med_ent, cov = cov_tx), error = function(e) d2_br)
+            d2_br <- pmin(d2_br, d2_dis, d2_ent, na.rm = TRUE)
+          }
           ord_br <- order(d2_br, na.last = NA)
           q80_thr <- stats::qchisq(mahal_q_bronze_promo, df = p_eff)
           elig_ord <- ord_br[d2_br[ord_br] <= q80_thr]

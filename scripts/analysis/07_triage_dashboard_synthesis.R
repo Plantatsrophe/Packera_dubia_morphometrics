@@ -710,7 +710,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   raw_pc_cand <- .sort_numbered_pc_cols(grep("^PC[0-9]+$", names(df), value = TRUE), "PC")
   raw_pc_cand <- raw_pc_cand[vapply(raw_pc_cand, function(cc) sum(is.finite(suppressWarnings(as.numeric(df[[cc]])))) >= 2L, logical(1))]
   pc_cand <- if (length(sel_mc) >= 2L) utils::head(sel_mc, max_mc_p) else if (length(sym_cand) >= 2L) utils::head(sym_cand, max_mc_p) else utils::head(c(raw_pc_cand, sym_cand), max_mc_p)
-  morph_coord_cols <- if (length(can_cand) >= 2L) can_cand else if (length(pc_cand) >= 1L) pc_cand else can_cand
+  morph_coord_cols <- if (length(active_taxa) > 4L && length(pc_cand) >= 2L) pc_cand else if (length(can_cand) >= 2L) can_cand else if (length(pc_cand) >= 1L) pc_cand else can_cand
 
   morph_X <- NULL; morph_centroids <- NULL; morph_S_inv <- NULL
   if (length(morph_coord_cols) >= 1L && length(active_taxa) >= 2L) {
@@ -877,7 +877,11 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     single_borderline_div <- ((as.integer(morph_div_i) + as.integer(vis_div_i)) == 1L) &&
                              (is.null(morph_sp) || morph_sp == given_sp || is.na(cda_prob) || cda_prob < cda_cut) &&
                              (!vis_trusted_i || is.null(vis_sp) || vis_sp == given_sp || eff_c_err < vis_cut)
-    is_late_foliar_wear <- has_obs_doy_i && (doy >= sp_q75_doy) && (g_cl == 1L) && !eff_is_corrupt && single_borderline_div
+    dlf_i <- if ("dissected_leaf_fraction" %in% names(df)) suppressWarnings(as.numeric(df$dissected_leaf_fraction[i])) else NA_real_
+    asym_i <- if ("pct_asymmetry" %in% names(df)) suppressWarnings(as.numeric(df$pct_asymmetry[i])) else NA_real_
+    is_sym_dissected_i <- ((is.finite(dlf_i) && dlf_i > 0.0) || ("is_dissected" %in% names(df) && isTRUE(as.logical(df$is_dissected[i])))) &&
+                          !(is.finite(asym_i) && asym_i > 0.22)
+    is_late_foliar_wear <- has_obs_doy_i && (doy >= sp_q75_doy) && (g_cl == 1L) && !eff_is_corrupt && single_borderline_div && !is_sym_dissected_i
     is_taphonomic_plasticity <- (triage_cat != "Severe_Triple_Stream_Conflict" || !vis_trusted_i) &&
                                 !both_alt_agree && !morph_edaph_alt_agree && !vis_edaph_alt_agree &&
                                 in_edaphic_envelope && (has_tomentum_shift || is_late_foliar_wear)

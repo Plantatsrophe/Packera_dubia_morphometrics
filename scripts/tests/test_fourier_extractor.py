@@ -520,6 +520,124 @@ class TestFourierExtractor(unittest.TestCase):
             self.assertIn("PC6", spec_df.columns)
             self.assertIn("Sym_PC6", spec_df.columns)
 
+    def test_basal_positional_gate_lowest_lamina_fallback_ribbon_filter_and_otu_medians(self):
+        """Verify basal positional homology filter, lowest-lamina fallback, curved ribbon rejection, and OTU median/q25 dissection summaries."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
+
+        def write_xy_csv(path: Path, cat: str, lid: int, xy: np.ndarray):
+            pd.DataFrame({
+                "catalogNumber": cat,
+                "leaf_id": lid,
+                "point_index": np.arange(len(xy)),
+                "x": xy[:, 0] + 250.0,
+                "y": xy[:, 1] + 250.0,
+            }).to_csv(path, index=False)
+
+        entire_xy = np.column_stack([85.0 * np.cos(t), 52.0 * np.sin(t)])
+        u_t = np.cos(t)
+        lobe_env = (0.25 + 0.75 * ((u_t + 1.0) / 2.0) ** 0.6) * (0.35 + 0.65 * np.abs(np.sin(4.5 * np.pi * (u_t + 1.0) / 2.0)))
+        pinn_xy = np.column_stack([100.0 * u_t, 42.0 * np.sin(t) * lobe_env])
+
+        s_arc = np.linspace(-1.1, 1.1, 60)
+        cx_arc = 120.0 * np.sin(s_arc)
+        cy_arc = 120.0 * (1.0 - np.cos(s_arc))
+        nx_arc, ny_arc = -np.sin(s_arc), np.cos(s_arc)
+        rib_xy = np.vstack([
+            np.column_stack([cx_arc + 2.2 * nx_arc, cy_arc + 2.2 * ny_arc]),
+            np.column_stack([(cx_arc - 2.2 * nx_arc)[::-1], (cy_arc - 2.2 * ny_arc)[::-1]]),
+        ])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            contours_dir = tmp_p / "contours"
+            contours_dir.mkdir(parents=True, exist_ok=True)
+            vouchers_csv = tmp_p / "curated_vouchers.csv"
+            manifest_csv = tmp_p / "extracted_leaf_manifest.csv"
+
+            vouchers = [
+                {"catalogNumber": "V_MIX", "taxon": "Packera paupercula", "scientificName": "Packera paupercula", "species_raw": "Packera paupercula", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "V_DET", "taxon": "Packera paupercula", "scientificName": "Packera paupercula", "species_raw": "Packera paupercula", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "V_REF1", "taxon": "Packera obovata", "scientificName": "Packera obovata", "species_raw": "Packera obovata", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "V_REF2", "taxon": "Packera obovata", "scientificName": "Packera obovata", "species_raw": "Packera obovata", "determiner_tier": "Tier_1_Gold"},
+            ]
+            pd.DataFrame(vouchers).to_csv(vouchers_csv, index=False)
+
+            leaf_specs = [
+                # V_MIX: leaf 1 is upper cauline (cy=0.18 -> excluded); leaf 2 entire basal; leaves 3-4 pinnatifid basal; leaf 5 curved ribbon (excluded)
+                ("V_MIX", 1, entire_xy, 0.18, 0.94, False),
+                ("V_MIX", 2, entire_xy, 0.72, 0.92, False),
+                ("V_MIX", 3, pinn_xy, 0.78, 0.44, True),
+                ("V_MIX", 4, pinn_xy * 1.03, 0.82, 0.46, True),
+                ("V_MIX", 5, rib_xy, 0.85, 0.10, True),
+                # V_DET: top-mounted detached rosette (all cy < 0.40, rescued by max - 0.15 fallback)
+                ("V_DET", 1, entire_xy * 0.98, 0.22, 0.91, False),
+                ("V_DET", 2, pinn_xy * 0.97, 0.31, 0.45, True),
+                # Reference vouchers
+                ("V_REF1", 1, entire_xy * 1.02, 0.76, 0.93, False),
+                ("V_REF2", 1, entire_xy * 0.96, 0.79, 0.92, False),
+            ]
+            manifest_rows = []
+            for cat, lid, xy_arr, cy_p, sol_v, is_diss in leaf_specs:
+                cpath = contours_dir / f"{cat}_leaf{lid}.csv"
+                write_xy_csv(cpath, cat, lid, xy_arr)
+                manifest_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "leaf_id": lid,
+                    "assigned_tier": "Tier_1_Direct",
+                    "pixels_per_mm": 10.0,
+                    "is_calibrated_mm": True,
+                    "solidity": sol_v,
+                    "ucs_score": 0.93,
+                    "is_dissected": is_diss,
+                    "cy_rel_plant_bbox": cy_p,
+                    "cy_rel_sheet": cy_p,
+                    "blade_area_cm2": 2.0,
+                    "effective_min_blade_area_cm2": 0.4,
+                    "contour_path": str(cpath),
+                })
+            pd.DataFrame(manifest_rows).to_csv(manifest_csv, index=False)
+
+            out_spec = tmp_p / "leaf_efa_harmonics.csv"
+            out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--contours-dir", str(contours_dir),
+                    "--masks-dir", str(tmp_p / "masks"),
+                    "--vouchers", str(vouchers_csv),
+                    "--manifest", str(manifest_csv),
+                    "--output", str(out_spec),
+                    "--output-individual", str(out_ind),
+                    "--report-out", str(tmp_p / "tier_rep.csv"),
+                    "--plot-out", str(tmp_p / "tier_fig.pdf"),
+                    "--permutations", "19",
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 03 basal/dissection test failed:\n{proc.stderr}\n{proc.stdout}")
+            ind_df = pd.read_csv(out_ind)
+            spec_df = pd.read_csv(out_spec)
+
+            vmix_lids = sorted(ind_df.loc[ind_df["catalogNumber"] == "V_MIX", "leaf_id"].astype(int).tolist())
+            self.assertEqual(vmix_lids, [2, 3, 4], f"Expected cauline leaf 1 and ribbon leaf 5 excluded, got {vmix_lids}")
+            vdet_lids = sorted(ind_df.loc[ind_df["catalogNumber"] == "V_DET", "leaf_id"].astype(int).tolist())
+            self.assertEqual(vdet_lids, [1, 2], f"Expected detached rosette leaves rescued by fallback, got {vdet_lids}")
+
+            vmix_otu = spec_df.loc[spec_df["catalogNumber"] == "V_MIX"].iloc[0]
+            self.assertEqual(int(vmix_otu["basal_leaf_count"]), 3)
+            # True median of [0.92, 0.44, 0.46] is 0.46 (NOT first-leaf 0.92)
+            self.assertAlmostEqual(float(vmix_otu["solidity"]), 0.46, places=2)
+            self.assertLess(float(vmix_otu["q25_solidity"]), 0.50)
+            self.assertAlmostEqual(float(vmix_otu["dissected_leaf_fraction"]), 2.0 / 3.0, places=3)
+            self.assertGreater(float(vmix_otu["dissection_index"]), 1.35)
+
 
 if __name__ == "__main__":
     unittest.main()

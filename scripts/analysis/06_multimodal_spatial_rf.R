@@ -4397,6 +4397,7 @@ main <- function() {
       "is_outlier", "morphometric_outlier_flag", "misidentification_flag",
       "can1", "can2", "can3", dyn_pc_cols,
       "efd_harmonic_opt", "efd_k95_pcs", "selected_morph_features",
+      "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "basal_leaf_count", "heteroblasty_index", "is_dissected",
       "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
       "plant_height_mm", "plant_height_cm", "scape_to_basal_leaf_ratio", "is_bent_stem",
       "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv",

@@ -1271,6 +1271,102 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertIn("p_value_bh", batch_df.columns)
             self.assertTrue(inst_rows["p_value_bh"].notna().all())
 
+    def test_dissection_collinearity_pruning_lobing_pc_rescue_bimodal_anchors_and_fast_permanova(self):
+        """Verify |r|<0.75 scalar pruning, PC3+ lobing rescue, bimodal heteroblastic anchor preservation, and fast PERMANOVA exactness."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        r_code = """
+        options(rgl.useNULL = TRUE)
+        source("scripts/morphometrics/04_gmm_morphotools.R")
+        set.seed(123)
+
+        # 1. |r| < 0.75 collinearity pruning on active anchors
+        n <- 60
+        s <- runif(n, 0.35, 0.95)
+        df_sc <- data.frame(
+          solidity_std = as.numeric(scale(s)),
+          q25_solidity_std = as.numeric(scale(s + rnorm(n, 0, 0.02))),
+          dissection_index_std = as.numeric(scale(1 / sqrt(s) + rnorm(n, 0, 0.35))),
+          heteroblasty_index_std = as.numeric(scale(rnorm(n)))
+        )
+        kept_sc <- prune_collinear_dissection_scalars(
+          df_sc,
+          base_cols = character(0),
+          cand_scalars = c("solidity_std", "q25_solidity_std", "dissection_index_std", "heteroblasty_index_std"),
+          active_mask = rep(TRUE, n),
+          group_vec = rep(c("SpA", "SpB"), each = 30),
+          max_r = 0.75
+        )
+        stopifnot(!all(c("solidity_std", "q25_solidity_std") %in% kept_sc))
+        stopifnot("heteroblasty_index_std" %in% kept_sc)
+
+        # 2. Subspace rescue of lobing PC4 within floor(N_min / 3)
+        n_sub <- 72
+        tx <- rep(c("Packera anonyma", "Packera dubia", "Packera obovata"), each = 24)
+        lobing_sig <- ifelse(tx == "Packera anonyma", 1.8, -0.9) + rnorm(n_sub, 0, 0.35)
+        pc_mat <- cbind(
+          PC1 = rnorm(n_sub, 0, 4.0),
+          PC2 = rnorm(n_sub, 0, 3.0),
+          PC3 = rnorm(n_sub, 0, 0.55),
+          PC4 = 0.35 * lobing_sig,
+          PC5 = rnorm(n_sub, 0, 0.25)
+        )
+        aux_df <- data.frame(
+          dissection_index = 1.6 + 0.4 * lobing_sig,
+          solidity = 0.75 - 0.12 * lobing_sig
+        )
+        sel_pcs <- select_morphometric_subspace(
+          pc_mat,
+          group_vec = tx,
+          aux_df = aux_df
+        )
+        stopifnot("PC4" %in% sel_pcs)
+        stopifnot(length(sel_pcs) <= floor(24 / 3))
+
+        # 3. Heteroblasty-aware bimodal Gold+Silver anchor preservation
+        df_bi <- rbind(
+          data.frame(
+            catalogNumber = paste0("E", 1:26), plant_individual_id = 0L,
+            species_standardized = "Packera paupercula", determiner_tier = "Tier_1_Gold",
+            morph_tier_source = "Tier_1_Pure", solidity = rnorm(26, 0.90, 0.02),
+            q25_solidity = rnorm(26, 0.88, 0.02),
+            PC1 = rnorm(26, -1.4, 0.2), PC2 = rnorm(26, 0.3, 0.2), PC3 = rnorm(26, -0.4, 0.15)
+          ),
+          data.frame(
+            catalogNumber = paste0("D", 1:6), plant_individual_id = 0L,
+            species_standardized = "Packera paupercula", determiner_tier = "Tier_1_Gold",
+            morph_tier_source = "Tier_1_Pure", solidity = rnorm(6, 0.46, 0.03),
+            q25_solidity = rnorm(6, 0.42, 0.03),
+            PC1 = rnorm(6, 2.9, 0.2), PC2 = rnorm(6, -1.5, 0.2), PC3 = rnorm(6, 3.1, 0.2)
+          )
+        )
+        anc_res <- select_adaptive_reference_anchors(
+          df_bi,
+          feature_matrix = as.matrix(df_bi[, c("PC1", "PC2", "PC3")]),
+          taxon_col = "species_standardized"
+        )
+        stopifnot(sum(anc_res$active_mask[27:32]) >= 5L)
+
+        # 4. Exact equivalence of O(N*P) fast_euclidean_permanova_trace vs vegan::adonis2
+        Xp <- matrix(rnorm(90 * 4), nrow = 90, ncol = 4)
+        gp <- factor(rep(c("E1", "E2", "E3"), each = 30))
+        Xp[31:60, 1] <- Xp[31:60, 1] + 1.4
+        fp <- fast_euclidean_permanova_trace(Xp, gp, permutations = 99L, seed = 7L)
+        vp <- vegan::adonis2(Xp ~ gp, permutations = 99L, method = "euclidean")
+        stopifnot(abs(fp$R2 - vp$R2[1]) < 1e-8)
+        stopifnot(abs(fp$F - vp$F[1]) < 1e-8)
+        cat("STEP04_DISSECTION_HELPERS_OK\\n")
+        """
+        proc = subprocess.run(
+            ["Rscript", "-e", r_code],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, f"Step 04 dissection R helper test failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("STEP04_DISSECTION_HELPERS_OK", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

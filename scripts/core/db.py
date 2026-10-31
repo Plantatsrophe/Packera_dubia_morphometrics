@@ -533,6 +533,10 @@ def _build_master_view_ddl() -> str:
         -- Step 03 & Step 04 OTU Morphometrics & CDA
         om.assigned_tier AS assigned_tier,
         om.solidity AS solidity,
+        om.dissection_index AS dissection_index,
+        om.q25_solidity AS q25_solidity,
+        om.dissected_leaf_fraction AS dissected_leaf_fraction,
+        om.basal_leaf_count AS basal_leaf_count,
         om.ucs_score AS ucs_score,
         om.aspect_ratio AS aspect_ratio,
         om.area_px AS area_px,
@@ -947,6 +951,7 @@ def _build_schema_ddl() -> str:
         leaf_id INTEGER NOT NULL,
         assigned_tier TEXT,
         solidity REAL,
+        dissection_index REAL,
         ucs_score REAL,
         aspect_ratio REAL,
         area_px REAL,
@@ -986,6 +991,10 @@ def _build_schema_ddl() -> str:
         pixels_per_mm REAL,
         is_calibrated_mm INTEGER,
         solidity REAL,
+        dissection_index REAL,
+        q25_solidity REAL,
+        dissected_leaf_fraction REAL,
+        basal_leaf_count INTEGER,
         ucs_score REAL,
         aspect_ratio REAL,
         area_px REAL,
@@ -1154,6 +1163,7 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             *((sp, "REAL") for sp in SYM_PC_COLS),
             ("efd_harmonic_opt", "INTEGER"),
             ("efd_k95_pcs", "INTEGER"),
+            ("dissection_index", "REAL"),
         ]
     ),
     "otu_morphometrics": tuple(
@@ -1164,6 +1174,10 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("efd_harmonic_opt", "INTEGER"),
             ("efd_k95_pcs", "INTEGER"),
             ("selected_morph_features", "TEXT"),
+            ("dissection_index", "REAL"),
+            ("q25_solidity", "REAL"),
+            ("dissected_leaf_fraction", "REAL"),
+            ("basal_leaf_count", "INTEGER"),
         ]
     ),
     "spatial_rf_predictions": tuple(

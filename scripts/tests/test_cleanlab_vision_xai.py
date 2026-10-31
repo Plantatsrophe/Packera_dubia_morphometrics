@@ -1246,6 +1246,136 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         self.assertTrue(bool(abax_audit.loc["ABAX_TRUE_MISID", "is_label_corrupted"]))
         self.assertTrue(bool(abax_audit.loc["ABAX_TRUE_MISID", "is_label_issue"]))
 
+    def test_basal_manifest_filter_dissection_neutral_weights_and_narrow_pinna_pooling(self):
+        """Verify basal manifest filtering + lowest-lamina fallback, dissection-neutral leaf weights, and narrow-pinna ViT token pooling."""
+        from scripts.analysis.vision_dissection_utils import (
+            compute_dissection_neutral_leaf_weight,
+            filter_basal_manifest_rows_py,
+        )
+
+        # 1. Dissection-neutral quality weighting: dissected and entire leaves with equal UCS get identical weights
+        w_diss, sol_diss = compute_dissection_neutral_leaf_weight({"solidity": 0.36, "ucs_score": 0.92})
+        w_ent, sol_ent = compute_dissection_neutral_leaf_weight({"solidity": 0.94, "ucs_score": 0.92})
+        self.assertAlmostEqual(w_diss, w_ent, places=6)
+        self.assertAlmostEqual(sol_diss, 0.36, places=4)
+        self.assertAlmostEqual(sol_ent, 0.94, places=4)
+
+        # 2. Positional basal gate + detached-rosette fallback + disk-glob cauline leak prevention
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            rosette_dir = tmp_path / "cropped_patches"
+            leaves_dir = rosette_dir / "leaves_tier1_2"
+            masks_dir = tmp_path / "masks"
+            leaves_dir.mkdir(parents=True)
+            masks_dir.mkdir(parents=True)
+
+            # Create leaf crops on disk: CAT_BASAL has leaf1 (cauline, cy=0.15) and leaf2 (basal, cy=0.78)
+            # CAT_FALLBACK has leaf1 (cy=0.24) and leaf2 (cy=0.32) -> rescued by max - 0.15 fallback
+            for cat, lid in [("CAT_BASAL", 1), ("CAT_BASAL", 2), ("CAT_FALLBACK", 1), ("CAT_FALLBACK", 2)]:
+                img_p = leaves_dir / f"{cat}_p0_leaf{lid}.png"
+                msk_p = masks_dir / f"{cat}_p0_leaf{lid}_mask.png"
+                Image.new("RGB", (224, 224), color=(60, 110, 50)).save(img_p)
+                Image.new("L", (224, 224), color=255).save(msk_p)
+
+            manifest_df = pd.DataFrame([
+                {
+                    "catalogNumber": "CAT_BASAL", "plant_individual_id": 0, "leaf_id": 1,
+                    "assigned_tier": "Tier_1_Direct", "solidity": 0.92, "circularity": 0.65,
+                    "ucs_score": 0.90, "cy_rel_plant_bbox": 0.15, "blade_area_cm2": 1.8,
+                    "effective_min_blade_area_cm2": 0.4,
+                    "leaf_crop_path": str(leaves_dir / "CAT_BASAL_p0_leaf1.png"),
+                    "mask_path": str(masks_dir / "CAT_BASAL_p0_leaf1_mask.png"),
+                },
+                {
+                    "catalogNumber": "CAT_BASAL", "plant_individual_id": 0, "leaf_id": 2,
+                    "assigned_tier": "Tier_1_Direct", "solidity": 0.42, "circularity": 0.14,
+                    "ucs_score": 0.91, "cy_rel_plant_bbox": 0.78, "blade_area_cm2": 2.1,
+                    "effective_min_blade_area_cm2": 0.4,
+                    "leaf_crop_path": str(leaves_dir / "CAT_BASAL_p0_leaf2.png"),
+                    "mask_path": str(masks_dir / "CAT_BASAL_p0_leaf2_mask.png"),
+                },
+                {
+                    "catalogNumber": "CAT_FALLBACK", "plant_individual_id": 0, "leaf_id": 1,
+                    "assigned_tier": "Tier_1_Direct", "solidity": 0.48, "circularity": 0.16,
+                    "ucs_score": 0.89, "cy_rel_plant_bbox": 0.24, "blade_area_cm2": 1.6,
+                    "effective_min_blade_area_cm2": 0.4,
+                    "leaf_crop_path": str(leaves_dir / "CAT_FALLBACK_p0_leaf1.png"),
+                    "mask_path": str(masks_dir / "CAT_FALLBACK_p0_leaf1_mask.png"),
+                },
+                {
+                    "catalogNumber": "CAT_FALLBACK", "plant_individual_id": 0, "leaf_id": 2,
+                    "assigned_tier": "Tier_1_Direct", "solidity": 0.88, "circularity": 0.58,
+                    "ucs_score": 0.92, "cy_rel_plant_bbox": 0.32, "blade_area_cm2": 1.9,
+                    "effective_min_blade_area_cm2": 0.4,
+                    "leaf_crop_path": str(leaves_dir / "CAT_FALLBACK_p0_leaf2.png"),
+                    "mask_path": str(masks_dir / "CAT_FALLBACK_p0_leaf2_mask.png"),
+                },
+            ])
+            filt_df = filter_basal_manifest_rows_py(manifest_df, tier_col="assigned_tier")
+            self.assertEqual(len(filt_df), 3)
+            self.assertEqual(
+                set(zip(filt_df["catalogNumber"].tolist(), filt_df["leaf_id"].astype(int).tolist())),
+                {("CAT_BASAL", 2), ("CAT_FALLBACK", 1), ("CAT_FALLBACK", 2)},
+            )
+
+            manifest_csv = tmp_path / "extracted_leaf_manifest.csv"
+            vouchers_csv = tmp_path / "curated_vouchers.csv"
+            manifest_df.to_csv(manifest_csv, index=False)
+            pd.DataFrame({
+                "catalogNumber": ["CAT_BASAL", "CAT_FALLBACK"],
+                "species_raw": [TEST_SPECIES[0], TEST_SPECIES[1]],
+                "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold"],
+                "institutionCode": ["NCU", "US"],
+            }).to_csv(vouchers_csv, index=False)
+
+            linked_df, _ = mod_xai.load_and_link_rosette_patches(
+                rosette_dir=rosette_dir,
+                vouchers_csv=vouchers_csv,
+                demo=False,
+                manifest_csv=manifest_csv,
+            )
+            basal_row = linked_df.loc[linked_df["catalogNumber"] == "CAT_BASAL"].iloc[0]
+            # Excluded cauline leaf1 on disk must NOT be re-ingested by disk glob fallback
+            self.assertEqual(int(basal_row["n_rosette_patches"]), 1)
+            self.assertIn("leaf2.png", basal_row["patch_paths"][0])
+            fb_row = linked_df.loc[linked_df["catalogNumber"] == "CAT_FALLBACK"].iloc[0]
+            self.assertEqual(int(fb_row["n_rosette_patches"]), 2)
+
+            # 3. Continuous area-weighted ViT token pooling for narrow dissected pinnae (0.05 <= patch_frac < 0.15)
+            import torch
+
+            class PinnaDINOv2(torch.nn.Module):
+                def forward_features(self, x: torch.Tensor):
+                    b = x.shape[0]
+                    pt = torch.zeros((b, 256, 768), dtype=torch.float32)
+                    # Patch (0, 0) has +10 in dim 0; all background patches have +10 in dim 1
+                    pt[:, 0, 0] = 10.0
+                    pt[:, 1:, 1] = 10.0
+                    return {"x_norm_patchtokens": pt, "x_norm_clstoken": torch.zeros((b, 768))}
+
+            narrow_img = tmp_path / "narrow_pinna.png"
+            narrow_msk = tmp_path / "narrow_pinna_mask.png"
+            Image.new("RGB", (224, 224), color=(80, 120, 70)).save(narrow_img)
+            # Put 20 foreground pixels inside top-left 14x14 patch -> patch_frac = 20/196 = 0.102 (< 0.15 old threshold, >= 0.05 new)
+            m_arr = np.zeros((224, 224), dtype=np.uint8)
+            m_arr[:2, :10] = 255
+            Image.fromarray(m_arr, mode="L").save(narrow_msk)
+
+            rec = [{
+                "catalogNumber": "CAT_PINNA",
+                "plant_individual_id": 0,
+                "label_idx": 0,
+                "patch_paths": [str(narrow_img)],
+                "mask_paths": [str(narrow_msk)],
+                "patch_weights": [1.0],
+            }]
+            with patch.object(mod_xai, "_load_dinov2_backbone", return_value=(PinnaDINOv2(), "cpu")), \
+                 patch.object(mod_xai, "resolve_db_path", return_value=tmp_path / "ephem.sqlite"):
+                emb, _, _ = extract_dinov2_embeddings(rec, demo=False)
+            # Foreground patch (0,0) must dominate dim 0 rather than falling back to background global average (dim 1)
+            self.assertGreater(float(emb[0, 0]), 0.95)
+            self.assertAlmostEqual(float(emb[0, 1]), 0.0, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()

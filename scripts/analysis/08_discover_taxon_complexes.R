@@ -440,7 +440,15 @@ evaluate_hierarchical_complex_delimitation <- function(morph_df, vis_df, pheno_r
 
   vis_pred <- sp_given; c_err <- rep(0.10, n)
   if (!is.null(vis_df) && nrow(vis_df) > 0L && "catalogNumber" %in% names(vis_df)) {
-    idx_v <- match(morph_df$catalogNumber, as.character(vis_df$catalogNumber))
+    if ("plant_individual_id" %in% names(morph_df) && "plant_individual_id" %in% names(vis_df)) {
+      m_pid <- ifelse(is.na(morph_df$plant_individual_id), 0L, suppressWarnings(as.integer(morph_df$plant_individual_id)))
+      v_pid <- ifelse(is.na(vis_df$plant_individual_id), 0L, suppressWarnings(as.integer(vis_df$plant_individual_id)))
+      idx_v <- match(paste0(trimws(as.character(morph_df$catalogNumber)), "__", m_pid), paste0(trimws(as.character(vis_df$catalogNumber)), "__", v_pid))
+      na_p0 <- is.na(idx_v) & (m_pid == 0L)
+      if (any(na_p0)) idx_v[na_p0] <- match(trimws(as.character(morph_df$catalogNumber[na_p0])), trimws(as.character(vis_df$catalogNumber)))
+    } else {
+      idx_v <- match(trimws(as.character(morph_df$catalogNumber)), trimws(as.character(vis_df$catalogNumber)))
+    }
     if ("vision_predicted_label" %in% names(vis_df)) {
       vp <- as.character(vis_df$vision_predicted_label)[idx_v]
       vis_pred[!is.na(vp) & nzchar(vp)] <- vp[!is.na(vp) & nzchar(vp)]

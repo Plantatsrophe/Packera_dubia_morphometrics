@@ -100,7 +100,7 @@ PACKERA_DB_WC_BIO_COLS <- c(
       stats::setNames(rep("REAL", length(PACKERA_DB_HARMONIC_COLS)), PACKERA_DB_HARMONIC_COLS),
       stats::setNames(rep("REAL", length(PACKERA_DB_PC_COLS)), PACKERA_DB_PC_COLS),
       stats::setNames(rep("REAL", length(PACKERA_DB_SYM_PC_COLS)), PACKERA_DB_SYM_PC_COLS),
-      c(efd_harmonic_opt = "INTEGER", efd_k95_pcs = "INTEGER")
+      c(efd_harmonic_opt = "INTEGER", efd_k95_pcs = "INTEGER", dissection_index = "REAL")
     ))
   }
   if (identical(table_name, "otu_morphometrics")) {
@@ -111,7 +111,11 @@ PACKERA_DB_WC_BIO_COLS <- c(
       c(
         efd_harmonic_opt = "INTEGER",
         efd_k95_pcs = "INTEGER",
-        selected_morph_features = "TEXT"
+        selected_morph_features = "TEXT",
+        dissection_index = "REAL",
+        q25_solidity = "REAL",
+        dissected_leaf_fraction = "REAL",
+        basal_leaf_count = "INTEGER"
       )
     ))
   }
@@ -549,7 +553,7 @@ fetch_step03_contours_from_db <- function(
     "  el.catalogNumber, el.plant_individual_id, el.leaf_id, el.shape_id, ",
     "  el.assigned_tier, COALESCE(el.tier_assignment, el.assigned_tier) AS tier_assignment, ",
     "  el.solidity, COALESCE(el.ucs_score, el.ucs) AS ucs_score, ",
-    "  el.aspect_ratio, el.area_px, el.is_dissected, ",
+    "  el.aspect_ratio, el.area_px, el.blade_area_cm2, el.is_dissected, ",
     "  COALESCE(el.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm, ",
     "  COALESCE(el.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm, ",
     "  COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm, ",
@@ -590,21 +594,44 @@ fetch_step03_contours_from_db <- function(
 
   if (is.null(rows) || nrow(rows) == 0L) return(NULL)
 
-  # If explicit manifest_path exists on disk with rows that are NOT yet in SQLite, defer to disk fallback
-  if (!is.null(manifest_path) && nzchar(manifest_path) && file.exists(manifest_path)) {
-    m_hdr <- tryCatch(readr::read_csv(manifest_path, show_col_types = FALSE, progress = FALSE), error = function(e) NULL)
+  # If explicit manifest_path exists on disk with rows that are NOT yet in SQLite, defer to disk fallback;
+  # otherwise build O(1) lookup tables for positional homology & cohort-adaptive blade area columns
+  eff_mpath <- if (!is.null(manifest_path) && nzchar(manifest_path) && file.exists(manifest_path)) {
+    manifest_path
+  } else if (!is.null(vouchers_path) && nzchar(vouchers_path) && file.exists(file.path(dirname(vouchers_path), "extracted_leaf_manifest.csv"))) {
+    file.path(dirname(vouchers_path), "extracted_leaf_manifest.csv")
+  } else {
+    ""
+  }
+  m_hdr <- NULL; m_idx_3k <- NULL; m_idx_2k <- NULL
+  if (nzchar(eff_mpath) && file.exists(eff_mpath)) {
+    m_hdr <- tryCatch(readr::read_csv(eff_mpath, show_col_types = FALSE, progress = FALSE), error = function(e) NULL)
     if (!is.null(m_hdr) && nrow(m_hdr) > 0L && "catalogNumber" %in% names(m_hdr)) {
-      disk_cats <- unique(trimws(as.character(m_hdr$catalogNumber)))
-      if (!is.null(active_catalogs) && length(active_catalogs) > 0L) {
-        disk_cats <- intersect(disk_cats, trimws(as.character(active_catalogs)))
+      if (!is.null(manifest_path) && nzchar(manifest_path) && identical(eff_mpath, manifest_path)) {
+        disk_cats <- unique(trimws(as.character(m_hdr$catalogNumber)))
+        if (!is.null(active_catalogs) && length(active_catalogs) > 0L) {
+          disk_cats <- intersect(disk_cats, trimws(as.character(active_catalogs)))
+        }
+        if (length(disk_cats) > 0L && length(intersect(disk_cats, unique(rows$catalogNumber))) == 0L) {
+          return(NULL)
+        }
       }
-      if (length(disk_cats) > 0L && length(intersect(disk_cats, unique(rows$catalogNumber))) == 0L) {
-        return(NULL)
+      if ("leaf_id" %in% names(m_hdr)) {
+        mc_v <- trimws(as.character(m_hdr$catalogNumber))
+        ml_v <- suppressWarnings(as.integer(m_hdr$leaf_id))
+        mp_v <- if ("plant_individual_id" %in% names(m_hdr)) ifelse(is.na(m_hdr$plant_individual_id), 0L, suppressWarnings(as.integer(m_hdr$plant_individual_id))) else rep(0L, nrow(m_hdr))
+        mp_v[is.na(mp_v)] <- 0L
+        k3 <- paste(mc_v, mp_v, ml_v, sep = "__")
+        k2 <- paste(mc_v, ml_v, sep = "__")
+        u3 <- !duplicated(k3, fromLast = TRUE); m_idx_3k <- which(u3); names(m_idx_3k) <- k3[u3]
+        u2 <- !duplicated(k2, fromLast = TRUE); m_idx_2k <- which(u2); names(m_idx_2k) <- k2[u2]
       }
     }
   }
 
-  coords_list <- list()
+  coords_list <- vector("list", nrow(rows))
+  coord_names <- character(nrow(rows))
+  seen_sids <- new.env(hash = TRUE, parent = emptyenv())
   meta_rows <- vector("list", nrow(rows))
   kept_k <- 0L
 
@@ -627,6 +654,7 @@ fetch_step03_contours_from_db <- function(
     area_px <- 0.5 * abs(sum(coo[, 1L] * y_next - x_next * coo[, 2L]))
     perim_px <- sum(sqrt((x_next - coo[, 1L])^2 + (y_next - coo[, 2L])^2))
     circ_val <- if (is.finite(perim_px) && perim_px > 1e-6) round(min(1.0, (4 * pi * area_px) / (perim_px^2)), 4) else NA_real_
+    di_val <- if (is.finite(perim_px) && is.finite(area_px) && area_px > 1e-6) round(max(1.0, perim_px / (2.0 * sqrt(pi * area_px))), 4) else NA_real_
 
     resolved_ppm <- suppressWarnings(as.numeric(rows$pixels_per_mm[i]))
     is_cal_raw <- rows$is_calibrated_mm[i]
@@ -663,9 +691,10 @@ fetch_step03_contours_from_db <- function(
     lid_val <- as.integer(ifelse(is.na(rows$leaf_id[i]), i, rows$leaf_id[i]))
     raw_sid <- as.character(rows$shape_id[i])
     shape_id <- if (!is.na(raw_sid) && nzchar(raw_sid)) raw_sid else sprintf("%s_p%d_leaf%d", cat_num, pid_val, lid_val)
-    if (shape_id %in% names(coords_list)) {
+    if (exists(shape_id, envir = seen_sids, inherits = FALSE)) {
       shape_id <- sprintf("%s_%d", shape_id, i)
     }
+    assign(shape_id, TRUE, envir = seen_sids)
 
     db_area <- suppressWarnings(as.numeric(rows$area_px[i]))
     eff_area <- if (!is.na(db_area) && is.finite(db_area) && db_area > 0) db_area else round(area_px, 1)
@@ -682,7 +711,22 @@ fetch_step03_contours_from_db <- function(
     }
 
     kept_k <- kept_k + 1L
-    coords_list[[shape_id]] <- coo
+    coords_list[[kept_k]] <- coo
+    coord_names[kept_k] <- shape_id
+    m_hit <- NA_integer_
+    if (!is.null(m_hdr)) {
+      if (!is.null(m_idx_3k)) m_hit <- unname(m_idx_3k[paste(trimws(cat_num), pid_val, lid_val, sep = "__")])
+      if (is.na(m_hit) && !is.null(m_idx_2k)) m_hit <- unname(m_idx_2k[paste(trimws(cat_num), lid_val, sep = "__")])
+    }
+    m_get_num <- function(cn, fb = NA_real_) {
+      if (!is.na(m_hit) && !is.null(m_hdr) && cn %in% names(m_hdr)) {
+        v <- suppressWarnings(as.numeric(m_hdr[[cn]][m_hit]))
+        if (is.finite(v)) return(v)
+      }
+      fb
+    }
+    db_ba_cm2 <- if ("blade_area_cm2" %in% names(rows)) suppressWarnings(as.numeric(rows$blade_area_cm2[i])) else NA_real_
+    if (!is.finite(db_ba_cm2)) db_ba_cm2 <- NA_real_
     meta_rows[[kept_k]] <- data.frame(
       shape_id = shape_id,
       catalogNumber = cat_num,
@@ -692,6 +736,7 @@ fetch_step03_contours_from_db <- function(
       assigned_tier = resolved_tier,
       reconstruction_tier = resolved_tier,
       solidity = sol_val,
+      dissection_index = as.numeric(di_val),
       ucs_score = suppressWarnings(as.numeric(rows$ucs_score[i])),
       pixels_per_mm = resolved_ppm,
       is_calibrated_mm = is_cal,
@@ -699,6 +744,10 @@ fetch_step03_contours_from_db <- function(
       blade_length_mm = suppressWarnings(as.numeric(rows$blade_length_mm[i])),
       petiole_to_blade_ratio = suppressWarnings(as.numeric(rows$petiole_to_blade_ratio[i])),
       is_dissected = eff_diss,
+      cy_rel_plant_bbox = m_get_num("cy_rel_plant_bbox", NA_real_),
+      cy_rel_sheet = m_get_num("cy_rel_sheet", NA_real_),
+      blade_area_cm2 = m_get_num("blade_area_cm2", db_ba_cm2),
+      effective_min_blade_area_cm2 = m_get_num("effective_min_blade_area_cm2", NA_real_),
       AR_inv = suppressWarnings(as.numeric(rows$AR_inv[i])),
       capitula_count = suppressWarnings(as.numeric(rows$capitula_count[i])),
       involucre_height_px = suppressWarnings(as.numeric(rows$involucre_height_px[i])),
@@ -716,8 +765,10 @@ fetch_step03_contours_from_db <- function(
   }
 
   if (kept_k == 0L) return(NULL)
+  coords_list <- coords_list[seq_len(kept_k)]
+  names(coords_list) <- coord_names[seq_len(kept_k)]
   meta_df <- as.data.frame(dplyr::bind_rows(meta_rows[seq_len(kept_k)]), stringsAsFactors = FALSE)
-  rownames(meta_df) <- names(coords_list)
+  rownames(meta_df) <- coord_names[seq_len(kept_k)]
   list(
     coords_list = coords_list,
     meta_df = meta_df
@@ -726,14 +777,15 @@ fetch_step03_contours_from_db <- function(
 
 .normalize_morph_dynamic_cols_r <- function(df) {
   if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(df)
-  for (ic in intersect(c("plant_individual_id", "leaf_id", "efd_harmonic_opt", "efd_k95_pcs"), names(df))) {
+  for (ic in intersect(c("plant_individual_id", "leaf_id", "efd_harmonic_opt", "efd_k95_pcs", "basal_leaf_count"), names(df))) {
     df[[ic]] <- suppressWarnings(as.integer(df[[ic]]))
   }
   if ("selected_morph_features" %in% names(df)) {
     df[["selected_morph_features"]] <- .normalize_semicolon_col_r(df[["selected_morph_features"]])
   }
   dyn_num_cols <- intersect(
-    c(PACKERA_DB_HARMONIC_COLS, PACKERA_DB_PC_COLS, PACKERA_DB_SYM_PC_COLS),
+    c(PACKERA_DB_HARMONIC_COLS, PACKERA_DB_PC_COLS, PACKERA_DB_SYM_PC_COLS,
+      "dissection_index", "q25_solidity", "dissected_leaf_fraction"),
     names(df)
   )
   for (nc in dyn_num_cols) {
