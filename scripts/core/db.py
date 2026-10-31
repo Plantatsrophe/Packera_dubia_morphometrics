@@ -459,6 +459,8 @@ def _build_schema_ddl() -> str:
         exsiccatae_key TEXT,
         is_primary_duplicate INTEGER,
         duplicate_count INTEGER,
+        exsiccatae_taxonomic_conflict INTEGER DEFAULT 0,
+        exsiccatae_gold_taxon TEXT,
         species_standardized TEXT,
         pixels_per_mm REAL,
         is_calibrated_mm INTEGER,
@@ -1061,10 +1063,30 @@ def _build_schema_ddl() -> str:
 
 SCHEMA_DDL: str = _build_schema_ddl()
 
+_VOUCHERS_MIGRATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
+    ("exsiccatae_taxonomic_conflict", "INTEGER DEFAULT 0"),
+    ("exsiccatae_gold_taxon", "TEXT"),
+)
+
+
+def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently add optional exsiccatae conflict audit columns to existing `vouchers` tables."""
+    existing_cols = {
+        str(r[1]) for r in conn.execute("PRAGMA table_info(vouchers);").fetchall()
+    }
+    if not existing_cols:
+        return
+    for col_name, col_ddl in _VOUCHERS_MIGRATION_COLUMNS:
+        if col_name not in existing_cols:
+            conn.execute(f"ALTER TABLE vouchers ADD COLUMN {col_name} {col_ddl};")
+            existing_cols.add(col_name)
+
 
 def init_db_schema(conn: sqlite3.Connection) -> None:
     """Create all Tier A and Tier B tables, indexes, triggers, R*Tree, and master view."""
+    _migrate_vouchers_schema_columns(conn)
     conn.executescript(SCHEMA_DDL)
+    _migrate_vouchers_schema_columns(conn)
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.commit()
 
@@ -1326,6 +1348,10 @@ def upsert_vouchers_records(
             row_dict["is_primary_duplicate"] = _to_bool_int(rec.get("is_primary_duplicate"), default=1)
         if "duplicate_count" in rec and not _is_missing(rec.get("duplicate_count")):
             row_dict["duplicate_count"] = _to_int(rec.get("duplicate_count"), default=1)
+        if "exsiccatae_taxonomic_conflict" in rec and not _is_missing(rec.get("exsiccatae_taxonomic_conflict")):
+            row_dict["exsiccatae_taxonomic_conflict"] = _to_bool_int(rec.get("exsiccatae_taxonomic_conflict"), default=0)
+        if "exsiccatae_gold_taxon" in rec and not _is_missing(rec.get("exsiccatae_gold_taxon")):
+            row_dict["exsiccatae_gold_taxon"] = _to_str(rec.get("exsiccatae_gold_taxon"))
         qc_val = _to_str(rec.get("qc_status"))
         if qc_val in {"PASS", "FAILED_QC", "PENDING"}:
             row_dict["qc_status"] = qc_val

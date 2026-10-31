@@ -1592,7 +1592,7 @@ resolve_analysis_group <- function(df, intraspecific_mode = FALSE) {
   return(df)
 }
 
-execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
+execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE, rf_res = NULL) {
   message("Executing 4-way cross-modal consensus checks (Morpho + Vision + Fine-Grain Edaphic + Phenology)...")
   if (exists("flag_coordinate_uncertainty", mode = "function")) {
     df <- flag_coordinate_uncertainty(df, max_uncertainty_m = 10000.0)
@@ -1772,6 +1772,191 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
     is_specialist_group[[tx]] <- isTRUE(emp_freq > 0.30 || emp_or > 2.0)
   }
 
+  # Precompute decorrelated PCA-env + Ledoit-Wolf shrinkage Mahalanobis likelihoods
+  # and extract optional Spatial Block-CV out-of-fold Random Forest posteriors
+  K_tx <- length(active_taxa)
+  maha_prob_mat <- matrix(1.0 / max(1L, K_tx), nrow = n, ncol = max(1L, K_tx),
+                          dimnames = list(NULL, if (K_tx > 0L) active_taxa else "Unknown"))
+  if (n > 0L && K_tx >= 2L && length(eco_cols) >= 1L) {
+    p_eco <- length(eco_cols)
+    E_all <- matrix(0.0, nrow = n, ncol = p_eco, dimnames = list(NULL, eco_cols))
+    E_anc <- matrix(0.0, nrow = nrow(anchor_df), ncol = p_eco, dimnames = list(NULL, eco_cols))
+    mu_scale <- numeric(p_eco); sd_scale <- numeric(p_eco)
+    w_anc_all <- anchor_df$authority_weight * anchor_df$spatial_balance_weight
+    for (j in seq_len(p_eco)) {
+      cl <- eco_cols[j]
+      v_all <- suppressWarnings(as.numeric(df[[cl]]))
+      v_anc <- suppressWarnings(as.numeric(anchor_df[[cl]]))
+      med_j <- stats::median(v_anc[is.finite(v_anc)], na.rm = TRUE)
+      if (!is.finite(med_j)) med_j <- stats::median(v_all[is.finite(v_all)], na.rm = TRUE)
+      if (!is.finite(med_j)) med_j <- 0.0
+      v_all[!is.finite(v_all)] <- med_j
+      v_anc[!is.finite(v_anc)] <- med_j
+      E_all[, j] <- v_all
+      E_anc[, j] <- v_anc
+      min_s <- if (cl %in% names(min_sd_map)) min_sd_map[[cl]] else 0.25
+      mu_j <- w_mean(v_anc, w_anc_all)
+      if (!is.finite(mu_j)) mu_j <- mean(v_all)
+      mu_scale[j] <- mu_j
+      sd_scale[j] <- max(w_sd(v_anc, w_anc_all, min_s), min_s, 1e-4)
+    }
+    Z_raw_all <- sweep(sweep(E_all, 2L, mu_scale, "-"), 2L, sd_scale, "/")
+    Z_raw_anc <- sweep(sweep(E_anc, 2L, mu_scale, "-"), 2L, sd_scale, "/")
+    Z_raw_all[!is.finite(Z_raw_all)] <- 0.0
+    Z_raw_anc[!is.finite(Z_raw_anc)] <- 0.0
+
+    if (p_eco >= 2L && nrow(Z_raw_anc) >= 3L) {
+      pca_env <- tryCatch(stats::prcomp(Z_raw_anc, center = TRUE, scale. = FALSE), error = function(e) NULL)
+    } else {
+      pca_env <- NULL
+    }
+    if (!is.null(pca_env) && ncol(pca_env$rotation) >= 1L) {
+      eig_v <- pca_env$sdev^2
+      cum_v <- if (sum(eig_v) > 1e-12) cumsum(eig_v) / sum(eig_v) else rep(1.0, length(eig_v))
+      k_90 <- which(cum_v >= 0.90)[1]
+      if (is.na(k_90)) k_90 <- ncol(pca_env$rotation)
+      k_max <- max(1L, min(6L, ncol(pca_env$rotation), max(1L, nrow(Z_raw_anc) - K_tx)))
+      k_pca <- max(1L, min(k_90, k_max))
+      rot_k <- pca_env$rotation[, seq_len(k_pca), drop = FALSE]
+      Z_all <- sweep(Z_raw_all, 2L, pca_env$center, "-") %*% rot_k
+      Z_anc <- sweep(Z_raw_anc, 2L, pca_env$center, "-") %*% rot_k
+    } else {
+      k_pca <- ncol(Z_raw_all)
+      Z_all <- Z_raw_all
+      Z_anc <- Z_raw_anc
+    }
+
+    mu_pca <- matrix(0.0, nrow = K_tx, ncol = k_pca, dimnames = list(active_taxa, NULL))
+    res_chunks <- list()
+    w_tot_pool <- 0.0
+    n_obs_pool <- 0L
+    for (tx in active_taxa) {
+      idx_a <- which(!is.na(anc_grp_vec) & anc_grp_vec == tx)
+      if (length(idx_a) >= 2L) {
+        Zk <- Z_anc[idx_a, , drop = FALSE]
+        wk <- pmax(1e-3, w_anc_all[idx_a])
+      } else {
+        idx_f <- which(!is.na(grp_vec) & grp_vec == tx)
+        Zk <- Z_all[idx_f, , drop = FALSE]
+        wk <- pmax(1e-3, df$case_wts[idx_f])
+      }
+      if (nrow(Zk) >= 1L) {
+        sw <- sum(wk)
+        mk <- colSums(Zk * wk) / max(sw, 1e-8)
+        mu_pca[tx, ] <- mk
+        dk <- sweep(Zk, 2L, mk, "-")
+        res_chunks[[length(res_chunks) + 1L]] <- dk * sqrt(wk)
+        w_tot_pool <- w_tot_pool + sw
+        n_obs_pool <- n_obs_pool + nrow(Zk)
+      }
+    }
+    X_res_pca <- if (length(res_chunks) > 0L) do.call(rbind, res_chunks) else Z_anc
+    S_w <- crossprod(X_res_pca) / max(w_tot_pool - K_tx, 1.0)
+    S_w[!is.finite(S_w)] <- 0.0
+    tr_sw <- sum(diag(S_w))
+    target_var <- if (is.finite(tr_sw) && tr_sw > 1e-8) (tr_sw / k_pca) else 1.0
+    if (k_pca == 1L) {
+      lam_lw <- 0.10
+    } else {
+      tr_sw2 <- sum(S_w * S_w)
+      denom_lw <- (max(n_obs_pool, 3L) + 1.0 - 2.0 / k_pca) * (tr_sw2 - (tr_sw * tr_sw) / k_pca)
+      num_lw <- (1.0 - 2.0 / k_pca) * tr_sw2 + (tr_sw * tr_sw)
+      lam_raw <- if (is.finite(denom_lw) && denom_lw > 1e-12) (num_lw / denom_lw) else 0.15
+      lam_lw <- min(0.50, max(0.05, lam_raw))
+    }
+    S_reg_pca <- (1.0 - lam_lw) * S_w + lam_lw * diag(target_var, nrow = k_pca, ncol = k_pca)
+    S_inv_pca <- tryCatch(
+      solve(S_reg_pca),
+      error = function(e) diag(1.0 / pmax(diag(S_reg_pca), 1e-4), nrow = k_pca, ncol = k_pca)
+    )
+
+    d2_maha <- matrix(0.0, nrow = n, ncol = K_tx, dimnames = list(NULL, active_taxa))
+    for (tx in active_taxa) {
+      diff_tx <- sweep(Z_all, 2L, mu_pca[tx, ], "-")
+      d2_maha[, tx] <- pmax(0.0, rowSums((diff_tx %*% S_inv_pca) * diff_tx))
+    }
+    ll_maha <- -0.5 * (d2_maha / max(1.0, 0.5 * k_pca))
+    ll_max <- apply(ll_maha, 1L, max)
+    p_maha_unnorm <- exp(sweep(ll_maha, 1L, ll_max, "-"))
+    maha_prob_mat <- sweep(p_maha_unnorm, 1L, pmax(rowSums(p_maha_unnorm), 1e-12), "/")
+  }
+
+  rf_prob_mat <- NULL
+  rf_acc_est <- NA_real_
+  if (!is.null(rf_res) && is.list(rf_res)) {
+    for (acc_nm in c("Spatial_Block_CV_Accuracy", "block_cv_acc", "OOB_Accuracy")) {
+      if (!is.null(rf_res[[acc_nm]]) && is.finite(suppressWarnings(as.numeric(rf_res[[acc_nm]][1])))) {
+        rf_acc_est <- suppressWarnings(as.numeric(rf_res[[acc_nm]][1]))
+        break
+      }
+    }
+    cand_mat <- if (!is.null(rf_res$oof_prob_matrix)) rf_res$oof_prob_matrix else rf_res$full_prob_mat
+    if (is.matrix(cand_mat) && nrow(cand_mat) == n && K_tx >= 2L && length(intersect(colnames(cand_mat), active_taxa)) >= 1L) {
+      rf_prob_mat <- matrix(NA_real_, nrow = n, ncol = K_tx, dimnames = list(NULL, active_taxa))
+      common_tx <- intersect(colnames(cand_mat), active_taxa)
+      rf_prob_mat[, common_tx] <- suppressWarnings(as.numeric(cand_mat[, common_tx]))
+    } else {
+      rf_p_tx <- if (!is.null(rf_res$rf_predicted_taxon)) rf_res$rf_predicted_taxon else rf_res$predicted_taxon
+      rf_p_pr <- if (!is.null(rf_res$rf_predicted_prob)) rf_res$rf_predicted_prob else rf_res$predicted_prob
+      rf_g_pr <- rf_res$rf_given_taxon_prob
+      if (!is.null(rf_p_tx) && !is.null(rf_p_pr) && length(rf_p_tx) == n && length(rf_p_pr) == n && K_tx >= 2L) {
+        rf_prob_mat <- matrix(NA_real_, nrow = n, ncol = K_tx, dimnames = list(NULL, active_taxa))
+        for (ri in seq_len(n)) {
+          ptx <- as.character(rf_p_tx[ri]); ppr <- suppressWarnings(as.numeric(rf_p_pr[ri]))
+          if (!is.na(ptx) && (ptx %in% active_taxa) && is.finite(ppr)) {
+            ppr <- min(0.999, max(1e-4, ppr))
+            gtx <- as.character(grp_vec[ri])
+            gpr <- if (!is.null(rf_g_pr) && length(rf_g_pr) == n) suppressWarnings(as.numeric(rf_g_pr[ri])) else NA_real_
+            if (!is.na(gtx) && (gtx %in% active_taxa) && gtx != ptx && is.finite(gpr)) {
+              gpr <- min(1.0 - ppr, max(0.0, gpr))
+              rem_tx <- setdiff(active_taxa, c(ptx, gtx))
+              rem_p <- if (length(rem_tx) > 0L) max(0.0, 1.0 - ppr - gpr) / length(rem_tx) else 0.0
+              rf_prob_mat[ri, ] <- rem_p
+              rf_prob_mat[ri, ptx] <- ppr
+              rf_prob_mat[ri, gtx] <- gpr
+            } else {
+              rem_p <- (1.0 - ppr) / max(1L, K_tx - 1L)
+              rf_prob_mat[ri, ] <- rem_p
+              rf_prob_mat[ri, ptx] <- ppr
+            }
+          }
+        }
+      }
+    }
+  } else if (K_tx >= 2L && all(c("rf_predicted_taxon", "rf_predicted_prob") %in% names(df))) {
+    if ("spatial_block_cv_acc" %in% names(df) && any(is.finite(suppressWarnings(as.numeric(df$spatial_block_cv_acc))))) {
+      rf_acc_est <- stats::median(suppressWarnings(as.numeric(df$spatial_block_cv_acc)), na.rm = TRUE)
+    }
+    rf_prob_mat <- matrix(NA_real_, nrow = n, ncol = K_tx, dimnames = list(NULL, active_taxa))
+    for (ri in seq_len(n)) {
+      ptx <- as.character(df$rf_predicted_taxon[ri]); ppr <- suppressWarnings(as.numeric(df$rf_predicted_prob[ri]))
+      if (!is.na(ptx) && (ptx %in% active_taxa) && is.finite(ppr)) {
+        ppr <- min(0.999, max(1e-4, ppr))
+        gtx <- as.character(grp_vec[ri])
+        gpr <- if ("rf_given_taxon_prob" %in% names(df)) suppressWarnings(as.numeric(df$rf_given_taxon_prob[ri])) else NA_real_
+        if (!is.na(gtx) && (gtx %in% active_taxa) && gtx != ptx && is.finite(gpr)) {
+          gpr <- min(1.0 - ppr, max(0.0, gpr))
+          rem_tx <- setdiff(active_taxa, c(ptx, gtx))
+          rem_p <- if (length(rem_tx) > 0L) max(0.0, 1.0 - ppr - gpr) / length(rem_tx) else 0.0
+          rf_prob_mat[ri, ] <- rem_p
+          rf_prob_mat[ri, ptx] <- ppr
+          rf_prob_mat[ri, gtx] <- gpr
+        } else {
+          rf_prob_mat[ri, ] <- (1.0 - ppr) / max(1L, K_tx - 1L)
+          rf_prob_mat[ri, ptx] <- ppr
+        }
+      }
+    }
+  }
+
+  chance_p <- 1.0 / max(2.0, K_tx)
+  if (!is.finite(rf_acc_est)) rf_acc_est <- 0.75
+  w_rf_pool <- if (rf_acc_est > chance_p) {
+    min(0.85, max(0.35, (rf_acc_est - chance_p) / max(1e-6, 1.0 - chance_p)))
+  } else {
+    max(0.10, 0.35 * max(0.0, rf_acc_est / max(chance_p, 1e-6)))
+  }
+
   # Evaluate modal concordance per specimen
   conf_flags <- logical(n); triage_cats <- character(n); concordances <- numeric(n); discord_notes <- character(n)
   edaph_best_vec <- character(n); edaph_z_vec <- numeric(n); outcrop_spec_flags <- logical(n)
@@ -1787,17 +1972,30 @@ execute_crossmodal_consensus <- function(df, intraspecific_mode = FALSE) {
     c_err    <- if ("c_error" %in% names(df) && !is.na(df$c_error[i])) df$c_error[i] else 0.0
     cda_prob <- if ("cda_posterior_prob" %in% names(df) && !is.na(df$cda_posterior_prob[i])) as.numeric(df$cda_posterior_prob[i]) else NA_real_
 
-    # Regularized Eco-Edaphic Gaussian log-likelihood score
-    edaph_scores <- sapply(active_taxa, function(tx) {
-      prof <- taxa_profiles[[tx]]
-      ll <- 0.0
-      for (cl in eco_cols) {
-        xv <- as.numeric(df[[cl]][i]); mv <- prof$eco_mean[[cl]]; sv <- prof$eco_sd[[cl]]
-        if (is.finite(xv) && is.finite(mv) && is.finite(sv) && sv > 0) ll <- ll - 0.5 * (((xv - mv) / sv)^2 + 2.0 * log(sv))
+    # Combine Spatial Block-CV OOF RF posterior with decorrelated PCA-env Mahalanobis likelihood
+    if (K_tx == 0L) {
+      edaph_sp <- given_sp
+    } else if (K_tx == 1L) {
+      edaph_sp <- active_taxa[1L]
+    } else {
+      p_maha_i <- pmax(as.numeric(maha_prob_mat[i, ]), 1e-6)
+      p_maha_i <- p_maha_i / sum(p_maha_i)
+      has_rf_i <- !is.null(rf_prob_mat) && any(is.finite(rf_prob_mat[i, ]))
+      if (has_rf_i) {
+        p_rf_i <- as.numeric(rf_prob_mat[i, ])
+        na_rf <- !is.finite(p_rf_i)
+        if (any(na_rf)) {
+          rem_mass <- max(0.0, 1.0 - sum(p_rf_i[!na_rf]))
+          p_rf_i[na_rf] <- rem_mass / sum(na_rf)
+        }
+        p_rf_i <- pmax(p_rf_i, 1e-6)
+        p_rf_i <- p_rf_i / sum(p_rf_i)
+        edaph_scores <- w_rf_pool * log(p_rf_i) + (1.0 - w_rf_pool) * log(p_maha_i)
+      } else {
+        edaph_scores <- log(p_maha_i)
       }
-      ll
-    })
-    edaph_sp <- if (all(is.na(edaph_scores))) given_sp else active_taxa[which.max(edaph_scores)][1]
+      edaph_sp <- if (all(!is.finite(edaph_scores))) given_sp else active_taxa[which.max(edaph_scores)][1]
+    }
     edaph_best_vec[i] <- edaph_sp
     edaph_z_given <- compute_specimen_edaphic_z(i, given_sp)
     edaph_z_vec[i] <- round(edaph_z_given, 3)
@@ -2273,6 +2471,11 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     rf_predicted_prob = round(rf_pred_prob, 4),
     rf_given_taxon_prob = round(rf_given_prob, 4),
     rf_prediction_source = rf_pred_source,
+    oof_prob_matrix = full_prob_mat,
+    full_prob_mat = full_prob_mat,
+    block_cv_acc = spatial_block_cv_acc,
+    predicted_taxon = full_preds,
+    predicted_prob = round(rf_pred_prob, 4),
     spatial_block_id = full_block_id,
     collinearity_screening = col_screen,
     residual_moran_i = round(moran_i, 4), residual_moran_p = round(moran_p, 4)
@@ -3271,6 +3474,13 @@ main <- function() {
   vouchers_df$rf_given_taxon_prob <- srf_res$rf_given_taxon_prob
   vouchers_df$rf_prediction_source <- srf_res$rf_prediction_source
   vouchers_df$spatial_block_id <- srf_res$spatial_block_id
+
+  # Refresh cross-modal consensus & edaphic_best_fit_taxon with Spatial Block-CV OOF RF posteriors
+  vouchers_df <- execute_crossmodal_consensus(
+    vouchers_df,
+    intraspecific_mode = isTRUE(opts$intraspecific_mode),
+    rf_res = srf_res
+  )
 
   # Stage 4: Partitioned PCA-env Niche Equivalency & Background Similarity Tests
   niche_res <- run_warren_niche_identity_tests(vouchers_df, env_vars, n_perm = opts$permutations, intraspecific_mode = isTRUE(opts$intraspecific_mode))

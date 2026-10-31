@@ -286,6 +286,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   pc_req <- intersect(paste0("PC", seq_len(5)), feature_cols)
   has_pcs <- complete.cases(df[, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE])
+  screened_by_adaptive_anchors <- FALSE
   if (is_intra) {
     cl_u <- if (!is.null(gmm_res) && length(unique(stats::na.omit(gmm_res$classification))) >= 2L) as.integer(gmm_res$classification) else NULL
     if (is.null(cl_u)) {
@@ -303,7 +304,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     if (length(target_taxa) < 2L) target_taxa <- sort(unique(stats::na.omit(df$grouping_col[is_active])))
     is_active <- is_active & (df$grouping_col %in% target_taxa); is_train_cand <- is_active
   } else {
-    df$grouping_col <- df$species_standardized
+    df$grouping_col <- df$species_standardized; used_unscreened_fb <- FALSE
     anc_cda <- select_adaptive_reference_anchors(df, feature_matrix = as.matrix(df[, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE]), taxon_col = "grouping_col")
     df$is_promoted_bronze <- anc_cda$is_promoted_bronze; df$anchor_tier_source <- anc_cda$anchor_tier_source
     df$authority_weight <- compute_authority_precision_weights(df); authority_weight <- df$authority_weight; eff_weight <- authority_weight
@@ -313,21 +314,28 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     } else if (any(tr_tab < 2L)) {
       if (length(unique(df$grouping_col[is_train_cand])) >= 2L) target_taxa <- intersect(target_taxa, unique(df$grouping_col[is_train_cand]))
       fallback_cand <- anc_cda$active_mask & (df$species_standardized %in% target_taxa) & has_pcs
-      is_train_cand <- if (all(table(factor(df$grouping_col[fallback_cand], levels = target_taxa)) >= 2L)) fallback_cand else (df$grouping_col %in% target_taxa & has_pcs)
+      if (all(table(factor(df$grouping_col[fallback_cand], levels = target_taxa)) >= 2L)) {
+        is_train_cand <- fallback_cand
+      } else {
+        is_train_cand <- (df$grouping_col %in% target_taxa) & has_pcs; used_unscreened_fb <- TRUE
+      }
     }
+    screened_by_adaptive_anchors <- (!used_unscreened_fb) && (sum(is_train_cand) >= 5L)
     is_active <- is_train_cand
   }
   X_full <- as.matrix(df[, feature_cols, drop = FALSE])
   for (j in seq_len(ncol(X_full))) if (any(is.na(X_full[, j]))) X_full[is.na(X_full[, j]), j] <- if (any(!is.na(X_full[is_train_cand, j]))) mean(X_full[is_train_cand, j], na.rm = TRUE) else 0.0
   feature_cols <- select_morphometric_subspace(X_full[is_train_cand, , drop = FALSE], group_vec = df$grouping_col[is_train_cand])
   X <- X_full[, feature_cols, drop = FALSE]; p <- ncol(X)
-  for (grp in target_taxa) {
-    cand_k <- which(is_train_cand & df$grouping_col == grp); n_k <- length(cand_k)
-    if (n_k >= 5) {
-      sub_x <- X[cand_k, , drop = FALSE]
-      d2_k <- tryCatch(stats::mahalanobis(sub_x, colMeans(sub_x), stats::cov(sub_x) + diag(1e-4, p)), error = function(e) rep(0, n_k))
-      drop_k <- !is.na(d2_k) & (d2_k > stats::qchisq(0.95, df = p))
-      if (sum(!drop_k) >= 2) is_train_cand[cand_k[drop_k]] <- FALSE
+  if (!screened_by_adaptive_anchors) {
+    for (grp in target_taxa) {
+      cand_k <- which(is_train_cand & df$grouping_col == grp); n_k <- length(cand_k)
+      if (n_k >= 5) {
+        sub_x <- X[cand_k, , drop = FALSE]
+        d2_k <- tryCatch(stats::mahalanobis(sub_x, colMeans(sub_x), stats::cov(sub_x) + diag(1e-4, p)), error = function(e) rep(0, n_k))
+        drop_k <- !is.na(d2_k) & (d2_k > stats::qchisq(0.95, df = p))
+        if (sum(!drop_k) >= 2) is_train_cand[cand_k[drop_k]] <- FALSE
+      }
     }
   }
   if (!is_intra) is_active <- is_train_cand
@@ -344,36 +352,40 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   message(sprintf("CDA Leave-One-Out Cross-Validation Accuracy (loocv_accuracy): %.4f", loocv_accuracy))
 
   g_levels <- target_taxa; g <- length(g_levels); grand_mean <- colSums(X_a * w_a) / sum(w_a)
-  B <- matrix(0, p, p); W <- matrix(0, p, p)
+  B <- matrix(0, p, p); W <- matrix(0, p, p); X_centered <- matrix(0, N_a, p, dimnames = dimnames(X_a))
   group_means <- matrix(0, g, p, dimnames = list(g_levels, feature_cols)); group_counts <- integer(g)
   for (k in seq_along(g_levels)) {
     grp <- g_levels[k]; k_mask <- (y_a == grp); sub_x <- X_a[k_mask, , drop = FALSE]; w_k <- eff_weight[k_mask]; group_counts[k] <- nrow(sub_x)
     if (nrow(sub_x) > 0) {
       m_k <- colSums(sub_x * w_k) / sum(w_k); group_means[k, ] <- m_k; diff_m <- m_k - grand_mean
       B <- B + sum(w_k) * (diff_m %*% t(diff_m)); diff_x <- t(t(sub_x) - m_k); W <- W + (t(diff_x) %*% (diff_x * w_k))
+      X_centered[k_mask, ] <- diff_x * sqrt(pmax(w_k, 0))
     }
   }
 
-  S_reg <- (W / max(sum(w_a) - g, 1)) + diag(1e-7, p); eig <- eigen(solve(S_reg, B))
-  real_idx <- which(abs(Im(eig$values)) < 1e-6); real_vals <- Re(eig$values[real_idx]); real_vecs <- Re(eig$vectors[, real_idx, drop = FALSE])
-  order_idx <- order(real_vals, decreasing = TRUE); num_axes <- max(1L, min(3L, ncol(X_mat), g - 1L))
-  eig_vals <- real_vals[order_idx][seq_len(num_axes)]; eig_vecs <- real_vecs[, order_idx[seq_len(num_axes)], drop = FALSE]
-  for (j in seq_len(num_axes)) {
-    v <- eig_vecs[, j]; s <- as.numeric(sqrt(t(v) %*% S_reg %*% v))
-    if (s > 1e-8) eig_vecs[, j] <- v / s
-  }
+  S_w <- W / max(sum(w_a) - g, 1)
+  S_reg <- compute_ledoit_wolf_cov(S_w, X_centered = X_centered, n_obs = N_a)
+  k_full <- max(1L, min(ncol(X_mat), g - 1L))
+  eig_cda <- solve_shrinkage_cda_eigen(S_reg, B, max_axes = k_full)
+  eig_vals <- eig_cda$values; eig_vecs_full <- eig_cda$vectors
   var_pct <- round((eig_vals / max(sum(eig_vals), 1e-12)) * 100, 2)
-  message("=== CDA Canonical Variates Eigenvalues & Variance ===")
-  for (j in seq_len(num_axes)) message(sprintf("  Can%d: Eigenvalue = %7.4f (%5.2f%% variation)", j, eig_vals[j], var_pct[j]))
+  message(sprintf("=== CDA Canonical Variates (K_full = %d, Ledoit-Wolf lambda = %.5f) ===", k_full, attr(S_reg, "shrinkage_lambda")))
+  for (j in seq_len(k_full)) message(sprintf("  Can%d: Eigenvalue = %7.4f (%5.2f%% variation)", j, eig_vals[j], var_pct[j]))
 
-  Z_active <- t(t(X_a) - grand_mean) %*% eig_vecs; struct_corr <- stats::cor(X_a, Z_active); X_proj <- X
+  Z_anchors_full <- sweep(X_a, 2L, grand_mean, "-") %*% eig_vecs_full
+  struct_corr <- suppressWarnings(stats::cor(X_a, Z_anchors_full)); struct_corr[!is.finite(struct_corr)] <- 0.0
+  X_proj <- X
   for (col_idx in seq_len(p)) {
     na_mask <- is.na(X_proj[, col_idx]); if (any(na_mask)) X_proj[na_mask, col_idx] <- grand_mean[col_idx]
   }
-  Z_all <- t(t(X_proj) - grand_mean) %*% eig_vecs; canonical_centroids <- t(t(group_means) - grand_mean) %*% eig_vecs
+  Z_all_full <- sweep(X_proj, 2L, grand_mean, "-") %*% eig_vecs_full
+  centroids_full <- sweep(group_means, 2L, grand_mean, "-") %*% eig_vecs_full
+  colnames(Z_all_full) <- colnames(Z_anchors_full) <- colnames(centroids_full) <- paste0("Can", seq_len(k_full))
+  rownames(centroids_full) <- g_levels
+
   priors <- rep(1/g, g); post_probs <- matrix(0, nrow(df), g, dimnames = list(NULL, g_levels))
   for (k in seq_along(g_levels)) {
-    diff_z <- t(t(Z_all) - canonical_centroids[k, ]); post_probs[, k] <- log(priors[k]) - 0.5 * rowSums(diff_z^2)
+    diff_z <- sweep(Z_all_full, 2L, centroids_full[k, ], "-"); post_probs[, k] <- log(priors[k]) - 0.5 * rowSums(diff_z^2)
   }
   post_probs <- exp(post_probs - apply(post_probs, 1, max, na.rm = TRUE))
   post_probs <- post_probs / pmax(rowSums(post_probs, na.rm = TRUE), 1e-12); pred_idx <- max.col(post_probs, ties.method = "first")
@@ -382,6 +394,8 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   second_taxon <- if (g >= 2L) colnames(post_probs)[second_idx] else rep(NA_character_, nrow(df))
   second_posterior_prob <- if (g >= 2L) post_probs[cbind(seq_len(nrow(post_probs)), second_idx)] else rep(0.0, nrow(df))
   posterior_margin <- posterior_prob - second_posterior_prob
+
+  num_ord <- min(3L, k_full); Z_all <- Z_all_full[, seq_len(num_ord), drop = FALSE]; canonical_centroids <- centroids_full[, seq_len(num_ord), drop = FALSE]
   orth_against <- function(vec, basis_mat) {
     v <- as.numeric(vec) - mean(vec, na.rm = TRUE)
     for (b_col in seq_len(ncol(basis_mat))) { b <- as.numeric(basis_mat[, b_col]); v <- v - (sum(v * b, na.rm = TRUE) / max(sum(b^2, na.rm = TRUE), 1e-12)) * b }
@@ -405,6 +419,8 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   }
   colnames(canonical_centroids) <- colnames(Z_all); rownames(canonical_centroids) <- g_levels
   return(list(eigenvalues = eig_vals, variance_pct = var_pct, canonical_scores = Z_all, centroids = canonical_centroids,
+              canonical_scores_full = Z_all_full, centroids_full = centroids_full, num_canonical_axes = k_full,
+              shrinkage_lambda = attr(S_reg, "shrinkage_lambda"),
               predicted_taxon = g_levels[pred_idx], posterior_prob = posterior_prob, second_taxon = second_taxon,
               second_posterior_prob = second_posterior_prob, post_probs = post_probs,
               posterior_margin = posterior_margin, is_active = is_active, is_promoted_bronze = df$is_promoted_bronze, anchor_tier_source = df$anchor_tier_source,
@@ -548,7 +564,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   }
   if (!is.null(vouchers_df)) {
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), , drop = FALSE]; v_idx <- match(as.character(closed_df$catalogNumber), as.character(v_sub$catalogNumber))
-    for (col in intersect(names(v_sub), c("scientificName", "species_standardized", "institutionCode", "county", "stateProvince", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) if (!col %in% names(closed_df)) closed_df[[col]] <- v_sub[[col]][v_idx]
+    for (col in intersect(names(v_sub), c("scientificName", "species_standardized", "identifiedBy", "determiner_raw", "determiner_tier", "institutionCode", "county", "stateProvince", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) if (!col %in% names(closed_df)) closed_df[[col]] <- v_sub[[col]][v_idx]
   }
   sp_cand <- rep("Unknown", nrow(closed_df)); for (sc in intersect(c("species_standardized", "scientificName", "species_raw"), names(closed_df))) { v <- standardize_packera_taxon(closed_df[[sc]]); m <- sp_cand == "Unknown" & !is.na(v) & v != "Unknown"; sp_cand[m] <- v[m] }
   closed_df$species_standardized <- sp_cand; closed_df$authority_weight <- compute_authority_precision_weights(closed_df)

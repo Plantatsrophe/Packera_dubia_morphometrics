@@ -1618,6 +1618,120 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertAlmostEqual(float(multi_rows.iloc[0]["petiole_to_blade_ratio"]), round(32.0 / 28.0, 4), places=3)
             self.assertAlmostEqual(float(multi_rows.iloc[1]["petiole_to_blade_ratio"]), round(12.0 / 30.0, 4), places=3)
 
+    def test_dawid_skene_em_determiner_shrinkage_no_double_pruning_and_k_full_cda(self):
+        """Verify 2-step Dawid-Skene EM determiner shrinkage, elimination of double Mahalanobis pruning, and K_full (>3 axes) shrinkage CDA posteriors."""
+        import shutil
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        r_code = """
+        source("scripts/morphometrics/authority_weighting_utils.R")
+        set.seed(20261030)
+        n_sp <- 10
+        df_eb <- data.frame(
+          catalogNumber = sprintf("EB_%02d", 1:(2 * n_sp)),
+          plant_individual_id = 1L,
+          species_standardized = rep(c("Packera aurea", "Packera obovata"), each = n_sp),
+          determiner_tier = rep(c(rep("Tier_2_Silver", 8), "Tier_1_Gold", "Tier_3_Bronze"), 2),
+          identifiedBy = c(
+            rep("Dr. Reliable Specialist", 4),
+            rep("Noisy Generalist", 4),
+            "T.M. Barkley",
+            "Field Student",
+            rep("Dr. Reliable Specialist", 4),
+            rep("Noisy Generalist", 4),
+            "T.M. Barkley",
+            "Field Student"
+          ),
+          is_promoted_bronze = FALSE,
+          PC1 = c(
+            rnorm(4, -3.0, 0.15),
+            rnorm(4, +3.0, 0.15),
+            -3.1, -2.9,
+            rnorm(4, +3.0, 0.15),
+            rnorm(4, -3.0, 0.15),
+            +3.1, +2.9
+          ),
+          PC2 = rnorm(2 * n_sp, 0.0, 0.15),
+          vision_predicted_label = c(
+            rep("Packera aurea", 4),
+            rep("Packera obovata", 4),
+            "Packera aurea", "Packera aurea",
+            rep("Packera obovata", 4),
+            rep("Packera aurea", 4),
+            "Packera obovata", "Packera obovata"
+          ),
+          c_error = c(rep(0.05, 4), rep(0.92, 4), 0.03, 0.10, rep(0.05, 4), rep(0.92, 4), 0.03, 0.10),
+          stringsAsFactors = FALSE
+        )
+
+        w_ap <- compute_empirical_bayes_authority_weights(df_eb, mode = "active_passive")
+        stopifnot(length(w_ap) == nrow(df_eb))
+        stopifnot(w_ap[10] == 0.0, w_ap[20] == 0.0)
+        stopifnot(abs(mean(w_ap[w_ap > 0]) - 1.0) < 1e-5)
+        stopifnot(mean(w_ap[df_eb$identifiedBy == "Dr. Reliable Specialist"]) >
+                  mean(w_ap[df_eb$identifiedBy == "Noisy Generalist"]))
+
+        w_cp <- compute_empirical_bayes_authority_weights(df_eb, mode = "continuous_prior_posterior")
+        stopifnot(all(w_cp >= 0.5 - 1e-9 & w_cp <= 3.0 + 1e-9))
+        stopifnot(mean(w_cp[df_eb$identifiedBy == "Dr. Reliable Specialist"]) >
+                  mean(w_cp[df_eb$identifiedBy == "Noisy Generalist"]))
+
+        source("scripts/morphometrics/04_gmm_morphotools.R")
+        set.seed(104)
+        taxa5 <- c("Packera spA", "Packera spB", "Packera spC", "Packera spD", "Packera spE")
+        centers5 <- rbind(
+          c(-4.0,  0.0,  0.0,  0.0),
+          c( 4.0,  0.0,  0.0,  0.0),
+          c( 0.0,  4.0,  0.0,  0.0),
+          c( 0.0, -2.0,  3.0, -4.5),
+          c( 0.0, -2.0,  3.0, +4.5)
+        )
+        rows5 <- list()
+        idx <- 1L
+        for (g_i in seq_along(taxa5)) {
+          for (j in 1:14) {
+            rows5[[idx]] <- data.frame(
+              catalogNumber = sprintf("G%d_%02d", g_i, j),
+              plant_individual_id = 1L,
+              species_standardized = taxa5[g_i],
+              determiner_tier = "Tier_1_Gold",
+              morph_tier_source = "Tier_1_Pure",
+              PC1 = centers5[g_i, 1] + rnorm(1, 0, 0.18),
+              PC2 = centers5[g_i, 2] + rnorm(1, 0, 0.18),
+              PC3 = centers5[g_i, 3] + rnorm(1, 0, 0.18),
+              PC4 = centers5[g_i, 4] + rnorm(1, 0, 0.18),
+              stringsAsFactors = FALSE
+            )
+            idx <- idx + 1L
+          }
+        }
+        df5 <- dplyr::bind_rows(rows5)
+        anc5 <- select_adaptive_reference_anchors(
+          df5,
+          feature_matrix = as.matrix(df5[, c("PC1", "PC2", "PC3", "PC4")]),
+          taxon_col = "species_standardized",
+          mahal_q_gold_silver = 0.95
+        )
+        cda5 <- run_canonical_discriminant_analysis(
+          df5,
+          feature_cols = c("PC1", "PC2", "PC3", "PC4"),
+          target_taxa = taxa5
+        )
+        stopifnot(identical(as.logical(cda5$is_active), as.logical(anc5$active_mask)))
+        stopifnot(all(c("Can1", "Can2", "Can3") %in% colnames(cda5$canonical_scores)))
+        stopifnot(cda5$num_canonical_axes == 4L)
+        spD_idx <- which(df5$species_standardized == "Packera spD")
+        spE_idx <- which(df5$species_standardized == "Packera spE")
+        stopifnot(mean(cda5$predicted_taxon[spD_idx] == "Packera spD") >= 0.90)
+        stopifnot(mean(cda5$predicted_taxon[spE_idx] == "Packera spE") >= 0.90)
+        stopifnot(mean(cda5$posterior_prob[c(spD_idx, spE_idx)]) > 0.85)
+        cat("PHASE4_DAWID_SKENE_AND_KFULL_OK\\n")
+        """
+        proc = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0, f"Phase 4 R test failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("PHASE4_DAWID_SKENE_AND_KFULL_OK", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

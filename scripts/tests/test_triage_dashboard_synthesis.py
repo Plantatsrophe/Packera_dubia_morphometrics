@@ -1414,6 +1414,128 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             self.assertAlmostEqual(float(multi_df.iloc[0]["petiole_to_blade_ratio"]), 1.24, places=2)
             self.assertAlmostEqual(float(multi_df.iloc[1]["petiole_to_blade_ratio"]), 0.39, places=2)
 
+    @unittest.skipUnless(shutil.which("Rscript") is not None, "Rscript required for Step 07 Bayes precision & non-contradiction test")
+    def test_stage1_crossmodal_non_contradiction_gate_and_oof_precision_pooling(self):
+        """Verify Stage 1 blocks contradicted single-modality reassignments and OOF confusion-matrix precision modulates consensus weights."""
+        r_code = """
+        source("scripts/analysis/07_triage_dashboard_synthesis.R")
+
+        df7 <- data.frame(
+          catalogNumber = c(
+            "A_G1", "A_G2", "A_G3",
+            "B_G1", "B_G2", "B_G3",
+            "C_G1", "C_G2", "C_G3",
+            "VIS_CONTRADICTED_BY_MORPH",
+            "MORPH_MOD_CONTRADICTED_BY_VIS",
+            "CORROBORATED_MISID"
+          ),
+          plant_individual_id = 1L,
+          institutionCode = "NCU",
+          species_raw = c(
+            rep("Packera aurea", 3),
+            rep("Packera obovata", 3),
+            rep("Packera schweinitziana", 3),
+            "Packera aurea",
+            "Packera aurea",
+            "Packera aurea"
+          ),
+          species_standardized = c(
+            rep("Packera aurea", 3),
+            rep("Packera obovata", 3),
+            rep("Packera schweinitziana", 3),
+            "Packera aurea",
+            "Packera aurea",
+            "Packera aurea"
+          ),
+          determiner_tier = c(rep("Tier_1_Gold", 9), rep("Tier_3_Bronze", 3)),
+          morph_tier_source = "Tier_1_Pure",
+          n_tier1_leaves = 3L,
+          cda_predicted_taxon = c(
+            rep("Packera aurea", 3),
+            rep("Packera obovata", 3),
+            rep("Packera schweinitziana", 3),
+            "Packera aurea",
+            "Packera obovata",
+            "Packera obovata"
+          ),
+          cda_second_taxon = c(
+            rep("Packera obovata", 3),
+            rep("Packera aurea", 3),
+            rep("Packera aurea", 3),
+            "Packera obovata",
+            "Packera aurea",
+            "Packera aurea"
+          ),
+          cda_posterior_prob = c(rep(0.95, 9), 0.91, 0.76, 0.92),
+          cda_posterior_margin = c(rep(0.90, 9), 0.82, 0.52, 0.84),
+          morphometric_outlier_flag = c(rep(FALSE, 9), FALSE, TRUE, TRUE),
+          vision_predicted_label = c(
+            rep("Packera aurea", 3),
+            rep("Packera obovata", 3),
+            "Packera obovata", "Packera obovata", "Packera schweinitziana",
+            "Packera obovata",
+            "Packera aurea",
+            "Packera obovata"
+          ),
+          c_error = c(rep(0.05, 6), 0.85, 0.85, 0.05, 0.88, 0.06, 0.92),
+          is_label_corrupted = c(rep(FALSE, 6), TRUE, TRUE, FALSE, TRUE, FALSE, TRUE),
+          is_artifact_driven = FALSE,
+          tomentum_taxon_discordance = FALSE,
+          vision_is_ood = FALSE,
+          vision_ood_score = 0.20,
+          edaphic_best_fit_taxon = c(
+            rep("Packera aurea", 3),
+            rep("Packera obovata", 3),
+            rep("Packera schweinitziana", 3),
+            "Packera aurea",
+            "Packera aurea",
+            "Packera obovata"
+          ),
+          edaphic_schoener_d = c(rep(0.82, 9), 0.80, 0.79, 0.18),
+          gmm_cluster = 1L,
+          gmm_uncertainty = 0.05,
+          can1 = c(rep(-3.0, 3), rep(3.0, 3), rep(0.0, 3), -2.9, 1.8, 2.9),
+          can2 = c(rep(0.0, 3), rep(0.0, 3), rep(3.0, 3), 0.1, 0.1, 0.0),
+          can3 = 0.0,
+          PC1 = c(rep(-1.5, 3), rep(1.5, 3), rep(0.0, 3), -1.4, 0.9, 1.4),
+          PC2 = c(rep(0.0, 3), rep(0.0, 3), rep(1.5, 3), 0.0, 0.0, 0.0),
+          triage_category = c(rep("Clean_MultiModal_Consensus", 9), rep("Severe_Triple_Stream_Conflict", 3)),
+          stringsAsFactors = FALSE
+        )
+
+        res7 <- apply_taxonomic_decision_matrix(df7)
+        row_vis_contra <- res7[res7$catalogNumber == "VIS_CONTRADICTED_BY_MORPH", ]
+        row_morph_contra <- res7[res7$catalogNumber == "MORPH_MOD_CONTRADICTED_BY_VIS", ]
+        row_corrob <- res7[res7$catalogNumber == "CORROBORATED_MISID", ]
+
+        stopifnot(row_vis_contra$taxonomic_treatment_subtype != "Misidentification_Reassign")
+        stopifnot(row_vis_contra$recommended_determination == "Packera aurea")
+        stopifnot(row_morph_contra$taxonomic_treatment_subtype != "Misidentification_Reassign")
+        stopifnot(row_morph_contra$recommended_determination == "Packera aurea")
+        stopifnot(row_corrob$taxonomic_treatment_subtype == "Misidentification_Reassign")
+        stopifnot(row_corrob$recommended_determination == "Packera obovata")
+        stopifnot(all(res7$probabilistic_consensus_conflict >= 0.0 & res7$probabilistic_consensus_conflict <= 1.0))
+
+        anc_m <- .resolve_step07_anchor_mask(df7)
+        prec_vis <- .compute_oof_class_precision_map(df7$species_standardized[anc_m], df7$vision_predicted_label[anc_m])
+        prec_mor <- .compute_oof_class_precision_map(df7$species_standardized[anc_m], df7$cda_predicted_taxon[anc_m])
+        stopifnot(prec_vis[["Packera obovata"]] < prec_mor[["Packera obovata"]])
+
+        # Compare conflict score on VIS_CONTRADICTED_BY_MORPH against an identical cohort where Vision has 100% anchor precision
+        df7_hi <- df7
+        df7_hi$vision_predicted_label[7:9] <- "Packera schweinitziana"
+        df7_hi$c_error[7:9] <- 0.05
+        df7_hi$is_label_corrupted[7:9] <- FALSE
+        res7_hi <- apply_taxonomic_decision_matrix(df7_hi)
+        c_low_prec <- res7$probabilistic_consensus_conflict[res7$catalogNumber == "VIS_CONTRADICTED_BY_MORPH"]
+        c_hi_prec <- res7_hi$probabilistic_consensus_conflict[res7_hi$catalogNumber == "VIS_CONTRADICTED_BY_MORPH"]
+        stopifnot(c_low_prec < c_hi_prec)
+        cat("STEP07_PRECISION_AND_GATE_OK\\n")
+        """
+        proc = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0, f"Step 07 precision/gate R test failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("STEP07_PRECISION_AND_GATE_OK", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

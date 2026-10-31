@@ -1940,6 +1940,215 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"bash -n run_pipeline.sh failed: {proc.stderr}")
 
 
+class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
+    """Tests for collector-as-determiner leakage prevention, corpus authority duplicate screening, and exsiccatae conflict auditing."""
+
+    def test_collector_as_determiner_leakage_prevented_in_parse_determiner_tier(self):
+        """Specialist in recordedBy must NOT promote a generalist/student identifiedBy sheet to Tier_1_Gold unless identifiedBy is blank or references collector."""
+        # 1. Specialist collected, student determined at local herbarium -> Tier_3_Bronze (NOT Tier_1_Gold)
+        tier_student_local, _, det_raw_1 = parse_determiner_tier(
+            type_status_raw="",
+            identified_by_raw="J. Undergrad Student",
+            recorded_by_raw="T.M. Barkley",
+            history_raw="",
+            institution_code_raw="UNCC",
+            locality_raw="Granite outcrop near Concord",
+            habitat_raw="Shallow sandy soil",
+        )
+        self.assertEqual(tier_student_local, "Tier_3_Bronze")
+        self.assertEqual(det_raw_1, "J. Undergrad Student")
+
+        # 2. Specialist collected, generalist determined at major research herbarium (NCU) -> Tier_2_Silver (NOT Tier_1_Gold)
+        tier_generalist_ncu, _, _ = parse_determiner_tier(
+            type_status_raw="",
+            identified_by_raw="J. Generalist",
+            recorded_by_raw="T.M. Barkley",
+            history_raw="",
+            institution_code_raw="NCU",
+            locality_raw="Wake Co., granite flatrock 3 km E of Rolesville",
+            habitat_raw="Granitic outcrop seepage margin",
+            dynamic_specialists={"mahoney", "kowal"},
+        )
+        self.assertEqual(tier_generalist_ncu, "Tier_2_Silver")
+
+        # 3. Dynamic corpus specialist in recordedBy, student in identifiedBy -> NOT Tier_1_Gold
+        tier_dyn_leak, _, _ = parse_determiner_tier(
+            type_status_raw="",
+            identified_by_raw="Field Intern",
+            recorded_by_raw="A.M. Mahoney",
+            history_raw="",
+            institution_code_raw="UNCC",
+            locality_raw="Roadside meadow",
+            habitat_raw="",
+            dynamic_specialists={"mahoney"},
+        )
+        self.assertNotEqual(tier_dyn_leak, "Tier_1_Gold")
+
+        # 4. Specialist collected, identifiedBy is blank or explicitly references collector -> Tier_1_Gold
+        for id_by in ["", "collector", "id. by collector", "same"]:
+            with self.subTest(identified_by=id_by):
+                tier_fb, _, _ = parse_determiner_tier(
+                    type_status_raw="",
+                    identified_by_raw=id_by,
+                    recorded_by_raw="T.M. Barkley",
+                    history_raw="",
+                    institution_code_raw="UNCC",
+                    locality_raw="Prairie slope",
+                    habitat_raw="",
+                )
+                self.assertEqual(tier_fb, "Tier_1_Gold")
+
+    def test_discover_corpus_authorities_disqualifies_high_duplicate_disagreement(self):
+        """Candidate corpus specialists with >25% cross-duplicate taxonomic disagreement across shared exsiccatae_key groups are disqualified."""
+        from scripts.core.harvester import discover_corpus_authorities
+
+        rows = []
+        insts = ["NCU", "NY", "MO", "GH", "US", "BRIT"]
+        # Consistent determiner: 6 determinations across 6 herbaria, 3 duplicate groups all concordant (0% disagreement)
+        for i in range(6):
+            grp_num = 100 + (i // 2)
+            rows.append({
+                "catalogNumber": f"CONS-{i:02d}",
+                "institutionCode": insts[i],
+                "scientificName": "Packera obovata",
+                "identifiedBy": "E.R. Consistent",
+                "recordedBy": "R. Collector",
+                "recordNumber": str(grp_num),
+                "eventDate": "2020-05-10",
+            })
+
+        # Noisy determiner: 6 determinations of Packera aurea across 6 herbaria,
+        # participating in 3 duplicate groups where 2 of 3 (66.7% > 25%) have duplicate sheets determined as Packera obovata
+        for i in range(6):
+            grp_num = 200 + (i % 3)
+            rows.append({
+                "catalogNumber": f"NOISY-{i:02d}",
+                "institutionCode": insts[i],
+                "scientificName": "Packera aurea",
+                "identifiedBy": "B.L. Noisy",
+                "recordedBy": "R. Collector",
+                "recordNumber": str(grp_num),
+                "eventDate": "2021-04-18",
+            })
+        # Add conflicting duplicate partners for groups 200 and 201 (2 of 3 duplicate groups conflicted = 66.7%)
+        rows.append({
+            "catalogNumber": "DUP-PARTNER-200",
+            "institutionCode": "TENN",
+            "scientificName": "Packera obovata",
+            "identifiedBy": "T.M. Barkley",
+            "recordedBy": "R. Collector",
+            "recordNumber": "200",
+            "eventDate": "2021-04-18",
+        })
+        rows.append({
+            "catalogNumber": "DUP-PARTNER-201",
+            "institutionCode": "DUKE",
+            "scientificName": "Packera obovata",
+            "identifiedBy": "T.M. Barkley",
+            "recordedBy": "R. Collector",
+            "recordNumber": "201",
+            "eventDate": "2021-04-18",
+        })
+
+        dyn_specs, _ = discover_corpus_authorities(pd.DataFrame(rows))
+        self.assertIn("consistent", dyn_specs)
+        self.assertNotIn("noisy", dyn_specs)
+
+    def test_stratify_duplicates_conflict_elevation_sqlite_persistence_and_26_col_csv(self):
+        """Conflicting Tier_3_Bronze home-herbarium primary duplicate elevates Tier_1_Gold duplicate determination, logs to SQLite, and preserves 26-column CSV."""
+        import sqlite3
+        from scripts.core.harvester import EXPORT_COLUMNS
+
+        df_in = pd.DataFrame([
+            {
+                "catalogNumber": "NCU-DUP-1",
+                "institutionCode": "NCU",
+                "scientificName": "Packera aurea",
+                "species_raw": "Packera aurea",
+                "recordedBy": "J. B. Fuller",
+                "recordNumber": "1042",
+                "identifiedBy": "Field Student",
+                "determiner_raw": "Field Student",
+                "determiner_tier": "Tier_3_Bronze",
+                "type_status": "",
+                "county": "Wake",
+                "stateProvince": "North Carolina",
+                "decimalLatitude": 35.85,
+                "latitude": 35.85,
+                "decimalLongitude": -78.55,
+                "longitude": -78.55,
+                "coordinateUncertainty": 50.0,
+                "year": 2022,
+                "month": 5,
+                "day": 1,
+                "eventDate": "2022-05-01",
+                "regional_group": "Piedmont",
+                "image_path": "",
+            },
+            {
+                "catalogNumber": "MO-DUP-2",
+                "institutionCode": "MO",
+                "scientificName": "Packera obovata",
+                "species_raw": "Packera obovata",
+                "recordedBy": "J. B. Fuller",
+                "recordNumber": "1042",
+                "identifiedBy": "T.M. Barkley",
+                "determiner_raw": "T.M. Barkley",
+                "determiner_tier": "Tier_1_Gold",
+                "type_status": "",
+                "county": "Wake",
+                "stateProvince": "North Carolina",
+                "decimalLatitude": 35.85,
+                "latitude": 35.85,
+                "decimalLongitude": -78.55,
+                "longitude": -78.55,
+                "coordinateUncertainty": 50.0,
+                "year": 2022,
+                "month": 5,
+                "day": 1,
+                "eventDate": "2022-05-01",
+                "regional_group": "Piedmont",
+                "image_path": "",
+            },
+        ])
+
+        strat_df = stratify_duplicates(df_in, home_herbarium="NCU")
+        self.assertTrue(strat_df["exsiccatae_taxonomic_conflict"].all())
+        self.assertTrue((strat_df["exsiccatae_gold_taxon"] == "Packera obovata").all())
+
+        prim = strat_df[strat_df["catalogNumber"] == "NCU-DUP-1"].iloc[0]
+        self.assertTrue(bool(prim["is_primary_duplicate"]))
+        self.assertEqual(prim["scientificName"], "Packera obovata")
+        self.assertEqual(prim["determiner_tier"], "Tier_1_Gold")
+        # Verbatim original determination fields remain intact for auditability
+        self.assertEqual(prim["species_raw"], "Packera aurea")
+        self.assertEqual(prim["determiner_raw"], "Field Student")
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            tmp_p = Path(tmp_d)
+            out_csv = tmp_p / "curated_vouchers.csv"
+            db_path = tmp_p / "test_packera.sqlite"
+            export_curated_table(strat_df, out_csv, home_herbarium="NCU", db_path=db_path)
+
+            csv_df = pd.read_csv(out_csv)
+            self.assertEqual(list(csv_df.columns), EXPORT_COLUMNS)
+            self.assertEqual(len(csv_df.columns), 26)
+
+            conn = sqlite3.connect(str(db_path))
+            try:
+                row_db = conn.execute(
+                    "SELECT scientificName, determiner_tier, exsiccatae_taxonomic_conflict, exsiccatae_gold_taxon "
+                    "FROM vouchers WHERE catalogNumber = 'NCU-DUP-1'"
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertIsNotNone(row_db)
+            self.assertEqual(row_db[0], "Packera obovata")
+            self.assertEqual(row_db[1], "Tier_1_Gold")
+            self.assertEqual(int(row_db[2]), 1)
+            self.assertEqual(row_db[3], "Packera obovata")
+
+
 if __name__ == "__main__":
     unittest.main()
 

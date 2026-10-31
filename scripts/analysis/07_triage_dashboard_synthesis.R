@@ -229,12 +229,55 @@ compute_cohens_kappa <- function(y_true, y_pred, default_kappa = 0.70) {
   max(0.05, min(0.99, round(kappa_val, 4)))
 }
 
-compute_modality_reliability_weights <- function(df) {
-  # Evaluates out-of-fold Cohen's kappa (w_m = max(0.05, kappa_m)) on Tier_1_Gold + Tier_2_Silver anchors
-  n <- nrow(df); if (n == 0L) return(c(morph = 0.80, vision = 0.75, edaphic = 0.65, pheno = 0.55))
+.resolve_step07_anchor_mask <- function(df) {
+  n <- nrow(df)
+  if (n == 0L) return(logical(0))
   tier_col <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
-  anchor_mask <- tier_col %in% c("Tier_1_Gold", "Tier_2_Silver")
+  promo_mask <- rep(FALSE, n)
+  for (pcol in intersect(c("is_promoted_anchor", "is_promoted_bronze"), names(df))) {
+    pv <- suppressWarnings(as.logical(df[[pcol]]))
+    pv[is.na(pv)] <- FALSE
+    promo_mask <- promo_mask | pv
+  }
+  anchor_mask <- (tier_col %in% c("Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze_Promoted")) | promo_mask
   if (sum(anchor_mask, na.rm = TRUE) < 4L) anchor_mask <- rep(TRUE, n)
+  anchor_mask
+}
+
+.compute_oof_class_precision_map <- function(y_true_vec, y_pred_vec, prior_alpha = 0.5) {
+  ok <- !is.na(y_true_vec) & !is.na(y_pred_vec) & nzchar(y_true_vec) & nzchar(y_pred_vec) &
+        (y_true_vec != "Unknown") & (y_pred_vec != "Unknown")
+  if (sum(ok) < 6L) return(numeric(0))
+  yt <- as.character(y_true_vec[ok])
+  yp <- as.character(y_pred_vec[ok])
+  true_taxa <- sort(unique(yt))
+  all_taxa <- sort(unique(c(true_taxa, yp)))
+  if (length(true_taxa) < 2L || length(all_taxa) < 2L) return(numeric(0))
+  K_cols <- length(all_taxa)
+  # Out-of-fold anchor confusion matrix C^{(m)}_{k,j} = P(y_hat_m = j | y_true = k)
+  C_mat <- matrix(0.0, nrow = length(true_taxa), ncol = K_cols, dimnames = list(true_taxa, all_taxa))
+  for (k_tx in true_taxa) {
+    idx_k <- which(yt == k_tx)
+    n_k <- length(idx_k)
+    for (j_tx in all_taxa) {
+      cnt_kj <- sum(yp[idx_k] == j_tx)
+      C_mat[k_tx, j_tx] <- (cnt_kj + prior_alpha / K_cols) / (n_k + prior_alpha)
+    }
+  }
+  prec_out <- stats::setNames(rep(1.0, K_cols), all_taxa)
+  for (j_tx in all_taxa) {
+    col_sum <- sum(C_mat[, j_tx])
+    diag_val <- if (j_tx %in% rownames(C_mat)) C_mat[j_tx, j_tx] else (prior_alpha / K_cols)
+    prec_j <- if (is.finite(col_sum) && col_sum > 1e-12) (diag_val / col_sum) else 1.0
+    prec_out[[j_tx]] <- min(1.0, max(0.05, round(prec_j, 4)))
+  }
+  prec_out
+}
+
+compute_modality_reliability_weights <- function(df) {
+  # Evaluates out-of-fold Cohen's kappa (w_m = max(0.05, kappa_m)) on Gold/Silver/promoted anchors
+  n <- nrow(df); if (n == 0L) return(c(morph = 0.80, vision = 0.75, edaphic = 0.65, pheno = 0.55))
+  anchor_mask <- .resolve_step07_anchor_mask(df)
   sub_a <- df[anchor_mask, , drop = FALSE]; y_true <- as.character(sub_a$species_standardized)
 
   m_pure <- if ("morph_tier_source" %in% names(sub_a)) (is.na(sub_a$morph_tier_source) | sub_a$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(sub_a))
@@ -242,8 +285,13 @@ compute_modality_reliability_weights <- function(df) {
   def_morph <- if ("loocv_accuracy" %in% names(df) && any(is.finite(as.numeric(df$loocv_accuracy)))) stats::median(as.numeric(df$loocv_accuracy), na.rm = TRUE) else 0.80
   w_morph <- max(0.05, compute_cohens_kappa(y_true[m_pure], y_morph[m_pure], default_kappa = def_morph))
 
+  fg_a <- if ("foreground_attention_ratio" %in% names(sub_a)) suppressWarnings(as.numeric(sub_a$foreground_attention_ratio)) else rep(NA_real_, nrow(sub_a))
+  art_a <- (if ("is_artifact_driven" %in% names(sub_a)) (!is.na(sub_a$is_artifact_driven) & as.logical(sub_a$is_artifact_driven)) else rep(FALSE, nrow(sub_a))) |
+           (if ("is_background_shortcut" %in% names(sub_a)) (!is.na(sub_a$is_background_shortcut) & as.logical(sub_a$is_background_shortcut)) else rep(FALSE, nrow(sub_a))) |
+           (is.finite(fg_a) & fg_a < 0.65)
+  vis_ok <- !art_a
   y_vis <- if ("vision_predicted_label" %in% names(sub_a)) as.character(sub_a$vision_predicted_label) else rep(NA_character_, nrow(sub_a))
-  w_vis <- max(0.05, compute_cohens_kappa(y_true, y_vis, default_kappa = 0.75))
+  w_vis <- max(0.05, compute_cohens_kappa(y_true[vis_ok], y_vis[vis_ok], default_kappa = 0.75))
 
   y_edaph <- if ("edaphic_best_fit_taxon" %in% names(sub_a)) as.character(sub_a$edaphic_best_fit_taxon) else rep(NA_character_, nrow(sub_a))
   def_edaph <- if ("spatial_block_cv_acc" %in% names(df) && any(is.finite(as.numeric(df$spatial_block_cv_acc)))) stats::median(as.numeric(df$spatial_block_cv_acc), na.rm = TRUE) else 0.65
@@ -256,12 +304,33 @@ compute_modality_reliability_weights <- function(df) {
 }
 
 compute_probabilistic_consensus_scores <- function(df) {
-  # Dynamically renormalizes empirical reliability weights w_m = max(0.05, kappa_m)
-  # over the non-NA modalities present for each specimen: sum(w_m * p_conflict) / sum(w_m)
+  # Dynamically renormalizes empirical reliability weights modulated by OOF confusion-matrix
+  # per-taxon precision w_{i,m} = w_m * (0.5 + 0.5 * Precision_m(y_hat_{i,m})) over observed modalities
   n <- nrow(df); if (n == 0L) return(df)
   w_vec <- compute_modality_reliability_weights(df)
   df$w_morph_kappa <- w_vec[["morph"]]; df$w_vision_kappa <- w_vec[["vision"]]
   df$w_edaphic_kappa <- w_vec[["edaphic"]]; df$w_pheno_kappa <- w_vec[["pheno"]]
+
+  anchor_mask <- .resolve_step07_anchor_mask(df)
+  sub_a <- df[anchor_mask, , drop = FALSE]
+  y_true_a <- if ("species_standardized" %in% names(sub_a)) as.character(sub_a$species_standardized) else rep(NA_character_, nrow(sub_a))
+  m_pure_a <- if ("morph_tier_source" %in% names(sub_a)) (is.na(sub_a$morph_tier_source) | sub_a$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(sub_a))
+  y_morph_a <- if ("cda_predicted_taxon" %in% names(sub_a)) as.character(sub_a$cda_predicted_taxon) else rep(NA_character_, nrow(sub_a))
+  fg_a <- if ("foreground_attention_ratio" %in% names(sub_a)) suppressWarnings(as.numeric(sub_a$foreground_attention_ratio)) else rep(NA_real_, nrow(sub_a))
+  art_a <- (if ("is_artifact_driven" %in% names(sub_a)) (!is.na(sub_a$is_artifact_driven) & as.logical(sub_a$is_artifact_driven)) else rep(FALSE, nrow(sub_a))) |
+           (if ("is_background_shortcut" %in% names(sub_a)) (!is.na(sub_a$is_background_shortcut) & as.logical(sub_a$is_background_shortcut)) else rep(FALSE, nrow(sub_a))) |
+           (is.finite(fg_a) & fg_a < 0.65)
+  y_vis_a <- if ("vision_predicted_label" %in% names(sub_a)) as.character(sub_a$vision_predicted_label) else rep(NA_character_, nrow(sub_a))
+  y_edaph_a <- if ("edaphic_best_fit_taxon" %in% names(sub_a)) as.character(sub_a$edaphic_best_fit_taxon) else rep(NA_character_, nrow(sub_a))
+
+  prec_morph <- .compute_oof_class_precision_map(y_true_a[m_pure_a], y_morph_a[m_pure_a])
+  prec_vis   <- .compute_oof_class_precision_map(y_true_a[!art_a], y_vis_a[!art_a])
+  prec_edaph <- .compute_oof_class_precision_map(y_true_a, y_edaph_a)
+  lookup_prec <- function(pmap, pred_tx) {
+    if (length(pmap) == 0L || is.na(pred_tx) || !nzchar(pred_tx) || !(pred_tx %in% names(pmap))) return(1.0)
+    as.numeric(pmap[[pred_tx]])
+  }
+
   p_conf_out <- numeric(n); p_score_out <- numeric(n); n_mod_out <- integer(n)
 
   for (i in seq_len(n)) {
@@ -288,9 +357,15 @@ compute_probabilistic_consensus_scores <- function(df) {
     p_e <- if (!is.na(edaph_sp)) (if (edaph_sp != given_sp) (if (isTRUE(mm_conf_i)) 0.85 else 0.65) else 0.10) else if (has_geo && !is.na(mm_conf_i)) (if (isTRUE(mm_conf_i)) 0.75 else 0.10) else NA_real_
     p_p <- if (is_anth && is.finite(ddoy_r)) min(1.0, abs(ddoy_r) / 30.0) else NA_real_
 
+    w_i_vec <- c(
+      morph   = w_vec[["morph"]]   * (0.5 + 0.5 * lookup_prec(prec_morph, morph_sp)),
+      vision  = w_vec[["vision"]]  * (0.5 + 0.5 * lookup_prec(prec_vis, vis_sp)),
+      edaphic = w_vec[["edaphic"]] * (0.5 + 0.5 * lookup_prec(prec_edaph, edaph_sp)),
+      pheno   = w_vec[["pheno"]]
+    )
     p_vec <- c(morph = p_m, vision = p_v, edaphic = p_e, pheno = p_p)
     avail <- !is.na(p_vec) & is.finite(p_vec); n_mod_out[i] <- sum(avail)
-    p_conf_i <- if (any(avail)) sum(w_vec[avail] * p_vec[avail]) / sum(w_vec[avail]) else 0.0
+    p_conf_i <- if (any(avail)) sum(w_i_vec[avail] * p_vec[avail]) / sum(w_i_vec[avail]) else 0.0
     p_conf_out[i] <- round(min(1.0, max(0.0, p_conf_i)), 4); p_score_out[i] <- round(1.0 - p_conf_out[i], 4)
   }
   df$n_active_modalities <- n_mod_out; df$n_available_modalities <- n_mod_out
@@ -588,17 +663,36 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
                             (is.na(cda_prob) || cda_prob < 0.85) && (eff_c_err < 0.88) && (triage_cat != "Severe_Triple_Stream_Conflict")
 
     # Stage 1: Misidentification_Reassign BEFORE Hybrid_Introgressant (Schlick-Steiner et al. 2010; Padial et al. 2010)
+    # Require cross-modal non-contradiction for single-modality reassignments so a moderate single-stream
+    # outlier cannot override an active, trusted, high-confidence second stream confirming given_sp.
+    vis_non_contradict_morph <- (!vis_trusted_i) || is.null(vis_sp) || (!vis_is_taxon) ||
+                                (vis_sp == morph_sp) || vis_is_ood_i || (eff_c_err >= 0.35) ||
+                                (!is.na(cda_prob) && cda_prob >= 0.85)
+    morph_non_contradict_vis <- is.null(morph_sp) || (!morph_is_taxon) || (morph_sp == vis_sp) ||
+                                (!is_tier1_pure_i) || is.na(cda_prob) || (cda_prob < 0.75) ||
+                                (morph_sp != given_sp)
+
     single_morph_reassign <- morph_is_taxon && (morph_sp != given_sp) && !is.na(cda_prob) && (cda_prob >= cda_cut) &&
-                             (!vis_trusted_i || is.null(vis_sp) || vis_sp == morph_sp || vis_sp == given_sp || eff_c_err < 0.55)
+                             (!vis_trusted_i || is.null(vis_sp) || vis_sp == morph_sp || vis_sp == given_sp || eff_c_err < 0.55) &&
+                             vis_non_contradict_morph
     single_vis_reassign <- vis_trusted_i && !vis_is_ood_i && vis_is_taxon && (vis_sp != given_sp) && (eff_c_err >= vis_cut) &&
-                           (is.null(morph_sp) || morph_sp == vis_sp || morph_sp == given_sp || is.na(cda_prob) || cda_prob < 0.55)
+                           (is.null(morph_sp) || morph_sp == vis_sp || morph_sp == given_sp || is.na(cda_prob) || cda_prob < 0.55) &&
+                           morph_non_contradict_vis
+    two_stream_non_given <- both_alt_agree || morph_edaph_alt_agree || vis_edaph_alt_agree ||
+                            (morph_is_taxon && vis_trusted_i && !vis_is_ood_i && vis_is_taxon &&
+                             morph_sp != given_sp && vis_sp != given_sp)
     eff_triple_conflict <- (triage_cat == "Severe_Triple_Stream_Conflict") && !vis_is_ood_i &&
-                           (vis_trusted_i || morph_edaph_alt_agree || single_morph_reassign)
-    morph_or_vis_corrupt_reassign <- if (vis_trusted_i) {
-      ((eff_is_corrupt || is_mo_flag) && ((!is.na(cda_prob) && cda_prob >= 0.70) || eff_c_err >= 0.75 || !is_tier1_pure_i))
-    } else {
-      (is_mo_flag && !is.null(morph_sp) && morph_sp != given_sp && ((!is.na(cda_prob) && cda_prob >= 0.70) || !is_tier1_pure_i))
-    }
+                           (two_stream_non_given || single_morph_reassign || single_vis_reassign)
+    morph_corrupt_cand <- is_mo_flag && morph_is_taxon && (morph_sp != given_sp) &&
+                          ((!is.na(cda_prob) && cda_prob >= 0.70) || !is_tier1_pure_i) &&
+                          vis_non_contradict_morph
+    vis_corrupt_cand <- vis_trusted_i && !vis_is_ood_i && eff_is_corrupt && vis_is_taxon && (vis_sp != given_sp) &&
+                        (eff_c_err >= 0.75 || (!is.na(cda_prob) && cda_prob >= 0.70 && !is.null(morph_sp) && morph_sp != given_sp) || !is_tier1_pure_i) &&
+                        morph_non_contradict_vis
+    joint_corrupt_cand <- vis_trusted_i && (eff_is_corrupt || is_mo_flag) &&
+                          (!is.null(morph_sp) && morph_sp != given_sp) && (!is.null(vis_sp) && vis_sp != given_sp) &&
+                          ((!is.na(cda_prob) && cda_prob >= 0.70) || eff_c_err >= 0.75 || !is_tier1_pure_i)
+    morph_or_vis_corrupt_reassign <- morph_corrupt_cand || vis_corrupt_cand || joint_corrupt_cand
     is_severe_misid <- !is_taphonomic_plasticity && !is_crypt && !is_intermodal_mosaic && (
       both_alt_agree || morph_edaph_alt_agree || vis_edaph_alt_agree ||
       eff_triple_conflict || single_morph_reassign || single_vis_reassign ||

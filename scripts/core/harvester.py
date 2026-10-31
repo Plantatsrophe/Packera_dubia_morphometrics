@@ -746,6 +746,27 @@ def get_image_resolution_score(image_path_str: Optional[str], workspace_dir: Opt
     return 0.0
 
 
+def _resolve_row_standardized_packera(row: Mapping[str, Any]) -> str:
+    """Resolve standardized canonical 'Packera <epithet>' binomial from a voucher row."""
+    for col in ("species_standardized", "scientificName", "species_raw"):
+        if col not in row:
+            continue
+        raw_val = row.get(col)
+        if raw_val is None or (isinstance(raw_val, float) and math.isnan(raw_val)) or pd.isna(raw_val):
+            continue
+        s_txt = str(raw_val).strip()
+        if not s_txt:
+            continue
+        std = standardize_packera_taxon(s_txt)
+        if std:
+            return std
+        if s_txt.startswith("Packera "):
+            fb = _extract_canonical_binomial(s_txt, {"Packera"})
+            if fb:
+                return fb
+    return ""
+
+
 def stratify_duplicates(
     df: pd.DataFrame,
     max_distance_meters: float = 50.0,
@@ -772,11 +793,15 @@ def stratify_duplicates(
       - exsiccatae_key: Standardized signature string
       - is_primary_duplicate: Boolean flag (True for primary specimen, False for duplicates)
       - duplicate_count: Total sheets in this exsiccatae group
+      - exsiccatae_taxonomic_conflict: Boolean flag (True when duplicates disagree in Packera taxon)
+      - exsiccatae_gold_taxon: Standardized Packera determination held by Tier_1_Gold duplicate(s)
     """
     if df.empty:
         df["exsiccatae_key"] = pd.Series(dtype=str)
         df["is_primary_duplicate"] = pd.Series(dtype=bool)
         df["duplicate_count"] = pd.Series(dtype=int)
+        df["exsiccatae_taxonomic_conflict"] = pd.Series(dtype=bool)
+        df["exsiccatae_gold_taxon"] = pd.Series(dtype=str)
         return df
 
     df = df.copy()
@@ -930,19 +955,28 @@ def stratify_duplicates(
 
     df["exsiccatae_key"] = group_labels
 
-    # Pass 3: Evaluate Institutional Priority and designate is_primary_duplicate
+    # Pass 3: Cross-duplicate taxonomic conflict auditing, institutional priority,
+    # and Tier_1_Gold duplicate determination elevation onto conflicting Bronze primaries
     grouped = df.groupby("exsiccatae_key", sort=False)
     df["duplicate_count"] = grouped["catalogNumber"].transform("count")
 
+    idx_to_pos: Dict[Any, int] = {idx_lbl: pos for pos, idx_lbl in enumerate(df.index)}
     is_primary_list = [False] * n_rows
+    conflict_list = [False] * n_rows
+    gold_taxon_list = [""] * n_rows
+    elevations_to_apply: List[Tuple[Any, str, Any]] = []
 
     for key, group_df in grouped:
         indices = list(group_df.index)
         if len(indices) == 1:
-            is_primary_list[indices[0]] = True
+            is_primary_list[idx_to_pos[indices[0]]] = True
             continue
 
         scored_candidates = []
+        idx_to_std_tx: Dict[Any, str] = {}
+        idx_to_tier: Dict[Any, str] = {}
+        idx_to_score: Dict[Any, Tuple[Any, ...]] = {}
+
         for idx in indices:
             row = group_df.loc[idx]
 
@@ -967,19 +1001,87 @@ def stratify_duplicates(
 
             score_tuple = (has_type, is_home_herb, tier_score, res_score, cat_tiebreak)
             scored_candidates.append((score_tuple, idx))
+            idx_to_std_tx[idx] = _resolve_row_standardized_packera(row)
+            idx_to_tier[idx] = tier
+            idx_to_score[idx] = score_tuple
+
+        distinct_taxa = {tx for tx in idx_to_std_tx.values() if tx}
+        has_conflict = len(distinct_taxa) >= 2
+
+        gold_counts: Dict[str, int] = {}
+        gold_best_idx: Dict[str, Any] = {}
+        for idx in indices:
+            tx_i = idx_to_std_tx.get(idx, "")
+            if idx_to_tier.get(idx) == "Tier_1_Gold" and tx_i:
+                gold_counts[tx_i] = gold_counts.get(tx_i, 0) + 1
+                if tx_i not in gold_best_idx or idx_to_score[idx] > idx_to_score[gold_best_idx[tx_i]]:
+                    gold_best_idx[tx_i] = idx
+
+        best_gold_taxon = ""
+        best_gold_source_idx: Any = None
+        if gold_counts:
+            ranked_gold = sorted(
+                gold_counts.keys(),
+                key=lambda tx: (gold_counts[tx], idx_to_score[gold_best_idx[tx]]),
+                reverse=True,
+            )
+            best_gold_taxon = ranked_gold[0]
+            best_gold_source_idx = gold_best_idx[best_gold_taxon]
+
+        for idx in indices:
+            pos_i = idx_to_pos[idx]
+            conflict_list[pos_i] = has_conflict
+            gold_taxon_list[pos_i] = best_gold_taxon
 
         scored_candidates.sort(key=lambda x: x[0], reverse=True)
         primary_idx = scored_candidates[0][1]
-        is_primary_list[primary_idx] = True
+        is_primary_list[idx_to_pos[primary_idx]] = True
+
+        primary_tier = idx_to_tier.get(primary_idx, "")
+        primary_tx = idx_to_std_tx.get(primary_idx, "")
+        if (
+            best_gold_taxon
+            and best_gold_source_idx is not None
+            and primary_tier in {"Tier_3_Bronze", ""}
+            and primary_tx != best_gold_taxon
+        ):
+            elevations_to_apply.append((primary_idx, best_gold_taxon, best_gold_source_idx))
 
     df["is_primary_duplicate"] = is_primary_list
+    df["exsiccatae_taxonomic_conflict"] = conflict_list
+    df["exsiccatae_gold_taxon"] = gold_taxon_list
+
+    for prim_idx, gold_tx, gold_src_idx in elevations_to_apply:
+        gold_row = df.loc[gold_src_idx]
+        gold_cat = str(gold_row.get("catalogNumber", gold_src_idx)).strip()
+        gold_det = str(
+            gold_row.get("identifiedBy")
+            if (not pd.isna(gold_row.get("identifiedBy", "")) and str(gold_row.get("identifiedBy", "")).strip())
+            else (gold_row.get("determiner_raw", "") if not pd.isna(gold_row.get("determiner_raw", "")) else "")
+        ).strip() or "Tier_1_Gold specialist"
+        if "scientificName" in df.columns:
+            df.at[prim_idx, "scientificName"] = gold_tx
+        if "species_standardized" in df.columns:
+            df.at[prim_idx, "species_standardized"] = gold_tx
+        if "determiner_tier" in df.columns:
+            df.at[prim_idx, "determiner_tier"] = "Tier_1_Gold"
+        if "identifiedBy" in df.columns:
+            df.at[prim_idx, "identifiedBy"] = f"{gold_det} [exsiccatae Tier_1_Gold duplicate {gold_cat}]"
+        if logger:
+            prim_cat = str(df.loc[prim_idx].get("catalogNumber", prim_idx)).strip()
+            logger.info(
+                f"Exsiccatae Conflict Resolution: Elevated Tier_1_Gold determination '{gold_tx}' "
+                f"(from duplicate {gold_cat}) onto conflicting Tier_3_Bronze primary sheet {prim_cat}."
+            )
 
     if logger:
         n_prim = sum(is_primary_list)
         n_dup = n_rows - n_prim
+        n_conf = sum(1 for v in conflict_list if v)
         logger.info(
             f"Duplicate Stratification: Processed {n_rows} vouchers -> "
-            f"{n_prim} primary duplicate vouchers designated ({n_dup} duplicate sheets flagged)."
+            f"{n_prim} primary duplicate vouchers designated ({n_dup} duplicate sheets flagged, "
+            f"{n_conf} sheets in taxonomically conflicted duplicate groups)."
         )
 
     return df
@@ -1536,12 +1638,45 @@ def extract_protologue_authors(raw_names: Union[str, Iterable[Any]]) -> Set[str]
     return authors
 
 
+_MISSING_IDENTIFIED_BY_TOKENS: Set[str] = {
+    "", "none", "nan", "null", "na", "n/a", "<na>",
+    "unknown", "unassigned", "unspecified", "unrecorded", "not recorded", "not evident",
+}
+_COLLECTOR_REFERENCE_REGEX = re.compile(
+    r"^(?:(?:id(?:entified)?|det(?:ermined)?|annot(?:ated)?|ver(?:ified)?|conf(?:irmed)?)\.?\s*(?:by\s+)?)?"
+    r"(?:the\s+)?(?:collector(?:s)?|same(?:\s+as\s+collector(?:s)?)?)\.?$",
+    re.IGNORECASE,
+)
+
+
+def _is_missing_identified_by(val: Optional[Any]) -> bool:
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return True
+    return str(val).strip().lower() in _MISSING_IDENTIFIED_BY_TOKENS
+
+
+def _is_explicit_collector_reference(val: Optional[Any]) -> bool:
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return False
+    s = re.sub(r"\s+", " ", str(val).strip())
+    return bool(s and _COLLECTOR_REFERENCE_REGEX.match(s))
+
+
+def _should_fallback_to_collector(identified_by_val: Optional[Any]) -> bool:
+    return _is_missing_identified_by(identified_by_val) or _is_explicit_collector_reference(identified_by_val)
+
+
 def normalize_determiner_surnames(identified_by_raw: Optional[Any]) -> List[str]:
     """
     Normalizes Darwin Core `identifiedBy` strings into clean ASCII-folded determiner
     surnames, filtering out dates, prefixes, initials, and generic non-person strings.
     """
-    if identified_by_raw is None or (isinstance(identified_by_raw, float) and math.isnan(identified_by_raw)):
+    if (
+        identified_by_raw is None
+        or (isinstance(identified_by_raw, float) and math.isnan(identified_by_raw))
+        or _is_missing_identified_by(identified_by_raw)
+        or _is_explicit_collector_reference(identified_by_raw)
+    ):
         return []
     raw = str(identified_by_raw).strip()
     if not raw:
@@ -1597,6 +1732,7 @@ def normalize_determiner_surnames(identified_by_raw: Optional[Any]) -> List[str]
         if (
             len(surname) >= 3
             and surname not in GENERIC_DETERMINER_TOKENS
+            and surname not in {"collector", "collectors", "same"}
             and not any(tok in GENERIC_DETERMINER_TOKENS for tok in _fold_ascii(p).split() if tok in {"staff", "student", "students", "herbarium", "unknown", "anonymous"})
         ):
             if surname not in surnames:
@@ -1627,7 +1763,9 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
       - Dynamic Specialist Discovery (`dynamic_specialists`):
         1. Determiner (`identifiedBy`) has identified >= 5 specimens of a given Packera
            taxon across >= 3 distinct `institutionCode`s, OR
-        2. Determiner has annotated >= 1 verified type specimen in the corpus.
+        2. Determiner has annotated >= 1 verified type specimen in the corpus, AND
+        3. Determiner is NOT flagged with > 25% cross-duplicate disagreement across
+           shared `exsiccatae_key` duplicate groups when duplicate groups exist.
       - Dynamic Regional Research Herbarium Discovery (`dynamic_herbaria`):
         1. `institutionCode` holds >= 1 verified type specimen for target Packera taxa, OR
         2. `institutionCode` ranks in the top quartile of institutional holdings
@@ -1657,6 +1795,7 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
         else ("type_status" if "type_status" in df.columns else ("typeStatus" if "typeStatus" in df.columns else None))
     )
     inst_col = "institutionCode" if "institutionCode" in df.columns else None
+    has_exsiccatae_col = "exsiccatae_key" in df.columns
 
     # Track (determiner_surname, standardized_taxon) -> [count, set_of_institutions]
     det_taxon_counts: Dict[Tuple[str, str], int] = {}
@@ -1667,6 +1806,9 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
     inst_taxon_totals: Dict[Tuple[str, str], int] = {}
     inst_taxon_attributed: Dict[Tuple[str, str], int] = {}
 
+    # Track duplicate groups for cross-duplicate disagreement auditing (> 25% threshold)
+    group_entries: Dict[str, List[Tuple[str, List[str], bool]]] = {}
+
     for _, row in df.iterrows():
         raw_sp = row.get(sp_col) if sp_col else None
         std_sp = standardize_packera_taxon(raw_sp)
@@ -1674,13 +1816,18 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
             s_tmp = str(raw_sp).strip()
             if s_tmp.startswith("Packera "):
                 std_sp = _extract_canonical_binomial(s_tmp, {"Packera"})
+        if not std_sp:
+            std_sp = _resolve_row_standardized_packera(row)
 
         raw_inst = row.get(inst_col) if inst_col else ""
         inst = str(raw_inst if not pd.isna(raw_inst) else "").strip().upper()
         valid_inst = inst not in _INVALID_INSTITUTION_CODES
 
         raw_id = row.get(id_col) if id_col else ""
-        surnames = normalize_determiner_surnames(raw_id)
+        if _is_explicit_collector_reference(raw_id) and "recordedBy" in row:
+            surnames = normalize_determiner_surnames(row.get("recordedBy"))
+        else:
+            surnames = normalize_determiner_surnames(raw_id)
         has_attributed_det = len(surnames) > 0
 
         raw_type = row.get(type_col) if type_col else None
@@ -1707,10 +1854,58 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
                 if valid_inst:
                     det_taxon_insts.setdefault(dt_key, set()).add(inst)
 
+        dup_key = ""
+        if has_exsiccatae_col:
+            raw_ek = row.get("exsiccatae_key")
+            if raw_ek is not None and not pd.isna(raw_ek):
+                dup_key = str(raw_ek).strip()
+        if not dup_key and "recordNumber" in row:
+            r_num = row.get("recordNumber", "")
+            norm_num = normalize_record_number("" if pd.isna(r_num) else r_num)
+            if norm_num:
+                r_by = row.get("recordedBy", "")
+                norm_col = normalize_collector("" if pd.isna(r_by) else str(r_by))
+                ev_dt = row.get("eventDate", "")
+                norm_dt = normalize_event_date(
+                    "" if pd.isna(ev_dt) else str(ev_dt),
+                    year=row.get("year"),
+                    month=row.get("month"),
+                    day=row.get("day"),
+                )
+                dup_key = f"{norm_col}_{norm_num}_{norm_dt}"
+        if dup_key and std_sp:
+            pre_conf = bool(
+                "exsiccatae_taxonomic_conflict" in row
+                and not pd.isna(row.get("exsiccatae_taxonomic_conflict"))
+                and bool(row.get("exsiccatae_taxonomic_conflict"))
+            )
+            group_entries.setdefault(dup_key, []).append((std_sp, surnames, pre_conf))
+
     for dt_key, n_specimens in det_taxon_counts.items():
         n_insts = len(det_taxon_insts.get(dt_key, set()))
         if n_specimens >= 5 and n_insts >= 3:
             dynamic_specialists.add(dt_key[0])
+
+    # Disqualify candidate corpus authorities with > 25% cross-duplicate disagreement
+    det_dup_groups: Dict[str, Set[str]] = {}
+    det_conflicted_groups: Dict[str, Set[str]] = {}
+    for dup_key, entries in group_entries.items():
+        if len(entries) < 2:
+            continue
+        distinct_group_taxa = {e[0] for e in entries if e[0]}
+        is_conflicted_group = (len(distinct_group_taxa) >= 2) or any(e[2] for e in entries)
+        for _, entry_surnames, _ in entries:
+            for s_name in entry_surnames:
+                det_dup_groups.setdefault(s_name, set()).add(dup_key)
+                if is_conflicted_group:
+                    det_conflicted_groups.setdefault(s_name, set()).add(dup_key)
+
+    for s_name in list(dynamic_specialists):
+        dup_grps = det_dup_groups.get(s_name)
+        if dup_grps:
+            conf_grps = det_conflicted_groups.get(s_name, set())
+            if (len(conf_grps) / float(len(dup_grps))) > 0.25:
+                dynamic_specialists.discard(s_name)
 
     if inst_total_sheets:
         q75_holdings = float(np.percentile(list(inst_total_sheets.values()), 75))
@@ -1763,14 +1958,29 @@ def parse_determiner_tier(
     locality = "" if (locality_raw is None or (isinstance(locality_raw, float) and math.isnan(locality_raw))) else str(locality_raw).strip()
     habitat = "" if (habitat_raw is None or (isinstance(habitat_raw, float) and math.isnan(habitat_raw))) else str(habitat_raw).strip()
 
-    determiner_raw = identified_by if identified_by else (history if history else recorded_by)
-    combined_audit_text = f"{type_status} | {identified_by} | {history} | {recorded_by}"
+    explicit_collector = _is_explicit_collector_reference(identified_by)
+    fallback_to_collector = _should_fallback_to_collector(identified_by)
+
+    if explicit_collector and recorded_by:
+        determiner_raw = recorded_by
+    elif identified_by and not _is_missing_identified_by(identified_by):
+        determiner_raw = identified_by
+    else:
+        determiner_raw = history if history else (recorded_by if recorded_by else identified_by)
+
+    # Match SPECIALIST_PATTERNS strictly against determiner/annotation fields unless
+    # identified_by is blank/missing or explicitly references the collector
+    determiner_audit_text = (
+        f"{type_status} | {identified_by} | {history} | {recorded_by}"
+        if fallback_to_collector
+        else f"{type_status} | {identified_by} | {history}"
+    )
 
     is_type, type_status_clean = _is_verified_type_status(type_status)
 
     is_specialist = False
     for pattern in SPECIALIST_PATTERNS:
-        if re.search(pattern, combined_audit_text, re.IGNORECASE):
+        if re.search(pattern, determiner_audit_text, re.IGNORECASE):
             is_specialist = True
             break
 
@@ -1784,11 +1994,14 @@ def parse_determiner_tier(
                 dyn_spec_set.add(s_tok)
                 dyn_spec_set.add(_fold_ascii(s_tok))
         if dyn_spec_set:
-            det_surnames = set(normalize_determiner_surnames(identified_by) + normalize_determiner_surnames(history))
+            det_sources = [identified_by, history] + ([recorded_by] if fallback_to_collector else [])
+            det_surnames: Set[str] = set()
+            for src in det_sources:
+                det_surnames.update(normalize_determiner_surnames(src))
             if det_surnames & dyn_spec_set:
                 is_specialist = True
             else:
-                det_audit_raw = f"{identified_by} | {history}".lower()
+                det_audit_raw = " | ".join(det_sources).lower()
                 det_audit_ascii = _fold_ascii(det_audit_raw)
                 for spec_tok in dyn_spec_set:
                     pat = rf"(?<![a-zA-ZÀ-ÿ]){re.escape(spec_tok)}(?![a-zA-ZÀ-ÿ])"
@@ -1802,10 +2015,11 @@ def parse_determiner_tier(
     dyn_herb_set = {str(h).strip().upper() for h in dynamic_herbaria if h} if dynamic_herbaria else set()
     is_major_herbarium = (institution in MAJOR_HERBARIA_CODES) or (institution in dyn_herb_set)
     has_rich_locality = len(locality) > 10 or len(habitat) > 5
+    eff_silver_det = recorded_by if (explicit_collector and recorded_by) else identified_by
     has_determiner = bool(
-        identified_by
-        and identified_by.lower() not in GENERIC_DETERMINER_TOKENS
-        and len(normalize_determiner_surnames(identified_by)) > 0
+        eff_silver_det
+        and eff_silver_det.lower() not in GENERIC_DETERMINER_TOKENS
+        and len(normalize_determiner_surnames(eff_silver_det)) > 0
     )
 
     if is_major_herbarium and has_rich_locality and has_determiner:
@@ -1879,7 +2093,7 @@ def apply_corpus_authority_tiers(
         hab_raw = row.get("_raw_habitat") if "_raw_habitat" in out.columns else row.get("habitat")
 
         raw_sci = row.get("scientificName") or row.get("species_raw")
-        std_sp = standardize_packera_taxon(raw_sci)
+        std_sp = standardize_packera_taxon(raw_sci) or _resolve_row_standardized_packera(row)
         row_proto_auths = set(taxon_protologue_map.get(std_sp, set())) if std_sp else set()
         row_proto_auths |= extract_protologue_authors([row.get("scientificName"), row.get("species_raw")])
 
@@ -1896,7 +2110,10 @@ def apply_corpus_authority_tiers(
         )
 
         prev_tier = str(row.get("determiner_tier", "") if not pd.isna(row.get("determiner_tier", "")) else "").strip()
-        if not has_locality_cols and prev_tier in tier_rank_map:
+        ex_gold = str(row.get("exsiccatae_gold_taxon", "") if not pd.isna(row.get("exsiccatae_gold_taxon", "")) else "").strip()
+        if prev_tier == "Tier_1_Gold" and ex_gold and std_sp == ex_gold:
+            tier_eval = "Tier_1_Gold"
+        elif not has_locality_cols and prev_tier in tier_rank_map:
             if tier_rank_map[tier_eval] < tier_rank_map[prev_tier]:
                 tier_eval = prev_tier
 
@@ -2768,11 +2985,20 @@ def export_curated_table(
         df = apply_corpus_authority_tiers(df)
         tiers_changed = df["determiner_tier"].astype(str).tolist() != prev_tiers
 
-        if tiers_changed or "exsiccatae_key" not in df.columns or "is_primary_duplicate" not in df.columns:
+        if (
+            tiers_changed
+            or "exsiccatae_key" not in df.columns
+            or "is_primary_duplicate" not in df.columns
+            or "exsiccatae_taxonomic_conflict" not in df.columns
+        ):
             df = stratify_duplicates(df, logger=logger, home_herbarium=home_herbarium)
 
+    _sqlite_only_cols = {"exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon"}
     cols_to_export = [col for col in EXPORT_COLUMNS if col in df.columns]
-    extra_cols = [c for c in df.columns if c not in cols_to_export and not c.startswith("_")]
+    extra_cols = [
+        c for c in df.columns
+        if c not in cols_to_export and not c.startswith("_") and c not in _sqlite_only_cols
+    ]
     final_cols = cols_to_export + extra_cols
 
     df_export = df[final_cols] if not df.empty else pd.DataFrame(columns=EXPORT_COLUMNS)
@@ -2799,7 +3025,8 @@ def export_curated_table(
                 try:
                     upsert_taxon_synonyms(conn, _DYNAMIC_SYNONYM_TO_CANONICAL, _DYNAMIC_TAXON_AUTHOR_STRINGS)
                     if not df_export.empty:
-                        db_records = df_export.to_dict(orient="records")
+                        sql_cols = list(final_cols) + [c for c in ("exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon") if c in df.columns and c not in final_cols]
+                        db_records = df[sql_cols].to_dict(orient="records")
                         for rec in db_records:
                             if not rec.get("species_standardized"):
                                 rec["species_standardized"] = standardize_packera_taxon(

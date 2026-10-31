@@ -1447,6 +1447,81 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"Step 06 composite handoff failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("STEP06_COMPOSITE_HANDOFF_OK", res.stdout)
 
+    def test_spatial_block_cv_oof_posterior_integration_in_edaphic_best_fit_taxon(self):
+        """Verify execute_crossmodal_consensus pools Spatial Block-CV OOF RF posteriors with PCA-env shrinkage Mahalanobis likelihoods."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        r_code = """
+        source("scripts/analysis/edaphic_fine_grain_utils.R")
+        source("scripts/analysis/06_multimodal_spatial_rf.R")
+
+        set.seed(106)
+        n6 <- 24
+        sp6 <- rep(c("Packera aurea", "Packera obovata"), each = n6 / 2)
+        df6 <- data.frame(
+          catalogNumber = sprintf("S6_%02d", seq_len(n6)),
+          plant_individual_id = 1L,
+          species_standardized = sp6,
+          analysis_group = sp6,
+          determiner_tier = rep(c("Tier_1_Gold", "Tier_2_Silver"), length.out = n6),
+          latitude = c(seq(35.0, 36.1, length.out = 12), seq(36.2, 37.3, length.out = 12)),
+          longitude = c(seq(-82.5, -81.4, length.out = 12), seq(-80.0, -78.9, length.out = 12)),
+          coordinateUncertaintyInMeters = rep(150.0, n6),
+          fine_soil_ph = c(rnorm(12, 5.2, 0.15), rnorm(12, 7.1, 0.15)),
+          fine_soil_sand = c(rnorm(12, 65.0, 3.0), rnorm(12, 28.0, 3.0)),
+          fine_bedrock_depth_cm = c(rnorm(12, 120.0, 8.0), rnorm(12, 35.0, 6.0)),
+          ssurgo_rock_outcrop_pct = c(rep(2.0, 12), rep(28.0, 12)),
+          topo_twi_30m = c(rnorm(12, 9.2, 0.3), rnorm(12, 4.8, 0.3)),
+          doy = rep(120, n6),
+          stringsAsFactors = FALSE
+        )
+        # Specimen 1 is a passive Bronze voucher misidentified as Packera aurea on calcareous shallow outcrop soil
+        df6$fine_soil_ph[1] <- 7.2
+        df6$fine_soil_sand[1] <- 26.0
+        df6$fine_bedrock_depth_cm[1] <- 33.0
+        df6$topo_twi_30m[1] <- 4.7
+        df6$determiner_tier[1] <- "Tier_3_Bronze"
+
+        srf6 <- compute_spatial_rf_mems(
+          df6,
+          c("fine_soil_ph", "fine_soil_sand", "fine_bedrock_depth_cm", "topo_twi_30m"),
+          n_trees = 60
+        )
+        stopifnot(!is.null(srf6$oof_prob_matrix))
+        stopifnot(nrow(srf6$oof_prob_matrix) == nrow(df6))
+
+        cons_mahal_only <- execute_crossmodal_consensus(df6, intraspecific_mode = FALSE, rf_res = NULL)
+        cons_pooled <- execute_crossmodal_consensus(df6, intraspecific_mode = FALSE, rf_res = srf6)
+        stopifnot("edaphic_best_fit_taxon" %in% names(cons_pooled))
+        stopifnot("edaphic_z_score" %in% names(cons_pooled))
+        stopifnot(cons_mahal_only$edaphic_best_fit_taxon[1] == "Packera obovata")
+        stopifnot(cons_pooled$edaphic_best_fit_taxon[1] == "Packera obovata")
+
+        # Verify RF posterior dominance when soil variables are ambiguous (midpoint) and RF posterior strongly favors Packera obovata
+        df_mid <- df6
+        df_mid$fine_soil_ph[2] <- mean(df6$fine_soil_ph)
+        df_mid$fine_soil_sand[2] <- mean(df6$fine_soil_sand)
+        df_mid$fine_bedrock_depth_cm[2] <- mean(df6$fine_bedrock_depth_cm)
+        df_mid$ssurgo_rock_outcrop_pct[2] <- mean(df6$ssurgo_rock_outcrop_pct)
+        df_mid$topo_twi_30m[2] <- mean(df6$topo_twi_30m)
+        synth_rf <- list(
+          oof_prob_matrix = matrix(
+            c(rep(c(0.90, 0.10), 1), c(0.03, 0.97), rep(c(0.90, 0.10), 10), rep(c(0.10, 0.90), 12)),
+            nrow = n6,
+            ncol = 2,
+            byrow = TRUE,
+            dimnames = list(NULL, c("Packera aurea", "Packera obovata"))
+          ),
+          spatial_block_cv_acc = 0.92
+        )
+        cons_rf_tiebreak <- execute_crossmodal_consensus(df_mid, intraspecific_mode = FALSE, rf_res = synth_rf)
+        stopifnot(cons_rf_tiebreak$edaphic_best_fit_taxon[2] == "Packera obovata")
+        cat("STEP06_RF_POSTERIOR_POOLING_OK\\n")
+        """
+        res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"Step 06 RF posterior pooling test failed:\n{res.stderr}\n{res.stdout}")
+        self.assertIn("STEP06_RF_POSTERIOR_POOLING_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

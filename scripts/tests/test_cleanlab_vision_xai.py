@@ -1129,6 +1129,122 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         self.assertIn("vision_is_ood", legacy_audit.columns)
         self.assertEqual(legacy_audit["vision_is_ood"].dtype, np.dtype(bool))
 
+    def test_promoted_bronze_anchor_alignment_and_conditional_abaxial_gate(self):
+        """Verify promoted Bronze anchors (<8 Gold/Silver) enter OOF/OOD and abaxial filtering preserves structural reassignments without chromatic discordance."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            dense_dir = tmp_p / "cropped_patches" / "rosettes_dense"
+            dense_dir.mkdir(parents=True)
+            for fname in ("CAT_MULTI_p0_rosette.jpg", "CAT_MULTI_p1_rosette.jpg", "CAT_RARE_p0_rosette.jpg"):
+                Image.new("RGB", (240, 240), color=(45, 95, 35)).save(dense_dir / fname)
+
+            vouchers_csv = tmp_p / "curated_vouchers.csv"
+            pd.DataFrame({
+                "catalogNumber": ["CAT_MULTI", "CAT_RARE"],
+                "species_raw": ["Packera aurea", "Packera obovata"],
+                "determiner_tier": ["Tier_3_Bronze", "Tier_3_Bronze"],
+                "institutionCode": ["NCU", "NY"],
+            }).to_csv(vouchers_csv, index=False)
+
+            morph_csv = tmp_p / "morphometric_flags.csv"
+            pd.DataFrame({
+                "catalogNumber": ["CAT_MULTI", "CAT_MULTI", "CAT_RARE"],
+                "plant_individual_id": [0, 1, 0],
+                "is_promoted_bronze": [True, False, False],
+                "anchor_tier_source": ["Tier_3_Bronze_Promoted", "Tier_3_Bronze_Passive", "Tier_3_Bronze_Promoted"],
+            }).to_csv(morph_csv, index=False)
+
+            linked_df, _ = mod_xai.load_and_link_rosette_patches(
+                rosette_dir=tmp_p / "cropped_patches",
+                vouchers_csv=vouchers_csv,
+                morphometrics_csv=morph_csv,
+            )
+            promo_by_key = dict(
+                zip(zip(linked_df["catalogNumber"], linked_df["plant_individual_id"]), linked_df["is_promoted_bronze"])
+            )
+            self.assertEqual(
+                promo_by_key,
+                {("CAT_MULTI", 0): True, ("CAT_MULTI", 1): False, ("CAT_RARE", 0): True},
+            )
+
+        # Taxon 0 has 8 Gold anchors (sufficient -> Bronze NOT promoted); Taxon 1 has only 2 Gold + 4 Promoted Bronze (<8 GS -> promoted Bronze included at weight 1.0)
+        rng = np.random.default_rng(2026)
+        labels = np.array([0] * 10 + [1] * 8, dtype=int)
+        tiers = (
+            ["Tier_1_Gold"] * 8 + ["Tier_3_Bronze", "Tier_3_Bronze"]
+            + ["Tier_1_Gold"] * 2 + ["Tier_3_Bronze"] * 6
+        )
+        promo_flags = np.array(
+            [False] * 8 + [True, False]
+            + [False, False, True, True, True, True, False, False],
+            dtype=bool,
+        )
+        anc_mask, anc_weights = mod_xai._resolve_adaptive_anchors(labels, tiers, promo_flags)
+        # Taxon 0 already has 8 Gold anchors -> index 8 (promoted flag True) stays passive
+        self.assertFalse(bool(anc_mask[8]))
+        # Taxon 1 has 2 Gold (<8) -> indices 12..15 (promoted Bronze) become active anchors with weight 1.0, while 16..17 remain passive
+        self.assertEqual(anc_mask[10:18].tolist(), [True, True, True, True, True, True, False, False])
+        np.testing.assert_allclose(anc_weights[12:16], np.ones(4), atol=1e-6)
+
+        X = rng.normal(0.0, 0.10, size=(len(labels), 64)).astype(np.float32)
+        X[labels == 0, :16] += 4.0
+        X[labels == 1, 16:32] += 4.0
+        # Corrupt the 2 unpromoted passive Bronze rows in Taxon 1 (indices 16, 17) to look like Taxon 0
+        X[16:18, 16:32] = 0.0
+        X[16:18, :16] += 4.0
+
+        oof_probs, oof_acc, _ = compute_out_of_fold_probabilities(
+            features=X,
+            labels=labels,
+            n_splits=3,
+            determiner_tiers=tiers,
+            is_promoted_bronze=promo_flags,
+        )
+        self.assertGreaterEqual(oof_acc, 0.90)
+        self.assertEqual(int(np.argmax(oof_probs[16])), 0)
+        self.assertEqual(int(np.argmax(oof_probs[17])), 0)
+
+        ood_with_promo = compute_feature_space_ood_scores(
+            features=X,
+            labels=labels,
+            pred_probs=oof_probs,
+            determiner_tiers=tiers,
+            is_promoted_bronze=promo_flags,
+        )
+        self.assertEqual(len(ood_with_promo), len(labels))
+        self.assertTrue(np.all((ood_with_promo >= 0.0) & (ood_with_promo <= 1.0)))
+
+        # Conditional abaxial gate test in run_confident_learning_audit
+        abax_records = pd.DataFrame({
+            "catalogNumber": ["ABAX_TOMENTUM", "ABAX_LOW_CONF", "ABAX_LOW_FG", "ABAX_TRUE_MISID"],
+            "plant_individual_id": [0, 0, 0, 0],
+            "species_raw": ["Packera aurea"] * 4,
+            "surface_orientation": ["abaxial"] * 4,
+            "tomentum_taxon_discordance": [True, False, False, False],
+            "foreground_attention_ratio": [0.88, 0.88, 0.45, 0.86],
+        })
+        abax_probs = np.array([
+            [0.04, 0.96],  # high c_error=0.96, conf=0.96, BUT tomentum_taxon_discordance=True -> suppressed
+            [0.20, 0.80],  # conf=0.80 < 0.85, c_error=0.80 <= 0.88 -> suppressed
+            [0.05, 0.95],  # foreground_attention_ratio=0.45 < 0.65 -> suppressed
+            [0.05, 0.95],  # tomentum_taxon_discordance=False, conf=0.95 >= 0.85, c_error=0.95 > 0.88, fg=0.86 >= 0.65 -> PRESERVED!
+        ])
+        abax_audit = run_confident_learning_audit(
+            pred_probs=abax_probs,
+            labels=np.array([0, 0, 0, 0]),
+            records_df=abax_records,
+            class_names=["Packera aurea", "Packera obovata"],
+            error_threshold=0.85,
+            filter_abaxial_artifacts=True,
+        ).set_index("catalogNumber")
+
+        self.assertFalse(bool(abax_audit.loc["ABAX_TOMENTUM", "is_label_corrupted"]))
+        self.assertFalse(bool(abax_audit.loc["ABAX_TOMENTUM", "is_label_issue"]))
+        self.assertFalse(bool(abax_audit.loc["ABAX_LOW_CONF", "is_label_corrupted"]))
+        self.assertFalse(bool(abax_audit.loc["ABAX_LOW_FG", "is_label_corrupted"]))
+        self.assertTrue(bool(abax_audit.loc["ABAX_TRUE_MISID", "is_label_corrupted"]))
+        self.assertTrue(bool(abax_audit.loc["ABAX_TRUE_MISID", "is_label_issue"]))
+
 
 if __name__ == "__main__":
     unittest.main()

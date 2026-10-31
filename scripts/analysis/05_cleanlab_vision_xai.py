@@ -168,18 +168,36 @@ class RosettePatchDataset(Dataset):
 
 def _parse_pid(val: Any, default: int = 0) -> int:
     s = "" if (val is None or pd.isna(val)) else str(val).strip()
-    if not s or s.lower() in {"nan", "na", "none", "null", "<na>"}: return default
-    try: return int(float(s))
+    try: return default if (not s or s.lower() in {"nan", "na", "none", "null", "<na>"}) else int(float(s))
     except Exception: return default
+def _is_truthy(val: Any) -> bool:
+    if val is None or isinstance(val, (list, tuple, dict, set, np.ndarray, pd.Series)): return False
+    if isinstance(val, (bool, np.bool_)): return bool(val)
+    try:
+        if bool(pd.isna(val)): return False
+    except Exception: pass
+    return (float(val) != 0.0) if isinstance(val, (int, float, np.number)) else (str(val).strip().lower() in {"true", "1", "1.0", "t", "yes"})
+def _row_promoted_bronze(d: Any) -> bool:
+    return bool(_is_truthy(d.get("is_promoted_bronze")) or _is_truthy(d.get("is_promoted_anchor")) or str(d.get("anchor_tier_source", "") or "").strip() == "Tier_3_Bronze_Promoted" or str(d.get("determiner_tier", "") or "").strip() == "Tier_3_Bronze_Promoted")
+def _merge_promoted_bronze_flags(df: pd.DataFrame, morph_csv: Optional[Path] = None) -> pd.DataFrame:
+    if df.empty: return df.assign(is_promoted_bronze=pd.Series(dtype=bool)) if "is_promoted_bronze" not in df.columns else df
+    out = df.copy(); out["is_promoted_bronze"] = pd.Series([_row_promoted_bronze(r) for r in out.to_dict("records")], index=out.index, dtype=bool)
+    if morph_csv is None or not Path(morph_csv).is_file(): return out
+    m_df = pd.read_csv(morph_csv)
+    if m_df.empty or "catalogNumber" not in m_df.columns or not ({"is_promoted_bronze", "is_promoted_anchor", "anchor_tier_source"} & set(m_df.columns)): return out
+    m_sub, has_m_pid = pd.DataFrame({"catalogNumber": m_df["catalogNumber"].astype(str).str.strip(), "_mp": [_row_promoted_bronze(r) for r in m_df.to_dict("records")]}), ("plant_individual_id" in m_df.columns)
+    if has_m_pid: m_sub["plant_individual_id"] = [_parse_pid(v, 0) for v in m_df["plant_individual_id"]]
+    j_cols = ["catalogNumber", "plant_individual_id"] if has_m_pid else ["catalogNumber"]
+    l_df = pd.DataFrame({"catalogNumber": out["catalogNumber"].astype(str).str.strip(), **({"plant_individual_id": ([_parse_pid(v, 0) for v in out["plant_individual_id"]] if "plant_individual_id" in out.columns else 0)} if has_m_pid else {})}, index=out.index)
+    out["is_promoted_bronze"] = (out["is_promoted_bronze"].to_numpy(dtype=bool) | l_df.merge(m_sub.drop_duplicates(subset=j_cols, keep="first"), on=j_cols, how="left")["_mp"].fillna(False).astype(bool).to_numpy()).astype(bool)
+    return out
 def _extract_catalog_number(stem: str, known_catalogs: Optional[set] = None) -> str:
     cleaned = re.sub(r"_(?:p\d+_)?(?:rosette|leaf|patch|crop).*$", "", stem, flags=re.IGNORECASE)
-    if known_catalogs and (stem in known_catalogs or cleaned in known_catalogs): return stem if stem in known_catalogs else cleaned
-    return cleaned if cleaned else stem.split("_")[0]
+    return (stem if stem in known_catalogs else cleaned) if (known_catalogs and (stem in known_catalogs or cleaned in known_catalogs)) else (cleaned or stem.split("_")[0])
 def _extract_pid_from_stem(stem: str, known_catalogs: Optional[set] = None) -> Optional[int]:
-    if known_catalogs and stem in known_catalogs: return None
-    m = re.search(r"_p(\d+)_(?:rosette|leaf|patch|crop)", stem, flags=re.IGNORECASE)
+    m = None if (known_catalogs and stem in known_catalogs) else re.search(r"_p(\d+)_(?:rosette|leaf|patch|crop)", stem, flags=re.IGNORECASE)
     return int(m.group(1)) if m else None
-def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: bool = False, manifest_csv: Optional[Path] = None) -> Tuple[pd.DataFrame, Dict[str, int]]:
+def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: bool = False, manifest_csv: Optional[Path] = None, morphometrics_csv: Optional[Path] = None) -> Tuple[pd.DataFrame, Dict[str, int]]:
     """Links vouchers per `(catalogNumber, plant_individual_id)` to verified `Tier_1_Direct` basal leaf crops/masks (or `rosettes_dense` fallbacks) and maps taxa to `0..K-1`."""
     rosette_dir, vouchers_csv = Path(rosette_dir), Path(vouchers_csv)
     vouchers_df = pd.read_csv(vouchers_csv) if vouchers_csv.exists() else pd.DataFrame()
@@ -195,6 +213,7 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
     dense_dir, basal_dir = (rosette_dir if rosette_dir.name == "rosettes_dense" else (cropped_root / "rosettes_dense")), (rosette_dir if rosette_dir.name == "basal_leaves_raw" else (cropped_root / "basal_leaves_raw"))
     tier1_mask_dir = next((d for d in (data_root / "masks" / "tier1_intact", vouchers_csv.parent.parent / "masks" / "tier1_intact") if d.is_dir()), data_root / "masks" / "tier1_intact")
     if manifest_csv is None: manifest_csv = next((p for p in (vouchers_csv.parent / "extracted_leaf_manifest.csv", data_root / "tables" / "extracted_leaf_manifest.csv") if p.is_file()), None)
+    cand_morph = Path(morphometrics_csv) if (morphometrics_csv is not None and Path(morphometrics_csv).is_file()) else next((p for p in (vouchers_csv.parent / "morphometric_flags.csv", data_root / "tables" / "morphometric_flags.csv") if p.is_file()), None)
     tier1_by_key, tier1_by_cat, man_pids_by_cat, man_has_pid, seen_basal = {}, {}, {}, False, set()
     if manifest_csv is not None and Path(manifest_csv).is_file():
         man_df = pd.read_csv(manifest_csv); man_has_pid = "plant_individual_id" in man_df.columns
@@ -262,7 +281,7 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
             ros_patches, ros_masks = ([str(x) for x in p_list], ros_masks) if p_list else (list(t1_patches), list(t1_masks))
             prim_patch, prim_mask = (t1_patches[0] if t1_patches else ros_patches[0]), (t1_masks[0] if t1_masks else (ros_masks[0] if ros_masks else ""))
             p_mask_arr = _load_aligned_binary_mask(Path(prim_mask), _wh(Path(prim_patch))[::-1]) if (prim_mask and Path(prim_mask).is_file() and Path(prim_patch).is_file()) else None
-            records.append({"catalogNumber": cat_num, "plant_individual_id": int(pid), "patch_path": prim_patch, "mask_path": prim_mask, "rosette_patches": ros_patches, "rosette_masks": ros_masks, "tier1_leaf_patches": t1_patches, "tier1_leaf_masks": t1_masks, "tier1_leaf_weights": t1_weights, "n_rosette_patches": len(ros_patches), "taxon": std_taxon, "species_raw": raw_sp, "label_idx": 0, "institutionCode": str(meta.get("institutionCode", "UNKNOWN") or "UNKNOWN").strip(), "determiner_tier": str(meta.get("determiner_tier", "Tier_3_Bronze") or "Tier_3_Bronze"), "spatial_balance_weight": float(meta.get("spatial_balance_weight", 1.0) if pd.notna(meta.get("spatial_balance_weight", 1.0)) else 1.0), **classify_foliar_surface_orientation(prim_patch, plant_mask=p_mask_arr)})
+            records.append({"catalogNumber": cat_num, "plant_individual_id": int(pid), "patch_path": prim_patch, "mask_path": prim_mask, "rosette_patches": ros_patches, "rosette_masks": ros_masks, "tier1_leaf_patches": t1_patches, "tier1_leaf_masks": t1_masks, "tier1_leaf_weights": t1_weights, "n_rosette_patches": len(ros_patches), "taxon": std_taxon, "species_raw": raw_sp, "label_idx": 0, "institutionCode": str(meta.get("institutionCode", "UNKNOWN") or "UNKNOWN").strip(), "determiner_tier": str(meta.get("determiner_tier", "Tier_3_Bronze") or "Tier_3_Bronze"), "is_promoted_bronze": _row_promoted_bronze(meta), "spatial_balance_weight": float(meta.get("spatial_balance_weight", 1.0) if pd.notna(meta.get("spatial_balance_weight", 1.0)) else 1.0), **classify_foliar_surface_orientation(prim_patch, plant_mask=p_mask_arr)})
     elif not demo: raise RuntimeError(f"No whole-rosette or basal-leaf patch images found in '{dense_dir}', '{basal_dir}', or '{rosette_dir}'.")
     elif not vouchers_df.empty:
         seen_demo = set()
@@ -274,12 +293,12 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
                 for pid in pids_demo:
                     if (cat_num, pid) in seen_demo: continue
                     seen_demo.add((cat_num, pid)); synth_p = str(dense_dir / f"{cat_num}_p{pid}_rosette.jpg")
-                    records.append({"catalogNumber": cat_num, "plant_individual_id": int(pid), "patch_path": synth_p, "mask_path": "", "rosette_patches": [synth_p], "rosette_masks": [""], "tier1_leaf_patches": [], "tier1_leaf_masks": [], "tier1_leaf_weights": [], "n_rosette_patches": 1, "taxon": std_taxon, "species_raw": raw_sp, "label_idx": 0, "institutionCode": str(row.get("institutionCode", "UNKNOWN") or "UNKNOWN").strip(), "determiner_tier": str(row.get("determiner_tier", "Tier_3_Bronze") or "Tier_3_Bronze"), "spatial_balance_weight": 1.0, "surface_orientation": "adaxial", "mean_luminance": 0.0, "mean_saturation": 0.0, "high_brightness_ratio": 0.0})
+                    records.append({"catalogNumber": cat_num, "plant_individual_id": int(pid), "patch_path": synth_p, "mask_path": "", "rosette_patches": [synth_p], "rosette_masks": [""], "tier1_leaf_patches": [], "tier1_leaf_masks": [], "tier1_leaf_weights": [], "n_rosette_patches": 1, "taxon": std_taxon, "species_raw": raw_sp, "label_idx": 0, "institutionCode": str(row.get("institutionCode", "UNKNOWN") or "UNKNOWN").strip(), "determiner_tier": str(row.get("determiner_tier", "Tier_3_Bronze") or "Tier_3_Bronze"), "is_promoted_bronze": _row_promoted_bronze(row), "spatial_balance_weight": 1.0, "surface_orientation": "adaxial", "mean_luminance": 0.0, "mean_saturation": 0.0, "high_brightness_ratio": 0.0})
     class_to_idx = {taxon: idx for idx, taxon in enumerate(sorted({r["taxon"] for r in records if _is_valid_packera_taxon(r["taxon"])}))}
     for r in records: r["label_idx"] = class_to_idx.get(r["taxon"], 0)
-    out_df = pd.DataFrame(records) if records else pd.DataFrame(columns=["catalogNumber", "plant_individual_id"])
+    out_df = pd.DataFrame(records) if records else pd.DataFrame(columns=["catalogNumber", "plant_individual_id", "is_promoted_bronze"])
     if not out_df.empty: out_df["plant_individual_id"] = out_df["plant_individual_id"].astype(int)
-    return out_df, class_to_idx
+    return _merge_promoted_bronze_flags(out_df, cand_morph), class_to_idx
 
 def _aggregate_voucher_embeddings(raw_feats: np.ndarray, expanded_meta: List[Any], raw_fg_ratios: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, List[Any], Dict[Any, float]]:
     if len(raw_feats) == 0: return np.empty((0, 768), dtype=np.float32), np.array([], dtype=int), [], {}
@@ -381,45 +400,41 @@ def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "
     final_f = np.vstack([np.asarray(cache_hits[gk]["embedding"], dtype=np.float32) if gk in cache_hits else computed_feats[gk] for gk in spec_order])
     final_fg = {gk: (float(cache_hits[gk]["foreground_attention_ratio"]) if (gk in cache_hits and cache_hits[gk].get("foreground_attention_ratio") is not None) else computed_fg.get(gk, 0.85)) for gk in spec_order}
     return _finalize(final_f, np.array([spec_lbl[gk] for gk in spec_order], dtype=int), spec_order, final_fg)
-def compute_out_of_fold_probabilities(features: np.ndarray, labels: np.ndarray, n_splits: int = 5, random_state: int = 42, surface_orientations: Optional[np.ndarray | List[str] | pd.Series] = None, stratify_by_orientation: bool = False, determiner_tiers: Optional[np.ndarray | List[str] | pd.Series] = None, spatial_balance_weights: Optional[np.ndarray | List[float] | pd.Series] = None, institution_codes: Optional[np.ndarray | List[str] | pd.Series] = None) -> Tuple[np.ndarray, float, float]:
-    """Computes calibrated out-of-fold probabilities anchored on Gold/Silver reference specimens."""
-    X = np.asarray(features, dtype=np.float64)
-    X, labels = X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-8), np.asarray(labels, dtype=int)
-    tier_weight_map = {"Tier_1_Gold": 3.0, "Tier_2_Silver": 1.5, "Tier_3_Bronze": 0.5}
-    if determiner_tiers is not None and len(determiner_tiers) == len(labels):
-        tier_strs = [str(t).strip() for t in determiner_tiers]
-        sample_weights = np.array([tier_weight_map.get(t, 0.5) for t in tier_strs], dtype=np.float64)
-        anchor_mask = np.array([t in {"Tier_1_Gold", "Tier_2_Silver"} for t in tier_strs], dtype=bool)
-    else: sample_weights, anchor_mask = np.ones(len(labels), dtype=np.float64), np.ones(len(labels), dtype=bool)
+def _resolve_adaptive_anchors(labels: np.ndarray, determiner_tiers: Optional[Any] = None, is_promoted_bronze: Optional[Any] = None, min_gs: int = 8) -> Tuple[np.ndarray, np.ndarray]:
+    n = len(labels); promo = np.array([_is_truthy(v) for v in is_promoted_bronze], dtype=bool) if (is_promoted_bronze is not None and len(is_promoted_bronze) == n) else np.zeros(n, dtype=bool)
+    if determiner_tiers is None or len(determiner_tiers) != n: return np.ones(n, dtype=bool), np.ones(n, dtype=np.float64)
+    t_strs = [str(t).strip() for t in determiner_tiers]; gs_mask = np.array([t in {"Tier_1_Gold", "Tier_2_Silver"} for t in t_strs], dtype=bool)
+    promo_cand, anchor_mask = (promo | np.array([t == "Tier_3_Bronze_Promoted" for t in t_strs], dtype=bool)), gs_mask.copy()
+    weights = np.array([{"Tier_1_Gold": 3.0, "Tier_2_Silver": 1.5, "Tier_3_Bronze_Promoted": 1.0, "Tier_3_Bronze": 0.5}.get(t, 0.5) for t in t_strs], dtype=np.float64)
+    for c in np.unique(labels):
+        cls_m = labels == c
+        if int(np.sum(gs_mask & cls_m)) < min_gs: use_p = cls_m & promo_cand & (~gs_mask); anchor_mask[use_p] = True; weights[use_p] = 1.0
+    return anchor_mask, weights
+def compute_out_of_fold_probabilities(features: np.ndarray, labels: np.ndarray, n_splits: int = 5, random_state: int = 42, surface_orientations: Optional[np.ndarray | List[str] | pd.Series] = None, stratify_by_orientation: bool = False, determiner_tiers: Optional[np.ndarray | List[str] | pd.Series] = None, spatial_balance_weights: Optional[np.ndarray | List[float] | pd.Series] = None, institution_codes: Optional[np.ndarray | List[str] | pd.Series] = None, is_promoted_bronze: Optional[np.ndarray | List[bool] | pd.Series] = None) -> Tuple[np.ndarray, float, float]:
+    """Computes calibrated out-of-fold probabilities anchored on Gold/Silver (and Gold-poor promoted Bronze) reference specimens."""
+    X = np.asarray(features, dtype=np.float64); X, labels = X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-8), np.asarray(labels, dtype=int)
+    anchor_mask, sample_weights = _resolve_adaptive_anchors(labels, determiner_tiers, is_promoted_bronze)
     if spatial_balance_weights is not None and len(spatial_balance_weights) == len(sample_weights):
-        sp_w = np.asarray(spatial_balance_weights, dtype=np.float64)
-        sample_weights = sample_weights * np.where(np.isfinite(sp_w) & (sp_w > 0.0), np.clip(sp_w, 0.20, 3.00), 1.0)
-    unique_labels, label_counts = np.unique(labels, return_counts=True)
-    num_classes = max(2, (int(np.max(labels)) + 1) if len(labels) > 0 else 2)
+        sp_w = np.asarray(spatial_balance_weights, dtype=np.float64); sample_weights = sample_weights * np.where(np.isfinite(sp_w) & (sp_w > 0.0), np.clip(sp_w, 0.20, 3.00), 1.0)
+    unique_labels, label_counts = np.unique(labels, return_counts=True); num_classes = max(2, (int(np.max(labels)) + 1) if len(labels) > 0 else 2)
     pred_probs = np.zeros((len(labels), num_classes), dtype=np.float64)
     if len(unique_labels) < 2 or int(np.min(label_counts)) < 2:
         if len(X) == 0: return pred_probs, 1.0, 1.0
-        centroid = np.median(X[anchor_mask] if np.any(anchor_mask) else X, axis=0)
-        cos_dist = 1.0 - np.clip(X @ (centroid / max(float(np.linalg.norm(centroid)), 1e-8)), -1.0, 1.0)
+        centroid = np.median(X[anchor_mask] if np.any(anchor_mask) else X, axis=0); cos_dist = 1.0 - np.clip(X @ (centroid / max(float(np.linalg.norm(centroid)), 1e-8)), -1.0, 1.0)
         q95 = max(float(np.percentile(cos_dist, 95)) if len(cos_dist) >= 5 else float(np.max(cos_dist)) + 1e-6, 1e-6)
         is_outlier = (cos_dist > q95) & ((np.asarray([str(o).lower() for o in surface_orientations]) != "abaxial") if surface_orientations is not None else True)
         p_self = np.where(is_outlier, np.clip(0.10 * np.exp(-(cos_dist - q95) / q95), 0.01, 0.12), np.clip(1.0 - 0.50 * (cos_dist / q95), 0.50, 0.999))
-        for i, lbl in enumerate(labels):
-            c0 = int(lbl) % num_classes; pred_probs[i, c0], pred_probs[i, (c0 + 1) % num_classes] = p_self[i], 1.0 - p_self[i]
+        for i, lbl in enumerate(labels): c0 = int(lbl) % num_classes; pred_probs[i, c0], pred_probs[i, (c0 + 1) % num_classes] = p_self[i], 1.0 - p_self[i]
         return pred_probs, float(np.mean(~is_outlier)), float(np.mean(~is_outlier))
     u_anc, c_anc = np.unique(labels[anchor_mask], return_counts=True)
     if len(u_anc) < len(unique_labels) or int(np.min(c_anc)) < 2: anchor_mask, u_anc, c_anc = np.ones(len(labels), dtype=bool), unique_labels, label_counts
-    anchor_idx, bronze_idx = np.where(anchor_mask)[0], np.where(~anchor_mask)[0]
-    eff_splits = max(2, min(int(n_splits), int(np.min(c_anc))))
-    X_anc, y_anc, w_anc = X[anchor_idx], labels[anchor_idx], sample_weights[anchor_idx]
-    strat_anc = y_anc
+    anchor_idx, bronze_idx, eff_splits = np.where(anchor_mask)[0], np.where(~anchor_mask)[0], max(2, min(int(n_splits), int(np.min(c_anc))))
+    X_anc, y_anc, w_anc = X[anchor_idx], labels[anchor_idx], sample_weights[anchor_idx]; strat_anc, cv_splits = y_anc, None
     if stratify_by_orientation and surface_orientations is not None:
         compound = np.array([f"{l}_{o}" for l, o in zip(y_anc, np.asarray(surface_orientations)[anchor_idx])])
         if all(c >= eff_splits for c in np.unique(compound, return_counts=True)[1]): strat_anc = compound
-    cv_splits = None
     if institution_codes is not None and len(institution_codes) == len(labels):
-        inst_anc = np.asarray(institution_codes)[anchor_idx]
-        groups = np.asarray([str(g).strip() if pd.notna(g) and str(g).strip() and str(g).strip().upper() != "UNKNOWN" else f"SINGLETON_{idx}" for idx, g in enumerate(inst_anc)])
+        groups = np.asarray([str(g).strip() if pd.notna(g) and str(g).strip() and str(g).strip().upper() != "UNKNOWN" else f"SINGLETON_{idx}" for idx, g in enumerate(np.asarray(institution_codes)[anchor_idx])])
         if len(np.unique(groups)) >= eff_splits:
             try:
                 cand = list(StratifiedGroupKFold(n_splits=eff_splits, shuffle=True, random_state=random_state).split(X_anc, strat_anc, groups))
@@ -428,10 +443,8 @@ def compute_out_of_fold_probabilities(features: np.ndarray, labels: np.ndarray, 
     if cv_splits is None: cv_splits = list(StratifiedKFold(n_splits=eff_splits, shuffle=True, random_state=random_state).split(X_anc, strat_anc))
     bronze_accum, n_valid_folds, y_true_anc, y_pred_anc = np.zeros((len(bronze_idx), num_classes), dtype=np.float64), 0, [], []
     for train_sub, val_sub in cv_splits:
-        scaler = StandardScaler()
-        X_train, X_val, y_train, y_val = scaler.fit_transform(X_anc[train_sub]), scaler.transform(X_anc[val_sub]), y_anc[train_sub], y_anc[val_sub]
-        w_train = w_anc[train_sub] / max(float(np.mean(w_anc[train_sub])), 1e-8)
-        min_cls = int(np.min(np.unique(y_train, return_counts=True)[1]))
+        scaler = StandardScaler(); X_train, X_val, y_train, y_val = scaler.fit_transform(X_anc[train_sub]), scaler.transform(X_anc[val_sub]), y_anc[train_sub], y_anc[val_sub]
+        w_train, min_cls = w_anc[train_sub] / max(float(np.mean(w_anc[train_sub])), 1e-8), int(np.min(np.unique(y_train, return_counts=True)[1]))
         lrcv_kw: Dict[str, Any] = {"use_legacy_attributes": False, "l1_ratios": (0.0,), "scoring": "accuracy"} if "use_legacy_attributes" in LogisticRegressionCV.__init__.__code__.co_varnames else {}
         base_clf: Any = LogisticRegressionCV(Cs=np.logspace(-2, 1, 6), cv=max(2, min(3, min_cls)), class_weight="balanced", max_iter=2000, random_state=random_state, **lrcv_kw) if min_cls >= 2 else LogisticRegression(max_iter=2000, C=0.25, class_weight="balanced", random_state=random_state)
         base_clf.fit(X_train, y_train, sample_weight=w_train); active_clf: Any = base_clf
@@ -443,60 +456,50 @@ def compute_out_of_fold_probabilities(features: np.ndarray, labels: np.ndarray, 
         val_probs, classes_arr = active_clf.predict_proba(X_val), np.asarray(active_clf.classes_, dtype=int)
         for col_i, c_idx in enumerate(classes_arr): pred_probs[anchor_idx[val_sub], c_idx] = val_probs[:, col_i]
         if len(bronze_idx) > 0:
-            brz_probs = active_clf.predict_proba(scaler.transform(X[bronze_idx]))
+            brz_probs = active_clf.predict_proba(scaler.transform(X[bronze_idx])); n_valid_folds += 1
             for col_i, c_idx in enumerate(classes_arr): bronze_accum[:, c_idx] += brz_probs[:, col_i]
-            n_valid_folds += 1
         y_true_anc.extend(y_val); y_pred_anc.extend(classes_arr[np.argmax(val_probs, axis=1)])
     if len(bronze_idx) > 0 and n_valid_folds > 0:
-        brz_mean = bronze_accum / float(n_valid_folds)
-        pred_probs[bronze_idx, :] = brz_mean / np.maximum(brz_mean.sum(axis=1, keepdims=True), 1e-8)
+        brz_mean = bronze_accum / float(n_valid_folds); pred_probs[bronze_idx, :] = brz_mean / np.maximum(brz_mean.sum(axis=1, keepdims=True), 1e-8)
     pred_probs = pred_probs / np.maximum(pred_probs.sum(axis=1, keepdims=True), 1e-8)
     return pred_probs, float(accuracy_score(y_true_anc, y_pred_anc) if y_true_anc else 1.0), float(f1_score(y_true_anc, y_pred_anc, average="weighted") if y_true_anc else 1.0)
-
-def compute_feature_space_ood_scores(features: np.ndarray, labels: np.ndarray, pred_probs: Optional[np.ndarray] = None, determiner_tiers: Optional[Any] = None) -> np.ndarray:
+def compute_feature_space_ood_scores(features: np.ndarray, labels: np.ndarray, pred_probs: Optional[np.ndarray] = None, determiner_tiers: Optional[Any] = None, is_promoted_bronze: Optional[np.ndarray | List[bool] | pd.Series] = None) -> np.ndarray:
     """Computes feature-space Out-of-Distribution score (`vision_ood_score` in [0, 1])."""
     n = len(labels)
     if n == 0: return np.array([], dtype=np.float64)
-    if features is None or len(features) != n:
-        return np.clip(1.0 - np.max(pred_probs, axis=1), 0.0, 1.0) if (pred_probs is not None and len(pred_probs) == n) else np.zeros(n, dtype=np.float64)
-    X = np.asarray(features, dtype=np.float64)
-    X, y = X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-8), np.asarray(labels, dtype=int)
-    anchor_mask = np.array([str(t).strip() in {"Tier_1_Gold", "Tier_2_Silver"} for t in determiner_tiers], dtype=bool) if (determiner_tiers is not None and len(determiner_tiers) == n) else np.ones(n, dtype=bool)
-    if not np.any(anchor_mask): anchor_mask = np.ones(n, dtype=bool)
+    if features is None or len(features) != n: return np.clip(1.0 - np.max(pred_probs, axis=1), 0.0, 1.0) if (pred_probs is not None and len(pred_probs) == n) else np.zeros(n, dtype=np.float64)
+    X = np.asarray(features, dtype=np.float64); X, y = X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-8), np.asarray(labels, dtype=int)
+    anchor_mask, _ = _resolve_adaptive_anchors(y, determiner_tiers, is_promoted_bronze); anchor_mask = anchor_mask if np.any(anchor_mask) else np.ones(n, dtype=bool)
     centroids = [np.mean(X[anchor_mask & (y == c)], axis=0) for c in np.unique(y[anchor_mask]) if np.any(anchor_mask & (y == c))]
     centroids = [mu / max(float(np.linalg.norm(mu)), 1e-8) for mu in (centroids or [np.mean(X, axis=0)])]
     centroid_ood = np.clip(np.min(1.0 - np.clip(X @ np.vstack(centroids).T, -1.0, 1.0), axis=1), 0.0, 1.0)
     try:
         from cleanlab.outlier import OutOfDistribution
-        cl_ood = np.clip(1.0 - np.asarray(OutOfDistribution().fit_score(features=X), dtype=np.float64), 0.0, 1.0)
-        return np.round(0.5 * centroid_ood + 0.5 * cl_ood, 4)
+        return np.round(0.5 * centroid_ood + 0.5 * np.clip(1.0 - np.asarray(OutOfDistribution().fit_score(features=X), dtype=np.float64), 0.0, 1.0), 4)
     except Exception: return np.round(centroid_ood, 4)
-
 def _compute_tomentum_taxon_discordance(audit_df: pd.DataFrame, error_threshold: float) -> pd.Series:
     """Organic, taxon-agnostic chromatic vestiture discordance rule in CIE L* luminance & HSV saturation space."""
     abax_mm = (audit_df["surface_orientation"].astype(str).str.lower() == "abaxial") & (audit_df["given_label"] != audit_df["predicted_label"]) & (audit_df["c_error"] > error_threshold)
-    lum_s = pd.to_numeric(audit_df.get("mean_luminance", pd.Series(np.nan, index=audit_df.index)), errors="coerce")
-    sat_s = pd.to_numeric(audit_df.get("mean_saturation", pd.Series(np.nan, index=audit_df.index)), errors="coerce")
-    valid_l = lum_s.dropna()
-    if len(valid_l) == 0 or float(valid_l.max() - valid_l.min()) <= 1e-6: return abax_mm.astype(bool)
+    lum_s, sat_s = pd.to_numeric(audit_df.get("mean_luminance", pd.Series(np.nan, index=audit_df.index)), errors="coerce"), pd.to_numeric(audit_df.get("mean_saturation", pd.Series(np.nan, index=audit_df.index)), errors="coerce")
+    valid_l, valid_s = lum_s.dropna(), sat_s.dropna()
+    if (len(valid_l) == 0 or float(valid_l.max() - valid_l.min()) <= 1e-6) and (len(valid_s) == 0 or float(valid_s.max() - valid_s.min()) <= 1e-6): return abax_mm.astype(bool)
     adax = audit_df["surface_orientation"].astype(str).str.lower() != "abaxial"
-    anc = audit_df["determiner_tier"].astype(str).str.strip().isin({"Tier_1_Gold", "Tier_2_Silver"}) if "determiner_tier" in audit_df.columns else pd.Series(True, index=audit_df.index)
+    anc = (audit_df["determiner_tier"].astype(str).str.strip().isin({"Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze_Promoted"}) | audit_df.get("is_promoted_bronze", pd.Series(False, index=audit_df.index)).astype(bool)) if "determiner_tier" in audit_df.columns else pd.Series(True, index=audit_df.index)
     med_L, med_S, q75_L = {}, {}, {}
     for tx in set(audit_df["given_label"].dropna().unique()):
         tx_m = audit_df["given_label"] == tx
-        ref_m = (tx_m & adax & anc) if np.any(tx_m & adax & anc & lum_s.notna()) else ((tx_m & adax) if np.any(tx_m & adax & lum_s.notna()) else tx_m)
-        if np.any(ref_m & lum_s.notna()): med_L[tx], q75_L[tx] = float(np.nanmedian(lum_s[ref_m])), float(np.nanpercentile(lum_s[tx_m & lum_s.notna()], 75))
-        if np.any(ref_m & sat_s.notna()): med_S[tx] = float(np.nanmedian(sat_s[ref_m]))
+        ref_l = (tx_m & adax & anc) if np.any(tx_m & adax & anc & lum_s.notna()) else ((tx_m & adax) if np.any(tx_m & adax & lum_s.notna()) else tx_m)
+        ref_s = (tx_m & adax & anc) if np.any(tx_m & adax & anc & sat_s.notna()) else ((tx_m & adax) if np.any(tx_m & adax & sat_s.notna()) else tx_m)
+        if np.any(ref_l & lum_s.notna()): med_L[tx], q75_L[tx] = float(np.nanmedian(lum_s[ref_l])), float(np.nanpercentile(lum_s[tx_m & lum_s.notna()], 75))
+        if np.any(ref_s & sat_s.notna()): med_S[tx] = float(np.nanmedian(sat_s[ref_s]))
     flags = []
     for idx_i, is_cand in enumerate(abax_mm.to_numpy(dtype=bool)):
         if not is_cand: flags.append(False); continue
-        g_tx, p_tx = audit_df.at[idx_i, "given_label"], audit_df.at[idx_i, "predicted_label"]
-        l_i = float(lum_s.iat[idx_i]) if pd.notna(lum_s.iat[idx_i]) else np.nan
+        g_tx, p_tx, l_i = audit_df.at[idx_i, "given_label"], audit_df.at[idx_i, "predicted_label"], (float(lum_s.iat[idx_i]) if pd.notna(lum_s.iat[idx_i]) else np.nan)
         cond_a = (p_tx in med_L and g_tx in med_L and med_L[p_tx] >= med_L[g_tx] + 2.0) or (p_tx in med_S and g_tx in med_S and med_S[p_tx] <= med_S[g_tx] - 0.02)
         flags.append(bool(cond_a or (np.isfinite(l_i) and g_tx in q75_L and l_i > q75_L[g_tx])))
     return pd.Series(flags, index=audit_df.index, dtype=bool)
-
-def run_confident_learning_audit(pred_probs: np.ndarray, labels: np.ndarray, records_df: pd.DataFrame, class_names: List[str], error_threshold: float = 0.85, filter_abaxial_artifacts: bool = True, features: Optional[np.ndarray] = None) -> pd.DataFrame:
+def run_confident_learning_audit(pred_probs: np.ndarray, labels: np.ndarray, records_df: pd.DataFrame, class_names: List[str], error_threshold: float = 0.85, filter_abaxial_artifacts: bool = True, features: Optional[np.ndarray] = None, is_promoted_bronze: Optional[np.ndarray | List[bool] | pd.Series] = None) -> pd.DataFrame:
     """Runs class-conditional Confident Learning (`prune_by_noise_rate`) & OOD audit preserving `(catalogNumber, plant_individual_id)`."""
     labels, pred_probs = np.asarray(labels, dtype=int), np.asarray(pred_probs, dtype=np.float64)
     num_classes = pred_probs.shape[1] if pred_probs.ndim == 2 and pred_probs.shape[1] > 0 else max(1, len(class_names))
@@ -508,8 +511,7 @@ def run_confident_learning_audit(pred_probs: np.ndarray, labels: np.ndarray, rec
         quality_scores, issues = get_label_quality_scores(labels=labels, pred_probs=pred_probs), find_label_issues(labels=labels, pred_probs=pred_probs, filter_by="prune_by_noise_rate", return_indices_ranked_by="self_confidence")
     except Exception:
         predicted_classes, quality_scores = np.argmax(pred_probs, axis=1), np.array([pred_probs[i, labels[i]] for i in range(len(labels))], dtype=np.float64)
-        thresh_for_pred = np.array([class_thresholds[min(int(c), num_classes - 1)] for c in predicted_classes])
-        issues = np.where((predicted_classes != labels) & ((np.max(pred_probs, axis=1) >= thresh_for_pred) | (1.0 - quality_scores > error_threshold)))[0]
+        issues = np.where((predicted_classes != labels) & ((np.max(pred_probs, axis=1) >= np.array([class_thresholds[min(int(c), num_classes - 1)] for c in predicted_classes])) | (1.0 - quality_scores > error_threshold)))[0]
     audit_df = records_df.copy().reset_index(drop=True)
     if "plant_individual_id" in audit_df.columns: audit_df["plant_individual_id"] = [_parse_pid(v, 0) for v in audit_df["plant_individual_id"]]
     else: audit_df.insert((list(audit_df.columns).index("catalogNumber") + 1) if "catalogNumber" in audit_df.columns else 0, "plant_individual_id", np.zeros(len(audit_df), dtype=int))
@@ -519,8 +521,11 @@ def run_confident_learning_audit(pred_probs: np.ndarray, labels: np.ndarray, rec
         audit_df = audit_df.drop_duplicates(subset=["catalogNumber", "plant_individual_id"], keep="first").reset_index(drop=True)
         if fg_agg is not None: audit_df["foreground_attention_ratio"] = [round(float(fg_agg.loc[(c, p)]), 4) for c, p in zip(audit_df["catalogNumber"], audit_df["plant_individual_id"])]
     num_records = len(audit_df)
-    given_classes = [class_names[l] if l < len(class_names) else "Unknown" for l in labels]
-    pred_classes = [class_names[i] if i < len(class_names) else "Outlier_Morphotype" for i in np.argmax(pred_probs, axis=1)]
+    row_promo = np.array([_row_promoted_bronze(r) for r in audit_df.to_dict("records")], dtype=bool) if num_records > 0 else np.zeros(0, dtype=bool)
+    arg_promo = np.array([_is_truthy(v) for v in is_promoted_bronze], dtype=bool) if (is_promoted_bronze is not None and len(is_promoted_bronze) == num_records) else np.zeros(num_records, dtype=bool)
+    promo_vec = row_promo | arg_promo
+    if "is_promoted_bronze" in audit_df.columns or np.any(promo_vec): audit_df["is_promoted_bronze"] = promo_vec
+    given_classes, pred_classes = [class_names[l] if l < len(class_names) else "Unknown" for l in labels], [class_names[i] if i < len(class_names) else "Outlier_Morphotype" for i in np.argmax(pred_probs, axis=1)]
     conf_given = np.array([pred_probs[i, labels[i]] if i < len(pred_probs) and labels[i] < pred_probs.shape[1] else 0.0 for i in range(num_records)], dtype=np.float64)
     sorted_probs = np.sort(pred_probs, axis=1)[:, ::-1] if pred_probs.shape[1] >= 2 else np.column_stack([np.max(pred_probs, axis=1), 1.0 - np.max(pred_probs, axis=1)])
     conf_pred, second_prob, c_error = sorted_probs[:, 0], sorted_probs[:, 1], 1.0 - conf_given
@@ -530,37 +535,38 @@ def run_confident_learning_audit(pred_probs: np.ndarray, labels: np.ndarray, rec
     audit_df["given_label"], audit_df["predicted_label"], audit_df["vision_predicted_label"] = given_classes, pred_classes, pred_classes
     audit_df["confidence_given_class"], audit_df["confidence_predicted_class"] = np.round(conf_given, 4), np.round(conf_pred, 4)
     audit_df["vision_confidence"], audit_df["vision_second_prob"], audit_df["vision_margin"] = np.round(conf_pred, 4), np.round(second_prob, 4), np.round(np.clip(conf_pred - second_prob, 0.0, 1.0), 4)
-    audit_df["class_self_confidence_threshold"] = np.round([class_thresholds[min(int(l), num_classes - 1)] for l in labels], 4)
-    audit_df["label_quality_score"], audit_df["c_error"] = np.round(quality_scores, 4), np.round(c_error, 4)
+    audit_df["class_self_confidence_threshold"], audit_df["label_quality_score"], audit_df["c_error"] = np.round([class_thresholds[min(int(l), num_classes - 1)] for l in labels], 4), np.round(quality_scores, 4), np.round(c_error, 4)
     audit_df["oof_probs"] = [np.round(pred_probs[i], 6).tolist() if i < len(pred_probs) else [] for i in range(num_records)]
-    if "vision_ood_score" not in audit_df.columns:
-        audit_df["vision_ood_score"] = compute_feature_space_ood_scores(features if features is not None else np.empty((0, 768)), labels, pred_probs, audit_df.get("determiner_tier", None))
-    audit_df["vision_ood_score"] = np.round(pd.to_numeric(audit_df["vision_ood_score"], errors="coerce").fillna(0.0), 4)
-    audit_df["vision_is_ood"] = (audit_df["vision_ood_score"] >= 0.65).astype(bool)
-    audit_df["foreground_attention_ratio"] = np.round(pd.to_numeric(audit_df.get("foreground_attention_ratio", pd.Series(0.85, index=audit_df.index)), errors="coerce").fillna(0.85), 4)
-    audit_df["is_artifact_driven"] = (audit_df["foreground_attention_ratio"] < FOREGROUND_ATTENTION_MIN_RATIO).astype(bool)
-    audit_df["is_background_shortcut"] = audit_df["is_artifact_driven"].astype(bool)
-    if "determiner_tier" in audit_df.columns:
-        audit_df["authority_weight"] = [{"Tier_1_Gold": 3.0, "Tier_2_Silver": 1.5, "Tier_3_Bronze": 0.5}.get(str(t).strip(), 0.5) for t in audit_df["determiner_tier"]]
-    is_issue = np.zeros(num_records, dtype=bool); is_issue[issues] = True
-    audit_df["is_cleanlab_issue"], audit_df["is_label_corrupted"] = is_issue, audit_df["c_error"] > error_threshold
-    audit_df["is_label_issue"] = (audit_df["is_cleanlab_issue"] | audit_df["is_label_corrupted"]).astype(bool)
+    if "vision_ood_score" not in audit_df.columns: audit_df["vision_ood_score"] = compute_feature_space_ood_scores(features if features is not None else np.empty((0, 768)), labels, pred_probs, audit_df.get("determiner_tier", None), is_promoted_bronze=promo_vec)
+    audit_df["vision_ood_score"] = np.round(pd.to_numeric(audit_df["vision_ood_score"], errors="coerce").fillna(0.0), 4); audit_df["vision_is_ood"] = (audit_df["vision_ood_score"] >= 0.65).astype(bool)
+    has_fg_col = "foreground_attention_ratio" in audit_df.columns
+    audit_df["foreground_attention_ratio"] = np.round(pd.to_numeric(audit_df.get("foreground_attention_ratio", pd.Series(0.85, index=audit_df.index)), errors="coerce").fillna(1.0 if has_fg_col else 0.85), 4)
+    audit_df["is_artifact_driven"] = (audit_df["foreground_attention_ratio"] < FOREGROUND_ATTENTION_MIN_RATIO).astype(bool); audit_df["is_background_shortcut"] = audit_df["is_artifact_driven"].astype(bool)
+    if "determiner_tier" in audit_df.columns: _, audit_df["authority_weight"] = _resolve_adaptive_anchors(labels, audit_df["determiner_tier"], is_promoted_bronze=promo_vec)
+    is_issue, raw_corrupted = np.zeros(num_records, dtype=bool), (audit_df["c_error"] > error_threshold).to_numpy(dtype=bool); is_issue[issues] = True
     if "surface_orientation" not in audit_df.columns: audit_df["surface_orientation"] = "adaxial"
-    audit_df["tomentum_taxon_discordance"] = _compute_tomentum_taxon_discordance(audit_df, error_threshold)
-    triage_actions, reasons = [], []
-    for _, row in audit_df.iterrows():
-        is_corrupted, is_issue_flag = bool(row["is_label_corrupted"]), bool(row["is_cleanlab_issue"])
-        orient, fg_ratio = str(row.get("surface_orientation", "adaxial")).lower(), float(row.get("foreground_attention_ratio", 0.85))
-        if filter_abaxial_artifacts and orient == "abaxial" and (is_corrupted or is_issue_flag):
-            act, rsn = "Retain (Abaxial Inversion Artifact)", "Visual divergence driven by dense abaxial arachnoid tomentum (mounting variant); retained as valid voucher."
-        elif fg_ratio < FOREGROUND_ATTENTION_MIN_RATIO and (is_corrupted or is_issue_flag):
-            act, rsn = "Downweight (Background Artifact Attribution)", f"Low foreground attention ratio ({fg_ratio:.2f} < {FOREGROUND_ATTENTION_MIN_RATIO:.2f}); prediction driven by sheet background."
-        elif is_corrupted: act, rsn = "Prune & Queue for Annotation Triage", f"Deep vision DINOv2 predicts {row['predicted_label']} (conf: {row['confidence_predicted_class']:.2f}) vs recorded {row['given_label']}"
-        elif is_issue_flag: act, rsn = "Flag for Morphometric Review", f"Confident learning flags potential discordance (quality: {row['label_quality_score']:.2f})"
-        else: act, rsn = "Retain", "High label consistency across visual self-supervised embeddings"
+    if "tomentum_taxon_discordance" in audit_df.columns and audit_df["tomentum_taxon_discordance"].notna().any(): audit_df["tomentum_taxon_discordance"] = pd.Series([_is_truthy(v) for v in audit_df["tomentum_taxon_discordance"]], index=audit_df.index, dtype=bool)
+    elif "mean_luminance" in audit_df.columns or "mean_saturation" in audit_df.columns: audit_df["tomentum_taxon_discordance"] = _compute_tomentum_taxon_discordance(audit_df, error_threshold)
+    else: audit_df["tomentum_taxon_discordance"] = pd.Series(False, index=audit_df.index, dtype=bool)
+    abax_err_cut, final_corrupted, final_issue, triage_actions, reasons = max(float(error_threshold), 0.88), [], [], [], []
+    for idx_r, (_, row) in enumerate(audit_df.iterrows()):
+        was_corrupted, was_cl = bool(raw_corrupted[idx_r]), bool(is_issue[idx_r]); was_flagged = was_corrupted or was_cl
+        orient, fg_ratio = str(row.get("surface_orientation", "adaxial")).strip().lower(), float(row.get("foreground_attention_ratio", 1.0))
+        tom_disc, conf_p, c_err_v = bool(row.get("tomentum_taxon_discordance", False)), float(row.get("confidence_predicted_class", 0.0)), float(row.get("c_error", 0.0))
+        if filter_abaxial_artifacts and orient == "abaxial":
+            if (not tom_disc) and (conf_p >= 0.85) and (c_err_v > abax_err_cut) and (fg_ratio >= FOREGROUND_ATTENTION_MIN_RATIO):
+                final_corrupted.append(True); final_issue.append(True); act, rsn = "Prune & Queue for Annotation Triage", f"High-confidence structural reassignment on abaxial lamina (no chromatic discordance): DINOv2 predicts {row['predicted_label']} (conf: {conf_p:.2f}) vs recorded {row['given_label']}"
+            else:
+                final_corrupted.append(False); final_issue.append(False); act, rsn = ("Retain (Abaxial Inversion Artifact)", "Visual divergence driven by dense abaxial arachnoid tomentum (mounting variant); retained as valid voucher.") if was_flagged else ("Retain", "High label consistency across visual self-supervised embeddings")
+        else:
+            final_corrupted.append(was_corrupted); final_issue.append(was_flagged)
+            if fg_ratio < FOREGROUND_ATTENTION_MIN_RATIO and was_flagged: act, rsn = "Downweight (Background Artifact Attribution)", f"Low foreground attention ratio ({fg_ratio:.2f} < {FOREGROUND_ATTENTION_MIN_RATIO:.2f}); prediction driven by sheet background."
+            elif was_corrupted: act, rsn = "Prune & Queue for Annotation Triage", f"Deep vision DINOv2 predicts {row['predicted_label']} (conf: {conf_p:.2f}) vs recorded {row['given_label']}"
+            elif was_cl: act, rsn = "Flag for Morphometric Review", f"Confident learning flags potential discordance (quality: {row['label_quality_score']:.2f})"
+            else: act, rsn = "Retain", "High label consistency across visual self-supervised embeddings"
         triage_actions.append(act); reasons.append(rsn)
+    audit_df["is_cleanlab_issue"], audit_df["is_label_corrupted"], audit_df["is_label_issue"] = is_issue, pd.Series(final_corrupted, index=audit_df.index, dtype=bool), pd.Series(final_issue, index=audit_df.index, dtype=bool)
     audit_df["triage_action"], audit_df["discordance_reason"] = triage_actions, reasons
-    if filter_abaxial_artifacts: audit_df.loc[audit_df["surface_orientation"].str.lower() == "abaxial", ["is_label_corrupted", "is_label_issue"]] = False
     return audit_df
 
 def compute_foreground_attention_ratio(heatmap: np.ndarray, fg_mask: np.ndarray) -> float:
@@ -621,8 +627,7 @@ def compute_vit_patch_saliency(img_arr: np.ndarray, model: Any, classifier: Opti
 
 def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_samples: int = 8, model: Optional[Any] = None, classifier: Optional[Any] = None, model_name: str = "dinov2_vitb14_reg", device: str = "cuda" if torch.cuda.is_available() else "cpu", demo: bool = False, class_names: Optional[List[str]] = None, active_taxa: Optional[List[str]] = None) -> None:
     """Renders multi-panel diagnostic figure with 224x224 ViT patch attribution, leaf-only saliency & calibrated OOF posteriors."""
-    output_path = Path(output_path); output_path.parent.mkdir(parents=True, exist_ok=True)
-    dedup_records, seen_keys = [], set()
+    output_path = Path(output_path); output_path.parent.mkdir(parents=True, exist_ok=True); dedup_records, seen_keys = [], set()
     for r in flagged_records:
         r_key = (str(r.get("catalogNumber", r.get("patch_path", ""))), _parse_pid(r.get("plant_individual_id", 0), 0))
         if r_key not in seen_keys: seen_keys.add(r_key); dedup_records.append(r)
@@ -649,46 +654,33 @@ def generate_gradcam_panel(flagged_records: List[dict], output_path: Path, max_s
             raw_arr = np.array(Image.open(img_path).convert("RGB")); orig_hw = raw_arr.shape[:2]
             img_arr = preprocess_macro_rosette_crop(apply_tier1_leaf_mask_to_rgb(raw_arr, mask_p, pad_px=5) if mask_p is not None else raw_arr, target_size=(224, 224), sigma=1.0)
         elif demo:
-            raw_demo = np.full((224, 224, 3), fill_value=[60, 120, 40], dtype=np.uint8)
-            img_arr = apply_tier1_leaf_mask_to_rgb(raw_demo, mask_p, pad_px=5) if mask_p is not None else raw_demo
+            raw_demo = np.full((224, 224, 3), fill_value=[60, 120, 40], dtype=np.uint8); img_arr = apply_tier1_leaf_mask_to_rgb(raw_demo, mask_p, pad_px=5) if mask_p is not None else raw_demo
         else: raise RuntimeError(f"Missing patch image at '{img_path}'.")
         fg_mask, _ = compute_foreground_tissue_mask(img_arr, mask_path=mask_p, grid_size=(16, 16), orig_hw=orig_hw)
-        rec_taxon = standardize_packera_taxon(str(rec.get("taxon", rec.get("species_standardized", rec.get("given_label", active_taxa[0])))))
-        rec_taxon = rec_taxon if _is_valid_packera_taxon(rec_taxon) else active_taxa[0]
+        rec_taxon = standardize_packera_taxon(str(rec.get("taxon", rec.get("species_standardized", rec.get("given_label", active_taxa[0]))))); rec_taxon = rec_taxon if _is_valid_packera_taxon(rec_taxon) else active_taxa[0]
         raw_pred = rec.get("predicted_taxon", rec.get("predicted_label", rec.get("vision_predicted_label", rec_taxon)))
-        pred_taxon = standardize_packera_taxon(str(raw_pred)) if raw_pred else rec_taxon
-        pred_taxon = pred_taxon if pred_taxon in active_taxa else (rec_taxon if rec_taxon in active_taxa else active_taxa[0])
-        target_cls_idx = active_taxa.index(pred_taxon) if pred_taxon in active_taxa else int(rec.get("label_idx", 0) or 0)
-        heatmap = compute_vit_patch_saliency(img_arr, model=model, classifier=classifier, target_class_idx=target_cls_idx, device=device)
+        pred_taxon = standardize_packera_taxon(str(raw_pred)) if raw_pred else rec_taxon; pred_taxon = pred_taxon if pred_taxon in active_taxa else (rec_taxon if rec_taxon in active_taxa else active_taxa[0])
+        heatmap = compute_vit_patch_saliency(img_arr, model=model, classifier=classifier, target_class_idx=(active_taxa.index(pred_taxon) if pred_taxon in active_taxa else int(rec.get("label_idx", 0) or 0)), device=device)
         fg_ratio = compute_foreground_attention_ratio(heatmap, fg_mask); rec["foreground_attention_ratio"] = round(fg_ratio, 4)
         fg_bin = (fg_mask > 0).astype(np.uint8); heatmap_masked = heatmap * fg_bin.astype(np.float32)
         if float(heatmap_masked.max()) > 1e-8: heatmap_masked = heatmap_masked / float(heatmap_masked.max())
         blended = blend_heatmap_on_image(img_arr, heatmap_masked, alpha=0.52, colormap="inferno", fg_mask=fg_bin)
         c_err_val = float(rec.get("c_error", 1.0 - float(rec.get("label_quality_score", 0.25)))); conf_val = float(np.clip(max(c_err_val, 1.0 - c_err_val), 0.35, 0.99))
-        axes[idx, 0].imshow(img_arr); axes[idx, 0].axis("off")
-        axes[idx, 0].set_title(f"[1] {cat_num_str}{f' [p{pid_val}]' if pid_val else ''} (224x224 Macro)\nRecorded: {rec_taxon.replace('Packera ', 'P. ')}", fontsize=8.8, fontweight="bold")
-        axes[idx, 1].imshow(blended); axes[idx, 1].axis("off")
-        axes[idx, 1].set_title(f"[2] 16x16 ViT Saliency (FG={fg_ratio:.2f})\nPredicted: {pred_taxon.replace('Packera ', 'P. ')} (c_err={c_err_val:.2f})", fontsize=8.8, fontweight="bold")
+        axes[idx, 0].imshow(img_arr); axes[idx, 0].axis("off"); axes[idx, 0].set_title(f"[1] {cat_num_str}{f' [p{pid_val}]' if pid_val else ''} (224x224 Macro)\nRecorded: {rec_taxon.replace('Packera ', 'P. ')}", fontsize=8.8, fontweight="bold")
+        axes[idx, 1].imshow(blended); axes[idx, 1].axis("off"); axes[idx, 1].set_title(f"[2] 16x16 ViT Saliency (FG={fg_ratio:.2f})\nPredicted: {pred_taxon.replace('Packera ', 'P. ')} (c_err={c_err_val:.2f})", fontsize=8.8, fontweight="bold")
         ax_bar, raw_oof = axes[idx, 2], rec.get("oof_probs")
-        if raw_oof is not None and len(raw_oof) == len(active_taxa):
-            probs = np.clip(np.asarray(raw_oof, dtype=float), 0.0, 1.0); probs = probs / max(float(probs.sum()), 1e-8)
+        if raw_oof is not None and len(raw_oof) == len(active_taxa): probs = np.clip(np.asarray(raw_oof, dtype=float), 0.0, 1.0); probs = probs / max(float(probs.sum()), 1e-8)
         elif raw_oof is not None and class_names and len(raw_oof) == len(class_names):
-            pmap = {str(cn): float(pv) for cn, pv in zip(class_names, raw_oof)}
-            probs = np.array([max(0.0, pmap.get(tx, 0.0)) for tx in active_taxa], dtype=float); probs = probs / max(float(probs.sum()), 1e-8)
+            pmap = {str(cn): float(pv) for cn, pv in zip(class_names, raw_oof)}; probs = np.array([max(0.0, pmap.get(tx, 0.0)) for tx in active_taxa], dtype=float); probs = probs / max(float(probs.sum()), 1e-8)
         else:
             probs = np.array([float(np.clip(1.0 - c_err_val, 0.01, 0.99))], dtype=float) if len(active_taxa) == 1 else np.full(len(active_taxa), (1.0 - conf_val) / max(len(active_taxa) - 1, 1), dtype=float)
             if len(active_taxa) > 1 and pred_taxon in active_taxa: probs[active_taxa.index(pred_taxon)] = conf_val; probs = probs / max(probs.sum(), 1e-8)
-        y_pos = np.arange(len(active_taxa))
-        ax_bar.barh(y_pos, probs * 100.0, color=[palette_map.get(tx, "#0072B2") for tx in active_taxa], edgecolor="#222222", height=0.58, alpha=0.88)
-        ax_bar.set_yticks(y_pos); ax_bar.set_yticklabels([tx.replace("Packera ", "P. ") for tx in active_taxa], fontsize=8.2, fontstyle="italic")
-        ax_bar.set_xlim(0, 112); ax_bar.invert_yaxis(); ax_bar.set_title("[3] Calibrated Posteriors", fontsize=8.8, fontweight="bold")
-    fig.subplots_adjust(hspace=0.38, wspace=0.24)
-    tmp_out = output_path.with_name(f".{output_path.stem}_{os.getpid()}_tmp{output_path.suffix}")
-    plt.savefig(tmp_out, dpi=300, bbox_inches="tight"); tmp_out.replace(output_path)
-    pdf_companion = output_path.with_suffix(".pdf")
+        y_pos = np.arange(len(active_taxa)); ax_bar.barh(y_pos, probs * 100.0, color=[palette_map.get(tx, "#0072B2") for tx in active_taxa], edgecolor="#222222", height=0.58, alpha=0.88)
+        ax_bar.set_yticks(y_pos); ax_bar.set_yticklabels([tx.replace("Packera ", "P. ") for tx in active_taxa], fontsize=8.2, fontstyle="italic"); ax_bar.set_xlim(0, 112); ax_bar.invert_yaxis(); ax_bar.set_title("[3] Calibrated Posteriors", fontsize=8.8, fontweight="bold")
+    fig.subplots_adjust(hspace=0.38, wspace=0.24); tmp_out = output_path.with_name(f".{output_path.stem}_{os.getpid()}_tmp{output_path.suffix}")
+    plt.savefig(tmp_out, dpi=300, bbox_inches="tight"); tmp_out.replace(output_path); pdf_companion = output_path.with_suffix(".pdf")
     if pdf_companion != output_path:
-        tmp_pdf = output_path.with_name(f".{output_path.stem}_{os.getpid()}_tmp.pdf")
-        plt.savefig(tmp_pdf, format="pdf", bbox_inches="tight"); tmp_pdf.replace(pdf_companion)
+        tmp_pdf = output_path.with_name(f".{output_path.stem}_{os.getpid()}_tmp.pdf"); plt.savefig(tmp_pdf, format="pdf", bbox_inches="tight"); tmp_pdf.replace(pdf_companion)
     plt.close()
 
 def generate_step05_publication_figures(audit_df: pd.DataFrame, output_figure_path: Path) -> Dict[str, Path]:
@@ -747,10 +739,8 @@ def _apply_intraspecific_morphotype_labels(df: pd.DataFrame, morphometrics_csv: 
     def _fmt(v: Any) -> Optional[str]:
         s = "" if (v is None or pd.isna(v)) else str(v).strip()
         if not s or s.lower() in {"nan", "na", "none"}: return None
-        m_num = re.search(r"(\d+)", s)
-        return s if s.startswith("Morphotype_") else (f"Morphotype_K{int(m_num.group(1))}" if m_num else f"Morphotype_{re.sub(r'[^A-Za-z0-9_]', '_', s)}")
-    m_sub, left = m_df.copy(), df.copy()
-    m_sub["catalogNumber"], left["catalogNumber"] = m_sub["catalogNumber"].astype(str).str.strip(), left["catalogNumber"].astype(str).str.strip()
+        m_num = re.search(r"(\d+)", s); return s if s.startswith("Morphotype_") else (f"Morphotype_K{int(m_num.group(1))}" if m_num else f"Morphotype_{re.sub(r'[^A-Za-z0-9_]', '_', s)}")
+    m_sub, left = m_df.copy(), df.copy(); m_sub["catalogNumber"], left["catalogNumber"] = m_sub["catalogNumber"].astype(str).str.strip(), left["catalogNumber"].astype(str).str.strip()
     m_sub["_m_lbl"] = m_sub["gmm_cluster"].map(_fmt); m_sub = m_sub[m_sub["_m_lbl"].notna()]
     join_keys = ["catalogNumber", "plant_individual_id"] if ("plant_individual_id" in m_sub.columns and "plant_individual_id" in left.columns) else ["catalogNumber"]
     if "plant_individual_id" in join_keys: m_sub["plant_individual_id"], left["plant_individual_id"] = [_parse_pid(v, 0) for v in m_sub["plant_individual_id"]], [_parse_pid(v, 0) for v in left["plant_individual_id"]]
@@ -761,16 +751,18 @@ def _apply_intraspecific_morphotype_labels(df: pd.DataFrame, morphometrics_csv: 
     return out
 def main() -> None:
     """Orchestrates Phase 5 Indumentum-Blind Deep Vision & Confident Learning workflow."""
-    args = parse_args(); df, _ = load_and_link_rosette_patches(args.rosette_dir, args.vouchers_csv, demo=args.demo, manifest_csv=args.manifest_csv)
+    args = parse_args()
+    morph_csv = Path(args.morphometrics_csv) if (args.morphometrics_csv is not None and Path(args.morphometrics_csv).is_file()) else next((p for p in (args.output_csv.parent / "morphometric_flags.csv", args.vouchers_csv.parent / "morphometric_flags.csv") if p.is_file()), None)
+    df, _ = load_and_link_rosette_patches(args.rosette_dir, args.vouchers_csv, demo=args.demo, manifest_csv=args.manifest_csv, morphometrics_csv=morph_csv)
     if df.empty: logger.warning("No rosette patch records were matched. Check inputs."); return
     df["plant_individual_id"] = [_parse_pid(v, 0) for v in df["plant_individual_id"]] if "plant_individual_id" in df.columns else 0
-    df = _apply_intraspecific_morphotype_labels(df, args.morphometrics_csv, vouchers_csv=args.vouchers_csv, intraspecific_mode=args.intraspecific_mode)
+    df = _apply_intraspecific_morphotype_labels(df, morph_csv, vouchers_csv=args.vouchers_csv, intraspecific_mode=args.intraspecific_mode)
     features, labels, key_order, fg_ratios = extract_dinov2_embeddings(df.to_dict("records"), neutralize_background=args.neutralize_background, demo=args.demo, return_fg_ratios=True, db_path=args.db)
     fg_by_key = {(k if isinstance(k, tuple) else (str(k).strip(), 0)): float(fg) for k, fg in zip(key_order, fg_ratios)}
     df["foreground_attention_ratio"] = [round(fg_by_key.get((str(c).strip(), _parse_pid(p, 0)), 0.85), 4) for c, p in zip(df["catalogNumber"], df["plant_individual_id"])]
-    active_taxa = sorted(t for t in set(df["taxon"]) if _is_valid_packera_taxon(t)) or ["Unassigned_Packera"]
-    pred_probs, _, _ = compute_out_of_fold_probabilities(features, labels, n_splits=5, surface_orientations=df.get("surface_orientation", None), stratify_by_orientation=args.stratify_by_orientation, determiner_tiers=df.get("determiner_tier", None), spatial_balance_weights=df.get("spatial_balance_weight", None), institution_codes=df.get("institutionCode", None))
-    audit_df = run_confident_learning_audit(pred_probs=pred_probs, labels=labels, records_df=df, class_names=active_taxa, error_threshold=args.cleanlab_threshold, filter_abaxial_artifacts=args.filter_abaxial_artifacts, features=features)
+    active_taxa, promo_s = sorted(t for t in set(df["taxon"]) if _is_valid_packera_taxon(t)) or ["Unassigned_Packera"], df.get("is_promoted_bronze", None)
+    pred_probs, _, _ = compute_out_of_fold_probabilities(features, labels, n_splits=5, surface_orientations=df.get("surface_orientation", None), stratify_by_orientation=args.stratify_by_orientation, determiner_tiers=df.get("determiner_tier", None), spatial_balance_weights=df.get("spatial_balance_weight", None), institution_codes=df.get("institutionCode", None), is_promoted_bronze=promo_s)
+    audit_df = run_confident_learning_audit(pred_probs=pred_probs, labels=labels, records_df=df, class_names=active_taxa, error_threshold=args.cleanlab_threshold, filter_abaxial_artifacts=args.filter_abaxial_artifacts, features=features, is_promoted_bronze=promo_s)
     if args.export_figures:
         flagged = audit_df[audit_df["is_label_corrupted"]].to_dict("records") or audit_df[audit_df["is_cleanlab_issue"]].to_dict("records") or audit_df.sort_values("c_error", ascending=False).head(8).to_dict("records")
         clf = LogisticRegression(max_iter=1000, C=0.25, class_weight="balanced", random_state=42).fit(features, labels) if len(np.unique(labels)) > 1 else None
@@ -779,6 +771,9 @@ def main() -> None:
         if fg_updates:
             audit_df["foreground_attention_ratio"] = [fg_updates.get((str(c).strip(), _parse_pid(p, 0)), float(fg)) for c, p, fg in zip(audit_df["catalogNumber"], audit_df["plant_individual_id"], audit_df["foreground_attention_ratio"])]
             audit_df["is_artifact_driven"] = (audit_df["foreground_attention_ratio"] < FOREGROUND_ATTENTION_MIN_RATIO).astype(bool); audit_df["is_background_shortcut"] = audit_df["is_artifact_driven"].astype(bool)
+            if args.filter_abaxial_artifacts:
+                ab_art = (audit_df["surface_orientation"].astype(str).str.lower() == "abaxial") & audit_df["is_artifact_driven"] & (audit_df["is_label_corrupted"] | audit_df["is_label_issue"])
+                if bool(ab_art.any()): audit_df.loc[ab_art, ["is_label_corrupted", "is_label_issue", "triage_action"]] = [False, False, "Retain (Abaxial Inversion Artifact)"]
         try: generate_step05_publication_figures(audit_df, args.output_figure)
         except Exception as fig_exc: logger.warning(f"Step 05 publication figure generation skipped: {fig_exc}")
     if not args.demo:
