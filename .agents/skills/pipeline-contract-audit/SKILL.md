@@ -127,14 +127,14 @@ checks = [
     ("03 groups by (catalogNumber, plant_individual_id), uses cov.wt & exports morph_tier_source", "plant_individual_id" in s03 and "catalogNumber" in s03 and "cov.wt" in s03 and "morph_tier_source" in s03),
     ("03 matches tier via case-insensitive regex", "tier_?1" in s03.lower() or "tier_?[12]" in s03.lower()),
     ("03 exports harmonic_roughness, is_contour_outlier & leaf_quality_weight", "harmonic_roughness" in s03 and "is_contour_outlier" in s03 and "leaf_quality_weight" in s03),
-    ("04 enforces 2-step Dawid-Skene / EB authority update & full-rank canonical axes", "compute_empirical_bayes_authority_weights" in s_auth and "alpha_0" in s_auth and "can3" in s04),
+    ("04 enforces 2-step Dawid-Skene / EB authority update & full-rank canonical axes", "compute_empirical_bayes_authority_weights" in s_auth and ("alpha0" in s_auth or "prior_alpha" in s_auth) and "can3" in s04),
     ("04 exports morphometric_outlier_flag, loocv_accuracy, cda_posterior_margin & can3", "morphometric_outlier_flag" in s04 and "loocv_accuracy" in s04 and "cda_posterior_margin" in s04 and "can3" in s04),
     ("05 uses promoted bronze anchor parity and conditional abaxial artifact gate", "is_promoted_bronze" in s05 and "filter_abaxial_artifacts" in s05),
     ("05 uses foreground patch pooling, OOD scoring & Pointing Game attribution", ("foreground_masked_patch_pooling" in s05 or "compute_foreground_tissue_mask" in s05) and "vision_ood_score" in s05 and "foreground_attention_ratio" in s05),
     ("06 uses 0-15cm depth weighting, VIF pruning, spatial_block_cv_acc & fine_grain_edaphic_cache", "left_join" in s06 and "prune_collinear_predictors" in s06 and "spatial_block_cv_acc" in s06 and "fine_grain_edaphic_cache" in s06),
     ("06 pools Spatial Block-CV RF posteriors and computes edaphic_z_score", "spatial_block_cv_acc" in s06 and "edaphic_z_score" in s06 and "edaphic_best_fit_taxon" in s06),
     ("07 validates contracts, coalesces non-georeferenced vouchers & enforces Tier_1_Pure cryptic gate", "validate_upstream_contracts" in s07 and "taxonomic_treatment_broad" in s07 and "taxonomic_treatment_subtype" in s07 and "is_completed_voucher" in s07 and "Tier_1_Pure" in s07),
-    ("07 enforces cross-modal non-contradiction and class-conditional precision", "morph_or_vis_corrupt_reassign" in s07 and "pred_prec" in s07),
+    ("07 enforces cross-modal non-contradiction and class-conditional precision", "morph_or_vis_corrupt_reassign" in s07 and ("prec_morph" in s07 or "lookup_prec" in s07)),
 ]
 
 failed = False
