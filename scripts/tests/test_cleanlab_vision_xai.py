@@ -1264,8 +1264,8 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             rosette_dir = tmp_path / "cropped_patches"
-            leaves_dir = rosette_dir / "leaves_tier1_2"
-            masks_dir = tmp_path / "masks"
+            leaves_dir = rosette_dir / "basal_leaves_raw"
+            masks_dir = tmp_path / "masks" / "tier1_intact"
             leaves_dir.mkdir(parents=True)
             masks_dir.mkdir(parents=True)
 
@@ -1273,7 +1273,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             # CAT_FALLBACK has leaf1 (cy=0.24) and leaf2 (cy=0.32) -> rescued by max - 0.15 fallback
             for cat, lid in [("CAT_BASAL", 1), ("CAT_BASAL", 2), ("CAT_FALLBACK", 1), ("CAT_FALLBACK", 2)]:
                 img_p = leaves_dir / f"{cat}_p0_leaf{lid}.png"
-                msk_p = masks_dir / f"{cat}_p0_leaf{lid}_mask.png"
+                msk_p = masks_dir / f"{cat}_p0_leaf{lid}.png"
                 Image.new("RGB", (224, 224), color=(60, 110, 50)).save(img_p)
                 Image.new("L", (224, 224), color=255).save(msk_p)
 
@@ -1284,7 +1284,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
                     "ucs_score": 0.90, "cy_rel_plant_bbox": 0.15, "blade_area_cm2": 1.8,
                     "effective_min_blade_area_cm2": 0.4,
                     "leaf_crop_path": str(leaves_dir / "CAT_BASAL_p0_leaf1.png"),
-                    "mask_path": str(masks_dir / "CAT_BASAL_p0_leaf1_mask.png"),
+                    "mask_path": str(masks_dir / "CAT_BASAL_p0_leaf1.png"),
                 },
                 {
                     "catalogNumber": "CAT_BASAL", "plant_individual_id": 0, "leaf_id": 2,
@@ -1292,7 +1292,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
                     "ucs_score": 0.91, "cy_rel_plant_bbox": 0.78, "blade_area_cm2": 2.1,
                     "effective_min_blade_area_cm2": 0.4,
                     "leaf_crop_path": str(leaves_dir / "CAT_BASAL_p0_leaf2.png"),
-                    "mask_path": str(masks_dir / "CAT_BASAL_p0_leaf2_mask.png"),
+                    "mask_path": str(masks_dir / "CAT_BASAL_p0_leaf2.png"),
                 },
                 {
                     "catalogNumber": "CAT_FALLBACK", "plant_individual_id": 0, "leaf_id": 1,
@@ -1300,7 +1300,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
                     "ucs_score": 0.89, "cy_rel_plant_bbox": 0.24, "blade_area_cm2": 1.6,
                     "effective_min_blade_area_cm2": 0.4,
                     "leaf_crop_path": str(leaves_dir / "CAT_FALLBACK_p0_leaf1.png"),
-                    "mask_path": str(masks_dir / "CAT_FALLBACK_p0_leaf1_mask.png"),
+                    "mask_path": str(masks_dir / "CAT_FALLBACK_p0_leaf1.png"),
                 },
                 {
                     "catalogNumber": "CAT_FALLBACK", "plant_individual_id": 0, "leaf_id": 2,
@@ -1308,7 +1308,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
                     "ucs_score": 0.92, "cy_rel_plant_bbox": 0.32, "blade_area_cm2": 1.9,
                     "effective_min_blade_area_cm2": 0.4,
                     "leaf_crop_path": str(leaves_dir / "CAT_FALLBACK_p0_leaf2.png"),
-                    "mask_path": str(masks_dir / "CAT_FALLBACK_p0_leaf2_mask.png"),
+                    "mask_path": str(masks_dir / "CAT_FALLBACK_p0_leaf2.png"),
                 },
             ])
             filt_df = filter_basal_manifest_rows_py(manifest_df, tier_col="assigned_tier")
@@ -1337,9 +1337,11 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             basal_row = linked_df.loc[linked_df["catalogNumber"] == "CAT_BASAL"].iloc[0]
             # Excluded cauline leaf1 on disk must NOT be re-ingested by disk glob fallback
             self.assertEqual(int(basal_row["n_rosette_patches"]), 1)
-            self.assertIn("leaf2.png", basal_row["patch_paths"][0])
+            self.assertEqual(len(basal_row["tier1_leaf_patches"]), 1)
+            self.assertIn("leaf2.png", basal_row["tier1_leaf_patches"][0])
             fb_row = linked_df.loc[linked_df["catalogNumber"] == "CAT_FALLBACK"].iloc[0]
             self.assertEqual(int(fb_row["n_rosette_patches"]), 2)
+            self.assertEqual(len(fb_row["tier1_leaf_patches"]), 2)
 
             # 3. Continuous area-weighted ViT token pooling for narrow dissected pinnae (0.05 <= patch_frac < 0.15)
             import torch
@@ -1365,13 +1367,14 @@ class TestCleanlabVisionXAI(unittest.TestCase):
                 "catalogNumber": "CAT_PINNA",
                 "plant_individual_id": 0,
                 "label_idx": 0,
-                "patch_paths": [str(narrow_img)],
-                "mask_paths": [str(narrow_msk)],
-                "patch_weights": [1.0],
+                "patch_path": str(narrow_img),
+                "mask_path": str(narrow_msk),
+                "tier1_leaf_patches": [str(narrow_img)],
+                "tier1_leaf_masks": [str(narrow_msk)],
+                "tier1_leaf_weights": [1.0],
             }]
-            with patch.object(mod_xai, "_load_dinov2_backbone", return_value=(PinnaDINOv2(), "cpu")), \
-                 patch.object(mod_xai, "resolve_db_path", return_value=tmp_path / "ephem.sqlite"):
-                emb, _, _ = extract_dinov2_embeddings(rec, demo=False)
+            with patch("torch.hub.load", return_value=PinnaDINOv2()):
+                emb, _, _ = extract_dinov2_embeddings(rec, demo=False, db_path=tmp_path / "ephem.sqlite")
             # Foreground patch (0,0) must dominate dim 0 rather than falling back to background global average (dim 1)
             self.assertGreater(float(emb[0, 0]), 0.95)
             self.assertAlmostEqual(float(emb[0, 1]), 0.0, places=5)

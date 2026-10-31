@@ -231,7 +231,9 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
                     m_pid, lid_raw = (_parse_pid(mrow.get("plant_individual_id"), 0) if man_has_pid else 0), mrow.get("leaf_id", "")
                     lid = str(int(float(lid_raw))) if (pd.notna(lid_raw) and str(lid_raw).strip().replace(".", "", 1).isdigit()) else str(lid_raw).strip()
                     stems = (f"{c_num}_p{m_pid}_leaf{lid}", f"{c_num}_leaf{lid}") if man_has_pid else (f"{c_num}_leaf{lid}",)
-                    cp = next((basal_dir / f"{st}{ext}" for st in stems for ext in (".jpg", ".png", ".jpeg") if (basal_dir / f"{st}{ext}").is_file()), None)
+                    cp_raw = str(mrow.get("leaf_crop_path", mrow.get("crop_path", "")) or "").strip()
+                    cp_cand = ([Path(cp_raw), data_root.parent / cp_raw, _script_root / cp_raw] if (cp_raw and cp_raw.lower() != "nan") else []) + [basal_dir / f"{st}{ext}" for st in stems for ext in (".jpg", ".png", ".jpeg")]
+                    cp = next((cand for cand in cp_cand if cand.is_file()), None)
                     mp_raw = str(mrow.get("mask_path", "") or "").strip()
                     mp_cand = ([Path(mp_raw), data_root.parent / mp_raw, _script_root / mp_raw] if (mp_raw and mp_raw.lower() != "nan") else []) + [tier1_mask_dir / f"{st}.png" for st in stems]
                     mp = next((cand for cand in mp_cand if cand.is_file()), None)
@@ -249,11 +251,12 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
     for d_t1 in (tier1_by_key, tier1_by_cat):
         for k_t1 in d_t1: d_t1[k_t1] = order_basal_leaves_by_median_solidity(d_t1[k_t1])
     dense_files: List[Path] = []
+    t1_dirs = {basal_dir} | {Path(x[1]).parent for vals in list(tier1_by_key.values()) + list(tier1_by_cat.values()) for x in vals}
     for search_dir, use_rglob in ((dense_dir, False), (rosette_dir, False), (rosette_dir, True)):
         if not dense_files and search_dir.exists():
             for ext in ("*.jpg", "*.png", "*.jpeg"):
                 for fp in sorted(search_dir.rglob(ext) if use_rglob else search_dir.glob(ext)):
-                    if not fp.stem.lower().endswith("_mask") and "capitula" not in fp.parts and (fp.parent != basal_dir or not (tier1_by_cat or tier1_by_key)): dense_files.append(fp)
+                    if not fp.stem.lower().endswith("_mask") and "capitula" not in fp.parts and (fp.parent not in t1_dirs or not (tier1_by_cat or tier1_by_key)): dense_files.append(fp)
     grouped_by_key, grouped_by_cat = {}, {}
     for p in dense_files:
         cat_num, s_pid = _extract_catalog_number(p.stem, known_cats), _extract_pid_from_stem(p.stem, known_cats)
