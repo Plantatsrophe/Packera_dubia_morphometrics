@@ -212,8 +212,10 @@ class TestGMMAndMorphoTools(unittest.TestCase):
               cat("PHASE4_DAWID_SKENE_AND_KFULL_OK\\n")
             }})
             """
+            r_batch_file = cls._class_tmp_path / "batched_step04_checks.R"
+            r_batch_file.write_text(r_batch_code, encoding="utf-8")
             cls.r_unit_proc = subprocess.run(
-                ["Rscript", "-e", r_batch_code],
+                ["Rscript", str(r_batch_file)],
                 cwd=str(PROJECT_ROOT),
                 capture_output=True,
                 text=True,

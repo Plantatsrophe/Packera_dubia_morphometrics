@@ -278,8 +278,10 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
               cat("STEP07_PRECISION_AND_GATE_OK\\n")
             }})
             """
+            r_batch_file = cls._class_tmp_path / "batched_step07_checks.R"
+            r_batch_file.write_text(r_batch_code, encoding="utf-8")
             cls.r_unit_proc = subprocess.run(
-                ["Rscript", "-e", r_batch_code],
+                ["Rscript", str(r_batch_file)],
                 cwd=str(PROJECT_ROOT),
                 capture_output=True,
                 text=True,

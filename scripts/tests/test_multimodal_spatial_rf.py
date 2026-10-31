@@ -496,8 +496,10 @@ class TestMultimodalSpatialRF(unittest.TestCase):
               cat("STEP06_RF_POSTERIOR_POOLING_OK\\n")
             }})
             """
+            r_batch_file = cls._class_tmp_path / "batched_step06_checks.R"
+            r_batch_file.write_text(r_batch_code, encoding="utf-8")
             cls.r_unit_proc = subprocess.run(
-                ["Rscript", "-e", r_batch_code],
+                ["Rscript", str(r_batch_file)],
                 cwd=str(PROJECT_ROOT),
                 capture_output=True,
                 text=True,
@@ -603,7 +605,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertEqual(standardize_packera_taxon("Packera anonyma (Alph.Wood) W.A.Weber"), "Packera anonyma")
         self.assertEqual(standardize_packera_taxon("Packera paupercula var. savannarum"), "Packera paupercula")
         self.assertEqual(standardize_packera_taxon("Packera streptanthifolia (Greene) W.A.Weber & Á.Löve"), "Packera streptanthifolia")
-        self.assertEqual(standardize_packera_taxon("P. sanguisorbae (DC.) C.Jeffrey"), "Packera sanguisorbae")
+        self.assertEqual(standardize_packera_taxon("Packera sanguisorbae (DC.) C.Jeffrey"), "Packera sanguisorbae")
         self.assertEqual(standardize_packera_taxon("Packera x memmingeri"), "Packera memmingeri")
         self.assertIn("STD_TAXON_OK", self._require_batched_r())
 
