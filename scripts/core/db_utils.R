@@ -267,21 +267,26 @@ is_sqlite_active_for_inputs <- function(input_paths = character(0), demo = FALSE
 
 .run_python_db_init_schema <- function(eff_path) {
   if (identical(eff_path, ":memory:")) return(invisible(FALSE))
-  py_bin <- if (file.exists(".venv/bin/python")) ".venv/bin/python" else Sys.which("python3")
-  if (!nzchar(py_bin)) return(invisible(FALSE))
-  tryCatch({
-    system2(
-      py_bin,
-      args = c(
-        "-c",
-        "import sys; from scripts.core.db import get_db_connection; c = get_db_connection(sys.argv[1], init_schema=True); c.close()",
-        eff_path
+  py_cands <- unique(c(
+    if (file.exists(".venv/bin/python")) ".venv/bin/python" else character(0),
+    Sys.which("python3")
+  ))
+  py_cands <- py_cands[nzchar(py_cands)]
+  if (length(py_cands) == 0L) return(invisible(FALSE))
+  py_code <- "import sys; from scripts.core.db import get_db_connection; c = get_db_connection(sys.argv[1], init_schema=True); c.close()"
+  for (py_bin in py_cands) {
+    rc <- tryCatch(
+      system2(
+        py_bin,
+        args = c("-c", shQuote(py_code), shQuote(eff_path)),
+        stdout = FALSE,
+        stderr = FALSE
       ),
-      stdout = FALSE,
-      stderr = FALSE
+      error = function(e) 1L
     )
-    TRUE
-  }, error = function(e) FALSE)
+    if (identical(as.integer(rc), 0L)) return(invisible(TRUE))
+  }
+  invisible(FALSE)
 }
 
 connect_packera_db <- function(
@@ -336,7 +341,12 @@ connect_packera_db <- function(
     view_needs_refresh <- schema_migrated
     if (!view_needs_refresh && db_table_exists_safe(conn, "v_integrative_triage_master")) {
       v_cols <- tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0))
-      if (length(v_cols) > 0L && !all(c("PC15", "Sym_PC15", "selected_morph_features", "climatic_z_score", "bio19_precip_coldest_qtr") %in% v_cols)) {
+      req_v_cols <- c(
+        "PC15", "Sym_PC15", "selected_morph_features", "climatic_z_score",
+        "bio19_precip_coldest_qtr", "dissection_index", "q25_solidity",
+        "dissected_leaf_fraction", "basal_leaf_count"
+      )
+      if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE
       }
     }
