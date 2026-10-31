@@ -170,21 +170,13 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
   if (!any(grepl("^(Sym_)?PC[0-9]+$", colnames(X_use))) && all(grepl("^[ABCD]_?[0-9]+$", colnames(X_use)))) {
     h_nums <- suppressWarnings(as.integer(gsub("[^0-9]", "", colnames(X_use))))
     if (!any(is.na(h_nums))) X_use <- X_use[, order(h_nums, colnames(X_use)), drop = FALSE]
-    raw_cap <- if (!is.null(max_p) && length(max_p) == 1L && is.finite(as.numeric(max_p)) && as.numeric(max_p) >= 1) {
-      as.integer(max_p)
-    } else {
-      max(2L, min(ncol(X_use), floor(max(sum(has_feat), 4L) / 2L), 10L))
-    }
-    X_use <- X_use[, seq_len(min(ncol(X_use), raw_cap)), drop = FALSE]
-  } else {
-    sel_cols <- select_morphometric_subspace(
-      X_use[has_feat, , drop = FALSE],
-      group_vec = if (!is.null(group_vec)) group_vec[has_feat] else NULL,
-      min_p = min(2L, ncol(X_use)),
-      max_p = max_p
-    )
-    X_use <- X_use[, sel_cols, drop = FALSE]
   }
+  dyn_cap <- if (!is.null(max_p) && length(max_p) == 1L && is.finite(as.numeric(max_p)) && as.numeric(max_p) >= 1) {
+    as.integer(max_p)
+  } else {
+    max(2L, min(ncol(X_use), floor(max(sum(has_feat), 4L) / 4L), 15L))
+  }
+  X_use <- X_use[, seq_len(min(ncol(X_use), dyn_cap)), drop = FALSE]
   list(X = X_use, has_feat = has_feat)
 }
 
@@ -593,8 +585,8 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
   eval_pc <- eval_mask & finite_pc & (taxa_vec %in% valid_taxa)
   if (sum(eval_pc) < 3L) return(NULL)
   if (ncol(X_pc) > 2L) {
-    sel_pc <- select_morphometric_subspace(X_pc[eval_pc, , drop = FALSE], group_vec = taxa_vec[eval_pc], min_p = 2L, max_p = NULL)
-    X_pc <- X_pc[, sel_pc, drop = FALSE]
+    p_cap <- max(2L, min(ncol(X_pc), floor(max(sum(eval_pc), 4L) / 4L), 15L))
+    X_pc <- X_pc[, seq_len(p_cap), drop = FALSE]
   }
   p <- ncol(X_pc)
 

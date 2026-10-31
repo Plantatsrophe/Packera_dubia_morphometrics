@@ -251,7 +251,7 @@ standardize_sgmc_lithology <- function(
     } else if (grepl("felsic|crystalline|granit|granodiorit|monzonit|quartz monzonit|gneiss|pegmatit|rhyolit|aplit|dacit|migmatit|wake|louisburg|ashlar|rion|wateree|pacolet|appling|cecil|wedowee|madison", combined, perl = TRUE) ||
                oc_clean == "granitic flatrock") {
       out_cls[i] <- "Felsic_Granitic_Gneiss"
-    } else if (grepl("siliciclastic|consolidated|sandstone|quartzit|arkos|conglomerat|greywack|graywack|siltston|shale|slate|phyllit|mudston|argillit|chert|novaculit|schist|ramsey|lily|sewanee|goldston|manteo|wallen|dekab", combined, perl = TRUE) ||
+    } else if (grepl("siliciclastic|\\bconsolidated\\b|sandstone|quartzit|arkos|conglomerat|greywack|graywack|siltston|shale|slate|phyllit|mudston|argillit|chert|novaculit|schist|ramsey|lily|sewanee|goldston|manteo|wallen|dekab", combined, perl = TRUE) ||
                oc_clean == "sandstone/siliceous") {
       out_cls[i] <- "Siliciclastic_Consolidated"
     } else if (grepl("unconsolidated|alluvi|colluvi|coastal plain|terrace|loess|till|outwash|glacial|dune|eolian|sandhill|muck|peat|saprist|psamment|aquult|aquoll|aquept|fluvent|wagram|lakeland|plainfield|goldsboro|norfolk|myatt|rains|lynchburg|tama", combined, perl = TRUE)) {

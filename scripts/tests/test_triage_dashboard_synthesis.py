@@ -633,10 +633,13 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         stopifnot(taus$tau_cryptic[1] >= 14.0 && taus$tau_cryptic[20] <= 35.0)
 
         # Verify Step 06 edaphic_z_score is preserved on rows 1..12 and dynamically computed on row 13 (extreme anomaly > 3.0)
-        df_dec <- apply_taxonomic_decision_matrix(df)
-        # Multi-feature institutional batch ANCOVA tests all 4 PC1..PC4 features
+        df_dec <- apply_taxonomic_decision_matrix(df_h)
+        stopifnot(abs(df_dec$edaphic_z_score[1] - 0.45) < 1e-6)
+        stopifnot(is.finite(df_dec$edaphic_z_score[13]) && df_dec$edaphic_z_score[13] > 3.0)
+        # Multi-feature institutional batch ANCOVA tests all 4 PC1..PC4 features with BH FDR
         anc_df <- audit_institutional_batch_effects_ancova(df_dec)
-        stopifnot(all(c("PC1", "PC2", "PC3", "PC4") %in% anc_df$Feature || all(c("PC1", "PC2", "PC3", "PC4") %in% anc_df$Response)))
+        stopifnot(all(c("PC1", "PC2", "PC3", "PC4") %in% anc_df$Response))
+        stopifnot("p_adj_bh" %in% names(anc_df) && all(is.finite(anc_df$p_adj_bh)))
         cat("STEP07_COHORT_ADAPTIVE_OK\\n")
         """
         res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)

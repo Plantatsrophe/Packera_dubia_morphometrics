@@ -129,8 +129,8 @@ resolve_active_anthesis_mask <- function(df) {
   if (length(state_cols) > 0L) {
     st_raw <- tolower(trimws(as.character(df[[state_cols[1L]]])))
     unk_mask <- is.na(st_raw) | !nzchar(st_raw) | st_raw == "unknown"
-    is_anthesis <- unk_mask | st_raw %in% c("anthesis", "flowering", "active_anthesis", "open_flower")
-    is_anthesis[!is.na(st_raw) & st_raw %in% c("bud", "fruit", "sterile", "vegetative", "fruiting", "senescent")] <- FALSE
+    is_anthesis <- unk_mask | st_raw %in% c("anthesis", "flowering", "active_anthesis", "open_flower") | grepl("anthesis|flower", st_raw)
+    is_anthesis[!is.na(st_raw) & (st_raw %in% c("bud", "fruit", "sterile", "vegetative", "fruiting", "senescent") | grepl("pre[_-]?anthesis|post[_-]?anthesis|non[_-]?anthesis", st_raw))] <- FALSE
     if (any(unk_mask)) {
       has_ver <- unk_mask & !is.na(ver_vec)
       if (any(has_ver)) is_anthesis[has_ver] <- ver_vec[has_ver]
