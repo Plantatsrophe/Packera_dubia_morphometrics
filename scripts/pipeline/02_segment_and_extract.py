@@ -4224,8 +4224,18 @@ def _parse_bool_val(val: Any, default: bool = False) -> bool:
     return default
 
 
+_ASSET_ANCHOR_DIRS = ("masks", "contours", "cropped_patches")
+
+
 def _resolve_asset_path(p_str: Any, out_dir: Path) -> Optional[Path]:
-    """Resolve mask or contour asset path across absolute, run-scoped, and workspace-root paths."""
+    """
+    Resolve mask or contour asset path across absolute, run-scoped, and workspace-root paths.
+
+    SQLite `extracted_leaves` / resumed Step 02 manifests may carry absolute paths into a
+    previous (since rebuilt or deleted) `runs/<run_id>/data/` directory. When the literal path
+    is missing, the trailing `masks/...`, `contours/...`, or `cropped_patches/...` segment is
+    re-rooted onto the current run-local `data/` store and then the canonical `data/` store.
+    """
     raw = str(p_str or "").strip()
     if not raw or raw.lower() in {"nan", "none", "na"}:
         return None
@@ -4236,6 +4246,14 @@ def _resolve_asset_path(p_str: Any, out_dir: Path) -> Optional[Path]:
         cand = base / raw
         if cand.exists():
             return cand
+    parts = p.parts
+    anchor_idx = next((i for i in range(len(parts) - 1, -1, -1) if parts[i] in _ASSET_ANCHOR_DIRS), None)
+    if anchor_idx is not None and anchor_idx < len(parts) - 1:
+        rel_tail = Path(*parts[anchor_idx:])
+        for data_root in (out_dir.parent.parent / "data", out_dir.parent / "data", PROJECT_ROOT / "data"):
+            cand = data_root / rel_tail
+            if cand.exists():
+                return cand
     return None
 
 
@@ -4876,11 +4894,7 @@ def generate_step02_publication_figures(
     if len(t1_pool) == 0:
         t1_pool = df_plot.copy()
 
-    # Precompute mask smoothness/closure validity and ranking attributes on t1_pool
-    t1_pool["mask_valid"] = [
-        _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir)
-        for _, r in t1_pool.iterrows()
-    ]
+    # Ranking attributes on t1_pool (mask smoothness/closure validity is evaluated lazily per species)
     t1_pool["is_gold_silver"] = t1_pool["determiner_tier"].astype(str).str.strip().isin(
         {"Tier_1_Gold", "Tier_2_Silver"}
     )
@@ -4904,15 +4918,37 @@ def generate_step02_publication_figures(
         sp_col = SPECIES_PALETTE[sp_name]
         # Strictly restrict to this species; never substitute another species' leaves
         sp_all = t1_pool[t1_pool["species_clean"] == sp_name].copy()
+        # Only real on-disk silhouettes are eligible (never render fabricated geometry)
+        sp_all["asset_ok"] = pd.Series(
+            [
+                (_resolve_asset_path(r.get("mask_path", ""), out_dir) is not None)
+                or (_resolve_asset_path(r.get("contour_path", ""), out_dir) is not None)
+                for _, r in sp_all.iterrows()
+            ],
+            index=sp_all.index,
+            dtype=bool,
+        )
+        n_missing_assets = int((~sp_all["asset_ok"]).sum())
+        if n_missing_assets:
+            logger.warning(
+                f"fig02b: {n_missing_assets} / {len(sp_all)} {sp_name} Tier_1_Direct leaves have no resolvable mask/contour asset on disk."
+            )
+        sp_all = sp_all[sp_all["asset_ok"]].copy()
         sp_hq = sp_all[
             (sp_all["ucs_val"] >= 0.88)
             & (sp_all["sol_val"] >= 0.80)
             & (sp_all["sol_val"] < 0.995)
-            & (sp_all["mask_valid"])
-        ].sort_values("ar_val").copy()
+        ].copy()
+        sp_hq["mask_valid"] = [
+            _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()
+        ]
+        sp_hq = sp_hq[sp_hq["mask_valid"].astype(bool)].sort_values("ar_val").copy()
         if len(sp_hq) < 4:
             # Fallback within the SAME species only (e.g. small synthetic unit test fixture)
-            sp_hq = sp_all[sp_all["mask_valid"]].sort_values("ar_val").copy()
+            sp_all["mask_valid"] = [
+                _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_all.iterrows()
+            ]
+            sp_hq = sp_all[sp_all["mask_valid"].astype(bool)].sort_values("ar_val").copy()
         if len(sp_hq) == 0:
             sp_hq = sp_all.sort_values("ar_val").copy()
 
@@ -5036,24 +5072,29 @@ def generate_step02_publication_figures(
                     except Exception:
                         pts_xy = None
                 if pts_xy is None:
-                    theta = np.linspace(0, 2 * np.pi, 90)
-                    pts_xy = np.column_stack([35.0 * np.sin(theta), (35.0 * ar_v) * np.cos(theta)])
-
-                ax_t.set_facecolor("#F8F8F8")
-                ax_t.fill(pts_xy[:, 0], pts_xy[:, 1], color=sp_col, alpha=0.82)
-                p_base_pt = pts_xy[0]
-                dists = np.hypot(pts_xy[:, 0] - p_base_pt[0], pts_xy[:, 1] - p_base_pt[1])
-                p_apex_pt = pts_xy[int(np.argmax(dists))]
-                ax_t.plot(
-                    [p_base_pt[0], p_apex_pt[0]],
-                    [p_base_pt[1], p_apex_pt[1]],
-                    color="#111111",
-                    linestyle="--",
-                    linewidth=1.3,
-                )
-                ax_t.scatter([p_base_pt[0]], [p_base_pt[1]], facecolors="none", edgecolors="#E69F00", linewidths=1.5, s=48, zorder=5)
-                ax_t.set_aspect("equal", adjustable="datalim")
-                ax_t.invert_yaxis()
+                    # Never fabricate a silhouette: render an explicit placeholder tile instead
+                    ax_t.set_facecolor("#F8F8F8")
+                    ax_t.text(
+                        0.5, 0.5, "Mask / contour asset\nunavailable on disk",
+                        transform=ax_t.transAxes, ha="center", va="center",
+                        fontsize=7.5, color="#666666", style="italic",
+                    )
+                else:
+                    ax_t.set_facecolor("#F8F8F8")
+                    ax_t.fill(pts_xy[:, 0], pts_xy[:, 1], color=sp_col, alpha=0.82)
+                    p_base_pt = pts_xy[0]
+                    dists = np.hypot(pts_xy[:, 0] - p_base_pt[0], pts_xy[:, 1] - p_base_pt[1])
+                    p_apex_pt = pts_xy[int(np.argmax(dists))]
+                    ax_t.plot(
+                        [p_base_pt[0], p_apex_pt[0]],
+                        [p_base_pt[1], p_apex_pt[1]],
+                        color="#111111",
+                        linestyle="--",
+                        linewidth=1.3,
+                    )
+                    ax_t.scatter([p_base_pt[0]], [p_base_pt[1]], facecolors="none", edgecolors="#E69F00", linewidths=1.5, s=48, zorder=5)
+                    ax_t.set_aspect("equal", adjustable="datalim")
+                    ax_t.invert_yaxis()
 
             col_hdr = f"{pct_labels[col_idx]}\n" if row_idx == 0 else ""
             ax_t.set_title(f"{col_hdr}{cat_num} (L{leaf_id}) | AR={ar_v:.2f}, Sol={sol_v:.2f}", fontsize=7.6, fontweight="bold")
