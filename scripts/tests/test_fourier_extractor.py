@@ -645,12 +645,12 @@ class TestFourierExtractor(unittest.TestCase):
         import sys
         if str(PROJECT_ROOT) not in sys.path:
             sys.path.insert(0, str(PROJECT_ROOT))
-        from scripts.core.db import get_sqlite_connection, init_schema, populate_run_active_cohort
+        from scripts.core.db import get_db_connection, init_db_schema, populate_run_active_cohort
 
         with tempfile.TemporaryDirectory() as tmp:
             eph_db = Path(tmp) / "ephemeral_synonym_test.sqlite"
-            conn = get_sqlite_connection(eph_db)
-            init_schema(conn)
+            conn = get_db_connection(eph_db)
+            init_db_schema(conn)
             with conn:
                 conn.executemany(
                     "INSERT INTO taxon_synonyms (raw_name_lower, canonical_packera) VALUES (?, ?);",
