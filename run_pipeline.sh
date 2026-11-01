@@ -602,25 +602,75 @@ if exclude_csv:
     for item in exclude_csv.split(','):
         item = item.strip()
         if item:
-            exclude_taxa.add(standardize_packera_taxon(item))
+            std_ex = standardize_packera_taxon(item)
+            if std_ex:
+                exclude_taxa.add(std_ex)
 
 tables_dir = run_dir / 'data' / 'tables'
 csv_path = tables_dir / 'curated_vouchers.csv'
+
+def _resolve_preflight_taxon(sn, sr, ss):
+    for cand in (sn, sr, ss):
+        if pd.notna(cand) and str(cand).strip():
+            std = standardize_packera_taxon(cand)
+            if std:
+                return std
+    return None
+
+focal_std_req = standardize_packera_taxon(focal_raw) if focal_raw else None
+requested_taxa = set(custom_taxa)
+if focal_std_req:
+    requested_taxa.add(focal_std_req)
+
+# Restore requested-taxon vouchers that exist in the canonical SQLite vouchers table but are missing
+# from the curated_vouchers.csv snapshot (taxon-restricted harvests UPSERT into SQLite but are never
+# promoted to data/tables/curated_vouchers.csv, so --skip-harvest runs would otherwise silently drop them).
+if requested_taxa and os.environ.get('PACKERA_DEMO_MODE') != '1' and seed_data == root_data:
+    from scripts.core.db import get_db_connection as _get_db_conn_sync, reconcile_curated_vouchers_csv_with_db
+    sync_db_path = os.environ.get('PACKERA_DB_PATH') or str(root_data / 'packera_pipeline.sqlite')
+    if Path(sync_db_path).is_file():
+        conn_sync = _get_db_conn_sync(db_path=sync_db_path, init_schema=True, workspace_root=root_data.parent)
+        try:
+            n_synced = reconcile_curated_vouchers_csv_with_db(
+                conn_sync,
+                csv_path,
+                taxa=requested_taxa,
+                taxon_resolver=_resolve_preflight_taxon,
+            )
+        finally:
+            conn_sync.close()
+        if n_synced:
+            print(f'[Preflight: SQLite Voucher Sync] Restored {n_synced} vouchers for requested taxa {sorted(requested_taxa)} from SQLite vouchers that were missing from curated_vouchers.csv.')
+
 df = pd.read_csv(csv_path)
 initial_voucher_count = len(df)
-if 'scientificName' in df.columns and 'species_raw' in df.columns:
-    df['species_standardized'] = [
-        standardize_packera_taxon(sn) or standardize_packera_taxon(sr)
-        for sn, sr in zip(df['scientificName'], df['species_raw'])
-    ]
-else:
-    sp_col = 'scientificName' if 'scientificName' in df.columns else ('species_raw' if 'species_raw' in df.columns else 'species')
-    df['species_standardized'] = df[sp_col].apply(standardize_packera_taxon)
+
+sn_vals = df['scientificName'] if 'scientificName' in df.columns else [None] * len(df)
+sr_vals = df['species_raw'] if 'species_raw' in df.columns else [None] * len(df)
+ss_vals = df['species_standardized'] if 'species_standardized' in df.columns else (df['species'] if 'species' in df.columns else [None] * len(df))
+df['species_standardized'] = [_resolve_preflight_taxon(sn, sr, ss) for sn, sr, ss in zip(sn_vals, sr_vals, ss_vals)]
+unres_mask = df['species_standardized'].isna() | df['species_standardized'].astype(str).str.strip().isin({'', 'None', 'nan'})
+if unres_mask.any():
+    n_unres = int(unres_mask.sum())
+    df = df[~unres_mask].copy()
+    print(f'[Preflight: Taxon Hygiene] Dropped {n_unres} vouchers with unresolvable or open-nomenclature taxon strings.')
 
 if custom_taxa:
     before_custom_n = len(df)
     df = df[df['species_standardized'].isin(custom_taxa)].copy()
     print(f'[Preflight: Custom Taxa] Restricted strictly to {sorted(custom_taxa)}: retained {len(df)} / {before_custom_n} vouchers.')
+
+# Fail fast when an explicitly requested taxon has zero vouchers (never silently analyze a reduced taxon set)
+if requested_taxa:
+    present_taxa_all = set(df['species_standardized'].dropna().astype(str).str.strip())
+    missing_requested = sorted(t for t in requested_taxa if t not in present_taxa_all)
+    if missing_requested:
+        print(
+            f'[ERROR] Requested taxa {missing_requested} have zero vouchers in {csv_path} or the SQLite vouchers table. '
+            'Harvest them first (re-run without --skip-harvest using a new --run-id or --force), or remove them from --taxon / --focal-taxon.',
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 from scripts.core.db import (
     ensure_pipeline_run,
@@ -736,8 +786,8 @@ if target_tier and 'determiner_tier' in df.columns:
 if exclude_taxa:
     before_n = len(df)
     df = df[~df['species_standardized'].isin(exclude_taxa)].copy()
-    retained_taxa = sorted(df['species_standardized'].unique().tolist())
-    print(f'[Preflight: Exclude Taxa] Excluded {sorted(exclude_taxa)}: retained {len(df)} / {before_n} vouchers across {retained_taxa}.')
+    retained_taxa = sorted([str(t).strip() for t in df['species_standardized'].dropna().unique().tolist() if str(t).strip()])
+    print(f'[Preflight: Exclude Taxa] Excluded {sorted([str(t) for t in exclude_taxa if t])}: retained {len(df)} / {before_n} vouchers across {retained_taxa}.')
 
 if focal_raw:
     focal_taxon = standardize_packera_taxon(focal_raw)

@@ -29,6 +29,7 @@ from __future__ import annotations
 import csv
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import logging
 import math
@@ -1629,6 +1630,122 @@ def upsert_vouchers_records(
         pk_cols=("catalogNumber",),
         preserve_existing_on_null=True,
     )
+
+
+_CSV_BOOL_VOUCHER_COLUMNS = frozenset({"is_primary_duplicate", "exsiccatae_taxonomic_conflict", "is_calibrated_mm"})
+
+
+def _format_voucher_csv_value(col: str, val: Any) -> Any:
+    """Render a SQLite `vouchers` value in the pandas-style `curated_vouchers.csv` convention."""
+    if _is_missing(val):
+        return ""
+    if col in _CSV_BOOL_VOUCHER_COLUMNS and not isinstance(val, str):
+        b = _to_bool_int(val)
+        return "" if b is None else ("True" if b else "False")
+    return val
+
+
+def reconcile_curated_vouchers_csv_with_db(
+    conn: sqlite3.Connection,
+    csv_path: Union[str, Path],
+    taxa: Optional[Iterable[str]] = None,
+    taxon_resolver: Optional[Any] = None,
+) -> int:
+    """
+    Append canonical SQLite `vouchers` rows that are missing from a
+    `curated_vouchers.csv` snapshot (matched on `catalogNumber`).
+
+    Taxon-restricted harvests (`--taxon` / `--focal-taxon`) UPSERT into `vouchers`
+    but are intentionally never promoted to the root CSV snapshot, so the snapshot
+    can silently lack requested taxa. When `taxa` is given, only vouchers whose
+    resolved taxon is in `taxa` are restored; `taxon_resolver(scientificName,
+    species_raw, species_standardized)` resolves each row (defaulting to the
+    stored `species_standardized`).
+
+    Existing CSV rows are preserved byte-for-byte; appended rows are projected onto
+    the existing CSV header (or the DwC voucher schema when the CSV does not exist)
+    and written atomically (`.tmp` + `fsync` + `replace`). Returns the number of
+    appended rows.
+    """
+    target = Path(csv_path)
+    db_cols = get_table_columns(conn, "vouchers")
+    if "catalogNumber" not in db_cols:
+        return 0
+
+    taxa_set = {str(t).strip() for t in (taxa or []) if t is not None and str(t).strip()}
+    restrict_taxa = taxa is not None
+    if restrict_taxa and not taxa_set:
+        return 0
+
+    original_text = ""
+    header: List[str] = []
+    existing_cats: Set[str] = set()
+    if target.is_file() and target.stat().st_size > 0:
+        with open(target, "r", encoding="utf-8", newline="") as fh:
+            original_text = fh.read()
+        reader = csv.DictReader(io.StringIO(original_text, newline=""))
+        header = list(reader.fieldnames or [])
+        if header and "catalogNumber" not in header:
+            raise ValueError(f"{target} is missing the required 'catalogNumber' column.")
+        for row in reader:
+            cat = str(row.get("catalogNumber") or "").strip()
+            if cat:
+                existing_cats.add(cat)
+    if not header:
+        original_text = ""
+        header = [c for c in DWC_VOUCHER_COLUMNS if c in db_cols]
+
+    taxon_cols = [c for c in ("scientificName", "species_raw", "species_standardized") if c in db_cols]
+    select_cols: List[str] = []
+    for c in ["catalogNumber"] + [h for h in header if h in db_cols] + taxon_cols:
+        if c not in select_cols:
+            select_cols.append(c)
+
+    cur = conn.execute(f"SELECT {', '.join(select_cols)} FROM vouchers ORDER BY catalogNumber;")
+    new_rows: List[List[Any]] = []
+    for rec in cur.fetchall():
+        rec_map = dict(zip(select_cols, tuple(rec)))
+        cat = str(rec_map.get("catalogNumber") or "").strip()
+        if not cat or cat in existing_cats:
+            continue
+        if restrict_taxa:
+            if taxon_resolver is not None:
+                resolved = taxon_resolver(
+                    rec_map.get("scientificName"),
+                    rec_map.get("species_raw"),
+                    rec_map.get("species_standardized"),
+                )
+            else:
+                resolved = _to_str(rec_map.get("species_standardized"))
+            if not resolved or str(resolved).strip() not in taxa_set:
+                continue
+        existing_cats.add(cat)
+        new_rows.append([_format_voucher_csv_value(c, rec_map.get(c)) for c in header])
+
+    if not new_rows:
+        return 0
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.stem}_", suffix=".csv.tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f, lineterminator="\n")
+            if original_text:
+                f.write(original_text)
+                if not original_text.endswith(("\n", "\r")):
+                    f.write("\n")
+            else:
+                writer.writerow(header)
+            writer.writerows(new_rows)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_path.replace(target)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
+    return len(new_rows)
 
 
 # =============================================================================

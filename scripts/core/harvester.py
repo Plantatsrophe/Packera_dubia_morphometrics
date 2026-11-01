@@ -214,6 +214,87 @@ def _register_dynamic_synonyms(
             _DYNAMIC_SYNONYM_TO_CANONICAL[item_bin.lower()] = canonical_packera
 
 
+def _call_and_normalize_gbif_backbone(query_name: str, rank: str) -> Dict[str, Any]:
+    """
+    Invoke `pygbif.species.name_backbone` across both v1 (`name=`, `rank=`) and
+    v2 (`scientificName=`, `taxonRank=`) signatures, normalizing nested GBIF v2
+    responses into the flat backbone dict schema.
+    """
+    if species is None or getattr(species, "name_backbone", None) is None:
+        return {}
+    nb_fn = species.name_backbone
+    use_v2_sig = False
+    if not _is_gbif_species_mocked():
+        try:
+            import inspect
+            use_v2_sig = "scientificName" in inspect.signature(nb_fn).parameters
+        except Exception:
+            use_v2_sig = False
+    if use_v2_sig:
+        raw = nb_fn(scientificName=query_name, taxonRank=str(rank).upper(), kingdom="Plantae")
+    else:
+        raw = nb_fn(name=query_name, rank=rank, kingdom="Plantae")
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    if "usageKey" in raw or "matchType" in raw or "canonicalName" in raw or "species" in raw:
+        return raw
+    usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+    acc_usage = raw.get("acceptedUsage") if isinstance(raw.get("acceptedUsage"), dict) else {}
+    diag = raw.get("diagnostics") if isinstance(raw.get("diagnostics"), dict) else {}
+    cls_list = raw.get("classification") if isinstance(raw.get("classification"), list) else []
+    cls_by_rank = {
+        str(c.get("rank", "")).upper(): c
+        for c in cls_list
+        if isinstance(c, dict) and c.get("rank")
+    }
+    sp_cls = cls_by_rank.get("SPECIES", {})
+    gen_cls = cls_by_rank.get("GENUS", {})
+    norm: Dict[str, Any] = {
+        "matchType": diag.get("matchType", "EXACT" if usage else "NONE"),
+        "status": usage.get("status") or diag.get("status"),
+        "usageKey": usage.get("key"),
+        "acceptedUsageKey": acc_usage.get("key") or sp_cls.get("key"),
+        "scientificName": usage.get("name"),
+        "canonicalName": usage.get("canonicalName") or usage.get("name"),
+        "accepted": acc_usage.get("name") or acc_usage.get("canonicalName") or sp_cls.get("name"),
+        "species": acc_usage.get("canonicalName") or sp_cls.get("name") or acc_usage.get("name"),
+        "genus": gen_cls.get("name"),
+        "genusKey": gen_cls.get("key"),
+    }
+    return {k: v for k, v in norm.items() if v is not None}
+
+
+def _persist_dynamic_synonyms_for_taxon(canonical_packera: str) -> None:
+    """Persist newly discovered live GBIF synonyms for `canonical_packera` into SQLite `taxon_synonyms`."""
+    if (
+        not canonical_packera
+        or _is_gbif_species_mocked()
+        or os.environ.get("PACKERA_DEMO_MODE") == "1"
+        or not is_canonical_or_explicit_db_context()
+    ):
+        return
+    try:
+        resolved = resolve_db_path()
+        if resolved != ":memory:" and Path(resolved).is_file():
+            sub_map = {
+                k: v
+                for k, v in _DYNAMIC_SYNONYM_TO_CANONICAL.items()
+                if v == canonical_packera and k
+            }
+            if not sub_map:
+                return
+            auth_sub = {}
+            if canonical_packera in _DYNAMIC_TAXON_AUTHOR_STRINGS:
+                auth_sub[canonical_packera] = sorted(_DYNAMIC_TAXON_AUTHOR_STRINGS[canonical_packera])
+            conn = get_db_connection(db_path=resolved, init_schema=False)
+            try:
+                upsert_taxon_synonyms(conn, sub_map, auth_sub or None)
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+
 def _get_packera_genus_key_gbif(timeout_seconds: float = 5.0) -> Optional[int]:
     """
     Query pygbif.species.name_backbone(name='Packera', rank='genus', kingdom='Plantae')
@@ -229,7 +310,7 @@ def _get_packera_genus_key_gbif(timeout_seconds: float = 5.0) -> Optional[int]:
         return None
 
     def _fetch_key() -> Optional[int]:
-        backbone = species.name_backbone(name="Packera", rank="genus", kingdom="Plantae")
+        backbone = _call_and_normalize_gbif_backbone("Packera", "genus")
         if not isinstance(backbone, dict) or not backbone:
             return None
         match_type = str(backbone.get("matchType", "EXACT")).upper()
@@ -379,7 +460,7 @@ def _query_gbif_backbone_and_synonyms(
         return None, [], []
 
     def _fetch() -> Tuple[Optional[str], List[str], List[str]]:
-        backbone = species.name_backbone(name=query_name, rank="species", kingdom="Plantae")
+        backbone = _call_and_normalize_gbif_backbone(query_name, "species")
         if not isinstance(backbone, dict) or not backbone:
             return None, [], []
         match_type = str(backbone.get("matchType", "EXACT")).upper()
@@ -409,9 +490,9 @@ def _query_gbif_backbone_and_synonyms(
         accepted_key = backbone.get("acceptedUsageKey")
         keys_to_query: List[Any] = []
         if usage_key is not None:
-            keys_to_query.append(usage_key)
-        if accepted_key is not None and accepted_key != usage_key:
-            keys_to_query.append(accepted_key)
+            keys_to_query.append(int(usage_key) if str(usage_key).isdigit() else usage_key)
+        if accepted_key is not None and str(accepted_key) != str(usage_key):
+            keys_to_query.append(int(accepted_key) if str(accepted_key).isdigit() else accepted_key)
 
         for k_id in keys_to_query:
             try:
@@ -534,6 +615,7 @@ def expand_taxon_synonyms_gbif(
     # Register dynamic synonyms -> canonical Packera binomial & cache protologue author strings
     if canonical_packera and canonical_packera.startswith("Packera "):
         _register_dynamic_synonyms(canonical_packera, expanded, gbif_author_names)
+        _persist_dynamic_synonyms_for_taxon(canonical_packera)
 
     return expanded
 
@@ -585,6 +667,7 @@ def standardize_packera_taxon(raw_name: Any) -> Optional[str]:
         gbif_acc, gbif_syns, gbif_authors = _query_gbif_backbone_and_synonyms(cand_bin)
         if gbif_acc and gbif_acc.startswith("Packera "):
             _register_dynamic_synonyms(gbif_acc, [s_orig, cand_bin, *gbif_syns], gbif_authors)
+            _persist_dynamic_synonyms_for_taxon(gbif_acc)
             return gbif_acc
 
     return None

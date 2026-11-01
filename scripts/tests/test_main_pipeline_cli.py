@@ -584,6 +584,118 @@ REUSE_CANONICAL_DATA="true"
             self.assertEqual({r[0] for r in cohort_rows}, {"NCU001", "UNCC_49308"})
             self.assertEqual({r[1] for r in cohort_rows}, {"Tier_1_Gold"})
 
+    def test_reconcile_curated_vouchers_csv_with_db_restores_requested_taxa(self):
+        """Verify SQLite vouchers missing from curated_vouchers.csv are appended (taxon-restricted), preserving existing rows byte-for-byte."""
+        from scripts.core.db import get_db_connection, reconcile_curated_vouchers_csv_with_db, upsert_vouchers_records
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            csv_path = tmp_path / "curated_vouchers.csv"
+            original = (
+                "catalogNumber,scientificName,determiner_tier,is_primary_duplicate,duplicate_count\n"
+                "A1,Packera anonyma,Tier_1_Gold,True,1\n"
+            )
+            csv_path.write_text(original, encoding="utf-8")
+
+            conn = get_db_connection(db_path=tmp_path / "test.sqlite", init_schema=True)
+            try:
+                upsert_vouchers_records(conn, [
+                    {"catalogNumber": "A1", "scientificName": "Packera anonyma", "determiner_tier": "Tier_1_Gold"},
+                    {"catalogNumber": "O1", "scientificName": "Packera obovata", "determiner_tier": "Tier_1_Gold",
+                     "species_standardized": "Packera obovata", "is_primary_duplicate": 1, "duplicate_count": 2},
+                    {"catalogNumber": "P1", "scientificName": "Packera paupercula", "determiner_tier": "Tier_3_Bronze",
+                     "species_standardized": "Packera paupercula"},
+                ])
+                n_added = reconcile_curated_vouchers_csv_with_db(conn, csv_path, taxa={"Packera obovata"})
+                self.assertEqual(n_added, 1)
+                # Idempotent: a second pass appends nothing
+                self.assertEqual(reconcile_curated_vouchers_csv_with_db(conn, csv_path, taxa={"Packera obovata"}), 0)
+                # Empty taxa set restores nothing
+                self.assertEqual(reconcile_curated_vouchers_csv_with_db(conn, csv_path, taxa=set()), 0)
+            finally:
+                conn.close()
+
+            text = csv_path.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith(original))
+            self.assertEqual(text[len(original):], "O1,Packera obovata,Tier_1_Gold,True,2\n")
+
+    def test_run_pipeline_sh_preflight_restores_sqlite_taxa_and_fails_on_missing_taxa(self):
+        """Verify --taxon restores requested-taxon vouchers present in SQLite but missing from curated_vouchers.csv, and fails fast on taxa with zero vouchers."""
+        import subprocess
+        import pandas as pd
+        from scripts.core.db import get_db_connection, upsert_vouchers_records
+
+        sh_src = (PROJECT_ROOT / "run_pipeline.sh").read_text(encoding="utf-8")
+        fn_start = sh_src.index("run_preflight_subset_filter() {")
+        fn_end = sh_src.index("\nrun_preflight_subset_filter\n", fn_start)
+        fn_body = sh_src[fn_start:fn_end]
+
+        def _run_preflight(run_dir, root_data, custom_taxa_csv):
+            test_bash = f"""
+set -euo pipefail
+PROJECT_ROOT="{PROJECT_ROOT}"
+RUN_DIR="{run_dir}"
+PYTHON_MAIN="{sys.executable}"
+FOCAL_TAXON=""
+EXCLUDE_TAXON_CSV=""
+INTRASPECIFIC_MODE="false"
+GOLD_ANCHORS=30
+DETERMINER_TIER=""
+REUSE_CANONICAL_DATA="true"
+CUSTOM_TAXA_CSV="{custom_taxa_csv}"
+SEED_DATA_DIR="{root_data}"
+START_STEP=3
+{fn_body}
+"""
+            test_bash = test_bash.replace('"${PROJECT_ROOT}/data"', f'"{root_data}"')
+            test_bash += "\nrun_preflight_subset_filter\n"
+            env = {k: v for k, v in __import__("os").environ.items() if k not in ("PACKERA_DB_PATH", "PACKERA_DEMO_MODE")}
+            return subprocess.run(["bash", "-c", test_bash], cwd=str(PROJECT_ROOT), capture_output=True, text=True, env=env)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            root_data = tmp_path / "root_data"
+            run_dir = tmp_path / "runs" / "test_sqlite_taxa_sync"
+            tables_dir = run_dir / "data" / "tables"
+            tables_dir.mkdir(parents=True, exist_ok=True)
+            for sub in ("rosettes_dense", "basal_leaves_raw", "capitula"):
+                (root_data / "cropped_patches" / sub).mkdir(parents=True, exist_ok=True)
+
+            # Stale CSV snapshot lacking Packera obovata
+            pd.DataFrame({
+                "catalogNumber": ["A1", "D1"],
+                "scientificName": ["Packera anonyma", "Packera dubia"],
+                "determiner_tier": ["Tier_1_Gold", "Tier_1_Gold"],
+                "is_primary_duplicate": [True, True],
+                "duplicate_count": [1, 1],
+            }).to_csv(tables_dir / "curated_vouchers.csv", index=False)
+
+            # Canonical SQLite vouchers include Packera obovata (from a taxon-restricted harvest)
+            conn = get_db_connection(db_path=root_data / "packera_pipeline.sqlite", init_schema=True)
+            try:
+                upsert_vouchers_records(conn, [
+                    {"catalogNumber": "A1", "scientificName": "Packera anonyma", "determiner_tier": "Tier_1_Gold"},
+                    {"catalogNumber": "D1", "scientificName": "Packera dubia", "determiner_tier": "Tier_1_Gold"},
+                    {"catalogNumber": "O1", "scientificName": "Packera obovata", "determiner_tier": "Tier_1_Gold",
+                     "species_standardized": "Packera obovata", "is_primary_duplicate": 1, "duplicate_count": 1},
+                    {"catalogNumber": "P1", "scientificName": "Packera paupercula", "determiner_tier": "Tier_1_Gold",
+                     "species_standardized": "Packera paupercula", "is_primary_duplicate": 1, "duplicate_count": 1},
+                ])
+            finally:
+                conn.close()
+
+            res = _run_preflight(run_dir, root_data, "Packera anonyma,Packera dubia,Packera obovata")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn("[Preflight: SQLite Voucher Sync] Restored 1 vouchers", res.stdout)
+            out_vouchers = pd.read_csv(tables_dir / "curated_vouchers.csv")
+            self.assertEqual(set(out_vouchers["catalogNumber"]), {"A1", "D1", "O1"})
+
+            # A requested taxon with zero vouchers anywhere must fail fast rather than be silently dropped
+            res_missing = _run_preflight(run_dir, root_data, "Packera anonyma,Packera aurea")
+            self.assertNotEqual(res_missing.returncode, 0)
+            self.assertIn("Packera aurea", res_missing.stderr)
+            self.assertIn("zero vouchers", res_missing.stderr)
+
     def test_run_pipeline_sh_exclude_misidentified_and_triage_source_filtering(self):
         """Verify run_pipeline.sh --exclude-misidentified (with default ALL and explicit --triage-source) filters out Misidentification_Reassign while retaining Confirmed_Species, Hybrid_Introgressant, Subspecies_Ecotype, Ecophenotypic_Plasticity, and Putative_Cryptic_Species across curated_vouchers.csv, Step 02 manifests, and cropped_patches."""
         import subprocess
