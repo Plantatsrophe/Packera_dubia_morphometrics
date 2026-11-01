@@ -109,6 +109,11 @@ if (!exists("prune_collinear_dissection_scalars", mode = "function")) {
     if (!is.na(.dl_p) && nzchar(.dl_p) && file.exists(.dl_p)) { source(.dl_p); break }
   }
 }
+if (!exists("packera_mclapply", mode = "function")) {
+  for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
+    if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+  }
+}
 
 .select_morphometric_subspace_core <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL, aux_df = NULL) {
   X <- as.matrix(X)
@@ -257,21 +262,40 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
   if (m == 0L) return(rep(0.0, p))
   if (m == 1L) return(as.numeric(X_sub[1, ]))
   if (m <= 4L) return(as.numeric(apply(X_sub, 2, stats::median, na.rm = TRUE)))
-  if (is.null(S_inv)) {
-    mads <- apply(X_sub, 2, stats::mad, na.rm = TRUE)
-    sds <- apply(X_sub, 2, stats::sd, na.rm = TRUE)
-    sc <- ifelse(is.finite(mads) & mads > 1e-8, mads, ifelse(is.finite(sds) & sds > 1e-8, sds, 1.0))
-    Z <- sweep(X_sub, 2, sc, "/")
-    dmat <- as.matrix(stats::dist(Z, method = "euclidean"))
+  if (m <= 600L) {
+    if (is.null(S_inv)) {
+      mads <- apply(X_sub, 2, stats::mad, na.rm = TRUE)
+      sds <- apply(X_sub, 2, stats::sd, na.rm = TRUE)
+      sc <- ifelse(is.finite(mads) & mads > 1e-8, mads, ifelse(is.finite(sds) & sds > 1e-8, sds, 1.0))
+      Z <- sweep(X_sub, 2, sc, "/")
+      dmat <- as.matrix(stats::dist(Z, method = "euclidean"))
+    } else {
+      # Pairwise Mahalanobis distances under precision matrix S_inv
+      G <- X_sub %*% S_inv %*% t(X_sub)
+      dg <- diag(G)
+      d2mat <- outer(dg, dg, "+") - 2.0 * G
+      d2mat[d2mat < 0.0] <- 0.0
+      dmat <- as.matrix(sqrt(d2mat))
+    }
+    row_d <- rowSums(dmat, na.rm = TRUE)
   } else {
-    # Pairwise Mahalanobis distances under precision matrix S_inv
-    G <- X_sub %*% S_inv %*% t(X_sub)
-    dg <- diag(G)
-    d2mat <- outer(dg, dg, "+") - 2.0 * G
+    ref_idx <- unique(round(seq(1L, m, length.out = 400L)))
+    if (is.null(S_inv)) {
+      mads <- apply(X_sub, 2, stats::mad, na.rm = TRUE)
+      sds <- apply(X_sub, 2, stats::sd, na.rm = TRUE)
+      sc <- ifelse(is.finite(mads) & mads > 1e-8, mads, ifelse(is.finite(sds) & sds > 1e-8, sds, 1.0))
+      Z <- sweep(X_sub, 2, sc, "/")
+      Z_ref <- Z[ref_idx, , drop = FALSE]
+      d2mat <- outer(rowSums(Z * Z), rowSums(Z_ref * Z_ref), "+") - 2.0 * tcrossprod(Z, Z_ref)
+    } else {
+      XS <- X_sub %*% S_inv
+      X_ref <- X_sub[ref_idx, , drop = FALSE]
+      d_all <- rowSums(XS * X_sub)
+      d2mat <- outer(d_all, d_all[ref_idx], "+") - 2.0 * tcrossprod(XS, X_ref)
+    }
     d2mat[d2mat < 0.0] <- 0.0
-    dmat <- as.matrix(sqrt(d2mat))
+    row_d <- rowSums(sqrt(d2mat), na.rm = TRUE)
   }
-  row_d <- rowSums(dmat, na.rm = TRUE)
   k_core <- max(2L, ceiling(0.60 * m))
   core_idx <- order(row_d)[seq_len(min(m, k_core))]
   as.numeric(colMeans(X_sub[core_idx, , drop = FALSE]))
@@ -283,34 +307,97 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
   if (is.finite(denom) && denom > 1e-8) (alpha / denom) else 1.0
 }
 
-.estimate_pooled_within_cov <- function(X_use, taxa_vec, det_tier, valid_pool) {
-  p <- ncol(X_use)
-  resid_blocks <- list()
-  for (tx in unique(taxa_vec[valid_pool])) {
-    if (tx == "Unassigned_Packera") next
-    idx_gs <- which(valid_pool & (taxa_vec == tx) & (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")))
-    idx_tx <- if (length(idx_gs) >= 3L) idx_gs else which(valid_pool & (taxa_vec == tx))
-    if (length(idx_tx) >= 3L) {
-      X_t <- X_use[idx_tx, , drop = FALSE]
-      med_t <- .compute_robust_taxon_medoid(X_t)
-      diff_t <- sweep(X_t, 2, med_t, "-")
-      nz_mask <- rowSums(diff_t^2) > 1e-12
-      if (sum(nz_mask) >= 2L) diff_t <- diff_t[nz_mask, , drop = FALSE]
-      if (length(idx_gs) < 3L && nrow(diff_t) >= 5L) {
-        r_norm <- sqrt(rowSums(diff_t^2))
-        keep_r <- r_norm <= stats::quantile(r_norm, probs = 0.75, na.rm = TRUE)
-        if (sum(keep_r) >= 3L) diff_t <- diff_t[keep_r, , drop = FALSE]
-      }
-      df_scale <- sqrt(nrow(X_t) / max(1.0, nrow(X_t) - 1.0))
-      resid_blocks[[length(resid_blocks) + 1L]] <- diff_t * df_scale
+.fit_fast_mcd_cov <- function(X_mat, q_used = NULL, seed = 42L, allow_parallel = TRUE) {
+  X_mat <- as.matrix(X_mat)
+  n_m <- nrow(X_mat)
+  p_m <- ncol(X_mat)
+  if (n_m < max(12L, p_m + 2L) || !requireNamespace("MASS", quietly = TRUE)) return(NULL)
+  if (is.null(q_used)) {
+    q_used <- min(n_m - 1L, max(floor(0.80 * n_m), floor((n_m + p_m + 1L) / 2L)))
+  }
+  if (n_m <= 1000L) {
+    return(tryCatch(MASS::cov.rob(X_mat, method = "mcd", quantile.used = q_used), error = function(e) NULL))
+  }
+  # Partitioned parallel FastMCD (Rousseeuw & Van Driessen 1999) + 2 full-sample C-steps across all n_m rows
+  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv, inherits = FALSE) else NULL
+  on.exit({ if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv) }, add = TRUE)
+  set.seed(as.integer(seed))
+  q_frac <- min(0.95, max(0.50, q_used / n_m))
+  n_blk <- min(8L, max(2L, as.integer(ceiling(n_m / 600L))))
+  blk_cap <- min(n_m, n_blk * 350L)
+  pool_idx <- if (blk_cap < n_m) round(seq(1L, n_m, length.out = blk_cap)) else seq_len(n_m)
+  perm_idx <- pool_idx[sample.int(length(pool_idx))]
+  blocks <- split(perm_idx, rep_len(seq_len(n_blk), length(perm_idx)))
+  fit_block <- function(b_idx) {
+    Xb <- X_mat[b_idx, , drop = FALSE]
+    nb <- nrow(Xb)
+    qb <- min(nb - 1L, max(floor(q_frac * nb), floor((nb + p_m + 1L) / 2L)))
+    tryCatch(MASS::cov.rob(Xb, method = "mcd", quantile.used = qb), error = function(e) NULL)
+  }
+  cand_fits <- if (isTRUE(allow_parallel) && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) {
+    packera_mclapply(blocks, fit_block, mc.cores = resolve_packera_workers(min(16L, n_blk), n_blk))
+  } else {
+    lapply(blocks, fit_block)
+  }
+  cand_fits <- Filter(function(f) !is.null(f) && !is.null(f$cov) && !is.null(f$center), cand_fits)
+  if (length(cand_fits) == 0L) return(NULL)
+  jit_diag <- diag(1e-6, nrow = p_m, ncol = p_m)
+  best_ld <- Inf; best_res <- NULL
+  for (cf in cand_fits) {
+    c_cur <- as.numeric(cf$center)
+    s_cur <- as.matrix(cf$cov) + jit_diag
+    ok_c <- TRUE
+    for (c_step in 1:2) {
+      d2 <- tryCatch(stats::mahalanobis(X_mat, center = c_cur, cov = s_cur), error = function(e) NULL)
+      if (is.null(d2) || sum(is.finite(d2)) < q_used) { ok_c <- FALSE; break }
+      inl <- order(d2, na.last = TRUE)[seq_len(q_used)]
+      X_inl <- X_mat[inl, , drop = FALSE]
+      c_cur <- colMeans(X_inl)
+      s_raw <- stats::cov(X_inl)
+      s_cur <- s_raw + jit_diag
+    }
+    if (!ok_c) next
+    ld <- tryCatch(as.numeric(determinant(s_cur, logarithm = TRUE)$modulus), error = function(e) Inf)
+    if (is.finite(ld) && ld < best_ld) {
+      best_ld <- ld
+      best_res <- list(center = c_cur, cov = s_raw)
     }
   }
+  if (!is.null(best_res)) best_res else cand_fits[[1L]]
+}
+
+.estimate_pooled_within_cov <- function(X_use, taxa_vec, det_tier, valid_pool) {
+  p <- ncol(X_use)
+  u_pool_tx <- setdiff(unique(taxa_vec[valid_pool]), "Unassigned_Packera")
+  build_resid <- function(tx) {
+    idx_gs <- which(valid_pool & (taxa_vec == tx) & (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")))
+    idx_tx <- if (length(idx_gs) >= 3L) idx_gs else which(valid_pool & (taxa_vec == tx))
+    if (length(idx_tx) < 3L) return(NULL)
+    X_t <- X_use[idx_tx, , drop = FALSE]
+    med_t <- .compute_robust_taxon_medoid(X_t)
+    diff_t <- sweep(X_t, 2, med_t, "-")
+    nz_mask <- rowSums(diff_t^2) > 1e-12
+    if (sum(nz_mask) >= 2L) diff_t <- diff_t[nz_mask, , drop = FALSE]
+    if (length(idx_gs) < 3L && nrow(diff_t) >= 5L) {
+      r_norm <- sqrt(rowSums(diff_t^2))
+      keep_r <- r_norm <= stats::quantile(r_norm, probs = 0.75, na.rm = TRUE)
+      if (sum(keep_r) >= 3L) diff_t <- diff_t[keep_r, , drop = FALSE]
+    }
+    df_scale <- sqrt(nrow(X_t) / max(1.0, nrow(X_t) - 1.0))
+    diff_t * df_scale
+  }
+  resid_blocks <- if (length(u_pool_tx) >= 2L && sum(valid_pool) >= 1200L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) {
+    packera_mclapply(u_pool_tx, build_resid, mc.cores = resolve_packera_workers(16L, length(u_pool_tx)))
+  } else {
+    lapply(u_pool_tx, build_resid)
+  }
+  resid_blocks <- Filter(Negate(is.null), resid_blocks)
   if (length(resid_blocks) > 0L) {
     R_all <- do.call(rbind, resid_blocks)
     if (nrow(R_all) >= (p + 2L)) {
       if (nrow(R_all) >= 25L && requireNamespace("MASS", quietly = TRUE)) {
         q_used <- min(nrow(R_all) - 1L, max(floor(0.80 * nrow(R_all)), floor((nrow(R_all) + p + 1L) / 2L)))
-        rob <- tryCatch(MASS::cov.rob(R_all, method = "mcd", quantile.used = q_used), error = function(e) NULL)
+        rob <- .fit_fast_mcd_cov(R_all, q_used = q_used)
         if (!is.null(rob) && !is.null(rob$cov)) {
           c_mcd <- .mcd_consistency_factor(q_used / nrow(R_all), p)
           return(c_mcd * rob$cov + diag(1e-5, nrow = p, ncol = p))
@@ -377,10 +464,15 @@ select_adaptive_reference_anchors <- function(
   dis_b <- if ("is_dissected" %in% names(df)) (!is.na(df$is_dissected) & as.logical(df$is_dissected)) else rep(FALSE, n)
   eff_sol <- ifelse(is.finite(q25_v), q25_v, sol_v)
   is_dis_mode <- (is.finite(eff_sol) & eff_sol < 0.72) | (is.finite(dlf_v) & dlf_v >= 0.50) | (!is.finite(eff_sol) & dis_b)
+  lqw_col <- if ("leaf_quality_weight" %in% names(df)) suppressWarnings(as.numeric(df$leaf_quality_weight)) else NULL
 
   unique_taxa <- unique(taxa_vec[valid_pool])
-  for (tx in unique_taxa) {
+  par_taxa <- length(unique_taxa) >= 2L && n >= 800L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")
+  eval_one_taxon <- function(tx) {
+    pruned_out <- integer(0)
+    promo_out <- integer(0)
     idx_gs <- which(is_gs & (taxa_vec == tx))
+    idx_gs_clean <- idx_gs
 
     # Step 1: Within-taxon robust MCD / medoid Mahalanobis pruning of Gold + Silver (chi-sq_0.95, p)
     # Heteroblasty-aware: when a taxon has >= 3 entire AND >= 3 dissected Gold+Silver anchors,
@@ -404,7 +496,7 @@ select_adaptive_reference_anchors <- function(
               rob_m <- NULL; q_m <- nrow(Xm)
               if (nrow(Xm) >= max(12L, p_eff + 4L) && requireNamespace("MASS", quietly = TRUE)) {
                 q_m <- min(nrow(Xm) - 1L, max(floor(0.80 * nrow(Xm)), floor((nrow(Xm) + p_eff + 1L) / 2L)))
-                rob_m <- tryCatch(MASS::cov.rob(Xm, method = "mcd", quantile.used = q_m), error = function(e) NULL)
+                rob_m <- .fit_fast_mcd_cov(Xm, q_used = q_m, allow_parallel = !par_taxa)
               }
               cent_m <- if (!is.null(rob_m)) rob_m$center else .compute_robust_taxon_medoid(Xm)
               cov_m <- if (!is.null(rob_m)) {
@@ -422,7 +514,7 @@ select_adaptive_reference_anchors <- function(
             rob_gs <- NULL; q_mcd <- nrow(X_gs)
             if (nrow(X_gs) >= 15L && requireNamespace("MASS", quietly = TRUE)) {
               q_mcd <- min(nrow(X_gs) - 1L, max(floor(0.80 * nrow(X_gs)), floor((nrow(X_gs) + p_eff + 1L) / 2L)))
-              rob_gs <- tryCatch(MASS::cov.rob(X_gs, method = "mcd", quantile.used = q_mcd), error = function(e) NULL)
+              rob_gs <- .fit_fast_mcd_cov(X_gs, q_used = q_mcd, allow_parallel = !par_taxa)
             }
             center_gs <- if (!is.null(rob_gs)) rob_gs$center else .compute_robust_taxon_medoid(X_gs)
             cov_gs <- if (!is.null(rob_gs)) (.mcd_consistency_factor(q_mcd / nrow(X_gs), p_eff) * rob_gs$cov + diag(1e-5, nrow = p_eff, ncol = p_eff)) else (stats::cov(X_gs) + diag(1e-4, nrow = p_eff, ncol = p_eff))
@@ -430,30 +522,26 @@ select_adaptive_reference_anchors <- function(
             drop_gs <- is.finite(d2_gs) & (d2_gs > stats::qchisq(mahal_q_gold_silver, df = p_eff))
           }
           if (any(drop_gs) && sum(!drop_gs) >= 3L) {
-            pruned_ids <- idx_gs[drop_gs]
-            is_gs[pruned_ids] <- FALSE
-            is_gold[pruned_ids] <- FALSE
-            is_silver[pruned_ids] <- FALSE
+            pruned_out <- idx_gs[drop_gs]
+            idx_gs_clean <- idx_gs[!drop_gs]
           }
         }
       }
     }
 
     # Step 2: Adaptive Anchor Promotion for Gold/Silver-poor taxa (raw GS < min_anchors_per_taxon or clean n_gs < 3)
-    idx_gs_clean <- which(is_gs & (taxa_vec == tx))
     n_gs <- length(idx_gs_clean)
     if (tx != "Unassigned_Packera" && (length(idx_gs) < min_anc || n_gs < min(3L, min_anc))) {
       idx_br <- which((det_tier == "Tier_3_Bronze") & valid_pool & (taxa_vec == tx))
       n_needed <- min_anc - n_gs
       if (length(idx_br) > 0L && n_needed > 0L) {
         if (is.null(X_use) || ncol(X_use) == 0L) {
-          ord_q <- if ("leaf_quality_weight" %in% names(df)) {
-            order(suppressWarnings(as.numeric(df$leaf_quality_weight[idx_br])), decreasing = TRUE, na.last = TRUE)
+          ord_q <- if (!is.null(lqw_col)) {
+            order(lqw_col[idx_br], decreasing = TRUE, na.last = TRUE)
           } else {
             seq_along(idx_br)
           }
-          promo_ids <- idx_br[ord_q[seq_len(min(length(idx_br), n_needed))]]
-          is_promoted_bronze[promo_ids] <- TRUE
+          promo_out <- idx_br[ord_q[seq_len(min(length(idx_br), n_needed))]]
         } else {
           p_eff <- ncol(X_use)
           ref_ids <- if (n_gs >= 1L) idx_gs_clean else idx_br
@@ -496,10 +584,27 @@ select_adaptive_reference_anchors <- function(
               promo_ids <- c(promo_ids, idx_br[rem_ord[seq_len(n_extra)]])
             }
           }
-          if (length(promo_ids) > 0L) is_promoted_bronze[promo_ids] <- TRUE
+          if (length(promo_ids) > 0L) promo_out <- promo_ids
         }
       }
     }
+    list(pruned = pruned_out, promo = promo_out)
+  }
+
+  tx_results <- if (length(unique_taxa) >= 2L && n >= 800L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) {
+    packera_mclapply(unique_taxa, eval_one_taxon, mc.cores = resolve_packera_workers(min(16L, length(unique_taxa)), length(unique_taxa)))
+  } else {
+    lapply(unique_taxa, eval_one_taxon)
+  }
+  all_pruned <- unlist(lapply(tx_results, `[[`, "pruned"), use.names = FALSE)
+  all_promo <- unlist(lapply(tx_results, `[[`, "promo"), use.names = FALSE)
+  if (length(all_pruned) > 0L) {
+    is_gs[all_pruned] <- FALSE
+    is_gold[all_pruned] <- FALSE
+    is_silver[all_pruned] <- FALSE
+  }
+  if (length(all_promo) > 0L) {
+    is_promoted_bronze[all_promo] <- TRUE
   }
 
   active_mask <- is_gs | is_promoted_bronze
@@ -653,7 +758,9 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
   has_raw <- nzchar(raw_det)
   if (!any(has_raw)) return(out)
 
-  s <- tolower(raw_det[has_raw])
+  raw_sub <- raw_det[has_raw]
+  u_raw <- unique(raw_sub)
+  s <- tolower(u_raw)
   for (iter in 1:2) {
     cand <- sub(
       "^(det\\.?|determined\\s+by|annot\\.?|annotated\\s+by|ver\\.?|verified\\s+by|rev\\.?|revised\\s+by|conf\\.?|confirmed\\s+by|identified\\s+by)[:;,\\s]+",
@@ -670,7 +777,7 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
   s <- trimws(s)
   invalid_norm <- c("", "na", "n a", "none", "unknown", "null", "anonymous", "anon", "unspecified", "not recorded", "s n", "indet", "unidentified")
   s[s %in% invalid_norm | nchar(s) < 2L] <- NA_character_
-  out[has_raw] <- s
+  out[has_raw] <- s[match(raw_sub, u_raw)]
   out
 }
 
@@ -1193,4 +1300,73 @@ compute_empirical_bayes_authority_weights <- function(
   w_cont <- if (is.finite(max_w) && max_w > 1e-12) (3.0 * w_eb / max_w) else rep(1.0, n)
   w_cont[!is.finite(w_cont)] <- 1.0
   round(pmax(0.5, pmin(3.0, w_cont)), 6)
+}
+
+fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_subset = 1800L) {
+  if (!requireNamespace("mclust", quietly = TRUE)) return(NULL)
+  if (!("package:mclust" %in% search())) {
+    tryCatch(suppressPackageStartupMessages(library(mclust, quietly = TRUE, warn.conflicts = FALSE)), error = function(e) NULL)
+  }
+  X_core <- as.matrix(X_core)
+  n_obs <- nrow(X_core)
+  G_int <- as.integer(G_vec)
+  if (n_obs <= 600L) {
+    return(mclust::Mclust(X_core, G = G_int, modelNames = modelNames, verbose = FALSE))
+  }
+  cand_models <- if (!is.null(modelNames) && length(modelNames) > 0L) {
+    as.character(modelNames)
+  } else {
+    as.character(mclust::mclust.options("emModelNames"))
+  }
+  if (ncol(X_core) == 1L) cand_models <- intersect(cand_models, c("E", "V"))
+  if (length(cand_models) == 0L) cand_models <- c("EII", "VII", "EEI", "VEI", "EVI", "VVI")
+
+  n_sub <- min(n_obs, max(600L, as.integer(max_hc_subset)))
+  init_arg <- if (n_obs > n_sub) {
+    ord1 <- order(X_core[, 1L])
+    list(subset = sort(ord1[unique(round(seq(1, n_obs, length.out = n_sub)))]))
+  } else {
+    NULL
+  }
+
+  fit_one_model <- function(mn) {
+    tryCatch(
+      mclust::Mclust(X_core, G = G_int, modelNames = mn, initialization = init_arg, verbose = FALSE),
+      error = function(e) NULL
+    )
+  }
+  use_par <- exists("packera_mclapply", mode = "function") && length(cand_models) >= 2L
+  fits <- if (use_par) {
+    n_w <- if (exists("resolve_packera_workers", mode = "function")) {
+      resolve_packera_workers(min(14L, length(cand_models)), length(cand_models))
+    } else {
+      min(4L, length(cand_models))
+    }
+    packera_mclapply(cand_models, fit_one_model, mc.cores = n_w)
+  } else {
+    lapply(cand_models, fit_one_model)
+  }
+
+  valid_fits <- Filter(function(f) !is.null(f) && !is.null(f$bic) && is.finite(f$bic[1L]), fits)
+  if (length(valid_fits) == 0L) {
+    return(mclust::Mclust(X_core, G = G_int, modelNames = modelNames, initialization = init_arg, verbose = FALSE))
+  }
+  bic_mat <- matrix(
+    NA_real_,
+    nrow = length(G_int),
+    ncol = length(cand_models),
+    dimnames = list(as.character(G_int), cand_models)
+  )
+  for (f in valid_fits) {
+    if (!is.null(f$BIC)) {
+      b_sub <- as.matrix(f$BIC)
+      rn <- intersect(rownames(bic_mat), rownames(b_sub))
+      cn <- intersect(colnames(bic_mat), colnames(b_sub))
+      if (length(rn) > 0L && length(cn) > 0L) bic_mat[rn, cn] <- b_sub[rn, cn, drop = FALSE]
+    }
+  }
+  bics <- vapply(valid_fits, function(f) as.numeric(f$bic[1L]), numeric(1L))
+  best_fit <- valid_fits[[which.max(bics)]]
+  best_fit$BIC <- bic_mat
+  best_fit
 }

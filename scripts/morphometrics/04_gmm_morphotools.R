@@ -220,18 +220,20 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   anchor_mask <- ref_cand & !mahal_outliers
   core_idx <- if (sum(anchor_mask, na.rm = TRUE) >= 6) which(anchor_mask) else which(ref_cand)
   if (requireNamespace("clustvarsel", quietly = TRUE) && (isTRUE(use_clustvarsel) || ncol(X) >= 4)) {
-    cvs <- tryCatch({ set.seed(42); clustvarsel::clustvarsel(X[if (length(core_idx) > 350L) core_idx[seq_len(350L)] else core_idx, , drop = FALSE], G = seq_len(min(max_k, 5L)), verbose = FALSE) }, error = function(e) NULL)
+    cvs_par <- if (nrow(X) >= 120L && exists("resolve_packera_workers", mode = "function") && requireNamespace("doParallel", quietly = TRUE)) resolve_packera_workers(min(8L, ncol(X))) else FALSE
+    cvs <- tryCatch({ set.seed(42); clustvarsel::clustvarsel(X[if (length(core_idx) > 350L) core_idx[seq_len(350L)] else core_idx, , drop = FALSE], G = seq_len(min(max_k, 5L)), parallel = cvs_par, verbose = FALSE) }, error = function(e) NULL)
     if (!is.null(cvs) && length(cvs$subset) >= 2) { selected_cols <- colnames(X)[cvs$subset]; X <- X[, cvs$subset, drop = FALSE] }
   }
   X_pcs <- X; X_core <- X_pcs[core_idx, , drop = FALSE]; eff_k <- max(2L, min(if (nrow(X_core) > 100 && max_k >= 7L) 6L else max_k, nrow(X_core) - 1L))
   modelNames <- if ((nrow(X_core) / ncol(X_pcs)) < 5.0) c("EII", "VII", "EEI", "VEI", "EVI", "VVI") else NULL
   is_intra_gmm <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2L)
   if (requireNamespace("mclust", quietly = TRUE)) {
-    gmm_fit <- tryCatch(mclust::Mclust(X_core, G = seq_len(eff_k), modelNames = modelNames, verbose = FALSE), error = function(e) NULL)
+    fit_mclust_fn <- function(G_arg) if (exists("fit_parallel_mclust_gmm", mode = "function")) fit_parallel_mclust_gmm(X_core, G_arg, modelNames) else mclust::Mclust(X_core, G = G_arg, modelNames = modelNames, verbose = FALSE)
+    gmm_fit <- tryCatch(fit_mclust_fn(seq_len(eff_k)), error = function(e) NULL)
     if (!is.null(gmm_fit)) {
       bic_vals <- apply(gmm_fit$BIC, 1, function(row) if (all(is.na(row))) NA_real_ else max(row, na.rm = TRUE))
       bic_table <- data.frame(K = seq_len(eff_k), BIC = round(bic_vals[seq_len(eff_k)], 2))
-      use_fit <- if (is_intra_gmm && gmm_fit$G < 2L) tryCatch(mclust::Mclust(X_core, G = 2:eff_k, modelNames = modelNames, verbose = FALSE), error = function(e) NULL) else gmm_fit
+      use_fit <- if (is_intra_gmm && gmm_fit$G < 2L) tryCatch(fit_mclust_fn(2:eff_k), error = function(e) NULL) else gmm_fit
       if (!is.null(use_fit)) {
         best_k <- use_fit$G; best_name <- use_fit$modelName; gmm_pred <- predict(use_fit, newdata = X_pcs)
         cls_sub <- as.integer(gmm_pred$classification)

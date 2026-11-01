@@ -188,7 +188,10 @@ adaptive_point_alpha <- function(n_pts) {
 }
 
 standardize_taxon_name <- function(raw_vec) {
-  vapply(as.character(raw_vec), function(val) {
+  if (is.null(raw_vec) || length(raw_vec) == 0L) return(character(0))
+  chr_vec <- as.character(raw_vec)
+  u_vals <- unique(chr_vec)
+  std_u <- vapply(u_vals, function(val) {
     if (is.na(val)) return(NA_character_)
     s_orig <- trimws(val)
     if (!nzchar(s_orig) || tolower(s_orig) %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_packera")) {
@@ -207,6 +210,7 @@ standardize_taxon_name <- function(raw_vec) {
     }
     NA_character_
   }, character(1), USE.NAMES = FALSE)
+  std_u[match(chr_vec, u_vals)]
 }
 standardize_packera_taxon <- standardize_taxon_name
 

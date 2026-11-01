@@ -456,9 +456,34 @@ screen_regime_stratified_mcd_outliers <- function(
     var_floor <- pmax(1e-4, 0.05 * apply(X_reg_fit, 2L, stats::var, na.rm = TRUE))
     var_floor[!is.finite(var_floor)] <- 1e-4
     if (nrow(X_reg_fit) >= 30L) {
-      set.seed(as.integer(seed))
       q_used <- min(nrow(X_reg_fit) - 1L, max(floor(0.88 * nrow(X_reg_fit)), floor((nrow(X_reg_fit) + df_reg + 1L) / 2L)))
-      mcd_fit <- tryCatch(MASS::cov.mcd(X_reg_fit, quantile.used = q_used), error = function(e) NULL)
+      if (nrow(X_reg_fit) > 1000L && exists(".fit_fast_mcd_cov", mode = "function")) {
+        mcd_fit <- tryCatch(.fit_fast_mcd_cov(X_reg_fit, q_used = q_used, seed = as.integer(seed)), error = function(e) NULL)
+      } else if (nrow(X_reg_fit) > 1000L) {
+        set.seed(as.integer(seed))
+        ord_r <- order(X_reg_fit[, 1L])
+        sub_r <- sort(ord_r[unique(round(seq(1, nrow(X_reg_fit), length.out = 800L)))])
+        q_sub <- min(length(sub_r) - 1L, max(floor((q_used / nrow(X_reg_fit)) * length(sub_r)), floor((length(sub_r) + df_reg + 1L) / 2L)))
+        sub_fit <- tryCatch(MASS::cov.mcd(X_reg_fit[sub_r, , drop = FALSE], quantile.used = q_sub), error = function(e) NULL)
+        if (!is.null(sub_fit) && !is.null(sub_fit$cov)) {
+          ctr_c <- sub_fit$center
+          cov_c <- sub_fit$cov + diag(1e-7, df_reg)
+          for (c_it in 1:2) {
+            d2_c <- tryCatch(stats::mahalanobis(X_reg_fit, center = ctr_c, cov = cov_c), error = function(e) NULL)
+            if (is.null(d2_c) || any(!is.finite(d2_c))) break
+            h_idx <- order(d2_c)[seq_len(q_used)]
+            X_h <- X_reg_fit[h_idx, , drop = FALSE]
+            ctr_c <- colMeans(X_h)
+            cov_c <- stats::cov(X_h) + diag(1e-7, df_reg)
+          }
+          mcd_fit <- list(center = ctr_c, cov = cov_c)
+        } else {
+          mcd_fit <- NULL
+        }
+      } else {
+        set.seed(as.integer(seed))
+        mcd_fit <- tryCatch(MASS::cov.mcd(X_reg_fit, quantile.used = q_used), error = function(e) NULL)
+      }
     } else {
       mcd_fit <- NULL
       q_used <- nrow(X_reg_fit)

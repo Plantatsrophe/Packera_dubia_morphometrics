@@ -254,7 +254,7 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
       permanova_res <- tryCatch(vegan::adonis2(sym_mat ~ assigned_tier, data = tier_df, permutations = permutations, method = "euclidean"), error = function(e) NULL)
     }
   }
-  list(df = out_df, sym_mat = sym_mat, pca = pca_sym, k_95 = as.integer(k_95_sym), permanova = permanova_res)
+  list(df = out_df, sym_mat = sym_mat, pca = pca_sym, k_95 = as.integer(k_95_sym), permanova = permanova_res, active_ref_mask = active_ref_mask)
 }
 
 # ------------------------------------------------------------------------------
@@ -545,19 +545,24 @@ run_fourier_extraction <- function(opts) {
     t1_clean_idx <- clean_idx[efa_df$tier_assignment[clean_idx] == "Tier_1_Direct"]
     base_fit_idx <- if (length(t1_clean_idx) >= 2L) t1_clean_idx else clean_idx
     base_mask <- seq_len(nrow(efa_df)) %in% base_fit_idx
-    ref_mask <- if (sum(base_mask, na.rm = TRUE) >= 2L) prune_within_taxon_mahalanobis(harm_mat, efa_df, base_mask, q = 0.95) else base_mask
-    efa_df$is_promoted_bronze <- if (!is.null(attr(ref_mask, "is_promoted_bronze"))) attr(ref_mask, "is_promoted_bronze") else rep(FALSE, nrow(efa_df))
-    efa_df$authority_weight <- compute_authority_precision_weights(efa_df); tier_wt <- efa_df$authority_weight
+    if (isTRUE(opts$symmetrize_efa_harmonics) && !is.null(sym_res$active_ref_mask) &&
+        length(sym_res$active_ref_mask) == nrow(efa_df) && length(complete_idx) == nrow(efa_df)) {
+      ref_mask <- as.logical(sym_res$active_ref_mask) & base_mask
+      efa_df$is_promoted_bronze <- if ("is_promoted_bronze" %in% names(sym_res$df)) as.logical(sym_res$df$is_promoted_bronze) else rep(FALSE, nrow(efa_df))
+      if (!identical(ref_mask, as.logical(sym_res$active_ref_mask))) {
+        efa_df$authority_weight <- compute_authority_precision_weights(efa_df); tier_wt <- efa_df$authority_weight
+      }
+    } else {
+      ref_mask <- if (sum(base_mask, na.rm = TRUE) >= 2L) prune_within_taxon_mahalanobis(harm_mat, efa_df, base_mask, q = 0.95) else base_mask
+      efa_df$is_promoted_bronze <- if (!is.null(attr(ref_mask, "is_promoted_bronze"))) attr(ref_mask, "is_promoted_bronze") else rep(FALSE, nrow(efa_df))
+      efa_df$authority_weight <- compute_authority_precision_weights(efa_df); tier_wt <- efa_df$authority_weight
+    }
     if (sum(ref_mask, na.rm = TRUE) < 2L) ref_mask <- base_mask
     fit_idx <- which(ref_mask)
     col_vars <- apply(harm_mat[fit_idx, , drop = FALSE], 2, stats::var, na.rm = TRUE)
     active_full_cols <- names(col_vars[!is.na(col_vars) & col_vars > 1e-10])
     if (length(active_full_cols) == 0L) active_full_cols <- sym_names[seq_len(min(length(sym_names), ncol(harm_mat)))]
     message(sprintf("Active harmonic dimensions with non-zero variance: %d / %d", length(active_full_cols), ncol(harm_mat)))
-    if (requireNamespace("Momocs", quietly = TRUE) && exists("ef_res") && !is.null(ef_res)) {
-      ef_clean <- if (nrow(harm_mat) >= 10 && length(fit_idx) >= 5) tryCatch(Momocs::slice(ef_res, fit_idx), error = function(e) ef_res) else ef_res
-      momocs_pca <- tryCatch(Momocs::PCA(ef_clean), error = function(e) NULL)
-    }
     w_fit <- tier_wt[fit_idx]; if (sum(w_fit, na.rm = TRUE) <= 0) w_fit <- rep(1.0, length(fit_idx))
     wt_cov <- stats::cov.wt(harm_mat[fit_idx, active_full_cols, drop = FALSE], wt = w_fit, center = TRUE)
     eig <- eigen(wt_cov$cov, symmetric = TRUE)
