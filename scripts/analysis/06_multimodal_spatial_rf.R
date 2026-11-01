@@ -36,7 +36,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
 
-if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+if (!exists("atomic_save_dual_plot", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
   source("scripts/morphometrics/pub_figures_utils.R")
 }
 if (file.exists("scripts/morphometrics/authority_weighting_utils.R")) {
@@ -367,7 +367,11 @@ write_csv_atomic <- function(df, target_path, demo = FALSE) {
   }
   dir.create(dirname(target_path), recursive = TRUE, showWarnings = FALSE)
   tmp_path <- paste0(target_path, ".tmp")
-  readr::write_csv(df, tmp_path)
+  if (requireNamespace("data.table", quietly = TRUE)) {
+    data.table::fwrite(df, file = tmp_path, na = "", quote = "auto", logical01 = FALSE)
+  } else {
+    readr::write_csv(df, tmp_path)
+  }
   file.rename(tmp_path, target_path)
   return(invisible(TRUE))
 }
@@ -376,21 +380,43 @@ write_csv_atomic <- function(df, target_path, demo = FALSE) {
 # 2. Environmental Extraction (SoilGrids 250m 0-15cm Rhizosphere & Uncertainty-Buffered WorldClim v2.1)
 # ------------------------------------------------------------------------------
 extract_rast_buffered_mean <- function(rast_obj, pts_vect, radii_m) {
-  pt_vals <- terra::extract(rast_obj, pts_vect)
+  r_num <- suppressWarnings(as.numeric(radii_m))
+  r_num[is.na(r_num) | !is.finite(r_num)] <- 250.0
+  r_num <- pmax(100.0, pmin(1000.0, r_num))
+
+  crds <- tryCatch(terra::crds(pts_vect), error = function(e) NULL)
+  inv_idx <- NULL
+  pts_use <- pts_vect
+  r_use <- r_num
+  if (!is.null(crds) && is.matrix(crds) && nrow(crds) == length(r_num) && nrow(crds) > 1L) {
+    u_key <- paste(round(crds[, 1], 6), round(crds[, 2], 6), round(r_num, 1), sep = "_")
+    u_keys <- unique(u_key)
+    if (length(u_keys) < nrow(crds)) {
+      first_idx <- match(u_keys, u_key)
+      inv_idx <- match(u_key, u_keys)
+      pts_use <- pts_vect[first_idx]
+      r_use <- r_num[first_idx]
+    }
+  }
+
+  pt_vals <- terra::extract(rast_obj, pts_use)
   buf_vals <- tryCatch({
-    r_num <- suppressWarnings(as.numeric(radii_m))
-    r_num[is.na(r_num) | !is.finite(r_num)] <- 250.0
-    r_num <- pmax(100.0, pmin(1000.0, r_num))
-    pts_buf <- terra::buffer(pts_vect, width = r_num)
+    pts_buf <- terra::buffer(pts_use, width = r_use)
     terra::extract(rast_obj, pts_buf, fun = mean, na.rm = TRUE)
   }, error = function(e) NULL)
-  if (is.null(buf_vals)) return(pt_vals)
-  for (col_nm in setdiff(names(pt_vals), "ID")) {
-    if (col_nm %in% names(buf_vals)) {
-      bv <- suppressWarnings(as.numeric(buf_vals[[col_nm]]))
-      pv <- suppressWarnings(as.numeric(pt_vals[[col_nm]]))
-      pt_vals[[col_nm]] <- ifelse(is.finite(bv), bv, pv)
+  if (!is.null(buf_vals)) {
+    for (col_nm in setdiff(names(pt_vals), "ID")) {
+      if (col_nm %in% names(buf_vals)) {
+        bv <- suppressWarnings(as.numeric(buf_vals[[col_nm]]))
+        pv <- suppressWarnings(as.numeric(pt_vals[[col_nm]]))
+        pt_vals[[col_nm]] <- ifelse(is.finite(bv), bv, pv)
+      }
     }
+  }
+  if (!is.null(inv_idx)) {
+    pt_vals <- pt_vals[inv_idx, , drop = FALSE]
+    pt_vals$ID <- seq_along(inv_idx)
+    rownames(pt_vals) <- NULL
   }
   return(pt_vals)
 }
@@ -542,6 +568,83 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
     df$buffer_radius_m <- ifelse(is.na(u_m) | !is.finite(u_m) | u_m <= 0, 250.0, pmax(100.0, pmin(1000.0, u_m)))
   }
 
+  # Cache-first SQLite environmental_cache pre-hydration in canonical non-demo runs
+  req_wc_sg_cols <- c(unname(WC_BIO_LOOKUP), "soil_ph", "soil_cec", "soil_sand", "soil_bulk_density")
+  full_df_ref <- NULL
+  uncached_env_idx <- seq_len(nrow(df))
+  is_canon_env <- !isTRUE(demo) && nrow(df) > 0L && is_canonical_prod_path(env_dir) &&
+                  exists("query_environmental_cache_sqlite", mode = "function")
+  if (is_canon_env) {
+    ll_pre <- ifelse(
+      is.finite(suppressWarnings(as.numeric(df$latitude))) & is.finite(suppressWarnings(as.numeric(df$longitude))),
+      sprintf("%.5f_%.5f", round(as.numeric(df$latitude), 5), round(as.numeric(df$longitude), 5)),
+      NA_character_
+    )
+    sql_pre <- tryCatch(
+      query_environmental_cache_sqlite(
+        catalog_numbers = as.character(df$catalogNumber),
+        lat_lon_keys = ll_pre,
+        cache_path = file.path(env_dir, "fine_grain_edaphic_cache.csv"),
+        demo = demo
+      ),
+      error = function(e) NULL
+    )
+    if (!is.null(sql_pre) && is.data.frame(sql_pre) && nrow(sql_pre) > 0L) {
+      m_cat_p <- if ("catalogNumber" %in% names(sql_pre)) match(as.character(df$catalogNumber), as.character(sql_pre$catalogNumber)) else rep(NA_integer_, nrow(df))
+      m_ll_p <- if ("lat_lon_key" %in% names(sql_pre)) match(ll_pre, as.character(sql_pre$lat_lon_key)) else rep(NA_integer_, nrow(df))
+      m_hit_p <- ifelse(!is.na(m_cat_p), m_cat_p, m_ll_p)
+      hyd_p <- intersect(c(req_wc_sg_cols, "bio18_precip_warmest_qt", "bio19_precip_coldest_qt"), names(sql_pre))
+      for (hc in hyd_p) {
+        v_s <- suppressWarnings(as.numeric(sql_pre[[hc]][m_hit_p]))
+        if (hc %in% names(df)) {
+          v_c <- suppressWarnings(as.numeric(df[[hc]]))
+          df[[hc]] <- ifelse(is.finite(v_c), v_c, v_s)
+        } else {
+          df[[hc]] <- v_s
+        }
+      }
+      df <- coalesce_legacy_wc_bio_cols(df, ensure_all_19 = TRUE)
+      if (all(req_wc_sg_cols %in% names(df))) {
+        fin_mat <- vapply(req_wc_sg_cols, function(cl) is.finite(suppressWarnings(as.numeric(df[[cl]]))), logical(nrow(df)))
+        if (!is.matrix(fin_mat)) fin_mat <- matrix(fin_mat, nrow = nrow(df))
+        valid_ll <- is.finite(suppressWarnings(as.numeric(df$latitude))) & is.finite(suppressWarnings(as.numeric(df$longitude)))
+        uncached_mask <- valid_ll & (rowSums(!fin_mat) > 0L)
+        if (!any(uncached_mask) && any(valid_ll)) {
+          message(sprintf("Hydrated all %d WorldClim v2.1 (bio1..bio19) & SoilGrids 250m records directly from SQLite environmental_cache (0 uncached rasters to extract).", sum(valid_ll)))
+          return(df)
+        }
+        if (sum(uncached_mask) < nrow(df) && sum(uncached_mask) > 0L) {
+          message(sprintf("SQLite environmental_cache hit for %d / %d records; extracting rasters for %d uncached coordinates...", nrow(df) - sum(uncached_mask), nrow(df), sum(uncached_mask)))
+          full_df_ref <- df
+          uncached_env_idx <- which(uncached_mask)
+          df <- df[uncached_env_idx, , drop = FALSE]
+        }
+      }
+    }
+  }
+  .finalize_env_extract <- function(extracted_sub) {
+    if (!is.null(full_df_ref)) {
+      out_full <- full_df_ref
+      for (cl in setdiff(names(extracted_sub), c("catalogNumber", "latitude", "longitude"))) {
+        if (!(cl %in% names(out_full))) out_full[[cl]] <- rep(NA, nrow(out_full))
+        out_full[[cl]][uncached_env_idx] <- extracted_sub[[cl]]
+      }
+    } else {
+      out_full <- extracted_sub
+    }
+    if (is_canon_env && exists("upsert_environmental_cache_sqlite", mode = "function")) {
+      tryCatch({
+        up_cols <- intersect(c("catalogNumber", "latitude", "longitude", req_wc_sg_cols), names(extracted_sub))
+        if (all(c("catalogNumber", "latitude", "longitude") %in% up_cols)) {
+          up_df <- extracted_sub[, up_cols, drop = FALSE]
+          up_df$lat_lon_key <- sprintf("%.5f_%.5f", round(as.numeric(up_df$latitude), 5), round(as.numeric(up_df$longitude), 5))
+          upsert_environmental_cache_sqlite(up_df, cache_path = file.path(env_dir, "fine_grain_edaphic_cache.csv"), demo = demo)
+        }
+      }, error = function(e) NULL)
+    }
+    out_full
+  }
+
   # Check if GeoTIFF rasters exist directly in env_dir
   raster_files <- list.files(env_dir, pattern = "\\.(tif|tiff|grd)$", full.names = TRUE, ignore.case = TRUE)
   extract_err <- NULL
@@ -582,7 +685,7 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
       extract_err <<- e$message
       NULL
     })
-    if (!is.null(extracted_df)) return(extracted_df)
+    if (!is.null(extracted_df)) return(.finalize_env_extract(extracted_df))
   }
 
   sub_files <- list.files(env_dir, pattern = "\\.(tif|tiff|grd)$", full.names = TRUE, recursive = TRUE, ignore.case = TRUE)
@@ -606,7 +709,7 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
       extract_err <<- e$message
       NULL
     })
-    if (!is.null(extracted_cached)) return(extracted_cached)
+    if (!is.null(extracted_cached)) return(.finalize_env_extract(extracted_cached))
   }
 
   # Automated GeoTIFF Acquisition via geodata when local rasters are absent and --demo is FALSE
@@ -633,8 +736,9 @@ extract_environmental_layers <- function(df, env_dir, demo = FALSE) {
       extract_err <<- e$message
       NULL
     })
-    if (!is.null(extracted_geo)) return(extracted_geo)
+    if (!is.null(extracted_geo)) return(.finalize_env_extract(extracted_geo))
   }
+  if (!is.null(full_df_ref)) df <- full_df_ref
 
   # Offline SQLite / CSV environmental_cache hydration when --demo is FALSE
   if (!isTRUE(demo) && nrow(df) > 0L) {
@@ -1192,14 +1296,57 @@ query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", 
   }
   
   merged_df <- tryCatch({
-    batch_indices <- split(seq_len(n_conus), ceiling(seq_len(n_conus) / batch_size))
     batch_results <- list()
-    
-    for (b_idx in seq_along(batch_indices)) {
-      idx <- batch_indices[[b_idx]]
-      sub_df <- conus_df[idx, ]
-      b_res <- query_ssurgo_sda_batch(sub_df, cache_dir, b_idx, demo = demo, batch_size = batch_size)
-      batch_results[[b_idx]] <- b_res
+    rem_conus <- conus_df
+
+    # Single-batch SQLite environmental_cache pre-hydration across all CONUS points
+    if (!isTRUE(demo) && exists("query_environmental_cache_sqlite", mode = "function")) {
+      c_ll <- sprintf("%.5f_%.5f", round(as.numeric(conus_df$latitude), 5), round(as.numeric(conus_df$longitude), 5))
+      sql_all <- tryCatch(
+        query_environmental_cache_sqlite(
+          catalog_numbers = as.character(conus_df$catalogNumber),
+          lat_lon_keys = c_ll,
+          cache_path = cache_dir,
+          demo = demo
+        ),
+        error = function(e) NULL
+      )
+      if (!is.null(sql_all) && nrow(sql_all) > 0L && any(c("musym", "ssurgo_rock_outcrop_pct") %in% names(sql_all))) {
+        m_cat <- if ("catalogNumber" %in% names(sql_all)) match(as.character(conus_df$catalogNumber), as.character(sql_all$catalogNumber)) else rep(NA_integer_, n_conus)
+        m_ll <- if ("lat_lon_key" %in% names(sql_all)) match(c_ll, as.character(sql_all$lat_lon_key)) else rep(NA_integer_, n_conus)
+        m_hit <- ifelse(!is.na(m_cat), m_cat, m_ll)
+        has_ss_hit <- !is.na(m_hit)
+        if (any(has_ss_hit)) {
+          cand_hit <- sql_all[m_hit[has_ss_hit], , drop = FALSE]
+          valid_ss <- (if ("musym" %in% names(cand_hit)) !is.na(cand_hit$musym) & nzchar(as.character(cand_hit$musym)) else rep(FALSE, nrow(cand_hit))) |
+                      (if ("ssurgo_rock_outcrop_pct" %in% names(cand_hit)) !is.na(cand_hit$ssurgo_rock_outcrop_pct) else rep(FALSE, nrow(cand_hit)))
+          if (any(valid_ss)) {
+            hit_idx <- which(has_ss_hit)[valid_ss]
+            hit_rows <- cand_hit[valid_ss, , drop = FALSE]
+            hit_rows$catalogNumber <- as.character(conus_df$catalogNumber[hit_idx])
+            hit_rows$latitude <- conus_df$latitude[hit_idx]
+            hit_rows$longitude <- conus_df$longitude[hit_idx]
+            batch_results[[1L]] <- normalize_ssurgo_cols(hit_rows)
+            rem_conus <- conus_df[-hit_idx, , drop = FALSE]
+            message(sprintf("Pre-hydrated %d / %d CONUS SSURGO records directly from SQLite environmental_cache.", length(hit_idx), n_conus))
+          }
+        }
+      }
+    }
+
+    if (nrow(rem_conus) > 0L) {
+      batch_indices <- split(seq_len(nrow(rem_conus)), ceiling(seq_len(nrow(rem_conus)) / batch_size))
+      run_one_ss_batch <- function(b_idx) {
+        idx <- batch_indices[[b_idx]]
+        sub_df <- rem_conus[idx, , drop = FALSE]
+        query_ssurgo_sda_batch(sub_df, cache_dir, b_idx, demo = demo, batch_size = batch_size)
+      }
+      rem_batches <- if (!isTRUE(demo) && length(batch_indices) >= 2L && exists("packera_mclapply", mode = "function")) {
+        packera_mclapply(seq_along(batch_indices), run_one_ss_batch, mc.cores = min(4L, length(batch_indices)), mc.preschedule = FALSE)
+      } else {
+        lapply(seq_along(batch_indices), run_one_ss_batch)
+      }
+      batch_results <- c(batch_results, rem_batches)
     }
     
     all_ssurgo <- as.data.frame(dplyr::bind_rows(batch_results), stringsAsFactors = FALSE)
@@ -3043,6 +3190,11 @@ compute_inverse_class_frequency_weights <- function(y_vec) {
 estimate_spatial_autocorrelation_block_size <- function(coords, X_env, default_km = 55.0) {
   n <- nrow(coords)
   if (is.null(coords) || n < 10) return(list(range_km = default_km, range_m = default_km * 1000.0, range_deg = default_km / 111.0))
+  if (n > 2500L) {
+    sub_idx <- unique(round(seq(1L, n, length.out = 2500L)))
+    coords <- coords[sub_idx, , drop = FALSE]
+    X_env <- X_env[sub_idx, , drop = FALSE]
+  }
   range_deg <- tryCatch({
     d_mat <- as.matrix(stats::dist(coords))
     d_vec <- d_mat[upper.tri(d_mat)]
@@ -3095,7 +3247,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   n <- nrow(coords)
 
   MEMs <- NULL
-  if (requireNamespace("adespatial", quietly = TRUE)) {
+  if (n <= 900L && requireNamespace("adespatial", quietly = TRUE)) {
     MEMs <- tryCatch({
       db_res <- adespatial::dbmem(coords, MEM.autocor = "positive")
       m_mat <- as.matrix(db_res)
@@ -3110,16 +3262,22 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     }, error = function(e) NULL)
   }
   if (is.null(MEMs)) {
-    # Fallback to distance-matrix cmdscale / double-centered eigenfunctions (MEM1..MEM5)
+    # Fast O(N^2) double-centering + truncated Lanczos (RSpectra::eigs_sym) for top-5 positive MEM eigenfunctions
     D <- as.matrix(dist(coords))
-    thresh <- max(apply(D, 1, function(r) sort(r)[min(8, n)]))
+    k_nn <- min(8L, n)
+    thresh <- max(apply(D, 1, function(r) sort(r, partial = k_nn)[k_nn]))
     W <- exp(-D / (thresh + 1e-5)) * (D <= thresh); diag(W) <- 0
-    H <- diag(n) - matrix(1 / n, n, n)
-    M <- H %*% W %*% H
-    eig <- eigen(M, symmetric = TRUE)
+    rm_w <- rowMeans(W)
+    M <- sweep(sweep(W, 1L, rm_w, "-"), 2L, rm_w, "-") + mean(rm_w)
+    eig <- if (n >= 20L && requireNamespace("RSpectra", quietly = TRUE)) {
+      tryCatch(RSpectra::eigs_sym(M, k = min(8L, n - 1L), which = "LA"), error = function(e) eigen(M, symmetric = TRUE))
+    } else {
+      eigen(M, symmetric = TRUE)
+    }
     pos_idx <- which(eig$values > 1e-4)
-    num_mems <- min(length(pos_idx), 5)
-    MEMs <- eig$vectors[, pos_idx[1:num_mems], drop = FALSE]
+    if (length(pos_idx) == 0L) pos_idx <- 1L
+    num_mems <- min(length(pos_idx), 5L)
+    MEMs <- eig$vectors[, pos_idx[seq_len(num_mems)], drop = FALSE]
     colnames(MEMs) <- paste0("MEM", seq_len(num_mems))
   }
 
@@ -3195,14 +3353,15 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   X_all_anc <- X_all[anchor_idx, , drop = FALSE]
   wts_anc   <- case_wts[anchor_idx]
 
+  rf_threads <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(32L) else 1L
   if (requireNamespace("ranger", quietly = TRUE)) {
     df_env_anc <- data.frame(y = y_anchor, as.data.frame(X_env_anc), check.names = FALSE)
     df_all_anc <- data.frame(y = y_anchor, as.data.frame(X_all_anc), check.names = FALSE)
-    rf_nonspatial <- ranger::ranger(y ~ ., data = df_env_anc, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_anc, seed = 42)
+    rf_nonspatial <- ranger::ranger(y ~ ., data = df_env_anc, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_anc, num.threads = rf_threads, seed = 42)
     oob_acc_nonspatial <- 1 - rf_nonspatial$prediction.error
-    rf_spatial <- ranger::ranger(y ~ ., data = df_all_anc, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_anc, seed = 42)
+    rf_spatial <- ranger::ranger(y ~ ., data = df_all_anc, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_anc, num.threads = rf_threads, seed = 42)
     oob_acc_spatial <- 1 - rf_spatial$prediction.error
-    rf_prob_anchor <- ranger::ranger(y ~ ., data = df_env_anc, num.trees = n_trees, probability = TRUE, case.weights = wts_anc, seed = 42)
+    rf_prob_anchor <- ranger::ranger(y ~ ., data = df_env_anc, num.trees = n_trees, probability = TRUE, case.weights = wts_anc, num.threads = rf_threads, seed = 42)
     imp_vec <- ranger::importance(rf_spatial)
     imp_mat <- cbind(MeanDecreaseAccuracy = imp_vec)
   } else {
@@ -3254,8 +3413,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
         tr_df <- data.frame(y = droplevels(y_anchor[tr_sub]), as.data.frame(X_env_anc[tr_sub, , drop = FALSE]), check.names = FALSE)
         te_df <- as.data.frame(X_env_anc[te_sub, , drop = FALSE])
         fit_cv <- ranger::ranger(y ~ ., data = tr_df, num.trees = max(100, floor(n_trees / 2)),
-                                 probability = TRUE, case.weights = wts_anc[tr_sub], seed = 42 + as.integer(f_id))
-        pr_mat <- stats::predict(fit_cv, data = te_df)$predictions
+                                 probability = TRUE, case.weights = wts_anc[tr_sub], num.threads = rf_threads, seed = 42 + as.integer(f_id))
+        pr_mat <- stats::predict(fit_cv, data = te_df, num.threads = rf_threads)$predictions
         if (!is.matrix(pr_mat)) pr_mat <- matrix(pr_mat, nrow = length(te_sub), dimnames = list(NULL, names(pr_mat)))
         for (cl_nm in intersect(colnames(pr_mat), cls_levels)) {
           oof_prob_mat[te_sub, cl_nm] <- pr_mat[, cl_nm]
@@ -3305,7 +3464,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   if (length(passive_idx) > 0) {
     if (requireNamespace("ranger", quietly = TRUE)) {
       pass_df <- as.data.frame(X_env[passive_idx, , drop = FALSE])
-      pass_pr <- stats::predict(rf_prob_anchor, data = pass_df)$predictions
+      pass_pr <- stats::predict(rf_prob_anchor, data = pass_df, num.threads = rf_threads)$predictions
       if (!is.matrix(pass_pr)) pass_pr <- matrix(pass_pr, nrow = length(passive_idx), dimnames = list(NULL, names(pass_pr)))
       for (cl_nm in intersect(colnames(pass_pr), cls_levels)) {
         full_prob_mat[passive_idx, cl_nm] <- pass_pr[, cl_nm]
@@ -3445,11 +3604,8 @@ run_spatial_rf_models <- compute_spatial_rf_mems
 # 5. Partitioned PCA-env Niche Overlap: Climatic vs. Edaphic-Geologic vs. Joint
 #    (Broennimann et al. 2012; Warren et al. 2008; Dormann et al. 2013)
 # ------------------------------------------------------------------------------
-compute_pca_env_partition_overlap <- function(bg_mat, grp_col, sp1, sp2, n_perm = 100, rf_var_weights = NULL) {
-  if (is.null(bg_mat) || ncol(bg_mat) == 0 || nrow(bg_mat) < 6) {
-    return(list(D_emp = NA_real_, I_emp = NA_real_, p_equiv_D = NA_real_, p_equiv_I = NA_real_,
-                p_bg_D = NA_real_, p_bg_I = NA_real_, D_null = rep(NA_real_, n_perm), I_null = rep(NA_real_, n_perm)))
-  }
+.prepare_partition_scores_glob <- function(bg_mat, rf_var_weights = NULL) {
+  if (is.null(bg_mat) || ncol(bg_mat) == 0 || nrow(bg_mat) < 6) return(NULL)
   for (j in seq_len(ncol(bg_mat))) {
     col_v <- bg_mat[, j]
     if (any(!is.finite(col_v))) {
@@ -3459,10 +3615,7 @@ compute_pca_env_partition_overlap <- function(bg_mat, grp_col, sp1, sp2, n_perm 
     }
   }
   active_cols <- which(apply(bg_mat, 2, stats::sd, na.rm = TRUE) > 1e-8)
-  if (length(active_cols) == 0) {
-    return(list(D_emp = NA_real_, I_emp = NA_real_, p_equiv_D = NA_real_, p_equiv_I = NA_real_,
-                p_bg_D = NA_real_, p_bg_I = NA_real_, D_null = rep(NA_real_, n_perm), I_null = rep(NA_real_, n_perm)))
-  }
+  if (length(active_cols) == 0) return(NULL)
   bg_sub <- bg_mat[, active_cols, drop = FALSE]
   use_rf_w <- !is.null(rf_var_weights) && !is.null(colnames(bg_sub)) && any(colnames(bg_sub) %in% names(rf_var_weights))
   if (use_rf_w) {
@@ -3490,6 +3643,165 @@ compute_pca_env_partition_overlap <- function(bg_mat, grp_col, sp1, sp2, n_perm 
       data.frame(PC1 = z1, PC2 = 0.05 * seq_along(z1) / length(z1))
     }
   }, error = function(e) NULL)
+  list(bg_sub = bg_sub, scores_glob = scores_glob)
+}
+
+.run_ecospat_test_chunk <- function(z1, z2, rep_n, test_kind) {
+  if (identical(test_kind, "equiv")) {
+    eq <- tryCatch(
+      suppressMessages(suppressWarnings(ecospat::ecospat.niche.equivalency.test(z1, z2, rep = rep_n, overlap.alternative = "lower", ncores = 1))),
+      error = function(e) suppressMessages(suppressWarnings(ecospat::ecospat.niche.equivalency.test(z1, z2, rep = rep_n, ncores = 1)))
+    )
+    list(D = as.numeric(eq$sim$D), I = as.numeric(eq$sim$I))
+  } else {
+    bg_sim <- tryCatch(
+      suppressMessages(suppressWarnings(ecospat::ecospat.niche.similarity.test(z1, z2, rep = rep_n, overlap.alternative = "lower", rand.type = 2, ncores = 1))),
+      error = function(e) tryCatch(
+        suppressMessages(suppressWarnings(ecospat::ecospat.niche.similarity.test(z1, z2, rep = rep_n, rand.type = 2, ncores = 1))),
+        error = function(e2) NULL
+      )
+    )
+    if (!is.null(bg_sim) && !is.null(bg_sim$sim$D)) {
+      list(D = as.numeric(bg_sim$sim$D), I = as.numeric(bg_sim$sim$I))
+    } else {
+      list(D = numeric(0), I = numeric(0))
+    }
+  }
+}
+
+.evaluate_partition_jobs_parallel <- function(job_specs, grp_col, n_perm) {
+  n_jobs <- length(job_specs)
+  if (n_jobs == 0L) return(list())
+  can_par <- (n_perm >= 99L) && exists("packera_mclapply", mode = "function") &&
+             exists("resolve_packera_workers", mode = "function") && (resolve_packera_workers(32L) > 1L)
+  if (!can_par) {
+    return(lapply(job_specs, function(jb) {
+      compute_pca_env_partition_overlap(
+        jb$bg_mat, grp_col, jb$sp1, jb$sp2,
+        n_perm = n_perm, rf_var_weights = jb$rf_var_weights, precomputed_prep = jb$prep
+      )
+    }))
+  }
+
+  # Build z1, z2, ov grids once per (pair, partition) job, then fan out equivalency + similarity chunks across 32 cores
+  grid_states <- vector("list", n_jobs)
+  flat_tasks <- list()
+  max_w <- resolve_packera_workers(32L)
+  chunks_per_test <- max(1L, min(6L, floor(max_w / max(2L * n_jobs, 1L))))
+
+  for (j_i in seq_len(n_jobs)) {
+    jb <- job_specs[[j_i]]
+    prep <- if (!is.null(jb$prep)) jb$prep else .prepare_partition_scores_glob(jb$bg_mat, jb$rf_var_weights)
+    idx1 <- which(grp_col == jb$sp1)
+    idx2 <- which(grp_col == jb$sp2)
+    g_st <- NULL
+    if (!is.null(prep) && !is.null(prep$scores_glob) && requireNamespace("ecospat", quietly = TRUE) &&
+        length(idx1) >= 5L && length(idx2) >= 5L) {
+      g_st <- tryCatch({
+        sc <- prep$scores_glob
+        z1 <- ecospat::ecospat.grid.clim.dyn(glob = sc, glob1 = sc, sp = sc[idx1, 1:2, drop = FALSE], R = 100)
+        z2 <- ecospat::ecospat.grid.clim.dyn(glob = sc, glob1 = sc, sp = sc[idx2, 1:2, drop = FALSE], R = 100)
+        ov <- ecospat::ecospat.niche.overlap(z1, z2, cor = TRUE)
+        if (is.finite(as.numeric(ov$D)) && is.finite(as.numeric(ov$I))) {
+          list(z1 = z1, z2 = z2, D_emp = as.numeric(ov$D), I_emp = as.numeric(ov$I))
+        } else NULL
+      }, error = function(e) NULL)
+    }
+    grid_states[[j_i]] <- list(prep = prep, g_st = g_st)
+    if (!is.null(g_st)) {
+      base_rep <- floor(n_perm / chunks_per_test)
+      rem_rep <- n_perm - base_rep * chunks_per_test
+      rep_vec <- rep(base_rep, chunks_per_test)
+      if (rem_rep > 0L) rep_vec[seq_len(rem_rep)] <- rep_vec[seq_len(rem_rep)] + 1L
+      rep_vec <- rep_vec[rep_vec > 0L]
+      for (tk in c("equiv", "bg")) {
+        for (rv in rep_vec) {
+          flat_tasks[[length(flat_tasks) + 1L]] <- list(job_idx = j_i, kind = tk, rep_n = as.integer(rv))
+        }
+      }
+    }
+  }
+
+  chunk_outs <- list()
+  if (length(flat_tasks) > 0L) {
+    base_seed <- sample.int(100000000L, 1L)
+    n_workers <- resolve_packera_workers(32L, length(flat_tasks))
+    chunk_outs <- packera_mclapply(
+      seq_along(flat_tasks),
+      function(t_i) {
+        set.seed(as.integer((base_seed + t_i * 104729L) %% 2147483647L))
+        tk_obj <- flat_tasks[[t_i]]
+        gs <- grid_states[[tk_obj$job_idx]]$g_st
+        tryCatch(.run_ecospat_test_chunk(gs$z1, gs$z2, tk_obj$rep_n, tk_obj$kind), error = function(e) NULL)
+      },
+      mc.cores = n_workers,
+      mc.preschedule = FALSE
+    )
+  }
+
+  out_res <- vector("list", n_jobs)
+  for (j_i in seq_len(n_jobs)) {
+    jb <- job_specs[[j_i]]
+    gs <- grid_states[[j_i]]$g_st
+    prep <- grid_states[[j_i]]$prep
+    if (!is.null(gs) && length(chunk_outs) == length(flat_tasks)) {
+      eq_d <- numeric(0); eq_i <- numeric(0); bg_d <- numeric(0); bg_i <- numeric(0)
+      ok_chunks <- TRUE
+      for (t_i in seq_along(flat_tasks)) {
+        if (flat_tasks[[t_i]]$job_idx == j_i) {
+          co <- chunk_outs[[t_i]]
+          if (is.null(co) || (identical(flat_tasks[[t_i]]$kind, "equiv") && length(co$D) == 0L)) {
+            ok_chunks <- FALSE
+            break
+          }
+          if (identical(flat_tasks[[t_i]]$kind, "equiv")) {
+            eq_d <- c(eq_d, co$D); eq_i <- c(eq_i, co$I)
+          } else {
+            bg_d <- c(bg_d, co$D); bg_i <- c(bg_i, co$I)
+          }
+        }
+      }
+      if (ok_chunks && length(eq_d) == n_perm) {
+        p_bg_d <- if (length(bg_d) > 0L) (sum(bg_d <= gs$D_emp, na.rm = TRUE) + 1) / (length(bg_d) + 1) else NA_real_
+        p_bg_i <- if (length(bg_i) > 0L) (sum(bg_i <= gs$I_emp, na.rm = TRUE) + 1) / (length(bg_i) + 1) else NA_real_
+        if (is.na(p_bg_d) || !is.finite(p_bg_d)) {
+          # Run fast analytical background fallback if ecospat similarity returned empty
+          fb <- compute_pca_env_partition_overlap(
+            jb$bg_mat, grp_col, jb$sp1, jb$sp2,
+            n_perm = n_perm, rf_var_weights = jb$rf_var_weights, precomputed_prep = prep
+          )
+          out_res[[j_i]] <- fb
+        } else {
+          out_res[[j_i]] <- list(
+            D_emp = gs$D_emp,
+            I_emp = gs$I_emp,
+            p_equiv_D = (sum(eq_d <= gs$D_emp, na.rm = TRUE) + 1) / (length(eq_d) + 1),
+            p_equiv_I = (sum(eq_i <= gs$I_emp, na.rm = TRUE) + 1) / (length(eq_i) + 1),
+            p_bg_D = p_bg_d,
+            p_bg_I = p_bg_i,
+            D_null = eq_d,
+            I_null = eq_i
+          )
+        }
+        next
+      }
+    }
+    out_res[[j_i]] <- compute_pca_env_partition_overlap(
+      jb$bg_mat, grp_col, jb$sp1, jb$sp2,
+      n_perm = n_perm, rf_var_weights = jb$rf_var_weights, precomputed_prep = prep
+    )
+  }
+  out_res
+}
+
+compute_pca_env_partition_overlap <- function(bg_mat, grp_col, sp1, sp2, n_perm = 100, rf_var_weights = NULL, precomputed_prep = NULL) {
+  prep <- if (!is.null(precomputed_prep)) precomputed_prep else .prepare_partition_scores_glob(bg_mat, rf_var_weights)
+  if (is.null(prep)) {
+    return(list(D_emp = NA_real_, I_emp = NA_real_, p_equiv_D = NA_real_, p_equiv_I = NA_real_,
+                p_bg_D = NA_real_, p_bg_I = NA_real_, D_null = rep(NA_real_, n_perm), I_null = rep(NA_real_, n_perm)))
+  }
+  bg_sub <- prep$bg_sub
+  scores_glob <- prep$scores_glob
 
   idx1 <- which(grp_col == sp1)
   idx2 <- which(grp_col == sp2)
@@ -3657,26 +3969,35 @@ compute_edaphic_schoener_d <- function(
     ))
   }
   X_ed <- as.matrix(df_calib[, edaph_cols, drop = FALSE])
-  out_list <- list()
+  prep_ed <- .prepare_partition_scores_glob(X_ed, rf_var_weights)
+  ed_jobs <- list()
+  ed_meta <- list()
   for (pr in pairs) {
     sp1 <- pr[1]; sp2 <- pr[2]
     if (sum(grp_col == sp1, na.rm = TRUE) < 5L || sum(grp_col == sp2, na.rm = TRUE) < 5L) next
     pair_name <- paste0(gsub("Packera ", "P.", sp1), " vs ", gsub("Packera ", "P.", sp2))
-    ov <- compute_pca_env_partition_overlap(X_ed, grp_col, sp1, sp2, n_perm = n_perm, rf_var_weights = rf_var_weights)
-    out_list[[pair_name]] <- data.frame(
-      Pair = pair_name, Taxon1 = sp1, Taxon2 = sp2,
-      D_edaph = round(ov$D_emp, 4), I_edaph = round(ov$I_emp, 4),
-      p_equiv_D_edaph = round(ov$p_equiv_D, 4), p_bg_D_edaph = round(ov$p_bg_D, 4),
-      stringsAsFactors = FALSE
-    )
+    ed_jobs[[length(ed_jobs) + 1L]] <- list(bg_mat = X_ed, sp1 = sp1, sp2 = sp2, rf_var_weights = rf_var_weights, prep = prep_ed)
+    ed_meta[[length(ed_meta) + 1L]] <- list(pair_name = pair_name, sp1 = sp1, sp2 = sp2)
   }
-  if (length(out_list) == 0L) {
+  if (length(ed_jobs) == 0L) {
     return(data.frame(
       Pair = character(0), Taxon1 = character(0), Taxon2 = character(0),
       D_edaph = numeric(0), I_edaph = numeric(0),
       p_equiv_D_edaph = numeric(0), p_bg_D_edaph = numeric(0),
       stringsAsFactors = FALSE
     ))
+  }
+  ed_outs <- .evaluate_partition_jobs_parallel(ed_jobs, grp_col, n_perm)
+  out_list <- vector("list", length(ed_jobs))
+  for (k in seq_along(ed_jobs)) {
+    ov <- ed_outs[[k]]
+    md <- ed_meta[[k]]
+    out_list[[k]] <- data.frame(
+      Pair = md$pair_name, Taxon1 = md$sp1, Taxon2 = md$sp2,
+      D_edaph = round(ov$D_emp, 4), I_edaph = round(ov$I_emp, 4),
+      p_equiv_D_edaph = round(ov$p_equiv_D, 4), p_bg_D_edaph = round(ov$p_bg_D, 4),
+      stringsAsFactors = FALSE
+    )
   }
   do.call(rbind, out_list)
 }
@@ -3756,27 +4077,34 @@ run_warren_niche_identity_tests <- function(
     joint_vars <- unique(c(clim_vars, edaph_vars))
   }
 
+  X_clim_part <- if (length(clim_vars) > 0) X_raw[, clim_vars, drop = FALSE] else X_raw
+  X_edaph_part <- if (length(edaph_vars) > 0) X_raw[, edaph_vars, drop = FALSE] else X_raw
+  X_joint_part <- X_raw[, joint_vars, drop = FALSE]
+  prep_clim <- .prepare_partition_scores_glob(X_clim_part, rf_var_weights)
+  prep_edaph <- .prepare_partition_scores_glob(X_edaph_part, rf_var_weights)
+  prep_joint <- .prepare_partition_scores_glob(X_joint_part, rf_var_weights)
+
+  valid_pair_meta <- list()
+  part_jobs <- list()
   for (pr in pairs) {
     sp1 <- pr[1]; sp2 <- pr[2]; pair_name <- paste0(gsub("Packera ", "P.", sp1), " vs ", gsub("Packera ", "P.", sp2))
     n1 <- sum(grp_col == sp1, na.rm = TRUE)
     n2 <- sum(grp_col == sp2, na.rm = TRUE)
     if (n1 < 5 || n2 < 5) next
+    valid_pair_meta[[length(valid_pair_meta) + 1L]] <- list(sp1 = sp1, sp2 = sp2, pair_name = pair_name, n1 = n1, n2 = n2)
+    part_jobs[[length(part_jobs) + 1L]] <- list(bg_mat = X_clim_part, sp1 = sp1, sp2 = sp2, rf_var_weights = rf_var_weights, prep = prep_clim)
+    part_jobs[[length(part_jobs) + 1L]] <- list(bg_mat = X_edaph_part, sp1 = sp1, sp2 = sp2, rf_var_weights = rf_var_weights, prep = prep_edaph)
+    part_jobs[[length(part_jobs) + 1L]] <- list(bg_mat = X_joint_part, sp1 = sp1, sp2 = sp2, rf_var_weights = rf_var_weights, prep = prep_joint)
+  }
 
-    # (a) Climatic Niche Partition (D_clim, I_clim)
-    clim_res <- compute_pca_env_partition_overlap(
-      if (length(clim_vars) > 0) X_raw[, clim_vars, drop = FALSE] else X_raw,
-      grp_col, sp1, sp2, n_perm = n_perm, rf_var_weights = rf_var_weights
-    )
-    # (b) Edaphic-Geologic Niche Partition (D_edaph, I_edaph)
-    edaph_res <- compute_pca_env_partition_overlap(
-      if (length(edaph_vars) > 0) X_raw[, edaph_vars, drop = FALSE] else X_raw,
-      grp_col, sp1, sp2, n_perm = n_perm, rf_var_weights = rf_var_weights
-    )
-    # (c) Joint Climato-Edaphic Niche Partition
-    joint_res <- compute_pca_env_partition_overlap(
-      X_raw[, joint_vars, drop = FALSE],
-      grp_col, sp1, sp2, n_perm = n_perm, rf_var_weights = rf_var_weights
-    )
+  part_outs <- .evaluate_partition_jobs_parallel(part_jobs, grp_col, n_perm)
+
+  for (p_i in seq_along(valid_pair_meta)) {
+    md <- valid_pair_meta[[p_i]]
+    sp1 <- md$sp1; sp2 <- md$sp2; pair_name <- md$pair_name; n1 <- md$n1; n2 <- md$n2
+    clim_res  <- part_outs[[(p_i - 1L) * 3L + 1L]]
+    edaph_res <- part_outs[[(p_i - 1L) * 3L + 2L]]
+    joint_res <- part_outs[[(p_i - 1L) * 3L + 3L]]
 
     D_emp <- joint_res$D_emp; I_emp <- joint_res$I_emp
     p_val_D <- joint_res$p_equiv_D; p_val_I <- joint_res$p_equiv_I
@@ -4084,7 +4412,7 @@ export_dynamic_fig06_ecological_niche_phenology <- function(df, srf_res = NULL, 
   invisible(list(pdf = pdf_out, png = png_out))
 }
 
-export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
+export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res = NULL) {
   message(sprintf("Exporting publication-quality 5-panel figure to %s...", out_pdf))
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
   
@@ -4245,10 +4573,10 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf) {
   # Export auxiliary Step 06 figures via generate_step06_pub_figures if available,
   # then atomically render dynamic top-RF-importance fig06_ecological_niche_phenology.{pdf,png}
   if (exists("generate_step06_pub_figures", mode = "function")) {
-    tryCatch(
-      generate_step06_pub_figures(df, srf_res, niche_res, NULL, out_pdf),
-      error = function(e) warning("generate_step06_pub_figures warning: ", e$message)
-    )
+    tryCatch({
+      format_predictor_labels <<- format_step06_predictor_labels
+      generate_step06_pub_figures(df, srf_res, niche_res, pheno_res, out_pdf)
+    }, error = function(e) warning("generate_step06_pub_figures warning: ", e$message))
   }
   tryCatch(
     export_dynamic_fig06_ecological_niche_phenology(df, srf_res, niche_res, out_pdf),
@@ -4593,13 +4921,6 @@ main <- function() {
       rf_var_weights = rf_var_weights
     )
   }
-  edaph_schoener_df <- compute_edaphic_schoener_d(
-    vouchers_df,
-    primary_edaph_vars = primary_edaph_vars,
-    rf_var_weights = rf_var_weights,
-    n_perm = opts$permutations,
-    intraspecific_mode = is_intra_run
-  )
   vouchers_df <- execute_crossmodal_consensus(
     vouchers_df,
     intraspecific_mode = is_intra_run,
@@ -4624,6 +4945,19 @@ main <- function() {
     primary_edaph_vars = primary_edaph_vars,
     rf_var_weights = rf_var_weights
   )
+  edaph_sum_cols <- c("Pair", "Taxon1", "Taxon2", "D_edaph", "I_edaph", "p_equiv_D_edaph", "p_bg_D_edaph")
+  edaph_schoener_df <- if (length(primary_edaph_vars) > 0L && !is.null(niche_res$summary) &&
+                           is.data.frame(niche_res$summary) && all(edaph_sum_cols %in% names(niche_res$summary))) {
+    niche_res$summary[, edaph_sum_cols, drop = FALSE]
+  } else {
+    compute_edaphic_schoener_d(
+      vouchers_df,
+      primary_edaph_vars = primary_edaph_vars,
+      rf_var_weights = rf_var_weights,
+      n_perm = opts$permutations,
+      intraspecific_mode = is_intra_run
+    )
+  }
   niche_res$edaphic_schoener_d <- edaph_schoener_df
 
   # Stage 5: Export Conflict Flags, Summary Report & Figures (Atomic write-then-replace)
@@ -4643,15 +4977,7 @@ main <- function() {
     message(sprintf("Saved Warren's Niche Identity summary to %s.", opts$output_summary))
   }
 
-  export_spatial_rf_figures(vouchers_df, srf_res, niche_res, opts$output_plot)
-  tryCatch({
-    if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
-      source("scripts/morphometrics/pub_figures_utils.R")
-      format_predictor_labels <<- format_step06_predictor_labels
-      generate_step06_pub_figures(vouchers_df, srf_res, niche_res, pheno_res, opts$output_plot)
-    }
-    export_dynamic_fig06_ecological_niche_phenology(vouchers_df, srf_res, niche_res, opts$output_plot)
-  }, error = function(e) warning("Step 06 publication figures export warning: ", e$message))
+  export_spatial_rf_figures(vouchers_df, srf_res, niche_res, opts$output_plot, pheno_res = pheno_res)
   message("=== Multimodal Spatial RF & Niche Modeling Analysis Complete ===")
 }
 

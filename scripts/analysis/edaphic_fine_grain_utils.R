@@ -231,38 +231,38 @@ standardize_sgmc_lithology <- function(
   lat_v  <- rep_num(lat)
   lon_v  <- rep_num(lon)
 
-  out_cls <- character(n)
-  for (i in seq_len(n)) {
-    geol_txt <- tolower(trimws(paste(r1[i], r2[i], m1[i], m2[i], mn1[i], un[i], gn[i], rt[i])))
-    oc_clean <- tolower(trimws(oc[i]))
-    oc_diag <- if (oc_clean == "non-outcrop matrix") "" else oc_clean
-    soil_txt <- tolower(trimws(paste(mu[i], cn[i], so[i], gg[i], rk[i], oc_diag)))
-    combined <- trimws(paste(geol_txt, soil_txt))
+  geol_txt <- tolower(trimws(paste(r1, r2, m1, m2, mn1, un, gn, rt)))
+  oc_clean <- tolower(trimws(oc))
+  oc_diag <- ifelse(oc_clean == "non-outcrop matrix", "", oc_clean)
+  soil_txt <- tolower(trimws(paste(mu, cn, so, gg, rk, oc_diag)))
+  combined <- trimws(paste(geol_txt, soil_txt))
 
-    if (grepl("ultramafic|serpentin|peridotit|dunit|pyroxenit|soapstone|talc|ophiolit|chrome|conowingo|aldino", combined, perl = TRUE) ||
-        oc_clean == "serpentine") {
-      out_cls[i] <- "Ultramafic_Serpentine"
-    } else if (grepl("mafic|diabas|gabbro|basalt|amphibolit|greenstone|metavolcanic|metadiorit|norite|anorthosit|trap rock|iredell|mecklenburg|wilkes|poindexter|enon", combined, perl = TRUE) ||
-               oc_clean == "diabase/mafic glade") {
-      out_cls[i] <- "Mafic_Igneous_Metamorphic"
-    } else if (grepl("carbonat|limeston|dolostone|dolomit|marble|chalk|marl|calcarenit|travertin|karst|coquina|alvar|gladeville|barfield|talbott|colbert|rendolls|calciustolls|calciudolls", combined, perl = TRUE) ||
-               oc_clean == "limestone glade") {
-      out_cls[i] <- "Carbonate_Calcareous"
-    } else if (grepl("felsic|crystalline|granit|granodiorit|monzonit|quartz monzonit|gneiss|pegmatit|rhyolit|aplit|dacit|migmatit|wake|louisburg|ashlar|rion|wateree|pacolet|appling|cecil|wedowee|madison", combined, perl = TRUE) ||
-               oc_clean == "granitic flatrock") {
-      out_cls[i] <- "Felsic_Granitic_Gneiss"
-    } else if (grepl("siliciclastic|\\bconsolidated\\b|sandstone|quartzit|arkos|conglomerat|greywack|graywack|siltston|shale|slate|phyllit|mudston|argillit|chert|novaculit|schist|ramsey|lily|sewanee|goldston|manteo|wallen|dekab", combined, perl = TRUE) ||
-               oc_clean == "sandstone/siliceous") {
-      out_cls[i] <- "Siliciclastic_Consolidated"
-    } else if (grepl("unconsolidated|alluvi|colluvi|coastal plain|terrace|loess|till|outwash|glacial|dune|eolian|sandhill|muck|peat|saprist|psamment|aquult|aquoll|aquept|fluvent|wagram|lakeland|plainfield|goldsboro|norfolk|myatt|rains|lynchburg|tama", combined, perl = TRUE)) {
-      out_cls[i] <- "Unconsolidated_Sedimentary"
-    } else {
+  m_ultra <- grepl("ultramafic|serpentin|peridotit|dunit|pyroxenit|soapstone|talc|ophiolit|chrome|conowingo|aldino", combined, perl = TRUE) | (oc_clean == "serpentine")
+  m_mafic <- !m_ultra & (grepl("mafic|diabas|gabbro|basalt|amphibolit|greenstone|metavolcanic|metadiorit|norite|anorthosit|trap rock|iredell|mecklenburg|wilkes|poindexter|enon", combined, perl = TRUE) | (oc_clean == "diabase/mafic glade"))
+  m_carb  <- !(m_ultra | m_mafic) & (grepl("carbonat|limeston|dolostone|dolomit|marble|chalk|marl|calcarenit|travertin|karst|coquina|alvar|gladeville|barfield|talbott|colbert|rendolls|calciustolls|calciudolls", combined, perl = TRUE) | (oc_clean == "limestone glade"))
+  m_fels  <- !(m_ultra | m_mafic | m_carb) & (grepl("felsic|crystalline|granit|granodiorit|monzonit|quartz monzonit|gneiss|pegmatit|rhyolit|aplit|dacit|migmatit|wake|louisburg|ashlar|rion|wateree|pacolet|appling|cecil|wedowee|madison", combined, perl = TRUE) | (oc_clean == "granitic flatrock"))
+  m_silic <- !(m_ultra | m_mafic | m_carb | m_fels) & (grepl("siliciclastic|\\bconsolidated\\b|sandstone|quartzit|arkos|conglomerat|greywack|graywack|siltston|shale|slate|phyllit|mudston|argillit|chert|novaculit|schist|ramsey|lily|sewanee|goldston|manteo|wallen|dekab", combined, perl = TRUE) | (oc_clean == "sandstone/siliceous"))
+  m_uncon <- !(m_ultra | m_mafic | m_carb | m_fels | m_silic) & grepl("unconsolidated|alluvi|colluvi|coastal plain|terrace|loess|till|outwash|glacial|dune|eolian|sandhill|muck|peat|saprist|psamment|aquult|aquoll|aquept|fluvent|wagram|lakeland|plainfield|goldsboro|norfolk|myatt|rains|lynchburg|tama", combined, perl = TRUE)
+
+  out_cls <- character(n)
+  out_cls[m_ultra] <- "Ultramafic_Serpentine"
+  out_cls[m_mafic] <- "Mafic_Igneous_Metamorphic"
+  out_cls[m_carb]  <- "Carbonate_Calcareous"
+  out_cls[m_fels]  <- "Felsic_Granitic_Gneiss"
+  out_cls[m_silic] <- "Siliciclastic_Consolidated"
+  out_cls[m_uncon] <- "Unconsolidated_Sedimentary"
+
+  rem_idx <- which(!nzchar(out_cls))
+  if (length(rem_idx) > 0L) {
+    rem_lithic_txt <- grepl("lithic|paralithic|bedrock|rock outcrop", combined[rem_idx], perl = TRUE)
+    for (k in seq_along(rem_idx)) {
+      i <- rem_idx[k]
       # Diagnostic physical soil/bedrock inference (strictly coordinate-free)
       ph_i <- ph_v[i]; sand_i <- sand_v[i]; cec_i <- cec_v[i]
       bed_i <- bed_v[i]; ro_i <- ro_v[i]
       is_shallow_lithic <- (is.finite(bed_i) && bed_i <= 50.0) ||
                            (is.finite(ro_i) && ro_i >= 15.0) ||
-                           grepl("lithic|paralithic|bedrock|rock outcrop", combined, perl = TRUE)
+                           rem_lithic_txt[k]
       if (is_shallow_lithic && is.finite(ph_i) && ph_i >= 7.0) {
         out_cls[i] <- "Carbonate_Calcareous"
       } else if (is_shallow_lithic && is.finite(ph_i) && ph_i >= 6.2 &&
@@ -275,7 +275,7 @@ standardize_sgmc_lithology <- function(
         out_cls[i] <- "Siliciclastic_Consolidated"
       } else if (is.finite(bed_i) && bed_i >= 150.0 &&
                  (!is.finite(ro_i) || ro_i < 5.0) &&
-                 ((is.finite(sand_i) && sand_i >= 70.0) || nzchar(combined))) {
+                 ((is.finite(sand_i) && sand_i >= 70.0) || nzchar(combined[i]))) {
         out_cls[i] <- "Unconsolidated_Sedimentary"
       } else if (isTRUE(eff_demo)) {
         # Synthetic demonstration fallback gated strictly behind demo == TRUE
@@ -415,21 +415,19 @@ extract_sgmc_lithology <- function(df, env_dir = "data/environmental", demo = FA
   df$is_azonal_lithology <- (lith_cls %in% c("Ultramafic_Serpentine", "Mafic_Igneous_Metamorphic")) |
                             ((lith_cls %in% azonal_classes) & (is_out | out_pct >= 10.0 | bed_cm <= 85.0))
 
-  # Compute distance (m) and fractional proximity [0, 1] to azonal rock contacts
-  for (i in seq_len(n)) {
-    if (!is.na(contact_dist_vec[i]) && is.finite(contact_dist_vec[i])) {
-      d_m <- contact_dist_vec[i]
-    } else if (is_out[i] || out_pct[i] >= 35.0 || bed_cm[i] <= 25.0) {
-      d_m <- pmax(0.0, 45.0 * (1.0 - pmin(1.0, out_pct[i] / 85.0)))
-    } else if (df$is_azonal_lithology[i] || out_pct[i] >= 10.0 || bed_cm[i] <= 80.0) {
-      d_m <- 50.0 + 2.2 * pmax(0.0, bed_cm[i] - 20.0) * (1.0 - pmin(0.8, out_pct[i] / 100.0))
-    } else if (lith_cls[i] %in% azonal_classes) {
-      d_m <- 220.0 + 3.0 * pmax(0.0, bed_cm[i] - 60.0)
-    } else {
-      d_m <- 650.0 + 4.5 * pmax(0.0, bed_cm[i] - 80.0)
-    }
-    contact_dist_vec[i] <- round(pmin(2500.0, pmax(0.0, d_m)), 1)
-  }
+  # Compute distance (m) and fractional proximity [0, 1] to azonal rock contacts (vectorized)
+  c1 <- is_out | out_pct >= 35.0 | bed_cm <= 25.0
+  c2 <- !c1 & (df$is_azonal_lithology | out_pct >= 10.0 | bed_cm <= 80.0)
+  c3 <- !(c1 | c2) & (lith_cls %in% azonal_classes)
+  d_calc <- ifelse(
+    c1, pmax(0.0, 45.0 * (1.0 - pmin(1.0, out_pct / 85.0))),
+    ifelse(
+      c2, 50.0 + 2.2 * pmax(0.0, bed_cm - 20.0) * (1.0 - pmin(0.8, out_pct / 100.0)),
+      ifelse(c3, 220.0 + 3.0 * pmax(0.0, bed_cm - 60.0), 650.0 + 4.5 * pmax(0.0, bed_cm - 80.0))
+    )
+  )
+  has_cd <- !is.na(contact_dist_vec) & is.finite(contact_dist_vec)
+  contact_dist_vec <- round(pmin(2500.0, pmax(0.0, ifelse(has_cd, contact_dist_vec, d_calc))), 1)
   df$azonal_contact_dist_m <- contact_dist_vec
   df$azonal_proximity_index <- round(
     pmin(1.0, pmax(0.0, 0.65 * exp(-df$azonal_contact_dist_m / 250.0) + 0.35 * pmin(1.0, out_pct / 60.0))),
@@ -1430,7 +1428,11 @@ load_and_update_fine_grain_cache <- function(
 
   if (!isTRUE(demo) && file.exists(cache_csv_path)) {
     cached_df <- tryCatch({
-      c_raw <- as.data.frame(readr::read_csv(cache_csv_path, show_col_types = FALSE), stringsAsFactors = FALSE)
+      c_raw <- if (requireNamespace("data.table", quietly = TRUE)) {
+        as.data.frame(data.table::fread(cache_csv_path, showProgress = FALSE, na.strings = c("", "NA")), stringsAsFactors = FALSE)
+      } else {
+        as.data.frame(readr::read_csv(cache_csv_path, show_col_types = FALSE), stringsAsFactors = FALSE)
+      }
       c_raw$catalogNumber <- as.character(c_raw$catalogNumber)
       if (!("lat_lon_key" %in% names(c_raw))) {
         c_raw$lat_lon_key <- format_lat_lon_key(c_raw$latitude, c_raw$longitude)
@@ -1444,7 +1446,7 @@ load_and_update_fine_grain_cache <- function(
     cached_df <- if (!is.null(cached_df) && nrow(cached_df) > 0L) dplyr::bind_rows(sql_cached, cached_df) else sql_cached
   }
 
-  # Match rows already present in fine_grain_edaphic_cache.csv
+  # Match rows already present in fine_grain_edaphic_cache.csv / SQLite environmental_cache
   if (!is.null(cached_df) && nrow(cached_df) > 0 && all(req_core_cols %in% names(cached_df))) {
     avail_cache_cols <- intersect(
       setdiff(FINE_GRAIN_CACHE_COLS, c("catalogNumber", "lat_lon_key", "latitude", "longitude",
@@ -1489,17 +1491,54 @@ load_and_update_fine_grain_cache <- function(
       sub_df <- enrich_ssurgo_pedology_from_series(sub_df)
       sub_df <- extract_polaris_and_solus_predictors(sub_df, env_dir = env_dir, demo = demo)
       sub_df <- extract_micro_topography_3dep(sub_df, env_dir = env_dir, demo = demo)
-      for (col in intersect(names(sub_df), req_core_cols)) {
+      for (col in setdiff(names(sub_df), c("catalogNumber", "lat_lon_key", "latitude", "longitude"))) {
+        if (!(col %in% names(df))) df[[col]] <- rep(NA, n)
         df[[col]][uncached_mask] <- sub_df[[col]]
       }
     }
-    # Ensure physical outcrop predictors, SGMC lithology, and uncertainty-buffered extrema are populated
-    df <- extract_polaris_and_solus_predictors(df, env_dir = env_dir, demo = demo)
-    df <- extract_sgmc_lithology(df, env_dir = env_dir, demo = demo)
-    df <- extract_uncertainty_buffered_predictors(df, env_dir = env_dir, demo = demo)
+
+    # Backfill extended physical outcrop predictors, SGMC lithology, and uncertainty-buffered extrema ONLY on rows missing them
+    need_polaris_ext <- !("bdricm" %in% names(df)) | is.na(df$bdricm) |
+                        !("awc" %in% names(df)) | is.na(df$awc) |
+                        !("alr_sand_clay" %in% names(df)) | is.na(df$alr_sand_clay) |
+                        !("fine_soil_cec" %in% names(df)) | is.na(df$fine_soil_cec)
+    if (any(need_polaris_ext)) {
+      p_sub <- extract_polaris_and_solus_predictors(df[need_polaris_ext, , drop = FALSE], env_dir = env_dir, demo = demo)
+      for (col in setdiff(names(p_sub), c("catalogNumber", "lat_lon_key", "latitude", "longitude"))) {
+        if (!(col %in% names(df))) df[[col]] <- rep(NA, n)
+        df[[col]][need_polaris_ext] <- p_sub[[col]]
+      }
+    }
+
+    need_sgmc <- !("sgmc_lithology_class" %in% names(df)) | is.na(df$sgmc_lithology_class) |
+                 !nzchar(trimws(as.character(df$sgmc_lithology_class))) |
+                 !("azonal_contact_dist_m" %in% names(df)) | is.na(df$azonal_contact_dist_m)
+    if (any(need_sgmc)) {
+      g_sub <- extract_sgmc_lithology(df[need_sgmc, , drop = FALSE], env_dir = env_dir, demo = demo)
+      for (col in c("sgmc_lithology_class", "is_azonal_lithology", "azonal_contact_dist_m", "azonal_proximity_index")) {
+        if (col %in% names(g_sub)) {
+          if (!(col %in% names(df))) df[[col]] <- rep(NA, n)
+          df[[col]][need_sgmc] <- g_sub[[col]]
+        }
+      }
+    }
+
+    need_buf <- !("ph_q10_buffer" %in% names(df)) | is.na(df$ph_q10_buffer) |
+                !("min_bedrock_depth_buffer_cm" %in% names(df)) | is.na(df$min_bedrock_depth_buffer_cm) |
+                !("max_cfvo_buffer_pct" %in% names(df)) | is.na(df$max_cfvo_buffer_pct)
+    if (any(need_buf)) {
+      b_sub <- extract_uncertainty_buffered_predictors(df[need_buf, , drop = FALSE], env_dir = env_dir, demo = demo)
+      for (col in c("ph_q10_buffer", "ph_q90_buffer", "min_bedrock_depth_buffer_cm", "max_cfvo_buffer_pct", "azonal_lithology_presence_buffer")) {
+        if (col %in% names(b_sub)) {
+          if (!(col %in% names(df))) df[[col]] <- rep(NA, n)
+          df[[col]][need_buf] <- b_sub[[col]]
+        }
+      }
+    }
+
     df$is_rock_outcrop <- as.logical(df$is_rock_outcrop)
     df$is_rock_outcrop[is.na(df$is_rock_outcrop)] <- FALSE
-    if (n_uncached == 0) {
+    if (n_uncached == 0 && !any(need_polaris_ext) && !any(need_sgmc) && !any(need_buf)) {
       return(df)
     }
   } else {
@@ -1527,7 +1566,11 @@ load_and_update_fine_grain_cache <- function(
     }
     dir.create(dirname(cache_csv_path), recursive = TRUE, showWarnings = FALSE)
     tmp_cache <- paste0(cache_csv_path, ".tmp")
-    readr::write_csv(combined_cache, tmp_cache)
+    if (requireNamespace("data.table", quietly = TRUE)) {
+      data.table::fwrite(combined_cache, file = tmp_cache, na = "", quote = "auto", logical01 = FALSE)
+    } else {
+      readr::write_csv(combined_cache, tmp_cache)
+    }
     file.rename(tmp_cache, cache_csv_path)
     if (exists("upsert_environmental_cache_sqlite", mode = "function")) {
       tryCatch(upsert_environmental_cache_sqlite(combined_cache, cache_path = cache_csv_path, demo = demo), error = function(e) NULL)

@@ -42,11 +42,11 @@ suppressPackageStartupMessages({
   if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
 
-if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+if (!exists("generate_step07_pub_figures", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
   source("scripts/morphometrics/pub_figures_utils.R")
 }
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
-  if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+  if (!exists("persist_step07_to_sqlite", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
 
 # ------------------------------------------------------------------------------
@@ -472,25 +472,33 @@ compute_probabilistic_consensus_scores <- function(df) {
   }
 
   p_conf_out <- numeric(n); p_score_out <- numeric(n); n_mod_out <- integer(n)
+  df_nms_c <- names(df)
+  given_sp_cv <- as.character(df$species_standardized)
+  morph_sp_cv <- if ("cda_predicted_taxon" %in% df_nms_c) as.character(df$cda_predicted_taxon) else rep(NA_character_, n)
+  morph_sp_cv[!is.na(morph_sp_cv) & !nzchar(morph_sp_cv)] <- NA_character_
+  cda_p_cv <- if ("cda_posterior_prob" %in% df_nms_c) suppressWarnings(as.numeric(df$cda_posterior_prob)) else rep(NA_real_, n)
+  is_mo_cv <- if ("morphometric_outlier_flag" %in% df_nms_c) (!is.na(df$morphometric_outlier_flag) & as.logical(df$morphometric_outlier_flag)) else rep(FALSE, n)
+  vis_sp_cv <- if ("vision_predicted_label" %in% df_nms_c) as.character(df$vision_predicted_label) else rep(NA_character_, n)
+  vis_sp_cv[!is.na(vis_sp_cv) & !nzchar(vis_sp_cv)] <- NA_character_
+  c_err_cv <- if ("c_error" %in% df_nms_c) suppressWarnings(as.numeric(df$c_error)) else rep(NA_real_, n)
+  is_cor_cv <- if ("is_label_corrupted" %in% df_nms_c) (!is.na(df$is_label_corrupted) & as.logical(df$is_label_corrupted)) else rep(FALSE, n)
+  has_geo_cv <- (if ("latitude" %in% df_nms_c) is.finite(suppressWarnings(as.numeric(df$latitude))) else rep(FALSE, n)) |
+                (if ("decimalLatitude" %in% df_nms_c) is.finite(suppressWarnings(as.numeric(df$decimalLatitude))) else rep(FALSE, n))
+  edaph_sp_cv <- if ("edaphic_best_fit_taxon" %in% df_nms_c) as.character(df$edaphic_best_fit_taxon) else rep(NA_character_, n)
+  edaph_sp_cv[!is.na(edaph_sp_cv) & !nzchar(edaph_sp_cv)] <- NA_character_
+  mm_conf_cv <- if ("multimodal_conflict_flag" %in% df_nms_c) as.logical(df$multimodal_conflict_flag) else rep(NA, n)
+  ddoy_r_cv <- if ("delta_doy_resid" %in% df_nms_c) suppressWarnings(as.numeric(df$delta_doy_resid)) else rep(NA_real_, n)
+  is_anth_cv <- if ("is_active_anthesis" %in% df_nms_c) (!is.na(df$is_active_anthesis) & as.logical(df$is_active_anthesis)) else rep(TRUE, n)
+  fg_att_cv <- if ("foreground_attention_ratio" %in% df_nms_c) suppressWarnings(as.numeric(df$foreground_attention_ratio)) else rep(NA_real_, n)
+  is_art_cv <- (if ("is_artifact_driven" %in% df_nms_c) (!is.na(df$is_artifact_driven) & as.logical(df$is_artifact_driven)) else rep(FALSE, n)) |
+               (if ("is_background_shortcut" %in% df_nms_c) (!is.na(df$is_background_shortcut) & as.logical(df$is_background_shortcut)) else rep(FALSE, n)) |
+               (is.finite(fg_att_cv) & fg_att_cv < 0.65)
+  w_morph_base <- w_vec[["morph"]]; w_vis_base <- w_vec[["vision"]]; w_edaph_base <- w_vec[["edaphic"]]; w_pheno_base <- w_vec[["pheno"]]
 
   for (i in seq_len(n)) {
-    given_sp <- as.character(df$species_standardized[i])
-    morph_sp <- if ("cda_predicted_taxon" %in% names(df) && !is.na(df$cda_predicted_taxon[i]) && nzchar(as.character(df$cda_predicted_taxon[i]))) as.character(df$cda_predicted_taxon[i]) else NA_character_
-    cda_p <- if ("cda_posterior_prob" %in% names(df)) suppressWarnings(as.numeric(df$cda_posterior_prob[i])) else NA_real_
-    is_mo <- if ("morphometric_outlier_flag" %in% names(df) && !is.na(df$morphometric_outlier_flag[i])) isTRUE(df$morphometric_outlier_flag[i]) else FALSE
-    vis_sp <- if ("vision_predicted_label" %in% names(df) && !is.na(df$vision_predicted_label[i]) && nzchar(as.character(df$vision_predicted_label[i]))) as.character(df$vision_predicted_label[i]) else NA_character_
-    c_err_i <- if ("c_error" %in% names(df)) suppressWarnings(as.numeric(df$c_error[i])) else NA_real_
-    is_cor <- if ("is_label_corrupted" %in% names(df) && !is.na(df$is_label_corrupted[i])) isTRUE(df$is_label_corrupted[i]) else FALSE
-    has_geo <- (("latitude" %in% names(df) && is.finite(suppressWarnings(as.numeric(df$latitude[i])))) || ("decimalLatitude" %in% names(df) && is.finite(suppressWarnings(as.numeric(df$decimalLatitude[i])))))
-    edaph_sp <- if ("edaphic_best_fit_taxon" %in% names(df) && !is.na(df$edaphic_best_fit_taxon[i]) && nzchar(as.character(df$edaphic_best_fit_taxon[i]))) as.character(df$edaphic_best_fit_taxon[i]) else NA_character_
-    mm_conf_i <- if ("multimodal_conflict_flag" %in% names(df) && !is.na(df$multimodal_conflict_flag[i])) isTRUE(df$multimodal_conflict_flag[i]) else NA
-    ddoy_r <- if ("delta_doy_resid" %in% names(df)) suppressWarnings(as.numeric(df$delta_doy_resid[i])) else NA_real_
-    is_anth <- if ("is_active_anthesis" %in% names(df)) isTRUE(df$is_active_anthesis[i]) else TRUE
-
-    fg_att_c <- if ("foreground_attention_ratio" %in% names(df)) suppressWarnings(as.numeric(df$foreground_attention_ratio[i])) else NA_real_
-    is_art_c <- ("is_artifact_driven" %in% names(df) && !is.na(df$is_artifact_driven[i]) && isTRUE(as.logical(df$is_artifact_driven[i]))) ||
-                ("is_background_shortcut" %in% names(df) && !is.na(df$is_background_shortcut[i]) && isTRUE(as.logical(df$is_background_shortcut[i]))) ||
-                (is.finite(fg_att_c) && fg_att_c < 0.65)
+    given_sp <- given_sp_cv[i]; morph_sp <- morph_sp_cv[i]; cda_p <- cda_p_cv[i]; is_mo <- is_mo_cv[i]
+    vis_sp <- vis_sp_cv[i]; c_err_i <- c_err_cv[i]; is_cor <- is_cor_cv[i]; has_geo <- has_geo_cv[i]
+    edaph_sp <- edaph_sp_cv[i]; mm_conf_i <- mm_conf_cv[i]; ddoy_r <- ddoy_r_cv[i]; is_anth <- is_anth_cv[i]; is_art_c <- is_art_cv[i]
 
     p_m <- if (!is.na(morph_sp)) (if (morph_sp != given_sp) max(if (is.finite(cda_p)) cda_p else 0.75, if (is_mo) 0.80 else 0.55) else if (is_mo) 0.65 else if (is.finite(cda_p)) max(0.0, 1.0 - cda_p) else 0.10) else NA_real_
     p_v <- if (!is_art_c && (!is.na(vis_sp) || is.finite(c_err_i))) { ce_use <- if (is.finite(c_err_i)) c_err_i else if (is_cor) 0.85 else 0.10; if (!is.na(vis_sp) && vis_sp != given_sp) max(ce_use, if (is_cor) 0.85 else 0.55) else ce_use * 0.5 } else NA_real_
@@ -498,10 +506,10 @@ compute_probabilistic_consensus_scores <- function(df) {
     p_p <- if (is_anth && is.finite(ddoy_r)) min(1.0, abs(ddoy_r) / 30.0) else NA_real_
 
     w_i_vec <- c(
-      morph   = w_vec[["morph"]]   * (0.5 + 0.5 * lookup_prec(prec_morph, morph_sp)),
-      vision  = w_vec[["vision"]]  * (0.5 + 0.5 * lookup_prec(prec_vis, vis_sp)),
-      edaphic = w_vec[["edaphic"]] * (0.5 + 0.5 * lookup_prec(prec_edaph, edaph_sp)),
-      pheno   = w_vec[["pheno"]]
+      morph   = w_morph_base * (0.5 + 0.5 * lookup_prec(prec_morph, morph_sp)),
+      vision  = w_vis_base   * (0.5 + 0.5 * lookup_prec(prec_vis, vis_sp)),
+      edaphic = w_edaph_base * (0.5 + 0.5 * lookup_prec(prec_edaph, edaph_sp)),
+      pheno   = w_pheno_base
     )
     p_vec <- c(morph = p_m, vision = p_v, edaphic = p_e, pheno = p_p)
     avail <- !is.na(p_vec) & is.finite(p_vec); n_mod_out[i] <- sum(avail)
@@ -767,73 +775,103 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
 
   status_calls <- character(n); rec_taxa <- character(n); triage_prios <- character(n)
   triage_acts <- character(n); rationales <- character(n); treat_broad <- character(n); treat_sub <- character(n)
+  df_nms_d <- names(df)
+  raw_sp_dv <- if ("species_raw" %in% df_nms_d) as.character(df$species_raw) else rep(NA_character_, n)
+  tier_dv <- if ("determiner_tier" %in% df_nms_d) as.character(df$determiner_tier) else rep(NA_character_, n)
+  cda_pred_dv <- if ("cda_predicted_taxon" %in% df_nms_d) as.character(df$cda_predicted_taxon) else rep(NA_character_, n)
+  cda_sec1_dv <- if ("cda_second_taxon" %in% df_nms_d) as.character(df$cda_second_taxon) else rep(NA_character_, n)
+  cda_sec2_dv <- if ("cda_second_predicted_taxon" %in% df_nms_d) as.character(df$cda_second_predicted_taxon) else rep(NA_character_, n)
+  cda_prob_dv <- if ("cda_posterior_prob" %in% df_nms_d) suppressWarnings(as.numeric(df$cda_posterior_prob)) else rep(NA_real_, n)
+  cda_sec_p_dv <- if ("cda_second_posterior_prob" %in% df_nms_d) suppressWarnings(as.numeric(df$cda_second_posterior_prob)) else rep(NA_real_, n)
+  cda_marg_dv <- if ("cda_posterior_margin" %in% df_nms_d) suppressWarnings(as.numeric(df$cda_posterior_margin)) else rep(NA_real_, n)
+  vis_pred_dv <- if ("vision_predicted_label" %in% df_nms_d) as.character(df$vision_predicted_label) else rep(NA_character_, n)
+  c_err_dv <- if ("c_error" %in% df_nms_d) suppressWarnings(as.numeric(df$c_error)) else rep(NA_real_, n)
+  vc_err_dv <- if ("vision_c_error" %in% df_nms_d) suppressWarnings(as.numeric(df$vision_c_error)) else rep(NA_real_, n)
+  mo_flag_dv <- if ("morphometric_outlier_flag" %in% df_nms_d) as.logical(df$morphometric_outlier_flag) else rep(NA, n)
+  misid_flag_dv <- if ("misidentification_flag" %in% df_nms_d) as.logical(df$misidentification_flag) else rep(NA, n)
+  triage_cat_dv <- if ("triage_category" %in% df_nms_d) as.character(df$triage_category) else rep(NA_character_, n)
+  mm_conf_dv <- if ("multimodal_conflict_flag" %in% df_nms_d) (!is.na(df$multimodal_conflict_flag) & as.logical(df$multimodal_conflict_flag)) else rep(FALSE, n)
+  edaph_sp_dv <- if ("edaphic_best_fit_taxon" %in% df_nms_d) as.character(df$edaphic_best_fit_taxon) else rep(NA_character_, n)
+  d_ed1_dv <- if ("edaphic_niche_overlap_d" %in% df_nms_d) suppressWarnings(as.numeric(df$edaphic_niche_overlap_d)) else rep(NA_real_, n)
+  d_ed2_dv <- if ("edaphic_schoener_d" %in% df_nms_d) suppressWarnings(as.numeric(df$edaphic_schoener_d)) else rep(NA_real_, n)
+  d_ed3_dv <- if ("schoener_d" %in% df_nms_d) suppressWarnings(as.numeric(df$schoener_d)) else rep(NA_real_, n)
+  gmm_unc_dv <- if ("gmm_uncertainty" %in% df_nms_d) suppressWarnings(as.numeric(df$gmm_uncertainty)) else rep(NA_real_, n)
+  gmm_cl_dv <- if ("gmm_cluster" %in% df_nms_d) suppressWarnings(as.integer(df$gmm_cluster)) else rep(NA_integer_, n)
+  ddoy1_dv <- if ("delta_doy_resid" %in% df_nms_d) suppressWarnings(as.numeric(df$delta_doy_resid)) else rep(NA_real_, n)
+  ddoy2_dv <- if ("delta_doy" %in% df_nms_d) suppressWarnings(as.numeric(df$delta_doy)) else rep(NA_real_, n)
+  is_anth_dv <- if ("is_active_anthesis" %in% df_nms_d) (!is.na(df$is_active_anthesis) & as.logical(df$is_active_anthesis)) else rep(TRUE, n)
+  bf1_dv <- if ("two_delta_bic" %in% df_nms_d) suppressWarnings(as.numeric(df$two_delta_bic)) else rep(NA_real_, n)
+  bf2_dv <- if ("gmm_2_delta_bic" %in% df_nms_d) suppressWarnings(as.numeric(df$gmm_2_delta_bic)) else rep(NA_real_, n)
+  m_tier_src_dv <- if ("morph_tier_source" %in% df_nms_d) as.character(df$morph_tier_source) else rep(NA_character_, n)
+  n_t1_dv <- if ("n_tier1_leaves" %in% df_nms_d) suppressWarnings(as.integer(df$n_tier1_leaves)) else rep(NA_integer_, n)
+  fg_att_dv <- if ("foreground_attention_ratio" %in% df_nms_d) suppressWarnings(as.numeric(df$foreground_attention_ratio)) else rep(NA_real_, n)
+  is_art_dv <- (if ("is_artifact_driven" %in% df_nms_d) (!is.na(df$is_artifact_driven) & as.logical(df$is_artifact_driven)) else rep(FALSE, n)) |
+               (if ("is_background_shortcut" %in% df_nms_d) (!is.na(df$is_background_shortcut) & as.logical(df$is_background_shortcut)) else rep(FALSE, n)) |
+               !(is.na(fg_att_dv) | fg_att_dv >= 0.65)
+  vis_ood_sc_dv <- if ("vision_ood_score" %in% df_nms_d) suppressWarnings(as.numeric(df$vision_ood_score)) else rep(NA_real_, n)
+  vis_is_ood_dv <- (if ("vision_is_ood" %in% df_nms_d) (!is.na(df$vision_is_ood) & as.logical(df$vision_is_ood)) else rep(FALSE, n)) |
+                   (is.finite(vis_ood_sc_dv) & vis_ood_sc_dv >= 0.65)
+  tom_disc_dv <- if ("tomentum_taxon_discordance" %in% df_nms_d) (!is.na(df$tomentum_taxon_discordance) & as.logical(df$tomentum_taxon_discordance)) else rep(FALSE, n)
+  dlf_dv <- if ("dissected_leaf_fraction" %in% df_nms_d) suppressWarnings(as.numeric(df$dissected_leaf_fraction)) else rep(NA_real_, n)
+  asym_dv <- if ("pct_asymmetry" %in% df_nms_d) suppressWarnings(as.numeric(df$pct_asymmetry)) else rep(NA_real_, n)
+  is_dis_dv <- if ("is_dissected" %in% df_nms_d) (!is.na(df$is_dissected) & as.logical(df$is_dissected)) else rep(FALSE, n)
+  p_conf_dv <- if ("probabilistic_consensus_conflict" %in% df_nms_d) suppressWarnings(as.numeric(df$probabilistic_consensus_conflict)) else rep(0.0, n)
+  is_valid_taxon_str <- function(s) !is.null(s) && !is.na(s) && nzchar(s) && s != "Unknown" && (s %in% active_taxa || grepl("^(Packera|P\\.)\\s+", s))
 
   for (i in seq_len(n)) {
     given_sp <- if (!is.na(sp_all_vec[i]) && nzchar(sp_all_vec[i])) sp_all_vec[i] else "Unknown"
-    raw_sp   <- if ("species_raw" %in% names(df) && !is.na(df$species_raw[i])) as.character(df$species_raw[i]) else given_sp
-    tier     <- if ("determiner_tier" %in% names(df) && !is.na(df$determiner_tier[i])) as.character(df$determiner_tier[i]) else "Tier_3_Bronze"
+    raw_sp   <- if (!is.na(raw_sp_dv[i])) raw_sp_dv[i] else given_sp
+    tier     <- if (!is.na(tier_dv[i])) tier_dv[i] else "Tier_3_Bronze"
     has_obs_doy_i <- valid_doy_all[i]
     sp_med_doy <- if (given_sp %in% names(med_doy)) med_doy[[given_sp]] else glob_med_doy
     sp_q75_doy <- if (given_sp %in% names(q75_doy)) q75_doy[[given_sp]] else glob_q75_doy
     doy      <- if (has_obs_doy_i) doy_num_all[i] else sp_med_doy
 
-    morph_sp <- if ("cda_predicted_taxon" %in% names(df) && !is.na(df$cda_predicted_taxon[i]) && nzchar(as.character(df$cda_predicted_taxon[i]))) as.character(df$cda_predicted_taxon[i]) else NULL
-    cda_sec_taxon <- if ("cda_second_taxon" %in% names(df) && !is.na(df$cda_second_taxon[i]) && nzchar(as.character(df$cda_second_taxon[i]))) {
-      as.character(df$cda_second_taxon[i])
-    } else if ("cda_second_predicted_taxon" %in% names(df) && !is.na(df$cda_second_predicted_taxon[i]) && nzchar(as.character(df$cda_second_predicted_taxon[i]))) {
-      as.character(df$cda_second_predicted_taxon[i])
-    } else NULL
-    cda_prob <- if ("cda_posterior_prob" %in% names(df) && !is.na(df$cda_posterior_prob[i])) as.numeric(df$cda_posterior_prob[i]) else NA_real_
-    cda_sec  <- if ("cda_second_posterior_prob" %in% names(df) && !is.na(df$cda_second_posterior_prob[i])) as.numeric(df$cda_second_posterior_prob[i]) else NA_real_
-    cda_marg <- if ("cda_posterior_margin" %in% names(df) && !is.na(df$cda_posterior_margin[i])) {
-      as.numeric(df$cda_posterior_margin[i])
-    } else if (!is.na(cda_prob) && !is.na(cda_sec)) cda_prob - cda_sec else if (!is.na(cda_prob)) abs(2.0 * cda_prob - 1.0) else NA_real_
+    morph_sp <- if (!is.na(cda_pred_dv[i]) && nzchar(cda_pred_dv[i])) cda_pred_dv[i] else NULL
+    cda_sec_taxon <- if (!is.na(cda_sec1_dv[i]) && nzchar(cda_sec1_dv[i])) cda_sec1_dv[i] else if (!is.na(cda_sec2_dv[i]) && nzchar(cda_sec2_dv[i])) cda_sec2_dv[i] else NULL
+    cda_prob <- cda_prob_dv[i]; cda_sec <- cda_sec_p_dv[i]
+    cda_marg <- if (!is.na(cda_marg_dv[i])) cda_marg_dv[i] else if (!is.na(cda_prob) && !is.na(cda_sec)) cda_prob - cda_sec else if (!is.na(cda_prob)) abs(2.0 * cda_prob - 1.0) else NA_real_
 
-    vis_sp     <- if ("vision_predicted_label" %in% names(df) && !is.na(df$vision_predicted_label[i]) && nzchar(as.character(df$vision_predicted_label[i]))) as.character(df$vision_predicted_label[i]) else NULL
-    c_err      <- if ("c_error" %in% names(df) && !is.na(df$c_error[i])) as.numeric(df$c_error[i]) else 0.0
-    v_cerr     <- if ("vision_c_error" %in% names(df) && !is.na(df$vision_c_error[i])) as.numeric(df$vision_c_error[i]) else c_err
+    vis_sp     <- if (!is.na(vis_pred_dv[i]) && nzchar(vis_pred_dv[i])) vis_pred_dv[i] else NULL
+    c_err      <- if (!is.na(c_err_dv[i])) c_err_dv[i] else 0.0
+    v_cerr     <- if (!is.na(vc_err_dv[i])) vc_err_dv[i] else c_err
     is_corrupt <- cor_all[i]
-    is_mo_flag <- if ("morphometric_outlier_flag" %in% names(df) && !is.na(df$morphometric_outlier_flag[i])) isTRUE(df$morphometric_outlier_flag[i]) else if ("misidentification_flag" %in% names(df) && !is.na(df$misidentification_flag[i])) isTRUE(df$misidentification_flag[i]) else FALSE
-    triage_cat <- if ("triage_category" %in% names(df) && !is.na(df$triage_category[i])) as.character(df$triage_category[i]) else "Clean_MultiModal_Consensus"
-    mm_conf    <- if ("multimodal_conflict_flag" %in% names(df) && !is.na(df$multimodal_conflict_flag[i])) isTRUE(df$multimodal_conflict_flag[i]) else FALSE
+    is_mo_flag <- if (!is.na(mo_flag_dv[i])) isTRUE(mo_flag_dv[i]) else if (!is.na(misid_flag_dv[i])) isTRUE(misid_flag_dv[i]) else FALSE
+    triage_cat <- if (!is.na(triage_cat_dv[i])) triage_cat_dv[i] else "Clean_MultiModal_Consensus"
+    mm_conf    <- mm_conf_dv[i]
 
-    edaph_sp <- if ("edaphic_best_fit_taxon" %in% names(df) && !is.na(df$edaphic_best_fit_taxon[i]) && nzchar(as.character(df$edaphic_best_fit_taxon[i]))) as.character(df$edaphic_best_fit_taxon[i]) else given_sp
-    d_edaph  <- if ("edaphic_niche_overlap_d" %in% names(df) && !is.na(df$edaphic_niche_overlap_d[i])) as.numeric(df$edaphic_niche_overlap_d[i]) else if ("edaphic_schoener_d" %in% names(df) && !is.na(df$edaphic_schoener_d[i])) as.numeric(df$edaphic_schoener_d[i]) else if ("schoener_d" %in% names(df) && !is.na(df$schoener_d[i])) as.numeric(df$schoener_d[i]) else if (edaph_sp != given_sp) 0.22 else 0.75
+    edaph_sp <- if (!is.na(edaph_sp_dv[i]) && nzchar(edaph_sp_dv[i])) edaph_sp_dv[i] else given_sp
+    d_edaph  <- if (!is.na(d_ed1_dv[i])) d_ed1_dv[i] else if (!is.na(d_ed2_dv[i])) d_ed2_dv[i] else if (!is.na(d_ed3_dv[i])) d_ed3_dv[i] else if (edaph_sp != given_sp) 0.22 else 0.75
     ph_str   <- if (is.finite(ph_num_all[i])) sprintf("%.2f", ph_num_all[i]) else "NA"
     sand_str <- if (is.finite(sand_num_all[i])) sprintf("%.1f%%", sand_num_all[i]) else "NA"
     edaph_z_i <- edaph_z_vec[i]
 
-    gmm_unc  <- if ("gmm_uncertainty" %in% names(df) && !is.na(df$gmm_uncertainty[i])) as.numeric(df$gmm_uncertainty[i]) else 0.05
-    g_cl     <- if ("gmm_cluster" %in% names(df) && !is.na(df$gmm_cluster[i])) as.integer(df$gmm_cluster[i]) else 1L
-    ddoy     <- if ("delta_doy_resid" %in% names(df) && is.finite(df$delta_doy_resid[i])) as.numeric(df$delta_doy_resid[i]) else if ("delta_doy" %in% names(df) && is.finite(df$delta_doy[i])) as.numeric(df$delta_doy[i]) else 0.0
-    is_anth  <- if ("is_active_anthesis" %in% names(df)) isTRUE(df$is_active_anthesis[i]) else TRUE
-    bf_val   <- if ("two_delta_bic" %in% names(df) && is.finite(df$two_delta_bic[i])) as.numeric(df$two_delta_bic[i]) else if ("gmm_2_delta_bic" %in% names(df) && is.finite(df$gmm_2_delta_bic[i])) as.numeric(df$gmm_2_delta_bic[i]) else gmm_two_delta_bic
+    gmm_unc  <- if (!is.na(gmm_unc_dv[i])) gmm_unc_dv[i] else 0.05
+    g_cl     <- if (!is.na(gmm_cl_dv[i])) gmm_cl_dv[i] else 1L
+    ddoy     <- if (is.finite(ddoy1_dv[i])) ddoy1_dv[i] else if (is.finite(ddoy2_dv[i])) ddoy2_dv[i] else 0.0
+    is_anth  <- is_anth_dv[i]
+    bf_val   <- if (is.finite(bf1_dv[i])) bf1_dv[i] else if (is.finite(bf2_dv[i])) bf2_dv[i] else gmm_two_delta_bic
     tau_ecotype_i <- tau_ecotype_vec[i]
     tau_cryptic_i <- tau_cryptic_vec[i]
 
-    is_valid_taxon_str <- function(s) !is.null(s) && !is.na(s) && nzchar(s) && s != "Unknown" && (s %in% active_taxa || grepl("^(Packera|P\\.)\\s+", s))
     morph_is_taxon <- is_valid_taxon_str(morph_sp)
     vis_is_taxon   <- is_valid_taxon_str(vis_sp)
     edaph_is_taxon <- is_valid_taxon_str(edaph_sp)
     sec_is_taxon   <- is_valid_taxon_str(cda_sec_taxon)
 
-    m_tier_src     <- if ("morph_tier_source" %in% names(df) && !is.na(df$morph_tier_source[i])) as.character(df$morph_tier_source[i]) else NA_character_
-    n_t1_i         <- if ("n_tier1_leaves" %in% names(df) && !is.na(df$n_tier1_leaves[i])) as.integer(df$n_tier1_leaves[i]) else NA_integer_
+    m_tier_src     <- m_tier_src_dv[i]
+    n_t1_i         <- n_t1_dv[i]
     is_tier1_pure_morph <- (is.na(m_tier_src) || !nzchar(m_tier_src) || m_tier_src == "Tier_1_Pure") && (is.na(n_t1_i) || n_t1_i >= 1L)
     is_tier1_pure_i <- is_tier1_pure_morph
 
-    fg_att_i <- if ("foreground_attention_ratio" %in% names(df)) suppressWarnings(as.numeric(df$foreground_attention_ratio[i])) else NA_real_
-    is_artifact_i <- ("is_artifact_driven" %in% names(df) && !is.na(df$is_artifact_driven[i]) && isTRUE(as.logical(df$is_artifact_driven[i]))) ||
-                     ("is_background_shortcut" %in% names(df) && !is.na(df$is_background_shortcut[i]) && isTRUE(as.logical(df$is_background_shortcut[i]))) ||
-                     !(is.na(fg_att_i) || fg_att_i >= 0.65)
+    is_artifact_i <- is_art_dv[i]
     vis_trusted_i <- !is_artifact_i
     eff_c_err <- if (vis_trusted_i) c_err else 0.0
     eff_v_cerr <- if (vis_trusted_i) v_cerr else 0.0
     eff_is_corrupt <- vis_trusted_i && is_corrupt
 
-    vis_ood_score_i <- if ("vision_ood_score" %in% names(df)) suppressWarnings(as.numeric(df$vision_ood_score[i])) else NA_real_
-    vis_is_ood_i <- vis_trusted_i && (("vision_is_ood" %in% names(df) && !is.na(df$vision_is_ood[i]) && isTRUE(as.logical(df$vision_is_ood[i]))) ||
-                                      (is.finite(vis_ood_score_i) && vis_ood_score_i >= 0.65))
+    vis_ood_score_i <- vis_ood_sc_dv[i]
+    vis_is_ood_i <- vis_trusted_i && vis_is_ood_dv[i]
 
     if (is_intra) {
       n_intra_modalities <- as.integer(is_tier1_pure_morph && (is_mo_flag || (g_cl > 1L && bf_val >= 6.0))) +
@@ -871,15 +909,14 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
 
     # 2. General Ontogenetic / Taphonomic Plasticity Rule (taxon-agnostic empirical quantile & edaphic envelope)
     in_edaphic_envelope <- (is.finite(edaph_z_i) && edaph_z_i <= 2.0) || (nzchar(edaph_sp) && edaph_sp == given_sp)
-    has_tomentum_shift  <- ("tomentum_taxon_discordance" %in% names(df)) && isTRUE(df$tomentum_taxon_discordance[i])
+    has_tomentum_shift  <- tom_disc_dv[i]
     morph_div_i <- (!is.null(morph_sp) && morph_sp != given_sp) || is_mo_flag
     vis_div_i   <- vis_trusted_i && ((!is.null(vis_sp) && vis_sp != given_sp) || (eff_c_err >= 0.45))
     single_borderline_div <- ((as.integer(morph_div_i) + as.integer(vis_div_i)) == 1L) &&
                              (is.null(morph_sp) || morph_sp == given_sp || is.na(cda_prob) || cda_prob < cda_cut) &&
                              (!vis_trusted_i || is.null(vis_sp) || vis_sp == given_sp || eff_c_err < vis_cut)
-    dlf_i <- if ("dissected_leaf_fraction" %in% names(df)) suppressWarnings(as.numeric(df$dissected_leaf_fraction[i])) else NA_real_
-    asym_i <- if ("pct_asymmetry" %in% names(df)) suppressWarnings(as.numeric(df$pct_asymmetry[i])) else NA_real_
-    is_sym_dissected_i <- ((is.finite(dlf_i) && dlf_i > 0.0) || ("is_dissected" %in% names(df) && isTRUE(as.logical(df$is_dissected[i])))) &&
+    dlf_i <- dlf_dv[i]; asym_i <- asym_dv[i]
+    is_sym_dissected_i <- ((is.finite(dlf_i) && dlf_i > 0.0) || is_dis_dv[i]) &&
                           !(is.finite(asym_i) && asym_i > 0.22)
     is_late_foliar_wear <- has_obs_doy_i && (doy >= sp_q75_doy) && (g_cl == 1L) && !eff_is_corrupt && single_borderline_div && !is_sym_dissected_i
     is_taphonomic_plasticity <- (triage_cat != "Severe_Triple_Stream_Conflict" || !vis_trusted_i) &&
@@ -960,7 +997,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       target_sp <- if (both_alt_agree && morph_is_taxon) morph_sp else if (morph_is_taxon && morph_sp != given_sp) morph_sp else if (vis_trusted_i && vis_is_taxon && vis_sp != given_sp) vis_sp else edaph_sp
       status_calls[i] <- "Misidentification_Severe"; rec_taxa[i] <- target_sp
       triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"; triage_acts[i] <- "Reassign_Determination"
-      rationales[i] <- sprintf("Stage 1 Reassign: %s contradicted across modalities (consensus_conflict=%.2f); reassign to %s", given_sp, df$probabilistic_consensus_conflict[i], target_sp)
+      rationales[i] <- sprintf("Stage 1 Reassign: %s contradicted across modalities (consensus_conflict=%.2f); reassign to %s", given_sp, p_conf_dv[i], target_sp)
       treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Misidentification_Reassign"
     } else if (is_hybrid_swarm) {
       # 4. Dynamic hybrid parent resolution (first non-given_sp among vis_sp, morph_sp, edaph_sp, cda_second_taxon,
@@ -1523,11 +1560,14 @@ build_triage_queue <- function(opts) {
   vouchers <- if ("coordinateUncertainty" %in% names(vouchers)) vouchers[order(vouchers$prio_rank, -vouchers$coordinateUncertainty), ] else vouchers[order(vouchers$prio_rank), ]
   vouchers$prio_rank <- NULL
 
+  .write_triage_fast <- function(d, p, na_str = "NA") {
+    if (requireNamespace("data.table", quietly = TRUE)) data.table::fwrite(d, file = p, na = na_str, quote = "auto", logical01 = FALSE) else readr::write_csv(d, p, na = na_str)
+  }
   dir.create(dirname(opts$output_queue), recursive = TRUE, showWarnings = FALSE)
-  tmp_queue <- paste0(opts$output_queue, ".tmp"); readr::write_csv(vouchers, tmp_queue); file.rename(tmp_queue, opts$output_queue)
+  tmp_queue <- paste0(opts$output_queue, ".tmp"); .write_triage_fast(vouchers, tmp_queue, na_str = "NA"); file.rename(tmp_queue, opts$output_queue)
   if (!is.null(opts$output_triage) && nzchar(opts$output_triage) && opts$output_triage != opts$output_queue) {
     dir.create(dirname(opts$output_triage), recursive = TRUE, showWarnings = FALSE)
-    tmp_tr <- paste0(opts$output_triage, ".tmp"); readr::write_csv(vouchers, tmp_tr); file.rename(tmp_tr, opts$output_triage)
+    tmp_tr <- paste0(opts$output_triage, ".tmp"); .write_triage_fast(vouchers, tmp_tr, na_str = "NA"); file.rename(tmp_tr, opts$output_triage)
   }
   if (!isTRUE(opts$demo) && exists("persist_step07_to_sqlite", mode = "function")) {
     tryCatch(persist_step07_to_sqlite(vouchers, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo)), error = function(e) warning("SQLite Step 07 persistence note: ", e$message))
@@ -1740,15 +1780,17 @@ main <- function() {
   triage_df <- build_triage_queue(opts)
   render_synthesis_figure_pdf(triage_df, opts$output_plot, cda_summary = opts$cda_summary, focal_taxon = opts$focal_taxon)
   tryCatch({
-    if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+    if (!exists("generate_step07_pub_figures", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
       source("scripts/morphometrics/pub_figures_utils.R")
-      generate_step07_pub_figures(triage_df, opts$output_plot)
     }
+    if (exists("generate_step07_pub_figures", mode = "function")) generate_step07_pub_figures(triage_df, opts$output_plot)
     env_run <- Sys.getenv("PACKERA_RUN_DIR", unset = "")
     rep_triage <- if (!is.null(opts$output_triage) && nzchar(opts$output_triage)) opts$output_triage else if (nzchar(env_run)) file.path(env_run, "outputs", "reports", "final_curation_triage.csv") else ""
     if (nzchar(rep_triage) && rep_triage != opts$output_queue) {
       dir.create(dirname(rep_triage), recursive = TRUE, showWarnings = FALSE)
-      tmp_rt <- paste0(rep_triage, ".tmp"); utils::write.csv(triage_df, file = tmp_rt, row.names = FALSE); file.rename(tmp_rt, rep_triage)
+      tmp_rt <- paste0(rep_triage, ".tmp")
+      if (requireNamespace("data.table", quietly = TRUE)) data.table::fwrite(triage_df, file = tmp_rt, na = "NA", quote = "auto", logical01 = FALSE) else utils::write.csv(triage_df, file = tmp_rt, row.names = FALSE)
+      file.rename(tmp_rt, rep_triage)
     }
   }, error = function(e) warning("Step 07 publication figures/triage export warning: ", e$message))
   generate_taxonomic_revision_report(triage_df, opts)

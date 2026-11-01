@@ -109,23 +109,32 @@ compute_spatial_balance_weights <- function(df, bandwidth_km = 25.0) {
     if (length(st_valid) > 0L) {
       st_tab <- table(st_valid)
       med_s <- max(as.numeric(stats::median(as.numeric(st_tab))), 1.0)
-      f_state <- vapply(states[geo_idx], function(s) {
-        if (nzchar(s) && s %in% names(st_tab)) max(as.numeric(st_tab[[s]]) / med_s, 1e-6) else 1.0
-      }, numeric(1))
+      st_geo <- states[geo_idx]
+      st_lookup <- pmax(as.numeric(st_tab) / med_s, 1e-6)
+      names(st_lookup) <- names(st_tab)
+      f_state <- unname(st_lookup[st_geo])
+      f_state[is.na(f_state) | !nzchar(st_geo)] <- 1.0
     } else {
       f_state <- rep(1.0, length(geo_idx))
     }
 
-    n_geo <- length(geo_idx)
-    rlat <- lats[geo_idx] * (pi / 180.0)
-    rlon <- lons[geo_idx] * (pi / 180.0)
-    dlat <- outer(rlat, rlat, "-")
-    dlon <- outer(rlon, rlon, "-")
-    a_mat <- sin(dlat / 2.0)^2 + (cos(rlat) %o% cos(rlat)) * (sin(dlon / 2.0)^2)
+    rlat <- (lats[geo_idx] * (pi / 180.0)) + 0.0
+    rlon <- (lons[geo_idx] * (pi / 180.0)) + 0.0
+    coord_key <- paste(rlat, rlon, sep = "_")
+    u_keys <- unique(coord_key)
+    inv_idx <- match(coord_key, u_keys)
+    first_idx <- match(u_keys, coord_key)
+    counts_u <- as.numeric(tabulate(inv_idx, nbins = length(u_keys)))
+    u_rlat <- rlat[first_idx]
+    u_rlon <- rlon[first_idx]
+    n_u <- length(u_keys)
+    dlat <- outer(u_rlat, u_rlat, "-")
+    dlon <- outer(u_rlon, u_rlon, "-")
+    a_mat <- sin(dlat / 2.0)^2 + (cos(u_rlat) %o% cos(u_rlat)) * (sin(dlon / 2.0)^2)
     dist_km <- 2.0 * 6371.0 * asin(pmin(1.0, pmax(0.0, sqrt(pmax(0.0, a_mat)))))
-    kern_mat <- matrix(exp(-(dist_km^2) / (2.0 * (bandwidth_km^2))), nrow = n_geo, ncol = n_geo)
-    diag(kern_mat) <- 0.0
-    d_local <- 1.0 + rowSums(kern_mat)
+    kern_u <- matrix(exp(-(dist_km^2) / (2.0 * (bandwidth_km^2))), nrow = n_u, ncol = n_u)
+    diag(kern_u) <- 1.0
+    d_local <- as.numeric(kern_u %*% counts_u)[inv_idx]
 
     w_raw <- 1.0 / sqrt(pmax(d_local * f_state, 1e-8))
     m_raw <- mean(w_raw, na.rm = TRUE)
@@ -408,7 +417,16 @@ atomic_save_dual_plot <- function(draw_fn, figures_dir, stem, width = 11, height
     file.rename(pdf_tmp, pdf_final)
   }
 
-  grDevices::png(png_tmp, width = width, height = height, units = "in", res = dpi)
+  opened_ragg <- FALSE
+  if (requireNamespace("ragg", quietly = TRUE)) {
+    opened_ragg <- tryCatch({
+      ragg::agg_png(png_tmp, width = width, height = height, units = "in", res = dpi)
+      TRUE
+    }, error = function(e) FALSE)
+  }
+  if (!opened_ragg) {
+    grDevices::png(png_tmp, width = width, height = height, units = "in", res = dpi)
+  }
   tryCatch({
     draw_fn()
   }, finally = {
@@ -1049,10 +1067,18 @@ export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path
     dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
   }
 
+  .write_pub_csv <- function(d_obj, tmp_p) {
+    if (requireNamespace("data.table", quietly = TRUE)) {
+      data.table::fwrite(d_obj, file = tmp_p, na = "", quote = "auto", logical01 = FALSE)
+    } else {
+      utils::write.csv(d_obj, file = tmp_p, row.names = FALSE)
+    }
+  }
+
   # 1. fourier_pcs.csv
   fourier_pcs_path <- file.path(tables_dir, "fourier_pcs.csv")
   fourier_tmp <- paste0(fourier_pcs_path, ".tmp")
-  utils::write.csv(specimen_df, file = fourier_tmp, row.names = FALSE)
+  .write_pub_csv(specimen_df, fourier_tmp)
   file.rename(fourier_tmp, fourier_pcs_path)
 
   # 2. symmetric_fourier_pcs.csv
@@ -1069,7 +1095,7 @@ export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path
   sym_df <- if (length(sym_cols) > 0) specimen_df[, sym_cols, drop = FALSE] else specimen_df
   sym_pcs_path <- file.path(tables_dir, "symmetric_fourier_pcs.csv")
   sym_tmp <- paste0(sym_pcs_path, ".tmp")
-  utils::write.csv(sym_df, file = sym_tmp, row.names = FALSE)
+  .write_pub_csv(sym_df, sym_tmp)
   file.rename(sym_tmp, sym_pcs_path)
 
   invisible(list(fourier_pcs = fourier_pcs_path, symmetric_fourier_pcs = sym_pcs_path))
@@ -1158,22 +1184,26 @@ generate_step03_pub_figures <- function(
     std_hmat <- extract_standardized_harmonic_matrix(efa_df, max_k = NULL)
   }
 
+  # Precompute linear projection from (Sym_PC1, Sym_PC2) to standardized harmonics once
+  grid_B_hat <- NULL
+  grid_h_bar <- NULL
+  if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && nrow(df) >= 5) {
+    s1 <- df$Sym_PC1; s2 <- df$Sym_PC2
+    if (stats::sd(s1, na.rm = TRUE) > 1e-6 && stats::sd(s2, na.rm = TRUE) > 1e-6) {
+      grid_B_hat <- tryCatch(qr.solve(cbind(1, s1, s2), std_hmat), error = function(e) NULL)
+    }
+    grid_h_bar <- colMeans(std_hmat, na.rm = TRUE)
+  }
+
   # Helper to synthesize harmonic vector at any (pc1_val, pc2_val) coordinate
   project_grid_harmonics <- function(pc1_val, pc2_val) {
-    if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && nrow(df) >= 5) {
-      # Fit linear projection from (Sym_PC1, Sym_PC2) to standardized harmonics
-      s1 <- df$Sym_PC1; s2 <- df$Sym_PC2
-      if (stats::sd(s1, na.rm = TRUE) > 1e-6 && stats::sd(s2, na.rm = TRUE) > 1e-6) {
-        X_des <- cbind(1, s1, s2)
-        B_hat <- tryCatch(qr.solve(X_des, std_hmat), error = function(e) NULL)
-        if (!is.null(B_hat)) {
-          h_pred <- as.numeric(c(1, pc1_val, pc2_val) %*% B_hat)
-          names(h_pred) <- colnames(std_hmat)
-          return(h_pred)
-        }
-      }
-      h_bar <- colMeans(std_hmat, na.rm = TRUE)
-      return(h_bar)
+    if (!is.null(grid_B_hat)) {
+      h_pred <- as.numeric(c(1, pc1_val, pc2_val) %*% grid_B_hat)
+      names(h_pred) <- colnames(std_hmat)
+      return(h_pred)
+    }
+    if (!is.null(grid_h_bar)) {
+      return(grid_h_bar)
     }
     # Parametric botanical fallback if harmonic columns absent in minimal test table
     c(

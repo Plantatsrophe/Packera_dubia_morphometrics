@@ -18,6 +18,9 @@ for (.dl_p in c("scripts/morphometrics/dissected_leaf_utils.R", file.path(dirnam
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
   if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
+for (.fp_p in c("scripts/morphometrics/fourier_parallel_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "fourier_parallel_utils.R"))) {
+  if (!is.na(.fp_p) && nzchar(.fp_p) && file.exists(.fp_p)) { source(.fp_p); break }
+}
 
 # 1. CLI Argument Parsing
 parse_args_robust <- function() {
@@ -218,7 +221,7 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
 
   ucs <- if ("ucs" %in% names(out_df)) ifelse(is.na(out_df$ucs), 1.0, as.numeric(out_df$ucs)) else if ("ucs_score" %in% names(out_df)) ifelse(is.na(out_df$ucs_score), 1.0, as.numeric(out_df$ucs_score)) else rep(1.0, nrow(out_df))
   leaf_quality_weight <- pmax(0.05, ucs * ((1.0 - pmin(pct_asymmetry, 0.95))^2) * ifelse(is_contour_outlier, 0.10, 1.0))
-  spatial_wt <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(out_df) else rep(1.0, nrow(out_df))
+  spatial_wt <- if ("spatial_balance_weight" %in% names(out_df) && any(is.finite(out_df$spatial_balance_weight))) as.numeric(out_df$spatial_balance_weight) else if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(out_df) else rep(1.0, nrow(out_df))
   active_ref_mask <- if (sum(fit_pca_mask, na.rm = TRUE) >= 2L) prune_within_taxon_mahalanobis(sym_mat, out_df, fit_pca_mask, q = 0.95) else fit_pca_mask
   out_df$is_promoted_bronze <- if (!is.null(attr(active_ref_mask, "is_promoted_bronze"))) attr(active_ref_mask, "is_promoted_bronze") else rep(FALSE, nrow(out_df))
   tier_wt <- compute_authority_precision_weights(out_df)
@@ -423,9 +426,9 @@ run_fourier_extraction <- function(opts) {
     list(shape_name = shape_name, coo = coo, rec = rec)
   }
 
-  if (.Platform$OS.type == "unix" && length(contour_files) >= 100 && requireNamespace("parallel", quietly = TRUE)) {
-    n_cores <- min(16L, max(1L, parallel::detectCores(logical = TRUE) - 1L))
-    ingested_list <- parallel::mclapply(contour_files, ingest_single_contour, mc.cores = n_cores)
+  if (.Platform$OS.type == "unix" && length(contour_files) >= 100 && exists("packera_mclapply", mode = "function")) {
+    n_cores <- resolve_packera_workers(32L, length(contour_files))
+    ingested_list <- packera_mclapply(contour_files, ingest_single_contour, mc.cores = n_cores)
   } else {
     ingested_list <- lapply(contour_files, ingest_single_contour)
   }
@@ -449,24 +452,35 @@ run_fourier_extraction <- function(opts) {
   message(sprintf("Assembled %d valid Tier 1 intact closed contours for Elliptic Fourier Analysis.", length(coo_list)))
 
   # 3. Dynamic Harmonic Power Calibration (H_opt in [6, 24], >=99% power) & Homologized EFA
-  efa_success <- FALSE; harm_mat <- NULL; out_obj <- NULL; h_opt <- max(6L, min(24L, as.integer(opts$harmonics)))
+  efa_success <- FALSE; harm_mat <- NULL; out_obj <- NULL; ef_res <- NULL; h_opt <- max(6L, min(24L, as.integer(opts$harmonics)))
   if (requireNamespace("Momocs", quietly = TRUE)) {
-    out_obj <- tryCatch(Momocs::Out(coo_list, fac = fac_df), error = function(e) { message("Momocs::Out() note: ", e$message); NULL })
-    if (!is.null(out_obj)) {
-      cs_vals <- tryCatch(Momocs::coo_centsize(out_obj), error = function(e) NULL)
-      if (!is.null(cs_vals) && length(cs_vals) == nrow(fac_df)) {
-        fac_df$centroid_size <- round(as.numeric(cs_vals), 4)
-        fac_df$log_centsize <- ifelse(!is.na(fac_df$centroid_size) & fac_df$centroid_size > 0, round(log(fac_df$centroid_size), 6), NA_real_)
+    if (length(coo_list) >= 240L && exists("run_parallel_momocs_efa", mode = "function") &&
+        exists("resolve_packera_workers", mode = "function") && resolve_packera_workers(32L) > 1L) {
+      p_efa <- tryCatch(run_parallel_momocs_efa(coo_list, fac_df, opts$harmonics, verify_harmonic_power_calibration), error = function(e) NULL)
+      if (!is.null(p_efa) && !is.null(p_efa$harm_mat)) {
+        out_obj <- p_efa$out_obj; fac_df <- p_efa$fac_df; h_opt <- p_efa$h_opt; ef_res <- p_efa$ef_res; harm_mat <- p_efa$harm_mat; efa_success <- TRUE
+        harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(h_opt), function(x, y) paste0(x, y)))
+        message("Multi-threaded Momocs EFA extraction successful across ", nrow(harm_mat), " outlines (H_opt = ", h_opt, ").")
       }
-      out_obj <- Momocs::coo_center(out_obj) %>% Momocs::coo_scale()
-      h_opt <- verify_harmonic_power_calibration(out_obj, nb_h = opts$harmonics)
-      harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(h_opt), function(x, y) paste0(x, y)))
-      message("Executing ", h_opt, "-harmonic EFA via Momocs::efourier(nb.h = ", h_opt, ", norm = FALSE, start = FALSE)...")
-      # Baseline homologous signature: Momocs::efourier(out_obj, nb.h = opts$harmonics, norm = FALSE, start = FALSE)
-      ef_res <- tryCatch(Momocs::efourier(out_obj, nb.h = h_opt, norm = FALSE, start = FALSE), error = function(e) { message("Momocs::efourier() note: ", e$message); NULL })
-      if (!is.null(ef_res) && !is.null(ef_res$coe)) {
-        harm_mat <- as.matrix(ef_res$coe); efa_success <- TRUE
-        message("Momocs EFA extraction successful across ", nrow(harm_mat), " outlines (H_opt = ", h_opt, ").")
+    }
+    if (!efa_success) {
+      out_obj <- tryCatch(Momocs::Out(coo_list, fac = fac_df), error = function(e) { message("Momocs::Out() note: ", e$message); NULL })
+      if (!is.null(out_obj)) {
+        cs_vals <- tryCatch(Momocs::coo_centsize(out_obj), error = function(e) NULL)
+        if (!is.null(cs_vals) && length(cs_vals) == nrow(fac_df)) {
+          fac_df$centroid_size <- round(as.numeric(cs_vals), 4)
+          fac_df$log_centsize <- ifelse(!is.na(fac_df$centroid_size) & fac_df$centroid_size > 0, round(log(fac_df$centroid_size), 6), NA_real_)
+        }
+        out_obj <- Momocs::coo_center(out_obj) %>% Momocs::coo_scale()
+        h_opt <- verify_harmonic_power_calibration(out_obj, nb_h = opts$harmonics)
+        harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(h_opt), function(x, y) paste0(x, y)))
+        message("Executing ", h_opt, "-harmonic EFA via Momocs::efourier(nb.h = ", h_opt, ", norm = FALSE, start = FALSE)...")
+        # Baseline homologous signature: Momocs::efourier(out_obj, nb.h = opts$harmonics, norm = FALSE, start = FALSE)
+        ef_res <- tryCatch(Momocs::efourier(out_obj, nb.h = h_opt, norm = FALSE, start = FALSE), error = function(e) { message("Momocs::efourier() note: ", e$message); NULL })
+        if (!is.null(ef_res) && !is.null(ef_res$coe)) {
+          harm_mat <- as.matrix(ef_res$coe); efa_success <- TRUE
+          message("Momocs EFA extraction successful across ", nrow(harm_mat), " outlines (H_opt = ", h_opt, ").")
+        }
       }
     }
   }
@@ -474,7 +488,7 @@ run_fourier_extraction <- function(opts) {
     h_opt <- verify_harmonic_power_calibration(out_obj, nb_h = opts$harmonics)
     harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(h_opt), function(x, y) paste0(x, y)))
     message("Running mathematical homologized EFA engine (nb_h = ", h_opt, ", norm = FALSE, start = FALSE)...")
-    harm_list <- lapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = h_opt, norm = FALSE, start = FALSE))
+    harm_list <- if (length(coo_list) >= 240L && exists("packera_mclapply", mode = "function")) packera_mclapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = h_opt, norm = FALSE, start = FALSE), mc.cores = resolve_packera_workers(32L, length(coo_list))) else lapply(coo_list, function(c) compute_efourier_coords_pure(c, nb_h = h_opt, norm = FALSE, start = FALSE))
     harm_mat <- do.call(rbind, harm_list); colnames(harm_mat) <- harmonic_names
   }
   if (all(harmonic_names %in% colnames(harm_mat))) harm_mat <- harm_mat[, harmonic_names, drop = FALSE] else if (ncol(harm_mat) == length(harmonic_names)) colnames(harm_mat) <- harmonic_names
@@ -586,8 +600,7 @@ run_fourier_extraction <- function(opts) {
 
   # 5a. Export Disaggregated Individual Leaf Harmonics Archive (Atomic write-then-replace)
   if (!is.null(opts$output_individual) && nzchar(opts$output_individual)) {
-    dir.create(dirname(opts$output_individual), recursive = TRUE, showWarnings = FALSE)
-    tmp_ind <- paste0(opts$output_individual, ".tmp"); write.csv(efa_df, file = tmp_ind, row.names = FALSE, na = ""); file.rename(tmp_ind, opts$output_individual)
+    write_step03_csv_fast(efa_df, opts$output_individual)
     message("Individual leaf EFA harmonics archive exported: ", opts$output_individual, " (Rows: ", nrow(efa_df), ")")
   }
 
@@ -596,47 +609,14 @@ run_fourier_extraction <- function(opts) {
   valid_closed_mask <- grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE) & (efa_df$assigned_tier == "Tier_1_Direct") & complete.cases(efa_df[, sym_names])
   closed_leaf_df <- efa_df[valid_closed_mask, , drop = FALSE]
   all_harm_cols <- intersect(c(harmonic_names, grep("Chebyshev", names(efa_df), value = TRUE)), names(efa_df))
-  spec_groups <- split(closed_leaf_df, list(closed_leaf_df$catalogNumber, closed_leaf_df$plant_individual_id), drop = TRUE)
-  specimen_records <- vector("list", length(spec_groups)); spec_idx <- 0L
-
-  for (grp in spec_groups) {
-    if (nrow(grp) == 0) next
-    if ("is_contour_outlier" %in% names(grp) && any(!grp$is_contour_outlier, na.rm = TRUE)) grp <- grp[!grp$is_contour_outlier, , drop = FALSE]
-    grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]
-    if (nrow(grp) == 0) next
-    spec_idx <- spec_idx + 1L
-    n_tier1_leaves <- nrow(grp); n_tier2_leaves <- 0L; morph_tier_source <- if (n_tier1_leaves >= 1L) "Tier_1_Pure" else "Tier_2_Fallback"
-    cat_num <- grp$catalogNumber[1]; p_id <- grp$plant_individual_id[1]; n_leaves <- nrow(grp)
-    harm_medians <- vapply(grp[, all_harm_cols, drop = FALSE], stats::median, numeric(1), na.rm = TRUE)
-    foliar_var <- if (n_leaves > 1) round(mean(apply(as.matrix(grp[, sym_names, drop = FALSE]), 2, stats::var, na.rm = TRUE), na.rm = TRUE), 8) else 0.0
-    het_disp <- if (n_leaves > 1) round(mean(sqrt(rowSums(sweep(as.matrix(grp[, sym_names, drop = FALSE]), 2, harm_medians[sym_names], "-")^2, na.rm = TRUE)), na.rm = TRUE), 6) else 0.0
-    det_t <- if ("determiner_tier" %in% names(grp) && !is.na(grp$determiner_tier[1])) as.character(grp$determiner_tier[1]) else "Tier_3_Bronze"
-    auth_w <- compute_authority_precision_weights(grp[1, , drop = FALSE])[1]
-    rec <- data.frame(catalogNumber = cat_num, plant_individual_id = p_id, leaf_count = n_leaves,
-                      n_tier1_leaves = n_tier1_leaves, n_tier2_leaves = n_tier2_leaves, morph_tier_source = morph_tier_source,
-                      foliar_variance = foliar_var, heteroblasty_index = het_disp, assigned_tier = "Tier_1_Direct", tier_assignment = "Tier_1_Direct",
-                      reconstruction_tier = "Tier 1", scientificName = grp$scientificName[1],
-                      species_raw = grp$species_raw[1], determiner_tier = det_t, authority_weight = auth_w, stringsAsFactors = FALSE)
-    med_cs <- stats::median(grp$centroid_size, na.rm = TRUE)
-    rec$centroid_size <- if (is.finite(med_cs) && med_cs > 0) round(med_cs, 4) else NA_real_
-    rec$log_centsize <- if (!is.na(rec$centroid_size) && rec$centroid_size > 0) round(log(rec$centroid_size), 6) else NA_real_
-    other_meta <- intersect(c("pixels_per_mm", "is_calibrated_mm", "taxon", "institutionCode", "determiner_raw", "authority_tier", "type_status",
-                              "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "coordinateUncertainty",
-                              "year", "month", "day", "eventDate", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"), names(grp))
-    for (m_col in other_meta) { vals <- stats::na.omit(grp[[m_col]]); rec[[m_col]] <- if (length(vals) > 0) vals[1] else NA }
-    dm <- summarize_otu_dissection_metrics(grp)
-    for (d_col in names(dm)) rec[[d_col]] <- dm[[d_col]]
-    for (p_col in intersect(c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"), names(grp))) {
-      pv <- suppressWarnings(as.numeric(grp[[p_col]])); pv <- pv[is.finite(pv)]; rec[[p_col]] <- if (length(pv) > 0L) round(stats::quantile(pv, probs = 0.75, na.rm = TRUE, names = FALSE), 4) else NA_real_
-    }
-    if ("is_dissected" %in% names(grp)) rec$is_dissected <- if (any(!is.na(grp$is_dissected))) any(as.logical(grp$is_dissected), na.rm = TRUE) else NA
-    if ("is_contour_outlier" %in% names(grp)) rec$is_contour_outlier <- all(as.logical(grp$is_contour_outlier), na.rm = TRUE)
-    for (h_name in names(harm_medians)) rec[[h_name]] <- harm_medians[[h_name]]
-    specimen_records[[spec_idx]] <- rec
+  specimen_df <- if (exists("aggregate_step03_otu_medians_fast", mode = "function")) {
+    aggregate_step03_otu_medians_fast(closed_leaf_df, all_harm_cols, sym_names)
+  } else {
+    do.call(rbind, lapply(split(closed_leaf_df, paste(closed_leaf_df$catalogNumber, closed_leaf_df$plant_individual_id, sep = "__")), function(grp) {
+      grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]; out <- grp[1, , drop = FALSE]
+      out$morph_tier_source <- ifelse(nrow(grp) >= 1L, "Tier_1_Pure", "Tier_2_Fallback"); out
+    }))
   }
-
-  specimen_records <- specimen_records[seq_len(spec_idx)]
-  specimen_df <- do.call(rbind, specimen_records)
   specimen_df$efd_harmonic_opt <- as.integer(h_opt); specimen_df$efd_k95_pcs <- as.integer(k_95)
   for (p in seq_len(k_export)) { specimen_df[[paste0("PC", p)]] <- NA_real_; specimen_df[[paste0("Sym_PC", p)]] <- 0.0 }
   # Fit OTU-level ordination on Empirical Bayes active reference anchors (with Adaptive Anchor Promotion for 0-Gold/Silver taxa)
@@ -681,14 +661,15 @@ run_fourier_extraction <- function(opts) {
   lead_spec_cols <- intersect(lead_spec_cols, names(specimen_df))
   specimen_df <- specimen_df[, c(lead_spec_cols, setdiff(names(specimen_df), lead_spec_cols))]
 
-  dir.create(dirname(opts$output), recursive = TRUE, showWarnings = FALSE)
-  tmp_out <- paste0(opts$output, ".tmp"); write.csv(specimen_df, file = tmp_out, row.names = FALSE, na = ""); file.rename(tmp_out, opts$output)
+  write_step03_csv_fast(specimen_df, opts$output)
   message("Specimen-aggregated EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(specimen_df), ")")
   if (exists("persist_step03_to_sqlite", mode = "function")) tryCatch(persist_step03_to_sqlite(efa_df, specimen_df, opts$vouchers), error = function(e) warning("SQLite Step 03 persistence note: ", e$message))
 
   tryCatch({
-    if (file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+    if (!exists("generate_step03_pub_figures", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
       source("scripts/morphometrics/pub_figures_utils.R")
+    }
+    if (exists("generate_step03_pub_figures", mode = "function")) {
       export_step03_fourier_pc_tables(specimen_df, efa_df, opts$output)
       generate_step03_pub_figures(efa_df, specimen_df, harm_mat, if (exists("pca_fit")) pca_fit else NULL, opts$figures_dir, opts$output, sym_res$pca)
     }
@@ -707,9 +688,13 @@ run_fourier_extraction <- function(opts) {
 
     if (length(act_terms) >= 1L && requireNamespace("RRPP", quietly = TRUE)) {
       rrpp_res <- tryCatch({
-        rdf <- RRPP::rrpp.data.frame(tier_sym = as.matrix(tier_sym), scientificName = tier_manifest$scientificName,
-                                     determiner_tier = tier_manifest$determiner_tier, reconstruction_tier = tier_manifest$reconstruction_tier)
-        fit_rrpp <- RRPP::lm.rrpp(stats::as.formula(paste("tier_sym ~", paste(act_terms, collapse = " + "))), data = rdf, iter = opts$permutations, print.progress = FALSE)
+        rr_idx <- if (nrow(tier_manifest) > 2500L) sort(sample(seq_len(nrow(tier_manifest)), 2500L)) else seq_len(nrow(tier_manifest))
+        rr_par <- if (exists("resolve_packera_workers", mode = "function") && length(rr_idx) >= 300L && opts$permutations >= 99L) resolve_packera_workers(16L) else FALSE
+        rdf <- RRPP::rrpp.data.frame(tier_sym = as.matrix(tier_sym[rr_idx, , drop = FALSE]), scientificName = droplevels(tier_manifest$scientificName[rr_idx]),
+                                     determiner_tier = droplevels(tier_manifest$determiner_tier[rr_idx]), reconstruction_tier = droplevels(tier_manifest$reconstruction_tier[rr_idx]))
+        rr_terms <- act_terms[vapply(act_terms, function(tn) nlevels(rdf[[tn]]) >= 2L, logical(1))]
+        if (length(rr_terms) == 0L) stop("Single-level subsample")
+        fit_rrpp <- RRPP::lm.rrpp(stats::as.formula(paste("tier_sym ~", paste(rr_terms, collapse = " + "))), data = rdf, iter = opts$permutations, turbo = TRUE, Parallel = rr_par, print.progress = FALSE)
         anova(fit_rrpp)$table
       }, error = function(e) { warning("RRPP::lm.rrpp issue: ", e$message, ". Falling back to vegan::adonis2()."); NULL })
       if (!is.null(rrpp_res)) {

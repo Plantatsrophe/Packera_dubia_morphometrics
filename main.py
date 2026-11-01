@@ -94,6 +94,9 @@ def _db_has_extracted_contours(contours_dir: Path) -> bool:
         return False
 
 
+_COHORT_SYNC_CACHE: Dict[str, Tuple[str, int, int, int, int]] = {}
+
+
 def _sync_run_cohort_in_db(
     run_dir: Path,
     args: Optional[argparse.Namespace] = None,
@@ -122,15 +125,26 @@ def _sync_run_cohort_in_db(
                 intraspecific_mode=intraspecific_mode,
             )
             vouchers_csv = run_dir / "data" / "tables" / "curated_vouchers.csv"
-            if vouchers_csv.is_file() and vouchers_csv.stat().st_size > 0:
-                v_rows = _read_csv_dicts(vouchers_csv)
-                if v_rows:
-                    populate_run_active_cohort(
-                        conn,
-                        run_id=run_dir.name,
-                        voucher_rows=v_rows,
-                        clear_existing=True,
-                    )
+            if vouchers_csv.is_file():
+                vst = vouchers_csv.stat()
+                if vst.st_size > 0:
+                    pi_row = conn.execute("SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM plant_individuals;").fetchone() or (0, 0)
+                    has_cohort = conn.execute(
+                        "SELECT 1 FROM run_active_cohort WHERE run_id = ? LIMIT 1;",
+                        (run_dir.name,),
+                    ).fetchone() is not None
+                    fp = (str(vouchers_csv.resolve()), int(vst.st_mtime_ns), int(vst.st_size), int(pi_row[0] or 0), int(pi_row[1] or 0))
+                    if has_cohort and _COHORT_SYNC_CACHE.get(run_dir.name) == fp:
+                        return
+                    v_rows = _read_csv_dicts(vouchers_csv)
+                    if v_rows:
+                        populate_run_active_cohort(
+                            conn,
+                            run_id=run_dir.name,
+                            voucher_rows=v_rows,
+                            clear_existing=True,
+                        )
+                        _COHORT_SYNC_CACHE[run_dir.name] = fp
         finally:
             conn.close()
     except Exception as exc:

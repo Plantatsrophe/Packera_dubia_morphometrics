@@ -343,6 +343,25 @@ def is_canonical_or_explicit_db_context(
         return False
 
 
+def _apply_sqlite_pragmas(conn: sqlite3.Connection, read_only: bool = False) -> None:
+    """Apply high-throughput workstation SQLite PRAGMAs (256 MiB page cache, 2 GiB mmap, RAM temp store)."""
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA cache_size = -262144;")
+    conn.execute("PRAGMA temp_store = MEMORY;")
+    try:
+        conn.execute("PRAGMA mmap_size = 2147483648;")
+    except sqlite3.Error:
+        pass
+    if not read_only:
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        try:
+            conn.execute("PRAGMA wal_autocheckpoint = 4000;")
+        except sqlite3.Error:
+            pass
+
+
 def get_db_connection(
     db_path: Optional[Union[str, Path]] = None,
     read_only: bool = False,
@@ -352,7 +371,7 @@ def get_db_connection(
 ) -> sqlite3.Connection:
     """
     Open a SQLite connection configured with WAL mode, NORMAL synchronous durability,
-    strict foreign-key enforcement, and a 30-second busy timeout.
+    strict foreign-key enforcement, 256 MiB page cache, 2 GiB mmap, and a 30-second busy timeout.
     """
     resolved = resolve_db_path(db_path=db_path, workspace_root=workspace_root, demo=demo)
 
@@ -362,8 +381,7 @@ def get_db_connection(
             raise FileNotFoundError(f"SQLite database not found for read-only connection: {p}")
         conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True, timeout=30.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 30000;")
-        conn.execute("PRAGMA foreign_keys = ON;")
+        _apply_sqlite_pragmas(conn, read_only=True)
         return conn
 
     if resolved != ":memory:":
@@ -373,10 +391,7 @@ def get_db_connection(
         conn = sqlite3.connect(":memory:", timeout=30.0)
 
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA busy_timeout = 30000;")
+    _apply_sqlite_pragmas(conn, read_only=False)
 
     if init_schema:
         init_db_schema(conn)
@@ -396,6 +411,11 @@ def get_duckdb_connection(
 
     resolved = resolve_db_path(db_path=db_path, workspace_root=workspace_root, demo=False)
     dconn = duckdb.connect(database=":memory:")
+    n_threads = max(1, min(32, os.cpu_count() or 8))
+    try:
+        dconn.execute(f"PRAGMA threads={n_threads};")
+    except Exception:
+        pass
     try:
         dconn.execute("LOAD sqlite;")
     except Exception:
@@ -835,6 +855,8 @@ def _build_schema_ddl() -> str:
 
     CREATE INDEX IF NOT EXISTS idx_extracted_leaves_tier ON extracted_leaves(assigned_tier);
     CREATE INDEX IF NOT EXISTS idx_extracted_leaves_cat ON extracted_leaves(catalogNumber);
+    CREATE INDEX IF NOT EXISTS idx_extracted_leaves_cat_pid_tier
+        ON extracted_leaves(catalogNumber, plant_individual_id, assigned_tier);
 
     CREATE TABLE IF NOT EXISTS voucher_reproductive_phenology (
         catalogNumber TEXT NOT NULL,
@@ -876,6 +898,9 @@ def _build_schema_ddl() -> str:
         high_brightness_ratio REAL,
         PRIMARY KEY (catalogNumber, plant_individual_id, model_name, sigma)
     );
+
+    CREATE INDEX IF NOT EXISTS idx_dinov2_cache_lookup
+        ON dinov2_feature_cache(model_name, sigma, catalogNumber, plant_individual_id);
 
     CREATE TABLE IF NOT EXISTS environmental_cache (
         {env_ddl}
@@ -1229,18 +1254,24 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-def _migrate_dynamic_schema_columns(conn: sqlite3.Connection) -> None:
+PACKERA_SCHEMA_USER_VERSION: int = 20260405
+
+
+def _migrate_dynamic_schema_columns(
+    conn: sqlite3.Connection,
+    recreate_view: bool = True,
+) -> None:
     """
     Idempotently upgrade existing SQLite databases in-place:
       1. Inspects `PRAGMA table_info(...)` on `leaf_efa_harmonics`, `otu_morphometrics`,
          `spatial_rf_predictions`, and `environmental_cache`.
       2. Issues `ALTER TABLE ... ADD COLUMN ...` for any missing dynamic harmonic (`A1..D24`),
          PCA (`PC1..PC15`, `Sym_PC1..Sym_PC15`), adaptive EFD metadata (`efd_harmonic_opt`,
-         `efd_k95_pcs`, `selected_morph_features`), 19-variable WorldClim (`bio1..bio19`),
-         `climatic_z_score`, or `primary_*_predictors` columns.
+         `efd_k95_pcs`, `selected_morph_features`), dissection scalars, 19-variable WorldClim
+         (`bio1..bio19`), `climatic_z_score`, or `primary_*_predictors` columns.
       3. Backfills bidirectional `bio18_precip_warmest_qtr <-> bio18_precip_warmest_qt` and
          `bio19_precip_coldest_qtr <-> bio19_precip_coldest_qt` values on existing tables.
-      4. Drops and recreates `v_integrative_triage_master` whenever all base tables exist.
+      4. Optionally drops and recreates `v_integrative_triage_master` whenever all base tables exist.
     """
     existing_tables: Set[str] = {
         str(r[0])
@@ -1286,17 +1317,37 @@ def _migrate_dynamic_schema_columns(conn: sqlite3.Connection) -> None:
                 """
             )
 
-    if set(_MASTER_VIEW_REQUIRED_TABLES).issubset(existing_tables):
+    if recreate_view and set(_MASTER_VIEW_REQUIRED_TABLES).issubset(existing_tables):
         conn.executescript(MASTER_VIEW_DDL)
 
 
 def init_db_schema(conn: sqlite3.Connection) -> None:
     """Create or idempotently migrate all Tier A and Tier B tables, indexes, triggers, R*Tree, and master view."""
+    cur_ver_row = conn.execute("PRAGMA user_version;").fetchone()
+    cur_ver = int(cur_ver_row[0]) if (cur_ver_row and cur_ver_row[0] is not None) else 0
+    if cur_ver == PACKERA_SCHEMA_USER_VERSION:
+        existing_objs = {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view');"
+            ).fetchall()
+        }
+        required_objs = set(_MASTER_VIEW_REQUIRED_TABLES) | {
+            "taxon_synonyms",
+            "extracted_leaves",
+            "dinov2_feature_cache",
+            "pipeline_runs",
+            "leaf_efa_harmonics",
+            "v_integrative_triage_master",
+        }
+        if required_objs.issubset(existing_objs):
+            conn.execute("PRAGMA foreign_keys = ON;")
+            return
+
     _migrate_vouchers_schema_columns(conn)
-    _migrate_dynamic_schema_columns(conn)
+    _migrate_dynamic_schema_columns(conn, recreate_view=False)
     conn.executescript(SCHEMA_DDL)
-    _migrate_vouchers_schema_columns(conn)
-    _migrate_dynamic_schema_columns(conn)
+    conn.execute(f"PRAGMA user_version = {PACKERA_SCHEMA_USER_VERSION};")
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.commit()
 
@@ -2165,6 +2216,8 @@ def fetch_cached_dinov2_features(
     sigma_val = round(float(sigma), 4)
 
     chunk_size = 500
+    sigma_lo = sigma_val - 1e-6
+    sigma_hi = sigma_val + 1e-6
     for i in range(0, len(cats), chunk_size):
         chunk = cats[i : i + chunk_size]
         ph = ", ".join("?" for _ in chunk)
@@ -2175,10 +2228,10 @@ def fetch_cached_dinov2_features(
                 foreground_attention_ratio, is_artifact_driven,
                 surface_orientation, mean_luminance, mean_saturation, high_brightness_ratio
             FROM dinov2_feature_cache
-            WHERE model_name = ? AND ABS(sigma - ?) < 1e-6
+            WHERE model_name = ? AND sigma BETWEEN ? AND ?
               AND catalogNumber IN ({ph});
             """,
-            [str(model_name), sigma_val, *chunk],
+            [str(model_name), sigma_lo, sigma_hi, *chunk],
         )
         for row in cur.fetchall():
             key = (str(row["catalogNumber"]).strip(), int(row["plant_individual_id"]))

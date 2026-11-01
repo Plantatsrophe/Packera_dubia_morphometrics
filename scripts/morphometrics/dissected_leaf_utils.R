@@ -54,6 +54,20 @@ compute_dissection_index_from_coo <- function(coo = NULL, area_val = NULL, perim
   round(max(1.0, p / (2.0 * sqrt(pi * a))), 4)
 }
 
+.RIBBON_SEP_MASK_CACHE <- new.env(hash = TRUE, parent = emptyenv())
+
+.get_ribbon_sep_mask <- function(M) {
+  k <- as.character(as.integer(M))
+  if (exists(k, envir = .RIBBON_SEP_MASK_CACHE, inherits = FALSE)) {
+    return(get(k, envir = .RIBBON_SEP_MASK_CACHE, inherits = FALSE))
+  }
+  min_sep <- max(4L, as.integer(floor(0.04 * M)))
+  idx_mat <- outer(seq_len(M), seq_len(M), function(a, b) pmin(abs(a - b), M - abs(a - b)))
+  mask <- idx_mat < min_sep
+  assign(k, mask, envir = .RIBBON_SEP_MASK_CACHE)
+  mask
+}
+
 compute_contour_ribbon_metrics <- function(coo) {
   if (is.null(coo) || !is.matrix(coo) || ncol(coo) < 2L || nrow(coo) < 12L) {
     return(list(width_ratio = 1.0, n_tips = 0L))
@@ -63,9 +77,7 @@ compute_contour_ribbon_metrics <- function(coo) {
   if (any(!is.finite(xy))) return(list(width_ratio = 1.0, n_tips = 0L))
 
   dmat <- as.matrix(stats::dist(xy))
-  idx_mat <- outer(seq_len(M), seq_len(M), function(a, b) pmin(abs(a - b), M - abs(a - b)))
-  min_sep <- max(4L, as.integer(floor(0.04 * M)))
-  dmat[idx_mat < min_sep] <- Inf
+  dmat[.get_ribbon_sep_mask(M)] <- Inf
   d_opp <- apply(dmat, 1L, min)
   d_opp <- d_opp[is.finite(d_opp)]
   width_ratio <- if (length(d_opp) >= 6L) {
@@ -128,17 +140,30 @@ filter_basal_lamina_contours <- function(
   di_vec <- if ("dissection_index" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$dissection_index)) else rep(NA_real_, n)
   sol_vec <- if ("solidity" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$solidity)) else rep(NA_real_, n)
   circ_vec <- if ("circularity" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$circularity)) else rep(NA_real_, n)
-  is_ribbon <- logical(n)
 
-  for (i in seq_len(n)) {
-    coo_i <- coo_list[[i]]
-    if (!is.finite(di_vec[i]) || !is.finite(sol_vec[i]) || !is.finite(circ_vec[i])) {
-      gp <- compute_polygon_area_perim_pure(coo_i)
+  miss_geom <- which(!is.finite(di_vec) | !is.finite(sol_vec) | !is.finite(circ_vec))
+  if (length(miss_geom) > 0L) {
+    for (i in miss_geom) {
+      gp <- compute_polygon_area_perim_pure(coo_list[[i]])
       if (!is.finite(sol_vec[i])) sol_vec[i] <- round(gp$solidity, 4)
       if (!is.finite(circ_vec[i])) circ_vec[i] <- round(gp$circularity, 4)
       if (!is.finite(di_vec[i])) di_vec[i] <- compute_dissection_index_from_coo(area_val = gp$area, perim_val = gp$perim)
     }
-    is_ribbon[i] <- is_non_lamina_petiole_ribbon(coo_i, solidity = sol_vec[i], circularity = circ_vec[i])
+  }
+
+  is_ribbon <- logical(n)
+  cand_rib <- which(is.finite(sol_vec) & is.finite(circ_vec) & (sol_vec < 0.65) & (circ_vec < 0.085))
+  if (length(cand_rib) > 0L) {
+    eval_rib <- function(idx) {
+      rm <- compute_contour_ribbon_metrics(coo_list[[idx]])
+      (rm$n_tips <= 3L) && (rm$width_ratio < 2.20)
+    }
+    if (length(cand_rib) >= 96L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) {
+      n_w <- resolve_packera_workers(32L, length(cand_rib))
+      is_ribbon[cand_rib] <- as.logical(unlist(packera_mclapply(cand_rib, eval_rib, mc.cores = n_w), use.names = FALSE))
+    } else {
+      is_ribbon[cand_rib] <- vapply(cand_rib, eval_rib, logical(1))
+    }
   }
   fac_df$solidity <- sol_vec
   fac_df$circularity <- circ_vec

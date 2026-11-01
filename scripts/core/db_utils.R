@@ -16,6 +16,90 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
+PACKERA_SCHEMA_USER_VERSION <- 20260405L
+
+resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
+  if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
+    return(1L)
+  }
+  env_w <- suppressWarnings(as.integer(Sys.getenv("PACKERA_MAX_WORKERS", unset = "")))
+  if (is.na(env_w) || env_w < 1L) {
+    det_phys <- tryCatch(parallel::detectCores(logical = FALSE), error = function(e) NA_integer_)
+    det_log <- tryCatch(parallel::detectCores(logical = TRUE), error = function(e) 1L)
+    base_cores <- if (!is.na(det_phys) && det_phys >= 1L) {
+      as.integer(det_phys)
+    } else if (!is.na(det_log) && det_log >= 1L) {
+      as.integer(det_log)
+    } else {
+      1L
+    }
+    env_w <- min(as.integer(max_workers), base_cores)
+  } else {
+    env_w <- min(as.integer(max_workers), env_w)
+  }
+  if (!is.null(n_tasks) && length(n_tasks) == 1L && is.finite(n_tasks)) {
+    env_w <- min(env_w, max(1L, as.integer(n_tasks)))
+  }
+  max(1L, as.integer(env_w))
+}
+
+packera_mclapply <- function(X, FUN, mc.cores = 1L, mc.preschedule = TRUE) {
+  n_x <- length(X)
+  eff_cores <- max(1L, min(as.integer(mc.cores), max(1L, n_x)))
+  if (eff_cores <= 1L || n_x <= 1L || !identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
+    return(lapply(X, FUN))
+  }
+  blas_vars <- c("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
+  prev_vals <- Sys.getenv(blas_vars, unset = NA_character_)
+  on.exit({
+    for (vn in blas_vars) {
+      pv <- prev_vals[[vn]]
+      if (is.na(pv)) {
+        Sys.unsetenv(vn)
+      } else {
+        do.call(Sys.setenv, stats::setNames(list(pv), vn))
+      }
+    }
+  }, add = TRUE)
+  Sys.setenv(
+    OMP_NUM_THREADS = "1",
+    OPENBLAS_NUM_THREADS = "1",
+    MKL_NUM_THREADS = "1",
+    VECLIB_MAXIMUM_THREADS = "1"
+  )
+  res <- parallel::mclapply(X, FUN, mc.cores = eff_cores, mc.preschedule = mc.preschedule)
+  bad_idx <- which(vapply(res, function(el) inherits(el, "try-error"), logical(1)))
+  if (length(bad_idx) > 0L) {
+    res[bad_idx] <- lapply(X[bad_idx], FUN)
+  }
+  res
+}
+
+.get_sqlite_user_version_r <- function(conn) {
+  if (is.null(conn)) return(0L)
+  uv <- tryCatch(DBI::dbGetQuery(conn, "PRAGMA user_version;"), error = function(e) NULL)
+  if (is.null(uv) || nrow(uv) == 0L || ncol(uv) == 0L) return(0L)
+  val <- suppressWarnings(as.integer(uv[[1]][1]))
+  if (is.na(val)) 0L else val
+}
+
+.apply_packera_sqlite_pragmas_r <- function(conn, read_only = FALSE) {
+  if (is.null(conn)) return(invisible(NULL))
+  tryCatch({
+    DBI::dbExecute(conn, "PRAGMA busy_timeout = 30000;")
+    DBI::dbExecute(conn, "PRAGMA foreign_keys = ON;")
+    DBI::dbExecute(conn, "PRAGMA cache_size = -262144;")
+    DBI::dbExecute(conn, "PRAGMA temp_store = MEMORY;")
+    tryCatch(DBI::dbExecute(conn, "PRAGMA mmap_size = 2147483648;"), error = function(e) NULL)
+    if (!isTRUE(read_only)) {
+      DBI::dbExecute(conn, "PRAGMA journal_mode = WAL;")
+      DBI::dbExecute(conn, "PRAGMA synchronous = NORMAL;")
+      tryCatch(DBI::dbExecute(conn, "PRAGMA wal_autocheckpoint = 4000;"), error = function(e) NULL)
+    }
+  }, error = function(e) NULL)
+  invisible(NULL)
+}
+
 PACKERA_DB_LOGICAL_COLS <- c(
   "is_primary_duplicate", "is_calibrated_mm", "is_bent_stem", "is_folded",
   "is_dissected", "reflection_applied", "is_verified_anthesis",
@@ -309,10 +393,7 @@ connect_packera_db <- function(
       error = function(e) NULL
     )
     if (is.null(conn)) return(NULL)
-    tryCatch({
-      DBI::dbExecute(conn, "PRAGMA busy_timeout = 30000;")
-      DBI::dbExecute(conn, "PRAGMA foreign_keys = ON;")
-    }, error = function(e) NULL)
+    .apply_packera_sqlite_pragmas_r(conn, read_only = TRUE)
     return(conn)
   }
 
@@ -329,12 +410,13 @@ connect_packera_db <- function(
     error = function(e) NULL
   )
   if (is.null(conn)) return(NULL)
-  tryCatch({
-    DBI::dbExecute(conn, "PRAGMA journal_mode = WAL;")
-    DBI::dbExecute(conn, "PRAGMA synchronous = NORMAL;")
-    DBI::dbExecute(conn, "PRAGMA foreign_keys = ON;")
-    DBI::dbExecute(conn, "PRAGMA busy_timeout = 30000;")
-  }, error = function(e) NULL)
+  .apply_packera_sqlite_pragmas_r(conn, read_only = FALSE)
+
+  cur_ver <- .get_sqlite_user_version_r(conn)
+  if (cur_ver >= PACKERA_SCHEMA_USER_VERSION &&
+      (identical(eff_path, ":memory:") || db_table_exists_safe(conn, "v_integrative_triage_master"))) {
+    return(conn)
+  }
 
   schema_migrated <- .migrate_dynamic_sqlite_schema_r(conn)
   if (!identical(eff_path, ":memory:")) {
@@ -358,13 +440,13 @@ connect_packera_db <- function(
         error = function(e) NULL
       )
       if (!is.null(conn)) {
-        tryCatch({
-          DBI::dbExecute(conn, "PRAGMA journal_mode = WAL;")
-          DBI::dbExecute(conn, "PRAGMA synchronous = NORMAL;")
-          DBI::dbExecute(conn, "PRAGMA foreign_keys = ON;")
-          DBI::dbExecute(conn, "PRAGMA busy_timeout = 30000;")
-        }, error = function(e) NULL)
+        .apply_packera_sqlite_pragmas_r(conn, read_only = FALSE)
       }
+    } else if (!is.null(conn) && db_table_exists_safe(conn, "v_integrative_triage_master")) {
+      tryCatch(
+        DBI::dbExecute(conn, sprintf("PRAGMA user_version = %d;", PACKERA_SCHEMA_USER_VERSION)),
+        error = function(e) NULL
+      )
     }
   }
   conn
@@ -438,7 +520,9 @@ db_upsert_dataframe <- function(
   if (is.null(conn) || is.null(df) || nrow(df) == 0L) return(0L)
   if (!db_table_exists_safe(conn, table_name)) return(0L)
 
-  .migrate_dynamic_sqlite_table_r(conn, table_name)
+  if (.get_sqlite_user_version_r(conn) < PACKERA_SCHEMA_USER_VERSION) {
+    .migrate_dynamic_sqlite_table_r(conn, table_name)
+  }
   tbl_fields <- DBI::dbListFields(conn, table_name)
   keep_cols <- intersect(names(df), tbl_fields)
   if (!all(pk_cols %in% keep_cols)) {
@@ -505,10 +589,20 @@ db_upsert_dataframe <- function(
     )
   }
 
+  n_sub <- nrow(sub_df)
+  chunk_sz <- 5000L
   DBI::dbWithTransaction(conn, {
-    DBI::dbExecute(conn, sql, params = unname(as.list(sub_df)))
+    if (n_sub <= chunk_sz) {
+      DBI::dbExecute(conn, sql, params = unname(as.list(sub_df)))
+    } else {
+      starts <- seq.int(1L, n_sub, by = chunk_sz)
+      for (s_idx in starts) {
+        e_idx <- min(n_sub, s_idx + chunk_sz - 1L)
+        DBI::dbExecute(conn, sql, params = unname(as.list(sub_df[s_idx:e_idx, , drop = FALSE])))
+      }
+    }
   })
-  nrow(sub_df)
+  n_sub
 }
 
 load_taxon_synonyms_sqlite <- function(conn = NULL) {
@@ -583,24 +677,37 @@ fetch_step03_contours_from_db <- function(
     "LEFT JOIN voucher_reproductive_phenology vrp0 ON vrp0.catalogNumber = el.catalogNumber AND vrp0.plant_individual_id = 0 "
   )
 
+  tier1_pred <- paste0(
+    "el.contour_xy_json IS NOT NULL AND el.contour_xy_json != '' AND (",
+    "LOWER(COALESCE(NULLIF(el.tier_assignment, ''), el.assigned_tier)) LIKE 'tier_1%' OR ",
+    "LOWER(COALESCE(NULLIF(el.tier_assignment, ''), el.assigned_tier)) LIKE 'tier1%')"
+  )
+
   if (!is.null(active_catalogs) && length(active_catalogs) > 0L) {
     cats <- unique(trimws(as.character(active_catalogs)))
     cats <- cats[!is.na(cats) & nzchar(cats)]
     if (length(cats) == 0L) return(NULL)
     q_cats <- paste(vapply(cats, function(x) as.character(DBI::dbQuoteString(conn, x)), character(1)), collapse = ", ")
-    sql <- paste0(base_sql, sprintf("WHERE el.catalogNumber IN (%s) ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;", q_cats))
+    sql <- paste0(
+      base_sql,
+      sprintf("WHERE %s AND el.catalogNumber IN (%s) ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;", tier1_pred, q_cats)
+    )
     rows <- tryCatch(DBI::dbGetQuery(conn, sql), error = function(e) NULL)
   } else if (has_cohort) {
     sql <- paste0(
       base_sql,
       "INNER JOIN run_active_cohort rac ON rac.catalogNumber = el.catalogNumber AND rac.plant_individual_id = el.plant_individual_id ",
-      "WHERE rac.run_id = $1 ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;"
+      "WHERE rac.run_id = $1 AND ", tier1_pred, " ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;"
     )
     rows <- tryCatch(DBI::dbGetQuery(conn, sql, params = list(rid)), error = function(e) NULL)
   } else {
-    sql <- paste0(base_sql, "ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;")
+    sql <- paste0(base_sql, "WHERE ", tier1_pred, " ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;")
     rows <- tryCatch(DBI::dbGetQuery(conn, sql), error = function(e) NULL)
   }
+
+  # Close DBI handle immediately before any parallel fork
+  disconnect_packera_db(conn)
+  conn <- NULL
 
   if (is.null(rows) || nrow(rows) == 0L) return(NULL)
 
@@ -615,7 +722,11 @@ fetch_step03_contours_from_db <- function(
   }
   m_hdr <- NULL; m_idx_3k <- NULL; m_idx_2k <- NULL
   if (nzchar(eff_mpath) && file.exists(eff_mpath)) {
-    m_hdr <- tryCatch(readr::read_csv(eff_mpath, show_col_types = FALSE, progress = FALSE), error = function(e) NULL)
+    m_hdr <- if (requireNamespace("data.table", quietly = TRUE)) {
+      tryCatch(data.table::fread(eff_mpath, showProgress = FALSE, data.table = FALSE), error = function(e) NULL)
+    } else {
+      tryCatch(as.data.frame(readr::read_csv(eff_mpath, show_col_types = FALSE, progress = FALSE)), error = function(e) NULL)
+    }
     if (!is.null(m_hdr) && nrow(m_hdr) > 0L && "catalogNumber" %in% names(m_hdr)) {
       if (!is.null(manifest_path) && nzchar(manifest_path) && identical(eff_mpath, manifest_path)) {
         disk_cats <- unique(trimws(as.character(m_hdr$catalogNumber)))
@@ -639,146 +750,214 @@ fetch_step03_contours_from_db <- function(
     }
   }
 
-  coords_list <- vector("list", nrow(rows))
-  coord_names <- character(nrow(rows))
-  seen_sids <- new.env(hash = TRUE, parent = emptyenv())
-  meta_rows <- vector("list", nrow(rows))
-  kept_k <- 0L
+  n_rows <- nrow(rows)
+  raw_tier_vec <- ifelse(
+    !is.na(rows$tier_assignment) & nzchar(as.character(rows$tier_assignment)),
+    as.character(rows$tier_assignment),
+    as.character(rows$assigned_tier)
+  )
+  keep_t1 <- !is.na(raw_tier_vec) & grepl("^tier_?1", raw_tier_vec, ignore.case = TRUE) &
+    !is.na(rows$contour_xy_json) & nzchar(as.character(rows$contour_xy_json))
+  if (!any(keep_t1)) return(NULL)
+  if (!all(keep_t1)) {
+    rows <- rows[keep_t1, , drop = FALSE]
+    n_rows <- nrow(rows)
+  }
 
+  ppm_vec <- suppressWarnings(as.numeric(rows$pixels_per_mm))
+  is_cal_vec <- !is.na(ppm_vec) & is.finite(ppm_vec) & (ppm_vec > 0)
+  ppm_vec[!is_cal_vec] <- NA_real_
+  db_area_vec <- suppressWarnings(as.numeric(rows$area_px))
+  db_sol_vec <- suppressWarnings(as.numeric(rows$solidity))
+  js_vec <- as.character(rows$contour_xy_json)
   has_momocs <- requireNamespace("Momocs", quietly = TRUE)
-  for (i in seq_len(nrow(rows))) {
-    raw_tier <- as.character(ifelse(!is.na(rows$tier_assignment[i]) && nzchar(rows$tier_assignment[i]), rows$tier_assignment[i], rows$assigned_tier[i]))
-    resolved_tier <- ifelse(grepl("^tier_?1", raw_tier, ignore.case = TRUE), "Tier_1_Direct", ifelse(grepl("^tier_?2", raw_tier, ignore.case = TRUE), "Tier_2_Reflected", raw_tier))
-    if (is.na(resolved_tier) || resolved_tier != "Tier_1_Direct") next
-    js <- rows$contour_xy_json[i]
-    if (is.na(js) || !nzchar(js)) next
-    coo <- tryCatch(jsonlite::fromJSON(js, simplifyMatrix = TRUE), error = function(e) NULL)
-    if (is.null(coo) || !is.matrix(coo) || ncol(coo) < 2L || nrow(coo) < 10L) next
-    coo <- matrix(as.numeric(coo[, 1:2]), ncol = 2L)
-    if (any(!is.finite(coo))) next
-    colnames(coo) <- c("x", "y")
-    if (has_momocs) coo <- tryCatch(Momocs::coo_cw(coo), error = function(e) coo)
 
-    x_next <- c(coo[-1L, 1L], coo[1L, 1L])
-    y_next <- c(coo[-1L, 2L], coo[1L, 2L])
-    area_px <- 0.5 * abs(sum(coo[, 1L] * y_next - x_next * coo[, 2L]))
-    perim_px <- sum(sqrt((x_next - coo[, 1L])^2 + (y_next - coo[, 2L])^2))
-    circ_val <- if (is.finite(perim_px) && perim_px > 1e-6) round(min(1.0, (4 * pi * area_px) / (perim_px^2)), 4) else NA_real_
-    di_val <- if (is.finite(perim_px) && is.finite(area_px) && area_px > 1e-6) round(max(1.0, perim_px / (2.0 * sqrt(pi * area_px))), 4) else NA_real_
+  process_contour_chunk <- function(idx_vec) {
+    m_len <- length(idx_vec)
+    c_list <- vector("list", m_len)
+    v_ok <- logical(m_len)
+    v_sol <- rep(NA_real_, m_len)
+    v_di <- rep(NA_real_, m_len)
+    v_cs <- rep(NA_real_, m_len)
+    v_ar <- rep(NA_real_, m_len)
+    v_area <- rep(NA_real_, m_len)
+    v_circ <- rep(NA_real_, m_len)
 
-    resolved_ppm <- suppressWarnings(as.numeric(rows$pixels_per_mm[i]))
-    is_cal_raw <- rows$is_calibrated_mm[i]
-    is_cal <- (!is.na(is_cal_raw) && as.integer(is_cal_raw) != 0L)
-    if (!is.na(resolved_ppm) && is.finite(resolved_ppm) && resolved_ppm > 0) {
-      is_cal <- TRUE
-    } else {
-      is_cal <- FALSE
-      resolved_ppm <- NA_real_
-    }
+    for (k in seq_len(m_len)) {
+      i <- idx_vec[k]
+      coo <- tryCatch(jsonlite::fromJSON(js_vec[i], simplifyMatrix = TRUE), error = function(e) NULL)
+      if (is.null(coo) || !is.matrix(coo) || ncol(coo) < 2L || nrow(coo) < 10L) next
+      coo <- matrix(as.numeric(coo[, 1:2]), ncol = 2L)
+      if (any(!is.finite(coo))) next
+      colnames(coo) <- c("x", "y")
+      if (has_momocs) coo <- tryCatch(Momocs::coo_cw(coo), error = function(e) coo)
 
-    if (is_cal) coo <- coo / resolved_ppm
-    cs_val <- if (!is.null(centsize_fn)) {
-      centsize_fn(coo)
-    } else {
-      cx <- mean(coo[, 1L]); cy <- mean(coo[, 2L])
-      sqrt(sum((coo[, 1L] - cx)^2 + (coo[, 2L] - cy)^2))
-    }
+      x_next <- c(coo[-1L, 1L], coo[1L, 1L])
+      y_next <- c(coo[-1L, 2L], coo[1L, 2L])
+      area_px <- 0.5 * abs(sum(coo[, 1L] * y_next - x_next * coo[, 2L]))
+      perim_px <- sum(sqrt((x_next - coo[, 1L])^2 + (y_next - coo[, 2L])^2))
+      circ_val <- if (is.finite(perim_px) && perim_px > 1e-6) round(min(1.0, (4 * pi * area_px) / (perim_px^2)), 4) else NA_real_
+      di_val <- if (is.finite(perim_px) && is.finite(area_px) && area_px > 1e-6) round(max(1.0, perim_px / (2.0 * sqrt(pi * area_px))), 4) else NA_real_
 
-    if (!is.null(align_fn)) {
-      coo <- align_fn(coo, circularity = circ_val, has_momocs = has_momocs)
-    }
-
-    lw <- if (has_momocs) tryCatch(Momocs::coo_lw(coo), error = function(e) NULL) else NULL
-    if (is.null(lw) || length(lw) < 2L || is.na(lw[2]) || lw[2] <= 1e-6) {
-      coo_centered <- scale(coo, center = TRUE, scale = FALSE)
-      svd_rot <- coo_centered %*% svd(coo_centered)$v
-      lw <- c(diff(range(svd_rot[, 1], na.rm = TRUE)), diff(range(svd_rot[, 2], na.rm = TRUE)))
-    }
-    ar_val <- round(as.numeric(lw[1] / lw[2]), 4)
-
-    cat_num <- as.character(rows$catalogNumber[i])
-    pid_val <- as.integer(ifelse(is.na(rows$plant_individual_id[i]), 0L, rows$plant_individual_id[i]))
-    lid_val <- as.integer(ifelse(is.na(rows$leaf_id[i]), i, rows$leaf_id[i]))
-    raw_sid <- as.character(rows$shape_id[i])
-    shape_id <- if (!is.na(raw_sid) && nzchar(raw_sid)) raw_sid else sprintf("%s_p%d_leaf%d", cat_num, pid_val, lid_val)
-    if (exists(shape_id, envir = seen_sids, inherits = FALSE)) {
-      shape_id <- sprintf("%s_%d", shape_id, i)
-    }
-    assign(shape_id, TRUE, envir = seen_sids)
-
-    db_area <- suppressWarnings(as.numeric(rows$area_px[i]))
-    eff_area <- if (!is.na(db_area) && is.finite(db_area) && db_area > 0) db_area else round(area_px, 1)
-    diss_raw <- rows$is_dissected[i]
-    eff_diss <- if (is.na(diss_raw)) NA else (as.integer(diss_raw) != 0L)
-    sol_val <- suppressWarnings(as.numeric(rows$solidity[i]))
-    if (is.na(sol_val) || !is.finite(sol_val)) {
-      ch_idx <- tryCatch(grDevices::chull(coo[, 1L], coo[, 2L]), error = function(e) integer(0))
-      if (length(ch_idx) >= 3L) {
-        hc <- coo[ch_idx, , drop = FALSE]
-        h_area <- 0.5 * abs(sum(hc[, 1L] * c(hc[-1L, 2L], hc[1L, 2L]) - c(hc[-1L, 1L], hc[1L, 1L]) * hc[, 2L]))
-        if (h_area > 1e-6) sol_val <- round(min(1.0, area_px / h_area), 4)
+      if (is_cal_vec[i]) coo <- coo / ppm_vec[i]
+      cs_val <- if (!is.null(centsize_fn)) {
+        centsize_fn(coo)
+      } else {
+        cx <- mean(coo[, 1L]); cy <- mean(coo[, 2L])
+        sqrt(sum((coo[, 1L] - cx)^2 + (coo[, 2L] - cy)^2))
       }
+
+      if (!is.null(align_fn)) {
+        coo <- align_fn(coo, circularity = circ_val, has_momocs = has_momocs)
+      }
+
+      lw <- if (has_momocs) tryCatch(Momocs::coo_lw(coo), error = function(e) NULL) else NULL
+      if (is.null(lw) || length(lw) < 2L || is.na(lw[2]) || lw[2] <= 1e-6) {
+        coo_centered <- scale(coo, center = TRUE, scale = FALSE)
+        svd_rot <- coo_centered %*% svd(coo_centered)$v
+        lw <- c(diff(range(svd_rot[, 1], na.rm = TRUE)), diff(range(svd_rot[, 2], na.rm = TRUE)))
+      }
+      ar_val <- round(as.numeric(lw[1] / lw[2]), 4)
+
+      db_a <- db_area_vec[i]
+      eff_area <- if (!is.na(db_a) && is.finite(db_a) && db_a > 0) db_a else round(area_px, 1)
+      sol_val <- db_sol_vec[i]
+      if (is.na(sol_val) || !is.finite(sol_val)) {
+        ch_idx <- tryCatch(grDevices::chull(coo[, 1L], coo[, 2L]), error = function(e) integer(0))
+        if (length(ch_idx) >= 3L) {
+          hc <- coo[ch_idx, , drop = FALSE]
+          h_area <- 0.5 * abs(sum(hc[, 1L] * c(hc[-1L, 2L], hc[1L, 2L]) - c(hc[-1L, 1L], hc[1L, 1L]) * hc[, 2L]))
+          if (h_area > 1e-6) sol_val <- round(min(1.0, area_px / h_area), 4)
+        }
+      }
+
+      v_ok[k] <- TRUE
+      c_list[[k]] <- coo
+      v_sol[k] <- sol_val
+      v_di[k] <- di_val
+      v_cs[k] <- as.numeric(cs_val)
+      v_ar[k] <- as.numeric(ar_val)
+      v_area[k] <- as.numeric(eff_area)
+      v_circ[k] <- as.numeric(circ_val)
     }
 
-    kept_k <- kept_k + 1L
-    coords_list[[kept_k]] <- coo
-    coord_names[kept_k] <- shape_id
-    m_hit <- NA_integer_
-    if (!is.null(m_hdr)) {
-      if (!is.null(m_idx_3k)) m_hit <- unname(m_idx_3k[paste(trimws(cat_num), pid_val, lid_val, sep = "__")])
-      if (is.na(m_hit) && !is.null(m_idx_2k)) m_hit <- unname(m_idx_2k[paste(trimws(cat_num), lid_val, sep = "__")])
-    }
-    m_get_num <- function(cn, fb = NA_real_) {
-      if (!is.na(m_hit) && !is.null(m_hdr) && cn %in% names(m_hdr)) {
-        v <- suppressWarnings(as.numeric(m_hdr[[cn]][m_hit]))
-        if (is.finite(v)) return(v)
-      }
-      fb
-    }
-    db_ba_cm2 <- if ("blade_area_cm2" %in% names(rows)) suppressWarnings(as.numeric(rows$blade_area_cm2[i])) else NA_real_
-    if (!is.finite(db_ba_cm2)) db_ba_cm2 <- NA_real_
-    meta_rows[[kept_k]] <- data.frame(
-      shape_id = shape_id,
-      catalogNumber = cat_num,
-      plant_individual_id = pid_val,
-      leaf_id = lid_val,
-      tier_assignment = resolved_tier,
-      assigned_tier = resolved_tier,
-      reconstruction_tier = resolved_tier,
-      solidity = sol_val,
-      dissection_index = as.numeric(di_val),
-      ucs_score = suppressWarnings(as.numeric(rows$ucs_score[i])),
-      pixels_per_mm = resolved_ppm,
-      is_calibrated_mm = is_cal,
-      petiole_length_mm = suppressWarnings(as.numeric(rows$petiole_length_mm[i])),
-      blade_length_mm = suppressWarnings(as.numeric(rows$blade_length_mm[i])),
-      petiole_to_blade_ratio = suppressWarnings(as.numeric(rows$petiole_to_blade_ratio[i])),
-      is_dissected = eff_diss,
-      cy_rel_plant_bbox = m_get_num("cy_rel_plant_bbox", NA_real_),
-      cy_rel_sheet = m_get_num("cy_rel_sheet", NA_real_),
-      blade_area_cm2 = m_get_num("blade_area_cm2", db_ba_cm2),
-      effective_min_blade_area_cm2 = m_get_num("effective_min_blade_area_cm2", NA_real_),
-      AR_inv = suppressWarnings(as.numeric(rows$AR_inv[i])),
-      capitula_count = suppressWarnings(as.numeric(rows$capitula_count[i])),
-      involucre_height_px = suppressWarnings(as.numeric(rows$involucre_height_px[i])),
-      involucre_width_px = suppressWarnings(as.numeric(rows$involucre_width_px[i])),
-      involucre_height_mm = suppressWarnings(as.numeric(rows$involucre_height_mm[i])),
-      involucre_width_mm = suppressWarnings(as.numeric(rows$involucre_width_mm[i])),
-      centroid_size = as.numeric(cs_val),
-      log_centsize = if (!is.na(cs_val) && cs_val > 0) log(cs_val) else NA_real_,
-      aspect_ratio = as.numeric(ar_val),
-      area_px = as.numeric(eff_area),
-      circularity = as.numeric(circ_val),
-      mask_source = paste0("sqlite://extracted_leaves/", shape_id),
-      stringsAsFactors = FALSE
+    list(
+      ok = v_ok, coo = c_list, sol = v_sol, di = v_di,
+      cs = v_cs, ar = v_ar, area = v_area, circ = v_circ
     )
   }
 
-  if (kept_k == 0L) return(NULL)
-  coords_list <- coords_list[seq_len(kept_k)]
-  names(coords_list) <- coord_names[seq_len(kept_k)]
-  meta_df <- as.data.frame(dplyr::bind_rows(meta_rows[seq_len(kept_k)]), stringsAsFactors = FALSE)
-  rownames(meta_df) <- coord_names[seq_len(kept_k)]
+  n_workers <- if (n_rows >= 160L) resolve_packera_workers(32L, ceiling(n_rows / 80L)) else 1L
+  if (n_workers <= 1L) {
+    merged <- process_contour_chunk(seq_len(n_rows))
+  } else {
+    chunk_ids <- split(seq_len(n_rows), cut(seq_len(n_rows), breaks = n_workers, labels = FALSE))
+    chunk_out <- packera_mclapply(chunk_ids, process_contour_chunk, mc.cores = n_workers)
+    merged <- list(
+      ok = unlist(lapply(chunk_out, `[[`, "ok"), use.names = FALSE),
+      coo = unlist(lapply(chunk_out, `[[`, "coo"), recursive = FALSE, use.names = FALSE),
+      sol = unlist(lapply(chunk_out, `[[`, "sol"), use.names = FALSE),
+      di = unlist(lapply(chunk_out, `[[`, "di"), use.names = FALSE),
+      cs = unlist(lapply(chunk_out, `[[`, "cs"), use.names = FALSE),
+      ar = unlist(lapply(chunk_out, `[[`, "ar"), use.names = FALSE),
+      area = unlist(lapply(chunk_out, `[[`, "area"), use.names = FALSE),
+      circ = unlist(lapply(chunk_out, `[[`, "circ"), use.names = FALSE)
+    )
+  }
+
+  ok_idx <- which(merged$ok)
+  if (length(ok_idx) == 0L) return(NULL)
+
+  sub_rows <- rows[ok_idx, , drop = FALSE]
+  n_kept <- length(ok_idx)
+  cat_vec <- as.character(sub_rows$catalogNumber)
+  pid_vec <- ifelse(is.na(sub_rows$plant_individual_id), 0L, as.integer(sub_rows$plant_individual_id))
+  lid_vec <- ifelse(is.na(sub_rows$leaf_id), ok_idx, as.integer(sub_rows$leaf_id))
+  raw_sid_vec <- as.character(sub_rows$shape_id)
+  sid_vec <- ifelse(!is.na(raw_sid_vec) & nzchar(raw_sid_vec), raw_sid_vec, sprintf("%s_p%d_leaf%d", cat_vec, pid_vec, lid_vec))
+  if (anyDuplicated(sid_vec) > 0L) {
+    seen_sids <- new.env(hash = TRUE, parent = emptyenv())
+    for (k in seq_len(n_kept)) {
+      s_cur <- sid_vec[k]
+      if (exists(s_cur, envir = seen_sids, inherits = FALSE)) {
+        s_cur <- sprintf("%s_%d", s_cur, ok_idx[k])
+        sid_vec[k] <- s_cur
+      }
+      assign(s_cur, TRUE, envir = seen_sids)
+    }
+  }
+
+  m_hit_vec <- rep(NA_integer_, n_kept)
+  if (!is.null(m_hdr)) {
+    t_cat <- trimws(cat_vec)
+    if (!is.null(m_idx_3k)) {
+      m_hit_vec <- unname(m_idx_3k[paste(t_cat, pid_vec, lid_vec, sep = "__")])
+    }
+    miss_m <- is.na(m_hit_vec)
+    if (any(miss_m) && !is.null(m_idx_2k)) {
+      m_hit_vec[miss_m] <- unname(m_idx_2k[paste(t_cat[miss_m], lid_vec[miss_m], sep = "__")])
+    }
+  }
+  pull_manifest_num <- function(cn, fb_vec = rep(NA_real_, n_kept)) {
+    out_v <- fb_vec
+    if (!is.null(m_hdr) && cn %in% names(m_hdr) && any(!is.na(m_hit_vec))) {
+      hit_mask <- !is.na(m_hit_vec)
+      cand_v <- suppressWarnings(as.numeric(m_hdr[[cn]][m_hit_vec[hit_mask]]))
+      fin_m <- is.finite(cand_v)
+      if (any(fin_m)) {
+        hit_pos <- which(hit_mask)
+        out_v[hit_pos[fin_m]] <- cand_v[fin_m]
+      }
+    }
+    out_v
+  }
+
+  db_ba_vec <- if ("blade_area_cm2" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_area_cm2)) else rep(NA_real_, n_kept)
+  db_ba_vec[!is.finite(db_ba_vec)] <- NA_real_
+  diss_raw_vec <- sub_rows$is_dissected
+  eff_diss_vec <- ifelse(is.na(diss_raw_vec), NA, as.integer(diss_raw_vec) != 0L)
+  cs_kept <- merged$cs[ok_idx]
+  log_cs_kept <- ifelse(!is.na(cs_kept) & cs_kept > 0, log(cs_kept), NA_real_)
+  t1_str <- rep("Tier_1_Direct", n_kept)
+
+  coords_list <- merged$coo[ok_idx]
+  names(coords_list) <- sid_vec
+  meta_df <- data.frame(
+    shape_id = sid_vec,
+    catalogNumber = cat_vec,
+    plant_individual_id = pid_vec,
+    leaf_id = lid_vec,
+    tier_assignment = t1_str,
+    assigned_tier = t1_str,
+    reconstruction_tier = t1_str,
+    solidity = merged$sol[ok_idx],
+    dissection_index = merged$di[ok_idx],
+    ucs_score = suppressWarnings(as.numeric(sub_rows$ucs_score)),
+    pixels_per_mm = ppm_vec[ok_idx],
+    is_calibrated_mm = is_cal_vec[ok_idx],
+    petiole_length_mm = suppressWarnings(as.numeric(sub_rows$petiole_length_mm)),
+    blade_length_mm = suppressWarnings(as.numeric(sub_rows$blade_length_mm)),
+    petiole_to_blade_ratio = suppressWarnings(as.numeric(sub_rows$petiole_to_blade_ratio)),
+    is_dissected = eff_diss_vec,
+    cy_rel_plant_bbox = pull_manifest_num("cy_rel_plant_bbox"),
+    cy_rel_sheet = pull_manifest_num("cy_rel_sheet"),
+    blade_area_cm2 = pull_manifest_num("blade_area_cm2", db_ba_vec),
+    effective_min_blade_area_cm2 = pull_manifest_num("effective_min_blade_area_cm2"),
+    AR_inv = suppressWarnings(as.numeric(sub_rows$AR_inv)),
+    capitula_count = suppressWarnings(as.numeric(sub_rows$capitula_count)),
+    involucre_height_px = suppressWarnings(as.numeric(sub_rows$involucre_height_px)),
+    involucre_width_px = suppressWarnings(as.numeric(sub_rows$involucre_width_px)),
+    involucre_height_mm = suppressWarnings(as.numeric(sub_rows$involucre_height_mm)),
+    involucre_width_mm = suppressWarnings(as.numeric(sub_rows$involucre_width_mm)),
+    centroid_size = cs_kept,
+    log_centsize = log_cs_kept,
+    aspect_ratio = merged$ar[ok_idx],
+    area_px = merged$area[ok_idx],
+    circularity = merged$circ[ok_idx],
+    mask_source = paste0("sqlite://extracted_leaves/", sid_vec),
+    stringsAsFactors = FALSE
+  )
+  rownames(meta_df) <- sid_vec
   list(
     coords_list = coords_list,
     meta_df = meta_df

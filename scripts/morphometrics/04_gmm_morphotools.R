@@ -37,13 +37,13 @@ calculate_circular_phenology <- function(df) {
 }
 
 for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "pub_figures_utils.R"))) {
-  if (!is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
+  if (!exists("compute_spatial_balance_weights", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
 }
 for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "authority_weighting_utils.R"))) {
-  if (!is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
+  if (!exists("compute_empirical_bayes_authority_weights", mode = "function") && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
 }
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
-  if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+  if (!exists("fetch_step04_morphometrics_from_db", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
 .base_std_taxon <- if (exists("standardize_taxon_name", mode = "function")) standardize_taxon_name else NULL
 standardize_packera_taxon <- function(species_vec) {
@@ -85,15 +85,16 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   is_tier1_pure <- if ("morph_tier_source" %in% names(sub_df)) (!is.na(sub_df$morph_tier_source) & sub_df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(sub_df))
   anc_allom <- select_adaptive_reference_anchors(sub_df, feature_matrix = as.matrix(sub_df[, sym_names[seq_len(min(4L, length(sym_names)))], drop = FALSE]), taxon_col = "scientificName")
   sub_df$is_promoted_bronze <- anc_allom$is_promoted_bronze; sub_df$authority_weight <- compute_authority_precision_weights(sub_df)
-  sub_df$spatial_balance_weight <- compute_spatial_balance_weights(sub_df); sub_df$eff_weight <- sub_df$authority_weight
+  if (!"spatial_balance_weight" %in% names(sub_df) || !any(is.finite(suppressWarnings(as.numeric(sub_df$spatial_balance_weight))))) sub_df$spatial_balance_weight <- compute_spatial_balance_weights(sub_df); sub_df$eff_weight <- sub_df$authority_weight
   gold_mask <- anc_allom$active_mask & !is.na(sub_df$scientificName) & is_tier1_pure
   min_sp <- min(2L, length(unique(stats::na.omit(sub_df$scientificName))))
   gold_df <- if (sum(gold_mask) >= 6 && length(unique(stats::na.omit(sub_df$scientificName[gold_mask]))) >= min_sp) sub_df[gold_mask, , drop = FALSE] else if (sum(is_tier1_pure) >= 6) sub_df[is_tier1_pure, , drop = FALSE] else sub_df
   if (all(gold_df$eff_weight <= 0)) gold_df$eff_weight <- 1.0
   gold_df$scientificName <- droplevels(factor(gold_df$scientificName)); Y <- as.matrix(gold_df[, sym_names, drop = FALSE]); set.seed(seed); anova_df <- NULL; pw_df <- NULL
   if (requireNamespace("RRPP", quietly = TRUE) && nlevels(gold_df$scientificName) >= 2) {
+    rr_par <- if (nrow(gold_df) >= 120L && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(16L) else FALSE
     rdf <- RRPP::rrpp.data.frame(Y = Y, log_centsize = gold_df$log_centsize, scientificName = gold_df$scientificName)
-    fit_rrpp <- tryCatch(RRPP::lm.rrpp(Y ~ log_centsize * scientificName, data = rdf, iter = permutations, print.progress = FALSE), error = function(e) NULL)
+    fit_rrpp <- tryCatch(RRPP::lm.rrpp(Y ~ log_centsize * scientificName, data = rdf, iter = permutations, turbo = TRUE, Parallel = rr_par, print.progress = FALSE), error = function(e) NULL)
     if (!is.null(fit_rrpp)) {
       anova_df <- as.data.frame(anova(fit_rrpp)$table); anova_df$Term <- rownames(anova_df); rownames(anova_df) <- NULL
       if ("SS" %in% names(anova_df)) anova_df$SumOfSqs <- anova_df$SS; if ("Rsq" %in% names(anova_df)) anova_df$R2 <- anova_df$Rsq
@@ -262,7 +263,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
 # 4. Canonical Discriminant Analysis with Passive Sample Projection (Track 1: Unsupervised Morphotype_K1..Kn or Multi-Species)
 run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, gmm_res = NULL, intraspecific_mode = FALSE) {
   message("Configuring Canonical Discriminant Analysis in MorphoTools2 Architecture (Tier_3_Bronze weight = 0.0)...")
-  df$authority_weight <- compute_authority_precision_weights(df); df$spatial_balance_weight <- compute_spatial_balance_weights(df)
+  df$authority_weight <- compute_authority_precision_weights(df); if (!"spatial_balance_weight" %in% names(df) || !any(is.finite(suppressWarnings(as.numeric(df$spatial_balance_weight))))) df$spatial_balance_weight <- compute_spatial_balance_weights(df)
   authority_weight <- df$authority_weight; spatial_balance_weight <- df$spatial_balance_weight; eff_weight <- authority_weight
   is_tier1_pure <- if ("morph_tier_source" %in% names(df)) (!is.na(df$morph_tier_source) & df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(df))
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
@@ -507,8 +508,10 @@ generate_cda_biplot_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feat
 }
 
 # 7. Main Workflow Orchestrator
+.read_csv_s04 <- function(p) if (requireNamespace("data.table", quietly = TRUE) && isTRUE(file.info(p)$size > 1048576)) as.data.frame(data.table::fread(p, data.table = FALSE, showProgress = FALSE)) else read.csv(p, stringsAsFactors = FALSE)
+.write_csv_s04 <- function(d, p, na = "NA") if (requireNamespace("data.table", quietly = TRUE)) data.table::fwrite(d, file = p, na = na, quote = "auto", logical01 = FALSE) else write.csv(d, file = p, row.names = FALSE, na = na)
 run_gmm_morphotools_pipeline <- function(opts) {
-  vouchers_df <- if (file.exists(opts$vouchers)) calculate_circular_phenology(read.csv(opts$vouchers, stringsAsFactors = FALSE)) else NULL
+  vouchers_df <- if (file.exists(opts$vouchers)) calculate_circular_phenology(.read_csv_s04(opts$vouchers)) else NULL
   db_efa <- if (exists("fetch_step04_morphometrics_from_db", mode = "function")) fetch_step04_morphometrics_from_db(opts$vouchers, opts$harmonics, active_catalogs = if (!is.null(vouchers_df) && "catalogNumber" %in% names(vouchers_df)) vouchers_df$catalogNumber else NULL) else NULL
   if (!is.null(db_efa) && nrow(db_efa) > 0L) {
     na_dyn <- grep("^(Sym_)?PC[0-9]+$|^[ABCD][0-9]+$", names(db_efa), value = TRUE)
@@ -518,7 +521,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   db_pcs <- if (!is.null(db_efa) && nrow(db_efa) > 0L) discover_sorted_morph_cols(db_efa, "^(Sym_)?PC[0-9]+$") else character(0)
   if (!is.null(db_efa) && nrow(db_efa) > 0L && length(db_pcs) >= 2L) { efa_df <- db_efa } else {
     if (!file.exists(opts$harmonics)) stop("Harmonics file not found: ", opts$harmonics)
-    efa_df <- read.csv(opts$harmonics, stringsAsFactors = FALSE)
+    efa_df <- .read_csv_s04(opts$harmonics)
   }
   pc_cols <- discover_sorted_morph_cols(efa_df, "^PC[0-9]+$"); sym_pc_cols <- discover_sorted_morph_cols(efa_df, "^Sym_PC[0-9]+$")
   pca_cols <- if (length(pc_cols) > 0L) pc_cols else sym_pc_cols
@@ -536,7 +539,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
     other_num <- setdiff(num_cols, c(pc_sym_cols, pet_cols)); has_w <- "leaf_quality_weight" %in% names(closed_df)
     meta_cols <- setdiff(names(closed_df), c(num_cols, "catalogNumber", "plant_individual_id", "shape_id", "leaf_id", "mask_source", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source"))
     grp_list <- split(closed_df, list(closed_df$catalogNumber, closed_df$plant_individual_id), drop = TRUE)
-    closed_df <- do.call(rbind, lapply(grp_list, function(grp) {
+    agg_rows <- (if (length(grp_list) >= 200L && exists("packera_mclapply", mode = "function")) packera_mclapply else lapply)(grp_list, function(grp) {
       n_t1 <- sum(grp$assigned_tier == "Tier_1_Direct", na.rm = TRUE); n_t2 <- sum(grp$assigned_tier == "Tier_2_Reflected", na.rm = TRUE)
       if (n_t1 >= 1L) { grp <- grp[grp$assigned_tier == "Tier_1_Direct", , drop = FALSE]; m_src <- "Tier_1_Pure" } else { m_src <- "Tier_2_Fallback" }
       leaf_quality_weight <- if (has_w) suppressWarnings(as.numeric(grp$leaf_quality_weight)) else rep(1.0, nrow(grp))
@@ -558,7 +561,8 @@ run_gmm_morphotools_pipeline <- function(opts) {
       out$n_tier1_leaves <- n_t1; out$n_tier2_leaves <- n_t2; out$morph_tier_source <- m_src
       for (col in meta_cols) { v <- stats::na.omit(grp[[col]]); out[[col]] <- if (length(v) > 0) v[1] else grp[[col]][1] }
       out
-    })); rownames(closed_df) <- NULL
+    })
+    closed_df <- if (requireNamespace("data.table", quietly = TRUE) && length(agg_rows) >= 200L) as.data.frame(data.table::rbindlist(agg_rows, use.names = TRUE, fill = TRUE)) else do.call(rbind, agg_rows); rownames(closed_df) <- NULL
   } else {
     lc <- if ("leaf_count" %in% names(closed_df) && !any(is.na(closed_df$leaf_count))) as.integer(closed_df$leaf_count) else rep(1L, nrow(closed_df))
     if (!"n_tier1_leaves" %in% names(closed_df)) closed_df$n_tier1_leaves <- ifelse(closed_df$assigned_tier == "Tier_1_Direct", lc, 0L)
@@ -572,7 +576,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   sp_cand <- rep("Unknown", nrow(closed_df)); for (sc in intersect(c("species_standardized", "scientificName", "species_raw"), names(closed_df))) { v <- standardize_packera_taxon(closed_df[[sc]]); m <- sp_cand == "Unknown" & !is.na(v) & v != "Unknown"; sp_cand[m] <- v[m] }
   closed_df$species_standardized <- sp_cand; closed_df$authority_weight <- compute_authority_precision_weights(closed_df)
   if ("regional_group" %in% names(closed_df) && exists("standardize_epa_l3_label_r", mode = "function")) closed_df$regional_group <- standardize_epa_l3_label_r(closed_df$regional_group)
-  closed_df$spatial_balance_weight <- compute_spatial_balance_weights(closed_df)
+  if (!"spatial_balance_weight" %in% names(closed_df) || !any(is.finite(suppressWarnings(as.numeric(closed_df$spatial_balance_weight))))) closed_df$spatial_balance_weight <- compute_spatial_balance_weights(closed_df)
   allom_res <- test_and_correct_allometry(closed_df, correct_mode = opts$correct_allometry, permutations = opts$permutations, seed = opts$seed, output_report = opts$allometry_report, output_plot = opts$allometry_plot, output_pairwise = opts$allometry_pairwise)
   if (!is.null(allom_res$df)) closed_df <- allom_res$df
   pc_cols <- discover_sorted_morph_cols(closed_df, "^PC[0-9]+$"); sym_pc_cols <- discover_sorted_morph_cols(closed_df, "^Sym_PC[0-9]+$"); pca_cols <- if (length(pc_cols) > 0L) pc_cols else sym_pc_cols
@@ -628,7 +632,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
                            "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", "pheno_sin", "pheno_cos", pc_cols, sym_pc_cols,
                            "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "heteroblasty_index", "ucs_score", "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std",
                            "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
-  out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]; dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".tmp"); write.csv(out_df, file = tmp_flags, row.names = FALSE, na = ""); file.rename(tmp_flags, opts$output_flags)
+  out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]; dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".tmp"); .write_csv_s04(out_df, tmp_flags, na = ""); file.rename(tmp_flags, opts$output_flags)
   if (exists("persist_step04_to_sqlite", mode = "function")) tryCatch(persist_step04_to_sqlite(out_df, opts$vouchers, focal_taxon = opts$focal_taxon, intraspecific_mode = is_intra_mode), error = function(e) warning("SQLite Step 04 persistence note: ", e$message))
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, selected_features, manova_res = manova_res)
   tryCatch({ if (exists("generate_step04_pub_figures", mode = "function")) generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot, eco_cda_res = eco_cda_res, manova_res = manova_res) }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
