@@ -673,13 +673,28 @@ fast_euclidean_permanova_trace <- function(X_mat, grp_vec, permutations = 999L, 
   p_val <- NA_real_
   if (B >= 1L) {
     set.seed(as.integer(seed))
-    ge_cnt <- 0L
     tol <- ss_between - 1e-12 * max(1.0, ss_tot)
-    for (b in seq_len(B)) {
-      g_perm <- sample.int(N)
-      sums_b <- rowsum(X_c[g_perm, , drop = FALSE], g_int, reorder = TRUE)
-      ss_b <- sum(rowSums(sums_b^2) / n_vec)
-      if (ss_b >= tol) ge_cnt <- ge_cnt + 1L
+    if (N * B >= 250000L && exists("packera_mclapply", mode = "function")) {
+      perm_list <- replicate(B, sample.int(N), simplify = FALSE)
+      n_w <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(16L, B) else 4L
+      chunks <- split(seq_len(B), cut(seq_len(B), breaks = min(n_w, B), labels = FALSE))
+      cnts <- packera_mclapply(chunks, function(idx_b) {
+        c_loc <- 0L
+        for (bi in idx_b) {
+          sums_b <- rowsum(X_c[perm_list[[bi]], , drop = FALSE], g_int, reorder = TRUE)
+          if (sum(rowSums(sums_b^2) / n_vec) >= tol) c_loc <- c_loc + 1L
+        }
+        c_loc
+      }, mc.cores = length(chunks))
+      ge_cnt <- sum(unlist(cnts))
+    } else {
+      ge_cnt <- 0L
+      for (b in seq_len(B)) {
+        g_perm <- sample.int(N)
+        sums_b <- rowsum(X_c[g_perm, , drop = FALSE], g_int, reorder = TRUE)
+        ss_b <- sum(rowSums(sums_b^2) / n_vec)
+        if (ss_b >= tol) ge_cnt <- ge_cnt + 1L
+      }
     }
     p_val <- (1.0 + ge_cnt) / (1.0 + B)
   }

@@ -147,6 +147,7 @@ if (!exists("packera_mclapply", mode = "function")) {
     bs_prop <- vapply(seq_len(k_m), function(j) sum(1 / (j:k_m)) / k_m, numeric(1))
     horn_thr <- (1 + sqrt(k_m / max(N, k_m + 1)))^2 / k_m
     keep_pc <- which(is.finite(v_prop) & (v_prop >= pmin(bs_prop * 0.55, horn_thr * 0.55)))
+    if (length(keep_pc) < min_p) keep_pc <- sort(unique(c(seq_len(min(min_p, k_m)), keep_pc)))
     rem_pc <- setdiff(which(is.finite(v_prop) & v_prop >= 0.004), keep_pc)
     if (length(rem_pc) > 0L) {
       rescued <- integer(0)
@@ -1302,25 +1303,121 @@ compute_empirical_bayes_authority_weights <- function(
   round(pmax(0.5, pmin(3.0, w_cont)), 6)
 }
 
-fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_subset = 1800L) {
+screen_gmm_point_mass_columns <- function(X_mat, ref_mask = NULL, max_tie_frac = 0.25) {
+  X_mat <- as.matrix(X_mat)
+  cn <- colnames(X_mat)
+  if (is.null(cn) || ncol(X_mat) <= 2L) return(seq_len(ncol(X_mat)))
+  ref_idx <- if (!is.null(ref_mask) && length(ref_mask) == nrow(X_mat) && sum(ref_mask, na.rm = TRUE) >= 10L) {
+    which(as.logical(ref_mask))
+  } else {
+    seq_len(nrow(X_mat))
+  }
+  if (length(ref_idx) < 30L) return(cn)
+  keep <- vapply(seq_len(ncol(X_mat)), function(j) {
+    if (grepl("^(Sym_)?PC[0-9]+$", cn[j])) return(TRUE)
+    v <- X_mat[ref_idx, j]
+    v <- round(v[is.finite(v)], 5)
+    if (length(v) < 10L) return(FALSE)
+    (max(tabulate(match(v, unique(v)))) / length(v)) <= max_tie_frac
+  }, logical(1L))
+  if (sum(keep) < 2L) return(cn)
+  cn[keep]
+}
+
+.max_column_tie_count <- function(X_mat) {
+  X_mat <- as.matrix(X_mat)
+  if (nrow(X_mat) == 0L || ncol(X_mat) == 0L) return(0L)
+  max(vapply(seq_len(ncol(X_mat)), function(j) {
+    v <- round(X_mat[is.finite(X_mat[, j]), j], 5)
+    if (length(v) == 0L) 0L else max(tabulate(match(v, unique(v))))
+  }, integer(1L)))
+}
+
+run_bounded_clustvarsel <- function(X_mat, core_idx, max_k = 8L, timeout_sec = 20.0) {
+  if (!requireNamespace("clustvarsel", quietly = TRUE)) return(NULL)
+  X_mat <- as.matrix(X_mat)
+  sub_idx <- if (length(core_idx) > 350L) {
+    core_idx[unique(round(seq(1L, length(core_idx), length.out = 350L)))]
+  } else {
+    core_idx
+  }
+  X_sub <- X_mat[sub_idx, , drop = FALSE]
+  p_dim <- ncol(X_sub)
+  if (nrow(X_sub) < 10L || p_dim < 3L) return(NULL)
+  has_ties <- .max_column_tie_count(X_sub) > p_dim
+  G_cvs <- seq_len(min(as.integer(max_k), 5L))
+
+  run_cvs_inner <- function() {
+    set.seed(42)
+    if (has_ties) {
+      clustvarsel::clustvarsel(
+        X_sub, G = G_cvs, search = "headlong",
+        hcModel = "VVI", emModels2 = c("EII", "VII", "EEI", "VEI", "EVI", "VVI"),
+        itermax = 100, parallel = FALSE, verbose = FALSE
+      )
+    } else {
+      clustvarsel::clustvarsel(X_sub, G = G_cvs, itermax = 100, parallel = FALSE, verbose = FALSE)
+    }
+  }
+
+  cvs_res <- if (.Platform$OS.type == "unix") {
+    jb <- parallel::mcparallel(tryCatch(run_cvs_inner(), error = function(e) NULL), silent = TRUE)
+    col_res <- parallel::mccollect(jb, wait = FALSE, timeout = timeout_sec)
+    if (is.null(col_res)) {
+      tryCatch(tools::pskill(jb$pid, signal = 9L), error = function(e) NULL)
+      tryCatch(parallel::mccollect(jb, wait = FALSE, timeout = 0.2), error = function(e) NULL)
+      NULL
+    } else {
+      val <- col_res[[1L]]
+      if (inherits(val, "try-error")) NULL else val
+    }
+  } else {
+    tryCatch(run_cvs_inner(), error = function(e) NULL)
+  }
+
+  if (is.null(cvs_res) || length(cvs_res$subset) < 2L) return(NULL)
+  sub_pos <- as.integer(cvs_res$subset)
+  if (has_ties && !is.null(colnames(X_mat))) {
+    lead_pc <- which(colnames(X_mat) %in% c("PC1", "Sym_PC1"))
+    if (length(lead_pc) > 0L && !(lead_pc[1L] %in% sub_pos)) {
+      sub_pos <- c(lead_pc[1L], sub_pos)
+    }
+  }
+  cvs_res$subset <- sort(unique(sub_pos))
+  cvs_res
+}
+
+fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_subset = 1500L) {
   if (!requireNamespace("mclust", quietly = TRUE)) return(NULL)
   if (!("package:mclust" %in% search())) {
     tryCatch(suppressPackageStartupMessages(library(mclust, quietly = TRUE, warn.conflicts = FALSE)), error = function(e) NULL)
   }
   X_core <- as.matrix(X_core)
   n_obs <- nrow(X_core)
+  p_dim <- ncol(X_core)
   G_int <- as.integer(G_vec)
-  if (n_obs <= 600L) {
-    return(mclust::Mclust(X_core, G = G_int, modelNames = modelNames, verbose = FALSE))
+  has_ties <- .max_column_tie_count(X_core) > p_dim
+  ctrl <- mclust::emControl(itmax = c(180L, 180L), tol = c(1e-5, sqrt(.Machine$double.eps)))
+
+  if (n_obs <= 300L && !has_ties) {
+    return(mclust::Mclust(X_core, G = G_int, modelNames = modelNames, control = ctrl, verbose = FALSE))
+  }
+
+  prior_supported <- if (p_dim == 1L) {
+    c("E", "V")
+  } else {
+    c("EII", "VII", "EEI", "VEI", "EVI", "VVI", "EEE", "EEV", "VEV", "VVV")
   }
   cand_models <- if (!is.null(modelNames) && length(modelNames) > 0L) {
     as.character(modelNames)
   } else {
     as.character(mclust::mclust.options("emModelNames"))
   }
-  if (ncol(X_core) == 1L) cand_models <- intersect(cand_models, c("E", "V"))
-  if (length(cand_models) == 0L) cand_models <- c("EII", "VII", "EEI", "VEI", "EVI", "VVI")
+  if (p_dim == 1L) cand_models <- intersect(cand_models, c("E", "V"))
+  if (has_ties) cand_models <- intersect(cand_models, prior_supported)
+  if (length(cand_models) == 0L) cand_models <- if (p_dim == 1L) c("E", "V") else c("EII", "VII", "EEI", "VEI", "EVI", "VVI")
 
+  prior_arg <- if (has_ties) mclust::priorControl() else NULL
   n_sub <- min(n_obs, max(600L, as.integer(max_hc_subset)))
   init_arg <- if (n_obs > n_sub) {
     ord1 <- order(X_core[, 1L])
@@ -1329,44 +1426,53 @@ fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_sub
     NULL
   }
 
-  fit_one_model <- function(mn) {
+  grid_df <- expand.grid(G = G_int, modelName = cand_models, stringsAsFactors = FALSE)
+  n_tasks <- nrow(grid_df)
+  fit_one_cell <- function(idx) {
+    g_i <- grid_df$G[idx]
+    mn_i <- grid_df$modelName[idx]
     tryCatch(
-      mclust::Mclust(X_core, G = G_int, modelNames = mn, initialization = init_arg, verbose = FALSE),
+      mclust::Mclust(
+        X_core, G = g_i, modelNames = mn_i,
+        prior = prior_arg, control = ctrl, initialization = init_arg, verbose = FALSE
+      ),
       error = function(e) NULL
     )
   }
-  use_par <- exists("packera_mclapply", mode = "function") && length(cand_models) >= 2L
+
+  use_par <- exists("packera_mclapply", mode = "function") && n_tasks >= 2L
   fits <- if (use_par) {
     n_w <- if (exists("resolve_packera_workers", mode = "function")) {
-      resolve_packera_workers(min(14L, length(cand_models)), length(cand_models))
+      resolve_packera_workers(min(32L, n_tasks), n_tasks)
     } else {
-      min(4L, length(cand_models))
+      min(8L, n_tasks)
     }
-    packera_mclapply(cand_models, fit_one_model, mc.cores = n_w)
+    packera_mclapply(seq_len(n_tasks), fit_one_cell, mc.cores = n_w)
   } else {
-    lapply(cand_models, fit_one_model)
+    lapply(seq_len(n_tasks), fit_one_cell)
   }
 
-  valid_fits <- Filter(function(f) !is.null(f) && !is.null(f$bic) && is.finite(f$bic[1L]), fits)
-  if (length(valid_fits) == 0L) {
-    return(mclust::Mclust(X_core, G = G_int, modelNames = modelNames, initialization = init_arg, verbose = FALSE))
+  valid_idx <- which(vapply(fits, function(f) !is.null(f) && !is.null(f$bic) && is.finite(f$bic[1L]), logical(1L)))
+  if (length(valid_idx) == 0L) {
+    return(mclust::Mclust(
+      X_core, G = G_int, modelNames = intersect(cand_models, prior_supported),
+      prior = mclust::priorControl(), control = ctrl, initialization = init_arg, verbose = FALSE
+    ))
   }
+
   bic_mat <- matrix(
     NA_real_,
     nrow = length(G_int),
     ncol = length(cand_models),
     dimnames = list(as.character(G_int), cand_models)
   )
-  for (f in valid_fits) {
-    if (!is.null(f$BIC)) {
-      b_sub <- as.matrix(f$BIC)
-      rn <- intersect(rownames(bic_mat), rownames(b_sub))
-      cn <- intersect(colnames(bic_mat), colnames(b_sub))
-      if (length(rn) > 0L && length(cn) > 0L) bic_mat[rn, cn] <- b_sub[rn, cn, drop = FALSE]
-    }
+  for (idx in valid_idx) {
+    r_nm <- as.character(grid_df$G[idx])
+    c_nm <- as.character(grid_df$modelName[idx])
+    bic_mat[r_nm, c_nm] <- as.numeric(fits[[idx]]$bic[1L])
   }
-  bics <- vapply(valid_fits, function(f) as.numeric(f$bic[1L]), numeric(1L))
-  best_fit <- valid_fits[[which.max(bics)]]
+  bics <- vapply(valid_idx, function(idx) as.numeric(fits[[idx]]$bic[1L]), numeric(1L))
+  best_fit <- fits[[valid_idx[which.max(bics)]]]
   best_fit$BIC <- bic_mat
   best_fit
 }

@@ -213,6 +213,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   if (sum(ref_cand, na.rm = TRUE) < 6L) ref_cand <- if (sum(is_tier1_pure) >= 6L) is_tier1_pure else rep(TRUE, N_valid)
   X <- as.matrix(sub_v[, feature_cols, drop = FALSE])
   for (j in seq_len(ncol(X))) if (any(is.na(X[, j]))) X[is.na(X[, j]), j] <- if (any(!is.na(X[ref_cand, j]))) mean(X[ref_cand, j], na.rm = TRUE) else 0.0
+  if (exists("screen_gmm_point_mass_columns", mode = "function")) X <- X[, screen_gmm_point_mass_columns(X, ref_cand), drop = FALSE]
   selected_cols <- select_morphometric_subspace(X[ref_cand, , drop = FALSE], aux_df = sub_v[ref_cand, , drop = FALSE]); X <- X[, selected_cols, drop = FALSE]
   set.seed(42); best_k <- 1; best_name <- "Full_Covariance_EM"; bic_table <- NULL; cls_sub <- NULL; unc_sub <- NULL
   X_mah <- X[, if (length(intersect(pc_guard_cols, colnames(X))) > 0) intersect(pc_guard_cols, colnames(X)) else colnames(X), drop = FALSE]
@@ -220,8 +221,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   anchor_mask <- ref_cand & !mahal_outliers
   core_idx <- if (sum(anchor_mask, na.rm = TRUE) >= 6) which(anchor_mask) else which(ref_cand)
   if (requireNamespace("clustvarsel", quietly = TRUE) && (isTRUE(use_clustvarsel) || ncol(X) >= 4)) {
-    cvs_par <- if (nrow(X) >= 120L && exists("resolve_packera_workers", mode = "function") && requireNamespace("doParallel", quietly = TRUE)) resolve_packera_workers(min(8L, ncol(X))) else FALSE
-    cvs <- tryCatch({ set.seed(42); clustvarsel::clustvarsel(X[if (length(core_idx) > 350L) core_idx[seq_len(350L)] else core_idx, , drop = FALSE], G = seq_len(min(max_k, 5L)), parallel = cvs_par, verbose = FALSE) }, error = function(e) NULL)
+    cvs <- if (exists("run_bounded_clustvarsel", mode = "function")) run_bounded_clustvarsel(X, core_idx, max_k = max_k) else tryCatch({ set.seed(42); clustvarsel::clustvarsel(X[if (length(core_idx) > 350L) core_idx[seq_len(350L)] else core_idx, , drop = FALSE], G = seq_len(min(max_k, 5L)), itermax = 100, parallel = FALSE, verbose = FALSE) }, error = function(e) NULL)
     if (!is.null(cvs) && length(cvs$subset) >= 2) { selected_cols <- colnames(X)[cvs$subset]; X <- X[, cvs$subset, drop = FALSE] }
   }
   X_pcs <- X; X_core <- X_pcs[core_idx, , drop = FALSE]; eff_k <- max(2L, min(if (nrow(X_core) > 100 && max_k >= 7L) 6L else max_k, nrow(X_core) - 1L))

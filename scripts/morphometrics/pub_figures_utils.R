@@ -3276,43 +3276,48 @@ run_multivariate_manova_audit <- function(
       stringsAsFactors = FALSE
     )
 
-    pair_list_factor <- list()
-    for (i1 in seq_len(length(act_lvls) - 1L)) {
-      for (i2 in seq.int(i1 + 1L, length(act_lvls))) {
-        g1 <- act_lvls[i1]
-        g2 <- act_lvls[i2]
-        m_pair <- (g_act == g1) | (g_act == g2)
-        n1 <- sum(g_act == g1)
-        n2 <- sum(g_act == g2)
-        pw_stat <- .fit_weighted_manova_stats(
-          Y_act[m_pair, omni$active_features, drop = FALSE],
-          droplevels(g_act[m_pair]),
-          w_act[m_pair]
-        )
-        if (!is.null(pw_stat)) {
-          pair_list_factor[[length(pair_list_factor) + 1L]] <- data.frame(
-            grouping_factor = spec$name,
-            group_1 = g1,
-            group_2 = g2,
-            contrast = paste(g1, "vs", g2),
-            n_1 = as.integer(n1),
-            n_2 = as.integer(n2),
-            n_features = as.integer(pw_stat$n_features),
-            hotelling_t2 = round(pw_stat$hotelling_t2, 5),
-            mahalanobis_d = round(pw_stat$mahalanobis_d, 5),
-            pillai_trace = round(pw_stat$pillai_trace, 6),
-            wilks_lambda = round(pw_stat$wilks_lambda, 6),
-            approx_F = round(pw_stat$approx_F, 5),
-            num_df = round(pw_stat$num_df, 3),
-            den_df = round(pw_stat$den_df, 3),
-            partial_eta2 = round(pw_stat$partial_eta2, 6),
-            p_value = signif(pw_stat$p_value, 6),
-            q_value = NA_real_,
-            stringsAsFactors = FALSE
-          )
-        }
-      }
+    comb_mat <- utils::combn(length(act_lvls), 2L)
+    n_pairs <- ncol(comb_mat)
+    eval_one_pair <- function(p_idx) {
+      g1 <- act_lvls[comb_mat[1L, p_idx]]
+      g2 <- act_lvls[comb_mat[2L, p_idx]]
+      m_pair <- (g_act == g1) | (g_act == g2)
+      n1 <- sum(g_act == g1)
+      n2 <- sum(g_act == g2)
+      pw_stat <- .fit_weighted_manova_stats(
+        Y_act[m_pair, omni$active_features, drop = FALSE],
+        droplevels(g_act[m_pair]),
+        w_act[m_pair]
+      )
+      if (is.null(pw_stat)) return(NULL)
+      data.frame(
+        grouping_factor = spec$name,
+        group_1 = g1,
+        group_2 = g2,
+        contrast = paste(g1, "vs", g2),
+        n_1 = as.integer(n1),
+        n_2 = as.integer(n2),
+        n_features = as.integer(pw_stat$n_features),
+        hotelling_t2 = round(pw_stat$hotelling_t2, 5),
+        mahalanobis_d = round(pw_stat$mahalanobis_d, 5),
+        pillai_trace = round(pw_stat$pillai_trace, 6),
+        wilks_lambda = round(pw_stat$wilks_lambda, 6),
+        approx_F = round(pw_stat$approx_F, 5),
+        num_df = round(pw_stat$num_df, 3),
+        den_df = round(pw_stat$den_df, 3),
+        partial_eta2 = round(pw_stat$partial_eta2, 6),
+        p_value = signif(pw_stat$p_value, 6),
+        q_value = NA_real_,
+        stringsAsFactors = FALSE
+      )
     }
+    raw_pairs <- if (n_pairs >= 40L && exists("packera_mclapply", mode = "function")) {
+      n_pw_cores <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(min(32L, n_pairs), n_pairs) else 8L
+      packera_mclapply(seq_len(n_pairs), eval_one_pair, mc.cores = n_pw_cores)
+    } else {
+      lapply(seq_len(n_pairs), eval_one_pair)
+    }
+    pair_list_factor <- Filter(Negate(is.null), raw_pairs)
     if (length(pair_list_factor) > 0L) {
       pw_fac_df <- do.call(rbind, pair_list_factor)
       pw_fac_df$q_value <- signif(stats::p.adjust(pw_fac_df$p_value, method = "BH"), 6)
