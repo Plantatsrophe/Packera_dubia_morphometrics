@@ -284,7 +284,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   )
 
   other_meta <- intersect(
-    c("pixels_per_mm", "is_calibrated_mm", "taxon", "institutionCode", "determiner_raw", "authority_tier", "type_status",
+    c("pixels_per_mm", "is_calibrated_mm", "species_standardized", "taxon", "institutionCode", "determiner_raw", "authority_tier", "type_status",
       "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "coordinateUncertainty",
       "year", "month", "day", "eventDate", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"),
     names(closed_leaf_df)

@@ -36,8 +36,8 @@ suppressPackageStartupMessages({
   if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
 
-if (!exists("atomic_save_dual_plot", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
-  source("scripts/morphometrics/pub_figures_utils.R")
+for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "pub_figures_utils.R"))) {
+  if (!exists("atomic_save_dual_plot", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
 }
 if (file.exists("scripts/morphometrics/authority_weighting_utils.R")) {
   try(source("scripts/morphometrics/authority_weighting_utils.R"), silent = TRUE)

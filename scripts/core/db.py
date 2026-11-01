@@ -2376,6 +2376,9 @@ def persist_vision_xai_audit(
             "discordance_reason": _to_str(r.get("discordance_reason")),
         })
 
+    if norm_rows:
+        with conn:
+            conn.execute("DELETE FROM vision_xai_audit WHERE run_id = ?;", (eff_run_id,))
     return upsert_rows_generic(
         conn,
         table_name="vision_xai_audit",
@@ -2448,10 +2451,19 @@ def populate_run_active_cohort(
     """
     rid = str(run_id).strip() or "canonical"
     ensure_pipeline_run(conn, run_id=rid)
+    _tier_b_tables = (
+        "leaf_efa_harmonics",
+        "otu_morphometrics",
+        "vision_xai_audit",
+        "spatial_rf_predictions",
+        "curation_triage",
+    )
     if not voucher_rows:
         if clear_existing:
             with conn:
                 conn.execute("DELETE FROM run_active_cohort WHERE run_id = ?;", (rid,))
+                for _tbl in _tier_b_tables:
+                    conn.execute(f"DELETE FROM {_tbl} WHERE run_id = ?;", (rid,))
         return 0
 
     upsert_vouchers_records(conn, voucher_rows)
@@ -2510,6 +2522,44 @@ def populate_run_active_cohort(
             """,
             cohort_payload,
         )
+        if clear_existing:
+            for _tbl in _tier_b_tables:
+                conn.execute(
+                    f"""
+                    DELETE FROM {_tbl}
+                    WHERE run_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM run_active_cohort rac
+                          WHERE rac.run_id = {_tbl}.run_id
+                            AND rac.catalogNumber = {_tbl}.catalogNumber
+                            AND rac.plant_individual_id = {_tbl}.plant_individual_id
+                      );
+                    """,
+                    (rid,),
+                )
+            conn.execute(
+                """
+                UPDATE otu_morphometrics
+                SET species_standardized = (
+                    SELECT rac.species_standardized
+                    FROM run_active_cohort rac
+                    WHERE rac.run_id = otu_morphometrics.run_id
+                      AND rac.catalogNumber = otu_morphometrics.catalogNumber
+                      AND rac.plant_individual_id = otu_morphometrics.plant_individual_id
+                )
+                WHERE run_id = ?
+                  AND EXISTS (
+                      SELECT 1
+                      FROM run_active_cohort rac
+                      WHERE rac.run_id = otu_morphometrics.run_id
+                        AND rac.catalogNumber = otu_morphometrics.catalogNumber
+                        AND rac.plant_individual_id = otu_morphometrics.plant_individual_id
+                        AND rac.species_standardized IS NOT NULL
+                        AND TRIM(rac.species_standardized) <> ''
+                  );
+                """,
+                (rid,),
+            )
     return len(cohort_payload)
 
 

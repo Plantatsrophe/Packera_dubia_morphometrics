@@ -54,12 +54,12 @@
   }
   if (is.null(chosen_col)) return(rep("Unassigned_Packera", n))
   tx <- trimws(as.character(df[[chosen_col]]))
-  if (chosen_col %in% c("scientificName", "species_raw") && !any(grepl("^Morphotype_K", tx[!is.na(tx)]))) {
-    if (exists("standardize_packera_taxon", mode = "function")) {
-      tx <- as.character(standardize_packera_taxon(tx))
-    } else if (exists("standardize_taxon_name", mode = "function")) {
+  if (chosen_col %in% c("species_standardized", "scientificName", "species_raw") && !any(grepl("^Morphotype_K|^Ecotype_", tx[!is.na(tx)]))) {
+    if (exists("standardize_taxon_name", mode = "function")) {
       std_tx <- as.character(standardize_taxon_name(tx))
       tx <- ifelse(!is.na(std_tx) & nzchar(std_tx), std_tx, tx)
+    } else if (exists("standardize_packera_taxon", mode = "function")) {
+      tx <- as.character(standardize_packera_taxon(tx))
     }
   }
   tx[is.na(tx) | !nzchar(tx) | tolower(tx) == "unknown"] <- "Unassigned_Packera"

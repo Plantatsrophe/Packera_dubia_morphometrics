@@ -638,6 +638,91 @@ class TestFourierExtractor(unittest.TestCase):
             self.assertAlmostEqual(float(vmix_otu["dissected_leaf_fraction"]), 2.0 / 3.0, places=3)
             self.assertGreater(float(vmix_otu["dissection_index"]), 1.35)
 
+    def test_dynamic_sqlite_synonym_resolution_and_tier_b_cohort_hygiene(self):
+        """Verify dynamic SQLite taxon_synonyms lookup in R and Tier B orphan/synonym refresh in populate_run_active_cohort."""
+        import os
+        import sqlite3
+        import sys
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from scripts.core.db import get_sqlite_connection, init_schema, populate_run_active_cohort
+
+        with tempfile.TemporaryDirectory() as tmp:
+            eph_db = Path(tmp) / "ephemeral_synonym_test.sqlite"
+            conn = get_sqlite_connection(eph_db)
+            init_schema(conn)
+            with conn:
+                conn.executemany(
+                    "INSERT INTO taxon_synonyms (raw_name_lower, canonical_packera) VALUES (?, ?);",
+                    [
+                        ("packera synalpha", "Packera canonbeta"),
+                        ("packera synalpha c.auth", "Packera canonbeta"),
+                        ("senecio synalpha", "Packera canonbeta"),
+                    ],
+                )
+                conn.executemany(
+                    "INSERT INTO vouchers (catalogNumber, scientificName, species_standardized, determiner_tier, qc_status) VALUES (?, ?, ?, ?, 'PASS');",
+                    [
+                        ("CAT_KEEP", "Packera synalpha C.Auth", "Packera canonbeta", "Tier_1_Gold"),
+                        ("CAT_DROP", "Packera gammataxon", "Packera gammataxon", "Tier_2_Silver"),
+                    ],
+                )
+                conn.executemany(
+                    "INSERT INTO plant_individuals (catalogNumber, plant_individual_id) VALUES (?, ?);",
+                    [("CAT_KEEP", 1), ("CAT_DROP", 1)],
+                )
+            populate_run_active_cohort(
+                conn,
+                run_id="test_run",
+                voucher_rows=[
+                    {"catalogNumber": "CAT_KEEP", "species_standardized": "Packera synalpha", "determiner_tier": "Tier_1_Gold"},
+                    {"catalogNumber": "CAT_DROP", "species_standardized": "Packera gammataxon", "determiner_tier": "Tier_2_Silver"},
+                ],
+            )
+            with conn:
+                conn.executemany(
+                    "INSERT INTO otu_morphometrics (run_id, catalogNumber, plant_individual_id, species_standardized) VALUES (?, ?, ?, ?);",
+                    [
+                        ("test_run", "CAT_KEEP", 1, "Packera synalpha"),
+                        ("test_run", "CAT_DROP", 1, "Packera gammataxon"),
+                    ],
+                )
+            # Re-populate narrowed cohort with canonical standardized species
+            populate_run_active_cohort(
+                conn,
+                run_id="test_run",
+                voucher_rows=[
+                    {"catalogNumber": "CAT_KEEP", "species_standardized": "Packera canonbeta", "determiner_tier": "Tier_1_Gold"},
+                ],
+            )
+            rows_om = conn.execute(
+                "SELECT catalogNumber, plant_individual_id, species_standardized FROM otu_morphometrics WHERE run_id = 'test_run';"
+            ).fetchall()
+            conn.close()
+            self.assertEqual([(r[0], int(r[1]), r[2]) for r in rows_om], [("CAT_KEEP", 1, "Packera canonbeta")])
+
+            if shutil.which("Rscript"):
+                env = dict(os.environ)
+                env["PACKERA_DB_PATH"] = str(eph_db)
+                r_expr = (
+                    "source('scripts/morphometrics/pub_figures_utils.R'); "
+                    "res <- standardize_taxon_name(c('Packera synalpha', 'Packera synalpha C.Auth', 'P. synalpha', 'Senecio synalpha', 'Packera canonbeta var. minor')); "
+                    "cat(paste(res, collapse='|'))"
+                )
+                proc = subprocess.run(
+                    ["Rscript", "-e", r_expr],
+                    cwd=str(PROJECT_ROOT),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, 0, f"R synonym test failed:\n{proc.stderr}\n{proc.stdout}")
+                self.assertEqual(
+                    proc.stdout.strip().splitlines()[-1],
+                    "|".join(["Packera canonbeta"] * 5),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -187,29 +187,161 @@ adaptive_point_alpha <- function(n_pts) {
   if (is.na(n_pts) || n_pts <= 1000L) 0.75 else 0.45
 }
 
+.pub_figures_script_dir <- tryCatch({
+  ofiles <- unlist(lapply(sys.frames(), function(fr) fr$ofile))
+  cand <- if (length(ofiles) > 0L) tail(ofiles, 1L) else sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))[1L]
+  if (!is.na(cand) && nzchar(cand)) dirname(normalizePath(cand, mustWork = FALSE)) else ""
+}, error = function(e) "")
+
+.packera_taxon_syn_env <- new.env(parent = emptyenv())
+.packera_taxon_syn_env$db_sig <- ""
+.packera_taxon_syn_env$syn_map <- character(0)
+.packera_taxon_syn_env$py_memo <- character(0)
+
+.expand_synonym_binomial_keys <- function(syn_vec) {
+  if (length(syn_vec) == 0L) return(character(0))
+  nms <- tolower(gsub("\\s+", " ", trimws(names(syn_vec))))
+  vals <- trimws(as.character(syn_vec))
+  keep <- !is.na(nms) & nzchar(nms) & !is.na(vals) & nzchar(vals)
+  if (!any(keep)) return(character(0))
+  out <- stats::setNames(vals[keep], nms[keep])
+  bin_pat <- "^([a-z]+\\s+(?:(?:x|×)\\s*)?[a-z][a-z-]*)\\b.*$"
+  is_bin <- grepl(bin_pat, names(out))
+  if (any(is_bin)) {
+    b_keys <- sub(bin_pat, "\\1", names(out)[is_bin])
+    b_vals <- unname(out[is_bin])
+    new_m <- !(b_keys %in% names(out)) & !duplicated(b_keys)
+    if (any(new_m)) out <- c(out, stats::setNames(b_vals[new_m], b_keys[new_m]))
+  }
+  out
+}
+
+.get_packera_synonym_map <- function() {
+  cand_dbs <- character(0)
+  env_db <- trimws(Sys.getenv("PACKERA_DB_PATH", unset = ""))
+  if (nzchar(env_db) && env_db != ":memory:") cand_dbs <- c(cand_dbs, env_db)
+  if (exists("resolve_packera_db_path", mode = "function")) {
+    rdb <- tryCatch(as.character(resolve_packera_db_path()), error = function(e) "")
+    if (!is.na(rdb) && nzchar(rdb) && rdb != ":memory:") cand_dbs <- c(cand_dbs, rdb)
+  }
+  cand_dbs <- c(cand_dbs, "data/packera_pipeline.sqlite")
+  if (nzchar(.pub_figures_script_dir)) {
+    cand_dbs <- c(cand_dbs, file.path(.pub_figures_script_dir, "..", "..", "data", "packera_pipeline.sqlite"))
+  }
+  cand_dbs <- unique(normalizePath(cand_dbs[file.exists(cand_dbs)], mustWork = FALSE))
+  sig <- if (length(cand_dbs) == 0L) "none" else paste(cand_dbs, as.numeric(file.info(cand_dbs)$mtime), sep = "@", collapse = "|")
+  if (identical(sig, .packera_taxon_syn_env$db_sig)) return(.packera_taxon_syn_env$syn_map)
+
+  merged <- character(0)
+  if (length(cand_dbs) > 0L && requireNamespace("DBI", quietly = TRUE) && requireNamespace("RSQLite", quietly = TRUE)) {
+    for (dbp in cand_dbs) {
+      res <- tryCatch({
+        con <- DBI::dbConnect(RSQLite::SQLite(), dbname = dbp, flags = RSQLite::SQLITE_RO)
+        on.exit(tryCatch(DBI::dbDisconnect(con), error = function(e) NULL), add = TRUE)
+        if ("taxon_synonyms" %in% DBI::dbListTables(con)) {
+          DBI::dbGetQuery(con, "SELECT raw_name_lower, canonical_packera FROM taxon_synonyms;")
+        } else NULL
+      }, error = function(e) NULL)
+      if (!is.null(res) && nrow(res) > 0L) {
+        cur <- .expand_synonym_binomial_keys(stats::setNames(as.character(res$canonical_packera), as.character(res$raw_name_lower)))
+        add_nms <- setdiff(names(cur), names(merged))
+        if (length(add_nms) > 0L) merged <- c(merged, cur[add_nms])
+      }
+    }
+  }
+  .packera_taxon_syn_env$db_sig <- sig
+  .packera_taxon_syn_env$syn_map <- merged
+  merged
+}
+
+.resolve_taxa_via_harvester_py <- function(query_vec) {
+  if (length(query_vec) == 0L) return(character(0))
+  u_q <- unique(as.character(query_vec))
+  memo <- .packera_taxon_syn_env$py_memo
+  miss <- setdiff(u_q, names(memo))
+  if (length(miss) > 0L) {
+    ws_root <- if (nzchar(.pub_figures_script_dir)) normalizePath(file.path(.pub_figures_script_dir, "..", ".."), mustWork = FALSE) else normalizePath(".", mustWork = FALSE)
+    py_cands <- c(file.path(ws_root, ".venv", "bin", "python"), file.path(".venv", "bin", "python"), Sys.which("python3"))
+    py_bin <- py_cands[nzchar(py_cands) & file.exists(py_cands)][1L]
+    resolved_miss <- stats::setNames(rep(NA_character_, length(miss)), miss)
+    if (!is.na(py_bin) && nzchar(py_bin) && file.exists(file.path(ws_root, "scripts", "core", "harvester.py"))) {
+      tf_in <- tempfile("packera_tax_in_"); on.exit(unlink(tf_in), add = TRUE)
+      writeLines(miss, con = tf_in, useBytes = TRUE)
+      py_code <- sprintf(
+        "import sys; sys.path.insert(0, %s); from scripts.core.harvester import standardize_packera_taxon as f\nwith open(%s, 'r', encoding='utf-8') as fh:\n for ln in fh:\n  r = f(ln.rstrip('\\r\\n'))\n  print(r if r else '')",
+        shQuote(ws_root), shQuote(tf_in)
+      )
+      py_out <- tryCatch(suppressWarnings(system2(py_bin, args = c("-c", shQuote(py_code)), stdout = TRUE, stderr = FALSE)), error = function(e) character(0))
+      if (length(py_out) == length(miss)) {
+        clean_out <- trimws(as.character(py_out))
+        resolved_miss <- stats::setNames(ifelse(nzchar(clean_out), clean_out, NA_character_), miss)
+      }
+    }
+    memo <- c(memo, resolved_miss)
+    .packera_taxon_syn_env$py_memo <- memo
+  }
+  unname(memo[as.character(query_vec)])
+}
+
 standardize_taxon_name <- function(raw_vec) {
   if (is.null(raw_vec) || length(raw_vec) == 0L) return(character(0))
   chr_vec <- as.character(raw_vec)
   u_vals <- unique(chr_vec)
-  std_u <- vapply(u_vals, function(val) {
-    if (is.na(val)) return(NA_character_)
+  syn_map <- .get_packera_synonym_map()
+  has_syn <- length(syn_map) > 0L
+  need_py_idx <- integer(0)
+  fb_packera <- rep(NA_character_, length(u_vals))
+  open_ep <- c("sp", "spp", "cf", "aff", "indet", "unknown", "na")
+  syn_gen_pat <- "^(packera|p\\.|senecio|s\\.|cineraria|jacobaea|aureolaria)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(x\\s+|×\\s*)?([a-z][a-z-]*).*$"
+
+  std_u <- character(length(u_vals))
+  for (i in seq_along(u_vals)) {
+    val <- u_vals[i]
+    if (is.na(val)) { std_u[i] <- NA_character_; next }
     s_orig <- trimws(val)
-    if (!nzchar(s_orig) || tolower(s_orig) %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_packera")) {
-      return(NA_character_)
+    s <- tolower(gsub("\\s+", " ", s_orig))
+    if (!nzchar(s_orig) || s %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_packera", "packera")) {
+      std_u[i] <- NA_character_; next
     }
     if (grepl("^Morphotype_K[0-9]+$|^Ecotype_|^LatTertile_|_Coastal$|_Outcrop$|\\[K[0-9]+\\]$", s_orig, ignore.case = TRUE)) {
-      return(s_orig)
+      std_u[i] <- s_orig; next
     }
-    s <- tolower(s_orig)
-    if (grepl("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?[a-z-]+", s)) {
-      ep <- sub("^(?:packera|p\\.)\\s*(?:(?:cf\\.?|aff\\.?)\\s+)?(?:x\\s+|×\\s*)?([a-z-]+).*$", "\\1", s)
-      ep <- sub("^[×-]+", "", ep)
-      if (nzchar(ep) && !(ep %in% c("sp", "spp", "cf", "aff", "indet", "unknown", "na"))) {
-        return(paste("Packera", ep))
+    if (has_syn && (s %in% names(syn_map))) {
+      std_u[i] <- unname(syn_map[[s]]); next
+    }
+    if (has_syn && grepl("^[a-z]+\\s+[a-z-]+\\s+(?:var\\.?|subsp\\.?|ssp\\.?|f\\.?)\\s+[a-z-]+", s)) {
+      v_raw <- sub("^([a-z]+\\s+[a-z-]+\\s+(?:var\\.?|subsp\\.?|ssp\\.?|f\\.?)\\s+[a-z-]+).*$", "\\1", s)
+      v_dot <- gsub("\\b(var|subsp|ssp|f)\\.?\\s+", "\\1. ", v_raw)
+      if (v_raw %in% names(syn_map)) { std_u[i] <- unname(syn_map[[v_raw]]); next }
+      if (v_dot %in% names(syn_map)) { std_u[i] <- unname(syn_map[[v_dot]]); next }
+    }
+    if (grepl(syn_gen_pat, s)) {
+      gen_tok <- sub(syn_gen_pat, "\\1", s)
+      hyb_tok <- trimws(sub(syn_gen_pat, "\\2", s))
+      ep <- sub("^[×-]+|[-]+$", "", sub(syn_gen_pat, "\\3", s))
+      if (!nzchar(ep) || nchar(ep) < 2L || (ep %in% open_ep)) { std_u[i] <- NA_character_; next }
+      gen_full <- if (gen_tok == "p.") "packera" else if (gen_tok == "s.") "senecio" else gen_tok
+      is_hyb <- nzchar(hyb_tok)
+      b_plain <- paste(gen_full, ep)
+      b_hyb <- if (is_hyb) paste(gen_full, "×", ep) else b_plain
+      if (has_syn && (b_hyb %in% names(syn_map))) { std_u[i] <- unname(syn_map[[b_hyb]]); next }
+      if (has_syn && (b_plain %in% names(syn_map))) { std_u[i] <- unname(syn_map[[b_plain]]); next }
+      if (gen_full == "packera") {
+        p_can <- paste0("Packera ", if (is_hyb) "× " else "", ep)
+        if (has_syn) { std_u[i] <- p_can; next }
+        fb_packera[i] <- p_can
       }
+      need_py_idx <- c(need_py_idx, i)
+      std_u[i] <- NA_character_
+      next
     }
-    NA_character_
-  }, character(1), USE.NAMES = FALSE)
+    std_u[i] <- NA_character_
+  }
+
+  if (length(need_py_idx) > 0L) {
+    py_res <- .resolve_taxa_via_harvester_py(u_vals[need_py_idx])
+    std_u[need_py_idx] <- ifelse(!is.na(py_res) & nzchar(py_res), py_res, fb_packera[need_py_idx])
+  }
   std_u[match(chr_vec, u_vals)]
 }
 standardize_packera_taxon <- standardize_taxon_name

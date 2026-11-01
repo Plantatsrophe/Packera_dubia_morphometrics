@@ -983,6 +983,27 @@ fetch_step03_contours_from_db <- function(
   df
 }
 
+.prune_stale_run_rows_r <- function(conn, table_name, rid, df) {
+  if (is.null(conn) || is.null(df) || nrow(df) == 0L || !("catalogNumber" %in% names(df))) return(invisible(0L))
+  cats <- trimws(as.character(df$catalogNumber))
+  pids <- if ("plant_individual_id" %in% names(df)) ifelse(is.na(df$plant_individual_id), 0L, suppressWarnings(as.integer(df$plant_individual_id))) else rep(0L, nrow(df))
+  pids[is.na(pids)] <- 0L
+  keep_keys <- unique(paste(cats, pids, sep = "\r"))
+  ex <- tryCatch(DBI::dbGetQuery(conn, sprintf("SELECT rowid AS _rid, catalogNumber, plant_individual_id FROM %s WHERE run_id = $1;", table_name), params = list(rid)), error = function(e) NULL)
+  if (is.null(ex) || nrow(ex) == 0L) return(invisible(0L))
+  ex_pids <- ifelse(is.na(ex$plant_individual_id), 0L, suppressWarnings(as.integer(ex$plant_individual_id)))
+  ex_pids[is.na(ex_pids)] <- 0L
+  ex_keys <- paste(trimws(as.character(ex$catalogNumber)), ex_pids, sep = "\r")
+  drop_rids <- as.integer(ex[["_rid"]][!(ex_keys %in% keep_keys)])
+  if (length(drop_rids) > 0L) {
+    for (s in seq.int(1L, length(drop_rids), by = 500L)) {
+      chunk <- drop_rids[s:min(length(drop_rids), s + 499L)]
+      tryCatch(DBI::dbExecute(conn, sprintf("DELETE FROM %s WHERE rowid IN (%s);", table_name, paste(chunk, collapse = ","))), error = function(e) NULL)
+    }
+  }
+  invisible(length(drop_rids))
+}
+
 persist_step03_to_sqlite <- function(
   efa_df,
   specimen_df,
@@ -1002,6 +1023,7 @@ persist_step03_to_sqlite <- function(
     ind_out$run_id <- rid
     if (!("plant_individual_id" %in% names(ind_out))) ind_out$plant_individual_id <- 0L
     ind_out$plant_individual_id[is.na(ind_out$plant_individual_id)] <- 0L
+    tryCatch(DBI::dbExecute(conn, "DELETE FROM leaf_efa_harmonics WHERE run_id = $1;", params = list(rid)), error = function(e) NULL)
     db_upsert_dataframe(
       conn,
       table_name = "leaf_efa_harmonics",
@@ -1016,12 +1038,13 @@ persist_step03_to_sqlite <- function(
     otu_out$run_id <- rid
     if (!("plant_individual_id" %in% names(otu_out))) otu_out$plant_individual_id <- 0L
     otu_out$plant_individual_id[is.na(otu_out$plant_individual_id)] <- 0L
+    tryCatch(DBI::dbExecute(conn, "DELETE FROM otu_morphometrics WHERE run_id = $1;", params = list(rid)), error = function(e) NULL)
     db_upsert_dataframe(
       conn,
       table_name = "otu_morphometrics",
       df = otu_out,
       pk_cols = c("run_id", "catalogNumber", "plant_individual_id"),
-      preserve_existing_on_null = TRUE
+      preserve_existing_on_null = FALSE
     )
   }
   invisible(TRUE)
@@ -1125,6 +1148,7 @@ persist_step04_to_sqlite <- function(
     pk_cols = c("run_id", "catalogNumber", "plant_individual_id"),
     preserve_existing_on_null = TRUE
   )
+  .prune_stale_run_rows_r(conn, "otu_morphometrics", rid, df_db)
 
   if (db_table_exists_safe(conn, "run_active_cohort") && db_table_exists_safe(conn, "vouchers")) {
     # Update authority_weight and is_promoted_bronze on existing cohort rows without violating vouchers FK
@@ -1333,6 +1357,7 @@ persist_step06_to_sqlite <- function(
     pk_cols = c("run_id", "catalogNumber", "plant_individual_id"),
     preserve_existing_on_null = FALSE
   )
+  .prune_stale_run_rows_r(conn, "spatial_rf_predictions", rid, srf_df)
   invisible(TRUE)
 }
 
@@ -1435,6 +1460,7 @@ persist_step07_to_sqlite <- function(
     pk_cols = c("run_id", "catalogNumber", "plant_individual_id"),
     preserve_existing_on_null = FALSE
   )
+  .prune_stale_run_rows_r(conn, "curation_triage", rid, ct_df)
   invisible(TRUE)
 }
 

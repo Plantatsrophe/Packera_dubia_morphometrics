@@ -573,7 +573,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   }
   if (!is.null(vouchers_df)) {
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), , drop = FALSE]; v_idx <- match(as.character(closed_df$catalogNumber), as.character(v_sub$catalogNumber))
-    for (col in intersect(names(v_sub), c("scientificName", "species_standardized", "identifiedBy", "determiner_raw", "determiner_tier", "institutionCode", "county", "stateProvince", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) if (!col %in% names(closed_df)) closed_df[[col]] <- v_sub[[col]][v_idx]
+    for (col in intersect(names(v_sub), c("scientificName", "species_standardized", "species_raw", "identifiedBy", "determiner_raw", "determiner_tier", "institutionCode", "county", "stateProvince", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) { vv <- v_sub[[col]][v_idx]; if (!col %in% names(closed_df)) closed_df[[col]] <- vv else { m_v <- !is.na(vv) & nzchar(trimws(as.character(vv))) & (col %in% c("scientificName", "species_standardized", "species_raw", "determiner_tier", "regional_group") | is.na(closed_df[[col]])); closed_df[[col]][m_v] <- vv[m_v] } }
   }
   sp_cand <- rep("Unknown", nrow(closed_df)); for (sc in intersect(c("species_standardized", "scientificName", "species_raw"), names(closed_df))) { v <- standardize_packera_taxon(closed_df[[sc]]); m <- sp_cand == "Unknown" & !is.na(v) & v != "Unknown"; sp_cand[m] <- v[m] }
   closed_df$species_standardized <- sp_cand; closed_df$authority_weight <- compute_authority_precision_weights(closed_df)

@@ -272,7 +272,7 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
             t1_list = list(tier1_by_key.get((cat_num, pid), [])) if man_has_pid else (list(tier1_by_key.get((cat_num, pid), [])) + (tier1_by_cat.get(cat_num, []) if (cat_num not in t1_key_cats or pid == 0) else []))
             p_list = list(grouped_by_key.get((cat_num, pid), [])) + (grouped_by_cat.get(cat_num, []) if (cat_num not in grp_key_cats or pid == 0) else [])
             if not t1_list and not p_list: continue
-            raw_sp = meta.get("species_raw", meta.get("species_standardized", meta.get("scientificName", meta.get("species", "Unknown")))); std_taxon = standardize_packera_taxon(raw_sp)
+            cands = [str(meta.get(k, "")).strip() for k in ("species_standardized", "scientificName", "species_raw", "species") if pd.notna(meta.get(k)) and str(meta.get(k, "")).strip()]; raw_sp = str(meta.get("species_raw") if pd.notna(meta.get("species_raw")) and str(meta.get("species_raw", "")).strip() else (cands[0] if cands else "Unknown")).strip(); std_taxon = next((t for t in (standardize_packera_taxon(c) for c in cands) if _is_valid_packera_taxon(t)), standardize_packera_taxon(raw_sp))
             if not _is_valid_packera_taxon(std_taxon): continue
             ros_masks = []
             for rp in p_list:
@@ -290,7 +290,7 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
     elif not vouchers_df.empty:
         seen_demo = set()
         for _, row in vouchers_df.iterrows():
-            raw_sp = str(row.get("species_raw", row.get("species_standardized", row.get("scientificName", row.get("species", "Unknown"))))); std_taxon = standardize_packera_taxon(raw_sp)
+            cands = [str(row.get(k, "")).strip() for k in ("species_standardized", "scientificName", "species_raw", "species") if pd.notna(row.get(k)) and str(row.get(k, "")).strip()]; raw_sp = str(row.get("species_raw") if pd.notna(row.get("species_raw")) and str(row.get("species_raw", "")).strip() else (cands[0] if cands else "Unknown")).strip(); std_taxon = next((t for t in (standardize_packera_taxon(c) for c in cands) if _is_valid_packera_taxon(t)), standardize_packera_taxon(raw_sp))
             cat_num = str(row.get("catalogNumber", "")).strip()
             if _is_valid_packera_taxon(std_taxon) and cat_num:
                 pids_demo = [_parse_pid(row.get("plant_individual_id", 0), 0)] if has_v_pid else (sorted(man_pids_by_cat.get(cat_num, set())) or [0])

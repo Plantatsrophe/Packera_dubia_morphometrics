@@ -33,19 +33,41 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
-import aiohttp
-import numpy as np
-import pandas as pd
-from PIL import Image
-import pygbif
-import pygbif.occurrences as occ
-import pygbif.species as species
-from shapely.geometry import Point, Polygon, shape
-from shapely.strtree import STRtree
-from tqdm.asyncio import tqdm as async_tqdm
+try:
+    import aiohttp
+except ImportError:
+    aiohttp = None  # type: ignore[assignment]
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+try:
+    import pandas as pd
+except ImportError:
+    pd = None  # type: ignore[assignment]
+try:
+    from PIL import Image
+except ImportError:
+    Image = None  # type: ignore[assignment]
+try:
+    import pygbif
+    import pygbif.occurrences as occ
+    import pygbif.species as species
+except ImportError:
+    pygbif = occ = species = None  # type: ignore[assignment]
+try:
+    from shapely.geometry import Point, Polygon, shape
+    from shapely.strtree import STRtree
+except ImportError:
+    Point = Polygon = shape = STRtree = None  # type: ignore[assignment]
+try:
+    from tqdm.asyncio import tqdm as async_tqdm
+except ImportError:
+    async_tqdm = None  # type: ignore[assignment]
 
 # Allow decompression of high-resolution botanical herbarium sheets (>89 MP)
-Image.MAX_IMAGE_PIXELS = None
+if Image is not None:
+    Image.MAX_IMAGE_PIXELS = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:

@@ -8,7 +8,9 @@ suppressPackageStartupMessages({
   if (requireNamespace("dplyr", quietly = TRUE)) library(dplyr); if (requireNamespace("readr", quietly = TRUE)) library(readr)
   if (requireNamespace("tibble", quietly = TRUE)) library(tibble); if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
-if (file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "pub_figures_utils.R"))) {
+  if (!is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
+}
 for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "authority_weighting_utils.R"))) {
   if (!is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
 }
@@ -493,7 +495,7 @@ run_fourier_extraction <- function(opts) {
   }
   if (all(harmonic_names %in% colnames(harm_mat))) harm_mat <- harm_mat[, harmonic_names, drop = FALSE] else if (ncol(harm_mat) == length(harmonic_names)) colnames(harm_mat) <- harmonic_names
   if (!is.null(vouchers_df)) {
-    meta_cols <- intersect(colnames(vouchers_df), c("catalogNumber", "taxon", "scientificName", "species_raw", "institutionCode",
+    meta_cols <- intersect(colnames(vouchers_df), c("catalogNumber", "taxon", "species_standardized", "scientificName", "species_raw", "institutionCode",
       "determiner_raw", "determiner_tier", "authority_tier", "type_status", "dawid_skene_error_rate", "label_error_rate",
       "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude", "latitude", "longitude",
       "coordinateUncertainty", "year", "month", "day", "eventDate", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))
@@ -505,6 +507,14 @@ run_fourier_extraction <- function(opts) {
   if (!"species_raw" %in% names(fac_df)) fac_df$species_raw <- if ("taxon" %in% names(fac_df)) fac_df$taxon else NA_character_
   if (!"scientificName" %in% names(fac_df)) fac_df$scientificName <- fac_df$species_raw
   else fac_df$scientificName <- ifelse(is.na(fac_df$scientificName) | fac_df$scientificName == "", fac_df$species_raw, fac_df$scientificName)
+  if (exists("standardize_taxon_name", mode = "function")) {
+    sp_std <- rep(NA_character_, nrow(fac_df))
+    for (sc in intersect(c("species_standardized", "scientificName", "species_raw", "taxon"), names(fac_df))) {
+      sv <- standardize_taxon_name(fac_df[[sc]]); hit_s <- is.na(sp_std) & !is.na(sv) & nzchar(sv); sp_std[hit_s] <- sv[hit_s]
+    }
+    fac_df$species_standardized <- sp_std
+    fac_df$scientificName <- ifelse(!is.na(sp_std) & nzchar(sp_std), sp_std, fac_df$scientificName)
+  }
   if (!"determiner_tier" %in% names(fac_df)) fac_df$determiner_tier <- if ("authority_tier" %in% names(fac_df)) as.character(fac_df$authority_tier) else "Tier_3_Bronze"
   else fac_df$determiner_tier <- ifelse(is.na(fac_df$determiner_tier) | fac_df$determiner_tier == "", if ("authority_tier" %in% names(fac_df)) ifelse(is.na(fac_df$authority_tier) | fac_df$authority_tier == "", "Tier_3_Bronze", as.character(fac_df$authority_tier)) else "Tier_3_Bronze", fac_df$determiner_tier)
   fac_df$authority_weight <- compute_authority_precision_weights(fac_df)
@@ -597,7 +607,7 @@ run_fourier_extraction <- function(opts) {
   exp_pc_cols <- paste0("PC", seq_len(k_export))
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "tier_assignment", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
-                 "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "aspect_ratio", "circularity", "solidity", "dissection_index", "ucs_score",
+                 "species_standardized", "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "aspect_ratio", "circularity", "solidity", "dissection_index", "ucs_score",
                  "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
                  "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
@@ -659,7 +669,7 @@ run_fourier_extraction <- function(opts) {
 
   lead_spec_cols <- c("catalogNumber", "plant_individual_id", "leaf_count", "basal_leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source",
                       "foliar_variance", "heteroblasty_index", "assigned_tier", "tier_assignment", "reconstruction_tier",
-                      "pixels_per_mm", "is_calibrated_mm", "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight",
+                      "pixels_per_mm", "is_calibrated_mm", "species_standardized", "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight",
                       "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "aspect_ratio", "circularity", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "ucs_score",
                       "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
                       "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize")
