@@ -354,27 +354,79 @@ sys.exit(0 if target in present else 1)
   fi
 fi
 
-# Determine whether to reuse canonical root data/ store for Steps 01-02
+# Resolve upstream Step 01-02 seed store (explicit --triage-source run data/ when deriving a filtered run, else canonical root data/)
+SEED_DATA_DIR="${PROJECT_ROOT}/data"
+HAS_EXPLICIT_SOURCE_RUN=false
+if [[ "${EXCLUDE_MISIDENTIFIED}" == "true" && -n "${TRIAGE_SOURCE}" && "${TRIAGE_SOURCE^^}" != "ALL" && "${TRIAGE_SOURCE}" != "*" && "${TRIAGE_SOURCE}" != *,* ]]; then
+  RUN_DATA_REAL="$(mkdir -p "${RUN_DIR}/data" && cd "${RUN_DIR}/data" && pwd -P)"
+  for cand_src in "${TRIAGE_SOURCE}/data" "${PROJECT_ROOT}/runs/${TRIAGE_SOURCE}/data" "${PROJECT_ROOT}/${TRIAGE_SOURCE}/data"; do
+    if [[ -d "${cand_src}" && -s "${cand_src}/tables/curated_vouchers.csv" ]]; then
+      CAND_REAL="$(cd "${cand_src}" && pwd -P)"
+      if [[ "${CAND_REAL}" != "${RUN_DATA_REAL}" ]]; then
+        SEED_DATA_DIR="${CAND_REAL}"
+        HAS_EXPLICIT_SOURCE_RUN=true
+        break
+      fi
+    fi
+  done
+fi
+
+_dir_has_files() {
+  [[ -d "$1" ]] && [[ -n "$(find "$1" -maxdepth 2 -type f -print -quit 2>/dev/null)" ]]
+}
+
+# Determine whether to reuse upstream/canonical Step 01-02 assets
 REUSE_CANONICAL_DATA=false
-if [[ -s "${PROJECT_ROOT}/data/tables/curated_vouchers.csv" && -s "${PROJECT_ROOT}/data/tables/extracted_leaf_manifest.csv" ]]; then
+HAS_UPSTREAM_VOUCHERS=false
+if [[ -s "${RUN_DIR}/data/tables/curated_vouchers.csv" || -s "${SEED_DATA_DIR}/tables/curated_vouchers.csv" || -s "${PROJECT_ROOT}/data/tables/curated_vouchers.csv" ]]; then
+  HAS_UPSTREAM_VOUCHERS=true
+fi
+HAS_UPSTREAM_STEP02=false
+if [[ -s "${SEED_DATA_DIR}/tables/extracted_leaf_manifest.csv" || -s "${PROJECT_ROOT}/data/tables/extracted_leaf_manifest.csv" ]]; then
+  HAS_UPSTREAM_STEP02=true
+elif [[ "${START_STEP}" -ge 3 ]] && ( _dir_has_files "${SEED_DATA_DIR}/cropped_patches/rosettes_dense" || _dir_has_files "${SEED_DATA_DIR}/cropped_patches/basal_leaves_raw" || _dir_has_files "${PROJECT_ROOT}/data/cropped_patches/rosettes_dense" || _dir_has_files "${PROJECT_ROOT}/data/cropped_patches/basal_leaves_raw" ); then
+  HAS_UPSTREAM_STEP02=true
+fi
+
+if [[ "${HAS_UPSTREAM_VOUCHERS}" == "true" && "${HAS_UPSTREAM_STEP02}" == "true" ]]; then
   if [[ "${RESEGMENT}" == "false" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
-    if [[ "${START_STEP}" -ge 3 ]] || [[ -z "${FORCE_FLAG}" && ( "${CUSTOM_GEO_SCOPE}" == "false" || "${SKIP_HARVEST}" == "true" ) ]]; then
+    if [[ "${START_STEP}" -ge 3 ]] || [[ -z "${FORCE_FLAG}" && ( "${CUSTOM_GEO_SCOPE}" == "false" || "${SKIP_HARVEST}" == "true" || "${HAS_EXPLICIT_SOURCE_RUN}" == "true" ) ]]; then
       REUSE_CANONICAL_DATA=true
     fi
   fi
 fi
 
 if [[ "${REUSE_CANONICAL_DATA}" == "true" ]]; then
-  echo "[Preflight] Seeding Step 01–02 tables, masks, and contours from canonical root data/ store..."
+  echo "[Preflight] Seeding Step 01–02 tables, masks, and contours from ${SEED_DATA_DIR}..."
+  OVERWRITE_SEED_TABLES=false
+  if [[ "${START_STEP}" -le 2 ]] || [[ "${START_STEP}" -eq 3 && "${HAS_EXPLICIT_SOURCE_RUN}" == "true" ]]; then
+    OVERWRITE_SEED_TABLES=true
+  fi
   for tbl in curated_vouchers.csv extracted_leaf_manifest.csv extracted_leaves_manifest.csv failed_qc_vouchers.csv voucher_reproductive_metrics.csv voucher_phenological_states.csv; do
-    if [[ -s "${PROJECT_ROOT}/data/tables/${tbl}" ]]; then
-      cp -f "${PROJECT_ROOT}/data/tables/${tbl}" "${RUN_DIR}/data/tables/${tbl}.tmp"
-      mv -f "${RUN_DIR}/data/tables/${tbl}.tmp" "${RUN_DIR}/data/tables/${tbl}"
+    if [[ "${OVERWRITE_SEED_TABLES}" == "true" || ! -s "${RUN_DIR}/data/tables/${tbl}" ]]; then
+      SRC_TBL=""
+      if [[ -s "${SEED_DATA_DIR}/tables/${tbl}" ]]; then
+        SRC_TBL="${SEED_DATA_DIR}/tables/${tbl}"
+      elif [[ -s "${PROJECT_ROOT}/data/tables/${tbl}" ]]; then
+        SRC_TBL="${PROJECT_ROOT}/data/tables/${tbl}"
+      fi
+      if [[ -n "${SRC_TBL}" ]]; then
+        cp -f "${SRC_TBL}" "${RUN_DIR}/data/tables/${tbl}.tmp"
+        mv -f "${RUN_DIR}/data/tables/${tbl}.tmp" "${RUN_DIR}/data/tables/${tbl}"
+      fi
     fi
   done
-  rm -rf "${RUN_DIR}/data/masks" "${RUN_DIR}/data/contours"
-  ln -sfn "${PROJECT_ROOT}/data/masks" "${RUN_DIR}/data/masks"
-  ln -sfn "${PROJECT_ROOT}/data/contours" "${RUN_DIR}/data/contours"
+  for asset_sub in masks contours; do
+    SRC_ASSET="${PROJECT_ROOT}/data/${asset_sub}"
+    if _dir_has_files "${SEED_DATA_DIR}/${asset_sub}"; then
+      SRC_ASSET="${SEED_DATA_DIR}/${asset_sub}"
+    fi
+    DST_ASSET="${RUN_DIR}/data/${asset_sub}"
+    if [[ -L "${DST_ASSET}" ]] || ! _dir_has_files "${DST_ASSET}"; then
+      rm -rf "${DST_ASSET}"
+      ln -sfn "${SRC_ASSET}" "${DST_ASSET}"
+    fi
+  done
   if [[ ${#DEMO_FLAG[@]} -eq 0 ]]; then
     "${PYTHON_MAIN}" -c "
 from pathlib import Path
@@ -466,12 +518,16 @@ fi
 
 # Ensure ${RUN_DIR}/data/tables/curated_vouchers.csv exists prior to Step 02+
 if [[ ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
-  if [[ -s "data/tables/curated_vouchers.csv" ]]; then
+  if [[ -s "${SEED_DATA_DIR}/tables/curated_vouchers.csv" ]]; then
+    echo "[Preflight] Copying ${SEED_DATA_DIR}/tables/curated_vouchers.csv -> ${RUN_DIR}/data/tables/curated_vouchers.csv"
+    cp -f "${SEED_DATA_DIR}/tables/curated_vouchers.csv" "${RUN_DIR}/data/tables/curated_vouchers.csv.tmp"
+    mv -f "${RUN_DIR}/data/tables/curated_vouchers.csv.tmp" "${RUN_DIR}/data/tables/curated_vouchers.csv"
+  elif [[ -s "data/tables/curated_vouchers.csv" ]]; then
     echo "[Preflight] Copying shared data/tables/curated_vouchers.csv -> ${RUN_DIR}/data/tables/curated_vouchers.csv"
     cp -f "data/tables/curated_vouchers.csv" "${RUN_DIR}/data/tables/curated_vouchers.csv.tmp"
-    mv -f "${RUN_DIR}/data/tables/curated_vouchers.csv.tmp" "${RUN_DIR}/data/tables/curated_vouchers.csv"
+    mv -f "data/tables/curated_vouchers.csv.tmp" "${RUN_DIR}/data/tables/curated_vouchers.csv"
   else
-    echo "[ERROR] Missing curated_vouchers.csv in both ${RUN_DIR}/data/tables/ and data/tables/." >&2
+    echo "[ERROR] Missing curated_vouchers.csv in ${RUN_DIR}/data/tables/, ${SEED_DATA_DIR}/tables/, and data/tables/." >&2
     exit 1
   fi
 fi
@@ -508,6 +564,8 @@ max_per_region = int(sys.argv[14]) if len(sys.argv) > 14 and sys.argv[14].strip(
 no_spatial_weights = sys.argv[15].lower() == 'true' if len(sys.argv) > 15 else False
 reuse_canonical = sys.argv[16].lower() == 'true' if len(sys.argv) > 16 else False
 custom_taxa_csv = sys.argv[17].strip() if len(sys.argv) > 17 else ''
+seed_data = Path(sys.argv[18]).resolve() if len(sys.argv) > 18 and sys.argv[18].strip() else root_data
+start_step_val = int(sys.argv[19]) if len(sys.argv) > 19 and sys.argv[19].strip().isdigit() else 1
 
 from scripts.core.harvester import (
     select_cascading_outgroup_anchors,
@@ -851,23 +909,31 @@ if os.environ.get('PACKERA_DEMO_MODE') != '1':
     finally:
         conn_coh.close()
 
-# Use directory-level symlinks to canonical data/cropped_patches/{rosettes_dense,basal_leaves_raw,capitula}
-# instead of creating thousands of per-voucher .jpg symlinks (SQLite run_active_cohort & CSV snapshots filter the cohort)
-if reuse_canonical:
+# Use directory-level symlinks to upstream/canonical cropped_patches/{rosettes_dense,basal_leaves_raw,capitula}
+# whenever reusing Step 01-02 assets or starting at Step >= 3 (preserving non-empty run-local patch directories)
+if reuse_canonical or start_step_val >= 3:
     run_patches_root = run_dir / 'data' / 'cropped_patches'
     if run_patches_root.is_symlink():
         run_patches_root.unlink()
     run_patches_root.mkdir(parents=True, exist_ok=True)
     for sub in ('rosettes_dense', 'basal_leaves_raw', 'capitula'):
-        src_sub = root_data / 'cropped_patches' / sub
+        seed_sub = seed_data / 'cropped_patches' / sub
+        root_sub = root_data / 'cropped_patches' / sub
+        src_sub = seed_sub if (seed_sub.is_dir() and any(seed_sub.iterdir())) else root_sub
+        if not src_sub.exists():
+            continue
         dst_sub = run_patches_root / sub
+        if dst_sub.resolve() == src_sub.resolve() and not dst_sub.is_symlink():
+            continue
         if dst_sub.is_symlink() or dst_sub.is_file():
             dst_sub.unlink()
-        elif dst_sub.exists():
-            shutil.rmtree(dst_sub)
-        if src_sub.exists():
             os.symlink(src_sub, dst_sub)
-" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}" "${SPATIAL_THIN_KM:-0}" "${MAX_PER_STATE:-}" "${MAX_PER_REGION:-}" "${NO_SPATIAL_WEIGHTS:-false}" "${REUSE_CANONICAL_DATA:-false}" "${CUSTOM_TAXA_CSV:-}"
+        elif not dst_sub.exists():
+            os.symlink(src_sub, dst_sub)
+        elif dst_sub.is_dir() and next(dst_sub.iterdir(), None) is None:
+            dst_sub.rmdir()
+            os.symlink(src_sub, dst_sub)
+" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}" "${SPATIAL_THIN_KM:-0}" "${MAX_PER_STATE:-}" "${MAX_PER_REGION:-}" "${NO_SPATIAL_WEIGHTS:-false}" "${REUSE_CANONICAL_DATA:-false}" "${CUSTOM_TAXA_CSV:-}" "${SEED_DATA_DIR:-${PROJECT_ROOT}/data}" "${START_STEP:-1}"
 }
 
 run_preflight_subset_filter

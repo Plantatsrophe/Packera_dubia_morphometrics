@@ -275,3 +275,65 @@ def pool_patch_tokens_and_fg_ratio_fast(
     fg_bin = (mask_flat > 0.0).to(dtype=torch.float32)
     b_fg = torch.clamp((tnorms * fg_bin).sum(dim=1) / torch.clamp(tnorms.sum(dim=1), min=1e-8), 0.0, 1.0)
     return pooled_l2.cpu().numpy().astype(np.float32), b_fg.cpu().numpy()
+
+
+def _dir_has_image_files(d: Path) -> bool:
+    if not d.is_dir():
+        return False
+    try:
+        return any(p.is_file() and p.suffix.lower() in {".jpg", ".png", ".jpeg"} for p in d.iterdir())
+    except OSError:
+        return False
+
+
+def resolve_run_scoped_patch_and_manifest_inputs(
+    data_root: Path,
+    dense_dir: Path,
+    basal_dir: Path,
+    tier1_mask_dir: Path,
+    manifest_csv: Optional[Path],
+    known_cats: Optional[set] = None,
+    demo: bool = False,
+) -> Tuple[Path, Path, Path, Optional[pd.DataFrame]]:
+    """
+    Resolve run-scoped `runs/<run_id>/data/...` patch/mask directories and leaf manifest DataFrame.
+
+    When a derived run (`--start-step >= 3`) has empty run-local `cropped_patches/` or lacks a
+    run-local `extracted_leaf_manifest.csv`, transparently falls back to canonical `<workspace>/data/`
+    patch/mask directories and queries `extracted_leaves` from canonical SQLite (`packera_pipeline.sqlite`).
+    """
+    dr = Path(data_root)
+    is_runs_layout = dr.name == "data" and dr.parent.parent.name == "runs"
+    ws_data = (dr.parent.parent.parent / "data") if is_runs_layout else None
+
+    if ws_data is not None and ws_data.is_dir():
+        if not _dir_has_image_files(dense_dir) and _dir_has_image_files(ws_data / "cropped_patches" / "rosettes_dense"):
+            dense_dir = ws_data / "cropped_patches" / "rosettes_dense"
+        if not _dir_has_image_files(basal_dir) and _dir_has_image_files(ws_data / "cropped_patches" / "basal_leaves_raw"):
+            basal_dir = ws_data / "cropped_patches" / "basal_leaves_raw"
+        if not _dir_has_image_files(tier1_mask_dir) and _dir_has_image_files(ws_data / "masks" / "tier1_intact"):
+            tier1_mask_dir = ws_data / "masks" / "tier1_intact"
+        if (manifest_csv is None or not Path(manifest_csv).is_file()) and (ws_data / "tables" / "extracted_leaf_manifest.csv").is_file():
+            manifest_csv = ws_data / "tables" / "extracted_leaf_manifest.csv"
+
+    man_df: Optional[pd.DataFrame] = None
+    if manifest_csv is not None and Path(manifest_csv).is_file():
+        man_df = pd.read_csv(manifest_csv)
+    elif (not demo) and ws_data is not None and (ws_data / "packera_pipeline.sqlite").is_file():
+        try:
+            from scripts.core.db import get_db_connection
+            conn = get_db_connection(workspace_root=ws_data.parent, init_schema=False)
+            try:
+                man_df = pd.read_sql_query(
+                    "SELECT catalogNumber, plant_individual_id, leaf_id, assigned_tier, ucs_score, "
+                    "solidity, circularity, blade_area_cm2, mask_path, crop_path FROM extracted_leaves",
+                    conn,
+                )
+                if known_cats and not man_df.empty:
+                    man_df = man_df[man_df["catalogNumber"].astype(str).str.strip().isin(known_cats)].reset_index(drop=True)
+            finally:
+                conn.close()
+        except Exception:
+            man_df = None
+
+    return dense_dir, basal_dir, tier1_mask_dir, man_df

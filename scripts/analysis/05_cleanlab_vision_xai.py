@@ -22,7 +22,7 @@ if torch.cuda.is_available(): torch.cuda.manual_seed_all(42)
 _script_root = Path(__file__).resolve().parents[2]
 if str(_script_root) not in sys.path: sys.path.insert(0, str(_script_root))
 from scripts.core.db import compute_file_sha256, fetch_cached_dinov2_features, get_db_connection, is_canonical_or_explicit_db_context, persist_vision_xai_audit, store_dinov2_features_cache
-from scripts.analysis.vision_dissection_utils import batch_classify_surface_orientations, compute_batch_patch_set_sha256, compute_dissection_neutral_leaf_weight, filter_basal_manifest_rows_py, order_basal_leaves_by_median_solidity, pool_patch_tokens_and_fg_ratio_fast, resolve_specimen_keys_fast
+from scripts.analysis.vision_dissection_utils import batch_classify_surface_orientations, compute_batch_patch_set_sha256, compute_dissection_neutral_leaf_weight, filter_basal_manifest_rows_py, order_basal_leaves_by_median_solidity, pool_patch_tokens_and_fg_ratio_fast, resolve_run_scoped_patch_and_manifest_inputs, resolve_specimen_keys_fast
 
 FOREGROUND_ATTENTION_MIN_RATIO: float = 0.65
 DYNAMIC_OKABE_ITO_HEX: List[str] = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#882255", "#44AA99", "#332288", "#117733"]
@@ -214,10 +214,11 @@ def load_and_link_rosette_patches(rosette_dir: Path, vouchers_csv: Path, demo: b
     dense_dir, basal_dir = (rosette_dir if rosette_dir.name == "rosettes_dense" else (cropped_root / "rosettes_dense")), (rosette_dir if rosette_dir.name == "basal_leaves_raw" else (cropped_root / "basal_leaves_raw"))
     tier1_mask_dir = next((d for d in (data_root / "masks" / "tier1_intact", vouchers_csv.parent.parent / "masks" / "tier1_intact") if d.is_dir()), data_root / "masks" / "tier1_intact")
     if manifest_csv is None: manifest_csv = next((p for p in (vouchers_csv.parent / "extracted_leaf_manifest.csv", data_root / "tables" / "extracted_leaf_manifest.csv") if p.is_file()), None)
+    dense_dir, basal_dir, tier1_mask_dir, man_df = resolve_run_scoped_patch_and_manifest_inputs(data_root, dense_dir, basal_dir, tier1_mask_dir, manifest_csv, known_cats=known_cats, demo=demo)
     cand_morph = Path(morphometrics_csv) if (morphometrics_csv is not None and Path(morphometrics_csv).is_file()) else next((p for p in (vouchers_csv.parent / "morphometric_flags.csv", data_root / "tables" / "morphometric_flags.csv") if p.is_file()), None)
     tier1_by_key, tier1_by_cat, man_pids_by_cat, man_has_pid, seen_basal, man_cov_keys, man_cov_cats = {}, {}, {}, False, set(), set(), set()
-    if manifest_csv is not None and Path(manifest_csv).is_file():
-        man_df = pd.read_csv(manifest_csv); man_has_pid = "plant_individual_id" in man_df.columns
+    if man_df is not None:
+        man_has_pid = "plant_individual_id" in man_df.columns
         tier_col = "assigned_tier" if "assigned_tier" in man_df.columns else ("tier" if "tier" in man_df.columns else "")
         if not man_df.empty and "catalogNumber" in man_df.columns:
             for idx_m, c_r in enumerate(man_df["catalogNumber"]):
