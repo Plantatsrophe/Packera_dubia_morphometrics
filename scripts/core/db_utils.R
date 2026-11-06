@@ -1498,7 +1498,7 @@ persist_step07_to_sqlite <- function(
   if (is.null(col_names) || length(col_names) == 0L) return(character(0))
   eco_pattern <- paste0(
     "^(bio[0-9]+_|fine_|ssurgo_|soil_|topo_|polaris_|solus_|sgmc_|primary_.*_predictors$)",
-    "|(^|_)(schoener_d|edaphic_z_score|climatic_z_score|delta_doy|hopkins_)"
+    "|(^|_)(schoener_d|edaphic_z_score|climatic_z_score|type_edaphic_z_score|nearest_type_niche_taxon|matches_type_lithology|delta_doy|hopkins_)"
   )
   setdiff(
     grep(eco_pattern, col_names, value = TRUE, ignore.case = TRUE),

@@ -201,7 +201,7 @@ adaptive_point_alpha <- function(n_pts) {
 .expand_synonym_binomial_keys <- function(syn_vec) {
   if (length(syn_vec) == 0L) return(character(0))
   nms <- tolower(gsub("\\s+", " ", trimws(names(syn_vec))))
-  vals <- trimws(as.character(syn_vec))
+  vals <- gsub("^Packera\\s+(?:x|×)\\s+", "Packera ", trimws(as.character(syn_vec)), ignore.case = TRUE)
   keep <- !is.na(nms) & nzchar(nms) & !is.na(vals) & nzchar(vals)
   if (!any(keep)) return(character(0))
   out <- stats::setNames(vals[keep], nms[keep])
@@ -327,7 +327,7 @@ standardize_taxon_name <- function(raw_vec) {
       if (has_syn && (b_hyb %in% names(syn_map))) { std_u[i] <- unname(syn_map[[b_hyb]]); next }
       if (has_syn && (b_plain %in% names(syn_map))) { std_u[i] <- unname(syn_map[[b_plain]]); next }
       if (gen_full == "packera") {
-        p_can <- paste0("Packera ", if (is_hyb) "× " else "", ep)
+        p_can <- paste0("Packera ", ep)
         if (has_syn) { std_u[i] <- p_can; next }
         fb_packera[i] <- p_can
       }

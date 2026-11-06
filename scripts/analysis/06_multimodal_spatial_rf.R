@@ -251,6 +251,11 @@ resolve_step06_authority_weights <- function(df) {
     post_mean <- (a_prior + k_cell) / (a_prior + b_prior + m_cell)
     w_out[idx] <- pmax(0.05, pmin(1.0, post_mean))
   }
+  if (exists(".identify_type_specimen_vec", mode = "function")) {
+    ti <- .identify_type_specimen_vec(df)
+    w_out[ti$type_rank == 2L] <- 3.0
+    w_out[ti$type_rank == 1L] <- pmax(w_out[ti$type_rank == 1L], 2.8)
+  }
   return(round(w_out, 4))
 }
 

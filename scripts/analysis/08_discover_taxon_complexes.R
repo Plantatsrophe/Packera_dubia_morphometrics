@@ -14,6 +14,9 @@ suppressPackageStartupMessages({
 for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "pub_figures_utils.R"))) {
   if (!exists("standardize_taxon_name", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
 }
+for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "authority_weighting_utils.R"))) {
+  if (!exists(".identify_type_specimen_vec", mode = "function") && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
+}
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
   if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
@@ -82,7 +85,7 @@ load_and_merge_inputs <- function(opts) {
       idx_m <- match(m_key, mm_key); s_cats <- names(which(table(mm$catalogNumber) == 1L))
       idx_fb <- ifelse(m_df$catalogNumber %in% s_cats, match(m_df$catalogNumber, mm$catalogNumber), NA_integer_)
       idx_m <- ifelse(!is.na(idx_m), idx_m, idx_fb)
-      extra_cols <- grep("^(primary_(env|clim|edaph)_predictors|edaphic_z_score|climatic_z_score|edaphic_schoener_d|schoener_d|edaphic_niche_overlap_d|bio[0-9]+_|fine_|ssurgo_|polaris_|solus_|topo_|cfvo|awc|bdricm|resdept|alr_|clr_|azonal_|soil_)", names(mm), value = TRUE)
+      extra_cols <- grep("^(primary_(env|clim|edaph)_predictors|edaphic_z_score|climatic_z_score|type_edaphic_z_score|nearest_type_niche_taxon|matches_type_lithology|edaphic_schoener_d|schoener_d|edaphic_niche_overlap_d|bio[0-9]+_|fine_|ssurgo_|polaris_|solus_|topo_|cfvo|awc|bdricm|resdept|alr_|clr_|azonal_|soil_)", names(mm), value = TRUE)
       for (ec in extra_cols) {
         if (!(ec %in% names(m_df))) m_df[[ec]] <- mm[[ec]][idx_m]
         else { na_e <- is.na(m_df[[ec]]) & !is.na(idx_m); if (any(na_e)) m_df[[ec]][na_e] <- mm[[ec]][idx_m[na_e]] }
@@ -100,18 +103,20 @@ select_taxon_anchors <- function(morph_df) {
   } else if ("morph_tier_source" %in% names(morph_df)) {
     mts <- as.character(morph_df$morph_tier_source); if (any(!is.na(mts) & nzchar(mts))) is_t1_pure <- !is.na(mts) & (mts == "Tier_1_Pure")
   }
+  type_info <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(morph_df) else list(type_rank = rep(0L, nrow(morph_df)), is_type_specimen = rep(FALSE, nrow(morph_df)))
+  is_type <- as.logical(type_info$is_type_specimen); is_type[is.na(is_type)] <- FALSE
   det_tier <- if ("determiner_tier" %in% names(morph_df)) as.character(morph_df$determiner_tier) else rep("Tier_1_Gold", nrow(morph_df))
-  is_gs <- det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")
-  taxa <- sort(unique(morph_df$species_standardized))
-  anchor_mask <- rep(FALSE, nrow(morph_df)); n_gs_vec <- stats::setNames(integer(length(taxa)), taxa)
+  is_gs <- (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_type; taxa <- sort(unique(morph_df$species_standardized))
+  anchor_mask <- rep(FALSE, nrow(morph_df)); n_gs_vec <- stats::setNames(integer(length(taxa)), taxa); n_type_vec <- stats::setNames(integer(length(taxa)), taxa)
   for (tx in taxa) {
-    tx_idx <- which(morph_df$species_standardized == tx); gs_pure_idx <- tx_idx[is_t1_pure[tx_idx] & is_gs[tx_idx]]
-    n_gs_vec[tx] <- length(gs_pure_idx)
+    tx_idx <- which(morph_df$species_standardized == tx); type_idx <- tx_idx[is_type[tx_idx]]
+    n_type_vec[tx] <- length(type_idx); gs_pure_idx <- tx_idx[is_t1_pure[tx_idx] & is_gs[tx_idx]]; n_gs_vec[tx] <- length(gs_pure_idx)
     if (length(gs_pure_idx) >= 5L) anchor_mask[gs_pure_idx] <- TRUE
     else if (length(tx_idx[is_t1_pure[tx_idx]]) >= 3L) anchor_mask[tx_idx[is_t1_pure[tx_idx]]] <- TRUE
     else anchor_mask[tx_idx] <- TRUE
+    if (length(type_idx) > 0L) anchor_mask[type_idx] <- TRUE
   }
-  list(anchor_df = morph_df[anchor_mask, , drop = FALSE], anchor_mask = anchor_mask, n_gold_silver = n_gs_vec)
+  list(anchor_df = morph_df[anchor_mask, , drop = FALSE], anchor_mask = anchor_mask, n_gold_silver = n_gs_vec, n_type_specimens = n_type_vec)
 }
 
 # 3. Step B: Empirical Cohen's Kappa Reliability Weights (Dawid & Skene 1979)
@@ -264,11 +269,18 @@ compute_morphometric_affinity <- function(morph_df, anchor_df, taxa) {
     X_anchor[!is.finite(X_anchor[, j]), j] <- med_j; X_all[!is.finite(X_all[, j]), j] <- med_j
   }
   p <- ncol(X_anchor); centroids <- matrix(0.0, nrow = n_taxa, ncol = p, dimnames = list(taxa, feat_cols))
+  anc_type <- if (exists(".identify_type_specimen_vec", mode = "function")) as.logical(.identify_type_specimen_vec(anchor_df)$is_type_specimen) else rep(FALSE, nrow(anchor_df))
+  anc_type[is.na(anc_type)] <- FALSE
   S_pooled <- matrix(0.0, nrow = p, ncol = p); df_total <- 0L
   for (tx in taxa) {
-    sub_x <- X_anchor[anchor_df$species_standardized == tx, , drop = FALSE]
+    tx_rows <- which(anchor_df$species_standardized == tx); sub_x <- X_anchor[tx_rows, , drop = FALSE]
     if (nrow(sub_x) == 0L) sub_x <- X_all[morph_df$species_standardized == tx, , drop = FALSE]
-    centroids[tx, ] <- colMeans(sub_x, na.rm = TRUE)
+    mu_base <- colMeans(sub_x, na.rm = TRUE); type_rows_tx <- tx_rows[anc_type[tx_rows]]
+    if (length(type_rows_tx) >= 1L) {
+      gamma_k <- min(0.35, 0.20 + 0.05 * length(type_rows_tx))
+      mu_base <- (1.0 - gamma_k) * mu_base + gamma_k * colMeans(X_anchor[type_rows_tx, , drop = FALSE], na.rm = TRUE)
+    }
+    centroids[tx, ] <- mu_base
     if (nrow(sub_x) >= 2L) {
       cov_tx <- stats::cov(sub_x); cov_tx[!is.finite(cov_tx)] <- 0.0
       S_pooled <- S_pooled + (nrow(sub_x) - 1L) * cov_tx; df_total <- df_total + (nrow(sub_x) - 1L)
@@ -287,14 +299,16 @@ compute_morphometric_affinity <- function(morph_df, anchor_df, taxa) {
   K_mahal <- exp(-D2_mahal / (2.0 * med_d2)); diag(K_mahal) <- 0.0
 
   C_morph <- matrix(0.0, nrow = n_taxa, ncol = n_taxa, dimnames = list(taxa, taxa))
+  has_type_nn <- "nearest_type_morph_taxon" %in% names(morph_df)
   for (i in seq_len(n_taxa)) {
     tx_i <- taxa[i]; idx_i <- which(morph_df$species_standardized == tx_i); if (length(idx_i) == 0L) next
     X_i <- X_all[idx_i, , drop = FALSE]
     cda_pred_i <- if ("cda_predicted_taxon" %in% names(morph_df)) as.character(morph_df$cda_predicted_taxon[idx_i]) else rep(tx_i, length(idx_i))
+    type_nn_i <- if (has_type_nn) as.character(morph_df$nearest_type_morph_taxon[idx_i]) else rep(NA_character_, length(idx_i))
     log_likes <- matrix(0.0, nrow = length(idx_i), ncol = n_taxa)
     for (j in seq_len(n_taxa)) { diff_mat <- sweep(X_i, 2, centroids[j, ], "-"); log_likes[, j] <- -0.5 * pmax(0.0, rowSums((diff_mat %*% S_inv) * diff_mat)) }
     probs_i <- exp(sweep(log_likes, 1, apply(log_likes, 1, max), "-")); probs_i <- sweep(probs_i, 1, pmax(rowSums(probs_i), 1e-12), "/")
-    for (j in seq_len(n_taxa)) if (i != j) C_morph[i, j] <- mean((!is.na(cda_pred_i) & cda_pred_i == taxa[j]) | (probs_i[, j] >= 0.15), na.rm = TRUE)
+    for (j in seq_len(n_taxa)) if (i != j) C_morph[i, j] <- mean((!is.na(cda_pred_i) & cda_pred_i == taxa[j]) | (!is.na(type_nn_i) & type_nn_i == taxa[j] & probs_i[, j] >= 0.10) | (probs_i[, j] >= 0.15), na.rm = TRUE)
   }
   C_morph_sym <- 0.5 * (C_morph + t(C_morph)); diag(C_morph_sym) <- 0.0
   S_morph <- 0.60 * K_mahal + 0.40 * C_morph_sym; diag(S_morph) <- 0.0
@@ -306,12 +320,20 @@ compute_visual_affinity <- function(vis_df, taxa) {
   if (is.null(vis_df) || nrow(vis_df) == 0L) return(list(S_vis = C_vis, C_vis = C_vis))
   c_err <- if ("c_error" %in% names(vis_df)) suppressWarnings(as.numeric(vis_df$c_error)) else rep(0.5, nrow(vis_df)); c_err[!is.finite(c_err)] <- 0.5
   det_tier <- if ("determiner_tier" %in% names(vis_df)) as.character(vis_df$determiner_tier) else rep("Tier_1_Gold", nrow(vis_df))
-  is_anchor <- det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")
+  vis_type <- if (exists(".identify_type_specimen_vec", mode = "function")) as.logical(.identify_type_specimen_vec(vis_df)$is_type_specimen) else rep(FALSE, nrow(vis_df))
+  vis_type[is.na(vis_type)] <- FALSE
+  is_anchor <- (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) | vis_type
+  has_vis_type_nn <- "vision_nearest_type_taxon" %in% names(vis_df) && "vision_type_cosine_sim" %in% names(vis_df)
   for (i in seq_len(n_taxa)) {
     tx_i <- taxa[i]; idx_i <- which(vis_df$species_standardized == tx_i); if (length(idx_i) == 0L) next
     pred_i <- as.character(vis_df$vision_predicted_label[idx_i]); cerr_i <- c_err[idx_i]; anch_i <- is_anchor[idx_i]
+    v_type_nn <- if (has_vis_type_nn) as.character(vis_df$vision_nearest_type_taxon[idx_i]) else rep(NA_character_, length(idx_i))
+    v_type_sim <- if (has_vis_type_nn) suppressWarnings(as.numeric(vis_df$vision_type_cosine_sim[idx_i])) else rep(NA_real_, length(idx_i))
     w_i <- ifelse(!is.na(pred_i) & pred_i != tx_i, ifelse(anch_i, pmax(1.0 - cerr_i, cerr_i), pmax(cerr_i, 0.25)), 1.0 - cerr_i); w_i[!is.finite(w_i) | w_i <= 0] <- 0.5
-    for (j in seq_len(n_taxa)) if (i != j) { match_j <- !is.na(pred_i) & (pred_i == taxa[j]); if (any(match_j)) C_vis[i, j] <- sum(w_i[match_j], na.rm = TRUE) / length(idx_i) }
+    for (j in seq_len(n_taxa)) if (i != j) {
+      match_j <- (!is.na(pred_i) & (pred_i == taxa[j])) | (!is.na(v_type_nn) & (v_type_nn == taxa[j]) & is.finite(v_type_sim) & v_type_sim >= 0.85)
+      if (any(match_j)) C_vis[i, j] <- sum(w_i[match_j], na.rm = TRUE) / length(idx_i)
+    }
   }
   S_vis <- 0.5 * (C_vis + t(C_vis)); diag(S_vis) <- 0.0
   list(S_vis = S_vis, C_vis = C_vis)
@@ -496,25 +518,38 @@ evaluate_hierarchical_complex_delimitation <- function(morph_df, vis_df, pheno_r
     if (any(!is.na(nt1))) is_t1_pure <- !is.na(nt1) & (nt1 >= 1)
   }
 
+  type_info <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(morph_df) else list(type_rank = rep(0L, n), is_type_specimen = rep(FALSE, n))
+  is_type_spec <- as.logical(type_info$is_type_specimen); is_type_spec[is.na(is_type_spec)] <- FALSE
+  type_morph_conc <- if ("type_morph_concordance" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$type_morph_concordance)) else rep(NA_real_, n)
+  vis_type_sim <- if ("vision_type_cosine_sim" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$vision_type_cosine_sim)) else rep(NA_real_, n)
+  if (!is.null(vis_df) && "vision_type_cosine_sim" %in% names(vis_df) && exists("idx_v", inherits = FALSE)) {
+    vts <- suppressWarnings(as.numeric(vis_df$vision_type_cosine_sim))[idx_v]
+    vis_type_sim[!is.finite(vis_type_sim) & is.finite(vts)] <- vts[!is.finite(vis_type_sim) & is.finite(vts)]
+  }
+  type_concordant_block <- is.finite(type_morph_conc) & (type_morph_conc >= 0.70) & is.finite(vis_type_sim) & (vis_type_sim >= 0.85)
+  is_typ_morph <- if ("is_typical_morphotype" %in% names(morph_df)) as.logical(morph_df$is_typical_morphotype) else rep(NA, n)
+  non_typical_morph <- !is.na(is_typ_morph) & !is_typ_morph
+  type_edaph_z <- if ("type_edaphic_z_score" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$type_edaphic_z_score)) else rep(NA_real_, n)
+
   morph_disagrees <- !is.na(cda_pred) & (cda_pred != sp_given) & (cda_prob >= 0.50)
   vis_disagrees <- !is.na(vis_pred) & (vis_pred != sp_given) & (c_err >= 0.55)
   both_alt_agree <- morph_disagrees & vis_disagrees & (cda_pred == vis_pred)
   inter_modal_mosaic <- morph_disagrees & vis_disagrees & (cda_pred != vis_pred)
-  single_strong_reassign <- !inter_modal_mosaic & (
+  single_strong_reassign <- !inter_modal_mosaic & !type_concordant_block & (
     (morph_disagrees & cda_prob >= 0.80 & (!vis_disagrees | cda_pred == vis_pred)) |
     (vis_disagrees & c_err >= 0.85 & (!morph_disagrees | cda_pred == vis_pred)))
-  # Stage 1: Misidentification_Reassign (evaluated BEFORE hybridity)
-  is_stage1_misid <- both_alt_agree | single_strong_reassign
+  # Stage 1: Misidentification_Reassign (evaluated BEFORE hybridity; Nomenclatural Type Immunity Rule A)
+  is_stage1_misid <- !is_type_spec & (both_alt_agree | single_strong_reassign)
   # Stage 2: Hybrid_Introgressant (Rieseberg 1995; Slenker et al. 2022)
-  is_stage2_hybrid <- !is_stage1_misid & (inter_modal_mosaic | (cda_margin < 0.25 & (morph_disagrees | vis_disagrees) & d_edaph >= 0.30))
+  is_stage2_hybrid <- !is_type_spec & !is_stage1_misid & (inter_modal_mosaic | (cda_margin < 0.25 & (morph_disagrees | vis_disagrees) & d_edaph >= 0.30))
   # Stage 3: Putative_Cryptic_Species via Integration by Congruence (Padial et al. 2010)
-  has_evol_barrier <- (!is.na(d_doy) & abs(d_doy) >= tau_cry_vec) | (d_edaph < 0.30)
-  is_stage3_cryptic <- !is_stage1_misid & !is_stage2_hybrid & is_t1_pure & (cda_prob < 0.70) & (c_err < 0.75) &
-    (m_flag | (gmm_cl > length(unique(sp_given)) & gmm_bf >= 6.0)) & has_evol_barrier
+  has_evol_barrier <- (!is.na(d_doy) & abs(d_doy) >= tau_cry_vec) | (d_edaph < 0.30) | (is.finite(type_edaph_z) & type_edaph_z >= 3.0)
+  is_stage3_cryptic <- !is_type_spec & !is_stage1_misid & !is_stage2_hybrid & is_t1_pure & (cda_prob < 0.70) & (c_err < 0.75) &
+    (m_flag | non_typical_morph | (gmm_cl > length(unique(sp_given)) & gmm_bf >= 6.0)) & has_evol_barrier
   # Stage 4: Subspecies_Ecotype vs. Ecophenotypic_Plasticity
-  is_stage4_ecotype <- !is_stage1_misid & !is_stage2_hybrid & !is_stage3_cryptic &
-    ((d_edaph < 0.30) | (!is.na(d_doy) & abs(d_doy) >= tau_eco_vec)) & (m_flag | gmm_cl > 1L)
-  is_stage4_plastic <- !is_stage1_misid & !is_stage2_hybrid & !is_stage3_cryptic & !is_stage4_ecotype & m_flag
+  is_stage4_ecotype <- !is_type_spec & !is_stage1_misid & !is_stage2_hybrid & !is_stage3_cryptic &
+    ((d_edaph < 0.30) | (is.finite(type_edaph_z) & type_edaph_z >= 2.5) | (!is.na(d_doy) & abs(d_doy) >= tau_eco_vec)) & (m_flag | non_typical_morph | gmm_cl > 1L)
+  is_stage4_plastic <- !is_type_spec & !is_stage1_misid & !is_stage2_hybrid & !is_stage3_cryptic & !is_stage4_ecotype & m_flag
 
   ifelse(is_stage1_misid, "Misidentification_Reassign",
     ifelse(is_stage2_hybrid, "Hybrid_Introgressant",
@@ -722,6 +757,7 @@ main <- function() {
       int_cong[i] <- n_mod >= 2L
     }
   }
+  part_res$complexes_df$n_type_specimens <- if (!is.null(anc$n_type_specimens)) as.integer(anc$n_type_specimens[taxa]) else integer(n_taxa)
   part_res$complexes_df$hopkins_pheno_overlap <- hop_ov
   part_res$complexes_df$eco_schoener_overlap <- eco_ov
   part_res$complexes_df$integrative_congruence <- int_cong
