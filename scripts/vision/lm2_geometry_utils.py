@@ -3467,9 +3467,16 @@ def crop_dense_rosette_tier4(
         rosette_crop = precropped_rosette_bgr
     else:
         if raw_img is None:
-            if not raw_image_path.exists():
+            resolved_raw_path = raw_image_path
+            if not resolved_raw_path.exists():
+                for _ext in (".webp", ".jpg", ".jpeg", ".png"):
+                    _cand = resolved_raw_path.with_suffix(_ext)
+                    if _cand.exists():
+                        resolved_raw_path = _cand
+                        break
+            if not resolved_raw_path.exists():
                 return None
-            raw_img = cv2.imread(str(raw_image_path))
+            raw_img = cv2.imread(str(resolved_raw_path))
         if raw_img is None:
             return None
 
@@ -3510,7 +3517,10 @@ def crop_dense_rosette_tier4(
     out_base = (output_dir / "data") if (output_dir.name != "data" and (output_dir / "data").is_dir()) else output_dir
     save_path = out_base / "cropped_patches" / "rosettes_dense" / f"{cat}_p{plant_id}_rosette.jpg"
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(save_path), rosette_crop)
+    try:
+        cv2.imwrite(str(save_path), rosette_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    except TypeError:
+        cv2.imwrite(str(save_path), rosette_crop)
     return str(save_path)
 
 

@@ -789,6 +789,8 @@ EXCLUDED_WESTERN_STATES: Set[str] = {
     "CO", "COLORADO", "NM", "NEW MEXICO", "WY", "WYOMING", "MT", "MONTANA",
     "UT", "UTAH", "AZ", "ARIZONA", "NV", "NEVADA", "ID", "IDAHO",
     "WA", "WASHINGTON", "OR", "OREGON", "CA", "CALIFORNIA", "AK", "ALASKA", "HI", "HAWAII",
+    "BC", "BRITISH COLUMBIA", "AB", "ALBERTA", "SK", "SASKATCHEWAN",
+    "YT", "YUKON", "YUKON TERRITORY", "NT", "NORTHWEST TERRITORIES", "NU", "NUNAVUT",
 }
 
 # Module-level defaults instantiated dynamically from configuration YAML

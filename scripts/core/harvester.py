@@ -157,8 +157,16 @@ def _hydrate_synonyms_from_sqlite(db_path: Optional[Union[str, Path]] = None) ->
             conn = get_db_connection(db_path=resolved, read_only=True)
             try:
                 for raw_low, canon in load_taxon_synonyms(conn).items():
-                    if raw_low and canon:
-                        _DYNAMIC_SYNONYM_TO_CANONICAL.setdefault(raw_low, canon)
+                    if not raw_low or not canon:
+                        continue
+                    raw_p_bin = _extract_canonical_binomial(raw_low, {"Packera"})
+                    if (
+                        raw_p_bin
+                        and raw_p_bin.lower() != canon.lower()
+                        and not re.search(r"\b(?:var|subsp|ssp|f)\b", raw_low)
+                    ):
+                        continue
+                    _DYNAMIC_SYNONYM_TO_CANONICAL.setdefault(raw_low, canon)
             finally:
                 conn.close()
     except Exception:
@@ -188,6 +196,7 @@ def _register_dynamic_synonyms(
     canonical_packera: str,
     synonyms: Iterable[Any],
     author_strings: Optional[Iterable[str]] = None,
+    allow_packera_species_remap: bool = False,
 ) -> None:
     """Register discovered synonyms and author strings in the in-memory standardization cache."""
     if not canonical_packera or not canonical_packera.startswith("Packera "):
@@ -199,6 +208,14 @@ def _register_dynamic_synonyms(
             _DYNAMIC_TAXON_AUTHOR_STRINGS.setdefault(canonical_packera, set()).update(clean_authors)
             for auth_sci in clean_authors:
                 auth_low = re.sub(r"\s+", " ", auth_sci.lower())
+                auth_p_bin = _extract_canonical_binomial(auth_sci, {"Packera"})
+                if (
+                    not allow_packera_species_remap
+                    and auth_p_bin
+                    and auth_p_bin.lower() != canonical_packera.lower()
+                    and not re.search(r"\b(?:var|subsp|ssp|f)\b", auth_low)
+                ):
+                    continue
                 _DYNAMIC_SYNONYM_TO_CANONICAL[auth_low] = canonical_packera
                 auth_bin = _extract_canonical_binomial(auth_sci, _SYNONYM_GENERA)
                 if auth_bin:
@@ -210,7 +227,16 @@ def _register_dynamic_synonyms(
         item_str = re.sub(r"\s+", " ", str(item).strip())
         if not item_str:
             continue
-        _DYNAMIC_SYNONYM_TO_CANONICAL[item_str.lower()] = canonical_packera
+        item_low = item_str.lower()
+        item_p_bin = _extract_canonical_binomial(item_str, {"Packera"})
+        if (
+            not allow_packera_species_remap
+            and item_p_bin
+            and item_p_bin.lower() != canonical_packera.lower()
+            and not re.search(r"\b(?:var|subsp|ssp|f)\b", item_low)
+        ):
+            continue
+        _DYNAMIC_SYNONYM_TO_CANONICAL[item_low] = canonical_packera
         item_bin = _extract_canonical_binomial(item_str, _SYNONYM_GENERA)
         if item_bin:
             _DYNAMIC_SYNONYM_TO_CANONICAL[item_bin.lower()] = canonical_packera
@@ -584,6 +610,7 @@ def expand_taxon_synonyms_gbif(
     if canonical_packera and canonical_packera.lower() in _DYNAMIC_SYNONYM_TO_CANONICAL:
         canonical_packera = _DYNAMIC_SYNONYM_TO_CANONICAL[canonical_packera.lower()]
 
+    cfg_group_matched: List[str] = []
     if cfg_synonyms:
         for cfg_key, cfg_vals in cfg_synonyms.items():
             key_clean = str(cfg_key).strip()
@@ -600,6 +627,7 @@ def expand_taxon_synonyms_gbif(
                     canonical_packera = _extract_canonical_binomial(key_clean, {"Packera"})
                 for g in all_group:
                     _add_candidate(g)
+                    cfg_group_matched.append(g)
 
     if canonical_packera and canonical_packera.startswith("Packera "):
         _add_candidate(canonical_packera)
@@ -609,14 +637,17 @@ def expand_taxon_synonyms_gbif(
     gbif_query_target = canonical_packera if (canonical_packera and canonical_packera.startswith("Packera ")) else clean_input
     gbif_acc, gbif_syns, gbif_author_names = _query_gbif_backbone_and_synonyms(gbif_query_target)
     if gbif_acc and gbif_acc.startswith("Packera "):
-        canonical_packera = gbif_acc
+        if not (canonical_packera and canonical_packera.startswith("Packera ")):
+            canonical_packera = gbif_acc
         _add_candidate(gbif_acc)
     for g_syn in gbif_syns:
         _add_candidate(g_syn)
 
     # Register dynamic synonyms -> canonical Packera binomial & cache protologue author strings
     if canonical_packera and canonical_packera.startswith("Packera "):
-        _register_dynamic_synonyms(canonical_packera, expanded, gbif_author_names)
+        if cfg_group_matched:
+            _register_dynamic_synonyms(canonical_packera, cfg_group_matched, None, allow_packera_species_remap=True)
+        _register_dynamic_synonyms(canonical_packera, expanded, gbif_author_names, allow_packera_species_remap=False)
         _persist_dynamic_synonyms_for_taxon(canonical_packera)
 
     return expanded
@@ -837,20 +868,53 @@ def haversine_distance_meters(lat1: float, lon1: float, lat2: float, lon2: float
     return r_earth * c
 
 
+def resolve_voucher_image_path(
+    image_path: Union[str, Path],
+    workspace_dir: Optional[Path] = None,
+) -> Path:
+    """
+    Resolves a voucher image path on disk by checking the given path, its `.webp` sibling,
+    and its `.jpg`/`.jpeg`/`.png` siblings (both relative to `workspace_dir` if provided
+    and directly), returning the existing file path on disk (or the `.webp` path by default
+    if none exists yet).
+    """
+    if image_path is None:
+        return Path("")
+    raw_str = str(image_path).strip()
+    if not raw_str:
+        return Path("")
+    p = Path(raw_str)
+    ws_root = Path(workspace_dir) if workspace_dir is not None else None
+
+    base_candidates: List[Path] = []
+    if p.is_absolute():
+        base_candidates.append(p)
+    else:
+        if ws_root is not None:
+            base_candidates.append(ws_root / p)
+        base_candidates.append(p)
+        base_candidates.append(PROJECT_ROOT / p)
+
+    for base_p in base_candidates:
+        if base_p.is_file():
+            return base_p
+        for ext in (".webp", ".jpg", ".jpeg", ".png"):
+            sib = base_p.with_suffix(ext)
+            if sib != base_p and sib.is_file():
+                return sib
+
+    default_target = base_candidates[0] if base_candidates else p
+    if default_target.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+        return default_target.with_suffix(".webp")
+    return default_target
+
+
 def get_image_resolution_score(image_path_str: Optional[str], workspace_dir: Optional[Path] = None) -> float:
     """Computes a numeric image resolution score (megapixels or pixel count, fallback to byte size)."""
-    if not image_path_str or not isinstance(image_path_str, str):
+    if not image_path_str or not isinstance(image_path_str, str) or not image_path_str.strip():
         return 0.0
-    p = Path(image_path_str)
-    resolved_path: Optional[Path] = None
-    if p.is_absolute() and p.exists():
-        resolved_path = p
-    elif workspace_dir and (workspace_dir / p).exists():
-        resolved_path = workspace_dir / p
-    elif (PROJECT_ROOT / p).exists():
-        resolved_path = PROJECT_ROOT / p
-
-    if resolved_path and resolved_path.exists():
+    resolved_path = resolve_voucher_image_path(image_path_str, workspace_dir=workspace_dir)
+    if resolved_path.is_file():
         try:
             with Image.open(resolved_path) as img:
                 w, h = img.size
@@ -976,6 +1040,7 @@ def stratify_duplicates(
 
     n_rows = len(df)
     group_labels: List[Optional[str]] = [None] * n_rows
+    row_std_taxa: List[str] = [_resolve_row_standardized_packera(df.iloc[i]) for i in range(n_rows)]
 
     # Pass 1: Assign keys for records with explicit collection numbers
     for idx in range(n_rows):
@@ -1013,7 +1078,12 @@ def stratify_duplicates(
         matched_to_numbered = set()
         for i in coord_indices:
             for num_i in numbered_date_indices:
-                if norm_collectors[i] == norm_collectors[num_i] or norm_collectors[i] == "unknown":
+                same_tx = (
+                    not row_std_taxa[i]
+                    or not row_std_taxa[num_i]
+                    or row_std_taxa[i] == row_std_taxa[num_i]
+                )
+                if same_tx and (norm_collectors[i] == norm_collectors[num_i] or norm_collectors[i] == "unknown"):
                     dist = haversine_distance_meters(lats[i], lons[i], lats[num_i], lons[num_i])
                     if dist <= max_distance_meters:
                         group_labels[i] = group_labels[num_i]
@@ -1043,7 +1113,12 @@ def stratify_duplicates(
                             or norm_collectors[curr_idx] == "unknown"
                             or norm_collectors[b_idx] == "unknown"
                         )
-                        if same_coll:
+                        same_tx = (
+                            not row_std_taxa[curr_idx]
+                            or not row_std_taxa[b_idx]
+                            or row_std_taxa[curr_idx] == row_std_taxa[b_idx]
+                        )
+                        if same_coll and same_tx:
                             dist = haversine_distance_meters(
                                 lats[curr_idx], lons[curr_idx], lats[b_idx], lons[b_idx]
                             )
@@ -1118,7 +1193,8 @@ def stratify_duplicates(
 
             # Priority 4: Highest specimen image resolution
             img_path = str(row.get("image_path", "") if not pd.isna(row.get("image_path", "")) else "")
-            res_score = get_image_resolution_score(img_path, workspace_dir=workspace_dir)
+            resolved_img = resolve_voucher_image_path(img_path, workspace_dir=workspace_dir) if img_path else Path("")
+            res_score = get_image_resolution_score(str(resolved_img) if img_path else "", workspace_dir=workspace_dir)
 
             cat_tiebreak = str(row.get("catalogNumber", idx))
 
@@ -1260,7 +1336,7 @@ def spatially_balance_and_thin_vouchers(
             return "Unknown"
         out_df["species_standardized"] = out_df.apply(_fill_sp, axis=1)
 
-    # Step A: Exsiccatae Deduplication
+    # Step A: Exsiccatae Deduplication (unconditionally retaining all nomenclatural type specimens)
     if primary_duplicates_only:
         if "is_primary_duplicate" not in out_df.columns:
             if any(c in out_df.columns for c in ("recordedBy", "recordNumber", "exsiccatae_key")):
@@ -1270,7 +1346,15 @@ def spatially_balance_and_thin_vouchers(
         prim_mask = out_df["is_primary_duplicate"].map(
             lambda v: v is True or str(v).strip().lower() in {"true", "1", "t", "yes"}
         )
-        out_df = out_df.loc[prim_mask].reset_index(drop=True)
+        ts_col_a = "type_status" if "type_status" in out_df.columns else (
+            "typeStatus" if "typeStatus" in out_df.columns else None
+        )
+        if ts_col_a is not None:
+            type_mask_a = out_df[ts_col_a].map(lambda t: classify_nomenclatural_type_rank(t)[0] >= 1)
+            keep_mask = prim_mask | type_mask_a
+        else:
+            keep_mask = prim_mask
+        out_df = out_df.loc[keep_mask].reset_index(drop=True)
         if out_df.empty:
             out_df["spatial_balance_weight"] = pd.Series(dtype=float)
             return out_df
@@ -1360,7 +1444,8 @@ def spatially_balance_and_thin_vouchers(
 
         # 5. image_resolution_score
         img_p = str(row.get("image_path", "") if not pd.isna(row.get("image_path", "")) else "")
-        res_score = get_image_resolution_score(img_p, workspace_dir=workspace_dir)
+        resolved_img_p = resolve_voucher_image_path(img_p, workspace_dir=workspace_dir) if img_p else Path("")
+        res_score = get_image_resolution_score(str(resolved_img_p) if img_p else "", workspace_dir=workspace_dir)
 
         priority_tuples.append((has_type, t_subrank, tier_score, n_t1, round(coord_prec, 8), round(res_score, 4), cat_str))
 
@@ -2386,26 +2471,40 @@ def is_excluded_western_region(
     lat: Optional[float] = None,
     lon: Optional[float] = None,
     western_longitude_threshold: float = WESTERN_LONGITUDE_THRESHOLD,
+    exclude_western: bool = True,
+    is_type_specimen: bool = False,
 ) -> bool:
     """Determines whether a record originates from a region farther west than TX and OK."""
+    if not exclude_western:
+        return False
+
+    has_valid_state = False
     if state_province is not None and not (isinstance(state_province, float) and math.isnan(state_province)):
-        raw_state = str(state_province).strip()
-        cleaned = re.sub(r"\(state\)", "", raw_state, flags=re.IGNORECASE).strip(" ._,-")
-        upper_state = cleaned.upper()
+        if pd is None or not pd.isna(state_province):
+            raw_state = str(state_province).strip()
+            cleaned = re.sub(r"\((?:state|province|territory)\)", "", raw_state, flags=re.IGNORECASE).strip(" ._,-")
+            upper_state = cleaned.upper()
+            if upper_state and upper_state not in {"NONE", "NAN", "NA", "N/A", "NULL", "UNKNOWN", "UNSPECIFIED", "UNRECORDED"}:
+                has_valid_state = True
+                if upper_state in {"WASHINGTON, D.C.", "WASHINGTON D.C.", "WASHINGTON DC", "DISTRICT OF COLUMBIA", "DC"}:
+                    return False
 
-        if upper_state in {"WASHINGTON, D.C.", "WASHINGTON D.C.", "WASHINGTON DC", "DISTRICT OF COLUMBIA", "DC"}:
-            return False
+                if upper_state in EXCLUDED_WESTERN_STATES:
+                    return True
 
-        if upper_state in EXCLUDED_WESTERN_STATES:
-            return True
-
+    has_valid_lon = False
     if lon is not None:
         try:
             lon_val = float(lon)
-            if lon_val < float(western_longitude_threshold):
-                return True
+            if math.isfinite(lon_val):
+                has_valid_lon = True
+                if lon_val < float(western_longitude_threshold):
+                    return True
         except (ValueError, TypeError):
             pass
+
+    if not has_valid_lon and not has_valid_state and not is_type_specimen:
+        return True
 
     return False
 
@@ -2445,16 +2544,12 @@ def select_cascading_outgroup_anchors(
         def _has_local(row: pd.Series) -> int:
             img_p = str(row.get("image_path", "") if not pd.isna(row.get("image_path", "")) else "").strip()
             cat_str = str(row.get("catalogNumber", "") if not pd.isna(row.get("catalogNumber", "")) else "").strip()
-            cat_rel = f"data/raw_vouchers/{cat_str}.jpg" if cat_str else ""
-            candidates = []
-            if img_p:
-                p_obj = Path(img_p)
-                candidates.append(p_obj if p_obj.is_absolute() else (ws_root / p_obj))
-                candidates.append(Path(img_p))
-            if cat_rel:
-                candidates.append(ws_root / cat_rel)
-                candidates.append(Path(cat_rel))
-            return 1 if any(cp.is_file() for cp in candidates) else 0
+            cat_rel = f"data/raw_vouchers/{cat_str}.webp" if cat_str else ""
+            if img_p and resolve_voucher_image_path(img_p, workspace_dir=ws_root).is_file():
+                return 1
+            if cat_rel and resolve_voucher_image_path(cat_rel, workspace_dir=ws_root).is_file():
+                return 1
+            return 0
 
         def _has_url_or_path(row: pd.Series) -> bool:
             for c in ("image_path", "_image_url", "image_url", "identifier", "good_quality_AccessURI"):
@@ -2961,8 +3056,13 @@ def validate_image_quality(
     min_sharpness: float = DEFAULT_MIN_SHARPNESS_LAPLACIAN,
 ) -> Tuple[bool, Dict[str, Any]]:
     """Evaluates image resolution, byte size, and optical sharpness metrics."""
+    image_path = Path(image_path)
     if not image_path.exists():
-        return False, {"valid": False, "reason": "file_not_found"}
+        resolved_alt = resolve_voucher_image_path(image_path)
+        if resolved_alt.is_file():
+            image_path = resolved_alt
+        else:
+            return False, {"valid": False, "reason": "file_not_found"}
 
     file_size_kb = image_path.stat().st_size / 1024.0
     if file_size_kb < min_file_size_kb:
@@ -3040,13 +3140,20 @@ async def download_single_image(
     Returns:
         Tuple[bool, bool]: (success, was_skipped)
     """
-    if not force and destination_path.exists() and os.path.getsize(destination_path) > 0:
-        if logger:
-            logger.info(
-                f"Skipping download for existing voucher {destination_path.name} "
-                f"({os.path.getsize(destination_path)} bytes)."
-            )
-        return True, True
+    destination_path = Path(destination_path)
+    if not force:
+        existing_path = (
+            destination_path
+            if (destination_path.exists() and os.path.getsize(destination_path) > 0)
+            else resolve_voucher_image_path(destination_path)
+        )
+        if existing_path.is_file() and os.path.getsize(existing_path) > 0:
+            if logger:
+                logger.info(
+                    f"Skipping download for existing voucher {existing_path.name} "
+                    f"({os.path.getsize(existing_path)} bytes)."
+                )
+            return True, True
 
     async with semaphore:
         for attempt in range(1, max_retries + 1):
@@ -3063,6 +3170,20 @@ async def download_single_image(
                             or "octet-stream" in content_type
                             or content[:3] == b"\xff\xd8\xff"
                         ):
+                            payload_to_write = content
+                            if destination_path.suffix.lower() == ".webp" and Image is not None:
+                                try:
+                                    import io
+                                    with Image.open(io.BytesIO(content)) as img:
+                                        rgb_img = img.convert("RGB")
+                                        buf = io.BytesIO()
+                                        rgb_img.save(buf, format="WEBP", quality=85, method=4)
+                                        webp_bytes = buf.getvalue()
+                                        if len(webp_bytes) > 0:
+                                            payload_to_write = webp_bytes
+                                except Exception:
+                                    payload_to_write = content
+
                             destination_path.parent.mkdir(parents=True, exist_ok=True)
                             temp_file = tempfile.NamedTemporaryFile(
                                 dir=destination_path.parent,
@@ -3071,7 +3192,7 @@ async def download_single_image(
                                 delete=False,
                             )
                             temp_path = Path(temp_file.name)
-                            temp_file.write(content)
+                            temp_file.write(payload_to_write)
                             temp_file.flush()
                             os.fsync(temp_file.fileno())
                             temp_file.close()
@@ -3107,11 +3228,17 @@ async def download_all_voucher_images(
 
     pending = []
     for url, dest in records_to_download:
-        if not force and dest.exists() and os.path.getsize(dest) > 0:
+        dest_p = Path(dest)
+        existing_dest = (
+            dest_p
+            if (not force and dest_p.exists() and os.path.getsize(dest_p) > 0)
+            else (resolve_voucher_image_path(dest_p) if not force else dest_p)
+        )
+        if not force and existing_dest.is_file() and os.path.getsize(existing_dest) > 0:
             if logger:
                 logger.info(
-                    f"Retaining existing voucher image: {dest.name} "
-                    f"({os.path.getsize(dest)} bytes)."
+                    f"Retaining existing voucher image: {existing_dest.name} "
+                    f"({os.path.getsize(existing_dest)} bytes)."
                 )
             stats["skipped"] += 1
         else:
@@ -3154,6 +3281,131 @@ async def download_all_voucher_images(
         )
 
     return stats
+
+
+def migrate_existing_vouchers_to_webp(
+    raw_dir: Union[str, Path],
+    db_path: Optional[Union[str, Path]] = None,
+    curated_csv: Optional[Union[str, Path]] = None,
+    quality: int = 85,
+    logger: Optional[logging.Logger] = None,
+) -> int:
+    """
+    Scans `raw_dir` for any existing `.jpg`/`.jpeg` voucher images, converts each valid
+    image to `.webp` (`quality=85, method=4`) via PIL, removes the old `.jpg` once the
+    `.webp` is verified non-empty, and updates `.jpg` -> `.webp` in `curated_csv` and
+    SQLite `vouchers.image_path` if present.
+    """
+    raw_dir_path = Path(raw_dir)
+    migrated_count = 0
+
+    if raw_dir_path.exists() and raw_dir_path.is_dir() and Image is not None:
+        jpg_files = sorted(
+            p for p in raw_dir_path.iterdir()
+            if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg"}
+        )
+        for jpg_path in jpg_files:
+            webp_path = jpg_path.with_suffix(".webp")
+            if webp_path.is_file() and webp_path.stat().st_size > 0:
+                try:
+                    jpg_path.unlink()
+                    migrated_count += 1
+                except Exception:
+                    pass
+                continue
+            temp_path: Optional[Path] = None
+            try:
+                with Image.open(jpg_path) as img:
+                    rgb_img = img.convert("RGB")
+                    temp_file = tempfile.NamedTemporaryFile(
+                        dir=raw_dir_path,
+                        prefix=f"{jpg_path.stem}_",
+                        suffix=".webp.tmp",
+                        delete=False,
+                    )
+                    temp_path = Path(temp_file.name)
+                    temp_file.close()
+                    rgb_img.save(temp_path, format="WEBP", quality=int(quality), method=4)
+                if temp_path.is_file() and temp_path.stat().st_size > 0:
+                    temp_path.replace(webp_path)
+                    if webp_path.is_file() and webp_path.stat().st_size > 0:
+                        jpg_path.unlink()
+                        migrated_count += 1
+                elif temp_path and temp_path.exists():
+                    temp_path.unlink()
+            except Exception as exc:
+                if temp_path and temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except Exception:
+                        pass
+                if logger:
+                    logger.warning(f"Skipping WebP migration for unreadable image {jpg_path.name}: {exc}")
+
+    if migrated_count > 0 and logger:
+        logger.info(
+            f"Migrated {migrated_count} existing JPG voucher image(s) in {raw_dir_path} to WebP (quality={quality})."
+        )
+
+    if curated_csv is not None and pd is not None:
+        csv_p = Path(curated_csv)
+        if csv_p.is_file() and csv_p.stat().st_size > 0:
+            try:
+                df_csv = pd.read_csv(csv_p)
+                if "image_path" in df_csv.columns and not df_csv.empty:
+                    old_paths = df_csv["image_path"].astype(str).tolist()
+                    new_paths = [
+                        re.sub(r"\.jpe?g$", ".webp", str(v), flags=re.IGNORECASE)
+                        if not pd.isna(v) and str(v).strip()
+                        else v
+                        for v in df_csv["image_path"]
+                    ]
+                    if [str(x) for x in new_paths] != old_paths:
+                        df_csv["image_path"] = new_paths
+                        tmp_csv = tempfile.NamedTemporaryFile(
+                            mode="w",
+                            delete=False,
+                            dir=csv_p.parent,
+                            suffix=".tmp",
+                            encoding="utf-8",
+                        )
+                        tmp_csv_p = Path(tmp_csv.name)
+                        try:
+                            df_csv.to_csv(tmp_csv, index=False, encoding="utf-8")
+                            tmp_csv.flush()
+                            os.fsync(tmp_csv.fileno())
+                            tmp_csv.close()
+                            tmp_csv_p.replace(csv_p)
+                        except Exception:
+                            if tmp_csv_p.exists():
+                                tmp_csv_p.unlink()
+            except Exception as csv_exc:
+                if logger:
+                    logger.warning(f"Could not update image_path in {csv_p}: {csv_exc}")
+
+    try:
+        target_csv_ctx = Path(curated_csv) if curated_csv is not None else None
+        if db_path is not None or (target_csv_ctx is not None and is_canonical_or_explicit_db_context(target_csv_ctx)):
+            resolved_db = resolve_db_path(db_path=db_path)
+            if resolved_db != ":memory:" and Path(resolved_db).is_file():
+                conn = get_db_connection(db_path=resolved_db, init_schema=False)
+                try:
+                    conn.execute(
+                        "UPDATE vouchers SET image_path = SUBSTR(image_path, 1, LENGTH(image_path) - 4) || '.webp' "
+                        "WHERE image_path IS NOT NULL AND LOWER(SUBSTR(image_path, -4)) = '.jpg'"
+                    )
+                    conn.execute(
+                        "UPDATE vouchers SET image_path = SUBSTR(image_path, 1, LENGTH(image_path) - 5) || '.webp' "
+                        "WHERE image_path IS NOT NULL AND LOWER(SUBSTR(image_path, -5)) = '.jpeg'"
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+    except Exception as db_exc:
+        if logger:
+            logger.debug(f"SQLite WebP image_path migration skipped/warning: {db_exc}")
+
+    return migrated_count
 
 
 def export_curated_table(
@@ -3477,6 +3729,181 @@ class VoucherHarvester:
             taxon_retained = 0
             taxon_western_excluded = 0
 
+            def _ingest_occurrence_record(rec: Dict[str, Any], require_type: bool = False) -> None:
+                nonlocal taxon_harvested, taxon_retained, taxon_western_excluded
+
+                rec_type_rank, _ = classify_nomenclatural_type_rank(rec.get("typeStatus"))
+                is_rec_type = rec_type_rank >= 1
+                if require_type and not is_rec_type:
+                    return
+
+                taxon_harvested += 1
+
+                # 1. Geographic Coordinate & Uncertainty Validation
+                lat = rec.get("decimalLatitude")
+                lon = rec.get("decimalLongitude")
+                lat_val: Optional[float] = None
+                lon_val: Optional[float] = None
+                if lat is not None and lon is not None:
+                    try:
+                        lat_val = float(lat)
+                        lon_val = float(lon)
+                    except (ValueError, TypeError):
+                        pass
+
+                state_prov = rec.get("stateProvince")
+                if self.exclude_western and is_excluded_western_region(
+                    state_prov,
+                    lat=lat_val,
+                    lon=lon_val,
+                    western_longitude_threshold=self.western_longitude_threshold,
+                    exclude_western=self.exclude_western,
+                    is_type_specimen=is_rec_type,
+                ):
+                    taxon_western_excluded += 1
+                    return
+
+                uncertainty_val = self.max_uncertainty_meters
+                if lat_val is not None and lon_val is not None:
+                    uncertainty_raw = rec.get("coordinateUncertaintyInMeters")
+                    if uncertainty_raw is not None:
+                        try:
+                            parsed_unc = float(uncertainty_raw)
+                            if parsed_unc > self.max_uncertainty_meters and not is_rec_type:
+                                return
+                            uncertainty_val = parsed_unc
+                        except (ValueError, TypeError):
+                            pass
+
+                # 2. Raw Darwin Core Temporal Validation (exempting historical nomenclatural types with partial/missing dates)
+                raw_year = rec.get("year")
+                raw_month = rec.get("month")
+                raw_day = rec.get("day")
+                try:
+                    y = int(raw_year)
+                    m = int(raw_month)
+                    d = int(raw_day)
+                    valid_date = datetime.date(y, m, d)
+                    year_val, month_val, day_val = y, m, d
+                    event_date = str(rec.get("eventDate") or valid_date.isoformat()).strip()
+                except (ValueError, TypeError, OverflowError):
+                    if not is_rec_type:
+                        return
+                    try:
+                        year_val = int(raw_year) if raw_year is not None else None
+                    except (ValueError, TypeError):
+                        year_val = None
+                    try:
+                        month_val = int(raw_month) if raw_month is not None else None
+                    except (ValueError, TypeError):
+                        month_val = None
+                    try:
+                        day_val = int(raw_day) if raw_day is not None else None
+                    except (ValueError, TypeError):
+                        day_val = None
+                    event_date = str(rec.get("eventDate") or (f"{year_val}" if year_val else "")).strip()
+
+                # 3. High-Resolution Media Image Validation
+                media_list = rec.get("media", [])
+                image_url = extract_high_res_image_url(media_list)
+                if not image_url:
+                    return
+
+                # 4. Catalog Number & Herbarium Institution Normalization
+                raw_catalog = rec.get("catalogNumber")
+                inst_code = rec.get("institutionCode") or rec.get("collectionCode") or "UNKNOWN_INST"
+                gbif_key = str(rec.get("key", ""))
+
+                if raw_catalog and str(raw_catalog).strip():
+                    catalog_number = sanitize_filename(str(raw_catalog).strip())
+                else:
+                    catalog_number = f"{sanitize_filename(inst_code)}_{gbif_key}"
+
+                unique_key = (catalog_number, gbif_key)
+                if unique_key in seen_catalog_keys:
+                    return
+                seen_catalog_keys.add(unique_key)
+
+                relative_image_path = f"data/raw_vouchers/{catalog_number}.webp"
+                raw_sci_val = str(rec.get("scientificName") or rec.get("species") or taxon).strip()
+                acc_from_rec: Optional[str] = None
+                for acc_fld in ("species", "acceptedScientificName"):
+                    cand_acc = _extract_canonical_binomial(rec.get(acc_fld), {"Packera"})
+                    if cand_acc:
+                        acc_from_rec = cand_acc
+                        break
+                if acc_from_rec:
+                    _register_dynamic_synonyms(acc_from_rec, [raw_sci_val], [raw_sci_val])
+                resolved_packera = acc_from_rec or standardize_packera_taxon(raw_sci_val)
+                if is_direct_genus_query or self.is_genus_wide:
+                    if not resolved_packera or not re.match(r"^Packera\s+(?:[x×]\s*)?[a-z-]+$", resolved_packera):
+                        seen_catalog_keys.discard(unique_key)
+                        return
+                if resolved_packera and not raw_sci_val.lower().startswith(resolved_packera.lower()):
+                    sci_name_val = resolved_packera
+                else:
+                    sci_name_val = raw_sci_val
+
+                raw_loc_val = rec.get("locality") or rec.get("verbatimLocality")
+                raw_hab_val = rec.get("habitat")
+                proto_auths = extract_protologue_authors([raw_sci_val, sci_name_val, taxon])
+
+                # 5. Initial Layer 1 + Layer 2 Determiner Tier Stratification
+                determiner_tier, type_status, determiner_raw = parse_determiner_tier(
+                    type_status_raw=rec.get("typeStatus"),
+                    identified_by_raw=rec.get("identifiedBy"),
+                    recorded_by_raw=rec.get("recordedBy"),
+                    history_raw=rec.get("verbatimIdentificationHistory"),
+                    institution_code_raw=inst_code,
+                    locality_raw=raw_loc_val,
+                    habitat_raw=raw_hab_val,
+                    dynamic_specialists=proto_auths,
+                )
+
+                # 6. US EPA Level III Ecoregion Polygon Assignment
+                regional_group = infer_regional_group(
+                    lat=lat_val,
+                    lon=lon_val,
+                    state_province=state_prov,
+                    habitat=raw_hab_val,
+                    locality=raw_loc_val,
+                    county=rec.get("county"),
+                )
+
+                curated_record = {
+                    "catalogNumber": catalog_number,
+                    "institutionCode": inst_code,
+                    "scientificName": sci_name_val,
+                    "species_raw": raw_sci_val,
+                    "recordedBy": str(rec.get("recordedBy") or "").strip(),
+                    "recordNumber": str(rec.get("recordNumber") or "").strip(),
+                    "identifiedBy": determiner_raw,
+                    "determiner_raw": determiner_raw,
+                    "determiner_tier": determiner_tier,
+                    "type_status": type_status,
+                    "county": rec.get("county") or "",
+                    "stateProvince": state_prov or "",
+                    "decimalLatitude": lat_val,
+                    "latitude": lat_val,
+                    "decimalLongitude": lon_val,
+                    "longitude": lon_val,
+                    "coordinateUncertainty": uncertainty_val,
+                    "year": year_val,
+                    "month": month_val,
+                    "day": day_val,
+                    "eventDate": event_date,
+                    "regional_group": regional_group,
+                    "image_path": relative_image_path,
+                    "_image_url": image_url,
+                    "_raw_identified_by": str(rec.get("identifiedBy") or "").strip(),
+                    "_raw_history": str(rec.get("verbatimIdentificationHistory") or "").strip(),
+                    "_raw_type_status": str(rec.get("typeStatus") or "").strip(),
+                    "_raw_locality": str(raw_loc_val or "").strip(),
+                    "_raw_habitat": str(raw_hab_val or "").strip(),
+                }
+                all_curated_records.append(curated_record)
+                taxon_retained += 1
+
             for country_code in country_targets:
                 offset = 0
                 limit = 300
@@ -3492,6 +3919,8 @@ class VoucherHarvester:
                         search_kwargs["scientificName"] = taxon
                     if country_code:
                         search_kwargs["country"] = country_code
+                    if self.exclude_western:
+                        search_kwargs["decimalLongitude"] = f"{self.western_longitude_threshold},-50.0"
                     try:
                         response = occ.search(**search_kwargs)
                     except Exception as e:
@@ -3504,174 +3933,7 @@ class VoucherHarvester:
                         break
 
                     for rec in results:
-                        taxon_harvested += 1
-
-                        # 1. Geographic Coordinate & Uncertainty Validation
-                        lat = rec.get("decimalLatitude")
-                        lon = rec.get("decimalLongitude")
-                        lat_val: Optional[float] = None
-                        lon_val: Optional[float] = None
-                        if lat is not None and lon is not None:
-                            try:
-                                lat_val = float(lat)
-                                lon_val = float(lon)
-                            except (ValueError, TypeError):
-                                pass
-
-                        state_prov = rec.get("stateProvince")
-                        if self.exclude_western and is_excluded_western_region(
-                            state_prov,
-                            lat=lat_val,
-                            lon=lon_val,
-                            western_longitude_threshold=self.western_longitude_threshold,
-                        ):
-                            taxon_western_excluded += 1
-                            continue
-
-                        rec_type_rank, _ = classify_nomenclatural_type_rank(rec.get("typeStatus"))
-                        is_rec_type = rec_type_rank >= 1
-
-                        uncertainty_val = self.max_uncertainty_meters
-                        if lat_val is not None and lon_val is not None:
-                            uncertainty_raw = rec.get("coordinateUncertaintyInMeters")
-                            if uncertainty_raw is not None:
-                                try:
-                                    parsed_unc = float(uncertainty_raw)
-                                    if parsed_unc > self.max_uncertainty_meters and not is_rec_type:
-                                        continue
-                                    uncertainty_val = parsed_unc
-                                except (ValueError, TypeError):
-                                    pass
-
-                        # 2. Raw Darwin Core Temporal Validation (exempting historical nomenclatural types with partial/missing dates)
-                        raw_year = rec.get("year")
-                        raw_month = rec.get("month")
-                        raw_day = rec.get("day")
-                        try:
-                            y = int(raw_year)
-                            m = int(raw_month)
-                            d = int(raw_day)
-                            valid_date = datetime.date(y, m, d)
-                            year_val, month_val, day_val = y, m, d
-                            event_date = str(rec.get("eventDate") or valid_date.isoformat()).strip()
-                        except (ValueError, TypeError, OverflowError):
-                            if not is_rec_type:
-                                continue
-                            try:
-                                year_val = int(raw_year) if raw_year is not None else None
-                            except (ValueError, TypeError):
-                                year_val = None
-                            try:
-                                month_val = int(raw_month) if raw_month is not None else None
-                            except (ValueError, TypeError):
-                                month_val = None
-                            try:
-                                day_val = int(raw_day) if raw_day is not None else None
-                            except (ValueError, TypeError):
-                                day_val = None
-                            event_date = str(rec.get("eventDate") or (f"{year_val}" if year_val else "")).strip()
-
-                        # 3. High-Resolution Media Image Validation
-                        media_list = rec.get("media", [])
-                        image_url = extract_high_res_image_url(media_list)
-                        if not image_url:
-                            continue
-
-                        # 4. Catalog Number & Herbarium Institution Normalization
-                        raw_catalog = rec.get("catalogNumber")
-                        inst_code = rec.get("institutionCode") or rec.get("collectionCode") or "UNKNOWN_INST"
-                        gbif_key = str(rec.get("key", ""))
-
-                        if raw_catalog and str(raw_catalog).strip():
-                            catalog_number = sanitize_filename(str(raw_catalog).strip())
-                        else:
-                            catalog_number = f"{sanitize_filename(inst_code)}_{gbif_key}"
-
-                        unique_key = (catalog_number, gbif_key)
-                        if unique_key in seen_catalog_keys:
-                            continue
-                        seen_catalog_keys.add(unique_key)
-
-                        relative_image_path = f"data/raw_vouchers/{catalog_number}.jpg"
-                        raw_sci_val = str(rec.get("scientificName") or rec.get("species") or taxon).strip()
-                        acc_from_rec: Optional[str] = None
-                        for acc_fld in ("species", "acceptedScientificName"):
-                            cand_acc = _extract_canonical_binomial(rec.get(acc_fld), {"Packera"})
-                            if cand_acc:
-                                acc_from_rec = cand_acc
-                                break
-                        if acc_from_rec:
-                            _register_dynamic_synonyms(acc_from_rec, [raw_sci_val], [raw_sci_val])
-                        resolved_packera = acc_from_rec or standardize_packera_taxon(raw_sci_val)
-                        if is_direct_genus_query or self.is_genus_wide:
-                            if not resolved_packera or not re.match(r"^Packera\s+(?:[x×]\s*)?[a-z-]+$", resolved_packera):
-                                seen_catalog_keys.discard(unique_key)
-                                continue
-                        if resolved_packera and not raw_sci_val.lower().startswith(resolved_packera.lower()):
-                            sci_name_val = resolved_packera
-                        else:
-                            sci_name_val = raw_sci_val
-
-                        raw_loc_val = rec.get("locality") or rec.get("verbatimLocality")
-                        raw_hab_val = rec.get("habitat")
-                        proto_auths = extract_protologue_authors([raw_sci_val, sci_name_val, taxon])
-
-                        # 5. Initial Layer 1 + Layer 2 Determiner Tier Stratification
-                        determiner_tier, type_status, determiner_raw = parse_determiner_tier(
-                            type_status_raw=rec.get("typeStatus"),
-                            identified_by_raw=rec.get("identifiedBy"),
-                            recorded_by_raw=rec.get("recordedBy"),
-                            history_raw=rec.get("verbatimIdentificationHistory"),
-                            institution_code_raw=inst_code,
-                            locality_raw=raw_loc_val,
-                            habitat_raw=raw_hab_val,
-                            dynamic_specialists=proto_auths,
-                        )
-
-                        # 6. US EPA Level III Ecoregion Polygon Assignment
-                        regional_group = infer_regional_group(
-                            lat=lat_val,
-                            lon=lon_val,
-                            state_province=state_prov,
-                            habitat=raw_hab_val,
-                            locality=raw_loc_val,
-                            county=rec.get("county"),
-                        )
-
-                        curated_record = {
-                            "catalogNumber": catalog_number,
-                            "institutionCode": inst_code,
-                            "scientificName": sci_name_val,
-                            "species_raw": raw_sci_val,
-                            "recordedBy": str(rec.get("recordedBy") or "").strip(),
-                            "recordNumber": str(rec.get("recordNumber") or "").strip(),
-                            "identifiedBy": determiner_raw,
-                            "determiner_raw": determiner_raw,
-                            "determiner_tier": determiner_tier,
-                            "type_status": type_status,
-                            "county": rec.get("county") or "",
-                            "stateProvince": state_prov or "",
-                            "decimalLatitude": lat_val,
-                            "latitude": lat_val,
-                            "decimalLongitude": lon_val,
-                            "longitude": lon_val,
-                            "coordinateUncertainty": uncertainty_val,
-                            "year": year_val,
-                            "month": month_val,
-                            "day": day_val,
-                            "eventDate": event_date,
-                            "regional_group": regional_group,
-                            "image_path": relative_image_path,
-                            "_image_url": image_url,
-                            "_raw_identified_by": str(rec.get("identifiedBy") or "").strip(),
-                            "_raw_history": str(rec.get("verbatimIdentificationHistory") or "").strip(),
-                            "_raw_type_status": str(rec.get("typeStatus") or "").strip(),
-                            "_raw_locality": str(raw_loc_val or "").strip(),
-                            "_raw_habitat": str(raw_hab_val or "").strip(),
-                        }
-                        all_curated_records.append(curated_record)
-                        taxon_retained += 1
-
+                        _ingest_occurrence_record(rec, require_type=False)
                         if taxon_retained >= self.max_records_per_taxon:
                             break
 
@@ -3679,6 +3941,30 @@ class VoucherHarvester:
                     if offset >= count:
                         break
                     time.sleep(0.1)
+
+                # Secondary Type-Specimen Rescue Query for un-georeferenced Eastern NA types when server-side decimalLongitude filter is active
+                if self.exclude_western and taxon_retained < self.max_records_per_taxon:
+                    type_search_kwargs: Dict[str, Any] = {
+                        "basisOfRecord": "PRESERVED_SPECIMEN",
+                        "typeStatus": "*",
+                        "limit": 300,
+                        "offset": 0,
+                    }
+                    if is_direct_genus_query and genus_key is not None:
+                        type_search_kwargs["taxonKey"] = genus_key
+                    else:
+                        type_search_kwargs["scientificName"] = taxon
+                    if country_code:
+                        type_search_kwargs["country"] = country_code
+                    try:
+                        type_resp = occ.search(**type_search_kwargs)
+                        type_results = type_resp.get("results", []) if isinstance(type_resp, dict) else []
+                    except Exception:
+                        type_results = []
+                    for t_rec in type_results:
+                        if taxon_retained >= self.max_records_per_taxon:
+                            break
+                        _ingest_occurrence_record(t_rec, require_type=True)
 
                 if taxon_retained >= self.max_records_per_taxon:
                     break
@@ -3691,6 +3977,34 @@ class VoucherHarvester:
 
         df = pd.DataFrame(all_curated_records)
         if not df.empty:
+            # Eastern NA Biogeographic Residency Check for Genus-Wide Discovery
+            is_direct_single_genus_tiny_mock = (
+                len(self.taxa) == 1
+                and self.taxa[0].strip().lower() == "packera"
+                and len(df) < 3
+            )
+            if self.is_genus_wide and self.exclude_western and not is_direct_single_genus_tiny_mock:
+                canon_series = df["scientificName"].map(
+                    lambda x: standardize_packera_taxon(x) or str(x).strip()
+                )
+                lon_series = pd.to_numeric(df["decimalLongitude"], errors="coerce")
+                east_geo_mask = lon_series.notna() & (lon_series >= float(self.western_longitude_threshold))
+                east_counts = canon_series[east_geo_mask].value_counts().to_dict()
+                resident_species = {sp for sp, cnt in east_counts.items() if int(cnt) >= 3}
+                all_species = set(canon_series.dropna().unique())
+                removed_species = sorted(all_species - resident_species)
+                if removed_species:
+                    pre_len = len(df)
+                    df = df.loc[canon_series.isin(resident_species)].reset_index(drop=True)
+                    removed_records = pre_len - len(df)
+                    self.logger.info(
+                        f"Eastern NA Biogeographic Residency Filter: Removed {len(removed_species)} "
+                        f"western stray species ({removed_records} records) with < 3 georeferenced "
+                        f"Eastern NA occurrences (lon >= {self.western_longitude_threshold})."
+                    )
+                if df.empty:
+                    return df
+
             # Layer 3: Corpus-derived multi-herbarium specialist & regional herbarium authority re-evaluation
             dyn_specs, dyn_herbs = discover_corpus_authorities(df)
             if dyn_specs or dyn_herbs:
@@ -3712,17 +4026,12 @@ class VoucherHarvester:
                 logger=self.logger,
                 home_herbarium=self.home_herbarium,
             )
-            has_thin_or_quota = (
-                self.spatial_thin_km > 0.0
-                or (self.max_per_state is not None and self.max_per_state > 0)
-                or (self.max_per_region is not None and self.max_per_region > 0)
-            )
             df = spatially_balance_and_thin_vouchers(
                 df,
                 spatial_thin_km=self.spatial_thin_km,
                 max_per_state=self.max_per_state,
                 max_per_region=self.max_per_region,
-                primary_duplicates_only=has_thin_or_quota,
+                primary_duplicates_only=True,
                 preserve_all_gold=True,
                 workspace_dir=self.workspace_dir,
             )
@@ -3772,11 +4081,12 @@ class VoucherHarvester:
                     mp_values.append(q_metrics["megapixels"])
             else:
                 quality_rejected += 1
-                if img_dest.exists():
-                    try:
-                        img_dest.unlink()
-                    except Exception:
-                        pass
+                for cand_unlink in (img_dest, resolve_voucher_image_path(img_dest)):
+                    if cand_unlink and cand_unlink.is_file():
+                        try:
+                            cand_unlink.unlink()
+                        except Exception:
+                            pass
 
         self.logger.info(
             f"Quality Audit Complete: Retained {len(valid_indices)} vouchers meeting quality standards "
@@ -3814,6 +4124,13 @@ class VoucherHarvester:
         """Executes the end-to-end voucher ingestion and curation workflow."""
         if force is not None:
             self.force = force
+
+        migrate_existing_vouchers_to_webp(
+            self.raw_dir,
+            db_path=self.db_path,
+            curated_csv=self.output_csv,
+            logger=self.logger,
+        )
 
         self.logger.info("Starting Packera Voucher Ingestion & Authority Stratification Pipeline...")
         self.logger.info(f"Target Taxa ({len(self.taxa)}): {self.taxa}")

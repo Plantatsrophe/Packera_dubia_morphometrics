@@ -444,3 +444,4 @@ vgcore.*
 .nox/
 .hypothesis/
 docs/antigravity_argon_sql_pipeline_prompt.md
+pytest.ini

@@ -911,6 +911,101 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"Step 06 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("STEP06_COHORT_ADAPTIVE_OK", res.stdout)
 
+    def test_na_raster_cropping_deflate_and_maxent_spatial_rf_sdm_maps(self):
+        """Verify automatic North American raster cropping/DEFLATE compression and default MaxEnt + Spatial RF SDM GeoTIFF & 4-panel figure generation."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        with tempfile.TemporaryDirectory() as tmp_d:
+            r_code = f"""
+            suppressPackageStartupMessages({{ library(readr); library(dplyr); library(terra) }})
+            source("scripts/core/db_utils.R")
+            source("scripts/morphometrics/authority_weighting_utils.R")
+            source("scripts/analysis/edaphic_fine_grain_utils.R")
+            source("scripts/analysis/06_multimodal_spatial_rf.R")
+
+            tmp_root <- {repr(str(tmp_d))}
+            env_dir <- file.path(tmp_root, "env")
+            out_dir <- file.path(tmp_root, "outputs")
+            dir.create(env_dir, recursive = TRUE, showWarnings = FALSE)
+            dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+            # 1. Create a global uncropped GeoTIFF (-180..180, -60..90) and verify automatic cropping to NA (-130..-50, 14..66)
+            r_glob <- terra::rast(xmin = -180, xmax = 180, ymin = -60, ymax = 90, res = 1.0, crs = "EPSG:4326")
+            terra::values(r_glob) <- seq_len(terra::ncell(r_glob)) %% 50
+            names(r_glob) <- "bio1_temp_mean"
+            glob_tif <- file.path(env_dir, "wc2.1_bio_1.tif")
+            terra::writeRaster(r_glob, glob_tif, overwrite = TRUE)
+
+            crop_and_compress_na_rasters(env_dir = env_dir)
+            r_after <- terra::rast(glob_tif)
+            ex_after <- terra::ext(r_after)
+            stopifnot(terra::xmin(ex_after) >= -130.1 && terra::xmax(ex_after) <= -49.9)
+            stopifnot(terra::ymin(ex_after) >= 13.9 && terra::ymax(ex_after) <= 66.1)
+            stopifnot(length(list.files(env_dir, pattern = "\\\\.crop_tmp\\\\.tif$")) == 0L)
+
+            # 2. Fit MaxEnt + Spatial RF SDM and verify GeoTIFFs, sdm_model_performance.csv, and fig06b PDF/PNG
+            set.seed(123)
+            n <- 30
+            sp <- rep(c("Packera dubia", "Packera anonyma"), each = 15)
+            df_sdm <- data.frame(
+              catalogNumber = paste0("SDM_", seq_len(n)),
+              plant_individual_id = 0L,
+              species_standardized = sp,
+              analysis_group = sp,
+              determiner_tier = c("Tier_1_Gold", rep("Tier_2_Silver", n - 1)),
+              type_status = c("Holotype", rep("None", n - 1)),
+              is_type_specimen = c(TRUE, rep(FALSE, n - 1)),
+              Combined_Prior_Weight = c(1.0, rep(0.85, n - 1)),
+              coordinateUncertaintyInMeters = rep(250, n),
+              latitude = ifelse(sp == "Packera dubia", seq(32.5, 36.2, length.out = 15), seq(34.0, 38.5, length.out = 15)) + rnorm(n, 0, 0.15),
+              longitude = ifelse(sp == "Packera dubia", seq(-81.5, -78.2, length.out = 15), seq(-83.5, -77.5, length.out = 15)) + rnorm(n, 0, 0.15),
+              bio1_temp_mean = ifelse(sp == "Packera dubia", 16.5, 13.2) + rnorm(n, 0, 0.8),
+              bio12_precip_annual = ifelse(sp == "Packera dubia", 1180, 1320) + rnorm(n, 0, 45),
+              fine_soil_sand = ifelse(sp == "Packera dubia", 82.0, 44.0) + rnorm(n, 0, 4.0),
+              fine_soil_ph = ifelse(sp == "Packera dubia", 4.9, 6.1) + rnorm(n, 0, 0.25),
+              stringsAsFactors = FALSE
+            )
+            kept_v <- c("bio1_temp_mean", "bio12_precip_annual", "fine_soil_sand", "fine_soil_ph")
+            srf_res <- compute_spatial_rf_mems(df_sdm, kept_v, n_trees = 50)
+            df_sdm$spatial_block_id <- srf_res$spatial_block_id
+            df_sdm$rf_predicted_taxon <- srf_res$rf_predicted_taxon
+            df_sdm$rf_predicted_prob <- srf_res$rf_predicted_prob
+            df_sdm$rf_given_taxon_prob <- srf_res$rf_given_taxon_prob
+
+            sdm_out <- fit_and_project_maxent_sdm_maps(
+              df = df_sdm,
+              srf_res = srf_res,
+              env_dir = file.path(tmp_root, "empty_env"),
+              out_dir = out_dir,
+              kept_vars = kept_v,
+              primary_clim_vars = c("bio1_temp_mean", "bio12_precip_annual"),
+              primary_edaph_vars = c("fine_soil_sand", "fine_soil_ph"),
+              focal_taxon = "Packera dubia",
+              intraspecific_mode = FALSE,
+              demo = FALSE
+            )
+
+            perf_csv <- file.path(out_dir, "reports", "sdm_model_performance.csv")
+            fig_pdf <- file.path(out_dir, "figures", "fig06b_sdm_habitat_suitability_map.pdf")
+            fig_png <- file.path(out_dir, "figures", "fig06b_sdm_habitat_suitability_map.png")
+            tif_maxent <- file.path(out_dir, "rasters", "sdm_packera_dubia_maxent_cloglog.tif")
+            tif_ens <- file.path(out_dir, "rasters", "sdm_packera_dubia_ensemble.tif")
+
+            stopifnot(file.exists(perf_csv) && file.info(perf_csv)$size > 0)
+            stopifnot(file.exists(fig_pdf) && file.info(fig_pdf)$size > 0)
+            stopifnot(file.exists(fig_png) && file.info(fig_png)$size > 0)
+            stopifnot(file.exists(tif_maxent) && file.info(tif_maxent)$size > 0)
+            stopifnot(file.exists(tif_ens) && file.info(tif_ens)$size > 0)
+
+            perf_df <- readr::read_csv(perf_csv, show_col_types = FALSE)
+            stopifnot("Packera dubia" %in% perf_df$Taxon_or_Morphotype)
+            stopifnot(all(c("AUC_Block_MaxEnt", "CBI_MaxEnt", "AUC_Block_SpatialRF", "CBI_SpatialRF", "AUC_Block_Ensemble", "CBI_Ensemble") %in% names(perf_df)))
+            cat("SDM_AND_CROP_OK\\n")
+            """
+            res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0, f"SDM & raster cropping test failed:\n{res.stderr}\n{res.stdout}")
+            self.assertIn("SDM_AND_CROP_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

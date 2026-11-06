@@ -277,14 +277,14 @@ def discover_lm2_candidates(
     mask_lookup: Dict[str, Path] = {}
     for md in mask_dirs:
         for mf in md.glob("*.*"):
-            if mf.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp", ".tif"]:
+            if mf.suffix.lower() in [".webp", ".jpg", ".jpeg", ".png", ".bmp", ".tif"]:
                 mask_lookup[mf.stem] = mf
 
     leaf_counts: Dict[str, int] = defaultdict(int)
 
     for lcd in leaf_crop_dirs:
         for crop_path in lcd.glob("*.*"):
-            if crop_path.suffix.lower() not in [".jpg", ".jpeg", ".png"]:
+            if crop_path.suffix.lower() not in [".webp", ".jpg", ".jpeg", ".png"]:
                 continue
 
             stem = crop_path.stem

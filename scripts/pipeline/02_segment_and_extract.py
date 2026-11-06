@@ -1673,6 +1673,12 @@ class SegmentAndExtractPipeline:
             img_bgr = preloaded_img
         else:
             if not image_path.exists():
+                for _ext in (".webp", ".jpg", ".jpeg", ".png"):
+                    _cand_p = image_path.with_suffix(_ext)
+                    if _cand_p.exists():
+                        image_path = _cand_p
+                        break
+            if not image_path.exists():
                 failure_record = {
                     "catalogNumber": catalog_number,
                     "image_path": str(image_path),
@@ -2188,7 +2194,10 @@ class SegmentAndExtractPipeline:
             crop_bgr = img_bgr[y0:y1, x0:x1]
             if crop_bgr.size > 0:
                 cap_patch_path = self.capitula_patches_dir / f"{catalog_number}_cap{cap_idx}.jpg"
-                cv2.imwrite(str(cap_patch_path), crop_bgr)
+                try:
+                    cv2.imwrite(str(cap_patch_path), crop_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                except TypeError:
+                    cv2.imwrite(str(cap_patch_path), crop_bgr)
 
                 if crop_bgr.shape[0] >= 5 and crop_bgr.shape[1] >= 5:
                     crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
@@ -3274,7 +3283,10 @@ class SegmentAndExtractPipeline:
                         leaf_rgb_crop[_dil_lm == 0] = (230, 239, 242)
                 self.basal_leaves_raw_dir.mkdir(parents=True, exist_ok=True)
                 leaf_patch_path = self.basal_leaves_raw_dir / f"{catalog_number}_leaf{inst.leaf_id}.jpg"
-                cv2.imwrite(str(leaf_patch_path), leaf_rgb_crop)
+                try:
+                    cv2.imwrite(str(leaf_patch_path), leaf_rgb_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                except TypeError:
+                    cv2.imwrite(str(leaf_patch_path), leaf_rgb_crop)
 
             pid_pet = by_plant_petiole.get(int(inst.plant_individual_id), petiole_scape_res)
             _inst_ar_val = inst_geom_map.get(inst.leaf_id, (0.0, 0.0, 0.0, np.nan, 1.0))[3]
@@ -3495,6 +3507,28 @@ class SegmentAndExtractPipeline:
         if "catalogNumber" not in df_vouchers.columns or "image_path" not in df_vouchers.columns:
             raise KeyError("Vouchers CSV must contain 'catalogNumber' and 'image_path' columns.")
 
+        # Automatic one-time migration of existing uncompressed .jpg in raw_vouchers/ to .webp (quality=85)
+        try:
+            _raw_vouchers_dir = self.output_dir / "raw_vouchers"
+            if _raw_vouchers_dir.is_dir():
+                for _jpg_f in list(_raw_vouchers_dir.glob("*.jpg")) + list(_raw_vouchers_dir.glob("*.jpeg")):
+                    _webp_f = _jpg_f.with_suffix(".webp")
+                    if not _webp_f.exists() or _webp_f.stat().st_size == 0:
+                        try:
+                            with Image.open(_jpg_f) as _im:
+                                _im.convert("RGB").save(_webp_f, format="WEBP", quality=85, method=4)
+                            if _webp_f.exists() and _webp_f.stat().st_size > 0:
+                                _jpg_f.unlink()
+                        except Exception:
+                            pass
+                    elif _webp_f.stat().st_size > 0:
+                        try:
+                            _jpg_f.unlink()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
         if limit and limit > 0:
             df_vouchers = df_vouchers.head(limit)
             logger.info(f"Applied execution limit: processing first {limit} vouchers.")
@@ -3605,6 +3639,12 @@ class SegmentAndExtractPipeline:
 
         def _prefetch_voucher_data(cat: str, img_p: Path) -> Tuple[Optional[np.ndarray], Tuple[bool, Optional[float]], Optional[np.ndarray]]:
             if not img_p.exists():
+                for _ext in (".webp", ".jpg", ".jpeg", ".png"):
+                    _cand_p = img_p.with_suffix(_ext)
+                    if _cand_p.exists():
+                        img_p = _cand_p
+                        break
+            if not img_p.exists():
                 return None, (False, None), None
             img = cv2.imread(str(img_p))
             if img is None:
@@ -3704,6 +3744,12 @@ class SegmentAndExtractPipeline:
                     raw_img_path = Path(str(row["image_path"]).strip())
                     if not raw_img_path.is_absolute():
                         raw_img_path = PROJECT_ROOT / raw_img_path
+                    if not raw_img_path.exists():
+                        for _ext in (".webp", ".jpg", ".jpeg", ".png"):
+                            _cand_p = raw_img_path.with_suffix(_ext)
+                            if _cand_p.exists():
+                                raw_img_path = _cand_p
+                                break
                     if _should_skip_voucher(cat_num) or (not self.force and cat_num in seen_active_cats):
                         ordered_plan.append(("skip", cat_num))
                     else:
@@ -4040,6 +4086,12 @@ class SegmentAndExtractPipeline:
                     raw_img_path = Path(str(row["image_path"]).strip())
                     if not raw_img_path.is_absolute():
                         raw_img_path = PROJECT_ROOT / raw_img_path
+                    if not raw_img_path.exists():
+                        for _ext in (".webp", ".jpg", ".jpeg", ".png"):
+                            _cand_p = raw_img_path.with_suffix(_ext)
+                            if _cand_p.exists():
+                                raw_img_path = _cand_p
+                                break
 
                     if _should_skip_voucher(cat_num):
                         _retire_skipped_voucher(cat_num)
