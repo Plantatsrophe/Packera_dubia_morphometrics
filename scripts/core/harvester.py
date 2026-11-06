@@ -1688,7 +1688,6 @@ def extract_protologue_authors(raw_names: Union[str, Iterable[Any]]) -> Set[str]
 
     Examples:
       - "Packera dubia (Spreng.) Trock & Mabb." -> {"spreng", "sprengel", "trock", "mabb", "mabberley"}
-      - "Packera paupercula (Michx.) Á.Löve & D.Löve" -> {"michx", "michaux", "love", "löve"}
     """
     if raw_names is None:
         return set()

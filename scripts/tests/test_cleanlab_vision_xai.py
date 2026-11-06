@@ -696,8 +696,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             tmp_path = Path(tmpdir)
             vouchers_csv = tmp_path / "curated_vouchers.csv"
             pd.DataFrame({"catalogNumber": ["NCU_MASK1"], "species_raw": ["Packera aurea"]}).to_csv(vouchers_csv, index=False)
-            weights_p = tmp_path / "dummy.pth"
-            weights_p.write_bytes(b"0")
+            weights_p = tmp_path / "dummy_nonexistent.pth"
             sheet_p = tmp_path / "NCU_MASK1.jpg"
 
             # Synthetic 600x500 BGR sheet with dark roots at bottom and dark stem/cauline bract at top

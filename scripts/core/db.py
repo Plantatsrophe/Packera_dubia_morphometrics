@@ -2795,6 +2795,8 @@ def query_misidentified_vouchers_from_db(
     """
     allowed = allowed_subtypes or {
         "Confirmed_Species",
+        "Confirmed_Type_Control",
+        "Type_Synonymy_Candidate",
         "Hybrid_Introgressant",
         "Subspecies_Ecotype",
         "Ecophenotypic_Plasticity",

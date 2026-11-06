@@ -575,6 +575,8 @@ from scripts.core.harvester import (
 
 ALLOWED_TREATMENT_SUBTYPES = {
     'Confirmed_Species',
+    'Confirmed_Type_Control',
+    'Type_Synonymy_Candidate',
     'Hybrid_Introgressant',
     'Subspecies_Ecotype',
     'Ecophenotypic_Plasticity',

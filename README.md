@@ -21,7 +21,7 @@ The computational infrastructure runs end-to-end using **stock LeafMachine2 v2.2
 - **Principal Investigator:** J. Brandon Fuller (PhD Candidate, Department of Biology, UNC-CH)  
 - **Faculty Advisor:** Dr. Alan S. Weakley (Director, NCU Herbarium; UNC Biology)  
 - **Standard Operating Procedure:** `UNC-BOT-SOP-2026-04-REV5`  
-- **Dissertation Baseline Taxa:** *Packera dubia* (formerly *P. tomentosa* / *Senecio tomentosus*), *Packera anonyma*, *Packera plattensis*, *Packera paupercula* (including var. *paupercula* and var. *savannarum*), and allied Eastern North American lineages (*P. aurea*, *P. obovata*, *P. glabella*, *P. schweinitziana*, *P. millefolium*, *P. crawfordii*, *P. serpenticola*), seamlessly expandable to all 50+ North American *Packera* taxa.
+- **Focal Dissertation Taxon & Dynamic Comparative Scope:** ***Packera dubia*** (Spreng.) Trock & Mabb. (formerly *P. tomentosa* / *Senecio tomentosus*) is the sole focal dissertation species. All other North American *Packera* species are harvested and evaluated dynamically from GBIF/iDigBio (with zero hardcoded species groups) as comparative congeners to resolve *P. dubia*'s evolutionary relationships, morphological diagnosability, and empirical species-complex placement.
 
 ---
 
@@ -225,7 +225,7 @@ python3 -c "from scripts.core.db import ingest_existing_csvs_to_db; print(ingest
 
 # 2. User-specified taxon subset mode (--taxon "Packera <sp1>" "Packera <sp2>" ...):
 #    Analyzes strictly the species specified by the user with zero hardcoded default species or injected outgroups:
-./run_pipeline.sh --run-id packera_subset --taxon "Packera dubia" "Packera anonyma" "Packera paupercula"
+./run_pipeline.sh --run-id packera_subset --taxon "Packera dubia" "Packera <congener_1>" "Packera <congener_2>"
 
 # 3. Custom named run directory (--run-id <NAME>) reusing cached vouchers & canonical Step 02 assets (--skip-harvest)
 ./run_pipeline.sh --run-id packera_revision_v1 --skip-harvest
@@ -243,7 +243,7 @@ python3 -c "from scripts.core.db import ingest_existing_csvs_to_db; print(ingest
 # 5. Exclude one or more taxa (--exclude-taxon "<TAXON>"):
 #    Filters curated_vouchers.csv, Step 02 manifests, and run_active_cohort while dynamically remapping
 #    Step 05 DINOv2/Cleanlab class indices to contiguous 0..K-1 (active_taxa):
-./run_pipeline.sh --run-id eastern_3taxa --skip-harvest --start-step 3 --exclude-taxon "Packera plattensis"
+./run_pipeline.sh --run-id custom_exclusion --skip-harvest --start-step 3 --exclude-taxon "Packera <excluded_species>"
 
 # 6. Strategy 1 (Focal Taxon + Outgroup Gold Reference Anchors, default --gold-anchors 30):
 #    Processes all focal taxon vouchers plus N Tier_1_Gold anchors per outgroup species for Steps 04–06 calibration,
@@ -293,9 +293,9 @@ The pipeline provides three unified tiers of command-line execution:
 #### Taxonomic Scope & Complex Discovery Flags
 | Flag | Arguments | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--focal-taxon` | `"<Binomial>"` | *(none)* | Target a focal *Packera* species (e.g., `"Packera anonyma"`) for targeted CDA, spatial niche modeling, and revision synthesis. |
+| `--focal-taxon` | `"<Binomial>"` | *(none)* | Target a focal *Packera* species (e.g., `"Packera dubia"`) for targeted CDA, spatial niche modeling, and revision synthesis. |
 | `--taxon`, `--taxa` | `"<Sp1>" "<Sp2>" ...` | *(all / genus-wide)* | Explicitly specify one or more target *Packera* binomials to harvest and analyze (omit to harvest the entire genus dynamically from GBIF). |
-| `--exclude-taxon` | `"<Binomial>"` | *(none)* | Exclude one or more specified taxa from the active run (repeatable; e.g., `--exclude-taxon "Packera plattensis"`). |
+| `--exclude-taxon` | `"<Binomial>"` | *(none)* | Exclude one or more specified taxa from the active run (repeatable; e.g., `--exclude-taxon "Packera <species>"`). |
 | `--intraspecific-mode` | *(none)* | `false` | Run single-taxon intraspecific morphotype/ecotype delimitation mode across Steps 04–07 (`n_unique_taxa == 1`), gating on GMM morphotypes and `PCA-env` ecotypes. |
 | `--expand-synonyms` / `--no-expand-synonyms` | *(none)* | `--expand-synonyms` | Toggle automatic expansion of *Packera* binomials to historical *Senecio* and *Cineraria* basionyms/synonyms via the GBIF Taxonomic Backbone. |
 | `--discover-complexes` | *(none)* | `false` | Trigger Step 08 unsupervised Leiden/Louvain and Ward.D2 taxon-complex discovery (`scripts/analysis/08_discover_taxon_complexes.R`). |
