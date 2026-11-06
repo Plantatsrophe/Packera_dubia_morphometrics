@@ -66,7 +66,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.core.config import PipelineConfig
+from scripts.core.config import (
+    PipelineConfig,
+    resolve_cpu_threads,
+    resolve_gpu_batch_size,
+)
 from scripts.core.db import (
     get_completed_qc_vouchers,
     get_db_connection,
@@ -1141,6 +1145,8 @@ class SegmentAndExtractPipeline:
         sam2_predictor: Optional[Any] = None,
         db_path: Optional[Union[str, Path]] = None,
         enable_geometric_qc: bool = False,
+        threads: Optional[int] = None,
+        gpu_batch_size: Optional[int] = None,
     ) -> None:
         self.db_path = db_path
         self.enable_geometric_qc = bool(enable_geometric_qc)
@@ -1180,7 +1186,28 @@ class SegmentAndExtractPipeline:
         }
 
         self.score_thresh = score_thresh
-        self.num_ruler_workers = num_ruler_workers
+        self.threads: Optional[int] = resolve_cpu_threads(threads, self.config)
+        if self.threads is not None and num_ruler_workers == 4:
+            self.num_ruler_workers = max(1, min(int(self.threads), 8))
+        else:
+            self.num_ruler_workers = num_ruler_workers
+        if self.threads is not None and self.device == "cpu" and torch is not None:
+            try:
+                torch.set_num_threads(max(1, int(self.threads)))
+            except Exception:
+                pass
+        self.gpu_batch_size: int = resolve_gpu_batch_size(
+            gpu_batch_size,
+            self.config,
+            default_cuda=10,
+            default_cpu=8,
+            use_cuda=(self.device == "cuda"),
+        )
+        _has_explicit_gpu_bs = (
+            gpu_batch_size is not None
+            or bool(os.environ.get("PACKERA_GPU_BATCH_SIZE", "").strip())
+            or self.config.compute.gpu_batch_size is not None
+        )
         self.force = force
         self.ruler_confidence_thresh = ruler_confidence_thresh
 
@@ -1190,6 +1217,8 @@ class SegmentAndExtractPipeline:
         self.lm2_config = generate_high_performance_config(
             pipeline_cfg=self.config,
             output_dir=str(self.lm2_project_dir / "Data" / "output") if self.lm2_project_dir else None,
+            batch_size=self.gpu_batch_size,
+            num_workers=max(1, int(self.threads)) if self.threads is not None else 4,
         )
 
         # Output artifact directories
@@ -1272,8 +1301,12 @@ class SegmentAndExtractPipeline:
         self.voucher_rosette_centroids_by_pid: Dict[str, Dict[int, Tuple[float, float]]] = {}
         self.voucher_petiole_by_pid: Dict[str, Dict[int, Dict[str, Any]]] = {}
         self.voucher_contour_coords_by_leaf: Dict[str, Dict[int, List[List[float]]]] = {}
-        self.stage1_wave_size: int = 16
-        self.stage2_batch_size: int = 10 if self.device == "cuda" else 8
+        self.stage2_batch_size: int = max(1, int(self.gpu_batch_size))
+        self.stage1_wave_size: int = (
+            max(1, min(32, int(self.gpu_batch_size)))
+            if _has_explicit_gpu_bs
+            else 16
+        )
 
         # Preload catalogNumber -> scientificName mapping if available
         self.vouchers_taxa: Dict[str, str] = {}
@@ -3722,16 +3755,27 @@ class SegmentAndExtractPipeline:
 
         try:
             if use_wave_engine:
-                n_cpu = os.cpu_count() or 8
-                prefetch_workers = min(12, max(4, n_cpu // 5))
-                prep_workers = min(12, max(4, n_cpu // 5))
-                post_workers = min(16, max(4, n_cpu // 4))
+                if self.threads is not None:
+                    t_val = max(1, int(self.threads))
+                    if t_val == 1:
+                        prefetch_workers = 1
+                        prep_workers = 1
+                        post_workers = 1
+                    else:
+                        prefetch_workers = min(12, max(1, min(t_val, max(2, t_val // 3))))
+                        prep_workers = min(12, max(1, min(t_val, max(2, t_val // 3))))
+                        post_workers = min(16, max(1, min(t_val, max(2, t_val // 2))))
+                else:
+                    n_cpu = os.cpu_count() or 8
+                    prefetch_workers = min(12, max(4, n_cpu // 5))
+                    prep_workers = min(12, max(4, n_cpu // 5))
+                    post_workers = min(16, max(4, n_cpu // 4))
                 wave_size = max(1, int(self.stage1_wave_size))
                 prefetch_window = max(wave_size * 2, prefetch_workers * 2)
 
                 try:
                     prev_cv2_threads = cv2.getNumThreads()
-                    cv2.setNumThreads(2)
+                    cv2.setNumThreads(1 if (self.threads is not None and int(self.threads) == 1) else 2)
                 except Exception:
                     prev_cv2_threads = None
 
@@ -5311,12 +5355,40 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "-j",
+        "--threads",
+        dest="threads",
+        type=int,
+        default=None,
+        help="Maximum CPU worker threads for image prefetching, ruler detection, and post-processing (default: auto).",
+    )
+    parser.add_argument(
+        "--gpu-batch-size",
+        dest="gpu_batch_size",
+        type=int,
+        default=None,
+        help="GPU inference batch size for Stage 2 PointRend leaf crops and Stage 1 wave scaling (default: 10 on CUDA, 8 on CPU).",
+    )
+    parser.add_argument(
+        "--batch-size",
+        dest="gpu_batch_size",
+        type=int,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--force",
-        "--overwrite",
         dest="force",
         action="store_true",
         default=False,
         help="Force re-segmentation and overwrite existing contour CSVs and masks.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--limit",
@@ -5362,6 +5434,8 @@ def main() -> None:
         sam2_config=args.sam2_config,
         db_path=getattr(args, "db", None),
         enable_geometric_qc=getattr(args, "enable_geometric_qc", False),
+        threads=getattr(args, "threads", None),
+        gpu_batch_size=getattr(args, "gpu_batch_size", None),
     )
     pipeline.run(limit=args.limit)
 

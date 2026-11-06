@@ -14,6 +14,41 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from scripts.core.config import resolve_cpu_threads, resolve_gpu_batch_size
+
+
+def _resolve_dissection_workers(n_items: int, max_cap: int = 16) -> int:
+    req_t = resolve_cpu_threads()
+    if req_t is not None:
+        return max(1, min(int(req_t), max(1, n_items)))
+    return min(max_cap, os.cpu_count() or 4, max(1, n_items))
+
+
+def resolve_step05_loader_params(
+    batch_size: Optional[int],
+    threads: Optional[int],
+    use_cuda: bool,
+    n_records: int,
+) -> Tuple[int, int]:
+    """Resolve DataLoader num_workers and effective GPU/CPU batch size for Step 05 DINOv2."""
+    req_t = resolve_cpu_threads(threads)
+    if req_t is not None:
+        os.environ["PACKERA_MAX_WORKERS"] = str(req_t)
+        try:
+            torch.set_num_threads(max(1, int(req_t)))
+        except Exception:
+            pass
+        nw = 0 if req_t <= 1 else (min(req_t, 16) if (use_cuda and n_records >= 16) else 0)
+    else:
+        nw = (min(8, os.cpu_count() or 4) if n_records >= 64 else 0) if use_cuda else 0
+    eff_bs = resolve_gpu_batch_size(
+        batch_size,
+        default_cuda=64,
+        default_cpu=32,
+        use_cuda=use_cuda,
+    )
+    return nw, eff_bs
+
 
 def _safe_pid_val(val: Any, default: int = 0) -> int:
     s = "" if (val is None or pd.isna(val)) else str(val).strip()
@@ -221,9 +256,10 @@ def batch_classify_surface_orientations(
         return classify_fn(img_arr, plant_mask=p_mask_arr)
 
     if len(prim_pairs) >= 24:
-        n_workers = min(16, os.cpu_count() or 4, len(prim_pairs))
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            return list(pool.map(_eval_one, prim_pairs))
+        n_workers = _resolve_dissection_workers(len(prim_pairs))
+        if n_workers > 1:
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                return list(pool.map(_eval_one, prim_pairs))
     return [_eval_one(pair) for pair in prim_pairs]
 
 
@@ -235,8 +271,8 @@ def compute_batch_patch_set_sha256(
 ) -> Dict[Tuple[str, int], Optional[str]]:
     """Hash unique patch files in parallel and assemble per-specimen weighted SHA-256 keys."""
     unique_paths = list(dict.fromkeys(str(p) for gk in spec_order for p in patches_by_key.get(gk, []) if str(p)))
-    if len(unique_paths) >= 24:
-        n_workers = min(16, os.cpu_count() or 4, len(unique_paths))
+    n_workers = _resolve_dissection_workers(len(unique_paths)) if len(unique_paths) >= 24 else 1
+    if len(unique_paths) >= 24 and n_workers > 1:
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             sha_lookup = dict(zip(unique_paths, pool.map(file_sha_fn, unique_paths)))
     else:

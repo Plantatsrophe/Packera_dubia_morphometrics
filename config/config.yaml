@@ -232,3 +232,12 @@ synthesis:
   ecotype_ddoy_cutoff_days: 14.0
   cryptic_ddoy_cutoff_days: 18.0
 
+# Compute & Parallel Execution Controls
+# Governed by CLI flags (-j/--threads and --gpu-batch-size) or environment variables
+# (PACKERA_MAX_WORKERS and PACKERA_GPU_BATCH_SIZE). Leaving null uses auto-detected
+# hardware defaults across Python and R stages.
+compute:
+  threads: null
+  gpu_batch_size: null
+
+

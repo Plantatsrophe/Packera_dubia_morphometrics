@@ -35,7 +35,7 @@ resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
     }
     env_w <- min(as.integer(max_workers), base_cores)
   } else {
-    env_w <- min(as.integer(max_workers), env_w)
+    env_w <- as.integer(env_w)
   }
   if (!is.null(n_tasks) && length(n_tasks) == 1L && is.finite(n_tasks)) {
     env_w <- min(env_w, max(1L, as.integer(n_tasks)))

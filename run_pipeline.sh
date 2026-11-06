@@ -53,9 +53,74 @@ SAM2_FLAG=()
 DEMO_FLAG=()
 FOCAL_ARGS=()
 INTRASPECIFIC_ARGS=()
+THREADS=""
+GPU_BATCH_SIZE=""
+COMPUTE_ARGS=()
+
+print_usage() {
+  cat <<'EOF'
+Usage: ./run_pipeline.sh [OPTIONS]
+
+Run & Compute Controls:
+  -h, --help                         Show this help message and exit
+  --run-id <ID>                      Custom identifier for isolated run directory under runs/<ID>/
+  --db <PATH>                        Override path to SQLite WAL database (default: data/packera_pipeline.sqlite)
+  --start-step <1..8>                Start or resume execution at step <1..8> (step >=2 skips harvest automatically)
+  --force                            Force re-execution and overwrite cached artifacts (with --start-step 2, re-segments)
+  -j, --threads <INT>                CPU worker thread limit across Python & R stages (exports PACKERA_MAX_WORKERS)
+  --gpu-batch-size <INT>             GPU inference batch size for Step 02 PointRend & Step 05 DINOv2
+  --limit <N>                        Cap maximum number of vouchers processed in Step 02 segmentation
+  --sam2-refine                      Enable automated LM2-guided SAM 2.1 boundary refinement in Step 02
+  --demo                             Run in ephemeral test isolation mode (PACKERA_DEMO_MODE=1)
+
+Taxonomic Scope & Complex Discovery:
+  --taxon "<Sp1>" "<Sp2>" ...        Target one or more Packera binomials (omit for genus-wide discovery)
+  --focal-taxon "<Binomial>"         Target a focal Packera species for targeted synthesis
+  --exclude-taxon "<Binomial>"       Exclude one or more specified taxa from the active run
+  --intraspecific-mode               Single-taxon intraspecific morphotype/ecotype delimitation mode
+  --expand-synonyms / --no-expand-synonyms
+                                     Toggle GBIF synonym/basionym expansion (default: --expand-synonyms)
+  --discover-complexes               Run Step 08 unsupervised taxon-complex discovery (auto-scopes focal neighbors)
+  --min-affinity <FLOAT>             Minimum multimodal affinity weight threshold in Step 08 (default: 0.03)
+
+Authority Tiering & Curation Filters:
+  --determiner-tier <TIER>           Restrict cohort to determiner authority tier (gold|silver|bronze or Tier_1_Gold)
+  --gold-anchors <N>                 Target Tier 1 Gold reference anchors per outgroup taxon (default: 30)
+  --exclude-misidentified            Prune vouchers flagged as Misidentification_Reassign in prior runs
+  --triage-source <SOURCE>           Source run ID(s) or ALL for --exclude-misidentified (default: ALL)
+
+Geographic Scope & Spatial Sampling:
+  --geographic-scope <SCOPE>         Geographic scope: eastern_na (default), north_america, or global
+  --countries "<ISO2> ..."           ISO-2 country codes for GBIF harvesting (default: US)
+  --spatial-thin-km <FLOAT>          Minimum spatial grid thinning distance in km per species (default: 0)
+  --max-per-state <INT>              Cap maximum vouchers retained per (species, stateProvince)
+  --max-per-region <INT>             Cap maximum vouchers retained per EPA Level III Ecoregion
+  --no-spatial-weights               Disable inverse spatial-density weighting during reference model fitting
+EOF
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -h|--help)
+      print_usage
+      exit 0
+      ;;
+    -j|--threads)
+      THREADS="$2"
+      shift 2
+      ;;
+    --threads=*)
+      THREADS="${1#*=}"
+      shift
+      ;;
+    --gpu-batch-size|--batch-size)
+      GPU_BATCH_SIZE="$2"
+      shift 2
+      ;;
+    --gpu-batch-size=*|--batch-size=*)
+      GPU_BATCH_SIZE="${1#*=}"
+      shift
+      ;;
     --run-id)
       CUSTOM_RUN_ID="$2"
       shift 2
@@ -267,6 +332,37 @@ done
 
 CUSTOM_TAXA_CSV="$(IFS=,; echo "${CUSTOM_TAXA_RAW[*]:-}")"
 EXCLUDE_TAXON_CSV="$(IFS=,; echo "${EXCLUDE_TAXA_RAW[*]:-}")"
+
+case "${DETERMINER_TIER,,}" in
+  gold|tier_1_gold)
+    DETERMINER_TIER="Tier_1_Gold"
+    GOLD_ONLY=true
+    ;;
+  silver|tier_2_silver)
+    DETERMINER_TIER="Tier_2_Silver"
+    ;;
+  bronze|tier_3_bronze)
+    DETERMINER_TIER="Tier_3_Bronze"
+    ;;
+esac
+
+if [[ "${START_STEP}" -ge 2 ]]; then
+  SKIP_HARVEST=true
+fi
+if [[ "${START_STEP_EXPLICIT}" == "true" && "${START_STEP}" -eq 2 && -n "${FORCE_FLAG}" ]]; then
+  RESEGMENT=true
+fi
+if [[ "${DISCOVER_COMPLEXES}" == "true" && -n "${FOCAL_TAXON}" ]]; then
+  AUTO_NEIGHBORS=true
+fi
+if [[ -n "${THREADS}" ]]; then
+  export PACKERA_MAX_WORKERS="${THREADS}"
+  COMPUTE_ARGS+=("--threads" "${THREADS}")
+fi
+if [[ -n "${GPU_BATCH_SIZE}" ]]; then
+  export PACKERA_GPU_BATCH_SIZE="${GPU_BATCH_SIZE}"
+  COMPUTE_ARGS+=("--gpu-batch-size" "${GPU_BATCH_SIZE}")
+fi
 
 if [[ -n "${FOCAL_TAXON}" ]]; then
   FOCAL_ARGS=("--focal-taxon" "${FOCAL_TAXON}")
@@ -1001,7 +1097,8 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
     --output-dir "${RUN_DIR}/data" \
     ${FORCE_FLAG} \
     "${LIMIT_ARG[@]}" \
-    "${SAM2_FLAG[@]}"
+    "${SAM2_FLAG[@]}" \
+    "${COMPUTE_ARGS[@]}"
 
   # Sync newly extracted masks, contours, cropped patches, and Step 02 manifests back to canonical root data/
   echo "[Step 02/07] Syncing newly extracted Step 02 assets back to canonical root data/ store..."
@@ -1099,7 +1196,8 @@ if [[ "${START_STEP}" -le 5 ]]; then
     --export-figures \
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}" \
-    "${DEMO_FLAG[@]}"
+    "${DEMO_FLAG[@]}" \
+    "${COMPUTE_ARGS[@]}"
 fi
 
 # ------------------------------------------------------------------------------

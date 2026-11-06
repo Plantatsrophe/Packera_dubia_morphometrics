@@ -892,6 +892,130 @@ REUSE_CANONICAL_DATA="false"
             out_v_sql = pd.read_csv(tables_dir_sql / "curated_vouchers.csv")
             self.assertEqual(set(out_v_sql["catalogNumber"]), expected_keep_run_a)
 
+    def test_cli_threads_and_gpu_batch_size_parsing_and_env_export(self):
+        """Verify -j/--threads and --gpu-batch-size parsing, config resolution, and subprocess forwarding."""
+        import importlib
+        import os
+        from scripts.core.config import resolve_cpu_threads, resolve_gpu_batch_size
+
+        parser = main.build_parser()
+
+        # Global and subcommand -j/--threads and --gpu-batch-size (plus hidden --batch-size alias)
+        args_seg = parser.parse_args(["segment", "-j", "12", "--gpu-batch-size", "24", "--enable-geometric-qc"])
+        self.assertEqual(args_seg.threads, 12)
+        self.assertEqual(args_seg.gpu_batch_size, 24)
+        self.assertTrue(args_seg.enable_geometric_qc)
+
+        args_alias = parser.parse_args(["synthesis", "--threads", "6", "--batch-size", "16", "--ssurgo-batch-size", "50"])
+        self.assertEqual(args_alias.threads, 6)
+        self.assertEqual(args_alias.gpu_batch_size, 16)
+        self.assertEqual(args_alias.ssurgo_batch_size, 50)
+
+        # Verify _apply_explicit_db_arg exports PACKERA_MAX_WORKERS and PACKERA_GPU_BATCH_SIZE
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PACKERA_MAX_WORKERS", None)
+            os.environ.pop("PACKERA_GPU_BATCH_SIZE", None)
+            main._apply_explicit_db_arg(args_seg)
+            self.assertEqual(os.environ.get("PACKERA_MAX_WORKERS"), "12")
+            self.assertEqual(os.environ.get("PACKERA_GPU_BATCH_SIZE"), "24")
+            self.assertEqual(resolve_cpu_threads(None, default=4), 12)
+            self.assertEqual(resolve_gpu_batch_size(None, default=16), 24)
+            self.assertEqual(resolve_cpu_threads(2, default=4), 2)
+            self.assertEqual(resolve_gpu_batch_size(8, default=16), 8)
+
+        # Verify 01_voucher_harvester.py, 02_segment_and_extract.py, and 05_cleanlab_vision_xai.py CLI parsers
+        fake_mods = {
+            k: MagicMock()
+            for k in (
+                "pandas", "numpy", "cv2", "PIL", "PIL.Image", "scipy",
+                "scipy.ndimage", "scipy.spatial", "scipy.spatial.distance",
+                "sklearn", "sklearn.cluster", "sklearn.linear_model",
+                "sklearn.calibration", "sklearn.model_selection", "sklearn.metrics",
+                "sklearn.preprocessing",
+                "matplotlib", "matplotlib.pyplot", "matplotlib.patches", "matplotlib.gridspec",
+                "pygbif", "aiohttp", "tqdm", "cleanlab", "cleanlab.filter",
+                "torch", "torch.nn", "torch.nn.functional", "torch.utils", "torch.utils.data",
+                "torchvision", "torchvision.transforms",
+            )
+            if k not in sys.modules
+        }
+        with patch.dict(sys.modules, fake_mods):
+            mod_01 = importlib.import_module("scripts.data_prep.01_voucher_harvester")
+            p01 = mod_01.parse_args(["--taxon", "Packera dubia", "--geographic-scope", "north_america", "--max-records", "250"])
+            self.assertEqual(p01.taxa, ["Packera dubia"])
+            self.assertEqual(p01.geographic_scope, "north_america")
+            self.assertEqual(p01.max_records, 250)
+            p01_legacy = mod_01.parse_args(["--taxa", "Packera dubia", "--include-western", "--max-records-per-taxon", "120", "--overwrite"])
+            self.assertEqual(p01_legacy.taxa, ["Packera dubia"])
+            self.assertTrue(p01_legacy.include_western)
+            self.assertEqual(p01_legacy.max_records, 120)
+            self.assertTrue(p01_legacy.force)
+
+            mod_02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
+            with patch.object(sys, "argv", ["02_segment_and_extract.py", "-j", "10", "--gpu-batch-size", "20", "--enable-geometric-qc"]):
+                p02 = mod_02.parse_args()
+                self.assertEqual(p02.threads, 10)
+                self.assertEqual(p02.gpu_batch_size, 20)
+                self.assertTrue(p02.enable_geometric_qc)
+
+            mod_05 = importlib.import_module("scripts.analysis.05_cleanlab_vision_xai")
+            p05 = mod_05.parse_args(["-j", "10", "--gpu-batch-size", "12", "--cleanlab-threshold", "0.88"])
+            self.assertEqual(p05.threads, 10)
+            self.assertEqual(p05.gpu_batch_size, 12)
+            self.assertAlmostEqual(p05.cleanlab_threshold, 0.88, places=4)
+            p05_legacy = mod_05.parse_args(["--batch-size", "16", "--error-threshold", "0.91"])
+            self.assertEqual(p05_legacy.gpu_batch_size, 16)
+            self.assertAlmostEqual(p05_legacy.cleanlab_threshold, 0.91, places=4)
+
+            from scripts.analysis.vision_dissection_utils import resolve_step05_loader_params
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("PACKERA_MAX_WORKERS", None)
+                os.environ.pop("PACKERA_GPU_BATCH_SIZE", None)
+                nw_cuda_8, bs_cuda_8 = resolve_step05_loader_params(batch_size=8, threads=6, use_cuda=True, n_records=50)
+                self.assertEqual(bs_cuda_8, 8)
+                self.assertEqual(nw_cuda_8, 6)
+                _, bs_cuda_def = resolve_step05_loader_params(batch_size=None, threads=4, use_cuda=True, n_records=50)
+                self.assertEqual(bs_cuda_def, 64)
+                _, bs_cpu_def = resolve_step05_loader_params(batch_size=None, threads=4, use_cuda=False, n_records=50)
+                self.assertEqual(bs_cpu_def, 32)
+
+    def test_subcommand_help_hides_suppressed_internal_and_legacy_flags(self):
+        """Verify --help output exposes consolidated flags and hides internal/retired aliases."""
+        parser = main.build_parser()
+        subparsers_action = next(
+            a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+        )
+        synth_help = subparsers_action.choices["synthesis"].format_help()
+        self.assertIn("--threads", synth_help)
+        self.assertIn("--gpu-batch-size", synth_help)
+        self.assertIn("--ssurgo-batch-size", synth_help)
+        for hidden_flag in ("--ssurgo-table", "--contingency-table", "--synthesis-report", "--error-threshold"):
+            self.assertNotIn(hidden_flag, synth_help)
+
+        run_all_help = subparsers_action.choices["run-all"].format_help()
+        self.assertIn("--taxon", run_all_help)
+        self.assertIn("--threads", run_all_help)
+        self.assertIn("--gpu-batch-size", run_all_help)
+        for hidden_flag in ("--overwrite", "--include-western", "--allometry-report", "--error-threshold"):
+            self.assertNotIn(hidden_flag, run_all_help)
+
+    def test_run_pipeline_sh_help_and_compute_flags(self):
+        """Verify ./run_pipeline.sh --help exits 0 and documents -j/--threads and --gpu-batch-size."""
+        import subprocess
+        res = subprocess.run(
+            ["bash", str(PROJECT_ROOT / "run_pipeline.sh"), "--help"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("-j, --threads", res.stdout)
+        self.assertIn("--gpu-batch-size", res.stdout)
+        self.assertIn("--taxon", res.stdout)
+        for retired in ("--skip-harvest", "--resegment", "--gold-only", "--auto-neighbors"):
+            self.assertNotIn(retired, res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

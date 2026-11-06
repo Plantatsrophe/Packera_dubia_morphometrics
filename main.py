@@ -67,14 +67,28 @@ from scripts.core.logger import setup_logging
 logger = setup_logging(name="PackeraPipeline")
 
 
-def _apply_explicit_db_arg(args: Optional[argparse.Namespace]) -> None:
-    """Export optional `--db` CLI override to `PACKERA_DB_PATH` for all Python/R stages."""
+def _apply_explicit_db_arg(args: Optional[argparse.Namespace], run_dir: Optional[Path] = None) -> None:
+    """Export optional `--db`, `--demo`, `--threads`, and `--gpu-batch-size` CLI overrides to environment."""
     if args is None:
         return
+    threads_arg = getattr(args, "threads", None)
+    if threads_arg is not None and int(threads_arg) >= 1:
+        os.environ["PACKERA_MAX_WORKERS"] = str(int(threads_arg))
+    gpu_bs_arg = getattr(args, "gpu_batch_size", None)
+    if gpu_bs_arg is not None and int(gpu_bs_arg) >= 1:
+        os.environ["PACKERA_GPU_BATCH_SIZE"] = str(int(gpu_bs_arg))
     db_arg = getattr(args, "db", None)
     if db_arg is not None and str(db_arg).strip():
         raw = str(db_arg).strip()
         os.environ["PACKERA_DB_PATH"] = raw if raw == ":memory:" else str(Path(raw).resolve())
+    elif getattr(args, "demo", False):
+        os.environ["PACKERA_DEMO_MODE"] = "1"
+        if run_dir is not None:
+            os.environ["PACKERA_DB_PATH"] = str((run_dir / "data" / "demo_ephemeral.sqlite").resolve())
+        elif not os.environ.get("PACKERA_DB_PATH"):
+            os.environ["PACKERA_DB_PATH"] = ":memory:"
+    if getattr(args, "demo", False):
+        os.environ["PACKERA_DEMO_MODE"] = "1"
 
 
 def _db_has_extracted_contours(contours_dir: Path) -> bool:
@@ -181,6 +195,7 @@ def _resolve_active_run_context(
         return None, cfg
 
     run_dir = initialize_run_directory(run_id=explicit_run_id, workspace_root=PROJECT_ROOT)
+    _apply_explicit_db_arg(args, run_dir=run_dir)
     _attach_run_log_handler(run_dir)
     if isinstance(cfg, PipelineConfig):
         cfg = cfg.with_run_dir(run_dir)
@@ -597,7 +612,15 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         if focal_clean:
             explicit_taxa = [focal_clean]
     if explicit_taxa:
-        cmd.extend(["--taxa", *explicit_taxa])
+        cmd.extend(["--taxon", *explicit_taxa])
+    if getattr(args, "geographic_scope", None):
+        cmd.extend(["--geographic-scope", str(args.geographic_scope)])
+    if getattr(args, "include_western", False):
+        cmd.append("--include-western")
+    if getattr(args, "countries", None):
+        cmd.extend(["--countries", *[str(c) for c in args.countries]])
+    if getattr(args, "expand_synonyms", None) is False:
+        cmd.append("--no-expand-synonyms")
 
     if args.download_images:
         cmd.append("--download-images")
@@ -718,6 +741,12 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd.extend(["--sam2-checkpoint", str(args.sam2_checkpoint)])
     if getattr(args, "sam2_config", None):
         cmd.extend(["--sam2-config", str(args.sam2_config)])
+    if getattr(args, "enable_geometric_qc", False):
+        cmd.append("--enable-geometric-qc")
+    if getattr(args, "threads", None) is not None:
+        cmd.extend(["--threads", str(args.threads)])
+    if getattr(args, "gpu_batch_size", None) is not None:
+        cmd.extend(["--gpu-batch-size", str(args.gpu_batch_size)])
     if getattr(args, "force", False):
         cmd.append("--force")
 
@@ -962,6 +991,12 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd_xai.extend(["--focal-taxon", focal_taxon])
     if intraspecific_mode:
         cmd_xai.append("--intraspecific-mode")
+    if getattr(args, "threads", None) is not None:
+        cmd_xai.extend(["--threads", str(args.threads)])
+    if getattr(args, "gpu_batch_size", None) is not None:
+        cmd_xai.extend(["--gpu-batch-size", str(args.gpu_batch_size)])
+    if getattr(args, "demo", False):
+        cmd_xai.append("--demo")
 
     logger.info(f"Running Phase 5 Cleanlab Vision XAI: {' '.join(cmd_xai)}")
     subprocess.run(cmd_xai, check=True)
@@ -1013,10 +1048,14 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd_spatial.extend(["--permutations", str(args.permutations)])
     if getattr(args, "n_trees", None) is not None:
         cmd_spatial.extend(["--n-trees", str(args.n_trees)])
+    if getattr(args, "ssurgo_batch_size", None) is not None:
+        cmd_spatial.extend(["--ssurgo-batch-size", str(args.ssurgo_batch_size)])
     if focal_taxon:
         cmd_spatial.extend(["--focal-taxon", focal_taxon])
     if intraspecific_mode:
         cmd_spatial.append("--intraspecific-mode")
+    if getattr(args, "demo", False):
+        cmd_spatial.append("--demo")
 
     logger.info(f"Running Phase 6 Multimodal Spatial RF: {' '.join(cmd_spatial)}")
     subprocess.run(cmd_spatial, check=True)
@@ -1076,6 +1115,8 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd_triage.extend(["--focal-taxon", focal_taxon])
     if intraspecific_mode:
         cmd_triage.append("--intraspecific-mode")
+    if getattr(args, "demo", False):
+        cmd_triage.append("--demo")
     logger.info(f"Running Phase 7 Triage Dashboard Synthesis: {' '.join(cmd_triage)}")
     subprocess.run(cmd_triage, check=True)
     verify_file_exists(output_queue, "triage queue CSV")
@@ -1171,6 +1212,54 @@ def run_calibrate_geometry(args: argparse.Namespace, cfg: PipelineConfig) -> Non
 # CLI Parser Setup
 # =============================================================================
 
+def _add_common_subparser_args(
+    subparser: argparse.ArgumentParser,
+    include_gpu: bool = False,
+) -> None:
+    """Attach shared run-scoping, database, demo, and compute flags to a subparser."""
+    subparser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Run identifier for isolated run directory under runs/<run_id>/",
+    )
+    subparser.add_argument(
+        "--db",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="Optional override path to SQLite database",
+    )
+    subparser.add_argument(
+        "--demo",
+        action="store_true",
+        default=False,
+        help="Run in ephemeral test isolation mode (PACKERA_DEMO_MODE=1).",
+    )
+    subparser.add_argument(
+        "-j",
+        "--threads",
+        dest="threads",
+        type=int,
+        default=None,
+        help="Maximum CPU worker threads across local Python and R stages (default: auto).",
+    )
+    if include_gpu:
+        subparser.add_argument(
+            "--gpu-batch-size",
+            dest="gpu_batch_size",
+            type=int,
+            default=None,
+            help="GPU inference batch size for PointRend crops and DINOv2 (default: stage-optimal).",
+        )
+        subparser.add_argument(
+            "--batch-size",
+            dest="gpu_batch_size",
+            type=int,
+            default=argparse.SUPPRESS,
+            help=argparse.SUPPRESS,
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
@@ -1200,6 +1289,33 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional override path to SQLite database (default: data/packera_pipeline.sqlite).",
     )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        default=False,
+        help="Run in ephemeral test isolation mode (PACKERA_DEMO_MODE=1).",
+    )
+    parser.add_argument(
+        "-j", "--threads",
+        dest="threads",
+        type=int,
+        default=None,
+        help="Maximum CPU worker threads across local Python and R stages (default: auto).",
+    )
+    parser.add_argument(
+        "--gpu-batch-size",
+        dest="gpu_batch_size",
+        type=int,
+        default=None,
+        help="GPU inference batch size for PointRend crops and DINOv2 (default: stage-optimal).",
+    )
+    parser.add_argument(
+        "--batch-size",
+        dest="gpu_batch_size",
+        type=int,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True, help="Pipeline phase to execute")
 
@@ -1222,25 +1338,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_dl.add_argument(
         "--force",
-        "--overwrite",
         dest="force",
         action="store_true",
         default=False,
         help="Force re-download even if model weights file exists locally.",
     )
+    p_dl.add_argument(
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
 
     # Subcommand: harvest
     p_harvest = subparsers.add_parser("harvest", help="Phase 1: Ingest GBIF occurrences & download images")
-    p_harvest.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
-    p_harvest.add_argument("--db", type=Path, default=argparse.SUPPRESS, help="Optional override path to SQLite database")
+    _add_common_subparser_args(p_harvest, include_gpu=False)
     p_harvest.add_argument(
         "--taxon",
-        "--taxa",
         dest="taxa",
         nargs="+",
         default=None,
         help="Target taxonomic binomials (omit to harvest all Packera species genus-wide)",
     )
+    p_harvest.add_argument(
+        "--taxa",
+        dest="taxa",
+        nargs="+",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    p_harvest.add_argument(
+        "--geographic-scope",
+        choices=["eastern_na", "north_america", "global"],
+        default=None,
+        help="Geographic scope for GBIF harvesting (eastern_na, north_america, global)",
+    )
+    p_harvest.add_argument("--countries", nargs="+", default=None, help="ISO-2 country codes for GBIF harvesting")
+    p_harvest.add_argument(
+        "--expand-synonyms",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Toggle GBIF Backbone synonym/basionym expansion (default: True)",
+    )
+    p_harvest.add_argument("--include-western", action="store_true", default=False, help=argparse.SUPPRESS)
     p_harvest.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
     p_harvest.add_argument("--output-csv", type=Path, default=None, help="Curated vouchers output CSV")
     p_harvest.add_argument("--max-records", type=int, default=None, help="Max records per taxon")
@@ -1251,17 +1392,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_harvest.add_argument("--download-images", action="store_true", default=False, help="Download specimen images")
     p_harvest.add_argument(
         "--force",
-        "--overwrite",
         dest="force",
         action="store_true",
         default=False,
         help="Force re-download and overwrite existing cached voucher images.",
     )
+    p_harvest.add_argument(
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
 
     # Subcommand: segment
     p_segment = subparsers.add_parser("segment", help="Phase 2: Segment leaves & export contours")
-    p_segment.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
-    p_segment.add_argument("--db", type=Path, default=argparse.SUPPRESS, help="Optional override path to SQLite database")
+    _add_common_subparser_args(p_segment, include_gpu=True)
     p_segment.add_argument("--vouchers", type=Path, default=None, help="Input curated vouchers CSV")
     p_segment.add_argument("--weights", type=Path, default=None, help="Model weights checkpoint (.pth)")
     p_segment.add_argument("--output-dir", type=Path, default=None, help="Root output directory")
@@ -1290,31 +1436,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="SAM 2 model config path for automated boundary refinement.",
     )
     p_segment.add_argument(
+        "--enable-geometric-qc",
+        dest="enable_geometric_qc",
+        action="store_true",
+        default=False,
+        help="Opt in to legacy post-hoc OpenCV geometric/photometric gatekeeping.",
+    )
+    p_segment.add_argument(
         "--force",
-        "--overwrite",
         dest="force",
         action="store_true",
         default=False,
         help="Force re-segmentation and overwrite existing contour CSVs and masks.",
     )
+    p_segment.add_argument(
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
 
     # Subcommand: morphometrics
     p_morph = subparsers.add_parser("morphometrics", help="Phase 3: Fourier EFA, GMM, & passive CDA in R")
-    p_morph.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
-    p_morph.add_argument("--db", type=Path, default=argparse.SUPPRESS, help="Optional override path to SQLite database")
-    p_morph.add_argument("--input", type=Path, default=None, help="Input contours directory")
+    _add_common_subparser_args(p_morph, include_gpu=False)
+    p_morph.add_argument("--input", type=Path, default=None, help=argparse.SUPPRESS)
     p_morph.add_argument("--manifest", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_morph.add_argument("--contours-dir", type=Path, default=None, help="Input contours directory")
     p_morph.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
     p_morph.add_argument("--reproductive", type=Path, default=None, help="Voucher reproductive metrics CSV")
-    p_morph.add_argument("--harmonics-out", type=Path, default=None, help="Output harmonics CSV")
-    p_morph.add_argument("--flags-out", type=Path, default=None, help="Output morphometric flags CSV")
-    p_morph.add_argument("--plot-out", type=Path, default=None, help="Output CDA biplot PDF")
-    p_morph.add_argument("--report-out", type=Path, default=None, help="Output BIC summary report")
-    p_morph.add_argument("--allometry-report", type=Path, default=None, help="Output allometry PERMANOVA summary CSV")
-    p_morph.add_argument("--allometry-pairwise", type=Path, default=None, help="Output allometry pairwise slopes CSV")
-    p_morph.add_argument("--allometry-plot", type=Path, default=None, help="Output allometry trajectory PDF")
-    p_morph.add_argument("--output-batch-audit", type=Path, default=None, help="Output institutional batch variance audit CSV")
+    p_morph.add_argument("--harmonics-out", type=Path, default=None, help=argparse.SUPPRESS)
+    p_morph.add_argument("--flags-out", type=Path, default=None, help=argparse.SUPPRESS)
+    p_morph.add_argument("--plot-out", type=Path, default=None, help=argparse.SUPPRESS)
+    p_morph.add_argument("--report-out", type=Path, default=None, help=argparse.SUPPRESS)
+    p_morph.add_argument("--allometry-report", type=Path, default=None, help=argparse.SUPPRESS)
+    p_morph.add_argument("--allometry-pairwise", type=Path, default=None, help=argparse.SUPPRESS)
+    p_morph.add_argument("--allometry-plot", type=Path, default=None, help=argparse.SUPPRESS)
+    p_morph.add_argument("--output-batch-audit", type=Path, default=None, help=argparse.SUPPRESS)
     p_morph.add_argument("--harmonics", type=int, default=None, help="Number of Fourier harmonics (k)")
     p_morph.add_argument("--num-pcs", type=int, default=None, help="Number of PCA dimensions")
     p_morph.add_argument("--max-k", type=int, default=None, help="Max GMM mixture components")
@@ -1323,49 +1481,70 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Subcommand: synthesis
     p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Phases 5-7: Vision XAI, Spatial RF, & Triage Dashboard")
-    p_synth.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
-    p_synth.add_argument("--db", type=Path, default=argparse.SUPPRESS, help="Optional override path to SQLite database")
+    _add_common_subparser_args(p_synth, include_gpu=True)
     p_synth.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
-    p_synth.add_argument("--manifest", "--manifest-csv", dest="manifest_csv", type=Path, default=None, help="Extracted leaf manifest CSV")
+    p_synth.add_argument("--manifest", dest="manifest_csv", type=Path, default=None, help="Extracted leaf manifest CSV")
+    p_synth.add_argument("--manifest-csv", dest="manifest_csv", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p_synth.add_argument("--rosette-dir", type=Path, default=None, help="Directory with cropped rosette patches")
-    p_synth.add_argument("--morphometrics", "--morphometrics-csv", dest="morphometrics", type=Path, default=None, help="Morphometrics flags CSV")
-    p_synth.add_argument("--pheno-states", type=Path, default=None, help="Voucher phenological states CSV")
+    p_synth.add_argument("--morphometrics", dest="morphometrics", type=Path, default=None, help="Morphometrics flags CSV")
+    p_synth.add_argument("--morphometrics-csv", dest="morphometrics", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    p_synth.add_argument("--pheno-states", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--vision-audit", type=Path, default=None, help="Output vision audit CSV")
     p_synth.add_argument("--cleanlab-threshold", type=float, default=0.85, help="Cleanlab noise cutoff threshold")
+    p_synth.add_argument("--error-threshold", dest="cleanlab_threshold", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p_synth.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
     p_synth.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
     p_synth.add_argument("--env-dir", type=Path, default=None, help="Directory containing environmental rasters")
-    p_synth.add_argument("--ssurgo-table", type=Path, default=None, help="Output SSURGO edaphic metrics CSV")
-    p_synth.add_argument("--contingency-table", type=Path, default=None, help="Output lithology-taxon contingency audit CSV")
-    p_synth.add_argument("--pheno-anomalies", type=Path, default=None, help="Output phenological allochrony anomalies CSV")
-    p_synth.add_argument("--pheno-summary", type=Path, default=None, help="Output phenological model summary CSV")
-    p_synth.add_argument("--pheno-plot", type=Path, default=None, help="Output phenological allochrony space-time PDF")
-    p_synth.add_argument("--conflict-flags", type=Path, default=None, help="Output multimodal conflict flags CSV")
-    p_synth.add_argument("--spatial-plot", type=Path, default=None, help="Output spatial RF PDF plot")
-    p_synth.add_argument("--spatial-summary", type=Path, default=None, help="Output Warren's identity summary CSV")
+    p_synth.add_argument("--ssurgo-batch-size", type=int, default=None, help="Batch size for USDA SDA SSURGO queries")
+    p_synth.add_argument("--ssurgo-table", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--contingency-table", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--pheno-anomalies", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--pheno-summary", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--pheno-plot", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--conflict-flags", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--spatial-plot", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--spatial-summary", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--permutations", type=int, default=100, help="Warren's identity test permutations")
     p_synth.add_argument("--n-trees", type=int, default=500, help="Random forest trees")
-    p_synth.add_argument("--gmm-summary", type=Path, default=None, help="GMM Bayes factor report CSV")
-    p_synth.add_argument("--output-queue", type=Path, default=None, help="Output expert triage queue CSV")
-    p_synth.add_argument("--synthesis-plot", type=Path, default=None, help="Output 6-panel synthesis plate PDF")
-    p_synth.add_argument("--synthesis-report", type=Path, default=None, help="Output revision summary Markdown")
-    p_synth.add_argument("--xai-plot", type=Path, default=None, help="Output Grad-CAM panel PNG")
+    p_synth.add_argument("--gmm-summary", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--output-queue", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--synthesis-plot", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--synthesis-report", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--xai-plot", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")
     p_synth.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
 
     # Subcommand: run-all
     p_all = subparsers.add_parser("run-all", help="Execute complete pipeline (harvest -> segment -> morphometrics -> synthesis)")
-    # Merge key arguments from previous stages
-    p_all.add_argument("--run-id", type=str, default=None, help="Run identifier for isolated run directory under runs/<run_id>/")
-    p_all.add_argument("--db", type=Path, default=argparse.SUPPRESS, help="Optional override path to SQLite database")
+    _add_common_subparser_args(p_all, include_gpu=True)
     p_all.add_argument(
         "--taxon",
-        "--taxa",
         dest="taxa",
         nargs="+",
         default=None,
         help="Target taxonomic binomials (omit to harvest all Packera species genus-wide)",
     )
+    p_all.add_argument(
+        "--taxa",
+        dest="taxa",
+        nargs="+",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    p_all.add_argument(
+        "--geographic-scope",
+        choices=["eastern_na", "north_america", "global"],
+        default=None,
+        help="Geographic scope for GBIF harvesting (eastern_na, north_america, global)",
+    )
+    p_all.add_argument("--countries", nargs="+", default=None, help="ISO-2 country codes for GBIF harvesting")
+    p_all.add_argument(
+        "--expand-synonyms",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Toggle GBIF Backbone synonym/basionym expansion (default: True)",
+    )
+    p_all.add_argument("--include-western", action="store_true", default=False, help=argparse.SUPPRESS)
     p_all.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
     p_all.add_argument("--output-csv", type=Path, default=None, help="Curated vouchers output CSV")
     p_all.add_argument("--max-records", type=int, default=None, help="Max records per taxon")
@@ -1376,11 +1555,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--download-images", action="store_true", default=False, help="Download specimen images")
     p_all.add_argument(
         "--force",
-        "--overwrite",
         dest="force",
         action="store_true",
         default=False,
         help="Force re-harvesting and re-segmentation, overwriting existing artifacts.",
+    )
+    p_all.add_argument(
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     p_all.add_argument("--vouchers", type=Path, default=None, help="Input curated vouchers CSV")
     p_all.add_argument("--weights", type=Path, default=None, help="Model weights checkpoint (.pth)")
@@ -1409,18 +1594,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="SAM 2 model config path for automated boundary refinement.",
     )
-    p_all.add_argument("--input", type=Path, default=None, help="Input contours directory")
+    p_all.add_argument(
+        "--enable-geometric-qc",
+        dest="enable_geometric_qc",
+        action="store_true",
+        default=False,
+        help="Opt in to legacy post-hoc OpenCV geometric/photometric gatekeeping.",
+    )
+    p_all.add_argument("--input", type=Path, default=None, help=argparse.SUPPRESS)
     p_all.add_argument("--manifest", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_all.add_argument("--contours-dir", type=Path, default=None, help="Input contours directory")
-    p_all.add_argument("--harmonics-out", type=Path, default=None, help="Output harmonics CSV")
-    p_all.add_argument("--flags-out", type=Path, default=None, help="Output morphometric flags CSV")
-    p_all.add_argument("--plot-out", type=Path, default=None, help="Output CDA biplot PDF")
-    p_all.add_argument("--report-out", type=Path, default=None, help="Output BIC summary report")
+    p_all.add_argument("--harmonics-out", type=Path, default=None, help=argparse.SUPPRESS)
+    p_all.add_argument("--flags-out", type=Path, default=None, help=argparse.SUPPRESS)
+    p_all.add_argument("--plot-out", type=Path, default=None, help=argparse.SUPPRESS)
+    p_all.add_argument("--report-out", type=Path, default=None, help=argparse.SUPPRESS)
     p_all.add_argument("--harmonics", type=int, default=None, help="Number of Fourier harmonics (k)")
     p_all.add_argument("--num-pcs", type=int, default=None, help="Number of PCA dimensions")
     p_all.add_argument("--max-k", type=int, default=None, help="Max GMM mixture components")
     p_all.add_argument("--rosette-dir", type=Path, default=None, help="Directory with cropped rosette patches")
     p_all.add_argument("--cleanlab-threshold", type=float, default=0.85, help="Cleanlab noise cutoff threshold")
+    p_all.add_argument("--error-threshold", dest="cleanlab_threshold", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    p_all.add_argument("--ssurgo-batch-size", type=int, default=None, help="Batch size for USDA SDA SSURGO queries")
     p_all.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
     p_all.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
     p_all.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")

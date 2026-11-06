@@ -1446,6 +1446,36 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         self.assertEqual(str(misid_row["vision_nearest_type_taxon"]), "Packera anonyma")
         self.assertGreater(float(misid_row["vision_type_margin"]), 0.40)
 
+    def test_resolve_step05_loader_params_and_cuda_batch_size_under_64(self):
+        """Verify resolve_step05_loader_params honors explicit CUDA batch sizes < 64 and CPU threads."""
+        import os
+        from scripts.analysis.vision_dissection_utils import resolve_step05_loader_params
+
+        with mock_patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PACKERA_MAX_WORKERS", None)
+            os.environ.pop("PACKERA_GPU_BATCH_SIZE", None)
+
+            # Explicit CUDA batch size < 64 (e.g., 8) must be honored without being forced to 64
+            nw_cuda_8, bs_cuda_8 = resolve_step05_loader_params(batch_size=8, threads=6, use_cuda=True, n_records=50)
+            self.assertEqual(bs_cuda_8, 8)
+            self.assertEqual(nw_cuda_8, 6)
+
+            # Default CUDA batch size (None) falls back to 64; CPU falls back to 32
+            _, bs_cuda_def = resolve_step05_loader_params(batch_size=None, threads=4, use_cuda=True, n_records=50)
+            self.assertEqual(bs_cuda_def, 64)
+            _, bs_cpu_def = resolve_step05_loader_params(batch_size=None, threads=4, use_cuda=False, n_records=50)
+            self.assertEqual(bs_cpu_def, 32)
+
+        # Verify Step 05 CLI parser supports -j/--threads, --gpu-batch-size, and hidden --batch-size
+        args_step05 = mod_xai.parse_args(["-j", "10", "--gpu-batch-size", "12", "--cleanlab-threshold", "0.88"])
+        self.assertEqual(args_step05.threads, 10)
+        self.assertEqual(args_step05.gpu_batch_size, 12)
+        self.assertAlmostEqual(args_step05.cleanlab_threshold, 0.88, places=4)
+
+        args_step05_legacy = mod_xai.parse_args(["--batch-size", "16", "--error-threshold", "0.91"])
+        self.assertEqual(args_step05_legacy.gpu_batch_size, 16)
+        self.assertAlmostEqual(args_step05_legacy.cleanlab_threshold, 0.91, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()

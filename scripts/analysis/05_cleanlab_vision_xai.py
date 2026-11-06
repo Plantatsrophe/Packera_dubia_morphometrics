@@ -23,7 +23,7 @@ _script_root = Path(__file__).resolve().parents[2]
 if str(_script_root) not in sys.path: sys.path.insert(0, str(_script_root))
 from scripts.core.db import compute_file_sha256, fetch_cached_dinov2_features, get_db_connection, is_canonical_or_explicit_db_context, persist_vision_xai_audit, store_dinov2_features_cache
 from scripts.core.harvester import classify_nomenclatural_type_rank
-from scripts.analysis.vision_dissection_utils import batch_classify_surface_orientations, compute_batch_patch_set_sha256, compute_dissection_neutral_leaf_weight, compute_type_visual_control, extract_row_type_info as _row_type_info, filter_basal_manifest_rows_py, fit_calibrated_oof_fold_classifier, order_basal_leaves_by_median_solidity, overlay_chromatic_type_anchors, pool_patch_tokens_and_fg_ratio_fast, resolve_run_scoped_patch_and_manifest_inputs, resolve_specimen_keys_fast
+from scripts.analysis.vision_dissection_utils import batch_classify_surface_orientations, compute_batch_patch_set_sha256, compute_dissection_neutral_leaf_weight, compute_type_visual_control, extract_row_type_info as _row_type_info, filter_basal_manifest_rows_py, fit_calibrated_oof_fold_classifier, order_basal_leaves_by_median_solidity, overlay_chromatic_type_anchors, pool_patch_tokens_and_fg_ratio_fast, resolve_run_scoped_patch_and_manifest_inputs, resolve_specimen_keys_fast, resolve_step05_loader_params
 
 FOREGROUND_ATTENTION_MIN_RATIO: float = 0.65
 DYNAMIC_OKABE_ITO_HEX: List[str] = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#882255", "#44AA99", "#332288", "#117733"]
@@ -319,7 +319,7 @@ def _aggregate_voucher_embeddings(raw_feats: np.ndarray, expanded_meta: List[Any
         fg_map[g_key] = round(float(np.sum(np.array([it[3] for it in items], dtype=np.float64) * nwts)), 4)
     return np.vstack(agg_feats), np.array(agg_labels, dtype=int), voucher_order, fg_map
 
-def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "dinov2_vitb14_reg", device: str = "cuda" if torch.cuda.is_available() else "cpu", batch_size: int = 32, neutralize_background: bool = True, demo: bool = False, return_fg_ratios: bool = False, db_path: Optional[Path] = None, sigma: float = 1.0, model_cache: Optional[Dict[str, Any]] = None) -> Any:
+def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "dinov2_vitb14_reg", device: str = "cuda" if torch.cuda.is_available() else "cpu", batch_size: Optional[int] = None, neutralize_background: bool = True, demo: bool = False, return_fg_ratios: bool = False, db_path: Optional[Path] = None, sigma: float = 1.0, model_cache: Optional[Dict[str, Any]] = None, threads: Optional[int] = None) -> Any:
     """Extracts 768-d DINOv2 embeddings & foreground patch-energy ratios per `(catalogNumber, plant_individual_id)` with SQLite feature caching."""
     torch.manual_seed(42); np.random.seed(42)
     if not records:
@@ -373,7 +373,7 @@ def extract_dinov2_embeddings(records: List[Dict[str, Any]], model_name: str = "
             exp_r, exp_m, _, _ = _expand(uncached_recs)
             use_cuda = (not demo) and str(device).startswith("cuda") and torch.cuda.is_available()
             if use_cuda: torch.backends.cuda.matmul.allow_tf32 = True; torch.backends.cudnn.allow_tf32 = True
-            nw, eff_bs = ((min(8, os.cpu_count() or 4) if len(exp_r) >= 64 else 0) if use_cuda else 0), (max(int(batch_size), 64) if use_cuda else int(batch_size))
+            nw, eff_bs = resolve_step05_loader_params(batch_size, threads, use_cuda, len(exp_r))
             loader = DataLoader(RosettePatchDataset(exp_r, neutralize_background=neutralize_background, sigma=sigma, demo=demo), batch_size=eff_bs, shuffle=False, num_workers=nw, pin_memory=use_cuda)
             model, last_err = None, None
             for candidate_name in (model_name, "dinov2_vitb14"):
@@ -722,18 +722,18 @@ def generate_step05_publication_figures(audit_df: pd.DataFrame, output_figure_pa
         fig.savefig(tmp_png, format="png", dpi=300, bbox_inches="tight"); tmp_png.replace(png_out)
     finally: plt.close(fig)
     return {"pdf": pdf_out, "png": png_out}
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parses command-line arguments for Phase 5 analysis."""
     p = argparse.ArgumentParser(description="Phase 5: Indumentum-Blind DINOv2 Macro-Architecture & Cleanlab XAI Audit")
     p.add_argument("--rosette-dir", type=Path, default=Path("data/cropped_patches")); p.add_argument("--vouchers-csv", type=Path, default=Path("data/tables/curated_vouchers.csv"))
     p.add_argument("--output-csv", type=Path, default=Path("data/tables/label_noise_audit.csv")); p.add_argument("--output-figure", type=Path, default=Path("outputs/figures/GradCAM_audit_panel.png"))
-    p.add_argument("--cleanlab-threshold", dest="cleanlab_threshold", type=float, default=0.85); p.add_argument("--error-threshold", dest="cleanlab_threshold", type=float)
-    p.add_argument("--neutralize-background", dest="neutralize_background", action="store_true", default=True); p.add_argument("--no-neutralize-background", dest="neutralize_background", action="store_false")
-    p.add_argument("--export-figures", dest="export_figures", action="store_true", default=True); p.add_argument("--no-export-figures", dest="export_figures", action="store_false")
+    p.add_argument("--cleanlab-threshold", dest="cleanlab_threshold", type=float, default=0.85); p.add_argument("--error-threshold", dest="cleanlab_threshold", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    p.add_argument("-j", "--threads", dest="threads", type=int, default=None, help="Maximum CPU worker threads for DataLoader and image hashing (default: auto)."); p.add_argument("--gpu-batch-size", dest="gpu_batch_size", type=int, default=None, help="GPU inference batch size for DINOv2 (default: 64 on CUDA, 32 on CPU)."); p.add_argument("--batch-size", dest="gpu_batch_size", type=int, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    p.add_argument("--neutralize-background", dest="neutralize_background", action="store_true", default=True); p.add_argument("--no-neutralize-background", dest="neutralize_background", action="store_false"); p.add_argument("--export-figures", dest="export_figures", action="store_true", default=True); p.add_argument("--no-export-figures", dest="export_figures", action="store_false")
     p.add_argument("--filter-abaxial-artifacts", dest="filter_abaxial_artifacts", action="store_true", default=True); p.add_argument("--no-filter-abaxial-artifacts", dest="filter_abaxial_artifacts", action="store_false")
     p.add_argument("--stratify-by-orientation", dest="stratify_by_orientation", action="store_true", default=False); p.add_argument("--intraspecific-mode", dest="intraspecific_mode", action="store_true", default=False)
     p.add_argument("--morphometrics-csv", type=Path, default=None); p.add_argument("--manifest-csv", type=Path, default=None); p.add_argument("--focal-taxon", type=str, default=""); p.add_argument("--demo", dest="demo", action="store_true", default=False); p.add_argument("--db", type=Path, default=None)
-    return p.parse_args()
+    return p.parse_args(argv)
 def _apply_intraspecific_morphotype_labels(df: pd.DataFrame, morphometrics_csv: Optional[Path], vouchers_csv: Optional[Path] = None, intraspecific_mode: bool = False) -> pd.DataFrame:
     """Remaps `taxon` and `label_idx` to Step 04 `Morphotype_K1..Kn` clusters when single-species or `--intraspecific-mode`."""
     if df.empty or (not intraspecific_mode and df["taxon"].nunique() >= 2): return df
@@ -760,7 +760,7 @@ def main() -> None:
     if df.empty: logger.warning("No rosette patch records were matched. Check inputs."); return
     df["plant_individual_id"] = [_parse_pid(v, 0) for v in df["plant_individual_id"]] if "plant_individual_id" in df.columns else 0
     df = _apply_intraspecific_morphotype_labels(df, morph_csv, vouchers_csv=args.vouchers_csv, intraspecific_mode=args.intraspecific_mode); model_box: Dict[str, Any] = {}
-    features, labels, key_order, fg_ratios = extract_dinov2_embeddings(df.to_dict("records"), neutralize_background=args.neutralize_background, demo=args.demo, return_fg_ratios=True, db_path=args.db, model_cache=model_box)
+    features, labels, key_order, fg_ratios = extract_dinov2_embeddings(df.to_dict("records"), batch_size=getattr(args, "gpu_batch_size", None), neutralize_background=args.neutralize_background, demo=args.demo, return_fg_ratios=True, db_path=args.db, model_cache=model_box, threads=getattr(args, "threads", None))
     fg_by_key = {(k if isinstance(k, tuple) else (str(k).strip(), 0)): float(fg) for k, fg in zip(key_order, fg_ratios)}
     df["foreground_attention_ratio"] = [round(fg_by_key.get((str(c).strip(), _parse_pid(p, 0)), 0.85), 4) for c, p in zip(df["catalogNumber"], df["plant_individual_id"])]
     active_taxa, promo_s = sorted(t for t in set(df["taxon"]) if _is_valid_packera_taxon(t)) or ["Unassigned_Packera"], df.get("is_promoted_bronze", None)

@@ -88,26 +88,26 @@ source .venv/bin/activate
 #    Analyzes strictly the species specified by the user with zero hardcoded default species or injected outgroups:
 ./run_pipeline.sh --run-id packera_subset --taxon "Packera dubia" "Packera <congener_1>" "Packera <congener_2>"
 
-# 3. Launch a custom named run (--run-id <NAME>) reusing cached vouchers & local images (--skip-harvest)
-./run_pipeline.sh --run-id packera_full_run --skip-harvest
+# 3. Launch a custom named run (--run-id <NAME>) with explicit CPU thread count and GPU batch size
+./run_pipeline.sh --run-id packera_full_run -j 8 --gpu-batch-size 32
 
-# 4. Resume an existing run from any step (--start-step <1..7>, e.g., Step 03 EFA or Step 04 GMM/CDA onward)
-./run_pipeline.sh --run-id packera_full_run --skip-harvest --start-step 3
+# 4. Resume an existing run from any step (--start-step <1..8>; automatically skips Step 01 harvest when --start-step >= 2)
+./run_pipeline.sh --run-id packera_full_run --start-step 3
 
 # 4b. Resume directly from Step 04 with Nomenclatural Type Controls:
 #     Nomenclatural type controls require ZERO new CLI flags and do NOT require re-running Step 01 on existing
 #     databases or manifests; preflight automatically evaluates type status ranks and applies SQLite schema migrations:
-./run_pipeline.sh --run-id packera_full_run --skip-harvest --start-step 4
+./run_pipeline.sh --run-id packera_full_run --start-step 4
 
 # 5. Strategy 1: Focal Taxon + Outgroup Gold Reference Anchors (--focal-taxon "<TAXON>" --gold-anchors 30)
 # (Nomenclatural types take unconditional precedence in outgroup selection; cascades Gold -> Silver -> Bronze anchors when an outgroup taxon lacks Tier_1_Gold vouchers)
-./run_pipeline.sh --run-id dubia_triage --skip-harvest --focal-taxon "Packera dubia" --gold-anchors 30
+./run_pipeline.sh --run-id dubia_triage --start-step 2 --focal-taxon "Packera dubia" --gold-anchors 30
 
 # 6. Strategy 2: Pure Intraspecific Delimitation Mode (--focal-taxon "<TAXON>" --intraspecific-mode)
-./run_pipeline.sh --run-id dubia_cryptic --skip-harvest --focal-taxon "Packera dubia" --intraspecific-mode
+./run_pipeline.sh --run-id dubia_cryptic --start-step 2 --focal-taxon "Packera dubia" --intraspecific-mode
 
 # 7. Continent-wide North American expansion across US, Canada, and Mexico with dynamic synonym expansion
-./run_pipeline.sh --run-id na_wide_run --geographic-scope north_america --include-western --countries "US,CA,MX" --expand-synonyms
+./run_pipeline.sh --run-id na_wide_run --geographic-scope north_america --countries "US,CA,MX" --expand-synonyms
 
 # 8. Unsupervised North American taxon-complex discovery across harvested vouchers
 ./run_pipeline.sh --run-id eastern_complexes --discover-complexes --spatial-thin-km 5.0
@@ -134,8 +134,8 @@ To execute a complete, rigorous systematic revision of *Packera dubia* and allie
 | :--- | :--- | :--- |
 | **Stage 1: Baseline Harmonization** | Full genus-wide (or user-specified `--taxon`) harvest, ruler calibration, LeafMachine2 segmentation, EFA, GMM/CDA, DINOv2 XAI, and multimodal random forests. | `./run_pipeline.sh --run-id stage1_baseline` |
 | **Stage 2: Promote Manifests** | Step 01–02 manifests, 120-vertex contours, and edaphic/embedding caches are automatically persisted into `data/packera_pipeline.sqlite`. Optionally promote CSV tables into canonical `data/tables/` via `cp` or `export_table_or_view_to_csv_atomic()`. | `cp runs/stage1_baseline/data/tables/*.csv data/tables/` |
-| **Stage 3: Pure Intraspecific Mode** | Delimit cryptic lineages and morphotypes within *P. dubia* strictly (`n_unique_taxa == 1`), gating Step 04–06 on GMM clusters and `PCA-env` ecotypes. | `./run_pipeline.sh --run-id stage3_dubia_cryptic --skip-harvest --focal-taxon "Packera dubia" --intraspecific-mode` |
-| **Stage 4: Outgroup Gold Anchors** | Calibrate *P. dubia* against 30 reference anchors per outgroup species (with unconditional nomenclatural type precedence via `select_cascading_outgroup_anchors()`, cascading Type -> Gold -> Silver -> Bronze) for definitive curation triage. | `./run_pipeline.sh --run-id stage4_dubia_triage --skip-harvest --focal-taxon "Packera dubia" --gold-anchors 30` |
+| **Stage 3: Pure Intraspecific Mode** | Delimit cryptic lineages and morphotypes within *P. dubia* strictly (`n_unique_taxa == 1`), gating Step 04–06 on GMM clusters and `PCA-env` ecotypes. | `./run_pipeline.sh --run-id stage3_dubia_cryptic --start-step 2 --focal-taxon "Packera dubia" --intraspecific-mode` |
+| **Stage 4: Outgroup Gold Anchors** | Calibrate *P. dubia* against 30 reference anchors per outgroup species (with unconditional nomenclatural type precedence via `select_cascading_outgroup_anchors()`, cascading Type -> Gold -> Silver -> Bronze) for definitive curation triage. | `./run_pipeline.sh --run-id stage4_dubia_triage --start-step 2 --focal-taxon "Packera dubia" --gold-anchors 30` |
 | **Stage 5: Full Tree Discovery** | Expand harvest across Eastern North America or continent-wide (`--geographic-scope north_america`) and perform unsupervised network community discovery. | `./run_pipeline.sh --run-id stage5_eastern_tree --discover-complexes` |
 
 ---
@@ -151,47 +151,45 @@ The pipeline provides three unified tiers of command-line execution:
 
 ### Tier 1: Master Run-Scoped Shell Orchestrator (`./run_pipeline.sh`)
 
-#### Run & Database Isolation Flags
+#### Run, Compute & Database Isolation Flags
 | Flag | Arguments | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--run-id` | `<ID>` | `run_<YYYYMMDD_HHMMSS>` | Custom identifier for isolated run directory under `runs/<ID>/`; atomically updates the `runs/latest` symlink. |
 | `--db` | `<PATH>` | `data/packera_pipeline.sqlite` | Override path to transactional WAL SQLite database (exports `PACKERA_DB_PATH` to all child processes). |
 | `--demo` | *(none)* | `false` | Run in ephemeral test isolation mode (`PACKERA_DEMO_MODE=1`), writing to `runs/<ID>/data/demo_ephemeral.sqlite`. |
-| `--start-step` | `<1..8>` | `1` | Start or resume execution at a specific phase (1=Harvest, 2=Segment, 3=EFA, 4=GMM/CDA, 5=Vision XAI, 6=Spatial RF, 7=Triage Synthesis, 8=Taxon Complex Discovery), automatically seeding upstream assets. |
-| `--skip-harvest` | *(none)* | `false` | Reuse existing `curated_vouchers.csv` and local raw images without re-querying GBIF. |
-| `--force`, `--overwrite` | *(none)* | `false` | Force re-execution and overwrite cached artifacts across phases. |
-| `--resegment`, `--force-segment` | *(none)* | `false` | Force fresh Step 02 LeafMachine2 + PointRend segmentation even if contour files already exist. |
+| `-j`, `--threads` | `<INT>` | `auto` | Number of CPU worker threads across local Python and R stages (`PACKERA_MAX_WORKERS`). |
+| `--gpu-batch-size` | `<INT>` | `16` (Stg 2) / `64` (Stg 5) | GPU inference batch size for Stage 2 PointRend and Step 05 DINOv2 (`PACKERA_GPU_BATCH_SIZE`), scaling Stage 1 YOLOv5 full-sheet waves (`max(1, min(32, B))`). |
+| `--start-step` | `<1..8>` | `1` | Start or resume execution at a specific phase (1=Harvest, 2=Segment, 3=EFA, 4=GMM/CDA, 5=Vision XAI, 6=Spatial RF, 7=Triage Synthesis, 8=Taxon Complex Discovery); automatically skips Step 01 harvest when $\ge 2$ and seeds upstream assets. |
+| `--force` | *(none)* | `false` | Force re-execution and overwrite cached artifacts across active phases (including fresh Step 02 re-segmentation when combined with `--start-step 2`). |
 | `--limit` | `<N>` | `0` *(unlimited)* | Cap the maximum number of vouchers processed in Step 02 segmentation. |
 | `--sam2-refine` | *(none)* | `false` | Enable automated LM2-guided SAM 2.1 sub-pixel boundary refinement on Stage 2 leaf crops. |
 | `--regenerate-figures-only` | *(none)* | `false` | Re-render Step 02 diagnostic figures (`fig02a`, `fig02b`) using post-QC validated silhouettes without re-running segmentation. |
+| `-h`, `--help` | *(none)* | — | Display categorized CLI usage summary and exit. |
 
 #### Taxonomic Scope & Complex Discovery Flags
 | Flag | Arguments | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--focal-taxon` | `"<Binomial>"` | *(none)* | Target a focal *Packera* species (e.g., `"Packera dubia"`) for targeted CDA, spatial niche modeling, and revision synthesis. |
-| `--taxon`, `--taxa` | `"<Sp1>" "<Sp2>" ...` | *(all / genus-wide)* | Explicitly specify one or more target *Packera* binomials to harvest and analyze (omit to harvest the entire genus dynamically from GBIF). |
+| `--taxon` | `"<Sp1>" "<Sp2>" ...` | *(all / genus-wide)* | Explicitly specify one or more target *Packera* binomials to harvest and analyze (omit to harvest the entire genus dynamically from GBIF). |
 | `--exclude-taxon` | `"<Binomial>"` | *(none)* | Exclude one or more specified taxa from the active run (repeatable; e.g., `--exclude-taxon "Packera <species>"`). |
 | `--intraspecific-mode` | *(none)* | `false` | Run single-taxon intraspecific morphotype/ecotype delimitation mode across Steps 04–07 (`n_unique_taxa == 1`), gating on GMM morphotypes and `PCA-env` ecotypes. |
 | `--expand-synonyms` / `--no-expand-synonyms` | *(none)* | `--expand-synonyms` | Toggle automatic expansion of *Packera* binomials to historical *Senecio* and *Cineraria* basionyms/synonyms via the GBIF Taxonomic Backbone. |
-| `--discover-complexes` | *(none)* | `false` | Trigger Step 08 unsupervised Leiden/Louvain and Ward.D2 taxon-complex discovery (`scripts/analysis/08_discover_taxon_complexes.R`). |
-| `--auto-neighbors` | *(none)* | `false` | Run Step 08 first to automatically discover high-affinity neighbor taxa ($W_{ij} \ge \text{min\_affinity}$) around `--focal-taxon` and scope downstream focal synthesis to that empirical complex. |
+| `--discover-complexes` | *(none)* | `false` | Trigger Step 08 unsupervised Leiden/Louvain and Ward.D2 taxon-complex discovery (`08_discover_taxon_complexes.R`); when paired with `--focal-taxon`, automatically discovers high-affinity neighbor taxa ($W_{ij} \ge \text{min\_affinity}$) for focal synthesis. |
 | `--min-affinity` | `<FLOAT>` | `0.03` | Minimum multi-modal affinity weight $W_{ij}$ threshold for connecting species nodes in the Step 08 complex graph. |
 
 #### Authority Tiering, Reference Anchors & Misidentification Filtering Flags
 | Flag | Arguments | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--gold-anchors` | `<N>` | `30` | Target number of Tier 1 Gold reference anchors per outgroup taxon in Strategy 1 focal runs (cascades Gold $\rightarrow$ Silver $\rightarrow$ Bronze). |
-| `--gold-only` | *(none)* | `false` | Restrict cohort strictly to `Tier_1_Gold` monograph-authority vouchers prior to model fitting. |
-| `--determiner-tier` | `<TIER>` | *(all)* | Filter vouchers strictly to a specified determiner authority tier (e.g., `Tier_1_Gold`, `Tier_2_Silver`, `Tier_3_Bronze`). |
+| `--gold-anchors` | `<N>` | `30` | Target number of Tier 1 Gold reference anchors per outgroup taxon in Strategy 1 focal runs (cascades Type $\rightarrow$ Gold $\rightarrow$ Silver $\rightarrow$ Bronze). |
+| `--determiner-tier` | `<TIER>` | *(all)* | Filter vouchers strictly to a specified determiner authority tier (`Tier_1_Gold`/`gold`, `Tier_2_Silver`/`silver`, `Tier_3_Bronze`/`bronze`). |
 | `--exclude-misidentified` | *(none)* | `false` | Prune vouchers flagged as misidentified (`Misidentification_Reassign`) in prior runs before fitting downstream models. |
 | `--triage-source` | `<SOURCE>` | `ALL` | Source of triage reports for misidentification pruning (`ALL` existing runs, or comma-separated run IDs). |
 
 #### Geographic Scope & Spatial Sampling Flags
 | Flag | Arguments | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--geographic-scope` | `{eastern_na,north_america,global}` | `eastern_na` | Set GBIF harvesting and longitudinal filtering envelope (`eastern_na` enforces $\ge -106.65^\circ\text{W}$; `north_america` and `global` disable the western cutoff). |
-| `--include-western`, `--no-exclude-western` | *(none)* | `false` | Retain occurrences west of $-106.65^\circ\text{W}$ across western US, Canada, and Mexico. |
-| `--countries` | `"<ISO2 ...>"` | `US` | Space-separated ISO-2 country codes for GBIF harvesting (e.g., `--countries "US CA MX"`). |
+| `--geographic-scope` | `{eastern_na,north_america,global}` | `eastern_na` | Set GBIF harvesting and longitudinal filtering envelope (`eastern_na` enforces $\ge -106.65^\circ\text{W}$; `north_america` and `global` disable the western cutoff and include western occurrences). |
+| `--countries` | `"<ISO2 ...>"` | `US` | Space-separated or comma-separated ISO-2 country codes for GBIF harvesting (e.g., `--countries "US CA MX"`). |
 | `--spatial-thin-km` | `<FLOAT>` | `0.0` *(disabled)* | Minimum spatial grid thinning distance in km per species to attenuate herbarium collection clustering. |
 | `--max-per-state` | `<INT>` | *(unlimited)* | Cap maximum vouchers retained per `(species, stateProvince)`. |
 | `--max-per-region` | `<INT>` | *(unlimited)* | Cap maximum vouchers retained per EPA Level III Ecoregion. |
@@ -207,16 +205,19 @@ All `python main.py` subcommands accept the following global options:
 - `-v`, `--verbose`: Enable detailed debug logging.
 - `--run-id <ID>`: Specify an explicit run identifier under `runs/<ID>/`.
 - `--db <PATH>`: Path to SQLite WAL relational database (default: `data/packera_pipeline.sqlite`).
+- `--demo`: Run in ephemeral test isolation mode (`runs/<ID>/data/demo_ephemeral.sqlite`).
+- `-j`, `--threads <INT>`: Number of CPU worker threads across local Python and R stages (`PACKERA_MAX_WORKERS`).
+- `--gpu-batch-size <INT>`: GPU inference batch size for Stage 2 PointRend and Step 05 DINOv2 (`PACKERA_GPU_BATCH_SIZE`).
 
 #### Subcommands Reference
 | Subcommand | Syntax & Primary Options | Operational Scope |
 | :--- | :--- | :--- |
 | **`check-env`** | `python main.py check-env [--strict]` | Verifies Python $\ge 3.10$, PyTorch CUDA acceleration, R installation, core packages, and LeafMachine2 submodule. |
 | **`download-weights`** | `python main.py download-weights [--force]` | Verifies or downloads YOLOv5 (`LeafPriority.pt`), PointRend (`leaf_seg_rcnn_v2_1`), and SAM 2 model checkpoints with SHA-256 integrity checks. |
-| **`harvest`** | `python main.py harvest [--run-id ID] [--db PATH] [--taxa ...] [--out-dir DIR] [--output-csv PATH] [--max-records N] [--max-uncertainty M] [--min-megapixels MP] [--min-file-size-kb KB] [--concurrency N] [--download-images] [--force]` | Queries GBIF/iDigBio, standardizes taxon synonyms, assigns EPA Level III Ecoregions, stratifies 3-layer determiner authority, and downloads voucher imagery. |
-| **`segment`** | `python main.py segment [--run-id ID] [--db PATH] [--vouchers PATH] [--weights PATH] [--output-dir DIR] [--device cuda\|cpu] [--min-solidity FLOAT] [--min-ucs FLOAT] [--score-thresh FLOAT] [--limit N] [--sam2-refine] [--sam2-checkpoint PATH] [--sam2-config PATH] [--force]` | Runs two-stage LeafMachine2 v2.2+ detection and PointRend segmentation with cohort-adaptive organ scaling, dimensionless gatekeeping, and per-voucher SQLite transactions. |
-| **`morphometrics`** | `python main.py morphometrics [--run-id ID] [--db PATH] [--input DIR] [--manifest PATH] [--contours-dir DIR] [--vouchers PATH] [--reproductive PATH] [--harmonics-out PATH] [--flags-out PATH] [--plot-out PATH] [--report-out PATH] [--allometry-report PATH] [--allometry-pairwise PATH] [--allometry-plot PATH] [--output-batch-audit PATH] [--harmonics K] [--num-pcs P] [--max-k K] [--focal-taxon TAXON] [--intraspecific-mode]` | Executes Step 03 EFA with dynamic harmonic power calibration ($H_{\text{opt}} \in [6, 24]$) and Step 04 Klingenberg allometry, Kass-Raftery GMM, and dual-track CDA. |
-| **`synthesis`** *(alias: `analyze`)* | `python main.py synthesis [--run-id ID] [--db PATH] [--vouchers PATH] [--manifest-csv PATH] [--rosette-dir DIR] [--morphometrics-csv PATH] [--pheno-states PATH] [--vision-audit PATH] [--cleanlab-threshold FLOAT] [--export-figures / --no-export-figures] [--env-dir DIR] [--ssurgo-table PATH] [--contingency-table PATH] [--pheno-anomalies PATH] [--pheno-summary PATH] [--pheno-plot PATH] [--conflict-flags PATH] [--spatial-plot PATH] [--spatial-summary PATH] [--permutations N] [--n-trees N] [--gmm-summary PATH] [--output-queue PATH] [--synthesis-plot PATH] [--synthesis-report PATH] [--xai-plot PATH] [--focal-taxon TAXON] [--intraspecific-mode]` | Orchestrates Step 05 DINOv2 foreground patch XAI, Step 06 19-bioclimatic edaphic spatial RF with dynamic primary predictor gating, and Step 07 consensus triage synthesis. |
+| **`harvest`** | `python main.py harvest [--run-id ID] [--db PATH] [-j THREADS] [--taxon ...] [--geographic-scope {eastern_na,north_america,global}] [--countries ...] [--expand-synonyms / --no-expand-synonyms] [--out-dir DIR] [--output-csv PATH] [--max-records N] [--max-uncertainty M] [--min-megapixels MP] [--min-file-size-kb KB] [--concurrency N] [--download-images] [--force]` | Queries GBIF/iDigBio, standardizes taxon synonyms, assigns EPA Level III Ecoregions, stratifies 3-layer determiner authority, and downloads voucher imagery. |
+| **`segment`** | `python main.py segment [--run-id ID] [--db PATH] [-j THREADS] [--gpu-batch-size BATCH] [--vouchers PATH] [--weights PATH] [--output-dir DIR] [--device cuda\|cpu] [--enable-geometric-qc / --no-enable-geometric-qc] [--min-solidity FLOAT] [--min-ucs FLOAT] [--score-thresh FLOAT] [--limit N] [--sam2-refine] [--sam2-checkpoint PATH] [--sam2-config PATH] [--force]` | Runs two-stage LeafMachine2 v2.2+ detection and PointRend segmentation with cohort-adaptive organ scaling, dimensionless gatekeeping, and per-voucher SQLite transactions. |
+| **`morphometrics`** | `python main.py morphometrics [--run-id ID] [--db PATH] [-j THREADS] [--input DIR] [--manifest PATH] [--contours-dir DIR] [--vouchers PATH] [--reproductive PATH] [--harmonics K] [--num-pcs P] [--max-k K] [--focal-taxon TAXON] [--intraspecific-mode]` | Executes Step 03 EFA with dynamic harmonic power calibration ($H_{\text{opt}} \in [6, 24]$) and Step 04 Klingenberg allometry, Kass-Raftery GMM, and dual-track CDA. |
+| **`synthesis`** *(alias: `analyze`)* | `python main.py synthesis [--run-id ID] [--db PATH] [-j THREADS] [--gpu-batch-size BATCH] [--vouchers PATH] [--manifest-csv PATH] [--rosette-dir DIR] [--morphometrics-csv PATH] [--pheno-states PATH] [--vision-audit PATH] [--cleanlab-threshold FLOAT] [--export-figures / --no-export-figures] [--env-dir DIR] [--ssurgo-batch-size N] [--permutations N] [--n-trees N] [--focal-taxon TAXON] [--intraspecific-mode]` | Orchestrates Step 05 DINOv2 foreground patch XAI, Step 06 19-bioclimatic edaphic spatial RF with dynamic primary predictor gating, and Step 07 consensus triage synthesis. |
 | **`run-all`** | `python main.py run-all [all combined flags from harvest, segment, morphometrics, synthesis]` | Full end-to-end automated pipeline execution from GBIF harvest through final 5-stage taxonomic revision synthesis. |
 | **`calibrate-geometry`** | `python main.py calibrate-geometry [--annotations PATH] [--output-plot PATH] [--config-path PATH] [--min-area FLOAT] [--category-id INT]` | Optimizes classical dimensionless gatekeeper thresholds on ground-truth annotations via ROC curves and Youden's $J$ statistic. |
 
@@ -227,17 +228,17 @@ All `python main.py` subcommands accept the following global options:
 For advanced experimentation or isolated execution, individual scripts can be invoked directly:
 
 - **Step 01 (`scripts/data_prep/01_voucher_harvester.py`)**:
-  `--taxon/--taxa <NAMES>`, `--expand-synonyms/--no-expand-synonyms`, `--geographic-scope <eastern_na|north_america|global>`, `--include-western`, `--exclude-western/--no-exclude-western`, `--countries <CODES>`, `--home-herbarium <CODE>`, `--max-records <N>`, `--max-uncertainty <METERS>`, `--download-images`, `--concurrency <N>`, `--min-megapixels <MP>`, `--min-file-size-kb <KB>`, `--check-sharpness`, `--min-sharpness <FLOAT>`, `--spatial-thin-km <KM>`, `--max-per-state <N>`, `--max-per-region <N>`, `--force`, `--db <PATH>`, `-v/--verbose`.
+  `--taxon <NAMES>`, `--expand-synonyms/--no-expand-synonyms`, `--geographic-scope <eastern_na|north_america|global>`, `--countries <CODES>`, `--home-herbarium <CODE>`, `--max-records <N>`, `--max-uncertainty <METERS>`, `--download-images`, `--concurrency <N>`, `--min-megapixels <MP>`, `--min-file-size-kb <KB>`, `--check-sharpness`, `--min-sharpness <FLOAT>`, `--spatial-thin-km <KM>`, `--max-per-state <N>`, `--max-per-region <N>`, `--force`, `--db <PATH>`, `-v/--verbose`.
 - **Step 02 (`scripts/pipeline/02_segment_and_extract.py`)**:
-  `--vouchers <PATH>`, `--model-weights <PATH>`, `--output-dir <DIR>`, `--device <cuda|cpu>`, `--min-solidity <FLOAT>`, `--min-ucs <FLOAT>`, `--score-thresh <FLOAT>`, `--sam2-refine`, `--sam2-checkpoint <PATH>`, `--sam2-config <PATH>`, `--force`, `--limit <N>`, `--db <PATH>`, `--regenerate-figures-only`.
+  `--vouchers <PATH>`, `--model-weights <PATH>`, `--output-dir <DIR>`, `--device <cuda|cpu>`, `-j/--threads <INT>`, `--gpu-batch-size <INT>`, `--enable-geometric-qc/--no-enable-geometric-qc`, `--min-solidity <FLOAT>`, `--min-ucs <FLOAT>`, `--score-thresh <FLOAT>`, `--sam2-refine`, `--sam2-checkpoint <PATH>`, `--sam2-config <PATH>`, `--force`, `--limit <N>`, `--db <PATH>`, `--regenerate-figures-only`.
 - **Step 03 (`scripts/morphometrics/03_fourier_extractor.R`)**:
   `-i/--input <DIR>`, `-c/--contours-dir <DIR>`, `-f/--manifest <PATH>`, `-m/--masks-dir <DIR>`, `-v/--vouchers <PATH>`, `-o/--output <PATH>`, `--output-individual <PATH>`, `-k/--harmonics <N>`, `-p/--num-pcs <N>`, `-r/--report-out <PATH>`, `-g/--plot-out <PATH>`, `--figures-dir <DIR>`, `--symmetrize-efa-harmonics`, `--permutations <N>`, `--seed <INT>`.
 - **Step 04 (`scripts/morphometrics/04_gmm_morphotools.R`)**:
   `-v/--vouchers <PATH>`, `-e/--harmonics <PATH>`, `-m/--reproductive <PATH>`, `--outline-only`, `--correct-allometry <auto|true|false>`, `--allometry-report <PATH>`, `--allometry-pairwise <PATH>`, `--allometry-plot <PATH>`, `--use-clustvarsel`, `-f/--output-flags <PATH>`, `-p/--output-plot <PATH>`, `-r/--output-report <PATH>`, `-b/--output-batch-audit <PATH>`, `-k/--max-k <INT>`, `-d/--num-pcs <INT>`, `--permutations <N>`, `--seed <INT>`, `--intraspecific-mode`, `--focal-taxon <NAME>`.
 - **Step 05 (`scripts/analysis/05_cleanlab_vision_xai.py`)**:
-  `--rosette-dir <DIR>`, `--vouchers-csv <PATH>`, `--output-csv <PATH>`, `--output-figure <PATH>`, `--cleanlab-threshold <FLOAT>`, `--neutralize-background/--no-neutralize-background`, `--export-figures/--no-export-figures`, `--filter-abaxial-artifacts/--no-filter-abaxial-artifacts`, `--stratify-by-orientation`, `--intraspecific-mode`, `--morphometrics-csv <PATH>`, `--manifest-csv <PATH>`, `--focal-taxon <NAME>`, `--demo`, `--db <PATH>`.
+  `--rosette-dir <DIR>`, `--vouchers-csv <PATH>`, `--output-csv <PATH>`, `--output-figure <PATH>`, `-j/--threads <INT>`, `--gpu-batch-size <INT>`, `--cleanlab-threshold <FLOAT>`, `--neutralize-background/--no-neutralize-background`, `--export-figures/--no-export-figures`, `--filter-abaxial-artifacts/--no-filter-abaxial-artifacts`, `--stratify-by-orientation`, `--intraspecific-mode`, `--morphometrics-csv <PATH>`, `--manifest-csv <PATH>`, `--focal-taxon <NAME>`, `--demo`, `--db <PATH>`.
 - **Step 06 (`scripts/analysis/06_multimodal_spatial_rf.R`)**:
-  `-v/--vouchers <PATH>`, `-m/--morphometrics <PATH>`, `-n/--vision-audit <PATH>`, `--pheno-states <PATH>`, `-e/--env-dir <DIR>`, `-f/--output-flags <PATH>`, `-p/--output-plot <PATH>`, `-s/--output-summary <PATH>`, `--pheno-anomalies <PATH>`, `--pheno-summary <PATH>`, `--pheno-plot <PATH>`, `--ssurgo-cache <DIR>`, `--ssurgo-table <PATH>`, `--contingency-table <PATH>`, `--batch-size <INT>`, `-k/--permutations <N>`, `-t/--n-trees <INT>`, `--intraspecific-mode`, `--focal-taxon <NAME>`, `--demo`.
+  `-v/--vouchers <PATH>`, `-m/--morphometrics <PATH>`, `-n/--vision-audit <PATH>`, `--pheno-states <PATH>`, `-e/--env-dir <DIR>`, `-f/--output-flags <PATH>`, `-p/--output-plot <PATH>`, `-s/--output-summary <PATH>`, `--pheno-anomalies <PATH>`, `--pheno-summary <PATH>`, `--pheno-plot <PATH>`, `--ssurgo-cache <DIR>`, `--ssurgo-table <PATH>`, `--contingency-table <PATH>`, `--ssurgo-batch-size <INT>`, `-k/--permutations <N>`, `-t/--n-trees <INT>`, `--intraspecific-mode`, `--focal-taxon <NAME>`, `--demo`.
 - **Step 07 (`scripts/analysis/07_triage_dashboard_synthesis.R`)**:
   `-v/--vouchers <PATH>`, `-m/--morphometrics <PATH>`, `--linear-traits <PATH>`, `-n/--vision-audit <PATH>`, `-c/--multimodal-flags <PATH>`, `--spatial-flags <PATH>`, `-g/--gmm-summary <PATH>`, `--gmm-bic <PATH>`, `--cda-summary <PATH>`, `-s/--niche-summary <PATH>`, `-q/--output-queue <PATH>`, `--output-triage <PATH>`, `-p/--output-plot <PATH>`, `--output-figure <PATH>`, `-r/--output-report <PATH>`, `--output-html <PATH>`, `--focal-taxon <NAME>`, `--intraspecific-mode`, `--demo`.
 - **Step 08 (`scripts/analysis/08_discover_taxon_complexes.R`)**:
@@ -312,7 +313,7 @@ flowchart TD
   - **Synchronized CSV Outputs:** Canonical Darwin Core manifest `data/tables/curated_vouchers.csv` (26 canonical columns).
 - **Empirical Protocol:**
   1. **Dynamic Taxon Standardization, GBIF Synonym Expansion & Biogeographic Scope Gating (`standardize_packera_taxon`):** Harmonizes binomials and basionyms across all North American *Packera* taxa (e.g., *Senecio tomentosus*, *Packera tomentosa*, *Cineraria integrifolia*, and all historical *Senecio* / *Cineraria* basionyms across the genus) into valid accepted binomials while handling arbitrary dynamic North American, boreal, and Mexican *Packera* species via `expand_taxon_synonyms_gbif()`. Running with no taxon flags dynamically queries and harvests all *Packera* species across the entire genus (`discover_genus_packera_species_gbif()`, `target_species: []`), whereas `--taxon "<sp1>" "<sp2>" ...` (or `--focal-taxon "<sp>"`) analyzes strictly the species specified by the user with zero hardcoded default species or injected outgroups.
-     - **Configurable Geographic Scope & Server-Side Longitude Bounding:** Configured via `--geographic-scope {eastern_na,north_america,global}` (default: `eastern_na`, enforcing server-side `decimalLongitude` bounds `[-106.65, -50.0]` during GBIF API search queries; `north_america` and `global` disable the western longitude boundary), `--include-western` (retaining occurrences west of $-106.65$), and `--countries` (default `["US"]`, expandable to `["US", "CA", "MX"]`).
+     - **Configurable Geographic Scope & Server-Side Longitude Bounding:** Configured via `--geographic-scope {eastern_na,north_america,global}` (default: `eastern_na`, enforcing server-side `decimalLongitude` bounds `[-106.65, -50.0]` during GBIF API search queries; `north_america` and `global` disable the western longitude boundary and include western occurrences) and `--countries` (default `["US"]`, expandable to `["US", "CA", "MX"]`).
      - **Server-Side Longitude Bounding & Secondary Type Rescue Query (`typeStatus="*"`):** When `exclude_western=True`, server-side `decimalLongitude` filtering prunes western records directly at the GBIF API layer. To ensure historical 18th/19th-century un-georeferenced type specimens (or types with missing coordinate fields) are not lost due to coordinate bounds, `VoucherHarvester.harvest()` automatically dispatches a secondary type-specimen rescue query with `typeStatus="*"` and `basisOfRecord="PRESERVED_SPECIMEN"` across target taxa, recovering all available historical Holotypes, Lectotypes, Syntypes, and Isotypes regardless of missing coordinates.
      - **Western Canadian Province & Territory Exclusion (`is_excluded_western_region`):** When `exclude_western=True`, records originating from Western Canadian provinces and territories (`BC, AB, SK, YT, NT, NU`) are strictly excluded alongside western US states (`CO, NM, WY, MT, UT, AZ, NV, ID, WA, OR, CA, AK, HI`).
      - **Eastern NA Biogeographic Residency Filter:** During genus-wide discovery (`is_genus_wide=True` under `exclude_western=True`), an empirical residency filter requires $\ge 3$ georeferenced records in Eastern North America (`decimalLongitude >= western_longitude_threshold`, default $-106.65^\circ$). Taxa failing this residency threshold are flagged as western strays or non-resident species and excluded from the downstream analysis cohort.

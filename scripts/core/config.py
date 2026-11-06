@@ -480,6 +480,13 @@ class ModelsConfig:
     pcd_weights_sha256: str = ""
 
 
+@dataclass(frozen=True)
+class ComputeConfig:
+    """CPU multithreading and GPU inference batch size configuration."""
+    threads: Optional[int] = None
+    gpu_batch_size: Optional[int] = None
+
+
 @dataclass
 class PipelineConfig:
     """Centralized, type-hinted configuration for Packera morphometrics pipeline."""
@@ -491,6 +498,7 @@ class PipelineConfig:
     segmentation: SegmentationConfig
     models: ModelsConfig = field(default_factory=ModelsConfig)
     macroecology: MacroecologyConfig = field(default_factory=MacroecologyConfig)
+    compute: ComputeConfig = field(default_factory=ComputeConfig)
     _raw_dict: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __getitem__(self, key: str) -> Any:
@@ -718,6 +726,14 @@ class PipelineConfig:
         )
         macroecology = MacroecologyConfig(phenology=phenology_cfg)
 
+        comp_dict = raw_cfg.get("compute", {}) or {}
+        raw_threads = comp_dict.get("threads")
+        raw_gpu_bs = comp_dict.get("gpu_batch_size")
+        compute_cfg = ComputeConfig(
+            threads=int(raw_threads) if raw_threads is not None and int(raw_threads) >= 1 else None,
+            gpu_batch_size=int(raw_gpu_bs) if raw_gpu_bs is not None and int(raw_gpu_bs) >= 1 else None,
+        )
+
         resolved_raw = dict(raw_cfg)
         resolved_raw["resolved_paths"] = {
             k: getattr(paths, k) for k in paths.__dataclass_fields__
@@ -727,7 +743,8 @@ class PipelineConfig:
             paths=paths, taxa=taxa, thresholds=thresholds,
             morphometrics=morph, harvesting=harvesting,
             segmentation=segmentation, models=models,
-            macroecology=macroecology, _raw_dict=resolved_raw,
+            macroecology=macroecology, compute=compute_cfg,
+            _raw_dict=resolved_raw,
         )
         if run_dir is not None:
             return instance.with_run_dir(run_dir)
@@ -810,3 +827,70 @@ WESTERN_LONGITUDE_THRESHOLD = _DEFAULT_CONFIG.thresholds.western_longitude_thres
 DEFAULT_GEOGRAPHIC_SCOPE = _DEFAULT_CONFIG.harvesting.geographic_scope
 DEFAULT_COUNTRIES = _DEFAULT_CONFIG.harvesting.countries
 DEFAULT_HOME_HERBARIUM = _DEFAULT_CONFIG.harvesting.home_herbarium
+
+
+def resolve_cpu_threads(
+    cli_val: Optional[int] = None,
+    cfg: Optional[PipelineConfig] = None,
+    default: Optional[int] = None,
+) -> Optional[int]:
+    """
+    Resolve CPU worker thread count via priority chain:
+    CLI (--threads / -j) -> ENV (PACKERA_MAX_WORKERS) -> config.yaml (compute.threads) -> default.
+    """
+    if cli_val is not None:
+        try:
+            v = int(cli_val)
+            if v >= 1:
+                return v
+        except (TypeError, ValueError):
+            pass
+    env_val = os.environ.get("PACKERA_MAX_WORKERS", "").strip()
+    if env_val:
+        try:
+            v = int(env_val)
+            if v >= 1:
+                return v
+        except (TypeError, ValueError):
+            pass
+    active_cfg = cfg if cfg is not None else _DEFAULT_CONFIG
+    if active_cfg.compute.threads is not None and int(active_cfg.compute.threads) >= 1:
+        return int(active_cfg.compute.threads)
+    return default
+
+
+def resolve_gpu_batch_size(
+    cli_val: Optional[int] = None,
+    cfg: Optional[PipelineConfig] = None,
+    default_cuda: int = 64,
+    default_cpu: int = 32,
+    use_cuda: bool = True,
+    default: Optional[int] = None,
+) -> int:
+    """
+    Resolve GPU/inference batch size via priority chain:
+    CLI (--gpu-batch-size / --batch-size) -> ENV (PACKERA_GPU_BATCH_SIZE) ->
+    config.yaml (compute.gpu_batch_size) -> stage-optimal default.
+    """
+    if cli_val is not None:
+        try:
+            v = int(cli_val)
+            if v >= 1:
+                return v
+        except (TypeError, ValueError):
+            pass
+    env_val = os.environ.get("PACKERA_GPU_BATCH_SIZE", "").strip()
+    if env_val:
+        try:
+            v = int(env_val)
+            if v >= 1:
+                return v
+        except (TypeError, ValueError):
+            pass
+    active_cfg = cfg if cfg is not None else _DEFAULT_CONFIG
+    if active_cfg.compute.gpu_batch_size is not None and int(active_cfg.compute.gpu_batch_size) >= 1:
+        return int(active_cfg.compute.gpu_batch_size)
+    if default is not None:
+        return max(1, int(default))
+    return max(1, int(default_cuda) if use_cuda else int(default_cpu))
+

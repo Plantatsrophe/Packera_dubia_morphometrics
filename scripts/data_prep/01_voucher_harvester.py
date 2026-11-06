@@ -44,7 +44,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--taxon",
-        "--taxa",
         dest="taxa",
         nargs="+",
         default=list(cfg.taxa.target_species),
@@ -52,6 +51,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "One or more scientific binomials to harvest strictly from GBIF. "
             "When omitted (empty), dynamically harvests all Packera species across the genus."
         ),
+    )
+    parser.add_argument(
+        "--taxa",
+        dest="taxa",
+        nargs="+",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--expand-synonyms",
@@ -69,7 +75,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--include-western",
         action="store_true",
         default=False,
-        help="Include western North American occurrences (< -106.65 longitude and western US/CA/MX provinces).",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--countries",
@@ -97,11 +103,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-records",
-        "--max-records-per-taxon",
         dest="max_records",
         type=int,
         default=cfg.harvesting.max_records_per_taxon,
         help=f"Maximum records to retain per taxon query (default: {cfg.harvesting.max_records_per_taxon}).",
+    )
+    parser.add_argument(
+        "--max-records-per-taxon",
+        dest="max_records",
+        type=int,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--max-uncertainty",
@@ -113,7 +125,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--exclude-western",
         action=argparse.BooleanOptionalAction,
         default=cfg.harvesting.exclude_western,
-        help=f"Exclude records from western US states (> TX & OK) (default: {cfg.harvesting.exclude_western}).",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--download-images",
@@ -159,11 +171,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--force",
-        "--overwrite",
         dest="force",
         action="store_true",
         default=False,
         help="Force re-download and overwrite existing cached voucher images.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        dest="force",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--spatial-thin-km",
@@ -197,6 +215,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Enable verbose debug logging.",
     )
     return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments for 01_voucher_harvester.py."""
+    return build_cli_parser().parse_args(argv)
 
 
 def main() -> None:

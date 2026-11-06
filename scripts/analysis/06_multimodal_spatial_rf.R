@@ -299,7 +299,7 @@ parse_args_robust <- function() {
       default = rp("data/tables/ssurgo_edaphic_validation.csv"), help = "Output SSURGO validation CSV [default: %default]"),
     optparse::make_option(c("--contingency-table"), type = "character",
       default = rp("outputs/reports/micro_edaphic_outcrop_contingency.csv"), help = "Output outcrop contingency CSV [default: %default]"),
-    optparse::make_option(c("--batch-size"), type = "integer",
+    optparse::make_option(c("--ssurgo-batch-size"), dest = "batch_size", type = "integer",
       default = 75, help = "Batch size for USDA SDA queries [default: %default]"),
     optparse::make_option(c("-k", "--permutations"), type = "integer",
       default = 100, help = "Warren's Identity Test permutations [default: %default]"),
@@ -313,7 +313,9 @@ parse_args_robust <- function() {
       default = FALSE, help = "Enable synthetic fallback data for demonstration/test runs [default: %default]")
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
-    opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
+    raw_args <- commandArgs(trailingOnly = TRUE)
+    raw_args <- sub("^--batch-size(?==|$)", "--ssurgo-batch-size", raw_args, perl = TRUE)
+    opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list), args = raw_args)
     names(opts) <- gsub("-", "_", names(opts))
     return(opts)
   }
