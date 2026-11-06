@@ -186,11 +186,19 @@ compute_authority_precision_weights <- function(df, active_mask = NULL) {
 # Within-taxon Mahalanobis outlier pruning + Adaptive Anchor Promotion for Gold/Silver-poor taxa
 prune_within_taxon_mahalanobis <- function(X, df, ref_mask = NULL, q = 0.95, min_anchors_per_taxon = 2L) {
   elig <- if (!is.null(ref_mask) && length(ref_mask) == nrow(df)) { m <- as.logical(ref_mask); m[is.na(m)] <- FALSE; m } else rep(TRUE, nrow(df))
-  if (sum(elig) < 2L || is.null(X) || ncol(X) < 1L) return(elig)
+  t_info_all <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(df) else list(is_type_specimen = rep(FALSE, nrow(df)))
+  if (sum(elig) < 2L || is.null(X) || ncol(X) < 1L) {
+    attr(elig, "is_promoted_bronze") <- rep(FALSE, nrow(df))
+    attr(elig, "is_type_specimen") <- as.logical(t_info_all$is_type_specimen)
+    attr(elig, "anchor_tier_source") <- ifelse(t_info_all$is_type_specimen, "Tier_0_Type_Anchor", "Passive_Unpromoted")
+    return(elig)
+  }
   anc <- select_adaptive_reference_anchors(df[elig, , drop = FALSE], feature_matrix = as.matrix(X[elig, , drop = FALSE]),
                                            taxon_col = "scientificName", min_anchors_per_taxon = min_anchors_per_taxon, mahal_q_gold_silver = q, mahal_q_bronze_promo = 0.80)
   out <- rep(FALSE, nrow(df)); out[elig] <- anc$active_mask
   attr(out, "is_promoted_bronze") <- { p <- rep(FALSE, nrow(df)); p[elig] <- anc$is_promoted_bronze; p }
+  attr(out, "is_type_specimen") <- as.logical(t_info_all$is_type_specimen)
+  attr(out, "anchor_tier_source") <- { a <- rep("Passive_Unpromoted", nrow(df)); a[elig] <- as.character(anc$anchor_tier_source); a }
   out
 }
 
@@ -226,7 +234,9 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
   spatial_wt <- if ("spatial_balance_weight" %in% names(out_df) && any(is.finite(out_df$spatial_balance_weight))) as.numeric(out_df$spatial_balance_weight) else if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(out_df) else rep(1.0, nrow(out_df))
   active_ref_mask <- if (sum(fit_pca_mask, na.rm = TRUE) >= 2L) prune_within_taxon_mahalanobis(sym_mat, out_df, fit_pca_mask, q = 0.95) else fit_pca_mask
   out_df$is_promoted_bronze <- if (!is.null(attr(active_ref_mask, "is_promoted_bronze"))) attr(active_ref_mask, "is_promoted_bronze") else rep(FALSE, nrow(out_df))
-  tier_wt <- compute_authority_precision_weights(out_df)
+  out_df$is_type_specimen <- if (!is.null(attr(active_ref_mask, "is_type_specimen"))) attr(active_ref_mask, "is_type_specimen") else if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(out_df)$is_type_specimen else rep(FALSE, nrow(out_df))
+  out_df$anchor_tier_source <- if (!is.null(attr(active_ref_mask, "anchor_tier_source"))) attr(active_ref_mask, "anchor_tier_source") else ifelse(out_df$is_type_specimen, "Tier_0_Type_Anchor", "Passive_Unpromoted")
+  tier_wt <- compute_authority_precision_weights(out_df, active_mask = active_ref_mask)
   if (sum(active_ref_mask, na.rm = TRUE) < 2L) active_ref_mask <- fit_pca_mask
   col_vars <- apply(sym_mat[active_ref_mask, , drop = FALSE], 2, stats::var, na.rm = TRUE)
   sym_mat <- sym_mat[, names(col_vars[!is.na(col_vars) & col_vars > 1e-10]), drop = FALSE]
@@ -517,6 +527,7 @@ run_fourier_extraction <- function(opts) {
   }
   if (!"determiner_tier" %in% names(fac_df)) fac_df$determiner_tier <- if ("authority_tier" %in% names(fac_df)) as.character(fac_df$authority_tier) else "Tier_3_Bronze"
   else fac_df$determiner_tier <- ifelse(is.na(fac_df$determiner_tier) | fac_df$determiner_tier == "", if ("authority_tier" %in% names(fac_df)) ifelse(is.na(fac_df$authority_tier) | fac_df$authority_tier == "", "Tier_3_Bronze", as.character(fac_df$authority_tier)) else "Tier_3_Bronze", fac_df$determiner_tier)
+  fac_df$is_type_specimen <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(fac_df)$is_type_specimen else rep(FALSE, nrow(fac_df))
   fac_df$authority_weight <- compute_authority_precision_weights(fac_df)
   fac_df$spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(fac_df) else rep(1.0, nrow(fac_df))
 
@@ -539,7 +550,7 @@ run_fourier_extraction <- function(opts) {
   sym_harmonics <- harm_mat[, sym_names, drop = FALSE]
   efa_df <- cbind(fac_df, as.data.frame(harm_mat))
   efa_df$assigned_tier <- "Tier_1_Direct"; efa_df$tier_assignment <- "Tier_1_Direct"
-  for (scol in c("authority_weight", "spatial_balance_weight", "sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight")) {
+  for (scol in c("is_type_specimen", "anchor_tier_source", "authority_weight", "spatial_balance_weight", "sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight")) {
     if (scol %in% names(sym_res$df)) efa_df[[scol]] <- sym_res$df[[scol]]
   }
   tier_wt <- efa_df$authority_weight
@@ -560,12 +571,13 @@ run_fourier_extraction <- function(opts) {
       ref_mask <- as.logical(sym_res$active_ref_mask) & base_mask
       efa_df$is_promoted_bronze <- if ("is_promoted_bronze" %in% names(sym_res$df)) as.logical(sym_res$df$is_promoted_bronze) else rep(FALSE, nrow(efa_df))
       if (!identical(ref_mask, as.logical(sym_res$active_ref_mask))) {
-        efa_df$authority_weight <- compute_authority_precision_weights(efa_df); tier_wt <- efa_df$authority_weight
+        efa_df$authority_weight <- compute_authority_precision_weights(efa_df, active_mask = ref_mask); tier_wt <- efa_df$authority_weight
       }
     } else {
       ref_mask <- if (sum(base_mask, na.rm = TRUE) >= 2L) prune_within_taxon_mahalanobis(harm_mat, efa_df, base_mask, q = 0.95) else base_mask
       efa_df$is_promoted_bronze <- if (!is.null(attr(ref_mask, "is_promoted_bronze"))) attr(ref_mask, "is_promoted_bronze") else rep(FALSE, nrow(efa_df))
-      efa_df$authority_weight <- compute_authority_precision_weights(efa_df); tier_wt <- efa_df$authority_weight
+      efa_df$anchor_tier_source <- if (!is.null(attr(ref_mask, "anchor_tier_source"))) attr(ref_mask, "anchor_tier_source") else ifelse(efa_df$is_type_specimen, "Tier_0_Type_Anchor", "Passive_Unpromoted")
+      efa_df$authority_weight <- compute_authority_precision_weights(efa_df, active_mask = ref_mask); tier_wt <- efa_df$authority_weight
     }
     if (sum(ref_mask, na.rm = TRUE) < 2L) ref_mask <- base_mask
     fit_idx <- which(ref_mask)
@@ -594,6 +606,9 @@ run_fourier_extraction <- function(opts) {
     }
     k_mcd <- max(2L, min(k_95_full, ncol(pc_scores), max(2L, floor(nrow(pc_scores) / 3L))))
     mcd_out <- screen_regime_stratified_mcd_outliers(pc_scores, fit_pos = match(fit_idx, complete_idx), solidity_vec = efa_df$solidity[complete_idx], is_dissected_vec = efa_df$is_dissected[complete_idx], k_mcd = k_mcd, p_cutoff = 0.001, seed = opts$seed)
+    if ("is_type_specimen" %in% names(efa_df)) {
+      mcd_out[as.logical(efa_df$is_type_specimen[complete_idx])] <- FALSE
+    }
     if (any(mcd_out) && sum(!mcd_out) >= 5L) {
       efa_df$is_contour_outlier[complete_idx] <- as.logical(efa_df$is_contour_outlier[complete_idx]) | mcd_out
       message(sprintf("Regime-stratified MCD robust Mahalanobis outlier filter (top %d PCs, k_95=%d, p < 0.001): flagged %d contours.", k_mcd, k_95, sum(mcd_out)))
@@ -607,7 +622,7 @@ run_fourier_extraction <- function(opts) {
   exp_pc_cols <- paste0("PC", seq_len(k_export))
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "tier_assignment", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm",
-                 "species_standardized", "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "aspect_ratio", "circularity", "solidity", "dissection_index", "ucs_score",
+                 "species_standardized", "scientificName", "species_raw", "determiner_tier", "type_status", "is_type_specimen", "anchor_tier_source", "authority_weight", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "aspect_ratio", "circularity", "solidity", "dissection_index", "ucs_score",
                  "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
                  "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
@@ -635,12 +650,14 @@ run_fourier_extraction <- function(opts) {
   specimen_df$efd_harmonic_opt <- as.integer(h_opt); specimen_df$efd_k95_pcs <- as.integer(k_95)
   for (p in seq_len(k_export)) { specimen_df[[paste0("PC", p)]] <- NA_real_; specimen_df[[paste0("Sym_PC", p)]] <- 0.0 }
   # Fit OTU-level ordination on Empirical Bayes active reference anchors (with Adaptive Anchor Promotion for 0-Gold/Silver taxa)
-  otu_base_mask <- (specimen_df$morph_tier_source == "Tier_1_Pure") & !as.logical(specimen_df$is_contour_outlier)
+  specimen_df$is_type_specimen <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(specimen_df)$is_type_specimen else rep(FALSE, nrow(specimen_df))
+  otu_base_mask <- (specimen_df$morph_tier_source == "Tier_1_Pure") & (!as.logical(specimen_df$is_contour_outlier) | as.logical(specimen_df$is_type_specimen))
   if (sum(otu_base_mask, na.rm = TRUE) < 2L) otu_base_mask <- rep(TRUE, nrow(specimen_df))
   otu_h_cols <- intersect(if (exists("active_full_cols") && length(active_full_cols) >= 1L) active_full_cols else sym_names, names(specimen_df))
   otu_ref_mask <- if (sum(otu_base_mask, na.rm = TRUE) >= 2L && length(otu_h_cols) >= 1L) prune_within_taxon_mahalanobis(as.matrix(specimen_df[, otu_h_cols, drop = FALSE]), specimen_df, otu_base_mask, q = 0.95) else otu_base_mask
   specimen_df$is_promoted_bronze <- if (!is.null(attr(otu_ref_mask, "is_promoted_bronze"))) attr(otu_ref_mask, "is_promoted_bronze") else rep(FALSE, nrow(specimen_df))
-  specimen_df$authority_weight <- compute_authority_precision_weights(specimen_df)
+  specimen_df$anchor_tier_source <- if (!is.null(attr(otu_ref_mask, "anchor_tier_source"))) attr(otu_ref_mask, "anchor_tier_source") else ifelse(specimen_df$is_type_specimen, "Tier_0_Type_Anchor", "Passive_Unpromoted")
+  specimen_df$authority_weight <- compute_authority_precision_weights(specimen_df, active_mask = otu_ref_mask)
   if (sum(otu_ref_mask, na.rm = TRUE) < 2L) otu_ref_mask <- otu_base_mask
   otu_fitted <- FALSE
   if (nrow(specimen_df) >= max(opts$num_pcs, 6L) && exists("active_full_cols") && length(active_full_cols) >= 2L) {
@@ -669,7 +686,7 @@ run_fourier_extraction <- function(opts) {
 
   lead_spec_cols <- c("catalogNumber", "plant_individual_id", "leaf_count", "basal_leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source",
                       "foliar_variance", "heteroblasty_index", "assigned_tier", "tier_assignment", "reconstruction_tier",
-                      "pixels_per_mm", "is_calibrated_mm", "species_standardized", "scientificName", "species_raw", "determiner_tier", "authority_weight", "spatial_balance_weight",
+                      "pixels_per_mm", "is_calibrated_mm", "species_standardized", "scientificName", "species_raw", "determiner_tier", "type_status", "is_type_specimen", "anchor_tier_source", "authority_weight", "spatial_balance_weight",
                       "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "aspect_ratio", "circularity", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "ucs_score",
                       "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
                       "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize")
