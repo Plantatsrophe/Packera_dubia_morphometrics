@@ -337,3 +337,119 @@ def resolve_run_scoped_patch_and_manifest_inputs(
             man_df = None
 
     return dense_dir, basal_dir, tier1_mask_dir, man_df
+
+
+def _is_truthy_val(val: Any) -> bool:
+    if val is None or isinstance(val, (list, tuple, dict, set, np.ndarray, pd.Series)):
+        return False
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    try:
+        if bool(pd.isna(val)):
+            return False
+    except Exception:
+        pass
+    return (float(val) != 0.0) if isinstance(val, (int, float, np.number)) else (str(val).strip().lower() in {"true", "1", "1.0", "t", "yes"})
+
+
+def extract_row_type_info(d: Any) -> Tuple[str, bool, int]:
+    """Return `(cleaned_type_status, is_type_specimen, type_rank)` for a voucher record dict/row."""
+    import re
+    from scripts.core.harvester import classify_nomenclatural_type_rank
+
+    raw_ts = d.get("type_status", d.get("typeStatus", ""))
+    ts_str = "" if (raw_ts is None or pd.isna(raw_ts)) else str(raw_ts).strip()
+    if ts_str.lower() in {"nan", "none", "null", "na"}:
+        ts_str = ""
+    t_rank, t_lbl = classify_nomenclatural_type_rank(ts_str)
+    exp_b = _is_truthy_val(d.get("is_type_specimen", False))
+    if t_rank == 0 and exp_b and not re.search(r"not a type|non-type|false type", ts_str, flags=re.IGNORECASE):
+        t_rank, t_lbl = 1, (ts_str or "TYPE")
+    return (ts_str if (t_rank >= 1 and ts_str) else (t_lbl if t_rank >= 1 else "")), bool(t_rank >= 1), int(t_rank)
+
+
+def compute_type_visual_control(
+    features: Optional[np.ndarray],
+    labels: np.ndarray,
+    class_names: List[str],
+    records_df: Optional[pd.DataFrame] = None,
+    pred_probs: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """Compute 768-d DINOv2 type prototype cosine similarity (`vision_type_cosine_sim`), nearest type taxon, and type margin."""
+    y = np.asarray(labels, dtype=int)
+    n = len(y)
+    if n == 0:
+        return {
+            "vision_type_cosine_sim": np.array([], dtype=np.float64),
+            "vision_nearest_type_taxon": [],
+            "vision_type_margin": np.array([], dtype=np.float64),
+        }
+    X_raw = (
+        np.asarray(features, dtype=np.float64)
+        if (features is not None and len(features) == n and np.asarray(features).size > 0)
+        else (
+            np.asarray(pred_probs, dtype=np.float64)
+            if (pred_probs is not None and len(pred_probs) == n)
+            else np.ones((n, 2), dtype=np.float64)
+        )
+    )
+    if X_raw.ndim == 1:
+        X_raw = X_raw[:, None]
+    X = X_raw / np.maximum(np.linalg.norm(X_raw, axis=1, keepdims=True), 1e-8)
+
+    type_ranks = np.zeros(n, dtype=int)
+    det_tiers = ["Tier_3_Bronze"] * n
+    if records_df is not None and len(records_df) == n:
+        for idx_r, r_dict in enumerate(records_df.to_dict("records")):
+            _, _, rk = extract_row_type_info(r_dict)
+            type_ranks[idx_r] = rk
+            det_tiers[idx_r] = str(r_dict.get("determiner_tier", "Tier_3_Bronze") or "Tier_3_Bronze").strip()
+    is_type_m = type_ranks >= 1
+    is_gold_m = (
+        np.array([t in {"Tier_0_Type_Anchor", "Tier_0_Primary_Type", "Tier_0_Secondary_Type", "Tier_1_Gold"} for t in det_tiers], dtype=bool)
+        | is_type_m
+    )
+
+    u_cls = sorted(set(int(c) for c in np.unique(y) if 0 <= int(c) < max(1, len(class_names))))
+    if not u_cls:
+        u_cls = [0]
+    prototypes = []
+    proto_taxa = []
+    for c in u_cls:
+        c_mask = y == c
+        t_mask = c_mask & is_type_m
+        if np.any(t_mask):
+            prim_mask = c_mask & (type_ranks == 2)
+            sub_X = X[prim_mask] if np.any(prim_mask) else X[t_mask]
+            proto = np.mean(sub_X, axis=0)
+        else:
+            g_mask = c_mask & is_gold_m
+            sub_X = X[g_mask] if np.any(g_mask) else (X[c_mask] if np.any(c_mask) else X)
+            med = np.median(sub_X, axis=0)
+            med_n = med / max(float(np.linalg.norm(med)), 1e-8)
+            if len(sub_X) >= 3:
+                best_i = int(np.argmax(sub_X @ med_n))
+                proto = 0.5 * med_n + 0.5 * sub_X[best_i]
+            else:
+                proto = med
+        proto = proto / max(float(np.linalg.norm(proto)), 1e-8)
+        prototypes.append(proto)
+        proto_taxa.append(class_names[c] if c < len(class_names) else f"Class_{c}")
+
+    P_mat = np.vstack(prototypes)
+    sim_mat = np.clip(X @ P_mat.T, 0.0, 1.0)
+    c_to_col = {c: col_i for col_i, c in enumerate(u_cls)}
+    sim_given = np.array([sim_mat[i, c_to_col.get(int(y[i]), 0)] for i in range(n)], dtype=np.float64)
+    best_col = np.argmax(sim_mat, axis=1)
+    nearest_taxa = [proto_taxa[int(ci)] for ci in best_col]
+    if sim_mat.shape[1] >= 2:
+        s_sorted = np.sort(sim_mat, axis=1)[:, ::-1]
+        margin = np.clip(s_sorted[:, 0] - s_sorted[:, 1], 0.0, 1.0)
+    else:
+        margin = np.clip(sim_given, 0.0, 1.0)
+    return {
+        "vision_type_cosine_sim": np.round(sim_given, 4),
+        "vision_nearest_type_taxon": nearest_taxa,
+        "vision_type_margin": np.round(margin, 4),
+    }
+

@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20260405L
+PACKERA_SCHEMA_USER_VERSION <- 20260406L
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -111,7 +111,8 @@ PACKERA_DB_LOGICAL_COLS <- c(
   "is_cleanlab_issue", "is_label_corrupted", "vision_is_ood",
   "tomentum_taxon_discordance", "substrate_specialist_flag",
   "piedmont_outcrop_specialist_flag", "multimodal_conflict_flag",
-  "is_completed_voucher"
+  "is_completed_voucher", "is_type_specimen", "has_empirical_type_anchor",
+  "is_typical_morphotype", "matches_type_lithology"
 )
 
 PACKERA_DB_HARMONIC_COLS <- as.vector(vapply(
@@ -179,6 +180,12 @@ PACKERA_DB_WC_BIO_COLS <- c(
 }
 
 .dynamic_sqlite_table_specs_r <- function(table_name) {
+  if (identical(table_name, "run_active_cohort")) {
+    return(c(
+      type_status = "TEXT",
+      is_type_specimen = "INTEGER"
+    ))
+  }
   if (identical(table_name, "leaf_efa_harmonics")) {
     return(c(
       stats::setNames(rep("REAL", length(PACKERA_DB_HARMONIC_COLS)), PACKERA_DB_HARMONIC_COLS),
@@ -199,8 +206,24 @@ PACKERA_DB_WC_BIO_COLS <- c(
         dissection_index = "REAL",
         q25_solidity = "REAL",
         dissected_leaf_fraction = "REAL",
-        basal_leaf_count = "INTEGER"
+        basal_leaf_count = "INTEGER",
+        type_status = "TEXT",
+        is_type_specimen = "INTEGER",
+        has_empirical_type_anchor = "INTEGER",
+        type_morph_mahal_d2 = "REAL",
+        nearest_type_morph_taxon = "TEXT",
+        type_morph_concordance = "REAL",
+        is_typical_morphotype = "INTEGER"
       )
+    ))
+  }
+  if (identical(table_name, "vision_xai_audit")) {
+    return(c(
+      type_status = "TEXT",
+      is_type_specimen = "INTEGER",
+      vision_type_cosine_sim = "REAL",
+      vision_nearest_type_taxon = "TEXT",
+      vision_type_margin = "REAL"
     ))
   }
   if (identical(table_name, "spatial_rf_predictions")) {
@@ -212,7 +235,10 @@ PACKERA_DB_WC_BIO_COLS <- c(
         climatic_z_score = "REAL",
         primary_env_predictors = "TEXT",
         primary_clim_predictors = "TEXT",
-        primary_edaph_predictors = "TEXT"
+        primary_edaph_predictors = "TEXT",
+        type_edaphic_z_score = "REAL",
+        nearest_type_niche_taxon = "TEXT",
+        matches_type_lithology = "INTEGER"
       )
     ))
   }
@@ -279,7 +305,7 @@ PACKERA_DB_WC_BIO_COLS <- c(
 .migrate_dynamic_sqlite_schema_r <- function(conn) {
   if (is.null(conn)) return(FALSE)
   changed <- FALSE
-  for (tbl in c("leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "environmental_cache")) {
+  for (tbl in c("run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "vision_xai_audit", "spatial_rf_predictions", "environmental_cache")) {
     if (isTRUE(.migrate_dynamic_sqlite_table_r(conn, tbl))) {
       changed <- TRUE
     }
@@ -426,7 +452,10 @@ connect_packera_db <- function(
       req_v_cols <- c(
         "PC15", "Sym_PC15", "selected_morph_features", "climatic_z_score",
         "bio19_precip_coldest_qtr", "dissection_index", "q25_solidity",
-        "dissected_leaf_fraction", "basal_leaf_count"
+        "dissected_leaf_fraction", "basal_leaf_count", "is_type_specimen",
+        "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance",
+        "is_typical_morphotype", "vision_type_cosine_sim", "vision_nearest_type_taxon",
+        "type_edaphic_z_score", "nearest_type_niche_taxon", "matches_type_lithology"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE
@@ -1160,7 +1189,8 @@ persist_step04_to_sqlite <- function(
       }
       coh_cols <- intersect(
         c("run_id", "catalogNumber", "plant_individual_id", "species_standardized",
-          "determiner_tier", "is_promoted_bronze", "authority_weight"),
+          "determiner_tier", "type_status", "is_type_specimen",
+          "is_promoted_bronze", "authority_weight"),
         names(coh_sub)
       )
       db_upsert_dataframe(
@@ -1334,7 +1364,7 @@ persist_step06_to_sqlite <- function(
   for (pc in intersect(c("primary_env_predictors", "primary_clim_predictors", "primary_edaph_predictors"), names(srf_df))) {
     srf_df[[pc]] <- .normalize_semicolon_col_r(srf_df[[pc]])
   }
-  for (nc in intersect(c("edaphic_z_score", "climatic_z_score", PACKERA_DB_WC_BIO_COLS, "bio18_precip_warmest_qt", "bio19_precip_coldest_qt"), names(srf_df))) {
+  for (nc in intersect(c("edaphic_z_score", "climatic_z_score", "type_edaphic_z_score", PACKERA_DB_WC_BIO_COLS, "bio18_precip_warmest_qt", "bio19_precip_coldest_qt"), names(srf_df))) {
     srf_df[[nc]] <- suppressWarnings(as.numeric(srf_df[[nc]]))
   }
 

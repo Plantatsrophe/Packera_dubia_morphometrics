@@ -491,7 +491,18 @@ def _build_master_view_ddl() -> str:
         v.identifiedBy AS identifiedBy,
         v.determiner_raw AS determiner_raw,
         COALESCE(rac.determiner_tier, om.determiner_tier, v.determiner_tier) AS determiner_tier,
-        v.type_status AS type_status,
+        COALESCE(rac.type_status, v.type_status, om.type_status, vx.type_status) AS type_status,
+        COALESCE(
+            rac.is_type_specimen,
+            om.is_type_specimen,
+            vx.is_type_specimen,
+            CASE
+                WHEN COALESCE(rac.type_status, v.type_status, '') != ''
+                 AND UPPER(TRIM(COALESCE(rac.type_status, v.type_status, ''))) NOT IN ('NONE', 'NOT A TYPE', 'NOTATYPE', 'NON-TYPE', 'NONTYPE', 'UNSPECIFIED', 'NULL', 'NAN', 'NA', 'N/A', 'FALSE', '0', 'UNKNOWN')
+                THEN 1
+                ELSE 0
+            END
+        ) AS is_type_specimen,
         v.county AS county,
         v.stateProvince AS stateProvince,
         v.locality AS locality,
@@ -599,6 +610,11 @@ def _build_master_view_ddl() -> str:
         COALESCE(om.misidentification_flag, om.morphometric_outlier_flag) AS misidentification_flag,
         om.triage_priority AS triage_priority,
         om.discordance_reason AS morph_discordance_reason,
+        om.has_empirical_type_anchor AS has_empirical_type_anchor,
+        om.type_morph_mahal_d2 AS type_morph_mahal_d2,
+        om.nearest_type_morph_taxon AS nearest_type_morph_taxon,
+        om.type_morph_concordance AS type_morph_concordance,
+        om.is_typical_morphotype AS is_typical_morphotype,
         -- Step 05 Vision XAI & Cleanlab Audit
         COALESCE(vx.vision_predicted_label, vx.predicted_label) AS vision_predicted_label,
         COALESCE(vx.predicted_label, vx.vision_predicted_label) AS predicted_label,
@@ -620,6 +636,9 @@ def _build_master_view_ddl() -> str:
         vx.mean_saturation AS mean_saturation,
         vx.high_brightness_ratio AS high_brightness_ratio,
         vx.tomentum_taxon_discordance AS tomentum_taxon_discordance,
+        vx.vision_type_cosine_sim AS vision_type_cosine_sim,
+        vx.vision_nearest_type_taxon AS vision_nearest_type_taxon,
+        vx.vision_type_margin AS vision_type_margin,
         -- Step 06 Spatial RF & Hopkins Phenology
         COALESCE(srf.lat_lon_key, ec.lat_lon_key) AS lat_lon_key,
         srf.rf_predicted_taxon AS rf_predicted_taxon,
@@ -639,6 +658,9 @@ def _build_master_view_ddl() -> str:
         srf.anthesis_filter_status AS anthesis_filter_status,
         srf.edaphic_z_score AS edaphic_z_score,
         srf.climatic_z_score AS climatic_z_score,
+        srf.type_edaphic_z_score AS type_edaphic_z_score,
+        srf.nearest_type_niche_taxon AS nearest_type_niche_taxon,
+        srf.matches_type_lithology AS matches_type_lithology,
         srf.primary_env_predictors AS primary_env_predictors,
         srf.primary_clim_predictors AS primary_clim_predictors,
         srf.primary_edaph_predictors AS primary_edaph_predictors,
@@ -960,6 +982,8 @@ def _build_schema_ddl() -> str:
         plant_individual_id INTEGER NOT NULL DEFAULT 0,
         species_standardized TEXT,
         determiner_tier TEXT,
+        type_status TEXT,
+        is_type_specimen INTEGER DEFAULT 0,
         is_promoted_bronze INTEGER DEFAULT 0,
         authority_weight REAL,
         spatial_balance_weight REAL DEFAULT 1.0,
@@ -1070,6 +1094,13 @@ def _build_schema_ddl() -> str:
         misidentification_flag INTEGER,
         triage_priority TEXT,
         discordance_reason TEXT,
+        type_status TEXT,
+        is_type_specimen INTEGER DEFAULT 0,
+        has_empirical_type_anchor INTEGER,
+        type_morph_mahal_d2 REAL,
+        nearest_type_morph_taxon TEXT,
+        type_morph_concordance REAL,
+        is_typical_morphotype INTEGER,
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
@@ -1100,6 +1131,11 @@ def _build_schema_ddl() -> str:
         mean_saturation REAL,
         high_brightness_ratio REAL,
         tomentum_taxon_discordance INTEGER,
+        type_status TEXT,
+        is_type_specimen INTEGER DEFAULT 0,
+        vision_type_cosine_sim REAL,
+        vision_nearest_type_taxon TEXT,
+        vision_type_margin REAL,
         triage_action TEXT,
         discordance_reason TEXT,
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
@@ -1127,6 +1163,9 @@ def _build_schema_ddl() -> str:
         anthesis_filter_status TEXT,
         edaphic_z_score REAL,
         climatic_z_score REAL,
+        type_edaphic_z_score REAL,
+        nearest_type_niche_taxon TEXT,
+        matches_type_lithology INTEGER,
         primary_env_predictors TEXT,
         primary_clim_predictors TEXT,
         primary_edaph_predictors TEXT,
@@ -1182,6 +1221,10 @@ _VOUCHERS_MIGRATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
 )
 
 _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
+    "run_active_cohort": (
+        ("type_status", "TEXT"),
+        ("is_type_specimen", "INTEGER DEFAULT 0"),
+    ),
     "leaf_efa_harmonics": tuple(
         [
             *((h, "REAL") for h in HARMONIC_COLS),
@@ -1204,7 +1247,21 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("q25_solidity", "REAL"),
             ("dissected_leaf_fraction", "REAL"),
             ("basal_leaf_count", "INTEGER"),
+            ("type_status", "TEXT"),
+            ("is_type_specimen", "INTEGER DEFAULT 0"),
+            ("has_empirical_type_anchor", "INTEGER"),
+            ("type_morph_mahal_d2", "REAL"),
+            ("nearest_type_morph_taxon", "TEXT"),
+            ("type_morph_concordance", "REAL"),
+            ("is_typical_morphotype", "INTEGER"),
         ]
+    ),
+    "vision_xai_audit": (
+        ("type_status", "TEXT"),
+        ("is_type_specimen", "INTEGER DEFAULT 0"),
+        ("vision_type_cosine_sim", "REAL"),
+        ("vision_nearest_type_taxon", "TEXT"),
+        ("vision_type_margin", "REAL"),
     ),
     "spatial_rf_predictions": tuple(
         [
@@ -1212,6 +1269,9 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("bio18_precip_warmest_qt", "REAL"),
             ("bio19_precip_coldest_qt", "REAL"),
             ("climatic_z_score", "REAL"),
+            ("type_edaphic_z_score", "REAL"),
+            ("nearest_type_niche_taxon", "TEXT"),
+            ("matches_type_lithology", "INTEGER"),
             ("primary_env_predictors", "TEXT"),
             ("primary_clim_predictors", "TEXT"),
             ("primary_edaph_predictors", "TEXT"),
@@ -1255,7 +1315,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20260405
+PACKERA_SCHEMA_USER_VERSION: int = 20260406
 
 
 def _migrate_dynamic_schema_columns(
@@ -2453,6 +2513,7 @@ def persist_vision_xai_audit(
     """Persist run-scoped Step 05 Cleanlab & DINOv2 XAI results into `vision_xai_audit`."""
     if demo or not audit_rows:
         return 0
+    _ensure_dynamic_table_migrated(conn, "vision_xai_audit")
     eff_run_id = str(run_id or os.environ.get("RUN_ID") or "canonical").strip()
     ensure_pipeline_run(conn, run_id=eff_run_id)
 
@@ -2463,6 +2524,22 @@ def persist_vision_xai_audit(
             continue
         pid = _to_int(r.get("plant_individual_id"), default=0) or 0
         pred_lbl = _to_str(r.get("vision_predicted_label")) or _to_str(r.get("predicted_label"))
+        ts_val = _to_str(r.get("type_status"))
+        is_type_v = _to_bool_int(r.get("is_type_specimen"))
+        if is_type_v is None:
+            is_type_v = (
+                1
+                if (
+                    ts_val
+                    and ts_val.upper()
+                    not in {
+                        "NONE", "NOT A TYPE", "NOTATYPE", "NON-TYPE", "NONTYPE",
+                        "UNSPECIFIED", "NULL", "NAN", "NA", "N/A", "FALSE", "0", "UNKNOWN",
+                    }
+                    and not re.search(r"\b(?:not\s+a?\s*type|non[-\s]?type)\b", ts_val, re.IGNORECASE)
+                )
+                else 0
+            )
         norm_rows.append({
             "run_id": eff_run_id,
             "catalogNumber": cat,
@@ -2489,6 +2566,11 @@ def persist_vision_xai_audit(
             "mean_saturation": _to_float(r.get("mean_saturation")),
             "high_brightness_ratio": _to_float(r.get("high_brightness_ratio")),
             "tomentum_taxon_discordance": _to_bool_int(r.get("tomentum_taxon_discordance"), default=0),
+            "type_status": ts_val,
+            "is_type_specimen": is_type_v,
+            "vision_type_cosine_sim": _to_float(r.get("vision_type_cosine_sim")),
+            "vision_nearest_type_taxon": _to_str(r.get("vision_nearest_type_taxon")),
+            "vision_type_margin": _to_float(r.get("vision_type_margin")),
             "triage_action": _to_str(r.get("triage_action")),
             "discordance_reason": _to_str(r.get("discordance_reason")),
         })
@@ -2583,6 +2665,7 @@ def populate_run_active_cohort(
                     conn.execute(f"DELETE FROM {_tbl} WHERE run_id = ?;", (rid,))
         return 0
 
+    _ensure_dynamic_table_migrated(conn, "run_active_cohort")
     upsert_vouchers_records(conn, voucher_rows)
 
     cats = [str(r.get("catalogNumber", "")).strip() for r in voucher_rows if str(r.get("catalogNumber", "")).strip()]
@@ -2606,6 +2689,22 @@ def populate_run_active_cohort(
             continue
         sp_std = _to_str(r.get("species_standardized"))
         det_tier = _to_str(r.get("determiner_tier"))
+        type_stat = _to_str(r.get("type_status"))
+        is_type_sp = _to_bool_int(r.get("is_type_specimen"))
+        if is_type_sp is None:
+            is_type_sp = (
+                1
+                if (
+                    type_stat
+                    and type_stat.upper()
+                    not in {
+                        "NONE", "NOT A TYPE", "NOTATYPE", "NON-TYPE", "NONTYPE",
+                        "UNSPECIFIED", "NULL", "NAN", "NA", "N/A", "FALSE", "0", "UNKNOWN",
+                    }
+                    and not re.search(r"\b(?:not\s+a?\s*type|non[-\s]?type)\b", type_stat, re.IGNORECASE)
+                )
+                else 0
+            )
         is_prom = _to_bool_int(r.get("is_promoted_bronze") or r.get("is_promoted_anchor"), default=0) or 0
         auth_wt = _to_float(r.get("authority_weight"))
         sp_wt = _to_float(r.get("spatial_balance_weight"))
@@ -2618,7 +2717,7 @@ def populate_run_active_cohort(
             if (cat, pid) in seen_keys:
                 continue
             seen_keys.add((cat, pid))
-            cohort_payload.append((rid, cat, pid, sp_std, det_tier, is_prom, auth_wt, sp_wt))
+            cohort_payload.append((rid, cat, pid, sp_std, det_tier, type_stat, is_type_sp, is_prom, auth_wt, sp_wt))
 
     with conn:
         if clear_existing:
@@ -2628,11 +2727,14 @@ def populate_run_active_cohort(
             INSERT INTO run_active_cohort (
                 run_id, catalogNumber, plant_individual_id,
                 species_standardized, determiner_tier,
+                type_status, is_type_specimen,
                 is_promoted_bronze, authority_weight, spatial_balance_weight
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id, catalogNumber, plant_individual_id) DO UPDATE SET
                 species_standardized = COALESCE(excluded.species_standardized, run_active_cohort.species_standardized),
                 determiner_tier = COALESCE(excluded.determiner_tier, run_active_cohort.determiner_tier),
+                type_status = COALESCE(excluded.type_status, run_active_cohort.type_status),
+                is_type_specimen = COALESCE(excluded.is_type_specimen, run_active_cohort.is_type_specimen),
                 is_promoted_bronze = COALESCE(excluded.is_promoted_bronze, run_active_cohort.is_promoted_bronze),
                 authority_weight = COALESCE(excluded.authority_weight, run_active_cohort.authority_weight),
                 spatial_balance_weight = COALESCE(excluded.spatial_balance_weight, run_active_cohort.spatial_balance_weight);
@@ -2950,6 +3052,9 @@ _OTU_MORPH_BOOL_COLS: Tuple[str, ...] = (
     "is_contour_outlier",
     "morphometric_outlier_flag",
     "misidentification_flag",
+    "is_type_specimen",
+    "has_empirical_type_anchor",
+    "is_typical_morphotype",
 )
 _OTU_MORPH_INT_COLS: Tuple[str, ...] = (
     "leaf_count",
@@ -2957,11 +3062,13 @@ _OTU_MORPH_INT_COLS: Tuple[str, ...] = (
     "n_tier2_leaves",
     "efd_harmonic_opt",
     "efd_k95_pcs",
+    "basal_leaf_count",
 )
 _OTU_MORPH_STR_COLS: Tuple[str, ...] = (
     "assigned_tier",
     "species_standardized",
     "determiner_tier",
+    "type_status",
     "reproductive_trait_status",
     "morph_tier_source",
     "gmm_cluster",
@@ -2970,11 +3077,15 @@ _OTU_MORPH_STR_COLS: Tuple[str, ...] = (
     "ecoregion_cda_predicted",
     "triage_priority",
     "discordance_reason",
+    "nearest_type_morph_taxon",
 )
 _OTU_MORPH_FLOAT_COLS: Tuple[str, ...] = (
     "authority_weight",
     "pixels_per_mm",
     "solidity",
+    "dissection_index",
+    "q25_solidity",
+    "dissected_leaf_fraction",
     "ucs_score",
     "aspect_ratio",
     "area_px",
@@ -3006,6 +3117,8 @@ _OTU_MORPH_FLOAT_COLS: Tuple[str, ...] = (
     "ecoregion_cda_posterior_prob",
     "ecoregion_can1",
     "ecoregion_can2",
+    "type_morph_mahal_d2",
+    "type_morph_concordance",
 )
 
 
@@ -3070,10 +3183,12 @@ _SRF_BOOL_COLS: Tuple[str, ...] = (
     "substrate_specialist_flag",
     "piedmont_outcrop_specialist_flag",
     "multimodal_conflict_flag",
+    "matches_type_lithology",
 )
 _SRF_STR_COLS: Tuple[str, ...] = (
     "rf_predicted_taxon",
     "edaphic_best_fit_taxon",
+    "nearest_type_niche_taxon",
     "spatial_block_id",
     "pheno_timing_category",
     "anthesis_filter_status",
@@ -3098,6 +3213,7 @@ _SRF_FLOAT_COLS: Tuple[str, ...] = (
     "hopkins_adjusted_doy",
     "edaphic_z_score",
     "climatic_z_score",
+    "type_edaphic_z_score",
     *WC_BIO_COLUMNS,
     "bio18_precip_warmest_qt",
     "bio19_precip_coldest_qt",

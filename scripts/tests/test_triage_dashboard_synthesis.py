@@ -646,6 +646,126 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"Step 07 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("STEP07_COHORT_ADAPTIVE_OK", res.stdout)
 
+    def test_nomenclatural_type_control_rules_a_b_c_and_locus_classicus_step06_baseline(self):
+        """Verify Milestone 4 (Step 06 locus classicus baseline) and Milestone 5 (Step 07 Rules A, B, and C: Confirmed_Type_Control / Type_Synonymy_Candidate, type_control_reassign, and is_typical_morphotype sensu stricto locking)."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        r_code = """
+        suppressPackageStartupMessages({ library(readr); library(dplyr) })
+        source("scripts/analysis/06_multimodal_spatial_rf.R")
+        source("scripts/analysis/07_triage_dashboard_synthesis.R")
+
+        # 1. Verify Step 06 compute_type_locality_ecological_control() computes type_edaphic_z_score,
+        #    nearest_type_niche_taxon, and matches_type_lithology relative to locus classicus
+        df06 <- data.frame(
+          catalogNumber = c("DUB_HOLO", "DUB_NEAR", "DUB_MATCHING_OBO_LOCUS", "OBO_HOLO", "OBO_NEAR"),
+          plant_individual_id = 0L,
+          species_standardized = c("Packera dubia", "Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata"),
+          determiner_tier = c("Tier_1_Gold", "Tier_1_Gold", "Tier_3_Bronze", "Tier_1_Gold", "Tier_1_Gold"),
+          type_status = c("Holotype", "None", "None", "Holotype", "None"),
+          is_type_specimen = c(TRUE, FALSE, FALSE, TRUE, FALSE),
+          regional_group = c("Piedmont", "Piedmont", "Interior Plateau", "Interior Plateau", "Interior Plateau"),
+          decimalLatitude = c(35.8, 35.9, 36.1, 36.0, 36.2),
+          decimalLongitude = c(-78.6, -78.5, -86.7, -86.8, -86.6),
+          fine_soil_ph = c(5.2, 5.3, 7.4, 7.5, 7.3),
+          fine_soil_sand = c(68.0, 66.0, 22.0, 20.0, 24.0),
+          fine_bedrock_depth_cm = c(140.0, 135.0, 35.0, 32.0, 38.0),
+          sgmc_lithology_class = c("Granitic_Felsic", "Granitic_Felsic", "Carbonate_Limestone_Dolostone", "Carbonate_Limestone_Dolostone", "Carbonate_Limestone_Dolostone"),
+          primary_env_predictors = "fine_soil_ph;fine_soil_sand;fine_bedrock_depth_cm",
+          primary_edaph_predictors = "fine_soil_ph;fine_soil_sand;fine_bedrock_depth_cm",
+          stringsAsFactors = FALSE
+        )
+        tc06 <- compute_type_locality_ecological_control(df06)
+        stopifnot(tc06$type_edaphic_z_score[1] < 0.5)
+        stopifnot(tc06$type_edaphic_z_score[3] > 2.5)
+        stopifnot(identical(tc06$nearest_type_niche_taxon[3], "Packera obovata"))
+        stopifnot(isTRUE(tc06$matches_type_lithology[1]))
+        stopifnot(!isTRUE(tc06$matches_type_lithology[3]))
+
+        # 2. Verify Step 07 Rules A, B, and C in apply_taxonomic_decision_matrix()
+        df07 <- data.frame(
+          catalogNumber = c(
+            "RULE_A_CLEAN_HOLO",
+            "RULE_A_SYNONYM_OVERLAP_HOLO",
+            "RULE_B_TYPE_CONTROL_REASSIGN",
+            "RULE_C_SENSU_STRICTO_LOCKED",
+            "NON_TYPICAL_ECOTYPE_K2"
+          ),
+          plant_individual_id = 0L,
+          species_raw = rep("Packera dubia", 5),
+          species_standardized = rep("Packera dubia", 5),
+          determiner_tier = c("Tier_1_Gold", "Tier_1_Gold", "Tier_3_Bronze", "Tier_1_Gold", "Tier_2_Silver"),
+          type_status = c("Holotype", "Lectotype", "None", "None", "None"),
+          is_type_specimen = c(TRUE, TRUE, FALSE, FALSE, FALSE),
+          morph_tier_source = "Tier_1_Pure",
+          n_tier1_leaves = 3L,
+          # Note: Row 3 has borderline classifier posteriors (cda_prob=0.58, c_error=0.52) that would NOT trigger
+          # ordinary single-stream reassign, but matches Packera obovata across all 3 type-control streams!
+          cda_predicted_taxon = c("Packera dubia", "Packera anonyma", "Packera dubia", "Packera dubia", "Packera dubia"),
+          cda_posterior_prob = c(0.96, 0.91, 0.58, 0.62, 0.85),
+          cda_posterior_margin = c(0.92, 0.82, 0.30, 0.35, 0.70),
+          morphometric_outlier_flag = c(FALSE, TRUE, FALSE, TRUE, FALSE),
+          vision_predicted_label = c("Packera dubia", "Packera anonyma", "Packera dubia", "Packera dubia", "Packera dubia"),
+          c_error = c(0.04, 0.92, 0.42, 0.25, 0.15),
+          is_label_corrupted = c(FALSE, FALSE, FALSE, FALSE, FALSE),
+          is_artifact_driven = FALSE,
+          vision_is_ood = c(FALSE, FALSE, FALSE, TRUE, FALSE),
+          vision_ood_score = c(0.15, 0.20, 0.25, 0.72, 0.18),
+          edaphic_best_fit_taxon = rep("Packera dubia", 5),
+          edaphic_schoener_d = c(0.85, 0.22, 0.55, 0.20, 0.25),
+          delta_doy_resid = c(1.0, 2.0, 3.0, 25.0, 22.0),
+          is_active_anthesis = TRUE,
+          gmm_cluster = c(1L, 1L, 2L, 2L, 3L),
+          gmm_2_delta_bic = 14.0,
+          gmm_uncertainty = 0.05,
+          is_typical_morphotype = c(TRUE, TRUE, FALSE, TRUE, FALSE),
+          type_morph_mahal_d2 = c(0.4, 8.5, 11.2, 1.5, 6.8),
+          nearest_type_morph_taxon = c("Packera dubia", "Packera anonyma", "Packera obovata", "Packera dubia", "Packera dubia"),
+          type_morph_concordance = c(0.95, 0.15, 0.12, 0.82, 0.45),
+          vision_type_cosine_sim = c(0.98, 0.72, 0.65, 0.91, 0.84),
+          vision_nearest_type_taxon = c("Packera dubia", "Packera anonyma", "Packera obovata", "Packera dubia", "Packera dubia"),
+          vision_type_margin = c(0.0, 0.18, 0.22, 0.0, 0.0),
+          type_edaphic_z_score = c(0.3, 1.8, 2.8, 0.9, 2.6),
+          nearest_type_niche_taxon = c("Packera dubia", "Packera anonyma", "Packera obovata", "Packera dubia", "Packera dubia"),
+          stringsAsFactors = FALSE
+        )
+
+        res07 <- apply_taxonomic_decision_matrix(df07)
+        # Rule A1: Clean Holotype -> Confirmed_Type_Control, Confirmed_Species, RESOLVED
+        stopifnot(identical(res07$taxonomic_status_call[1], "Confirmed_Type_Control"))
+        stopifnot(identical(res07$taxonomic_treatment_subtype[1], "Confirmed_Species"))
+        stopifnot(identical(res07$recommended_determination[1], "Packera dubia"))
+
+        # Rule A2: Cross-modal overlapping Lectotype -> Type_Synonymy_Candidate, NEVER Misidentification_Reassign
+        stopifnot(identical(res07$taxonomic_status_call[2], "Type_Synonymy_Candidate"))
+        stopifnot(identical(res07$taxonomic_treatment_subtype[2], "Confirmed_Species"))
+        stopifnot(identical(res07$recommended_determination[2], "Packera dubia"))
+        stopifnot(grepl("Packera anonyma", res07$synthesis_rationale[2]))
+
+        # Rule B: Non-type sheet matching Packera obovata across >=2 type baselines + deviating from P. dubia type baseline
+        stopifnot(identical(res07$taxonomic_treatment_subtype[3], "Misidentification_Reassign"))
+        stopifnot(identical(res07$recommended_determination[3], "Packera obovata"))
+        stopifnot(grepl("Type-Baseline Concordance", res07$synthesis_rationale[3]))
+
+        # Rule C: Specimen in typical morphotype cluster (is_typical_morphotype=TRUE) with type_edaphic_z_score <= 2.0
+        # is locked as Confirmed_Species (sensu stricto) in both multi-species and intraspecific modes!
+        stopifnot(identical(res07$taxonomic_treatment_subtype[4], "Confirmed_Species"))
+        stopifnot(identical(res07$recommended_determination[4], "Packera dubia"))
+        res07_intra <- apply_taxonomic_decision_matrix(df07, intraspecific_mode = TRUE)
+        stopifnot(identical(res07_intra$taxonomic_treatment_subtype[4], "Confirmed_Species"))
+        # Meanwhile non-typical cluster 3 with barrier (row 5) is allowed to route to Subspecies_Ecotype
+        stopifnot(identical(res07$taxonomic_treatment_subtype[5], "Subspecies_Ecotype"))
+        stopifnot(identical(res07_intra$taxonomic_treatment_subtype[5], "Subspecies_Ecotype"))
+
+        cat("STEP06_07_TYPE_RULES_OK\\n")
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            r_script_path = Path(tmpdir) / "test_step06_07_type_rules.R"
+            r_script_path.write_text(r_code, encoding="utf-8")
+            res = subprocess.run(["Rscript", str(r_script_path)], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"Step 06/07 type rules test failed:\n{res.stderr}\n{res.stdout}")
+        self.assertIn("STEP06_07_TYPE_RULES_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

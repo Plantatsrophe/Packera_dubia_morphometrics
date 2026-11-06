@@ -318,7 +318,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
       if (n_k >= 5) {
         sub_x <- X[cand_k, , drop = FALSE]
         d2_k <- tryCatch(stats::mahalanobis(sub_x, colMeans(sub_x), stats::cov(sub_x) + diag(1e-4, p)), error = function(e) rep(0, n_k))
-        drop_k <- !is.na(d2_k) & (d2_k > stats::qchisq(0.95, df = p))
+        drop_k <- !is.na(d2_k) & (d2_k > stats::qchisq(0.95, df = p)); drop_k[.identify_type_specimen_vec(df[cand_k, , drop = FALSE])$is_type_specimen] <- FALSE
         if (sum(!drop_k) >= 2) is_train_cand[cand_k[drop_k]] <- FALSE
       }
     }
@@ -409,12 +409,12 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
               predicted_taxon = g_levels[pred_idx], posterior_prob = posterior_prob, second_taxon = second_taxon,
               second_posterior_prob = second_posterior_prob, post_probs = post_probs,
               posterior_margin = posterior_margin, is_active = is_active, is_promoted_bronze = df$is_promoted_bronze, anchor_tier_source = df$anchor_tier_source,
-              authority_weight = df$authority_weight, structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col))
+              authority_weight = df$authority_weight, structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col, X_proj = X_proj, S_reg = S_reg))
 }
-run_cda_with_passive_projection <- run_canonical_discriminant_analysis; run_weighted_cda_loocv <- run_canonical_discriminant_analysis
+run_cda_with_passive_projection <- run_canonical_discriminant_analysis; run_weighted_cda_loocv <- run_canonical_discriminant_analysis; run_cda_ordination <- run_canonical_discriminant_analysis
 
 # 5. Outlier Flagging & Herbarium Misidentification Auditing
-audit_misidentifications <- function(df, cda_res, gmm_res, selected_features = NULL) {
+audit_misidentifications <- function(df, cda_res, gmm_res = NULL, selected_features = NULL) {
   message("Auditing specimens for morphospace outliers & label discordances...")
   n <- nrow(df); flags <- logical(n); triage <- character(n); reasons <- character(n)
   grp_vec <- if (!is.null(cda_res$grouping_col)) cda_res$grouping_col else df$species_standardized
@@ -447,10 +447,15 @@ audit_misidentifications <- function(df, cda_res, gmm_res, selected_features = N
     }
     if (is_intra_audit && !flags[i] && isTRUE(mahal_out[i])) { flags[i] <- TRUE; triage[i] <- "HIGH"; reasons[i] <- "Intraspecific_Mahalanobis_Morphospace_Outlier" }
   }
+  tc <- compute_type_specimen_morph_control(df, cda_res$X_proj, cda_res$S_reg, cda_res, gmm_res, flags = flags, triage = triage, reasons = reasons)
+  flags <- tc$flags; triage <- tc$triage; reasons <- tc$reasons
+  for (cn in c("type_status", "is_type_specimen", "has_empirical_type_anchor", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype")) df[[cn]] <- tc[[cn]]
   if (!is.null(cda_res$is_promoted_bronze)) df$is_promoted_bronze <- cda_res$is_promoted_bronze
   if (!is.null(cda_res$anchor_tier_source)) df$anchor_tier_source <- cda_res$anchor_tier_source
   df$authority_weight <- if (!is.null(cda_res$authority_weight)) cda_res$authority_weight else compute_authority_precision_weights(df)
-  df$gmm_cluster <- gmm_res$classification; df$gmm_uncertainty <- round(gmm_res$uncertainty, 4); df$loocv_accuracy <- cda_res$loocv_accuracy
+  if (!is.null(gmm_res$classification)) df$gmm_cluster <- gmm_res$classification
+  if (!is.null(gmm_res$uncertainty)) df$gmm_uncertainty <- round(gmm_res$uncertainty, 4)
+  df$loocv_accuracy <- cda_res$loocv_accuracy
   df$selected_morph_features <- paste(sel_feats, collapse = ";")
   df$cda_predicted_taxon <- cda_res$predicted_taxon; df$cda_posterior_prob <- round(cda_res$posterior_prob, 4)
   df$cda_second_taxon <- if (!is.null(cda_res$second_taxon)) as.character(cda_res$second_taxon) else NA_character_
@@ -573,7 +578,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   }
   if (!is.null(vouchers_df)) {
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), , drop = FALSE]; v_idx <- match(as.character(closed_df$catalogNumber), as.character(v_sub$catalogNumber))
-    for (col in intersect(names(v_sub), c("scientificName", "species_standardized", "species_raw", "identifiedBy", "determiner_raw", "determiner_tier", "institutionCode", "county", "stateProvince", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) { vv <- v_sub[[col]][v_idx]; if (!col %in% names(closed_df)) closed_df[[col]] <- vv else { m_v <- !is.na(vv) & nzchar(trimws(as.character(vv))) & (col %in% c("scientificName", "species_standardized", "species_raw", "determiner_tier", "regional_group") | is.na(closed_df[[col]])); closed_df[[col]][m_v] <- vv[m_v] } }
+    for (col in intersect(names(v_sub), c("scientificName", "species_standardized", "species_raw", "identifiedBy", "determiner_raw", "determiner_tier", "type_status", "is_type_specimen", "institutionCode", "county", "stateProvince", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "doy", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))) { vv <- v_sub[[col]][v_idx]; if (!col %in% names(closed_df)) closed_df[[col]] <- vv else { m_v <- !is.na(vv) & nzchar(trimws(as.character(vv))) & (col %in% c("scientificName", "species_standardized", "species_raw", "determiner_tier", "type_status", "is_type_specimen", "regional_group") | is.na(closed_df[[col]])); closed_df[[col]][m_v] <- vv[m_v] } }
   }
   sp_cand <- rep("Unknown", nrow(closed_df)); for (sc in intersect(c("species_standardized", "scientificName", "species_raw"), names(closed_df))) { v <- standardize_packera_taxon(closed_df[[sc]]); m <- sp_cand == "Unknown" & !is.na(v) & v != "Unknown"; sp_cand[m] <- v[m] }
   closed_df$species_standardized <- sp_cand; closed_df$authority_weight <- compute_authority_precision_weights(closed_df)
@@ -629,8 +634,8 @@ run_gmm_morphotools_pipeline <- function(opts) {
   }
   manova_res <- if (exists("run_multivariate_manova_audit", mode = "function")) run_multivariate_manova_audit(audited_df, cda_cols, gmm_res, output_group_csv = file.path(rep_dir, "manova_group_significance.csv"), output_pairwise_csv = file.path(rep_dir, "manova_pairwise_posthoc.csv")) else NULL
   lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "basal_leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm",
-                           "species_raw", "species_standardized", "determiner_tier", "authority_weight", "spatial_balance_weight", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_taxon", "cda_second_posterior_prob",
-                           "cda_posterior_margin", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty",
+                           "species_raw", "species_standardized", "determiner_tier", "type_status", "is_type_specimen", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_taxon", "cda_second_posterior_prob",
+                           "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty",
                            "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", "pheno_sin", "pheno_cos", pc_cols, sym_pc_cols,
                            "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "heteroblasty_index", "ucs_score", "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std",
                            "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))

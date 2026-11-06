@@ -2659,6 +2659,249 @@ compute_specimen_edaphic_z <- function(
   )
 }
 
+compute_type_locality_ecological_control <- function(
+  df,
+  primary_env_vars = NULL,
+  primary_edaph_vars = NULL,
+  rf_var_weights = NULL,
+  intraspecific_mode = FALSE,
+  max_radius_km = 150.0
+) {
+  n <- if (is.null(df) || !is.data.frame(df)) 0L else nrow(df)
+  if (n == 0L) {
+    return(list(
+      type_edaphic_z_score = numeric(0),
+      nearest_type_niche_taxon = character(0),
+      matches_type_lithology = logical(0)
+    ))
+  }
+
+  t_info <- if (exists(".identify_type_specimen_vec", mode = "function")) {
+    .identify_type_specimen_vec(df)
+  } else {
+    ts_raw <- if ("type_status" %in% names(df)) as.character(df$type_status) else rep("", n)
+    ts_raw[is.na(ts_raw)] <- ""
+    is_t <- grepl("\\b(holotype|lectotype|neotype|epitype|isotype|isolectotype|isoneotype|syntype|isosyntype|paratype|isoparatype|type|cotype)s?\\b", ts_raw, ignore.case = TRUE) &
+      !grepl("not a type|non-type|false type", ts_raw, ignore.case = TRUE)
+    if ("is_type_specimen" %in% names(df)) {
+      b <- as.logical(df$is_type_specimen); b[is.na(b)] <- FALSE
+      is_t <- is_t | b
+    }
+    list(type_rank = ifelse(is_t, 2L, 0L), is_type_specimen = is_t)
+  }
+  is_type_vec <- as.logical(t_info$is_type_specimen)
+  type_rank_vec <- as.integer(t_info$type_rank)
+
+  is_intra <- isTRUE(intraspecific_mode) ||
+    (("species_standardized" %in% names(df)) && length(unique(stats::na.omit(df$species_standardized))) < 2L)
+  grp_vec <- if (is_intra && "analysis_group" %in% names(df)) {
+    as.character(df$analysis_group)
+  } else if ("species_standardized" %in% names(df)) {
+    as.character(df$species_standardized)
+  } else if ("analysis_group" %in% names(df)) {
+    as.character(df$analysis_group)
+  } else {
+    rep("Unknown", n)
+  }
+  active_taxa <- sort(unique(grp_vec[!is.na(grp_vec) & nzchar(grp_vec) & grp_vec != "Unknown"]))
+  if (length(active_taxa) == 0L) active_taxa <- "Unknown"
+
+  cand_all <- discover_candidate_eco_predictors(df, include_pheno = TRUE, min_finite = 2L)
+  env_use <- if (!is.null(primary_env_vars) && length(primary_env_vars) > 0L) {
+    intersect(as.character(primary_env_vars), names(df))
+  } else {
+    cand_all
+  }
+  if (length(env_use) == 0L) {
+    env_use <- intersect(c("fine_soil_ph", "fine_soil_sand", "fine_soil_cec", "soil_ph", "soil_sand", "soil_cec", "bio1_temp_mean", "bio12_precip_annual"), names(df))
+  }
+  clim_pat <- "^(bio[0-9]*_|delta_doy$|doy$|hopkins_|sin_doy$|cos_doy$)"
+  edaph_use <- if (!is.null(primary_edaph_vars) && length(primary_edaph_vars) > 0L) {
+    intersect(as.character(primary_edaph_vars), names(df))
+  } else {
+    setdiff(env_use, grep(clim_pat, env_use, value = TRUE, ignore.case = TRUE))
+  }
+  if (length(edaph_use) == 0L) edaph_use <- env_use
+  all_vars <- unique(c(env_use, edaph_use))
+  all_vars <- all_vars[vapply(all_vars, function(cl) {
+    (cl %in% names(df)) && sum(is.finite(suppressWarnings(as.numeric(df[[cl]])))) >= 1L
+  }, logical(1))]
+
+  lat_v <- if ("decimalLatitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLatitude)) else if ("latitude" %in% names(df)) suppressWarnings(as.numeric(df$latitude)) else rep(NA_real_, n)
+  lon_v <- if ("decimalLongitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLongitude)) else if ("longitude" %in% names(df)) suppressWarnings(as.numeric(df$longitude)) else rep(NA_real_, n)
+  has_xy <- is.finite(lat_v) & is.finite(lon_v)
+  reg_v <- if ("regional_group" %in% names(df)) trimws(as.character(df$regional_group)) else rep("", n)
+  reg_v[is.na(reg_v) | tolower(reg_v) %in% c("na", "unknown", "unknown_ecoregion")] <- ""
+  det_t <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
+  is_gold_v <- grepl("tier_?[01]|gold|type", det_t, ignore.case = TRUE) | is_type_vec
+  is_anc_v <- is_gold_v | grepl("tier_?2|silver", det_t, ignore.case = TRUE)
+  if ("is_promoted_bronze" %in% names(df)) {
+    pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_anc_v <- is_anc_v | pb
+  }
+
+  haversine_km <- function(lat1, lon1, lat2_vec, lon2_vec) {
+    rad <- pi / 180.0
+    dlat <- (lat2_vec - lat1) * rad
+    dlon <- (lon2_vec - lon1) * rad
+    a <- sin(dlat / 2.0)^2 + cos(lat1 * rad) * cos(lat2_vec * rad) * sin(dlon / 2.0)^2
+    6371.0 * (2.0 * atan2(sqrt(pmax(0.0, a)), sqrt(pmax(0.0, 1.0 - a))))
+  }
+
+  scale_floors <- stats::setNames(vapply(all_vars, function(cl) {
+    v <- suppressWarnings(as.numeric(df[[cl]]))
+    vf <- v[is.finite(v)]
+    if (length(vf) < 2L) return(1.0)
+    disp_g <- max(c(stats::mad(vf, na.rm = TRUE), stats::sd(vf, na.rm = TRUE), stats::IQR(vf, na.rm = TRUE) / 1.349), na.rm = TRUE)
+    if (!is.finite(disp_g) || disp_g <= 1e-8) 1.0 else max(0.20 * disp_g, 1e-4)
+  }, numeric(1)), all_vars)
+
+  lith_col <- if ("sgmc_lithology_class" %in% names(df)) {
+    "sgmc_lithology_class"
+  } else if ("Dominant_Lithology_Class" %in% names(df)) {
+    "Dominant_Lithology_Class"
+  } else {
+    NULL
+  }
+  lith_vec <- if (!is.null(lith_col)) trimws(as.character(df[[lith_col]])) else rep("", n)
+  lith_vec[is.na(lith_vec) | tolower(lith_vec) %in% c("na", "unknown", "none", "unmapped")] <- ""
+
+  type_profiles <- list()
+  for (tx in active_taxa) {
+    tx_rows <- which(grp_vec == tx)
+    type_rows <- tx_rows[is_type_vec[tx_rows]]
+    loc_rows <- integer(0)
+    loc_wts <- numeric(0)
+    if (length(type_rows) > 0L) {
+      near_gold <- integer(0)
+      gold_cand <- setdiff(tx_rows[is_gold_v[tx_rows]], type_rows)
+      if (length(gold_cand) > 0L) {
+        type_regs <- unique(reg_v[type_rows[nzchar(reg_v[type_rows])]])
+        same_reg <- if (length(type_regs) > 0L) gold_cand[reg_v[gold_cand] %in% type_regs] else integer(0)
+        near_xy <- integer(0)
+        type_xy <- type_rows[has_xy[type_rows]]
+        gold_xy <- gold_cand[has_xy[gold_cand]]
+        if (length(type_xy) > 0L && length(gold_xy) > 0L) {
+          min_d <- rep(Inf, length(gold_xy))
+          for (ti in type_xy) {
+            min_d <- pmin(min_d, haversine_km(lat_v[ti], lon_v[ti], lat_v[gold_xy], lon_v[gold_xy]))
+          }
+          near_xy <- gold_xy[is.finite(min_d) & (min_d <= max_radius_km)]
+        }
+        near_gold <- unique(c(same_reg, near_xy))
+      }
+      loc_rows <- c(type_rows, near_gold)
+      loc_wts <- c(ifelse(type_rank_vec[type_rows] == 2L, 3.5, 2.5), rep(1.0, length(near_gold)))
+    } else {
+      anc_tx <- tx_rows[is_anc_v[tx_rows]]
+      loc_rows <- if (length(anc_tx) >= 1L) anc_tx else tx_rows
+      loc_wts <- rep(1.0, length(loc_rows))
+    }
+
+    mu_tx <- stats::setNames(numeric(length(all_vars)), all_vars)
+    sd_tx <- stats::setNames(numeric(length(all_vars)), all_vars)
+    for (cl in all_vars) {
+      x_loc <- suppressWarnings(as.numeric(df[[cl]][loc_rows]))
+      x_all_tx <- suppressWarnings(as.numeric(df[[cl]][tx_rows]))
+      ok_l <- is.finite(x_loc) & is.finite(loc_wts) & (loc_wts > 0)
+      if (any(ok_l)) {
+        if (length(type_rows) > 0L && any(is.finite(df[[cl]][type_rows]))) {
+          t_vals <- suppressWarnings(as.numeric(df[[cl]][type_rows]))
+          t_med <- stats::median(t_vals[is.finite(t_vals)], na.rm = TRUE)
+          l_med <- sum(x_loc[ok_l] * loc_wts[ok_l]) / sum(loc_wts[ok_l])
+          mu_tx[[cl]] <- if (sum(ok_l) > length(type_rows)) (0.65 * t_med + 0.35 * l_med) else t_med
+        } else {
+          mu_tx[[cl]] <- stats::median(x_loc[ok_l], na.rm = TRUE)
+        }
+      } else {
+        mu_tx[[cl]] <- stats::median(x_all_tx[is.finite(x_all_tx)], na.rm = TRUE)
+      }
+      if (!is.finite(mu_tx[[cl]])) mu_tx[[cl]] <- 0.0
+
+      anc_tx_rows <- tx_rows[is_anc_v[tx_rows]]
+      x_anc_tx <- suppressWarnings(as.numeric(df[[cl]][anc_tx_rows]))
+      pool_x <- if (sum(ok_l) >= 2L) {
+        x_loc[ok_l]
+      } else if (sum(is.finite(x_anc_tx)) >= 2L) {
+        x_anc_tx[is.finite(x_anc_tx)]
+      } else {
+        x_all_tx[is.finite(x_all_tx)]
+      }
+      mad_v <- if (length(pool_x) >= 2L) stats::mad(pool_x, center = mu_tx[[cl]], na.rm = TRUE) else NA_real_
+      sd_v <- if (length(pool_x) >= 2L) stats::sd(pool_x, na.rm = TRUE) else NA_real_
+      disp_tx <- if (is.finite(mad_v) && mad_v > 1e-6) mad_v else sd_v
+      sd_tx[[cl]] <- max(c(disp_tx, scale_floors[[cl]]), na.rm = TRUE)
+      if (!is.finite(sd_tx[[cl]]) || sd_tx[[cl]] <= 1e-6) sd_tx[[cl]] <- scale_floors[[cl]]
+    }
+
+    lith_ref <- unique(lith_vec[type_rows[nzchar(lith_vec[type_rows])]])
+    if (length(lith_ref) == 0L) {
+      l_cand <- lith_vec[loc_rows[nzchar(lith_vec[loc_rows])]]
+      if (length(l_cand) > 0L) {
+        tb_l <- table(l_cand)
+        lith_ref <- names(tb_l[tb_l == max(tb_l)])
+      }
+    }
+    type_profiles[[tx]] <- list(mu = mu_tx, sd = sd_tx, lith_ref = lith_ref)
+  }
+
+  get_wts <- function(vars_s) {
+    if (length(vars_s) == 0L) return(numeric(0))
+    w <- stats::setNames(rep(1.0 / length(vars_s), length(vars_s)), vars_s)
+    if (!is.null(rf_var_weights) && length(rf_var_weights) > 0L && !is.null(names(rf_var_weights))) {
+      hit <- intersect(vars_s, names(rf_var_weights))
+      if (length(hit) > 0L) {
+        w_pos <- suppressWarnings(as.numeric(rf_var_weights[hit]))
+        w_pos[!is.finite(w_pos) | w_pos <= 0] <- 1e-4
+        w[hit] <- w_pos
+        w <- w / sum(w)
+      }
+    }
+    w
+  }
+  edaph_v <- intersect(edaph_use, all_vars)
+  env_v <- intersect(env_use, all_vars)
+  w_ed <- get_wts(edaph_v)
+  w_en <- get_wts(env_v)
+
+  calc_z <- function(idx, tx_name, vars_s, wts_s) {
+    if (length(vars_s) == 0L || is.na(tx_name) || !(tx_name %in% names(type_profiles))) return(0.0)
+    pr <- type_profiles[[tx_name]]
+    xv <- vapply(vars_s, function(cl) suppressWarnings(as.numeric(df[[cl]][idx])), numeric(1))
+    z2 <- ((xv - pr$mu[vars_s]) / pmax(pr$sd[vars_s], scale_floors[vars_s], 1e-4))^2
+    ok <- is.finite(z2) & is.finite(wts_s) & (wts_s > 0)
+    if (!any(ok)) return(0.0)
+    sqrt(sum(wts_s[ok] * z2[ok]) / sum(wts_s[ok]))
+  }
+
+  type_edaphic_z <- numeric(n)
+  nearest_type_niche <- character(n)
+  matches_lith <- rep(TRUE, n)
+
+  for (i in seq_len(n)) {
+    g_sp <- grp_vec[i]
+    if (is.na(g_sp) || !(g_sp %in% active_taxa)) g_sp <- active_taxa[1L]
+    z_ed_vec <- vapply(active_taxa, function(tx) calc_z(i, tx, edaph_v, w_ed), numeric(1))
+    z_en_vec <- vapply(active_taxa, function(tx) calc_z(i, tx, env_v, w_en), numeric(1))
+    comb_z <- 0.60 * z_ed_vec + 0.40 * z_en_vec
+    g_pos <- match(g_sp, active_taxa)
+    type_edaphic_z[i] <- round(z_ed_vec[if (is.na(g_pos)) 1L else g_pos], 4)
+    nearest_type_niche[i] <- active_taxa[which.min(comb_z)][1L]
+
+    pr_g <- type_profiles[[g_sp]]
+    if (!is.null(pr_g) && length(pr_g$lith_ref) > 0L && nzchar(lith_vec[i])) {
+      matches_lith[i] <- lith_vec[i] %in% pr_g$lith_ref
+    } else {
+      matches_lith[i] <- type_edaphic_z[i] <= 2.5
+    }
+  }
+
+  list(
+    type_edaphic_z_score = type_edaphic_z,
+    nearest_type_niche_taxon = nearest_type_niche,
+    matches_type_lithology = as.logical(matches_lith)
+  )
+}
+
 execute_crossmodal_consensus <- function(
   df,
   intraspecific_mode = FALSE,
@@ -3168,6 +3411,16 @@ execute_crossmodal_consensus <- function(
   df$primary_edaph_predictors <- rep(paste(z_engine$primary_edaph_vars, collapse = ";"), n)
   df$substrate_specialist_flag <- outcrop_spec_flags
   df$piedmont_outcrop_specialist_flag <- outcrop_spec_flags
+  type_eco_ctrl <- compute_type_locality_ecological_control(
+    df = df,
+    primary_env_vars = z_engine$primary_env_vars,
+    primary_edaph_vars = z_engine$primary_edaph_vars,
+    rf_var_weights = z_engine$rf_var_weights,
+    intraspecific_mode = is_intra
+  )
+  df$type_edaphic_z_score <- type_eco_ctrl$type_edaphic_z_score
+  df$nearest_type_niche_taxon <- type_eco_ctrl$nearest_type_niche_taxon
+  df$matches_type_lithology <- type_eco_ctrl$matches_type_lithology
   return(df)
 }
 evaluate_multimodal_concordance <- execute_crossmodal_consensus
@@ -4730,6 +4983,8 @@ main <- function() {
       "plant_height_mm", "plant_height_cm", "scape_to_basal_leaf_ratio", "is_bent_stem",
       "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv",
       "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob",
+      "type_status", "is_type_specimen", "has_empirical_type_anchor",
+      "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype",
       "is_promoted_bronze", "is_promoted_anchor", "authority_weight"
     )))
     vouchers_df <- left_join_by_voucher_individual(vouchers_df, morph_df, m_cols)
@@ -4754,6 +5009,8 @@ main <- function() {
       "catalogNumber", "plant_individual_id", "vision_predicted_label",
       "confidence_predicted_class", "vision_second_prob", "vision_margin",
       "c_error", "is_label_corrupted", "vision_ood_score", "vision_is_ood",
+      "vision_type_cosine_sim", "vision_nearest_type_taxon", "vision_type_margin",
+      "type_status", "is_type_specimen",
       "foreground_attention_ratio", "is_artifact_driven", "is_background_shortcut",
       "surface_orientation", "mean_luminance", "mean_saturation", "tomentum_taxon_discordance"
     ))

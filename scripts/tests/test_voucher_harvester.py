@@ -2148,6 +2148,81 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
             self.assertEqual(int(row_db[2]), 1)
             self.assertEqual(row_db[3], "Packera obovata")
 
+    def test_classify_nomenclatural_type_rank_and_cascading_outgroup_type_priority(self):
+        """Verify classify_nomenclatural_type_rank() and confirm select_cascading_outgroup_anchors() prioritizes Holotypes/Isotypes/Paratypes ahead of higher-megapixel non-type Tier_1_Gold sheets."""
+        from scripts.core.harvester import (
+            classify_nomenclatural_type_rank,
+            select_cascading_outgroup_anchors,
+        )
+
+        self.assertEqual(classify_nomenclatural_type_rank("Holotype of Senecio dubius")[0], 2)
+        self.assertEqual(classify_nomenclatural_type_rank("Isolectotype")[0], 2)
+        self.assertEqual(classify_nomenclatural_type_rank("Paratype")[0], 1)
+        self.assertEqual(classify_nomenclatural_type_rank("Syntype")[0], 1)
+        self.assertEqual(classify_nomenclatural_type_rank("Not a type"), (0, "None"))
+        self.assertEqual(classify_nomenclatural_type_rank(None), (0, "None"))
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            tmp_p = Path(tmp_d)
+            # Create local images where non-type Gold sheets have LARGER dimensions than the Holotype/Paratype
+            holo_img = tmp_p / "holo.jpg"
+            para_img = tmp_p / "para.jpg"
+            Image.new("RGB", (2000, 2000), color=(120, 120, 120)).save(holo_img)
+            Image.new("RGB", (2100, 2100), color=(120, 120, 120)).save(para_img)
+
+            rows = [
+                {
+                    "catalogNumber": "HOLO-01",
+                    "scientificName": "Packera aurea",
+                    "species_raw": "Packera aurea",
+                    "species_standardized": "Packera aurea",
+                    "determiner_tier": "Tier_1_Gold",
+                    "type_status": "Holotype",
+                    "is_primary_duplicate": True,
+                    "image_path": str(holo_img),
+                },
+                {
+                    "catalogNumber": "PARA-01",
+                    "scientificName": "Packera aurea",
+                    "species_raw": "Packera aurea",
+                    "species_standardized": "Packera aurea",
+                    "determiner_tier": "Tier_1_Gold",
+                    "type_status": "Paratype",
+                    "is_primary_duplicate": True,
+                    "image_path": str(para_img),
+                },
+            ]
+            for idx in range(5):
+                hi_img = tmp_p / f"gold_{idx}.jpg"
+                Image.new("RGB", (3500, 3500), color=(120, 120, 120)).save(hi_img)
+                rows.append({
+                    "catalogNumber": f"GOLD-NONTYPE-{idx:02d}",
+                    "scientificName": "Packera aurea",
+                    "species_raw": "Packera aurea",
+                    "species_standardized": "Packera aurea",
+                    "determiner_tier": "Tier_1_Gold",
+                    "type_status": "None",
+                    "is_primary_duplicate": True,
+                    "image_path": str(hi_img),
+                })
+
+            df_in = pd.DataFrame(rows)
+            outgroup_dfs, counts, breakdown = select_cascading_outgroup_anchors(
+                df_in,
+                outgroup_taxa=["Packera aurea"],
+                max_anchors=3,
+                workspace_dir=tmp_p,
+            )
+            self.assertEqual(counts["Packera aurea"], 3)
+            selected_df = outgroup_dfs[0]
+            self.assertEqual(len(selected_df), 3)
+            sel_cats = list(selected_df["catalogNumber"])
+            self.assertEqual(sel_cats[0], "HOLO-01")
+            self.assertEqual(sel_cats[1], "PARA-01")
+            self.assertEqual(breakdown["Packera aurea"]["Type_Specimens"], 2)
+            self.assertEqual(breakdown["Packera aurea"]["Tier_0_Primary_Type"], 1)
+            self.assertEqual(breakdown["Packera aurea"]["Tier_0_Secondary_Type"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

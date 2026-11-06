@@ -1381,6 +1381,72 @@ class TestCleanlabVisionXAI(unittest.TestCase):
             self.assertGreater(float(emb[0, 0]), 0.95)
             self.assertAlmostEqual(float(emb[0, 1]), 0.0, places=5)
 
+    def test_nomenclatural_type_visual_cosine_control_and_cleanlab_immunity(self):
+        """Verify vision_type_cosine_sim, vision_nearest_type_taxon, vision_type_margin, 4.5x type anchor weighting, and primary type protection against is_label_corrupted."""
+        anchor_mask, weights = mod_xai._resolve_adaptive_anchors(
+            labels=np.array([0, 0, 1, 1]),
+            determiner_tiers=["Tier_1_Gold", "Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze"],
+            is_type_specimen=[True, False, False, False],
+        )
+        self.assertTrue(bool(anchor_mask[0]))
+        self.assertAlmostEqual(float(weights[0]), 4.5, places=4)
+        self.assertAlmostEqual(float(weights[1]), 3.0, places=4)
+
+        # Construct orthogonal 768-d embeddings for 2 classes:
+        # Specimen 0 is Holotype of Packera dubia (class 0), with embedding along dim 0,
+        # but given an artificially conflicting OOF pred_probs favoring class 1 (0.94) to test Cleanlab type protection.
+        # Specimen 1 is a non-type Packera dubia whose embedding aligns with class 1's Holotype (dim 1).
+        # Specimen 2 is Holotype of Packera anonyma (class 1), with embedding along dim 1.
+        feats = np.zeros((4, 768), dtype=np.float32)
+        feats[0, 0] = 1.0  # Holotype of P. dubia
+        feats[1, 1] = 1.0  # Misidentified non-type sheet of P. dubia matching P. anonyma type
+        feats[2, 1] = 1.0  # Holotype of P. anonyma
+        feats[3, 1] = 0.98
+        feats[3, 2] = 0.20
+
+        pred_probs = np.array([
+            [0.06, 0.94],  # Holotype of P. dubia with high apparent OOF conflict -> must be protected!
+            [0.04, 0.96],  # Non-type sheet -> flagged as corrupted
+            [0.03, 0.97],  # Holotype of P. anonyma
+            [0.05, 0.95],  # Non-type P. anonyma
+        ], dtype=np.float64)
+        labels = np.array([0, 0, 1, 1])
+        records_df = pd.DataFrame({
+            "catalogNumber": ["DUB-HOLO-1", "DUB-MISID-2", "ANON-HOLO-1", "ANON-GOLD-2"],
+            "plant_individual_id": [0, 0, 0, 0],
+            "patch_path": ["/p1", "/p2", "/p3", "/p4"],
+            "species_raw": ["Packera dubia", "Packera dubia", "Packera anonyma", "Packera anonyma"],
+            "label_idx": [0, 0, 1, 1],
+            "determiner_tier": ["Tier_1_Gold", "Tier_3_Bronze", "Tier_1_Gold", "Tier_1_Gold"],
+            "type_status": ["Holotype", "None", "Isotype", "None"],
+            "is_type_specimen": [True, False, True, False],
+            "foreground_attention_ratio": [0.90, 0.89, 0.92, 0.88],
+        })
+
+        audit = run_confident_learning_audit(
+            pred_probs=pred_probs,
+            labels=labels,
+            records_df=records_df,
+            class_names=["Packera dubia", "Packera anonyma"],
+            error_threshold=0.85,
+            features=feats,
+        )
+
+        for col in ("vision_type_cosine_sim", "vision_nearest_type_taxon", "vision_type_margin"):
+            self.assertIn(col, audit.columns)
+
+        holo_row = audit.loc[audit["catalogNumber"] == "DUB-HOLO-1"].iloc[0]
+        self.assertFalse(bool(holo_row["is_label_corrupted"]), "Primary/isotype specimen must never be flagged as is_label_corrupted=True")
+        self.assertEqual(str(holo_row["triage_action"]), "Retain (Nomenclatural Type Control — Evaluate Synonymy)")
+        self.assertIn("evaluate heterotypic synonymy", str(holo_row["discordance_reason"]))
+        self.assertAlmostEqual(float(holo_row["vision_type_cosine_sim"]), 1.0, places=4)
+        self.assertEqual(str(holo_row["vision_nearest_type_taxon"]), "Packera dubia")
+
+        misid_row = audit.loc[audit["catalogNumber"] == "DUB-MISID-2"].iloc[0]
+        self.assertTrue(bool(misid_row["is_label_corrupted"]))
+        self.assertEqual(str(misid_row["vision_nearest_type_taxon"]), "Packera anonyma")
+        self.assertGreater(float(misid_row["vision_type_margin"]), 0.40)
+
 
 if __name__ == "__main__":
     unittest.main()

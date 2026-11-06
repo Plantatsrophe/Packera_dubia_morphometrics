@@ -86,6 +86,8 @@ from scripts.core.config import (
     DEFAULT_WORKSPACE,
     EXCLUDED_WESTERN_STATES,
     MAJOR_HERBARIA_CODES,
+    PRIMARY_TYPE_STATUSES,
+    SECONDARY_TYPE_STATUSES,
     SPECIALIST_PATTERNS,
     VALID_GEOGRAPHIC_SCOPES,
     VALID_TYPE_STATUSES,
@@ -1846,17 +1848,40 @@ def normalize_determiner_surnames(identified_by_raw: Optional[Any]) -> List[str]
     return surnames
 
 
+def classify_nomenclatural_type_rank(type_status_raw: Optional[Any]) -> Tuple[int, str]:
+    """
+    Classify a Darwin Core `typeStatus` value into a 3-tier nomenclatural type rank:
+      - (2, cleaned_label) for PRIMARY_TYPE_STATUSES (Holotype, Lectotype, Neotype,
+        Epitype, Isotype, Isolectotype, Isoneotype; `Tier_0_Primary_Type`)
+      - (1, cleaned_label) for SECONDARY_TYPE_STATUSES (Syntype, Isosyntype,
+        Paratype, Isoparatype, Type, Cotype; `Tier_0_Secondary_Type`)
+      - (0, "None") for non-types or negated strings.
+    """
+    if type_status_raw is None or (isinstance(type_status_raw, float) and math.isnan(type_status_raw)):
+        return 0, "None"
+    if pd is not None and pd.isna(type_status_raw):
+        return 0, "None"
+    type_status = str(type_status_raw).strip()
+    if not type_status or type_status.upper() in {
+        "NONE", "NOT A TYPE", "NOTATYPE", "NON-TYPE", "NONTYPE",
+        "UNSPECIFIED", "NULL", "NAN", "NA", "N/A", "FALSE", "0", "UNKNOWN",
+    }:
+        return 0, "None"
+    if re.search(r"\b(?:not\s+a?\s*type|non[-\s]?type)\b", type_status, re.IGNORECASE):
+        return 0, "None"
+    for prim_type in sorted(PRIMARY_TYPE_STATUSES, key=len, reverse=True):
+        if re.search(rf"\b{prim_type}\b", type_status, re.IGNORECASE):
+            return 2, prim_type.title()
+    for sec_type in sorted(SECONDARY_TYPE_STATUSES, key=len, reverse=True):
+        if re.search(rf"\b{sec_type}\b", type_status, re.IGNORECASE):
+            return 1, sec_type.title()
+    return 0, "None"
+
+
 def _is_verified_type_status(type_status_raw: Optional[Any]) -> Tuple[bool, str]:
     """Return (is_type, cleaned_type_label) for a Darwin Core typeStatus value."""
-    if type_status_raw is None or (isinstance(type_status_raw, float) and math.isnan(type_status_raw)):
-        return False, "None"
-    type_status = str(type_status_raw).strip()
-    if not type_status or type_status.upper() in {"NONE", "NOT A TYPE", "NOTATYPE", "UNSPECIFIED", "NULL", "NAN"}:
-        return False, "None"
-    for valid_type in VALID_TYPE_STATUSES:
-        if re.search(rf"\b{valid_type}\b", type_status, re.IGNORECASE):
-            return True, valid_type.title()
-    return False, "None"
+    t_rank, t_lbl = classify_nomenclatural_type_rank(type_status_raw)
+    return (t_rank >= 1), t_lbl
 
 
 def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
@@ -2361,6 +2386,11 @@ def select_cascading_outgroup_anchors(
             outgroup_tier_breakdown[tx] = {}
             continue
 
+        tx_df["_type_rank"] = (
+            tx_df["type_status"].map(lambda t: classify_nomenclatural_type_rank(t)[0])
+            if "type_status" in tx_df.columns
+            else 0
+        )
         tx_df["_tier_rank"] = (
             tx_df["determiner_tier"].astype(str).str.strip().map(lambda t: tier_rank.get(t, 0))
             if "determiner_tier" in tx_df.columns
@@ -2372,21 +2402,31 @@ def select_cascading_outgroup_anchors(
         ) if "image_path" in tx_df.columns else 0.0
 
         tx_df = tx_df.sort_values(
-            by=["_tier_rank", "_is_prim", "_has_local", "_img_res"],
-            ascending=[False, False, False, False],
+            by=["_type_rank", "_tier_rank", "_is_prim", "_has_local", "_img_res"],
+            ascending=[False, False, False, False, False],
             kind="mergesort",
         )
-        tx_sel = tx_df.head(int(max_anchors)).drop(
-            columns=["_has_local", "_has_valid", "_tier_rank", "_is_prim", "_img_res"]
+        tx_head = tx_df.head(int(max_anchors))
+        n_type_sel = int((tx_head["_type_rank"] >= 1).sum())
+        n_prim_type_sel = int((tx_head["_type_rank"] == 2).sum())
+        n_sec_type_sel = int((tx_head["_type_rank"] == 1).sum())
+        tx_sel = tx_head.drop(
+            columns=["_has_local", "_has_valid", "_type_rank", "_tier_rank", "_is_prim", "_img_res"]
         )
         outgroup_dfs.append(tx_sel)
         outgroup_counts[tx] = len(tx_sel)
         if "determiner_tier" in tx_sel.columns:
-            outgroup_tier_breakdown[tx] = {
+            breakdown = {
                 str(k): int(v) for k, v in tx_sel["determiner_tier"].astype(str).value_counts().items()
             }
         else:
-            outgroup_tier_breakdown[tx] = {"Unspecified": len(tx_sel)}
+            breakdown = {"Unspecified": len(tx_sel)}
+        breakdown["Type_Specimens"] = n_type_sel
+        if n_prim_type_sel > 0:
+            breakdown["Tier_0_Primary_Type"] = n_prim_type_sel
+        if n_sec_type_sel > 0:
+            breakdown["Tier_0_Secondary_Type"] = n_sec_type_sel
+        outgroup_tier_breakdown[tx] = breakdown
 
     return outgroup_dfs, outgroup_counts, outgroup_tier_breakdown
 

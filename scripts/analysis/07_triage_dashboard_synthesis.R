@@ -42,6 +42,9 @@ suppressPackageStartupMessages({
   if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
 
+for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "authority_weighting_utils.R"))) {
+  if (!exists(".identify_type_specimen_vec", mode = "function") && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
+}
 for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "pub_figures_utils.R"))) {
   if (!exists("generate_step07_pub_figures", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
 }
@@ -373,12 +376,15 @@ compute_cohens_kappa <- function(y_true, y_pred, default_kappa = 0.70) {
   if (n == 0L) return(logical(0))
   tier_col <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
   promo_mask <- rep(FALSE, n)
-  for (pcol in intersect(c("is_promoted_anchor", "is_promoted_bronze"), names(df))) {
+  for (pcol in intersect(c("is_promoted_anchor", "is_promoted_bronze", "is_type_specimen"), names(df))) {
     pv <- suppressWarnings(as.logical(df[[pcol]]))
     pv[is.na(pv)] <- FALSE
     promo_mask <- promo_mask | pv
   }
-  anchor_mask <- (tier_col %in% c("Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze_Promoted")) | promo_mask
+  if (exists(".identify_type_specimen_vec", mode = "function")) {
+    promo_mask <- promo_mask | .identify_type_specimen_vec(df)$is_type_specimen
+  }
+  anchor_mask <- (tier_col %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze_Promoted")) | promo_mask
   if (sum(anchor_mask, na.rm = TRUE) < 4L) anchor_mask <- rep(TRUE, n)
   anchor_mask
 }
@@ -545,7 +551,8 @@ compute_probabilistic_consensus_scores <- function(df) {
   exclude_cols <- c(
     "edaphic_z_score", "climatic_z_score", "edaphic_niche_overlap_d", "edaphic_schoener_d",
     "schoener_d", "sgmc_lithology_class", "Dominant_Lithology_Class", "edaphic_best_fit_taxon",
-    "rf_predicted_taxon", "primary_env_predictors", "primary_clim_predictors", "primary_edaph_predictors"
+    "rf_predicted_taxon", "primary_env_predictors", "primary_clim_predictors", "primary_edaph_predictors",
+    "type_edaphic_z_score", "nearest_type_niche_taxon", "matches_type_lithology"
   )
   keep_finite_num <- function(cands) {
     cands <- setdiff(unique(cands), exclude_cols)
@@ -816,6 +823,26 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   asym_dv <- if ("pct_asymmetry" %in% df_nms_d) suppressWarnings(as.numeric(df$pct_asymmetry)) else rep(NA_real_, n)
   is_dis_dv <- if ("is_dissected" %in% df_nms_d) (!is.na(df$is_dissected) & as.logical(df$is_dissected)) else rep(FALSE, n)
   p_conf_dv <- if ("probabilistic_consensus_conflict" %in% df_nms_d) suppressWarnings(as.numeric(df$probabilistic_consensus_conflict)) else rep(0.0, n)
+
+  type_info_d <- if (exists(".identify_type_specimen_vec", mode = "function")) {
+    .identify_type_specimen_vec(df)
+  } else {
+    list(type_rank = rep(0L, n), is_type_specimen = rep(FALSE, n), type_status_clean = rep("None", n))
+  }
+  is_type_dv <- type_info_d$is_type_specimen | (if ("is_type_specimen" %in% df_nms_d) (!is.na(df$is_type_specimen) & as.logical(df$is_type_specimen)) else rep(FALSE, n))
+  type_stat_dv <- if ("type_status" %in% df_nms_d) as.character(df$type_status) else type_info_d$type_status_clean
+  is_typ_morph_dv <- if ("is_typical_morphotype" %in% df_nms_d) as.logical(df$is_typical_morphotype) else rep(NA, n)
+  tm_d2_dv <- if ("type_morph_mahal_d2" %in% df_nms_d) suppressWarnings(as.numeric(df$type_morph_mahal_d2)) else rep(NA_real_, n)
+  nt_morph_dv <- if ("nearest_type_morph_taxon" %in% df_nms_d) as.character(df$nearest_type_morph_taxon) else rep(NA_character_, n)
+  tm_conc_dv <- if ("type_morph_concordance" %in% df_nms_d) suppressWarnings(as.numeric(df$type_morph_concordance)) else rep(NA_real_, n)
+  vis_tcos_dv <- if ("vision_type_cosine_sim" %in% df_nms_d) suppressWarnings(as.numeric(df$vision_type_cosine_sim)) else rep(NA_real_, n)
+  nt_vis_dv <- if ("vision_nearest_type_taxon" %in% df_nms_d) as.character(df$vision_nearest_type_taxon) else rep(NA_character_, n)
+  vis_tmarg_dv <- if ("vision_type_margin" %in% df_nms_d) suppressWarnings(as.numeric(df$vision_type_margin)) else rep(NA_real_, n)
+  te_z_dv <- if ("type_edaphic_z_score" %in% df_nms_d) suppressWarnings(as.numeric(df$type_edaphic_z_score)) else rep(NA_real_, n)
+  nt_niche_dv <- if ("nearest_type_niche_taxon" %in% df_nms_d) as.character(df$nearest_type_niche_taxon) else rep(NA_character_, n)
+  p_type_morph <- max(2L, if (length(sel_mc) > 0L) length(sel_mc) else if (length(morph_coord_cols) > 0L) length(morph_coord_cols) else 3L)
+  type_morph_chisq90 <- stats::qchisq(0.90, df = p_type_morph)
+
   is_valid_taxon_str <- function(s) !is.null(s) && !is.na(s) && nzchar(s) && s != "Unknown" && (s %in% active_taxa || grepl("^(Packera|P\\.)\\s+", s))
 
   for (i in seq_len(n)) {
@@ -873,11 +900,71 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     vis_ood_score_i <- vis_ood_sc_dv[i]
     vis_is_ood_i <- vis_trusted_i && vis_is_ood_dv[i]
 
+    is_type_specimen_i <- isTRUE(is_type_dv[i])
+    type_stat_i <- if (!is.na(type_stat_dv[i]) && nzchar(trimws(type_stat_dv[i])) && tolower(trimws(type_stat_dv[i])) != "none") trimws(type_stat_dv[i]) else "TYPE"
+    is_typical_morph_i <- !is.na(is_typ_morph_dv[i]) && isTRUE(is_typ_morph_dv[i])
+    te_z_i <- te_z_dv[i]
+    tm_d2_i <- tm_d2_dv[i]
+    nt_m_i <- if (is_valid_taxon_str(nt_morph_dv[i])) nt_morph_dv[i] else NA_character_
+    nt_v_i <- if (vis_trusted_i && is_valid_taxon_str(nt_vis_dv[i])) nt_vis_dv[i] else NA_character_
+    nt_e_i <- if (is_valid_taxon_str(nt_niche_dv[i])) nt_niche_dv[i] else NA_character_
+    in_type_edaphic_env_i <- if (is.finite(te_z_i)) (te_z_i <= 2.0) else (!is.finite(edaph_z_i) || edaph_z_i <= 2.0)
+    # Rule C: Stage 3 & Stage 4 Autonymic (sensu stricto) Locking
+    is_sensu_stricto_locked_i <- is_typical_morph_i && in_type_edaphic_env_i
+
+    both_alt_agree <- vis_trusted_i && !vis_is_ood_i && (!is.null(morph_sp) && !is.null(vis_sp) && morph_sp != given_sp && vis_sp != given_sp && morph_sp == vis_sp)
+    morph_edaph_alt_agree <- (!is.null(morph_sp) && morph_sp != given_sp && edaph_sp == morph_sp && (is.na(cda_prob) || cda_prob >= 0.55))
+    vis_edaph_alt_agree <- vis_trusted_i && !vis_is_ood_i && (!is.null(vis_sp) && vis_sp != given_sp && edaph_sp == vis_sp && eff_c_err >= 0.70)
+
+    # Rule A: Nomenclatural Type Control Pinning
+    if (is_type_specimen_i) {
+      alt_aff_cands <- c(
+        if (morph_is_taxon && morph_sp != given_sp) morph_sp else NA_character_,
+        if (vis_trusted_i && vis_is_taxon && vis_sp != given_sp) vis_sp else NA_character_,
+        if (edaph_is_taxon && edaph_sp != given_sp) edaph_sp else NA_character_,
+        if (!is.na(nt_m_i) && nt_m_i != given_sp) nt_m_i else NA_character_,
+        if (!is.na(nt_v_i) && nt_v_i != given_sp) nt_v_i else NA_character_,
+        if (!is.na(nt_e_i) && nt_e_i != given_sp) nt_e_i else NA_character_
+      )
+      alt_aff_cands <- alt_aff_cands[!is.na(alt_aff_cands) & nzchar(alt_aff_cands)]
+      rec_taxa[i] <- given_sp
+      treat_broad[i] <- "Confirmed Species"
+      treat_sub[i] <- "Confirmed_Species"
+      if (both_alt_agree) {
+        status_calls[i] <- "Type_Synonymy_Candidate"
+        triage_prios[i] <- "CRITICAL"
+        triage_acts[i] <- "Evaluate_Heterotypic_Synonymy"
+        rationales[i] <- sprintf(
+          "Rule A Nomenclatural Type Control (%s): Protected from Misidentification_Reassign; cross-modal type-to-taxon affinity with %s (evaluate heterotypic synonymy)",
+          type_stat_i, morph_sp
+        )
+      } else if (length(alt_aff_cands) > 0L) {
+        aff_tx <- names(sort(table(alt_aff_cands), decreasing = TRUE))[1L]
+        status_calls[i] <- "Confirmed_Type_Control"
+        triage_prios[i] <- "LOW"
+        triage_acts[i] <- "Accept_Current_Determination"
+        rationales[i] <- sprintf(
+          "Rule A Nomenclatural Type Control (%s): Pinned as %s sensu stricto baseline; partial type-to-taxon affinity noted with %s",
+          type_stat_i, given_sp, aff_tx
+        )
+      } else {
+        status_calls[i] <- "Confirmed_Type_Control"
+        triage_prios[i] <- "RESOLVED"
+        triage_acts[i] <- "Accept_Current_Determination"
+        rationales[i] <- sprintf(
+          "Rule A Nomenclatural Type Control (%s): Immutable %s sensu stricto baseline concordant across morphological, visual, and locus classicus streams",
+          type_stat_i, given_sp
+        )
+      }
+      next
+    }
+
     if (is_intra) {
       n_intra_modalities <- as.integer(is_tier1_pure_morph && (is_mo_flag || (g_cl > 1L && bf_val >= 6.0))) +
                             as.integer(vis_is_ood_i) +
                             as.integer(is_anth && abs(ddoy) >= tau_cryptic_i) + as.integer(d_edaph < 0.30 || mm_conf)
-      is_cryptic_intra <- is_tier1_pure_morph && (is_mo_flag || vis_is_ood_i || (g_cl > 1L && bf_val >= 6.0)) &&
+      is_cryptic_intra <- !is_sensu_stricto_locked_i &&
+                          is_tier1_pure_morph && (is_mo_flag || vis_is_ood_i || (g_cl > 1L && bf_val >= 6.0)) &&
                           ((is.na(cda_prob) || cda_prob < 0.70) || eff_v_cerr > 0.85 || vis_is_ood_i) &&
                           ((is_anth && abs(ddoy) >= tau_cryptic_i) || d_edaph < 0.30) && (n_intra_modalities >= 2L)
       has_edaph_pheno_div <- (is_anth && abs(ddoy) >= tau_ecotype_i) || (d_edaph < 0.45) || mm_conf ||
@@ -892,7 +979,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         triage_prios[i] <- "HIGH"; triage_acts[i] <- "Reassign_Determination"
         rationales[i] <- "Tier_2_Fallback morphology with severe multimodal discordance routed to Misidentification_Reassign"
         treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Misidentification_Reassign"; next
-      } else if ((g_cl > 1L) && has_edaph_pheno_div) {
+      } else if (!is_sensu_stricto_locked_i && (g_cl > 1L) && has_edaph_pheno_div) {
         status_calls[i] <- "Subspecies_Ecotype"; rec_taxa[i] <- sprintf("%s var. morphotype_K%d", given_sp, g_cl)
         triage_prios[i] <- "MEDIUM"; triage_acts[i] <- "Accept_Subspecific_Treatment"
         rationales[i] <- sprintf("Secondary GMM morphotype (K%d) with cohesive edaphic/phenological divergence (delta_DOY=%.1fd, pH=%s, Sand=%s)", g_cl, ddoy, ph_str, sand_str)
@@ -903,9 +990,16 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     vis_cut <- if (tier == "Tier_1_Gold") 0.90 else if (tier == "Tier_2_Silver") 0.84 else 0.80
     cda_cut <- if (tier == "Tier_1_Gold") 0.85 else if (tier == "Tier_2_Silver") 0.75 else 0.68
 
-    both_alt_agree <- vis_trusted_i && !vis_is_ood_i && (!is.null(morph_sp) && !is.null(vis_sp) && morph_sp != given_sp && vis_sp != given_sp && morph_sp == vis_sp)
-    morph_edaph_alt_agree <- (!is.null(morph_sp) && morph_sp != given_sp && edaph_sp == morph_sp && (is.na(cda_prob) || cda_prob >= 0.55))
-    vis_edaph_alt_agree <- vis_trusted_i && !vis_is_ood_i && (!is.null(vis_sp) && vis_sp != given_sp && edaph_sp == vis_sp && eff_c_err >= 0.70)
+    # Rule B: Stage 1 Type-Control Consensus Reassignment (type_control_reassign)
+    alt_type_votes <- c(nt_m_i, nt_v_i, nt_e_i)
+    alt_type_votes <- alt_type_votes[!is.na(alt_type_votes) & nzchar(alt_type_votes) & alt_type_votes != given_sp]
+    type_control_target_sp <- NULL
+    if (length(alt_type_votes) >= 2L) {
+      tab_tv <- sort(table(alt_type_votes), decreasing = TRUE)
+      if (as.integer(tab_tv[1L]) >= 2L) type_control_target_sp <- names(tab_tv)[1L]
+    }
+    deviates_from_given_type <- (is.finite(tm_d2_i) && tm_d2_i > type_morph_chisq90) || (is.finite(te_z_i) && te_z_i > 2.0)
+    type_control_reassign <- !is_type_specimen_i && !is.null(type_control_target_sp) && deviates_from_given_type
 
     # 2. General Ontogenetic / Taphonomic Plasticity Rule (taxon-agnostic empirical quantile & edaphic envelope)
     in_edaphic_envelope <- (is.finite(edaph_z_i) && edaph_z_i <= 2.0) || (nzchar(edaph_sp) && edaph_sp == given_sp)
@@ -921,9 +1015,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     is_late_foliar_wear <- has_obs_doy_i && (doy >= sp_q75_doy) && (g_cl == 1L) && !eff_is_corrupt && single_borderline_div && !is_sym_dissected_i
     is_taphonomic_plasticity <- (triage_cat != "Severe_Triple_Stream_Conflict" || !vis_trusted_i) &&
                                 !both_alt_agree && !morph_edaph_alt_agree && !vis_edaph_alt_agree &&
+                                !type_control_reassign &&
                                 in_edaphic_envelope && (has_tomentum_shift || is_late_foliar_wear)
 
-    non_assigned_known <- (is.na(cda_prob) || cda_prob < 0.70) && ((eff_c_err < 0.75) || vis_is_ood_i) && !both_alt_agree && !morph_edaph_alt_agree && !vis_edaph_alt_agree
+    non_assigned_known <- (is.na(cda_prob) || cda_prob < 0.70) && ((eff_c_err < 0.75) || vis_is_ood_i) && !both_alt_agree && !morph_edaph_alt_agree && !vis_edaph_alt_agree && !type_control_reassign
     has_morph_or_gmm_outlier <- is_mo_flag || (g_cl > max(2L, n_known_taxa) && bf_val >= 6.0)
     has_allochronic_barrier <- is_anth && (abs(ddoy) >= tau_cryptic_i)
     has_edaphic_barrier <- (d_edaph < 0.30) || (nzchar(edaph_sp) && edaph_sp != given_sp && (is.null(morph_sp) || edaph_sp != morph_sp))
@@ -932,9 +1027,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     mod_non_assign <- non_assigned_known
     mod_barrier <- has_allochronic_barrier || has_edaphic_barrier
     n_cryptic_modalities <- as.integer(mod_morph) + as.integer(mod_vis_ood) + as.integer(mod_non_assign) + as.integer(has_allochronic_barrier) + as.integer(has_edaphic_barrier)
-    is_crypt <- is_tier1_pure_i && (mod_morph || mod_vis_ood) && mod_non_assign && mod_barrier && (n_cryptic_modalities >= 2L)
+    is_crypt <- !is_sensu_stricto_locked_i && is_tier1_pure_i && (mod_morph || mod_vis_ood) && mod_non_assign && mod_barrier && (n_cryptic_modalities >= 2L)
 
-    is_intermodal_mosaic <- vis_trusted_i && morph_is_taxon && vis_is_taxon && (morph_sp != given_sp) && (vis_sp != given_sp) && (morph_sp != vis_sp) &&
+    is_intermodal_mosaic <- !type_control_reassign && vis_trusted_i && morph_is_taxon && vis_is_taxon && (morph_sp != given_sp) && (vis_sp != given_sp) && (morph_sp != vis_sp) &&
                             (is.na(cda_prob) || cda_prob < 0.85) && (eff_c_err < 0.88) && (triage_cat != "Severe_Triple_Stream_Conflict")
 
     # Stage 1: Misidentification_Reassign BEFORE Hybrid_Introgressant (Schlick-Steiner et al. 2010; Padial et al. 2010)
@@ -968,11 +1063,11 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
                           (!is.null(morph_sp) && morph_sp != given_sp) && (!is.null(vis_sp) && vis_sp != given_sp) &&
                           ((!is.na(cda_prob) && cda_prob >= 0.70) || eff_c_err >= 0.75 || !is_tier1_pure_i)
     morph_or_vis_corrupt_reassign <- morph_corrupt_cand || vis_corrupt_cand || joint_corrupt_cand
-    is_severe_misid <- !is_taphonomic_plasticity && !is_crypt && !is_intermodal_mosaic && (
+    is_severe_misid <- (!is_taphonomic_plasticity && !is_crypt && !is_intermodal_mosaic && (
       both_alt_agree || morph_edaph_alt_agree || vis_edaph_alt_agree ||
       eff_triple_conflict || single_morph_reassign || single_vis_reassign ||
       morph_or_vis_corrupt_reassign
-    )
+    )) || type_control_reassign
 
     # Stage 2: Hybrid_Introgressant (Rieseberg 1995; Slenker et al. 2022)
     has_niche_overlap <- (d_edaph >= 0.25) || (edaph_sp %in% c(given_sp, morph_sp, if (vis_trusted_i) vis_sp else NULL)) || (triage_cat == "Putative_Hybrid_Zone_Intergrade")
@@ -986,18 +1081,38 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
 
     # 3. Stage 4: Organic Ecotype Rule vs. Ontogenetic/Taphonomic Plasticity
     has_infraspecific_rank <- grepl("\\b(var\\.|subsp\\.|ssp\\.)\\s+[a-z-]+", raw_sp, ignore.case = TRUE)
-    is_cohesive_ecotype <- !is_severe_misid && !is_crypt && !is_hybrid_swarm && (
+    is_cohesive_ecotype <- !is_sensu_stricto_locked_i && !is_severe_misid && !is_crypt && !is_hybrid_swarm && (
       has_infraspecific_rank ||
       ((g_cl > 1L) && ((d_edaph < 0.45) || (is_anth && abs(ddoy) >= tau_ecotype_i)))
     )
-    is_plastic_variant <- !is_cohesive_ecotype && !is_severe_misid && !is_hybrid_swarm && !is_crypt &&
+    is_plastic_variant <- !is_sensu_stricto_locked_i && !is_cohesive_ecotype && !is_severe_misid && !is_hybrid_swarm && !is_crypt &&
                           (is_taphonomic_plasticity || is_mo_flag)
 
     if (is_severe_misid) {
-      target_sp <- if (both_alt_agree && morph_is_taxon) morph_sp else if (morph_is_taxon && morph_sp != given_sp) morph_sp else if (vis_trusted_i && vis_is_taxon && vis_sp != given_sp) vis_sp else edaph_sp
+      target_sp <- if (type_control_reassign && !is.null(type_control_target_sp)) {
+        type_control_target_sp
+      } else if (both_alt_agree && morph_is_taxon) {
+        morph_sp
+      } else if (morph_is_taxon && morph_sp != given_sp) {
+        morph_sp
+      } else if (vis_trusted_i && vis_is_taxon && vis_sp != given_sp) {
+        vis_sp
+      } else {
+        edaph_sp
+      }
       status_calls[i] <- "Misidentification_Severe"; rec_taxa[i] <- target_sp
       triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"; triage_acts[i] <- "Reassign_Determination"
-      rationales[i] <- sprintf("Stage 1 Reassign: %s contradicted across modalities (consensus_conflict=%.2f); reassign to %s", given_sp, p_conf_dv[i], target_sp)
+      rationales[i] <- if (type_control_reassign) {
+        sprintf(
+          "Stage 1 Reassign (Type-Baseline Concordance): %s deviates from recorded type control (type_mahal_d2=%s, type_edaphic_z=%s) and matches %s nomenclatural type baseline across >=2 modalities; reassign to %s",
+          given_sp,
+          ifelse(is.finite(tm_d2_i), sprintf("%.2f", tm_d2_i), "NA"),
+          ifelse(is.finite(te_z_i), sprintf("%.2f", te_z_i), "NA"),
+          target_sp, target_sp
+        )
+      } else {
+        sprintf("Stage 1 Reassign: %s contradicted across modalities (consensus_conflict=%.2f); reassign to %s", given_sp, p_conf_dv[i], target_sp)
+      }
       treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Misidentification_Reassign"
     } else if (is_hybrid_swarm) {
       # 4. Dynamic hybrid parent resolution (first non-given_sp among vis_sp, morph_sp, edaph_sp, cda_second_taxon,
@@ -1061,6 +1176,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   } else {
     df$authority_weight <- fallback_aw
   }
+  df$is_type_specimen <- as.logical(is_type_dv)
+  if (!("type_status" %in% names(df))) df$type_status <- type_stat_dv
   df$edaphic_z_score <- edaph_z_vec
   df$taxonomic_status_call <- status_calls; df$recommended_determination <- rec_taxa
   df$synthesis_triage_priority <- triage_prios; df$synthesis_triage_action <- triage_acts
@@ -1298,7 +1415,7 @@ build_triage_queue <- function(opts) {
     "doy", "latitude", "longitude", "decimalLatitude", "decimalLongitude",
     "soil_ph", "soil_sand", "soil_cec", "soil_bulk_density", "delta_doy",
     "fine_soil_ph", "fine_soil_sand", "fine_bedrock_depth_cm", "ssurgo_rock_outcrop_pct",
-    "edaphic_z_score", "climatic_z_score", "spatial_block_cv_acc", "rf_predicted_prob",
+    "edaphic_z_score", "type_edaphic_z_score", "climatic_z_score", "spatial_block_cv_acc", "rf_predicted_prob",
     "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
     "plant_height_cm", "scape_to_basal_leaf_ratio",
     "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv"
@@ -1314,7 +1431,7 @@ build_triage_queue <- function(opts) {
     dyn_mm_num <- dyn_mm_num[vapply(dyn_mm_num, function(cc) !is.character(mm_df[[cc]]) && !is.logical(mm_df[[cc]]), logical(1))]
     mm_num_all <- unique(c(mm_numeric_coalesce, dyn_mm_num))
     vouchers <- safe_left_join_and_coalesce(vouchers, mm_df, numeric_coalesce_cols = mm_num_all)
-    for (mc_col in intersect(c("rf_predicted_taxon", "is_verified_anthesis", "primary_env_predictors", "primary_clim_predictors", "primary_edaph_predictors"), names(mm_df))) {
+    for (mc_col in intersect(c("rf_predicted_taxon", "is_verified_anthesis", "primary_env_predictors", "primary_clim_predictors", "primary_edaph_predictors", "nearest_type_niche_taxon", "matches_type_lithology", "type_edaphic_z_score"), names(mm_df))) {
       if (!(mc_col %in% names(vouchers))) vouchers[[mc_col]] <- NA
     }
   }
@@ -1388,14 +1505,19 @@ build_triage_queue <- function(opts) {
       "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
       "plant_height_cm", "scape_to_basal_leaf_ratio",
       "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv",
-      "ecoregion_cda_posterior_prob", "authority_weight"
+      "ecoregion_cda_posterior_prob", "authority_weight",
+      "type_morph_mahal_d2", "type_morph_concordance"
     )) if (!(nc %in% names(mo_df))) mo_df[[nc]] <- NA_real_
     if (!("cda_predicted_taxon" %in% names(mo_df))) mo_df$cda_predicted_taxon <- NA_character_
     if (!("cda_second_taxon" %in% names(mo_df))) {
       mo_df$cda_second_taxon <- if ("cda_second_predicted_taxon" %in% names(mo_df)) as.character(mo_df$cda_second_predicted_taxon) else NA_character_
     }
     if (!("ecoregion_cda_predicted" %in% names(mo_df))) mo_df$ecoregion_cda_predicted <- NA_character_
+    if (!("nearest_type_morph_taxon" %in% names(mo_df))) mo_df$nearest_type_morph_taxon <- NA_character_
     if (!("is_bent_stem" %in% names(mo_df))) mo_df$is_bent_stem <- NA
+    if (!("is_typical_morphotype" %in% names(mo_df))) mo_df$is_typical_morphotype <- NA
+    if (!("has_empirical_type_anchor" %in% names(mo_df))) mo_df$has_empirical_type_anchor <- NA
+    if (!("is_type_specimen" %in% names(mo_df))) mo_df$is_type_specimen <- NA
     if (!("gmm_cluster" %in% names(mo_df))) mo_df$gmm_cluster <- 1L
     if (!("gmm_uncertainty" %in% names(mo_df))) mo_df$gmm_uncertainty <- 0.05
     if (!("morph_tier_source" %in% names(mo_df))) mo_df$morph_tier_source <- NA_character_
@@ -1415,6 +1537,12 @@ build_triage_queue <- function(opts) {
       Sym_PC1 = med_or_na(Sym_PC1), Sym_PC2 = med_or_na(Sym_PC2),
       can1 = med_or_na(can1), can2 = med_or_na(can2), can3 = med_or_na(can3),
       gmm_cluster = first_int_or_na(gmm_cluster), gmm_uncertainty = med_or_na(gmm_uncertainty),
+      is_typical_morphotype = any_lgl_or_na(is_typical_morphotype),
+      type_morph_mahal_d2 = med_or_na(type_morph_mahal_d2),
+      nearest_type_morph_taxon = first_chr_or_na(nearest_type_morph_taxon),
+      type_morph_concordance = med_or_na(type_morph_concordance),
+      has_empirical_type_anchor = any_lgl_or_na(has_empirical_type_anchor),
+      is_type_specimen = any_lgl_or_na(is_type_specimen),
       petiole_length_mm = med_or_na(petiole_length_mm),
       blade_length_mm = med_or_na(blade_length_mm),
       petiole_to_blade_ratio = med_or_na(petiole_to_blade_ratio),
@@ -1434,7 +1562,7 @@ build_triage_queue <- function(opts) {
     )
     extra_pc_cols <- setdiff(grep("^(Sym_)?PC[0-9]+$", names(mo_df), value = TRUE), c("PC1", "PC2", "Sym_PC1", "Sym_PC2"))
     extra_num_meta <- intersect(c("efd_harmonic_opt", "efd_k95_pcs"), names(mo_df))
-    extra_chr_meta <- intersect(c("selected_morph_features"), names(mo_df))
+    extra_chr_meta <- intersect(c("selected_morph_features", "type_status"), names(mo_df))
     if (length(c(extra_pc_cols, extra_num_meta, extra_chr_meta)) > 0L) {
       mo_key <- paste0(mo_df$catalogNumber, "__", mo_df$plant_individual_id)
       agg_key <- paste0(mo_agg$catalogNumber, "__", mo_agg$plant_individual_id)
@@ -1456,6 +1584,7 @@ build_triage_queue <- function(opts) {
         "cda_posterior_prob", "cda_second_posterior_prob", "cda_posterior_margin",
         "gmm_uncertainty", "loocv_accuracy", "PC1", "PC2", "Sym_PC1", "Sym_PC2",
         "can1", "can2", "can3", "ecoregion_cda_posterior_prob", "authority_weight",
+        "type_morph_mahal_d2", "type_morph_concordance",
         extra_pc_cols, extra_num_meta
       ))
     )
@@ -1484,10 +1613,11 @@ build_triage_queue <- function(opts) {
         vi_df$vision_is_ood <- NA
       }
     }
-    for (vnc in c("confidence_predicted_class", "c_error", "vision_ood_score", "foreground_attention_ratio", "mean_luminance", "mean_saturation", "vision_second_prob", "vision_margin")) {
+    for (vnc in c("confidence_predicted_class", "c_error", "vision_ood_score", "foreground_attention_ratio", "mean_luminance", "mean_saturation", "vision_second_prob", "vision_margin", "vision_type_cosine_sim", "vision_type_margin")) {
       if (!(vnc %in% names(vi_df))) vi_df[[vnc]] <- NA_real_
     }
     if (!("vision_predicted_label" %in% names(vi_df))) vi_df$vision_predicted_label <- NA_character_
+    if (!("vision_nearest_type_taxon" %in% names(vi_df))) vi_df$vision_nearest_type_taxon <- NA_character_
     if (!("surface_orientation" %in% names(vi_df))) vi_df$surface_orientation <- NA_character_
     if (!("is_label_corrupted" %in% names(vi_df))) vi_df$is_label_corrupted <- FALSE
     if (!("tomentum_taxon_discordance" %in% names(vi_df))) vi_df$tomentum_taxon_discordance <- FALSE
@@ -1505,6 +1635,9 @@ build_triage_queue <- function(opts) {
       confidence_predicted_class = mean_or_na(confidence_predicted_class),
       vision_second_prob = med_or_na(vision_second_prob),
       vision_margin = med_or_na(vision_margin),
+      vision_type_cosine_sim = med_or_na(vision_type_cosine_sim),
+      vision_nearest_type_taxon = first_chr_or_na(vision_nearest_type_taxon),
+      vision_type_margin = med_or_na(vision_type_margin),
       c_error = max_or_na(c_error),
       is_label_corrupted = any(is_label_corrupted == TRUE, na.rm = TRUE),
       vision_ood_score = max_or_na(vision_ood_score),
@@ -1520,6 +1653,7 @@ build_triage_queue <- function(opts) {
       vouchers, vi_agg,
       numeric_coalesce_cols = c(
         "confidence_predicted_class", "vision_second_prob", "vision_margin",
+        "vision_type_cosine_sim", "vision_type_margin",
         "c_error", "vision_ood_score", "foreground_attention_ratio",
         "mean_luminance", "mean_saturation"
       )

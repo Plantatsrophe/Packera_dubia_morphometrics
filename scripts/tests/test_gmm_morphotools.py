@@ -1367,6 +1367,85 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"Step 04 dissection R helper test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("STEP04_DISSECTION_HELPERS_OK", proc.stdout)
 
+    def test_nomenclatural_type_mahalanobis_immunity_eb_pinning_and_typical_morphotype_control(self):
+        """Verify select_adaptive_reference_anchors() never prunes an intact Holotype/Lectotype during 95% chi^2 FastMCD screening, pins EB weights, and exports nearest_type_morph_taxon and is_typical_morphotype."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        r_code = """
+        options(rgl.useNULL = TRUE)
+        source("scripts/morphometrics/04_gmm_morphotools.R")
+        set.seed(202611)
+
+        # 1. Verify .identify_type_specimen_vec() ranks primary (2L), secondary (1L), and non-types (0L)
+        df_t <- data.frame(
+          type_status = c("Holotype", "Isolectotype", "Paratype", "Syntype", "Not a type", NA_character_),
+          stringsAsFactors = FALSE
+        )
+        t_id <- .identify_type_specimen_vec(df_t)
+        stopifnot(identical(as.integer(t_id$type_rank), c(2L, 2L, 1L, 1L, 0L, 0L)))
+        stopifnot(identical(as.logical(t_id$is_type_specimen), c(TRUE, TRUE, TRUE, TRUE, FALSE, FALSE)))
+
+        # 2. Verify select_adaptive_reference_anchors() never prunes an extreme Holotype during 95% chi^2 MCD screening,
+        #    while pruning an equally extreme non-type Tier_1_Gold outlier
+        df_anc <- data.frame(
+          catalogNumber = c("HOLO_EXTREME", "GOLD_EXTREME_OUTLIER", paste0("GOLD_CORE_", 1:18), paste0("OBO_GOLD_", 1:12)),
+          plant_individual_id = 0L,
+          species_standardized = c(rep("Packera dubia", 20), rep("Packera obovata", 12)),
+          determiner_tier = "Tier_1_Gold",
+          type_status = c("Holotype", "None", rep("None", 18), "Lectotype", rep("None", 11)),
+          morph_tier_source = "Tier_1_Pure",
+          PC1 = c(-4.8, 14.5, rnorm(18, -1.8, 0.18), 4.2, rnorm(11, 3.8, 0.18)),
+          PC2 = c(3.9, -12.0, rnorm(18, 0.4, 0.18), -1.1, rnorm(11, -0.9, 0.18)),
+          PC3 = c(2.6, 9.5, rnorm(18, 0.1, 0.15), -0.4, rnorm(11, -0.3, 0.15)),
+          stringsAsFactors = FALSE
+        )
+        X_anc <- as.matrix(df_anc[, c("PC1", "PC2", "PC3")])
+        anc_out <- select_adaptive_reference_anchors(df_anc, feature_matrix = X_anc, taxon_col = "species_standardized")
+        # Holotype at row 1 MUST remain active and marked Tier_0_Type_Anchor; non-type extreme outlier at row 2 MUST be pruned
+        stopifnot(isTRUE(anc_out$active_mask[1]))
+        stopifnot(identical(anc_out$anchor_tier_source[1], "Tier_0_Type_Anchor"))
+        stopifnot(!isTRUE(anc_out$active_mask[2]))
+
+        # 3. Verify compute_empirical_bayes_authority_weights() pins primary types to 3.0 in continuous mode
+        #    and gives type anchors >= 1.4x higher active weight than ordinary Gold anchors
+        w_act <- compute_empirical_bayes_authority_weights(
+          df_anc, mode = "active_passive", active_mask = anc_out$active_mask
+        )
+        w_cont <- compute_empirical_bayes_authority_weights(
+          df_anc, mode = "continuous_prior_posterior", active_mask = anc_out$active_mask
+        )
+        stopifnot(w_act[1] > 1.35 * stats::median(w_act[3:20]))
+        stopifnot(abs(w_cont[1] - 3.0) < 1e-6)
+
+        # 4. Verify audit_misidentifications() exports type_morph_mahal_d2, nearest_type_morph_taxon,
+        #    type_morph_concordance, is_typical_morphotype, and protects type specimens from routine misidentification
+        df_anc$gmm_cluster <- c(2L, 3L, rep(2L, 18), rep(1L, 12))
+        df_anc$gmm_uncertainty <- 0.04
+        cda_res <- run_canonical_discriminant_analysis(
+          df_anc, feature_cols = c("PC1", "PC2", "PC3"), target_taxa = c("Packera dubia", "Packera obovata")
+        )
+        aud_df <- audit_misidentifications(
+          df_anc, cda_res, list(classification = df_anc$gmm_cluster, uncertainty = df_anc$gmm_uncertainty)
+        )
+        req_cols <- c("is_type_specimen", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "has_empirical_type_anchor")
+        stopifnot(all(req_cols %in% names(aud_df)))
+        # P. dubia Holotype is in gmm_cluster 2 -> cluster 2 is typical morphotype for P. dubia
+        stopifnot(isTRUE(aud_df$is_typical_morphotype[1]))
+        stopifnot(!isTRUE(aud_df$is_typical_morphotype[2]))
+        stopifnot(!isTRUE(aud_df$morphometric_outlier_flag[1]))
+        stopifnot(identical(aud_df$nearest_type_morph_taxon[21], "Packera obovata"))
+        cat("STEP04_TYPE_CONTROL_OK\\n")
+        """
+        proc = subprocess.run(
+            ["Rscript", "-e", r_code],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, f"Step 04 type control R test failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("STEP04_TYPE_CONTROL_OK", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
