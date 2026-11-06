@@ -1098,7 +1098,13 @@ def stratify_duplicates(
             row = group_df.loc[idx]
 
             # Priority 1: Verified Nomenclatural Type Rank (2 = Primary Type, 1 = Secondary Type, 0 = Non-type)
-            type_rank, _ = classify_nomenclatural_type_rank(row.get("type_status", row.get("typeStatus")))
+            # and ICN Art. 9.6 fine-grained float sub-rank (2.2 = Holotype-tier, 2.0 = Isotype-tier,
+            # 1.5 = Syntype-tier, 1.0 = Paratype-tier, 0.0 = Non-type)
+            raw_ts = row.get("type_status")
+            if raw_ts is None or (pd is not None and pd.isna(raw_ts)) or not str(raw_ts).strip():
+                raw_ts = row.get("typeStatus")
+            type_rank, _ = classify_nomenclatural_type_rank(raw_ts)
+            type_subrank = classify_nomenclatural_type_subrank(raw_ts)
             has_type = int(type_rank)
 
             # Priority 2: Home Herbarium (default: NCU, configurable via home_herbarium)
@@ -1116,7 +1122,7 @@ def stratify_duplicates(
 
             cat_tiebreak = str(row.get("catalogNumber", idx))
 
-            score_tuple = (has_type, is_home_herb, tier_score, res_score, cat_tiebreak)
+            score_tuple = (has_type, type_subrank, is_home_herb, tier_score, res_score, cat_tiebreak)
             scored_candidates.append((score_tuple, idx))
             idx_to_std_tx[idx] = _resolve_row_standardized_packera(row)
             idx_to_tier[idx] = tier
@@ -1294,7 +1300,7 @@ def spatially_balance_and_thin_vouchers(
     n_rows = len(out_df)
     lats: List[Optional[float]] = [None] * n_rows
     lons: List[Optional[float]] = [None] * n_rows
-    priority_tuples: List[Tuple[int, int, int, float, float, str]] = []
+    priority_tuples: List[Tuple[int, float, int, int, float, float, str]] = []
     is_gold_flags: List[bool] = []
     is_type_flags: List[bool] = []
 
@@ -1302,8 +1308,12 @@ def spatially_balance_and_thin_vouchers(
         row = out_df.iloc[i]
         cat_str = str(row.get("catalogNumber", i))
 
-        # 1. Nomenclatural type rank (2 = Primary Type, 1 = Secondary Type, 0 = Non-type)
-        has_type, _ = classify_nomenclatural_type_rank(row.get("type_status", row.get("typeStatus")))
+        # 1. Nomenclatural type rank (2 = Primary Type, 1 = Secondary Type, 0 = Non-type) + ICN Art. 9.6 sub-rank
+        raw_ts = row.get("type_status")
+        if raw_ts is None or (pd is not None and pd.isna(raw_ts)) or not str(raw_ts).strip():
+            raw_ts = row.get("typeStatus")
+        has_type, _ = classify_nomenclatural_type_rank(raw_ts)
+        t_subrank = classify_nomenclatural_type_subrank(raw_ts)
         is_type_flags.append(has_type >= 1)
 
         # 2. determiner_tier
@@ -1352,7 +1362,7 @@ def spatially_balance_and_thin_vouchers(
         img_p = str(row.get("image_path", "") if not pd.isna(row.get("image_path", "")) else "")
         res_score = get_image_resolution_score(img_p, workspace_dir=workspace_dir)
 
-        priority_tuples.append((has_type, tier_score, n_t1, round(coord_prec, 8), round(res_score, 4), cat_str))
+        priority_tuples.append((has_type, t_subrank, tier_score, n_t1, round(coord_prec, 8), round(res_score, 4), cat_str))
 
     active_indices = list(range(n_rows))
 
@@ -1857,6 +1867,13 @@ def normalize_determiner_surnames(identified_by_raw: Optional[Any]) -> List[str]
     return surnames
 
 
+_HOLOTYPE_TIER_STATUSES: Set[str] = {"HOLOTYPE", "LECTOTYPE", "NEOTYPE", "EPITYPE"}
+_ISOTYPE_TIER_STATUSES: Set[str] = {"ISOTYPE", "ISOLECTOTYPE", "ISONEOTYPE"}
+_SYNTYPE_TIER_STATUSES: Set[str] = {"SYNTYPE", "ISOSYNTYPE"}
+_PARATYPE_TIER_STATUSES: Set[str] = {"PARATYPE", "ISOPARATYPE", "TYPE", "COTYPE"}
+_NEGATED_TYPE_RE = re.compile(r"\b(?:not\s+a?\s*type|non[-\s]?type)\b", re.IGNORECASE)
+
+
 def classify_nomenclatural_type_rank(type_status_raw: Optional[Any]) -> Tuple[int, str]:
     """
     Classify a Darwin Core `typeStatus` value into a 3-tier nomenclatural type rank:
@@ -1876,7 +1893,7 @@ def classify_nomenclatural_type_rank(type_status_raw: Optional[Any]) -> Tuple[in
         "UNSPECIFIED", "NULL", "NAN", "NA", "N/A", "FALSE", "0", "UNKNOWN",
     }:
         return 0, "None"
-    if re.search(r"\b(?:not\s+a?\s*type|non[-\s]?type)\b", type_status, re.IGNORECASE):
+    if _NEGATED_TYPE_RE.search(type_status):
         return 0, "None"
     for prim_type in sorted(PRIMARY_TYPE_STATUSES, key=len, reverse=True):
         if re.search(rf"\b{prim_type}\b", type_status, re.IGNORECASE):
@@ -1885,6 +1902,39 @@ def classify_nomenclatural_type_rank(type_status_raw: Optional[Any]) -> Tuple[in
         if re.search(rf"\b{sec_type}\b", type_status, re.IGNORECASE):
             return 1, sec_type.title()
     return 0, "None"
+
+
+def classify_nomenclatural_type_subrank(type_status_raw: Optional[Any]) -> float:
+    """
+    Classify a Darwin Core `typeStatus` value into an ICN Art. 9.6 fine-grained float sub-rank:
+      - 2.2: Holotype-tier (HOLOTYPE, LECTOTYPE, NEOTYPE, EPITYPE)
+      - 2.0: Isotype-tier (ISOTYPE, ISOLECTOTYPE, ISONEOTYPE)
+      - 1.5: Syntype-tier (SYNTYPE, ISOSYNTYPE; jointly name-bearing under ICN Art. 9.6)
+      - 1.0: Paratype-tier (PARATYPE, ISOPARATYPE, TYPE, COTYPE; non-name-bearing)
+      - 0.0: Non-types or negated strings.
+    """
+    if type_status_raw is None or (isinstance(type_status_raw, float) and math.isnan(type_status_raw)):
+        return 0.0
+    if pd is not None and pd.isna(type_status_raw):
+        return 0.0
+    type_status = str(type_status_raw).strip()
+    if not type_status or type_status.upper() in {
+        "NONE", "NOT A TYPE", "NOTATYPE", "NON-TYPE", "NONTYPE",
+        "UNSPECIFIED", "NULL", "NAN", "NA", "N/A", "FALSE", "0", "UNKNOWN",
+    }:
+        return 0.0
+    if _NEGATED_TYPE_RE.search(type_status):
+        return 0.0
+    for tier_val, tier_set in (
+        (2.2, _HOLOTYPE_TIER_STATUSES),
+        (2.0, _ISOTYPE_TIER_STATUSES),
+        (1.5, _SYNTYPE_TIER_STATUSES),
+        (1.0, _PARATYPE_TIER_STATUSES),
+    ):
+        for tok in sorted(tier_set, key=len, reverse=True):
+            if re.search(rf"\b{tok}\b", type_status, re.IGNORECASE):
+                return tier_val
+    return 0.0
 
 
 def _is_verified_type_status(type_status_raw: Optional[Any]) -> Tuple[bool, str]:
@@ -1902,11 +1952,14 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
       - Dynamic Specialist Discovery (`dynamic_specialists`):
         1. Determiner (`identifiedBy`) has identified >= 5 specimens of a given Packera
            taxon across >= 3 distinct `institutionCode`s, OR
-        2. Determiner has annotated >= 1 verified type specimen in the corpus, AND
+        2. Determiner has explicitly annotated >= 1 verified type specimen (giving +2
+           weight to type determinations, excluding collector-reference fallbacks) AND
+           reaches weighted count >= 3 across >= 2 distinct `institutionCode`s, AND
         3. Determiner is NOT flagged with > 25% cross-duplicate disagreement across
-           shared `exsiccatae_key` duplicate groups when duplicate groups exist.
+           shared `exsiccatae_key` duplicate groups when >= 2 duplicate groups exist.
       - Dynamic Regional Research Herbarium Discovery (`dynamic_herbaria`):
-        1. `institutionCode` holds >= 1 verified type specimen for target Packera taxa, OR
+        1. `institutionCode` holds >= 1 verified type specimen for target Packera taxa
+           AND >= 5 total sheets in the corpus, OR
         2. `institutionCode` ranks in the top quartile of institutional holdings
            (>= 10 curated sheets) with >= 70% determiner-attributed records for any harvested taxon.
 
@@ -1939,9 +1992,13 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
     # Track (determiner_surname, standardized_taxon) -> [count, set_of_institutions]
     det_taxon_counts: Dict[Tuple[str, str], int] = {}
     det_taxon_insts: Dict[Tuple[str, str], Set[str]] = {}
+    det_total_counts: Dict[str, int] = {}
+    det_total_insts: Dict[str, Set[str]] = {}
+    det_type_annotated: Set[str] = set()
 
-    # Track institutional holdings and determiner-attribution rates
+    # Track institutional holdings, type holdings, and determiner-attribution rates
     inst_total_sheets: Dict[str, int] = {}
+    inst_type_sheets: Dict[str, int] = {}
     inst_taxon_totals: Dict[Tuple[str, str], int] = {}
     inst_taxon_attributed: Dict[Tuple[str, str], int] = {}
 
@@ -1963,7 +2020,14 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
         valid_inst = inst not in _INVALID_INSTITUTION_CODES
 
         raw_id = row.get(id_col) if id_col else ""
-        if _is_explicit_collector_reference(raw_id) and "recordedBy" in row:
+        is_explicit_col_ref = _is_explicit_collector_reference(raw_id)
+        has_explicit_det_str = (
+            raw_id is not None
+            and not (pd is not None and pd.isna(raw_id))
+            and bool(str(raw_id).strip())
+            and not is_explicit_col_ref
+        )
+        if is_explicit_col_ref and "recordedBy" in row:
             surnames = normalize_determiner_surnames(row.get("recordedBy"))
         else:
             surnames = normalize_determiner_surnames(raw_id)
@@ -1973,10 +2037,11 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
         is_type, _ = _is_verified_type_status(raw_type)
 
         if is_type:
-            for s_name in surnames:
-                dynamic_specialists.add(s_name)
-            if valid_inst and std_sp:
-                dynamic_herbaria.add(inst)
+            if valid_inst and inst != "UNKNOWN" and std_sp:
+                inst_type_sheets[inst] = inst_type_sheets.get(inst, 0) + 1
+            if has_explicit_det_str:
+                for s_name in surnames:
+                    det_type_annotated.add(s_name)
 
         if valid_inst:
             inst_total_sheets[inst] = inst_total_sheets.get(inst, 0) + 1
@@ -1987,11 +2052,14 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
                     inst_taxon_attributed[it_key] = inst_taxon_attributed.get(it_key, 0) + 1
 
         if std_sp and surnames:
+            det_weight = 2 if (is_type and has_explicit_det_str) else 1
             for s_name in surnames:
                 dt_key = (s_name, std_sp)
-                det_taxon_counts[dt_key] = det_taxon_counts.get(dt_key, 0) + 1
+                det_taxon_counts[dt_key] = det_taxon_counts.get(dt_key, 0) + det_weight
+                det_total_counts[s_name] = det_total_counts.get(s_name, 0) + det_weight
                 if valid_inst:
                     det_taxon_insts.setdefault(dt_key, set()).add(inst)
+                    det_total_insts.setdefault(s_name, set()).add(inst)
 
         dup_key = ""
         if has_exsiccatae_col:
@@ -2020,12 +2088,7 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
             )
             group_entries.setdefault(dup_key, []).append((std_sp, surnames, pre_conf))
 
-    for dt_key, n_specimens in det_taxon_counts.items():
-        n_insts = len(det_taxon_insts.get(dt_key, set()))
-        if n_specimens >= 5 and n_insts >= 3:
-            dynamic_specialists.add(dt_key[0])
-
-    # Disqualify candidate corpus authorities with > 25% cross-duplicate disagreement
+    # Build cross-duplicate conflict counts per determiner before promotion
     det_dup_groups: Dict[str, Set[str]] = {}
     det_conflicted_groups: Dict[str, Set[str]] = {}
     for dup_key, entries in group_entries.items():
@@ -2039,14 +2102,34 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
                 if is_conflicted_group:
                     det_conflicted_groups.setdefault(s_name, set()).add(dup_key)
 
-    for s_name in list(dynamic_specialists):
-        dup_grps = det_dup_groups.get(s_name)
-        if dup_grps:
-            conf_grps = det_conflicted_groups.get(s_name, set())
-            if (len(conf_grps) / float(len(dup_grps))) > 0.25:
-                dynamic_specialists.discard(s_name)
+    for dt_key, count in det_taxon_counts.items():
+        s_name = dt_key[0]
+        dup_groups = len(det_dup_groups.get(s_name, set()))
+        conflicted_groups = len(det_conflicted_groups.get(s_name, set()))
+        if dup_groups >= 2 and (conflicted_groups / float(dup_groups)) > 0.25:
+            continue
+        inst_set = det_taxon_insts.get(dt_key, set())
+        if (count >= 5 and len(inst_set) >= 3) or (
+            s_name in det_type_annotated and count >= 3 and len(inst_set) >= 2
+        ):
+            dynamic_specialists.add(s_name)
+
+    for s_name in det_type_annotated:
+        if s_name in dynamic_specialists:
+            continue
+        dup_groups = len(det_dup_groups.get(s_name, set()))
+        conflicted_groups = len(det_conflicted_groups.get(s_name, set()))
+        if dup_groups >= 2 and (conflicted_groups / float(dup_groups)) > 0.25:
+            continue
+        tot_count = det_total_counts.get(s_name, 0)
+        tot_insts = det_total_insts.get(s_name, set())
+        if tot_count >= 3 and len(tot_insts) >= 2:
+            dynamic_specialists.add(s_name)
 
     if inst_total_sheets:
+        for inst, n_types in inst_type_sheets.items():
+            if n_types >= 1 and inst_total_sheets.get(inst, 0) >= 5:
+                dynamic_herbaria.add(inst)
         q75_holdings = float(np.percentile(list(inst_total_sheets.values()), 75))
         for inst, total_n in inst_total_sheets.items():
             if total_n >= 10 and total_n >= q75_holdings:
@@ -2395,10 +2478,16 @@ def select_cascading_outgroup_anchors(
             outgroup_tier_breakdown[tx] = {}
             continue
 
+        ts_col = "type_status" if "type_status" in tx_df.columns else ("typeStatus" if "typeStatus" in tx_df.columns else None)
         tx_df["_type_rank"] = (
-            tx_df["type_status"].map(lambda t: classify_nomenclatural_type_rank(t)[0])
-            if "type_status" in tx_df.columns
+            tx_df[ts_col].map(lambda t: classify_nomenclatural_type_rank(t)[0])
+            if ts_col
             else 0
+        )
+        tx_df["_type_subrank"] = (
+            tx_df[ts_col].map(classify_nomenclatural_type_subrank)
+            if ts_col
+            else 0.0
         )
         tx_df["_tier_rank"] = (
             tx_df["determiner_tier"].astype(str).str.strip().map(lambda t: tier_rank.get(t, 0))
@@ -2411,8 +2500,8 @@ def select_cascading_outgroup_anchors(
         ) if "image_path" in tx_df.columns else 0.0
 
         tx_df = tx_df.sort_values(
-            by=["_type_rank", "_tier_rank", "_is_prim", "_has_local", "_img_res"],
-            ascending=[False, False, False, False, False],
+            by=["_type_rank", "_type_subrank", "_tier_rank", "_is_prim", "_has_local", "_img_res"],
+            ascending=[False, False, False, False, False, False],
             kind="mergesort",
         )
         tx_head = tx_df.head(int(max_anchors))
@@ -2420,7 +2509,7 @@ def select_cascading_outgroup_anchors(
         n_prim_type_sel = int((tx_head["_type_rank"] == 2).sum())
         n_sec_type_sel = int((tx_head["_type_rank"] == 1).sum())
         tx_sel = tx_head.drop(
-            columns=["_has_local", "_has_valid", "_type_rank", "_tier_rank", "_is_prim", "_img_res"]
+            columns=["_has_local", "_has_valid", "_type_rank", "_type_subrank", "_tier_rank", "_is_prim", "_img_res"]
         )
         outgroup_dfs.append(tx_sel)
         outgroup_counts[tx] = len(tx_sel)

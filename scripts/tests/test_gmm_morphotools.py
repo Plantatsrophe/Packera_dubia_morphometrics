@@ -1406,16 +1406,34 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         stopifnot(identical(anc_out$anchor_tier_source[1], "Tier_0_Type_Anchor"))
         stopifnot(!isTRUE(anc_out$active_mask[2]))
 
-        # 3. Verify compute_empirical_bayes_authority_weights() pins primary types to 3.0 in continuous mode
-        #    and gives type anchors >= 1.4x higher active weight than ordinary Gold anchors
+        # 3. Verify compute_empirical_bayes_authority_weights() pins primary types to 3.0 in continuous mode,
+        #    gives type anchors >= 1.4x higher active weight than ordinary Gold anchors, and supports target_modality="morph"
         w_act <- compute_empirical_bayes_authority_weights(
-          df_anc, mode = "active_passive", active_mask = anc_out$active_mask
+          df_anc, mode = "active_passive", active_mask = anc_out$active_mask, target_modality = "morph"
         )
         w_cont <- compute_empirical_bayes_authority_weights(
-          df_anc, mode = "continuous_prior_posterior", active_mask = anc_out$active_mask
+          df_anc, mode = "continuous_prior_posterior", active_mask = anc_out$active_mask, target_modality = "morph"
         )
         stopifnot(w_act[1] > 1.35 * stats::median(w_act[3:20]))
         stopifnot(abs(w_cont[1] - 3.0) < 1e-6)
+
+        # 3b. Verify Kish's N_eff in compute_ledoit_wolf_cov(..., weights = w) and two-sample scaling in compute_type_specimen_morph_control()
+        X_lw <- scale(X_anc[anc_out$active_mask, , drop = FALSE], center = TRUE, scale = FALSE)
+        S_emp_lw <- stats::cov(X_lw)
+        lw_unw <- compute_ledoit_wolf_cov(S_emp_lw, X_centered = X_lw, n_obs = nrow(X_lw))
+        w_skew <- c(100.0, rep(0.05, nrow(X_lw) - 1L))
+        lw_skew <- compute_ledoit_wolf_cov(S_emp_lw, X_centered = X_lw, n_obs = nrow(X_lw), weights = w_skew)
+        stopifnot(attr(lw_skew, "n_eff") < attr(lw_unw, "n_eff"))
+        stopifnot(attr(lw_skew, "shrinkage_lambda") >= attr(lw_unw, "shrinkage_lambda"))
+
+        # Verify two-sample (1 + 1/n_eff_type)^(-1) scaling in compute_type_specimen_morph_control()
+        df_ts_1 <- df_anc[c(1, 3:10, 21:28), ]
+        X_ts_1 <- as.matrix(df_ts_1[, c("PC1", "PC2", "PC3")])
+        tc_1 <- compute_type_specimen_morph_control(df_ts_1, X_ts_1, S_reg = diag(3), taxon_col = "species_standardized")
+        raw_d2_row2 <- sum((X_ts_1[2, ] - X_ts_1[1, ])^2)
+        # Single Holotype (n_eff_type = 1) -> scaled by 1 / (1 + 1/1) = 0.5
+        stopifnot(abs(tc_1$type_morph_mahal_d2[2] - round(0.5 * raw_d2_row2, 4)) < 1e-4)
+        stopifnot(abs(tc_1$type_morph_mahal_d2[1]) < 1e-8)
 
         # 4. Verify audit_misidentifications() exports type_morph_mahal_d2, nearest_type_morph_taxon,
         #    type_morph_concordance, is_typical_morphotype, and protects type specimens from routine misidentification

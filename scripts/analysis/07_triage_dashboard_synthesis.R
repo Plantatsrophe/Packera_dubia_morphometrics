@@ -841,7 +841,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   te_z_dv <- if ("type_edaphic_z_score" %in% df_nms_d) suppressWarnings(as.numeric(df$type_edaphic_z_score)) else rep(NA_real_, n)
   nt_niche_dv <- if ("nearest_type_niche_taxon" %in% df_nms_d) as.character(df$nearest_type_niche_taxon) else rep(NA_character_, n)
   p_type_morph <- max(2L, if (length(sel_mc) > 0L) length(sel_mc) else if (length(morph_coord_cols) > 0L) length(morph_coord_cols) else 3L)
-  type_morph_chisq90 <- stats::qchisq(0.90, df = p_type_morph)
+  type_morph_chisq95 <- stats::qchisq(0.95, df = p_type_morph)
 
   is_valid_taxon_str <- function(s) !is.null(s) && !is.na(s) && nzchar(s) && s != "Unknown" && (s %in% active_taxa || grepl("^(Packera|P\\.)\\s+", s))
 
@@ -998,7 +998,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       tab_tv <- sort(table(alt_type_votes), decreasing = TRUE)
       if (as.integer(tab_tv[1L]) >= 2L) type_control_target_sp <- names(tab_tv)[1L]
     }
-    deviates_from_given_type <- (is.finite(tm_d2_i) && tm_d2_i > type_morph_chisq90) || (is.finite(te_z_i) && te_z_i > 2.0)
+    deviates_from_given_type <- (is.finite(tm_d2_i) && tm_d2_i > type_morph_chisq95) || (is.finite(tm_conc_dv[i]) && tm_conc_dv[i] < 0.25) || (is.finite(te_z_i) && te_z_i > 2.0)
     type_control_reassign <- !is_type_specimen_i && !is.null(type_control_target_sp) && deviates_from_given_type
 
     # 2. General Ontogenetic / Taphonomic Plasticity Rule (taxon-agnostic empirical quantile & edaphic envelope)
@@ -1805,7 +1805,10 @@ generate_taxonomic_revision_report <- function(df, opts) {
   for (sp in active_taxa) {
     sub_sp <- df[!is.na(sp_col_rep) & sp_col_rep == sp, , drop = FALSE]
     n_sp <- nrow(sub_sp)
-    n_gs <- if ("determiner_tier" %in% names(sub_sp)) sum(sub_sp$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver"), na.rm = TRUE) else 0L
+    is_type_sp <- if ("is_type_specimen" %in% names(sub_sp)) as.logical(sub_sp$is_type_specimen) else rep(FALSE, n_sp)
+    is_type_sp[is.na(is_type_sp)] <- FALSE
+    n_types <- sum(is_type_sp, na.rm = TRUE)
+    n_gs <- if ("determiner_tier" %in% names(sub_sp)) sum((sub_sp$determiner_tier %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver")) | is_type_sp, na.rm = TRUE) else n_types
 
     rg_vals <- if ("regional_group" %in% names(sub_sp)) trimws(as.character(sub_sp$regional_group)) else character(0)
     rg_vals <- rg_vals[!is.na(rg_vals) & nzchar(rg_vals) & !(tolower(rg_vals) %in% c("na", "unknown", "unassigned"))]
@@ -1832,8 +1835,11 @@ generate_taxonomic_revision_report <- function(df, opts) {
       sprintf("DOY %d–%d (10th–90th pct; n=%d; Hopkins 1918; Pewsey et al. 2013)", q10, q90, length(d_valid))
     } else "NA (no dated anthesis vouchers; Hopkins 1918; Pewsey et al. 2013)"
 
-    st_sp <- if ("taxonomic_treatment_subtype" %in% names(sub_sp)) as.character(sub_sp$taxonomic_treatment_subtype) else rep("Confirmed_Species", n_sp)
-    cnt_sub <- function(lbl) sum(!is.na(st_sp) & st_sp == lbl)
+    st_sp <- if ("taxonomic_treatment_subtype" %in% names(sub_sp)) as.character(sub_sp$taxonomic_treatment_subtype) else if ("taxonomic_status_call" %in% names(sub_sp)) as.character(sub_sp$taxonomic_status_call) else rep("Confirmed_Species", n_sp)
+    call_sp <- if ("taxonomic_status_call" %in% names(sub_sp)) as.character(sub_sp$taxonomic_status_call) else st_sp
+    cnt_sub <- function(lbls) sum(!is.na(st_sp) & (st_sp %in% lbls))
+    n_type_ctrl <- sum((!is.na(call_sp) & call_sp == "Confirmed_Type_Control") | (!is.na(st_sp) & st_sp == "Confirmed_Type_Control"))
+    n_type_syn  <- sum((!is.na(call_sp) & call_sp == "Type_Synonymy_Candidate") | (!is.na(st_sp) & st_sp == "Type_Synonymy_Candidate"))
     sci_vals <- if ("scientificName" %in% names(sub_sp)) trimws(as.character(sub_sp$scientificName)) else character(0)
     sci_vals <- sci_vals[!is.na(sci_vals) & nzchar(sci_vals) & !(tolower(sci_vals) %in% c("na", "unknown", "none", "null"))]
     sp_esc <- gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", sp)
@@ -1846,14 +1852,20 @@ generate_taxonomic_revision_report <- function(df, opts) {
     treatment_lines <- c(
       treatment_lines,
       head_sp,
-      sprintf("  - **Examined Vouchers:** $n = %d$ (Active Gold/Silver Anchors: %d)", n_sp, n_gs),
+      sprintf("  - **Examined Vouchers:** $n = %d$ (Nomenclatural Types: %d; Active Gold/Silver Anchors: %d)", n_sp, n_types, n_gs),
       sprintf("  - **Dominant US EPA Level III Ecoregions:** %s", eco_str),
       sprintf("  - **Edaphic Envelope (Median [IQR]):** `fine_soil_ph` = %s; `fine_soil_sand` = %s; `fine_bedrock_depth_cm` = %s", ph_str, sand_str, bed_str),
       sprintf("  - **Verified Anthesis Window:** %s", doy_str),
       sprintf(
-        "  - **Delimitation Breakdown:** `Confirmed_Species` = %d | `Subspecies_Ecotype` = %d | `Ecophenotypic_Plasticity` = %d | `Hybrid_Introgressant` = %d | `Misidentification_Reassign` = %d | `Putative_Cryptic_Species` = %d",
-        cnt_sub("Confirmed_Species"), cnt_sub("Subspecies_Ecotype"), cnt_sub("Ecophenotypic_Plasticity"),
-        cnt_sub("Hybrid_Introgressant"), cnt_sub("Misidentification_Reassign"), cnt_sub("Putative_Cryptic_Species")
+        "  - **Delimitation Breakdown:** `Confirmed_Species` = %d (`Confirmed_Type_Control` = %d) | `Subspecies_Ecotype` = %d (`Type_Synonymy_Candidate` = %d) | `Ecophenotypic_Plasticity` = %d | `Hybrid_Introgressant` = %d | `Misidentification_Reassign` = %d | `Putative_Cryptic_Species` = %d",
+        cnt_sub(c("Confirmed_Species", "Species_Confirmed", "Confirmed_Type_Control")),
+        n_type_ctrl,
+        cnt_sub(c("Subspecies_Ecotype", "Type_Synonymy_Candidate")),
+        n_type_syn,
+        cnt_sub("Ecophenotypic_Plasticity"),
+        cnt_sub(c("Hybrid_Introgressant", "Hybrid_Intergrade_Swarm")),
+        cnt_sub(c("Misidentification_Reassign", "Misidentification_Severe")),
+        cnt_sub("Putative_Cryptic_Species")
       )
     )
   }

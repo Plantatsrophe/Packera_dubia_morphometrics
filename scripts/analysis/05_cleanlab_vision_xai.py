@@ -23,7 +23,7 @@ _script_root = Path(__file__).resolve().parents[2]
 if str(_script_root) not in sys.path: sys.path.insert(0, str(_script_root))
 from scripts.core.db import compute_file_sha256, fetch_cached_dinov2_features, get_db_connection, is_canonical_or_explicit_db_context, persist_vision_xai_audit, store_dinov2_features_cache
 from scripts.core.harvester import classify_nomenclatural_type_rank
-from scripts.analysis.vision_dissection_utils import batch_classify_surface_orientations, compute_batch_patch_set_sha256, compute_dissection_neutral_leaf_weight, compute_type_visual_control, extract_row_type_info as _row_type_info, filter_basal_manifest_rows_py, order_basal_leaves_by_median_solidity, pool_patch_tokens_and_fg_ratio_fast, resolve_run_scoped_patch_and_manifest_inputs, resolve_specimen_keys_fast
+from scripts.analysis.vision_dissection_utils import batch_classify_surface_orientations, compute_batch_patch_set_sha256, compute_dissection_neutral_leaf_weight, compute_type_visual_control, extract_row_type_info as _row_type_info, filter_basal_manifest_rows_py, fit_calibrated_oof_fold_classifier, order_basal_leaves_by_median_solidity, overlay_chromatic_type_anchors, pool_patch_tokens_and_fg_ratio_fast, resolve_run_scoped_patch_and_manifest_inputs, resolve_specimen_keys_fast
 
 FOREGROUND_ATTENTION_MIN_RATIO: float = 0.65
 DYNAMIC_OKABE_ITO_HEX: List[str] = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#882255", "#44AA99", "#332288", "#117733"]
@@ -454,15 +454,8 @@ def compute_out_of_fold_probabilities(features: np.ndarray, labels: np.ndarray, 
     bronze_accum, n_valid_folds, y_true_anc, y_pred_anc = np.zeros((len(bronze_idx), num_classes), dtype=np.float64), 0, [], []
     for train_sub, val_sub in cv_splits:
         scaler = StandardScaler(); X_train, X_val, y_train, y_val = scaler.fit_transform(X_anc[train_sub]), scaler.transform(X_anc[val_sub]), y_anc[train_sub], y_anc[val_sub]
-        w_train, min_cls = w_anc[train_sub] / max(float(np.mean(w_anc[train_sub])), 1e-8), int(np.min(np.unique(y_train, return_counts=True)[1]))
-        lrcv_kw: Dict[str, Any] = {"use_legacy_attributes": False, "l1_ratios": (0.0,), "scoring": "accuracy"} if "use_legacy_attributes" in LogisticRegressionCV.__init__.__code__.co_varnames else {}
-        base_clf: Any = LogisticRegressionCV(Cs=np.logspace(-2, 1, 6), cv=max(2, min(3, min_cls)), class_weight="balanced", max_iter=2000, random_state=random_state, **lrcv_kw) if min_cls >= 2 else LogisticRegression(max_iter=2000, C=0.25, class_weight="balanced", random_state=random_state)
-        base_clf.fit(X_train, y_train, sample_weight=w_train); active_clf: Any = base_clf
-        if min_cls >= 3:
-            try:
-                cal_clf = CalibratedClassifierCV(estimator=LogisticRegression(max_iter=2000, C=0.25, class_weight="balanced", random_state=random_state), method="sigmoid", cv=min(3, min_cls))
-                cal_clf.fit(X_train, y_train, sample_weight=w_train); active_clf = cal_clf
-            except Exception: active_clf = base_clf
+        min_cls = int(np.min(np.unique(y_train, return_counts=True)[1]))
+        active_clf = fit_calibrated_oof_fold_classifier(X_train, y_train, w_anc[train_sub], min_cls, random_state=random_state)
         val_probs, classes_arr = active_clf.predict_proba(X_val), np.asarray(active_clf.classes_, dtype=int)
         for col_i, c_idx in enumerate(classes_arr): pred_probs[anchor_idx[val_sub], c_idx] = val_probs[:, col_i]
         if len(bronze_idx) > 0:
@@ -719,6 +712,7 @@ def generate_step05_publication_figures(audit_df: pd.DataFrame, output_figure_pa
         sp_mask = (df["taxon_clean"] == sp_name).to_numpy()
         if np.any(sp_mask): ax_b.scatter(lum_vals[sp_mask], sat_vals[sp_mask], facecolors="none", edgecolors=palette_map.get(sp_name, "#0072B2"), marker=hollow_markers[idx_sp % len(hollow_markers)], s=36, alpha=0.75, label=sp_name.replace("Packera ", "P. "))
     ax_b.set_xlabel("Mean Foliar CIE L* Luminance", fontsize=9.5, fontweight="bold"); ax_b.set_ylabel("Mean Foliar HSV Saturation", fontsize=9.5, fontweight="bold")
+    overlay_chromatic_type_anchors(ax_b, df, lum_vals, sat_vals)
     if len(taxa_order) > 0: ax_b.legend(loc="best", fontsize=8.0, frameon=True)
     ax_b.set_title("B. Foliar Chromatic Space & Species Ellipses", fontsize=10.5, fontweight="bold", loc="left"); fig.tight_layout()
     pdf_out, png_out = figures_dir / "fig05b_cleanlab_quality_and_tomentum.pdf", figures_dir / "fig05b_cleanlab_quality_and_tomentum.png"

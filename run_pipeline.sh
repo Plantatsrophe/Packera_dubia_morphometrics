@@ -983,7 +983,7 @@ if reuse_canonical or start_step_val >= 3:
         elif dst_sub.is_dir() and next(dst_sub.iterdir(), None) is None:
             dst_sub.rmdir()
             os.symlink(src_sub, dst_sub)
-" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}" "${SPATIAL_THIN_KM:-0}" "${MAX_PER_STATE:-}" "${MAX_PER_REGION:-}" "${NO_SPATIAL_WEIGHTS:-false}" "${REUSE_CANONICAL_DATA:-false}" "${CUSTOM_TAXA_CSV:-}" "${SEED_DATA_DIR:-${PROJECT_ROOT}/data}" "${START_STEP:-1}"
+" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}" "${SPATIAL_THIN_KM:-0}" "${MAX_PER_STATE:-}" "${MAX_PER_REGION:-}" "${NO_SPATIAL_WEIGHTS:-false}" "${REUSE_CANONICAL_DATA:-false}" "${CUSTOM_TAXA_CSV:-}" "${SEED_DATA_DIR:-}" "${START_STEP:-1}"
 }
 
 run_preflight_subset_filter

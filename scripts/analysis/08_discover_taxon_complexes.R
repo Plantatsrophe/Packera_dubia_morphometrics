@@ -277,7 +277,7 @@ compute_morphometric_affinity <- function(morph_df, anchor_df, taxa) {
     if (nrow(sub_x) == 0L) sub_x <- X_all[morph_df$species_standardized == tx, , drop = FALSE]
     mu_base <- colMeans(sub_x, na.rm = TRUE); type_rows_tx <- tx_rows[anc_type[tx_rows]]
     if (length(type_rows_tx) >= 1L) {
-      gamma_k <- min(0.35, 0.20 + 0.05 * length(type_rows_tx))
+      gamma_k <- if (exists(".compute_type_shrinkage_gamma", mode = "function")) .compute_type_shrinkage_gamma(if (exists(".count_effective_type_gatherings", mode = "function")) .count_effective_type_gatherings(anchor_df, type_rows_tx) else length(type_rows_tx), nrow(sub_x)) else min(0.35, (2.5 * length(type_rows_tx)) / (max(1.0, nrow(sub_x)) + 2.5 * length(type_rows_tx)))
       mu_base <- (1.0 - gamma_k) * mu_base + gamma_k * colMeans(X_anchor[type_rows_tx, , drop = FALSE], na.rm = TRUE)
     }
     centroids[tx, ] <- mu_base

@@ -2149,9 +2149,11 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
             self.assertEqual(row_db[3], "Packera obovata")
 
     def test_classify_nomenclatural_type_rank_and_cascading_outgroup_type_priority(self):
-        """Verify classify_nomenclatural_type_rank() and confirm select_cascading_outgroup_anchors() prioritizes Holotypes/Isotypes/Paratypes ahead of higher-megapixel non-type Tier_1_Gold sheets."""
+        """Verify classify_nomenclatural_type_rank(), classify_nomenclatural_type_subrank(), type-annotator leakage guard, and cascading outgroup type priority."""
         from scripts.core.harvester import (
             classify_nomenclatural_type_rank,
+            classify_nomenclatural_type_subrank,
+            discover_corpus_authorities,
             select_cascading_outgroup_anchors,
         )
 
@@ -2161,6 +2163,55 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
         self.assertEqual(classify_nomenclatural_type_rank("Syntype")[0], 1)
         self.assertEqual(classify_nomenclatural_type_rank("Not a type"), (0, "None"))
         self.assertEqual(classify_nomenclatural_type_rank(None), (0, "None"))
+
+        # Verify ICN Art. 9.6 sub-ranking: Holotype > Isotype > Syntype > Paratype > Non-type
+        self.assertGreater(
+            classify_nomenclatural_type_subrank("Holotype"),
+            classify_nomenclatural_type_subrank("Isotype"),
+        )
+        self.assertGreater(
+            classify_nomenclatural_type_subrank("Syntype"),
+            classify_nomenclatural_type_subrank("Paratype"),
+        )
+        self.assertEqual(classify_nomenclatural_type_subrank("Not a type"), 0.0)
+
+        # Verify Layer 3 type-annotator leakage guard: a single-sheet annotator on 1 type specimen
+        # at 1 herbarium is NOT promoted to dynamic_specialists unless multi-institution criteria are met
+        leak_rows = [
+            {
+                "catalogNumber": "TYPE-SINGLE-1",
+                "institutionCode": "NCU",
+                "scientificName": "Packera aurea",
+                "identifiedBy": "Q.Z. Singleannotator",
+                "recordedBy": "A. Collector",
+                "recordNumber": "10",
+                "type_status": "Holotype",
+                "eventDate": "1950-05-01",
+            },
+            {
+                "catalogNumber": "TYPE-MULTI-1",
+                "institutionCode": "NCU",
+                "scientificName": "Packera aurea",
+                "identifiedBy": "M.K. Multiannotator",
+                "recordedBy": "B. Collector",
+                "recordNumber": "20",
+                "type_status": "Holotype",
+                "eventDate": "1960-05-01",
+            },
+            {
+                "catalogNumber": "NONTYPE-MULTI-2",
+                "institutionCode": "NY",
+                "scientificName": "Packera aurea",
+                "identifiedBy": "M.K. Multiannotator",
+                "recordedBy": "C. Collector",
+                "recordNumber": "21",
+                "type_status": "None",
+                "eventDate": "1962-05-01",
+            },
+        ]
+        dyn_specs_leak, _ = discover_corpus_authorities(pd.DataFrame(leak_rows))
+        self.assertNotIn("singleannotator", dyn_specs_leak)
+        self.assertIn("multiannotator", dyn_specs_leak)
 
         with tempfile.TemporaryDirectory() as tmp_d:
             tmp_p = Path(tmp_d)

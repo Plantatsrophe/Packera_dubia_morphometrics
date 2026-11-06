@@ -656,21 +656,23 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         source("scripts/analysis/07_triage_dashboard_synthesis.R")
 
         # 1. Verify Step 06 compute_type_locality_ecological_control() computes type_edaphic_z_score,
-        #    nearest_type_niche_taxon, and matches_type_lithology relative to locus classicus
+        #    nearest_type_niche_taxon, and matches_type_lithology relative to locus classicus,
+        #    and gates out coarse-uncertainty (>2000m) historical type centroids in favor of precise near_gold vouchers
         df06 <- data.frame(
-          catalogNumber = c("DUB_HOLO", "DUB_NEAR", "DUB_MATCHING_OBO_LOCUS", "OBO_HOLO", "OBO_NEAR"),
+          catalogNumber = c("DUB_HOLO", "DUB_NEAR", "DUB_MATCHING_OBO_LOCUS", "OBO_HOLO", "OBO_NEAR", "COARSE_HOLO", "COARSE_NEAR_GOLD", "COARSE_TEST_VOUCHER"),
           plant_individual_id = 0L,
-          species_standardized = c("Packera dubia", "Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata"),
-          determiner_tier = c("Tier_1_Gold", "Tier_1_Gold", "Tier_3_Bronze", "Tier_1_Gold", "Tier_1_Gold"),
-          type_status = c("Holotype", "None", "None", "Holotype", "None"),
-          is_type_specimen = c(TRUE, FALSE, FALSE, TRUE, FALSE),
-          regional_group = c("Piedmont", "Piedmont", "Interior Plateau", "Interior Plateau", "Interior Plateau"),
-          decimalLatitude = c(35.8, 35.9, 36.1, 36.0, 36.2),
-          decimalLongitude = c(-78.6, -78.5, -86.7, -86.8, -86.6),
-          fine_soil_ph = c(5.2, 5.3, 7.4, 7.5, 7.3),
-          fine_soil_sand = c(68.0, 66.0, 22.0, 20.0, 24.0),
-          fine_bedrock_depth_cm = c(140.0, 135.0, 35.0, 32.0, 38.0),
-          sgmc_lithology_class = c("Granitic_Felsic", "Granitic_Felsic", "Carbonate_Limestone_Dolostone", "Carbonate_Limestone_Dolostone", "Carbonate_Limestone_Dolostone"),
+          species_standardized = c("Packera dubia", "Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata", "Packera aurea", "Packera aurea", "Packera aurea"),
+          determiner_tier = c("Tier_1_Gold", "Tier_1_Gold", "Tier_3_Bronze", "Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_2_Silver"),
+          type_status = c("Holotype", "None", "None", "Holotype", "None", "Holotype", "None", "None"),
+          is_type_specimen = c(TRUE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE, FALSE),
+          coordinateUncertaintyInMeters = c(250.0, 300.0, 400.0, 200.0, 350.0, 25000.0, 150.0, 200.0),
+          regional_group = c("Piedmont", "Piedmont", "Interior Plateau", "Interior Plateau", "Interior Plateau", "Blue Ridge", "Blue Ridge", "Blue Ridge"),
+          decimalLatitude = c(35.8, 35.9, 36.1, 36.0, 36.2, 35.5, 35.52, 35.53),
+          decimalLongitude = c(-78.6, -78.5, -86.7, -86.8, -86.6, -82.5, -82.48, -82.49),
+          fine_soil_ph = c(5.2, 5.3, 7.4, 7.5, 7.3, 8.1, 5.8, 5.9),
+          fine_soil_sand = c(68.0, 66.0, 22.0, 20.0, 24.0, 12.0, 54.0, 55.0),
+          fine_bedrock_depth_cm = c(140.0, 135.0, 35.0, 32.0, 38.0, 15.0, 110.0, 112.0),
+          sgmc_lithology_class = c("Granitic_Felsic", "Granitic_Felsic", "Carbonate_Limestone_Dolostone", "Carbonate_Limestone_Dolostone", "Carbonate_Limestone_Dolostone", "Carbonate_Limestone_Dolostone", "Mafic_Metamorphic", "Mafic_Metamorphic"),
           primary_env_predictors = "fine_soil_ph;fine_soil_sand;fine_bedrock_depth_cm",
           primary_edaph_predictors = "fine_soil_ph;fine_soil_sand;fine_bedrock_depth_cm",
           stringsAsFactors = FALSE
@@ -681,6 +683,9 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         stopifnot(identical(tc06$nearest_type_niche_taxon[3], "Packera obovata"))
         stopifnot(isTRUE(tc06$matches_type_lithology[1]))
         stopifnot(!isTRUE(tc06$matches_type_lithology[3]))
+        # Coarse-uncertainty type row (25000m, noisy carbonate/pH 8.1 centroid) must fall back to precise near_gold (Mafic_Metamorphic, pH 5.8)
+        stopifnot(tc06$type_edaphic_z_score[8] < 0.5)
+        stopifnot(isTRUE(tc06$matches_type_lithology[8]))
 
         # 2. Verify Step 07 Rules A, B, and C in apply_taxonomic_decision_matrix()
         df07 <- data.frame(

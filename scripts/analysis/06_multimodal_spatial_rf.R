@@ -175,13 +175,18 @@ resolve_step06_authority_weights <- function(df) {
   if (exists("compute_empirical_bayes_authority_weights", mode = "function")) {
     eb_wts <- tryCatch({
       res <- tryCatch(
-        compute_empirical_bayes_authority_weights(df, mode = "continuous_prior_posterior"),
+        compute_empirical_bayes_authority_weights(
+          df,
+          mode = "continuous_prior_posterior",
+          target_modality = "ecological"
+        ),
         error = function(e1) {
           compute_empirical_bayes_authority_weights(
             df = df,
             taxon_col = "species_standardized",
             tier_col = "determiner_tier",
-            mode = "continuous_prior_posterior"
+            mode = "continuous_prior_posterior",
+            target_modality = "ecological"
           )
         }
       )
@@ -2044,6 +2049,13 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
       subtitle = "Solid black = Empirical robust regression; Dashed vermilion = Hopkins' Law (+4.0 d / deg N)",
       x = "Decimal Latitude (deg N)", y = "Observed Anthesis Day of Year (DOY)", color = "Group", shape = "Group"
     )
+  if ("is_type_specimen" %in% names(target_df) && any(as.logical(target_df$is_type_specimen) == TRUE, na.rm = TRUE)) {
+    p1 <- p1 + ggplot2::geom_point(
+      data = target_df[which(as.logical(target_df$is_type_specimen) == TRUE), , drop = FALSE],
+      ggplot2::aes(x = decimalLatitude, y = doy),
+      shape = 5, fill = NA, stroke = 1.3, size = 2.8, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
+    )
+  }
 
   med_df <- stats::aggregate(delta_doy ~ plot_group, data = target_df, FUN = function(x) stats::median(x, na.rm = TRUE))
   if (requireNamespace("ggridges", quietly = TRUE)) {
@@ -2735,6 +2747,16 @@ compute_type_locality_ecological_control <- function(
   lat_v <- if ("decimalLatitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLatitude)) else if ("latitude" %in% names(df)) suppressWarnings(as.numeric(df$latitude)) else rep(NA_real_, n)
   lon_v <- if ("decimalLongitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLongitude)) else if ("longitude" %in% names(df)) suppressWarnings(as.numeric(df$longitude)) else rep(NA_real_, n)
   has_xy <- is.finite(lat_v) & is.finite(lon_v)
+  unc_v <- if ("coordinateUncertaintyInMeters" %in% names(df)) {
+    suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
+  } else if ("coordinateUncertainty" %in% names(df)) {
+    suppressWarnings(as.numeric(df$coordinateUncertainty))
+  } else {
+    rep(0.0, n)
+  }
+  unc_v[!is.finite(unc_v) | unc_v < 0.0] <- 0.0
+  is_precise_edaph <- unc_v <= 2000.0
+  is_precise_clim <- unc_v <= 10000.0
   reg_v <- if ("regional_group" %in% names(df)) trimws(as.character(df$regional_group)) else rep("", n)
   reg_v[is.na(reg_v) | tolower(reg_v) %in% c("na", "unknown", "unknown_ecoregion")] <- ""
   det_t <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
@@ -2781,18 +2803,24 @@ compute_type_locality_ecological_control <- function(
       gold_cand <- setdiff(tx_rows[is_gold_v[tx_rows]], type_rows)
       if (length(gold_cand) > 0L) {
         type_regs <- unique(reg_v[type_rows[nzchar(reg_v[type_rows])]])
-        same_reg <- if (length(type_regs) > 0L) gold_cand[reg_v[gold_cand] %in% type_regs] else integer(0)
+        gold_cand_eco <- gold_cand[is_precise_edaph[gold_cand]]
+        if (length(gold_cand_eco) == 0L) gold_cand_eco <- gold_cand
+        near_eco <- if (length(type_regs) > 0L) gold_cand_eco[reg_v[gold_cand_eco] %in% type_regs] else integer(0)
+        if (length(near_eco) == 0L && length(type_regs) > 0L) {
+          near_eco <- gold_cand[reg_v[gold_cand] %in% type_regs]
+        }
         near_xy <- integer(0)
         type_xy <- type_rows[has_xy[type_rows]]
-        gold_xy <- gold_cand[has_xy[gold_cand]]
-        if (length(type_xy) > 0L && length(gold_xy) > 0L) {
-          min_d <- rep(Inf, length(gold_xy))
+        cand_xy <- gold_cand[has_xy[gold_cand] & is_precise_edaph[gold_cand]]
+        if (length(cand_xy) == 0L) cand_xy <- gold_cand[has_xy[gold_cand]]
+        if (length(type_xy) > 0L && length(cand_xy) > 0L) {
+          min_d <- rep(Inf, length(cand_xy))
           for (ti in type_xy) {
-            min_d <- pmin(min_d, haversine_km(lat_v[ti], lon_v[ti], lat_v[gold_xy], lon_v[gold_xy]))
+            min_d <- pmin(min_d, haversine_km(lat_v[ti], lon_v[ti], lat_v[cand_xy], lon_v[cand_xy]))
           }
-          near_xy <- gold_xy[is.finite(min_d) & (min_d <= max_radius_km)]
+          near_xy <- cand_xy[is.finite(min_d) & (min_d <= max_radius_km)]
         }
-        near_gold <- unique(c(same_reg, near_xy))
+        near_gold <- unique(c(near_eco, near_xy))
       }
       loc_rows <- c(type_rows, near_gold)
       loc_wts <- c(ifelse(type_rank_vec[type_rows] == 2L, 3.5, 2.5), rep(1.0, length(near_gold)))
@@ -2805,27 +2833,40 @@ compute_type_locality_ecological_control <- function(
     mu_tx <- stats::setNames(numeric(length(all_vars)), all_vars)
     sd_tx <- stats::setNames(numeric(length(all_vars)), all_vars)
     for (cl in all_vars) {
-      x_loc <- suppressWarnings(as.numeric(df[[cl]][loc_rows]))
-      x_all_tx <- suppressWarnings(as.numeric(df[[cl]][tx_rows]))
-      ok_l <- is.finite(x_loc) & is.finite(loc_wts) & (loc_wts > 0)
-      if (any(ok_l)) {
-        if (length(type_rows) > 0L && any(is.finite(df[[cl]][type_rows]))) {
-          t_vals <- suppressWarnings(as.numeric(df[[cl]][type_rows]))
-          t_med <- stats::median(t_vals[is.finite(t_vals)], na.rm = TRUE)
-          l_med <- sum(x_loc[ok_l] * loc_wts[ok_l]) / sum(loc_wts[ok_l])
-          mu_tx[[cl]] <- if (sum(ok_l) > length(type_rows)) (0.65 * t_med + 0.35 * l_med) else t_med
-        } else {
-          mu_tx[[cl]] <- stats::median(x_loc[ok_l], na.rm = TRUE)
-        }
+      col_v <- suppressWarnings(as.numeric(df[[cl]]))
+      is_edaph_col <- cl %in% edaph_use
+      type_rows_precise <- if (is_edaph_col) type_rows[is_precise_edaph[type_rows]] else type_rows[is_precise_clim[type_rows]]
+      loc_rows_precise <- if (is_edaph_col) loc_rows[is_precise_edaph[loc_rows]] else loc_rows[is_precise_clim[loc_rows]]
+      if (length(loc_rows_precise) == 0L || !any(is.finite(col_v[loc_rows_precise]))) {
+        loc_rows_precise <- loc_rows
+      }
+      t_vals <- if (length(type_rows_precise) > 0L) col_v[type_rows_precise] else numeric(0)
+      t_vals <- t_vals[is.finite(t_vals)]
+      l_vals <- if (length(loc_rows_precise) > 0L) col_v[loc_rows_precise] else numeric(0)
+      l_vals <- l_vals[is.finite(l_vals)]
+      x_all_tx <- col_v[tx_rows]
+
+      if (length(t_vals) > 0L && length(l_vals) > 0L) {
+        mu_tx[[cl]] <- 0.65 * stats::median(t_vals) + 0.35 * stats::median(l_vals)
+      } else if (length(t_vals) > 0L) {
+        mu_tx[[cl]] <- stats::median(t_vals)
+      } else if (length(l_vals) > 0L) {
+        mu_tx[[cl]] <- stats::median(l_vals)
       } else {
-        mu_tx[[cl]] <- stats::median(x_all_tx[is.finite(x_all_tx)], na.rm = TRUE)
+        t_fallback <- col_v[type_rows]
+        t_fallback <- t_fallback[is.finite(t_fallback)]
+        if (length(t_fallback) > 0L) {
+          mu_tx[[cl]] <- stats::median(t_fallback)
+        } else {
+          mu_tx[[cl]] <- stats::median(x_all_tx[is.finite(x_all_tx)], na.rm = TRUE)
+        }
       }
       if (!is.finite(mu_tx[[cl]])) mu_tx[[cl]] <- 0.0
 
       anc_tx_rows <- tx_rows[is_anc_v[tx_rows]]
-      x_anc_tx <- suppressWarnings(as.numeric(df[[cl]][anc_tx_rows]))
-      pool_x <- if (sum(ok_l) >= 2L) {
-        x_loc[ok_l]
+      x_anc_tx <- col_v[anc_tx_rows]
+      pool_x <- if (length(l_vals) >= 2L) {
+        l_vals
       } else if (sum(is.finite(x_anc_tx)) >= 2L) {
         x_anc_tx[is.finite(x_anc_tx)]
       } else {
@@ -2838,9 +2879,17 @@ compute_type_locality_ecological_control <- function(
       if (!is.finite(sd_tx[[cl]]) || sd_tx[[cl]] <= 1e-6) sd_tx[[cl]] <- scale_floors[[cl]]
     }
 
-    lith_ref <- unique(lith_vec[type_rows[nzchar(lith_vec[type_rows])]])
+    type_lith_rows <- type_rows[is_precise_edaph[type_rows]]
+    lith_ref <- unique(lith_vec[type_lith_rows[nzchar(lith_vec[type_lith_rows])]])
     if (length(lith_ref) == 0L) {
-      l_cand <- lith_vec[loc_rows[nzchar(lith_vec[loc_rows])]]
+      loc_lith_precise <- loc_rows[is_precise_edaph[loc_rows]]
+      l_cand <- lith_vec[loc_lith_precise[nzchar(lith_vec[loc_lith_precise])]]
+      if (length(l_cand) == 0L) {
+        l_cand <- lith_vec[loc_rows[nzchar(lith_vec[loc_rows])]]
+      }
+      if (length(l_cand) == 0L) {
+        l_cand <- lith_vec[type_rows[nzchar(lith_vec[type_rows])]]
+      }
       if (length(l_cand) > 0L) {
         tb_l <- table(l_cand)
         lith_ref <- names(tb_l[tb_l == max(tb_l)])
@@ -3582,11 +3631,22 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     u_m <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
     elig_coord <- elig_coord & (is.na(u_m) | u_m <= 10000.0)
   }
-  det_tier <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
-  is_prom <- rep(FALSE, n)
-  if ("is_promoted_anchor" %in% names(df)) { pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_prom <- is_prom | pa }
-  if ("is_promoted_bronze" %in% names(df)) { pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_prom <- is_prom | pb }
-  is_gold_silver <- (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_prom
+  det_tier <- if (exists(".standardize_determiner_tier_vec", mode = "function")) {
+    .standardize_determiner_tier_vec(df)
+  } else if ("determiner_tier" %in% names(df)) {
+    as.character(df$determiner_tier)
+  } else {
+    rep("Tier_2_Silver", nrow(df))
+  }
+  type_info_rf <- if (exists(".identify_type_specimen_vec", mode = "function")) {
+    .identify_type_specimen_vec(df)
+  } else {
+    list(is_type_specimen = rep(FALSE, nrow(df)))
+  }
+  is_promoted <- rep(FALSE, n)
+  if ("is_promoted_anchor" %in% names(df)) { pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_promoted <- is_promoted | pa }
+  if ("is_promoted_bronze" %in% names(df)) { pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_promoted <- is_promoted | pb }
+  is_gold_silver <- (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_promoted | type_info_rf$is_type_specimen
   anchor_mask <- is_gold_silver & elig_coord & !is.na(y)
   if (sum(anchor_mask) < 6 || length(unique(y[anchor_mask])) < 2) {
     # Fallback for tiny synthetic unit-test fixtures where all rows may lack determiner_tier
@@ -3606,6 +3666,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   inv_freq_wts[anchor_idx] <- compute_inverse_class_frequency_weights(y_anchor)
   case_wts <- auth_wts * inv_freq_wts * spatial_balance_weight
   case_wts <- case_wts / max(mean(case_wts[anchor_idx], na.rm = TRUE), 1e-8)
+  case_wts[anchor_idx] <- pmin(4.0, pmax(0.25, case_wts[anchor_idx]))
+  case_wts[anchor_idx] <- case_wts[anchor_idx] / mean(case_wts[anchor_idx], na.rm = TRUE)
 
   X_env_anc <- X_env[anchor_idx, , drop = FALSE]
   X_all_anc <- X_all[anchor_idx, , drop = FALSE]
@@ -4554,6 +4616,13 @@ export_dynamic_fig06_ecological_niche_phenology <- function(df, srf_res = NULL, 
     )
     graphics::grid(col = "grey88")
     graphics::points(xv, yv, col = cols_tx, pch = pch_tx, bg = NA, cex = 0.85, lwd = 1.0)
+    if ("is_type_specimen" %in% names(df)) {
+      m_t_b <- which(as.logical(df$is_type_specimen) == TRUE & is.finite(xv) & is.finite(yv))
+      if (length(m_t_b) > 0L) {
+        graphics::points(xv[m_t_b], yv[m_t_b], pch = 5L, bg = NA, col = cols_tx[m_t_b], cex = 1.45, lwd = 2.0)
+        graphics::points(xv[m_t_b], yv[m_t_b], pch = 1L, bg = NA, col = "#111111", cex = 1.85, lwd = 1.4)
+      }
+    }
     t_seq <- seq(0, 2 * pi, length.out = 100)
     chi_r <- sqrt(stats::qchisq(0.85, df = 2))
     for (tx in present_tx) {
@@ -4764,6 +4833,13 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
       subtitle = sprintf("Top Non-MEM Predictors: %s vs. %s", env_axis_lbls[1], env_axis_lbls[2]),
       x = env_axis_lbls[1], y = env_axis_lbls[2], color = grp_lbl, shape = grp_lbl
     )
+  if ("is_type_specimen" %in% names(plot_df) && any(as.logical(plot_df$is_type_specimen) == TRUE, na.rm = TRUE)) {
+    p2 <- p2 + ggplot2::geom_point(
+      data = plot_df[which(as.logical(plot_df$is_type_specimen) == TRUE), , drop = FALSE],
+      ggplot2::aes(x = top_env_1_val, y = top_env_2_val),
+      shape = 5, fill = NA, stroke = 1.3, size = 2.8, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
+    )
+  }
 
   # Panel C: Top-Importance Edaphic/Lithic Predictor Diagnostic Boxplots + Kruskal-Wallis p-value
   kw_edaph <- tryCatch(stats::kruskal.test(top_edaph_1_val ~ factor(plot_group), data = plot_df)$p.value, error = function(e) NA_real_)

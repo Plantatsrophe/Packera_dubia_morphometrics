@@ -52,7 +52,7 @@ standardize_packera_taxon <- function(species_vec) {
 }
 
 # Empirical Bayes / Dawid-Skene hierarchical active/passive reference authority weights (Slenker et al. 2022; Dawid & Skene 1979)
-compute_authority_precision_weights <- function(df, active_mask = NULL) compute_empirical_bayes_authority_weights(df, mode = "active_passive", active_mask = active_mask)
+compute_authority_precision_weights <- function(df, tier_col = "determiner_tier", active_mask = NULL, target_modality = "morph") compute_empirical_bayes_authority_weights(df, mode = "active_passive", active_mask = if (is.logical(tier_col) && is.null(active_mask)) tier_col else active_mask, target_modality = target_modality)
 
 discover_sorted_morph_cols <- function(x, pattern, require_finite = TRUE) {
   nms <- if (is.data.frame(x) || is.matrix(x)) colnames(x) else as.character(x); hits <- grep(pattern, nms, value = TRUE)
@@ -94,7 +94,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   if (requireNamespace("RRPP", quietly = TRUE) && nlevels(gold_df$scientificName) >= 2) {
     rr_par <- if (nrow(gold_df) >= 120L && exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(16L) else FALSE
     rdf <- RRPP::rrpp.data.frame(Y = Y, log_centsize = gold_df$log_centsize, scientificName = gold_df$scientificName)
-    fit_rrpp <- tryCatch(RRPP::lm.rrpp(Y ~ log_centsize * scientificName, data = rdf, iter = permutations, turbo = TRUE, Parallel = rr_par, print.progress = FALSE), error = function(e) NULL)
+    fit_rrpp <- tryCatch(RRPP::lm.rrpp(Y ~ log_centsize * scientificName, data = rdf, weights = gold_df$eff_weight, iter = permutations, turbo = TRUE, Parallel = rr_par, print.progress = FALSE), error = function(e) tryCatch(RRPP::lm.rrpp(Y ~ log_centsize * scientificName, data = rdf, iter = permutations, turbo = TRUE, Parallel = rr_par, print.progress = FALSE), error = function(e2) NULL))
     if (!is.null(fit_rrpp)) {
       anova_df <- as.data.frame(anova(fit_rrpp)$table); anova_df$Term <- rownames(anova_df); rownames(anova_df) <- NULL
       if ("SS" %in% names(anova_df)) anova_df$SumOfSqs <- anova_df$SS; if ("Rsq" %in% names(anova_df)) anova_df$R2 <- anova_df$Rsq
@@ -330,10 +330,9 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
 
   X_a <- X[active_idx, , drop = FALSE]; y_a <- df$grouping_col[active_idx]; eff_weight <- eff_weight[active_idx]; if (all(eff_weight <= 0)) eff_weight <- rep(1.0, length(active_idx)); w_a <- eff_weight; N_a <- nrow(X_a)
   X_mat <- X_a; grp_factor <- droplevels(factor(y_a))
-  lda_cv <- if (requireNamespace("MASS", quietly = TRUE) && nlevels(grp_factor) >= 2) {
-    tryCatch(MASS::lda(x = X_mat, grouping = grp_factor, prior = rep(1.0 / nlevels(grp_factor), nlevels(grp_factor)), CV = TRUE), error = function(e) NULL)
-  } else NULL
-  loocv_accuracy <- if (!is.null(lda_cv) && !is.null(lda_cv$class)) round(mean(as.character(lda_cv$class) == as.character(grp_factor), na.rm = TRUE), 4) else NA_real_
+  lda_cv <- if (requireNamespace("MASS", quietly = TRUE) && nlevels(grp_factor) >= 2) tryCatch(MASS::lda(x = X_mat, grouping = grp_factor, prior = rep(1.0 / nlevels(grp_factor), nlevels(grp_factor)), CV = TRUE), error = function(e) NULL) else NULL
+  loocv_accuracy <- tryCatch(compute_weighted_shrinkage_cda_loocv(X_a, grp_factor, w_a), error = function(e) NA_real_)
+  if (is.na(loocv_accuracy) && !is.null(lda_cv) && !is.null(lda_cv$class)) loocv_accuracy <- round(mean(as.character(lda_cv$class) == as.character(grp_factor), na.rm = TRUE), 4)
   message(sprintf("CDA Leave-One-Out Cross-Validation Accuracy (loocv_accuracy): %.4f", loocv_accuracy))
 
   g_levels <- target_taxa; g <- length(g_levels); grand_mean <- colSums(X_a * w_a) / sum(w_a)
@@ -344,12 +343,13 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     if (nrow(sub_x) > 0) {
       m_k <- colSums(sub_x * w_k) / sum(w_k); group_means[k, ] <- m_k; diff_m <- m_k - grand_mean
       B <- B + sum(w_k) * (diff_m %*% t(diff_m)); diff_x <- t(t(sub_x) - m_k); W <- W + (t(diff_x) %*% (diff_x * w_k))
-      X_centered[k_mask, ] <- diff_x * sqrt(pmax(w_k, 0))
+      X_centered[k_mask, ] <- diff_x
     }
   }
 
-  S_w <- W / max(sum(w_a) - g, 1)
-  S_reg <- compute_ledoit_wolf_cov(S_w, X_centered = X_centered, n_obs = N_a)
+  denom_w <- max(sum(w_a) - sum(vapply(g_levels, function(g_k) { wk <- w_a[y_a == g_k]; if (sum(wk) > 0) sum(wk^2) / sum(wk) else 1.0 }, numeric(1))), 1.0)
+  S_w <- W / denom_w
+  S_reg <- compute_ledoit_wolf_cov(S_w, X_centered = X_centered, n_obs = N_a, weights = w_a)
   k_full <- max(1L, min(ncol(X_mat), g - 1L))
   eig_cda <- solve_shrinkage_cda_eigen(S_reg, B, max_axes = k_full)
   eig_vals <- eig_cda$values; eig_vecs_full <- eig_cda$vectors

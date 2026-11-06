@@ -4895,8 +4895,15 @@ def generate_step02_publication_figures(
         t1_pool = df_plot.copy()
 
     # Ranking attributes on t1_pool (mask smoothness/closure validity is evaluated lazily per species)
-    t1_pool["is_gold_silver"] = t1_pool["determiner_tier"].astype(str).str.strip().isin(
-        {"Tier_1_Gold", "Tier_2_Silver"}
+    is_type_s = (
+        t1_pool["is_type_specimen"].apply(_parse_bool_val)
+        if "is_type_specimen" in t1_pool.columns
+        else pd.Series(False, index=t1_pool.index)
+    )
+    t1_pool["is_type_bool"] = is_type_s
+    t1_pool["is_gold_silver"] = (
+        t1_pool["determiner_tier"].astype(str).str.strip().isin({"Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver"})
+        | is_type_s
     )
     if "is_calibrated_mm" in t1_pool.columns:
         t1_pool["is_cal_bool"] = t1_pool["is_calibrated_mm"].apply(_parse_bool_val)
@@ -5096,8 +5103,9 @@ def generate_step02_publication_figures(
                     ax_t.set_aspect("equal", adjustable="datalim")
                     ax_t.invert_yaxis()
 
+            type_tag = " [TYPE]" if bool(row.get("is_type_bool", False)) else ""
             col_hdr = f"{pct_labels[col_idx]}\n" if row_idx == 0 else ""
-            ax_t.set_title(f"{col_hdr}{cat_num} (L{leaf_id}) | AR={ar_v:.2f}, Sol={sol_v:.2f}", fontsize=7.6, fontweight="bold")
+            ax_t.set_title(f"{col_hdr}{cat_num}{type_tag} (L{leaf_id}) | AR={ar_v:.2f}, Sol={sol_v:.2f}", fontsize=7.6, fontweight="bold")
             if col_idx == 0:
                 ax_t.set_ylabel(SPECIES_ITALIC[sp_name], fontsize=9.8, fontweight="bold", color=sp_col, labelpad=6)
             ax_t.set_xticks([])

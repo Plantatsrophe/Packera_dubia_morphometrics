@@ -419,9 +419,22 @@ def compute_type_visual_control(
         c_mask = y == c
         t_mask = c_mask & is_type_m
         if np.any(t_mask):
-            prim_mask = c_mask & (type_ranks == 2)
-            sub_X = X[prim_mask] if np.any(prim_mask) else X[t_mask]
-            proto = np.mean(sub_X, axis=0)
+            t_idx = np.where(t_mask)[0]
+            w_t = np.where(type_ranks[t_idx] == 2, 2.0, 1.0).astype(np.float64)
+            proto_type = np.average(X[t_idx], axis=0, weights=w_t)
+            proto_type = proto_type / max(float(np.linalg.norm(proto_type)), 1e-8)
+            if len(t_idx) == 1:
+                g_non_type_mask = c_mask & is_gold_m & (~is_type_m)
+                if int(np.sum(g_non_type_mask)) >= 3:
+                    X_g = X[g_non_type_mask]
+                    med_g_idx = int(np.argmax(np.mean(X_g @ X_g.T, axis=1)))
+                    med_g = X_g[med_g_idx] / max(float(np.linalg.norm(X_g[med_g_idx])), 1e-8)
+                    proto = 0.80 * proto_type + 0.20 * med_g
+                    proto = proto / max(float(np.linalg.norm(proto)), 1e-8)
+                else:
+                    proto = proto_type
+            else:
+                proto = proto_type
         else:
             g_mask = c_mask & is_gold_m
             sub_X = X[g_mask] if np.any(g_mask) else (X[c_mask] if np.any(c_mask) else X)
@@ -452,4 +465,87 @@ def compute_type_visual_control(
         "vision_nearest_type_taxon": nearest_taxa,
         "vision_type_margin": np.round(margin, 4),
     }
+
+
+def fit_calibrated_oof_fold_classifier(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    w_train: np.ndarray,
+    min_cls: int,
+    random_state: int = 42,
+) -> Any:
+    """Fit cross-validated L2 logistic regression and propagate optimal `C_` into sigmoid Platt calibration with bounded sample weights."""
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
+
+    w_arr = np.asarray(w_train, dtype=np.float64)
+    w_mean = max(float(np.mean(w_arr)) if len(w_arr) > 0 else 1.0, 1e-8)
+    w_norm = np.clip(w_arr / w_mean, 0.35, 3.0)
+    if min_cls >= 2:
+        base_clf: Any = LogisticRegressionCV(
+            Cs=10,
+            cv=min(3, min_cls),
+            max_iter=2000,
+            class_weight="balanced",
+            random_state=random_state,
+            scoring="neg_log_loss",
+        )
+    else:
+        base_clf = LogisticRegression(
+            max_iter=2000, C=0.25, class_weight="balanced", random_state=random_state
+        )
+    base_clf.fit(X_train, y_train, sample_weight=w_norm)
+    c_attr = getattr(base_clf, "C_", None)
+    best_c = (
+        float(np.clip(np.median(np.asarray(c_attr, dtype=np.float64)), 0.01, 10.0))
+        if c_attr is not None
+        else 0.25
+    )
+    if min_cls >= 3:
+        try:
+            cal_est = LogisticRegression(
+                max_iter=2000, C=best_c, class_weight="balanced", random_state=random_state
+            )
+            clf = CalibratedClassifierCV(
+                estimator=cal_est, method="sigmoid", cv=min(3, min_cls)
+            )
+            clf.fit(X_train, y_train, sample_weight=w_norm)
+            return clf
+        except Exception:
+            return base_clf
+    return base_clf
+
+
+def overlay_chromatic_type_anchors(
+    ax: Any,
+    df: pd.DataFrame,
+    lum_vals: np.ndarray,
+    sat_vals: np.ndarray,
+) -> None:
+    """Overplot nomenclatural type specimens in foliar chromatic space using hollow diamond markers."""
+    if df is None or len(df) == 0 or "is_type_specimen" not in df.columns:
+        return
+    type_mask = np.array(
+        [
+            bool(v)
+            if isinstance(v, (bool, np.bool_))
+            else str(v).strip().lower() in {"true", "1", "yes", "t"}
+            for v in df["is_type_specimen"]
+        ],
+        dtype=bool,
+    )
+    if np.any(type_mask):
+        ax.scatter(
+            lum_vals[type_mask],
+            sat_vals[type_mask],
+            facecolors="none",
+            edgecolors="#111111",
+            marker="D",
+            s=78,
+            linewidths=1.6,
+            zorder=6,
+            label="Nomenclatural Type",
+        )
+
+
 

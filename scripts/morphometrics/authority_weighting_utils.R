@@ -465,6 +465,26 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
   diag(v_diag, nrow = p, ncol = p)
 }
 
+.compute_type_shrinkage_gamma <- function(n_eff_type, n_ref, type_prior_mult = 2.5, max_gamma = 0.35) {
+  n_t <- max(0.0, as.numeric(n_eff_type))
+  if (!is.finite(n_t) || n_t <= 0.0) return(0.0)
+  n_r <- max(1.0, as.numeric(n_ref))
+  min(as.numeric(max_gamma), (type_prior_mult * n_t) / (n_r + type_prior_mult * n_t))
+}
+
+.count_effective_type_gatherings <- function(df, row_idx) {
+  k_len <- length(row_idx)
+  if (k_len == 0L) return(0.0)
+  if (!is.null(df) && "exsiccatae_key" %in% names(df)) {
+    ek <- trimws(as.character(df$exsiccatae_key[row_idx]))
+    valid_ek <- !is.na(ek) & nzchar(ek) & !(tolower(ek) %in% c("na", "none", "null", "unknown"))
+    n_distinct_ek <- length(unique(ek[valid_ek]))
+    n_no_ek <- sum(!valid_ek)
+    return(as.numeric(max(1L, n_distinct_ek + n_no_ek)))
+  }
+  as.numeric(max(1L, k_len))
+}
+
 select_adaptive_reference_anchors <- function(
   df,
   feature_matrix = NULL,
@@ -532,8 +552,10 @@ select_adaptive_reference_anchors <- function(
     idx_gs <- which(is_gs & (taxa_vec == tx))
     idx_gs_clean <- idx_gs
     gs_type_local <- is_type_valid[idx_gs]
-    n_type_k <- sum(gs_type_local)
-    gamma_k <- if (n_type_k > 0L) min(0.35, 0.20 + 0.05 * n_type_k) else 0.0
+    idx_type_k <- idx_gs[gs_type_local]
+    n_type_k <- length(idx_type_k)
+    n_eff_type_k <- if (n_type_k > 0L) .count_effective_type_gatherings(df, idx_type_k) else 0.0
+    gamma_k <- if (n_type_k > 0L) .compute_type_shrinkage_gamma(n_eff_type_k, length(idx_gs)) else 0.0
 
     # Step 1: Within-taxon robust MCD / medoid Mahalanobis pruning of Gold + Silver (chi-sq_0.95, p)
     # Heteroblasty-aware: when a taxon has >= 3 entire AND >= 3 dissected Gold+Silver anchors,
@@ -547,10 +569,29 @@ select_adaptive_reference_anchors <- function(
           col_sub <- which(v_ok)
           X_gs <- X_gs_raw[, col_sub, drop = FALSE]
           p_eff <- ncol(X_gs)
-          mu_type_gs <- if (n_type_k > 0L) {
-            .compute_robust_taxon_medoid(X_gs[which(gs_type_local), , drop = FALSE])
+          extreme_type_local <- rep(FALSE, nrow(X_gs))
+          if (any(gs_type_local) && sum(!gs_type_local) >= 5L) {
+            X_nt <- X_gs[!gs_type_local, , drop = FALSE]
+            mu_nt <- .compute_robust_taxon_medoid(X_nt)
+            cov_nt_raw <- stats::cov(X_nt)
+            cov_nt_raw[!is.finite(cov_nt_raw)] <- 0.0
+            reg_nt <- max(1e-4, 0.05 * max(mean(diag(cov_nt_raw), na.rm = TRUE), 1e-4))
+            S_nt <- cov_nt_raw + diag(reg_nt, nrow = p_eff, ncol = p_eff)
+            type_pos <- which(gs_type_local)
+            d2_type_prelim <- tryCatch(
+              stats::mahalanobis(X_gs[type_pos, , drop = FALSE], center = mu_nt, cov = S_nt),
+              error = function(e) rep(0.0, length(type_pos))
+            )
+            extreme_type_local[type_pos] <- is.finite(d2_type_prelim) & (d2_type_prelim > stats::qchisq(0.99, df = p_eff))
+          }
+          non_ext_type_pos <- which(gs_type_local & !extreme_type_local)
+          if (n_type_k > 0L && length(non_ext_type_pos) == 0L && sum(!gs_type_local) >= 5L) {
+            mu_type_gs <- NULL
+            gamma_k <- 0.0
+          } else if (length(non_ext_type_pos) > 0L) {
+            mu_type_gs <- .compute_robust_taxon_medoid(X_gs[non_ext_type_pos, , drop = FALSE])
           } else {
-            NULL
+            mu_type_gs <- NULL
           }
           gs_dis_pos <- which(is_dis_mode[idx_gs])
           gs_ent_pos <- which(!is_dis_mode[idx_gs])
@@ -559,25 +600,28 @@ select_adaptive_reference_anchors <- function(
             S_sub_pool <- if (!is.null(S_pool)) S_pool[col_sub, col_sub, drop = FALSE] else (stats::cov(X_gs) + diag(1e-4, nrow = p_eff, ncol = p_eff))
             for (pos_m in list(gs_ent_pos, gs_dis_pos)) {
               Xm <- X_gs[pos_m, , drop = FALSE]
-              rob_m <- NULL; q_m <- nrow(Xm)
-              if (nrow(Xm) >= max(12L, p_eff + 4L) && requireNamespace("MASS", quietly = TRUE)) {
-                q_m <- min(nrow(Xm) - 1L, max(floor(0.80 * nrow(Xm)), floor((nrow(Xm) + p_eff + 1L) / 2L)))
-                rob_m <- .fit_fast_mcd_cov(Xm, q_used = q_m, allow_parallel = !par_taxa)
+              pos_m_fit <- pos_m[!extreme_type_local[pos_m]]
+              if (length(pos_m_fit) < 3L) pos_m_fit <- pos_m
+              Xm_fit <- X_gs[pos_m_fit, , drop = FALSE]
+              rob_m <- NULL; q_m <- nrow(Xm_fit)
+              if (nrow(Xm_fit) >= max(12L, p_eff + 4L) && requireNamespace("MASS", quietly = TRUE)) {
+                q_m <- min(nrow(Xm_fit) - 1L, max(floor(0.80 * nrow(Xm_fit)), floor((nrow(Xm_fit) + p_eff + 1L) / 2L)))
+                rob_m <- .fit_fast_mcd_cov(Xm_fit, q_used = q_m, allow_parallel = !par_taxa)
               }
-              cent_raw_m <- if (!is.null(rob_m)) rob_m$center else .compute_robust_taxon_medoid(Xm)
+              cent_raw_m <- if (!is.null(rob_m)) rob_m$center else .compute_robust_taxon_medoid(Xm_fit)
               cent_m <- cent_raw_m
               cov_shift_m <- matrix(0.0, nrow = p_eff, ncol = p_eff)
-              if (!is.null(mu_type_gs)) {
-                sub_types <- pos_m[gs_type_local[pos_m]]
+              if (!is.null(mu_type_gs) && gamma_k > 0.0) {
+                sub_types <- pos_m[gs_type_local[pos_m] & !extreme_type_local[pos_m]]
                 mu_sub <- if (length(sub_types) > 0L) .compute_robust_taxon_medoid(X_gs[sub_types, , drop = FALSE]) else mu_type_gs
                 cent_m <- (1.0 - gamma_k) * cent_raw_m + gamma_k * mu_sub
                 d_mu_m <- cent_m - cent_raw_m
                 cov_shift_m <- tcrossprod(d_mu_m) + diag(sum(d_mu_m^2) / max(1.0, p_eff), nrow = p_eff, ncol = p_eff)
               }
               cov_m <- (if (!is.null(rob_m)) {
-                .mcd_consistency_factor(q_m / nrow(Xm), p_eff) * rob_m$cov + diag(1e-5, nrow = p_eff, ncol = p_eff)
-              } else if (nrow(Xm) >= (p_eff + 3L)) {
-                0.65 * stats::cov(Xm) + 0.35 * S_sub_pool + diag(1e-5, nrow = p_eff, ncol = p_eff)
+                .mcd_consistency_factor(q_m / nrow(Xm_fit), p_eff) * rob_m$cov + diag(1e-5, nrow = p_eff, ncol = p_eff)
+              } else if (nrow(Xm_fit) >= (p_eff + 3L)) {
+                0.65 * stats::cov(Xm_fit) + 0.35 * S_sub_pool + diag(1e-5, nrow = p_eff, ncol = p_eff)
               } else {
                 S_sub_pool + diag(1e-4, nrow = p_eff, ncol = p_eff)
               }) + cov_shift_m
@@ -586,20 +630,21 @@ select_adaptive_reference_anchors <- function(
               if (any(dr_m) && sum(!dr_m) >= 2L) drop_gs[pos_m[dr_m]] <- TRUE
             }
           } else {
-            rob_gs <- NULL; q_mcd <- nrow(X_gs)
-            if (nrow(X_gs) >= 15L && requireNamespace("MASS", quietly = TRUE)) {
-              q_mcd <- min(nrow(X_gs) - 1L, max(floor(0.80 * nrow(X_gs)), floor((nrow(X_gs) + p_eff + 1L) / 2L)))
-              rob_gs <- .fit_fast_mcd_cov(X_gs, q_used = q_mcd, allow_parallel = !par_taxa)
+            X_gs_fit <- if (any(extreme_type_local) && sum(!extreme_type_local) >= 5L) X_gs[!extreme_type_local, , drop = FALSE] else X_gs
+            rob_gs <- NULL; q_mcd <- nrow(X_gs_fit)
+            if (nrow(X_gs_fit) >= 15L && requireNamespace("MASS", quietly = TRUE)) {
+              q_mcd <- min(nrow(X_gs_fit) - 1L, max(floor(0.80 * nrow(X_gs_fit)), floor((nrow(X_gs_fit) + p_eff + 1L) / 2L)))
+              rob_gs <- .fit_fast_mcd_cov(X_gs_fit, q_used = q_mcd, allow_parallel = !par_taxa)
             }
-            center_raw_gs <- if (!is.null(rob_gs)) rob_gs$center else .compute_robust_taxon_medoid(X_gs)
+            center_raw_gs <- if (!is.null(rob_gs)) rob_gs$center else .compute_robust_taxon_medoid(X_gs_fit)
             center_gs <- center_raw_gs
             cov_shift_gs <- matrix(0.0, nrow = p_eff, ncol = p_eff)
-            if (!is.null(mu_type_gs)) {
+            if (!is.null(mu_type_gs) && gamma_k > 0.0) {
               center_gs <- (1.0 - gamma_k) * center_raw_gs + gamma_k * mu_type_gs
               d_mu_gs <- center_gs - center_raw_gs
               cov_shift_gs <- tcrossprod(d_mu_gs) + diag(sum(d_mu_gs^2) / max(1.0, p_eff), nrow = p_eff, ncol = p_eff)
             }
-            cov_gs <- (if (!is.null(rob_gs)) (.mcd_consistency_factor(q_mcd / nrow(X_gs), p_eff) * rob_gs$cov + diag(1e-5, nrow = p_eff, ncol = p_eff)) else (stats::cov(X_gs) + diag(1e-4, nrow = p_eff, ncol = p_eff))) + cov_shift_gs
+            cov_gs <- (if (!is.null(rob_gs)) (.mcd_consistency_factor(q_mcd / nrow(X_gs_fit), p_eff) * rob_gs$cov + diag(1e-5, nrow = p_eff, ncol = p_eff)) else (stats::cov(X_gs_fit) + diag(1e-4, nrow = p_eff, ncol = p_eff))) + cov_shift_gs
             d2_gs <- tryCatch(stats::mahalanobis(X_gs, center = center_gs, cov = cov_gs), error = function(e) rep(0.0, nrow(X_gs)))
             drop_gs <- is.finite(d2_gs) & (d2_gs > stats::qchisq(mahal_q_gold_silver, df = p_eff))
           }
@@ -728,8 +773,13 @@ compute_ledoit_wolf_cov <- function(
   X_centered = NULL,
   n_obs = NULL,
   min_lambda = 1e-5,
-  max_lambda = 0.25
+  max_lambda = 0.25,
+  weights = NULL,
+  min_shrinkage = NULL,
+  max_shrinkage = NULL
 ) {
+  if (!is.null(min_shrinkage)) min_lambda <- min_shrinkage
+  if (!is.null(max_shrinkage)) max_lambda <- max_shrinkage
   S_mat <- as.matrix(S_w)
   p <- ncol(S_mat)
   dn <- dimnames(S_mat)
@@ -754,31 +804,59 @@ compute_ledoit_wolf_cov <- function(
   delta2 <- sum(diff_target * diff_target) / p
 
   lambda_raw <- min_l
+  n_eff_used <- NA_real_
   if (is.finite(delta2) && delta2 > 1e-16) {
     if (!is.null(X_centered)) {
-      Xc <- as.matrix(X_centered)
-      valid_rows <- apply(Xc, 1L, function(r) all(is.finite(r)))
-      Xc <- Xc[valid_rows, , drop = FALSE]
-      n_c <- nrow(Xc)
-      if (n_c >= 2L && ncol(Xc) == p) {
-        emp_tr <- sum(Xc * Xc) / n_c
+      Xc_in <- as.matrix(X_centered)
+      valid_rows <- apply(Xc_in, 1L, function(r) all(is.finite(r)))
+      Xc <- Xc_in[valid_rows, , drop = FALSE]
+      n_raw <- nrow(Xc)
+      w_sub <- if (!is.null(weights) && length(weights) == nrow(Xc_in)) suppressWarnings(as.numeric(weights))[valid_rows] else NULL
+      use_w <- !is.null(w_sub) && all(is.finite(w_sub)) && sum(w_sub > 0.0) >= 2L
+      if (use_w) {
+        w_pos <- pmax(0.0, as.numeric(w_sub))
+        n_eff <- (sum(w_pos)^2) / max(sum(w_pos^2), 1e-12)
+        n_c <- max(2.0, n_eff)
+        w_norm <- w_pos / sum(w_pos)
+      } else {
+        n_c <- as.numeric(n_raw)
+        w_norm <- rep(1.0 / max(1L, n_raw), n_raw)
+      }
+      n_eff_used <- n_c
+      if (n_raw >= 2L && ncol(Xc) == p) {
+        emp_tr <- sum((Xc * Xc) * w_norm)
         if (is.finite(emp_tr) && emp_tr > 1e-12 && tr_s > 1e-12) {
           Xc <- Xc * sqrt(tr_s / emp_tr)
         }
+        X_w <- Xc * sqrt(w_norm * n_c)
+        Q_mat <- crossprod(X_w^2)
         q_i <- rowSums(Xc * Xc)
         s_norm2 <- sum(S_mat * S_mat)
         cross_i <- rowSums((Xc %*% S_mat) * Xc)
-        b_bar2 <- mean(pmax(0.0, q_i * q_i - 2.0 * cross_i + s_norm2)) / (p * n_c)
+        u_w <- pmax(0.0, n_c * (w_norm^2))
+        u_w <- u_w / max(sum(u_w), 1e-12)
+        b_bar2 <- sum(u_w * pmax(0.0, q_i * q_i - 2.0 * cross_i + s_norm2)) / (p * n_c)
         beta2 <- min(delta2, max(0.0, b_bar2))
         lambda_raw <- beta2 / delta2
       }
     } else {
-      n_eff <- if (!is.null(n_obs) && is.finite(as.numeric(n_obs))) max(2.0, as.numeric(n_obs)) else max(2.0, as.numeric(p) + 2.0)
+      w_ok <- !is.null(weights) && length(weights) >= 2L && sum(is.finite(weights) & weights > 0.0) >= 2L
+      n_eff <- if (w_ok) {
+        w_pos <- pmax(0.0, as.numeric(weights[is.finite(weights)]))
+        max(2.0, (sum(w_pos)^2) / max(sum(w_pos^2), 1e-12))
+      } else if (!is.null(n_obs) && is.finite(as.numeric(n_obs))) {
+        max(2.0, as.numeric(n_obs))
+      } else {
+        max(2.0, as.numeric(p) + 2.0)
+      }
+      n_eff_used <- n_eff
       tr_s2 <- sum(S_mat * S_mat)
       denom_oas <- (n_eff + 1.0 - 2.0 / p) * (tr_s2 - (tr_s * tr_s) / p)
       if (is.finite(denom_oas) && denom_oas > 1e-16) {
         num_oas <- (1.0 - 2.0 / p) * tr_s2 + (tr_s * tr_s)
         lambda_raw <- num_oas / denom_oas
+      } else {
+        lambda_raw <- min(0.50, p / max(1.0, as.numeric(n_eff) * 2.0))
       }
     }
   }
@@ -788,7 +866,72 @@ compute_ledoit_wolf_cov <- function(
   S_reg <- 0.5 * (S_reg + t(S_reg))
   dimnames(S_reg) <- dn
   attr(S_reg, "shrinkage_lambda") <- lambda
+  attr(S_reg, "n_eff") <- n_eff_used
   S_reg
+}
+
+compute_weighted_shrinkage_cda_loocv <- function(X_a, y_a, w_a = NULL) {
+  X_a <- as.matrix(X_a)
+  storage.mode(X_a) <- "double"
+  y_f <- droplevels(as.factor(y_a))
+  g_levels <- levels(y_f)
+  K <- length(g_levels)
+  N_a <- nrow(X_a)
+  p <- ncol(X_a)
+  if (N_a < K + 2L || K < 2L || p < 1L) return(NA_real_)
+  if (is.null(w_a) || length(w_a) != N_a) {
+    w_a <- rep(1.0, N_a)
+  } else {
+    w_a <- suppressWarnings(as.numeric(w_a))
+    w_a[!is.finite(w_a) | w_a < 0.0] <- 0.0
+    if (sum(w_a) <= 1e-12) w_a <- rep(1.0, N_a)
+  }
+
+  mu_k <- matrix(0.0, nrow = K, ncol = p, dimnames = list(g_levels, colnames(X_a)))
+  W_mat <- matrix(0.0, nrow = p, ncol = p)
+  X_c <- matrix(0.0, nrow = N_a, ncol = p)
+  W_vec <- numeric(K)
+  w_corr_sum <- 0.0
+
+  for (k in seq_len(K)) {
+    idx_k <- which(as.integer(y_f) == k)
+    wk <- w_a[idx_k]
+    sw_k <- sum(wk)
+    if (sw_k <= 1e-12) {
+      wk <- rep(1.0, length(idx_k))
+      sw_k <- sum(wk)
+    }
+    W_vec[k] <- sw_k
+    w_corr_sum <- w_corr_sum + (sum(wk^2) / sw_k)
+    Xk <- X_a[idx_k, , drop = FALSE]
+    mk <- colSums(Xk * wk) / sw_k
+    mu_k[k, ] <- mk
+    diff_k <- sweep(Xk, 2L, mk, "-")
+    X_c[idx_k, ] <- diff_k
+    W_mat <- W_mat + crossprod(diff_k, diff_k * wk)
+  }
+
+  denom_w <- max(sum(w_a) - w_corr_sum, 1.0)
+  S_w <- W_mat / denom_w
+  S_reg <- compute_ledoit_wolf_cov(S_w, X_centered = X_c, n_obs = N_a, weights = w_a)
+  if (is.list(S_reg) && !is.null(S_reg$S_reg)) S_reg <- S_reg$S_reg
+  S_inv <- tryCatch(solve(S_reg), error = function(e) diag(1.0 / pmax(diag(S_reg), 1e-6), nrow = p, ncol = p))
+
+  priors <- rep(1.0 / K, K)
+  pred_loo <- character(N_a)
+  for (i in seq_len(N_a)) {
+    k_i <- as.integer(y_f[i])
+    w_i <- w_a[i]
+    W_k <- W_vec[k_i]
+    mu_k_loo <- mu_k
+    if (W_k > w_i + 1e-8) {
+      mu_k_loo[k_i, ] <- (W_k * mu_k[k_i, ] - w_i * X_a[i, ]) / (W_k - w_i)
+    }
+    diff_i <- sweep(mu_k_loo, 2L, X_a[i, ], "-")
+    d2_i <- rowSums((diff_i %*% S_inv) * diff_i) - 2.0 * log(priors)
+    pred_loo[i] <- g_levels[which.min(d2_i)]
+  }
+  round(mean(pred_loo == as.character(y_f), na.rm = TRUE), 4)
 }
 
 solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
@@ -1005,8 +1148,18 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
   L_pc
 }
 
-.extract_specimen_discordance_signals <- function(df, eval_mask) {
+.extract_specimen_discordance_signals <- function(
+  df,
+  eval_mask = NULL,
+  taxon_col = "scientificName",
+  pc_cols = NULL,
+  target_modality = c("all", "morph", "vision", "ecological")
+) {
+  target_modality <- match.arg(target_modality, c("all", "morph", "vision", "ecological"))
   n <- nrow(df)
+  if (is.null(eval_mask) || is.character(eval_mask) || length(eval_mask) != n) {
+    eval_mask <- rep(TRUE, n)
+  }
   err_cols <- intersect(
     c("dawid_skene_error_rate", "label_error_rate", "error_rate_k", "c_error", "loo_discordance", "loo_error_rate"),
     names(df)
@@ -1037,10 +1190,13 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
     cur_eps
   }
 
-  if ("is_label_corrupted" %in% names(df)) {
+  if ("exsiccatae_taxonomic_conflict" %in% names(df)) {
+    eps_err <- apply_bool_flag(eps_err, df$exsiccatae_taxonomic_conflict, pos_rate = 0.85, neg_rate = 0.05)
+  }
+  if (target_modality != "vision" && "is_label_corrupted" %in% names(df)) {
     eps_err <- apply_bool_flag(eps_err, df$is_label_corrupted, pos_rate = 0.85, neg_rate = 0.05)
   }
-  if ("morphometric_outlier_flag" %in% names(df)) {
+  if (target_modality != "morph" && "morphometric_outlier_flag" %in% names(df)) {
     eps_err <- apply_bool_flag(eps_err, df$morphometric_outlier_flag, pos_rate = 0.75, neg_rate = 0.05)
   }
   if ("multimodal_conflict_flag" %in% names(df)) {
@@ -1055,9 +1211,12 @@ compute_empirical_bayes_authority_weights <- function(
   active_mask = NULL,
   prior_alpha = 5.0,
   anchor_info = NULL,
+  target_modality = c("all", "morph", "vision", "ecological"),
+  taxon_col = "species_standardized",
   ...
 ) {
   mode <- match.arg(mode)
+  target_modality <- match.arg(target_modality, c("all", "morph", "vision", "ecological"))
   if (is.null(df) || nrow(df) == 0L) return(numeric(0))
   n <- nrow(df)
   if (is.null(active_mask) && !is.null(anchor_info) && is.list(anchor_info) && !is.null(anchor_info$active_mask)) {
@@ -1069,7 +1228,7 @@ compute_empirical_bayes_authority_weights <- function(
   type_rank <- type_info$type_rank
   is_type_mask <- type_info$is_type_specimen
   det_tier <- .standardize_determiner_tier_vec(df)
-  taxa_vec <- .resolve_authority_taxon_vec(df, taxon_col = "species_standardized")
+  taxa_vec <- .resolve_authority_taxon_vec(df, taxon_col = taxon_col)
   det_id <- .normalize_determiner_id_vec(df)
 
   is_promoted <- rep(FALSE, n)
@@ -1132,18 +1291,29 @@ compute_empirical_bayes_authority_weights <- function(
   }
 
   blend_tier_and_determiner <- function(conc_vec, obs_mask) {
-    theta_cell <- pi_vec
-    cell_keys <- paste0(taxa_vec, "||", tier_cell)
-    for (ck in unique(cell_keys[eval_mask])) {
-      idx_all <- which(eval_mask & (cell_keys == ck))
+    theta_tier <- pi_vec
+    for (tc in unique(tier_cell[eval_mask])) {
+      idx_t_all <- which(eval_mask & (tier_cell == tc))
+      idx_t_obs <- idx_t_all[obs_mask[idx_t_all]]
+      pi_t <- pi_vec[idx_t_all[1L]]
+      n_t <- length(idx_t_obs)
+      s_t <- if (n_t > 0L) sum(conc_vec[idx_t_obs]) else 0.0
+      theta_tier[idx_t_all] <- (alpha0 * pi_t + s_t) / (alpha0 + n_t)
+    }
+
+    theta_taxon_tier <- pi_vec
+    taxon_tier_cell <- paste0(taxa_vec, "||", tier_cell)
+    for (ck in unique(taxon_tier_cell[eval_mask])) {
+      idx_all <- which(eval_mask & (taxon_tier_cell == ck))
       idx_obs <- idx_all[obs_mask[idx_all]]
       pi_t <- pi_vec[idx_all[1L]]
       n_c <- length(idx_obs)
       s_c <- if (n_c > 0L) sum(conc_vec[idx_obs]) else 0.0
-      theta_cell[idx_all] <- (alpha0 * pi_t + s_c) / (alpha0 + n_c)
+      theta_taxon_tier[idx_all] <- (alpha0 * pi_t + s_c) / (alpha0 + n_c)
     }
 
-    theta_blend <- theta_cell
+    theta_cell_blend <- 0.50 * theta_tier + 0.50 * theta_taxon_tier
+    theta_blend <- theta_cell_blend
     known_dets <- unique(det_id[eval_mask & !is.na(det_id)])
     if (length(known_dets) > 0L) {
       for (d_key in known_dets) {
@@ -1159,14 +1329,14 @@ compute_empirical_bayes_authority_weights <- function(
         } else {
           theta_d_i <- rep(theta_d, length(idx_d_all))
         }
-        gamma_d <- n_d / (0.5 * alpha0 + n_d)
-        theta_blend[idx_d_all] <- gamma_d * theta_d_i + (1.0 - gamma_d) * theta_cell[idx_d_all]
+        lambda_d <- n_d / (0.5 * alpha0 + n_d)
+        theta_blend[idx_d_all] <- (1.0 - lambda_d) * theta_cell_blend[idx_d_all] + lambda_d * theta_d_i
       }
     }
     pmax(0.05, pmin(0.995, theta_blend))
   }
 
-  eps_err <- .extract_specimen_discordance_signals(df, eval_mask)
+  eps_err <- .extract_specimen_discordance_signals(df, eval_mask = eval_mask, target_modality = target_modality)
 
   is_art <- if ("is_artifact_driven" %in% names(df)) {
     av <- as.logical(df$is_artifact_driven)
@@ -1188,27 +1358,45 @@ compute_empirical_bayes_authority_weights <- function(
   }
 
   pred_sources <- list()
-  if ("cda_predicted_taxon" %in% names(df)) {
+  if ("exsiccatae_gold_taxon" %in% names(df)) {
+    p_ex <- safe_std_tx(df$exsiccatae_gold_taxon)
+    valid_ex <- !is.na(p_ex) & nzchar(p_ex) & !(tolower(p_ex) %in% c("na", "none", "unknown", "unassigned_packera"))
+    if (any(valid_ex)) {
+      pred_sources[["exsiccatae"]] <- list(taxon = p_ex, conf = rep(0.92, n), valid = valid_ex)
+    }
+  }
+  if (target_modality != "morph" && "cda_predicted_taxon" %in% names(df)) {
     p_cda <- safe_std_tx(df$cda_predicted_taxon)
     c_cda <- if ("cda_posterior_prob" %in% names(df)) suppressWarnings(as.numeric(df$cda_posterior_prob)) else rep(0.82, n)
     c_cda[!is.finite(c_cda)] <- 0.82
     pred_sources[["cda"]] <- list(taxon = p_cda, conf = pmax(0.55, pmin(0.92, c_cda)), valid = rep(TRUE, n))
   }
   vis_col <- if ("vision_predicted_label" %in% names(df)) "vision_predicted_label" else if ("predicted_label" %in% names(df)) "predicted_label" else NULL
-  if (!is.null(vis_col)) {
+  if (target_modality != "vision" && !is.null(vis_col)) {
     p_vis <- safe_std_tx(df[[vis_col]])
     pred_sources[["vision"]] <- list(taxon = p_vis, conf = rep(0.82, n), valid = !is_art)
   }
-  rf_col <- if ("rf_predicted_taxon" %in% names(df)) "rf_predicted_taxon" else if ("edaphic_best_fit_taxon" %in% names(df)) "edaphic_best_fit_taxon" else NULL
-  if (!is.null(rf_col)) {
-    p_rf <- safe_std_tx(df[[rf_col]])
-    pred_sources[["rf"]] <- list(taxon = p_rf, conf = rep(0.78, n), valid = rep(TRUE, n))
+  if (target_modality != "ecological") {
+    if ("rf_predicted_taxon" %in% names(df)) {
+      p_rf <- safe_std_tx(df$rf_predicted_taxon)
+      pred_sources[["rf"]] <- list(taxon = p_rf, conf = rep(0.78, n), valid = rep(TRUE, n))
+    }
+    if ("edaphic_best_fit_taxon" %in% names(df)) {
+      p_ed <- safe_std_tx(df$edaphic_best_fit_taxon)
+      pred_sources[["edaphic"]] <- list(taxon = p_ed, conf = rep(0.75, n), valid = rep(TRUE, n))
+    }
   }
 
   bad_tx <- c("", "Unknown", "Unassigned_Packera", "NA")
   valid_taxa <- sort(unique(taxa_vec[eval_mask & !is.na(taxa_vec) & !(taxa_vec %in% bad_tx)]))
   G <- length(valid_taxa)
-  L_pc <- if (G >= 2L) .compute_loo_pc_likelihoods(df, taxa_vec, det_tier, is_promoted, eval_mask, valid_taxa, pi_vec) else NULL
+  exog_cols <- intersect(
+    c("exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon", "vision_predicted_label", "is_label_corrupted", "rf_predicted_taxon", "edaphic_best_fit_taxon"),
+    names(df)
+  )
+  has_exog_signals <- length(exog_cols) > 0L && any(vapply(exog_cols, function(cl) any(!is.na(df[[cl]]) & nzchar(trimws(as.character(df[[cl]])))), logical(1)))
+  use_loo_pc <- (G >= 2L) && (target_modality != "morph" || !has_exog_signals)
+  L_pc <- if (use_loo_pc) .compute_loo_pc_likelihoods(df, taxa_vec, det_tier, is_promoted, eval_mask, valid_taxa, pi_vec) else NULL
 
   y_idx <- match(taxa_vec, valid_taxa)
   has_ds_Row <- rep(FALSE, n)
@@ -1425,6 +1613,14 @@ compute_empirical_bayes_authority_weights <- function(
   round(pmax(0.5, pmin(3.0, w_cont)), 6)
 }
 
+compute_authority_precision_weights <- function(df, tier_col = "determiner_tier", active_mask = NULL, target_modality = "morph") {
+  if (is.logical(tier_col) && is.null(active_mask)) {
+    active_mask <- tier_col
+    tier_col <- "determiner_tier"
+  }
+  compute_empirical_bayes_authority_weights(df, mode = "active_passive", active_mask = active_mask, target_modality = target_modality)
+}
+
 screen_gmm_point_mass_columns <- function(X_mat, ref_mask = NULL, max_tie_frac = 0.25) {
   X_mat <- as.matrix(X_mat)
   cn <- colnames(X_mat)
@@ -1607,7 +1803,8 @@ compute_type_specimen_morph_control <- function(
   gmm_res = NULL,
   flags = NULL,
   triage = NULL,
-  reasons = NULL
+  reasons = NULL,
+  taxon_col = "species_standardized"
 ) {
   n <- if (is.null(df)) 0L else nrow(df)
   if (n == 0L) {
@@ -1681,7 +1878,7 @@ compute_type_specimen_morph_control <- function(
     error = function(e) diag(1.0 / pmax(diag(S_reg), 1e-5), nrow = p, ncol = p)
   )
 
-  taxa_vec <- .resolve_authority_taxon_vec(df, taxon_col = "species_standardized")
+  taxa_vec <- .resolve_authority_taxon_vec(df, taxon_col = taxon_col)
   if (all(taxa_vec == "Unassigned_Packera") && !is.null(cda_res) && !is.null(cda_res$grouping_col)) {
     taxa_vec <- as.character(cda_res$grouping_col)
   }
@@ -1727,6 +1924,8 @@ compute_type_specimen_morph_control <- function(
   type_centroids <- matrix(0.0, nrow = G, ncol = p, dimnames = list(active_taxa, colnames(X_mat)))
   has_emp_map <- stats::setNames(rep(FALSE, G), active_taxa)
   typical_cl_map <- stats::setNames(rep(NA_integer_, G), active_taxa)
+  n_eff_type_vec <- stats::setNames(numeric(G), active_taxa)
+  type_anchor_rows_list <- stats::setNames(vector("list", G), active_taxa)
 
   for (k in seq_len(G)) {
     tx_k <- active_taxa[k]
@@ -1737,18 +1936,21 @@ compute_type_specimen_morph_control <- function(
     }
     if (length(type_rows_k) > 0L) {
       has_emp_map[tx_k] <- TRUE
+      prim_k <- type_rows_k[type_rank[type_rows_k] == 2L]
+      pool_k <- if (length(type_rows_k) >= 3L && length(prim_k) > 0L) prim_k else type_rows_k
+      type_anchor_rows_list[[tx_k]] <- pool_k
+      n_eff_type_vec[tx_k] <- .count_effective_type_gatherings(df, pool_k)
       if (length(type_rows_k) == 1L) {
         mu_k <- as.numeric(X_mat[type_rows_k, ])
       } else if (length(type_rows_k) == 2L) {
         w_t <- ifelse(type_rank[type_rows_k] == 2L, 2.0, 1.0)
         mu_k <- as.numeric(colSums(X_mat[type_rows_k, , drop = FALSE] * w_t) / sum(w_t))
       } else {
-        prim_k <- type_rows_k[type_rank[type_rows_k] == 2L]
-        pool_k <- if (length(prim_k) > 0L) prim_k else type_rows_k
         mu_k <- .compute_robust_taxon_medoid(X_mat[pool_k, , drop = FALSE], S_inv = S_inv)
       }
     } else {
       has_emp_map[tx_k] <- FALSE
+      type_anchor_rows_list[[tx_k]] <- integer(0)
       gold_rows_k <- tx_rows[(det_tier[tx_rows] == "Tier_1_Gold") & is_t1_pure[tx_rows]]
       if (length(gold_rows_k) == 0L) {
         gold_rows_k <- tx_rows[det_tier[tx_rows] == "Tier_1_Gold"]
@@ -1756,8 +1958,10 @@ compute_type_specimen_morph_control <- function(
       if (length(gold_rows_k) > 0L) {
         max_w_k <- max(auth_w[gold_rows_k], na.rm = TRUE)
         top_gold_k <- gold_rows_k[auth_w[gold_rows_k] >= 0.85 * max_w_k]
+        n_eff_type_vec[tx_k] <- as.numeric(max(1L, length(top_gold_k)))
         mu_k <- .compute_robust_taxon_medoid(X_mat[top_gold_k, , drop = FALSE], S_inv = S_inv)
       } else {
+        n_eff_type_vec[tx_k] <- as.numeric(max(1L, length(tx_rows)))
         mu_k <- .compute_robust_taxon_medoid(X_mat[tx_rows, , drop = FALSE], S_inv = S_inv)
       }
     }
@@ -1794,10 +1998,17 @@ compute_type_specimen_morph_control <- function(
 
   d2_mat <- matrix(NA_real_, nrow = n, ncol = G, dimnames = list(NULL, active_taxa))
   for (k in seq_len(G)) {
+    tx_k <- active_taxa[k]
     diff_k <- sweep(X_mat, 2L, type_centroids[k, ], "-")
-    d2_k <- rowSums((diff_k %*% S_inv) * diff_k)
-    d2_k[!is.finite(d2_k) | d2_k < 0.0] <- 0.0
-    d2_mat[, k] <- d2_k
+    raw_d2 <- rowSums((diff_k %*% S_inv) * diff_k)
+    raw_d2[!is.finite(raw_d2) | raw_d2 < 0.0] <- 0.0
+    scale_k <- 1.0 + (1.0 / max(1.0, n_eff_type_vec[tx_k]))
+    scaled_d2 <- raw_d2 / scale_k
+    anchor_rows <- type_anchor_rows_list[[tx_k]]
+    if (length(anchor_rows) > 0L) {
+      scaled_d2[anchor_rows] <- raw_d2[anchor_rows]
+    }
+    d2_mat[, k] <- scaled_d2
   }
 
   given_idx <- match(taxa_vec, active_taxa)

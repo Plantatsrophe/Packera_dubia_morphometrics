@@ -725,7 +725,8 @@ draw_2d_confidence_ellipse <- function(
   level = 0.95,
   lwd = 2.0,
   lty = 2,
-  n_pts = 100
+  n_pts = 100,
+  weights = NULL
 ) {
   x_num <- suppressWarnings(as.numeric(x))
   y_num <- suppressWarnings(as.numeric(y))
@@ -734,7 +735,28 @@ draw_2d_confidence_ellipse <- function(
 
   xv <- x_num[valid]
   yv <- y_num[valid]
-  cov_mat <- tryCatch(stats::cov(cbind(xv, yv)), error = function(e) NULL)
+  cx_el <- mean(xv)
+  cy_el <- mean(yv)
+  cov_mat <- NULL
+  if (!is.null(weights) && length(weights) == length(x_num)) {
+    w_sub <- suppressWarnings(as.numeric(weights[valid]))
+    w_ok <- is.finite(w_sub) & (w_sub > 0)
+    if (sum(w_ok) >= 3L) {
+      w_pos <- w_sub[w_ok]
+      n_eff <- (sum(w_pos)^2) / max(sum(w_pos^2), 1e-12)
+      if (is.finite(n_eff) && n_eff >= 2.2) {
+        cwt <- tryCatch(stats::cov.wt(cbind(xv[w_ok], yv[w_ok]), wt = w_pos, method = "unbiased"), error = function(e) NULL)
+        if (!is.null(cwt) && !is.null(cwt$cov) && all(is.finite(cwt$cov))) {
+          cov_mat <- cwt$cov
+          cx_el <- as.numeric(cwt$center[1])
+          cy_el <- as.numeric(cwt$center[2])
+        }
+      }
+    }
+  }
+  if (is.null(cov_mat)) {
+    cov_mat <- tryCatch(stats::cov(cbind(xv, yv)), error = function(e) NULL)
+  }
   if (is.null(cov_mat) || any(!is.finite(cov_mat)) || max(diag(cov_mat)) < 1e-10) {
     return(invisible(NULL))
   }
@@ -747,7 +769,7 @@ draw_2d_confidence_ellipse <- function(
   theta <- seq(0, 2 * pi, length.out = n_pts)
   circle <- rbind(cos(theta), sin(theta))
   transform_mat <- eig$vectors %*% diag(sqrt(evals), nrow = 2, ncol = 2)
-  ellipse_pts <- sweep(radius * (transform_mat %*% circle), 1, c(mean(xv), mean(yv)), "+")
+  ellipse_pts <- sweep(radius * (transform_mat %*% circle), 1, c(cx_el, cy_el), "+")
   graphics::lines(ellipse_pts[1, ], ellipse_pts[2, ], col = col, lwd = lwd, lty = lty)
   invisible(ellipse_pts)
 }
@@ -766,12 +788,14 @@ plot_2d_ordination_scatter <- function(
   group_vec = NULL,
   group_cols = NULL,
   ellipse_level = 0.95,
+  ellipse_weights = NULL,
   centroids = NULL,
   centroid_labels = NULL,
   legend_args = NULL,
   bg_draw_fn = NULL,
   biplot_vectors = NULL,
-  biplot_labels = NULL
+  biplot_labels = NULL,
+  is_type_vec = NULL
 ) {
   x_num <- suppressWarnings(as.numeric(x))
   y_num <- suppressWarnings(as.numeric(y))
@@ -852,6 +876,22 @@ plot_2d_ordination_scatter <- function(
     lwd = lwd_vec
   )
 
+  if (!is.null(is_type_vec) && length(is_type_vec) > 0L) {
+    t_bool <- as.logical(rep_len(is_type_vec, n_pts))
+    t_bool[is.na(t_bool)] <- FALSE
+    type_idx <- which(t_bool)
+    if (length(type_idx) > 0L) {
+      graphics::points(
+        x_num[type_idx], y_num[type_idx],
+        col = col_vec[type_idx], pch = 5L, bg = NA, cex = 1.45, lwd = 2.0
+      )
+      graphics::points(
+        x_num[type_idx], y_num[type_idx],
+        col = "#111111", pch = 1L, bg = NA, cex = 1.85, lwd = 1.4
+      )
+    }
+  }
+
   if (!is.null(group_vec) && length(group_vec) == n_pts) {
     grp_chr <- as.character(group_vec)
     u_grps <- unique(grp_chr[!is.na(grp_chr) & nzchar(grp_chr)])
@@ -863,7 +903,8 @@ plot_2d_ordination_scatter <- function(
         } else {
           col_vec[which(m)[1]]
         }
-        draw_2d_confidence_ellipse(x_num[m], y_num[m], col = g_col, level = ellipse_level, lwd = 2.1, lty = 1)
+        w_m <- if (!is.null(ellipse_weights) && length(ellipse_weights) == n_pts) ellipse_weights[m] else NULL
+        draw_2d_confidence_ellipse(x_num[m], y_num[m], col = g_col, level = ellipse_level, lwd = 2.1, lty = 1, weights = w_m)
       }
     }
   }
@@ -954,7 +995,8 @@ plot_3d_scatter_box <- function(
   drop_lines = TRUE,
   centroids = NULL,
   centroid_labels = NULL,
-  legend_args = NULL
+  legend_args = NULL,
+  is_type_vec = NULL
 ) {
   x_num <- suppressWarnings(as.numeric(x))
   y_num <- suppressWarnings(as.numeric(y))
@@ -1003,7 +1045,8 @@ plot_3d_scatter_box <- function(
     return(plot_2d_ordination_scatter(
       x = x_num, y = y_num, col = col_vec, pch = pch_vec, cex = cex_vec, lwd = lwd_vec,
       xlab = xlab, ylab = ylab, main = main, centroids = centroids,
-      centroid_labels = centroid_labels, legend_args = legend_args
+      centroid_labels = centroid_labels, legend_args = legend_args,
+      is_type_vec = is_type_vec
     ))
   }
 
@@ -1040,6 +1083,22 @@ plot_3d_scatter_box <- function(
     cex = cex_vec,
     lwd = lwd_vec
   )
+
+  if (!is.null(is_type_vec) && length(is_type_vec) > 0L) {
+    t_bool <- as.logical(rep_len(is_type_vec, n_pts))
+    t_bool[is.na(t_bool)] <- FALSE
+    type_idx <- which(t_bool)
+    if (length(type_idx) > 0L) {
+      graphics::points(
+        pts_3d$x[type_idx], pts_3d$y[type_idx],
+        col = col_vec[type_idx], pch = 5L, bg = NA, cex = 1.45, lwd = 2.0
+      )
+      graphics::points(
+        pts_3d$x[type_idx], pts_3d$y[type_idx],
+        col = "#111111", pch = 1L, bg = NA, cex = 1.85, lwd = 1.4
+      )
+    }
+  }
 
   if (!is.null(centroids)) {
     c_df <- tryCatch(as.matrix(centroids), error = function(e) NULL)
@@ -1309,9 +1368,16 @@ generate_step03_pub_figures <- function(
   present_tx <- sort(unique(df$taxon_clean[df$taxon_clean != "Unknown" & !is.na(df$taxon_clean)]))
   present_tx <- present_tx[vapply(present_tx, function(tx) sum(df$taxon_clean == tx, na.rm = TRUE) >= 1L, logical(1))]
   if (length(present_tx) == 0) present_tx <- default_grp
+  is_type_row <- if ("is_type_specimen" %in% colnames(df)) as.logical(df$is_type_specimen) else rep(FALSE, nrow(df))
+  is_type_row[is.na(is_type_row)] <- FALSE
+  auth_w_3 <- if ("authority_weight" %in% colnames(df)) suppressWarnings(as.numeric(df$authority_weight)) else rep(1.0, nrow(df))
+  auth_w_3[is.na(auth_w_3) | !is.finite(auth_w_3)] <- 0.0
+  if (all(auth_w_3 <= 0)) auth_w_3 <- rep(1.0, nrow(df))
   cent_sym <- do.call(rbind, lapply(present_tx, function(tx) {
-    m <- df$taxon_clean == tx
-    c(mean(df$Sym_PC1[m], na.rm = TRUE), mean(df$Sym_PC2[m], na.rm = TRUE))
+    m <- which(df$taxon_clean == tx)
+    w_m <- if (any(auth_w_3[m] > 0)) pmax(auth_w_3[m], 1e-6) else rep(1.0, length(m))
+    c(stats::weighted.mean(df$Sym_PC1[m], w = w_m, na.rm = TRUE),
+      stats::weighted.mean(df$Sym_PC2[m], w = w_m, na.rm = TRUE))
   }))
   rownames(cent_sym) <- gsub("Packera ", "P. ", present_tx)
 
@@ -1394,8 +1460,10 @@ generate_step03_pub_figures <- function(
       group_vec = df$taxon_clean,
       group_cols = dyn_pal,
       ellipse_level = 0.95,
+      ellipse_weights = auth_w_3,
       centroids = cent_sym,
       bg_draw_fn = bg_fourier_grid,
+      is_type_vec = is_type_row,
       legend_args = list(
         "topright",
         legend = c(packera_italic_expressions(present_tx), "Bg: Inverse EFA (-2..+2 SD)"),
@@ -1435,7 +1503,9 @@ generate_step03_pub_figures <- function(
     }
 
     is_t1_pure <- if ("morph_tier_source" %in% colnames(df)) (df$morph_tier_source == "Tier_1_Pure") else !grepl("2", as.character(df$assigned_tier))
-    is_gold_silv <- if ("determiner_tier" %in% colnames(df)) (df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) else rep(TRUE, nrow(df))
+    is_promo_row <- if ("is_promoted_anchor" %in% colnames(df)) as.logical(df$is_promoted_anchor) else rep(FALSE, nrow(df))
+    is_promo_row[is.na(is_promo_row)] <- FALSE
+    is_gold_silv <- if ("determiner_tier" %in% colnames(df)) (df$determiner_tier %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver") | is_type_row | is_promo_row) else rep(TRUE, nrow(df))
 
     for (idx_sp in seq_len(n_disp)) {
       sp_name <- disp_tx[idx_sp]
@@ -1445,6 +1515,7 @@ generate_step03_pub_figures <- function(
       m_anchor <- (df$taxon_clean == sp_name) & is_t1_pure & is_gold_silv
       if (sum(m_anchor, na.rm = TRUE) < 3) m_anchor <- (df$taxon_clean == sp_name) & is_t1_pure
       if (sum(m_anchor, na.rm = TRUE) < 1) m_anchor <- (df$taxon_clean == sp_name)
+      m_type <- (df$taxon_clean == sp_name) & is_type_row
 
       sol_col_b <- if ("q25_solidity" %in% colnames(df)) suppressWarnings(as.numeric(df$q25_solidity)) else if ("solidity" %in% colnames(df)) suppressWarnings(as.numeric(df$solidity)) else rep(NA_real_, nrow(df))
       m_dis_sub <- m_anchor & is.finite(sol_col_b) & (sol_col_b < 0.72)
@@ -1500,6 +1571,13 @@ generate_step03_pub_figures <- function(
           col_border = sp_col,
           col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.22), lwd = 2.2, lty = 1
         )
+        if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && any(m_type, na.rm = TRUE)) {
+          xy_type <- reconstruct_efa_outline(colMeans(std_hmat[m_type, , drop = FALSE], na.rm = TRUE), nb_pts = 120L)
+          draw_outline_in_box(
+            xy_type, cx = cx, cy = cy - 0.05, w_box = 0.67, h_box = 0.63,
+            col_border = "#111111", col_fill = NA, lwd = 1.6, lty = 2
+          )
+        }
         # Midrib axis line inside reconstructed leaf
         if (!is.null(pts_mean)) {
           graphics::segments(cx, min(pts_mean[, 2]), cx, max(pts_mean[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.55), lty = 2, lwd = 1.0)
@@ -1526,7 +1604,11 @@ generate_step03_pub_figures <- function(
 
   # Companion Figure 03a: 2D & 3D (PC1 x PC2 x PC3) Hollow-Point EFA Ordination
   spc3 <- if ("Sym_PC3" %in% colnames(df)) as.numeric(df$Sym_PC3) else if ("PC3" %in% colnames(df)) as.numeric(df$PC3) else rep(0.0, nrow(df))
-  cent_sym_3d <- cbind(cent_sym, vapply(present_tx, function(tx) mean(spc3[df$taxon_clean == tx], na.rm = TRUE), numeric(1)))
+  cent_sym_3d <- cbind(cent_sym, vapply(present_tx, function(tx) {
+    m <- which(df$taxon_clean == tx)
+    w_m <- if (any(auth_w_3[m] > 0)) pmax(auth_w_3[m], 1e-6) else rep(1.0, length(m))
+    stats::weighted.mean(spc3[m], w = w_m, na.rm = TRUE)
+  }, numeric(1)))
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(4.5, 4.5, 3.2, 1.1))
     plot_2d_ordination_scatter(
@@ -1534,7 +1616,8 @@ generate_step03_pub_figures <- function(
       xlab = sprintf("Sym_PC1 (%.1f%%)", sym_var_pct[1]),
       ylab = sprintf("Sym_PC2 (%.1f%%)", sym_var_pct[2]),
       main = "A. 2D Symmetric EFA Morphospace (Hollow Markers)",
-      group_vec = df$taxon_clean, group_cols = dyn_pal, ellipse_level = 0.95, centroids = cent_sym
+      group_vec = df$taxon_clean, group_cols = dyn_pal, ellipse_level = 0.95,
+      ellipse_weights = auth_w_3, centroids = cent_sym, is_type_vec = is_type_row
     )
     plot_3d_scatter_box(
       x = df$Sym_PC1, y = df$Sym_PC2, z = spc3,
@@ -1542,6 +1625,7 @@ generate_step03_pub_figures <- function(
       xlab = "Sym_PC1", ylab = "Sym_PC2", zlab = "Sym_PC3",
       main = "B. 3D PCA Morphospace (PC1 x PC2 x PC3)",
       centroids = cent_sym_3d,
+      is_type_vec = is_type_row,
       legend_args = list(
         "topright", legend = packera_italic_expressions(present_tx),
         col = dyn_pal[present_tx], pch = dyn_pch[present_tx], pt.bg = NA, cex = 0.72, bty = "n"
@@ -2149,6 +2233,8 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
     s_load <- if (!is.null(cda_res$structure_loadings)) as.matrix(cda_res$structure_loadings) else NULL
     if (!is.null(s_load) && ncol(s_load) == 1L) s_load <- cbind(s_load, 0.0)
     s_lbls <- if (!is.null(s_load) && !is.null(rownames(s_load))) format_cda_loading_labels(rownames(s_load)) else NULL
+    is_type_cda <- if ("is_type_specimen" %in% names(audit_df)) as.logical(audit_df$is_type_specimen) else rep(FALSE, nrow(audit_df))
+    is_type_cda[is.na(is_type_cda)] <- FALSE
 
     # Panel A: 2D Passive CDA Biplot with Scaled Trait Structure Vectors
     plot_2d_ordination_scatter(
@@ -2164,6 +2250,7 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
       centroids = cent_2d,
       biplot_vectors = s_load,
       biplot_labels = s_lbls,
+      is_type_vec = is_type_cda,
       legend_args = list(
         "topleft",
         legend = packera_italic_expressions(present_tx),
@@ -2285,6 +2372,8 @@ generate_step04_pub_figures <- function(
     c(mean(x_v[m], na.rm = TRUE), mean(y_v[m], na.rm = TRUE))
   }))
   rownames(cent_gmm) <- paste0("Morphotype_K", u_cl)
+  is_type_v <- if ("is_type_specimen" %in% names(audited_df)) as.logical(audited_df$is_type_specimen) else rep(FALSE, nrow(audited_df))
+  is_type_v[is.na(is_type_v)] <- FALSE
 
   # ----------------------------------------------------------------------------
   # Figure 04a: mclust BIC Model Selection & 2D GMM Clusters in PCA Space
@@ -2318,6 +2407,7 @@ generate_step04_pub_figures <- function(
       group_cols = cl_col_map,
       ellipse_level = 0.95,
       centroids = cent_gmm,
+      is_type_vec = is_type_v,
       legend_args = list(
         "topright",
         legend = paste0("Morphotype_K", u_cl),
@@ -2347,6 +2437,7 @@ generate_step04_pub_figures <- function(
       centroids = cent_cda,
       biplot_vectors = s_load,
       biplot_labels = s_lbls,
+      is_type_vec = is_type_v,
       legend_args = list(
         "topright",
         legend = packera_italic_expressions(present_tx),
@@ -2361,6 +2452,7 @@ generate_step04_pub_figures <- function(
       xlab = "Can1", ylab = "Can2", zlab = "Can3",
       main = "B. 3D Canonical Discriminant Space (Can1 x Can2 x Can3)",
       centroids = cent_cda_3d,
+      is_type_vec = is_type_v,
       legend_args = list(
         "topright",
         legend = packera_italic_expressions(present_tx),
@@ -2392,6 +2484,7 @@ generate_step04_pub_figures <- function(
       centroids = cent_cda,
       biplot_vectors = s_load,
       biplot_labels = s_lbls,
+      is_type_vec = is_type_v,
       legend_args = list(
         "topright",
         legend = packera_italic_expressions(present_tx),
@@ -2808,13 +2901,15 @@ run_supervised_ecoregion_cda <- function(
     X_use <- X_full[, sel_cols, drop = FALSE]
     p_dim <- ncol(X_use)
 
-    # Per-ecoregion 95% chi-square Mahalanobis trimming on active training anchors
+    # Per-ecoregion 95% chi-square Mahalanobis trimming on active training anchors (exempting nomenclatural types)
+    is_type_eco <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, n)
+    is_type_eco[is.na(is_type_eco)] <- FALSE
     for (eco_g in active_ecos) {
       idx_g <- which(is_train & rg == eco_g)
       if (length(idx_g) >= 5L) {
         sub_g <- X_use[idx_g, , drop = FALSE]
         d2_g <- tryCatch(stats::mahalanobis(sub_g, colMeans(sub_g), stats::cov(sub_g) + diag(1e-4, p_dim)), error = function(e) rep(0, length(idx_g)))
-        drop_g <- !is.na(d2_g) & (d2_g > stats::qchisq(0.95, df = p_dim))
+        drop_g <- !is.na(d2_g) & (d2_g > stats::qchisq(0.95, df = p_dim)) & !is_type_eco[idx_g]
         if (sum(!drop_g) >= min_anchors_per_ecoregion) is_train[idx_g[drop_g]] <- FALSE
       }
     }
@@ -3217,6 +3312,8 @@ run_multivariate_manova_audit <- function(
   }
 
   # Strict active/passive authority weighting (Tier_1_Gold & Tier_2_Silver active; Tier_3_Bronze = 0.0)
+  is_type_row <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, n)
+  is_type_row[is.na(is_type_row)] <- FALSE
   if ("authority_weight" %in% names(df)) {
     auth_w <- suppressWarnings(as.numeric(df$authority_weight))
     auth_w[is.na(auth_w) | !is.finite(auth_w)] <- 0.0
@@ -3228,7 +3325,7 @@ run_multivariate_manova_audit <- function(
       err_col <- intersect(c("dawid_skene_error_rate", "label_error_rate", "error_rate_k"), names(df))
       prec_w <- if (length(err_col) > 0L) pmax(0.0, pmin(1.0, 1.0 - suppressWarnings(as.numeric(df[[err_col[1]]])))) else rep(1.0, n)
       prec_w[is.na(prec_w) | !is.finite(prec_w)] <- 1.0
-      auth_w <- ifelse(det_tier %in% c("Tier_1_Gold", "Tier_2_Silver"), prec_w, 0.0)
+      auth_w <- ifelse(det_tier %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver") | is_type_row, prec_w, 0.0)
     }
   } else {
     auth_w <- rep(1.0, n)
@@ -3366,13 +3463,13 @@ run_multivariate_manova_audit <- function(
     X_sub <- X_full[, sel_cols, drop = FALSE]
     p_sub <- ncol(X_sub)
 
-    # Per-group 95% chi-square Mahalanobis outlier pruning on active anchors
+    # Per-group 95% chi-square Mahalanobis outlier pruning on active anchors (exempting nomenclatural types)
     for (lvl in act_lvls) {
       idx_g <- which(is_train & g_raw == lvl)
       if (length(idx_g) >= 5L) {
         sub_g <- X_sub[idx_g, , drop = FALSE]
         d2_g <- tryCatch(stats::mahalanobis(sub_g, colMeans(sub_g), stats::cov(sub_g) + diag(1e-4, p_sub)), error = function(e) rep(0.0, length(idx_g)))
-        drop_g <- !is.na(d2_g) & (d2_g > stats::qchisq(0.95, df = p_sub))
+        drop_g <- !is.na(d2_g) & (d2_g > stats::qchisq(0.95, df = p_sub)) & !is_type_row[idx_g]
         if (sum(!drop_g) >= max(3L, min_n)) is_train[idx_g[drop_g]] <- FALSE
       }
     }
@@ -3722,6 +3819,8 @@ render_fig04c_supervised_ecoregion_cda <- function(
       list("topright", legend = leg_names, col = leg_cols, pch = leg_pchs, pt.bg = NA, cex = 0.64, bty = "n")
     } else NULL
 
+    is_type_e <- if ("is_type_specimen" %in% names(audited_df)) as.logical(audited_df$is_type_specimen) else rep(FALSE, n)
+    is_type_e[is.na(is_type_e)] <- FALSE
     plot_2d_ordination_scatter(
       x = x_a, y = y_a,
       col = pt_col, pch = pt_pch, cex = 0.84, lwd = 1.0,
@@ -3736,7 +3835,8 @@ render_fig04c_supervised_ecoregion_cda <- function(
       centroid_labels = cent_lbl_e,
       biplot_vectors = s_load_e,
       biplot_labels = s_lbl_e,
-      legend_args = leg_arg
+      legend_args = leg_arg,
+      is_type_vec = is_type_e
     )
 
     # Panel B: Unsupervised GMM Cluster x EPA Level III Ecoregion Contingency Heatmap
@@ -4022,6 +4122,8 @@ generate_step06_pub_figures <- function(
         }
       }
     }
+    is_type_6 <- if ("is_type_specimen" %in% colnames(vouchers_df)) as.logical(vouchers_df$is_type_specimen) else rep(FALSE, nrow(vouchers_df))
+    is_type_6[is.na(is_type_6)] <- FALSE
     cent_env <- do.call(rbind, lapply(present_tx, function(tx) {
       m <- tx_clean == tx
       c(mean(env_pc1[m], na.rm = TRUE), mean(env_pc2[m], na.rm = TRUE))
@@ -4040,6 +4142,7 @@ generate_step06_pub_figures <- function(
       centroids = cent_env,
       biplot_vectors = env_load,
       biplot_labels = env_lbls,
+      is_type_vec = is_type_6,
       legend_args = list(
         "topright",
         legend = packera_italic_expressions(present_tx),
@@ -4161,6 +4264,9 @@ generate_step06_pub_figures <- function(
     xlim_map <- geo_b$xlim
     ylim_map <- geo_b$ylim
 
+    is_type_6b <- if ("is_type_specimen" %in% colnames(vouchers_df)) as.logical(vouchers_df$is_type_specimen) else rep(FALSE, nrow(vouchers_df))
+    is_type_6b[is.na(is_type_6b)] <- FALSE
+
     # Panel A: North American Geographic Distribution Map with Dynamic Bounds
     draw_us_state_basemap_base_r(
       xlim = xlim_map, ylim = ylim_map,
@@ -4177,6 +4283,11 @@ generate_step06_pub_figures <- function(
         pch = 5L, bg = NA,
         col = grDevices::adjustcolor("#CC79A7", alpha.f = 0.90), cex = 1.10, lwd = 1.4
       )
+    }
+    if (any(valid_geo & is_type_6b)) {
+      m_t6 <- which(valid_geo & is_type_6b)
+      graphics::points(lon_v[m_t6], lat_v[m_t6], pch = 5L, bg = NA, col = cols_tx[m_t6], cex = 1.45, lwd = 2.0)
+      graphics::points(lon_v[m_t6], lat_v[m_t6], pch = 1L, bg = NA, col = "#111111", cex = 1.85, lwd = 1.4)
     }
     graphics::legend(
       "bottomleft",
@@ -4197,6 +4308,11 @@ generate_step06_pub_figures <- function(
       font.main = 2
     )
     graphics::grid(col = "grey88")
+    if (any(valid_geo & is_type_6b)) {
+      m_t6 <- which(valid_geo & is_type_6b)
+      graphics::points(lat_v[m_t6], doy_v[m_t6], pch = 5L, bg = NA, col = cols_tx[m_t6], cex = 1.45, lwd = 2.0)
+      graphics::points(lat_v[m_t6], doy_v[m_t6], pch = 1L, bg = NA, col = "#111111", cex = 1.85, lwd = 1.4)
+    }
     for (sp in present_tx) {
       m_sp <- which(valid_geo & (tx_clean == sp))
       if (length(m_sp) >= 4 && stats::sd(lat_v[m_sp], na.rm = TRUE) > 0.2) {
@@ -4357,9 +4473,9 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
     rep("Confirmed_Species", nrow(triage_df))
   }
   treat_5 <- ifelse(
-    sub_col %in% c("Confirmed_Species", "Species_Confirmed"), "Confirmed Species",
+    sub_col %in% c("Confirmed_Species", "Species_Confirmed", "Confirmed_Type_Control"), "Confirmed Species",
     ifelse(
-      sub_col %in% c("Subspecies_Ecotype", "Ecophenotypic_Plasticity"), "Variety / Ecotype",
+      sub_col %in% c("Subspecies_Ecotype", "Ecophenotypic_Plasticity", "Type_Synonymy_Candidate"), "Variety / Ecotype",
       ifelse(
         sub_col %in% c("Hybrid_Introgressant", "Hybrid_Intergrade_Swarm", "Putative_Hybrid_or_Ecophenotype"), "Hybrid / Introgressant",
         ifelse(
@@ -4513,13 +4629,21 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
       x = sprintf("Canonical Variate 1 (Can1: %.1f%%)", can1_pct), y = sprintf("Canonical Variate 2 (Can2: %.1f%%)", can2_pct),
       color = grp_legend_lbl, shape = grp_legend_lbl
     )
+  if ("is_type_specimen" %in% names(cda_sub) && any(as.logical(cda_sub$is_type_specimen) == TRUE, na.rm = TRUE)) {
+    p1 <- p1 + ggplot2::geom_point(
+      data = cda_sub[which(as.logical(cda_sub$is_type_specimen) == TRUE), , drop = FALSE],
+      ggplot2::aes(x = can1, y = can2),
+      shape = 5, fill = NA, stroke = 1.35, size = 2.8, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
+    )
+  }
 
   df_comp <- if ("is_completed_voucher" %in% names(df) && any(df$is_completed_voucher == TRUE, na.rm = TRUE)) df[which(df$is_completed_voucher == TRUE), , drop = FALSE] else df
   df_comp <- df_comp[df_comp$plot_group %in% active_tx, , drop = FALSE]
   if (nrow(df_comp) == 0) df_comp <- df
   raw_treat <- if ("taxonomic_treatment_subtype" %in% names(df_comp)) as.character(df_comp$taxonomic_treatment_subtype) else as.character(df_comp$taxonomic_status_call)
   treat_clean <- rep("Confirmed Species", length(raw_treat))
-  treat_clean[grepl("Ecotype|Subspecies|Plasticity|Variety", raw_treat, ignore.case = TRUE)] <- "Variety / Ecotype"
+  treat_clean[grepl("Ecotype|Subspecies|Plasticity|Variety|Synonymy", raw_treat, ignore.case = TRUE)] <- "Variety / Ecotype"
+  treat_clean[grepl("Confirmed_Type_Control|Confirmed_Species|Species_Confirmed", raw_treat, ignore.case = TRUE)] <- "Confirmed Species"
   treat_clean[grepl("Hybrid|Introgress", raw_treat, ignore.case = TRUE)] <- "Hybrid / Introgressant"
   treat_clean[grepl("Misident|Reassign", raw_treat, ignore.case = TRUE)] <- "Misidentification (Reassign)"
   treat_clean[grepl("Cryptic", raw_treat, ignore.case = TRUE)] <- "Putative Cryptic Species"
@@ -4559,6 +4683,13 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     thm + ggplot2::labs(title = "C. Fine-Grain (10m-30m) Edaphic & Outcrop Niche Separation",
                         subtitle = "85% Confidence Ellipses & Group Centroids (+) Across Active Groups",
                         x = "Fine-Grain Soil Sand Fraction (%)", y = "Fine-Grain Soil pH (H2O)", color = grp_legend_lbl, shape = grp_legend_lbl)
+  if ("is_type_specimen" %in% names(ed_sub) && any(as.logical(ed_sub$is_type_specimen) == TRUE, na.rm = TRUE)) {
+    p3 <- p3 + ggplot2::geom_point(
+      data = ed_sub[which(as.logical(ed_sub$is_type_specimen) == TRUE), , drop = FALSE],
+      ggplot2::aes(x = sand_plot, y = ph_plot),
+      shape = 5, fill = NA, stroke = 1.35, size = 2.8, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
+    )
+  }
 
   ph_sub <- df[df$plot_group %in% active_tx, , drop = FALSE]
   use_delta <- "delta_doy" %in% names(ph_sub) && sum(!is.na(ph_sub$delta_doy)) >= 10
@@ -4603,6 +4734,13 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     thm + ggplot2::labs(title = "E. North American Geographic Distribution & Contact Zones",
                         subtitle = "Hollow markers (fill = NA) = Localities over dynamically framed administrative boundaries",
                         x = "Longitude (deg W)", y = "Latitude (deg N)", color = grp_legend_lbl, shape = grp_legend_lbl)
+  if ("is_type_specimen" %in% names(geo_sub) && any(as.logical(geo_sub$is_type_specimen) == TRUE, na.rm = TRUE)) {
+    p5 <- p5 + ggplot2::geom_point(
+      data = geo_sub[which(as.logical(geo_sub$is_type_specimen) == TRUE), , drop = FALSE],
+      ggplot2::aes(x = lon_plot_e, y = lat_plot_e),
+      shape = 5, fill = NA, stroke = 1.35, size = 2.8, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
+    )
+  }
 
   ev_rows <- list()
   for (tx in active_tx) {
