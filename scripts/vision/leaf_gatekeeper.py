@@ -27,7 +27,6 @@ from scripts.vision.leaf_geometry_utils import (
     compute_geometric_metrics,
     extract_tier2_reflected,
     resample_normalized_contour,
-    trim_petiole_tail,
 )
 
 __all__ = [
@@ -968,8 +967,18 @@ def detect_folded_leaf(
         ):
             midvein_folded_trigger = True
     else:
-        line_params = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
-        vx, vy, x0, y0 = [float(v[0]) for v in line_params]
+        pts_f64 = pts.astype(np.float64)
+        mean_pt = np.mean(pts_f64, axis=0)
+        centered = pts_f64 - mean_pt
+        cov = np.cov(centered, rowvar=False)
+        if cov.shape == (2, 2) and np.all(np.isfinite(cov)):
+            eigvals, eigvecs = np.linalg.eigh(cov)
+            principal = eigvecs[:, int(np.argmax(eigvals))]
+            vx, vy = float(principal[0]), float(principal[1])
+            x0, y0 = float(mean_pt[0]), float(mean_pt[1])
+        else:
+            line_params = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
+            vx, vy, x0, y0 = [float(v[0]) for v in line_params]
         projections = (pts[:, 0] - x0) * vx + (pts[:, 1] - y0) * vy
 
         min_idx = int(np.argmin(projections))
@@ -1886,10 +1895,10 @@ def classify_and_route_leaf(
                 mask = np.where((lam_u8 > 0) | internal_holes, 255, 0).astype(np.uint8)
                 hole_filled = True
 
-    # Reconnect micro-severed rachis islands (fast no-op when mask has <= 1 connected component)
+    # Reconnect micro-severed rachis islands (preserving basal pinnae on dissected Packera leaves)
     mask = bridge_dissected_rachis_components(
         mask,
-        petiole_mask=petiole_mask if not petiole_subtracted else None,
+        petiole_mask=petiole_mask,
         crop_bgr=crop_img,
         specimen_paper_cleaned_mask=specimen_paper_cleaned_mask,
     )
@@ -1909,7 +1918,7 @@ def classify_and_route_leaf(
             return pa_in, pb_in, ang_out
         return pa_in, pb_in, None
 
-    # Compute initial geometric metrics and disambiguated (p_apex, p_base), then trim petiole tail
+    # Compute initial geometric metrics and disambiguated (p_apex, p_base)
     ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(
         mask, rosette_centroid=rosette_centroid
     )
@@ -1917,23 +1926,8 @@ def classify_and_route_leaf(
     if ang_override is not None:
         angle_deg = ang_override
 
-    if (not already_trimmed and not petiole_subtracted) or rosette_centroid is not None:
-        trimmed_mask, trim_meta = trim_petiole_tail(
-            mask,
-            p_base=p_base,
-            p_apex=p_apex,
-            return_metadata=True,
-            sheet_shape=sheet_shape,
-        )
-        if trim_meta.get("is_trimmed", False):
-            mask = trimmed_mask
-            ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(
-                mask, rosette_centroid=rosette_centroid
-            )
-            p_apex, p_base, ang_override = _apply_kp31_base_apex_disambiguation(p_apex, p_base)
-            if ang_override is not None:
-                angle_deg = ang_override
-    elif trim_meta is None:
+    _ = already_trimmed
+    if trim_meta is None:
         trim_meta = {
             "is_trimmed": petiole_subtracted,
             "reason": "LM3_PETIOLE_MASK_SUBTRACTED" if petiole_subtracted else "PRE_TRIMMED",

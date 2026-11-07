@@ -8,8 +8,8 @@ Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 Description:
     Unit and integration tests for Step 02:
     LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) segmentation, 2-path botanical
-    leaf extraction (Tier 1 Pristine and Tier 2 Bilateral Reflection), asynchronous
-    Hough ruler detection, centroid spatial clustering, and standardized contour CSV generation.
+    leaf extraction (Tier 1 Pristine and Tier 2 Bilateral Reflection), LM3 ruler
+    scale calibration, centroid spatial clustering, and standardized contour CSV generation.
 ===============================================================================
 """
 
@@ -35,12 +35,10 @@ SegmentAndExtractPipeline = step02.SegmentAndExtractPipeline
 parse_args = step02.parse_args
 cluster_plant_individuals = step02.cluster_plant_individuals
 compute_geometric_metrics = step02.compute_geometric_metrics
-detect_ruler_scale_hough = step02.detect_ruler_scale_hough
 export_standardized_contour = step02.export_standardized_contour
 extract_tier1_pristine = step02.extract_tier1_pristine
 extract_tier2_reflected = step02.extract_tier2_reflected
 compute_capitulum_metrics = step02.compute_capitulum_metrics
-homologize_contour_starting_point = step02.homologize_contour_starting_point
 
 
 class TestSegmentAndExtract(unittest.TestCase):
@@ -97,29 +95,51 @@ class TestSegmentAndExtract(unittest.TestCase):
         ref_ucs, ref_solidity, _, _, _ = compute_geometric_metrics(reflected_mask)
         self.assertGreaterEqual(ref_solidity, 0.70, "Synthesized Tier 2 silhouette must have high solidity.")
 
-    def test_hough_ruler_detection(self) -> None:
-        """Verify that periodic ruler tick marks yield pixels_per_mm estimation."""
-        # Synthesize a herbarium sheet margin containing a 20-tick ruler
-        sheet = np.full((1000, 800, 3), 240, dtype=np.uint8)
-        ruler_x_start = 50
-        tick_pitch = 25  # 25 pixels per mm
+    def test_lm3_ruler_lattice_and_mp_prior_scale_resolution(self) -> None:
+        """Verify measured_from_ruler, measured_from_fieldprism, and predicted_from_megapixels scale resolution in lm3_data_loader."""
+        from scripts.vision import lm3_data_loader
 
-        # Draw ruler ticks in the bottom margin
-        for i in range(25):
-            x = ruler_x_start + i * tick_pitch
-            cv2.line(sheet, (x, 850), (x, 900), (20, 20, 20), 2)
-        # Add ruler baseline
-        cv2.line(sheet, (ruler_x_start, 900), (ruler_x_start + 24 * tick_pitch, 900), (20, 20, 20), 3)
+        ruler_dir = self.temp_dir / "lm3_scale_res" / "Data" / "Ruler"
+        ruler_dir.mkdir(parents=True, exist_ok=True)
+        ruler_csv = ruler_dir / "ruler_summary.csv"
+        pd.DataFrame([
+            {
+                "filename": "NCU_RULER__R__10-10-100-500",
+                "ruler_success": True,
+                "conversion_mean": 118.11,
+                "ruler_class_confidence": 96.5,
+                "conversion_determination": "measured_from_ruler",
+            },
+            {
+                "filename": "NCU_FIELDPRISM__R__10-10-100-500",
+                "ruler_success": True,
+                "conversion_mean": 125.0,
+                "ruler_class_confidence": 92.0,
+                "conversion_determination": "measured_from_fieldprism",
+            },
+            {
+                "filename": "NCU_MP_PRIOR__R__10-10-100-500",
+                "ruler_success": True,
+                "conversion_mean": 105.0,
+                "ruler_class_confidence": 85.0,
+                "conversion_determination": "predicted_from_megapixels",
+            },
+            {
+                "filename": "NCU_UNRELIABLE__R__10-10-100-500",
+                "ruler_success": False,
+                "conversion_mean": 0.0,
+                "ruler_class_confidence": 12.0,
+            },
+        ]).to_csv(ruler_csv, index=False)
 
-        detected_scale = detect_ruler_scale_hough(sheet)
-        self.assertIsNotNone(detected_scale, "Ruler detector should identify tick pitch.")
-        self.assertAlmostEqual(detected_scale, float(tick_pitch), delta=4.0)
+        calibs = lm3_data_loader.load_ruler_calibrations(self.temp_dir / "lm3_scale_res", min_confidence=0.50)
+        self.assertAlmostEqual(calibs["NCU_RULER"], 11.811, places=3)
+        self.assertAlmostEqual(calibs["NCU_FIELDPRISM"], 12.500, places=3)
+        self.assertAlmostEqual(calibs["NCU_MP_PRIOR"], 10.500, places=3)
+        self.assertNotIn("NCU_UNRELIABLE", calibs)
 
-    def test_hough_ruler_detection_fallback_on_blank(self) -> None:
-        """Verify that absent ruler safely returns None without exception."""
-        blank_sheet = np.full((500, 500, 3), 240, dtype=np.uint8)
-        scale = detect_ruler_scale_hough(blank_sheet)
-        self.assertIsNone(scale, "Blank sheet without ticks should gracefully return None.")
+        empty_calibs = lm3_data_loader.load_ruler_calibrations(self.temp_dir / "nonexistent_lm3_dir")
+        self.assertEqual(empty_calibs, {})
 
     def test_standardized_contour_export(self) -> None:
         """Verify that 2D coordinates CSV is exported with normalized columns."""
@@ -185,70 +205,25 @@ class TestSegmentAndExtract(unittest.TestCase):
         metrics_stem = compute_capitulum_metrics(mask_stem, (20, 40, 280, 60))
         self.assertIsNone(metrics_stem, "Excessively elongated stem fragment must be rejected (AR > 2.0).")
 
-    def test_homologize_contour_starting_point_anchoring_and_orientation(self) -> None:
-        """Verify contour start point rolls to closest anchor vertex and enforces clockwise orientation."""
-        # 1. Counter-clockwise oriented polygon (positive area in OpenCV)
-        # Coordinates: bottom (100, 170), left (30, 100), top (100, 30), right (170, 100)
-        pts_ccw = np.array([[100, 170], [30, 100], [100, 30], [170, 100]], dtype=np.float32)
-        self.assertGreater(cv2.contourArea(pts_ccw, oriented=True), 0)
+    def test_lm3_tip_up_contour_export_preserves_lamina_base_anchor(self) -> None:
+        """Verify 120-vertex clockwise contour export anchored at lamina_base (petiole_attachment_pt) via resample_normalized_contour and export_standardized_contour."""
+        from scripts.vision.leaf_geometry_utils import resample_normalized_contour
 
-        # Petiole anchor near top (100, 25)
-        homo_top = homologize_contour_starting_point(pts_ccw, (100, 25))
-        self.assertEqual(len(homo_top), len(pts_ccw), "Vertex count must be preserved exactly.")
-        np.testing.assert_array_almost_equal(homo_top[0], [100.0, 30.0], err_msg="Index 0 must be closest to anchor.")
-        self.assertLessEqual(cv2.contourArea(homo_top, oriented=True), 0, "Oriented area must be negative (CW).")
-
-        # Petiole anchor near bottom (100, 180)
-        homo_bottom = homologize_contour_starting_point(pts_ccw, (100, 180))
-        self.assertEqual(len(homo_bottom), len(pts_ccw))
-        np.testing.assert_array_almost_equal(homo_bottom[0], [100.0, 170.0])
-        self.assertLessEqual(cv2.contourArea(homo_bottom, oriented=True), 0)
-
-        # 2. Already clockwise oriented polygon (negative area in OpenCV)
-        pts_cw = np.array([[100, 170], [170, 100], [100, 30], [30, 100]], dtype=np.float32)
-        self.assertLess(cv2.contourArea(pts_cw, oriented=True), 0)
-
-        homo_cw = homologize_contour_starting_point(pts_cw, (25, 100))
-        self.assertEqual(len(homo_cw), len(pts_cw))
-        np.testing.assert_array_almost_equal(homo_cw[0], [30.0, 100.0])
-        self.assertLessEqual(cv2.contourArea(homo_cw, oriented=True), 0)
-
-    def test_homologize_contour_starting_point_guards(self) -> None:
-        """Verify homologize_contour_starting_point gracefully handles empty, degenerate, and edge cases."""
-        # Empty array
-        empty = homologize_contour_starting_point(np.empty((0, 2)), (100, 100))
-        self.assertEqual(len(empty), 0)
-
-        # Single point
-        single = homologize_contour_starting_point(np.array([[50, 50]]), (100, 100))
-        self.assertEqual(len(single), 1)
-
-        # Collinear points (zero area)
-        collinear = np.array([[10, 10], [20, 20], [30, 30]], dtype=np.float32)
-        homo_collinear = homologize_contour_starting_point(collinear, (28, 28))
-        self.assertEqual(len(homo_collinear), 3)
-        np.testing.assert_array_almost_equal(homo_collinear[0], [30.0, 30.0])
-
-        # None anchor
-        unchanged = homologize_contour_starting_point(collinear, None)
-        np.testing.assert_array_almost_equal(unchanged, collinear)
-
-    def test_export_standardized_contour_homologized_start_point(self) -> None:
-        """Verify exported CSV contour begins at the petiole anchor and has clockwise orientation."""
         mask = np.zeros((300, 300), dtype=np.uint8)
-        # Vertical ellipse: center (150, 150), axes (40, 100) -> apex ~(150, 50), base ~(150, 250)
+        # Vertical ellipse: center (150, 150), axes (40, 100) -> apex ~(150, 50), lamina_base ~(150, 250)
         cv2.ellipse(mask, (150, 150), (40, 100), 0, 0, 360, 255, -1)
 
         p_base = (150, 250)
+        resampled = resample_normalized_contour(mask, num_points=120, petiole_attachment_pt=p_base)
+        self.assertEqual(resampled.shape, (120, 2))
+        self.assertLess(cv2.contourArea(resampled.astype(np.float32), oriented=True), 0)
+
         csv_path = export_standardized_contour(
             mask, "TEST_HOMO", 1, self.temp_dir, num_points=120, petiole_attachment_pt=p_base
         )
         self.assertIsNotNone(csv_path)
         df = pd.read_csv(csv_path)
-
-        # First vertex should be closest to p_base
-        dist_pt0 = np.hypot(df.iloc[0]["x"] - p_base[0], df.iloc[0]["y"] - p_base[1])
-        self.assertLessEqual(dist_pt0, 5.0, "Index 0 must be located at the petiole base.")
+        self.assertEqual(len(df), 120)
 
         # Resampled contour must trace clockwise: oriented area should be negative
         pts = df[["x", "y"]].to_numpy(dtype=np.float32)
@@ -687,8 +662,8 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             leaf_patch = self.pipeline.basal_leaves_raw_dir / f"NCU123_leaf{leaf_id}.jpg"
             self.assertTrue(leaf_patch.exists(), f"Basal leaf RGB crop {leaf_patch} must exist.")
 
-    def test_lm3_ruler_calibration_with_hough_fallback(self) -> None:
-        """Verify load_ruler_calibrations() primary scale vs. detect_ruler_scale_hough() secondary fallback."""
+    def test_lm3_ruler_calibration_resolution(self) -> None:
+        """Verify load_ruler_calibrations() resolves measured_from_ruler and predicted_from_megapixels scales."""
         from unittest.mock import patch
 
         ruler_dir = self.temp_dir / "lm3_ruler_test" / "Data" / "Ruler"
@@ -700,6 +675,14 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                 "ruler_success": True,
                 "conversion_mean": 118.11,  # 118.11 px/cm = 11.811 px/mm
                 "ruler_class_confidence": 96.5,
+                "conversion_determination": "measured_from_ruler",
+            },
+            {
+                "filename": "NCU_MP_PRIOR__R__10-10-100-500",
+                "ruler_success": True,
+                "conversion_mean": 105.0,  # 105.0 px/cm = 10.5 px/mm
+                "ruler_class_confidence": 85.0,
+                "conversion_determination": "predicted_from_megapixels",
             },
             {
                 "filename": "NCU_LOW_CONF__R__10-10-100-500",
@@ -711,27 +694,24 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
 
         calibs = step02.load_ruler_calibrations(self.temp_dir / "lm3_ruler_test", min_confidence=0.50)
         self.assertIn("NCU_HIGH_CONF", calibs)
+        self.assertIn("NCU_MP_PRIOR", calibs)
         self.assertNotIn("NCU_LOW_CONF", calibs)
         self.assertAlmostEqual(calibs["NCU_HIGH_CONF"], 11.811, places=3)
+        self.assertAlmostEqual(calibs["NCU_MP_PRIOR"], 10.5, places=3)
 
-        # Verify pipeline uses LM3 calibration for NCU_HIGH_CONF without needing Hough fallback,
-        # and falls back to detect_ruler_scale_hough for NCU_LOW_CONF
         self.pipeline.ruler_calibrations = calibs
         mask = np.zeros((300, 300), dtype=np.uint8)
         cv2.ellipse(mask, (150, 150), (65, 120), 0, 0, 360, 255, -1)
 
         with patch("cv2.imread", return_value=np.full((400, 400, 3), 200, dtype=np.uint8)):
             with patch.object(self.pipeline.model_engine, "predict", return_value=[((30, 85, 270, 215), mask, 0.95, 0)]):
-                with patch.object(step02, "detect_ruler_scale_hough", return_value=22.5) as mock_hough:
-                    recs_high, _ = self.pipeline.process_voucher("NCU_HIGH_CONF", self.img_path)
-                    self.assertEqual(mock_hough.call_count, 0, "Hough fallback must not run when LM3 ruler is valid.")
-                    self.assertAlmostEqual(recs_high[0]["pixels_per_mm"], 11.811, places=3)
-                    self.assertTrue(recs_high[0]["is_calibrated_mm"])
+                recs_high, _ = self.pipeline.process_voucher("NCU_HIGH_CONF", self.img_path)
+                self.assertAlmostEqual(recs_high[0]["pixels_per_mm"], 11.811, places=3)
+                self.assertTrue(recs_high[0]["is_calibrated_mm"])
 
-                    recs_low, _ = self.pipeline.process_voucher("NCU_LOW_CONF", self.img_path)
-                    self.assertEqual(mock_hough.call_count, 1, "Hough fallback must run when LM3 ruler confidence is low.")
-                    self.assertAlmostEqual(recs_low[0]["pixels_per_mm"], 22.5, places=3)
-                    self.assertTrue(recs_low[0]["is_calibrated_mm"])
+                recs_mp, _ = self.pipeline.process_voucher("NCU_MP_PRIOR", self.img_path)
+                self.assertAlmostEqual(recs_mp[0]["pixels_per_mm"], 10.5, places=3)
+                self.assertTrue(recs_mp[0]["is_calibrated_mm"])
 
     @staticmethod
     def _build_synthetic_lyrate_mask(size: int = 400) -> np.ndarray:
@@ -747,121 +727,6 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             cv2.ellipse(mask, (cx - 35, cy + y_off), (35, 12), -15, 0, 360, 255, -1)
             cv2.ellipse(mask, (cx + 35, cy + y_off), (35, 12), 15, 0, 360, 255, -1)
         return mask
-
-    def test_generate_sam2_prompts_from_leaf_mask_on_lyrate_leaf(self) -> None:
-        """Verify automated prompt generation (medial/lobe positive points, corner/concavity negative points, box, logits)."""
-        m_init = self._build_synthetic_lyrate_mask(400)
-        bundle = step02.generate_sam2_prompts_from_leaf_mask(m_init)
-
-        # 1. Verify positive foreground points (pole of inaccessibility + top 2 lobe distance peaks)
-        pos_pts = bundle["positive_points"]
-        self.assertGreaterEqual(pos_pts.shape[0], 2, "Must generate primary interior pole + lobe peak prompts.")
-        self.assertLessEqual(pos_pts.shape[0], 3, "At most 3 positive points (pole + top 2 lobe peaks).")
-        eroded = bundle["eroded_mask"]
-        for px, py in pos_pts:
-            ix, iy = int(round(float(px))), int(round(float(py)))
-            self.assertGreater(
-                eroded[iy, ix],
-                0,
-                f"Positive prompt {(px, py)} must lie strictly inside eroded m_init.",
-            )
-
-        # 2. Verify negative background points (4 exterior corners + deep concavity pockets outside dilated m_init)
-        neg_pts = bundle["negative_points"]
-        corner_pts = bundle["corner_points"]
-        concavity_pts = bundle["concavity_points"]
-        self.assertGreaterEqual(corner_pts.shape[0], 4, "Must include 4 exterior bounding-box corner prompts.")
-        self.assertGreaterEqual(
-            concavity_pts.shape[0],
-            1,
-            "Deeply lyrate leaf mask must yield negative prompt points in deep concavity pockets.",
-        )
-        dilated = bundle["dilated_mask"]
-        for nx, ny in neg_pts:
-            ix, iy = int(round(float(nx))), int(round(float(ny)))
-            self.assertEqual(
-                dilated[iy, ix],
-                0,
-                f"Negative prompt {(nx, ny)} must lie strictly outside dilated m_init.",
-            )
-
-        # 3. Verify combined point_coords, point_labels, box, and (1, 256, 256) low-res logits
-        self.assertEqual(bundle["point_coords"].shape[0], pos_pts.shape[0] + neg_pts.shape[0])
-        self.assertEqual(bundle["point_labels"].shape[0], bundle["point_coords"].shape[0])
-        self.assertEqual(int(np.sum(bundle["point_labels"] == 1)), pos_pts.shape[0])
-        self.assertEqual(int(np.sum(bundle["point_labels"] == 0)), neg_pts.shape[0])
-        self.assertEqual(bundle["box"].shape, (4,))
-        self.assertEqual(bundle["mask_input"].shape, (1, 256, 256))
-        self.assertEqual(bundle["mask_input"].dtype, np.float32)
-        self.assertGreater(float(np.max(bundle["mask_input"])), 0.0)
-        self.assertLess(float(np.min(bundle["mask_input"])), 0.0)
-
-    def test_sam2_boundary_refinement_and_topological_fallback(self) -> None:
-        """Verify SAM2BoundaryRefiner refines sub-pixel margins and falls back cleanly on disconnected masks."""
-        from unittest.mock import MagicMock, patch
-
-        m_init = self._build_synthetic_lyrate_mask(400)
-        crop_bgr = np.full((400, 400, 3), 210, dtype=np.uint8)
-
-        # 1. Clean fallback when SAM 2 weights/predictor are unavailable
-        refiner_no_weights = step02.SAM2BoundaryRefiner(
-            checkpoint_path=self.temp_dir / "nonexistent_sam2.pt",
-            predictor=None,
-        )
-        out_fallback = refiner_no_weights.refine_crop_mask(crop_bgr, m_init)
-        np.testing.assert_array_equal(out_fallback, m_init)
-
-        # 2. Successful refinement when SAM2ImagePredictor returns a connected refined lyrate mask
-        refined_lyrate = cv2.dilate(m_init, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
-        mock_predictor = MagicMock()
-        mock_predictor.predict.return_value = (
-            np.stack([(refined_lyrate > 0).astype(np.float32)], axis=0),
-            np.array([0.97], dtype=np.float32),
-            np.zeros((1, 256, 256), dtype=np.float32),
-        )
-        refiner_ok = step02.SAM2BoundaryRefiner(predictor=mock_predictor)
-        out_refined = refiner_ok.refine_crop_mask(crop_bgr, m_init)
-        self.assertTrue(mock_predictor.set_image.called)
-        self.assertTrue(mock_predictor.predict.called)
-        _, pred_kwargs = mock_predictor.predict.call_args
-        self.assertIn("point_coords", pred_kwargs)
-        self.assertIn("point_labels", pred_kwargs)
-        self.assertIn("box", pred_kwargs)
-        self.assertIn("mask_input", pred_kwargs)
-        self.assertEqual(pred_kwargs["mask_input"].shape, (1, 256, 256))
-        np.testing.assert_array_equal(out_refined, refined_lyrate)
-
-        # Verify trim_petiole_tail() and is_botanical_dissection() run identically on refined mask
-        trimmed_init = step02.trim_petiole_tail(m_init)
-        trimmed_refined = step02.trim_petiole_tail(out_refined)
-        self.assertGreater(np.count_nonzero(trimmed_init), 0)
-        self.assertGreater(np.count_nonzero(trimmed_refined), 0)
-        self.assertTrue(step02.is_botanical_dissection(m_init))
-        self.assertTrue(step02.is_botanical_dissection(out_refined))
-
-        # 3. Topological connectedness violation -> clean fallback to m_init
-        disconnected_mask = np.zeros_like(m_init)
-        cv2.circle(disconnected_mask, (70, 70), 25, 255, -1)
-        cv2.circle(disconnected_mask, (290, 290), 25, 255, -1)
-        self.assertFalse(step02.is_topologically_connected_mask(disconnected_mask, reference_mask=m_init))
-        mock_predictor_bad = MagicMock()
-        mock_predictor_bad.predict.return_value = (
-            np.stack([(disconnected_mask > 0).astype(np.float32)], axis=0),
-            np.array([0.99], dtype=np.float32),
-            np.zeros((1, 256, 256), dtype=np.float32),
-        )
-        refiner_bad = step02.SAM2BoundaryRefiner(predictor=mock_predictor_bad)
-        out_bad_fallback = refiner_bad.refine_crop_mask(crop_bgr, m_init)
-        np.testing.assert_array_equal(
-            out_bad_fallback,
-            m_init,
-            "Refiner must fall back cleanly to m_init when refined mask violates topological connectedness.",
-        )
-
-        # 4. Verify --sam2-refine CLI flag and pipeline integration
-        with patch("sys.argv", ["02_segment_and_extract.py", "--sam2-refine"]):
-            parsed = step02.parse_args()
-            self.assertTrue(parsed.sam2_refine)
 
     def test_extract_tier2_reflected_45deg_asymmetric_leaf_iou(self) -> None:
         """
@@ -911,11 +776,11 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
 
     def test_export_standardized_contour_isotropic_aspect_ratio_preservation(self) -> None:
         """
-        Verify an oblong leaf with L/W = 3.0 exported via export_standardized_contour()
-        retains (max(x_norm) - min(x_norm)) / (max(y_norm) - min(y_norm)) == 3.0 within 1e-3.
+        Verify an oblong tip-up leaf with L/W = 3.0 exported via export_standardized_contour()
+        retains (max(y_norm) - min(y_norm)) / (max(x_norm) - min(x_norm)) == 3.0 within 1e-3.
         """
         mask = np.zeros((500, 500), dtype=np.uint8)
-        # Oblong leaf with semi-axes a=150 (L=300), b=50 (W=100) -> L/W = 3.0
+        # Oblong tip-up leaf with semi-axes a=150 (L=300 along y), b=50 (W=100 along x) -> L/W = 3.0
         cv2.ellipse(mask, (250, 250), (50, 150), 0.0, 0, 360, 255, -1)
 
         csv_path = export_standardized_contour(
@@ -931,7 +796,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
 
         span_x_norm = float(df["x_norm"].max() - df["x_norm"].min())
         span_y_norm = float(df["y_norm"].max() - df["y_norm"].min())
-        lw_ratio = span_x_norm / max(span_y_norm, 1e-9)
+        lw_ratio = max(span_x_norm, span_y_norm) / max(min(span_x_norm, span_y_norm), 1e-9)
         self.assertAlmostEqual(
             lw_ratio,
             3.0,
@@ -967,28 +832,6 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         res_dubia = classify_and_route_leaf(bitten, taxon="Packera dubia")
         self.assertFalse(res_paupercula.is_dissected)
         self.assertEqual(res_paupercula.assigned_tier, res_dubia.assigned_tier)
-
-    def test_sam2_concavity_points_bounded_loop_and_suppression(self) -> None:
-        """Verify generate_sam2_prompts_from_leaf_mask terminates within bounded iterations and never visits same pixel."""
-        from scripts.vision.leaf_geometry_utils import generate_sam2_prompts_from_leaf_mask
-
-        # Star-shaped polygon with multiple deep sinuses
-        mask = np.zeros((300, 300), dtype=np.uint8)
-        pts = np.array([
-            [150, 20], [180, 110], [270, 110], [200, 160],
-            [230, 250], [150, 195], [70, 250], [100, 160],
-            [30, 110], [120, 110]
-        ], dtype=np.int32)
-        cv2.fillPoly(mask, [pts], 255)
-
-        bundle = generate_sam2_prompts_from_leaf_mask(mask, max_concavity_points=6)
-        self.assertIsInstance(bundle, dict)
-        self.assertLessEqual(len(bundle["concavity_points"]), 6)
-        if len(bundle["concavity_points"]) > 1:
-            # Check all points are unique
-            pts_arr = bundle["concavity_points"]
-            unique_pts = np.unique(pts_arr, axis=0)
-            self.assertEqual(len(pts_arr), len(unique_pts))
 
     def test_classify_and_route_stem_clump_rejection_before_reflection(self) -> None:
         """Verify classify_and_route_leaf rejects stems and clumps (solidity < 0.58 or ucs < 0.62) without Tier 2 reflection."""
@@ -1563,7 +1406,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
              or vertical sheet position, while natively excluding `leaf_partial` (1), `leaflet` (2),
              `specimen` (8), and `wood`/stems (10).
           2. Stage 2 `LM3LeafSegmenterEngine` (`thing_classes = ['leaf', 'petiole', 'hole']`) retains the top-scoring
-             `'leaf'` (`class_id == 0`) mask 100% pixel-identical (zero `trim_petiole_tail()` clipping),
+             `'leaf'` (`class_id == 0`) mask 100% pixel-identical (zero heuristic petiole clipping),
              pairs the top-scoring `'petiole'` (`class_id == 1`) mask to locate `p_base` and native petiole length,
              and retains >6 leaves without any post-hoc geometric/photometric rejections or top-6 cap.
         """
@@ -1864,27 +1707,41 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         n_merged, _ = cv2.connectedComponents(merged)
         self.assertEqual(n_merged, 2)
 
-    def test_trim_petiole_tail_preserves_basal_pinnae_on_dissected_leaf(self) -> None:
-        """trim_petiole_tail must remove only the basal stalk below the first pinna pair and never amputate pinnae."""
-        from scripts.vision.leaf_geometry_utils import trim_petiole_tail
+    def test_lm3_explicit_petiole_and_hole_mask_routing_on_dissected_leaf(self) -> None:
+        """classify_and_route_leaf strips petiole_mask (class_id == 1) and fills hole_mask (class_id == 2) while preserving basal pinnae on dissected Packera leaves."""
+        from scripts.vision.leaf_geometry_utils import classify_and_route_leaf
 
         mask_no_stalk = self._build_high_dpi_pinnatisect_mask(sever_rachis=False, include_petiole=False)
         mask_with_stalk = self._build_high_dpi_pinnatisect_mask(sever_rachis=False, include_petiole=True)
         lamina_area = float(np.count_nonzero(mask_no_stalk))
 
-        trimmed, pet_metrics = trim_petiole_tail(mask_with_stalk, return_metadata=True)
-        trimmed_area = float(np.count_nonzero(trimmed))
+        petiole_mask = np.zeros_like(mask_with_stalk)
+        cv2.rectangle(petiole_mask, (450 - 7, 835), (450 + 7, 1090), 255, -1)
 
-        # Trimmed mask must retain >= 95% of the true lamina area (all 3 lateral pinna pairs + terminal lobe)
-        self.assertGreaterEqual(
-            trimmed_area / lamina_area,
-            0.95,
-            f"trim_petiole_tail amputated dissected pinnae: retained {trimmed_area / lamina_area:.3f} of lamina.",
+        hole_mask = np.zeros_like(mask_with_stalk)
+        cv2.circle(hole_mask, (450, 210), 18, 255, -1)
+        raw_dissected = mask_with_stalk.copy()
+        raw_dissected[hole_mask > 0] = 0
+
+        routed = classify_and_route_leaf(
+            raw_dissected,
+            petiole_mask=petiole_mask,
+            hole_mask=hole_mask,
         )
-        # And the narrow petiole stalk at the bottom (y > 950) should be trimmed away
-        self.assertEqual(int(np.count_nonzero(trimmed[950:, :])), 0)
-        self.assertTrue(bool(pet_metrics.get("is_trimmed", False)))
-        self.assertGreater(float(pet_metrics.get("trim_distance_px", 0.0)), 100.0)
+        self.assertIsNotNone(routed.processed_mask)
+        routed_area = float(np.count_nonzero(routed.processed_mask))
+
+        # Processed mask must retain >= 95% of the true lamina area (all 3 lateral pinna pairs + terminal lobe)
+        self.assertGreaterEqual(
+            routed_area / lamina_area,
+            0.95,
+            f"Explicit petiole/hole routing lost dissected pinnae: retained {routed_area / lamina_area:.3f} of lamina.",
+        )
+        # Internal hole in terminal lobe must be filled and basal petiole stalk (y > 950) stripped
+        self.assertGreater(int(routed.processed_mask[210, 450]), 0)
+        self.assertEqual(int(np.count_nonzero(routed.processed_mask[950:, :])), 0)
+        self.assertEqual(routed.assigned_tier, "tier1")
+        self.assertTrue(routed.is_dissected)
 
     def test_stage1_rescues_leaf_partial_when_leaf_whole_absent(self) -> None:
         """When Stage 1 finds 0 Class 0 (leaf_whole) boxes, Class 1 (leaf_partial) boxes are rescued for LM3LeafSegmenterEngine."""

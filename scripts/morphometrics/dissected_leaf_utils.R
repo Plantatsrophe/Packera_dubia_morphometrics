@@ -1,7 +1,7 @@
 # ==============================================================================
 # Module: dissected_leaf_utils.R - Packera Morphometrics Pipeline (NCU)
 # Literature-backed utilities for positional basal-organ homology filtering,
-# curved petiole/stem ribbon rejection, phase-invariant Dissection Index (DI),
+# phase-invariant Dissection Index (DI),
 # solidity-stratified EFA harmonic power calibration, multimodal regime-aware
 # MCD outlier screening, heteroblastic OTU summary statistics, MorphoTools2
 # collinearity pruning (|r| < 0.75), and O(N*P) trace Euclidean PERMANOVA.
@@ -54,70 +54,6 @@ compute_dissection_index_from_coo <- function(coo = NULL, area_val = NULL, perim
   round(max(1.0, p / (2.0 * sqrt(pi * a))), 4)
 }
 
-.RIBBON_SEP_MASK_CACHE <- new.env(hash = TRUE, parent = emptyenv())
-
-.get_ribbon_sep_mask <- function(M) {
-  k <- as.character(as.integer(M))
-  if (exists(k, envir = .RIBBON_SEP_MASK_CACHE, inherits = FALSE)) {
-    return(get(k, envir = .RIBBON_SEP_MASK_CACHE, inherits = FALSE))
-  }
-  min_sep <- max(4L, as.integer(floor(0.04 * M)))
-  idx_mat <- outer(seq_len(M), seq_len(M), function(a, b) pmin(abs(a - b), M - abs(a - b)))
-  mask <- idx_mat < min_sep
-  assign(k, mask, envir = .RIBBON_SEP_MASK_CACHE)
-  mask
-}
-
-compute_contour_ribbon_metrics <- function(coo) {
-  if (is.null(coo) || !is.matrix(coo) || ncol(coo) < 2L || nrow(coo) < 12L) {
-    return(list(width_ratio = 1.0, n_tips = 0L))
-  }
-  M <- nrow(coo)
-  xy <- scale(matrix(as.numeric(coo[, 1:2]), ncol = 2L), center = TRUE, scale = FALSE)
-  if (any(!is.finite(xy))) return(list(width_ratio = 1.0, n_tips = 0L))
-
-  dmat <- as.matrix(stats::dist(xy))
-  dmat[.get_ribbon_sep_mask(M)] <- Inf
-  d_opp <- apply(dmat, 1L, min)
-  d_opp <- d_opp[is.finite(d_opp)]
-  width_ratio <- if (length(d_opp) >= 6L) {
-    q92 <- as.numeric(stats::quantile(d_opp, probs = 0.92, na.rm = TRUE, names = FALSE))
-    q25 <- as.numeric(stats::quantile(d_opp, probs = 0.25, na.rm = TRUE, names = FALSE))
-    q92 / max(q25, 1e-6)
-  } else {
-    1.0
-  }
-
-  xs <- xy[, 1L]; ys <- xy[, 2L]
-  for (pass in 1:2) {
-    xs <- 0.25 * c(xs[M], xs[-M]) + 0.50 * xs + 0.25 * c(xs[-1L], xs[1L])
-    ys <- 0.25 * c(ys[M], ys[-M]) + 0.50 * ys + 0.25 * c(ys[-1L], ys[1L])
-  }
-  prev_i <- c(M, seq_len(M - 1L))
-  next_i <- c(seq(2L, M), 1L)
-  v1x <- xs - xs[prev_i]; v1y <- ys - ys[prev_i]
-  v2x <- xs[next_i] - xs; v2y <- ys[next_i] - ys
-  signed_area <- 0.5 * sum(xs * ys[next_i] - xs[next_i] * ys)
-  sgn <- if (is.finite(signed_area) && signed_area >= 0.0) 1.0 else -1.0
-  turn <- sgn * atan2(v1x * v2y - v1y * v2x, pmax(-1e12, v1x * v2x + v1y * v2y))
-  n_tips <- sum(turn > 0.30 & turn >= turn[prev_i] & turn > turn[next_i], na.rm = TRUE)
-  list(width_ratio = as.numeric(width_ratio), n_tips = as.integer(n_tips))
-}
-
-is_non_lamina_petiole_ribbon <- function(coo, solidity = NA_real_, circularity = NA_real_) {
-  sol <- suppressWarnings(as.numeric(solidity))
-  circ <- suppressWarnings(as.numeric(circularity))
-  if (!is.finite(sol) || !is.finite(circ)) {
-    gp <- compute_polygon_area_perim_pure(coo)
-    if (!is.finite(sol)) sol <- gp$solidity
-    if (!is.finite(circ)) circ <- gp$circularity
-  }
-  if (!is.finite(sol) || !is.finite(circ)) return(FALSE)
-  if (sol >= 0.65 || circ >= 0.085) return(FALSE)
-  rm <- compute_contour_ribbon_metrics(coo)
-  (rm$n_tips <= 3L) && (rm$width_ratio < 2.20)
-}
-
 filter_basal_lamina_contours <- function(
   fac_df,
   coo_list,
@@ -151,20 +87,6 @@ filter_basal_lamina_contours <- function(
     }
   }
 
-  is_ribbon <- logical(n)
-  cand_rib <- which(is.finite(sol_vec) & is.finite(circ_vec) & (sol_vec < 0.65) & (circ_vec < 0.085))
-  if (length(cand_rib) > 0L) {
-    eval_rib <- function(idx) {
-      rm <- compute_contour_ribbon_metrics(coo_list[[idx]])
-      (rm$n_tips <= 3L) && (rm$width_ratio < 2.20)
-    }
-    if (length(cand_rib) >= 96L && exists("packera_mclapply", mode = "function") && exists("resolve_packera_workers", mode = "function")) {
-      n_w <- resolve_packera_workers(32L, length(cand_rib))
-      is_ribbon[cand_rib] <- as.logical(unlist(packera_mclapply(cand_rib, eval_rib, mc.cores = n_w), use.names = FALSE))
-    } else {
-      is_ribbon[cand_rib] <- vapply(cand_rib, eval_rib, logical(1))
-    }
-  }
   fac_df$solidity <- sol_vec
   fac_df$circularity <- circ_vec
   fac_df$dissection_index <- di_vec
@@ -188,8 +110,8 @@ filter_basal_lamina_contours <- function(
   n_fb_individuals <- 0L
 
   for (g_idx in idx_by_grp) {
-    lam_ok <- g_idx[!is_ribbon[g_idx] & area_ok[g_idx]]
-    if (length(lam_ok) == 0L) lam_ok <- g_idx[!is_ribbon[g_idx]]
+    lam_ok <- g_idx[area_ok[g_idx]]
+    if (length(lam_ok) == 0L) lam_ok <- g_idx
     if (length(lam_ok) == 0L) next
 
     has_cy_p <- is.finite(cy_p[lam_ok])
@@ -228,17 +150,16 @@ filter_basal_lamina_contours <- function(
   }
 
   fac_df$is_basal_fallback <- is_fallback_vec
-  n_rib <- sum(is_ribbon)
-  n_area_drop <- sum(!is_ribbon & !area_ok & !keep_mask)
-  n_caul_drop <- sum(!is_ribbon & area_ok & !keep_mask)
-  if (n_rib > 0L || n_area_drop > 0L || n_caul_drop > 0L || n_fb_individuals > 0L) {
+  n_area_drop <- sum(!area_ok & !keep_mask)
+  n_caul_drop <- sum(area_ok & !keep_mask)
+  if (n_area_drop > 0L || n_caul_drop > 0L || n_fb_individuals > 0L) {
     message(sprintf(
       paste0(
         "Positional Homology & Basal Lamina Gate: retained %d / %d Tier 1 basal blades ",
-        "(excluded %d upper cauline, %d petiole/stem ribbons, %d sub-floor blade fragments; ",
+        "(excluded %d upper cauline, %d sub-floor blade fragments; ",
         "lowest-lamina fallback individuals = %d)."
       ),
-      sum(keep_mask), n, n_caul_drop, n_rib, n_area_drop, n_fb_individuals
+      sum(keep_mask), n, n_caul_drop, n_area_drop, n_fb_individuals
     ))
   }
   fac_sub <- fac_df[keep_mask, , drop = FALSE]
@@ -251,7 +172,6 @@ filter_basal_lamina_contours <- function(
       n_input = n,
       n_retained = sum(keep_mask),
       n_cauline_excluded = n_caul_drop,
-      n_ribbon_excluded = n_rib,
       n_subfloor_excluded = n_area_drop,
       n_fallback_individuals = n_fb_individuals
     )

@@ -6,10 +6,9 @@ Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-    LeafMachine3 (YOLO26x / UNet++ v9) SAM 2 prompt generation, topological
-    connectivity gatekeeping, multi-plant DBSCAN spatial clustering, Hough
-    ruler scale calibration, Tier 4 dense rosette patch masking, and 31-keypoint
-    rosette crown / petiole / bent-scape metrics.
+    LeafMachine3 (YOLO26x / UNet++ v9) topological connectivity gatekeeping,
+    multi-plant DBSCAN spatial clustering, Tier 4 dense rosette patch masking,
+    and 31-keypoint rosette crown / petiole / bent-scape metrics.
 ===============================================================================
 """
 
@@ -26,16 +25,13 @@ from sklearn.cluster import DBSCAN
 
 from scripts.vision.leaf_geometry_utils import (
     compute_geometric_metrics,
-    trim_petiole_tail,
+    find_lamina_midrib_endpoints,
 )
 
 __all__ = [
-    "SAM2PromptBundle",
-    "generate_sam2_prompts_from_leaf_mask",
     "is_topologically_connected_mask",
     "cluster_plant_individuals",
     "cluster_voucher_plants_dbscan",
-    "detect_ruler_scale_hough",
     "route_tier3_open_curve",
     "crop_dense_rosette_tier4",
     "_extract_xy_point",
@@ -47,316 +43,8 @@ __all__ = [
 
 
 # =============================================================================
-# 3B. Automated LeafMachine3 -> SAM 2 Prompt Generation & Topological Gatekeeping
+# 3B. Topological Gatekeeping
 # =============================================================================
-
-class SAM2PromptBundle(dict):
-    """
-    Dictionary-compatible and attribute-accessible bundle of automated SAM 2 prompts
-    derived from an initial LeafMachine3 (YOLO26x) binary leaf mask `m_init`.
-    """
-
-    def __getattr__(self, name: str) -> Any:
-        try:
-            return self[name]
-        except KeyError as exc:
-            raise AttributeError(f"'SAM2PromptBundle' object has no attribute '{name}'") from exc
-
-
-def generate_sam2_prompts_from_leaf_mask(
-    m_init: np.ndarray,
-    num_lobe_peaks: int = 2,
-    erode_kernel_size: int = 5,
-    dilate_kernel_size: int = 7,
-    min_peak_dist_px: Optional[float] = None,
-    max_concavity_points: int = 4,
-    logit_scale: float = 6.0,
-    keypoints_31: Optional[Dict[str, Tuple[float, float, float]]] = None,
-    petiole_mask: Optional[np.ndarray] = None,
-) -> SAM2PromptBundle:
-    """
-    Automatically generates deterministic SAM 2 prompt inputs from an initial
-    LeafMachine3 (YOLO26x) binary leaf crop mask `m_init` without human intervention:
-
-      1. Positive foreground prompt points (`label = 1`) along the medial skeleton /
-         Euclidean distance-transform local maxima (`polygon_interior_point` pole of
-         inaccessibility + top `num_lobe_peaks` lobe distance peaks) strictly inside
-         the eroded `m_init`, augmented by high-confidence LeafMachine3 `midvein`
-         keypoints (`midvein_1..15`) when `keypoints_31` is provided.
-      2. Negative background prompt points (`label = 0`) in the exterior bounding-box
-         corners, deep concavity / sinus pockets (inside the convex hull but strictly
-         outside the dilated `m_init`), and `petiole_mask` centroids when available.
-      3. Crop bounding box (`[x_min, y_min, x_max, y_max]`) and low-resolution mask
-         logits of `m_init` (`(1, 256, 256)` in `[-logit_scale, +logit_scale]`) for
-         `SAM2ImagePredictor.predict()`.
-    """
-    if m_init is None or m_init.size == 0 or np.count_nonzero(m_init) == 0:
-        empty_u8 = (
-            np.zeros_like(m_init, dtype=np.uint8)
-            if (m_init is not None and m_init.ndim == 2)
-            else np.zeros((10, 10), dtype=np.uint8)
-        )
-        return SAM2PromptBundle({
-            "point_coords": np.zeros((0, 2), dtype=np.float32),
-            "point_labels": np.zeros((0,), dtype=np.int32),
-            "positive_points": np.zeros((0, 2), dtype=np.float32),
-            "negative_points": np.zeros((0, 2), dtype=np.float32),
-            "corner_points": np.zeros((0, 2), dtype=np.float32),
-            "concavity_points": np.zeros((0, 2), dtype=np.float32),
-            "petiole_negative_points": np.zeros((0, 2), dtype=np.float32),
-            "box": np.zeros((4,), dtype=np.float32),
-            "mask_input": np.full((1, 256, 256), -float(logit_scale), dtype=np.float32),
-            "eroded_mask": empty_u8,
-            "dilated_mask": empty_u8.copy(),
-        })
-
-    mask_u8 = (m_init > 0).astype(np.uint8) * 255
-    h, w = mask_u8.shape[:2]
-    ys, xs = np.where(mask_u8 > 0)
-
-    xmin, xmax = int(np.min(xs)), int(np.max(xs))
-    ymin, ymax = int(np.min(ys)), int(np.max(ys))
-    span_w = max(1, xmax - xmin)
-    span_h = max(1, ymax - ymin)
-    pad_box = max(2, int(round(0.04 * max(span_w, span_h))))
-
-    bx0 = max(0, xmin - pad_box)
-    by0 = max(0, ymin - pad_box)
-    bx1 = min(w - 1, xmax + pad_box)
-    by1 = min(h - 1, ymax + pad_box)
-    box = np.array([float(bx0), float(by0), float(bx1), float(by1)], dtype=np.float32)
-
-    # 1. Erode m_init and compute positive foreground points via distance transform peaks
-    ek = max(3, int(erode_kernel_size) | 1)
-    erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ek, ek))
-    eroded = cv2.erode(mask_u8, erode_kernel, iterations=1)
-    if np.count_nonzero(eroded) < 12 and ek > 3:
-        eroded = cv2.erode(mask_u8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
-    if np.count_nonzero(eroded) == 0:
-        eroded = mask_u8.copy()
-
-    dist_map = cv2.distanceTransform(eroded, cv2.DIST_L2, 5)
-    pos_pts: List[Tuple[float, float]] = []
-
-    # Primary interior pole of inaccessibility (matches polygon_interior_point)
-    _, max_val, _, max_loc = cv2.minMaxLoc(dist_map)
-    if max_val > 0:
-        pos_pts.append((float(max_loc[0]), float(max_loc[1])))
-    else:
-        pos_pts.append((float(xs[len(xs) // 2]), float(ys[len(ys) // 2])))
-
-    # Top `num_lobe_peaks` additional lobe distance peaks via adaptive NMS
-    if num_lobe_peaks > 0 and max_val > 0:
-        base_min_dist = (
-            float(min_peak_dist_px)
-            if min_peak_dist_px is not None
-            else max(8.0, 0.12 * float(math.hypot(span_w, span_h)))
-        )
-        work_dist = dist_map.copy()
-        p0_x, p0_y = int(round(pos_pts[0][0])), int(round(pos_pts[0][1]))
-        r0 = int(round(max(base_min_dist, 1.15 * float(max_val))))
-        cv2.circle(work_dist, (p0_x, p0_y), max(1, r0), 0.0, -1)
-
-        # If adaptive radius cleared the entire mask (e.g. small unlobed blade), use compact suppression
-        if float(np.max(work_dist)) <= 0.5:
-            work_dist = dist_map.copy()
-            r0_small = max(3, int(round(min(base_min_dist, 0.25 * max(span_w, span_h)))))
-            cv2.circle(work_dist, (p0_x, p0_y), r0_small, 0.0, -1)
-
-        for _ in range(int(num_lobe_peaks)):
-            _, pk_val, _, pk_loc = cv2.minMaxLoc(work_dist)
-            if pk_val <= 0.0:
-                break
-            px_i, py_i = int(pk_loc[0]), int(pk_loc[1])
-            if eroded[py_i, px_i] > 0:
-                pos_pts.append((float(px_i), float(py_i)))
-            r_i = int(round(max(base_min_dist, 1.10 * float(pk_val))))
-            cv2.circle(work_dist, (px_i, py_i), max(2, r_i), 0.0, -1)
-
-    # 1b. Incorporate high-confidence LM3 `midvein` points when `keypoints_31` is provided
-    if keypoints_31 and isinstance(keypoints_31, dict):
-        min_kp_sep = max(5.0, 0.08 * float(math.hypot(span_w, span_h)))
-        for idx_mv in range(1, 16):
-            raw_mv = keypoints_31.get(f"midvein_{idx_mv}")
-            if raw_mv is None:
-                continue
-            if isinstance(raw_mv, dict):
-                mx = float(raw_mv.get("x", 0.0))
-                my = float(raw_mv.get("y", 0.0))
-                mc = float(raw_mv.get("conf", raw_mv.get("confidence", 1.0)))
-            elif isinstance(raw_mv, (tuple, list, np.ndarray)) and len(raw_mv) >= 2:
-                mx = float(raw_mv[0])
-                my = float(raw_mv[1])
-                mc = float(raw_mv[2]) if len(raw_mv) >= 3 else 1.0
-            else:
-                continue
-            if not (np.isfinite(mx) and np.isfinite(my) and np.isfinite(mc)) or mc < 0.50:
-                continue
-            ix, iy = int(round(mx)), int(round(my))
-            if 0 <= ix < w and 0 <= iy < h and mask_u8[iy, ix] > 0:
-                if all(math.hypot(mx - ex, my - ey) >= min_kp_sep for ex, ey in pos_pts):
-                    pos_pts.append((float(mx), float(my)))
-
-    positive_points = np.array(pos_pts, dtype=np.float32).reshape(-1, 2)
-
-    # 2. Dilate m_init and compute negative background points (corners + concavity pockets + petiole centroids)
-    dk = max(3, int(dilate_kernel_size) | 1)
-    dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dk, dk))
-    dilated = cv2.dilate(mask_u8, dilate_kernel, iterations=1)
-
-    # 2a. Exterior bounding-box corners outside dilated mask
-    cx0 = max(1, xmin - dk)
-    cy0 = max(1, ymin - dk)
-    cx1 = min(w - 2, xmax + dk)
-    cy1 = min(h - 2, ymax + dk)
-    candidate_corners = [
-        (cx0, cy0),
-        (cx1, cy0),
-        (cx0, cy1),
-        (cx1, cy1),
-        (1, 1),
-        (max(1, w - 2), 1),
-        (1, max(1, h - 2)),
-        (max(1, w - 2), max(1, h - 2)),
-    ]
-    corner_pts: List[Tuple[float, float]] = []
-    seen_corners = set()
-    for qx, qy in candidate_corners:
-        qx_c = max(0, min(w - 1, int(qx)))
-        qy_c = max(0, min(h - 1, int(qy)))
-        if dilated[qy_c, qx_c] == 0 and (qx_c, qy_c) not in seen_corners:
-            corner_pts.append((float(qx_c), float(qy_c)))
-            seen_corners.add((qx_c, qy_c))
-            if len(corner_pts) >= 4:
-                break
-
-    # 2b. Deep concavity pockets (lyrate sinuses) inside convex hull but outside dilated m_init
-    concavity_pts: List[Tuple[float, float]] = []
-    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if contours and max_concavity_points > 0:
-        main_cnt = max(contours, key=cv2.contourArea)
-        hull = cv2.convexHull(main_cnt)
-        hull_mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.fillPoly(hull_mask, [hull], 255)
-
-        pocket_mask = np.where((hull_mask > 0) & (dilated == 0), 255, 0).astype(np.uint8)
-        if np.count_nonzero(pocket_mask) > 0:
-            pocket_dist = cv2.distanceTransform(pocket_mask, cv2.DIST_L2, 5)
-            num_pockets, pocket_labels, pocket_stats, _ = cv2.connectedComponentsWithStats(
-                pocket_mask, connectivity=8
-            )
-            pocket_candidates: List[Tuple[float, float, float]] = []
-            for lbl in range(1, num_pockets):
-                area_p = int(pocket_stats[lbl, cv2.CC_STAT_AREA])
-                if area_p < 8:
-                    continue
-                comp_dist = np.where(pocket_labels == lbl, pocket_dist, 0.0)
-                _, p_max_val, _, p_max_loc = cv2.minMaxLoc(comp_dist)
-                if p_max_val >= 1.5:
-                    qx_p, qy_p = int(p_max_loc[0]), int(p_max_loc[1])
-                    if dilated[qy_p, qx_p] == 0:
-                        pocket_candidates.append((float(p_max_val), float(qx_p), float(qy_p)))
-
-            pocket_candidates.sort(key=lambda item: item[0], reverse=True)
-            for _, qx_p, qy_p in pocket_candidates[: int(max_concavity_points)]:
-                concavity_pts.append((qx_p, qy_p))
-
-            # If a single pocket spans multiple sinuses, extract additional peaks via NMS on pocket_dist
-            if len(concavity_pts) < int(max_concavity_points):
-                work_pdist = pocket_dist.copy()
-                supp_p = max(8, int(round(0.10 * max(span_w, span_h))))
-                for qx_p, qy_p in concavity_pts:
-                    cv2.circle(work_pdist, (int(round(qx_p)), int(round(qy_p))), max(1, supp_p), 0.0, -1)
-                for _ in range(int(max_concavity_points) * 3):
-                    if len(concavity_pts) >= int(max_concavity_points):
-                        break
-                    _, p_val, _, p_loc = cv2.minMaxLoc(work_pdist)
-                    if p_val < 2.0:
-                        break
-                    qx_p, qy_p = int(p_loc[0]), int(p_loc[1])
-                    if dilated[qy_p, qx_p] == 0:
-                        concavity_pts.append((float(qx_p), float(qy_p)))
-                    cv2.circle(work_pdist, (qx_p, qy_p), max(1, supp_p), 0.0, -1)
-
-    # 2c. Petiole mask negative prompt centroids (to prevent SAM 2 from bleeding into the petiole stalk)
-    petiole_neg_pts: List[Tuple[float, float]] = []
-    if petiole_mask is not None and isinstance(petiole_mask, np.ndarray) and petiole_mask.size > 0:
-        pet_u8 = (petiole_mask > 0).astype(np.uint8) * 255
-        if pet_u8.shape[:2] != (h, w):
-            pet_u8 = cv2.resize(pet_u8, (w, h), interpolation=cv2.INTER_NEAREST)
-        pet_cand = np.where((pet_u8 > 0) & (eroded == 0), 255, 0).astype(np.uint8)
-        if np.count_nonzero(pet_cand) == 0:
-            pet_cand = pet_u8
-        if np.count_nonzero(pet_cand) > 0:
-            n_pet, pet_lbls, pet_stats, pet_cents = cv2.connectedComponentsWithStats(pet_cand, connectivity=8)
-            for plbl in range(1, n_pet):
-                if int(pet_stats[plbl, cv2.CC_STAT_AREA]) < 3:
-                    continue
-                cx_p, cy_p = float(pet_cents[plbl][0]), float(pet_cents[plbl][1])
-                ix_p, iy_p = int(round(cx_p)), int(round(cy_p))
-                if not (0 <= ix_p < w and 0 <= iy_p < h and pet_cand[iy_p, ix_p] > 0):
-                    p_dist = cv2.distanceTransform(np.where(pet_lbls == plbl, 255, 0).astype(np.uint8), cv2.DIST_L2, 3)
-                    _, _, _, p_loc = cv2.minMaxLoc(p_dist)
-                    cx_p, cy_p = float(p_loc[0]), float(p_loc[1])
-                petiole_neg_pts.append((cx_p, cy_p))
-
-    corner_points = (
-        np.array(corner_pts, dtype=np.float32).reshape(-1, 2)
-        if corner_pts
-        else np.zeros((0, 2), dtype=np.float32)
-    )
-    concavity_points = (
-        np.array(concavity_pts, dtype=np.float32).reshape(-1, 2)
-        if concavity_pts
-        else np.zeros((0, 2), dtype=np.float32)
-    )
-    petiole_negative_points = (
-        np.array(petiole_neg_pts, dtype=np.float32).reshape(-1, 2)
-        if petiole_neg_pts
-        else np.zeros((0, 2), dtype=np.float32)
-    )
-
-    neg_list = corner_pts + concavity_pts + petiole_neg_pts
-    negative_points = (
-        np.array(neg_list, dtype=np.float32).reshape(-1, 2)
-        if neg_list
-        else np.zeros((0, 2), dtype=np.float32)
-    )
-
-    if len(positive_points) > 0 and len(negative_points) > 0:
-        point_coords = np.vstack([positive_points, negative_points]).astype(np.float32)
-        point_labels = np.concatenate([
-            np.ones(len(positive_points), dtype=np.int32),
-            np.zeros(len(negative_points), dtype=np.int32),
-        ])
-    elif len(positive_points) > 0:
-        point_coords = positive_points.copy()
-        point_labels = np.ones(len(positive_points), dtype=np.int32)
-    else:
-        point_coords = negative_points.copy()
-        point_labels = np.zeros(len(negative_points), dtype=np.int32)
-
-    # 3. Low-resolution mask logits (1, 256, 256) in [-logit_scale, +logit_scale]
-    prob_float = (mask_u8 > 0).astype(np.float32)
-    prob_smooth = cv2.GaussianBlur(prob_float, (5, 5), 1.0)
-    prob_256 = cv2.resize(prob_smooth, (256, 256), interpolation=cv2.INTER_LINEAR)
-    logits_256 = ((prob_256 * 2.0) - 1.0) * float(logit_scale)
-    mask_input = logits_256[np.newaxis, :, :].astype(np.float32)
-
-    return SAM2PromptBundle({
-        "point_coords": point_coords,
-        "point_labels": point_labels,
-        "positive_points": positive_points,
-        "negative_points": negative_points,
-        "corner_points": corner_points,
-        "concavity_points": concavity_points,
-        "petiole_negative_points": petiole_negative_points,
-        "box": box,
-        "mask_input": mask_input,
-        "eroded_mask": eroded,
-        "dilated_mask": dilated,
-    })
-
 
 def is_topologically_connected_mask(
     mask: np.ndarray,
@@ -518,115 +206,6 @@ def cluster_voucher_plants_dbscan(
             next_id += 1
 
     return candidates
-
-
-# =============================================================================
-# 5. Decoupled Asynchronous Ruler Detector (Hough Transform)
-# =============================================================================
-
-def detect_ruler_scale_hough(image: np.ndarray) -> Optional[float]:
-    """
-    Asynchronous Hough-transform ruler detection.
-    Scans margin regions of the herbarium sheet for periodic tick marks.
-    Returns pixels_per_mm or None if not confidently detected.
-    """
-    if image is None or image.size == 0:
-        return None
-
-    h, w = image.shape[:2]
-    # Rulers are typically along sheet borders (margins)
-    margins = [
-        image[int(h * 0.75):, :],               # Bottom
-        image[:int(h * 0.25), :],               # Top
-        image[:, :int(w * 0.20)],               # Left
-        image[:, int(w * 0.80):],               # Right
-    ]
-
-    candidate_scales: List[float] = []
-
-    for region in margins:
-        if region.size == 0:
-            continue
-        # Downscale before grayscale conversion if extremely large for rapid Hough transform
-        rh, rw = region.shape[:2]
-        max_dim = max(rh, rw)
-        scale_factor = 1.0
-        if max_dim > 1500:
-            scale_factor = 1500.0 / max_dim
-            region_small = cv2.resize(
-                region,
-                (int(rw * scale_factor), int(rh * scale_factor)),
-                interpolation=cv2.INTER_AREA,
-            )
-            gray = cv2.cvtColor(region_small, cv2.COLOR_BGR2GRAY) if len(region_small.shape) == 3 else region_small
-        else:
-            gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY) if len(region.shape) == 3 else region
-
-        # Bilateral / Gaussian blur + Canny edge detection
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-        edges = cv2.Canny(blurred, 30, 100)
-
-        # Detect line segments
-        min_line_len = max(int(12 * scale_factor), 10)
-        lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi / 180, threshold=25,
-                                minLineLength=min_line_len, maxLineGap=4)
-        if lines is None or len(lines) < 8:
-            continue
-
-        # Extract line angles and lengths
-        line_data = []
-        for line in lines:
-            pts = line.reshape(-1)
-            if len(pts) < 4:
-                continue
-            x1, y1, x2, y2 = pts[:4]
-            dx, dy = x2 - x1, y2 - y1
-            length = math.hypot(dx, dy)
-            angle = math.degrees(math.atan2(dy, dx)) % 180.0
-            line_data.append((x1, y1, x2, y2, angle, length))
-
-        # Check for dominant parallel angle (horizontal or vertical ticks)
-        angles = np.array([ld[4] for ld in line_data])
-        hist, bin_edges = np.histogram(angles, bins=18, range=(0, 180))
-        dominant_bin = np.argmax(hist)
-        if hist[dominant_bin] < 6:
-            continue
-
-        dom_angle_low = bin_edges[dominant_bin]
-        dom_angle_high = bin_edges[dominant_bin + 1]
-
-        # Filter lines matching dominant tick orientation
-        matching_lines = [ld for ld in line_data if dom_angle_low <= ld[4] <= dom_angle_high]
-        if len(matching_lines) < 6:
-            continue
-
-        # Project lines onto orthogonal axis to determine inter-tick pitch
-        dom_angle = (dom_angle_low + dom_angle_high) / 2.0
-        ortho_rad = math.radians(dom_angle + 90.0)
-        proj_coords = []
-        for ld in matching_lines:
-            mid_x, mid_y = (ld[0] + ld[2]) / 2.0, (ld[1] + ld[3]) / 2.0
-            p = mid_x * math.cos(ortho_rad) + mid_y * math.sin(ortho_rad)
-            proj_coords.append(p)
-
-        proj_coords = np.sort(proj_coords)
-        tick_positions = []
-        for p in proj_coords:
-            if not tick_positions or abs(p - tick_positions[-1]) > 5.0:
-                tick_positions.append(p)
-
-        if len(tick_positions) >= 5:
-            deltas = np.diff(tick_positions)
-            med_delta = float(np.median(deltas))
-            mad = float(np.median(np.abs(deltas - med_delta)))
-            # Consistent periodic tick spacing condition
-            if mad < 0.25 * med_delta and (8.0 <= med_delta / scale_factor <= 150.0):
-                px_per_mm = med_delta / scale_factor
-                candidate_scales.append(px_per_mm)
-
-    if candidate_scales:
-        return float(np.median(candidate_scales))
-    return None
 
 
 # =============================================================================
@@ -912,11 +491,10 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
             blade_px = float(item["blade_length_px"])
 
     elif isinstance(item, np.ndarray) and item.ndim == 2:
-        trimmed_m, trim_m = trim_petiole_tail(item, return_metadata=True)
-        _, _, _, pa_m, pb_m = compute_geometric_metrics(trimmed_m)
+        pa_m, pb_m = find_lamina_midrib_endpoints(item)
         p_base = (float(pb_m[0]), float(pb_m[1]))
         p_apex = (float(pa_m[0]), float(pa_m[1]))
-        geodesic_px = float(trim_m.get("trim_distance_px", 0.0) or 0.0)
+        geodesic_px = 0.0
 
     elif isinstance(item, (tuple, list)) and len(item) >= 2:
         first, second = item[0], item[1]

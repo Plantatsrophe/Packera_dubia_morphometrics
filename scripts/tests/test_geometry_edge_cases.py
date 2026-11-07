@@ -38,7 +38,6 @@ from scripts.vision.leaf_geometry_utils import (
     estimate_rosette_crown_point,
     is_botanical_dissection,
     resample_normalized_contour,
-    trim_petiole_tail,
 )
 
 
@@ -312,74 +311,89 @@ class TestGeometryEdgeCases(unittest.TestCase):
         )
 
     def test_fixture_5_petiole_stalk_trimming_and_restoration(self) -> None:
-        """Fixture 5: Slender petiole stalk trimmed at junction, restoring blade metrics and Tier 1 routing."""
+        """Fixture 5: Explicit LM3 petiole_mask subtraction and hole_mask filling restore blade metrics and Tier 1 routing."""
         f5_mask = create_fixture_5_leaf_with_petiole_stalk(self.f1_mask, stalk_length=45, stalk_width=10)
         orig_area = np.count_nonzero(self.f1_mask)
         stalk_area = np.count_nonzero(f5_mask)
         self.assertGreater(stalk_area, orig_area, "Fixture 5 mask must include attached stalk pixels.")
 
-        # Metric degradation before trimming
+        # Metric degradation when petiole stalk is included in raw blade mask
         ucs_stalk, sol_stalk, _, _, _ = compute_geometric_metrics(f5_mask)
-        self.assertLess(sol_stalk, 0.89, f"Untrimmed stalk should degrade solidity (got {sol_stalk:.3f}).")
+        self.assertLess(sol_stalk, 0.89, f"Attached stalk should degrade solidity (got {sol_stalk:.3f}).")
 
-        # Trim petiole tail
-        trimmed_mask, meta = trim_petiole_tail(f5_mask, return_metadata=True)
-        self.assertTrue(meta["is_trimmed"], "trim_petiole_tail must detect and trim petiole stalk.")
-        self.assertEqual(meta["reason"], "WIDTH_INFLECTION_JUNCTION_TRIMMED")
-        self.assertGreaterEqual(meta["trim_distance_px"], 35.0, "Trim distance must span the narrow stalk length.")
-        self.assertIsNotNone(meta["junction_pt"])
+        # Explicit LM3 Class 1 petiole_mask and Class 2 hole_mask
+        petiole_mask = np.zeros_like(f5_mask)
+        cv2.rectangle(petiole_mask, (195, 315), (205, 360), 255, -1)
 
-        # Metric restoration after trimming
-        trimmed_area = np.count_nonzero(trimmed_mask)
-        area_diff = abs(trimmed_area - orig_area)
-        self.assertLessEqual(area_diff, 15, f"Trimmed mask must match intact blade area within 15 px (diff={area_diff}).")
+        hole_mask = np.zeros_like(f5_mask)
+        cv2.circle(hole_mask, (200, 200), 10, 255, -1)
+        raw_with_hole = f5_mask.copy()
+        raw_with_hole[hole_mask > 0] = 0
 
-        ucs_trimmed, sol_trimmed, _, _, _ = compute_geometric_metrics(trimmed_mask)
-        self.assertGreaterEqual(sol_trimmed, 0.90, f"Trimmed mask solidity ({sol_trimmed:.3f}) must be restored to >= 0.90.")
-        self.assertGreaterEqual(ucs_trimmed, 0.95, f"Trimmed mask UCS ({ucs_trimmed:.3f}) must be restored to >= 0.95.")
-
-        # Tier routing integration assertion: classify_and_route_leaf automatically trims petiole and routes to Tier 1
-        routing = classify_and_route_leaf(f5_mask)
-        self.assertEqual(routing.tier, "Tier 1", "Leaf with trimmed petiole tail must route to Tier 1.")
+        routing = classify_and_route_leaf(
+            raw_with_hole,
+            petiole_mask=petiole_mask,
+            hole_mask=hole_mask,
+        )
+        self.assertEqual(routing.tier, "Tier 1", "Leaf with LM3 petiole_mask subtraction must route to Tier 1.")
         self.assertEqual(routing.assigned_tier, "tier1")
         self.assertFalse(routing.is_folded)
-        self.assertTrue(routing.metadata.get("petiole_trim_info", {}).get("is_trimmed", False))
+        self.assertIsNotNone(routing.processed_mask)
+
+        # Internal hole filled and petiole stalk subtracted
+        self.assertGreater(int(routing.processed_mask[200, 200]), 0)
+        self.assertEqual(int(np.count_nonzero(routing.processed_mask[325:, :])), 0)
+
+        # Metric restoration after explicit petiole_mask subtraction and hole_mask filling
+        cleaned_area = np.count_nonzero(routing.processed_mask)
+        area_diff = abs(cleaned_area - orig_area)
+        self.assertLessEqual(area_diff, 25, f"Cleaned mask must match intact blade area within 25 px (diff={area_diff}).")
+
+        ucs_clean, sol_clean, _, _, _ = compute_geometric_metrics(routing.processed_mask)
+        self.assertGreaterEqual(sol_clean, 0.90, f"Cleaned mask solidity ({sol_clean:.3f}) must be restored to >= 0.90.")
+        self.assertGreaterEqual(ucs_clean, 0.95, f"Cleaned mask UCS ({ucs_clean:.3f}) must be restored to >= 0.95.")
 
     def test_fixture_6_cordate_blade_protection(self) -> None:
-        """Fixture 6: Broad cordate blade base is guarded and 100% protected against false clipping."""
+        """Fixture 6: Broad cordate blade base is 100% preserved and unclipped in classify_and_route_leaf and resample_normalized_contour."""
         f6_mask = create_fixture_6_cordate_leaf()
         orig_area = np.count_nonzero(f6_mask)
 
-        trimmed_mask, meta = trim_petiole_tail(f6_mask, return_metadata=True)
-        self.assertFalse(meta["is_trimmed"], "Cordate leaf base must NOT be clipped.")
-        self.assertEqual(meta["reason"], "CORDATE_OR_BROAD_BASE_PROTECTED")
-        self.assertEqual(np.count_nonzero(trimmed_mask), orig_area, "Cordate leaf area must be 100% preserved.")
+        routing = classify_and_route_leaf(f6_mask)
+        self.assertEqual(routing.assigned_tier, "tier1")
+        self.assertIsNotNone(routing.processed_mask)
+        self.assertEqual(np.count_nonzero(routing.processed_mask), orig_area, "Cordate leaf area must be 100% preserved.")
+
+        pts = resample_normalized_contour(routing.processed_mask, num_points=120)
+        self.assertEqual(pts.shape, (120, 2))
 
     def test_clean_unfolded_leaf_left_unclipped(self) -> None:
-        """Verify that a cleanly clipped blade without petiole stalk passes fallback check and remains unclipped."""
+        """Verify that a cleanly segmented blade without petiole_mask remains 100% unclipped."""
         f1_mask = self.f1_mask
         orig_area = np.count_nonzero(f1_mask)
 
-        trimmed_mask, meta = trim_petiole_tail(f1_mask, return_metadata=True)
-        self.assertFalse(meta["is_trimmed"], "Cleanly clipped blade must NOT be clipped.")
-        self.assertEqual(meta["reason"], "CLEAN_BLADE_UNCLIPPED")
-        self.assertEqual(np.count_nonzero(trimmed_mask), orig_area, "Intact blade area must be 100% preserved.")
+        routing = classify_and_route_leaf(f1_mask)
+        self.assertEqual(routing.assigned_tier, "tier1")
+        self.assertIsNotNone(routing.processed_mask)
+        self.assertEqual(np.count_nonzero(routing.processed_mask), orig_area, "Intact blade area must be 100% preserved.")
+
+        pts = resample_normalized_contour(routing.processed_mask, num_points=120)
+        self.assertEqual(pts.shape, (120, 2))
 
     def test_fallback_morphological_linear_protrusion(self) -> None:
-        """Verify that fallback morphological check catches and trims narrow linear protrusions (aspect ratio > 3:1)."""
-        # Create an oval blade with a slender protrusion (length 25 px, width 6 px, aspect ratio ~ 4:1)
+        """Verify that explicit LM3 petiole_mask removes narrow linear petiole protrusions cleanly."""
         mask = np.zeros((300, 300), dtype=np.uint8)
         cv2.ellipse(mask, (150, 130), (50, 90), 0, 0, 360, 255, -1)
-        # Add narrow protrusion at basal tip (y from 220 to 245, width 6)
+        # Add narrow petiole protrusion at basal tip (y from 220 to 245, width 6)
         cv2.rectangle(mask, (147, 220), (153, 245), 255, -1)
 
-        trimmed_mask, meta = trim_petiole_tail(mask, return_metadata=True)
-        self.assertTrue(meta["is_trimmed"], "Narrow linear protrusion must be trimmed.")
-        self.assertIn(
-            meta["reason"],
-            ["WIDTH_INFLECTION_JUNCTION_TRIMMED", "FALLBACK_MORPHOLOGICAL_PROTRUSION_TRIMMED"]
-        )
-        self.assertLess(np.count_nonzero(trimmed_mask), np.count_nonzero(mask))
+        petiole_mask = np.zeros((300, 300), dtype=np.uint8)
+        cv2.rectangle(petiole_mask, (147, 220), (153, 245), 255, -1)
+
+        routing = classify_and_route_leaf(mask, petiole_mask=petiole_mask)
+        self.assertEqual(routing.assigned_tier, "tier1")
+        self.assertIsNotNone(routing.processed_mask)
+        self.assertLess(np.count_nonzero(routing.processed_mask), np.count_nonzero(mask))
+        self.assertEqual(int(np.count_nonzero(routing.processed_mask[222:, :])), 0)
 
     def test_estimate_rosette_crown_point_midrib_intersection_and_root_anchor(self) -> None:
         """Verify estimate_rosette_crown_point() intersects inward basal midrib rays and anchors on Class 9 roots."""

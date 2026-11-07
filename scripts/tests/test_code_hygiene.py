@@ -53,6 +53,30 @@ FORBIDDEN_LEGACY_LM2_TOKENS = (
     "detectron2",
 )
 
+FORBIDDEN_OBSOLETE_SAM2_AND_PRUNED_HELPER_TOKENS = (
+    # SAM-2 & tuning tokens
+    "sam2",
+    "SAM2",
+    "annotate_with_sam2",
+    "sam2_annotator_utils",
+    "SAM2BoundaryRefiner",
+    "SAM2PromptBundle",
+    "refine_mask_with_sam2",
+    "tune_geometry_parameters",
+    "run_calibrate_geometry",
+    # Pruned helper tokens
+    "detect_ruler_scale_hough",
+    "trim_petiole_tail",
+    "_sample_cross_sectional_widths",
+    "_disambiguate_base_apex_endpoints",
+    "homologize_contour_starting_point",
+    "_align_and_normalize_contour",
+    "align_contour_basal_apical",
+    "is_non_lamina_petiole_ribbon",
+    # LeafMachine2 tokens
+    *FORBIDDEN_LEGACY_LM2_TOKENS,
+)
+
 
 def iter_active_source_files(include_shell: bool = False) -> List[Path]:
     """Return all active .py, .R (and optionally .sh) files under scripts/ and root, excluding archive and submodule/venv directories."""
@@ -148,7 +172,7 @@ class TestCodeHygiene(unittest.TestCase):
 
     def test_no_files_or_folders_named_lm2_or_leafmachine2(self):
         """Verify that zero files or folders in the workspace use 'lm2' or 'leafmachine2' in their naming."""
-        skip_roots = {".git", ".venv", ".venv_LM3", "LeafMachine3"}
+        skip_roots = {".git", ".venv", ".venv_LM3", "LeafMachine3", "data", "runs", "outputs"}
         bad_paths: List[str] = []
         for entry in sorted(PROJECT_ROOT.iterdir()):
             name_low = entry.name.lower()
@@ -166,6 +190,26 @@ class TestCodeHygiene(unittest.TestCase):
             [],
             "No files or folders in the workspace may use 'lm2' or 'leafmachine2' in their name:\n"
             + "\n".join(bad_paths),
+        )
+
+    def test_no_active_files_reference_obsolete_sam2_lm2_or_pruned_helpers(self):
+        """Scan all active .py, .R, and .sh files (excluding test_code_hygiene.py) and assert zero forbidden SAM-2, LM2, or pruned helper tokens."""
+        violations: List[str] = []
+        for src_path in iter_active_source_files(include_shell=True):
+            if src_path == SELF_PATH:
+                continue
+            content = src_path.read_text(encoding="utf-8", errors="ignore")
+            rel = src_path.relative_to(PROJECT_ROOT)
+            for lineno, line in enumerate(content.splitlines(), start=1):
+                for token in FORBIDDEN_OBSOLETE_SAM2_AND_PRUNED_HELPER_TOKENS:
+                    if token in line:
+                        violations.append(f"{rel}:{lineno} [{token}]: {line.strip()}")
+
+        self.assertEqual(
+            violations,
+            [],
+            "Active source files must not contain any obsolete SAM-2, LeafMachine2, or pruned helper tokens:\n"
+            + "\n".join(violations),
         )
 
 

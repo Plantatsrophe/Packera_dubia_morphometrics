@@ -134,25 +134,6 @@ compute_centsize_robust <- function(coo) {
   if (is.finite(val) && val > 0) val else NA_real_
 }
 
-# Pre-align contour along principal inertial axis (Momocs::coo_alignxax) with consistent
-# basal-to-apical polarity so suborbicular rosettes (circularity > 0.75) do not flip (Rohlf 1990; Bonhomme et al. 2014).
-align_contour_basal_apical <- function(coo, circularity = NA_real_, has_momocs = FALSE) {
-  if (is.null(coo) || nrow(coo) < 5) return(coo)
-  coo[, 1] <- coo[, 1] - mean(coo[, 1], na.rm = TRUE); coo[, 2] <- coo[, 2] - mean(coo[, 2], na.rm = TRUE)
-  aligned <- if (has_momocs) tryCatch(Momocs::coo_alignxax(coo), error = function(e) coo) else tryCatch(coo %*% svd(coo)$v, error = function(e) coo)
-  if (!is.matrix(aligned) || nrow(aligned) != nrow(coo)) aligned <- coo
-  # For suborbicular outlines (circularity > 0.75), guard against 90-deg transverse inertial axis swap
-  if (!is.na(circularity) && circularity > 0.75 && abs(aligned[1, 1]) < abs(aligned[1, 2])) {
-    theta_b <- atan2(coo[1, 2], coo[1, 1]) - pi
-    R_b <- matrix(c(cos(-theta_b), -sin(-theta_b), sin(-theta_b), cos(-theta_b)), nrow = 2, byrow = TRUE)
-    aligned <- coo %*% t(R_b)
-  }
-  # Enforce consistent basal-to-apical polarity: homologous base landmark (index 1) at negative X
-  if (is.finite(aligned[1, 1]) && aligned[1, 1] > 0) aligned <- -aligned
-  if (has_momocs) aligned <- tryCatch(Momocs::coo_cw(aligned), error = function(e) aligned)
-  aligned
-}
-
 verify_harmonic_power_calibration <- function(out_obj = NULL, harm_mat = NULL, nb_h = 12L) {
   fb_h <- max(6L, min(24L, as.integer(if (is.null(nb_h) || is.na(nb_h)) 12L else nb_h)))
   h_opt <- fb_h; cum_pct <- NA_real_
@@ -319,7 +300,7 @@ run_fourier_extraction <- function(opts) {
 
   # 1. Discover coordinates via SQLite extracted_leaves or Dual Filesystem Ingestion Engine
   harmonic_names <- as.vector(outer(c("A", "B", "C", "D"), seq_len(opts$harmonics), function(x, y) paste0(x, y)))
-  db_ing <- if (exists("fetch_step03_contours_from_db", mode = "function")) fetch_step03_contours_from_db(opts$vouchers, opts$manifest, opts$contours_dir, active_catalogs = if (length(active_voucher_cats) > 0L) setdiff(active_voucher_cats, sec_dup_cats) else NULL, align_fn = align_contour_basal_apical, centsize_fn = compute_centsize_robust) else NULL
+  db_ing <- if (exists("fetch_step03_contours_from_db", mode = "function")) fetch_step03_contours_from_db(opts$vouchers, opts$manifest, opts$contours_dir, active_catalogs = if (length(active_voucher_cats) > 0L) setdiff(active_voucher_cats, sec_dup_cats) else NULL, align_fn = function(coo, ...) sweep(coo, 2, colMeans(coo, na.rm = TRUE), "-"), centsize_fn = compute_centsize_robust) else NULL
   if (!is.null(db_ing)) {
     coo_list <- db_ing$coords_list; fac_df <- db_ing$meta_df; shape_names_vec <- names(coo_list)
     message("Ingested ", length(coo_list), " Tier 1 intact 120-vertex contours directly from SQLite extracted_leaves.")
@@ -415,8 +396,8 @@ run_fourier_extraction <- function(opts) {
     centsize <- compute_centsize_robust(coo)
     log_cs <- if (!is.na(centsize) && centsize > 0) round(log(centsize), 6) else NA_real_
 
-    # Pre-align contour along principal inertial axis with consistent basal-to-apical polarity (Rohlf 1990; Bonhomme et al. 2014)
-    coo <- align_contour_basal_apical(coo, circularity = circularity, has_momocs = has_momocs)
+    # Center contour coordinates while preserving LeafMachine3 tip-up, lamina_base-anchored clockwise outline
+    coo <- if (has_momocs) tryCatch(Momocs::coo_center(coo), error = function(e) sweep(coo, 2, colMeans(coo, na.rm = TRUE), "-")) else sweep(coo, 2, colMeans(coo, na.rm = TRUE), "-")
     lw <- if (has_momocs) tryCatch(Momocs::coo_lw(coo), error = function(e) NULL) else NULL
     if (is.null(lw) || length(lw) < 2 || is.na(lw[2]) || lw[2] <= 1e-6) {
       coo_centered <- scale(coo, center = TRUE, scale = FALSE); svd_rot <- coo_centered %*% svd(coo_centered)$v

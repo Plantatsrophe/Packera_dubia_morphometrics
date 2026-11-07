@@ -49,7 +49,6 @@ MAX_PER_STATE=""
 MAX_PER_REGION=""
 NO_SPATIAL_WEIGHTS=false
 LIMIT_ARG=()
-SAM2_FLAG=()
 DEMO_FLAG=()
 FOCAL_ARGS=()
 INTRASPECIFIC_ARGS=()
@@ -70,7 +69,6 @@ Run & Compute Controls:
   -j, --threads <INT>                CPU worker thread limit across Python & R stages (exports PACKERA_MAX_WORKERS)
   --gpu-batch-size <INT>             GPU inference batch size for Step 02 LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) & Step 05 DINOv2
   --limit <N>                        Cap maximum number of vouchers processed in Step 02 segmentation
-  --sam2-refine                      Enable automated LM3-guided SAM 2.1 boundary refinement in Step 02
   --demo                             Run in ephemeral test isolation mode (PACKERA_DEMO_MODE=1)
 
 Taxonomic Scope & Complex Discovery:
@@ -162,10 +160,6 @@ while [[ $# -gt 0 ]]; do
     --limit)
       LIMIT_ARG=("--limit" "$2")
       shift 2
-      ;;
-    --sam2-refine)
-      SAM2_FLAG=("--sam2-refine")
-      shift
       ;;
     --demo)
       DEMO_FLAG=("--demo")
@@ -1107,7 +1101,6 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
     --output-dir "${RUN_DIR}/data" \
     ${FORCE_FLAG} \
     "${LIMIT_ARG[@]}" \
-    "${SAM2_FLAG[@]}" \
     "${COMPUTE_ARGS[@]}"
 
   # Sync newly extracted masks, contours, cropped patches, and Step 02 manifests back to canonical root data/

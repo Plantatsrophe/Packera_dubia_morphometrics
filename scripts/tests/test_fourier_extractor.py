@@ -127,11 +127,12 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn('grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]', r_content)
 
     def test_empirical_efa_alignment_harmonic_power_and_otu_aggregation(self):
-        """Verify Phase 3 empirical EFA protocol: coo_alignxax, calibrate_harmonicpower_efourier, RRPP, and OTU-level PCA."""
+        """Verify Phase 3 empirical EFA protocol: coo_center, calibrate_harmonicpower_efourier, RRPP, and OTU-level PCA."""
         r_content = self.r_script_path.read_text(encoding="utf-8")
-        self.assertIn("align_contour_basal_apical", r_content)
-        self.assertIn("Momocs::coo_alignxax", r_content)
-        self.assertIn("circularity > 0.75", r_content)
+        self.assertIn("Momocs::efourier", r_content)
+        self.assertIn("norm = FALSE, start = FALSE", r_content)
+        self.assertIn("Momocs::coo_center", r_content)
+        self.assertIn("Momocs::coo_scale", r_content)
         self.assertIn("verify_harmonic_power_calibration", r_content)
         self.assertIn("calibrate_harmonicpower_efourier", r_content)
         self.assertIn("heteroblasty_index", r_content)
@@ -521,7 +522,7 @@ class TestFourierExtractor(unittest.TestCase):
             self.assertIn("Sym_PC6", spec_df.columns)
 
     def test_basal_positional_gate_lowest_lamina_fallback_ribbon_filter_and_otu_medians(self):
-        """Verify basal positional homology filter, lowest-lamina fallback, curved ribbon rejection, and OTU median/q25 dissection summaries."""
+        """Verify basal positional homology filter, lowest-lamina fallback, and OTU median/q25 dissection summaries."""
         if not shutil.which("Rscript"):
             self.skipTest("Rscript not installed.")
         t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
@@ -540,15 +541,6 @@ class TestFourierExtractor(unittest.TestCase):
         lobe_env = (0.25 + 0.75 * ((u_t + 1.0) / 2.0) ** 0.6) * (0.35 + 0.65 * np.abs(np.sin(4.5 * np.pi * (u_t + 1.0) / 2.0)))
         pinn_xy = np.column_stack([100.0 * u_t, 42.0 * np.sin(t) * lobe_env])
 
-        s_arc = np.linspace(-1.1, 1.1, 60)
-        cx_arc = 120.0 * np.sin(s_arc)
-        cy_arc = 120.0 * (1.0 - np.cos(s_arc))
-        nx_arc, ny_arc = -np.sin(s_arc), np.cos(s_arc)
-        rib_xy = np.vstack([
-            np.column_stack([cx_arc + 2.2 * nx_arc, cy_arc + 2.2 * ny_arc]),
-            np.column_stack([(cx_arc - 2.2 * nx_arc)[::-1], (cy_arc - 2.2 * ny_arc)[::-1]]),
-        ])
-
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_p = Path(tmpdir)
             contours_dir = tmp_p / "contours"
@@ -565,12 +557,11 @@ class TestFourierExtractor(unittest.TestCase):
             pd.DataFrame(vouchers).to_csv(vouchers_csv, index=False)
 
             leaf_specs = [
-                # V_MIX: leaf 1 is upper cauline (cy=0.18 -> excluded); leaf 2 entire basal; leaves 3-4 pinnatifid basal; leaf 5 curved ribbon (excluded)
+                # V_MIX: leaf 1 is upper cauline (cy=0.18 -> excluded); leaf 2 entire basal; leaves 3-4 pinnatifid basal
                 ("V_MIX", 1, entire_xy, 0.18, 0.94, False),
                 ("V_MIX", 2, entire_xy, 0.72, 0.92, False),
                 ("V_MIX", 3, pinn_xy, 0.78, 0.44, True),
                 ("V_MIX", 4, pinn_xy * 1.03, 0.82, 0.46, True),
-                ("V_MIX", 5, rib_xy, 0.85, 0.10, True),
                 # V_DET: top-mounted detached rosette (all cy < 0.40, rescued by max - 0.15 fallback)
                 ("V_DET", 1, entire_xy * 0.98, 0.22, 0.91, False),
                 ("V_DET", 2, pinn_xy * 0.97, 0.31, 0.45, True),
@@ -626,7 +617,7 @@ class TestFourierExtractor(unittest.TestCase):
             spec_df = pd.read_csv(out_spec)
 
             vmix_lids = sorted(ind_df.loc[ind_df["catalogNumber"] == "V_MIX", "leaf_id"].astype(int).tolist())
-            self.assertEqual(vmix_lids, [2, 3, 4], f"Expected cauline leaf 1 and ribbon leaf 5 excluded, got {vmix_lids}")
+            self.assertEqual(vmix_lids, [2, 3, 4], f"Expected cauline leaf 1 excluded, got {vmix_lids}")
             vdet_lids = sorted(ind_df.loc[ind_df["catalogNumber"] == "V_DET", "leaf_id"].astype(int).tolist())
             self.assertEqual(vdet_lids, [1, 2], f"Expected detached rosette leaves rescued by fallback, got {vdet_lids}")
 

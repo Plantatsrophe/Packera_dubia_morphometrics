@@ -15,8 +15,8 @@ Description:
          staging or symlink copying.
       2. LeafMachine3 ONNX Segmentation: Direct inference using YOLO26x plant/leaf/pose
          engines and UNet++ v9 specimen segmentation (models/lm3_packera_seg_finetuned.onnx).
-      3. Decoupled Asynchronous Scale Detection: Hough-transform ruler detection
-         runs in parallel; scale failure never aborts silhouette extraction.
+      3. LeafMachine3 Scale Calibration: Resolves metric scale from LeafMachine3's
+         Module 7 Ruler Lattice Solver and Module 1 Megapixel Conversion Prior.
       4. In-Sheet Centroid Clustering: Groups organs into plant individuals
          without separate DBSCAN micro-scripts.
       5. 2-Path Botanical Leaf Extraction:
@@ -110,22 +110,17 @@ from scripts.vision.leaf_geometry_utils import (
     compute_sheet_adaptive_min_blade_area_cm2,
     crop_dense_rosette_tier4,
     detect_folded_leaf,
-    detect_ruler_scale_hough,
     estimate_rosette_crown_point,
     export_standardized_contour,
     extract_tier1_pristine,
     extract_tier2_reflected,
-    generate_sam2_prompts_from_leaf_mask,
-    homologize_contour_starting_point,
     is_botanical_dissection,
     is_cauline_or_stem_contaminant,
     is_topologically_connected_mask,
     LeafRoutingResult,
     normalize_assigned_tier,
-    SAM2PromptBundle,
     TIER_1_DIRECT,
     TIER_2_REFLECTED,
-    trim_petiole_tail,
 )
 from scripts.vision.capitulum_phenology_classifier import (
     classify_single_capitulum,
@@ -150,14 +145,12 @@ from scripts.vision.lm3_inference_engines import (
     LM3PlantDetector,
     LM3PoseLandmarkEngine,
     LM3SpecimenSegmenter,
-    SAM2BoundaryRefiner,
     _VoucherFinalizeBundle,
     _extract_native_lm3_petiole_anchor,
     _merge_and_bridge_dissected_crop_mask,
     compute_capitulum_metrics,
     crop_leaf_bbox_with_padding,
     is_stock_lm3_weights,
-    refine_mask_with_sam2,
     reproject_crop_mask_to_sheet,
     torch_cuda_available,
 )
@@ -179,16 +172,11 @@ class SegmentAndExtractPipeline:
         min_solidity: Optional[float] = None,
         min_ucs: Optional[float] = None,
         score_thresh: float = 0.35,
-        num_ruler_workers: int = 4,
         force: bool = False,
         config: Optional[PipelineConfig] = None,
         lm3_project_dir: Optional[Union[str, Path]] = None,
         stage1_weights: Optional[Union[str, Path]] = None,
         ruler_confidence_thresh: float = 0.50,
-        sam2_refine: bool = False,
-        sam2_checkpoint: Optional[Union[str, Path]] = None,
-        sam2_config: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
-        sam2_predictor: Optional[Any] = None,
         db_path: Optional[Union[str, Path]] = None,
         enable_geometric_qc: bool = False,
         threads: Optional[int] = None,
@@ -233,10 +221,6 @@ class SegmentAndExtractPipeline:
 
         self.score_thresh = score_thresh
         self.threads: Optional[int] = resolve_cpu_threads(threads, self.config)
-        if self.threads is not None and num_ruler_workers == 4:
-            self.num_ruler_workers = max(1, min(int(self.threads), 8))
-        else:
-            self.num_ruler_workers = num_ruler_workers
         if self.threads is not None and self.device == "cpu" and torch is not None:
             try:
                 torch.set_num_threads(max(1, int(self.threads)))
@@ -300,7 +284,7 @@ class SegmentAndExtractPipeline:
                 shutil.copy2(shared_vouchers, tmp_v)
                 tmp_v.replace(self.vouchers_csv)
 
-        # Preload LM3 ruler scale calibrations (keeping Hough as secondary fallback)
+        # Preload LM3 ruler scale calibrations
         self.ruler_calibrations: Dict[str, float] = {}
         if self.lm3_project_dir and self.lm3_project_dir.exists():
             self.ruler_calibrations.update(
@@ -310,8 +294,6 @@ class SegmentAndExtractPipeline:
             self.ruler_calibrations.update(
                 load_ruler_calibrations(self.output_dir, min_confidence=self.ruler_confidence_thresh)
             )
-
-        self.ruler_executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.num_ruler_workers)
 
         # 1. Stage 1 Full-Sheet Plant Organ Detector (YOLO26x 1280px, 9 classes)
         self.stage1_detector = LM3PlantDetector(
@@ -341,19 +323,6 @@ class SegmentAndExtractPipeline:
         )
 
         self.is_stock_lm3 = is_stock_lm3_weights(self.model_weights)
-        self.sam2_refine = bool(sam2_refine)
-        self.sam2_checkpoint = (
-            Path(sam2_checkpoint)
-            if sam2_checkpoint is not None
-            else (PROJECT_ROOT / "models" / "sam2.1_hiera_large.pt")
-        )
-        self.sam2_config = sam2_config
-        self.sam2_refiner = SAM2BoundaryRefiner(
-            checkpoint_path=self.sam2_checkpoint,
-            model_cfg=self.sam2_config,
-            device=self.device,
-            predictor=sam2_predictor,
-        )
         self.voucher_repro_records: Dict[str, Dict[str, Any]] = {}
         self.voucher_pheno_records: Dict[str, Dict[str, Any]] = {}
         self.voucher_crowns_by_pid: Dict[str, Dict[int, Tuple[float, float]]] = {}
@@ -400,28 +369,9 @@ class SegmentAndExtractPipeline:
             if v_tel and k_tel in self.rejection_telemetry:
                 self.rejection_telemetry[k_tel] += int(v_tel)
 
-    def _should_refine_with_sam2(self, m_init: np.ndarray) -> bool:
-        """
-        Determines whether to invoke automated LM3-guided SAM 2 boundary refinement
-        on an initial LeafMachine3 leaf mask `m_init`.
-        Triggered only when `--sam2-refine` is explicitly enabled (or when opt-in
-        geometric QC is active on stock LM3 weights).
-        """
-        if self.sam2_refiner is None or not self.sam2_refiner.is_available:
-            return False
-        if self.sam2_refine:
-            return True
-        if not self.enable_geometric_qc:
-            return False
-        if not self.is_stock_lm3:
-            return False
-        if m_init is None or m_init.size == 0 or np.count_nonzero(m_init) == 0:
-            return False
-        return bool(is_botanical_dissection((m_init > 0).astype(np.uint8) * 255))
-
     def shutdown(self) -> None:
         """Cleans up background thread pools."""
-        self.ruler_executor.shutdown(wait=False)
+        pass
 
     def _index_completed_vouchers(self) -> Set[str]:
         """Builds an O(1) lookup set of catalogNumbers that already have mask or contour files."""
@@ -821,11 +771,10 @@ class SegmentAndExtractPipeline:
         image_path: Path,
         taxon: Optional[str] = None,
         preloaded_img: Optional[np.ndarray] = None,
-        precomputed_ruler_scale: Optional[Tuple[bool, Optional[float]]] = None,
         precomputed_s1_letterbox: Optional[np.ndarray] = None,
         precomputed_s1_detections: Optional[List[Any]] = None,
         precomputed_s2_payload: Optional[Tuple[Any, ...]] = None,
-        precomputed_single_stage_detections: Optional[Tuple[List[Any], bool]] = None,
+        precomputed_single_stage_detections: Optional[Union[List[Any], Tuple[List[Any], bool]]] = None,
         _return_bundle: bool = False,
     ) -> Any:
         """Processes a single herbarium voucher specimen sheet using LeafMachine3 ONNX engines."""
@@ -902,18 +851,16 @@ class SegmentAndExtractPipeline:
         scale_f = max(sheet_h, sheet_w) / 5600.0 if max(sheet_h, sheet_w) > 1000 else 0.0
         is_high_dpi = max(sheet_h, sheet_w) > 1000 and scale_f > 0.4
 
-        # 1. Ruler Scale Calibration: Prefer Stage 1 LM3 Ruler Calibration, fallback to Hough
+        # 1. Ruler Scale Calibration: LeafMachine3 Module 7 Ruler Lattice Solver & Module 1 Megapixel Prior
         lm3_px_per_mm = self.ruler_calibrations.get(catalog_number)
-        ruler_future = None
         if lm3_px_per_mm is not None and not np.isnan(lm3_px_per_mm) and lm3_px_per_mm > 0:
             pixels_per_mm: Optional[float] = (
                 float(1.0 / lm3_px_per_mm) if lm3_px_per_mm < 1.0 else float(lm3_px_per_mm)
             )
-        elif precomputed_ruler_scale is not None and precomputed_ruler_scale[0]:
-            pixels_per_mm = precomputed_ruler_scale[1]
+            cf_source = "measured_from_ruler"
         else:
             pixels_per_mm = None
-            ruler_future = self.ruler_executor.submit(detect_ruler_scale_hough, img_bgr)
+            cf_source = "predicted_from_megapixels"
 
         # 1b. Whole-Sheet UNet++ v9 Specimen Segmenter + LLR_Hyst_KeepBlobs paper cleanup
         specimen_paper_cleaned_mask: Optional[np.ndarray] = None
@@ -955,15 +902,6 @@ class SegmentAndExtractPipeline:
         leaf_detections: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int, Tuple[int, int], Tuple[int, int], bool, Optional[Dict[str, Any]], float, int]] = []
 
         if stage1_detections:
-            if ruler_future is not None and (is_high_dpi or scale_f > 0.0):
-                try:
-                    pixels_per_mm = ruler_future.result(timeout=5.0)
-                except Exception as e:
-                    logger.debug(f"Ruler detection timeout or exception for {catalog_number}: {e}")
-                    pixels_per_mm = None
-                ruler_future = None
-
-            _sam2_already_done = False
             if precomputed_s2_payload is not None:
                 (
                     candidate_s1_crops,
@@ -976,7 +914,6 @@ class SegmentAndExtractPipeline:
                     s1_px_per_cm,
                     s1_eff_min_cm2,
                     all_crop_preds,
-                    _sam2_already_done,
                 ) = precomputed_s2_payload
                 _telem_deltas["rejected_leaflet_class"] += int(_rej_lflt)
             else:
@@ -1054,8 +991,6 @@ class SegmentAndExtractPipeline:
                         crop_bgr=crop_bgr,
                         specimen_paper_cleaned_mask=crop_spec_mask,
                     )
-                    if (not _sam2_already_done) and self._should_refine_with_sam2(m_raw):
-                        m_raw = self.sam2_refiner.refine_crop_mask(crop_bgr, m_raw)
 
                     fg_area = int(np.count_nonzero(m_raw))
                     if fg_area <= 0:
@@ -1194,24 +1129,19 @@ class SegmentAndExtractPipeline:
                         crop_bgr=crop_bgr,
                         specimen_paper_cleaned_mask=crop_spec_qc,
                     )
-                    if (not _sam2_already_done) and self._should_refine_with_sam2(m_refined):
-                        m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, m_refined)
-
-                    # Trim petiole tail directly on the compact crop mask using sheet_shape for high-res scaling
-                    m_trimmed, trim_meta = trim_petiole_tail(
-                        m_refined, return_metadata=True, sheet_shape=(sheet_h, sheet_w)
-                    )
-                    if isinstance(trim_meta, dict):
-                        trim_meta["petiole_mask"] = best_petiole_qc
-                        trim_meta["hole_mask"] = best_hole_qc
-                    fg_area = int(np.count_nonzero(m_trimmed))
+                    trim_meta: Dict[str, Any] = {
+                        "is_trimmed": best_petiole_qc is not None,
+                        "petiole_mask": best_petiole_qc,
+                        "hole_mask": best_hole_qc,
+                    }
+                    fg_area = int(np.count_nonzero(m_refined))
                     if fg_area == 0:
                         continue
 
-                    bx_c, by_c, bw_c, bh_c = cv2.boundingRect(m_trimmed)
+                    bx_c, by_c, bw_c, bh_c = cv2.boundingRect(m_refined)
                     if bw_c == 0 or bh_c == 0:
                         continue
-                    sub_trimmed = m_trimmed[by_c : by_c + bh_c, bx_c : bx_c + bw_c]
+                    sub_trimmed = m_refined[by_c : by_c + bh_c, bx_c : bx_c + bw_c]
                     cnts_m, _ = cv2.findContours(sub_trimmed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if not cnts_m:
                         continue
@@ -1330,9 +1260,12 @@ class SegmentAndExtractPipeline:
                 leaf_detections = [x[3] for x in kept_scored]
         elif not is_high_dpi or self.stage1_detector.model is None or "predict" in self.model_engine.__dict__:
             # Fallback when Stage 1 detector is uninitialized (e.g., direct single-stage unit tests)
-            _ss_sam2_done = False
             if precomputed_single_stage_detections is not None:
-                raw_detections, _ss_sam2_done = precomputed_single_stage_detections
+                raw_detections = (
+                    precomputed_single_stage_detections[0]
+                    if isinstance(precomputed_single_stage_detections, tuple)
+                    else precomputed_single_stage_detections
+                )
             else:
                 raw_detections = self.model_engine.predict(img_bgr)
             if not self.enable_geometric_qc:
@@ -1351,15 +1284,6 @@ class SegmentAndExtractPipeline:
                 for bbox, mask, score, cls_id in raw_s2_leaves:
                     sheet_mask = mask
                     full_bbox = bbox
-                    if (not _ss_sam2_done) and self._should_refine_with_sam2(mask):
-                        crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, bbox, pad_ratio=0.12)
-                        cy0, cx0, cy1, cx1 = crop_box
-                        if crop_bgr.size > 0 and cy1 > cy0 and cx1 > cx0:
-                            crop_m_init = mask[cy0:cy1, cx0:cx1]
-                            crop_m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, crop_m_init)
-                            sheet_mask, full_bbox = reproject_crop_mask_to_sheet(
-                                crop_m_refined, crop_box, (sheet_h, sheet_w)
-                            )
                     fg_area = int(np.count_nonzero(sheet_mask))
                     if fg_area <= 0:
                         continue
@@ -1422,15 +1346,6 @@ class SegmentAndExtractPipeline:
                     elif cls_id in LM3_LEAF_CLASS_IDS:
                         sheet_mask = mask
                         full_bbox = bbox
-                        if (not _ss_sam2_done) and self._should_refine_with_sam2(mask):
-                            crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, bbox, pad_ratio=0.12)
-                            cy0, cx0, cy1, cx1 = crop_box
-                            if crop_bgr.size > 0 and cy1 > cy0 and cx1 > cx0:
-                                crop_m_init = mask[cy0:cy1, cx0:cx1]
-                                crop_m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, crop_m_init)
-                                sheet_mask, full_bbox = reproject_crop_mask_to_sheet(
-                                    crop_m_refined, crop_box, (sheet_h, sheet_w)
-                                )
                         leaf_detections.append((
                             full_bbox,
                             sheet_mask,
@@ -1443,14 +1358,6 @@ class SegmentAndExtractPipeline:
                             0.0,
                             int(np.count_nonzero(sheet_mask)),
                         ))
-
-        # Collect asynchronous Hough scale fallback if LM3 ruler calibration was absent
-        if ruler_future is not None:
-            try:
-                pixels_per_mm = ruler_future.result(timeout=5.0)
-            except Exception as e:
-                logger.debug(f"Ruler detection timeout or exception for {catalog_number}: {e}")
-                pixels_per_mm = None
 
         is_calibrated_mm = bool(
             pixels_per_mm is not None and not np.isnan(pixels_per_mm) and float(pixels_per_mm) > 0.0
@@ -2530,7 +2437,13 @@ class SegmentAndExtractPipeline:
                     )
                     if cnts:
                         raw_c = max(cnts, key=cv2.contourArea).reshape(-1, 2)
-                        homologized_c = homologize_contour_starting_point(raw_c, p_base_pt)
+                        if len(raw_c) >= 3 and cv2.contourArea(raw_c.astype(np.float32), oriented=True) < 0:
+                            raw_c = raw_c[::-1]
+                        if p_base_pt is not None and len(raw_c) > 0:
+                            dists = np.linalg.norm(raw_c - np.asarray(p_base_pt, dtype=np.float64), axis=1)
+                            homologized_c = np.roll(raw_c, -int(np.argmin(dists)), axis=0)
+                        else:
+                            homologized_c = raw_c
                         if ox != 0 or oy != 0:
                             homologized_c = homologized_c + np.array([ox, oy], dtype=homologized_c.dtype)
                             if p_base_pt is not None:
@@ -2982,7 +2895,7 @@ class SegmentAndExtractPipeline:
         )
         use_wave_engine = (not custom_hooks) and (total_vouchers > 4)
 
-        def _prefetch_voucher_data(cat: str, img_p: Path) -> Tuple[Optional[np.ndarray], Tuple[bool, Optional[float]], Optional[np.ndarray]]:
+        def _prefetch_voucher_data(cat: str, img_p: Path) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
             if not img_p.exists():
                 for _ext in (".webp", ".jpg", ".jpeg", ".png"):
                     _cand_p = img_p.with_suffix(_ext)
@@ -2990,21 +2903,10 @@ class SegmentAndExtractPipeline:
                         img_p = _cand_p
                         break
             if not img_p.exists():
-                return None, (False, None), None
+                return None, None
             img = cv2.imread(str(img_p))
             if img is None:
-                return None, (False, None), None
-            lm3_cal = self.ruler_calibrations.get(cat)
-            if lm3_cal is not None and not np.isnan(lm3_cal) and lm3_cal > 0:
-                ruler_res: Tuple[bool, Optional[float]] = (
-                    True,
-                    float(1.0 / lm3_cal) if lm3_cal < 1.0 else float(lm3_cal),
-                )
-            else:
-                try:
-                    ruler_res = (True, detect_ruler_scale_hough(img))
-                except Exception:
-                    ruler_res = (True, None)
+                return None, None
             s1_lb: Optional[np.ndarray] = None
             if (
                 hasattr(self.stage1_detector, "prepare_letterbox")
@@ -3015,7 +2917,7 @@ class SegmentAndExtractPipeline:
                     s1_lb = self.stage1_detector.prepare_letterbox(img)
                 except Exception:
                     s1_lb = None
-            return img, ruler_res, s1_lb
+            return img, s1_lb
 
         def _should_skip_voucher(cat_num: str) -> bool:
             if self.force:
@@ -3163,11 +3065,6 @@ class SegmentAndExtractPipeline:
                     prefetch_futures: Dict[int, concurrent.futures.Future] = {}
                     in_flight_waves: List[List[Tuple[int, str, Path, concurrent.futures.Future]]] = []
                     use_s1_cache = bool(self.lm3_project_dir is not None and not self.force)
-                    sam2_active = bool(
-                        self.sam2_refiner is not None
-                        and self.sam2_refiner.is_available
-                        and (self.sam2_refine or (self.enable_geometric_qc and self.is_stock_lm3))
-                    )
 
                     def _retire_oldest_wave() -> None:
                         if not in_flight_waves:
@@ -3241,12 +3138,12 @@ class SegmentAndExtractPipeline:
                                 prefetch_futures[la_idx] = prefetch_pool.submit(_prefetch_voucher_data, la_cat, la_path)
 
                         wave_slice = active_tasks[w_start:w_end]
-                        wave_prefetched: List[Tuple[int, str, Path, str, Optional[np.ndarray], Tuple[bool, Optional[float]], Optional[np.ndarray]]] = []
+                        wave_prefetched: List[Tuple[int, str, Path, str, Optional[np.ndarray], Optional[np.ndarray]]] = []
                         valid_indices: List[int] = []
                         valid_s1_inputs: List[Tuple[np.ndarray, Optional[str], Optional[np.ndarray]]] = []
                         for local_i, (a_idx, cat_num, raw_img_path, taxon) in enumerate(wave_slice):
-                            pre_img, pre_ruler, pre_s1_lb = prefetch_futures.pop(a_idx).result()
-                            wave_prefetched.append((a_idx, cat_num, raw_img_path, taxon, pre_img, pre_ruler, pre_s1_lb))
+                            pre_img, pre_s1_lb = prefetch_futures.pop(a_idx).result()
+                            wave_prefetched.append((a_idx, cat_num, raw_img_path, taxon, pre_img, pre_s1_lb))
                             if pre_img is not None:
                                 valid_indices.append(local_i)
                                 valid_s1_inputs.append((pre_img, cat_num, pre_s1_lb))
@@ -3264,7 +3161,7 @@ class SegmentAndExtractPipeline:
 
                         # Stage B2: Parallel CPU crop extraction + LM3 resize transform across Threadripper pool
                         def _prep_s2_voucher(local_i: int) -> Tuple[int, Optional[Tuple[Any, ...]], List[Optional[Tuple[np.ndarray, int, int]]], bool]:
-                            _, cat_v, _, _, img_v, ruler_v, _ = wave_prefetched[local_i]
+                            _, cat_v, _, _, img_v, _ = wave_prefetched[local_i]
                             dets_v = s1_dets_by_local.get(local_i, [])
                             assert img_v is not None
                             sh_v, sw_v = img_v.shape[:2]
@@ -3279,12 +3176,12 @@ class SegmentAndExtractPipeline:
                                 )
                                 return local_i, None, ss_pre, needs_ss
 
-                            ppm_v: Optional[float] = ruler_v[1] if ruler_v[0] else None
-                            if not ruler_v[0]:
-                                try:
-                                    ppm_v = detect_ruler_scale_hough(img_v)
-                                except Exception:
-                                    ppm_v = None
+                            lm3_cal_v = self.ruler_calibrations.get(cat_v)
+                            ppm_v: Optional[float] = (
+                                (float(1.0 / lm3_cal_v) if lm3_cal_v < 1.0 else float(lm3_cal_v))
+                                if (lm3_cal_v is not None and not np.isnan(lm3_cal_v) and lm3_cal_v > 0)
+                                else None
+                            )
                             unpacked = self._unpack_stage1_candidates(
                                 catalog_number=cat_v,
                                 img_bgr=img_v,
@@ -3347,36 +3244,9 @@ class SegmentAndExtractPipeline:
                         for loc_i, s_idx, e_idx in slice_ranges:
                             unp = unpacked_by_local[loc_i]
                             v_preds = list(flat_preds[s_idx:e_idx]) if e_idx > s_idx else []
-                            sam2_done_flag = not sam2_active
-                            if sam2_active and v_preds:
-                                # Keep optional SAM 2 refinement strictly on the single GPU thread
-                                cands_v = unp[0]
-                                for idx_cp, (c_item, cp_list) in enumerate(zip(cands_v, v_preds)):
-                                    if not cp_list:
-                                        continue
-                                    crop_bgr_v = c_item[3]
-                                    best_k = -1
-                                    best_metric = (-1.0, -1)
-                                    for k_p, (_pb, pm, ps, pcl) in enumerate(cp_list):
-                                        if int(pcl) != 0:
-                                            continue
-                                        fga = int(np.count_nonzero(pm))
-                                        if fga <= 0:
-                                            continue
-                                        key_m = (float(ps), fga) if not self.enable_geometric_qc else (fga * float(ps), fga)
-                                        if key_m > best_metric:
-                                            best_metric = key_m
-                                            best_k = k_p
-                                    if best_k >= 0 and self._should_refine_with_sam2(cp_list[best_k][1]):
-                                        pb0, pm0, ps0, pcl0 = cp_list[best_k]
-                                        pm_ref = self.sam2_refiner.refine_crop_mask(crop_bgr_v, pm0)
-                                        new_cp = list(cp_list)
-                                        new_cp[best_k] = (pb0, pm_ref, ps0, pcl0)
-                                        v_preds[idx_cp] = new_cp
-                                sam2_done_flag = True
-                            s2_payload_by_local[loc_i] = (*unp, v_preds, sam2_done_flag)
+                            s2_payload_by_local[loc_i] = (*unp, v_preds)
 
-                        ss_payload_by_local: Dict[int, Tuple[List[Any], bool]] = {}
+                        ss_payload_by_local: Dict[int, List[Any]] = {}
                         if ss_Fallback_locals:
                             ss_imgs = [wave_prefetched[loc_i][4] for loc_i in ss_Fallback_locals]  # type: ignore[misc]
                             ss_pre_list = [
@@ -3389,38 +3259,17 @@ class SegmentAndExtractPipeline:
                                 pretransformed=ss_pre_list,
                             )
                             for loc_i, ss_raw in zip(ss_Fallback_locals, ss_preds_batch):
-                                ss_done = not sam2_active
-                                if sam2_active and ss_raw:
-                                    img_ss = wave_prefetched[loc_i][4]
-                                    assert img_ss is not None
-                                    sh_ss, sw_ss = img_ss.shape[:2]
-                                    upd_ss = []
-                                    for b_ss, m_ss, sc_ss, cl_ss in ss_raw:
-                                        if int(cl_ss) in LM3_LEAF_CLASS_IDS and self._should_refine_with_sam2(m_ss):
-                                            cb_ss, cbox_ss = crop_leaf_bbox_with_padding(img_ss, b_ss, pad_ratio=0.12)
-                                            cy0_s, cx0_s, cy1_s, cx1_s = cbox_ss
-                                            if cb_ss.size > 0 and cy1_s > cy0_s and cx1_s > cx0_s:
-                                                cm_ref = self.sam2_refiner.refine_crop_mask(
-                                                    cb_ss, m_ss[cy0_s:cy1_s, cx0_s:cx1_s]
-                                                )
-                                                m_ss, b_ss = reproject_crop_mask_to_sheet(
-                                                    cm_ref, cbox_ss, (sh_ss, sw_ss)
-                                                )
-                                        upd_ss.append((b_ss, m_ss, sc_ss, cl_ss))
-                                    ss_raw = upd_ss
-                                    ss_done = True
-                                ss_payload_by_local[loc_i] = (ss_raw, ss_done)
+                                ss_payload_by_local[loc_i] = ss_raw
 
                         # Stage C: Submit parallel CPU contour/mask/rosette post-processing while GPU moves to next wave
                         wave_post_tasks: List[Tuple[int, str, Path, concurrent.futures.Future]] = []
-                        for local_i, (a_idx, cat_num, raw_img_path, taxon, pre_img, pre_ruler, _pre_lb) in enumerate(wave_prefetched):
+                        for local_i, (a_idx, cat_num, raw_img_path, taxon, pre_img, _pre_lb) in enumerate(wave_prefetched):
                             fut_post = post_pool.submit(
                                 self.process_voucher,
                                 cat_num,
                                 raw_img_path,
                                 taxon,
                                 pre_img,
-                                pre_ruler,
                                 None,
                                 s1_dets_by_local.get(local_i, []) if pre_img is not None else None,
                                 s2_payload_by_local.get(local_i),
@@ -3647,25 +3496,6 @@ def parse_args() -> argparse.Namespace:
         help=f"Detection confidence score threshold (default: {cfg.segmentation.score_thresh})."
     )
     parser.add_argument(
-        "--sam2-refine",
-        dest="sam2_refine",
-        action="store_true",
-        default=False,
-        help="Enable automated LM3-guided SAM 2 sub-pixel boundary refinement on Stage 2 leaf crops.",
-    )
-    parser.add_argument(
-        "--sam2-checkpoint",
-        type=Path,
-        default=cfg.paths.workspace_root / "models" / "sam2.1_hiera_large.pt",
-        help="Path to SAM 2.1 checkpoint for automated boundary refinement.",
-    )
-    parser.add_argument(
-        "--sam2-config",
-        type=str,
-        default="configs/sam2.1/sam2.1_hiera_l.yaml",
-        help="SAM 2 model config path for automated boundary refinement.",
-    )
-    parser.add_argument(
         "--enable-geometric-qc",
         dest="enable_geometric_qc",
         action="store_true",
@@ -3681,7 +3511,7 @@ def parse_args() -> argparse.Namespace:
         dest="threads",
         type=int,
         default=None,
-        help="Maximum CPU worker threads for image prefetching, ruler detection, and post-processing (default: auto).",
+        help="Maximum CPU worker threads for image prefetching and post-processing (default: auto).",
     )
     parser.add_argument(
         "--gpu-batch-size",
@@ -3751,9 +3581,6 @@ def main() -> None:
         score_thresh=args.score_thresh,
         force=args.force,
         lm3_project_dir=getattr(args, "lm3_project_dir", None),
-        sam2_refine=args.sam2_refine,
-        sam2_checkpoint=args.sam2_checkpoint,
-        sam2_config=args.sam2_config,
         db_path=getattr(args, "db", None),
         enable_geometric_qc=getattr(args, "enable_geometric_qc", False),
         threads=getattr(args, "threads", None),

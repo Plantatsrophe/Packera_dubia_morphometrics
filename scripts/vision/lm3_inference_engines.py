@@ -14,7 +14,6 @@ Description:
          producing separated lamina, petiole, and hole masks)
       4. LM3PoseLandmarkEngine (lm3_landmark_detector__yolo26x_pose_640, 640 px YOLO26x-pose
          31-keypoint mid15_pet5 skeleton + petiole width estimation)
-      5. SAM2BoundaryRefiner optional post-LM3 sub-pixel refinement pass (--sam2-refine)
 ===============================================================================
 """
 
@@ -127,9 +126,7 @@ except ImportError:
 
 from scripts.vision.leaf_geometry_utils import (
     bridge_dissected_rachis_components,
-    generate_sam2_prompts_from_leaf_mask,
     is_topologically_connected_mask,
-    trim_petiole_tail,
 )
 
 logger = logging.getLogger("SegmentAndExtract")
@@ -191,8 +188,6 @@ __all__ = [
     "LM3PoseLandmarkEngine",
     "torch_cuda_available",
     "is_stock_lm3_weights",
-    "SAM2BoundaryRefiner",
-    "refine_mask_with_sam2",
     "_extract_native_lm3_petiole_anchor",
     "_merge_and_bridge_dissected_crop_mask",
 ]
@@ -1468,10 +1463,16 @@ class LM3PoseLandmarkEngine:
                 return round(float(2.0 * np.percentile(nz_dt, 75)), 3)
 
         if lamina_mask is not None and lamina_mask.size > 0 and int(np.count_nonzero(lamina_mask)) > 0:
-            _, meta = trim_petiole_tail(lamina_mask, return_metadata=True)
-            sw = float(meta.get("stalk_width_mean", 0.0) or 0.0)
-            if sw > 0.0:
-                return round(sw, 3)
+            lam_u8 = (lamina_mask > 0).astype(np.uint8)
+            dt_lam = cv2.distanceTransform(lam_u8, cv2.DIST_L2, 3)
+            ys_l, _ = np.where(lam_u8 > 0)
+            if ys_l.size > 0:
+                y_cut = float(np.percentile(ys_l, 85))
+                basal_dt = dt_lam[(lam_u8 > 0) & (np.arange(lam_u8.shape[0])[:, None] >= y_cut)]
+                if basal_dt.size > 0:
+                    sw = float(2.0 * np.median(basal_dt))
+                    if sw > 0.0:
+                        return round(sw, 3)
 
         return None
 
@@ -1677,200 +1678,7 @@ class LM3PoseLandmarkEngine:
 
 
 # =============================================================================
-# 5. Automated LM3-Guided SAM 2 Boundary Refinement Engine (--sam2-refine)
-# =============================================================================
-
-class SAM2BoundaryRefiner:
-    """
-    Automated zero-shot SAM 2 boundary refiner guided by LeafMachine3 initial masks (`m_init`)
-    and optional 31-keypoint `mid15_pet5` midvein trace (`--sam2-refine`).
-
-    Given a 12%-padded native-DPI leaf crop and initial binary mask `m_init`:
-      1. Generates positive medial/lobe prompts inside eroded `m_init` (augmented by LM3's
-         15-point midvein trace when available), negative corner/concavity/hole prompts
-         outside dilated `m_init`, crop bounding box, and `(1, 256, 256)` low-res logits.
-      2. Queries `SAM2ImagePredictor.predict()` deterministically (`torch.no_grad()`, fixed seeds).
-      3. Validates topological connectedness (`is_topologically_connected_mask`); falls back cleanly
-         to `m_init` if SAM 2 weights are unavailable or if the refined mask violates connectedness.
-    """
-
-    def __init__(
-        self,
-        checkpoint_path: Optional[Union[str, Path]] = None,
-        model_cfg: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
-        device: str = "cuda",
-        predictor: Optional[Any] = None,
-        seed: int = 42,
-    ) -> None:
-        self.checkpoint_path = (
-            Path(checkpoint_path)
-            if checkpoint_path is not None
-            else (PROJECT_ROOT / "models" / "sam2.1_hiera_large.pt")
-        )
-        self.model_cfg = model_cfg
-        self.device = device if (device == "cuda" and torch_cuda_available()) else "cpu"
-        self.seed = int(seed)
-        self.predictor = predictor
-        if self.predictor is None:
-            self._load_predictor()
-
-    def _load_predictor(self) -> None:
-        """Loads SAM2ImagePredictor if checkpoint and sam2 package are available."""
-        if not self.checkpoint_path.exists():
-            logger.debug(
-                f"SAM 2 checkpoint not found at {self.checkpoint_path}; "
-                "SAM2BoundaryRefiner will fall back cleanly to LM3 m_init."
-            )
-            return
-
-        try:
-            import torch
-            from sam2.build_sam import build_sam2
-            from sam2.sam2_image_predictor import SAM2ImagePredictor
-
-            torch.manual_seed(self.seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(self.seed)
-
-            sam2_model = build_sam2(
-                self.model_cfg,
-                str(self.checkpoint_path),
-                device=self.device,
-            )
-            sam2_model.eval()
-            self.predictor = SAM2ImagePredictor(sam2_model)
-            logger.info(f"Loaded SAM 2 boundary refiner from {self.checkpoint_path} on {self.device}")
-        except Exception as e:
-            logger.debug(f"SAM 2 runtime unavailable ({e}); falling back to LM3 m_init.")
-            self.predictor = None
-
-    @property
-    def is_available(self) -> bool:
-        return self.predictor is not None
-
-    def refine_crop_mask(
-        self,
-        crop_bgr: np.ndarray,
-        m_init: np.ndarray,
-        petiole_mask: Optional[np.ndarray] = None,
-        hole_mask: Optional[np.ndarray] = None,
-        keypoints_31: Optional[Dict[str, Tuple[float, float, float]]] = None,
-    ) -> np.ndarray:
-        """
-        Refines an initial LeafMachine3 binary mask `m_init` on `crop_bgr` using automated
-        SAM 2 prompting seeded by `m_init`, `hole_mask`, and the 15-point midvein trace.
-        Falls back cleanly to `m_init` if SAM 2 is unavailable or if the refined candidate
-        violates topological connectedness.
-        """
-        if m_init is None or m_init.size == 0:
-            return np.zeros((0, 0), dtype=np.uint8)
-
-        fallback_mask = (m_init > 0).astype(np.uint8) * 255
-        if np.count_nonzero(fallback_mask) == 0 or crop_bgr is None or crop_bgr.size == 0:
-            return fallback_mask
-
-        if self.predictor is None:
-            return fallback_mask
-
-        prompt_bundle = generate_sam2_prompts_from_leaf_mask(fallback_mask)
-        if prompt_bundle["point_coords"].shape[0] == 0 or prompt_bundle["positive_points"].shape[0] == 0:
-            return fallback_mask
-
-        point_coords = np.asarray(prompt_bundle["point_coords"], dtype=np.float32)
-        point_labels = np.asarray(prompt_bundle["point_labels"], dtype=np.int32)
-        h_m, w_m = fallback_mask.shape[:2]
-
-        extra_pts: List[List[float]] = []
-        extra_lbls: List[int] = []
-        if keypoints_31:
-            for idx_m in range(1, 16, 3):
-                kp = keypoints_31.get(f"midvein_{idx_m}")
-                if kp is not None and kp[2] >= 0.35:
-                    kx, ky = int(round(kp[0])), int(round(kp[1]))
-                    if 0 <= kx < w_m and 0 <= ky < h_m and fallback_mask[ky, kx] > 0:
-                        extra_pts.append([float(kp[0]), float(kp[1])])
-                        extra_lbls.append(1)
-
-        if hole_mask is not None and hole_mask.shape[:2] == (h_m, w_m) and int(np.count_nonzero(hole_mask)) > 0:
-            hys, hxs = np.where(hole_mask > 0)
-            extra_pts.append([float(np.mean(hxs)), float(np.mean(hys))])
-            extra_lbls.append(0)
-
-        if extra_pts:
-            point_coords = np.vstack([point_coords, np.asarray(extra_pts, dtype=np.float32)])
-            point_labels = np.concatenate([point_labels, np.asarray(extra_lbls, dtype=np.int32)])
-
-        try:
-            np.random.seed(self.seed)
-            try:
-                import torch
-                torch.manual_seed(self.seed)
-                grad_ctx = torch.no_grad()
-            except ImportError:
-                from contextlib import nullcontext
-                grad_ctx = nullcontext()
-
-            crop_rgb = (
-                cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-                if (crop_bgr.ndim == 3 and crop_bgr.shape[2] == 3)
-                else crop_bgr
-            )
-
-            with grad_ctx:
-                self.predictor.set_image(crop_rgb)
-                masks, scores, _ = self.predictor.predict(
-                    point_coords=point_coords,
-                    point_labels=point_labels,
-                    box=prompt_bundle["box"],
-                    mask_input=prompt_bundle["mask_input"],
-                    multimask_output=True,
-                )
-
-            if masks is None or len(masks) == 0:
-                return fallback_mask
-
-            scores_arr = np.asarray(scores, dtype=np.float32).reshape(-1)
-            order = np.argsort(scores_arr)[::-1]
-            target_h, target_w = fallback_mask.shape[:2]
-
-            for idx in order:
-                cand = np.asarray(masks[int(idx)])
-                if cand.ndim == 3:
-                    cand = cand[0]
-                cand_u8 = (cand > 0.0).astype(np.uint8) * 255
-                if cand_u8.shape[0] != target_h or cand_u8.shape[1] != target_w:
-                    cand_u8 = cv2.resize(cand_u8, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-
-                if is_topologically_connected_mask(cand_u8, reference_mask=fallback_mask):
-                    return cand_u8
-
-            logger.debug("SAM 2 candidate masks violated topological connectedness; falling back to m_init.")
-            return fallback_mask
-        except Exception as e:
-            logger.debug(f"SAM 2 boundary refinement failed ({e}); falling back to m_init.")
-            return fallback_mask
-
-
-def refine_mask_with_sam2(
-    crop_bgr: np.ndarray,
-    m_init: np.ndarray,
-    predictor: Optional[Any] = None,
-    checkpoint_path: Optional[Union[str, Path]] = None,
-    model_cfg: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
-    device: str = "cuda",
-) -> np.ndarray:
-    """Functional helper for automated LM3 -> SAM 2 mask boundary refinement."""
-    refiner = SAM2BoundaryRefiner(
-        checkpoint_path=checkpoint_path,
-        model_cfg=model_cfg,
-        device=device,
-        predictor=predictor,
-    )
-    return refiner.refine_crop_mask(crop_bgr, m_init)
-
-
-# =============================================================================
-# 6. Native LM3 Petiole / Keypoint Anchoring & Dissected Rachis Bridging
+# 5. Native LM3 Petiole / Keypoint Anchoring & Dissected Rachis Bridging
 # =============================================================================
 
 def _extract_native_lm3_petiole_anchor(
@@ -1884,7 +1692,7 @@ def _extract_native_lm3_petiole_anchor(
     31-keypoint `mid15_pet5` (`lamina_base`, `petiole_1..6`, `lamina_tip`) skeleton to
     locate the anatomical petiole-lamina junction `p_base_crop`, distal lamina apex
     `p_apex_crop`, and native petiole pixel span without clipping `leaf_mask`.
-    Falls back to morphological petiole-stub detection when both `keypoints_31` and
+    Falls back to the basal-most mask contour point when both `keypoints_31` and
     `petiole_mask` are absent.
     """
     if leaf_mask is None or leaf_mask.size == 0 or int(np.count_nonzero(leaf_mask)) == 0:
@@ -1933,6 +1741,9 @@ def _extract_native_lm3_petiole_anchor(
             pkp = keypoints_31.get(f"petiole_{idx_p}")
             if pkp is not None and len(pkp) >= 3 and float(pkp[2]) >= min_kp_conf:
                 pet_chain.append((float(pkp[0]), float(pkp[1])))
+        pt_kp = keypoints_31.get("petiole_tip")
+        if pt_kp is not None and len(pt_kp) >= 3 and float(pt_kp[2]) >= min_kp_conf:
+            pet_chain.append((float(pt_kp[0]), float(pt_kp[1])))
         if len(pet_chain) >= 2:
             arc_len = 0.0
             for i_c in range(len(pet_chain) - 1):
@@ -1990,32 +1801,20 @@ def _extract_native_lm3_petiole_anchor(
             "p_apex_crop": p_apex_crop,
         }
 
-    # 3. Fallback to morphological petiole-stub detection when keypoints and petiole_mask are absent
-    try:
-        trimmed_m, trim_meta = trim_petiole_tail(leaf_mask, return_metadata=True)
-        if isinstance(trim_meta, dict) and bool(trim_meta.get("is_trimmed", False)):
-            removed = (leaf_mask > 0) & (trimmed_m == 0)
-            if int(np.count_nonzero(removed)) > 0:
-                rys, rxs = np.where(removed)
-                rem_cent = (float(np.mean(rxs)), float(np.mean(rys)))
-                dists_rem = np.hypot(leaf_pts[:, 0] - rem_cent[0], leaf_pts[:, 1] - rem_cent[1])
-                base_idx = int(np.argmin(dists_rem))
-                p_base_crop = (int(leaf_pts[base_idx, 0]), int(leaf_pts[base_idx, 1]))
-                dists_from_base = np.hypot(leaf_pts[:, 0] - p_base_crop[0], leaf_pts[:, 1] - p_base_crop[1])
-                apex_idx = int(np.argmax(dists_from_base))
-                p_apex_crop = (int(leaf_pts[apex_idx, 0]), int(leaf_pts[apex_idx, 1]))
-                return {
-                    "is_trimmed": False,
-                    "native_lm3_petiole": False,
-                    "morphological_fallback": True,
-                    "trim_distance_px": round(float(trim_meta.get("trim_distance_px", 0.0) or 0.0), 2),
-                    "p_base_crop": p_base_crop,
-                    "p_apex_crop": p_apex_crop,
-                }
-    except Exception:
-        pass
-
-    return None
+    # 3. Fallback to basal-most contour vertex when both keypoints and petiole_mask are absent
+    base_idx = int(np.argmax(leaf_pts[:, 1]))
+    p_base_crop = (int(leaf_pts[base_idx, 0]), int(leaf_pts[base_idx, 1]))
+    dists_from_base = np.hypot(leaf_pts[:, 0] - p_base_crop[0], leaf_pts[:, 1] - p_base_crop[1])
+    apex_idx = int(np.argmax(dists_from_base))
+    p_apex_crop = (int(leaf_pts[apex_idx, 0]), int(leaf_pts[apex_idx, 1]))
+    return {
+        "is_trimmed": False,
+        "native_lm3_petiole": False,
+        "morphological_fallback": True,
+        "trim_distance_px": 0.0,
+        "p_base_crop": p_base_crop,
+        "p_apex_crop": p_apex_crop,
+    }
 
 
 def _merge_and_bridge_dissected_crop_mask(
