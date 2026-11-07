@@ -5339,13 +5339,20 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   lat_v <- suppressWarnings(as.numeric(df$latitude))
   ok_ll <- is.finite(lon_v) & is.finite(lat_v)
   if (!any(ok_ll)) return(NULL)
-  lon_rng <- range(lon_v[ok_ll], na.rm = TRUE)
-  lat_rng <- range(lat_v[ok_ll], na.rm = TRUE)
-  pad_x <- max(0.75, 0.12 * diff(lon_rng))
-  pad_y <- max(0.75, 0.12 * diff(lat_rng))
+  if (sum(ok_ll) >= 20L) {
+    lon_rng <- as.numeric(stats::quantile(lon_v[ok_ll], probs = c(0.005, 0.995), na.rm = TRUE))
+    lat_rng <- as.numeric(stats::quantile(lat_v[ok_ll], probs = c(0.005, 0.995), na.rm = TRUE))
+  } else {
+    lon_rng <- range(lon_v[ok_ll], na.rm = TRUE)
+    lat_rng <- range(lat_v[ok_ll], na.rm = TRUE)
+  }
+  pad_x <- max(0.75, 0.10 * diff(lon_rng))
+  pad_y <- max(0.75, 0.10 * diff(lat_rng))
+  med_lat <- stats::median(lat_v[ok_ll], na.rm = TRUE)
+  min_lat_clamp <- if (is.finite(med_lat) && med_lat >= 28.0) 24.5 else 14.0
   xmin <- max(-130.0, lon_rng[1] - pad_x)
   xmax <- min(-50.0,  lon_rng[2] + pad_x)
-  ymin <- max(14.0,   lat_rng[1] - pad_y)
+  ymin <- max(min_lat_clamp, lat_rng[1] - pad_y)
   ymax <- min(66.0,   lat_rng[2] + pad_y)
   if (xmax - xmin < 1.0) { xmin <- xmin - 0.75; xmax <- xmax + 0.75 }
   if (ymax - ymin < 1.0) { ymin <- ymin - 0.75; ymax <- ymax + 0.75 }

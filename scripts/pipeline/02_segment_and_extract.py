@@ -5291,10 +5291,11 @@ def generate_step02_publication_figures(
             ),
             sp_all["ucs_val"],
         )
-        sp_diss_frac = float((is_diss_col | (sp_all["sol_val"] < 0.70)).mean()) if len(sp_all) > 0 else 0.0
+        sp_diss_frac = float((is_diss_col | (sp_all["sol_val"] < 0.65)).mean()) if len(sp_all) > 0 else 0.0
         sp_med_sol = float(sp_all["sol_val"].median()) if len(sp_all) > 0 else 0.85
+        is_dissected_cohort = bool(sp_med_sol < 0.60 or sp_diss_frac >= 0.60)
 
-        if sp_diss_frac >= 0.25 or sp_med_sol < 0.72:
+        if is_dissected_cohort:
             # Dissected / pinnatisect species: prioritize authentic dissected blades over undivided terminal lobes
             sp_hq = sp_all[
                 (sp_all["eff_ucs"] >= 0.78)
@@ -5318,7 +5319,8 @@ def generate_step02_publication_figures(
                     & (sp_all["sol_val"] < 0.995)
                 )
                 | (
-                    (sp_all["eff_ucs"] >= 0.80)
+                    is_dissected_cohort
+                    & (sp_all["eff_ucs"] >= 0.80)
                     & (sp_all["sol_val"] >= 0.18)
                     & is_diss_col
                 )
@@ -5338,11 +5340,16 @@ def generate_step02_publication_figures(
 
         sp_target_sol = float(sp_hq["sol_val"].median()) if len(sp_hq) > 0 else sp_med_sol
         sp_hq_med_area = float(sp_hq["area_val"].median()) if len(sp_hq) > 0 else max(sp_med_area, 1.0)
-        sp_hq["rep_score"] = (
-            (1.0 - np.abs(sp_hq["sol_val"] - sp_target_sol))
-            * np.minimum(1.15, sp_hq["area_val"] / max(sp_hq_med_area, 1.0))
-            * sp_hq["eff_ucs"]
-        )
+        if is_dissected_cohort:
+            sp_hq["rep_score"] = (
+                (1.0 - np.abs(sp_hq["sol_val"] - sp_target_sol))
+                * np.minimum(1.15, sp_hq["area_val"] / max(sp_hq_med_area, 1.0))
+                * sp_hq["eff_ucs"]
+            )
+        else:
+            sp_hq["rep_score"] = sp_hq["qual_weight"] * np.minimum(
+                1.10, np.maximum(0.85, sp_hq["area_val"] / max(sp_hq_med_area, 1.0))
+            )
 
         n_avail = len(sp_hq)
         if n_avail > 1:
