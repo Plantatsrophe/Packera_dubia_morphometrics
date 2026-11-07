@@ -1902,8 +1902,8 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                 cmd_step06 = mock_synth_sub.call_args_list[0][0][0]
                 cmd_step07 = mock_synth_sub.call_args_list[1][0][0]
 
-            # Step 06 assertions
-            self.assertTrue(any("06_multimodal_spatial_rf.R" in tok for tok in cmd_step06))
+            # Step 05 assertions
+            self.assertTrue(any("05_multimodal_spatial_rf.R" in tok for tok in cmd_step06))
             self.assertEqual(_arg_value(cmd_step06, "--pheno-states"), str(tables_dir / "voucher_phenological_states.csv"))
             self.assertEqual(_arg_value(cmd_step06, "--ssurgo-table"), str(tables_dir / "ssurgo_edaphic_metrics.csv"))
             self.assertEqual(_arg_value(cmd_step06, "--contingency-table"), str(tables_dir / "lithology_taxon_contingency_audit.csv"))
@@ -1913,24 +1913,24 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             self.assertEqual(_arg_value(cmd_step06, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step06)
 
-            # Step 07 assertions
-            self.assertTrue(any("07_triage_dashboard_synthesis.R" in tok for tok in cmd_step07))
+            # Step 06 assertions
+            self.assertTrue(any("06_triage_dashboard_synthesis.R" in tok for tok in cmd_step07))
             self.assertEqual(_arg_value(cmd_step07, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step07)
 
-        # 3. Verify run_pipeline.sh Step 08 ordering + --multimodal handoff
+        # 3. Verify run_pipeline.sh Step 07 ordering + --multimodal handoff
         run_sh = Path(__file__).resolve().parents[2] / "run_pipeline.sh"
         sh_text = run_sh.read_text(encoding="utf-8")
 
-        pos_step06 = sh_text.index("scripts/analysis/06_multimodal_spatial_rf.R")
-        pos_step08 = sh_text.index("scripts/analysis/08_discover_taxon_complexes.R")
-        pos_step07 = sh_text.index("scripts/analysis/07_triage_dashboard_synthesis.R")
+        pos_step05 = sh_text.index("scripts/analysis/05_multimodal_spatial_rf.R")
+        pos_step07 = sh_text.index("scripts/analysis/07_discover_taxon_complexes.R")
+        pos_step06 = sh_text.index("scripts/analysis/06_triage_dashboard_synthesis.R")
 
-        self.assertLess(pos_step06, pos_step08, "Step 08 must run AFTER Step 06 completes in run_pipeline.sh")
-        self.assertLess(pos_step08, pos_step07, "Step 08 must run before Step 07 synthesis in run_pipeline.sh")
+        self.assertLess(pos_step05, pos_step07, "Step 07 must run AFTER Step 05 completes in run_pipeline.sh")
+        self.assertLess(pos_step07, pos_step06, "Step 07 must run before Step 06 synthesis in run_pipeline.sh")
 
-        step08_block = sh_text[pos_step08:pos_step07]
-        self.assertIn('--multimodal "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv"', step08_block)
+        step07_block = sh_text[pos_step07:pos_step06]
+        self.assertIn('--multimodal "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv"', step07_block)
 
         proc = subprocess.run(["bash", "-n", str(run_sh)], capture_output=True, text=True, check=False)
         self.assertEqual(proc.returncode, 0, f"bash -n run_pipeline.sh failed: {proc.stderr}")

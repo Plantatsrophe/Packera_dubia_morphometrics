@@ -5,15 +5,15 @@
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
-#   Step 06 ecological niche & geographic map publication figures, Step 07
-#   integrative synthesis plates, Step 08 complex discovery plates, pure-R
+#   Step 05 ecological niche & geographic map publication figures, Step 06
+#   integrative synthesis plates, Step 07 complex discovery plates, pure-R
 #   Gaussian Mixture Model EM solver, and individual-level trait mergers.
 # ==============================================================================
 
 # ==============================================================================
-# Step 06 Figures:
+# Step 05 Figures:
 #   - spatial_rf_niche_importance.png (300-DPI companion to .pdf)
-#   - fig06_ecological_niche_phenology.{pdf,png} (4-panel ecological niche plate)
+#   - fig05_ecological_niche_phenology.{pdf,png} (4-panel ecological niche plate)
 #   - fig06b_geographic_map_and_hopkins_phenology.{pdf,png} (US state map + Hopkins)
 # ==============================================================================
 compute_dynamic_na_map_bounds <- function(lon_v, lat_v) {
@@ -153,7 +153,7 @@ generate_step06_pub_figures <- function(
   })
   if (file.exists(png_imp_tmp)) file.rename(png_imp_tmp, png_imp)
 
-  # 2. fig06_ecological_niche_phenology.{pdf,png} (4-Panel Publication Plate)
+  # 2. fig05_ecological_niche_phenology.{pdf,png} (4-Panel Publication Plate)
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(2, 2), mar = c(4.5, 10.5, 3.0, 1.2), oma = c(0.5, 0.5, 1.6, 0.5))
 
@@ -315,7 +315,7 @@ generate_step06_pub_figures <- function(
     graphics::box(col = "grey75")
     title_taxa <- if ("species_standardized" %in% names(vouchers_df) && length(unique(stats::na.omit(vouchers_df$species_standardized))) == 1L) vouchers_df$species_standardized else tx_clean
     graphics::title(format_active_complex_title(title_taxa, "10m-30m Fine-Grain Edaphic Niche & PCA-env Equivalency"), outer = TRUE, cex.main = 1.25)
-  }, fdir, "fig06_ecological_niche_phenology", width = 13.0, height = 9.5, dpi = 300)
+  }, fdir, "fig05_ecological_niche_phenology", width = 13.0, height = 9.5, dpi = 300)
 
   # 3. fig06b_geographic_map_and_hopkins_phenology.{pdf,png} (North American Basemap + Hopkins Phenology)
   atomic_save_dual_plot(function() {

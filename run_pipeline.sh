@@ -64,7 +64,7 @@ Run & Compute Controls:
   -h, --help                         Show this help message and exit
   --run-id <ID>                      Custom identifier for isolated run directory under runs/<ID>/
   --db <PATH>                        Override path to SQLite WAL database (default: data/packera_pipeline.sqlite)
-  --start-step <1..8>                Start or resume execution at step <1..8> (step >=2 skips harvest automatically)
+  --start-step <1..7>                Start or resume execution at step <1..7> (step >=2 skips harvest automatically)
   --force                            Force re-execution and overwrite cached artifacts (with --start-step 2, re-segments)
   -j, --threads <INT>                CPU worker thread limit across Python & R stages (exports PACKERA_MAX_WORKERS)
   --gpu-batch-size <INT>             GPU inference batch size for Step 02 LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime)
@@ -78,8 +78,8 @@ Taxonomic Scope & Complex Discovery:
   --intraspecific-mode               Single-taxon intraspecific morphotype/ecotype delimitation mode
   --expand-synonyms / --no-expand-synonyms
                                      Toggle GBIF synonym/basionym expansion (default: --expand-synonyms)
-  --discover-complexes               Run Step 08 unsupervised taxon-complex discovery (auto-scopes focal neighbors)
-  --min-affinity <FLOAT>             Minimum multimodal affinity weight threshold in Step 08 (default: 0.03)
+  --discover-complexes               Run Step 07 unsupervised taxon-complex discovery (auto-scopes focal neighbors)
+  --min-affinity <FLOAT>             Minimum multimodal affinity weight threshold in Step 07 (default: 0.03)
 
 Authority Tiering & Curation Filters:
   --determiner-tier <TIER>           Restrict cohort to determiner authority tier (gold|silver|bronze or Tier_1_Gold)
@@ -1195,11 +1195,11 @@ if [[ "${START_STEP}" -le 4 ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Step 06: Multimodal Spatial Random Forests, SoilGrids/SSURGO & Hopkins Phenology
+# Step 05: Multimodal Spatial Random Forests, SoilGrids/SSURGO & Hopkins Phenology
 # ------------------------------------------------------------------------------
-if [[ "${START_STEP}" -le 6 ]]; then
-  echo "[Step 06/07] Running Multimodal Spatial RF & Niche Identity Tests..."
-  Rscript scripts/analysis/06_multimodal_spatial_rf.R \
+if [[ "${START_STEP}" -le 5 ]]; then
+  echo "[Step 05/07] Running Multimodal Spatial RF & Niche Identity Tests..."
+  Rscript scripts/analysis/05_multimodal_spatial_rf.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
     --pheno-states "${RUN_DIR}/data/tables/voucher_phenological_states.csv" \
@@ -1218,12 +1218,12 @@ if [[ "${START_STEP}" -le 6 ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Step 08 (Optional): Unsupervised Quantitative Taxon-Complex Discovery
+# Step 07 (Optional): Unsupervised Quantitative Taxon-Complex Discovery
 # (--discover-complexes / --auto-neighbors)
 # ------------------------------------------------------------------------------
-if [[ "${DISCOVER_COMPLEXES}" == "true" || "${AUTO_NEIGHBORS}" == "true" ]]; then
-  echo "[Step 08] Running Quantitative Taxon-Complex Discovery Engine..."
-  Rscript scripts/analysis/08_discover_taxon_complexes.R \
+if [[ "${DISCOVER_COMPLEXES}" == "true" || "${AUTO_NEIGHBORS}" == "true" || "${START_STEP}" -eq 7 ]]; then
+  echo "[Step 07/07] Running Quantitative Taxon-Complex Discovery Engine..."
+  Rscript scripts/analysis/07_discover_taxon_complexes.R \
     --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
     --harmonics "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
@@ -1237,19 +1237,19 @@ if [[ "${DISCOVER_COMPLEXES}" == "true" || "${AUTO_NEIGHBORS}" == "true" ]]; the
 fi
 
 # ------------------------------------------------------------------------------
-# Step 07: Multi-Evidence Taxonomic Decision Matrix & Triage Dashboard Synthesis
+# Step 06: Multi-Evidence Taxonomic Decision Matrix & Triage Dashboard Synthesis
 # ------------------------------------------------------------------------------
-if [[ "${START_STEP}" -le 7 ]]; then
-  echo "[Step 07/07] Running Triage Dashboard Synthesis..."
+if [[ "${START_STEP}" -le 6 ]]; then
+  echo "[Step 06/07] Running Triage Dashboard Synthesis..."
   if [[ -n "${FOCAL_TAXON}" ]]; then
     FOCAL_TAXON_SLUG="$(printf '%s' "${FOCAL_TAXON}" | sed -E 's/[^A-Za-z0-9]+/_/g; s/^_+|_+$//g')"
-    STEP07_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_${FOCAL_TAXON_SLUG}_Revision.pdf"
-    STEP07_REPORT="${RUN_DIR}/outputs/reports/${FOCAL_TAXON_SLUG}_Taxonomic_Revision_Summary.md"
+    STEP06_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_${FOCAL_TAXON_SLUG}_Revision.pdf"
+    STEP06_REPORT="${RUN_DIR}/outputs/reports/${FOCAL_TAXON_SLUG}_Taxonomic_Revision_Summary.md"
   else
-    STEP07_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_Packera_Revision.pdf"
-    STEP07_REPORT="${RUN_DIR}/outputs/reports/Packera_Taxonomic_Revision_Summary.md"
+    STEP06_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_Packera_Revision.pdf"
+    STEP06_REPORT="${RUN_DIR}/outputs/reports/Packera_Taxonomic_Revision_Summary.md"
   fi
-  Rscript scripts/analysis/07_triage_dashboard_synthesis.R \
+  Rscript scripts/analysis/06_triage_dashboard_synthesis.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
     --multimodal-flags "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv" \
@@ -1257,8 +1257,8 @@ if [[ "${START_STEP}" -le 7 ]]; then
     --niche-summary "${RUN_DIR}/outputs/reports/multimodal_spatial_rf_summary.csv" \
     --output-queue "${RUN_DIR}/data/tables/triage_queue.csv" \
     --output-triage "${RUN_DIR}/outputs/reports/final_curation_triage.csv" \
-    --output-figure "${STEP07_FIGURE}" \
-    --output-report "${STEP07_REPORT}" \
+    --output-figure "${STEP06_FIGURE}" \
+    --output-report "${STEP06_REPORT}" \
     --output-html "${RUN_DIR}/outputs/reports/Triage_Dashboard_Interactive.html" \
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}"

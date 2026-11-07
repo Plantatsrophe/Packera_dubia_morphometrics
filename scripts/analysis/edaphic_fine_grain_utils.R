@@ -7,7 +7,7 @@
 # Description:
 #   Fine-grain (10 m to 30 m) edaphic, lithic, geologic, and micro-topographic
 #   predictor extraction, uncertainty-buffered herbarium sampling, and caching
-#   utilities for Step 06 (06_multimodal_spatial_rf.R):
+#   utilities for Step 05 (05_multimodal_spatial_rf.R):
 #     1. Trapezoidal 0-15 cm herbaceous rhizosphere integration
 #        ((5 * X_0_5 + 10 * X_5_15) / 15) across 30 m POLARIS, 30 m gSSURGO,
 #        100 m SOLUS100, and 250 m SoilGrids fallback (Chaney et al. 2019;

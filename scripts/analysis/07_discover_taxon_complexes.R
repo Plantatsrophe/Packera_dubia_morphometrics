@@ -1,9 +1,9 @@
 #!/usr/bin/env Rscript
 # ==============================================================================
-# Script: scripts/analysis/08_discover_taxon_complexes.R
+# Script: scripts/analysis/07_discover_taxon_complexes.R
 # Project: Packera Species Delimitation & Morphometrics Pipeline (NCU)
 # Description: Unsupervised Quantitative Taxon-Complex Discovery & Integrative
-#   Delimitation Engine (Phase 08): Cohen's kappa weights (Dawid & Skene 1979),
+#   Delimitation Engine (Phase 07): Cohen's kappa weights (Dawid & Skene 1979),
 #   Empirical Bayes circular Hopkins phenology, 5-Stage Decision Matrix (Padial
 #   et al. 2010; Schlick-Steiner et al. 2010), and Leiden/Louvain + Ward.D2.
 # ==============================================================================
@@ -72,7 +72,7 @@ std_taxon <- function(x) {
 
 # 2. Step A: Load & Filter Tier_1_Pure Gold/Silver Anchor Specimens
 load_and_merge_inputs <- function(opts) {
-  res <- load_step08_merged_inputs(opts, std_taxon)
+  res <- load_step07_merged_inputs(opts, std_taxon)
   if (!is.null(opts$multimodal) && nzchar(opts$multimodal) && file.exists(opts$multimodal) && !is.null(res$morph_df) && nrow(res$morph_df) > 0L) {
     mm <- tryCatch(utils::read.csv(opts$multimodal, stringsAsFactors = FALSE, check.names = FALSE), error = function(e) NULL)
     if (!is.null(mm) && nrow(mm) > 0L && "catalogNumber" %in% names(mm)) {

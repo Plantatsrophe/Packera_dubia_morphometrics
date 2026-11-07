@@ -1,6 +1,6 @@
 #!/usr/bin/env Rscript
 # ==============================================================================
-# Script: 06_multimodal_spatial_rf.R
+# Script: 05_multimodal_spatial_rf.R
 # Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
@@ -1565,12 +1565,12 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
 }
 
 # Source modular phenology (model_latitudinal_spring_baseline, hopkins_adjusted_doy, delta_doy, fill = NA) and ecotype/type-locality helpers
-step06_dir <- if (dir.exists("scripts/analysis")) {
+step05_dir <- if (dir.exists("scripts/analysis")) {
   "scripts/analysis"
 } else {
   dirname(normalizePath(sys.frame(1)$ofile, mustWork = FALSE))
 }
-source(file.path(step06_dir, "step06_phenology_ecotypes.R"))
+source(file.path(step05_dir, "step05_phenology_ecotypes.R"))
 
 execute_crossmodal_consensus <- function(
   df,
@@ -3135,8 +3135,8 @@ select_top_rf_predictors <- function(imp_df, plot_df) {
   list(top_env_1 = top_env_1, top_env_2 = top_env_2, top_edaph_1 = top_edaph_1)
 }
 
-# Source modular Figure 06, Spatial RF plotting (fill = NA), and MaxEnt/SRF SDM projection helpers
-source(file.path(step06_dir, "step06_sdm_maxent.R"))
+# Source modular Figure 05, Spatial RF plotting (fill = NA), and MaxEnt/SRF SDM projection helpers
+source(file.path(step05_dir, "step05_sdm_maxent.R"))
 
 
 # ------------------------------------------------------------------------------

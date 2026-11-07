@@ -1,6 +1,6 @@
 # ==============================================================================
-# Step 06 Module: Phenology, Circular DOY, & Type-Locality Ecotype Controls
-# Extracted from 06_multimodal_spatial_rf.R
+# Step 05 Module: Phenology, Circular DOY, & Type-Locality Ecotype Controls
+# Extracted from 05_multimodal_spatial_rf.R
 # ==============================================================================
 
 # ------------------------------------------------------------------------------

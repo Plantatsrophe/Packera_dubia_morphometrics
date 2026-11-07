@@ -6,13 +6,13 @@ Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-    Unit and integration tests for Step 06 (scripts/analysis/06_multimodal_spatial_rf.R):
+    Unit and integration tests for Step 05 (scripts/analysis/05_multimodal_spatial_rf.R):
     - 0-15 cm Trapezoidal Rhizosphere Integration & Non-Blended Coalesce Hierarchy
     - 6-Class USGS SGMC Bedrock Lithology & Azonal Contact Proximity
     - Coordinate-Uncertainty Buffered Focal Extraction (>10000m Training Exclusion)
     - Block-Wise Collinearity Pruning (|r| < 0.70, VIF < 5.0) & Partitioned Niche Tests
     - Multi-Class SGMC/SSURGO Substrate Contingency & Organic PCA-env Ecotypes
-    - Authority-Anchored Spatial Block CV, OOF Posterior Pooling, & Step 07 Handshake
+    - Authority-Anchored Spatial Block CV, OOF Posterior Pooling, & Step 06 Handshake
 ===============================================================================
 """
 
@@ -35,11 +35,11 @@ from scripts.core.harvester import standardize_packera_taxon
 
 
 class TestMultimodalSpatialRF(unittest.TestCase):
-    """Test suite for Step 06 active R script (scripts/analysis/06_multimodal_spatial_rf.R)."""
+    """Test suite for Step 05 active R script (scripts/analysis/05_multimodal_spatial_rf.R)."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R"
+        cls.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "05_multimodal_spatial_rf.R"
         cls.util_path = PROJECT_ROOT / "scripts" / "analysis" / "edaphic_fine_grain_utils.R"
         cls._class_temp_dir = tempfile.TemporaryDirectory()
         cls._class_tmp_path = Path(cls._class_temp_dir.name)
@@ -53,7 +53,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             ssurgo_out = cls._class_tmp_path / "ssurgo_val.csv"
             r_batch_code = f"""
             source("scripts/analysis/edaphic_fine_grain_utils.R")
-            source("scripts/analysis/06_multimodal_spatial_rf.R")
+            source("scripts/analysis/05_multimodal_spatial_rf.R")
 
             # 1. Taxonomic standardization
             local({{
@@ -511,7 +511,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         cls._class_temp_dir.cleanup()
 
     def setUp(self) -> None:
-        self.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R"
+        self.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "05_multimodal_spatial_rf.R"
         self.util_path = PROJECT_ROOT / "scripts" / "analysis" / "edaphic_fine_grain_utils.R"
 
     def _require_batched_r(self) -> str:
@@ -520,13 +520,13 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertEqual(
             self.r_unit_proc.returncode,
             0,
-            f"Batched Step 06 R unit suite failed:\n{self.r_unit_proc.stderr}\n{self.r_unit_proc.stdout}",
+            f"Batched Step 05 R unit suite failed:\n{self.r_unit_proc.stderr}\n{self.r_unit_proc.stdout}",
         )
         return self.r_unit_proc.stdout
 
     def test_r_script_phenological_and_fine_grain_edaphic_contracts(self):
-        """Verify 06_multimodal_spatial_rf.R and edaphic_fine_grain_utils.R retain all phenological, ENM, SSURGO, POLARIS, 3DEP, and Spatial RF contracts."""
-        self.assertTrue(self.r_script_path.exists(), "06_multimodal_spatial_rf.R must exist.")
+        """Verify 05_multimodal_spatial_rf.R and edaphic_fine_grain_utils.R retain all phenological, ENM, SSURGO, POLARIS, 3DEP, and Spatial RF contracts."""
+        self.assertTrue(self.r_script_path.exists(), "05_multimodal_spatial_rf.R must exist.")
         self.assertTrue(self.util_path.exists(), "edaphic_fine_grain_utils.R must exist.")
 
         r_content = self.r_script_path.read_text(encoding="utf-8")
@@ -597,7 +597,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             "residual_moran_i",
             "hopkins_adjusted_doy",
         ):
-            self.assertIn(token, combined_r, f"Expected fine-grain token '{token}' in Step 06 R code.")
+            self.assertIn(token, combined_r, f"Expected fine-grain token '{token}' in Step 05 R code.")
 
     def test_taxonomic_standardization(self):
         """Verify generic species-agnostic standardization across North American Packera binomials in Python and R."""
@@ -637,8 +637,8 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertIn("P_Value_BH", con_csv_df.columns)
 
         self.assertTrue(self.pca_out_pdf.exists(), "spatial_rf_niche_importance.pdf must be generated.")
-        self.assertTrue((self.pca_env_dir / "fig06_ecological_niche_phenology.pdf").exists())
-        self.assertTrue((self.pca_env_dir / "fig06_ecological_niche_phenology.png").exists())
+        self.assertTrue((self.pca_env_dir / "fig05_ecological_niche_phenology.pdf").exists())
+        self.assertTrue((self.pca_env_dir / "fig05_ecological_niche_phenology.png").exists())
 
     def test_authority_anchored_spatial_block_cv_zero_synthetic_cache_and_step07_contract(self):
         """Verify authority-anchored Spatial RF training, zero synthetic disk caching under --demo, passive Bronze/high-uncertainty projection, and Step 07 compatibility."""
@@ -792,14 +792,14 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             for col in ["D_clim", "I_clim", "D_edaph", "I_edaph", "D_joint", "I_joint", "Schoener_D", "Warren_D", "Warren_I"]:
                 self.assertIn(col, sum_df.columns, f"Missing column '{col}' in multimodal_spatial_rf_summary.csv")
 
-            # Verify Step 07 07_triage_dashboard_synthesis.R accepts the Step 06 outputs and completes without error
-            step07_script = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
+            # Verify Step 06 06_triage_dashboard_synthesis.R accepts the Step 05 outputs and completes without error
+            step06_script = PROJECT_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
             out_queue = tmp / "triage_queue.csv"
             out_report = tmp / "revision_summary.md"
             out_triage_plot = tmp / "triage_plot.pdf"
-            cmd07 = [
+            cmd06 = [
                 "Rscript",
-                str(step07_script),
+                str(step06_script),
                 "--vouchers", str(vouchers_csv),
                 "--morphometrics", str(morph_csv),
                 "--multimodal-flags", str(out_flags),
@@ -808,9 +808,9 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 "--output-report", str(out_report),
                 "--output-plot", str(out_triage_plot),
             ]
-            res07 = subprocess.run(cmd07, cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
-            self.assertEqual(res07.returncode, 0, f"Step 07 execution failed: {res07.stderr}\n{res07.stdout}")
-            self.assertTrue(out_queue.exists(), "Step 07 triage_queue.csv must be generated from Step 06 outputs.")
+            res07 = subprocess.run(cmd06, cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(res07.returncode, 0, f"Step 06 execution failed: {res07.stderr}\n{res07.stdout}")
+            self.assertTrue(out_queue.exists(), "Step 06 triage_queue.csv must be generated from Step 05 outputs.")
             queue_df = pd.read_csv(out_queue)
             self.assertEqual(len(queue_df), 32)
 
@@ -823,7 +823,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         source("scripts/core/db_utils.R")
         source("scripts/morphometrics/authority_weighting_utils.R")
         source("scripts/analysis/edaphic_fine_grain_utils.R")
-        source("scripts/analysis/06_multimodal_spatial_rf.R")
+        source("scripts/analysis/05_multimodal_spatial_rf.R")
 
         # 2A: All 19 WorldClim bioclimatic variables present and aligned with SQLite schema
         stopifnot(length(WC_BIO_LOOKUP) == 19L)
@@ -894,7 +894,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         cat("STEP06_COHORT_ADAPTIVE_OK\\n")
         """
         res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
-        self.assertEqual(res.returncode, 0, f"Step 06 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
+        self.assertEqual(res.returncode, 0, f"Step 05 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("STEP06_COHORT_ADAPTIVE_OK", res.stdout)
 
     def test_na_raster_cropping_deflate_and_maxent_spatial_rf_sdm_maps(self):
@@ -907,7 +907,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             source("scripts/core/db_utils.R")
             source("scripts/morphometrics/authority_weighting_utils.R")
             source("scripts/analysis/edaphic_fine_grain_utils.R")
-            source("scripts/analysis/06_multimodal_spatial_rf.R")
+            source("scripts/analysis/05_multimodal_spatial_rf.R")
 
             tmp_root <- {repr(str(tmp_d))}
             env_dir <- file.path(tmp_root, "env")
@@ -929,7 +929,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             stopifnot(terra::ymin(ex_after) >= 13.9 && terra::ymax(ex_after) <= 66.1)
             stopifnot(length(list.files(env_dir, pattern = "\\\\.crop_tmp\\\\.tif$")) == 0L)
 
-            # 2. Fit MaxEnt + Spatial RF SDM and verify GeoTIFFs, sdm_model_performance.csv, and fig06b PDF/PNG
+            # 2. Fit MaxEnt + Spatial RF SDM and verify GeoTIFFs, sdm_model_performance.csv, and fig05b PDF/PNG
             set.seed(123)
             n <- 30
             sp <- rep(c("Packera dubia", "Packera anonyma"), each = 15)
@@ -972,8 +972,8 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             )
 
             perf_csv <- file.path(out_dir, "reports", "sdm_model_performance.csv")
-            fig_pdf <- file.path(out_dir, "figures", "fig06b_sdm_habitat_suitability_map.pdf")
-            fig_png <- file.path(out_dir, "figures", "fig06b_sdm_habitat_suitability_map.png")
+            fig_pdf <- file.path(out_dir, "figures", "fig05b_sdm_habitat_suitability_map.pdf")
+            fig_png <- file.path(out_dir, "figures", "fig05b_sdm_habitat_suitability_map.png")
             tif_maxent <- file.path(out_dir, "rasters", "sdm_packera_dubia_maxent_cloglog.tif")
             tif_ens <- file.path(out_dir, "rasters", "sdm_packera_dubia_ensemble.tif")
 

@@ -6,7 +6,7 @@ Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-    Unit and integration tests for Step 07 (scripts/analysis/07_triage_dashboard_synthesis.R):
+    Unit and integration tests for Step 06 (scripts/analysis/06_triage_dashboard_synthesis.R):
     - Safe Relational Joins & Non-Georeferenced Voucher Coalescing
     - Reliability-Weighted Probabilistic Consensus Score (Dawid & Skene 1979)
       with Dynamic Missing-Modality Weight Renormalization & OOF Class Precision
@@ -35,11 +35,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 class TestTriageDashboardSynthesis(unittest.TestCase):
-    """Test suite for Step 07 active R script (scripts/analysis/07_triage_dashboard_synthesis.R)."""
+    """Test suite for Step 06 active R script (scripts/analysis/06_triage_dashboard_synthesis.R)."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
+        cls.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
         cls._class_temp_dir = tempfile.TemporaryDirectory()
         cls._class_tmp_path = Path(cls._class_temp_dir.name)
         cls.r_unit_proc = None
@@ -288,7 +288,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         cls._class_temp_dir.cleanup()
 
     def setUp(self) -> None:
-        self.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
+        self.r_script_path = PROJECT_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
 
     def _require_batched_r(self) -> str:
         if self.r_unit_proc is None:
@@ -296,12 +296,12 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertEqual(
             self.r_unit_proc.returncode,
             0,
-            f"Batched Step 07 R unit suite failed:\n{self.r_unit_proc.stderr}\n{self.r_unit_proc.stdout}",
+            f"Batched Step 06 R unit suite failed:\n{self.r_unit_proc.stderr}\n{self.r_unit_proc.stdout}",
         )
         return self.r_unit_proc.stdout
 
     def test_step07_static_contracts_phenology_and_tier1_pure_gating(self):
-        """Verify 07_triage_dashboard_synthesis.R retains safe coalescing, Hopkins circular phenology, Tier_1_Pure gating, and dynamic species-agnostic contracts."""
+        """Verify 06_triage_dashboard_synthesis.R retains safe coalescing, Hopkins circular phenology, Tier_1_Pure gating, and dynamic species-agnostic contracts."""
         self.assertTrue(self.r_script_path.exists())
         r_text = self.r_script_path.read_text(encoding="utf-8")
         for token in (
@@ -331,7 +331,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             "PC1 ~ species_standardized + institutionCode",
             "partial_eta_sq",
         ):
-            self.assertIn(token, r_text, f"Missing expected Step 07 token: {token}")
+            self.assertIn(token, r_text, f"Missing expected Step 06 token: {token}")
 
         for forbidden in (
             "TARGET_TAXA",
@@ -345,9 +345,9 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, r_text)
 
-        r06_text = (PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R").read_text(encoding="utf-8")
-        self.assertIn("morph_tier_source", r06_text)
-        self.assertIn("n_tier1_leaves", r06_text)
+        r05_text = (PROJECT_ROOT / "scripts" / "analysis" / "05_multimodal_spatial_rf.R").read_text(encoding="utf-8")
+        self.assertIn("morph_tier_source", r05_text)
+        self.assertIn("n_tier1_leaves", r05_text)
 
     def test_five_stage_hierarchical_precedence_and_cryptic_congruence(self):
         """Test Stage 1 (Misidentification_Reassign BEFORE Hybrid_Introgressant), Stage 2 (Hybrid), Stage 3 (Putative_Cryptic_Species Congruence), and Stage 4 (Ecophenotypic_Plasticity)."""
@@ -566,7 +566,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             self.skipTest("Rscript not installed.")
         r_code = """
         suppressPackageStartupMessages({ library(readr); library(dplyr) })
-        source("scripts/analysis/07_triage_dashboard_synthesis.R")
+        source("scripts/analysis/06_triage_dashboard_synthesis.R")
 
         set.seed(2026)
         # 25 active-anthesis anchors (alpha = clip((25 - 5)/15, 0, 1) = 1.0 -> full empirical circular slope)
@@ -620,17 +620,17 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         cat("STEP07_COHORT_ADAPTIVE_OK\\n")
         """
         res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
-        self.assertEqual(res.returncode, 0, f"Step 07 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
+        self.assertEqual(res.returncode, 0, f"Step 06 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("STEP07_COHORT_ADAPTIVE_OK", res.stdout)
 
     def test_nomenclatural_type_control_rules_a_b_c_and_locus_classicus_step06_baseline(self):
-        """Verify Milestone 4 (Step 06 locus classicus baseline) and Milestone 5 (Step 07 Rules A, B, and C: Confirmed_Type_Control / Type_Synonymy_Candidate, type_control_reassign, and is_typical_morphotype sensu stricto locking)."""
+        """Verify Milestone 4 (Step 05 locus classicus baseline) and Milestone 5 (Step 06 Rules A, B, and C: Confirmed_Type_Control / Type_Synonymy_Candidate, type_control_reassign, and is_typical_morphotype sensu stricto locking)."""
         if not shutil.which("Rscript"):
             self.skipTest("Rscript not installed.")
         r_code = """
         suppressPackageStartupMessages({ library(readr); library(dplyr) })
-        source("scripts/analysis/06_multimodal_spatial_rf.R")
-        source("scripts/analysis/07_triage_dashboard_synthesis.R")
+        source("scripts/analysis/05_multimodal_spatial_rf.R")
+        source("scripts/analysis/06_triage_dashboard_synthesis.R")
 
         # 1. Verify Step 06 compute_type_locality_ecological_control() computes type_edaphic_z_score,
         #    nearest_type_niche_taxon, and matches_type_lithology relative to locus classicus,

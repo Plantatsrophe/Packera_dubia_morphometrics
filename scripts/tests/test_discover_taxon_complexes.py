@@ -2,7 +2,7 @@
 """
 Unit tests for Eastern North American Packera N-Taxon Standardization,
 Bipinnatisect Dissection Gate, and Quantitative Taxon-Complex Discovery Engine
-(08_discover_taxon_complexes.R).
+(07_discover_taxon_complexes.R).
 """
 
 import importlib
@@ -25,7 +25,7 @@ from scripts.vision.leaf_geometry_utils import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DISCOVERY_R_SCRIPT = REPO_ROOT / "scripts" / "analysis" / "08_discover_taxon_complexes.R"
+DISCOVERY_R_SCRIPT = REPO_ROOT / "scripts" / "analysis" / "07_discover_taxon_complexes.R"
 PUB_FIG_R_SCRIPT = REPO_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R"
 
 
@@ -186,7 +186,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
 
             # Block 4: Intraspecific morphotype cluster visualization across R figures
             source("{PUB_FIG_R_SCRIPT.as_posix()}")
-            source("{(REPO_ROOT / 'scripts' / 'analysis' / '06_multimodal_spatial_rf.R').as_posix()}")
+            source("{(REPO_ROOT / 'scripts' / 'analysis' / '05_multimodal_spatial_rf.R').as_posix()}")
             local({{
               set.seed(123)
               n <- 24
@@ -417,7 +417,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         self.assertEqual(route_res["assigned_tier"], "tier1")
 
     def test_discover_taxon_complexes_8_species_3_complexes(self):
-        """Verify 08_discover_taxon_complexes.R recovers 3 true complexes across 8 species with 100% accuracy."""
+        """Verify 07_discover_taxon_complexes.R recovers 3 true complexes across 8 species with 100% accuracy."""
         rng = np.random.default_rng(20261025)
 
         complex_map = {
@@ -533,7 +533,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
 
             cmd = [
                 "Rscript",
-                "scripts/analysis/08_discover_taxon_complexes.R",
+                "scripts/analysis/07_discover_taxon_complexes.R",
                 "--morphometrics",
                 str(morph_csv),
                 "--harmonics",
@@ -557,7 +557,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             self.assertEqual(
                 res.returncode,
                 0,
-                f"08_discover_taxon_complexes.R failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}",
+                f"07_discover_taxon_complexes.R failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}",
             )
 
             self.assertTrue(out_complexes.exists() and out_complexes.stat().st_size > 0)
@@ -612,16 +612,16 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             self.assertIn("Schlick-Steiner et al. 2010", r08_text)
 
     def test_hierarchical_precedence_missing_modality_and_3d_hollow_ordinations(self):
-        """Verify Stage 1-5 precedence in 08_discover_taxon_complexes.R, missing-modality weight renormalization, and 3D hollow ordinations + BH FDR in pub_figures_utils.R."""
+        """Verify Stage 1-5 precedence in 07_discover_taxon_complexes.R, missing-modality weight renormalization, and 3D hollow ordinations + BH FDR in pub_figures_utils.R."""
         self.assertIn("STEP08_HIERARCHICAL_OK", self._require_batched_r())
 
     def test_subcluster_network_when_2_species_or_within_species_gmm_clusters(self) -> None:
-        """Verify 08_discover_taxon_complexes.R (<=800 lines) builds Taxon x Morphotype subcluster network when <=2 species."""
+        """Verify 07_discover_taxon_complexes.R (<=800 lines) builds Taxon x Morphotype subcluster network when <=2 species."""
         line_count = len(DISCOVERY_R_SCRIPT.read_text(encoding="utf-8").splitlines())
         self.assertLessEqual(
             line_count,
             800,
-            f"08_discover_taxon_complexes.R has {line_count} lines; must be <= 800 lines.",
+            f"07_discover_taxon_complexes.R has {line_count} lines; must be <= 800 lines.",
         )
 
         rng = np.random.default_rng(20261028)
@@ -690,21 +690,21 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             self.assertTrue(out_fig.exists() and out_fig.stat().st_size > 1000)
 
     def test_intraspecific_morphotype_cluster_visualization_across_r_figures(self) -> None:
-        """Verify pub_figures_utils.R and 06_multimodal_spatial_rf.R use morphotype clusters when <2 species."""
+        """Verify pub_figures_utils.R and 05_multimodal_spatial_rf.R use morphotype clusters when <2 species."""
         self.assertIn("STEP08_INTRA_FIGS_OK", self._require_batched_r())
 
     def test_multimodal_cli_flag_and_ecological_edaphic_left_join(self) -> None:
-        """Verify 08_discover_taxon_complexes.R (<=800 lines) parses --multimodal and merges Step 06 ecological/edaphic columns onto morph_df."""
+        """Verify 07_discover_taxon_complexes.R (<=800 lines) parses --multimodal and merges Step 05 ecological/edaphic columns onto morph_df."""
         line_count = len(DISCOVERY_R_SCRIPT.read_text(encoding="utf-8").splitlines())
         self.assertLessEqual(
             line_count,
             800,
-            f"08_discover_taxon_complexes.R has {line_count} lines; must be <= 800 lines.",
+            f"07_discover_taxon_complexes.R has {line_count} lines; must be <= 800 lines.",
         )
         self.assertIn("STEP08_MULTIMODAL_JOIN_OK", self._require_batched_r())
 
     def test_dynamic_morph_and_primary_env_predictor_discovery_in_step08(self) -> None:
-        """Verify Task 3D + 3A: 08_discover_taxon_complexes.R dynamically discovers >5 PCs via selected_morph_features and Step 06 primary_env_predictors without hardcoded 4-variable eco caps."""
+        """Verify Task 3D + 3A: 07_discover_taxon_complexes.R dynamically discovers >5 PCs via selected_morph_features and Step 05 primary_env_predictors without hardcoded 4-variable eco caps."""
         rng = np.random.default_rng(20261031)
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

@@ -943,8 +943,8 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
 
 
 def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
-    """Executes Phases 6 and 7: Spatial Macroecology and Synthesis Triage."""
-    logger.info("=== Starting Synthesis Workflow (Phases 6, 7) ===")
+    """Executes Phases 5 and 6: Spatial Macroecology and Synthesis Triage."""
+    logger.info("=== Starting Synthesis Workflow (Phases 5, 6) ===")
     start_ts = datetime.now().astimezone().isoformat()
     run_dir, cfg = _resolve_active_run_context(args, cfg)
 
@@ -985,9 +985,9 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     )
 
     # -------------------------------------------------------------------------
-    # Stage 6: Multimodal Spatial Random Forests & Warren's Niche Identity Tests
+    # Stage 5: Multimodal Spatial Random Forests & Warren's Niche Identity Tests
     # -------------------------------------------------------------------------
-    spatial_rf_script = PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R"
+    spatial_rf_script = PROJECT_ROOT / "scripts" / "analysis" / "05_multimodal_spatial_rf.R"
     verify_file_exists(spatial_rf_script, "Spatial RF R script")
 
     env_dir = Path(getattr(args, "env_dir", None) or "data/environmental")
@@ -1038,14 +1038,14 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     if getattr(args, "demo", False):
         cmd_spatial.append("--demo")
 
-    logger.info(f"Running Phase 6 Multimodal Spatial RF: {' '.join(cmd_spatial)}")
+    logger.info(f"Running Phase 5 Multimodal Spatial RF: {' '.join(cmd_spatial)}")
     subprocess.run(cmd_spatial, check=True)
     verify_file_exists(conflict_flags, "multimodal conflict flags CSV")
 
     # -------------------------------------------------------------------------
-    # Stage 7: Multi-Evidence Taxonomic Decision Matrix & Triage Dashboard
+    # Stage 6: Multi-Evidence Taxonomic Decision Matrix & Triage Dashboard
     # -------------------------------------------------------------------------
-    triage_script = PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"
+    triage_script = PROJECT_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
     verify_file_exists(triage_script, "Triage Dashboard R script")
 
     default_gmm_summary = (
@@ -1097,14 +1097,14 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd_triage.append("--intraspecific-mode")
     if getattr(args, "demo", False):
         cmd_triage.append("--demo")
-    logger.info(f"Running Phase 7 Triage Dashboard Synthesis: {' '.join(cmd_triage)}")
+    logger.info(f"Running Phase 6 Triage Dashboard Synthesis: {' '.join(cmd_triage)}")
     subprocess.run(cmd_triage, check=True)
     verify_file_exists(output_queue, "triage queue CSV")
     verify_file_exists(synthesis_report, "taxonomic revision summary markdown report")
 
     if run_dir is not None:
         write_run_metadata(run_dir, start_time=start_ts)
-    logger.info("=== Synthesis Workflow (Phases 6, 7) Completed Successfully ===")
+    logger.info("=== Synthesis Workflow (Phases 5, 6) Completed Successfully ===")
 
 
 def run_all(args: argparse.Namespace, cfg: PipelineConfig) -> None:

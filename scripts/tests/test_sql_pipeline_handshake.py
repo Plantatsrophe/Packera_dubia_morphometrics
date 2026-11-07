@@ -691,9 +691,9 @@ class TestSQLPipelineHandshake(unittest.TestCase):
 
             conflict_csv = tables_dir / "multimodal_conflict_flags.csv"
             srf_summary_csv = reports_dir / "multimodal_spatial_rf_summary.csv"
-            cmd_step06 = [
+            cmd_step05 = [
                 rscript_bin,
-                str(PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R"),
+                str(PROJECT_ROOT / "scripts" / "analysis" / "05_multimodal_spatial_rf.R"),
                 "--vouchers", str(vouchers_csv),
                 "--morphometrics", str(tables_dir / "morphometric_flags.csv"),
                 "--env-dir", str(env_dir),
@@ -708,13 +708,13 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 "--permutations", "9",
                 "--n-trees", "50",
             ]
-            proc06 = subprocess.run(cmd_step06, cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=False)
-            self.assertEqual(proc06.returncode, 0, f"Step 06 failed:\n{proc06.stdout}\n{proc06.stderr}")
+            proc05 = subprocess.run(cmd_step05, cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=False)
+            self.assertEqual(proc05.returncode, 0, f"Step 05 failed:\n{proc05.stdout}\n{proc05.stderr}")
             self.assertTrue(conflict_csv.is_file())
 
-            # Execute Step 07 synthesis reading from SQLite v_integrative_triage_master
+            # Execute Step 06 synthesis reading from SQLite v_integrative_triage_master
             # Remove intermediate CSVs (morphometric_flags, multimodal_conflict_flags)
-            # to prove Step 07 hydrates all upstream evidence streams directly from SQLite!
+            # to prove Step 06 hydrates all upstream evidence streams directly from SQLite!
             (tables_dir / "morphometric_flags.csv").unlink()
             conflict_csv.unlink()
 
@@ -723,9 +723,9 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             rev_report_md = reports_dir / "Packera_Taxonomic_Revision_Summary.md"
             rev_fig_pdf = figures_dir / "Figure_Integrative_Packera_Revision.pdf"
 
-            cmd_step07 = [
+            cmd_step06 = [
                 rscript_bin,
-                str(PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"),
+                str(PROJECT_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"),
                 "--vouchers", str(vouchers_csv),
                 "--morphometrics", str(tables_dir / "morphometric_flags.csv"),
                 "--multimodal-flags", str(conflict_csv),
@@ -735,10 +735,10 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 "--output-figure", str(rev_fig_pdf),
                 "--output-report", str(rev_report_md),
             ]
-            proc07 = subprocess.run(cmd_step07, cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=False)
-            combined07 = proc07.stdout + "\n" + proc07.stderr
-            self.assertEqual(proc07.returncode, 0, f"Step 07 failed:\n{combined07}")
-            self.assertIn("v_integrative_triage_master", combined07)
+            proc06 = subprocess.run(cmd_step06, cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=False)
+            combined06 = proc06.stdout + "\n" + proc06.stderr
+            self.assertEqual(proc06.returncode, 0, f"Step 06 failed:\n{combined06}")
+            self.assertIn("v_integrative_triage_master", combined06)
             self.assertTrue(final_triage_csv.is_file())
 
             with open(final_triage_csv, "r", encoding="utf-8", newline="") as tf:

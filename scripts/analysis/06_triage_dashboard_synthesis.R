@@ -1,14 +1,14 @@
 #!/usr/bin/env Rscript
 # ==============================================================================
-# Script: 07_triage_dashboard_synthesis.R
+# Script: 06_triage_dashboard_synthesis.R
 # Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
 #   Final Multi-Evidence Synthesis & Triage Dashboard Engine.
 #   1. Safely joins and coalesces georeferenced and non-georeferenced vouchers
-#      across Step 04 (Vegetative EFA/ECT Morphometrics), Step 02/06
-#      (Reproductive Capitulum & Phenological Allochrony), and Step 06
+#      across Step 04 (Vegetative EFA/ECT Morphometrics), Step 02/05
+#      (Reproductive Capitulum & Phenological Allochrony), and Step 05
 #      (Fine-Grain Rhizosphere/Outcrop & Climatic Niche) using composite keys.
 #   2. Computes empirical out-of-fold Cohen's kappa reliability weights on
 #      Tier_1_Gold + Tier_2_Silver anchors (Dawid & Skene 1979; Kuncheva 2014)
@@ -1327,7 +1327,7 @@ build_triage_queue <- function(opts) {
   }
   vouchers$species_standardized <- sp_cand
   sql_master <- if (!isTRUE(opts$demo) && exists("try_fetch_master_view_for_cohort", mode = "function")) {
-    tryCatch(try_fetch_master_view_for_cohort(vouchers_df = vouchers, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo), require_step04 = file.exists(opts$morphometrics), require_step06 = file.exists(opts$multimodal_flags)), error = function(e) NULL)
+    tryCatch(try_fetch_master_view_for_cohort(vouchers_df = vouchers, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo), require_step04 = file.exists(opts$morphometrics), require_step05 = file.exists(opts$multimodal_flags)), error = function(e) NULL)
   } else NULL
   if (!is.null(sql_master) && nrow(sql_master) > 0L) {
     vouchers <- sql_master

@@ -1408,6 +1408,7 @@ try_fetch_master_view_for_cohort <- function(
   vouchers_df = NULL,
   vouchers_path = NULL,
   require_step04 = FALSE,
+  require_step05 = FALSE,
   require_step06 = FALSE,
   ...
 ) {
@@ -1443,7 +1444,7 @@ try_fetch_master_view_for_cohort <- function(
            ("edaphic_best_fit_taxon" %in% names(master_df) && any(!is.na(master_df$edaphic_best_fit_taxon)))
 
   if (isTRUE(require_step04) && !has_m) return(NULL)
-  if (isTRUE(require_step06) && !has_s) return(NULL)
+  if ((isTRUE(require_step05) || isTRUE(require_step06)) && !has_s) return(NULL)
   master_df
 }
 
@@ -1532,7 +1533,7 @@ persist_step07_to_sqlite <- function(
   target_df
 }
 
-load_step08_merged_inputs <- function(opts, standardize_fn) {
+load_step07_merged_inputs <- function(opts, standardize_fn) {
   in_paths <- c(opts$morphometrics, opts$harmonics, opts$vouchers, opts$multimodal)
   active_cats <- NULL
   if (!is.null(opts$vouchers) && nzchar(opts$vouchers) && file.exists(opts$vouchers)) {
@@ -1630,3 +1631,4 @@ load_step08_merged_inputs <- function(opts, standardize_fn) {
 
   list(morph_df = morph_df)
 }
+load_step08_merged_inputs <- load_step07_merged_inputs

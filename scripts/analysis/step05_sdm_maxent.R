@@ -1,9 +1,9 @@
 # ==============================================================================
-# Step 06 Module: Ecological Niche Figures, Spatial RF Plots, & MaxEnt/SRF SDMs
-# Extracted from 06_multimodal_spatial_rf.R
+# Step 05 Module: Ecological Niche Figures, Spatial RF Plots, & MaxEnt/SRF SDMs
+# Extracted from 05_multimodal_spatial_rf.R
 # ==============================================================================
 
-export_dynamic_fig06_ecological_niche_phenology <- function(df, srf_res = NULL, niche_res = NULL, out_plot_pdf = NULL) {
+export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, niche_res = NULL, out_plot_pdf = NULL) {
   fdir <- if (exists("resolve_active_figures_dir", mode = "function")) {
     resolve_active_figures_dir(reference_path = out_plot_pdf)
   } else if (!is.null(out_plot_pdf) && nzchar(out_plot_pdf)) {
@@ -203,13 +203,13 @@ export_dynamic_fig06_ecological_niche_phenology <- function(df, srf_res = NULL, 
     graphics::title(sprintf("%s: Multi-Scale Ecological Niche, Top RF Predictors & Equivalency", hdr_lbl), outer = TRUE, cex.main = 1.20)
   }
 
-  pdf_out <- file.path(fdir, "fig06_ecological_niche_phenology.pdf")
+  pdf_out <- file.path(fdir, "fig05_ecological_niche_phenology.pdf")
   pdf_tmp <- paste0(pdf_out, ".tmp")
   grDevices::pdf(pdf_tmp, width = 13.0, height = 9.5)
   tryCatch(render_plate(), finally = grDevices::dev.off())
   if (file.exists(pdf_tmp)) file.rename(pdf_tmp, pdf_out)
 
-  png_out <- file.path(fdir, "fig06_ecological_niche_phenology.png")
+  png_out <- file.path(fdir, "fig05_ecological_niche_phenology.png")
   png_tmp <- paste0(png_out, ".tmp")
   grDevices::png(png_tmp, width = 13.0, height = 9.5, units = "in", res = 300)
   tryCatch(render_plate(), finally = grDevices::dev.off())
@@ -382,8 +382,8 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
   })
   if (file.exists(tmp_pdf)) file.rename(tmp_pdf, out_pdf)
 
-  # Export auxiliary Step 06 figures via generate_step06_pub_figures if available,
-  # then atomically render dynamic top-RF-importance fig06_ecological_niche_phenology.{pdf,png}
+  # Export auxiliary Step 05 figures via generate_step06_pub_figures if available,
+  # then atomically render dynamic top-RF-importance fig05_ecological_niche_phenology.{pdf,png}
   if (exists("generate_step06_pub_figures", mode = "function")) {
     tryCatch({
       format_predictor_labels <<- format_step06_predictor_labels
@@ -391,8 +391,8 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
     }, error = function(e) warning("generate_step06_pub_figures warning: ", e$message))
   }
   tryCatch(
-    export_dynamic_fig06_ecological_niche_phenology(df, srf_res, niche_res, out_pdf),
-    error = function(e) warning("export_dynamic_fig06_ecological_niche_phenology warning: ", e$message)
+    export_dynamic_fig05_ecological_niche_phenology(df, srf_res, niche_res, out_pdf),
+    error = function(e) warning("export_dynamic_fig05_ecological_niche_phenology warning: ", e$message)
   )
 }
 
@@ -1172,12 +1172,12 @@ fit_and_project_maxent_sdm_maps <- function(
     message(sprintf("Saved SDM performance metrics (%d modeled taxa/morphotypes) to %s.", nrow(perf_df), perf_csv_out))
   }
 
-  # Render 4-panel publication figure fig06b_sdm_habitat_suitability_map.{pdf,png}
+  # Render 4-panel publication figure fig05b_sdm_habitat_suitability_map.{pdf,png}
   if (!is.null(focal_artifacts) && !is.null(focal_artifacts$rast_mx) && !is.null(focal_artifacts$rast_ens)) {
     fig_dir <- file.path(out_dir, "figures")
     dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
-    pdf_out <- file.path(fig_dir, "fig06b_sdm_habitat_suitability_map.pdf")
-    png_out <- file.path(fig_dir, "fig06b_sdm_habitat_suitability_map.png")
+    pdf_out <- file.path(fig_dir, "fig05b_sdm_habitat_suitability_map.pdf")
+    png_out <- file.path(fig_dir, "fig05b_sdm_habitat_suitability_map.png")
 
     # Select top 3 climatic + edaphic predictors for Panel C marginal response curves
     resp_vars <- unique(c(top_clim_pred, top_edaph_pred, clim_cand, edaph_cand, kept_vars))
