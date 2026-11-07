@@ -280,6 +280,7 @@ class TestConfigureLeafMachine3(unittest.TestCase):
 
     def test_load_onnx_session_handles_posixpath_resolution_and_dummy_weights(self) -> None:
         """Verify _load_onnx_session unpacks single-Path resolve_lm3_weights returns and stays mock-ready on dummy paths."""
+        from unittest.mock import patch
         from scripts.vision.lm3_inference_engines import _load_onnx_session
 
         with tempfile.TemporaryDirectory() as tmpdir:
