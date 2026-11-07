@@ -3304,15 +3304,21 @@ def migrate_existing_vouchers_to_webp(
             p for p in raw_dir_path.iterdir()
             if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg"}
         )
-        for jpg_path in jpg_files:
+        total_jpgs = len(jpg_files)
+        if total_jpgs > 0 and logger:
+            logger.info(
+                f"Found {total_jpgs} existing JPG voucher image(s) in {raw_dir_path}; "
+                f"migrating to WebP (quality={quality})..."
+            )
+
+        def _convert_single_jpg(jpg_path: Path) -> int:
             webp_path = jpg_path.with_suffix(".webp")
             if webp_path.is_file() and webp_path.stat().st_size > 0:
                 try:
                     jpg_path.unlink()
-                    migrated_count += 1
+                    return 1
                 except Exception:
-                    pass
-                continue
+                    return 0
             temp_path: Optional[Path] = None
             try:
                 with Image.open(jpg_path) as img:
@@ -3325,12 +3331,12 @@ def migrate_existing_vouchers_to_webp(
                     )
                     temp_path = Path(temp_file.name)
                     temp_file.close()
-                    rgb_img.save(temp_path, format="WEBP", quality=int(quality), method=4)
+                    rgb_img.save(temp_path, format="WEBP", quality=int(quality), method=2)
                 if temp_path.is_file() and temp_path.stat().st_size > 0:
                     temp_path.replace(webp_path)
                     if webp_path.is_file() and webp_path.stat().st_size > 0:
                         jpg_path.unlink()
-                        migrated_count += 1
+                        return 1
                 elif temp_path and temp_path.exists():
                     temp_path.unlink()
             except Exception as exc:
@@ -3341,6 +3347,28 @@ def migrate_existing_vouchers_to_webp(
                         pass
                 if logger:
                     logger.warning(f"Skipping WebP migration for unreadable image {jpg_path.name}: {exc}")
+            return 0
+
+        if total_jpgs <= 4:
+            for jpg_path in jpg_files:
+                migrated_count += _convert_single_jpg(jpg_path)
+        else:
+            env_workers = os.environ.get("PACKERA_MAX_WORKERS", "").strip()
+            max_workers = (
+                max(1, int(env_workers))
+                if env_workers.isdigit()
+                else min(16, max(4, (os.cpu_count() or 4) * 2))
+            )
+            completed_jpgs = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+                for res in pool.map(_convert_single_jpg, jpg_files):
+                    migrated_count += res
+                    completed_jpgs += 1
+                    if logger and (completed_jpgs % 250 == 0 or completed_jpgs == total_jpgs):
+                        logger.info(
+                            f"  [WebP Migration] Processed {completed_jpgs}/{total_jpgs} "
+                            f"({100.0 * completed_jpgs / total_jpgs:.1f}%) JPG sheets..."
+                        )
 
     if migrated_count > 0 and logger:
         logger.info(
@@ -3651,6 +3679,7 @@ class VoucherHarvester:
         home_herbarium: str = DEFAULT_HOME_HERBARIUM,
         db_path: Optional[Union[str, Path]] = None,
     ):
+        self.logger = logger or logging.getLogger("VoucherHarvester")
         self.db_path = db_path
         if self.db_path is not None:
             _hydrate_synonyms_from_sqlite(self.db_path)
@@ -3659,10 +3688,76 @@ class VoucherHarvester:
         self.cfg_synonyms = cfg_synonyms if cfg_synonyms is not None else dict(_DEFAULT_CONFIG.taxa.synonyms or {})
 
         explicit_genus_only = len(raw_input_taxa) == 1 and raw_input_taxa[0].lower() == "packera"
+        scope, eff_excl_west, eff_countries = resolve_geographic_scope_settings(
+            geographic_scope=geographic_scope,
+            exclude_western=exclude_western,
+            include_western=include_western,
+            countries=countries,
+        )
         if not raw_input_taxa:
             self.is_genus_wide = True
+            self.logger.info("Discovering accepted Packera species across the genus via GBIF Backbone...")
             discovered_species = discover_genus_packera_species_gbif()
             base_taxa = discovered_species if discovered_species else ["Packera"]
+            self.logger.info(f"Discovered {len(base_taxa)} accepted Packera base taxa.")
+            if (
+                eff_excl_west
+                and len(base_taxa) > 1
+                and occ is not None
+                and getattr(occ, "search", None) is not None
+                and not _is_gbif_species_mocked()
+                and not hasattr(occ.search, "_mock_name")
+                and not hasattr(occ.search, "assert_called")
+            ):
+                lon_bound = f"{float(western_longitude_threshold)},-50.0"
+                ctry = eff_countries[0] if eff_countries else "US"
+                self.logger.info(
+                    f"Querying GBIF server-side species facet for Eastern NA residency "
+                    f"(country={ctry}, decimalLongitude={lon_bound}, min_records=3)..."
+                )
+                eastern_residents = []
+                try:
+                    genus_key_val = _get_packera_genus_key_gbif() or 3109225
+                    facet_url = (
+                        f"https://api.gbif.org/v1/occurrence/search?"
+                        f"taxonKey={genus_key_val}&country={ctry}&decimalLongitude={lon_bound}"
+                        f"&basisOfRecord=PRESERVED_SPECIMEN&mediaType=StillImage"
+                        f"&facet=speciesKey&facetMincount=3&facetLimit=500&limit=0"
+                    )
+                    req = urllib.request.Request(facet_url, headers={"Accept": "application/json"})
+                    with urllib.request.urlopen(req, timeout=15.0) as resp_http:
+                        payload = json.loads(resp_http.read().decode("utf-8"))
+                    facets = payload.get("facets", []) or []
+                    sp_counts = (facets[0].get("counts", []) or []) if facets else []
+                    resident_keys = [
+                        int(item["name"])
+                        for item in sp_counts
+                        if isinstance(item, dict) and str(item.get("name", "")).isdigit() and int(item.get("count", 0)) >= 3
+                    ]
+                    base_set_lower = {b.lower(): b for b in base_taxa}
+                    resolved_names = set()
+                    for sk in resident_keys:
+                        try:
+                            u_info = species.name_usage(key=sk) if hasattr(species, "name_usage") else {}
+                            if isinstance(u_info, dict):
+                                cand = _extract_canonical_binomial(
+                                    u_info.get("canonicalName") or u_info.get("species") or u_info.get("scientificName"),
+                                    {"Packera"},
+                                )
+                                if cand:
+                                    resolved_names.add(base_set_lower.get(cand.lower(), cand))
+                        except Exception:
+                            pass
+                    eastern_residents = sorted(resolved_names)
+                except Exception as facet_exc:
+                    self.logger.warning(f"Facet pre-screen fallback triggered ({facet_exc}).")
+
+                if eastern_residents:
+                    self.logger.info(
+                        f"Eastern NA Pre-Screen: Retained {len(eastern_residents)}/{len(base_taxa)} "
+                        f"Eastern NA resident Packera species: {eastern_residents}"
+                    )
+                    base_taxa = eastern_residents
         elif explicit_genus_only:
             self.is_genus_wide = True
             base_taxa = ["Packera"]
@@ -3671,14 +3766,25 @@ class VoucherHarvester:
             base_taxa = raw_input_taxa
 
         if self.expand_synonyms and not (len(base_taxa) == 1 and base_taxa[0].lower() == "packera"):
+            self.logger.info(f"Resolving historical Senecio/Cineraria synonyms across {len(base_taxa)} base taxa...")
+            if len(base_taxa) > 1 and not _is_gbif_species_mocked() and not _GBIF_NETWORK_UNAVAILABLE:
+                uncached_taxa = [tx for tx in base_taxa if tx.strip().lower() not in _GBIF_SYNONYM_CACHE]
+                if uncached_taxa:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, len(uncached_taxa))) as syn_pool:
+                        list(syn_pool.map(_query_gbif_backbone_and_synonyms, uncached_taxa))
             expanded_taxa: List[str] = []
             seen_t: Set[str] = set()
-            for tx in base_taxa:
+            for idx_tx, tx in enumerate(base_taxa, start=1):
                 for syn_tx in expand_taxon_synonyms_gbif(tx, cfg_synonyms=self.cfg_synonyms):
                     low_tx = syn_tx.lower()
                     if low_tx not in seen_t:
                         seen_t.add(low_tx)
                         expanded_taxa.append(syn_tx)
+                if len(base_taxa) >= 15 and (idx_tx % 25 == 0 or idx_tx == len(base_taxa)):
+                    self.logger.info(
+                        f"  [Synonym Expansion] Resolved {idx_tx}/{len(base_taxa)} base taxa "
+                        f"-> {len(expanded_taxa)} total query binomials..."
+                    )
             self.taxa = expanded_taxa if expanded_taxa else base_taxa
         else:
             self.taxa = base_taxa

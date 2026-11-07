@@ -397,6 +397,7 @@ mkdir -p \
 # Maintain runs/latest symlink pointing to the most recent RUN_DIR
 ln -sfn "${RUN_ID}" "runs/latest"
 
+export PYTHONUNBUFFERED=1
 LOG_FILE="${RUN_DIR}/logs/pipeline.log"
 exec > >(tee -a "${LOG_FILE}") 2>&1
 

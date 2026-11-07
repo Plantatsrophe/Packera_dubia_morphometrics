@@ -370,7 +370,7 @@ class ThresholdsConfig:
     min_file_size_kb: float = 500.0
     min_sharpness_laplacian: float = 80.0
     max_uncertainty_meters: float = 5000.0
-    western_longitude_threshold: float = -106.65
+    western_longitude_threshold: float = -98.0
     geographic_scope: str = "eastern_na"
     countries: List[str] = field(default_factory=lambda: ["US"])
     fold_detection: FoldDetectionConfig = field(default_factory=FoldDetectionConfig)
@@ -429,7 +429,7 @@ class HarvestingConfig:
     geographic_scope: str = "eastern_na"
     countries: List[str] = field(default_factory=lambda: ["US"])
     exclude_western: bool = True
-    western_longitude_threshold: float = -106.65
+    western_longitude_threshold: float = -98.0
     home_herbarium: str = "NCU"
     min_megapixels: float = 8.0
     min_file_size_kb: float = 500.0
