@@ -541,6 +541,13 @@ if v_n == 0 or el_n == 0:
 "
   fi
 else
+  for asset_sub in masks contours cropped_patches; do
+    if [[ -L "${RUN_DIR}/data/${asset_sub}" ]]; then
+      rm -f "${RUN_DIR}/data/${asset_sub}"
+    elif [[ "${RESEGMENT}" == "true" && -d "${RUN_DIR}/data/${asset_sub}" ]]; then
+      rm -rf "${RUN_DIR}/data/${asset_sub}"
+    fi
+  done
   mkdir -p \
     "${RUN_DIR}/data/masks/tier1_intact" \
     "${RUN_DIR}/data/masks/tier2_reflected" \

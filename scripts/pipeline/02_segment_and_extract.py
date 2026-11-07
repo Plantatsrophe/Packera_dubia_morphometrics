@@ -1473,6 +1473,46 @@ class SegmentAndExtractPipeline:
 
         return False
 
+    def _purge_voucher_disk_artifacts(self, catalog_number: str) -> None:
+        """
+        Purges all prior mask, contour, basal leaf crop, rosette crop/mask, and capitula
+        crop files for `catalog_number` before re-segmenting under `--force`, preventing
+        orphan files (e.g., `_leaf5.png` when a voucher now yields 3 leaves) from lingering.
+        """
+        cat = str(catalog_number).strip()
+        if not cat:
+            return
+        roots = [self.output_dir]
+        if (
+            self.force
+            and os.environ.get("PACKERA_DEMO_MODE") != "1"
+            and is_canonical_or_explicit_db_context(self.output_dir)
+        ):
+            canon_data = PROJECT_ROOT / "data"
+            if canon_data.exists() and canon_data.resolve() != self.output_dir.resolve():
+                roots.append(canon_data)
+
+        for base_dir in roots:
+            dir_patterns = [
+                (base_dir / "contours", f"{cat}_leaf*.csv"),
+                (base_dir / "masks", f"{cat}_leaf*.png"),
+                (base_dir / "masks" / "tier1_pristine", f"{cat}_leaf*.png"),
+                (base_dir / "masks" / "tier1_intact", f"{cat}_leaf*.png"),
+                (base_dir / "masks" / "tier2_reflected", f"{cat}_leaf*.png"),
+                (base_dir / "cropped_patches" / "basal_leaves_raw", f"{cat}_leaf*.jpg"),
+                (base_dir / "cropped_patches" / "rosettes_dense", f"{cat}_*rosette*"),
+                (base_dir / "cropped_patches" / "capitula", f"{cat}_cap*.jpg"),
+            ]
+            for d_path, pat in dir_patterns:
+                if not d_path.exists():
+                    continue
+                for f_old in d_path.glob(pat):
+                    try:
+                        if f_old.is_file() or f_old.is_symlink():
+                            f_old.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
     @staticmethod
     def _atomic_save_csv(df: pd.DataFrame, target_path: Path) -> None:
         """Atomically persists DataFrame to CSV via temporary file replacement."""
@@ -1788,6 +1828,9 @@ class SegmentAndExtractPipeline:
                     "details": "Failed to decode image with OpenCV"
                 }
                 return _finish([], failure_record, pheno_rec=classify_voucher_phenology(catalog_number, []))
+
+        if self.force:
+            self._purge_voucher_disk_artifacts(catalog_number)
 
         sheet_h, sheet_w = img_bgr.shape[:2]
         scale_f = max(sheet_h, sheet_w) / 5600.0 if max(sheet_h, sheet_w) > 1000 else 0.0

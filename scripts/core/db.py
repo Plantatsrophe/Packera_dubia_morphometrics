@@ -2189,6 +2189,7 @@ def record_voucher_segmentation_transaction(
         conn.execute("DELETE FROM extracted_leaves WHERE catalogNumber = ?;", (cat,))
         conn.execute("DELETE FROM voucher_reproductive_phenology WHERE catalogNumber = ?;", (cat,))
         conn.execute("DELETE FROM plant_individuals WHERE catalogNumber = ?;", (cat,))
+        conn.execute("DELETE FROM dinov2_feature_cache WHERE catalogNumber = ?;", (cat,))
 
         conn.executemany(
             """
