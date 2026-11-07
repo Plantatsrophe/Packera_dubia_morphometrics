@@ -238,6 +238,16 @@ Rscript scripts/analysis/08_discover_taxon_complexes.R \
 | `--exclude-misidentified` | *(flag)* | `false` | Retains concordant vouchers alongside `Confirmed_Type_Control` and `Type_Synonymy_Candidate` sheets across iterative refinement runs |
 | `--ingest-db-only` | *(flag)* | `false` | Synchronizes existing CSV tables and contours on disk into `data/packera_pipeline.sqlite` and exits |
 | `--demo` | *(flag)* | `false` | Runs in ephemeral test isolation mode (`PACKERA_DEMO_MODE=1`) |
+| `--discover-complexes` | *(flag)* | `false` | Runs Step 08 (`08_discover_taxon_complexes.R`) to delimit species complexes via Leiden/Louvain and Ward.D2 clustering, and auto-scopes outgroup neighbors when paired with `--focal-taxon` |
+| `--auto-neighbors` | *(flag)* | `false` | Restricts `--focal-taxon` outgroup reference anchors to congeners in the same empirical complex or with pairwise affinity $\ge$ `--min-affinity` (automatically enables `--discover-complexes`) |
+| `--min-affinity` | `<FLOAT>` | `0.03` | Minimum multimodal pairwise affinity threshold used by Step 08 and `--auto-neighbors` to link complex neighbors |
+| `--resegment` | *(flag)* | `false` | Forces Step 02 LeafMachine3 re-segmentation of cached vouchers without re-downloading images in Step 01 |
+| `--expand-synonyms` / `--no-expand-synonyms` | *(flag)* | `--expand-synonyms` | Toggles GBIF Backbone *Senecio* and *Cineraria* basionym/synonym expansion during Step 01 harvesting |
+| `--determiner-tier` | `gold` \| `silver` \| `bronze` | All tiers | Restricts the active run cohort strictly to a single determiner authority tier (`--gold-only` is an alias for `--determiner-tier gold`) |
+| `--triage-source` | `<RUN_ID>` \| `ALL` | `ALL` | Specifies which prior run(s) supply `Misidentification_Reassign` exclusions when `--exclude-misidentified` is active |
+| `--max-per-state` | `<INT>` | None | Caps the maximum number of non-anchor vouchers retained per (`species`, `stateProvince`) during spatial balancing |
+| `--max-per-region` | `<INT>` | None | Caps the maximum number of non-anchor vouchers retained per US EPA Level III Ecoregion during spatial balancing |
+| `--no-spatial-weights` | *(flag)* | `false` | Sets `spatial_balance_weight = 1.0` across all specimens instead of inverse spatial-density weighting |
 
 ## Publication Figure Suite Inventory
 
