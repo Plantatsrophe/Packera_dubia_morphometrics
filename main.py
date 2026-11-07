@@ -531,12 +531,22 @@ def check_environment(args: Optional[argparse.Namespace] = None) -> bool:
         if parsed_config
         else default_seg_weights
     )
-    model_path = PROJECT_ROOT / model_rel
+    model_path = Path(model_rel) if Path(model_rel).is_absolute() else (PROJECT_ROOT / model_rel)
+    if not (model_path.exists() and model_path.is_file() and model_path.stat().st_size > 0):
+        try:
+            from scripts.vision.configure_leafmachine3 import resolve_lm3_weights
+            resolved_cand = resolve_lm3_weights(Path(model_rel).name, explicit_path=model_path)
+            if resolved_cand.exists() and resolved_cand.is_file() and resolved_cand.stat().st_size > 0:
+                model_path = resolved_cand
+        except Exception:
+            pass
     if not (model_path.exists() and model_path.is_file() and model_path.stat().st_size > 0):
         print(f"  [INFO] Model checkpoint missing at {model_path}. Invoking automated artifact manager...")
         try:
             cfg_obj = PipelineConfig.from_yaml(cfg_file) if cfg_file.exists() else (parsed_config or {})
-            ensure_model_weights(cfg_obj)
+            ensured = ensure_model_weights(cfg_obj)
+            if isinstance(ensured, Path) and ensured.exists() and ensured.is_file() and ensured.stat().st_size > 0:
+                model_path = ensured
         except Exception as exc:
             print(f"  [WARN] Automatic weights acquisition failed: {exc}")
 
@@ -717,6 +727,15 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         elif isinstance(cfg, dict) and cfg.get("segmentation", {}).get("model_weights"):
             cand_p = Path(cfg["segmentation"]["model_weights"])
             seg_weights_cand = cand_p if cand_p.is_absolute() else (PROJECT_ROOT / cand_p)
+
+        if seg_weights_cand is not None and not seg_weights_cand.exists():
+            try:
+                from scripts.vision.configure_leafmachine3 import resolve_lm3_weights
+                resolved_seg = resolve_lm3_weights(seg_weights_cand.name, explicit_path=seg_weights_cand)
+                if resolved_seg.exists():
+                    seg_weights_cand = resolved_seg
+            except Exception:
+                pass
 
         if seg_weights_cand is not None and seg_weights_cand.exists():
             model_weights = seg_weights_cand

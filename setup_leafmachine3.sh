@@ -16,6 +16,10 @@ if ! command -v uv >/dev/null 2>&1; then
     echo "Installing uv 0.12.23..."
     curl -LsSf https://astral.sh/uv/0.12.23/install.sh | sh
     export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+elif ! uv --version | grep -q "0.12.23"; then
+    echo "Updating uv ($(uv --version)) to required version 0.12.23..."
+    uv self update 0.12.23 || curl -LsSf https://astral.sh/uv/0.12.23/install.sh | sh
+    export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
 else
     echo "uv is already installed: $(uv --version)"
 fi
@@ -53,6 +57,37 @@ if ! printf '%s\n' "${DOCTOR_OUT}" | grep -q "Result: READY"; then
     exit 1
 fi
 popd >/dev/null
+
+echo "=== 6b. Linking canonical LeafMachine3 ONNX models into models/lm3/ and syncing .venv_LM3 ==="
+mkdir -p "${PROJECT_ROOT}/models/lm3"
+declare -A LM3_STAGE_LINKS=(
+    ["lm3_archival_detector__yolo26x_det_1280.onnx"]="${LM3_DIR}/models/archival_detector/model.onnx"
+    ["lm3_plant_detector__yolo26x_det_1280.onnx"]="${LM3_DIR}/models/plant_detector/model.onnx"
+    ["lm3_landmark_detector__yolo26x_pose_640_canonical.onnx"]="${LM3_DIR}/models/landmark_detector/model.onnx"
+    ["lm3_landmark_detector__yolo26x_pose_640.onnx"]="${LM3_DIR}/models/landmark_detector/model.onnx"
+    ["lm3_leaf_segmenter__yolo26x_seg_1024.onnx"]="${LM3_DIR}/models/leaf_segmenter/model.onnx"
+    ["lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain.onnx"]="${LM3_DIR}/models/specimen_segmenter/unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain/model.onnx"
+    ["lm3_ruler_classifier__dinov3_vits16_tile_four_896_mlp.onnx"]="${LM3_DIR}/models/ruler_classifier/model.onnx"
+)
+for link_name in "${!LM3_STAGE_LINKS[@]}"; do
+    target_file="${LM3_STAGE_LINKS[$link_name]}"
+    if [ -f "${target_file}" ]; then
+        ln -sfn "${target_file}" "${PROJECT_ROOT}/models/lm3/${link_name}"
+    fi
+done
+
+if [ -d "${LM3_DIR}/.venv" ]; then
+    if [ -L "${PROJECT_ROOT}/.venv_LM3" ]; then
+        ln -sfn "${LM3_DIR}/.venv" "${PROJECT_ROOT}/.venv_LM3"
+    elif [ -d "${PROJECT_ROOT}/.venv_LM3" ]; then
+        if ! "${PROJECT_ROOT}/.venv_LM3/bin/python" -c "import onnxruntime" >/dev/null 2>&1; then
+            rm -rf "${PROJECT_ROOT}/.venv_LM3"
+            ln -sfn "${LM3_DIR}/.venv" "${PROJECT_ROOT}/.venv_LM3"
+        fi
+    else
+        ln -sfn "${LM3_DIR}/.venv" "${PROJECT_ROOT}/.venv_LM3"
+    fi
+fi
 
 echo "=== 7. Ensuring main project .venv has ONNX Runtime & core dependencies ==="
 if [ ! -d "${PROJECT_ROOT}/.venv" ]; then

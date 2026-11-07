@@ -227,6 +227,126 @@ def resolve_lm3_models_dir(
     return resolved_candidates[0] if resolved_candidates else (root / "models" / "lm3").resolve()
 
 
+_LM3_MODELHUB_SUBPATHS: Dict[str, List[str]] = {
+    "lm3_plant_detector__yolo26x_det_1280": [
+        "plant_detector/model.onnx",
+        "plant_detector/yolo26x_det_1280/model.onnx",
+        "plant_detector/best.pt",
+        "plant_detector/model.torchscript",
+    ],
+    "lm3_leaf_segmenter__yolo26x_seg_1024": [
+        "leaf_segmenter/model.onnx",
+        "leaf_segmenter/yolo26x_seg_1024/model.onnx",
+        "leaf_segmenter/best.pt",
+        "leaf_segmenter/model.torchscript",
+    ],
+    "lm3_landmark_detector__yolo26x_pose_640_canonical": [
+        "landmark_detector/model.onnx",
+        "landmark_detector/yolo26x_pose_640_canonical/model.onnx",
+        "landmark_detector/best.pt",
+        "landmark_detector/model.torchscript",
+    ],
+    "lm3_landmark_detector__yolo26x_pose_640": [
+        "landmark_detector/model.onnx",
+        "landmark_detector/yolo26x_pose_640_canonical/model.onnx",
+        "landmark_detector/best.pt",
+        "landmark_detector/model.torchscript",
+    ],
+    "lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain": [
+        "specimen_segmenter/unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain/model.onnx",
+        "specimen_segmenter/model.onnx",
+        "specimen_segmenter/unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain/best.pt",
+        "specimen_segmenter/unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain/model.torchscript.pt",
+    ],
+    "lm3_archival_detector__yolo26x_det_1280": [
+        "archival_detector/model.onnx",
+        "archival_detector/yolo26x_det_1280/model.onnx",
+        "archival_detector/best.pt",
+        "archival_detector/model.torchscript",
+    ],
+    "lm3_ruler_classifier__dinov3_vits16_tile_four_896_mlp": [
+        "ruler_classifier/model.onnx",
+        "ruler_classifier/dinov3_vits16_tile_four_896_mlp/model.onnx",
+        "ruler_classifier/ckpt_best.pt",
+    ],
+}
+
+
+def _candidate_relpaths_for_stem(stem: str) -> List[str]:
+    """Build relative candidate paths inside an LM3 models root for a given model stem."""
+    rels: List[str] = []
+    for ext in (".onnx", ".pt", ".torchscript", ".torchscript.pt"):
+        rels.append(f"{stem}{ext}")
+    rels.append(f"{stem}/model.onnx")
+    for sub in _LM3_MODELHUB_SUBPATHS.get(stem, []):
+        if sub not in rels:
+            rels.append(sub)
+    if stem.startswith("lm3_") and "__" in stem:
+        stage, model_key = stem[4:].split("__", 1)
+        for sub in (
+            f"{stage}/model.onnx",
+            f"{stage}/{model_key}/model.onnx",
+            f"{stage}/best.pt",
+            f"{stage}/{model_key}/best.pt",
+            f"{stage}/model.torchscript",
+            f"{stage}/{model_key}/model.torchscript",
+            f"{stage}/{model_key}/model.torchscript.pt",
+        ):
+            if sub not in rels:
+                rels.append(sub)
+    return rels
+
+
+def resolve_lm3_weights(
+    default_filename: str,
+    explicit_path: Optional[Union[str, Path]] = None,
+    project_root: Optional[Path] = None,
+) -> Path:
+    """
+    Resolve a LeafMachine3 ONNX/PyTorch model checkpoint path across flat `models/lm3/`
+    and `LeafMachine3/models/<stage>/` modelhub directory layouts.
+    """
+    root = (Path(project_root) if project_root else PROJECT_ROOT).resolve()
+    explicit_resolved: Optional[Path] = None
+    if explicit_path is not None and str(explicit_path).strip():
+        p = Path(explicit_path)
+        explicit_resolved = p.resolve() if p.is_absolute() else (root / p).resolve()
+        if explicit_resolved.exists():
+            return explicit_resolved
+
+    search_roots = [
+        root / "models" / "lm3",
+        root / "LeafMachine3" / "models",
+        root / "LeafMachine3" / "leafmachine3" / "models",
+        root / "models",
+    ]
+    stems_to_check: List[str] = []
+    if explicit_resolved is not None:
+        exp_stem = explicit_resolved.stem
+        if exp_stem.startswith("lm3_") or exp_stem == Path(default_filename).stem:
+            stems_to_check.append(exp_stem)
+        else:
+            return explicit_resolved
+
+    def_stem = Path(default_filename).stem
+    if def_stem not in stems_to_check:
+        stems_to_check.append(def_stem)
+
+    for stem in stems_to_check:
+        rel_paths = _candidate_relpaths_for_stem(stem)
+        for base_dir in search_roots:
+            for rel in rel_paths:
+                cand = base_dir / rel
+                if cand.exists() and cand.is_file():
+                    return cand.resolve()
+
+    if explicit_resolved is not None:
+        return explicit_resolved
+    models_dir = resolve_lm3_models_dir(project_root=root)
+    onnx_name = def_stem if def_stem.endswith(".onnx") else f"{def_stem}.onnx"
+    return (models_dir / onnx_name).resolve()
+
+
 def resolve_pcd_weights(
     weights_path: Optional[Union[str, Path]] = None,
     project_root: Optional[Path] = None,
@@ -235,28 +355,15 @@ def resolve_pcd_weights(
     root = (Path(project_root) if project_root else PROJECT_ROOT).resolve()
     if weights_path:
         p = Path(weights_path)
-        if p.is_absolute() and p.exists():
-            return p.stem, p.resolve()
-        if (root / p).exists():
-            resolved = (root / p).resolve()
-            return resolved.stem, resolved
         target_name = p.stem if p.suffix else p.name
     else:
         target_name = DEFAULT_PLANT_DETECTOR_MODEL
-
-    models_dir = resolve_lm3_models_dir(project_root=root)
-    onnx_name = target_name if target_name.endswith(".onnx") else f"{target_name}.onnx"
-    candidates = [
-        models_dir / onnx_name,
-        models_dir / target_name / "model.onnx",
-        root / "LeafMachine3" / "models" / onnx_name,
-        root / "LeafMachine3" / "models" / target_name / "model.onnx",
-        root / "models" / "lm3" / onnx_name,
-    ]
-    for c in candidates:
-        if c.exists():
-            return target_name, c.resolve()
-    return target_name, (models_dir / onnx_name).resolve()
+    resolved = resolve_lm3_weights(
+        DEFAULT_PLANT_DETECTOR_MODEL,
+        explicit_path=weights_path,
+        project_root=root,
+    )
+    return target_name, resolved
 
 
 def _extract_cfg_attr(
@@ -782,6 +889,7 @@ __all__ = [
     "DEFAULT_NUM_WORKERS",
     "get_default_lm3_template",
     "resolve_lm3_models_dir",
+    "resolve_lm3_weights",
     "resolve_pcd_weights",
     "generate_lm3_config",
     "generate_high_performance_config",

@@ -236,6 +236,48 @@ class TestConfigureLeafMachine3(unittest.TestCase):
             self.assertIs(bool(_find_value(_extract_module_block(loaded, "momocs"), "include_petiole")), False)
             self.assertIs(bool(_find_value(_extract_module_block(loaded, "momocs"), "oriented")), True)
 
+    def test_resolve_lm3_weights_modelhub_and_flat_layouts(self) -> None:
+        """Verify resolve_lm3_weights resolves both LeafMachine3 modelhub stage layouts and flat models/lm3 files."""
+        from scripts.vision.configure_leafmachine3 import resolve_lm3_weights, resolve_pcd_weights
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stage_onnx = root / "LeafMachine3" / "models" / "leaf_segmenter" / "model.onnx"
+            stage_onnx.parent.mkdir(parents=True, exist_ok=True)
+            stage_onnx.write_bytes(b"ONNX_LEAF_SEG")
+
+            unet_onnx = (
+                root
+                / "LeafMachine3"
+                / "models"
+                / "specimen_segmenter"
+                / "unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain"
+                / "model.onnx"
+            )
+            unet_onnx.parent.mkdir(parents=True, exist_ok=True)
+            unet_onnx.write_bytes(b"ONNX_UNETPP")
+
+            pcd_onnx = root / "LeafMachine3" / "models" / "plant_detector" / "model.onnx"
+            pcd_onnx.parent.mkdir(parents=True, exist_ok=True)
+            pcd_onnx.write_bytes(b"ONNX_PCD")
+
+            resolved_leaf = resolve_lm3_weights(
+                "lm3_leaf_segmenter__yolo26x_seg_1024.onnx",
+                explicit_path="models/lm3/lm3_leaf_segmenter__yolo26x_seg_1024.onnx",
+                project_root=root,
+            )
+            self.assertEqual(resolved_leaf, stage_onnx.resolve())
+
+            resolved_unet = resolve_lm3_weights(
+                "lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain.onnx",
+                project_root=root,
+            )
+            self.assertEqual(resolved_unet, unet_onnx.resolve())
+
+            pcd_name, pcd_resolved = resolve_pcd_weights(project_root=root)
+            self.assertEqual(pcd_name, "lm3_plant_detector__yolo26x_det_1280")
+            self.assertEqual(pcd_resolved, pcd_onnx.resolve())
+
 
 if __name__ == "__main__":
     unittest.main()

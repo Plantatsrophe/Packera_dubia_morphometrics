@@ -6,18 +6,16 @@
 
 ## Project Overview
 
-Species boundaries in North American *Packera* Á. Löve & D. Löve (Asteraceae: Senecioneae) are notoriously difficult to resolve from herbarium specimens alone. Across the ***Packera dubia*** **(Spreng.) Trock & Mabb. complex** (formerly *Packera tomentosa* and *Senecio tomentosus*) and its eastern North American congeners, taxa exhibit pronounced heteroblasty between basal rosette leaves and upper cauline stem leaves, frequent polyploidy ($2n = 44, 46, 88$; Kowal 1975), reticulate hybridization, and sharp edaphic specialization on granite flatrocks, diabase glades, serpentine barrens, and coastal plain sands. Because historical herbarium holdings contain high rates of misidentification and mixed duplicate gatherings (exsiccatae), pooling raw specimen measurements by their current folder label blurs real evolutionary boundaries.
+Species boundaries in North American *Packera* Á. Löve & D. Löve (Asteraceae: Senecioneae) are difficult to resolve from herbarium sheets alone. Across the ***Packera dubia* (Spreng.) Trock & Mabb. complex** (formerly *Packera tomentosa* and *Senecio tomentosus*) and its eastern North American congeners, taxa exhibit pronounced heteroblasty between basal rosette leaves and upper cauline stem leaves alongside frequent polyploidy ($2n = 44, 46, 88$; Kowal 1975) and reticulate hybridization. Many lineages also occupy specialized edaphic habitats on granite flatrocks and diabase glades, as well as serpentine barrens and coastal plain sands. Because herbarium collections contain high rates of misidentification and mixed duplicate gatherings (exsiccatae), pooling raw specimen measurements by their current folder label obscures evolutionary boundaries.
 
-I built this pipeline at the University of North Carolina at Chapel Hill and the UNC Herbarium (NCU) to evaluate morphological diagnosability under the Unified Species Concept (de Queiroz 2007) through Integration by Congruence (Padial et al. 2010). Rather than treating every herbarium label as equally reliable ground truth, I stratify specimens by determiner authority, pin verified nomenclatural type specimens (`Holotype`, `Lectotype`, `Neotype`, `Isotype`, `Syntype`, and `Paratype`) as immutable morphological, visual, and *locus classicus* ecological baselines, and isolate intact basal rosette leaves from cauline stem leaves before measuring outline shape. I then test whether vegetative leaf geometry, reproductive macro-morphology, leaf surface visual features, flowering phenology, and fine-scale rhizosphere and bedrock niches ($0\text{ to }15\text{ cm}$ soil properties and $10\text{ to }30\text{ m}$ outcrop lithology) converge on the same evolutionary lineages.
-
-While *Packera dubia* serves as my primary focal species for eastern North American dissertation research, the pipeline contains zero hardcoded species lists (`target_species: []`). It discovers, harvests, and evaluates any user-specified *Packera* subset or the entire North American genus dynamically from GBIF and iDigBio.
+I built this pipeline at the University of North Carolina at Chapel Hill and the UNC Herbarium (NCU) to evaluate morphological diagnosability across North American *Packera* under the Unified Species Concept (de Queiroz 2007) through Integration by Congruence (Padial et al. 2010). To account for variation in determiner reliability across herbarium holdings, I stratify specimens by taxonomic authority and pin verified nomenclatural type specimens (`Holotype`, `Lectotype`, `Neotype`, `Isotype`, `Syntype`, and `Paratype`) as morphological, visual, and *locus classicus* ecological baselines. I isolate intact basal rosette leaves from cauline stem leaves before quantifying lamina shape, then test whether vegetative leaf geometry and reproductive macro-morphology align with leaf surface visual features, flowering phenology, and fine-scale rhizosphere and bedrock niches ($0\text{ to }15\text{ cm}$ soil properties and $10\text{ to }30\text{ m}$ outcrop lithology).
 
 ### Core Empirical Capabilities
 
-* **Taxonomic Authority Weighting and Nomenclatural Type Pinning (Step 01):** I harvest Darwin Core archives from GBIF and iDigBio, resolve *Senecio* and *Cineraria* basionyms dynamically, deduplicate exsiccatae series before downloading imagery, store sheets as lossless-calibrated WebP images, intersect coordinates with official US EPA Level III Ecoregions (Omernik & Griffith 2014), and classify determiners across a 4-tier authority hierarchy (`Tier_0_Type`, `Tier_1_Gold` monographers and protologue authors, `Tier_2_Silver` curated regional herbaria, and `Tier_3_Bronze` general collections). Historical nomenclatural types are exempted from coordinate-uncertainty and partial-date drop filters so 18th- and 19th-century type gatherings are never discarded.
-* **LeafMachine3 ONNX Segmentation and Basal-Rosette Gatekeeping (Step 02):** I run [LeafMachine3](https://github.com/Gene-Weaver/LeafMachine3) (Weaver 2026) on `onnxruntime` for 9-class plant organ detection (`yolo26x_det_1280`), whole-sheet plant-versus-paper segmentation (`UNet++ v9` with `LLR_Hyst_KeepBlobs` color-likelihood paper cleanup), ensemble ruler classification and tick-lattice scale calibration anchored by a megapixel resolution prior (`lm3_mp_conversion_factor__sqrt_fit`, $R^2 = 0.905$), 3-class single-leaf instance segmentation (`yolo26x_seg_1024` separating `Leaf`, `Petiole`, and `Hole`), and 31-keypoint midvein and petiole pose tracking (`yolo26x_pose_640`). My *Packera* gatekeepers (`leaf_gatekeeper.py` and `organ_crown_metrics.py`) cluster multi-plant sheets via DBSCAN, estimate rosette crowns, reject cauline stem leaves and severed lobes, bridge dissected pinnae along paper-cleaned rachises, reflect folded leaves across the 15-point midvein trace (`Tier_2_Reflected`), and export 120-vertex tip-up lamina outlines alongside 360-direction Euler Characteristic Transforms (ECT; Ayub et al. 2026).
-* **Type-Anchored Elliptic Fourier Analysis and Multivariate Morphometrics (Steps 03 to 04):** I decompose closed `Tier_1_Direct` basal leaf outlines using Elliptic Fourier Analysis (`Momocs::efourier`, calibrated to capture $\ge 99\%$ cumulative harmonic power), remove bilateral asymmetry (`Momocs::rm_asym`; Claude 2008), and aggregate leaves to Operational Taxonomic Unit (OTU) medians per plant individual. In Step 04, I estimate determiner error rates via an exogenous Dawid-Skene and Beta-Binomial Empirical Bayes model, test Klingenberg (2016) allometric slope homogeneity, shrink taxon reference centroids toward nomenclatural type medoids in proportion to effective type sample size (ICN Art. 7.2), and run both unsupervised Gaussian Mixture Modeling (`Morphotype_K1..Kn`) and supervised Canonical Discriminant Analysis and Pillai/Wilks MANOVA across EPA Level III Ecoregions.
-* **Indumentum-Blind Vision XAI and Confident Learning Audit (Step 05):** I extract foreground-pooled 768-dimensional `dinov2_vitb14_reg` patch embeddings from masked basal rosette crops, compute cosine similarity against weighted spherical type prototypes, and apply Cleanlab out-of-fold Confident Learning (Northcutt et al. 2021) to distinguish genuine taxonomic misidentifications from taphonomic drying artifacts and abaxial tomentum denudation.
+* **Taxonomic Authority Weighting and Nomenclatural Type Pinning (Step 01):** I harvest Darwin Core archives from GBIF and iDigBio, resolve *Senecio* and *Cineraria* basionyms, deduplicate exsiccatae series prior to image download, store sheets as lossless-calibrated WebP images, intersect coordinates with official US EPA Level III Ecoregions (Omernik & Griffith 2014), and classify determiners across a 4-tier authority hierarchy (`Tier_0_Type`, `Tier_1_Gold` monographers and protologue authors, `Tier_2_Silver` curated regional herbaria, and `Tier_3_Bronze` general collections). The harvester also retains 18th- and 19th-century nomenclatural type gatherings with county-level retro-georeferences or partial collection dates as permanent taxonomic anchors.
+* **LeafMachine3 ONNX Segmentation and Basal-Rosette Gatekeeping (Step 02):** I run [LeafMachine3](https://github.com/Gene-Weaver/LeafMachine3) (Weaver 2026) on `onnxruntime` for 9-class plant organ detection (`yolo26x_det_1280`), whole-sheet plant-versus-paper segmentation (`UNet++ v9` with `LLR_Hyst_KeepBlobs` color-likelihood paper cleanup), ensemble ruler classification and tick-lattice scale calibration anchored by a megapixel resolution prior (`lm3_mp_conversion_factor__sqrt_fit`, $R^2 = 0.905$), 3-class single-leaf instance segmentation (`yolo26x_seg_1024` separating `Leaf`, `Petiole`, and `Hole`), and 31-keypoint midvein and petiole pose tracking (`yolo26x_pose_640`). My *Packera* gatekeepers (`leaf_gatekeeper.py` and `organ_crown_metrics.py`) cluster multi-plant sheets via DBSCAN, estimate rosette crowns, select intact basal rosette leaves, bridge dissected pinnae along paper-cleaned rachises, reflect folded leaves across the 15-point midvein trace (`Tier_2_Reflected`), and export 120-vertex tip-up lamina outlines alongside 360-direction Euler Characteristic Transforms (ECT; Ayub et al. 2026).
+* **Type-Anchored Elliptic Fourier Analysis and Multivariate Morphometrics (Steps 03 to 04):** I decompose closed `Tier_1_Direct` basal leaf outlines using Elliptic Fourier Analysis (`Momocs::efourier`, calibrated to capture $\ge 99\%$ cumulative harmonic power), symmetrize bilateral leaf outlines (`Momocs::rm_asym`; Claude 2008), and aggregate leaves to Operational Taxonomic Unit (OTU) medians per plant individual. In Step 04, I estimate determiner error rates via an exogenous Dawid-Skene and Beta-Binomial Empirical Bayes model, test Klingenberg (2016) allometric slope homogeneity, shrink taxon reference centroids toward nomenclatural type medoids in proportion to effective type sample size (ICN Art. 7.2), and run both unsupervised Gaussian Mixture Modeling (`Morphotype_K1..Kn`) and supervised Canonical Discriminant Analysis and Pillai/Wilks MANOVA across EPA Level III Ecoregions.
+* **Foreground-Masked DINOv2 Vision XAI and Confident Learning Audit (Step 05):** I extract foreground-pooled 768-dimensional `dinov2_vitb14_reg` patch embeddings from masked basal rosette crops, compute cosine similarity against weighted spherical type prototypes, and apply Cleanlab out-of-fold Confident Learning (Northcutt et al. 2021) to identify candidate taxonomic misidentifications and separate them from taphonomic drying artifacts and abaxial tomentum variation.
 * **Fine-Grain Rhizosphere/Outcrop Niche Modeling and Integrative Triage (Steps 06 to 08):** I pair $1\text{ km}$ WorldClim bioclimatic variables with a cached $0\text{ to }15\text{ cm}$ rhizosphere and bedrock stack combining 50 m-buffered USDA-NRCS SSURGO map units (`ssurgo_rock_outcrop_pct`, `ssurgo_bedrock_depth_cm`), 30 m POLARIS probabilistic soil grids, 100 m SOLUS100 bedrock depth and rock fragment volume, $10\text{ to }30\text{ m}$ USGS 3DEP micro-topography, and USGS SGMC bedrock lithology, alongside circular Hopkins flowering phenology anomalies. I fit spatially blocked Random Forest and authority-weighted MaxEnt (`maxnet`) habitat suitability models, run partitioned climatic versus edaphic niche equivalency tests (Warren et al. 2008; Broennimann et al. 2012), and synthesize all modalities in a 5-stage hierarchical decision matrix (`v_integrative_triage_master`) and Leiden/Louvain graph clustering to delimit species complexes and flag candidate cryptic lineages or synonymies.
 
 ### Project Metadata
@@ -30,13 +28,13 @@ While *Packera dubia* serves as my primary focal species for eastern North Ameri
 
 The pipeline executes under a **Two-Tier Canonical Storage Architecture**:
 1. **Tier A: Canonical Shared Store (`data/` and `data/packera_pipeline.sqlite`):** Houses invariant Step 01 and Step 02 specimen records, WebP imagery (`data/raw_vouchers/`), organ masks and contours (`data/masks/`, `data/contours/`, `data/cropped_patches/`), environmental caches (`environmental_cache`, `environmental_rtree`), and DINOv2 embeddings (`dinov2_feature_cache`).
-2. **Tier B: Run-Scoped Analysis Directories (`runs/<RUN_ID>/` and `runs/latest`):** Registers each execution in `pipeline_runs`, populates `run_active_cohort`, symlinks shared Tier A image/mask assets without re-segmenting already completed sheets, and isolates all Step 03 to 08 tables, reports, rasters, and publication figures inside `runs/<RUN_ID>/`.
+2. **Tier B: Run-Scoped Analysis Directories (`runs/<RUN_ID>/` and `runs/latest`):** Registers each execution in `pipeline_runs`, populates `run_active_cohort`, links shared Tier A image and mask assets via symbolic links, and isolates all Step 03 to 08 tables, reports, rasters, and publication figures inside `runs/<RUN_ID>/`.
 
 | Step | Entrypoint & Helper Modules | Primary Inputs | Primary Outputs (SQLite & CSV/Figures) | Core Scientific Function |
 | :--- | :--- | :--- | :--- | :--- |
-| **01** | `scripts/pipeline/01_voucher_harvester.py`<br>`scripts/core/harvester.py`<br>`scripts/core/taxonomy_authority.py`<br>`scripts/core/epa_ecoregions.py` | GBIF & iDigBio APIs, `config/config.yaml`, US EPA Level III Ecoregion polygons | `vouchers`, `taxon_synonyms`, `data/tables/curated_vouchers.csv`, `data/raw_vouchers/*.webp` | Dynamic synonym expansion, pre-download exsiccatae deduplication, 3-layer determiner authority scoring, nomenclatural type rescue, and EPA Level III ecoregion assignment |
-| **02** | `scripts/pipeline/02_segment_and_extract.py`<br>`scripts/vision/lm3_inference_engines.py`<br>`scripts/vision/lm3_data_loader.py`<br>`scripts/vision/leaf_geometry_utils.py`<br>`scripts/vision/leaf_gatekeeper.py`<br>`scripts/vision/organ_crown_metrics.py`<br>`scripts/vision/step02_figures.py` | `curated_vouchers.csv`, `data/raw_vouchers/*.webp`, LeafMachine3 ONNX models | `plant_individuals`, `extracted_leaves`, `voucher_reproductive_phenology`, `extracted_leaf_manifest.csv`, `fig02a`, `fig02b` | LeafMachine3 ONNX detection (`yolo26x_det_1280`), UNet++ v9 paper cleanup, ruler lattice + MP scale calibration, 3-class `Leaf`/`Petiole`/`Hole` segmentation, 31-keypoint pose tracking, DBSCAN plant clustering, cauline/lobe rejection, rachis bridging, and 120-vertex tip-up contour + 360-direction ECT export |
-| **03** | `scripts/morphometrics/03_fourier_extractor.R`<br>`scripts/morphometrics/dissected_leaf_utils.R`<br>`scripts/morphometrics/fourier_parallel_utils.R` | `extracted_leaves.contour_xy_json`, `reports/Leaf_Momocs/momocs_outlines.json`, `Coordinates/*.h5` | `leaf_efa_harmonics`, `leaf_efa_harmonics.csv`, `fourier_pcs.csv`, `fig03` plates | Batch SQLite/Momocs tip-up contour ingestion, $\ge 99\%$ harmonic power calibration, bilateral symmetrization (`rm_asym`), type-exempt MCD outlier screening, and OTU median aggregation |
+| **01** | `scripts/pipeline/01_voucher_harvester.py`<br>`scripts/core/harvester.py`<br>`scripts/core/taxonomy_authority.py`<br>`scripts/core/epa_ecoregions.py` | GBIF & iDigBio APIs, `config/config.yaml`, US EPA Level III Ecoregion polygons | `vouchers`, `taxon_synonyms`, `data/tables/curated_vouchers.csv`, `data/raw_vouchers/*.webp` | Synonym expansion, pre-download exsiccatae deduplication, 3-layer determiner authority scoring, nomenclatural type retention, and EPA Level III ecoregion assignment |
+| **02** | `scripts/pipeline/02_segment_and_extract.py`<br>`scripts/vision/lm3_inference_engines.py`<br>`scripts/vision/lm3_data_loader.py`<br>`scripts/vision/leaf_geometry_utils.py`<br>`scripts/vision/leaf_gatekeeper.py`<br>`scripts/vision/organ_crown_metrics.py`<br>`scripts/vision/step02_figures.py` | `curated_vouchers.csv`, `data/raw_vouchers/*.webp`, LeafMachine3 ONNX models | `plant_individuals`, `extracted_leaves`, `voucher_reproductive_phenology`, `extracted_leaf_manifest.csv`, `fig02a`, `fig02b` | LeafMachine3 ONNX detection (`yolo26x_det_1280`), UNet++ v9 paper cleanup, ruler lattice + MP scale calibration, 3-class `Leaf`/`Petiole`/`Hole` segmentation, 31-keypoint pose tracking, DBSCAN plant clustering, basal rosette selection, rachis bridging, and 120-vertex tip-up contour + 360-direction ECT export |
+| **03** | `scripts/morphometrics/03_fourier_extractor.R`<br>`scripts/morphometrics/dissected_leaf_utils.R`<br>`scripts/morphometrics/fourier_parallel_utils.R` | `extracted_leaves.contour_xy_json`, `reports/Leaf_Momocs/momocs_outlines.json`, `Coordinates/*.h5` | `leaf_efa_harmonics`, `leaf_efa_harmonics.csv`, `fourier_pcs.csv`, `fig03` plates | Batch SQLite/Momocs tip-up contour ingestion, $\ge 99\%$ harmonic power calibration, bilateral symmetrization (`rm_asym`), type-anchored MCD outlier screening, and OTU median aggregation |
 | **04** | `scripts/morphometrics/04_gmm_morphotools.R`<br>`scripts/morphometrics/authority_weighting_utils.R`<br>`scripts/morphometrics/pub_figures_utils.R`<br>`scripts/morphometrics/pub_ecoregion_manova_utils.R` | `leaf_efa_harmonics`, `curated_vouchers.csv`, `voucher_reproductive_phenology` | `otu_morphometrics`, `morphometric_audit.csv`, `gmm_bayes_factors_summary.csv`, `fig04a`, `fig04b`, `fig04c` | Dawid-Skene + Beta-Binomial Empirical Bayes authority weighting, Klingenberg allometric testing, Art. 7.2 type-medoid shrinkage, Track 1 unsupervised GMM clustering, and Track 2 supervised EPA Level III Ecoregion CDA & MANOVA |
 | **05** | `scripts/analysis/05_cleanlab_vision_xai.py`<br>`scripts/analysis/vision_dissection_utils.py` | `rosettes_dense/`, `basal_leaves_raw/`, `otu_morphometrics` | `dinov2_feature_cache`, `vision_xai_audit`, `misidentified_vouchers_audit.csv`, `fig05` | Foreground-masked `dinov2_vitb14_reg` patch pooling, spherical type visual prototype cosine control, and Cleanlab out-of-fold Confident Learning label-noise audit |
 | **06** | `scripts/analysis/06_multimodal_spatial_rf.R`<br>`scripts/analysis/step06_phenology_ecotypes.R`<br>`scripts/analysis/step06_sdm_maxent.R`<br>`scripts/analysis/edaphic_fine_grain_utils.R` | `otu_morphometrics`, WorldClim, SSURGO, POLARIS, SOLUS100, 3DEP, SGMC | `environmental_cache`, `spatial_rf_predictions`, `multimodal_conflict_flags.csv`, `sdm_*.tif`, `fig06`, `fig06b` | $0\text{ to }15\text{ cm}$ rhizosphere and outcrop extraction, *locus classicus* ecological baseline control, Hopkins circular phenology anomalies, Spatial Block-CV Random Forest, MaxEnt (`maxnet`) ensemble SDMs, and niche equivalency tests |
@@ -51,11 +49,11 @@ flowchart TD
     B1 --> B2["Step 02: LeafMachine3 ONNX Segmentation & Pose Skeleton\n(yolo26x_det_1280 · UNet++ v9 LLR_Hyst_KeepBlobs · yolo26x_seg_1024 · yolo26x_pose_640)"]
     B2 --> B3["Step 02: Packera Basal-Rosette Gatekeeper & Dissected Rachis Bridging\n(leaf_gatekeeper.py · organ_crown_metrics.py · 120-Vertex Tip-Up Contours & 360-Dir ECT)"]
     B3 -->|"Per-Voucher SQLite Transaction"| DB
-    B3 -->|"Tip-Up Tier_1_Direct Outlines"| B4["Step 03: Closed-Contour EFA (>=99% Power), Symmetrization & OTU Medians\n(03_fourier_extractor.R · dissected_leaf_utils.R · Type MCD Immunity)"]
+    B3 -->|"Tip-Up Tier_1_Direct Outlines"| B4["Step 03: Closed-Contour EFA (>=99% Power), Symmetrization & OTU Medians\n(03_fourier_extractor.R · dissected_leaf_utils.R · Type MCD Anchoring)"]
     B4 -->|"leaf_efa_harmonics"| DB
     B4 --> B5["Step 04: Dawid-Skene Authority Weighting, Type-Medoid Shrinkage & Dual CDA/GMM\n(04_gmm_morphotools.R · authority_weighting_utils.R · pub_ecoregion_manova_utils.R)"]
     B5 -->|"otu_morphometrics"| DB
-    B3 -->|"Masked Basal Rosette Crops"| B6["Step 05: Indumentum-Blind DINOv2 Patch Pooling & Cleanlab Audit\n(05_cleanlab_vision_xai.py · Spherical Type Prototypes · Primary Type Immunity)"]
+    B3 -->|"Masked Basal Rosette Crops"| B6["Step 05: Foreground-Masked DINOv2 Patch Pooling & Cleanlab Audit\n(05_cleanlab_vision_xai.py · Spherical Type Prototypes · Type Anchoring)"]
     B6 -->|"dinov2_feature_cache & vision_xai_audit"| DB
     B5 & B6 --> B7["Step 06: 0 to 15 cm Rhizosphere/Outcrop Stack, Spatial RF & MaxEnt SDMs\n(06_multimodal_spatial_rf.R · step06_phenology_ecotypes.R · step06_sdm_maxent.R)"]
     B7 -->|"environmental_rtree & spatial_rf_predictions"| DB
@@ -76,7 +74,7 @@ Packera_dubia_morphometrics/
 │   └── skills/
 │       ├── pipeline-contract-audit/SKILL.md         # Cross-stage SQLite/CSV contract & CV guardrail verification
 │       └── write-in-my-voice/SKILL.md               # Writing DNA v5.2 voice & punctuation enforcement rules
-├── AGENTS.md                                        # Compact non-negotiable workspace invariants & module map
+├── AGENTS.md                                        # Compact workspace invariants & module map
 ├── README.md                                        # Operational guide, setup instructions & CLI reference
 ├── setup_leafmachine3.sh                            # Automated uv + LeafMachine3 ONNX model installer & doctor check
 ├── run_pipeline.sh                                  # Master run-scoped shell orchestrator (Steps 01 to 08)
@@ -109,7 +107,7 @@ Packera_dubia_morphometrics/
     │   ├── leaf_gatekeeper.py                       # Boundary continuity, dissected rachis bridging & 4-tier leaf routing
     │   ├── organ_crown_metrics.py                   # DBSCAN plant clustering, rosette crown estimation & petiole/scape metrics
     │   ├── capitulum_phenology_classifier.py        # 3-tier reproductive anthesis staging & capitulum macro-metrics
-    │   └── step02_figures.py                        # Step 02 QC distribution & dynamic taxon silhouette montage plates
+    │   └── step02_figures.py                        # Step 02 QC distribution & taxon silhouette montage plates
     ├── pipeline/
     │   ├── 01_voucher_harvester.py                  # Step 01 CLI entrypoint
     │   └── 02_segment_and_extract.py                # Step 02 CLI entrypoint & wave-pipelined coordinator
@@ -119,7 +117,7 @@ Packera_dubia_morphometrics/
     │   ├── authority_weighting_utils.R              # Dawid-Skene & Beta-Binomial Empirical Bayes determiner weighting
     │   ├── dissected_leaf_utils.R                   # Dissection index, harmonic power calibration & regime-stratified MCD
     │   ├── fourier_parallel_utils.R                 # Parallel EFA harmonic extraction workers
-    │   ├── pub_figures_utils.R                      # Core ordination, dynamic taxon palettes & Step 03 to 04 figure generators
+    │   ├── pub_figures_utils.R                      # Core ordination, taxon palettes & Step 03 to 04 figure generators
     │   ├── pub_ecoregion_manova_utils.R             # Track 2 supervised EPA Level III Ecoregion CDA & MANOVA audit suite
     │   └── pub_synthesis_plates.R                   # North American basemaps, pure-R GMM EM solver & Steps 06 to 08 plates
     ├── analysis/
@@ -138,9 +136,9 @@ Packera_dubia_morphometrics/
 
 ### 1. Windows WSL 2 Storage and GPU Prerequisites (Windows Users Only)
 
-If you run this pipeline on Windows 10 or Windows 11, run it inside **WSL 2 (Ubuntu 22.04 LTS or newer)** and store the repository on the native Linux `ext4` filesystem (`~/Packera_dubia_morphometrics`), never inside `/mnt/c/`. SQLite WAL concurrency and high-throughput raster/image I/O are 10 to 20 times faster on native `ext4` than across the Windows-to-Linux `/mnt/c/` bridge.
+On Windows 10 or Windows 11, run the pipeline inside **WSL 2 (Ubuntu 22.04 LTS or newer)** and store the repository on the native Linux `ext4` filesystem (`~/Packera_dubia_morphometrics`) for high-speed SQLite WAL concurrency and raster I/O.
 
-Install the Windows NVIDIA driver ($\ge 528.33$ on Windows, or $\ge 525.60$ on native Linux) and verify that `nvidia-smi` prints your GPU table inside WSL 2. Do not install a separate CUDA toolkit inside Ubuntu, as [LeafMachine3](https://github.com/Gene-Weaver/LeafMachine3) installs pinned CUDA runtime wheels directly via `uv.lock`.
+Install the Windows NVIDIA driver ($\ge 528.33$ on Windows, or $\ge 525.60$ on native Linux) and verify that `nvidia-smi` prints your GPU table inside WSL 2. [LeafMachine3](https://github.com/Gene-Weaver/LeafMachine3) installs its own pinned CUDA runtime wheels directly through `uv.lock`, so only the host NVIDIA driver is required.
 
 ### 2. System Packages and Primary Python Environment (`.venv`)
 
@@ -182,28 +180,28 @@ python main.py check-env
 # 0. Bootstrap or synchronize existing CSV manifests and contours into data/packera_pipeline.sqlite
 ./run_pipeline.sh --ingest-db-only
 
-# 1. Default zero-flag Eastern North American genus-wide run
-#    Dynamically discovers all Packera species in Eastern NA (>= 3 georeferenced records east of -106.65 W)
-#    plus un-georeferenced historical nomenclatural types, creating runs/run_<YYYYMMDD_HHMMSS>/ and runs/latest:
+# 1. Default Eastern North American genus-wide run
+#    Harvests and evaluates all Packera species in Eastern NA (>= 3 georeferenced records east of -106.65 W)
+#    plus historical nomenclatural types, creating runs/run_<YYYYMMDD_HHMMSS>/ and runs/latest:
 ./run_pipeline.sh
 
-# 2. Targeted taxon subset mode (analyzes strictly the named species with zero hardcoded defaults)
+# 2. Targeted taxon subset mode (harvests and analyzes the specified Packera species)
 ./run_pipeline.sh --taxon "Packera dubia" "Packera aurea" "Packera paupercula" "Packera glabella"
 
 # 3. Custom named run with explicit CPU worker threads and GPU batch size
 ./run_pipeline.sh --run-id packera_eastern_rev1 --threads 12 --gpu-batch-size 16
 
-# 4. Resume an existing run from any step (Steps 2 to 8 automatically skip Step 01 harvest and seed from data/)
+# 4. Resume an existing run from a downstream step (seeds active cohort from data/)
 ./run_pipeline.sh --run-id packera_eastern_rev1 --start-step 3
 
 # 5. Strategy 1: Focal Taxon + Cascading Outgroup Reference Anchors (default --gold-anchors 30)
 #    Retains all focal-taxon vouchers plus up to 30 Type/Gold/Silver/Bronze anchors per outgroup congener
-#    for Steps 04 to 06 calibration, then filters Step 07 triage reports strictly to the focal taxon:
+#    for Steps 04 to 06 calibration, then focuses Step 07 triage reports on the focal taxon:
 ./run_pipeline.sh --focal-taxon "Packera dubia" --gold-anchors 30
 
-# 6. Strategy 2: Pure Intraspecific Delimitation Mode (single species, zero outgroups)
+# 6. Strategy 2: Intraspecific Delimitation Mode (single-species morphotype and ecotype evaluation)
 #    Tests for cryptic lineages, cytotypes, and granite-flatrock ecotypes within a single species
-#    using label-blind GMM morphotypes (Morphotype_K1..Kn) and EPA Level III Ecoregions:
+#    using unsupervised GMM morphotypes (Morphotype_K1..Kn) and EPA Level III Ecoregions:
 ./run_pipeline.sh --focal-taxon "Packera dubia" --intraspecific-mode
 
 # 7. Continent-wide North American expansion across the US, Canada, and Mexico
@@ -224,20 +222,20 @@ Rscript scripts/analysis/08_discover_taxon_complexes.R \
 | :--- | :--- | :--- | :--- |
 | `--run-id` | `<STRING>` | `run_<TIMESTAMP>` | Creates or resumes an isolated run directory at `runs/<RUN_ID>/` and updates the `runs/latest` symlink |
 | `--db` | `<PATH>` | `data/packera_pipeline.sqlite` | Path to the shared transactional SQLite WAL database |
-| `--start-step` | `<1..8>` | `1` | Starts or resumes execution at Step `1` through `8` (`>= 2` skips Step 01 harvest and seeds from `data/`) |
-| `--force` | *(flag)* | `false` | Forces re-execution of the active steps and overwrites cached run artifacts |
+| `--start-step` | `<1..8>` | `1` | Starts or resumes execution at Step `1` through `8` (`>= 2` seeds the active cohort from `data/`) |
+| `--force` | *(flag)* | `false` | Forces re-execution of the active steps and refreshes cached run outputs |
 | `-j`, `--threads` | `<INT>` | Auto-detected | Caps CPU worker threads across Python and R stages (`PACKERA_MAX_WORKERS`) |
 | `--gpu-batch-size` | `<INT>` | `10` (CUDA) / `8` (CPU) | Sets GPU inference batch size for Step 02 segmentation and Step 05 DINOv2 embedding extraction |
-| `--limit` | `<INT>` | None (all vouchers) | Caps the maximum number of vouchers processed during Step 02 segmentation |
-| `--taxon` | `"<Sp1>" "<Sp2>" ...` | `[]` (dynamic genus-wide) | Restricts harvesting and downstream analysis strictly to the specified *Packera* binomials |
-| `--focal-taxon` | `"<Binomial>"` | None | Sets the primary focal species for Strategy 1 outgroup anchoring or Strategy 2 intraspecific mode |
-| `--exclude-taxon` | `"<Sp1>" "<Sp2>" ...` | `[]` | Excludes specified taxa from the active run cohort and dynamically remaps Step 05 class indices to `0 to K-1` |
+| `--limit` | `<INT>` | All vouchers | Caps the maximum number of vouchers processed during Step 02 segmentation |
+| `--taxon` | `"<Sp1>" "<Sp2>" ...` | Genus-wide | Restricts harvesting and downstream analysis to the specified *Packera* binomials |
+| `--focal-taxon` | `"<Binomial>"` | All active taxa | Sets the primary focal species for Strategy 1 outgroup anchoring or Strategy 2 intraspecific mode |
+| `--exclude-taxon` | `"<Sp1>" "<Sp2>" ...` | None | Excludes specified taxa from the active run cohort and remaps Step 05 class indices to `0 to K-1` |
 | `--gold-anchors` | `<INT>` | `30` | Maximum number of cascading Type/Gold/Silver/Bronze reference anchors retained per outgroup taxon |
-| `--intraspecific-mode` | *(flag)* | `false` | Evaluates label-blind GMM morphotypes (`Morphotype_K1..Kn`) and ecoregional ecotypes within a single focal taxon |
-| `--geographic-scope` | `eastern_na` \| `north_america` \| `global` | `eastern_na` | Controls geographic filtering (`eastern_na` enforces `[-106.65, -50.0]` longitude bounds and $\ge 3$ Eastern NA records while rescuing un-georeferenced types) |
+| `--intraspecific-mode` | *(flag)* | `false` | Evaluates unsupervised GMM morphotypes (`Morphotype_K1..Kn`) and ecoregional ecotypes within a single focal taxon |
+| `--geographic-scope` | `eastern_na` \| `north_america` \| `global` | `eastern_na` | Sets geographic scope (`eastern_na` applies `[-106.65, -50.0]` longitude bounds and $\ge 3$ Eastern NA records while retaining historical nomenclatural types) |
 | `--countries` | `"US,CA,MX"` | `"US"` | Comma-separated ISO country codes queried during GBIF/iDigBio harvesting |
-| `--spatial-thin-km` | `<FLOAT>` | `0` (disabled) | Minimum spatial thinning distance in kilometers (`Tier_0_Type` and `Tier_1_Gold` vouchers are unconditionally exempt) |
-| `--exclude-misidentified` | *(flag)* | `false` | Filters out non-type vouchers flagged as misidentified in a prior run while preserving `Confirmed_Type_Control` and `Type_Synonymy_Candidate` sheets |
+| `--spatial-thin-km` | `<FLOAT>` | `0` | Minimum spatial thinning distance in kilometers for non-anchor collections while retaining all `Tier_0_Type` and `Tier_1_Gold` vouchers |
+| `--exclude-misidentified` | *(flag)* | `false` | Retains concordant vouchers alongside `Confirmed_Type_Control` and `Type_Synonymy_Candidate` sheets across iterative refinement runs |
 | `--ingest-db-only` | *(flag)* | `false` | Synchronizes existing CSV tables and contours on disk into `data/packera_pipeline.sqlite` and exits |
 | `--demo` | *(flag)* | `false` | Runs in ephemeral test isolation mode (`PACKERA_DEMO_MODE=1`) |
 
@@ -269,4 +267,4 @@ pytest scripts/tests/ -q
 
 ## License and Attribution
 
-Released under the MIT License (note that [LeafMachine3](https://github.com/Gene-Weaver/LeafMachine3) is distributed separately under the GNU Affero General Public License v3.0). When citing this pipeline or its underlying methods, please cite [docs/TAXONOMIC\_SOP.md](https://www.google.com/search?q=docs/TAXONOMIC_SOP.md), Weaver & Smith (2023), Weaver (2026), and Ayub et al. (2026).
+Released under the MIT License ([LeafMachine3](https://github.com/Gene-Weaver/LeafMachine3) is distributed under the GNU Affero General Public License v3.0). When citing this pipeline or its underlying methods, please cite [docs/TAXONOMIC\_SOP.md](https://www.google.com/search?q=docs/TAXONOMIC_SOP.md), Weaver & Smith (2023), Weaver (2026), and Ayub et al. (2026).

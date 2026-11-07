@@ -115,6 +115,34 @@ def download_file_with_progress(
         raise
 
 
+_CANONICAL_LM3_HF_URLS: Dict[str, tuple[str, str]] = {
+    "lm3_archival_detector__yolo26x_det_1280": (
+        "https://huggingface.co/phyloforfun/lm3_archival_detector__yolo26x_det_1280/resolve/a3c09585cb952b6388006684f9e2db460224739a/onnx/model.onnx",
+        "f87c866941b4cb9e6bf1d3ff801b49d9d5eb222bc48a40da6f49fd371333bf49",
+    ),
+    "lm3_plant_detector__yolo26x_det_1280": (
+        "https://huggingface.co/phyloforfun/lm3_plant_detector__yolo26x_det_1280/resolve/86fcde82e671ca025a9d3d8be09ebe861599851b/onnx/model.onnx",
+        "9f7d251cd650debbca7db59a1dbf87377386ab200256baa6f5d78f1a41a80966",
+    ),
+    "lm3_landmark_detector__yolo26x_pose_640_canonical": (
+        "https://huggingface.co/phyloforfun/lm3_landmark_detector__yolo26x_pose_640_canonical/resolve/736d2c8ce354111171a23961dd77239941a30899/onnx/model.onnx",
+        "2e840e0869110acdb48d8e0ce733dec72bf5ec4c4f5bf5d07c916075c2a8b227",
+    ),
+    "lm3_landmark_detector__yolo26x_pose_640": (
+        "https://huggingface.co/phyloforfun/lm3_landmark_detector__yolo26x_pose_640_canonical/resolve/736d2c8ce354111171a23961dd77239941a30899/onnx/model.onnx",
+        "2e840e0869110acdb48d8e0ce733dec72bf5ec4c4f5bf5d07c916075c2a8b227",
+    ),
+    "lm3_leaf_segmenter__yolo26x_seg_1024": (
+        "https://huggingface.co/phyloforfun/lm3_leaf_segmenter__yolo26x_seg_1024/resolve/b2a612c3e889146e7563666c094e2c0268df4f8f/onnx/model.onnx",
+        "7b8398e8a28594c636db3e9c1d591674cd7e5cc5bb8bd0dd432161b85086205c",
+    ),
+    "lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain": (
+        "https://huggingface.co/phyloforfun/lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain/resolve/e98803c53bcdd539d3ce02c39124bf986d542b20/onnx/model.onnx",
+        "119d4e0e650d7ece9c55460686bbfbc2461c8aa4df4b8996f54692a98eff3b42",
+    ),
+}
+
+
 def ensure_model_weights(
     config: Union[PipelineConfig, Dict[str, Any]],
     force: bool = False,
@@ -143,6 +171,15 @@ def ensure_model_weights(
         weights_url = models_dict.get("pcd_weights_url", "")
         weights_sha256 = models_dict.get("pcd_weights_sha256", "")
 
+    if not force and not weights_path.exists() and weights_path.stem.startswith("lm3_"):
+        try:
+            from scripts.vision.configure_leafmachine3 import resolve_lm3_weights
+            resolved_cand = resolve_lm3_weights(weights_path.name, explicit_path=weights_path)
+            if resolved_cand.exists() and resolved_cand.is_file() and resolved_cand.stat().st_size > 0:
+                weights_path = resolved_cand
+        except Exception:
+            pass
+
     if not force and weights_path.exists() and weights_path.is_file() and weights_path.stat().st_size > 0:
         if weights_sha256 and weights_sha256.strip():
             actual_sha256 = compute_sha256(weights_path)
@@ -156,6 +193,11 @@ def ensure_model_weights(
             f"({weights_path.stat().st_size / (1024 * 1024):.2f} MB)"
         )
         return weights_path
+
+    if not weights_url and weights_path.stem in _CANONICAL_LM3_HF_URLS:
+        weights_url, default_sha = _CANONICAL_LM3_HF_URLS[weights_path.stem]
+        if not weights_sha256:
+            weights_sha256 = default_sha
 
     if not weights_url:
         raise ValueError(
