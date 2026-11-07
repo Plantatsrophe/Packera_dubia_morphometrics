@@ -36,7 +36,8 @@ DEFAULT_PCD_WEIGHTS_NAME = "LeafPriority.pt"
 DEFAULT_SEG_MODEL_NAME = "Packera_LeafPriority"
 DEFAULT_PCD_CONFIDENCE = 0.65
 DEFAULT_NMS_THRESH = 0.75
-DEFAULT_SUBDIVISION_STEPS = 5
+DEFAULT_SUBDIVISION_STEPS = 6
+DEFAULT_SUBDIVISION_NUM_POINTS = 2304
 DEFAULT_MIN_LEAF_AREA = 500
 DEFAULT_SEG_CONFIDENCE = 0.70
 DEFAULT_EFD_ORDER = 40
@@ -126,7 +127,8 @@ leafmachine:
     minimum_confidence_threshold: 0.7
     NMS_thresh: 0.75
     min_leaf_area: 500
-    pointrend_subdivision_steps: 5
+    pointrend_subdivision_steps: 6
+    pointrend_subdivision_num_points: 2304
     overlay_background_color: black
     overlay_dpi: 300
     overlay_line_width: 1
@@ -311,6 +313,7 @@ def generate_high_performance_config(
     pcd_confidence: Optional[float] = None,
     nms_thresh: float = DEFAULT_NMS_THRESH,
     pointrend_subdivision_steps: int = DEFAULT_SUBDIVISION_STEPS,
+    pointrend_subdivision_num_points: int = DEFAULT_SUBDIVISION_NUM_POINTS,
     min_leaf_area: int = DEFAULT_MIN_LEAF_AREA,
     seg_confidence: float = DEFAULT_SEG_CONFIDENCE,
     batch_size: Optional[int] = None,
@@ -395,6 +398,7 @@ def generate_high_performance_config(
     seg["minimum_confidence_threshold"] = seg_confidence
     seg["NMS_thresh"] = nms_thresh
     seg["pointrend_subdivision_steps"] = pointrend_subdivision_steps
+    seg["pointrend_subdivision_num_points"] = pointrend_subdivision_num_points
     seg["min_leaf_area"] = min_leaf_area
     seg["minimum_leaf_area_px"] = min_leaf_area
     seg["calculate_elliptic_fourier_descriptors"] = True

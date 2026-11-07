@@ -33,6 +33,7 @@ from scripts.vision.configure_leafmachine2 import (
     DEFAULT_NUM_WORKERS,
     DEFAULT_PCD_CONFIDENCE,
     DEFAULT_SEG_MODEL_NAME,
+    DEFAULT_SUBDIVISION_NUM_POINTS,
     DEFAULT_SUBDIVISION_STEPS,
     generate_high_performance_config,
     get_default_lm2_template,
@@ -103,7 +104,10 @@ class TestConfigureLeafMachine2(unittest.TestCase):
         self.assertEqual(seg["segmentation_model"], DEFAULT_SEG_MODEL_NAME)
         self.assertEqual(seg["segmentation_type"], "Detectron2_PointRend")
         self.assertTrue(seg["use_pointrend"])
+        self.assertEqual(DEFAULT_SUBDIVISION_STEPS, 6)
+        self.assertEqual(DEFAULT_SUBDIVISION_NUM_POINTS, 2304)
         self.assertEqual(seg["pointrend_subdivision_steps"], DEFAULT_SUBDIVISION_STEPS)
+        self.assertEqual(seg["pointrend_subdivision_num_points"], DEFAULT_SUBDIVISION_NUM_POINTS)
         self.assertTrue(seg["calculate_elliptic_fourier_descriptors"])
         self.assertEqual(seg["elliptic_fourier_descriptor_order"], 40)
 

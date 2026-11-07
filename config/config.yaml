@@ -150,6 +150,8 @@ leaf_segmentation:
   treat_leaflet_as_leaf_whole: false
   use_efds_for_png_masks: false
   do_apply_landmarks: false
+  pointrend_subdivision_steps: 6
+  pointrend_subdivision_num_points: 2304
 
 # Phase 3 & 4: Elliptic Fourier Analysis & Statistical Morphometrics (Momocs / MorphoTools2)
 # Cohort-adaptive mode dynamically calibrates EFD harmonic order (A1..D24, >=99% cumulative

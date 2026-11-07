@@ -100,6 +100,7 @@ from scripts.vision.lm2_data_loader import (
 from scripts.vision.lm2_geometry_utils import (
     approximate_petiole_and_scape_metrics,
     BoundaryContinuityResult,
+    bridge_dissected_rachis_components,
     check_boundary_tissue_continuity,
     classify_and_route_leaf,
     cluster_plant_individuals,
@@ -605,11 +606,15 @@ class PointRendInferenceEngine:
         self,
         weights_path: Union[str, Path],
         device: str = "cuda",
-        score_thresh: float = 0.50
+        score_thresh: float = 0.50,
+        subdivision_steps: int = 6,
+        subdivision_num_points: int = 2304,
     ) -> None:
         self.weights_path = Path(weights_path)
         self.device = device if (device == "cuda" and torch_cuda_available()) else "cpu"
         self.score_thresh = score_thresh
+        self.subdivision_steps = int(subdivision_steps)
+        self.subdivision_num_points = int(subdivision_num_points)
         self.predictor = None
         self.model = None
         self.cfg = None
@@ -660,6 +665,9 @@ class PointRendInferenceEngine:
         cfg.MODEL.WEIGHTS = str(self.weights_path.resolve())
         cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = self.score_thresh
         cfg.MODEL.DEVICE = self.device
+        if hasattr(cfg.MODEL, "POINT_HEAD"):
+            cfg.MODEL.POINT_HEAD.SUBDIVISION_STEPS = int(self.subdivision_steps)
+            cfg.MODEL.POINT_HEAD.SUBDIVISION_NUM_POINTS = int(self.subdivision_num_points)
 
         model = build_model(cfg)
         model.eval()
@@ -1117,6 +1125,48 @@ def _extract_native_lm2_petiole_anchor(
     }
 
 
+def _merge_and_bridge_dissected_crop_mask(
+    best_mask: np.ndarray,
+    leaf_cands: Sequence[Tuple[float, int, Any, np.ndarray]],
+    petiole_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    Reconstructs a unified dissected leaf silhouette when PointRend predicts lateral pinna
+    pairs as either:
+      (a) disconnected foreground components within `best_mask`, OR
+      (b) secondary `Class 0` (`leaf`) predictions in `leaf_cands[1:]` that are spatially
+          disjoint from `best_mask` and anchored to the same native `petiole_mask` (`Class 1`)
+          rachis stalk.
+    Fast no-op (`0` pixels modified) when `best_mask` is a single connected component and
+    no co-predicted pinna lobes share the petiole/rachis.
+    """
+    if best_mask is None or best_mask.size == 0:
+        return best_mask
+
+    merged = best_mask
+    best_area = int(np.count_nonzero(best_mask))
+    if len(leaf_cands) > 1 and petiole_mask is not None and petiole_mask.shape[:2] == best_mask.shape[:2]:
+        if int(np.count_nonzero(petiole_mask)) > 0 and best_area > 0:
+            k_pet = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+            pet_dil = cv2.dilate((petiole_mask > 0).astype(np.uint8) * 255, k_pet, iterations=1) > 0
+            best_bool = best_mask > 0
+            if np.any(best_bool & pet_dil):
+                merged = best_mask.copy()
+                for c_score, c_area, _c_bbox, c_mask in leaf_cands[1:]:
+                    if float(c_score) < 0.45 or c_mask is None or c_mask.shape[:2] != best_mask.shape[:2]:
+                        continue
+                    if c_area < max(16, int(0.025 * best_area)) or c_area > int(0.85 * best_area):
+                        continue
+                    c_bool = c_mask > 0
+                    inter = int(np.count_nonzero(best_bool & c_bool))
+                    if float(inter) / float(max(1, min(c_area, best_area))) >= 0.10:
+                        continue
+                    if np.any(c_bool & pet_dil):
+                        merged = np.maximum(merged, (c_bool.astype(np.uint8) * 255))
+
+    return bridge_dissected_rachis_components(merged, petiole_mask=petiole_mask)
+
+
 # =============================================================================
 # Core Pipeline Execution Runner
 # =============================================================================
@@ -1276,10 +1326,15 @@ class SegmentAndExtractPipeline:
         )
 
         # Stage 2 Cropped Leaf PointRend Segmentation Engine
+        _seg_cfg_lm2 = self.lm2_config.get("leafmachine", {}).get("leaf_segmentation", {})
+        _pr_steps = int(_seg_cfg_lm2.get("pointrend_subdivision_steps", 6))
+        _pr_pts = int(_seg_cfg_lm2.get("pointrend_subdivision_num_points", 2304))
         self.model_engine = PointRendInferenceEngine(
             weights_path=self.model_weights,
             device=self.device,
-            score_thresh=self.score_thresh
+            score_thresh=self.score_thresh,
+            subdivision_steps=_pr_steps,
+            subdivision_num_points=_pr_pts,
         )
         self.is_stock_pointrend = is_stock_pointrend_weights(self.model_weights)
         self.sam2_refine = bool(sam2_refine)
@@ -1492,7 +1547,7 @@ class SegmentAndExtractPipeline:
         s1_plant_boxes: List[Tuple[int, int, int, int]] = []
         rosette_bbox_fallback_used = False
         rejected_leaflet_delta = 0
-        crop_pad = 0.06 if scale_f > 0.4 else 0.12
+        crop_pad = 0.12
 
         if not self.enable_geometric_qc:
             # 100% Raw Unconstrained LeafMachine2 Two-Stage Handshake:
@@ -1500,12 +1555,16 @@ class SegmentAndExtractPipeline:
             #   from `1: leaf_partial`, `2: leaflet`, `3..7: reproductive`, `8: specimen`,
             #   `9: roots`, and `10: wood` (stems). Unpack `leaf_whole` boxes directly to
             #   Stage 2 PointRend with zero bounding-box size or vertical-position cutoffs.
+            #   When YOLOv5 finds zero `0: leaf_whole` detections on a sheet (common on deeply
+            #   pinnatisect/bipinnatisect taxa such as Packera glabella where dissected blades
+            #   are classified as `1: leaf_partial`), automatically rescue `1: leaf_partial`.
             seg_partial_cfg = bool(
                 self.lm2_config.get("leafmachine", {})
                 .get("leaf_segmentation", {})
                 .get("segment_partial_leaves", False)
             )
-            raw_s1_leaf_classes = (0, 1) if seg_partial_cfg else (0,)
+            has_class0 = any(int(it[-1]) == 0 for it in stage1_detections)
+            raw_s1_leaf_classes = (0, 1) if (seg_partial_cfg or not has_class0) else (0,)
             for s1_item in stage1_detections:
                 if len(s1_item) == 4:
                     s1_bbox, s1_mask, s1_score, s1_cls = s1_item
@@ -1856,9 +1915,11 @@ class SegmentAndExtractPipeline:
                         petiole_cands.sort(key=lambda c: (c[0], c[1]), reverse=True)
                         best_petiole_mask = petiole_cands[0][3]
 
-                    m_raw = best_mask
-                    if (not _sam2_already_done) and self._should_refine_with_sam2(best_mask):
-                        m_raw = self.sam2_refiner.refine_crop_mask(crop_bgr, best_mask)
+                    m_raw = _merge_and_bridge_dissected_crop_mask(
+                        best_mask, leaf_cands, petiole_mask=best_petiole_mask
+                    )
+                    if (not _sam2_already_done) and self._should_refine_with_sam2(m_raw):
+                        m_raw = self.sam2_refiner.refine_crop_mask(crop_bgr, m_raw)
 
                     fg_area = int(np.count_nonzero(m_raw))
                     if fg_area <= 0:
@@ -1935,11 +1996,14 @@ class SegmentAndExtractPipeline:
                     else:
                         min_blade_area = 20
                     blade_candidates = []
+                    petiole_cands_qc = []
                     for _pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
-                        if _pr_cls != 0:
-                            continue
                         fg_area = int(np.count_nonzero(pr_mask))
-                        if fg_area >= min_blade_area:
+                        if fg_area <= 0:
+                            continue
+                        if _pr_cls == 1:
+                            petiole_cands_qc.append((float(pr_score), fg_area, _pr_bbox, pr_mask))
+                        elif _pr_cls == 0 and fg_area >= min_blade_area:
                             blade_candidates.append((fg_area, float(pr_score), _pr_bbox, pr_mask))
 
                     if not blade_candidates:
@@ -1948,10 +2012,17 @@ class SegmentAndExtractPipeline:
                     # Select ONLY the single best mask per Stage 1 box (highest area * pr_score)
                     blade_candidates.sort(key=lambda c: (c[0] * c[1], c[0]), reverse=True)
                     best_area, best_score, best_bbox, best_mask = blade_candidates[0]
+                    best_petiole_qc: Optional[np.ndarray] = None
+                    if petiole_cands_qc:
+                        petiole_cands_qc.sort(key=lambda c: (c[0], c[1]), reverse=True)
+                        best_petiole_qc = petiole_cands_qc[0][3]
 
-                    m_refined = best_mask
-                    if (not _sam2_already_done) and self._should_refine_with_sam2(best_mask):
-                        m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, best_mask)
+                    qc_leaf_cands = [(c[1], c[0], c[2], c[3]) for c in blade_candidates]
+                    m_refined = _merge_and_bridge_dissected_crop_mask(
+                        best_mask, qc_leaf_cands, petiole_mask=best_petiole_qc
+                    )
+                    if (not _sam2_already_done) and self._should_refine_with_sam2(m_refined):
+                        m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, m_refined)
 
                     # Trim petiole tail directly on the compact crop mask using sheet_shape for high-res scaling
                     m_trimmed, trim_meta = trim_petiole_tail(
@@ -2739,7 +2810,7 @@ class SegmentAndExtractPipeline:
             inst.circularity = float(raw_desc["circularity"] if is_trusted_lm2_whole else proc_desc["circularity"])
             inst.extent = float(max(raw_desc["extent"], proc_desc["extent"]))
 
-            min_req_extent = 0.20 if is_trusted_lm2_whole else self.min_extent
+            min_req_extent = 0.16 if (is_trusted_lm2_whole or bool(routing_res.is_dissected)) else self.min_extent
             if inst.extent < min_req_extent:
                 _telem_deltas["rejected_solidity_extent"] += 1
                 inst.assigned_tier = "rejected"
@@ -2965,6 +3036,7 @@ class SegmentAndExtractPipeline:
                     or max(m_bw, m_bh) < min_dim_px
                     or (
                         not is_trusted_lm2_whole
+                        and not bool(is_dissected)
                         and (min(m_bw, m_bh) / max(m_bw, m_bh, 1)) > 0.78
                         and inst.solidity < 0.84
                     )
@@ -4422,7 +4494,11 @@ def _is_valid_smooth_closed_mask(m_path_str: Any, out_dir: Path) -> bool:
         return False
     circ = (4.0 * math.pi * area_c) / (perim_c * perim_c)
     if circ < 0.12:
-        return False
+        hull_c = cv2.convexHull(main_cnt)
+        hull_area_c = float(cv2.contourArea(hull_c))
+        sol_c = area_c / max(hull_area_c, 1.0)
+        if not (circ >= 0.025 and sol_c < 0.75 and is_botanical_dissection(main_cnt, solidity=sol_c, check_solidity_range=False)):
+            return False
     return True
 
 
@@ -5037,10 +5113,22 @@ def generate_step02_publication_figures(
                 f"fig02b: {n_missing_assets} / {len(sp_all)} {sp_name} Tier_1_Direct leaves have no resolvable mask/contour asset on disk."
             )
         sp_all = sp_all[sp_all["asset_ok"]].copy()
+        is_diss_col = (
+            sp_all["is_dissected"].astype(str).str.lower().isin(["true", "1", "t", "yes"])
+            if "is_dissected" in sp_all.columns
+            else (sp_all["sol_val"] < 0.72)
+        )
         sp_hq = sp_all[
-            (sp_all["ucs_val"] >= 0.88)
-            & (sp_all["sol_val"] >= 0.80)
-            & (sp_all["sol_val"] < 0.995)
+            (
+                (sp_all["ucs_val"] >= 0.88)
+                & (sp_all["sol_val"] >= 0.80)
+                & (sp_all["sol_val"] < 0.995)
+            )
+            | (
+                (sp_all["ucs_val"] >= 0.80)
+                & (sp_all["sol_val"] >= 0.18)
+                & is_diss_col
+            )
         ].copy()
         sp_hq["mask_valid"] = [
             _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()

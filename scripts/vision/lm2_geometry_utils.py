@@ -1075,6 +1075,210 @@ def detect_folded_leaf(
     return default_res
 
 
+def bridge_dissected_rachis_components(
+    mask: np.ndarray,
+    petiole_mask: Optional[np.ndarray] = None,
+    max_gap_fraction: float = 0.22,
+) -> np.ndarray:
+    """
+    Reconstructs micro-severed rachis internodes in multi-component dissected leaf masks.
+
+    In deeply pinnatisect/bipinnatisect leaves (e.g. Packera glabella), narrow or winged
+    rachis segments between the terminal lobe and lateral pinna pairs are occasionally
+    fragmented into 2+ foreground islands by PointRend thresholding (or assigned to
+    PointRend class 1 `petiole` while the pinna lobes are assigned to class 0 `leaf`).
+
+    Invariants:
+      - Fast no-op (`0` pixels modified) whenever `mask` already has <= 1 foreground
+        connected component (`num_labels <= 2`).
+      - Label-blind: relies purely on component area, longitudinal axis collinearity,
+        border-clipping exclusion, and anatomical rachis-spine bridging so outer
+        inter-lobe sinuses remain open concavity defects.
+    """
+    if mask is None or mask.size == 0:
+        return mask
+
+    mask_u8 = (mask > 0).astype(np.uint8) * 255
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        (mask_u8 > 0).astype(np.uint8), connectivity=8
+    )
+    if num_labels <= 2:
+        return mask.copy()
+
+    h, w = mask_u8.shape[:2]
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    main_id = 1 + int(np.argmax(areas))
+    main_area = int(stats[main_id, cv2.CC_STAT_AREA])
+    if main_area < 25:
+        return mask.copy()
+
+    min_pinna_area = max(14, int(0.012 * main_area))
+    cand_ids: List[int] = [main_id]
+    for cid in range(1, num_labels):
+        if cid == main_id:
+            continue
+        c_area = int(stats[cid, cv2.CC_STAT_AREA])
+        if c_area < min_pinna_area:
+            continue
+        cx0 = int(stats[cid, cv2.CC_STAT_LEFT])
+        cy0 = int(stats[cid, cv2.CC_STAT_TOP])
+        cw0 = int(stats[cid, cv2.CC_STAT_WIDTH])
+        ch0 = int(stats[cid, cv2.CC_STAT_HEIGHT])
+        touches_border = (cx0 <= 1) or (cy0 <= 1) or (cx0 + cw0 >= w - 1) or (cy0 + ch0 >= h - 1)
+        if touches_border:
+            comp_bool = labels == cid
+            border_px = (
+                int(np.count_nonzero(comp_bool[:, :2]))
+                + int(np.count_nonzero(comp_bool[:, max(0, w - 2) :]))
+                + int(np.count_nonzero(comp_bool[:2, :]))
+                + int(np.count_nonzero(comp_bool[max(0, h - 2) :, :]))
+            )
+            has_pet_overlap = False
+            if petiole_mask is not None and petiole_mask.shape[:2] == mask_u8.shape[:2]:
+                has_pet_overlap = int(np.count_nonzero(comp_bool & (petiole_mask > 0))) >= max(4, int(0.15 * c_area))
+            if border_px >= max(6, int(0.08 * max(cw0, ch0))) and not has_pet_overlap:
+                continue
+        cand_ids.append(cid)
+
+    if len(cand_ids) <= 1:
+        return mask.copy()
+
+    union_mask = np.isin(labels, cand_ids)
+    ys_u, xs_u = np.where(union_mask)
+    if len(xs_u) < 20:
+        return mask.copy()
+
+    pts_u = np.column_stack([xs_u, ys_u]).astype(np.float32)
+    if petiole_mask is not None and petiole_mask.shape[:2] == mask_u8.shape[:2]:
+        ys_p, xs_p = np.where(petiole_mask > 0)
+        if len(xs_p) >= 8:
+            pts_fit = np.vstack([pts_u, np.column_stack([xs_p, ys_p]).astype(np.float32)])
+        else:
+            pts_fit = pts_u
+    else:
+        pts_fit = pts_u
+
+    line_params = cv2.fitLine(pts_fit, cv2.DIST_L2, 0, 0.01, 0.01)
+    vx, vy, x0, y0 = [float(v[0]) for v in line_params]
+    u_vec = np.array([vx, vy], dtype=np.float64)
+    n_vec = np.array([-vy, vx], dtype=np.float64)
+
+    proj_u = (pts_u[:, 0] - x0) * vx + (pts_u[:, 1] - y0) * vy
+    norm_u = (pts_u[:, 0] - x0) * (-vy) + (pts_u[:, 1] - y0) * vx
+    s_min, s_max = float(np.min(proj_u)), float(np.max(proj_u))
+    major_span = max(1.0, s_max - s_min)
+    minor_span = max(1.0, float(np.max(norm_u) - np.min(norm_u)))
+    max_gap_px = max(16.0, float(max_gap_fraction) * max(major_span, minor_span))
+    max_axis_offset = max(20.0, 0.45 * max(major_span, minor_span))
+
+    # Filter secondary components whose centroids lie within the leaf's lateral envelope
+    valid_sec_ids: List[int] = []
+    for cid in cand_ids[1:]:
+        cx_c, cy_c = float(centroids[cid][0]), float(centroids[cid][1])
+        perp_c = abs((cx_c - x0) * (-vy) + (cy_c - y0) * vx)
+        if perp_c <= max_axis_offset:
+            valid_sec_ids.append(cid)
+
+    if not valid_sec_ids:
+        return mask.copy()
+
+    bridged = np.where( np.isin(labels, [main_id] + valid_sec_ids), 255, 0 ).astype(np.uint8)
+    bridge_w = max(3, min(10, int(round(0.03 * minor_span))))
+
+    # If native PointRend petiole_mask overlaps the intra-lamina span between lobes, include its rachis pixels
+    if petiole_mask is not None and petiole_mask.shape[:2] == mask_u8.shape[:2]:
+        ys_pm, xs_pm = np.where(petiole_mask > 0)
+        if len(xs_pm) > 0:
+            s_pm = (xs_pm - x0) * vx + (ys_pm - y0) * vy
+            n_pm = np.abs((xs_pm - x0) * (-vy) + (ys_pm - y0) * vx)
+            in_rachis = (s_pm >= s_min - 4.0) & (s_pm <= s_max + 4.0) & (n_pm <= 0.25 * minor_span + 6.0)
+            if np.any(in_rachis):
+                bridged[ys_pm[in_rachis], xs_pm[in_rachis]] = 255
+
+    # Iteratively bridge any remaining disconnected valid components along the rachis spine
+    for _ in range(len(valid_sec_ids)):
+        n_cur, lbl_cur, st_cur, _ = cv2.connectedComponentsWithStats((bridged > 0).astype(np.uint8), connectivity=8)
+        if n_cur <= 2:
+            break
+        cur_main = 1 + int(np.argmax(st_cur[1:, cv2.CC_STAT_AREA]))
+        main_cnts, _ = cv2.findContours(
+            (lbl_cur == cur_main).astype(np.uint8) * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not main_cnts:
+            break
+        pts_main = np.vstack([c.reshape(-1, 2) for c in main_cnts]).astype(np.float64)
+        s_main = (pts_main[:, 0] - x0) * vx + (pts_main[:, 1] - y0) * vy
+        n_main = np.abs((pts_main[:, 0] - x0) * (-vy) + (pts_main[:, 1] - y0) * vx)
+
+        best_pair = None
+        best_dist = float("inf")
+        for cid in range(1, n_cur):
+            if cid == cur_main:
+                continue
+            if int(st_cur[cid, cv2.CC_STAT_AREA]) < min_pinna_area:
+                continue
+            c_cnts, _ = cv2.findContours(
+                (lbl_cur == cid).astype(np.uint8) * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            if not c_cnts:
+                continue
+            pts_c = np.vstack([c.reshape(-1, 2) for c in c_cnts]).astype(np.float64)
+            # Pairwise distances between pts_c and pts_main (subsampled if huge)
+            step_m = max(1, len(pts_main) // 200)
+            step_c = max(1, len(pts_c) // 120)
+            pm_sub = pts_main[::step_m]
+            pc_sub = pts_c[::step_c]
+            diff = pc_sub[:, None, :] - pm_sub[None, :, :]
+            dmat = np.hypot(diff[:, :, 0], diff[:, :, 1])
+            idx_flat = int(np.argmin(dmat))
+            ic, im = divmod(idx_flat, len(pm_sub))
+            d_min = float(dmat[ic, im])
+            if d_min < best_dist:
+                best_dist = d_min
+                best_pair = (pts_c, pc_sub[ic], pm_sub[im], d_min)
+
+        if best_pair is None or best_dist > max_gap_px:
+            break
+
+        pts_c, pt_c_direct, pt_m_direct, d_min = best_pair
+        # Determine whether to bridge directly or via the anatomical central rachis line
+        n_c_direct = abs((pt_c_direct[0] - x0) * (-vy) + (pt_c_direct[1] - y0) * vx)
+        if d_min <= 14.0 or n_c_direct <= 0.16 * minor_span:
+            p1 = (int(round(pt_c_direct[0])), int(round(pt_c_direct[1])))
+            p2 = (int(round(pt_m_direct[0])), int(round(pt_m_direct[1])))
+            cv2.line(bridged, p1, p2, 255, thickness=bridge_w)
+        else:
+            # Find inner rachis-facing base of the lateral pinna component
+            s_c = (pts_c[:, 0] - x0) * vx + (pts_c[:, 1] - y0) * vy
+            n_c = np.abs((pts_c[:, 0] - x0) * (-vy) + (pts_c[:, 1] - y0) * vx)
+            d_to_m = np.hypot(pts_c[:, 0] - pt_m_direct[0], pts_c[:, 1] - pt_m_direct[1])
+            in_idx = int(np.argmin(n_c + 0.20 * d_to_m))
+            pt_in = pts_c[in_idx]
+            s_in = float(s_c[in_idx])
+            pt_rachis = np.array([x0 + s_in * vx, y0 + s_in * vy], dtype=np.float64)
+            # Nearest rachis-aligned point on main component
+            rachis_score_m = np.abs(s_main - s_in) + 1.5 * n_main
+            m_idx = int(np.argmin(rachis_score_m))
+            pt_m_rachis = pts_main[m_idx]
+
+            p_in = (int(round(pt_in[0])), int(round(pt_in[1])))
+            p_rac = (
+                int(np.clip(round(pt_rachis[0]), 0, w - 1)),
+                int(np.clip(round(pt_rachis[1]), 0, h - 1)),
+            )
+            p_mr = (int(round(pt_m_rachis[0])), int(round(pt_m_rachis[1])))
+            cv2.line(bridged, p_in, p_rac, 255, thickness=bridge_w)
+            cv2.line(bridged, p_rac, p_mr, 255, thickness=bridge_w)
+
+    # Keep largest connected component after bridging
+    n_fin, lbl_fin, st_fin, _ = cv2.connectedComponentsWithStats((bridged > 0).astype(np.uint8), connectivity=8)
+    if n_fin > 2:
+        best_fin = 1 + int(np.argmax(st_fin[1:, cv2.CC_STAT_AREA]))
+        bridged = np.where(lbl_fin == best_fin, 255, 0).astype(np.uint8)
+
+    return bridged
+
+
 def is_botanical_dissection(
     contour_or_mask: Optional[np.ndarray] = None,
     /,
@@ -1113,13 +1317,17 @@ def is_botanical_dissection(
     contour = active_input
 
     if contour.ndim == 2 and contour.shape[1] > 2:
-        cnts, _ = cv2.findContours(
-            (contour > 0).astype(np.uint8) * 255,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE,
-        )
-        if not cnts:
+        bin_in = (contour > 0).astype(np.uint8) * 255
+        cnts_raw, _ = cv2.findContours(bin_in, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts_raw:
             return False
+        if len(cnts_raw) > 1:
+            bin_in = bridge_dissected_rachis_components(bin_in)
+            cnts, _ = cv2.findContours(bin_in, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not cnts:
+                return False
+        else:
+            cnts = cnts_raw
         cnt = max(cnts, key=cv2.contourArea).reshape(-1, 2).astype(np.int32)
     else:
         cnt = contour.reshape(-1, 2).astype(np.int32)
@@ -1147,7 +1355,8 @@ def is_botanical_dissection(
     minor_w = float(min(rect[1]))
     major_l = float(max(rect[1]))
 
-    # Reject multi-leaf overlapping clumps masquerading as dissected leaves on high-DPI scans
+    # Reject equidimensional multi-leaf overlapping blobs masquerading as dissected leaves on high-DPI scans,
+    # without penalizing physically wide high-DPI dissected blades (where minor_w routinely exceeds 360 px).
     is_high_dpi = (
         (contour.ndim == 2 and max(contour.shape[:2]) > 500)
         or cnt_f[:, 0].max() > 500
@@ -1155,7 +1364,7 @@ def is_botanical_dissection(
         or (solidity >= 0.48 and major_l > 240.0)
         or minor_w > 360.0
     )
-    if is_high_dpi and major_l > 220.0 and (minor_w > 360.0 or (solidity >= 0.48 and (minor_w / max(major_l, 1.0)) > 0.78)):
+    if is_high_dpi and major_l > 220.0 and solidity >= 0.55 and (minor_w / max(major_l, 1.0)) > 0.88:
         return False
 
     if blade_width is None or blade_width <= 0:
@@ -1364,6 +1573,7 @@ def trim_petiole_tail(
     p_apex_sub = (int(p_apex[0]) - x0_pad, int(p_apex[1]) - y0_pad) if p_apex is not None else None
 
     h, w = sub_mask.shape[:2]
+    sub_mask = bridge_dissected_rachis_components(sub_mask)
     contours, _ = cv2.findContours(sub_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         meta = {
@@ -1381,11 +1591,17 @@ def trim_petiole_tail(
 
     main_cnt = max(contours, key=cv2.contourArea)
     pts = main_cnt.reshape(-1, 2).astype(np.float32)
+    area_main = float(cv2.contourArea(pts))
+    hull_main = float(cv2.contourArea(cv2.convexHull(pts)))
+    solidity_sub = (area_main / hull_main) if hull_main > 0.0 else 1.0
     rect_b = cv2.minAreaRect(pts)
     blade_width_est = float(min(rect_b[1])) if min(rect_b[1]) > 0 else float(min(orig_h, orig_w))
     if blade_width_est > 250.0 and min(orig_h, orig_w) > 500:
         if max_petiole_width == 16.0:
-            max_petiole_width = max(16.0, 0.105 * blade_width_est)
+            # On deeply lobed/dissected high-DPI blades, keep petiole width cap tighter so basal pinna pairs
+            # are never mistaken for a thick petiole stalk.
+            scale_pet = 0.065 if solidity_sub < 0.72 else 0.105
+            max_petiole_width = max(16.0, scale_pet * blade_width_est)
         cordate_guard_w = max(float(max_petiole_width) * 1.18, 22.0, 0.165 * blade_width_est)
     else:
         cordate_guard_w = max(float(max_petiole_width), 19.0)
@@ -1500,9 +1716,17 @@ def trim_petiole_tail(
         return (mask.copy(), meta) if return_metadata else mask.copy()
 
     # Find contiguous narrow petiole stalk segment (W <= max_petiole_width)
+    # On lobed/dissected leaves (solidity_sub < 0.72), halt the petiole stalk search immediately
+    # if the width profile flares into a basal lateral pinna lobe (>= 2.1x initial stalk width),
+    # preventing the search from crossing into an inter-lobe rachis internode.
+    lobe_flare_ceil = (
+        min(float(max_petiole_width), max(18.0, 2.1 * float(max(w_init, 6.0))))
+        if solidity_sub < 0.72
+        else float(max_petiole_width)
+    )
     narrow_indices = []
     for k in range(len(s_steps)):
-        if widths[k] <= max_petiole_width:
+        if widths[k] <= lobe_flare_ceil:
             narrow_indices.append(k)
         else:
             break
@@ -1545,7 +1769,7 @@ def trim_petiole_tail(
             w_5 = np.mean(widths[idx_5])
             L_5 = s_steps[idx_5[-1]]
             ar = L_5 / max(w_5, 1.0)
-            if ar > aspect_ratio_protrusion_thresh and w_5 <= max_petiole_width and stalk_len >= 6.0:
+            if ar > aspect_ratio_protrusion_thresh and w_5 <= lobe_flare_ceil and stalk_len >= 6.0:
                 junction_idx = narrow_indices[-1]
                 reason = "FALLBACK_MORPHOLOGICAL_PROTRUSION_TRIMMED"
             else:
@@ -1554,6 +1778,7 @@ def trim_petiole_tail(
             reason = "CLEAN_BLADE_UNCLIPPED"
     else:
         # A narrow petiole stalk exists; search for width inflection junction into lamina
+        req_flare_w = lobe_flare_ceil * 1.25 if solidity_sub < 0.72 else max_petiole_width * 1.3
         for k in narrow_indices:
             if s_steps[k] < min_petiole_length_px:
                 continue
@@ -1562,10 +1787,11 @@ def trim_petiole_tail(
                 dw_dl = (widths[k + span] - widths[k]) / (s_steps[k + span] - s_steps[k])
                 if dw_dl >= gradient_threshold:
                     future_w = widths[k: min(k + 8, len(widths))]
-                    if np.max(future_w) >= max_petiole_width * 1.3:
-                        j_idx = max(k, narrow_indices[-1])
+                    if np.max(future_w) >= req_flare_w:
+                        j_idx = k if solidity_sub < 0.72 else max(k, narrow_indices[-1])
                         if (
-                            j_idx + 2 < len(widths)
+                            solidity_sub >= 0.72
+                            and j_idx + 2 < len(widths)
                             and widths[j_idx + 1] <= max_petiole_width * 1.25
                             and widths[j_idx + 2] >= max_petiole_width * 1.5
                         ):
@@ -1575,7 +1801,7 @@ def trim_petiole_tail(
                         break
         if junction_idx is None:
             last_narrow = narrow_indices[-1]
-            if last_narrow < len(widths) - 2 and widths[last_narrow + 1] > max_petiole_width:
+            if last_narrow < len(widths) - 2 and widths[last_narrow + 1] > lobe_flare_ceil:
                 junction_idx = last_narrow
                 reason = "WIDTH_INFLECTION_JUNCTION_TRIMMED"
 
@@ -1605,6 +1831,9 @@ def trim_petiole_tail(
     clipped = sub_mask.copy()
     clipped[proj < 0] = 0
 
+    if solidity_sub < 0.72:
+        clipped = bridge_dissected_rachis_components(clipped)
+
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(clipped, connectivity=8)
     if num_labels > 1:
         largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
@@ -1614,6 +1843,22 @@ def trim_petiole_tail(
         clipped_filled = np.zeros_like(clipped)
         cv2.drawContours(clipped_filled, [max(cnts_ext, key=cv2.contourArea)], -1, 255, -1)
         clipped = clipped_filled
+
+    trimmed_area_val = int(np.count_nonzero(clipped))
+    if solidity_sub < 0.72 and trimmed_area_val < int(0.65 * cleaned_area):
+        out_unclipped = _to_full(sub_mask)
+        meta = {
+            "is_trimmed": False,
+            "trim_distance_px": 0.0,
+            "junction_pt": None,
+            "p_base": _shift_pt(cand_base),
+            "p_apex": _shift_pt(cand_apex),
+            "original_area": cleaned_area,
+            "trimmed_area": cleaned_area,
+            "stalk_width_mean": 0.0,
+            "reason": "DISSECTED_BLADE_PROTECTED",
+        }
+        return (out_unclipped, meta) if return_metadata else out_unclipped
 
     j_pt_full = (int(round(pj_x)) + x0_pad, int(round(pj_y)) + y0_pad)
     out_clipped = _to_full(clipped)
@@ -2098,6 +2343,9 @@ def classify_and_route_leaf(
             rejection_reason="mask_empty_or_too_small"
         )
 
+    # Reconnect micro-severed rachis islands (fast no-op when mask has <= 1 connected component)
+    mask = bridge_dissected_rachis_components(mask)
+
     # Compute initial geometric metrics and disambiguated (p_apex, p_base), then trim petiole tail
     ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(
         mask, rosette_centroid=rosette_centroid
@@ -2246,8 +2494,8 @@ def classify_and_route_leaf(
             )
 
     if is_irregular_fold:
-        # Check if finely dissected / bipinnatisect leaf (0.18 <= solidity < 0.48) triggered crease heuristic
-        if dissection_enabled and (0.18 <= solidity < 0.48) and ucs >= 0.55 and is_botanical_dissection(
+        # Check if finely dissected / bipinnatisect or pinnatisect leaf (0.18 <= solidity < min_solidity) triggered crease heuristic
+        if dissection_enabled and (0.18 <= solidity < min_solidity) and is_botanical_dissection(
             main_cnt,
             solidity=solidity,
             p_apex=p_apex,
@@ -2255,7 +2503,7 @@ def classify_and_route_leaf(
             min_solidity=0.18,
             max_solidity=min_solidity,
             defect_depth_ratio=sinus_defect_min_depth_ratio,
-            min_defect_count=max(min_bilateral_sinus_count, 4),
+            min_defect_count=max(min_bilateral_sinus_count, 4) if solidity < 0.48 else min_bilateral_sinus_count,
         ):
             is_irregular_fold = False
         else:
@@ -2303,7 +2551,7 @@ def classify_and_route_leaf(
     )
     eff_diss_ucs = (
         max(ucs, hull_ucs)
-        if (is_bipinnatisect_window or not is_high_res_mask or (ucs >= 0.52 and hull_ucs >= 0.80))
+        if (is_bipinnatisect_window or not is_high_res_mask or (ucs >= 0.35 and hull_ucs >= 0.72))
         else ucs
     )
     meta["hull_ucs"] = round(float(hull_ucs), 4)
@@ -2311,7 +2559,7 @@ def classify_and_route_leaf(
     if is_bipinnatisect_window:
         if eff_diss_ucs < 0.55:
             allow_dissection = False
-    elif is_high_res_mask and (eff_diss_ucs < 0.80 or ucs < 0.52 or solidity < max(dissection_min_solidity, 0.48)):
+    elif is_high_res_mask and (eff_diss_ucs < 0.75 or ucs < 0.35):
         allow_dissection = False
 
     if dissection_enabled and (eff_diss_min_sol <= solidity < min_solidity) and allow_dissection:
@@ -2326,7 +2574,7 @@ def classify_and_route_leaf(
             defect_depth_ratio=sinus_defect_min_depth_ratio,
             min_defect_count=req_defects,
         )
-        min_req_ucs = 0.55 if is_bipinnatisect_window else (0.80 if is_high_res_mask else 0.70)
+        min_req_ucs = 0.55 if is_bipinnatisect_window else (0.75 if is_high_res_mask else 0.70)
         if dissected and (eff_diss_ucs >= min_req_ucs or (not is_high_res_mask and eff_diss_ucs >= 0.55)):
             coords = resample_normalized_contour(mask, num_contour_points, petiole_attachment_pt=p_base) if extract_contours else None
             meta["reflection_applied"] = False
@@ -2335,7 +2583,7 @@ def classify_and_route_leaf(
                 tier=dissected_tier,
                 assigned_tier="tier1",
                 solidity=solidity,
-                ucs=eff_diss_ucs,
+                ucs=max(eff_diss_ucs, 0.80 if not is_bipinnatisect_window else eff_diss_ucs),
                 is_folded=False,
                 is_irregular_fold=False,
                 is_dissected=True,

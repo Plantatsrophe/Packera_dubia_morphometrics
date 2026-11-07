@@ -1773,5 +1773,161 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             np.testing.assert_array_equal(w_rmask, s_rmask)
 
 
+class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
+    """Tests for high-DPI dissected leaf geometry, rachis bridging, and petiole trimming."""
+
+    @staticmethod
+    def _build_high_dpi_pinnatisect_mask(sever_rachis: bool = False, include_petiole: bool = False) -> np.ndarray:
+        """Synthesize a high-DPI (1200x900, minor_w > 480 px) lyrate-pinnatisect leaf mask."""
+        mask = np.zeros((1200, 900), dtype=np.uint8)
+        cx = 450
+        # Central rachis spine (from y=180 terminal lobe down to y=880 lowest pinna pair)
+        if not sever_rachis:
+            cv2.rectangle(mask, (cx - 10, 200), (cx + 10, 880), 255, -1)
+
+        # Terminal rounded-lobate segment
+        cv2.ellipse(mask, (cx, 210), (135, 95), 0, 0, 360, 255, -1)
+        cv2.ellipse(mask, (cx - 95, 220), (55, 40), -15, 0, 360, 255, -1)
+        cv2.ellipse(mask, (cx + 95, 220), (55, 40), 15, 0, 360, 255, -1)
+
+        # 3 pairs of opposing lateral pinnae spanning width ~520 px (> 360 px high-DPI threshold)
+        pinna_specs = [
+            (410, 250, 48, 12),
+            (610, 235, 44, 10),
+            (800, 195, 38, 8),
+        ]
+        for y_c, span_x, lobe_h, angle in pinna_specs:
+            # Left pinna
+            cv2.ellipse(mask, (cx - span_x // 2, y_c), (span_x // 2, lobe_h), -angle, 0, 360, 255, -1)
+            # Right pinna
+            cv2.ellipse(mask, (cx + span_x // 2, y_c), (span_x // 2, lobe_h), angle, 0, 360, 255, -1)
+            if sever_rachis:
+                # Carve a narrow gap across the central rachis internode above this pinna pair
+                cv2.rectangle(mask, (cx - 35, y_c - lobe_h - 32), (cx + 35, y_c - lobe_h - 4), 0, -1)
+
+        if include_petiole:
+            # Narrow basal petiole stalk below the lowest pinna pair (y=840..1090, width=14 px)
+            cv2.rectangle(mask, (cx - 7, 835), (cx + 7, 1090), 255, -1)
+
+        return mask
+
+    def test_high_dpi_dissected_leaf_passes_is_botanical_dissection_and_tier1_routing(self) -> None:
+        """High-DPI dissected leaves (minor_w > 360 px) must pass is_botanical_dissection and route to Tier 1."""
+        from scripts.vision.lm2_geometry_utils import (
+            classify_and_route_leaf,
+            is_botanical_dissection,
+        )
+
+        mask = self._build_high_dpi_pinnatisect_mask(sever_rachis=False, include_petiole=False)
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        main_cnt = max(cnts, key=cv2.contourArea)
+        (_, (w_rect, h_rect), _) = cv2.minAreaRect(main_cnt)
+        minor_w = float(min(w_rect, h_rect))
+        self.assertGreater(minor_w, 400.0, "Fixture must exercise native high-DPI minor_w > 360 px regime.")
+
+        self.assertTrue(
+            is_botanical_dissection(mask),
+            "High-DPI pinnatisect leaf with minor_w > 360 px must be recognized as botanical dissection.",
+        )
+
+        res = classify_and_route_leaf(mask)
+        self.assertTrue(res.is_dissected)
+        self.assertIn("Tier 1", res.tier)
+        self.assertGreaterEqual(res.ucs, 0.80)
+
+    def test_bridge_dissected_rachis_components_reconnects_severed_pinnae_and_noop_on_single_component(self) -> None:
+        """Severed pinna islands must be reconnected along the central rachis while single-component masks stay untouched."""
+        from scripts.vision.lm2_geometry_utils import bridge_dissected_rachis_components
+
+        # 1. Single-component mask must be a strict 0-pixel no-op
+        intact = self._build_high_dpi_pinnatisect_mask(sever_rachis=False)
+        bridged_intact = bridge_dissected_rachis_components(intact)
+        np.testing.assert_array_equal(intact, bridged_intact)
+
+        # 2. Severed rachis mask with disconnected pinna pairs
+        severed = self._build_high_dpi_pinnatisect_mask(sever_rachis=True)
+        n_before, _ = cv2.connectedComponents((severed > 0).astype(np.uint8))
+        self.assertGreater(n_before, 2, "Severed fixture must contain multiple disconnected pinna components.")
+
+        bridged = bridge_dissected_rachis_components(severed)
+        n_after, _ = cv2.connectedComponents((bridged > 0).astype(np.uint8))
+        self.assertEqual(n_after, 2, "All valid pinna components must be unified into 1 foreground component.")
+
+        cnts_after, _ = cv2.findContours(bridged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        main_after = max(cnts_after, key=cv2.contourArea)
+        # Ensure total contour area retains all pinna lobes rather than just the terminal lobe
+        self.assertGreater(cv2.contourArea(main_after), 0.90 * float(np.count_nonzero(severed)))
+
+        # 3. Also verify _merge_and_bridge_dissected_crop_mask uses Class 1 intra-lamina rachis pixels
+        petiole_rachis = np.zeros_like(severed)
+        cv2.rectangle(petiole_rachis, (442, 260), (458, 820), 255, -1)
+        merged = step02._merge_and_bridge_dissected_crop_mask(severed > 0, petiole_rachis > 0)
+        n_merged, _ = cv2.connectedComponents(merged)
+        self.assertEqual(n_merged, 2)
+
+    def test_trim_petiole_tail_preserves_basal_pinnae_on_dissected_leaf(self) -> None:
+        """trim_petiole_tail must remove only the basal stalk below the first pinna pair and never amputate pinnae."""
+        from scripts.vision.lm2_geometry_utils import trim_petiole_tail
+
+        mask_no_stalk = self._build_high_dpi_pinnatisect_mask(sever_rachis=False, include_petiole=False)
+        mask_with_stalk = self._build_high_dpi_pinnatisect_mask(sever_rachis=False, include_petiole=True)
+        lamina_area = float(np.count_nonzero(mask_no_stalk))
+
+        trimmed, pet_metrics = trim_petiole_tail(mask_with_stalk, return_metadata=True)
+        trimmed_area = float(np.count_nonzero(trimmed))
+
+        # Trimmed mask must retain >= 95% of the true lamina area (all 3 lateral pinna pairs + terminal lobe)
+        self.assertGreaterEqual(
+            trimmed_area / lamina_area,
+            0.95,
+            f"trim_petiole_tail amputated dissected pinnae: retained {trimmed_area / lamina_area:.3f} of lamina.",
+        )
+        # And the narrow petiole stalk at the bottom (y > 950) should be trimmed away
+        self.assertEqual(int(np.count_nonzero(trimmed[950:, :])), 0)
+        self.assertTrue(bool(pet_metrics.get("is_trimmed", False)))
+        self.assertGreater(float(pet_metrics.get("trim_distance_px", 0.0)), 100.0)
+
+    def test_stage1_rescues_leaf_partial_when_leaf_whole_absent(self) -> None:
+        """When Stage 1 finds 0 Class 0 (leaf_whole) boxes, Class 1 (leaf_partial) boxes are rescued for PointRend."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_p = Path(tmp)
+            dummy_weights = tmp_p / "dummy.pt"
+            dummy_weights.write_bytes(b"0")
+            v_csv = tmp_p / "v.csv"
+            pd.DataFrame([{"catalogNumber": "TEST_GLABELLA_1", "scientificName": "Packera glabella"}]).to_csv(
+                v_csv, index=False
+            )
+            with patch.object(step02, "PointRendInferenceEngine"), patch.object(
+                step02, "LM2Stage1Detector"
+            ):
+                pipe = step02.SegmentAndExtractPipeline(
+                    vouchers_csv=v_csv,
+                    model_weights=dummy_weights,
+                    stage1_weights=dummy_weights,
+                    output_dir=tmp_p / "out",
+                    device="cpu",
+                    db_path=tmp_p / "test.sqlite",
+                )
+            sheet_img = np.zeros((2000, 1500, 3), dtype=np.uint8)
+            # Case A: Only Class 1 (leaf_partial) detected on sheet -> rescued into candidate_s1_crops
+            s1_only_partial = [
+                ((100, 200, 600, 550), 0.72, 1),
+            ]
+            unpacked_a = pipe._unpack_stage1_candidates("TEST_GLABELLA_1", sheet_img, s1_only_partial, 10.0)
+            candidate_crops_a = unpacked_a[0]
+            self.assertEqual(len(candidate_crops_a), 1)
+            self.assertEqual(candidate_crops_a[0][2], 1)
+
+            # Case B: Both Class 0 and Class 1 detected on sheet (with default segment_partial_leaves=False)
+            s1_mixed = [
+                ((100, 200, 600, 550), 0.85, 0),
+                ((250, 400, 550, 600), 0.65, 1),
+            ]
+            unpacked_b = pipe._unpack_stage1_candidates("TEST_GLABELLA_1", sheet_img, s1_mixed, 10.0)
+            candidate_crops_b = unpacked_b[0]
+            self.assertEqual(len(candidate_crops_b), 1)
+            self.assertEqual(candidate_crops_b[0][2], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
