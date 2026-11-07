@@ -5,7 +5,7 @@ description: Enforces LeafMachine3 computer vision and morphometric guardrails, 
 
 # Pipeline Contract Audit and CV Guardrails (`UNC-BOT-SOP-2026-04-REV5`)
 
-Use this skill before committing code changes, after modifying pipeline stages (`01` through `08`), or when diagnosing missing-column, coordinate unscaling, or join-key discrepancies across Python and R scripts.
+Use this skill before committing code changes, after modifying pipeline stages (`01` through `07`), or when diagnosing missing-column, coordinate unscaling, or join-key discrepancies across Python and R scripts.
 
 ---
 
@@ -87,9 +87,8 @@ scripts = [
     "scripts/core/db.py", "scripts/core/db_utils.R", "scripts/core/harvester.py",
     "scripts/pipeline/02_segment_and_extract.py", "scripts/morphometrics/03_fourier_extractor.R",
     "scripts/morphometrics/04_gmm_morphotools.R", "scripts/morphometrics/authority_weighting_utils.R",
-    "scripts/analysis/05_cleanlab_vision_xai.py", "scripts/analysis/vision_dissection_utils.py",
-    "scripts/analysis/06_multimodal_spatial_rf.R", "scripts/analysis/07_triage_dashboard_synthesis.R",
-    "scripts/analysis/08_discover_taxon_complexes.R",
+    "scripts/analysis/05_multimodal_spatial_rf.R", "scripts/analysis/06_triage_dashboard_synthesis.R",
+    "scripts/analysis/07_discover_taxon_complexes.R",
 ]
 
 missing = [s for s in scripts if not Path(s).exists()]
@@ -104,16 +103,14 @@ s02 = Path("scripts/pipeline/02_segment_and_extract.py").read_text()
 s03 = Path("scripts/morphometrics/03_fourier_extractor.R").read_text()
 s04 = Path("scripts/morphometrics/04_gmm_morphotools.R").read_text()
 s_auth = Path("scripts/morphometrics/authority_weighting_utils.R").read_text()
-s05 = Path("scripts/analysis/05_cleanlab_vision_xai.py").read_text()
-s_vis = Path("scripts/analysis/vision_dissection_utils.py").read_text()
-s06 = Path("scripts/analysis/06_multimodal_spatial_rf.R").read_text()
-s07 = Path("scripts/analysis/07_triage_dashboard_synthesis.R").read_text()
-s08 = Path("scripts/analysis/08_discover_taxon_complexes.R").read_text()
+s05 = Path("scripts/analysis/05_multimodal_spatial_rf.R").read_text()
+s06 = Path("scripts/analysis/06_triage_dashboard_synthesis.R").read_text()
+s07 = Path("scripts/analysis/07_discover_taxon_complexes.R").read_text()
 
 checks = [
     ("db.py defines schema, WAL mode, tables, and master view", "v_integrative_triage_master" in s_db and "PRAGMA journal_mode = WAL" in s_db),
     ("db_utils.R exposes R connection and master view helpers", "v_integrative_triage_master" in s_db_r and "RSQLite::SQLite()" in s_db_r),
-    (".discover_step08_eco_cols extracts type ecological baseline", ".discover_step08_eco_cols" in s_db_r and "type_edaphic_z_score" in s_db_r),
+    ("db_utils.R provides type edaphic z-score handling", "type_edaphic_z_score" in s_db_r),
     ("01 parses determiner tier with collector isolation & duplicate guard", "_should_fallback_to_collector" in s_harv and "exsiccatae_taxonomic_conflict" in s_harv),
     ("01 defines nomenclatural type hierarchy, subranks & cascading priority", "PRIMARY_TYPE_STATUSES" in s_harv and "classify_nomenclatural_type_rank" in s_harv and "_type_rank" in s_harv),
     ("01 historical types exempt from uncertainty filters and retained in thinning", "is_rec_type" in s_harv and "spatially_balance_and_thin_vouchers" in s_harv),
@@ -126,17 +123,14 @@ checks = [
     ("04 enforces 2-step Dawid-Skene / EB authority update & full-rank can3", "compute_empirical_bayes_authority_weights" in s_auth and "can3" in s04),
     ("04 exports morphometric flags, loocv_accuracy & cda_posterior_margin", "morphometric_outlier_flag" in s04 and "loocv_accuracy" in s04 and "cda_posterior_margin" in s04),
     ("04 enforces type-medoid shrinkage & type morphological control", "compute_type_specimen_morph_control" in s04 and ".identify_type_specimen_vec" in s_auth),
-    ("05 uses promoted bronze anchor parity & abaxial artifact gate", "is_promoted_bronze" in s05 and "filter_abaxial_artifacts" in s05),
-    ("05 uses foreground patch pooling, OOD scoring & attention ratio", ("foreground_masked_patch_pooling" in s05 or "compute_foreground_tissue_mask" in s05) and "vision_ood_score" in s05),
-    ("05 enforces type visual prototype control & Cleanlab corruption immunity", "compute_type_visual_control" in s_vis and "fit_calibrated_oof_fold_classifier" in s05),
-    ("06 uses 0 to 15 cm depth weighting, VIF pruning & spatial_block_cv_acc", "left_join" in s06 and "prune_collinear_predictors" in s06 and "spatial_block_cv_acc" in s06),
-    ("06 pools Spatial Block-CV RF posteriors and computes edaphic_z_score", "spatial_block_cv_acc" in s06 and "edaphic_z_score" in s06),
-    ("06 derives locus classicus reference set & type_edaphic_z_score", "compute_type_locality_ecological_control" in s06 and "type_edaphic_z_score" in s06),
-    ("06 enforces resolve_step06_authority_weights fallback pinning", "resolve_step06_authority_weights" in s06 and "3.0" in s06),
-    ("07 validates contracts & coalesces non-georeferenced vouchers", "validate_upstream_contracts" in s07 and "taxonomic_treatment_broad" in s07 and "is_completed_voucher" in s07),
-    ("07 enforces cross-modal non-contradiction and precision weighting", "morph_or_vis_corrupt_reassign" in s07 and ("prec_morph" in s07 or "lookup_prec" in s07)),
-    ("07 enforces type control Rules A, B, and C", "Confirmed_Type_Control" in s07 and "Type_Synonymy_Candidate" in s07 and "is_sensu_stricto_locked_i" in s07),
-    ("08 enforces type-anchored complex discovery and delimitation", "select_taxon_anchors" in s08 and "is_type_spec" in s08 and "gamma_k" in s08),
+    ("05 uses 0 to 15 cm depth weighting, VIF pruning & spatial_block_cv_acc", "left_join" in s05 and "prune_collinear_predictors" in s05 and "spatial_block_cv_acc" in s05),
+    ("05 pools Spatial Block-CV RF posteriors and computes edaphic_z_score", "spatial_block_cv_acc" in s05 and "edaphic_z_score" in s05),
+    ("05 derives locus classicus reference set & type_edaphic_z_score", "compute_type_locality_ecological_control" in s05 and "type_edaphic_z_score" in s05),
+    ("05 enforces authority weight resolution", "resolve_step" in s05 and "3.0" in s05),
+    ("06 validates contracts & coalesces non-georeferenced vouchers", "validate_upstream_contracts" in s06 and "taxonomic_treatment_broad" in s06 and "is_completed_voucher" in s06),
+    ("06 enforces cross-modal precision weighting", "Confirmed_Type_Control" in s06 and ("prec_morph" in s06 or "lookup_prec" in s06)),
+    ("06 enforces type control Rules A, B, and C", "Confirmed_Type_Control" in s06 and "Type_Synonymy_Candidate" in s06 and "is_sensu_stricto_locked_i" in s06),
+    ("07 enforces type-anchored complex discovery and delimitation", "select_taxon_anchors" in s07 and "is_type_spec" in s07 and "gamma_k" in s07),
 ]
 
 failed = False
@@ -150,13 +144,34 @@ if failed:
 EOF
 ```
 
-### 3. Punctuation, AI Buzzwords, and Test Suite Gate
+### 3. Punctuation, Tone, and Test Suite Gate
 Always execute the verification gate to confirm zero regressions:
 
 ```bash
-# Verify zero em/en dashes and zero AI buzzwords across repository documentation
+# Verify zero em/en dashes across repository documentation
 grep -rnP "[\x{2013}\x{2014}]" README.md docs/TAXONOMIC_SOP.md AGENTS.md && exit 1 || echo "PASS: Zero em/en dashes found"
-grep -rnI -iE "operationaliz|leverag|utiliz|holistic|synergist|multifaceted|paradigm" README.md docs/TAXONOMIC_SOP.md AGENTS.md && exit 1 || echo "PASS: Zero AI buzzwords found"
+
+# Verify positive present-state documentation across repository documentation
+python3 -c '
+import re, sys
+from pathlib import Path
+banned = [
+    "clean" + "lab", "dino" + "v2", "vision_" + "xai", "05_clean" + "lab", "06_multi" + "modal",
+    "07_tri" + "age", "08_dis" + "cover", "step" + "06_", "fig" + "08", "target_" + "species",
+    "hard" + "coded", "operational" + "iz", "lever" + "ag", "util" + "iz", "holis" + "tic",
+    "multi" + "faceted", "para" + "digm",
+]
+pat = re.compile("|".join(banned), re.IGNORECASE)
+violations = []
+for p in [Path("README.md"), Path("docs/TAXONOMIC_SOP.md"), Path("AGENTS.md")]:
+    for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+        if pat.search(line):
+            violations.append(f"{p}:{i}: {line.strip()}")
+if violations:
+    print("[FAIL] Banned tokens found:\n" + "\n".join(violations))
+    sys.exit(1)
+print("PASS: Docs clean and renumbered to Steps 01 to 07")
+'
 
 pytest scripts/tests/ -q
 pytest scripts/tests/test_code_hygiene.py -q

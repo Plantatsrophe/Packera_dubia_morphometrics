@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import math
 import sys
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -451,6 +452,7 @@ def resolve_onnx_providers(
 
 _ONNX_SESSION_CACHE: Dict[Tuple[str, Tuple[str, ...]], Any] = {}
 _NVIDIA_LIBS_PRELOADED: bool = False
+_ONNX_GPU_LOCK: threading.Lock = threading.Lock()
 
 
 def _preload_nvidia_cuda_libs() -> None:
@@ -523,11 +525,29 @@ def _load_onnx_session(
             _preload_nvidia_cuda_libs()
         sess_opts = ort.SessionOptions()
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_opts.enable_mem_pattern = False
+        sess_opts.enable_mem_reuse = True
+        sess_opts.intra_op_num_threads = 2
+        sess_opts.inter_op_num_threads = 1
         try:
             sess_opts.log_severity_level = int(os.environ.get("LM3_ORT_LOG_SEVERITY", 3))
         except ValueError:
             sess_opts.log_severity_level = 3
-        session = ort.InferenceSession(str(w_path), sess_options=sess_opts, providers=prov_list)
+        ort_providers: List[Any] = [
+            (
+                "CUDAExecutionProvider",
+                {
+                    "device_id": 0,
+                    "arena_extend_strategy": "kSameAsRequested",
+                    "cudnn_conv_use_max_workspace": "0",
+                    "do_copy_in_default_stream": "1",
+                },
+            )
+            if p == "CUDAExecutionProvider"
+            else p
+            for p in prov_list
+        ]
+        session = ort.InferenceSession(str(w_path), sess_options=sess_opts, providers=ort_providers)
         _ONNX_SESSION_CACHE[cache_key] = session
         bound_provs = session.get_providers()
         logger.info(f"Loaded LeafMachine3 ONNX session ({m_name}) from {w_path} with providers={bound_provs}")
@@ -819,7 +839,8 @@ class LM3PlantDetector:
 
             inp_tensor = _bgr_to_nchw_float32(lb_bgr)
             input_name = active_sess.get_inputs()[0].name
-            raw_outs = active_sess.run(None, {input_name: inp_tensor})
+            with _ONNX_GPU_LOCK:
+                raw_outs = active_sess.run(None, {input_name: inp_tensor})
             if not raw_outs:
                 return []
             return self._decode_yolo26x_det_output(
@@ -1051,7 +1072,8 @@ class LM3SpecimenSegmenter:
                 norm_chw = np.transpose((canvas.astype(np.float32) / 255.0 - im_mean) / im_std, (2, 0, 1))
                 inp_tensor = np.ascontiguousarray(norm_chw[None, ...], dtype=np.float32)
                 input_name = active_sess.get_inputs()[0].name
-                raw_outs = active_sess.run(None, {input_name: inp_tensor})
+                with _ONNX_GPU_LOCK:
+                    raw_outs = active_sess.run(None, {input_name: inp_tensor})
                 if raw_outs:
                     out_arr = np.asarray(raw_outs[0], dtype=np.float32)
                     while out_arr.ndim > 2 and out_arr.shape[0] == 1:
@@ -1271,7 +1293,8 @@ class LM3LeafSegmenterEngine:
                 inp_tensor = _bgr_to_nchw_float32(lb_bgr)
 
             input_name = active_sess.get_inputs()[0].name
-            raw_outs = active_sess.run(None, {input_name: inp_tensor})
+            with _ONNX_GPU_LOCK:
+                raw_outs = active_sess.run(None, {input_name: inp_tensor})
             return self._decode_yolo26x_seg_outputs(
                 raw_outs,
                 crop_shape=(crop_h, crop_w),
@@ -1687,7 +1710,8 @@ class LM3PoseLandmarkEngine:
                 lb_bgr, r, (dw, dh) = _letterbox_bgr(padded_bgr, self.img_size)
                 inp_tensor = _bgr_to_nchw_float32(lb_bgr)
                 input_name = active_sess.get_inputs()[0].name
-                raw_outs = active_sess.run(None, {input_name: inp_tensor})
+                with _ONNX_GPU_LOCK:
+                    raw_outs = active_sess.run(None, {input_name: inp_tensor})
                 if raw_outs:
                     arr = np.asarray(raw_outs[0], dtype=np.float32)
                     if arr.ndim == 3:

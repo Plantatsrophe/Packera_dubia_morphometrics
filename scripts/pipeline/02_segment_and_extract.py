@@ -866,14 +866,28 @@ class SegmentAndExtractPipeline:
             pixels_per_mm = None
             cf_source = "predicted_from_megapixels"
 
-        # 1b. Whole-Sheet UNet++ v9 Specimen Segmenter + LLR_Hyst_KeepBlobs paper cleanup
+        # 1b. Whole-Sheet UNet++ v9 Specimen Segmenter + LLR_Hyst_KeepBlobs paper cleanup (lazy per-voucher cache)
         specimen_paper_cleaned_mask: Optional[np.ndarray] = None
-        if getattr(self, "specimen_segmenter", None) is not None and getattr(self.specimen_segmenter, "model", None) is not None:
-            try:
-                specimen_paper_cleaned_mask = self.specimen_segmenter.segment_specimen(img_bgr)
-            except Exception as spec_exc:
-                logger.debug(f"Voucher {catalog_number}: specimen segmenter skipped ({spec_exc}).")
-                specimen_paper_cleaned_mask = None
+        _specimen_mask_evaluated: bool = False
+
+        def _get_specimen_paper_cleaned_mask() -> Optional[np.ndarray]:
+            nonlocal specimen_paper_cleaned_mask, _specimen_mask_evaluated
+            if _specimen_mask_evaluated:
+                return specimen_paper_cleaned_mask
+            _specimen_mask_evaluated = True
+            if (
+                getattr(self, "specimen_segmenter", None) is not None
+                and getattr(self.specimen_segmenter, "model", None) is not None
+            ):
+                try:
+                    specimen_paper_cleaned_mask = self.specimen_segmenter.segment_specimen(img_bgr)
+                except Exception as spec_exc:
+                    logger.debug(f"Voucher {catalog_number}: specimen segmenter skipped ({spec_exc}).")
+                    specimen_paper_cleaned_mask = None
+            return specimen_paper_cleaned_mask
+
+        if "segment_specimen" in getattr(getattr(self, "specimen_segmenter", None), "__dict__", {}):
+            _get_specimen_paper_cleaned_mask()
 
         # 2. Stage 1 Full-Sheet Plant Organ Detection (YOLO26x 9-class detector)
         use_s1_cache = bool(self.lm3_project_dir is not None and not self.force)
@@ -985,8 +999,13 @@ class SegmentAndExtractPipeline:
 
                     cy0, cx0, cy1, cx1 = crop_box
                     crop_spec_mask: Optional[np.ndarray] = None
-                    if specimen_paper_cleaned_mask is not None and cy1 > cy0 and cx1 > cx0:
-                        crop_spec_mask = specimen_paper_cleaned_mask[cy0:cy1, cx0:cx1]
+                    if cy1 > cy0 and cx1 > cx0 and (
+                        len(leaf_cands) > 1
+                        or cv2.connectedComponents((best_mask > 0).astype(np.uint8), connectivity=8)[0] > 2
+                    ):
+                        full_spec_m = _get_specimen_paper_cleaned_mask()
+                        if full_spec_m is not None:
+                            crop_spec_mask = full_spec_m[cy0:cy1, cx0:cx1]
 
                     m_raw = _merge_and_bridge_dissected_crop_mask(
                         best_mask,
@@ -1122,8 +1141,13 @@ class SegmentAndExtractPipeline:
 
                     cy0, cx0, cy1, cx1 = crop_box
                     crop_spec_qc: Optional[np.ndarray] = None
-                    if specimen_paper_cleaned_mask is not None and cy1 > cy0 and cx1 > cx0:
-                        crop_spec_qc = specimen_paper_cleaned_mask[cy0:cy1, cx0:cx1]
+                    if cy1 > cy0 and cx1 > cx0 and (
+                        len(blade_candidates) > 1
+                        or cv2.connectedComponents((best_mask > 0).astype(np.uint8), connectivity=8)[0] > 2
+                    ):
+                        full_spec_qc = _get_specimen_paper_cleaned_mask()
+                        if full_spec_qc is not None:
+                            crop_spec_qc = full_spec_qc[cy0:cy1, cx0:cx1]
 
                     qc_leaf_cands = [(c[1], c[0], c[2], c[3]) for c in blade_candidates]
                     m_refined = _merge_and_bridge_dissected_crop_mask(

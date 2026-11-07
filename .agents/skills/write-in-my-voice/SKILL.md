@@ -19,7 +19,7 @@ IDENTITY: A passionate naturalist, educator, and working-class scholar who trans
      - `Now that [X] is defined, let us dig into why...`
 
 2. **Plainspoken Word Usage, Active First-Person Voice & Standard Numerals:**
-   - **Active First-Person Voice in Empirical Writing:** Write in direct, active first-person prose (`I built...`, `I harvest...`, `I deduplicate...`, `I stratify...`, `I segment...`, `I prune...`) rather than impersonal passive voice (`is decoupled`, `are analyzed`, `undergo gatekeeping`) or AI buzzwords (`operationalizing`, `leveraging`, `utilizing`, `holistic`, `seamless`, `multifaceted`, `paradigm`).
+   - **Active First-Person Voice in Empirical Writing:** Write in direct, active first-person prose (`I built...`, `I harvest...`, `I deduplicate...`, `I stratify...`, `I segment...`, `I prune...`) rather than impersonal passive voice (`is decoupled`, `are analyzed`, `undergo gatekeeping`) or empty AI marketing jargon.
    - **Standard Numerals:** Write years, percentages, and measurements in standard numerals (`2026`, `37%`, `10`, `0 to 15 cm`).
 
 3. **Asymmetrical Paragraph Sizing & Self-Contained Sentence Clarity:**
