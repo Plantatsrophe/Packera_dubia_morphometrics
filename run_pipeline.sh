@@ -422,6 +422,20 @@ else
   PYTHON_LM3="${PYTHON_MAIN}"
 fi
 
+# Ensure bundled nvidia-* CUDA/cuDNN shared library directories from PYTHON_LM3 are on LD_LIBRARY_PATH for onnxruntime-gpu
+LM3_NVIDIA_LD_DIRS="$("${PYTHON_LM3}" -c "
+from pathlib import Path
+try:
+    import nvidia
+    roots = [Path(p) for p in getattr(nvidia, '__path__', ()) or ()]
+    print(':'.join(sorted({str(d) for root in roots for d in root.glob('*/lib') if d.is_dir()})))
+except Exception:
+    pass
+" 2>/dev/null || true)"
+if [[ -n "${LM3_NVIDIA_LD_DIRS}" ]]; then
+  export LD_LIBRARY_PATH="${LM3_NVIDIA_LD_DIRS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
 # Determine whether a non-default geographic scope or custom taxon harvest was requested
 CUSTOM_GEO_SCOPE=false
 if [[ ( -n "${GEOGRAPHIC_SCOPE}" && "${GEOGRAPHIC_SCOPE}" != "eastern_na" ) || "${INCLUDE_WESTERN}" == "true" || ${#COUNTRIES_RAW[@]} -gt 0 || ${#CUSTOM_TAXA_RAW[@]} -gt 0 ]]; then

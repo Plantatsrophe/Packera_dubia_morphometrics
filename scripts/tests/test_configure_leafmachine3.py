@@ -278,6 +278,38 @@ class TestConfigureLeafMachine3(unittest.TestCase):
             self.assertEqual(pcd_name, "lm3_plant_detector__yolo26x_det_1280")
             self.assertEqual(pcd_resolved, pcd_onnx.resolve())
 
+    def test_load_onnx_session_handles_posixpath_resolution_and_dummy_weights(self) -> None:
+        """Verify _load_onnx_session unpacks single-Path resolve_lm3_weights returns and stays mock-ready on dummy paths."""
+        from scripts.vision.lm3_inference_engines import _load_onnx_session
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dummy_p = Path(tmpdir) / "dummy.pth"
+            dummy_p.write_bytes(b"dummy")
+            w_path, m_name, provs, sess = _load_onnx_session(
+                weights_path=dummy_p,
+                default_model_name="lm3_leaf_segmenter__yolo26x_seg_1024",
+                device="cpu",
+            )
+            self.assertIsInstance(w_path, Path)
+            self.assertEqual(m_name, "dummy")
+            self.assertEqual(provs, ["CPUExecutionProvider"])
+            self.assertIsNone(sess)
+
+            # Also verify weights_path=None does not raise TypeError when unpacking resolve_lm3_weights
+            with patch(
+                "scripts.vision.lm3_inference_engines.resolve_lm3_weights",
+                return_value=Path(tmpdir) / "LeafMachine3" / "models" / "plant_detector" / "model.onnx",
+            ):
+                w_none, m_none, provs_none, sess_none = _load_onnx_session(
+                    weights_path=None,
+                    default_model_name="lm3_plant_detector__yolo26x_det_1280",
+                    device="cpu",
+                )
+                self.assertEqual(m_none, "lm3_plant_detector__yolo26x_det_1280")
+                self.assertTrue(str(w_none).endswith("plant_detector/model.onnx"))
+                self.assertEqual(provs_none, ["CPUExecutionProvider"])
+                self.assertIsNone(sess_none)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,10 +39,17 @@ try:
         resolve_lm3_weights,
     )
 except ImportError:
-    def resolve_lm3_weights(model_key: str) -> Tuple[str, Path]:
-        stem = Path(model_key).stem
-        cand = PROJECT_ROOT / "models" / f"{stem}.onnx"
-        return stem, cand
+    def resolve_lm3_weights(
+        default_filename: str,
+        explicit_path: Optional[Union[str, Path]] = None,
+        project_root: Optional[Path] = None,
+    ) -> Path:
+        root = Path(project_root) if project_root is not None else PROJECT_ROOT
+        if explicit_path is not None and str(explicit_path).strip():
+            p = Path(explicit_path)
+            return p if p.is_absolute() else (root / p)
+        stem = Path(default_filename).stem
+        return root / "models" / "lm3" / f"{stem}.onnx"
 
 try:
     from scripts.vision.lm3_data_loader import (
@@ -443,6 +450,38 @@ def resolve_onnx_providers(
 
 
 _ONNX_SESSION_CACHE: Dict[Tuple[str, Tuple[str, ...]], Any] = {}
+_NVIDIA_LIBS_PRELOADED: bool = False
+
+
+def _preload_nvidia_cuda_libs() -> None:
+    """
+    Preloads bundled `nvidia-*` wheel CUDA 12 / cuDNN 9 shared libraries into the process
+    symbol table (`RTLD_GLOBAL`) so `onnxruntime-gpu` binds `CUDAExecutionProvider` even when
+    `LD_LIBRARY_PATH` was not exported prior to interpreter launch.
+    """
+    global _NVIDIA_LIBS_PRELOADED
+    if _NVIDIA_LIBS_PRELOADED:
+        return
+    _NVIDIA_LIBS_PRELOADED = True
+    try:
+        import ctypes
+        import nvidia  # type: ignore
+        roots = [Path(p) for p in getattr(nvidia, "__path__", ()) or ()]
+        lib_dirs = sorted({d for root in roots for d in root.glob("*/lib") if d.is_dir()})
+        so_files = [
+            p
+            for d in lib_dirs
+            for p in sorted(d.glob("lib*.so*"))
+            if p.is_file() and not p.is_symlink()
+        ]
+        for _ in range(2):
+            for p in so_files:
+                try:
+                    ctypes.CDLL(str(p), mode=ctypes.RTLD_GLOBAL)
+                except OSError:
+                    pass
+    except Exception:
+        pass
 
 
 def _load_onnx_session(
@@ -452,14 +491,24 @@ def _load_onnx_session(
     providers: Optional[Sequence[str]] = None,
 ) -> Tuple[Path, str, List[str], Optional[Any]]:
     """Loads or retrieves a cached ONNX Runtime InferenceSession with graceful fallback when absent."""
-    if weights_path is not None:
-        w_path = Path(weights_path)
-        m_name = w_path.stem or default_model_name
+    resolved = resolve_lm3_weights(default_model_name, explicit_path=weights_path)
+    if isinstance(resolved, tuple):
+        m_name, w_path = str(resolved[0]), Path(resolved[1])
     else:
-        m_name, w_path = resolve_lm3_weights(default_model_name)
+        w_path = Path(resolved)
+        if weights_path is not None and str(weights_path).strip():
+            wp_stem = Path(weights_path).stem
+            m_name = wp_stem if (wp_stem and wp_stem != "model") else (Path(default_model_name).stem or default_model_name)
+        else:
+            m_name = (w_path.stem if (w_path.stem and w_path.stem != "model") else Path(default_model_name).stem) or default_model_name
 
     prov_list = resolve_onnx_providers(device=device, requested_providers=providers)
-    if not w_path.exists():
+    try:
+        has_valid_weights = w_path.is_file() and w_path.stat().st_size >= 1024
+    except OSError:
+        has_valid_weights = False
+
+    if not has_valid_weights:
         logger.debug(f"LeafMachine3 ONNX weights not found at {w_path}; running in fallback/mock-ready mode.")
         return w_path, m_name, prov_list, None
 
@@ -468,13 +517,21 @@ def _load_onnx_session(
         return w_path, m_name, prov_list, _ONNX_SESSION_CACHE[cache_key]
 
     try:
+        import os
         import onnxruntime as ort
+        if "CUDAExecutionProvider" in prov_list:
+            _preload_nvidia_cuda_libs()
         sess_opts = ort.SessionOptions()
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        try:
+            sess_opts.log_severity_level = int(os.environ.get("LM3_ORT_LOG_SEVERITY", 3))
+        except ValueError:
+            sess_opts.log_severity_level = 3
         session = ort.InferenceSession(str(w_path), sess_options=sess_opts, providers=prov_list)
         _ONNX_SESSION_CACHE[cache_key] = session
-        logger.info(f"Loaded LeafMachine3 ONNX session ({m_name}) from {w_path} with providers={prov_list}")
-        return w_path, m_name, prov_list, session
+        bound_provs = session.get_providers()
+        logger.info(f"Loaded LeafMachine3 ONNX session ({m_name}) from {w_path} with providers={bound_provs}")
+        return w_path, m_name, bound_provs, session
     except Exception as exc:
         logger.debug(f"ONNX Runtime session initialization skipped for {w_path}: {exc}")
         return w_path, m_name, prov_list, None
@@ -980,8 +1037,19 @@ class LM3SpecimenSegmenter:
         prob_map: Optional[np.ndarray] = None
         if active_sess is not None:
             try:
-                resized = cv2.resize(image_bgr, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
-                inp_tensor = _bgr_to_nchw_float32(resized)
+                rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB) if image_bgr.ndim == 3 else cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2RGB)
+                scale = float(self.img_size) / float(max(sheet_h, sheet_w, 1))
+                h2 = max(1, int(round(sheet_h * scale)))
+                w2 = max(1, int(round(sheet_w * scale)))
+                r_rgb = cv2.resize(rgb, (w2, h2), interpolation=cv2.INTER_AREA)
+                top = (self.img_size - h2) // 2
+                left = (self.img_size - w2) // 2
+                canvas = np.full((self.img_size, self.img_size, 3), 255, dtype=np.uint8)
+                canvas[top : top + h2, left : left + w2] = r_rgb
+                im_mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+                im_std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+                norm_chw = np.transpose((canvas.astype(np.float32) / 255.0 - im_mean) / im_std, (2, 0, 1))
+                inp_tensor = np.ascontiguousarray(norm_chw[None, ...], dtype=np.float32)
                 input_name = active_sess.get_inputs()[0].name
                 raw_outs = active_sess.run(None, {input_name: inp_tensor})
                 if raw_outs:
@@ -992,6 +1060,8 @@ class LM3SpecimenSegmenter:
                         out_arr = out_arr[-1] if out_arr.shape[0] <= 4 else out_arr[:, :, 0]
                     if out_arr.min() < 0.0 or out_arr.max() > 1.0:
                         out_arr = _sigmoid(out_arr)
+                    if out_arr.shape[:2] == (self.img_size, self.img_size):
+                        out_arr = out_arr[top : top + h2, left : left + w2]
                     prob_map = cv2.resize(out_arr, (sheet_w, sheet_h), interpolation=cv2.INTER_LINEAR)
             except Exception as exc:
                 logger.debug(f"LM3SpecimenSegmenter ONNX inference fallback: {exc}")
@@ -1610,7 +1680,11 @@ class LM3PoseLandmarkEngine:
         if active_sess is not None and crop_bgr is not None and crop_bgr.size > 0:
             try:
                 crop_h, crop_w = crop_bgr.shape[:2]
-                lb_bgr, r, (dw, dh) = _letterbox_bgr(crop_bgr, self.img_size)
+                px, py = int(round(crop_w * 0.10)), int(round(crop_h * 0.10))
+                padded_bgr = cv2.copyMakeBorder(
+                    crop_bgr, py, py, px, px, cv2.BORDER_CONSTANT, value=(255, 255, 255)
+                )
+                lb_bgr, r, (dw, dh) = _letterbox_bgr(padded_bgr, self.img_size)
                 inp_tensor = _bgr_to_nchw_float32(lb_bgr)
                 input_name = active_sess.get_inputs()[0].name
                 raw_outs = active_sess.run(None, {input_name: inp_tensor})
@@ -1629,8 +1703,10 @@ class LM3PoseLandmarkEngine:
                             inv_r = 1.0 / max(float(r), 1e-6)
                             kps_out: Dict[str, Tuple[float, float, float]] = {}
                             for idx_k, kp_name in enumerate(self.KEYPOINT_NAMES):
-                                kx = max(0.0, min(float(crop_w), (float(kp_flat[idx_k, 0]) - dw) * inv_r)) + ox
-                                ky = max(0.0, min(float(crop_h), (float(kp_flat[idx_k, 1]) - dh) * inv_r)) + oy
+                                kx_pad = (float(kp_flat[idx_k, 0]) - dw) * inv_r
+                                ky_pad = (float(kp_flat[idx_k, 1]) - dh) * inv_r
+                                kx = max(0.0, min(float(crop_w), kx_pad - float(px))) + ox
+                                ky = max(0.0, min(float(crop_h), ky_pad - float(py))) + oy
                                 kc = float(np.clip(kp_flat[idx_k, 2], 0.0, 1.0))
                                 kps_out[kp_name] = (round(kx, 2), round(ky, 2), round(kc, 4))
                             pet_w = self._estimate_petiole_width_px(
