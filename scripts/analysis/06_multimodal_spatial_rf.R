@@ -5100,7 +5100,7 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   list(auc = round(min(1.0, max(0.0, auc_val)), 4), fpr = fpr, tpr = tpr)
 }
 
-.fit_single_maxent_model <- function(p_vec, X_df, w_vec = NULL) {
+.fit_single_maxent_model <- function(p_vec, X_df, w_vec = NULL, use_java_maxent = TRUE) {
   p_num <- as.integer(as.numeric(p_vec) > 0.5)
   X_mat <- as.data.frame(X_df)
   pred_cols <- colnames(X_mat)
@@ -5154,10 +5154,12 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   }
 
   # 2. Secondary Engine: dismo::maxent when maxent.jar is available
-  if (requireNamespace("dismo", quietly = TRUE) && requireNamespace("rJava", quietly = TRUE)) {
+  if (isTRUE(use_java_maxent) && requireNamespace("dismo", quietly = TRUE) && requireNamespace("rJava", quietly = TRUE)) {
     jar_p <- system.file("java", "maxent.jar", package = "dismo")
     if (nzchar(jar_p) && file.exists(jar_p) && n_pres >= 4L) {
-      mod_dm <- tryCatch(suppressWarnings(dismo::maxent(x = X_mat, p = p_num)), error = function(e) NULL)
+      mx_args <- c("nothreshold", "noproduct", "noplots", "nopictures", "threads=4")
+      if (n_pres < 15L) mx_args <- c(mx_args, "nohinge")
+      mod_dm <- tryCatch(suppressWarnings(dismo::maxent(x = X_mat, p = p_num, args = mx_args)), error = function(e) NULL)
       if (!is.null(mod_dm)) {
         return(list(
           engine = "dismo::maxent (cloglog)",
@@ -5198,11 +5200,14 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
     B <- Z
     if (isTRUE(use_quad)) {
       Z2 <- Z^2
+      dim(Z2) <- dim(Z)
       colnames(Z2) <- paste0(pred_cols, "__q2")
       B <- cbind(B, Z2)
     }
     if (isTRUE(use_hinge)) {
-      Zh <- pmax(0.0, sweep(Z, 2L, (q50_vec - mu_vec) / sd_vec, "-"))
+      Zh <- sweep(Z, 2L, (q50_vec - mu_vec) / sd_vec, "-")
+      Zh[Zh < 0.0] <- 0.0
+      dim(Zh) <- dim(Z)
       colnames(Zh) <- paste0(pred_cols, "__hg")
       B <- cbind(B, Zh)
     }
@@ -5393,6 +5398,8 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
     }
   }
 
+  land_mask_rast <- if (length(loaded_layers) > 0L) loaded_layers[[1L]] else NULL
+
   # Interpolate any remaining kept_vars across template_rast via fast vectorized IDW
   miss_vars <- setdiff(kept_vars, names(loaded_layers))
   if (length(miss_vars) > 0L) {
@@ -5421,6 +5428,9 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
       vn <- miss_vars[j]
       r_idw <- terra::rast(tmpl_rast)
       terra::values(r_idw) <- as.numeric(G_mat[, j])
+      if (!is.null(land_mask_rast)) {
+        r_idw <- tryCatch(terra::mask(r_idw, land_mask_rast), error = function(e) r_idw)
+      }
       names(r_idw) <- vn
       loaded_layers[[vn]] <- r_idw
     }
@@ -5451,10 +5461,35 @@ fit_and_project_maxent_sdm_maps <- function(
     if (!is.null(srf_res) && !is.null(srf_res$collinearity_screening$kept_vars)) {
       kept_vars <- srf_res$collinearity_screening$kept_vars
     } else {
-      kept_vars <- discover_candidate_eco_predictors(df, include_pheno = TRUE, min_finite = 2L)
+      imp_csv <- file.path(out_dir, "reports", "srf_feature_importance.csv")
+      if (file.exists(imp_csv)) {
+        imp_tbl <- tryCatch(utils::read.csv(imp_csv, stringsAsFactors = FALSE), error = function(e) NULL)
+        if (!is.null(imp_tbl) && "Predictor" %in% names(imp_tbl)) {
+          kept_vars <- as.character(imp_tbl$Predictor)
+        }
+      }
+      if (is.null(kept_vars) || length(kept_vars) == 0L) {
+        cand_eco <- discover_candidate_eco_predictors(df, include_pheno = FALSE, min_finite = 2L)
+        if (length(cand_eco) > 12L && exists("screen_collinear_predictors_by_block", mode = "function")) {
+          kept_vars <- tryCatch(
+            screen_collinear_predictors_by_block(df[, cand_eco, drop = FALSE], cor.threshold = 0.70, vif.threshold = 5.0)$kept_vars,
+            error = function(e) NULL
+          )
+        }
+        if (is.null(kept_vars) || length(kept_vars) == 0L) {
+          clim_c <- cand_eco[grepl("^bio[0-9]+", cand_eco)]
+          soil_c <- setdiff(cand_eco, clim_c)
+          kept_vars <- c(utils::head(clim_c, 6L), utils::head(soil_c, 6L))
+        }
+      }
     }
   }
   kept_vars <- intersect(kept_vars[!grepl("^MEM", kept_vars)], names(df))
+  if (length(kept_vars) > 14L) {
+    kv_clim <- kept_vars[grepl("^bio[0-9]+", kept_vars)]
+    kv_edaph <- setdiff(kept_vars, kv_clim)
+    kept_vars <- c(utils::head(kv_clim, 7L), utils::head(kv_edaph, 7L))
+  }
   if (length(kept_vars) == 0L) {
     kept_vars <- intersect(c("bio1_temp_mean", "bio12_precip_annual", "fine_soil_ph", "soil_ph", "fine_soil_sand", "soil_sand"), names(df))
   }
@@ -5636,7 +5671,7 @@ fit_and_project_maxent_sdm_maps <- function(
       tr_idx <- which(block_ids != fid)
       te_idx <- which(block_ids == fid)
       if (sum(p_vec[tr_idx] == 1L) >= 2L && sum(p_vec[tr_idx] == 0L) >= 2L && length(te_idx) >= 1L) {
-        mx_cv <- .fit_single_maxent_model(p_vec[tr_idx], X_comb[tr_idx, , drop = FALSE], w_vec[tr_idx])
+        mx_cv <- .fit_single_maxent_model(p_vec[tr_idx], X_comb[tr_idx, , drop = FALSE], w_vec[tr_idx], use_java_maxent = FALSE)
         rf_cv <- .fit_single_srf_binary_model(p_vec[tr_idx], X_comb[tr_idx, , drop = FALSE], w_vec[tr_idx], n_trees = 200L)
         oof_mx[te_idx] <- mx_cv$predict_cloglog(X_comb[te_idx, , drop = FALSE])
         oof_rf[te_idx] <- rf_cv$predict_prob(X_comb[te_idx, , drop = FALSE])
