@@ -3,23 +3,23 @@ name: pipeline-contract-audit
 description: Enforces LeafMachine3 computer vision and morphometric guardrails, audits cross-stage Python and R SQLite/CSV schema contracts, and runs the test suite.
 ---
 
-# Pipeline Contract Audit & CV Guardrails (`UNC-BOT-SOP-2026-04-REV5`)
+# Pipeline Contract Audit and CV Guardrails (`UNC-BOT-SOP-2026-04-REV5`)
 
 Use this skill before committing code changes, after modifying pipeline stages (`01` through `08`), or when diagnosing missing-column, coordinate unscaling, or join-key discrepancies across Python and R scripts.
 
 ---
 
-## Part 1: Computer Vision & Morphometric Guardrails (LeafMachine3)
+## Part 1: Computer Vision and Morphometric Guardrails (LeafMachine3)
 
 Every CV, extraction, and morphometrics module in `scripts/vision/`, `scripts/pipeline/`, and `scripts/morphometrics/` must enforce these invariants:
 
 ### 1. Working-Frame Coordinate Unscaling (`work_scale`)
-* When LeafMachine3 processes downscaled/letterboxed representations (`work_scale`), all bounding boxes, polygon vertices, landmark coordinates, and binary masks saved to database tables or exported manifests must be divided by `work_scale` to return to native full-sheet coordinates:
+* When LeafMachine3 processes downscaled or letterboxed representations (`work_scale`), all bounding boxes, polygon vertices, landmark coordinates, and binary masks saved to database tables or exported manifests must be divided by `work_scale` to return to native full-sheet coordinates:
   $$\text{coord}_{\text{native}} = \frac{\text{coord}_{\text{work}}}{\text{work\_scale}}$$
 * Columns with suffix `_px` (e.g., `petiole_length_px`, `plant_height_px`, contour vertices) must strictly represent coordinates on the original unscaled image.
 
-### 2. 3-Class Organ Mask Handling & UNet++ v9 Rachis Bridging
-* Module 8 instance segmentation (`lm3_leaf_segmenter__yolo26x_seg_1024`) outputs 3 semantic classes: `Leaf` (lamina, class 0), `Petiole` (class 1), and `Hole` (sinuses/perforations, class 2).
+### 2. 3-Class Organ Mask Handling and UNet++ v9 Rachis Bridging
+* Module 8 instance segmentation (`lm3_leaf_segmenter__yolo26x_seg_1024`) outputs 3 semantic classes: `Leaf` (lamina, class 0), `Petiole` (class 1), and `Hole` (sinuses or perforations, class 2).
 * Hole pixels falling within lamina polygons must be subtracted from the blade mask.
 * In deeply dissected or pinnatifid leaves where narrow rachis segments experience minor breaks, Module 4 UNet++ v9 `specimen_paper_cleaned_mask` (`LLR_Hyst_KeepBlobs: true` color likelihood) acts as an anatomical bridge constraint (`bridge_dissected_rachis_components`), reconnecting genuine pinnae without bridging across mounting paper.
 
@@ -33,13 +33,13 @@ Every CV, extraction, and morphometrics module in `scripts/vision/`, `scripts/pi
 
 ### 4. Strict Active vs. Passive Determiner Authority Split
 * **Active Reference Anchors (`Tier_1_Gold`, `Tier_2_Silver`, promoted `Tier_3_Bronze`, `Tier_0_Type`):** Used exclusively for model fitting, Mahalanobis scatter estimation, CDA discriminant axes, and Spatial RF training.
-* **Passively Projected Vouchers (`Tier_4_Unverified` / unpromoted `Tier_3_Bronze`):** Assigned weight $0.0$ during training and projected into fitted spaces without altering reference geometry.
+* **Passively Projected Vouchers (`Tier_4_Unverified` or unpromoted `Tier_3_Bronze`):** Assigned weight $0.0$ during training and projected into fitted spaces without altering reference geometry.
 
 ---
 
-## Part 2: Automated Cross-Stage SQLite/CSV Contract & Hygiene Audit
+## Part 2: Automated Cross-Stage SQLite/CSV Contract and Hygiene Audit
 
-### 1. Zero `_archive` Coupling & Legacy Token Scan
+### 1. Zero `_archive` Coupling and Legacy Token Scan
 Active files must never reference `_archive` paths and must contain zero legacy framework remnants:
 
 ```bash
@@ -129,7 +129,7 @@ checks = [
     ("05 uses promoted bronze anchor parity & abaxial artifact gate", "is_promoted_bronze" in s05 and "filter_abaxial_artifacts" in s05),
     ("05 uses foreground patch pooling, OOD scoring & attention ratio", ("foreground_masked_patch_pooling" in s05 or "compute_foreground_tissue_mask" in s05) and "vision_ood_score" in s05),
     ("05 enforces type visual prototype control & Cleanlab corruption immunity", "compute_type_visual_control" in s_vis and "fit_calibrated_oof_fold_classifier" in s05),
-    ("06 uses 0-15cm depth weighting, VIF pruning & spatial_block_cv_acc", "left_join" in s06 and "prune_collinear_predictors" in s06 and "spatial_block_cv_acc" in s06),
+    ("06 uses 0 to 15 cm depth weighting, VIF pruning & spatial_block_cv_acc", "left_join" in s06 and "prune_collinear_predictors" in s06 and "spatial_block_cv_acc" in s06),
     ("06 pools Spatial Block-CV RF posteriors and computes edaphic_z_score", "spatial_block_cv_acc" in s06 and "edaphic_z_score" in s06),
     ("06 derives locus classicus reference set & type_edaphic_z_score", "compute_type_locality_ecological_control" in s06 and "type_edaphic_z_score" in s06),
     ("06 enforces resolve_step06_authority_weights fallback pinning", "resolve_step06_authority_weights" in s06 and "3.0" in s06),
@@ -150,10 +150,14 @@ if failed:
 EOF
 ```
 
-### 3. Unit & Integration Test Suite Verification Gate
-Always execute the comprehensive test suite to confirm zero regressions:
+### 3. Punctuation, AI Buzzwords, and Test Suite Gate
+Always execute the verification gate to confirm zero regressions:
 
 ```bash
+# Verify zero em/en dashes and zero AI buzzwords across repository documentation
+grep -rnP "[\x{2013}\x{2014}]" README.md docs/TAXONOMIC_SOP.md AGENTS.md && exit 1 || echo "PASS: Zero em/en dashes found"
+grep -rnI -iE "operationaliz|leverag|utiliz|holistic|synergist|multifaceted|paradigm" README.md docs/TAXONOMIC_SOP.md AGENTS.md && exit 1 || echo "PASS: Zero AI buzzwords found"
+
 pytest scripts/tests/ -q
 pytest scripts/tests/test_code_hygiene.py -q
 ```
