@@ -1659,7 +1659,7 @@ class SegmentAndExtractPipeline:
                             if area0 >= 1.15 * area1 and (inter / area1) >= 0.50:
                                 nested_in_c0 = True
                     if encloses_c0_sublobe or (
-                        not nested_in_c0 and sc1 >= 0.45 and area1 >= 0.65 * med_c0_area
+                        len(c0_items) <= 4 and not nested_in_c0 and sc1 >= 0.45 and area1 >= 1.35 * med_c0_area
                     ):
                         selected_s1_leaves.append((b1, sc1, cl1))
 
