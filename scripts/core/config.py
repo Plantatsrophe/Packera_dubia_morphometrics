@@ -257,19 +257,14 @@ class PathsConfig:
     revision_report_md: Path = PROJECT_ROOT / "outputs" / "reports" / "Packera_Taxonomic_Revision_Summary.md"
     gmm_report_csv: Path = PROJECT_ROOT / "outputs" / "reports" / "gmm_bayes_factors_summary.csv"
     summary_log: Path = PROJECT_ROOT / "outputs" / "reports" / "voucher_ingestion_summary.log"
+    lm3_root: Path = PROJECT_ROOT / "LeafMachine3"
+    models_dir: Path = PROJECT_ROOT / "models" / "lm3"
     model_weights: Path = (
-        PROJECT_ROOT
-        / "LeafMachine2"
-        / "leafmachine2"
-        / "segmentation"
-        / "models"
-        / "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR"
-        / "model_final.pth"
+        PROJECT_ROOT / "models" / "lm3" / "lm3_leaf_segmenter__yolo26x_seg_1024.onnx"
     )
     quarantine_dir: Path = PROJECT_ROOT / "data" / "raw_vouchers_quarantine"
     tables_dir: Path = PROJECT_ROOT / "data" / "tables"
     figures_dir: Path = PROJECT_ROOT / "outputs" / "figures"
-    models_dir: Path = PROJECT_ROOT / "models"
 
 
 @dataclass(frozen=True)
@@ -439,21 +434,28 @@ class HarvestingConfig:
 
 @dataclass(frozen=True)
 class SegmentationConfig:
-    """Phase 2 PointRend deep segmentation parameters."""
+    """Phase 2 LeafMachine3 ONNX segmentation and morphological extraction parameters."""
+    lm3_root: Path = PROJECT_ROOT / "LeafMachine3"
+    models_dir: Path = PROJECT_ROOT / "models" / "lm3"
     model_weights: Path = (
-        PROJECT_ROOT
-        / "LeafMachine2"
-        / "leafmachine2"
-        / "segmentation"
-        / "models"
-        / "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR"
-        / "model_final.pth"
+        PROJECT_ROOT / "models" / "lm3" / "lm3_leaf_segmenter__yolo26x_seg_1024.onnx"
     )
-    detector_version: str = "PLANT_LeafPriority"
-    minimum_confidence_threshold: float = 0.65
+    plant_detector_model: str = "lm3_plant_detector__yolo26x_det_1280"
+    archival_detector_model: str = "lm3_archival_detector__yolo26x_det_1280"
+    specimen_segmenter_model: str = "lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain"
+    leaf_segmenter_model: str = "lm3_leaf_segmenter__yolo26x_seg_1024"
+    landmark_detector_model: str = "lm3_landmark_detector__yolo26x_pose_640"
+    mp_conversion_model: str = "lm3_mp_conversion_factor__sqrt_fit"
+    detector_version: str = "lm3_plant_detector__yolo26x_det_1280"
+    max_working_dim: int = 3200
+    paperclean: bool = True
+    llr_hyst_keep_blobs: bool = True
+    use_cf_predicted_by_mp: bool = True
+    ect_num_dirs: int = 360
+    minimum_confidence_threshold: float = 0.50
     treat_leaflet_as_leaf_whole: bool = False
     use_efds_for_png_masks: bool = False
-    do_apply_landmarks: bool = False
+    do_apply_landmarks: bool = True
     score_thresh: float = 0.35
     min_ucs: float = 0.85
     min_solidity: float = 0.72
@@ -466,15 +468,17 @@ class SegmentationConfig:
 
 @dataclass(frozen=True)
 class ModelsConfig:
-    """Model weights checkpoint paths, remote URLs, and integrity hashes."""
+    """LeafMachine3 ONNX model identifiers, checkpoint paths, remote URLs, and integrity hashes."""
+    lm3_root: Path = PROJECT_ROOT / "LeafMachine3"
+    models_dir: Path = PROJECT_ROOT / "models" / "lm3"
+    plant_detector_model: str = "lm3_plant_detector__yolo26x_det_1280"
+    archival_detector_model: str = "lm3_archival_detector__yolo26x_det_1280"
+    specimen_segmenter_model: str = "lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain"
+    leaf_segmenter_model: str = "lm3_leaf_segmenter__yolo26x_seg_1024"
+    landmark_detector_model: str = "lm3_landmark_detector__yolo26x_pose_640"
+    mp_conversion_model: str = "lm3_mp_conversion_factor__sqrt_fit"
     pcd_weights_path: Path = (
-        PROJECT_ROOT
-        / "LeafMachine2"
-        / "leafmachine2"
-        / "segmentation"
-        / "models"
-        / "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR"
-        / "model_final.pth"
+        PROJECT_ROOT / "models" / "lm3" / "lm3_plant_detector__yolo26x_det_1280.onnx"
     )
     pcd_weights_url: str = ""
     pcd_weights_sha256: str = ""
@@ -703,18 +707,30 @@ class PipelineConfig:
 
         seg_dict = raw_cfg.get("segmentation", {})
         seg_kwargs = {k: v for k, v in seg_dict.items() if k in SegmentationConfig.__dataclass_fields__}
-        if "model_weights" in seg_kwargs:
-            seg_kwargs["model_weights"] = _resolve(seg_kwargs["model_weights"])
+        for path_k in ("model_weights", "lm3_root", "models_dir"):
+            if path_k in seg_kwargs and seg_kwargs[path_k] is not None:
+                seg_kwargs[path_k] = _resolve(seg_kwargs[path_k])
         segmentation = SegmentationConfig(**seg_kwargs)
 
         models_dict = raw_cfg.get("models", {})
-        models_kwargs: Dict[str, Any] = {}
-        if "pcd_weights_path" in models_dict:
-            models_kwargs["pcd_weights_path"] = _resolve(models_dict["pcd_weights_path"])
-        if "pcd_weights_url" in models_dict:
-            models_kwargs["pcd_weights_url"] = str(models_dict["pcd_weights_url"])
-        if "pcd_weights_sha256" in models_dict:
-            models_kwargs["pcd_weights_sha256"] = str(models_dict["pcd_weights_sha256"])
+        models_kwargs: Dict[str, Any] = {
+            k: v for k, v in models_dict.items() if k in ModelsConfig.__dataclass_fields__
+        }
+        for path_k in ("pcd_weights_path", "lm3_root", "models_dir"):
+            if path_k in models_kwargs and models_kwargs[path_k] is not None:
+                models_kwargs[path_k] = _resolve(models_kwargs[path_k])
+        for str_k in (
+            "plant_detector_model",
+            "archival_detector_model",
+            "specimen_segmenter_model",
+            "leaf_segmenter_model",
+            "landmark_detector_model",
+            "mp_conversion_model",
+            "pcd_weights_url",
+            "pcd_weights_sha256",
+        ):
+            if str_k in models_kwargs and models_kwargs[str_k] is not None:
+                models_kwargs[str_k] = str(models_kwargs[str_k])
         models = ModelsConfig(**models_kwargs)
 
         macro_dict = raw_cfg.get("macroecology", {})

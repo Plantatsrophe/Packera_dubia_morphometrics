@@ -11,8 +11,9 @@ Description:
     storage (`data/packera_pipeline.sqlite`) and synchronized CSV snapshots:
       - harvest: Queries GBIF occurrences, scores determiner tiers, downloads imagery,
                  persists vouchers and taxon synonyms to SQLite and CSV.
-      - segment: PointRend deep segmentation, bilateral midrib reflection, contour export,
-                 storing 120-vertex JSON contours in extracted_leaves and CSVs.
+      - segment: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) segmentation,
+                 bilateral midrib reflection, and contour export, storing 120-vertex
+                 JSON contours in extracted_leaves and CSVs.
       - morphometrics: Rscript EFA (Momocs) and GMM/CDA clustering (MorphoTools2),
                        querying extracted_leaves in batch and persisting OTUs.
       - synthesis: Canonical Phases 5-7 (Vision XAI, Spatial RF, & Triage Dashboard),
@@ -488,19 +489,39 @@ def check_environment(args: Optional[argparse.Namespace] = None) -> bool:
     # 4. Model Checkpoint & Sub-Environments
     # -------------------------------------------------------------------------
     print("\n[4/4] Model Checkpoint & Sub-Environments:")
-    venv_lm2 = PROJECT_ROOT / ".venv_LM2"
-    venv_lm2_python = venv_lm2 / "bin" / "python"
-    if venv_lm2.is_dir() and (venv_lm2_python.exists() or (venv_lm2 / "Scripts" / "python.exe").exists()):
-        print(f"  [PASS] LeafMachine2 virtual environment found: {venv_lm2.name}/")
+    venv_lm3_candidates = [
+        PROJECT_ROOT / "LeafMachine3" / ".venv",
+        PROJECT_ROOT / ".venv_LM3",
+    ]
+    venv_lm3 = next(
+        (
+            cand
+            for cand in venv_lm3_candidates
+            if cand.is_dir()
+            and ((cand / "bin" / "python").exists() or (cand / "Scripts" / "python.exe").exists())
+        ),
+        None,
+    )
+    if venv_lm3 is not None:
+        rel_lm3 = venv_lm3.relative_to(PROJECT_ROOT) if venv_lm3.is_relative_to(PROJECT_ROOT) else venv_lm3
+        print(f"  [PASS] LeafMachine3 virtual environment found: {rel_lm3}/")
     else:
-        print(f"  [WARN] LeafMachine2 environment (.venv_LM2) not found at {venv_lm2}")
-        warning_count += 1
-        if strict:
-            critical_failure = True
+        try:
+            ort_mod = importlib.import_module("onnxruntime")
+            ort_ver = getattr(ort_mod, "__version__", "installed")
+            print(f"  [PASS] LeafMachine3 ONNX Runtime available in active environment (onnxruntime {ort_ver})")
+        except ImportError:
+            print(
+                f"  [WARN] LeafMachine3 environment (LeafMachine3/.venv or .venv_LM3) not found at {venv_lm3_candidates[0]}. "
+                "Run `bash setup_leafmachine3.sh` to provision LeafMachine3."
+            )
+            warning_count += 1
+            if strict:
+                critical_failure = True
 
     default_seg_weights = (
-        "LeafMachine2/leafmachine2/segmentation/models/"
-        "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
+        "LeafMachine3/leafmachine3/models/"
+        "lm3_leaf_segmenter__yolo26x_seg_1024.onnx"
     )
     model_rel = (
         (
@@ -638,39 +659,42 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     logger.info("Phase 1 completed successfully.")
 
 
-def get_lm2_python_executable() -> Path:
-    """Resolves the Python interpreter executable for LeafMachine2 execution.
+def get_lm3_python_executable() -> Path:
+    """Resolves the Python interpreter executable for LeafMachine3 execution.
 
     Checks for:
-      - Unix/Ubuntu: .venv_LM2/bin/python
-      - Windows: .venv_LM2/Scripts/python.exe
+      - Unix/Ubuntu: LeafMachine3/.venv/bin/python and .venv_LM3/bin/python
+      - Windows: LeafMachine3/.venv/Scripts/python.exe and .venv_LM3/Scripts/python.exe
 
     Returns:
-        Path: Path to the LM2 virtual environment Python interpreter if found,
+        Path: Path to the LM3 virtual environment Python interpreter if found,
         otherwise falls back to sys.executable and logs a warning advising setup
-        via setup_leafmachine2.sh.
+        via setup_leafmachine3.sh.
     """
-    venv_lm2 = PROJECT_ROOT / ".venv_LM2"
+    venv_lm3_primary = PROJECT_ROOT / "LeafMachine3" / ".venv"
+    venv_lm3_alt = PROJECT_ROOT / ".venv_LM3"
     candidates = [
-        venv_lm2 / "bin" / "python",
-        venv_lm2 / "Scripts" / "python.exe",
+        venv_lm3_primary / "bin" / "python",
+        venv_lm3_alt / "bin" / "python",
+        venv_lm3_primary / "Scripts" / "python.exe",
+        venv_lm3_alt / "Scripts" / "python.exe",
     ]
     for candidate in candidates:
         if candidate.exists():
             return candidate
 
     logger.warning(
-        "LeafMachine2 dedicated virtual environment (.venv_LM2) not found at %s. "
+        "LeafMachine3 dedicated virtual environment (LeafMachine3/.venv or .venv_LM3) not found at %s. "
         "Falling back to current active interpreter (%s). "
-        "Please run 'bash setup_leafmachine2.sh' to configure the dedicated LM2 environment.",
-        venv_lm2,
+        "Please run 'bash setup_leafmachine3.sh' to configure the dedicated LM3 environment.",
+        venv_lm3_primary,
         sys.executable,
     )
     return Path(sys.executable)
 
 
 def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
-    """Executes Phase 2: PointRend segmentation, midrib reflection, and contour extraction."""
+    """Executes Phase 2: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) segmentation, midrib reflection, and contour extraction."""
     logger.info("=== Starting Phase 2: Segmentation & Geometric Leaf Extraction ===")
     start_ts = datetime.now().astimezone().isoformat()
     run_dir, cfg = _resolve_active_run_context(args, cfg)
@@ -702,29 +726,29 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
             except Exception as exc:
                 logger.warning(f"Automated weights acquisition could not complete: {exc}")
                 default_seg_weights = (
-                    "LeafMachine2/leafmachine2/segmentation/models/"
-                    "Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
+                    "LeafMachine3/leafmachine3/models/"
+                    "lm3_leaf_segmenter__yolo26x_seg_1024.onnx"
                 )
                 model_weights = Path(
                     cfg.get("paths", {}).get("model_weights", default_seg_weights)
                 )
-    verify_file_exists(model_weights, "PointRend model weights checkpoint")
+    verify_file_exists(model_weights, "LeafMachine3 model weights checkpoint")
 
     device = args.device or cfg.get("segmentation", {}).get("device", "cuda")
     if device == "cuda":
         check_gpu_availability(warn_only=True)
 
-    lm2_python = get_lm2_python_executable()
+    lm3_python = get_lm3_python_executable()
     try:
-        display_path = lm2_python.relative_to(PROJECT_ROOT).as_posix()
+        display_path = lm3_python.relative_to(PROJECT_ROOT).as_posix()
     except ValueError:
-        display_path = str(lm2_python)
-    logger.info(f"Executing LeafMachine2 segmentation via: {display_path}")
+        display_path = str(lm3_python)
+    logger.info(f"Executing LeafMachine3 segmentation via: {display_path}")
 
     default_out_dir = (run_dir / "data") if run_dir is not None else (PROJECT_ROOT / "data")
     out_dir = Path(args.output_dir or default_out_dir)
     cmd = [
-        str(lm2_python), str(script_path),
+        str(lm3_python), str(script_path),
         "--vouchers", str(vouchers_csv),
         "--model-weights", str(model_weights),
         "--output-dir", str(out_dir),
@@ -754,7 +778,7 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as exc:
-        logger.error(f"LeafMachine2 segmentation failed with exit code {exc.returncode}")
+        logger.error(f"LeafMachine3 segmentation failed with exit code {exc.returncode}")
         sys.exit(exc.returncode)
 
     contours_dir = (run_dir / "data" / "contours") if run_dir is not None else Path(cfg["paths"]["contours_dir"])
@@ -1173,8 +1197,9 @@ def run_calibrate_geometry(args: argparse.Namespace, cfg: PipelineConfig) -> Non
     # Resolve Python interpreter with required dependencies
     py_candidates = [
         PROJECT_ROOT / ".venv" / "bin" / "python",
-        PROJECT_ROOT / ".venv_LM2" / "bin" / "python",
-        get_lm2_python_executable(),
+        PROJECT_ROOT / "LeafMachine3" / ".venv" / "bin" / "python",
+        PROJECT_ROOT / ".venv_LM3" / "bin" / "python",
+        get_lm3_python_executable(),
     ]
     python_bin = sys.executable
     for cand in py_candidates:
@@ -1249,7 +1274,7 @@ def _add_common_subparser_args(
             dest="gpu_batch_size",
             type=int,
             default=None,
-            help="GPU inference batch size for PointRend crops and DINOv2 (default: stage-optimal).",
+            help="GPU inference batch size for LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) and DINOv2 (default: stage-optimal).",
         )
         subparser.add_argument(
             "--batch-size",
@@ -1307,7 +1332,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="gpu_batch_size",
         type=int,
         default=None,
-        help="GPU inference batch size for PointRend crops and DINOv2 (default: stage-optimal).",
+        help="GPU inference batch size for LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) and DINOv2 (default: stage-optimal).",
     )
     parser.add_argument(
         "--batch-size",
@@ -1334,7 +1359,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: download-weights
     p_dl = subparsers.add_parser(
         "download-weights",
-        help="Download and verify fine-tuned PointRend model weights from remote repository",
+        help="Download and verify LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) model weights from remote repository",
     )
     p_dl.add_argument(
         "--force",
@@ -1409,7 +1434,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_segment = subparsers.add_parser("segment", help="Phase 2: Segment leaves & export contours")
     _add_common_subparser_args(p_segment, include_gpu=True)
     p_segment.add_argument("--vouchers", type=Path, default=None, help="Input curated vouchers CSV")
-    p_segment.add_argument("--weights", type=Path, default=None, help="Model weights checkpoint (.pth)")
+    p_segment.add_argument("--weights", type=Path, default=None, help="LeafMachine3 model weights checkpoint (.onnx / .pt)")
     p_segment.add_argument("--output-dir", type=Path, default=None, help="Root output directory")
     p_segment.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Inference device")
     p_segment.add_argument("--min-solidity", type=float, default=None, help="Tier 1 min solidity")
@@ -1421,7 +1446,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="sam2_refine",
         action="store_true",
         default=False,
-        help="Enable automated LM2-guided SAM 2 sub-pixel boundary refinement on Stage 2 leaf crops.",
+        help="Enable automated LM3-guided SAM 2 sub-pixel boundary refinement on Stage 2 leaf crops.",
     )
     p_segment.add_argument(
         "--sam2-checkpoint",
@@ -1568,7 +1593,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     p_all.add_argument("--vouchers", type=Path, default=None, help="Input curated vouchers CSV")
-    p_all.add_argument("--weights", type=Path, default=None, help="Model weights checkpoint (.pth)")
+    p_all.add_argument("--weights", type=Path, default=None, help="LeafMachine3 model weights checkpoint (.onnx / .pt)")
     p_all.add_argument("--output-dir", type=Path, default=None, help="Root output directory")
     p_all.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Inference device")
     p_all.add_argument("--min-solidity", type=float, default=None, help="Tier 1 min solidity")
@@ -1580,7 +1605,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="sam2_refine",
         action="store_true",
         default=False,
-        help="Enable automated LM2-guided SAM 2 sub-pixel boundary refinement on Stage 2 leaf crops.",
+        help="Enable automated LM3-guided SAM 2 sub-pixel boundary refinement on Stage 2 leaf crops.",
     )
     p_all.add_argument(
         "--sam2-checkpoint",

@@ -120,7 +120,7 @@ def ensure_model_weights(
     force: bool = False,
 ) -> Path:
     """
-    Ensure the PointRend model weights checkpoint exists and is non-empty.
+    Ensure the LeafMachine3 ONNX model weights checkpoint exists and is non-empty.
 
     Downloads the weights automatically from configured remote URL if missing
     or if force=True.
@@ -135,7 +135,7 @@ def ensure_model_weights(
         raw_path = (
             models_dict.get("pcd_weights_path")
             or paths_dict.get("model_weights")
-            or "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth"
+            or "models/lm3/lm3_plant_detector__yolo26x_det_1280.onnx"
         )
         weights_path = Path(raw_path)
         if not weights_path.is_absolute():

@@ -584,7 +584,7 @@ class TestCleanlabVisionXAI(unittest.TestCase):
         """Verify Phase 2 label-blind Dissected/Bipinnatisect routing and non-dubia dynamic Step 02 figures."""
         import cv2
         from unittest.mock import patch as mock_patch
-        from scripts.vision.lm2_geometry_utils import classify_and_route_leaf
+        from scripts.vision.leaf_geometry_utils import classify_and_route_leaf
 
         step02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
 

@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-Module: lm2_geometry_utils.py
+Module: leaf_geometry_utils.py
 Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-    Consolidated geometric quality gatekeeping, midrib pose estimation,
+    Consolidated LeafMachine3 (lm3) geometric quality gatekeeping, 31-keypoint
+    midrib/petiole pose estimation, 3-class (lamina/petiole/hole) mask routing,
     bilateral hemi-blade reflection, adaptive DBSCAN spatial clustering,
     and standardized contour coordinate extraction.
 
 Key Capabilities:
-    1. Geometric Quality Gatekeeping:
+    1. Geometric Quality Gatekeeping (LeafMachine3 YOLO26x & UNet++ v9):
        - Unoccluded Completeness Score (UCS >= 0.85): Area_mask / (0.70 * Area_min_rect)
        - Solidity (Solidity >= 0.72): Area_mask / Area_convex_hull
-       - Longitudinal midrib axis angle and apex/base pose estimation
+       - Longitudinal midrib axis angle and apex/base pose estimation anchored by
+         LM3 31-keypoint anatomical landmarks (lamina_base, lamina_tip, midvein_1..15)
     2. Vectorized Hemi-Blade Reflection (Tier 2):
-       - Primary midrib alignment via affine rotation
+       - Primary midrib alignment via affine rotation or LM3 15-point midvein trace
        - Vectorized margin profile defect calculation across upper/lower halves
        - Fully vectorized slice reflection in NumPy (zero manual pixel loops)
        - Morphological seam closure
@@ -1316,6 +1318,7 @@ from scripts.vision.leaf_gatekeeper import (  # noqa: E402
     LeafRoutingResult,
     TIER_1_DIRECT,
     TIER_2_REFLECTED,
+    _extract_lm3_midvein_trace,
     _has_artificial_straight_occlusion_cut,
     bridge_dissected_rachis_components,
     check_boundary_tissue_continuity,
@@ -1340,7 +1343,7 @@ from scripts.vision.organ_crown_metrics import (  # noqa: E402
     crop_dense_rosette_tier4,
     detect_ruler_scale_hough,
     estimate_rosette_crown_point,
-    generate_sam2_prompts_from_lm2_mask,
+    generate_sam2_prompts_from_leaf_mask,
     is_topologically_connected_mask,
     route_tier3_open_curve,
 )
@@ -1352,6 +1355,7 @@ __all__ = [
     "compute_geometric_metrics_and_pose",
     "is_tier1_pristine",
     "BoundaryContinuityResult",
+    "_extract_lm3_midvein_trace",
     "_has_artificial_straight_occlusion_cut",
     "check_boundary_tissue_continuity",
     "compute_classical_shape_descriptors",
@@ -1379,7 +1383,7 @@ __all__ = [
     "route_tier2_reflected",
     "export_standardized_contour",
     "SAM2PromptBundle",
-    "generate_sam2_prompts_from_lm2_mask",
+    "generate_sam2_prompts_from_leaf_mask",
     "is_topologically_connected_mask",
     "cluster_plant_individuals",
     "cluster_voucher_plants_dbscan",

@@ -12,7 +12,7 @@
 1. [Environment & Setup](#1-environment--setup)
    - [Windows / WSL 2 Setup Guide (`docs/WINDOWS_WSL2_SETUP.md`)](WINDOWS_WSL2_SETUP.md)
    - [A. Primary Python Pipeline Environment (`.venv`)](#a-primary-python-pipeline-environment-venv)
-   - [B. LeafMachine2 Dedicated Virtual Environment (`.venv_LM2`)](#b-leafmachine2-dedicated-virtual-environment-venv_lm2)
+   - [B. LeafMachine3 Dedicated Virtual Environment (`.venv_LM3`)](#b-leafmachine3-dedicated-virtual-environment-venv_lm3)
    - [C. R Statistical Computing Environment](#c-r-statistical-computing-environment)
    - [⚡ Quick-Start Copy-Paste Terminal Cheat-Sheet](#-quick-start-copy-paste-terminal-cheat-sheet)
    - [Recommended Multi-Stage Execution Sequence](#recommended-multi-stage-execution-sequence)
@@ -22,7 +22,7 @@
    - [Tier 3: Standalone Per-Step & Utility Script Flags](#tier-3-standalone-per-step--utility-script-flags)
 3. [Eight-Phase Automated Pipeline Overview](#3-eight-phase-automated-pipeline-overview)
 4. [Phase 1: Voucher Ingestion & Strict Active/Passive Authority Stratification](#phase-1-voucher-ingestion--strict-activepassive-authority-stratification)
-5. [Phase 2: Stock LeafMachine2 v2.2+ Segmentation, Boundary-Continuity Lobe Rejection & Cohort-Adaptive Organ Scaling](#phase-2-stock-leafmachine2-v22-segmentation-boundary-continuity-lobe-rejection--cohort-adaptive-organ-scaling)
+5. [Phase 2: LeafMachine3 ONNX Runtime Segmentation, Boundary-Continuity Lobe Rejection & Cohort-Adaptive Organ Scaling](#phase-2-leafmachine3-onnx-runtime-segmentation-boundary-continuity-lobe-rejection--cohort-adaptive-organ-scaling)
 6. [Phase 3: Strict Tier-1 Closed-Contour EFA, Dynamic Harmonic Power Calibration, Symmetrization & OTU Medians](#phase-3-strict-tier-1-closed-contour-efa-dynamic-harmonic-power-calibration-symmetrization--otu-medians)
 7. [Phase 4: Klingenberg Allometry, Dynamic Morphometric Subspace Selection, Dual CDA & Parametric MANOVA](#phase-4-klingenberg-allometry-dynamic-morphometric-subspace-selection-dual-cda--parametric-manova)
 8. [Phase 5: Taphonomic Indumentum-Blind Vision XAI, Foreground Patch Pooling & OOD Scoring](#phase-5-taphonomic-indumentum-blind-vision-xai-foreground-patch-pooling--ood-scoring)
@@ -48,15 +48,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### B. LeafMachine2 Dedicated Virtual Environment (`.venv_LM2`)
-Houses stock LeafMachine2 v2.2+, YOLOv5 (`PLANT_LeafPriority` / `LeafPriority.pt` and the 38-class Ruler Detector), and compiled Detectron2 PointRend (`leaf_seg_rcnn_v2_1`) with strict ABI pins (`numpy<2.0`, `opencv-contrib-python<=4.10.0.84`):
+### B. LeafMachine3 Dedicated Virtual Environment (`.venv_LM3`)
+Houses LeafMachine3 ONNX Runtime (`lm3_plant_detector__yolo26x_det_1280`, `lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain`, `lm3_leaf_segmenter__yolo26x_seg_1024`, `lm3_landmark_detector__yolo26x_pose_640`, and 3-model Ruler Lattice Solver):
 ```bash
-bash setup_leafmachine2.sh
+bash setup_leafmachine3.sh
 ```
 
 > [!NOTE]
 > **Zero Custom Retraining or Manual Annotation Required:**  
-> The automated production pipeline uses stock LeafMachine2 v2.2+ `PLANT_LeafPriority` and `leaf_seg_rcnn_v2_1` weights out of the box. The standalone utilities in `scripts/annotation_and_training/` and `docs/SAM2_Precision_Botanical_Annotation_Guide.txt` are archived/optional tools not required by the automated pipeline.
+> The automated production pipeline uses locked LeafMachine3 ONNX Runtime weights out of the box. The standalone utilities in `scripts/annotation_and_training/` and `docs/SAM2_Precision_Botanical_Annotation_Guide.txt` are archived/optional tools not required by the automated pipeline.
 
 ### C. R Statistical Computing Environment
 Requires R $\ge 4.3$ with database packages (`DBI`, `RSQLite`), CRAN statistical and spatial macroecological packages (`remotes`, `tidyverse`, `optparse`, `mclust`, `clustvarsel`, `MorphoTools2`, `RRPP`, `vegan`, `terra`, `sf`, `geodata`, `soilDB`, `spatialRF`, `ranger`, `adespatial`, `blockCV`, `ecospat`, `ENMTools`, `igraph`, `patchwork`, `viridis`) and `Momocs` (`remotes::install_github("MomX/Momocs")`):
@@ -132,7 +132,7 @@ To execute a complete, rigorous systematic revision of *Packera dubia* and allie
 
 | Stage | Objective | Production Command |
 | :--- | :--- | :--- |
-| **Stage 1: Baseline Harmonization** | Full genus-wide (or user-specified `--taxon`) harvest, ruler calibration, LeafMachine2 segmentation, EFA, GMM/CDA, DINOv2 XAI, and multimodal random forests. | `./run_pipeline.sh --run-id stage1_baseline` |
+| **Stage 1: Baseline Harmonization** | Full genus-wide (or user-specified `--taxon`) harvest, ruler calibration, LeafMachine3 segmentation, EFA, GMM/CDA, DINOv2 XAI, and multimodal random forests. | `./run_pipeline.sh --run-id stage1_baseline` |
 | **Stage 2: Promote Manifests** | Step 01–02 manifests, 120-vertex contours, and edaphic/embedding caches are automatically persisted into `data/packera_pipeline.sqlite`. Optionally promote CSV tables into canonical `data/tables/` via `cp` or `export_table_or_view_to_csv_atomic()`. | `cp runs/stage1_baseline/data/tables/*.csv data/tables/` |
 | **Stage 3: Pure Intraspecific Mode** | Delimit cryptic lineages and morphotypes within *P. dubia* strictly (`n_unique_taxa == 1`), gating Step 04–06 on GMM clusters and `PCA-env` ecotypes. | `./run_pipeline.sh --run-id stage3_dubia_cryptic --start-step 2 --focal-taxon "Packera dubia" --intraspecific-mode` |
 | **Stage 4: Outgroup Gold Anchors** | Calibrate *P. dubia* against 30 reference anchors per outgroup species (with unconditional nomenclatural type precedence via `select_cascading_outgroup_anchors()`, cascading Type -> Gold -> Silver -> Bronze) for definitive curation triage. | `./run_pipeline.sh --run-id stage4_dubia_triage --start-step 2 --focal-taxon "Packera dubia" --gold-anchors 30` |
@@ -143,7 +143,7 @@ To execute a complete, rigorous systematic revision of *Packera dubia* and allie
 ## CLI Feature Flags & Execution Reference
 
 The pipeline provides three unified tiers of command-line execution:
-1. **Tier 1 (`./run_pipeline.sh`)**: Master run-scoped shell orchestrator managing database isolation, directory symlinks, environment switching (`.venv` vs. `.venv_LM2`), preflight cohort filtering, and cross-stage execution.
+1. **Tier 1 (`./run_pipeline.sh`)**: Master run-scoped shell orchestrator managing database isolation, directory symlinks, environment switching (`.venv` vs. `.venv_LM3`), preflight cohort filtering, and cross-stage execution.
 2. **Tier 2 (`python main.py <subcommand>`)**: Unified Python CLI exposing modular phase-by-phase execution, environment preflight, model weight management, and diagnostic calibration.
 3. **Tier 3 (Standalone Per-Step Scripts)**: Direct CLI invocation of individual Python (`01`, `02`, `05`, SAM 2) and R (`03`, `04`, `06`, `07`, `08`) statistical modules.
 
@@ -162,7 +162,7 @@ The pipeline provides three unified tiers of command-line execution:
 | `--start-step` | `<1..8>` | `1` | Start or resume execution at a specific phase (1=Harvest, 2=Segment, 3=EFA, 4=GMM/CDA, 5=Vision XAI, 6=Spatial RF, 7=Triage Synthesis, 8=Taxon Complex Discovery); automatically skips Step 01 harvest when $\ge 2$ and seeds upstream assets. |
 | `--force` | *(none)* | `false` | Force re-execution and overwrite cached artifacts across active phases (including fresh Step 02 re-segmentation when combined with `--start-step 2`). |
 | `--limit` | `<N>` | `0` *(unlimited)* | Cap the maximum number of vouchers processed in Step 02 segmentation. |
-| `--sam2-refine` | *(none)* | `false` | Enable automated LM2-guided SAM 2.1 sub-pixel boundary refinement on Stage 2 leaf crops. |
+| `--sam2-refine` | *(none)* | `false` | Enable automated LM3-guided SAM 2.1 sub-pixel boundary refinement on Stage 2 leaf crops. |
 | `--regenerate-figures-only` | *(none)* | `false` | Re-render Step 02 diagnostic figures (`fig02a`, `fig02b`) using post-QC validated silhouettes without re-running segmentation. |
 | `-h`, `--help` | *(none)* | — | Display categorized CLI usage summary and exit. |
 
@@ -212,10 +212,10 @@ All `python main.py` subcommands accept the following global options:
 #### Subcommands Reference
 | Subcommand | Syntax & Primary Options | Operational Scope |
 | :--- | :--- | :--- |
-| **`check-env`** | `python main.py check-env [--strict]` | Verifies Python $\ge 3.10$, PyTorch CUDA acceleration, R installation, core packages, and LeafMachine2 submodule. |
-| **`download-weights`** | `python main.py download-weights [--force]` | Verifies or downloads YOLOv5 (`LeafPriority.pt`), PointRend (`leaf_seg_rcnn_v2_1`), and SAM 2 model checkpoints with SHA-256 integrity checks. |
+| **`check-env`** | `python main.py check-env [--strict]` | Verifies Python $\ge 3.10$, PyTorch CUDA acceleration, R installation, core packages, and LeafMachine3 submodule. |
+| **`download-weights`** | `python main.py download-weights [--force]` | Verifies or downloads LeafMachine3 ONNX models and SAM 2 model checkpoints with SHA-256 integrity checks. |
 | **`harvest`** | `python main.py harvest [--run-id ID] [--db PATH] [-j THREADS] [--taxon ...] [--geographic-scope {eastern_na,north_america,global}] [--countries ...] [--expand-synonyms / --no-expand-synonyms] [--out-dir DIR] [--output-csv PATH] [--max-records N] [--max-uncertainty M] [--min-megapixels MP] [--min-file-size-kb KB] [--concurrency N] [--download-images] [--force]` | Queries GBIF/iDigBio, standardizes taxon synonyms, assigns EPA Level III Ecoregions, stratifies 3-layer determiner authority, and downloads voucher imagery. |
-| **`segment`** | `python main.py segment [--run-id ID] [--db PATH] [-j THREADS] [--gpu-batch-size BATCH] [--vouchers PATH] [--weights PATH] [--output-dir DIR] [--device cuda\|cpu] [--enable-geometric-qc / --no-enable-geometric-qc] [--min-solidity FLOAT] [--min-ucs FLOAT] [--score-thresh FLOAT] [--limit N] [--sam2-refine] [--sam2-checkpoint PATH] [--sam2-config PATH] [--force]` | Runs two-stage LeafMachine2 v2.2+ detection and PointRend segmentation with cohort-adaptive organ scaling, dimensionless gatekeeping, and per-voucher SQLite transactions. |
+| **`segment`** | `python main.py segment [--run-id ID] [--db PATH] [-j THREADS] [--gpu-batch-size BATCH] [--vouchers PATH] [--weights PATH] [--output-dir DIR] [--device cuda\|cpu] [--enable-geometric-qc / --no-enable-geometric-qc] [--min-solidity FLOAT] [--min-ucs FLOAT] [--score-thresh FLOAT] [--limit N] [--sam2-refine] [--sam2-checkpoint PATH] [--sam2-config PATH] [--force]` | Runs two-stage LeafMachine3 ONNX detection and segmentation with cohort-adaptive organ scaling, dimensionless gatekeeping, and per-voucher SQLite transactions. |
 | **`morphometrics`** | `python main.py morphometrics [--run-id ID] [--db PATH] [-j THREADS] [--input DIR] [--manifest PATH] [--contours-dir DIR] [--vouchers PATH] [--reproductive PATH] [--harmonics K] [--num-pcs P] [--max-k K] [--focal-taxon TAXON] [--intraspecific-mode]` | Executes Step 03 EFA with dynamic harmonic power calibration ($H_{\text{opt}} \in [6, 24]$) and Step 04 Klingenberg allometry, Kass-Raftery GMM, and dual-track CDA. |
 | **`synthesis`** *(alias: `analyze`)* | `python main.py synthesis [--run-id ID] [--db PATH] [-j THREADS] [--gpu-batch-size BATCH] [--vouchers PATH] [--manifest-csv PATH] [--rosette-dir DIR] [--morphometrics-csv PATH] [--pheno-states PATH] [--vision-audit PATH] [--cleanlab-threshold FLOAT] [--export-figures / --no-export-figures] [--env-dir DIR] [--ssurgo-batch-size N] [--permutations N] [--n-trees N] [--focal-taxon TAXON] [--intraspecific-mode]` | Orchestrates Step 05 DINOv2 foreground patch XAI, Step 06 19-bioclimatic edaphic spatial RF with dynamic primary predictor gating, and Step 07 consensus triage synthesis. |
 | **`run-all`** | `python main.py run-all [all combined flags from harvest, segment, morphometrics, synthesis]` | Full end-to-end automated pipeline execution from GBIF harvest through final 5-stage taxonomic revision synthesis. |
@@ -243,9 +243,8 @@ For advanced experimentation or isolated execution, individual scripts can be in
   `-v/--vouchers <PATH>`, `-m/--morphometrics <PATH>`, `--linear-traits <PATH>`, `-n/--vision-audit <PATH>`, `-c/--multimodal-flags <PATH>`, `--spatial-flags <PATH>`, `-g/--gmm-summary <PATH>`, `--gmm-bic <PATH>`, `--cda-summary <PATH>`, `-s/--niche-summary <PATH>`, `-q/--output-queue <PATH>`, `--output-triage <PATH>`, `-p/--output-plot <PATH>`, `--output-figure <PATH>`, `-r/--output-report <PATH>`, `--output-html <PATH>`, `--focal-taxon <NAME>`, `--intraspecific-mode`, `--demo`.
 - **Step 08 (`scripts/analysis/08_discover_taxon_complexes.R`)**:
   `-m/--morphometrics <PATH>`, `-e/--harmonics <PATH>`, `-n/--vision-audit <PATH>`, `-v/--vouchers <PATH>`, `-c/--multimodal <PATH>`, `--focal-taxon <NAME>`, `--min-affinity <FLOAT>`, `--output-complexes <PATH>`, `--output-affinity <PATH>`, `--output-neighbors <PATH>`, `--output-figure <PATH>`.
-- **SAM 2 Interactive Annotator & PointRend Fine-Tuning**:
+- **SAM 2 Interactive Annotator**:
   - `annotate_with_sam2.py`: `--images-dir <DIR>`, `--output-dir <DIR>`, `--output-coco <PATH>`, `--single-image <PATH>`, `--checkpoint <PATH>`, `--config <PATH>`, `--export-coco`, `--masks-dir <DIR>`, `--crops-dir <DIR>`, `--full-sheet`, `--val-split <FLOAT>`, `--resume-last`, `--resume-unannotated`, `--voucher <NAME>`, `--index <INT>`, `--tier <1|2|3|all>`, `--vouchers-csv <PATH>`.
-  - `finetune_lm2_pcd.py`: `--iterations <N>`, `--lr <FLOAT>`, `--batch-size <N>`, `--freeze-stages <INT>`, `--device <cuda|cpu>`, `--dry-run`.
 
 ---
 
@@ -260,9 +259,9 @@ flowchart TD
     end
     A -.->|Cache Synonyms & UPSERT Vouchers| DB
 
-    subgraph P2["Phase 2: Stock LeafMachine2 v2.2+ & Cohort-Adaptive Scaling"]
-        B --> C["Stock YOLOv5 PLANT_LeafPriority (Conf >= 0.65)\n+ 38-Class Ruler Calibration (lm2_data_loader.py)"]
-        C --> D["12%-Padded Crops -> Stock PointRend (leaf_seg_rcnn_v2_1)\n+ Boundary Filter (<= 0.15) & Cohort-Adaptive Area Floor (effective_min_area_cm2)"]
+    subgraph P2["Phase 2: LeafMachine3 ONNX Runtime & Cohort-Adaptive Scaling"]
+        B --> C["LeafMachine3 yolo26x_det_1280 + UNet++ v9\n+ Ruler Lattice Calibration (lm3_data_loader.py)"]
+        C --> D["12%-Padded Crops -> yolo26x_seg_1024 + yolo26x_pose_640\n+ Boundary Filter (<= 0.15) & Cohort-Adaptive Area Floor (effective_min_area_cm2)"]
         D --> D1["Intact Tier_1_Direct Contours (Solidity >= 0.72)\n+ 100% Label-Blind Dissection Gates & Petiole/Height"]
         D --> D2["Organ RGB Crops (rosettes_dense · basal_leaves_raw · capitula)\n+ Post-QC Montage (--regenerate-figures-only)"]
     end
@@ -346,14 +345,14 @@ flowchart TD
 
 ---
 
-## Phase 2: Stock LeafMachine2 v2.2+ Segmentation, Boundary-Continuity Lobe Rejection & Cohort-Adaptive Organ Scaling
+## Phase 2: LeafMachine3 ONNX Runtime Segmentation, Boundary-Continuity Lobe Rejection & Cohort-Adaptive Organ Scaling
 
-- **Scripts:** [`scripts/pipeline/02_segment_and_extract.py`](../scripts/pipeline/02_segment_and_extract.py), [`scripts/vision/configure_leafmachine2.py`](../scripts/vision/configure_leafmachine2.py), [`scripts/vision/lm2_geometry_utils.py`](../scripts/vision/lm2_geometry_utils.py)
+- **Scripts:** [`scripts/pipeline/02_segment_and_extract.py`](../scripts/pipeline/02_segment_and_extract.py), [`scripts/vision/configure_leafmachine3.py`](../scripts/vision/configure_leafmachine3.py), [`scripts/vision/leaf_geometry_utils.py`](../scripts/vision/leaf_geometry_utils.py)
 - **Relational DB & Manifest Contracts:**
   - **SQLite Tables Read / Written:** Reads `vouchers`; writes `plant_individuals` (PK: `(catalogNumber, plant_individual_id)`), `extracted_leaves` (PK: `(catalogNumber, plant_individual_id, leaf_id)`, storing 120-vertex `contour_xy_json` alongside dimensionless descriptors), and `voucher_reproductive_phenology` (PK: `(catalogNumber, plant_individual_id)`) inside per-voucher atomic SQLite transactions with $O(1)$ SQL resumption checks (`qc_status IN ('PASS', 'FAILED_QC')`).
   - **Synchronized CSV Outputs:** `data/tables/extracted_leaf_manifest.csv`, `data/tables/failed_qc_vouchers.csv`, `data/tables/voucher_reproductive_metrics.csv`, `data/tables/voucher_phenological_states.csv`.
 - **Empirical Protocol:**
-  1. **Stock LeafMachine2 v2.2+ Configuration (`configure_leafmachine2.py`):** Uses stock `PLANT_LeafPriority` (`minimum_confidence_threshold: 0.65`) and compiled Detectron2 PointRend (`leaf_seg_rcnn_v2_1`) weights with `treat_leaflet_as_leaf_whole: False`, `use_efds_for_png_masks: False`, and `do_apply_landmarks: False`.
+  1. **LeafMachine3 Configuration (`configure_leafmachine3.py`):** Synthesizes `LM3_settings.local.yaml` across the 18-module LeafMachine3 ONNX pipeline (`lm3_plant_detector__yolo26x_det_1280`, `lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain`, `lm3_leaf_segmenter__yolo26x_seg_1024`, `lm3_landmark_detector__yolo26x_pose_640`, 3-model ruler ensemble + tick-lattice solver, 360-direction ECT, and native Momocs outline exports).
   2. **Otsu Boundary-Continuity Lobe Rejection (`is_truncated_lobe_or_leaflet`):** Rejects severed lobes or unattached leaf fragments where non-paper plant tissue occupies $> 15\%$ of the bounding-box perimeter (`max_tissue_border_ratio: 0.15`).
   3. **Ruler-Calibrated Physical Area Floor & Cohort-Adaptive Scaling (`compute_sheet_adaptive_min_blade_area_cm2`):** Rather than enforcing a static area cutoff that discards miniature specimens, the minimum physical basal blade area floor scales dynamically to the sheet's calibrated leaf size distribution:
      $$\text{effective\_min\_area\_cm2} = \min(0.75, \max(0.15, 0.25 \times \text{median\_sheet\_leaf\_area\_cm2}))$$

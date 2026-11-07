@@ -6,9 +6,11 @@ Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-    Static AST and text/grep hygiene test suite verifying that all active .py
-    and .R files in the repository (excluding archived script folders) are 100%
-    isolated from legacy archived code and data directories.
+    Static AST and text/grep hygiene test suite verifying that all active .py,
+    .R, and .sh files in the repository (excluding archived script folders,
+    .git, .venv, .venv_LM3, and LeafMachine3) are 100% isolated from legacy
+    archived code/data directories and contain zero legacy LeafMachine2 or
+    Detectron2 PointRend remnants.
 ===============================================================================
 """
 
@@ -27,26 +29,56 @@ if str(PROJECT_ROOT) not in sys.path:
 ARCHIVE_MARKER = "_" + "archive"
 SELF_PATH = Path(__file__).resolve()
 
+EXCLUDED_DIRS = {
+    ARCHIVE_MARKER,
+    ".git",
+    ".venv",
+    ".venv_LM3",
+    "LeafMachine3",
+    "__pycache__",
+}
 
-def iter_active_source_files() -> List[Path]:
-    """Return all active .py and .R files under scripts/ and root, excluding archive directories."""
+FORBIDDEN_LEGACY_LM2_TOKENS = (
+    "LeafMachine2",
+    "leafmachine2",
+    ".venv_LM2",
+    "setup_leafmachine2",
+    "configure_leafmachine2",
+    "lm2_data_loader",
+    "lm2_inference_engines",
+    "lm2_geometry_utils",
+    "finetune_lm2_pcd",
+    "PointRendInferenceEngine",
+    "LM2Stage1Detector",
+    "detectron2",
+)
+
+
+def iter_active_source_files(include_shell: bool = False) -> List[Path]:
+    """Return all active .py, .R (and optionally .sh) files under scripts/ and root, excluding archive and submodule/venv directories."""
+    exts = ("*.py", "*.R", "*.sh") if include_shell else ("*.py", "*.R")
     files: List[Path] = []
-    for root_py in PROJECT_ROOT.glob("*.py"):
-        files.append(root_py.resolve())
+    for ext in exts:
+        for root_file in sorted(PROJECT_ROOT.glob(ext)):
+            resolved = root_file.resolve()
+            if resolved.is_file():
+                files.append(resolved)
 
     scripts_dir = PROJECT_ROOT / "scripts"
-    for ext in ("*.py", "*.R"):
+    for ext in exts:
         for path in sorted(scripts_dir.rglob(ext)):
             resolved = path.resolve()
-            rel_parts = resolved.relative_to(scripts_dir.resolve()).parts
-            if ARCHIVE_MARKER in rel_parts:
+            if not resolved.is_file():
+                continue
+            rel_parts = set(resolved.relative_to(PROJECT_ROOT).parts)
+            if rel_parts & EXCLUDED_DIRS:
                 continue
             files.append(resolved)
     return files
 
 
 class TestCodeHygiene(unittest.TestCase):
-    """Static AST and grep hygiene checks for archive isolation across active .py and .R files."""
+    """Static AST and grep hygiene checks for archive isolation and zero legacy LM2 remnants across active files."""
 
     def test_no_active_files_reference_legacy_folders_via_grep(self):
         """Scan all active .py and .R files and fail if any references the archive folder."""
@@ -92,6 +124,48 @@ class TestCodeHygiene(unittest.TestCase):
             [],
             f"AST inspection detected '{ARCHIVE_MARKER}' references in active Python files:\n"
             + "\n".join(ast_violations),
+        )
+
+    def test_no_active_files_reference_leafmachine2_or_pointrend(self):
+        """Scan all active .py, .R, and .sh files (excluding test_code_hygiene.py, archived folders, .git, .venv, .venv_LM3, LeafMachine3) and assert zero forbidden LM2/PointRend tokens."""
+        violations: List[str] = []
+        for src_path in iter_active_source_files(include_shell=True):
+            if src_path == SELF_PATH:
+                continue
+            content = src_path.read_text(encoding="utf-8", errors="ignore")
+            rel = src_path.relative_to(PROJECT_ROOT)
+            for lineno, line in enumerate(content.splitlines(), start=1):
+                for token in FORBIDDEN_LEGACY_LM2_TOKENS:
+                    if token in line:
+                        violations.append(f"{rel}:{lineno} [{token}]: {line.strip()}")
+
+        self.assertEqual(
+            violations,
+            [],
+            "Active source files must not contain any legacy LeafMachine2 / PointRend tokens:\n"
+            + "\n".join(violations),
+        )
+
+    def test_no_files_or_folders_named_lm2_or_leafmachine2(self):
+        """Verify that zero files or folders in the workspace use 'lm2' or 'leafmachine2' in their naming."""
+        skip_roots = {".git", ".venv", ".venv_LM3", "LeafMachine3"}
+        bad_paths: List[str] = []
+        for entry in sorted(PROJECT_ROOT.iterdir()):
+            name_low = entry.name.lower()
+            if "lm2" in name_low or "leafmachine2" in name_low:
+                bad_paths.append(str(entry.relative_to(PROJECT_ROOT)))
+            if entry.name in skip_roots or not entry.is_dir():
+                continue
+            for sub in entry.rglob("*"):
+                sub_low = sub.name.lower()
+                if "lm2" in sub_low or "leafmachine2" in sub_low:
+                    bad_paths.append(str(sub.relative_to(PROJECT_ROOT)))
+
+        self.assertEqual(
+            bad_paths,
+            [],
+            "No files or folders in the workspace may use 'lm2' or 'leafmachine2' in their name:\n"
+            + "\n".join(bad_paths),
         )
 
 

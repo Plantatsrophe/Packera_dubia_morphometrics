@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.vision.lm2_geometry_utils import (
+from scripts.vision.leaf_geometry_utils import (
     BoundaryContinuityResult,
     FoldDetectionResult,
     LeafRoutingResult,

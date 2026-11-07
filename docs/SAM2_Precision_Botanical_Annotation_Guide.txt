@@ -10,20 +10,20 @@ Author: J. Brandon Fuller (University of North Carolina at Chapel Hill / NCU Her
 IMPORTANT NOTICE — ARCHIVED / OPTIONAL STANDALONE UTILITY:
 --------------------------------------------------------------------------------
 The automated production pipeline (`./run_pipeline.sh` / `python main.py`) does NOT
-require manual SAM 2 annotation or custom LeafMachine2 PointRend/PCD retraining.
-By default, Phase 2 (`02_segment_and_extract.py` and `configure_leafmachine2.py`)
-operates out of the box using stock LeafMachine2 v2.2+ weights:
-  - Stage 1 Detector: Stock `PLANT_LeafPriority` (`minimum_confidence_threshold: 0.65`,
-    `treat_leaflet_as_leaf_whole: False`, `use_efds_for_png_masks: False`,
-    `do_apply_landmarks: False`) + 38-class Ruler Detector (`min_blade_area_cm2: 0.75`).
-  - Stage 2 Segmenter: Stock Detectron2 PointRend (`leaf_seg_rcnn_v2_1`) paired with
-    Otsu boundary-continuity lobe rejection (`max_tissue_border_ratio: 0.15`) and
-    classical dimensionless shape gatekeeping (`Solidity >= 0.72`, `Circularity >= 0.25`,
-    `Extent >= 0.35`, plus pinnatifid and bipinnatisect dissection gates).
+require manual SAM 2 annotation or custom LeafMachine3 retraining.
+By default, Phase 2 (`02_segment_and_extract.py` and `configure_leafmachine3.py`)
+operates out of the box using locked LeafMachine3 ONNX Runtime weights:
+  - Stage 1 Detector & Specimen Segmenter: `lm3_plant_detector__yolo26x_det_1280` +
+    `lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain` +
+    3-model Ruler Classifier & Tick-Lattice Solver (`min_blade_area_cm2: 0.75`).
+  - Stage 2 Segmenter & Pose: `lm3_leaf_segmenter__yolo26x_seg_1024` +
+    `lm3_landmark_detector__yolo26x_pose_640` paired with Otsu boundary-continuity
+    lobe rejection (`max_tissue_border_ratio: 0.15`) and classical dimensionless
+    shape gatekeeping (`Solidity >= 0.72`, `Circularity >= 0.25`, `Extent >= 0.35`,
+    plus pinnatifid and bipinnatisect dissection gates).
 
 The interactive SAM 2 annotator (`scripts/annotation_and_training/annotate_with_sam2.py`)
-and PointRend fine-tuning script (`scripts/annotation_and_training/finetune_lm2_pcd.py`)
-documented below are retained strictly as optional standalone utilities for custom
+documented below is retained strictly as an optional standalone utility for custom
 benchmark creation or exploratory mask curation.
 
 
@@ -34,7 +34,7 @@ at the caudex (root crown), physically merging with fibrous roots and rhizomes.
 When curating custom ground-truth benchmarks outside the main automated pipeline,
 `scripts/annotation_and_training/annotate_with_sam2.py` provides six optional
 interactive mechanisms:
-  a. Automated LM2 + SAM 2 Pre-Labeling (--prelabel-with-lm2)
+  a. Automated LM3 + SAM 2 Pre-Labeling (--prelabel-with-lm3)
   b. Bounding Box Prompts (Shift + Drag)
   c. Negative Exclusion Points (Right-Click)
   d. Multimask Proposal Cycling (Tab)
@@ -50,14 +50,14 @@ python scripts/annotation_and_training/annotate_with_sam2.py \
     --images-dir data/raw_vouchers \
     --output-dir data/raw_annotations \
     --output-coco data/annotations/packera_train_coco.json \
-    --prelabel-with-lm2
+    --prelabel-with-lm3
 
 # Headless compilation of single-leaf cropped COCO dataset:
 python scripts/annotation_and_training/annotate_with_sam2.py \
     --export-coco \
     --masks-dir data/raw_annotations/masks \
     --images-dir data/raw_vouchers \
-    --crops-dir data/annotations/lm2_leaf_crops \
+    --crops-dir data/annotations/lm3_leaf_crops \
     --output-coco data/annotations/packera_train_coco.json \
     --val-split 0.15
 

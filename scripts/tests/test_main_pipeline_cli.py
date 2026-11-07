@@ -233,7 +233,7 @@ class TestMainPipelineCLI(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            dummy_weights = tmp_path / "lm2_packera_pcd_finetuned.pth"
+            dummy_weights = tmp_path / "lm3_leaf_segmenter__yolo26x_seg_1024.onnx"
             dummy_weights.write_bytes(b"MOCK_WEIGHTS_BYTES" * 64)
             dummy_cfg = tmp_path / "config.yaml"
             dummy_cfg.write_text(
@@ -293,35 +293,41 @@ class TestMainPipelineCLI(unittest.TestCase):
         self.assertIn("MomX/Momocs", main_src)
 
 
-    def test_get_lm2_python_executable_unix(self):
-        """Verify get_lm2_python_executable resolves .venv_LM2/bin/python on Unix systems."""
+    def test_get_lm3_python_executable_unix(self):
+        """Verify get_lm3_python_executable resolves LeafMachine3/.venv/bin/python and .venv_LM3/bin/python on Unix systems."""
         with patch.object(Path, "exists", side_effect=[True]):
-            resolved = main.get_lm2_python_executable()
-            self.assertEqual(resolved, main.PROJECT_ROOT / ".venv_LM2" / "bin" / "python")
-
-    def test_get_lm2_python_executable_windows(self):
-        """Verify get_lm2_python_executable resolves .venv_LM2/Scripts/python.exe on Windows."""
+            resolved = main.get_lm3_python_executable()
+            self.assertEqual(resolved, main.PROJECT_ROOT / "LeafMachine3" / ".venv" / "bin" / "python")
         with patch.object(Path, "exists", side_effect=[False, True]):
-            resolved = main.get_lm2_python_executable()
-            self.assertEqual(resolved, main.PROJECT_ROOT / ".venv_LM2" / "Scripts" / "python.exe")
+            resolved_alt = main.get_lm3_python_executable()
+            self.assertEqual(resolved_alt, main.PROJECT_ROOT / ".venv_LM3" / "bin" / "python")
 
-    def test_get_lm2_python_executable_fallback_warning(self):
-        """Verify get_lm2_python_executable falls back to sys.executable and warns if .venv_LM2 is absent."""
+    def test_get_lm3_python_executable_windows(self):
+        """Verify get_lm3_python_executable resolves LeafMachine3/.venv/Scripts/python.exe and .venv_LM3/Scripts/python.exe on Windows."""
+        with patch.object(Path, "exists", side_effect=[False, False, True]):
+            resolved = main.get_lm3_python_executable()
+            self.assertEqual(resolved, main.PROJECT_ROOT / "LeafMachine3" / ".venv" / "Scripts" / "python.exe")
+        with patch.object(Path, "exists", side_effect=[False, False, False, True]):
+            resolved_alt = main.get_lm3_python_executable()
+            self.assertEqual(resolved_alt, main.PROJECT_ROOT / ".venv_LM3" / "Scripts" / "python.exe")
+
+    def test_get_lm3_python_executable_fallback_warning(self):
+        """Verify get_lm3_python_executable falls back to sys.executable and warns if LeafMachine3/.venv and .venv_LM3 are absent."""
         with patch.object(Path, "exists", return_value=False), \
              patch.object(main.logger, "warning") as mock_warn:
-            resolved = main.get_lm2_python_executable()
+            resolved = main.get_lm3_python_executable()
             self.assertEqual(resolved, Path(sys.executable))
             mock_warn.assert_called_once()
-            self.assertIn("LeafMachine2 dedicated virtual environment", mock_warn.call_args[0][0])
+            self.assertIn("LeafMachine3 dedicated virtual environment", mock_warn.call_args[0][0])
 
-    def test_run_segment_uses_resolved_lm2_interpreter(self):
-        """Verify run_segment invokes 02_segment_and_extract.py with resolved LM2 interpreter and logs diagnostic."""
+    def test_run_segment_uses_resolved_lm3_interpreter(self):
+        """Verify run_segment invokes 02_segment_and_extract.py with resolved LM3 interpreter and logs diagnostic."""
         parser = main.build_parser()
         args = parser.parse_args(["segment"])
         cfg = {
             "paths": {
                 "curated_vouchers_csv": "/tmp/dummy_curated.csv",
-                "model_weights": "models/dummy.pth",
+                "model_weights": "models/dummy.onnx",
                 "contours_dir": "/tmp/dummy_contours",
             },
             "segmentation": {
@@ -331,8 +337,8 @@ class TestMainPipelineCLI(unittest.TestCase):
                 "score_thresh": 0.40,
             },
         }
-        dummy_lm2_python = main.PROJECT_ROOT / ".venv_LM2" / "bin" / "python"
-        with patch("main.get_lm2_python_executable", return_value=dummy_lm2_python), \
+        dummy_lm3_python = main.PROJECT_ROOT / "LeafMachine3" / ".venv" / "bin" / "python"
+        with patch("main.get_lm3_python_executable", return_value=dummy_lm3_python), \
              patch("subprocess.run") as mock_subp, \
              patch("main.verify_file_exists"), \
              patch("main.verify_dir_has_files"), \
@@ -340,11 +346,11 @@ class TestMainPipelineCLI(unittest.TestCase):
             main.run_segment(args, cfg)
             mock_subp.assert_called_once()
             cmd_called = mock_subp.call_args[0][0]
-            self.assertEqual(cmd_called[0], str(dummy_lm2_python))
+            self.assertEqual(cmd_called[0], str(dummy_lm3_python))
             # Verify diagnostic log entry
             log_messages = [call[0][0] for call in mock_info.call_args_list if call[0]]
             self.assertTrue(
-                any("Executing LeafMachine2 segmentation via: .venv_LM2/bin/python" in msg for msg in log_messages),
+                any("Executing LeafMachine3 segmentation via: LeafMachine3/.venv/bin/python" in msg for msg in log_messages),
                 f"Expected diagnostic log missing from: {log_messages}",
             )
 
@@ -413,7 +419,7 @@ class TestMainPipelineCLI(unittest.TestCase):
             cfg = {
                 "models": {
                     "pcd_weights_path": str(target_pth),
-                    "pcd_weights_url": "https://github.com/Plantatsrophe/Packera_dubia_morphometrics/releases/download/v1.0-weights/lm2_packera_pcd_finetuned.pth",
+                    "pcd_weights_url": "https://github.com/Plantatsrophe/Packera_dubia_morphometrics/releases/download/v2.0-weights/lm3_leaf_segmenter__yolo26x_seg_1024.onnx",
                     "pcd_weights_sha256": "",
                 }
             }

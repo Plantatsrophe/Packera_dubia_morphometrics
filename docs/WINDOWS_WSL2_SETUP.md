@@ -10,10 +10,10 @@
 
 ## 📋 Overview
 
-The computational pipeline couples automated deep learning organ segmentation (stock LeafMachine2 v2.2+ `PLANT_LeafPriority` + 38-class Ruler Detector + `leaf_seg_rcnn_v2_1` PointRend), classical dimensionless geometric gatekeeping (`Tier_1_Direct`), R statistical morphometrics (`Momocs`, `MorphoTools2`, `RRPP`, `mclust`, `clustvarsel`, `igraph`), taphonomic indumentum-blind `dinov2_vitb14_reg` foreground patch-token pooling with Cleanlab confident learning, and $0\text{–}15\text{ cm}$ rhizosphere / USGS SGMC bedrock spatial macroecology (`geodata`, `soilDB`, `ranger`, `adespatial`, `blockCV`, `ecospat`).
+The computational pipeline couples automated deep learning organ segmentation (LeafMachine3 ONNX Runtime `lm3_plant_detector__yolo26x_det_1280` + UNet++ v9 + 3-model Ruler Lattice Solver + `lm3_leaf_segmenter__yolo26x_seg_1024` + `lm3_landmark_detector__yolo26x_pose_640`), classical dimensionless geometric gatekeeping (`Tier_1_Direct`), R statistical morphometrics (`Momocs`, `MorphoTools2`, `RRPP`, `mclust`, `clustvarsel`, `igraph`), taphonomic indumentum-blind `dinov2_vitb14_reg` foreground patch-token pooling with Cleanlab confident learning, and $0\text{–}15\text{ cm}$ rhizosphere / USGS SGMC bedrock spatial macroecology (`geodata`, `soilDB`, `ranger`, `adespatial`, `blockCV`, `ecospat`).
 
 While developed natively on Linux, **Windows Subsystem for Linux (WSL 2)** provides first-class support for the entire pipeline on Windows machines:
-- **NVIDIA GPU Acceleration:** Direct pass-through of CUDA cores and Tensor cores to PyTorch, DINOv2, and LeafMachine2 via the Windows host display driver.
+- **NVIDIA GPU Acceleration:** Direct pass-through of CUDA cores and Tensor cores to PyTorch, ONNX Runtime, DINOv2, and LeafMachine3 via the Windows host display driver.
 - **Native GUI Acceleration (WSLg):** X11/Wayland graphics render directly in native Windows desktop windows without requiring external X-servers.
 - **Near-Native Filesystem Performance:** When operating inside native ext4 virtual disks (`~/`), batch processing on thousands of high-resolution herbarium scans achieves near bare-metal Linux speeds.
 
@@ -28,7 +28,7 @@ While developed natively on Linux, **Windows Subsystem for Linux (WSL 2)** provi
 | **3** | Verify GPU in Linux | Ubuntu (WSL) | `nvidia-smi` |
 | **4** | Clone to Native ext4 | Ubuntu (WSL) | `cd ~ && git clone ...` (Avoid `/mnt/c/`) |
 | **5** | Install System Packages | Ubuntu (WSL) | `sudo apt-get install -y libgl1 libglib2.0-0 r-base ...` |
-| **6** | Configure Python & LM2 | Ubuntu (WSL) | `source .venv/bin/activate && bash setup_leafmachine2.sh` |
+| **6** | Configure Python & LM3 | Ubuntu (WSL) | `source .venv/bin/activate && bash setup_leafmachine3.sh` |
 | **7** | Configure R Packages | Ubuntu (WSL) | `Rscript -e 'install.packages(...); remotes::install_github("MomX/Momocs")'` |
 | **8** | Launch Pipeline | Ubuntu (WSL) | `./run_pipeline.sh` |
 
@@ -116,9 +116,9 @@ sudo apt-get update && sudo apt-get install -y \
 
 ---
 
-## Step 5: Python Environments & Stock LeafMachine2 v2.2+ Setup
+## Step 5: Python Environments & LeafMachine3 Setup
 
-The pipeline uses two virtual environments to decouple modern PyTorch / `dinov2_vitb14_reg` / Cleanlab dependencies (`.venv`) from stock LeafMachine2 v2.2+ and Detectron2 PointRend ABI pins (`.venv_LM2`):
+The pipeline uses two virtual environments to decouple modern PyTorch / `dinov2_vitb14_reg` / Cleanlab dependencies (`.venv`) from LeafMachine3 ONNX Runtime dependencies (`.venv_LM3`):
 
 ### A. Create and Populate Primary Pipeline Environment (`.venv`):
 ```bash
@@ -128,9 +128,9 @@ pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
 
-### B. Configure LeafMachine2 Virtual Environment (`.venv_LM2`):
+### B. Configure LeafMachine3 Virtual Environment (`.venv_LM3`):
 ```bash
-bash setup_leafmachine2.sh
+bash setup_leafmachine3.sh
 ```
 
 ### C. Run Preflight Diagnostic:
@@ -153,7 +153,7 @@ Rscript -e 'install.packages(c("DBI", "RSQLite", "remotes", "tidyverse", "optpar
 
 ## Step 7: Running the Automated Pipeline (`run_pipeline.sh`)
 
-The production pipeline runs completely headlessly using stock LeafMachine2 v2.2+ weights (`PLANT_LeafPriority` and `leaf_seg_rcnn_v2_1`) without requiring manual interactive annotation:
+The production pipeline runs completely headlessly using locked LeafMachine3 ONNX Runtime weights (`yolo26x_det_1280`, `unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain`, `yolo26x_seg_1024`, and `yolo26x_pose_640`) without requiring manual interactive annotation:
 
 ```bash
 source .venv/bin/activate

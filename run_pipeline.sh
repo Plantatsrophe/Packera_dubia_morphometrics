@@ -68,9 +68,9 @@ Run & Compute Controls:
   --start-step <1..8>                Start or resume execution at step <1..8> (step >=2 skips harvest automatically)
   --force                            Force re-execution and overwrite cached artifacts (with --start-step 2, re-segments)
   -j, --threads <INT>                CPU worker thread limit across Python & R stages (exports PACKERA_MAX_WORKERS)
-  --gpu-batch-size <INT>             GPU inference batch size for Step 02 PointRend & Step 05 DINOv2
+  --gpu-batch-size <INT>             GPU inference batch size for Step 02 LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) & Step 05 DINOv2
   --limit <N>                        Cap maximum number of vouchers processed in Step 02 segmentation
-  --sam2-refine                      Enable automated LM2-guided SAM 2.1 boundary refinement in Step 02
+  --sam2-refine                      Enable automated LM3-guided SAM 2.1 boundary refinement in Step 02
   --demo                             Run in ephemeral test isolation mode (PACKERA_DEMO_MODE=1)
 
 Taxonomic Scope & Complex Discovery:
@@ -413,17 +413,19 @@ echo "  Start Timestamp : ${START_TIME}"
 echo "  Git Commit SHA  : ${GIT_SHA}"
 echo "=============================================================================="
 
-# Resolve Python interpreters (.venv for primary orchestration/DINOv2, .venv_LM2 for LeafMachine2)
+# Resolve Python interpreters (.venv for primary orchestration/DINOv2, LeafMachine3/.venv or .venv_LM3 for LeafMachine3)
 if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
   PYTHON_MAIN="${PROJECT_ROOT}/.venv/bin/python"
 else
   PYTHON_MAIN="python3"
 fi
 
-if [[ -x "${PROJECT_ROOT}/.venv_LM2/bin/python" ]]; then
-  PYTHON_LM2="${PROJECT_ROOT}/.venv_LM2/bin/python"
+if [[ -x "${PROJECT_ROOT}/LeafMachine3/.venv/bin/python" ]]; then
+  PYTHON_LM3="${PROJECT_ROOT}/LeafMachine3/.venv/bin/python"
+elif [[ -x "${PROJECT_ROOT}/.venv_LM3/bin/python" ]]; then
+  PYTHON_LM3="${PROJECT_ROOT}/.venv_LM3/bin/python"
 else
-  PYTHON_LM2="${PYTHON_MAIN}"
+  PYTHON_LM3="${PYTHON_MAIN}"
 fi
 
 # Determine whether a non-default geographic scope or custom taxon harvest was requested
@@ -1095,12 +1097,12 @@ if reuse_canonical or start_step_val >= 3:
 run_preflight_subset_filter
 
 # ------------------------------------------------------------------------------
-# Step 02: PointRend Segmentation, Geometric Gatekeeper & 2-Tier Leaf Extraction
+# Step 02: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) Segmentation, Geometric Gatekeeper & 2-Tier Leaf Extraction
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
-  echo "[Step 02/07] Running Segmentation & Organ Extraction..."
+  echo "[Step 02/07] Running LeafMachine3 Segmentation & Organ Extraction..."
   find "${RUN_DIR}/data/cropped_patches" -type l -delete 2>/dev/null || true
-  "${PYTHON_LM2}" scripts/pipeline/02_segment_and_extract.py \
+  "${PYTHON_LM3}" scripts/pipeline/02_segment_and_extract.py \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --output-dir "${RUN_DIR}/data" \
     ${FORCE_FLAG} \

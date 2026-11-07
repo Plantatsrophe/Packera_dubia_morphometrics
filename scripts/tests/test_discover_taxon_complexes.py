@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from scripts.core.harvester import standardize_packera_taxon
-from scripts.vision.lm2_geometry_utils import (
+from scripts.vision.leaf_geometry_utils import (
     classify_and_route_leaf,
     evaluate_leaf_quality,
     is_botanical_dissection,

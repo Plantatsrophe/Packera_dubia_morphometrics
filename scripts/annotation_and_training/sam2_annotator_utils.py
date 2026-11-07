@@ -11,8 +11,8 @@ Description:
          polygon-to-box projection, interior pole calculation, sub-pixel polygon extraction).
       2. Native X11 HUD and viewport rendering (viewport coordinate transforms,
          cached base layers, live candidate mask composition).
-      3. Standardized COCO 1.0 dataset export aligned with LeafMachine2 Plant Component
-         Detector (PCD) taxonomy.
+      3. Standardized COCO 1.0 dataset export aligned with LeafMachine3 (YOLO26x / UNet++ v9)
+         Plant Component Detector (PCD) taxonomy.
 ===============================================================================
 """
 
@@ -63,13 +63,13 @@ ACTIVE_CLASS_NAMES: List[str] = [
     "basal_leaf_partial",
 ]
 
-# Strict class mapping from SAM 2 botanical annotations to LeafMachine2 PCD taxonomy
+# Strict class mapping from SAM 2 botanical annotations to LeafMachine3 PCD taxonomy
 PCD_CLASS_MAPPING: Dict[str, str] = {
     "basal_leaf_whole": "ideal_leaf",
     "basal_leaf_partial": "partial_leaf",
 }
 
-# Categories intentionally omitted so Detectron2 treats them as background noise
+# Categories intentionally omitted so LeafMachine3 (YOLO26x / UNet++ v9) treats them as background noise
 OMITTED_CLASSES: Set[str] = {
     "cauline_leaf",
     "cauline_stem",
@@ -78,7 +78,7 @@ OMITTED_CLASSES: Set[str] = {
     "capitulum",
 }
 
-# Standardized COCO 1.0 categories for LeafMachine2 Plant Component Detector
+# Standardized COCO 1.0 categories for LeafMachine3 (YOLO26x / UNet++ v9) Plant Component Detector
 PCD_COCO_CATEGORIES: List[Dict[str, Any]] = [
     {
         "id": 1,
@@ -907,7 +907,7 @@ def overlay_candidate_mask_on_viewport(
 # 4. Standardized COCO 1.0 Dataset Exporter
 # ===============================================================================
 
-DEFAULT_LEAF_CROPS_DIR = Path("data/annotations/lm2_leaf_crops")
+DEFAULT_LEAF_CROPS_DIR = Path("data/annotations/lm3_leaf_crops")
 DEFAULT_CROP_PADDING_RATIO = 0.12
 
 
@@ -1094,16 +1094,16 @@ def export_coco_from_yolo_and_masks(
 ) -> Dict[str, Any]:
     """
     Exports SAM 2 annotations (binary PNG masks and/or YOLO polygon .txt labels) to
-    standardized COCO 1.0 JSON format for LeafMachine2 Stage 2 PointRend fine-tuning.
+    standardized COCO 1.0 JSON format for LeafMachine3 (YOLO26x / UNet++ v9) Stage 2 fine-tuning.
 
-    By default (`full_sheet=False`), operates in LeafMachine2 Stage 2 single-leaf crop mode:
+    By default (`full_sheet=False`), operates in LeafMachine3 Stage 2 single-leaf crop mode:
       For each annotated `basal_leaf_whole` (`ideal_leaf`, category_id=1) and
       `basal_leaf_partial` (`partial_leaf`, category_id=2) instance on a voucher sheet:
         1. Computes the tight bounding box `(x_min, y_min, w, h)` of the instance polygon.
         2. Expands the bounding box isotropically by 12% padding (`padding_ratio=0.12`) on each
            side, clamped to sheet image boundaries `[0, sheet_w] x [0, sheet_h]`.
         3. Crops the high-resolution RGB voucher patch `img[y0:y1, x0:x1]` at native DPI and
-           saves it to `data/annotations/lm2_leaf_crops/{catalogNumber}_inst{idx}.jpg`.
+           saves it to `data/annotations/lm3_leaf_crops/{catalogNumber}_inst{idx}.jpg`.
         4. Translates the instance segmentation polygon vertices `(x - x0, y - y0)` and bounding
            box into the local coordinate frame of the cropped patch, writing COCO `images` and
            `annotations` entries referencing the cropped patch dimensions `(crop_w, crop_h)`.
@@ -1150,9 +1150,9 @@ def export_coco_from_yolo_and_masks(
     if crops_dir is not None:
         crops_dir_path = Path(crops_dir)
     elif output_coco_path is not None:
-        crops_dir_path = Path(output_coco_path).parent / "lm2_leaf_crops"
+        crops_dir_path = Path(output_coco_path).parent / "lm3_leaf_crops"
     elif masks_dir_path is not None and str(masks_dir_path).startswith("/tmp"):
-        crops_dir_path = masks_dir_path.parent / "lm2_leaf_crops"
+        crops_dir_path = masks_dir_path.parent / "lm3_leaf_crops"
     else:
         crops_dir_path = DEFAULT_LEAF_CROPS_DIR
 
@@ -1410,7 +1410,7 @@ def export_coco_from_yolo_and_masks(
     mode_desc = "Full-Sheet" if full_sheet else "Stage 2 Single-Leaf Crops"
     coco_doc: Dict[str, Any] = {
         "info": {
-            "description": f"LeafMachine2 PointRend Leaf Segmenter - Packera Dataset ({mode_desc})",
+            "description": f"LeafMachine3 (YOLO26x / UNet++ v9) Leaf Segmenter - Packera Dataset ({mode_desc})",
             "version": "2.1",
             "year": 2026,
             "contributor": "NCU Herbarium / UNC Chapel Hill",
@@ -1457,7 +1457,7 @@ def convert_masks_to_coco_dataset(
     """
     Scans a directory of binary PNG masks (and optional YOLO polygons) and compiles
     a COCO 1.0 JSON format dictionary. Defaults to single-leaf crops (`full_sheet=False`)
-    with 12% isotropic padding for LeafMachine2 Stage 2 PointRend fine-tuning.
+    with 12% isotropic padding for LeafMachine3 (YOLO26x / UNet++ v9) Stage 2 fine-tuning.
     """
     return export_coco_from_yolo_and_masks(
         masks_dir=masks_dir,

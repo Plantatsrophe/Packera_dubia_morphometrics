@@ -6,9 +6,11 @@ Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-    Botanical leaf quality gatekeeping, boundary tissue continuity verification,
-    folded leaf detection/reflection, dissected rachis bridging, cauline bract
-    rejection, and 2-tier silhouette routing (Tier_1_Direct / Tier_2_Reflected).
+    Botanical leaf quality gatekeeping for LeafMachine3 (YOLO26x / UNet++ v9),
+    3-class (lamina, petiole, hole) mask routing, 31-keypoint midvein trace
+    fold detection/reflection, UNet++ v9 whole-specimen rachis bridging,
+    boundary tissue continuity verification, cauline bract rejection, and
+    2-tier silhouette routing (Tier_1_Direct / Tier_2_Reflected).
 ===============================================================================
 """
 
@@ -21,7 +23,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import cv2
 import numpy as np
 
-from scripts.vision.lm2_geometry_utils import (
+from scripts.vision.leaf_geometry_utils import (
     compute_geometric_metrics,
     extract_tier2_reflected,
     resample_normalized_contour,
@@ -30,6 +32,7 @@ from scripts.vision.lm2_geometry_utils import (
 
 __all__ = [
     "BoundaryContinuityResult",
+    "_extract_lm3_midvein_trace",
     "_has_artificial_straight_occlusion_cut",
     "check_boundary_tissue_continuity",
     "compute_classical_shape_descriptors",
@@ -228,7 +231,7 @@ def check_boundary_tissue_continuity(
     (or internal sub-lamina / stem-chunk / label-clipped fragment) rather than an intact
     whole leaf blade:
       1. Extracts a buffered exterior perimeter ring `(dilated_outer > 0) & (dilated_inner == 0)`
-         so 1-3 px PointRend serration margin conservatism and boundary anti-aliasing are not
+         so 1-3 px LeafMachine3 (YOLO26x) serration margin conservatism and boundary anti-aliasing are not
          misclassified as exterior tissue.
       2. Masks out the trimmed petiole insertion sector around `petiole_base_pt` and any
          separately segmented distinct neighboring organ masks (`exclude_mask`).
@@ -496,15 +499,174 @@ def compute_classical_shape_descriptors(
     }
 
 
+def _normalize_keypoints_31_input(
+    keypoints_31: Any,
+) -> Optional[Dict[str, Tuple[float, float, float]]]:
+    """Normalizes a dict or (31, 3) ndarray of LeafMachine3 keypoints into a canonical dict."""
+    if keypoints_31 is None:
+        return None
+    if isinstance(keypoints_31, dict):
+        return keypoints_31 if len(keypoints_31) > 0 else None
+    if isinstance(keypoints_31, np.ndarray) and keypoints_31.ndim == 2 and keypoints_31.shape[0] >= 8 and keypoints_31.shape[1] >= 2:
+        kp_dict: Dict[str, Tuple[float, float, float]] = {}
+        def _row_to_tup(row: np.ndarray) -> Tuple[float, float, float]:
+            return (float(row[0]), float(row[1]), float(row[2]) if len(row) >= 3 else 1.0)
+        kp_dict["lamina_tip"] = _row_to_tup(keypoints_31[0])
+        kp_dict["lamina_base"] = _row_to_tup(keypoints_31[1])
+        for i in range(min(6, keypoints_31.shape[0] - 2)):
+            kp_dict[f"petiole_{i + 1}"] = _row_to_tup(keypoints_31[2 + i])
+        for i in range(min(15, max(0, keypoints_31.shape[0] - 8))):
+            kp_dict[f"midvein_{i + 1}"] = _row_to_tup(keypoints_31[8 + i])
+        return kp_dict
+    return None
+
+
+def _extract_lm3_midvein_trace(
+    keypoints_31: Optional[Any],
+    min_points: int = 3,
+    min_mean_conf: float = 0.50,
+) -> Dict[str, Any]:
+    """
+    Parses LeafMachine3 (YOLO26x) 31-keypoint midvein trace (`midvein_1`..`midvein_15`,
+    plus `lamina_base` and `lamina_tip`) and fits a least-squares anatomical midrib line
+    anchored from `lamina_base` -> `lamina_tip` when >= `min_points` valid points exist
+    with mean confidence >= `min_mean_conf`.
+    """
+    default_trace: Dict[str, Any] = {
+        "is_valid": False,
+        "points": np.zeros((0, 2), dtype=np.float64),
+        "confidences": np.zeros((0,), dtype=np.float64),
+        "mean_conf": 0.0,
+        "vx": 1.0,
+        "vy": 0.0,
+        "x0": 0.0,
+        "y0": 0.0,
+        "p_base": None,
+        "p_apex": None,
+        "lamina_base": None,
+        "lamina_tip": None,
+    }
+    keypoints_31 = _normalize_keypoints_31_input(keypoints_31)
+    if keypoints_31 is None:
+        return default_trace
+
+    def _parse_kp(val: Any) -> Optional[Tuple[float, float, float]]:
+        if val is None:
+            return None
+        if isinstance(val, dict):
+            x = float(val.get("x", 0.0))
+            y = float(val.get("y", 0.0))
+            c = float(val.get("conf", val.get("confidence", 1.0)))
+        elif isinstance(val, (tuple, list, np.ndarray)) and len(val) >= 2:
+            x = float(val[0])
+            y = float(val[1])
+            c = float(val[2]) if len(val) >= 3 else 1.0
+        else:
+            return None
+        if not (np.isfinite(x) and np.isfinite(y) and np.isfinite(c)):
+            return None
+        if c <= 0.05 or (x == 0.0 and y == 0.0):
+            return None
+        return (x, y, c)
+
+    lb_kp = _parse_kp(keypoints_31.get("lamina_base"))
+    lt_kp = _parse_kp(keypoints_31.get("lamina_tip"))
+    if lb_kp is not None and lb_kp[2] >= 0.50:
+        default_trace["lamina_base"] = (lb_kp[0], lb_kp[1])
+    if lt_kp is not None and lt_kp[2] >= 0.50:
+        default_trace["lamina_tip"] = (lt_kp[0], lt_kp[1])
+
+    trace_pts: List[Tuple[float, float]] = []
+    trace_confs: List[float] = []
+    if lb_kp is not None and lb_kp[2] >= 0.25:
+        trace_pts.append((lb_kp[0], lb_kp[1]))
+        trace_confs.append(lb_kp[2])
+
+    for idx_m in range(1, 16):
+        mkp = _parse_kp(keypoints_31.get(f"midvein_{idx_m}"))
+        if mkp is not None and mkp[2] >= 0.25:
+            trace_pts.append((mkp[0], mkp[1]))
+            trace_confs.append(mkp[2])
+
+    if lt_kp is not None and lt_kp[2] >= 0.25:
+        trace_pts.append((lt_kp[0], lt_kp[1]))
+        trace_confs.append(lt_kp[2])
+
+    if len(trace_pts) < min_points:
+        return default_trace
+
+    confs_arr = np.asarray(trace_confs, dtype=np.float64)
+    mean_conf = float(np.mean(confs_arr))
+    default_trace["mean_conf"] = round(mean_conf, 4)
+    if mean_conf < min_mean_conf:
+        return default_trace
+
+    pts_arr = np.asarray(trace_pts, dtype=np.float64)
+    line_params = cv2.fitLine(pts_arr.astype(np.float32), cv2.DIST_L2, 0, 0.01, 0.01)
+    vx, vy, x0, y0 = [float(v[0]) for v in line_params]
+
+    # Orient (vx, vy) from lamina_base toward lamina_tip (or first -> last trace point)
+    if default_trace["lamina_base"] is not None and default_trace["lamina_tip"] is not None:
+        ref_dx = default_trace["lamina_tip"][0] - default_trace["lamina_base"][0]
+        ref_dy = default_trace["lamina_tip"][1] - default_trace["lamina_base"][1]
+    elif default_trace["lamina_base"] is not None:
+        ref_dx = pts_arr[-1, 0] - default_trace["lamina_base"][0]
+        ref_dy = pts_arr[-1, 1] - default_trace["lamina_base"][1]
+    elif default_trace["lamina_tip"] is not None:
+        ref_dx = default_trace["lamina_tip"][0] - pts_arr[0, 0]
+        ref_dy = default_trace["lamina_tip"][1] - pts_arr[0, 1]
+    else:
+        ref_dx = pts_arr[-1, 0] - pts_arr[0, 0]
+        ref_dy = pts_arr[-1, 1] - pts_arr[0, 1]
+
+    if (ref_dx * vx + ref_dy * vy) < 0.0:
+        vx, vy = -vx, -vy
+
+    proj_t = (pts_arr[:, 0] - x0) * vx + (pts_arr[:, 1] - y0) * vy
+    t_base = float(np.min(proj_t))
+    t_apex = float(np.max(proj_t))
+    if default_trace["lamina_base"] is not None:
+        tb_anch = (default_trace["lamina_base"][0] - x0) * vx + (default_trace["lamina_base"][1] - y0) * vy
+        t_base = min(t_base, float(tb_anch))
+    if default_trace["lamina_tip"] is not None:
+        ta_anch = (default_trace["lamina_tip"][0] - x0) * vx + (default_trace["lamina_tip"][1] - y0) * vy
+        t_apex = max(t_apex, float(ta_anch))
+
+    if abs(t_apex - t_base) < 1e-4:
+        return default_trace
+
+    p_base_fit = (int(round(x0 + t_base * vx)), int(round(y0 + t_base * vy)))
+    p_apex_fit = (int(round(x0 + t_apex * vx)), int(round(y0 + t_apex * vy)))
+
+    default_trace.update({
+        "is_valid": True,
+        "points": pts_arr,
+        "confidences": confs_arr,
+        "vx": float(vx),
+        "vy": float(vy),
+        "x0": float(x0),
+        "y0": float(y0),
+        "p_base": p_base_fit,
+        "p_apex": p_apex_fit,
+    })
+    return default_trace
+
+
 def reflect_folded_mask(
     mask: np.ndarray,
-    p1: Tuple[int, int],
-    p2: Tuple[int, int],
-    padding: Optional[int] = None
+    p1: Optional[Tuple[int, int]] = None,
+    p2: Optional[Tuple[int, int]] = None,
+    padding: Optional[int] = None,
+    keypoints_31: Optional[Any] = None,
+    lm3_symmetry_score: Optional[float] = None,
+    p_apex: Optional[Tuple[int, int]] = None,
+    p_base: Optional[Tuple[int, int]] = None,
 ) -> np.ndarray:
     """
     Symmetrically reflects a folded hemi-blade mask across the straight chord line
-    passing through p1 and p2, synthesizing a complete bilateral silhouette.
+    passing through p1 and p2 (or across the fitted LeafMachine3 15-point midvein line
+    anchored at `lamina_base -> lamina_tip` when `keypoints_31` has >= 3 valid midvein
+    keypoints with mean confidence >= 0.50), synthesizing a complete bilateral silhouette.
     Fully vectorized in OpenCV using an affine reflection matrix and bitwise_or.
     Applies morphological closing to seal the midrib seam.
 
@@ -512,18 +674,25 @@ def reflect_folded_mask(
     ----------
     mask : np.ndarray
         Binary uint8 mask of the folded leaf.
-    p1 : Tuple[int, int]
-        Starting endpoint of the fold chord (apex or base).
-    p2 : Tuple[int, int]
-        Ending endpoint of the fold chord (base or apex).
+    p1 : Optional[Tuple[int, int]]
+        Starting endpoint of the fold chord (apex or base). Optional when `keypoints_31`
+        is provided or auto-detected.
+    p2 : Optional[Tuple[int, int]]
+        Ending endpoint of the fold chord (base or apex). Optional when `keypoints_31`
+        is provided or auto-detected.
     padding : Optional[int]
         Canvas margin to avoid clipping reflected geometry.
+    keypoints_31 : Optional[Dict[str, Tuple[float, float, float]]]
+        Optional LeafMachine3 31-keypoint dictionary (`midvein_1..15`, `lamina_base`, `lamina_tip`).
+    lm3_symmetry_score : Optional[float]
+        Optional LeafMachine3 bilateral symmetry score diagnostic.
 
     Returns
     -------
     np.ndarray
         Synthesized bilateral silhouette mask (uint8, 0 or 255).
     """
+    _ = lm3_symmetry_score
     h, w = mask.shape[:2]
     if h < 5 or w < 5:
         return mask.copy()
@@ -532,6 +701,19 @@ def reflect_folded_mask(
     bx, by, bw, bh = cv2.boundingRect(mask_u8)
     if bw == 0 or bh == 0:
         return mask.copy()
+
+    if p1 is None and p_apex is not None:
+        p1 = p_apex
+    if p2 is None and p_base is not None:
+        p2 = p_base
+    trace = _extract_lm3_midvein_trace(keypoints_31, min_points=3, min_mean_conf=0.50)
+    if trace["is_valid"] and trace["p_apex"] is not None and trace["p_base"] is not None:
+        p1 = trace["p_apex"]
+        p2 = trace["p_base"]
+    elif p1 is None or p2 is None:
+        _, _, _, pa_m, pb_m = compute_geometric_metrics(mask_u8)
+        p1 = pa_m if p1 is None else p1
+        p2 = pb_m if p2 is None else p2
 
     x1, y1 = float(p1[0]), float(p1[1])
     x2, y2 = float(p2[0]), float(p2[1])
@@ -653,47 +835,35 @@ def detect_folded_leaf(
     min_r2: float = 0.97,
     max_wl_ratio: float = 0.42,
     min_chord_length_px: float = 5.0,
+    keypoints_31: Optional[Any] = None,
+    lm3_symmetry_score: Optional[float] = None,
+    p_apex: Optional[Tuple[int, int]] = None,
+    p_base: Optional[Tuple[int, int]] = None,
 ) -> FoldDetectionResult:
     """
     Detects whether a leaf is folded in half along the midrib.
 
     Identifies the primary longitudinal axis connecting the basal petiole insertion
-    to the blade apex, splits the perimeter into Side A and Side B lateral contours,
-    and evaluates linearity and chord straightness.
+    to the blade apex (using LeafMachine3's 15-point midvein trace `midvein_1..15`
+    anchored at `lamina_base -> lamina_tip` when >= 3 valid keypoints have mean
+    confidence >= 0.50, or whole-mask principal line otherwise), splits the perimeter
+    into Side A and Side B lateral contours, and evaluates linearity, chord straightness,
+    and midvein-to-margin lamina width asymmetry.
 
     Detection Rules:
       - If exactly one lateral boundary is a straight chord (max deviation < 3.5% of
         chord length, R^2 > 0.97 to linear fit) AND W/L <= 0.45:
-          Classified as is_folded = True, with the straight chord as the true midrib_axis.
-          Symmetrically reflects the curved margin across the fold chord.
+          Classified as is_folded = True, with the straight chord (or fitted LM3 midvein
+          axis) as the true midrib_axis. Symmetrically reflects the curved margin across
+          the fold chord.
+      - When `keypoints_31` provides a valid midvein trace (>= 3 points, mean conf >= 0.50):
+          Computes how close the traced midvein points lie to the outer contour boundary
+          and how asymmetric the perpendicular lamina widths are on the left vs. right
+          side of the traced midvein axis (incorporating `lm3_symmetry_score` when low),
+          fitting the bilateral reflection axis (`p_base -> p_apex`) directly to the
+          traced midvein line.
       - If folded irregularly or diagonally (neither side is collinear with petiole-to-apex
         axis), classified as is_irregular_fold = True.
-
-    Parameters
-    ----------
-    mask : np.ndarray
-        Binary leaf mask.
-    contour : Optional[np.ndarray]
-        External contour points. If None, extracted from mask.
-    max_dev_ratio : float
-        Maximum perpendicular distance to chord as fraction of chord length (default 0.035).
-    min_r2 : float
-        Minimum linear fit R^2 for straight boundary (default 0.97).
-    max_wl_ratio : float
-        Maximum width-to-length ratio to be classified as folded (default 0.45).
-
-    Returns
-    -------
-    FoldDetectionResult
-        Dictionary containing:
-          - is_folded: bool
-          - is_irregular_fold: bool
-          - straight_side: Optional[str] ("Side A" or "Side B")
-          - midrib_axis: Optional[Tuple[Tuple[int, int], Tuple[int, int]]]
-          - wl_ratio: float
-          - synthesized_mask: Optional[np.ndarray]
-          - side_a_stats: Dict[str, Any]
-          - side_b_stats: Dict[str, Any]
     """
     default_res: FoldDetectionResult = FoldDetectionResult({
         "is_folded": False,
@@ -704,13 +874,18 @@ def detect_folded_leaf(
         "synthesized_mask": None,
         "side_a_stats": {"dev_ratio": 1.0, "r2": 0.0, "is_straight": False},
         "side_b_stats": {"dev_ratio": 1.0, "r2": 0.0, "is_straight": False},
+        "midvein_trace_used": False,
+        "midvein_boundary_ratio": 1.0,
+        "lamina_width_asymmetry": 0.0,
+        "lm3_symmetry_score": lm3_symmetry_score,
     })
 
     if mask is None or np.count_nonzero(mask) < 20:
         return default_res
 
+    mask_u8 = mask if mask.dtype == np.uint8 else ((mask > 0).astype(np.uint8) * 255)
     if contour is None:
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         if not contours:
             return default_res
         main_cnt = max(contours, key=cv2.contourArea)
@@ -730,15 +905,81 @@ def detect_folded_leaf(
     wl_ratio = float(box_wid / box_len) if box_len > 1e-6 else 0.0
     default_res["wl_ratio"] = round(wl_ratio, 4)
 
-    # 2. Longitudinal Midrib Axis via cv2.fitLine
-    line_params = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
-    vx, vy, x0, y0 = [float(v[0]) for v in line_params]
-    projections = (pts[:, 0] - x0) * vx + (pts[:, 1] - y0) * vy
+    # 2. Longitudinal Midrib Axis (LM3 15-point midvein trace when available, else cv2.fitLine)
+    _ = (p_apex, p_base)
+    trace = _extract_lm3_midvein_trace(keypoints_31, min_points=3, min_mean_conf=0.50)
+    midvein_folded_trigger = False
+    midvein_narrow_side: Optional[str] = None
 
-    min_idx = int(np.argmin(projections))
-    max_idx = int(np.argmax(projections))
-    p_apex = (int(pts[min_idx, 0]), int(pts[min_idx, 1]))
-    p_base = (int(pts[max_idx, 0]), int(pts[max_idx, 1]))
+    if trace["is_valid"] and trace["p_apex"] is not None and trace["p_base"] is not None:
+        default_res["midvein_trace_used"] = True
+        vx, vy, x0, y0 = trace["vx"], trace["vy"], trace["x0"], trace["y0"]
+        projections = (pts[:, 0] - x0) * vx + (pts[:, 1] - y0) * vy
+        min_idx = int(np.argmin(projections))
+        max_idx = int(np.argmax(projections))
+        p_apex = trace["p_apex"]
+        p_base = trace["p_base"]
+
+        # Measure proximity of traced midvein points to outer contour boundary
+        t_pts = trace["points"]
+        d_to_cnt = np.min(
+            np.hypot(t_pts[:, None, 0] - pts[None, :, 0], t_pts[:, None, 1] - pts[None, :, 1]),
+            axis=1,
+        )
+        midvein_boundary_ratio = float(np.median(d_to_cnt)) / max(float(box_wid), 1.0)
+        default_res["midvein_boundary_ratio"] = round(midvein_boundary_ratio, 4)
+
+        # Measure left vs. right lamina widths perpendicular to the traced midvein axis
+        mh, mw = mask_u8.shape[:2]
+        nx, ny = -vy, vx
+        max_probe = max(12, int(round(max(box_wid, 20.0) * 1.25)))
+        t_steps = np.arange(1, max_probe + 1, dtype=np.float64)
+        w_pos_list: List[float] = []
+        w_neg_list: List[float] = []
+        for mp_x, mp_y in t_pts:
+            px_p = np.round(mp_x + t_steps * nx).astype(np.int32)
+            py_p = np.round(mp_y + t_steps * ny).astype(np.int32)
+            vp = (px_p >= 0) & (px_p < mw) & (py_p >= 0) & (py_p < mh)
+            fg_p = np.zeros(len(t_steps), dtype=bool)
+            fg_p[vp] = mask_u8[py_p[vp], px_p[vp]] > 0
+            nz_p = np.where(fg_p)[0]
+            w_pos_list.append(float(nz_p[-1] + 1) if len(nz_p) > 0 else 0.0)
+
+            px_n = np.round(mp_x - t_steps * nx).astype(np.int32)
+            py_n = np.round(mp_y - t_steps * ny).astype(np.int32)
+            vn = (px_n >= 0) & (px_n < mw) & (py_n >= 0) & (py_n < mh)
+            fg_n = np.zeros(len(t_steps), dtype=bool)
+            fg_n[vn] = mask_u8[py_n[vn], px_n[vn]] > 0
+            nz_n = np.where(fg_n)[0]
+            w_neg_list.append(float(nz_n[-1] + 1) if len(nz_n) > 0 else 0.0)
+
+        mean_w_pos = float(np.mean(w_pos_list)) if w_pos_list else 0.0
+        mean_w_neg = float(np.mean(w_neg_list)) if w_neg_list else 0.0
+        lamina_asym = abs(mean_w_pos - mean_w_neg) / max(mean_w_pos + mean_w_neg, 1.0)
+        default_res["lamina_width_asymmetry"] = round(lamina_asym, 4)
+        midvein_narrow_side = "Side A" if mean_w_pos <= mean_w_neg else "Side B"
+
+        low_sym_bonus = lm3_symmetry_score is not None and float(lm3_symmetry_score) < 0.60
+        eff_wl_cap = max(float(max_wl_ratio), 0.55 if low_sym_bonus else 0.48)
+        if wl_ratio <= eff_wl_cap and (
+            midvein_boundary_ratio <= 0.20
+            or lamina_asym >= 0.60
+            or (low_sym_bonus and (midvein_boundary_ratio <= 0.28 or lamina_asym >= 0.48))
+        ):
+            midvein_folded_trigger = True
+    else:
+        line_params = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
+        vx, vy, x0, y0 = [float(v[0]) for v in line_params]
+        projections = (pts[:, 0] - x0) * vx + (pts[:, 1] - y0) * vy
+
+        min_idx = int(np.argmin(projections))
+        max_idx = int(np.argmax(projections))
+        p_apex = (int(pts[min_idx, 0]), int(pts[min_idx, 1]))
+        p_base = (int(pts[max_idx, 0]), int(pts[max_idx, 1]))
+        if trace["lamina_base"] is not None:
+            lb_x, lb_y = trace["lamina_base"]
+            if math.hypot(p_apex[0] - lb_x, p_apex[1] - lb_y) < math.hypot(p_base[0] - lb_x, p_base[1] - lb_y):
+                p_apex, p_base = p_base, p_apex
 
     chord_dx = float(p_base[0] - p_apex[0])
     chord_dy = float(p_base[1] - p_apex[1])
@@ -784,14 +1025,21 @@ def detect_folded_leaf(
     default_res["side_b_stats"] = {"dev_ratio": round(dev_b, 4), "r2": round(r2_b, 4), "is_straight": straight_b}
 
     # 4. Detection Rule Evaluation
-    if straight_a ^ straight_b:
-        # Exactly one lateral boundary is a straight chord
-        if wl_ratio <= max_wl_ratio:
-            default_res["is_folded"] = True
+    if (straight_a ^ straight_b and wl_ratio <= max_wl_ratio) or midvein_folded_trigger:
+        default_res["is_folded"] = True
+        if straight_a ^ straight_b:
             default_res["straight_side"] = "Side A" if straight_a else "Side B"
-            default_res["midrib_axis"] = (p_apex, p_base)
-            default_res["synthesized_mask"] = reflect_folded_mask(mask, p_apex, p_base)
-            return default_res
+        else:
+            default_res["straight_side"] = midvein_narrow_side or ("Side A" if dev_a <= dev_b else "Side B")
+        default_res["midrib_axis"] = (p_apex, p_base)
+        default_res["synthesized_mask"] = reflect_folded_mask(
+            mask_u8,
+            p_apex,
+            p_base,
+            keypoints_31=keypoints_31,
+            lm3_symmetry_score=lm3_symmetry_score,
+        )
+        return default_res
 
     # Check for irregular or diagonal fold:
     # If aspect ratio is narrow (W/L <= 0.45) but neither side matches the straight midrib chord
@@ -832,14 +1080,15 @@ def bridge_dissected_rachis_components(
     petiole_mask: Optional[np.ndarray] = None,
     max_gap_fraction: float = 0.22,
     crop_bgr: Optional[np.ndarray] = None,
+    specimen_paper_cleaned_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Reconstructs micro-severed rachis internodes in multi-component dissected leaf masks.
 
     In deeply pinnatisect/bipinnatisect leaves (e.g. Packera glabella), narrow or winged
     rachis segments between the terminal lobe and lateral pinna pairs are occasionally
-    fragmented into 2+ foreground islands by PointRend thresholding (or assigned to
-    PointRend class 1 `petiole` while the pinna lobes are assigned to class 0 `leaf`).
+    fragmented into 2+ foreground islands by LeafMachine3 (YOLO26x) thresholding (or assigned to
+    LeafMachine3 class 1 `petiole` while the pinna lobes are assigned to class 0 `lamina`).
 
     Invariants:
       - Fast no-op (`0` pixels modified) whenever `mask` already has <= 1 foreground
@@ -847,6 +1096,11 @@ def bridge_dissected_rachis_components(
       - Label-blind: relies purely on component area, longitudinal axis collinearity,
         border-clipping exclusion, and anatomical rachis-spine bridging so outer
         inter-lobe sinuses remain open concavity defects.
+      - When `specimen_paper_cleaned_mask` (from LeafMachine3 UNet++ v9 `LLR_Hyst_KeepBlobs`
+        whole-specimen segmenter) is provided, constrains rachis-bridging corridors to
+        non-paper plant pixels: boosts bridging affinity where `specimen_paper_cleaned_mask > 0`
+        covers >= 50% of the corridor between adjacent pinnatifid lobes, while rejecting
+        corridors that cross > 70% pure paper background (`specimen_paper_cleaned_mask == 0`).
       - When `crop_bgr` is provided, verifies that any synthetic bridge segment > 10 px
         is supported by non-paper botanical tissue (or `petiole_mask`) rather than drawing
         artificial straight lines across bright mounting paper between separate leaves.
@@ -862,6 +1116,18 @@ def bridge_dissected_rachis_components(
         return mask.copy()
 
     h, w = mask_u8.shape[:2]
+    spec_clean_bool: Optional[np.ndarray] = None
+    if specimen_paper_cleaned_mask is not None and specimen_paper_cleaned_mask.size > 0:
+        if specimen_paper_cleaned_mask.shape[:2] == (h, w):
+            spec_clean_bool = specimen_paper_cleaned_mask > 0
+        else:
+            spec_rs = cv2.resize(
+                (specimen_paper_cleaned_mask > 0).astype(np.uint8) * 255,
+                (w, h),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            spec_clean_bool = spec_rs > 0
+
     areas = stats[1:, cv2.CC_STAT_AREA]
     main_id = 1 + int(np.argmax(areas))
     main_area = int(stats[main_id, cv2.CC_STAT_AREA])
@@ -945,14 +1211,30 @@ def bridge_dissected_rachis_components(
 
     def _bridge_path_has_tissue(pt_a: Tuple[int, int], pt_b: Tuple[int, int]) -> bool:
         seg_len = math.hypot(float(pt_b[0] - pt_a[0]), float(pt_b[1] - pt_a[1]))
+        n_samples = max(8, int(round(max(seg_len, 4.0))))
+        xs_s = np.clip(np.round(np.linspace(pt_a[0], pt_b[0], n_samples)).astype(int), 0, w - 1)
+        ys_s = np.clip(np.round(np.linspace(pt_a[1], pt_b[1], n_samples)).astype(int), 0, h - 1)
+
+        if spec_clean_bool is not None:
+            # Evaluate corridor coverage on UNet++ v9 whole-specimen binary mask (with 1px tolerance)
+            corridor_hits = np.zeros(n_samples, dtype=bool)
+            for dy_c in (-1, 0, 1):
+                for dx_c in (-1, 0, 1):
+                    yc = np.clip(ys_s + dy_c, 0, h - 1)
+                    xc = np.clip(xs_s + dx_c, 0, w - 1)
+                    corridor_hits |= spec_clean_bool[yc, xc]
+            plant_frac = float(np.mean(corridor_hits))
+            paper_frac = 1.0 - plant_frac
+            if paper_frac > 0.70:
+                return False
+            if plant_frac >= 0.50:
+                return True
+
         if seg_len <= 10.0:
             return True
         if gray_crop is None or paper_thresh is None:
             return True
-        n_samples = max(8, int(round(seg_len)))
-        xs_s = np.clip(np.round(np.linspace(pt_a[0], pt_b[0], n_samples)).astype(int), 0, w - 1)
-        ys_s = np.clip(np.round(np.linspace(pt_a[1], pt_b[1], n_samples)).astype(int), 0, h - 1)
-        # Check a 3x3 neighborhood around each sample along the bridge segment
+        # Check a neighborhood along the bridge segment
         has_pet = False
         if petiole_mask is not None and petiole_mask.shape[:2] == mask_u8.shape[:2]:
             pet_hits = int(np.count_nonzero(petiole_mask[ys_s, xs_s] > 0))
@@ -984,7 +1266,7 @@ def bridge_dissected_rachis_components(
     bridged = np.where(np.isin(labels, [main_id] + valid_sec_ids), 255, 0).astype(np.uint8)
     bridge_w = max(3, min(10, int(round(0.03 * minor_span))))
 
-    # If native PointRend petiole_mask overlaps the intra-lamina span between lobes, include its rachis pixels
+    # If native LeafMachine3 (YOLO26x) petiole_mask overlaps the intra-lamina span between lobes, include its rachis pixels
     if petiole_mask is not None and petiole_mask.shape[:2] == mask_u8.shape[:2]:
         ys_pm, xs_pm = np.where(petiole_mask > 0)
         if len(xs_pm) > 0:
@@ -1445,11 +1727,23 @@ def classify_and_route_leaf(
     boundary_dilation_px: int = 8,
     max_tissue_border_ratio: float = 0.15,
     exclude_mask: Optional[np.ndarray] = None,
+    petiole_mask: Optional[np.ndarray] = None,
+    hole_mask: Optional[np.ndarray] = None,
+    keypoints_31: Optional[Dict[str, Tuple[float, float, float]]] = None,
+    specimen_paper_cleaned_mask: Optional[np.ndarray] = None,
+    lm3_symmetry_score: Optional[float] = None,
 ) -> LeafRoutingResult:
     """
-    Comprehensive 100% label-blind geometric quality gatekeeper and routing engine:
-      1. Evaluates midrib pose and initial solidity/UCS metrics.
-      2. Straight-chord fold detection:
+    Comprehensive 100% label-blind geometric quality gatekeeper and routing engine
+    for LeafMachine3 (`yolo26x_seg_1024` 3-class masks & `yolo26x_pose_640` 31-keypoints):
+      0. Pre-processes LM3 3-class segmentation masks when provided:
+         - Subtracts `petiole_mask > 0` pixels from the lamina mask prior to contour
+           extraction (provided remaining lamina retains >= 50% of original foreground area).
+         - Fills internal `hole_mask > 0` voids inside the lamina hull for closed
+           `Tier_1_Direct` EFA contour extraction while recording hole area diagnostics.
+      1. Evaluates midrib pose (disambiguating `p_base` vs. `p_apex` using `lamina_base`
+         from `keypoints_31` when confidence >= 0.50) and initial solidity/UCS metrics.
+      2. Straight-chord & 15-point midvein trace fold detection:
          - If folded along midrib (is_folded = True), symmetrically reflects hemi-blade
            into synthesized bilateral silhouette and routes to Tier 2.
          - If irregular/diagonal fold (is_irregular_fold = True), routes to Failed QC.
@@ -1553,14 +1847,77 @@ def classify_and_route_leaf(
             rejection_reason="mask_empty_or_too_small"
         )
 
+    orig_fg_area = int(np.count_nonzero(mask))
+    petiole_subtracted = False
+    petiole_mask_area_px = 0
+    if (
+        petiole_mask is not None
+        and isinstance(petiole_mask, np.ndarray)
+        and petiole_mask.shape[:2] == mask.shape[:2]
+        and np.count_nonzero(petiole_mask) > 0
+    ):
+        petiole_mask_area_px = int(np.count_nonzero(petiole_mask > 0))
+        cand_lamina = np.where((mask > 0) & (petiole_mask == 0), 255, 0).astype(np.uint8)
+        if int(np.count_nonzero(cand_lamina)) >= int(0.50 * orig_fg_area):
+            mask = cand_lamina
+            petiole_subtracted = True
+
+    hole_filled = False
+    hole_mask_area_px = 0
+    filled_hole_area_px = 0
+    if (
+        hole_mask is not None
+        and isinstance(hole_mask, np.ndarray)
+        and hole_mask.shape[:2] == mask.shape[:2]
+        and np.count_nonzero(hole_mask) > 0
+    ):
+        hole_bool = hole_mask > 0
+        hole_mask_area_px = int(np.count_nonzero(hole_bool))
+        lam_u8 = (mask > 0).astype(np.uint8) * 255
+        cnts_h, _ = cv2.findContours(lam_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if cnts_h:
+            hull_mask = np.zeros(mask.shape[:2], dtype=np.uint8)
+            all_pts_h = np.vstack([c.reshape(-1, 2) for c in cnts_h]).astype(np.int32)
+            if len(all_pts_h) >= 3:
+                cv2.fillPoly(hull_mask, [cv2.convexHull(all_pts_h)], 255)
+            internal_holes = hole_bool & (hull_mask > 0) & (lam_u8 == 0)
+            filled_hole_area_px = int(np.count_nonzero(internal_holes))
+            if filled_hole_area_px > 0:
+                mask = np.where((lam_u8 > 0) | internal_holes, 255, 0).astype(np.uint8)
+                hole_filled = True
+
     # Reconnect micro-severed rachis islands (fast no-op when mask has <= 1 connected component)
-    mask = bridge_dissected_rachis_components(mask)
+    mask = bridge_dissected_rachis_components(
+        mask,
+        petiole_mask=petiole_mask if not petiole_subtracted else None,
+        crop_bgr=crop_img,
+        specimen_paper_cleaned_mask=specimen_paper_cleaned_mask,
+    )
+
+    trace_kp = _extract_lm3_midvein_trace(keypoints_31, min_points=3, min_mean_conf=0.50)
+
+    def _apply_kp31_base_apex_disambiguation(
+        pa_in: Tuple[int, int], pb_in: Tuple[int, int]
+    ) -> Tuple[Tuple[int, int], Tuple[int, int], Optional[float]]:
+        if trace_kp["lamina_base"] is not None:
+            lbx, lby = trace_kp["lamina_base"]
+            d_base = math.hypot(pb_in[0] - lbx, pb_in[1] - lby)
+            d_apex = math.hypot(pa_in[0] - lbx, pa_in[1] - lby)
+            if d_apex + 2.0 < d_base:
+                pa_in, pb_in = pb_in, pa_in
+            ang_out = math.degrees(math.atan2(float(pb_in[1] - pa_in[1]), float(pb_in[0] - pa_in[0])))
+            return pa_in, pb_in, ang_out
+        return pa_in, pb_in, None
 
     # Compute initial geometric metrics and disambiguated (p_apex, p_base), then trim petiole tail
     ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(
         mask, rosette_centroid=rosette_centroid
     )
-    if not already_trimmed or rosette_centroid is not None:
+    p_apex, p_base, ang_override = _apply_kp31_base_apex_disambiguation(p_apex, p_base)
+    if ang_override is not None:
+        angle_deg = ang_override
+
+    if (not already_trimmed and not petiole_subtracted) or rosette_centroid is not None:
         trimmed_mask, trim_meta = trim_petiole_tail(
             mask,
             p_base=p_base,
@@ -1573,8 +1930,14 @@ def classify_and_route_leaf(
             ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(
                 mask, rosette_centroid=rosette_centroid
             )
+            p_apex, p_base, ang_override = _apply_kp31_base_apex_disambiguation(p_apex, p_base)
+            if ang_override is not None:
+                angle_deg = ang_override
     elif trim_meta is None:
-        trim_meta = {"is_trimmed": False, "reason": "PRE_TRIMMED"}
+        trim_meta = {
+            "is_trimmed": petiole_subtracted,
+            "reason": "LM3_PETIOLE_MASK_SUBTRACTED" if petiole_subtracted else "PRE_TRIMMED",
+        }
     mask_u8 = mask if mask.dtype == np.uint8 else ((mask > 0).astype(np.uint8) * 255)
     bx_m, by_m, bw_m, bh_m = cv2.boundingRect(mask_u8)
     if bw_m == 0 or bh_m == 0:
@@ -1614,7 +1977,7 @@ def classify_and_route_leaf(
 
     main_cnt = max(contours, key=cv2.contourArea)
 
-    # 1. Straight-chord fold detection
+    # 1. Straight-chord & LM3 15-point midvein trace fold detection
     if fold_detection_enabled:
         fold_info = detect_folded_leaf(
             mask,
@@ -1622,6 +1985,8 @@ def classify_and_route_leaf(
             max_dev_ratio=max_chord_deviation_ratio,
             max_wl_ratio=max_folded_aspect_ratio,
             min_chord_length_px=min_chord_length_px,
+            keypoints_31=keypoints_31,
+            lm3_symmetry_score=lm3_symmetry_score,
         )
     else:
         fold_info = {
@@ -1644,6 +2009,12 @@ def classify_and_route_leaf(
         "fold_info": fold_info,
         "reflection_applied": False,
         "petiole_trim_info": trim_meta,
+        "petiole_mask_subtracted": petiole_subtracted,
+        "petiole_mask_area_px": petiole_mask_area_px,
+        "hole_mask_filled": hole_filled,
+        "hole_mask_area_px": hole_mask_area_px,
+        "filled_hole_area_px": filled_hole_area_px,
+        "keypoints_31_used": bool(keypoints_31),
         "is_severed_lobe": False,
         "tissue_border_ratio": 0.0,
     }

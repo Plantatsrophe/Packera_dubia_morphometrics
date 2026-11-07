@@ -432,8 +432,8 @@ class PrecisionSAM2Annotator:
         vouchers_csv: Union[str, Path] = "data/tables/curated_vouchers.csv",
         crops_dir: Optional[Union[str, Path]] = None,
         full_sheet: bool = False,
-        prelabel_with_lm2: bool = False,
-        lm2_weights: Union[str, Path] = "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth",
+        prelabel_with_lm3: bool = False,
+        lm3_weights: Union[str, Path] = "models/lm3_packera_seg_finetuned.onnx",
         stage1_weights: Optional[Union[str, Path]] = None,
         active_class_ids: Tuple[int, ...] = ACTIVE_BASAL_CLASS_IDS,
     ):
@@ -443,12 +443,12 @@ class PrecisionSAM2Annotator:
         self.coco_output = Path(coco_output)
         self.crops_dir = Path(crops_dir) if crops_dir is not None else None
         self.full_sheet = bool(full_sheet)
-        self.prelabel_with_lm2 = bool(prelabel_with_lm2)
-        self.lm2_weights = Path(lm2_weights)
+        self.prelabel_with_lm3 = bool(prelabel_with_lm3)
+        self.lm3_weights = Path(lm3_weights)
         self.stage1_weights = Path(stage1_weights) if stage1_weights is not None else None
         self.active_class_ids: Tuple[int, ...] = tuple(active_class_ids)
-        self.lm2_stage1_detector: Optional[Any] = None
-        self.lm2_pointrend_engine: Optional[Any] = None
+        self.lm3_stage1_detector: Optional[Any] = None
+        self.lm3_segmenter_engine: Optional[Any] = None
         self.sam2_boundary_refiner: Optional[Any] = None
         self.masks_dir = self.output_dir / "masks"
         self.labels_dir = self.output_dir / "labels"
@@ -672,28 +672,28 @@ class PrecisionSAM2Annotator:
             except Exception as e:
                 logger.error(f"Failed to load SAM 2 weights: {e}")
 
-        if getattr(self, "prelabel_with_lm2", False):
-            self._init_lm2_prelabeler()
+        if getattr(self, "prelabel_with_lm3", False):
+            self._init_lm3_prelabeler()
 
-    def _init_lm2_prelabeler(self) -> None:
-        """Initializes Stage 1 LeafPriority.pt + Stage 2 PointRend + SAM 2 refiner for automated pre-labeling."""
-        if self.lm2_pointrend_engine is not None and self.sam2_boundary_refiner is not None:
+    def _init_lm3_prelabeler(self) -> None:
+        """Initializes LeafMachine3 (YOLO26x / UNet++ v9) + SAM 2 refiner for automated pre-labeling."""
+        if self.lm3_segmenter_engine is not None and self.sam2_boundary_refiner is not None:
             return
         try:
             import importlib
             step02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
-            if self.lm2_stage1_detector is None:
-                self.lm2_stage1_detector = step02.LM2Stage1Detector(
+            if self.lm3_stage1_detector is None:
+                self.lm3_stage1_detector = step02.LM3PlantDetector(
                     weights_path=getattr(self, "stage1_weights", None),
                     device=self.device,
                     conf_thres=0.25,
                 )
-            if self.lm2_pointrend_engine is None:
-                self.lm2_pointrend_engine = step02.PointRendInferenceEngine(
+            if self.lm3_segmenter_engine is None:
+                self.lm3_segmenter_engine = step02.LM3LeafSegmenterEngine(
                     weights_path=getattr(
                         self,
-                        "lm2_weights",
-                        "LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth",
+                        "lm3_weights",
+                        "models/lm3_packera_seg_finetuned.onnx",
                     ),
                     device=self.device,
                     score_thresh=0.40,
@@ -706,12 +706,12 @@ class PrecisionSAM2Annotator:
                     predictor=self.predictor,
                 )
         except Exception as e:
-            logger.debug(f"Could not initialize LM2 pre-labeler runtime ({e}).")
+            logger.debug(f"Could not initialize LeafMachine3 pre-labeler runtime ({e}).")
 
-    def prelabel_current_sheet_with_lm2(self) -> List[Dict[str, Any]]:
+    def prelabel_current_sheet_with_lm3(self) -> List[Dict[str, Any]]:
         """
         Pre-populates `self.saved_instances` on the active voucher sheet using the automated
-        Two-Stage LM2 (LeafPriority.pt + PointRend) -> SAM 2 boundary refinement pipeline.
+        LeafMachine3 (YOLO26x / UNet++ v9) -> SAM 2 boundary refinement pipeline.
         Restricts pre-labeled classes strictly to basal leaves:
           - 0: basal_leaf_whole
           - 1: basal_leaf_partial
@@ -719,12 +719,15 @@ class PrecisionSAM2Annotator:
         if self.active_image is None:
             return []
 
-        self._init_lm2_prelabeler()
+        self._init_lm3_prelabeler()
 
         import importlib
         step02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
-        from scripts.vision.lm2_data_loader import LM2_LEAF_CLASS_IDS
-        from scripts.vision.lm2_geometry_utils import classify_and_route_leaf
+        from scripts.vision.lm3_data_loader import LM3_LEAF_CLASS_IDS
+        from scripts.vision.leaf_geometry_utils import (
+            classify_and_route_leaf,
+            generate_sam2_prompts_from_leaf_mask,
+        )
 
         sheet_h, sheet_w = self.active_image.shape[:2]
         voucher_id = (
@@ -746,33 +749,33 @@ class PrecisionSAM2Annotator:
             refiner.predictor = self.predictor
 
         stage1_dets = []
-        if self.lm2_stage1_detector is not None:
-            stage1_dets = self.lm2_stage1_detector.predict(self.active_image, catalog_number=voucher_id)
+        if self.lm3_stage1_detector is not None:
+            stage1_dets = self.lm3_stage1_detector.predict(self.active_image, catalog_number=voucher_id)
 
         candidate_leaf_masks: List[Tuple[np.ndarray, int]] = []
 
-        if stage1_dets and self.lm2_pointrend_engine is not None:
+        if stage1_dets and self.lm3_segmenter_engine is not None:
             for s1_item in stage1_dets:
                 if len(s1_item) == 4:
                     s1_bbox, _s1_mask, _s1_score, s1_cls = s1_item
                 else:
                     s1_bbox, _s1_score, s1_cls = s1_item
-                if int(s1_cls) not in LM2_LEAF_CLASS_IDS:
+                if int(s1_cls) not in LM3_LEAF_CLASS_IDS:
                     continue
                 crop_bgr, crop_box = step02.crop_leaf_bbox_with_padding(self.active_image, s1_bbox, pad_ratio=0.12)
                 if crop_bgr.size == 0:
                     continue
-                crop_preds = self.lm2_pointrend_engine.predict(crop_bgr)
+                crop_preds = self.lm3_segmenter_engine.predict(crop_bgr)
                 for _pr_bbox, pr_mask, _pr_score, _pr_cls in crop_preds:
                     m_refined = refiner.refine_crop_mask(crop_bgr, pr_mask)
                     sheet_mask, _full_bbox = step02.reproject_crop_mask_to_sheet(
                         m_refined, crop_box, (sheet_h, sheet_w)
                     )
                     candidate_leaf_masks.append((sheet_mask, int(s1_cls)))
-        elif self.lm2_pointrend_engine is not None:
-            raw_dets = self.lm2_pointrend_engine.predict(self.active_image)
+        elif self.lm3_segmenter_engine is not None:
+            raw_dets = self.lm3_segmenter_engine.predict(self.active_image)
             for bbox, mask, _score, cls_id in raw_dets:
-                if int(cls_id) not in LM2_LEAF_CLASS_IDS:
+                if int(cls_id) not in LM3_LEAF_CLASS_IDS:
                     continue
                 crop_bgr, crop_box = step02.crop_leaf_bbox_with_padding(self.active_image, bbox, pad_ratio=0.12)
                 cy0, cx0, cy1, cx1 = crop_box
@@ -830,7 +833,7 @@ class PrecisionSAM2Annotator:
             self._update_cached_base_layer()
             logger.info(
                 f"Pre-labeled {len(prelabeled_instances)} basal leaf instances on voucher {voucher_id} "
-                "via automated LM2 + SAM 2 pipeline."
+                "via automated LeafMachine3 + SAM 2 pipeline."
             )
 
         return prelabeled_instances
@@ -1279,8 +1282,8 @@ class PrecisionSAM2Annotator:
         self.saved_instances = self._load_existing_instances(voucher_id)
         if self.saved_instances:
             logger.info(f"Loaded {len(self.saved_instances)} existing instance annotations for voucher {voucher_id}")
-        elif getattr(self, "prelabel_with_lm2", False):
-            self.prelabel_current_sheet_with_lm2()
+        elif getattr(self, "prelabel_with_lm3", False):
+            self.prelabel_current_sheet_with_lm3()
 
         self._update_cached_base_layer()
 
@@ -1787,7 +1790,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default="sam2_hiera_l.yaml", help="SAM 2 model configuration")
     parser.add_argument("--export-coco", action="store_true", help="Compile and export COCO dataset from existing masks in headless mode")
     parser.add_argument("--masks-dir", type=str, default="data/raw_annotations/masks", help="Masks directory for --export-coco")
-    parser.add_argument("--crops-dir", type=str, default="data/annotations/lm2_leaf_crops", help="Directory for native-DPI cropped leaf patches")
+    parser.add_argument("--crops-dir", type=str, default="data/annotations/lm3_leaf_crops", help="Directory for native-DPI cropped leaf patches")
     parser.add_argument("--full-sheet", action="store_true", help="Export full-sheet COCO annotations instead of Stage 2 single-leaf crops")
     parser.add_argument("--val-split", type=float, default=0.0, help="Validation partition fraction (e.g. 0.20)")
     parser.add_argument("--resume-last", action="store_true", help="Automatically resume from the most recently annotated voucher")
@@ -1797,23 +1800,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tier", type=str, default="1", choices=["1", "2", "3", "all"], help="Filter vouchers by determiner authority tier (default: '1' for Tier 1 Gold monograph authorities; 'all' for all 5347 vouchers)")
     parser.add_argument("--vouchers-csv", type=str, default="data/tables/curated_vouchers.csv", help="Path to curated vouchers metadata CSV")
     parser.add_argument(
-        "--prelabel-with-lm2",
-        dest="prelabel_with_lm2",
+        "--prelabel-with-lm3",
+        dest="prelabel_with_lm3",
         action="store_true",
         default=False,
-        help="Pre-populate saved_instances on each voucher sheet using automated LM2 + SAM 2 basal leaf segmentation.",
+        help="Pre-populate saved_instances on each voucher sheet using automated LeafMachine3 (YOLO26x / UNet++ v9) + SAM 2 basal leaf segmentation.",
     )
     parser.add_argument(
-        "--lm2-weights",
+        "--lm3-weights",
         type=str,
-        default="LeafMachine2/leafmachine2/segmentation/models/Group3_Dataset_100000_Iter_1176PTS_512Batch_smooth_l1_LR00025_BGR/model_final.pth",
-        help="Stage 2 PointRend weights checkpoint for --prelabel-with-lm2.",
+        default="models/lm3_packera_seg_finetuned.onnx",
+        help="LeafMachine3 YOLO26x leaf segmenter weights checkpoint for --prelabel-with-lm3.",
     )
     parser.add_argument(
         "--stage1-weights",
         type=str,
         default=None,
-        help="Optional Stage 1 YOLOv5 LeafPriority.pt weights path for --prelabel-with-lm2.",
+        help="Optional LeafMachine3 Stage 1 YOLO26x plant detector weights path for --prelabel-with-lm3.",
     )
     return parser.parse_args()
 
@@ -1854,8 +1857,8 @@ def main() -> None:
         vouchers_csv=args.vouchers_csv,
         crops_dir=args.crops_dir,
         full_sheet=args.full_sheet,
-        prelabel_with_lm2=args.prelabel_with_lm2,
-        lm2_weights=args.lm2_weights,
+        prelabel_with_lm3=args.prelabel_with_lm3,
+        lm3_weights=args.lm3_weights,
         stage1_weights=args.stage1_weights,
     )
     logger.info("Launching Precision SAM 2 Annotator GUI...")

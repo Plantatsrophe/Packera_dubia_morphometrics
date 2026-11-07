@@ -18,7 +18,7 @@ Description:
 
     ABI Invariant:
       Relies strictly on Python's built-in standard library (`sqlite3`, `csv`,
-      `json`, `hashlib`, etc.) at import time so `.venv_LM2` requires zero new
+      `json`, `hashlib`, etc.) at import time so `.venv_LM3` requires zero new
       binary package installations. `duckdb` is imported lazily only when
       explicitly requested inside `.venv`.
 ===============================================================================
@@ -408,7 +408,7 @@ def get_duckdb_connection(
     Lazily attach the SQLite database inside an in-memory DuckDB analytical session
     when `duckdb` is installed in `.venv`.
     """
-    import duckdb  # Lazy import so .venv_LM2 never requires duckdb
+    import duckdb  # Lazy import so .venv_LM3 never requires duckdb
 
     resolved = resolve_db_path(db_path=db_path, workspace_root=workspace_root, demo=False)
     dconn = duckdb.connect(database=":memory:")

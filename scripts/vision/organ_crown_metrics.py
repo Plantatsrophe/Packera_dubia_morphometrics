@@ -6,9 +6,10 @@ Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-    SAM 2 prompt generation, topological connectivity gatekeeping, multi-plant
-    DBSCAN spatial clustering, Hough ruler scale calibration, Tier 4 dense
-    rosette patch masking, and rosette crown / petiole / bent-scape metrics.
+    LeafMachine3 (YOLO26x / UNet++ v9) SAM 2 prompt generation, topological
+    connectivity gatekeeping, multi-plant DBSCAN spatial clustering, Hough
+    ruler scale calibration, Tier 4 dense rosette patch masking, and 31-keypoint
+    rosette crown / petiole / bent-scape metrics.
 ===============================================================================
 """
 
@@ -23,14 +24,14 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import DBSCAN
 
-from scripts.vision.lm2_geometry_utils import (
+from scripts.vision.leaf_geometry_utils import (
     compute_geometric_metrics,
     trim_petiole_tail,
 )
 
 __all__ = [
     "SAM2PromptBundle",
-    "generate_sam2_prompts_from_lm2_mask",
+    "generate_sam2_prompts_from_leaf_mask",
     "is_topologically_connected_mask",
     "cluster_plant_individuals",
     "cluster_voucher_plants_dbscan",
@@ -46,13 +47,13 @@ __all__ = [
 
 
 # =============================================================================
-# 3B. Automated LM2 -> SAM 2 Prompt Generation & Topological Gatekeeping
+# 3B. Automated LeafMachine3 -> SAM 2 Prompt Generation & Topological Gatekeeping
 # =============================================================================
 
 class SAM2PromptBundle(dict):
     """
     Dictionary-compatible and attribute-accessible bundle of automated SAM 2 prompts
-    derived from an initial Stage 2 PointRend binary leaf mask `m_init`.
+    derived from an initial LeafMachine3 (YOLO26x) binary leaf mask `m_init`.
     """
 
     def __getattr__(self, name: str) -> Any:
@@ -62,7 +63,7 @@ class SAM2PromptBundle(dict):
             raise AttributeError(f"'SAM2PromptBundle' object has no attribute '{name}'") from exc
 
 
-def generate_sam2_prompts_from_lm2_mask(
+def generate_sam2_prompts_from_leaf_mask(
     m_init: np.ndarray,
     num_lobe_peaks: int = 2,
     erode_kernel_size: int = 5,
@@ -70,18 +71,21 @@ def generate_sam2_prompts_from_lm2_mask(
     min_peak_dist_px: Optional[float] = None,
     max_concavity_points: int = 4,
     logit_scale: float = 6.0,
+    keypoints_31: Optional[Dict[str, Tuple[float, float, float]]] = None,
+    petiole_mask: Optional[np.ndarray] = None,
 ) -> SAM2PromptBundle:
     """
     Automatically generates deterministic SAM 2 prompt inputs from an initial
-    Stage 2 PointRend binary leaf crop mask `m_init` without human intervention:
+    LeafMachine3 (YOLO26x) binary leaf crop mask `m_init` without human intervention:
 
       1. Positive foreground prompt points (`label = 1`) along the medial skeleton /
          Euclidean distance-transform local maxima (`polygon_interior_point` pole of
          inaccessibility + top `num_lobe_peaks` lobe distance peaks) strictly inside
-         the eroded `m_init`.
+         the eroded `m_init`, augmented by high-confidence LeafMachine3 `midvein`
+         keypoints (`midvein_1..15`) when `keypoints_31` is provided.
       2. Negative background prompt points (`label = 0`) in the exterior bounding-box
-         corners and deep concavity / sinus pockets (inside the convex hull but
-         strictly outside the dilated `m_init`).
+         corners, deep concavity / sinus pockets (inside the convex hull but strictly
+         outside the dilated `m_init`), and `petiole_mask` centroids when available.
       3. Crop bounding box (`[x_min, y_min, x_max, y_max]`) and low-resolution mask
          logits of `m_init` (`(1, 256, 256)` in `[-logit_scale, +logit_scale]`) for
          `SAM2ImagePredictor.predict()`.
@@ -99,6 +103,7 @@ def generate_sam2_prompts_from_lm2_mask(
             "negative_points": np.zeros((0, 2), dtype=np.float32),
             "corner_points": np.zeros((0, 2), dtype=np.float32),
             "concavity_points": np.zeros((0, 2), dtype=np.float32),
+            "petiole_negative_points": np.zeros((0, 2), dtype=np.float32),
             "box": np.zeros((4,), dtype=np.float32),
             "mask_input": np.full((1, 256, 256), -float(logit_scale), dtype=np.float32),
             "eroded_mask": empty_u8,
@@ -168,9 +173,33 @@ def generate_sam2_prompts_from_lm2_mask(
             r_i = int(round(max(base_min_dist, 1.10 * float(pk_val))))
             cv2.circle(work_dist, (px_i, py_i), max(2, r_i), 0.0, -1)
 
+    # 1b. Incorporate high-confidence LM3 `midvein` points when `keypoints_31` is provided
+    if keypoints_31 and isinstance(keypoints_31, dict):
+        min_kp_sep = max(5.0, 0.08 * float(math.hypot(span_w, span_h)))
+        for idx_mv in range(1, 16):
+            raw_mv = keypoints_31.get(f"midvein_{idx_mv}")
+            if raw_mv is None:
+                continue
+            if isinstance(raw_mv, dict):
+                mx = float(raw_mv.get("x", 0.0))
+                my = float(raw_mv.get("y", 0.0))
+                mc = float(raw_mv.get("conf", raw_mv.get("confidence", 1.0)))
+            elif isinstance(raw_mv, (tuple, list, np.ndarray)) and len(raw_mv) >= 2:
+                mx = float(raw_mv[0])
+                my = float(raw_mv[1])
+                mc = float(raw_mv[2]) if len(raw_mv) >= 3 else 1.0
+            else:
+                continue
+            if not (np.isfinite(mx) and np.isfinite(my) and np.isfinite(mc)) or mc < 0.50:
+                continue
+            ix, iy = int(round(mx)), int(round(my))
+            if 0 <= ix < w and 0 <= iy < h and mask_u8[iy, ix] > 0:
+                if all(math.hypot(mx - ex, my - ey) >= min_kp_sep for ex, ey in pos_pts):
+                    pos_pts.append((float(mx), float(my)))
+
     positive_points = np.array(pos_pts, dtype=np.float32).reshape(-1, 2)
 
-    # 2. Dilate m_init and compute negative background points (corners + concavity pockets)
+    # 2. Dilate m_init and compute negative background points (corners + concavity pockets + petiole centroids)
     dk = max(3, int(dilate_kernel_size) | 1)
     dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dk, dk))
     dilated = cv2.dilate(mask_u8, dilate_kernel, iterations=1)
@@ -249,6 +278,28 @@ def generate_sam2_prompts_from_lm2_mask(
                         concavity_pts.append((float(qx_p), float(qy_p)))
                     cv2.circle(work_pdist, (qx_p, qy_p), max(1, supp_p), 0.0, -1)
 
+    # 2c. Petiole mask negative prompt centroids (to prevent SAM 2 from bleeding into the petiole stalk)
+    petiole_neg_pts: List[Tuple[float, float]] = []
+    if petiole_mask is not None and isinstance(petiole_mask, np.ndarray) and petiole_mask.size > 0:
+        pet_u8 = (petiole_mask > 0).astype(np.uint8) * 255
+        if pet_u8.shape[:2] != (h, w):
+            pet_u8 = cv2.resize(pet_u8, (w, h), interpolation=cv2.INTER_NEAREST)
+        pet_cand = np.where((pet_u8 > 0) & (eroded == 0), 255, 0).astype(np.uint8)
+        if np.count_nonzero(pet_cand) == 0:
+            pet_cand = pet_u8
+        if np.count_nonzero(pet_cand) > 0:
+            n_pet, pet_lbls, pet_stats, pet_cents = cv2.connectedComponentsWithStats(pet_cand, connectivity=8)
+            for plbl in range(1, n_pet):
+                if int(pet_stats[plbl, cv2.CC_STAT_AREA]) < 3:
+                    continue
+                cx_p, cy_p = float(pet_cents[plbl][0]), float(pet_cents[plbl][1])
+                ix_p, iy_p = int(round(cx_p)), int(round(cy_p))
+                if not (0 <= ix_p < w and 0 <= iy_p < h and pet_cand[iy_p, ix_p] > 0):
+                    p_dist = cv2.distanceTransform(np.where(pet_lbls == plbl, 255, 0).astype(np.uint8), cv2.DIST_L2, 3)
+                    _, _, _, p_loc = cv2.minMaxLoc(p_dist)
+                    cx_p, cy_p = float(p_loc[0]), float(p_loc[1])
+                petiole_neg_pts.append((cx_p, cy_p))
+
     corner_points = (
         np.array(corner_pts, dtype=np.float32).reshape(-1, 2)
         if corner_pts
@@ -259,8 +310,13 @@ def generate_sam2_prompts_from_lm2_mask(
         if concavity_pts
         else np.zeros((0, 2), dtype=np.float32)
     )
+    petiole_negative_points = (
+        np.array(petiole_neg_pts, dtype=np.float32).reshape(-1, 2)
+        if petiole_neg_pts
+        else np.zeros((0, 2), dtype=np.float32)
+    )
 
-    neg_list = corner_pts + concavity_pts
+    neg_list = corner_pts + concavity_pts + petiole_neg_pts
     negative_points = (
         np.array(neg_list, dtype=np.float32).reshape(-1, 2)
         if neg_list
@@ -294,6 +350,7 @@ def generate_sam2_prompts_from_lm2_mask(
         "negative_points": negative_points,
         "corner_points": corner_points,
         "concavity_points": concavity_points,
+        "petiole_negative_points": petiole_negative_points,
         "box": box,
         "mask_input": mask_input,
         "eroded_mask": eroded,
@@ -765,7 +822,11 @@ def _extract_xy_point(item: Any, ref_pt: Optional[Tuple[float, float]] = None) -
 
 
 def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
-    """Extract standardized (p_base, p_apex, plant_individual_id, geodesic_petiole_skeleton_px, blade_length_px) from a leaf record."""
+    """
+    Extract standardized `(p_base, p_apex, plant_individual_id, geodesic_petiole_skeleton_px,
+    blade_length_px)` and LeafMachine3 31-keypoint pose attributes (`p_petiole_tip`,
+    `pose_petiole_polyline_px`, `ray_dir`, `petiole_width_px`, `petiole_width_mm`) from a leaf record.
+    """
     if item is None:
         return None
 
@@ -773,9 +834,26 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
     ox, oy = 0.0, 0.0
     p_base: Optional[Tuple[float, float]] = None
     p_apex: Optional[Tuple[float, float]] = None
+    p_petiole_tip: Optional[Tuple[float, float]] = None
+    ray_dir: Optional[Tuple[float, float]] = None
+    has_lm3_petiole_pose = False
+    pose_petiole_polyline_px = 0.0
     geodesic_px = 0.0
     blade_px: Optional[float] = None
+    petiole_width_px: Optional[float] = None
+    petiole_width_mm: Optional[float] = None
     leaf_id: Optional[int] = None
+    keypoints_31: Optional[Dict[str, Any]] = None
+    kp_in_sheet_space = False
+
+    def _safe_pos_float(val: Any) -> Optional[float]:
+        if val is None:
+            return None
+        try:
+            fval = float(val)
+        except (TypeError, ValueError):
+            return None
+        return fval if (np.isfinite(fval) and fval > 0.0) else None
 
     if isinstance(item, dict):
         pid = int(item.get("plant_individual_id", 0) or 0)
@@ -783,6 +861,9 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
         origin = item.get("mask_origin") or item.get("origin")
         if origin is not None and len(origin) == 2 and not item.get("coords_in_sheet_space", False):
             ox, oy = float(origin[0]), float(origin[1])
+
+        keypoints_31 = item.get("keypoints_31")
+        kp_in_sheet_space = bool(item.get("keypoints_in_sheet_space", item.get("coords_in_sheet_space", False)))
 
         if item.get("p_base_sheet") is not None:
             pb = item["p_base_sheet"]
@@ -797,6 +878,20 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
         elif item.get("p_apex") is not None:
             pa = item["p_apex"]
             p_apex = (float(pa[0]) + ox, float(pa[1]) + oy)
+
+        if item.get("p_petiole_tip") is not None:
+            ptip = item["p_petiole_tip"]
+            p_petiole_tip = (float(ptip[0]) + (0.0 if kp_in_sheet_space else ox), float(ptip[1]) + (0.0 if kp_in_sheet_space else oy))
+        if item.get("ray_dir") is not None and len(item["ray_dir"]) == 2:
+            rd = item["ray_dir"]
+            ray_dir = (float(rd[0]), float(rd[1]))
+        if item.get("has_lm3_petiole_pose") is not None:
+            has_lm3_petiole_pose = bool(item["has_lm3_petiole_pose"])
+        if item.get("pose_petiole_polyline_px") is not None:
+            pose_petiole_polyline_px = max(0.0, float(item["pose_petiole_polyline_px"] or 0.0))
+
+        petiole_width_mm = _safe_pos_float(item.get("petiole_width_mm"))
+        petiole_width_px = _safe_pos_float(item.get("petiole_width_px", item.get("petiole_width")))
 
         if (p_base is None or p_apex is None) and isinstance(item.get("mask"), np.ndarray):
             _, _, _, pa_m, pb_m = compute_geometric_metrics(item["mask"])
@@ -838,11 +933,15 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
             if len(item) >= 4 and isinstance(item[3], (int, np.integer)):
                 pid = int(item[3])
 
-    elif hasattr(item, "p_base") or hasattr(item, "mask"):
+    elif hasattr(item, "p_base") or hasattr(item, "mask") or hasattr(item, "keypoints_31"):
         pid = int(getattr(item, "plant_individual_id", 0) or 0)
         leaf_id = getattr(item, "leaf_id", None)
         origin = getattr(item, "mask_origin", (0, 0)) or (0, 0)
         ox, oy = float(origin[0]), float(origin[1])
+        keypoints_31 = getattr(item, "keypoints_31", None)
+        kp_in_sheet_space = bool(getattr(item, "keypoints_in_sheet_space", False))
+        petiole_width_mm = _safe_pos_float(getattr(item, "petiole_width_mm", None))
+        petiole_width_px = _safe_pos_float(getattr(item, "petiole_width_px", getattr(item, "petiole_width", None)))
         pb = getattr(item, "p_base", None)
         pa = getattr(item, "p_apex", None)
         if (pb is None or pa is None) and getattr(item, "mask", None) is not None:
@@ -855,6 +954,129 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
             getattr(item, "geodesic_petiole_skeleton_px", trim_info.get("trim_distance_px", 0.0)) or 0.0
         )
 
+    # Parse LeafMachine3 31-keypoint pose skeleton when present (supports dict or (31, 3) ndarray)
+    if isinstance(keypoints_31, np.ndarray) and keypoints_31.ndim == 2 and keypoints_31.shape[0] >= 8 and keypoints_31.shape[1] >= 2:
+        _kp_arr = keypoints_31
+        def _row_tup(r: np.ndarray) -> Tuple[float, float, float]:
+            return (float(r[0]), float(r[1]), float(r[2]) if len(r) >= 3 else 1.0)
+        _kp_dict: Dict[str, Tuple[float, float, float]] = {
+            "lamina_tip": _row_tup(_kp_arr[0]),
+            "lamina_base": _row_tup(_kp_arr[1]),
+        }
+        for _pi in range(min(6, _kp_arr.shape[0] - 2)):
+            _kp_dict[f"petiole_{_pi + 1}"] = _row_tup(_kp_arr[2 + _pi])
+        for _mi in range(min(15, max(0, _kp_arr.shape[0] - 8))):
+            _kp_dict[f"midvein_{_mi + 1}"] = _row_tup(_kp_arr[8 + _mi])
+        keypoints_31 = _kp_dict
+
+    if isinstance(keypoints_31, dict) and len(keypoints_31) > 0:
+        kp_ox = 0.0 if kp_in_sheet_space else ox
+        kp_oy = 0.0 if kp_in_sheet_space else oy
+
+        def _extract_kp(name: str, min_conf: float = 0.50) -> Optional[Tuple[float, float, float]]:
+            val = keypoints_31.get(name)
+            if val is None:
+                return None
+            if isinstance(val, dict):
+                x = float(val.get("x", 0.0))
+                y = float(val.get("y", 0.0))
+                c = float(val.get("conf", val.get("confidence", 1.0)))
+            elif isinstance(val, (tuple, list, np.ndarray)) and len(val) >= 2:
+                x = float(val[0])
+                y = float(val[1])
+                c = float(val[2]) if len(val) >= 3 else 1.0
+            else:
+                return None
+            if not (np.isfinite(x) and np.isfinite(y) and np.isfinite(c)):
+                return None
+            if c < min_conf or (x == 0.0 and y == 0.0):
+                return None
+            return (x + kp_ox, y + kp_oy, c)
+
+        lb_kp = _extract_kp("lamina_base", min_conf=0.50)
+        lt_kp = _extract_kp("lamina_tip", min_conf=0.50)
+        mv_kps = [kp for kp in (_extract_kp(f"midvein_{i}", min_conf=0.50) for i in range(1, 16)) if kp is not None]
+        pet_kps = [(i, kp) for i in range(1, 7) for kp in (_extract_kp(f"petiole_{i}", min_conf=0.50),) if kp is not None]
+
+        if lb_kp is not None:
+            p_base = (lb_kp[0], lb_kp[1])
+        elif pet_kps and p_base is None:
+            p_base = (pet_kps[0][1][0], pet_kps[0][1][1])
+
+        if lt_kp is not None:
+            p_apex = (lt_kp[0], lt_kp[1])
+        elif mv_kps and p_apex is None and p_base is not None:
+            far_mv = max(mv_kps, key=lambda kp: math.hypot(kp[0] - p_base[0], kp[1] - p_base[1]))
+            p_apex = (far_mv[0], far_mv[1])
+
+        if pet_kps:
+            has_lm3_petiole_pose = True
+            # Distal crown-ward endpoint of petiole skeleton (petiole_6 or highest valid index)
+            p_petiole_tip = (pet_kps[-1][1][0], pet_kps[-1][1][1])
+
+            # Polyline arc length along lamina_base -> petiole_1 -> ... -> petiole_6 when >= 2 valid petiole_1..6 keypoints exist
+            if len(pet_kps) >= 2:
+                poly_pts: List[Tuple[float, float]] = []
+                if lb_kp is not None:
+                    poly_pts.append((lb_kp[0], lb_kp[1]))
+                for _, pkp in pet_kps:
+                    pt_xy = (pkp[0], pkp[1])
+                    if not poly_pts or math.hypot(pt_xy[0] - poly_pts[-1][0], pt_xy[1] - poly_pts[-1][1]) > 1e-4:
+                        poly_pts.append(pt_xy)
+                if len(poly_pts) >= 2:
+                    pose_petiole_polyline_px = float(
+                        sum(
+                            math.hypot(poly_pts[k + 1][0] - poly_pts[k][0], poly_pts[k + 1][1] - poly_pts[k][1])
+                            for k in range(len(poly_pts) - 1)
+                        )
+                    )
+
+            # Align inward ray direction from lamina_tip/midvein through lamina_base and petiole_1..6
+            spine_pts: List[Tuple[float, float]] = []
+            if lt_kp is not None:
+                spine_pts.append((lt_kp[0], lt_kp[1]))
+            for mkp in reversed(mv_kps):
+                spine_pts.append((mkp[0], mkp[1]))
+            if lb_kp is not None:
+                spine_pts.append((lb_kp[0], lb_kp[1]))
+            for _, pkp in pet_kps:
+                spine_pts.append((pkp[0], pkp[1]))
+
+            if len(spine_pts) >= 2 and p_base is not None:
+                pet_vec_x = p_petiole_tip[0] - p_base[0]
+                pet_vec_y = p_petiole_tip[1] - p_base[1]
+                pet_vec_len = math.hypot(pet_vec_x, pet_vec_y)
+                spine_arr = np.asarray(spine_pts, dtype=np.float32)
+                lp = cv2.fitLine(spine_arr, cv2.DIST_L2, 0, 0.01, 0.01)
+                vx_s, vy_s = float(lp[0][0]), float(lp[1][0])
+                ref_x = spine_pts[-1][0] - spine_pts[0][0]
+                ref_y = spine_pts[-1][1] - spine_pts[0][1]
+                if (ref_x * vx_s + ref_y * vy_s) < 0.0:
+                    vx_s, vy_s = -vx_s, -vy_s
+                if pet_vec_len > 2.0:
+                    ux_pet, uy_pet = pet_vec_x / pet_vec_len, pet_vec_y / pet_vec_len
+                    bx_dir = 0.65 * ux_pet + 0.35 * vx_s
+                    by_dir = 0.65 * uy_pet + 0.35 * vy_s
+                    bnorm = math.hypot(bx_dir, by_dir)
+                    ray_dir = (bx_dir / bnorm, by_dir / bnorm) if bnorm > 1e-6 else (ux_pet, uy_pet)
+                else:
+                    ray_dir = (vx_s, vy_s)
+
+        # Extract Module 13 petiole_width or width_1/width_2 fallback when present
+        if petiole_width_mm is None:
+            petiole_width_mm = _safe_pos_float(keypoints_31.get("petiole_width_mm"))
+        if petiole_width_px is None:
+            petiole_width_px = _safe_pos_float(
+                keypoints_31.get("petiole_width_px", keypoints_31.get("petiole_width"))
+            )
+        if petiole_width_px is None and petiole_width_mm is None:
+            w1_kp = _extract_kp("width_1", min_conf=0.50)
+            w2_kp = _extract_kp("width_2", min_conf=0.50)
+            if w1_kp is not None and w2_kp is not None:
+                w_dist = math.hypot(w1_kp[0] - w2_kp[0], w1_kp[1] - w2_kp[1])
+                if w_dist > 0.0:
+                    petiole_width_px = float(w_dist)
+
     if p_base is None or p_apex is None:
         return None
 
@@ -862,13 +1084,22 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
     if blade_px is None or blade_px <= 0.0:
         blade_px = chord_len
 
+    if ray_dir is None and chord_len > 1e-6:
+        ray_dir = ((p_base[0] - p_apex[0]) / chord_len, (p_base[1] - p_apex[1]) / chord_len)
+
     return {
         "leaf_id": leaf_id,
         "plant_individual_id": pid,
         "p_base": p_base,
         "p_apex": p_apex,
-        "geodesic_petiole_skeleton_px": max(0.0, geodesic_px),
+        "p_petiole_tip": p_petiole_tip,
+        "ray_dir": ray_dir,
+        "has_lm3_petiole_pose": bool(has_lm3_petiole_pose),
+        "pose_petiole_polyline_px": max(0.0, float(pose_petiole_polyline_px)),
+        "geodesic_petiole_skeleton_px": max(0.0, max(float(geodesic_px), float(pose_petiole_polyline_px))),
         "blade_length_px": max(0.0, float(blade_px)),
+        "petiole_width_px": petiole_width_px,
+        "petiole_width_mm": petiole_width_mm,
     }
 
 
@@ -878,8 +1109,9 @@ def _estimate_single_plant_crown(
 ) -> Tuple[float, float]:
     """
     Compute the caudex crown point `p_crown = (x_crown, y_crown)` for a single plant individual
-    via least-squares intersection of inward basal-leaf midrib rays anchored by Stage 1 Class 9
-    root detections and/or the innermost `p_base` coordinates.
+    via weighted least-squares intersection of inward basal-leaf midrib/petiole rays anchored by
+    LeafMachine3 `petiole_1..6` distal endpoints (`petiole_6`), root detections, and/or the
+    innermost `p_base` coordinates.
     """
     if not poses:
         if root_pts:
@@ -892,6 +1124,26 @@ def _estimate_single_plant_crown(
     apices = np.array([p["p_apex"] for p in poses], dtype=np.float64)
     vecs = bases - apices  # Inward midrib vector: apex -> base -> caudex crown
     lengths = np.hypot(vecs[:, 0], vecs[:, 1])
+
+    # Incorporate aligned LM3 ray directions and distal petiole_6 endpoints when available
+    petiole_tips: List[Tuple[float, float]] = []
+    ray_weights = np.ones(len(poses), dtype=np.float64)
+    ray_origins = bases.copy()
+    for idx_p, p in enumerate(poses):
+        if p.get("has_lm3_petiole_pose"):
+            ray_weights[idx_p] = 2.5
+        ptip = p.get("p_petiole_tip")
+        if ptip is not None and len(ptip) == 2:
+            petiole_tips.append((float(ptip[0]), float(ptip[1])))
+            ray_origins[idx_p] = np.array([float(ptip[0]), float(ptip[1])], dtype=np.float64)
+        rdir = p.get("ray_dir")
+        if rdir is not None and len(rdir) == 2 and p.get("has_lm3_petiole_pose"):
+            rnorm = math.hypot(float(rdir[0]), float(rdir[1]))
+            if rnorm > 1e-6:
+                eff_len = max(float(lengths[idx_p]), 25.0)
+                vecs[idx_p] = np.array([float(rdir[0]) / rnorm, float(rdir[1]) / rnorm], dtype=np.float64) * eff_len
+                lengths[idx_p] = eff_len
+
     valid_mask = lengths > 1e-4
 
     mean_base = np.median(bases, axis=0)
@@ -907,7 +1159,17 @@ def _estimate_single_plant_crown(
         if not near_roots and len(root_pts) == 1:
             near_roots = list(root_pts)
 
-    # Determine innermost p_base coordinate anchor
+    has_petiole_tip_anchor = len(petiole_tips) > 0
+    pet_tip_anchor = (
+        np.array(
+            [np.median([p[0] for p in petiole_tips]), np.median([p[1] for p in petiole_tips])],
+            dtype=np.float64,
+        )
+        if has_petiole_tip_anchor
+        else None
+    )
+
+    # Determine innermost p_base / petiole_6 / root coordinate anchor
     if near_roots:
         root_anchor = np.array(
             [np.median([p[0] for p in near_roots]), np.median([p[1] for p in near_roots])],
@@ -916,8 +1178,15 @@ def _estimate_single_plant_crown(
         dists_to_root = np.hypot(bases[:, 0] - root_anchor[0], bases[:, 1] - root_anchor[1])
         inner_idx = int(np.argmin(dists_to_root))
         innermost_base = bases[inner_idx]
-        p_anchor = 0.70 * root_anchor + 0.30 * innermost_base
+        if pet_tip_anchor is not None:
+            p_anchor = 0.50 * pet_tip_anchor + 0.35 * root_anchor + 0.15 * innermost_base
+        else:
+            p_anchor = 0.70 * root_anchor + 0.30 * innermost_base
         has_root_anchor = True
+    elif pet_tip_anchor is not None:
+        has_root_anchor = True
+        innermost_base = pet_tip_anchor.copy()
+        p_anchor = pet_tip_anchor.copy()
     else:
         has_root_anchor = False
         if np.any(valid_mask):
@@ -943,10 +1212,12 @@ def _estimate_single_plant_crown(
 
     if int(np.sum(valid_mask)) < 2:
         if has_root_anchor:
+            if has_petiole_tip_anchor:
+                return float(p_anchor[0]), float(p_anchor[1])
             if int(np.sum(valid_mask)) == 1:
                 idx0 = int(np.where(valid_mask)[0][0])
                 u0 = vecs[idx0] / lengths[idx0]
-                b0 = bases[idx0]
+                b0 = ray_origins[idx0]
                 t_root = float(np.dot(p_anchor - b0, u0))
                 if t_root >= 0.0:
                     proj_pt = b0 + min(t_root, 2.5 * mean_len) * u0
@@ -955,26 +1226,27 @@ def _estimate_single_plant_crown(
             return float(p_anchor[0]), float(p_anchor[1])
         return float(innermost_base[0]), float(innermost_base[1])
 
-    # Least-squares intersection of 2D inward midrib lines:
-    # Each line i has normal projector P_i = I - u_i u_i^T passing through b_i.
+    # Weighted least-squares intersection of 2D inward midrib/petiole lines:
+    # Each line i has normal projector P_i = w_i * (I - u_i u_i^T) passing through ray_origins[i].
     A_mat = np.zeros((2, 2), dtype=np.float64)
     b_vec = np.zeros(2, dtype=np.float64)
     valid_indices = np.where(valid_mask)[0]
     unit_list = []
     for idx_i in valid_indices:
         u_i = vecs[idx_i] / lengths[idx_i]
+        w_i = float(ray_weights[idx_i])
         unit_list.append(u_i)
-        P_i = np.eye(2, dtype=np.float64) - np.outer(u_i, u_i)
+        P_i = w_i * (np.eye(2, dtype=np.float64) - np.outer(u_i, u_i))
         A_mat += P_i
-        b_vec += P_i @ bases[idx_i]
+        b_vec += P_i @ ray_origins[idx_i]
 
     eigvals = np.linalg.eigvalsh(A_mat)
     min_eig = float(np.min(eigvals))
     max_reach = max(2.5 * float(np.max(lengths[valid_mask])), 60.0)
 
     if min_eig > 1e-3:
-        # Rays have distinct angles -> solve least-squares intersection with light anchor regularization
-        reg_w = 0.35 if has_root_anchor else 1e-4
+        # Rays have distinct angles -> solve least-squares intersection with anchor regularization
+        reg_w = (0.65 * float(len(petiole_tips))) if has_petiole_tip_anchor else (0.35 if has_root_anchor else 1e-4)
         p_ls = np.linalg.solve(A_mat + reg_w * np.eye(2, dtype=np.float64), b_vec + reg_w * p_anchor)
         u_arr = np.array(unit_list, dtype=np.float64)
         b_arr = bases[valid_indices]
@@ -991,7 +1263,7 @@ def _estimate_single_plant_crown(
                 clamped = 0.5 * clamped + 0.5 * p_anchor
             return float(clamped[0]), float(clamped[1])
 
-    # Fallback when rays are nearly parallel or divergent: anchor by roots / innermost p_base
+    # Fallback when rays are nearly parallel or divergent: anchor by roots / petiole_6 / innermost p_base
     return float(p_anchor[0]), float(p_anchor[1])
 
 
@@ -1004,9 +1276,10 @@ def estimate_rosette_crown_point(
     **kwargs: Any,
 ) -> Union[Tuple[float, float], Dict[int, Tuple[float, float]]]:
     """
-    Compute the caudex crown point `p_crown` per `plant_individual_id` via least-squares
-    intersection of inward basal-leaf midrib rays (`p_apex -> p_base`) anchored by
-    Stage 1 Class 9 (`roots`) detections and/or the innermost `p_base` coordinates.
+    Compute the caudex crown point `p_crown` per `plant_individual_id` via weighted least-squares
+    intersection of inward basal-leaf midrib/petiole rays (`p_apex -> p_base -> petiole_6`)
+    anchored by LeafMachine3 `petiole_1..6` pose skeletons, `roots` detections, and/or the
+    innermost `p_base` coordinates.
 
     Returns:
       - `Tuple[float, float]` `(x_crown, y_crown)` when invoked on a single plant's leaf sequence
@@ -1025,7 +1298,9 @@ def estimate_rosette_crown_point(
         )
     )
 
-    if isinstance(basal_leaves, dict) and not ("p_base" in basal_leaves or "mask" in basal_leaves):
+    if isinstance(basal_leaves, dict) and not (
+        "p_base" in basal_leaves or "mask" in basal_leaves or "keypoints_31" in basal_leaves
+    ):
         out_by_pid: Dict[int, Tuple[float, float]] = {}
         for pid_k, leaves_k in basal_leaves.items():
             pt_k = estimate_rosette_crown_point(
@@ -1110,14 +1385,18 @@ def approximate_petiole_and_scape_metrics(
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """
-    Compute empirical approximations for basal petiole length and flowering plant height:
+    Compute empirical approximations for basal petiole length, petiole width, and flowering plant height:
       1. Per-leaf:
-         - `petiole_length_px = max(geodesic_petiole_skeleton_px, ||p_base - p_crown||_2)`
+         - When `keypoints_31` has >= 2 valid `petiole_1..6` keypoints (confidence >= 0.50),
+           computes the polyline arc length along `lamina_base -> petiole_1 -> ... -> petiole_6`
+           (plus continuation to `p_crown` if `petiole_6` terminates short of `p_crown`), taking
+           `petiole_length_px = max(d_pose_polyline, geodesic_petiole_skeleton_px, ||p_base - p_crown||_2)`
          - `blade_length_px = ||p_apex - p_base||_2`
          - `petiole_to_blade_ratio = petiole_length_px / blade_length_px`
-         - `petiole_length_mm` and `blade_length_mm` (using `px_per_cm`, where `px_per_mm = px_per_cm / 10.0`)
+         - `petiole_length_mm`, `blade_length_mm`, and `petiole_width_mm` (from LM3 Module 13
+           `petiole_width` or `width_1`/`width_2` when available, scaled via `px_per_mm = px_per_cm / 10.0`)
       2. Specimen-level outer-rosette aggregation (75th percentile across basal leaves per specimen):
-         - `petiole_length_mm`, `blade_length_mm`, `petiole_to_blade_ratio`
+         - `petiole_length_mm`, `blade_length_mm`, `petiole_to_blade_ratio`, `petiole_width_mm`
       3. Per-voucher flowering scape height:
          - Traces the piecewise path from `p_crown` through any upper stem-bend apex (`p_bend`
            from upper cauline detections / specimen stem skeleton when bent) to the flowering
@@ -1135,6 +1414,8 @@ def approximate_petiole_and_scape_metrics(
     px_per_mm = (eff_px_per_cm / 10.0) if (eff_px_per_cm is not None and eff_px_per_cm > 0.0) else None
 
     # Parse basal leaf poses
+    if basal_leaves is None and kwargs.get("leaf_records") is not None:
+        basal_leaves = kwargs["leaf_records"]
     poses: List[Dict[str, Any]] = []
     if isinstance(basal_leaves, (dict, np.ndarray)):
         parsed = _parse_basal_leaf_pose(basal_leaves)
@@ -1151,6 +1432,9 @@ def approximate_petiole_and_scape_metrics(
             "p_apex": kwargs["p_apex"],
             "geodesic_petiole_skeleton_px": kwargs.get("geodesic_petiole_skeleton_px", 0.0),
             "blade_length_px": kwargs.get("blade_length_px"),
+            "keypoints_31": kwargs.get("keypoints_31"),
+            "petiole_width_mm": kwargs.get("petiole_width_mm"),
+            "petiole_width_px": kwargs.get("petiole_width_px"),
         })
         if parsed is not None:
             poses.append(parsed)
@@ -1189,7 +1473,18 @@ def approximate_petiole_and_scape_metrics(
         pa = p["p_apex"]
         geodesic_px = float(p["geodesic_petiole_skeleton_px"])
         crown_dist_px = float(math.hypot(pb[0] - c_pt[0], pb[1] - c_pt[1]))
-        petiole_px = max(geodesic_px, crown_dist_px)
+
+        base_poly_px = float(p.get("pose_petiole_polyline_px", 0.0) or 0.0)
+        p_tip = p.get("p_petiole_tip")
+        d_pose_polyline = base_poly_px
+        if base_poly_px > 0.0 and p_tip is not None:
+            tip_to_crown_px = float(math.hypot(p_tip[0] - c_pt[0], p_tip[1] - c_pt[1]))
+            # Add continuation to p_crown if petiole_6 terminates short of p_crown along the inward direction
+            dot_inward = (p_tip[0] - pb[0]) * (c_pt[0] - p_tip[0]) + (p_tip[1] - pb[1]) * (c_pt[1] - p_tip[1])
+            if dot_inward > 0.0 and tip_to_crown_px > 1.0:
+                d_pose_polyline = base_poly_px + tip_to_crown_px
+
+        petiole_px = max(d_pose_polyline, geodesic_px, crown_dist_px)
         blade_px = float(p["blade_length_px"])
         if blade_px <= 0.0:
             blade_px = float(math.hypot(pa[0] - pb[0], pa[1] - pb[1]))
@@ -1197,19 +1492,30 @@ def approximate_petiole_and_scape_metrics(
         petiole_mm = (petiole_px / px_per_mm) if (px_per_mm is not None and px_per_mm > 0.0) else np.nan
         blade_mm = (blade_px / px_per_mm) if (px_per_mm is not None and px_per_mm > 0.0) else np.nan
 
+        pw_px = p.get("petiole_width_px")
+        pw_mm = p.get("petiole_width_mm")
+        if pw_mm is None and pw_px is not None and px_per_mm is not None and px_per_mm > 0.0:
+            pw_mm = float(pw_px) / px_per_mm
+        elif pw_px is None and pw_mm is not None and px_per_mm is not None and px_per_mm > 0.0:
+            pw_px = float(pw_mm) * px_per_mm
+
         leaf_metrics.append({
             "leaf_id": p["leaf_id"] if p["leaf_id"] is not None else (idx_l + 1),
             "plant_individual_id": pid,
             "p_base": pb,
             "p_apex": pa,
+            "p_petiole_tip": p_tip,
             "p_crown": c_pt,
-            "geodesic_petiole_skeleton_px": round(geodesic_px, 4),
+            "pose_petiole_polyline_px": round(float(d_pose_polyline), 4),
+            "geodesic_petiole_skeleton_px": round(max(geodesic_px, float(d_pose_polyline)), 4),
             "crown_distance_px": round(crown_dist_px, 4),
             "petiole_length_px": round(petiole_px, 4),
             "blade_length_px": round(blade_px, 4),
             "petiole_to_blade_ratio": round(float(pet_to_blade), 4) if np.isfinite(pet_to_blade) else np.nan,
             "petiole_length_mm": round(float(petiole_mm), 3) if np.isfinite(petiole_mm) else np.nan,
             "blade_length_mm": round(float(blade_mm), 3) if np.isfinite(blade_mm) else np.nan,
+            "petiole_width_px": round(float(pw_px), 4) if (pw_px is not None and np.isfinite(float(pw_px))) else np.nan,
+            "petiole_width_mm": round(float(pw_mm), 3) if (pw_mm is not None and np.isfinite(float(pw_mm))) else np.nan,
         })
 
     def _agg_p75(records: List[Dict[str, Any]], key: str, digits: int = 4) -> float:
@@ -1230,6 +1536,8 @@ def approximate_petiole_and_scape_metrics(
             "petiole_length_mm": _agg_p75(sub_r, "petiole_length_mm", 3),
             "blade_length_mm": _agg_p75(sub_r, "blade_length_mm", 3),
             "petiole_to_blade_ratio": _agg_p75(sub_r, "petiole_to_blade_ratio", 4),
+            "petiole_width_px": _agg_p75(sub_r, "petiole_width_px", 4),
+            "petiole_width_mm": _agg_p75(sub_r, "petiole_width_mm", 3),
         }
 
     petiole_px_p75 = _agg_p75(leaf_metrics, "petiole_length_px", 4)
@@ -1237,6 +1545,8 @@ def approximate_petiole_and_scape_metrics(
     petiole_mm_p75 = _agg_p75(leaf_metrics, "petiole_length_mm", 3)
     blade_mm_p75 = _agg_p75(leaf_metrics, "blade_length_mm", 3)
     pet_to_blade_p75 = _agg_p75(leaf_metrics, "petiole_to_blade_ratio", 4)
+    petiole_width_px_p75 = _agg_p75(leaf_metrics, "petiole_width_px", 4)
+    petiole_width_mm_p75 = _agg_p75(leaf_metrics, "petiole_width_mm", 3)
 
     # Resolve flowering capitula centroid p_corymb
     resolved_corymb: Optional[Tuple[float, float]] = None
@@ -1358,6 +1668,8 @@ def approximate_petiole_and_scape_metrics(
         "petiole_length_mm": petiole_mm_p75,
         "blade_length_mm": blade_mm_p75,
         "petiole_to_blade_ratio": pet_to_blade_p75,
+        "petiole_width_px": petiole_width_px_p75,
+        "petiole_width_mm": petiole_width_mm_p75,
         "leaf_metrics": leaf_metrics,
         "by_plant": by_plant_summary,
     }

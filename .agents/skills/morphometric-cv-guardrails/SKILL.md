@@ -1,33 +1,33 @@
 ---
 name: morphometric-cv-guardrails
-description: Enforces scientific, mathematical, and computer vision protocols for LeafMachine2, Detectron2 PointRend, OpenCV geometry, and R Momocs/MorphoTools2 morphometrics. Use whenever modifying scripts in scripts/vision/, scripts/pipeline/, scripts/annotation_and_training/, scripts/morphometrics/, or scripts/analysis/.
+description: Enforces scientific, mathematical, and computer vision protocols for LeafMachine3 ONNX Runtime, YOLO26x Seg/Pose, UNet++ v9, OpenCV geometry, and R Momocs/MorphoTools2 morphometrics. Use whenever modifying scripts in scripts/vision/, scripts/pipeline/, scripts/annotation_and_training/, scripts/morphometrics/, or scripts/analysis/.
 ---
 
 # Morphometric & Computer Vision Guardrails (`UNC-BOT-SOP-2026-04-REV5`)
 
 Activate and follow these scientific, mathematical, and computer vision guardrails whenever creating, refactoring, or debugging code in:
 * `scripts/core/` (`db.py`, `db_utils.R`, `config.py`)
-* `scripts/vision/` (`lm2_geometry_utils.py`, `configure_leafmachine2.py`, `capitulum_phenology_classifier.py`, `tune_geometry_parameters.py`)
+* `scripts/vision/` (`leaf_geometry_utils.py`, `configure_leafmachine3.py`, `lm3_data_loader.py`, `lm3_inference_engines.py`, `leaf_gatekeeper.py`, `organ_crown_metrics.py`, `capitulum_phenology_classifier.py`, `tune_geometry_parameters.py`)
 * `scripts/pipeline/` (`02_segment_and_extract.py`)
-* `scripts/annotation_and_training/` (`annotate_with_sam2.py`, `sam2_annotator_utils.py`, `finetune_lm2_pcd.py` — optional standalone utilities)
+* `scripts/annotation_and_training/` (`annotate_with_sam2.py`, `sam2_annotator_utils.py` — optional standalone utilities)
 * `scripts/morphometrics/` (`03_fourier_extractor.R`, `04_gmm_morphotools.R`, `authority_weighting_utils.R`, `pub_figures_utils.R`)
 * `scripts/analysis/` (`05_cleanlab_vision_xai.py`, `06_multimodal_spatial_rf.R`, `07_triage_dashboard_synthesis.R`, `08_discover_taxon_complexes.R`)
 
 ---
 
-## 1. Two-Stage Stock LeafMachine2 v2.2+ Handshake & Basal Leaf Candidate Filtering
+## 1. Two-Stage LeafMachine3 ONNX Runtime Handshake & Basal Leaf Candidate Filtering
 
-Never run Detectron2 PointRend directly on full-resolution herbarium sheets, as PointRend is trained on cropped single-organ bounding boxes and fails when presented with whole-sheet scale variance and background clutter.
+Never run single-organ segmentation directly on full-resolution herbarium sheets without Stage 1 organ detection or whole-specimen foreground masking.
 
-1. **Stage 1 (Full-Sheet Stock LeafMachine2 v2.2+ Component & Ruler Detection):**
-   * Run LeafMachine2's stock YOLOv5 Plant Component Detector (`PLANT_LeafPriority` / `LeafPriority.pt`, `minimum_confidence_threshold: 0.65`) and the **LM2 38-class Ruler Detector** on full herbarium sheets to localize organ bounding boxes (`bbox`) and extract empirical scale bars (`pixels_per_mm`, `is_calibrated_mm`).
-   * **Stock LeafMachine2 v2.2+ Configuration (`configure_leafmachine2.py`):** Enforce `treat_leaflet_as_leaf_whole: False` (preventing individual lobes of pinnatifid *Packera* blades from being segmented as standalone leaves), `use_efds_for_png_masks: False` (exporting raw pixel-accurate PointRend binary masks without premature LM2 Fourier smoothing), and `do_apply_landmarks: False` (disabling angiosperm venation landmarking). No custom PCD retraining or manual annotation is required by default.
-   * **Dual-Class Candidate Box Processing (`Class 0` & `Class 1`):** Stage 1 processes both `Class 0` (`leaf_whole`) and `Class 1` (`leaf_partial`) candidate boxes (`if s1_cls not in (0, 1): continue`) so rosette-attached basal blades on native-DPI (`3753x5634`) scans are captured despite partial overlap or occlusions.
+1. **Stage 1 (Full-Sheet LeafMachine3 Component, Specimen Mask & Ruler Detection):**
+   * Run LeafMachine3's ONNX Plant Component Detector (`lm3_plant_detector__yolo26x_det_1280`), whole-specimen UNet++ v9 segmenter (`lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain` with `LLR_Hyst_KeepBlobs` paper cleanup), and the **LM3 3-model Ruler Classifier + Tick-Lattice Solver** (`lm3_mp_conversion_factor__sqrt_fit`) on full herbarium sheets to localize organ bounding boxes (`bbox`) and extract empirical scale bars (`pixels_per_mm`, `is_calibrated_mm`).
+   * **LeafMachine3 Configuration (`configure_leafmachine3.py`):** Synthesize `LM3_settings.local.yaml` across the 18-module LM3 pipeline (`yolo26x_det_1280`, `unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain`, `yolo26x_seg_1024`, `yolo26x_pose_640`, 360-direction ECT, and native Momocs outline exports).
+   * **Dual-Class Candidate Box Processing (`Class 0` & `Class 1`):** Stage 1 processes both `Class 0` (`Leaf_WHOLE`) and `Class 1` (`Leaf_PARTIAL`) candidate boxes (`if s1_cls not in (0, 1): continue`) so rosette-attached basal blades on native-DPI (`3753x5634`) scans are captured despite partial overlap or occlusions.
    * **Upper-Sheet Cauline & Tiny Fragment Pre-Filtering:** On high-DPI images (`is_high_dpi`: `max(sheet_h, sheet_w) > 1000`), pre-filter cauline leaf candidates in the upper inflorescence zone (`cy < 0.40 * sheet_h`), tiny fragments (`max(bh, bw) < int(200 * scale_f)`), and square partial fragments above mid-sheet (`s1_cls == 1 and bh == bw and cy < 0.60 * sheet_h`).
-   * Keep `detect_ruler_scale_hough()` only as an asynchronous secondary fallback if the 38-class Ruler Detector finds no ruler block.
-2. **Stage 2 (Single-Leaf Native-DPI PointRend Segmentation):**
+   * Keep `detect_ruler_scale_hough()` only as an asynchronous secondary fallback if the LM3 ruler lattice solver finds no ruler block.
+2. **Stage 2 (Single-Leaf Native-DPI `yolo26x_seg_1024` & `yolo26x_pose_640` Segmentation):**
    * For each candidate leaf bounding box from Stage 1, extract a **12%-padded native-DPI single-leaf crop** from the original high-resolution voucher image (or 6% padding for high-DPI scans).
-   * Run the stock LeafMachine2 v2.2+ Detectron2 PointRend checkpoint (`leaf_seg_rcnn_v2_1`) **strictly on these padded native-DPI single-leaf crops** (never on full sheets).
+   * Run the LeafMachine3 3-class instance segmenter (`lm3_leaf_segmenter__yolo26x_seg_1024` for `Leaf`/`Petiole`/`Hole`) and 31-keypoint pose estimator (`lm3_landmark_detector__yolo26x_pose_640` `mid15_pet5`) **strictly on these padded native-DPI single-leaf crops** (never on full sheets).
    * Project the segmented binary crop mask back into full-sheet coordinates for spatial clustering (`cluster_plant_individuals`) via DBSCAN (`plant_individual_id`), while preserving native-DPI crop resolution for contour extraction.
 
 ---
@@ -63,7 +63,7 @@ To prevent taxonomic circularity under the Unified Species Concept (de Queiroz 2
 
 ## 3. OpenCV Affine & Contour Math
 
-Every geometric operation in `scripts/vision/lm2_geometry_utils.py` and `scripts/pipeline/02_segment_and_extract.py` must obey these exact coordinate conventions:
+Every geometric operation in `scripts/vision/leaf_geometry_utils.py` and `scripts/pipeline/02_segment_and_extract.py` must obey these exact coordinate conventions:
 
 1. **Crop with Padding Before Rotating:**
    * Before calling `cv2.warpAffine()`, always crop the binary mask to its tight foreground bounding box plus sufficient zero-border padding (`pad = int(math.ceil(0.5 * math.hypot(h, w)))` via `cv2.copyMakeBorder`) so that affine rotation never clips apices or basal lobes against image canvas boundaries.
@@ -195,7 +195,7 @@ When modifying `scripts/morphometrics/03_fourier_extractor.R`, `scripts/morphome
 
 ## Verification Checklist Before Completing Changes
 
-1. Confirm no changes were made inside `LeafMachine2/`.
+1. Confirm no changes were made inside `LeafMachine3/`.
 2. Run unit tests covering geometry, orientation, Fourier decomposition, and contracts:
    ```bash
    python3 -m unittest discover -s scripts/tests -p "test_*.py" -v

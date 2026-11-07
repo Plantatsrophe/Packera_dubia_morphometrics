@@ -67,13 +67,13 @@ The pipeline operationalizes morphological diagnosability within the theoretical
 
 ---
 
-## 3. Phase 2 Protocol: Stock LeafMachine2 v2.2+, Boundary-Continuity Lobe Rejection & Classical Gatekeeping
+## 3. Phase 2 Protocol: LeafMachine3 ONNX Runtime, Boundary-Continuity Lobe Rejection & Classical Gatekeeping
 
-Candidate organs are extracted out of the box using **stock LeafMachine2 v2.2+** (Weaver et al. 2024) without requiring custom fine-tuned PCD checkpoints or manual SAM 2 annotation, and routed through a **100% label-blind classical geometric gatekeeper**:
+Candidate organs are extracted out of the box using **LeafMachine3 ONNX Runtime** (`yolo26x_det_1280`, `unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain`, `yolo26x_seg_1024`, `yolo26x_pose_640`, and 3-model ruler ensemble + tick-lattice solver) without requiring custom retraining or manual SAM 2 annotation, and routed through a **100% label-blind classical geometric gatekeeper**:
 
-* **Stock LeafMachine2 v2.2+ Configuration (`configure_leafmachine2.py`):**
-  - **Stage 1 (Full-Sheet Detection & Ruler Calibration):** Stock LeafMachine2 YOLOv5 `PLANT_LeafPriority` (`LeafPriority.pt`, `minimum_confidence_threshold: 0.65`) processes both `Class 0` (`leaf_whole`) and `Class 1` (`leaf_partial`) candidate boxes while enforcing `treat_leaflet_as_leaf_whole: False` (preventing individual lobes of pinnatifid *Packera* leaves from being segmented as standalone blades), `use_efds_for_png_masks: False` (exporting raw pixel-accurate PointRend binary masks without premature LM2 Fourier smoothing), and `do_apply_landmarks: False` (disabling angiosperm venation landmarking). Paired with the 38-class Ruler Detector (`scripts/vision/lm2_data_loader.py`) for empirical scale conversions (`pixels_per_mm`, `is_calibrated_mm`).
-  - **Stage 2 (Cropped Leaf Segmentation):** Candidate leaf bounding boxes are cropped at native DPI with 12% padding, segmented via stock Detectron2 PointRend (`leaf_seg_rcnn_v2_1`), and spatially clustered into distinct individuals via DBSCAN (`plant_individual_id`).
+* **LeafMachine3 Configuration (`configure_leafmachine3.py`):**
+  - **Stage 1 (Full-Sheet Detection, Specimen Masking & Ruler Calibration):** LeafMachine3 `lm3_plant_detector__yolo26x_det_1280` processes both `Class 0` (`Leaf_WHOLE`) and `Class 1` (`Leaf_PARTIAL`) candidate boxes alongside `lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain` (`LLR_Hyst_KeepBlobs` paper cleanup). Paired with the 3-model Ruler Classifier + Tick-Lattice Solver (`scripts/vision/lm3_data_loader.py`) for empirical scale conversions (`pixels_per_mm`, `is_calibrated_mm`).
+  - **Stage 2 (Cropped Leaf Segmentation & 31-Keypoint Pose):** Candidate leaf bounding boxes are cropped at native DPI with 12% padding, segmented via `lm3_leaf_segmenter__yolo26x_seg_1024` and `lm3_landmark_detector__yolo26x_pose_640`, and spatially clustered into distinct individuals via DBSCAN (`plant_individual_id`).
 * **Otsu Boundary-Continuity Lobe Rejection (`is_truncated_lobe_or_leaflet`, `max_tissue_border_ratio: 0.15`):**
   - Inspects a 2-pixel perimeter band around the candidate bounding box using Otsu's threshold in CIE $L^*a^*b^*$ luminance space. If non-paper plant tissue occupies $> 15\%$ of the bounding-box perimeter (excluding a single narrow petiole exit $\le 12\%$ on one edge), the candidate is rejected as an unattached terminal lobe or severed fragment of a larger pinnatifid leaf.
 * **Ruler-Calibrated Physical Blade Area Floor & Cohort-Adaptive Scaling (`compute_sheet_adaptive_min_blade_area_cm2`):**
@@ -104,7 +104,7 @@ Candidate organs are extracted out of the box using **stock LeafMachine2 v2.2+**
 
 ```mermaid
 flowchart TD
-    A0["Stage 1: Stock LM2 v2.2+ YOLOv5 PLANT_LeafPriority (Conf >= 0.65)\n+ 38-Class Ruler Calibration (lm2_data_loader.py)"] --> A["Stage 2: 12%-Padded Native-DPI Leaf Crop\n-> Stock PointRend (leaf_seg_rcnn_v2_1)"]
+    A0["Stage 1: LeafMachine3 yolo26x_det_1280 + UNet++ v9\n+ Ruler Lattice Calibration (lm3_data_loader.py)"] --> A["Stage 2: 12%-Padded Native-DPI Leaf Crop\n-> yolo26x_seg_1024 + yolo26x_pose_640"]
     A --> B{"Otsu Boundary Continuity (<= 0.15)\n& Cohort-Adaptive Area Floor (effective_min_area_cm2)?"}
     B -- No --> X["Reject Severed Lobe / Tiny Fragment"]
     B -- Yes --> C{"Classical Descriptors:\nSolidity >= 0.72 (or Dissected 0.18-0.72),\nCircularity >= 0.25, Extent >= 0.35, UCS >= 0.85?"}

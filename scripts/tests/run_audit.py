@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def run_audit(verbose: bool = True, log_file: str = "/tmp/lm2_audit_results.txt") -> unittest.TestResult:
+def run_audit(verbose: bool = True, log_file: str = "/tmp/lm3_audit_results.txt") -> unittest.TestResult:
     """Discovers and executes all active unit tests in scripts/tests, asserting 100% pass rate."""
     test_dir = PROJECT_ROOT / "scripts" / "tests"
     loader = unittest.TestLoader()
