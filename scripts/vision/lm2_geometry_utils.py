@@ -1079,6 +1079,7 @@ def bridge_dissected_rachis_components(
     mask: np.ndarray,
     petiole_mask: Optional[np.ndarray] = None,
     max_gap_fraction: float = 0.22,
+    crop_bgr: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Reconstructs micro-severed rachis internodes in multi-component dissected leaf masks.
@@ -1094,6 +1095,9 @@ def bridge_dissected_rachis_components(
       - Label-blind: relies purely on component area, longitudinal axis collinearity,
         border-clipping exclusion, and anatomical rachis-spine bridging so outer
         inter-lobe sinuses remain open concavity defects.
+      - When `crop_bgr` is provided, verifies that any synthetic bridge segment > 10 px
+        is supported by non-paper botanical tissue (or `petiole_mask`) rather than drawing
+        artificial straight lines across bright mounting paper between separate leaves.
     """
     if mask is None or mask.size == 0:
         return mask
@@ -1112,7 +1116,7 @@ def bridge_dissected_rachis_components(
     if main_area < 25:
         return mask.copy()
 
-    min_pinna_area = max(14, int(0.012 * main_area))
+    min_pinna_area = max(14, int(0.015 * main_area))
     cand_ids: List[int] = [main_id]
     for cid in range(1, num_labels):
         if cid == main_id:
@@ -1141,12 +1145,13 @@ def bridge_dissected_rachis_components(
         cand_ids.append(cid)
 
     if len(cand_ids) <= 1:
-        return mask.copy()
+        # Strip tiny unbridged noise specks (< 1.5% of main_area) so the primary component is clean
+        return np.where(labels == main_id, 255, 0).astype(np.uint8)
 
     union_mask = np.isin(labels, cand_ids)
     ys_u, xs_u = np.where(union_mask)
     if len(xs_u) < 20:
-        return mask.copy()
+        return np.where(labels == main_id, 255, 0).astype(np.uint8)
 
     pts_u = np.column_stack([xs_u, ys_u]).astype(np.float32)
     if petiole_mask is not None and petiole_mask.shape[:2] == mask_u8.shape[:2]:
@@ -1160,8 +1165,6 @@ def bridge_dissected_rachis_components(
 
     line_params = cv2.fitLine(pts_fit, cv2.DIST_L2, 0, 0.01, 0.01)
     vx, vy, x0, y0 = [float(v[0]) for v in line_params]
-    u_vec = np.array([vx, vy], dtype=np.float64)
-    n_vec = np.array([-vy, vx], dtype=np.float64)
 
     proj_u = (pts_u[:, 0] - x0) * vx + (pts_u[:, 1] - y0) * vy
     norm_u = (pts_u[:, 0] - x0) * (-vy) + (pts_u[:, 1] - y0) * vx
@@ -1170,6 +1173,50 @@ def bridge_dissected_rachis_components(
     minor_span = max(1.0, float(np.max(norm_u) - np.min(norm_u)))
     max_gap_px = max(16.0, float(max_gap_fraction) * max(major_span, minor_span))
     max_axis_offset = max(20.0, 0.45 * max(major_span, minor_span))
+
+    # Optional grayscale tissue map from crop_bgr to prevent bridging across blank mounting paper
+    paper_thresh: Optional[float] = None
+    gray_crop: Optional[np.ndarray] = None
+    if crop_bgr is not None and crop_bgr.shape[:2] == mask_u8.shape[:2] and crop_bgr.size > 0:
+        gray_crop = (
+            cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+            if crop_bgr.ndim == 3
+            else crop_bgr
+        )
+        bg_px = gray_crop[mask_u8 == 0]
+        fg_px = gray_crop[mask_u8 > 0]
+        if bg_px.size >= 32 and fg_px.size >= 32:
+            bg_med = float(np.percentile(bg_px, 65))
+            fg_p75 = float(np.percentile(fg_px, 75))
+            if bg_med > fg_p75 + 10.0:
+                paper_thresh = 0.55 * bg_med + 0.45 * fg_p75
+
+    def _bridge_path_has_tissue(pt_a: Tuple[int, int], pt_b: Tuple[int, int]) -> bool:
+        seg_len = math.hypot(float(pt_b[0] - pt_a[0]), float(pt_b[1] - pt_a[1]))
+        if seg_len <= 10.0:
+            return True
+        if gray_crop is None or paper_thresh is None:
+            return True
+        n_samples = max(8, int(round(seg_len)))
+        xs_s = np.clip(np.round(np.linspace(pt_a[0], pt_b[0], n_samples)).astype(int), 0, w - 1)
+        ys_s = np.clip(np.round(np.linspace(pt_a[1], pt_b[1], n_samples)).astype(int), 0, h - 1)
+        # Check a 3x3 neighborhood around each sample along the bridge segment
+        has_pet = False
+        if petiole_mask is not None and petiole_mask.shape[:2] == mask_u8.shape[:2]:
+            pet_hits = int(np.count_nonzero(petiole_mask[ys_s, xs_s] > 0))
+            if float(pet_hits) / float(n_samples) >= 0.25:
+                has_pet = True
+        if has_pet:
+            return True
+        if seg_len > 0.14 * max(major_span, minor_span):
+            return False
+        vals = gray_crop[ys_s, xs_s].astype(np.float32)
+        non_mask = mask_u8[ys_s, xs_s] == 0
+        if int(np.count_nonzero(non_mask)) <= 3:
+            return True
+        gap_vals = vals[non_mask]
+        tissue_frac = float(np.mean(gap_vals <= paper_thresh))
+        return tissue_frac >= 0.45
 
     # Filter secondary components whose centroids lie within the leaf's lateral envelope
     valid_sec_ids: List[int] = []
@@ -1180,9 +1227,9 @@ def bridge_dissected_rachis_components(
             valid_sec_ids.append(cid)
 
     if not valid_sec_ids:
-        return mask.copy()
+        return np.where(labels == main_id, 255, 0).astype(np.uint8)
 
-    bridged = np.where( np.isin(labels, [main_id] + valid_sec_ids), 255, 0 ).astype(np.uint8)
+    bridged = np.where(np.isin(labels, [main_id] + valid_sec_ids), 255, 0).astype(np.uint8)
     bridge_w = max(3, min(10, int(round(0.03 * minor_span))))
 
     # If native PointRend petiole_mask overlaps the intra-lamina span between lobes, include its rachis pixels
@@ -1196,6 +1243,7 @@ def bridge_dissected_rachis_components(
                 bridged[ys_pm[in_rachis], xs_pm[in_rachis]] = 255
 
     # Iteratively bridge any remaining disconnected valid components along the rachis spine
+    rejected_cids: Set[int] = set()
     for _ in range(len(valid_sec_ids)):
         n_cur, lbl_cur, st_cur, _ = cv2.connectedComponentsWithStats((bridged > 0).astype(np.uint8), connectivity=8)
         if n_cur <= 2:
@@ -1212,8 +1260,9 @@ def bridge_dissected_rachis_components(
 
         best_pair = None
         best_dist = float("inf")
+        best_cid = -1
         for cid in range(1, n_cur):
-            if cid == cur_main:
+            if cid == cur_main or cid in rejected_cids:
                 continue
             if int(st_cur[cid, cv2.CC_STAT_AREA]) < min_pinna_area:
                 continue
@@ -1235,6 +1284,7 @@ def bridge_dissected_rachis_components(
             d_min = float(dmat[ic, im])
             if d_min < best_dist:
                 best_dist = d_min
+                best_cid = cid
                 best_pair = (pts_c, pc_sub[ic], pm_sub[im], d_min)
 
         if best_pair is None or best_dist > max_gap_px:
@@ -1246,7 +1296,11 @@ def bridge_dissected_rachis_components(
         if d_min <= 14.0 or n_c_direct <= 0.16 * minor_span:
             p1 = (int(round(pt_c_direct[0])), int(round(pt_c_direct[1])))
             p2 = (int(round(pt_m_direct[0])), int(round(pt_m_direct[1])))
-            cv2.line(bridged, p1, p2, 255, thickness=bridge_w)
+            if _bridge_path_has_tissue(p1, p2):
+                cv2.line(bridged, p1, p2, 255, thickness=bridge_w)
+            else:
+                bridged[lbl_cur == best_cid] = 0
+                rejected_cids.add(best_cid)
         else:
             # Find inner rachis-facing base of the lateral pinna component
             s_c = (pts_c[:, 0] - x0) * vx + (pts_c[:, 1] - y0) * vy
@@ -1267,8 +1321,12 @@ def bridge_dissected_rachis_components(
                 int(np.clip(round(pt_rachis[1]), 0, h - 1)),
             )
             p_mr = (int(round(pt_m_rachis[0])), int(round(pt_m_rachis[1])))
-            cv2.line(bridged, p_in, p_rac, 255, thickness=bridge_w)
-            cv2.line(bridged, p_rac, p_mr, 255, thickness=bridge_w)
+            if _bridge_path_has_tissue(p_in, p_rac) and _bridge_path_has_tissue(p_rac, p_mr):
+                cv2.line(bridged, p_in, p_rac, 255, thickness=bridge_w)
+                cv2.line(bridged, p_rac, p_mr, 255, thickness=bridge_w)
+            else:
+                bridged[lbl_cur == best_cid] = 0
+                rejected_cids.add(best_cid)
 
     # Keep largest connected component after bridging
     n_fin, lbl_fin, st_fin, _ = cv2.connectedComponentsWithStats((bridged > 0).astype(np.uint8), connectivity=8)

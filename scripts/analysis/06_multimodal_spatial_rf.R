@@ -5164,7 +5164,13 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
           model = mod_dm,
           predict_cloglog = function(new_df) {
             nd <- as.data.frame(new_df)[, pred_cols, drop = FALSE]
+            for (cn in pred_cols) {
+              v <- suppressWarnings(as.numeric(nd[[cn]]))
+              v[!is.finite(v)] <- stats::median(X_mat[[cn]], na.rm = TRUE)
+              nd[[cn]] <- v
+            }
             pr <- tryCatch(as.numeric(dismo::predict(mod_dm, nd, args = c("outputformat=cloglog"))), error = function(e) rep(0.5, nrow(nd)))
+            if (length(pr) != nrow(nd)) pr <- rep(0.5, nrow(nd))
             pr[!is.finite(pr)] <- 0.0
             pmin(1.0, pmax(0.0, pr))
           }
@@ -5572,6 +5578,7 @@ fit_and_project_maxent_sdm_maps <- function(
 
   perf_rows <- list()
   focal_artifacts <- NULL
+  all_sdm_artifacts <- list()
 
   for (tg in target_groups) {
     pres_mask <- if (tg %in% df$species_standardized && !(tg %in% grp_vec)) {
@@ -5677,11 +5684,11 @@ fit_and_project_maxent_sdm_maps <- function(
     rast_ens <- NULL
     if (!is.null(env_stack) && requireNamespace("terra", quietly = TRUE)) {
       rast_mx <- tryCatch(
-        terra::predict(env_stack, mx_full, fun = function(model, data, ...) model$predict_cloglog(data)),
+        terra::predict(env_stack, mx_full, fun = function(model, data, ...) model$predict_cloglog(data), na.rm = TRUE),
         error = function(e) NULL
       )
       rast_rf <- tryCatch(
-        terra::predict(env_stack, rf_full, fun = function(model, data, ...) model$predict_prob(data)),
+        terra::predict(env_stack, rf_full, fun = function(model, data, ...) model$predict_prob(data), na.rm = TRUE),
         error = function(e) NULL
       )
       if (!is.null(rast_mx) && !is.null(rast_rf)) {
@@ -5711,24 +5718,26 @@ fit_and_project_maxent_sdm_maps <- function(
       }
     }
 
+    tg_art <- list(
+      taxon = tg,
+      pres_mask = pres_mask,
+      mx_full = mx_full,
+      rf_full = rf_full,
+      rast_mx = rast_mx,
+      rast_rf = rast_rf,
+      rast_ens = rast_ens,
+      roc_mx = roc_mx,
+      roc_rf = roc_rf,
+      roc_ens = roc_ens,
+      cbi_mx = cbi_mx,
+      cbi_rf = cbi_rf,
+      cbi_ens = cbi_ens,
+      X_comb = X_comb,
+      p_vec = p_vec
+    )
+    all_sdm_artifacts[[tg]] <- tg_art
     if (is.null(focal_artifacts)) {
-      focal_artifacts <- list(
-        taxon = tg,
-        pres_mask = pres_mask,
-        mx_full = mx_full,
-        rf_full = rf_full,
-        rast_mx = rast_mx,
-        rast_rf = rast_rf,
-        rast_ens = rast_ens,
-        roc_mx = roc_mx,
-        roc_rf = roc_rf,
-        roc_ens = roc_ens,
-        cbi_mx = cbi_mx,
-        cbi_rf = cbi_rf,
-        cbi_ens = cbi_ens,
-        X_comb = X_comb,
-        p_vec = p_vec
-      )
+      focal_artifacts <- tg_art
     }
   }
 
@@ -5946,6 +5955,75 @@ fit_and_project_maxent_sdm_maps <- function(
       tryCatch(render_sdm_plate(), finally = grDevices::dev.off())
       if (file.exists(png_tmp)) file.rename(png_tmp, png_out)
       message(sprintf("Exported 4-panel MaxEnt & Ensemble SDM figure to %s (.pdf & .png).", pdf_out))
+
+      # When multiple taxa/morphotypes are modeled, also render a multi-species MaxEnt SDM comparison grid
+      valid_multi_arts <- Filter(function(a) !is.null(a$rast_mx), all_sdm_artifacts)
+      if (length(valid_multi_arts) > 1L) {
+        grid_pdf_out <- file.path(fig_dir, "fig06c_multispecies_maxent_sdm_grid.pdf")
+        grid_png_out <- file.path(fig_dir, "fig06c_multispecies_maxent_sdm_grid.png")
+        n_sp_m <- length(valid_multi_arts)
+        n_cols_m <- if (n_sp_m <= 4L) 2L else if (n_sp_m <= 9L) 3L else 4L
+        n_rows_m <- as.integer(ceiling(n_sp_m / n_cols_m))
+        fig_w_m <- max(10.0, 3.6 * n_cols_m)
+        fig_h_m <- max(7.0, 3.1 * n_rows_m + 0.8)
+
+        render_multispecies_sdm_grid <- function() {
+          graphics::par(mfrow = c(n_rows_m, n_cols_m), mar = c(3.2, 3.4, 2.6, 1.0), oma = c(0.5, 0.5, 2.0, 0.5))
+          suit_ramp <- grDevices::colorRampPalette(c("#F7FCF0", "#E0F3DB", "#A8DDB5", "#4EB3D3", "#0868AC", "#084081"))(100)
+          for (art_i in valid_multi_arts) {
+            r_layer <- art_i$rast_mx
+            ex_r <- terra::ext(r_layer)
+            xs <- terra::xFromCol(r_layer, seq_len(terra::ncol(r_layer)))
+            ys <- rev(terra::yFromRow(r_layer, seq_len(terra::nrow(r_layer))))
+            mat_v <- terra::as.matrix(r_layer, wide = TRUE)
+            mat_plot <- t(mat_v[rev(seq_len(nrow(mat_v))), , drop = FALSE])
+            p_row_i <- perf_df[perf_df$Taxon_or_Morphotype == art_i$taxon, , drop = FALSE]
+            auc_v <- if (nrow(p_row_i) > 0L) p_row_i$AUC_Block_MaxEnt[1] else NA_real_
+            cbi_v <- if (nrow(p_row_i) > 0L) p_row_i$CBI_MaxEnt[1] else NA_real_
+            n_pr_v <- sum(art_i$pres_mask, na.rm = TRUE)
+            graphics::image(
+              x = xs, y = ys, z = mat_plot, zlim = c(0, 1), col = suit_ramp,
+              xlab = "Lon (deg E)", ylab = "Lat (deg N)",
+              main = sprintf("%s (n = %d)", art_i$taxon, n_pr_v), font.main = 4, cex.main = 0.95
+            )
+            graphics::mtext(
+              sprintf("MaxEnt AUC = %.3f | CBI = %.2f", auc_v, cbi_v),
+              side = 3, line = 0.15, cex = 0.65, col = "grey25"
+            )
+            if (requireNamespace("maps", quietly = TRUE)) {
+              tryCatch(
+                maps::map("state", xlim = c(terra::xmin(ex_r), terra::xmax(ex_r)),
+                          ylim = c(terra::ymin(ex_r), terra::ymax(ex_r)),
+                          add = TRUE, col = grDevices::adjustcolor("#222222", alpha.f = 0.45), lwd = 0.6),
+                error = function(e) NULL
+              )
+            }
+            tryCatch(
+              graphics::contour(x = xs, y = ys, z = mat_plot, levels = c(0.50, 0.75),
+                                add = TRUE, col = c("#E69F00", "#D55E00"), lwd = c(0.7, 1.0), drawlabels = FALSE),
+              error = function(e) NULL
+            )
+            pm_i <- which(art_i$pres_mask)
+            graphics::points(lon_all[pm_i], lat_all[pm_i], pch = 1L, col = "#D55E00", cex = 0.55, lwd = 0.8)
+            graphics::box(col = "grey40")
+          }
+          graphics::title(
+            sprintf("Step 06 Multi-Species MaxEnt (cloglog) Habitat Suitability Maps (%d Modeled Taxa)", n_sp_m),
+            outer = TRUE, cex.main = 1.15
+          )
+        }
+
+        g_pdf_tmp <- paste0(grid_pdf_out, ".tmp")
+        grDevices::pdf(g_pdf_tmp, width = fig_w_m, height = fig_h_m)
+        tryCatch(render_multispecies_sdm_grid(), finally = grDevices::dev.off())
+        if (file.exists(g_pdf_tmp)) file.rename(g_pdf_tmp, grid_pdf_out)
+
+        g_png_tmp <- paste0(grid_png_out, ".tmp")
+        grDevices::png(g_png_tmp, width = fig_w_m, height = fig_h_m, units = "in", res = 300)
+        tryCatch(render_multispecies_sdm_grid(), finally = grDevices::dev.off())
+        if (file.exists(g_png_tmp)) file.rename(g_png_tmp, grid_png_out)
+        message(sprintf("Exported multi-species MaxEnt SDM grid (%d taxa) to %s (.pdf & .png).", n_sp_m, grid_pdf_out))
+      }
     }
   }
 

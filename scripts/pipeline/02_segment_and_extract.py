@@ -1129,6 +1129,7 @@ def _merge_and_bridge_dissected_crop_mask(
     best_mask: np.ndarray,
     leaf_cands: Sequence[Tuple[float, int, Any, np.ndarray]],
     petiole_mask: Optional[np.ndarray] = None,
+    crop_bgr: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Reconstructs a unified dissected leaf silhouette when PointRend predicts lateral pinna
@@ -1164,7 +1165,7 @@ def _merge_and_bridge_dissected_crop_mask(
                     if np.any(c_bool & pet_dil):
                         merged = np.maximum(merged, (c_bool.astype(np.uint8) * 255))
 
-    return bridge_dissected_rachis_components(merged, petiole_mask=petiole_mask)
+    return bridge_dissected_rachis_components(merged, petiole_mask=petiole_mask, crop_bgr=crop_bgr)
 
 
 # =============================================================================
@@ -1595,16 +1596,17 @@ class SegmentAndExtractPipeline:
             #   from `1: leaf_partial`, `2: leaflet`, `3..7: reproductive`, `8: specimen`,
             #   `9: roots`, and `10: wood` (stems). Unpack `leaf_whole` boxes directly to
             #   Stage 2 PointRend with zero bounding-box size or vertical-position cutoffs.
-            #   When YOLOv5 finds zero `0: leaf_whole` detections on a sheet (common on deeply
-            #   pinnatisect/bipinnatisect taxa such as Packera glabella where dissected blades
-            #   are classified as `1: leaf_partial`), automatically rescue `1: leaf_partial`.
+            #   When YOLOv5 finds zero `0: leaf_whole` detections on a sheet (or classifies only
+            #   terminal lobes as `0: leaf_whole` while classifying the full pinnatisect/dissected
+            #   leaves as `1: leaf_partial`), automatically rescue those whole-leaf `1: leaf_partial`
+            #   boxes and suppress nested sub-lobe/terminal-lobe duplicate boxes.
             seg_partial_cfg = bool(
                 self.lm2_config.get("leafmachine", {})
                 .get("leaf_segmentation", {})
                 .get("segment_partial_leaves", False)
             )
-            has_class0 = any(int(it[-1]) == 0 for it in stage1_detections)
-            raw_s1_leaf_classes = (0, 1) if (seg_partial_cfg or not has_class0) else (0,)
+            c0_items: List[Tuple[Tuple[int, int, int, int], float, int]] = []
+            c1_items: List[Tuple[Tuple[int, int, int, int], float, int]] = []
             for s1_item in stage1_detections:
                 if len(s1_item) == 4:
                     s1_bbox, s1_mask, s1_score, s1_cls = s1_item
@@ -1620,11 +1622,76 @@ class SegmentAndExtractPipeline:
                     s1_plant_boxes.append(s1_bbox)
                 elif int(s1_cls) == 2:
                     rejected_leaflet_delta += 1
-                elif int(s1_cls) in raw_s1_leaf_classes:
+                elif int(s1_cls) == 0:
                     s1_plant_boxes.append(s1_bbox)
-                    crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
-                    if crop_bgr.size > 0:
-                        candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
+                    c0_items.append((s1_bbox, float(s1_score), 0))
+                elif int(s1_cls) == 1:
+                    s1_plant_boxes.append(s1_bbox)
+                    c1_items.append((s1_bbox, float(s1_score), 1))
+
+            selected_s1_leaves: List[Tuple[Tuple[int, int, int, int], float, int]] = list(c0_items)
+            if seg_partial_cfg or not c0_items:
+                selected_s1_leaves.extend(c1_items)
+            elif is_high_dpi and c1_items:
+                c0_areas = [
+                    float(max(1, (b[2] - b[0]) * (b[3] - b[1])))
+                    for b, _, _ in c0_items
+                ]
+                med_c0_area = float(np.median(c0_areas)) if c0_areas else 0.0
+                max_valid_s1_area = 0.35 * float(sheet_h * sheet_w)
+                min_macro_dim = max(180, int(200 * scale_f))
+                for b1, sc1, cl1 in c1_items:
+                    bh1 = int(b1[2] - b1[0])
+                    bw1 = int(b1[3] - b1[1])
+                    area1 = float(max(1, bh1 * bw1))
+                    if area1 > max_valid_s1_area or max(bh1, bw1) < min_macro_dim:
+                        continue
+                    encloses_c0_sublobe = False
+                    nested_in_c0 = False
+                    for b0, _, _ in c0_items:
+                        area0 = float(max(1, (b0[2] - b0[0]) * (b0[3] - b0[1])))
+                        iy0, ix0 = max(b1[0], b0[0]), max(b1[1], b0[1])
+                        iy1, ix1 = min(b1[2], b0[2]), min(b1[3], b0[3])
+                        if iy1 > iy0 and ix1 > ix0:
+                            inter = float((iy1 - iy0) * (ix1 - ix0))
+                            if area1 >= 1.25 * area0 and (inter / area0) >= 0.55:
+                                encloses_c0_sublobe = True
+                            if area0 >= 1.15 * area1 and (inter / area1) >= 0.50:
+                                nested_in_c0 = True
+                    if encloses_c0_sublobe or (
+                        not nested_in_c0 and sc1 >= 0.45 and area1 >= 0.65 * med_c0_area
+                    ):
+                        selected_s1_leaves.append((b1, sc1, cl1))
+
+            # Suppress smaller Stage 1 sub-lobe / terminal-lobe boxes that are >= 68% enclosed inside
+            # a larger compound/dissected leaf box so Stage 2 segments the whole leaf rather than a truncated lobe
+            if is_high_dpi and len(selected_s1_leaves) >= 2:
+                filtered_s1_leaves: List[Tuple[Tuple[int, int, int, int], float, int]] = []
+                max_parent_area = 0.35 * float(sheet_h * sheet_w)
+                for idx_a, (ba, sca, cla) in enumerate(selected_s1_leaves):
+                    area_a = float(max(1, (ba[2] - ba[0]) * (ba[3] - ba[1])))
+                    is_nested_sublobe = False
+                    for idx_b, (bb, scb, clb) in enumerate(selected_s1_leaves):
+                        if idx_a == idx_b:
+                            continue
+                        area_b = float(max(1, (bb[2] - bb[0]) * (bb[3] - bb[1])))
+                        if area_b < 1.30 * area_a or area_b > max_parent_area:
+                            continue
+                        iy0, ix0 = max(ba[0], bb[0]), max(ba[1], bb[1])
+                        iy1, ix1 = min(ba[2], bb[2]), min(ba[3], bb[3])
+                        if iy1 > iy0 and ix1 > ix0:
+                            inter = float((iy1 - iy0) * (ix1 - ix0))
+                            if (inter / area_a) >= 0.68:
+                                is_nested_sublobe = True
+                                break
+                    if not is_nested_sublobe:
+                        filtered_s1_leaves.append((ba, sca, cla))
+                selected_s1_leaves = filtered_s1_leaves
+
+            for s1_bbox, s1_score, s1_cls in selected_s1_leaves:
+                crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
+                if crop_bgr.size > 0:
+                    candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
             s1_eff_min_cm2 = 0.0
         else:
             s1_raw_leaf_items: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
@@ -1950,7 +2017,10 @@ class SegmentAndExtractPipeline:
                     if not leaf_cands:
                         continue
 
-                    leaf_cands.sort(key=lambda c: (c[0], c[1]), reverse=True)
+                    leaf_cands.sort(
+                        key=lambda c: (float(c[1]) * (float(c[0]) ** 0.5) if float(c[0]) >= 0.42 else float(c[0]), c[1]),
+                        reverse=True,
+                    )
                     best_score, _, _, best_mask = leaf_cands[0]
 
                     best_petiole_mask: Optional[np.ndarray] = None
@@ -1959,7 +2029,7 @@ class SegmentAndExtractPipeline:
                         best_petiole_mask = petiole_cands[0][3]
 
                     m_raw = _merge_and_bridge_dissected_crop_mask(
-                        best_mask, leaf_cands, petiole_mask=best_petiole_mask
+                        best_mask, leaf_cands, petiole_mask=best_petiole_mask, crop_bgr=crop_bgr
                     )
                     if (not _sam2_already_done) and self._should_refine_with_sam2(m_raw):
                         m_raw = self.sam2_refiner.refine_crop_mask(crop_bgr, m_raw)
@@ -2062,7 +2132,7 @@ class SegmentAndExtractPipeline:
 
                     qc_leaf_cands = [(c[1], c[0], c[2], c[3]) for c in blade_candidates]
                     m_refined = _merge_and_bridge_dissected_crop_mask(
-                        best_mask, qc_leaf_cands, petiole_mask=best_petiole_qc
+                        best_mask, qc_leaf_cands, petiole_mask=best_petiole_qc, crop_bgr=crop_bgr
                     )
                     if (not _sam2_already_done) and self._should_refine_with_sam2(m_refined):
                         m_refined = self.sam2_refiner.refine_crop_mask(crop_bgr, m_refined)
@@ -2130,49 +2200,72 @@ class SegmentAndExtractPipeline:
                         fg_area,
                     ))
 
-                # Deduplicate leaf_detections on the sheet by mask IoU (IoU > 0.45 keeps the higher-solidity mask)
-                if scale_f > 0.4 and len(leaf_detections) >= 2:
-                    scored_dets = [
-                        (det_item[8], det_item[2], idx_d, det_item)
-                        for idx_d, det_item in enumerate(leaf_detections)
-                    ]
-                    scored_dets.sort(key=lambda x: (x[0], x[1]), reverse=True)
-                    kept_scored = []
-                    for d_sol, d_score, idx_d, det_item in scored_dets:
-                        b1 = det_item[0]
-                        m1 = det_item[1]
-                        ox1, oy1 = det_item[5]
-                        area1 = det_item[9]
-                        is_dup = False
-                        for _, _, _, kept_item in kept_scored:
-                            b2 = kept_item[0]
-                            if b1[2] <= b2[0] or b2[2] <= b1[0] or b1[3] <= b2[1] or b2[3] <= b1[1]:
-                                continue
-                            iy0, ix0 = max(b1[0], b2[0]), max(b1[1], b2[1])
-                            iy1, ix1 = min(b1[2], b2[2]), min(b1[3], b2[3])
-                            if iy1 <= iy0 or ix1 <= ix0:
-                                continue
-                            m2 = kept_item[1]
-                            ox2, oy2 = kept_item[5]
-                            area2 = kept_item[9]
-                            sub1 = m1[iy0 - oy1 : iy1 - oy1, ix0 - ox1 : ix1 - ox1] > 0
-                            sub2 = m2[iy0 - oy2 : iy1 - oy2, ix0 - ox2 : ix1 - ox2] > 0
-                            if sub1.shape != sub2.shape:
-                                sh = min(sub1.shape[0], sub2.shape[0])
-                                sw = min(sub1.shape[1], sub2.shape[1])
-                                sub1 = sub1[:sh, :sw]
-                                sub2 = sub2[:sh, :sw]
-                            inter = int(np.count_nonzero(sub1 & sub2))
-                            if inter > 0:
-                                union = max(area1 + area2 - inter, 1)
-                                if float(inter / union) > 0.45:
-                                    is_dup = True
-                                    break
-                        if not is_dup:
-                            kept_scored.append((d_sol, d_score, idx_d, det_item))
+            # Sheet-level sub-pinna noise speck filtering and nested sub-lobe / duplicate suppression:
+            # Sort by foreground area descending (NEVER by solidity descending, which would discard whole
+            # dissected leaves in favor of nested high-solidity terminal lobes).
+            if scale_f > 0.4 and len(leaf_detections) >= 2:
+                all_fg_areas = sorted([int(d[9]) for d in leaf_detections], reverse=True)
+                if all_fg_areas[0] >= int(3500 * (scale_f ** 2)):
+                    top_k_areas = all_fg_areas[: max(1, min(8, len(all_fg_areas)))]
+                    med_top_area = float(np.median(top_k_areas))
+                    min_sheet_fg_area = max(int(1500 * (scale_f ** 2)), int(0.06 * med_top_area))
+                    filtered_by_area = [d for d in leaf_detections if int(d[9]) >= min_sheet_fg_area]
+                    if filtered_by_area:
+                        leaf_detections = filtered_by_area
 
-                    kept_scored.sort(key=lambda x: x[2])
-                    leaf_detections = [x[3] for x in kept_scored]
+                scored_dets = [
+                    (int(det_item[9]), float(det_item[2]), idx_d, det_item)
+                    for idx_d, det_item in enumerate(leaf_detections)
+                ]
+                scored_dets.sort(key=lambda x: (x[0], x[1]), reverse=True)
+                kept_scored = []
+                for d_area, d_score, idx_d, det_item in scored_dets:
+                    b1 = det_item[0]
+                    m1 = det_item[1]
+                    ox1, oy1 = det_item[5]
+                    area1 = max(1, int(det_item[9]))
+                    bbox_area1 = float(max(1, (b1[2] - b1[0]) * (b1[3] - b1[1])))
+                    is_dup = False
+                    for _, _, _, kept_item in kept_scored:
+                        b2 = kept_item[0]
+                        if b1[2] <= b2[0] or b2[2] <= b1[0] or b1[3] <= b2[1] or b2[3] <= b1[1]:
+                            continue
+                        iy0, ix0 = max(b1[0], b2[0]), max(b1[1], b2[1])
+                        iy1, ix1 = min(b1[2], b2[2]), min(b1[3], b2[3])
+                        if iy1 <= iy0 or ix1 <= ix0:
+                            continue
+                        bbox_inter = float((iy1 - iy0) * (ix1 - ix0))
+                        m2 = kept_item[1]
+                        ox2, oy2 = kept_item[5]
+                        area2 = max(1, int(kept_item[9]))
+                        sub1 = m1[iy0 - oy1 : iy1 - oy1, ix0 - ox1 : ix1 - ox1] > 0
+                        sub2 = m2[iy0 - oy2 : iy1 - oy2, ix0 - ox2 : ix1 - ox2] > 0
+                        if sub1.shape != sub2.shape:
+                            sh = min(sub1.shape[0], sub2.shape[0])
+                            sw = min(sub1.shape[1], sub2.shape[1])
+                            sub1 = sub1[:sh, :sw]
+                            sub2 = sub2[:sh, :sw]
+                        inter = int(np.count_nonzero(sub1 & sub2))
+                        if inter > 0:
+                            union = max(area1 + area2 - inter, 1)
+                            iou = float(inter / union)
+                            containment = float(inter) / float(area1)
+                            if (
+                                iou > 0.40
+                                or containment >= 0.55
+                                or (
+                                    area2 >= 1.30 * area1
+                                    and (bbox_inter / bbox_area1) >= 0.75
+                                    and containment >= 0.25
+                                )
+                            ):
+                                is_dup = True
+                                break
+                    if not is_dup:
+                        kept_scored.append((d_area, d_score, idx_d, det_item))
+
+                kept_scored.sort(key=lambda x: x[2])
+                leaf_detections = [x[3] for x in kept_scored]
         elif not is_high_dpi or self.stage1_detector.model is None or "predict" in self.model_engine.__dict__:
             # Fallback when Stage 1 detector is uninitialized (e.g., direct PointRend unit tests)
             _ss_sam2_done = False
@@ -2624,7 +2717,6 @@ class SegmentAndExtractPipeline:
                     p_apex_use = raw_pa
                     midrib_ang_use = float(raw_ang)
 
-                inst.ucs_score = float(raw_ucs)
                 inst.solidity = float(raw_sol)
                 inst.midrib_angle_deg = midrib_ang_use
                 inst.circularity = float(raw_desc["circularity"])
@@ -2633,8 +2725,12 @@ class SegmentAndExtractPipeline:
 
                 is_dissected = bool(inst.solidity < self.min_solidity and is_botanical_dissection(inst.mask))
                 if is_dissected:
+                    # Normalize UCS by convex-hull solidity so deeply dissected pinnatisect/lyrate leaves
+                    # are not penalized for inter-lobe sinus area
+                    inst.ucs_score = float(min(1.0, max(float(raw_ucs) / max(float(raw_sol), 0.35), 0.82)))
                     tier = "Tier 1 (Bipinnatisect)" if inst.solidity < 0.48 else "Tier 1 (Dissected)"
                 else:
+                    inst.ucs_score = float(raw_ucs)
                     tier = "Tier 1"
                 assigned_tier = TIER_1_DIRECT
                 is_folded = False
@@ -4501,33 +4597,36 @@ def _is_valid_smooth_closed_mask(m_path_str: Any, out_dir: Path) -> bool:
     ):
         return False
 
-    # 2. Require a single significant connected component
-    num_l, _, stats_cc, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
+    # 2. Require a single significant connected component (or dominant >=92% primary component)
+    num_l, lbls_cc, stats_cc, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
     if num_l <= 1:
         return False
     min_sig_area = max(25, int(0.01 * total_fg))
-    sig_comps = int(np.sum(stats_cc[1:, cv2.CC_STAT_AREA] >= min_sig_area))
+    cc_areas = stats_cc[1:, cv2.CC_STAT_AREA]
+    sig_comps = int(np.sum(cc_areas >= min_sig_area))
     if sig_comps != 1:
-        return False
+        best_cc = 1 + int(np.argmax(cc_areas))
+        best_cc_area = int(stats_cc[best_cc, cv2.CC_STAT_AREA])
+        if float(best_cc_area) / float(max(total_fg, 1)) >= 0.92:
+            fg = (lbls_cc == best_cc).astype(np.uint8)
+            total_fg = best_cc_area
+            min_sig_area = max(25, int(0.01 * total_fg))
+        else:
+            return False
 
-    # 3. Reject internal holes using 2-level contour hierarchy (RETR_CCOMP)
+    # 3. Reject internal holes using 2-level contour hierarchy (RETR_CCOMP), allowing tiny
+    #    natural herbivory pinholes (< 2.5% of blade area) on deeply dissected leaves
     cnts, hier = cv2.findContours(fg, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
     if not cnts or hier is None:
         return False
-    min_hole_area = max(12.0, 0.002 * float(total_fg))
-    outer_cnts = []
-    for idx_c, c in enumerate(cnts):
-        parent_idx = int(hier[0][idx_c][3])
-        c_area = float(cv2.contourArea(c))
-        if parent_idx != -1:
-            if c_area >= min_hole_area:
-                return False
-        elif c_area >= min_sig_area:
-            outer_cnts.append(c)
+    outer_cnts = [
+        cnts[idx_c]
+        for idx_c in range(len(cnts))
+        if int(hier[0][idx_c][3]) == -1 and float(cv2.contourArea(cnts[idx_c])) >= min_sig_area
+    ]
     if len(outer_cnts) != 1:
         return False
 
-    # 4. Require smooth closed contour geometry
     main_cnt = outer_cnts[0]
     if len(main_cnt) < 12:
         return False
@@ -4535,11 +4634,19 @@ def _is_valid_smooth_closed_mask(m_path_str: Any, out_dir: Path) -> bool:
     perim_c = float(cv2.arcLength(main_cnt, True))
     if area_c <= 0.0 or perim_c <= 0.0:
         return False
+    hull_c = cv2.convexHull(main_cnt)
+    hull_area_c = float(cv2.contourArea(hull_c))
+    sol_c = area_c / max(hull_area_c, 1.0)
+
+    min_hole_area = max(12.0, (0.025 if sol_c < 0.72 else 0.002) * float(total_fg))
+    for idx_c, c in enumerate(cnts):
+        parent_idx = int(hier[0][idx_c][3])
+        if parent_idx != -1 and float(cv2.contourArea(c)) >= min_hole_area:
+            return False
+
+    # 4. Require smooth closed contour geometry
     circ = (4.0 * math.pi * area_c) / (perim_c * perim_c)
     if circ < 0.12:
-        hull_c = cv2.convexHull(main_cnt)
-        hull_area_c = float(cv2.contourArea(hull_c))
-        sol_c = area_c / max(hull_area_c, 1.0)
         if not (circ >= 0.025 and sol_c < 0.75 and is_botanical_dissection(main_cnt, solidity=sol_c, check_solidity_range=False)):
             return False
     return True
@@ -4689,10 +4796,10 @@ def generate_step02_publication_figures(
                     ind_df = ind_df[~ind_df["is_contour_outlier"].apply(_parse_bool_val)]
                 if "pct_asymmetry" in ind_df.columns:
                     ind_asym = pd.to_numeric(ind_df["pct_asymmetry"], errors="coerce")
-                    ind_df = ind_df[ind_asym.isna() | (ind_asym <= 0.15)]
+                    ind_df = ind_df[ind_asym.isna() | (ind_asym <= 0.22)]
                 if "harmonic_roughness" in ind_df.columns:
                     ind_hr = pd.to_numeric(ind_df["harmonic_roughness"], errors="coerce")
-                    ind_df = ind_df[ind_hr.isna() | (ind_hr <= 0.10)]
+                    ind_df = ind_df[ind_hr.isna() | (ind_hr <= 0.22)]
 
                 enrich_cols = [
                     c for c in (
@@ -4735,10 +4842,10 @@ def generate_step02_publication_figures(
         df_plot = df_plot[~df_plot["is_contour_outlier"].apply(_parse_bool_val)].copy()
     if "pct_asymmetry" in df_plot.columns:
         asym_s = pd.to_numeric(df_plot["pct_asymmetry"], errors="coerce")
-        df_plot = df_plot[asym_s.isna() | (asym_s <= 0.15)].copy()
+        df_plot = df_plot[asym_s.isna() | (asym_s <= 0.22)].copy()
     if "harmonic_roughness" in df_plot.columns:
         hr_s = pd.to_numeric(df_plot["harmonic_roughness"], errors="coerce")
-        df_plot = df_plot[hr_s.isna() | (hr_s <= 0.10)].copy()
+        df_plot = df_plot[hr_s.isna() | (hr_s <= 0.22)].copy()
 
     # Filter to vouchers retained in leaf_efa_harmonics.csv when present
     otu_efa_path = _discover_downstream_table("leaf_efa_harmonics.csv", out_dir, active_cats)
@@ -5156,27 +5263,70 @@ def generate_step02_publication_figures(
                 f"fig02b: {n_missing_assets} / {len(sp_all)} {sp_name} Tier_1_Direct leaves have no resolvable mask/contour asset on disk."
             )
         sp_all = sp_all[sp_all["asset_ok"]].copy()
+        if "area_px" in sp_all.columns:
+            sp_all["area_val"] = pd.to_numeric(sp_all["area_px"], errors="coerce").fillna(1.0)
+        elif "blade_area_cm2" in sp_all.columns:
+            sp_all["area_val"] = pd.to_numeric(sp_all["blade_area_cm2"], errors="coerce").fillna(1.0)
+        else:
+            sp_all["area_val"] = 1.0
+        sp_med_area = float(sp_all["area_val"].median()) if len(sp_all) > 0 else 1.0
+        if len(sp_all) >= 8 and sp_med_area > 0:
+            sp_size_ok = sp_all[sp_all["area_val"] >= 0.35 * sp_med_area]
+            if len(sp_size_ok) >= 4:
+                sp_all = sp_size_ok.copy()
+
         is_diss_col = (
             sp_all["is_dissected"].astype(str).str.lower().isin(["true", "1", "t", "yes"])
             if "is_dissected" in sp_all.columns
             else (sp_all["sol_val"] < 0.72)
         )
-        sp_hq = sp_all[
-            (
-                (sp_all["ucs_val"] >= 0.88)
-                & (sp_all["sol_val"] >= 0.80)
-                & (sp_all["sol_val"] < 0.995)
-            )
-            | (
-                (sp_all["ucs_val"] >= 0.80)
-                & (sp_all["sol_val"] >= 0.18)
-                & is_diss_col
-            )
-        ].copy()
-        sp_hq["mask_valid"] = [
-            _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()
-        ]
-        sp_hq = sp_hq[sp_hq["mask_valid"].astype(bool)].sort_values("ar_val").copy()
+        sp_all["eff_ucs"] = np.where(
+            is_diss_col | (sp_all["sol_val"] < 0.72),
+            np.minimum(
+                1.0,
+                np.maximum(
+                    sp_all["ucs_val"] / np.maximum(sp_all["sol_val"], 0.35),
+                    sp_all["ucs_val"],
+                ),
+            ),
+            sp_all["ucs_val"],
+        )
+        sp_diss_frac = float((is_diss_col | (sp_all["sol_val"] < 0.70)).mean()) if len(sp_all) > 0 else 0.0
+        sp_med_sol = float(sp_all["sol_val"].median()) if len(sp_all) > 0 else 0.85
+
+        if sp_diss_frac >= 0.25 or sp_med_sol < 0.72:
+            # Dissected / pinnatisect species: prioritize authentic dissected blades over undivided terminal lobes
+            sp_hq = sp_all[
+                (sp_all["eff_ucs"] >= 0.78)
+                & (sp_all["sol_val"] >= 0.22)
+                & (sp_all["sol_val"] < 0.70)
+                & (is_diss_col | (sp_all["sol_val"] < 0.68))
+            ].copy()
+            if len(sp_hq) >= 4:
+                sp_hq["mask_valid"] = [
+                    _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()
+                ]
+                sp_hq = sp_hq[sp_hq["mask_valid"].astype(bool)].sort_values("ar_val").copy()
+        else:
+            sp_hq = pd.DataFrame()
+
+        if len(sp_hq) < 4:
+            sp_hq = sp_all[
+                (
+                    (sp_all["ucs_val"] >= 0.88)
+                    & (sp_all["sol_val"] >= 0.80)
+                    & (sp_all["sol_val"] < 0.995)
+                )
+                | (
+                    (sp_all["eff_ucs"] >= 0.80)
+                    & (sp_all["sol_val"] >= 0.18)
+                    & is_diss_col
+                )
+            ].copy()
+            sp_hq["mask_valid"] = [
+                _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()
+            ]
+            sp_hq = sp_hq[sp_hq["mask_valid"].astype(bool)].sort_values("ar_val").copy()
         if len(sp_hq) < 4:
             # Fallback within the SAME species only (e.g. small synthetic unit test fixture)
             sp_all["mask_valid"] = [
@@ -5185,6 +5335,14 @@ def generate_step02_publication_figures(
             sp_hq = sp_all[sp_all["mask_valid"].astype(bool)].sort_values("ar_val").copy()
         if len(sp_hq) == 0:
             sp_hq = sp_all.sort_values("ar_val").copy()
+
+        sp_target_sol = float(sp_hq["sol_val"].median()) if len(sp_hq) > 0 else sp_med_sol
+        sp_hq_med_area = float(sp_hq["area_val"].median()) if len(sp_hq) > 0 else max(sp_med_area, 1.0)
+        sp_hq["rep_score"] = (
+            (1.0 - np.abs(sp_hq["sol_val"] - sp_target_sol))
+            * np.minimum(1.15, sp_hq["area_val"] / max(sp_hq_med_area, 1.0))
+            * sp_hq["eff_ucs"]
+        )
 
         n_avail = len(sp_hq)
         if n_avail > 1:
@@ -5224,7 +5382,7 @@ def generate_step02_publication_figures(
                 key=lambda r: (
                     int(bool(r.get("is_gold_silver", False))),
                     int(bool(r.get("is_cal_bool", False))),
-                    float(r.get("qual_weight", 0.0)),
+                    float(r.get("rep_score", r.get("qual_weight", 0.0))),
                     -abs(float(r.get("q_rank", q_target)) - q_target),
                 ),
             )
@@ -5263,6 +5421,13 @@ def generate_step02_publication_figures(
                 y0, y1 = max(0, int(ys.min()) - pad), min(mask_img.shape[0], int(ys.max()) + pad + 1)
                 x0, x1 = max(0, int(xs.min()) - pad), min(mask_img.shape[1], int(xs.max()) + pad + 1)
                 crop_m = (mask_img[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
+                # Seal any tiny internal herbivory pinholes (< 2.5% of blade area) for clean silhouette rendering
+                cnts_fill, hier_fill = cv2.findContours(crop_m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+                if cnts_fill and hier_fill is not None:
+                    fg_cnt_px = float(np.count_nonzero(crop_m))
+                    for idx_h, c_h in enumerate(cnts_fill):
+                        if int(hier_fill[0][idx_h][3]) != -1 and float(cv2.contourArea(c_h)) < 0.025 * fg_cnt_px:
+                            cv2.drawContours(crop_m, cnts_fill, idx_h, 255, thickness=cv2.FILLED)
                 _, _, _, p_apex_c, p_base_c = compute_geometric_metrics(crop_m)
 
                 h_c, w_c = crop_m.shape[:2]
