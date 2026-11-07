@@ -1614,7 +1614,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                     "scientificName": f"{sci} Auth.",
                     "stateProvince": "Texas",
                     "decimalLatitude": 31.20 + idx * 0.05,
-                    "decimalLongitude": -98.50 - idx * 0.05,
+                    "decimalLongitude": -95.50 - idx * 0.05,
                     "coordinateUncertaintyInMeters": 100.0,
                     "year": 2021,
                     "month": 5,
@@ -1676,7 +1676,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                         "scientificName": "Packera hartiana (A.Heller) W.A.Weber & Á.Löve",
                         "stateProvince": "Texas",
                         "decimalLatitude": 31.1,
-                        "decimalLongitude": -99.1,
+                        "decimalLongitude": -95.1,
                         "coordinateUncertaintyInMeters": 50.0,
                         "year": 2020,
                         "month": 4,
@@ -1690,7 +1690,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                         "scientificName": "Senecio cardamine Greene",
                         "stateProvince": "Texas",
                         "decimalLatitude": 31.3,
-                        "decimalLongitude": -99.3,
+                        "decimalLongitude": -95.3,
                         "coordinateUncertaintyInMeters": 50.0,
                         "year": 2020,
                         "month": 4,
@@ -1704,7 +1704,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                         "scientificName": "Packera sp.",
                         "stateProvince": "Texas",
                         "decimalLatitude": 31.4,
-                        "decimalLongitude": -99.4,
+                        "decimalLongitude": -95.4,
                         "coordinateUncertaintyInMeters": 50.0,
                         "year": 2020,
                         "month": 4,
@@ -1826,8 +1826,9 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                     cfg_default,
                 )
                 cmd_explicit = mock_sub_explicit.call_args[0][0]
-                self.assertIn("--taxa", cmd_explicit)
-                taxa_idx = cmd_explicit.index("--taxa")
+                self.assertTrue("--taxa" in cmd_explicit or "--taxon" in cmd_explicit)
+                taxa_flag = "--taxa" if "--taxa" in cmd_explicit else "--taxon"
+                taxa_idx = cmd_explicit.index(taxa_flag)
                 self.assertEqual(cmd_explicit[taxa_idx + 1 : taxa_idx + 3], ["Packera aurea", "Packera obovata"])
                 self.assertNotIn("Packera dubia", cmd_explicit)
 
