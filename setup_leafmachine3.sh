@@ -77,6 +77,7 @@ for link_name in "${!LM3_STAGE_LINKS[@]}"; do
 done
 
 if [ -d "${LM3_DIR}/.venv" ]; then
+    uv pip install --python "${LM3_DIR}/.venv/bin/python" "pandas>=2.0.0"
     if [ -L "${PROJECT_ROOT}/.venv_LM3" ]; then
         ln -sfn "${LM3_DIR}/.venv" "${PROJECT_ROOT}/.venv_LM3"
     elif [ -d "${PROJECT_ROOT}/.venv_LM3" ]; then

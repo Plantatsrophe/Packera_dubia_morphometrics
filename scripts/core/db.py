@@ -2329,6 +2329,46 @@ def _read_csv_dicts(csv_path: Path) -> List[Dict[str, str]]:
         return list(csv.DictReader(f))
 
 
+def export_table_to_csv(
+    conn: sqlite3.Connection,
+    table_name: str,
+    csv_path: Union[str, Path],
+    where_clause: str = "",
+    params: Sequence[Any] = (),
+) -> int:
+    """
+    Atomically export rows of a SQLite table or view to a CSV snapshot file.
+    Returns the number of exported rows.
+    """
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table_name):
+        raise ValueError(f"Invalid SQLite table/view identifier: {table_name!r}")
+    dest = Path(csv_path).resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sql = f'SELECT * FROM "{table_name}"'
+    if where_clause.strip():
+        sql += f" WHERE {where_clause.strip()}"
+    cur = conn.execute(sql, tuple(params))
+    col_names = [desc[0] for desc in (cur.description or [])]
+    rows = cur.fetchall()
+    tmp_path = dest.parent / f".{dest.name}.tmp.{os.getpid()}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            if col_names:
+                writer.writerow(col_names)
+            for row in rows:
+                writer.writerow(["" if val is None else val for val in row])
+        tmp_path.replace(dest)
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+    return len(rows)
+
+
 def ingest_existing_run_tables_into_db(
     conn: sqlite3.Connection,
     tables_dir: Union[str, Path],
