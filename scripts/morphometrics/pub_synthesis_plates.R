@@ -437,8 +437,8 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
     comp_mask[is.na(comp_mask)] <- FALSE
   } else {
     has_m <- if ("can1" %in% colnames(triage_df)) !is.na(triage_df$can1) else if ("cda_predicted_taxon" %in% colnames(triage_df)) !is.na(triage_df$cda_predicted_taxon) else rep(FALSE, nrow(triage_df))
-    has_v <- if ("c_error" %in% colnames(triage_df)) !is.na(triage_df$c_error) else rep(FALSE, nrow(triage_df))
-    comp_mask <- has_m | has_v
+    has_e <- if ("edaphic_best_fit_taxon" %in% colnames(triage_df)) !is.na(triage_df$edaphic_best_fit_taxon) else rep(FALSE, nrow(triage_df))
+    comp_mask <- has_m | has_e
   }
   if (any(comp_mask)) {
     triage_df <- triage_df[comp_mask, , drop = FALSE]
@@ -455,10 +455,12 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
   } else {
     rep(FALSE, nrow(triage_df))
   }
-  vis_conflict <- if ("is_label_corrupted" %in% colnames(triage_df) && any(!is.na(triage_df$is_label_corrupted))) {
-    as.logical(triage_df$is_label_corrupted)
-  } else if ("vision_predicted_label" %in% colnames(triage_df) && any(!is.na(triage_df$vision_predicted_label))) {
-    ifelse(is.na(triage_df$vision_predicted_label), NA, as.character(triage_df$vision_predicted_label) != tx_clean)
+  pheno_conflict <- if ("phenology_conflict_flag" %in% colnames(triage_df) && any(!is.na(triage_df$phenology_conflict_flag))) {
+    as.logical(triage_df$phenology_conflict_flag)
+  } else if ("delta_doy_resid" %in% colnames(triage_df) && any(!is.na(triage_df$delta_doy_resid))) {
+    abs(suppressWarnings(as.numeric(triage_df$delta_doy_resid))) >= 14.0
+  } else if ("delta_doy" %in% colnames(triage_df) && any(!is.na(triage_df$delta_doy))) {
+    abs(suppressWarnings(as.numeric(triage_df$delta_doy))) >= 14.0
   } else {
     rep(FALSE, nrow(triage_df))
   }
@@ -476,11 +478,11 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(5.4, 5.4, 3.4, 1.2))
     r_m <- mean(morph_conflict, na.rm = TRUE) * 100
-    r_v <- mean(vis_conflict, na.rm = TRUE) * 100
+    r_p <- mean(pheno_conflict, na.rm = TRUE) * 100
     r_e <- mean(eco_conflict, na.rm = TRUE) * 100
     rates <- c(
       ifelse(is.finite(r_m), r_m, 0),
-      ifelse(is.finite(r_v), r_v, 0),
+      ifelse(is.finite(r_p), r_p, 0),
       ifelse(is.finite(r_e), r_e, 0)
     )
     bp <- graphics::barplot(
@@ -494,7 +496,7 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
     )
     graphics::axis(
       1, at = bp,
-      labels = c("Morphology\n(CDA/GMM)", "Vision\n(DINOv2/Cleanlab)", "Edaphic Niche\n(10m-30m RF)"),
+      labels = c("Morphology\n(EFA/ECT/CDA)", "Phenology\n(Anthesis Allochrony)", "Edaphic Niche\n(0-15cm RF)"),
       tick = FALSE, cex.axis = 0.82, line = 0.6
     )
     graphics::text(bp, rates + 4.5, labels = sprintf("%.1f%%", rates), font = 2, cex = 0.9)
@@ -829,21 +831,23 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     sp_t <- as.character(sub_t$species_standardized)
     m_ok <- if ("cda_predicted_taxon" %in% names(sub_t)) (sub_t$cda_predicted_taxon == tx | sub_t$cda_predicted_taxon == sp_t) else !isTRUE(sub_t$morphometric_outlier_flag)
     pct_m <- 100 * mean(m_ok, na.rm = TRUE); if (!is.finite(pct_m)) pct_m <- 85.0
-    v_ok <- if ("vision_predicted_label" %in% names(sub_t) && any(!is.na(sub_t$vision_predicted_label))) {
-      (sub_t$vision_predicted_label == tx | sub_t$vision_predicted_label == sp_t) & (!isTRUE(sub_t$is_label_corrupted))
-    } else if ("c_error" %in% names(sub_t)) as.numeric(sub_t$c_error) < 0.55 else TRUE
-    pct_v <- 100 * mean(v_ok, na.rm = TRUE); if (!is.finite(pct_v)) pct_v <- 82.0
+    p_ok <- if ("phenology_conflict_flag" %in% names(sub_t)) {
+      !as.logical(sub_t$phenology_conflict_flag)
+    } else if ("delta_doy_resid" %in% names(sub_t) && any(!is.na(sub_t$delta_doy_resid))) {
+      abs(suppressWarnings(as.numeric(sub_t$delta_doy_resid))) < 14.0
+    } else if ("delta_doy" %in% names(sub_t) && any(!is.na(sub_t$delta_doy))) {
+      abs(suppressWarnings(as.numeric(sub_t$delta_doy))) < 14.0
+    } else TRUE
+    pct_p <- 100 * mean(p_ok, na.rm = TRUE); if (!is.finite(pct_p)) pct_p <- 88.0
     e_ok <- if ("edaphic_best_fit_taxon" %in% names(sub_t) && any(!is.na(sub_t$edaphic_best_fit_taxon))) {
       sub_t$edaphic_best_fit_taxon == tx | sub_t$edaphic_best_fit_taxon == sp_t
     } else if ("edaphic_conflict_flag" %in% names(sub_t)) !as.logical(sub_t$edaphic_conflict_flag) else TRUE
     pct_e <- 100 * mean(e_ok, na.rm = TRUE); if (!is.finite(pct_e)) pct_e <- 80.0
-    p_ok <- if ("phenology_conflict_flag" %in% names(sub_t)) !as.logical(sub_t$phenology_conflict_flag) else TRUE
-    pct_p <- 100 * mean(p_ok, na.rm = TRUE); if (!is.finite(pct_p)) pct_p <- 88.0
     ev_rows[[length(ev_rows) + 1]] <- data.frame(
       Species = gsub("^Packera\\s+", "P. ", tx),
-      Stream = factor(c("1. EFA/CDA Morphology", "2. DINOv2 Vision/Vestiture", "3. 10m-30m Edaphic Niche", "4. Anthesis Phenology"),
-                      levels = c("4. Anthesis Phenology", "3. 10m-30m Edaphic Niche", "2. DINOv2 Vision/Vestiture", "1. EFA/CDA Morphology")),
-      Concordance_Pct = round(c(pct_m, pct_v, pct_e, pct_p), 1), stringsAsFactors = FALSE
+      Stream = factor(c("1. EFA/ECT/CDA Morphology", "2. Capitulum & Anthesis Phenology", "3. 0-15cm Edaphic Niche"),
+                      levels = c("3. 0-15cm Edaphic Niche", "2. Capitulum & Anthesis Phenology", "1. EFA/ECT/CDA Morphology")),
+      Concordance_Pct = round(c(pct_m, pct_p, pct_e), 1), stringsAsFactors = FALSE
     )
   }
   ev_df <- if (length(ev_rows) > 0) do.call(rbind, ev_rows) else data.frame(Species = gsub("^Packera\\s+", "P. ", active_tx[1L]), Stream = "1. EFA/CDA Morphology", Concordance_Pct = 90.0)

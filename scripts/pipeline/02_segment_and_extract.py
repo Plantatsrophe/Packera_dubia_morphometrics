@@ -108,7 +108,6 @@ from scripts.vision.leaf_geometry_utils import (
     compute_classical_shape_descriptors,
     compute_geometric_metrics,
     compute_sheet_adaptive_min_blade_area_cm2,
-    crop_dense_rosette_tier4,
     detect_folded_leaf,
     estimate_rosette_crown_point,
     export_standardized_contour,
@@ -258,9 +257,7 @@ class SegmentAndExtractPipeline:
         self.contours_dir = self.output_dir / "contours"
         self.tables_dir = self.output_dir / "tables"
         self.cropped_patches_dir = self.output_dir / "cropped_patches"
-        self.basal_leaves_raw_dir = self.cropped_patches_dir / "basal_leaves_raw"
         self.capitula_patches_dir = self.cropped_patches_dir / "capitula"
-        self.rosettes_dense_dir = self.cropped_patches_dir / "rosettes_dense"
 
         for d in [
             self.masks_dir,
@@ -268,9 +265,7 @@ class SegmentAndExtractPipeline:
             self.tier2_reflected_dir,
             self.contours_dir,
             self.tables_dir,
-            self.basal_leaves_raw_dir,
             self.capitula_patches_dir,
-            self.rosettes_dense_dir,
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -440,9 +435,9 @@ class SegmentAndExtractPipeline:
 
     def _purge_voucher_disk_artifacts(self, catalog_number: str) -> None:
         """
-        Purges all prior mask, contour, basal leaf crop, rosette crop/mask, and capitula
-        crop files for `catalog_number` before re-segmenting under `--force`, preventing
-        orphan files (e.g., `_leaf5.png` when a voucher now yields 3 leaves) from lingering.
+        Purges all prior mask, contour, and capitula crop files for `catalog_number`
+        before re-segmenting under `--force`, preventing orphan files (e.g., `_leaf5.png`
+        when a voucher now yields 3 leaves) from lingering.
         """
         cat = str(catalog_number).strip()
         if not cat:
@@ -464,8 +459,6 @@ class SegmentAndExtractPipeline:
                 (base_dir / "masks" / "tier1_pristine", f"{cat}_leaf*.png"),
                 (base_dir / "masks" / "tier1_intact", f"{cat}_leaf*.png"),
                 (base_dir / "masks" / "tier2_reflected", f"{cat}_leaf*.png"),
-                (base_dir / "cropped_patches" / "basal_leaves_raw", f"{cat}_leaf*.jpg"),
-                (base_dir / "cropped_patches" / "rosettes_dense", f"{cat}_*rosette*"),
                 (base_dir / "cropped_patches" / "capitula", f"{cat}_cap*.jpg"),
             ]
             for d_path, pat in dir_patterns:
@@ -1500,7 +1493,7 @@ class SegmentAndExtractPipeline:
         # 4. Vectorized Centroid Spatial Clustering (DBSCAN)
         instances = cluster_plant_individuals(instances, sheet_w, sheet_h)
 
-        # 5. Tier 4 Dense Rosette Patch Generation & Basal Rosette Zone Statistics per plant_individual_id
+        # 5. Basal Rosette Zone Statistics per plant_individual_id
         def _inst_sheet_geom(inst_obj: DetectedInstance) -> Tuple[float, float, float, float, float]:
             ox_i, oy_i = inst_obj.mask_origin
             m_u8 = inst_obj.mask if inst_obj.mask.dtype == np.uint8 else ((inst_obj.mask > 0).astype(np.uint8) * 255)
@@ -1604,7 +1597,7 @@ class SegmentAndExtractPipeline:
         tier2_rosette_fallback_by_pid: Dict[int, List[DetectedInstance]] = defaultdict(list)
         tier2_upper_rosette_fallback_by_pid: Dict[int, List[DetectedInstance]] = defaultdict(list)
 
-        # 6. Geometric Quality Gatekeeper, 2-Path Extraction & Basal Leaf RGB Patch Saving
+        # 6. Geometric Quality Gatekeeper & 2-Path Extraction
         px_per_cm_sheet = resolve_px_per_cm(
             pixels_per_mm=pixels_per_mm,
             default_dpi=DEFAULT_HERBARIUM_DPI,
@@ -2100,36 +2093,12 @@ class SegmentAndExtractPipeline:
                 reflection_applied = False
 
             elif is_folded or routing_res.assigned_tier == "tier2":
-                rejection_reason = "PARTIAL_OR_FOLDED_ROUTED_TO_ROSETTE"
+                rejection_reason = "PARTIAL_OR_FOLDED_EXCLUDED_FROM_EFA"
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = rejection_reason
-                keep_for_rosette_fallback = True
-                keep_as_upper_rosette_fb = False
-                if is_high_dpi:
-                    ys_fb, xs_fb = np.where(inst.mask > 0)
-                    if len(ys_fb) == 0 or len(xs_fb) == 0:
-                        keep_for_rosette_fallback = False
-                    else:
-                        min_t2_fb_px = float(18000 * (scale_f ** 2))
-                        if is_calibrated_mm and px_per_cm_sheet > 0:
-                            min_t2_fb_px = min(min_t2_fb_px, float(effective_min_blade_area_cm2 * (px_per_cm_sheet ** 2)))
-                        cy_fb_sheet = float(np.mean(ys_fb)) + oy
-                        cy_rel_fb = cy_fb_sheet / float(sheet_h)
-                        cy_rel_p_fb = (cy_fb_sheet - ymin_plant) / plant_bbox_span
-                        if raw_area_px < min_t2_fb_px:
-                            keep_for_rosette_fallback = False
-                        elif cy_rel_fb < 0.48:
-                            keep_for_rosette_fallback = False
-                            if cy_rel_p_fb >= 0.40:
-                                keep_as_upper_rosette_fb = True
-                if keep_for_rosette_fallback:
-                    tier2_rosette_fallback_by_pid[int(inst.plant_individual_id)].append(inst)
-                elif keep_as_upper_rosette_fb:
-                    tier2_upper_rosette_fallback_by_pid[int(inst.plant_individual_id)].append(inst)
                 logger.debug(
                     f"Voucher {catalog_number} leaf {inst.leaf_id} excluded from closed-outline EFA "
-                    f"({rejection_reason}; is_folded={is_folded}, routing={routing_res.assigned_tier}) "
-                    f"and routed to whole-rosette contextual crop for Phase 5 DINOv2."
+                    f"({rejection_reason}; is_folded={is_folded}, routing={routing_res.assigned_tier})."
                 )
                 rejected_instances.append(inst)
                 continue
@@ -2276,92 +2245,6 @@ class SegmentAndExtractPipeline:
                     kept_with_q_cand.append((_q, item))
             kept_with_q_cand.sort(key=lambda x: x[0], reverse=True)
             candidate_extractions = [x[1] for x in kept_with_q_cand[:6]]
-
-        # Post-QC basal-leaf-only dense rosette cropping: composite 5-px dilated union of verified
-        # Tier_1_Direct (or post-cauline-filter Tier_2_Reflected fallback) basal leaf masks onto
-        # neutral herbarium paper BGR (230, 239, 242) [RGB 242, 239, 230] and save companion mask.
-        accepted_rosette_by_pid: Dict[int, List[Tuple[DetectedInstance, np.ndarray]]] = defaultdict(list)
-        for _inst, _rres, _tier, _atier, _fold, _diss, _refl, _area in candidate_extractions:
-            _proc_m = getattr(_rres, "processed_mask", None)
-            _use_m = (
-                _proc_m
-                if (_proc_m is not None and not _refl and _proc_m.shape[:2] == _inst.mask.shape[:2])
-                else _inst.mask
-            )
-            accepted_rosette_by_pid[int(_inst.plant_individual_id)].append((_inst, _use_m))
-        for _fb_pid, _fb_insts in tier2_rosette_fallback_by_pid.items():
-            if int(_fb_pid) not in accepted_rosette_by_pid and _fb_insts:
-                accepted_rosette_by_pid[int(_fb_pid)] = [(_fi, _fi.mask) for _fi in _fb_insts]
-
-        _rosette_dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-        for _pid, _pid_pairs in sorted(accepted_rosette_by_pid.items()):
-            if not _pid_pairs:
-                continue
-            _pid_insts = [p[0] for p in _pid_pairs]
-            _ys_b, _xs_b, _ye_b, _xe_b = [], [], [], []
-            for _ci in _pid_insts:
-                _by0, _bx0, _by1, _bx1 = _ci.bbox
-                if _by1 > _by0 and _bx1 > _bx0:
-                    _ys_b.append(_by0)
-                    _xs_b.append(_bx0)
-                    _ye_b.append(_by1)
-                    _xe_b.append(_bx1)
-            if _ys_b:
-                _min_y, _max_y = min(_ys_b), max(_ye_b)
-                _min_x, _max_x = min(_xs_b), max(_xe_b)
-                _pad_y = int(0.15 * (_max_y - _min_y + 10))
-                _pad_x = int(0.15 * (_max_x - _min_x + 10))
-                _ry0, _ry1 = max(0, _min_y - _pad_y), min(sheet_h, _max_y + _pad_y)
-                _rx0, _rx1 = max(0, _min_x - _pad_x), min(sheet_w, _max_x + _pad_x)
-            else:
-                _ry0, _ry1 = int(sheet_h * 0.40), int(sheet_h * 0.85)
-                _rx0, _rx1 = int(sheet_w * 0.20), int(sheet_w * 0.80)
-            if _ry1 <= _ry0 or _rx1 <= _rx0:
-                continue
-
-            # ROI-scoped haloed union masking: avoids 67 MP full-sheet allocations + 195 MB BGR copy
-            _hy0, _hy1 = max(0, _ry0 - 6), min(sheet_h, _ry1 + 6)
-            _hx0, _hx1 = max(0, _rx0 - 6), min(sheet_w, _rx1 + 6)
-            _halo_union = np.zeros((_hy1 - _hy0, _hx1 - _hx0), dtype=np.uint8)
-            for _p_inst, _p_mask in _pid_pairs:
-                if _p_mask is None or _p_mask.size == 0:
-                    continue
-                _ox_u, _oy_u = int(_p_inst.mask_origin[0]), int(_p_inst.mask_origin[1])
-                _mh_u, _mw_u = _p_mask.shape[:2]
-                _sy0, _sx0 = max(_hy0, _oy_u), max(_hx0, _ox_u)
-                _sy1, _sx1 = min(_hy1, _oy_u + _mh_u), min(_hx1, _ox_u + _mw_u)
-                if _sy1 > _sy0 and _sx1 > _sx0:
-                    _ly0_u, _lx0_u = _sy0 - _oy_u, _sx0 - _ox_u
-                    _hy_s, _hx_s = _sy0 - _hy0, _sx0 - _hx0
-                    _sub_u = (
-                        (_p_mask[_ly0_u : _ly0_u + (_sy1 - _sy0), _lx0_u : _lx0_u + (_sx1 - _sx0)] > 0).astype(np.uint8)
-                    ) * 255
-                    _dst_h = _halo_union[_hy_s : _hy_s + (_sy1 - _sy0), _hx_s : _hx_s + (_sx1 - _sx0)]
-                    np.maximum(_dst_h, _sub_u, out=_dst_h)
-
-            _dilated_halo = cv2.dilate(_halo_union, _rosette_dilate_k, iterations=1)
-            _ry_off, _rx_off = _ry0 - _hy0, _rx0 - _hx0
-            _rh, _rw = _ry1 - _ry0, _rx1 - _rx0
-            _rosette_mask_crop = _halo_union[_ry_off : _ry_off + _rh, _rx_off : _rx_off + _rw]
-            _dilated_roi = _dilated_halo[_ry_off : _ry_off + _rh, _rx_off : _rx_off + _rw]
-            _rosette_bgr = img_bgr[_ry0:_ry1, _rx0:_rx1].copy()
-            _rosette_bgr[_dilated_roi == 0] = (230, 239, 242)
-
-            _saved_rosette = crop_dense_rosette_tier4(
-                raw_image_path=image_path,
-                plant_candidates=_pid_insts,
-                plant_id=_pid,
-                output_dir=self.output_dir,
-                catalog_number=catalog_number,
-                precropped_rosette_bgr=_rosette_bgr,
-            )
-            if _saved_rosette and _rosette_mask_crop.size > 0:
-                _rmask_dst = self.rosettes_dense_dir / f"{catalog_number}_p{_pid}_rosette_mask.png"
-                _rmask_tmp = self.rosettes_dense_dir / (
-                    f".{catalog_number}_p{_pid}_rosette_mask_{os.getpid()}_{threading.get_ident()}_tmp.png"
-                )
-                cv2.imwrite(str(_rmask_tmp), _rosette_mask_crop)
-                _rmask_tmp.replace(_rmask_dst)
 
         # Compute empirical rosette crown (p_crown), 75th-percentile outer-rosette petiole metrics,
         # and piecewise flowering scape height metrics across candidate_extractions
@@ -2517,45 +2400,6 @@ class SegmentAndExtractPipeline:
                 contour_path = _export_homologized(routing_res.processed_mask, is_reflected=False)
                 inst.mask_path = str(dst_intact) if dst_intact.exists() else mask_path
                 inst.contour_path = contour_path
-
-            # Save extracted basal leaf RGB crop to data/cropped_patches/basal_leaves_raw/{catalogNumber}_leaf{leaf_id}.jpg
-            ly0, lx0, ly1, lx1 = [int(v) for v in inst.bbox]
-            ly0, ly1 = max(0, ly0), min(sheet_h, max(0, ly1))
-            lx0, lx1 = max(0, lx0), min(sheet_w, max(0, lx1))
-            if ly1 <= ly0 or lx1 <= lx0:
-                ys_m, xs_m = np.where(inst.mask > 0)
-                if len(ys_m) > 0 and len(xs_m) > 0:
-                    ly0, ly1 = max(0, int(np.min(ys_m)) + oy), min(sheet_h, int(np.max(ys_m)) + oy + 1)
-                    lx0, lx1 = max(0, int(np.min(xs_m)) + ox), min(sheet_w, int(np.max(xs_m)) + ox + 1)
-            leaf_rgb_crop = img_bgr[ly0:ly1, lx0:lx1].copy()
-            if leaf_rgb_crop.size > 0:
-                _src_lm = (
-                    routing_res.processed_mask
-                    if (
-                        getattr(routing_res, "processed_mask", None) is not None
-                        and not reflection_applied
-                        and routing_res.processed_mask.shape[:2] == inst.mask.shape[:2]
-                    )
-                    else inst.mask
-                )
-                if _src_lm is not None and _src_lm.size > 0:
-                    _ch, _cw = leaf_rgb_crop.shape[:2]
-                    _crop_mask = np.zeros((_ch, _cw), dtype=np.uint8)
-                    _mh_l, _mw_l = _src_lm.shape[:2]
-                    _iy0, _ix0 = max(ly0, oy), max(lx0, ox)
-                    _iy1, _ix1 = min(ly1, oy + _mh_l), min(lx1, ox + _mw_l)
-                    if _iy1 > _iy0 and _ix1 > _ix0:
-                        _sub_lm = ((_src_lm[_iy0 - oy : _iy1 - oy, _ix0 - ox : _ix1 - ox] > 0).astype(np.uint8)) * 255
-                        _crop_mask[_iy0 - ly0 : _iy1 - ly0, _ix0 - lx0 : _ix1 - lx0] = _sub_lm
-                    if np.any(_crop_mask > 0):
-                        _dil_lm = cv2.dilate(_crop_mask, _rosette_dilate_k, iterations=1)
-                        leaf_rgb_crop[_dil_lm == 0] = (230, 239, 242)
-                self.basal_leaves_raw_dir.mkdir(parents=True, exist_ok=True)
-                leaf_patch_path = self.basal_leaves_raw_dir / f"{catalog_number}_leaf{inst.leaf_id}.jpg"
-                try:
-                    cv2.imwrite(str(leaf_patch_path), leaf_rgb_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-                except TypeError:
-                    cv2.imwrite(str(leaf_patch_path), leaf_rgb_crop)
 
             pid_pet = by_plant_petiole.get(int(inst.plant_individual_id), petiole_scape_res)
             _inst_ar_val = inst_geom_map.get(inst.leaf_id, (0.0, 0.0, 0.0, np.nan, 1.0))[3]

@@ -103,13 +103,11 @@ packera_mclapply <- function(X, FUN, mc.cores = 1L, mc.preschedule = TRUE) {
 PACKERA_DB_LOGICAL_COLS <- c(
   "is_primary_duplicate", "is_calibrated_mm", "is_bent_stem", "is_folded",
   "is_dissected", "reflection_applied", "is_verified_anthesis",
-  "is_artifact_driven", "is_background_shortcut", "is_rock_outcrop",
-  "is_azonal_lithology", "high_coord_uncertainty_flag",
+  "is_rock_outcrop", "is_azonal_lithology", "high_coord_uncertainty_flag",
   "is_training_eligible_coord", "azonal_lithology_presence_buffer",
   "is_promoted_bronze", "is_promoted_anchor", "is_passive",
   "is_contour_outlier", "morphometric_outlier_flag", "misidentification_flag",
-  "is_cleanlab_issue", "is_label_corrupted", "vision_is_ood",
-  "tomentum_taxon_discordance", "substrate_specialist_flag",
+  "substrate_specialist_flag",
   "piedmont_outcrop_specialist_flag", "multimodal_conflict_flag",
   "is_completed_voucher", "is_type_specimen", "has_empirical_type_anchor",
   "is_typical_morphotype", "matches_type_lithology"
@@ -217,15 +215,6 @@ PACKERA_DB_WC_BIO_COLS <- c(
       )
     ))
   }
-  if (identical(table_name, "vision_xai_audit")) {
-    return(c(
-      type_status = "TEXT",
-      is_type_specimen = "INTEGER",
-      vision_type_cosine_sim = "REAL",
-      vision_nearest_type_taxon = "TEXT",
-      vision_type_margin = "REAL"
-    ))
-  }
   if (identical(table_name, "spatial_rf_predictions")) {
     return(c(
       stats::setNames(rep("REAL", length(PACKERA_DB_WC_BIO_COLS)), PACKERA_DB_WC_BIO_COLS),
@@ -305,7 +294,7 @@ PACKERA_DB_WC_BIO_COLS <- c(
 .migrate_dynamic_sqlite_schema_r <- function(conn) {
   if (is.null(conn)) return(FALSE)
   changed <- FALSE
-  for (tbl in c("run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "vision_xai_audit", "spatial_rf_predictions", "environmental_cache")) {
+  for (tbl in c("run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "environmental_cache")) {
     if (isTRUE(.migrate_dynamic_sqlite_table_r(conn, tbl))) {
       changed <- TRUE
     }
@@ -454,7 +443,7 @@ connect_packera_db <- function(
         "bio19_precip_coldest_qtr", "dissection_index", "q25_solidity",
         "dissected_leaf_fraction", "basal_leaf_count", "is_type_specimen",
         "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance",
-        "is_typical_morphotype", "vision_type_cosine_sim", "vision_nearest_type_taxon",
+        "is_typical_morphotype",
         "type_edaphic_z_score", "nearest_type_niche_taxon", "matches_type_lithology"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
@@ -1414,14 +1403,13 @@ fetch_run_master_view <- function(conn, run_id = resolve_packera_run_id()) {
 try_fetch_master_view_for_cohort <- function(
   input_paths = character(0),
   active_catalogs = NULL,
-  require_morph_or_vision = FALSE,
   run_id = NULL,
   demo = FALSE,
   vouchers_df = NULL,
   vouchers_path = NULL,
   require_step04 = FALSE,
-  require_step05 = FALSE,
-  require_step06 = FALSE
+  require_step06 = FALSE,
+  ...
 ) {
   eff_paths <- unique(c(input_paths, vouchers_path))
   eff_paths <- eff_paths[!is.na(eff_paths) & nzchar(eff_paths)]
@@ -1451,14 +1439,11 @@ try_fetch_master_view_for_cohort <- function(
 
   has_m <- ("cda_predicted_taxon" %in% names(master_df) && any(!is.na(master_df$cda_predicted_taxon))) ||
            ("PC1" %in% names(master_df) && any(!is.na(master_df$PC1)))
-  has_v <- ("vision_predicted_label" %in% names(master_df) && any(!is.na(master_df$vision_predicted_label)))
   has_s <- ("rf_predicted_taxon" %in% names(master_df) && any(!is.na(master_df$rf_predicted_taxon))) ||
            ("edaphic_best_fit_taxon" %in% names(master_df) && any(!is.na(master_df$edaphic_best_fit_taxon)))
 
   if (isTRUE(require_step04) && !has_m) return(NULL)
-  if (isTRUE(require_step05) && !has_v) return(NULL)
   if (isTRUE(require_step06) && !has_s) return(NULL)
-  if (isTRUE(require_morph_or_vision) && !has_m && !has_v) return(NULL)
   master_df
 }
 
@@ -1548,7 +1533,7 @@ persist_step07_to_sqlite <- function(
 }
 
 load_step08_merged_inputs <- function(opts, standardize_fn) {
-  in_paths <- c(opts$morphometrics, opts$harmonics, opts$vision_audit, opts$vouchers, opts$multimodal)
+  in_paths <- c(opts$morphometrics, opts$harmonics, opts$vouchers, opts$multimodal)
   active_cats <- NULL
   if (!is.null(opts$vouchers) && nzchar(opts$vouchers) && file.exists(opts$vouchers)) {
     v_tmp <- tryCatch(utils::read.csv(opts$vouchers, stringsAsFactors = FALSE), error = function(e) NULL)
@@ -1594,20 +1579,7 @@ load_step08_merged_inputs <- function(opts, standardize_fn) {
     morph_df$species_standardized <- standardize_fn(raw_sp)
     morph_df <- morph_df[!is.na(morph_df$species_standardized) & nzchar(morph_df$species_standardized) & morph_df$species_standardized != "Unknown", , drop = FALSE]
     if ("cda_predicted_taxon" %in% names(morph_df)) morph_df$cda_predicted_taxon <- standardize_fn(morph_df$cda_predicted_taxon)
-    vis_df <- NULL
-    if ("vision_predicted_label" %in% names(morph_df) && any(!is.na(morph_df$vision_predicted_label) & nzchar(as.character(morph_df$vision_predicted_label)))) {
-      vis_df <- morph_df[!is.na(morph_df$vision_predicted_label) & nzchar(as.character(morph_df$vision_predicted_label)), , drop = FALSE]
-      vis_df$vision_predicted_label <- standardize_fn(vis_df$vision_predicted_label)
-    } else if (!is.null(opts$vision_audit) && nzchar(opts$vision_audit) && file.exists(opts$vision_audit)) {
-      vis_df <- tryCatch(utils::read.csv(opts$vision_audit, stringsAsFactors = FALSE), error = function(e) NULL)
-      if (!is.null(vis_df) && nrow(vis_df) > 0) {
-        vis_sp <- if ("species_standardized" %in% names(vis_df)) vis_df$species_standardized else if ("given_label" %in% names(vis_df)) vis_df$given_label else if ("taxon" %in% names(vis_df)) vis_df$taxon else vis_df$species_raw
-        vis_df$species_standardized <- standardize_fn(vis_sp)
-        pred_col <- if ("vision_predicted_label" %in% names(vis_df)) vis_df$vision_predicted_label else if ("predicted_label" %in% names(vis_df)) vis_df$predicted_label else vis_df$species_standardized
-        vis_df$vision_predicted_label <- standardize_fn(pred_col)
-      }
-    }
-    return(list(morph_df = morph_df, vis_df = vis_df))
+    return(list(morph_df = morph_df))
   }
 
   morph_path <- opts$morphometrics
@@ -1656,15 +1628,5 @@ load_step08_merged_inputs <- function(opts, standardize_fn) {
   morph_df <- morph_df[!is.na(morph_df$species_standardized) & nzchar(morph_df$species_standardized) & morph_df$species_standardized != "Unknown", , drop = FALSE]
   if ("cda_predicted_taxon" %in% names(morph_df)) morph_df$cda_predicted_taxon <- standardize_fn(morph_df$cda_predicted_taxon)
 
-  vis_df <- NULL
-  if (!is.null(opts$vision_audit) && nzchar(opts$vision_audit) && file.exists(opts$vision_audit)) {
-    vis_df <- tryCatch(utils::read.csv(opts$vision_audit, stringsAsFactors = FALSE), error = function(e) NULL)
-    if (!is.null(vis_df) && nrow(vis_df) > 0) {
-      vis_sp <- if ("species_standardized" %in% names(vis_df)) vis_df$species_standardized else if ("given_label" %in% names(vis_df)) vis_df$given_label else if ("taxon" %in% names(vis_df)) vis_df$taxon else vis_df$species_raw
-      vis_df$species_standardized <- standardize_fn(vis_sp)
-      pred_col <- if ("vision_predicted_label" %in% names(vis_df)) vis_df$vision_predicted_label else if ("predicted_label" %in% names(vis_df)) vis_df$predicted_label else vis_df$species_standardized
-      vis_df$vision_predicted_label <- standardize_fn(pred_col)
-    }
-  }
-  list(morph_df = morph_df, vis_df = vis_df)
+  list(morph_df = morph_df)
 }

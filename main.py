@@ -16,8 +16,8 @@ Description:
                  JSON contours in extracted_leaves and CSVs.
       - morphometrics: Rscript EFA (Momocs) and GMM/CDA clustering (MorphoTools2),
                        querying extracted_leaves in batch and persisting OTUs.
-      - synthesis: Canonical Phases 5-7 (Vision XAI, Spatial RF, & Triage Dashboard),
-                   leveraging dinov2_feature_cache and v_integrative_triage_master.
+      - synthesis: Canonical Phases 6-7 (Spatial RF & Triage Dashboard),
+                   leveraging v_integrative_triage_master.
       - run-all: Executes the complete production workflow sequentially.
 
     CLI Flags & Environment Overrides:
@@ -324,7 +324,6 @@ def check_environment(args: Optional[argparse.Namespace] = None) -> bool:
     core_packages = [
         ("cv2", "OpenCV"),
         ("torch", "PyTorch"),
-        ("cleanlab", "Cleanlab"),
         ("pygbif", "pygbif"),
         ("yaml", "PyYAML"),
     ]
@@ -944,8 +943,8 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
 
 
 def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
-    """Executes Phases 5, 6, and 7: Vision XAI, Spatial Macroecology, and Synthesis Triage."""
-    logger.info("=== Starting Synthesis Workflow (Phases 5, 6, 7) ===")
+    """Executes Phases 6 and 7: Spatial Macroecology and Synthesis Triage."""
+    logger.info("=== Starting Synthesis Workflow (Phases 6, 7) ===")
     start_ts = datetime.now().astimezone().isoformat()
     run_dir, cfg = _resolve_active_run_context(args, cfg)
 
@@ -979,65 +978,11 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     vouchers_csv = Path(getattr(args, "vouchers", None) or default_vouchers)
     verify_file_exists(vouchers_csv, "curated vouchers table", "python main.py harvest")
 
-    manifest_csv = Path(
-        getattr(args, "manifest_csv", None)
-        or getattr(args, "manifest", None)
-        or (tables_dir / "extracted_leaf_manifest.csv")
-    )
     morph_flags = Path(
         getattr(args, "morphometrics_csv", None)
         or getattr(args, "morphometrics", None)
         or (tables_dir / "morphometric_flags.csv")
     )
-
-    # -------------------------------------------------------------------------
-    # Stage 5: DINOv2 Deep Vision Feature Extraction & Cleanlab XAI Audit
-    # -------------------------------------------------------------------------
-    xai_script = PROJECT_ROOT / "scripts" / "analysis" / "05_cleanlab_vision_xai.py"
-    verify_file_exists(xai_script, "Cleanlab Vision XAI script")
-
-    rosette_dir = Path(
-        getattr(args, "rosette_dir", None)
-        or ((run_dir / "data" / "cropped_patches") if run_dir is not None else "data/cropped_patches")
-    )
-    audit_csv = Path(
-        getattr(args, "vision_audit", None)
-        or (tables_dir / "label_noise_audit.csv")
-    )
-    xai_fig = Path(
-        getattr(args, "xai_plot", None)
-        or (figures_dir / "GradCAM_audit_panel.png")
-    )
-    cleanlab_thresh = getattr(args, "cleanlab_threshold", 0.85)
-
-    cmd_xai = [
-        sys.executable, str(xai_script),
-        "--rosette-dir", str(rosette_dir),
-        "--vouchers-csv", str(vouchers_csv),
-        "--manifest-csv", str(manifest_csv),
-        "--morphometrics-csv", str(morph_flags),
-        "--output-csv", str(audit_csv),
-        "--output-figure", str(xai_fig),
-        "--cleanlab-threshold", str(cleanlab_thresh),
-    ]
-    if getattr(args, "export_figures", True):
-        cmd_xai.append("--export-figures")
-    else:
-        cmd_xai.append("--no-export-figures")
-    if focal_taxon:
-        cmd_xai.extend(["--focal-taxon", focal_taxon])
-    if intraspecific_mode:
-        cmd_xai.append("--intraspecific-mode")
-    if getattr(args, "threads", None) is not None:
-        cmd_xai.extend(["--threads", str(args.threads)])
-    if getattr(args, "gpu_batch_size", None) is not None:
-        cmd_xai.extend(["--gpu-batch-size", str(args.gpu_batch_size)])
-    if getattr(args, "demo", False):
-        cmd_xai.append("--demo")
-
-    logger.info(f"Running Phase 5 Cleanlab Vision XAI: {' '.join(cmd_xai)}")
-    subprocess.run(cmd_xai, check=True)
-    verify_file_exists(audit_csv, "Cleanlab label noise audit CSV")
 
     # -------------------------------------------------------------------------
     # Stage 6: Multimodal Spatial Random Forests & Warren's Niche Identity Tests
@@ -1069,7 +1014,6 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         rscript_bin, str(spatial_rf_script),
         "--vouchers", str(vouchers_csv),
         "--morphometrics", str(morph_flags),
-        "--vision-audit", str(audit_csv),
         "--pheno-states", str(pheno_states),
         "--env-dir", str(env_dir),
         "--ssurgo-table", str(ssurgo_table),
@@ -1140,7 +1084,6 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         rscript_bin, str(triage_script),
         "--vouchers", str(vouchers_csv),
         "--morphometrics", str(morph_flags),
-        "--vision-audit", str(audit_csv),
         "--multimodal-flags", str(conflict_flags),
         "--gmm-summary", str(gmm_summary),
         "--niche-summary", str(spatial_summary),
@@ -1161,7 +1104,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
 
     if run_dir is not None:
         write_run_metadata(run_dir, start_time=start_ts)
-    logger.info("=== Synthesis Workflow (Phases 5, 6, 7) Completed Successfully ===")
+    logger.info("=== Synthesis Workflow (Phases 6, 7) Completed Successfully ===")
 
 
 def run_all(args: argparse.Namespace, cfg: PipelineConfig) -> None:
@@ -1231,7 +1174,7 @@ def _add_common_subparser_args(
             dest="gpu_batch_size",
             type=int,
             default=None,
-            help="GPU inference batch size for LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) and DINOv2 (default: stage-optimal).",
+            help="GPU inference batch size for LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) (default: stage-optimal).",
         )
         subparser.add_argument(
             "--batch-size",
@@ -1289,7 +1232,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="gpu_batch_size",
         type=int,
         default=None,
-        help="GPU inference batch size for LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) and DINOv2 (default: stage-optimal).",
+        help="GPU inference batch size for LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) (default: stage-optimal).",
     )
     parser.add_argument(
         "--batch-size",
@@ -1443,18 +1386,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_morph.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
 
     # Subcommand: synthesis
-    p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Phases 5-7: Vision XAI, Spatial RF, & Triage Dashboard")
+    p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Phases 6-7: Spatial RF & Triage Dashboard")
     _add_common_subparser_args(p_synth, include_gpu=True)
     p_synth.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
     p_synth.add_argument("--manifest", dest="manifest_csv", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_synth.add_argument("--manifest-csv", dest="manifest_csv", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    p_synth.add_argument("--rosette-dir", type=Path, default=None, help="Directory with cropped rosette patches")
     p_synth.add_argument("--morphometrics", dest="morphometrics", type=Path, default=None, help="Morphometrics flags CSV")
     p_synth.add_argument("--morphometrics-csv", dest="morphometrics", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p_synth.add_argument("--pheno-states", type=Path, default=None, help=argparse.SUPPRESS)
-    p_synth.add_argument("--vision-audit", type=Path, default=None, help="Output vision audit CSV")
-    p_synth.add_argument("--cleanlab-threshold", type=float, default=0.85, help="Cleanlab noise cutoff threshold")
-    p_synth.add_argument("--error-threshold", dest="cleanlab_threshold", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p_synth.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
     p_synth.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
     p_synth.add_argument("--env-dir", type=Path, default=None, help="Directory containing environmental rasters")
@@ -1473,7 +1412,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_synth.add_argument("--output-queue", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--synthesis-plot", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--synthesis-report", type=Path, default=None, help=argparse.SUPPRESS)
-    p_synth.add_argument("--xai-plot", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")
     p_synth.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
 
@@ -1555,9 +1493,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--harmonics", type=int, default=None, help="Number of Fourier harmonics (k)")
     p_all.add_argument("--num-pcs", type=int, default=None, help="Number of PCA dimensions")
     p_all.add_argument("--max-k", type=int, default=None, help="Max GMM mixture components")
-    p_all.add_argument("--rosette-dir", type=Path, default=None, help="Directory with cropped rosette patches")
-    p_all.add_argument("--cleanlab-threshold", type=float, default=0.85, help="Cleanlab noise cutoff threshold")
-    p_all.add_argument("--error-threshold", dest="cleanlab_threshold", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p_all.add_argument("--ssurgo-batch-size", type=int, default=None, help="Batch size for USDA SDA SSURGO queries")
     p_all.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
     p_all.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")

@@ -193,11 +193,10 @@ def _build_master_view_ddl() -> str:
         v.identifiedBy AS identifiedBy,
         v.determiner_raw AS determiner_raw,
         COALESCE(rac.determiner_tier, om.determiner_tier, v.determiner_tier) AS determiner_tier,
-        COALESCE(rac.type_status, v.type_status, om.type_status, vx.type_status) AS type_status,
+        COALESCE(rac.type_status, v.type_status, om.type_status) AS type_status,
         COALESCE(
             rac.is_type_specimen,
             om.is_type_specimen,
-            vx.is_type_specimen,
             CASE
                 WHEN COALESCE(rac.type_status, v.type_status, '') != ''
                  AND UPPER(TRIM(COALESCE(rac.type_status, v.type_status, ''))) NOT IN ('NONE', 'NOT A TYPE', 'NOTATYPE', 'NON-TYPE', 'NONTYPE', 'UNSPECIFIED', 'NULL', 'NAN', 'NA', 'N/A', 'FALSE', '0', 'UNKNOWN')
@@ -317,30 +316,6 @@ def _build_master_view_ddl() -> str:
         om.nearest_type_morph_taxon AS nearest_type_morph_taxon,
         om.type_morph_concordance AS type_morph_concordance,
         om.is_typical_morphotype AS is_typical_morphotype,
-        -- Step 05 Vision XAI & Cleanlab Audit
-        COALESCE(vx.vision_predicted_label, vx.predicted_label) AS vision_predicted_label,
-        COALESCE(vx.predicted_label, vx.vision_predicted_label) AS predicted_label,
-        vx.confidence_given_class AS confidence_given_class,
-        vx.confidence_predicted_class AS confidence_predicted_class,
-        vx.vision_second_prob AS vision_second_prob,
-        vx.vision_margin AS vision_margin,
-        vx.label_quality_score AS label_quality_score,
-        vx.c_error AS c_error,
-        vx.is_cleanlab_issue AS is_cleanlab_issue,
-        vx.is_label_corrupted AS is_label_corrupted,
-        vx.vision_ood_score AS vision_ood_score,
-        vx.vision_is_ood AS vision_is_ood,
-        vx.foreground_attention_ratio AS foreground_attention_ratio,
-        vx.is_artifact_driven AS is_artifact_driven,
-        vx.is_background_shortcut AS is_background_shortcut,
-        vx.surface_orientation AS surface_orientation,
-        vx.mean_luminance AS mean_luminance,
-        vx.mean_saturation AS mean_saturation,
-        vx.high_brightness_ratio AS high_brightness_ratio,
-        vx.tomentum_taxon_discordance AS tomentum_taxon_discordance,
-        vx.vision_type_cosine_sim AS vision_type_cosine_sim,
-        vx.vision_nearest_type_taxon AS vision_nearest_type_taxon,
-        vx.vision_type_margin AS vision_type_margin,
         -- Step 06 Spatial RF & Hopkins Phenology
         COALESCE(srf.lat_lon_key, ec.lat_lon_key) AS lat_lon_key,
         srf.rf_predicted_taxon AS rf_predicted_taxon,
@@ -412,10 +387,6 @@ def _build_master_view_ddl() -> str:
         ON om.run_id = rac.run_id
        AND om.catalogNumber = rac.catalogNumber
        AND om.plant_individual_id = rac.plant_individual_id
-    LEFT JOIN vision_xai_audit vx
-        ON vx.run_id = rac.run_id
-       AND vx.catalogNumber = rac.catalogNumber
-       AND vx.plant_individual_id = rac.plant_individual_id
     LEFT JOIN spatial_rf_predictions srf
         ON srf.run_id = rac.run_id
        AND srf.catalogNumber = rac.catalogNumber
@@ -608,25 +579,6 @@ def _build_schema_ddl() -> str:
             REFERENCES plant_individuals(catalogNumber, plant_individual_id) ON DELETE CASCADE
     );
 
-    CREATE TABLE IF NOT EXISTS dinov2_feature_cache (
-        catalogNumber TEXT NOT NULL,
-        plant_individual_id INTEGER NOT NULL DEFAULT 0,
-        model_name TEXT NOT NULL,
-        sigma REAL NOT NULL,
-        patch_sha256 TEXT,
-        embedding_json TEXT NOT NULL,
-        foreground_attention_ratio REAL,
-        is_artifact_driven INTEGER,
-        surface_orientation TEXT,
-        mean_luminance REAL,
-        mean_saturation REAL,
-        high_brightness_ratio REAL,
-        PRIMARY KEY (catalogNumber, plant_individual_id, model_name, sigma)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_dinov2_cache_lookup
-        ON dinov2_feature_cache(model_name, sigma, catalogNumber, plant_individual_id);
-
     CREATE TABLE IF NOT EXISTS environmental_cache (
         {env_ddl}
     );
@@ -807,43 +759,6 @@ def _build_schema_ddl() -> str:
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
 
-    CREATE TABLE IF NOT EXISTS vision_xai_audit (
-        run_id TEXT NOT NULL,
-        catalogNumber TEXT NOT NULL,
-        plant_individual_id INTEGER NOT NULL DEFAULT 0,
-        patch_path TEXT,
-        given_label TEXT,
-        vision_predicted_label TEXT,
-        predicted_label TEXT,
-        confidence_given_class REAL,
-        confidence_predicted_class REAL,
-        vision_second_prob REAL,
-        vision_margin REAL,
-        label_quality_score REAL,
-        c_error REAL,
-        is_cleanlab_issue INTEGER,
-        is_label_corrupted INTEGER,
-        vision_ood_score REAL,
-        vision_is_ood INTEGER,
-        foreground_attention_ratio REAL,
-        is_artifact_driven INTEGER,
-        is_background_shortcut INTEGER,
-        surface_orientation TEXT,
-        mean_luminance REAL,
-        mean_saturation REAL,
-        high_brightness_ratio REAL,
-        tomentum_taxon_discordance INTEGER,
-        type_status TEXT,
-        is_type_specimen INTEGER DEFAULT 0,
-        vision_type_cosine_sim REAL,
-        vision_nearest_type_taxon TEXT,
-        vision_type_margin REAL,
-        triage_action TEXT,
-        discordance_reason TEXT,
-        PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
-        FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
-    );
-
     CREATE TABLE IF NOT EXISTS spatial_rf_predictions (
         run_id TEXT NOT NULL,
         catalogNumber TEXT NOT NULL,
@@ -958,13 +873,6 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("is_typical_morphotype", "INTEGER"),
         ]
     ),
-    "vision_xai_audit": (
-        ("type_status", "TEXT"),
-        ("is_type_specimen", "INTEGER DEFAULT 0"),
-        ("vision_type_cosine_sim", "REAL"),
-        ("vision_nearest_type_taxon", "TEXT"),
-        ("vision_type_margin", "REAL"),
-    ),
     "spatial_rf_predictions": tuple(
         [
             *((col, "REAL") for col in WC_BIO_COLUMNS),
@@ -997,7 +905,6 @@ _MASTER_VIEW_REQUIRED_TABLES: Tuple[str, ...] = (
     "plant_individuals",
     "voucher_reproductive_phenology",
     "otu_morphometrics",
-    "vision_xai_audit",
     "spatial_rf_predictions",
     "environmental_cache",
     "curation_triage",
@@ -1098,7 +1005,6 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
         required_objs = set(_MASTER_VIEW_REQUIRED_TABLES) | {
             "taxon_synonyms",
             "extracted_leaves",
-            "dinov2_feature_cache",
             "pipeline_runs",
             "leaf_efa_harmonics",
             "v_integrative_triage_master",

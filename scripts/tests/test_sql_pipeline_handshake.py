@@ -15,10 +15,7 @@ Description:
          `extracted_leaf_manifest.csv`, and 120-vertex contours into
          `extracted_leaves`, followed by Step 03 EFA execution with zero
          filesystem `.csv` contour files.
-      3. `dinov2_feature_cache` hit/miss & SHA-256 invalidation behavior in
-         `05_cleanlab_vision_xai.py` (confirming zero redundant model loads or
-         forward passes on cache hit, and zero DB writes under `--demo`).
-      4. Multi-plant sheet preservation `(catalogNumber, plant_individual_id)`
+      3. Multi-plant sheet preservation `(catalogNumber, plant_individual_id)`
          and non-georeferenced historic voucher retention across
          `v_integrative_triage_master`, Step 06, and Step 07.
 ===============================================================================
@@ -39,11 +36,8 @@ import sys
 import tempfile
 from typing import Any, Dict, List, Tuple
 import unittest
-from unittest.mock import patch
 
 import numpy as np
-from PIL import Image
-import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -52,28 +46,16 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts.core.db import (
     DEFAULT_SQLITE_REL_PATH,
     ensure_pipeline_run,
-    fetch_cached_dinov2_features,
     get_db_connection,
     get_duckdb_connection,
     ingest_existing_csvs_to_db,
-    persist_vision_xai_audit,
     populate_run_active_cohort,
     query_environmental_bbox,
     resolve_db_path,
-    store_dinov2_features_cache,
     upsert_environmental_cache_records,
     upsert_rows_generic,
     upsert_vouchers_records,
 )
-
-
-def _load_step05_module():
-    script_path = PROJECT_ROOT / "scripts" / "analysis" / "05_cleanlab_vision_xai.py"
-    spec = importlib.util.spec_from_file_location("step05_cleanlab_sql_test", script_path)
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _make_closed_leaf_contour(
@@ -93,29 +75,6 @@ def _make_closed_leaf_contour(
         y = 220.0 + ry * r_mod * width_scale * math.sin(theta)
         pts.append((round(x, 4), round(y, 4)))
     return pts
-
-
-class _CountingFakeDINOv2(torch.nn.Module):
-    """Deterministic fake DINOv2 module counting `forward_features` invocations."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.forward_calls = 0
-        self.batch_sizes: List[int] = []
-
-    def forward_features(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        self.forward_calls += 1
-        b = int(x.shape[0])
-        self.batch_sizes.append(b)
-        # Deterministic spatial patch tokens (B, 256, 768) derived from input pixels
-        pooled_16 = torch.nn.functional.adaptive_avg_pool2d(x.float(), (16, 16))  # (B, 3, 16, 16)
-        flat_rgb = pooled_16.flatten(2).transpose(1, 2)  # (B, 256, 3)
-        patch_tokens = flat_rgb.repeat(1, 1, 256)  # (B, 256, 768)
-        cls_token = patch_tokens.mean(dim=1)  # (B, 768)
-        return {
-            "x_norm_patchtokens": patch_tokens,
-            "x_norm_clstoken": cls_token,
-        }
 
 
 class TestSQLPipelineHandshake(unittest.TestCase):
@@ -145,14 +104,12 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                     "plant_individuals",
                     "extracted_leaves",
                     "voucher_reproductive_phenology",
-                    "dinov2_feature_cache",
                     "environmental_cache",
                     "environmental_rtree",
                     "pipeline_runs",
                     "run_active_cohort",
                     "leaf_efa_harmonics",
                     "otu_morphometrics",
-                    "vision_xai_audit",
                     "spatial_rf_predictions",
                     "curation_triage",
                 }
@@ -464,173 +421,6 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             finally:
                 conn.close()
 
-    def test_dinov2_feature_cache_hit_miss_and_demo_isolation(self) -> None:
-        """Verify Step 05 dinov2_feature_cache hit/miss, SHA-256 invalidation, and --demo isolation."""
-        step05 = _load_step05_module()
-
-        with tempfile.TemporaryDirectory() as tmp_d:
-            tmp_dir = Path(tmp_d)
-            db_path = tmp_dir / "vision_cache.sqlite"
-            demo_db_path = tmp_dir / "demo_vision.sqlite"
-            patches_dir = tmp_dir / "basal_leaves_raw"
-            masks_dir = tmp_dir / "tier1_intact"
-            patches_dir.mkdir(parents=True, exist_ok=True)
-            masks_dir.mkdir(parents=True, exist_ok=True)
-
-            # Seed parent vouchers + multi-plant individuals in SQLite
-            conn = get_db_connection(db_path=db_path, init_schema=True)
-            try:
-                upsert_vouchers_records(
-                    conn,
-                    [{"catalogNumber": "NCU-VIS-01", "scientificName": "Packera aurea"}],
-                )
-                with conn:
-                    conn.execute(
-                        "INSERT INTO plant_individuals (catalogNumber, plant_individual_id) VALUES ('NCU-VIS-01', 0);"
-                    )
-                    conn.execute(
-                        "INSERT INTO plant_individuals (catalogNumber, plant_individual_id) VALUES ('NCU-VIS-01', 1);"
-                    )
-            finally:
-                conn.close()
-
-            records: List[Dict[str, Any]] = []
-            for pid, rgb in ((0, (70, 125, 65)), (1, (95, 140, 80))):
-                p_img = patches_dir / f"NCU-VIS-01_p{pid}_leaf1.jpg"
-                p_msk = masks_dir / f"NCU-VIS-01_p{pid}_leaf1.png"
-                arr = np.full((96, 96, 3), [242, 239, 230], dtype=np.uint8)
-                arr[16:80, 16:80] = rgb
-                Image.fromarray(arr, mode="RGB").save(p_img, quality=95)
-
-                m_arr = np.zeros((96, 96), dtype=np.uint8)
-                m_arr[16:80, 16:80] = 255
-                Image.fromarray(m_arr, mode="L").save(p_msk)
-
-                records.append(
-                    {
-                        "catalogNumber": "NCU-VIS-01",
-                        "plant_individual_id": pid,
-                        "label_idx": pid,
-                        "patch_path": str(p_img),
-                        "mask_path": str(p_msk),
-                        "tier1_leaf_patches": [str(p_img)],
-                        "tier1_leaf_masks": [str(p_msk)],
-                        "tier1_leaf_weights": [1.0],
-                        "surface_orientation": "adaxial",
-                        "mean_luminance": 48.5 + pid,
-                        "mean_saturation": 0.35,
-                        "high_brightness_ratio": 0.04,
-                    }
-                )
-
-            # 1. Cache MISS: first call invokes fake DINOv2 once and populates dinov2_feature_cache
-            fake_model = _CountingFakeDINOv2()
-            with patch.object(step05.torch.hub, "load", return_value=fake_model) as mock_hub:
-                feats_1, labels_1, order_1, fg_1 = step05.extract_dinov2_embeddings(
-                    records,
-                    model_name="dinov2_vitb14_reg",
-                    device="cpu",
-                    batch_size=8,
-                    demo=False,
-                    return_fg_ratios=True,
-                    db_path=db_path,
-                    sigma=1.0,
-                )
-            self.assertEqual(mock_hub.call_count, 1)
-            self.assertEqual(fake_model.forward_calls, 1)
-            self.assertEqual(fake_model.batch_sizes, [2])
-            self.assertEqual(feats_1.shape, (2, 768))
-            self.assertEqual(order_1, [("NCU-VIS-01", 0), ("NCU-VIS-01", 1)])
-            self.assertTrue(np.all(np.isfinite(fg_1)))
-
-            conn_ro = get_db_connection(db_path=db_path, read_only=True)
-            try:
-                n_cached = conn_ro.execute("SELECT COUNT(*) FROM dinov2_feature_cache;").fetchone()[0]
-                self.assertEqual(int(n_cached), 2)
-                cached_map = fetch_cached_dinov2_features(
-                    conn_ro,
-                    [("NCU-VIS-01", 0, None), ("NCU-VIS-01", 1, None)],
-                    model_name="dinov2_vitb14_reg",
-                    sigma=1.0,
-                )
-                self.assertEqual(len(cached_map), 2)
-                self.assertEqual(len(cached_map[("NCU-VIS-01", 0)]["embedding"]), 768)
-            finally:
-                conn_ro.close()
-
-            # 2. Full Cache HIT: patching torch.hub.load to raise proves zero model loads & zero forward passes
-            with patch.object(
-                step05.torch.hub,
-                "load",
-                side_effect=AssertionError("DINOv2 model must NOT be loaded when all specimens hit SQLite cache!"),
-            ):
-                feats_2, labels_2, order_2, fg_2 = step05.extract_dinov2_embeddings(
-                    records,
-                    model_name="dinov2_vitb14_reg",
-                    device="cpu",
-                    batch_size=8,
-                    demo=False,
-                    return_fg_ratios=True,
-                    db_path=db_path,
-                    sigma=1.0,
-                )
-            self.assertEqual(order_2, order_1)
-            np.testing.assert_array_equal(labels_2, labels_1)
-            np.testing.assert_allclose(feats_2, feats_1, atol=1e-5)
-            np.testing.assert_allclose(fg_2, fg_1, atol=1e-5)
-
-            # 3. Partial SHA-256 invalidation: modifying pid=1 image re-runs strictly batch_size == 1
-            p_img_pid1 = Path(records[1]["patch_path"])
-            arr_mod = np.full((96, 96, 3), [242, 239, 230], dtype=np.uint8)
-            arr_mod[16:80, 16:80] = (140, 90, 50)
-            Image.fromarray(arr_mod, mode="RGB").save(p_img_pid1, quality=95)
-
-            fake_model_partial = _CountingFakeDINOv2()
-            with patch.object(step05.torch.hub, "load", return_value=fake_model_partial):
-                feats_3, _, _, _ = step05.extract_dinov2_embeddings(
-                    records,
-                    model_name="dinov2_vitb14_reg",
-                    device="cpu",
-                    batch_size=8,
-                    demo=False,
-                    return_fg_ratios=True,
-                    db_path=db_path,
-                    sigma=1.0,
-                )
-            self.assertEqual(fake_model_partial.forward_calls, 1)
-            self.assertEqual(fake_model_partial.batch_sizes, [1])
-            np.testing.assert_allclose(feats_3[0], feats_1[0], atol=1e-5)
-
-            # 4. --demo isolation: never persists synthetic embeddings or audit rows into SQLite
-            conn_demo = get_db_connection(db_path=demo_db_path, init_schema=True)
-            try:
-                n_store = store_dinov2_features_cache(
-                    conn_demo,
-                    [{"catalogNumber": "X", "embedding": [0.1] * 768}],
-                    model_name="dinov2_vitb14_reg",
-                    sigma=1.0,
-                    demo=True,
-                )
-                n_audit = persist_vision_xai_audit(conn_demo, "demo_run", [{"catalogNumber": "X"}], demo=True)
-                self.assertEqual(n_store, 0)
-                self.assertEqual(n_audit, 0)
-            finally:
-                conn_demo.close()
-
-            with patch.object(step05.torch.hub, "load", side_effect=RuntimeError("offline")):
-                _ = step05.extract_dinov2_embeddings(
-                    records,
-                    device="cpu",
-                    demo=True,
-                    db_path=demo_db_path,
-                )
-            conn_demo_ro = get_db_connection(db_path=demo_db_path, read_only=True)
-            try:
-                cnt_demo = conn_demo_ro.execute("SELECT COUNT(*) FROM dinov2_feature_cache;").fetchone()[0]
-                self.assertEqual(int(cnt_demo), 0)
-            finally:
-                conn_demo_ro.close()
-
     def test_multi_plant_and_non_georeferenced_retention_across_step06_and_step07(self) -> None:
         """Verify multi-plant (catalogNumber, plant_individual_id) & non-georeferenced retention across Step 06, Step 07, and v_integrative_triage_master."""
         rscript_bin = shutil.which("Rscript")
@@ -792,7 +582,6 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 self.assertEqual(n_coh, 13)
 
                 otu_rows: List[Dict[str, Any]] = []
-                vis_rows: List[Dict[str, Any]] = []
                 env_rows: List[Dict[str, Any]] = []
                 v_by_cat = {r["catalogNumber"]: r for r in voucher_specs}
 
@@ -826,32 +615,6 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                             "mahalanobis_d2": 1.4 if given_sp == true_sp else 14.2,
                             "morphometric_outlier_flag": 0 if given_sp == true_sp else 1,
                             "misidentification_flag": 0 if given_sp == true_sp else 1,
-                        }
-                    )
-                    vis_rows.append(
-                        {
-                            "catalogNumber": cat,
-                            "plant_individual_id": pid,
-                            "given_label": given_sp,
-                            "predicted_label": true_sp,
-                            "vision_predicted_label": true_sp,
-                            "vision_predicted_prob": 0.93,
-                            "vision_second_taxon": second_sp,
-                            "vision_second_prob": 0.07,
-                            "vision_margin": 0.86,
-                            "self_confidence": 0.93 if given_sp == true_sp else 0.07,
-                            "c_error": 0.07 if given_sp == true_sp else 0.93,
-                            "is_cleanlab_issue": given_sp != true_sp,
-                            "is_label_corrupted": given_sp != true_sp,
-                            "vision_ood_score": 0.22,
-                            "vision_is_ood": False,
-                            "foreground_attention_ratio": 0.89,
-                            "is_artifact_driven": False,
-                            "is_background_shortcut": False,
-                            "surface_orientation": "adaxial",
-                            "mean_luminance": 51.0,
-                            "mean_saturation": 0.34,
-                            "tomentum_taxon_discordance": False,
                         }
                     )
                     v_rec = v_by_cat[cat]
@@ -890,26 +653,20 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                         )
 
                 upsert_rows_generic(conn, "otu_morphometrics", otu_rows, ("run_id", "catalogNumber", "plant_individual_id"))
-                persist_vision_xai_audit(conn, run_id, vis_rows, demo=False)
                 upsert_environmental_cache_records(conn, env_rows, demo=False)
 
-                # Export morphometric_flags.csv & label_noise_audit.csv snapshots for Step 06 CLI
+                # Export morphometric_flags.csv snapshot for Step 06 CLI
                 morph_csv = tables_dir / "morphometric_flags.csv"
-                audit_csv = tables_dir / "label_noise_audit.csv"
                 with open(morph_csv, "w", encoding="utf-8", newline="") as mf:
                     mw = csv.DictWriter(mf, fieldnames=list(otu_rows[0].keys()))
                     mw.writeheader()
                     mw.writerows(otu_rows)
-                with open(audit_csv, "w", encoding="utf-8", newline="") as af:
-                    aw = csv.DictWriter(af, fieldnames=list(vis_rows[0].keys()))
-                    aw.writeheader()
-                    aw.writerows(vis_rows)
 
                 # Verify v_integrative_triage_master already exposes all 13 specimen rows prior to Step 06/07
                 view_rows_pre = conn.execute(
                     """
                     SELECT catalogNumber, plant_individual_id, cda_predicted_taxon,
-                           vision_predicted_label, fine_soil_ph
+                           fine_soil_ph
                     FROM v_integrative_triage_master
                     WHERE run_id = ?
                     ORDER BY catalogNumber, plant_individual_id;
@@ -921,7 +678,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 self.assertEqual(pre_by_key[("MULTI-001", 0)]["cda_predicted_taxon"], "Packera aurea")
                 self.assertEqual(pre_by_key[("MULTI-001", 1)]["cda_predicted_taxon"], "Packera obovata")
                 self.assertIn(("HIST-NOGEO-99", 0), pre_by_key)
-                self.assertEqual(pre_by_key[("HIST-NOGEO-99", 0)]["vision_predicted_label"], "Packera obovata")
+                self.assertEqual(pre_by_key[("HIST-NOGEO-99", 0)]["cda_predicted_taxon"], "Packera obovata")
                 self.assertIsNone(pre_by_key[("HIST-NOGEO-99", 0)]["fine_soil_ph"])
             finally:
                 conn.close()
@@ -939,7 +696,6 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 str(PROJECT_ROOT / "scripts" / "analysis" / "06_multimodal_spatial_rf.R"),
                 "--vouchers", str(vouchers_csv),
                 "--morphometrics", str(tables_dir / "morphometric_flags.csv"),
-                "--vision-audit", str(tables_dir / "label_noise_audit.csv"),
                 "--env-dir", str(env_dir),
                 "--ssurgo-table", str(tables_dir / "ssurgo_edaphic_validation.csv"),
                 "--contingency-table", str(reports_dir / "micro_edaphic_outcrop_contingency.csv"),
@@ -957,10 +713,9 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             self.assertTrue(conflict_csv.is_file())
 
             # Execute Step 07 synthesis reading from SQLite v_integrative_triage_master
-            # Remove intermediate CSVs (morphometric_flags, label_noise_audit, multimodal_conflict_flags)
-            # to prove Step 07 hydrates all 3 upstream evidence streams directly from SQLite!
+            # Remove intermediate CSVs (morphometric_flags, multimodal_conflict_flags)
+            # to prove Step 07 hydrates all upstream evidence streams directly from SQLite!
             (tables_dir / "morphometric_flags.csv").unlink()
-            (tables_dir / "label_noise_audit.csv").unlink()
             conflict_csv.unlink()
 
             triage_queue_csv = tables_dir / "triage_queue.csv"
@@ -973,7 +728,6 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 str(PROJECT_ROOT / "scripts" / "analysis" / "07_triage_dashboard_synthesis.R"),
                 "--vouchers", str(vouchers_csv),
                 "--morphometrics", str(tables_dir / "morphometric_flags.csv"),
-                "--vision-audit", str(tables_dir / "label_noise_audit.csv"),
                 "--multimodal-flags", str(conflict_csv),
                 "--niche-summary", str(srf_summary_csv),
                 "--output-queue", str(triage_queue_csv),

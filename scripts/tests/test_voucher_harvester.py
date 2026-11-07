@@ -1839,7 +1839,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             self.assertIsNone(parsed_all_empty.taxa)
 
     def test_cross_stage_cli_table_handoffs_in_main_and_run_pipeline(self):
-        """Verify main.py and run_pipeline.sh wire all cross-stage CLI table handoffs across Steps 04, 05, 06, 07, and 08."""
+        """Verify main.py and run_pipeline.sh wire all cross-stage CLI table handoffs across Steps 04, 06, 07, and 08."""
         import os
         import subprocess
         import main as root_main
@@ -1887,7 +1887,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             self.assertEqual(_arg_value(cmd_step04, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step04)
 
-            # 2. Verify Step 05, Step 06, and Step 07 handoffs in main.run_synthesis()
+            # 2. Verify Step 06 and Step 07 handoffs in main.run_synthesis()
             synth_args = parser.parse_args([
                 "synthesis",
                 "--focal-taxon", "Packera aurea",
@@ -1898,17 +1898,9 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                  patch.object(root_main, "verify_file_exists"), \
                  patch.object(root_main.subprocess, "run") as mock_synth_sub:
                 root_main.run_synthesis(synth_args, cfg_scoped)
-                self.assertEqual(mock_synth_sub.call_count, 3)
-                cmd_step05 = mock_synth_sub.call_args_list[0][0][0]
-                cmd_step06 = mock_synth_sub.call_args_list[1][0][0]
-                cmd_step07 = mock_synth_sub.call_args_list[2][0][0]
-
-            # Step 05 assertions
-            self.assertTrue(any("05_cleanlab_vision_xai.py" in tok for tok in cmd_step05))
-            self.assertEqual(_arg_value(cmd_step05, "--manifest-csv"), str(tables_dir / "extracted_leaf_manifest.csv"))
-            self.assertEqual(_arg_value(cmd_step05, "--morphometrics-csv"), str(tables_dir / "morphometric_flags.csv"))
-            self.assertEqual(_arg_value(cmd_step05, "--focal-taxon"), "Packera aurea")
-            self.assertIn("--intraspecific-mode", cmd_step05)
+                self.assertEqual(mock_synth_sub.call_count, 2)
+                cmd_step06 = mock_synth_sub.call_args_list[0][0][0]
+                cmd_step07 = mock_synth_sub.call_args_list[1][0][0]
 
             # Step 06 assertions
             self.assertTrue(any("06_multimodal_spatial_rf.R" in tok for tok in cmd_step06))
@@ -1926,22 +1918,16 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             self.assertEqual(_arg_value(cmd_step07, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step07)
 
-        # 3. Verify run_pipeline.sh Step 05 --manifest-csv handoff and Step 08 ordering + --multimodal handoff
+        # 3. Verify run_pipeline.sh Step 08 ordering + --multimodal handoff
         run_sh = Path(__file__).resolve().parents[2] / "run_pipeline.sh"
         sh_text = run_sh.read_text(encoding="utf-8")
 
-        pos_step05 = sh_text.index("scripts/analysis/05_cleanlab_vision_xai.py")
         pos_step06 = sh_text.index("scripts/analysis/06_multimodal_spatial_rf.R")
         pos_step08 = sh_text.index("scripts/analysis/08_discover_taxon_complexes.R")
         pos_step07 = sh_text.index("scripts/analysis/07_triage_dashboard_synthesis.R")
 
-        self.assertLess(pos_step05, pos_step06, "Step 05 must run before Step 06 in run_pipeline.sh")
         self.assertLess(pos_step06, pos_step08, "Step 08 must run AFTER Step 06 completes in run_pipeline.sh")
         self.assertLess(pos_step08, pos_step07, "Step 08 must run before Step 07 synthesis in run_pipeline.sh")
-
-        step05_block = sh_text[pos_step05:pos_step06]
-        self.assertIn('--manifest-csv "${RUN_DIR}/data/tables/extracted_leaf_manifest.csv"', step05_block)
-        self.assertIn('--morphometrics-csv "${RUN_DIR}/data/tables/morphometric_flags.csv"', step05_block)
 
         step08_block = sh_text[pos_step08:pos_step07]
         self.assertIn('--multimodal "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv"', step08_block)

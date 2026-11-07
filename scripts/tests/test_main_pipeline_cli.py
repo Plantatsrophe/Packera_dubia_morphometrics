@@ -75,12 +75,10 @@ class TestMainPipelineCLI(unittest.TestCase):
         # synthesis
         args_synth = parser.parse_args([
             "synthesis",
-            "--cleanlab-threshold", "0.90",
             "--no-export-figures",
             "--permutations", "50",
         ])
         self.assertEqual(args_synth.subcommand, "synthesis")
-        self.assertEqual(args_synth.cleanlab_threshold, 0.90)
         self.assertFalse(args_synth.export_figures)
         self.assertEqual(args_synth.permutations, 50)
 
@@ -490,7 +488,7 @@ class TestMainPipelineCLI(unittest.TestCase):
             tables_dir = run_dir / "data" / "tables"
             tables_dir.mkdir(parents=True, exist_ok=True)
 
-            for sub in ("rosettes_dense", "basal_leaves_raw", "capitula"):
+            for sub in ("capitula",):
                 pdir = root_data / "cropped_patches" / sub
                 pdir.mkdir(parents=True, exist_ok=True)
 
@@ -514,13 +512,7 @@ class TestMainPipelineCLI(unittest.TestCase):
                     "plant_individual_id": [0, 0, 0, 0],
                 }).to_csv(tables_dir / tbl_name, index=False)
 
-            # Create cropped patches for Gold, Silver, and Bronze vouchers (including underscored catalogNumber)
-            (root_data / "cropped_patches" / "rosettes_dense" / "NCU001_p0_rosette.jpg").write_bytes(b"jpg")
-            (root_data / "cropped_patches" / "rosettes_dense" / "UNCC_49308_p0_rosette.jpg").write_bytes(b"jpg")
-            (root_data / "cropped_patches" / "rosettes_dense" / "US002_p0_rosette.jpg").write_bytes(b"jpg")
-            (root_data / "cropped_patches" / "basal_leaves_raw" / "NCU001_leaf1.jpg").write_bytes(b"jpg")
-            (root_data / "cropped_patches" / "basal_leaves_raw" / "UNCC_49308_leaf2.jpg").write_bytes(b"jpg")
-            (root_data / "cropped_patches" / "basal_leaves_raw" / "NY003_leaf1.jpg").write_bytes(b"jpg")
+            # Create cropped capitula patches for Gold and Silver vouchers
             (root_data / "cropped_patches" / "capitula" / "NCU001_cap1.jpg").write_bytes(b"jpg")
             (root_data / "cropped_patches" / "capitula" / "US002_cap1.jpg").write_bytes(b"jpg")
 
@@ -562,7 +554,7 @@ REUSE_CANONICAL_DATA="true"
                 tdf = pd.read_csv(tables_dir / tbl_name)
                 self.assertEqual(set(tdf["catalogNumber"]), {"NCU001", "UNCC_49308"}, f"Failed filter on {tbl_name}")
 
-            for sub in ("rosettes_dense", "basal_leaves_raw", "capitula"):
+            for sub in ("capitula",):
                 link_p = run_dir / "data" / "cropped_patches" / sub
                 self.assertTrue(link_p.is_symlink(), f"Expected directory-level symlink for {sub}")
                 self.assertEqual(link_p.resolve(), (root_data / "cropped_patches" / sub).resolve())
@@ -652,7 +644,7 @@ START_STEP=3
             run_dir = tmp_path / "runs" / "test_sqlite_taxa_sync"
             tables_dir = run_dir / "data" / "tables"
             tables_dir.mkdir(parents=True, exist_ok=True)
-            for sub in ("rosettes_dense", "basal_leaves_raw", "capitula"):
+            for sub in ("capitula",):
                 (root_data / "cropped_patches" / sub).mkdir(parents=True, exist_ok=True)
 
             # Stale CSV snapshot lacking Packera obovata
@@ -748,12 +740,11 @@ START_STEP=3
                     ],
                 }).to_csv(run_b_rep / "final_curation_triage.csv", index=False)
 
-                for sub in ("rosettes_dense", "basal_leaves_raw", "capitula"):
+                for sub in ("capitula",):
                     pdir = root_data / "cropped_patches" / sub
                     pdir.mkdir(parents=True, exist_ok=True)
                     for c in all_cats:
-                        suffix = "p0_rosette.jpg" if sub == "rosettes_dense" else ("leaf1.jpg" if sub == "basal_leaves_raw" else "cap1.jpg")
-                        (pdir / f"{c}_{suffix}").write_bytes(b"jpg")
+                        (pdir / f"{c}_cap1.jpg").write_bytes(b"jpg")
 
                 pd.DataFrame({
                     "catalogNumber": all_cats,
@@ -808,7 +799,7 @@ REUSE_CANONICAL_DATA="true"
                     tdf = pd.read_csv(tables_dir / tbl_name)
                     self.assertEqual(set(tdf["catalogNumber"]), expected_keep, f"Failed filter on {tbl_name} in {mode}")
 
-                for sub in ("rosettes_dense", "basal_leaves_raw", "capitula"):
+                for sub in ("capitula",):
                     link_p = run_dir / "data" / "cropped_patches" / sub
                     self.assertTrue(link_p.is_symlink(), f"Expected directory-level symlink for {sub}")
                     self.assertEqual(link_p.resolve(), (root_data / "cropped_patches" / sub).resolve())
@@ -917,7 +908,7 @@ REUSE_CANONICAL_DATA="false"
             self.assertEqual(resolve_cpu_threads(2, default=4), 2)
             self.assertEqual(resolve_gpu_batch_size(8, default=16), 8)
 
-        # Verify 01_voucher_harvester.py, 02_segment_and_extract.py, and 05_cleanlab_vision_xai.py CLI parsers
+        # Verify 01_voucher_harvester.py and 02_segment_and_extract.py CLI parsers
         fake_mods = {
             k: MagicMock()
             for k in (
@@ -927,7 +918,7 @@ REUSE_CANONICAL_DATA="false"
                 "sklearn.calibration", "sklearn.model_selection", "sklearn.metrics",
                 "sklearn.preprocessing",
                 "matplotlib", "matplotlib.pyplot", "matplotlib.patches", "matplotlib.gridspec",
-                "pygbif", "aiohttp", "tqdm", "cleanlab", "cleanlab.filter",
+                "pygbif", "aiohttp", "tqdm",
                 "torch", "torch.nn", "torch.nn.functional", "torch.utils", "torch.utils.data",
                 "torchvision", "torchvision.transforms",
             )
@@ -952,27 +943,6 @@ REUSE_CANONICAL_DATA="false"
                 self.assertEqual(p02.gpu_batch_size, 20)
                 self.assertTrue(p02.enable_geometric_qc)
 
-            mod_05 = importlib.import_module("scripts.analysis.05_cleanlab_vision_xai")
-            p05 = mod_05.parse_args(["-j", "10", "--gpu-batch-size", "12", "--cleanlab-threshold", "0.88"])
-            self.assertEqual(p05.threads, 10)
-            self.assertEqual(p05.gpu_batch_size, 12)
-            self.assertAlmostEqual(p05.cleanlab_threshold, 0.88, places=4)
-            p05_legacy = mod_05.parse_args(["--batch-size", "16", "--error-threshold", "0.91"])
-            self.assertEqual(p05_legacy.gpu_batch_size, 16)
-            self.assertAlmostEqual(p05_legacy.cleanlab_threshold, 0.91, places=4)
-
-            from scripts.analysis.vision_dissection_utils import resolve_step05_loader_params
-            with patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("PACKERA_MAX_WORKERS", None)
-                os.environ.pop("PACKERA_GPU_BATCH_SIZE", None)
-                nw_cuda_8, bs_cuda_8 = resolve_step05_loader_params(batch_size=8, threads=6, use_cuda=True, n_records=50)
-                self.assertEqual(bs_cuda_8, 8)
-                self.assertEqual(nw_cuda_8, 6)
-                _, bs_cuda_def = resolve_step05_loader_params(batch_size=None, threads=4, use_cuda=True, n_records=50)
-                self.assertEqual(bs_cuda_def, 64)
-                _, bs_cpu_def = resolve_step05_loader_params(batch_size=None, threads=4, use_cuda=False, n_records=50)
-                self.assertEqual(bs_cpu_def, 32)
-
     def test_subcommand_help_hides_suppressed_internal_and_legacy_flags(self):
         """Verify --help output exposes consolidated flags and hides internal/retired aliases."""
         parser = main.build_parser()
@@ -983,14 +953,14 @@ REUSE_CANONICAL_DATA="false"
         self.assertIn("--threads", synth_help)
         self.assertIn("--gpu-batch-size", synth_help)
         self.assertIn("--ssurgo-batch-size", synth_help)
-        for hidden_flag in ("--ssurgo-table", "--contingency-table", "--synthesis-report", "--error-threshold"):
+        for hidden_flag in ("--ssurgo-table", "--contingency-table", "--synthesis-report"):
             self.assertNotIn(hidden_flag, synth_help)
 
         run_all_help = subparsers_action.choices["run-all"].format_help()
         self.assertIn("--taxon", run_all_help)
         self.assertIn("--threads", run_all_help)
         self.assertIn("--gpu-batch-size", run_all_help)
-        for hidden_flag in ("--overwrite", "--include-western", "--allometry-report", "--error-threshold"):
+        for hidden_flag in ("--overwrite", "--include-western", "--allometry-report"):
             self.assertNotIn(hidden_flag, run_all_help)
 
     def test_run_pipeline_sh_help_and_compute_flags(self):

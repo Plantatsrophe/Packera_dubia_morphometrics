@@ -59,7 +59,6 @@ class TestPipelineConfig(unittest.TestCase):
         self.assertAlmostEqual(cfg.thresholds.pcd_conf, 0.72)
         self.assertAlmostEqual(cfg.thresholds.min_solidity, 0.72)
         self.assertAlmostEqual(cfg.thresholds.min_ucs, 0.85)
-        self.assertAlmostEqual(cfg.thresholds.cleanlab_cutoff, 0.85)
         self.assertAlmostEqual(cfg.thresholds.min_megapixels, 8.0)
         self.assertAlmostEqual(cfg.thresholds.min_file_size_kb, 500.0)
         self.assertAlmostEqual(cfg.thresholds.min_sharpness_laplacian, 80.0)

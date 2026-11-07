@@ -67,7 +67,7 @@ Run & Compute Controls:
   --start-step <1..8>                Start or resume execution at step <1..8> (step >=2 skips harvest automatically)
   --force                            Force re-execution and overwrite cached artifacts (with --start-step 2, re-segments)
   -j, --threads <INT>                CPU worker thread limit across Python & R stages (exports PACKERA_MAX_WORKERS)
-  --gpu-batch-size <INT>             GPU inference batch size for Step 02 LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) & Step 05 DINOv2
+  --gpu-batch-size <INT>             GPU inference batch size for Step 02 LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime)
   --limit <N>                        Cap maximum number of vouchers processed in Step 02 segmentation
   --demo                             Run in ephemeral test isolation mode (PACKERA_DEMO_MODE=1)
 
@@ -407,7 +407,7 @@ echo "  Start Timestamp : ${START_TIME}"
 echo "  Git Commit SHA  : ${GIT_SHA}"
 echo "=============================================================================="
 
-# Resolve Python interpreters (.venv for primary orchestration/DINOv2, LeafMachine3/.venv or .venv_LM3 for LeafMachine3)
+# Resolve Python interpreters (.venv for primary orchestration, LeafMachine3/.venv or .venv_LM3 for LeafMachine3)
 if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
   PYTHON_MAIN="${PROJECT_ROOT}/.venv/bin/python"
 else
@@ -491,7 +491,7 @@ fi
 HAS_UPSTREAM_STEP02=false
 if [[ -s "${SEED_DATA_DIR}/tables/extracted_leaf_manifest.csv" || -s "${PROJECT_ROOT}/data/tables/extracted_leaf_manifest.csv" ]]; then
   HAS_UPSTREAM_STEP02=true
-elif [[ "${START_STEP}" -ge 3 ]] && ( _dir_has_files "${SEED_DATA_DIR}/cropped_patches/rosettes_dense" || _dir_has_files "${SEED_DATA_DIR}/cropped_patches/basal_leaves_raw" || _dir_has_files "${PROJECT_ROOT}/data/cropped_patches/rosettes_dense" || _dir_has_files "${PROJECT_ROOT}/data/cropped_patches/basal_leaves_raw" ); then
+elif [[ "${START_STEP}" -ge 3 ]] && ( _dir_has_files "${SEED_DATA_DIR}/contours" || _dir_has_files "${SEED_DATA_DIR}/cropped_patches/capitula" || _dir_has_files "${PROJECT_ROOT}/data/contours" || _dir_has_files "${PROJECT_ROOT}/data/cropped_patches/capitula" ); then
   HAS_UPSTREAM_STEP02=true
 fi
 
@@ -562,9 +562,7 @@ else
     "${RUN_DIR}/data/masks/tier1_intact" \
     "${RUN_DIR}/data/masks/tier2_reflected" \
     "${RUN_DIR}/data/contours" \
-    "${RUN_DIR}/data/cropped_patches/basal_leaves_raw" \
-    "${RUN_DIR}/data/cropped_patches/capitula" \
-    "${RUN_DIR}/data/cropped_patches/rosettes_dense"
+    "${RUN_DIR}/data/cropped_patches/capitula"
 fi
 
 # Initialize run_metadata.json at start of run
@@ -1075,14 +1073,14 @@ if os.environ.get('PACKERA_DEMO_MODE') != '1':
     finally:
         conn_coh.close()
 
-# Use directory-level symlinks to upstream/canonical cropped_patches/{rosettes_dense,basal_leaves_raw,capitula}
+# Use directory-level symlinks to upstream/canonical cropped_patches/capitula
 # whenever reusing Step 01-02 assets or starting at Step >= 3 (preserving non-empty run-local patch directories)
 if reuse_canonical or start_step_val >= 3:
     run_patches_root = run_dir / 'data' / 'cropped_patches'
     if run_patches_root.is_symlink():
         run_patches_root.unlink()
     run_patches_root.mkdir(parents=True, exist_ok=True)
-    for sub in ('rosettes_dense', 'basal_leaves_raw', 'capitula'):
+    for sub in ('capitula',):
         seed_sub = seed_data / 'cropped_patches' / sub
         root_sub = root_data / 'cropped_patches' / sub
         src_sub = seed_sub if (seed_sub.is_dir() and any(seed_sub.iterdir())) else root_sub
@@ -1123,9 +1121,7 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
     "${PROJECT_ROOT}/data/masks/tier1_intact" \
     "${PROJECT_ROOT}/data/masks/tier2_reflected" \
     "${PROJECT_ROOT}/data/contours" \
-    "${PROJECT_ROOT}/data/cropped_patches/basal_leaves_raw" \
     "${PROJECT_ROOT}/data/cropped_patches/capitula" \
-    "${PROJECT_ROOT}/data/cropped_patches/rosettes_dense" \
     "${PROJECT_ROOT}/data/tables"
   cp -alf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/" 2>/dev/null || cp -rf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/"
   cp -alf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/" 2>/dev/null || cp -rf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/"
@@ -1199,25 +1195,6 @@ if [[ "${START_STEP}" -le 4 ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Step 05: DINOv2 Deep Vision Feature Extraction & Cleanlab Confident Learning
-# ------------------------------------------------------------------------------
-if [[ "${START_STEP}" -le 5 ]]; then
-  echo "[Step 05/07] Running DINOv2 Vision XAI & Cleanlab Audit..."
-  "${PYTHON_MAIN}" scripts/analysis/05_cleanlab_vision_xai.py \
-    --rosette-dir "${RUN_DIR}/data/cropped_patches" \
-    --vouchers-csv "${RUN_DIR}/data/tables/curated_vouchers.csv" \
-    --manifest-csv "${RUN_DIR}/data/tables/extracted_leaf_manifest.csv" \
-    --morphometrics-csv "${RUN_DIR}/data/tables/morphometric_flags.csv" \
-    --output-csv "${RUN_DIR}/data/tables/label_noise_audit.csv" \
-    --output-figure "${RUN_DIR}/outputs/figures/GradCAM_audit_panel.png" \
-    --export-figures \
-    "${FOCAL_ARGS[@]}" \
-    "${INTRASPECIFIC_ARGS[@]}" \
-    "${DEMO_FLAG[@]}" \
-    "${COMPUTE_ARGS[@]}"
-fi
-
-# ------------------------------------------------------------------------------
 # Step 06: Multimodal Spatial Random Forests, SoilGrids/SSURGO & Hopkins Phenology
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 6 ]]; then
@@ -1225,7 +1202,6 @@ if [[ "${START_STEP}" -le 6 ]]; then
   Rscript scripts/analysis/06_multimodal_spatial_rf.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
-    --vision-audit "${RUN_DIR}/data/tables/label_noise_audit.csv" \
     --pheno-states "${RUN_DIR}/data/tables/voucher_phenological_states.csv" \
     --env-dir "data/environmental" \
     --ssurgo-table "${RUN_DIR}/data/tables/ssurgo_edaphic_validation.csv" \
@@ -1250,7 +1226,6 @@ if [[ "${DISCOVER_COMPLEXES}" == "true" || "${AUTO_NEIGHBORS}" == "true" ]]; the
   Rscript scripts/analysis/08_discover_taxon_complexes.R \
     --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
     --harmonics "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
-    --vision-audit "${RUN_DIR}/data/tables/label_noise_audit.csv" \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --multimodal "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv" \
     --min-affinity "${MIN_AFFINITY}" \
@@ -1277,7 +1252,6 @@ if [[ "${START_STEP}" -le 7 ]]; then
   Rscript scripts/analysis/07_triage_dashboard_synthesis.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
-    --vision-audit "${RUN_DIR}/data/tables/label_noise_audit.csv" \
     --multimodal-flags "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv" \
     --gmm-summary "${RUN_DIR}/outputs/reports/gmm_bayes_factors_summary.csv" \
     --niche-summary "${RUN_DIR}/outputs/reports/multimodal_spatial_rf_summary.csv" \

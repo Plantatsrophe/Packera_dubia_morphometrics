@@ -137,9 +137,9 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                 species_standardized = c("Packera dubia", "Packera dubia", "Packera dubia", "Packera anonyma", "Packera anonyma", "Packera anonyma"),
                 determiner_tier = rep("Tier_1_Gold", 6),
                 cda_predicted_taxon = c("Packera dubia", "Packera anonyma", "Packera anonyma", "Packera dubia", "Packera anonyma", "Packera anonyma"),
-                cda_posterior_prob = c(0.95, 0.62, 0.65, 0.44, 0.48, 0.92),
-                cda_second_posterior_prob = c(0.03, 0.36, 0.30, 0.28, 0.25, 0.05),
-                cda_posterior_margin = c(0.92, 0.26, 0.35, 0.16, 0.23, 0.87),
+                cda_posterior_prob = c(0.95, 0.85, 0.60, 0.44, 0.48, 0.92),
+                cda_second_posterior_prob = c(0.03, 0.12, 0.40, 0.28, 0.25, 0.05),
+                cda_posterior_margin = c(0.92, 0.73, 0.20, 0.16, 0.23, 0.87),
                 morphometric_outlier_flag = c(FALSE, TRUE, TRUE, TRUE, TRUE, FALSE),
                 gmm_cluster = c(1L, 2L, 2L, 5L, 5L, 2L),
                 gmm_2_delta_bic = c(0, 0, 0, 12.0, 12.0, 0),
@@ -147,19 +147,17 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                 n_tier1_leaves = rep(3L, 6),
                 stringsAsFactors = FALSE
               )
-              kw_missing <- compute_modality_kappa_weights(mdf, NULL, rep(TRUE, 6))
-              stopifnot(abs(kw_missing$w_morph - 1.0) < 1e-9 && kw_missing$w_vis == 0.0)
-
-              vdf <- data.frame(
-                catalogNumber = c("V1", "V2", "V3", "V4", "V5", "V6"),
-                species_standardized = mdf$species_standardized,
-                determiner_tier = rep("Tier_1_Gold", 6),
-                vision_predicted_label = c("Packera dubia", "Packera anonyma", "Packera paupercula", "Packera anonyma", "Packera anonyma", "Packera anonyma"),
-                c_error = c(0.04, 0.82, 0.75, 0.28, 0.25, 0.05),
-                stringsAsFactors = FALSE
+              kw_missing <- tryCatch(
+                compute_modality_kappa_weights(mdf, NULL, rep(TRUE, 6)),
+                error = function(e) compute_modality_kappa_weights(mdf, rep(TRUE, 6))
               )
+              stopifnot(abs(kw_missing$w_morph - 1.0) < 1e-9)
+
               pheno_mock <- list(delta_doy_resid = c(2.0, 3.0, 4.0, 22.0, 3.0, 1.0))
-              calls <- evaluate_hierarchical_complex_delimitation(mdf, vdf, pheno_mock)
+              calls <- tryCatch(
+                evaluate_hierarchical_complex_delimitation(mdf, NULL, pheno_mock),
+                error = function(e) evaluate_hierarchical_complex_delimitation(mdf, pheno_res = pheno_mock)
+              )
               stopifnot(calls[1] == "Confirmed_Species")
               stopifnot(calls[2] == "Misidentification_Reassign")
               stopifnot(calls[3] == "Hybrid_Introgressant")
@@ -346,12 +344,10 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         }
 
         mod01_pipe = importlib.import_module("scripts.pipeline.01_voucher_harvester")
-        mod05 = importlib.import_module("scripts.analysis.05_cleanlab_vision_xai")
 
         for raw_name, expected in cases.items():
             self.assertEqual(standardize_packera_taxon(raw_name), expected, f"Failed for {raw_name!r}")
             self.assertEqual(mod01_pipe.standardize_packera_taxon(raw_name), expected)
-            self.assertEqual(mod05.standardize_packera_taxon(raw_name), expected)
 
         # Also verify dynamic GBIF backbone resolution for historical Senecio basionyms across regions
         basionym_backbone = {
@@ -377,7 +373,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                 ("Senecio sanguisorbae DC.", "Packera sanguisorbae"),
             ]:
                 self.assertEqual(standardize_packera_taxon(raw_syn), expected)
-                self.assertEqual(mod05.standardize_packera_taxon(raw_syn), expected)
+                self.assertEqual(mod01_pipe.standardize_packera_taxon(raw_syn), expected)
 
     def test_r_standardize_taxon_and_dynamic_palette(self):
         """Verify R standardize_taxon_name(), get_dynamic_packera_palette(), shapes, titles, and italic expressions are 100% species-agnostic."""
@@ -444,7 +440,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         vouchers_rows = []
         harmonics_rows = []
         morph_rows = []
-        vision_rows = []
 
         n_per_taxon = 15
         idx = 1
@@ -465,13 +460,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                     cda_pred = taxon
                     cda_post = 0.78
                     cda_sec = 0.19
-
-                if k % 4 == 0:
-                    vis_pred = peers[(k // 4) % len(peers)]
-                    c_err = 0.62
-                else:
-                    vis_pred = taxon
-                    c_err = 0.12
 
                 vouchers_rows.append(
                     {
@@ -527,23 +515,12 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                         "morphometric_outlier_flag": False,
                     }
                 )
-                vision_rows.append(
-                    {
-                        "catalogNumber": cat,
-                        "given_label": taxon,
-                        "predicted_label": vis_pred,
-                        "vision_predicted_label": vis_pred,
-                        "c_error": c_err,
-                        "is_label_corrupted": c_err > 0.5,
-                    }
-                )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             vouchers_csv = tmp_path / "curated_vouchers.csv"
             harmonics_csv = tmp_path / "leaf_efa_harmonics.csv"
             morph_csv = tmp_path / "morphometric_flags.csv"
-            vision_csv = tmp_path / "label_noise_audit.csv"
 
             out_complexes = tmp_path / "empirical_taxon_complexes.csv"
             out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
@@ -553,7 +530,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             pd.DataFrame(vouchers_rows).to_csv(vouchers_csv, index=False)
             pd.DataFrame(harmonics_rows).to_csv(harmonics_csv, index=False)
             pd.DataFrame(morph_rows).to_csv(morph_csv, index=False)
-            pd.DataFrame(vision_rows).to_csv(vision_csv, index=False)
 
             cmd = [
                 "Rscript",
@@ -562,8 +538,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                 str(morph_csv),
                 "--harmonics",
                 str(harmonics_csv),
-                "--vision-audit",
-                str(vision_csv),
                 "--vouchers",
                 str(vouchers_csv),
                 "--focal-taxon",
@@ -629,7 +603,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             self.assertIn("hopkins_pheno_overlap", comp_df.columns)
             self.assertIn("integrative_congruence", comp_df.columns)
             self.assertIn("kappa_morph_weight", comp_df.columns)
-            self.assertIn("kappa_vis_weight", comp_df.columns)
             r08_text = DISCOVERY_R_SCRIPT.read_text(encoding="utf-8")
             self.assertIn("compute_hopkins_phenological_affinity", r08_text)
             self.assertIn("compute_modality_kappa_weights", r08_text)
@@ -655,7 +628,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             morph_csv = tmp_path / "morphometric_flags.csv"
-            vis_csv = tmp_path / "label_noise_audit.csv"
             out_complexes = tmp_path / "empirical_taxon_complexes.csv"
             out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
             out_neighbors = tmp_path / "focal_auto_neighbors.txt"
@@ -669,7 +641,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                 ("Packera paupercula", 2, 6, np.array([1.9, 1.3, -0.2, 0.0, 0.0])),
             ]
             morph_rows = []
-            vis_rows = []
             v_idx = 0
             for sp_name, k_id, count, center in subclusters:
                 for _ in range(count):
@@ -693,24 +664,13 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                         "cda_posterior_prob": 0.90,
                         "cda_second_posterior_prob": 0.08,
                     })
-                    vis_rows.append({
-                        "catalogNumber": cat_no,
-                        "plant_individual_id": 1,
-                        "species_standardized": sp_name,
-                        "determiner_tier": "Tier_1_Gold",
-                        "vision_predicted_label": sp_name,
-                        "c_error": 0.08,
-                        "is_label_corrupted": False,
-                    })
 
             pd.DataFrame(morph_rows).to_csv(morph_csv, index=False)
-            pd.DataFrame(vis_rows).to_csv(vis_csv, index=False)
 
             res = subprocess.run(
                 [
                     "Rscript", str(DISCOVERY_R_SCRIPT),
                     "--morphometrics", str(morph_csv),
-                    "--vision-audit", str(vis_csv),
                     "--focal-taxon", "Packera dubia",
                     "--output-complexes", str(out_complexes),
                     "--output-affinity", str(out_affinity),
@@ -749,7 +709,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             morph_csv = tmp_path / "morphometric_flags.csv"
-            vis_csv = tmp_path / "label_noise_audit.csv"
             mm_csv = tmp_path / "multimodal_conflict_flags.csv"
             out_complexes = tmp_path / "discovered_taxon_complexes.csv"
             out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
@@ -764,7 +723,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                 ("Packera cymbalaria", (4.5, 4.2), (13.5, 9.2)),
             ]
             morph_rows = []
-            vis_rows = []
             mm_rows = []
             v_idx = 0
             for sp_name, (pc6_mu, pc7_mu), (b10_mu, ksat_mu) in taxa_specs:
@@ -792,15 +750,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                         "cda_posterior_prob": 0.92,
                         "cda_second_posterior_prob": 0.05,
                     })
-                    vis_rows.append({
-                        "catalogNumber": cat_no,
-                        "plant_individual_id": 0,
-                        "species_standardized": sp_name,
-                        "determiner_tier": "Tier_1_Gold",
-                        "vision_predicted_label": sp_name,
-                        "c_error": 0.06,
-                        "is_label_corrupted": False,
-                    })
                     mm_rows.append({
                         "catalogNumber": cat_no,
                         "plant_individual_id": 0,
@@ -820,14 +769,12 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                     })
 
             pd.DataFrame(morph_rows).to_csv(morph_csv, index=False)
-            pd.DataFrame(vis_rows).to_csv(vis_csv, index=False)
             pd.DataFrame(mm_rows).to_csv(mm_csv, index=False)
 
             res = subprocess.run(
                 [
                     "Rscript", str(DISCOVERY_R_SCRIPT),
                     "--morphometrics", str(morph_csv),
-                    "--vision-audit", str(vis_csv),
                     "--multimodal", str(mm_csv),
                     "--focal-taxon", "Packera hyperborea",
                     "--output-complexes", str(out_complexes),

@@ -648,7 +648,6 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             tmp = Path(tmpdir)
             vouchers_csv = tmp / "curated_vouchers.csv"
             morph_csv = tmp / "morphometric_flags.csv"
-            vision_csv = tmp / "label_noise_audit.csv"
             pheno_states_csv = tmp / "voucher_phenological_states.csv"
             out_flags = tmp / "multimodal_conflict_flags.csv"
             out_summary = tmp / "multimodal_spatial_rf_summary.csv"
@@ -713,17 +712,6 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             pd.DataFrame([
                 {
                     "catalogNumber": r["catalogNumber"],
-                    "predicted_label": r["species_raw"],
-                    "confidence_predicted_class": 0.91,
-                    "c_error": 0.08,
-                    "is_label_corrupted": False,
-                }
-                for r in rows
-            ]).to_csv(vision_csv, index=False)
-
-            pd.DataFrame([
-                {
-                    "catalogNumber": r["catalogNumber"],
                     "total_capitula": 4,
                     "n_anthesis": 3,
                     "n_fruit": 1,
@@ -739,7 +727,6 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 str(self.r_script_path),
                 "--vouchers", str(vouchers_csv),
                 "--morphometrics", str(morph_csv),
-                "--vision-audit", str(vision_csv),
                 "--pheno-states", str(pheno_states_csv),
                 "--env-dir", str(tmp / "env"),
                 "--ssurgo-cache", str(tmp / "ssurgo_cache"),
@@ -815,7 +802,6 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 str(step07_script),
                 "--vouchers", str(vouchers_csv),
                 "--morphometrics", str(morph_csv),
-                "--vision-audit", str(vision_csv),
                 "--multimodal-flags", str(out_flags),
                 "--niche-summary", str(out_summary),
                 "--output-queue", str(out_queue),

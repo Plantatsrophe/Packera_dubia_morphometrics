@@ -461,7 +461,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertFalse(rec["is_dissected"])
 
     def test_routing_folded_leaf_to_tier2(self) -> None:
-        """Verify folded/partial leaf is excluded from closed-outline EFA and routed exclusively to rosette crops under opt-in geometric QC."""
+        """Verify folded/partial leaf is excluded from closed-outline EFA under opt-in geometric QC."""
         # Half-ellipse with straight edge along midrib
         mask = np.zeros((400, 400), dtype=np.uint8)
         cv2.ellipse(mask, (200, 200), (35, 130), 0, -90, 90, 255, -1)
@@ -473,9 +473,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
 
         self.assertEqual(len(records), 0, "Mirrored Tier 2 hemi-blades must not enter closed-outline EFA records.")
         self.assertIsNotNone(failure)
-        self.assertEqual(failure["failure_reason"], "PARTIAL_OR_FOLDED_ROUTED_TO_ROSETTE")
-        rosette_crop = self.qc_pipeline.rosettes_dense_dir / "NCU123_p0_rosette.jpg"
-        self.assertTrue(rosette_crop.exists(), "Partial/folded leaf must still generate whole-rosette crop for Phase 5 DINOv2.")
+        self.assertEqual(failure["failure_reason"], "PARTIAL_OR_FOLDED_EXCLUDED_FROM_EFA")
 
     def test_routing_botanical_dissection_to_tier1_dissected(self) -> None:
         """Verify dissected leaf with lyrate taxon routes to Tier 1 (Dissected)."""
@@ -620,8 +618,8 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             {"anthesis", "fruit", "bud"},
         )
 
-    def test_tier4_rosette_and_basal_leaf_patch_generation(self) -> None:
-        """Verify crop_dense_rosette_tier4() and basal_leaves_raw RGB patch saving per plant_individual_id."""
+    def test_multi_plant_clustering_and_tier1_mask_generation(self) -> None:
+        """Verify multi-plant DBSCAN clustering and Tier 1 binary mask saving per plant_individual_id."""
         from unittest.mock import patch
 
         sheet_img = np.full((2000, 2000, 3), 210, dtype=np.uint8)
@@ -651,16 +649,10 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         plant_ids = sorted({r["plant_individual_id"] for r in records})
         self.assertEqual(plant_ids, [0, 1])
 
-        # Verify Tier 4 dense rosette patches exist for both plant individuals
-        rosette_p0 = self.pipeline.rosettes_dense_dir / "NCU123_p0_rosette.jpg"
-        rosette_p1 = self.pipeline.rosettes_dense_dir / "NCU123_p1_rosette.jpg"
-        self.assertTrue(rosette_p0.exists(), "Tier 4 rosette crop for plant_individual_id=0 must exist.")
-        self.assertTrue(rosette_p1.exists(), "Tier 4 rosette crop for plant_individual_id=1 must exist.")
-
-        # Verify basal leaf RGB crops exist in data/cropped_patches/basal_leaves_raw/
+        # Verify Tier 1 binary leaf masks exist in data/masks/tier1_intact/
         for leaf_id in [1, 2, 3]:
-            leaf_patch = self.pipeline.basal_leaves_raw_dir / f"NCU123_leaf{leaf_id}.jpg"
-            self.assertTrue(leaf_patch.exists(), f"Basal leaf RGB crop {leaf_patch} must exist.")
+            leaf_mask = self.pipeline.masks_dir / "tier1_intact" / f"NCU123_leaf{leaf_id}.png"
+            self.assertTrue(leaf_mask.exists(), f"Tier 1 binary leaf mask {leaf_mask} must exist.")
 
     def test_lm3_ruler_calibration_resolution(self) -> None:
         """Verify load_ruler_calibrations() resolves measured_from_ruler and predicted_from_megapixels scales."""
@@ -1592,7 +1584,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             df_seq[compare_cols].reset_index(drop=True),
         )
 
-        # Verify ROI-scoped rosette masks & binary leaf masks match pixel-for-pixel and SQLite stores 120-pt contours
+        # Verify SQLite stores 120-pt contours
         conn = get_db_connection(wave_db, init_schema=False)
         try:
             rows_db = conn.execute(
@@ -1605,14 +1597,6 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                 self.assertEqual(len(coords), 120)
         finally:
             conn.close()
-
-        for r in vouchers_rows:
-            cat = r["catalogNumber"]
-            w_rmask = cv2.imread(str(pipe_wave.rosettes_dense_dir / f"{cat}_p0_rosette_mask.png"), cv2.IMREAD_GRAYSCALE)
-            s_rmask = cv2.imread(str(pipe_seq.rosettes_dense_dir / f"{cat}_p0_rosette_mask.png"), cv2.IMREAD_GRAYSCALE)
-            self.assertIsNotNone(w_rmask)
-            self.assertIsNotNone(s_rmask)
-            np.testing.assert_array_equal(w_rmask, s_rmask)
 
 
 class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):

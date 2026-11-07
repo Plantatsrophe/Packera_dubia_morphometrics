@@ -9,11 +9,11 @@ Description:
     (`data/packera_pipeline.sqlite`) implementing the Two-Tier Storage schema:
       - Tier A (Canonical Shared Store):
           taxon_synonyms, vouchers, plant_individuals, extracted_leaves,
-          voucher_reproductive_phenology, dinov2_feature_cache,
+          voucher_reproductive_phenology,
           environmental_cache + environmental_rtree (R*Tree spatial index).
       - Tier B (Run-Scoped Analytical Store, partitioned by run_id):
           pipeline_runs, run_active_cohort, leaf_efa_harmonics,
-          otu_morphometrics, vision_xai_audit, spatial_rf_predictions,
+          otu_morphometrics, spatial_rf_predictions,
           curation_triage, and v_integrative_triage_master.
 
     ABI Invariant:
@@ -989,18 +989,7 @@ def record_voucher_segmentation_transaction(
     if not pids:
         pids.add(0)
 
-    # Discover saved rosette patch / companion mask paths per plant individual
     out_base = Path(output_dir) if output_dir is not None else (workspace_root / "data")
-    rosettes_dir = (
-        out_base / "cropped_patches" / "rosettes_dense"
-        if (out_base / "cropped_patches" / "rosettes_dense").exists()
-        else (out_base / "data" / "cropped_patches" / "rosettes_dense")
-    )
-    basal_dir = (
-        out_base / "cropped_patches" / "basal_leaves_raw"
-        if (out_base / "cropped_patches" / "basal_leaves_raw").exists()
-        else (out_base / "data" / "cropped_patches" / "basal_leaves_raw")
-    )
 
     plant_rows: List[Tuple[Any, ...]] = []
     repro_pheno_rows: List[Tuple[Any, ...]] = []
@@ -1049,16 +1038,6 @@ def record_voucher_segmentation_transaction(
 
         r_patch: Optional[str] = None
         r_mask: Optional[str] = None
-        if rosettes_dir.exists():
-            cand_p = rosettes_dir / f"{cat}_p{pid}_rosette.jpg"
-            cand_p0 = rosettes_dir / f"{cat}_rosette.jpg"
-            if cand_p.exists():
-                r_patch = str(cand_p)
-            elif pid == 0 and cand_p0.exists():
-                r_patch = str(cand_p0)
-            cand_m = rosettes_dir / f"{cat}_p{pid}_rosette_mask.png"
-            if cand_m.exists():
-                r_mask = str(cand_m)
 
         plant_rows.append((
             cat,
@@ -1153,10 +1132,6 @@ def record_voucher_segmentation_transaction(
 
         contour_json = json.dumps(xy_pts, separators=(",", ":"))
         crop_p = _to_str(r.get("crop_path"))
-        if crop_p is None and basal_dir.exists():
-            cand_crop = basal_dir / f"{cat}_leaf{leaf_id}.jpg"
-            if cand_crop.exists():
-                crop_p = str(cand_crop)
 
         shape_id = _to_str(r.get("shape_id")) or f"{cat}_p{pid}_leaf{leaf_id}"
         l_ppm = _to_float(r.get("pixels_per_mm"))
@@ -1223,7 +1198,6 @@ def record_voucher_segmentation_transaction(
         conn.execute("DELETE FROM extracted_leaves WHERE catalogNumber = ?;", (cat,))
         conn.execute("DELETE FROM voucher_reproductive_phenology WHERE catalogNumber = ?;", (cat,))
         conn.execute("DELETE FROM plant_individuals WHERE catalogNumber = ?;", (cat,))
-        conn.execute("DELETE FROM dinov2_feature_cache WHERE catalogNumber = ?;", (cat,))
 
         conn.executemany(
             """
@@ -1400,229 +1374,6 @@ def load_step02_records_from_db(
 
 
 # =============================================================================
-# Step 05: DINOv2 Feature Cache & Vision XAI Audit Persistence
-# =============================================================================
-
-def fetch_cached_dinov2_features(
-    conn: sqlite3.Connection,
-    specimen_keys: Sequence[Tuple[str, int, Optional[str]]],
-    model_name: str,
-    sigma: float,
-) -> Dict[Tuple[str, int], Dict[str, Any]]:
-    """
-    Fetch cached 768-d DINOv2 embeddings and foreground attention ratios from
-    `dinov2_feature_cache` for `(catalogNumber, plant_individual_id, model_name, sigma)`.
-    If `patch_sha256` is supplied in `specimen_keys` and differs from a non-null cached
-    checksum, treats that specimen as a cache miss so modified patches re-embed cleanly.
-    """
-    if not specimen_keys:
-        return {}
-    cats = sorted({str(k[0]).strip() for k in specimen_keys if str(k[0]).strip()})
-    if not cats:
-        return {}
-
-    expected_sha: Dict[Tuple[str, int], Optional[str]] = {
-        (str(cat).strip(), int(pid)): sha for cat, pid, sha in specimen_keys
-    }
-    hits: Dict[Tuple[str, int], Dict[str, Any]] = {}
-    sigma_val = round(float(sigma), 4)
-
-    chunk_size = 500
-    sigma_lo = sigma_val - 1e-6
-    sigma_hi = sigma_val + 1e-6
-    for i in range(0, len(cats), chunk_size):
-        chunk = cats[i : i + chunk_size]
-        ph = ", ".join("?" for _ in chunk)
-        cur = conn.execute(
-            f"""
-            SELECT
-                catalogNumber, plant_individual_id, patch_sha256, embedding_json,
-                foreground_attention_ratio, is_artifact_driven,
-                surface_orientation, mean_luminance, mean_saturation, high_brightness_ratio
-            FROM dinov2_feature_cache
-            WHERE model_name = ? AND sigma BETWEEN ? AND ?
-              AND catalogNumber IN ({ph});
-            """,
-            [str(model_name), sigma_lo, sigma_hi, *chunk],
-        )
-        for row in cur.fetchall():
-            key = (str(row["catalogNumber"]).strip(), int(row["plant_individual_id"]))
-            if key not in expected_sha:
-                continue
-            exp_hash = expected_sha[key]
-            cached_hash = row["patch_sha256"]
-            if exp_hash and cached_hash and str(exp_hash) != str(cached_hash):
-                continue
-            try:
-                emb_vec = json.loads(row["embedding_json"])
-                if not isinstance(emb_vec, list) or len(emb_vec) == 0:
-                    continue
-            except (TypeError, ValueError):
-                continue
-            hits[key] = {
-                "embedding": emb_vec,
-                "patch_sha256": cached_hash,
-                "foreground_attention_ratio": _to_float(row["foreground_attention_ratio"]),
-                "is_artifact_driven": bool(row["is_artifact_driven"]) if row["is_artifact_driven"] is not None else False,
-                "surface_orientation": row["surface_orientation"],
-                "mean_luminance": _to_float(row["mean_luminance"]),
-                "mean_saturation": _to_float(row["mean_saturation"]),
-                "high_brightness_ratio": _to_float(row["high_brightness_ratio"]),
-            }
-    return hits
-
-
-def store_dinov2_features_cache(
-    conn: sqlite3.Connection,
-    cache_rows: Sequence[Mapping[str, Any]],
-    model_name: str,
-    sigma: float,
-    demo: bool = False,
-) -> int:
-    """
-    Batch-insert newly computed 768-d DINOv2 embeddings and foreground attention
-    metrics into `dinov2_feature_cache`. Strictly no-ops when `demo=True`.
-    """
-    if demo or not cache_rows:
-        return 0
-    sigma_val = round(float(sigma), 4)
-    payload: List[Tuple[Any, ...]] = []
-    for r in cache_rows:
-        cat = _to_str(r.get("catalogNumber"))
-        if not cat:
-            continue
-        pid = _to_int(r.get("plant_individual_id"), default=0) or 0
-        emb = r.get("embedding")
-        if emb is None and r.get("embedding_json"):
-            emb_json = str(r["embedding_json"])
-        elif emb is not None:
-            emb_list = [round(float(x), 7) for x in emb]
-            emb_json = json.dumps(emb_list, separators=(",", ":"))
-        else:
-            continue
-        payload.append((
-            cat,
-            pid,
-            str(model_name),
-            sigma_val,
-            _to_str(r.get("patch_sha256")),
-            emb_json,
-            _to_float(r.get("foreground_attention_ratio")),
-            _to_bool_int(r.get("is_artifact_driven"), default=0),
-            _to_str(r.get("surface_orientation")),
-            _to_float(r.get("mean_luminance")),
-            _to_float(r.get("mean_saturation")),
-            _to_float(r.get("high_brightness_ratio")),
-        ))
-
-    if not payload:
-        return 0
-
-    sql = """
-    INSERT INTO dinov2_feature_cache (
-        catalogNumber, plant_individual_id, model_name, sigma,
-        patch_sha256, embedding_json, foreground_attention_ratio, is_artifact_driven,
-        surface_orientation, mean_luminance, mean_saturation, high_brightness_ratio
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(catalogNumber, plant_individual_id, model_name, sigma) DO UPDATE SET
-        patch_sha256 = excluded.patch_sha256,
-        embedding_json = excluded.embedding_json,
-        foreground_attention_ratio = excluded.foreground_attention_ratio,
-        is_artifact_driven = excluded.is_artifact_driven,
-        surface_orientation = COALESCE(excluded.surface_orientation, dinov2_feature_cache.surface_orientation),
-        mean_luminance = COALESCE(excluded.mean_luminance, dinov2_feature_cache.mean_luminance),
-        mean_saturation = COALESCE(excluded.mean_saturation, dinov2_feature_cache.mean_saturation),
-        high_brightness_ratio = COALESCE(excluded.high_brightness_ratio, dinov2_feature_cache.high_brightness_ratio);
-    """
-    with conn:
-        conn.executemany(sql, payload)
-    return len(payload)
-
-
-def persist_vision_xai_audit(
-    conn: sqlite3.Connection,
-    run_id: str,
-    audit_rows: Sequence[Mapping[str, Any]],
-    demo: bool = False,
-) -> int:
-    """Persist run-scoped Step 05 Cleanlab & DINOv2 XAI results into `vision_xai_audit`."""
-    if demo or not audit_rows:
-        return 0
-    _ensure_dynamic_table_migrated(conn, "vision_xai_audit")
-    eff_run_id = str(run_id or os.environ.get("RUN_ID") or "canonical").strip()
-    ensure_pipeline_run(conn, run_id=eff_run_id)
-
-    norm_rows: List[Dict[str, Any]] = []
-    for r in audit_rows:
-        cat = _to_str(r.get("catalogNumber"))
-        if not cat:
-            continue
-        pid = _to_int(r.get("plant_individual_id"), default=0) or 0
-        pred_lbl = _to_str(r.get("vision_predicted_label")) or _to_str(r.get("predicted_label"))
-        ts_val = _to_str(r.get("type_status"))
-        is_type_v = _to_bool_int(r.get("is_type_specimen"))
-        if is_type_v is None:
-            is_type_v = (
-                1
-                if (
-                    ts_val
-                    and ts_val.upper()
-                    not in {
-                        "NONE", "NOT A TYPE", "NOTATYPE", "NON-TYPE", "NONTYPE",
-                        "UNSPECIFIED", "NULL", "NAN", "NA", "N/A", "FALSE", "0", "UNKNOWN",
-                    }
-                    and not re.search(r"\b(?:not\s+a?\s*type|non[-\s]?type)\b", ts_val, re.IGNORECASE)
-                )
-                else 0
-            )
-        norm_rows.append({
-            "run_id": eff_run_id,
-            "catalogNumber": cat,
-            "plant_individual_id": pid,
-            "patch_path": _to_str(r.get("patch_path")),
-            "given_label": _to_str(r.get("given_label")),
-            "vision_predicted_label": pred_lbl,
-            "predicted_label": _to_str(r.get("predicted_label")) or pred_lbl,
-            "confidence_given_class": _to_float(r.get("confidence_given_class")),
-            "confidence_predicted_class": _to_float(r.get("confidence_predicted_class")),
-            "vision_second_prob": _to_float(r.get("vision_second_prob")),
-            "vision_margin": _to_float(r.get("vision_margin")),
-            "label_quality_score": _to_float(r.get("label_quality_score")),
-            "c_error": _to_float(r.get("c_error")),
-            "is_cleanlab_issue": _to_bool_int(r.get("is_cleanlab_issue"), default=0),
-            "is_label_corrupted": _to_bool_int(r.get("is_label_corrupted"), default=0),
-            "vision_ood_score": _to_float(r.get("vision_ood_score")),
-            "vision_is_ood": _to_bool_int(r.get("vision_is_ood"), default=0),
-            "foreground_attention_ratio": _to_float(r.get("foreground_attention_ratio")),
-            "is_artifact_driven": _to_bool_int(r.get("is_artifact_driven"), default=0),
-            "is_background_shortcut": _to_bool_int(r.get("is_background_shortcut"), default=0),
-            "surface_orientation": _to_str(r.get("surface_orientation")),
-            "mean_luminance": _to_float(r.get("mean_luminance")),
-            "mean_saturation": _to_float(r.get("mean_saturation")),
-            "high_brightness_ratio": _to_float(r.get("high_brightness_ratio")),
-            "tomentum_taxon_discordance": _to_bool_int(r.get("tomentum_taxon_discordance"), default=0),
-            "type_status": ts_val,
-            "is_type_specimen": is_type_v,
-            "vision_type_cosine_sim": _to_float(r.get("vision_type_cosine_sim")),
-            "vision_nearest_type_taxon": _to_str(r.get("vision_nearest_type_taxon")),
-            "vision_type_margin": _to_float(r.get("vision_type_margin")),
-            "triage_action": _to_str(r.get("triage_action")),
-            "discordance_reason": _to_str(r.get("discordance_reason")),
-        })
-
-    if norm_rows:
-        with conn:
-            conn.execute("DELETE FROM vision_xai_audit WHERE run_id = ?;", (eff_run_id,))
-    return upsert_rows_generic(
-        conn,
-        table_name="vision_xai_audit",
-        rows=norm_rows,
-        pk_cols=("run_id", "catalogNumber", "plant_individual_id"),
-        preserve_existing_on_null=False,
-    )
-
-
-# =============================================================================
 # Run Registration & SQL Preflight Cohort Selection
 # =============================================================================
 
@@ -1688,7 +1439,6 @@ def populate_run_active_cohort(
     _tier_b_tables = (
         "leaf_efa_harmonics",
         "otu_morphometrics",
-        "vision_xai_audit",
         "spatial_rf_predictions",
         "curation_triage",
     )
@@ -2377,7 +2127,7 @@ def ingest_existing_run_tables_into_db(
 ) -> Dict[str, int]:
     """
     Ingest Step 03-07 run-scoped CSV outputs (`leaf_efa_harmonics_individual.csv`,
-    `leaf_efa_harmonics.csv`, `morphometric_flags.csv`, `label_noise_audit.csv`,
+    `leaf_efa_harmonics.csv`, `morphometric_flags.csv`,
     `multimodal_conflict_flags.csv`, `triage_queue.csv` / `final_curation_triage.csv`)
     into Tier B SQLite tables with full dynamic `A1..D24`, `PC1..PC15`,
     `Sym_PC1..Sym_PC15`, and 19-variable `bio1..bio19` (`_qtr <-> _qt`) support.
@@ -2408,12 +2158,6 @@ def ingest_existing_run_tables_into_db(
         )
     if step03_otu or step04_otu:
         run_counts["otu_morphometrics"] = n_otu
-
-    vis_rows = _read_csv_dicts(t_dir / "label_noise_audit.csv")
-    if vis_rows:
-        run_counts["vision_xai_audit"] = persist_vision_xai_audit(
-            conn, eff_run, vis_rows, demo=False
-        )
 
     srf_rows = _read_csv_dicts(t_dir / "multimodal_conflict_flags.csv")
     if srf_rows:

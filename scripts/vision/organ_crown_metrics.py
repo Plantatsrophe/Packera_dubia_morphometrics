@@ -7,7 +7,7 @@ Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
     LeafMachine3 (YOLO26x / UNet++ v9) topological connectivity gatekeeping,
-    multi-plant DBSCAN spatial clustering, Tier 4 dense rosette patch masking,
+    multi-plant DBSCAN spatial clustering,
     and 31-keypoint rosette crown / petiole / bent-scape metrics.
 ===============================================================================
 """
@@ -33,7 +33,6 @@ __all__ = [
     "cluster_plant_individuals",
     "cluster_voucher_plants_dbscan",
     "route_tier3_open_curve",
-    "crop_dense_rosette_tier4",
     "_extract_xy_point",
     "_parse_basal_leaf_pose",
     "_estimate_single_plant_crown",
@@ -209,7 +208,7 @@ def cluster_voucher_plants_dbscan(
 
 
 # =============================================================================
-# 6. Additional Caliper & Rosette Utilities (Tier 3 & Tier 4)
+# 6. Additional Caliper Utilities (Tier 3)
 # =============================================================================
 
 def route_tier3_open_curve(
@@ -281,77 +280,6 @@ def route_tier3_open_curve(
             apex_angle_deg = float(math.degrees(math.acos(np.clip(cos_ang, -1.0, 1.0))))
 
     return str(save_path), petiole_length_mm, width_mm, apex_angle_deg
-
-
-def crop_dense_rosette_tier4(
-    raw_image_path: Path,
-    plant_candidates: List[Any],
-    plant_id: int,
-    output_dir: Path,
-    raw_img: Optional[np.ndarray] = None,
-    catalog_number: Optional[str] = None,
-    precropped_rosette_bgr: Optional[np.ndarray] = None,
-) -> Optional[str]:
-    """Tier 4: Dense whole-rosette bounding crop from native-DPI sheet."""
-    if precropped_rosette_bgr is not None:
-        rosette_crop = precropped_rosette_bgr
-    else:
-        if raw_img is None:
-            resolved_raw_path = raw_image_path
-            if not resolved_raw_path.exists():
-                for _ext in (".webp", ".jpg", ".jpeg", ".png"):
-                    _cand = resolved_raw_path.with_suffix(_ext)
-                    if _cand.exists():
-                        resolved_raw_path = _cand
-                        break
-            if not resolved_raw_path.exists():
-                return None
-            raw_img = cv2.imread(str(resolved_raw_path))
-        if raw_img is None:
-            return None
-
-        img_h, img_w = raw_img.shape[:2]
-
-        all_ymin, all_xmin, all_ymax, all_xmax = [], [], [], []
-        for cand in plant_candidates:
-            ymin, xmin, ymax, xmax = cand.bbox
-            if ymax > ymin and xmax > xmin:
-                all_ymin.append(ymin)
-                all_xmin.append(xmin)
-                all_ymax.append(ymax)
-                all_xmax.append(xmax)
-
-        if not all_ymin:
-            ymin, ymax = int(img_h * 0.40), int(img_h * 0.85)
-            xmin, xmax = int(img_w * 0.20), int(img_w * 0.80)
-        else:
-            min_y, max_y = min(all_ymin), max(all_ymax)
-            min_x, max_x = min(all_xmin), max(all_xmax)
-            pad_y = int(0.15 * (max_y - min_y + 10))
-            pad_x = int(0.15 * (max_x - min_x + 10))
-            ymin = max(0, min_y - pad_y)
-            ymax = min(img_h, max_y + pad_y)
-            xmin = max(0, min_x - pad_x)
-            xmax = min(img_w, max_x + pad_x)
-
-        rosette_crop = raw_img[ymin:ymax, xmin:xmax]
-    if rosette_crop.size == 0:
-        return None
-
-    cat = (
-        catalog_number
-        or (getattr(plant_candidates[0], "catalog_number", None) if plant_candidates else None)
-        or (raw_image_path.stem if raw_image_path else None)
-        or "UNKNOWN"
-    )
-    out_base = (output_dir / "data") if (output_dir.name != "data" and (output_dir / "data").is_dir()) else output_dir
-    save_path = out_base / "cropped_patches" / "rosettes_dense" / f"{cat}_p{plant_id}_rosette.jpg"
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        cv2.imwrite(str(save_path), rosette_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-    except TypeError:
-        cv2.imwrite(str(save_path), rosette_crop)
-    return str(save_path)
 
 
 # =============================================================================

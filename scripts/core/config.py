@@ -76,7 +76,7 @@ def initialize_run_directory(
     Create the standardized self-contained run directory structure under `runs/<run_id>/`:
       - data/masks/{tier1_intact,tier2_reflected}
       - data/contours
-      - data/cropped_patches/{basal_leaves_raw,capitula,rosettes_dense}
+      - data/cropped_patches/capitula
       - data/tables
       - outputs/{figures,reports}
       - logs
@@ -91,9 +91,7 @@ def initialize_run_directory(
         run_dir / "data" / "masks" / "tier1_intact",
         run_dir / "data" / "masks" / "tier2_reflected",
         run_dir / "data" / "contours",
-        run_dir / "data" / "cropped_patches" / "basal_leaves_raw",
         run_dir / "data" / "cropped_patches" / "capitula",
-        run_dir / "data" / "cropped_patches" / "rosettes_dense",
         run_dir / "data" / "tables",
         run_dir / "outputs" / "figures",
         run_dir / "outputs" / "reports",
@@ -360,7 +358,6 @@ class ThresholdsConfig:
     min_blade_area_cm2: float = 0.75
     max_tissue_border_ratio: float = 0.15
     min_ucs: float = 0.85
-    cleanlab_cutoff: float = 0.85
     min_megapixels: float = 8.0
     min_file_size_kb: float = 500.0
     min_sharpness_laplacian: float = 80.0

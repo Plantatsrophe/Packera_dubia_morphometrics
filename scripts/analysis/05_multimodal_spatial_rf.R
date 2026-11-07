@@ -228,7 +228,7 @@ resolve_step06_authority_weights <- function(df) {
 
   # Empirical cross-modal agreement trials per specimen when auxiliary predictions exist
   has_cda <- "cda_predicted_taxon" %in% names(df)
-  has_vis <- "vision_predicted_label" %in% names(df)
+  has_eco <- ("rf_predicted_taxon" %in% names(df)) || ("edaphic_best_fit_taxon" %in% names(df))
   obs_succ <- rep(0.0, n)
   obs_trials <- rep(0.0, n)
   if (has_cda) {
@@ -237,11 +237,12 @@ resolve_step06_authority_weights <- function(df) {
     obs_succ[ok_c] <- obs_succ[ok_c] + as.numeric(cda_v[ok_c] == sp_vec[ok_c])
     obs_trials[ok_c] <- obs_trials[ok_c] + 1.0
   }
-  if (has_vis) {
-    vis_v <- as.character(df$vision_predicted_label)
-    ok_v <- !is.na(vis_v) & nzchar(vis_v) & sp_vec != "Unknown"
-    obs_succ[ok_v] <- obs_succ[ok_v] + as.numeric(vis_v[ok_v] == sp_vec[ok_v])
-    obs_trials[ok_v] <- obs_trials[ok_v] + 1.0
+  if (has_eco) {
+    eco_col <- if ("rf_predicted_taxon" %in% names(df)) "rf_predicted_taxon" else "edaphic_best_fit_taxon"
+    eco_v <- as.character(df[[eco_col]])
+    ok_e <- !is.na(eco_v) & nzchar(eco_v) & sp_vec != "Unknown"
+    obs_succ[ok_e] <- obs_succ[ok_e] + as.numeric(eco_v[ok_e] == sp_vec[ok_e])
+    obs_trials[ok_e] <- obs_trials[ok_e] + 1.0
   }
 
   cell_key <- paste(sp_vec, tier_std, sep = "||")
@@ -275,8 +276,6 @@ parse_args_robust <- function() {
       default = rp("data/tables/curated_vouchers.csv"), help = "Curated vouchers CSV [default: %default]"),
     optparse::make_option(c("-m", "--morphometrics"), type = "character",
       default = rp("data/tables/morphometrics_misidentification_flags.csv"), help = "Morphometrics flags CSV [default: %default]"),
-    optparse::make_option(c("-n", "--vision-audit"), type = "character",
-      default = rp("data/tables/label_noise_audit.csv"), help = "Cleanlab vision audit CSV [default: %default]"),
     optparse::make_option(c("--pheno-states"), type = "character",
       default = rp("data/tables/voucher_phenological_states.csv"), help = "Voucher phenological states CSV [default: %default]"),
     optparse::make_option(c("-e", "--env-dir"), type = "character",
@@ -321,7 +320,7 @@ parse_args_robust <- function() {
   }
   return(list(
     vouchers = "data/tables/curated_vouchers.csv", morphometrics = "data/tables/morphometrics_misidentification_flags.csv",
-    vision_audit = "data/tables/label_noise_audit.csv", pheno_states = "data/tables/voucher_phenological_states.csv",
+    pheno_states = "data/tables/voucher_phenological_states.csv",
     env_dir = "data/environmental",
     output_flags = "data/tables/multimodal_conflict_flags.csv", output_plot = "outputs/figures/spatial_rf_niche_importance.pdf",
     output_summary = "outputs/reports/multimodal_spatial_rf_summary.csv",
@@ -1582,7 +1581,7 @@ execute_crossmodal_consensus <- function(
   primary_edaph_vars = NULL,
   rf_var_weights = NULL
 ) {
-  message("Executing 4-way cross-modal consensus checks (Morpho + Vision + Fine-Grain Edaphic + Phenology)...")
+  message("Executing 3-way cross-modal consensus checks (Morpho + Fine-Grain Edaphic + Phenology)...")
   if (exists("flag_coordinate_uncertainty", mode = "function")) {
     df <- flag_coordinate_uncertainty(df, max_uncertainty_m = 10000.0)
   } else {
@@ -1971,13 +1970,11 @@ execute_crossmodal_consensus <- function(
   for (i in seq_len(n)) {
     given_sp <- grp_vec[i]
     morph_sp <- if ("cda_predicted_taxon" %in% names(df) && !is.na(df$cda_predicted_taxon[i])) df$cda_predicted_taxon[i] else given_sp
-    vis_sp   <- if ("vision_predicted_label" %in% names(df) && !is.na(df$vision_predicted_label[i])) df$vision_predicted_label[i] else given_sp
     if (is_intra) {
       if (!(morph_sp %in% active_taxa)) morph_sp <- given_sp
-      if (!(vis_sp %in% active_taxa)) vis_sp <- given_sp
     }
-    c_err    <- if ("c_error" %in% names(df) && !is.na(df$c_error[i])) df$c_error[i] else 0.0
     cda_prob <- if ("cda_posterior_prob" %in% names(df) && !is.na(df$cda_posterior_prob[i])) as.numeric(df$cda_posterior_prob[i]) else NA_real_
+    is_m_out <- if ("morphometric_outlier_flag" %in% names(df) && !is.na(df$morphometric_outlier_flag[i])) isTRUE(as.logical(df$morphometric_outlier_flag[i])) else FALSE
 
     # Combine Spatial Block-CV OOF RF posterior with decorrelated PCA-env Mahalanobis likelihood
     if (K_tx == 0L) {
@@ -2009,7 +2006,7 @@ execute_crossmodal_consensus <- function(
     edaph_z_vec[i] <- round(edaph_z_given, 3)
     clim_z_vec[i]  <- if (is.finite(clim_z_given)) round(clim_z_given, 3) else NA_real_
 
-    alt_parent <- if (morph_sp != given_sp) morph_sp else if (vis_sp != given_sp) vis_sp else edaph_sp
+    alt_parent <- if (morph_sp != given_sp) morph_sp else edaph_sp
     edaph_z_alt <- z_engine$eval_specimen_z(i, alt_parent, "edaphic")
 
     rock_pct_i <- if (!is.na(df$ssurgo_rock_outcrop_pct[i])) as.numeric(df$ssurgo_rock_outcrop_pct[i]) else 0.0
@@ -2028,16 +2025,16 @@ execute_crossmodal_consensus <- function(
     if (is.na(ang_diff) || !is.finite(ang_diff)) ang_diff <- 0.0
     pheno_agree <- isTRUE(ang_diff < (pi / 3)) # within ~60 days
 
-    # Agreement matrix
-    matches <- c(morph_sp == given_sp, vis_sp == given_sp, edaph_sp == given_sp, pheno_agree)
-    concordance <- sum(matches, na.rm = TRUE) / 4.0
+    # Agreement matrix across Morphometrics, Fine-Grain Edaphic/Climatic Niche, and Reproductive Phenology
+    matches <- c(morph_sp == given_sp, edaph_sp == given_sp, pheno_agree)
+    concordance <- sum(matches, na.rm = TRUE) / 3.0
     concordances[i] <- round(concordance, 2)
 
     # Multi-evidence decision triage
-    if (morph_sp != given_sp && vis_sp != given_sp && (morph_sp == vis_sp || edaph_sp == morph_sp || c_err >= 0.85)) {
+    if (morph_sp != given_sp && edaph_sp != given_sp && (edaph_sp == morph_sp || !pheno_agree || is_m_out || (!is.na(cda_prob) && cda_prob >= 0.70))) {
       conf_flags[i] <- TRUE; triage_cats[i] <- "Severe_Triple_Stream_Conflict"
-      discord_notes[i] <- sprintf("Given %s contradicted by Morphology (%s), Vision (%s), and Fine-Grain Edaphic (%s)",
-                                  given_sp, morph_sp, vis_sp, edaph_sp)
+      discord_notes[i] <- sprintf("Given %s contradicted by Morphology (%s) and Fine-Grain Edaphic (%s)",
+                                  given_sp, morph_sp, edaph_sp)
     } else if (edaph_z_given > 3.0 && morph_sp == given_sp) {
       conf_flags[i] <- TRUE; triage_cats[i] <- "Edaphic_Envelope_Violation"
       discord_notes[i] <- sprintf(
@@ -2045,28 +2042,24 @@ execute_crossmodal_consensus <- function(
         paste(utils::head(z_engine$primary_edaph_vars, 4L), collapse = ","),
         edaph_z_given
       )
-    } else if (!pheno_agree && concordance >= 0.75) {
+    } else if (!pheno_agree && morph_sp == given_sp && edaph_sp == given_sp) {
       conf_flags[i] <- TRUE; triage_cats[i] <- "Phenological_Anomaly_Outlier"
       discord_notes[i] <- sprintf("Flowering DOY %d diverges from seasonal peak (ang_diff=%.2f rad)", doy[i], ang_diff)
-    } else if (concordance == 0.50) {
-      if (morph_sp != given_sp && vis_sp != given_sp && morph_sp == vis_sp) {
-        conf_flags[i] <- TRUE; triage_cats[i] <- "Severe_Triple_Stream_Conflict"
-        discord_notes[i] <- sprintf("Both Morphology and Vision agree on %s over given %s", morph_sp, given_sp)
-      } else if ((morph_sp != vis_sp || (!is.na(cda_prob) && cda_prob >= 0.40 && cda_prob <= 0.65)) &&
-                 (c_err < 0.80) && (edaph_z_given <= 2.5 && edaph_z_alt <= 2.5)) {
+    } else if (morph_sp != given_sp || edaph_sp != given_sp) {
+      if ((morph_sp != edaph_sp || (!is.na(cda_prob) && cda_prob >= 0.40 && cda_prob <= 0.65)) &&
+          (edaph_z_given <= 2.5 && edaph_z_alt <= 2.5)) {
         conf_flags[i] <- TRUE; triage_cats[i] <- "Putative_Hybrid_Zone_Intergrade"
         discord_notes[i] <- sprintf("Intermediate morphometrics & fine-grain edaphic overlap between %s and %s", given_sp, alt_parent)
-      } else if ((morph_sp != given_sp && edaph_sp == morph_sp && (is.na(cda_prob) || cda_prob >= 0.55)) ||
-                 (vis_sp != given_sp && c_err >= 0.80)) {
+      } else if (morph_sp != given_sp && (edaph_sp == morph_sp || is_m_out || (!is.na(cda_prob) && cda_prob >= 0.70))) {
         conf_flags[i] <- TRUE; triage_cats[i] <- "Severe_Triple_Stream_Conflict"
         discord_notes[i] <- sprintf("Cross-modal misidentification signal favoring %s over given %s", alt_parent, given_sp)
       } else {
         conf_flags[i] <- FALSE; triage_cats[i] <- "Clean_MultiModal_Consensus"
-        discord_notes[i] <- "Concordant across primary morphological, vision, and ecological axes"
+        discord_notes[i] <- "Concordant across primary morphological, phenological, and ecological axes"
       }
     } else {
       conf_flags[i] <- FALSE; triage_cats[i] <- "Clean_MultiModal_Consensus"
-      discord_notes[i] <- "Concordant across morphological, vision, and ecological axes"
+      discord_notes[i] <- "Concordant across morphological, phenological, and ecological axes"
     }
   }
 
@@ -3241,12 +3234,12 @@ main <- function() {
   }
   vouchers_df$species_standardized <- sp_cand
   sql_master <- if (!isTRUE(opts$demo) && exists("try_fetch_master_view_for_cohort", mode = "function")) {
-    tryCatch(try_fetch_master_view_for_cohort(vouchers_df = vouchers_df, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo), require_step04 = TRUE, require_step05 = file.exists(opts$vision_audit)), error = function(e) NULL)
+    tryCatch(try_fetch_master_view_for_cohort(vouchers_df = vouchers_df, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo), require_step04 = TRUE), error = function(e) NULL)
   } else NULL
   if (!is.null(sql_master) && nrow(sql_master) > 0L) {
     vouchers_df <- sql_master
     vouchers_df$species_standardized <- standardize_packera_taxon(ifelse(!is.na(vouchers_df$species_standardized) & nzchar(vouchers_df$species_standardized), vouchers_df$species_standardized, vouchers_df$scientificName))
-    message(sprintf("Hydrated %d specimen rows across Steps 01-05 directly from SQLite v_integrative_triage_master.", nrow(vouchers_df)))
+    message(sprintf("Hydrated %d specimen rows across Steps 01-04 directly from SQLite v_integrative_triage_master.", nrow(vouchers_df)))
   } else {
   # Merge Morphometrics if present (resolve morphometric_flags.csv <-> morphometrics_misidentification_flags.csv)
   if (!file.exists(opts$morphometrics)) {
@@ -3297,33 +3290,6 @@ main <- function() {
       "is_promoted_bronze", "is_promoted_anchor", "authority_weight"
     )))
     vouchers_df <- left_join_by_voucher_individual(vouchers_df, morph_df, m_cols)
-  }
-
-  # Merge Cleanlab Vision Audit if present
-  if (file.exists(opts$vision_audit)) {
-    vis_df <- readr::read_csv(opts$vision_audit, show_col_types = FALSE)
-    vis_df$catalogNumber <- as.character(vis_df$catalogNumber)
-    if ("predicted_label" %in% names(vis_df) && !("vision_predicted_label" %in% names(vis_df))) {
-      names(vis_df)[names(vis_df) == "predicted_label"] <- "vision_predicted_label"
-    }
-    if (!("is_artifact_driven" %in% names(vis_df))) {
-      if ("is_background_shortcut" %in% names(vis_df)) {
-        vis_df$is_artifact_driven <- as.logical(vis_df$is_background_shortcut)
-      } else if ("foreground_attention_ratio" %in% names(vis_df)) {
-        fg_r <- suppressWarnings(as.numeric(vis_df$foreground_attention_ratio))
-        vis_df$is_artifact_driven <- ifelse(is.finite(fg_r), fg_r < 0.65, NA)
-      }
-    }
-    v_cols <- intersect(names(vis_df), c(
-      "catalogNumber", "plant_individual_id", "vision_predicted_label",
-      "confidence_predicted_class", "vision_second_prob", "vision_margin",
-      "c_error", "is_label_corrupted", "vision_ood_score", "vision_is_ood",
-      "vision_type_cosine_sim", "vision_nearest_type_taxon", "vision_type_margin",
-      "type_status", "is_type_specimen",
-      "foreground_attention_ratio", "is_artifact_driven", "is_background_shortcut",
-      "surface_orientation", "mean_luminance", "mean_saturation", "tomentum_taxon_discordance"
-    ))
-    vouchers_df <- left_join_by_voucher_individual(vouchers_df, vis_df, v_cols)
   }
 
   # Ingest Voucher Phenological States (Computer Vision Anthesis Ingestion via left_join)
