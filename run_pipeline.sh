@@ -54,6 +54,10 @@ FOCAL_ARGS=()
 INTRASPECIFIC_ARGS=()
 THREADS=""
 GPU_BATCH_SIZE=""
+WAVE_SIZE=""
+PREFETCH_WORKERS=""
+PREP_WORKERS=""
+POST_WORKERS=""
 COMPUTE_ARGS=()
 
 print_usage() {
@@ -68,8 +72,12 @@ Run & Compute Controls:
   --skip-harvest                     Skip Step 01 network harvest; seed cohort from SQLite / curated_vouchers.csv
   --force                            Force re-execution and overwrite cached artifacts (with --start-step 2, re-segments)
   --resegment                        Force Step 02 LeafMachine3 ONNX re-segmentation (--force-reprocess)
-  -j, --threads <INT>                CPU worker thread limit across Python & R stages (exports PACKERA_MAX_WORKERS)
-  --gpu-batch-size <INT>             GPU inference batch size for Step 02 LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime)
+  -j, --threads, --workers <INT>     CPU worker thread limit across Python & R stages (exports PACKERA_MAX_WORKERS)
+  --gpu-batch-size, --batch-size <N> GPU inference batch size for Step 02 LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime)
+  --wave-size <N>                    Cross-voucher GPU wave size in Step 02 (default: 16 or --gpu-batch-size)
+  --prefetch-workers <N>             Override Stage A disk image prefetch worker thread count in Step 02
+  --prep-workers <N>                 Override Stage B2/B3 CPU crop prep & mask decode worker count in Step 02
+  --post-workers <N>                 Override Stage C contour/ECT/rosette post-processing worker count in Step 02
   --limit <N>                        Cap maximum number of vouchers processed in Step 02 segmentation
   --demo                             Run in ephemeral test isolation mode (PACKERA_DEMO_MODE=1)
 
@@ -108,11 +116,11 @@ while [[ $# -gt 0 ]]; do
       print_usage
       exit 0
       ;;
-    -j|--threads)
+    -j|--threads|--workers)
       THREADS="$2"
       shift 2
       ;;
-    --threads=*)
+    --threads=*|--workers=*)
       THREADS="${1#*=}"
       shift
       ;;
@@ -122,6 +130,38 @@ while [[ $# -gt 0 ]]; do
       ;;
     --gpu-batch-size=*|--batch-size=*)
       GPU_BATCH_SIZE="${1#*=}"
+      shift
+      ;;
+    --wave-size)
+      WAVE_SIZE="$2"
+      shift 2
+      ;;
+    --wave-size=*)
+      WAVE_SIZE="${1#*=}"
+      shift
+      ;;
+    --prefetch-workers)
+      PREFETCH_WORKERS="$2"
+      shift 2
+      ;;
+    --prefetch-workers=*)
+      PREFETCH_WORKERS="${1#*=}"
+      shift
+      ;;
+    --prep-workers)
+      PREP_WORKERS="$2"
+      shift 2
+      ;;
+    --prep-workers=*)
+      PREP_WORKERS="${1#*=}"
+      shift
+      ;;
+    --post-workers)
+      POST_WORKERS="$2"
+      shift 2
+      ;;
+    --post-workers=*)
+      POST_WORKERS="${1#*=}"
       shift
       ;;
     --run-id)
@@ -361,6 +401,22 @@ fi
 if [[ -n "${GPU_BATCH_SIZE}" ]]; then
   export PACKERA_GPU_BATCH_SIZE="${GPU_BATCH_SIZE}"
   COMPUTE_ARGS+=("--gpu-batch-size" "${GPU_BATCH_SIZE}")
+fi
+if [[ -n "${WAVE_SIZE}" ]]; then
+  export PACKERA_WAVE_SIZE="${WAVE_SIZE}"
+  COMPUTE_ARGS+=("--wave-size" "${WAVE_SIZE}")
+fi
+if [[ -n "${PREFETCH_WORKERS}" ]]; then
+  export PACKERA_PREFETCH_WORKERS="${PREFETCH_WORKERS}"
+  COMPUTE_ARGS+=("--prefetch-workers" "${PREFETCH_WORKERS}")
+fi
+if [[ -n "${PREP_WORKERS}" ]]; then
+  export PACKERA_PREP_WORKERS="${PREP_WORKERS}"
+  COMPUTE_ARGS+=("--prep-workers" "${PREP_WORKERS}")
+fi
+if [[ -n "${POST_WORKERS}" ]]; then
+  export PACKERA_POST_WORKERS="${POST_WORKERS}"
+  COMPUTE_ARGS+=("--post-workers" "${POST_WORKERS}")
 fi
 
 if [[ -n "${FOCAL_TAXON}" ]]; then

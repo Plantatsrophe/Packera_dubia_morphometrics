@@ -184,6 +184,10 @@ class SegmentAndExtractPipeline:
         enable_geometric_qc: bool = False,
         threads: Optional[int] = None,
         gpu_batch_size: Optional[int] = None,
+        wave_size: Optional[int] = None,
+        prefetch_workers: Optional[int] = None,
+        prep_workers: Optional[int] = None,
+        post_workers: Optional[int] = None,
     ) -> None:
         self.db_path = db_path
         self.enable_geometric_qc = bool(enable_geometric_qc)
@@ -349,10 +353,33 @@ class SegmentAndExtractPipeline:
         self.voucher_petiole_by_pid: Dict[str, Dict[int, Dict[str, Any]]] = {}
         self.voucher_contour_coords_by_leaf: Dict[str, Dict[int, List[List[float]]]] = {}
         self.stage2_batch_size: int = max(1, int(self.gpu_batch_size))
-        self.stage1_wave_size: int = (
-            max(1, min(32, int(self.gpu_batch_size)))
-            if _has_explicit_gpu_bs
-            else 16
+        env_wave_size = os.environ.get("PACKERA_WAVE_SIZE", "").strip()
+        if wave_size is not None:
+            self.stage1_wave_size: int = max(1, int(wave_size))
+        elif env_wave_size:
+            self.stage1_wave_size = max(1, int(env_wave_size))
+        elif _has_explicit_gpu_bs:
+            self.stage1_wave_size = max(1, min(64, int(self.gpu_batch_size)))
+        else:
+            self.stage1_wave_size = 16
+
+        env_prefetch_w = os.environ.get("PACKERA_PREFETCH_WORKERS", "").strip()
+        env_prep_w = os.environ.get("PACKERA_PREP_WORKERS", "").strip()
+        env_post_w = os.environ.get("PACKERA_POST_WORKERS", "").strip()
+        self.prefetch_workers_override: Optional[int] = (
+            max(1, int(prefetch_workers))
+            if prefetch_workers is not None
+            else (max(1, int(env_prefetch_w)) if env_prefetch_w else None)
+        )
+        self.prep_workers_override: Optional[int] = (
+            max(1, int(prep_workers))
+            if prep_workers is not None
+            else (max(1, int(env_prep_w)) if env_prep_w else None)
+        )
+        self.post_workers_override: Optional[int] = (
+            max(1, int(post_workers))
+            if post_workers is not None
+            else (max(1, int(env_post_w)) if env_post_w else None)
         )
 
         # Preload catalogNumber -> scientificName mapping if available
@@ -853,6 +880,9 @@ class SegmentAndExtractPipeline:
         # 1b. Whole-Sheet UNet++ v9 Specimen Segmenter + LLR_Hyst_KeepBlobs paper cleanup (lazy per-voucher cache)
         specimen_paper_cleaned_mask: Optional[np.ndarray] = None
         _specimen_mask_evaluated: bool = False
+        if precomputed_s2_payload is not None and len(precomputed_s2_payload) >= 12:
+            specimen_paper_cleaned_mask = precomputed_s2_payload[11]
+            _specimen_mask_evaluated = True
 
         def _get_specimen_paper_cleaned_mask() -> Optional[np.ndarray]:
             nonlocal specimen_paper_cleaned_mask, _specimen_mask_evaluated
@@ -2980,6 +3010,7 @@ class SegmentAndExtractPipeline:
         prefetch_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
         prep_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
         post_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+        retire_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
         try:
             if use_wave_engine:
@@ -2990,16 +3021,24 @@ class SegmentAndExtractPipeline:
                         prep_workers = 1
                         post_workers = 1
                     else:
-                        prefetch_workers = min(16, max(1, min(t_val, max(4, t_val // 2))))
-                        prep_workers = min(16, max(1, min(t_val, max(4, t_val // 2))))
-                        post_workers = min(24, max(1, t_val))
+                        prefetch_workers = max(4, min(32, t_val // 2))
+                        prep_workers = max(4, min(48, (t_val * 3) // 4))
+                        post_workers = max(4, min(64, t_val))
                 else:
-                    n_cpu = os.cpu_count() or 8
-                    prefetch_workers = min(16, max(4, n_cpu // 2))
-                    prep_workers = min(16, max(4, n_cpu // 2))
-                    post_workers = min(24, max(4, (n_cpu * 3) // 4))
+                    n_cpu = os.cpu_count() or 32
+                    # On 32-core / 64-thread SMT CPUs, scale worker pools to full physical core count (32) by default
+                    eff_cores = min(32, max(4, n_cpu // 2)) if n_cpu >= 32 else max(4, (n_cpu * 3) // 4)
+                    prefetch_workers = max(4, min(24, eff_cores // 2))
+                    prep_workers = max(4, min(32, (eff_cores * 3) // 4))
+                    post_workers = max(4, min(64, eff_cores))
+                if self.prefetch_workers_override is not None:
+                    prefetch_workers = max(1, int(self.prefetch_workers_override))
+                if self.prep_workers_override is not None:
+                    prep_workers = max(1, int(self.prep_workers_override))
+                if self.post_workers_override is not None:
+                    post_workers = max(1, int(self.post_workers_override))
                 wave_size = max(1, int(self.stage1_wave_size))
-                prefetch_window = max(wave_size * 2, prefetch_workers * 2)
+                prefetch_window = max(wave_size * 3, prefetch_workers * 2)
 
                 try:
                     prev_cv2_threads = cv2.getNumThreads()
@@ -3076,14 +3115,18 @@ class SegmentAndExtractPipeline:
                     prefetch_pool = concurrent.futures.ThreadPoolExecutor(max_workers=prefetch_workers)
                     prep_pool = concurrent.futures.ThreadPoolExecutor(max_workers=prep_workers)
                     post_pool = concurrent.futures.ThreadPoolExecutor(max_workers=post_workers)
+                    retire_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    self.stage1_detector._prep_executor = prep_pool  # type: ignore[attr-defined]
+                    self.model_engine._prep_executor = prep_pool  # type: ignore[attr-defined]
+                    if getattr(self, "pose_engine", None) is not None:
+                        self.pose_engine._prep_executor = prep_pool  # type: ignore[attr-defined]
                     prefetch_futures: Dict[int, concurrent.futures.Future] = {}
-                    in_flight_waves: List[List[Tuple[int, str, Path, concurrent.futures.Future]]] = []
+                    retire_futures: List[concurrent.futures.Future] = []
                     use_s1_cache = bool(self.lm3_project_dir is not None and not self.force)
 
-                    def _retire_oldest_wave() -> None:
-                        if not in_flight_waves:
-                            return
-                        oldest_wave = in_flight_waves.pop(0)
+                    def _retire_wave_batch(
+                        oldest_wave: List[Tuple[int, str, Path, concurrent.futures.Future]]
+                    ) -> None:
                         wave_bundles: List[_VoucherFinalizeBundle] = []
                         for a_idx_w, cat_w, path_w, fut_w in oldest_wave:
                             try:
@@ -3302,11 +3345,58 @@ class SegmentAndExtractPipeline:
                                     flat_pose_preds[idx_f] = p_res
 
                         s2_payload_by_local: Dict[int, Tuple[Any, ...]] = {}
+                        has_spec_seg = (
+                            getattr(self, "specimen_segmenter", None) is not None
+                            and getattr(self.specimen_segmenter, "model", None) is not None
+                        )
                         for loc_i, s_idx, e_idx in slice_ranges:
                             unp = unpacked_by_local[loc_i]
                             v_preds = list(flat_preds[s_idx:e_idx]) if e_idx > s_idx else []
                             v_pose_preds = list(flat_pose_preds[s_idx:e_idx]) if e_idx > s_idx else []
-                            s2_payload_by_local[loc_i] = (*unp, v_preds, v_pose_preds)
+                            v_spec_mask: Optional[np.ndarray] = None
+                            if has_spec_seg and v_preds:
+                                needs_spec = False
+                                for c_idx_v, c_preds_v in enumerate(v_preds):
+                                    if not c_preds_v:
+                                        continue
+                                    l_cands_v = [
+                                        (float(p_sc), int(np.count_nonzero(pm_u8)), pm_u8)
+                                        for _bb, pm_u8, p_sc, p_cls in c_preds_v
+                                        if int(p_cls) == 0 and np.any(pm_u8 > 0)
+                                    ]
+                                    if not l_cands_v:
+                                        continue
+                                    l_cands_v.sort(
+                                        key=lambda c: (
+                                            float(c[1]) * (float(c[0]) ** 0.5)
+                                            if float(c[0]) >= 0.42
+                                            else float(c[0]),
+                                            c[1],
+                                        ),
+                                        reverse=True,
+                                    )
+                                    best_m_v = l_cands_v[0][2]
+                                    if cv2.connectedComponents((best_m_v > 0).astype(np.uint8), connectivity=8)[0] > 2:
+                                        needs_spec = True
+                                        break
+                                    if len(l_cands_v) > 1:
+                                        has_pet_v = any(
+                                            int(p_cls) == 1 and np.any(pm_u8 > 0)
+                                            for _bb, pm_u8, _p_sc, p_cls in c_preds_v
+                                        )
+                                        p_res_v = v_pose_preds[c_idx_v] if c_idx_v < len(v_pose_preds) else None
+                                        has_kps_v = bool(getattr(p_res_v, "keypoints_31", None))
+                                        if not has_pet_v and not has_kps_v:
+                                            needs_spec = True
+                                            break
+                                if needs_spec:
+                                    img_v = wave_prefetched[loc_i][4]
+                                    if img_v is not None:
+                                        try:
+                                            v_spec_mask = self.specimen_segmenter.segment_specimen(img_v)
+                                        except Exception:
+                                            v_spec_mask = None
+                            s2_payload_by_local[loc_i] = (*unp, v_preds, v_pose_preds, v_spec_mask)
 
                         ss_payload_by_local: Dict[int, List[Any]] = {}
                         if ss_Fallback_locals:
@@ -3340,12 +3430,12 @@ class SegmentAndExtractPipeline:
                             )
                             wave_post_tasks.append((a_idx, cat_num, raw_img_path, fut_post))
 
-                        in_flight_waves.append(wave_post_tasks)
-                        if len(in_flight_waves) >= 3:
-                            _retire_oldest_wave()
+                        retire_futures.append(retire_pool.submit(_retire_wave_batch, wave_post_tasks))
+                        while len(retire_futures) >= 4:
+                            retire_futures.pop(0).result()
 
-                    while in_flight_waves:
-                        _retire_oldest_wave()
+                    while retire_futures:
+                        retire_futures.pop(0).result()
                 _drain_ordered_plan()
             else:
                 for _, row in voucher_rows:
@@ -3409,6 +3499,12 @@ class SegmentAndExtractPipeline:
                             f"({len(all_extracted_records)} leaves extracted, {len(all_failed_records)} failed QC)."
                         )
         finally:
+            self.stage1_detector._prep_executor = None  # type: ignore[attr-defined]
+            self.model_engine._prep_executor = None  # type: ignore[attr-defined]
+            if getattr(self, "pose_engine", None) is not None:
+                self.pose_engine._prep_executor = None  # type: ignore[attr-defined]
+            if retire_pool is not None:
+                retire_pool.shutdown(wait=True)
             if post_pool is not None:
                 post_pool.shutdown(wait=True)
             if prep_pool is not None:
@@ -3567,10 +3663,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-j",
         "--threads",
+        "--workers",
         dest="threads",
         type=int,
         default=None,
-        help="Maximum CPU worker threads for image prefetching and post-processing (default: auto).",
+        help="Maximum CPU worker threads for image prefetching, tensor prep, and post-processing (default: auto-scaled for 32-core/64-thread CPUs).",
     )
     parser.add_argument(
         "--gpu-batch-size",
@@ -3585,6 +3682,34 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=argparse.SUPPRESS,
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--wave-size",
+        dest="wave_size",
+        type=int,
+        default=None,
+        help="Number of herbarium sheets processed per cross-voucher GPU wave (default: 16 or --gpu-batch-size).",
+    )
+    parser.add_argument(
+        "--prefetch-workers",
+        dest="prefetch_workers",
+        type=int,
+        default=None,
+        help="Optional override for Stage A disk image prefetch worker thread count.",
+    )
+    parser.add_argument(
+        "--prep-workers",
+        dest="prep_workers",
+        type=int,
+        default=None,
+        help="Optional override for Stage B2/B3 CPU crop prep and prototype mask decode worker thread count.",
+    )
+    parser.add_argument(
+        "--post-workers",
+        dest="post_workers",
+        type=int,
+        default=None,
+        help="Optional override for Stage C contour/ECT/rosette post-processing worker thread count.",
     )
     parser.add_argument(
         "--force",
@@ -3644,6 +3769,10 @@ def main() -> None:
         enable_geometric_qc=getattr(args, "enable_geometric_qc", False),
         threads=getattr(args, "threads", None),
         gpu_batch_size=getattr(args, "gpu_batch_size", None),
+        wave_size=getattr(args, "wave_size", None),
+        prefetch_workers=getattr(args, "prefetch_workers", None),
+        prep_workers=getattr(args, "prep_workers", None),
+        post_workers=getattr(args, "post_workers", None),
     )
     pipeline.run(limit=args.limit)
 

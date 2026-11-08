@@ -460,7 +460,38 @@ def resolve_onnx_providers(
 
 _ONNX_SESSION_CACHE: Dict[Tuple[str, Tuple[str, ...]], Any] = {}
 _NVIDIA_LIBS_PRELOADED: bool = False
+_SHARED_CUDA_ARENA_REGISTERED: bool = False
 _ONNX_GPU_LOCK: threading.Lock = threading.Lock()
+
+
+def _ensure_shared_cuda_arena() -> bool:
+    """
+    Registers a single process-wide shared CUDA BFCArena allocator in ONNX Runtime so all
+    4 LeafMachine3 ONNX sessions (PlantDetector, LeafSegmenter, PoseLandmark, SpecimenSegmenter)
+    reuse the same GPU activation pool instead of hoarding 4 isolated per-session arenas.
+    """
+    global _SHARED_CUDA_ARENA_REGISTERED
+    if _SHARED_CUDA_ARENA_REGISTERED:
+        return True
+    try:
+        import onnxruntime as ort
+        mem_info = ort.OrtMemoryInfo(
+            "Cuda",
+            ort.OrtAllocatorType.ORT_ARENA_ALLOCATOR,
+            0,
+            ort.OrtMemType.DEFAULT,
+        )
+        # OrtArenaCfg(max_mem=0 [auto], arena_extend_strategy=1 [kSameAsRequested], initial_chunk=-1, max_dead=-1)
+        arena_cfg = ort.OrtArenaCfg(0, 1, -1, -1)
+        if hasattr(ort, "create_and_register_allocator_v2"):
+            ort.create_and_register_allocator_v2("CUDAExecutionProvider", mem_info, {}, arena_cfg)
+        else:
+            ort.create_and_register_allocator(mem_info, arena_cfg)
+        _SHARED_CUDA_ARENA_REGISTERED = True
+        return True
+    except Exception as exc:
+        logger.debug(f"Shared CUDA arena registration skipped: {exc}")
+        return False
 
 
 def _preload_nvidia_cuda_libs() -> None:
@@ -547,6 +578,11 @@ def _load_onnx_session(
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess_opts.enable_mem_pattern = False
         sess_opts.enable_mem_reuse = True
+        if "CUDAExecutionProvider" in prov_list and _ensure_shared_cuda_arena():
+            try:
+                sess_opts.add_session_config_entry("session.use_env_allocators", "1")
+            except Exception:
+                pass
         sess_opts.intra_op_num_threads = 2
         sess_opts.inter_op_num_threads = 1
         try:
@@ -666,6 +702,42 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
 # =============================================================================
 # 1. LeafMachine3 Stage 1 Plant Detector (YOLO26x End-to-End NMS-Free, 1280 px)
 # =============================================================================
+
+def _run_onnx_minibatches_back_to_back(
+    active_sess: Any,
+    input_name: str,
+    valid_chw_list: Sequence[np.ndarray],
+    initial_sub_bs: int,
+) -> List[Tuple[int, int, List[np.ndarray]]]:
+    """
+    Executes GPU ONNX mini-batches back-to-back without interleaved CPU post-processing.
+    Automatically halves the mini-batch size on transient BFCArena / VRAM allocation pressure.
+    """
+    n_valid = len(valid_chw_list)
+    if n_valid == 0:
+        return []
+    sub_bs = max(1, int(initial_sub_bs))
+    batch_records: List[Tuple[int, int, List[np.ndarray]]] = []
+    idx = 0
+    while idx < n_valid:
+        cur_bs = min(sub_bs, n_valid - idx)
+        batch_tensor = np.stack(valid_chw_list[idx : idx + cur_bs], axis=0)
+        try:
+            with _ONNX_GPU_LOCK:
+                raw_outs = active_sess.run(None, {input_name: batch_tensor})
+        except Exception as exc:
+            if cur_bs > 1:
+                sub_bs = max(1, cur_bs // 2)
+                logger.debug(
+                    f"ONNX mini-batch size {cur_bs} hit memory ceiling ({exc}); retrying with sub_bs={sub_bs}"
+                )
+                continue
+            raise
+        if raw_outs:
+            batch_records.append((idx, idx + cur_bs, raw_outs))
+        idx += cur_bs
+    return batch_records
+
 
 class LM3PlantDetector:
     """
@@ -1005,6 +1077,7 @@ class LM3PlantDetector:
         items: Sequence[Tuple[np.ndarray, Optional[str], Optional[np.ndarray]]],
         use_cache: bool = False,
         max_batch_size: int = 16,
+        executor: Optional[Any] = None,
     ) -> List[List[Tuple[Tuple[int, int, int, int], float, int]]]:
         """Runs Stage 1 plant organ detection across a wave of herbarium sheets using batched GPU tensors."""
         if not items:
@@ -1025,18 +1098,17 @@ class LM3PlantDetector:
 
         try:
             input_name = active_sess.get_inputs()[0].name
-            sub_bs = min(4, max(1, int(max_batch_size)))
+            sub_bs = min(8, max(1, int(max_batch_size)))
             all_outs: List[List[Tuple[Tuple[int, int, int, int], float, int]]] = [[] for _ in items]
-            valid_indices: List[int] = []
-            valid_chw_list: List[np.ndarray] = []
-            valid_meta: List[Tuple[float, Tuple[float, float], Tuple[int, int], float, Tuple[int, int]]] = []
 
-            for idx, (img_bgr, _cat, lb_pre) in enumerate(items):
+            def _prep_s1_item(
+                idx_item: Tuple[int, Tuple[np.ndarray, Optional[str], Optional[np.ndarray]]]
+            ) -> Optional[Tuple[int, np.ndarray, Tuple[float, Tuple[float, float], Tuple[int, int], float, Tuple[int, int]]]]:
+                idx, (img_bgr, _cat, lb_pre) = idx_item
                 if img_bgr is None or img_bgr.size == 0:
-                    continue
+                    return None
                 sh, sw = img_bgr.shape[:2]
                 w_scale = compute_work_scale((sh, sw), max_working_dim=self.max_working_dim)
-                self.last_work_scale = w_scale
                 if w_scale < 1.0:
                     work_w = max(1, int(round(sw * w_scale)))
                     work_h = max(1, int(round(sh * w_scale)))
@@ -1059,29 +1131,58 @@ class LM3PlantDetector:
                 rgb = cv2.cvtColor(lb_bgr, cv2.COLOR_BGR2RGB)
                 chw_f32 = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1)), dtype=np.float32)
                 chw_f32 *= np.float32(1.0) / np.float32(255.0)
-                valid_indices.append(idx)
-                valid_chw_list.append(chw_f32)
-                valid_meta.append((r, pad_xy, (work_h, work_w), w_scale, (sh, sw)))
+                return (idx, chw_f32, (r, pad_xy, (work_h, work_w), w_scale, (sh, sw)))
 
-            for start_i in range(0, len(valid_indices), sub_bs):
-                end_i = min(len(valid_indices), start_i + sub_bs)
-                batch_tensor = np.stack(valid_chw_list[start_i:end_i], axis=0)
-                with _ONNX_GPU_LOCK:
-                    raw_outs = active_sess.run(None, {input_name: batch_tensor})
-                if not raw_outs:
-                    continue
+            indexed_items = list(enumerate(items))
+            eff_exec = executor if executor is not None else getattr(self, "_prep_executor", None)
+            if eff_exec is not None and len(indexed_items) >= 2:
+                prep_results = list(eff_exec.map(_prep_s1_item, indexed_items))
+            else:
+                prep_results = [_prep_s1_item(it) for it in indexed_items]
+
+            valid_indices: List[int] = []
+            valid_chw_list: List[np.ndarray] = []
+            valid_meta: List[Tuple[float, Tuple[float, float], Tuple[int, int], float, Tuple[int, int]]] = []
+            for res in prep_results:
+                if res is not None:
+                    idx, chw_f32, meta = res
+                    self.last_work_scale = meta[3]
+                    valid_indices.append(idx)
+                    valid_chw_list.append(chw_f32)
+                    valid_meta.append(meta)
+
+            batch_records = _run_onnx_minibatches_back_to_back(
+                active_sess, input_name, valid_chw_list, sub_bs
+            )
+
+            decode_tasks: List[Tuple[int, np.ndarray, Tuple[float, Tuple[float, float], Tuple[int, int], float, Tuple[int, int]]]] = []
+            for start_i, end_i, raw_outs in batch_records:
                 out0 = np.asarray(raw_outs[0], dtype=np.float32)
                 for b_off, orig_idx in enumerate(valid_indices[start_i:end_i]):
-                    r, pad_xy, work_hw, w_scale, sheet_hw = valid_meta[start_i + b_off]
                     slice_out = out0[b_off : b_off + 1] if out0.ndim >= 3 else out0
-                    all_outs[orig_idx] = self._decode_yolo26x_det_output(
-                        slice_out,
-                        ratio=r,
-                        pad_xy=pad_xy,
-                        work_shape=work_hw,
-                        work_scale=w_scale,
-                        sheet_shape=sheet_hw,
-                    )
+                    decode_tasks.append((orig_idx, slice_out, valid_meta[start_i + b_off]))
+
+            def _decode_s1_item(
+                task: Tuple[int, np.ndarray, Tuple[float, Tuple[float, float], Tuple[int, int], float, Tuple[int, int]]]
+            ) -> Tuple[int, List[Tuple[Tuple[int, int, int, int], float, int]]]:
+                orig_idx, slice_out, (r, pad_xy, work_hw, w_scale, sheet_hw) = task
+                dets = self._decode_yolo26x_det_output(
+                    slice_out,
+                    ratio=r,
+                    pad_xy=pad_xy,
+                    work_shape=work_hw,
+                    work_scale=w_scale,
+                    sheet_shape=sheet_hw,
+                )
+                return orig_idx, dets
+
+            if eff_exec is not None and len(decode_tasks) >= 2:
+                decoded_pairs = list(eff_exec.map(_decode_s1_item, decode_tasks))
+            else:
+                decoded_pairs = [_decode_s1_item(t) for t in decode_tasks]
+
+            for orig_idx, dets in decoded_pairs:
+                all_outs[orig_idx] = dets
             return all_outs
         except Exception as exc:
             logger.debug(f"LM3PlantDetector batched inference fallback: {exc}")
@@ -1570,6 +1671,7 @@ class LM3LeafSegmenterEngine:
         images_bgr: List[np.ndarray],
         batch_size: int = 10,
         pretransformed: Optional[Sequence[Optional[Tuple[np.ndarray, int, int]]]] = None,
+        executor: Optional[Any] = None,
     ) -> List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]]:
         """
         Runs Stage 2 LeafMachine3 YOLO26x-seg inference across candidate leaf crops using
@@ -1597,15 +1699,15 @@ class LM3LeafSegmenterEngine:
 
         try:
             input_name = active_sess.get_inputs()[0].name
-            sub_bs = min(4, max(1, int(batch_size)))
+            sub_bs = min(8, max(1, int(batch_size)))
             out: List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]] = [[] for _ in images_bgr]
-            valid_indices: List[int] = []
-            valid_chw_list: List[np.ndarray] = []
-            valid_meta: List[Tuple[Tuple[int, int], float, Tuple[float, float], Tuple[int, int]]] = []
 
-            for idx, img in enumerate(images_bgr):
+            def _prep_s2_item(
+                idx: int,
+            ) -> Optional[Tuple[int, np.ndarray, Tuple[Tuple[int, int], float, Tuple[float, float], Tuple[int, int]]]]:
+                img = images_bgr[idx]
                 if img is None or img.size == 0:
-                    continue
+                    return None
                 pre_i = pretransformed[idx] if has_pre else None  # type: ignore[index]
                 if (
                     pre_i is not None
@@ -1624,32 +1726,59 @@ class LM3LeafSegmenterEngine:
                     inp_f32 = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1)), dtype=np.float32)
                     inp_f32 *= np.float32(1.0) / np.float32(255.0)
                     lb_shape = (int(lb_bgr.shape[0]), int(lb_bgr.shape[1]))
+                return (idx, inp_f32, ((crop_h, crop_w), r, pad_xy, lb_shape))
 
-                valid_indices.append(idx)
-                valid_chw_list.append(inp_f32)
-                valid_meta.append(((crop_h, crop_w), r, pad_xy, lb_shape))
+            all_idx = list(range(len(images_bgr)))
+            eff_exec = executor if executor is not None else getattr(self, "_prep_executor", None)
+            if eff_exec is not None and len(all_idx) >= 2:
+                prep_results = list(eff_exec.map(_prep_s2_item, all_idx))
+            else:
+                prep_results = [_prep_s2_item(i) for i in all_idx]
 
-            for start_i in range(0, len(valid_indices), sub_bs):
-                end_i = min(len(valid_indices), start_i + sub_bs)
-                batch_tensor = np.stack(valid_chw_list[start_i:end_i], axis=0)
-                with _ONNX_GPU_LOCK:
-                    raw_outs = active_sess.run(None, {input_name: batch_tensor})
-                if not raw_outs:
-                    continue
+            valid_indices: List[int] = []
+            valid_chw_list: List[np.ndarray] = []
+            valid_meta: List[Tuple[Tuple[int, int], float, Tuple[float, float], Tuple[int, int]]] = []
+            for res in prep_results:
+                if res is not None:
+                    idx, inp_f32, meta = res
+                    valid_indices.append(idx)
+                    valid_chw_list.append(inp_f32)
+                    valid_meta.append(meta)
+
+            batch_records = _run_onnx_minibatches_back_to_back(
+                active_sess, input_name, valid_chw_list, sub_bs
+            )
+
+            decode_tasks: List[Tuple[int, List[np.ndarray], Tuple[Tuple[int, int], float, Tuple[float, float], Tuple[int, int]]]] = []
+            for start_i, end_i, raw_outs in batch_records:
                 for b_off, orig_idx in enumerate(valid_indices[start_i:end_i]):
-                    crop_hw, r, pad_xy, lb_shape = valid_meta[start_i + b_off]
                     item_outs = [
                         ro[b_off : b_off + 1] if np.asarray(ro).ndim >= 3 else ro
                         for ro in raw_outs
                     ]
-                    out[orig_idx] = self._decode_yolo26x_seg_outputs(
-                        item_outs,
-                        crop_shape=crop_hw,
-                        ratio=r,
-                        pad_xy=pad_xy,
-                        image_bgr=images_bgr[orig_idx],
-                        letterbox_shape=lb_shape,
-                    )
+                    decode_tasks.append((orig_idx, item_outs, valid_meta[start_i + b_off]))
+
+            def _decode_s2_item(
+                task: Tuple[int, List[np.ndarray], Tuple[Tuple[int, int], float, Tuple[float, float], Tuple[int, int]]]
+            ) -> Tuple[int, List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]]:
+                orig_idx, item_outs, (crop_hw, r, pad_xy, lb_shape) = task
+                dets = self._decode_yolo26x_seg_outputs(
+                    item_outs,
+                    crop_shape=crop_hw,
+                    ratio=r,
+                    pad_xy=pad_xy,
+                    image_bgr=images_bgr[orig_idx],
+                    letterbox_shape=lb_shape,
+                )
+                return orig_idx, dets
+
+            if eff_exec is not None and len(decode_tasks) >= 2:
+                decoded_pairs = list(eff_exec.map(_decode_s2_item, decode_tasks))
+            else:
+                decoded_pairs = [_decode_s2_item(t) for t in decode_tasks]
+
+            for orig_idx, dets in decoded_pairs:
+                out[orig_idx] = dets
             return out
         except Exception as exc:
             logger.debug(f"LM3LeafSegmenterEngine batched inference fallback: {exc}")
@@ -2093,6 +2222,7 @@ class LM3PoseLandmarkEngine:
         petiole_masks: Optional[Sequence[Optional[np.ndarray]]] = None,
         crop_offsets: Optional[Sequence[Tuple[float, float]]] = None,
         batch_size: int = 8,
+        executor: Optional[Any] = None,
     ) -> List[LM3PoseResult]:
         """
         Runs batched 640 px YOLO26x-pose landmark detection across multiple leaf crops on the GPU
@@ -2120,27 +2250,21 @@ class LM3PoseLandmarkEngine:
 
         try:
             input_name = active_sess.get_inputs()[0].name
-            sub_bs = min(8, max(1, int(batch_size)))
+            sub_bs = min(16, max(1, int(batch_size)))
             pad_f = float(getattr(self, "WHITE_PAD_FRAC", 0.10))
             results: List[Optional[LM3PoseResult]] = [None] * n_items
-            valid_indices: List[int] = []
-            valid_chw_list: List[np.ndarray] = []
-            valid_meta: List[Tuple[int, int, int, int, float, float, float, float, float]] = []
 
-            for idx, crop_bgr in enumerate(crops_bgr):
+            def _prep_pose_item(
+                idx: int,
+            ) -> Optional[Tuple[int, np.ndarray, Tuple[int, int, int, int, float, float, float, float, float]]]:
+                crop_bgr = crops_bgr[idx]
                 ox, oy = (
                     (float(crop_offsets[idx][0]), float(crop_offsets[idx][1]))
                     if (crop_offsets and idx < len(crop_offsets))
                     else (0.0, 0.0)
                 )
                 if crop_bgr is None or crop_bgr.size == 0:
-                    results[idx] = self._geometric_fallback_keypoints_31(
-                        crop_bgr=crop_bgr,
-                        lamina_mask=lamina_masks[idx] if (lamina_masks and idx < len(lamina_masks)) else None,
-                        petiole_mask=petiole_masks[idx] if (petiole_masks and idx < len(petiole_masks)) else None,
-                        offset_xy=(ox, oy),
-                    )
-                    continue
+                    return None
                 crop_h, crop_w = crop_bgr.shape[:2]
                 px, py = int(round(crop_w * pad_f)), int(round(crop_h * pad_f))
                 padded_bgr = cv2.copyMakeBorder(
@@ -2150,23 +2274,46 @@ class LM3PoseLandmarkEngine:
                 rgb = cv2.cvtColor(lb_bgr, cv2.COLOR_BGR2RGB)
                 chw_f32 = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1)), dtype=np.float32)
                 chw_f32 *= np.float32(1.0) / np.float32(255.0)
-                valid_indices.append(idx)
-                valid_chw_list.append(chw_f32)
-                valid_meta.append((crop_h, crop_w, px, py, float(r), float(dw), float(dh), ox, oy))
+                return (idx, chw_f32, (crop_h, crop_w, px, py, float(r), float(dw), float(dh), ox, oy))
 
-            for start_i in range(0, len(valid_indices), sub_bs):
-                end_i = min(len(valid_indices), start_i + sub_bs)
-                batch_tensor = np.stack(valid_chw_list[start_i:end_i], axis=0)
-                with _ONNX_GPU_LOCK:
-                    raw_outs = active_sess.run(None, {input_name: batch_tensor})
-                if not raw_outs:
-                    continue
+            all_idx = list(range(n_items))
+            eff_exec = executor if executor is not None else getattr(self, "_prep_executor", None)
+            if eff_exec is not None and n_items >= 2:
+                prep_results = list(eff_exec.map(_prep_pose_item, all_idx))
+            else:
+                prep_results = [_prep_pose_item(i) for i in all_idx]
+
+            valid_indices: List[int] = []
+            valid_chw_list: List[np.ndarray] = []
+            valid_meta: List[Tuple[int, int, int, int, float, float, float, float, float]] = []
+            for res in prep_results:
+                if res is not None:
+                    idx, chw_f32, meta = res
+                    valid_indices.append(idx)
+                    valid_chw_list.append(chw_f32)
+                    valid_meta.append(meta)
+
+            batch_records = _run_onnx_minibatches_back_to_back(
+                active_sess, input_name, valid_chw_list, sub_bs
+            )
+
+            raw_arr_by_idx: Dict[int, Tuple[np.ndarray, Tuple[int, int, int, int, float, float, float, float, float]]] = {}
+            for start_i, end_i, raw_outs in batch_records:
                 out0 = np.asarray(raw_outs[0], dtype=np.float32)
                 for b_off, orig_idx in enumerate(valid_indices[start_i:end_i]):
-                    crop_h, crop_w, px, py, r, dw, dh, ox, oy = valid_meta[start_i + b_off]
-                    lm_i = lamina_masks[orig_idx] if (lamina_masks and orig_idx < len(lamina_masks)) else None
-                    pm_i = petiole_masks[orig_idx] if (petiole_masks and orig_idx < len(petiole_masks)) else None
                     arr = out0[b_off] if out0.ndim >= 3 else out0
+                    raw_arr_by_idx[orig_idx] = (arr, valid_meta[start_i + b_off])
+
+            def _decode_pose_item(idx: int) -> LM3PoseResult:
+                lm_i = lamina_masks[idx] if (lamina_masks and idx < len(lamina_masks)) else None
+                pm_i = petiole_masks[idx] if (petiole_masks and idx < len(petiole_masks)) else None
+                ox, oy = (
+                    (float(crop_offsets[idx][0]), float(crop_offsets[idx][1]))
+                    if (crop_offsets and idx < len(crop_offsets))
+                    else (0.0, 0.0)
+                )
+                if idx in raw_arr_by_idx:
+                    arr, (crop_h, crop_w, px, py, r, dw, dh, ox, oy) = raw_arr_by_idx[idx]
                     if arr.ndim == 2 and arr.shape[0] < arr.shape[1] and arr.shape[0] >= 5 + 3 * 31:
                         arr = arr.T
                     if arr.ndim == 2 and arr.shape[0] > 0 and arr.shape[1] >= 5 + 3 * 31:
@@ -2187,27 +2334,17 @@ class LM3PoseLandmarkEngine:
                             pet_w = self._estimate_petiole_width_px(
                                 kps_out, petiole_mask=pm_i, lamina_mask=lm_i
                             )
-                            results[orig_idx] = LM3PoseResult(kps_out, petiole_width_px=pet_w)
+                            return LM3PoseResult(kps_out, petiole_width_px=pet_w)
+                return self._geometric_fallback_keypoints_31(
+                    crop_bgr=crops_bgr[idx],
+                    lamina_mask=lm_i,
+                    petiole_mask=pm_i,
+                    offset_xy=(ox, oy),
+                )
 
-            out_final: List[LM3PoseResult] = []
-            for idx in range(n_items):
-                if results[idx] is not None:
-                    out_final.append(results[idx])  # type: ignore[arg-type]
-                else:
-                    ox, oy = (
-                        (float(crop_offsets[idx][0]), float(crop_offsets[idx][1]))
-                        if (crop_offsets and idx < len(crop_offsets))
-                        else (0.0, 0.0)
-                    )
-                    out_final.append(
-                        self._geometric_fallback_keypoints_31(
-                            crop_bgr=crops_bgr[idx],
-                            lamina_mask=lamina_masks[idx] if (lamina_masks and idx < len(lamina_masks)) else None,
-                            petiole_mask=petiole_masks[idx] if (petiole_masks and idx < len(petiole_masks)) else None,
-                            offset_xy=(ox, oy),
-                        )
-                    )
-            return out_final
+            if eff_exec is not None and n_items >= 2:
+                return list(eff_exec.map(_decode_pose_item, all_idx))
+            return [_decode_pose_item(i) for i in all_idx]
         except Exception as exc:
             logger.debug(f"LM3PoseLandmarkEngine batched inference fallback: {exc}")
             return [

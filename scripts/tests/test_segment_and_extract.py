@@ -2169,6 +2169,87 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         deduped = det_eng._deduplicate_sheet_boxes(boxes_s1)
         self.assertEqual(len(deduped), 2)
 
+    def test_step02_cli_compute_flags_and_back_to_back_minibatch_halving(self) -> None:
+        """
+        Verify CLI flags (--threads/--workers, --gpu-batch-size/--batch-size, --wave-size,
+        --prefetch-workers, --prep-workers, --post-workers) and _run_onnx_minibatches_back_to_back
+        automatic mini-batch halving on transient memory errors.
+        """
+        import main as main_cli
+        from scripts.vision.lm3_inference_engines import _run_onnx_minibatches_back_to_back
+
+        with patch(
+            "sys.argv",
+            [
+                "02_segment_and_extract.py",
+                "--workers",
+                "32",
+                "--batch-size",
+                "16",
+                "--wave-size",
+                "24",
+                "--prefetch-workers",
+                "16",
+                "--prep-workers",
+                "24",
+                "--post-workers",
+                "32",
+            ],
+        ):
+            parsed_s2 = step02.parse_args()
+            self.assertEqual(parsed_s2.threads, 32)
+            self.assertEqual(parsed_s2.gpu_batch_size, 16)
+            self.assertEqual(parsed_s2.wave_size, 24)
+            self.assertEqual(parsed_s2.prefetch_workers, 16)
+            self.assertEqual(parsed_s2.prep_workers, 24)
+            self.assertEqual(parsed_s2.post_workers, 32)
+
+        main_parser = main_cli.build_parser()
+        parsed_main = main_parser.parse_args(
+            [
+                "segment",
+                "--workers",
+                "64",
+                "--gpu-batch-size",
+                "16",
+                "--wave-size",
+                "32",
+                "--prefetch-workers",
+                "24",
+                "--prep-workers",
+                "32",
+                "--post-workers",
+                "48",
+            ]
+        )
+        self.assertEqual(parsed_main.threads, 64)
+        self.assertEqual(parsed_main.gpu_batch_size, 16)
+        self.assertEqual(parsed_main.wave_size, 32)
+        self.assertEqual(parsed_main.prefetch_workers, 24)
+        self.assertEqual(parsed_main.prep_workers, 32)
+        self.assertEqual(parsed_main.post_workers, 48)
+
+        # Verify _run_onnx_minibatches_back_to_back automatically halves sub_bs when B>2 raises an OOM error
+        class _FakeBFCExhaustedSession:
+            def __init__(self) -> None:
+                self.batch_sizes_seen: list[int] = []
+
+            def run(self, _out_names, feed_dict):
+                x = feed_dict["images"]
+                b = int(x.shape[0])
+                self.batch_sizes_seen.append(b)
+                if b > 2:
+                    raise RuntimeError("BFCArena::AllocateRawInternal Failed to allocate memory")
+                return [np.zeros((b, 8, 10), dtype=np.float32)]
+
+        fake_sess = _FakeBFCExhaustedSession()
+        tensors = [np.zeros((3, 8, 8), dtype=np.float32) for _ in range(6)]
+        records = _run_onnx_minibatches_back_to_back(fake_sess, "images", tensors, initial_sub_bs=8)
+        # Initial attempt at B=6 fails -> halves to 3 (fails) -> halves to 1 (succeeds for all 6 items)
+        total_covered = sum(end_i - start_i for start_i, end_i, _ in records)
+        self.assertEqual(total_covered, 6)
+        self.assertGreaterEqual(len(fake_sess.batch_sizes_seen), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

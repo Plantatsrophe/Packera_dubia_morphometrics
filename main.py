@@ -783,6 +783,14 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd.extend(["--threads", str(args.threads)])
     if getattr(args, "gpu_batch_size", None) is not None:
         cmd.extend(["--gpu-batch-size", str(args.gpu_batch_size)])
+    if getattr(args, "wave_size", None) is not None:
+        cmd.extend(["--wave-size", str(args.wave_size)])
+    if getattr(args, "prefetch_workers", None) is not None:
+        cmd.extend(["--prefetch-workers", str(args.prefetch_workers)])
+    if getattr(args, "prep_workers", None) is not None:
+        cmd.extend(["--prep-workers", str(args.prep_workers)])
+    if getattr(args, "post_workers", None) is not None:
+        cmd.extend(["--post-workers", str(args.post_workers)])
     if getattr(args, "force", False):
         cmd.append("--force")
 
@@ -1163,6 +1171,7 @@ def _add_common_subparser_args(
     subparser.add_argument(
         "-j",
         "--threads",
+        "--workers",
         dest="threads",
         type=int,
         default=None,
@@ -1182,6 +1191,34 @@ def _add_common_subparser_args(
             type=int,
             default=argparse.SUPPRESS,
             help=argparse.SUPPRESS,
+        )
+        subparser.add_argument(
+            "--wave-size",
+            dest="wave_size",
+            type=int,
+            default=None,
+            help="Number of herbarium sheets processed per cross-voucher GPU wave (default: 16 or --gpu-batch-size).",
+        )
+        subparser.add_argument(
+            "--prefetch-workers",
+            dest="prefetch_workers",
+            type=int,
+            default=None,
+            help="Optional override for Stage A disk image prefetch worker thread count.",
+        )
+        subparser.add_argument(
+            "--prep-workers",
+            dest="prep_workers",
+            type=int,
+            default=None,
+            help="Optional override for Stage B2/B3 CPU crop prep and prototype mask decode worker thread count.",
+        )
+        subparser.add_argument(
+            "--post-workers",
+            dest="post_workers",
+            type=int,
+            default=None,
+            help="Optional override for Stage C contour/ECT/rosette post-processing worker thread count.",
         )
 
 
@@ -1221,7 +1258,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run in ephemeral test isolation mode (PACKERA_DEMO_MODE=1).",
     )
     parser.add_argument(
-        "-j", "--threads",
+        "-j", "--threads", "--workers",
         dest="threads",
         type=int,
         default=None,

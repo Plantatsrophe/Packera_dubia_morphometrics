@@ -369,6 +369,7 @@ def get_db_connection(
     demo: bool = False,
     init_schema: bool = False,
     workspace_root: Path = PROJECT_ROOT,
+    check_same_thread: bool = False,
 ) -> sqlite3.Connection:
     """
     Open a SQLite connection configured with WAL mode, NORMAL synchronous durability,
@@ -380,16 +381,21 @@ def get_db_connection(
         p = Path(resolved)
         if not p.exists():
             raise FileNotFoundError(f"SQLite database not found for read-only connection: {p}")
-        conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True, timeout=30.0)
+        conn = sqlite3.connect(
+            f"file:{p.as_posix()}?mode=ro",
+            uri=True,
+            timeout=30.0,
+            check_same_thread=check_same_thread,
+        )
         conn.row_factory = sqlite3.Row
         _apply_sqlite_pragmas(conn, read_only=True)
         return conn
 
     if resolved != ":memory:":
         Path(resolved).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(resolved), timeout=30.0)
+        conn = sqlite3.connect(str(resolved), timeout=30.0, check_same_thread=check_same_thread)
     else:
-        conn = sqlite3.connect(":memory:", timeout=30.0)
+        conn = sqlite3.connect(":memory:", timeout=30.0, check_same_thread=check_same_thread)
 
     conn.row_factory = sqlite3.Row
     _apply_sqlite_pragmas(conn, read_only=False)
