@@ -843,45 +843,45 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertEqual(routing.rejection_reason, "UNRESOLVED_CLUMP")
 
     def test_stage1_high_dpi_filtering_and_single_primary_blade_selection(self) -> None:
-        """Verify on high-DPI herbarium sheets (>2000px), Stage 1 restricts to Class 0, filters tiny/upper boxes, and selects 1 blade."""
+        """Verify on high-DPI herbarium sheets (>2000px), Stage 1 forwards all Class 0 (`Leaf_WHOLE`) boxes to Stage 2 while skipping Class 1 (`Leaf_PARTIAL`), and post-segmentation filters tiny noise."""
         sheet_img = np.full((3000, 2400, 3), 230, dtype=np.uint8)
         self.assertTrue(max(sheet_img.shape[:2]) > 2000)
 
         # Stage 1 detections:
-        # 1. Class 1 (leaf_partial) -> should be skipped on high-DPI
-        # 2. Class 0, but upper cauline: cy = 600 < 0.28 * 3000 (840) -> should be skipped
-        # 3. Class 0, but tiny box: bh=80, bw=80 < 0.045 * 3000 (135) -> should be skipped
-        # 4. Class 0, valid basal leaf box: ymin=1800, xmin=800, ymax=2400, xmax=1400 (bh=600, bw=600, cy=2100) -> accepted!
+        # 1. Class 1 (leaf_partial) -> skipped when Class 0 is present and segment_partial_leaves=False
+        # 2. Class 0, upper-sheet plant leaf: cy = 600 -> forwarded to Stage 2 and retained!
+        # 3. Class 0, tiny 80x80 box near lower rosette -> forwarded to Stage 2 and filtered post-segmentation
+        # 4. Class 0, lower-sheet basal leaf box: ymin=1800, xmin=800, ymax=2400, xmax=1400 -> forwarded and retained!
         stage1_dets = [
             ((1500, 500, 1900, 900), 0.90, 1),   # leaf_partial -> skipped
-            ((400, 800, 800, 1200), 0.92, 0),    # cy=600 < 840 -> skipped
-            ((1600, 600, 1680, 680), 0.88, 0),   # max(bh, bw)=80 < 135 -> skipped
-            ((1800, 800, 2400, 1400), 0.95, 0),  # valid basal leaf!
+            ((400, 800, 800, 1200), 0.92, 0),    # upper-sheet Class 0 leaf_whole -> forwarded
+            ((1600, 600, 1680, 680), 0.88, 0),   # 80x80 Class 0 box -> forwarded to Stage 2, rejected post-seg
+            ((1800, 800, 2400, 1400), 0.95, 0),  # lower-sheet Class 0 leaf_whole -> forwarded
         ]
 
         def fake_high_dpi_stage2(crop_img: np.ndarray):
             ch, cw = crop_img.shape[:2]
-            # Prediction 1: Class 1 (petiole/stem fragment) -> ignored
+            # Prediction 1: Class 1 (petiole/stem fragment)
             m1 = np.zeros((ch, cw), dtype=np.uint8)
-            cv2.rectangle(m1, (10, 10), (30, 200), 255, -1)
+            cv2.rectangle(m1, (10, 10), (min(cw - 1, 30), min(ch - 1, 200)), 255, -1)
 
-            # Prediction 2: Class 0, tiny noise fragment (< 8000 px) -> ignored
+            # Prediction 2: Class 0, tiny noise fragment
             m2 = np.zeros((ch, cw), dtype=np.uint8)
-            cv2.circle(m2, (50, 50), 20, 255, -1)
+            cv2.circle(m2, ( min(cw - 1, 50), min(ch - 1, 50)), 5, 255, -1)
 
-            # Prediction 3: Class 0, large primary blade (> 8000 px, area ~ 40,000) -> selected!
+            # Prediction 3: Class 0, primary blade in crop
             m3 = np.zeros((ch, cw), dtype=np.uint8)
-            cv2.ellipse(m3, (cw // 2, ch // 2), (cw // 3, ch // 3), 0, 0, 360, 255, -1)
+            cv2.ellipse(m3, (cw // 2, ch // 2), (max(8, cw // 3), max(8, ch // 3)), 0, 0, 360, 255, -1)
 
-            # Prediction 4: Class 0, smaller blade fragment (area ~ 15,000, lower score) -> not selected
+            # Prediction 4: Class 0, smaller blade fragment (lower score)
             m4 = np.zeros((ch, cw), dtype=np.uint8)
-            cv2.ellipse(m4, (cw // 2, ch // 2), (cw // 5, ch // 5), 0, 0, 360, 255, -1)
+            cv2.ellipse(m4, (cw // 2, ch // 2), (max(5, cw // 5), max(5, ch // 5)), 0, 0, 360, 255, -1)
 
             return [
-                ((10, 10, 200, 30), m1, 0.90, 1),
-                ((30, 30, 70, 70), m2, 0.85, 0),
-                ((50, 50, ch - 50, cw - 50), m3, 0.95, 0),
-                ((100, 100, ch - 100, cw - 100), m4, 0.70, 0),
+                ((10, 10, min(ch, 200), min(cw, 30)), m1, 0.90, 1),
+                ((10, 10, min(ch, 30), min(cw, 30)), m2, 0.85, 0),
+                ((10, 10, max(20, ch - 10), max(20, cw - 10)), m3, 0.95, 0),
+                ((20, 20, max(30, ch - 20), max(30, cw - 20)), m4, 0.70, 0),
             ]
 
         with patch("cv2.imread", return_value=sheet_img):
@@ -890,11 +890,11 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                     records, failure = self.qc_pipeline.process_voucher("NCU_HIGHDPI", self.img_path)
 
         self.assertIsNone(failure)
-        # Stage 2 LM3LeafSegmenterEngine must be called EXACTLY ONCE (only for valid basal leaf box #4)
-        self.assertEqual(mock_s2.call_count, 1)
-        # Exactly ONE primary blade instance extracted
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["assigned_tier"], "Tier_1_Direct")
+        # Stage 2 LM3LeafSegmenterEngine is called for all 3 Class 0 (`Leaf_WHOLE`) boxes (Class 1 skipped)
+        self.assertEqual(mock_s2.call_count, 3)
+        # Upper-sheet and lower-sheet whole leaves are retained; tiny 80x80 candidate is rejected post-segmentation
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(r["assigned_tier"] == "Tier_1_Direct" for r in records))
 
     def test_stage1_use_cache_flag(self) -> None:
         """Verify LM3PlantDetector.predict respects use_cache flag."""
@@ -2094,6 +2094,75 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         expected_px_per_mm = 27.112084 * np.sqrt(6.0) / 10.0
         self.assertAlmostEqual(float(cal_res["pixels_per_mm"]), expected_px_per_mm, places=3)
         self.assertEqual(cal_res["cf_source"], "predicted_from_megapixels")
+
+    def test_native_lm3_stride32_letterbox_tight_crops_and_cordate_survival(self) -> None:
+        """
+        Verify Phases 1-4 native LeafMachine3 alignment:
+          1. Dynamic stride-32 letterboxing (`auto=True, stride=32`) matches `ultra_rep.letterbox`
+             instead of forcing a square canvas.
+          2. Default `crop_leaf_bbox_with_padding` uses tight `pad_ratio=0.0` matching `detector_common.py`.
+          3. `LM3LeafSegmenterEngine.segment_leaf_crop` unions multiple `Petiole` and `Hole` instances (`>= 64 px`).
+          4. Stage 1 `_deduplicate_sheet_boxes` uses `overlap=0.95` (`inter / min_area >= 0.95`) so adjacent
+             rosette leaves with moderate overlap (`IoU ~ 0.55`) both survive.
+          5. Broad cordate/orbicular leaves (`W/L > 0.78, solidity < 0.84`) survive high-DPI QC.
+        """
+        from scripts.vision.lm3_inference_engines import (
+            LM3LeafSegmenterEngine,
+            LM3PlantDetector,
+            _letterbox_bgr,
+            crop_leaf_bbox_with_padding,
+        )
+
+        # 1. Dynamic stride-32 letterboxing on a 600x200 crop at img_size=1024
+        dummy_crop = np.full((600, 200, 3), 180, dtype=np.uint8)
+        lb_bgr, gain, (pad_x, pad_y) = _letterbox_bgr(dummy_crop, 1024)
+        self.assertEqual(lb_bgr.shape[0], 1024)
+        self.assertLess(lb_bgr.shape[1], 1024)
+        self.assertEqual(lb_bgr.shape[1] % 32, 0)
+
+        # 2. Default tight crop (`pad_ratio=0.0`)
+        sheet_img = np.full((1000, 800, 3), 235, dtype=np.uint8)
+        crop_tight, box_tight = crop_leaf_bbox_with_padding(sheet_img, (200, 150, 500, 450))
+        self.assertEqual(box_tight, (200, 150, 500, 450))
+        self.assertEqual(crop_tight.shape[:2], (300, 300))
+
+        # 3. Multi-instance Petiole and Hole unioning in LM3LeafSegmenterEngine.segment_leaf_crop
+        seg_eng = LM3LeafSegmenterEngine(device="cpu")
+        lam_m = np.zeros((200, 200), dtype=np.uint8)
+        cv2.circle(lam_m, (100, 90), 55, 255, -1)
+        pet_1 = np.zeros((200, 200), dtype=np.uint8)
+        cv2.rectangle(pet_1, (96, 145), (104, 165), 255, -1)  # 9 * 21 = 189 px >= 64
+        pet_2 = np.zeros((200, 200), dtype=np.uint8)
+        cv2.rectangle(pet_2, (96, 165), (104, 190), 255, -1)  # 9 * 26 = 234 px >= 64
+        hole_1 = np.zeros((200, 200), dtype=np.uint8)
+        cv2.circle(hole_1, (85, 85), 6, 255, -1)  # ~113 px >= 64
+        hole_2 = np.zeros((200, 200), dtype=np.uint8)
+        cv2.circle(hole_2, (115, 95), 6, 255, -1)  # ~113 px >= 64
+        fake_preds = [
+            ((35, 45, 145, 155), lam_m, 0.94, 0),
+            ((145, 96, 165, 104), pet_1, 0.85, 1),
+            ((165, 96, 190, 104), pet_2, 0.80, 1),
+            ((79, 79, 91, 91), hole_1, 0.82, 2),
+            ((89, 109, 101, 121), hole_2, 0.79, 2),
+        ]
+        with patch.object(seg_eng, "predict", return_value=fake_preds):
+            lam_out, pet_out, hole_out, sc_out = seg_eng.segment_leaf_crop(np.zeros((200, 200, 3), dtype=np.uint8))
+        self.assertIsNotNone(lam_out)
+        self.assertIsNotNone(pet_out)
+        self.assertIsNotNone(hole_out)
+        self.assertGreater(int(np.count_nonzero(pet_out)), int(np.count_nonzero(pet_1)))
+        self.assertGreater(int(np.count_nonzero(hole_out)), int(np.count_nonzero(hole_1)))
+        self.assertAlmostEqual(sc_out, 0.94, places=3)
+
+        # 4. Stage 1 overlap=0.95 deduplication keeps moderately overlapping rosette leaves
+        boxes_s1 = [
+            ((500, 500, 900, 900), 0.95, 0),
+            ((550, 550, 950, 950), 0.92, 0),  # ~62% containment (< 0.95) -> both kept!
+            ((510, 510, 890, 890), 0.88, 0),  # 100% contained (>= 0.95) -> suppressed!
+        ]
+        det_eng = LM3PlantDetector(device="cpu")
+        deduped = det_eng._deduplicate_sheet_boxes(boxes_s1)
+        self.assertEqual(len(deduped), 2)
 
 
 if __name__ == "__main__":

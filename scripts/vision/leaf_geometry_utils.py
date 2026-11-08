@@ -826,14 +826,26 @@ def export_standardized_contour(
 
     anchor_pt = petiole_attachment_pt if petiole_attachment_pt is not None else lamina_base
     if keypoints_31 is not None:
-        kp_arr = np.asarray(keypoints_31, dtype=np.float64)
-        if kp_arr.ndim == 2 and kp_arr.shape[0] >= 2 and kp_arr.shape[1] >= 2:
-            c0 = float(kp_arr[0, 2]) if kp_arr.shape[1] >= 3 else 1.0
-            c1 = float(kp_arr[1, 2]) if kp_arr.shape[1] >= 3 else 1.0
-            if anchor_pt is None and c1 >= 0.25 and (abs(kp_arr[1, 0]) + abs(kp_arr[1, 1])) > 0.0:
-                anchor_pt = (float(kp_arr[1, 0]), float(kp_arr[1, 1]))
-            if p_apex_pt is None and c0 >= 0.25 and (abs(kp_arr[0, 0]) + abs(kp_arr[0, 1])) > 0.0:
-                p_apex_pt = (float(kp_arr[0, 0]), float(kp_arr[0, 1]))
+        if isinstance(keypoints_31, dict):
+            lb_kp = keypoints_31.get("lamina_base") or keypoints_31.get("base_2") or keypoints_31.get("base_center")
+            lt_kp = keypoints_31.get("lamina_tip") or keypoints_31.get("apex_2") or keypoints_31.get("apex_center")
+            if anchor_pt is None and lb_kp is not None and len(lb_kp) >= 2:
+                c1 = float(lb_kp[2]) if len(lb_kp) >= 3 else 1.0
+                if c1 >= 0.25 and (abs(float(lb_kp[0])) + abs(float(lb_kp[1]))) > 0.0:
+                    anchor_pt = (float(lb_kp[0]), float(lb_kp[1]))
+            if p_apex_pt is None and lt_kp is not None and len(lt_kp) >= 2:
+                c0 = float(lt_kp[2]) if len(lt_kp) >= 3 else 1.0
+                if c0 >= 0.25 and (abs(float(lt_kp[0])) + abs(float(lt_kp[1]))) > 0.0:
+                    p_apex_pt = (float(lt_kp[0]), float(lt_kp[1]))
+        else:
+            kp_arr = np.asarray(keypoints_31, dtype=np.float64)
+            if kp_arr.ndim == 2 and kp_arr.shape[0] >= 2 and kp_arr.shape[1] >= 2:
+                c0 = float(kp_arr[0, 2]) if kp_arr.shape[1] >= 3 else 1.0
+                c1 = float(kp_arr[1, 2]) if kp_arr.shape[1] >= 3 else 1.0
+                if anchor_pt is None and c1 >= 0.25 and (abs(kp_arr[1, 0]) + abs(kp_arr[1, 1])) > 0.0:
+                    anchor_pt = (float(kp_arr[1, 0]), float(kp_arr[1, 1]))
+                if p_apex_pt is None and c0 >= 0.25 and (abs(kp_arr[0, 0]) + abs(kp_arr[0, 1])) > 0.0:
+                    p_apex_pt = (float(kp_arr[0, 0]), float(kp_arr[0, 1]))
     if anchor_pt is None and work_mask is not None:
         try:
             _, _, _, calc_apex, calc_base = compute_geometric_metrics(work_mask)
