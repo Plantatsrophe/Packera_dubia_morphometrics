@@ -3443,10 +3443,7 @@ def parse_args() -> argparse.Namespace:
         dest="enable_geometric_qc",
         action="store_true",
         default=False,
-        help=(
-            "Opt in to legacy post-hoc OpenCV geometric/photometric gatekeeping. "
-            "Disabled by default so Step 02 runs 100%% raw unconstrained LeafMachine3 segmentation."
-        ),
+        help="Enable Packera botanical gatekeeper, dissected-rachis bridging, and per-plant adaptive blade-area filtering (default: False for unconstrained LeafMachine3 extraction)",
     )
     parser.add_argument(
         "-j",
@@ -3501,7 +3498,7 @@ def parse_args() -> argparse.Namespace:
         dest="regenerate_figures_only",
         action="store_true",
         default=False,
-        help="Reload Step 02–04 tables and regenerate post-QC Step 02 publication figures without running segmentation.",
+        help="Reload Step 02 to 04 tables and regenerate post-QC Step 02 publication figures without running segmentation.",
     )
     return parser.parse_args()
 

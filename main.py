@@ -1346,7 +1346,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="enable_geometric_qc",
         action="store_true",
         default=False,
-        help="Opt in to legacy post-hoc OpenCV geometric/photometric gatekeeping.",
+        help="Enable Packera botanical gatekeeper, dissected-rachis bridging, and per-plant adaptive blade-area filtering (default: False for unconstrained LeafMachine3 extraction)",
     )
     p_segment.add_argument(
         "--force",
@@ -1481,7 +1481,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="enable_geometric_qc",
         action="store_true",
         default=False,
-        help="Opt in to legacy post-hoc OpenCV geometric/photometric gatekeeping.",
+        help="Enable Packera botanical gatekeeper, dissected-rachis bridging, and per-plant adaptive blade-area filtering (default: False for unconstrained LeafMachine3 extraction)",
     )
     p_all.add_argument("--input", type=Path, default=None, help=argparse.SUPPRESS)
     p_all.add_argument("--manifest", type=Path, default=None, help="Extracted leaf manifest CSV")

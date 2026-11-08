@@ -35,12 +35,19 @@ Every CV, extraction, and morphometrics module in `scripts/vision/`, `scripts/pi
 * **Active Reference Anchors (`Tier_1_Gold`, `Tier_2_Silver`, promoted `Tier_3_Bronze`, `Tier_0_Type`):** Used exclusively for model fitting, Mahalanobis scatter estimation, CDA discriminant axes, and Spatial RF training.
 * **Passively Projected Vouchers (`Tier_4_Unverified` or unpromoted `Tier_3_Bronze`):** Assigned weight $0.0$ during training and projected into fitted spaces without altering reference geometry.
 
+### 5. Native LeafMachine3 ONNX Alignment (`lm3_inference_engines.py`)
+* Stage 1 and Stage 2 models execute dynamic rectangular stride-32 letterboxing via `ultra_rep.letterbox(auto=True, stride=32)` with `cv2.INTER_LINEAR_EXACT` interpolation.
+* Stage 1 operates at `conf = 0.30` and suppresses nested duplicate detections within each class at `overlap = 0.95` (`inter / min_area >= 0.95`).
+* Stage 2 extracts tight crops (`crop_pad = 0.0`), decodes prototype masks natively via `ultra_rep.process_mask_native`, and performs class-wise unioning of all valid `Leaf` (`0`), `Petiole` (`1`), and `Hole` (`2`) instances (`>= 64 px`).
+* Whole-sheet `LLR_Hyst_KeepBlobs` log-likelihood hysteresis is applied strictly in `LM3SpecimenSegmenter` at the whole-sheet level, and `10%` white border padding (`WHITE_PAD_FRAC = 0.10`) is added around leaf crops in `LM3LandmarkDetector`.
+* Adaptive physical blade-area flooring ($\min(0.75, \max(0.15, 0.25 \times \text{median\_area}))\text{ cm}^2$) and relative area filtering ($0.15 \times \max\text{area}$) are computed per plant individual (`plant_individual_id`, `effective_min_area_by_pid`), retaining all passing leaves without a sheet-wide 6-leaf cap.
+
 ---
 
 ## Part 2: Automated Cross-Stage SQLite/CSV Contract and Hygiene Audit
 
-### 1. Zero `_archive` Coupling and Legacy Token Scan
-Active files must never reference `_archive` paths and must contain zero legacy framework remnants:
+### 1. Zero `_archive` Coupling and Obsolete Token Scan
+Active files must never reference `_archive` paths and must contain zero obsolete framework remnants:
 
 ```bash
 python3 - <<'EOF'

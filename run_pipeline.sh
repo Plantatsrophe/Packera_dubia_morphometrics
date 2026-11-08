@@ -65,7 +65,9 @@ Run & Compute Controls:
   --run-id <ID>                      Custom identifier for isolated run directory under runs/<ID>/
   --db <PATH>                        Override path to SQLite WAL database (default: data/packera_pipeline.sqlite)
   --start-step <1..7>                Start or resume execution at step <1..7> (step >=2 skips harvest automatically)
+  --skip-harvest                     Skip Step 01 network harvest; seed cohort from SQLite / curated_vouchers.csv
   --force                            Force re-execution and overwrite cached artifacts (with --start-step 2, re-segments)
+  --resegment                        Force Step 02 LeafMachine3 ONNX re-segmentation (--force-reprocess)
   -j, --threads <INT>                CPU worker thread limit across Python & R stages (exports PACKERA_MAX_WORKERS)
   --gpu-batch-size <INT>             GPU inference batch size for Step 02 LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime)
   --limit <N>                        Cap maximum number of vouchers processed in Step 02 segmentation
@@ -79,9 +81,11 @@ Taxonomic Scope & Complex Discovery:
   --expand-synonyms / --no-expand-synonyms
                                      Toggle GBIF synonym/basionym expansion (default: --expand-synonyms)
   --discover-complexes               Run Step 07 unsupervised taxon-complex discovery (auto-scopes focal neighbors)
+  --auto-neighbors                   Append high-affinity neighbor taxa from prior Step 07 network output
   --min-affinity <FLOAT>             Minimum multimodal affinity weight threshold in Step 07 (default: 0.03)
 
 Authority Tiering & Curation Filters:
+  --gold-only                        Restrict active cohort to Nomenclatural Types and Tier_1_Gold vouchers
   --determiner-tier <TIER>           Restrict cohort to determiner authority tier (gold|silver|bronze or Tier_1_Gold)
   --gold-anchors <N>                 Target Tier 1 Gold reference anchors per outgroup taxon (default: 30)
   --exclude-misidentified            Prune vouchers flagged as Misidentification_Reassign in prior runs
@@ -89,6 +93,7 @@ Authority Tiering & Curation Filters:
 
 Geographic Scope & Spatial Sampling:
   --geographic-scope <SCOPE>         Geographic scope: eastern_na (default), north_america, or global
+  --include-western                  Include western North American vouchers west of -106.65W
   --countries "<ISO2> ..."           ISO-2 country codes for GBIF harvesting (default: US)
   --spatial-thin-km <FLOAT>          Minimum spatial grid thinning distance in km per species (default: 0)
   --max-per-state <INT>              Cap maximum vouchers retained per (species, stateProvince)
@@ -399,7 +404,7 @@ START_TIME="$(date -Iseconds)"
 GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
 
 echo "=============================================================================="
-echo "Packera Morphometrics Pipeline — Run-Scoped Execution"
+echo "Packera Morphometrics Pipeline: Run-Scoped Execution"
 echo "  Run ID          : ${RUN_ID}"
 echo "  Run Directory   : ${RUN_DIR}"
 echo "  SQLite Database : ${PACKERA_DB_PATH}"
@@ -504,7 +509,7 @@ if [[ "${HAS_UPSTREAM_VOUCHERS}" == "true" && "${HAS_UPSTREAM_STEP02}" == "true"
 fi
 
 if [[ "${REUSE_CANONICAL_DATA}" == "true" ]]; then
-  echo "[Preflight] Seeding Step 01–02 tables, masks, and contours from ${SEED_DATA_DIR}..."
+  echo "[Preflight] Seeding Step 01 to 02 tables, masks, and contours from ${SEED_DATA_DIR}..."
   OVERWRITE_SEED_TABLES=false
   if [[ "${START_STEP}" -le 2 ]] || [[ "${START_STEP}" -eq 3 && "${HAS_EXPLICIT_SOURCE_RUN}" == "true" ]]; then
     OVERWRITE_SEED_TABLES=true
