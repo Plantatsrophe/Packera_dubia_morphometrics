@@ -265,20 +265,6 @@ def format_lat_lon_key(lat: Any, lon: Any) -> Optional[str]:
     return f"{f_lat:.5f}_{f_lon:.5f}"
 
 
-def compute_file_sha256(path: Union[str, Path]) -> Optional[str]:
-    p = Path(path)
-    if not p.is_file():
-        return None
-    h = hashlib.sha256()
-    try:
-        with open(p, "rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except OSError:
-        return None
-
-
 def resolve_db_path(
     db_path: Optional[Union[str, Path]] = None,
     workspace_root: Path = PROJECT_ROOT,
@@ -456,47 +442,6 @@ from scripts.core.db_schema import (
 # =============================================================================
 # Atomic CSV Export & Generic Upsert Utilities
 # =============================================================================
-
-def export_table_or_view_to_csv_atomic(
-    conn: sqlite3.Connection,
-    query: str,
-    params: Sequence[Any],
-    target_csv: Union[str, Path],
-) -> Path:
-    """
-    Execute `query` with `params` and atomically write the result set to `target_csv`
-    via `.tmp` + `flush()` + `os.fsync()` + `Path.replace()`.
-    """
-    target_path = Path(target_csv)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-
-    cur = conn.execute(query, tuple(params))
-    headers = [desc[0] for desc in (cur.description or [])]
-    rows = cur.fetchall()
-
-    tmp_fd, tmp_name = tempfile.mkstemp(
-        dir=str(target_path.parent),
-        prefix=f".{target_path.stem}_",
-        suffix=".csv.tmp",
-    )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8", newline="") as f:
-            writer = csv.writer(f)
-            if headers:
-                writer.writerow(headers)
-            for row in rows:
-                writer.writerow(["" if val is None else val for val in row])
-            f.flush()
-            os.fsync(f.fileno())
-        tmp_path.replace(target_path)
-    except Exception:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
-        raise
-
-    return target_path
-
 
 def get_table_columns(conn: sqlite3.Connection, table_name: str) -> List[str]:
     cur = conn.execute(f"PRAGMA table_info({table_name});")
@@ -2110,46 +2055,6 @@ def _read_csv_dicts(csv_path: Path) -> List[Dict[str, str]]:
         return []
     with open(csv_path, "r", encoding="utf-8", errors="replace", newline="") as f:
         return list(csv.DictReader(f))
-
-
-def export_table_to_csv(
-    conn: sqlite3.Connection,
-    table_name: str,
-    csv_path: Union[str, Path],
-    where_clause: str = "",
-    params: Sequence[Any] = (),
-) -> int:
-    """
-    Atomically export rows of a SQLite table or view to a CSV snapshot file.
-    Returns the number of exported rows.
-    """
-    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table_name):
-        raise ValueError(f"Invalid SQLite table/view identifier: {table_name!r}")
-    dest = Path(csv_path).resolve()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    sql = f'SELECT * FROM "{table_name}"'
-    if where_clause.strip():
-        sql += f" WHERE {where_clause.strip()}"
-    cur = conn.execute(sql, tuple(params))
-    col_names = [desc[0] for desc in (cur.description or [])]
-    rows = cur.fetchall()
-    tmp_path = dest.parent / f".{dest.name}.tmp.{os.getpid()}"
-    try:
-        with open(tmp_path, "w", encoding="utf-8", newline="") as f:
-            writer = csv.writer(f)
-            if col_names:
-                writer.writerow(col_names)
-            for row in rows:
-                writer.writerow(["" if val is None else val for val in row])
-        tmp_path.replace(dest)
-    except Exception:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise
-    return len(rows)
 
 
 def ingest_existing_run_tables_into_db(

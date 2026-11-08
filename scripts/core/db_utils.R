@@ -669,20 +669,6 @@ db_upsert_dataframe <- function(
   n_sub
 }
 
-load_taxon_synonyms_sqlite <- function(conn = NULL) {
-  own_conn <- is.null(conn)
-  if (own_conn) conn <- connect_packera_db(read_only = TRUE)
-  if (is.null(conn)) return(character(0))
-  on.exit(if (own_conn) disconnect_packera_db(conn), add = TRUE)
-  if (!db_table_exists_safe(conn, "taxon_synonyms")) return(character(0))
-  res <- tryCatch(
-    DBI::dbGetQuery(conn, "SELECT raw_name_lower, canonical_packera FROM taxon_synonyms;"),
-    error = function(e) NULL
-  )
-  if (is.null(res) || nrow(res) == 0L) return(character(0))
-  stats::setNames(as.character(res$canonical_packera), tolower(trimws(as.character(res$raw_name_lower))))
-}
-
 # ==============================================================================
 # Step 03: Single-Query 120-Vertex Contour & Leaf Metadata Ingestion + Persistence
 # ==============================================================================
@@ -1339,24 +1325,6 @@ query_environmental_cache_sqlite <- function(
   res <- tryCatch(DBI::dbGetQuery(conn, sql), error = function(e) NULL)
   if (is.null(res) || nrow(res) == 0L) return(NULL)
   .coalesce_wc_bio_qt_qtr_df(coerce_sqlite_logical_cols(res))
-}
-
-load_environmental_cache_sqlite <- function(
-  cache_path = NULL,
-  db_path = NULL,
-  catalog_numbers = NULL,
-  lat_lon_keys = NULL,
-  bbox = NULL,
-  demo = FALSE
-) {
-  query_environmental_cache_sqlite(
-    catalog_numbers = catalog_numbers,
-    lat_lon_keys = lat_lon_keys,
-    bbox = bbox,
-    cache_path = cache_path,
-    db_path = db_path,
-    demo = demo
-  )
 }
 
 upsert_environmental_cache_sqlite <- function(

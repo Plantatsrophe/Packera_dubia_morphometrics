@@ -131,10 +131,10 @@ class TestConfigureLeafMachine3(unittest.TestCase):
         self.assertIn("lm3_archival_detector__yolo26x_det_1280", yaml.safe_dump(archival))
         self.assertAlmostEqual(float(_find_value(archival, "conf_thres")), 0.65, places=3)
 
-        # 4. plant_detector (lm3_plant_detector__yolo26x_det_1280, conf_thres: 0.35)
+        # 4. plant_detector (lm3_plant_detector__yolo26x_det_1280, conf_thres: 0.25)
         plant_det = _extract_module_block(cfg, "plant_detector")
         self.assertIn("lm3_plant_detector__yolo26x_det_1280", yaml.safe_dump(plant_det))
-        self.assertAlmostEqual(float(_find_value(plant_det, "conf_thres")), 0.35, places=3)
+        self.assertAlmostEqual(float(_find_value(plant_det, "conf_thres")), 0.25, places=3)
 
         # 5. specimen_segmenter (lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain, paperclean: True, LLR_Hyst_KeepBlobs: True)
         spec_seg = _extract_module_block(cfg, "specimen_segmenter")

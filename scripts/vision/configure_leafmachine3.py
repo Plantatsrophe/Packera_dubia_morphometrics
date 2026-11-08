@@ -808,48 +808,6 @@ def generate_lm3_config(
     return cfg
 
 
-def _default_local_settings(**kwargs: Any) -> Dict[str, Any]:
-    """Returns canonical LeafMachine3 local settings dictionary."""
-    return generate_lm3_config(**kwargs)
-
-
-def patch_local_settings(yaml_path: Union[str, Path]) -> Dict[str, Any]:
-    """Enforces high-resolution paper-cleaning and hole-subtraction settings on an existing LM3 YAML."""
-    cfg = load_config_yaml(yaml_path) if Path(yaml_path).exists() else generate_lm3_config()
-    ingest = cfg.setdefault("ingest", {})
-    ingest["recursive"] = True
-    ingest["allowed_exts"] = [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"]
-    ingest["max_working_dim"] = 3200
-    modules = cfg.setdefault("modules", {})
-    spec_seg = modules.setdefault("specimen_segmenter", {"enabled": True})
-    spec_seg["conf"] = 0.50
-    spec_seg["paperclean"] = True
-    spec_seg["LLR_Hyst_KeepBlobs"] = True
-    leaf_seg = modules.setdefault("leaf_segmenter", {"enabled": True})
-    leaf_seg["retina_masks"] = True
-    leaf_seg.setdefault("conf", 0.30)
-    leaf_seg.setdefault("iou", 0.50)
-    leaf_seg.setdefault("imgsz", 1024)
-    leaf_seg.setdefault("max_det", 300)
-    leaf_seg.setdefault("overlap", 0.95)
-    leaf_seg.setdefault("include_partial", False)
-    leaf_seg.setdefault("crop_pad", 0.0)
-    report = cfg.setdefault("report", {})
-    report.setdefault("masks", {})["subtract_holes"] = True
-    lp = report.setdefault("leaf_products", {"enabled": True, "products": {}})
-    lp["enabled"] = True
-    lp_prods = lp.setdefault("products", {})
-    lp_prods["lamina_mask"] = True
-    lp_prods["hole_mask"] = True
-    save_config_yaml(cfg, yaml_path)
-    return cfg
-
-
-# Alias for callers using the high-performance or legacy dict builder names
-generate_high_performance_config = generate_lm3_config
-build_lm3_config_dict = generate_lm3_config
-
-
 def validate_lm3_config(config_dict: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     """Validates structural integrity and data types of a LeafMachine3 configuration dictionary."""
     if not isinstance(config_dict, dict):

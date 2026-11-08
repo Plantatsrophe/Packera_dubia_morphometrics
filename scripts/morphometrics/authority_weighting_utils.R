@@ -257,7 +257,9 @@ if (!exists("packera_mclapply", mode = "function")) {
 }
 
 select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL, aux_df = NULL) {
-  .select_morphometric_subspace_core(X, group_vec = group_vec, min_p = min_p, max_p = max_p, aux_df = aux_df)
+  sel <- .select_morphometric_subspace_core(X, group_vec = group_vec, min_p = min_p, max_p = max_p, aux_df = aux_df)
+  message(sprintf("Subspace Selection (Horn Parallel Analysis / Broken-Stick & Williams & Titus 1988 P <= floor(N_min / 3)): retained P = %d / %d features.", length(sel), ncol(as.matrix(X))))
+  sel
 }
 
 .prepare_anchor_feature_matrix <- function(df, feature_matrix = NULL, max_p = NULL, group_vec = NULL) {

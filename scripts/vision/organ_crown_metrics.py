@@ -100,55 +100,6 @@ def cluster_plant_individuals(
     return instances
 
 
-def cluster_voucher_plants_dbscan(
-    candidates: List[Any],
-    sheet_width: int = 3000,
-    sheet_height: int = 4000
-) -> List[Any]:
-    """
-    Applies adaptive DBSCAN spatial clustering (eps ≈ 0.15 * sheet_width, min_samples=2)
-    to group detected organs into distinct plant_individual_id clusters.
-    Outlier noise leaves (label == -1) receive unique individual IDs so no leaf is lost.
-    """
-    if not candidates:
-        return candidates
-
-    centroids = []
-    for cand in candidates:
-        ymin, xmin, ymax, xmax = cand.bbox
-        if ymax > ymin and xmax > xmin:
-            cx = (xmin + xmax) / 2.0
-            cy = (ymin + ymax) / 2.0
-        else:
-            cx = sheet_width / 2.0
-            cy = sheet_height / 2.0
-        centroids.append([cx, cy])
-
-    coords = np.array(centroids, dtype=np.float32)
-
-    if len(candidates) <= 1:
-        candidates[0].plant_individual_id = 0
-        return candidates
-
-    adaptive_eps = 0.15 * float(sheet_width)
-    db = DBSCAN(eps=adaptive_eps, min_samples=2).fit(coords)
-    labels = db.labels_
-
-    unique_clusters = sorted([l for l in set(labels) if l >= 0])
-    cluster_mapping = {c: i for i, c in enumerate(unique_clusters)}
-
-    next_id = len(cluster_mapping)
-    for i, cand in enumerate(candidates):
-        raw_label = labels[i]
-        if raw_label >= 0:
-            cand.plant_individual_id = cluster_mapping[raw_label]
-        else:
-            cand.plant_individual_id = next_id
-            next_id += 1
-
-    return candidates
-
-
 # =============================================================================
 # 7. Empirical Basal Petiole Length & Flowering Scape Height Approximations
 # =============================================================================

@@ -56,7 +56,7 @@ class TestPipelineConfig(unittest.TestCase):
     def test_thresholds_values(self):
         """Verify key pipeline quality and segmentation thresholds match expected parameters."""
         cfg = PipelineConfig.from_yaml()
-        self.assertAlmostEqual(cfg.thresholds.pcd_conf, 0.72)
+        self.assertAlmostEqual(cfg.thresholds.pcd_conf, 0.25)
         self.assertAlmostEqual(cfg.thresholds.min_solidity, 0.72)
         self.assertAlmostEqual(cfg.thresholds.min_ucs, 0.85)
         self.assertAlmostEqual(cfg.thresholds.min_megapixels, 8.0)

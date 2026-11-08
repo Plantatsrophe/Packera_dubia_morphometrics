@@ -51,9 +51,6 @@ standardize_packera_taxon <- function(species_vec) {
   as.character(species_vec)
 }
 
-# Empirical Bayes / Dawid-Skene hierarchical active/passive reference authority weights (Slenker et al. 2022; Dawid & Skene 1979)
-compute_authority_precision_weights <- function(df, tier_col = "determiner_tier", active_mask = NULL, target_modality = "morph") compute_empirical_bayes_authority_weights(df, mode = "active_passive", active_mask = if (is.logical(tier_col) && is.null(active_mask)) tier_col else active_mask, target_modality = target_modality)
-
 discover_sorted_morph_cols <- function(x, pattern, require_finite = TRUE) {
   nms <- if (is.data.frame(x) || is.matrix(x)) colnames(x) else as.character(x); hits <- grep(pattern, nms, value = TRUE)
   if (length(hits) > 1L) hits <- hits[order(suppressWarnings(as.integer(gsub("[^0-9]", "", hits))), hits)]
@@ -190,11 +187,6 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
 }
 evaluate_ontogenetic_allometry <- test_and_correct_allometry
 # Subspace Selection: Horn's Parallel Analysis / Broken-Stick & Williams & Titus (1988) Rule (P <= floor(N_min / 3))
-select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL, aux_df = NULL) {
-  sel <- .select_morphometric_subspace_core(X, group_vec = group_vec, min_p = min_p, max_p = max_p, aux_df = aux_df)
-  message(sprintf("Subspace Selection (Horn Parallel Analysis / Broken-Stick & Williams & Titus 1988 P <= floor(N_min / 3)): retained P = %d / %d features.", length(sel), ncol(as.matrix(X))))
-  sel
-}
 # 3. Gaussian Mixture Modeling & Bayes Factor Testing (Seed = 42; fit_gmm_em_pure in pub_figures_utils.R)
 run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarsel = FALSE, intraspecific_mode = FALSE) {
   pc_guard_cols <- grep("^(Sym_)?PC[0-9]+$", feature_cols, value = TRUE)

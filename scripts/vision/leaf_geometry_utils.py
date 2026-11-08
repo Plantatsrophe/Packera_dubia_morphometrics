@@ -250,22 +250,6 @@ def compute_geometric_metrics(
     return ucs, solidity, angle_deg, p_apex, p_base
 
 
-# Alias for backwards compatibility with geometric_gatekeeper.py
-compute_geometric_metrics_and_pose = compute_geometric_metrics
-
-
-def is_tier1_pristine(
-    ucs: float,
-    solidity: float,
-    min_ucs: float = 0.85,
-    min_solidity: float = 0.72
-) -> bool:
-    """
-    Evaluates whether a leaf instance satisfies Tier 1 Pristine QC thresholds.
-    """
-    return bool(ucs >= min_ucs and solidity >= min_solidity)
-
-
 def _prepare_lamina_mask(
     mask: Optional[np.ndarray] = None,
     petiole_mask: Optional[np.ndarray] = None,
@@ -710,15 +694,12 @@ from scripts.vision.organ_crown_metrics import (  # noqa: E402
     approximate_petiole_and_scape_metrics,
     classify_leaf_zone_anatomical,
     cluster_plant_individuals,
-    cluster_voucher_plants_dbscan,
     estimate_rosette_crown_point,
 )
 
 __all__ = [
     "find_lamina_midrib_endpoints",
     "compute_geometric_metrics",
-    "compute_geometric_metrics_and_pose",
-    "is_tier1_pristine",
     "compute_classical_shape_descriptors",
     "is_botanical_dissection",
     "resample_normalized_contour",
@@ -732,7 +713,6 @@ __all__ = [
     "route_tier1_silhouette",
     "export_standardized_contour",
     "cluster_plant_individuals",
-    "cluster_voucher_plants_dbscan",
     "_extract_xy_point",
     "_parse_basal_leaf_pose",
     "_estimate_single_plant_crown",

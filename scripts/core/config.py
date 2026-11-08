@@ -467,14 +467,6 @@ class SegmentationConfig:
 
 
 @dataclass(frozen=True)
-class LeafMachine3VisionConfig:
-    """LeafMachine3 vision settings for high-resolution paper cleanup and hole subtraction."""
-    subtract_holes: bool = True
-    paperclean_llr_hyst_keepblobs: bool = True
-    specimen_max_working_dim: int = 3200
-
-
-@dataclass(frozen=True)
 class ModelsConfig:
     """LeafMachine3 ONNX model identifiers, checkpoint paths, remote URLs, and integrity hashes."""
     lm3_root: Path = PROJECT_ROOT / "LeafMachine3"

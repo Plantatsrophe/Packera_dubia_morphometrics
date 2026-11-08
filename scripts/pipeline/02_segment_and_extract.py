@@ -80,23 +80,15 @@ from scripts.core.db import (
     record_voucher_segmentation_transaction,
     upsert_vouchers_records,
 )
-from scripts.vision.configure_leafmachine3 import (
-    generate_high_performance_config,
-    generate_lm3_config,
-    resolve_pcd_weights,
-)
+from scripts.vision.configure_leafmachine3 import generate_lm3_config
 from scripts.vision.lm3_data_loader import (
     compute_blade_area_cm2,
     DEFAULT_HERBARIUM_DPI,
     DEFAULT_PX_PER_CM,
-    discover_lm3_candidates,
-    LeafCandidate,
     LM3_LEAF_CLASS_IDS,
     LM3_PLANT_CLASSES,
     LM3_REPRODUCTIVE_CLASS_IDS,
-    load_precomputed_pcd_labels,
     load_ruler_calibrations,
-    parse_bbox_from_filename,
     resolve_px_per_cm,
 )
 from scripts.vision.leaf_geometry_utils import (
@@ -119,33 +111,7 @@ from scripts.vision.capitulum_phenology_classifier import (
     classify_single_capitulum,
     classify_voucher_phenology,
 )
-try:
-    from scripts.vision.organ_crown_metrics import classify_leaf_zone_anatomical
-except ImportError:
-    def classify_leaf_zone_anatomical(
-        leaf_inputs: Sequence[Mapping[str, Any]],
-        crowns_by_pid: Optional[Mapping[int, Tuple[float, float]]] = None,
-        rosette_centroids_by_pid: Optional[Mapping[int, Optional[Tuple[float, float]]]] = None,
-        basal_stats_by_pid: Optional[Mapping[int, Tuple[float, float, float, float]]] = None,
-        capitula_detections: Optional[Sequence[Tuple[int, int, int, int]]] = None,
-        root_boxes: Optional[Sequence[Tuple[int, int, int, int]]] = None,
-        is_bent_stem: bool = False,
-        sheet_shape: Optional[Tuple[int, int]] = None,
-    ) -> Dict[int, Dict[str, Any]]:
-        _ = (crowns_by_pid, rosette_centroids_by_pid, basal_stats_by_pid, capitula_detections, root_boxes, is_bent_stem, sheet_shape)
-        out: Dict[int, Dict[str, Any]] = {}
-        for item in leaf_inputs:
-            lid = int(item.get("leaf_id", 0))
-            cy_rel = float(item.get("cy_rel_plant_bbox", np.nan))
-            has_pet = bool(item.get("has_petiole_mask", False)) or float(item.get("geodesic_petiole_skeleton_px", 0.0) or 0.0) > 5.0
-            zone = "cauline" if (np.isfinite(cy_rel) and cy_rel < 0.38 and not has_pet) else "basal"
-            out[lid] = {
-                "leaf_zone": zone,
-                "leaf_zone_confidence": 0.75,
-                "dist_from_crown_norm": np.nan,
-                "cy_rel_plant_bbox": cy_rel,
-            }
-        return out
+from scripts.vision.organ_crown_metrics import classify_leaf_zone_anatomical
 
 from leafmachine3.core.ect_compute import ect_product_for
 from leafmachine3.core.imaging import polygon_mask

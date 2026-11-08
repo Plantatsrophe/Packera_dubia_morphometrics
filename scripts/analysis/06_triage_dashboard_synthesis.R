@@ -1738,14 +1738,6 @@ build_triage_queue <- function(opts) {
     v <- suppressWarnings(as.numeric(x)); v <- v[is.finite(v)]
     if (length(v) > 0L) stats::median(v) else NA_real_
   }
-  mean_or_na <- function(x) {
-    v <- suppressWarnings(as.numeric(x)); v <- v[is.finite(v)]
-    if (length(v) > 0L) mean(v) else NA_real_
-  }
-  max_or_na <- function(x) {
-    v <- suppressWarnings(as.numeric(x)); v <- v[is.finite(v)]
-    if (length(v) > 0L) max(v) else NA_real_
-  }
   first_chr_or_na <- function(x) {
     v <- as.character(stats::na.omit(x)); v <- v[nzchar(trimws(v))]
     if (length(v) > 0L) v[1L] else NA_character_

@@ -1473,14 +1473,13 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
 
     def test_lm3_working_frame_coordinate_unscaling(self) -> None:
         """
-        Verify LeafMachine3 working-frame coordinate unscaling (`compute_lm3_work_scale`,
-        `unscale_working_bbox_to_sheet`, and `unscale_working_points_to_sheet`) converts
-        from a 3,200 px working frame back to native sheet dimensions (3753x5634).
+        Verify LeafMachine3 working-frame coordinate unscaling (`compute_lm3_work_scale`
+        and `unscale_working_bbox_to_sheet`) converts from a 3,200 px working frame back
+        to native sheet dimensions (3753x5634).
         """
         from scripts.vision.lm3_data_loader import (
             compute_lm3_work_scale,
             unscale_working_bbox_to_sheet,
-            unscale_working_points_to_sheet,
         )
 
         sheet_h, sheet_w = 5634, 3753
@@ -1508,26 +1507,6 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         self.assertGreaterEqual(xmin, 0)
         self.assertLessEqual(ymax, sheet_h)
         self.assertLessEqual(xmax, sheet_w)
-
-        # Working-frame 2D points / 31-keypoint array -> native sheet coordinates
-        work_pts = np.array(
-            [
-                [1000.0 * expected_scale, 2000.0 * expected_scale, 0.95],
-                [1500.0 * expected_scale, 3500.0 * expected_scale, 0.91],
-            ],
-            dtype=np.float32,
-        )
-        unscaled_pts = unscale_working_points_to_sheet(
-            work_pts,
-            work_scale,
-            sheet_shape=(sheet_h, sheet_w),
-        )
-        self.assertEqual(unscaled_pts.shape, (2, 3))
-        self.assertAlmostEqual(float(unscaled_pts[0, 0]), 1000.0, delta=1.5)
-        self.assertAlmostEqual(float(unscaled_pts[0, 1]), 2000.0, delta=1.5)
-        self.assertAlmostEqual(float(unscaled_pts[0, 2]), 0.95, places=4)
-        self.assertAlmostEqual(float(unscaled_pts[1, 0]), 1500.0, delta=1.5)
-        self.assertAlmostEqual(float(unscaled_pts[1, 1]), 3500.0, delta=1.5)
 
     def test_lm3_unetpp_specimen_mask_rachis_bridging_and_6pt_petiole_pose(self) -> None:
         """

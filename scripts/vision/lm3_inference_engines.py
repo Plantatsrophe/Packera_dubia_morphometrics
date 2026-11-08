@@ -96,85 +96,14 @@ except ImportError:
         stem = Path(default_filename).stem
         return root / "models" / "lm3" / f"{stem}.onnx"
 
-try:
-    from scripts.vision.lm3_data_loader import (
-        LM3_LEAF_CLASS_IDS,
-        LM3_PLANT_CLASSES,
-        LM3_REPRODUCTIVE_CLASS_IDS,
-        compute_work_scale,
-        load_precomputed_plant_labels,
-        unscale_working_bbox_to_sheet,
-    )
-except ImportError:
-    LM3_PLANT_CLASSES: Dict[int, str] = {
-        0: "Leaf_WHOLE",
-        1: "Leaf_PARTIAL",
-        2: "Seed_Fruit_ONE",
-        3: "Seed_Fruit_MANY",
-        4: "Flower_ONE",
-        5: "Flower_MANY",
-        6: "Bud",
-        7: "Roots",
-        8: "Wood",
-    }
-    LM3_LEAF_CLASS_IDS: Tuple[int, ...] = (0, 1)
-    LM3_REPRODUCTIVE_CLASS_IDS: Tuple[int, ...] = (2, 3, 4, 5, 6)
-
-    def compute_work_scale(sheet_shape: Tuple[int, int], max_working_dim: int = 3200) -> float:
-        sh, sw = int(sheet_shape[0]), int(sheet_shape[1])
-        max_dim = max(sh, sw)
-        if max_dim <= 0 or max_working_dim <= 0 or max_dim <= max_working_dim:
-            return 1.0
-        return float(max_working_dim) / float(max_dim)
-
-    def unscale_working_bbox_to_sheet(
-        bbox_work: Tuple[Union[int, float], Union[int, float], Union[int, float], Union[int, float]],
-        work_scale: float,
-        sheet_shape: Optional[Tuple[int, int]] = None,
-    ) -> Tuple[int, int, int, int]:
-        scale = float(work_scale) if (work_scale and work_scale > 0.0) else 1.0
-        ymin_w, xmin_w, ymax_w, xmax_w = bbox_work
-        ymin_s = int(round(float(ymin_w) / scale))
-        xmin_s = int(round(float(xmin_w) / scale))
-        ymax_s = int(round(float(ymax_w) / scale))
-        xmax_s = int(round(float(xmax_w) / scale))
-        if sheet_shape is not None:
-            sh, sw = int(sheet_shape[0]), int(sheet_shape[1])
-            ymin_s = max(0, min(sh, ymin_s))
-            xmin_s = max(0, min(sw, xmin_s))
-            ymax_s = max(ymin_s, min(sh, ymax_s))
-            xmax_s = max(xmin_s, min(sw, xmax_s))
-        return ymin_s, xmin_s, ymax_s, xmax_s
-
-    def load_precomputed_plant_labels(
-        label_path: Union[str, Path],
-        sheet_w: int,
-        sheet_h: int,
-        min_confidence: float = 0.25,
-    ) -> List[Tuple[Tuple[int, int, int, int], float, int]]:
-        p = Path(label_path)
-        if not p.exists():
-            return []
-        results: List[Tuple[Tuple[int, int, int, int], float, int]] = []
-        try:
-            for line in p.read_text(encoding="utf-8").splitlines():
-                parts = line.strip().split()
-                if len(parts) < 5:
-                    continue
-                cls_id = int(float(parts[0]))
-                xc, yc, bw, bh = [float(x) for x in parts[1:5]]
-                conf = float(parts[5]) if len(parts) >= 6 else 0.90
-                if conf < min_confidence:
-                    continue
-                xmin = max(0, int(round((xc - 0.5 * bw) * sheet_w)))
-                xmax = min(sheet_w, int(round((xc + 0.5 * bw) * sheet_w)))
-                ymin = max(0, int(round((yc - 0.5 * bh) * sheet_h)))
-                ymax = min(sheet_h, int(round((yc + 0.5 * bh) * sheet_h)))
-                if ymax > ymin and xmax > xmin:
-                    results.append(((ymin, xmin, ymax, xmax), conf, cls_id))
-        except Exception:
-            return []
-        return results
+from scripts.vision.lm3_data_loader import (
+    LM3_LEAF_CLASS_IDS,
+    LM3_PLANT_CLASSES,
+    LM3_REPRODUCTIVE_CLASS_IDS,
+    compute_work_scale,
+    load_precomputed_plant_labels,
+    unscale_working_bbox_to_sheet,
+)
 
 logger = logging.getLogger("SegmentAndExtract")
 
@@ -751,10 +680,6 @@ def _bgr_to_nchw_float32(letterboxed_bgr: np.ndarray) -> np.ndarray:
     im_f32 = np.ascontiguousarray(im, dtype=np.float32)
     im_f32 *= np.float32(1.0) / np.float32(255.0)
     return im_f32
-
-
-def _sigmoid(x: np.ndarray) -> np.ndarray:
-    return 1.0 / (1.0 + np.exp(-np.clip(x, -40.0, 40.0)))
 
 
 # =============================================================================
@@ -1829,65 +1754,6 @@ class LM3LeafSegmenterEngine:
             return None, None, None, 0.0
 
         return lamina_mask, petiole_mask, hole_mask, float(best_score)
-
-    def segment_crop(
-        self,
-        crop_bgr: np.ndarray,
-    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], float]:
-        """Alias for `segment_leaf_crop` returning `(lamina_mask, petiole_mask, hole_mask, score)`."""
-        return self.segment_leaf_crop(crop_bgr)
-
-    segment_crop_full = segment_leaf_crop
-
-    def segment_sheet(
-        self,
-        image_bgr: np.ndarray,
-        candidate_boxes: Optional[Sequence[Tuple[int, int, int, int]]] = None,
-        catalog_number: str = "",
-        pad_ratio: float = 0.0,
-    ) -> List[DetectedInstance]:
-        """
-        Segments candidate leaf boxes (or the full sheet when `candidate_boxes` is None)
-        and returns `DetectedInstance` objects with `mask` (lamina), `petiole_mask`, and `hole_mask`.
-        """
-        if image_bgr is None or image_bgr.size == 0:
-            return []
-        sheet_h, sheet_w = image_bgr.shape[:2]
-        boxes = list(candidate_boxes) if candidate_boxes is not None else [(0, 0, sheet_h, sheet_w)]
-        instances: List[DetectedInstance] = []
-        for idx, box in enumerate(boxes, 1):
-            crop_bgr, crop_box = crop_leaf_bbox_with_padding(image_bgr, box, pad_ratio=pad_ratio)
-            if crop_bgr.size == 0:
-                continue
-            lamina_m, petiole_m, hole_m, sc = self.segment_leaf_crop(crop_bgr)
-            if lamina_m is None or int(np.count_nonzero(lamina_m)) == 0:
-                continue
-            sheet_lamina, full_bbox = reproject_crop_mask_to_sheet(lamina_m, crop_box, (sheet_h, sheet_w))
-            sheet_petiole = (
-                reproject_crop_mask_to_sheet(petiole_m, crop_box, (sheet_h, sheet_w))[0]
-                if petiole_m is not None
-                else None
-            )
-            sheet_hole = (
-                reproject_crop_mask_to_sheet(hole_m, crop_box, (sheet_h, sheet_w))[0]
-                if hole_m is not None
-                else None
-            )
-            instances.append(
-                DetectedInstance(
-                    catalog_number=catalog_number,
-                    leaf_id=idx,
-                    bbox=full_bbox,
-                    mask=sheet_lamina,
-                    score=sc,
-                    class_id=0,
-                    crop_offset=(crop_box[1], crop_box[0]),
-                    mask_origin=(0, 0),
-                    petiole_mask=sheet_petiole,
-                    hole_mask=sheet_hole,
-                )
-            )
-        return instances
 
     def __call__(self, image_bgr: np.ndarray, **kwargs: Any) -> Any:
         return self.predict(image_bgr, **kwargs)
@@ -3014,10 +2880,6 @@ class LM3ScaleCalibrator:
                 self.ruler_lattice = RulerCFLattice(lat_onnx)
             except Exception:
                 self.ruler_lattice = None
-
-    @property
-    def has_models(self) -> bool:
-        return bool(self.archival_session is not None or self.mp_model is not None)
 
     def predict_megapixel_scale(self, height_px: int, width_px: int) -> Tuple[float, str]:
         """Predicts `pixels_per_mm` from native sheet dimensions `(height_px, width_px)` via `MpConversionFactorModel`."""

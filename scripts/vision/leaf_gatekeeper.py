@@ -399,11 +399,6 @@ class LeafRoutingResult:
     rejection_reason: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    @property
-    def canonical_tier(self) -> str:
-        """Returns the canonical cross-language CSV tier ('Tier_1_Direct', 'Tier_2_Reflected', or 'rejected')."""
-        return normalize_assigned_tier(self.assigned_tier)
-
     def __getitem__(self, key: str) -> Any:
         if hasattr(self, key):
             return getattr(self, key)

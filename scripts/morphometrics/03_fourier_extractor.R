@@ -159,12 +159,6 @@ verify_harmonic_power_calibration <- function(out_obj = NULL, harm_mat = NULL, n
   as.integer(h_opt)
 }
 
-# Empirical Bayes / Dawid-Skene hierarchical active/passive reference authority weights (Slenker et al. 2022; Dawid & Skene 1979)
-compute_authority_precision_weights <- function(df, tier_col = "determiner_tier", active_mask = NULL, target_modality = "morph") {
-  if (is.logical(tier_col) && is.null(active_mask)) { active_mask <- tier_col; tier_col <- "determiner_tier" }
-  compute_empirical_bayes_authority_weights(df, mode = "active_passive", active_mask = active_mask, target_modality = target_modality)
-}
-
 # Within-taxon Mahalanobis outlier pruning + Adaptive Anchor Promotion for Gold/Silver-poor taxa
 prune_within_taxon_mahalanobis <- function(X, df, ref_mask = NULL, q = 0.95, min_anchors_per_taxon = 2L) {
   elig <- if (!is.null(ref_mask) && length(ref_mask) == nrow(df)) { m <- as.logical(ref_mask); m[is.na(m)] <- FALSE; m } else rep(TRUE, nrow(df))
