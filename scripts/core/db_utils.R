@@ -179,6 +179,15 @@ PACKERA_DB_WC_BIO_COLS <- c(
 }
 
 .dynamic_sqlite_table_specs_r <- function(table_name) {
+  if (identical(table_name, "extracted_leaves")) {
+    return(c(
+      leaf_zone = "TEXT DEFAULT 'basal'",
+      leaf_zone_confidence = "REAL",
+      dist_from_crown_norm = "REAL",
+      cy_rel_plant_bbox = "REAL",
+      effective_min_blade_area_cm2 = "REAL"
+    ))
+  }
   if (identical(table_name, "run_active_cohort")) {
     return(c(
       type_status = "TEXT",
@@ -190,7 +199,15 @@ PACKERA_DB_WC_BIO_COLS <- c(
       stats::setNames(rep("REAL", length(PACKERA_DB_HARMONIC_COLS)), PACKERA_DB_HARMONIC_COLS),
       stats::setNames(rep("REAL", length(PACKERA_DB_PC_COLS)), PACKERA_DB_PC_COLS),
       stats::setNames(rep("REAL", length(PACKERA_DB_SYM_PC_COLS)), PACKERA_DB_SYM_PC_COLS),
-      c(efd_harmonic_opt = "INTEGER", efd_k95_pcs = "INTEGER", dissection_index = "REAL")
+      c(
+        efd_harmonic_opt = "INTEGER",
+        efd_k95_pcs = "INTEGER",
+        dissection_index = "REAL",
+        leaf_zone = "TEXT",
+        leaf_zone_confidence = "REAL",
+        dist_from_crown_norm = "REAL",
+        cy_rel_plant_bbox = "REAL"
+      )
     ))
   }
   if (identical(table_name, "otu_morphometrics")) {
@@ -206,6 +223,17 @@ PACKERA_DB_WC_BIO_COLS <- c(
         q25_solidity = "REAL",
         dissected_leaf_fraction = "REAL",
         basal_leaf_count = "INTEGER",
+        cauline_leaf_count = "INTEGER",
+        cauline_solidity_med = "REAL",
+        cauline_dissection_index_med = "REAL",
+        cauline_aspect_ratio_med = "REAL",
+        cauline_blade_length_mm = "REAL",
+        basal_vs_cauline_length_ratio = "REAL",
+        basal_vs_cauline_solidity_delta = "REAL",
+        heteroblasty_efa_distance = "REAL",
+        Cauline_PC1 = "REAL",
+        Cauline_PC2 = "REAL",
+        Cauline_PC3 = "REAL",
         type_status = "TEXT",
         is_type_specimen = "INTEGER",
         has_empirical_type_anchor = "INTEGER",
@@ -304,7 +332,7 @@ PACKERA_DB_WC_BIO_COLS <- c(
 .migrate_dynamic_sqlite_schema_r <- function(conn) {
   if (is.null(conn)) return(FALSE)
   changed <- FALSE
-  for (tbl in c("run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache")) {
+  for (tbl in c("extracted_leaves", "run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache")) {
     if (isTRUE(.migrate_dynamic_sqlite_table_r(conn, tbl))) {
       changed <- TRUE
     }
@@ -438,7 +466,12 @@ connect_packera_db <- function(
   .apply_packera_sqlite_pragmas_r(conn, read_only = FALSE)
 
   cur_ver <- .get_sqlite_user_version_r(conn)
+  el_has_zone <- !db_table_exists_safe(conn, "extracted_leaves") ||
+    ("leaf_zone" %in% tryCatch(DBI::dbListFields(conn, "extracted_leaves"), error = function(e) character(0)))
+  om_has_cauline <- !db_table_exists_safe(conn, "otu_morphometrics") ||
+    ("cauline_leaf_count" %in% tryCatch(DBI::dbListFields(conn, "otu_morphometrics"), error = function(e) character(0)))
   if (cur_ver >= PACKERA_SCHEMA_USER_VERSION &&
+      el_has_zone && om_has_cauline &&
       (identical(eff_path, ":memory:") || db_table_exists_safe(conn, "v_integrative_triage_master"))) {
     return(conn)
   }
@@ -451,7 +484,8 @@ connect_packera_db <- function(
       req_v_cols <- c(
         "PC15", "Sym_PC15", "selected_morph_features", "climatic_z_score",
         "bio19_precip_coldest_qtr", "dissection_index", "q25_solidity",
-        "dissected_leaf_fraction", "basal_leaf_count", "is_type_specimen",
+        "dissected_leaf_fraction", "basal_leaf_count", "cauline_leaf_count",
+        "basal_vs_cauline_length_ratio", "heteroblasty_efa_distance", "is_type_specimen",
         "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance",
         "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon",
         "open_set_novelty_p", "is_confident_label_noise",
@@ -682,12 +716,20 @@ fetch_step03_contours_from_db <- function(
     has_cohort <- isTRUE(cnt_df$n[1] > 0L)
   }
 
+  el_fields <- tryCatch(DBI::dbListFields(conn, "extracted_leaves"), error = function(e) character(0))
+  sel_zone <- if ("leaf_zone" %in% el_fields) "el.leaf_zone" else "'basal' AS leaf_zone"
+  sel_zone_conf <- if ("leaf_zone_confidence" %in% el_fields) "el.leaf_zone_confidence" else "NULL AS leaf_zone_confidence"
+  sel_dist_cr <- if ("dist_from_crown_norm" %in% el_fields) "el.dist_from_crown_norm" else "NULL AS dist_from_crown_norm"
+  sel_cy_rel <- if ("cy_rel_plant_bbox" %in% el_fields) "el.cy_rel_plant_bbox" else "NULL AS cy_rel_plant_bbox"
+  sel_eff_min <- if ("effective_min_blade_area_cm2" %in% el_fields) "el.effective_min_blade_area_cm2" else "NULL AS effective_min_blade_area_cm2"
+
   base_sql <- paste0(
     "SELECT ",
     "  el.catalogNumber, el.plant_individual_id, el.leaf_id, el.shape_id, ",
     "  el.assigned_tier, COALESCE(el.tier_assignment, el.assigned_tier) AS tier_assignment, ",
     "  el.solidity, COALESCE(el.ucs_score, el.ucs) AS ucs_score, ",
     "  el.aspect_ratio, el.area_px, el.blade_area_cm2, el.is_dissected, ",
+    "  ", sel_zone, ", ", sel_zone_conf, ", ", sel_dist_cr, ", ", sel_cy_rel, ", ", sel_eff_min, ", ",
     "  COALESCE(el.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm, ",
     "  COALESCE(el.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm, ",
     "  COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm, ",
@@ -944,6 +986,25 @@ fetch_step03_contours_from_db <- function(
 
   db_ba_vec <- if ("blade_area_cm2" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_area_cm2)) else rep(NA_real_, n_kept)
   db_ba_vec[!is.finite(db_ba_vec)] <- NA_real_
+  db_cy_rel_vec <- if ("cy_rel_plant_bbox" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$cy_rel_plant_bbox)) else rep(NA_real_, n_kept)
+  db_cy_rel_vec[!is.finite(db_cy_rel_vec)] <- NA_real_
+  db_eff_min_vec <- if ("effective_min_blade_area_cm2" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$effective_min_blade_area_cm2)) else rep(NA_real_, n_kept)
+  db_eff_min_vec[!is.finite(db_eff_min_vec)] <- NA_real_
+  db_zone_conf_vec <- if ("leaf_zone_confidence" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$leaf_zone_confidence)) else rep(NA_real_, n_kept)
+  db_zone_conf_vec[!is.finite(db_zone_conf_vec)] <- NA_real_
+  db_dist_cr_vec <- if ("dist_from_crown_norm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$dist_from_crown_norm)) else rep(NA_real_, n_kept)
+  db_dist_cr_vec[!is.finite(db_dist_cr_vec)] <- NA_real_
+  db_zone_vec <- if ("leaf_zone" %in% names(sub_rows)) trimws(as.character(sub_rows$leaf_zone)) else rep("basal", n_kept)
+  db_zone_vec[is.na(db_zone_vec) | !nzchar(db_zone_vec)] <- "basal"
+  if (!is.null(m_hdr) && "leaf_zone" %in% names(m_hdr) && any(!is.na(m_hit_vec))) {
+    hit_m_z <- !is.na(m_hit_vec)
+    cand_z <- trimws(as.character(m_hdr[["leaf_zone"]][m_hit_vec[hit_m_z]]))
+    valid_z <- !is.na(cand_z) & nzchar(cand_z)
+    if (any(valid_z)) {
+      hit_pos_z <- which(hit_m_z)
+      db_zone_vec[hit_pos_z[valid_z]] <- cand_z[valid_z]
+    }
+  }
   diss_raw_vec <- sub_rows$is_dissected
   eff_diss_vec <- ifelse(is.na(diss_raw_vec), NA, as.integer(diss_raw_vec) != 0L)
   cs_kept <- merged$cs[ok_idx]
@@ -969,10 +1030,13 @@ fetch_step03_contours_from_db <- function(
     blade_length_mm = suppressWarnings(as.numeric(sub_rows$blade_length_mm)),
     petiole_to_blade_ratio = suppressWarnings(as.numeric(sub_rows$petiole_to_blade_ratio)),
     is_dissected = eff_diss_vec,
-    cy_rel_plant_bbox = pull_manifest_num("cy_rel_plant_bbox"),
+    leaf_zone = db_zone_vec,
+    leaf_zone_confidence = pull_manifest_num("leaf_zone_confidence", db_zone_conf_vec),
+    dist_from_crown_norm = pull_manifest_num("dist_from_crown_norm", db_dist_cr_vec),
+    cy_rel_plant_bbox = pull_manifest_num("cy_rel_plant_bbox", db_cy_rel_vec),
     cy_rel_sheet = pull_manifest_num("cy_rel_sheet"),
     blade_area_cm2 = pull_manifest_num("blade_area_cm2", db_ba_vec),
-    effective_min_blade_area_cm2 = pull_manifest_num("effective_min_blade_area_cm2"),
+    effective_min_blade_area_cm2 = pull_manifest_num("effective_min_blade_area_cm2", db_eff_min_vec),
     AR_inv = suppressWarnings(as.numeric(sub_rows$AR_inv)),
     capitula_count = suppressWarnings(as.numeric(sub_rows$capitula_count)),
     involucre_height_px = suppressWarnings(as.numeric(sub_rows$involucre_height_px)),
@@ -996,7 +1060,7 @@ fetch_step03_contours_from_db <- function(
 
 .normalize_morph_dynamic_cols_r <- function(df) {
   if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(df)
-  for (ic in intersect(c("plant_individual_id", "leaf_id", "efd_harmonic_opt", "efd_k95_pcs", "basal_leaf_count"), names(df))) {
+  for (ic in intersect(c("plant_individual_id", "leaf_id", "efd_harmonic_opt", "efd_k95_pcs", "basal_leaf_count", "cauline_leaf_count"), names(df))) {
     df[[ic]] <- suppressWarnings(as.integer(df[[ic]]))
   }
   if ("selected_morph_features" %in% names(df)) {
@@ -1004,7 +1068,12 @@ fetch_step03_contours_from_db <- function(
   }
   dyn_num_cols <- intersect(
     c(PACKERA_DB_HARMONIC_COLS, PACKERA_DB_PC_COLS, PACKERA_DB_SYM_PC_COLS,
-      "dissection_index", "q25_solidity", "dissected_leaf_fraction"),
+      "dissection_index", "q25_solidity", "dissected_leaf_fraction",
+      "leaf_zone_confidence", "dist_from_crown_norm", "cy_rel_plant_bbox",
+      "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med",
+      "cauline_blade_length_mm", "basal_vs_cauline_length_ratio",
+      "basal_vs_cauline_solidity_delta", "heteroblasty_efa_distance",
+      "Cauline_PC1", "Cauline_PC2", "Cauline_PC3"),
     names(df)
   )
   for (nc in dyn_num_cols) {

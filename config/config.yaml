@@ -58,7 +58,7 @@ taxonomy:
 # Pipeline Quality & Morphological Thresholds
 thresholds:
   # Standard baseline gatekeepers (existing)
-  pcd_conf: 0.72
+  pcd_conf: 0.25
   minimum_confidence_threshold: 0.65
   min_ucs: 0.85
   min_solidity: 0.72
@@ -152,7 +152,8 @@ segmentation:
   treat_leaflet_as_leaf_whole: false
   use_efds_for_png_masks: false
   do_apply_landmarks: true
-  score_thresh: 0.35
+  segment_partial_leaves: true
+  score_thresh: 0.25
   min_ucs: 0.85
   min_solidity: 0.72
   min_circularity: 0.25
@@ -170,7 +171,11 @@ plant_component_detector:
   detector_version: "lm3_plant_detector__yolo26x_det_1280"
   plant_detector_model: "lm3_plant_detector__yolo26x_det_1280"
   archival_detector_model: "lm3_archival_detector__yolo26x_det_1280"
-  minimum_confidence_threshold: 0.35
+  minimum_confidence_threshold: 0.25
+  iou: 0.55
+  max_det: 1000
+  min_box_area: 16
+  include_partial: true
 
 leaf_segmentation:
   leaf_segmenter_model: "lm3_leaf_segmenter__yolo26x_seg_1024"
@@ -188,6 +193,7 @@ leaf_segmentation:
   treat_leaflet_as_leaf_whole: false
   use_efds_for_png_masks: false
   do_apply_landmarks: true
+  segment_partial_leaves: true
 
 vision:
   leafmachine3:

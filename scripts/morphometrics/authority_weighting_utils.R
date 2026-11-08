@@ -2589,14 +2589,21 @@ weighted_otu_stat <- function(x, w = NULL, digits = NULL) {
   xv <- suppressWarnings(as.numeric(x))
   if (length(xv) == 0L || all(!is.finite(xv))) return(NA_real_)
   fin <- is.finite(xv)
-  xv <- xv[fin]
-  if (length(xv) == 1L) return(if (!is.null(digits)) round(xv[1L], digits) else xv[1L])
-  if (is.null(w) || length(w) != length(x)) {
-    val <- stats::median(xv, na.rm = TRUE)
-    return(if (!is.null(digits)) round(val, digits) else val)
+  if (!is.null(w) && length(w) == length(x)) {
+    wv_raw <- suppressWarnings(as.numeric(w))
+    pos_mask <- fin & is.finite(wv_raw) & (wv_raw > 0.0)
+    if (any(pos_mask)) {
+      xv <- xv[pos_mask]
+      wv <- wv_raw[pos_mask]
+    } else {
+      xv <- xv[fin]
+      wv <- rep(1.0, length(xv))
+    }
+  } else {
+    xv <- xv[fin]
+    wv <- rep(1.0, length(xv))
   }
-  wv <- suppressWarnings(as.numeric(w))[fin]
-  wv[!is.finite(wv) | wv <= 0.0] <- 1.0
+  if (length(xv) == 1L) return(if (!is.null(digits)) round(xv[1L], digits) else xv[1L])
   w_sum <- sum(wv)
   if (!is.finite(w_sum) || w_sum <= 1e-12 || max(wv) - min(wv) <= 1e-9) {
     val <- stats::median(xv, na.rm = TRUE)
@@ -2620,8 +2627,9 @@ compute_heteroblasty_leaf_weights <- function(df_sub) {
   w_zone <- rep(0.70, n_l)
   if ("leaf_zone" %in% names(df_sub)) {
     lz <- tolower(trimws(as.character(df_sub$leaf_zone)))
+    has_basal <- any(!is.na(lz) & lz == "basal")
     w_zone[!is.na(lz) & lz == "basal"] <- 1.00
-    w_zone[!is.na(lz) & lz == "cauline"] <- 0.35
+    w_zone[!is.na(lz) & lz == "cauline"] <- if (has_basal) 0.0 else 0.35
   }
   area_v <- rep(NA_real_, n_l)
   if ("area_mm2" %in% names(df_sub)) {
@@ -2640,7 +2648,7 @@ compute_heteroblasty_leaf_weights <- function(df_sub) {
     area_v[has_px] <- a_px[has_px]
   }
   w_area <- rep(1.0, n_l)
-  fin_a <- is.finite(area_v) & area_v > 0.0
+  fin_a <- is.finite(area_v) & area_v > 0.0 & (w_zone > 0.0)
   if (any(fin_a)) {
     max_a <- max(area_v[fin_a], na.rm = TRUE)
     if (is.finite(max_a) && max_a > 0.0) {
@@ -2666,24 +2674,43 @@ apply_step03_heteroblasty_weighted_otu_aggregation <- function(specimen_df, clos
     log_centsize = 6L, harmonic_roughness = 6L, leaf_quality_weight = 4L,
     asymmetry_index = 6L
   )
+  pet_cols <- intersect(c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"), names(specimen_df))
   for (i in seq_len(nrow(specimen_df))) {
     rows_i <- idx_by_key[[spec_keys[i]]]
-    if (length(rows_i) < 2L) next
+    if (length(rows_i) < 1L) next
     grp <- closed_leaf_df[rows_i, , drop = FALSE]
     if ("tier_assignment" %in% names(grp) && any(grp$tier_assignment == "Tier_1_Direct", na.rm = TRUE)) {
       grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]
     }
-    if (nrow(grp) < 2L) next
-    w_l <- compute_heteroblasty_leaf_weights(grp)
+    if ("is_contour_outlier" %in% names(grp) && any(!as.logical(grp$is_contour_outlier), na.rm = TRUE)) {
+      grp <- grp[!is.na(grp$is_contour_outlier) & !as.logical(grp$is_contour_outlier), , drop = FALSE]
+    }
+    if ("leaf_zone" %in% names(grp)) {
+      lz_g <- tolower(trimws(as.character(grp$leaf_zone)))
+      if (any(!is.na(lz_g) & lz_g == "basal")) {
+        grp <- grp[!is.na(lz_g) & lz_g == "basal", , drop = FALSE]
+      }
+    }
+    if (nrow(grp) < 1L) next
     for (hc in harm_cols) {
       if (hc %in% names(grp)) {
-        specimen_df[[hc]][i] <- weighted_otu_stat(grp[[hc]], w_l, digits = 6L)
+        hv <- suppressWarnings(as.numeric(grp[[hc]]))
+        hv <- hv[is.finite(hv)]
+        if (length(hv) > 0L) specimen_df[[hc]][i] <- stats::median(hv)
       }
     }
     for (tc in names(trait_digits)) {
       if ((tc %in% names(specimen_df)) && (tc %in% names(grp))) {
-        val_t <- weighted_otu_stat(grp[[tc]], w_l, digits = trait_digits[[tc]])
-        if (is.finite(val_t)) specimen_df[[tc]][i] <- val_t
+        tv <- suppressWarnings(as.numeric(grp[[tc]]))
+        tv <- tv[is.finite(tv)]
+        if (length(tv) > 0L) specimen_df[[tc]][i] <- round(stats::median(tv), trait_digits[[tc]])
+      }
+    }
+    for (pc in pet_cols) {
+      if (pc %in% names(grp)) {
+        pv <- suppressWarnings(as.numeric(grp[[pc]]))
+        pv <- pv[is.finite(pv)]
+        if (length(pv) > 0L) specimen_df[[pc]][i] <- round(as.numeric(stats::quantile(pv, probs = 0.75, na.rm = TRUE, names = FALSE)), 4L)
       }
     }
   }

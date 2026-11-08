@@ -121,10 +121,13 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   has_out_col <- "is_contour_outlier" %in% names(closed_leaf_df)
   out_vec <- if (has_out_col) as.logical(closed_leaf_df$is_contour_outlier) else rep(FALSE, n_rows)
   t1_vec <- as.character(closed_leaf_df$tier_assignment) == "Tier_1_Direct"
+  lz_vec <- if ("leaf_zone" %in% names(closed_leaf_df)) tolower(trimws(as.character(closed_leaf_df$leaf_zone))) else rep("basal", n_rows)
+  lz_vec[is.na(lz_vec) | !(lz_vec %in% c("basal", "cauline"))] <- "basal"
 
   grp_list <- vector("list", length(raw_groups))
   kept_g <- 0L
   first_idx <- integer(length(raw_groups))
+  is_caul_fb_vec <- logical(length(raw_groups))
   for (g in seq_along(raw_groups)) {
     idx <- raw_groups[[g]]
     if (length(idx) == 0L) next
@@ -133,16 +136,26 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     }
     idx <- idx[t1_vec[idx]]
     if (length(idx) == 0L) next
+    bas_idx <- idx[lz_vec[idx] == "basal"]
     kept_g <- kept_g + 1L
-    grp_list[[kept_g]] <- idx
-    first_idx[kept_g] <- idx[1L]
+    if (length(bas_idx) >= 1L) {
+      grp_list[[kept_g]] <- bas_idx
+      first_idx[kept_g] <- bas_idx[1L]
+      is_caul_fb_vec[kept_g] <- FALSE
+    } else {
+      grp_list[[kept_g]] <- idx
+      first_idx[kept_g] <- idx[1L]
+      is_caul_fb_vec[kept_g] <- TRUE
+    }
   }
   if (kept_g == 0L) return(data.frame())
   grp_list <- grp_list[seq_len(kept_g)]
   first_idx <- first_idx[seq_len(kept_g)]
+  is_caul_fb_vec <- is_caul_fb_vec[seq_len(kept_g)]
   ord_g <- order(pid_col[first_idx], cat_col[first_idx])
   grp_list <- grp_list[ord_g]
   first_idx <- first_idx[ord_g]
+  is_caul_fb_vec <- is_caul_fb_vec[ord_g]
   n_spec <- length(grp_list)
 
   harm_mat <- as.matrix(closed_leaf_df[, all_harm_cols, drop = FALSE])
@@ -299,7 +312,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     leaf_count = res$nl,
     n_tier1_leaves = res$nl,
     n_tier2_leaves = rep(0L, n_spec),
-    morph_tier_source = ifelse(res$nl >= 1L, "Tier_1_Pure", "Tier_2_Fallback"),
+    morph_tier_source = ifelse(is_caul_fb_vec, "Cauline_Only_Fallback", ifelse(res$nl >= 1L, "Tier_1_Pure", "Tier_2_Fallback")),
     foliar_variance = res$fv,
     heteroblasty_index = res$hi,
     assigned_tier = rep("Tier_1_Direct", n_spec),
@@ -334,7 +347,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     spec_df[[m_col]] <- v_first
   }
 
-  spec_df$basal_leaf_count <- as.integer(res$nl)
+  spec_df$basal_leaf_count <- ifelse(is_caul_fb_vec, 0L, as.integer(res$nl))
   spec_df$solidity <- res$sol
   spec_df$q25_solidity <- res$q25
   spec_df$dissection_index <- res$di

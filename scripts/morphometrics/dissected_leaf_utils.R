@@ -54,16 +54,13 @@ compute_dissection_index_from_coo <- function(coo = NULL, area_val = NULL, perim
   round(max(1.0, p / (2.0 * sqrt(pi * a))), 4)
 }
 
-filter_basal_lamina_contours <- function(
+classify_and_partition_leaf_zones <- function(
   fac_df,
-  coo_list,
   min_cy_plant = 0.40,
   min_cy_sheet = 0.42,
   fallback_band = 0.15
 ) {
-  if (is.null(fac_df) || nrow(fac_df) == 0L || length(coo_list) == 0L) {
-    return(list(fac_df = fac_df, coo_list = coo_list, stats = list()))
-  }
+  if (is.null(fac_df) || nrow(fac_df) == 0L) return(fac_df)
   n <- nrow(fac_df)
   if (!("plant_individual_id" %in% names(fac_df))) fac_df$plant_individual_id <- 0L
   fac_df$plant_individual_id <- ifelse(
@@ -73,6 +70,111 @@ filter_basal_lamina_contours <- function(
   )
   fac_df$plant_individual_id[is.na(fac_df$plant_individual_id)] <- 0L
 
+  raw_zone <- if ("leaf_zone" %in% names(fac_df)) tolower(trimws(as.character(fac_df$leaf_zone))) else rep(NA_character_, n)
+  raw_zone[!(raw_zone %in% c("basal", "cauline"))] <- NA_character_
+  zone_conf <- if ("leaf_zone_confidence" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$leaf_zone_confidence)) else rep(NA_real_, n)
+  d_crown <- if ("dist_from_crown_norm" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$dist_from_crown_norm)) else rep(NA_real_, n)
+  cy_p <- if ("cy_rel_plant_bbox" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$cy_rel_plant_bbox)) else rep(NA_real_, n)
+  cy_s <- if ("cy_rel_sheet" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$cy_rel_sheet)) else rep(NA_real_, n)
+  pbr <- if ("petiole_to_blade_ratio" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$petiole_to_blade_ratio)) else rep(NA_real_, n)
+  area_px <- if ("area_px" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$area_px)) else rep(NA_real_, n)
+  ba_cm2 <- if ("blade_area_cm2" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$blade_area_cm2)) else rep(NA_real_, n)
+  min_ba <- if ("effective_min_blade_area_cm2" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$effective_min_blade_area_cm2)) else rep(NA_real_, n)
+  area_ok <- ifelse(is.finite(ba_cm2) & is.finite(min_ba) & min_ba > 0, ba_cm2 >= min_ba, TRUE)
+
+  leaf_zone <- raw_zone
+  is_fallback_vec <- rep(FALSE, n)
+  is_caul_only_vec <- rep(FALSE, n)
+  grp_keys <- paste0(trimws(as.character(fac_df$catalogNumber)), "__", fac_df$plant_individual_id)
+  idx_by_grp <- split(seq_len(n), grp_keys)
+
+  for (g_idx in idx_by_grp) {
+    lam_ok <- g_idx[area_ok[g_idx]]
+    if (length(lam_ok) == 0L) lam_ok <- g_idx
+    if (length(lam_ok) == 0L) next
+    all_explicit_cauline <- all(!is.na(raw_zone[lam_ok]) & raw_zone[lam_ok] == "cauline")
+
+    a_pool <- ifelse(is.finite(area_px[lam_ok]) & area_px[lam_ok] > 0, area_px[lam_ok],
+                     ifelse(is.finite(ba_cm2[lam_ok]) & ba_cm2[lam_ok] > 0, ba_cm2[lam_ok] * 100.0, 1.0))
+    max_pid_a <- max(a_pool, 1.0, na.rm = TRUE)
+
+    for (ii in g_idx) {
+      if (!is.na(leaf_zone[ii])) {
+        if (!is.finite(zone_conf[ii])) zone_conf[ii] <- 0.90
+        next
+      }
+      rel_a <- if (is.finite(area_px[ii]) && area_px[ii] > 0) area_px[ii] / max_pid_a else if (is.finite(ba_cm2[ii]) && ba_cm2[ii] > 0) (ba_cm2[ii] * 100.0) / max_pid_a else 1.0
+      if (is.finite(d_crown[ii])) {
+        s_b <- if (d_crown[ii] <= 0.42) 0.76 else if (d_crown[ii] > 0.45) 0.22 else 0.50
+        if (is.finite(cy_p[ii])) s_b <- s_b + (if (cy_p[ii] >= min_cy_plant) 0.12 else -0.12)
+        if (is.finite(pbr[ii])) s_b <- s_b + (if (pbr[ii] >= 0.12) 0.14 else if (pbr[ii] < 0.08 && d_crown[ii] > 0.38) -0.14 else 0.0)
+        if (is.finite(rel_a)) s_b <- s_b + (if (rel_a < 0.45 && d_crown[ii] > 0.38) -0.12 else if (rel_a >= 0.65) 0.08 else 0.0)
+        p_b <- min(1.0, max(0.0, s_b))
+        leaf_zone[ii] <- if (p_b >= 0.50) "basal" else "cauline"
+        zone_conf[ii] <- round(max(0.55, abs(p_b - 0.50) * 2.0), 4)
+      } else if (is.finite(cy_p[ii]) || is.finite(cy_s[ii])) {
+        in_prim <- if (is.finite(cy_p[ii])) (cy_p[ii] >= min_cy_plant) else (cy_s[ii] >= min_cy_sheet)
+        leaf_zone[ii] <- if (isTRUE(in_prim)) "basal" else "cauline"
+        zone_conf[ii] <- if (is.finite(zone_conf[ii])) zone_conf[ii] else 0.80
+      } else {
+        is_caul_heur <- is.finite(pbr[ii]) && (pbr[ii] < 0.06) && is.finite(rel_a) && (rel_a < 0.40) && (length(lam_ok) >= 2L)
+        leaf_zone[ii] <- if (is_caul_heur) "cauline" else "basal"
+        zone_conf[ii] <- if (is.finite(zone_conf[ii])) zone_conf[ii] else 0.75
+      }
+    }
+
+    has_basal <- any(leaf_zone[lam_ok] == "basal", na.rm = TRUE)
+    if (!has_basal) {
+      if (all_explicit_cauline) {
+        is_caul_only_vec[lam_ok] <- TRUE
+        is_fallback_vec[lam_ok] <- TRUE
+      } else {
+        has_cy_p <- is.finite(cy_p[lam_ok])
+        has_cy_s <- !has_cy_p & is.finite(cy_s[lam_ok])
+        has_dc <- is.finite(d_crown[lam_ok])
+        if (any(has_cy_p)) {
+          c_max <- max(cy_p[lam_ok[has_cy_p]], na.rm = TRUE)
+          fb_hit <- has_cy_p & (cy_p[lam_ok] >= (c_max - fallback_band))
+        } else if (any(has_cy_s)) {
+          c_max <- max(cy_s[lam_ok[has_cy_s]], na.rm = TRUE)
+          fb_hit <- has_cy_s & (cy_s[lam_ok] >= (c_max - fallback_band))
+        } else if (any(has_dc)) {
+          d_min <- min(d_crown[lam_ok[has_dc]], na.rm = TRUE)
+          fb_hit <- has_dc & (d_crown[lam_ok] <= (d_min + fallback_band))
+        } else {
+          fb_hit <- seq_along(lam_ok) == which.max(a_pool)
+        }
+        if (any(fb_hit)) {
+          leaf_zone[lam_ok[fb_hit]] <- "basal"
+          is_fallback_vec[lam_ok[fb_hit]] <- TRUE
+        }
+      }
+    }
+  }
+
+  fac_df$leaf_zone <- leaf_zone
+  fac_df$leaf_zone_confidence <- zone_conf
+  fac_df$dist_from_crown_norm <- d_crown
+  fac_df$is_basal_fallback <- is_fallback_vec
+  fac_df$is_cauline_only_individual <- is_caul_only_vec
+  fac_df$area_ok_flag <- area_ok
+  fac_df
+}
+
+partition_basal_and_cauline_contours <- classify_and_partition_leaf_zones
+
+filter_basal_lamina_contours <- function(
+  fac_df,
+  coo_list,
+  min_cy_plant = 0.40,
+  min_cy_sheet = 0.42,
+  fallback_band = 0.15,
+  retain_cauline_tagged = FALSE
+) {
+  if (is.null(fac_df) || nrow(fac_df) == 0L || length(coo_list) == 0L) {
+    return(list(fac_df = fac_df, coo_list = coo_list, stats = list()))
+  }
+  n <- nrow(fac_df)
   di_vec <- if ("dissection_index" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$dissection_index)) else rep(NA_real_, n)
   sol_vec <- if ("solidity" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$solidity)) else rep(NA_real_, n)
   circ_vec <- if ("circularity" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$circularity)) else rep(NA_real_, n)
@@ -97,61 +199,38 @@ filter_basal_lamina_contours <- function(
     (is.finite(sol_vec) & sol_vec < 0.68)
   )
 
-  cy_p <- if ("cy_rel_plant_bbox" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$cy_rel_plant_bbox)) else rep(NA_real_, n)
-  cy_s <- if ("cy_rel_sheet" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$cy_rel_sheet)) else rep(NA_real_, n)
-  ba_cm2 <- if ("blade_area_cm2" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$blade_area_cm2)) else rep(NA_real_, n)
-  min_ba <- if ("effective_min_blade_area_cm2" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$effective_min_blade_area_cm2)) else rep(NA_real_, n)
-  area_ok <- ifelse(is.finite(ba_cm2) & is.finite(min_ba) & min_ba > 0, ba_cm2 >= min_ba, TRUE)
-
-  keep_mask <- rep(FALSE, n)
-  is_fallback_vec <- rep(FALSE, n)
+  fac_df <- classify_and_partition_leaf_zones(
+    fac_df,
+    min_cy_plant = min_cy_plant,
+    min_cy_sheet = min_cy_sheet,
+    fallback_band = fallback_band
+  )
+  area_ok <- as.logical(fac_df$area_ok_flag)
+  fac_df$area_ok_flag <- NULL
+  is_fallback_vec <- as.logical(fac_df$is_basal_fallback)
   grp_keys <- paste0(trimws(as.character(fac_df$catalogNumber)), "__", fac_df$plant_individual_id)
   idx_by_grp <- split(seq_len(n), grp_keys)
-  n_fb_individuals <- 0L
+  n_fb_individuals <- sum(vapply(idx_by_grp, function(g_idx) any(is_fallback_vec[g_idx] & !fac_df$is_cauline_only_individual[g_idx]), logical(1)))
 
+  basal_keep <- area_ok & ((fac_df$leaf_zone == "basal") | is_fallback_vec)
   for (g_idx in idx_by_grp) {
-    lam_ok <- g_idx[area_ok[g_idx]]
-    if (length(lam_ok) == 0L) lam_ok <- g_idx
-    if (length(lam_ok) == 0L) next
-
-    has_cy_p <- is.finite(cy_p[lam_ok])
-    has_cy_s <- !has_cy_p & is.finite(cy_s[lam_ok])
-    if (!any(has_cy_p) && !any(has_cy_s)) {
-      keep_mask[lam_ok] <- TRUE
-      next
-    }
-    in_primary <- ifelse(
-      has_cy_p,
-      cy_p[lam_ok] >= min_cy_plant,
-      ifelse(has_cy_s, cy_s[lam_ok] >= min_cy_sheet, TRUE)
-    )
-    if (any(in_primary)) {
-      keep_mask[lam_ok[in_primary]] <- TRUE
-    } else {
-      # Confirmed detached/top-mounted rosette fallback: retain lowest lamina band on individual
-      if (any(has_cy_p)) {
-        c_max <- max(cy_p[lam_ok[has_cy_p]], na.rm = TRUE)
-        fb_hit <- has_cy_p & (cy_p[lam_ok] >= (c_max - fallback_band))
-      } else {
-        c_max <- max(cy_s[lam_ok[has_cy_s]], na.rm = TRUE)
-        fb_hit <- has_cy_s & (cy_s[lam_ok] >= (c_max - fallback_band))
-      }
-      if (any(fb_hit)) {
-        keep_mask[lam_ok[fb_hit]] <- TRUE
-        is_fallback_vec[lam_ok[fb_hit]] <- TRUE
-        n_fb_individuals <- n_fb_individuals + 1L
-      }
+    if (!any(basal_keep[g_idx])) {
+      lam_ok <- g_idx[area_ok[g_idx]]
+      if (length(lam_ok) == 0L) lam_ok <- g_idx
+      if (length(lam_ok) > 0L) basal_keep[lam_ok[1L]] <- TRUE
     }
   }
+  if (!any(basal_keep)) basal_keep <- rep(TRUE, n)
 
-  # Safeguard: never drop 100% of cohort contours on minimal synthetic fixtures
-  if (!any(keep_mask)) {
-    keep_mask <- rep(TRUE, n)
+  n_area_drop <- sum(!area_ok & !basal_keep)
+  n_caul_drop <- sum(area_ok & !basal_keep)
+  keep_mask <- if (isTRUE(retain_cauline_tagged)) {
+    km <- area_ok | basal_keep
+    if (!any(km)) rep(TRUE, n) else km
+  } else {
+    basal_keep
   }
 
-  fac_df$is_basal_fallback <- is_fallback_vec
-  n_area_drop <- sum(!area_ok & !keep_mask)
-  n_caul_drop <- sum(area_ok & !keep_mask)
   if (n_area_drop > 0L || n_caul_drop > 0L || n_fb_individuals > 0L) {
     message(sprintf(
       paste0(
@@ -159,7 +238,7 @@ filter_basal_lamina_contours <- function(
         "(excluded %d upper cauline, %d sub-floor blade fragments; ",
         "lowest-lamina fallback individuals = %d)."
       ),
-      sum(keep_mask), n, n_caul_drop, n_area_drop, n_fb_individuals
+      sum(basal_keep), n, n_caul_drop, n_area_drop, n_fb_individuals
     ))
   }
   fac_sub <- fac_df[keep_mask, , drop = FALSE]
@@ -171,6 +250,7 @@ filter_basal_lamina_contours <- function(
     stats = list(
       n_input = n,
       n_retained = sum(keep_mask),
+      n_basal_retained = sum(basal_keep),
       n_cauline_excluded = n_caul_drop,
       n_subfloor_excluded = n_area_drop,
       n_fallback_individuals = n_fb_individuals
@@ -433,6 +513,12 @@ screen_regime_stratified_mcd_outliers <- function(
 }
 
 summarize_otu_dissection_metrics <- function(grp_df) {
+  if ("leaf_zone" %in% names(grp_df)) {
+    lz <- tolower(trimws(as.character(grp_df$leaf_zone)))
+    if (any(!is.na(lz) & lz == "basal")) {
+      grp_df <- grp_df[!is.na(lz) & lz == "basal", , drop = FALSE]
+    }
+  }
   n_l <- nrow(grp_df)
   med_num <- function(col_nm, digits = 4L) {
     if (!(col_nm %in% names(grp_df))) return(NA_real_)
@@ -469,6 +555,169 @@ summarize_otu_dissection_metrics <- function(grp_df) {
   )
 }
 
+compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = NULL) {
+  if (is.null(specimen_df) || nrow(specimen_df) == 0L) return(specimen_df)
+  n_spec <- nrow(specimen_df)
+  cauline_leaf_count <- integer(n_spec)
+  cauline_solidity_med <- rep(NA_real_, n_spec)
+  cauline_dissection_index_med <- rep(NA_real_, n_spec)
+  cauline_aspect_ratio_med <- rep(NA_real_, n_spec)
+  cauline_blade_length_mm <- rep(NA_real_, n_spec)
+  basal_vs_cauline_length_ratio <- rep(NA_real_, n_spec)
+  basal_vs_cauline_solidity_delta <- rep(NA_real_, n_spec)
+  heteroblasty_efa_distance <- rep(NA_real_, n_spec)
+  Cauline_PC1 <- rep(NA_real_, n_spec)
+  Cauline_PC2 <- rep(NA_real_, n_spec)
+  Cauline_PC3 <- rep(NA_real_, n_spec)
+
+  if (!is.null(efa_df) && nrow(efa_df) > 0L) {
+    if (is.null(sym_names) || length(sym_names) == 0L) {
+      sym_names <- grep("^[AD][0-9]+$", names(efa_df), value = TRUE)
+    }
+    sym_names <- intersect(as.character(sym_names), names(efa_df))
+    pids_leaf <- if ("plant_individual_id" %in% names(efa_df)) ifelse(is.na(efa_df$plant_individual_id), 0L, as.integer(efa_df$plant_individual_id)) else rep(0L, nrow(efa_df))
+    pids_spec <- if ("plant_individual_id" %in% names(specimen_df)) ifelse(is.na(specimen_df$plant_individual_id), 0L, as.integer(specimen_df$plant_individual_id)) else rep(0L, n_spec)
+    leaf_keys <- paste0(trimws(as.character(efa_df$catalogNumber)), "__", pids_leaf)
+    spec_keys <- paste0(trimws(as.character(specimen_df$catalogNumber)), "__", pids_spec)
+    idx_by_spec <- split(seq_len(nrow(efa_df)), leaf_keys)
+
+    med_col <- function(df_sub, cn, digits = 4L, pos_only = FALSE) {
+      if (!(cn %in% names(df_sub))) return(NA_real_)
+      v <- suppressWarnings(as.numeric(df_sub[[cn]]))
+      v <- if (pos_only) v[is.finite(v) & v > 0.0] else v[is.finite(v)]
+      if (length(v) == 0L) NA_real_ else round(stats::median(v), digits)
+    }
+
+    caul_harm_list <- vector("list", n_spec)
+    for (i in seq_len(n_spec)) {
+      r_idx <- idx_by_spec[[spec_keys[i]]]
+      if (length(r_idx) == 0L) next
+      grp <- efa_df[r_idx, , drop = FALSE]
+      if ("tier_assignment" %in% names(grp) && any(grp$tier_assignment == "Tier_1_Direct", na.rm = TRUE)) {
+        grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]
+      }
+      if ("is_contour_outlier" %in% names(grp) && any(!as.logical(grp$is_contour_outlier), na.rm = TRUE)) {
+        grp <- grp[!is.na(grp$is_contour_outlier) & !as.logical(grp$is_contour_outlier), , drop = FALSE]
+      }
+      lz <- if ("leaf_zone" %in% names(grp)) tolower(trimws(as.character(grp$leaf_zone))) else rep("basal", nrow(grp))
+      lz[is.na(lz) | !(lz %in% c("basal", "cauline"))] <- "basal"
+      basal_rows <- grp[lz == "basal", , drop = FALSE]
+      cauline_rows <- grp[lz == "cauline", , drop = FALSE]
+      n_bas <- nrow(basal_rows)
+      n_caul <- nrow(cauline_rows)
+      cauline_leaf_count[i] <- as.integer(n_caul)
+      if ("basal_leaf_count" %in% names(specimen_df)) specimen_df$basal_leaf_count[i] <- as.integer(n_bas)
+      if ("leaf_count" %in% names(specimen_df)) specimen_df$leaf_count[i] <- as.integer(n_bas + n_caul)
+      if (n_bas == 0L && n_caul >= 1L && ("morph_tier_source" %in% names(specimen_df))) {
+        specimen_df$morph_tier_source[i] <- "Cauline_Only_Fallback"
+      }
+
+      if (n_caul >= 1L) {
+        cauline_solidity_med[i] <- med_col(cauline_rows, "solidity", 4L)
+        cauline_dissection_index_med[i] <- med_col(cauline_rows, "dissection_index", 4L)
+        cauline_aspect_ratio_med[i] <- med_col(cauline_rows, "aspect_ratio", 4L)
+        c_bl <- med_col(cauline_rows, "blade_length_mm", 3L, pos_only = TRUE)
+        c_cs <- med_col(cauline_rows, "centroid_size", 3L, pos_only = TRUE)
+        cauline_blade_length_mm[i] <- if (is.finite(c_bl)) c_bl else c_cs
+
+        b_bl <- if (n_bas >= 1L) med_col(basal_rows, "blade_length_mm", 4L, pos_only = TRUE) else NA_real_
+        if (!is.finite(b_bl) && ("blade_length_mm" %in% names(specimen_df))) {
+          v_b <- suppressWarnings(as.numeric(specimen_df$blade_length_mm[i]))
+          if (is.finite(v_b) && v_b > 0.0) b_bl <- v_b
+        }
+        b_cs <- if (n_bas >= 1L) med_col(basal_rows, "centroid_size", 4L, pos_only = TRUE) else NA_real_
+        if (!is.finite(b_cs) && ("centroid_size" %in% names(specimen_df))) {
+          v_c <- suppressWarnings(as.numeric(specimen_df$centroid_size[i]))
+          if (is.finite(v_c) && v_c > 0.0) b_cs <- v_c
+        }
+        if (is.finite(b_bl) && is.finite(c_bl) && c_bl > 1e-6) {
+          basal_vs_cauline_length_ratio[i] <- round(b_bl / c_bl, 4)
+        } else if (is.finite(b_cs) && is.finite(c_cs) && c_cs > 1e-6) {
+          basal_vs_cauline_length_ratio[i] <- round(b_cs / c_cs, 4)
+        }
+
+        b_sol <- if ("solidity" %in% names(specimen_df)) suppressWarnings(as.numeric(specimen_df$solidity[i])) else med_col(basal_rows, "solidity", 4L)
+        if (is.finite(b_sol) && is.finite(cauline_solidity_med[i])) {
+          basal_vs_cauline_solidity_delta[i] <- round(b_sol - cauline_solidity_med[i], 4)
+        }
+
+        if (length(sym_names) >= 1L) {
+          caul_mat_i <- as.matrix(cauline_rows[, sym_names, drop = FALSE])
+          storage.mode(caul_mat_i) <- "double"
+          caul_med_h <- apply(caul_mat_i, 2L, stats::median, na.rm = TRUE)
+          caul_med_h[!is.finite(caul_med_h)] <- 0.0
+          caul_harm_list[[i]] <- caul_med_h
+          if (n_bas >= 1L) {
+            bas_mat_i <- as.matrix(basal_rows[, sym_names, drop = FALSE])
+            storage.mode(bas_mat_i) <- "double"
+            bas_med_h <- apply(bas_mat_i, 2L, stats::median, na.rm = TRUE)
+            bas_med_h[!is.finite(bas_med_h)] <- 0.0
+            d_efa <- sqrt(sum((bas_med_h - caul_med_h)^2, na.rm = TRUE))
+            if (is.finite(d_efa)) {
+              heteroblasty_efa_distance[i] <- round(d_efa, 6)
+              if ("heteroblasty_index" %in% names(specimen_df)) {
+                specimen_df$heteroblasty_index[i] <- round(d_efa, 6)
+              }
+            }
+          }
+        }
+      }
+    }
+
+    caul_spec_idx <- which(cauline_leaf_count >= 1L & !vapply(caul_harm_list, is.null, logical(1)))
+    if (length(caul_spec_idx) >= 1L && length(sym_names) >= 1L) {
+      M_caul <- do.call(rbind, caul_harm_list[caul_spec_idx])
+      storage.mode(M_caul) <- "double"
+      for (jc in seq_len(ncol(M_caul))) {
+        bad_c <- !is.finite(M_caul[, jc])
+        if (any(bad_c)) M_caul[bad_c, jc] <- if (any(!bad_c)) stats::median(M_caul[!bad_c, jc], na.rm = TRUE) else 0.0
+      }
+      c_scores <- NULL
+      if (nrow(M_caul) >= 3L) {
+        c_vars <- apply(M_caul, 2L, stats::var, na.rm = TRUE)
+        act_c <- which(is.finite(c_vars) & c_vars > 1e-12)
+        if (length(act_c) >= 1L) {
+          M_sub <- scale(M_caul[, act_c, drop = FALSE], center = TRUE, scale = FALSE)
+          eig_c <- eigen(stats::cov(M_sub), symmetric = TRUE)
+          c_scores <- M_sub %*% eig_c$vectors
+        }
+      }
+      if (is.null(c_scores)) {
+        all_sym_m <- as.matrix(efa_df[, sym_names, drop = FALSE])
+        storage.mode(all_sym_m) <- "double"
+        all_sym_m[!is.finite(all_sym_m)] <- 0.0
+        if (nrow(all_sym_m) >= 2L) {
+          c_vars <- apply(all_sym_m, 2L, stats::var, na.rm = TRUE)
+          act_c <- which(is.finite(c_vars) & c_vars > 1e-12)
+          if (length(act_c) >= 1L) {
+            mu_all <- colMeans(all_sym_m[, act_c, drop = FALSE])
+            eig_all <- eigen(stats::cov(all_sym_m[, act_c, drop = FALSE]), symmetric = TRUE)
+            c_scores <- sweep(M_caul[, act_c, drop = FALSE], 2L, mu_all, "-") %*% eig_all$vectors
+          }
+        }
+      }
+      if (!is.null(c_scores) && nrow(c_scores) == length(caul_spec_idx)) {
+        Cauline_PC1[caul_spec_idx] <- if (ncol(c_scores) >= 1L) round(c_scores[, 1L], 6) else 0.0
+        Cauline_PC2[caul_spec_idx] <- if (ncol(c_scores) >= 2L) round(c_scores[, 2L], 6) else 0.0
+        Cauline_PC3[caul_spec_idx] <- if (ncol(c_scores) >= 3L) round(c_scores[, 3L], 6) else 0.0
+      }
+    }
+  }
+
+  specimen_df$cauline_leaf_count <- as.integer(cauline_leaf_count)
+  specimen_df$cauline_solidity_med <- as.numeric(cauline_solidity_med)
+  specimen_df$cauline_dissection_index_med <- as.numeric(cauline_dissection_index_med)
+  specimen_df$cauline_aspect_ratio_med <- as.numeric(cauline_aspect_ratio_med)
+  specimen_df$cauline_blade_length_mm <- as.numeric(cauline_blade_length_mm)
+  specimen_df$basal_vs_cauline_length_ratio <- as.numeric(basal_vs_cauline_length_ratio)
+  specimen_df$basal_vs_cauline_solidity_delta <- as.numeric(basal_vs_cauline_solidity_delta)
+  specimen_df$heteroblasty_efa_distance <- as.numeric(heteroblasty_efa_distance)
+  specimen_df$Cauline_PC1 <- as.numeric(Cauline_PC1)
+  specimen_df$Cauline_PC2 <- as.numeric(Cauline_PC2)
+  specimen_df$Cauline_PC3 <- as.numeric(Cauline_PC3)
+  specimen_df
+}
+
 filter_biologically_variable_dissection_scalars <- function(df, cand_scalars, active_mask = NULL) {
   cand_scalars <- intersect(as.character(cand_scalars), names(df))
   if (length(cand_scalars) == 0L || nrow(df) < 5L) return(character(0))
@@ -477,20 +726,28 @@ filter_biologically_variable_dissection_scalars <- function(df, cand_scalars, ac
   } else {
     seq_len(nrow(df))
   }
+  cauline_het_scalars <- c(
+    "heteroblasty_efa_distance", "basal_vs_cauline_length_ratio",
+    "basal_vs_cauline_solidity_delta", "cauline_dissection_index_med",
+    "cauline_solidity_med", "Cauline_PC1"
+  )
   keep <- character(0)
   for (sc in cand_scalars) {
     raw_nm <- sub("_std$", "", sc)
     raw_v <- if (raw_nm %in% names(df)) suppressWarnings(as.numeric(df[[raw_nm]][act])) else suppressWarnings(as.numeric(df[[sc]][act]))
     raw_v <- raw_v[is.finite(raw_v)]
     if (length(raw_v) < 5L) next
+    if ((raw_nm %in% cauline_het_scalars) && (length(raw_v) < ceiling(0.50 * length(act)))) next
     sd_v <- stats::sd(raw_v)
     q_span <- as.numeric(diff(stats::quantile(raw_v, probs = c(0.10, 0.90), names = FALSE)))
-    ok <- if (raw_nm %in% c("solidity", "q25_solidity")) {
+    ok <- if (raw_nm %in% c("solidity", "q25_solidity", "cauline_solidity_med")) {
       (is.finite(sd_v) && sd_v >= 0.045) || any(raw_v < 0.75) || (is.finite(q_span) && q_span >= 0.10)
-    } else if (identical(raw_nm, "dissection_index")) {
+    } else if (raw_nm %in% c("dissection_index", "cauline_dissection_index_med")) {
       (is.finite(sd_v) && sd_v >= 0.12) || any(raw_v > 1.35)
-    } else if (identical(raw_nm, "heteroblasty_index")) {
+    } else if (raw_nm %in% c("heteroblasty_index", "heteroblasty_efa_distance")) {
       (is.finite(sd_v) && sd_v >= 0.015) && (sum(raw_v > 0) >= 5L)
+    } else if (raw_nm %in% c("basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "Cauline_PC1")) {
+      is.finite(sd_v) && sd_v >= 0.015
     } else {
       is.finite(sd_v) && sd_v > 1e-6
     }

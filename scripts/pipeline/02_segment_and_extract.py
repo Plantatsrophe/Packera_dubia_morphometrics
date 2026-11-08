@@ -127,6 +127,39 @@ from scripts.vision.capitulum_phenology_classifier import (
     classify_single_capitulum,
     classify_voucher_phenology,
 )
+try:
+    from scripts.vision.organ_crown_metrics import classify_leaf_zone_anatomical
+except ImportError:
+    def classify_leaf_zone_anatomical(
+        leaf_inputs: Sequence[Mapping[str, Any]],
+        crowns_by_pid: Optional[Mapping[int, Tuple[float, float]]] = None,
+        rosette_centroids_by_pid: Optional[Mapping[int, Optional[Tuple[float, float]]]] = None,
+        basal_stats_by_pid: Optional[Mapping[int, Tuple[float, float, float, float]]] = None,
+        capitula_detections: Optional[Sequence[Tuple[int, int, int, int]]] = None,
+        root_boxes: Optional[Sequence[Tuple[int, int, int, int]]] = None,
+        is_bent_stem: bool = False,
+        sheet_shape: Optional[Tuple[int, int]] = None,
+    ) -> Dict[int, Dict[str, Any]]:
+        _ = (crowns_by_pid, rosette_centroids_by_pid, basal_stats_by_pid, capitula_detections, root_boxes, is_bent_stem, sheet_shape)
+        out: Dict[int, Dict[str, Any]] = {}
+        for item in leaf_inputs:
+            lid = int(item.get("leaf_id", 0))
+            cy_rel = float(item.get("cy_rel_plant_bbox", np.nan))
+            has_pet = bool(item.get("has_petiole_mask", False)) or float(item.get("geodesic_petiole_skeleton_px", 0.0) or 0.0) > 5.0
+            zone = "cauline" if (np.isfinite(cy_rel) and cy_rel < 0.38 and not has_pet) else "basal"
+            out[lid] = {
+                "leaf_zone": zone,
+                "leaf_zone_confidence": 0.75,
+                "dist_from_crown_norm": np.nan,
+                "cy_rel_plant_bbox": cy_rel,
+            }
+        return out
+
+from leafmachine3.core.ect_compute import ect_product_for
+from leafmachine3.core.imaging import polygon_mask
+from leafmachine3.core.orientation import compute_orientation
+from leafmachine3.inference.leaf_segmenter import _components, _largest_component, _outer_polygons
+from leafmachine3.reporting.leaf_products import render_leaf_products
 
 logging.basicConfig(
     level=logging.INFO,
@@ -336,17 +369,22 @@ def _build_native_lm3_crop_masks(
     crop_shape: Tuple[int, int],
     is_high_dpi: bool = True,
     min_leaf_area: int = 0,
+    specimen_paper_cleaned_mask: Optional[np.ndarray] = None,
 ) -> Tuple[Optional[np.ndarray], float, Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Constructs `best_mask` (`cls == 0`), `petiole_crop_mask` (`cls == 1`), and `hole_crop_mask` (`cls == 2`)
-    purely via native LeafMachine3 rules (`leaf_segmenter.py:68-106` & `reporter.py:670-689`):
-      - Union all `cls == 0` (`Leaf`) candidate masks -> keep single largest 8-connected component
-        (`area >= 64` px, or largest if crop is tiny in unit tests) -> rasterize outer polygon
-        (`cv2.RETR_EXTERNAL`) as `silhouette`.
-      - Union all `cls == 1` (`Petiole`) candidate masks -> keep single largest 8-connected
-        component (`area >= 64` px).
-      - Union all `cls == 2` (`Hole`) candidate masks -> keep all 8-connected components
-        (`area >= 64` px) -> rasterize their outer polygons as `hole_crop_mask`.
+    delegating component isolation to `leafmachine3.inference.leaf_segmenter._largest_component`,
+    `_components`, `_outer_polygons`, and `leafmachine3.core.imaging.polygon_mask`, while retaining
+    rachis-bridged lateral pinnae in deeply dissected leaves:
+      - Union all `cls == 0` (`Leaf`) candidate masks -> extract `leaf_primary = _largest_component(leaf_union)`.
+      - Check `all_leaf_comps = _components(leaf_union, min_area=64)`. When secondary pinna components (`>= 64` px)
+        are present alongside `leaf_primary` (`>= 64` px), retain any component connected to `leaf_primary`
+        through a `7x7` ellipse-dilated `petiole_mask` / `specimen_paper_cleaned_mask` bridge or within
+        `max(6, int(0.03 * max(ch, cw)))` px of `leaf_primary` or `petiole_mask`.
+      - Rasterize outer polygons of `leaf_mask` via `_outer_polygons` + `polygon_mask` as `silhouette`.
+      - Union all `cls == 1` (`Petiole`) candidate masks -> keep `_largest_component` (`area >= 64` px).
+      - Union all `cls == 2` (`Hole`) candidate masks -> keep `_components(min_area=64)` -> rasterize outer
+        polygons via `_outer_polygons` + `polygon_mask` as `hole_crop_mask`.
       - Compute `best_mask = np.where((silhouette > 0) & (hole_crop_mask == 0), 255, 0).astype(np.uint8)`
         (`lamina = silhouette & ~hole`), never subtracting `petiole_crop_mask`.
     """
@@ -392,52 +430,110 @@ def _build_native_lm3_crop_masks(
         return None, 0.0, None, None
 
     best_score = float(max(leaf_scores))
-    min_cc_area = 64 if (is_high_dpi and (crop_h * crop_w) >= 4096) else max(1, int(min_leaf_area))
-
-    n_l, lbl_l, stats_l, _ = cv2.connectedComponentsWithStats((leaf_union > 0).astype(np.uint8), connectivity=8)
-    if n_l <= 1:
-        return None, 0.0, None, None
-    areas_l = stats_l[1:, cv2.CC_STAT_AREA]
-    valid_l_idxs = [i + 1 for i, a in enumerate(areas_l) if int(a) >= min_cc_area]
-    if not valid_l_idxs:
-        if is_high_dpi and (crop_h * crop_w) >= 4096:
-            return None, 0.0, None, None
-        valid_l_idxs = [int(np.argmax(areas_l)) + 1]
-    best_l_idx = max(valid_l_idxs, key=lambda idx: int(stats_l[idx, cv2.CC_STAT_AREA]))
-    largest_leaf_cc = np.where(lbl_l == best_l_idx, 255, 0).astype(np.uint8)
-    cnts_sil, _ = cv2.findContours(largest_leaf_cc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    silhouette = np.zeros((crop_h, crop_w), dtype=np.uint8)
-    if cnts_sil:
-        main_sil_cnt = max(cnts_sil, key=cv2.contourArea)
-        cv2.drawContours(silhouette, [main_sil_cnt], -1, 255, thickness=cv2.FILLED)
-        np.maximum(silhouette, largest_leaf_cc, out=silhouette)
-    else:
-        silhouette = largest_leaf_cc
+    is_full_crop = bool(is_high_dpi and (crop_h * crop_w) >= 4096)
+    min_cc_area = 64 if is_full_crop else max(1, int(min_leaf_area))
 
     petiole_crop_mask: Optional[np.ndarray] = None
     if has_pet and np.any(pet_union > 0):
-        n_p, lbl_p, stats_p, _ = cv2.connectedComponentsWithStats((pet_union > 0).astype(np.uint8), connectivity=8)
-        if n_p > 1:
-            areas_p = stats_p[1:, cv2.CC_STAT_AREA]
-            min_pet_cc = 64 if (is_high_dpi and (crop_h * crop_w) >= 4096) else 1
-            valid_p_idxs = [i + 1 for i, a in enumerate(areas_p) if int(a) >= min_pet_cc]
-            if valid_p_idxs:
-                best_p_idx = max(valid_p_idxs, key=lambda idx: int(stats_p[idx, cv2.CC_STAT_AREA]))
-                petiole_crop_mask = np.where(lbl_p == best_p_idx, 255, 0).astype(np.uint8)
+        min_pet_cc = 64 if is_full_crop else 1
+        pet_primary = _largest_component(pet_union > 0)
+        if int(pet_primary.sum()) >= min_pet_cc:
+            pet_sil = np.zeros((crop_h, crop_w), dtype=bool)
+            for poly_p in _outer_polygons(pet_primary):
+                pet_sil |= polygon_mask(poly_p, (crop_h, crop_w))
+            pet_sil |= pet_primary
+            petiole_crop_mask = np.where(pet_sil, 255, 0).astype(np.uint8)
+
+    leaf_primary = _largest_component(leaf_union > 0)
+    if int(leaf_primary.sum()) < min_cc_area:
+        if is_full_crop:
+            leaf_primary = np.zeros_like(leaf_union, dtype=bool)
+            return None, 0.0, None, None
+        if int(leaf_primary.sum()) <= 0:
+            return None, 0.0, None, None
+
+    leaf_mask_bool = leaf_primary.copy()
+    raw_leaf_comps = _components(leaf_union > 0, min_area=64)
+    if isinstance(raw_leaf_comps, list):
+        comp_list = [np.asarray(c, dtype=bool) for c in raw_leaf_comps if np.any(c)]
+        all_leaf_comps = (
+            np.logical_or.reduce(comp_list)
+            if comp_list
+            else np.zeros((crop_h, crop_w), dtype=bool)
+        )
+    else:
+        all_leaf_comps = np.asarray(raw_leaf_comps > 0, dtype=bool)
+        n_ac, lbl_ac = cv2.connectedComponents(all_leaf_comps.astype(np.uint8), connectivity=8)
+        comp_list = [lbl_ac == ci for ci in range(1, n_ac)]
+
+    if int(all_leaf_comps.sum()) > int(leaf_primary.sum()) and int(leaf_primary.sum()) >= 64:
+        k_bridge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        pet_src = (petiole_crop_mask > 0) if petiole_crop_mask is not None else (pet_union > 0)
+        dilated_pet_bridge = (
+            cv2.dilate(pet_src.astype(np.uint8), k_bridge, iterations=1) > 0
+            if np.any(pet_src)
+            else np.zeros((crop_h, crop_w), dtype=bool)
+        )
+        bridge_mask = dilated_pet_bridge.copy()
+        if (
+            specimen_paper_cleaned_mask is not None
+            and isinstance(specimen_paper_cleaned_mask, np.ndarray)
+            and specimen_paper_cleaned_mask.size > 0
+        ):
+            if specimen_paper_cleaned_mask.shape[:2] != (crop_h, crop_w):
+                spec_rsz = cv2.resize(
+                    (specimen_paper_cleaned_mask > 0).astype(np.uint8),
+                    (crop_w, crop_h),
+                    interpolation=cv2.INTER_NEAREST,
+                ) > 0
+            else:
+                spec_rsz = specimen_paper_cleaned_mask > 0
+            bridge_mask |= spec_rsz
+
+        prox_px = max(6, int(0.03 * max(crop_h, crop_w)))
+        k_prox = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * prox_px + 1, 2 * prox_px + 1))
+        anchor_prox = cv2.dilate(
+            (leaf_primary | pet_src).astype(np.uint8),
+            k_prox,
+            iterations=1,
+        ) > 0
+
+        combined_bridge = all_leaf_comps | bridge_mask
+        _, br_lbls = cv2.connectedComponents(combined_bridge.astype(np.uint8), connectivity=8)
+        primary_br_ids = set(np.unique(br_lbls[leaf_primary]).tolist()) - {0}
+
+        for comp_mask in comp_list:
+            if int(comp_mask.sum()) < 64:
+                continue
+            if np.any(comp_mask & leaf_primary):
+                continue
+            comp_br_ids = set(np.unique(br_lbls[comp_mask]).tolist()) - {0}
+            connected_via_bridge = bool(primary_br_ids & comp_br_ids)
+            within_prox = bool(np.any(comp_mask & anchor_prox))
+            if connected_via_bridge or within_prox:
+                leaf_mask_bool |= comp_mask
+
+    silhouette_bool = np.zeros((crop_h, crop_w), dtype=bool)
+    for poly_l in _outer_polygons(leaf_mask_bool):
+        silhouette_bool |= polygon_mask(poly_l, (crop_h, crop_w))
+    silhouette_bool |= leaf_mask_bool
+    silhouette = np.where(silhouette_bool, 255, 0).astype(np.uint8)
 
     hole_crop_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
     if has_hole and np.any(hole_union > 0):
-        n_h, lbl_h, stats_h, _ = cv2.connectedComponentsWithStats((hole_union > 0).astype(np.uint8), connectivity=8)
-        if n_h > 1:
-            min_hole_cc = 64 if (is_high_dpi and (crop_h * crop_w) >= 4096) else 1
-            for h_idx in range(1, n_h):
-                if int(stats_h[h_idx, cv2.CC_STAT_AREA]) >= min_hole_cc:
-                    h_cc = np.where(lbl_h == h_idx, 255, 0).astype(np.uint8)
-                    cnts_h, _ = cv2.findContours(h_cc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-                    if cnts_h:
-                        cv2.drawContours(hole_crop_mask, cnts_h, -1, 255, thickness=cv2.FILLED)
-                    else:
-                        np.maximum(hole_crop_mask, h_cc, out=hole_crop_mask)
+        min_hole_cc = 64 if is_full_crop else 1
+        raw_hole_comps = _components(hole_union > 0, min_area=min_hole_cc)
+        hole_comp_list = (
+            [np.asarray(hc, dtype=bool) for hc in raw_hole_comps if np.any(hc)]
+            if isinstance(raw_hole_comps, list)
+            else ([np.asarray(raw_hole_comps > 0, dtype=bool)] if np.any(raw_hole_comps) else [])
+        )
+        hole_bool = np.zeros((crop_h, crop_w), dtype=bool)
+        for hc_mask in hole_comp_list:
+            for poly_h in _outer_polygons(hc_mask):
+                hole_bool |= polygon_mask(poly_h, (crop_h, crop_w))
+            hole_bool |= hc_mask
+        hole_crop_mask = np.where(hole_bool, 255, 0).astype(np.uint8)
 
     best_mask = np.where((silhouette > 0) & (hole_crop_mask == 0), 255, 0).astype(np.uint8)
     if not np.any(best_mask > 0):
@@ -879,7 +975,7 @@ class SegmentAndExtractPipeline:
         seg_partial_cfg = bool(
             self.lm3_config.get("leafmachine", {})
             .get("leaf_segmentation", {})
-            .get("segment_partial_leaves", False)
+            .get("segment_partial_leaves", True)
         )
 
         if not self.enable_geometric_qc:
@@ -919,25 +1015,47 @@ class SegmentAndExtractPipeline:
             if seg_partial_cfg or not c0_items:
                 selected_s1_leaves.extend(c1_items)
 
-            # Native LeafMachine3 confidence-ordered nested-box deduplication (`overlap: 0.95, metric: "min"`)
-            if is_high_dpi and len(selected_s1_leaves) >= 2:
+            # Asymmetric confidence-ordered nested-box deduplication:
+            #   1. Already-kept box `k` suppresses candidate `b` if symmetric `IoU >= 0.70` OR `k` encloses `b`
+            #      (`area_k >= 0.85 * area_b` and `inter / max(area_b, 1.0) >= 0.90`).
+            #   2. Conversely, if candidate `b` is a larger whole-leaf box that encloses an already-kept
+            #      smaller sub-lobe box `k` (`area_b >= 1.35 * area_k` and `inter / max(area_k, 1.0) >= 0.90`
+            #      and `b_score >= 0.25`), replace `k` in `deduped_s1` with the enclosing parent leaf box `b`.
+            if len(selected_s1_leaves) >= 2:
                 selected_s1_leaves.sort(key=lambda x: float(x[1]), reverse=True)
-                filtered_s1_leaves: List[Tuple[Tuple[int, int, int, int], float, int]] = []
-                for ba, sca, cla in selected_s1_leaves:
-                    area_a = float(max(1, (ba[2] - ba[0]) * (ba[3] - ba[1])))
-                    is_nested_sublobe = False
-                    for bb, _scb, _clb in filtered_s1_leaves:
-                        area_b = float(max(1, (bb[2] - bb[0]) * (bb[3] - bb[1])))
-                        iy0, ix0 = max(ba[0], bb[0]), max(ba[1], bb[1])
-                        iy1, ix1 = min(ba[2], bb[2]), min(ba[3], bb[3])
+                deduped_s1: List[Tuple[Tuple[int, int, int, int], float, int]] = []
+                for b_box, b_score, b_cls in selected_s1_leaves:
+                    area_b = float(max(1, (b_box[2] - b_box[0]) * (b_box[3] - b_box[1])))
+                    suppressed = False
+                    replaced_indices: List[int] = []
+                    for idx_k, (k_box, _k_score, _k_cls) in enumerate(deduped_s1):
+                        area_k = float(max(1, (k_box[2] - k_box[0]) * (k_box[3] - k_box[1])))
+                        iy0, ix0 = max(b_box[0], k_box[0]), max(b_box[1], k_box[1])
+                        iy1, ix1 = min(b_box[2], k_box[2]), min(b_box[3], k_box[3])
                         if iy1 > iy0 and ix1 > ix0:
                             inter = float((iy1 - iy0) * (ix1 - ix0))
-                            if (inter / min(area_a, area_b)) >= 0.95:
-                                is_nested_sublobe = True
+                            iou = inter / max(area_b + area_k - inter, 1.0)
+                            if (
+                                area_b >= 1.35 * area_k
+                                and (inter / max(area_k, 1.0)) >= 0.90
+                                and float(b_score) >= 0.25
+                            ):
+                                replaced_indices.append(idx_k)
+                            elif iou >= 0.70 or (
+                                area_k >= 0.85 * area_b and (inter / max(area_b, 1.0)) >= 0.90
+                            ):
+                                suppressed = True
                                 break
-                    if not is_nested_sublobe:
-                        filtered_s1_leaves.append((ba, sca, cla))
-                selected_s1_leaves = filtered_s1_leaves
+                    if suppressed:
+                        continue
+                    if replaced_indices:
+                        first_idx = replaced_indices[0]
+                        deduped_s1[first_idx] = (b_box, b_score, b_cls)
+                        for rem_idx in reversed(replaced_indices[1:]):
+                            deduped_s1.pop(rem_idx)
+                    else:
+                        deduped_s1.append((b_box, b_score, b_cls))
+                selected_s1_leaves = deduped_s1
 
             for s1_bbox, s1_score, s1_cls in selected_s1_leaves:
                 crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
@@ -998,9 +1116,9 @@ class SegmentAndExtractPipeline:
 
             c0_present = any(int(it[2]) == 0 for it in s1_raw_leaf_items)
 
-            # Native LeafMachine3 Stage 1 candidate unpacking (`overlap: 0.95` nested-box deduplication,
+            # Native LeafMachine3 Stage 1 candidate unpacking (asymmetric nested-box deduplication,
             # minimum 16 px box area matching `detector_common.py`, and zero pre-segmentation vertical
-            # or uncalibrated pixel filtering so every `Leaf_WHOLE` detection reaches Stage 2)
+            # or uncalibrated pixel filtering so every `Leaf_WHOLE` and `Leaf_PARTIAL` detection reaches Stage 2)
             eligible_s1_items: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
             for s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy in s1_raw_leaf_items:
                 if s1_bh < 4 or s1_bw < 4 or (s1_bh * s1_bw) < 16:
@@ -1012,26 +1130,44 @@ class SegmentAndExtractPipeline:
                         continue
                 eligible_s1_items.append((s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy))
 
-            if is_high_dpi and len(eligible_s1_items) >= 2:
+            if len(eligible_s1_items) >= 2:
                 eligible_s1_items.sort(key=lambda x: float(x[1]), reverse=True)
-                dedup_s1_items: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
-                for item_a in eligible_s1_items:
-                    ba = item_a[0]
-                    area_a = float(max(1, (ba[2] - ba[0]) * (ba[3] - ba[1])))
-                    is_nested_sublobe = False
-                    for item_b in dedup_s1_items:
-                        bb = item_b[0]
-                        area_b = float(max(1, (bb[2] - bb[0]) * (bb[3] - bb[1])))
-                        iy0, ix0 = max(ba[0], bb[0]), max(ba[1], bb[1])
-                        iy1, ix1 = min(ba[2], bb[2]), min(ba[3], bb[3])
+                deduped_s1_qc: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
+                for item_b in eligible_s1_items:
+                    b_box = item_b[0]
+                    b_score = float(item_b[1])
+                    area_b = float(max(1, (b_box[2] - b_box[0]) * (b_box[3] - b_box[1])))
+                    suppressed = False
+                    replaced_indices_qc: List[int] = []
+                    for idx_k, item_k in enumerate(deduped_s1_qc):
+                        k_box = item_k[0]
+                        area_k = float(max(1, (k_box[2] - k_box[0]) * (k_box[3] - k_box[1])))
+                        iy0, ix0 = max(b_box[0], k_box[0]), max(b_box[1], k_box[1])
+                        iy1, ix1 = min(b_box[2], k_box[2]), min(b_box[3], k_box[3])
                         if iy1 > iy0 and ix1 > ix0:
                             inter = float((iy1 - iy0) * (ix1 - ix0))
-                            if (inter / min(area_a, area_b)) >= 0.95:
-                                is_nested_sublobe = True
+                            iou = inter / max(area_b + area_k - inter, 1.0)
+                            if (
+                                area_b >= 1.35 * area_k
+                                and (inter / max(area_k, 1.0)) >= 0.90
+                                and b_score >= 0.25
+                            ):
+                                replaced_indices_qc.append(idx_k)
+                            elif iou >= 0.70 or (
+                                area_k >= 0.85 * area_b and (inter / max(area_b, 1.0)) >= 0.90
+                            ):
+                                suppressed = True
                                 break
-                    if not is_nested_sublobe:
-                        dedup_s1_items.append(item_a)
-                eligible_s1_items = dedup_s1_items
+                    if suppressed:
+                        continue
+                    if replaced_indices_qc:
+                        first_idx = replaced_indices_qc[0]
+                        deduped_s1_qc[first_idx] = item_b
+                        for rem_idx in reversed(replaced_indices_qc[1:]):
+                            deduped_s1_qc.pop(rem_idx)
+                    else:
+                        deduped_s1_qc.append(item_b)
+                eligible_s1_items = deduped_s1_qc
 
             for s1_bbox, s1_score, s1_cls, _s1_bh, _s1_bw, _s1_cy in eligible_s1_items:
                 crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
@@ -1367,11 +1503,22 @@ class SegmentAndExtractPipeline:
                     if not crop_preds:
                         continue
 
+                    cy0_sp, cx0_sp, cy1_sp, cx1_sp = crop_box
+                    spec_crop_s2 = (
+                        specimen_paper_cleaned_mask[cy0_sp:cy1_sp, cx0_sp:cx1_sp]
+                        if (
+                            specimen_paper_cleaned_mask is not None
+                            and isinstance(specimen_paper_cleaned_mask, np.ndarray)
+                            and specimen_paper_cleaned_mask.shape[:2] == (sheet_h, sheet_w)
+                        )
+                        else None
+                    )
                     best_mask, best_score, best_petiole_mask, best_hole_mask = _build_native_lm3_crop_masks(
                         crop_preds,
                         crop_bgr.shape[:2],
                         is_high_dpi=is_high_dpi,
                         min_leaf_area=0,
+                        specimen_paper_cleaned_mask=spec_crop_s2,
                     )
                     if best_mask is None:
                         continue
@@ -1483,11 +1630,22 @@ class SegmentAndExtractPipeline:
                         continue
 
                     min_blade_area = 64 if scale_f > 0.0 else 20
+                    cy0_qc, cx0_qc, cy1_qc, cx1_qc = crop_box
+                    spec_crop_qc = (
+                        specimen_paper_cleaned_mask[cy0_qc:cy1_qc, cx0_qc:cx1_qc]
+                        if (
+                            specimen_paper_cleaned_mask is not None
+                            and isinstance(specimen_paper_cleaned_mask, np.ndarray)
+                            and specimen_paper_cleaned_mask.shape[:2] == (sheet_h, sheet_w)
+                        )
+                        else None
+                    )
                     best_mask, best_score, best_petiole_qc, best_hole_qc = _build_native_lm3_crop_masks(
                         crop_preds,
                         crop_bgr.shape[:2],
                         is_high_dpi=is_high_dpi,
                         min_leaf_area=min_blade_area,
+                        specimen_paper_cleaned_mask=spec_crop_qc,
                     )
                     if best_mask is None:
                         continue
@@ -2599,8 +2757,8 @@ class SegmentAndExtractPipeline:
             kept_with_q_cand.sort(key=lambda x: x[0], reverse=True)
             candidate_extractions = [x[1] for x in kept_with_q_cand]
 
-        # Compute empirical rosette crown (p_crown), 75th-percentile outer-rosette petiole metrics,
-        # and piecewise flowering scape height metrics across candidate_extractions
+        # Compute empirical rosette crown (p_crown), anatomical basal vs cauline leaf_zone classification,
+        # 75th-percentile outer-rosette petiole metrics, and piecewise flowering scape height metrics across candidate_extractions
         pose_inputs: List[Dict[str, Any]] = []
         for _inst, _rres, _tier, _atier, _fold, _diss, _refl, _area in candidate_extractions:
             _ox, _oy = _inst.mask_origin
@@ -2612,12 +2770,23 @@ class SegmentAndExtractPipeline:
             _pa_sheet = (float(_pa[0] + _ox), float(_pa[1] + _oy))
             _trim_info = _inst.trim_meta or _rres.metadata.get("petiole_trim_info") or {}
             _geod_px = float(_trim_info.get("trim_distance_px", 0.0) or 0.0)
+            _geom_tup = inst_geom_map.get(_inst.leaf_id, (0.0, 0.0, 0.0, np.nan, 1.0))
             pose_inputs.append({
                 "leaf_id": _inst.leaf_id,
                 "plant_individual_id": _inst.plant_individual_id,
                 "p_base_sheet": _pb_sheet,
                 "p_apex_sheet": _pa_sheet,
                 "geodesic_petiole_skeleton_px": _geod_px,
+                "keypoints_31": _inst.keypoints_31,
+                "petiole_width_mm": _inst.petiole_width_mm,
+                "area_px": _raw_px_by_leaf_id.get(_inst.leaf_id, float(_area)),
+                "blade_area_cm2": _inst.blade_area_cm2,
+                "has_petiole_mask": bool(_inst.petiole_mask is not None and np.any(_inst.petiole_mask > 0)),
+                "cy_rel_plant_bbox": inst_cy_rel_plant_bbox.get(_inst.leaf_id, np.nan),
+                "cx": float(_geom_tup[0]),
+                "cy": float(_geom_tup[1]),
+                "aspect_ratio": float(_geom_tup[3]),
+                "solidity": float(_inst.solidity),
             })
 
         crowns_by_pid = estimate_rosette_crown_point(
@@ -2636,7 +2805,39 @@ class SegmentAndExtractPipeline:
         repro_summary["plant_height_cm"] = petiole_scape_res.get("plant_height_cm", np.nan)
         repro_summary["scape_to_basal_leaf_ratio"] = petiole_scape_res.get("scape_to_basal_leaf_ratio", np.nan)
         repro_summary["is_bent_stem"] = bool(petiole_scape_res.get("is_bent_stem", False))
-        by_plant_petiole = petiole_scape_res.get("by_plant", {})
+
+        leaf_zones_by_id = classify_leaf_zone_anatomical(
+            pose_inputs,
+            crowns_by_pid=crowns_by_pid if isinstance(crowns_by_pid, dict) else None,
+            rosette_centroids_by_pid=rosette_centroids_by_pid,
+            basal_stats_by_pid=basal_stats_by_pid,
+            capitula_detections=[b for b, _, _, _ in capitulum_detections],
+            root_boxes=root_detections,
+            is_bent_stem=bool(repro_summary.get("is_bent_stem", False)),
+            sheet_shape=(sheet_h, sheet_w),
+        )
+        basal_only_pose_inputs = [
+            p_in
+            for p_in in pose_inputs
+            if str((leaf_zones_by_id.get(int(p_in["leaf_id"])) or {}).get("leaf_zone", "basal")).lower() == "basal"
+        ]
+        if basal_only_pose_inputs and len(basal_only_pose_inputs) < len(pose_inputs):
+            basal_petiole_res = approximate_petiole_and_scape_metrics(
+                basal_leaves=basal_only_pose_inputs,
+                p_crown=crowns_by_pid,
+                px_per_cm=px_per_cm_sheet,
+                upper_cauline_detections=upper_cauline_pts,
+                root_boxes=root_detections,
+                capitula_detections=[b for b, _, _, _ in capitulum_detections],
+            )
+            by_plant_petiole = dict(petiole_scape_res.get("by_plant", {}) or {})
+            for b_pid, b_pdict in (basal_petiole_res.get("by_plant", {}) or {}).items():
+                if isinstance(b_pdict, dict):
+                    by_plant_petiole[int(b_pid)] = dict(b_pdict)
+            if np.isfinite(basal_petiole_res.get("scape_to_basal_leaf_ratio", np.nan)):
+                repro_summary["scape_to_basal_leaf_ratio"] = basal_petiole_res.get("scape_to_basal_leaf_ratio", np.nan)
+        else:
+            by_plant_petiole = petiole_scape_res.get("by_plant", {})
         _centroids_out = {
             int(k): (float(v[0]), float(v[1]))
             for k, v in rosette_centroids_by_pid.items()
@@ -2666,16 +2867,13 @@ class SegmentAndExtractPipeline:
             ox, oy = inst.mask_origin
 
             def _export_homologized(mask_proc: np.ndarray, is_reflected: bool) -> Optional[str]:
-                if not self.enable_geometric_qc:
-                    mask_for_contour = np.where(mask_proc > 0, 255, 0).astype(np.uint8)
-                else:
-                    mask_for_contour = _prepare_lamina_mask(
-                        mask_proc,
-                        petiole_mask=inst.petiole_mask,
-                        hole_mask=inst.hole_mask,
-                    )
-                    if not np.any(mask_for_contour > 0):
-                        mask_for_contour = (mask_proc > 0).astype(np.uint8) * 255
+                mask_for_contour = _prepare_lamina_mask(
+                    mask_proc,
+                    petiole_mask=inst.petiole_mask,
+                    hole_mask=inst.hole_mask,
+                )
+                if not np.any(mask_for_contour > 0):
+                    mask_for_contour = (mask_proc > 0).astype(np.uint8) * 255
                 p_base_pt = routing_res.metadata.get("p_base")
                 p_apex_pt = routing_res.metadata.get("p_apex")
                 if (
@@ -2700,6 +2898,30 @@ class SegmentAndExtractPipeline:
                         if p_apex_pt is None or p_apex_pt == (0, 0):
                             p_apex_pt = _pa_lam
 
+                angle_cw: Optional[float] = None
+                if isinstance(inst.keypoints_31, dict):
+                    _pts_ori = {
+                        str(_k): (float(_v[0]), float(_v[1]))
+                        for _k, _v in inst.keypoints_31.items()
+                        if isinstance(_v, (tuple, list, np.ndarray)) and len(_v) >= 2
+                    }
+                    if "lamina_tip" in _pts_ori and "lamina_base" in _pts_ori:
+                        _ori_res = compute_orientation(_pts_ori)
+                        if _ori_res.success and _ori_res.angle_cw is not None:
+                            angle_cw = float(_ori_res.angle_cw)
+                if (
+                    angle_cw is None
+                    and p_base_pt is not None
+                    and p_apex_pt is not None
+                    and p_base_pt != p_apex_pt
+                ):
+                    _ori_fb = compute_orientation({
+                        "lamina_tip": (float(p_apex_pt[0]), float(p_apex_pt[1])),
+                        "lamina_base": (float(p_base_pt[0]), float(p_base_pt[1])),
+                    })
+                    if _ori_fb.success and _ori_fb.angle_cw is not None:
+                        angle_cw = float(_ori_fb.angle_cw)
+
                 c_res = export_standardized_contour(
                     mask_for_contour,
                     catalog_number,
@@ -2712,7 +2934,18 @@ class SegmentAndExtractPipeline:
                 )
                 if getattr(self, "ect_dir", None) is not None:
                     ect_out = self.ect_dir / f"{catalog_number}_leaf{inst.leaf_id}_ect.npy"
-                    ect_mat = compute_leaf_ect_descriptor(mask_for_contour, output_path=ect_out)
+                    try:
+                        ect_mat = compute_leaf_ect_descriptor(
+                            mask_for_contour,
+                            output_path=ect_out,
+                            hole_mask=inst.hole_mask,
+                            petiole_mask=inst.petiole_mask,
+                            angle_cw=angle_cw,
+                            include_petiole=False,
+                            include_holes=True,
+                        )
+                    except TypeError:
+                        ect_mat = compute_leaf_ect_descriptor(mask_for_contour, output_path=ect_out)
                     if ect_mat is not None:
                         inst.ect_path = str(ect_out)
                 if isinstance(c_res, tuple):
@@ -2764,6 +2997,14 @@ class SegmentAndExtractPipeline:
             pid_pet = by_plant_petiole.get(int(inst.plant_individual_id), petiole_scape_res)
             _inst_ar_val = inst_geom_map.get(inst.leaf_id, (0.0, 0.0, 0.0, np.nan, 1.0))[3]
             _inst_area_px_val = _raw_px_by_leaf_id.get(inst.leaf_id, np.nan)
+            _lz_info = leaf_zones_by_id.get(int(inst.leaf_id), {}) if isinstance(leaf_zones_by_id, dict) else {}
+            _leaf_zone_str = str(_lz_info.get("leaf_zone", "basal") or "basal")
+            _leaf_zone_conf = _lz_info.get("leaf_zone_confidence", np.nan)
+            _dist_crown_norm = _lz_info.get("dist_from_crown_norm", np.nan)
+            _eff_min_cm2_leaf = effective_min_area_by_pid.get(
+                int(inst.plant_individual_id),
+                effective_min_blade_area_cm2,
+            )
             # Record successfully extracted leaf with diagnostic classification flags
             extracted_records.append({
                 "catalogNumber": catalog_number,
@@ -2805,7 +3046,10 @@ class SegmentAndExtractPipeline:
                 "involucre_height_mm": repro_summary["involucre_height_mm"],
                 "involucre_width_mm": repro_summary["involucre_width_mm"],
                 "capitulum_aspect_ratio": repro_summary["capitulum_aspect_ratio"],
-                "effective_min_blade_area_cm2": round(float(effective_min_blade_area_cm2), 4),
+                "leaf_zone": _leaf_zone_str,
+                "leaf_zone_confidence": round(float(_leaf_zone_conf), 4) if _leaf_zone_conf is not None and np.isfinite(_leaf_zone_conf) else np.nan,
+                "dist_from_crown_norm": round(float(_dist_crown_norm), 4) if _dist_crown_norm is not None and np.isfinite(_dist_crown_norm) else np.nan,
+                "effective_min_blade_area_cm2": round(float(_eff_min_cm2_leaf), 4),
                 "cy_rel_plant_bbox": round(float(inst_cy_rel_plant_bbox.get(inst.leaf_id, np.nan)), 4),
                 "rosette_bbox_fallback_used": bool(rosette_bbox_fallback_used),
             })
@@ -2898,15 +3142,36 @@ class SegmentAndExtractPipeline:
                     extracted_df[pet_col] = np.nan
                 else:
                     extracted_df[pet_col] = pd.to_numeric(extracted_df[pet_col], errors="coerce")
-            # Enforce 75th-percentile outer-rosette aggregation per specimen (catalogNumber, plant_individual_id)
+            # Enforce 75th-percentile outer-rosette aggregation over basal rows per specimen (catalogNumber, plant_individual_id)
             if "catalogNumber" in extracted_df.columns and len(extracted_df) > 1:
                 grp_keys = [extracted_df["catalogNumber"].astype(str), extracted_df["plant_individual_id"].fillna(0).astype(int)]
+                has_zone_col = "leaf_zone" in extracted_df.columns
                 for pet_col, r_dig in (("petiole_length_mm", 3), ("blade_length_mm", 3), ("petiole_to_blade_ratio", 4)):
                     if extracted_df[pet_col].notna().any():
-                        extracted_df[pet_col] = (
-                            extracted_df.groupby(grp_keys)[pet_col]
-                            .transform(lambda s: round(float(np.nanpercentile(s, 75)), r_dig) if s.notna().any() else np.nan)
-                        )
+                        if has_zone_col:
+                            def _agg_basal_p75(grp_df: pd.DataFrame) -> pd.Series:
+                                z_ser = grp_df["leaf_zone"].fillna("basal").astype(str).str.lower()
+                                b_mask = z_ser == "basal"
+                                b_vals = grp_df.loc[b_mask, pet_col].dropna()
+                                if len(b_vals) > 0:
+                                    p75_val = round(float(np.nanpercentile(b_vals, 75)), r_dig)
+                                    out_s = grp_df[pet_col].copy()
+                                    out_s.loc[b_mask] = p75_val
+                                    out_s.loc[~b_mask] = out_s.loc[~b_mask].fillna(p75_val)
+                                    return out_s
+                                all_vals = grp_df[pet_col].dropna()
+                                if len(all_vals) > 0:
+                                    p75_all = round(float(np.nanpercentile(all_vals, 75)), r_dig)
+                                    return pd.Series(p75_all, index=grp_df.index)
+                                return grp_df[pet_col]
+
+                            for _, _g_df in extracted_df.groupby(grp_keys, sort=False):
+                                extracted_df.loc[_g_df.index, pet_col] = _agg_basal_p75(_g_df)
+                        else:
+                            extracted_df[pet_col] = (
+                                extracted_df.groupby(grp_keys)[pet_col]
+                                .transform(lambda s: round(float(np.nanpercentile(s, 75)), r_dig) if s.notna().any() else np.nan)
+                            )
             for c in manifest_cols:
                 if c not in extracted_df.columns:
                     extracted_df[c] = np.nan

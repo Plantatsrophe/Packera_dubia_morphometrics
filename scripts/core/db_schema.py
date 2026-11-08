@@ -270,6 +270,17 @@ def _build_master_view_ddl() -> str:
         om.q25_solidity AS q25_solidity,
         om.dissected_leaf_fraction AS dissected_leaf_fraction,
         om.basal_leaf_count AS basal_leaf_count,
+        om.cauline_leaf_count AS cauline_leaf_count,
+        om.cauline_solidity_med AS cauline_solidity_med,
+        om.cauline_dissection_index_med AS cauline_dissection_index_med,
+        om.cauline_aspect_ratio_med AS cauline_aspect_ratio_med,
+        om.cauline_blade_length_mm AS cauline_blade_length_mm,
+        om.basal_vs_cauline_length_ratio AS basal_vs_cauline_length_ratio,
+        om.basal_vs_cauline_solidity_delta AS basal_vs_cauline_solidity_delta,
+        om.heteroblasty_efa_distance AS heteroblasty_efa_distance,
+        om.Cauline_PC1 AS Cauline_PC1,
+        om.Cauline_PC2 AS Cauline_PC2,
+        om.Cauline_PC3 AS Cauline_PC3,
         om.ucs_score AS ucs_score,
         om.aspect_ratio AS aspect_ratio,
         om.area_px AS area_px,
@@ -549,6 +560,11 @@ def _build_schema_ddl() -> str:
         contour_path TEXT,
         contour_n_pts INTEGER DEFAULT 120,
         contour_xy_json TEXT NOT NULL,
+        leaf_zone TEXT DEFAULT 'basal',
+        leaf_zone_confidence REAL,
+        dist_from_crown_norm REAL,
+        cy_rel_plant_bbox REAL,
+        effective_min_blade_area_cm2 REAL,
         PRIMARY KEY (catalogNumber, plant_individual_id, leaf_id),
         FOREIGN KEY (catalogNumber, plant_individual_id)
             REFERENCES plant_individuals(catalogNumber, plant_individual_id) ON DELETE CASCADE
@@ -681,6 +697,10 @@ def _build_schema_ddl() -> str:
         log_centsize REAL,
         efd_harmonic_opt INTEGER,
         efd_k95_pcs INTEGER,
+        leaf_zone TEXT,
+        leaf_zone_confidence REAL,
+        dist_from_crown_norm REAL,
+        cy_rel_plant_bbox REAL,
         {pc_ddl},
         {sym_pc_ddl},
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id, leaf_id),
@@ -704,6 +724,17 @@ def _build_schema_ddl() -> str:
         q25_solidity REAL,
         dissected_leaf_fraction REAL,
         basal_leaf_count INTEGER,
+        cauline_leaf_count INTEGER,
+        cauline_solidity_med REAL,
+        cauline_dissection_index_med REAL,
+        cauline_aspect_ratio_med REAL,
+        cauline_blade_length_mm REAL,
+        basal_vs_cauline_length_ratio REAL,
+        basal_vs_cauline_solidity_delta REAL,
+        heteroblasty_efa_distance REAL,
+        Cauline_PC1 REAL,
+        Cauline_PC2 REAL,
+        Cauline_PC3 REAL,
         ucs_score REAL,
         aspect_ratio REAL,
         area_px REAL,
@@ -848,6 +879,13 @@ _VOUCHERS_MIGRATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
 )
 
 _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
+    "extracted_leaves": (
+        ("leaf_zone", "TEXT DEFAULT 'basal'"),
+        ("leaf_zone_confidence", "REAL"),
+        ("dist_from_crown_norm", "REAL"),
+        ("cy_rel_plant_bbox", "REAL"),
+        ("effective_min_blade_area_cm2", "REAL"),
+    ),
     "run_active_cohort": (
         ("type_status", "TEXT"),
         ("is_type_specimen", "INTEGER DEFAULT 0"),
@@ -860,6 +898,10 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("efd_harmonic_opt", "INTEGER"),
             ("efd_k95_pcs", "INTEGER"),
             ("dissection_index", "REAL"),
+            ("leaf_zone", "TEXT"),
+            ("leaf_zone_confidence", "REAL"),
+            ("dist_from_crown_norm", "REAL"),
+            ("cy_rel_plant_bbox", "REAL"),
         ]
     ),
     "otu_morphometrics": tuple(
@@ -874,6 +916,17 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("q25_solidity", "REAL"),
             ("dissected_leaf_fraction", "REAL"),
             ("basal_leaf_count", "INTEGER"),
+            ("cauline_leaf_count", "INTEGER"),
+            ("cauline_solidity_med", "REAL"),
+            ("cauline_dissection_index_med", "REAL"),
+            ("cauline_aspect_ratio_med", "REAL"),
+            ("cauline_blade_length_mm", "REAL"),
+            ("basal_vs_cauline_length_ratio", "REAL"),
+            ("basal_vs_cauline_solidity_delta", "REAL"),
+            ("heteroblasty_efa_distance", "REAL"),
+            ("Cauline_PC1", "REAL"),
+            ("Cauline_PC2", "REAL"),
+            ("Cauline_PC3", "REAL"),
             ("type_status", "TEXT"),
             ("is_type_specimen", "INTEGER DEFAULT 0"),
             ("has_empirical_type_anchor", "INTEGER"),
@@ -1027,6 +1080,10 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             "v_integrative_triage_master",
         }
         if required_objs.issubset(existing_objs):
+            el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
+            om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
+            if "leaf_zone" not in el_cols or "cauline_leaf_count" not in om_cols:
+                _migrate_dynamic_schema_columns(conn, recreate_view=True)
             conn.execute("PRAGMA foreign_keys = ON;")
             return
 

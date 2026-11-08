@@ -1683,6 +1683,87 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"Deme shrinkage / typical morphotype R test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("DEME_SHRINKAGE_AND_PER_SPECIES_TYPICAL_OK", proc.stdout)
 
+    def test_heteroblasty_leaf_weights_pure_basal_and_cauline_fallback(self) -> None:
+        """
+        Verify compute_heteroblasty_leaf_weights and apply_step03_heteroblasty_weighted_otu_aggregation:
+          1. When a specimen has >= 1 basal leaf (leaf_zone == "basal"), cauline leaves receive
+             weight 0.0 (w_cauline == 0.0) in the primary basal OTU aggregation so primary
+             OTU harmonics and solidity are uncontaminated by cauline leaves.
+          2. When a specimen has only cauline leaves (0 basal leaves), cauline leaves receive
+             positive fallback weights (> 0.0) so the specimen still receives valid OTU coordinates.
+        """
+        r_code = """
+        source("scripts/morphometrics/authority_weighting_utils.R")
+
+        # 1. Mixed basal + cauline specimen -> w_cauline == 0.0 on primary basal track
+        df_mixed <- data.frame(
+          catalogNumber = rep("SPEC_MIX", 3L),
+          plant_individual_id = rep(0L, 3L),
+          leaf_id = 1:3,
+          tier_assignment = rep("Tier_1_Direct", 3L),
+          leaf_zone = c("basal", "basal", "cauline"),
+          area_mm2 = c(400.0, 380.0, 90.0),
+          solidity = c(0.92, 0.90, 0.42),
+          dissection_index = c(1.08, 1.10, 2.40),
+          blade_length_mm = c(40.0, 38.0, 19.0),
+          A1 = c(1.00, 1.02, 0.30),
+          D1 = c(0.50, 0.52, 0.95),
+          stringsAsFactors = FALSE
+        )
+        w_mix <- compute_heteroblasty_leaf_weights(df_mixed)
+        stopifnot(length(w_mix) == 3L)
+        stopifnot(all(w_mix[1:2] > 0.0))
+        stopifnot(abs(w_mix[3L]) < 1e-12)
+
+        spec_init <- data.frame(
+          catalogNumber = "SPEC_MIX",
+          plant_individual_id = 0L,
+          solidity = 0.0,
+          dissection_index = 0.0,
+          A1 = 0.0,
+          D1 = 0.0,
+          stringsAsFactors = FALSE
+        )
+        spec_agg <- apply_step03_heteroblasty_weighted_otu_aggregation(
+          spec_init,
+          df_mixed,
+          all_harm_cols = c("A1", "D1"),
+          sym_names = c("A1", "D1")
+        )
+        stopifnot(abs(spec_agg$solidity[1L] - 0.91) < 0.02)
+        stopifnot(abs(spec_agg$A1[1L] - 1.01) < 0.02)
+
+        # 2. Cauline-only specimen -> positive fallback weights (> 0.0)
+        df_caul_only <- data.frame(
+          catalogNumber = rep("SPEC_CAUL", 2L),
+          plant_individual_id = rep(0L, 2L),
+          leaf_id = 1:2,
+          tier_assignment = rep("Tier_1_Direct", 2L),
+          leaf_zone = c("cauline", "cauline"),
+          area_mm2 = c(120.0, 100.0),
+          solidity = c(0.52, 0.48),
+          A1 = c(0.40, 0.44),
+          D1 = c(0.80, 0.84),
+          stringsAsFactors = FALSE
+        )
+        w_caul <- compute_heteroblasty_leaf_weights(df_caul_only)
+        stopifnot(length(w_caul) == 2L)
+        stopifnot(all(w_caul > 0.0))
+        cat("HETEROBLASTY_PURE_BASAL_AND_CAULINE_FALLBACK_OK\\n")
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            r_file = Path(tmpdir) / "test_heteroblasty_weights.R"
+            r_file.write_text(r_code, encoding="utf-8")
+            proc = subprocess.run(
+                ["Rscript", str(r_file)],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(proc.returncode, 0, f"Heteroblasty leaf weights R test failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("HETEROBLASTY_PURE_BASAL_AND_CAULINE_FALLBACK_OK", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

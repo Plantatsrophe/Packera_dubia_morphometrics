@@ -541,7 +541,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   if (!"plant_individual_id" %in% names(closed_df)) closed_df$plant_individual_id <- 0L
   spec_keys <- paste0(closed_df$catalogNumber, "_", closed_df$plant_individual_id)
   if (any(duplicated(spec_keys))) {
-    pc_sym_cols <- unique(c(pc_cols, sym_pc_cols)); pet_cols <- intersect(c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"), names(closed_df))
+    disagg_leaf_df <- closed_df; pc_sym_cols <- unique(c(pc_cols, sym_pc_cols)); pet_cols <- intersect(c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"), names(closed_df))
     lin_med_cols <- intersect(c("median_area_mm2", "median_perimeter_mm", "median_length_mm", "median_width_mm", "median_circularity", "median_aspect_ratio", "median_solidity", "median_dissection_index", "area_mm2", "perimeter_mm", "length_mm", "width_mm", "circularity"), names(closed_df))
     num_cols <- intersect(c(pc_sym_cols, pet_cols, lin_med_cols, "plant_height_cm", "scape_to_basal_leaf_ratio", "foliar_variance", "leaf_count", "aspect_ratio", "solidity", "dissection_index", "ucs_score", "area_px", "centroid_size", "log_centsize", "harmonic_roughness", "leaf_quality_weight"), names(closed_df))
     other_num <- setdiff(num_cols, c(pc_sym_cols, pet_cols)); has_w <- "leaf_quality_weight" %in% names(closed_df); has_lz <- "leaf_zone" %in% names(closed_df)
@@ -550,6 +550,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
     agg_rows <- (if (length(grp_list) >= 200L && exists("packera_mclapply", mode = "function")) packera_mclapply else lapply)(grp_list, function(grp) {
       n_t1 <- sum(grp$assigned_tier == "Tier_1_Direct", na.rm = TRUE); n_t2 <- sum(grp$assigned_tier == "Tier_2_Reflected", na.rm = TRUE)
       if (n_t1 >= 1L) { grp <- grp[grp$assigned_tier == "Tier_1_Direct", , drop = FALSE]; m_src <- "Tier_1_Pure" } else { m_src <- "Tier_2_Fallback" }
+      if (has_lz) { lz_g <- tolower(trimws(as.character(grp$leaf_zone))); if (any(!is.na(lz_g) & lz_g == "basal")) grp <- grp[!is.na(lz_g) & lz_g == "basal", , drop = FALSE] else if (all(!is.na(lz_g) & lz_g == "cauline")) m_src <- "Cauline_Only_Fallback" }
       leaf_quality_weight <- if (has_w) suppressWarnings(as.numeric(grp$leaf_quality_weight)) else rep(1.0, nrow(grp))
       leaf_quality_weight[is.na(leaf_quality_weight) | leaf_quality_weight <= 0] <- 1.0
       is_contour_outlier <- if ("is_contour_outlier" %in% names(grp)) as.logical(grp$is_contour_outlier) else rep(FALSE, nrow(grp)); is_contour_outlier[is.na(is_contour_outlier)] <- FALSE
@@ -560,11 +561,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
         if (sum(!drop_leaf) < 2) drop_leaf[utils::head(order(leaf_quality_weight, -dist, decreasing = TRUE), 2)] <- FALSE
         grp <- grp[!drop_leaf, , drop = FALSE]
       }
-      w_l <- if (exists("compute_heteroblasty_leaf_weights", mode = "function")) compute_heteroblasty_leaf_weights(grp) else {
-        wz <- if (has_lz) ifelse(tolower(as.character(grp$leaf_zone)) == "basal", 1.0, ifelse(tolower(as.character(grp$leaf_zone)) == "cauline", 0.35, 0.70)) else rep(0.70, nrow(grp)); wz[is.na(wz)] <- 0.70
-        av <- if ("area_mm2" %in% names(grp) && any(is.finite(grp$area_mm2) & grp$area_mm2 > 0)) grp$area_mm2 else if ("area_px" %in% names(grp)) grp$area_px else rep(1.0, nrow(grp))
-        wz * pmin(1.0, pmax(0.35, sqrt(pmax(1e-6, av) / max(av, 1e-6, na.rm = TRUE))))
-      }
+      w_l <- if (exists("compute_heteroblasty_leaf_weights", mode = "function")) compute_heteroblasty_leaf_weights(grp) else rep(1.0, nrow(grp))
       out <- grp[1, , drop = FALSE]; for (col in c(pc_sym_cols, other_num)) out[[col]] <- w_median(grp[[col]], w_l)
       dm_sub <- summarize_otu_dissection_metrics(grp)
       for (d_nm in c("basal_leaf_count", "q25_solidity", "dissection_index", "dissected_leaf_fraction")) if (!is.na(dm_sub[[d_nm]])) out[[d_nm]] <- dm_sub[[d_nm]]
@@ -575,6 +572,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
       out
     })
     closed_df <- if (requireNamespace("data.table", quietly = TRUE) && length(agg_rows) >= 200L) as.data.frame(data.table::rbindlist(agg_rows, use.names = TRUE, fill = TRUE)) else do.call(rbind, agg_rows); rownames(closed_df) <- NULL
+    if (!("cauline_leaf_count" %in% names(closed_df)) && exists("compute_separate_cauline_otu_track", mode = "function")) closed_df <- compute_separate_cauline_otu_track(disagg_leaf_df, closed_df)
   } else {
     lc <- if ("leaf_count" %in% names(closed_df) && !any(is.na(closed_df$leaf_count))) as.integer(closed_df$leaf_count) else rep(1L, nrow(closed_df))
     if (!"n_tier1_leaves" %in% names(closed_df)) closed_df$n_tier1_leaves <- ifelse(closed_df$assigned_tier == "Tier_1_Direct", lc, 0L)
@@ -609,16 +607,18 @@ run_gmm_morphotools_pipeline <- function(opts) {
       }
     }
   }
-  veg_all <- intersect(c("log_centsize", "aspect_ratio", "solidity", "q25_solidity", "dissection_index", "heteroblasty_index"), names(closed_df))
+  caul_het_raw <- c("basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "heteroblasty_efa_distance", "cauline_dissection_index_med", "cauline_solidity_med", "Cauline_PC1")
+  veg_all <- intersect(c("log_centsize", "aspect_ratio", "solidity", "q25_solidity", "dissection_index", "heteroblasty_index", caul_het_raw), names(closed_df))
   ref_std_idx <- which(closed_df$authority_weight > 0); if (length(ref_std_idx) < 3L) ref_std_idx <- seq_len(nrow(closed_df))
   for (vc in veg_all) {
     vv <- suppressWarnings(as.numeric(closed_df[[vc]])); closed_df[[vc]] <- vv; v_fin <- which(is.finite(vv)); v_ref <- intersect(v_fin, ref_std_idx); if (length(v_ref) < 3L) v_ref <- v_fin
-    if (length(v_fin) >= 5L && is.finite(stats::sd(vv[v_ref])) && stats::sd(vv[v_ref]) > 1e-6) {
-      closed_df[[paste0(vc, "_std")]] <- NA_real_; closed_df[[paste0(vc, "_std")]][v_fin] <- round((vv[v_fin] - mean(vv[v_ref])) / stats::sd(vv[v_ref]), 5)
+    min_req <- if (vc %in% caul_het_raw) max(5L, ceiling(0.50 * length(ref_std_idx))) else 5L
+    if (length(v_ref) >= min_req && is.finite(stats::sd(vv[v_ref])) && stats::sd(vv[v_ref]) > 1e-6) {
+      closed_df[[paste0(vc, "_std")]] <- if (vc %in% caul_het_raw) 0.0 else NA_real_; closed_df[[paste0(vc, "_std")]][v_fin] <- round((vv[v_fin] - mean(vv[v_ref])) / stats::sd(vv[v_ref]), 5)
     }
   }
   if (!isTRUE(opts$outline_only)) {
-    dis_cands <- filter_biologically_variable_dissection_scalars(closed_df, intersect(c("solidity_std", "q25_solidity_std", "dissection_index_std", "heteroblasty_index_std"), names(closed_df)), active_mask = (closed_df$authority_weight > 0))
+    dis_cands <- filter_biologically_variable_dissection_scalars(closed_df, intersect(c("solidity_std", "q25_solidity_std", "dissection_index_std", "heteroblasty_index_std", paste0(caul_het_raw, "_std")), names(closed_df)), active_mask = (closed_df$authority_weight > 0))
     kept_dis <- prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = dis_cands, active_mask = (closed_df$authority_weight > 0), group_vec = closed_df$species_standardized, max_r = 0.75)
     if (length(kept_dis) > 0L) feature_cols <- unique(c(feature_cols, kept_dis))
   }
@@ -637,7 +637,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   eco_cda_res <- if (exists("run_supervised_ecoregion_cda", mode = "function")) run_supervised_ecoregion_cda(audited_df, cda_cols, gmm_res = gmm_res, output_summary_csv = eco_sum_csv, permutations = opts$permutations, seed = opts$seed) else NULL
   if (!is.null(eco_cda_res)) { audited_df$regional_group <- eco_cda_res$ecoregion_vec; audited_df$ecoregion_cda_predicted <- eco_cda_res$ecoregion_cda_predicted; audited_df$ecoregion_cda_posterior_prob <- eco_cda_res$ecoregion_cda_posterior_prob; audited_df$ecoregion_can1 <- eco_cda_res$ecoregion_can1; audited_df$ecoregion_can2 <- eco_cda_res$ecoregion_can2 }
   manova_res <- if (exists("run_multivariate_manova_audit", mode = "function")) run_multivariate_manova_audit(audited_df, cda_cols, gmm_res, output_group_csv = file.path(rep_dir, "manova_group_significance.csv"), output_pairwise_csv = file.path(rep_dir, "manova_pairwise_posthoc.csv")) else NULL
-  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "basal_leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "determiner_tier", "type_status", "is_type_specimen", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "population_deme_id", "deme_n_specimens", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "is_confident_label_noise", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", "pheno_sin", "pheno_cos", pc_cols, sym_pc_cols, "PC1_raw_individual", "PC2_raw_individual", "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "heteroblasty_index", "ucs_score", "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std", "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
+  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "basal_leaf_count", "cauline_leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "determiner_tier", "type_status", "is_type_specimen", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "population_deme_id", "deme_n_specimens", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "is_confident_label_noise", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", "pheno_sin", "pheno_cos", pc_cols, sym_pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "PC1_raw_individual", "PC2_raw_individual", "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "heteroblasty_index", "heteroblasty_efa_distance", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "ucs_score", "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std", "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]; dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".tmp"); .write_csv_s04(out_df, tmp_flags, na = ""); file.rename(tmp_flags, opts$output_flags)
   if (exists("persist_step04_to_sqlite", mode = "function")) tryCatch(persist_step04_to_sqlite(out_df, opts$vouchers, focal_taxon = opts$focal_taxon, intraspecific_mode = is_intra_mode), error = function(e) warning("SQLite Step 04 persistence note: ", e$message))
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, selected_features, manova_res = manova_res)

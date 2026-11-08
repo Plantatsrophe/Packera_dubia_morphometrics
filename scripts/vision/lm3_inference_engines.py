@@ -37,6 +37,47 @@ if str(PROJECT_ROOT) not in sys.path:
 LM3_PACKAGE_ROOT = PROJECT_ROOT / "LeafMachine3"
 if LM3_PACKAGE_ROOT.is_dir() and str(LM3_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(LM3_PACKAGE_ROOT))
+_VENV_LM3_LIB = PROJECT_ROOT / ".venv_LM3" / "lib"
+
+
+def _ensure_ect_module_loaded() -> None:
+    if "ect" in sys.modules:
+        return
+    try:
+        import ect as _ect_probe  # noqa: F401
+        return
+    except ImportError:
+        pass
+    if not _VENV_LM3_LIB.is_dir():
+        return
+    import importlib.util as _ilu
+    import types as _types
+
+    for _ect_init in sorted(_VENV_LM3_LIB.glob("python*/site-packages/ect/__init__.py")):
+        if _ect_init.is_file():
+            try:
+                import numba as _numba_probe  # noqa: F401
+            except ImportError:
+                _numba_mod = _types.ModuleType("numba")
+                _numba_mod.prange = range  # type: ignore[attr-defined]
+                _numba_mod.njit = (  # type: ignore[attr-defined]
+                    lambda *a, **kw: (a[0] if (a and callable(a[0])) else (lambda f: f))
+                )
+                _numba_typed = _types.ModuleType("numba.typed")
+                _numba_typed.List = list  # type: ignore[attr-defined]
+                _numba_mod.typed = _numba_typed  # type: ignore[attr-defined]
+                sys.modules["numba"] = _numba_mod
+                sys.modules["numba.typed"] = _numba_typed
+            _ect_spec = _ilu.spec_from_file_location(
+                "ect",
+                str(_ect_init),
+                submodule_search_locations=[str(_ect_init.parent)],
+            )
+            if _ect_spec is not None and _ect_spec.loader is not None:
+                _ect_mod = _ilu.module_from_spec(_ect_spec)
+                sys.modules["ect"] = _ect_mod
+                _ect_spec.loader.exec_module(_ect_mod)
+            break
 
 try:
     from scripts.vision.configure_leafmachine3 import (
@@ -2146,20 +2187,55 @@ class LM3PoseLandmarkEngine:
         petiole_mask: Optional[np.ndarray] = None,
         lamina_mask: Optional[np.ndarray] = None,
     ) -> Optional[float]:
-        """Estimates petiole width in pixels from `petiole_mask` distance transform or skeleton geometry."""
+        """Estimates petiole width in pixels by delegating to `leafmachine3.core.petiole.measure_petiole`."""
         if petiole_mask is not None and petiole_mask.size > 0 and int(np.count_nonzero(petiole_mask)) > 0:
             pet_u8 = (petiole_mask > 0).astype(np.uint8)
+            lam_u8 = (
+                (lamina_mask > 0).astype(np.uint8)
+                if (lamina_mask is not None and lamina_mask.size > 0 and lamina_mask.shape[:2] == pet_u8.shape[:2])
+                else None
+            )
+            norm_kps = normalize_lm3_keypoints_dict(keypoints_31)
+            petiole_pts: List[Tuple[float, float]] = []
+            for kp_name in ("lamina_base", "petiole_0", "petiole_1", "petiole_2", "petiole_3", "petiole_4", "petiole_tip"):
+                kp = norm_kps.get(kp_name)
+                if kp is not None and len(kp) >= 3 and float(kp[2]) >= 0.20:
+                    pt_xy = (float(kp[0]), float(kp[1]))
+                    if not petiole_pts or math.hypot(pt_xy[0] - petiole_pts[-1][0], pt_xy[1] - petiole_pts[-1][1]) > 1e-3:
+                        petiole_pts.append(pt_xy)
+            if len(petiole_pts) < 2:
+                ys_p, xs_p = np.where(pet_u8 > 0)
+                if len(xs_p) >= 2:
+                    pts_cov = np.column_stack((xs_p.astype(np.float64), ys_p.astype(np.float64)))
+                    mean_pt = pts_cov.mean(axis=0)
+                    centered = pts_cov - mean_pt
+                    _, _, vh = np.linalg.svd(centered, full_matrices=False)
+                    proj = centered @ vh[0]
+                    i_min = int(np.argmin(proj))
+                    i_max = int(np.argmax(proj))
+                    p0 = (float(pts_cov[i_min, 0]), float(pts_cov[i_min, 1]))
+                    p1 = (float(pts_cov[i_max, 0]), float(pts_cov[i_max, 1]))
+                    if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > 1e-3:
+                        petiole_pts = [p0, p1]
+            if lam_u8 is not None and len(petiole_pts) >= 2:
+                try:
+                    from leafmachine3.core.petiole import measure_petiole
+
+                    res = measure_petiole(pet_u8, lam_u8, petiole_pts)
+                    if res is not None and res.width_px is not None and np.isfinite(res.width_px) and res.width_px > 0:
+                        return round(float(res.width_px), 3)
+                except Exception:
+                    pass
+
             dt = cv2.distanceTransform(pet_u8, cv2.DIST_L2, 3)
             sampled_radii: List[float] = []
             h_p, w_p = pet_u8.shape[:2]
-            for kp_name in ("lamina_base", "petiole_1", "petiole_2", "petiole_3", "petiole_4", "petiole_5", "petiole_6"):
-                kp = keypoints_31.get(kp_name)
-                if kp is not None and kp[2] >= 0.20:
-                    ix = max(0, min(w_p - 1, int(round(kp[0]))))
-                    iy = max(0, min(h_p - 1, int(round(kp[1]))))
-                    r_val = float(dt[iy, ix])
-                    if r_val > 0.0:
-                        sampled_radii.append(2.0 * r_val)
+            for pt_x, pt_y in petiole_pts:
+                ix = max(0, min(w_p - 1, int(round(pt_x))))
+                iy = max(0, min(h_p - 1, int(round(pt_y))))
+                r_val = float(dt[iy, ix])
+                if r_val > 0.0:
+                    sampled_radii.append(2.0 * r_val)
             if sampled_radii:
                 return round(float(np.median(sampled_radii)), 3)
             nz_dt = dt[dt > 0]
@@ -2550,19 +2626,24 @@ class LM3PoseLandmarkEngine:
 # =============================================================================
 
 def _extract_native_lm3_petiole_anchor(
-    leaf_mask: np.ndarray,
+    leaf_mask: Optional[np.ndarray] = None,
     petiole_mask: Optional[np.ndarray] = None,
     keypoints_31: Optional[Dict[str, Tuple[float, float, float]]] = None,
     min_kp_conf: float = 0.25,
+    lamina_mask: Optional[np.ndarray] = None,
+    offset_xy: Tuple[float, float] = (0.0, 0.0),
 ) -> Optional[Dict[str, Any]]:
     """
     Uses LeafMachine3's explicit Stage 2 `petiole_mask` (`class_id == 1`) and/or
-    31-keypoint `mid15_pet5` (`lamina_base`, `petiole_1..6`, `lamina_tip`) skeleton to
-    locate the anatomical petiole-lamina junction `p_base_crop`, distal lamina apex
-    `p_apex_crop`, and native petiole pixel span without clipping `leaf_mask`.
+    31-keypoint `mid15_pet5` (`lamina_base`, `petiole_0..4`, `petiole_tip`, `lamina_tip`)
+    skeleton to locate the anatomical petiole-lamina junction `p_base_crop`, distal lamina
+    apex `p_apex_crop`, native landmark metrics (`leafmachine3.core.landmark_metrics.compute_measurements`),
+    and orthogonal petiole measurements (`leafmachine3.core.petiole.measure_petiole`).
     Falls back to the basal-most mask contour point when both `keypoints_31` and
     `petiole_mask` are absent.
     """
+    if leaf_mask is None and lamina_mask is not None:
+        leaf_mask = lamina_mask
     if leaf_mask is None or leaf_mask.size == 0 or int(np.count_nonzero(leaf_mask)) == 0:
         return None
 
@@ -2584,11 +2665,41 @@ def _extract_native_lm3_petiole_anchor(
     p_base_crop: Optional[Tuple[int, int]] = None
     p_apex_crop: Optional[Tuple[int, int]] = None
     petiole_len_px: float = 0.0
+    petiole_width_px: Optional[float] = None
+    touches_leaf: bool = False
     used_native_lm3 = False
+    lm_metrics_dict: Dict[str, Any] = {}
+    pet_chain: List[Tuple[float, float]] = []
 
-    # 1. Try 31-keypoint pose skeleton (`lamina_base`, `petiole_1..6`, `lamina_tip`)
-    if keypoints_31:
-        lb_kp = keypoints_31.get("lamina_base") or keypoints_31.get("base_2")
+    norm_kps = normalize_lm3_keypoints_dict(keypoints_31, offset_xy=offset_xy) if keypoints_31 is not None else {}
+
+    # 1. Try 31-keypoint pose skeleton (`lamina_base`, `petiole_0..4`, `petiole_tip`, `lamina_tip`)
+    if norm_kps:
+        pts_2d: Dict[str, Tuple[float, float]] = {
+            k: (float(v[0]), float(v[1]))
+            for k, v in norm_kps.items()
+            if len(v) >= 3 and float(v[2]) >= float(min_kp_conf)
+        }
+        try:
+            from leafmachine3.core.landmark_metrics import compute_measurements
+
+            lm_res = compute_measurements(pts_2d)
+            if lm_res is not None:
+                lm_metrics_dict = {
+                    "lamina_trace_length_px": lm_res.lamina_trace_length_px,
+                    "lamina_tip_base_length_px": lm_res.lamina_tip_base_length_px,
+                    "petiole_trace_length_px": lm_res.petiole_trace_length_px,
+                    "leaf_width_px": lm_res.leaf_width_px,
+                    "apex_angle_deg": lm_res.apex_angle_deg,
+                    "base_angle_deg": lm_res.base_angle_deg,
+                    "lamina_curvature": lm_res.lamina_curvature,
+                }
+                if lm_res.petiole_trace_length_px is not None and np.isfinite(lm_res.petiole_trace_length_px):
+                    petiole_len_px = max(petiole_len_px, float(lm_res.petiole_trace_length_px))
+        except Exception:
+            pass
+
+        lb_kp = norm_kps.get("lamina_base") or norm_kps.get("base_center") or norm_kps.get("base_2")
         if lb_kp is not None and len(lb_kp) >= 3 and float(lb_kp[2]) >= min_kp_conf:
             dists_lb = np.hypot(leaf_pts[:, 0] - float(lb_kp[0]), leaf_pts[:, 1] - float(lb_kp[1]))
             min_lb_idx = int(np.argmin(dists_lb))
@@ -2596,23 +2707,23 @@ def _extract_native_lm3_petiole_anchor(
                 p_base_crop = (int(leaf_pts[min_lb_idx, 0]), int(leaf_pts[min_lb_idx, 1]))
                 used_native_lm3 = True
 
-        lt_kp = keypoints_31.get("lamina_tip") or keypoints_31.get("apex_2")
+        lt_kp = norm_kps.get("lamina_tip") or norm_kps.get("apex_center") or norm_kps.get("apex_2")
         if lt_kp is not None and len(lt_kp) >= 3 and float(lt_kp[2]) >= min_kp_conf:
             dists_lt = np.hypot(leaf_pts[:, 0] - float(lt_kp[0]), leaf_pts[:, 1] - float(lt_kp[1]))
             min_lt_idx = int(np.argmin(dists_lt))
             p_apex_crop = (int(leaf_pts[min_lt_idx, 0]), int(leaf_pts[min_lt_idx, 1]))
 
-        pet_chain: List[Tuple[float, float]] = []
         if p_base_crop is not None:
             pet_chain.append((float(p_base_crop[0]), float(p_base_crop[1])))
-        for idx_p in range(1, 7):
-            pkp = keypoints_31.get(f"petiole_{idx_p}")
+        elif lb_kp is not None and len(lb_kp) >= 3 and float(lb_kp[2]) >= min_kp_conf:
+            pet_chain.append((float(lb_kp[0]), float(lb_kp[1])))
+        for native_pk in ("petiole_0", "petiole_1", "petiole_2", "petiole_3", "petiole_4", "petiole_tip"):
+            pkp = norm_kps.get(native_pk)
             if pkp is not None and len(pkp) >= 3 and float(pkp[2]) >= min_kp_conf:
-                pet_chain.append((float(pkp[0]), float(pkp[1])))
-        pt_kp = keypoints_31.get("petiole_tip")
-        if pt_kp is not None and len(pt_kp) >= 3 and float(pt_kp[2]) >= min_kp_conf:
-            pet_chain.append((float(pt_kp[0]), float(pt_kp[1])))
-        if len(pet_chain) >= 2:
+                pt_xy = (float(pkp[0]), float(pkp[1]))
+                if not pet_chain or math.hypot(pt_xy[0] - pet_chain[-1][0], pt_xy[1] - pet_chain[-1][1]) > 1e-3:
+                    pet_chain.append(pt_xy)
+        if len(pet_chain) >= 2 and petiole_len_px <= 0.0:
             arc_len = 0.0
             for i_c in range(len(pet_chain) - 1):
                 arc_len += math.hypot(
@@ -2628,14 +2739,16 @@ def _extract_native_lm3_petiole_anchor(
         and petiole_mask.shape[:2] == leaf_mask.shape[:2]
         and int(np.count_nonzero(petiole_mask)) > 0
     ):
-        bx_p, by_p, bw_p, bh_p = cv2.boundingRect(petiole_mask)
+        pet_u8 = (petiole_mask > 0).astype(np.uint8)
+        lam_u8 = (leaf_mask > 0).astype(np.uint8)
+        bx_p, by_p, bw_p, bh_p = cv2.boundingRect(pet_u8)
         if bw_p > 0 and bh_p > 0:
             h_full, w_full = leaf_mask.shape[:2]
             ux0 = max(0, min(bx_l, bx_p) - 2)
             uy0 = max(0, min(by_l, by_p) - 2)
             ux1 = min(w_full, max(bx_l + bw_l, bx_p + bw_p) + 2)
             uy1 = min(h_full, max(by_l + bh_l, by_p + bh_p) + 2)
-            inv_pet_sub = (petiole_mask[uy0:uy1, ux0:ux1] == 0).astype(np.uint8)
+            inv_pet_sub = (pet_u8[uy0:uy1, ux0:ux1] == 0).astype(np.uint8)
             dt_pet = cv2.distanceTransform(inv_pet_sub, cv2.DIST_L2, 3)
             dists_to_pet = dt_pet[leaf_pts[:, 1] - uy0, leaf_pts[:, 0] - ux0]
             min_idx = int(np.argmin(dists_to_pet))
@@ -2645,7 +2758,7 @@ def _extract_native_lm3_petiole_anchor(
                     p_base_crop = (int(leaf_pts[min_idx, 0]), int(leaf_pts[min_idx, 1]))
                 used_native_lm3 = True
                 cnts_p, _ = cv2.findContours(
-                    petiole_mask[by_p : by_p + bh_p, bx_p : bx_p + bw_p],
+                    pet_u8[by_p : by_p + bh_p, bx_p : bx_p + bw_p],
                     cv2.RETR_EXTERNAL,
                     cv2.CHAIN_APPROX_NONE,
                     offset=(bx_p, by_p),
@@ -2654,20 +2767,48 @@ def _extract_native_lm3_petiole_anchor(
                     pet_pts = np.vstack([c.reshape(-1, 2) for c in cnts_p])
                     pet_span_dists = np.hypot(pet_pts[:, 0] - p_base_crop[0], pet_pts[:, 1] - p_base_crop[1])
                     if len(pet_span_dists) > 0:
-                        petiole_len_px = max(petiole_len_px, float(np.max(pet_span_dists)))
+                        far_idx = int(np.argmax(pet_span_dists))
+                        petiole_len_px = max(petiole_len_px, float(pet_span_dists[far_idx]))
+                        if len(pet_chain) < 2:
+                            pet_chain = [
+                                (float(p_base_crop[0]), float(p_base_crop[1])),
+                                (float(pet_pts[far_idx, 0]), float(pet_pts[far_idx, 1])),
+                            ]
+            if len(pet_chain) >= 2:
+                try:
+                    from leafmachine3.core.petiole import measure_petiole
+
+                    pet_res = measure_petiole(pet_u8, lam_u8, pet_chain)
+                    if pet_res is not None:
+                        touches_leaf = bool(pet_res.touches_leaf)
+                        if pet_res.width_px is not None and np.isfinite(pet_res.width_px) and pet_res.width_px > 0:
+                            petiole_width_px = round(float(pet_res.width_px), 3)
+                        if pet_res.length_px is not None and np.isfinite(pet_res.length_px) and pet_res.length_px > 0:
+                            petiole_len_px = float(pet_res.length_px)
+                except Exception:
+                    pass
 
     if p_base_crop is not None:
         if p_apex_crop is None:
             dists_from_base = np.hypot(leaf_pts[:, 0] - p_base_crop[0], leaf_pts[:, 1] - p_base_crop[1])
             apex_idx = int(np.argmax(dists_from_base))
             p_apex_crop = (int(leaf_pts[apex_idx, 0]), int(leaf_pts[apex_idx, 1]))
-        return {
+        out_anchor: Dict[str, Any] = {
             "is_trimmed": False,
             "native_lm3_petiole": bool(used_native_lm3),
             "trim_distance_px": round(float(petiole_len_px), 2),
+            "petiole_length_px": round(float(petiole_len_px), 2),
+            "geodesic_petiole_skeleton_px": round(float(petiole_len_px), 2),
+            "petiole_width_px": petiole_width_px,
+            "touches_leaf": bool(touches_leaf),
             "p_base_crop": p_base_crop,
             "p_apex_crop": p_apex_crop,
+            "p_base": p_base_crop,
+            "p_apex": p_apex_crop,
+            "landmark_measurements": lm_metrics_dict,
         }
+        out_anchor.update({k: v for k, v in lm_metrics_dict.items() if v is not None})
+        return out_anchor
 
     # 3. Fallback to basal-most contour vertex when both keypoints and petiole_mask are absent
     base_idx = int(np.argmax(leaf_pts[:, 1]))
@@ -2675,14 +2816,23 @@ def _extract_native_lm3_petiole_anchor(
     dists_from_base = np.hypot(leaf_pts[:, 0] - p_base_crop[0], leaf_pts[:, 1] - p_base_crop[1])
     apex_idx = int(np.argmax(dists_from_base))
     p_apex_crop = (int(leaf_pts[apex_idx, 0]), int(leaf_pts[apex_idx, 1]))
-    return {
+    out_fallback: Dict[str, Any] = {
         "is_trimmed": False,
         "native_lm3_petiole": False,
         "morphological_fallback": True,
         "trim_distance_px": 0.0,
+        "petiole_length_px": 0.0,
+        "geodesic_petiole_skeleton_px": 0.0,
+        "petiole_width_px": petiole_width_px,
+        "touches_leaf": False,
         "p_base_crop": p_base_crop,
         "p_apex_crop": p_apex_crop,
+        "p_base": p_base_crop,
+        "p_apex": p_apex_crop,
+        "landmark_measurements": lm_metrics_dict,
     }
+    out_fallback.update({k: v for k, v in lm_metrics_dict.items() if v is not None})
+    return out_fallback
 
 
 def _merge_and_bridge_dissected_crop_mask(
@@ -2830,11 +2980,60 @@ def normalize_lm3_keypoints_dict(
             vy = float(val[1]) - oy
             vc = float(val[2]) if len(val) >= 3 else 1.0
             out[str(k)] = (vx, vy, vc)
-        for canon_k, native_k in _LM3_CANONICAL_TO_NATIVE_KPT_MAP.items():
-            if canon_k in out and native_k not in out:
-                out[native_k] = out[canon_k]
-            elif native_k in out and canon_k not in out:
-                out[canon_k] = out[native_k]
+        src_kpts = dict(out)
+        # 1. Resolve 1-based (`midvein_1..15`) vs 0-based (`midvein_0..14`) midvein indexing without collision
+        if "midvein_0" not in src_kpts and "midvein_1" in src_kpts:
+            for i in range(1, 16):
+                ck = f"midvein_{i}"
+                if ck in src_kpts:
+                    out[f"midvein_{i - 1}"] = src_kpts[ck]
+        elif "midvein_0" in src_kpts and "midvein_15" not in src_kpts:
+            for i in range(1, 16):
+                ck = f"midvein_{i}"
+                nk = f"midvein_{i - 1}"
+                if nk in src_kpts and ck not in src_kpts:
+                    out[ck] = src_kpts[nk]
+        # 2. Resolve 1-based (`petiole_1..6`) vs 0-based (`petiole_0..4`, `petiole_tip`) petiole indexing
+        if "petiole_0" not in src_kpts and "petiole_1" in src_kpts:
+            for i in range(1, 6):
+                ck = f"petiole_{i}"
+                if ck in src_kpts:
+                    out[f"petiole_{i - 1}"] = src_kpts[ck]
+            if "petiole_6" in src_kpts:
+                out["petiole_tip"] = src_kpts["petiole_6"]
+            elif "petiole_5" in src_kpts and "petiole_tip" not in src_kpts:
+                out["petiole_tip"] = src_kpts["petiole_5"]
+        elif "petiole_0" in src_kpts and "petiole_6" not in src_kpts:
+            for i in range(1, 6):
+                ck = f"petiole_{i}"
+                nk = f"petiole_{i - 1}"
+                if nk in src_kpts and ck not in src_kpts:
+                    out[ck] = src_kpts[nk]
+            if "petiole_tip" in src_kpts and "petiole_6" not in src_kpts:
+                out["petiole_6"] = src_kpts["petiole_tip"]
+        # 3. Map non-overlapping canonical <-> native aliases
+        _NON_INDEXED_ALIASES = (
+            ("lamina_tip", "apex_center"),
+            ("apex_2", "apex_center"),
+            ("apex_1", "apex_left"),
+            ("apex_3", "apex_right"),
+            ("lamina_base", "base_center"),
+            ("base_2", "base_center"),
+            ("base_1", "base_left"),
+            ("base_3", "base_right"),
+            ("petiole_6", "petiole_tip"),
+            ("width_1", "width_left"),
+            ("width_2", "width_right"),
+        )
+        for canon_k, native_k in _NON_INDEXED_ALIASES:
+            if canon_k in src_kpts and native_k not in out:
+                out[native_k] = src_kpts[canon_k]
+            if native_k in src_kpts and canon_k not in out:
+                out[canon_k] = src_kpts[native_k]
+        if "lamina_tip" in out and "apex_2" not in out:
+            out["apex_2"] = out["lamina_tip"]
+        if "lamina_base" in out and "base_2" not in out:
+            out["base_2"] = out["lamina_base"]
         return out
 
     arr = np.asarray(keypoints_31, dtype=np.float64)
@@ -2878,7 +3077,6 @@ def normalize_lm3_keypoints_dict(
                     vcm = float(mv_rows[r_idx, 2]) if arr.shape[1] >= 3 else 1.0
                     # Ensure tip -> base ordering along midvein_0..14
                     out[f"midvein_{m_i}"] = (vxm, vym, vcm)
-                    out[f"midvein_{m_i + 1}"] = (vxm, vym, vcm)
             if "midvein_0" in out and "midvein_14" in out:
                 d0_tip = math.hypot(out["midvein_0"][0] - vx0, out["midvein_0"][1] - vy0)
                 d14_tip = math.hypot(out["midvein_14"][0] - vx0, out["midvein_14"][1] - vy0)
@@ -2886,6 +3084,7 @@ def normalize_lm3_keypoints_dict(
                     rev_mv = [out[f"midvein_{i}"] for i in range(14, -1, -1) if f"midvein_{i}" in out]
                     for i, val in enumerate(rev_mv):
                         out[f"midvein_{i}"] = val
+                out["midvein_15"] = out["midvein_14"]
     return out
 
 
@@ -2897,10 +3096,14 @@ def orient_and_score_leaf_lm3(
     offset_xy: Tuple[float, float] = (0.0, 0.0),
     min_conf: float = 0.25,
     min_score: float = 0.50,
+    hole_mask: Optional[np.ndarray] = None,
+    petiole_mask: Optional[np.ndarray] = None,
+    crop_bgr: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """
     Computes LeafMachine3 native tip-up rotation angle (`compute_orientation`), rotates
-    `lamina_mask` and its keypoints (`oriented_affine`, `apply_affine`), and evaluates
+    `lamina_mask`, optional `hole_mask`, `petiole_mask`, and `crop_bgr` (`rotate_image`,
+    `mask_bbox`, `crop_to_box`, `oriented_affine`, `apply_affine`), and evaluates
     curvilinear midvein bilateral symmetry and archetype quality (`measure_leaf`).
     """
     if lamina_mask is None or lamina_mask.size == 0 or int(np.count_nonzero(lamina_mask)) == 0:
@@ -2938,6 +3141,7 @@ def orient_and_score_leaf_lm3(
     try:
         from leafmachine3.core.orientation import compute_orientation
         from leafmachine3.core.bilateral import OrientedLeaf, apply_affine, measure_leaf, oriented_affine
+        from leafmachine3.core.imaging import crop_to_box, mask_bbox, rotate_image
 
         ori = compute_orientation(pts_2d)
         angle_cw = float(ori.angle_cw) if (ori.success and ori.angle_cw is not None) else 0.0
@@ -2946,14 +3150,20 @@ def orient_and_score_leaf_lm3(
         mask_u8 = ((lamina_mask > 0).astype(np.uint8)) * 255
         orig_h, orig_w = int(mask_u8.shape[0]), int(mask_u8.shape[1])
         mat, (nh, nw) = oriented_affine((orig_h, orig_w), angle_cw)
-        rot_mask = cv2.warpAffine(
-            mask_u8,
-            mat,
-            (int(nw), int(nh)),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
+        rot_mask = rotate_image(mask_u8, angle_cw, bg=0, nearest=True)
+
+        rot_hole: Optional[np.ndarray] = None
+        if hole_mask is not None and hole_mask.size > 0 and hole_mask.shape[:2] == (orig_h, orig_w):
+            rot_hole = rotate_image(((hole_mask > 0).astype(np.uint8)) * 255, angle_cw, bg=0, nearest=True)
+
+        rot_petiole: Optional[np.ndarray] = None
+        if petiole_mask is not None and petiole_mask.size > 0 and petiole_mask.shape[:2] == (orig_h, orig_w):
+            rot_petiole = rotate_image(((petiole_mask > 0).astype(np.uint8)) * 255, angle_cw, bg=0, nearest=True)
+
+        rot_bgr: Optional[np.ndarray] = None
+        if crop_bgr is not None and crop_bgr.size > 0 and crop_bgr.shape[:2] == (orig_h, orig_w):
+            rot_bgr = rotate_image(crop_bgr, angle_cw, bg=0, nearest=False)
+
         pt_keys = list(pts_2d.keys())
         if pt_keys:
             pt_arr = np.asarray([pts_2d[k] for k in pt_keys], dtype=np.float64)
@@ -2962,19 +3172,30 @@ def orient_and_score_leaf_lm3(
         else:
             rot_pts = {}
 
-        ys, xs = np.where(rot_mask > 0)
-        if len(ys) > 0:
-            x0, y0, x1, y1 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
-            crop_rot = rot_mask[y0:y1, x0:x1]
+        union_rot = rot_mask.copy()
+        if rot_petiole is not None and rot_petiole.shape == union_rot.shape:
+            union_rot = np.maximum(union_rot, rot_petiole)
+        bbox = mask_bbox(union_rot)
+        if bbox is not None:
+            x0, y0, x1, y1 = bbox
+            crop_rot = crop_to_box(rot_mask, bbox)
+            crop_hole = crop_to_box(rot_hole, bbox) if rot_hole is not None else None
+            crop_pet = crop_to_box(rot_petiole, bbox) if rot_petiole is not None else None
+            crop_img = crop_to_box(rot_bgr, bbox) if rot_bgr is not None else None
             shifted_pts = {k: (pt[0] - float(x0), pt[1] - float(y0)) for k, pt in rot_pts.items()}
             det_box = (x0, y0, x1, y1)
         else:
             crop_rot = rot_mask
+            crop_hole = rot_hole
+            crop_pet = rot_petiole
+            crop_img = rot_bgr
             shifted_pts = rot_pts
             det_box = (0, 0, int(nw), int(nh))
 
-        sil_bool = (crop_rot > 0).astype(bool)
-        holes_bool = np.zeros_like(sil_bool, dtype=bool)
+        lam_bool = (crop_rot > 0).astype(bool)
+        holes_bool = (crop_hole > 0).astype(bool) if crop_hole is not None else np.zeros_like(lam_bool, dtype=bool)
+        sil_bool = lam_bool | holes_bool
+        pet_bool = (crop_pet > 0).astype(bool) if crop_pet is not None else None
         kpt_conf = {
             k: (float(norm_kps[k][2]) if k in norm_kps and len(norm_kps[k]) >= 3 else 0.95)
             for k in shifted_pts
@@ -2985,9 +3206,9 @@ def orient_and_score_leaf_lm3(
             detection_id=0,
             stem="leaf",
             silhouette=sil_bool,
-            lamina=sil_bool,
+            lamina=lam_bool,
             holes=holes_bool,
-            petiole=None,
+            petiole=pet_bool,
             kpts=shifted_pts,
             kpt_conf=kpt_conf,
             angle_cw=angle_cw,
@@ -3008,6 +3229,9 @@ def orient_and_score_leaf_lm3(
                 "gates_pass": True,
                 "is_archetypal": True,
                 "oriented_mask": crop_rot,
+                "oriented_hole_mask": crop_hole,
+                "oriented_petiole_mask": crop_pet,
+                "oriented_crop_bgr": crop_img,
                 "oriented_points": shifted_pts,
             }
         return {
@@ -3021,6 +3245,9 @@ def orient_and_score_leaf_lm3(
             "gates_pass": bool(bm.gates_pass),
             "is_archetypal": bool(bm.is_archetypal),
             "oriented_mask": crop_rot,
+            "oriented_hole_mask": crop_hole,
+            "oriented_petiole_mask": crop_pet,
+            "oriented_crop_bgr": crop_img,
             "oriented_points": shifted_pts,
         }
     except Exception as exc:
@@ -3217,62 +3444,86 @@ class LM3ScaleCalibrator:
 
 
 def compute_leaf_ect_descriptor(
-    mask_u8: np.ndarray,
-    output_path: Optional[Union[str, Path]] = None,
-    num_dirs: int = 32,
+    mask: np.ndarray,
+    num_dirs: Union[int, str, Path, None] = 32,
     num_thresh: int = 32,
+    output_path: Optional[Union[str, Path]] = None,
+    hole_mask: Optional[np.ndarray] = None,
+    petiole_mask: Optional[np.ndarray] = None,
+    angle_cw: Optional[float] = None,
+    include_petiole: bool = False,
+    include_holes: bool = True,
 ) -> Optional[np.ndarray]:
     """
-    Computes the LeafMachine3 Module 18 `(num_dirs, num_thresh)` Euler Characteristic Transform
-    (ECT) matrix for a binary leaf mask:
-      1. Invokes `leafmachine3.core.ect_compute.compute_ect` when the `ect` package is available.
-      2. Falls back to an exact pure-NumPy 1D contour cycle graph Euler characteristic filtration
-         `chi(theta, t) = V(t) - E(t)` on centered unit-radius boundary coordinates when `ect`
-         is absent.
-      3. Persists `.npy` to `output_path` when supplied.
+    Computes the LeafMachine3 Module 18 Euler Characteristic Transform (ECT) matrix
+    by delegating directly to `leafmachine3.core.ect_compute.compute_ect`,
+    `ect_product_for`, and `leafmachine3.reporting.leaf_products.render_leaf_products`.
     """
-    if mask_u8 is None or mask_u8.size == 0 or int(np.count_nonzero(mask_u8)) == 0:
+    if mask is None or mask.size == 0 or int(np.count_nonzero(mask)) == 0:
         return None
 
-    ect_mat: Optional[np.ndarray] = None
-    try:
-        from leafmachine3.core.ect_compute import compute_ect
-        res = compute_ect((mask_u8 > 0).astype(np.uint8) * 255, num_dirs=int(num_dirs), num_thresh=int(num_thresh))
-        if res is not None and getattr(res, "success", False) and getattr(res, "matrix", None) is not None:
-            ect_mat = np.asarray(res.matrix, dtype=np.float32)
-    except Exception:
-        ect_mat = None
+    # Support legacy positional call `compute_leaf_ect_descriptor(mask, output_path)`
+    if isinstance(num_dirs, (str, Path)) or num_dirs is None:
+        if output_path is None and isinstance(num_dirs, (str, Path)):
+            output_path = num_dirs
+        eff_num_dirs = 32
+    else:
+        eff_num_dirs = int(num_dirs)
+    eff_num_thresh = int(num_thresh)
 
-    if ect_mat is None:
-        try:
-            bin_u8 = ((mask_u8 > 0).astype(np.uint8)) * 255
-            cnts, _ = cv2.findContours(bin_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-            if not cnts:
-                return None
-            main_cnt = max(cnts, key=cv2.contourArea).reshape(-1, 2).astype(np.float64)
-            if len(main_cnt) < 3:
-                return None
-            pts = np.column_stack((main_cnt[:, 0], -main_cnt[:, 1]))
-            pts = pts - np.mean(pts, axis=0, keepdims=True)
-            radii = np.linalg.norm(pts, axis=1)
-            max_r = float(np.max(radii))
-            if max_r <= 1e-9:
-                return None
-            pts = pts / max_r
+    _ensure_ect_module_loaded()
+    from leafmachine3.core.ect_compute import compute_ect, ect_product_for
+    from leafmachine3.reporting.leaf_products import render_leaf_products
 
-            thetas = np.linspace(0.0, 2.0 * math.pi, int(num_dirs), endpoint=False)
-            dirs = np.column_stack((np.cos(thetas), np.sin(thetas)))  # (D, 2)
-            heights = pts @ dirs.T  # (V, D)
-            edge_heights = np.maximum(heights, np.roll(heights, -1, axis=0))  # (E, D)
-            thresholds = np.linspace(-1.0, 1.0, int(num_thresh))  # (T,)
+    mask_u8 = ((mask > 0).astype(np.uint8)) * 255
+    if angle_cw is not None or hole_mask is not None or petiole_mask is not None:
+        h_m, w_m = mask_u8.shape[:2]
+        dummy_rgb = np.zeros((h_m, w_m, 3), dtype=np.uint8)
+        lam_bool = mask_u8 > 0
+        hole_bool = (
+            (hole_mask > 0)
+            if (hole_mask is not None and hole_mask.size > 0 and hole_mask.shape[:2] == (h_m, w_m))
+            else None
+        )
+        pet_bool = (
+            (petiole_mask > 0)
+            if (petiole_mask is not None and petiole_mask.size > 0 and petiole_mask.shape[:2] == (h_m, w_m))
+            else None
+        )
+        if hole_bool is not None:
+            lam_bool = lam_bool & (~hole_bool)
+            sil_bool = lam_bool | hole_bool
+        else:
+            sil_bool = lam_bool
+        prod_name = ect_product_for(bool(include_petiole), bool(include_holes))
+        masks_dict: Dict[str, Optional[np.ndarray]] = {
+            "lamina": lam_bool,
+            "laminapet": (lam_bool | pet_bool) if pet_bool is not None else None,
+            "silhouette": sil_bool,
+            "silhouettepet": (sil_bool | pet_bool) if pet_bool is not None else None,
+            "hole": hole_bool,
+        }
+        prods = render_leaf_products(
+            dummy_rgb,
+            masks_dict,
+            angle_cw=float(angle_cw) if angle_cw is not None else None,
+            want={prod_name},
+        )
+        selected = prods.get(prod_name)
+        if selected is not None and selected.size > 0 and int(np.count_nonzero(selected)) > 0:
+            mask_u8 = ((selected > 0).astype(np.uint8)) * 255
 
-            v_counts = np.sum(heights[:, :, None] <= thresholds[None, None, :], axis=0)
-            e_counts = np.sum(edge_heights[:, :, None] <= thresholds[None, None, :], axis=0)
-            ect_mat = (v_counts - e_counts).astype(np.float32)
-        except Exception:
-            return None
+    res = compute_ect(mask_u8, num_dirs=eff_num_dirs, bound_radius=1.0, want_simple=False)
+    if res is None or getattr(res, "ect_matrix", None) is None:
+        return None
 
-    if output_path is not None and ect_mat is not None:
+    ect_mat = np.asarray(res.ect_matrix, dtype=np.float32)
+    if ect_mat.shape != (eff_num_dirs, eff_num_thresh):
+        ect_mat = cv2.resize(ect_mat, (eff_num_thresh, eff_num_dirs), interpolation=cv2.INTER_LINEAR).astype(
+            np.float32
+        )
+
+    if output_path is not None:
         out_p = Path(output_path)
         out_p.parent.mkdir(parents=True, exist_ok=True)
         np.save(str(out_p), ect_mat)

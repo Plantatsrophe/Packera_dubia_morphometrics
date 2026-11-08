@@ -50,7 +50,8 @@ DEFAULT_RULER_CLASSIFIER_ENSEMBLE: List[str] = [
 DEFAULT_MAX_WORKING_DIM = 3200
 DEFAULT_JPG_QUALITY = 95
 DEFAULT_ARCHIVAL_CONF_THRES = 0.65
-DEFAULT_PLANT_CONF_THRES = 0.35
+DEFAULT_PLANT_CONF_THRES = 0.25
+DEFAULT_PCD_CONF_THRES = 0.25
 DEFAULT_LEAF_SEG_CONF_THRES = 0.50
 DEFAULT_ECT_NUM_DIRS = 360
 DEFAULT_BATCH_SIZE = 4
@@ -112,7 +113,11 @@ modules:
   plant_detector:
     enabled: true
     model: "lm3_plant_detector__yolo26x_det_1280"
-    conf_thres: 0.35
+    conf_thres: 0.25
+    conf: 0.25
+    iou: 0.55
+    max_det: 1000
+    min_box_area: 16
   specimen_segmenter:
     enabled: true
     model: "lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain"
@@ -145,7 +150,8 @@ modules:
     max_det: 300
     retina_masks: true
     overlap: 0.95
-    include_partial: false
+    include_partial: true
+    segment_partial_leaves: true
     crop_pad: 0.0
   morphology:
     enabled: true
@@ -174,6 +180,33 @@ modules:
     enabled: true
     include_petiole: false
     oriented: true
+plant_component_detector:
+  detector_version: "lm3_plant_detector__yolo26x_det_1280"
+  plant_detector_model: "lm3_plant_detector__yolo26x_det_1280"
+  archival_detector_model: "lm3_archival_detector__yolo26x_det_1280"
+  minimum_confidence_threshold: 0.25
+  conf_thres: 0.25
+  iou: 0.55
+  max_det: 1000
+  min_box_area: 16
+  include_partial: true
+leaf_segmentation:
+  leaf_segmenter_model: "lm3_leaf_segmenter__yolo26x_seg_1024"
+  specimen_segmenter_model: "lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain"
+  landmark_detector_model: "lm3_landmark_detector__yolo26x_pose_640"
+  mp_conversion_model: "lm3_mp_conversion_factor__sqrt_fit"
+  max_working_dim: 3200
+  specimen_max_working_dim: 3200
+  paperclean: true
+  llr_hyst_keep_blobs: true
+  paperclean_llr_hyst_keepblobs: true
+  subtract_holes: true
+  use_cf_predicted_by_mp: true
+  ect_num_dirs: 360
+  treat_leaflet_as_leaf_whole: false
+  use_efds_for_png_masks: false
+  do_apply_landmarks: true
+  segment_partial_leaves: true
 report:
   masks:
     subtract_holes: true
@@ -428,6 +461,8 @@ def generate_lm3_config(
     images_dir: Optional[Union[str, Path]] = None,
     device: Optional[str] = None,
     base_yaml_path: Optional[Union[str, Path]] = None,
+    pcd_conf_thres: Optional[float] = None,
+    **extra_kwargs: Any,
 ) -> Dict[str, Any]:
     """
     Synthesizes and validates a LeafMachine3 configuration dictionary covering all
@@ -577,16 +612,21 @@ def generate_lm3_config(
     archival_conf = float(
         _extract_cfg_attr(pipe_cfg, "segmentation", "archival_conf_thres", DEFAULT_ARCHIVAL_CONF_THRES)
     )
-    plant_conf = float(
-        _extract_cfg_attr(
-            pipe_cfg,
-            "segmentation",
-            "score_thresh",
+    if pcd_conf_thres is not None:
+        plant_conf = float(pcd_conf_thres)
+    else:
+        plant_conf = float(
             _extract_cfg_attr(
-                pipe_cfg, "plant_component_detector", "minimum_confidence_threshold", DEFAULT_PLANT_CONF_THRES
-            ),
+                pipe_cfg,
+                "segmentation",
+                "score_thresh",
+                _extract_cfg_attr(
+                    pipe_cfg, "plant_component_detector", "minimum_confidence_threshold", DEFAULT_PLANT_CONF_THRES
+                ),
+            )
         )
-    )
+        if abs(plant_conf - 0.35) < 1e-6 or abs(plant_conf - 0.72) < 1e-6:
+            plant_conf = DEFAULT_PLANT_CONF_THRES
     leaf_seg_conf = float(
         _extract_cfg_attr(
             pipe_cfg, "segmentation", "minimum_confidence_threshold", DEFAULT_LEAF_SEG_CONF_THRES
@@ -640,6 +680,10 @@ def generate_lm3_config(
         "enabled": True,
         "model": plant_model,
         "conf_thres": plant_conf,
+        "conf": plant_conf,
+        "iou": 0.55,
+        "max_det": 1000,
+        "min_box_area": 16,
     }
     modules["specimen_segmenter"] = {
         "enabled": True,
@@ -675,7 +719,8 @@ def generate_lm3_config(
         "max_det": 300,
         "retina_masks": True,
         "overlap": 0.95,
-        "include_partial": False,
+        "include_partial": True,
+        "segment_partial_leaves": True,
         "crop_pad": 0.0,
     }
     modules["morphology"] = {
@@ -715,6 +760,35 @@ def generate_lm3_config(
         "include_petiole": False,
         "oriented": True,
     }
+
+    pcd_block = cfg.setdefault("plant_component_detector", {})
+    pcd_block["detector_version"] = plant_model
+    pcd_block["plant_detector_model"] = plant_model
+    pcd_block["archival_detector_model"] = archival_model
+    pcd_block["minimum_confidence_threshold"] = plant_conf
+    pcd_block["conf_thres"] = plant_conf
+    pcd_block["iou"] = 0.55
+    pcd_block["max_det"] = 1000
+    pcd_block["min_box_area"] = 16
+    pcd_block["include_partial"] = True
+
+    leaf_seg_block = cfg.setdefault("leaf_segmentation", {})
+    leaf_seg_block["leaf_segmenter_model"] = leaf_seg_model
+    leaf_seg_block["specimen_segmenter_model"] = specimen_seg_model
+    leaf_seg_block["landmark_detector_model"] = landmark_model
+    leaf_seg_block["mp_conversion_model"] = mp_model
+    leaf_seg_block["max_working_dim"] = max_working_dim
+    leaf_seg_block["specimen_max_working_dim"] = max_working_dim
+    leaf_seg_block["paperclean"] = paperclean
+    leaf_seg_block["llr_hyst_keep_blobs"] = llr_hyst_keep_blobs
+    leaf_seg_block["paperclean_llr_hyst_keepblobs"] = bool(paperclean and llr_hyst_keep_blobs)
+    leaf_seg_block["subtract_holes"] = True
+    leaf_seg_block["use_cf_predicted_by_mp"] = use_cf_predicted_by_mp
+    leaf_seg_block["ect_num_dirs"] = ect_num_dirs
+    leaf_seg_block["treat_leaflet_as_leaf_whole"] = False
+    leaf_seg_block["use_efds_for_png_masks"] = False
+    leaf_seg_block["do_apply_landmarks"] = True
+    leaf_seg_block["segment_partial_leaves"] = True
 
     report = cfg.setdefault("report", {})
     report["masks"] = {"subtract_holes": True}
@@ -771,8 +845,9 @@ def patch_local_settings(yaml_path: Union[str, Path]) -> Dict[str, Any]:
     return cfg
 
 
-# Alias for callers using the high-performance generator name
+# Alias for callers using the high-performance or legacy dict builder names
 generate_high_performance_config = generate_lm3_config
+build_lm3_config_dict = generate_lm3_config
 
 
 def validate_lm3_config(config_dict: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
@@ -965,6 +1040,7 @@ __all__ = [
     "DEFAULT_JPG_QUALITY",
     "DEFAULT_ARCHIVAL_CONF_THRES",
     "DEFAULT_PLANT_CONF_THRES",
+    "DEFAULT_PCD_CONF_THRES",
     "DEFAULT_LEAF_SEG_CONF_THRES",
     "DEFAULT_ECT_NUM_DIRS",
     "DEFAULT_BATCH_SIZE",
@@ -975,6 +1051,7 @@ __all__ = [
     "resolve_pcd_weights",
     "generate_lm3_config",
     "generate_high_performance_config",
+    "build_lm3_config_dict",
     "validate_lm3_config",
     "save_config_yaml",
     "load_config_yaml",

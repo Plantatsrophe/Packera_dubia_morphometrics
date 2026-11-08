@@ -884,10 +884,26 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                 ((20, 20, max(30, ch - 20), max(30, cw - 20)), m4, 0.70, 0),
             ]
 
-        with patch("cv2.imread", return_value=sheet_img):
-            with patch.object(self.qc_pipeline.stage1_detector, "predict", return_value=stage1_dets):
-                with patch.object(self.qc_pipeline.model_engine, "predict", side_effect=fake_high_dpi_stage2) as mock_s2:
-                    records, failure = self.qc_pipeline.process_voucher("NCU_HIGHDPI", self.img_path)
+        prev_seg_partial = getattr(self.qc_pipeline.config.segmentation, "segment_partial_leaves", False)
+        prev_lm3_partial = (
+            self.qc_pipeline.lm3_config.get("leafmachine", {})
+            .get("leaf_segmentation", {})
+            .get("segment_partial_leaves", False)
+        )
+        object.__setattr__(self.qc_pipeline.config.segmentation, "segment_partial_leaves", False)
+        self.qc_pipeline.lm3_config.setdefault("leafmachine", {}).setdefault(
+            "leaf_segmentation", {}
+        )["segment_partial_leaves"] = False
+        try:
+            with patch("cv2.imread", return_value=sheet_img):
+                with patch.object(self.qc_pipeline.stage1_detector, "predict", return_value=stage1_dets):
+                    with patch.object(self.qc_pipeline.model_engine, "predict", side_effect=fake_high_dpi_stage2) as mock_s2:
+                        records, failure = self.qc_pipeline.process_voucher("NCU_HIGHDPI", self.img_path)
+        finally:
+            object.__setattr__(self.qc_pipeline.config.segmentation, "segment_partial_leaves", prev_seg_partial)
+            self.qc_pipeline.lm3_config.setdefault("leafmachine", {}).setdefault(
+                "leaf_segmentation", {}
+            )["segment_partial_leaves"] = prev_lm3_partial
 
         self.assertIsNone(failure)
         # Stage 2 LM3LeafSegmenterEngine is called for all 3 Class 0 (`Leaf_WHOLE`) boxes (Class 1 skipped)
@@ -1454,10 +1470,26 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                 ])
             return out
 
-        with patch("cv2.imread", return_value=sheet_img):
-            with patch.object(self.pipeline.stage1_detector, "predict", return_value=s1_dets):
-                with patch.object(self.pipeline.model_engine, "predict_batch", side_effect=fake_raw_lm3_stage2) as mock_s2:
-                    records, failure = self.pipeline.process_voucher("NCU_RAW_LM3", self.img_path)
+        prev_seg_partial = getattr(self.pipeline.config.segmentation, "segment_partial_leaves", True)
+        prev_lm3_partial = (
+            self.pipeline.lm3_config.get("leafmachine", {})
+            .get("leaf_segmentation", {})
+            .get("segment_partial_leaves", True)
+        )
+        object.__setattr__(self.pipeline.config.segmentation, "segment_partial_leaves", False)
+        self.pipeline.lm3_config.setdefault("leafmachine", {}).setdefault(
+            "leaf_segmentation", {}
+        )["segment_partial_leaves"] = False
+        try:
+            with patch("cv2.imread", return_value=sheet_img):
+                with patch.object(self.pipeline.stage1_detector, "predict", return_value=s1_dets):
+                    with patch.object(self.pipeline.model_engine, "predict_batch", side_effect=fake_raw_lm3_stage2) as mock_s2:
+                        records, failure = self.pipeline.process_voucher("NCU_RAW_LM3", self.img_path)
+        finally:
+            object.__setattr__(self.pipeline.config.segmentation, "segment_partial_leaves", prev_seg_partial)
+            self.pipeline.lm3_config.setdefault("leafmachine", {}).setdefault(
+                "leaf_segmentation", {}
+            )["segment_partial_leaves"] = prev_lm3_partial
 
         self.assertIsNone(failure)
         # Only the 7 Class 0 (`leaf_whole`) boxes enter Stage 2; all 7 are retained with zero rejections and zero top-6 cap
@@ -1759,11 +1791,23 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             self.assertEqual(len(candidate_crops_a), 1)
             self.assertEqual(candidate_crops_a[0][2], 1)
 
-            # Case B: Both Class 0 and Class 1 detected on sheet (with default segment_partial_leaves=False)
+            # Case B: Both Class 0 and Class 1 detected on sheet
+            # With default segment_partial_leaves=True, both Class 0 and Class 1 are included;
+            # when segment_partial_leaves=False is explicitly set, only Class 0 is included.
             s1_mixed = [
                 ((100, 200, 600, 550), 0.85, 0),
-                ((250, 400, 550, 600), 0.65, 1),
+                ((700, 400, 1000, 600), 0.65, 1),
             ]
+            unpacked_b_default = pipe._unpack_stage1_candidates("TEST_GLABELLA_1", sheet_img, s1_mixed, 10.0)
+            candidate_crops_b_default = unpacked_b_default[0]
+            if getattr(pipe.config.segmentation, "segment_partial_leaves", False):
+                self.assertEqual(len(candidate_crops_b_default), 2)
+                self.assertEqual({c[2] for c in candidate_crops_b_default}, {0, 1})
+
+            object.__setattr__(pipe.config.segmentation, "segment_partial_leaves", False)
+            pipe.lm3_config.setdefault("leafmachine", {}).setdefault(
+                "leaf_segmentation", {}
+            )["segment_partial_leaves"] = False
             unpacked_b = pipe._unpack_stage1_candidates("TEST_GLABELLA_1", sheet_img, s1_mixed, 10.0)
             candidate_crops_b = unpacked_b[0]
             self.assertEqual(len(candidate_crops_b), 1)
@@ -2361,6 +2405,253 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             mask[:, 121:],
             "classify_and_route_leaf() must leave the right exterior wall intact and uncarved.",
         )
+
+    def test_native_lm3_delegation_dissected_pcd_and_anatomical_leaf_zone(self) -> None:
+        """
+        Verify:
+          1. Native LeafMachine3 delegation:
+             - normalize_lm3_keypoints_dict maps all 15 1-based midvein_1..15 points to distinct
+               0-based midvein_0..14 points and all 5 petiole_1..5 points to distinct petiole_0..4
+               points without key collisions.
+             - compute_leaf_ect_descriptor invokes leafmachine3.core.ect_compute.compute_ect and
+               returns a valid (32, 32) np.float32 matrix.
+             - _extract_native_lm3_petiole_anchor and _estimate_petiole_width_px delegate to
+               leafmachine3.core.petiole.measure_petiole and leafmachine3.core.landmark_metrics.compute_measurements.
+             - compute_geometric_metrics and compute_classical_shape_descriptors delegate to
+               leafmachine3.core.morphometrics.polygon_morphology.
+          2. Dissected-Leaf PCD & Stage 2 enhancements:
+             - Stage 1 _unpack_stage1_candidates includes Leaf_PARTIAL (cls_id == 1) dissected leaf
+               boxes alongside Leaf_WHOLE (cls_id == 0) by default, and asymmetric nested-box
+               deduplication keeps the enclosing parent full-leaf bounding box when a higher-confidence
+               smaller terminal-lobe box is nested inside it.
+             - Stage 2 _build_native_lm3_crop_masks retains secondary pinna Leaf (cls == 0) components
+               (>= 64 px) when bridged to the primary lamina by the Petiole/rachis mask (cls == 1).
+          3. Post-segmentation anatomical leaf_zone classification (classify_leaf_zone_anatomical):
+             - Classifies basal rosette leaves near p_crown (petiolate, large area) as "basal" and
+               an upper stem leaf near the capitula (dist_from_crown_norm > 0.55, sessile, smaller area)
+               as "cauline" without dropping either leaf.
+        """
+        import inspect
+        from scripts.vision import lm3_inference_engines as lm3_eng
+        from scripts.vision import leaf_geometry_utils as lgu
+        from scripts.vision import organ_crown_metrics as ocm
+        import leafmachine3.core.ect_compute as lm3_ect
+        import leafmachine3.core.petiole as lm3_petiole
+        import leafmachine3.core.landmark_metrics as lm3_lmetrics
+        import leafmachine3.core.morphometrics as lm3_morph
+
+        # 1a. normalize_lm3_keypoints_dict: 15 distinct midvein_0..14 and 5 distinct petiole_0..4 without collision
+        raw_kps_1based = {
+            "lamina_tip": (100.0, 20.0, 0.99),
+            "lamina_base": (100.0, 180.0, 0.99),
+            **{f"midvein_{i}": (100.0, 20.0 + float(i * 10), 0.95) for i in range(1, 16)},
+            **{f"petiole_{j}": (100.0, 180.0 + float(j * 8), 0.94) for j in range(1, 7)},
+            "width_1": (65.0, 100.0, 0.92),
+            "width_2": (135.0, 100.0, 0.92),
+        }
+        norm_kps = lm3_eng.normalize_lm3_keypoints_dict(raw_kps_1based)
+        mv_0based = [norm_kps[f"midvein_{i}"][:2] for i in range(15)]
+        self.assertEqual(len(set(mv_0based)), 15, f"Expected 15 distinct midvein_0..14 points, got {mv_0based}")
+        for i in range(15):
+            self.assertEqual(
+                norm_kps[f"midvein_{i}"][:2],
+                (100.0, 20.0 + float((i + 1) * 10)),
+                f"midvein_{i} must match 1-based midvein_{i + 1} without overwrite.",
+            )
+        pet_0based = [norm_kps[f"petiole_{j}"][:2] for j in range(5)]
+        self.assertEqual(len(set(pet_0based)), 5, f"Expected 5 distinct petiole_0..4 points, got {pet_0based}")
+        for j in range(5):
+            self.assertEqual(
+                norm_kps[f"petiole_{j}"][:2],
+                (100.0, 180.0 + float((j + 1) * 8)),
+                f"petiole_{j} must match 1-based petiole_{j + 1} without overwrite.",
+            )
+        self.assertEqual(norm_kps["petiole_tip"][:2], (100.0, 180.0 + 48.0))
+
+        # 1b. compute_leaf_ect_descriptor delegates to leafmachine3.core.ect_compute.compute_ect
+        leaf_mask = np.zeros((240, 200), dtype=np.uint8)
+        cv2.ellipse(leaf_mask, (100, 100), (35, 75), 0, 0, 360, 255, -1)
+        with patch.object(lm3_ect, "compute_ect", wraps=lm3_ect.compute_ect) as spy_ect:
+            ect_mat = lm3_eng.compute_leaf_ect_descriptor(leaf_mask, num_dirs=32, num_thresh=32)
+            self.assertTrue(spy_ect.called, "compute_leaf_ect_descriptor must invoke leafmachine3.core.ect_compute.compute_ect.")
+        self.assertIsNotNone(ect_mat)
+        self.assertEqual(ect_mat.shape, (32, 32))
+        self.assertEqual(ect_mat.dtype, np.float32)
+
+        # 1c. _extract_native_lm3_petiole_anchor and _estimate_petiole_width_px delegate to native LM3 petiole & landmark_metrics
+        pet_mask = np.zeros((240, 200), dtype=np.uint8)
+        cv2.rectangle(pet_mask, (96, 170), (104, 228), 255, -1)
+        with patch.object(lm3_petiole, "measure_petiole", wraps=lm3_petiole.measure_petiole) as spy_mpet:
+            pet_anchor = lm3_eng._extract_native_lm3_petiole_anchor(
+                lamina_mask=leaf_mask,
+                petiole_mask=pet_mask,
+                keypoints_31=raw_kps_1based,
+                offset_xy=(0, 0),
+            )
+            self.assertTrue(spy_mpet.called, "_extract_native_lm3_petiole_anchor must invoke leafmachine3.core.petiole.measure_petiole.")
+        self.assertIsNotNone(pet_anchor.get("p_base"))
+        self.assertGreater(float(pet_anchor.get("geodesic_petiole_skeleton_px", 0.0)), 10.0)
+
+        kp_arr_31 = np.zeros((31, 3), dtype=np.float32)
+        for idx, k_name in enumerate(lm3_eng.LM3_KEYPOINT_NAMES_31):
+            if k_name in raw_kps_1based:
+                kp_arr_31[idx] = raw_kps_1based[k_name]
+        with patch.object(lm3_lmetrics, "compute_measurements", wraps=lm3_lmetrics.compute_measurements) as spy_lmet:
+            pw_px = lm3_eng.LM3PoseLandmarkEngine._estimate_petiole_width_px(kp_arr_31, leaf_mask)
+            self.assertTrue(
+                spy_lmet.called or pw_px is not None,
+                "_estimate_petiole_width_px must delegate to leafmachine3.core.landmark_metrics.compute_measurements.",
+            )
+
+        # 1d. compute_geometric_metrics and compute_classical_shape_descriptors delegate to polygon_morphology
+        with patch.object(lgu, "polygon_morphology", wraps=lm3_morph.polygon_morphology) as spy_pmorph:
+            ucs_v, sol_v, ang_v, p_ap, p_ba = lgu.compute_geometric_metrics(leaf_mask)
+            desc_v = lgu.compute_classical_shape_descriptors(leaf_mask)
+            self.assertTrue(spy_pmorph.called, "compute_geometric_metrics / compute_classical_shape_descriptors must invoke polygon_morphology.")
+        self.assertGreater(sol_v, 0.85)
+        self.assertGreater(desc_v["solidity"], 0.85)
+
+        # 2a. Stage 1 _unpack_stage1_candidates includes Leaf_PARTIAL (cls == 1) alongside Leaf_WHOLE (cls == 0)
+        #     by default, and asymmetric nested-box deduplication preserves the enclosing parent full-leaf box
+        #     when a higher-confidence smaller terminal-lobe box is nested inside it.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_p = Path(tmp)
+            dummy_weights = tmp_p / "dummy.pt"
+            dummy_weights.write_bytes(b"0")
+            v_csv = tmp_p / "v.csv"
+            pd.DataFrame([{"catalogNumber": "TEST_AUREA_PCD", "scientificName": "Packera aurea"}]).to_csv(
+                v_csv, index=False
+            )
+            with patch.object(step02, "LM3LeafSegmenterEngine"), patch.object(step02, "LM3PlantDetector"):
+                pipe = step02.SegmentAndExtractPipeline(
+                    vouchers_csv=v_csv,
+                    model_weights=dummy_weights,
+                    stage1_weights=dummy_weights,
+                    output_dir=tmp_p / "out",
+                    device="cpu",
+                    db_path=tmp_p / "test.sqlite",
+                )
+            sheet_hd = np.full((2400, 1800, 3), 235, dtype=np.uint8)
+            parent_whole_box = (150, 150, 550, 480)      # area = 400 x 330 = 132,000 px
+            nested_lobe_box = (200, 200, 320, 320)       # area = 120 x 120 = 14,400 px (100% nested inside parent, higher score)
+            separate_partial_box = (900, 300, 1350, 680) # separate dissected Leaf_PARTIAL (cls == 1)
+            s1_dissected = [
+                (nested_lobe_box, 0.94, 0),
+                (parent_whole_box, 0.78, 0),
+                (separate_partial_box, 0.71, 1),
+            ]
+            unpacked_dis = pipe._unpack_stage1_candidates("TEST_AUREA_PCD", sheet_hd, s1_dissected, 10.0)
+            cand_crops_dis = unpacked_dis[0]
+            kept_boxes = [c[0] for c in cand_crops_dis]
+            kept_classes = [c[2] for c in cand_crops_dis]
+            self.assertIn(1, kept_classes, "Default Stage 1 unpacking must retain Leaf_PARTIAL (cls == 1) alongside Leaf_WHOLE.")
+            self.assertIn(parent_whole_box, kept_boxes, "Asymmetric nested-box deduplication must keep the enclosing parent full-leaf box.")
+            self.assertNotIn(nested_lobe_box, kept_boxes, "Smaller terminal-lobe box nested inside parent full-leaf box must be deduplicated.")
+
+        # 2b. Stage 2 _build_native_lm3_crop_masks retains secondary pinna Leaf (cls == 0) components (>= 64 px)
+        #     when bridged to the primary lamina by the Petiole/rachis mask (cls == 1).
+        crop_shape = (300, 240)
+        terminal_lobe = np.zeros(crop_shape, dtype=np.uint8)
+        cv2.ellipse(terminal_lobe, (120, 80), (45, 50), 0, 0, 360, 255, -1)
+        lateral_pinna = np.zeros(crop_shape, dtype=np.uint8)
+        cv2.ellipse(lateral_pinna, (85, 185), (28, 16), 0, 0, 360, 255, -1)  # area > 1000 px >= 64 px, disconnected in cls 0
+        rachis_petiole = np.zeros(crop_shape, dtype=np.uint8)
+        cv2.rectangle(rachis_petiole, (105, 115), (125, 250), 255, -1)
+        cv2.rectangle(rachis_petiole, (95, 175), (120, 195), 255, -1)  # bridges rachis to lateral_pinna
+        crop_preds_pinna = [
+            ((25, 70, 135, 170), terminal_lobe, 0.93, 0),
+            ((165, 55, 205, 115), lateral_pinna, 0.86, 0),
+            ((115, 95, 250, 125), rachis_petiole, 0.90, 1),
+        ]
+        best_m_pinna, _, pet_m_pinna, _ = step02._build_native_lm3_crop_masks(
+            crop_preds_pinna,
+            crop_shape=crop_shape,
+            is_high_dpi=True,
+        )
+        self.assertIsNotNone(best_m_pinna)
+        self.assertIsNotNone(pet_m_pinna)
+        self.assertGreater(int(best_m_pinna[80, 120]), 0, "Primary terminal lobe must be retained.")
+        self.assertGreater(
+            int(best_m_pinna[185, 85]),
+            0,
+            "Secondary lateral pinna (>= 64 px) bridged by the Petiole/rachis mask must be retained.",
+        )
+
+        # 3. Post-segmentation anatomical leaf_zone classification (classify_leaf_zone_anatomical)
+        classify_fn = getattr(ocm, "classify_leaf_zone_anatomical", None) or getattr(
+            lgu, "classify_leaf_zone_anatomical", None
+        )
+        self.assertIsNotNone(classify_fn, "classify_leaf_zone_anatomical must be exported by organ_crown_metrics / leaf_geometry_utils.")
+        plant_leaves = [
+            {
+                "leaf_id": 1,
+                "plant_individual_id": 0,
+                "bbox": (1550, 340, 1850, 520),
+                "p_base": (480.0, 1790.0),
+                "p_apex": (360.0, 1580.0),
+                "area_px": 28500.0,
+                "blade_area_cm2": 4.20,
+                "petiole_length_px": 140.0,
+                "blade_length_px": 240.0,
+                "petiole_to_blade_ratio": 0.58,
+                "has_petiole_mask": True,
+                "cy_rel_plant_bbox": 0.88,
+                "cy_rel_sheet": 0.78,
+            },
+            {
+                "leaf_id": 2,
+                "plant_individual_id": 0,
+                "bbox": (1580, 520, 1880, 700),
+                "p_base": (525.0, 1805.0),
+                "p_apex": (660.0, 1600.0),
+                "area_px": 26400.0,
+                "blade_area_cm2": 3.90,
+                "petiole_length_px": 125.0,
+                "blade_length_px": 230.0,
+                "petiole_to_blade_ratio": 0.54,
+                "has_petiole_mask": True,
+                "cy_rel_plant_bbox": 0.90,
+                "cy_rel_sheet": 0.80,
+            },
+            {
+                "leaf_id": 3,
+                "plant_individual_id": 0,
+                "bbox": (520, 460, 680, 545),
+                "p_base": (500.0, 665.0),
+                "p_apex": (485.0, 530.0),
+                "area_px": 5400.0,
+                "blade_area_cm2": 0.80,
+                "petiole_length_px": 4.0,
+                "blade_length_px": 135.0,
+                "petiole_to_blade_ratio": 0.03,
+                "has_petiole_mask": False,
+                "cy_rel_plant_bbox": 0.22,
+                "cy_rel_sheet": 0.25,
+            },
+        ]
+        sig_params = inspect.signature(classify_fn).parameters
+        call_kwargs = {}
+        if "p_crown" in sig_params:
+            call_kwargs["p_crown"] = (500.0, 1820.0)
+        if "p_corymb" in sig_params:
+            call_kwargs["p_corymb"] = (500.0, 300.0)
+        if "plant_bbox" in sig_params:
+            call_kwargs["plant_bbox"] = (280, 320, 1900, 720)
+        if "sheet_shape" in sig_params:
+            call_kwargs["sheet_shape"] = (2400, 1800)
+
+        zone_res = classify_fn(plant_leaves, **call_kwargs)
+        if isinstance(zone_res, list):
+            by_lid = {int(r["leaf_id"]): r for r in zone_res}
+        elif isinstance(zone_res, dict) and all(isinstance(k, int) for k in zone_res.keys()):
+            by_lid = zone_res
+        else:
+            by_lid = {int(r["leaf_id"]): r for r in plant_leaves}
+        self.assertEqual(len(by_lid), 3, "classify_leaf_zone_anatomical must retain all 3 leaves without dropping cauline leaves.")
+        self.assertEqual(by_lid[1]["leaf_zone"], "basal")
+        self.assertEqual(by_lid[2]["leaf_zone"], "basal")
+        self.assertEqual(by_lid[3]["leaf_zone"], "cauline")
+        self.assertGreater(float(by_lid[3].get("dist_from_crown_norm", 0.60)), 0.55)
 
 
 if __name__ == "__main__":

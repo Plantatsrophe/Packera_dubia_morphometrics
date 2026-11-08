@@ -616,8 +616,23 @@ class TestFourierExtractor(unittest.TestCase):
             ind_df = pd.read_csv(out_ind)
             spec_df = pd.read_csv(out_spec)
 
-            vmix_lids = sorted(ind_df.loc[ind_df["catalogNumber"] == "V_MIX", "leaf_id"].astype(int).tolist())
-            self.assertEqual(vmix_lids, [2, 3, 4], f"Expected cauline leaf 1 excluded, got {vmix_lids}")
+            vmix_rows = ind_df.loc[ind_df["catalogNumber"] == "V_MIX"]
+            if "leaf_zone" in vmix_rows.columns and len(vmix_rows) == 4:
+                vmix_basal_lids = sorted(
+                    vmix_rows.loc[vmix_rows["leaf_zone"].astype(str).str.lower() == "basal", "leaf_id"]
+                    .astype(int)
+                    .tolist()
+                )
+                vmix_caul_lids = sorted(
+                    vmix_rows.loc[vmix_rows["leaf_zone"].astype(str).str.lower() == "cauline", "leaf_id"]
+                    .astype(int)
+                    .tolist()
+                )
+                self.assertEqual(vmix_basal_lids, [2, 3, 4], f"Expected basal leaves [2, 3, 4], got {vmix_basal_lids}")
+                self.assertEqual(vmix_caul_lids, [1], f"Expected cauline leaf [1], got {vmix_caul_lids}")
+            else:
+                vmix_lids = sorted(vmix_rows["leaf_id"].astype(int).tolist())
+                self.assertEqual(vmix_lids, [2, 3, 4], f"Expected basal leaves [2, 3, 4], got {vmix_lids}")
             vdet_lids = sorted(ind_df.loc[ind_df["catalogNumber"] == "V_DET", "leaf_id"].astype(int).tolist())
             self.assertEqual(vdet_lids, [1, 2], f"Expected detached rosette leaves rescued by fallback, got {vdet_lids}")
 
@@ -806,6 +821,226 @@ class TestFourierExtractor(unittest.TestCase):
                 (outlier_flags == "FALSE").all(),
                 f"Expected zero contour outliers on vertically oriented symmetric leaves, got {outlier_flags.tolist()}",
             )
+
+    def test_step03_preserves_basal_and_cauline_tracks_with_pure_basal_otu_medians(self) -> None:
+        """
+        Verify that when a specimen has both leaf_zone = "basal" and leaf_zone = "cauline" leaves in Step 03:
+          - Both basal and cauline leaves are preserved in leaf_efa_harmonics_ind.csv with their leaf_zone tags.
+          - The specimen's primary OTU harmonics (A1..D_H, solidity) in specimen_efa_medians.csv match the
+            pure basal leaf outlines (w_cauline = 0.0, uncontaminated by the cauline leaf), while the separate
+            cauline track columns (cauline_leaf_count, cauline_solidity_med, cauline_dissection_index_med,
+            basal_vs_cauline_length_ratio, heteroblasty_efa_distance) are populated.
+        """
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            contours_dir = tmp_p / "contours"
+            contours_dir.mkdir(parents=True, exist_ok=True)
+            vouchers_csv = tmp_p / "curated_vouchers.csv"
+            manifest_mixed_csv = tmp_p / "manifest_mixed.csv"
+            manifest_basal_only_csv = tmp_p / "manifest_basal_only.csv"
+
+            def write_contour(cat: str, lid: int, r_vec: np.ndarray) -> Path:
+                x = 250.0 + r_vec * np.cos(t)
+                y = 250.0 + r_vec * np.sin(t)
+                p = contours_dir / f"{cat}_leaf{lid}.csv"
+                pd.DataFrame({
+                    "catalogNumber": cat,
+                    "leaf_id": lid,
+                    "point_index": np.arange(120),
+                    "x": x,
+                    "y": y,
+                }).to_csv(p, index=False)
+                return p
+
+            # Basal rosette outline (broad ovate, solidity ~ 0.94) vs dissected cauline outline (deep lobes, solidity ~ 0.48)
+            r_basal_1 = 80.0 * (1.0 + 0.12 * np.cos(t))
+            r_basal_2 = 82.0 * (1.0 + 0.14 * np.cos(t))
+            r_cauline = 55.0 * (1.0 + 0.46 * np.cos(6 * t))
+
+            vouchers = [
+                {"catalogNumber": "V_HETERO_1", "species_raw": "Packera aurea", "scientificName": "Packera aurea", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "V_REF_2", "species_raw": "Packera aurea", "scientificName": "Packera aurea", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "V_REF_3", "species_raw": "Packera obovata", "scientificName": "Packera obovata", "determiner_tier": "Tier_1_Gold"},
+                {"catalogNumber": "V_REF_4", "species_raw": "Packera obovata", "scientificName": "Packera obovata", "determiner_tier": "Tier_1_Gold"},
+            ]
+            pd.DataFrame(vouchers).to_csv(vouchers_csv, index=False)
+
+            p_h1_b1 = write_contour("V_HETERO_1", 1, r_basal_1)
+            p_h1_b2 = write_contour("V_HETERO_1", 2, r_basal_2)
+            p_h1_c3 = write_contour("V_HETERO_1", 3, r_cauline)
+
+            basal_rows = [
+                {
+                    "catalogNumber": "V_HETERO_1",
+                    "plant_individual_id": 0,
+                    "leaf_id": 1,
+                    "assigned_tier": "Tier_1_Direct",
+                    "leaf_zone": "basal",
+                    "pixels_per_mm": 10.0,
+                    "is_calibrated_mm": True,
+                    "solidity": 0.94,
+                    "dissection_index": 1.08,
+                    "blade_length_mm": 42.0,
+                    "petiole_length_mm": 28.0,
+                    "petiole_to_blade_ratio": 0.67,
+                    "cy_rel_plant_bbox": 0.86,
+                    "cy_rel_sheet": 0.80,
+                    "blade_area_cm2": 4.2,
+                    "effective_min_blade_area_cm2": 0.50,
+                    "ucs_score": 0.95,
+                    "contour_path": str(p_h1_b1),
+                },
+                {
+                    "catalogNumber": "V_HETERO_1",
+                    "plant_individual_id": 0,
+                    "leaf_id": 2,
+                    "assigned_tier": "Tier_1_Direct",
+                    "leaf_zone": "basal",
+                    "pixels_per_mm": 10.0,
+                    "is_calibrated_mm": True,
+                    "solidity": 0.92,
+                    "dissection_index": 1.10,
+                    "blade_length_mm": 40.0,
+                    "petiole_length_mm": 25.0,
+                    "petiole_to_blade_ratio": 0.625,
+                    "cy_rel_plant_bbox": 0.84,
+                    "cy_rel_sheet": 0.78,
+                    "blade_area_cm2": 4.0,
+                    "effective_min_blade_area_cm2": 0.50,
+                    "ucs_score": 0.95,
+                    "contour_path": str(p_h1_b2),
+                },
+            ]
+            for idx_ref, cat_ref in enumerate(["V_REF_2", "V_REF_3", "V_REF_4"], start=2):
+                p_ref = write_contour(cat_ref, 1, 78.0 * (1.0 + (0.10 + 0.03 * idx_ref) * np.cos(2 * t)))
+                basal_rows.append({
+                    "catalogNumber": cat_ref,
+                    "plant_individual_id": 0,
+                    "leaf_id": 1,
+                    "assigned_tier": "Tier_1_Direct",
+                    "leaf_zone": "basal",
+                    "pixels_per_mm": 10.0,
+                    "is_calibrated_mm": True,
+                    "solidity": 0.91,
+                    "dissection_index": 1.12,
+                    "blade_length_mm": 38.0,
+                    "petiole_length_mm": 20.0,
+                    "petiole_to_blade_ratio": 0.53,
+                    "cy_rel_plant_bbox": 0.82,
+                    "cy_rel_sheet": 0.76,
+                    "blade_area_cm2": 3.6,
+                    "effective_min_blade_area_cm2": 0.50,
+                    "ucs_score": 0.94,
+                    "contour_path": str(p_ref),
+                })
+
+            cauline_row = {
+                "catalogNumber": "V_HETERO_1",
+                "plant_individual_id": 0,
+                "leaf_id": 3,
+                "assigned_tier": "Tier_1_Direct",
+                "leaf_zone": "cauline",
+                "pixels_per_mm": 10.0,
+                "is_calibrated_mm": True,
+                "solidity": 0.48,
+                "dissection_index": 2.35,
+                "blade_length_mm": 20.5,
+                "petiole_length_mm": 0.8,
+                "petiole_to_blade_ratio": 0.039,
+                "cy_rel_plant_bbox": 0.20,
+                "cy_rel_sheet": 0.22,
+                "blade_area_cm2": 1.1,
+                "effective_min_blade_area_cm2": 0.50,
+                "ucs_score": 0.90,
+                "contour_path": str(p_h1_c3),
+            }
+
+            pd.DataFrame(basal_rows).to_csv(manifest_basal_only_csv, index=False)
+            pd.DataFrame(basal_rows + [cauline_row]).to_csv(manifest_mixed_csv, index=False)
+
+            out_spec_basal = tmp_p / "spec_basal_only.csv"
+            out_ind_basal = tmp_p / "ind_basal_only.csv"
+            proc_b = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--contours-dir", str(contours_dir),
+                    "--masks-dir", str(tmp_p / "masks"),
+                    "--vouchers", str(vouchers_csv),
+                    "--manifest", str(manifest_basal_only_csv),
+                    "--output", str(out_spec_basal),
+                    "--output-individual", str(out_ind_basal),
+                    "--report-out", str(tmp_p / "rep_b.csv"),
+                    "--plot-out", str(tmp_p / "fig_b.pdf"),
+                    "--permutations", "9",
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_b.returncode, 0, f"Basal-only Step 03 failed:\n{proc_b.stderr}\n{proc_b.stdout}")
+
+            out_spec_mix = tmp_p / "spec_mixed.csv"
+            out_ind_mix = tmp_p / "ind_mixed.csv"
+            proc_m = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--contours-dir", str(contours_dir),
+                    "--masks-dir", str(tmp_p / "masks"),
+                    "--vouchers", str(vouchers_csv),
+                    "--manifest", str(manifest_mixed_csv),
+                    "--output", str(out_spec_mix),
+                    "--output-individual", str(out_ind_mix),
+                    "--report-out", str(tmp_p / "rep_m.csv"),
+                    "--plot-out", str(tmp_p / "fig_m.pdf"),
+                    "--permutations", "9",
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_m.returncode, 0, f"Mixed basal+cauline Step 03 failed:\n{proc_m.stderr}\n{proc_m.stdout}")
+
+            ind_mix = pd.read_csv(out_ind_mix)
+            spec_basal = pd.read_csv(out_spec_basal)
+            spec_mix = pd.read_csv(out_spec_mix)
+
+            # 1. Both basal and cauline leaves are preserved in leaf_efa_harmonics_ind.csv with leaf_zone tags
+            h1_ind = ind_mix.loc[ind_mix["catalogNumber"] == "V_HETERO_1"].sort_values("leaf_id")
+            self.assertEqual(h1_ind["leaf_id"].astype(int).tolist(), [1, 2, 3])
+            self.assertEqual(
+                h1_ind["leaf_zone"].astype(str).str.lower().tolist(),
+                ["basal", "basal", "cauline"],
+            )
+
+            # 2. Primary OTU harmonics (A1..D6, solidity) in spec_mix match pure basal leaf outlines (w_cauline = 0.0)
+            row_b = spec_basal.loc[spec_basal["catalogNumber"] == "V_HETERO_1"].iloc[0]
+            row_m = spec_mix.loc[spec_mix["catalogNumber"] == "V_HETERO_1"].iloc[0]
+            self.assertEqual(int(row_m["basal_leaf_count"]), 2)
+            self.assertAlmostEqual(float(row_m["solidity"]), float(row_b["solidity"]), places=4)
+            for h_col in ["A1", "A2", "A3", "D1", "D2", "D3"]:
+                if h_col in row_m and h_col in row_b:
+                    self.assertAlmostEqual(
+                        float(row_m[h_col]),
+                        float(row_b[h_col]),
+                        places=5,
+                        msg=f"Primary OTU harmonic {h_col} must match pure basal leaves without cauline contamination.",
+                    )
+
+            # 3. Separate cauline track columns are populated on the mixed specimen
+            self.assertEqual(int(row_m["cauline_leaf_count"]), 1)
+            self.assertAlmostEqual(float(row_m["cauline_solidity_med"]), 0.48, places=2)
+            self.assertGreater(float(row_m["cauline_dissection_index_med"]), 1.8)
+            self.assertGreater(float(row_m["basal_vs_cauline_length_ratio"]), 1.5)
+            self.assertGreater(float(row_m["heteroblasty_efa_distance"]), 0.01)
 
 
 if __name__ == "__main__":

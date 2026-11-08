@@ -17,11 +17,24 @@ Description:
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import cv2
 import numpy as np
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LM3_PACKAGE_ROOT = PROJECT_ROOT / "LeafMachine3"
+for _p in (PROJECT_ROOT, LM3_PACKAGE_ROOT):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+from leafmachine3.core.leaf_outline import extract_contour
+from leafmachine3.core.morphometrics import polygon_morphology
+from leafmachine3.core.orientation import length_width_from_box
+from leafmachine3.inference.leaf_segmenter import _components, _largest_component
 
 from scripts.vision.leaf_geometry_utils import (
     compute_geometric_metrics,
@@ -411,9 +424,11 @@ def check_boundary_tissue_continuity(
 def compute_classical_shape_descriptors(
     mask: np.ndarray,
     bbox: Optional[Tuple[int, int, int, int]] = None,
+    angle_cw: Optional[float] = None,
 ) -> Dict[str, float]:
     """
-    Computes classical dimensionless shape descriptors (Krieger 2017; Russ 2011):
+    Computes classical dimensionless shape descriptors (Krieger 2017; Russ 2011)
+    by delegating contour extraction and polygon morphology to LeafMachine3:
       - Solidity = Area / Convex Hull Area
       - Circularity (Form Factor) = 4 * pi * Area / Perimeter^2
       - Extent = Mask Area / Oriented Bounding Box Area (scaled by external PCD `bbox`
@@ -429,6 +444,7 @@ def compute_classical_shape_descriptors(
             "solidity": 0.0,
             "circularity": 0.0,
             "extent": 0.0,
+            "aspect_ratio": 0.0,
         }
 
     mask_u8 = (mask > 0).astype(np.uint8) * 255
@@ -442,12 +458,14 @@ def compute_classical_shape_descriptors(
             "solidity": 0.0,
             "circularity": 0.0,
             "extent": 0.0,
+            "aspect_ratio": 0.0,
         }
 
     bx, by, bw, bh = cv2.boundingRect(mask_u8)
     sub = mask_u8[by : by + bh, bx : bx + bw]
+    main_cnt_xy = extract_contour(sub)
     contours, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
+    if main_cnt_xy is None and not contours:
         return {
             "area_px": area_px,
             "perimeter_px": 0.0,
@@ -456,20 +474,60 @@ def compute_classical_shape_descriptors(
             "solidity": 1.0,
             "circularity": 0.0,
             "extent": min(1.0, area_px / float(max(bw * bh, 1))),
+            "aspect_ratio": float(max(bw, bh)) / float(max(min(bw, bh), 1)),
         }
 
-    main_cnt = max(contours, key=cv2.contourArea)
-    cnt_area = max(float(cv2.contourArea(main_cnt)), area_px)
-    perim_px = float(cv2.arcLength(main_cnt, True))
-    hull = cv2.convexHull(main_cnt)
-    hull_area = float(cv2.contourArea(hull))
+    main_cnt = (
+        max(contours, key=cv2.contourArea)
+        if contours
+        else np.round(main_cnt_xy).astype(np.int32).reshape(-1, 1, 2)
+    )
+    if main_cnt_xy is None:
+        main_cnt_xy = main_cnt.reshape(-1, 2).astype(np.float64)
 
-    solidity = min(max(area_px / hull_area, 0.0), 1.0) if hull_area > 0.0 else 0.0
+    morph = polygon_morphology(main_cnt_xy, method="minarearect")
+    morph_area = float(getattr(morph, "area_px", 0.0) or 0.0) if morph is not None else 0.0
+    cnt_area = max(morph_area, float(cv2.contourArea(main_cnt)), area_px)
+
+    perim_px = (
+        float(getattr(morph, "perimeter_px", 0.0) or 0.0)
+        if (morph is not None and float(getattr(morph, "perimeter_px", 0.0) or 0.0) > 0.0)
+        else float(cv2.arcLength(main_cnt, True))
+    )
+    hull = cv2.convexHull(main_cnt)
+    hull_area_cv = float(cv2.contourArea(hull))
+    hull_area_morph = (
+        float(getattr(morph, "convex_area_px", getattr(morph, "convex_hull_area", 0.0)) or 0.0)
+        if morph is not None
+        else 0.0
+    )
+    hull_area = hull_area_cv if hull_area_cv > 0.0 else hull_area_morph
+
+    morph_sol = (
+        float(getattr(morph, "solidity", getattr(morph, "convexity", 0.0)) or 0.0)
+        if morph is not None
+        else 0.0
+    )
+    solidity = (
+        min(max(area_px / hull_area, 0.0), 1.0)
+        if hull_area > 0.0
+        else min(max(morph_sol, 0.0), 1.0)
+    )
+
+    morph_circ = float(getattr(morph, "circularity", 0.0) or 0.0) if morph is not None else 0.0
     circularity = (
         min(max((4.0 * math.pi * cnt_area) / (perim_px * perim_px), 0.0), 1.0)
         if perim_px > 0.0
-        else 0.0
+        else min(max(morph_circ, 0.0), 1.0)
     )
+
+    aspect_ratio = float(getattr(morph, "aspect_ratio", 0.0) or 0.0) if morph is not None else 0.0
+    if angle_cw is not None and morph is not None and getattr(morph, "rotated_bbox", None) is not None:
+        rbox = np.asarray(morph.rotated_bbox, dtype=np.float64)
+        if rbox.shape == (4, 2):
+            l_px, w_px = length_width_from_box(rbox, float(angle_cw))
+            if l_px > 0.0 and w_px > 0.0:
+                aspect_ratio = float(max(l_px, w_px)) / float(max(min(l_px, w_px), 1e-6))
 
     tight_axis_area = float(max(bw * bh, 1))
     rect_w, rect_h = cv2.minAreaRect(main_cnt)[1]
@@ -495,6 +553,7 @@ def compute_classical_shape_descriptors(
         "solidity": solidity,
         "circularity": circularity,
         "extent": extent,
+        "aspect_ratio": aspect_ratio,
     }
 
 
@@ -1879,19 +1938,16 @@ def classify_and_route_leaf(
             petiole_tip_pt = (int(round(float(np.mean(px_idx)))), int(round(float(np.mean(py_idx)))))
 
     fg_u8 = (mask > 0).astype(np.uint8)
-    n_cc, cc_lbls, cc_stats, _ = cv2.connectedComponentsWithStats(fg_u8, connectivity=8)
-    if n_cc > 1:
-        largest_idx = 1 + int(np.argmax(cc_stats[1:, cv2.CC_STAT_AREA]))
-        largest_comp = (cc_lbls == largest_idx).astype(np.uint8)
-        ext_cnts, _ = cv2.findContours(largest_comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        ext_polys = [c.reshape(-1, 2).astype(np.int32) for c in ext_cnts if len(c.reshape(-1, 2)) >= 3]
-        work_mask = np.zeros(mask.shape[:2], dtype=np.uint8)
-        if ext_polys:
-            cv2.fillPoly(work_mask, ext_polys, 255)
-        else:
-            work_mask = largest_comp * 255
+    largest_comp = np.asarray(_largest_component(fg_u8) > 0, dtype=np.uint8)
+    if not np.any(largest_comp):
+        largest_comp = fg_u8
+    ext_cnts, _ = cv2.findContours(largest_comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    ext_polys = [c.reshape(-1, 2).astype(np.int32) for c in ext_cnts if len(c.reshape(-1, 2)) >= 3]
+    work_mask = np.zeros(mask.shape[:2], dtype=np.uint8)
+    if ext_polys:
+        cv2.fillPoly(work_mask, ext_polys, 255)
     else:
-        work_mask = (mask > 0).astype(np.uint8) * 255
+        work_mask = largest_comp * 255
 
     hole_filled = False
     hole_mask_area_px = 0
@@ -1905,28 +1961,33 @@ def classify_and_route_leaf(
         min_area_px = 64
         hole_u8 = (hole_mask > 0).astype(np.uint8)
         hole_mask_area_px = int(np.count_nonzero(hole_u8))
-        n_hc, hc_lbls, hc_stats, _ = cv2.connectedComponentsWithStats(hole_u8, connectivity=8)
+        raw_h_comps = _components(hole_u8, min_area=min_area_px)
         qualifying_holes = np.zeros(work_mask.shape[:2], dtype=np.uint8)
         hole_polys: List[np.ndarray] = []
-        for hid in range(1, n_hc):
-            if int(hc_stats[hid, cv2.CC_STAT_AREA]) >= min_area_px:
-                h_comp = (hc_lbls == hid).astype(np.uint8)
-                h_cnts, _ = cv2.findContours(h_comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                for hc in h_cnts:
-                    pts_h = hc.reshape(-1, 2).astype(np.int32)
-                    if len(pts_h) >= 3:
-                        hole_polys.append(pts_h)
+        if isinstance(raw_h_comps, np.ndarray):
+            h_list = [raw_h_comps > 0] if np.any(raw_h_comps > 0) else []
+        elif isinstance(raw_h_comps, (list, tuple)):
+            h_list = [np.asarray(hc > 0, dtype=np.uint8) for hc in raw_h_comps if np.any(hc)]
+        else:
+            h_list = []
+        for h_comp in h_list:
+            h_cnts, _ = cv2.findContours(
+                np.asarray(h_comp > 0, dtype=np.uint8),
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+            for hc in h_cnts:
+                pts_h = hc.reshape(-1, 2).astype(np.int32)
+                if len(pts_h) >= 3:
+                    hole_polys.append(pts_h)
         if hole_polys:
             cv2.fillPoly(qualifying_holes, hole_polys, 255)
             work_mask[qualifying_holes > 0] = 0
 
     if int(np.count_nonzero(work_mask)) > 0:
-        n_out, out_lbls, out_stats, _ = cv2.connectedComponentsWithStats(
-            (work_mask > 0).astype(np.uint8), connectivity=8
-        )
-        if n_out > 2:
-            best_out = 1 + int(np.argmax(out_stats[1:, cv2.CC_STAT_AREA]))
-            work_mask = np.where(out_lbls == best_out, 255, 0).astype(np.uint8)
+        out_comp = np.asarray(_largest_component((work_mask > 0).astype(np.uint8)) > 0, dtype=np.uint8)
+        if np.any(out_comp):
+            work_mask = out_comp * 255
         mask = (work_mask > 0).astype(np.uint8) * 255
 
     trace_kp = _extract_lm3_midvein_trace(keypoints_31, min_points=3, min_mean_conf=0.50)

@@ -1179,12 +1179,19 @@ def record_voucher_segmentation_transaction(
             _to_str(r.get("contour_path")),
             len(xy_pts),
             contour_json,
+            _to_str(r.get("leaf_zone")) or "basal",
+            _to_float(r.get("leaf_zone_confidence")),
+            _to_float(r.get("dist_from_crown_norm")),
+            _to_float(r.get("cy_rel_plant_bbox")),
+            _to_float(r.get("effective_min_blade_area_cm2")),
         ))
 
     if extracted_records and not leaf_rows:
         # All extracted records lacked readable contours
         qc_status = "FAILED_QC"
         fail_reason = fail_reason or "MISSING_CONTOUR_COORDINATES"
+
+    _ensure_dynamic_table_migrated(conn, "extracted_leaves")
 
     def _apply_sql() -> None:
         conn.execute(
@@ -1243,8 +1250,10 @@ def record_voucher_segmentation_transaction(
                     midrib_angle_deg, petiole_length_px, petiole_length_mm,
                     blade_length_px, blade_length_mm, petiole_to_blade_ratio,
                     pixels_per_mm, is_calibrated_mm,
-                    mask_path, crop_path, contour_path, contour_n_pts, contour_xy_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    mask_path, crop_path, contour_path, contour_n_pts, contour_xy_json,
+                    leaf_zone, leaf_zone_confidence, dist_from_crown_norm,
+                    cy_rel_plant_bbox, effective_min_blade_area_cm2
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 leaf_rows,
             )
@@ -1277,6 +1286,7 @@ def load_step02_records_from_db(
     if not cats:
         return extracted_by_cat, failed_by_cat, repro_by_cat, pheno_by_cat
 
+    _ensure_dynamic_table_migrated(conn, "extracted_leaves")
     chunk_size = 500
     for i in range(0, len(cats), chunk_size):
         chunk = cats[i : i + chunk_size]
@@ -1292,6 +1302,8 @@ def load_step02_records_from_db(
                 COALESCE(el.tier_assignment, el.assigned_tier) AS tier_assignment,
                 el.ucs_score, el.midrib_angle_deg, el.pixels_per_mm, el.is_calibrated_mm,
                 el.mask_path,
+                el.leaf_zone, el.leaf_zone_confidence, el.dist_from_crown_norm,
+                el.cy_rel_plant_bbox, el.effective_min_blade_area_cm2,
                 COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm,
                 COALESCE(el.blade_length_mm, pi.blade_length_mm) AS blade_length_mm,
                 COALESCE(el.petiole_to_blade_ratio, pi.petiole_to_blade_ratio) AS petiole_to_blade_ratio,
@@ -1761,9 +1773,10 @@ _LEAF_EFA_INT_COLS: Tuple[str, ...] = (
     "efd_harmonic_opt",
     "efd_k95_pcs",
 )
-_LEAF_EFA_STR_COLS: Tuple[str, ...] = ("assigned_tier",)
+_LEAF_EFA_STR_COLS: Tuple[str, ...] = ("assigned_tier", "leaf_zone")
 _LEAF_EFA_FLOAT_COLS: Tuple[str, ...] = (
     "solidity",
+    "dissection_index",
     "ucs_score",
     "aspect_ratio",
     "area_px",
@@ -1771,6 +1784,9 @@ _LEAF_EFA_FLOAT_COLS: Tuple[str, ...] = (
     "petiole_length_mm",
     "blade_length_mm",
     "petiole_to_blade_ratio",
+    "leaf_zone_confidence",
+    "dist_from_crown_norm",
+    "cy_rel_plant_bbox",
     *HARMONIC_COLS,
     "sym_var",
     "asym_var",
@@ -1856,6 +1872,7 @@ _OTU_MORPH_INT_COLS: Tuple[str, ...] = (
     "efd_harmonic_opt",
     "efd_k95_pcs",
     "basal_leaf_count",
+    "cauline_leaf_count",
 )
 _OTU_MORPH_STR_COLS: Tuple[str, ...] = (
     "assigned_tier",
@@ -1879,6 +1896,16 @@ _OTU_MORPH_FLOAT_COLS: Tuple[str, ...] = (
     "dissection_index",
     "q25_solidity",
     "dissected_leaf_fraction",
+    "cauline_solidity_med",
+    "cauline_dissection_index_med",
+    "cauline_aspect_ratio_med",
+    "cauline_blade_length_mm",
+    "basal_vs_cauline_length_ratio",
+    "basal_vs_cauline_solidity_delta",
+    "heteroblasty_efa_distance",
+    "Cauline_PC1",
+    "Cauline_PC2",
+    "Cauline_PC3",
     "ucs_score",
     "aspect_ratio",
     "area_px",
