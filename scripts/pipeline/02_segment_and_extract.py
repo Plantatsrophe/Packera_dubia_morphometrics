@@ -904,19 +904,35 @@ class SegmentAndExtractPipeline:
         leaf_detections: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int, Tuple[int, int], Tuple[int, int], bool, Optional[Dict[str, Any]], float, int]] = []
 
         if stage1_detections:
+            all_crop_pose_preds: List[Optional[Any]] = []
             if precomputed_s2_payload is not None:
-                (
-                    candidate_s1_crops,
-                    capitulum_detections,
-                    root_detections,
-                    upper_cauline_pts,
-                    rosette_bbox_fallback_used,
-                    _rej_lflt,
-                    s1_is_calibrated_mm,
-                    s1_px_per_cm,
-                    s1_eff_min_cm2,
-                    all_crop_preds,
-                ) = precomputed_s2_payload
+                if len(precomputed_s2_payload) >= 11:
+                    (
+                        candidate_s1_crops,
+                        capitulum_detections,
+                        root_detections,
+                        upper_cauline_pts,
+                        rosette_bbox_fallback_used,
+                        _rej_lflt,
+                        s1_is_calibrated_mm,
+                        s1_px_per_cm,
+                        s1_eff_min_cm2,
+                        all_crop_preds,
+                        all_crop_pose_preds,
+                    ) = precomputed_s2_payload[:11]
+                else:
+                    (
+                        candidate_s1_crops,
+                        capitulum_detections,
+                        root_detections,
+                        upper_cauline_pts,
+                        rosette_bbox_fallback_used,
+                        _rej_lflt,
+                        s1_is_calibrated_mm,
+                        s1_px_per_cm,
+                        s1_eff_min_cm2,
+                        all_crop_preds,
+                    ) = precomputed_s2_payload[:10]
                 _telem_deltas["rejected_leaflet_class"] += int(_rej_lflt)
             else:
                 (
@@ -941,6 +957,51 @@ class SegmentAndExtractPipeline:
                     if candidate_s1_crops
                     else []
                 )
+                if (
+                    candidate_s1_crops
+                    and all_crop_preds
+                    and getattr(self, "pose_engine", None) is not None
+                    and getattr(self.pose_engine, "model", None) is not None
+                    and "predict_landmarks" not in getattr(self.pose_engine, "__dict__", {})
+                    and hasattr(self.pose_engine, "predict_batch")
+                ):
+                    all_crop_pose_preds = [None] * len(candidate_s1_crops)
+                    p_idxs: List[int] = []
+                    p_crops: List[np.ndarray] = []
+                    p_lams: List[Optional[np.ndarray]] = []
+                    p_pets: List[Optional[np.ndarray]] = []
+                    for idx_c, ((_b, _s, _c, c_bgr, _cb), c_preds) in enumerate(zip(candidate_s1_crops, all_crop_preds)):
+                        if not c_preds:
+                            continue
+                        b_lm: Optional[np.ndarray] = None
+                        b_val: float = -1.0
+                        b_pm: Optional[np.ndarray] = None
+                        b_psc: float = -1.0
+                        for _pb, pm_u8, p_sc, p_cls in c_preds:
+                            if int(p_cls) == 0:
+                                fg_a = int(np.count_nonzero(pm_u8))
+                                if fg_a > 0 and float(fg_a) * float(p_sc) > b_val:
+                                    b_val = float(fg_a) * float(p_sc)
+                                    b_lm = pm_u8
+                            elif int(p_cls) == 1 and float(p_sc) > b_psc and np.any(pm_u8 > 0):
+                                b_psc = float(p_sc)
+                                b_pm = pm_u8
+                        if b_lm is not None:
+                            p_idxs.append(idx_c)
+                            p_crops.append(c_bgr)
+                            p_lams.append(b_lm)
+                            p_pets.append(b_pm)
+                    if p_crops:
+                        for idx_c, p_res in zip(
+                            p_idxs,
+                            self.pose_engine.predict_batch(
+                                p_crops,
+                                lamina_masks=p_lams,
+                                petiole_masks=p_pets,
+                                batch_size=max(8, self.stage2_batch_size),
+                            ),
+                        ):
+                            all_crop_pose_preds[idx_c] = p_res
 
             def _reproject_crop_mask_to_local_win(
                 cmask: Optional[np.ndarray],
@@ -987,7 +1048,7 @@ class SegmentAndExtractPipeline:
 
             if not self.enable_geometric_qc:
                 # Stage 2 LeafMachine3 YOLO26x-seg (`0: Leaf`, `1: Petiole`, `2: Hole`) + YOLO26x-pose (`keypoints_31`)
-                for (s1_bbox, s1_score, s1_cls, crop_bgr, crop_box), crop_preds in zip(candidate_s1_crops, all_crop_preds):
+                for crop_idx_s2, ((s1_bbox, s1_score, s1_cls, crop_bgr, crop_box), crop_preds) in enumerate(zip(candidate_s1_crops, all_crop_preds)):
                     if not crop_preds:
                         continue
 
@@ -1036,19 +1097,13 @@ class SegmentAndExtractPipeline:
                         if int(np.count_nonzero(hole_union)) > 0:
                             best_hole_mask = hole_union
 
-                    cy0, cx0, cy1, cx1 = crop_box
-                    crop_spec_mask: Optional[np.ndarray] = None
-                    if cy1 > cy0 and cx1 > cx0 and (
-                        len(leaf_cands) > 1
-                        or cv2.connectedComponents((best_mask > 0).astype(np.uint8), connectivity=8)[0] > 2
-                    ):
-                        full_spec_m = _get_specimen_paper_cleaned_mask()
-                        if full_spec_m is not None:
-                            crop_spec_mask = full_spec_m[cy0:cy1, cx0:cx1]
-
                     keypoints_31_crop: Optional[Dict[str, Tuple[float, float, float]]] = None
                     petiole_width_px_crop: Optional[float] = None
-                    if getattr(self, "pose_engine", None) is not None and (
+                    pre_pose_crop = all_crop_pose_preds[crop_idx_s2] if crop_idx_s2 < len(all_crop_pose_preds) else None
+                    if pre_pose_crop is not None:
+                        keypoints_31_crop = getattr(pre_pose_crop, "keypoints_31", None) or None
+                        petiole_width_px_crop = getattr(pre_pose_crop, "petiole_width_px", None)
+                    elif getattr(self, "pose_engine", None) is not None and (
                         getattr(self.pose_engine, "model", None) is not None
                         or "predict_landmarks" in getattr(self.pose_engine, "__dict__", {})
                     ):
@@ -1060,6 +1115,16 @@ class SegmentAndExtractPipeline:
                             petiole_width_px_crop = pose_res.petiole_width_px
                         except Exception:
                             keypoints_31_crop = None
+
+                    cy0, cx0, cy1, cx1 = crop_box
+                    crop_spec_mask: Optional[np.ndarray] = None
+                    if cy1 > cy0 and cx1 > cx0 and (
+                        cv2.connectedComponents((best_mask > 0).astype(np.uint8), connectivity=8)[0] > 2
+                        or (len(leaf_cands) > 1 and best_petiole_mask is None and not keypoints_31_crop)
+                    ):
+                        full_spec_m = _get_specimen_paper_cleaned_mask()
+                        if full_spec_m is not None:
+                            crop_spec_mask = full_spec_m[cy0:cy1, cx0:cx1]
 
                     try:
                         m_raw = _merge_and_bridge_dissected_crop_mask(
@@ -1154,7 +1219,7 @@ class SegmentAndExtractPipeline:
                         fg_area,
                     ))
             else:
-                for (s1_bbox, s1_score, s1_cls, crop_bgr, crop_box), crop_preds in zip(candidate_s1_crops, all_crop_preds):
+                for crop_idx_qc, ((s1_bbox, s1_score, s1_cls, crop_bgr, crop_box), crop_preds) in enumerate(zip(candidate_s1_crops, all_crop_preds)):
                     if not crop_preds:
                         continue
 
@@ -1201,19 +1266,13 @@ class SegmentAndExtractPipeline:
                         if int(np.count_nonzero(hole_union_qc)) > 0:
                             best_hole_qc = hole_union_qc
 
-                    cy0, cx0, cy1, cx1 = crop_box
-                    crop_spec_qc: Optional[np.ndarray] = None
-                    if cy1 > cy0 and cx1 > cx0 and (
-                        len(blade_candidates) > 1
-                        or cv2.connectedComponents((best_mask > 0).astype(np.uint8), connectivity=8)[0] > 2
-                    ):
-                        full_spec_qc = _get_specimen_paper_cleaned_mask()
-                        if full_spec_qc is not None:
-                            crop_spec_qc = full_spec_qc[cy0:cy1, cx0:cx1]
-
                     keypoints_31_qc: Optional[Dict[str, Tuple[float, float, float]]] = None
                     petiole_width_px_qc: Optional[float] = None
-                    if getattr(self, "pose_engine", None) is not None and (
+                    pre_pose_qc = all_crop_pose_preds[crop_idx_qc] if crop_idx_qc < len(all_crop_pose_preds) else None
+                    if pre_pose_qc is not None:
+                        keypoints_31_qc = getattr(pre_pose_qc, "keypoints_31", None) or None
+                        petiole_width_px_qc = getattr(pre_pose_qc, "petiole_width_px", None)
+                    elif getattr(self, "pose_engine", None) is not None and (
                         getattr(self.pose_engine, "model", None) is not None
                         or "predict_landmarks" in getattr(self.pose_engine, "__dict__", {})
                     ):
@@ -1225,6 +1284,16 @@ class SegmentAndExtractPipeline:
                             petiole_width_px_qc = pose_res_qc.petiole_width_px
                         except Exception:
                             keypoints_31_qc = None
+
+                    cy0, cx0, cy1, cx1 = crop_box
+                    crop_spec_qc: Optional[np.ndarray] = None
+                    if cy1 > cy0 and cx1 > cx0 and (
+                        cv2.connectedComponents((best_mask > 0).astype(np.uint8), connectivity=8)[0] > 2
+                        or (len(blade_candidates) > 1 and best_petiole_qc is None and not keypoints_31_qc)
+                    ):
+                        full_spec_qc = _get_specimen_paper_cleaned_mask()
+                        if full_spec_qc is not None:
+                            crop_spec_qc = full_spec_qc[cy0:cy1, cx0:cx1]
 
                     qc_leaf_cands = [(c[1], c[0], c[2], c[3]) for c in blade_candidates]
                     try:
@@ -2921,14 +2990,14 @@ class SegmentAndExtractPipeline:
                         prep_workers = 1
                         post_workers = 1
                     else:
-                        prefetch_workers = min(12, max(1, min(t_val, max(2, t_val // 3))))
-                        prep_workers = min(12, max(1, min(t_val, max(2, t_val // 3))))
-                        post_workers = min(16, max(1, min(t_val, max(2, t_val // 2))))
+                        prefetch_workers = min(16, max(1, min(t_val, max(4, t_val // 2))))
+                        prep_workers = min(16, max(1, min(t_val, max(4, t_val // 2))))
+                        post_workers = min(24, max(1, t_val))
                 else:
                     n_cpu = os.cpu_count() or 8
-                    prefetch_workers = min(12, max(4, n_cpu // 5))
-                    prep_workers = min(12, max(4, n_cpu // 5))
-                    post_workers = min(16, max(4, n_cpu // 4))
+                    prefetch_workers = min(16, max(4, n_cpu // 2))
+                    prep_workers = min(16, max(4, n_cpu // 2))
+                    post_workers = min(24, max(4, (n_cpu * 3) // 4))
                 wave_size = max(1, int(self.stage1_wave_size))
                 prefetch_window = max(wave_size * 2, prefetch_workers * 2)
 
@@ -3185,11 +3254,59 @@ class SegmentAndExtractPipeline:
                             else []
                         )
 
+                        flat_pose_preds: List[Optional[Any]] = [None] * len(flat_crops)
+                        if (
+                            flat_crops
+                            and flat_preds
+                            and getattr(self, "pose_engine", None) is not None
+                            and getattr(self.pose_engine, "model", None) is not None
+                            and "predict_landmarks" not in getattr(self.pose_engine, "__dict__", {})
+                            and hasattr(self.pose_engine, "predict_batch")
+                        ):
+                            pose_indices: List[int] = []
+                            pose_crops: List[np.ndarray] = []
+                            pose_laminas: List[Optional[np.ndarray]] = []
+                            pose_petioles: List[Optional[np.ndarray]] = []
+                            for idx_f, (c_bgr, c_preds) in enumerate(zip(flat_crops, flat_preds)):
+                                if not c_preds:
+                                    continue
+                                best_lm: Optional[np.ndarray] = None
+                                best_lm_val: float = -1.0
+                                best_pm: Optional[np.ndarray] = None
+                                best_pm_sc: float = -1.0
+                                for _bb, pm_u8, p_sc, p_cls in c_preds:
+                                    if int(p_cls) == 0:
+                                        fg_c = int(np.count_nonzero(pm_u8))
+                                        if fg_c > 0:
+                                            val_c = float(fg_c) * float(p_sc)
+                                            if val_c > best_lm_val:
+                                                best_lm_val = val_c
+                                                best_lm = pm_u8
+                                    elif int(p_cls) == 1 and float(p_sc) > best_pm_sc:
+                                        if np.any(pm_u8 > 0):
+                                            best_pm_sc = float(p_sc)
+                                            best_pm = pm_u8
+                                if best_lm is not None:
+                                    pose_indices.append(idx_f)
+                                    pose_crops.append(c_bgr)
+                                    pose_laminas.append(best_lm)
+                                    pose_petioles.append(best_pm)
+                            if pose_crops:
+                                pose_batch_out = self.pose_engine.predict_batch(
+                                    pose_crops,
+                                    lamina_masks=pose_laminas,
+                                    petiole_masks=pose_petioles,
+                                    batch_size=max(8, self.stage2_batch_size),
+                                )
+                                for idx_f, p_res in zip(pose_indices, pose_batch_out):
+                                    flat_pose_preds[idx_f] = p_res
+
                         s2_payload_by_local: Dict[int, Tuple[Any, ...]] = {}
                         for loc_i, s_idx, e_idx in slice_ranges:
                             unp = unpacked_by_local[loc_i]
                             v_preds = list(flat_preds[s_idx:e_idx]) if e_idx > s_idx else []
-                            s2_payload_by_local[loc_i] = (*unp, v_preds)
+                            v_pose_preds = list(flat_pose_preds[s_idx:e_idx]) if e_idx > s_idx else []
+                            s2_payload_by_local[loc_i] = (*unp, v_preds, v_pose_preds)
 
                         ss_payload_by_local: Dict[int, List[Any]] = {}
                         if ss_Fallback_locals:
@@ -3224,7 +3341,7 @@ class SegmentAndExtractPipeline:
                             wave_post_tasks.append((a_idx, cat_num, raw_img_path, fut_post))
 
                         in_flight_waves.append(wave_post_tasks)
-                        if len(in_flight_waves) >= 2:
+                        if len(in_flight_waves) >= 3:
                             _retire_oldest_wave()
 
                     while in_flight_waves:

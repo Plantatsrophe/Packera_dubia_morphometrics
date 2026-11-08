@@ -729,7 +729,7 @@ class LM3PlantDetector:
             work_img = cv2.resize(image_bgr, (work_w, work_h), interpolation=cv2.INTER_AREA)
         else:
             work_img = image_bgr
-        lb_bgr, _, _ = _letterbox_bgr(work_img, self.img_size)
+        lb_bgr, _, _ = _letterbox_bgr(work_img, self.img_size, auto=False)
         return lb_bgr
 
     def _decode_yolo26x_det_output(
@@ -937,13 +937,14 @@ class LM3PlantDetector:
             if (
                 precomputed_letterbox is not None
                 and precomputed_letterbox.ndim == 3
-                and max(precomputed_letterbox.shape[:2]) == self.img_size
+                and precomputed_letterbox.shape[:2] == (self.img_size, self.img_size)
             ):
                 lb_bgr = precomputed_letterbox
                 r, pad_xy = _letterbox_gain_pad_hw(lb_bgr.shape[:2], (work_h, work_w))
             else:
-                assert work_img is not None
-                lb_bgr, r, pad_xy = _letterbox_bgr(work_img, self.img_size)
+                if work_img is None:
+                    work_img = cv2.resize(image_bgr, (work_w, work_h), interpolation=cv2.INTER_AREA)
+                lb_bgr, r, pad_xy = _letterbox_bgr(work_img, self.img_size, auto=False)
 
             inp_tensor = _bgr_to_nchw_float32(lb_bgr)
             input_name = active_sess.get_inputs()[0].name
@@ -1005,13 +1006,89 @@ class LM3PlantDetector:
         use_cache: bool = False,
         max_batch_size: int = 16,
     ) -> List[List[Tuple[Tuple[int, int, int, int], float, int]]]:
-        """Runs Stage 1 plant organ detection across a wave of herbarium sheets."""
+        """Runs Stage 1 plant organ detection across a wave of herbarium sheets using batched GPU tensors."""
         if not items:
             return []
-        return [
-            self.predict(img, catalog_number=cat, use_cache=use_cache, precomputed_letterbox=lb)
-            for img, cat, lb in items
-        ]
+        active_sess = self.session if self.session is not None else self.model
+        if (
+            active_sess is None
+            or "detect" in self.__dict__
+            or "predict" in self.__dict__
+            or getattr(self.detect, "__func__", None) is not LM3PlantDetector.detect
+            or getattr(self.predict, "__func__", None) is not LM3PlantDetector.predict
+            or len(items) <= 1
+        ):
+            return [
+                self.predict(img, catalog_number=cat, use_cache=use_cache, precomputed_letterbox=lb)
+                for img, cat, lb in items
+            ]
+
+        try:
+            input_name = active_sess.get_inputs()[0].name
+            sub_bs = min(4, max(1, int(max_batch_size)))
+            all_outs: List[List[Tuple[Tuple[int, int, int, int], float, int]]] = [[] for _ in items]
+            valid_indices: List[int] = []
+            valid_chw_list: List[np.ndarray] = []
+            valid_meta: List[Tuple[float, Tuple[float, float], Tuple[int, int], float, Tuple[int, int]]] = []
+
+            for idx, (img_bgr, _cat, lb_pre) in enumerate(items):
+                if img_bgr is None or img_bgr.size == 0:
+                    continue
+                sh, sw = img_bgr.shape[:2]
+                w_scale = compute_work_scale((sh, sw), max_working_dim=self.max_working_dim)
+                self.last_work_scale = w_scale
+                if w_scale < 1.0:
+                    work_w = max(1, int(round(sw * w_scale)))
+                    work_h = max(1, int(round(sh * w_scale)))
+                else:
+                    work_h, work_w = sh, sw
+                if (
+                    lb_pre is not None
+                    and lb_pre.ndim == 3
+                    and lb_pre.shape[:2] == (self.img_size, self.img_size)
+                ):
+                    lb_bgr = lb_pre
+                    r, pad_xy = _letterbox_gain_pad_hw(lb_bgr.shape[:2], (work_h, work_w))
+                else:
+                    work_img = (
+                        cv2.resize(img_bgr, (work_w, work_h), interpolation=cv2.INTER_AREA)
+                        if w_scale < 1.0
+                        else img_bgr
+                    )
+                    lb_bgr, r, pad_xy = _letterbox_bgr(work_img, self.img_size, auto=False)
+                rgb = cv2.cvtColor(lb_bgr, cv2.COLOR_BGR2RGB)
+                chw_f32 = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1)), dtype=np.float32)
+                chw_f32 *= np.float32(1.0) / np.float32(255.0)
+                valid_indices.append(idx)
+                valid_chw_list.append(chw_f32)
+                valid_meta.append((r, pad_xy, (work_h, work_w), w_scale, (sh, sw)))
+
+            for start_i in range(0, len(valid_indices), sub_bs):
+                end_i = min(len(valid_indices), start_i + sub_bs)
+                batch_tensor = np.stack(valid_chw_list[start_i:end_i], axis=0)
+                with _ONNX_GPU_LOCK:
+                    raw_outs = active_sess.run(None, {input_name: batch_tensor})
+                if not raw_outs:
+                    continue
+                out0 = np.asarray(raw_outs[0], dtype=np.float32)
+                for b_off, orig_idx in enumerate(valid_indices[start_i:end_i]):
+                    r, pad_xy, work_hw, w_scale, sheet_hw = valid_meta[start_i + b_off]
+                    slice_out = out0[b_off : b_off + 1] if out0.ndim >= 3 else out0
+                    all_outs[orig_idx] = self._decode_yolo26x_det_output(
+                        slice_out,
+                        ratio=r,
+                        pad_xy=pad_xy,
+                        work_shape=work_hw,
+                        work_scale=w_scale,
+                        sheet_shape=sheet_hw,
+                    )
+            return all_outs
+        except Exception as exc:
+            logger.debug(f"LM3PlantDetector batched inference fallback: {exc}")
+            return [
+                self.predict(img, catalog_number=cat, use_cache=use_cache, precomputed_letterbox=lb)
+                for img, cat, lb in items
+            ]
 
 
 # =============================================================================
@@ -1052,10 +1129,30 @@ def apply_llr_hyst_keep_blobs(
     else:
         prob = np.clip(np.nan_to_num(prob, nan=0.0), 0.0, 1.0)
 
-    h, w = prob.shape[:2]
-    if image_bgr is not None and image_bgr.ndim == 3 and image_bgr.shape[:2] == (h, w):
-        bgr_f = image_bgr.astype(np.float32)
-        bg_candidates = prob < max(0.15, float(low_thresh))
+    orig_h, orig_w = prob.shape[:2]
+    max_work_dim = 1024
+    if max(orig_h, orig_w) > max_work_dim:
+        w_scale = float(max_work_dim) / float(max(orig_h, orig_w))
+        h = max(1, int(round(orig_h * w_scale)))
+        w = max(1, int(round(orig_w * w_scale)))
+        prob_work = cv2.resize(prob, (w, h), interpolation=cv2.INTER_AREA)
+        bgr_work = (
+            cv2.resize(image_bgr, (w, h), interpolation=cv2.INTER_AREA)
+            if (image_bgr is not None and image_bgr.ndim == 3 and image_bgr.shape[:2] == (orig_h, orig_w))
+            else None
+        )
+    else:
+        h, w = orig_h, orig_w
+        prob_work = prob
+        bgr_work = (
+            image_bgr
+            if (image_bgr is not None and image_bgr.ndim == 3 and image_bgr.shape[:2] == (orig_h, orig_w))
+            else None
+        )
+
+    if bgr_work is not None:
+        bgr_f = bgr_work.astype(np.float32)
+        bg_candidates = prob_work < max(0.15, float(low_thresh))
         if int(np.count_nonzero(bg_candidates)) >= 32:
             paper_med = np.median(bgr_f[bg_candidates], axis=0)
             paper_std = np.maximum(np.std(bgr_f[bg_candidates], axis=0), 8.0)
@@ -1066,49 +1163,54 @@ def apply_llr_hyst_keep_blobs(
         z_dist = np.sqrt(np.mean(((bgr_f - paper_med) / paper_std) ** 2, axis=2))
         # Log-likelihood ratio adjustment: positive for dark/chromatic plant tissue, negative for bright paper
         llr_shift = np.clip((z_dist - 1.65) * 0.12, -0.22, 0.22)
-        prob = np.clip(prob + np.where(prob > 0.08, llr_shift, 0.0), 0.0, 1.0)
+        prob_work = np.clip(prob_work + np.where(prob_work > 0.08, llr_shift, 0.0), 0.0, 1.0)
 
     hi = float(max(low_thresh, high_thresh))
     lo = float(min(low_thresh, high_thresh))
-    strong = (prob >= hi).astype(np.uint8)
-    weak = (prob >= lo).astype(np.uint8)
+    strong = (prob_work >= hi).astype(np.uint8)
+    weak = (prob_work >= lo).astype(np.uint8)
 
     if int(np.count_nonzero(strong)) == 0:
-        return np.zeros((h, w), dtype=np.uint8)
+        return np.zeros((orig_h, orig_w), dtype=np.uint8)
 
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(weak, connectivity=8)
     if num_labels <= 1:
-        return (strong * 255).astype(np.uint8)
+        cleaned_work = (strong * 255).astype(np.uint8)
+    else:
+        strong_labels = np.unique(labels[strong > 0])
+        strong_labels = strong_labels[strong_labels > 0]
+        if len(strong_labels) == 0:
+            return np.zeros((orig_h, orig_w), dtype=np.uint8)
 
-    strong_labels = np.unique(labels[strong > 0])
-    strong_labels = strong_labels[strong_labels > 0]
-    if len(strong_labels) == 0:
-        return np.zeros((h, w), dtype=np.uint8)
+        eff_min_area = max(
+            1,
+            min(
+                int(round(float(min_blob_area) * ((float(h) * float(w)) / float(max(1, orig_h * orig_w))))),
+                int(0.0005 * h * w),
+            ),
+        )
+        valid_labels = [
+            int(lbl)
+            for lbl in strong_labels
+            if int(stats[int(lbl), cv2.CC_STAT_AREA]) >= eff_min_area
+        ]
+        if not valid_labels:
+            valid_labels = [int(lbl) for lbl in strong_labels]
 
-    eff_min_area = max(1, min(int(min_blob_area), int(0.0005 * h * w)))
-    valid_labels = [
-        int(lbl)
-        for lbl in strong_labels
-        if int(stats[int(lbl), cv2.CC_STAT_AREA]) >= eff_min_area
-    ]
-    if not valid_labels:
-        valid_labels = [int(lbl) for lbl in strong_labels]
+        cleaned_work = np.isin(labels, valid_labels).astype(np.uint8) * 255
+        if bgr_work is not None and int(np.count_nonzero(cleaned_work)) >= 64:
+            try:
+                from leafmachine3.core.paper_removal import paperclean_llr_hyst_keepblobs
+                lab_res = paperclean_llr_hyst_keepblobs(bgr_work, cleaned_work)
+                lab_cleaned = lab_res[0] if isinstance(lab_res, tuple) else lab_res
+                if lab_cleaned is not None and int(np.count_nonzero(lab_cleaned)) >= int(0.35 * np.count_nonzero(cleaned_work)):
+                    cleaned_work = (lab_cleaned > 0).astype(np.uint8) * 255
+            except Exception:
+                pass
 
-    cleaned = np.isin(labels, valid_labels).astype(np.uint8) * 255
-    if (
-        image_bgr is not None
-        and image_bgr.ndim == 3
-        and image_bgr.shape[:2] == (h, w)
-        and int(np.count_nonzero(cleaned)) >= 100
-    ):
-        try:
-            from leafmachine3.core.paper_removal import paperclean_llr_hyst_keepblobs
-            lab_cleaned = paperclean_llr_hyst_keepblobs(image_bgr, cleaned)
-            if lab_cleaned is not None and int(np.count_nonzero(lab_cleaned)) >= int(0.35 * np.count_nonzero(cleaned)):
-                cleaned = (lab_cleaned > 0).astype(np.uint8) * 255
-        except Exception:
-            pass
-    return cleaned
+    if (h, w) != (orig_h, orig_w):
+        return cv2.resize(cleaned_work, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+    return cleaned_work
 
 
 class LM3SpecimenSegmenter:
@@ -1269,13 +1371,13 @@ class LM3LeafSegmenterEngine:
 
     def prepare_transformed_crop(self, image_bgr: np.ndarray) -> Optional[Tuple[np.ndarray, int, int]]:
         """
-        Thread-safe CPU helper that precomputes the 1024 px dynamic stride-32 letterbox uint8 CHW crop
+        Thread-safe CPU helper that precomputes the 1024 px square letterbox uint8 CHW crop
         on worker threads for batched inference.
         """
         if (self.session is None and self.model is None) or image_bgr is None or image_bgr.size == 0:
             return None
         h, w = image_bgr.shape[:2]
-        lb_bgr, _, _ = _letterbox_bgr(image_bgr, self.img_size)
+        lb_bgr, _, _ = _letterbox_bgr(image_bgr, self.img_size, auto=False)
         rgb = cv2.cvtColor(lb_bgr, cv2.COLOR_BGR2RGB)
         chw_u8 = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1)), dtype=np.uint8)
         return chw_u8, h, w
@@ -1431,7 +1533,10 @@ class LM3LeafSegmenterEngine:
             return []
 
         try:
-            if pretransformed is not None:
+            if (
+                pretransformed is not None
+                and pretransformed[0].shape[1:] == (self.img_size, self.img_size)
+            ):
                 chw_u8, crop_h, crop_w = pretransformed
                 lb_h, lb_w = int(chw_u8.shape[1]), int(chw_u8.shape[2])
                 r, pad_xy = _letterbox_gain_pad_hw((lb_h, lb_w), (crop_h, crop_w))
@@ -1441,7 +1546,7 @@ class LM3LeafSegmenterEngine:
                 lb_shape = (lb_h, lb_w)
             else:
                 crop_h, crop_w = image_bgr.shape[:2]
-                lb_bgr, r, pad_xy = _letterbox_bgr(image_bgr, self.img_size)
+                lb_bgr, r, pad_xy = _letterbox_bgr(image_bgr, self.img_size, auto=False)
                 inp_tensor = _bgr_to_nchw_float32(lb_bgr)
                 lb_shape = (int(lb_bgr.shape[0]), int(lb_bgr.shape[1]))
 
@@ -1467,14 +1572,16 @@ class LM3LeafSegmenterEngine:
         pretransformed: Optional[Sequence[Optional[Tuple[np.ndarray, int, int]]]] = None,
     ) -> List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]]:
         """
-        Runs Stage 2 LeafMachine3 YOLO26x-seg inference across candidate leaf crops.
+        Runs Stage 2 LeafMachine3 YOLO26x-seg inference across candidate leaf crops using
+        true batched GPU tensors `(B, 3, 1024, 1024)`.
         Automatically delegates to `self.predict(img)` when `predict` is mocked in unit tests.
         """
         if not images_bgr:
             return []
         has_pre = pretransformed is not None and len(pretransformed) == len(images_bgr)
+        active_sess = self.session if self.session is not None else self.model
         if (
-            (self.session is None and self.model is None)
+            active_sess is None
             or "predict" in self.__dict__
             or getattr(self.predict, "__func__", None) is not LM3LeafSegmenterEngine.predict
             or len(images_bgr) <= 1
@@ -1488,11 +1595,69 @@ class LM3LeafSegmenterEngine:
                 return [self.predict(images_bgr[0], pretransformed=pretransformed[0])]  # type: ignore[index]
             return [self.predict(img) for img in images_bgr]
 
-        out: List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]] = []
-        for idx, img in enumerate(images_bgr):
-            pre_i = pretransformed[idx] if has_pre else None  # type: ignore[index]
-            out.append(self.predict(img, pretransformed=pre_i))
-        return out
+        try:
+            input_name = active_sess.get_inputs()[0].name
+            sub_bs = min(4, max(1, int(batch_size)))
+            out: List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]] = [[] for _ in images_bgr]
+            valid_indices: List[int] = []
+            valid_chw_list: List[np.ndarray] = []
+            valid_meta: List[Tuple[Tuple[int, int], float, Tuple[float, float], Tuple[int, int]]] = []
+
+            for idx, img in enumerate(images_bgr):
+                if img is None or img.size == 0:
+                    continue
+                pre_i = pretransformed[idx] if has_pre else None  # type: ignore[index]
+                if (
+                    pre_i is not None
+                    and pre_i[0].shape[1:] == (self.img_size, self.img_size)
+                ):
+                    chw_u8, crop_h, crop_w = pre_i
+                    lb_h, lb_w = int(chw_u8.shape[1]), int(chw_u8.shape[2])
+                    r, pad_xy = _letterbox_gain_pad_hw((lb_h, lb_w), (crop_h, crop_w))
+                    inp_f32 = np.ascontiguousarray(chw_u8, dtype=np.float32)
+                    inp_f32 *= np.float32(1.0) / np.float32(255.0)
+                    lb_shape = (lb_h, lb_w)
+                else:
+                    crop_h, crop_w = img.shape[:2]
+                    lb_bgr, r, pad_xy = _letterbox_bgr(img, self.img_size, auto=False)
+                    rgb = cv2.cvtColor(lb_bgr, cv2.COLOR_BGR2RGB)
+                    inp_f32 = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1)), dtype=np.float32)
+                    inp_f32 *= np.float32(1.0) / np.float32(255.0)
+                    lb_shape = (int(lb_bgr.shape[0]), int(lb_bgr.shape[1]))
+
+                valid_indices.append(idx)
+                valid_chw_list.append(inp_f32)
+                valid_meta.append(((crop_h, crop_w), r, pad_xy, lb_shape))
+
+            for start_i in range(0, len(valid_indices), sub_bs):
+                end_i = min(len(valid_indices), start_i + sub_bs)
+                batch_tensor = np.stack(valid_chw_list[start_i:end_i], axis=0)
+                with _ONNX_GPU_LOCK:
+                    raw_outs = active_sess.run(None, {input_name: batch_tensor})
+                if not raw_outs:
+                    continue
+                for b_off, orig_idx in enumerate(valid_indices[start_i:end_i]):
+                    crop_hw, r, pad_xy, lb_shape = valid_meta[start_i + b_off]
+                    item_outs = [
+                        ro[b_off : b_off + 1] if np.asarray(ro).ndim >= 3 else ro
+                        for ro in raw_outs
+                    ]
+                    out[orig_idx] = self._decode_yolo26x_seg_outputs(
+                        item_outs,
+                        crop_shape=crop_hw,
+                        ratio=r,
+                        pad_xy=pad_xy,
+                        image_bgr=images_bgr[orig_idx],
+                        letterbox_shape=lb_shape,
+                    )
+            return out
+        except Exception as exc:
+            logger.debug(f"LM3LeafSegmenterEngine batched inference fallback: {exc}")
+            out_fb: List[List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]] = []
+            for idx, img in enumerate(images_bgr):
+                pre_i = pretransformed[idx] if has_pre else None  # type: ignore[index]
+                out_fb.append(self.predict(img, pretransformed=pre_i))
+            return out_fb
 
     def segment_leaf_crop(
         self,
@@ -1881,7 +2046,7 @@ class LM3PoseLandmarkEngine:
                 padded_bgr = cv2.copyMakeBorder(
                     crop_bgr, py, py, px, px, cv2.BORDER_CONSTANT, value=(255, 255, 255)
                 )
-                lb_bgr, r, (dw, dh) = _letterbox_bgr(padded_bgr, self.img_size)
+                lb_bgr, r, (dw, dh) = _letterbox_bgr(padded_bgr, self.img_size, auto=False)
                 inp_tensor = _bgr_to_nchw_float32(lb_bgr)
                 input_name = active_sess.get_inputs()[0].name
                 with _ONNX_GPU_LOCK:
@@ -1920,6 +2085,140 @@ class LM3PoseLandmarkEngine:
             petiole_mask=petiole_mask,
             offset_xy=(ox, oy),
         )
+
+    def predict_batch(
+        self,
+        crops_bgr: Sequence[np.ndarray],
+        lamina_masks: Optional[Sequence[Optional[np.ndarray]]] = None,
+        petiole_masks: Optional[Sequence[Optional[np.ndarray]]] = None,
+        crop_offsets: Optional[Sequence[Tuple[float, float]]] = None,
+        batch_size: int = 8,
+    ) -> List[LM3PoseResult]:
+        """
+        Runs batched 640 px YOLO26x-pose landmark detection across multiple leaf crops on the GPU
+        in `(B, 3, 640, 640)` mini-batches, avoiding per-crop lock acquisition on CPU worker threads.
+        """
+        if not crops_bgr:
+            return []
+        n_items = len(crops_bgr)
+        active_sess = self.session if self.session is not None else self.model
+        if (
+            active_sess is None
+            or "predict_landmarks" in self.__dict__
+            or getattr(self.predict_landmarks, "__func__", None) is not LM3PoseLandmarkEngine.predict_landmarks
+            or n_items <= 1
+        ):
+            return [
+                self.predict_landmarks(
+                    crop_bgr=crops_bgr[i],
+                    lamina_mask=lamina_masks[i] if (lamina_masks and i < len(lamina_masks)) else None,
+                    petiole_mask=petiole_masks[i] if (petiole_masks and i < len(petiole_masks)) else None,
+                    crop_offset=crop_offsets[i] if (crop_offsets and i < len(crop_offsets)) else (0.0, 0.0),
+                )
+                for i in range(n_items)
+            ]
+
+        try:
+            input_name = active_sess.get_inputs()[0].name
+            sub_bs = min(8, max(1, int(batch_size)))
+            pad_f = float(getattr(self, "WHITE_PAD_FRAC", 0.10))
+            results: List[Optional[LM3PoseResult]] = [None] * n_items
+            valid_indices: List[int] = []
+            valid_chw_list: List[np.ndarray] = []
+            valid_meta: List[Tuple[int, int, int, int, float, float, float, float, float]] = []
+
+            for idx, crop_bgr in enumerate(crops_bgr):
+                ox, oy = (
+                    (float(crop_offsets[idx][0]), float(crop_offsets[idx][1]))
+                    if (crop_offsets and idx < len(crop_offsets))
+                    else (0.0, 0.0)
+                )
+                if crop_bgr is None or crop_bgr.size == 0:
+                    results[idx] = self._geometric_fallback_keypoints_31(
+                        crop_bgr=crop_bgr,
+                        lamina_mask=lamina_masks[idx] if (lamina_masks and idx < len(lamina_masks)) else None,
+                        petiole_mask=petiole_masks[idx] if (petiole_masks and idx < len(petiole_masks)) else None,
+                        offset_xy=(ox, oy),
+                    )
+                    continue
+                crop_h, crop_w = crop_bgr.shape[:2]
+                px, py = int(round(crop_w * pad_f)), int(round(crop_h * pad_f))
+                padded_bgr = cv2.copyMakeBorder(
+                    crop_bgr, py, py, px, px, cv2.BORDER_CONSTANT, value=(255, 255, 255)
+                )
+                lb_bgr, r, (dw, dh) = _letterbox_bgr(padded_bgr, self.img_size, auto=False)
+                rgb = cv2.cvtColor(lb_bgr, cv2.COLOR_BGR2RGB)
+                chw_f32 = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1)), dtype=np.float32)
+                chw_f32 *= np.float32(1.0) / np.float32(255.0)
+                valid_indices.append(idx)
+                valid_chw_list.append(chw_f32)
+                valid_meta.append((crop_h, crop_w, px, py, float(r), float(dw), float(dh), ox, oy))
+
+            for start_i in range(0, len(valid_indices), sub_bs):
+                end_i = min(len(valid_indices), start_i + sub_bs)
+                batch_tensor = np.stack(valid_chw_list[start_i:end_i], axis=0)
+                with _ONNX_GPU_LOCK:
+                    raw_outs = active_sess.run(None, {input_name: batch_tensor})
+                if not raw_outs:
+                    continue
+                out0 = np.asarray(raw_outs[0], dtype=np.float32)
+                for b_off, orig_idx in enumerate(valid_indices[start_i:end_i]):
+                    crop_h, crop_w, px, py, r, dw, dh, ox, oy = valid_meta[start_i + b_off]
+                    lm_i = lamina_masks[orig_idx] if (lamina_masks and orig_idx < len(lamina_masks)) else None
+                    pm_i = petiole_masks[orig_idx] if (petiole_masks and orig_idx < len(petiole_masks)) else None
+                    arr = out0[b_off] if out0.ndim >= 3 else out0
+                    if arr.ndim == 2 and arr.shape[0] < arr.shape[1] and arr.shape[0] >= 5 + 3 * 31:
+                        arr = arr.T
+                    if arr.ndim == 2 and arr.shape[0] > 0 and arr.shape[1] >= 5 + 3 * 31:
+                        best_row_idx = int(np.argmax(arr[:, 4]))
+                        best_row = arr[best_row_idx]
+                        if float(best_row[4]) >= self.conf_thres:
+                            kp_offset = 6 if best_row.shape[0] >= 6 + 3 * 31 else 5
+                            kp_flat = best_row[kp_offset : kp_offset + 3 * 31].reshape(31, 3)
+                            inv_r = float(np.float32(1.0) / np.float32(max(float(r), 1e-6)))
+                            kps_out: Dict[str, Tuple[float, float, float]] = {}
+                            for idx_k, kp_name in enumerate(self.KEYPOINT_NAMES):
+                                kx_pad = (float(kp_flat[idx_k, 0]) - dw) * inv_r
+                                ky_pad = (float(kp_flat[idx_k, 1]) - dh) * inv_r
+                                kx = max(0.0, min(float(crop_w), kx_pad - float(px))) + ox
+                                ky = max(0.0, min(float(crop_h), ky_pad - float(py))) + oy
+                                kc = float(np.clip(kp_flat[idx_k, 2], 0.0, 1.0))
+                                kps_out[kp_name] = (round(kx, 2), round(ky, 2), round(kc, 4))
+                            pet_w = self._estimate_petiole_width_px(
+                                kps_out, petiole_mask=pm_i, lamina_mask=lm_i
+                            )
+                            results[orig_idx] = LM3PoseResult(kps_out, petiole_width_px=pet_w)
+
+            out_final: List[LM3PoseResult] = []
+            for idx in range(n_items):
+                if results[idx] is not None:
+                    out_final.append(results[idx])  # type: ignore[arg-type]
+                else:
+                    ox, oy = (
+                        (float(crop_offsets[idx][0]), float(crop_offsets[idx][1]))
+                        if (crop_offsets and idx < len(crop_offsets))
+                        else (0.0, 0.0)
+                    )
+                    out_final.append(
+                        self._geometric_fallback_keypoints_31(
+                            crop_bgr=crops_bgr[idx],
+                            lamina_mask=lamina_masks[idx] if (lamina_masks and idx < len(lamina_masks)) else None,
+                            petiole_mask=petiole_masks[idx] if (petiole_masks and idx < len(petiole_masks)) else None,
+                            offset_xy=(ox, oy),
+                        )
+                    )
+            return out_final
+        except Exception as exc:
+            logger.debug(f"LM3PoseLandmarkEngine batched inference fallback: {exc}")
+            return [
+                self.predict_landmarks(
+                    crop_bgr=crops_bgr[i],
+                    lamina_mask=lamina_masks[i] if (lamina_masks and i < len(lamina_masks)) else None,
+                    petiole_mask=petiole_masks[i] if (petiole_masks and i < len(petiole_masks)) else None,
+                    crop_offset=crop_offsets[i] if (crop_offsets and i < len(crop_offsets)) else (0.0, 0.0),
+                )
+                for i in range(n_items)
+            ]
 
     def predict(
         self,
@@ -2462,16 +2761,19 @@ class LM3ScaleCalibrator:
     ) -> None:
         self.device = device if (device == "cuda" and torch_cuda_available()) else "cpu"
         self.providers = providers
-        self.archival_weights_path, _, _, self.archival_session = _load_onnx_session(
-            weights_path=None,
-            default_model_name=self.ARCHIVAL_MODEL_NAME,
-            device=self.device,
-            providers=providers,
-        )
+        self.archival_weights_path: Optional[Path] = None
+        self.archival_session: Optional[Any] = None
         self.mp_model: Optional[Any] = None
         self.ruler_classifier: Optional[Any] = None
         self.ruler_lattice: Optional[Any] = None
         self._init_lm3_scale_models()
+        if self.ruler_lattice is not None:
+            self.archival_weights_path, _, _, self.archival_session = _load_onnx_session(
+                weights_path=None,
+                default_model_name=self.ARCHIVAL_MODEL_NAME,
+                device=self.device,
+                providers=providers,
+            )
 
     def _init_lm3_scale_models(self) -> None:
         mp_json = LM3_PACKAGE_ROOT / "models" / "mp_conversion_factor" / "model.json"
