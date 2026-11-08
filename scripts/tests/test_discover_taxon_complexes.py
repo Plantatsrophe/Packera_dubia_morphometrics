@@ -18,11 +18,7 @@ import numpy as np
 import pandas as pd
 
 from scripts.core.harvester import standardize_packera_taxon
-from scripts.vision.leaf_geometry_utils import (
-    classify_and_route_leaf,
-    evaluate_leaf_quality,
-    is_botanical_dissection,
-)
+from scripts.vision.leaf_geometry_utils import is_botanical_dissection
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DISCOVERY_R_SCRIPT = REPO_ROOT / "scripts" / "analysis" / "07_discover_taxon_complexes.R"
@@ -406,15 +402,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             is_botanical_dissection(mask, contour=cnt, solidity=solidity),
             f"Expected bipinnatisect silhouette (solidity={solidity:.3f}) to be recognized as botanical dissection.",
         )
-
-        res = evaluate_leaf_quality(mask, contour=cnt)
-        self.assertTrue(res["is_dissected"])
-        self.assertEqual(res["assigned_tier"], "tier1")
-        self.assertIn("Tier 1", res["tier"])
-
-        route_res = classify_and_route_leaf(mask)
-        self.assertTrue(route_res["is_dissected"])
-        self.assertEqual(route_res["assigned_tier"], "tier1")
 
     def test_discover_taxon_complexes_8_species_3_complexes(self):
         """Verify 07_discover_taxon_complexes.R recovers 3 true complexes across 8 species with 100% accuracy."""

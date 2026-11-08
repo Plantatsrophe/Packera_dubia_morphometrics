@@ -102,22 +102,14 @@ from scripts.vision.lm3_data_loader import (
 from scripts.vision.leaf_geometry_utils import (
     _prepare_lamina_mask,
     approximate_petiole_and_scape_metrics,
-    BoundaryContinuityResult,
-    bridge_dissected_rachis_components,
-    check_boundary_tissue_continuity,
-    classify_and_route_leaf,
     cluster_plant_individuals,
     compute_classical_shape_descriptors,
     compute_geometric_metrics,
     compute_sheet_adaptive_min_blade_area_cm2,
-    detect_folded_leaf,
     estimate_rosette_crown_point,
     export_standardized_contour,
     extract_tier1_pristine,
-    extract_tier2_reflected,
     is_botanical_dissection,
-    is_cauline_or_stem_contaminant,
-    is_topologically_connected_mask,
     LeafRoutingResult,
     normalize_assigned_tier,
     TIER_1_DIRECT,
@@ -179,11 +171,8 @@ from scripts.vision.lm3_inference_engines import (
     LM3PlantDetector,
     LM3PoseLandmarkEngine,
     LM3ScaleCalibrator,
-    LM3SpecimenSegmenter,
     _VoucherFinalizeBundle,
     _extract_native_lm3_petiole_anchor,
-    _merge_and_bridge_dissected_crop_mask,
-    apply_llr_hyst_keep_blobs,
     compute_capitulum_metrics,
     compute_leaf_ect_descriptor,
     crop_leaf_bbox_with_padding,
@@ -192,176 +181,6 @@ from scripts.vision.lm3_inference_engines import (
     reproject_crop_mask_to_sheet,
     torch_cuda_available,
 )
-
-
-def _clean_leaf_instance_mounting_paper(
-    inst: DetectedInstance,
-    crop_bgr: Optional[np.ndarray] = None,
-    specimen_paper_cleaned_mask: Optional[np.ndarray] = None,
-) -> None:
-    """
-    Subtracts internal `hole_mask` voids (`report.masks.subtract_holes: true`) and transfers
-    inter-lobe mounting paper pixels inside `inst.mask` into `inst.hole_mask`, opening narrow
-    touching-lobe sinus bridges via `_prepare_lamina_mask`.
-    """
-    if inst.mask is None or inst.mask.size == 0:
-        return
-    mh, mw = inst.mask.shape[:2]
-    lam_u8 = (inst.mask > 0).astype(np.uint8) * 255
-    fg_orig = int(np.count_nonzero(lam_u8))
-    if fg_orig < 32:
-        return
-
-    hole_u8 = (
-        ((inst.hole_mask > 0).astype(np.uint8) * 255)
-        if (inst.hole_mask is not None and isinstance(inst.hole_mask, np.ndarray) and inst.hole_mask.shape[:2] == (mh, mw))
-        else np.zeros((mh, mw), dtype=np.uint8)
-    )
-
-    eff_crop = crop_bgr if crop_bgr is not None else getattr(inst, "crop_bgr", None)
-    paper_cand = np.zeros((mh, mw), dtype=bool)
-
-    if (
-        specimen_paper_cleaned_mask is not None
-        and isinstance(specimen_paper_cleaned_mask, np.ndarray)
-        and specimen_paper_cleaned_mask.shape[:2] == (mh, mw)
-    ):
-        spec_fg = int(np.count_nonzero((specimen_paper_cleaned_mask > 0) & (lam_u8 > 0)))
-        if spec_fg >= int(0.40 * fg_orig):
-            paper_cand |= (lam_u8 > 0) & (specimen_paper_cleaned_mask == 0)
-
-    if (
-        eff_crop is not None
-        and isinstance(eff_crop, np.ndarray)
-        and eff_crop.ndim == 3
-        and eff_crop.shape[:2] == (mh, mw)
-        and float(np.std(eff_crop)) >= 5.0
-    ):
-        cleaned_llr: Optional[np.ndarray] = None
-        try:
-            from leafmachine3.core.paper_removal import paperclean_llr_hyst_keepblobs
-            rgb_crop = cv2.cvtColor(eff_crop, cv2.COLOR_BGR2RGB)
-            res_p = paperclean_llr_hyst_keepblobs(rgb_crop, lam_u8)
-            cleaned_llr = res_p[0] if isinstance(res_p, tuple) else res_p
-        except Exception:
-            cleaned_llr = apply_llr_hyst_keep_blobs((lam_u8 > 0).astype(np.float32), image_bgr=eff_crop, max_work_dim=3200)
-        if cleaned_llr is not None and cleaned_llr.shape[:2] == (mh, mw):
-            llr_fg = int(np.count_nonzero((cleaned_llr > 0) & (lam_u8 > 0)))
-            if llr_fg >= int(0.40 * fg_orig):
-                paper_cand |= (lam_u8 > 0) & (cleaned_llr == 0)
-
-    if np.any(paper_cand):
-        n_pc, pc_lbls, pc_stats, _ = cv2.connectedComponentsWithStats(paper_cand.astype(np.uint8), connectivity=8)
-        for pid_c in range(1, n_pc):
-            c_area = int(pc_stats[pid_c, cv2.CC_STAT_AREA])
-            if c_area >= 16 and c_area <= int(0.55 * fg_orig):
-                c_mask = pc_lbls == pid_c
-                lam_u8[c_mask] = 0
-                hole_u8[c_mask] = 255
-
-    if np.any(hole_u8 > 0):
-        inst.hole_mask = hole_u8
-        if isinstance(inst.trim_meta, dict):
-            inst.trim_meta["hole_mask"] = hole_u8
-        prep_m = _prepare_lamina_mask(lam_u8, petiole_mask=None, hole_mask=hole_u8)
-        if int(np.count_nonzero(prep_m)) >= int(0.35 * fg_orig):
-            lam_u8 = prep_m
-
-    inst.mask = lam_u8
-
-
-def _downscale_crop_for_working_frame(
-    crop_bgr: np.ndarray,
-    sheet_h: int,
-    sheet_w: int,
-) -> Tuple[np.ndarray, float]:
-    """
-    Passes Stage 2 `crop_bgr` directly to `LM3LeafSegmenterEngine` (`img_size=1024`) and
-    `LM3PoseLandmarkEngine` (`img_size=640`) so `_letterbox_bgr(..., auto=True, stride=32)`
-    scales directly once and un-letterboxes directly to native crop dimensions without
-    secondary `cv2.INTER_NEAREST` mask resampling.
-    """
-    _ = (sheet_h, sheet_w)
-    return crop_bgr, 1.0
-
-
-def _upscale_stage2_preds_to_native_crop(
-    crop_preds: Sequence[Any],
-    native_h: int,
-    native_w: int,
-    work_scale: float,
-) -> List[Any]:
-    """
-    Resizes Stage 2 segmentation masks from `work_crop_bgr` back to `(native_h, native_w)` using
-    `cv2.INTER_NEAREST` so downstream sheet reprojection and `pixels_per_mm` stay in native sheet space.
-    """
-    if not crop_preds:
-        return []
-    if work_scale >= 1.0 or native_h <= 0 or native_w <= 0:
-        return list(crop_preds)
-    inv_scale = 1.0 / float(work_scale)
-    out_preds: List[Any] = []
-    for pr_bbox, pr_mask, pr_score, pr_cls in crop_preds:
-        if isinstance(pr_mask, np.ndarray) and pr_mask.size > 0 and pr_mask.shape[:2] != (native_h, native_w):
-            up_mask = cv2.resize(pr_mask, (native_w, native_h), interpolation=cv2.INTER_NEAREST)
-        else:
-            up_mask = pr_mask
-        if isinstance(pr_bbox, (tuple, list)) and len(pr_bbox) == 4:
-            up_bbox = (
-                int(round(float(pr_bbox[0]) * inv_scale)),
-                int(round(float(pr_bbox[1]) * inv_scale)),
-                int(round(float(pr_bbox[2]) * inv_scale)),
-                int(round(float(pr_bbox[3]) * inv_scale)),
-            )
-        else:
-            up_bbox = pr_bbox
-        out_preds.append((up_bbox, up_mask, pr_score, pr_cls))
-    return out_preds
-
-
-def _upscale_pose_result_to_native_crop(
-    pose_res: Any,
-    work_h: int,
-    work_w: int,
-    work_scale: float,
-) -> Any:
-    """
-    Scales `keypoints_31[:, :2]` (and `petiole_width_px`) returned on `work_crop_bgr` by `1.0 / work_scale`
-    back to the native crop coordinate frame.
-    """
-    if pose_res is None or work_scale >= 1.0:
-        return pose_res
-    inv_scale = 1.0 / float(work_scale)
-    kpts = getattr(pose_res, "keypoints_31", None)
-    if isinstance(kpts, dict) and kpts:
-        already_native = any(
-            isinstance(v, (tuple, list, np.ndarray))
-            and len(v) >= 2
-            and (float(v[0]) > work_w + 1.0 or float(v[1]) > work_h + 1.0)
-            for v in kpts.values()
-        )
-        if not already_native:
-            scaled_dict: Dict[str, Tuple[float, float, float]] = {}
-            for k_name, vals in kpts.items():
-                if isinstance(vals, (tuple, list, np.ndarray)) and len(vals) >= 2:
-                    conf_v = float(vals[2]) if len(vals) >= 3 else 1.0
-                    scaled_dict[str(k_name)] = (
-                        float(vals[0]) * inv_scale,
-                        float(vals[1]) * inv_scale,
-                        conf_v,
-                    )
-            pose_res.keypoints_31 = scaled_dict
-            pw_px = getattr(pose_res, "petiole_width_px", None)
-            if pw_px is not None:
-                pose_res.petiole_width_px = float(pw_px) * inv_scale
-    elif isinstance(kpts, np.ndarray) and kpts.ndim == 2 and kpts.shape[1] >= 2:
-        scaled_arr = kpts.astype(np.float64, copy=True)
-        scaled_arr[:, :2] *= inv_scale
-        pose_res.keypoints_31 = scaled_arr
-        pw_px = getattr(pose_res, "petiole_width_px", None)
-        if pw_px is not None:
-            pose_res.petiole_width_px = float(pw_px) * inv_scale
-    return pose_res
 
 
 def _build_native_lm3_crop_masks(
@@ -663,7 +482,6 @@ class SegmentAndExtractPipeline:
         # Output artifact directories
         self.masks_dir = self.output_dir / "masks"
         self.tier1_intact_dir = self.masks_dir / "tier1_intact"
-        self.tier2_reflected_dir = self.masks_dir / "tier2_reflected"
         self.contours_dir = self.output_dir / "contours"
         self.ect_dir = self.output_dir / "ect"
         self.tables_dir = self.output_dir / "tables"
@@ -673,7 +491,6 @@ class SegmentAndExtractPipeline:
         for d in [
             self.masks_dir,
             self.tier1_intact_dir,
-            self.tier2_reflected_dir,
             self.contours_dir,
             self.ect_dir,
             self.tables_dir,
@@ -721,13 +538,7 @@ class SegmentAndExtractPipeline:
         )
         self.plant_detector = self.stage1_detector
 
-        # 2. Whole-Sheet UNet++ v9 Specimen Segmenter + LLR_Hyst_KeepBlobs
-        self.specimen_segmenter = LM3SpecimenSegmenter(
-            weights_path=_aux_default_weights,
-            device=self.device,
-        )
-
-        # 3. Stage 2 Cropped Leaf Instance Segmenter (YOLO26x-seg 1024px: Leaf, Petiole, Hole)
+        # 2. Stage 2 Cropped Leaf Instance Segmenter (YOLO26x-seg 1024px: Leaf, Petiole, Hole)
         self.model_engine = LM3LeafSegmenterEngine(
             weights_path=self.model_weights,
             device=self.device,
@@ -735,13 +546,13 @@ class SegmentAndExtractPipeline:
         )
         self.leaf_segmenter = self.model_engine
 
-        # 4. Stage 2 Cropped Leaf Pose Landmark Detector (YOLO26x-pose 640px, 31 keypoints)
+        # 3. Stage 2 Cropped Leaf Pose Landmark Detector (YOLO26x-pose 640px, 31 keypoints)
         self.pose_engine = LM3PoseLandmarkEngine(
             weights_path=_aux_default_weights,
             device=self.device,
         )
 
-        # 5. LeafMachine3 Archival Ruler Detector + Lattice Solver + Megapixel Scale Calibrator
+        # 4. LeafMachine3 Archival Ruler Detector + Lattice Solver + Megapixel Scale Calibrator
         self.scale_calibrator = LM3ScaleCalibrator(
             device=self.device,
             providers=([] if _is_dummy_test_weights else None),
@@ -829,7 +640,6 @@ class SegmentAndExtractPipeline:
             self.masks_dir,
             self.masks_dir / "tier1_pristine",
             self.masks_dir / "tier1_intact",
-            self.masks_dir / "tier2_reflected",
         ]
         for d in scan_dirs:
             if not d.exists():
@@ -856,7 +666,7 @@ class SegmentAndExtractPipeline:
         Verifies:
           1. Standardized contour CSV: data/contours/{catalogNumber}_leaf*.csv (size > 0)
           2. Binary silhouette mask: data/masks/{catalogNumber}_leaf*.png (size > 0)
-             or within tier1_pristine / tier2_reflected subdirectories.
+             or within tier1_pristine / tier1_intact subdirectories.
         """
         contours = list(self.contours_dir.glob(f"{catalog_number}_leaf*.csv"))
         if contours and any(c.is_file() and c.stat().st_size > 0 for c in contours):
@@ -866,7 +676,7 @@ class SegmentAndExtractPipeline:
         if masks and any(m.is_file() and m.stat().st_size > 0 for m in masks):
             return True
 
-        for sub in ["tier1_pristine", "tier1_intact", "tier2_reflected"]:
+        for sub in ["tier1_pristine", "tier1_intact"]:
             sub_dir = self.masks_dir / sub
             if sub_dir.exists():
                 sub_masks = list(sub_dir.glob(f"{catalog_number}_leaf*.png"))
@@ -901,7 +711,6 @@ class SegmentAndExtractPipeline:
                 (base_dir / "masks", f"{cat}_leaf*.png"),
                 (base_dir / "masks" / "tier1_pristine", f"{cat}_leaf*.png"),
                 (base_dir / "masks" / "tier1_intact", f"{cat}_leaf*.png"),
-                (base_dir / "masks" / "tier2_reflected", f"{cat}_leaf*.png"),
                 (base_dir / "cropped_patches", f"{cat}_p*.*"),
                 (base_dir / "cropped_patches" / "capitula", f"{cat}_cap*.jpg"),
             ]
@@ -966,8 +775,6 @@ class SegmentAndExtractPipeline:
            s1_px_per_cm, s1_eff_min_cm2)
         """
         sheet_h, sheet_w = img_bgr.shape[:2]
-        scale_f = max(sheet_h, sheet_w) / 5600.0 if max(sheet_h, sheet_w) > 1000 else 0.0
-        is_high_dpi = max(sheet_h, sheet_w) > 1000 and scale_f > 0.4
 
         s1_is_calibrated_mm = bool(
             pixels_per_mm is not None and not np.isnan(pixels_per_mm) and float(pixels_per_mm) > 0.0
@@ -1000,226 +807,102 @@ class SegmentAndExtractPipeline:
             _cfg_partial if _cfg_partial is not None else (_lm3_partial if _lm3_partial is not None else False)
         )
 
-        if not self.enable_geometric_qc:
-            # 100% Raw Unconstrained LeafMachine3 Two-Stage Handshake:
-            #   Stage 1 (`lm3_plant_detector__yolo26x_det_1280` 9-class YOLO26x) separates
-            #   `0: Leaf_WHOLE`, `1: Leaf_PARTIAL`, `2..6: reproductive` (`Seed_Fruit_ONE`,
-            #   `Seed_Fruit_MANY`, `Flower_ONE`, `Flower_MANY`, `Bud`), `7: Roots`, and `8: Wood`.
-            #   Unpack `Leaf_WHOLE` and rescued `Leaf_PARTIAL` boxes directly to Stage 2
-            #   `LM3LeafSegmenterEngine` and `LM3PoseLandmarkEngine`.
-            #   Because LeafMachine3's 9-class Plant Detector treats leaflets as simple leaves
-            #   rather than emitting a separate leaflet class, severed lobe/leaflet rejection
-            #   is handled geometrically by `check_boundary_tissue_continuity` / `is_truncated_lobe_or_leaflet`
-            #   and `bridge_dissected_rachis_components` in `leaf_gatekeeper.py`.
-            c0_items: List[Tuple[Tuple[int, int, int, int], float, int]] = []
-            c1_items: List[Tuple[Tuple[int, int, int, int], float, int]] = []
-            for s1_item in stage1_detections:
-                if len(s1_item) == 4:
-                    s1_bbox, s1_mask, s1_score, s1_cls = s1_item
-                else:
-                    s1_bbox, s1_score, s1_cls = s1_item
-                    s1_mask = None
-
-                if s1_cls in LM3_REPRODUCTIVE_CLASS_IDS:
-                    capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
-                    s1_plant_boxes.append(s1_bbox)
-                elif int(s1_cls) in (7, 9):
-                    root_detections.append(s1_bbox)
-                    s1_plant_boxes.append(s1_bbox)
-                elif int(s1_cls) == 0:
-                    s1_plant_boxes.append(s1_bbox)
-                    c0_items.append((s1_bbox, float(s1_score), 0))
-                elif int(s1_cls) == 1:
-                    s1_plant_boxes.append(s1_bbox)
-                    c1_items.append((s1_bbox, float(s1_score), 1))
-
-            selected_s1_leaves: List[Tuple[Tuple[int, int, int, int], float, int]] = list(c0_items)
-            if not c0_items:
-                selected_s1_leaves.extend(c1_items)
-            elif seg_partial_cfg:
-                for c1_box, c1_sc, c1_cl in c1_items:
-                    area_c1 = float(max(1, (c1_box[2] - c1_box[0]) * (c1_box[3] - c1_box[1])))
-                    overlaps_c0 = False
-                    for c0_box, _c0_sc, _c0_cl in c0_items:
-                        area_c0 = float(max(1, (c0_box[2] - c0_box[0]) * (c0_box[3] - c0_box[1])))
-                        iy0, ix0 = max(c1_box[0], c0_box[0]), max(c1_box[1], c0_box[1])
-                        iy1, ix1 = min(c1_box[2], c0_box[2]), min(c1_box[3], c0_box[3])
-                        if iy1 > iy0 and ix1 > ix0:
-                            inter_c = float((iy1 - iy0) * (ix1 - ix0))
-                            if (inter_c / max(min(area_c1, area_c0), 1.0)) >= 0.20:
-                                overlaps_c0 = True
-                                break
-                    if not overlaps_c0:
-                        selected_s1_leaves.append((c1_box, c1_sc, c1_cl))
-
-            # Confidence-ordered nested-box deduplication:
-            #   1. Already-kept box `k` suppresses candidate `b` if symmetric `IoU >= 0.70` OR `k` encloses `b`
-            #      (`area_k >= 0.85 * area_b` and `inter / max(area_b, 1.0) >= 0.90`).
-            #   2. Conversely, if candidate `b` is a whole-leaf box (`b_cls == 0`) that encloses an already-kept
-            #      smaller sub-lobe box `k` (`k_cls == 0`, `area_b >= 1.35 * area_k` and `inter / max(area_k, 1.0) >= 0.90`
-            #      and `b_score >= 0.50`), replace `k` in `deduped_s1` with the enclosing parent leaf box `b`.
-            if len(selected_s1_leaves) >= 2:
-                selected_s1_leaves.sort(key=lambda x: (int(x[2]) == 0, float(x[1])), reverse=True)
-                deduped_s1: List[Tuple[Tuple[int, int, int, int], float, int]] = []
-                for b_box, b_score, b_cls in selected_s1_leaves:
-                    area_b = float(max(1, (b_box[2] - b_box[0]) * (b_box[3] - b_box[1])))
-                    suppressed = False
-                    replaced_indices: List[int] = []
-                    for idx_k, (k_box, _k_score, k_cls) in enumerate(deduped_s1):
-                        area_k = float(max(1, (k_box[2] - k_box[0]) * (k_box[3] - k_box[1])))
-                        iy0, ix0 = max(b_box[0], k_box[0]), max(b_box[1], k_box[1])
-                        iy1, ix1 = min(b_box[2], k_box[2]), min(b_box[3], k_box[3])
-                        if iy1 > iy0 and ix1 > ix0:
-                            inter = float((iy1 - iy0) * (ix1 - ix0))
-                            iou = inter / max(area_b + area_k - inter, 1.0)
-                            if (
-                                int(b_cls) == 0
-                                and int(k_cls) == 0
-                                and area_b >= 1.35 * area_k
-                                and (inter / max(area_k, 1.0)) >= 0.90
-                                and float(b_score) >= 0.50
-                            ):
-                                replaced_indices.append(idx_k)
-                            elif iou >= 0.70 or (
-                                area_k >= 0.85 * area_b and (inter / max(area_b, 1.0)) >= 0.90
-                            ):
-                                suppressed = True
-                                break
-                    if suppressed:
-                        continue
-                    if replaced_indices:
-                        first_idx = replaced_indices[0]
-                        deduped_s1[first_idx] = (b_box, b_score, b_cls)
-                        for rem_idx in reversed(replaced_indices[1:]):
-                            deduped_s1.pop(rem_idx)
-                    else:
-                        deduped_s1.append((b_box, b_score, b_cls))
-                selected_s1_leaves = deduped_s1
-
-            for s1_bbox, s1_score, s1_cls in selected_s1_leaves:
-                crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
-                if crop_bgr.size > 0:
-                    candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
-            s1_eff_min_cm2 = 0.0
-        else:
-            s1_raw_leaf_items: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
-            for s1_item in stage1_detections:
-                if len(s1_item) == 4:
-                    s1_bbox, s1_mask, s1_score, s1_cls = s1_item
-                else:
-                    s1_bbox, s1_score, s1_cls = s1_item
-                    s1_mask = None
-
-                if s1_cls in LM3_REPRODUCTIVE_CLASS_IDS:
-                    capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
-                    s1_plant_boxes.append(s1_bbox)
-                elif int(s1_cls) in (7, 9):
-                    root_detections.append(s1_bbox)
-                    s1_plant_boxes.append(s1_bbox)
-                elif s1_cls in LM3_LEAF_CLASS_IDS:
-                    s1_plant_boxes.append(s1_bbox)
-                    if s1_cls not in (0, 1):
-                        continue
-                    s1_bh = int(s1_bbox[2] - s1_bbox[0])
-                    s1_bw = int(s1_bbox[3] - s1_bbox[1])
-                    s1_cy = 0.5 * float(s1_bbox[0] + s1_bbox[2])
-                    s1_raw_leaf_items.append((s1_bbox, float(s1_score), int(s1_cls), s1_bh, s1_bw, s1_cy))
-
-            max_s1_major = max(
-                int(0.78 * max(sheet_h, sheet_w)),
-                int(38.0 * s1_px_per_cm) if (s1_is_calibrated_mm and s1_px_per_cm > 0.0) else 0,
-            )
-            max_s1_area = 0.45 * float(sheet_h * sheet_w)
-
-            if s1_is_calibrated_mm and s1_px_per_cm > 0.0:
-                _s1_est_cm2 = [
-                    0.72 * float(_bh * _bw) / (s1_px_per_cm ** 2)
-                    for (_bb, _sc, _cl, _bh, _bw, _cy) in s1_raw_leaf_items
-                    if _bh > 0
-                    and _bw > 0
-                    and (
-                        scale_f <= 0.0
-                        or (
-                            max(_bh, _bw) <= max_s1_major
-                            and (_bh * _bw) <= max_s1_area
-                        )
-                    )
-                ]
-                s1_eff_min_cm2 = compute_sheet_adaptive_min_blade_area_cm2(
-                    _s1_est_cm2,
-                    config_min_blade_area_cm2=self.min_blade_area_cm2,
-                    absolute_floor_cm2=0.15,
-                )
+        # Native LeafMachine3 Two-Stage Handshake:
+        #   Stage 1 (`lm3_plant_detector__yolo26x_det_1280` 9-class YOLO26x) separates
+        #   `0: Leaf_WHOLE`, `1: Leaf_PARTIAL`, `2..6: reproductive` (`Seed_Fruit_ONE`,
+        #   `Seed_Fruit_MANY`, `Flower_ONE`, `Flower_MANY`, `Bud`), `7: Roots`, and `8: Wood`.
+        #   Unpack `Leaf_WHOLE` and rescued `Leaf_PARTIAL` boxes directly to Stage 2
+        #   `LM3LeafSegmenterEngine` and `LM3PoseLandmarkEngine`.
+        c0_items: List[Tuple[Tuple[int, int, int, int], float, int]] = []
+        c1_items: List[Tuple[Tuple[int, int, int, int], float, int]] = []
+        for s1_item in stage1_detections:
+            if len(s1_item) == 4:
+                s1_bbox, s1_mask, s1_score, s1_cls = s1_item
             else:
-                s1_eff_min_cm2 = float(self.min_blade_area_cm2)
+                s1_bbox, s1_score, s1_cls = s1_item
+                s1_mask = None
 
-            c0_present = any(int(it[2]) == 0 for it in s1_raw_leaf_items)
+            if s1_cls in LM3_REPRODUCTIVE_CLASS_IDS:
+                capitulum_detections.append((s1_bbox, s1_mask, float(s1_score), int(s1_cls)))
+                s1_plant_boxes.append(s1_bbox)
+            elif int(s1_cls) in (7, 9):
+                root_detections.append(s1_bbox)
+                s1_plant_boxes.append(s1_bbox)
+            elif int(s1_cls) == 0:
+                s1_plant_boxes.append(s1_bbox)
+                c0_items.append((s1_bbox, float(s1_score), 0))
+            elif int(s1_cls) == 1:
+                s1_plant_boxes.append(s1_bbox)
+                c1_items.append((s1_bbox, float(s1_score), 1))
 
-            # Native LeafMachine3 Stage 1 candidate unpacking (asymmetric nested-box deduplication,
-            # minimum 16 px box area matching `detector_common.py`, and zero pre-segmentation vertical
-            # or uncalibrated pixel filtering so every `Leaf_WHOLE` and `Leaf_PARTIAL` detection reaches Stage 2)
-            eligible_s1_items: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
-            for s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy in s1_raw_leaf_items:
-                if s1_bh < 4 or s1_bw < 4 or (s1_bh * s1_bw) < 16:
+        selected_s1_leaves: List[Tuple[Tuple[int, int, int, int], float, int]] = list(c0_items)
+        if not c0_items:
+            selected_s1_leaves.extend(c1_items)
+        elif seg_partial_cfg:
+            for c1_box, c1_sc, c1_cl in c1_items:
+                area_c1 = float(max(1, (c1_box[2] - c1_box[0]) * (c1_box[3] - c1_box[1])))
+                overlaps_c0 = False
+                for c0_box, _c0_sc, _c0_cl in c0_items:
+                    area_c0 = float(max(1, (c0_box[2] - c0_box[0]) * (c0_box[3] - c0_box[1])))
+                    iy0, ix0 = max(c1_box[0], c0_box[0]), max(c1_box[1], c0_box[1])
+                    iy1, ix1 = min(c1_box[2], c0_box[2]), min(c1_box[3], c0_box[3])
+                    if iy1 > iy0 and ix1 > ix0:
+                        inter_c = float((iy1 - iy0) * (ix1 - ix0))
+                        if (inter_c / max(min(area_c1, area_c0), 1.0)) >= 0.20:
+                            overlaps_c0 = True
+                            break
+                if not overlaps_c0:
+                    selected_s1_leaves.append((c1_box, c1_sc, c1_cl))
+
+        # Confidence-ordered nested-box deduplication:
+        #   1. Already-kept box `k` suppresses candidate `b` if symmetric `IoU >= 0.70` OR `k` encloses `b`
+        #      (`area_k >= 0.85 * area_b` and `inter / max(area_b, 1.0) >= 0.90`).
+        #   2. Conversely, if candidate `b` is a whole-leaf box (`b_cls == 0`) that encloses an already-kept
+        #      smaller sub-lobe box `k` (`k_cls == 0`, `area_b >= 1.35 * area_k` and `inter / max(area_k, 1.0) >= 0.90`
+        #      and `b_score >= 0.50`), replace `k` in `deduped_s1` with the enclosing parent leaf box `b`.
+        if len(selected_s1_leaves) >= 2:
+            selected_s1_leaves.sort(key=lambda x: (int(x[2]) == 0, float(x[1])), reverse=True)
+            deduped_s1: List[Tuple[Tuple[int, int, int, int], float, int]] = []
+            for b_box, b_score, b_cls in selected_s1_leaves:
+                area_b = float(max(1, (b_box[2] - b_box[0]) * (b_box[3] - b_box[1])))
+                suppressed = False
+                replaced_indices: List[int] = []
+                for idx_k, (k_box, _k_score, k_cls) in enumerate(deduped_s1):
+                    area_k = float(max(1, (k_box[2] - k_box[0]) * (k_box[3] - k_box[1])))
+                    iy0, ix0 = max(b_box[0], k_box[0]), max(b_box[1], k_box[1])
+                    iy1, ix1 = min(b_box[2], k_box[2]), min(b_box[3], k_box[3])
+                    if iy1 > iy0 and ix1 > ix0:
+                        inter = float((iy1 - iy0) * (ix1 - ix0))
+                        iou = inter / max(area_b + area_k - inter, 1.0)
+                        if (
+                            int(b_cls) == 0
+                            and int(k_cls) == 0
+                            and area_b >= 1.35 * area_k
+                            and (inter / max(area_k, 1.0)) >= 0.90
+                            and float(b_score) >= 0.50
+                        ):
+                            replaced_indices.append(idx_k)
+                        elif iou >= 0.70 or (
+                            area_k >= 0.85 * area_b and (inter / max(area_b, 1.0)) >= 0.90
+                        ):
+                            suppressed = True
+                            break
+                if suppressed:
                     continue
-                if scale_f > 0.0:
-                    if max(s1_bh, s1_bw) > max_s1_major or (s1_bh * s1_bw) > max_s1_area:
-                        continue
-                    if is_high_dpi and s1_cls == 1 and c0_present and not seg_partial_cfg:
-                        continue
-                eligible_s1_items.append((s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy))
+                if replaced_indices:
+                    first_idx = replaced_indices[0]
+                    deduped_s1[first_idx] = (b_box, b_score, b_cls)
+                    for rem_idx in reversed(replaced_indices[1:]):
+                        deduped_s1.pop(rem_idx)
+                else:
+                    deduped_s1.append((b_box, b_score, b_cls))
+            selected_s1_leaves = deduped_s1
 
-            if len(eligible_s1_items) >= 2:
-                eligible_s1_items.sort(key=lambda x: (int(x[2]) == 0, float(x[1])), reverse=True)
-                deduped_s1_qc: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
-                for item_b in eligible_s1_items:
-                    b_box = item_b[0]
-                    b_score = float(item_b[1])
-                    b_cls = int(item_b[2])
-                    area_b = float(max(1, (b_box[2] - b_box[0]) * (b_box[3] - b_box[1])))
-                    suppressed = False
-                    replaced_indices_qc: List[int] = []
-                    for idx_k, item_k in enumerate(deduped_s1_qc):
-                        k_box = item_k[0]
-                        k_cls = int(item_k[2])
-                        area_k = float(max(1, (k_box[2] - k_box[0]) * (k_box[3] - k_box[1])))
-                        iy0, ix0 = max(b_box[0], k_box[0]), max(b_box[1], k_box[1])
-                        iy1, ix1 = min(b_box[2], k_box[2]), min(b_box[3], k_box[3])
-                        if iy1 > iy0 and ix1 > ix0:
-                            inter = float((iy1 - iy0) * (ix1 - ix0))
-                            iou = inter / max(area_b + area_k - inter, 1.0)
-                            if b_cls == 1 and k_cls == 0 and (inter / max(min(area_b, area_k), 1.0)) >= 0.20:
-                                suppressed = True
-                                break
-                            if (
-                                b_cls == 0
-                                and k_cls == 0
-                                and area_b >= 1.35 * area_k
-                                and (inter / max(area_k, 1.0)) >= 0.90
-                                and b_score >= 0.50
-                            ):
-                                replaced_indices_qc.append(idx_k)
-                            elif iou >= 0.70 or (
-                                area_k >= 0.85 * area_b and (inter / max(area_b, 1.0)) >= 0.90
-                            ):
-                                suppressed = True
-                                break
-                    if suppressed:
-                        continue
-                    if replaced_indices_qc:
-                        first_idx = replaced_indices_qc[0]
-                        deduped_s1_qc[first_idx] = item_b
-                        for rem_idx in reversed(replaced_indices_qc[1:]):
-                            deduped_s1_qc.pop(rem_idx)
-                    else:
-                        deduped_s1_qc.append(item_b)
-                eligible_s1_items = deduped_s1_qc
-
-            for s1_bbox, s1_score, s1_cls, _s1_bh, _s1_bw, _s1_cy in eligible_s1_items:
-                crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
-                if crop_bgr.size == 0:
-                    continue
+        for s1_bbox, s1_score, s1_cls in selected_s1_leaves:
+            crop_bgr, crop_box = crop_leaf_bbox_with_padding(img_bgr, s1_bbox, pad_ratio=crop_pad)
+            if crop_bgr.size > 0:
                 candidate_s1_crops.append((s1_bbox, float(s1_score), int(s1_cls), crop_bgr, crop_box))
+        s1_eff_min_cm2 = 0.0
 
         return (
             candidate_s1_crops,
@@ -1339,32 +1022,6 @@ class SegmentAndExtractPipeline:
             pixels_per_mm = None
             cf_source = "predicted_from_megapixels"
 
-        # 1b. Whole-Sheet UNet++ v9 Specimen Segmenter + LLR_Hyst_KeepBlobs paper cleanup (lazy per-voucher cache)
-        specimen_paper_cleaned_mask: Optional[np.ndarray] = None
-        _specimen_mask_evaluated: bool = False
-        if precomputed_s2_payload is not None and len(precomputed_s2_payload) >= 12:
-            specimen_paper_cleaned_mask = precomputed_s2_payload[11]
-            _specimen_mask_evaluated = True
-
-        def _get_specimen_paper_cleaned_mask() -> Optional[np.ndarray]:
-            nonlocal specimen_paper_cleaned_mask, _specimen_mask_evaluated
-            if _specimen_mask_evaluated:
-                return specimen_paper_cleaned_mask
-            _specimen_mask_evaluated = True
-            if (
-                getattr(self, "specimen_segmenter", None) is not None
-                and getattr(self.specimen_segmenter, "model", None) is not None
-            ):
-                try:
-                    specimen_paper_cleaned_mask = self.specimen_segmenter.segment_specimen(img_bgr)
-                except Exception as spec_exc:
-                    logger.debug(f"Voucher {catalog_number}: specimen segmenter skipped ({spec_exc}).")
-                    specimen_paper_cleaned_mask = None
-            return specimen_paper_cleaned_mask
-
-        if "segment_specimen" in getattr(getattr(self, "specimen_segmenter", None), "__dict__", {}):
-            _get_specimen_paper_cleaned_mask()
-
         # 2. Stage 1 Full-Sheet Plant Organ Detection (YOLO26x 9-class detector)
         use_s1_cache = bool(self.lm3_project_dir is not None and not self.force)
         direct_s2_mock = (
@@ -1444,26 +1101,11 @@ class SegmentAndExtractPipeline:
                     pixels_per_mm=pixels_per_mm,
                 )
                 _telem_deltas["rejected_leaflet_class"] += int(_rej_lflt)
-                work_crops_and_scales = [
-                    _downscale_crop_for_working_frame(c[3], sheet_h, sheet_w)
-                    for c in candidate_s1_crops
-                ]
-                raw_crop_preds = (
-                    self.model_engine.predict_batch([wc for wc, _ in work_crops_and_scales])
+                all_crop_preds = (
+                    self.model_engine.predict_batch([c[3] for c in candidate_s1_crops])
                     if candidate_s1_crops
                     else []
                 )
-                all_crop_preds = [
-                    _upscale_stage2_preds_to_native_crop(
-                        c_preds,
-                        c_item[3].shape[0],
-                        c_item[3].shape[1],
-                        w_scale,
-                    )
-                    for c_item, (_, w_scale), c_preds in zip(
-                        candidate_s1_crops, work_crops_and_scales, raw_crop_preds
-                    )
-                ]
                 if (
                     candidate_s1_crops
                     and all_crop_preds
@@ -1475,7 +1117,7 @@ class SegmentAndExtractPipeline:
                     all_crop_pose_preds = [None] * len(candidate_s1_crops)
                     p_idxs: List[int] = []
                     p_crops: List[np.ndarray] = []
-                    for idx_c, ((wc_bgr, _ws), c_preds) in enumerate(zip(work_crops_and_scales, all_crop_preds)):
+                    for idx_c, (c_item, c_preds) in enumerate(zip(candidate_s1_crops, all_crop_preds)):
                         if not c_preds:
                             continue
                         has_leaf_cand = any(
@@ -1484,7 +1126,7 @@ class SegmentAndExtractPipeline:
                         )
                         if has_leaf_cand:
                             p_idxs.append(idx_c)
-                            p_crops.append(wc_bgr)
+                            p_crops.append(c_item[3])
                     if p_crops:
                         for idx_c, p_res in zip(
                             p_idxs,
@@ -1495,10 +1137,7 @@ class SegmentAndExtractPipeline:
                                 batch_size=max(8, self.stage2_batch_size),
                             ),
                         ):
-                            wc_bgr_i, w_scale_i = work_crops_and_scales[idx_c]
-                            all_crop_pose_preds[idx_c] = _upscale_pose_result_to_native_crop(
-                                p_res, wc_bgr_i.shape[0], wc_bgr_i.shape[1], w_scale_i
-                            )
+                            all_crop_pose_preds[idx_c] = p_res
 
             def _reproject_crop_mask_to_local_win(
                 cmask: Optional[np.ndarray],
@@ -1543,328 +1182,115 @@ class SegmentAndExtractPipeline:
                         shifted[str(k_name)] = (float(vals[0]) + dx_w, float(vals[1]) + dy_w, conf_v)
                 return shifted or None
 
-            if not self.enable_geometric_qc:
-                # Stage 2 LeafMachine3 YOLO26x-seg (`0: Leaf`, `1: Petiole`, `2: Hole`) + YOLO26x-pose (`keypoints_31`)
-                for crop_idx_s2, ((s1_bbox, s1_score, s1_cls, crop_bgr, crop_box), crop_preds) in enumerate(zip(candidate_s1_crops, all_crop_preds)):
-                    if not crop_preds:
-                        continue
+            # Stage 2 LeafMachine3 YOLO26x-seg (`0: Leaf`, `1: Petiole`, `2: Hole`) + YOLO26x-pose (`keypoints_31`)
+            for crop_idx_s2, ((s1_bbox, s1_score, s1_cls, crop_bgr, crop_box), crop_preds) in enumerate(zip(candidate_s1_crops, all_crop_preds)):
+                if not crop_preds:
+                    continue
 
-                    cy0_sp, cx0_sp, cy1_sp, cx1_sp = crop_box
-                    spec_crop_s2 = (
-                        specimen_paper_cleaned_mask[cy0_sp:cy1_sp, cx0_sp:cx1_sp]
-                        if (
-                            specimen_paper_cleaned_mask is not None
-                            and isinstance(specimen_paper_cleaned_mask, np.ndarray)
-                            and specimen_paper_cleaned_mask.shape[:2] == (sheet_h, sheet_w)
+                best_mask, best_score, best_petiole_mask, best_hole_mask = _build_native_lm3_crop_masks(
+                    crop_preds,
+                    crop_bgr.shape[:2],
+                    is_high_dpi=is_high_dpi,
+                    min_leaf_area=0,
+                )
+                if best_mask is None:
+                    continue
+
+                keypoints_31_crop: Optional[Dict[str, Tuple[float, float, float]]] = None
+                petiole_width_px_crop: Optional[float] = None
+                pre_pose_crop = all_crop_pose_preds[crop_idx_s2] if crop_idx_s2 < len(all_crop_pose_preds) else None
+                if pre_pose_crop is not None:
+                    keypoints_31_crop = getattr(pre_pose_crop, "keypoints_31", None) or None
+                    petiole_width_px_crop = getattr(pre_pose_crop, "petiole_width_px", None)
+                elif getattr(self, "pose_engine", None) is not None and (
+                    getattr(self.pose_engine, "model", None) is not None
+                    or "predict_landmarks" in getattr(self.pose_engine, "__dict__", {})
+                ):
+                    try:
+                        pose_res = self.pose_engine.predict_landmarks(
+                            crop_bgr, lamina_mask=None, petiole_mask=None
                         )
-                        else None
+                        keypoints_31_crop = pose_res.keypoints_31 or None
+                        petiole_width_px_crop = pose_res.petiole_width_px
+                    except Exception:
+                        keypoints_31_crop = None
+
+                cy0, cx0, cy1, cx1 = crop_box
+                m_raw = best_mask
+                fg_area = int(np.count_nonzero(m_raw))
+                if fg_area <= 0:
+                    continue
+
+                bx_c, by_c, bw_c, bh_c = cv2.boundingRect(m_raw)
+                if bw_c == 0 or bh_c == 0:
+                    continue
+                sub_raw = m_raw[by_c : by_c + bh_c, bx_c : bx_c + bw_c]
+                cnts_m, _ = cv2.findContours(sub_raw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if not cnts_m:
+                    continue
+                main_m_cnt = max(cnts_m, key=cv2.contourArea)
+                hull_m_area = float(cv2.contourArea(cv2.convexHull(main_m_cnt)))
+                m_solidity = float(fg_area) / hull_m_area if hull_m_area > 0 else 1.0
+
+                ymin_s = max(0, cy0 + by_c)
+                ymax_s = min(sheet_h, cy0 + by_c + bh_c)
+                xmin_s = max(0, cx0 + bx_c)
+                xmax_s = min(sheet_w, cx0 + bx_c + bw_c)
+                if ymax_s <= ymin_s or xmax_s <= xmin_s:
+                    continue
+                full_bbox = (ymin_s, xmin_s, ymax_s, xmax_s)
+
+                margin = max(24, int(0.35 * max(bw_c, bh_c)))
+                win_y0 = max(0, ymin_s - margin)
+                win_x0 = max(0, xmin_s - margin)
+                win_y1 = min(sheet_h, ymax_s + margin)
+                win_x1 = min(sheet_w, xmax_s + margin)
+                local_mask = np.zeros((win_y1 - win_y0, win_x1 - win_x0), dtype=np.uint8)
+                dst_y0 = ymin_s - win_y0
+                dst_x0 = xmin_s - win_x0
+                eff_h = min(bh_c, win_y1 - ymin_s)
+                eff_w = min(bw_c, win_x1 - xmin_s)
+                local_mask[dst_y0 : dst_y0 + eff_h, dst_x0 : dst_x0 + eff_w] = sub_raw[:eff_h, :eff_w]
+
+                native_pet_meta = _extract_native_lm3_petiole_anchor(
+                    m_raw, best_petiole_mask, keypoints_31=keypoints_31_crop
+                )
+                if native_pet_meta is not None:
+                    p_bc = native_pet_meta["p_base_crop"]
+                    p_ac = native_pet_meta["p_apex_crop"]
+                    native_pet_meta["p_base"] = (
+                        int(cx0 + p_bc[0] - win_x0),
+                        int(cy0 + p_bc[1] - win_y0),
                     )
-                    best_mask, best_score, best_petiole_mask, best_hole_mask = _build_native_lm3_crop_masks(
-                        crop_preds,
-                        crop_bgr.shape[:2],
-                        is_high_dpi=is_high_dpi,
-                        min_leaf_area=0,
-                        specimen_paper_cleaned_mask=spec_crop_s2,
+                    native_pet_meta["p_apex"] = (
+                        int(cx0 + p_ac[0] - win_x0),
+                        int(cy0 + p_ac[1] - win_y0),
                     )
-                    if best_mask is None:
-                        continue
+                else:
+                    native_pet_meta = {}
+                native_pet_meta["petiole_mask"] = _reproject_crop_mask_to_local_win(
+                    best_petiole_mask, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
+                )
+                native_pet_meta["hole_mask"] = _reproject_crop_mask_to_local_win(
+                    best_hole_mask, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
+                )
+                native_pet_meta["keypoints_31"] = _shift_crop_keypoints_to_local_win(
+                    keypoints_31_crop, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
+                )
+                native_pet_meta["petiole_width_px"] = petiole_width_px_crop
 
-                    keypoints_31_crop: Optional[Dict[str, Tuple[float, float, float]]] = None
-                    petiole_width_px_crop: Optional[float] = None
-                    pre_pose_crop = all_crop_pose_preds[crop_idx_s2] if crop_idx_s2 < len(all_crop_pose_preds) else None
-                    if pre_pose_crop is not None:
-                        keypoints_31_crop = getattr(pre_pose_crop, "keypoints_31", None) or None
-                        petiole_width_px_crop = getattr(pre_pose_crop, "petiole_width_px", None)
-                    elif getattr(self, "pose_engine", None) is not None and (
-                        getattr(self.pose_engine, "model", None) is not None
-                        or "predict_landmarks" in getattr(self.pose_engine, "__dict__", {})
-                    ):
-                        try:
-                            wc_pose_bgr, w_pose_scale = _downscale_crop_for_working_frame(
-                                crop_bgr, sheet_h, sheet_w
-                            )
-                            pose_res = self.pose_engine.predict_landmarks(
-                                wc_pose_bgr, lamina_mask=None, petiole_mask=None
-                            )
-                            pose_res = _upscale_pose_result_to_native_crop(
-                                pose_res, wc_pose_bgr.shape[0], wc_pose_bgr.shape[1], w_pose_scale
-                            )
-                            keypoints_31_crop = pose_res.keypoints_31 or None
-                            petiole_width_px_crop = pose_res.petiole_width_px
-                        except Exception:
-                            keypoints_31_crop = None
-
-                    cy0, cx0, cy1, cx1 = crop_box
-                    m_raw = best_mask
-                    fg_area = int(np.count_nonzero(m_raw))
-                    if fg_area <= 0:
-                        continue
-
-                    bx_c, by_c, bw_c, bh_c = cv2.boundingRect(m_raw)
-                    if bw_c == 0 or bh_c == 0:
-                        continue
-                    sub_raw = m_raw[by_c : by_c + bh_c, bx_c : bx_c + bw_c]
-                    cnts_m, _ = cv2.findContours(sub_raw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if not cnts_m:
-                        continue
-                    main_m_cnt = max(cnts_m, key=cv2.contourArea)
-                    hull_m_area = float(cv2.contourArea(cv2.convexHull(main_m_cnt)))
-                    m_solidity = float(fg_area) / hull_m_area if hull_m_area > 0 else 1.0
-
-                    ymin_s = max(0, cy0 + by_c)
-                    ymax_s = min(sheet_h, cy0 + by_c + bh_c)
-                    xmin_s = max(0, cx0 + bx_c)
-                    xmax_s = min(sheet_w, cx0 + bx_c + bw_c)
-                    if ymax_s <= ymin_s or xmax_s <= xmin_s:
-                        continue
-                    full_bbox = (ymin_s, xmin_s, ymax_s, xmax_s)
-
-                    margin = max(24, int(0.35 * max(bw_c, bh_c)))
-                    win_y0 = max(0, ymin_s - margin)
-                    win_x0 = max(0, xmin_s - margin)
-                    win_y1 = min(sheet_h, ymax_s + margin)
-                    win_x1 = min(sheet_w, xmax_s + margin)
-                    local_mask = np.zeros((win_y1 - win_y0, win_x1 - win_x0), dtype=np.uint8)
-                    dst_y0 = ymin_s - win_y0
-                    dst_x0 = xmin_s - win_x0
-                    eff_h = min(bh_c, win_y1 - ymin_s)
-                    eff_w = min(bw_c, win_x1 - xmin_s)
-                    local_mask[dst_y0 : dst_y0 + eff_h, dst_x0 : dst_x0 + eff_w] = sub_raw[:eff_h, :eff_w]
-
-                    native_pet_meta = _extract_native_lm3_petiole_anchor(
-                        m_raw, best_petiole_mask, keypoints_31=keypoints_31_crop
-                    )
-                    if native_pet_meta is not None:
-                        p_bc = native_pet_meta["p_base_crop"]
-                        p_ac = native_pet_meta["p_apex_crop"]
-                        native_pet_meta["p_base"] = (
-                            int(cx0 + p_bc[0] - win_x0),
-                            int(cy0 + p_bc[1] - win_y0),
-                        )
-                        native_pet_meta["p_apex"] = (
-                            int(cx0 + p_ac[0] - win_x0),
-                            int(cy0 + p_ac[1] - win_y0),
-                        )
-                    else:
-                        native_pet_meta = {}
-                    native_pet_meta["petiole_mask"] = _reproject_crop_mask_to_local_win(
-                        best_petiole_mask, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
-                    )
-                    native_pet_meta["hole_mask"] = _reproject_crop_mask_to_local_win(
-                        best_hole_mask, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
-                    )
-                    native_pet_meta["keypoints_31"] = _shift_crop_keypoints_to_local_win(
-                        keypoints_31_crop, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
-                    )
-                    native_pet_meta["petiole_width_px"] = petiole_width_px_crop
-
-                    leaf_detections.append((
-                        full_bbox,
-                        local_mask,
-                        float(best_score),
-                        int(s1_cls),
-                        (crop_box[1], crop_box[0]),
-                        (win_x0, win_y0),
-                        False,
-                        native_pet_meta,
-                        m_solidity,
-                        fg_area,
-                    ))
-            else:
-                for crop_idx_qc, ((s1_bbox, s1_score, s1_cls, crop_bgr, crop_box), crop_preds) in enumerate(zip(candidate_s1_crops, all_crop_preds)):
-                    if not crop_preds:
-                        continue
-
-                    min_blade_area = 64 if scale_f > 0.0 else 20
-                    cy0_qc, cx0_qc, cy1_qc, cx1_qc = crop_box
-                    spec_crop_qc = (
-                        specimen_paper_cleaned_mask[cy0_qc:cy1_qc, cx0_qc:cx1_qc]
-                        if (
-                            specimen_paper_cleaned_mask is not None
-                            and isinstance(specimen_paper_cleaned_mask, np.ndarray)
-                            and specimen_paper_cleaned_mask.shape[:2] == (sheet_h, sheet_w)
-                        )
-                        else None
-                    )
-                    best_mask, best_score, best_petiole_qc, best_hole_qc = _build_native_lm3_crop_masks(
-                        crop_preds,
-                        crop_bgr.shape[:2],
-                        is_high_dpi=is_high_dpi,
-                        min_leaf_area=min_blade_area,
-                        specimen_paper_cleaned_mask=spec_crop_qc,
-                    )
-                    if best_mask is None:
-                        continue
-
-                    keypoints_31_qc: Optional[Dict[str, Tuple[float, float, float]]] = None
-                    petiole_width_px_qc: Optional[float] = None
-                    pre_pose_qc = all_crop_pose_preds[crop_idx_qc] if crop_idx_qc < len(all_crop_pose_preds) else None
-                    if pre_pose_qc is not None:
-                        keypoints_31_qc = getattr(pre_pose_qc, "keypoints_31", None) or None
-                        petiole_width_px_qc = getattr(pre_pose_qc, "petiole_width_px", None)
-                    elif getattr(self, "pose_engine", None) is not None and (
-                        getattr(self.pose_engine, "model", None) is not None
-                        or "predict_landmarks" in getattr(self.pose_engine, "__dict__", {})
-                    ):
-                        try:
-                            wc_pose_qc, w_scale_qc = _downscale_crop_for_working_frame(
-                                crop_bgr, sheet_h, sheet_w
-                            )
-                            pose_res_qc = self.pose_engine.predict_landmarks(
-                                wc_pose_qc, lamina_mask=None, petiole_mask=None
-                            )
-                            pose_res_qc = _upscale_pose_result_to_native_crop(
-                                pose_res_qc, wc_pose_qc.shape[0], wc_pose_qc.shape[1], w_scale_qc
-                            )
-                            keypoints_31_qc = pose_res_qc.keypoints_31 or None
-                            petiole_width_px_qc = pose_res_qc.petiole_width_px
-                        except Exception:
-                            keypoints_31_qc = None
-
-                    cy0, cx0, cy1, cx1 = crop_box
-                    m_refined = best_mask
-                    fg_area = int(np.count_nonzero(m_refined))
-                    if fg_area == 0:
-                        continue
-
-                    bx_c, by_c, bw_c, bh_c = cv2.boundingRect(m_refined)
-                    if bw_c == 0 or bh_c == 0:
-                        continue
-                    sub_trimmed = m_refined[by_c : by_c + bh_c, bx_c : bx_c + bw_c]
-                    cnts_m, _ = cv2.findContours(sub_trimmed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if not cnts_m:
-                        continue
-                    main_m_cnt = max(cnts_m, key=cv2.contourArea)
-                    hull_m_area = float(cv2.contourArea(cv2.convexHull(main_m_cnt)))
-                    m_solidity = float(fg_area) / hull_m_area if hull_m_area > 0 else 0.0
-
-                    ymin_s = max(0, cy0 + by_c)
-                    ymax_s = min(sheet_h, cy0 + by_c + bh_c)
-                    xmin_s = max(0, cx0 + bx_c)
-                    xmax_s = min(sheet_w, cx0 + bx_c + bw_c)
-                    if ymax_s <= ymin_s or xmax_s <= xmin_s:
-                        continue
-                    full_bbox = (ymin_s, xmin_s, ymax_s, xmax_s)
-
-                    # Store mask in a compact padded local window instead of a 67 MP full-sheet canvas
-                    margin = max(24, int(0.35 * max(bw_c, bh_c)))
-                    win_y0 = max(0, ymin_s - margin)
-                    win_x0 = max(0, xmin_s - margin)
-                    win_y1 = min(sheet_h, ymax_s + margin)
-                    win_x1 = min(sheet_w, xmax_s + margin)
-                    local_mask = np.zeros((win_y1 - win_y0, win_x1 - win_x0), dtype=np.uint8)
-                    dst_y0 = ymin_s - win_y0
-                    dst_x0 = xmin_s - win_x0
-                    eff_h = min(bh_c, win_y1 - ymin_s)
-                    eff_w = min(bw_c, win_x1 - xmin_s)
-                    local_mask[dst_y0 : dst_y0 + eff_h, dst_x0 : dst_x0 + eff_w] = sub_trimmed[:eff_h, :eff_w]
-
-                    trim_meta_qc = _extract_native_lm3_petiole_anchor(
-                        m_refined, best_petiole_qc, keypoints_31=keypoints_31_qc
-                    )
-                    if trim_meta_qc is not None:
-                        p_bc = trim_meta_qc["p_base_crop"]
-                        p_ac = trim_meta_qc["p_apex_crop"]
-                        trim_meta_qc["p_base"] = (
-                            int(cx0 + p_bc[0] - win_x0),
-                            int(cy0 + p_bc[1] - win_y0),
-                        )
-                        trim_meta_qc["p_apex"] = (
-                            int(cx0 + p_ac[0] - win_x0),
-                            int(cy0 + p_ac[1] - win_y0),
-                        )
-                    else:
-                        trim_meta_qc = {"is_trimmed": best_petiole_qc is not None}
-                    trim_meta_qc["petiole_mask"] = _reproject_crop_mask_to_local_win(
-                        best_petiole_qc, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
-                    )
-                    trim_meta_qc["hole_mask"] = _reproject_crop_mask_to_local_win(
-                        best_hole_qc, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
-                    )
-                    trim_meta_qc["keypoints_31"] = _shift_crop_keypoints_to_local_win(
-                        keypoints_31_qc, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
-                    )
-                    trim_meta_qc["petiole_width_px"] = petiole_width_px_qc
-
-                    leaf_detections.append((
-                        full_bbox,
-                        local_mask,
-                        float(best_score),
-                        int(s1_cls),
-                        (crop_box[1], crop_box[0]),
-                        (win_x0, win_y0),
-                        True,
-                        trim_meta_qc,
-                        m_solidity,
-                        fg_area,
-                    ))
-
-            # Sheet-level sub-pinna noise speck filtering and nested sub-lobe / duplicate suppression:
-            # Gated strictly behind `self.enable_geometric_qc` so default raw LeafMachine3 mode never drops
-            # segmented LeafMachine3 leaves via custom sheet-area heuristics or cross-crop mask suppression.
-            if self.enable_geometric_qc and scale_f > 0.4 and len(leaf_detections) >= 2:
-                all_fg_areas = sorted([int(d[9]) for d in leaf_detections], reverse=True)
-                if all_fg_areas[0] >= int(3500 * (scale_f ** 2)):
-                    top_k_areas = all_fg_areas[: max(1, min(8, len(all_fg_areas)))]
-                    med_top_area = float(np.median(top_k_areas))
-                    min_sheet_fg_area = max(int(1500 * (scale_f ** 2)), int(0.06 * med_top_area))
-                    filtered_by_area = [d for d in leaf_detections if int(d[9]) >= min_sheet_fg_area]
-                    if filtered_by_area:
-                        leaf_detections = filtered_by_area
-
-                scored_dets = [
-                    (int(det_item[9]), float(det_item[2]), idx_d, det_item)
-                    for idx_d, det_item in enumerate(leaf_detections)
-                ]
-                scored_dets.sort(key=lambda x: (x[0], x[1]), reverse=True)
-                kept_scored = []
-                for d_area, d_score, idx_d, det_item in scored_dets:
-                    b1 = det_item[0]
-                    m1 = det_item[1]
-                    ox1, oy1 = det_item[5]
-                    area1 = max(1, int(det_item[9]))
-                    bbox_area1 = float(max(1, (b1[2] - b1[0]) * (b1[3] - b1[1])))
-                    is_dup = False
-                    for _, _, _, kept_item in kept_scored:
-                        b2 = kept_item[0]
-                        if b1[2] <= b2[0] or b2[2] <= b1[0] or b1[3] <= b2[1] or b2[3] <= b1[1]:
-                            continue
-                        iy0, ix0 = max(b1[0], b2[0]), max(b1[1], b2[1])
-                        iy1, ix1 = min(b1[2], b2[2]), min(b1[3], b2[3])
-                        if iy1 <= iy0 or ix1 <= ix0:
-                            continue
-                        bbox_inter = float((iy1 - iy0) * (ix1 - ix0))
-                        m2 = kept_item[1]
-                        ox2, oy2 = kept_item[5]
-                        area2 = max(1, int(kept_item[9]))
-                        sub1 = m1[iy0 - oy1 : iy1 - oy1, ix0 - ox1 : ix1 - ox1] > 0
-                        sub2 = m2[iy0 - oy2 : iy1 - oy2, ix0 - ox2 : ix1 - ox2] > 0
-                        if sub1.shape != sub2.shape:
-                            sh = min(sub1.shape[0], sub2.shape[0])
-                            sw = min(sub1.shape[1], sub2.shape[1])
-                            sub1 = sub1[:sh, :sw]
-                            sub2 = sub2[:sh, :sw]
-                        inter = int(np.count_nonzero(sub1 & sub2))
-                        if inter > 0:
-                            union = max(area1 + area2 - inter, 1)
-                            iou = float(inter / union)
-                            containment = float(inter) / float(area1)
-                            if (
-                                iou > 0.40
-                                or containment >= 0.55
-                                or (
-                                    area2 >= 1.30 * area1
-                                    and (bbox_inter / bbox_area1) >= 0.75
-                                    and containment >= 0.25
-                                )
-                            ):
-                                is_dup = True
-                                break
-                    if not is_dup:
-                        kept_scored.append((d_area, d_score, idx_d, det_item))
-
-                kept_scored.sort(key=lambda x: x[2])
-                leaf_detections = [x[3] for x in kept_scored]
+                leaf_detections.append((
+                    full_bbox,
+                    local_mask,
+                    float(best_score),
+                    int(s1_cls),
+                    (crop_box[1], crop_box[0]),
+                    (win_x0, win_y0),
+                    False,
+                    native_pet_meta,
+                    m_solidity,
+                    fg_area,
+                ))
         elif not is_high_dpi or self.stage1_detector.model is None or "predict" in self.model_engine.__dict__:
             # Fallback when Stage 1 detector is uninitialized (e.g., direct single-stage unit tests)
             if precomputed_single_stage_detections is not None:
@@ -1875,96 +1301,71 @@ class SegmentAndExtractPipeline:
                 )
             else:
                 raw_detections = self.model_engine.predict(img_bgr)
-            if not self.enable_geometric_qc:
-                raw_s2_leaves: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]] = []
-                raw_s2_petioles: List[Tuple[Tuple[int, int, int, int], np.ndarray, float]] = []
-                for bbox, mask, score, cls_id in raw_detections:
-                    if cls_id in LM3_REPRODUCTIVE_CLASS_IDS:
-                        capitulum_detections.append((bbox, mask, float(score), int(cls_id)))
-                    elif int(cls_id) in (7, 9):
-                        root_detections.append(bbox)
-                    elif int(cls_id) == 0:
-                        raw_s2_leaves.append((bbox, mask, float(score), int(cls_id)))
-                    elif int(cls_id) == 1:
-                        raw_s2_petioles.append((bbox, mask, float(score)))
+            raw_s2_leaves: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]] = []
+            raw_s2_petioles: List[Tuple[Tuple[int, int, int, int], np.ndarray, float]] = []
+            for bbox, mask, score, cls_id in raw_detections:
+                if cls_id in LM3_REPRODUCTIVE_CLASS_IDS:
+                    capitulum_detections.append((bbox, mask, float(score), int(cls_id)))
+                elif int(cls_id) in (7, 9):
+                    root_detections.append(bbox)
+                elif int(cls_id) == 0:
+                    raw_s2_leaves.append((bbox, mask, float(score), int(cls_id)))
+                elif int(cls_id) == 1:
+                    raw_s2_petioles.append((bbox, mask, float(score)))
 
-                for bbox, mask, score, cls_id in raw_s2_leaves:
-                    sheet_mask = mask
-                    full_bbox = bbox
-                    fg_area = int(np.count_nonzero(sheet_mask))
-                    if fg_area <= 0:
-                        continue
+            for bbox, mask, score, cls_id in raw_s2_leaves:
+                sheet_mask = mask
+                full_bbox = bbox
+                fg_area = int(np.count_nonzero(sheet_mask))
+                if fg_area <= 0:
+                    continue
 
-                    native_pet_meta: Optional[Dict[str, Any]] = None
-                    if raw_s2_petioles and sheet_mask.shape[:2] == (sheet_h, sheet_w):
-                        ly0, lx0, ly1, lx1 = [int(v) for v in full_bbox]
-                        prox = max(32, int(0.35 * max(ly1 - ly0, lx1 - lx0, 1)))
-                        nearby_pets = [
-                            (pscore, pbbox, pmask)
-                            for pbbox, pmask, pscore in raw_s2_petioles
-                            if pmask is not None
-                            and pmask.shape[:2] == sheet_mask.shape[:2]
-                            and not (
-                                int(pbbox[2]) < ly0 - prox
-                                or int(pbbox[0]) > ly1 + prox
-                                or int(pbbox[3]) < lx0 - prox
-                                or int(pbbox[1]) > lx1 + prox
+                native_pet_meta: Optional[Dict[str, Any]] = None
+                if raw_s2_petioles and sheet_mask.shape[:2] == (sheet_h, sheet_w):
+                    ly0, lx0, ly1, lx1 = [int(v) for v in full_bbox]
+                    prox = max(32, int(0.35 * max(ly1 - ly0, lx1 - lx0, 1)))
+                    nearby_pets = [
+                        (pscore, pbbox, pmask)
+                        for pbbox, pmask, pscore in raw_s2_petioles
+                        if pmask is not None
+                        and pmask.shape[:2] == sheet_mask.shape[:2]
+                        and not (
+                            int(pbbox[2]) < ly0 - prox
+                            or int(pbbox[0]) > ly1 + prox
+                            or int(pbbox[3]) < lx0 - prox
+                            or int(pbbox[1]) > lx1 + prox
+                        )
+                    ]
+                    if nearby_pets:
+                        nearby_pets.sort(key=lambda item: item[0], reverse=True)
+                        _, pbbox_best, pmask_best = nearby_pets[0]
+                        jy0 = max(0, min(ly0, int(pbbox_best[0])) - 8)
+                        jx0 = max(0, min(lx0, int(pbbox_best[1])) - 8)
+                        jy1 = min(sheet_h, max(ly1, int(pbbox_best[2])) + 8)
+                        jx1 = min(sheet_w, max(lx1, int(pbbox_best[3])) + 8)
+                        if jy1 > jy0 and jx1 > jx0:
+                            native_pet_meta = _extract_native_lm3_petiole_anchor(
+                                sheet_mask[jy0:jy1, jx0:jx1],
+                                pmask_best[jy0:jy1, jx0:jx1],
                             )
-                        ]
-                        if nearby_pets:
-                            nearby_pets.sort(key=lambda item: item[0], reverse=True)
-                            _, pbbox_best, pmask_best = nearby_pets[0]
-                            jy0 = max(0, min(ly0, int(pbbox_best[0])) - 8)
-                            jx0 = max(0, min(lx0, int(pbbox_best[1])) - 8)
-                            jy1 = min(sheet_h, max(ly1, int(pbbox_best[2])) + 8)
-                            jx1 = min(sheet_w, max(lx1, int(pbbox_best[3])) + 8)
-                            if jy1 > jy0 and jx1 > jx0:
-                                native_pet_meta = _extract_native_lm3_petiole_anchor(
-                                    sheet_mask[jy0:jy1, jx0:jx1],
-                                    pmask_best[jy0:jy1, jx0:jx1],
-                                )
-                                if native_pet_meta is not None:
-                                    p_bc = native_pet_meta["p_base_crop"]
-                                    p_ac = native_pet_meta["p_apex_crop"]
-                                    native_pet_meta["p_base"] = (int(jx0 + p_bc[0]), int(jy0 + p_bc[1]))
-                                    native_pet_meta["p_apex"] = (int(jx0 + p_ac[0]), int(jy0 + p_ac[1]))
+                            if native_pet_meta is not None:
+                                p_bc = native_pet_meta["p_base_crop"]
+                                p_ac = native_pet_meta["p_apex_crop"]
+                                native_pet_meta["p_base"] = (int(jx0 + p_bc[0]), int(jy0 + p_bc[1]))
+                                native_pet_meta["p_apex"] = (int(jx0 + p_ac[0]), int(jy0 + p_ac[1]))
 
-                    leaf_detections.append((
-                        full_bbox,
-                        sheet_mask,
-                        float(score),
-                        int(cls_id),
-                        (int(full_bbox[1]), int(full_bbox[0])),
-                        (0, 0),
-                        False,
-                        native_pet_meta,
-                        0.0,
-                        fg_area,
-                    ))
-            else:
-                for bbox, mask, score, cls_id in raw_detections:
-                    if int(cls_id) == 2 and self.enable_geometric_qc:
-                        _telem_deltas["rejected_leaflet_class"] += 1
-                        continue
-                    if cls_id in LM3_REPRODUCTIVE_CLASS_IDS:
-                        capitulum_detections.append((bbox, mask, float(score), int(cls_id)))
-                    elif int(cls_id) in (7, 9):
-                        root_detections.append(bbox)
-                    elif cls_id in LM3_LEAF_CLASS_IDS:
-                        sheet_mask = mask
-                        full_bbox = bbox
-                        leaf_detections.append((
-                            full_bbox,
-                            sheet_mask,
-                            float(score),
-                            int(cls_id),
-                            (int(full_bbox[1]), int(full_bbox[0])),
-                            (0, 0),
-                            False,
-                            None,
-                            0.0,
-                            int(np.count_nonzero(sheet_mask)),
-                        ))
+                leaf_detections.append((
+                    full_bbox,
+                    sheet_mask,
+                    float(score),
+                    int(cls_id),
+                    (int(full_bbox[1]), int(full_bbox[0])),
+                    (0, 0),
+                    False,
+                    native_pet_meta,
+                    0.0,
+                    fg_area,
+                ))
 
         is_calibrated_mm = bool(
             pixels_per_mm is not None and not np.isnan(pixels_per_mm) and float(pixels_per_mm) > 0.0
@@ -2196,11 +1597,8 @@ class SegmentAndExtractPipeline:
         extracted_records: List[Dict[str, Any]] = []
         rejected_instances: List[DetectedInstance] = []
         candidate_extractions: List[Tuple[DetectedInstance, Any, str, str, bool, bool, bool, int]] = []
-        rosette_vertical_fallback_extractions: List[Tuple[DetectedInstance, Any, str, str, bool, bool, bool, int]] = []
-        tier2_rosette_fallback_by_pid: Dict[int, List[DetectedInstance]] = defaultdict(list)
-        tier2_upper_rosette_fallback_by_pid: Dict[int, List[DetectedInstance]] = defaultdict(list)
 
-        # 6. Geometric Quality Gatekeeper & 2-Path Extraction
+        # 6. LeafMachine3 Orientation, Symmetry Scoring, and Direct Extraction
         px_per_cm_sheet = resolve_px_per_cm(
             pixels_per_mm=pixels_per_mm,
             default_dpi=DEFAULT_HERBARIUM_DPI,
@@ -2248,568 +1646,121 @@ class SegmentAndExtractPipeline:
             _inst_pre.blade_area_cm2 = _acm2
 
         effective_min_area_by_pid: Dict[int, float] = {}
-        if not self.enable_geometric_qc:
-            effective_min_blade_area_cm2 = 0.0
-        elif is_calibrated_mm:
-            _cls0_areas_cm2 = [
-                _i.blade_area_cm2
-                for _i in instances
-                if int(_i.class_id) == 0 and np.isfinite(_i.blade_area_cm2) and _i.blade_area_cm2 > 0.0
-            ]
-            _sheet_cand_areas_cm2 = (
-                _cls0_areas_cm2
-                if _cls0_areas_cm2
-                else [
-                    _i.blade_area_cm2
-                    for _i in instances
-                    if np.isfinite(_i.blade_area_cm2) and _i.blade_area_cm2 > 0.0
-                ]
-            )
-            effective_min_blade_area_cm2 = compute_sheet_adaptive_min_blade_area_cm2(
-                _sheet_cand_areas_cm2,
-                config_min_blade_area_cm2=self.min_blade_area_cm2,
-                absolute_floor_cm2=0.15,
-            )
-            _pids_present = sorted({int(_i.plant_individual_id) for _i in instances})
-            if len(_pids_present) >= 2:
-                for _pid_k in _pids_present:
-                    _pid_cls0 = [
-                        _i.blade_area_cm2
-                        for _i in instances
-                        if int(_i.plant_individual_id) == _pid_k
-                        and int(_i.class_id) == 0
-                        and np.isfinite(_i.blade_area_cm2)
-                        and _i.blade_area_cm2 > 0.0
-                    ]
-                    _pid_cands = (
-                        _pid_cls0
-                        if _pid_cls0
-                        else [
-                            _i.blade_area_cm2
-                            for _i in instances
-                            if int(_i.plant_individual_id) == _pid_k
-                            and np.isfinite(_i.blade_area_cm2)
-                            and _i.blade_area_cm2 > 0.0
-                        ]
-                    )
-                    if len(_pid_cands) >= 2:
-                        effective_min_area_by_pid[_pid_k] = compute_sheet_adaptive_min_blade_area_cm2(
-                            _pid_cands,
-                            config_min_blade_area_cm2=self.min_blade_area_cm2,
-                            absolute_floor_cm2=0.15,
-                        )
-        else:
-            effective_min_blade_area_cm2 = float(self.min_blade_area_cm2)
+        effective_min_blade_area_cm2 = 0.0
 
-        _neighbor_dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         for inst in instances:
-            ox, oy = inst.mask_origin
-            mh, mw = inst.mask.shape[:2]
-            cy0_m = max(0, oy)
-            cx0_m = max(0, ox)
-            cy1_m = min(sheet_h, oy + mh)
-            cx1_m = min(sheet_w, ox + mw)
-            inst_crop_bgr = (
-                img_bgr[cy0_m:cy1_m, cx0_m:cx1_m]
-                if (cy1_m > cy0_m and cx1_m > cx0_m)
-                else None
-            )
-
-            if not self.enable_geometric_qc:
-                # 100% Raw Unconstrained LeafMachine3 Mode:
-                # Retain every LeafMachine3 `Leaf` mask untouched with zero post-hoc
-                # geometric/photometric rejections, computing passive shape descriptors and
-                # pairing native LeafMachine3 `Petiole` (`class_id == 1`) / 31-keypoint attachment endpoints.
-                m_area = int(np.count_nonzero(inst.mask))
-                if m_area <= 0:
-                    continue
-                ox, oy = inst.mask_origin
-                rc_sheet = rosette_centroids_by_pid.get(inst.plant_individual_id)
-                rc_local = (rc_sheet[0] - ox, rc_sheet[1] - oy) if rc_sheet is not None else None
-                raw_ucs, raw_sol, raw_ang, raw_pa, raw_pb = compute_geometric_metrics(
-                    inst.mask, rosette_centroid=rc_local
-                )
-                ref_bbox = inst.pcd_bbox if inst.pcd_bbox is not None else inst.bbox
-                raw_desc = compute_classical_shape_descriptors(inst.mask, bbox=ref_bbox)
-                if (
-                    isinstance(inst.trim_meta, dict)
-                    and inst.trim_meta.get("native_lm3_petiole")
-                    and inst.trim_meta.get("p_base") is not None
-                    and inst.trim_meta.get("p_apex") is not None
-                ):
-                    p_base_use = inst.trim_meta["p_base"]
-                    p_apex_use = inst.trim_meta["p_apex"]
-                    midrib_ang_use = float(
-                        math.degrees(math.atan2(p_apex_use[1] - p_base_use[1], p_apex_use[0] - p_base_use[0]))
-                    )
-                else:
-                    p_base_use = raw_pb
-                    p_apex_use = raw_pa
-                    midrib_ang_use = float(raw_ang)
-
-                inst.solidity = float(raw_sol)
-                inst.midrib_angle_deg = midrib_ang_use
-                inst.circularity = float(raw_desc["circularity"])
-                inst.extent = float(raw_desc["extent"])
-                inst.is_severed_lobe = False
-                inst.cf_source = cf_source
-
-                lm3_bm_raw = orient_and_score_leaf_lm3(
-                    inst.mask,
-                    keypoints_31=inst.keypoints_31,
-                    p_base=p_base_use,
-                    p_apex=p_apex_use,
-                    offset_xy=(0, 0),
-                )
-                lm3_bm_geom = (
-                    orient_and_score_leaf_lm3(
-                        inst.mask,
-                        keypoints_31=None,
-                        p_base=raw_pb,
-                        p_apex=raw_pa,
-                        offset_xy=(0, 0),
-                    )
-                    if inst.keypoints_31 is not None
-                    else lm3_bm_raw
-                )
-                inst.archetype_score = float(
-                    min(
-                        float(lm3_bm_raw.get("archetype_score", 0.0)),
-                        float(lm3_bm_geom.get("archetype_score", 0.0)),
-                    )
-                )
-                _raw_b_dice = min(
-                    float(lm3_bm_raw.get("bilateral_dice", 1.0)),
-                    float(lm3_bm_geom.get("bilateral_dice", 1.0)),
-                )
-                _raw_si_a = max(
-                    abs(float(lm3_bm_raw.get("si_a", 0.0))),
-                    abs(float(lm3_bm_geom.get("si_a", 0.0))),
-                )
-                _raw_sym_ok = bool(lm3_bm_raw.get("success", False) or lm3_bm_geom.get("success", False))
-
-                is_dissected = bool(inst.solidity < self.min_solidity and is_botanical_dissection(inst.mask))
-                _min_sym_dice = 0.45 if is_dissected else 0.70
-                _max_sym_sia = 0.48 if is_dissected else 0.35
-                if (
-                    (_raw_sym_ok and (_raw_b_dice < _min_sym_dice or _raw_si_a >= _max_sym_sia))
-                    or (not is_dissected and inst.solidity < 0.65)
-                    or inst.extent < (0.16 if is_dissected else 0.25)
-                    or inst.circularity < 0.05
-                ):
-                    _telem_deltas["rejected_solidity_extent"] += 1
-                    inst.assigned_tier = "rejected"
-                    inst.rejection_reason = "UNRESOLVED_CLUMP"
-                    rejected_instances.append(inst)
-                    continue
-                if is_dissected:
-                    # Normalize UCS by convex-hull solidity so deeply dissected pinnatisect/lyrate leaves
-                    # are not penalized for inter-lobe sinus area
-                    inst.ucs_score = float(min(1.0, max(float(raw_ucs) / max(float(raw_sol), 0.35), 0.82)))
-                    tier = "Tier 1 (Bipinnatisect)" if inst.solidity < 0.48 else "Tier 1 (Dissected)"
-                else:
-                    inst.ucs_score = float(raw_ucs)
-                    tier = "Tier 1"
-                assigned_tier = TIER_1_DIRECT
-                is_folded = False
-                reflection_applied = False
-                inst.assigned_tier = assigned_tier
-
-                routing_res = LeafRoutingResult(
-                    tier=tier,
-                    assigned_tier="tier1",
-                    solidity=inst.solidity,
-                    ucs=inst.ucs_score,
-                    is_folded=False,
-                    is_irregular_fold=False,
-                    is_dissected=is_dissected,
-                    processed_mask=inst.mask,
-                    metadata={
-                        "p_base": p_base_use,
-                        "p_apex": p_apex_use,
-                        "midrib_angle_deg": midrib_ang_use,
-                        "reflection_applied": False,
-                        "petiole_trim_info": inst.trim_meta or {"is_trimmed": False},
-                    },
-                )
-                candidate_extractions.append((
-                    inst,
-                    routing_res,
-                    tier,
-                    assigned_tier,
-                    is_folded,
-                    is_dissected,
-                    reflection_applied,
-                    m_area,
-                ))
+            m_area = int(np.count_nonzero(inst.mask))
+            if m_area <= 0:
                 continue
-
+            ox, oy = inst.mask_origin
             rc_sheet = rosette_centroids_by_pid.get(inst.plant_individual_id)
             rc_local = (rc_sheet[0] - ox, rc_sheet[1] - oy) if rc_sheet is not None else None
-            _, _, _, _, p_base_hint = compute_geometric_metrics(inst.mask, rosette_centroid=rc_local)
-
-            # Build distinct neighboring leaf exclusion mask in inst.mask coordinates so crowded basal
-            # rosettes do not penalize intact blades touching sibling leaves, while preventing parent
-            # masks from shielding internal sub-lobes (overlap_frac < 0.30) or thin stem segments.
-            neighbor_mask: Optional[np.ndarray] = None
-            if len(instances) >= 2 and mh > 0 and mw > 0:
-                _, _, inst_area_g, _, _ = inst_geom_map.get(inst.leaf_id, (0.0, 0.0, 1.0, 1.0, 1.0))
-                inst_bool_local = inst.mask > 0
-                for other in instances:
-                    if other.leaf_id == inst.leaf_id:
-                        continue
-                    ob0, ob1, ob2, ob3 = other.bbox
-                    if ob2 + 24 <= oy or oy + mh <= ob0 - 24 or ob3 + 24 <= ox or ox + mw <= ob1 - 24:
-                        continue
-                    _, _, other_area_g, other_ar_g, other_sol_g = inst_geom_map.get(
-                        other.leaf_id, (0.0, 0.0, 0.0, 1.0, 0.0)
-                    )
-                    if other_area_g < 0.18 * max(inst_area_g, 1.0) or other_sol_g < 0.42:
-                        continue
-                    if other_ar_g >= 4.2 and other_sol_g < 0.72:
-                        continue
-                    oox, ooy = other.mask_origin
-                    omh, omw = other.mask.shape[:2]
-                    iy0 = max(oy, ooy)
-                    ix0 = max(ox, oox)
-                    iy1 = min(oy + mh, ooy + omh)
-                    ix1 = min(ox + mw, oox + omw)
-                    if iy1 <= iy0 or ix1 <= ix0:
-                        continue
-                    sub_inst = inst_bool_local[iy0 - oy : iy1 - oy, ix0 - ox : ix1 - ox]
-                    sub_other = other.mask[iy0 - ooy : iy1 - ooy, ix0 - oox : ix1 - oox] > 0
-                    if not np.any(sub_other):
-                        continue
-                    overlap_px = float(np.count_nonzero(sub_inst & sub_other))
-                    if (overlap_px / max(inst_area_g, 1.0)) >= 0.65:
-                        continue
-                    if neighbor_mask is None:
-                        neighbor_mask = np.zeros((mh, mw), dtype=np.uint8)
-                    dst_slice = neighbor_mask[iy0 - oy : iy1 - oy, ix0 - ox : ix1 - ox]
-                    dst_slice[sub_other] = 255
-                if neighbor_mask is not None and np.any(neighbor_mask > 0):
-                    _nd_rad = max(3, min(16, int(round(0.007 * max(mh, mw)))))
-                    _nd_k = (
-                        _neighbor_dilate_k
-                        if _nd_rad == 3
-                        else cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * _nd_rad + 1, 2 * _nd_rad + 1))
-                    )
-                    neighbor_mask = cv2.dilate(neighbor_mask, _nd_k, iterations=1)
-
-            _, _, _inst_area_pre, _inst_ar_pre, _inst_sol_pre = inst_geom_map.get(
-                inst.leaf_id, (0.0, 0.0, 0.0, 1.0, 0.0)
+            raw_ucs, raw_sol, raw_ang, raw_pa, raw_pb = compute_geometric_metrics(
+                inst.mask, rosette_centroid=rc_local
             )
-            # Enforce full geometric QC and boundary-continuity verification across all Stage 2 leaves
-            is_trusted_lm3_whole = False
-            inst.cf_source = cf_source
-
-            if is_high_dpi:
-                _ys_bchk, _xs_bchk = np.where(inst.mask > 0)
-                if len(_ys_bchk) > 0:
-                    _ys_s = _ys_bchk + int(oy)
-                    _xs_s = _xs_bchk + int(ox)
-                    _min_span_b = max(40, int(0.16 * max(1, min(int(np.ptp(_xs_bchk)), int(np.ptp(_ys_bchk))))))
-                    _border_touch = max(
-                        int(np.count_nonzero(_ys_s <= 1)),
-                        int(np.count_nonzero(_ys_s >= sheet_h - 2)),
-                        int(np.count_nonzero(_xs_s <= 1)),
-                        int(np.count_nonzero(_xs_s >= sheet_w - 2)),
-                    )
-                    if _border_touch >= _min_span_b:
-                        _telem_deltas["rejected_severed_lobe"] += 1
-                        inst.assigned_tier = "rejected"
-                        inst.rejection_reason = "SEVERED_LOBE"
-                        rejected_instances.append(inst)
-                        continue
-
-            eff_max_border_ratio = float(self.max_tissue_border_ratio)
-
-            # 6a. Boundary-continuity severed lobe / straight artificial occlusion check
-            bc_res = check_boundary_tissue_continuity(
-                inst_crop_bgr,
-                inst.mask,
-                dilation_px=8,
-                max_tissue_border_ratio=eff_max_border_ratio,
-                exclude_mask=neighbor_mask,
-                petiole_base_pt=p_base_hint,
-            )
-            inst.is_severed_lobe = bool(bc_res["is_severed_lobe"])
-            if inst.is_severed_lobe:
-                _telem_deltas["rejected_severed_lobe"] += 1
-                inst.assigned_tier = "rejected"
-                inst.rejection_reason = "SEVERED_LOBE"
-                logger.debug(
-                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected as severed/occluded fragment "
-                    f"(tissue_border_ratio={bc_res['tissue_border_ratio']:.3f} > {eff_max_border_ratio:.2f})."
-                )
-                rejected_instances.append(inst)
-                continue
-
-            # 6b. Cohort/plant-adaptive ruler-calibrated physical blade area filter
-            raw_area_px = _raw_px_by_leaf_id.get(inst.leaf_id, float(np.count_nonzero(inst.mask)))
-            _req_min_area_cm2 = effective_min_area_by_pid.get(
-                int(inst.plant_individual_id), effective_min_blade_area_cm2
-            )
-            if inst.blade_area_cm2 < _req_min_area_cm2:
-                _telem_deltas["rejected_min_area_cm2"] += 1
-                inst.assigned_tier = "rejected"
-                inst.rejection_reason = "MIN_BLADE_AREA_CM2"
-                logger.debug(
-                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by effective_min_blade_area_cm2: "
-                    f"{inst.blade_area_cm2:.3f} cm^2 < {_req_min_area_cm2:.3f} cm^2."
-                )
-                rejected_instances.append(inst)
-                continue
-
-            inst_spec_mask = (
-                specimen_paper_cleaned_mask[cy0_m:cy1_m, cx0_m:cx1_m]
-                if (specimen_paper_cleaned_mask is not None and cy1_m > cy0_m and cx1_m > cx0_m)
-                else None
-            )
-            try:
-                routing_res = classify_and_route_leaf(
-                    inst.mask,
-                    config=self.config,
-                    min_ucs=self.min_ucs,
-                    min_solidity=self.min_solidity,
-                    taxon=taxon,
-                    rosette_centroid=rc_local,
-                    extract_contours=False,
-                    already_trimmed=inst.already_trimmed,
-                    trim_meta=inst.trim_meta,
-                    sheet_shape=(sheet_h, sheet_w),
-                    crop_img=inst_crop_bgr,
-                    max_tissue_border_ratio=eff_max_border_ratio,
-                    exclude_mask=neighbor_mask,
-                    petiole_mask=inst.petiole_mask,
-                    hole_mask=inst.hole_mask,
-                    keypoints_31=inst.keypoints_31,
-                    specimen_paper_cleaned_mask=inst_spec_mask,
-                )
-            except TypeError:
-                routing_res = classify_and_route_leaf(
-                    inst.mask,
-                    config=self.config,
-                    min_ucs=self.min_ucs,
-                    min_solidity=self.min_solidity,
-                    taxon=taxon,
-                    rosette_centroid=rc_local,
-                    extract_contours=False,
-                    already_trimmed=inst.already_trimmed,
-                    trim_meta=inst.trim_meta,
-                    sheet_shape=(sheet_h, sheet_w),
-                    crop_img=inst_crop_bgr,
-                    max_tissue_border_ratio=eff_max_border_ratio,
-                    exclude_mask=neighbor_mask,
-                )
-
-            inst.ucs_score = routing_res.ucs
-            inst.solidity = routing_res.solidity
-            inst.midrib_angle_deg = float(routing_res.metadata.get("midrib_angle_deg", 0.0))
-
-            lm3_bm_qc = orient_and_score_leaf_lm3(
-                routing_res.processed_mask if routing_res.processed_mask is not None else inst.mask,
-                keypoints_31=inst.keypoints_31,
-                p_base=routing_res.metadata.get("p_base"),
-                p_apex=routing_res.metadata.get("p_apex"),
-                offset_xy=(0, 0),
-            )
-            inst.archetype_score = float(lm3_bm_qc.get("archetype_score", 0.0))
-            _lm3_bilateral_dice = float(lm3_bm_qc.get("bilateral_dice", 1.0))
-            _lm3_si_a = abs(float(lm3_bm_qc.get("si_a", 0.0)))
-            _lm3_sym_ok = bool(lm3_bm_qc.get("success", False))
-
-            # 6c. Classical dimensionless shape descriptors (Krieger 2017; Russ 2011): Solidity, Circularity, Extent
             ref_bbox = inst.pcd_bbox if inst.pcd_bbox is not None else inst.bbox
             raw_desc = compute_classical_shape_descriptors(inst.mask, bbox=ref_bbox)
-            proc_desc = compute_classical_shape_descriptors(routing_res.processed_mask, bbox=ref_bbox)
-            inst.circularity = float(proc_desc["circularity"] if routing_res.processed_mask is not None else raw_desc["circularity"])
-            inst.extent = float(max(raw_desc["extent"], proc_desc["extent"]))
-
-            min_req_extent = 0.16 if bool(routing_res.is_dissected) else self.min_extent
-            if inst.extent < min_req_extent:
-                _telem_deltas["rejected_solidity_extent"] += 1
-                inst.assigned_tier = "rejected"
-                inst.rejection_reason = "FAILED_EXTENT"
-                logger.debug(
-                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by min_extent: "
-                    f"extent={inst.extent:.3f} < {min_req_extent:.2f}."
-                )
-                rejected_instances.append(inst)
-                continue
-
             if (
-                not bool(routing_res.is_dissected)
-                and routing_res.assigned_tier != "tier2"
-                and inst.circularity < self.min_circularity
+                isinstance(inst.trim_meta, dict)
+                and inst.trim_meta.get("native_lm3_petiole")
+                and inst.trim_meta.get("p_base") is not None
+                and inst.trim_meta.get("p_apex") is not None
             ):
-                _telem_deltas["rejected_solidity_extent"] += 1
-                inst.assigned_tier = "rejected"
-                inst.rejection_reason = "FAILED_CIRCULARITY"
-                logger.debug(
-                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by min_circularity: "
-                    f"circularity={inst.circularity:.3f} < {self.min_circularity:.2f}."
+                p_base_use = inst.trim_meta["p_base"]
+                p_apex_use = inst.trim_meta["p_apex"]
+                midrib_ang_use = float(
+                    math.degrees(math.atan2(p_apex_use[1] - p_base_use[1], p_apex_use[0] - p_base_use[0]))
                 )
-                rejected_instances.append(inst)
-                continue
+            else:
+                p_base_use = raw_pb
+                p_apex_use = raw_pa
+                midrib_ang_use = float(raw_ang)
 
-            # Heterophylly / cauline-bract / stem-segment filter (works even when capitula_count == 0)
-            inst_cx, inst_cy, inst_area, inst_ar, inst_raw_sol = inst_geom_map[inst.leaf_id]
-            b_cx_med, b_cy_med, b_med_area, b_med_rad = basal_stats_by_pid.get(
-                inst.plant_individual_id, (sheet_basal_cx, sheet_basal_cy, sheet_med_area, sheet_rosette_rad)
+            inst.solidity = float(raw_sol)
+            inst.midrib_angle_deg = midrib_ang_use
+            inst.circularity = float(raw_desc["circularity"])
+            inst.extent = float(raw_desc["extent"])
+            inst.is_severed_lobe = False
+            inst.cf_source = cf_source
+
+            lm3_bm_raw = orient_and_score_leaf_lm3(
+                inst.mask,
+                keypoints_31=inst.keypoints_31,
+                p_base=p_base_use,
+                p_apex=p_apex_use,
+                offset_xy=(0, 0),
             )
-            trim_info = inst.trim_meta or routing_res.metadata.get("petiole_trim_info") or {}
-            has_petiole = bool(
-                getattr(inst, "has_petiole", False)
-                or trim_info.get("is_trimmed", False)
-                or float(trim_info.get("stalk_width_mean", 0.0) or 0.0) > 0.0
-            )
-            rad_dist = math.hypot(inst_cx - b_cx_med, inst_cy - b_cy_med)
-            is_cauline_reject, cauline_reason = is_cauline_or_stem_contaminant(
-                cy=inst_cy,
-                area=inst_area,
-                aspect_ratio=inst_ar,
-                solidity=min(float(inst_raw_sol), float(routing_res.solidity)),
-                basal_cy_med=b_cy_med,
-                med_area=b_med_area,
-                img_h=float(sheet_h),
-                capitula_count=max(int(capitula_count), len(capitulum_detections)),
-                cap_cy=cap_cy,
-                has_petiole=has_petiole,
-                med_rosette_radius=b_med_rad,
-                radial_dist_from_rosette=rad_dist,
-            )
-            if is_cauline_reject:
-                if inst_cy < b_cy_med:
-                    upper_cauline_pts.append((float(inst_cx), float(inst_cy)))
-                inst.assigned_tier = "rejected"
-                inst.rejection_reason = cauline_reason or "CAULINE_LEAF_REJECTED"
-                logger.debug(
-                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by heterophylly/cauline filter: "
-                    f"{inst.rejection_reason} (cy={inst_cy:.1f}, basal_cy_med={b_cy_med:.1f}, area={inst_area:.0f}, med_area={b_med_area:.0f})"
+            lm3_bm_geom = (
+                orient_and_score_leaf_lm3(
+                    inst.mask,
+                    keypoints_31=None,
+                    p_base=raw_pb,
+                    p_apex=raw_pa,
+                    offset_xy=(0, 0),
                 )
-                rejected_instances.append(inst)
-                continue
-
-            # Bare stem / fibrous root stick sanity check (applies anywhere on sheet, including below rosette)
-            _is_bare_stem_or_artifact = (
-                inst.solidity < 0.20
-                or inst.circularity < 0.035
-                or (inst_ar > 4.4 and inst.solidity < 0.65 and not bool(routing_res.is_dissected))
-                or (inst.solidity < 0.48 and inst.ucs_score < 0.52 and not bool(routing_res.is_dissected))
+                if inst.keypoints_31 is not None
+                else lm3_bm_raw
             )
-            if _is_bare_stem_or_artifact:
+            inst.archetype_score = float(
+                min(
+                    float(lm3_bm_raw.get("archetype_score", 0.0)),
+                    float(lm3_bm_geom.get("archetype_score", 0.0)),
+                )
+            )
+            _raw_b_dice = min(
+                float(lm3_bm_raw.get("bilateral_dice", 1.0)),
+                float(lm3_bm_geom.get("bilateral_dice", 1.0)),
+            )
+            _raw_si_a = max(
+                abs(float(lm3_bm_raw.get("si_a", 0.0))),
+                abs(float(lm3_bm_geom.get("si_a", 0.0))),
+            )
+            _raw_sym_ok = bool(lm3_bm_raw.get("success", False) or lm3_bm_geom.get("success", False))
+
+            is_dissected = bool(inst.solidity < self.min_solidity and is_botanical_dissection(inst.mask))
+            _min_sym_dice = 0.45 if is_dissected else 0.70
+            _max_sym_sia = 0.48 if is_dissected else 0.35
+            if (
+                (_raw_sym_ok and (_raw_b_dice < _min_sym_dice or _raw_si_a >= _max_sym_sia))
+                or (not is_dissected and inst.solidity < 0.65)
+                or inst.extent < (0.16 if is_dissected else 0.25)
+                or inst.circularity < 0.05
+            ):
                 _telem_deltas["rejected_solidity_extent"] += 1
                 inst.assigned_tier = "rejected"
                 inst.rejection_reason = "UNRESOLVED_CLUMP"
                 rejected_instances.append(inst)
                 continue
-
-            # Diagnostic classification flags
-            is_folded = bool(routing_res.is_folded)
-            is_dissected = bool(routing_res.is_dissected)
-            reflection_applied = False
-            tier: str = "Failed QC"
-            assigned_tier: str = "rejected"
-
-            # LeafMachine3 Voronoi bilateral symmetry veto across the midvein (SYM_DICE_ZERO = 0.70, SYM_SIA_ZERO = 0.35):
-            # Rejects merged multi-leaf or leaf-stem blobs (e.g. 1202203_leaf19 where bilateral_dice=0.510, si_a=0.436).
-            if self.enable_geometric_qc and _lm3_sym_ok and not is_folded:
-                _min_sym_dice = 0.45 if is_dissected else 0.70
-                _max_sym_sia = 0.48 if is_dissected else 0.35
-                if _lm3_bilateral_dice < _min_sym_dice or _lm3_si_a >= _max_sym_sia:
-                    _telem_deltas["rejected_solidity_extent"] += 1
-                    inst.assigned_tier = "rejected"
-                    inst.rejection_reason = "UNRESOLVED_CLUMP"
-                    logger.debug(
-                        f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by LM3 bilateral symmetry gate: "
-                        f"bilateral_dice={_lm3_bilateral_dice:.3f} < {_min_sym_dice:.2f} or "
-                        f"|si_a|={_lm3_si_a:.3f} >= {_max_sym_sia:.2f} (is_dissected={is_dissected})."
-                    )
-                    rejected_instances.append(inst)
-                    continue
-
-            # Routing Decision Tree
-            if not is_folded and routing_res.solidity >= self.min_solidity and routing_res.ucs >= self.min_ucs and routing_res.assigned_tier == "tier1" and not is_dissected:
-                tier = "Tier 1"
-                assigned_tier = TIER_1_DIRECT
-                reflection_applied = False
-
-            elif (
-                not is_folded
-                and (routing_res.solidity < self.min_solidity)
-                and is_dissected
-                and routing_res.solidity >= min(self.min_dissected, 0.18)
-                and (
-                    routing_res.ucs >= self.min_ucs
-                    or routing_res.ucs >= (0.55 if routing_res.solidity < 0.48 else 0.80)
-                )
-                and routing_res.assigned_tier == "tier1"
-            ):
-                tier = (
-                    routing_res.tier
-                    if routing_res.tier in ("Tier 1 (Dissected)", "Tier 1 (Bipinnatisect)")
-                    else ("Tier 1 (Bipinnatisect)" if routing_res.solidity < 0.48 else "Tier 1 (Dissected)")
-                )
-                assigned_tier = TIER_1_DIRECT
-                is_dissected = True
-                reflection_applied = False
-
-            elif is_folded or routing_res.assigned_tier == "tier2":
-                rejection_reason = "PARTIAL_OR_FOLDED_EXCLUDED_FROM_EFA"
-                inst.assigned_tier = "rejected"
-                inst.rejection_reason = rejection_reason
-                logger.debug(
-                    f"Voucher {catalog_number} leaf {inst.leaf_id} excluded from closed-outline EFA "
-                    f"({rejection_reason}; is_folded={is_folded}, routing={routing_res.assigned_tier})."
-                )
-                rejected_instances.append(inst)
-                continue
-
-            # Else -> log rejection reason (FAILED_SOLIDITY, IRREGULAR_FOLD, UNRESOLVED_CLUMP) and route to Failed QC
+            if is_dissected:
+                # Normalize UCS by convex-hull solidity so deeply dissected pinnatisect/lyrate leaves
+                # are not penalized for inter-lobe sinus area
+                inst.ucs_score = float(min(1.0, max(float(raw_ucs) / max(float(raw_sol), 0.35), 0.82)))
+                tier = "Tier 1 (Bipinnatisect)" if inst.solidity < 0.48 else "Tier 1 (Dissected)"
             else:
-                if routing_res.is_irregular_fold:
-                    rejection_reason = "IRREGULAR_FOLD"
-                elif routing_res.rejection_reason in ["FAILED_SOLIDITY", "IRREGULAR_FOLD", "UNRESOLVED_CLUMP"]:
-                    rejection_reason = routing_res.rejection_reason
-                elif routing_res.solidity < self.min_dissected or routing_res.ucs < 0.60:
-                    rejection_reason = "UNRESOLVED_CLUMP"
-                elif routing_res.solidity < self.min_solidity:
-                    rejection_reason = "FAILED_SOLIDITY"
-                else:
-                    rejection_reason = "UNRESOLVED_CLUMP"
-
-                inst.assigned_tier = "rejected"
-                inst.rejection_reason = rejection_reason
-                if rejection_reason in ("FAILED_SOLIDITY", "UNRESOLVED_CLUMP"):
-                    _telem_deltas["rejected_solidity_extent"] += 1
-                logger.debug(
-                    f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by gatekeeper: {rejection_reason} "
-                    f"(solidity={inst.solidity:.3f}, ucs={inst.ucs_score:.3f})"
-                )
-                rejected_instances.append(inst)
-                continue
-
-            m_area = int(np.count_nonzero(routing_res.processed_mask))
-            if is_high_dpi:
-                bx_i, by_i, bw_i, bh_i = cv2.boundingRect(inst.mask)
-                if bw_i == 0 or bh_i == 0:
-                    inst.assigned_tier = "rejected"
-                    inst.rejection_reason = "UNRESOLVED_CLUMP"
-                    rejected_instances.append(inst)
-                    continue
-                sub_i = inst.mask[by_i : by_i + bh_i, bx_i : bx_i + bw_i]
-                ys_m, xs_m = np.where(sub_i > 0)
-                if len(ys_m) == 0 or len(xs_m) == 0:
-                    inst.assigned_tier = "rejected"
-                    inst.rejection_reason = "UNRESOLVED_CLUMP"
-                    rejected_instances.append(inst)
-                    continue
-                cy_sheet_m = float(np.mean(ys_m)) + by_i + oy
-                cy_rel_p_m = max(0.0, min(1.0, (cy_sheet_m - ymin_plant) / plant_bbox_span))
-                inst_cy_rel_plant_bbox[inst.leaf_id] = cy_rel_p_m
-
+                inst.ucs_score = float(raw_ucs)
+                tier = "Tier 1"
+            assigned_tier = TIER_1_DIRECT
+            is_folded = False
+            reflection_applied = False
             inst.assigned_tier = assigned_tier
+
+            routing_res = LeafRoutingResult(
+                tier=tier,
+                assigned_tier="tier1",
+                solidity=inst.solidity,
+                ucs=inst.ucs_score,
+                is_folded=False,
+                is_irregular_fold=False,
+                is_dissected=is_dissected,
+                processed_mask=inst.mask,
+                metadata={
+                    "p_base": p_base_use,
+                    "p_apex": p_apex_use,
+                    "midrib_angle_deg": midrib_ang_use,
+                    "reflection_applied": False,
+                    "petiole_trim_info": inst.trim_meta or {"is_trimmed": False},
+                },
+            )
             candidate_extractions.append((
                 inst,
                 routing_res,
@@ -2820,46 +1771,6 @@ class SegmentAndExtractPipeline:
                 reflection_applied,
                 m_area,
             ))
-
-        # Vertical Rosette Position Relaxation: if no candidate basal leaf satisfied the static sheet vertical gate,
-        # relax to the lower 60% of the detected plant bounding box (cy_rel_plant_bbox >= 0.40)
-        if not candidate_extractions and rosette_vertical_fallback_extractions:
-            rosette_bbox_fallback_used = True
-            for _fb_item in rosette_vertical_fallback_extractions:
-                _fb_item[0].assigned_tier = _fb_item[3]
-                candidate_extractions.append(_fb_item)
-            for _fb_pid, _fb_list in tier2_upper_rosette_fallback_by_pid.items():
-                tier2_rosette_fallback_by_pid[_fb_pid].extend(_fb_list)
-        else:
-            for _fb_item in rosette_vertical_fallback_extractions:
-                _fb_inst = _fb_item[0]
-                _fb_inst.assigned_tier = "rejected"
-                _fb_inst.rejection_reason = "UNRESOLVED_CLUMP"
-                rejected_instances.append(_fb_inst)
-            if not candidate_extractions and not tier2_rosette_fallback_by_pid and tier2_upper_rosette_fallback_by_pid:
-                rosette_bbox_fallback_used = True
-                for _fb_pid, _fb_list in tier2_upper_rosette_fallback_by_pid.items():
-                    tier2_rosette_fallback_by_pid[_fb_pid].extend(_fb_list)
-
-        # Scope relative area floor (0.15 * max_pid_area) and quality ranking per `plant_individual_id`
-        # without an arbitrary sheet-wide 6-leaf cap so multi-plant sheets retain all valid basal leaves.
-        if self.enable_geometric_qc and is_high_dpi and candidate_extractions:
-            max_area_by_pid: Dict[int, int] = {}
-            for item in candidate_extractions:
-                _pid_c = int(item[0].plant_individual_id)
-                _area_c = int(item[7])
-                if _area_c > max_area_by_pid.get(_pid_c, 0):
-                    max_area_by_pid[_pid_c] = _area_c
-            kept_with_q_cand: List[Tuple[float, Tuple[DetectedInstance, Any, str, str, bool, bool, bool, int]]] = []
-            for item in candidate_extractions:
-                _inst, _rres, _tier, _atier, _fold, _diss, _refl, _area = item
-                _max_pid_area = max_area_by_pid.get(int(_inst.plant_individual_id), _area)
-                if _area >= 0.15 * _max_pid_area:
-                    _arch_w = max(0.35, float(_inst.archetype_score)) if float(_inst.archetype_score) > 0.0 else 1.0
-                    _q = round(float(_inst.solidity), 4) * round(float(_inst.ucs_score), 4) * _arch_w * math.sqrt(_area)
-                    kept_with_q_cand.append((_q, item))
-            kept_with_q_cand.sort(key=lambda x: x[0], reverse=True)
-            candidate_extractions = [x[1] for x in kept_with_q_cand]
 
         # Compute empirical rosette crown (p_crown), anatomical basal vs cauline leaf_zone classification,
         # 75th-percentile outer-rosette petiole metrics, and piecewise flowering scape height metrics across candidate_extractions
@@ -2970,7 +1881,7 @@ class SegmentAndExtractPipeline:
         for inst, routing_res, tier, assigned_tier, is_folded, is_dissected, reflection_applied, m_area in candidate_extractions:
             ox, oy = inst.mask_origin
 
-            def _export_homologized(mask_proc: np.ndarray, is_reflected: bool) -> Optional[str]:
+            def _export_homologized(mask_proc: np.ndarray) -> Optional[str]:
                 mask_for_contour = _prepare_lamina_mask(
                     mask_proc,
                     petiole_mask=inst.petiole_mask,
@@ -2981,13 +1892,12 @@ class SegmentAndExtractPipeline:
                 p_base_pt = routing_res.metadata.get("p_base")
                 p_apex_pt = routing_res.metadata.get("p_apex")
                 if (
-                    is_reflected
-                    or p_base_pt is None
+                    p_base_pt is None
                     or p_base_pt == (0, 0)
                     or inst.petiole_mask is not None
                 ):
                     _, _, _, _pa_lam, _pb_lam = compute_geometric_metrics(mask_for_contour)
-                    if is_reflected or p_base_pt is None or p_base_pt == (0, 0):
+                    if p_base_pt is None or p_base_pt == (0, 0):
                         p_base_pt = _pb_lam
                         p_apex_pt = _pa_lam
                     elif inst.petiole_mask is not None:
@@ -3059,29 +1969,10 @@ class SegmentAndExtractPipeline:
                     return c_path
                 return c_res
 
-            if tier == "Tier 2":
-                out_base = (self.output_dir / "data") if (self.output_dir.name != "data" and (self.output_dir / "data").is_dir()) else self.output_dir
-                mask_dir = out_base / "masks"
-                tier2_dir = mask_dir / "tier2_reflected"
-                tier2_dir.mkdir(parents=True, exist_ok=True)
-
-                filename = f"{catalog_number}_leaf{inst.leaf_id}.png"
-                tier_save_path = tier2_dir / filename
-
-                ok_enc, enc_buf = cv2.imencode(".png", routing_res.processed_mask)
-                if ok_enc:
-                    tier_save_path.write_bytes(enc_buf.tobytes())
-                else:
-                    cv2.imwrite(str(tier_save_path), routing_res.processed_mask)
-
-                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=True)
-                inst.mask_path = str(tier_save_path)
-                inst.contour_path = contour_path
-            else:
-                mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
-                contour_path = _export_homologized(routing_res.processed_mask, is_reflected=False)
-                inst.mask_path = mask_path
-                inst.contour_path = contour_path
+            mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
+            contour_path = _export_homologized(routing_res.processed_mask)
+            inst.mask_path = mask_path
+            inst.contour_path = contour_path
 
             pid_pet = by_plant_petiole.get(int(inst.plant_individual_id), petiole_scape_res)
             _inst_ar_val = inst_geom_map.get(inst.leaf_id, (0.0, 0.0, 0.0, np.nan, 1.0))[3]
@@ -3321,16 +2212,10 @@ class SegmentAndExtractPipeline:
         logger.info(f"Output Directory: {self.output_dir}")
         logger.info(f"Device: {self.device}")
         logger.info(f"Force Overwrite: {self.force}")
-        if self.enable_geometric_qc:
-            logger.info(
-                f"Segmentation Mode: Opt-in Geometric QC Gatekeeper "
-                f"(Min Solidity={self.min_solidity}, Min UCS={self.min_ucs})"
-            )
-        else:
-            logger.info(
-                "Segmentation Mode: 100% Raw Unconstrained LeafMachine3 "
-                "(native leaf/petiole/hole/pose detection, zero post-hoc geometric QC constraints)"
-            )
+        logger.info(
+            "Segmentation Mode: 100% Raw Unconstrained LeafMachine3 "
+            "(native leaf/petiole/hole/pose detection, zero post-hoc geometric QC constraints)"
+        )
         logger.info("==================================================================")
 
         if not self.vouchers_csv.exists():
@@ -3780,9 +2665,7 @@ class SegmentAndExtractPipeline:
                             )
                             cand_crops = unpacked[0]
                             pre_crops = [
-                                self.model_engine.prepare_transformed_crop(
-                                    _downscale_crop_for_working_frame(c[3], sh_v, sw_v)[0]
-                                )
+                                self.model_engine.prepare_transformed_crop(c[3])
                                 for c in cand_crops
                             ]
                             return local_i, unpacked, pre_crops, False
@@ -3810,8 +2693,6 @@ class SegmentAndExtractPipeline:
 
                         # Stage B3: Cross-voucher batched Stage 2 LeafMachine3 YOLO26x-seg on GPU thread
                         flat_crops: List[np.ndarray] = []
-                        flat_native_shapes: List[Tuple[int, int]] = []
-                        flat_work_scales: List[float] = []
                         flat_pre: List[Optional[Tuple[np.ndarray, int, int]]] = []
                         slice_ranges: List[Tuple[int, int, int]] = []
                         for loc_i in valid_indices:
@@ -3821,18 +2702,13 @@ class SegmentAndExtractPipeline:
                             if not cands:
                                 slice_ranges.append((loc_i, 0, 0))
                                 continue
-                            img_v_loc = wave_prefetched[loc_i][4]
-                            sh_loc, sw_loc = img_v_loc.shape[:2] if img_v_loc is not None else (0, 0)
                             s_idx = len(flat_crops)
                             for c_item in cands:
-                                wc_bgr, w_scale = _downscale_crop_for_working_frame(c_item[3], sh_loc, sw_loc)
-                                flat_crops.append(wc_bgr)
-                                flat_native_shapes.append((c_item[3].shape[0], c_item[3].shape[1]))
-                                flat_work_scales.append(w_scale)
+                                flat_crops.append(c_item[3])
                             flat_pre.extend(precrops_by_local.get(loc_i, [None] * len(cands)))
                             slice_ranges.append((loc_i, s_idx, len(flat_crops)))
 
-                        raw_flat_preds = (
+                        flat_preds = (
                             self.model_engine.predict_batch(
                                 flat_crops,
                                 batch_size=self.stage2_batch_size,
@@ -3841,12 +2717,6 @@ class SegmentAndExtractPipeline:
                             if flat_crops
                             else []
                         )
-                        flat_preds = [
-                            _upscale_stage2_preds_to_native_crop(c_preds, nat_h, nat_w, w_scale)
-                            for c_preds, (nat_h, nat_w), w_scale in zip(
-                                raw_flat_preds, flat_native_shapes, flat_work_scales
-                            )
-                        ]
 
                         flat_pose_preds: List[Optional[Any]] = [None] * len(flat_crops)
                         if (
@@ -3877,65 +2747,14 @@ class SegmentAndExtractPipeline:
                                     batch_size=max(8, self.stage2_batch_size),
                                 )
                                 for idx_f, p_res in zip(pose_indices, pose_batch_out):
-                                    wc_f = flat_crops[idx_f]
-                                    flat_pose_preds[idx_f] = _upscale_pose_result_to_native_crop(
-                                        p_res, wc_f.shape[0], wc_f.shape[1], flat_work_scales[idx_f]
-                                    )
+                                    flat_pose_preds[idx_f] = p_res
 
                         s2_payload_by_local: Dict[int, Tuple[Any, ...]] = {}
-                        has_spec_seg = (
-                            self.enable_geometric_qc
-                            and getattr(self, "specimen_segmenter", None) is not None
-                            and getattr(self.specimen_segmenter, "model", None) is not None
-                        )
                         for loc_i, s_idx, e_idx in slice_ranges:
                             unp = unpacked_by_local[loc_i]
                             v_preds = list(flat_preds[s_idx:e_idx]) if e_idx > s_idx else []
                             v_pose_preds = list(flat_pose_preds[s_idx:e_idx]) if e_idx > s_idx else []
-                            v_spec_mask: Optional[np.ndarray] = None
-                            if has_spec_seg and v_preds:
-                                needs_spec = False
-                                for c_idx_v, c_preds_v in enumerate(v_preds):
-                                    if not c_preds_v:
-                                        continue
-                                    l_cands_v = [
-                                        (float(p_sc), int(np.count_nonzero(pm_u8)), pm_u8)
-                                        for _bb, pm_u8, p_sc, p_cls in c_preds_v
-                                        if int(p_cls) == 0 and np.any(pm_u8 > 0)
-                                    ]
-                                    if not l_cands_v:
-                                        continue
-                                    l_cands_v.sort(
-                                        key=lambda c: (
-                                            float(c[1]) * (float(c[0]) ** 0.5)
-                                            if float(c[0]) >= 0.42
-                                            else float(c[0]),
-                                            c[1],
-                                        ),
-                                        reverse=True,
-                                    )
-                                    best_m_v = l_cands_v[0][2]
-                                    if cv2.connectedComponents((best_m_v > 0).astype(np.uint8), connectivity=8)[0] > 2:
-                                        needs_spec = True
-                                        break
-                                    if len(l_cands_v) > 1:
-                                        has_pet_v = any(
-                                            int(p_cls) == 1 and np.any(pm_u8 > 0)
-                                            for _bb, pm_u8, _p_sc, p_cls in c_preds_v
-                                        )
-                                        p_res_v = v_pose_preds[c_idx_v] if c_idx_v < len(v_pose_preds) else None
-                                        has_kps_v = bool(getattr(p_res_v, "keypoints_31", None))
-                                        if not has_pet_v and not has_kps_v:
-                                            needs_spec = True
-                                            break
-                                if needs_spec:
-                                    img_v = wave_prefetched[loc_i][4]
-                                    if img_v is not None:
-                                        try:
-                                            v_spec_mask = self.specimen_segmenter.segment_specimen(img_v)
-                                        except Exception:
-                                            v_spec_mask = None
-                            s2_payload_by_local[loc_i] = (*unp, v_preds, v_pose_preds, v_spec_mask)
+                            s2_payload_by_local[loc_i] = (*unp, v_preds, v_pose_preds)
 
                         ss_payload_by_local: Dict[int, List[Any]] = {}
                         if ss_Fallback_locals:

@@ -29,10 +29,8 @@ from scripts.vision.leaf_geometry_utils import (
 )
 
 __all__ = [
-    "is_topologically_connected_mask",
     "cluster_plant_individuals",
     "cluster_voucher_plants_dbscan",
-    "route_tier3_open_curve",
     "_extract_xy_point",
     "_parse_basal_leaf_pose",
     "_estimate_single_plant_crown",
@@ -40,63 +38,6 @@ __all__ = [
     "approximate_petiole_and_scape_metrics",
     "classify_leaf_zone_anatomical",
 ]
-
-
-# =============================================================================
-# 3B. Topological Gatekeeping
-# =============================================================================
-
-def is_topologically_connected_mask(
-    mask: np.ndarray,
-    reference_mask: Optional[np.ndarray] = None,
-    min_area_px: int = 30,
-    min_iou_with_ref: float = 0.35,
-    max_hole_area_px: float = 15.0,
-) -> bool:
-    """
-    Validates that a refined binary leaf mask satisfies strict topological connectedness:
-      1. Non-empty with foreground pixel count >= `min_area_px`.
-      2. Strictly 1 connected foreground component (`num_labels == 2` in 8-connectivity),
-         preventing disconnected lobe islands or severed blade fragments.
-      3. Simply connected (genus 0; no internal topological holes with area >= `max_hole_area_px`).
-      4. When `reference_mask` (`m_init`) is provided, preserves macro-scale alignment
-         (IoU >= `min_iou_with_ref` and area ratio within [0.35, 2.50]).
-    """
-    if mask is None or mask.size == 0:
-        return False
-
-    bin_u8 = (mask > 0).astype(np.uint8)
-    fg_count = int(np.count_nonzero(bin_u8))
-    if fg_count < min_area_px:
-        return False
-
-    num_labels, _, _, _ = cv2.connectedComponentsWithStats(bin_u8, connectivity=8)
-    if num_labels != 2:
-        return False
-
-    # Check for internal holes via two-level contour hierarchy
-    contours, hierarchy = cv2.findContours(bin_u8 * 255, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    if hierarchy is not None and len(contours) > 1:
-        hier = hierarchy[0]
-        for idx, h_node in enumerate(hier):
-            parent_idx = int(h_node[3])
-            if parent_idx != -1:
-                hole_area = float(cv2.contourArea(contours[idx]))
-                if hole_area >= max_hole_area_px:
-                    return False
-
-    if reference_mask is not None and reference_mask.size == mask.size:
-        ref_bin = (reference_mask > 0)
-        ref_area = int(np.count_nonzero(ref_bin))
-        if ref_area > 0:
-            inter = int(np.count_nonzero(bin_u8.astype(bool) & ref_bin))
-            union = int(np.count_nonzero(bin_u8.astype(bool) | ref_bin))
-            iou = float(inter) / float(max(1, union))
-            area_ratio = float(fg_count) / float(ref_area)
-            if iou < min_iou_with_ref or not (0.35 <= area_ratio <= 2.50):
-                return False
-
-    return True
 
 
 # =============================================================================
@@ -206,81 +147,6 @@ def cluster_voucher_plants_dbscan(
             next_id += 1
 
     return candidates
-
-
-# =============================================================================
-# 6. Additional Caliper Utilities (Tier 3)
-# =============================================================================
-
-def route_tier3_open_curve(
-    mask: np.ndarray,
-    candidate: Any,
-    output_dir: Path,
-    scale_mm_per_px: float
-) -> Tuple[str, float, float, float]:
-    """
-    Tier 3: Open Margin Curves & Caliper Measurements.
-    Extracts continuous margin coordinate series and measures scalar traits.
-    """
-    h, w = mask.shape[:2]
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
-        return "", 0.0, 0.0, 0.0
-
-    main_contour = max(contours, key=cv2.contourArea).reshape(-1, 2)
-    num_pts = len(main_contour)
-
-    if num_pts < 30:
-        resampled = main_contour
-    else:
-        indices = np.linspace(0, num_pts - 1, 100).astype(int)
-        resampled = main_contour[indices]
-
-    min_x, min_y = np.min(resampled, axis=0)
-    max_x, max_y = np.max(resampled, axis=0)
-    span_x = max(max_x - min_x, 1)
-    span_y = max(max_y - min_y, 1)
-
-    cat_num = getattr(candidate, "catalog_number", "UNKNOWN")
-    plant_id = getattr(candidate, "plant_individual_id", 0)
-    leaf_id = getattr(candidate, "leaf_id", 1)
-
-    curve_df = pd.DataFrame({
-        "catalogNumber": cat_num,
-        "plant_individual_id": plant_id,
-        "leaf_id": leaf_id,
-        "point_index": np.arange(len(resampled)),
-        "x_px": resampled[:, 0],
-        "y_px": resampled[:, 1],
-        "x_norm": (resampled[:, 0] - min_x) / span_x,
-        "y_norm": (resampled[:, 1] - min_y) / span_y,
-    })
-
-    save_path = output_dir / "masks" / "tier3_open_curves" / f"{cat_num}_p{plant_id}_leaf{leaf_id}_curve.csv"
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    curve_df.to_csv(save_path, index=False)
-
-    col_widths = [np.sum(mask[:, x] > 0) for x in range(w)]
-    max_width_px = float(np.max(col_widths)) if col_widths else 0.0
-    width_mm = max_width_px * scale_mm_per_px
-
-    petiole_cutoff_px = 0.25 * max_width_px
-    petiole_cols = [x for x in range(int(w * 0.5), w) if col_widths[x] <= petiole_cutoff_px]
-    petiole_length_mm = float(len(petiole_cols)) * scale_mm_per_px
-
-    apex_angle_deg = 45.0
-    probe_x = int(w * 0.10)
-    if probe_x < w:
-        probe_y = np.where(mask[:, probe_x] > 0)[0]
-        if len(probe_y) >= 2:
-            y_top, y_bot = np.min(probe_y), np.max(probe_y)
-            apex_x, apex_y = 0, h // 2
-            v1 = np.array([probe_x - apex_x, y_top - apex_y], dtype=np.float32)
-            v2 = np.array([probe_x - apex_x, y_bot - apex_y], dtype=np.float32)
-            cos_ang = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6)
-            apex_angle_deg = float(math.degrees(math.acos(np.clip(cos_ang, -1.0, 1.0))))
-
-    return str(save_path), petiole_length_mm, width_mm, apex_angle_deg
 
 
 # =============================================================================

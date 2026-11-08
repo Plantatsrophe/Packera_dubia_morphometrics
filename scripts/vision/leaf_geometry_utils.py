@@ -552,260 +552,6 @@ def extract_tier1_pristine(
 route_tier1_silhouette = extract_tier1_pristine
 
 
-def extract_tier2_reflected(
-    mask: np.ndarray,
-    catalog_number: str,
-    leaf_id: int,
-    p_apex: Tuple[int, int],
-    p_base: Tuple[int, int],
-    output_dir: Optional[Path] = None,
-    threshold_defect: float = 35.0,
-    min_solidity: float = 0.68,
-    min_ucs: float = 0.50,
-    petiole_mask: Optional[np.ndarray] = None,
-    hole_mask: Optional[np.ndarray] = None,
-) -> Tuple[Optional[str], Optional[np.ndarray]]:
-    """
-    Tier 2: Vectorized Hemi-Blade Bilateral Symmetry Reflection.
-    Crops around the tight bounding box with 25% padding, aligns mask along the
-    midrib axis using +angle (so the midrib rotates to 0 degrees horizontal in
-    OpenCV's top-left origin frame), assesses margin defect profile of upper vs
-    lower half, reflects the clean half across the midrib axis symmetrically
-    using NumPy vectorization (no nested pixel loops), applies morphological
-    closing to produce a watertight closed silhouette, and inverse-rotates back
-    to the original canvas frame.
-    """
-    h, w = mask.shape[:2]
-    if h < 15 or w < 15:
-        return None, None
-
-    mask_u8 = _prepare_lamina_mask(mask, petiole_mask=petiole_mask, hole_mask=hole_mask)
-    bx, by, bw, bh = cv2.boundingRect(mask_u8)
-    if bw == 0 or bh == 0:
-        return None, None
-
-    x_min, x_max = bx, bx + bw - 1
-    y_min, y_max = by, by + bh - 1
-    pad = max(16, int(0.25 * max(bw, bh)))
-
-    tight_crop = (mask_u8[y_min:y_max + 1, x_min:x_max + 1] > 0).astype(np.uint8) * 255
-    if int(np.count_nonzero(tight_crop)) < 30:
-        return None, None
-
-    if p_apex == p_base or p_apex == (0, 0):
-        _, _, _, p_apex, p_base = compute_geometric_metrics(mask_u8)
-
-    cnts, _ = cv2.findContours(tight_crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not cnts:
-        return None, None
-    in_cnt = max(cnts, key=cv2.contourArea)
-    in_cnt_f = in_cnt.astype(np.float32)
-    in_rect = cv2.minAreaRect(in_cnt_f)
-    in_minor_w = float(min(in_rect[1]))
-    in_major_l = float(max(in_rect[1]))
-    in_ar = in_minor_w / max(in_major_l, 1.0)
-
-    in_area = float(cv2.contourArea(in_cnt_f))
-    in_hull = cv2.convexHull(in_cnt_f)
-    in_hull_area = float(cv2.contourArea(in_hull))
-    in_solidity = float(in_area / in_hull_area) if in_hull_area > 0 else 0.0
-
-    is_high_dpi_mask = max(bw, bh) > 160
-    if is_high_dpi_mask and (in_solidity < 0.68 or in_ar > 0.84):
-        return None, None
-
-    crop_mask = cv2.copyMakeBorder(
-        tight_crop, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0
-    )
-    ch, cw = crop_mask.shape[:2]
-
-    ax_c = float(p_apex[0] - x_min + pad)
-    ay_c = float(p_apex[1] - y_min + pad)
-    bx_c = float(p_base[0] - x_min + pad)
-    by_c = float(p_base[1] - y_min + pad)
-
-    # 2. Compute midrib angle from p_apex to p_base and pass +angle to rotate to 0 deg horizontal
-    dx = float(p_base[0] - p_apex[0])
-    dy = float(p_base[1] - p_apex[1])
-    angle = math.degrees(math.atan2(dy, dx))
-
-    cx = float(round(0.5 * (ax_c + bx_c)))
-    cy = float(round(0.5 * (ay_c + by_c)))
-    if not (2.0 < cx < cw - 3.0 and 2.0 < cy < ch - 3.0):
-        cx, cy = cw / 2.0, ch / 2.0
-
-    rot_mat = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
-    aligned = cv2.warpAffine(crop_mask, rot_mat, (cw, ch), flags=cv2.INTER_NEAREST)
-
-    y_indices, x_indices = np.where(aligned > 0)
-    if len(y_indices) < 30:
-        return None, None
-
-    y_midrib = int(round(cy))
-    if y_midrib <= 1 or y_midrib >= ch - 2:
-        y_midrib = int(np.median(y_indices))
-    if y_midrib <= 1 or y_midrib >= ch - 2:
-        return None, None
-
-    upper_half = np.zeros_like(aligned)
-    lower_half = np.zeros_like(aligned)
-    upper_half[:y_midrib, :] = aligned[:y_midrib, :]
-    lower_half[y_midrib:, :] = aligned[y_midrib:, :]
-
-    # Fully vectorized margin profile detection across active leaf columns
-    upper_has_fg = upper_half > 0
-    lower_has_fg = lower_half > 0
-
-    col_has_upper = np.any(upper_has_fg, axis=0)
-    col_has_lower = np.any(lower_has_fg, axis=0)
-    active_cols = np.where(col_has_upper | col_has_lower)[0]
-    if len(active_cols) < 5:
-        return None, None
-    c_start, c_end = int(active_cols[0]), int(active_cols[-1])
-
-    # Fast column min/max using vectorized argmax
-    upper_profile = np.where(col_has_upper, np.argmax(upper_has_fg, axis=0), y_midrib)[c_start:c_end + 1]
-    lower_profile = np.where(col_has_lower, ch - 1 - np.argmax(lower_has_fg[::-1, :], axis=0), y_midrib)[c_start:c_end + 1]
-
-    # Assess margin defect score (jumps/discontinuities)
-    upper_diff = np.abs(np.diff(upper_profile))
-    lower_diff = np.abs(np.diff(lower_profile))
-    upper_defects = float(np.sum(upper_diff > 8) * 10.0 + np.std(upper_diff))
-    lower_defects = float(np.sum(lower_diff > 8) * 10.0 + np.std(lower_diff))
-
-    upper_area = int(np.count_nonzero(upper_half))
-    lower_area = int(np.count_nonzero(lower_half))
-
-    if upper_defects < threshold_defect and lower_defects < threshold_defect:
-        if abs(upper_defects - lower_defects) < 5.0 and upper_area != lower_area:
-            selected_half = "upper" if upper_area > lower_area else "lower"
-        elif upper_defects <= lower_defects:
-            selected_half = "upper"
-        else:
-            selected_half = "lower"
-    elif upper_defects < threshold_defect:
-        selected_half = "upper"
-    elif lower_defects < threshold_defect:
-        selected_half = "lower"
-    else:
-        return None, None
-
-    # Fully vectorized slice reflection in NumPy (zero manual pixel loops)
-    reflected = np.zeros_like(aligned)
-    max_dy = min(y_midrib, ch - y_midrib)
-    if selected_half == "upper":
-        reflected[:y_midrib, :] = upper_half[:y_midrib, :]
-        if max_dy > 0:
-            reflected[y_midrib:y_midrib + max_dy, :] = np.flip(
-                upper_half[y_midrib - max_dy:y_midrib, :], axis=0
-            )
-    else:
-        reflected[y_midrib:, :] = lower_half[y_midrib:, :]
-        if max_dy > 0:
-            reflected[y_midrib - max_dy:y_midrib, :] = np.flip(
-                lower_half[y_midrib:y_midrib + max_dy, :], axis=0
-            )
-
-    # Morphological closing to seal midrib seam in horizontal aligned space
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    reflected = cv2.morphologyEx(reflected, cv2.MORPH_CLOSE, kernel)
-
-    # Inverse-rotate synthesized silhouette back (-angle) into original pose
-    inv_rot_mat = cv2.getRotationMatrix2D((cx, cy), -angle, 1.0)
-    unaligned_crop = cv2.warpAffine(reflected, inv_rot_mat, (cw, ch), flags=cv2.INTER_NEAREST)
-    unaligned_crop = cv2.morphologyEx(unaligned_crop, cv2.MORPH_CLOSE, kernel)
-
-    # Evaluate and clean in tight ROI coordinates before allocating full (h, w) canvas
-    src_x0 = max(0, pad - x_min)
-    src_y0 = max(0, pad - y_min)
-    dst_x0 = max(0, x_min - pad)
-    dst_y0 = max(0, y_min - pad)
-    copy_w = min(cw - src_x0, w - dst_x0)
-    copy_h = min(ch - src_y0, h - dst_y0)
-    if copy_w > 0 and copy_h > 0:
-        roi_bin = (
-            unaligned_crop[src_y0:src_y0 + copy_h, src_x0:src_x0 + copy_w] > 127
-        ).astype(np.uint8) * 255
-    else:
-        roi_bin = (unaligned_crop > 127).astype(np.uint8) * 255
-
-    num_lr, lbl_r, st_r, _ = cv2.connectedComponentsWithStats((roi_bin > 0).astype(np.uint8), connectivity=8)
-    if num_lr > 1:
-        best_lr = 1 + int(np.argmax(st_r[1:, cv2.CC_STAT_AREA]))
-        roi_bin = np.where(lbl_r == best_lr, 255, 0).astype(np.uint8)
-    cnts_r, _ = cv2.findContours(roi_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if cnts_r:
-        ref_filled = np.zeros_like(roi_bin)
-        cv2.drawContours(ref_filled, [max(cnts_r, key=cv2.contourArea)], -1, 255, -1)
-        roi_bin = ref_filled
-
-    # Verify synthesized silhouette quality on tight ROI
-    ref_ucs, ref_solidity, _, _, _ = compute_geometric_metrics(roi_bin)
-    if ref_solidity < min_solidity or ref_ucs < min_ucs:
-        return None, None
-
-    if is_high_dpi_mask:
-        ref_cnts, _ = cv2.findContours(roi_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not ref_cnts:
-            return None, None
-        ref_cnt = max(ref_cnts, key=cv2.contourArea)
-        ref_cnt_f = ref_cnt.astype(np.float32)
-        ref_rect = cv2.minAreaRect(ref_cnt_f)
-        ref_minor_w = float(min(ref_rect[1]))
-        ref_major_l = float(max(ref_rect[1]))
-        ref_ar = ref_minor_w / max(ref_major_l, 1.0)
-
-        if ref_ar > 0.84 or ref_solidity < 0.78 or ref_ucs < 0.82:
-            return None, None
-
-    if copy_w > 0 and copy_h > 0:
-        reflected_bin = np.zeros((h, w), dtype=np.uint8)
-        reflected_bin[dst_y0:dst_y0 + copy_h, dst_x0:dst_x0 + copy_w] = roi_bin
-    else:
-        reflected_bin = roi_bin
-
-    tier_save_path = None
-    if output_dir is not None:
-        out_base = (output_dir / "data") if (output_dir.name != "data" and (output_dir / "data").is_dir()) else output_dir
-        mask_dir = out_base / "masks"
-        tier2_dir = mask_dir / "tier2_reflected"
-        tier2_dir.mkdir(parents=True, exist_ok=True)
-
-        filename = f"{catalog_number}_leaf{leaf_id}.png"
-        tier_save_path = tier2_dir / filename
-
-        ok, png_buf = cv2.imencode(".png", reflected_bin)
-        if ok:
-            tier_save_path.write_bytes(png_buf.tobytes())
-        else:
-            cv2.imwrite(str(tier_save_path), reflected_bin)
-
-    return str(tier_save_path) if tier_save_path else None, reflected_bin
-
-
-def route_tier2_reflected(
-    mask: np.ndarray,
-    candidate: Any,
-    output_dir: Path,
-    p_apex: Tuple[int, int],
-    p_base: Tuple[int, int]
-) -> Tuple[Optional[str], bool]:
-    """
-    Backward-compatible adapter for route_tier2_reflected signature.
-    """
-    cat_num = getattr(candidate, "catalog_number", "UNKNOWN")
-    leaf_id = getattr(candidate, "leaf_id", 1)
-    path, reflected_mask = extract_tier2_reflected(
-        mask=mask,
-        catalog_number=cat_num,
-        leaf_id=leaf_id,
-        p_apex=p_apex,
-        p_base=p_base,
-        output_dir=output_dir
-    )
-    return path, (path is not None and reflected_mask is not None)
-
-
 # =============================================================================
 # 3. Standardized Coordinate Contour Exporter
 # =============================================================================
@@ -948,25 +694,14 @@ def export_standardized_contour(
 # =============================================================================
 
 from scripts.vision.leaf_gatekeeper import (  # noqa: E402
-    BoundaryContinuityResult,
     CANONICAL_TIER_MAP,
-    FoldDetectionResult,
     LeafRoutingResult,
     TIER_1_DIRECT,
     TIER_2_REFLECTED,
-    _extract_lm3_midvein_trace,
-    _has_artificial_straight_occlusion_cut,
-    bridge_dissected_rachis_components,
-    check_boundary_tissue_continuity,
-    classify_and_route_leaf,
     compute_classical_shape_descriptors,
     compute_sheet_adaptive_min_blade_area_cm2,
-    detect_folded_leaf,
-    evaluate_leaf_quality,
     is_botanical_dissection,
-    is_cauline_or_stem_contaminant,
     normalize_assigned_tier,
-    reflect_folded_mask,
 )
 from scripts.vision.organ_crown_metrics import (  # noqa: E402
     _estimate_single_plant_crown,
@@ -977,8 +712,6 @@ from scripts.vision.organ_crown_metrics import (  # noqa: E402
     cluster_plant_individuals,
     cluster_voucher_plants_dbscan,
     estimate_rosette_crown_point,
-    is_topologically_connected_mask,
-    route_tier3_open_curve,
 )
 
 __all__ = [
@@ -986,15 +719,7 @@ __all__ = [
     "compute_geometric_metrics",
     "compute_geometric_metrics_and_pose",
     "is_tier1_pristine",
-    "BoundaryContinuityResult",
-    "_extract_lm3_midvein_trace",
-    "_has_artificial_straight_occlusion_cut",
-    "check_boundary_tissue_continuity",
     "compute_classical_shape_descriptors",
-    "reflect_folded_mask",
-    "FoldDetectionResult",
-    "detect_folded_leaf",
-    "bridge_dissected_rachis_components",
     "is_botanical_dissection",
     "resample_normalized_contour",
     "TIER_1_DIRECT",
@@ -1002,19 +727,12 @@ __all__ = [
     "CANONICAL_TIER_MAP",
     "normalize_assigned_tier",
     "compute_sheet_adaptive_min_blade_area_cm2",
-    "is_cauline_or_stem_contaminant",
     "LeafRoutingResult",
-    "classify_and_route_leaf",
-    "evaluate_leaf_quality",
     "extract_tier1_pristine",
     "route_tier1_silhouette",
-    "extract_tier2_reflected",
-    "route_tier2_reflected",
     "export_standardized_contour",
-    "is_topologically_connected_mask",
     "cluster_plant_individuals",
     "cluster_voucher_plants_dbscan",
-    "route_tier3_open_curve",
     "_extract_xy_point",
     "_parse_basal_leaf_pose",
     "_estimate_single_plant_crown",
