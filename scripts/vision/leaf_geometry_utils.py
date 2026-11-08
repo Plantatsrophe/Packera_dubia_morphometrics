@@ -232,119 +232,80 @@ def is_tier1_pristine(
 
 
 def _prepare_lamina_mask(
-    mask: np.ndarray,
+    lamina_mask: np.ndarray,
     petiole_mask: Optional[np.ndarray] = None,
     hole_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
-    Applies LM3 `petiole_mask` subtraction and topology-aware `hole_mask` handling:
-      - Subtracts `petiole_mask` (`class_id == 1`) from `work_mask` when present.
-      - Differentiates true interior lamina herbivory holes from enclosed inter-lobe
-        background sinuses on pinnatifid/dissected leaves:
-          * True interior holes (compact cavities > 6 px inside the outer contour and
-            < 6% of lamina area) are filled so internal insect damage does not distort EFA.
-          * Enclosed inter-lobe sinuses (cavities within <= 6 px of the exterior background
-            formed when adjacent pinna tips touch, or large background voids >= 6% of lamina
-            area) are subtracted and their narrow contact bridge to the exterior background
-            is opened so `cv2.RETR_EXTERNAL` traces into the sinus around both pinna lobes.
+    Prepares a binary lamina mask using native LeafMachine3 `lamina = silhouette & ~hole` semantics:
+      - Keeps the largest 8-connected component of `(lamina_mask > 0)` and rasterizes its
+        external contour (`cv2.RETR_EXTERNAL`, `cv2.CHAIN_APPROX_SIMPLE` -> `cv2.fillPoly`)
+        as `silhouette` without subtracting `petiole_mask`.
+      - When `hole_mask` is provided and contains 8-connected components with area >= 64 px
+        (`min_area_px = 64`), rasterizes their external contours via `cv2.fillPoly` and
+        subtracts them (`work_mask[qualifying_holes > 0] = 0`).
+      - Keeps the largest 8-connected component of `work_mask` and returns uint8 (0 or 255).
     """
-    work_mask = (mask > 0).astype(np.uint8) * 255
-    if (
-        petiole_mask is not None
-        and isinstance(petiole_mask, np.ndarray)
-        and petiole_mask.shape[:2] == work_mask.shape[:2]
-        and np.count_nonzero(petiole_mask) > 0
-    ):
-        cand = np.where((work_mask > 0) & (petiole_mask == 0), 255, 0).astype(np.uint8)
-        if np.count_nonzero(cand) >= max(10, int(0.35 * np.count_nonzero(work_mask))):
-            work_mask = cand
+    _ = petiole_mask
+    if lamina_mask is None or lamina_mask.size == 0:
+        return (
+            np.zeros((0, 0), dtype=np.uint8)
+            if lamina_mask is None
+            else np.zeros(lamina_mask.shape[:2], dtype=np.uint8)
+        )
 
-    lamina_fg = int(np.count_nonzero(work_mask))
-    if lamina_fg <= 0:
-        return work_mask
+    fg_u8 = (lamina_mask > 0).astype(np.uint8)
+    if int(np.count_nonzero(fg_u8)) == 0:
+        return np.zeros(lamina_mask.shape[:2], dtype=np.uint8)
 
-    # Identify exterior background from outer contour fill
-    ext_cnts, _ = cv2.findContours(work_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    n_cc, cc_lbls, cc_stats, _ = cv2.connectedComponentsWithStats(fg_u8, connectivity=8)
+    if n_cc <= 1:
+        return np.zeros(lamina_mask.shape[:2], dtype=np.uint8)
+    largest_idx = 1 + int(np.argmax(cc_stats[1:, cv2.CC_STAT_AREA]))
+    largest_comp = (cc_lbls == largest_idx).astype(np.uint8)
+
+    ext_cnts, _ = cv2.findContours(largest_comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not ext_cnts:
-        return work_mask
-    filled_ext = np.zeros_like(work_mask)
-    cv2.drawContours(filled_ext, ext_cnts, -1, 255, thickness=cv2.FILLED)
+        return largest_comp * 255
+    ext_polys = [c.reshape(-1, 2).astype(np.int32) for c in ext_cnts if len(c.reshape(-1, 2)) >= 3]
+    work_mask = np.zeros(lamina_mask.shape[:2], dtype=np.uint8)
+    if ext_polys:
+        cv2.fillPoly(work_mask, ext_polys, 255)
+    else:
+        work_mask = largest_comp * 255
 
-    # Combine explicit hole_mask with any enclosed cavities inside filled_ext
-    internal_voids = ((filled_ext > 0) & (work_mask == 0)).astype(np.uint8) * 255
     if (
         hole_mask is not None
         and isinstance(hole_mask, np.ndarray)
         and hole_mask.shape[:2] == work_mask.shape[:2]
         and np.count_nonzero(hole_mask) > 0
     ):
-        internal_voids = np.maximum(internal_voids, ((hole_mask > 0) & (filled_ext > 0)).astype(np.uint8) * 255)
+        min_area_px = 64
+        hole_u8 = (hole_mask > 0).astype(np.uint8)
+        n_hc, hc_lbls, hc_stats, _ = cv2.connectedComponentsWithStats(hole_u8, connectivity=8)
+        qualifying_holes = np.zeros(work_mask.shape[:2], dtype=np.uint8)
+        hole_polys: List[np.ndarray] = []
+        for hid in range(1, n_hc):
+            if int(hc_stats[hid, cv2.CC_STAT_AREA]) >= min_area_px:
+                h_comp = (hc_lbls == hid).astype(np.uint8)
+                h_cnts, _ = cv2.findContours(h_comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for hc in h_cnts:
+                    pts_h = hc.reshape(-1, 2).astype(np.int32)
+                    if len(pts_h) >= 3:
+                        hole_polys.append(pts_h)
+        if hole_polys:
+            cv2.fillPoly(qualifying_holes, hole_polys, 255)
+            work_mask[qualifying_holes > 0] = 0
 
-    if int(np.count_nonzero(internal_voids)) == 0:
-        return work_mask
-
-    # Distance from each pixel inside filled_ext to the exterior background (filled_ext == 0)
-    dist_to_ext = cv2.distanceTransform((filled_ext > 0).astype(np.uint8), cv2.DIST_L2, 3)
-    ext_bg_mask = (filled_ext == 0).astype(np.uint8)
-    _, ext_labels = cv2.distanceTransformWithLabels(
-        (filled_ext > 0).astype(np.uint8), cv2.DIST_L2, 3, labelType=cv2.DIST_LABEL_PIXEL
-    )
-    ext_coords_y, ext_coords_x = np.where(ext_bg_mask > 0)
-
-    n_voids, void_lbls, void_stats, _ = cv2.connectedComponentsWithStats(
-        (internal_voids > 0).astype(np.uint8), connectivity=8
-    )
-    has_hole_arr = (
-        hole_mask is not None
-        and isinstance(hole_mask, np.ndarray)
-        and hole_mask.shape[:2] == work_mask.shape[:2]
-        and np.count_nonzero(hole_mask) > 0
-    )
-    hole_bool_arr = (hole_mask > 0) if has_hole_arr else None
-    max_bridge_px = 24.0
-    for v_id in range(1, n_voids):
-        v_mask = void_lbls == v_id
-        v_area = int(void_stats[v_id, cv2.CC_STAT_AREA])
-        if v_area <= 0:
-            continue
-        min_d_ext = float(np.min(dist_to_ext[v_mask])) if np.any(v_mask) else 999.0
-        area_frac = float(v_area) / float(max(lamina_fg, 1))
-        hole_overlap = (
-            float(np.count_nonzero(v_mask & hole_bool_arr)) / float(max(v_area, 1))
-            if hole_bool_arr is not None
-            else 0.0
+    if int(np.count_nonzero(work_mask)) > 0:
+        n_out, out_lbls, out_stats, _ = cv2.connectedComponentsWithStats(
+            (work_mask > 0).astype(np.uint8), connectivity=8
         )
-        # Enclosed inter-lobe sinus / background paper pocket: separated from exterior background
-        # by a lobe bridge (<= 24 px) with area >= 25 px, or a large enclosed background region.
-        is_enclosed_sinus = (
-            (v_area >= 25 and 0.0 < min_d_ext <= max_bridge_px and (area_frac >= 0.008 or hole_overlap > 0.15))
-            or (min_d_ext <= max_bridge_px and area_frac >= 0.05)
-            or (area_frac >= 0.08)
-        )
-        if is_enclosed_sinus:
-            work_mask[v_mask] = 0
-            # Carve open the narrow contact bottleneck to exterior background so RETR_EXTERNAL enters the sinus
-            v_ys, v_xs = np.where(v_mask)
-            if len(v_ys) > 0 and len(ext_coords_y) > 0:
-                d_vals = dist_to_ext[v_ys, v_xs]
-                best_i = int(np.argmin(d_vals))
-                vy0, vx0 = int(v_ys[best_i]), int(v_xs[best_i])
-                # Find nearest exterior background pixel within a local window
-                win = max(8, int(math.ceil(min_d_ext)) + 4)
-                y_lo, y_hi = max(0, vy0 - win), min(work_mask.shape[0], vy0 + win + 1)
-                x_lo, x_hi = max(0, vx0 - win), min(work_mask.shape[1], vx0 + win + 1)
-                bg_sub_y, bg_sub_x = np.where(filled_ext[y_lo:y_hi, x_lo:x_hi] == 0)
-                if len(bg_sub_y) > 0:
-                    bg_y = bg_sub_y + y_lo
-                    bg_x = bg_sub_x + x_lo
-                    nearest_bg_idx = int(np.argmin((bg_y - vy0) ** 2 + (bg_x - vx0) ** 2))
-                    ey0, ex0 = int(bg_y[nearest_bg_idx]), int(bg_x[nearest_bg_idx])
-                    cv2.line(work_mask, (vx0, vy0), (ex0, ey0), 0, thickness=3)
-        else:
-            # True interior insect hole -> fill in work_mask
-            work_mask[v_mask] = 255
+        if n_out > 2:
+            best_out = 1 + int(np.argmax(out_stats[1:, cv2.CC_STAT_AREA]))
+            work_mask = np.where(out_lbls == best_out, 255, 0).astype(np.uint8)
 
-    return work_mask
+    return (work_mask > 0).astype(np.uint8) * 255
 
 
 def _rotate_contour_to_tip_up(
@@ -434,8 +395,9 @@ def resample_normalized_contour(
     else:
         if mask is None or mask.size == 0:
             return None
-        work_mask = _prepare_lamina_mask(mask, petiole_mask=petiole_mask, hole_mask=hole_mask)
-        contours, _ = cv2.findContours(work_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        _ = petiole_mask
+        clean_mask = _prepare_lamina_mask(mask, hole_mask=hole_mask)
+        contours, _ = cv2.findContours(clean_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         if not contours:
             return None
         largest_cnt = max(contours, key=cv2.contourArea).reshape(-1, 2).astype(np.float64)
@@ -527,14 +489,15 @@ def extract_tier1_pristine(
     main_save_path = mask_dir / filename
     tier_save_path = tier1_dir / filename
 
-    bin_mask = _prepare_lamina_mask(mask, petiole_mask=petiole_mask, hole_mask=hole_mask)
-    ok, png_buf = cv2.imencode(".png", bin_mask)
+    _ = (petiole_mask, hole_mask)
+    binary_mask = np.where(mask > 0, 255, 0).astype(np.uint8)
+    ok, png_buf = cv2.imencode(".png", binary_mask)
     if ok:
         png_bytes = png_buf.tobytes()
         main_save_path.write_bytes(png_bytes)
         tier_save_path.write_bytes(png_bytes)
     else:
-        cv2.imwrite(str(main_save_path), bin_mask)
+        cv2.imwrite(str(main_save_path), binary_mask)
         shutil.copyfile(str(main_save_path), str(tier_save_path))
     return str(main_save_path)
 
@@ -833,8 +796,10 @@ def export_standardized_contour(
     else:
         if mask is None or mask.size == 0:
             return empty_ret
-        work_mask = _prepare_lamina_mask(mask, petiole_mask=petiole_mask, hole_mask=hole_mask)
-        contours, _ = cv2.findContours(work_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        _ = petiole_mask
+        clean_mask = _prepare_lamina_mask(mask, hole_mask=hole_mask)
+        work_mask = clean_mask
+        contours, _ = cv2.findContours(clean_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         if not contours:
             return empty_ret
         largest_cnt = max(contours, key=cv2.contourArea).reshape(-1, 2).astype(np.float64)

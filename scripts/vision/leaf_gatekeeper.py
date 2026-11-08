@@ -1754,10 +1754,9 @@ def classify_and_route_leaf(
     Comprehensive 100% label-blind geometric quality gatekeeper and routing engine
     for LeafMachine3 (`yolo26x_seg_1024` 3-class masks & `yolo26x_pose_640` 31-keypoints):
       0. Pre-processes LM3 3-class segmentation masks when provided:
-         - Subtracts `petiole_mask > 0` pixels from the lamina mask prior to contour
-           extraction (provided remaining lamina retains >= 50% of original foreground area).
-         - Fills internal `hole_mask > 0` voids inside the lamina hull for closed
-           `Tier_1_Direct` EFA contour extraction while recording hole area diagnostics.
+         - Keeps the largest 8-connected component of `mask > 0` as `silhouette` without
+           subtracting `petiole_mask`, and subtracts 8-connected `hole_mask > 0` components
+           with area >= 64 px (`lamina = silhouette & ~hole`).
       1. Evaluates midrib pose (disambiguating `p_base` vs. `p_apex` using `lamina_base`
          from `keypoints_31` when confidence >= 0.50) and initial solidity/UCS metrics.
       2. Straight-chord & 15-point midvein trace fold detection:
@@ -1864,9 +1863,10 @@ def classify_and_route_leaf(
             rejection_reason="mask_empty_or_too_small"
         )
 
-    orig_fg_area = int(np.count_nonzero(mask))
+    _ = specimen_paper_cleaned_mask
     petiole_subtracted = False
     petiole_mask_area_px = 0
+    petiole_tip_pt: Optional[Tuple[int, int]] = None
     if (
         petiole_mask is not None
         and isinstance(petiole_mask, np.ndarray)
@@ -1874,10 +1874,24 @@ def classify_and_route_leaf(
         and np.count_nonzero(petiole_mask) > 0
     ):
         petiole_mask_area_px = int(np.count_nonzero(petiole_mask > 0))
-        cand_lamina = np.where((mask > 0) & (petiole_mask == 0), 255, 0).astype(np.uint8)
-        if int(np.count_nonzero(cand_lamina)) >= int(0.50 * orig_fg_area):
-            mask = cand_lamina
-            petiole_subtracted = True
+        py_idx, px_idx = np.where(petiole_mask > 0)
+        if len(py_idx) > 0:
+            petiole_tip_pt = (int(round(float(np.mean(px_idx)))), int(round(float(np.mean(py_idx)))))
+
+    fg_u8 = (mask > 0).astype(np.uint8)
+    n_cc, cc_lbls, cc_stats, _ = cv2.connectedComponentsWithStats(fg_u8, connectivity=8)
+    if n_cc > 1:
+        largest_idx = 1 + int(np.argmax(cc_stats[1:, cv2.CC_STAT_AREA]))
+        largest_comp = (cc_lbls == largest_idx).astype(np.uint8)
+        ext_cnts, _ = cv2.findContours(largest_comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        ext_polys = [c.reshape(-1, 2).astype(np.int32) for c in ext_cnts if len(c.reshape(-1, 2)) >= 3]
+        work_mask = np.zeros(mask.shape[:2], dtype=np.uint8)
+        if ext_polys:
+            cv2.fillPoly(work_mask, ext_polys, 255)
+        else:
+            work_mask = largest_comp * 255
+    else:
+        work_mask = (mask > 0).astype(np.uint8) * 255
 
     hole_filled = False
     hole_mask_area_px = 0
@@ -1885,62 +1899,35 @@ def classify_and_route_leaf(
     if (
         hole_mask is not None
         and isinstance(hole_mask, np.ndarray)
-        and hole_mask.shape[:2] == mask.shape[:2]
+        and hole_mask.shape[:2] == work_mask.shape[:2]
         and np.count_nonzero(hole_mask) > 0
     ):
-        hole_bool = hole_mask > 0
-        hole_mask_area_px = int(np.count_nonzero(hole_bool))
-        lam_u8 = (mask > 0).astype(np.uint8) * 255
-        cnts_h, _ = cv2.findContours(lam_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        if cnts_h:
-            filled_ext_h = np.zeros(mask.shape[:2], dtype=np.uint8)
-            cv2.drawContours(filled_ext_h, cnts_h, -1, 255, thickness=cv2.FILLED)
-            dist_to_ext_h = cv2.distanceTransform((filled_ext_h > 0).astype(np.uint8), cv2.DIST_L2, 3)
-            lam_area_h = max(1, int(np.count_nonzero(lam_u8)))
-            cand_holes = ((hole_bool | (lam_u8 == 0)) & (filled_ext_h > 0)).astype(np.uint8)
-            n_hc, hc_lbls, hc_stats, _ = cv2.connectedComponentsWithStats(cand_holes, connectivity=8)
-            max_bridge_px_h = 24.0
-            for hid in range(1, n_hc):
-                h_comp = hc_lbls == hid
-                if not np.any(h_comp & hole_bool):
-                    continue
-                h_area = int(hc_stats[hid, cv2.CC_STAT_AREA])
-                min_d_ext = float(np.min(dist_to_ext_h[h_comp])) if h_area > 0 else 999.0
-                area_frac = float(h_area) / float(lam_area_h)
-                hole_overlap_h = float(np.count_nonzero(h_comp & hole_bool)) / float(max(h_area, 1))
-                is_enclosed_sinus = (
-                    (h_area >= 25 and 0.0 < min_d_ext <= max_bridge_px_h and (area_frac >= 0.008 or hole_overlap_h > 0.15))
-                    or (min_d_ext <= max_bridge_px_h and area_frac >= 0.05)
-                    or (area_frac >= 0.08)
-                )
-                if is_enclosed_sinus:
-                    lam_u8[h_comp] = 0
-                    hys, hxs = np.where(h_comp)
-                    if len(hys) > 0:
-                        best_i = int(np.argmin(dist_to_ext_h[hys, hxs]))
-                        vy0, vx0 = int(hys[best_i]), int(hxs[best_i])
-                        win = max(8, int(math.ceil(min_d_ext)) + 4)
-                        y_lo, y_hi = max(0, vy0 - win), min(lam_u8.shape[0], vy0 + win + 1)
-                        x_lo, x_hi = max(0, vx0 - win), min(lam_u8.shape[1], vx0 + win + 1)
-                        bg_sy, bg_sx = np.where(filled_ext_h[y_lo:y_hi, x_lo:x_hi] == 0)
-                        if len(bg_sy) > 0:
-                            by_all = bg_sy + y_lo
-                            bx_all = bg_sx + x_lo
-                            nb_i = int(np.argmin((by_all - vy0) ** 2 + (bx_all - vx0) ** 2))
-                            cv2.line(lam_u8, (vx0, vy0), (int(bx_all[nb_i]), int(by_all[nb_i])), 0, thickness=3)
-                else:
-                    lam_u8[h_comp] = 255
-                    filled_hole_area_px += h_area
-                    hole_filled = True
-            mask = lam_u8
+        min_area_px = 64
+        hole_u8 = (hole_mask > 0).astype(np.uint8)
+        hole_mask_area_px = int(np.count_nonzero(hole_u8))
+        n_hc, hc_lbls, hc_stats, _ = cv2.connectedComponentsWithStats(hole_u8, connectivity=8)
+        qualifying_holes = np.zeros(work_mask.shape[:2], dtype=np.uint8)
+        hole_polys: List[np.ndarray] = []
+        for hid in range(1, n_hc):
+            if int(hc_stats[hid, cv2.CC_STAT_AREA]) >= min_area_px:
+                h_comp = (hc_lbls == hid).astype(np.uint8)
+                h_cnts, _ = cv2.findContours(h_comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for hc in h_cnts:
+                    pts_h = hc.reshape(-1, 2).astype(np.int32)
+                    if len(pts_h) >= 3:
+                        hole_polys.append(pts_h)
+        if hole_polys:
+            cv2.fillPoly(qualifying_holes, hole_polys, 255)
+            work_mask[qualifying_holes > 0] = 0
 
-    # Reconnect micro-severed rachis islands (preserving basal pinnae on dissected Packera leaves)
-    mask = bridge_dissected_rachis_components(
-        mask,
-        petiole_mask=petiole_mask,
-        crop_bgr=crop_img,
-        specimen_paper_cleaned_mask=specimen_paper_cleaned_mask,
-    )
+    if int(np.count_nonzero(work_mask)) > 0:
+        n_out, out_lbls, out_stats, _ = cv2.connectedComponentsWithStats(
+            (work_mask > 0).astype(np.uint8), connectivity=8
+        )
+        if n_out > 2:
+            best_out = 1 + int(np.argmax(out_stats[1:, cv2.CC_STAT_AREA]))
+            work_mask = np.where(out_lbls == best_out, 255, 0).astype(np.uint8)
+        mask = (work_mask > 0).astype(np.uint8) * 255
 
     trace_kp = _extract_lm3_midvein_trace(keypoints_31, min_points=3, min_mean_conf=0.50)
 
@@ -2044,6 +2031,7 @@ def classify_and_route_leaf(
         "petiole_trim_info": trim_meta,
         "petiole_mask_subtracted": petiole_subtracted,
         "petiole_mask_area_px": petiole_mask_area_px,
+        "petiole_tip_pt": petiole_tip_pt,
         "hole_mask_filled": hole_filled,
         "hole_mask_area_px": hole_mask_area_px,
         "filled_hole_area_px": filled_hole_area_px,

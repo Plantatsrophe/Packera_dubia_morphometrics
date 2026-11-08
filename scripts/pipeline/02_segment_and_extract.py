@@ -236,6 +236,216 @@ def _clean_leaf_instance_mounting_paper(
     inst.mask = lam_u8
 
 
+def _downscale_crop_for_working_frame(
+    crop_bgr: np.ndarray,
+    sheet_h: int,
+    sheet_w: int,
+) -> Tuple[np.ndarray, float]:
+    """
+    Passes Stage 2 `crop_bgr` directly to `LM3LeafSegmenterEngine` (`img_size=1024`) and
+    `LM3PoseLandmarkEngine` (`img_size=640`) so `_letterbox_bgr(..., auto=True, stride=32)`
+    scales directly once and un-letterboxes directly to native crop dimensions without
+    secondary `cv2.INTER_NEAREST` mask resampling.
+    """
+    _ = (sheet_h, sheet_w)
+    return crop_bgr, 1.0
+
+
+def _upscale_stage2_preds_to_native_crop(
+    crop_preds: Sequence[Any],
+    native_h: int,
+    native_w: int,
+    work_scale: float,
+) -> List[Any]:
+    """
+    Resizes Stage 2 segmentation masks from `work_crop_bgr` back to `(native_h, native_w)` using
+    `cv2.INTER_NEAREST` so downstream sheet reprojection and `pixels_per_mm` stay in native sheet space.
+    """
+    if not crop_preds:
+        return []
+    if work_scale >= 1.0 or native_h <= 0 or native_w <= 0:
+        return list(crop_preds)
+    inv_scale = 1.0 / float(work_scale)
+    out_preds: List[Any] = []
+    for pr_bbox, pr_mask, pr_score, pr_cls in crop_preds:
+        if isinstance(pr_mask, np.ndarray) and pr_mask.size > 0 and pr_mask.shape[:2] != (native_h, native_w):
+            up_mask = cv2.resize(pr_mask, (native_w, native_h), interpolation=cv2.INTER_NEAREST)
+        else:
+            up_mask = pr_mask
+        if isinstance(pr_bbox, (tuple, list)) and len(pr_bbox) == 4:
+            up_bbox = (
+                int(round(float(pr_bbox[0]) * inv_scale)),
+                int(round(float(pr_bbox[1]) * inv_scale)),
+                int(round(float(pr_bbox[2]) * inv_scale)),
+                int(round(float(pr_bbox[3]) * inv_scale)),
+            )
+        else:
+            up_bbox = pr_bbox
+        out_preds.append((up_bbox, up_mask, pr_score, pr_cls))
+    return out_preds
+
+
+def _upscale_pose_result_to_native_crop(
+    pose_res: Any,
+    work_h: int,
+    work_w: int,
+    work_scale: float,
+) -> Any:
+    """
+    Scales `keypoints_31[:, :2]` (and `petiole_width_px`) returned on `work_crop_bgr` by `1.0 / work_scale`
+    back to the native crop coordinate frame.
+    """
+    if pose_res is None or work_scale >= 1.0:
+        return pose_res
+    inv_scale = 1.0 / float(work_scale)
+    kpts = getattr(pose_res, "keypoints_31", None)
+    if isinstance(kpts, dict) and kpts:
+        already_native = any(
+            isinstance(v, (tuple, list, np.ndarray))
+            and len(v) >= 2
+            and (float(v[0]) > work_w + 1.0 or float(v[1]) > work_h + 1.0)
+            for v in kpts.values()
+        )
+        if not already_native:
+            scaled_dict: Dict[str, Tuple[float, float, float]] = {}
+            for k_name, vals in kpts.items():
+                if isinstance(vals, (tuple, list, np.ndarray)) and len(vals) >= 2:
+                    conf_v = float(vals[2]) if len(vals) >= 3 else 1.0
+                    scaled_dict[str(k_name)] = (
+                        float(vals[0]) * inv_scale,
+                        float(vals[1]) * inv_scale,
+                        conf_v,
+                    )
+            pose_res.keypoints_31 = scaled_dict
+            pw_px = getattr(pose_res, "petiole_width_px", None)
+            if pw_px is not None:
+                pose_res.petiole_width_px = float(pw_px) * inv_scale
+    elif isinstance(kpts, np.ndarray) and kpts.ndim == 2 and kpts.shape[1] >= 2:
+        scaled_arr = kpts.astype(np.float64, copy=True)
+        scaled_arr[:, :2] *= inv_scale
+        pose_res.keypoints_31 = scaled_arr
+        pw_px = getattr(pose_res, "petiole_width_px", None)
+        if pw_px is not None:
+            pose_res.petiole_width_px = float(pw_px) * inv_scale
+    return pose_res
+
+
+def _build_native_lm3_crop_masks(
+    crop_preds: Sequence[Any],
+    crop_shape: Tuple[int, int],
+    is_high_dpi: bool = True,
+    min_leaf_area: int = 0,
+) -> Tuple[Optional[np.ndarray], float, Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Constructs `best_mask` (`cls == 0`), `petiole_crop_mask` (`cls == 1`), and `hole_crop_mask` (`cls == 2`)
+    purely via native LeafMachine3 rules (`leaf_segmenter.py:68-106` & `reporter.py:670-689`):
+      - Union all `cls == 0` (`Leaf`) candidate masks -> keep single largest 8-connected component
+        (`area >= 64` px, or largest if crop is tiny in unit tests) -> rasterize outer polygon
+        (`cv2.RETR_EXTERNAL`) as `silhouette`.
+      - Union all `cls == 1` (`Petiole`) candidate masks -> keep single largest 8-connected
+        component (`area >= 64` px).
+      - Union all `cls == 2` (`Hole`) candidate masks -> keep all 8-connected components
+        (`area >= 64` px) -> rasterize their outer polygons as `hole_crop_mask`.
+      - Compute `best_mask = np.where((silhouette > 0) & (hole_crop_mask == 0), 255, 0).astype(np.uint8)`
+        (`lamina = silhouette & ~hole`), never subtracting `petiole_crop_mask`.
+    """
+    crop_h, crop_w = int(crop_shape[0]), int(crop_shape[1])
+    if crop_h <= 0 or crop_w <= 0 or not crop_preds:
+        return None, 0.0, None, None
+
+    leaf_scores: List[float] = []
+    leaf_union = np.zeros((crop_h, crop_w), dtype=np.uint8)
+    pet_union = np.zeros((crop_h, crop_w), dtype=np.uint8)
+    hole_union = np.zeros((crop_h, crop_w), dtype=np.uint8)
+    has_pet = False
+    has_hole = False
+
+    for _pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
+        if pr_mask is None or not isinstance(pr_mask, np.ndarray) or pr_mask.size == 0:
+            continue
+        if pr_mask.shape[:2] != (crop_h, crop_w):
+            m_u8 = cv2.resize(
+                (pr_mask > 0).astype(np.uint8) * 255,
+                (crop_w, crop_h),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        else:
+            m_u8 = (pr_mask > 0).astype(np.uint8) * 255
+        fg_area = int(np.count_nonzero(m_u8))
+        if fg_area <= 0:
+            continue
+        cls_i = int(_pr_cls)
+        if cls_i == 0:
+            if min_leaf_area > 0 and fg_area < min_leaf_area:
+                continue
+            leaf_scores.append(float(pr_score))
+            np.maximum(leaf_union, m_u8, out=leaf_union)
+        elif cls_i == 1:
+            has_pet = True
+            np.maximum(pet_union, m_u8, out=pet_union)
+        elif cls_i == 2:
+            has_hole = True
+            np.maximum(hole_union, m_u8, out=hole_union)
+
+    if not leaf_scores or not np.any(leaf_union > 0):
+        return None, 0.0, None, None
+
+    best_score = float(max(leaf_scores))
+    min_cc_area = 64 if (is_high_dpi and (crop_h * crop_w) >= 4096) else max(1, int(min_leaf_area))
+
+    n_l, lbl_l, stats_l, _ = cv2.connectedComponentsWithStats((leaf_union > 0).astype(np.uint8), connectivity=8)
+    if n_l <= 1:
+        return None, 0.0, None, None
+    areas_l = stats_l[1:, cv2.CC_STAT_AREA]
+    valid_l_idxs = [i + 1 for i, a in enumerate(areas_l) if int(a) >= min_cc_area]
+    if not valid_l_idxs:
+        if is_high_dpi and (crop_h * crop_w) >= 4096:
+            return None, 0.0, None, None
+        valid_l_idxs = [int(np.argmax(areas_l)) + 1]
+    best_l_idx = max(valid_l_idxs, key=lambda idx: int(stats_l[idx, cv2.CC_STAT_AREA]))
+    largest_leaf_cc = np.where(lbl_l == best_l_idx, 255, 0).astype(np.uint8)
+    cnts_sil, _ = cv2.findContours(largest_leaf_cc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    silhouette = np.zeros((crop_h, crop_w), dtype=np.uint8)
+    if cnts_sil:
+        main_sil_cnt = max(cnts_sil, key=cv2.contourArea)
+        cv2.drawContours(silhouette, [main_sil_cnt], -1, 255, thickness=cv2.FILLED)
+        np.maximum(silhouette, largest_leaf_cc, out=silhouette)
+    else:
+        silhouette = largest_leaf_cc
+
+    petiole_crop_mask: Optional[np.ndarray] = None
+    if has_pet and np.any(pet_union > 0):
+        n_p, lbl_p, stats_p, _ = cv2.connectedComponentsWithStats((pet_union > 0).astype(np.uint8), connectivity=8)
+        if n_p > 1:
+            areas_p = stats_p[1:, cv2.CC_STAT_AREA]
+            min_pet_cc = 64 if (is_high_dpi and (crop_h * crop_w) >= 4096) else 1
+            valid_p_idxs = [i + 1 for i, a in enumerate(areas_p) if int(a) >= min_pet_cc]
+            if valid_p_idxs:
+                best_p_idx = max(valid_p_idxs, key=lambda idx: int(stats_p[idx, cv2.CC_STAT_AREA]))
+                petiole_crop_mask = np.where(lbl_p == best_p_idx, 255, 0).astype(np.uint8)
+
+    hole_crop_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
+    if has_hole and np.any(hole_union > 0):
+        n_h, lbl_h, stats_h, _ = cv2.connectedComponentsWithStats((hole_union > 0).astype(np.uint8), connectivity=8)
+        if n_h > 1:
+            min_hole_cc = 64 if (is_high_dpi and (crop_h * crop_w) >= 4096) else 1
+            for h_idx in range(1, n_h):
+                if int(stats_h[h_idx, cv2.CC_STAT_AREA]) >= min_hole_cc:
+                    h_cc = np.where(lbl_h == h_idx, 255, 0).astype(np.uint8)
+                    cnts_h, _ = cv2.findContours(h_cc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                    if cnts_h:
+                        cv2.drawContours(hole_crop_mask, cnts_h, -1, 255, thickness=cv2.FILLED)
+                    else:
+                        np.maximum(hole_crop_mask, h_cc, out=hole_crop_mask)
+
+    best_mask = np.where((silhouette > 0) & (hole_crop_mask == 0), 255, 0).astype(np.uint8)
+    if not np.any(best_mask > 0):
+        best_mask = silhouette
+
+    hole_out: Optional[np.ndarray] = hole_crop_mask if np.any(hole_crop_mask > 0) else None
+    return best_mask, best_score, petiole_crop_mask, hole_out
+
+
 # =============================================================================
 # Core Pipeline Execution Runner
 # =============================================================================
@@ -708,24 +918,20 @@ class SegmentAndExtractPipeline:
             if seg_partial_cfg or not c0_items:
                 selected_s1_leaves.extend(c1_items)
 
-            # Native LeafMachine3 nested-box deduplication (`overlap: 0.95, metric: "min"`)
+            # Native LeafMachine3 confidence-ordered nested-box deduplication (`overlap: 0.95, metric: "min"`)
             if is_high_dpi and len(selected_s1_leaves) >= 2:
+                selected_s1_leaves.sort(key=lambda x: float(x[1]), reverse=True)
                 filtered_s1_leaves: List[Tuple[Tuple[int, int, int, int], float, int]] = []
-                max_parent_area = 0.35 * float(sheet_h * sheet_w)
-                for idx_a, (ba, sca, cla) in enumerate(selected_s1_leaves):
+                for ba, sca, cla in selected_s1_leaves:
                     area_a = float(max(1, (ba[2] - ba[0]) * (ba[3] - ba[1])))
                     is_nested_sublobe = False
-                    for idx_b, (bb, scb, clb) in enumerate(selected_s1_leaves):
-                        if idx_a == idx_b:
-                            continue
+                    for bb, _scb, _clb in filtered_s1_leaves:
                         area_b = float(max(1, (bb[2] - bb[0]) * (bb[3] - bb[1])))
-                        if area_b < area_a or (area_b == area_a and scb < sca) or area_b > max_parent_area:
-                            continue
                         iy0, ix0 = max(ba[0], bb[0]), max(ba[1], bb[1])
                         iy1, ix1 = min(ba[2], bb[2]), min(ba[3], bb[3])
                         if iy1 > iy0 and ix1 > ix0:
                             inter = float((iy1 - iy0) * (ix1 - ix0))
-                            if (inter / area_a) >= 0.95:
+                            if (inter / min(area_a, area_b)) >= 0.95:
                                 is_nested_sublobe = True
                                 break
                     if not is_nested_sublobe:
@@ -806,24 +1012,20 @@ class SegmentAndExtractPipeline:
                 eligible_s1_items.append((s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy))
 
             if is_high_dpi and len(eligible_s1_items) >= 2:
+                eligible_s1_items.sort(key=lambda x: float(x[1]), reverse=True)
                 dedup_s1_items: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
-                max_parent_area = 0.35 * float(sheet_h * sheet_w)
-                for idx_a, item_a in enumerate(eligible_s1_items):
-                    ba, sca = item_a[0], item_a[1]
+                for item_a in eligible_s1_items:
+                    ba = item_a[0]
                     area_a = float(max(1, (ba[2] - ba[0]) * (ba[3] - ba[1])))
                     is_nested_sublobe = False
-                    for idx_b, item_b in enumerate(eligible_s1_items):
-                        if idx_a == idx_b:
-                            continue
-                        bb, scb = item_b[0], item_b[1]
+                    for item_b in dedup_s1_items:
+                        bb = item_b[0]
                         area_b = float(max(1, (bb[2] - bb[0]) * (bb[3] - bb[1])))
-                        if area_b < area_a or (area_b == area_a and scb < sca) or area_b > max_parent_area:
-                            continue
                         iy0, ix0 = max(ba[0], bb[0]), max(ba[1], bb[1])
                         iy1, ix1 = min(ba[2], bb[2]), min(ba[3], bb[3])
                         if iy1 > iy0 and ix1 > ix0:
                             inter = float((iy1 - iy0) * (ix1 - ix0))
-                            if (inter / area_a) >= 0.95:
+                            if (inter / min(area_a, area_b)) >= 0.95:
                                 is_nested_sublobe = True
                                 break
                     if not is_nested_sublobe:
@@ -1059,11 +1261,26 @@ class SegmentAndExtractPipeline:
                     pixels_per_mm=pixels_per_mm,
                 )
                 _telem_deltas["rejected_leaflet_class"] += int(_rej_lflt)
-                all_crop_preds = (
-                    self.model_engine.predict_batch([c[3] for c in candidate_s1_crops])
+                work_crops_and_scales = [
+                    _downscale_crop_for_working_frame(c[3], sheet_h, sheet_w)
+                    for c in candidate_s1_crops
+                ]
+                raw_crop_preds = (
+                    self.model_engine.predict_batch([wc for wc, _ in work_crops_and_scales])
                     if candidate_s1_crops
                     else []
                 )
+                all_crop_preds = [
+                    _upscale_stage2_preds_to_native_crop(
+                        c_preds,
+                        c_item[3].shape[0],
+                        c_item[3].shape[1],
+                        w_scale,
+                    )
+                    for c_item, (_, w_scale), c_preds in zip(
+                        candidate_s1_crops, work_crops_and_scales, raw_crop_preds
+                    )
+                ]
                 if (
                     candidate_s1_crops
                     and all_crop_preds
@@ -1075,40 +1292,30 @@ class SegmentAndExtractPipeline:
                     all_crop_pose_preds = [None] * len(candidate_s1_crops)
                     p_idxs: List[int] = []
                     p_crops: List[np.ndarray] = []
-                    p_lams: List[Optional[np.ndarray]] = []
-                    p_pets: List[Optional[np.ndarray]] = []
-                    for idx_c, ((_b, _s, _c, c_bgr, _cb), c_preds) in enumerate(zip(candidate_s1_crops, all_crop_preds)):
+                    for idx_c, ((wc_bgr, _ws), c_preds) in enumerate(zip(work_crops_and_scales, all_crop_preds)):
                         if not c_preds:
                             continue
-                        b_lm: Optional[np.ndarray] = None
-                        b_val: float = -1.0
-                        b_pm: Optional[np.ndarray] = None
-                        b_psc: float = -1.0
-                        for _pb, pm_u8, p_sc, p_cls in c_preds:
-                            if int(p_cls) == 0:
-                                fg_a = int(np.count_nonzero(pm_u8))
-                                if fg_a > 0 and float(fg_a) * float(p_sc) > b_val:
-                                    b_val = float(fg_a) * float(p_sc)
-                                    b_lm = pm_u8
-                            elif int(p_cls) == 1 and float(p_sc) > b_psc and np.any(pm_u8 > 0):
-                                b_psc = float(p_sc)
-                                b_pm = pm_u8
-                        if b_lm is not None:
+                        has_leaf_cand = any(
+                            int(p_cls) == 0 and np.any(pm_u8 > 0)
+                            for _pb, pm_u8, _p_sc, p_cls in c_preds
+                        )
+                        if has_leaf_cand:
                             p_idxs.append(idx_c)
-                            p_crops.append(c_bgr)
-                            p_lams.append(b_lm)
-                            p_pets.append(b_pm)
+                            p_crops.append(wc_bgr)
                     if p_crops:
                         for idx_c, p_res in zip(
                             p_idxs,
                             self.pose_engine.predict_batch(
                                 p_crops,
-                                lamina_masks=p_lams,
-                                petiole_masks=p_pets,
+                                lamina_masks=None,
+                                petiole_masks=None,
                                 batch_size=max(8, self.stage2_batch_size),
                             ),
                         ):
-                            all_crop_pose_preds[idx_c] = p_res
+                            wc_bgr_i, w_scale_i = work_crops_and_scales[idx_c]
+                            all_crop_pose_preds[idx_c] = _upscale_pose_result_to_native_crop(
+                                p_res, wc_bgr_i.shape[0], wc_bgr_i.shape[1], w_scale_i
+                            )
 
             def _reproject_crop_mask_to_local_win(
                 cmask: Optional[np.ndarray],
@@ -1159,50 +1366,14 @@ class SegmentAndExtractPipeline:
                     if not crop_preds:
                         continue
 
-                    leaf_cands = []
-                    petiole_cands = []
-                    hole_cands = []
-                    for _pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
-                        fg_area_cand = int(np.count_nonzero(pr_mask))
-                        if fg_area_cand <= 0:
-                            continue
-                        if int(_pr_cls) == 0:
-                            leaf_cands.append((float(pr_score), fg_area_cand, _pr_bbox, pr_mask))
-                        elif int(_pr_cls) == 1:
-                            petiole_cands.append((float(pr_score), fg_area_cand, _pr_bbox, pr_mask))
-                        elif int(_pr_cls) == 2:
-                            hole_cands.append((float(pr_score), fg_area_cand, _pr_bbox, pr_mask))
-
-                    if not leaf_cands:
-                        continue
-
-                    leaf_cands.sort(
-                        key=lambda c: (float(c[1]) * (float(c[0]) ** 0.5) if float(c[0]) >= 0.42 else float(c[0]), c[1]),
-                        reverse=True,
+                    best_mask, best_score, best_petiole_mask, best_hole_mask = _build_native_lm3_crop_masks(
+                        crop_preds,
+                        crop_bgr.shape[:2],
+                        is_high_dpi=is_high_dpi,
+                        min_leaf_area=0,
                     )
-                    best_score, _, _, best_mask = leaf_cands[0]
-
-                    best_petiole_mask: Optional[np.ndarray] = None
-                    if petiole_cands:
-                        petiole_cands.sort(key=lambda c: (c[0], c[1]), reverse=True)
-                        pet_union = np.zeros(best_mask.shape[:2], dtype=np.uint8)
-                        valid_pets = [c for c in petiole_cands if int(c[1]) >= 64] or [petiole_cands[0]]
-                        for _sc_p, _fg_p, _bb_p, pm in valid_pets:
-                            if pm.shape[:2] == best_mask.shape[:2]:
-                                np.maximum(pet_union, (pm > 0).astype(np.uint8) * 255, out=pet_union)
-                        if int(np.count_nonzero(pet_union)) > 0:
-                            best_petiole_mask = pet_union
-
-                    best_hole_mask: Optional[np.ndarray] = None
-                    if hole_cands:
-                        hole_cands.sort(key=lambda c: (c[0], c[1]), reverse=True)
-                        hole_union = np.zeros(best_mask.shape[:2], dtype=np.uint8)
-                        valid_holes = [c for c in hole_cands if int(c[1]) >= 64] or [hole_cands[0]]
-                        for _sc_h, _fg_h, _bb_h, hm in valid_holes:
-                            if hm.shape[:2] == best_mask.shape[:2]:
-                                np.maximum(hole_union, (hm > 0).astype(np.uint8) * 255, out=hole_union)
-                        if int(np.count_nonzero(hole_union)) > 0:
-                            best_hole_mask = hole_union
+                    if best_mask is None:
+                        continue
 
                     keypoints_31_crop: Optional[Dict[str, Tuple[float, float, float]]] = None
                     petiole_width_px_crop: Optional[float] = None
@@ -1215,8 +1386,14 @@ class SegmentAndExtractPipeline:
                         or "predict_landmarks" in getattr(self.pose_engine, "__dict__", {})
                     ):
                         try:
+                            wc_pose_bgr, w_pose_scale = _downscale_crop_for_working_frame(
+                                crop_bgr, sheet_h, sheet_w
+                            )
                             pose_res = self.pose_engine.predict_landmarks(
-                                crop_bgr, lamina_mask=best_mask, petiole_mask=best_petiole_mask
+                                wc_pose_bgr, lamina_mask=None, petiole_mask=None
+                            )
+                            pose_res = _upscale_pose_result_to_native_crop(
+                                pose_res, wc_pose_bgr.shape[0], wc_pose_bgr.shape[1], w_pose_scale
                             )
                             keypoints_31_crop = pose_res.keypoints_31 or None
                             petiole_width_px_crop = pose_res.petiole_width_px
@@ -1224,33 +1401,7 @@ class SegmentAndExtractPipeline:
                             keypoints_31_crop = None
 
                     cy0, cx0, cy1, cx1 = crop_box
-                    crop_spec_mask: Optional[np.ndarray] = None
-                    if cy1 > cy0 and cx1 > cx0 and (
-                        cv2.connectedComponents((best_mask > 0).astype(np.uint8), connectivity=8)[0] > 2
-                        or (len(leaf_cands) > 1 and best_petiole_mask is None and not keypoints_31_crop)
-                    ):
-                        full_spec_m = _get_specimen_paper_cleaned_mask()
-                        if full_spec_m is not None:
-                            crop_spec_mask = full_spec_m[cy0:cy1, cx0:cx1]
-
-                    try:
-                        m_raw = _merge_and_bridge_dissected_crop_mask(
-                            best_mask,
-                            leaf_cands,
-                            petiole_mask=best_petiole_mask,
-                            crop_bgr=crop_bgr,
-                            specimen_paper_cleaned_mask=crop_spec_mask,
-                            keypoints_31=keypoints_31_crop,
-                        )
-                    except TypeError:
-                        m_raw = _merge_and_bridge_dissected_crop_mask(
-                            best_mask,
-                            leaf_cands,
-                            petiole_mask=best_petiole_mask,
-                            crop_bgr=crop_bgr,
-                            specimen_paper_cleaned_mask=crop_spec_mask,
-                        )
-
+                    m_raw = best_mask
                     fg_area = int(np.count_nonzero(m_raw))
                     if fg_area <= 0:
                         continue
@@ -1330,48 +1481,15 @@ class SegmentAndExtractPipeline:
                     if not crop_preds:
                         continue
 
-                    crop_h, crop_w = crop_bgr.shape[:2]
                     min_blade_area = 64 if scale_f > 0.0 else 20
-                    blade_candidates = []
-                    petiole_cands_qc = []
-                    hole_cands_qc = []
-                    for _pr_bbox, pr_mask, pr_score, _pr_cls in crop_preds:
-                        fg_area = int(np.count_nonzero(pr_mask))
-                        if fg_area <= 0:
-                            continue
-                        if _pr_cls == 1:
-                            petiole_cands_qc.append((float(pr_score), fg_area, _pr_bbox, pr_mask))
-                        elif _pr_cls == 2:
-                            hole_cands_qc.append((float(pr_score), fg_area, _pr_bbox, pr_mask))
-                        elif _pr_cls == 0 and fg_area >= min_blade_area:
-                            blade_candidates.append((fg_area, float(pr_score), _pr_bbox, pr_mask))
-
-                    if not blade_candidates:
+                    best_mask, best_score, best_petiole_qc, best_hole_qc = _build_native_lm3_crop_masks(
+                        crop_preds,
+                        crop_bgr.shape[:2],
+                        is_high_dpi=is_high_dpi,
+                        min_leaf_area=min_blade_area,
+                    )
+                    if best_mask is None:
                         continue
-
-                    blade_candidates.sort(key=lambda c: (c[0] * c[1], c[0]), reverse=True)
-                    best_area, best_score, best_bbox, best_mask = blade_candidates[0]
-                    best_petiole_qc: Optional[np.ndarray] = None
-                    if petiole_cands_qc:
-                        petiole_cands_qc.sort(key=lambda c: (c[0], c[1]), reverse=True)
-                        pet_union_qc = np.zeros(best_mask.shape[:2], dtype=np.uint8)
-                        valid_pets_qc = [c for c in petiole_cands_qc if int(c[1]) >= 64] or [petiole_cands_qc[0]]
-                        for _sc_p, _fg_p, _bb_p, pm in valid_pets_qc:
-                            if pm.shape[:2] == best_mask.shape[:2]:
-                                np.maximum(pet_union_qc, (pm > 0).astype(np.uint8) * 255, out=pet_union_qc)
-                        if int(np.count_nonzero(pet_union_qc)) > 0:
-                            best_petiole_qc = pet_union_qc
-
-                    best_hole_qc: Optional[np.ndarray] = None
-                    if hole_cands_qc:
-                        hole_cands_qc.sort(key=lambda c: (c[0], c[1]), reverse=True)
-                        hole_union_qc = np.zeros(best_mask.shape[:2], dtype=np.uint8)
-                        valid_holes_qc = [c for c in hole_cands_qc if int(c[1]) >= 64] or [hole_cands_qc[0]]
-                        for _sc_h, _fg_h, _bb_h, hm in valid_holes_qc:
-                            if hm.shape[:2] == best_mask.shape[:2]:
-                                np.maximum(hole_union_qc, (hm > 0).astype(np.uint8) * 255, out=hole_union_qc)
-                        if int(np.count_nonzero(hole_union_qc)) > 0:
-                            best_hole_qc = hole_union_qc
 
                     keypoints_31_qc: Optional[Dict[str, Tuple[float, float, float]]] = None
                     petiole_width_px_qc: Optional[float] = None
@@ -1384,8 +1502,14 @@ class SegmentAndExtractPipeline:
                         or "predict_landmarks" in getattr(self.pose_engine, "__dict__", {})
                     ):
                         try:
+                            wc_pose_qc, w_scale_qc = _downscale_crop_for_working_frame(
+                                crop_bgr, sheet_h, sheet_w
+                            )
                             pose_res_qc = self.pose_engine.predict_landmarks(
-                                crop_bgr, lamina_mask=best_mask, petiole_mask=best_petiole_qc
+                                wc_pose_qc, lamina_mask=None, petiole_mask=None
+                            )
+                            pose_res_qc = _upscale_pose_result_to_native_crop(
+                                pose_res_qc, wc_pose_qc.shape[0], wc_pose_qc.shape[1], w_scale_qc
                             )
                             keypoints_31_qc = pose_res_qc.keypoints_31 or None
                             petiole_width_px_qc = pose_res_qc.petiole_width_px
@@ -1393,33 +1517,7 @@ class SegmentAndExtractPipeline:
                             keypoints_31_qc = None
 
                     cy0, cx0, cy1, cx1 = crop_box
-                    crop_spec_qc: Optional[np.ndarray] = None
-                    if cy1 > cy0 and cx1 > cx0 and (
-                        cv2.connectedComponents((best_mask > 0).astype(np.uint8), connectivity=8)[0] > 2
-                        or (len(blade_candidates) > 1 and best_petiole_qc is None and not keypoints_31_qc)
-                    ):
-                        full_spec_qc = _get_specimen_paper_cleaned_mask()
-                        if full_spec_qc is not None:
-                            crop_spec_qc = full_spec_qc[cy0:cy1, cx0:cx1]
-
-                    qc_leaf_cands = [(c[1], c[0], c[2], c[3]) for c in blade_candidates]
-                    try:
-                        m_refined = _merge_and_bridge_dissected_crop_mask(
-                            best_mask,
-                            qc_leaf_cands,
-                            petiole_mask=best_petiole_qc,
-                            crop_bgr=crop_bgr,
-                            specimen_paper_cleaned_mask=crop_spec_qc,
-                            keypoints_31=keypoints_31_qc,
-                        )
-                    except TypeError:
-                        m_refined = _merge_and_bridge_dissected_crop_mask(
-                            best_mask,
-                            qc_leaf_cands,
-                            petiole_mask=best_petiole_qc,
-                            crop_bgr=crop_bgr,
-                            specimen_paper_cleaned_mask=crop_spec_qc,
-                        )
+                    m_refined = best_mask
                     fg_area = int(np.count_nonzero(m_refined))
                     if fg_area == 0:
                         continue
@@ -1497,9 +1595,9 @@ class SegmentAndExtractPipeline:
                     ))
 
             # Sheet-level sub-pinna noise speck filtering and nested sub-lobe / duplicate suppression:
-            # Sort by foreground area descending (NEVER by solidity descending, which would discard whole
-            # dissected leaves in favor of nested high-solidity terminal lobes).
-            if scale_f > 0.4 and len(leaf_detections) >= 2:
+            # Gated strictly behind `self.enable_geometric_qc` so default raw LeafMachine3 mode never drops
+            # segmented LeafMachine3 leaves via custom sheet-area heuristics or cross-crop mask suppression.
+            if self.enable_geometric_qc and scale_f > 0.4 and len(leaf_detections) >= 2:
                 all_fg_areas = sorted([int(d[9]) for d in leaf_detections], reverse=True)
                 if all_fg_areas[0] >= int(3500 * (scale_f ** 2)):
                     top_k_areas = all_fg_areas[: max(1, min(8, len(all_fg_areas)))]
@@ -2010,16 +2108,6 @@ class SegmentAndExtractPipeline:
                 img_bgr[cy0_m:cy1_m, cx0_m:cx1_m]
                 if (cy1_m > cy0_m and cx1_m > cx0_m)
                 else None
-            )
-            inst_spec_mask = (
-                specimen_paper_cleaned_mask[cy0_m:cy1_m, cx0_m:cx1_m]
-                if (specimen_paper_cleaned_mask is not None and cy1_m > cy0_m and cx1_m > cx0_m)
-                else None
-            )
-            _clean_leaf_instance_mounting_paper(
-                inst,
-                crop_bgr=inst_crop_bgr,
-                specimen_paper_cleaned_mask=inst_spec_mask,
             )
 
             if not self.enable_geometric_qc:
@@ -2577,13 +2665,16 @@ class SegmentAndExtractPipeline:
             ox, oy = inst.mask_origin
 
             def _export_homologized(mask_proc: np.ndarray, is_reflected: bool) -> Optional[str]:
-                mask_for_contour = _prepare_lamina_mask(
-                    mask_proc,
-                    petiole_mask=inst.petiole_mask,
-                    hole_mask=inst.hole_mask,
-                )
-                if not np.any(mask_for_contour > 0):
-                    mask_for_contour = (mask_proc > 0).astype(np.uint8) * 255
+                if not self.enable_geometric_qc:
+                    mask_for_contour = np.where(mask_proc > 0, 255, 0).astype(np.uint8)
+                else:
+                    mask_for_contour = _prepare_lamina_mask(
+                        mask_proc,
+                        petiole_mask=inst.petiole_mask,
+                        hole_mask=inst.hole_mask,
+                    )
+                    if not np.any(mask_for_contour > 0):
+                        mask_for_contour = (mask_proc > 0).astype(np.uint8) * 255
                 p_base_pt = routing_res.metadata.get("p_base")
                 p_apex_pt = routing_res.metadata.get("p_apex")
                 if (
@@ -3333,7 +3424,12 @@ class SegmentAndExtractPipeline:
                                 pixels_per_mm=ppm_v,
                             )
                             cand_crops = unpacked[0]
-                            pre_crops = [self.model_engine.prepare_transformed_crop(c[3]) for c in cand_crops]
+                            pre_crops = [
+                                self.model_engine.prepare_transformed_crop(
+                                    _downscale_crop_for_working_frame(c[3], sh_v, sw_v)[0]
+                                )
+                                for c in cand_crops
+                            ]
                             return local_i, unpacked, pre_crops, False
 
                         unpacked_by_local: Dict[int, Tuple[Any, ...]] = {}
@@ -3359,6 +3455,8 @@ class SegmentAndExtractPipeline:
 
                         # Stage B3: Cross-voucher batched Stage 2 LeafMachine3 YOLO26x-seg on GPU thread
                         flat_crops: List[np.ndarray] = []
+                        flat_native_shapes: List[Tuple[int, int]] = []
+                        flat_work_scales: List[float] = []
                         flat_pre: List[Optional[Tuple[np.ndarray, int, int]]] = []
                         slice_ranges: List[Tuple[int, int, int]] = []
                         for loc_i in valid_indices:
@@ -3368,13 +3466,18 @@ class SegmentAndExtractPipeline:
                             if not cands:
                                 slice_ranges.append((loc_i, 0, 0))
                                 continue
+                            img_v_loc = wave_prefetched[loc_i][4]
+                            sh_loc, sw_loc = img_v_loc.shape[:2] if img_v_loc is not None else (0, 0)
                             s_idx = len(flat_crops)
                             for c_item in cands:
-                                flat_crops.append(c_item[3])
+                                wc_bgr, w_scale = _downscale_crop_for_working_frame(c_item[3], sh_loc, sw_loc)
+                                flat_crops.append(wc_bgr)
+                                flat_native_shapes.append((c_item[3].shape[0], c_item[3].shape[1]))
+                                flat_work_scales.append(w_scale)
                             flat_pre.extend(precrops_by_local.get(loc_i, [None] * len(cands)))
                             slice_ranges.append((loc_i, s_idx, len(flat_crops)))
 
-                        flat_preds = (
+                        raw_flat_preds = (
                             self.model_engine.predict_batch(
                                 flat_crops,
                                 batch_size=self.stage2_batch_size,
@@ -3383,6 +3486,12 @@ class SegmentAndExtractPipeline:
                             if flat_crops
                             else []
                         )
+                        flat_preds = [
+                            _upscale_stage2_preds_to_native_crop(c_preds, nat_h, nat_w, w_scale)
+                            for c_preds, (nat_h, nat_w), w_scale in zip(
+                                raw_flat_preds, flat_native_shapes, flat_work_scales
+                            )
+                        ]
 
                         flat_pose_preds: List[Optional[Any]] = [None] * len(flat_crops)
                         if (
@@ -3395,45 +3504,33 @@ class SegmentAndExtractPipeline:
                         ):
                             pose_indices: List[int] = []
                             pose_crops: List[np.ndarray] = []
-                            pose_laminas: List[Optional[np.ndarray]] = []
-                            pose_petioles: List[Optional[np.ndarray]] = []
                             for idx_f, (c_bgr, c_preds) in enumerate(zip(flat_crops, flat_preds)):
                                 if not c_preds:
                                     continue
-                                best_lm: Optional[np.ndarray] = None
-                                best_lm_val: float = -1.0
-                                best_pm: Optional[np.ndarray] = None
-                                best_pm_sc: float = -1.0
-                                for _bb, pm_u8, p_sc, p_cls in c_preds:
-                                    if int(p_cls) == 0:
-                                        fg_c = int(np.count_nonzero(pm_u8))
-                                        if fg_c > 0:
-                                            val_c = float(fg_c) * float(p_sc)
-                                            if val_c > best_lm_val:
-                                                best_lm_val = val_c
-                                                best_lm = pm_u8
-                                    elif int(p_cls) == 1 and float(p_sc) > best_pm_sc:
-                                        if np.any(pm_u8 > 0):
-                                            best_pm_sc = float(p_sc)
-                                            best_pm = pm_u8
-                                if best_lm is not None:
+                                has_leaf_f = any(
+                                    int(p_cls) == 0 and np.any(pm_u8 > 0)
+                                    for _bb, pm_u8, _p_sc, p_cls in c_preds
+                                )
+                                if has_leaf_f:
                                     pose_indices.append(idx_f)
                                     pose_crops.append(c_bgr)
-                                    pose_laminas.append(best_lm)
-                                    pose_petioles.append(best_pm)
                             if pose_crops:
                                 pose_batch_out = self.pose_engine.predict_batch(
                                     pose_crops,
-                                    lamina_masks=pose_laminas,
-                                    petiole_masks=pose_petioles,
+                                    lamina_masks=None,
+                                    petiole_masks=None,
                                     batch_size=max(8, self.stage2_batch_size),
                                 )
                                 for idx_f, p_res in zip(pose_indices, pose_batch_out):
-                                    flat_pose_preds[idx_f] = p_res
+                                    wc_f = flat_crops[idx_f]
+                                    flat_pose_preds[idx_f] = _upscale_pose_result_to_native_crop(
+                                        p_res, wc_f.shape[0], wc_f.shape[1], flat_work_scales[idx_f]
+                                    )
 
                         s2_payload_by_local: Dict[int, Tuple[Any, ...]] = {}
                         has_spec_seg = (
-                            getattr(self, "specimen_segmenter", None) is not None
+                            self.enable_geometric_qc
+                            and getattr(self, "specimen_segmenter", None) is not None
                             and getattr(self.specimen_segmenter, "model", None) is not None
                         )
                         for loc_i, s_idx, e_idx in slice_ranges:

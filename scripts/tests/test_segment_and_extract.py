@@ -1692,7 +1692,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         self.assertEqual(n_merged, 2)
 
     def test_lm3_explicit_petiole_and_hole_mask_routing_on_dissected_leaf(self) -> None:
-        """classify_and_route_leaf strips petiole_mask (class_id == 1) and fills hole_mask (class_id == 2) while preserving basal pinnae on dissected Packera leaves."""
+        """classify_and_route_leaf applies native LeafMachine3 lamina = silhouette & ~hole without subtracting petiole_mask on dissected Packera leaves."""
         from scripts.vision.leaf_geometry_utils import classify_and_route_leaf
 
         mask_no_stalk = self._build_high_dpi_pinnatisect_mask(sever_rachis=False, include_petiole=False)
@@ -1705,7 +1705,6 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         hole_mask = np.zeros_like(mask_with_stalk)
         cv2.circle(hole_mask, (450, 210), 18, 255, -1)
         raw_dissected = mask_with_stalk.copy()
-        raw_dissected[hole_mask > 0] = 0
 
         routed = classify_and_route_leaf(
             raw_dissected,
@@ -1714,16 +1713,18 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         )
         self.assertIsNotNone(routed.processed_mask)
         routed_area = float(np.count_nonzero(routed.processed_mask))
+        expected_non_hole = cv2.bitwise_and(raw_dissected, cv2.bitwise_not(hole_mask))
 
-        # Processed mask must retain >= 95% of the true lamina area (all 3 lateral pinna pairs + terminal lobe)
+        # Processed mask must retain >= 95% of the true lamina area and preserve 100% of the non-hole leaf silhouette
         self.assertGreaterEqual(
             routed_area / lamina_area,
             0.95,
             f"Explicit petiole/hole routing lost dissected pinnae: retained {routed_area / lamina_area:.3f} of lamina.",
         )
-        # Internal hole in terminal lobe must be filled and basal petiole stalk (y > 950) stripped
-        self.assertGreater(int(routed.processed_mask[210, 450]), 0)
-        self.assertEqual(int(np.count_nonzero(routed.processed_mask[950:, :])), 0)
+        np.testing.assert_array_equal(routed.processed_mask > 0, expected_non_hole > 0)
+        # Qualifying hole (>= 64 px) in terminal lobe is subtracted (== 0), and petiole_mask is never subtracted from lamina
+        self.assertEqual(int(routed.processed_mask[210, 450]), 0)
+        self.assertGreater(int(np.count_nonzero(routed.processed_mask[950:, :])), 0)
         self.assertEqual(routed.assigned_tier, "tier1")
         self.assertTrue(routed.is_dissected)
 
@@ -1829,7 +1830,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
     def test_lm3_three_class_leaf_petiole_hole_routing_and_31kp_reflection(self) -> None:
         """
         Verify LeafMachine3 3-class `Leaf` / `Petiole` / `Hole` mask routing in
-        `classify_and_route_leaf` (petiole_mask subtraction and internal hole_mask filling)
+        `classify_and_route_leaf` (`lamina = silhouette & ~hole` without subtracting `petiole_mask`)
         and 31-keypoint midvein fold reflection (`detect_folded_leaf` and `reflect_folded_mask`).
         """
         from scripts.vision.leaf_geometry_utils import (
@@ -1838,32 +1839,30 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             reflect_folded_mask,
         )
 
-        # 1. 3-class Leaf / Petiole / Hole routing
+        # 1. 3-class Leaf / Petiole / Hole routing (Leaf = pure_lamina silhouette, Petiole = separate class 1, Hole = separate class 2)
         canvas_shape = (400, 400)
         pure_lamina = np.zeros(canvas_shape, dtype=np.uint8)
         cv2.ellipse(pure_lamina, (200, 180), (65, 110), 0.0, 0, 360, 255, -1)
 
         petiole_mask = np.zeros(canvas_shape, dtype=np.uint8)
-        cv2.rectangle(petiole_mask, (194, 285), (206, 375), 255, -1)
+        cv2.rectangle(petiole_mask, (194, 260), (206, 375), 255, -1)
 
         hole_mask = np.zeros(canvas_shape, dtype=np.uint8)
         cv2.circle(hole_mask, (200, 175), 18, 255, -1)
 
-        # Combined raw leaf mask with attached petiole stalk and internal herbivory hole
-        raw_leaf_mask = cv2.bitwise_or(pure_lamina, petiole_mask)
-        raw_leaf_mask[hole_mask > 0] = 0
-
         routed = classify_and_route_leaf(
-            raw_leaf_mask,
+            pure_lamina,
             petiole_mask=petiole_mask,
             hole_mask=hole_mask,
         )
         self.assertEqual(routed.assigned_tier, "tier1")
         self.assertIsNotNone(routed.processed_mask)
-        # Internal hole at (200, 175) must be filled in processed_mask
-        self.assertGreater(int(routed.processed_mask[175, 200]), 0)
-        # External petiole stalk at y=350 must be subtracted from processed_mask
-        self.assertEqual(int(np.count_nonzero(routed.processed_mask[330:, :])), 0)
+        # Qualifying hole (>= 64 px) at (200, 175) is subtracted in processed_mask (lamina = silhouette & ~hole)
+        self.assertEqual(int(routed.processed_mask[175, 200]), 0)
+        # Overlapping petiole_mask region inside basal lamina (y=260..290) is never subtracted from processed_mask
+        self.assertGreater(int(routed.processed_mask[275, 200]), 0)
+        expected_lamina = cv2.bitwise_and(pure_lamina, cv2.bitwise_not(hole_mask))
+        np.testing.assert_array_equal(routed.processed_mask > 0, expected_lamina > 0)
 
         # 2. 31-keypoint midvein fold detection & bilateral reflection
         folded_hemi = np.zeros(canvas_shape, dtype=np.uint8)
@@ -2011,31 +2010,25 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             orient_and_score_leaf_lm3,
         )
 
-        # 1. Dissected leaf with an enclosed inter-lobe sinus (touching pinna tips)
-        #    and a true interior insect hole deep inside the terminal lobe.
+        # 1. Native LeafMachine3 lamina = silhouette & ~hole component gating (min_area_px = 64):
+        #    qualifying hole_mask components (>= 64 px) are subtracted, tiny specks (< 64 px) are ignored,
+        #    and zero 3px cv2.line trenches are carved into the outer margin.
         mask = self._build_high_dpi_pinnatisect_mask(sever_rachis=False, include_petiole=False)
-        # Bridge the outer tips of the upper right pinna (y=410) and middle right pinna (y=610)
-        # with a thin 2-px touch at x=565 so the sinus between y=450..570 becomes an enclosed hole_mask region.
         cv2.line(mask, (565, 410), (565, 610), 255, thickness=2)
         hole_mask = np.zeros_like(mask)
-        # Mark the enclosed inter-lobe sinus (x=475..562, y=455..565) in hole_mask
+        # Qualifying large hole_mask component (x=475..562, y=455..565; area >= 64 px)
         cv2.rectangle(hole_mask, (475, 455), (562, 565), 255, -1)
-        mask[hole_mask > 0] = 0
-        # Also carve a small true interior insect hole deep inside the terminal lobe at (450, 210)
-        cv2.circle(hole_mask, (450, 210), 14, 255, -1)
-        cv2.circle(mask, (450, 210), 14, 0, -1)
+        # Tiny 3x3 = 9 px speck (< 64 px) at (450, 210) deep inside the terminal lobe
+        hole_mask[209:212, 449:452] = 255
 
-        routed = classify_and_route_leaf(mask, hole_mask=hole_mask)
+        routed = classify_and_route_leaf(mask.copy(), hole_mask=hole_mask)
         self.assertIsNotNone(routed.processed_mask)
-        # True interior insect hole at (450, 210) is filled (> 0)
+        # Tiny 3x3 speck (< 64 px) at (450, 210) is ignored by min_area_px = 64 so lamina remains > 0
         self.assertGreater(int(routed.processed_mask[210, 450]), 0)
-        # Enclosed inter-lobe sinus at (515, 510) remains open (== 0) and connected to exterior background
+        # Qualifying hole_mask component (>= 64 px) at (515, 510) is subtracted (== 0)
         self.assertEqual(int(routed.processed_mask[510, 515]), 0)
-        ext_cnts, _ = cv2.findContours(routed.processed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        main_ext_area = float(cv2.contourArea(max(ext_cnts, key=cv2.contourArea)))
-        # Because the touching-pinna bottleneck was opened, RETR_EXTERNAL area matches foreground pixel area closely
-        fg_area = float(np.count_nonzero(routed.processed_mask))
-        self.assertLess(abs(main_ext_area - fg_area) / max(fg_area, 1.0), 0.05)
+        # Zero 3px cv2.line trenches are carved into the outer margin at x=565
+        np.testing.assert_array_equal(routed.processed_mask[410:611, 564:567] > 0, mask[410:611, 564:567] > 0)
 
         # 2. Canonical tip-up contour rotation on an oblique 135-degree leaf
         oblique_mask = np.zeros((400, 400), dtype=np.uint8)
@@ -2136,16 +2129,16 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         lam_m = np.zeros((200, 200), dtype=np.uint8)
         cv2.circle(lam_m, (100, 90), 55, 255, -1)
         pet_1 = np.zeros((200, 200), dtype=np.uint8)
-        cv2.rectangle(pet_1, (96, 145), (104, 165), 255, -1)  # 9 * 21 = 189 px >= 64
+        cv2.rectangle(pet_1, (96, 145), (104, 168), 255, -1)  # 9 * 24 = 216 px >= 64
         pet_2 = np.zeros((200, 200), dtype=np.uint8)
-        cv2.rectangle(pet_2, (96, 165), (104, 190), 255, -1)  # 9 * 26 = 234 px >= 64
+        cv2.rectangle(pet_2, (96, 165), (104, 190), 255, -1)  # overlaps pet_1 across rows 165..168
         hole_1 = np.zeros((200, 200), dtype=np.uint8)
         cv2.circle(hole_1, (85, 85), 6, 255, -1)  # ~113 px >= 64
         hole_2 = np.zeros((200, 200), dtype=np.uint8)
         cv2.circle(hole_2, (115, 95), 6, 255, -1)  # ~113 px >= 64
         fake_preds = [
             ((35, 45, 145, 155), lam_m, 0.94, 0),
-            ((145, 96, 165, 104), pet_1, 0.85, 1),
+            ((145, 96, 168, 104), pet_1, 0.85, 1),
             ((165, 96, 190, 104), pet_2, 0.80, 1),
             ((79, 79, 91, 91), hole_1, 0.82, 2),
             ((89, 109, 101, 121), hole_2, 0.79, 2),
@@ -2168,6 +2161,16 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         det_eng = LM3PlantDetector(device="cpu")
         deduped = det_eng._deduplicate_sheet_boxes(boxes_s1)
         self.assertEqual(len(deduped), 2)
+
+        # Confidence-ordered deduplication keeps high-confidence tight box and drops lower-confidence oversized box
+        boxes_nested_conf = [
+            ((480, 480, 920, 920), 0.45, 0),
+            ((520, 520, 880, 880), 0.96, 0),
+        ]
+        deduped_conf = det_eng._deduplicate_sheet_boxes(boxes_nested_conf)
+        self.assertEqual(len(deduped_conf), 1)
+        self.assertAlmostEqual(deduped_conf[0][1], 0.96, places=3)
+        self.assertEqual(deduped_conf[0][0], (520, 520, 880, 880))
 
     def test_step02_cli_compute_flags_and_back_to_back_minibatch_halving(self) -> None:
         """
@@ -2323,10 +2326,10 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
 
     def test_enclosed_sinus_hole_subtraction_and_bridge_opening(self) -> None:
         """
-        Verify that _prepare_lamina_mask() and classify_and_route_leaf() subtract
-        internal hole_mask / inter-lobe background paper pockets rather than refilling
-        them to 255, and open narrow inter-lobe bridges so the outer contour traces
-        into the sinus.
+        Verify that _prepare_lamina_mask() and classify_and_route_leaf() apply native
+        LeafMachine3 lamina = silhouette & ~hole subtraction for qualifying hole_mask
+        components (>= 64 px), ignore tiny specks (< 64 px), and carve zero synthetic
+        3px cv2.line trenches across the exterior wall.
         """
         from scripts.vision.leaf_geometry_utils import _prepare_lamina_mask
         from scripts.vision.leaf_gatekeeper import classify_and_route_leaf
@@ -2335,40 +2338,28 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         cv2.ellipse(mask, (80, 100), (45, 80), 0, 0, 360, 255, -1)
 
         hole_mask = np.zeros_like(mask)
-        # Enclosed inter-lobe background paper pocket separated from right exterior by a 4-px bridge
+        # Qualifying hole_mask component >= 64 px (30 x 36 = 1080 px)
         hole_mask[85:115, 85:121] = 255
-        # Small true interior insect hole deep inside the blade
+        # Tiny speck < 64 px (4 x 4 = 16 px) deep inside the blade
         hole_mask[60:64, 75:79] = 255
-        mask[60:64, 75:79] = 0
 
         prep_mask = _prepare_lamina_mask(mask.copy(), hole_mask=hole_mask)
-        self.assertEqual(int(prep_mask[100, 100]), 0, "Inter-lobe sinus pocket must be subtracted, not refilled to 255.")
-        self.assertEqual(int(prep_mask[62, 77]), 255, "Small true interior insect hole should be filled to 255.")
-
-        cnts_prep, _ = cv2.findContours(prep_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        self.assertTrue(len(cnts_prep) >= 1)
-        pts_prep = max(cnts_prep, key=cv2.contourArea).reshape(-1, 2)
-        sinus_pts_prep = pts_prep[(pts_prep[:, 1] >= 90) & (pts_prep[:, 1] <= 110) & (pts_prep[:, 0] >= 80)]
-        self.assertTrue(len(sinus_pts_prep) > 0)
-        self.assertLessEqual(
-            int(np.min(sinus_pts_prep[:, 0])),
-            87,
-            "Outer contour from _prepare_lamina_mask() must enter the opened inter-lobe sinus.",
+        self.assertEqual(int(prep_mask[100, 100]), 0, "Qualifying hole_mask component (>= 64 px) must be subtracted.")
+        self.assertEqual(int(prep_mask[62, 77]), 255, "Tiny hole_mask speck (< 64 px) must be ignored.")
+        np.testing.assert_array_equal(
+            prep_mask[:, 121:],
+            mask[:, 121:],
+            "Zero synthetic 3px cv2.line trenches may be carved across the right exterior wall.",
         )
 
         gate_res = classify_and_route_leaf(mask=mask.copy(), hole_mask=hole_mask)
         proc_mask = gate_res.processed_mask
-        self.assertEqual(int(proc_mask[100, 100]), 0, "classify_and_route_leaf() must subtract inter-lobe sinus hole_mask.")
-
-        cnts_gate, _ = cv2.findContours(proc_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        self.assertTrue(len(cnts_gate) >= 1)
-        pts_gate = max(cnts_gate, key=cv2.contourArea).reshape(-1, 2)
-        sinus_pts_gate = pts_gate[(pts_gate[:, 1] >= 90) & (pts_gate[:, 1] <= 110) & (pts_gate[:, 0] >= 80)]
-        self.assertTrue(len(sinus_pts_gate) > 0)
-        self.assertLessEqual(
-            int(np.min(sinus_pts_gate[:, 0])),
-            87,
-            "Outer contour from classify_and_route_leaf() must trace into the opened inter-lobe sinus.",
+        self.assertEqual(int(proc_mask[100, 100]), 0, "classify_and_route_leaf() must subtract qualifying hole_mask (>= 64 px).")
+        self.assertEqual(int(proc_mask[62, 77]), 255, "classify_and_route_leaf() must ignore tiny hole_mask speck (< 64 px).")
+        np.testing.assert_array_equal(
+            proc_mask[:, 121:],
+            mask[:, 121:],
+            "classify_and_route_leaf() must leave the right exterior wall intact and uncarved.",
         )
 
 
