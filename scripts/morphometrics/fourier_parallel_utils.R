@@ -22,7 +22,38 @@ write_step03_csv_fast <- function(df, target_path) {
   file.rename(tmp_p, target_path)
 }
 
+align_contour_horizontal_xax <- function(coo) {
+  if (is.null(coo) || !is.matrix(coo) || nrow(coo) < 5L || ncol(coo) < 2L) return(coo)
+  cx <- mean(coo[, 1L], na.rm = TRUE)
+  cy <- mean(coo[, 2L], na.rm = TRUE)
+  c_xy <- cbind(coo[, 1L] - cx, coo[, 2L] - cy)
+  opp_idx <- min(nrow(c_xy), floor(nrow(c_xy) / 2L) + 1L)
+  v_anchor <- c(c_xy[1L, 1L] - c_xy[opp_idx, 1L], c_xy[1L, 2L] - c_xy[opp_idx, 2L])
+  v_norm <- sqrt(sum(v_anchor^2))
+  if (!is.finite(v_norm) || v_norm < 1e-8) {
+    if (requireNamespace("Momocs", quietly = TRUE)) {
+      return(tryCatch(Momocs::coo_alignxax(coo), error = function(e) coo))
+    }
+    return(coo)
+  }
+  if (abs(c_xy[1L, 1L]) <= 0.20 * max(abs(c_xy[1L, 2L]), 1e-8) && abs(v_anchor[2L]) > abs(v_anchor[1L])) {
+    theta <- -sign(v_anchor[2L]) * (pi / 2.0)
+  } else if (abs(v_anchor[2L]) <= 0.05 * v_norm && v_anchor[1L] >= 0.0) {
+    return(coo)
+  } else {
+    theta <- -atan2(v_anchor[2L], v_anchor[1L])
+  }
+  cs_t <- cos(theta)
+  sn_t <- sin(theta)
+  rot_x <- c_xy[, 1L] * cs_t - c_xy[, 2L] * sn_t + cx
+  rot_y <- c_xy[, 1L] * sn_t + c_xy[, 2L] * cs_t + cy
+  out_coo <- cbind(rot_x, rot_y)
+  colnames(out_coo) <- colnames(coo)
+  out_coo
+}
+
 run_parallel_momocs_efa <- function(coo_list, fac_df, nb_h, calibrate_fn) {
+  coo_list <- lapply(coo_list, align_contour_horizontal_xax)
   n_out <- length(coo_list)
   n_w <- if (exists("resolve_packera_workers", mode = "function")) {
     resolve_packera_workers(32L, ceiling(n_out / 80L))

@@ -443,6 +443,7 @@ run_fourier_extraction <- function(opts) {
   if (exists("filter_basal_lamina_contours", mode = "function")) {
     bg_res <- filter_basal_lamina_contours(fac_df, coo_list); fac_df <- bg_res$fac_df; coo_list <- bg_res$coo_list
   }
+  if (exists("align_contour_horizontal_xax", mode = "function")) coo_list <- lapply(coo_list, align_contour_horizontal_xax)
   message(sprintf("Assembled %d valid Tier 1 intact closed contours for Elliptic Fourier Analysis.", length(coo_list)))
 
   # 3. Dynamic Harmonic Power Calibration (H_opt in [6, 24], >=99% power) & Homologized EFA

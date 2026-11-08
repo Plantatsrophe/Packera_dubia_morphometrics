@@ -99,6 +99,7 @@ from scripts.vision.lm3_data_loader import (
     resolve_px_per_cm,
 )
 from scripts.vision.leaf_geometry_utils import (
+    _prepare_lamina_mask,
     approximate_petiole_and_scape_metrics,
     BoundaryContinuityResult,
     bridge_dissected_rachis_components,
@@ -143,13 +144,16 @@ from scripts.vision.lm3_inference_engines import (
     LM3LeafSegmenterEngine,
     LM3PlantDetector,
     LM3PoseLandmarkEngine,
+    LM3ScaleCalibrator,
     LM3SpecimenSegmenter,
     _VoucherFinalizeBundle,
     _extract_native_lm3_petiole_anchor,
     _merge_and_bridge_dissected_crop_mask,
     compute_capitulum_metrics,
+    compute_leaf_ect_descriptor,
     crop_leaf_bbox_with_padding,
     is_stock_lm3_weights,
+    orient_and_score_leaf_lm3,
     reproject_crop_mask_to_sheet,
     torch_cuda_available,
 )
@@ -255,6 +259,7 @@ class SegmentAndExtractPipeline:
         self.tier1_intact_dir = self.masks_dir / "tier1_intact"
         self.tier2_reflected_dir = self.masks_dir / "tier2_reflected"
         self.contours_dir = self.output_dir / "contours"
+        self.ect_dir = self.output_dir / "ect"
         self.tables_dir = self.output_dir / "tables"
         self.cropped_patches_dir = self.output_dir / "cropped_patches"
         self.capitula_patches_dir = self.cropped_patches_dir / "capitula"
@@ -264,6 +269,7 @@ class SegmentAndExtractPipeline:
             self.tier1_intact_dir,
             self.tier2_reflected_dir,
             self.contours_dir,
+            self.ect_dir,
             self.tables_dir,
             self.capitula_patches_dir,
         ]:
@@ -297,6 +303,7 @@ class SegmentAndExtractPipeline:
             )
         except OSError:
             _is_dummy_test_weights = True
+        self._is_dummy_test_weights = bool(_is_dummy_test_weights)
         _aux_default_weights = self.model_weights if _is_dummy_test_weights else None
 
         # 1. Stage 1 Full-Sheet Plant Organ Detector (YOLO26x 1280px, 9 classes)
@@ -326,6 +333,12 @@ class SegmentAndExtractPipeline:
         self.pose_engine = LM3PoseLandmarkEngine(
             weights_path=_aux_default_weights,
             device=self.device,
+        )
+
+        # 5. LeafMachine3 Archival Ruler Detector + Lattice Solver + Megapixel Scale Calibrator
+        self.scale_calibrator = LM3ScaleCalibrator(
+            device=self.device,
+            providers=([] if _is_dummy_test_weights else None),
         )
 
         self.is_stock_lm3 = is_stock_lm3_weights(self.model_weights)
@@ -546,6 +559,11 @@ class SegmentAndExtractPipeline:
         rosette_bbox_fallback_used = False
         rejected_leaflet_delta = 0
         crop_pad = 0.12
+        seg_partial_cfg = bool(
+            self.lm3_config.get("leafmachine", {})
+            .get("leaf_segmentation", {})
+            .get("segment_partial_leaves", False)
+        )
 
         if not self.enable_geometric_qc:
             # 100% Raw Unconstrained LeafMachine3 Two-Stage Handshake:
@@ -558,11 +576,6 @@ class SegmentAndExtractPipeline:
             #   rather than emitting a separate leaflet class, severed lobe/leaflet rejection
             #   is handled geometrically by `check_boundary_tissue_continuity` / `is_truncated_lobe_or_leaflet`
             #   and `bridge_dissected_rachis_components` in `leaf_gatekeeper.py`.
-            seg_partial_cfg = bool(
-                self.lm3_config.get("leafmachine", {})
-                .get("leaf_segmentation", {})
-                .get("segment_partial_leaves", False)
-            )
             c0_items: List[Tuple[Tuple[int, int, int, int], float, int]] = []
             c1_items: List[Tuple[Tuple[int, int, int, int], float, int]] = []
             for s1_item in stage1_detections:
@@ -588,36 +601,6 @@ class SegmentAndExtractPipeline:
             selected_s1_leaves: List[Tuple[Tuple[int, int, int, int], float, int]] = list(c0_items)
             if seg_partial_cfg or not c0_items:
                 selected_s1_leaves.extend(c1_items)
-            elif is_high_dpi and c1_items:
-                c0_areas = [
-                    float(max(1, (b[2] - b[0]) * (b[3] - b[1])))
-                    for b, _, _ in c0_items
-                ]
-                med_c0_area = float(np.median(c0_areas)) if c0_areas else 0.0
-                max_valid_s1_area = 0.35 * float(sheet_h * sheet_w)
-                min_macro_dim = max(180, int(200 * scale_f))
-                for b1, sc1, cl1 in c1_items:
-                    bh1 = int(b1[2] - b1[0])
-                    bw1 = int(b1[3] - b1[1])
-                    area1 = float(max(1, bh1 * bw1))
-                    if area1 > max_valid_s1_area or max(bh1, bw1) < min_macro_dim:
-                        continue
-                    encloses_c0_sublobe = False
-                    nested_in_c0 = False
-                    for b0, _, _ in c0_items:
-                        area0 = float(max(1, (b0[2] - b0[0]) * (b0[3] - b0[1])))
-                        iy0, ix0 = max(b1[0], b0[0]), max(b1[1], b0[1])
-                        iy1, ix1 = min(b1[2], b0[2]), min(b1[3], b0[3])
-                        if iy1 > iy0 and ix1 > ix0:
-                            inter = float((iy1 - iy0) * (ix1 - ix0))
-                            if area1 >= 1.25 * area0 and (inter / area0) >= 0.55:
-                                encloses_c0_sublobe = True
-                            if area0 >= 1.15 * area1 and (inter / area1) >= 0.50:
-                                nested_in_c0 = True
-                    if encloses_c0_sublobe or (
-                        len(c0_items) <= 4 and not nested_in_c0 and sc1 >= 0.45 and area1 >= 1.35 * med_c0_area
-                    ):
-                        selected_s1_leaves.append((b1, sc1, cl1))
 
             # Suppress smaller Stage 1 sub-lobe / terminal-lobe boxes that are >= 68% enclosed inside
             # a larger compound/dissected leaf box so Stage 2 segments the whole leaf rather than a truncated lobe
@@ -705,6 +688,7 @@ class SegmentAndExtractPipeline:
 
             s1_vertical_fallback_items: List[Tuple[Tuple[int, int, int, int], float, int, float]] = []
             s1_pending_upper_pts: List[Tuple[float, float]] = []
+            c0_present = any(int(it[2]) == 0 for it in s1_raw_leaf_items)
 
             for s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy in s1_raw_leaf_items:
                 if scale_f > 0.0:
@@ -721,6 +705,8 @@ class SegmentAndExtractPipeline:
                     if max(s1_bh, s1_bw) > max_s1_major or (s1_bh * s1_bw) > max_s1_area:
                         continue
                     if is_high_dpi:
+                        if s1_cls == 1 and c0_present and not seg_partial_cfg:
+                            continue
                         if max(s1_bh, s1_bw) < min_s1_hd_major:
                             continue
                         _is_macro_or_veg_basal = (
@@ -862,6 +848,15 @@ class SegmentAndExtractPipeline:
                 float(1.0 / lm3_px_per_mm) if lm3_px_per_mm < 1.0 else float(lm3_px_per_mm)
             )
             cf_source = "measured_from_ruler"
+        elif (
+            not getattr(self, "_is_dummy_test_weights", True)
+            and getattr(self, "scale_calibrator", None) is not None
+        ):
+            cal_res = self.scale_calibrator.calibrate_sheet(img_bgr, catalog_number=catalog_number)
+            pixels_per_mm = cal_res.get("pixels_per_mm")
+            cf_source = str(cal_res.get("cf_source", "predicted_from_megapixels"))
+            if pixels_per_mm is not None and float(pixels_per_mm) > 0.0:
+                self.ruler_calibrations[catalog_number] = float(pixels_per_mm)
         else:
             pixels_per_mm = None
             cf_source = "predicted_from_megapixels"
@@ -957,6 +952,49 @@ class SegmentAndExtractPipeline:
                     if candidate_s1_crops
                     else []
                 )
+
+            def _reproject_crop_mask_to_local_win(
+                cmask: Optional[np.ndarray],
+                crop_box_yx: Tuple[int, int, int, int],
+                win_box_yx: Tuple[int, int, int, int],
+            ) -> Optional[np.ndarray]:
+                if cmask is None:
+                    return None
+                cy0_c, cx0_c, cy1_c, cx1_c = crop_box_yx
+                wy0_w, wx0_w, wy1_w, wx1_w = win_box_yx
+                wh = wy1_w - wy0_w
+                ww = wx1_w - wx0_w
+                if wh <= 0 or ww <= 0:
+                    return None
+                out_m = np.zeros((wh, ww), dtype=np.uint8)
+                ch_m, cw_m = cmask.shape[:2]
+                iy0 = max(cy0_c, wy0_w)
+                ix0 = max(cx0_c, wx0_w)
+                iy1 = min(cy0_c + ch_m, wy1_w)
+                ix1 = min(cx0_c + cw_m, wx1_w)
+                if iy1 > iy0 and ix1 > ix0:
+                    out_m[iy0 - wy0_w : iy1 - wy0_w, ix0 - wx0_w : ix1 - wx0_w] = cmask[
+                        iy0 - cy0_c : iy1 - cy0_c, ix0 - cx0_c : ix1 - cx0_c
+                    ]
+                return out_m if np.any(out_m > 0) else None
+
+            def _shift_crop_keypoints_to_local_win(
+                kpts: Optional[Any],
+                crop_box_yx: Tuple[int, int, int, int],
+                win_box_yx: Tuple[int, int, int, int],
+            ) -> Optional[Dict[str, Tuple[float, float, float]]]:
+                if not kpts or not isinstance(kpts, dict):
+                    return None
+                cy0_c, cx0_c, _, _ = crop_box_yx
+                wy0_w, wx0_w, _, _ = win_box_yx
+                dx_w = float(cx0_c - wx0_w)
+                dy_w = float(cy0_c - wy0_w)
+                shifted: Dict[str, Tuple[float, float, float]] = {}
+                for k_name, vals in kpts.items():
+                    if isinstance(vals, (tuple, list, np.ndarray)) and len(vals) >= 2:
+                        conf_v = float(vals[2]) if len(vals) >= 3 else 1.0
+                        shifted[str(k_name)] = (float(vals[0]) + dx_w, float(vals[1]) + dy_w, conf_v)
+                return shifted or None
 
             if not self.enable_geometric_qc:
                 # Stage 2 LeafMachine3 YOLO26x-seg (`0: Leaf`, `1: Petiole`, `2: Hole`) + YOLO26x-pose (`keypoints_31`)
@@ -1080,9 +1118,15 @@ class SegmentAndExtractPipeline:
                         )
                     else:
                         native_pet_meta = {}
-                    native_pet_meta["petiole_mask"] = best_petiole_mask
-                    native_pet_meta["hole_mask"] = best_hole_mask
-                    native_pet_meta["keypoints_31"] = keypoints_31_crop
+                    native_pet_meta["petiole_mask"] = _reproject_crop_mask_to_local_win(
+                        best_petiole_mask, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
+                    )
+                    native_pet_meta["hole_mask"] = _reproject_crop_mask_to_local_win(
+                        best_hole_mask, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
+                    )
+                    native_pet_meta["keypoints_31"] = _shift_crop_keypoints_to_local_win(
+                        keypoints_31_crop, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
+                    )
                     native_pet_meta["petiole_width_px"] = petiole_width_px_crop
 
                     leaf_detections.append((
@@ -1157,11 +1201,6 @@ class SegmentAndExtractPipeline:
                         crop_bgr=crop_bgr,
                         specimen_paper_cleaned_mask=crop_spec_qc,
                     )
-                    trim_meta: Dict[str, Any] = {
-                        "is_trimmed": best_petiole_qc is not None,
-                        "petiole_mask": best_petiole_qc,
-                        "hole_mask": best_hole_qc,
-                    }
                     fg_area = int(np.count_nonzero(m_refined))
                     if fg_area == 0:
                         continue
@@ -1207,6 +1246,47 @@ class SegmentAndExtractPipeline:
                     eff_w = min(bw_c, win_x1 - xmin_s)
                     local_mask[dst_y0 : dst_y0 + eff_h, dst_x0 : dst_x0 + eff_w] = sub_trimmed[:eff_h, :eff_w]
 
+                    keypoints_31_qc: Optional[Dict[str, Tuple[float, float, float]]] = None
+                    petiole_width_px_qc: Optional[float] = None
+                    if getattr(self, "pose_engine", None) is not None and (
+                        getattr(self.pose_engine, "model", None) is not None or best_petiole_qc is not None
+                    ):
+                        try:
+                            pose_res_qc = self.pose_engine.predict_landmarks(
+                                crop_bgr, lamina_mask=m_refined, petiole_mask=best_petiole_qc
+                            )
+                            keypoints_31_qc = pose_res_qc.keypoints_31 or None
+                            petiole_width_px_qc = pose_res_qc.petiole_width_px
+                        except Exception:
+                            keypoints_31_qc = None
+
+                    trim_meta_qc = _extract_native_lm3_petiole_anchor(
+                        m_refined, best_petiole_qc, keypoints_31=keypoints_31_qc
+                    )
+                    if trim_meta_qc is not None:
+                        p_bc = trim_meta_qc["p_base_crop"]
+                        p_ac = trim_meta_qc["p_apex_crop"]
+                        trim_meta_qc["p_base"] = (
+                            int(cx0 + p_bc[0] - win_x0),
+                            int(cy0 + p_bc[1] - win_y0),
+                        )
+                        trim_meta_qc["p_apex"] = (
+                            int(cx0 + p_ac[0] - win_x0),
+                            int(cy0 + p_ac[1] - win_y0),
+                        )
+                    else:
+                        trim_meta_qc = {"is_trimmed": best_petiole_qc is not None}
+                    trim_meta_qc["petiole_mask"] = _reproject_crop_mask_to_local_win(
+                        best_petiole_qc, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
+                    )
+                    trim_meta_qc["hole_mask"] = _reproject_crop_mask_to_local_win(
+                        best_hole_qc, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
+                    )
+                    trim_meta_qc["keypoints_31"] = _shift_crop_keypoints_to_local_win(
+                        keypoints_31_qc, (cy0, cx0, cy1, cx1), (win_y0, win_x0, win_y1, win_x1)
+                    )
+                    trim_meta_qc["petiole_width_px"] = petiole_width_px_qc
+
                     leaf_detections.append((
                         full_bbox,
                         local_mask,
@@ -1215,7 +1295,7 @@ class SegmentAndExtractPipeline:
                         (crop_box[1], crop_box[0]),
                         (win_x0, win_y0),
                         True,
-                        trim_meta,
+                        trim_meta_qc,
                         m_solidity,
                         fg_area,
                     ))
@@ -1732,6 +1812,16 @@ class SegmentAndExtractPipeline:
                 inst.circularity = float(raw_desc["circularity"])
                 inst.extent = float(raw_desc["extent"])
                 inst.is_severed_lobe = False
+                inst.cf_source = cf_source
+
+                lm3_bm_raw = orient_and_score_leaf_lm3(
+                    inst.mask,
+                    keypoints_31=inst.keypoints_31,
+                    p_base=p_base_use,
+                    p_apex=p_apex_use,
+                    offset_xy=(0, 0),
+                )
+                inst.archetype_score = float(lm3_bm_raw.get("archetype_score", 0.0))
 
                 is_dissected = bool(inst.solidity < self.min_solidity and is_botanical_dissection(inst.mask))
                 if is_dissected:
@@ -1843,12 +1933,9 @@ class SegmentAndExtractPipeline:
             _, _, _inst_area_pre, _inst_ar_pre, _inst_sol_pre = inst_geom_map.get(
                 inst.leaf_id, (0.0, 0.0, 0.0, 1.0, 0.0)
             )
-            # Approach 1 (Trust LM3 Leaf_WHOLE + Minimal Botanical Hygiene):
-            # Two-stage LeafMachine3 Class 0 (`Leaf_WHOLE`) YOLO26x-seg masks are trusted without
-            # hair-trigger Otsu shadow/neighbor vetoes or rigid ucs/solidity/fold rejections,
-            # while enforcing physical scan-border clipping, artificial straight-object occlusion,
-            # adaptive minimum blade area, and basal-vs.-cauline / bare-stem botanical hygiene.
-            is_trusted_lm3_whole = bool(is_high_dpi and inst.already_trimmed and int(inst.class_id) == 0)
+            # Enforce full geometric QC and boundary-continuity verification across all Stage 2 leaves
+            is_trusted_lm3_whole = False
+            inst.cf_source = cf_source
 
             if is_high_dpi:
                 _ys_bchk, _xs_bchk = np.where(inst.mask > 0)
@@ -1869,7 +1956,7 @@ class SegmentAndExtractPipeline:
                         rejected_instances.append(inst)
                         continue
 
-            eff_max_border_ratio = 0.42 if is_trusted_lm3_whole else float(self.max_tissue_border_ratio)
+            eff_max_border_ratio = float(self.max_tissue_border_ratio)
 
             # 6a. Boundary-continuity severed lobe / straight artificial occlusion check
             bc_res = check_boundary_tissue_continuity(
@@ -1946,46 +2033,28 @@ class SegmentAndExtractPipeline:
                     max_tissue_border_ratio=eff_max_border_ratio,
                     exclude_mask=neighbor_mask,
                 )
-            if is_trusted_lm3_whole and (
-                routing_res.is_folded
-                or bool(routing_res.metadata.get("reflection_applied", False))
-                or routing_res.processed_mask is None
-                or routing_res.processed_mask.shape[:2] != inst.mask.shape[:2]
-            ):
-                _t_ucs, _t_sol, _t_ang, _t_pa, _t_pb = compute_geometric_metrics(
-                    inst.mask, rosette_centroid=rc_local
-                )
-                _t_meta = dict(routing_res.metadata)
-                _t_meta.update({
-                    "p_base": _t_pb,
-                    "p_apex": _t_pa,
-                    "midrib_angle_deg": _t_ang,
-                    "reflection_applied": False,
-                })
-                routing_res = LeafRoutingResult(
-                    tier="Tier 1",
-                    assigned_tier="tier1",
-                    solidity=_t_sol,
-                    ucs=_t_ucs,
-                    is_folded=False,
-                    is_irregular_fold=False,
-                    is_dissected=bool(routing_res.is_dissected or _t_sol < self.min_solidity),
-                    processed_mask=inst.mask,
-                    metadata=_t_meta,
-                )
 
             inst.ucs_score = routing_res.ucs
             inst.solidity = routing_res.solidity
             inst.midrib_angle_deg = float(routing_res.metadata.get("midrib_angle_deg", 0.0))
 
+            lm3_bm_qc = orient_and_score_leaf_lm3(
+                routing_res.processed_mask if routing_res.processed_mask is not None else inst.mask,
+                keypoints_31=inst.keypoints_31,
+                p_base=routing_res.metadata.get("p_base"),
+                p_apex=routing_res.metadata.get("p_apex"),
+                offset_xy=(0, 0),
+            )
+            inst.archetype_score = float(lm3_bm_qc.get("archetype_score", 0.0))
+
             # 6c. Classical dimensionless shape descriptors (Krieger 2017; Russ 2011): Solidity, Circularity, Extent
             ref_bbox = inst.pcd_bbox if inst.pcd_bbox is not None else inst.bbox
             raw_desc = compute_classical_shape_descriptors(inst.mask, bbox=ref_bbox)
             proc_desc = compute_classical_shape_descriptors(routing_res.processed_mask, bbox=ref_bbox)
-            inst.circularity = float(raw_desc["circularity"] if is_trusted_lm3_whole else proc_desc["circularity"])
+            inst.circularity = float(proc_desc["circularity"] if routing_res.processed_mask is not None else raw_desc["circularity"])
             inst.extent = float(max(raw_desc["extent"], proc_desc["extent"]))
 
-            min_req_extent = 0.16 if (is_trusted_lm3_whole or bool(routing_res.is_dissected)) else self.min_extent
+            min_req_extent = 0.16 if bool(routing_res.is_dissected) else self.min_extent
             if inst.extent < min_req_extent:
                 _telem_deltas["rejected_solidity_extent"] += 1
                 inst.assigned_tier = "rejected"
@@ -1998,8 +2067,7 @@ class SegmentAndExtractPipeline:
                 continue
 
             if (
-                not is_trusted_lm3_whole
-                and not bool(routing_res.is_dissected)
+                not bool(routing_res.is_dissected)
                 and routing_res.assigned_tier != "tier2"
                 and inst.circularity < self.min_circularity
             ):
@@ -2052,46 +2120,28 @@ class SegmentAndExtractPipeline:
                 continue
 
             # Bare stem / fibrous root stick sanity check (applies anywhere on sheet, including below rosette)
-            if is_trusted_lm3_whole:
-                _is_bare_stem_or_artifact = (
-                    inst.solidity < 0.20
-                    or inst.circularity < 0.035
-                    or (inst_ar > 4.4 and inst.solidity < 0.65 and not bool(routing_res.is_dissected))
-                    or (inst.solidity < 0.48 and inst.ucs_score < 0.52 and not bool(routing_res.is_dissected))
-                )
-                if _is_bare_stem_or_artifact:
-                    _telem_deltas["rejected_solidity_extent"] += 1
-                    inst.assigned_tier = "rejected"
-                    inst.rejection_reason = "UNRESOLVED_CLUMP"
-                    rejected_instances.append(inst)
-                    continue
+            _is_bare_stem_or_artifact = (
+                inst.solidity < 0.20
+                or inst.circularity < 0.035
+                or (inst_ar > 4.4 and inst.solidity < 0.65 and not bool(routing_res.is_dissected))
+                or (inst.solidity < 0.48 and inst.ucs_score < 0.52 and not bool(routing_res.is_dissected))
+            )
+            if _is_bare_stem_or_artifact:
+                _telem_deltas["rejected_solidity_extent"] += 1
+                inst.assigned_tier = "rejected"
+                inst.rejection_reason = "UNRESOLVED_CLUMP"
+                rejected_instances.append(inst)
+                continue
 
             # Diagnostic classification flags
-            is_folded = False if is_trusted_lm3_whole else bool(routing_res.is_folded)
+            is_folded = bool(routing_res.is_folded)
             is_dissected = bool(routing_res.is_dissected)
             reflection_applied = False
             tier: str = "Failed QC"
             assigned_tier: str = "rejected"
 
-            # Routing Decision Tree:
-            # Under Approach 1, trusted two-stage LM3 Class 0 (`Leaf_WHOLE`) basal leaf masks enter
-            # Tier_1_Direct directly (letting Step 03 Momocs::rm_asym + MCD Mahalanobis outlier pruning
-            # filter subtle harmonic outliers statistically), while Class 1 (`Leaf_PARTIAL`) and
-            # single-stage masks continue through strict geometric wholeness verification.
-            if is_trusted_lm3_whole:
-                if inst.solidity < 0.48:
-                    tier = "Tier 1 (Bipinnatisect)"
-                    is_dissected = True
-                elif inst.solidity < self.min_solidity or is_dissected:
-                    tier = "Tier 1 (Dissected)"
-                    is_dissected = True
-                else:
-                    tier = "Tier 1"
-                    is_dissected = False
-                assigned_tier = TIER_1_DIRECT
-                reflection_applied = False
-
-            elif not is_folded and routing_res.solidity >= self.min_solidity and routing_res.ucs >= self.min_ucs and routing_res.assigned_tier == "tier1" and not is_dissected:
+            # Routing Decision Tree
+            if not is_folded and routing_res.solidity >= self.min_solidity and routing_res.ucs >= self.min_ucs and routing_res.assigned_tier == "tier1" and not is_dissected:
                 tier = "Tier 1"
                 assigned_tier = TIER_1_DIRECT
                 reflection_applied = False
@@ -2172,8 +2222,8 @@ class SegmentAndExtractPipeline:
                 inst_cy_rel_plant_bbox[inst.leaf_id] = cy_rel_p_m
                 m_bh = int(np.ptp(ys_m))
                 m_bw = int(np.ptp(xs_m))
-                min_area_px = int((6500 if is_trusted_lm3_whole else 12000) * (scale_f ** 2))
-                min_dim_px = int((160 if is_trusted_lm3_whole else 220) * scale_f)
+                min_area_px = int((6500 if (inst.already_trimmed and int(inst.class_id) == 0) else 12000) * (scale_f ** 2))
+                min_dim_px = int((160 if (inst.already_trimmed and int(inst.class_id) == 0) else 220) * scale_f)
                 min_t2_area_px = int(18000 * (scale_f ** 2))
                 if is_calibrated_mm and px_per_cm_sheet > 0:
                     _phys_area_px = max(20, int(effective_min_blade_area_cm2 * (px_per_cm_sheet ** 2)))
@@ -2186,8 +2236,7 @@ class SegmentAndExtractPipeline:
                     m_area < min_area_px
                     or max(m_bw, m_bh) < min_dim_px
                     or (
-                        not is_trusted_lm3_whole
-                        and not bool(is_dissected)
+                        not bool(is_dissected)
                         and (min(m_bw, m_bh) / max(m_bw, m_bh, 1)) > 0.78
                         and inst.solidity < 0.84
                     )
@@ -2202,7 +2251,7 @@ class SegmentAndExtractPipeline:
                 _is_veg_or_macro_rosette_blade = (
                     (
                         not capitulum_detections
-                        and (is_trusted_lm3_whole or m_area >= int(0.45 * sheet_med_area))
+                        and (m_area >= int(0.45 * sheet_med_area) or (inst.already_trimmed and int(inst.class_id) == 0))
                         and cy_rel >= 0.20
                     )
                     or (max(m_bw, m_bh) >= int(0.22 * sheet_h) and cy_rel >= 0.20)
@@ -2265,7 +2314,8 @@ class SegmentAndExtractPipeline:
                 _inst, _rres, _tier, _atier, _fold, _diss, _refl, _area = item
                 _rel_floor = 0.16 if (_inst.already_trimmed and int(_inst.class_id) == 0) else 0.28
                 if _area >= _rel_floor * max_sheet_area:
-                    _q = round(float(_inst.solidity), 4) * round(float(_inst.ucs_score), 4) * math.sqrt(_area)
+                    _arch_w = max(0.35, float(_inst.archetype_score)) if float(_inst.archetype_score) > 0.0 else 1.0
+                    _q = round(float(_inst.solidity), 4) * round(float(_inst.ucs_score), 4) * _arch_w * math.sqrt(_area)
                     kept_with_q_cand.append((_q, item))
             kept_with_q_cand.sort(key=lambda x: x[0], reverse=True)
             candidate_extractions = [x[1] for x in kept_with_q_cand[:6]]
@@ -2337,48 +2387,52 @@ class SegmentAndExtractPipeline:
             ox, oy = inst.mask_origin
 
             def _export_homologized(mask_proc: np.ndarray, is_reflected: bool) -> Optional[str]:
+                mask_for_contour = _prepare_lamina_mask(
+                    mask_proc,
+                    petiole_mask=inst.petiole_mask,
+                    hole_mask=inst.hole_mask,
+                )
+                if not np.any(mask_for_contour > 0):
+                    mask_for_contour = (mask_proc > 0).astype(np.uint8) * 255
                 p_base_pt = routing_res.metadata.get("p_base")
                 p_apex_pt = routing_res.metadata.get("p_apex")
-                if is_reflected or p_base_pt is None or p_base_pt == (0, 0):
-                    _, _, _, p_apex_pt, p_base_pt = compute_geometric_metrics(mask_proc)
-
-                bx_p, by_p, bw_p, bh_p = cv2.boundingRect(mask_proc)
-                homologized_c = None
-                p_base_export = p_base_pt
-                p_apex_export = p_apex_pt
-                if bw_p > 0 and bh_p > 0:
-                    cnts, _ = cv2.findContours(
-                        mask_proc[by_p : by_p + bh_p, bx_p : bx_p + bw_p],
-                        cv2.RETR_EXTERNAL,
-                        cv2.CHAIN_APPROX_NONE,
-                        offset=(bx_p, by_p),
-                    )
-                    if cnts:
-                        raw_c = max(cnts, key=cv2.contourArea).reshape(-1, 2)
-                        if len(raw_c) >= 3 and cv2.contourArea(raw_c.astype(np.float32), oriented=True) < 0:
-                            raw_c = raw_c[::-1]
-                        if p_base_pt is not None and len(raw_c) > 0:
-                            dists = np.linalg.norm(raw_c - np.asarray(p_base_pt, dtype=np.float64), axis=1)
-                            homologized_c = np.roll(raw_c, -int(np.argmin(dists)), axis=0)
-                        else:
-                            homologized_c = raw_c
-                        if ox != 0 or oy != 0:
-                            homologized_c = homologized_c + np.array([ox, oy], dtype=homologized_c.dtype)
-                            if p_base_pt is not None:
-                                p_base_export = (int(p_base_pt[0] + ox), int(p_base_pt[1] + oy))
-                            if p_apex_pt is not None:
-                                p_apex_export = (int(p_apex_pt[0] + ox), int(p_apex_pt[1] + oy))
+                if (
+                    is_reflected
+                    or p_base_pt is None
+                    or p_base_pt == (0, 0)
+                    or inst.petiole_mask is not None
+                ):
+                    _, _, _, _pa_lam, _pb_lam = compute_geometric_metrics(mask_for_contour)
+                    if is_reflected or p_base_pt is None or p_base_pt == (0, 0):
+                        p_base_pt = _pb_lam
+                        p_apex_pt = _pa_lam
+                    elif inst.petiole_mask is not None:
+                        _cnts_lam, _ = cv2.findContours(
+                            mask_for_contour, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+                        )
+                        if _cnts_lam:
+                            _c_lam = max(_cnts_lam, key=cv2.contourArea).reshape(-1, 2)
+                            _d_lam = np.linalg.norm(_c_lam - np.asarray(p_base_pt, dtype=np.float64), axis=1)
+                            _nearest_pt = _c_lam[int(np.argmin(_d_lam))]
+                            p_base_pt = (int(_nearest_pt[0]), int(_nearest_pt[1]))
+                        if p_apex_pt is None or p_apex_pt == (0, 0):
+                            p_apex_pt = _pa_lam
 
                 c_res = export_standardized_contour(
-                    mask_proc,
+                    mask_for_contour,
                     catalog_number,
                     inst.leaf_id,
                     self.output_dir,
-                    petiole_attachment_pt=p_base_export,
-                    contour=homologized_c,
-                    p_apex_pt=p_apex_export,
+                    petiole_attachment_pt=p_base_pt,
+                    p_apex_pt=p_apex_pt,
                     return_coords=True,
+                    keypoints_31=inst.keypoints_31,
                 )
+                if getattr(self, "ect_dir", None) is not None:
+                    ect_out = self.ect_dir / f"{catalog_number}_leaf{inst.leaf_id}_ect.npy"
+                    ect_mat = compute_leaf_ect_descriptor(mask_for_contour, output_path=ect_out)
+                    if ect_mat is not None:
+                        inst.ect_path = str(ect_out)
                 if isinstance(c_res, tuple):
                     c_path, c_xy = c_res
                     if c_xy:
@@ -2443,6 +2497,7 @@ class SegmentAndExtractPipeline:
                 "assigned_tier": inst.assigned_tier,
                 "tier_assignment": inst.assigned_tier,
                 "ucs_score": round(float(inst.ucs_score), 4),
+                "archetype_score": round(float(inst.archetype_score), 4),
                 "circularity": round(float(inst.circularity), 4) if np.isfinite(inst.circularity) else np.nan,
                 "extent": round(float(inst.extent), 4) if np.isfinite(inst.extent) else np.nan,
                 "aspect_ratio": round(float(_inst_ar_val), 4) if np.isfinite(_inst_ar_val) else np.nan,
@@ -2451,8 +2506,15 @@ class SegmentAndExtractPipeline:
                 "midrib_angle_deg": round(float(inst.midrib_angle_deg), 2),
                 "pixels_per_mm": round(float(inst.pixels_per_mm), 4) if inst.pixels_per_mm else np.nan,
                 "is_calibrated_mm": bool(inst.is_calibrated_mm),
+                "cf_source": inst.cf_source,
                 "mask_path": inst.mask_path,
+                "ect_path": inst.ect_path,
                 "petiole_length_mm": pid_pet.get("petiole_length_mm", np.nan),
+                "petiole_width_mm": (
+                    round(float(inst.petiole_width_mm), 4)
+                    if inst.petiole_width_mm is not None and np.isfinite(inst.petiole_width_mm)
+                    else np.nan
+                ),
                 "blade_length_mm": pid_pet.get("blade_length_mm", np.nan),
                 "petiole_to_blade_ratio": pid_pet.get("petiole_to_blade_ratio", np.nan),
                 "capitula_count": capitula_count,

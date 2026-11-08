@@ -1994,6 +1994,107 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         self.assertGreater(float(pet_metrics["petiole_length_px"]), 50.0)
         self.assertGreater(float(pet_metrics["petiole_length_mm"]), 5.0)
 
+    def test_dissected_sinus_topology_opening_and_canonical_tip_up_ect_export(self) -> None:
+        """
+        Verify topology-aware inter-lobe sinus opening vs interior hole filling,
+        canonical tip-up contour rotation in export_standardized_contour,
+        LM3ScaleCalibrator megapixel prior, orient_and_score_leaf_lm3, and
+        compute_leaf_ect_descriptor.
+        """
+        from scripts.vision.leaf_geometry_utils import (
+            classify_and_route_leaf,
+            export_standardized_contour,
+        )
+        from scripts.vision.lm3_inference_engines import (
+            LM3ScaleCalibrator,
+            compute_leaf_ect_descriptor,
+            orient_and_score_leaf_lm3,
+        )
+
+        # 1. Dissected leaf with an enclosed inter-lobe sinus (touching pinna tips)
+        #    and a true interior insect hole deep inside the terminal lobe.
+        mask = self._build_high_dpi_pinnatisect_mask(sever_rachis=False, include_petiole=False)
+        # Bridge the outer tips of the upper right pinna (y=410) and middle right pinna (y=610)
+        # with a thin 2-px touch at x=565 so the sinus between y=450..570 becomes an enclosed hole_mask region.
+        cv2.line(mask, (565, 410), (565, 610), 255, thickness=2)
+        hole_mask = np.zeros_like(mask)
+        # Mark the enclosed inter-lobe sinus (x=475..562, y=455..565) in hole_mask
+        cv2.rectangle(hole_mask, (475, 455), (562, 565), 255, -1)
+        mask[hole_mask > 0] = 0
+        # Also carve a small true interior insect hole deep inside the terminal lobe at (450, 210)
+        cv2.circle(hole_mask, (450, 210), 14, 255, -1)
+        cv2.circle(mask, (450, 210), 14, 0, -1)
+
+        routed = classify_and_route_leaf(mask, hole_mask=hole_mask)
+        self.assertIsNotNone(routed.processed_mask)
+        # True interior insect hole at (450, 210) is filled (> 0)
+        self.assertGreater(int(routed.processed_mask[210, 450]), 0)
+        # Enclosed inter-lobe sinus at (515, 510) remains open (== 0) and connected to exterior background
+        self.assertEqual(int(routed.processed_mask[510, 515]), 0)
+        ext_cnts, _ = cv2.findContours(routed.processed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        main_ext_area = float(cv2.contourArea(max(ext_cnts, key=cv2.contourArea)))
+        # Because the touching-pinna bottleneck was opened, RETR_EXTERNAL area matches foreground pixel area closely
+        fg_area = float(np.count_nonzero(routed.processed_mask))
+        self.assertLess(abs(main_ext_area - fg_area) / max(fg_area, 1.0), 0.05)
+
+        # 2. Canonical tip-up contour rotation on an oblique 135-degree leaf
+        oblique_mask = np.zeros((400, 400), dtype=np.uint8)
+        cv2.ellipse(oblique_mask, (200, 200), (95, 38), 45.0, 0, 360, 255, -1)
+        kp31 = np.zeros((31, 3), dtype=np.float32)
+        # Base at top-left (133, 133), tip at bottom-right (267, 267) -> pointing down-right (+135 deg from tip-up)
+        kp31[0] = [267.0, 267.0, 0.98]  # lamina_tip
+        kp31[1] = [133.0, 133.0, 0.98]  # lamina_base
+        for i in range(23):
+            frac = i / 22.0
+            kp31[8 + i] = [133.0 + frac * 134.0, 133.0 + frac * 134.0, 0.95]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_p = Path(tmp)
+            c_path = export_standardized_contour(
+                oblique_mask,
+                catalog_number="TEST_OBLIQUE_135",
+                leaf_id=1,
+                output_dir=tmp_p,
+                num_points=120,
+                keypoints_31=kp31,
+            )
+            self.assertIsNotNone(c_path)
+            cdf = pd.read_csv(c_path)
+            # Point 0 (lamina_base) must sit at the bottom (high y_norm), and point 60 (lamina_tip) at the top (low y_norm)
+            self.assertGreater(float(cdf.loc[0, "y_norm"]), 0.65)
+            self.assertLess(float(cdf.loc[60, "y_norm"]), 0.15)
+            span_y = float(cdf["y_norm"].max() - cdf["y_norm"].min())
+            span_x = float(cdf["x_norm"].max() - cdf["x_norm"].min())
+            self.assertGreater(span_y, 1.8 * span_x)
+
+            # 3. Module 18 ECT descriptor export
+            ect_file = tmp_p / "TEST_OBLIQUE_135_leaf1_ect.npy"
+            ect_arr = compute_leaf_ect_descriptor(
+                oblique_mask,
+                output_path=ect_file,
+                num_dirs=32,
+                num_thresh=32,
+            )
+            self.assertIsNotNone(ect_arr)
+            self.assertTrue(ect_file.exists())
+            self.assertEqual(ect_arr.shape, (32, 32))
+            self.assertEqual(ect_arr.dtype, np.float32)
+
+        # 4. LM3 native leaf orientation and bilateral archetype scoring
+        orient_res = orient_and_score_leaf_lm3(oblique_mask, keypoints_31=kp31)
+        self.assertTrue(orient_res["success"])
+        self.assertGreater(abs(float(orient_res["angle_cw"])), 100.0)
+        self.assertGreaterEqual(float(orient_res["archetype_score"]), 0.70)
+
+        # 5. LM3ScaleCalibrator megapixel prior fallback when no ruler is present
+        calibrator = LM3ScaleCalibrator(device="cpu")
+        calibrator.archival_session = None
+        sheet_dummy = np.zeros((3000, 2000, 3), dtype=np.uint8)  # 6.0 MP
+        cal_res = calibrator.calibrate_sheet(sheet_dummy, catalog_number="NCU_MP_FALLBACK")
+        expected_px_per_mm = 27.112084 * np.sqrt(6.0) / 10.0
+        self.assertAlmostEqual(float(cal_res["pixels_per_mm"]), expected_px_per_mm, places=3)
+        self.assertEqual(cal_res["cf_source"], "predicted_from_megapixels")
+
 
 if __name__ == "__main__":
     unittest.main()

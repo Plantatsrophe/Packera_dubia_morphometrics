@@ -1111,6 +1111,7 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
   "${PYTHON_LM3}" scripts/pipeline/02_segment_and_extract.py \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --output-dir "${RUN_DIR}/data" \
+    --enable-geometric-qc \
     ${FORCE_FLAG} \
     "${LIMIT_ARG[@]}" \
     "${COMPUTE_ARGS[@]}"
@@ -1121,10 +1122,14 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
     "${PROJECT_ROOT}/data/masks/tier1_intact" \
     "${PROJECT_ROOT}/data/masks/tier2_reflected" \
     "${PROJECT_ROOT}/data/contours" \
+    "${PROJECT_ROOT}/data/ect" \
     "${PROJECT_ROOT}/data/cropped_patches/capitula" \
     "${PROJECT_ROOT}/data/tables"
   cp -alf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/" 2>/dev/null || cp -rf "${RUN_DIR}/data/masks/." "${PROJECT_ROOT}/data/masks/"
   cp -alf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/" 2>/dev/null || cp -rf "${RUN_DIR}/data/contours/." "${PROJECT_ROOT}/data/contours/"
+  if [[ -d "${RUN_DIR}/data/ect" ]]; then
+    cp -alf "${RUN_DIR}/data/ect/." "${PROJECT_ROOT}/data/ect/" 2>/dev/null || cp -rf "${RUN_DIR}/data/ect/." "${PROJECT_ROOT}/data/ect/" 2>/dev/null || true
+  fi
   cp -alf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/" 2>/dev/null || cp -rf "${RUN_DIR}/data/cropped_patches/." "${PROJECT_ROOT}/data/cropped_patches/"
   if [[ "${CUSTOM_GEO_SCOPE}" != "true" && -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && "${EXCLUDE_MISIDENTIFIED}" != "true" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
     "${PYTHON_MAIN}" -c "

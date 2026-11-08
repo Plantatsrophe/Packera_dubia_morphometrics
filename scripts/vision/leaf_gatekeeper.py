@@ -1233,11 +1233,9 @@ def bridge_dissected_rachis_components(
                     xc = np.clip(xs_s + dx_c, 0, w - 1)
                     corridor_hits |= spec_clean_bool[yc, xc]
             plant_frac = float(np.mean(corridor_hits))
-            paper_frac = 1.0 - plant_frac
-            if paper_frac > 0.70:
+            if plant_frac < 0.60:
                 return False
-            if plant_frac >= 0.50:
-                return True
+            return True
 
         if seg_len <= 10.0:
             return True
@@ -1284,6 +1282,16 @@ def bridge_dissected_rachis_components(
             in_rachis = (s_pm >= s_min - 4.0) & (s_pm <= s_max + 4.0) & (n_pm <= 0.25 * minor_span + 6.0)
             if np.any(in_rachis):
                 bridged[ys_pm[in_rachis], xs_pm[in_rachis]] = 255
+
+    # Include verified UNet++ v9 specimen_paper_cleaned_mask rachis tissue along the central midvein corridor
+    if spec_clean_bool is not None:
+        ys_sp, xs_sp = np.where(spec_clean_bool)
+        if len(xs_sp) > 0:
+            s_sp = (xs_sp - x0) * vx + (ys_sp - y0) * vy
+            n_sp = np.abs((xs_sp - x0) * (-vy) + (ys_sp - y0) * vx)
+            in_spec_rachis = (s_sp >= s_min - 2.0) & (s_sp <= s_max + 2.0) & (n_sp <= max(6.0, 0.08 * minor_span))
+            if np.any(in_spec_rachis):
+                bridged[ys_sp[in_spec_rachis], xs_sp[in_spec_rachis]] = 255
 
     # Iteratively bridge any remaining disconnected valid components along the rachis spine
     rejected_cids: Set[int] = set()
@@ -1883,17 +1891,42 @@ def classify_and_route_leaf(
         hole_bool = hole_mask > 0
         hole_mask_area_px = int(np.count_nonzero(hole_bool))
         lam_u8 = (mask > 0).astype(np.uint8) * 255
-        cnts_h, _ = cv2.findContours(lam_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts_h, _ = cv2.findContours(lam_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         if cnts_h:
-            hull_mask = np.zeros(mask.shape[:2], dtype=np.uint8)
-            all_pts_h = np.vstack([c.reshape(-1, 2) for c in cnts_h]).astype(np.int32)
-            if len(all_pts_h) >= 3:
-                cv2.fillPoly(hull_mask, [cv2.convexHull(all_pts_h)], 255)
-            internal_holes = hole_bool & (hull_mask > 0) & (lam_u8 == 0)
-            filled_hole_area_px = int(np.count_nonzero(internal_holes))
-            if filled_hole_area_px > 0:
-                mask = np.where((lam_u8 > 0) | internal_holes, 255, 0).astype(np.uint8)
-                hole_filled = True
+            filled_ext_h = np.zeros(mask.shape[:2], dtype=np.uint8)
+            cv2.drawContours(filled_ext_h, cnts_h, -1, 255, thickness=cv2.FILLED)
+            dist_to_ext_h = cv2.distanceTransform((filled_ext_h > 0).astype(np.uint8), cv2.DIST_L2, 3)
+            lam_area_h = max(1, int(np.count_nonzero(lam_u8)))
+            cand_holes = ((hole_bool | (lam_u8 == 0)) & (filled_ext_h > 0)).astype(np.uint8)
+            n_hc, hc_lbls, hc_stats, _ = cv2.connectedComponentsWithStats(cand_holes, connectivity=8)
+            for hid in range(1, n_hc):
+                h_comp = hc_lbls == hid
+                if not np.any(h_comp & hole_bool):
+                    continue
+                h_area = int(hc_stats[hid, cv2.CC_STAT_AREA])
+                min_d_ext = float(np.min(dist_to_ext_h[h_comp])) if h_area > 0 else 999.0
+                area_frac = float(h_area) / float(lam_area_h)
+                is_enclosed_sinus = (min_d_ext <= 6.0 and area_frac >= 0.012) or (min_d_ext <= 12.0 and area_frac >= 0.065)
+                if is_enclosed_sinus:
+                    lam_u8[h_comp] = 0
+                    hys, hxs = np.where(h_comp)
+                    if len(hys) > 0:
+                        best_i = int(np.argmin(dist_to_ext_h[hys, hxs]))
+                        vy0, vx0 = int(hys[best_i]), int(hxs[best_i])
+                        win = max(8, int(math.ceil(min_d_ext)) + 4)
+                        y_lo, y_hi = max(0, vy0 - win), min(lam_u8.shape[0], vy0 + win + 1)
+                        x_lo, x_hi = max(0, vx0 - win), min(lam_u8.shape[1], vx0 + win + 1)
+                        bg_sy, bg_sx = np.where(filled_ext_h[y_lo:y_hi, x_lo:x_hi] == 0)
+                        if len(bg_sy) > 0:
+                            by_all = bg_sy + y_lo
+                            bx_all = bg_sx + x_lo
+                            nb_i = int(np.argmin((by_all - vy0) ** 2 + (bx_all - vx0) ** 2))
+                            cv2.line(lam_u8, (vx0, vy0), (int(bx_all[nb_i]), int(by_all[nb_i])), 0, thickness=3)
+                else:
+                    lam_u8[h_comp] = 255
+                    filled_hole_area_px += h_area
+                    hole_filled = True
+            mask = lam_u8
 
     # Reconnect micro-severed rachis islands (preserving basal pinnae on dissected Packera leaves)
     mask = bridge_dissected_rachis_components(

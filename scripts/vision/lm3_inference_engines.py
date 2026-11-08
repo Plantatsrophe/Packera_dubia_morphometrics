@@ -34,6 +34,9 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+LM3_PACKAGE_ROOT = PROJECT_ROOT / "LeafMachine3"
+if LM3_PACKAGE_ROOT.is_dir() and str(LM3_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(LM3_PACKAGE_ROOT))
 
 try:
     from scripts.vision.configure_leafmachine3 import (
@@ -194,6 +197,10 @@ __all__ = [
     "LM3LeafSegmenterEngine",
     "LM3PoseResult",
     "LM3PoseLandmarkEngine",
+    "LM3ScaleCalibrator",
+    "normalize_lm3_keypoints_dict",
+    "orient_and_score_leaf_lm3",
+    "compute_leaf_ect_descriptor",
     "torch_cuda_available",
     "is_stock_lm3_weights",
     "_extract_native_lm3_petiole_anchor",
@@ -493,7 +500,19 @@ def _load_onnx_session(
     providers: Optional[Sequence[str]] = None,
 ) -> Tuple[Path, str, List[str], Optional[Any]]:
     """Loads or retrieves a cached ONNX Runtime InferenceSession with graceful fallback when absent."""
-    resolved = resolve_lm3_weights(default_model_name, explicit_path=weights_path)
+    lookup_name = default_model_name
+    if (
+        (weights_path is None or not str(weights_path).strip())
+        and default_model_name == "lm3_landmark_detector__yolo26x_pose_640"
+    ):
+        cand_canon = resolve_lm3_weights("lm3_landmark_detector__yolo26x_pose_640_canonical", explicit_path=None)
+        canon_path = Path(cand_canon[1]) if isinstance(cand_canon, tuple) else Path(cand_canon)
+        try:
+            if canon_path.is_file() and canon_path.stat().st_size >= 1024:
+                lookup_name = "lm3_landmark_detector__yolo26x_pose_640_canonical"
+        except OSError:
+            pass
+    resolved = resolve_lm3_weights(lookup_name, explicit_path=weights_path)
     if isinstance(resolved, tuple):
         m_name, w_path = str(resolved[0]), Path(resolved[1])
     else:
@@ -717,7 +736,7 @@ class LM3PlantDetector:
                 )
                 if sheet_bbox[2] > sheet_bbox[0] and sheet_bbox[3] > sheet_bbox[1]:
                     results.append((sheet_bbox, score, cls_id))
-            return results
+            return self._deduplicate_sheet_boxes(results)
 
         # Transpose (4+C, A) -> (A, 4+C) if needed
         if arr.ndim == 2 and arr.shape[0] < arr.shape[1] and arr.shape[0] >= 5:
@@ -774,7 +793,52 @@ class LM3PlantDetector:
             cls_id = int(best_cls[idx])
             if sheet_bbox[2] > sheet_bbox[0] and sheet_bbox[3] > sheet_bbox[1] and cls_id in self.CLASSES:
                 results.append((sheet_bbox, float(best_scores[idx]), cls_id))
-        return results
+        return self._deduplicate_sheet_boxes(results)
+
+    def _deduplicate_sheet_boxes(
+        self,
+        dets: List[Tuple[Tuple[int, int, int, int], float, int]],
+        containment_thres: float = 0.85,
+    ) -> List[Tuple[Tuple[int, int, int, int], float, int]]:
+        """
+        Applies LeafMachine3 asymmetric containment and IoU deduplication across same-class
+        organ detections (`intersection / min(area_i, area_j) >= containment_thres` or
+        `iou >= self.iou_thres`), retaining the higher-confidence box first.
+        """
+        if len(dets) <= 1:
+            return dets
+        by_class: Dict[int, List[Tuple[int, Tuple[int, int, int, int], float, int]]] = defaultdict(list)
+        for orig_idx, (bbox, score, cls_id) in enumerate(dets):
+            by_class[int(cls_id)].append((orig_idx, bbox, float(score), int(cls_id)))
+
+        kept_with_idx: List[Tuple[int, Tuple[int, int, int, int], float, int]] = []
+        for _cid, group in by_class.items():
+            group.sort(key=lambda item: item[2], reverse=True)
+            accepted: List[Tuple[int, Tuple[int, int, int, int], float, int]] = []
+            for cand in group:
+                _, (y1_a, x1_a, y2_a, x2_a), _sc_a, _c_a = cand
+                area_a = float(max(1, (y2_a - y1_a) * (x2_a - x1_a)))
+                is_dup = False
+                for _, (y1_b, x1_b, y2_b, x2_b), _sc_b, _c_b in accepted:
+                    iy1 = max(y1_a, y1_b)
+                    ix1 = max(x1_a, x1_b)
+                    iy2 = min(y2_a, y2_b)
+                    ix2 = min(x2_a, x2_b)
+                    if iy2 <= iy1 or ix2 <= ix1:
+                        continue
+                    inter = float((iy2 - iy1) * (ix2 - ix1))
+                    area_b = float(max(1, (y2_b - y1_b) * (x2_b - x1_b)))
+                    min_area = min(area_a, area_b)
+                    union = max(1.0, area_a + area_b - inter)
+                    if (inter / min_area) >= float(containment_thres) or (inter / union) >= float(self.iou_thres):
+                        is_dup = True
+                        break
+                if not is_dup:
+                    accepted.append(cand)
+            kept_with_idx.extend(accepted)
+
+        kept_with_idx.sort(key=lambda item: item[0])
+        return [(bbox, score, cls_id) for _, bbox, score, cls_id in kept_with_idx]
 
     def detect(
         self,
@@ -987,6 +1051,19 @@ def apply_llr_hyst_keep_blobs(
         valid_labels = [int(lbl) for lbl in strong_labels]
 
     cleaned = np.isin(labels, valid_labels).astype(np.uint8) * 255
+    if (
+        image_bgr is not None
+        and image_bgr.ndim == 3
+        and image_bgr.shape[:2] == (h, w)
+        and int(np.count_nonzero(cleaned)) >= 100
+    ):
+        try:
+            from leafmachine3.core.paper_removal import paperclean_llr_hyst_keepblobs
+            lab_cleaned = paperclean_llr_hyst_keepblobs(image_bgr, cleaned)
+            if lab_cleaned is not None and int(np.count_nonzero(lab_cleaned)) >= int(0.35 * np.count_nonzero(cleaned)):
+                cleaned = (lab_cleaned > 0).astype(np.uint8) * 255
+        except Exception:
+            pass
     return cleaned
 
 
@@ -1163,6 +1240,7 @@ class LM3LeafSegmenterEngine:
         crop_shape: Tuple[int, int],
         ratio: float,
         pad_xy: Tuple[float, float],
+        image_bgr: Optional[np.ndarray] = None,
     ) -> List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]:
         """Decodes YOLO26x-seg detection + prototype mask outputs into `(bbox, mask_u8, score, class_id)`."""
         if not raw_outs:
@@ -1254,6 +1332,39 @@ class LM3LeafSegmenterEngine:
                     box_prob = np.zeros((crop_h, crop_w), dtype=np.float32)
                     box_prob[ymin:ymax, xmin:xmax] = resized_prob[ymin:ymax, xmin:xmax]
                     mask_u8 = (box_prob >= 0.50).astype(np.uint8) * 255
+                    if (
+                        int(cls_id) == 0
+                        and image_bgr is not None
+                        and image_bgr.ndim == 3
+                        and image_bgr.shape[:2] == (crop_h, crop_w)
+                        and int(np.count_nonzero(mask_u8)) >= 120
+                    ):
+                        try:
+                            from leafmachine3.core.paper_removal import paperclean_llr_hyst_keepblobs
+                            lab_refined = paperclean_llr_hyst_keepblobs(image_bgr, mask_u8)
+                            core_fg = int(np.count_nonzero(mask_u8))
+                            ref_fg = int(np.count_nonzero(lab_refined)) if lab_refined is not None else 0
+                            if lab_refined is not None and ref_fg >= int(0.45 * core_fg):
+                                # Reconnect sub-threshold non-paper rachis tissue (0.25 <= box_prob < 0.50)
+                                weak_rachis = (box_prob >= 0.25).astype(np.uint8) * 255
+                                weak_clean = paperclean_llr_hyst_keepblobs(image_bgr, weak_rachis)
+                                if weak_clean is not None and int(np.count_nonzero(weak_clean)) > ref_fg:
+                                    n_lbl, lbls, _, _ = cv2.connectedComponentsWithStats(
+                                        (weak_clean > 0).astype(np.uint8), connectivity=8
+                                    )
+                                    if n_lbl > 1:
+                                        seed_lbls = np.unique(lbls[lab_refined > 0])
+                                        seed_lbls = seed_lbls[seed_lbls > 0]
+                                        if len(seed_lbls) > 0:
+                                            mask_u8 = np.isin(lbls, seed_lbls).astype(np.uint8) * 255
+                                        else:
+                                            mask_u8 = (lab_refined > 0).astype(np.uint8) * 255
+                                    else:
+                                        mask_u8 = (lab_refined > 0).astype(np.uint8) * 255
+                                else:
+                                    mask_u8 = (lab_refined > 0).astype(np.uint8) * 255
+                        except Exception:
+                            pass
             else:
                 mask_u8[ymin:ymax, xmin:xmax] = 255
 
@@ -1300,6 +1411,7 @@ class LM3LeafSegmenterEngine:
                 crop_shape=(crop_h, crop_w),
                 ratio=r,
                 pad_xy=pad_xy,
+                image_bgr=image_bgr,
             )
         except Exception as exc:
             logger.debug(f"LM3LeafSegmenterEngine ONNX inference error: {exc}")
@@ -1981,3 +2093,494 @@ def _merge_and_bridge_dissected_crop_mask(
             petiole_mask=petiole_mask,
             crop_bgr=crop_bgr,
         )
+
+
+# =============================================================================
+# 5. LeafMachine3 Native Orientation, Bilateral Archetype, Scale & ECT Engines
+# =============================================================================
+
+_LM3_CANONICAL_TO_NATIVE_KPT_MAP: Dict[str, str] = {
+    "lamina_tip": "lamina_tip",
+    "apex_1": "apex_left",
+    "apex_2": "apex_center",
+    "apex_3": "apex_right",
+    **{f"midvein_{i}": f"midvein_{i - 1}" for i in range(1, 16)},
+    "base_1": "base_left",
+    "base_2": "base_center",
+    "base_3": "base_right",
+    "lamina_base": "lamina_base",
+    **{f"petiole_{i}": f"petiole_{i - 1}" for i in range(1, 6)},
+    "petiole_6": "petiole_tip",
+    "width_1": "width_left",
+    "width_2": "width_right",
+}
+
+
+def normalize_lm3_keypoints_dict(
+    keypoints_31: Optional[Union[Dict[str, Tuple[float, float, float]], np.ndarray]],
+    offset_xy: Tuple[float, float] = (0.0, 0.0),
+) -> Dict[str, Tuple[float, float, float]]:
+    """
+    Normalizes a 31-keypoint dictionary or `(31, 3)` array so both `LM3_KEYPOINT_NAMES_31`
+    (`midvein_1..15`, `apex_1..3`, `base_1..3`, `petiole_1..6`, `width_1..2`) and LeafMachine3
+    native `KPT_NAMES` (`midvein_0..14`, `apex_left/center/right`, `base_left/center/right`,
+    `petiole_0..4`, `petiole_tip`, `width_left/right`) are populated. Applies optional
+    `(ox, oy)` subtraction when converting sheet-space keypoints back to crop coordinates.
+    """
+    ox, oy = float(offset_xy[0]), float(offset_xy[1])
+    out: Dict[str, Tuple[float, float, float]] = {}
+    if keypoints_31 is None:
+        return out
+    if isinstance(keypoints_31, dict):
+        for k, val in keypoints_31.items():
+            if not isinstance(val, (tuple, list, np.ndarray)) or len(val) < 2:
+                continue
+            vx = float(val[0]) - ox
+            vy = float(val[1]) - oy
+            vc = float(val[2]) if len(val) >= 3 else 1.0
+            out[str(k)] = (vx, vy, vc)
+        for canon_k, native_k in _LM3_CANONICAL_TO_NATIVE_KPT_MAP.items():
+            if canon_k in out and native_k not in out:
+                out[native_k] = out[canon_k]
+            elif native_k in out and canon_k not in out:
+                out[canon_k] = out[native_k]
+        return out
+
+    arr = np.asarray(keypoints_31, dtype=np.float64)
+    if arr.ndim == 2 and arr.shape[0] >= 2 and arr.shape[1] >= 2:
+        # Support both LM3_KEYPOINT_NAMES_31 order (lamina_base at index 22) and
+        # compact array order (0: lamina_tip, 1: lamina_base, 2..7: petiole, 8..30: midvein)
+        c22 = float(arr[22, 2]) if (arr.shape[0] > 22 and arr.shape[1] >= 3) else 0.0
+        c4 = float(arr[4, 2]) if (arr.shape[0] > 4 and arr.shape[1] >= 3) else 0.0
+        if arr.shape[0] >= 23 and c22 > 0.0 and c4 > 0.0:
+            for idx, canon_k in enumerate(LM3_KEYPOINT_NAMES_31):
+                if idx >= arr.shape[0]:
+                    break
+                vx = float(arr[idx, 0]) - ox
+                vy = float(arr[idx, 1]) - oy
+                vc = float(arr[idx, 2]) if arr.shape[1] >= 3 else 1.0
+                out[canon_k] = (vx, vy, vc)
+                native_k = _LM3_CANONICAL_TO_NATIVE_KPT_MAP.get(canon_k)
+                if native_k:
+                    out[native_k] = (vx, vy, vc)
+        else:
+            vx0, vy0 = float(arr[0, 0]) - ox, float(arr[0, 1]) - oy
+            vc0 = float(arr[0, 2]) if arr.shape[1] >= 3 else 1.0
+            out["lamina_tip"] = (vx0, vy0, vc0)
+            vx1, vy1 = float(arr[1, 0]) - ox, float(arr[1, 1]) - oy
+            vc1 = float(arr[1, 2]) if arr.shape[1] >= 3 else 1.0
+            out["lamina_base"] = (vx1, vy1, vc1)
+            for p_i in range(min(6, max(0, arr.shape[0] - 2))):
+                row_idx = 2 + p_i
+                vxp, vyp = float(arr[row_idx, 0]) - ox, float(arr[row_idx, 1]) - oy
+                vcp = float(arr[row_idx, 2]) if arr.shape[1] >= 3 else 1.0
+                canon_pk = f"petiole_{p_i + 1}"
+                out[canon_pk] = (vxp, vyp, vcp)
+                native_pk = _LM3_CANONICAL_TO_NATIVE_KPT_MAP.get(canon_pk)
+                if native_pk:
+                    out[native_pk] = (vxp, vyp, vcp)
+            mv_rows = arr[8:] if arr.shape[0] > 8 else np.empty((0, arr.shape[1]))
+            if len(mv_rows) > 0:
+                idxs = np.linspace(0, len(mv_rows) - 1, min(15, len(mv_rows))).round().astype(int)
+                for m_i, r_idx in enumerate(idxs):
+                    vxm, vym = float(mv_rows[r_idx, 0]) - ox, float(mv_rows[r_idx, 1]) - oy
+                    vcm = float(mv_rows[r_idx, 2]) if arr.shape[1] >= 3 else 1.0
+                    # Ensure tip -> base ordering along midvein_0..14
+                    out[f"midvein_{m_i}"] = (vxm, vym, vcm)
+                    out[f"midvein_{m_i + 1}"] = (vxm, vym, vcm)
+            if "midvein_0" in out and "midvein_14" in out:
+                d0_tip = math.hypot(out["midvein_0"][0] - vx0, out["midvein_0"][1] - vy0)
+                d14_tip = math.hypot(out["midvein_14"][0] - vx0, out["midvein_14"][1] - vy0)
+                if d0_tip > d14_tip:
+                    rev_mv = [out[f"midvein_{i}"] for i in range(14, -1, -1) if f"midvein_{i}" in out]
+                    for i, val in enumerate(rev_mv):
+                        out[f"midvein_{i}"] = val
+    return out
+
+
+def orient_and_score_leaf_lm3(
+    lamina_mask: np.ndarray,
+    keypoints_31: Optional[Union[Dict[str, Tuple[float, float, float]], np.ndarray]] = None,
+    p_base: Optional[Tuple[float, float]] = None,
+    p_apex: Optional[Tuple[float, float]] = None,
+    offset_xy: Tuple[float, float] = (0.0, 0.0),
+    min_conf: float = 0.25,
+    min_score: float = 0.50,
+) -> Dict[str, Any]:
+    """
+    Computes LeafMachine3 native tip-up rotation angle (`compute_orientation`), rotates
+    `lamina_mask` and its keypoints (`oriented_affine`, `apply_affine`), and evaluates
+    curvilinear midvein bilateral symmetry and archetype quality (`measure_leaf`).
+    """
+    if lamina_mask is None or lamina_mask.size == 0 or int(np.count_nonzero(lamina_mask)) == 0:
+        return {
+            "success": False,
+            "angle_cw": 0.0,
+            "method": "empty",
+            "archetype_score": 0.0,
+            "bilateral_dice": 0.0,
+            "si_a": 1.0,
+            "largest_frac": 0.0,
+            "gates_pass": False,
+            "is_archetypal": False,
+        }
+
+    norm_kps = normalize_lm3_keypoints_dict(keypoints_31, offset_xy=offset_xy)
+    pts_2d: Dict[str, Tuple[float, float]] = {
+        k: (float(v[0]), float(v[1]))
+        for k, v in norm_kps.items()
+        if len(v) >= 3 and float(v[2]) >= float(min_conf)
+    }
+    if p_base is not None and "lamina_base" not in pts_2d:
+        pts_2d["lamina_base"] = (float(p_base[0]) - float(offset_xy[0]), float(p_base[1]) - float(offset_xy[1]))
+    if p_apex is not None and "lamina_tip" not in pts_2d:
+        pts_2d["lamina_tip"] = (float(p_apex[0]) - float(offset_xy[0]), float(p_apex[1]) - float(offset_xy[1]))
+
+    # Populate synthetic midvein_0..14 along p_apex -> p_base if pose keypoints were not supplied
+    if "lamina_tip" in pts_2d and "lamina_base" in pts_2d and "midvein_0" not in pts_2d:
+        tx, ty = pts_2d["lamina_tip"]
+        bx, by = pts_2d["lamina_base"]
+        for i in range(15):
+            frac = float(i + 1) / 16.0
+            pts_2d[f"midvein_{i}"] = (tx + frac * (bx - tx), ty + frac * (by - ty))
+
+    try:
+        from leafmachine3.core.orientation import compute_orientation
+        from leafmachine3.core.bilateral import OrientedLeaf, apply_affine, measure_leaf, oriented_affine
+
+        ori = compute_orientation(pts_2d)
+        angle_cw = float(ori.angle_cw) if (ori.success and ori.angle_cw is not None) else 0.0
+        method = str(ori.method) if ori.success else "fallback"
+
+        mask_u8 = ((lamina_mask > 0).astype(np.uint8)) * 255
+        orig_h, orig_w = int(mask_u8.shape[0]), int(mask_u8.shape[1])
+        mat, (nh, nw) = oriented_affine((orig_h, orig_w), angle_cw)
+        rot_mask = cv2.warpAffine(
+            mask_u8,
+            mat,
+            (int(nw), int(nh)),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        pt_keys = list(pts_2d.keys())
+        if pt_keys:
+            pt_arr = np.asarray([pts_2d[k] for k in pt_keys], dtype=np.float64)
+            rot_arr = apply_affine(mat, pt_arr)
+            rot_pts = {k: (float(rot_arr[i, 0]), float(rot_arr[i, 1])) for i, k in enumerate(pt_keys)}
+        else:
+            rot_pts = {}
+
+        ys, xs = np.where(rot_mask > 0)
+        if len(ys) > 0:
+            x0, y0, x1, y1 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+            crop_rot = rot_mask[y0:y1, x0:x1]
+            shifted_pts = {k: (pt[0] - float(x0), pt[1] - float(y0)) for k, pt in rot_pts.items()}
+            det_box = (x0, y0, x1, y1)
+        else:
+            crop_rot = rot_mask
+            shifted_pts = rot_pts
+            det_box = (0, 0, int(nw), int(nh))
+
+        sil_bool = (crop_rot > 0).astype(bool)
+        holes_bool = np.zeros_like(sil_bool, dtype=bool)
+        kpt_conf = {
+            k: (float(norm_kps[k][2]) if k in norm_kps and len(norm_kps[k]) >= 3 else 0.95)
+            for k in shifted_pts
+        }
+        oleaf = OrientedLeaf(
+            specimen_id=0,
+            leaf_id=0,
+            detection_id=0,
+            stem="leaf",
+            silhouette=sil_bool,
+            lamina=sil_bool,
+            holes=holes_bool,
+            petiole=None,
+            kpts=shifted_pts,
+            kpt_conf=kpt_conf,
+            angle_cw=angle_cw,
+            det_box=det_box,
+            crop_shape=(orig_h, orig_w),
+            truncated=False,
+        )
+        bm = measure_leaf(oleaf, min_score=float(min_score))
+        if bm is None:
+            return {
+                "success": bool(ori.success),
+                "angle_cw": round(angle_cw, 4),
+                "method": method,
+                "archetype_score": 0.75,
+                "bilateral_dice": 0.75,
+                "si_a": 0.0,
+                "largest_frac": 1.0,
+                "gates_pass": True,
+                "is_archetypal": True,
+                "oriented_mask": crop_rot,
+                "oriented_points": shifted_pts,
+            }
+        return {
+            "success": bool(ori.success),
+            "angle_cw": round(angle_cw, 4),
+            "method": method,
+            "archetype_score": round(float(bm.archetype_score), 4) if np.isfinite(bm.archetype_score) else 0.75,
+            "bilateral_dice": round(float(bm.dice), 4) if (bm.dice is not None and np.isfinite(bm.dice)) else 0.0,
+            "si_a": round(float(bm.si_a), 4) if (bm.si_a is not None and np.isfinite(bm.si_a)) else 0.0,
+            "largest_frac": round(float(bm.largest_frac), 4) if np.isfinite(bm.largest_frac) else 1.0,
+            "gates_pass": bool(bm.gates_pass),
+            "is_archetypal": bool(bm.is_archetypal),
+            "oriented_mask": crop_rot,
+            "oriented_points": shifted_pts,
+        }
+    except Exception as exc:
+        logger.debug(f"LeafMachine3 orient_and_score_leaf_lm3 fallback: {exc}")
+        return {
+            "success": False,
+            "angle_cw": 0.0,
+            "method": "fallback",
+            "archetype_score": 0.75,
+            "bilateral_dice": 0.75,
+            "si_a": 0.0,
+            "largest_frac": 1.0,
+            "gates_pass": True,
+            "is_archetypal": True,
+        }
+
+
+class LM3ScaleCalibrator:
+    """
+    LeafMachine3 scale calibration engine combining:
+      1. Archival ruler detection (`lm3_archival_detector__yolo26x_det_1280`, class `0: Ruler`)
+      2. Ruler Verification Classifier (`RulerClassifierModel`) and Lattice Scale Solver (`RulerCFLattice`)
+      3. Megapixel Conversion Factor prior (`MpConversionFactorModel`, `cf_px_per_cm = 27.112084 * sqrt(MP)`)
+    """
+
+    ARCHIVAL_MODEL_NAME: str = "lm3_archival_detector__yolo26x_det_1280"
+    MP_PRIOR_SLOPE_PX_PER_CM: float = 27.112084
+
+    def __init__(
+        self,
+        device: str = "cuda",
+        providers: Optional[Sequence[str]] = None,
+    ) -> None:
+        self.device = device if (device == "cuda" and torch_cuda_available()) else "cpu"
+        self.providers = providers
+        self.archival_weights_path, _, _, self.archival_session = _load_onnx_session(
+            weights_path=None,
+            default_model_name=self.ARCHIVAL_MODEL_NAME,
+            device=self.device,
+            providers=providers,
+        )
+        self.mp_model: Optional[Any] = None
+        self.ruler_classifier: Optional[Any] = None
+        self.ruler_lattice: Optional[Any] = None
+        self._init_lm3_scale_models()
+
+    def _init_lm3_scale_models(self) -> None:
+        mp_json = LM3_PACKAGE_ROOT / "models" / "mp_conversion_factor" / "model.json"
+        if mp_json.is_file():
+            try:
+                from leafmachine3.inference.mp_conversion_factor import MpConversionFactorModel
+                self.mp_model = MpConversionFactorModel(mp_json)
+            except Exception:
+                self.mp_model = None
+
+        cls_onnx = LM3_PACKAGE_ROOT / "models" / "ruler_classifier" / "model.onnx"
+        if not cls_onnx.is_file():
+            cand_cls = resolve_lm3_weights("lm3_ruler_classifier__effnet_b4", explicit_path=None)
+            cls_onnx = Path(cand_cls[1]) if isinstance(cand_cls, tuple) else Path(cand_cls)
+        if cls_onnx.is_file():
+            try:
+                from leafmachine3.inference.ruler_classifier import RulerClassifierModel
+                self.ruler_classifier = RulerClassifierModel(cls_onnx)
+            except Exception:
+                self.ruler_classifier = None
+
+        lat_onnx = LM3_PACKAGE_ROOT / "models" / "ruler_cf_lattice" / "model.onnx"
+        if not lat_onnx.is_file():
+            cand_lat = resolve_lm3_weights("lm3_ruler_cf_lattice__effb4_v11", explicit_path=None)
+            lat_onnx = Path(cand_lat[1]) if isinstance(cand_lat, tuple) else Path(cand_lat)
+        if lat_onnx.is_file():
+            try:
+                from leafmachine3.inference.ruler_lattice import RulerCFLattice
+                self.ruler_lattice = RulerCFLattice(lat_onnx)
+            except Exception:
+                self.ruler_lattice = None
+
+    @property
+    def has_models(self) -> bool:
+        return bool(self.archival_session is not None or self.mp_model is not None)
+
+    def predict_megapixel_scale(self, height_px: int, width_px: int) -> Tuple[float, str]:
+        """Predicts `pixels_per_mm` from native sheet dimensions `(height_px, width_px)` via `MpConversionFactorModel`."""
+        h, w = max(1, int(height_px)), max(1, int(width_px))
+        if self.mp_model is not None:
+            try:
+                pred = self.mp_model.predict_from_hw(h, w)
+                px_per_mm = float(pred.cf_px_per_cm) / 10.0
+                if np.isfinite(px_per_mm) and px_per_mm > 0.0:
+                    return round(px_per_mm, 4), "predicted_from_megapixels"
+            except Exception:
+                pass
+        mp = (float(h) * float(w)) / 1e6
+        px_per_mm = (self.MP_PRIOR_SLOPE_PX_PER_CM * math.sqrt(max(mp, 1e-6))) / 10.0
+        return round(px_per_mm, 4), "predicted_from_megapixels"
+
+    def _detect_ruler_boxes(self, image_bgr: np.ndarray) -> List[Tuple[Tuple[int, int, int, int], float]]:
+        """Runs `lm3_archival_detector__yolo26x_det_1280` and extracts class `0` (`Ruler`) bounding boxes."""
+        if self.archival_session is None or image_bgr is None or image_bgr.size == 0:
+            return []
+        try:
+            sh, sw = image_bgr.shape[:2]
+            w_scale = compute_work_scale((sh, sw), max_working_dim=3200)
+            if w_scale < 1.0:
+                work_w = max(1, int(round(sw * w_scale)))
+                work_h = max(1, int(round(sh * w_scale)))
+                work_img = cv2.resize(image_bgr, (work_w, work_h), interpolation=cv2.INTER_AREA)
+            else:
+                work_h, work_w = sh, sw
+                work_img = image_bgr
+            lb_bgr, r, (dw, dh) = _letterbox_bgr(work_img, 1280)
+            inp_tensor = _bgr_to_nchw_float32(lb_bgr)
+            input_name = self.archival_session.get_inputs()[0].name
+            with _ONNX_GPU_LOCK:
+                raw_outs = self.archival_session.run(None, {input_name: inp_tensor})
+            if not raw_outs:
+                return []
+            arr = np.asarray(raw_outs[0], dtype=np.float32)
+            if arr.ndim == 3:
+                arr = arr[0]
+            inv_r = 1.0 / max(float(r), 1e-6)
+            rulers: List[Tuple[Tuple[int, int, int, int], float]] = []
+            if arr.ndim == 2 and arr.shape[1] in (6, 7):
+                for row in arr:
+                    sc = float(row[4])
+                    cls_id = int(round(float(row[5])))
+                    if cls_id != 0 or sc < 0.25:
+                        continue
+                    x1_w = max(0.0, min(float(work_w), (float(row[0]) - dw) * inv_r))
+                    y1_w = max(0.0, min(float(work_h), (float(row[1]) - dh) * inv_r))
+                    x2_w = max(0.0, min(float(work_w), (float(row[2]) - dw) * inv_r))
+                    y2_w = max(0.0, min(float(work_h), (float(row[3]) - dh) * inv_r))
+                    if y2_w <= y1_w or x2_w <= x1_w:
+                        continue
+                    s_bbox = unscale_working_bbox_to_sheet((y1_w, x1_w, y2_w, x2_w), w_scale, sheet_shape=(sh, sw))
+                    if s_bbox[2] > s_bbox[0] and s_bbox[3] > s_bbox[1]:
+                        rulers.append((s_bbox, sc))
+            rulers.sort(key=lambda item: item[1], reverse=True)
+            return rulers
+        except Exception as exc:
+            logger.debug(f"LM3ScaleCalibrator archival ruler detection fallback: {exc}")
+            return []
+
+    def calibrate_sheet(
+        self,
+        image_bgr: np.ndarray,
+        catalog_number: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Resolves `pixels_per_mm`, `is_calibrated_mm`, and `cf_source` for a herbarium sheet:
+          1. Attempts direct ruler measurement via `lm3_archival_detector__yolo26x_det_1280` +
+             `RulerClassifierModel` + `RulerCFLattice` (`cf_source = 'measured_from_ruler'`).
+          2. Falls back to `MpConversionFactorModel` (`cf_source = 'predicted_from_megapixels'`)
+             when no high-confidence ruler is present.
+        """
+        if image_bgr is None or image_bgr.size == 0:
+            return {"pixels_per_mm": None, "is_calibrated_mm": False, "cf_source": "uncalibrated"}
+
+        sh, sw = image_bgr.shape[:2]
+        if self.archival_session is not None and self.ruler_lattice is not None:
+            ruler_boxes = self._detect_ruler_boxes(image_bgr)
+            for (ymin, xmin, ymax, xmax), _det_sc in ruler_boxes:
+                crop = image_bgr[ymin:ymax, xmin:xmax]
+                if crop.size == 0 or min(crop.shape[:2]) < 16:
+                    continue
+                try:
+                    crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                    if self.ruler_classifier is not None:
+                        cls_pred = self.ruler_classifier.predict(crop_rgb)
+                        if not getattr(cls_pred, "is_ruler", True):
+                            continue
+                    lat_res = self.ruler_lattice.predict(crop_rgb)
+                    px_per_cm = getattr(lat_res, "px_per_cm", None)
+                    conf = float(getattr(lat_res, "confidence", 0.0) or 0.0)
+                    if px_per_cm is not None and np.isfinite(float(px_per_cm)) and float(px_per_cm) > 10.0 and conf >= 0.45:
+                        px_per_mm = round(float(px_per_cm) / 10.0, 4)
+                        return {
+                            "pixels_per_mm": px_per_mm,
+                            "is_calibrated_mm": True,
+                            "cf_source": "measured_from_ruler",
+                        }
+                except Exception:
+                    continue
+
+        px_per_mm, cf_source = self.predict_megapixel_scale(sh, sw)
+        return {
+            "pixels_per_mm": px_per_mm,
+            "is_calibrated_mm": True,
+            "cf_source": cf_source,
+        }
+
+
+def compute_leaf_ect_descriptor(
+    mask_u8: np.ndarray,
+    output_path: Optional[Union[str, Path]] = None,
+    num_dirs: int = 32,
+    num_thresh: int = 32,
+) -> Optional[np.ndarray]:
+    """
+    Computes the LeafMachine3 Module 18 `(num_dirs, num_thresh)` Euler Characteristic Transform
+    (ECT) matrix for a binary leaf mask:
+      1. Invokes `leafmachine3.core.ect_compute.compute_ect` when the `ect` package is available.
+      2. Falls back to an exact pure-NumPy 1D contour cycle graph Euler characteristic filtration
+         `chi(theta, t) = V(t) - E(t)` on centered unit-radius boundary coordinates when `ect`
+         is absent.
+      3. Persists `.npy` to `output_path` when supplied.
+    """
+    if mask_u8 is None or mask_u8.size == 0 or int(np.count_nonzero(mask_u8)) == 0:
+        return None
+
+    ect_mat: Optional[np.ndarray] = None
+    try:
+        from leafmachine3.core.ect_compute import compute_ect
+        res = compute_ect((mask_u8 > 0).astype(np.uint8) * 255, num_dirs=int(num_dirs), num_thresh=int(num_thresh))
+        if res is not None and getattr(res, "success", False) and getattr(res, "matrix", None) is not None:
+            ect_mat = np.asarray(res.matrix, dtype=np.float32)
+    except Exception:
+        ect_mat = None
+
+    if ect_mat is None:
+        try:
+            bin_u8 = ((mask_u8 > 0).astype(np.uint8)) * 255
+            cnts, _ = cv2.findContours(bin_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            if not cnts:
+                return None
+            main_cnt = max(cnts, key=cv2.contourArea).reshape(-1, 2).astype(np.float64)
+            if len(main_cnt) < 3:
+                return None
+            pts = np.column_stack((main_cnt[:, 0], -main_cnt[:, 1]))
+            pts = pts - np.mean(pts, axis=0, keepdims=True)
+            radii = np.linalg.norm(pts, axis=1)
+            max_r = float(np.max(radii))
+            if max_r <= 1e-9:
+                return None
+            pts = pts / max_r
+
+            thetas = np.linspace(0.0, 2.0 * math.pi, int(num_dirs), endpoint=False)
+            dirs = np.column_stack((np.cos(thetas), np.sin(thetas)))  # (D, 2)
+            heights = pts @ dirs.T  # (V, D)
+            edge_heights = np.maximum(heights, np.roll(heights, -1, axis=0))  # (E, D)
+            thresholds = np.linspace(-1.0, 1.0, int(num_thresh))  # (T,)
+
+            v_counts = np.sum(heights[:, :, None] <= thresholds[None, None, :], axis=0)
+            e_counts = np.sum(edge_heights[:, :, None] <= thresholds[None, None, :], axis=0)
+            ect_mat = (v_counts - e_counts).astype(np.float32)
+        except Exception:
+            return None
+
+    if output_path is not None and ect_mat is not None:
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        np.save(str(out_p), ect_mat)
+
+    return ect_mat

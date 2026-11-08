@@ -236,7 +236,18 @@ def _prepare_lamina_mask(
     petiole_mask: Optional[np.ndarray] = None,
     hole_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Applies optional LM3 `petiole_mask` subtraction and `hole_mask` filling."""
+    """
+    Applies LM3 `petiole_mask` subtraction and topology-aware `hole_mask` handling:
+      - Subtracts `petiole_mask` (`class_id == 1`) from `work_mask` when present.
+      - Differentiates true interior lamina herbivory holes from enclosed inter-lobe
+        background sinuses on pinnatifid/dissected leaves:
+          * True interior holes (compact cavities > 6 px inside the outer contour and
+            < 6% of lamina area) are filled so internal insect damage does not distort EFA.
+          * Enclosed inter-lobe sinuses (cavities within <= 6 px of the exterior background
+            formed when adjacent pinna tips touch, or large background voids >= 6% of lamina
+            area) are subtracted and their narrow contact bridge to the exterior background
+            is opened so `cv2.RETR_EXTERNAL` traces into the sinus around both pinna lobes.
+    """
     work_mask = (mask > 0).astype(np.uint8) * 255
     if (
         petiole_mask is not None
@@ -247,14 +258,141 @@ def _prepare_lamina_mask(
         cand = np.where((work_mask > 0) & (petiole_mask == 0), 255, 0).astype(np.uint8)
         if np.count_nonzero(cand) >= max(10, int(0.35 * np.count_nonzero(work_mask))):
             work_mask = cand
+
+    lamina_fg = int(np.count_nonzero(work_mask))
+    if lamina_fg <= 0:
+        return work_mask
+
+    # Identify exterior background from outer contour fill
+    ext_cnts, _ = cv2.findContours(work_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not ext_cnts:
+        return work_mask
+    filled_ext = np.zeros_like(work_mask)
+    cv2.drawContours(filled_ext, ext_cnts, -1, 255, thickness=cv2.FILLED)
+
+    # Combine explicit hole_mask with any enclosed cavities inside filled_ext
+    internal_voids = ((filled_ext > 0) & (work_mask == 0)).astype(np.uint8) * 255
     if (
         hole_mask is not None
         and isinstance(hole_mask, np.ndarray)
         and hole_mask.shape[:2] == work_mask.shape[:2]
         and np.count_nonzero(hole_mask) > 0
     ):
-        work_mask = np.where((work_mask > 0) | (hole_mask > 0), 255, 0).astype(np.uint8)
+        internal_voids = np.maximum(internal_voids, ((hole_mask > 0) & (filled_ext > 0)).astype(np.uint8) * 255)
+
+    if int(np.count_nonzero(internal_voids)) == 0:
+        return work_mask
+
+    # Distance from each pixel inside filled_ext to the exterior background (filled_ext == 0)
+    dist_to_ext = cv2.distanceTransform((filled_ext > 0).astype(np.uint8), cv2.DIST_L2, 3)
+    ext_bg_mask = (filled_ext == 0).astype(np.uint8)
+    _, ext_labels = cv2.distanceTransformWithLabels(
+        (filled_ext > 0).astype(np.uint8), cv2.DIST_L2, 3, labelType=cv2.DIST_LABEL_PIXEL
+    )
+    ext_coords_y, ext_coords_x = np.where(ext_bg_mask > 0)
+
+    n_voids, void_lbls, void_stats, _ = cv2.connectedComponentsWithStats(
+        (internal_voids > 0).astype(np.uint8), connectivity=8
+    )
+    for v_id in range(1, n_voids):
+        v_mask = void_lbls == v_id
+        v_area = int(void_stats[v_id, cv2.CC_STAT_AREA])
+        if v_area <= 0:
+            continue
+        min_d_ext = float(np.min(dist_to_ext[v_mask])) if np.any(v_mask) else 999.0
+        area_frac = float(v_area) / float(max(lamina_fg, 1))
+        # Enclosed inter-lobe sinus: separated from exterior by a narrow touching-lobe bridge (<= 6 px)
+        # and at least 1.2% of lamina area, or a massive enclosed background region (>= 6.5% of lamina).
+        is_enclosed_sinus = (min_d_ext <= 6.0 and area_frac >= 0.012) or (min_d_ext <= 12.0 and area_frac >= 0.065)
+        if is_enclosed_sinus:
+            work_mask[v_mask] = 0
+            # Carve open the narrow contact bottleneck to exterior background so RETR_EXTERNAL enters the sinus
+            v_ys, v_xs = np.where(v_mask)
+            if len(v_ys) > 0 and len(ext_coords_y) > 0:
+                d_vals = dist_to_ext[v_ys, v_xs]
+                best_i = int(np.argmin(d_vals))
+                vy0, vx0 = int(v_ys[best_i]), int(v_xs[best_i])
+                # Find nearest exterior background pixel within a local window
+                win = max(8, int(math.ceil(min_d_ext)) + 4)
+                y_lo, y_hi = max(0, vy0 - win), min(work_mask.shape[0], vy0 + win + 1)
+                x_lo, x_hi = max(0, vx0 - win), min(work_mask.shape[1], vx0 + win + 1)
+                bg_sub_y, bg_sub_x = np.where(filled_ext[y_lo:y_hi, x_lo:x_hi] == 0)
+                if len(bg_sub_y) > 0:
+                    bg_y = bg_sub_y + y_lo
+                    bg_x = bg_sub_x + x_lo
+                    nearest_bg_idx = int(np.argmin((bg_y - vy0) ** 2 + (bg_x - vx0) ** 2))
+                    ey0, ex0 = int(bg_y[nearest_bg_idx]), int(bg_x[nearest_bg_idx])
+                    cv2.line(work_mask, (vx0, vy0), (ex0, ey0), 0, thickness=3)
+        else:
+            # True interior insect hole -> fill in work_mask
+            work_mask[v_mask] = 255
+
     return work_mask
+
+
+def _rotate_contour_to_tip_up(
+    resamp_pts: np.ndarray,
+    anchor_pt: Optional[Tuple[float, float]] = None,
+    p_apex_pt: Optional[Tuple[float, float]] = None,
+    keypoints_31: Optional[Any] = None,
+) -> np.ndarray:
+    """
+    Rotates a resampled clockwise contour `(N, 2)` around its centroid by LeafMachine3's
+    clockwise orientation angle `angle_cw` (`compute_orientation` or `_angle_cw_to_up`)
+    so the anatomical `lamina_base -> lamina_tip` axis points strictly tip-up `(0, -1)`
+    in image coordinates (`y` down). Leaves already oriented tip-up (`|angle_cw| <= 0.25 deg`)
+    untouched.
+    """
+    if resamp_pts is None or len(resamp_pts) < 4:
+        return resamp_pts
+
+    angle_cw: Optional[float] = None
+    if keypoints_31 is not None:
+        try:
+            from scripts.vision.lm3_inference_engines import normalize_lm3_keypoints_dict
+            from leafmachine3.core.orientation import compute_orientation
+
+            norm_kps = normalize_lm3_keypoints_dict(keypoints_31)
+            pts_2d = {
+                k: (float(v[0]), float(v[1]))
+                for k, v in norm_kps.items()
+                if len(v) >= 3 and float(v[2]) >= 0.25
+            }
+            ori = compute_orientation(pts_2d)
+            if ori.success and ori.angle_cw is not None:
+                angle_cw = float(ori.angle_cw)
+        except Exception:
+            angle_cw = None
+
+    if angle_cw is None:
+        base_xy = (
+            np.array([float(anchor_pt[0]), float(anchor_pt[1])], dtype=np.float64)
+            if anchor_pt is not None
+            else np.asarray(resamp_pts[0], dtype=np.float64)
+        )
+        if p_apex_pt is not None:
+            apex_xy = np.array([float(p_apex_pt[0]), float(p_apex_pt[1])], dtype=np.float64)
+        else:
+            mid_idx = len(resamp_pts) // 2
+            apex_xy = np.asarray(resamp_pts[mid_idx], dtype=np.float64)
+        dx = float(apex_xy[0] - base_xy[0])
+        dy = float(apex_xy[1] - base_xy[1])
+        if math.hypot(dx, dy) > 1e-3:
+            angle_cw = -math.degrees(math.atan2(dx, -dy))
+        else:
+            angle_cw = 0.0
+
+    if angle_cw is not None and abs(float(angle_cw)) > 0.25:
+        rad = math.radians(float(angle_cw))
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+        centroid = np.mean(resamp_pts, axis=0)
+        centered = resamp_pts - centroid
+        x_rot = centered[:, 0] * cos_a - centered[:, 1] * sin_a + centroid[0]
+        y_rot = centered[:, 0] * sin_a + centered[:, 1] * cos_a + centroid[1]
+        resamp_pts = np.column_stack([x_rot, y_rot])
+
+    return resamp_pts
 
 
 def resample_normalized_contour(
@@ -265,12 +403,14 @@ def resample_normalized_contour(
     hole_mask: Optional[np.ndarray] = None,
     lamina_base: Optional[Tuple[float, float]] = None,
     momocs_outline_xy: Optional[np.ndarray] = None,
+    p_apex_pt: Optional[Tuple[float, float]] = None,
+    keypoints_31: Optional[Any] = None,
 ) -> Optional[np.ndarray]:
     """
     Extracts resampled, normalized 2D coordinates (x_norm, y_norm) of shape (num_points, 2)
     from a binary mask or outline coordinate array, anchored at vertex 0 (`petiole_attachment_pt`,
-    `lamina_base`, or basal-most point `argmax(y)`), with clockwise winding and isotropic
-    normalization by `max(span_x, span_y, 1e-6)` preserving LM3's tip-up orientation.
+    `lamina_base`, or basal-most point `argmax(y)`), oriented tip-up via LeafMachine3 native
+    orientation, with clockwise winding and isotropic normalization by `max(span_x, span_y, 1e-6)`.
     """
     if momocs_outline_xy is not None and len(np.asarray(momocs_outline_xy)) >= 10:
         largest_cnt = np.asarray(momocs_outline_xy, dtype=np.float64).reshape(-1, 2)
@@ -324,6 +464,12 @@ def resample_normalized_contour(
     signed_area_r = cv2.contourArea(resamp_pts.reshape(-1, 1, 2).astype(np.float32), oriented=True)
     if signed_area_r > 0:
         resamp_pts = np.vstack([resamp_pts[0:1], resamp_pts[1:][::-1]])
+    resamp_pts = _rotate_contour_to_tip_up(
+        resamp_pts,
+        anchor_pt=anchor_pt,
+        p_apex_pt=p_apex_pt,
+        keypoints_31=keypoints_31,
+    )
     x_resamp = resamp_pts[:, 0]
     y_resamp = resamp_pts[:, 1]
 
@@ -651,17 +797,18 @@ def export_standardized_contour(
     hole_mask: Optional[np.ndarray] = None,
     lamina_base: Optional[Tuple[float, float]] = None,
     momocs_outline_xy: Optional[np.ndarray] = None,
+    keypoints_31: Optional[Any] = None,
 ) -> Any:
     """
     Extracts vectorized 2D (x, y) boundary coordinates from a binary silhouette mask,
     anchors vertex 0 to `petiole_attachment_pt` / `lamina_base` (or the basal-most
-    point `argmax(y)`), enforces clockwise orientation, normalizes coordinates
-    `(x_norm, y_norm)` isotropically by `max(span_x, span_y, 1e-6)` without rotation
-    (preserving LM3 tip-up orientation), and saves to
-    `output_dir/contours/{catalogNumber}_leaf{id}.csv`.
+    point `argmax(y)`), enforces clockwise orientation, rotates the contour into
+    LeafMachine3 canonical tip-up orientation (`lamina_base -> lamina_tip` along `(0, -1)`),
+    normalizes coordinates `(x_norm, y_norm)` isotropically by `max(span_x, span_y, 1e-6)`,
+    and saves to `output_dir/contours/{catalogNumber}_leaf{id}.csv`.
     """
-    _ = p_apex_pt
     empty_ret: Any = (None, None) if return_coords else None
+    work_mask: Optional[np.ndarray] = None
     if momocs_outline_xy is not None and len(np.asarray(momocs_outline_xy)) >= 10:
         largest_cnt = np.asarray(momocs_outline_xy, dtype=np.float64).reshape(-1, 2)
     elif contour is not None and len(contour) >= 10:
@@ -678,6 +825,23 @@ def export_standardized_contour(
             return empty_ret
 
     anchor_pt = petiole_attachment_pt if petiole_attachment_pt is not None else lamina_base
+    if keypoints_31 is not None:
+        kp_arr = np.asarray(keypoints_31, dtype=np.float64)
+        if kp_arr.ndim == 2 and kp_arr.shape[0] >= 2 and kp_arr.shape[1] >= 2:
+            c0 = float(kp_arr[0, 2]) if kp_arr.shape[1] >= 3 else 1.0
+            c1 = float(kp_arr[1, 2]) if kp_arr.shape[1] >= 3 else 1.0
+            if anchor_pt is None and c1 >= 0.25 and (abs(kp_arr[1, 0]) + abs(kp_arr[1, 1])) > 0.0:
+                anchor_pt = (float(kp_arr[1, 0]), float(kp_arr[1, 1]))
+            if p_apex_pt is None and c0 >= 0.25 and (abs(kp_arr[0, 0]) + abs(kp_arr[0, 1])) > 0.0:
+                p_apex_pt = (float(kp_arr[0, 0]), float(kp_arr[0, 1]))
+    if anchor_pt is None and work_mask is not None:
+        try:
+            _, _, _, calc_apex, calc_base = compute_geometric_metrics(work_mask)
+            anchor_pt = calc_base
+            if p_apex_pt is None:
+                p_apex_pt = calc_apex
+        except Exception:
+            pass
     if anchor_pt is not None:
         diffs = largest_cnt - np.array([float(anchor_pt[0]), float(anchor_pt[1])], dtype=np.float64)
         start_idx = int(np.argmin(np.hypot(diffs[:, 0], diffs[:, 1])))
@@ -716,6 +880,12 @@ def export_standardized_contour(
     signed_area_r = cv2.contourArea(resamp_pts.reshape(-1, 1, 2).astype(np.float32), oriented=True)
     if signed_area_r > 0:
         resamp_pts = np.vstack([resamp_pts[0:1], resamp_pts[1:][::-1]])
+    resamp_pts = _rotate_contour_to_tip_up(
+        resamp_pts,
+        anchor_pt=anchor_pt,
+        p_apex_pt=p_apex_pt,
+        keypoints_31=keypoints_31,
+    )
     x_resamp = resamp_pts[:, 0]
     y_resamp = resamp_pts[:, 1]
 

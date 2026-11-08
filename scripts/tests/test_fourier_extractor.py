@@ -714,6 +714,99 @@ class TestFourierExtractor(unittest.TestCase):
                     "|".join(["Packera canonbeta"] * 5),
                 )
 
+    def test_vertical_tip_up_contour_horizontal_xax_alignment_before_rm_asym(self) -> None:
+        """
+        Verify align_contour_horizontal_xax in fourier_parallel_utils.R and 03_fourier_extractor.R
+        rotates a vertically oriented tip-up symmetric leaf contour onto the horizontal X-axis
+        before Momocs::rm_asym() so pct_asymmetry < 0.05 and is_contour_outlier == False.
+        """
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            contours_dir = tmp_p / "contours"
+            contours_dir.mkdir(parents=True, exist_ok=True)
+            vouchers_csv = tmp_p / "curated_vouchers.csv"
+            manifest_csv = tmp_p / "extracted_leaf_manifest.csv"
+
+            vouchers = []
+            manifest_rows = []
+            for idx in range(6):
+                cat = f"VERT_TIPUP_{idx:02d}"
+                sp = "Packera dubia" if idx < 3 else "Packera anonyma"
+                # Vertically oriented tip-up bilaterally symmetric leaf:
+                # point 0 at lamina_base (x=250, y=340), point 60 at lamina_tip (x=250, y=160)
+                # lateral width along X-axis symmetric around x=250
+                a_len = 90.0 + idx * 1.5
+                b_wid = 36.0 + (idx % 2) * 3.0
+                y = 250.0 + a_len * np.cos(t)
+                x = 250.0 + b_wid * np.sin(t) * (1.0 - 0.18 * np.cos(t))
+                cpath = contours_dir / f"{cat}_leaf1.csv"
+                pd.DataFrame({
+                    "catalogNumber": cat,
+                    "leaf_id": 1,
+                    "point_index": np.arange(120),
+                    "x": x,
+                    "y": y,
+                }).to_csv(cpath, index=False)
+                vouchers.append({
+                    "catalogNumber": cat,
+                    "species_raw": sp,
+                    "scientificName": sp,
+                    "determiner_tier": "Tier_1_Gold",
+                })
+                manifest_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "leaf_id": 1,
+                    "assigned_tier": "Tier_1_Direct",
+                    "pixels_per_mm": 10.0,
+                    "is_calibrated_mm": True,
+                    "solidity": 0.94,
+                    "ucs_score": 0.96,
+                    "contour_path": str(cpath),
+                })
+
+            pd.DataFrame(vouchers).to_csv(vouchers_csv, index=False)
+            pd.DataFrame(manifest_rows).to_csv(manifest_csv, index=False)
+
+            out_spec = tmp_p / "leaf_efa_harmonics.csv"
+            out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--contours-dir", str(contours_dir),
+                    "--masks-dir", str(tmp_p / "masks"),
+                    "--vouchers", str(vouchers_csv),
+                    "--manifest", str(manifest_csv),
+                    "--output", str(out_spec),
+                    "--output-individual", str(out_ind),
+                    "--report-out", str(tmp_p / "tier_rep.csv"),
+                    "--plot-out", str(tmp_p / "tier_fig.pdf"),
+                    "--permutations", "19",
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 03 vertical tip-up test failed:\n{proc.stderr}\n{proc.stdout}")
+            ind_df = pd.read_csv(out_ind)
+            self.assertEqual(len(ind_df), 6)
+            self.assertTrue(
+                (ind_df["pct_asymmetry"].astype(float) < 0.05).all(),
+                f"Expected pct_asymmetry < 0.05 on vertically oriented symmetric leaves, got {ind_df['pct_asymmetry'].tolist()}",
+            )
+            outlier_flags = ind_df["is_contour_outlier"].astype(str).str.upper()
+            self.assertTrue(
+                (outlier_flags == "FALSE").all(),
+                f"Expected zero contour outliers on vertically oriented symmetric leaves, got {outlier_flags.tolist()}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
