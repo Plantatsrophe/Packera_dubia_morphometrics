@@ -2110,6 +2110,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             LM3LeafSegmenterEngine,
             LM3PlantDetector,
             _letterbox_bgr,
+            _letterbox_gain_pad_hw,
             crop_leaf_bbox_with_padding,
         )
 
@@ -2119,6 +2120,10 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         self.assertEqual(lb_bgr.shape[0], 1024)
         self.assertLess(lb_bgr.shape[1], 1024)
         self.assertEqual(lb_bgr.shape[1] % 32, 0)
+        gain_hw, (pad_hw_x, pad_hw_y) = _letterbox_gain_pad_hw(lb_bgr.shape[:2], dummy_crop.shape[:2])
+        self.assertAlmostEqual(gain_hw, gain, places=6)
+        self.assertAlmostEqual(pad_hw_x, pad_x, places=6)
+        self.assertAlmostEqual(pad_hw_y, pad_y, places=6)
 
         # 2. Default tight crop (`pad_ratio=0.0`)
         sheet_img = np.full((1000, 800, 3), 235, dtype=np.uint8)

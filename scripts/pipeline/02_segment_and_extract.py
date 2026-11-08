@@ -468,10 +468,12 @@ class SegmentAndExtractPipeline:
         for base_dir in roots:
             dir_patterns = [
                 (base_dir / "contours", f"{cat}_leaf*.csv"),
+                (base_dir / "ect", f"{cat}_leaf*_ect.npy"),
                 (base_dir / "masks", f"{cat}_leaf*.png"),
                 (base_dir / "masks" / "tier1_pristine", f"{cat}_leaf*.png"),
                 (base_dir / "masks" / "tier1_intact", f"{cat}_leaf*.png"),
                 (base_dir / "masks" / "tier2_reflected", f"{cat}_leaf*.png"),
+                (base_dir / "cropped_patches", f"{cat}_p*.*"),
                 (base_dir / "cropped_patches" / "capitula", f"{cat}_cap*.jpg"),
             ]
             for d_path, pat in dir_patterns:

@@ -580,19 +580,19 @@ def _load_onnx_session(
 def _letterbox_gain_pad_hw(
     img1_shape: Tuple[int, int],
     img0_shape: Tuple[int, int],
-) -> Tuple[float, float, float]:
-    """Computes LeafMachine3 `ultra_rep._letterbox_gain_pad` `(gain, pad_x, pad_y)`."""
+) -> Tuple[float, Tuple[float, float]]:
+    """Computes LeafMachine3 `ultra_rep._letterbox_gain_pad` `(gain, (pad_x, pad_y))`."""
     try:
         from leafmachine3.inference import ultra_replacements as ultra_rep
         gain, pad_x, pad_y = ultra_rep._letterbox_gain_pad(img1_shape, img0_shape)
-        return float(gain), float(pad_x), float(pad_y)
+        return float(gain), (float(pad_x), float(pad_y))
     except Exception:
         h0, w0 = max(1, int(img0_shape[0])), max(1, int(img0_shape[1]))
         h1, w1 = int(img1_shape[0]), int(img1_shape[1])
         gain = min(float(h1) / float(h0), float(w1) / float(w0))
         pad_x = float(round((w1 - round(w0 * gain)) / 2.0 - 0.1))
         pad_y = float(round((h1 - round(h0 * gain)) / 2.0 - 0.1))
-        return gain, pad_x, pad_y
+        return gain, (pad_x, pad_y)
 
 
 def _letterbox_bgr(
