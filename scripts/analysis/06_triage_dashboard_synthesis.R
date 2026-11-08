@@ -61,6 +61,7 @@ parse_args_robust <- function() {
   rp <- function(rel) if (nzchar(run_dir)) file.path(run_dir, rel) else rel
   option_list <- list(
     optparse::make_option(c("-v", "--vouchers"), type = "character", default = rp("data/tables/curated_vouchers.csv")),
+    optparse::make_option(c("--phenology"), type = "character", default = ""),
     optparse::make_option(c("-m", "--morphometrics"), type = "character", default = rp("data/tables/morphometrics_misidentification_flags.csv")),
     optparse::make_option(c("--linear-traits"), type = "character", default = ""),
     optparse::make_option(c("-c", "--multimodal-flags"), type = "character", default = rp("data/tables/multimodal_conflict_flags.csv")),
@@ -887,7 +888,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       cryptic_cluster_pass_map[[map_key]] <- FALSE
       next
     }
-    if (n < 50L) {
+    has_collector_col <- any(!is.na(rec_by_v) & nzchar(trimws(rec_by_v)))
+    if (n < 50L && !has_collector_col) {
       pass_events <- length(idx_cl) >= 1L
     } else {
       has_meta <- any(!is.na(rec_by_v[idx_cl]) & nzchar(trimws(rec_by_v[idx_cl]))) ||

@@ -557,10 +557,11 @@ select_adaptive_reference_anchors <- function(
     gs_silver_local <- is_silver[idx_gs]
     n_gold_k <- sum(gs_gold_local)
     dis_gold_n <- sum(is_dis_mode[idx_gs[gs_gold_local]], na.rm = TRUE)
-    dis_gold_frac <- if (n_gold_k > 0L) (dis_gold_n / n_gold_k) else mean(is_dis_mode[idx_gs], na.rm = TRUE)
+    dis_gold_frac <- if (n_gold_k > 0L) (dis_gold_n / n_gold_k) else if (length(idx_gs) > 0L) mean(is_dis_mode[idx_gs], na.rm = TRUE) else 0.0
+    if (!is.finite(dis_gold_frac)) dis_gold_frac <- 0.0
     is_entire_basal_sp <- grepl("dubia|tomentosa|obovata|cardamine", as.character(tx), ignore.case = TRUE)
     min_dis_gold_frac <- if (is_entire_basal_sp) 0.25 else if (dis_gold_n >= 5L) 0.15 else 0.25
-    allow_dis_split <- if (n_gold_k > 0L) (dis_gold_frac >= min_dis_gold_frac) else (dis_gold_frac >= 0.30)
+    allow_dis_split <- isTRUE(if (n_gold_k > 0L) (dis_gold_frac >= min_dis_gold_frac) else (dis_gold_frac >= 0.30))
     idx_type_k <- idx_gs[gs_type_local]
     n_type_k <- length(idx_type_k)
     n_eff_type_k <- if (n_type_k > 0L) .count_effective_type_gatherings(df, idx_type_k) else 0.0
@@ -611,12 +612,12 @@ select_adaptive_reference_anchors <- function(
             for (pos_m in list(gs_ent_pos, gs_dis_pos)) {
               Xm <- X_gs[pos_m, , drop = FALSE]
               pos_m_gold <- pos_m[gs_gold_local[pos_m] & !extreme_type_local[pos_m]]
-              use_gold_m <- length(pos_m_gold) >= 5L
+              use_gold_m <- length(pos_m_gold) >= max(5L, p_eff + 3L)
               pos_m_fit <- if (use_gold_m) pos_m_gold else pos_m[!extreme_type_local[pos_m]]
               if (length(pos_m_fit) < 3L) pos_m_fit <- pos_m
               Xm_fit <- X_gs[pos_m_fit, , drop = FALSE]
               rob_m <- NULL; q_m <- nrow(Xm_fit)
-              if (nrow(Xm_fit) >= max(12L, p_eff + 4L) && requireNamespace("MASS", quietly = TRUE)) {
+              if (nrow(Xm_fit) >= max(12L, 5L * p_eff) && requireNamespace("MASS", quietly = TRUE)) {
                 q_m <- min(nrow(Xm_fit) - 1L, max(floor(0.80 * nrow(Xm_fit)), floor((nrow(Xm_fit) + p_eff + 1L) / 2L)))
                 rob_m <- .fit_fast_mcd_cov(Xm_fit, q_used = q_m, allow_parallel = !par_taxa)
               }
@@ -648,7 +649,7 @@ select_adaptive_reference_anchors <- function(
             }
           } else {
             gold_core_pos <- which(gs_gold_local & !extreme_type_local)
-            use_gold_core <- length(gold_core_pos) >= 5L
+            use_gold_core <- length(gold_core_pos) >= max(5L, p_eff + 3L)
             X_gs_fit <- if (use_gold_core) {
               X_gs[gold_core_pos, , drop = FALSE]
             } else if (any(extreme_type_local) && sum(!extreme_type_local) >= 5L) {
@@ -657,7 +658,7 @@ select_adaptive_reference_anchors <- function(
               X_gs
             }
             rob_gs <- NULL; q_mcd <- nrow(X_gs_fit)
-            if (nrow(X_gs_fit) >= max(12L, p_eff + 4L) && requireNamespace("MASS", quietly = TRUE)) {
+            if (nrow(X_gs_fit) >= max(12L, 5L * p_eff) && requireNamespace("MASS", quietly = TRUE)) {
               q_mcd <- min(nrow(X_gs_fit) - 1L, max(floor(0.80 * nrow(X_gs_fit)), floor((nrow(X_gs_fit) + p_eff + 1L) / 2L)))
               rob_gs <- .fit_fast_mcd_cov(X_gs_fit, q_used = q_mcd, allow_parallel = !par_taxa)
             }

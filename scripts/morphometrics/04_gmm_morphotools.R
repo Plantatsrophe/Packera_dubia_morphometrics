@@ -252,8 +252,8 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
     cls_sub <- ifelse(d1 <= d2, 1L, 2L); unc_sub <- pmin(d1, d2) / pmax(d1 + d2, 1e-9)
   }
   relab <- .canonical_relabel_gmm_clusters(sub_v, cls_sub, best_k, ref_cand, core_idx); cls_sub <- relab$cls_sub; cls <- rep(NA_integer_, nrow(df)); unc <- rep(NA_real_, nrow(df)); cls[valid_rows] <- cls_sub; unc[valid_rows] <- unc_sub
-  bic_table$Delta_BIC_prev <- c(0, diff(bic_table$BIC)); bic_table$Two_Delta_BIC <- round((bic_table$BIC - bic_table$BIC[1]) * relab$n_eff_ratio, 2)
-  bic_table$BayesFactor_vs_Null <- bic_table$Two_Delta_BIC
+  bic_table$Delta_BIC_prev <- c(0, diff(bic_table$BIC)); bic_table$Two_Delta_BIC <- round(bic_table$BIC - bic_table$BIC[1], 2)
+  bic_table$BayesFactor_vs_Null <- round(bic_table$Two_Delta_BIC * relab$n_eff_ratio, 2)
   bic_table$Evidence <- sapply(seq_len(nrow(bic_table)), function(idx_b) { # Kass & Raftery (1995) 2 * Delta_BIC vs G = 1
     if (idx_b == 1L) return("Null Model (G = 1)"); val <- bic_table$Two_Delta_BIC[idx_b]
     if (is.na(val) || val < 0) return("Negative (favors G = 1)")
