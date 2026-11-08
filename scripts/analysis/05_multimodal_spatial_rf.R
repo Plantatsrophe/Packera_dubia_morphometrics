@@ -172,6 +172,31 @@ resolve_step06_authority_weights <- function(df) {
       !exists("compute_empirical_bayes_authority_weights", mode = "function")) {
     try(source("scripts/morphometrics/authority_weighting_utils.R"), silent = TRUE)
   }
+  tier_raw <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", n)
+  tier_raw[is.na(tier_raw) | !nzchar(tier_raw)] <- "Tier_3_Bronze"
+  tier_std <- ifelse(grepl("Tier_1|Gold|Tier 1", tier_raw, ignore.case = TRUE), "Tier_1_Gold",
+              ifelse(grepl("Tier_2|Silver|Tier 2", tier_raw, ignore.case = TRUE), "Tier_2_Silver", "Tier_3_Bronze"))
+  ti_vec <- if (exists(".identify_type_specimen_vec", mode = "function")) {
+    .identify_type_specimen_vec(df)
+  } else {
+    is_t_fb <- if ("is_type_specimen" %in% names(df)) (!is.na(df$is_type_specimen) & as.logical(df$is_type_specimen)) else rep(FALSE, n)
+    list(type_rank = ifelse(is_t_fb, 2L, 0L), is_type_specimen = is_t_fb)
+  }
+  is_type_v <- as.logical(ti_vec$is_type_specimen)
+  is_type_v[is.na(is_type_v)] <- FALSE
+  prop_fb <- ifelse(is_type_v, 3.0, ifelse(tier_std == "Tier_1_Gold", 1.0, ifelse(tier_std == "Tier_2_Silver", 0.85, 0.35)))
+
+  if ("authority_weight" %in% names(df)) {
+    cur_aw <- suppressWarnings(as.numeric(df$authority_weight))
+    fin_non_type <- cur_aw[is.finite(cur_aw) & cur_aw > 0 & !is_type_v]
+    if (length(fin_non_type) > 0L && max(fin_non_type, na.rm = TRUE) <= 2.2) {
+      out_aw <- ifelse(is.finite(cur_aw) & cur_aw > 0, cur_aw, prop_fb)
+      out_aw[ti_vec$type_rank == 2L] <- 3.0
+      out_aw[ti_vec$type_rank == 1L] <- pmax(out_aw[ti_vec$type_rank == 1L], 2.8)
+      return(round(pmax(0.05, out_aw), 4))
+    }
+  }
+
   if (exists("compute_empirical_bayes_authority_weights", mode = "function")) {
     eb_wts <- tryCatch({
       res <- tryCatch(
@@ -205,7 +230,10 @@ resolve_step06_authority_weights <- function(df) {
         }
       }
       if (!is.null(w_out) && length(w_out) == n && any(is.finite(w_out) & w_out > 0)) {
-        w_out[!is.finite(w_out) | is.na(w_out)] <- 0.25
+        na_w <- !is.finite(w_out) | is.na(w_out) | w_out <= 0
+        if (any(na_w)) w_out[na_w] <- prop_fb[na_w]
+        w_out[ti_vec$type_rank == 2L] <- 3.0
+        w_out[ti_vec$type_rank == 1L] <- pmax(w_out[ti_vec$type_rank == 1L], 2.8)
         pmax(0.05, w_out)
       } else {
         NULL
@@ -217,11 +245,6 @@ resolve_step06_authority_weights <- function(df) {
   # Inline Empirical Bayes Beta-Binomial shrinkage fallback on (species_standardized, determiner_tier)
   sp_vec <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("Unknown", n)
   sp_vec[is.na(sp_vec) | !nzchar(sp_vec)] <- "Unknown"
-  tier_raw <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", n)
-  tier_raw[is.na(tier_raw) | !nzchar(tier_raw)] <- "Tier_3_Bronze"
-
-  tier_std <- ifelse(grepl("Tier_1|Gold|Tier 1", tier_raw, ignore.case = TRUE), "Tier_1_Gold",
-              ifelse(grepl("Tier_2|Silver|Tier 2", tier_raw, ignore.case = TRUE), "Tier_2_Silver", "Tier_3_Bronze"))
 
   alpha0 <- ifelse(tier_std == "Tier_1_Gold", 19.0, ifelse(tier_std == "Tier_2_Silver", 8.0, 3.0))
   beta0  <- ifelse(tier_std == "Tier_1_Gold", 1.0,  ifelse(tier_std == "Tier_2_Silver", 2.0, 3.0))
@@ -1677,7 +1700,12 @@ execute_crossmodal_consensus <- function(
   if ("is_promoted_anchor" %in% names(df)) { pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_prom_anc <- is_prom_anc | pa }
   if ("is_promoted_bronze" %in% names(df)) { pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_prom_anc <- is_prom_anc | pb }
   det_t_vec <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
-  is_anchor <- ((det_t_vec %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_prom_anc) & elig_coord & grp_vec %in% active_taxa
+  miss_gmm_c <- if (is_intra && "is_missing_gmm_cluster" %in% names(df)) as.logical(df$is_missing_gmm_cluster) else rep(FALSE, n)
+  miss_gmm_c[is.na(miss_gmm_c)] <- FALSE
+  is_anchor <- ((det_t_vec %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_prom_anc) & elig_coord & grp_vec %in% active_taxa & !miss_gmm_c
+  if (sum(is_anchor) < min(6L, n) || length(unique(grp_vec[is_anchor])) < min(2L, length(active_taxa))) {
+    is_anchor <- ((det_t_vec %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_prom_anc) & elig_coord & grp_vec %in% active_taxa
+  }
   anchor_df <- df[is_anchor, ]
   if (nrow(anchor_df) < min(10L, n)) anchor_df <- df[elig_coord & grp_vec %in% active_taxa, ]
   if (nrow(anchor_df) < min(10L, n)) anchor_df <- df[grp_vec %in% active_taxa, ]
@@ -2257,7 +2285,21 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   if ("is_promoted_anchor" %in% names(df)) { pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_promoted <- is_promoted | pa }
   if ("is_promoted_bronze" %in% names(df)) { pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_promoted <- is_promoted | pb }
   is_gold_silver <- (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_promoted | type_info_rf$is_type_specimen
-  anchor_mask <- is_gold_silver & elig_coord & !is.na(y)
+  miss_gmm_rf <- if (isTRUE(intraspecific_mode) && "is_missing_gmm_cluster" %in% names(df)) {
+    as.logical(df$is_missing_gmm_cluster)
+  } else if (isTRUE(intraspecific_mode) && all(grepl("^Morphotype_K", stats::na.omit(as.character(y)))) && "gmm_cluster" %in% names(df)) {
+    is.na(df$gmm_cluster) | !nzchar(trimws(as.character(df$gmm_cluster)))
+  } else {
+    rep(FALSE, n)
+  }
+  miss_gmm_rf[is.na(miss_gmm_rf)] <- FALSE
+  anchor_mask <- is_gold_silver & elig_coord & !is.na(y) & !miss_gmm_rf
+  if (sum(anchor_mask) < 6 || length(unique(y[anchor_mask])) < 2) {
+    anchor_mask <- elig_coord & !is.na(y) & !miss_gmm_rf
+  }
+  if (sum(anchor_mask) < 6 || length(unique(y[anchor_mask])) < 2) {
+    anchor_mask <- is_gold_silver & elig_coord & !is.na(y)
+  }
   if (sum(anchor_mask) < 6 || length(unique(y[anchor_mask])) < 2) {
     # Fallback for tiny synthetic unit-test fixtures where all rows may lack determiner_tier
     anchor_mask <- elig_coord & !is.na(y)
@@ -3287,6 +3329,7 @@ main <- function() {
       "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob",
       "type_status", "is_type_specimen", "has_empirical_type_anchor",
       "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype",
+      "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p",
       "is_promoted_bronze", "is_promoted_anchor", "authority_weight"
     )))
     vouchers_df <- left_join_by_voucher_individual(vouchers_df, morph_df, m_cols)

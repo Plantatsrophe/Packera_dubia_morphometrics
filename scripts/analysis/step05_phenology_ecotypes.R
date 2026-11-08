@@ -777,21 +777,26 @@ resolve_analysis_group <- function(
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   if (!is_intra) {
     df$analysis_group <- as.character(df$species_standardized)
+    df$is_missing_gmm_cluster <- rep(FALSE, nrow(df))
     return(df)
   }
   used_gmm <- FALSE
   if ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster))) {
-    g_raw <- ifelse(is.na(df$gmm_cluster), 1L, as.integer(df$gmm_cluster))
+    miss_gmm <- is.na(df$gmm_cluster) | !nzchar(trimws(as.character(df$gmm_cluster)))
+    g_raw <- ifelse(miss_gmm, 1L, suppressWarnings(as.integer(df$gmm_cluster)))
+    g_raw[is.na(g_raw)] <- 1L
     grp_cand <- paste0("Morphotype_K", g_raw)
     tbl <- table(grp_cand)
     if (length(tbl) >= 2 && sum(tbl >= 5) >= 2) {
       df$analysis_group <- as.character(grp_cand)
+      df$is_missing_gmm_cluster <- as.logical(miss_gmm)
       used_gmm <- TRUE
       message(sprintf("[Intraspecific Mode] Using Step 04 GMM morphotypes as analysis_group (%s).",
                       paste(names(tbl), tbl, sep = "=", collapse = ", ")))
     }
   }
   if (!used_gmm) {
+    df$is_missing_gmm_cluster <- rep(FALSE, nrow(df))
     n_rows <- nrow(df)
     if (n_rows == 0L) {
       df$analysis_group <- character(0)
@@ -964,7 +969,22 @@ resolve_active_anchor_groups <- function(df, intraspecific_mode = FALSE) {
   if ("is_promoted_bronze" %in% names(df)) {
     pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_prom <- is_prom | pb
   }
-  is_anc <- ((det_t %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_prom) & elig & !is.na(g_raw) & nzchar(g_raw) & (g_raw != "Unknown")
+  miss_gmm <- if (is_intra && "is_missing_gmm_cluster" %in% names(df)) {
+    as.logical(df$is_missing_gmm_cluster)
+  } else if (is_intra && "analysis_group" %in% names(df) && all(grepl("^Morphotype_K", stats::na.omit(df$analysis_group))) && "gmm_cluster" %in% names(df)) {
+    is.na(df$gmm_cluster) | !nzchar(trimws(as.character(df$gmm_cluster)))
+  } else {
+    rep(FALSE, n_r)
+  }
+  miss_gmm[is.na(miss_gmm)] <- FALSE
+  base_anc <- ((det_t %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_prom) & elig & !is.na(g_raw) & nzchar(g_raw) & (g_raw != "Unknown")
+  is_anc <- base_anc & !miss_gmm
+  if (sum(is_anc) < 6L || length(unique(g_raw[is_anc])) < 2L) {
+    is_anc <- (elig & !is.na(g_raw) & nzchar(g_raw) & (g_raw != "Unknown")) & !miss_gmm
+  }
+  if (sum(is_anc) < 6L || length(unique(g_raw[is_anc])) < 2L) {
+    is_anc <- base_anc
+  }
   if (sum(is_anc) < 6L || length(unique(g_raw[is_anc])) < 2L) {
     is_anc <- elig & !is.na(g_raw) & nzchar(g_raw) & (g_raw != "Unknown")
   }

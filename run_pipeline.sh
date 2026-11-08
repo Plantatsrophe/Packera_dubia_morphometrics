@@ -830,6 +830,9 @@ if unres_mask.any():
     df = df[~unres_mask].copy()
     print(f'[Preflight: Taxon Hygiene] Dropped {n_unres} vouchers with unresolvable or open-nomenclature taxon strings.')
 
+from scripts.core.taxonomy_authority import apply_corpus_authority_tiers
+df = apply_corpus_authority_tiers(df)
+
 if custom_taxa:
     before_custom_n = len(df)
     df = df[df['species_standardized'].isin(custom_taxa)].copy()
@@ -999,7 +1002,10 @@ if focal_raw:
                     focal_rows = cdf[cdf['taxon_std'] == focal_taxon]
                     if not focal_rows.empty:
                         f_cid = focal_rows['consensus_complex_id'].iloc[0]
-                        same_c = cdf[(cdf['consensus_complex_id'] == f_cid) & (cdf['taxon_std'] != focal_taxon)]['taxon_std'].tolist()
+                        same_c = [
+                            col_std for col_std in cdf[(cdf['consensus_complex_id'] == f_cid) & (cdf['taxon_std'] != focal_taxon)]['taxon_std'].tolist()
+                            if isinstance(col_std, str) and col_std.startswith('Packera ') and col_std != focal_taxon
+                        ]
                         discovered_neighbors.extend(same_c)
             if aff_file is not None:
                 adf = pd.read_csv(aff_file)
@@ -1011,7 +1017,7 @@ if focal_raw:
                             if col in ('taxon', 'taxon_std'):
                                 continue
                             col_std = standardize_packera_taxon(col)
-                            if col_std != focal_taxon:
+                            if isinstance(col_std, str) and col_std.startswith('Packera ') and col_std != focal_taxon:
                                 try:
                                     val = float(frow[col].iloc[0])
                                     if val >= min_affinity_val:
@@ -1022,14 +1028,17 @@ if focal_raw:
                 nf = next((p for p in neigh_candidates if p.is_file() and p.stat().st_size > 0), None)
                 if nf is not None:
                     discovered_neighbors = [
-                        standardize_packera_taxon(line.strip())
+                        col_std
                         for line in nf.read_text(encoding='utf-8').splitlines()
-                        if line.strip() and standardize_packera_taxon(line.strip()) != focal_taxon
+                        if line.strip()
+                        for col_std in (standardize_packera_taxon(line.strip()),)
+                        if isinstance(col_std, str) and col_std.startswith('Packera ') and col_std != focal_taxon
                     ]
             if discovered_neighbors:
-                disc_set = set(discovered_neighbors) - exclude_taxa - {focal_taxon}
-                outgroup_taxa = [t for t in outgroup_taxa if t in disc_set] or sorted(disc_set)
-                print(f'[Auto-Neighbors] Empirical complex & affinity neighbors for {focal_taxon}: {outgroup_taxa}')
+                disc_set = {t for t in discovered_neighbors if isinstance(t, str) and t.startswith('Packera ')} - exclude_taxa - {focal_taxon}
+                if disc_set:
+                    outgroup_taxa = [t for t in outgroup_taxa if t in disc_set] or sorted(disc_set)
+                    print(f'[Auto-Neighbors] Empirical complex & affinity neighbors for {focal_taxon}: {outgroup_taxa}')
 
         outgroup_dfs, outgroup_counts, outgroup_tiers = select_cascading_outgroup_anchors(
             df,

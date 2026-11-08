@@ -207,10 +207,10 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   sub_v <- df[valid_rows, , drop = FALSE]
   is_tier1_pure <- if ("morph_tier_source" %in% names(sub_v)) (!is.na(sub_v$morph_tier_source) & sub_v$morph_tier_source == "Tier_1_Pure") else rep(TRUE, N_valid)
   anc_gmm <- select_adaptive_reference_anchors(sub_v, feature_matrix = as.matrix(sub_v[, req_cols, drop = FALSE]), taxon_col = "species_standardized")
-  ref_cand <- anc_gmm$active_mask & is_tier1_pure
+  ref_cand <- anc_gmm$active_mask & !anc_gmm$is_confident_label_noise & is_tier1_pure
   if (sum(ref_cand, na.rm = TRUE) < 6L) ref_cand <- if (sum(is_tier1_pure) >= 6L) is_tier1_pure else rep(TRUE, N_valid)
-  X <- as.matrix(sub_v[, feature_cols, drop = FALSE])
-  for (j in seq_len(ncol(X))) if (any(is.na(X[, j]))) X[is.na(X[, j]), j] <- if (any(!is.na(X[ref_cand, j]))) mean(X[ref_cand, j], na.rm = TRUE) else 0.0
+  fa_gmm <- .augment_foliar_architecture_features(sub_v, feature_cols, ref_cand); sub_v <- fa_gmm$df; feature_cols <- fa_gmm$feature_cols; X <- as.matrix(sub_v[, feature_cols, drop = FALSE])
+  for (j in seq_len(ncol(X))) if (any(is.na(X[, j]))) X[is.na(X[, j]), j] <- if (any(!is.na(X[ref_cand, j]))) stats::median(X[ref_cand, j], na.rm = TRUE) else 0.0
   if (exists("screen_gmm_point_mass_columns", mode = "function")) X <- X[, screen_gmm_point_mass_columns(X, ref_cand), drop = FALSE]
   selected_cols <- select_morphometric_subspace(X[ref_cand, , drop = FALSE], aux_df = sub_v[ref_cand, , drop = FALSE]); X <- X[, selected_cols, drop = FALSE]
   set.seed(42); best_k <- 1; best_name <- "Full_Covariance_EM"; bic_table <- NULL; cls_sub <- NULL; unc_sub <- NULL
@@ -251,8 +251,8 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
     d1 <- sqrt(rowSums(sweep(X_pcs, 2, km$centers[1, ], "-")^2)); d2 <- sqrt(rowSums(sweep(X_pcs, 2, km$centers[2, ], "-")^2))
     cls_sub <- ifelse(d1 <= d2, 1L, 2L); unc_sub <- pmin(d1, d2) / pmax(d1 + d2, 1e-9)
   }
-  cls <- rep(NA_integer_, nrow(df)); unc <- rep(NA_real_, nrow(df)); cls[valid_rows] <- cls_sub; unc[valid_rows] <- unc_sub
-  bic_table$Delta_BIC_prev <- c(0, diff(bic_table$BIC)); bic_table$Two_Delta_BIC <- round(bic_table$BIC - bic_table$BIC[1], 2)
+  relab <- .canonical_relabel_gmm_clusters(sub_v, cls_sub, best_k, ref_cand, core_idx); cls_sub <- relab$cls_sub; cls <- rep(NA_integer_, nrow(df)); unc <- rep(NA_real_, nrow(df)); cls[valid_rows] <- cls_sub; unc[valid_rows] <- unc_sub
+  bic_table$Delta_BIC_prev <- c(0, diff(bic_table$BIC)); bic_table$Two_Delta_BIC <- round((bic_table$BIC - bic_table$BIC[1]) * relab$n_eff_ratio, 2)
   bic_table$BayesFactor_vs_Null <- bic_table$Two_Delta_BIC
   bic_table$Evidence <- sapply(seq_len(nrow(bic_table)), function(idx_b) { # Kass & Raftery (1995) 2 * Delta_BIC vs G = 1
     if (idx_b == 1L) return("Null Model (G = 1)"); val <- bic_table$Two_Delta_BIC[idx_b]
@@ -272,7 +272,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   pc_req <- grep("^(Sym_)?PC[0-9]+$", feature_cols, value = TRUE)
   has_pcs <- complete.cases(df[, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE])
-  screened_by_adaptive_anchors <- FALSE
+  screened_by_adaptive_anchors <- FALSE; df$is_confident_label_noise <- rep(FALSE, nrow(df))
   if (is_intra) {
     cl_u <- if (!is.null(gmm_res) && length(unique(stats::na.omit(gmm_res$classification))) >= 2L) as.integer(gmm_res$classification) else NULL
     if (is.null(cl_u)) {
@@ -292,7 +292,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   } else {
     df$grouping_col <- df$species_standardized; used_unscreened_fb <- FALSE
     anc_cda <- select_adaptive_reference_anchors(df, feature_matrix = as.matrix(df[, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE]), taxon_col = "grouping_col")
-    df$is_promoted_bronze <- anc_cda$is_promoted_bronze; df$anchor_tier_source <- anc_cda$anchor_tier_source
+    df$is_promoted_bronze <- anc_cda$is_promoted_bronze; df$anchor_tier_source <- anc_cda$anchor_tier_source; df$is_confident_label_noise <- as.logical(anc_cda$is_confident_label_noise)
     df$authority_weight <- compute_authority_precision_weights(df); authority_weight <- df$authority_weight; eff_weight <- authority_weight
     is_train_cand <- anc_cda$active_mask & is_tier1_pure & (df$grouping_col %in% target_taxa) & has_pcs
     tr_tab <- table(factor(df$grouping_col[is_train_cand], levels = target_taxa))
@@ -309,8 +309,8 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     screened_by_adaptive_anchors <- (!used_unscreened_fb) && (sum(is_train_cand) >= 5L)
     is_active <- is_train_cand
   }
-  X_full <- as.matrix(df[, feature_cols, drop = FALSE])
-  for (j in seq_len(ncol(X_full))) if (any(is.na(X_full[, j]))) X_full[is.na(X_full[, j]), j] <- if (any(!is.na(X_full[is_train_cand, j]))) mean(X_full[is_train_cand, j], na.rm = TRUE) else 0.0
+  fa_cda <- .augment_foliar_architecture_features(df, feature_cols, is_train_cand); df <- fa_cda$df; feature_cols <- fa_cda$feature_cols; X_full <- as.matrix(df[, feature_cols, drop = FALSE])
+  for (j in seq_len(ncol(X_full))) if (any(is.na(X_full[, j]))) X_full[is.na(X_full[, j]), j] <- if (any(!is.na(X_full[is_train_cand, j]))) stats::median(X_full[is_train_cand, j], na.rm = TRUE) else 0.0
   feature_cols <- select_morphometric_subspace(X_full[is_train_cand, , drop = FALSE], group_vec = df$grouping_col[is_train_cand], aux_df = df[is_train_cand, , drop = FALSE])
   X <- X_full[, feature_cols, drop = FALSE]; p <- ncol(X)
   if (!screened_by_adaptive_anchors) {
@@ -332,7 +332,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   X_a <- X[active_idx, , drop = FALSE]; y_a <- df$grouping_col[active_idx]; eff_weight <- eff_weight[active_idx]; if (all(eff_weight <= 0)) eff_weight <- rep(1.0, length(active_idx)); w_a <- eff_weight; N_a <- nrow(X_a)
   X_mat <- X_a; grp_factor <- droplevels(factor(y_a))
   lda_cv <- if (requireNamespace("MASS", quietly = TRUE) && nlevels(grp_factor) >= 2) tryCatch(MASS::lda(x = X_mat, grouping = grp_factor, prior = rep(1.0 / nlevels(grp_factor), nlevels(grp_factor)), CV = TRUE), error = function(e) NULL) else NULL
-  loocv_accuracy <- tryCatch(compute_weighted_shrinkage_cda_loocv(X_a, grp_factor, w_a), error = function(e) NA_real_)
+  loocv_accuracy <- tryCatch(compute_weighted_shrinkage_cda_loocv(X_a, grp_factor, w_a, coords_df = df[active_idx, , drop = FALSE]), error = function(e) NA_real_)
   if (is.na(loocv_accuracy) && !is.null(lda_cv) && !is.null(lda_cv$class)) loocv_accuracy <- round(mean(as.character(lda_cv$class) == as.character(grp_factor), na.rm = TRUE), 4)
   message(sprintf("CDA Leave-One-Out Cross-Validation Accuracy (loocv_accuracy): %.4f", loocv_accuracy))
 
@@ -369,9 +369,9 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   colnames(Z_all_full) <- colnames(Z_anchors_full) <- colnames(centroids_full) <- paste0("Can", seq_len(k_full))
   rownames(centroids_full) <- g_levels
 
-  priors <- rep(1/g, g); post_probs <- matrix(0, nrow(df), g, dimnames = list(NULL, g_levels))
+  priors <- rep(1/g, g); post_probs <- .compute_soft_geo_range_log_prior(df, df$grouping_col, w_vec = df$authority_weight, active_mask = is_active, g_levels = g_levels); dimnames(post_probs) <- list(NULL, g_levels)
   for (k in seq_along(g_levels)) {
-    diff_z <- sweep(Z_all_full, 2L, centroids_full[k, ], "-"); post_probs[, k] <- log(priors[k]) - 0.5 * rowSums(diff_z^2)
+    diff_z <- sweep(Z_all_full, 2L, centroids_full[k, ], "-"); post_probs[, k] <- post_probs[, k] + log(priors[k]) - 0.5 * rowSums(diff_z^2)
   }
   post_probs <- exp(post_probs - apply(post_probs, 1, max, na.rm = TRUE))
   post_probs <- post_probs / pmax(rowSums(post_probs, na.rm = TRUE), 1e-12); pred_idx <- max.col(post_probs, ties.method = "first")
@@ -409,7 +409,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
               shrinkage_lambda = attr(S_reg, "shrinkage_lambda"), selected_features = feature_cols,
               predicted_taxon = g_levels[pred_idx], posterior_prob = posterior_prob, second_taxon = second_taxon,
               second_posterior_prob = second_posterior_prob, post_probs = post_probs,
-              posterior_margin = posterior_margin, is_active = is_active, is_promoted_bronze = df$is_promoted_bronze, anchor_tier_source = df$anchor_tier_source,
+              posterior_margin = posterior_margin, is_active = is_active, is_promoted_bronze = df$is_promoted_bronze, is_confident_label_noise = df$is_confident_label_noise, anchor_tier_source = df$anchor_tier_source,
               authority_weight = df$authority_weight, structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col, X_proj = X_proj, S_reg = S_reg))
 }
 run_cda_with_passive_projection <- run_canonical_discriminant_analysis; run_weighted_cda_loocv <- run_canonical_discriminant_analysis; run_cda_ordination <- run_canonical_discriminant_analysis
@@ -450,8 +450,8 @@ audit_misidentifications <- function(df, cda_res, gmm_res = NULL, selected_featu
   }
   tc <- compute_type_specimen_morph_control(df, cda_res$X_proj, cda_res$S_reg, cda_res, gmm_res, flags = flags, triage = triage, reasons = reasons)
   flags <- tc$flags; triage <- tc$triage; reasons <- tc$reasons
-  for (cn in c("type_status", "is_type_specimen", "has_empirical_type_anchor", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype")) df[[cn]] <- tc[[cn]]
-  if (!is.null(cda_res$is_promoted_bronze)) df$is_promoted_bronze <- cda_res$is_promoted_bronze
+  for (cn in c("type_status", "is_type_specimen", "has_empirical_type_anchor", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p")) df[[cn]] <- tc[[cn]]
+  if (!is.null(cda_res$is_promoted_bronze)) df$is_promoted_bronze <- cda_res$is_promoted_bronze; df$is_confident_label_noise <- if (!is.null(cda_res$is_confident_label_noise)) as.logical(cda_res$is_confident_label_noise) else rep(FALSE, n)
   if (!is.null(cda_res$anchor_tier_source)) df$anchor_tier_source <- cda_res$anchor_tier_source
   df$authority_weight <- if (!is.null(cda_res$authority_weight)) cda_res$authority_weight else compute_authority_precision_weights(df)
   if (!is.null(gmm_res$classification)) df$gmm_cluster <- gmm_res$classification
@@ -636,7 +636,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   manova_res <- if (exists("run_multivariate_manova_audit", mode = "function")) run_multivariate_manova_audit(audited_df, cda_cols, gmm_res, output_group_csv = file.path(rep_dir, "manova_group_significance.csv"), output_pairwise_csv = file.path(rep_dir, "manova_pairwise_posthoc.csv")) else NULL
   lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "basal_leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm",
                            "species_raw", "species_standardized", "determiner_tier", "type_status", "is_type_specimen", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_taxon", "cda_second_posterior_prob",
-                           "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty",
+                           "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "is_confident_label_noise", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty",
                            "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", "pheno_sin", "pheno_cos", pc_cols, sym_pc_cols,
                            "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "heteroblasty_index", "ucs_score", "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std",
                            "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))

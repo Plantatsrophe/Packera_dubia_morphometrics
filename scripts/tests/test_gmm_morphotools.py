@@ -1480,6 +1480,122 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertIn("ncol = min(5L, max(2L, ceiling(length(u_tx) / 3L)))", content)
         self.assertIn("horiz = FALSE", content)
 
+    def test_morphometric_flags_exports_osr_and_confident_learning_columns(self):
+        """
+        Verify that `morphometric_flags.csv` exports `min_congener_mahal_d2`,
+        `min_congener_taxon`, `open_set_novelty_p`, and `is_confident_label_noise`.
+        """
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        rng = np.random.default_rng(20261108)
+        rows = []
+        vouch_rows = []
+        taxa = ["Packera dubia", "Packera obovata"]
+        for s_idx, sp in enumerate(taxa):
+            center_pc1 = -3.0 if s_idx == 0 else 3.0
+            center_pc2 = 1.2 if s_idx == 0 else -1.2
+            for j in range(12):
+                cat = f"OSR_CL_{s_idx}_{j:02d}"
+                is_swapped_noise = (j == 11)
+                pc1 = float(rng.normal(-center_pc1 if is_swapped_noise else center_pc1, 0.25))
+                pc2 = float(rng.normal(-center_pc2 if is_swapped_noise else center_pc2, 0.25))
+                pc3 = float(rng.normal(0.0, 0.20))
+                cs = float(20.0 + 0.4 * j)
+                tier = "Tier_1_Gold" if j < 10 else ("Tier_2_Silver" if j == 11 else "Tier_3_Bronze")
+                t_status = "Holotype" if j == 0 else "None"
+                row = {
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "assigned_tier": "Tier_1_Direct",
+                    "n_tier1_leaves": 3,
+                    "n_tier2_leaves": 0,
+                    "morph_tier_source": "Tier_1_Pure",
+                    "species_raw": sp,
+                    "scientificName": sp,
+                    "determiner_tier": tier,
+                    "type_status": t_status,
+                    "foliar_variance": 0.015,
+                    "leaf_count": 3,
+                    "centroid_size": cs,
+                    "log_centsize": float(np.log(cs)),
+                    "is_calibrated_mm": True,
+                    "aspect_ratio": 1.55,
+                    "solidity": 0.90,
+                    "ucs_score": 0.94,
+                    "PC1": pc1,
+                    "PC2": pc2,
+                    "PC3": pc3,
+                    "Sym_PC1": pc1,
+                    "Sym_PC2": pc2,
+                    "Sym_PC3": pc3,
+                }
+                for k in range(1, 13):
+                    row[f"A{k}"] = float((pc1 * 0.04) / k)
+                    row[f"B{k}"] = 0.0
+                    row[f"C{k}"] = 0.0
+                    row[f"D{k}"] = float((pc2 * 0.04) / k)
+                rows.append(row)
+                vouch_rows.append(
+                    {
+                        "catalogNumber": cat,
+                        "species_raw": sp,
+                        "scientificName": sp,
+                        "determiner_tier": tier,
+                        "type_status": t_status,
+                        "identifiedBy": "D. K. Trock" if tier == "Tier_1_Gold" else "A. Curator",
+                        "institutionCode": "NCU" if j % 2 == 0 else "DUKE",
+                        "stateProvince": "NC",
+                        "county": "Orange",
+                        "decimalLatitude": 35.91 + 0.01 * j,
+                        "decimalLongitude": -79.05 - 0.01 * j,
+                        "regional_group": "Piedmont",
+                        "doy": 115 + j,
+                    }
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            harm_csv = tmp_p / "leaf_efa_harmonics.csv"
+            vouch_csv = tmp_p / "curated_vouchers.csv"
+            flags_csv = tmp_p / "morphometric_flags.csv"
+            pd.DataFrame(rows).to_csv(harm_csv, index=False)
+            pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
+
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--vouchers", str(vouch_csv),
+                    "--harmonics", str(harm_csv),
+                    "--output-flags", str(flags_csv),
+                    "--output-report", str(tmp_p / "bic.csv"),
+                    "--output-plot", str(tmp_p / "cda.pdf"),
+                    "--output-batch-audit", str(tmp_p / "batch_audit.csv"),
+                    "--allometry-report", str(tmp_p / "allom.csv"),
+                    "--allometry-pairwise", str(tmp_p / "pw.csv"),
+                    "--allometry-plot", str(tmp_p / "allom.pdf"),
+                    "--permutations", "19",
+                ],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 04 OSR/Confident Learning test failed:\n{proc.stderr}\n{proc.stdout}")
+            flags_df = pd.read_csv(flags_csv)
+            for req_col in (
+                "min_congener_mahal_d2",
+                "min_congener_taxon",
+                "open_set_novelty_p",
+                "is_confident_label_noise",
+            ):
+                self.assertIn(req_col, flags_df.columns, f"Missing {req_col} in morphometric_flags.csv")
+            self.assertTrue(flags_df["min_congener_mahal_d2"].notna().all())
+            self.assertTrue(flags_df["min_congener_taxon"].notna().all())
+            self.assertTrue(flags_df["open_set_novelty_p"].notna().all())
+            self.assertTrue(flags_df["is_confident_label_noise"].notna().all())
+
 
 if __name__ == "__main__":
     unittest.main()

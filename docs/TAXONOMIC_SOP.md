@@ -33,9 +33,9 @@ I designed Phase 1 to solve the foundational challenge of herbarium data intake:
 * **Darwin Core Schema Contract and Relational UPSERT (`vouchers`):**
   I harvest occurrences into SQLite `vouchers` (PK: `catalogNumber`) via atomic UPSERT while resolving synonyms through `taxon_synonyms`, exporting synchronized CSV `data/tables/curated_vouchers.csv` with 26 Darwin Core columns: `catalogNumber`, `institutionCode`, `scientificName`, `species_raw`, `recordedBy`, `recordNumber`, `identifiedBy`, `determiner_raw`, `determiner_tier`, `type_status`, `county`, `stateProvince`, `decimalLatitude`, `latitude`, `decimalLongitude`, `longitude`, `coordinateUncertainty`, `year`, `month`, `day`, `eventDate`, `regional_group`, `image_path`, `exsiccatae_key`, `is_primary_duplicate`, `duplicate_count`, `exsiccatae_taxonomic_conflict`, and `exsiccatae_gold_taxon`.
 * **Dynamic Taxon Standardization and GBIF Synonym Expansion:**
-  I standardize binomials and basionyms dynamically through `expand_taxon_synonyms_gbif()`. Omitting taxon flags queries all *Packera* species across the genus through `discover_genus_packera_species_gbif()`. When I pass `--taxon` or `--focal-taxon`, the harvester restricts analysis strictly to those specified taxa.
+  I standardize binomials and basionyms dynamically through `expand_taxon_synonyms_gbif()`. Omitting taxon flags queries all *Packera* species across the genus through `discover_genus_packera_species_gbif()`. When I pass `taxon` or `focal_taxon` CLI flags, the harvester restricts analysis strictly to those specified taxa.
 * **Configurable Geographic Scope:**
-  I support `--geographic-scope {eastern_na,north_america,global}` (default: `eastern_na`, enforcing `decimalLongitude` bounds `[-106.65, -50.0]` during GBIF queries with a `typeStatus="*"` rescue query for historical types; `north_america` and `global` include western occurrences). When `exclude_western` is active, I exclude Western US states and Western or Northern Canadian provinces (`BC, AB, SK, YT, NT, NU`) and require $\ge 3$ georeferenced records east of $-106.65^\circ\text{W}$, supported by `--countries` (default `["US"]`).
+  I support `geographic_scope {eastern_na,north_america,global}` (default: `eastern_na`, enforcing `decimalLongitude` bounds `[-106.65, -50.0]` during GBIF queries with a `typeStatus="*"` rescue query for historical types; `north_america` and `global` include western occurrences). When `exclude_western` is active, I exclude Western US states and Western or Northern Canadian provinces (`BC, AB, SK, YT, NT, NU`) and require $\ge 3$ georeferenced records east of $-106.65^\circ\text{W}$, supported by `countries` (default `["US"]`).
 * **Pre-Download Deduplication and WebP Storage:**
   I deduplicate exsiccatae (`primary_duplicates_only=True`) before downloading images, retaining primary sheets (`is_primary_duplicate == TRUE`) while unconditionally preserving verified nomenclatural types. Full-sheet imagery in `data/raw_vouchers/` and crops in `data/cropped_patches/` default to quality-85 `.webp` compression (`method=4` via PIL), which yields a 70% to 80% disk reduction relative to JPEG or PNG with zero edge degradation.
 * **Official US EPA Level III Ecoregion Point-in-Polygon Delineation:**
@@ -49,9 +49,9 @@ I designed Phase 1 to solve the foundational challenge of herbarium data intake:
   - `SECONDARY_TYPE_STATUSES = {"SYNTYPE", "ISOSYNTYPE", "PARATYPE", "ISOPARATYPE", "TYPE", "COTYPE"}` (`Tier_0_Secondary_Type`, rank 1).
   - I resolve fine-grained ICN priority through `classify_nomenclatural_type_subrank()` (`2.2` primary, `2.0` isotype, `1.5` syntype, `1.0` paratype; Turland et al. 2018). I exempt verified types from uncertainty or partial-date filters and retain them unconditionally during spatial thinning and outgroup selection.
 * **3-Layer Dynamic Authority Engine (`parse_determiner_tier`):**
-  - **Layer 1 (Monographer Heuristics and Determiner Isolation):** I restrict `SPECIALIST_PATTERNS` matching strictly to `identifiedBy` and `identificationHistory` (falling back to `recordedBy` only when `identifiedBy` is absent), preventing collector-as-determiner false Gold promotions.
-  - **Layer 2 (Protologue Author Extraction):** I parse basionym and combination authors directly from Darwin Core `scientificName` strings with `extract_protologue_authors()`; sheets annotated by a nomenclatural author become `Tier_1_Gold`.
-  - **Layer 3 (Corpus Determiners and Regional Herbaria):** Determiners identifying $\ge 5$ specimens across $\ge 3$ herbaria become `Tier_1_Gold` (weighting type annotations $2\times$ and requiring $\le 25\%$ duplicate conflict). Curated herbaria with $\ge 5$ sheets holding $\ge 1$ type become `Tier_2_Silver`, whereas unverified collections receive `Tier_3_Bronze`.
+  - **Layer 1 (Monographer Heuristics and Determiner Isolation):** I restrict `SPECIALIST_PATTERNS` matching strictly to `identifiedBy` and `identificationHistory`, falling back to `recordedBy` only when `identifiedBy` is blank or explicitly references the collector, which prevents collector-as-determiner false Gold promotions. I also exclude non-person database adjustment strings (`"Nomenclatural Adjustment"`, `"Nomenclature update"`) and ambiguous bare surnames lacking initials or given names from dynamic `Tier_1_Gold` promotion (Goodwin et al. 2015; Maldonado et al. 2015).
+  - **Layer 2 (Protologue Author Extraction):** I parse basionym and combination authors directly from Darwin Core `scientificName` strings with `extract_protologue_authors()`, so sheets annotated by a nomenclatural author become `Tier_1_Gold`.
+  - **Layer 3 (Corpus Determiners, Batch-Transfer Demotion and Regional Herbaria):** Determiners identifying $\ge 5$ specimens across $\ge 3$ herbaria become `Tier_1_Gold` (weighting type annotations $2\times$ and requiring $\le 25\%$ duplicate conflict). To guard against uncritical folder-level synonymy stamps, I demote undated institutional batch transfers spanning $\ge 25$ sheets across $\ge 10$ historical collectors (or $> 25$ historical collectors corpus-wide) at a single herbarium to `Tier_2_Silver`, while preserving `Tier_1_Gold` status for the specialist's own field collections (`recordedBy == identifiedBy`; Goodwin et al. 2015; Maldonado et al. 2015). Curated herbaria with $\ge 5$ sheets holding $\ge 1$ type become `Tier_2_Silver`, whereas unverified collections receive `Tier_3_Bronze`.
 
 Now that Phase 1 establishes an authoritative, georeferenced specimen cohort, I feed these vetted vouchers directly into the vision pipeline.
 
@@ -78,7 +78,7 @@ Herbarium sheets present challenging visual artifacts: white mounting tape, frag
 * **Cauline and Stem Rejection (`is_cauline_or_stem_contaminant`):** I reject cauline bracts and stem fragments through aspect ratio $> 3.8$, solidity $< 0.78$, or height $> 2.2 \times \text{median rosette radius}$ above the caudex crown.
 * **Boundary-Continuity Lobe Rejection (`check_boundary_tissue_continuity`):** I inspect an 8-pixel exterior ring (`dilation_px = 8`) in CIE $L^*a^*b^*$ space. I mask out adjacent leaf blades (`neighbor_mask`) and the `petiole_base_pt` attachment zone, then reject candidates when non-paper tissue exceeds `max_tissue_border_ratio = 0.25` of the perimeter ring or exhibits an artificial straight-edge crop cut.
 * **Dissected-Leaf Rachis Bridging (`_merge_and_bridge_dissected_crop_mask`):** In deeply pinnatifid leaves with narrow segmentation breaks, I bridge secondary `Leaf` components inside a crop only when they are topologically connected to the primary lamina through `petiole_mask`, the 31-keypoint midvein trace (`midvein_1..15`), or `specimen_paper_cleaned_mask`. This topological constraint prevents adjacent overlapping leaves at crop borders from being fused into a single contour.
-* **Tier 2 Hemi-Blade Routing (`reflect_folded_mask`):** For folded blades, I reflect the intact half across the 15-point midvein into `Tier_2_Reflected` for auxiliary linear traits. When `--enable-geometric-qc` is active, folded or partial blades (`is_folded` or `tier2`) are excluded from closed-outline EFA (`PARTIAL_OR_FOLDED_EXCLUDED_FROM_EFA`), so only intact `Tier_1_Direct` blades enter Step 03 harmonic decomposition. This includes pinnatifid and bipinnatisect leaves validated by `is_botanical_dissection()` and normalized by convex-hull solidity.
+* **Tier 2 Hemi-Blade Routing (`reflect_folded_mask`):** For folded blades, I reflect the intact half across the 15-point midvein into `Tier_2_Reflected` for auxiliary linear traits. When `enable_geometric_qc` is active, folded or partial blades (`is_folded` or `tier2`) are excluded from closed-outline EFA (`PARTIAL_OR_FOLDED_EXCLUDED_FROM_EFA`), so only intact `Tier_1_Direct` blades enter Step 03 harmonic decomposition. This includes pinnatifid and bipinnatisect leaves validated by `is_botanical_dissection()` and normalized by convex-hull solidity.
 * **Classical Gatekeeper and Dissection Gates (`Tier_1_Direct`):** Entire blades require $\text{Solidity} \ge 0.72$, isoperimetric $\text{Circularity} = \frac{4\pi A}{P^2} \ge 0.25$, $\text{Extent} = \frac{A}{W \cdot H} \ge 0.35$, and $\text{UCS} \ge 0.85$. Pinnatifid ($0.48 \le \text{Solidity} < 0.72$) and bipinnatisect ($0.18 \le \text{Solidity} < 0.48$, $\ge 4$ deep sinuses) blades are validated through `is_botanical_dissection()` and routed into `Tier_1_Direct`.
 * **Plant-Adaptive Physical Blade Area Floor (`effective_min_area_by_pid`):** When multiple multi-leaf plant individuals (`plant_individual_id`) occupy the same sheet, I compute both the adaptive physical floor:
   $$\text{effective\_min\_area} = \min(0.75, \max(0.15, 0.25 \times \text{median\_area}))\text{ cm}^2$$
@@ -108,23 +108,27 @@ In Phase 3 and Phase 4, I transform discrete leaf outlines into continuous mathe
   I exempt intact type contours from within-taxon Mahalanobis and MCD outlier screening (`mcd_out[is_type_specimen] <- FALSE`). Active type anchors receive a $1.5\times$ precision boost in `stats::cov.wt()`. I export PCs accounting for $\ge 95\%$ variance ($k_{\text{export}} = \max(5, k_{95})$), followed by unweighted coordinate-wise OTU median aggregation to `(catalogNumber, plant_individual_id)`.
 
 ### 4.2 Determiner Authority Weighting and Adaptive Reference Anchors (`authority_weighting_utils.R`)
-* **Adaptive Reference Anchors and Type-Medoid Shrinkage:**
-  Reference anchors consist of `Tier_1_Gold` and `Tier_2_Silver` vouchers pruned once at $\chi^2_{0.95}$ FastMCD. Intact types receive retention immunity (`anchor_tier_source = "Tier_0_Type_Anchor"`), whereas extreme types ($> \chi^2_{0.99}$) are isolated from FastMCD scatter estimation. Taxon reference centers shrink toward the type medoid:
+* **Two-Stage Gold/Silver Anchor Seeding, Heteroblastic Gold Gating and Confident Learning Pruning:**
+  I seed reference anchors through a two-stage robust workflow. First, I fit the initial FastMCD location and scatter estimator strictly on verified `Tier_0_Type` and `Tier_1_Gold` monographer anchors ($\chi^2_{0.95, p}$), and I screen candidate `Tier_2_Silver` vouchers against that Gold-anchored envelope at $\chi^2_{0.90, p}$ before refitting the combined anchor covariance (Rousseeuw & Van Driessen 1999). When a taxon exhibits bimodal foliar dissection, I retain a secondary dissected sub-mode only if it achieves $\ge 25\%$ `Tier_1_Gold` support, which prevents misidentified dissected congeners in Silver or Bronze tiers from seeding spurious bimodal anchor clusters. I then execute out-of-fold **Confident Learning** (`Northcutt et al. 2021`) across candidate anchors to estimate the joint distribution of noisy herbarium labels and true latent taxa, pruning non-type anchors flagged as confident label noise (`is_confident_label_noise = TRUE`) prior to final ordination. Intact types receive retention immunity (`anchor_tier_source = "Tier_0_Type_Anchor"`), whereas extreme types ($> \chi^2_{0.99}$) are isolated from FastMCD scatter estimation. Taxon reference centers shrink toward the type medoid:
   $$\boldsymbol{\mu}_{\text{ref}, k} \leftarrow (1 - \gamma_k) \boldsymbol{\mu}_{\text{ref}, k} + \gamma_k \boldsymbol{\mu}_{\text{type}, k},\quad \gamma_k = \min\!\left(0.35,\, \frac{2.5\,n_{\text{eff, type}, k}}{N_{\text{gs}, k} + 2.5\,n_{\text{eff, type}, k}}\right)$$
   Taxa with $< 8$ Gold and Silver anchors promote central `Tier_3_Bronze` vouchers within $\chi^2_{0.80}$ (`is_promoted_anchor = TRUE`).
-* **2-Step Dawid-Skene and Beta-Binomial Empirical Bayes Authority Weighting:**
-  I estimate observer error rates $\hat{\epsilon}_i$ exogenously (`target_modality = ...`; Dawid & Skene 1979) and pool priors ($\alpha_0 = 5.0$, prior reliabilities $\pi_{\text{PrimaryType}} = 0.999$, $\pi_{\text{SecType}} = 0.985$, $\pi_{\text{Gold}} = 0.95$, $\pi_{\text{Silver}} = 0.85$, $\pi_{\text{PromotedBronze}} = 0.65$, $\pi_{\text{Bronze}} = 0.35$). Types are exempt from downward shrinkage. Unpromoted Bronze receive $0.0$ in `active_passive` mode.
+* **Crossed-Effects Hierarchical Log-Odds Prior and Multiplicative Bayesian Posterior Updating:**
+  I model baseline label reliability $\pi_{d(i), h(i)} = \text{logit}^{-1}(\eta_0 + u_{d(i)} + v_{h(i)})$ through a crossed-effects hierarchical log-odds prior combining determiner authority $u_{d(i)}$ and institutional curation quality $v_{h(i)}$ ($\alpha_0 = 5.0$, prior reliabilities $\pi_{\text{PrimaryType}} = 0.999$, $\pi_{\text{SecType}} = 0.985$, $\pi_{\text{Gold}} = 0.95$, $\pi_{\text{Silver}} = 0.85$, $\pi_{\text{PromotedBronze}} = 0.65$, $\pi_{\text{Bronze}} = 0.35$; Dawid & Skene 1979; Gelman & Hill 2007; Raykar et al. 2010). I update each specimen's authority weight via multiplicative Bayesian posterior updating against its leave-one-out cross-modal likelihood $L_{\text{LOO}}(\mathbf{x}_i \mid y_i^{\text{obs}})$:
+  $$w_i = \frac{\pi_{d(i), h(i)} \, L_{\text{LOO}}(\mathbf{x}_i \mid y_i^{\text{obs}})}{\pi_{d(i), h(i)} \, L_{\text{LOO}}(\mathbf{x}_i \mid y_i^{\text{obs}}) + (1 - \pi_{d(i), h(i)}) \, \bar{L}_{\text{LOO}}(\mathbf{x}_i \mid k \ne y_i^{\text{obs}})}$$
+  Types remain exempt from downward shrinkage, and unpromoted Bronze vouchers receive $0.0$ in `active_passive` mode.
 
 ### 4.3 Klingenberg Allometry, Dual-Track CDA and MANOVA (`04_gmm_morphotools.R`)
-* **Two-Sample Prediction-Variance Corrected Type Distance:**
+* **Two-Sample Prediction-Variance Corrected Type Distance and Canonical GMM Relabeling:**
   $$D^2_{\text{type}, i} = \left(1 + \frac{1}{n_{\text{eff, type}, k}}\right)^{-1} (\mathbf{x}_i - \boldsymbol{\mu}_{\text{type}, k})^\top \mathbf{S}_{\text{reg}}^{-1} (\mathbf{x}_i - \boldsymbol{\mu}_{\text{type}, k})$$
-  persisted as `type_morph_mahal_d2`, alongside `nearest_type_morph_taxon` and `is_typical_morphotype` (GMM cluster $c^*$).
+  persisted as `type_morph_mahal_d2`, alongside `nearest_type_morph_taxon` and `is_typical_morphotype` (GMM cluster $c^*$). Because Gaussian Mixture Model component indices are arbitrary across runs, I canonically relabel fitted `mclust` components so Cluster 1 ($c^*$) always indexes the component containing the nomenclatural type medoid or highest-weighted `Tier_1_Gold` core, ordering secondary components by decreasing Gold anchor support (Scrucca et al. 2016; Cadena et al. 2018).
 * **Klingenberg (2016) Allometric Slope Homogeneity:**
   I evaluate slope homogeneity across ruler-calibrated anchors (`is_calibrated_mm == TRUE`) through multivariate interaction models in `RRPP::lm.rrpp(..., weights = eff_weight)`:
   $$\mathbf{y}_{\text{shape}} = \beta_0 + \beta_1 \log_{10}(\text{CS}) + \boldsymbol{\gamma}_{\text{species}} + \boldsymbol{\delta} (\log_{10}(\text{CS}) \times \boldsymbol{\gamma}_{\text{species}}) + \boldsymbol{\epsilon}$$
   If $p \ge 0.01$, I apply common-slope correction: $\mathbf{y}_{\text{corrected}} = \mathbf{y}_{\text{shape}} - \hat{\beta}_1 (\log_{10}(\text{CS}) - \overline{\log_{10}(\text{CS})})$.
-* **Subspace Selection and Dual-Track CDA:**
-  I apply Horn's Parallel Analysis capped by Williams & Titus (1988) $P_{\max} = \lfloor (N_{\min,\text{anchor}} - 1) / 3 \rfloor$. I evaluate honest LOOCV on weighted Ledoit-Wolf shrinkage CDA. Track 1 evaluates Unsupervised GMM Morphotypes (`Morphotype_K1..Kn`) via Kass & Raftery (1995) $2\Delta\text{BIC}$ thresholds ($> 6$ strong, $> 10$ very strong). Track 2 evaluates Supervised EPA Level III Ecoregion CDA biplots and MANOVA with Benjamini-Hochberg FDR.
+* **Subspace Selection, Geographic Range-Envelope Priors and Dual-Track CDA:**
+  I apply Horn's Parallel Analysis capped by Williams & Titus (1988) $P_{\max} = \lfloor (N_{\min,\text{anchor}} - 1) / 3 \rfloor$. I evaluate honest LOOCV on weighted Ledoit-Wolf shrinkage CDA (Ledoit & Wolf 2004), incorporating soft geographic range-envelope log-priors so allopatric congeners outside a specimen's Haversine and EPA Level III ecoregion envelope are down-weighted during posterior classification. Track 1 evaluates Unsupervised GMM Morphotypes (`Morphotype_K1..Kn`) via Kass & Raftery (1995) $2\Delta\text{BIC}$ thresholds ($> 6$ strong, $> 10$ very strong). Track 2 evaluates Supervised EPA Level III Ecoregion CDA biplots and MANOVA with Benjamini-Hochberg FDR.
+* **Open-Set Recognition (OSR) Class-Conditional Mahalanobis Novelty Scoring:**
+  Closed-set discriminant posteriors force every specimen into a training taxon even when a sheet belongs to an unmodeled congener or novel lineage. To relax the closed-world assumption, I compute class-conditional Mahalanobis distances in regularized morphospace across all candidate congeners (Scheirer et al. 2013; Lee et al. 2018; Geng et al. 2020), exporting the minimum congener distance `min_congener_mahal_d2`, closest congener `min_congener_taxon`, upper-tail chi-square novelty probability `open_set_novelty_p`, and confident label-noise flag `is_confident_label_noise` to `morphometric_flags.csv`.
 
 ---
 
@@ -157,10 +161,10 @@ In Phase 6, I synthesize all lines of evidence. If for say, a specimen displays 
   achieving high voucher completion across georeferenced and non-georeferenced sheets.
 * **Taxon-Agnostic 5-Stage Hierarchical Decision Matrix:**
   - **Rule A (Nomenclatural Type Override):** I never reassign type specimens (`recommended_determination = given_sp`), nor route them to `Misidentification_Reassign`, `Hybrid_Introgressant`, or `Putative_Cryptic_Species`. Concordant types receive `taxonomic_status_call = "Confirmed_Type_Control"` (`RESOLVED`). Cross-modal divergence triggers `taxonomic_status_call = "Type_Synonymy_Candidate"` (`CRITICAL`).
-  - **Rule B (Type-Control Reassignment):** When non-types deviate from type baselines ($D^2_{\text{type}} > \chi^2_{0.95}$, $z_{\text{type}} > 2.0$) with $\ge 2$ type streams agreeing on $T_{\text{alt}} \ne \text{given\_sp}$ without classifier contradiction, I reassign them to $T_{\text{alt}}$.
-  - **Rule C (*Sensu Stricto* Typical Morphotype Locking):** Specimens in typical morphotype GMM cluster ($c^*$) with $z_{\text{type}} \le 2.0$ are locked as `Confirmed_Species` (*sensu stricto*).
+  - **Rule B and Stage 1 Precedence (`Misidentification_Reassign` and Open-Set Congener Reassignment):** I evaluate Stage 1 (`Misidentification_Reassign`) strictly before Stage 2 (`Hybrid_Introgressant`) and Stage 3 (`Putative_Cryptic_Species`), so misidentified sympatric congeners are reassigned before any cryptic-species gate is tested. When non-types deviate from type baselines ($D^2_{\text{type}} > \chi^2_{0.95}$, $z_{\text{type}} > 2.0$) with $\ge 2$ type streams agreeing on $T_{\text{alt}} \ne \text{given\_sp}$, or when Open-Set Recognition (`min_congener_mahal_d2` $\le \chi^2_{0.95, P}$ for `min_congener_taxon` $\ne \text{given\_sp}$) and cross-modal evidence corroborate a known congener, I reassign the determination to that congener.
+  - **Rule C (*Sensu Stricto* Typical Morphotype Locking):** Specimens in the canonically relabeled typical morphotype GMM cluster ($c^* = 1$) with $z_{\text{type}} \le 2.0$ are locked as `Confirmed_Species` (*sensu stricto*).
   - **Stage 2 (`Hybrid_Introgressant`):** Intermediate CDA posteriors ($0.35 \le P_1 \le 0.65$, $P_2 \ge 0.25$) in sympatry, resolving parents via `cda_second_taxon`.
-  - **Stage 3 (`Putative_Cryptic_Species`):** Requires `morph_tier_source == "Tier_1_Pure"`, GMM $2\Delta\text{BIC} > 6$, alongside independent edaphic or phenological divergence.
+  - **Stage 3 (`Putative_Cryptic_Species` and Population-Cohesion Lineage Gate):** To prevent isolated taphonomic outliers or local population structure from being over-split into spurious species, I enforce a **Population-Cohesion Lineage Gate** (`cryptic_cluster_cohesion_pass`; Carstens et al. 2013; Sukumaran & Knowles 2017; Fišer et al. 2018). Diagnosing a `Putative_Cryptic_Species` requires `morph_tier_source == "Tier_1_Pure"`, non-core GMM membership ($k \ne c^*$) with very strong Bayes factor support ($2\Delta\text{BIC} \ge 10$), open-set exclusion from all known sympatric congeners ($D^2_{\text{Mahal}} > \chi^2_{0.95, P}$, `open_set_novelty_p` $< 0.05$), population cohesion of $\ge 5$ independent collection events (`exsiccatae_key`) spanning $\ge 2$ collectors or herbaria within the candidate cluster, and cohesive ecological or allochronic divergence. Non-core morphotype vouchers failing `cryptic_cluster_cohesion_pass` route to `Subspecies_Ecotype` or `Ecophenotypic_Plasticity`.
   - **Stage 4 (`Subspecies_Ecotype` vs. `Ecophenotypic_Plasticity`):** Evaluates cohesive geographic or edaphic divergence for ecotypes versus overlapping envelopes for plasticity.
 * **Synthesis Figures and Curatorial Reports:**
   I generate integrative multi-panel plates (`pub_synthesis_plates.R`; `fig06`) and produce actionable curation summaries (`Packera_Taxonomic_Revision_Summary.md`, `curation_triage`).
@@ -197,27 +201,42 @@ In Phase 7, I scale beyond single-species comparisons to delimit species complex
 1. Ayub, M. S., et al. 2026. Topological shape descriptors and ECT in plant phenomics. *bioRxiv* https://doi.org/10.64898/2026.04.13.718293
 2. Barkley, T. M. 1988. Variation among Senecioneae in North America. *Brittonia* 40: 211 to 221.
 3. Broennimann, O., et al. 2012. Measuring ecological niche overlap. *Glob Ecol Biogeogr* 21: 481 to 497.
-4. Claude, J. 2008. *Morphometrics with R*. Springer, New York.
-5. Collyer, M. L., & D. C. Adams. 2018. RRPP: Linear models via residual randomization. *Methods Ecol Evol* 9: 1772 to 1779.
-6. Daru, B. H., et al. 2018. Widespread sampling biases in herbaria. *New Phytol* 217: 939 to 955.
-7. Dawid, A. P., & A. M. Skene. 1979. Maximum likelihood estimation of observer error-rates. *Appl Stat* 28: 20 to 28.
-8. de Queiroz, K. 2007. Species concepts and species delimitation. *Syst Biol* 56: 879 to 886.
-9. Hirzel, A. H., et al. 2006. Evaluating ability of habitat suitability models to predict presence. *Ecol Modell* 199: 142 to 152.
-10. Kass, R. E., & A. E. Raftery. 1995. Bayes Factors. *JASA* 90: 773 to 795.
-11. Klingenberg, C. P. 2016. Size, shape, and form: concepts of allometry in geometric morphometrics. *Dev Genes Evol* 226: 113 to 137.
-12. Kowal, R. R. 1975. Systematics of *Senecio aureus* and allied species on Gaspé Peninsula. *Mem Torrey Bot Club* 23: 1 to 113.
-13. Kuhl, F. P., & C. R. Giardina. 1982. Elliptic Fourier features of a closed contour. *Comput Graph Image Process* 18: 236 to 258.
-14. Omernik, J. M., & G. E. Griffith. 2014. Ecoregions of conterminous United States. *Environ Manage* 54: 1249 to 1266.
-15. Padial, J. M., et al. 2010. The integrative future of taxonomy. *Front Zool* 7: 16.
-16. Phillips, S. J., et al. 2009. Sample selection bias in Maxent. *Ecography* 32: 181 to 197.
-17. Phillips, S. J., et al. 2017. Opening the black box: open-source release of Maxent. *Ecography* 40: 887 to 893.
-18. Scrucca, L., & A. E. Raftery. 2018. clustvarsel: Variable selection for model-based clustering. *J Stat Softw* 84: 1 to 28.
-19. Šlenker, M., et al. 2022. MorphoTools2: multivariate morphometric analysis. *Bioinformatics* 38: 2954 to 2955.
-20. Trock, D. K. 2006. *Packera*. In *Flora of North America*, Vol. 20, 570 to 602. Oxford University Press, New York.
-21. Turland, N. J., et al. 2018. *International Code of Nomenclature (Shenzhen Code)*. Regnum Veg 159. Koeltz, Glashütten.
-22. Valavi, R., et al. 2019. blockCV: Spatially separated folds for k-fold cross-validation. *Methods Ecol Evol* 10: 225 to 232.
-23. Warren, D. L., et al. 2008. Environmental niche equivalency versus conservatism. *Evolution* 62: 2868 to 2883.
-24. Weakley, A. S. 2026. *Flora of the Southeastern United States*. UNC Herbarium (NCU), Chapel Hill.
-25. Weaver, W. N. 2026. LeafMachine3: Automated machine vision for herbarium trait phenotyping. https://github.com/Gene-Weaver/LeafMachine3
-26. Williams, B. K., & K. Titus. 1988. Sampling stability in discriminant analysis. *Ecology* 69: 1275 to 1285.
-27. Wright, M. N., & A. Ziegler. 2017. ranger: Fast implementation of random forests. *J Stat Softw* 77: 1 to 17.
+4. Cadena, C. D., F. Zapata, & I. Jiménez. 2018. Issues and perspectives in species delimitation using phenotypic data: Atlantean evolution in Darwin's finches. *Syst Biol* 67: 181 to 194.
+5. Carstens, B. C., T. A. Pelletier, N. M. Reid, & J. D. Satler. 2013. How to fail at species delimitation. *Mol Ecol* 22: 4369 to 4383.
+6. Claude, J. 2008. *Morphometrics with R*. Springer, New York.
+7. Collyer, M. L., & D. C. Adams. 2018. RRPP: Linear models via residual randomization. *Methods Ecol Evol* 9: 1772 to 1779.
+8. Daru, B. H., et al. 2018. Widespread sampling biases in herbaria. *New Phytol* 217: 939 to 955.
+9. Dawid, A. P., & A. M. Skene. 1979. Maximum likelihood estimation of observer error-rates. *Appl Stat* 28: 20 to 28.
+10. de Queiroz, K. 2007. Species concepts and species delimitation. *Syst Biol* 56: 879 to 886.
+11. Fišer, C., C. T. Robinson, & F. Malard. 2018. Cryptic species as a window into the shift of the species concept. *Mol Ecol* 27: 613 to 635.
+12. Gelman, A., & J. Hill. 2007. *Data Analysis Using Regression and Multilevel/Hierarchical Models*. Cambridge University Press, Cambridge.
+13. Geng, C., S. J. Huang, & S. Chen. 2020. Recent advances in open set recognition: a survey. *IEEE Trans Pattern Anal Mach Intell* 43: 3614 to 3631.
+14. Goodwin, Z. A., D. J. Harris, D. Filer, J. R. I. Wood, & R. W. Scotland. 2015. Widespread mistaken identity in tropical plant collections. *Curr Biol* 25: R1066 to R1067.
+15. Hirzel, A. H., et al. 2006. Evaluating ability of habitat suitability models to predict presence. *Ecol Modell* 199: 142 to 152.
+16. Kass, R. E., & A. E. Raftery. 1995. Bayes Factors. *JASA* 90: 773 to 795.
+17. Klingenberg, C. P. 2016. Size, shape, and form: concepts of allometry in geometric morphometrics. *Dev Genes Evol* 226: 113 to 137.
+18. Kowal, R. R. 1975. Systematics of *Senecio aureus* and allied species on Gaspé Peninsula. *Mem Torrey Bot Club* 23: 1 to 113.
+19. Kuhl, F. P., & C. R. Giardina. 1982. Elliptic Fourier features of a closed contour. *Comput Graph Image Process* 18: 236 to 258.
+20. Ledoit, O., & M. Wolf. 2004. A well-conditioned estimator for large-dimensional covariance matrices. *J Multivar Anal* 88: 365 to 411.
+21. Lee, K., K. Lee, H. Lee, & J. Shin. 2018. A simple unified framework for detecting out-of-distribution samples and adversarial attacks. *Adv Neural Inf Process Syst* 31: 7167 to 7177.
+22. Maldonado, C., et al. 2015. Estimating species diversity and distribution in the era of Big Data: to what extent can we trust public databases? *Glob Ecol Biogeogr* 24: 973 to 984.
+23. Northcutt, C. G., L. Jiang, & I. L. Chuang. 2021. Confident learning: estimating uncertainty in dataset labels. *J Artif Intell Res* 70: 1373 to 1411.
+24. Omernik, J. M., & G. E. Griffith. 2014. Ecoregions of conterminous United States. *Environ Manage* 54: 1249 to 1266.
+25. Padial, J. M., et al. 2010. The integrative future of taxonomy. *Front Zool* 7: 16.
+26. Phillips, S. J., et al. 2009. Sample selection bias in Maxent. *Ecography* 32: 181 to 197.
+27. Phillips, S. J., et al. 2017. Opening the black box: open-source release of Maxent. *Ecography* 40: 887 to 893.
+28. Raykar, V. C., et al. 2010. Learning from crowds. *J Mach Learn Res* 11: 1297 to 1322.
+29. Rousseeuw, P. J., & K. Van Driessen. 1999. A fast algorithm for the minimum covariance determinant estimator. *Technometrics* 41: 212 to 223.
+30. Scheirer, W. J., A. de Rezende Rocha, A. Sapkota, & T. E. Boult. 2013. Toward open set recognition. *IEEE Trans Pattern Anal Mach Intell* 35: 1757 to 1772.
+31. Scrucca, L., M. Fop, T. B. Murphy, & A. E. Raftery. 2016. mclust 5: clustering, classification and density estimation using Gaussian finite mixture models. *R J* 8: 289 to 317.
+32. Scrucca, L., & A. E. Raftery. 2018. clustvarsel: Variable selection for model-based clustering. *J Stat Softw* 84: 1 to 28.
+33. Šlenker, M., et al. 2022. MorphoTools2: multivariate morphometric analysis. *Bioinformatics* 38: 2954 to 2955.
+34. Sukumaran, J., & L. L. Knowles. 2017. Multispecies coalescent delimits structure, not species. *Proc Natl Acad Sci USA* 114: 1607 to 1612.
+35. Trock, D. K. 2006. *Packera*. In *Flora of North America*, Vol. 20, 570 to 602. Oxford University Press, New York.
+36. Turland, N. J., et al. 2018. *International Code of Nomenclature (Shenzhen Code)*. Regnum Veg 159. Koeltz, Glashütten.
+37. Valavi, R., et al. 2019. blockCV: Spatially separated folds for k-fold cross-validation. *Methods Ecol Evol* 10: 225 to 232.
+38. Warren, D. L., et al. 2008. Environmental niche equivalency versus conservatism. *Evolution* 62: 2868 to 2883.
+39. Weakley, A. S. 2026. *Flora of the Southeastern United States*. UNC Herbarium (NCU), Chapel Hill.
+40. Weaver, W. N. 2026. LeafMachine3: Automated machine vision for herbarium trait phenotyping. https://github.com/Gene-Weaver/LeafMachine3
+41. Williams, B. K., & K. Titus. 1988. Sampling stability in discriminant analysis. *Ecology* 69: 1275 to 1285.
+42. Wright, M. N., & A. Ziegler. 2017. ranger: Fast implementation of random forests. *J Stat Softw* 77: 1 to 17.

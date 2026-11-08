@@ -1194,11 +1194,58 @@ _MISSING_IDENTIFIED_BY_TOKENS: Set[str] = {
     "", "none", "nan", "null", "na", "n/a", "<na>",
     "unknown", "unassigned", "unspecified", "unrecorded", "not recorded", "not evident",
 }
+_NON_PERSON_DETERMINATION_TOKENS: Tuple[str, ...] = (
+    "nomenclatural adjustment",
+    "nomenclature update",
+    "nomenclatural update",
+    "taxonomic update",
+    "taxonomic adjustment",
+    "synonymy update",
+    "folder update",
+    "database import",
+    "batch update",
+    "sernec",
+    "gbif",
+    "idigbio",
+    "unverified",
+    "unknown",
+    "anonymous",
+    "leg. ign",
+    "s.n.",
+)
+_AMBIGUOUS_COMMON_SURNAMES: Set[str] = {
+    "anderson", "baker", "bell", "brooks", "brown", "bush", "campbell", "carter",
+    "chapman", "clark", "collins", "cook", "cooper", "cox", "davis", "diamond",
+    "duncan", "evans", "fisher", "freeman", "gray", "green", "hall", "hill",
+    "horn", "howard", "jackson", "james", "johnson", "jones", "kelly", "king",
+    "lee", "lewis", "long", "martin", "miller", "mitchell", "moore", "morgan",
+    "morris", "murphy", "nelson", "parker", "perry", "phillips", "powell", "price",
+    "reed", "richardson", "roberts", "robinson", "rogers", "ross", "russell",
+    "scott", "smith", "stewart", "taylor", "thomas", "thompson", "turner", "walker",
+    "ward", "watson", "white", "williams", "wilson", "wood", "wright", "young",
+}
+PACKERA_SPECIALISTS: Set[str] = {
+    "barkley", "trock", "kowal", "weakley", "bain", "mahoney", "fuller",
+    "freeman", "cronquist", "greenman", "weber", "love", "löve",
+    "spellenberg", "pippen", "uttal", "fernald", "rydberg", "heller",
+    "kral", "godfrey", "sorrie", "nesom", "strother", "turner", "golden",
+}
 _COLLECTOR_REFERENCE_REGEX = re.compile(
     r"^(?:(?:id(?:entified)?|det(?:ermined)?|annot(?:ated)?|ver(?:ified)?|conf(?:irmed)?)\.?\s*(?:by\s+)?)?"
     r"(?:the\s+)?(?:collector(?:s)?|same(?:\s+as\s+collector(?:s)?)?)\.?$",
     re.IGNORECASE,
 )
+
+
+def _has_non_person_determination_token(val: Optional[Any]) -> bool:
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return False
+    if pd is not None and pd.isna(val):
+        return False
+    s_low = str(val).strip().lower()
+    if not s_low:
+        return False
+    return any(tok in s_low for tok in _NON_PERSON_DETERMINATION_TOKENS)
 
 
 def _is_missing_identified_by(val: Optional[Any]) -> bool:
@@ -1215,6 +1262,8 @@ def _is_explicit_collector_reference(val: Optional[Any]) -> bool:
 
 
 def _should_fallback_to_collector(identified_by_val: Optional[Any]) -> bool:
+    if _has_non_person_determination_token(identified_by_val):
+        return False
     return _is_missing_identified_by(identified_by_val) or _is_explicit_collector_reference(identified_by_val)
 
 
@@ -1228,6 +1277,7 @@ def normalize_determiner_surnames(identified_by_raw: Optional[Any]) -> List[str]
         or (isinstance(identified_by_raw, float) and math.isnan(identified_by_raw))
         or _is_missing_identified_by(identified_by_raw)
         or _is_explicit_collector_reference(identified_by_raw)
+        or _has_non_person_determination_token(identified_by_raw)
     ):
         return []
     raw = str(identified_by_raw).strip()
@@ -1369,25 +1419,35 @@ def _is_verified_type_status(type_status_raw: Optional[Any]) -> Tuple[bool, str]
     return (t_rank >= 1), t_lbl
 
 
-def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
+def discover_corpus_authorities(
+    df: pd.DataFrame,
+    min_gold_determinations: Optional[int] = None,
+    min_gold_herbaria: int = 3,
+    min_herbarium_vouchers: int = 10,
+) -> Tuple[Set[str], Set[str]]:
     """
     Layer 3 Authority Engine: Discovers empirical taxonomic specialists and regional
     research herbaria directly from the assembled Darwin Core voucher corpus.
 
     Rules:
       - Dynamic Specialist Discovery (`dynamic_specialists`):
-        1. Determiner (`identifiedBy`) has identified >= 5 specimens of a given Packera
-           taxon across >= 3 distinct `institutionCode`s, OR
+        1. Determiner (`identifiedBy` only, never falling back to `recordedBy` or
+           matching `_NON_PERSON_DETERMINATION_TOKENS`) has identified >= `min_gold_determinations`
+           specimens across >= `min_gold_herbaria` distinct `institutionCode`s (and in full
+           corpora with >= 100 rows, either >= 4 distinct Packera species or >= 1 type specimen), OR
         2. Determiner has explicitly annotated >= 1 verified type specimen (giving +2
            weight to type determinations, excluding collector-reference fallbacks) AND
            reaches weighted count >= 3 across >= 2 distinct `institutionCode`s, AND
-        3. Determiner is NOT flagged with > 25% cross-duplicate disagreement across
-           shared `exsiccatae_key` duplicate groups when >= 2 duplicate groups exist.
+        3. Bare surnames in `_AMBIGUOUS_COMMON_SURNAMES` are excluded unless already in
+           `PACKERA_SPECIALISTS` or backed by >= 1 verified type determination, AND
+        4. Determiner has cross-duplicate disagreement rate <= 15% across shared
+           `exsiccatae_key` duplicate groups when >= 2 duplicate groups exist.
       - Dynamic Regional Research Herbarium Discovery (`dynamic_herbaria`):
         1. `institutionCode` holds >= 1 verified type specimen for target Packera taxa
            AND >= 5 total sheets in the corpus, OR
         2. `institutionCode` ranks in the top quartile of institutional holdings
-           (>= 10 curated sheets) with >= 70% determiner-attributed records for any harvested taxon.
+           (>= `min_herbarium_vouchers` curated sheets) with >= 70% determiner-attributed
+           records for any harvested taxon.
 
     Returns:
         Tuple[Set[str], Set[str]]: (dynamic_specialists, dynamic_herbaria)
@@ -1396,6 +1456,11 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
     dynamic_herbaria: Set[str] = set()
     if df is None or df.empty:
         return dynamic_specialists, dynamic_herbaria
+
+    is_large_corpus = len(df) >= 100
+    eff_min_det = (15 if is_large_corpus else 5) if min_gold_determinations is None else int(min_gold_determinations)
+    eff_min_herbs = max(1, int(min_gold_herbaria))
+    eff_min_herb_vouchers = max(1, int(min_herbarium_vouchers))
 
     id_col = (
         "_raw_identified_by"
@@ -1420,6 +1485,8 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
     det_taxon_insts: Dict[Tuple[str, str], Set[str]] = {}
     det_total_counts: Dict[str, int] = {}
     det_total_insts: Dict[str, Set[str]] = {}
+    det_species: Dict[str, Set[str]] = {}
+    det_type_hits: Dict[str, int] = {}
     det_type_annotated: Set[str] = set()
 
     # Track institutional holdings, type holdings, and determiner-attribution rates
@@ -1430,7 +1497,7 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
 
     from scripts.core.harvester import _extract_canonical_binomial, standardize_packera_taxon
 
-    # Track duplicate groups for cross-duplicate disagreement auditing (> 25% threshold)
+    # Track duplicate groups for cross-duplicate disagreement auditing (<= 15% threshold)
     group_entries: Dict[str, List[Tuple[str, List[str], bool]]] = {}
 
     for _, row in df.iterrows():
@@ -1449,16 +1516,16 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
 
         raw_id = row.get(id_col) if id_col else ""
         is_explicit_col_ref = _is_explicit_collector_reference(raw_id)
+        is_non_person_id = _has_non_person_determination_token(raw_id)
         has_explicit_det_str = (
             raw_id is not None
             and not (pd is not None and pd.isna(raw_id))
             and bool(str(raw_id).strip())
             and not is_explicit_col_ref
+            and not is_non_person_id
         )
-        if is_explicit_col_ref and "recordedBy" in row:
-            surnames = normalize_determiner_surnames(row.get("recordedBy"))
-        else:
-            surnames = normalize_determiner_surnames(raw_id)
+        # Never fall back to recordedBy when counting determinations in discover_corpus_authorities
+        surnames = normalize_determiner_surnames(raw_id) if has_explicit_det_str else []
         has_attributed_det = len(surnames) > 0
 
         raw_type = row.get(type_col) if type_col else None
@@ -1470,6 +1537,7 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
             if has_explicit_det_str:
                 for s_name in surnames:
                     det_type_annotated.add(s_name)
+                    det_type_hits[s_name] = det_type_hits.get(s_name, 0) + 1
 
         if valid_inst:
             inst_total_sheets[inst] = inst_total_sheets.get(inst, 0) + 1
@@ -1485,6 +1553,7 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
                 dt_key = (s_name, std_sp)
                 det_taxon_counts[dt_key] = det_taxon_counts.get(dt_key, 0) + det_weight
                 det_total_counts[s_name] = det_total_counts.get(s_name, 0) + det_weight
+                det_species.setdefault(s_name, set()).add(std_sp)
                 if valid_inst:
                     det_taxon_insts.setdefault(dt_key, set()).add(inst)
                     det_total_insts.setdefault(s_name, set()).add(inst)
@@ -1530,28 +1599,35 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
                 if is_conflicted_group:
                     det_conflicted_groups.setdefault(s_name, set()).add(dup_key)
 
-    for dt_key, count in det_taxon_counts.items():
-        s_name = dt_key[0]
+    def _passes_specialist_gates(s_name: str) -> bool:
+        type_hits = det_type_hits.get(s_name, 0)
+        if s_name in _AMBIGUOUS_COMMON_SURNAMES and s_name not in PACKERA_SPECIALISTS and type_hits < 1:
+            return False
         dup_groups = len(det_dup_groups.get(s_name, set()))
         conflicted_groups = len(det_conflicted_groups.get(s_name, set()))
-        if dup_groups >= 2 and (conflicted_groups / float(dup_groups)) > 0.25:
+        if dup_groups >= 2 and (conflicted_groups / float(dup_groups)) > 0.15:
+            return False
+        if is_large_corpus and type_hits < 1 and len(det_species.get(s_name, set())) < 4:
+            return False
+        return True
+
+    for dt_key, count in det_taxon_counts.items():
+        s_name = dt_key[0]
+        if not _passes_specialist_gates(s_name):
             continue
         inst_set = det_taxon_insts.get(dt_key, set())
-        if (count >= 5 and len(inst_set) >= 3) or (
+        if (count >= eff_min_det and len(inst_set) >= eff_min_herbs) or (
             s_name in det_type_annotated and count >= 3 and len(inst_set) >= 2
         ):
             dynamic_specialists.add(s_name)
 
-    for s_name in det_type_annotated:
-        if s_name in dynamic_specialists:
+    for s_name, tot_count in det_total_counts.items():
+        if s_name in dynamic_specialists or not _passes_specialist_gates(s_name):
             continue
-        dup_groups = len(det_dup_groups.get(s_name, set()))
-        conflicted_groups = len(det_conflicted_groups.get(s_name, set()))
-        if dup_groups >= 2 and (conflicted_groups / float(dup_groups)) > 0.25:
-            continue
-        tot_count = det_total_counts.get(s_name, 0)
         tot_insts = det_total_insts.get(s_name, set())
-        if tot_count >= 3 and len(tot_insts) >= 2:
+        if (tot_count >= eff_min_det and len(tot_insts) >= eff_min_herbs) or (
+            s_name in det_type_annotated and tot_count >= 3 and len(tot_insts) >= 2
+        ):
             dynamic_specialists.add(s_name)
 
     if inst_total_sheets:
@@ -1560,7 +1636,7 @@ def discover_corpus_authorities(df: pd.DataFrame) -> Tuple[Set[str], Set[str]]:
                 dynamic_herbaria.add(inst)
         q75_holdings = float(np.percentile(list(inst_total_sheets.values()), 75))
         for inst, total_n in inst_total_sheets.items():
-            if total_n >= 10 and total_n >= q75_holdings:
+            if total_n >= eff_min_herb_vouchers and total_n >= q75_holdings:
                 min_sp_sheets = min(3, total_n)
                 for (i_code, sp_name), sp_total in inst_taxon_totals.items():
                     if i_code == inst and sp_total >= min_sp_sheets:
@@ -1608,33 +1684,51 @@ def parse_determiner_tier(
     locality = "" if (locality_raw is None or (isinstance(locality_raw, float) and math.isnan(locality_raw))) else str(locality_raw).strip()
     habitat = "" if (habitat_raw is None or (isinstance(habitat_raw, float) and math.isnan(habitat_raw))) else str(habitat_raw).strip()
 
-    explicit_collector = _is_explicit_collector_reference(identified_by)
-    fallback_to_collector = _should_fallback_to_collector(identified_by)
+    type_rank, type_status_clean = classify_nomenclatural_type_rank(type_status)
+    is_type = type_rank > 0
 
-    if explicit_collector and recorded_by:
+    is_non_person_det = _has_non_person_determination_token(identified_by)
+    has_collector_ref = False if is_non_person_det else _is_explicit_collector_reference(identified_by)
+    has_explicit_det = bool(
+        not is_non_person_det
+        and identified_by
+        and not _is_missing_identified_by(identified_by)
+        and not has_collector_ref
+    )
+    fallback_to_collector = (
+        False
+        if (is_non_person_det and type_rank <= 0)
+        else _should_fallback_to_collector(identified_by)
+    )
+
+    if has_collector_ref and recorded_by:
         determiner_raw = recorded_by
-    elif identified_by and not _is_missing_identified_by(identified_by):
+    elif has_explicit_det:
         determiner_raw = identified_by
     else:
         determiner_raw = history if history else (recorded_by if recorded_by else identified_by)
 
-    # Match SPECIALIST_PATTERNS strictly against determiner/annotation fields unless
-    # identified_by is blank/missing or explicitly references the collector
+    # Match core PACKERA_SPECIALISTS (SPECIALIST_PATTERNS) against determiner/annotation fields;
+    # only include recorded_by when fallback_to_collector is True (blank identified_by or collector ref,
+    # and never when identified_by is a non-person adjustment note on a non-type).
+    eff_id_for_specialist = "" if is_non_person_det else identified_by
+    eff_hist_for_specialist = "" if _has_non_person_determination_token(history) else history
     determiner_audit_text = (
-        f"{type_status} | {identified_by} | {history} | {recorded_by}"
+        f"{type_status} | {eff_id_for_specialist} | {eff_hist_for_specialist} | {recorded_by}"
         if fallback_to_collector
-        else f"{type_status} | {identified_by} | {history}"
+        else f"{type_status} | {eff_id_for_specialist} | {eff_hist_for_specialist}"
     )
 
-    is_type, type_status_clean = _is_verified_type_status(type_status)
-
     is_specialist = False
-    for pattern in SPECIALIST_PATTERNS:
-        if re.search(pattern, determiner_audit_text, re.IGNORECASE):
-            is_specialist = True
-            break
+    if not (is_non_person_det and not eff_hist_for_specialist and type_rank <= 0):
+        for pattern in SPECIALIST_PATTERNS:
+            if re.search(pattern, determiner_audit_text, re.IGNORECASE):
+                is_specialist = True
+                break
 
-    if not is_specialist and dynamic_specialists:
+    # Dynamic specialists and protologue authors apply ONLY to explicit determinations/history,
+    # NEVER via collector fallback (recordedBy alone or collector reference).
+    if not is_specialist and dynamic_specialists and (has_explicit_det or eff_hist_for_specialist):
         dyn_spec_set: Set[str] = set()
         for item in dynamic_specialists:
             if item is None:
@@ -1644,7 +1738,7 @@ def parse_determiner_tier(
                 dyn_spec_set.add(s_tok)
                 dyn_spec_set.add(_fold_ascii(s_tok))
         if dyn_spec_set:
-            det_sources = [identified_by, history] + ([recorded_by] if fallback_to_collector else [])
+            det_sources = [eff_id_for_specialist if has_explicit_det else "", eff_hist_for_specialist]
             det_surnames: Set[str] = set()
             for src in det_sources:
                 det_surnames.update(normalize_determiner_surnames(src))
@@ -1665,10 +1759,11 @@ def parse_determiner_tier(
     dyn_herb_set = {str(h).strip().upper() for h in dynamic_herbaria if h} if dynamic_herbaria else set()
     is_major_herbarium = (institution in MAJOR_HERBARIA_CODES) or (institution in dyn_herb_set)
     has_rich_locality = len(locality) > 10 or len(habitat) > 5
-    eff_silver_det = recorded_by if (explicit_collector and recorded_by) else identified_by
+    eff_silver_det = "" if is_non_person_det else (recorded_by if (has_collector_ref and recorded_by) else identified_by)
     has_determiner = bool(
         eff_silver_det
         and eff_silver_det.lower() not in GENERIC_DETERMINER_TOKENS
+        and not _has_non_person_determination_token(eff_silver_det)
         and len(normalize_determiner_surnames(eff_silver_det)) > 0
     )
 
@@ -1687,8 +1782,11 @@ def apply_corpus_authority_tiers(
     Applies the 3-Layer Dynamic Authority Engine across an assembled DataFrame:
       - Discovers corpus-level multi-herbarium specialists and dynamic regional herbaria.
       - Collects per-taxon protologue authors from Darwin Core `scientificName` / `species_raw`.
+      - Detects undated institutional batch transfers (>= 25 sheets at 1 institution across >= 10
+        collectors) and demotes non-type historical sheets collected by others from `Tier_1_Gold`
+        to `Tier_2_Silver` for out-of-sample screening.
       - Re-evaluates `determiner_tier` across all rows cleanly without downgrading pre-scored
-        rows whose `locality` / `habitat` columns were already omitted upon CSV persistence.
+        Silver rows whose `locality` / `habitat` columns were already omitted upon CSV persistence.
     """
     if df is None or df.empty:
         return df
@@ -1706,6 +1804,11 @@ def apply_corpus_authority_tiers(
 
     # Collect per-taxon protologue authors across the corpus + cached GBIF synonyms
     taxon_protologue_map: Dict[str, Set[str]] = {}
+    # Also tally (institutionCode, identifiedBy) batch statistics to detect undated institutional batch transfers
+    batch_voucher_counts: Dict[Tuple[str, str], int] = {}
+    batch_collectors: Dict[Tuple[str, str], Set[str]] = {}
+    batch_dates: Dict[Tuple[str, str], Set[str]] = {}
+
     for _, row in out.iterrows():
         raw_names_row = [
             row.get("scientificName"),
@@ -1722,10 +1825,38 @@ def apply_corpus_authority_tiers(
             if auths:
                 taxon_protologue_map.setdefault(std_sp, set()).update(auths)
 
+        inst_r = row.get("institutionCode")
+        inst_key = "" if (inst_r is None or pd.isna(inst_r)) else str(inst_r).strip().upper()
+        id_r = row.get("_raw_identified_by") if "_raw_identified_by" in out.columns else row.get("identifiedBy")
+        id_key = "" if (id_r is None or pd.isna(id_r)) else re.sub(r"\s+", " ", str(id_r).strip().lower())
+        if (
+            inst_key
+            and inst_key not in _INVALID_INSTITUTION_CODES
+            and id_key
+            and not _is_missing_identified_by(id_key)
+            and not _is_explicit_collector_reference(id_key)
+            and not _has_non_person_determination_token(id_key)
+        ):
+            b_key = (inst_key, id_key)
+            batch_voucher_counts[b_key] = batch_voucher_counts.get(b_key, 0) + 1
+            rec_r = row.get("recordedBy")
+            col_norm = normalize_collector("" if (rec_r is None or pd.isna(rec_r)) else str(rec_r))
+            if col_norm and col_norm != "unknown":
+                batch_collectors.setdefault(b_key, set()).add(col_norm)
+            dt_id_r = row.get("_raw_date_identified") if "_raw_date_identified" in out.columns else row.get("dateIdentified")
+            dt_id_str = "" if (dt_id_r is None or pd.isna(dt_id_r)) else str(dt_id_r).strip()
+            if dt_id_str and dt_id_str.lower() not in {"none", "nan", "null", "na", "n/a", "unknown"}:
+                batch_dates.setdefault(b_key, set()).add(dt_id_str)
+
+    flagged_batch_keys: Set[Tuple[str, str]] = {
+        b_key
+        for b_key, v_cnt in batch_voucher_counts.items()
+        if v_cnt >= 25 and len(batch_collectors.get(b_key, set())) >= 10
+    }
+
     has_locality_cols = any(
         c in out.columns for c in ("_raw_locality", "locality", "verbatimLocality", "_raw_habitat", "habitat")
     )
-    tier_rank_map = {"Tier_1_Gold": 3, "Tier_2_Silver": 2, "Tier_3_Bronze": 1}
 
     new_tiers: List[str] = []
     new_types: List[str] = []
@@ -1765,9 +1896,39 @@ def apply_corpus_authority_tiers(
         ex_gold = str(row.get("exsiccatae_gold_taxon", "") if not pd.isna(row.get("exsiccatae_gold_taxon", "")) else "").strip()
         if prev_tier == "Tier_1_Gold" and ex_gold and std_sp == ex_gold:
             tier_eval = "Tier_1_Gold"
-        elif not has_locality_cols and prev_tier in tier_rank_map:
-            if tier_rank_map[tier_eval] < tier_rank_map[prev_tier]:
-                tier_eval = prev_tier
+        elif not has_locality_cols and prev_tier == "Tier_2_Silver" and tier_eval == "Tier_3_Bronze":
+            tier_eval = "Tier_2_Silver"
+
+        # Demote undated (or batch-identical-dated) institutional batch transfers on historical sheets
+        # collected by others (type_rank == 0) from Tier_1_Gold to Tier_2_Silver
+        if tier_eval == "Tier_1_Gold" and not (ex_gold and std_sp == ex_gold):
+            t_rank, _ = classify_nomenclatural_type_rank(t_raw)
+            if t_rank == 0:
+                inst_key = "" if (inst_raw is None or pd.isna(inst_raw)) else str(inst_raw).strip().upper()
+                id_key = "" if (id_raw is None or pd.isna(id_raw)) else re.sub(r"\s+", " ", str(id_raw).strip().lower())
+                b_key = (inst_key, id_key)
+                if b_key in flagged_batch_keys:
+                    dt_id_r = row.get("_raw_date_identified") if "_raw_date_identified" in out.columns else row.get("dateIdentified")
+                    dt_id_str = "" if (dt_id_r is None or pd.isna(dt_id_r)) else str(dt_id_r).strip()
+                    has_blank_or_batch_date = (
+                        not dt_id_str
+                        or dt_id_str.lower() in {"none", "nan", "null", "na", "n/a", "unknown"}
+                        or len(batch_dates.get(b_key, set())) <= 1
+                    )
+                    if has_blank_or_batch_date:
+                        det_surnames = set(normalize_determiner_surnames(id_raw))
+                        rec_str = "" if (rec_raw is None or pd.isna(rec_raw)) else str(rec_raw)
+                        rec_surnames = set(normalize_determiner_surnames(rec_str))
+                        rec_primary = normalize_collector(rec_str)
+                        if rec_primary and rec_primary != "unknown":
+                            rec_surnames.add(rec_primary)
+                        rec_ascii = _fold_ascii(rec_str)
+                        collector_matches_det = bool(det_surnames & rec_surnames) or any(
+                            bool(re.search(rf"(?<![a-zA-ZÀ-ÿ]){re.escape(ds)}(?![a-zA-ZÀ-ÿ])", rec_ascii))
+                            for ds in det_surnames
+                        )
+                        if not collector_matches_det:
+                            tier_eval = "Tier_2_Silver"
 
         new_tiers.append(tier_eval)
         prev_type = str(row.get("type_status", "") if not pd.isna(row.get("type_status", "")) else "").strip()

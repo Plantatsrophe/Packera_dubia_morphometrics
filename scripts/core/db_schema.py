@@ -316,6 +316,10 @@ def _build_master_view_ddl() -> str:
         om.nearest_type_morph_taxon AS nearest_type_morph_taxon,
         om.type_morph_concordance AS type_morph_concordance,
         om.is_typical_morphotype AS is_typical_morphotype,
+        om.min_congener_mahal_d2 AS min_congener_mahal_d2,
+        om.min_congener_taxon AS min_congener_taxon,
+        om.open_set_novelty_p AS open_set_novelty_p,
+        om.is_confident_label_noise AS is_confident_label_noise,
         -- Step 06 Spatial RF & Hopkins Phenology
         COALESCE(srf.lat_lon_key, ec.lat_lon_key) AS lat_lon_key,
         srf.rf_predicted_taxon AS rf_predicted_taxon,
@@ -370,6 +374,7 @@ def _build_master_view_ddl() -> str:
         ct.synthesis_triage_priority AS synthesis_triage_priority,
         ct.synthesis_triage_action AS synthesis_triage_action,
         ct.synthesis_rationale AS synthesis_rationale,
+        ct.cryptic_cluster_cohesion_pass AS cryptic_cluster_cohesion_pass,
         ct.is_completed_voucher AS is_completed_voucher
     FROM run_active_cohort rac
     LEFT JOIN vouchers v
@@ -755,6 +760,10 @@ def _build_schema_ddl() -> str:
         nearest_type_morph_taxon TEXT,
         type_morph_concordance REAL,
         is_typical_morphotype INTEGER,
+        min_congener_mahal_d2 REAL,
+        min_congener_taxon TEXT,
+        open_set_novelty_p REAL,
+        is_confident_label_noise INTEGER,
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
@@ -820,6 +829,7 @@ def _build_schema_ddl() -> str:
         synthesis_triage_priority TEXT,
         synthesis_triage_action TEXT,
         synthesis_rationale TEXT,
+        cryptic_cluster_cohesion_pass INTEGER,
         is_completed_voucher INTEGER,
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
@@ -871,6 +881,10 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("nearest_type_morph_taxon", "TEXT"),
             ("type_morph_concordance", "REAL"),
             ("is_typical_morphotype", "INTEGER"),
+            ("min_congener_mahal_d2", "REAL"),
+            ("min_congener_taxon", "TEXT"),
+            ("open_set_novelty_p", "REAL"),
+            ("is_confident_label_noise", "INTEGER"),
         ]
     ),
     "spatial_rf_predictions": tuple(
@@ -886,6 +900,9 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("primary_clim_predictors", "TEXT"),
             ("primary_edaph_predictors", "TEXT"),
         ]
+    ),
+    "curation_triage": (
+        ("cryptic_cluster_cohesion_pass", "INTEGER"),
     ),
     "environmental_cache": tuple(
         (
@@ -924,7 +941,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20260406
+PACKERA_SCHEMA_USER_VERSION: int = 20260407
 
 
 def _migrate_dynamic_schema_columns(

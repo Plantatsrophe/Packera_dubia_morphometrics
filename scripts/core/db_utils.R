@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20260406L
+PACKERA_SCHEMA_USER_VERSION <- 20260407L
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -110,7 +110,8 @@ PACKERA_DB_LOGICAL_COLS <- c(
   "substrate_specialist_flag",
   "piedmont_outcrop_specialist_flag", "multimodal_conflict_flag",
   "is_completed_voucher", "is_type_specimen", "has_empirical_type_anchor",
-  "is_typical_morphotype", "matches_type_lithology"
+  "is_typical_morphotype", "matches_type_lithology",
+  "is_confident_label_noise", "cryptic_cluster_cohesion_pass"
 )
 
 PACKERA_DB_HARMONIC_COLS <- as.vector(vapply(
@@ -211,8 +212,17 @@ PACKERA_DB_WC_BIO_COLS <- c(
         type_morph_mahal_d2 = "REAL",
         nearest_type_morph_taxon = "TEXT",
         type_morph_concordance = "REAL",
-        is_typical_morphotype = "INTEGER"
+        is_typical_morphotype = "INTEGER",
+        min_congener_mahal_d2 = "REAL",
+        min_congener_taxon = "TEXT",
+        open_set_novelty_p = "REAL",
+        is_confident_label_noise = "INTEGER"
       )
+    ))
+  }
+  if (identical(table_name, "curation_triage")) {
+    return(c(
+      cryptic_cluster_cohesion_pass = "INTEGER"
     ))
   }
   if (identical(table_name, "spatial_rf_predictions")) {
@@ -294,7 +304,7 @@ PACKERA_DB_WC_BIO_COLS <- c(
 .migrate_dynamic_sqlite_schema_r <- function(conn) {
   if (is.null(conn)) return(FALSE)
   changed <- FALSE
-  for (tbl in c("run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "environmental_cache")) {
+  for (tbl in c("run_active_cohort", "leaf_efa_harmonics", "otu_morphometrics", "spatial_rf_predictions", "curation_triage", "environmental_cache")) {
     if (isTRUE(.migrate_dynamic_sqlite_table_r(conn, tbl))) {
       changed <- TRUE
     }
@@ -443,8 +453,10 @@ connect_packera_db <- function(
         "bio19_precip_coldest_qtr", "dissection_index", "q25_solidity",
         "dissected_leaf_fraction", "basal_leaf_count", "is_type_specimen",
         "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance",
-        "is_typical_morphotype",
-        "type_edaphic_z_score", "nearest_type_niche_taxon", "matches_type_lithology"
+        "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon",
+        "open_set_novelty_p", "is_confident_label_noise",
+        "type_edaphic_z_score", "nearest_type_niche_taxon", "matches_type_lithology",
+        "cryptic_cluster_cohesion_pass"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE

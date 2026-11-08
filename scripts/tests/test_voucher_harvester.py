@@ -2481,7 +2481,88 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
             resolved = resolve_voucher_image_path("data/raw_vouchers/NCU_LEGACY_001.jpg", workspace_dir=tmp_p)
             self.assertEqual(resolved, webp_file)
 
+    def test_nomenclatural_adjustment_isolation_and_institutional_batch_demotion(self):
+        """
+        Verify that:
+          1. `identifiedBy = 'Nomenclatural Adjustment'` is not promoted to `Tier_1_Gold`
+             even when `recordedBy` contains a specialist surname.
+          2. Undated institutional batch determinations (`>= 25` sheets across `>= 10`
+             collectors at one herbarium) are demoted to `Tier_2_Silver` for historical
+             collectors while personal collections (`recordedBy == identifiedBy`) remain
+             `Tier_1_Gold`.
+        """
+        from scripts.core.taxonomy_authority import (
+            apply_corpus_authority_tiers,
+            parse_determiner_tier,
+        )
+
+        tier_adj, _, _ = parse_determiner_tier(
+            type_status_raw="None",
+            identified_by_raw="Nomenclatural Adjustment",
+            recorded_by_raw="D. K. Trock",
+            history_raw="",
+            institution_code_raw="NCU",
+            locality_raw="Orange County, Chapel Hill, rich mesic slope",
+            habitat_raw="Deciduous forest",
+            dynamic_specialists={"trock", "weakley"},
+            dynamic_herbaria={"NCU"},
+        )
+        self.assertNotEqual(tier_adj, "Tier_1_Gold")
+
+        batch_rows = [
+            {
+                "catalogNumber": "NCU_NOM_ADJ_01",
+                "institutionCode": "NCU",
+                "scientificName": "Packera dubia (Spreng.) Trock & Mabb.",
+                "species_raw": "Packera dubia",
+                "type_status": "None",
+                "identifiedBy": "Nomenclatural Adjustment",
+                "recordedBy": "A. S. Weakley",
+                "dateIdentified": "",
+                "locality": "Orange County, Chapel Hill, rich mesic slope",
+                "habitat": "Deciduous forest",
+            }
+        ]
+        for idx in range(26):
+            batch_rows.append(
+                {
+                    "catalogNumber": f"NCU_BATCH_HIST_{idx:02d}",
+                    "institutionCode": "NCU",
+                    "scientificName": "Packera dubia (Spreng.) Trock & Mabb.",
+                    "species_raw": "Packera dubia",
+                    "type_status": "None",
+                    "identifiedBy": "D. K. Trock",
+                    "recordedBy": f"J. HistoricalCollector{idx:02d}",
+                    "dateIdentified": "",
+                    "locality": "Orange County, North Carolina, alluvial woodland",
+                    "habitat": "Bottomland forest",
+                }
+            )
+        batch_rows.append(
+            {
+                "catalogNumber": "NCU_BATCH_PERSONAL_01",
+                "institutionCode": "NCU",
+                "scientificName": "Packera dubia (Spreng.) Trock & Mabb.",
+                "species_raw": "Packera dubia",
+                "type_status": "None",
+                "identifiedBy": "D. K. Trock",
+                "recordedBy": "D. K. Trock",
+                "dateIdentified": "",
+                "locality": "Orange County, North Carolina, alluvial woodland",
+                "habitat": "Bottomland forest",
+            }
+        )
+
+        df_scored = apply_corpus_authority_tiers(pd.DataFrame(batch_rows))
+        tier_by_cat = dict(zip(df_scored["catalogNumber"], df_scored["determiner_tier"]))
+
+        self.assertNotEqual(tier_by_cat["NCU_NOM_ADJ_01"], "Tier_1_Gold")
+        for idx in range(26):
+            self.assertEqual(tier_by_cat[f"NCU_BATCH_HIST_{idx:02d}"], "Tier_2_Silver")
+        self.assertEqual(tier_by_cat["NCU_BATCH_PERSONAL_01"], "Tier_1_Gold")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
