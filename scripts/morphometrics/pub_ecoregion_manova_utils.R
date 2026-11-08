@@ -1192,20 +1192,30 @@ draw_dynamic_ecoregion_mean_silhouettes <- function(
     xy_plus <- reconstruct_efa_outline(h_mean + 1.0 * h_sd, nb_pts = 120L)
     xy_minus <- reconstruct_efa_outline(h_mean - 1.0 * h_sd, nb_pts = 120L)
 
+    env_pts <- rbind(xy_plus, xy_mean, xy_minus)
+    shared_center <- c(mean(range(env_pts[, 1], na.rm = TRUE)), mean(range(env_pts[, 2], na.rm = TRUE)))
+    shared_scale <- min(
+      0.68 / max(diff(range(env_pts[, 1], na.rm = TRUE)), 1e-6),
+      0.64 / max(diff(range(env_pts[, 2], na.rm = TRUE)), 1e-6)
+    ) * 0.86
+
     draw_outline_in_box(
-      xy_plus, cx = cx, cy = cy - 0.03, w_box = 0.72, h_box = 0.66,
+      xy_plus, cx = cx, cy = cy - 0.03, w_box = 0.68, h_box = 0.64,
       col_border = grDevices::adjustcolor(g_col, alpha.f = 0.48),
-      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.10), lwd = 0.9, lty = 3
+      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.10), lwd = 0.9, lty = 3,
+      shared_scale = shared_scale, shared_center = shared_center
     )
     draw_outline_in_box(
-      xy_minus, cx = cx, cy = cy - 0.03, w_box = 0.60, h_box = 0.55,
+      xy_minus, cx = cx, cy = cy - 0.03, w_box = 0.68, h_box = 0.64,
       col_border = grDevices::adjustcolor(g_col, alpha.f = 0.48),
-      col_fill = NA, lwd = 0.9, lty = 3
+      col_fill = NA, lwd = 0.9, lty = 3,
+      shared_scale = shared_scale, shared_center = shared_center
     )
     pts_mean <- draw_outline_in_box(
-      xy_mean, cx = cx, cy = cy - 0.03, w_box = 0.66, h_box = 0.61,
+      xy_mean, cx = cx, cy = cy - 0.03, w_box = 0.68, h_box = 0.64,
       col_border = g_col,
-      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.22), lwd = 2.1, lty = 1
+      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.22), lwd = 2.1, lty = 1,
+      shared_scale = shared_scale, shared_center = shared_center
     )
     if (!is.null(pts_mean)) {
       graphics::segments(cx, min(pts_mean[, 2]), cx, max(pts_mean[, 2]), col = grDevices::adjustcolor(g_col, alpha.f = 0.55), lty = 2, lwd = 0.9)

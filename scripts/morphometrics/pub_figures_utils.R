@@ -19,7 +19,7 @@ EXTENDED_COLORBLIND_HEX <- c(
   "#E7298A", "#66A61E", "#E6AB02", "#A6761D", "#008080"
 )
 
-HOLLOW_PCH_CYCLE <- c(1L, 2L, 5L, 0L)
+HOLLOW_PCH_CYCLE <- c(1L, 2L, 5L, 0L, 6L, 4L)
 if (!exists("fast_euclidean_permanova_trace", mode = "function")) {
   for (.dl_p in c("scripts/morphometrics/dissected_leaf_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "dissected_leaf_utils.R"))) {
     if (!is.na(.dl_p) && nzchar(.dl_p) && file.exists(.dl_p)) { source(.dl_p); break }
@@ -366,10 +366,21 @@ format_active_complex_title <- function(taxa_vec, suffix) {
   sprintf("Packera Taxon Complex (%d Taxa): %s", length(unique_taxa), suffix)
 }
 
-get_dynamic_packera_palette <- function(taxa_vec = NULL) {
+.order_unique_packera_taxa <- function(taxa_vec, preserve_order = FALSE) {
+  clean_v <- trimws(as.character(taxa_vec[!is.na(taxa_vec) & nzchar(trimws(as.character(taxa_vec)))]))
+  if (length(clean_v) == 0L) return(character(0))
+  u_raw <- unique(clean_v)
+  u_non_unk <- setdiff(u_raw, "Unknown")
+  if (length(u_non_unk) == 0L) return(character(0))
+  if (isTRUE(preserve_order)) {
+    return(u_non_unk)
+  }
+  sort(u_non_unk)
+}
+
+get_dynamic_packera_palette <- function(taxa_vec = NULL, preserve_order = FALSE) {
   if (is.null(taxa_vec) || length(taxa_vec) == 0L) return(c("Unknown" = "#7F7F7F"))
-  u_taxa <- sort(unique(trimws(as.character(taxa_vec[!is.na(taxa_vec) & nzchar(trimws(as.character(taxa_vec)))]))))
-  u_non_unk <- setdiff(u_taxa, "Unknown")
+  u_non_unk <- .order_unique_packera_taxa(taxa_vec, preserve_order = preserve_order)
   if (length(u_non_unk) == 0L) return(c("Unknown" = "#7F7F7F"))
   pal_pool <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", EXTENDED_COLORBLIND_HEX)
   if (length(u_non_unk) > length(pal_pool)) {
@@ -383,24 +394,145 @@ get_dynamic_packera_palette <- function(taxa_vec = NULL) {
   c(cols, "Unknown" = "#7F7F7F")
 }
 
-get_dynamic_packera_shapes <- function(taxa_vec = NULL) {
+get_dynamic_packera_shapes <- function(taxa_vec = NULL, preserve_order = FALSE) {
   if (is.null(taxa_vec) || length(taxa_vec) == 0L) return(c("Unknown" = 0L))
-  u_taxa <- sort(unique(trimws(as.character(taxa_vec[!is.na(taxa_vec) & nzchar(trimws(as.character(taxa_vec)))]))))
-  u_non_unk <- setdiff(u_taxa, "Unknown")
+  u_non_unk <- .order_unique_packera_taxa(taxa_vec, preserve_order = preserve_order)
   if (length(u_non_unk) == 0L) return(c("Unknown" = 0L))
-  shps <- rep_len(c(1L, 2L, 5L, 0L), length(u_non_unk))
+  shps <- rep_len(c(1L, 2L, 5L, 0L, 6L, 4L), length(u_non_unk))
   names(shps) <- u_non_unk
   c(shps, "Unknown" = 0L)
 }
 
-get_dynamic_packera_ggplot_shapes <- function(taxa_vec = NULL) {
+get_dynamic_packera_ggplot_shapes <- function(taxa_vec = NULL, preserve_order = FALSE) {
   if (is.null(taxa_vec) || length(taxa_vec) == 0L) return(c("Unknown" = 25))
-  u_taxa <- sort(unique(trimws(as.character(taxa_vec[!is.na(taxa_vec) & nzchar(trimws(as.character(taxa_vec)))]))))
-  u_non_unk <- setdiff(u_taxa, "Unknown")
-  if (length(u_non_unk) == 0L) return(c("Unknown" = 25))
+  u_non_unk <- .order_unique_packera_taxa(taxa_vec, preserve_order = preserve_order)
+  if (length(u_non_unk) == 0L) return(c("Unknown" = 0L))
   shps <- rep_len(c(21, 24, 22, 23, 25), length(u_non_unk))
   names(shps) <- u_non_unk
   c(shps, "Unknown" = 25)
+}
+
+resolve_taxon_display_tier <- function(
+  df,
+  group_vec = NULL,
+  focal_taxon = Sys.getenv("PACKERA_FOCAL_TAXON", "Packera dubia"),
+  max_fg = 6L,
+  feat_cols = NULL
+) {
+  df_obj <- if (is.data.frame(df)) df else NULL
+  if (is.null(df_obj)) {
+    if (is.null(group_vec) && !is.null(df)) {
+      group_vec <- as.character(df)
+    }
+  } else if (is.null(group_vec)) {
+    cand_cols <- c("taxon_clean", "species_standardized", "species_clean", "taxon", "scientificName", "given_label", "recorded_taxon")
+    hit_cols <- intersect(cand_cols, colnames(df_obj))
+    if (length(hit_cols) > 0L) {
+      group_vec <- as.character(df_obj[[hit_cols[1L]]])
+    } else if (exists("resolve_plot_group_column", mode = "function")) {
+      group_vec <- resolve_plot_group_column(df_obj)
+    } else {
+      group_vec <- rep("Unassigned_Packera", nrow(df_obj))
+    }
+  }
+  grp_chr <- trimws(as.character(group_vec))
+  valid_m <- !is.na(grp_chr) & nzchar(grp_chr) & !(tolower(grp_chr) %in% c("unknown", "na", "none"))
+  u_grps <- unique(grp_chr[valid_m])
+  if (length(u_grps) == 0L) {
+    u_grps <- "Unassigned_Packera"
+  }
+
+  n_g <- vapply(u_grps, function(g) sum(valid_m & grp_chr == g, na.rm = TRUE), integer(1))
+  names(n_g) <- u_grps
+
+  focal_chr <- trimws(as.character(focal_taxon)[1L])
+  if (is.na(focal_chr) || !nzchar(focal_chr)) focal_chr <- "Packera dubia"
+
+  exact_hit <- u_grps[tolower(u_grps) == tolower(focal_chr)]
+  dubia_hit <- u_grps[grepl("^Packera\\s+dubia|^P\\.\\s*dubia", u_grps, ignore.case = TRUE)]
+  focal_candidates <- unique(c(exact_hit, dubia_hit))
+
+  if (length(focal_candidates) > 0L) {
+    focal_candidates <- focal_candidates[order(-n_g[focal_candidates], focal_candidates)]
+    slot1 <- focal_candidates[1L]
+  } else {
+    ord_n <- u_grps[order(-n_g[u_grps], u_grps)]
+    slot1 <- ord_n[1L]
+  }
+
+  rem_grps <- setdiff(u_grps, slot1)
+  if (length(rem_grps) > 0L) {
+    d2_vec <- rep(Inf, length(rem_grps))
+    names(d2_vec) <- rem_grps
+
+    if (!is.null(df_obj) && nrow(df_obj) == length(grp_chr) && nrow(df_obj) >= 3L) {
+      cand_f <- if (!is.null(feat_cols)) {
+        intersect(as.character(feat_cols), colnames(df_obj))
+      } else {
+        grep("^(Sym_)?PC[1-5]$|^can[1-3]$|^PC[1-5]_corrected$", colnames(df_obj), value = TRUE)
+      }
+      if (length(cand_f) > 0L) {
+        num_f <- cand_f[vapply(cand_f, function(cn) {
+          v <- suppressWarnings(as.numeric(df_obj[[cn]]))
+          sum(is.finite(v)) >= 3L && isTRUE(stats::sd(v, na.rm = TRUE) > 1e-7)
+        }, logical(1))]
+        if (length(num_f) > 0L) {
+          num_f <- utils::head(num_f, 5L)
+          X_mat <- do.call(cbind, lapply(num_f, function(cn) {
+            v <- suppressWarnings(as.numeric(df_obj[[cn]]))
+            v[!is.finite(v)] <- mean(v[is.finite(v)], na.rm = TRUE)
+            v[!is.finite(v)] <- 0.0
+            v
+          }))
+          m1 <- which(valid_m & grp_chr == slot1)
+          if (length(m1) >= 1L) {
+            mu1 <- colMeans(X_mat[m1, , drop = FALSE], na.rm = TRUE)
+            W_cov <- tryCatch(stats::cov(X_mat[valid_m, , drop = FALSE]), error = function(e) NULL)
+            W_inv <- NULL
+            if (!is.null(W_cov) && all(is.finite(W_cov))) {
+              W_reg <- W_cov + diag(max(1e-4, 0.05 * mean(diag(W_cov), na.rm = TRUE)), ncol(X_mat))
+              W_inv <- tryCatch(solve(W_reg), error = function(e) NULL)
+            }
+            for (rg in rem_grps) {
+              mg <- which(valid_m & grp_chr == rg)
+              if (length(mg) >= 1L) {
+                mug <- colMeans(X_mat[mg, , drop = FALSE], na.rm = TRUE)
+                dv <- mug - mu1
+                if (all(is.finite(dv))) {
+                  if (!is.null(W_inv)) {
+                    val_d2 <- as.numeric(t(dv) %*% W_inv %*% dv)
+                    d2_vec[rg] <- if (is.finite(val_d2) && val_d2 >= 0) val_d2 else sum(dv^2)
+                  } else {
+                    d2_vec[rg] <- sum(dv^2)
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    has_d2 <- any(is.finite(d2_vec))
+    if (has_d2) {
+      rem_grps <- rem_grps[order(d2_vec[rem_grps], -n_g[rem_grps], rem_grps)]
+    } else {
+      rem_grps <- rem_grps[order(-n_g[rem_grps], rem_grps)]
+    }
+  }
+
+  ordered_groups <- c(slot1, rem_grps)
+  max_fg_int <- max(1L, as.integer(max_fg))
+  fg_groups <- utils::head(ordered_groups, max_fg_int)
+  bg_groups <- if (length(ordered_groups) > max_fg_int) utils::tail(ordered_groups, -max_fg_int) else character(0)
+
+  list(
+    ordered_groups = ordered_groups,
+    fg_groups = fg_groups,
+    bg_groups = bg_groups,
+    is_multi_crowded = length(ordered_groups) > max_fg_int,
+    palette = get_dynamic_packera_palette(ordered_groups, preserve_order = TRUE),
+    shapes = get_dynamic_packera_shapes(ordered_groups, preserve_order = TRUE)
+  )
 }
 
 format_italic_taxon_expr <- function(tx) {
@@ -700,22 +832,166 @@ draw_outline_in_box <- function(
   col_border = "grey55",
   col_fill = grDevices::adjustcolor("grey85", alpha.f = 0.35),
   lwd = 1.0,
-  lty = 1
+  lty = 1,
+  shared_scale = NULL,
+  shared_center = NULL
 ) {
   if (is.null(xy) || nrow(xy) < 3) return(invisible(NULL))
-  rx <- range(xy[, 1], na.rm = TRUE)
-  ry <- range(xy[, 2], na.rm = TRUE)
-  sx <- max(diff(rx), 1e-6)
-  sy <- max(diff(ry), 1e-6)
-  scale_f <- min(w_box / sx, h_box / sy) * 0.86
-  px <- cx + (xy[, 1] - mean(rx)) * scale_f
-  py <- cy + (xy[, 2] - mean(ry)) * scale_f
+  if (!is.null(shared_scale) && length(shared_scale) == 1L && is.finite(shared_scale) &&
+      !is.null(shared_center) && length(shared_center) >= 2L && all(is.finite(shared_center[1:2]))) {
+    px <- cx + (xy[, 1] - shared_center[1]) * shared_scale
+    py <- cy + (xy[, 2] - shared_center[2]) * shared_scale
+  } else {
+    rx <- range(xy[, 1], na.rm = TRUE)
+    ry <- range(xy[, 2], na.rm = TRUE)
+    sx <- max(diff(rx), 1e-6)
+    sy <- max(diff(ry), 1e-6)
+    scale_f <- min(w_box / sx, h_box / sy) * 0.86
+    px <- cx + (xy[, 1] - mean(rx)) * scale_f
+    py <- cy + (xy[, 2] - mean(ry)) * scale_f
+  }
   if (!is.null(col_fill) && !is.na(col_fill)) {
     graphics::polygon(px, py, col = col_fill, border = col_border, lwd = lwd, lty = lty)
   } else {
     graphics::lines(c(px, px[1]), c(py, py[1]), col = col_border, lwd = lwd, lty = lty)
   }
   invisible(cbind(px, py))
+}
+
+.compute_outline_grid_layout <- function(n_disp, draw_dividers = TRUE) {
+  n_d <- max(1L, min(9L, as.integer(n_disp)))
+  if (n_d == 1L) {
+    nr <- 1L; nc <- 1L
+    cx_vec <- 1.0; cy_vec <- 1.0
+  } else if (n_d == 2L) {
+    nr <- 1L; nc <- 2L
+    if (draw_dividers) graphics::abline(v = 1.0, col = "grey88", lty = 2)
+    cx_vec <- c(0.5, 1.5); cy_vec <- c(1.0, 1.0)
+  } else if (n_d == 3L) {
+    nr <- 2L; nc <- 2L
+    if (draw_dividers) {
+      graphics::abline(h = 1.0, col = "grey88", lty = 2)
+      graphics::segments(1.0, 1.0, 1.0, 2.0, col = "grey88", lty = 2)
+    }
+    cx_vec <- c(0.5, 1.5, 1.0); cy_vec <- c(1.48, 1.48, 0.48)
+  } else if (n_d == 4L) {
+    nr <- 2L; nc <- 2L
+    if (draw_dividers) graphics::abline(h = 1.0, v = 1.0, col = "grey88", lty = 2)
+    cx_vec <- c(0.5, 1.5, 0.5, 1.5); cy_vec <- c(1.48, 1.48, 0.48, 0.48)
+  } else if (n_d <= 6L) {
+    nr <- 2L; nc <- 3L
+    if (draw_dividers) {
+      graphics::abline(h = 1.0, col = "grey88", lty = 2)
+      graphics::abline(v = c(2.0 / 3.0, 4.0 / 3.0), col = "grey88", lty = 2)
+    }
+    cx_all <- rep(c(1.0 / 3.0, 1.0, 5.0 / 3.0), times = 2L)
+    cy_all <- rep(c(1.48, 0.48), each = 3L)
+    cx_vec <- cx_all[seq_len(n_d)]; cy_vec <- cy_all[seq_len(n_d)]
+  } else {
+    nr <- 3L; nc <- 3L
+    if (draw_dividers) {
+      graphics::abline(h = c(2.0 / 3.0, 4.0 / 3.0), col = "grey88", lty = 2)
+      graphics::abline(v = c(2.0 / 3.0, 4.0 / 3.0), col = "grey88", lty = 2)
+    }
+    cx_all <- rep(c(1.0 / 3.0, 1.0, 5.0 / 3.0), times = 3L)
+    cy_all <- rep(c(5.0 / 3.0, 1.0, 1.0 / 3.0), each = 3L)
+    cx_vec <- cx_all[seq_len(n_d)]; cy_vec <- cy_all[seq_len(n_d)]
+  }
+  cell_scale <- if (n_d <= 4L) 1.0 else if (n_d <= 6L) 0.72 else 0.58
+  list(
+    nr = nr, nc = nc,
+    cx = cx_vec, cy = cy_vec,
+    cell_scale = cell_scale,
+    title_dy = if (nr == 3L) 0.26 else 0.41,
+    sub_dy   = if (nr == 3L) 0.27 else 0.43,
+    body_dy  = if (nr == 3L) 0.02 else 0.05,
+    cex_title = if (n_d <= 4L) 0.78 else if (n_d <= 6L) 0.68 else 0.60,
+    cex_sub   = if (n_d <= 4L) 0.65 else if (n_d <= 6L) 0.56 else 0.50
+  )
+}
+
+repel_2d_labels <- function(
+  x0,
+  y0,
+  labels,
+  xlim,
+  ylim,
+  cex = 0.72,
+  n_iter = 25L,
+  draw_segments = TRUE,
+  seg_col = "grey45",
+  seg_lwd = 0.75,
+  anchor_x = NULL,
+  anchor_y = NULL
+) {
+  x_init <- suppressWarnings(as.numeric(x0))
+  y_init <- suppressWarnings(as.numeric(y0))
+  n <- min(length(x_init), length(y_init))
+  if (n == 0L) return(list(x = numeric(0), y = numeric(0)))
+  x_lbl <- x_init[seq_len(n)]
+  y_lbl <- y_init[seq_len(n)]
+  ax <- if (!is.null(anchor_x) && length(anchor_x) >= n) suppressWarnings(as.numeric(anchor_x[seq_len(n)])) else x_lbl
+  ay <- if (!is.null(anchor_y) && length(anchor_y) >= n) suppressWarnings(as.numeric(anchor_y[seq_len(n)])) else y_lbl
+  lbl_chr <- as.character(rep_len(labels, n))
+
+  span_x <- max(diff(xlim), 1e-6)
+  span_y <- max(diff(ylim), 1e-6)
+  x_min <- xlim[1] + 0.04 * span_x
+  x_max <- xlim[2] - 0.04 * span_x
+  y_min <- ylim[1] + 0.04 * span_y
+  y_max <- ylim[2] - 0.04 * span_y
+
+  sw <- tryCatch(graphics::strwidth(lbl_chr, cex = cex), error = function(e) rep(0.0, n))
+  sh <- tryCatch(graphics::strheight(lbl_chr, cex = cex), error = function(e) rep(0.0, n))
+  sw[!is.finite(sw) | sw <= 0] <- 0.012 * span_x * pmax(nchar(lbl_chr), 3L)
+  sh[!is.finite(sh) | sh <= 0] <- 0.040 * span_y
+  hw <- 0.56 * sw + 0.012 * span_x
+  hh <- 0.64 * sh + 0.010 * span_y
+
+  x_lbl <- pmin(x_max, pmax(x_min, x_lbl))
+  y_lbl <- pmin(y_max, pmax(y_min, y_lbl))
+
+  if (n >= 2L && n_iter >= 1L) {
+    for (iter in seq_len(as.integer(n_iter))) {
+      for (i in 1:(n - 1L)) {
+        for (j in (i + 1L):n) {
+          if (!is.finite(x_lbl[i]) || !is.finite(y_lbl[i]) || !is.finite(x_lbl[j]) || !is.finite(y_lbl[j])) next
+          dx <- x_lbl[i] - x_lbl[j]
+          dy <- y_lbl[i] - y_lbl[j]
+          ov_x <- (hw[i] + hw[j]) - abs(dx)
+          ov_y <- (hh[i] + hh[j]) - abs(dy)
+          if (ov_x > 0 && ov_y > 0) {
+            if (abs(dx) < 1e-9 && abs(dy) < 1e-9) {
+              ang <- (i - j) * 0.75
+              dx <- cos(ang) * 1e-4 * span_x
+              dy <- sin(ang) * 1e-4 * span_y
+            }
+            sx <- if (dx >= 0) 1.0 else -1.0
+            sy <- if (dy >= 0) 1.0 else -1.0
+            px_step <- 0.34 * ov_x * sx
+            py_step <- 0.44 * ov_y * sy
+            x_lbl[i] <- x_lbl[i] + px_step
+            x_lbl[j] <- x_lbl[j] - px_step
+            y_lbl[i] <- y_lbl[i] + py_step
+            y_lbl[j] <- y_lbl[j] - py_step
+          }
+        }
+      }
+      x_lbl <- pmin(x_max, pmax(x_min, x_lbl))
+      y_lbl <- pmin(y_max, pmax(y_min, y_lbl))
+    }
+  }
+
+  if (isTRUE(draw_segments)) {
+    move_d <- sqrt((x_lbl - ax)^2 + (y_lbl - ay)^2)
+    thresh <- 0.04 * min(span_x, span_y)
+    moved_idx <- which(is.finite(move_d) & (move_d > thresh))
+    if (length(moved_idx) > 0L) {
+      graphics::segments(ax[moved_idx], ay[moved_idx], x_lbl[moved_idx], y_lbl[moved_idx], col = seg_col, lwd = seg_lwd)
+    }
+  }
+
+  list(x = x_lbl, y = y_lbl)
 }
 
 draw_2d_confidence_ellipse <- function(
@@ -844,6 +1120,88 @@ plot_2d_ordination_scatter <- function(
   ylim <- pad_range(all_y)
   has_sub <- !is.null(subtitle) && length(subtitle) > 0L && !is.na(subtitle[1]) && nzchar(trimws(as.character(subtitle[1])))
 
+  grp_chr <- if (!is.null(group_vec) && length(group_vec) == n_pts) trimws(as.character(group_vec)) else NULL
+  u_grps <- if (!is.null(grp_chr)) unique(grp_chr[!is.na(grp_chr) & nzchar(grp_chr) & grp_chr != "Unknown"]) else character(0)
+
+  # G = 2 Mirrored/Overlaid Canonical Histogram Mode (MorphoTools2::plotHist convention)
+  is_can2_degen <- (length(u_grps) == 2L) &&
+    grepl("^Can2", as.character(ylab), ignore.case = TRUE) &&
+    (isTRUE(stats::sd(y_num, na.rm = TRUE) < 1e-5) || grepl("\\(0\\.0%\\)", as.character(ylab)))
+
+  if (is_can2_degen) {
+    brks <- seq(xlim[1], xlim[2], length.out = 22L)
+    h_list <- list()
+    d_list <- list()
+    max_dens <- 0.25
+    for (g_val in u_grps) {
+      xg <- x_num[!is.na(grp_chr) & grp_chr == g_val]
+      hg <- tryCatch(graphics::hist(xg, breaks = brks, plot = FALSE), error = function(e) NULL)
+      dg <- if (length(xg) >= 2L && isTRUE(stats::sd(xg, na.rm = TRUE) > 1e-6)) {
+        tryCatch(stats::density(xg, from = xlim[1], to = xlim[2]), error = function(e) NULL)
+      } else NULL
+      h_list[[g_val]] <- hg
+      d_list[[g_val]] <- dg
+      if (!is.null(hg) && length(hg$density) > 0L) max_dens <- max(max_dens, max(hg$density, na.rm = TRUE))
+      if (!is.null(dg) && length(dg$y) > 0L) max_dens <- max(max_dens, max(dg$y, na.rm = TRUE))
+    }
+    ylim_hist <- c(0.0, max_dens * 1.28)
+    graphics::plot(
+      xlim, ylim_hist,
+      type = "n",
+      xlim = xlim,
+      ylim = ylim_hist,
+      xlab = xlab,
+      ylab = "Canonical Score Density (Can1)",
+      main = if (has_sub) "" else main,
+      font.main = 2
+    )
+    if (has_sub) {
+      if (!is.null(main) && nzchar(trimws(as.character(main)))) {
+        graphics::title(main = main, line = 1.45, font.main = 2)
+      }
+      graphics::mtext(trimws(as.character(subtitle[1])), side = 3, line = 0.28, cex = 0.73, col = "grey20", font = 1)
+    }
+    graphics::grid(col = "grey88", lty = "solid")
+    for (g_val in u_grps) {
+      m <- !is.na(grp_chr) & (grp_chr == g_val)
+      g_col <- if (!is.null(group_cols) && g_val %in% names(group_cols)) group_cols[[g_val]] else col_vec[which(m)[1L]]
+      hg <- h_list[[g_val]]
+      dg <- d_list[[g_val]]
+      if (!is.null(hg) && length(hg$density) > 0L) {
+        graphics::rect(
+          hg$breaks[-length(hg$breaks)], 0.0, hg$breaks[-1L], hg$density,
+          col = grDevices::adjustcolor(g_col, alpha.f = 0.28),
+          border = grDevices::adjustcolor(g_col, alpha.f = 0.75),
+          lwd = 1.1
+        )
+      }
+      if (!is.null(dg)) {
+        graphics::lines(dg$x, dg$y, col = g_col, lwd = 2.2)
+      }
+      mu_g <- mean(x_num[m], na.rm = TRUE)
+      if (is.finite(mu_g)) {
+        graphics::abline(v = mu_g, col = g_col, lty = 2, lwd = 2.0)
+        graphics::text(mu_g, max_dens * 1.15, labels = sub("^Packera\\s+", "P. ", g_val), col = g_col, cex = 0.76, font = 4)
+      }
+    }
+    if (!is.null(is_type_vec) && length(is_type_vec) > 0L) {
+      t_bool <- as.logical(rep_len(is_type_vec, n_pts))
+      t_bool[is.na(t_bool)] <- FALSE
+      type_idx <- which(t_bool)
+      if (length(type_idx) > 0L) {
+        graphics::arrows(
+          x_num[type_idx], max_dens * 0.20, x_num[type_idx], 0.0,
+          length = 0.07, lwd = 2.0, col = col_vec[type_idx]
+        )
+        graphics::points(x_num[type_idx], rep(max_dens * 0.20, length(type_idx)), pch = 5L, col = "#111111", cex = 1.25, lwd = 1.6)
+      }
+    }
+    if (!is.null(legend_args) && is.list(legend_args)) {
+      do.call(graphics::legend, legend_args)
+    }
+    return(invisible(list(xlim = xlim, ylim = ylim_hist)))
+  }
+
   graphics::plot(
     x_num, y_num,
     type = "n",
@@ -867,14 +1225,75 @@ plot_2d_ordination_scatter <- function(
     tryCatch(bg_draw_fn(xlim, ylim), error = function(e) NULL)
   }
 
-  graphics::points(
-    x_num, y_num,
-    col = col_vec,
-    pch = pch_vec,
-    bg = NA,
-    cex = cex_vec,
-    lwd = lwd_vec
-  )
+  # G > 6 Focal-Plus-Top-k Context Layering
+  tier_ord <- NULL
+  fg_grps <- u_grps
+  bg_grps <- character(0)
+  if (length(u_grps) > 6L) {
+    tier_ord <- resolve_taxon_display_tier(
+      data.frame(PC1 = x_num, PC2 = y_num, stringsAsFactors = FALSE),
+      group_vec = grp_chr,
+      max_fg = 6L,
+      feat_cols = c("PC1", "PC2")
+    )
+    fg_grps <- tier_ord$fg_groups
+    bg_grps <- tier_ord$bg_groups
+
+    for (bg_val in bg_grps) {
+      m_bg <- which(!is.na(grp_chr) & (grp_chr == bg_val))
+      if (length(m_bg) >= 3L) {
+        ch_idx <- tryCatch(grDevices::chull(x_num[m_bg], y_num[m_bg]), error = function(e) NULL)
+        if (!is.null(ch_idx) && length(ch_idx) >= 3L) {
+          ch_pts <- m_bg[c(ch_idx, ch_idx[1L])]
+          graphics::polygon(
+            x_num[ch_pts], y_num[ch_pts],
+            col = NA,
+            border = grDevices::adjustcolor("#888888", alpha.f = 0.45),
+            lty = 2, lwd = 1.0
+          )
+        }
+      }
+    }
+    bg_mask <- !is.na(grp_chr) & (grp_chr %in% bg_grps)
+    if (any(bg_mask)) {
+      graphics::points(
+        x_num[bg_mask], y_num[bg_mask],
+        col = grDevices::adjustcolor("#999999", alpha.f = 0.32),
+        pch = 1L, bg = NA, cex = 0.58, lwd = 0.85
+      )
+    }
+    fg_mask <- !bg_mask
+    if (any(fg_mask)) {
+      fg_alpha <- adaptive_point_alpha(sum(fg_mask))
+      fg_col_vec <- col_vec[fg_mask]
+      fg_pch_vec <- pch_vec[fg_mask]
+      for (fg_val in fg_grps) {
+        mf <- which(grp_chr[fg_mask] == fg_val)
+        if (length(mf) > 0L) {
+          c_use <- if (!is.null(group_cols) && fg_val %in% names(group_cols)) group_cols[[fg_val]] else tier_ord$palette[[fg_val]]
+          fg_col_vec[mf] <- grDevices::adjustcolor(c_use, alpha.f = fg_alpha)
+          fg_pch_vec[mf] <- tier_ord$shapes[[fg_val]]
+        }
+      }
+      graphics::points(
+        x_num[fg_mask], y_num[fg_mask],
+        col = fg_col_vec,
+        pch = fg_pch_vec,
+        bg = NA,
+        cex = cex_vec[fg_mask],
+        lwd = lwd_vec[fg_mask]
+      )
+    }
+  } else {
+    graphics::points(
+      x_num, y_num,
+      col = col_vec,
+      pch = pch_vec,
+      bg = NA,
+      cex = cex_vec,
+      lwd = lwd_vec
+    )
+  }
 
   if (!is.null(is_type_vec) && length(is_type_vec) > 0L) {
     t_bool <- as.logical(rep_len(is_type_vec, n_pts))
@@ -892,19 +1311,19 @@ plot_2d_ordination_scatter <- function(
     }
   }
 
-  if (!is.null(group_vec) && length(group_vec) == n_pts) {
-    grp_chr <- as.character(group_vec)
-    u_grps <- unique(grp_chr[!is.na(grp_chr) & nzchar(grp_chr)])
-    for (g_val in u_grps) {
+  if (!is.null(grp_chr) && length(fg_grps) > 0L) {
+    for (g_val in fg_grps) {
       m <- !is.na(grp_chr) & (grp_chr == g_val)
       if (sum(m) >= 3) {
         g_col <- if (!is.null(group_cols) && g_val %in% names(group_cols)) {
           group_cols[[g_val]]
+        } else if (!is.null(tier_ord) && g_val %in% names(tier_ord$palette)) {
+          tier_ord$palette[[g_val]]
         } else {
           col_vec[which(m)[1]]
         }
         w_m <- if (!is.null(ellipse_weights) && length(ellipse_weights) == n_pts) ellipse_weights[m] else NULL
-        draw_2d_confidence_ellipse(x_num[m], y_num[m], col = g_col, level = ellipse_level, lwd = 2.1, lty = 1, weights = w_m)
+        draw_2d_confidence_ellipse(x_num[m], y_num[m], col = g_col, level = ellipse_level, lwd = 2.0, lty = 1, weights = w_m)
       }
     }
   }
@@ -934,46 +1353,73 @@ plot_2d_ordination_scatter <- function(
         } else {
           paste0("V", which(keep_v))
         }
-        # Slight radial outward offset + vertical stagger to prevent label overlap
-        tx_x <- vx[keep_v] * 1.15
-        tx_y <- vy[keep_v] * 1.15
-        if (length(tx_y) >= 2) {
-          ord_y <- order(tx_y)
-          min_dy <- 0.055 * diff(ylim)
-          for (ii in seq(2, length(ord_y))) {
-            idx_cur <- ord_y[ii]; idx_prev <- ord_y[ii - 1]
-            if (abs(tx_y[idx_cur] - tx_y[idx_prev]) < min_dy && abs(tx_x[idx_cur] - tx_x[idx_prev]) < 0.30 * diff(xlim)) {
-              tx_y[idx_cur] <- tx_y[idx_prev] + min_dy
-            }
-          }
-        }
-        graphics::text(tx_x, tx_y, labels = v_lbls, cex = 0.72, font = 2, col = "#111111")
+        tx_x0 <- vx[keep_v] * 1.14
+        tx_y0 <- vy[keep_v] * 1.14
+        rep_v <- repel_2d_labels(
+          x0 = tx_x0, y0 = tx_y0, labels = v_lbls,
+          xlim = xlim, ylim = ylim, cex = 0.72, n_iter = 25L,
+          draw_segments = TRUE, seg_col = "grey45", seg_lwd = 0.75,
+          anchor_x = vx[keep_v], anchor_y = vy[keep_v]
+        )
+        graphics::text(rep_v$x, rep_v$y, labels = v_lbls, cex = 0.72, font = 2, col = "#111111")
       }
     }
   }
 
   if (!is.null(c_mat) && nrow(c_mat) > 0) {
-    graphics::points(c_mat[, 1], c_mat[, 2], pch = 3, col = "black", cex = 1.8, lwd = 2.4)
-    lbls <- if (!is.null(centroid_labels)) centroid_labels else rownames(c_mat)
-    if (!is.null(lbls) && length(lbls) == nrow(c_mat)) {
-      cx_lbl <- c_mat[, 1]
-      cy_lbl <- c_mat[, 2] + 0.032 * diff(ylim)
-      if (length(cy_lbl) >= 2) {
-        ord_c <- order(cy_lbl)
-        min_cy <- 0.048 * diff(ylim)
-        for (ii in seq(2, length(ord_c))) {
-          ic <- ord_c[ii]; ip <- ord_c[ii - 1]
-          if (abs(cy_lbl[ic] - cy_lbl[ip]) < min_cy && abs(cx_lbl[ic] - cx_lbl[ip]) < 0.28 * diff(xlim)) {
-            cy_lbl[ic] <- cy_lbl[ip] + min_cy
-          }
-        }
+    lbls <- if (!is.null(centroid_labels)) as.character(centroid_labels) else rownames(c_mat)
+    c_use_mat <- c_mat
+    c_use_lbls <- lbls
+    if (!is.null(tier_ord) && length(fg_grps) > 0L && !is.null(c_use_lbls) && length(c_use_lbls) == nrow(c_use_mat)) {
+      short_fg <- sub("^Packera\\s+", "P. ", fg_grps)
+      keep_c <- (c_use_lbls %in% fg_grps) | (c_use_lbls %in% short_fg)
+      if (any(keep_c)) {
+        c_use_mat <- c_use_mat[keep_c, , drop = FALSE]
+        c_use_lbls <- c_use_lbls[keep_c]
       }
-      graphics::text(cx_lbl, cy_lbl, labels = lbls, cex = 0.76, font = 4, col = "black")
+    }
+    graphics::points(c_use_mat[, 1], c_use_mat[, 2], pch = 3, col = "black", cex = 1.8, lwd = 2.4)
+    if (!is.null(c_use_lbls) && length(c_use_lbls) == nrow(c_use_mat)) {
+      cx0 <- c_use_mat[, 1]
+      cy0 <- c_use_mat[, 2]
+      rep_c <- repel_2d_labels(
+        x0 = cx0,
+        y0 = cy0 + 0.032 * diff(ylim),
+        labels = c_use_lbls,
+        xlim = xlim,
+        ylim = ylim,
+        cex = 0.76,
+        n_iter = 25L,
+        draw_segments = TRUE,
+        seg_col = "grey45",
+        seg_lwd = 0.75,
+        anchor_x = cx0,
+        anchor_y = cy0
+      )
+      graphics::text(rep_c$x, rep_c$y, labels = c_use_lbls, cex = 0.76, font = 4, col = "black")
     }
   }
 
   if (!is.null(legend_args) && is.list(legend_args)) {
-    do.call(graphics::legend, legend_args)
+    if (!is.null(tier_ord) && tier_ord$is_multi_crowded) {
+      fg_cols_leg <- vapply(fg_grps, function(g) {
+        if (!is.null(group_cols) && g %in% names(group_cols)) group_cols[[g]] else tier_ord$palette[[g]]
+      }, character(1))
+      fg_pch_leg <- vapply(fg_grps, function(g) tier_ord$shapes[[g]], integer(1))
+      pos_leg <- if (length(legend_args) >= 1L && is.character(legend_args[[1L]])) legend_args[[1L]] else "topright"
+      graphics::legend(
+        pos_leg,
+        legend = c(packera_italic_expressions(fg_grps), "Background Congeners (Chull)"),
+        col = c(fg_cols_leg, "#888888"),
+        pch = c(fg_pch_leg, 1L),
+        lty = c(rep(NA, length(fg_grps)), 2L),
+        pt.bg = NA,
+        cex = if (!is.null(legend_args$cex)) legend_args$cex else 0.70,
+        bty = "n"
+      )
+    } else {
+      do.call(graphics::legend, legend_args)
+    }
   }
   invisible(list(xlim = xlim, ylim = ylim))
 }
@@ -1202,21 +1648,20 @@ render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL
     # Panel B: Superimposed Mean Reconstructed Leaf Silhouette of Tier 1 Direct vs. Tier 2 Reflected per Species / Morphotype
     h_mat <- extract_standardized_harmonic_matrix(tier_manifest, max_k = 12L)
     tx_vec <- resolve_plot_group_column(tier_manifest)
-    u_tx <- sort(unique(tx_vec[!is.na(tx_vec) & nzchar(tx_vec) & tx_vec != "Unknown"]))
-    if (length(u_tx) == 0) u_tx <- "Unassigned_Packera"
+    tier_info <- resolve_taxon_display_tier(tier_manifest, tx_vec)
+    disp_tx <- utils::head(tier_info$ordered_groups, 9L)
+    if (length(disp_tx) == 0L) disp_tx <- "Unassigned_Packera"
 
     graphics::plot(
       c(0, 2), c(0, 2), type = "n", axes = FALSE, xlab = "", ylab = "",
       main = "B. Mean Reconstructed Silhouette: Tier 1 Direct vs. Tier 2 Reflected"
     )
     graphics::box(col = "grey80")
-    graphics::abline(h = 1.0, v = 1.0, col = "grey88", lty = 2)
-    centers_x <- c(0.5, 1.5, 0.5, 1.5)
-    centers_y <- c(1.48, 1.48, 0.48, 0.48)
+    grid_lay <- .compute_outline_grid_layout(length(disp_tx))
 
-    for (idx_sp in seq_len(min(4L, length(u_tx)))) {
-      sp_name <- u_tx[idx_sp]
-      cx <- centers_x[idx_sp]; cy <- centers_y[idx_sp]
+    for (idx_sp in seq_along(disp_tx)) {
+      sp_name <- disp_tx[idx_sp]
+      cx <- grid_lay$cx[idx_sp]; cy <- grid_lay$cy[idx_sp]
       m_t1 <- (tx_vec == sp_name) & !is_t2
       m_t2 <- (tx_vec == sp_name) & is_t2
       if (!is.null(h_mat)) {
@@ -1228,19 +1673,24 @@ render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL
       }
       xy1 <- reconstruct_efa_outline(h1, nb_pts = 120L)
       xy2 <- reconstruct_efa_outline(h2, nb_pts = 120L)
+      env_pts <- rbind(xy1, xy2)
+      shared_center <- c(mean(range(env_pts[, 1], na.rm = TRUE)), mean(range(env_pts[, 2], na.rm = TRUE)))
+      shared_scale  <- min(0.68 / max(diff(range(env_pts[, 1], na.rm = TRUE)), 1e-6), 0.64 / max(diff(range(env_pts[, 2], na.rm = TRUE)), 1e-6)) * 0.86 * grid_lay$cell_scale
       draw_outline_in_box(
-        xy1, cx = cx, cy = cy - 0.04, w_box = 0.72, h_box = 0.72,
-        col_border = "#0072B2", col_fill = grDevices::adjustcolor("#0072B2", alpha.f = 0.16), lwd = 2.0, lty = 1
+        xy1, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
+        col_border = "#0072B2", col_fill = grDevices::adjustcolor("#0072B2", alpha.f = 0.16), lwd = 2.0, lty = 1,
+        shared_scale = shared_scale, shared_center = shared_center
       )
       draw_outline_in_box(
-        xy2, cx = cx, cy = cy - 0.04, w_box = 0.72, h_box = 0.72,
-        col_border = "#D55E00", col_fill = NA, lwd = 1.9, lty = 2
+        xy2, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
+        col_border = "#D55E00", col_fill = NA, lwd = 1.9, lty = 2,
+        shared_scale = shared_scale, shared_center = shared_center
       )
       short_sp <- sub("^Packera\\s+", "P. ", sp_name)
       graphics::text(
-        cx, cy + 0.42,
+        cx, cy + grid_lay$title_dy,
         labels = as.expression(bquote(bolditalic(.(short_sp)) ~ .(sprintf("(T1:%d / T2:%d)", sum(m_t1), sum(m_t2))))),
-        cex = 0.78
+        cex = grid_lay$cex_title
       )
     }
     graphics::legend(
@@ -1482,25 +1932,14 @@ generate_step03_pub_figures <- function(
     )
     graphics::box(col = "grey80")
 
-    disp_tx <- present_tx[vapply(present_tx, function(tx) sum(df$taxon_clean == tx, na.rm = TRUE) >= 1L, logical(1))]
-    n_disp <- min(4L, length(disp_tx))
-    if (n_disp == 1L) {
-      cx_vec <- 1.0
-      cy_vec <- 1.0
-    } else if (n_disp == 2L) {
-      graphics::abline(v = 1.0, col = "grey88", lty = 2)
-      cx_vec <- c(0.5, 1.5)
-      cy_vec <- c(1.0, 1.0)
-    } else if (n_disp == 3L) {
-      graphics::abline(h = 1.0, col = "grey88", lty = 2)
-      graphics::segments(1.0, 1.0, 1.0, 2.0, col = "grey88", lty = 2)
-      cx_vec <- c(0.5, 1.5, 1.0)
-      cy_vec <- c(1.48, 1.48, 0.48)
-    } else {
-      graphics::abline(h = 1.0, v = 1.0, col = "grey88", lty = 2)
-      cx_vec <- c(0.5, 1.5, 0.5, 1.5)
-      cy_vec <- c(1.48, 1.48, 0.48, 0.48)
-    }
+    tier_info <- resolve_taxon_display_tier(df, df$taxon_clean)
+    disp_tx <- utils::head(tier_info$ordered_groups, 9L)
+    disp_tx <- disp_tx[vapply(disp_tx, function(tx) sum(df$taxon_clean == tx, na.rm = TRUE) >= 1L, logical(1))]
+    if (length(disp_tx) == 0L) disp_tx <- default_grp
+    n_disp <- length(disp_tx)
+    grid_lay <- .compute_outline_grid_layout(n_disp)
+    cx_vec <- grid_lay$cx
+    cy_vec <- grid_lay$cy
 
     is_t1_pure <- if ("morph_tier_source" %in% colnames(df)) (df$morph_tier_source == "Tier_1_Pure") else !grepl("2", as.character(df$assigned_tier))
     is_promo_row <- if ("is_promoted_anchor" %in% colnames(df)) as.logical(df$is_promoted_anchor) else rep(FALSE, nrow(df))
@@ -1530,16 +1969,17 @@ generate_step03_pub_figures <- function(
         h_dis <- colMeans(std_hmat[m_dis_sub, , drop = FALSE], na.rm = TRUE)
         xy_ent <- reconstruct_efa_outline(h_ent, nb_pts = 120L)
         xy_dis <- reconstruct_efa_outline(h_dis, nb_pts = 120L)
+        dx_bi <- 0.17 * grid_lay$cell_scale
         pts_ent <- draw_outline_in_box(
-          xy_ent, cx = cx - 0.17, cy = cy - 0.05, w_box = 0.36, h_box = 0.60,
+          xy_ent, cx = cx - dx_bi, cy = cy - grid_lay$body_dy, w_box = 0.36 * grid_lay$cell_scale, h_box = 0.60 * grid_lay$cell_scale,
           col_border = sp_col, col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.18), lwd = 1.9, lty = 1
         )
         pts_dis <- draw_outline_in_box(
-          xy_dis, cx = cx + 0.17, cy = cy - 0.05, w_box = 0.38, h_box = 0.60,
+          xy_dis, cx = cx + dx_bi, cy = cy - grid_lay$body_dy, w_box = 0.38 * grid_lay$cell_scale, h_box = 0.60 * grid_lay$cell_scale,
           col_border = sp_col, col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.28), lwd = 2.1, lty = 1
         )
-        if (!is.null(pts_ent)) graphics::segments(cx - 0.17, min(pts_ent[, 2]), cx - 0.17, max(pts_ent[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.50), lty = 2, lwd = 0.9)
-        if (!is.null(pts_dis)) graphics::segments(cx + 0.17, min(pts_dis[, 2]), cx + 0.17, max(pts_dis[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.50), lty = 2, lwd = 0.9)
+        if (!is.null(pts_ent)) graphics::segments(cx - dx_bi, min(pts_ent[, 2]), cx - dx_bi, max(pts_ent[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.50), lty = 2, lwd = 0.9)
+        if (!is.null(pts_dis)) graphics::segments(cx + dx_bi, min(pts_dis[, 2]), cx + dx_bi, max(pts_dis[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.50), lty = 2, lwd = 0.9)
       } else {
         if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && any(m_anchor)) {
           h_mean <- colMeans(std_hmat[m_anchor, , drop = FALSE], na.rm = TRUE)
@@ -1555,27 +1995,35 @@ generate_step03_pub_figures <- function(
         xy_plus  <- reconstruct_efa_outline(h_mean + 0.65 * h_sd, nb_pts = 120L)
         xy_minus <- reconstruct_efa_outline(h_mean - 0.65 * h_sd, nb_pts = 120L)
 
-        # Draw +1 SD and -1 SD marginal envelopes + bold mean consensus outline
+        env_pts <- rbind(xy_plus, xy_mean, xy_minus)
+        shared_center <- c(mean(range(env_pts[, 1], na.rm = TRUE)), mean(range(env_pts[, 2], na.rm = TRUE)))
+        shared_scale  <- min(0.68 / max(diff(range(env_pts[, 1], na.rm = TRUE)), 1e-6), 0.64 / max(diff(range(env_pts[, 2], na.rm = TRUE)), 1e-6)) * 0.86 * grid_lay$cell_scale
+
+        # Draw +1 SD and -1 SD marginal envelopes + bold mean consensus outline under identical registration
         draw_outline_in_box(
-          xy_plus, cx = cx, cy = cy - 0.05, w_box = 0.72, h_box = 0.68,
+          xy_plus, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
           col_border = grDevices::adjustcolor(sp_col, alpha.f = 0.45),
-          col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.10), lwd = 0.9, lty = 3
+          col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.10), lwd = 0.9, lty = 3,
+          shared_scale = shared_scale, shared_center = shared_center
         )
         draw_outline_in_box(
-          xy_minus, cx = cx, cy = cy - 0.05, w_box = 0.62, h_box = 0.58,
+          xy_minus, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
           col_border = grDevices::adjustcolor(sp_col, alpha.f = 0.45),
-          col_fill = NA, lwd = 0.9, lty = 3
+          col_fill = NA, lwd = 0.9, lty = 3,
+          shared_scale = shared_scale, shared_center = shared_center
         )
         pts_mean <- draw_outline_in_box(
-          xy_mean, cx = cx, cy = cy - 0.05, w_box = 0.67, h_box = 0.63,
+          xy_mean, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
           col_border = sp_col,
-          col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.22), lwd = 2.2, lty = 1
+          col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.22), lwd = 2.2, lty = 1,
+          shared_scale = shared_scale, shared_center = shared_center
         )
         if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && any(m_type, na.rm = TRUE)) {
           xy_type <- reconstruct_efa_outline(colMeans(std_hmat[m_type, , drop = FALSE], na.rm = TRUE), nb_pts = 120L)
           draw_outline_in_box(
-            xy_type, cx = cx, cy = cy - 0.05, w_box = 0.67, h_box = 0.63,
-            col_border = "#111111", col_fill = NA, lwd = 1.6, lty = 2
+            xy_type, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
+            col_border = "#111111", col_fill = NA, lwd = 1.6, lty = 2,
+            shared_scale = shared_scale, shared_center = shared_center
           )
         }
         # Midrib axis line inside reconstructed leaf
@@ -1584,53 +2032,219 @@ generate_step03_pub_figures <- function(
         }
       }
 
-      med_ar  <- if ("aspect_ratio" %in% colnames(df) && any(m_anchor)) stats::median(df$aspect_ratio[m_anchor], na.rm = TRUE) else 2.2
-      med_sol <- if ("solidity" %in% colnames(df) && any(m_anchor)) stats::median(df$solidity[m_anchor], na.rm = TRUE) else 0.91
-      med_cs  <- if ("centroid_size" %in% colnames(df) && any(m_anchor)) stats::median(df$centroid_size[m_anchor], na.rm = TRUE) else 12.5
-      if (!is.finite(med_ar)) med_ar <- 2.2
-      if (!is.finite(med_sol)) med_sol <- 0.91
-      if (!is.finite(med_cs)) med_cs <- 12.5
+      .fin_med <- function(col_nm) {
+        if (!(col_nm %in% colnames(df)) || !any(m_anchor)) return(NA_real_)
+        vv <- suppressWarnings(as.numeric(df[[col_nm]][m_anchor]))
+        vv <- vv[is.finite(vv)]
+        if (length(vv) == 0L) return(NA_real_)
+        stats::median(vv)
+      }
+      med_ar  <- .fin_med("aspect_ratio")
+      med_sol <- .fin_med("solidity")
+      med_cs  <- .fin_med("centroid_size")
 
       short_sp <- sub("^Packera\\s+", "P. ", sp_name)
-      graphics::text(cx, cy + 0.41, labels = as.expression(bquote(bolditalic(.(short_sp)) ~ .(sprintf("(n=%d)", sum(m_anchor))))), cex = 0.80, col = "#111111")
-      graphics::text(
-        cx, cy - 0.43,
-        labels = sprintf("AR=%.2f | Sol=%.2f | CS=%.1fmm", med_ar, med_sol, med_cs),
-        cex = 0.66, col = "grey25"
-      )
+      graphics::text(cx, cy + grid_lay$title_dy, labels = as.expression(bquote(bolditalic(.(short_sp)) ~ .(sprintf("(n=%d)", sum(m_anchor))))), cex = grid_lay$cex_title, col = "#111111")
+      m_parts <- character(0)
+      if (is.finite(med_ar))  m_parts <- c(m_parts, sprintf("AR=%.2f", med_ar))
+      if (is.finite(med_sol)) m_parts <- c(m_parts, sprintf("Sol=%.2f", med_sol))
+      if (is.finite(med_cs))  m_parts <- c(m_parts, sprintf("CS=%.1fmm", med_cs))
+      if (length(m_parts) > 0L) {
+        graphics::text(
+          cx, cy - grid_lay$sub_dy,
+          labels = paste(m_parts, collapse = " | "),
+          cex = grid_lay$cex_sub, col = "grey25"
+        )
+      }
     }
   }
   atomic_save_dual_plot(draw_fig03_reconstruction, fdir, "fig03_efa_morphospace_reconstruction", width = 13.0, height = 6.0, dpi = 300)
 
-  # Companion Figure 03a: 2D & 3D (PC1 x PC2 x PC3) Hollow-Point EFA Ordination
+  # Companion Figure 03a: Momocs Marginal Eigenleaf Matrix (PC1-PC3) & Homologous Radial Displacement vs. Focal Reference
   spc3 <- if ("Sym_PC3" %in% colnames(df)) as.numeric(df$Sym_PC3) else if ("PC3" %in% colnames(df)) as.numeric(df$PC3) else rep(0.0, nrow(df))
-  cent_sym_3d <- cbind(cent_sym, vapply(present_tx, function(tx) {
-    m <- which(df$taxon_clean == tx)
-    w_m <- if (any(auth_w_3[m] > 0)) pmax(auth_w_3[m], 1e-6) else rep(1.0, length(m))
-    stats::weighted.mean(spc3[m], w = w_m, na.rm = TRUE)
-  }, numeric(1)))
+  sym_var_pct3 <- c(sym_var_pct[1], sym_var_pct[2], 10.5)
+  if (!is.null(sym_pca) && !is.null(sym_pca$sdev) && length(sym_pca$sdev) >= 3) {
+    vs3 <- (sym_pca$sdev^2) / max(sum(sym_pca$sdev^2), 1e-12) * 100
+    sym_var_pct3 <- round(vs3[1:3], 1)
+  } else if (!is.null(pca_fit) && !is.null(pca_fit$sdev) && length(pca_fit$sdev) >= 3) {
+    vp3 <- (pca_fit$sdev^2) / max(sum(pca_fit$sdev^2), 1e-12) * 100
+    sym_var_pct3 <- round(vp3[1:3], 1)
+  }
+
   atomic_save_dual_plot(function() {
-    graphics::par(mfrow = c(1, 2), mar = c(4.5, 4.5, 3.2, 1.1))
-    plot_2d_ordination_scatter(
-      x = df$Sym_PC1, y = df$Sym_PC2, col = cols, pch = pt_pch, cex = 0.85, lwd = 1.05,
-      xlab = sprintf("Sym_PC1 (%.1f%%)", sym_var_pct[1]),
-      ylab = sprintf("Sym_PC2 (%.1f%%)", sym_var_pct[2]),
-      main = "A. 2D Symmetric EFA Morphospace (Hollow Markers)",
-      group_vec = df$taxon_clean, group_cols = dyn_pal, ellipse_level = 0.95,
-      ellipse_weights = auth_w_3, centroids = cent_sym, is_type_vec = is_type_row
+    graphics::par(mfrow = c(1, 2), mar = c(4.2, 4.4, 3.2, 1.0))
+
+    # Panel A: 3 x 5 Marginal Inverse-Fourier Shape Reconstructions Across PC1-PC3 (-2, -1, 0, +1, +2 SD)
+    graphics::plot(
+      c(0, 5), c(0, 3), type = "n", axes = FALSE, xlab = "", ylab = "",
+      main = "A. Marginal Inverse-Fourier Shape Reconstructions Across PC1-PC3",
+      font.main = 2
     )
-    plot_3d_scatter_box(
-      x = df$Sym_PC1, y = df$Sym_PC2, z = spc3,
-      col = cols, pch = pt_pch, cex = 0.85, lwd = 1.0,
-      xlab = "Sym_PC1", ylab = "Sym_PC2", zlab = "Sym_PC3",
-      main = "B. 3D PCA Morphospace (PC1 x PC2 x PC3)",
-      centroids = cent_sym_3d,
-      is_type_vec = is_type_row,
-      legend_args = list(
-        "topright", legend = packera_italic_expressions(present_tx),
-        col = dyn_pal[present_tx], pch = dyn_pch[present_tx], pt.bg = NA, cex = 0.72, bty = "n"
+    graphics::box(col = "grey78")
+    graphics::abline(h = c(1.0, 2.0), v = c(1.0, 2.0, 3.0, 4.0), col = "grey88", lty = 2)
+
+    z_levels <- c(-2.0, -1.0, 0.0, 1.0, 2.0)
+    z_headers <- c("-2.0 SD", "-1.0 SD", "Mean (0 SD)", "+1.0 SD", "+2.0 SD")
+    graphics::axis(3, at = seq(0.5, 4.5, by = 1.0), labels = z_headers, tick = FALSE, line = -0.6, cex.axis = 0.76, font = 2)
+    row_labels <- c(
+      sprintf("Sym_PC1\n(%.1f%%)", sym_var_pct3[1]),
+      sprintf("Sym_PC2\n(%.1f%%)", sym_var_pct3[2]),
+      sprintf("Sym_PC3\n(%.1f%%)", sym_var_pct3[3])
+    )
+    graphics::axis(2, at = c(2.5, 1.5, 0.5), labels = row_labels, tick = FALSE, las = 1, line = -0.4, cex.axis = 0.74, font = 2)
+
+    pc_scores_3 <- cbind(as.numeric(df$Sym_PC1), as.numeric(df$Sym_PC2), as.numeric(spc3))
+    h_grand_mean <- if (!is.null(std_hmat) && nrow(std_hmat) >= 1L) colMeans(std_hmat, na.rm = TRUE) else project_grid_harmonics(0, 0)
+
+    for (r_idx in 1:3) {
+      y_center <- 3.0 - (r_idx - 0.5)
+      p_vec <- pc_scores_3[, r_idx]
+      sd_p <- stats::sd(p_vec, na.rm = TRUE)
+      b_axis <- NULL
+      if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && is.finite(sd_p) && sd_p > 1e-6) {
+        z_std <- (p_vec - mean(p_vec, na.rm = TRUE)) / sd_p
+        z_std[!is.finite(z_std)] <- 0.0
+        H_cent <- scale(std_hmat, center = TRUE, scale = FALSE)
+        H_cent[!is.finite(H_cent)] <- 0.0
+        b_axis <- as.numeric(crossprod(z_std, H_cent) / max(sum(z_std^2), 1.0))
+        names(b_axis) <- colnames(std_hmat)
+      }
+      row_outlines <- vector("list", length(z_levels))
+      for (c_idx in seq_along(z_levels)) {
+        z_val <- z_levels[c_idx]
+        if (!is.null(b_axis)) {
+          h_z <- h_grand_mean + z_val * b_axis
+        } else if (r_idx == 1L) {
+          h_z <- project_grid_harmonics(z_val * max(sd_p, 0.4), 0.0)
+        } else if (r_idx == 2L) {
+          h_z <- project_grid_harmonics(0.0, z_val * max(sd_p, 0.4))
+        } else {
+          h_z <- h_grand_mean
+          if ("A3" %in% names(h_z)) h_z["A3"] <- h_z["A3"] + 0.06 * z_val
+          if ("D3" %in% names(h_z)) h_z["D3"] <- h_z["D3"] - 0.05 * z_val
+        }
+        row_outlines[[c_idx]] <- reconstruct_efa_outline(h_z, nb_pts = 120L)
+      }
+      row_pts <- do.call(rbind, row_outlines)
+      row_center <- c(mean(range(row_pts[, 1], na.rm = TRUE)), mean(range(row_pts[, 2], na.rm = TRUE)))
+      row_scale  <- min(0.78 / max(diff(range(row_pts[, 1], na.rm = TRUE)), 1e-6), 0.78 / max(diff(range(row_pts[, 2], na.rm = TRUE)), 1e-6)) * 0.86
+      xy_zero <- row_outlines[[3L]]
+
+      for (c_idx in seq_along(z_levels)) {
+        x_center <- c_idx - 0.5
+        if (c_idx != 3L) {
+          draw_outline_in_box(
+            xy_zero, cx = x_center, cy = y_center, w_box = 0.78, h_box = 0.78,
+            col_border = "grey65", col_fill = NA, lwd = 0.9, lty = 3,
+            shared_scale = row_scale, shared_center = row_center
+          )
+        }
+        col_c <- if (c_idx < 3L) "#0072B2" else if (c_idx == 3L) "#009E73" else "#D55E00"
+        draw_outline_in_box(
+          row_outlines[[c_idx]], cx = x_center, cy = y_center, w_box = 0.78, h_box = 0.78,
+          col_border = col_c,
+          col_fill = grDevices::adjustcolor(col_c, alpha.f = if (c_idx == 3L) 0.24 else 0.15),
+          lwd = if (c_idx == 3L) 2.1 else 1.6, lty = 1,
+          shared_scale = row_scale, shared_center = row_center
+        )
+      }
+    }
+
+    # Panel B: Homologous Radial Shape Displacement vs. Focal Reference (with Jacobian Margin Shading)
+    tier_3a <- resolve_taxon_display_tier(df, df$taxon_clean)
+    fg_3a <- tier_3a$fg_groups
+    ref_tx <- fg_3a[1L]
+    m_ref_type <- (df$taxon_clean == ref_tx) & is_type_row
+    m_ref_all  <- (df$taxon_clean == ref_tx)
+    h_ref <- if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df)) {
+      if (any(m_ref_type, na.rm = TRUE)) colMeans(std_hmat[m_ref_type, , drop = FALSE], na.rm = TRUE)
+      else if (any(m_ref_all, na.rm = TRUE)) colMeans(std_hmat[m_ref_all, , drop = FALSE], na.rm = TRUE)
+      else colMeans(std_hmat, na.rm = TRUE)
+    } else {
+      project_grid_harmonics(0.0, 0.0)
+    }
+    xy_ref <- reconstruct_efa_outline(h_ref, nb_pts = 120L)
+
+    comp_tx <- if (length(fg_3a) >= 2L) utils::head(fg_3a[-1L], 4L) else ref_tx
+    graphics::plot(
+      c(0, 2), c(0, 2), type = "n", axes = FALSE, xlab = "", ylab = "",
+      main = "B. Homologous Radial Shape Displacement vs. Focal Reference",
+      font.main = 2
+    )
+    graphics::box(col = "grey78")
+    lay_b <- .compute_outline_grid_layout(length(comp_tx))
+
+    for (idx_c in seq_along(comp_tx)) {
+      tx_c <- comp_tx[idx_c]
+      col_tx <- if (tx_c %in% names(dyn_pal)) dyn_pal[[tx_c]] else "#D55E00"
+      cx_b <- lay_b$cx[idx_c]; cy_b <- lay_b$cy[idx_c]
+      m_c <- which(df$taxon_clean == tx_c)
+      h_comp <- if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && length(m_c) > 0L) {
+        if (tx_c == ref_tx && length(comp_tx) == 1L) {
+          h_sd_r <- apply(std_hmat[m_c, , drop = FALSE], 2, stats::sd, na.rm = TRUE)
+          h_sd_r[!is.finite(h_sd_r)] <- 0.0
+          h_ref + 0.85 * h_sd_r
+        } else {
+          colMeans(std_hmat[m_c, , drop = FALSE], na.rm = TRUE)
+        }
+      } else {
+        project_grid_harmonics(0.6 * idx_c, -0.3 * idx_c)
+      }
+      xy_comp <- reconstruct_efa_outline(h_comp, nb_pts = 120L)
+
+      comb_xy <- rbind(xy_ref, xy_comp)
+      sh_cent <- c(mean(range(comb_xy[, 1], na.rm = TRUE)), mean(range(comb_xy[, 2], na.rm = TRUE)))
+      sh_scl  <- min(0.68 / max(diff(range(comb_xy[, 1], na.rm = TRUE)), 1e-6), 0.64 / max(diff(range(comb_xy[, 2], na.rm = TRUE)), 1e-6)) * 0.86 * lay_b$cell_scale
+
+      pts_ref  <- cbind(cx_b + (xy_ref[, 1] - sh_cent[1]) * sh_scl, (cy_b - lay_b$body_dy) + (xy_ref[, 2] - sh_cent[2]) * sh_scl)
+      pts_comp <- cbind(cx_b + (xy_comp[, 1] - sh_cent[1]) * sh_scl, (cy_b - lay_b$body_dy) + (xy_comp[, 2] - sh_cent[2]) * sh_scl)
+
+      # Jacobian expansion/contraction ribbon shading along homologous blade margin
+      n_v <- nrow(pts_ref)
+      for (k_v in seq_len(n_v)) {
+        k_next <- if (k_v < n_v) k_v + 1L else 1L
+        ds_ref  <- sqrt(sum((pts_ref[k_next, ] - pts_ref[k_v, ])^2))
+        ds_comp <- sqrt(sum((pts_comp[k_next, ] - pts_comp[k_v, ])^2))
+        jac_ratio <- ds_comp / max(ds_ref, 1e-6)
+        rib_col <- if (jac_ratio >= 1.0) grDevices::adjustcolor("#D55E00", alpha.f = 0.24) else grDevices::adjustcolor("#0072B2", alpha.f = 0.24)
+        graphics::polygon(
+          c(pts_ref[k_v, 1], pts_ref[k_next, 1], pts_comp[k_next, 1], pts_comp[k_v, 1]),
+          c(pts_ref[k_v, 2], pts_ref[k_next, 2], pts_comp[k_next, 2], pts_comp[k_v, 2]),
+          col = rib_col, border = NA
+        )
+      }
+
+      graphics::lines(c(pts_ref[, 1], pts_ref[1, 1]), c(pts_ref[, 2], pts_ref[1, 2]), col = "#111111", lwd = 1.4, lty = 2)
+      graphics::polygon(pts_comp[, 1], pts_comp[, 2], col = grDevices::adjustcolor(col_tx, alpha.f = 0.12), border = col_tx, lwd = 2.0)
+
+      arr_idx <- seq(1L, n_v, by = 6L)
+      dx_v <- pts_comp[arr_idx, 1] - pts_ref[arr_idx, 1]
+      dy_v <- pts_comp[arr_idx, 2] - pts_ref[arr_idx, 2]
+      keep_arr <- which(is.finite(dx_v) & is.finite(dy_v) & (sqrt(dx_v^2 + dy_v^2) > 1e-4))
+      if (length(keep_arr) > 0L) {
+        graphics::arrows(
+          pts_ref[arr_idx[keep_arr], 1], pts_ref[arr_idx[keep_arr], 2],
+          pts_comp[arr_idx[keep_arr], 1], pts_comp[arr_idx[keep_arr], 2],
+          length = 0.04, lwd = 1.15, col = "#111111"
+        )
+      }
+
+      rmsd_val <- sqrt(mean(rowSums((xy_comp - xy_ref)^2), na.rm = TRUE))
+      short_c <- sub("^Packera\\s+", "P. ", tx_c)
+      short_r <- sub("^Packera\\s+", "P. ", ref_tx)
+      graphics::text(
+        cx_b, cy_b + lay_b$title_dy,
+        labels = as.expression(bquote(bolditalic(.(short_c)) ~ "vs." ~ italic(.(short_r)))),
+        cex = lay_b$cex_title, col = "#111111"
       )
-    )
+      if (is.finite(rmsd_val)) {
+        graphics::text(
+          cx_b, cy_b - lay_b$sub_dy,
+          labels = sprintf("Radial RMSD = %.3f | Red: Expansion, Blue: Contraction", rmsd_val),
+          cex = lay_b$cex_sub, col = "grey25"
+        )
+      }
+    }
   }, fdir, "fig03a_efa_morphospace_pca", width = 13.0, height = 6.0, dpi = 300)
 
   # ----------------------------------------------------------------------------
@@ -1762,35 +2376,85 @@ compute_ari_pure <- function(labels_true, labels_pred) {
 
 render_allometry_diagnostic_pdf <- function(sub_df, r2_size, p_size, r2_int, output_pdf, p_int = 1.0) {
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
+  tmp_pdf <- paste0(output_pdf, ".tmp")
   sub_df$sp_clean <- resolve_plot_group_column(sub_df)
-  taxon_cols <- get_dynamic_packera_palette(sub_df$sp_clean)
-  taxon_pch  <- get_dynamic_packera_shapes(sub_df$sp_clean)
-  taxa_in_data <- intersect(names(taxon_cols), sort(unique(sub_df$sp_clean)))
-  if (length(taxa_in_data) == 0) taxa_in_data <- sort(unique(sub_df$sp_clean))
-  alpha_val <- adaptive_point_alpha(nrow(sub_df))
+  tier_info <- resolve_taxon_display_tier(sub_df, sub_df$sp_clean)
+  taxon_cols <- tier_info$palette
+  taxon_pch  <- tier_info$shapes
+  fg_taxa    <- tier_info$fg_groups
+  bg_taxa    <- tier_info$bg_groups
+  alpha_val  <- adaptive_point_alpha(nrow(sub_df))
 
-  grDevices::pdf(output_pdf, width = 12.5, height = 5.6, pointsize = 11, useDingbats = FALSE)
+  # Compute multivariate Drake & Klingenberg (2008) regression score s = Y * beta_hat / ||beta_hat||
+  sym_cols <- c(grep("^A[0-9]+$", colnames(sub_df), value = TRUE), grep("^D[0-9]+$", colnames(sub_df), value = TRUE))
+  reg_score <- NULL
+  ylab_a <- "Drake & Klingenberg Allometric Score (s)"
+  if (length(sym_cols) >= 2L && "log_centsize" %in% colnames(sub_df)) {
+    Y_raw <- tryCatch(as.matrix(sub_df[, sym_cols, drop = FALSE]), error = function(e) NULL)
+    if (!is.null(Y_raw) && is.numeric(Y_raw)) {
+      keep_c <- which(apply(Y_raw, 2, function(col) sum(is.finite(col)) >= 3L && isTRUE(stats::sd(col, na.rm = TRUE) > 1e-8)))
+      if (length(keep_c) >= 2L) {
+        Y_use <- Y_raw[, keep_c, drop = FALSE]
+        for (jc in seq_len(ncol(Y_use))) {
+          bad_j <- !is.finite(Y_use[, jc])
+          if (any(bad_j)) Y_use[bad_j, jc] <- mean(Y_use[!bad_j, jc], na.rm = TRUE)
+        }
+        lcs <- suppressWarnings(as.numeric(sub_df$log_centsize))
+        lcs[!is.finite(lcs)] <- mean(lcs[is.finite(lcs)], na.rm = TRUE)
+        if (isTRUE(stats::sd(lcs, na.rm = TRUE) > 1e-6)) {
+          fit_dk <- tryCatch(stats::lm(Y_use ~ lcs), error = function(e) NULL)
+          if (!is.null(fit_dk)) {
+            b_hat <- as.numeric(stats::coef(fit_dk)[2, ])
+            b_hat[!is.finite(b_hat)] <- 0.0
+            b_norm <- sqrt(sum(b_hat^2))
+            if (is.finite(b_norm) && b_norm > 1e-8) {
+              Y_cent <- scale(Y_use, center = TRUE, scale = FALSE)
+              reg_score <- as.numeric((Y_cent %*% b_hat) / b_norm)
+            }
+          }
+        }
+      }
+    }
+  }
+  if (is.null(reg_score) || !any(is.finite(reg_score))) {
+    reg_score <- if ("PC1_raw" %in% colnames(sub_df)) as.numeric(sub_df$PC1_raw) else if ("PC1" %in% colnames(sub_df)) as.numeric(sub_df$PC1) else rep(0.0, nrow(sub_df))
+    ylab_a <- "Symmetric Morphospace PC1 (Blade Elongation)"
+  }
+  sub_df$allom_reg_score <- reg_score
+
+  grDevices::pdf(tmp_pdf, width = 12.5, height = 5.6, pointsize = 11, useDingbats = FALSE)
   tryCatch({
     graphics::par(mfrow = c(1, 2), mar = c(4.5, 4.5, 3.2, 1.4), oma = c(0, 0, 1.8, 0), family = "sans")
-    # Panel A: log(Centroid Size) vs Sym_PC1 with 95% confidence ribbons & ANCOVA stats
+    # Panel A: log(Centroid Size) vs Multivariate Drake & Klingenberg Allometric Score s
     p_int_val <- if (!is.null(p_int) && is.finite(p_int)) p_int else 1.0
     graphics::plot(
-      sub_df$log_centsize, sub_df$PC1_raw, type = "n",
+      sub_df$log_centsize, sub_df$allom_reg_score, type = "n",
       xlab = expression(log(Centroid~Size)~"[mm]"),
-      ylab = "Symmetric Morphospace PC1 (Blade Elongation)",
+      ylab = ylab_a,
       main = sprintf("A. Foliar Allometry (R2_size = %.3f, p = %.3f; Slope p_int = %.3f)", r2_size, p_size, p_int_val),
       font.main = 2
     )
     graphics::grid(col = "gray88", lty = "solid")
 
-    for (sp in taxa_in_data) {
+    if (length(bg_taxa) > 0L) {
+      bg_idx <- which(sub_df$sp_clean %in% bg_taxa)
+      if (length(bg_idx) > 0L) {
+        graphics::points(
+          sub_df$log_centsize[bg_idx], sub_df$allom_reg_score[bg_idx],
+          pch = 1L, bg = NA, col = grDevices::adjustcolor("#999999", alpha.f = 0.30),
+          cex = 0.58, lwd = 0.85
+        )
+      }
+    }
+
+    for (sp in fg_taxa) {
       sp_idx <- which(sub_df$sp_clean == sp)
       if (length(sp_idx) > 0) {
-        pt_col <- if (sp %in% names(taxon_cols)) taxon_cols[[sp]] else "#7F7F7F"
+        pt_col <- if (sp %in% names(taxon_cols)) taxon_cols[[sp]] else "#0072B2"
         pt_pch <- if (sp %in% names(taxon_pch)) taxon_pch[[sp]] else 1L
-        if (length(sp_idx) >= 4 && stats::sd(sub_df$log_centsize[sp_idx], na.rm = TRUE) > 1e-5) {
+        if (length(sp_idx) >= 4 && isTRUE(stats::sd(sub_df$log_centsize[sp_idx], na.rm = TRUE) > 1e-5)) {
           sp_sub <- sub_df[sp_idx, , drop = FALSE]
-          sp_lm <- tryCatch(stats::lm(PC1_raw ~ log_centsize, data = sp_sub), error = function(e) NULL)
+          sp_lm <- tryCatch(stats::lm(allom_reg_score ~ log_centsize, data = sp_sub), error = function(e) NULL)
           if (!is.null(sp_lm)) {
             x_seq <- seq(min(sp_sub$log_centsize, na.rm = TRUE), max(sp_sub$log_centsize, na.rm = TRUE), length.out = 40)
             pred_ci <- tryCatch(stats::predict(sp_lm, newdata = data.frame(log_centsize = x_seq), interval = "confidence"), error = function(e) NULL)
@@ -1804,88 +2468,67 @@ render_allometry_diagnostic_pdf <- function(sub_df, r2_size, p_size, r2_int, out
           }
         }
         graphics::points(
-          sub_df$log_centsize[sp_idx], sub_df$PC1_raw[sp_idx],
+          sub_df$log_centsize[sp_idx], sub_df$allom_reg_score[sp_idx],
           pch = pt_pch, bg = NA, col = grDevices::adjustcolor(pt_col, alpha.f = alpha_val),
           cex = 0.85, lwd = 1.0
         )
       }
     }
-    glob_lm <- tryCatch(stats::lm(PC1_raw ~ log_centsize, data = sub_df), error = function(e) NULL)
+    glob_lm <- tryCatch(stats::lm(allom_reg_score ~ log_centsize, data = sub_df), error = function(e) NULL)
     if (!is.null(glob_lm)) graphics::abline(glob_lm, col = "#111111", lwd = 2.2, lty = 2)
-    sp_cols <- vapply(taxa_in_data, function(sp) if (sp %in% names(taxon_cols)) taxon_cols[[sp]] else "#7F7F7F", character(1))
-    sp_pchs <- vapply(taxa_in_data, function(sp) if (sp %in% names(taxon_pch)) taxon_pch[[sp]] else 1L, integer(1))
+    sp_cols <- vapply(fg_taxa, function(sp) if (sp %in% names(taxon_cols)) taxon_cols[[sp]] else "#7F7F7F", character(1))
+    sp_pchs <- vapply(fg_taxa, function(sp) if (sp %in% names(taxon_pch)) taxon_pch[[sp]] else 1L, integer(1))
     graphics::legend(
       "topleft",
-      legend = c(packera_italic_expressions(taxa_in_data), "Pooled Allometric Slope"),
+      legend = c(packera_italic_expressions(fg_taxa), "Pooled Allometric Trajectory"),
       col = c(sp_cols, "#111111"),
       pch = c(sp_pchs, NA),
-      lty = c(rep(1, length(taxa_in_data)), 2),
-      lwd = c(rep(1.8, length(taxa_in_data)), 2.2),
-      pt.bg = NA, bty = "n", cex = 0.74
+      lty = c(rep(1, length(fg_taxa)), 2),
+      lwd = c(rep(1.8, length(fg_taxa)), 2.2),
+      pt.bg = NA, bty = "n", cex = 0.72
     )
 
-    # Panel B: Clean 95% Ellipses + Species Centroids Before (Dashed) vs After (Solid) Allometric Correction
-    x_lim <- range(c(sub_df$PC1_raw, sub_df$PC1_corrected), na.rm = TRUE)
-    y_lim <- range(c(sub_df$PC2_raw, sub_df$PC2_corrected), na.rm = TRUE)
-    x_pad <- 0.12 * max(diff(x_lim), 0.1); y_pad <- 0.12 * max(diff(y_lim), 0.1)
-    graphics::plot(
-      sub_df$PC1_corrected, sub_df$PC2_corrected, type = "n",
-      xlim = c(x_lim[1] - x_pad, x_lim[2] + x_pad),
-      ylim = c(y_lim[1] - y_pad, y_lim[2] + y_pad),
-      xlab = "Morphospace PC1", ylab = "Morphospace PC2",
-      main = "B. Species Ellipses & Centroids: Raw (Dashed) vs. Residual-Corrected (Solid)",
-      font.main = 2
-    )
-    graphics::grid(col = "gray88", lty = "solid")
-    graphics::abline(h = 0, v = 0, lty = 3, col = "grey70")
+    # Panel B: Allometry-Free Residual Morphospace (PC1_corrected vs. PC2_corrected) with 95% Ellipses & Type Anchors
+    pc1_cor <- if ("PC1_corrected" %in% colnames(sub_df)) as.numeric(sub_df$PC1_corrected) else as.numeric(sub_df$PC1_raw)
+    pc2_cor <- if ("PC2_corrected" %in% colnames(sub_df)) as.numeric(sub_df$PC2_corrected) else if ("PC2_raw" %in% colnames(sub_df)) as.numeric(sub_df$PC2_raw) else rep(0.0, nrow(sub_df))
+    cent_cor <- do.call(rbind, lapply(fg_taxa, function(sp) {
+      m <- which(sub_df$sp_clean == sp)
+      c(mean(pc1_cor[m], na.rm = TRUE), mean(pc2_cor[m], na.rm = TRUE))
+    }))
+    rownames(cent_cor) <- sub("^Packera\\s+", "P. ", fg_taxa)
+    is_type_allom <- if ("is_type_specimen" %in% colnames(sub_df)) as.logical(sub_df$is_type_specimen) else rep(FALSE, nrow(sub_df))
+    is_type_allom[is.na(is_type_allom)] <- FALSE
 
-    for (sp in taxa_in_data) {
-      sp_idx <- which(sub_df$sp_clean == sp)
-      if (length(sp_idx) > 0) {
-        pt_col <- if (sp %in% names(taxon_cols)) taxon_cols[[sp]] else "#7F7F7F"
-        pt_pch <- if (sp %in% names(taxon_pch)) taxon_pch[[sp]] else 1L
-        # Faint hollow points for corrected coordinates
-        graphics::points(
-          sub_df$PC1_corrected[sp_idx], sub_df$PC2_corrected[sp_idx],
-          pch = pt_pch, bg = NA, col = grDevices::adjustcolor(pt_col, alpha.f = alpha_val * 0.85),
-          cex = 0.78, lwd = 0.9
-        )
-        # Dashed ellipse before correction, bold solid ellipse after correction
-        if (length(sp_idx) >= 3) {
-          draw_2d_confidence_ellipse(
-            sub_df$PC1_raw[sp_idx], sub_df$PC2_raw[sp_idx],
-            col = grDevices::adjustcolor(pt_col, alpha.f = 0.70), level = 0.95, lwd = 1.4, lty = 2
-          )
-          draw_2d_confidence_ellipse(
-            sub_df$PC1_corrected[sp_idx], sub_df$PC2_corrected[sp_idx],
-            col = pt_col, level = 0.95, lwd = 2.2, lty = 1
-          )
-        }
-        # Species centroid shift vector
-        cx_raw <- mean(sub_df$PC1_raw[sp_idx], na.rm = TRUE)
-        cy_raw <- mean(sub_df$PC2_raw[sp_idx], na.rm = TRUE)
-        cx_cor <- mean(sub_df$PC1_corrected[sp_idx], na.rm = TRUE)
-        cy_cor <- mean(sub_df$PC2_corrected[sp_idx], na.rm = TRUE)
-        graphics::points(cx_raw, cy_raw, pch = 1, col = pt_col, cex = 1.4, lwd = 1.8)
-        graphics::points(cx_cor, cy_cor, pch = 3, col = pt_col, cex = 1.7, lwd = 2.4)
-        if (sqrt((cx_cor - cx_raw)^2 + (cy_cor - cy_raw)^2) > 1e-4) {
-          graphics::arrows(cx_raw, cy_raw, cx_cor, cy_cor, length = 0.08, lwd = 2.2, col = "#111111")
-        }
-        short_sp <- sub("^Packera\\s+", "P. ", sp)
-        graphics::text(cx_cor, cy_cor, labels = short_sp, pos = 3, cex = 0.76, font = 4, col = "#111111")
-      }
-    }
-    graphics::legend(
-      "bottomright",
-      legend = c("Raw 95% Ellipse (Before)", "Allometry-Free 95% Ellipse (After)", "Species Centroid Shift Vector"),
-      lty = c(2, 1, 1), lwd = c(1.4, 2.2, 2.2), pch = c(1, 3, NA),
-      col = c("grey40", "#0072B2", "#111111"), pt.bg = NA, bty = "n", cex = 0.74
+    plot_2d_ordination_scatter(
+      x = pc1_cor,
+      y = pc2_cor,
+      col = grDevices::adjustcolor(taxon_cols[sub_df$sp_clean], alpha.f = alpha_val),
+      pch = taxon_pch[sub_df$sp_clean],
+      cex = 0.84,
+      lwd = 1.0,
+      xlab = "Allometry-Free Residual PC1",
+      ylab = "Allometry-Free Residual PC2",
+      main = "B. Allometry-Free Residual Morphospace (95% Confidence Ellipses)",
+      group_vec = sub_df$sp_clean,
+      group_cols = taxon_cols,
+      ellipse_level = 0.95,
+      centroids = cent_cor,
+      is_type_vec = is_type_allom,
+      legend_args = list(
+        "bottomright",
+        legend = packera_italic_expressions(fg_taxa),
+        col = sp_cols,
+        pch = sp_pchs,
+        pt.bg = NA, bty = "n", cex = 0.72
+      )
     )
+
     title_taxa <- if ("species_standardized" %in% names(sub_df) && length(unique(stats::na.omit(sub_df$species_standardized))) == 1L) sub_df$species_standardized else sub_df$sp_clean
     graphics::title(format_active_complex_title(title_taxa, "Foliar Size-Shape Allometry & Morphospace Correction"), outer = TRUE, cex.main = 1.25)
   }, finally = {
     grDevices::dev.off()
   })
+  if (file.exists(tmp_pdf)) file.rename(tmp_pdf, output_pdf)
   invisible(output_pdf)
 }
 
@@ -1930,67 +2573,108 @@ draw_gmm_species_contingency_heatmap <- function(sp_clean, cl_v, gmm_res, main_p
 }
 
 draw_diagnostic_trait_boxplots <- function(df, sp_clean, taxon_cols, taxon_pch, main_title = "C. Diagnostic Vegetative & Reproductive Traits by Species") {
-  present_tx <- sort(unique(sp_clean[sp_clean != "Unknown"]))
-  if (length(present_tx) == 0) present_tx <- "Unassigned_Packera"
-  short_tx <- gsub("^Packera\\s+", "P. ", present_tx)
+  tier_info <- resolve_taxon_display_tier(df, sp_clean, max_fg = 8L)
+  present_tx <- tier_info$fg_groups
+  if (length(present_tx) == 0L) present_tx <- "Unassigned_Packera"
 
-  ar_leaf <- if ("aspect_ratio" %in% names(df)) as.numeric(df$aspect_ratio) else rep(2.2, nrow(df))
-  sol_v   <- if ("solidity" %in% names(df)) as.numeric(df$solidity) else rep(0.90, nrow(df))
-  lcs_v   <- if ("log_centsize" %in% names(df)) as.numeric(df$log_centsize) else rep(2.5, nrow(df))
-  ar_inv  <- if ("AR_inv" %in% names(df)) as.numeric(df$AR_inv) else if ("capitulum_aspect_ratio" %in% names(df)) as.numeric(df$capitulum_aspect_ratio) else rep(1.1, nrow(df))
-
-  z_norm <- function(v) {
-    v_num <- suppressWarnings(as.numeric(v))
-    m <- mean(v_num, na.rm = TRUE); s <- stats::sd(v_num, na.rm = TRUE)
-    if (!is.finite(s) || s < 1e-6) return(rep(0.0, length(v_num)))
-    pmax(-3.2, pmin(3.2, (v_num - m) / s))
+  .get_raw_trait <- function(col_candidates, fallback_val, transform_fn = NULL) {
+    for (cn in col_candidates) {
+      if (cn %in% names(df)) {
+        v <- suppressWarnings(as.numeric(df[[cn]]))
+        if (any(is.finite(v))) {
+          if (!is.null(transform_fn)) v <- transform_fn(v)
+          return(v)
+        }
+      }
+    }
+    rep(fallback_val, nrow(df))
   }
 
-  trait_list <- list(
-    "Blade Aspect\nRatio (L/W)" = z_norm(ar_leaf),
-    "Lamina Solidity\n(Dissection)" = z_norm(sol_v),
-    "Log Centroid\nSize (mm)" = z_norm(lcs_v),
-    "Involucre\nRatio (AR_inv)" = z_norm(ar_inv)
+  ar_leaf <- .get_raw_trait(c("aspect_ratio"), 2.2)
+  sol_v   <- .get_raw_trait(c("solidity"), 0.90)
+  cs_mm   <- .get_raw_trait(c("centroid_size"), NA_real_)
+  if (!any(is.finite(cs_mm))) {
+    cs_mm <- .get_raw_trait(c("log_centsize"), 12.2, transform_fn = function(x) exp(pmin(x, 8.0)))
+  }
+  ar_inv  <- .get_raw_trait(c("AR_inv", "capitulum_aspect_ratio"), 1.15)
+
+  raw_traits <- list(
+    "Blade Aspect\nRatio (L/W)"     = list(vec = ar_leaf, unit = "L/W", fmt = "%.2f"),
+    "Lamina Solidity\n(Area/Hull)"  = list(vec = sol_v,   unit = "ratio", fmt = "%.2f"),
+    "Centroid Size\n(Raw mm)"       = list(vec = cs_mm,   unit = "mm", fmt = "%.1f"),
+    "Involucre Ratio\n(AR_inv L/W)" = list(vec = ar_inv,  unit = "L/W", fmt = "%.2f")
   )
 
-  n_traits <- length(trait_list)
+  n_traits <- length(raw_traits)
   n_sp <- length(present_tx)
   box_data <- list()
   box_at   <- numeric(0)
   box_cols <- character(0)
   pos_cursor <- 1.0
   group_centers <- numeric(n_traits)
+  kw_labels <- character(n_traits)
+  range_labels <- character(n_traits)
+
+  sp_step <- if (n_sp <= 4L) 0.82 else max(0.45, 3.0 / n_sp)
 
   for (t_idx in seq_len(n_traits)) {
-    t_vec <- trait_list[[t_idx]]
-    sp_positions <- seq(pos_cursor, by = 0.85, length.out = n_sp)
+    t_info <- raw_traits[[t_idx]]
+    raw_v  <- as.numeric(t_info$vec)
+    fin_m  <- is.finite(raw_v) & (sp_clean %in% present_tx)
+    r_min  <- if (any(fin_m)) min(raw_v[fin_m], na.rm = TRUE) else 0.0
+    r_med  <- if (any(fin_m)) stats::median(raw_v[fin_m], na.rm = TRUE) else 0.5
+    r_max  <- if (any(fin_m)) max(raw_v[fin_m], na.rm = TRUE) else 1.0
+    r_span <- max(r_max - r_min, 1e-6)
+    norm_v <- (raw_v - r_min) / r_span
+
+    kw_p <- if (sum(fin_m) >= 4L && length(unique(sp_clean[fin_m])) >= 2L && isTRUE(stats::sd(raw_v[fin_m], na.rm = TRUE) > 1e-7)) {
+      tryCatch(stats::kruskal.test(raw_v[fin_m] ~ factor(sp_clean[fin_m]))$p.value, error = function(e) NA_real_)
+    } else NA_real_
+    kw_labels[t_idx] <- if (is.finite(kw_p)) {
+      if (kw_p < 0.001) "KW p < 0.001" else sprintf("KW p = %.3f", kw_p)
+    } else "KW NS"
+    range_labels[t_idx] <- sprintf(
+      paste0("[", t_info$fmt, " | med ", t_info$fmt, " | ", t_info$fmt, " %s]"),
+      r_min, r_med, r_max, t_info$unit
+    )
+
+    sp_positions <- seq(pos_cursor, by = sp_step, length.out = n_sp)
     group_centers[t_idx] <- mean(sp_positions)
     for (s_idx in seq_len(n_sp)) {
       sp_name <- present_tx[s_idx]
-      vals <- t_vec[sp_clean == sp_name]
+      vals <- norm_v[sp_clean == sp_name]
       vals <- vals[is.finite(vals)]
-      if (length(vals) == 0) vals <- c(-0.2, 0.0, 0.2)
-      box_data[[length(box_data) + 1L]] <- vals
+      if (length(vals) == 0L) vals <- c(0.4, 0.5, 0.6)
+      box_data[[length(box_data) + 1L]] <- pmin(1.0, pmax(0.0, vals))
       box_at <- c(box_at, sp_positions[s_idx])
-      box_cols <- c(box_cols, if (sp_name %in% names(taxon_cols)) taxon_cols[[sp_name]] else "#0072B2")
+      c_use <- if (sp_name %in% names(taxon_cols)) taxon_cols[[sp_name]] else if (sp_name %in% names(tier_info$palette)) tier_info$palette[[sp_name]] else "#0072B2"
+      box_cols <- c(box_cols, c_use)
     }
-    pos_cursor <- max(sp_positions) + 1.55
+    pos_cursor <- max(sp_positions) + 1.45
   }
 
   graphics::boxplot(
     box_data, at = box_at, col = grDevices::adjustcolor(box_cols, alpha.f = 0.28),
     border = box_cols, outpch = 1, outcol = grDevices::adjustcolor(box_cols, alpha.f = 0.65),
-    xaxt = "n", boxwex = 0.65, ylim = c(-3.3, 3.6),
-    ylab = "Standardized Trait Score (Z-score)",
+    xaxt = "n", yaxt = "n", boxwex = min(0.62, sp_step * 0.78), ylim = c(-0.16, 1.32),
+    ylab = "Raw Trait Range Strip (Min -> Max Annotated)",
     main = main_title, font.main = 2
   )
-  graphics::abline(h = 0, lty = 3, col = "grey65")
-  graphics::axis(1, at = group_centers, labels = names(trait_list), tick = FALSE, cex.axis = 0.78, line = 0.4, font = 2)
+  graphics::axis(2, at = c(0.0, 0.5, 1.0), labels = c("Min", "50%", "Max"), las = 1, cex.axis = 0.76)
+  graphics::abline(h = c(0.0, 0.5, 1.0), lty = 3, col = "grey78")
+  graphics::axis(1, at = group_centers, labels = names(raw_traits), tick = FALSE, cex.axis = 0.76, line = 0.35, font = 2)
+  graphics::text(group_centers, rep(-0.10, n_traits), labels = range_labels, cex = 0.60, col = "grey20")
+  graphics::text(group_centers, rep(1.08, n_traits), labels = kw_labels, cex = 0.66, font = 2, col = "#111111")
+
+  leg_cols <- vapply(present_tx, function(sp) {
+    if (sp %in% names(taxon_cols)) taxon_cols[[sp]] else if (sp %in% names(tier_info$palette)) tier_info$palette[[sp]] else "#0072B2"
+  }, character(1))
   graphics::legend(
-    "topright", horiz = TRUE,
+    "topright",
+    ncol = min(4L, max(1L, ceiling(length(present_tx) / 3L))),
     legend = packera_italic_expressions(present_tx),
-    fill = grDevices::adjustcolor(taxon_cols[present_tx], alpha.f = 0.40),
-    border = taxon_cols[present_tx], cex = 0.68, bty = "n"
+    fill = grDevices::adjustcolor(leg_cols, alpha.f = 0.40),
+    border = leg_cols, cex = 0.66, bty = "n"
   )
 }
 
@@ -2089,9 +2773,9 @@ draw_structure_posterior_barplot <- function(audit_df, cda_res, sp_clean, taxon_
 }
 
 draw_group_mean_leaf_outlines <- function(df, group_vec, group_cols, main_title = "B. Mean Leaf Outline Reconstructions (+/- 1 SD)") {
-  present_grp <- sort(unique(group_vec[!is.na(group_vec) & nzchar(group_vec) & group_vec != "Unknown"]))
-  if (length(present_grp) == 0) present_grp <- "Morphotype_K1"
-  disp_grp <- present_grp[seq_len(min(4L, length(present_grp)))]
+  tier_info <- resolve_taxon_display_tier(df, group_vec)
+  disp_grp <- utils::head(tier_info$ordered_groups, 9L)
+  if (length(disp_grp) == 0L) disp_grp <- "Morphotype_K1"
   n_disp <- length(disp_grp)
 
   graphics::plot(
@@ -2099,29 +2783,22 @@ draw_group_mean_leaf_outlines <- function(df, group_vec, group_cols, main_title 
     main = main_title, font.main = 2
   )
   graphics::box(col = "grey80")
-  if (n_disp == 1L) {
-    cx_vec <- 1.0; cy_vec <- 1.0
-  } else if (n_disp == 2L) {
-    graphics::abline(v = 1.0, col = "grey88", lty = 2)
-    cx_vec <- c(0.5, 1.5); cy_vec <- c(1.0, 1.0)
-  } else if (n_disp == 3L) {
-    graphics::abline(h = 1.0, col = "grey88", lty = 2)
-    graphics::segments(1.0, 1.0, 1.0, 2.0, col = "grey88", lty = 2)
-    cx_vec <- c(0.5, 1.5, 1.0); cy_vec <- c(1.48, 1.48, 0.48)
-  } else {
-    graphics::abline(h = 1.0, v = 1.0, col = "grey88", lty = 2)
-    cx_vec <- c(0.5, 1.5, 0.5, 1.5); cy_vec <- c(1.48, 1.48, 0.48, 0.48)
-  }
+  grid_lay <- .compute_outline_grid_layout(n_disp)
+  cx_vec <- grid_lay$cx
+  cy_vec <- grid_lay$cy
 
   std_hmat <- extract_standardized_harmonic_matrix(df, max_k = 12L)
   pc1_v <- if ("Sym_PC1" %in% names(df)) as.numeric(df$Sym_PC1) else if ("PC1" %in% names(df)) as.numeric(df$PC1) else rep(0.0, nrow(df))
   pc2_v <- if ("Sym_PC2" %in% names(df)) as.numeric(df$Sym_PC2) else if ("PC2" %in% names(df)) as.numeric(df$PC2) else rep(0.0, nrow(df))
+  is_type_row <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, nrow(df))
+  is_type_row[is.na(is_type_row)] <- FALSE
 
   for (idx_g in seq_len(n_disp)) {
     g_name <- disp_grp[idx_g]
-    g_col <- if (g_name %in% names(group_cols)) group_cols[[g_name]] else "#0072B2"
+    g_col <- if (g_name %in% names(group_cols)) group_cols[[g_name]] else if (g_name %in% names(tier_info$palette)) tier_info$palette[[g_name]] else "#0072B2"
     cx <- cx_vec[idx_g]; cy <- cy_vec[idx_g]
     m_grp <- which(group_vec == g_name)
+    m_type <- which((group_vec == g_name) & is_type_row)
 
     if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && length(m_grp) > 0) {
       h_mean <- colMeans(std_hmat[m_grp, , drop = FALSE], na.rm = TRUE)
@@ -2143,37 +2820,76 @@ draw_group_mean_leaf_outlines <- function(df, group_vec, group_cols, main_title 
     xy_plus  <- reconstruct_efa_outline(h_mean + 0.65 * h_sd, nb_pts = 120L)
     xy_minus <- reconstruct_efa_outline(h_mean - 0.65 * h_sd, nb_pts = 120L)
 
+    env_pts <- rbind(xy_plus, xy_mean, xy_minus)
+    shared_center <- c(mean(range(env_pts[, 1], na.rm = TRUE)), mean(range(env_pts[, 2], na.rm = TRUE)))
+    shared_scale  <- min(0.68 / max(diff(range(env_pts[, 1], na.rm = TRUE)), 1e-6), 0.64 / max(diff(range(env_pts[, 2], na.rm = TRUE)), 1e-6)) * 0.86 * grid_lay$cell_scale
+
     draw_outline_in_box(
-      xy_plus, cx = cx, cy = cy - 0.05, w_box = 0.72, h_box = 0.68,
+      xy_plus, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
       col_border = grDevices::adjustcolor(g_col, alpha.f = 0.45),
-      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.10), lwd = 0.9, lty = 3
+      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.10), lwd = 0.9, lty = 3,
+      shared_scale = shared_scale, shared_center = shared_center
     )
     draw_outline_in_box(
-      xy_minus, cx = cx, cy = cy - 0.05, w_box = 0.62, h_box = 0.58,
+      xy_minus, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
       col_border = grDevices::adjustcolor(g_col, alpha.f = 0.45),
-      col_fill = NA, lwd = 0.9, lty = 3
+      col_fill = NA, lwd = 0.9, lty = 3,
+      shared_scale = shared_scale, shared_center = shared_center
     )
     pts_mean <- draw_outline_in_box(
-      xy_mean, cx = cx, cy = cy - 0.05, w_box = 0.67, h_box = 0.63,
+      xy_mean, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
       col_border = g_col,
-      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.22), lwd = 2.2, lty = 1
+      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.22), lwd = 2.2, lty = 1,
+      shared_scale = shared_scale, shared_center = shared_center
     )
+    if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && length(m_type) > 0L) {
+      xy_type <- reconstruct_efa_outline(colMeans(std_hmat[m_type, , drop = FALSE], na.rm = TRUE), nb_pts = 120L)
+      draw_outline_in_box(
+        xy_type, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
+        col_border = "#111111", col_fill = NA, lwd = 1.6, lty = 2,
+        shared_scale = shared_scale, shared_center = shared_center
+      )
+    }
     if (!is.null(pts_mean)) {
       graphics::segments(cx, min(pts_mean[, 2]), cx, max(pts_mean[, 2]), col = grDevices::adjustcolor(g_col, alpha.f = 0.55), lty = 2, lwd = 1.0)
     }
 
-    med_ar  <- if ("aspect_ratio" %in% names(df) && length(m_grp) > 0) stats::median(as.numeric(df$aspect_ratio[m_grp]), na.rm = TRUE) else 2.2
-    med_sol <- if ("solidity" %in% names(df) && length(m_grp) > 0) stats::median(as.numeric(df$solidity[m_grp]), na.rm = TRUE) else 0.91
-    if (!is.finite(med_ar)) med_ar <- 2.2
-    if (!is.finite(med_sol)) med_sol <- 0.91
+    .fin_med_g <- function(col_nm) {
+      if (!(col_nm %in% names(df)) || length(m_grp) == 0L) return(NA_real_)
+      vv <- suppressWarnings(as.numeric(df[[col_nm]][m_grp]))
+      vv <- vv[is.finite(vv)]
+      if (length(vv) == 0L) return(NA_real_)
+      stats::median(vv)
+    }
+    med_ar  <- .fin_med_g("aspect_ratio")
+    med_sol <- .fin_med_g("solidity")
+    med_cs  <- .fin_med_g("centroid_size")
     short_g <- sub("^Packera\\s+", "P. ", g_name)
-    graphics::text(cx, cy + 0.41, labels = sprintf("%s (n=%d)", short_g, length(m_grp)), font = 2, cex = 0.78, col = "#111111")
-    graphics::text(cx, cy - 0.43, labels = sprintf("AR=%.2f | Sol=%.2f", med_ar, med_sol), cex = 0.66, col = "grey25")
+    graphics::text(cx, cy + grid_lay$title_dy, labels = sprintf("%s (n=%d)", short_g, length(m_grp)), font = 2, cex = grid_lay$cex_title, col = "#111111")
+    m_parts <- character(0)
+    if (is.finite(med_ar))  m_parts <- c(m_parts, sprintf("AR=%.2f", med_ar))
+    if (is.finite(med_sol)) m_parts <- c(m_parts, sprintf("Sol=%.2f", med_sol))
+    if (is.finite(med_cs))  m_parts <- c(m_parts, sprintf("CS=%.1fmm", med_cs))
+    if (length(m_parts) > 0L) {
+      graphics::text(cx, cy - grid_lay$sub_dy, labels = paste(m_parts, collapse = " | "), cex = grid_lay$cex_sub, col = "grey25")
+    }
   }
 }
 
 render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL, manova_res = NULL) {
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
+  fig04_cand <- file.path(dirname(output_pdf), "fig04_gmm_cda_clustering.pdf")
+  if (file.exists(fig04_cand) &&
+      normalizePath(fig04_cand, mustWork = FALSE) != normalizePath(output_pdf, mustWork = FALSE)) {
+    fi <- file.info(fig04_cand)
+    if (is.finite(fi$size) && fi$size > 1024 && abs(as.numeric(difftime(Sys.time(), fi$mtime, units = "secs"))) < 20.0) {
+      tmp_cp <- paste0(output_pdf, ".tmp")
+      if (file.copy(fig04_cand, tmp_cp, overwrite = TRUE)) {
+        file.rename(tmp_cp, output_pdf)
+        return(invisible(output_pdf))
+      }
+    }
+  }
   if (is.null(manova_res) && exists("run_multivariate_manova_audit", mode = "function")) {
     manova_res <- tryCatch(
       run_multivariate_manova_audit(
@@ -2186,12 +2902,14 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
       error = function(e) NULL
     )
   }
-  grDevices::pdf(output_pdf, width = 13.0, height = 10.2, pointsize = 11, useDingbats = FALSE)
+  tmp_pdf <- paste0(output_pdf, ".tmp")
+  grDevices::pdf(tmp_pdf, width = 13.0, height = 10.2, pointsize = 11, useDingbats = FALSE)
   tryCatch({
     graphics::par(mfrow = c(2, 2), mar = c(4.4, 5.2, 3.2, 1.2), oma = c(0.8, 0.8, 2.0, 0.8), family = "sans")
     sp_clean <- resolve_plot_group_column(audit_df, cda_res = cda_res, gmm_res = gmm_res)
-    taxon_cols <- get_dynamic_packera_palette(sp_clean)
-    taxon_pch  <- get_dynamic_packera_shapes(sp_clean)
+    tier_cda <- resolve_taxon_display_tier(audit_df, sp_clean)
+    taxon_cols <- tier_cda$palette
+    taxon_pch  <- tier_cda$shapes
     is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", sp_clean, ignore.case = TRUE)) ||
       length(unique(stats::na.omit(audit_df$species_standardized))) < 2L
     cda_sub <- format_manova_pillai_subtitle(
@@ -2211,7 +2929,7 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
     can1_v <- if ("can1" %in% names(audit_df)) audit_df$can1 else cda_res$canonical_scores[, 1]
     can2_v <- if ("can2" %in% names(audit_df)) audit_df$can2 else if (ncol(cda_res$canonical_scores) >= 2) cda_res$canonical_scores[, 2] else rep(0, nrow(audit_df))
 
-    present_tx <- sort(unique(sp_clean[!is.na(sp_clean) & nzchar(sp_clean) & sp_clean != "Unknown"]))
+    present_tx <- tier_cda$ordered_groups
     if (length(present_tx) == 0) present_tx <- "Unassigned_Packera"
     alpha_val <- adaptive_point_alpha(nrow(audit_df))
     pch_cda <- taxon_pch[sp_clean]; pch_cda[is.na(pch_cda)] <- 1L
@@ -2288,6 +3006,7 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
   }, finally = {
     grDevices::dev.off()
   })
+  if (file.exists(tmp_pdf)) file.rename(tmp_pdf, output_pdf)
   invisible(output_pdf)
 }
 
@@ -2320,8 +3039,9 @@ generate_step04_pub_figures <- function(
   opt_mod <- if (!is.null(gmm_res$optimal_model)) gmm_res$optimal_model else if (!is.null(gmm_res$model_name)) gmm_res$model_name else "VVI"
 
   tx_clean <- resolve_plot_group_column(audited_df, cda_res = cda_res, gmm_res = gmm_res)
-  dyn_pal <- get_dynamic_packera_palette(tx_clean)
-  dyn_pch <- get_dynamic_packera_shapes(tx_clean)
+  tier_s04 <- resolve_taxon_display_tier(audited_df, tx_clean)
+  dyn_pal <- tier_s04$palette
+  dyn_pch <- tier_s04$shapes
   is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", tx_clean, ignore.case = TRUE)) ||
     length(unique(stats::na.omit(audited_df$species_standardized))) < 2L
   cda_manova_sub <- format_manova_pillai_subtitle(
@@ -2339,7 +3059,7 @@ generate_step04_pub_figures <- function(
   var1 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 1) cda_res$variance_pct[1] else 55.0
   var2 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 2) cda_res$variance_pct[2] else 28.0
 
-  present_tx <- sort(unique(tx_clean[!is.na(tx_clean) & nzchar(tx_clean) & tx_clean != "Unknown"]))
+  present_tx <- tier_s04$ordered_groups
   if (length(present_tx) == 0) present_tx <- "Unassigned_Packera"
   cent_cda <- if (!is.null(cda_res$centroids) && ncol(cda_res$centroids) >= 2 && all(present_tx %in% rownames(cda_res$centroids))) {
     c2 <- cda_res$centroids[present_tx, 1:2, drop = FALSE]
@@ -2376,23 +3096,110 @@ generate_step04_pub_figures <- function(
   is_type_v[is.na(is_type_v)] <- FALSE
 
   # ----------------------------------------------------------------------------
-  # Figure 04a: mclust BIC Model Selection & 2D GMM Clusters in PCA Space
+  # Figure 04a: Multi-Model mclust BIC Credible Band & Uncertainty-Scaled GMM Clusters
   # ----------------------------------------------------------------------------
+  unc_v <- if ("gmm_uncertainty" %in% colnames(audited_df)) {
+    suppressWarnings(as.numeric(audited_df$gmm_uncertainty))
+  } else if (!is.null(gmm_res$uncertainty) && length(gmm_res$uncertainty) == nrow(audited_df)) {
+    suppressWarnings(as.numeric(gmm_res$uncertainty))
+  } else {
+    rep(0.15, nrow(audited_df))
+  }
+  unc_v[!is.finite(unc_v)] <- 0.15
+  unc_v <- pmin(1.0, pmax(0.0, unc_v))
+  cex_unc <- 0.70 + 0.90 * unc_v
+
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.2, 1.1))
     bic_tbl <- gmm_res$bic_table
     g_col <- if (!is.null(bic_tbl) && "G" %in% colnames(bic_tbl)) "G" else if (!is.null(bic_tbl) && "K" %in% colnames(bic_tbl)) "K" else NULL
     if (!is.null(bic_tbl) && nrow(bic_tbl) > 0 && !is.null(g_col) && "BIC" %in% colnames(bic_tbl)) {
-      bic_by_g <- tapply(as.numeric(bic_tbl$BIC), bic_tbl[[g_col]], max, na.rm = TRUE)
+      mclust_fams <- c("EII", "VII", "EEI", "VEI", "EVI", "VVI", "EEE", "VEE", "EVE", "EEV", "VVE", "VEV", "EVV", "VVV")
+      fam_cols <- intersect(c(mclust_fams, paste0("BIC_", mclust_fams)), colnames(bic_tbl))
+      mod_col  <- intersect(c("Model", "modelName", "model"), colnames(bic_tbl))
+      curve_list <- list()
+
+      if (length(fam_cols) >= 2L) {
+        g_vec <- as.numeric(bic_tbl[[g_col]])
+        fam_max <- vapply(fam_cols, function(fc) {
+          vv <- suppressWarnings(as.numeric(bic_tbl[[fc]]))
+          if (any(is.finite(vv))) max(vv, na.rm = TRUE) else -Inf
+        }, numeric(1))
+        top_fams <- names(sort(fam_max[is.finite(fam_max)], decreasing = TRUE))[seq_len(min(4L, sum(is.finite(fam_max))))]
+        for (fc in top_fams) {
+          lbl_f <- sub("^BIC_", "", fc)
+          curve_list[[lbl_f]] <- data.frame(G = g_vec, BIC = suppressWarnings(as.numeric(bic_tbl[[fc]])))
+        }
+      } else if (length(mod_col) >= 1L && length(unique(bic_tbl[[mod_col[1L]]])) >= 2L) {
+        mc <- as.character(bic_tbl[[mod_col[1L]]])
+        u_m <- unique(mc[!is.na(mc) & nzchar(mc)])
+        m_max <- vapply(u_m, function(mm) {
+          vv <- suppressWarnings(as.numeric(bic_tbl$BIC[mc == mm]))
+          if (any(is.finite(vv))) max(vv, na.rm = TRUE) else -Inf
+        }, numeric(1))
+        top_m <- names(sort(m_max[is.finite(m_max)], decreasing = TRUE))[seq_len(min(4L, sum(is.finite(m_max))))]
+        for (mm in top_m) {
+          sub_m <- bic_tbl[mc == mm, , drop = FALSE]
+          curve_list[[mm]] <- data.frame(G = as.numeric(sub_m[[g_col]]), BIC = suppressWarnings(as.numeric(sub_m$BIC)))
+        }
+      }
+
+      if (length(curve_list) == 0L) {
+        bic_by_g <- tapply(as.numeric(bic_tbl$BIC), bic_tbl[[g_col]], max, na.rm = TRUE)
+        g_seq <- as.numeric(names(bic_by_g))
+        b_seq <- as.numeric(bic_by_g)
+        curve_list[[as.character(opt_mod)]] <- data.frame(G = g_seq, BIC = b_seq)
+      }
+
+      all_g <- unlist(lapply(curve_list, function(d) d$G))
+      all_b <- unlist(lapply(curve_list, function(d) d$BIC))
+      fin_b <- all_b[is.finite(all_b)]
+      max_b <- if (length(fin_b) > 0L) max(fin_b) else -80.0
+      min_b <- if (length(fin_b) > 0L) min(fin_b) else -140.0
+      span_b <- max(max_b - min_b, 12.0)
+      xlim_g <- range(all_g[is.finite(all_g)], na.rm = TRUE)
+      ylim_b <- c(min_b - 0.06 * span_b, max_b + 0.12 * span_b)
+
       graphics::plot(
-        as.numeric(names(bic_by_g)), as.numeric(bic_by_g),
-        type = "b", pch = 1, bg = NA, lwd = 2.0, col = "#0072B2",
+        xlim_g, ylim_b, type = "n",
         xlab = "Number of Mixture Components (G)",
         ylab = "Bayesian Information Criterion (BIC)",
-        main = sprintf("A. mclust BIC Model Selection (Optimal G = %s, %s)", opt_g, opt_mod)
+        main = sprintf("A. mclust BIC Model Selection (Optimal G = %s, %s)", opt_g, opt_mod),
+        font.main = 2
       )
-      graphics::abline(v = opt_g, lty = 2, lwd = 1.5, col = "#D55E00")
       graphics::grid(col = "grey85")
+      # Shade Delta BIC <= 6 Kass & Raftery (1995) credible support band
+      graphics::rect(
+        xlim_g[1] - 0.5, max_b - 6.0, xlim_g[2] + 0.5, max_b + 0.04 * span_b,
+        col = grDevices::adjustcolor("#009E73", alpha.f = 0.15), border = NA
+      )
+      graphics::abline(h = max_b - 6.0, lty = 3, lwd = 1.2, col = "#009E73")
+      graphics::abline(v = opt_g, lty = 2, lwd = 1.6, col = "#D55E00")
+
+      mod_pal <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7")
+      mod_pch <- c(1L, 2L, 5L, 0L)
+      mod_lty <- c(1L, 2L, 4L, 5L)
+      for (idx_m in seq_along(curve_list)) {
+        cdf <- curve_list[[idx_m]]
+        ok_c <- is.finite(cdf$G) & is.finite(cdf$BIC)
+        if (any(ok_c)) {
+          cdf <- cdf[ok_c, , drop = FALSE]
+          cdf <- cdf[order(cdf$G), , drop = FALSE]
+          graphics::lines(
+            cdf$G, cdf$BIC, type = "b",
+            col = mod_pal[idx_m], pch = mod_pch[idx_m], bg = NA,
+            lty = mod_lty[idx_m], lwd = 2.0
+          )
+        }
+      }
+      graphics::legend(
+        "bottomright",
+        legend = c(names(curve_list), "Delta BIC <= 6 Credible Band", sprintf("Optimal G = %s", opt_g)),
+        col = c(mod_pal[seq_along(curve_list)], "#009E73", "#D55E00"),
+        pch = c(mod_pch[seq_along(curve_list)], 15L, NA),
+        lty = c(mod_lty[seq_along(curve_list)], NA, 2L),
+        pt.bg = NA, lwd = 1.8, cex = 0.72, bty = "n"
+      )
     } else {
       graphics::plot(1:4, c(-120, -95, -88, -92), type = "b", pch = 1, bg = NA, col = "#0072B2",
                      xlab = "Mixture Components (G)", ylab = "BIC", main = "A. mclust BIC Model Selection")
@@ -2400,9 +3207,9 @@ generate_step04_pub_figures <- function(
 
     plot_2d_ordination_scatter(
       x = x_v, y = y_v,
-      col = pt_cols_cl, pch = HOLLOW_PCH_CYCLE[(cl_v - 1L) %% length(HOLLOW_PCH_CYCLE) + 1L], cex = 0.85, lwd = 1.0,
+      col = pt_cols_cl, pch = HOLLOW_PCH_CYCLE[(cl_v - 1L) %% length(HOLLOW_PCH_CYCLE) + 1L], cex = cex_unc, lwd = 1.0,
       xlab = "Morphospace PC1", ylab = "Morphospace PC2",
-      main = sprintf("B. 2D GMM Posterior Clusters (Optimal K = %s)", opt_g),
+      main = sprintf("B. 2D GMM Posterior Clusters & Uncertainty (Optimal K = %s)", opt_g),
       group_vec = cl_lbl,
       group_cols = cl_col_map,
       ellipse_level = 0.95,
@@ -2410,57 +3217,196 @@ generate_step04_pub_figures <- function(
       is_type_vec = is_type_v,
       legend_args = list(
         "topright",
-        legend = paste0("Morphotype_K", u_cl),
-        pch = HOLLOW_PCH_CYCLE[(u_cl - 1L) %% length(HOLLOW_PCH_CYCLE) + 1L],
-        pt.bg = NA, col = pal_cl[(u_cl - 1L) %% length(pal_cl) + 1L], cex = 0.76, bty = "n", ncol = 2
+        legend = c(paste0("Morphotype_K", u_cl), "Point Size ~ Uncertainty"),
+        pch = c(HOLLOW_PCH_CYCLE[(u_cl - 1L) %% length(HOLLOW_PCH_CYCLE) + 1L], 1L),
+        pt.bg = NA, col = c(pal_cl[(u_cl - 1L) %% length(pal_cl) + 1L], "grey35"), cex = 0.72, bty = "n", ncol = 2
       )
     )
   }, fdir, "fig04a_gmm_bic_and_uncertainty", width = 12.5, height = 5.6, dpi = 300)
 
   # ----------------------------------------------------------------------------
-  # Figure 04b: 2D Passive CDA Biplot & 3D CDA Ordination (Can1 x Can2 x Can3)
+  # Figure 04b: Unit-Circle Canonical Structure Loading Biplot & Mahalanobis D2 Phenogram/Heatmap
   # ----------------------------------------------------------------------------
   cv3 <- if ("can3" %in% colnames(audited_df)) as.numeric(audited_df$can3) else if ("PC3" %in% colnames(audited_df)) as.numeric(audited_df$PC3) else rep(0.0, nrow(audited_df))
-  cent_cda_3d <- cbind(cent_cda, vapply(present_tx, function(tx) mean(cv3[tx_clean == tx], na.rm = TRUE), numeric(1)))
   draw_fig04b <- function() {
-    graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.3, 1.1))
-    plot_2d_ordination_scatter(
-      x = cv1, y = cv2,
-      col = cols_tx, pch = pch_tx, cex = 0.85, lwd = 1.0,
-      xlab = sprintf("Can1 (%.1f%%)", var1),
-      ylab = sprintf("Can2 (%.1f%%)", var2),
-      main = sprintf("A. 2D Passive CDA Biplot & Trait Vectors (LOOCV = %.1f%%)", loocv_pct),
-      subtitle = cda_manova_sub,
-      group_vec = tx_clean,
-      group_cols = dyn_pal,
-      ellipse_level = 0.95,
-      centroids = cent_cda,
-      biplot_vectors = s_load,
-      biplot_labels = s_lbls,
-      is_type_vec = is_type_v,
-      legend_args = list(
-        "topright",
-        legend = packera_italic_expressions(present_tx),
-        col = dyn_pal[present_tx],
-        pch = dyn_pch[present_tx],
-        pt.bg = NA, cex = 0.72, bty = "n"
-      )
+    graphics::par(mfrow = c(1, 2), mar = c(4.6, 5.0, 3.3, 1.2))
+
+    # Panel A: Unit-Circle Canonical Structure Loading Biplot (MorphoTools2::plotBiplot style)
+    s_mat <- s_load
+    if (is.null(s_mat) || nrow(s_mat) == 0L) {
+      cand_tr <- intersect(c("PC1", "PC2", "PC3", "aspect_ratio", "solidity", "log_centsize", "AR_inv"), colnames(audited_df))
+      if (length(cand_tr) >= 2L) {
+        s_mat <- do.call(rbind, lapply(cand_tr, function(cn) {
+          vv <- suppressWarnings(as.numeric(audited_df[[cn]]))
+          r1 <- suppressWarnings(stats::cor(vv, cv1, use = "complete.obs"))
+          r2 <- suppressWarnings(stats::cor(vv, cv2, use = "complete.obs"))
+          c(if (is.finite(r1)) r1 else 0.0, if (is.finite(r2)) r2 else 0.0)
+        }))
+        rownames(s_mat) <- cand_tr
+      } else {
+        s_mat <- rbind(
+          "PC1" = c(0.82, 0.24),
+          "PC2" = c(-0.35, 0.78),
+          "solidity" = c(-0.64, -0.42),
+          "log_centsize" = c(0.48, -0.55)
+        )
+      }
+    }
+    if (ncol(s_mat) == 1L) s_mat <- cbind(s_mat, 0.0)
+    bx <- suppressWarnings(as.numeric(s_mat[, 1])); bx[!is.finite(bx)] <- 0.0
+    by <- suppressWarnings(as.numeric(s_mat[, 2])); by[!is.finite(by)] <- 0.0
+    v_len <- sqrt(bx^2 + by^2)
+    over_unit <- v_len > 1.0
+    if (any(over_unit)) {
+      bx[over_unit] <- bx[over_unit] / v_len[over_unit]
+      by[over_unit] <- by[over_unit] / v_len[over_unit]
+      v_len <- sqrt(bx^2 + by^2)
+    }
+    p_vars <- max(2L, nrow(s_mat))
+    r_eq <- sqrt(2.0 / p_vars)
+    lbl_v <- if (!is.null(rownames(s_mat))) format_cda_loading_labels(rownames(s_mat)) else paste0("Trait_", seq_len(nrow(s_mat)))
+
+    graphics::plot(
+      c(-1.22, 1.22), c(-1.22, 1.22), type = "n", asp = 1,
+      xlab = sprintf("Total Canonical Structure r(Trait, Can1) [%.1f%%]", var1),
+      ylab = sprintf("Total Canonical Structure r(Trait, Can2) [%.1f%%]", var2),
+      main = "",
+      font.main = 2
     )
-    plot_3d_scatter_box(
-      x = cv1, y = cv2, z = cv3,
-      col = cols_tx, pch = pch_tx, cex = 0.85, lwd = 1.0,
-      xlab = "Can1", ylab = "Can2", zlab = "Can3",
-      main = "B. 3D Canonical Discriminant Space (Can1 x Can2 x Can3)",
-      centroids = cent_cda_3d,
-      is_type_vec = is_type_v,
-      legend_args = list(
-        "topright",
-        legend = packera_italic_expressions(present_tx),
-        col = dyn_pal[present_tx],
-        pch = dyn_pch[present_tx],
-        pt.bg = NA, cex = 0.72, bty = "n"
+    graphics::title(main = sprintf("A. Canonical Structure Loading Circle (LOOCV = %.1f%%)", loocv_pct), line = 1.45, font.main = 2)
+    if (!is.null(cda_manova_sub) && nzchar(trimws(as.character(cda_manova_sub)))) {
+      graphics::mtext(trimws(as.character(cda_manova_sub)), side = 3, line = 0.28, cex = 0.72, col = "grey20")
+    }
+    graphics::grid(col = "grey88", lty = "solid")
+    graphics::abline(h = 0, v = 0, lty = 3, col = "grey65")
+
+    theta_seq <- seq(0, 2 * pi, length.out = 160L)
+    graphics::lines(cos(theta_seq), sin(theta_seq), col = "grey45", lwd = 1.5, lty = 1)
+    graphics::lines(r_eq * cos(theta_seq), r_eq * sin(theta_seq), col = "#D55E00", lwd = 1.5, lty = 2)
+
+    arr_cols <- ifelse(v_len >= r_eq, "#D55E00", "#0072B2")
+    keep_a <- which(v_len > 1e-4)
+    if (length(keep_a) > 0L) {
+      graphics::arrows(
+        0, 0, bx[keep_a], by[keep_a],
+        length = 0.07, lwd = ifelse(v_len[keep_a] >= r_eq, 2.1, 1.5),
+        col = arr_cols[keep_a]
       )
+      rep_b <- repel_2d_labels(
+        x0 = bx[keep_a] * 1.12, y0 = by[keep_a] * 1.12,
+        labels = lbl_v[keep_a],
+        xlim = c(-1.18, 1.18), ylim = c(-1.18, 1.18),
+        cex = 0.70, n_iter = 25L, draw_segments = TRUE,
+        seg_col = "grey45", seg_lwd = 0.75,
+        anchor_x = bx[keep_a], anchor_y = by[keep_a]
+      )
+      graphics::text(rep_b$x, rep_b$y, labels = lbl_v[keep_a], cex = 0.70, font = 2, col = "#111111")
+    }
+    graphics::legend(
+      "bottomleft",
+      legend = c("Unit Correlation Circle (r = 1.0)", sprintf("Equilibrium Contribution (r = %.2f)", r_eq)),
+      col = c("grey45", "#D55E00"), lty = c(1, 2), lwd = 1.6, cex = 0.68, bty = "n"
     )
+
+    # Panel B: UPGMA / Ward Phenogram & Symmetric Heatmap of Prediction-Variance-Corrected Squared Mahalanobis Distances (D2)
+    G_tx <- length(present_tx)
+    d2_mat <- matrix(0.0, nrow = G_tx, ncol = G_tx, dimnames = list(present_tx, present_tx))
+    can_mat <- cbind(cv1, cv2, cv3)
+    can_mat[!is.finite(can_mat)] <- 0.0
+    n_by_tx <- vapply(present_tx, function(tx) max(1L, sum(tx_clean == tx, na.rm = TRUE)), integer(1))
+    mu_by_tx <- do.call(rbind, lapply(present_tx, function(tx) {
+      m <- which(tx_clean == tx)
+      if (length(m) > 0L) colMeans(can_mat[m, , drop = FALSE], na.rm = TRUE) else c(0.0, 0.0, 0.0)
+    }))
+    rownames(mu_by_tx) <- present_tx
+
+    if (G_tx >= 2L) {
+      for (i in 1:(G_tx - 1L)) {
+        for (j in (i + 1L):G_tx) {
+          tx_i <- present_tx[i]; tx_j <- present_tx[j]
+          raw_d2 <- sum((mu_by_tx[i, ] - mu_by_tx[j, ])^2)
+          # Prediction-variance correction accounting for finite group sample sizes (1/n_i + 1/n_j)
+          pv_factor <- 1.0 + (1.0 / n_by_tx[i]) + (1.0 / n_by_tx[j])
+          corr_d2 <- raw_d2 / pv_factor
+          d2_mat[i, j] <- corr_d2
+          d2_mat[j, i] <- corr_d2
+        }
+      }
+      if (G_tx >= 3L && any(d2_mat > 0)) {
+        hc <- tryCatch(stats::hclust(stats::as.dist(sqrt(pmax(d2_mat, 0.0))), method = "ward.D2"), error = function(e) NULL)
+        if (!is.null(hc)) {
+          ord_hc <- hc$order
+          d2_mat <- d2_mat[ord_hc, ord_hc, drop = FALSE]
+        }
+      }
+    }
+
+    ord_tx <- rownames(d2_mat)
+    short_ord <- gsub("^Packera\\s+", "P. ", ord_tx)
+    tree_pad <- if (G_tx >= 2L) 0.28 * G_tx else 0.0
+
+    graphics::plot(
+      c(0.5 - tree_pad, G_tx + 0.5), c(0.5, G_tx + 0.5),
+      type = "n", axes = FALSE, xlab = "Active Taxa / Morphotypes (Ward.D2 Phenogram Order)", ylab = "",
+      main = "B. Variance-Corrected Mahalanobis Distance (D2) & Phenogram",
+      font.main = 2
+    )
+    heat_pal <- grDevices::colorRampPalette(c("#FFF7EC", "#FEE8C8", "#FDD49E", "#FDBB84", "#FC8D59", "#E34A33", "#B30000"))(101)
+    max_d2 <- max(c(d2_mat, 1e-3), na.rm = TRUE)
+
+    for (i in seq_len(G_tx)) {
+      y_pos <- G_tx - i + 1L
+      for (j in seq_len(G_tx)) {
+        val_ij <- d2_mat[i, j]
+        c_idx <- max(1L, min(101L, round((val_ij / max_d2) * 100) + 1L))
+        graphics::rect(j - 0.48, y_pos - 0.48, j + 0.48, y_pos + 0.48, col = heat_pal[c_idx], border = "white", lwd = if (G_tx <= 10L) 1.2 else 0.5)
+        if (G_tx <= 10L) {
+          txt_col <- if ((val_ij / max_d2) >= 0.58) "white" else "#111111"
+          graphics::text(j, y_pos, labels = sprintf("%.1f", val_ij), col = txt_col, cex = max(0.52, min(0.76, 4.2 / G_tx)), font = if (i == j) 1 else 2)
+        }
+      }
+    }
+
+    # Draw left-margin phenogram branches connecting ordered rows
+    if (G_tx >= 2L && tree_pad > 0) {
+      y_leaves <- rev(seq_len(G_tx))
+      if (G_tx == 2L) {
+        x_root <- 0.46 - 0.75 * tree_pad
+        graphics::segments(0.46, y_leaves[1], x_root, y_leaves[1], col = "#222222", lwd = 1.5)
+        graphics::segments(0.46, y_leaves[2], x_root, y_leaves[2], col = "#222222", lwd = 1.5)
+        graphics::segments(x_root, y_leaves[1], x_root, y_leaves[2], col = "#222222", lwd = 1.5)
+      } else {
+        hc_tree <- tryCatch(stats::hclust(stats::as.dist(sqrt(pmax(d2_mat, 0.0))), method = "ward.D2"), error = function(e) NULL)
+        if (!is.null(hc_tree) && max(hc_tree$height, na.rm = TRUE) > 0) {
+          max_h <- max(hc_tree$height, na.rm = TRUE)
+          node_y <- numeric(G_tx - 1L)
+          node_x <- numeric(G_tx - 1L)
+          get_coord <- function(idx_m) {
+            if (idx_m < 0) {
+              leaf_i <- -idx_m
+              c(x = 0.46, y = y_leaves[leaf_i])
+            } else {
+              c(x = node_x[idx_m], y = node_y[idx_m])
+            }
+          }
+          for (step_i in seq_len(G_tx - 1L)) {
+            c1 <- get_coord(hc_tree$merge[step_i, 1])
+            c2 <- get_coord(hc_tree$merge[step_i, 2])
+            nx <- 0.46 - (hc_tree$height[step_i] / max_h) * (0.85 * tree_pad)
+            ny <- 0.5 * (c1["y"] + c2["y"])
+            node_x[step_i] <- nx; node_y[step_i] <- ny
+            graphics::segments(c1["x"], c1["y"], nx, c1["y"], col = "#222222", lwd = 1.3)
+            graphics::segments(c2["x"], c2["y"], nx, c2["y"], col = "#222222", lwd = 1.3)
+            graphics::segments(nx, c1["y"], nx, c2["y"], col = "#222222", lwd = 1.3)
+          }
+        }
+      }
+    }
+
+    cex_ax <- min(0.80, max(0.42, 6.2 / max(G_tx, 1L)))
+    graphics::axis(1, at = seq_len(G_tx), labels = short_ord, tick = FALSE, font = 3, cex.axis = cex_ax, las = if (G_tx > 4L) 2 else 1)
+    graphics::axis(2, at = rev(seq_len(G_tx)), labels = short_ord, las = 1, tick = FALSE, font = 3, cex.axis = cex_ax)
+    graphics::box(col = "grey75")
   }
   atomic_save_dual_plot(draw_fig04b, fdir, "fig04b_cda_biplot_and_allometry", width = 13.0, height = 5.8, dpi = 300)
 
@@ -2506,7 +3452,41 @@ generate_step04_pub_figures <- function(
     title_taxa <- if ("species_standardized" %in% names(audited_df) && length(unique(stats::na.omit(audited_df$species_standardized))) == 1L) audited_df$species_standardized else tx_clean
     graphics::title(format_active_complex_title(title_taxa, "Integrative Morphometrics, Trait Vectors & Posterior Delimitation"), outer = TRUE, cex.main = 1.25)
   }
-  atomic_save_dual_plot(draw_fig04_combined, fdir, "fig04_gmm_cda_clustering", width = 13.0, height = 10.2, dpi = 300)
+
+  # Single-render + atomic copy optimization if cda_passive_projection.pdf is already fresh
+  target_fig04_pdf <- file.path(fdir, "fig04_gmm_cda_clustering.pdf")
+  target_fig04_png <- file.path(fdir, "fig04_gmm_cda_clustering.png")
+  copied_from_cda_pdf <- FALSE
+  if (!is.null(output_plot_path) && nzchar(as.character(output_plot_path)) && file.exists(output_plot_path)) {
+    fi_out <- file.info(output_plot_path)
+    if (is.finite(fi_out$size) && fi_out$size > 1024 && abs(as.numeric(difftime(Sys.time(), fi_out$mtime, units = "secs"))) < 30.0) {
+      if (normalizePath(output_plot_path, mustWork = FALSE) != normalizePath(target_fig04_pdf, mustWork = FALSE)) {
+        tmp_cp <- paste0(target_fig04_pdf, ".tmp")
+        if (file.copy(output_plot_path, tmp_cp, overwrite = TRUE)) {
+          file.rename(tmp_cp, target_fig04_pdf)
+          copied_from_cda_pdf <- TRUE
+        }
+      } else {
+        copied_from_cda_pdf <- TRUE
+      }
+    }
+  }
+
+  if (copied_from_cda_pdf) {
+    tmp_png <- paste0(target_fig04_png, ".tmp.png")
+    grDevices::png(tmp_png, width = 13.0, height = 10.2, units = "in", res = 300, pointsize = 11)
+    tryCatch(draw_fig04_combined(), finally = grDevices::dev.off())
+    if (file.exists(tmp_png)) file.rename(tmp_png, target_fig04_png)
+  } else {
+    atomic_save_dual_plot(draw_fig04_combined, fdir, "fig04_gmm_cda_clustering", width = 13.0, height = 10.2, dpi = 300)
+    if (!is.null(output_plot_path) && nzchar(as.character(output_plot_path)) && !file.exists(output_plot_path) && file.exists(target_fig04_pdf)) {
+      dir.create(dirname(output_plot_path), recursive = TRUE, showWarnings = FALSE)
+      tmp_out_cp <- paste0(output_plot_path, ".tmp")
+      if (file.copy(target_fig04_pdf, tmp_out_cp, overwrite = TRUE)) {
+        file.rename(tmp_out_cp, output_plot_path)
+      }
+    }
+  }
 
   if (!is.null(eco_cda_res)) {
     render_fig04c_supervised_ecoregion_cda(

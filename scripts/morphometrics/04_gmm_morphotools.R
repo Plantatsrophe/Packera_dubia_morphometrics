@@ -189,14 +189,12 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
               r2_size = r2_size, p_size = p_size, r2_interaction = r2_int, p_interaction = p_int, anova_table = anova_df, pairwise_table = pw_df, df = morpho_df))
 }
 evaluate_ontogenetic_allometry <- test_and_correct_allometry
-
 # Subspace Selection: Horn's Parallel Analysis / Broken-Stick & Williams & Titus (1988) Rule (P <= floor(N_min / 3))
 select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL, aux_df = NULL) {
   sel <- .select_morphometric_subspace_core(X, group_vec = group_vec, min_p = min_p, max_p = max_p, aux_df = aux_df)
   message(sprintf("Subspace Selection (Horn Parallel Analysis / Broken-Stick & Williams & Titus 1988 P <= floor(N_min / 3)): retained P = %d / %d features.", length(sel), ncol(as.matrix(X))))
   sel
 }
-
 # 3. Gaussian Mixture Modeling & Bayes Factor Testing (Seed = 42; fit_gmm_em_pure in pub_figures_utils.R)
 run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarsel = FALSE, intraspecific_mode = FALSE) {
   pc_guard_cols <- grep("^(Sym_)?PC[0-9]+$", feature_cols, value = TRUE)
@@ -233,6 +231,9 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
     if (!is.null(gmm_fit)) {
       bic_vals <- apply(gmm_fit$BIC, 1, function(row) if (all(is.na(row))) NA_real_ else max(row, na.rm = TRUE))
       bic_table <- data.frame(K = seq_len(eff_k), BIC = round(bic_vals[seq_len(eff_k)], 2))
+      if (!is.null(colnames(gmm_fit$BIC))) {
+        for (mn in colnames(gmm_fit$BIC)) bic_table[[paste0("BIC_", mn)]] <- round(as.numeric(gmm_fit$BIC[seq_len(eff_k), mn]), 2)
+      }
       use_fit <- if (is_intra_gmm && gmm_fit$G < 2L) tryCatch(fit_mclust_fn(2:eff_k), error = function(e) NULL) else gmm_fit
       if (!is.null(use_fit)) {
         best_k <- use_fit$G; best_name <- use_fit$modelName; gmm_pred <- predict(use_fit, newdata = X_pcs)

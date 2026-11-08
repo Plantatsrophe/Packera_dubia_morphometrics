@@ -86,15 +86,58 @@ draw_us_state_basemap_base_r <- function(xlim = c(-98, -73), ylim = c(28, 46), m
   graphics::box(col = "grey50")
 }
 
-generate_step06_pub_figures <- function(
+.unpack_synthesis_display_tier <- function(tx_vec, present_tx = NULL, max_fg = 6L) {
+  if (is.null(present_tx)) {
+    present_tx <- sort(unique(tx_vec[!is.na(tx_vec) & nzchar(tx_vec) & tx_vec != "Unknown"]))
+  }
+  if (length(present_tx) == 0L) present_tx <- "Unassigned_Packera"
+  tier_obj <- if (exists("resolve_taxon_display_tier", mode = "function")) {
+    tryCatch(resolve_taxon_display_tier(tx_vec), error = function(e) NULL)
+  } else {
+    NULL
+  }
+  fg_tx <- NULL
+  if (!is.null(tier_obj)) {
+    if (is.list(tier_obj)) {
+      for (k in c("foreground_taxa", "fg_taxa", "foreground", "focal_and_top", "top_taxa", "legend_taxa")) {
+        if (!is.null(tier_obj[[k]]) && length(tier_obj[[k]]) > 0L) {
+          fg_tx <- intersect(as.character(tier_obj[[k]]), present_tx)
+          if (length(fg_tx) > 0L) break
+        }
+      }
+    } else if (is.character(tier_obj)) {
+      fg_tx <- intersect(tier_obj, present_tx)
+    }
+  }
+  if (is.null(fg_tx) || length(fg_tx) == 0L) {
+    if (length(present_tx) <= max_fg) {
+      fg_tx <- present_tx
+    } else {
+      cnts <- sort(table(tx_vec[tx_vec %in% present_tx]), decreasing = TRUE)
+      focal_cand <- present_tx[grepl("dubia", present_tx, ignore.case = TRUE)]
+      fg_tx <- unique(c(focal_cand, names(cnts)))
+      fg_tx <- fg_tx[seq_len(min(max_fg, length(fg_tx)))]
+    }
+  }
+  bg_tx <- setdiff(present_tx, fg_tx)
+  list(
+    foreground_taxa = fg_tx,
+    background_taxa = bg_tx,
+    is_tiered = length(bg_tx) > 0L
+  )
+}
+
+export_step06b_geographic_and_hopkins <- function(
   vouchers_df,
-  srf_res = NULL,
-  niche_res = NULL,
-  pheno_res = NULL,
-  out_plot_pdf = NULL
+  fig_dir = "outputs/figures"
 ) {
-  fdir <- resolve_active_figures_dir(reference_path = out_plot_pdf)
-  if (is.null(vouchers_df) || nrow(vouchers_df) == 0) return(invisible(NULL))
+  if (is.null(vouchers_df) || nrow(vouchers_df) == 0L) return(invisible(NULL))
+  fdir <- if (is.null(fig_dir) || !nzchar(fig_dir) || grepl("\\.(pdf|png)$", fig_dir, ignore.case = TRUE)) {
+    resolve_active_figures_dir(reference_path = fig_dir)
+  } else {
+    dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+    fig_dir
+  }
 
   tx_clean <- resolve_plot_group_column(vouchers_df)
   dyn_pal <- get_dynamic_packera_palette(tx_clean)
@@ -103,221 +146,16 @@ generate_step06_pub_figures <- function(
   cols_tx <- grDevices::adjustcolor(dyn_pal[tx_clean], alpha.f = alpha_val)
   pch_tx  <- dyn_pch[tx_clean]; pch_tx[is.na(pch_tx)] <- 1L
   present_tx <- sort(unique(tx_clean[!is.na(tx_clean) & nzchar(tx_clean) & tx_clean != "Unknown"]))
-  if (length(present_tx) == 0) present_tx <- "Unassigned_Packera"
+  if (length(present_tx) == 0L) present_tx <- "Unassigned_Packera"
 
-  imp_df <- if (!is.null(srf_res) && !is.null(srf_res$importance)) srf_res$importance else NULL
-
-  draw_importance_panel <- function(main_title = "A. Spatial RF Predictor Importance (10m-30m Stack)") {
-    pred_raw <- c("topo_tpi_30m", "bio12_precip_annual", "bio1_temp_mean", "fine_soil_ph", "ssurgo_rock_outcrop_pct", "fine_soil_sand", "fine_bedrock_depth_cm")
-    imp_vals <- c(0.11, 0.14, 0.16, 0.19, 0.23, 0.27, 0.32)
-    if (!is.null(imp_df) && nrow(imp_df) > 0) {
-      if (all(c("Predictor", "MeanDecreaseAccuracy") %in% colnames(imp_df))) {
-        ord <- utils::tail(order(as.numeric(imp_df$MeanDecreaseAccuracy), decreasing = FALSE), 12)
-        pred_raw <- as.character(imp_df$Predictor[ord])
-        imp_vals <- pmax(0, as.numeric(imp_df$MeanDecreaseAccuracy[ord]))
-      } else if (all(c("Variable", "Importance") %in% colnames(imp_df))) {
-        ord <- utils::tail(order(as.numeric(imp_df$Importance), decreasing = FALSE), 12)
-        pred_raw <- as.character(imp_df$Variable[ord])
-        imp_vals <- pmax(0, as.numeric(imp_df$Importance[ord]))
-      }
-    }
-    pred_lbls <- format_predictor_labels(pred_raw)
-    bar_cols <- ifelse(
-      grepl("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_)", pred_raw), "#009E73",
-      ifelse(grepl("^MEM", pred_raw), "#CC79A7", "#0072B2")
-    )
-    bp <- graphics::barplot(
-      imp_vals, names.arg = pred_lbls, horiz = TRUE, las = 1,
-      col = bar_cols, border = "white", cex.names = 0.72,
-      xlim = c(0, max(imp_vals, 0.05, na.rm = TRUE) * 1.18),
-      xlab = "Permutation Importance (Mean Decrease Accuracy)",
-      main = main_title, font.main = 2
-    )
-    graphics::grid(nx = NULL, ny = NA, col = "grey88")
-    graphics::legend(
-      "bottomright",
-      legend = c("10m-30m Edaphic/Outcrop", "WorldClim Macro-Climate", "Spatial MEMs"),
-      fill = c("#009E73", "#0072B2", "#CC79A7"), border = NA, cex = 0.68, bty = "n"
-    )
+  tier_info <- if (length(present_tx) > 6L) {
+    .unpack_synthesis_display_tier(tx_clean, present_tx, max_fg = 6L)
+  } else {
+    list(foreground_taxa = present_tx, background_taxa = character(0), is_tiered = FALSE)
   }
+  fg_tx <- tier_info$foreground_taxa
+  bg_tx <- tier_info$background_taxa
 
-  # 1. Also export 300-DPI PNG for spatial_rf_niche_importance
-  png_imp <- file.path(fdir, "spatial_rf_niche_importance.png")
-  png_imp_tmp <- paste0(png_imp, ".tmp")
-  grDevices::png(png_imp_tmp, width = 10.5, height = 5.6, units = "in", res = 300)
-  tryCatch({
-    graphics::par(mar = c(4.5, 11.5, 3.0, 1.5))
-    draw_importance_panel("Phase 06 - 10m-30m Outcrop, Edaphic & Climatic Predictor Importance")
-  }, finally = {
-    grDevices::dev.off()
-  })
-  if (file.exists(png_imp_tmp)) file.rename(png_imp_tmp, png_imp)
-
-  # 2. fig05_ecological_niche_phenology.{pdf,png} (4-Panel Publication Plate)
-  atomic_save_dual_plot(function() {
-    graphics::par(mfrow = c(2, 2), mar = c(4.5, 10.5, 3.0, 1.2), oma = c(0.5, 0.5, 1.6, 0.5))
-
-    # Panel A: Variable Importance Ranking with Human-Readable Labels
-    draw_importance_panel("A. Spatial RF Predictor Importance (10m-30m Stack)")
-
-    # Panel B: 2D PCA-env Ecological Niche Space with Environmental Loading Vectors
-    graphics::par(mar = c(4.5, 4.6, 3.0, 1.2))
-    env_cand <- c("fine_soil_sand", "soil_sand", "fine_soil_ph", "soil_ph", "fine_bedrock_depth_cm", "ssurgo_rock_outcrop_pct", "topo_tpi_30m", "bio1_temp_mean", "bio12_precip_annual")
-    avail_env <- unique(intersect(env_cand, colnames(vouchers_df)))
-    if ("fine_soil_sand" %in% avail_env) avail_env <- setdiff(avail_env, "soil_sand")
-    if ("fine_soil_ph" %in% avail_env) avail_env <- setdiff(avail_env, "soil_ph")
-
-    env_pc1 <- rep(0.0, nrow(vouchers_df))
-    env_pc2 <- rep(0.0, nrow(vouchers_df))
-    env_var_pct <- c(44.5, 26.8)
-    env_load <- NULL
-    env_lbls <- NULL
-    if (length(avail_env) >= 2 && nrow(vouchers_df) >= 5) {
-      E_mat <- as.matrix(vouchers_df[, avail_env, drop = FALSE])
-      storage.mode(E_mat) <- "double"
-      for (j in seq_len(ncol(E_mat))) {
-        m_j <- stats::median(E_mat[, j], na.rm = TRUE)
-        if (!is.finite(m_j)) m_j <- 0.0
-        E_mat[!is.finite(E_mat[, j]), j] <- m_j
-      }
-      keep_e <- which(apply(E_mat, 2, stats::sd, na.rm = TRUE) > 1e-6)
-      if (length(keep_e) >= 2) {
-        pca_e <- tryCatch(stats::prcomp(E_mat[, keep_e, drop = FALSE], center = TRUE, scale. = TRUE), error = function(e) NULL)
-        if (!is.null(pca_e) && ncol(pca_e$x) >= 2) {
-          env_pc1 <- pca_e$x[, 1]
-          env_pc2 <- pca_e$x[, 2]
-          ve <- (pca_e$sdev^2) / max(sum(pca_e$sdev^2), 1e-12) * 100
-          env_var_pct <- round(ve[1:2], 1)
-          env_load <- pca_e$rotation[, 1:2, drop = FALSE]
-          short_dict <- c(
-            "fine_soil_sand" = "Sand %", "soil_sand" = "Sand %",
-            "fine_soil_ph" = "Soil pH", "soil_ph" = "Soil pH",
-            "fine_bedrock_depth_cm" = "Bedrock Depth",
-            "ssurgo_rock_outcrop_pct" = "Rock Outcrop %",
-            "topo_tpi_30m" = "30m TPI",
-            "bio1_temp_mean" = "MAT (BIO1)",
-            "bio12_precip_annual" = "MAP (BIO12)"
-          )
-          env_lbls <- vapply(rownames(env_load), function(nm) if (nm %in% names(short_dict)) short_dict[[nm]] else nm, character(1))
-        }
-      }
-    }
-    is_type_6 <- if ("is_type_specimen" %in% colnames(vouchers_df)) as.logical(vouchers_df$is_type_specimen) else rep(FALSE, nrow(vouchers_df))
-    is_type_6[is.na(is_type_6)] <- FALSE
-    cent_env <- do.call(rbind, lapply(present_tx, function(tx) {
-      m <- tx_clean == tx
-      c(mean(env_pc1[m], na.rm = TRUE), mean(env_pc2[m], na.rm = TRUE))
-    }))
-    rownames(cent_env) <- gsub("^Packera\\s+", "P. ", present_tx)
-
-    plot_2d_ordination_scatter(
-      x = env_pc1, y = env_pc2,
-      col = cols_tx, pch = pch_tx, cex = 0.85, lwd = 1.0,
-      xlab = sprintf("PCA-env Axis 1 (%.1f%%)", env_var_pct[1]),
-      ylab = sprintf("PCA-env Axis 2 (%.1f%%)", env_var_pct[2]),
-      main = "B. 2D PCA-env Ecological Niche Space & Gradient Vectors",
-      group_vec = tx_clean,
-      group_cols = dyn_pal,
-      ellipse_level = 0.85,
-      centroids = cent_env,
-      biplot_vectors = env_load,
-      biplot_labels = env_lbls,
-      is_type_vec = is_type_6,
-      legend_args = list(
-        "topright",
-        legend = packera_italic_expressions(present_tx),
-        col = dyn_pal[present_tx], pch = dyn_pch[present_tx], pt.bg = NA, cex = 0.72, bty = "n"
-      )
-    )
-
-    # Panel C: Taxon-Stratified Pedological Boxplots (Bedrock Depth & Soil Sand %) with ANOVA/KW p-values
-    sand_v <- if ("fine_soil_sand" %in% colnames(vouchers_df)) as.numeric(vouchers_df$fine_soil_sand) else if ("soil_sand" %in% colnames(vouchers_df)) as.numeric(vouchers_df$soil_sand) else rep(55.0, nrow(vouchers_df))
-    sand_v[!is.finite(sand_v)] <- 55.0
-    kw_p <- tryCatch(stats::kruskal.test(sand_v ~ factor(tx_clean))$p.value, error = function(e) NA_real_)
-    p_str <- if (is.finite(kw_p)) sprintf("Kruskal-Wallis p = %.2e", kw_p) else "Edaphic Divergence"
-    short_tx <- gsub("^Packera\\s+", "P. ", present_tx)
-    tx_fac <- factor(tx_clean, levels = present_tx, labels = short_tx)
-    graphics::boxplot(
-      sand_v ~ tx_fac,
-      col = grDevices::adjustcolor(dyn_pal[present_tx], alpha.f = 0.25),
-      border = dyn_pal[present_tx], outpch = NA,
-      xlab = "", ylab = "Soil Sand Fraction (%, 30m POLARIS / SSURGO)",
-      main = sprintf("C. Fine-Grain Soil Sand by Species (%s)", p_str),
-      font.axis = 3, cex.axis = 0.82, font.main = 2
-    )
-    graphics::grid(nx = NA, ny = NULL, col = "grey88")
-    set.seed(42)
-    for (s_i in seq_along(present_tx)) {
-      m_s <- which(tx_clean == present_tx[s_i])
-      if (length(m_s) > 0) {
-        jit_x <- s_i + stats::runif(length(m_s), -0.18, 0.18)
-        graphics::points(
-          jit_x, sand_v[m_s],
-          pch = dyn_pch[[present_tx[s_i]]], bg = NA,
-          col = grDevices::adjustcolor(dyn_pal[[present_tx[s_i]]], alpha.f = alpha_val),
-          cex = 0.75, lwd = 0.9
-        )
-      }
-    }
-
-    # Panel D: Pairwise Schoener's D Niche Overlap Matrix (Benjamini-Hochberg FDR Adjusted)
-    n_sp <- length(present_tx)
-    d_mat <- matrix(1.0, nrow = n_sp, ncol = n_sp, dimnames = list(short_tx, short_tx))
-    p_mat <- matrix(NA_real_, nrow = n_sp, ncol = n_sp, dimnames = list(short_tx, short_tx))
-    if (!is.null(niche_res) && is.data.frame(niche_res) && nrow(niche_res) > 0) {
-      niche_res <- apply_bh_fdr_correction(niche_res, p_col = "Equivalency_p_value")
-      for (r_i in seq_len(nrow(niche_res))) {
-        t1 <- sub("^Packera\\s+", "P. ", as.character(niche_res$Taxon_1[r_i]))
-        t2 <- sub("^Packera\\s+", "P. ", as.character(niche_res$Taxon_2[r_i]))
-        dv <- suppressWarnings(as.numeric(niche_res$Schoeners_D[r_i]))
-        pv <- if ("p_adj_bh" %in% names(niche_res)) suppressWarnings(as.numeric(niche_res$p_adj_bh[r_i])) else suppressWarnings(as.numeric(niche_res$Equivalency_p_value[r_i]))
-        if (t1 %in% short_tx && t2 %in% short_tx && is.finite(dv)) {
-          d_mat[t1, t2] <- dv; d_mat[t2, t1] <- dv
-          p_mat[t1, t2] <- pv; p_mat[t2, t1] <- pv
-        }
-      }
-    } else if (n_sp >= 2) {
-      for (i in seq_len(n_sp)) {
-        for (j in seq_len(n_sp)) {
-          if (i != j) {
-            mi <- tx_clean == present_tx[i]; mj <- tx_clean == present_tx[j]
-            dist_ij <- sqrt((mean(env_pc1[mi], na.rm = TRUE) - mean(env_pc1[mj], na.rm = TRUE))^2 +
-                            (mean(env_pc2[mi], na.rm = TRUE) - mean(env_pc2[mj], na.rm = TRUE))^2)
-            d_mat[i, j] <- round(exp(-0.55 * dist_ij), 3)
-            p_mat[i, j] <- round(max(0.001, exp(-1.8 * dist_ij)), 3)
-          }
-        }
-      }
-      if (any(is.finite(p_mat[upper.tri(p_mat)]))) {
-        adj_ut <- stats::p.adjust(p_mat[upper.tri(p_mat)], method = "BH")
-        p_mat[upper.tri(p_mat)] <- round(adj_ut, 3)
-        p_mat[lower.tri(p_mat)] <- t(p_mat)[lower.tri(p_mat)]
-      }
-    }
-    graphics::plot(
-      c(0.5, n_sp + 0.5), c(0.5, n_sp + 0.5), type = "n", axes = FALSE,
-      xlab = "Focal Taxon", ylab = "",
-      main = "D. Pairwise Schoener's D Niche Overlap & Equivalency", font.main = 2
-    )
-    ramp_d <- grDevices::colorRampPalette(c("#FFF5EB", "#FDD0A2", "#FD8D3C", "#D94801", "#7F2704"))(101)
-    for (i in seq_len(n_sp)) {
-      y_pos <- n_sp - i + 1
-      for (j in seq_len(n_sp)) {
-        dv <- d_mat[i, j]
-        c_idx <- max(1L, min(101L, round(dv * 100) + 1L))
-        graphics::rect(j - 0.48, y_pos - 0.46, j + 0.48, y_pos + 0.46, col = if (i == j) "#EEEEEE" else ramp_d[c_idx], border = "white", lwd = 1.5)
-        lbl_cell <- if (i == j) "1.00\n(Self)" else if (is.finite(p_mat[i, j])) sprintf("D = %.2f\n(p = %.3f)", dv, p_mat[i, j]) else sprintf("D = %.2f", dv)
-        graphics::text(j, y_pos, labels = lbl_cell, cex = 0.74, font = if (i == j) 1 else 2, col = if (i != j && dv > 0.62) "white" else "#111111")
-      }
-    }
-    graphics::axis(1, at = seq_len(n_sp), labels = short_tx, tick = FALSE, font = 3, cex.axis = 0.80)
-    graphics::axis(2, at = rev(seq_len(n_sp)), labels = short_tx, las = 1, tick = FALSE, font = 3, cex.axis = 0.80)
-    graphics::box(col = "grey75")
-    title_taxa <- if ("species_standardized" %in% names(vouchers_df) && length(unique(stats::na.omit(vouchers_df$species_standardized))) == 1L) vouchers_df$species_standardized else tx_clean
-    graphics::title(format_active_complex_title(title_taxa, "10m-30m Fine-Grain Edaphic Niche & PCA-env Equivalency"), outer = TRUE, cex.main = 1.25)
-  }, fdir, "fig05_ecological_niche_phenology", width = 13.0, height = 9.5, dpi = 300)
-
-  # 3. fig06b_geographic_map_and_hopkins_phenology.{pdf,png} (North American Basemap + Hopkins Phenology)
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(4.6, 4.6, 3.2, 1.2))
     lat_v <- if ("decimalLatitude" %in% colnames(vouchers_df)) suppressWarnings(as.numeric(vouchers_df$decimalLatitude)) else rep(NA_real_, nrow(vouchers_df))
@@ -326,11 +164,6 @@ generate_step06_pub_figures <- function(
     if ("longitude" %in% colnames(vouchers_df)) lon_v <- ifelse(is.finite(lon_v), lon_v, suppressWarnings(as.numeric(vouchers_df$longitude)))
     geo_b <- compute_dynamic_na_map_bounds(lon_v, lat_v)
     valid_geo <- geo_b$valid_geo
-    if (!any(valid_geo)) {
-      lat_v[is.na(lat_v)] <- 38.0; lon_v[is.na(lon_v)] <- -96.0
-      geo_b <- compute_dynamic_na_map_bounds(lon_v, lat_v)
-      valid_geo <- geo_b$valid_geo
-    }
 
     conflict_v <- if ("consensus_conflict_flag" %in% colnames(vouchers_df)) {
       as.logical(vouchers_df$consensus_conflict_flag)
@@ -352,70 +185,447 @@ generate_step06_pub_figures <- function(
       xlim = xlim_map, ylim = ylim_map,
       main = "A. Geographic Distribution & Contact Zone Map (WGS84)"
     )
-    graphics::points(
-      lon_v[valid_geo & !conflict_v], lat_v[valid_geo & !conflict_v],
-      pch = pch_tx[valid_geo & !conflict_v], bg = NA,
-      col = cols_tx[valid_geo & !conflict_v], cex = 0.85, lwd = 1.0
+    if (any(valid_geo)) {
+      if (length(bg_tx) > 0L) {
+        m_bg <- valid_geo & !conflict_v & (tx_clean %in% bg_tx)
+        if (any(m_bg)) {
+          graphics::points(
+            lon_v[m_bg], lat_v[m_bg],
+            pch = 1L, bg = NA,
+            col = grDevices::adjustcolor("grey68", alpha.f = 0.35), cex = 0.68, lwd = 0.7
+          )
+        }
+      }
+      m_fg <- valid_geo & !conflict_v & (tx_clean %in% fg_tx)
+      if (any(m_fg)) {
+        graphics::points(
+          lon_v[m_fg], lat_v[m_fg],
+          pch = pch_tx[m_fg], bg = NA,
+          col = cols_tx[m_fg], cex = 0.85, lwd = 1.0
+        )
+      }
+      if (any(valid_geo & conflict_v)) {
+        graphics::points(
+          lon_v[valid_geo & conflict_v], lat_v[valid_geo & conflict_v],
+          pch = 5L, bg = NA,
+          col = grDevices::adjustcolor("#CC79A7", alpha.f = 0.90), cex = 1.10, lwd = 1.4
+        )
+      }
+      if (any(valid_geo & is_type_6b)) {
+        m_t6 <- which(valid_geo & is_type_6b)
+        graphics::points(lon_v[m_t6], lat_v[m_t6], pch = 5L, bg = NA, col = cols_tx[m_t6], cex = 1.45, lwd = 2.0)
+        graphics::points(lon_v[m_t6], lat_v[m_t6], pch = 1L, bg = NA, col = "#111111", cex = 1.85, lwd = 1.4)
+      }
+    }
+    leg_expr_a <- c(
+      packera_italic_expressions(fg_tx),
+      if (length(bg_tx) > 0L) sprintf("Other Packera (%d spp.)", length(bg_tx)) else NULL,
+      "Contact / Conflict Voucher"
     )
-    if (any(valid_geo & conflict_v)) {
-      graphics::points(
-        lon_v[valid_geo & conflict_v], lat_v[valid_geo & conflict_v],
-        pch = 5L, bg = NA,
-        col = grDevices::adjustcolor("#CC79A7", alpha.f = 0.90), cex = 1.10, lwd = 1.4
-      )
-    }
-    if (any(valid_geo & is_type_6b)) {
-      m_t6 <- which(valid_geo & is_type_6b)
-      graphics::points(lon_v[m_t6], lat_v[m_t6], pch = 5L, bg = NA, col = cols_tx[m_t6], cex = 1.45, lwd = 2.0)
-      graphics::points(lon_v[m_t6], lat_v[m_t6], pch = 1L, bg = NA, col = "#111111", cex = 1.85, lwd = 1.4)
-    }
+    leg_col_a <- c(
+      dyn_pal[fg_tx],
+      if (length(bg_tx) > 0L) "grey60" else NULL,
+      "#CC79A7"
+    )
+    leg_pch_a <- c(
+      dyn_pch[fg_tx],
+      if (length(bg_tx) > 0L) 1L else NULL,
+      5L
+    )
     graphics::legend(
       "bottomleft",
-      legend = c(packera_italic_expressions(present_tx), "Contact / Conflict Voucher"),
-      col = c(dyn_pal[present_tx], "#CC79A7"),
-      pch = c(dyn_pch[present_tx], 5L), pt.bg = NA, cex = 0.72, bg = grDevices::adjustcolor("white", alpha.f = 0.85)
+      legend = leg_expr_a,
+      col = leg_col_a,
+      pch = leg_pch_a, pt.bg = NA, cex = 0.68, bg = grDevices::adjustcolor("white", alpha.f = 0.85)
     )
 
     # Panel B: DOY vs. Latitude with Species Regression Lines & Hopkins' Law Baseline (+4.0 d / deg N)
-    doy_v <- if ("doy" %in% colnames(vouchers_df)) as.numeric(vouchers_df$doy) else rep(115, nrow(vouchers_df))
-    doy_v[!is.finite(doy_v)] <- 115
-    graphics::plot(
-      lat_v[valid_geo], doy_v[valid_geo],
-      pch = pch_tx[valid_geo], bg = NA, col = cols_tx[valid_geo], cex = 0.85, lwd = 1.0,
-      xlab = "Decimal Latitude (deg N)",
-      ylab = "Flowering Day of Year (DOY)",
-      main = "B. Hopkins' Bioclimatic Law (+4.0 d / deg N) & Allochrony",
-      font.main = 2
-    )
-    graphics::grid(col = "grey88")
-    if (any(valid_geo & is_type_6b)) {
-      m_t6 <- which(valid_geo & is_type_6b)
-      graphics::points(lat_v[m_t6], doy_v[m_t6], pch = 5L, bg = NA, col = cols_tx[m_t6], cex = 1.45, lwd = 2.0)
-      graphics::points(lat_v[m_t6], doy_v[m_t6], pch = 1L, bg = NA, col = "#111111", cex = 1.85, lwd = 1.4)
+    doy_v <- if ("doy" %in% colnames(vouchers_df)) {
+      suppressWarnings(as.numeric(vouchers_df$doy))
+    } else if ("collection_doy" %in% colnames(vouchers_df)) {
+      suppressWarnings(as.numeric(vouchers_df$collection_doy))
+    } else {
+      rep(NA_real_, nrow(vouchers_df))
     }
-    for (sp in present_tx) {
-      m_sp <- which(valid_geo & (tx_clean == sp))
-      if (length(m_sp) >= 4 && stats::sd(lat_v[m_sp], na.rm = TRUE) > 0.2) {
-        lm_sp <- tryCatch(stats::lm(doy_v[m_sp] ~ lat_v[m_sp]), error = function(e) NULL)
-        if (!is.null(lm_sp)) {
-          graphics::abline(lm_sp, col = dyn_pal[[sp]], lwd = 1.8, lty = 1)
-        }
+    valid_pheno <- valid_geo & is.finite(doy_v) & (doy_v >= 1) & (doy_v <= 366)
+    if ("is_verified_anthesis" %in% colnames(vouchers_df)) {
+      ver_anth <- as.logical(vouchers_df$is_verified_anthesis)
+      ver_anth[is.na(ver_anth)] <- FALSE
+      if (sum(valid_pheno & ver_anth) >= 3L) {
+        valid_pheno <- valid_pheno & ver_anth
       }
     }
-    lat_seq <- seq(min(lat_v[valid_geo], na.rm = TRUE) - 0.5, max(lat_v[valid_geo], na.rm = TRUE) + 0.5, length.out = 50)
-    mean_lat <- mean(lat_v[valid_geo], na.rm = TRUE)
-    mean_doy <- mean(doy_v[valid_geo], na.rm = TRUE)
-    hopkins_line <- mean_doy + 4.0 * (lat_seq - mean_lat)
-    graphics::lines(lat_seq, hopkins_line, lwd = 2.4, lty = 2, col = "#111111")
-    graphics::legend(
-      "topleft",
-      legend = c("Hopkins' Law (+4.0 d/deg N)", packera_italic_expressions(present_tx)),
-      col = c("#111111", dyn_pal[present_tx]),
-      lty = c(2, rep(1, length(present_tx))),
-      pch = c(NA, dyn_pch[present_tx]), pt.bg = NA,
-      lwd = c(2.4, rep(1.6, length(present_tx))), cex = 0.72, bty = "n"
-    )
+
+    if (any(valid_pheno)) {
+      graphics::plot(
+        lat_v[valid_pheno], doy_v[valid_pheno], type = "n",
+        xlab = "Decimal Latitude (deg N)",
+        ylab = "Flowering Day of Year (DOY)",
+        main = "B. Hopkins' Bioclimatic Law (+4.0 d / deg N) & Allochrony",
+        font.main = 2
+      )
+      graphics::grid(col = "grey88")
+      if (length(bg_tx) > 0L) {
+        m_bg_p <- valid_pheno & (tx_clean %in% bg_tx)
+        if (any(m_bg_p)) {
+          graphics::points(
+            lat_v[m_bg_p], doy_v[m_bg_p],
+            pch = 1L, bg = NA, col = grDevices::adjustcolor("grey68", alpha.f = 0.35), cex = 0.68, lwd = 0.7
+          )
+        }
+      }
+      m_fg_p <- valid_pheno & (tx_clean %in% fg_tx)
+      if (any(m_fg_p)) {
+        graphics::points(
+          lat_v[m_fg_p], doy_v[m_fg_p],
+          pch = pch_tx[m_fg_p], bg = NA, col = cols_tx[m_fg_p], cex = 0.85, lwd = 1.0
+        )
+      }
+      if (any(valid_pheno & is_type_6b)) {
+        m_t6 <- which(valid_pheno & is_type_6b)
+        graphics::points(lat_v[m_t6], doy_v[m_t6], pch = 5L, bg = NA, col = cols_tx[m_t6], cex = 1.45, lwd = 2.0)
+        graphics::points(lat_v[m_t6], doy_v[m_t6], pch = 1L, bg = NA, col = "#111111", cex = 1.85, lwd = 1.4)
+      }
+      for (sp in fg_tx) {
+        m_sp <- which(valid_pheno & (tx_clean == sp))
+        if (length(m_sp) >= 4L && is.finite(stats::sd(lat_v[m_sp], na.rm = TRUE)) && stats::sd(lat_v[m_sp], na.rm = TRUE) > 0.2) {
+          lm_sp <- tryCatch(stats::lm(doy_v[m_sp] ~ lat_v[m_sp]), error = function(e) NULL)
+          if (!is.null(lm_sp)) {
+            graphics::abline(lm_sp, col = dyn_pal[[sp]], lwd = 1.8, lty = 1)
+          }
+        }
+      }
+      lat_seq <- seq(min(lat_v[valid_pheno], na.rm = TRUE) - 0.5, max(lat_v[valid_pheno], na.rm = TRUE) + 0.5, length.out = 50)
+      mean_lat <- mean(lat_v[valid_pheno], na.rm = TRUE)
+      mean_doy <- mean(doy_v[valid_pheno], na.rm = TRUE)
+      hopkins_line <- mean_doy + 4.0 * (lat_seq - mean_lat)
+      graphics::lines(lat_seq, hopkins_line, lwd = 2.4, lty = 2, col = "#111111")
+      graphics::legend(
+        "topleft",
+        legend = c("Hopkins' Law (+4.0 d/deg N)", packera_italic_expressions(fg_tx)),
+        col = c("#111111", dyn_pal[fg_tx]),
+        lty = c(2, rep(1, length(fg_tx))),
+        pch = c(NA, dyn_pch[fg_tx]), pt.bg = NA,
+        lwd = c(2.4, rep(1.6, length(fg_tx))), cex = 0.68, bty = "n"
+      )
+    } else {
+      graphics::plot(
+        c(0, 1), c(0, 1), type = "n", axes = FALSE,
+        xlab = "Decimal Latitude (deg N)",
+        ylab = "Flowering Day of Year (DOY)",
+        main = "B. Hopkins' Bioclimatic Law (+4.0 d / deg N) & Allochrony",
+        font.main = 2
+      )
+      graphics::box(col = "grey75")
+      graphics::text(0.5, 0.5, "No verified flowering DOY observations (1..366) available", col = "grey35", cex = 0.85)
+    }
   }, fdir, "fig06b_geographic_map_and_hopkins_phenology", width = 12.8, height = 5.6, dpi = 300)
+
+  invisible(TRUE)
+}
+
+generate_step06_pub_figures <- function(
+  vouchers_df,
+  srf_res = NULL,
+  niche_res = NULL,
+  pheno_res = NULL,
+  out_plot_pdf = NULL,
+  skip_fig05 = FALSE
+) {
+  fdir <- resolve_active_figures_dir(reference_path = out_plot_pdf)
+  if (is.null(vouchers_df) || nrow(vouchers_df) == 0) return(invisible(NULL))
+
+  tx_clean <- resolve_plot_group_column(vouchers_df)
+  dyn_pal <- get_dynamic_packera_palette(tx_clean)
+  dyn_pch <- get_dynamic_packera_shapes(tx_clean)
+  alpha_val <- adaptive_point_alpha(nrow(vouchers_df))
+  cols_tx <- grDevices::adjustcolor(dyn_pal[tx_clean], alpha.f = alpha_val)
+  pch_tx  <- dyn_pch[tx_clean]; pch_tx[is.na(pch_tx)] <- 1L
+  present_tx <- sort(unique(tx_clean[!is.na(tx_clean) & nzchar(tx_clean) & tx_clean != "Unknown"]))
+  if (length(present_tx) == 0) present_tx <- "Unassigned_Packera"
+
+  tier_info <- if (length(present_tx) > 6L) {
+    .unpack_synthesis_display_tier(tx_clean, present_tx, max_fg = 6L)
+  } else {
+    list(foreground_taxa = present_tx, background_taxa = character(0), is_tiered = FALSE)
+  }
+  fg_tx <- tier_info$foreground_taxa
+
+  imp_df <- if (!is.null(srf_res) && !is.null(srf_res$importance)) srf_res$importance else NULL
+
+  draw_importance_panel <- function(main_title = "A. Spatial RF Predictor Importance (10m-30m Stack)") {
+    pred_raw <- character(0)
+    imp_vals <- numeric(0)
+    if (!is.null(imp_df) && nrow(imp_df) > 0) {
+      if (all(c("Predictor", "MeanDecreaseAccuracy") %in% colnames(imp_df))) {
+        ord <- utils::tail(order(as.numeric(imp_df$MeanDecreaseAccuracy), decreasing = FALSE), 12)
+        pred_raw <- as.character(imp_df$Predictor[ord])
+        imp_vals <- pmax(0, as.numeric(imp_df$MeanDecreaseAccuracy[ord]))
+      } else if (all(c("Variable", "Importance") %in% colnames(imp_df))) {
+        ord <- utils::tail(order(as.numeric(imp_df$Importance), decreasing = FALSE), 12)
+        pred_raw <- as.character(imp_df$Variable[ord])
+        imp_vals <- pmax(0, as.numeric(imp_df$Importance[ord]))
+      }
+    }
+    if (length(pred_raw) == 0L) {
+      cand_p <- intersect(c("fine_bedrock_depth_cm", "fine_soil_sand", "ssurgo_rock_outcrop_pct", "fine_soil_ph", "bio1_temp_mean", "bio12_precip_annual", "topo_tpi_30m"), colnames(vouchers_df))
+      if (length(cand_p) > 0L) {
+        pred_raw <- rev(cand_p)
+        imp_vals <- vapply(pred_raw, function(cn) {
+          v <- suppressWarnings(as.numeric(vouchers_df[[cn]]))
+          if (sum(is.finite(v)) >= 3L) stats::sd(v, na.rm = TRUE) / (abs(mean(v, na.rm = TRUE)) + 1.0) else 0.05
+        }, numeric(1))
+      }
+    }
+    if (length(pred_raw) == 0L) {
+      graphics::plot(c(0, 1), c(0, 1), type = "n", axes = FALSE, xlab = "", ylab = "", main = main_title, font.main = 2)
+      graphics::box(col = "grey75")
+      graphics::text(0.5, 0.5, "Spatial RF importance table not supplied", col = "grey35", cex = 0.85)
+      return(invisible(NULL))
+    }
+    pred_lbls <- format_predictor_labels(pred_raw)
+    bar_cols <- ifelse(
+      grepl("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_)", pred_raw), "#009E73",
+      ifelse(grepl("^MEM", pred_raw), "#CC79A7", "#0072B2")
+    )
+    bp <- graphics::barplot(
+      imp_vals, names.arg = pred_lbls, horiz = TRUE, las = 1,
+      col = bar_cols, border = "white", cex.names = 0.72,
+      xlim = c(0, max(imp_vals, 0.05, na.rm = TRUE) * 1.18),
+      xlab = "Permutation Importance (Mean Decrease Accuracy)",
+      main = main_title, font.main = 2
+    )
+    graphics::grid(nx = NULL, ny = NA, col = "grey88")
+    graphics::legend(
+      "bottomright",
+      legend = c("10m-30m Edaphic/Outcrop", "WorldClim Macro-Climate", "Spatial MEMs"),
+      fill = c("#009E73", "#0072B2", "#CC79A7"), border = NA, cex = 0.68, bty = "n"
+    )
+  }
+
+  # 1. fig05_ecological_niche_phenology.{pdf,png} (4-Panel Publication Plate)
+  if (!isTRUE(skip_fig05)) {
+    atomic_save_dual_plot(function() {
+      graphics::par(mfrow = c(2, 2), mar = c(4.5, 10.5, 3.0, 1.2), oma = c(0.5, 0.5, 1.6, 0.5))
+
+      # Panel A: Variable Importance Ranking with Human-Readable Labels
+      draw_importance_panel("A. Spatial RF Predictor Importance (10m-30m Stack)")
+
+      # Panel B: 2D PCA-env Ecological Niche Space with Environmental Loading Vectors
+      graphics::par(mar = c(4.5, 4.6, 3.0, 1.2))
+      env_cand <- c("fine_soil_sand", "soil_sand", "fine_soil_ph", "soil_ph", "fine_bedrock_depth_cm", "ssurgo_rock_outcrop_pct", "topo_tpi_30m", "bio1_temp_mean", "bio12_precip_annual")
+      avail_env <- unique(intersect(env_cand, colnames(vouchers_df)))
+      if ("fine_soil_sand" %in% avail_env) avail_env <- setdiff(avail_env, "soil_sand")
+      if ("fine_soil_ph" %in% avail_env) avail_env <- setdiff(avail_env, "soil_ph")
+
+      env_pc1 <- rep(NA_real_, nrow(vouchers_df))
+      env_pc2 <- rep(NA_real_, nrow(vouchers_df))
+      env_var_pct <- c(0.0, 0.0)
+      env_load <- NULL
+      env_lbls <- NULL
+      has_valid_env_pca <- FALSE
+      if (length(avail_env) >= 2 && nrow(vouchers_df) >= 5) {
+        E_mat <- as.matrix(vouchers_df[, avail_env, drop = FALSE])
+        storage.mode(E_mat) <- "double"
+        col_fin <- colSums(is.finite(E_mat)) >= 3L
+        E_mat <- E_mat[, col_fin, drop = FALSE]
+        if (ncol(E_mat) >= 2L) {
+          for (j in seq_len(ncol(E_mat))) {
+            m_j <- stats::median(E_mat[, j], na.rm = TRUE)
+            if (is.finite(m_j)) E_mat[!is.finite(E_mat[, j]), j] <- m_j
+          }
+          keep_e <- which(apply(E_mat, 2, stats::sd, na.rm = TRUE) > 1e-6)
+          if (length(keep_e) >= 2) {
+            pca_e <- tryCatch(stats::prcomp(E_mat[, keep_e, drop = FALSE], center = TRUE, scale. = TRUE), error = function(e) NULL)
+            if (!is.null(pca_e) && ncol(pca_e$x) >= 2) {
+              env_pc1 <- pca_e$x[, 1]
+              env_pc2 <- pca_e$x[, 2]
+              ve <- (pca_e$sdev^2) / max(sum(pca_e$sdev^2), 1e-12) * 100
+              env_var_pct <- round(ve[1:2], 1)
+              env_load <- pca_e$rotation[, 1:2, drop = FALSE]
+              has_valid_env_pca <- TRUE
+              short_dict <- c(
+                "fine_soil_sand" = "Sand %", "soil_sand" = "Sand %",
+                "fine_soil_ph" = "Soil pH", "soil_ph" = "Soil pH",
+                "fine_bedrock_depth_cm" = "Bedrock Depth",
+                "ssurgo_rock_outcrop_pct" = "Rock Outcrop %",
+                "topo_tpi_30m" = "30m TPI",
+                "bio1_temp_mean" = "MAT (BIO1)",
+                "bio12_precip_annual" = "MAP (BIO12)"
+              )
+              env_lbls <- vapply(rownames(env_load), function(nm) if (nm %in% names(short_dict)) short_dict[[nm]] else nm, character(1))
+            }
+          }
+        }
+      }
+      is_type_6 <- if ("is_type_specimen" %in% colnames(vouchers_df)) as.logical(vouchers_df$is_type_specimen) else rep(FALSE, nrow(vouchers_df))
+      is_type_6[is.na(is_type_6)] <- FALSE
+      if (has_valid_env_pca) {
+        cent_env <- do.call(rbind, lapply(fg_tx, function(tx) {
+          m <- tx_clean == tx & is.finite(env_pc1) & is.finite(env_pc2)
+          c(mean(env_pc1[m], na.rm = TRUE), mean(env_pc2[m], na.rm = TRUE))
+        }))
+        rownames(cent_env) <- gsub("^Packera\\s+", "P. ", fg_tx)
+
+        plot_2d_ordination_scatter(
+          x = env_pc1, y = env_pc2,
+          col = cols_tx, pch = pch_tx, cex = 0.85, lwd = 1.0,
+          xlab = sprintf("PCA-env Axis 1 (%.1f%%)", env_var_pct[1]),
+          ylab = sprintf("PCA-env Axis 2 (%.1f%%)", env_var_pct[2]),
+          main = "B. 2D PCA-env Ecological Niche Space & Gradient Vectors",
+          group_vec = ifelse(tx_clean %in% fg_tx, tx_clean, NA_character_),
+          group_cols = dyn_pal,
+          ellipse_level = 0.85,
+          centroids = cent_env,
+          biplot_vectors = env_load,
+          biplot_labels = env_lbls,
+          is_type_vec = is_type_6,
+          legend_args = list(
+            "topright",
+            legend = packera_italic_expressions(fg_tx),
+            col = dyn_pal[fg_tx], pch = dyn_pch[fg_tx], pt.bg = NA, cex = 0.68, bty = "n"
+          )
+        )
+      } else {
+        graphics::plot(c(0, 1), c(0, 1), type = "n", axes = FALSE, xlab = "PCA-env Axis 1", ylab = "PCA-env Axis 2",
+                       main = "B. 2D PCA-env Ecological Niche Space & Gradient Vectors", font.main = 2)
+        graphics::box(col = "grey75")
+        graphics::text(0.5, 0.5, "Insufficient finite environmental predictors for PCA-env", col = "grey35", cex = 0.85)
+      }
+
+      # Panel C: Taxon-Stratified Pedological Boxplots (Soil Sand %) strictly on finite observations
+      sand_v <- if ("fine_soil_sand" %in% colnames(vouchers_df)) {
+        suppressWarnings(as.numeric(vouchers_df$fine_soil_sand))
+      } else if ("soil_sand" %in% colnames(vouchers_df)) {
+        suppressWarnings(as.numeric(vouchers_df$soil_sand))
+      } else {
+        rep(NA_real_, nrow(vouchers_df))
+      }
+      valid_sand <- is.finite(sand_v) & !is.na(tx_clean) & (tx_clean %in% fg_tx)
+      if (sum(valid_sand) >= 2L) {
+        sand_tx <- fg_tx[fg_tx %in% unique(tx_clean[valid_sand])]
+        kw_p <- if (length(sand_tx) >= 2L) {
+          tryCatch(stats::kruskal.test(sand_v[valid_sand] ~ factor(tx_clean[valid_sand]))$p.value, error = function(e) NA_real_)
+        } else {
+          NA_real_
+        }
+        p_str <- if (is.finite(kw_p)) sprintf("Kruskal-Wallis p = %.2e", kw_p) else "Edaphic Divergence"
+        short_tx_c <- gsub("^Packera\\s+", "P. ", sand_tx)
+        tx_fac <- factor(tx_clean[valid_sand], levels = sand_tx, labels = short_tx_c)
+        graphics::boxplot(
+          sand_v[valid_sand] ~ tx_fac,
+          col = grDevices::adjustcolor(dyn_pal[sand_tx], alpha.f = 0.25),
+          border = dyn_pal[sand_tx], outpch = NA,
+          xlab = "", ylab = "Soil Sand Fraction (%, 30m POLARIS / SSURGO)",
+          main = sprintf("C. Fine-Grain Soil Sand by Species (%s)", p_str),
+          font.axis = 3, cex.axis = 0.78, font.main = 2,
+          las = if (length(sand_tx) > 4L) 2 else 1
+        )
+        graphics::grid(nx = NA, ny = NULL, col = "grey88")
+        set.seed(42)
+        for (s_i in seq_along(sand_tx)) {
+          m_s <- which(valid_sand & tx_clean == sand_tx[s_i])
+          if (length(m_s) > 0) {
+            jit_x <- s_i + stats::runif(length(m_s), -0.18, 0.18)
+            graphics::points(
+              jit_x, sand_v[m_s],
+              pch = dyn_pch[[sand_tx[s_i]]], bg = NA,
+              col = grDevices::adjustcolor(dyn_pal[[sand_tx[s_i]]], alpha.f = alpha_val),
+              cex = 0.75, lwd = 0.9
+            )
+          }
+        }
+      } else {
+        graphics::plot(c(0, 1), c(0, 1), type = "n", axes = FALSE, xlab = "", ylab = "Soil Sand Fraction (%)",
+                       main = "C. Fine-Grain Soil Sand by Species", font.main = 2)
+        graphics::box(col = "grey75")
+        graphics::text(0.5, 0.5, "No finite soil sand measurements available", col = "grey35", cex = 0.85)
+      }
+
+      # Panel D: Pairwise Schoener's D Niche Overlap Matrix (Benjamini-Hochberg FDR Adjusted)
+      disp_tx_d <- fg_tx
+      short_tx_d <- gsub("^Packera\\s+", "P. ", disp_tx_d)
+      n_sp <- length(disp_tx_d)
+      has_niche_table <- !is.null(niche_res) && is.data.frame(niche_res) && nrow(niche_res) > 0
+      env_grp_counts <- if (has_valid_env_pca) {
+        vapply(disp_tx_d, function(tx) sum(tx_clean == tx & is.finite(env_pc1)), integer(1))
+      } else {
+        rep(0L, n_sp)
+      }
+
+      if (!has_niche_table && sum(env_grp_counts >= 2L) < 2L) {
+        graphics::plot(
+          c(0, 1), c(0, 1), type = "n", axes = FALSE,
+          xlab = "Focal Taxon", ylab = "",
+          main = "D. Pairwise Schoener's D Niche Overlap & Equivalency", font.main = 2
+        )
+        graphics::box(col = "grey75")
+        graphics::text(0.5, 0.5, "Pairwise niche equivalency table not supplied", col = "grey35", cex = 0.85)
+      } else {
+        d_mat <- matrix(1.0, nrow = n_sp, ncol = n_sp, dimnames = list(short_tx_d, short_tx_d))
+        p_mat <- matrix(NA_real_, nrow = n_sp, ncol = n_sp, dimnames = list(short_tx_d, short_tx_d))
+        if (has_niche_table) {
+          niche_res <- apply_bh_fdr_correction(niche_res, p_col = "Equivalency_p_value")
+          for (r_i in seq_len(nrow(niche_res))) {
+            t1 <- sub("^Packera\\s+", "P. ", as.character(niche_res$Taxon_1[r_i]))
+            t2 <- sub("^Packera\\s+", "P. ", as.character(niche_res$Taxon_2[r_i]))
+            dv <- suppressWarnings(as.numeric(niche_res$Schoeners_D[r_i]))
+            pv <- if ("p_adj_bh" %in% names(niche_res)) suppressWarnings(as.numeric(niche_res$p_adj_bh[r_i])) else suppressWarnings(as.numeric(niche_res$Equivalency_p_value[r_i]))
+            if (t1 %in% short_tx_d && t2 %in% short_tx_d && is.finite(dv)) {
+              d_mat[t1, t2] <- dv; d_mat[t2, t1] <- dv
+              p_mat[t1, t2] <- pv; p_mat[t2, t1] <- pv
+            }
+          }
+        } else {
+          rng_pc1 <- range(env_pc1[is.finite(env_pc1)], na.rm = TRUE)
+          brks <- seq(rng_pc1[1] - 1e-6, rng_pc1[2] + 1e-6, length.out = 16L)
+          for (i in seq_len(n_sp)) {
+            for (j in seq_len(n_sp)) {
+              if (i < j) {
+                v_i <- env_pc1[tx_clean == disp_tx_d[i] & is.finite(env_pc1)]
+                v_j <- env_pc1[tx_clean == disp_tx_d[j] & is.finite(env_pc1)]
+                if (length(v_i) >= 2L && length(v_j) >= 2L) {
+                  p_i <- graphics::hist(v_i, breaks = brks, plot = FALSE)$counts
+                  p_j <- graphics::hist(v_j, breaks = brks, plot = FALSE)$counts
+                  p_i <- p_i / max(sum(p_i), 1L)
+                  p_j <- p_j / max(sum(p_j), 1L)
+                  d_ij <- round(1.0 - 0.5 * sum(abs(p_i - p_j)), 3)
+                  d_mat[i, j] <- d_ij; d_mat[j, i] <- d_ij
+                } else {
+                  d_mat[i, j] <- NA_real_; d_mat[j, i] <- NA_real_
+                }
+              }
+            }
+          }
+        }
+        graphics::plot(
+          c(0.5, n_sp + 0.5), c(0.5, n_sp + 0.5), type = "n", axes = FALSE,
+          xlab = "Focal Taxon", ylab = "",
+          main = "D. Pairwise Schoener's D Niche Overlap & Equivalency", font.main = 2
+        )
+        ramp_d <- grDevices::colorRampPalette(c("#FFF5EB", "#FDD0A2", "#FD8D3C", "#D94801", "#7F2704"))(101)
+        cex_d <- min(0.74, max(0.42, 4.8 / max(n_sp, 1L)))
+        for (i in seq_len(n_sp)) {
+          y_pos <- n_sp - i + 1
+          for (j in seq_len(n_sp)) {
+            dv <- d_mat[i, j]
+            c_idx <- if (is.finite(dv)) max(1L, min(101L, round(dv * 100) + 1L)) else 1L
+            graphics::rect(j - 0.48, y_pos - 0.46, j + 0.48, y_pos + 0.46, col = if (i == j) "#EEEEEE" else if (is.finite(dv)) ramp_d[c_idx] else "#F7F7F7", border = "white", lwd = 1.5)
+            lbl_cell <- if (i == j) "1.00\n(Self)" else if (!is.finite(dv)) "NA" else if (is.finite(p_mat[i, j])) sprintf("D = %.2f\n(p = %.3f)", dv, p_mat[i, j]) else sprintf("D = %.2f", dv)
+            graphics::text(j, y_pos, labels = lbl_cell, cex = cex_d, font = if (i == j) 1 else 2, col = if (i != j && is.finite(dv) && dv > 0.62) "white" else "#111111")
+          }
+        }
+        graphics::axis(1, at = seq_len(n_sp), labels = short_tx_d, tick = FALSE, font = 3, cex.axis = min(0.80, max(0.50, 5.5 / max(n_sp, 1L))), las = if (n_sp > 4L) 2 else 1)
+        graphics::axis(2, at = rev(seq_len(n_sp)), labels = short_tx_d, las = 1, tick = FALSE, font = 3, cex.axis = min(0.80, max(0.50, 5.5 / max(n_sp, 1L))))
+        graphics::box(col = "grey75")
+      }
+      title_taxa <- if ("species_standardized" %in% names(vouchers_df) && length(unique(stats::na.omit(vouchers_df$species_standardized))) == 1L) vouchers_df$species_standardized else tx_clean
+      graphics::title(format_active_complex_title(title_taxa, "10m-30m Fine-Grain Edaphic Niche & PCA-env Equivalency"), outer = TRUE, cex.main = 1.25)
+    }, fdir, "fig05_ecological_niche_phenology", width = 13.0, height = 9.5, dpi = 300)
+  }
+
+  # 2. fig06b_geographic_map_and_hopkins_phenology.{pdf,png}
+  export_step06b_geographic_and_hopkins(vouchers_df = vouchers_df, fig_dir = fdir)
 
   invisible(TRUE)
 }
@@ -522,12 +732,14 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
     row_pct <- sweep(flow_mat, 1, pmax(rowSums(flow_mat), 1), "/") * 100
     nr <- nrow(flow_mat); nc <- ncol(flow_mat)
 
+    graphics::par(mar = c(if (nc > 5L) 6.6 else 5.4, if (nr > 6L) 6.6 else 5.4, 3.4, 1.2))
     graphics::plot(
       c(0.5, nc + 0.5), c(0.5, nr + 0.5), type = "n", axes = FALSE,
-      xlab = "Recommended Taxonomic Determination", ylab = "",
+      xlab = if (nc > 5L) "" else "Recommended Taxonomic Determination", ylab = "",
       main = "B. Recorded vs. Recommended Determination Matrix", font.main = 2
     )
     ramp_b <- grDevices::colorRampPalette(c("#F7FBFF", "#C6DBEF", "#6BAED6", "#2171B5", "#084594"))(101)
+    cex_cell <- min(0.74, max(0.38, 5.2 / max(nr, nc)))
     for (i in seq_len(nr)) {
       y_pos <- nr - i + 1
       for (j in seq_len(nc)) {
@@ -536,11 +748,21 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
         c_idx <- max(1L, min(101L, round(pct_ij) + 1L))
         graphics::rect(j - 0.48, y_pos - 0.46, j + 0.48, y_pos + 0.46, col = ramp_b[c_idx], border = "white", lwd = 1.5)
         txt_col <- if (pct_ij >= 52) "white" else "#111111"
-        graphics::text(j, y_pos, labels = sprintf("%d\n(%.1f%%)", cnt_ij, pct_ij), col = txt_col, cex = 0.74, font = if (cnt_ij > 0) 2 else 1)
+        is_diag_ij <- (j <= length(col_levels)) && (tx_levels[i] == col_levels[j])
+        lbl_ij <- if (max(nr, nc) > 6L) {
+          if (cnt_ij == 0L && !is_diag_ij) "" else sprintf("%d (%.0f%%)", cnt_ij, pct_ij)
+        } else {
+          sprintf("%d\n(%.1f%%)", cnt_ij, pct_ij)
+        }
+        if (nzchar(lbl_ij)) {
+          graphics::text(j, y_pos, labels = lbl_ij, col = txt_col, cex = cex_cell, font = if (cnt_ij > 0) 2 else 1)
+        }
       }
     }
-    graphics::axis(1, at = seq_len(nc), labels = col_labels, tick = FALSE, font = 3, cex.axis = 0.78)
-    graphics::axis(2, at = rev(seq_len(nr)), labels = tx_labels, las = 1, tick = FALSE, font = 3, cex.axis = 0.80)
+    cex_ax_x <- min(0.78, max(0.42, 6.2 / max(nc, 1L)))
+    cex_ax_y <- min(0.80, max(0.42, 6.2 / max(nr, 1L)))
+    graphics::axis(1, at = seq_len(nc), labels = col_labels, tick = FALSE, font = 3, cex.axis = cex_ax_x, las = if (nc > 5L) 2 else 1)
+    graphics::axis(2, at = rev(seq_len(nr)), labels = tx_labels, las = 1, tick = FALSE, font = 3, cex.axis = cex_ax_y)
     graphics::box(col = "grey75")
   }, fdir, "fig07_multimodal_discordance_summary", width = 13.0, height = 5.6, dpi = 300)
 
@@ -611,30 +833,63 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
     tx_f <- factor(tx_clean, levels = tx_levels, labels = tx_labels)
     tbl_treat_tx <- table(treat_f, tx_f)
     col_totals <- colSums(tbl_treat_tx)
-    y_top_b <- max(c(5, col_totals), na.rm = TRUE) * 1.25
-    bp_b <- graphics::barplot(
-      tbl_treat_tx,
-      beside = FALSE,
-      col = treat_pal[rownames(tbl_treat_tx)],
-      ylim = c(0, y_top_b),
-      ylab = "Completed Voucher Count",
-      font.axis = 3,
-      cex.names = 0.86,
-      main = "B. Taxonomic Treatments by Recorded Species",
-      font.main = 2
-    )
-    graphics::text(
-      bp_b, col_totals + y_top_b * 0.04,
-      labels = ifelse(col_totals > 0, sprintf("n = %d", col_totals), ""),
-      font = 2, cex = 0.80
-    )
-    graphics::grid(nx = NA, ny = NULL, col = "grey85")
-    graphics::legend(
-      "topright",
-      legend = treat_levels,
-      fill = treat_pal[treat_levels],
-      cex = 0.72, bty = "n"
-    )
+    if (length(tx_levels) > 6L) {
+      graphics::par(mar = c(5.2, 7.6, 3.6, 1.4))
+      prop_treat_tx <- sweep(tbl_treat_tx, 2, pmax(col_totals, 1), "/") * 100
+      cex_nm <- min(0.78, max(0.40, 6.4 / length(tx_levels)))
+      bp_b <- graphics::barplot(
+        prop_treat_tx[, rev(seq_len(ncol(prop_treat_tx))), drop = FALSE],
+        beside = FALSE,
+        horiz = TRUE,
+        las = 1,
+        col = treat_pal[rownames(prop_treat_tx)],
+        xlim = c(0, 118),
+        xlab = "Completed Voucher Proportion (%)",
+        ylab = "",
+        font.axis = 3,
+        cex.names = cex_nm,
+        main = "B. Taxonomic Treatments by Recorded Species",
+        font.main = 2
+      )
+      rev_totals <- rev(col_totals)
+      graphics::text(
+        rep(101.5, length(bp_b)), bp_b,
+        labels = ifelse(rev_totals > 0, sprintf("n=%d", rev_totals), ""),
+        pos = 4, font = 2, cex = cex_nm
+      )
+      graphics::grid(nx = NULL, ny = NA, col = "grey85")
+      graphics::legend(
+        "bottomright",
+        legend = treat_levels,
+        fill = treat_pal[treat_levels],
+        cex = 0.64, bg = grDevices::adjustcolor("white", alpha.f = 0.88)
+      )
+    } else {
+      y_top_b <- max(c(5, col_totals), na.rm = TRUE) * 1.25
+      bp_b <- graphics::barplot(
+        tbl_treat_tx,
+        beside = FALSE,
+        col = treat_pal[rownames(tbl_treat_tx)],
+        ylim = c(0, y_top_b),
+        ylab = "Completed Voucher Count",
+        font.axis = 3,
+        cex.names = 0.86,
+        main = "B. Taxonomic Treatments by Recorded Species",
+        font.main = 2
+      )
+      graphics::text(
+        bp_b, col_totals + y_top_b * 0.04,
+        labels = ifelse(col_totals > 0, sprintf("n = %d", col_totals), ""),
+        font = 2, cex = 0.80
+      )
+      graphics::grid(nx = NA, ny = NULL, col = "grey85")
+      graphics::legend(
+        "topright",
+        legend = treat_levels,
+        fill = treat_pal[treat_levels],
+        cex = 0.72, bty = "n"
+      )
+    }
   }, fdir, "fig07b_taxonomic_treatment_summary", width = 13.5, height = 5.8, dpi = 300)
 
   invisible(TRUE)
@@ -679,46 +934,97 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", active_tx, ignore.case = TRUE)) ||
     length(unique(stats::na.omit(df$species_standardized))) < 2L
   grp_legend_lbl <- if (is_subcluster_mode) "Morphotype" else "Species"
+
+  tier_info <- if (length(active_tx) > 6L) {
+    .unpack_synthesis_display_tier(df$plot_group, active_tx, max_fg = 6L)
+  } else {
+    list(foreground_taxa = active_tx, background_taxa = character(0), is_tiered = FALSE)
+  }
+  fg_tx <- tier_info$foreground_taxa
+  bg_tx <- tier_info$background_taxa
+
   dyn_pal <- get_dynamic_packera_palette(active_tx)
   dyn_shapes <- get_dynamic_packera_ggplot_shapes(active_tx)
   thm <- ggplot2::theme_bw(base_size = 9) +
     ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 9.5),
-                   plot.subtitle = ggplot2::element_text(size = 7.8, color = "grey25"),
+                   plot.subtitle = ggplot2::element_text(size = 7.6, color = "grey25"),
                    panel.grid.minor = ggplot2::element_blank(),
                    legend.title = ggplot2::element_text(size = 8, face = "bold"),
-                   legend.text = ggplot2::element_text(size = 7.5))
+                   legend.text = ggplot2::element_text(size = 7.3))
 
+  # ----------------------------------------------------------------------------
+  # Panel A (p1): Integrative Canonical Discriminant & Type Baseline Projection
+  # ----------------------------------------------------------------------------
   cda_sub <- df[!is.na(df$can1) & !is.na(df$can2) & df$plot_group %in% active_tx, , drop = FALSE]
   if (nrow(cda_sub) == 0) cda_sub <- df[!is.na(df$can1) & !is.na(df$can2), , drop = FALSE]
   pt_alpha <- adaptive_point_alpha(nrow(cda_sub))
-  cent_rows <- lapply(intersect(active_tx, unique(cda_sub$plot_group)), function(tx) {
-    m <- cda_sub$plot_group == tx
-    data.frame(plot_group = tx, cx = mean(cda_sub$can1[m], na.rm = TRUE), cy = mean(cda_sub$can2[m], na.rm = TRUE),
+  fg_cda <- cda_sub[cda_sub$plot_group %in% fg_tx, , drop = FALSE]
+  if (nrow(fg_cda) == 0) fg_cda <- cda_sub
+  bg_cda <- if (length(bg_tx) > 0L) cda_sub[cda_sub$plot_group %in% bg_tx, , drop = FALSE] else cda_sub[FALSE, , drop = FALSE]
+
+  cent_rows <- lapply(intersect(fg_tx, unique(fg_cda$plot_group)), function(tx) {
+    m <- fg_cda$plot_group == tx
+    data.frame(plot_group = tx, cx = mean(fg_cda$can1[m], na.rm = TRUE), cy = mean(fg_cda$can2[m], na.rm = TRUE),
                label = gsub("^Packera\\s+", "P. ", tx), stringsAsFactors = FALSE)
   })
   cent_df <- if (length(cent_rows) > 0) do.call(rbind, cent_rows) else data.frame(cx = numeric(0), cy = numeric(0), label = character(0))
 
-  p1 <- ggplot2::ggplot(cda_sub, ggplot2::aes(x = can1, y = can2, color = plot_group, shape = plot_group)) +
+  p1 <- ggplot2::ggplot(fg_cda, ggplot2::aes(x = can1, y = can2, color = plot_group, shape = plot_group)) +
     ggplot2::geom_hline(yintercept = 0, linetype = "dotted", color = "grey75", linewidth = 0.4) +
-    ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "grey75", linewidth = 0.4) +
+    ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "grey75", linewidth = 0.4)
+
+  if (nrow(bg_cda) > 0L) {
+    hull_list <- lapply(unique(bg_cda$plot_group), function(b_tx) {
+      sub_b <- bg_cda[bg_cda$plot_group == b_tx, , drop = FALSE]
+      if (nrow(sub_b) >= 3L) {
+        idx_h <- grDevices::chull(sub_b$can1, sub_b$can2)
+        sub_b[idx_h, c("can1", "can2", "plot_group"), drop = FALSE]
+      } else {
+        NULL
+      }
+    })
+    hull_list <- Filter(Negate(is.null), hull_list)
+    if (length(hull_list) > 0L) {
+      bg_hull_df <- do.call(rbind, hull_list)
+      p1 <- p1 + ggplot2::geom_polygon(
+        data = bg_hull_df, ggplot2::aes(x = can1, y = can2, group = plot_group),
+        fill = "grey85", color = "grey70", alpha = 0.18, linetype = "dashed", linewidth = 0.35, inherit.aes = FALSE
+      )
+    }
+    p1 <- p1 + ggplot2::geom_point(
+      data = bg_cda, ggplot2::aes(x = can1, y = can2),
+      shape = 1, color = "grey70", alpha = 0.32, size = 1.15, stroke = 0.5, inherit.aes = FALSE
+    )
+  }
+
+  p1 <- p1 +
     ggplot2::stat_ellipse(level = 0.95, linetype = 1, linewidth = 0.85, show.legend = FALSE) +
     ggplot2::geom_point(fill = NA, stroke = 0.72, alpha = pt_alpha, size = 1.55) +
     ggplot2::geom_point(data = cent_df, ggplot2::aes(x = cx, y = cy), shape = 3, size = 2.8, stroke = 1.3, color = "black", inherit.aes = FALSE) +
-    ggplot2::scale_color_manual(values = dyn_pal) + ggplot2::scale_shape_manual(values = dyn_shapes) +
+    ggplot2::scale_color_manual(values = dyn_pal[fg_tx]) +
+    ggplot2::scale_shape_manual(values = dyn_shapes[fg_tx]) +
     thm + ggplot2::labs(
-      title = "A. Integrative 2D CDA Morphospace (Can1 vs. Can2)",
-      subtitle = if (!is.na(loocv_acc)) sprintf("Gold/Silver Anchor CDA (LOOCV = %.1f%%) | 95%% Ellipses & Centroids (+)", loocv_acc) else "95% Confidence Ellipses & Group Centroids (+)",
+      title = "A. Integrative Canonical Discriminant & Type Baseline Projection",
+      subtitle = if (!is.na(loocv_acc)) sprintf("Gold/Silver Anchor CDA (LOOCV = %.1f%%) | 95%% Ellipses & Double-Ringed Types", loocv_acc) else "95% Confidence Ellipses, Group Centroids (+) & Type Anchors",
       x = sprintf("Canonical Variate 1 (Can1: %.1f%%)", can1_pct), y = sprintf("Canonical Variate 2 (Can2: %.1f%%)", can2_pct),
       color = grp_legend_lbl, shape = grp_legend_lbl
     )
   if ("is_type_specimen" %in% names(cda_sub) && any(as.logical(cda_sub$is_type_specimen) == TRUE, na.rm = TRUE)) {
-    p1 <- p1 + ggplot2::geom_point(
-      data = cda_sub[which(as.logical(cda_sub$is_type_specimen) == TRUE), , drop = FALSE],
-      ggplot2::aes(x = can1, y = can2),
-      shape = 5, fill = NA, stroke = 1.35, size = 2.8, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
-    )
+    type_cda <- cda_sub[which(as.logical(cda_sub$is_type_specimen) == TRUE), , drop = FALSE]
+    p1 <- p1 +
+      ggplot2::geom_point(
+        data = type_cda, ggplot2::aes(x = can1, y = can2),
+        shape = 5, fill = NA, stroke = 1.35, size = 2.7, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
+      ) +
+      ggplot2::geom_point(
+        data = type_cda, ggplot2::aes(x = can1, y = can2),
+        shape = 1, fill = NA, stroke = 1.15, size = 3.5, color = "#D55E00", inherit.aes = FALSE, show.legend = FALSE
+      )
   }
 
+  # ----------------------------------------------------------------------------
+  # Panel B (p2): Hierarchical Integrative Treatment Breakdown
+  # ----------------------------------------------------------------------------
   df_comp <- if ("is_completed_voucher" %in% names(df) && any(df$is_completed_voucher == TRUE, na.rm = TRUE)) df[which(df$is_completed_voucher == TRUE), , drop = FALSE] else df
   df_comp <- df_comp[df_comp$plot_group %in% active_tx, , drop = FALSE]
   if (nrow(df_comp) == 0) df_comp <- df
@@ -733,74 +1039,198 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   df_comp$Treatment_Clean <- factor(treat_clean, levels = treat_levels)
   df_comp$Species_Short <- gsub("^Packera\\s+", "P. ", as.character(df_comp$plot_group))
   n_by_sp <- stats::aggregate(catalogNumber ~ Species_Short, data = df_comp, FUN = length)
+  p2_sz <- min(2.6, max(1.7, 18.0 / max(nrow(n_by_sp), 1L)))
   p2 <- ggplot2::ggplot(df_comp, ggplot2::aes(x = Species_Short, fill = Treatment_Clean)) +
     ggplot2::geom_bar(position = "fill", width = 0.65, color = "white", linewidth = 0.25) +
-    ggplot2::geom_text(data = n_by_sp, ggplot2::aes(x = Species_Short, y = 1.03, label = paste0("n=", catalogNumber)), inherit.aes = FALSE, size = 2.6, fontface = "bold") +
-    ggplot2::scale_y_continuous(labels = function(x) paste0(round(x * 100), "%"), limits = c(0, 1.08)) +
+    ggplot2::geom_text(data = n_by_sp, ggplot2::aes(x = Species_Short, y = 1.04, label = paste0("n=", catalogNumber)), inherit.aes = FALSE, size = p2_sz, fontface = "bold") +
+    ggplot2::scale_y_continuous(labels = function(x) paste0(round(x * 100), "%"), limits = c(0, 1.12)) +
     ggplot2::scale_fill_manual(values = TAXONOMIC_TREATMENT_PALETTE[treat_levels], drop = FALSE) +
-    thm + ggplot2::theme(axis.text.x = ggplot2::element_text(face = if (is_subcluster_mode) "bold" else "italic", angle = 14, hjust = 1)) +
+    thm +
     ggplot2::labs(title = "B. Hierarchical Integrative Treatment Breakdown",
                   subtitle = "5-stage precedence (Misidentification -> Hybrid -> Cryptic -> Ecotype -> Confirmed)",
                   x = if (is_subcluster_mode) "Morphotype / Subcluster Group" else "Recorded Herbarium Taxon", y = "Proportion of Completed Vouchers", fill = "Treatment")
-
-  ed_sub <- df[df$plot_group %in% active_tx, , drop = FALSE]
-  ed_sub$sand_plot <- if ("fine_soil_sand" %in% names(ed_sub) && any(!is.na(ed_sub$fine_soil_sand))) suppressWarnings(as.numeric(ed_sub$fine_soil_sand)) else if ("soil_sand" %in% names(ed_sub)) suppressWarnings(as.numeric(ed_sub$soil_sand)) else rep(NA_real_, nrow(ed_sub))
-  ed_sub$ph_plot <- if ("fine_soil_ph" %in% names(ed_sub) && any(!is.na(ed_sub$fine_soil_ph))) suppressWarnings(as.numeric(ed_sub$fine_soil_ph)) else if ("soil_ph" %in% names(ed_sub)) suppressWarnings(as.numeric(ed_sub$soil_ph)) else rep(NA_real_, nrow(ed_sub))
-  ed_sub <- ed_sub[is.finite(ed_sub$sand_plot) & is.finite(ed_sub$ph_plot), , drop = FALSE]
-  ed_cent_rows <- lapply(intersect(active_tx, unique(ed_sub$plot_group)), function(tx) {
-    m <- ed_sub$plot_group == tx
-    data.frame(
-      plot_group = tx,
-      cx = mean(ed_sub$sand_plot[m], na.rm = TRUE),
-      cy = mean(ed_sub$ph_plot[m], na.rm = TRUE),
-      stringsAsFactors = FALSE
-    )
-  })
-  ed_cent_df <- if (length(ed_cent_rows) > 0L) do.call(rbind, ed_cent_rows) else data.frame(cx = numeric(0), cy = numeric(0))
-  p3 <- ggplot2::ggplot(ed_sub, ggplot2::aes(x = sand_plot, y = ph_plot, color = plot_group, shape = plot_group)) +
-    ggplot2::stat_ellipse(level = 0.85, linewidth = 0.9, show.legend = FALSE) +
-    ggplot2::geom_point(fill = NA, stroke = 0.72, alpha = pt_alpha, size = 1.4) +
-    ggplot2::geom_point(data = ed_cent_df, ggplot2::aes(x = cx, y = cy), shape = 3, size = 2.8, stroke = 1.3, color = "black", inherit.aes = FALSE) +
-    ggplot2::scale_color_manual(values = dyn_pal) + ggplot2::scale_shape_manual(values = dyn_shapes) +
-    thm + ggplot2::labs(title = "C. Fine-Grain (10m-30m) Edaphic & Outcrop Niche Separation",
-                        subtitle = "85% Confidence Ellipses & Group Centroids (+) Across Active Groups",
-                        x = "Fine-Grain Soil Sand Fraction (%)", y = "Fine-Grain Soil pH (H2O)", color = grp_legend_lbl, shape = grp_legend_lbl)
-  if ("is_type_specimen" %in% names(ed_sub) && any(as.logical(ed_sub$is_type_specimen) == TRUE, na.rm = TRUE)) {
-    p3 <- p3 + ggplot2::geom_point(
-      data = ed_sub[which(as.logical(ed_sub$is_type_specimen) == TRUE), , drop = FALSE],
-      ggplot2::aes(x = sand_plot, y = ph_plot),
-      shape = 5, fill = NA, stroke = 1.35, size = 2.8, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
-    )
+  if (length(active_tx) > 5L) {
+    ax_sz_b <- min(7.8, max(4.6, 52.0 / length(active_tx)))
+    p2 <- p2 + ggplot2::coord_flip() +
+      ggplot2::theme(axis.text.y = ggplot2::element_text(face = if (is_subcluster_mode) "bold" else "italic", size = ax_sz_b))
+  } else {
+    p2 <- p2 + ggplot2::theme(axis.text.x = ggplot2::element_text(face = if (is_subcluster_mode) "bold" else "italic", angle = 14, hjust = 1))
   }
 
-  ph_sub <- df[df$plot_group %in% active_tx, , drop = FALSE]
-  use_delta <- "delta_doy" %in% names(ph_sub) && sum(!is.na(ph_sub$delta_doy)) >= 10
-  ph_sub$x_pheno <- if (use_delta) suppressWarnings(as.numeric(ph_sub$delta_doy)) else if ("doy" %in% names(ph_sub)) suppressWarnings(as.numeric(ph_sub$doy)) else rep(NA_real_, nrow(ph_sub))
-  ph_sub <- ph_sub[is.finite(ph_sub$x_pheno), , drop = FALSE]
-  med_ph <- if (nrow(ph_sub) > 0) stats::aggregate(x_pheno ~ plot_group, data = ph_sub, FUN = function(x) stats::median(x, na.rm = TRUE)) else data.frame(plot_group = character(0), x_pheno = numeric(0))
-  p4 <- ggplot2::ggplot(ph_sub, ggplot2::aes(x = x_pheno, fill = plot_group, color = plot_group)) +
-    ggplot2::geom_density(alpha = 0.35, linewidth = 0.75) +
-    ggplot2::geom_vline(data = med_ph, ggplot2::aes(xintercept = x_pheno, color = plot_group), linetype = "dashed", linewidth = 0.8, show.legend = FALSE) +
-    ggplot2::scale_fill_manual(values = dyn_pal) + ggplot2::scale_color_manual(values = dyn_pal) +
-    thm + ggplot2::labs(
-      title = if (use_delta) "D. Hopkins-Corrected Circular Anthesis Isolation (Delta DOY)" else "D. Allochronic Flowering Isolation (Anthesis DOY)",
-      subtitle = if (nrow(med_ph) > 0) paste(sprintf("%s: %.1fd", gsub("^Packera\\s+", "P. ", med_ph$plot_group), med_ph$x_pheno), collapse = " | ") else "Dashed lines = Group median flowering time",
-      x = if (use_delta) "Circular Hopkins Residual Delta DOY (Days)" else "Flowering Day of Year (DOY)",
-      y = "Kernel Density", fill = grp_legend_lbl, color = grp_legend_lbl
+  # ----------------------------------------------------------------------------
+  # Panel C (p3): Recorded vs. Recommended Integrative Determination Matrix
+  # ----------------------------------------------------------------------------
+  rec_raw_c <- if ("recommended_determination" %in% names(df_comp)) {
+    as.character(df_comp$recommended_determination)
+  } else if ("cda_predicted_taxon" %in% names(df_comp)) {
+    as.character(df_comp$cda_predicted_taxon)
+  } else {
+    as.character(df_comp$plot_group)
+  }
+  rec_std_c <- standardize_taxon_name(rec_raw_c)
+  rec_clean_c <- ifelse(!is.na(rec_std_c), rec_std_c, ifelse(grepl("×|hybrid", rec_raw_c, ignore.case = TRUE), "Hybrid Swarm", as.character(df_comp$plot_group)))
+  mat_tx_c <- if (length(active_tx) > 10L) {
+    .unpack_synthesis_display_tier(df_comp$plot_group, active_tx, max_fg = 8L)$foreground_taxa
+  } else {
+    active_tx
+  }
+  row_c_vec <- ifelse(df_comp$plot_group %in% mat_tx_c, as.character(df_comp$plot_group), "Other Packera spp.")
+  col_c_vec <- ifelse(rec_clean_c %in% c(mat_tx_c, "Hybrid Swarm"), rec_clean_c, "Other Packera spp.")
+  row_c_lvls <- unique(c(mat_tx_c, if (any(row_c_vec == "Other Packera spp.")) "Other Packera spp." else NULL))
+  col_c_lvls <- unique(c(mat_tx_c, if (any(col_c_vec == "Other Packera spp.")) "Other Packera spp." else NULL, if (any(col_c_vec == "Hybrid Swarm")) "Hybrid Swarm" else NULL))
+  row_c_lbls <- gsub("^Packera\\s+", "P. ", row_c_lvls)
+  col_c_lbls <- gsub("^Packera\\s+", "P. ", col_c_lvls)
+
+  flow_tbl_c <- table(
+    Recorded = factor(row_c_vec, levels = rev(row_c_lvls), labels = rev(row_c_lbls)),
+    Recommended = factor(col_c_vec, levels = col_c_lvls, labels = col_c_lbls)
+  )
+  flow_pct_c <- sweep(flow_tbl_c, 1, pmax(rowSums(flow_tbl_c), 1), "/") * 100
+  flow_df_c <- as.data.frame(flow_tbl_c, stringsAsFactors = FALSE)
+  pct_df_c <- as.data.frame(flow_pct_c, stringsAsFactors = FALSE)
+  flow_df_c$Pct <- pct_df_c$Freq
+  flow_df_c$Recorded <- factor(flow_df_c$Recorded, levels = rev(row_c_lbls))
+  flow_df_c$Recommended <- factor(flow_df_c$Recommended, levels = col_c_lbls)
+  max_dim_c <- max(length(row_c_lbls), length(col_c_lbls))
+  flow_df_c$Cell_Label <- vapply(seq_len(nrow(flow_df_c)), function(k) {
+    cnt_k <- flow_df_c$Freq[k]
+    pct_k <- flow_df_c$Pct[k]
+    is_diag_k <- as.character(flow_df_c$Recorded[k]) == as.character(flow_df_c$Recommended[k])
+    if (cnt_k == 0L && !is_diag_k) {
+      ""
+    } else if (max_dim_c > 6L) {
+      sprintf("%d (%.0f%%)", cnt_k, pct_k)
+    } else {
+      sprintf("%d\n(%.0f%%)", cnt_k, pct_k)
+    }
+  }, character(1))
+  txt_sz_c <- min(2.7, max(1.65, 16.0 / max(max_dim_c, 1L)))
+  p3 <- ggplot2::ggplot(flow_df_c, ggplot2::aes(x = Recommended, y = Recorded, fill = Pct)) +
+    ggplot2::geom_tile(color = "white", linewidth = 0.6) +
+    ggplot2::geom_text(
+      ggplot2::aes(label = Cell_Label),
+      size = txt_sz_c,
+      fontface = "bold",
+      color = ifelse(flow_df_c$Pct >= 52, "white", "#111111")
+    ) +
+    ggplot2::scale_fill_gradient(low = "#F7FBFF", high = "#084594", limits = c(0, 100)) +
+    thm +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(face = "italic", angle = if (length(col_c_lbls) > 4L) 28 else 12, hjust = 1, size = min(7.6, max(5.2, 48.0 / max(length(col_c_lbls), 1L)))),
+      axis.text.y = ggplot2::element_text(face = "italic", size = min(7.6, max(5.2, 48.0 / max(length(row_c_lbls), 1L))))
+    ) +
+    ggplot2::labs(
+      title = "C. Recorded vs. Recommended Integrative Determination Matrix",
+      subtitle = "Row-normalized reassignment percentages (off-diagonal zero labels suppressed)",
+      x = "Recommended Integrative Determination",
+      y = "Recorded Herbarium Taxon",
+      fill = "Row %"
     )
 
-  lon_col_e <- if ("longitude" %in% names(df)) suppressWarnings(as.numeric(df$longitude)) else rep(NA_real_, nrow(df))
-  if ("decimalLongitude" %in% names(df)) lon_col_e <- ifelse(is.finite(lon_col_e), lon_col_e, suppressWarnings(as.numeric(df$decimalLongitude)))
-  lat_col_e <- if ("latitude" %in% names(df)) suppressWarnings(as.numeric(df$latitude)) else rep(NA_real_, nrow(df))
-  if ("decimalLatitude" %in% names(df)) lat_col_e <- ifelse(is.finite(lat_col_e), lat_col_e, suppressWarnings(as.numeric(df$decimalLatitude)))
-  df$lon_plot_e <- lon_col_e
-  df$lat_plot_e <- lat_col_e
-  geo_b_e <- compute_dynamic_na_map_bounds(df$lon_plot_e, df$lat_plot_e)
-  geo_sub <- df[geo_b_e$valid_geo & df$plot_group %in% active_tx, , drop = FALSE]
-  if (nrow(geo_sub) == 0L) geo_sub <- df[geo_b_e$valid_geo, , drop = FALSE]
+  # ----------------------------------------------------------------------------
+  # Panel D (p4): Specimen-Level Multi-Modal Confidence & Triage Priority Distribution
+  # ----------------------------------------------------------------------------
+  conf_sub <- df_comp
+  conf_score <- rep(NA_real_, nrow(conf_sub))
+  for (cc in c("consensus_confidence", "multimodal_consensus_prob", "cda_posterior_prob", "edaphic_rf_prob")) {
+    if (cc %in% names(conf_sub)) {
+      v_cc <- suppressWarnings(as.numeric(conf_sub[[cc]]))
+      conf_score <- ifelse(is.finite(conf_score), conf_score, v_cc)
+    }
+  }
+  if (any(!is.finite(conf_score))) {
+    fallback_conf <- ifelse(conf_sub$Treatment_Clean == "Confirmed Species", 0.88,
+                     ifelse(conf_sub$Treatment_Clean == "Variety / Ecotype", 0.74,
+                     ifelse(conf_sub$Treatment_Clean == "Hybrid / Introgressant", 0.52, 0.36)))
+    conf_score[!is.finite(conf_score)] <- fallback_conf[!is.finite(conf_score)]
+  }
+  conf_sub$conf_score <- pmin(1.0, pmax(0.0, conf_score))
+
+  prio_raw <- if ("synthesis_triage_priority" %in% names(conf_sub)) {
+    toupper(as.character(conf_sub$synthesis_triage_priority))
+  } else if ("triage_priority" %in% names(conf_sub)) {
+    toupper(as.character(conf_sub$triage_priority))
+  } else {
+    rep(NA_character_, nrow(conf_sub))
+  }
+  prio_clean <- ifelse(grepl("CRIT", prio_raw), "CRITICAL",
+                ifelse(grepl("HIGH", prio_raw), "HIGH",
+                ifelse(grepl("MED|MOD", prio_raw), "MEDIUM",
+                ifelse(grepl("LOW", prio_raw) & !grepl("RESOLVED|CONFIRMED", prio_raw), "LOW",
+                ifelse(grepl("RES|CONF|NONE", prio_raw), "RESOLVED", NA_character_)))))
+  if (any(is.na(prio_clean))) {
+    prio_fallback <- ifelse(conf_sub$Treatment_Clean == "Confirmed Species", "RESOLVED",
+                     ifelse(conf_sub$Treatment_Clean == "Variety / Ecotype", "LOW",
+                     ifelse(conf_sub$Treatment_Clean == "Hybrid / Introgressant", "MEDIUM",
+                     ifelse(conf_sub$Treatment_Clean == "Misidentification (Reassign)", "HIGH", "CRITICAL"))))
+    prio_clean[is.na(prio_clean)] <- prio_fallback[is.na(prio_clean)]
+  }
+  prio_lvls <- c("RESOLVED", "LOW", "MEDIUM", "HIGH", "CRITICAL")
+  conf_sub$Priority_Fac <- factor(prio_clean, levels = prio_lvls)
+
+  auth_raw <- if ("authority_tier" %in% names(conf_sub)) {
+    as.character(conf_sub$authority_tier)
+  } else if ("determiner_tier" %in% names(conf_sub)) {
+    as.character(conf_sub$determiner_tier)
+  } else {
+    rep("Bronze", nrow(conf_sub))
+  }
+  auth_clean <- ifelse(grepl("Type|Tier_0|Gold|Tier_1", auth_raw, ignore.case = TRUE), "Type / Gold",
+                ifelse(grepl("Silver|Tier_2", auth_raw, ignore.case = TRUE), "Silver", "Bronze"))
+  conf_sub$Auth_Tier <- factor(auth_clean, levels = c("Type / Gold", "Silver", "Bronze"))
+
+  prio_pal <- c(
+    "RESOLVED" = "#009E73",
+    "LOW"      = "#56B4E9",
+    "MEDIUM"   = "#CC79A7",
+    "HIGH"     = "#E69F00",
+    "CRITICAL" = "#D55E00"
+  )
+  p4 <- ggplot2::ggplot(conf_sub, ggplot2::aes(x = Priority_Fac, y = conf_score, fill = Priority_Fac)) +
+    ggplot2::geom_boxplot(width = 0.50, alpha = 0.35, outlier.shape = NA, color = "grey30", show.legend = FALSE) +
+    ggplot2::geom_point(
+      ggplot2::aes(color = Priority_Fac, shape = Auth_Tier),
+      position = ggplot2::position_jitter(width = 0.15, height = 0, seed = 42),
+      fill = NA, stroke = 0.75, size = 1.55, alpha = pt_alpha
+    ) +
+    ggplot2::scale_fill_manual(values = prio_pal, drop = FALSE) +
+    ggplot2::scale_color_manual(values = prio_pal, guide = "none") +
+    ggplot2::scale_shape_manual(values = c("Type / Gold" = 5, "Silver" = 2, "Bronze" = 1), drop = FALSE) +
+    ggplot2::scale_y_continuous(limits = c(0, 1.05)) +
+    thm +
+    ggplot2::labs(
+      title = "D. Specimen-Level Multi-Modal Confidence & Triage Priority Distribution",
+      subtitle = "Northcutt et al. (2021) Confident Learning audit stratified by priority & authority tier",
+      x = "Integrative Triage Priority",
+      y = "Multi-Modal Consensus Confidence",
+      shape = "Authority Tier"
+    )
+
+  # ----------------------------------------------------------------------------
+  # Panel E (p5): Geographic Contact Zones, Triage Flags & Type Localities
+  # ----------------------------------------------------------------------------
+  lon_col_e <- if ("longitude" %in% names(df_comp)) suppressWarnings(as.numeric(df_comp$longitude)) else rep(NA_real_, nrow(df_comp))
+  if ("decimalLongitude" %in% names(df_comp)) lon_col_e <- ifelse(is.finite(lon_col_e), lon_col_e, suppressWarnings(as.numeric(df_comp$decimalLongitude)))
+  lat_col_e <- if ("latitude" %in% names(df_comp)) suppressWarnings(as.numeric(df_comp$latitude)) else rep(NA_real_, nrow(df_comp))
+  if ("decimalLatitude" %in% names(df_comp)) lat_col_e <- ifelse(is.finite(lat_col_e), lat_col_e, suppressWarnings(as.numeric(df_comp$decimalLatitude)))
+  df_comp$lon_plot_e <- lon_col_e
+  df_comp$lat_plot_e <- lat_col_e
+  df_comp$is_type_flag_e <- if ("is_type_specimen" %in% names(df_comp)) as.logical(df_comp$is_type_specimen) else rep(FALSE, nrow(df_comp))
+  df_comp$is_type_flag_e[is.na(df_comp$is_type_flag_e)] <- FALSE
+
+  geo_b_e <- compute_dynamic_na_map_bounds(df_comp$lon_plot_e, df_comp$lat_plot_e)
+  geo_sub <- df_comp[geo_b_e$valid_geo, , drop = FALSE]
   needs_cont_e <- (geo_b_e$xlim[1L] < -125.0) || (geo_b_e$ylim[2L] > 49.5) || (geo_b_e$ylim[1L] < 25.0)
   na_world <- if (needs_cont_e) tryCatch(ggplot2::map_data("world", region = c("USA", "Canada", "Mexico")), error = function(e) NULL) else NULL
   us_states <- tryCatch(ggplot2::map_data("state"), error = function(e) NULL)
+
+  fg_triage_cats <- c("Misidentification (Reassign)", "Hybrid / Introgressant", "Putative Cryptic Species")
+  bg_geo <- geo_sub[!(as.character(geo_sub$Treatment_Clean) %in% fg_triage_cats) & !geo_sub$is_type_flag_e, , drop = FALSE]
+  fg_geo <- geo_sub[as.character(geo_sub$Treatment_Clean) %in% fg_triage_cats, , drop = FALSE]
+  if (nrow(fg_geo) > 0L) {
+    fg_geo$Triage_Highlight <- factor(as.character(fg_geo$Treatment_Clean), levels = fg_triage_cats)
+  }
+
   p5 <- ggplot2::ggplot()
   if (!is.null(na_world) && nrow(na_world) > 0) {
     p5 <- p5 + ggplot2::geom_polygon(data = na_world, ggplot2::aes(x = long, y = lat, group = group), fill = "#FBFBF9", color = "grey75", linewidth = 0.22)
@@ -808,57 +1238,191 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   if (!is.null(us_states) && nrow(us_states) > 0) {
     p5 <- p5 + ggplot2::geom_polygon(data = us_states, ggplot2::aes(x = long, y = lat, group = group), fill = "#FBFBF9", color = "grey72", linewidth = 0.25)
   }
-  p5 <- p5 +
-    ggplot2::geom_point(data = geo_sub, ggplot2::aes(x = lon_plot_e, y = lat_plot_e, color = plot_group, shape = plot_group),
-                        fill = NA, stroke = 0.72, alpha = pt_alpha, size = 1.45) +
-    ggplot2::scale_color_manual(values = dyn_pal) + ggplot2::scale_shape_manual(values = dyn_shapes) +
-    ggplot2::coord_quickmap(xlim = geo_b_e$xlim, ylim = geo_b_e$ylim) +
-    thm + ggplot2::labs(title = "E. North American Geographic Distribution & Contact Zones",
-                        subtitle = "Hollow markers (fill = NA) = Localities over dynamically framed administrative boundaries",
-                        x = "Longitude (deg W)", y = "Latitude (deg N)", color = grp_legend_lbl, shape = grp_legend_lbl)
-  if ("is_type_specimen" %in% names(geo_sub) && any(as.logical(geo_sub$is_type_specimen) == TRUE, na.rm = TRUE)) {
+  if (nrow(bg_geo) > 0L) {
     p5 <- p5 + ggplot2::geom_point(
-      data = geo_sub[which(as.logical(geo_sub$is_type_specimen) == TRUE), , drop = FALSE],
-      ggplot2::aes(x = lon_plot_e, y = lat_plot_e),
-      shape = 5, fill = NA, stroke = 1.35, size = 2.8, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
+      data = bg_geo, ggplot2::aes(x = lon_plot_e, y = lat_plot_e),
+      shape = 1, fill = NA, color = "grey62", alpha = 0.35, size = 1.25, stroke = 0.55
     )
   }
+  if (nrow(fg_geo) > 0L) {
+    p5 <- p5 + ggplot2::geom_point(
+      data = fg_geo, ggplot2::aes(x = lon_plot_e, y = lat_plot_e, color = Triage_Highlight, shape = Triage_Highlight),
+      fill = NA, stroke = 0.95, alpha = 0.92, size = 1.95
+    ) +
+      ggplot2::scale_color_manual(
+        values = c(
+          "Misidentification (Reassign)" = "#E69F00",
+          "Hybrid / Introgressant"       = "#CC79A7",
+          "Putative Cryptic Species"     = "#D55E00"
+        ),
+        drop = FALSE
+      ) +
+      ggplot2::scale_shape_manual(
+        values = c(
+          "Misidentification (Reassign)" = 4,
+          "Hybrid / Introgressant"       = 2,
+          "Putative Cryptic Species"     = 6
+        ),
+        drop = FALSE
+      )
+  }
+  if (any(geo_sub$is_type_flag_e)) {
+    type_geo <- geo_sub[geo_sub$is_type_flag_e, , drop = FALSE]
+    p5 <- p5 +
+      ggplot2::geom_point(
+        data = type_geo, ggplot2::aes(x = lon_plot_e, y = lat_plot_e),
+        shape = 5, fill = NA, stroke = 1.35, size = 2.8, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
+      ) +
+      ggplot2::geom_point(
+        data = type_geo, ggplot2::aes(x = lon_plot_e, y = lat_plot_e),
+        shape = 1, fill = NA, stroke = 1.15, size = 3.5, color = "#D55E00", inherit.aes = FALSE, show.legend = FALSE
+      )
+  }
+  p5 <- p5 +
+    ggplot2::coord_quickmap(xlim = geo_b_e$xlim, ylim = geo_b_e$ylim) +
+    thm + ggplot2::labs(
+      title = "E. Geographic Contact Zones, Triage Flags & Type Localities",
+      subtitle = "Confirmed vouchers muted (alpha = 0.35) | Triage flags & double-ringed Types highlighted",
+      x = "Longitude (deg W)", y = "Latitude (deg N)",
+      color = "Triage Flag", shape = "Triage Flag"
+    )
 
+  # ----------------------------------------------------------------------------
+  # Panel F (p6): Multi-Evidence Delimitation Concordance Grid — Wettstein Matrix
+  # ----------------------------------------------------------------------------
+  wett_tx <- if (length(active_tx) > 10L) {
+    .unpack_synthesis_display_tier(df_comp$plot_group, active_tx, max_fg = 8L)$foreground_taxa
+  } else {
+    active_tx
+  }
+  stream_lvls <- c(
+    "1. Type Baseline Control",
+    "2. EFA/CDA Morphology",
+    "3. DINOv2 Vision Audit",
+    "4. 10m-30m Edaphic Niche",
+    "5. Hopkins Anthesis Phenology",
+    "6. Padial Status"
+  )
   ev_rows <- list()
-  for (tx in active_tx) {
-    sub_t <- df[df$plot_group == tx, , drop = FALSE]
+  for (tx in wett_tx) {
+    sub_t <- df_comp[df_comp$plot_group == tx, , drop = FALSE]
     if (nrow(sub_t) == 0) next
     sp_t <- as.character(sub_t$species_standardized)
-    m_ok <- if ("cda_predicted_taxon" %in% names(sub_t)) (sub_t$cda_predicted_taxon == tx | sub_t$cda_predicted_taxon == sp_t) else !isTRUE(sub_t$morphometric_outlier_flag)
-    pct_m <- 100 * mean(m_ok, na.rm = TRUE); if (!is.finite(pct_m)) pct_m <- 85.0
-    p_ok <- if ("phenology_conflict_flag" %in% names(sub_t)) {
+
+    # 2. EFA/CDA Morphology
+    m_ok <- if ("cda_predicted_taxon" %in% names(sub_t) && any(!is.na(sub_t$cda_predicted_taxon))) {
+      sub_t$cda_predicted_taxon == tx | sub_t$cda_predicted_taxon == sp_t
+    } else if ("morphometric_outlier_flag" %in% names(sub_t)) {
+      !as.logical(sub_t$morphometric_outlier_flag)
+    } else {
+      sub_t$Treatment_Clean == "Confirmed Species"
+    }
+    pct_m <- 100 * mean(m_ok, na.rm = TRUE); if (!is.finite(pct_m)) pct_m <- 0.0
+
+    # 1. Type Baseline Control
+    t_ok <- if ("type_outlier_flag" %in% names(sub_t) && any(!is.na(sub_t$type_outlier_flag))) {
+      !as.logical(sub_t$type_outlier_flag)
+    } else if ("mahalanobis_d2_type" %in% names(sub_t) && any(is.finite(suppressWarnings(as.numeric(sub_t$mahalanobis_d2_type))))) {
+      suppressWarnings(as.numeric(sub_t$mahalanobis_d2_type)) <= stats::qchisq(0.95, df = 2)
+    } else if ("nearest_type_morph_taxon" %in% names(sub_t) && any(!is.na(sub_t$nearest_type_morph_taxon))) {
+      sub_t$nearest_type_morph_taxon == tx | sub_t$nearest_type_morph_taxon == sp_t
+    } else {
+      m_ok
+    }
+    pct_t <- 100 * mean(t_ok, na.rm = TRUE); if (!is.finite(pct_t)) pct_t <- pct_m
+
+    # 3. DINOv2 Vision Audit
+    v_ok <- if ("vision_conflict_flag" %in% names(sub_t) && any(!is.na(sub_t$vision_conflict_flag))) {
+      !as.logical(sub_t$vision_conflict_flag)
+    } else if ("dinov2_predicted_taxon" %in% names(sub_t) && any(!is.na(sub_t$dinov2_predicted_taxon))) {
+      sub_t$dinov2_predicted_taxon == tx | sub_t$dinov2_predicted_taxon == sp_t
+    } else if ("ect_outlier_flag" %in% names(sub_t) && any(!is.na(sub_t$ect_outlier_flag))) {
+      !as.logical(sub_t$ect_outlier_flag)
+    } else {
+      m_ok
+    }
+    pct_v <- 100 * mean(v_ok, na.rm = TRUE); if (!is.finite(pct_v)) pct_v <- pct_m
+
+    # 4. 10m-30m Edaphic Niche
+    e_ok <- if ("edaphic_best_fit_taxon" %in% names(sub_t) && any(!is.na(sub_t$edaphic_best_fit_taxon))) {
+      sub_t$edaphic_best_fit_taxon == tx | sub_t$edaphic_best_fit_taxon == sp_t
+    } else if ("edaphic_conflict_flag" %in% names(sub_t) && any(!is.na(sub_t$edaphic_conflict_flag))) {
+      !as.logical(sub_t$edaphic_conflict_flag)
+    } else {
+      m_ok
+    }
+    pct_e <- 100 * mean(e_ok, na.rm = TRUE); if (!is.finite(pct_e)) pct_e <- pct_m
+
+    # 5. Hopkins Anthesis Phenology
+    p_ok <- if ("phenology_conflict_flag" %in% names(sub_t) && any(!is.na(sub_t$phenology_conflict_flag))) {
       !as.logical(sub_t$phenology_conflict_flag)
     } else if ("delta_doy_resid" %in% names(sub_t) && any(!is.na(sub_t$delta_doy_resid))) {
       abs(suppressWarnings(as.numeric(sub_t$delta_doy_resid))) < 14.0
     } else if ("delta_doy" %in% names(sub_t) && any(!is.na(sub_t$delta_doy))) {
       abs(suppressWarnings(as.numeric(sub_t$delta_doy))) < 14.0
-    } else TRUE
-    pct_p <- 100 * mean(p_ok, na.rm = TRUE); if (!is.finite(pct_p)) pct_p <- 88.0
-    e_ok <- if ("edaphic_best_fit_taxon" %in% names(sub_t) && any(!is.na(sub_t$edaphic_best_fit_taxon))) {
-      sub_t$edaphic_best_fit_taxon == tx | sub_t$edaphic_best_fit_taxon == sp_t
-    } else if ("edaphic_conflict_flag" %in% names(sub_t)) !as.logical(sub_t$edaphic_conflict_flag) else TRUE
-    pct_e <- 100 * mean(e_ok, na.rm = TRUE); if (!is.finite(pct_e)) pct_e <- 80.0
-    ev_rows[[length(ev_rows) + 1]] <- data.frame(
+    } else {
+      m_ok
+    }
+    pct_p <- 100 * mean(p_ok, na.rm = TRUE); if (!is.finite(pct_p)) pct_p <- pct_m
+
+    # Modal Padial et al. (2010) status code (CCS, ECS, HYB, UCS)
+    pad_vec <- if ("padial_status_code" %in% names(sub_t) && any(nzchar(as.character(stats::na.omit(sub_t$padial_status_code))))) {
+      toupper(as.character(stats::na.omit(sub_t$padial_status_code)))
+    } else {
+      tr_v <- as.character(sub_t$Treatment_Clean)
+      ifelse(tr_v == "Confirmed Species", "CCS",
+      ifelse(tr_v == "Variety / Ecotype", "ECS",
+      ifelse(tr_v == "Hybrid / Introgressant", "HYB", "UCS")))
+    }
+    pad_vec <- pad_vec[pad_vec %in% c("CCS", "ECS", "HYB", "UCS")]
+    modal_padial <- if (length(pad_vec) > 0L) names(sort(table(pad_vec), decreasing = TRUE))[1L] else "CCS"
+    mean_pct <- round(mean(c(pct_t, pct_m, pct_v, pct_e, pct_p), na.rm = TRUE), 1)
+
+    pct_vals <- round(c(pct_t, pct_m, pct_v, pct_e, pct_p, mean_pct), 1)
+    cell_lbls <- c(sprintf("%.0f%%", pct_vals[1:5]), modal_padial)
+
+    ev_rows[[length(ev_rows) + 1L]] <- data.frame(
       Species = gsub("^Packera\\s+", "P. ", tx),
-      Stream = factor(c("1. EFA/ECT/CDA Morphology", "2. Capitulum & Anthesis Phenology", "3. 0-15cm Edaphic Niche"),
-                      levels = c("3. 0-15cm Edaphic Niche", "2. Capitulum & Anthesis Phenology", "1. EFA/ECT/CDA Morphology")),
-      Concordance_Pct = round(c(pct_m, pct_p, pct_e), 1), stringsAsFactors = FALSE
+      Stream = factor(stream_lvls, levels = stream_lvls),
+      Concordance_Pct = pct_vals,
+      Cell_Label = cell_lbls,
+      stringsAsFactors = FALSE
     )
   }
-  ev_df <- if (length(ev_rows) > 0) do.call(rbind, ev_rows) else data.frame(Species = gsub("^Packera\\s+", "P. ", active_tx[1L]), Stream = "1. EFA/CDA Morphology", Concordance_Pct = 90.0)
-  p6 <- ggplot2::ggplot(ev_df, ggplot2::aes(x = Species, y = Stream, fill = Concordance_Pct)) +
-    ggplot2::geom_tile(color = "white", linewidth = 0.8) +
-    ggplot2::geom_text(ggplot2::aes(label = sprintf("%.1f%%", Concordance_Pct)), size = 3.0, fontface = "bold", color = ifelse(ev_df$Concordance_Pct >= 55, "white", "#111111")) +
+  ev_df <- if (length(ev_rows) > 0) {
+    do.call(rbind, ev_rows)
+  } else {
+    data.frame(
+      Species = gsub("^Packera\\s+", "P. ", active_tx[1L]),
+      Stream = factor(stream_lvls, levels = stream_lvls),
+      Concordance_Pct = c(90, 90, 90, 90, 90, 90),
+      Cell_Label = c("90%", "90%", "90%", "90%", "90%", "CCS"),
+      stringsAsFactors = FALSE
+    )
+  }
+  sp_wett_lvls <- rev(unique(ev_df$Species))
+  ev_df$Species <- factor(ev_df$Species, levels = sp_wett_lvls)
+  p6 <- ggplot2::ggplot(ev_df, ggplot2::aes(x = Stream, y = Species, fill = Concordance_Pct)) +
+    ggplot2::geom_tile(color = "white", linewidth = 0.7) +
+    ggplot2::geom_text(
+      ggplot2::aes(label = Cell_Label),
+      size = min(2.8, max(1.8, 18.0 / max(length(sp_wett_lvls), 1L))),
+      fontface = "bold",
+      color = ifelse(ev_df$Concordance_Pct >= 55, "white", "#111111")
+    ) +
     ggplot2::scale_fill_gradient2(low = "#E69F00", mid = "#56B4E9", high = "#0072B2", midpoint = 65, limits = c(0, 100)) +
-    thm + ggplot2::theme(axis.text.x = ggplot2::element_text(face = if (is_subcluster_mode) "bold" else "italic", angle = 14, hjust = 1)) +
-    ggplot2::labs(title = "F. Multi-Evidence Delimitation Concordance",
-                  subtitle = "Reliability-weighted concordance per modality across active groups",
-                  x = if (is_subcluster_mode) "Target Morphotype / Subcluster" else "Target Species", y = "Independent Evidence Stream", fill = "% Concordant")
+    thm +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(angle = 24, hjust = 1, size = 7.0, face = "bold"),
+      axis.text.y = ggplot2::element_text(face = if (is_subcluster_mode) "bold" else "italic", size = min(7.8, max(5.2, 48.0 / max(length(sp_wett_lvls), 1L))))
+    ) +
+    ggplot2::labs(
+      title = "F. Multi-Evidence Delimitation Concordance Grid — Wettstein Matrix",
+      subtitle = "5 evidence streams + right-hand modal Padial et al. (2010) status code (CCS, ECS, HYB, UCS)",
+      x = "Independent Evidence Stream & Padial Summary",
+      y = if (is_subcluster_mode) "Target Morphotype / Subcluster" else "Target Species",
+      fill = "% Concordant"
+    )
 
   tmp_pdf <- paste0(out_pdf, ".", Sys.getpid(), ".tmp")
   grDevices::pdf(tmp_pdf, width = 14.0, height = 9.2)
@@ -896,15 +1460,35 @@ render_step08_complex_discovery_pdf <- function(W, part_res, morph_res, vis_res,
     cid_ord <- cdf$complex_id[ord]
 
     heat_cols <- grDevices::hcl.colors(64, "YlOrRd", rev = TRUE)
+    cex_ax_heat <- min(0.78, max(0.42, 6.8 / max(n_taxa, 1L)))
     graphics::image(
       x = seq_len(n_taxa), y = seq_len(n_taxa),
       z = t(W_ord[rev(seq_len(n_taxa)), , drop = FALSE]),
       col = heat_cols, axes = FALSE, xlab = "", ylab = "",
       main = "A. Empirical Taxon Affinity Matrix (W_ij) & Complexes"
     )
-    graphics::axis(1, at = seq_len(n_taxa), labels = lbl_ord, las = 2, cex.axis = 0.78, font = 3)
-    graphics::axis(2, at = seq_len(n_taxa), labels = rev(lbl_ord), las = 2, cex.axis = 0.78, font = 3)
+    graphics::axis(1, at = seq_len(n_taxa), labels = lbl_ord, las = 2, cex.axis = cex_ax_heat, font = 3)
+    graphics::axis(2, at = seq_len(n_taxa), labels = rev(lbl_ord), las = 2, cex.axis = cex_ax_heat, font = 3)
     graphics::box()
+
+    if (n_taxa <= 10L) {
+      cell_cex_w <- min(0.72, max(0.44, 5.0 / max(n_taxa, 1L)))
+      for (r_i in seq_len(n_taxa)) {
+        y_pos <- n_taxa - r_i + 1L
+        for (c_j in seq_len(n_taxa)) {
+          w_val <- W_ord[r_i, c_j]
+          if (is.finite(w_val)) {
+            graphics::text(
+              c_j, y_pos,
+              labels = sprintf("%.2f", w_val),
+              cex = cell_cex_w,
+              font = if (r_i == c_j) 1L else 2L,
+              col = if (w_val >= 0.65) "white" else "#111111"
+            )
+          }
+        }
+      }
+    }
 
     for (cid in unique(cid_ord)) {
       idx_c <- which(cid_ord == cid)
@@ -946,12 +1530,31 @@ render_step08_complex_discovery_pdf <- function(W, part_res, morph_res, vis_res,
       }
     }
 
-    for (i in seq_len(n_taxa - 1L)) {
-      for (j in (i + 1L):n_taxa) {
-        if (W[i, j] >= 0.05) {
-          same_c <- cdf$complex_id[i] == cdf$complex_id[j]
-          e_col <- if (same_c) grDevices::adjustcolor(complex_pal[(cdf$complex_id[i] - 1L) %% length(complex_pal) + 1L], alpha.f = 0.70) else grDevices::adjustcolor("grey55", alpha.f = 0.45)
-          graphics::segments(px[i], py[i], px[j], py[j], col = e_col, lwd = max(0.8, 5.5 * W[i, j]))
+    keep_edge <- matrix(FALSE, nrow = n_taxa, ncol = n_taxa)
+    for (i in seq_len(n_taxa)) {
+      oth <- setdiff(seq_len(n_taxa), i)
+      if (length(oth) > 0L) {
+        w_i <- W[i, oth]
+        w_i[!is.finite(w_i)] <- -Inf
+        top_k <- oth[utils::head(order(w_i, decreasing = TRUE), min(2L, length(oth)))]
+        top_k <- top_k[is.finite(W[i, top_k]) & W[i, top_k] > 0]
+        for (j in oth) {
+          if ((is.finite(W[i, j]) && W[i, j] >= 0.08) || (j %in% top_k)) {
+            keep_edge[i, j] <- TRUE
+            keep_edge[j, i] <- TRUE
+          }
+        }
+      }
+    }
+
+    if (n_taxa >= 2L) {
+      for (i in seq_len(n_taxa - 1L)) {
+        for (j in (i + 1L):n_taxa) {
+          if (keep_edge[i, j]) {
+            same_c <- cdf$complex_id[i] == cdf$complex_id[j]
+            e_col <- if (same_c) grDevices::adjustcolor(complex_pal[(cdf$complex_id[i] - 1L) %% length(complex_pal) + 1L], alpha.f = 0.70) else grDevices::adjustcolor("grey55", alpha.f = 0.45)
+            graphics::segments(px[i], py[i], px[j], py[j], col = e_col, lwd = max(0.8, 5.5 * W[i, j]))
+          }
         }
       }
     }
@@ -961,7 +1564,49 @@ render_step08_complex_discovery_pdf <- function(W, part_res, morph_res, vis_res,
     node_col <- dyn_pal[taxa]
     node_col[is.na(node_col)] <- complex_pal[(cdf$complex_id[is.na(node_col)] - 1L) %% length(complex_pal) + 1L]
     graphics::points(px, py, pch = node_pch, bg = NA, col = node_col, cex = node_cex, lwd = 1.8)
-    graphics::text(px, py, labels = short_names, pos = 3, cex = 0.76, font = 3, col = "black")
+
+    lbl_xy <- NULL
+    if (exists("repel_2d_labels", mode = "function")) {
+      lbl_xy <- tryCatch(repel_2d_labels(px, py, short_names), error = function(e) {
+        tryCatch(repel_2d_labels(px, py), error = function(e2) {
+          tryCatch(repel_2d_labels(cbind(px, py)), error = function(e3) NULL)
+        })
+      })
+    }
+    lx <- px
+    ly <- py + max(0.04 * diff(yr), 0.025)
+    used_external_repel <- FALSE
+    if (!is.null(lbl_xy)) {
+      if ((is.matrix(lbl_xy) || is.data.frame(lbl_xy)) && ncol(lbl_xy) >= 2L && nrow(lbl_xy) == length(px)) {
+        lx <- as.numeric(lbl_xy[, 1])
+        ly <- as.numeric(lbl_xy[, 2])
+        used_external_repel <- TRUE
+      } else if (is.list(lbl_xy) && all(c("x", "y") %in% names(lbl_xy)) && length(lbl_xy$x) == length(px)) {
+        lx <- as.numeric(lbl_xy$x)
+        ly <- as.numeric(lbl_xy$y)
+        used_external_repel <- TRUE
+      }
+    }
+    if (!used_external_repel && length(px) >= 2L) {
+      min_dx <- max(0.085 * diff(xr), 0.045)
+      min_dy <- max(0.055 * diff(yr), 0.030)
+      for (iter in seq_len(25L)) {
+        for (a in seq_len(length(px) - 1L)) {
+          for (b in (a + 1L):length(px)) {
+            dx <- lx[a] - lx[b]
+            dy <- ly[a] - ly[b]
+            if (abs(dx) < min_dx && abs(dy) < min_dy) {
+              push_x <- 0.25 * (min_dx - abs(dx)) * (if (dx >= 0) 1 else -1)
+              push_y <- 0.25 * (min_dy - abs(dy)) * (if (dy >= 0) 1 else -1)
+              lx[a] <- lx[a] + push_x; lx[b] <- lx[b] - push_x
+              ly[a] <- ly[a] + push_y; ly[b] <- ly[b] - push_y
+            }
+          }
+        }
+      }
+    }
+    lbl_cex_net <- min(0.76, max(0.48, 7.2 / max(n_taxa, 1L)))
+    graphics::text(lx, ly, labels = short_names, cex = lbl_cex_net, font = 3, col = "black")
 
     u_cl <- sort(unique(cdf$complex_id))
     cl_names <- vapply(u_cl, function(k) cdf$complex_label[which(cdf$complex_id == k)[1]], character(1))

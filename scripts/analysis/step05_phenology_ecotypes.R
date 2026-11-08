@@ -540,8 +540,6 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   active_tx <- sort(unique(stats::na.omit(df$plot_group)))
   active_tx <- active_tx[nzchar(active_tx) & active_tx != "Unknown"]
   if (length(active_tx) == 0L) active_tx <- get_active_packera_taxa(df$species_standardized)
-  dyn_pal <- resolve_dynamic_group_palette(active_tx)
-  dyn_shapes <- stats::setNames(rep_len(c(21, 24, 22, 23, 1, 2, 5, 0), length(active_tx)), active_tx)
   is_target <- df$plot_group %in% active_tx & !is.na(df$delta_doy)
   target_df <- if ("is_verified_anthesis" %in% names(df)) {
     df[is_target & df$is_verified_anthesis, , drop = FALSE]
@@ -564,6 +562,40 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   target_df <- target_df[is.finite(target_df$decimalLatitude) & is.finite(target_df$doy), , drop = FALSE]
   if (nrow(target_df) == 0L) return(invisible(NULL))
 
+  active_tx <- sort(unique(as.character(target_df$plot_group)))
+  fg_tx <- active_tx
+  bg_tx <- character(0)
+  if (length(active_tx) > 6L) {
+    tier_info <- if (exists("resolve_taxon_display_tier", mode = "function")) {
+      tryCatch(resolve_taxon_display_tier(target_df, target_df$plot_group), error = function(e) NULL)
+    } else {
+      NULL
+    }
+    if (is.list(tier_info) && !is.null(tier_info$foreground) && length(intersect(tier_info$foreground, active_tx)) > 0L) {
+      fg_tx <- intersect(as.character(tier_info$foreground), active_tx)
+    } else if (is.list(tier_info) && !is.null(tier_info$fg_taxa) && length(intersect(tier_info$fg_taxa, active_tx)) > 0L) {
+      fg_tx <- intersect(as.character(tier_info$fg_taxa), active_tx)
+    } else if (is.character(tier_info) && length(intersect(tier_info, active_tx)) > 0L && length(intersect(tier_info, active_tx)) <= 6L) {
+      fg_tx <- intersect(tier_info, active_tx)
+    } else {
+      dubia_tx <- active_tx[grepl("dubia", active_tx, ignore.case = TRUE)]
+      other_tx <- setdiff(active_tx, dubia_tx)
+      cnt_other <- vapply(other_tx, function(tx) sum(target_df$plot_group == tx, na.rm = TRUE), integer(1))
+      other_ord <- other_tx[order(-cnt_other, other_tx)]
+      n_keep_oth <- max(0L, 6L - length(dubia_tx))
+      fg_tx <- c(dubia_tx, utils::head(other_ord, n_keep_oth))
+    }
+    bg_tx <- setdiff(active_tx, fg_tx)
+  }
+
+  dyn_pal <- resolve_dynamic_group_palette(active_tx)
+  if (length(bg_tx) > 0L) {
+    fg_pal <- resolve_dynamic_group_palette(fg_tx)
+    for (tx in fg_tx) dyn_pal[[tx]] <- fg_pal[[tx]]
+    for (tx in bg_tx) dyn_pal[[tx]] <- "#B0B0B0"
+  }
+  dyn_shapes <- stats::setNames(rep_len(c(21, 24, 22, 23, 1, 2, 5, 0), length(active_tx)), active_tx)
+
   min_lat <- min(target_df$decimalLatitude, na.rm = TRUE)
   max_lat <- max(target_df$decimalLatitude, na.rm = TRUE)
   b0_use <- if (!is.null(baseline$intercept) && is.finite(baseline$intercept)) baseline$intercept else compute_circular_mean_doy(target_df$doy)
@@ -578,21 +610,63 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   )
 
   pt_alpha <- if (nrow(target_df) > 1000L) 0.45 else 0.75
-  p1 <- ggplot2::ggplot(target_df, ggplot2::aes(x = decimalLatitude, y = doy, color = plot_group, shape = plot_group)) +
-    ggplot2::geom_point(fill = NA, stroke = 0.78, alpha = pt_alpha, size = 1.65) +
-    ggplot2::geom_line(data = pred_line, ggplot2::aes(x = decimalLatitude, y = doy),
-                       color = "black", linewidth = 1.1, linetype = "solid", inherit.aes = FALSE) +
-    ggplot2::geom_line(data = pred_line, ggplot2::aes(x = decimalLatitude, y = hopkins_expected),
-                       color = "#D55E00", linewidth = 0.95, linetype = "dashed", inherit.aes = FALSE) +
-    ggplot2::scale_color_manual(values = dyn_pal) +
-    ggplot2::scale_shape_manual(values = dyn_shapes) +
-    thm +
-    ggplot2::labs(
-      title = sprintf("A. Verified Latitudinal Anthesis Cline: DOY ~ Latitude (Slope = +%.2f d/deg, R2 = %.2f)",
-                      b1_use, ifelse(is.finite(baseline$r_squared), baseline$r_squared, 0.0)),
-      subtitle = "Solid black = Empirical robust regression; Dashed vermilion = Hopkins' Law (+4.0 d / deg N)",
-      x = "Decimal Latitude (deg N)", y = "Observed Anthesis Day of Year (DOY)", color = "Group", shape = "Group"
-    )
+  if (length(active_tx) > 6L) {
+    bg_df <- target_df[target_df$plot_group %in% bg_tx, , drop = FALSE]
+    fg_df <- target_df[target_df$plot_group %in% fg_tx, , drop = FALSE]
+    fg_df$plot_group <- factor(fg_df$plot_group, levels = fg_tx)
+    fg_cnts <- table(fg_df$plot_group)
+    reg_tx <- names(fg_cnts)[fg_cnts >= 3L]
+    reg_df <- fg_df[fg_df$plot_group %in% reg_tx, , drop = FALSE]
+
+    p1 <- ggplot2::ggplot() +
+      ggplot2::geom_point(
+        data = bg_df,
+        ggplot2::aes(x = decimalLatitude, y = doy),
+        shape = 1, color = "#B0B0B0", fill = NA, stroke = 0.65, alpha = 0.35, size = 1.45
+      ) +
+      ggplot2::geom_point(
+        data = fg_df,
+        ggplot2::aes(x = decimalLatitude, y = doy, color = plot_group, shape = plot_group),
+        fill = NA, stroke = 0.80, alpha = pt_alpha, size = 1.70
+      )
+    if (nrow(reg_df) >= 3L) {
+      p1 <- p1 + ggplot2::geom_smooth(
+        data = reg_df,
+        ggplot2::aes(x = decimalLatitude, y = doy, color = plot_group),
+        method = "lm", formula = y ~ x, se = FALSE, linewidth = 0.75, linetype = "solid", show.legend = FALSE
+      )
+    }
+    p1 <- p1 +
+      ggplot2::geom_line(data = pred_line, ggplot2::aes(x = decimalLatitude, y = doy),
+                         color = "black", linewidth = 1.1, linetype = "solid", inherit.aes = FALSE) +
+      ggplot2::geom_line(data = pred_line, ggplot2::aes(x = decimalLatitude, y = hopkins_expected),
+                         color = "#D55E00", linewidth = 0.95, linetype = "dashed", inherit.aes = FALSE) +
+      ggplot2::scale_color_manual(values = dyn_pal[fg_tx], breaks = fg_tx) +
+      ggplot2::scale_shape_manual(values = dyn_shapes[fg_tx], breaks = fg_tx) +
+      thm +
+      ggplot2::labs(
+        title = sprintf("A. Verified Latitudinal Anthesis Cline: DOY ~ Latitude (Slope = +%.2f d/deg, R2 = %.2f)",
+                        b1_use, ifelse(is.finite(baseline$r_squared), baseline$r_squared, 0.0)),
+        subtitle = "Solid black = Empirical baseline; Dashed vermilion = Hopkins' Law (+4.0 d/deg N); Colored lines = Foreground species clines",
+        x = "Decimal Latitude (deg N)", y = "Observed Anthesis Day of Year (DOY)", color = "Foreground Taxa", shape = "Foreground Taxa"
+      )
+  } else {
+    p1 <- ggplot2::ggplot(target_df, ggplot2::aes(x = decimalLatitude, y = doy, color = plot_group, shape = plot_group)) +
+      ggplot2::geom_point(fill = NA, stroke = 0.78, alpha = pt_alpha, size = 1.65) +
+      ggplot2::geom_line(data = pred_line, ggplot2::aes(x = decimalLatitude, y = doy),
+                         color = "black", linewidth = 1.1, linetype = "solid", inherit.aes = FALSE) +
+      ggplot2::geom_line(data = pred_line, ggplot2::aes(x = decimalLatitude, y = hopkins_expected),
+                         color = "#D55E00", linewidth = 0.95, linetype = "dashed", inherit.aes = FALSE) +
+      ggplot2::scale_color_manual(values = dyn_pal) +
+      ggplot2::scale_shape_manual(values = dyn_shapes) +
+      thm +
+      ggplot2::labs(
+        title = sprintf("A. Verified Latitudinal Anthesis Cline: DOY ~ Latitude (Slope = +%.2f d/deg, R2 = %.2f)",
+                        b1_use, ifelse(is.finite(baseline$r_squared), baseline$r_squared, 0.0)),
+        subtitle = "Solid black = Empirical robust regression; Dashed vermilion = Hopkins' Law (+4.0 d / deg N)",
+        x = "Decimal Latitude (deg N)", y = "Observed Anthesis Day of Year (DOY)", color = "Group", shape = "Group"
+      )
+  }
   if ("is_type_specimen" %in% names(target_df) && any(as.logical(target_df$is_type_specimen) == TRUE, na.rm = TRUE)) {
     p1 <- p1 + ggplot2::geom_point(
       data = target_df[which(as.logical(target_df$is_type_specimen) == TRUE), , drop = FALSE],
@@ -602,42 +676,67 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   }
 
   med_df <- stats::aggregate(delta_doy ~ plot_group, data = target_df, FUN = function(x) stats::median(x, na.rm = TRUE))
+  med_df <- med_df[order(med_df$delta_doy, as.character(med_df$plot_group)), , drop = FALSE]
+  ord_levels <- as.character(med_df$plot_group)
+  target_df$plot_group <- factor(target_df$plot_group, levels = ord_levels)
+  med_sub_df <- if (nrow(med_df) > 6L) med_df[med_df$plot_group %in% fg_tx, , drop = FALSE] else med_df
+  sub_p2_txt <- paste(sprintf("%s: %+.1f d", gsub("^Packera\\s+", "P. ", as.character(med_sub_df$plot_group)), med_sub_df$delta_doy), collapse = " | ")
+
   if (requireNamespace("ggridges", quietly = TRUE)) {
     p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, y = plot_group, fill = plot_group, color = plot_group)) +
       ggridges::geom_density_ridges(alpha = 0.45, scale = 1.15, rel_min_height = 0.01, linewidth = 0.8) +
       ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
+      ggplot2::geom_vline(xintercept = c(-14, 14), linetype = "dotted", color = "#D55E00", linewidth = 0.78) +
       ggplot2::scale_fill_manual(values = dyn_pal) +
       ggplot2::scale_color_manual(values = dyn_pal) +
       thm +
+      ggplot2::theme(legend.position = if (length(active_tx) > 6L) "none" else "right") +
       ggplot2::labs(
         title = "B. Phenological Anomalies (Delta DOY) & Allochronic Separation",
-        subtitle = paste(sprintf("%s: %+.1f d", med_df$plot_group, med_df$delta_doy), collapse = " | "),
-        x = "Phenological Anomaly Delta DOY (Days Relative to Latitudinal Baseline)", y = "Target Group", fill = "Group", color = "Group"
+        subtitle = sub_p2_txt,
+        x = "Phenological Anomaly Delta DOY (Days Relative to Latitudinal Baseline; Dotted = +/-14 d)", y = "Target Group (Ordered by Median Delta DOY)", fill = "Group", color = "Group"
       )
   } else {
     p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, fill = plot_group, color = plot_group)) +
       ggplot2::geom_density(alpha = 0.35, linewidth = 0.85) +
       ggplot2::geom_vline(data = med_df, ggplot2::aes(xintercept = delta_doy, color = plot_group),
                           linetype = "dashed", linewidth = 0.85, show.legend = FALSE) +
-      ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "black", linewidth = 0.8) +
+      ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
+      ggplot2::geom_vline(xintercept = c(-14, 14), linetype = "dotted", color = "#D55E00", linewidth = 0.78) +
       ggplot2::scale_fill_manual(values = dyn_pal) +
       ggplot2::scale_color_manual(values = dyn_pal) +
       thm +
+      ggplot2::theme(legend.position = if (length(active_tx) > 6L) "none" else "right") +
       ggplot2::labs(
         title = "B. Phenological Anomalies (Delta DOY) & Allochronic Separation",
-        subtitle = paste(sprintf("%s: %+.1f d", med_df$plot_group, med_df$delta_doy), collapse = " | "),
-        x = "Phenological Anomaly Delta DOY (Days Relative to Latitudinal Baseline)", y = "Kernel Density", fill = "Group", color = "Group"
+        subtitle = sub_p2_txt,
+        x = "Phenological Anomaly Delta DOY (Days Relative to Latitudinal Baseline; Dotted = +/-14 d)", y = "Kernel Density", fill = "Group", color = "Group"
       )
   }
 
+  fig_w <- 12.5
+  fig_h <- max(5.5, 0.32 * length(active_tx) + 2.2)
+  grob_pheno <- gridExtra::arrangeGrob(p1, p2, ncol = 2)
+
   tmp_pdf <- paste0(out_pdf, ".tmp")
-  pdf(tmp_pdf, width = 12, height = 5.5)
+  grDevices::pdf(tmp_pdf, width = fig_w, height = fig_h)
   tryCatch({
-    gridExtra::grid.arrange(p1, p2, ncol = 2)
+    grid::grid.draw(grob_pheno)
   }, finally = {
-    dev.off()
+    grDevices::dev.off()
   })
   if (file.exists(tmp_pdf)) file.rename(tmp_pdf, out_pdf)
+
+  out_png <- sub("\\.pdf$", ".png", out_pdf, ignore.case = TRUE)
+  if (identical(out_png, out_pdf)) out_png <- paste0(out_pdf, ".png")
+  tmp_png <- paste0(out_png, ".tmp")
+  grDevices::png(tmp_png, width = fig_w, height = fig_h, units = "in", res = 300)
+  tryCatch({
+    grid::grid.draw(grob_pheno)
+  }, finally = {
+    grDevices::dev.off()
+  })
+  if (file.exists(tmp_png)) file.rename(tmp_png, out_png)
 }
 
 

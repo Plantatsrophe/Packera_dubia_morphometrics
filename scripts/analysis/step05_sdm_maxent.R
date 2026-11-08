@@ -25,7 +25,38 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
   if (length(present_tx) == 0L) present_tx <- get_active_packera_taxa(df$species_standardized)
   if (length(present_tx) == 0L) return(invisible(NULL))
 
+  # Resolve foreground (Packera dubia + top 5 congeners) vs background display tier when > 6 groups
+  fg_tx <- present_tx
+  bg_tx <- character(0)
+  if (length(present_tx) > 6L) {
+    tier_info <- if (exists("resolve_taxon_display_tier", mode = "function")) {
+      tryCatch(resolve_taxon_display_tier(df, tx_clean), error = function(e) NULL)
+    } else {
+      NULL
+    }
+    if (is.list(tier_info) && !is.null(tier_info$foreground) && length(intersect(tier_info$foreground, present_tx)) > 0L) {
+      fg_tx <- intersect(as.character(tier_info$foreground), present_tx)
+    } else if (is.list(tier_info) && !is.null(tier_info$fg_taxa) && length(intersect(tier_info$fg_taxa, present_tx)) > 0L) {
+      fg_tx <- intersect(as.character(tier_info$fg_taxa), present_tx)
+    } else if (is.character(tier_info) && length(intersect(tier_info, present_tx)) > 0L && length(intersect(tier_info, present_tx)) <= 6L) {
+      fg_tx <- intersect(tier_info, present_tx)
+    } else {
+      dubia_tx <- present_tx[grepl("dubia", present_tx, ignore.case = TRUE)]
+      other_tx <- setdiff(present_tx, dubia_tx)
+      cnt_other <- vapply(other_tx, function(tx) sum(tx_clean == tx, na.rm = TRUE), integer(1))
+      other_ord <- other_tx[order(-cnt_other, other_tx)]
+      n_keep_oth <- max(0L, 6L - length(dubia_tx))
+      fg_tx <- c(dubia_tx, utils::head(other_ord, n_keep_oth))
+    }
+    bg_tx <- setdiff(present_tx, fg_tx)
+  }
+
   dyn_pal <- resolve_dynamic_group_palette(present_tx)
+  if (length(bg_tx) > 0L) {
+    fg_pal <- resolve_dynamic_group_palette(fg_tx)
+    for (tx in fg_tx) dyn_pal[[tx]] <- fg_pal[[tx]]
+    for (tx in bg_tx) dyn_pal[[tx]] <- "#B0B0B0"
+  }
   hollow_pchs <- c(1L, 2L, 5L, 0L, 6L, 4L, 3L, 8L)
   dyn_pch <- if (exists("get_dynamic_packera_shapes", mode = "function")) {
     sh <- get_dynamic_packera_shapes(present_tx)
@@ -35,7 +66,11 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
   }
   alpha_val <- if (nrow(df) > 1000L) 0.45 else 0.78
   cols_tx <- grDevices::adjustcolor(dyn_pal[tx_clean], alpha.f = alpha_val)
-  pch_tx  <- dyn_pch[tx_clean]; pch_tx[is.na(pch_tx)] <- 1L
+  if (length(bg_tx) > 0L) {
+    is_bg_row <- tx_clean %in% bg_tx
+    cols_tx[is_bg_row] <- grDevices::adjustcolor("#B0B0B0", alpha.f = 0.38)
+  }
+  pch_tx <- dyn_pch[tx_clean]; pch_tx[is.na(pch_tx)] <- 1L
 
   if (!("fine_soil_sand" %in% names(df)) && "soil_sand" %in% names(df)) df$fine_soil_sand <- df$soil_sand
   if (!("fine_soil_ph" %in% names(df)) && "soil_ph" %in% names(df)) df$fine_soil_ph <- df$soil_ph
@@ -79,77 +114,173 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
       fill = c("#009E73", "#0072B2", "#CC79A7"), border = NA, cex = 0.68, bty = "n"
     )
 
-    # Panel B: Dynamic Top-2 RF Environmental Predictors (Hollow Markers + 85% Ellipses)
+    # Panel B: Dynamic Top-2 RF Environmental Predictors (Strict Complete-Case Filtering + Availability Contours)
     graphics::par(mar = c(4.5, 4.8, 3.0, 1.2))
     xv <- suppressWarnings(as.numeric(df[[top_env_1]]))
     yv <- suppressWarnings(as.numeric(df[[top_env_2]]))
-    xv[!is.finite(xv)] <- stats::median(xv[is.finite(xv)], na.rm = TRUE)
-    yv[!is.finite(yv)] <- stats::median(yv[is.finite(yv)], na.rm = TRUE)
-    xv[!is.finite(xv)] <- 0.0; yv[!is.finite(yv)] <- 0.0
+    ok_xy <- is.finite(xv) & is.finite(yv) & (tx_clean %in% present_tx)
 
-    graphics::plot(
-      xv, yv, type = "n",
-      xlab = top_env_lbls[1], ylab = top_env_lbls[2],
-      main = "B. Top Spatial RF Niche Predictors (85% Confidence Ellipses)", font.main = 2
-    )
-    graphics::grid(col = "grey88")
-    graphics::points(xv, yv, col = cols_tx, pch = pch_tx, bg = NA, cex = 0.85, lwd = 1.0)
-    if ("is_type_specimen" %in% names(df)) {
-      m_t_b <- which(as.logical(df$is_type_specimen) == TRUE & is.finite(xv) & is.finite(yv))
-      if (length(m_t_b) > 0L) {
-        graphics::points(xv[m_t_b], yv[m_t_b], pch = 5L, bg = NA, col = cols_tx[m_t_b], cex = 1.45, lwd = 2.0)
-        graphics::points(xv[m_t_b], yv[m_t_b], pch = 1L, bg = NA, col = "#111111", cex = 1.85, lwd = 1.4)
-      }
-    }
-    t_seq <- seq(0, 2 * pi, length.out = 100)
-    chi_r <- sqrt(stats::qchisq(0.85, df = 2))
-    for (tx in present_tx) {
-      m_g <- which(tx_clean == tx & is.finite(xv) & is.finite(yv))
-      if (length(m_g) >= 3L) {
-        cov_g <- tryCatch(stats::cov(cbind(xv[m_g], yv[m_g])), error = function(e) NULL)
-        if (!is.null(cov_g) && all(is.finite(cov_g)) && det(cov_g) > 1e-12) {
-          eg <- eigen(cov_g, symmetric = TRUE)
-          pts_el <- t(c(mean(xv[m_g]), mean(yv[m_g])) + chi_r * eg$vectors %*% diag(sqrt(pmax(eg$values, 0))) %*% rbind(cos(t_seq), sin(t_seq)))
-          graphics::lines(pts_el[, 1], pts_el[, 2], col = dyn_pal[[tx]], lwd = 1.5)
+    if (sum(ok_xy) > 0L) {
+      graphics::plot(
+        xv[ok_xy], yv[ok_xy], type = "n",
+        xlab = top_env_lbls[1], ylab = top_env_lbls[2],
+        main = "B. Top Spatial RF Niche Predictors (85% Confidence Ellipses)", font.main = 2
+      )
+      graphics::grid(col = "grey88")
+
+      # Background environmental availability contours: 100% (solid grey55) and 50% (dashed grey65) (Broennimann et al. 2012)
+      if (sum(ok_xy) >= 3L) {
+        x_bg <- xv[ok_xy]; y_bg <- yv[ok_xy]
+        ch_100 <- tryCatch(grDevices::chull(x_bg, y_bg), error = function(e) integer(0))
+        if (length(ch_100) >= 3L) {
+          graphics::polygon(x_bg[ch_100], y_bg[ch_100], border = "grey55", lty = 1L, lwd = 1.15, col = NA)
+        }
+        if (sum(ok_xy) >= 6L) {
+          sx <- stats::sd(x_bg, na.rm = TRUE); if (!is.finite(sx) || sx < 1e-9) sx <- 1.0
+          sy <- stats::sd(y_bg, na.rm = TRUE); if (!is.finite(sy) || sy < 1e-9) sy <- 1.0
+          d_rad <- sqrt(((x_bg - stats::median(x_bg)) / sx)^2 + ((y_bg - stats::median(y_bg)) / sy)^2)
+          in_50 <- which(d_rad <= stats::quantile(d_rad, probs = 0.50, na.rm = TRUE))
+          if (length(in_50) >= 3L) {
+            ch_50 <- tryCatch(grDevices::chull(x_bg[in_50], y_bg[in_50]), error = function(e) integer(0))
+            if (length(ch_50) >= 3L) {
+              graphics::polygon(x_bg[in_50][ch_50], y_bg[in_50][ch_50], border = "grey65", lty = 2L, lwd = 1.10, col = NA)
+            }
+          }
         }
       }
-    }
-    short_tx <- gsub("^Packera\\s+", "P. ", present_tx)
-    graphics::legend(
-      "topright", legend = short_tx, col = dyn_pal[present_tx],
-      pch = dyn_pch[present_tx], pt.bg = NA, cex = 0.72, bty = "n"
-    )
 
-    # Panel C: Top Edaphic/Lithic Predictor Boxplots + Kruskal-Wallis p-value
-    ed_v <- suppressWarnings(as.numeric(df[[top_edaph_1]]))
-    ed_v[!is.finite(ed_v)] <- stats::median(ed_v[is.finite(ed_v)], na.rm = TRUE)
-    ed_v[!is.finite(ed_v)] <- 0.0
-    kw_p <- tryCatch(stats::kruskal.test(ed_v ~ factor(tx_clean))$p.value, error = function(e) NA_real_)
-    p_str <- if (is.finite(kw_p)) sprintf("Kruskal-Wallis p = %.2e", kw_p) else "Edaphic Divergence"
-    tx_fac <- factor(tx_clean, levels = present_tx, labels = short_tx)
-    graphics::boxplot(
-      ed_v ~ tx_fac,
-      col = grDevices::adjustcolor(dyn_pal[present_tx], alpha.f = 0.25),
-      border = dyn_pal[present_tx], outpch = NA,
-      xlab = "", ylab = top_edaph_lbl,
-      main = sprintf("C. %s (%s)", top_edaph_lbl, p_str),
-      font.axis = 3, cex.axis = 0.80, font.main = 2
-    )
-    graphics::grid(nx = NA, ny = NULL, col = "grey88")
-    for (s_i in seq_along(present_tx)) {
-      m_s <- which(tx_clean == present_tx[s_i])
-      if (length(m_s) > 0L) {
-        jit_x <- s_i + (((seq_along(m_s) %% 7L) - 3.0) * 0.045)
-        graphics::points(
-          jit_x, ed_v[m_s],
-          pch = dyn_pch[[present_tx[s_i]]], bg = NA,
-          col = grDevices::adjustcolor(dyn_pal[[present_tx[s_i]]], alpha.f = alpha_val),
-          cex = 0.75, lwd = 0.9
-        )
+      # Plot background taxa first in #B0B0B0 gray with dashed convex hulls when length(present_tx) > 6L
+      if (length(bg_tx) > 0L) {
+        m_bg_pts <- which(ok_xy & (tx_clean %in% bg_tx))
+        if (length(m_bg_pts) > 0L) {
+          graphics::points(xv[m_bg_pts], yv[m_bg_pts], col = cols_tx[m_bg_pts], pch = pch_tx[m_bg_pts], bg = NA, cex = 0.72, lwd = 0.8)
+        }
+        for (tx in bg_tx) {
+          m_g <- which(tx_clean == tx & ok_xy)
+          if (length(m_g) >= 3L) {
+            ch_bg <- tryCatch(grDevices::chull(xv[m_g], yv[m_g]), error = function(e) integer(0))
+            if (length(ch_bg) >= 3L) {
+              graphics::polygon(xv[m_g][ch_bg], yv[m_g][ch_bg], border = "#B0B0B0", lty = 2L, lwd = 0.95, col = NA)
+            }
+          }
+        }
       }
+
+      # Plot foreground taxa and their 85% confidence ellipses
+      m_fg_pts <- which(ok_xy & (tx_clean %in% fg_tx))
+      if (length(m_fg_pts) > 0L) {
+        graphics::points(xv[m_fg_pts], yv[m_fg_pts], col = cols_tx[m_fg_pts], pch = pch_tx[m_fg_pts], bg = NA, cex = 0.85, lwd = 1.0)
+      }
+      if ("is_type_specimen" %in% names(df)) {
+        m_t_b <- which(as.logical(df$is_type_specimen) == TRUE & ok_xy)
+        if (length(m_t_b) > 0L) {
+          graphics::points(xv[m_t_b], yv[m_t_b], pch = 5L, bg = NA, col = cols_tx[m_t_b], cex = 1.45, lwd = 2.0)
+          graphics::points(xv[m_t_b], yv[m_t_b], pch = 1L, bg = NA, col = "#111111", cex = 1.85, lwd = 1.4)
+        }
+      }
+      t_seq <- seq(0, 2 * pi, length.out = 100)
+      chi_r <- sqrt(stats::qchisq(0.85, df = 2))
+      for (tx in fg_tx) {
+        m_g <- which(tx_clean == tx & ok_xy)
+        if (length(m_g) >= 3L) {
+          cov_g <- tryCatch(stats::cov(cbind(xv[m_g], yv[m_g])), error = function(e) NULL)
+          if (!is.null(cov_g) && all(is.finite(cov_g)) && det(cov_g) > 1e-12) {
+            eg <- eigen(cov_g, symmetric = TRUE)
+            pts_el <- t(c(mean(xv[m_g]), mean(yv[m_g])) + chi_r * eg$vectors %*% diag(sqrt(pmax(eg$values, 0))) %*% rbind(cos(t_seq), sin(t_seq)))
+            graphics::lines(pts_el[, 1], pts_el[, 2], col = dyn_pal[[tx]], lwd = 1.5)
+          }
+        }
+      }
+      leg_tx <- gsub("^Packera\\s+", "P. ", fg_tx)
+      leg_cols <- dyn_pal[fg_tx]
+      leg_pchs <- dyn_pch[fg_tx]
+      if (length(bg_tx) > 0L) {
+        leg_tx <- c(leg_tx, sprintf("Other spp. (%d)", length(bg_tx)))
+        leg_cols <- c(leg_cols, "#B0B0B0")
+        leg_pchs <- c(leg_pchs, 1L)
+      }
+      graphics::legend(
+        "topright", legend = leg_tx, col = leg_cols,
+        pch = leg_pchs, pt.bg = NA, cex = 0.68, bty = "n"
+      )
+    } else {
+      graphics::plot(c(0, 1), c(0, 1), type = "n", xlab = top_env_lbls[1], ylab = top_env_lbls[2],
+                     main = "B. Top Spatial RF Niche Predictors", font.main = 2)
+      graphics::text(0.5, 0.5, "No finite environmental pairs available")
+    }
+
+    # Panel C: Top Edaphic/Lithic Predictor Boxplots + Kruskal-Wallis p-value (Strict Complete-Case Filtering)
+    ed_v <- suppressWarnings(as.numeric(df[[top_edaph_1]]))
+    ok_ed <- is.finite(ed_v) & (tx_clean %in% present_tx)
+    short_tx <- gsub("^Packera\\s+", "P. ", present_tx)
+    if (sum(ok_ed) > 0L) {
+      kw_p <- tryCatch(stats::kruskal.test(ed_v[ok_ed] ~ factor(tx_clean[ok_ed]))$p.value, error = function(e) NA_real_)
+      p_str <- if (is.finite(kw_p)) sprintf("Kruskal-Wallis p = %.2e", kw_p) else "Edaphic Divergence"
+      if (length(present_tx) > 6L) {
+        graphics::par(mar = c(4.5, 8.2, 3.0, 1.2))
+        grp_meds <- vapply(present_tx, function(tx) {
+          vals <- ed_v[ok_ed & tx_clean == tx]
+          if (length(vals) > 0L) stats::median(vals, na.rm = TRUE) else NA_real_
+        }, numeric(1))
+        ord_c <- order(grp_meds, present_tx, na.last = TRUE)
+        tx_ord_c <- present_tx[ord_c]
+        short_ord_c <- gsub("^Packera\\s+", "P. ", tx_ord_c)
+        tx_fac <- factor(tx_clean[ok_ed], levels = tx_ord_c, labels = short_ord_c)
+        c_pal <- dyn_pal[tx_ord_c]
+        graphics::boxplot(
+          ed_v[ok_ed] ~ tx_fac,
+          horizontal = TRUE, las = 1,
+          col = grDevices::adjustcolor(c_pal, alpha.f = 0.25),
+          border = c_pal, outpch = NA,
+          xlab = top_edaph_lbl, ylab = "",
+          main = sprintf("C. %s (%s)", top_edaph_lbl, p_str),
+          font.axis = 3, cex.axis = min(0.76, max(0.48, 8.5 / length(tx_ord_c))), font.main = 2
+        )
+        graphics::grid(nx = NULL, ny = NA, col = "grey88")
+        for (s_i in seq_along(tx_ord_c)) {
+          m_s <- which(ok_ed & tx_clean == tx_ord_c[s_i])
+          if (length(m_s) > 0L) {
+            jit_y <- s_i + (((seq_along(m_s) %% 7L) - 3.0) * 0.045)
+            graphics::points(
+              ed_v[m_s], jit_y,
+              pch = dyn_pch[[tx_ord_c[s_i]]], bg = NA,
+              col = grDevices::adjustcolor(c_pal[[tx_ord_c[s_i]]], alpha.f = if (tx_ord_c[s_i] %in% bg_tx) 0.38 else alpha_val),
+              cex = 0.68, lwd = 0.85
+            )
+          }
+        }
+      } else {
+        tx_fac <- factor(tx_clean[ok_ed], levels = present_tx, labels = short_tx)
+        graphics::boxplot(
+          ed_v[ok_ed] ~ tx_fac,
+          col = grDevices::adjustcolor(dyn_pal[present_tx], alpha.f = 0.25),
+          border = dyn_pal[present_tx], outpch = NA,
+          xlab = "", ylab = top_edaph_lbl,
+          main = sprintf("C. %s (%s)", top_edaph_lbl, p_str),
+          font.axis = 3, cex.axis = 0.80, font.main = 2
+        )
+        graphics::grid(nx = NA, ny = NULL, col = "grey88")
+        for (s_i in seq_along(present_tx)) {
+          m_s <- which(ok_ed & tx_clean == present_tx[s_i])
+          if (length(m_s) > 0L) {
+            jit_x <- s_i + (((seq_along(m_s) %% 7L) - 3.0) * 0.045)
+            graphics::points(
+              jit_x, ed_v[m_s],
+              pch = dyn_pch[[present_tx[s_i]]], bg = NA,
+              col = grDevices::adjustcolor(dyn_pal[[present_tx[s_i]]], alpha.f = alpha_val),
+              cex = 0.75, lwd = 0.9
+            )
+          }
+        }
+      }
+    } else {
+      graphics::plot(c(0, 1), c(0, 1), type = "n", xlab = "", ylab = top_edaph_lbl,
+                     main = sprintf("C. %s", top_edaph_lbl), font.main = 2)
+      graphics::text(0.5, 0.5, "No finite edaphic values available")
     }
 
     # Panel D: Pairwise Schoener's D Niche Overlap Matrix (Benjamini-Hochberg FDR Adjusted)
+    graphics::par(mar = c(4.5, 6.2, 3.0, 1.2))
     n_sp <- length(present_tx)
     d_mat <- matrix(1.0, nrow = n_sp, ncol = n_sp, dimnames = list(short_tx, short_tx))
     p_mat <- matrix(NA_real_, nrow = n_sp, ncol = n_sp, dimnames = list(short_tx, short_tx))
@@ -179,24 +310,40 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
         }
       }
     }
+    short_tx_d <- short_tx
+    if (n_sp >= 3L) {
+      hc_ord <- tryCatch(
+        stats::hclust(stats::as.dist(pmax(0, 1 - d_mat)), method = "average")$order,
+        error = function(e) seq_len(n_sp)
+      )
+      short_tx_d <- short_tx[hc_ord]
+      d_mat <- d_mat[hc_ord, hc_ord, drop = FALSE]
+      p_mat <- p_mat[hc_ord, hc_ord, drop = FALSE]
+    }
     graphics::plot(
       c(0.5, n_sp + 0.5), c(0.5, n_sp + 0.5), type = "n", axes = FALSE,
-      xlab = "Active Group", ylab = "",
+      xlab = if (n_sp > 6L) "" else "Active Group", ylab = "",
       main = "D. Pairwise Schoener's D Niche Overlap & Equivalency", font.main = 2
     )
     ramp_d <- grDevices::colorRampPalette(c("#FFF5EB", "#FDD0A2", "#FD8D3C", "#D94801", "#7F2704"))(101)
+    cell_cex <- min(0.74, max(0.38, 5.0 / n_sp))
     for (i in seq_len(n_sp)) {
       y_pos <- n_sp - i + 1L
       for (j in seq_len(n_sp)) {
         dv <- d_mat[i, j]
         c_idx <- max(1L, min(101L, round(dv * 100) + 1L))
-        graphics::rect(j - 0.48, y_pos - 0.46, j + 0.48, y_pos + 0.46, col = if (i == j) "#EEEEEE" else ramp_d[c_idx], border = "white", lwd = 1.5)
-        lbl_cell <- if (i == j) "1.00\n(Self)" else if (is.finite(p_mat[i, j])) sprintf("D = %.2f\n(q = %.3f)", dv, p_mat[i, j]) else sprintf("D = %.2f", dv)
-        graphics::text(j, y_pos, labels = lbl_cell, cex = 0.74, font = if (i == j) 1 else 2, col = if (i != j && dv > 0.62) "white" else "#111111")
+        graphics::rect(j - 0.48, y_pos - 0.46, j + 0.48, y_pos + 0.46, col = if (i == j) "#EEEEEE" else ramp_d[c_idx], border = "white", lwd = if (n_sp > 8L) 0.8 else 1.5)
+        lbl_cell <- if (n_sp > 6L) {
+          if (i == j) "1.00" else sprintf("%.2f%s", dv, ifelse(is.finite(p_mat[i, j]) && p_mat[i, j] < 0.05, "*", ""))
+        } else {
+          if (i == j) "1.00\n(Self)" else if (is.finite(p_mat[i, j])) sprintf("D = %.2f\n(q = %.3f)", dv, p_mat[i, j]) else sprintf("D = %.2f", dv)
+        }
+        graphics::text(j, y_pos, labels = lbl_cell, cex = cell_cex, font = if (i == j) 1 else 2, col = if (i != j && dv > 0.62) "white" else "#111111")
       }
     }
-    graphics::axis(1, at = seq_len(n_sp), labels = short_tx, tick = FALSE, font = 3, cex.axis = 0.80)
-    graphics::axis(2, at = rev(seq_len(n_sp)), labels = short_tx, las = 1, tick = FALSE, font = 3, cex.axis = 0.80)
+    ax_cex_d <- min(0.80, max(0.46, 6.0 / n_sp))
+    graphics::axis(1, at = seq_len(n_sp), labels = short_tx_d, las = if (n_sp > 6L) 2 else 1, tick = FALSE, font = 3, cex.axis = ax_cex_d)
+    graphics::axis(2, at = rev(seq_len(n_sp)), labels = short_tx_d, las = 1, tick = FALSE, font = 3, cex.axis = ax_cex_d)
     graphics::box(col = "grey75")
     u_sp_hdr <- get_active_packera_taxa(df$species_standardized)
     hdr_lbl <- if (length(u_sp_hdr) == 1L) u_sp_hdr[1] else sprintf("Packera Multi-Taxon Cohort (%d Active Groups)", length(present_tx))
@@ -373,27 +520,53 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
       x = NULL, y = "Percentage of Explained Niche Variance (%)", fill = "Variance Component"
     )
 
+  grob_5p <- gridExtra::arrangeGrob(
+    p1, p2, p3, p4, p5,
+    layout_matrix = rbind(c(1, 2, 5), c(3, 4, 5)),
+    widths = c(1.15, 1.15, 0.95)
+  )
+
   tmp_pdf <- paste0(out_pdf, ".tmp")
-  pdf(tmp_pdf, width = 13, height = 8.5)
+  grDevices::pdf(tmp_pdf, width = 13, height = 8.5)
   tryCatch({
-    gridExtra::grid.arrange(p1, p2, p3, p4, p5, layout_matrix = rbind(c(1, 2, 5), c(3, 4, 5)), widths = c(1.15, 1.15, 0.95))
+    grid::grid.draw(grob_5p)
   }, finally = {
-    dev.off()
+    grDevices::dev.off()
   })
   if (file.exists(tmp_pdf)) file.rename(tmp_pdf, out_pdf)
 
-  # Export auxiliary Step 05 figures via generate_step06_pub_figures if available,
-  # then atomically render dynamic top-RF-importance fig05_ecological_niche_phenology.{pdf,png}
-  if (exists("generate_step06_pub_figures", mode = "function")) {
-    tryCatch({
-      format_predictor_labels <<- format_step06_predictor_labels
-      generate_step06_pub_figures(df, srf_res, niche_res, pheno_res, out_pdf)
-    }, error = function(e) warning("generate_step06_pub_figures warning: ", e$message))
-  }
+  out_png <- sub("\\.pdf$", ".png", out_pdf, ignore.case = TRUE)
+  if (identical(out_png, out_pdf)) out_png <- paste0(out_pdf, ".png")
+  tmp_png <- paste0(out_png, ".tmp")
+  grDevices::png(tmp_png, width = 13, height = 8.5, units = "in", res = 300)
+  tryCatch({
+    grid::grid.draw(grob_5p)
+  }, finally = {
+    grDevices::dev.off()
+  })
+  if (file.exists(tmp_png)) file.rename(tmp_png, out_png)
+
+  # Atomically render dynamic top-RF-importance fig05_ecological_niche_phenology.{pdf,png}
+  # and fig06b_geographic_map_and_hopkins_phenology.{pdf,png} without redundant double-render
   tryCatch(
     export_dynamic_fig05_ecological_niche_phenology(df, srf_res, niche_res, out_pdf),
     error = function(e) warning("export_dynamic_fig05_ecological_niche_phenology warning: ", e$message)
   )
+  if (exists("export_step06b_geographic_and_hopkins", mode = "function")) {
+    tryCatch({
+      format_predictor_labels <<- format_step06_predictor_labels
+      fn_fmls <- names(formals(export_step06b_geographic_and_hopkins))
+      if (length(fn_fmls) >= 5L) {
+        export_step06b_geographic_and_hopkins(df, srf_res, niche_res, pheno_res, out_pdf)
+      } else if (length(fn_fmls) == 4L) {
+        export_step06b_geographic_and_hopkins(df, srf_res, pheno_res, out_pdf)
+      } else if (length(fn_fmls) == 3L) {
+        export_step06b_geographic_and_hopkins(df, pheno_res, out_pdf)
+      } else {
+        export_step06b_geographic_and_hopkins(df, out_pdf)
+      }
+    }, error = function(e) warning("export_step06b_geographic_and_hopkins warning: ", e$message))
+  }
 }
 
 # ------------------------------------------------------------------------------
@@ -1198,7 +1371,9 @@ fit_and_project_maxent_sdm_maps <- function(
     }
 
     render_sdm_plate <- function() {
-      graphics::par(mfrow = c(2, 2), mar = c(4.4, 4.6, 3.0, 1.5), oma = c(0.5, 0.5, 1.8, 0.5))
+      graphics::layout(matrix(c(1, 1, 2, 2, 3, 3, 4, 5), nrow = 2, ncol = 4, byrow = TRUE))
+      on.exit(graphics::layout(1), add = TRUE)
+      graphics::par(mar = c(4.4, 4.6, 3.0, 1.5), oma = c(0.5, 0.5, 1.8, 0.5))
       suit_ramp <- grDevices::colorRampPalette(c("#F7FCF0", "#E0F3DB", "#A8DDB5", "#4EB3D3", "#0868AC", "#084081"))(100)
 
       .plot_suit_rast <- function(r_layer, panel_title, sub_txt) {
@@ -1321,36 +1496,55 @@ fit_and_project_maxent_sdm_maps <- function(
         bg = grDevices::adjustcolor("white", alpha.f = 0.85)
       )
 
-      # Panel D: Spatial-Block Cross-Validated ROC/AUC & Continuous Boyce Index (P/E Ratio)
+      # Panel D1: Spatial-Block Cross-Validated ROC Curves (TPR vs. FPR)
       graphics::plot(
         c(0, 1), c(0, 1), type = "n",
-        xlab = "False Positive Rate (1 - Specificity) / Suitability Bin",
-        ylab = "True Positive Rate (Sensitivity) / Scaled P/E",
-        main = "D. Spatial-Block CV ROC Curves & Boyce Calibration (P/E)", font.main = 2
+        xlab = "False Positive Rate (1 - Specificity)",
+        ylab = "True Positive Rate (Sensitivity)",
+        main = "D1. Spatial-Block CV ROC Curves", font.main = 2
       )
       graphics::grid(col = "grey88")
       graphics::abline(0, 1, lty = 3, col = "grey55", lwd = 1.1)
       graphics::lines(focal_artifacts$roc_mx$fpr, focal_artifacts$roc_mx$tpr, col = "#0072B2", lwd = 2.1, lty = 1L)
       graphics::lines(focal_artifacts$roc_rf$fpr, focal_artifacts$roc_rf$tpr, col = "#009E73", lwd = 2.0, lty = 2L)
       graphics::lines(focal_artifacts$roc_ens$fpr, focal_artifacts$roc_ens$tpr, col = "#D55E00", lwd = 2.3, lty = 1L)
-
-      b_curve <- attr(focal_artifacts$cbi_ens, "boyce_curve")
-      if (is.data.frame(b_curve) && nrow(b_curve) >= 2L && any(is.finite(b_curve$pe_ratio))) {
-        pe_max <- max(b_curve$pe_ratio, 1.0, na.rm = TRUE)
-        pe_scaled <- pmin(1.0, pmax(0.0, b_curve$pe_ratio / pe_max))
-        graphics::lines(b_curve$suitability, pe_scaled, col = "#CC79A7", lwd = 1.8, lty = 4L, type = "b", pch = 16, cex = 0.65)
-      }
       graphics::legend(
         "bottomright",
         legend = c(
-          sprintf("MaxEnt (AUC = %.3f, CBI = %.2f)", p_row_1$AUC_Block_MaxEnt[1], p_row_1$CBI_MaxEnt[1]),
-          sprintf("Spatial RF (AUC = %.3f, CBI = %.2f)", p_row_1$AUC_Block_SpatialRF[1], p_row_1$CBI_SpatialRF[1]),
-          sprintf("Ensemble (AUC = %.3f, CBI = %.2f)", p_row_1$AUC_Block_Ensemble[1], p_row_1$CBI_Ensemble[1]),
-          "Boyce P/E Ratio Curve (Scaled)"
+          sprintf("MaxEnt (AUC = %.3f)", p_row_1$AUC_Block_MaxEnt[1]),
+          sprintf("Spatial RF (AUC = %.3f)", p_row_1$AUC_Block_SpatialRF[1]),
+          sprintf("Ensemble (AUC = %.3f)", p_row_1$AUC_Block_Ensemble[1])
         ),
-        col = c("#0072B2", "#009E73", "#D55E00", "#CC79A7"),
-        lty = c(1L, 2L, 1L, 4L), lwd = c(2.1, 2.0, 2.3, 1.8),
-        cex = 0.68, bg = grDevices::adjustcolor("white", alpha.f = 0.85)
+        col = c("#0072B2", "#009E73", "#D55E00"),
+        lty = c(1L, 2L, 1L), lwd = c(2.1, 2.0, 2.3),
+        cex = 0.64, bg = grDevices::adjustcolor("white", alpha.f = 0.85)
+      )
+
+      # Panel D2: Continuous Boyce Index Calibration Curve (P/E Ratio vs. Suitability Bin)
+      b_curve <- attr(focal_artifacts$cbi_ens, "boyce_curve")
+      pe_vals <- if (is.data.frame(b_curve) && "pe_ratio" %in% names(b_curve)) b_curve$pe_ratio[is.finite(b_curve$pe_ratio)] else numeric(0)
+      y_max_pe <- max(c(2.0, pe_vals * 1.12), na.rm = TRUE)
+      graphics::plot(
+        c(0, 1), c(0, y_max_pe), type = "n",
+        xlab = "Habitat Suitability Bin",
+        ylab = "Predicted / Expected (P/E) Ratio",
+        main = "D2. Continuous Boyce Calibration (P/E)", font.main = 2
+      )
+      graphics::grid(col = "grey88")
+      graphics::abline(h = 1.0, lty = 2L, col = "grey45", lwd = 1.2)
+      if (is.data.frame(b_curve) && nrow(b_curve) >= 2L && any(is.finite(b_curve$pe_ratio))) {
+        graphics::lines(b_curve$suitability, b_curve$pe_ratio, col = "#CC79A7", lwd = 2.0, lty = 1L, type = "b", pch = 16, cex = 0.68)
+      }
+      graphics::legend(
+        "topleft",
+        legend = c(
+          sprintf("Ensemble CBI = %.3f", p_row_1$CBI_Ensemble[1]),
+          sprintf("MaxEnt CBI = %.3f", p_row_1$CBI_MaxEnt[1]),
+          "Random Expectation (P/E = 1.0)"
+        ),
+        col = c("#CC79A7", "#0072B2", "grey45"),
+        lty = c(1L, NA, 2L), pch = c(16, NA, NA), lwd = c(2.0, NA, 1.2),
+        cex = 0.62, bg = grDevices::adjustcolor("white", alpha.f = 0.85)
       )
       graphics::title(
         sprintf("Step 06 Species Distribution Modeling (MaxEnt & Spatial RF): %s", focal_artifacts$taxon),
@@ -1368,11 +1562,16 @@ fit_and_project_maxent_sdm_maps <- function(
       grDevices::png(png_tmp, width = 13.0, height = 9.5, units = "in", res = 300)
       tryCatch(render_sdm_plate(), finally = grDevices::dev.off())
       if (file.exists(png_tmp)) file.rename(png_tmp, png_out)
-      message(sprintf("Exported 4-panel MaxEnt & Ensemble SDM figure to %s (.pdf & .png).", pdf_out))
+      message(sprintf("Exported 5-panel MaxEnt & Ensemble SDM figure to %s (.pdf & .png).", pdf_out))
 
       # When multiple taxa/morphotypes are modeled, also render a multi-species MaxEnt SDM comparison grid
       valid_multi_arts <- Filter(function(a) !is.null(a$rast_mx), all_sdm_artifacts)
       if (length(valid_multi_arts) > 1L) {
+        focal_tx_name <- if (!is.null(focal_artifacts$taxon)) as.character(focal_artifacts$taxon) else "Packera dubia"
+        art_taxa <- vapply(valid_multi_arts, function(a) as.character(a$taxon), character(1))
+        is_focal_art <- (art_taxa == focal_tx_name) | grepl("dubia", art_taxa, ignore.case = TRUE)
+        n_pres_art <- vapply(valid_multi_arts, function(a) sum(a$pres_mask, na.rm = TRUE), numeric(1))
+        valid_multi_arts <- valid_multi_arts[order(!is_focal_art, -n_pres_art, art_taxa)]
         grid_pdf_out <- file.path(fig_dir, "fig06c_multispecies_maxent_sdm_grid.pdf")
         grid_png_out <- file.path(fig_dir, "fig06c_multispecies_maxent_sdm_grid.png")
         n_sp_m <- length(valid_multi_arts)

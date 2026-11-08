@@ -561,7 +561,22 @@ def generate_step02_publication_figures(
             df_plot["ar_val"] = ar_final
 
     # Dynamically resolve active species present in df_plot and assign Okabe-Ito colors + hollow markers
-    present_sp = sorted(str(sp) for sp in df_plot["species_clean"].dropna().unique() if str(sp).strip())
+    focal_std = _standardize_packera_species_py(
+        os.environ.get("PACKERA_FOCAL_TAXON", "").strip() or "Packera dubia"
+    )
+    t1_counts = (
+        df_plot[df_plot["norm_tier"] == "Tier_1_Direct"]["species_clean"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .value_counts()
+        .to_dict()
+    )
+    unique_sp = [str(sp).strip() for sp in df_plot["species_clean"].dropna().unique() if str(sp).strip()]
+    present_sp = sorted(
+        unique_sp,
+        key=lambda sp: (0 if sp == focal_std else 1, -int(t1_counts.get(sp, 0)), sp),
+    )
     if not present_sp:
         present_sp = ["Unassigned_Packera"]
     for idx_sp, sp_name in enumerate(present_sp):
@@ -578,12 +593,17 @@ def generate_step02_publication_figures(
         else:
             SPECIES_ITALIC[sp_name] = sp_name.replace("_", " ")
 
+    for c_val, sp_val in zip(df_plot["cat_str"], df_plot["species_clean"]):
+        if c_val and pd.notna(sp_val) and str(sp_val).strip() and c_val not in cat_to_species:
+            cat_to_species[c_val] = str(sp_val).strip()
+
     alpha_pt = 0.45 if len(df_plot) > 1000 else 0.75
 
     # -------------------------------------------------------------------------
     # Figure 02a: Lamina Solidity vs. Aspect Ratio & Taxon Reproductive Traits
     # -------------------------------------------------------------------------
-    fig_a = plt.figure(figsize=(13.0, 5.8), dpi=300)
+    fig_a_height = max(5.8, 0.34 * min(16, len(present_sp)) + 2.4)
+    fig_a = plt.figure(figsize=(13.0, fig_a_height), dpi=300)
     gs_a = GridSpec(1, 2, figure=fig_a, width_ratios=[1.15, 1.05], wspace=0.28)
 
     # Panel A: Lamina Solidity vs. Blade Aspect Ratio colored and shaped by Species
@@ -607,26 +627,59 @@ def generate_step02_publication_figures(
         )
     )
 
-    for sp_name in present_sp:
-        sub = df_plot[df_plot["species_clean"] == sp_name]
-        if len(sub) > 0:
+    if len(present_sp) <= 6:
+        for sp_name in present_sp:
+            sub = df_plot[df_plot["species_clean"] == sp_name]
+            if len(sub) > 0:
+                ax_sc.scatter(
+                    sub["sol_val"],
+                    sub["ar_val"],
+                    facecolors="none",
+                    edgecolors=SPECIES_PALETTE[sp_name],
+                    marker=SPECIES_MARKERS[sp_name],
+                    label=f"{SPECIES_ITALIC[sp_name]} (n={len(sub)})",
+                    alpha=alpha_pt,
+                    s=38,
+                    linewidths=1.0,
+                    zorder=3,
+                )
+    else:
+        fg_sp = present_sp[:6]
+        bg_sp = present_sp[6:]
+        bg_sub = df_plot[df_plot["species_clean"].isin(bg_sp)]
+        for sp_name in fg_sp:
+            sub = df_plot[df_plot["species_clean"] == sp_name]
+            if len(sub) > 0:
+                ax_sc.scatter(
+                    sub["sol_val"],
+                    sub["ar_val"],
+                    facecolors="none",
+                    edgecolors=SPECIES_PALETTE[sp_name],
+                    marker=SPECIES_MARKERS[sp_name],
+                    label=f"{SPECIES_ITALIC[sp_name]} (n={len(sub)})",
+                    alpha=alpha_pt,
+                    s=38,
+                    linewidths=1.0,
+                    zorder=4,
+                )
+        if len(bg_sub) > 0:
             ax_sc.scatter(
-                sub["sol_val"],
-                sub["ar_val"],
+                bg_sub["sol_val"],
+                bg_sub["ar_val"],
                 facecolors="none",
-                edgecolors=SPECIES_PALETTE[sp_name],
-                marker=SPECIES_MARKERS[sp_name],
-                label=f"{SPECIES_ITALIC[sp_name]} (n={len(sub)})",
-                alpha=alpha_pt,
-                s=38,
-                linewidths=1.0,
-                zorder=3,
+                edgecolors="#B0B0B0",
+                marker="o",
+                label=f"Other Packera ({len(bg_sp)} spp., n={len(bg_sub)})",
+                alpha=0.30,
+                s=22,
+                linewidths=0.8,
+                zorder=2,
             )
 
     env_focal = os.environ.get("PACKERA_FOCAL_TAXON", "").strip()
-    focal_std = _standardize_packera_species_py(env_focal) if env_focal else (present_sp[0] if len(present_sp) == 1 else "")
-    if focal_std and focal_std != "Unassigned_Packera":
-        sp_title = focal_std.replace("_", " ").replace(" ", r"\ ")
+    title_focal_std = _standardize_packera_species_py(env_focal) if env_focal else (present_sp[0] if len(present_sp) == 1 else "")
+    if title_focal_std and title_focal_std != "Unassigned_Packera":
+        sp_title = title_focal_std.replace("_", " ").replace(" ", r"\ ")
         panel_a_title = r"A. Foliar Solidity vs. Blade Elongation ($\it{" + sp_title + r"}$)"
     elif len(present_sp) == 1 and present_sp[0] != "Unassigned_Packera":
         sp_title = present_sp[0].replace("_", " ").replace(" ", r"\ ")
@@ -664,9 +717,9 @@ def generate_step02_publication_figures(
         if "species_standardized" in rep_df.columns:
             rep_df["sp_clean"] = rep_df["species_standardized"].apply(_standardize_packera_species_py)
         elif cat_to_species:
-            rep_df["sp_clean"] = rep_df["cat_str"].map(lambda c: cat_to_species.get(c, present_sp[0]))
+            rep_df["sp_clean"] = rep_df["cat_str"].map(lambda c: cat_to_species.get(c, "Unassigned_Packera"))
         else:
-            rep_df["sp_clean"] = [present_sp[i % len(present_sp)] for i in range(len(rep_df))]
+            rep_df["sp_clean"] = "Unassigned_Packera"
         ar_col = (
             "capitulum_aspect_ratio"
             if "capitulum_aspect_ratio" in rep_df.columns
@@ -681,51 +734,118 @@ def generate_step02_publication_figures(
     else:
         rep_valid = pd.DataFrame()
 
+    horiz_repro = len(present_sp) > 5
     rng_jit = np.random.default_rng(42)
-    box_vals = []
+    box_vals: List[np.ndarray] = []
+    box_positions: List[int] = []
+    box_species: List[str] = []
+    empty_positions: List[int] = []
+
     for idx_s, sp_name in enumerate(present_sp):
+        pos_i = idx_s if horiz_repro else (idx_s + 1)
         if len(rep_valid) > 0 and (rep_valid["sp_clean"] == sp_name).any():
-            vals = rep_valid.loc[rep_valid["sp_clean"] == sp_name, "trait_v"].to_numpy(dtype=float)
+            vals = rep_valid.loc[rep_valid["sp_clean"] == sp_name, "trait_v"].dropna().to_numpy(dtype=float)
         else:
-            sub_s = df_plot[df_plot["species_clean"] == sp_name]
-            vals = np.clip(0.85 + 0.12 * sub_s["ar_val"].to_numpy(dtype=float), 0.65, 1.85)
-        if len(vals) == 0:
-            vals = np.array([1.05, 1.12, 1.18])
-        box_vals.append(vals)
-        jit_x = (idx_s + 1) + rng_jit.uniform(-0.16, 0.16, size=len(vals))
-        ax_repro.scatter(
-            jit_x,
-            vals,
-            facecolors="none",
-            edgecolors=SPECIES_PALETTE[sp_name],
-            marker=SPECIES_MARKERS[sp_name],
-            alpha=min(0.75, alpha_pt),
-            s=24,
-            linewidths=0.85,
-            zorder=3,
+            vals = np.array([], dtype=float)
+
+        if len(vals) > 0:
+            box_vals.append(vals)
+            box_positions.append(pos_i)
+            box_species.append(sp_name)
+            jit_offset = rng_jit.uniform(-0.16, 0.16, size=len(vals))
+            if horiz_repro:
+                ax_repro.scatter(
+                    vals,
+                    pos_i + jit_offset,
+                    facecolors="none",
+                    edgecolors=SPECIES_PALETTE[sp_name],
+                    marker=SPECIES_MARKERS[sp_name],
+                    alpha=min(0.75, alpha_pt),
+                    s=24,
+                    linewidths=0.85,
+                    zorder=3,
+                )
+            else:
+                ax_repro.scatter(
+                    pos_i + jit_offset,
+                    vals,
+                    facecolors="none",
+                    edgecolors=SPECIES_PALETTE[sp_name],
+                    marker=SPECIES_MARKERS[sp_name],
+                    alpha=min(0.75, alpha_pt),
+                    s=24,
+                    linewidths=0.85,
+                    zorder=3,
+                )
+        else:
+            empty_positions.append(pos_i)
+
+    if len(box_vals) > 0:
+        bp = ax_repro.boxplot(
+            box_vals,
+            positions=box_positions,
+            vert=not horiz_repro,
+            widths=0.48,
+            patch_artist=True,
+            showfliers=False,
+            zorder=2,
         )
+        for patch, med, sp_name in zip(bp["boxes"], bp["medians"], box_species):
+            c_hex = SPECIES_PALETTE[sp_name]
+            patch.set_facecolor(c_hex + "33")
+            patch.set_edgecolor(c_hex)
+            patch.set_linewidth(1.4)
+            med.set_color("#111111")
+            med.set_linewidth(1.6)
+        all_repro_concat = np.concatenate(box_vals)
+        baseline_val = max(0.45, float(np.nanmin(all_repro_concat)) * 0.92)
+    else:
+        baseline_val = 0.60
+        if horiz_repro:
+            ax_repro.set_xlim(0.5, 2.0)
+        else:
+            ax_repro.set_ylim(0.5, 2.0)
 
-    bp = ax_repro.boxplot(
-        box_vals,
-        positions=list(range(1, len(present_sp) + 1)),
-        widths=0.48,
-        patch_artist=True,
-        showfliers=False,
-        zorder=2,
-    )
-    for patch, med, sp_name in zip(bp["boxes"], bp["medians"], present_sp):
-        c_hex = SPECIES_PALETTE[sp_name]
-        patch.set_facecolor(c_hex + "33")
-        patch.set_edgecolor(c_hex)
-        patch.set_linewidth(1.4)
-        med.set_color("#111111")
-        med.set_linewidth(1.6)
+    for pos_i in empty_positions:
+        if horiz_repro:
+            ax_repro.text(
+                baseline_val,
+                pos_i,
+                "n=0",
+                color="#666666",
+                style="italic",
+                fontsize=7.8,
+                va="center",
+                ha="left",
+            )
+        else:
+            ax_repro.text(
+                pos_i,
+                baseline_val,
+                "n=0",
+                color="#666666",
+                style="italic",
+                fontsize=7.8,
+                ha="center",
+                va="bottom",
+            )
 
-    ax_repro.set_xticks(list(range(1, len(present_sp) + 1)))
-    ax_repro.set_xticklabels([SPECIES_ITALIC[sp] for sp in present_sp], fontsize=8.5)
-    ax_repro.set_ylabel("Involucre Aspect Ratio (L/W)", fontsize=9.2, fontweight="bold")
+    if horiz_repro:
+        y_ticks_repro = np.arange(len(present_sp))
+        ax_repro.set_yticks(y_ticks_repro)
+        ax_repro.set_yticklabels([SPECIES_ITALIC[sp] for sp in present_sp], fontsize=8.2)
+        ax_repro.set_ylim(-0.6, len(present_sp) - 0.4)
+        ax_repro.set_xlabel("Involucre Aspect Ratio (L/W)", fontsize=9.2, fontweight="bold")
+        ax_repro.grid(True, axis="x", linestyle=":", alpha=0.45)
+    else:
+        x_ticks_repro = list(range(1, len(present_sp) + 1))
+        ax_repro.set_xticks(x_ticks_repro)
+        ax_repro.set_xticklabels([SPECIES_ITALIC[sp] for sp in present_sp], fontsize=8.5)
+        ax_repro.set_xlim(0.4, len(present_sp) + 0.6)
+        ax_repro.set_ylabel("Involucre Aspect Ratio (L/W)", fontsize=9.2, fontweight="bold")
+        ax_repro.grid(True, axis="y", linestyle=":", alpha=0.45)
+
     ax_repro.set_title("B1. Capitulum / Involucre Proportions by Species", fontsize=10.2, fontweight="bold", loc="left")
-    ax_repro.grid(True, axis="y", linestyle=":", alpha=0.45)
 
     # Panel B2: Anthesis Phenological State Proportions across Species
     ax_pheno = fig_a.add_subplot(gs_b[1, 0])
@@ -739,42 +859,67 @@ def generate_step02_publication_figures(
         if "species_standardized" in ph_df.columns:
             ph_df["sp_clean"] = ph_df["species_standardized"].apply(_standardize_packera_species_py)
         elif cat_to_species:
-            ph_df["sp_clean"] = ph_df["cat_str"].map(lambda c: cat_to_species.get(c, present_sp[0]))
+            ph_df["sp_clean"] = ph_df["cat_str"].map(lambda c: cat_to_species.get(c, "Unassigned_Packera"))
         else:
-            ph_df["sp_clean"] = [present_sp[i % len(present_sp)] for i in range(len(ph_df))]
+            ph_df["sp_clean"] = "Unassigned_Packera"
         st_col = (
             "voucher_phenological_state"
             if "voucher_phenological_state" in ph_df.columns
             else ("phenological_state" if "phenological_state" in ph_df.columns else ph_df.columns[-1])
         )
-        ph_df["state_str"] = ph_df[st_col].fillna("Anthesis").astype(str)
+        ph_df["state_str"] = ph_df[st_col].dropna().astype(str)
+        ph_df = ph_df[ph_df["state_str"].str.strip() != ""].copy()
     else:
-        ph_df = pd.DataFrame({
-            "sp_clean": df_plot["species_clean"],
-            "state_str": ["Flowering_Anthesis" if i % 4 != 0 else "Bud_PreAnthesis" for i in range(len(df_plot))],
-        })
+        ph_df = pd.DataFrame(columns=["sp_clean", "state_str"])
 
-    anthesis_pct = []
-    bud_fruiting_pct = []
-    for sp_name in present_sp:
-        sub_p = ph_df[ph_df["sp_clean"] == sp_name]
+    anthesis_pct: List[float] = []
+    bud_pct: List[float] = []
+    fruiting_pct: List[float] = []
+    no_pheno_indices: List[int] = []
+    for idx_p, sp_name in enumerate(present_sp):
+        sub_p = ph_df[ph_df["sp_clean"] == sp_name] if len(ph_df) > 0 else pd.DataFrame()
         if len(sub_p) > 0:
-            is_anth = sub_p["state_str"].str.contains("anthesis|flower|open", case=False, na=False) & ~sub_p["state_str"].str.contains("pre|bud", case=False, na=False)
+            s_lower = sub_p["state_str"].astype(str)
+            is_anth = s_lower.str.contains("anthesis|flower|open", case=False, na=False) & ~s_lower.str.contains(
+                "pre|bud|post|fruit|senes", case=False, na=False
+            )
+            is_bud = s_lower.str.contains("bud|pre", case=False, na=False) & ~is_anth
+            is_fruit = ~is_anth & ~is_bud
             p_a = float(is_anth.mean() * 100.0)
+            p_b = float(is_bud.mean() * 100.0)
+            p_f = float(is_fruit.mean() * 100.0)
+            anthesis_pct.append(p_a)
+            bud_pct.append(p_b)
+            fruiting_pct.append(p_f)
         else:
-            p_a = 78.0
-        anthesis_pct.append(p_a)
-        bud_fruiting_pct.append(max(0.0, 100.0 - p_a))
+            anthesis_pct.append(0.0)
+            bud_pct.append(0.0)
+            fruiting_pct.append(0.0)
+            no_pheno_indices.append(idx_p)
 
     y_pos = np.arange(len(present_sp))
+    left_bud = np.array(anthesis_pct, dtype=float)
+    left_fruit = left_bud + np.array(bud_pct, dtype=float)
     ax_pheno.barh(y_pos, anthesis_pct, color="#009E73", edgecolor="white", height=0.58, alpha=0.88, label="Verified Anthesis")
-    ax_pheno.barh(y_pos, bud_fruiting_pct, left=anthesis_pct, color="#56B4E9", edgecolor="white", height=0.58, alpha=0.78, label="Bud / Post-Anthesis")
+    ax_pheno.barh(y_pos, bud_pct, left=left_bud, color="#56B4E9", edgecolor="white", height=0.58, alpha=0.78, label="Pre-Anthesis Bud")
+    ax_pheno.barh(y_pos, fruiting_pct, left=left_fruit, color="#E69F00", edgecolor="white", height=0.58, alpha=0.78, label="Fruiting / Post-Anthesis")
+    for idx_p in no_pheno_indices:
+        ax_pheno.text(
+            2.0,
+            idx_p,
+            "No pheno data",
+            color="#666666",
+            style="italic",
+            fontsize=7.8,
+            va="center",
+            ha="left",
+        )
     ax_pheno.set_yticks(y_pos)
-    ax_pheno.set_yticklabels([SPECIES_ITALIC[sp] for sp in present_sp], fontsize=8.5)
+    ax_pheno.set_yticklabels([SPECIES_ITALIC[sp] for sp in present_sp], fontsize=8.2 if horiz_repro else 8.5)
     ax_pheno.set_xlim(0, 105)
     ax_pheno.set_xlabel("Proportion of Vouchers (%)", fontsize=9.2, fontweight="bold")
     ax_pheno.set_title("B2. Reproductive Phenological State Breakdown", fontsize=10.2, fontweight="bold", loc="left")
-    ax_pheno.legend(loc="lower right", fontsize=7.6, frameon=True)
+    ax_pheno.legend(loc="lower right", fontsize=7.4, frameon=True)
     ax_pheno.grid(True, axis="x", linestyle=":", alpha=0.45)
 
     fig02a_pdf, fig02a_png = _save_fig_fn(
@@ -786,14 +931,16 @@ def generate_step02_publication_figures(
 
     # -------------------------------------------------------------------------
     # Figure 02b: Taxon-Stratified Basal Leaf Silhouette Montage
-    #             (Rows = Active Species; Cols = 20th, 40th, 60th, 80th %ile Aspect Ratio)
+    #             (Rows = Active Species; Cols = Type Anchor / 20th, 35th/40th, 60th, 80th/85th %ile)
     # -------------------------------------------------------------------------
-    n_sp_rows = max(1, len(present_sp))
-    fig_b, axes_b = plt.subplots(
-        n_sp_rows, 4, figsize=(12.2, max(3.6, 3.0 * n_sp_rows)), dpi=300, squeeze=False
-    )
-    pct_labels = ["20th %ile (Broad)", "40th %ile (Median-Low)", "60th %ile (Median-High)", "80th %ile (Elongate)"]
-    target_quantiles = (0.20, 0.40, 0.60, 0.80)
+    pct_labels = [
+        "Type Anchor / 20th %ile",
+        "40th %ile (Median-Low)",
+        "60th %ile (Median-High)",
+        "80th %ile (Elongate)",
+    ]
+    default_quantiles = (0.20, 0.40, 0.60, 0.80)
+    type_anchored_quantiles = (0.35, 0.60, 0.85)
 
     t1_pool = df_plot[df_plot["norm_tier"] == "Tier_1_Direct"].copy()
     if len(t1_pool) == 0:
@@ -805,10 +952,15 @@ def generate_step02_publication_figures(
         if "is_type_specimen" in t1_pool.columns
         else pd.Series(False, index=t1_pool.index)
     )
-    t1_pool["is_type_bool"] = is_type_s
+    det_type_s = (
+        t1_pool["determiner_tier"].astype(str).str.strip().eq("Tier_0_Type_Anchor")
+        if "determiner_tier" in t1_pool.columns
+        else pd.Series(False, index=t1_pool.index)
+    )
+    t1_pool["is_type_bool"] = is_type_s | det_type_s
     t1_pool["is_gold_silver"] = (
         t1_pool["determiner_tier"].astype(str).str.strip().isin({"Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver"})
-        | is_type_s
+        | t1_pool["is_type_bool"]
     )
     if "is_calibrated_mm" in t1_pool.columns:
         t1_pool["is_cal_bool"] = t1_pool["is_calibrated_mm"].apply(_parse_bool_val)
@@ -826,286 +978,335 @@ def generate_step02_publication_figures(
     fallback_qw = t1_pool["sol_val"] * t1_pool["ucs_val"]
     t1_pool["qual_weight"] = lqw_num.where(lqw_num.notna() & (lqw_num > 0), fallback_qw)
 
-    for row_idx, sp_name in enumerate(present_sp):
-        sp_col = SPECIES_PALETTE[sp_name]
-        # Strictly restrict to this species; never substitute another species' leaves
-        sp_all = t1_pool[t1_pool["species_clean"] == sp_name].copy()
-        # Only real on-disk silhouettes are eligible (never render fabricated geometry)
-        sp_all["asset_ok"] = pd.Series(
-            [
-                (_resolve_asset_path(r.get("mask_path", ""), out_dir) is not None)
-                or (_resolve_asset_path(r.get("contour_path", ""), out_dir) is not None)
-                for _, r in sp_all.iterrows()
-            ],
-            index=sp_all.index,
-            dtype=bool,
+    def _render_montage_page(
+        montage_sp_list: List[str],
+        out_stem: str,
+        title_suffix: str = "",
+    ) -> Tuple[Path, Path]:
+        n_sp_rows = max(1, len(montage_sp_list))
+        fig_height = min(24.0, max(3.6, 3.0 * n_sp_rows))
+        fig_b, axes_b = plt.subplots(
+            n_sp_rows, 4, figsize=(12.2, fig_height), dpi=300, squeeze=False
         )
-        n_missing_assets = int((~sp_all["asset_ok"]).sum())
-        if n_missing_assets:
-            logger.warning(
-                f"fig02b: {n_missing_assets} / {len(sp_all)} {sp_name} Tier_1_Direct leaves have no resolvable mask/contour asset on disk."
+
+        for row_idx, sp_name in enumerate(montage_sp_list):
+            sp_col = SPECIES_PALETTE[sp_name]
+            # Strictly restrict to this species; never substitute another species' leaves
+            sp_all = t1_pool[t1_pool["species_clean"] == sp_name].copy()
+            # Only real on-disk silhouettes are eligible (never render fabricated geometry)
+            sp_all["asset_ok"] = pd.Series(
+                [
+                    (_resolve_asset_path(r.get("mask_path", ""), out_dir) is not None)
+                    or (_resolve_asset_path(r.get("contour_path", ""), out_dir) is not None)
+                    for _, r in sp_all.iterrows()
+                ],
+                index=sp_all.index,
+                dtype=bool,
             )
-        sp_all = sp_all[sp_all["asset_ok"]].copy()
-        if "area_px" in sp_all.columns:
-            sp_all["area_val"] = pd.to_numeric(sp_all["area_px"], errors="coerce").fillna(1.0)
-        elif "blade_area_cm2" in sp_all.columns:
-            sp_all["area_val"] = pd.to_numeric(sp_all["blade_area_cm2"], errors="coerce").fillna(1.0)
-        else:
-            sp_all["area_val"] = 1.0
-        sp_med_area = float(sp_all["area_val"].median()) if len(sp_all) > 0 else 1.0
-        if len(sp_all) >= 8 and sp_med_area > 0:
-            sp_size_ok = sp_all[sp_all["area_val"] >= 0.35 * sp_med_area]
-            if len(sp_size_ok) >= 4:
-                sp_all = sp_size_ok.copy()
+            n_missing_assets = int((~sp_all["asset_ok"]).sum())
+            if n_missing_assets:
+                logger.warning(
+                    f"fig02b: {n_missing_assets} / {len(sp_all)} {sp_name} Tier_1_Direct leaves have no resolvable mask/contour asset on disk."
+                )
+            sp_all = sp_all[sp_all["asset_ok"]].copy()
+            if "area_px" in sp_all.columns:
+                sp_all["area_val"] = pd.to_numeric(sp_all["area_px"], errors="coerce").fillna(1.0)
+            elif "blade_area_cm2" in sp_all.columns:
+                sp_all["area_val"] = pd.to_numeric(sp_all["blade_area_cm2"], errors="coerce").fillna(1.0)
+            else:
+                sp_all["area_val"] = 1.0
+            sp_med_area = float(sp_all["area_val"].median()) if len(sp_all) > 0 else 1.0
+            if len(sp_all) >= 8 and sp_med_area > 0:
+                sp_size_ok = sp_all[sp_all["area_val"] >= 0.35 * sp_med_area]
+                if len(sp_size_ok) >= 4:
+                    sp_all = sp_size_ok.copy()
 
-        is_diss_col = (
-            sp_all["is_dissected"].astype(str).str.lower().isin(["true", "1", "t", "yes"])
-            if "is_dissected" in sp_all.columns
-            else (sp_all["sol_val"] < 0.72)
-        )
-        sp_all["eff_ucs"] = np.where(
-            is_diss_col | (sp_all["sol_val"] < 0.72),
-            np.minimum(
-                1.0,
-                np.maximum(
-                    sp_all["ucs_val"] / np.maximum(sp_all["sol_val"], 0.35),
-                    sp_all["ucs_val"],
+            is_diss_col = (
+                sp_all["is_dissected"].astype(str).str.lower().isin(["true", "1", "t", "yes"])
+                if "is_dissected" in sp_all.columns
+                else (sp_all["sol_val"] < 0.72)
+            )
+            sp_all["eff_ucs"] = np.where(
+                is_diss_col | (sp_all["sol_val"] < 0.72),
+                np.minimum(
+                    1.0,
+                    np.maximum(
+                        sp_all["ucs_val"] / np.maximum(sp_all["sol_val"], 0.35),
+                        sp_all["ucs_val"],
+                    ),
                 ),
-            ),
-            sp_all["ucs_val"],
-        )
-        sp_diss_frac = float((is_diss_col | (sp_all["sol_val"] < 0.65)).mean()) if len(sp_all) > 0 else 0.0
-        sp_med_sol = float(sp_all["sol_val"].median()) if len(sp_all) > 0 else 0.85
-        is_dissected_cohort = bool(sp_med_sol < 0.60 or sp_diss_frac >= 0.60)
+                sp_all["ucs_val"],
+            )
+            sp_diss_frac = float((is_diss_col | (sp_all["sol_val"] < 0.65)).mean()) if len(sp_all) > 0 else 0.0
+            sp_med_sol = float(sp_all["sol_val"].median()) if len(sp_all) > 0 else 0.85
+            is_dissected_cohort = bool(sp_med_sol < 0.60 or sp_diss_frac >= 0.60)
 
-        if is_dissected_cohort:
-            # Dissected / pinnatisect species: prioritize authentic dissected blades over undivided terminal lobes
-            sp_hq = sp_all[
-                (sp_all["eff_ucs"] >= 0.78)
-                & (sp_all["sol_val"] >= 0.22)
-                & (sp_all["sol_val"] < 0.70)
-                & (is_diss_col | (sp_all["sol_val"] < 0.68))
-            ].copy()
-            if len(sp_hq) >= 4:
+            if is_dissected_cohort:
+                # Dissected / pinnatisect species: prioritize authentic dissected blades over undivided terminal lobes
+                sp_hq = sp_all[
+                    (sp_all["eff_ucs"] >= 0.78)
+                    & (sp_all["sol_val"] >= 0.22)
+                    & (sp_all["sol_val"] < 0.70)
+                    & (is_diss_col | (sp_all["sol_val"] < 0.68))
+                ].copy()
+                if len(sp_hq) >= 4:
+                    sp_hq["mask_valid"] = [
+                        _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()
+                    ]
+                    sp_hq = sp_hq[sp_hq["mask_valid"].astype(bool)].sort_values("ar_val").copy()
+            else:
+                sp_hq = pd.DataFrame()
+
+            if len(sp_hq) < 4:
+                sp_hq = sp_all[
+                    (
+                        (sp_all["ucs_val"] >= 0.88)
+                        & (sp_all["sol_val"] >= 0.80)
+                        & (sp_all["sol_val"] < 0.995)
+                    )
+                    | (
+                        is_dissected_cohort
+                        & (sp_all["eff_ucs"] >= 0.80)
+                        & (sp_all["sol_val"] >= 0.18)
+                        & is_diss_col
+                    )
+                ].copy()
                 sp_hq["mask_valid"] = [
                     _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()
                 ]
                 sp_hq = sp_hq[sp_hq["mask_valid"].astype(bool)].sort_values("ar_val").copy()
-        else:
-            sp_hq = pd.DataFrame()
-
-        if len(sp_hq) < 4:
-            sp_hq = sp_all[
-                (
-                    (sp_all["ucs_val"] >= 0.88)
-                    & (sp_all["sol_val"] >= 0.80)
-                    & (sp_all["sol_val"] < 0.995)
-                )
-                | (
-                    is_dissected_cohort
-                    & (sp_all["eff_ucs"] >= 0.80)
-                    & (sp_all["sol_val"] >= 0.18)
-                    & is_diss_col
-                )
-            ].copy()
-            sp_hq["mask_valid"] = [
-                _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()
-            ]
-            sp_hq = sp_hq[sp_hq["mask_valid"].astype(bool)].sort_values("ar_val").copy()
-        if len(sp_hq) < 4:
-            # Fallback within the SAME species only (e.g. small synthetic unit test fixture)
-            sp_all["mask_valid"] = [
-                _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_all.iterrows()
-            ]
-            sp_hq = sp_all[sp_all["mask_valid"].astype(bool)].sort_values("ar_val").copy()
-        if len(sp_hq) == 0:
-            sp_hq = sp_all.sort_values("ar_val").copy()
-
-        sp_target_sol = float(sp_hq["sol_val"].median()) if len(sp_hq) > 0 else sp_med_sol
-        sp_hq_med_area = float(sp_hq["area_val"].median()) if len(sp_hq) > 0 else max(sp_med_area, 1.0)
-        if is_dissected_cohort:
-            sp_hq["rep_score"] = (
-                (1.0 - np.abs(sp_hq["sol_val"] - sp_target_sol))
-                * np.minimum(1.15, sp_hq["area_val"] / max(sp_hq_med_area, 1.0))
-                * sp_hq["eff_ucs"]
-            )
-        else:
-            sp_hq["rep_score"] = sp_hq["qual_weight"] * np.minimum(
-                1.10, np.maximum(0.85, sp_hq["area_val"] / max(sp_hq_med_area, 1.0))
-            )
-
-        n_avail = len(sp_hq)
-        if n_avail > 1:
-            sp_hq["q_rank"] = np.linspace(0.0, 1.0, n_avail)
-        elif n_avail == 1:
-            sp_hq["q_rank"] = [0.5]
-
-        selected_rows: List[Optional[pd.Series]] = []
-        used_keys: Set[Tuple[str, int]] = set()
-        for q_target in target_quantiles:
-            if n_avail == 0:
-                selected_rows.append(None)
-                continue
-            # Primary window: q +/- 0.08
-            win_df = sp_hq[(sp_hq["q_rank"] >= q_target - 0.08 - 1e-9) & (sp_hq["q_rank"] <= q_target + 0.08 + 1e-9)]
-            win_unused = [
-                r for _, r in win_df.iterrows()
-                if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
-            ]
-            if not win_unused:
-                # Secondary wider window within the same species if n_avail is small
-                win_df2 = sp_hq[(sp_hq["q_rank"] >= q_target - 0.18 - 1e-9) & (sp_hq["q_rank"] <= q_target + 0.18 + 1e-9)]
-                win_unused = [
-                    r for _, r in win_df2.iterrows()
-                    if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
+            if len(sp_hq) < 4:
+                # Fallback within the SAME species only (e.g. small synthetic unit test fixture)
+                sp_all["mask_valid"] = [
+                    _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_all.iterrows()
                 ]
-            if not win_unused:
-                win_unused = [
-                    r for _, r in sp_hq.iterrows()
-                    if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
-                ]
-            if not win_unused:
-                win_unused = [sp_hq.iloc[min(n_avail - 1, max(0, int(round(q_target * (n_avail - 1)))))]]
+                sp_hq = sp_all[sp_all["mask_valid"].astype(bool)].sort_values("ar_val").copy()
+            if len(sp_hq) == 0:
+                sp_hq = sp_all.sort_values("ar_val").copy()
 
-            best_row = max(
-                win_unused,
-                key=lambda r: (
-                    int(bool(r.get("is_gold_silver", False))),
-                    int(bool(r.get("is_cal_bool", False))),
-                    float(r.get("rep_score", r.get("qual_weight", 0.0))),
-                    -abs(float(r.get("q_rank", q_target)) - q_target),
-                ),
-            )
-            used_keys.add((str(best_row.get("cat_str", "")), int(best_row.get("leaf_id_int", 1))))
-            selected_rows.append(best_row)
-
-        for col_idx in range(4):
-            ax_t = axes_b[row_idx, col_idx]
-            row = selected_rows[col_idx]
-            if row is None:
-                ax_t.axis("off")
-                continue
-
-            cat_num = str(row.get("catalogNumber", f"V{row_idx * 4 + col_idx + 1}"))
-            leaf_id = int(row.get("leaf_id", 1)) if pd.notna(row.get("leaf_id", 1)) else 1
-            sol_v = float(row.get("sol_val", 0.88))
-            ar_v = float(row.get("ar_val", 2.10))
-            ppm_raw = row.get("pixels_per_mm", np.nan)
-            ppm_val = float(ppm_raw) if pd.notna(ppm_raw) and str(ppm_raw).strip() != "" else np.nan
-
-            mask_img: Optional[np.ndarray] = None
-            m_path_res = _resolve_asset_path(row.get("mask_path", ""), out_dir)
-            if m_path_res is not None and m_path_res.exists():
-                mask_img = cv2.imread(str(m_path_res), cv2.IMREAD_GRAYSCALE)
-                if mask_img is not None and mask_img.ndim == 3:
-                    mask_img = mask_img[:, :, 0]
-                if mask_img is not None and np.count_nonzero(mask_img) > 0:
-                    num_l, lbls, stats_cc, _ = cv2.connectedComponentsWithStats((mask_img > 0).astype(np.uint8), connectivity=8)
-                    if num_l > 1:
-                        best_l = 1 + int(np.argmax(stats_cc[1:, cv2.CC_STAT_AREA]))
-                        mask_img = ((lbls == best_l).astype(np.uint8)) * 255
-
-            if mask_img is not None and np.count_nonzero(mask_img) > 0:
-                ys, xs = np.where(mask_img > 0)
-                pad = 14
-                y0, y1 = max(0, int(ys.min()) - pad), min(mask_img.shape[0], int(ys.max()) + pad + 1)
-                x0, x1 = max(0, int(xs.min()) - pad), min(mask_img.shape[1], int(xs.max()) + pad + 1)
-                crop_m = (mask_img[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
-                # Seal any tiny internal herbivory pinholes (< 2.5% of blade area) for clean silhouette rendering
-                cnts_fill, hier_fill = cv2.findContours(crop_m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-                if cnts_fill and hier_fill is not None:
-                    fg_cnt_px = float(np.count_nonzero(crop_m))
-                    for idx_h, c_h in enumerate(cnts_fill):
-                        if int(hier_fill[0][idx_h][3]) != -1 and float(cv2.contourArea(c_h)) < 0.025 * fg_cnt_px:
-                            cv2.drawContours(crop_m, cnts_fill, idx_h, 255, thickness=cv2.FILLED)
-                _, _, _, p_apex_c, p_base_c = compute_geometric_metrics(crop_m)
-
-                h_c, w_c = crop_m.shape[:2]
-                canvas_rgb = np.full((h_c, w_c, 3), 248, dtype=np.uint8)
-                rgb_hex = sp_col.lstrip("#")
-                r_c, g_c, b_c = int(rgb_hex[0:2], 16), int(rgb_hex[2:4], 16), int(rgb_hex[4:6], 16)
-                canvas_rgb[crop_m > 0] = (r_c, g_c, b_c)
-
-                ax_t.imshow(canvas_rgb)
-                ax_t.plot(
-                    [p_base_c[0], p_apex_c[0]],
-                    [p_base_c[1], p_apex_c[1]],
-                    color="#111111",
-                    linestyle="--",
-                    linewidth=1.3,
+            sp_target_sol = float(sp_hq["sol_val"].median()) if len(sp_hq) > 0 else sp_med_sol
+            sp_hq_med_area = float(sp_hq["area_val"].median()) if len(sp_hq) > 0 else max(sp_med_area, 1.0)
+            if is_dissected_cohort:
+                sp_hq["rep_score"] = (
+                    (1.0 - np.abs(sp_hq["sol_val"] - sp_target_sol))
+                    * np.minimum(1.15, sp_hq["area_val"] / max(sp_hq_med_area, 1.0))
+                    * sp_hq["eff_ucs"]
                 )
-                ax_t.scatter(
-                    [p_base_c[0]],
-                    [p_base_c[1]],
-                    facecolors="none",
-                    edgecolors="#E69F00",
-                    linewidths=1.5,
-                    s=48,
-                    zorder=5,
-                )
-                # Draw 10 mm physical scale bar on calibrated tiles
-                if np.isfinite(ppm_val) and ppm_val > 0:
-                    bar_px = min(w_c * 0.45, 10.0 * ppm_val)
-                    bx0 = w_c * 0.08
-                    by0 = h_c * 0.92
-                    ax_t.plot([bx0, bx0 + bar_px], [by0, by0], color="#111111", linewidth=2.2)
-                    ax_t.text(bx0 + bar_px / 2.0, by0 - max(4.0, h_c * 0.04), "10 mm", fontsize=6.5, fontweight="bold", ha="center", va="bottom", color="#111111")
             else:
-                c_path_res = _resolve_asset_path(row.get("contour_path", ""), out_dir)
-                pts_xy = None
-                if c_path_res is not None and c_path_res.exists():
-                    try:
-                        cdf = pd.read_csv(c_path_res)
-                        if {"x", "y"}.issubset(cdf.columns) and len(cdf) >= 3:
-                            pts_xy = cdf[["x", "y"]].to_numpy(dtype=float)
-                    except Exception:
-                        pts_xy = None
-                if pts_xy is None:
-                    # Never fabricate a silhouette: render an explicit placeholder tile instead
-                    ax_t.set_facecolor("#F8F8F8")
-                    ax_t.text(
-                        0.5, 0.5, "Mask / contour asset\nunavailable on disk",
-                        transform=ax_t.transAxes, ha="center", va="center",
-                        fontsize=7.5, color="#666666", style="italic",
-                    )
-                else:
-                    ax_t.set_facecolor("#F8F8F8")
-                    ax_t.fill(pts_xy[:, 0], pts_xy[:, 1], color=sp_col, alpha=0.82)
-                    p_base_pt = pts_xy[0]
-                    dists = np.hypot(pts_xy[:, 0] - p_base_pt[0], pts_xy[:, 1] - p_base_pt[1])
-                    p_apex_pt = pts_xy[int(np.argmax(dists))]
+                sp_hq["rep_score"] = sp_hq["qual_weight"] * np.minimum(
+                    1.10, np.maximum(0.85, sp_hq["area_val"] / max(sp_hq_med_area, 1.0))
+                )
+
+            n_avail = len(sp_hq)
+            if n_avail > 1:
+                sp_hq["q_rank"] = np.linspace(0.0, 1.0, n_avail)
+            elif n_avail == 1:
+                sp_hq["q_rank"] = [0.5]
+
+            selected_rows: List[Optional[pd.Series]] = []
+            used_keys: Set[Tuple[str, int]] = set()
+
+            type_candidates = (
+                sp_hq[sp_hq["is_type_bool"].astype(bool)]
+                if "is_type_bool" in sp_hq.columns
+                else pd.DataFrame()
+            )
+            if len(type_candidates) == 0 and "is_type_bool" in sp_all.columns:
+                type_candidates = sp_all[sp_all["is_type_bool"].astype(bool)]
+
+            if len(type_candidates) > 0:
+                best_type_row = max(
+                    [r for _, r in type_candidates.iterrows()],
+                    key=lambda r: (
+                        int(bool(r.get("is_cal_bool", False))),
+                        float(r.get("rep_score", r.get("qual_weight", 0.0))),
+                        float(r.get("qual_weight", 0.0)),
+                    ),
+                )
+                used_keys.add((str(best_type_row.get("cat_str", "")), int(best_type_row.get("leaf_id_int", 1))))
+                selected_rows.append(best_type_row)
+                row_quantiles: Tuple[float, ...] = type_anchored_quantiles
+            else:
+                row_quantiles = default_quantiles
+
+            for q_target in row_quantiles:
+                if n_avail == 0:
+                    selected_rows.append(None)
+                    continue
+                # Primary window: q +/- 0.08
+                win_df = sp_hq[(sp_hq["q_rank"] >= q_target - 0.08 - 1e-9) & (sp_hq["q_rank"] <= q_target + 0.08 + 1e-9)]
+                win_unused = [
+                    r for _, r in win_df.iterrows()
+                    if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
+                ]
+                if not win_unused:
+                    # Secondary wider window within the same species if n_avail is small
+                    win_df2 = sp_hq[(sp_hq["q_rank"] >= q_target - 0.18 - 1e-9) & (sp_hq["q_rank"] <= q_target + 0.18 + 1e-9)]
+                    win_unused = [
+                        r for _, r in win_df2.iterrows()
+                        if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
+                    ]
+                if not win_unused:
+                    win_unused = [
+                        r for _, r in sp_hq.iterrows()
+                        if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
+                    ]
+                if not win_unused:
+                    win_unused = [sp_hq.iloc[min(n_avail - 1, max(0, int(round(q_target * (n_avail - 1)))))]]
+
+                best_row = max(
+                    win_unused,
+                    key=lambda r: (
+                        int(bool(r.get("is_gold_silver", False))),
+                        int(bool(r.get("is_cal_bool", False))),
+                        float(r.get("rep_score", r.get("qual_weight", 0.0))),
+                        -abs(float(r.get("q_rank", q_target)) - q_target),
+                    ),
+                )
+                used_keys.add((str(best_row.get("cat_str", "")), int(best_row.get("leaf_id_int", 1))))
+                selected_rows.append(best_row)
+
+            for col_idx in range(4):
+                ax_t = axes_b[row_idx, col_idx]
+                row = selected_rows[col_idx] if col_idx < len(selected_rows) else None
+                if row is None:
+                    ax_t.axis("off")
+                    continue
+
+                cat_num = str(row.get("catalogNumber", f"V{row_idx * 4 + col_idx + 1}"))
+                leaf_id = int(row.get("leaf_id", 1)) if pd.notna(row.get("leaf_id", 1)) else 1
+                sol_v = float(row.get("sol_val", 0.88))
+                ar_v = float(row.get("ar_val", 2.10))
+                ppm_raw = row.get("pixels_per_mm", np.nan)
+                ppm_val = float(ppm_raw) if pd.notna(ppm_raw) and str(ppm_raw).strip() != "" else np.nan
+
+                mask_img: Optional[np.ndarray] = None
+                m_path_res = _resolve_asset_path(row.get("mask_path", ""), out_dir)
+                if m_path_res is not None and m_path_res.exists():
+                    mask_img = cv2.imread(str(m_path_res), cv2.IMREAD_GRAYSCALE)
+                    if mask_img is not None and mask_img.ndim == 3:
+                        mask_img = mask_img[:, :, 0]
+                    if mask_img is not None and np.count_nonzero(mask_img) > 0:
+                        num_l, lbls, stats_cc, _ = cv2.connectedComponentsWithStats((mask_img > 0).astype(np.uint8), connectivity=8)
+                        if num_l > 1:
+                            best_l = 1 + int(np.argmax(stats_cc[1:, cv2.CC_STAT_AREA]))
+                            mask_img = ((lbls == best_l).astype(np.uint8)) * 255
+
+                if mask_img is not None and np.count_nonzero(mask_img) > 0:
+                    ys, xs = np.where(mask_img > 0)
+                    pad = 14
+                    y0, y1 = max(0, int(ys.min()) - pad), min(mask_img.shape[0], int(ys.max()) + pad + 1)
+                    x0, x1 = max(0, int(xs.min()) - pad), min(mask_img.shape[1], int(xs.max()) + pad + 1)
+                    crop_m = (mask_img[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
+                    # Seal any tiny internal herbivory pinholes (< 2.5% of blade area) for clean silhouette rendering
+                    cnts_fill, hier_fill = cv2.findContours(crop_m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+                    if cnts_fill and hier_fill is not None:
+                        fg_cnt_px = float(np.count_nonzero(crop_m))
+                        for idx_h, c_h in enumerate(cnts_fill):
+                            if int(hier_fill[0][idx_h][3]) != -1 and float(cv2.contourArea(c_h)) < 0.025 * fg_cnt_px:
+                                cv2.drawContours(crop_m, cnts_fill, idx_h, 255, thickness=cv2.FILLED)
+                    _, _, _, p_apex_c, p_base_c = compute_geometric_metrics(crop_m)
+
+                    h_c, w_c = crop_m.shape[:2]
+                    canvas_rgb = np.full((h_c, w_c, 3), 248, dtype=np.uint8)
+                    rgb_hex = sp_col.lstrip("#")
+                    r_c, g_c, b_c = int(rgb_hex[0:2], 16), int(rgb_hex[2:4], 16), int(rgb_hex[4:6], 16)
+                    canvas_rgb[crop_m > 0] = (r_c, g_c, b_c)
+
+                    ax_t.imshow(canvas_rgb)
                     ax_t.plot(
-                        [p_base_pt[0], p_apex_pt[0]],
-                        [p_base_pt[1], p_apex_pt[1]],
+                        [p_base_c[0], p_apex_c[0]],
+                        [p_base_c[1], p_apex_c[1]],
                         color="#111111",
                         linestyle="--",
                         linewidth=1.3,
                     )
-                    ax_t.scatter([p_base_pt[0]], [p_base_pt[1]], facecolors="none", edgecolors="#E69F00", linewidths=1.5, s=48, zorder=5)
-                    ax_t.set_aspect("equal", adjustable="datalim")
-                    ax_t.invert_yaxis()
+                    ax_t.scatter(
+                        [p_base_c[0]],
+                        [p_base_c[1]],
+                        facecolors="none",
+                        edgecolors="#E69F00",
+                        linewidths=1.5,
+                        s=48,
+                        zorder=5,
+                    )
+                    # Draw 10 mm physical scale bar on calibrated tiles
+                    if np.isfinite(ppm_val) and ppm_val > 0:
+                        bar_px = min(w_c * 0.45, 10.0 * ppm_val)
+                        bx0 = w_c * 0.08
+                        by0 = h_c * 0.92
+                        ax_t.plot([bx0, bx0 + bar_px], [by0, by0], color="#111111", linewidth=2.2)
+                        ax_t.text(bx0 + bar_px / 2.0, by0 - max(4.0, h_c * 0.04), "10 mm", fontsize=6.5, fontweight="bold", ha="center", va="bottom", color="#111111")
+                else:
+                    c_path_res = _resolve_asset_path(row.get("contour_path", ""), out_dir)
+                    pts_xy = None
+                    if c_path_res is not None and c_path_res.exists():
+                        try:
+                            cdf = pd.read_csv(c_path_res)
+                            if {"x", "y"}.issubset(cdf.columns) and len(cdf) >= 3:
+                                pts_xy = cdf[["x", "y"]].to_numpy(dtype=float)
+                        except Exception:
+                            pts_xy = None
+                    if pts_xy is None:
+                        # Never fabricate a silhouette: render an explicit placeholder tile instead
+                        ax_t.set_facecolor("#F8F8F8")
+                        ax_t.text(
+                            0.5, 0.5, "Mask / contour asset\nunavailable on disk",
+                            transform=ax_t.transAxes, ha="center", va="center",
+                            fontsize=7.5, color="#666666", style="italic",
+                        )
+                    else:
+                        ax_t.set_facecolor("#F8F8F8")
+                        ax_t.fill(pts_xy[:, 0], pts_xy[:, 1], color=sp_col, alpha=0.82)
+                        p_base_pt = pts_xy[0]
+                        dists = np.hypot(pts_xy[:, 0] - p_base_pt[0], pts_xy[:, 1] - p_base_pt[1])
+                        p_apex_pt = pts_xy[int(np.argmax(dists))]
+                        ax_t.plot(
+                            [p_base_pt[0], p_apex_pt[0]],
+                            [p_base_pt[1], p_apex_pt[1]],
+                            color="#111111",
+                            linestyle="--",
+                            linewidth=1.3,
+                        )
+                        ax_t.scatter([p_base_pt[0]], [p_base_pt[1]], facecolors="none", edgecolors="#E69F00", linewidths=1.5, s=48, zorder=5)
+                        ax_t.set_aspect("equal", adjustable="datalim")
+                        ax_t.invert_yaxis()
 
-            type_tag = " [TYPE]" if bool(row.get("is_type_bool", False)) else ""
-            col_hdr = f"{pct_labels[col_idx]}\n" if row_idx == 0 else ""
-            ax_t.set_title(f"{col_hdr}{cat_num}{type_tag} (L{leaf_id}) | AR={ar_v:.2f}, Sol={sol_v:.2f}", fontsize=7.6, fontweight="bold")
-            if col_idx == 0:
-                ax_t.set_ylabel(SPECIES_ITALIC[sp_name], fontsize=9.8, fontweight="bold", color=sp_col, labelpad=6)
-            ax_t.set_xticks([])
-            ax_t.set_yticks([])
+                type_tag = " [TYPE]" if bool(row.get("is_type_bool", False)) else ""
+                col_hdr = f"{pct_labels[col_idx]}\n" if row_idx == 0 else ""
+                ax_t.set_title(f"{col_hdr}{cat_num}{type_tag} (L{leaf_id}) | AR={ar_v:.2f}, Sol={sol_v:.2f}", fontsize=7.6, fontweight="bold")
+                if col_idx == 0:
+                    ax_t.set_ylabel(SPECIES_ITALIC[sp_name], fontsize=9.8, fontweight="bold", color=sp_col, labelpad=6)
+                ax_t.set_xticks([])
+                ax_t.set_yticks([])
 
-    fig_b.suptitle(
-        r"Phase 02 — Taxon-Stratified Basal Leaf Silhouettes (20th–80th %ile Aspect Ratio), Midrib Axes & Petiole Anchors",
-        fontsize=11.5,
-        fontweight="bold",
-        y=0.99,
+        fig_b.suptitle(
+            f"Phase 02 — Taxon-Stratified Basal Leaf Silhouettes (20th–80th %ile Aspect Ratio), Midrib Axes & Petiole Anchors{title_suffix}",
+            fontsize=11.5,
+            fontweight="bold",
+            y=0.99,
+        )
+        fig_b.tight_layout(rect=[0.01, 0, 1, 0.965])
+        page_pdf, page_png = _save_fig_fn(fig_b, out_dir / out_stem, dpi=300)
+        plt.close(fig_b)
+        return page_pdf, page_png
+
+    fg_montage_sp = present_sp[:8]
+    fig02b_pdf, fig02b_png = _render_montage_page(
+        fg_montage_sp, "fig02b_silhouette_montage"
     )
-    fig_b.tight_layout(rect=[0.01, 0, 1, 0.965])
-    fig02b_pdf, fig02b_png = _save_fig_fn(
-        fig_b, out_dir / "fig02b_silhouette_montage", dpi=300
-    )
-    plt.close(fig_b)
     saved_paths["fig02b_pdf"] = fig02b_pdf
     saved_paths["fig02b_png"] = fig02b_png
+
+    if len(present_sp) > 8:
+        supp_montage_sp = present_sp[8:]
+        supp_pdf, supp_png = _render_montage_page(
+            supp_montage_sp,
+            "fig02b_silhouette_montage_supplement",
+            title_suffix=" (Supplementary Taxa)",
+        )
+        saved_paths["fig02b_supplement_pdf"] = supp_pdf
+        saved_paths["fig02b_supplement_png"] = supp_png
 
     logger.info(f"Step 02 publication figures exported to: {out_dir}")
     return saved_paths
