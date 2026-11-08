@@ -80,11 +80,39 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
   top_env_1 <- top_sel$top_env_1
   top_env_2 <- top_sel$top_env_2
   top_edaph_1 <- top_sel$top_edaph_1
+
+  .count_unique_finite <- function(vec) {
+    vals <- suppressWarnings(as.numeric(vec))
+    length(unique(round(vals[is.finite(vals)], 4)))
+  }
+  cont_edaph_cands <- unique(intersect(c(
+    top_edaph_1,
+    "ssurgo_ph", "ssurgo_om_pct", "polaris_bd_30m", "fine_soil_ph",
+    "fine_soil_sand", "awc_0_15cm", "elev_3dep_m",
+    if (!is.null(imp_df) && "Predictor" %in% names(imp_df)) {
+      ed_ord <- as.character(imp_df$Predictor[order(as.numeric(imp_df$MeanDecreaseAccuracy), decreasing = TRUE)])
+      ed_ord[grepl("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bdricm|resdept_r|cfvo|awc|alr_|sgmc_|elev_)", ed_ord)]
+    } else character(0)
+  ), names(df)))
+  if (length(cont_edaph_cands) > 0L) {
+    u_cnts <- vapply(cont_edaph_cands, function(cn) .count_unique_finite(df[[cn]]), integer(1))
+    if (.count_unique_finite(df[[top_edaph_1]]) < 12L && any(u_cnts >= 12L)) {
+      top_edaph_1 <- cont_edaph_cands[which(u_cnts >= 12L)[1L]]
+    }
+  }
+  top_edaph_2 <- if (length(cont_edaph_cands) >= 2L) {
+    rem_ed <- setdiff(cont_edaph_cands, top_edaph_1)
+    rem_cnts <- vapply(rem_ed, function(cn) .count_unique_finite(df[[cn]]), integer(1))
+    if (any(rem_cnts >= 12L)) rem_ed[which(rem_cnts >= 12L)[1L]] else rem_ed[1L]
+  } else {
+    top_edaph_1
+  }
+
   top_env_lbls <- format_step06_predictor_labels(c(top_env_1, top_env_2))
   top_edaph_lbl <- format_step06_predictor_labels(top_edaph_1)[1]
 
   render_plate <- function() {
-    graphics::par(mfrow = c(2, 2), mar = c(4.5, 11.0, 3.0, 1.2), oma = c(0.5, 0.5, 1.8, 0.5))
+    graphics::par(mfrow = c(2, 2), mar = c(4.5, 16.4, 3.0, 1.2), oma = c(0.5, 0.5, 1.8, 0.5))
 
     # Panel A: Spatial RF Predictor Importance Ranking
     pred_raw <- c(top_env_2, top_env_1)
@@ -102,7 +130,7 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
     )
     graphics::barplot(
       imp_vals, names.arg = pred_lbls, horiz = TRUE, las = 1,
-      col = bar_cols, border = "white", cex.names = 0.70,
+      col = bar_cols, border = "white", cex.names = 0.72,
       xlim = c(0, max(imp_vals, 0.05, na.rm = TRUE) * 1.18),
       xlab = "Permutation Importance (Mean Decrease Accuracy)",
       main = "A. Spatial RF Predictor Importance (10m-30m Stack)", font.main = 2
@@ -123,6 +151,8 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
     if (sum(ok_xy) > 0L) {
       graphics::plot(
         xv[ok_xy], yv[ok_xy], type = "n",
+        xlim = grDevices::extendrange(xv[ok_xy], f = 0.08),
+        ylim = grDevices::extendrange(yv[ok_xy], f = 0.08),
         xlab = top_env_lbls[1], ylab = top_env_lbls[2],
         main = "B. Top Spatial RF Niche Predictors (85% Confidence Ellipses)", font.main = 2
       )
@@ -234,7 +264,7 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
           border = c_pal, outpch = NA,
           xlab = top_edaph_lbl, ylab = "",
           main = sprintf("C. %s (%s)", top_edaph_lbl, p_str),
-          font.axis = 3, cex.axis = min(0.76, max(0.48, 8.5 / length(tx_ord_c))), font.main = 2
+          font.axis = 3, cex.axis = min(0.76, max(0.48, 8.5 / length(tx_ord_c))), font.main = 2, cex.main = 0.90
         )
         graphics::grid(nx = NULL, ny = NA, col = "grey88")
         for (s_i in seq_along(tx_ord_c)) {
@@ -257,7 +287,7 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
           border = dyn_pal[present_tx], outpch = NA,
           xlab = "", ylab = top_edaph_lbl,
           main = sprintf("C. %s (%s)", top_edaph_lbl, p_str),
-          font.axis = 3, cex.axis = 0.80, font.main = 2
+          font.axis = 3, cex.axis = 0.80, font.main = 2, cex.main = 0.90
         )
         graphics::grid(nx = NA, ny = NULL, col = "grey88")
         for (s_i in seq_along(present_tx)) {
@@ -433,6 +463,22 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
   top_env_2 <- top_sel$top_env_2
   top_edaph_1 <- top_sel$top_edaph_1
 
+  .count_unique_finite_srf <- function(vec) {
+    vals <- suppressWarnings(as.numeric(vec))
+    length(unique(round(vals[is.finite(vals)], 4)))
+  }
+  cont_edaph_srf <- unique(intersect(c(
+    top_edaph_1,
+    "ssurgo_ph", "ssurgo_om_pct", "polaris_bd_30m", "fine_soil_ph",
+    "fine_soil_sand", "awc_0_15cm", "elev_3dep_m"
+  ), names(plot_df)))
+  if (length(cont_edaph_srf) > 0L) {
+    u_cnts_srf <- vapply(cont_edaph_srf, function(cn) .count_unique_finite_srf(plot_df[[cn]]), integer(1))
+    if (.count_unique_finite_srf(plot_df[[top_edaph_1]]) < 12L && any(u_cnts_srf >= 12L)) {
+      top_edaph_1 <- cont_edaph_srf[which(u_cnts_srf >= 12L)[1L]]
+    }
+  }
+
   env_axis_lbls <- format_predictor_labels(c(top_env_1, top_env_2))
   if (exists("format_step06_predictor_labels", mode = "function")) {
     env_axis_lbls <- format_step06_predictor_labels(c(top_env_1, top_env_2))
@@ -447,12 +493,40 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
   plot_df$top_edaph_1_val <- suppressWarnings(as.numeric(plot_df[[top_edaph_1]]))
 
   pt_alpha <- if (nrow(plot_df) > 1000) 0.45 else 0.78
-  p2 <- ggplot2::ggplot(plot_df,
-                        ggplot2::aes(x = top_env_1_val, y = top_env_2_val, color = plot_group, shape = plot_group)) +
+  pca_df <- plot_df
+  pca_df$taxon <- as.character(pca_df$plot_group)
+  if (length(unique(pca_df$taxon)) > 6L) {
+    tier_b <- if (exists("resolve_taxon_display_tier", mode = "function")) {
+      tryCatch(resolve_taxon_display_tier(pca_df, group_vec = pca_df$taxon),
+               error = function(e) tryCatch(resolve_taxon_display_tier(pca_df, pca_df$taxon), error = function(e2) NULL))
+    } else NULL
+    fg_b <- if (is.list(tier_b) && !is.null(tier_b$foreground) && length(intersect(tier_b$foreground, active_tx)) > 0L) {
+      intersect(as.character(tier_b$foreground), active_tx)
+    } else if (is.list(tier_b) && !is.null(tier_b$fg_taxa) && length(intersect(tier_b$fg_taxa, active_tx)) > 0L) {
+      intersect(as.character(tier_b$fg_taxa), active_tx)
+    } else {
+      dubia_b <- active_tx[grepl("dubia", active_tx, ignore.case = TRUE)]
+      oth_b <- setdiff(active_tx, dubia_b)
+      cnt_b <- vapply(oth_b, function(tx) sum(pca_df$taxon == tx, na.rm = TRUE), integer(1))
+      c(dubia_b, utils::head(oth_b[order(-cnt_b, oth_b)], max(0L, 6L - length(dubia_b))))
+    }
+    pca_df$display_group <- ifelse(pca_df$taxon %in% fg_b, pca_df$taxon, "Other Packera")
+    b_lvls <- c(fg_b, "Other Packera")
+    pca_df$display_group <- factor(pca_df$display_group, levels = b_lvls)
+    pal_b <- c(resolve_dynamic_group_palette(fg_b)[fg_b], "Other Packera" = "#B0B0B0")
+    shp_b <- c(stats::setNames(rep_len(c(21, 24, 22, 23, 1, 2, 5, 0), length(fg_b)), fg_b), "Other Packera" = 1)
+  } else {
+    pca_df$display_group <- factor(pca_df$taxon, levels = active_tx)
+    pal_b <- dyn_pal
+    shp_b <- dyn_shapes
+  }
+  p2 <- ggplot2::ggplot(pca_df,
+                        ggplot2::aes(x = top_env_1_val, y = top_env_2_val, color = display_group, shape = display_group)) +
     ggplot2::stat_ellipse(level = 0.85, linewidth = 1.0) +
     ggplot2::geom_point(fill = NA, stroke = 0.75, alpha = pt_alpha, size = 1.55) +
-    ggplot2::scale_shape_manual(values = dyn_shapes) +
-    ggplot2::scale_color_manual(values = dyn_pal) +
+    ggplot2::scale_shape_manual(values = shp_b) +
+    ggplot2::scale_color_manual(values = pal_b) +
+    ggplot2::guides(color = ggplot2::guide_legend(ncol = 2), fill = ggplot2::guide_legend(ncol = 2), shape = ggplot2::guide_legend(ncol = 2)) +
     thm + ggplot2::labs(
       title = "B. Top Spatial RF Ecological Niche Envelopes (85% Confidence Ellipses)",
       subtitle = sprintf("Top Non-MEM Predictors: %s vs. %s", env_axis_lbls[1], env_axis_lbls[2]),
@@ -468,28 +542,67 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
 
   # Panel C: Top-Importance Edaphic/Lithic Predictor Diagnostic Boxplots + Kruskal-Wallis p-value
   kw_edaph <- tryCatch(stats::kruskal.test(top_edaph_1_val ~ factor(plot_group), data = plot_df)$p.value, error = function(e) NA_real_)
-  p3 <- ggplot2::ggplot(plot_df,
-                        ggplot2::aes(x = plot_group, y = top_edaph_1_val, fill = plot_group, color = plot_group)) +
+  ed_df <- plot_df[is.finite(plot_df$top_edaph_1_val), , drop = FALSE]
+  if (nrow(ed_df) == 0L) ed_df <- plot_df
+  ed_tx <- unique(as.character(ed_df$plot_group))
+  if (length(ed_tx) > 10L) {
+    dub_c <- ed_tx[grepl("dubia", ed_tx, ignore.case = TRUE)]
+    oth_c <- setdiff(ed_tx, dub_c)
+    cnt_c <- vapply(oth_c, function(tx) sum(ed_df$plot_group == tx, na.rm = TRUE), integer(1))
+    keep_c10 <- c(dub_c, utils::head(oth_c[order(-cnt_c, oth_c)], max(0L, 10L - length(dub_c))))
+    ed_df$c_group <- ifelse(ed_df$plot_group %in% keep_c10, as.character(ed_df$plot_group), "Other Packera")
+  } else {
+    ed_df$c_group <- as.character(ed_df$plot_group)
+  }
+  c_meds <- tryCatch(
+    stats::aggregate(top_edaph_1_val ~ c_group, data = ed_df, FUN = function(x) stats::median(x, na.rm = TRUE)),
+    error = function(e) data.frame(c_group = unique(ed_df$c_group), top_edaph_1_val = 0)
+  )
+  c_lvls <- as.character(c_meds$c_group[order(c_meds$top_edaph_1_val, as.character(c_meds$c_group))])
+  ed_df$c_group <- factor(ed_df$c_group, levels = c_lvls)
+  pal_c <- stats::setNames(
+    ifelse(c_lvls == "Other Packera", "#B0B0B0", dyn_pal[c_lvls]),
+    c_lvls
+  )
+  pal_c[is.na(pal_c)] <- "#B0B0B0"
+  p3 <- ggplot2::ggplot(ed_df,
+                        ggplot2::aes(x = c_group, y = top_edaph_1_val, fill = c_group, color = c_group)) +
     ggplot2::geom_boxplot(alpha = 0.30, outlier.shape = 1, outlier.size = 1.2, width = 0.58) +
-    ggplot2::scale_fill_manual(values = dyn_pal) +
-    ggplot2::scale_color_manual(values = dyn_pal) +
-    thm + ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 18, hjust = 1, face = if (is_subcluster_mode) "bold" else "italic"), legend.position = "none") +
+    ggplot2::coord_flip() +
+    ggplot2::scale_fill_manual(values = pal_c) +
+    ggplot2::scale_color_manual(values = pal_c) +
+    thm + ggplot2::theme(axis.text.y = ggplot2::element_text(face = if (is_subcluster_mode) "bold" else "italic"), legend.position = "none") +
     ggplot2::labs(
       title = sprintf("C. %s", edaph_lbl),
       subtitle = if (!is.na(kw_edaph) && is.finite(kw_edaph)) sprintf("Kruskal-Wallis p = %.2e across active groups", kw_edaph) else sprintf("Top-ranked edaphic/lithic predictor (%s)", top_edaph_1),
       x = NULL, y = edaph_lbl
     )
 
-  # Panel D: Warren's Niche Identity Permutations & Empirical Schoener's D
+  # Panel D: Warren's Niche Identity Permutations & Empirical Schoener's D (Capped at Top 6 Pairs)
   if (!is.null(niche_res$permutations) && is.data.frame(niche_res$permutations) && nrow(niche_res$permutations) > 0L) {
-    p4 <- ggplot2::ggplot(niche_res$permutations, ggplot2::aes(x = D_null, fill = Pair)) +
+    perm_df <- niche_res$permutations
+    obs_df <- if (!is.null(niche_res$overlaps) && is.data.frame(niche_res$overlaps)) niche_res$overlaps else niche_res$summary
+    if (!("pair" %in% names(perm_df)) && "Pair" %in% names(perm_df)) perm_df$pair <- as.character(perm_df$Pair)
+    if (!("Pair" %in% names(perm_df)) && "pair" %in% names(perm_df)) perm_df$Pair <- as.character(perm_df$pair)
+    if (is.data.frame(obs_df)) {
+      if (!("pair" %in% names(obs_df)) && "Pair" %in% names(obs_df)) obs_df$pair <- as.character(obs_df$Pair)
+      if (!("Pair" %in% names(obs_df)) && "pair" %in% names(obs_df)) obs_df$Pair <- as.character(obs_df$pair)
+    }
+    keep_pairs <- head(unique(perm_df$pair[order(!grepl("dubia", perm_df$pair, ignore.case = TRUE), seq_len(nrow(perm_df)))]), 6L)
+    perm_df <- perm_df[perm_df$pair %in% keep_pairs, , drop = FALSE]
+    if (is.data.frame(obs_df)) {
+      obs_df <- obs_df[obs_df$pair %in% keep_pairs, , drop = FALSE]
+    }
+    p4 <- ggplot2::ggplot(perm_df, ggplot2::aes(x = D_null, fill = Pair)) +
       ggplot2::geom_histogram(bins = 20, alpha = 0.65, position = "identity", color = "white", linewidth = 0.2) +
-      ggplot2::geom_vline(data = niche_res$summary, ggplot2::aes(xintercept = Warren_D, color = Pair),
+      ggplot2::geom_vline(data = obs_df, ggplot2::aes(xintercept = Warren_D, color = Pair),
                           linetype = "dashed", linewidth = 0.95, show.legend = FALSE) +
       ggplot2::coord_cartesian(xlim = c(0, 1)) +
-      thm + ggplot2::labs(
+      ggplot2::guides(fill = ggplot2::guide_legend(ncol = 2), color = ggplot2::guide_legend(ncol = 2)) +
+      thm + ggplot2::theme(legend.text = ggplot2::element_text(size = 6.5)) +
+      ggplot2::labs(
         title = "D. Pairwise Niche Equivalency (Schoener's D vs. Null Permutations)",
-        subtitle = "Dashed vertical lines = Empirical Schoener's D; Histogram = Null niche identity distribution",
+        subtitle = "Dashed vertical lines = Empirical Schoener's D; Histogram = Null niche identity distribution (Top 6 Pairs)",
         x = "Schoener's D Niche Overlap (0 = Disjoint, 1 = Identical)", y = "Permutation Count", fill = "Taxon Pair"
       )
   } else {
@@ -1373,10 +1486,11 @@ fit_and_project_maxent_sdm_maps <- function(
     render_sdm_plate <- function() {
       graphics::layout(matrix(c(1, 1, 2, 2, 3, 3, 4, 5), nrow = 2, ncol = 4, byrow = TRUE))
       on.exit(graphics::layout(1), add = TRUE)
-      graphics::par(mar = c(4.4, 4.6, 3.0, 1.5), oma = c(0.5, 0.5, 1.8, 0.5))
+      graphics::par(mar = c(3.8, 4.0, 3.2, 1.2), oma = c(0.5, 0.5, 1.8, 0.5))
       suit_ramp <- grDevices::colorRampPalette(c("#F7FCF0", "#E0F3DB", "#A8DDB5", "#4EB3D3", "#0868AC", "#084081"))(100)
 
       .plot_suit_rast <- function(r_layer, panel_title, sub_txt) {
+        graphics::par(mar = c(3.8, 4.0, 3.2, 1.2))
         ex_r <- terra::ext(r_layer)
         xs <- terra::xFromCol(r_layer, seq_len(terra::ncol(r_layer)))
         ys <- rev(terra::yFromRow(r_layer, seq_len(terra::nrow(r_layer))))
@@ -1385,9 +1499,10 @@ fit_and_project_maxent_sdm_maps <- function(
         graphics::image(
           x = xs, y = ys, z = mat_plot, zlim = c(0, 1), col = suit_ramp,
           xlab = "Decimal Longitude (deg E)", ylab = "Decimal Latitude (deg N)",
-          main = panel_title, font.main = 2
+          main = ""
         )
-        graphics::mtext(sub_txt, side = 3, line = 0.25, cex = 0.72, col = "grey25")
+        graphics::title(main = panel_title, line = 1.55, cex.main = 0.94, font.main = 2)
+        graphics::mtext(sub_txt, side = 3, line = 0.30, cex = 0.68, col = "grey25")
         if (!is.null(epa_vect)) {
           tryCatch(terra::lines(epa_vect, col = grDevices::adjustcolor("#555555", alpha.f = 0.35), lwd = 0.55), error = function(e) NULL)
         }
@@ -1404,6 +1519,23 @@ fit_and_project_maxent_sdm_maps <- function(
                             add = TRUE, col = c("#E69F00", "#D55E00"), lwd = c(0.9, 1.2), drawlabels = TRUE),
           error = function(e) NULL
         )
+        usr <- graphics::par("usr")
+        dx <- usr[2] - usr[1]
+        dy <- usr[4] - usr[3]
+        bx0 <- usr[1] + 0.04 * dx
+        bx1 <- usr[1] + 0.30 * dx
+        by0 <- usr[3] + 0.05 * dy
+        by1 <- usr[3] + 0.09 * dy
+        graphics::rect(bx0 - 0.015 * dx, by0 - 0.03 * dy, bx1 + 0.015 * dx, by1 + 0.055 * dy,
+                       col = grDevices::adjustcolor("white", alpha.f = 0.84), border = "grey60", lwd = 0.6)
+        n_sb <- length(suit_ramp)
+        sb_xs <- seq(bx0, bx1, length.out = n_sb + 1L)
+        for (si in seq_len(n_sb)) {
+          graphics::rect(sb_xs[si], by0, sb_xs[si + 1L], by1, col = suit_ramp[si], border = NA)
+        }
+        graphics::rect(bx0, by0, bx1, by1, col = NA, border = "grey30", lwd = 0.5)
+        graphics::text(c(bx0, 0.5 * (bx0 + bx1), bx1), rep(by1 + 0.024 * dy, 3L),
+                       labels = c("0.0", "Suitability", "1.0"), cex = 0.56, col = "#222222")
         graphics::box(col = "grey40")
       }
 
@@ -1464,6 +1596,7 @@ fit_and_project_maxent_sdm_maps <- function(
       )
 
       # Panel C: Marginal MaxEnt (cloglog) Response Curves for Top 3 Climatic & Edaphic Predictors
+      graphics::par(mar = c(4.2, 4.4, 3.0, 1.2))
       graphics::plot(
         c(0, 1), c(0, 1), type = "n",
         xlab = "Normalized Predictor Gradient (5th to 95th Percentile, Others at Median)",
@@ -1471,7 +1604,10 @@ fit_and_project_maxent_sdm_maps <- function(
         main = "C. Marginal MaxEnt (cloglog) Ecological Response Curves", font.main = 2
       )
       graphics::grid(col = "grey88")
-      med_row <- as.data.frame(lapply(focal_artifacts$X_comb, function(col_x) stats::median(as.numeric(col_x), na.rm = TRUE)), check.names = FALSE)
+      pres_mat <- focal_artifacts$X_comb[focal_artifacts$p_vec == 1L, , drop = FALSE]
+      if (nrow(pres_mat) == 0L) pres_mat <- focal_artifacts$X_comb
+      med_row <- apply(pres_mat, 2, stats::median, na.rm = TRUE)
+      med_row <- as.data.frame(as.list(med_row), check.names = FALSE)
       resp_cols <- c("#0072B2", "#009E73", "#D55E00")
       resp_ltys <- c(1L, 2L, 4L)
       leg_c <- character(length(resp_vars))
@@ -1581,7 +1717,7 @@ fit_and_project_maxent_sdm_maps <- function(
         fig_h_m <- max(7.0, 3.1 * n_rows_m + 0.8)
 
         render_multispecies_sdm_grid <- function() {
-          graphics::par(mfrow = c(n_rows_m, n_cols_m), mar = c(3.2, 3.4, 2.6, 1.0), oma = c(0.5, 0.5, 2.0, 0.5))
+          graphics::par(mfrow = c(n_rows_m, n_cols_m), mar = c(3.2, 3.8, 2.9, 0.8), mgp = c(2.0, 0.6, 0), oma = c(0.5, 0.5, 2.0, 0.5))
           suit_ramp <- grDevices::colorRampPalette(c("#F7FCF0", "#E0F3DB", "#A8DDB5", "#4EB3D3", "#0868AC", "#084081"))(100)
           for (art_i in valid_multi_arts) {
             r_layer <- art_i$rast_mx
@@ -1597,11 +1733,12 @@ fit_and_project_maxent_sdm_maps <- function(
             graphics::image(
               x = xs, y = ys, z = mat_plot, zlim = c(0, 1), col = suit_ramp,
               xlab = "Lon (deg E)", ylab = "Lat (deg N)",
-              main = sprintf("%s (n = %d)", art_i$taxon, n_pr_v), font.main = 4, cex.main = 0.95
+              main = ""
             )
+            graphics::title(main = sprintf("%s (n = %d)", art_i$taxon, n_pr_v), line = 1.45, cex.main = 0.88, font.main = 4)
             graphics::mtext(
               sprintf("MaxEnt AUC = %.3f | CBI = %.2f", auc_v, cbi_v),
-              side = 3, line = 0.15, cex = 0.65, col = "grey25"
+              side = 3, line = 0.25, cex = 0.64, col = "grey25"
             )
             if (requireNamespace("maps", quietly = TRUE)) {
               tryCatch(

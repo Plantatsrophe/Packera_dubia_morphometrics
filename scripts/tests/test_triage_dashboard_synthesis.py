@@ -739,6 +739,12 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"Step 06/07 type rules test failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("STEP06_07_TYPE_RULES_OK", res.stdout)
 
+    def test_synthesis_plate_stream_independence_and_fill_reversal(self):
+        """Ensure render_step07_synthesis_plate_pdf avoids pct_v <- pct_m duplication and uses position_fill(reverse = TRUE)."""
+        plates_src = (PROJECT_ROOT / "scripts" / "morphometrics" / "pub_synthesis_plates.R").read_text(encoding="utf-8")
+        self.assertNotIn("pct_v <- pct_m", plates_src)
+        self.assertIn("position_fill(reverse = TRUE)", plates_src)
+
 
 if __name__ == "__main__":
     unittest.main()

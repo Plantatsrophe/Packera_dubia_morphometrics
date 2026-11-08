@@ -1464,6 +1464,22 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"Step 04 type control R test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("STEP04_TYPE_CONTROL_OK", proc.stdout)
 
+    def test_step03_step04_eastern_na_figure_refinements(self):
+        """Verify Step 03 and Step 04 Eastern NA baseline figure refinements in pub_figures_utils.R."""
+        pub_fig_path = PROJECT_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R"
+        content = pub_fig_path.read_text(encoding="utf-8")
+
+        # 1. Underscore/space normalization and white halo rectangles behind centroid labels in plot_2d_ordination_scatter
+        self.assertIn("norm_lbl_key <- function(v)", content)
+        self.assertIn('col = grDevices::adjustcolor("white", alpha.f = 0.84), border = NA', content)
+
+        # 2. Removal of unlabeled bimodal silhouette split in fig03
+        self.assertNotIn("if (is_bimodal_sp)", content)
+
+        # 3. Multi-column non-horizontal legend in draw_structure_posterior_barplot
+        self.assertIn("ncol = min(5L, max(2L, ceiling(length(u_tx) / 3L)))", content)
+        self.assertIn("horiz = FALSE", content)
+
 
 if __name__ == "__main__":
     unittest.main()

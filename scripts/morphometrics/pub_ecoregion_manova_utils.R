@@ -1117,7 +1117,7 @@ draw_gmm_ecoregion_contingency_heatmap <- function(rg_vec, cl_v, active_ecos, ar
       graphics::text(j, y_pos, labels = lbl_ij, col = txt_col, cex = cell_cex, font = if (pct_ij >= 25) 2 else 1)
     }
   }
-  graphics::axis(1, at = seq_len(nc), labels = paste0("Morphotype_K", u_cl), tick = FALSE, font = 2, cex.axis = 0.78)
+  graphics::axis(1, at = seq_len(nc), labels = paste0("K", colnames(tab_mat)), tick = FALSE, font = 2, cex.axis = 0.72, gap.axis = 0.05)
   short_e <- vapply(.short_epa_ecoregion_label(ecos_use), function(s) if (nchar(s) > 26L) paste0(substr(s, 1, 24), "..") else s, character(1))
   graphics::axis(2, at = rev(seq_len(nr)), labels = short_e, las = 1, tick = FALSE, cex.axis = if (nr > 8L) 0.66 else 0.75)
   graphics::box(col = "grey75")
@@ -1378,10 +1378,15 @@ render_fig04c_supervised_ecoregion_cda <- function(
         grp_ord <- grp_ord[keep_s]
       }
       nb <- nrow(post_ord)
+      grle <- rle(grp_ord)
+      brks <- cumsum(grle$lengths)
+      mids <- brks - grle$lengths / 2.0
+      use_las2_d <- length(mids) > 4L
+      if (use_las2_d) graphics::par(mar = c(5.8, 4.6, 3.0, 1.2))
       k_cols <- ifelse(colnames(post_ord) %in% names(eco_cols), eco_cols[colnames(post_ord)], "#7F7F7F")
       graphics::plot(
         c(0, nb), c(0, 1.10), type = "n", xaxs = "i", yaxs = "i", xaxt = "n",
-        xlab = "Herbarium Vouchers Grouped by US EPA Level III Ecoregion",
+        xlab = if (use_las2_d) "" else "Herbarium Vouchers Grouped by US EPA Level III Ecoregion",
         ylab = "Posterior Probability P(Ecoregion | x)",
         main = "D. STRUCTURE-Style Supervised Ecoregion Posterior Probabilities",
         font.main = 2
@@ -1394,9 +1399,6 @@ render_fig04c_supervised_ecoregion_cda <- function(
         graphics::rect(xl, cum_l, xr, cum_h, col = k_cols[ki], border = NA)
         cum_l <- cum_h
       }
-      grle <- rle(grp_ord)
-      brks <- cumsum(grle$lengths)
-      mids <- brks - grle$lengths / 2.0
       if (length(brks) > 1L) {
         graphics::segments(brks[-length(brks)], 0, brks[-length(brks)], 1.0, col = "#111111", lwd = 1.6)
       }
@@ -1406,7 +1408,7 @@ render_fig04c_supervised_ecoregion_cda <- function(
         s <- .short_epa_ecoregion_label(v)
         if (nchar(s) > 14L) paste0(substr(s, 1, 12), "..") else s
       }, character(1))
-      graphics::axis(1, at = mids, labels = ax_lbls, tick = FALSE, las = if (length(mids) > 4L) 2 else 1, cex.axis = 0.66, line = -0.3)
+      graphics::axis(1, at = mids, labels = ax_lbls, tick = FALSE, las = if (use_las2_d) 2 else 1, cex.axis = 0.66, line = -0.3)
       leg_k <- seq_len(min(6L, ncol(post_ord)))
       graphics::legend(
         "top", horiz = TRUE,

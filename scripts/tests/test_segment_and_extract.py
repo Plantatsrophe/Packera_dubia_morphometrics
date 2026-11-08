@@ -2250,6 +2250,77 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         self.assertEqual(total_covered, 6)
         self.assertGreaterEqual(len(fake_sess.batch_sizes_seen), 3)
 
+    def test_step02_figures_eastern_na_refinements(self) -> None:
+        """
+        Verify Phase 2 figure refinements in step02_figures.py:
+        1. orientation="horizontal" is used for Matplotlib 3.11 boxplot compatibility.
+        2. bbox_to_anchor=(0.5, 1.005) places the Panel B2 legend above the horizontal bars.
+        3. "20th %ile (Compact)" is used for non-Type Column 0 headers.
+        4. Small-N species (n=3 leaves) do not duplicate leaf IDs across a montage row.
+        """
+        from pathlib import Path
+        from unittest.mock import patch
+        import scripts.vision.step02_figures as s02_figs
+
+        src_text = Path(s02_figs.__file__).read_text(encoding="utf-8")
+        self.assertIn('orientation="horizontal"', src_text)
+        self.assertIn("bbox_to_anchor=(0.5, 1.005)", src_text)
+        self.assertIn('"20th %ile (Compact)"', src_text)
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            tmp_dir = Path(tmp_d)
+            mask_paths = []
+            for idx_l in (1, 2, 3):
+                m_img = np.zeros((160, 120), dtype=np.uint8)
+                cv2.ellipse(m_img, (60, 80), (22 + idx_l * 3, 52), 25, 0, 360, 255, -1)
+                m_file = tmp_dir / f"NCU000{idx_l}_leaf{idx_l}.png"
+                cv2.imwrite(str(m_file), m_img)
+                mask_paths.append(str(m_file))
+
+            df_small = pd.DataFrame(
+                {
+                    "catalogNumber": ["NCU0001", "NCU0002", "NCU0003"],
+                    "leaf_id": [1, 2, 3],
+                    "species_standardized": ["Packera millefolia"] * 3,
+                    "assigned_tier": ["Tier_1_Direct"] * 3,
+                    "determiner_tier": ["Tier_1_Gold"] * 3,
+                    "is_type_specimen": [False, False, False],
+                    "solidity": [0.86, 0.88, 0.90],
+                    "aspect_ratio": [1.65, 2.05, 2.55],
+                    "ucs_score": [0.93, 0.94, 0.95],
+                    "pixels_per_mm": [10.0, 10.0, 10.0],
+                    "is_calibrated_mm": [True, True, True],
+                    "mask_path": mask_paths,
+                }
+            )
+
+            captured_titles: list[str] = []
+            orig_save = s02_figs._atomic_save_matplotlib_fig
+
+            def _spy_save(fig, out_base_path, dpi=300):
+                if Path(out_base_path).name == "fig02b_silhouette_montage":
+                    captured_titles.extend(ax.get_title() for ax in fig.axes)
+                return orig_save(fig, out_base_path, dpi=dpi)
+
+            with patch.object(s02_figs, "_atomic_save_matplotlib_fig", side_effect=_spy_save), patch.object(
+                step02, "_atomic_save_matplotlib_fig", side_effect=_spy_save
+            ):
+                out_paths = s02_figs.generate_step02_publication_figures(
+                    extracted_df=df_small,
+                    failed_df=pd.DataFrame(),
+                    repro_df=pd.DataFrame(),
+                    pheno_df=pd.DataFrame(),
+                    figures_dir=tmp_dir / "figures",
+                )
+
+            self.assertIn("fig02b_png", out_paths)
+            self.assertEqual(len(captured_titles), 4)
+            self.assertTrue(captured_titles[0].startswith("20th %ile (Compact)\n"))
+            leaf_titles = [t for t in captured_titles if "NCU000" in t]
+            self.assertEqual(len(leaf_titles), 3, "Exactly 3 tiles should render leaf silhouettes for n=3.")
+            seen_vouchers = [t.split("\n")[-1].split(" ")[0] for t in leaf_titles]
+            self.assertEqual(len(seen_vouchers), len(set(seen_vouchers)), "No duplicate leaf IDs across a row.")
+
 
 if __name__ == "__main__":
     unittest.main()

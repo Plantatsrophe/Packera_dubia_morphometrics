@@ -554,13 +554,15 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
 
   thm <- ggplot2::theme_bw(base_size = 9.5) +
          ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 10),
-                        plot.subtitle = ggplot2::element_text(size = 8.5, color = "grey25"),
+                        plot.subtitle = ggplot2::element_text(size = 7.5, color = "grey25"),
                         panel.grid.minor = ggplot2::element_blank())
 
   lat_col <- if ("decimalLatitude" %in% names(target_df) && any(!is.na(target_df$decimalLatitude))) target_df$decimalLatitude else target_df$latitude
   target_df$decimalLatitude <- suppressWarnings(as.numeric(lat_col))
   target_df <- target_df[is.finite(target_df$decimalLatitude) & is.finite(target_df$doy), , drop = FALSE]
   if (nrow(target_df) == 0L) return(invisible(NULL))
+  keep_na_lat <- is.finite(target_df$decimalLatitude) & target_df$decimalLatitude >= 22.0 & target_df$decimalLatitude <= 62.0
+  if (sum(keep_na_lat) >= 3L) target_df <- target_df[keep_na_lat, , drop = FALSE]
 
   active_tx <- sort(unique(as.character(target_df$plot_group)))
   fg_tx <- active_tx
@@ -605,8 +607,8 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   pred_line <- data.frame(
     latitude = lat_seq,
     decimalLatitude = lat_seq,
-    doy = wrap_doy_365(b0_use + b1_use * lat_seq),
-    hopkins_expected = wrap_doy_365(pred_min_lat + 4.0 * (lat_seq - min_lat))
+    doy = pmin(365.0, pmax(1.0, b0_use + b1_use * lat_seq)),
+    hopkins_expected = pmin(365.0, pmax(1.0, pred_min_lat + 4.0 * (lat_seq - min_lat)))
   )
 
   pt_alpha <- if (nrow(target_df) > 1000L) 0.45 else 0.75
@@ -675,15 +677,17 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
     )
   }
 
-  med_df <- stats::aggregate(delta_doy ~ plot_group, data = target_df, FUN = function(x) stats::median(x, na.rm = TRUE))
-  med_df <- med_df[order(med_df$delta_doy, as.character(med_df$plot_group)), , drop = FALSE]
-  ord_levels <- as.character(med_df$plot_group)
-  target_df$plot_group <- factor(target_df$plot_group, levels = ord_levels)
-  med_sub_df <- if (nrow(med_df) > 6L) med_df[med_df$plot_group %in% fg_tx, , drop = FALSE] else med_df
+  df_ridge <- target_df[is.finite(target_df$delta_doy), , drop = FALSE]
+  med_df <- stats::aggregate(delta_doy ~ plot_group, data = df_ridge, FUN = function(x) stats::median(x, na.rm = TRUE))
+  ord_lvls <- as.character(med_df$plot_group[order(med_df$delta_doy)])
+  df_ridge$plot_group <- factor(as.character(df_ridge$plot_group), levels = ord_lvls)
+  med_df <- med_df[order(med_df$delta_doy), , drop = FALSE]
+  med_df$plot_group <- factor(as.character(med_df$plot_group), levels = ord_lvls)
+  med_sub_df <- if (nrow(med_df) > 6L) med_df[as.character(med_df$plot_group) %in% fg_tx, , drop = FALSE] else med_df
   sub_p2_txt <- paste(sprintf("%s: %+.1f d", gsub("^Packera\\s+", "P. ", as.character(med_sub_df$plot_group)), med_sub_df$delta_doy), collapse = " | ")
 
   if (requireNamespace("ggridges", quietly = TRUE)) {
-    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, y = plot_group, fill = plot_group, color = plot_group)) +
+    p2 <- ggplot2::ggplot(df_ridge, ggplot2::aes(x = delta_doy, y = plot_group, fill = plot_group, color = plot_group)) +
       ggridges::geom_density_ridges(alpha = 0.45, scale = 1.15, rel_min_height = 0.01, linewidth = 0.8) +
       ggplot2::geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
       ggplot2::geom_vline(xintercept = c(-14, 14), linetype = "dotted", color = "#D55E00", linewidth = 0.78) +
@@ -697,7 +701,7 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
         x = "Phenological Anomaly Delta DOY (Days Relative to Latitudinal Baseline; Dotted = +/-14 d)", y = "Target Group (Ordered by Median Delta DOY)", fill = "Group", color = "Group"
       )
   } else {
-    p2 <- ggplot2::ggplot(target_df, ggplot2::aes(x = delta_doy, fill = plot_group, color = plot_group)) +
+    p2 <- ggplot2::ggplot(df_ridge, ggplot2::aes(x = delta_doy, fill = plot_group, color = plot_group)) +
       ggplot2::geom_density(alpha = 0.35, linewidth = 0.85) +
       ggplot2::geom_vline(data = med_df, ggplot2::aes(xintercept = delta_doy, color = plot_group),
                           linetype = "dashed", linewidth = 0.85, show.legend = FALSE) +

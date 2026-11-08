@@ -627,41 +627,18 @@ def generate_step02_publication_figures(
         )
     )
 
-    if len(present_sp) <= 6:
-        for sp_name in present_sp:
-            sub = df_plot[df_plot["species_clean"] == sp_name]
-            if len(sub) > 0:
-                ax_sc.scatter(
-                    sub["sol_val"],
-                    sub["ar_val"],
-                    facecolors="none",
-                    edgecolors=SPECIES_PALETTE[sp_name],
-                    marker=SPECIES_MARKERS[sp_name],
-                    label=f"{SPECIES_ITALIC[sp_name]} (n={len(sub)})",
-                    alpha=alpha_pt,
-                    s=38,
-                    linewidths=1.0,
-                    zorder=3,
-                )
-    else:
-        fg_sp = present_sp[:6]
-        bg_sp = present_sp[6:]
+    dense_panel_a = len(df_plot) > 1500
+    fg_s = 18 if dense_panel_a else 38
+    fg_alpha = 0.35 if dense_panel_a else alpha_pt
+    fg_lw = 0.75 if dense_panel_a else 1.0
+    bg_s = 12 if dense_panel_a else 22
+    bg_alpha = 0.18 if dense_panel_a else 0.30
+
+    fg_sp = present_sp if len(present_sp) <= 6 else present_sp[:6]
+    bg_sp = [] if len(present_sp) <= 6 else present_sp[6:]
+
+    if bg_sp:
         bg_sub = df_plot[df_plot["species_clean"].isin(bg_sp)]
-        for sp_name in fg_sp:
-            sub = df_plot[df_plot["species_clean"] == sp_name]
-            if len(sub) > 0:
-                ax_sc.scatter(
-                    sub["sol_val"],
-                    sub["ar_val"],
-                    facecolors="none",
-                    edgecolors=SPECIES_PALETTE[sp_name],
-                    marker=SPECIES_MARKERS[sp_name],
-                    label=f"{SPECIES_ITALIC[sp_name]} (n={len(sub)})",
-                    alpha=alpha_pt,
-                    s=38,
-                    linewidths=1.0,
-                    zorder=4,
-                )
         if len(bg_sub) > 0:
             ax_sc.scatter(
                 bg_sub["sol_val"],
@@ -670,11 +647,60 @@ def generate_step02_publication_figures(
                 edgecolors="#B0B0B0",
                 marker="o",
                 label=f"Other Packera ({len(bg_sp)} spp., n={len(bg_sub)})",
-                alpha=0.30,
-                s=22,
-                linewidths=0.8,
+                alpha=bg_alpha,
+                s=bg_s,
+                linewidths=0.7,
                 zorder=2,
             )
+
+    for sp_name in fg_sp:
+        sub = df_plot[df_plot["species_clean"] == sp_name]
+        if len(sub) > 0:
+            col_hex = SPECIES_PALETTE[sp_name]
+            mk_sym = SPECIES_MARKERS[sp_name]
+            ax_sc.scatter(
+                sub["sol_val"],
+                sub["ar_val"],
+                facecolors="none",
+                edgecolors=col_hex,
+                marker=mk_sym,
+                label=f"{SPECIES_ITALIC[sp_name]} (n={len(sub)})",
+                alpha=fg_alpha,
+                s=fg_s,
+                linewidths=fg_lw,
+                zorder=4,
+            )
+            sub_xy = sub[["sol_val", "ar_val"]].dropna()
+            if len(sub_xy) >= 10:
+                xv = sub_xy["sol_val"].to_numpy(dtype=float)
+                yv = sub_xy["ar_val"].to_numpy(dtype=float)
+                valid_m = np.isfinite(xv) & np.isfinite(yv)
+                xv, yv = xv[valid_m], yv[valid_m]
+                if len(xv) >= 10:
+                    mx = float(np.mean(xv))
+                    my = float(np.mean(yv))
+                    cov_mat = np.cov(np.vstack([xv, yv]))
+                    if cov_mat.shape == (2, 2) and np.all(np.isfinite(cov_mat)):
+                        eigvals, eigvecs = np.linalg.eigh(cov_mat)
+                        eigvals = np.maximum(eigvals, 1e-6)
+                        chi2_val = 2.7726
+                        theta_t = np.linspace(0.0, 2.0 * np.pi, 64)
+                        unit_circle = np.vstack([np.cos(theta_t), np.sin(theta_t)])
+                        ell_pts = eigvecs @ (np.sqrt(chi2_val * eigvals)[:, None] * unit_circle)
+                        ex = mx + ell_pts[0, :]
+                        ey = my + ell_pts[1, :]
+                        ax_sc.plot(ex, ey, color="white", linewidth=2.8, zorder=5)
+                        ax_sc.plot(ex, ey, color=col_hex, linewidth=1.6, zorder=6)
+                        ax_sc.scatter(
+                            [mx],
+                            [my],
+                            s=58,
+                            facecolors=col_hex,
+                            edgecolors="#111111",
+                            linewidths=1.1,
+                            marker=mk_sym,
+                            zorder=7,
+                        )
 
     env_focal = os.environ.get("PACKERA_FOCAL_TAXON", "").strip()
     title_focal_std = _standardize_packera_species_py(env_focal) if env_focal else (present_sp[0] if len(present_sp) == 1 else "")
@@ -760,10 +786,10 @@ def generate_step02_publication_figures(
                     facecolors="none",
                     edgecolors=SPECIES_PALETTE[sp_name],
                     marker=SPECIES_MARKERS[sp_name],
-                    alpha=min(0.75, alpha_pt),
-                    s=24,
-                    linewidths=0.85,
-                    zorder=3,
+                    alpha=0.22,
+                    s=11,
+                    linewidths=0.75,
+                    zorder=2,
                 )
             else:
                 ax_repro.scatter(
@@ -772,31 +798,47 @@ def generate_step02_publication_figures(
                     facecolors="none",
                     edgecolors=SPECIES_PALETTE[sp_name],
                     marker=SPECIES_MARKERS[sp_name],
-                    alpha=min(0.75, alpha_pt),
-                    s=24,
-                    linewidths=0.85,
-                    zorder=3,
+                    alpha=0.22,
+                    s=11,
+                    linewidths=0.75,
+                    zorder=2,
                 )
         else:
             empty_positions.append(pos_i)
 
     if len(box_vals) > 0:
-        bp = ax_repro.boxplot(
-            box_vals,
-            positions=box_positions,
-            vert=not horiz_repro,
-            widths=0.48,
-            patch_artist=True,
-            showfliers=False,
-            zorder=2,
-        )
+        try:
+            bp = ax_repro.boxplot(
+                box_vals,
+                positions=box_positions,
+                orientation="horizontal" if horiz_repro else "vertical",
+                widths=0.48,
+                patch_artist=True,
+                showfliers=False,
+                zorder=5,
+            )
+        except TypeError:
+            bp = ax_repro.boxplot(
+                box_vals,
+                positions=box_positions,
+                vert=not horiz_repro,
+                widths=0.48,
+                patch_artist=True,
+                showfliers=False,
+                zorder=5,
+            )
         for patch, med, sp_name in zip(bp["boxes"], bp["medians"], box_species):
             c_hex = SPECIES_PALETTE[sp_name]
-            patch.set_facecolor(c_hex + "33")
+            patch.set_facecolor("#F2F2F2")
+            patch.set_alpha(0.72)
             patch.set_edgecolor(c_hex)
             patch.set_linewidth(1.4)
+            patch.set_zorder(5)
             med.set_color("#111111")
-            med.set_linewidth(1.6)
+            med.set_linewidth(2.2)
+            med.set_zorder(6)
+        for w_line in bp.get("whiskers", []) + bp.get("caps", []):
+            w_line.set_zorder(5)
         all_repro_concat = np.concatenate(box_vals)
         baseline_val = max(0.45, float(np.nanmin(all_repro_concat)) * 0.92)
     else:
@@ -918,8 +960,8 @@ def generate_step02_publication_figures(
     ax_pheno.set_yticklabels([SPECIES_ITALIC[sp] for sp in present_sp], fontsize=8.2 if horiz_repro else 8.5)
     ax_pheno.set_xlim(0, 105)
     ax_pheno.set_xlabel("Proportion of Vouchers (%)", fontsize=9.2, fontweight="bold")
-    ax_pheno.set_title("B2. Reproductive Phenological State Breakdown", fontsize=10.2, fontweight="bold", loc="left")
-    ax_pheno.legend(loc="lower right", fontsize=7.4, frameon=True)
+    ax_pheno.set_title("B2. Optical Phenology State Proportions", fontsize=9.8, fontweight="bold", loc="left", pad=22)
+    ax_pheno.legend(loc="lower center", bbox_to_anchor=(0.5, 1.005), ncol=3, frameon=False, fontsize=7.6)
     ax_pheno.grid(True, axis="x", linestyle=":", alpha=0.45)
 
     fig02a_pdf, fig02a_png = _save_fig_fn(
@@ -934,7 +976,7 @@ def generate_step02_publication_figures(
     #             (Rows = Active Species; Cols = Type Anchor / 20th, 35th/40th, 60th, 80th/85th %ile)
     # -------------------------------------------------------------------------
     pct_labels = [
-        "Type Anchor / 20th %ile",
+        "20th %ile (Compact)",
         "40th %ile (Median-Low)",
         "60th %ile (Median-High)",
         "80th %ile (Elongate)",
@@ -1105,6 +1147,7 @@ def generate_step02_publication_figures(
 
             selected_rows: List[Optional[pd.Series]] = []
             used_keys: Set[Tuple[str, int]] = set()
+            used_row_ids: Set[Any] = set()
 
             type_candidates = (
                 sp_hq[sp_hq["is_type_bool"].astype(bool)]
@@ -1124,6 +1167,7 @@ def generate_step02_publication_figures(
                     ),
                 )
                 used_keys.add((str(best_type_row.get("cat_str", "")), int(best_type_row.get("leaf_id_int", 1))))
+                used_row_ids.add(best_type_row.name)
                 selected_rows.append(best_type_row)
                 row_quantiles: Tuple[float, ...] = type_anchored_quantiles
             else:
@@ -1136,23 +1180,28 @@ def generate_step02_publication_figures(
                 # Primary window: q +/- 0.08
                 win_df = sp_hq[(sp_hq["q_rank"] >= q_target - 0.08 - 1e-9) & (sp_hq["q_rank"] <= q_target + 0.08 + 1e-9)]
                 win_unused = [
-                    r for _, r in win_df.iterrows()
-                    if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
+                    r for r_idx, r in win_df.iterrows()
+                    if r_idx not in used_row_ids
+                    and (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
                 ]
                 if not win_unused:
                     # Secondary wider window within the same species if n_avail is small
                     win_df2 = sp_hq[(sp_hq["q_rank"] >= q_target - 0.18 - 1e-9) & (sp_hq["q_rank"] <= q_target + 0.18 + 1e-9)]
                     win_unused = [
-                        r for _, r in win_df2.iterrows()
-                        if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
+                        r for r_idx, r in win_df2.iterrows()
+                        if r_idx not in used_row_ids
+                        and (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
                     ]
                 if not win_unused:
                     win_unused = [
-                        r for _, r in sp_hq.iterrows()
-                        if (str(r.get("cat_str", "")), int(r.get("leaf_id_int", 1))) not in used_keys
+                        sp_hq.loc[r_idx]
+                        for r_idx in sp_hq.index
+                        if r_idx not in used_row_ids
+                        and (str(sp_hq.loc[r_idx].get("cat_str", "")), int(sp_hq.loc[r_idx].get("leaf_id_int", 1))) not in used_keys
                     ]
                 if not win_unused:
-                    win_unused = [sp_hq.iloc[min(n_avail - 1, max(0, int(round(q_target * (n_avail - 1)))))]]
+                    selected_rows.append(None)
+                    continue
 
                 best_row = max(
                     win_unused,
@@ -1164,16 +1213,37 @@ def generate_step02_publication_figures(
                     ),
                 )
                 used_keys.add((str(best_row.get("cat_str", "")), int(best_row.get("leaf_id_int", 1))))
+                used_row_ids.add(best_row.name)
                 selected_rows.append(best_row)
 
-            for col_idx in range(4):
-                ax_t = axes_b[row_idx, col_idx]
-                row = selected_rows[col_idx] if col_idx < len(selected_rows) else None
+            for c_idx in range(4):
+                ax_t = axes_b[row_idx, c_idx]
+                row = selected_rows[c_idx] if c_idx < len(selected_rows) else None
                 if row is None:
-                    ax_t.axis("off")
+                    ax_t.set_facecolor("#F8F8F8")
+                    ax_t.text(
+                        0.5,
+                        0.5,
+                        f"n = {len(sp_hq)} leaves available\n(No additional distinct leaf)",
+                        transform=ax_t.transAxes,
+                        ha="center",
+                        va="center",
+                        fontsize=7.5,
+                        color="#666666",
+                        style="italic",
+                    )
+                    if row_idx == 0:
+                        ax_t.set_title(pct_labels[c_idx], fontsize=7.6, fontweight="bold")
+                    if c_idx == 0:
+                        ax_t.set_ylabel(SPECIES_ITALIC[sp_name], fontsize=9.8, fontweight="bold", color=sp_col, labelpad=6)
+                    ax_t.set_xticks([])
+                    ax_t.set_yticks([])
+                    for spine in ax_t.spines.values():
+                        spine.set_edgecolor("#CCCCCC")
+                        spine.set_linewidth(0.8)
                     continue
 
-                cat_num = str(row.get("catalogNumber", f"V{row_idx * 4 + col_idx + 1}"))
+                cat_num = str(row.get("catalogNumber", f"V{row_idx * 4 + c_idx + 1}"))
                 leaf_id = int(row.get("leaf_id", 1)) if pd.notna(row.get("leaf_id", 1)) else 1
                 sol_v = float(row.get("sol_val", 0.88))
                 ar_v = float(row.get("ar_val", 2.10))
@@ -1205,38 +1275,96 @@ def generate_step02_publication_figures(
                         for idx_h, c_h in enumerate(cnts_fill):
                             if int(hier_fill[0][idx_h][3]) != -1 and float(cv2.contourArea(c_h)) < 0.025 * fg_cnt_px:
                                 cv2.drawContours(crop_m, cnts_fill, idx_h, 255, thickness=cv2.FILLED)
-                    _, _, _, p_apex_c, p_base_c = compute_geometric_metrics(crop_m)
+                    _, _, _, p_apex, p_base = compute_geometric_metrics(crop_m)
 
-                    h_c, w_c = crop_m.shape[:2]
-                    canvas_rgb = np.full((h_c, w_c, 3), 248, dtype=np.uint8)
+                    if p_base is not None and p_apex is not None:
+                        dx = float(p_apex[0] - p_base[0])
+                        dy = float(p_apex[1] - p_base[1])
+                        if np.hypot(dx, dy) > 4.0:
+                            h0, w0 = crop_m.shape[:2]
+                            cx, cy = w0 / 2.0, h0 / 2.0
+                            rot_deg = float(np.degrees(np.arctan2(dy, dx))) + 90.0
+                            rot_mat = cv2.getRotationMatrix2D((cx, cy), rot_deg, 1.0)
+                            cos_v = abs(float(rot_mat[0, 0]))
+                            sin_v = abs(float(rot_mat[0, 1]))
+                            new_w = max(1, int(round(h0 * sin_v + w0 * cos_v)))
+                            new_h = max(1, int(round(h0 * cos_v + w0 * sin_v)))
+                            rot_mat[0, 2] += (new_w / 2.0) - cx
+                            rot_mat[1, 2] += (new_h / 2.0) - cy
+                            crop_m = cv2.warpAffine(
+                                crop_m,
+                                rot_mat,
+                                (new_w, new_h),
+                                flags=cv2.INTER_NEAREST,
+                                borderMode=cv2.BORDER_CONSTANT,
+                                borderValue=0,
+                            )
+                            p_base = (
+                                float(rot_mat[0, 0] * p_base[0] + rot_mat[0, 1] * p_base[1] + rot_mat[0, 2]),
+                                float(rot_mat[1, 0] * p_base[0] + rot_mat[1, 1] * p_base[1] + rot_mat[1, 2]),
+                            )
+                            p_apex = (
+                                float(rot_mat[0, 0] * p_apex[0] + rot_mat[0, 1] * p_apex[1] + rot_mat[0, 2]),
+                                float(rot_mat[1, 0] * p_apex[0] + rot_mat[1, 1] * p_apex[1] + rot_mat[1, 2]),
+                            )
+                            ys_r, xs_r = np.where(crop_m > 0)
+                            if len(ys_r) > 0:
+                                ry0 = max(0, int(ys_r.min()) - pad)
+                                ry1 = min(crop_m.shape[0], int(ys_r.max()) + pad + 1)
+                                rx0 = max(0, int(xs_r.min()) - pad)
+                                rx1 = min(crop_m.shape[1], int(xs_r.max()) + pad + 1)
+                                crop_m = crop_m[ry0:ry1, rx0:rx1]
+                                p_base = (float(p_base[0] - rx0), float(p_base[1] - ry0))
+                                p_apex = (float(p_apex[0] - rx0), float(p_apex[1] - ry0))
+
+                    h_m, w_m = crop_m.shape[:2]
+                    canvas_rgb = np.full((h_m, w_m, 3), 248, dtype=np.uint8)
                     rgb_hex = sp_col.lstrip("#")
                     r_c, g_c, b_c = int(rgb_hex[0:2], 16), int(rgb_hex[2:4], 16), int(rgb_hex[4:6], 16)
                     canvas_rgb[crop_m > 0] = (r_c, g_c, b_c)
 
+                    pad_bot = max(18, int(round(canvas_rgb.shape[0] * 0.16)))
+                    canvas_rgb = np.pad(
+                        canvas_rgb,
+                        ((0, pad_bot), (0, 0), (0, 0)),
+                        mode="constant",
+                        constant_values=248,
+                    )
+                    h_c, w_c = canvas_rgb.shape[:2]
+
                     ax_t.imshow(canvas_rgb)
                     ax_t.plot(
-                        [p_base_c[0], p_apex_c[0]],
-                        [p_base_c[1], p_apex_c[1]],
+                        [p_base[0], p_apex[0]],
+                        [p_base[1], p_apex[1]],
                         color="#111111",
                         linestyle="--",
                         linewidth=1.3,
                     )
                     ax_t.scatter(
-                        [p_base_c[0]],
-                        [p_base_c[1]],
+                        [p_base[0]],
+                        [p_base[1]],
                         facecolors="none",
                         edgecolors="#E69F00",
                         linewidths=1.5,
                         s=48,
                         zorder=5,
                     )
-                    # Draw 10 mm physical scale bar on calibrated tiles
+                    # Draw 10 mm physical scale bar in dedicated bottom footer band
                     if np.isfinite(ppm_val) and ppm_val > 0:
                         bar_px = min(w_c * 0.45, 10.0 * ppm_val)
                         bx0 = w_c * 0.08
-                        by0 = h_c * 0.92
+                        by0 = h_c - pad_bot * 0.45
                         ax_t.plot([bx0, bx0 + bar_px], [by0, by0], color="#111111", linewidth=2.2)
-                        ax_t.text(bx0 + bar_px / 2.0, by0 - max(4.0, h_c * 0.04), "10 mm", fontsize=6.5, fontweight="bold", ha="center", va="bottom", color="#111111")
+                        ax_t.text(
+                            bx0 + bar_px / 2.0,
+                            by0 - max(3.0, pad_bot * 0.18),
+                            "10 mm",
+                            fontsize=6.5,
+                            fontweight="bold",
+                            ha="center",
+                            va="bottom",
+                            color="#111111",
+                        )
                 else:
                     c_path_res = _resolve_asset_path(row.get("contour_path", ""), out_dir)
                     pts_xy = None
@@ -1256,11 +1384,23 @@ def generate_step02_publication_figures(
                             fontsize=7.5, color="#666666", style="italic",
                         )
                     else:
+                        p_base_pt = pts_xy[0].copy()
+                        dists = np.hypot(pts_xy[:, 0] - p_base_pt[0], pts_xy[:, 1] - p_base_pt[1])
+                        p_apex_pt = pts_xy[int(np.argmax(dists))].copy()
+                        dx_pt = float(p_apex_pt[0] - p_base_pt[0])
+                        dy_pt = float(p_apex_pt[1] - p_base_pt[1])
+                        if np.hypot(dx_pt, dy_pt) > 1e-6:
+                            rot_rad = -(float(np.arctan2(dy_pt, dx_pt)) + 0.5 * np.pi)
+                            cos_r, sin_r = float(np.cos(rot_rad)), float(np.sin(rot_rad))
+                            rel_xy = pts_xy - p_base_pt
+                            pts_xy = np.column_stack([
+                                cos_r * rel_xy[:, 0] - sin_r * rel_xy[:, 1],
+                                sin_r * rel_xy[:, 0] + cos_r * rel_xy[:, 1],
+                            ])
+                            p_base_pt = pts_xy[0]
+                            p_apex_pt = pts_xy[int(np.argmax(dists))]
                         ax_t.set_facecolor("#F8F8F8")
                         ax_t.fill(pts_xy[:, 0], pts_xy[:, 1], color=sp_col, alpha=0.82)
-                        p_base_pt = pts_xy[0]
-                        dists = np.hypot(pts_xy[:, 0] - p_base_pt[0], pts_xy[:, 1] - p_base_pt[1])
-                        p_apex_pt = pts_xy[int(np.argmax(dists))]
                         ax_t.plot(
                             [p_base_pt[0], p_apex_pt[0]],
                             [p_base_pt[1], p_apex_pt[1]],
@@ -1272,16 +1412,24 @@ def generate_step02_publication_figures(
                         ax_t.set_aspect("equal", adjustable="datalim")
                         ax_t.invert_yaxis()
 
-                type_tag = " [TYPE]" if bool(row.get("is_type_bool", False)) else ""
-                col_hdr = f"{pct_labels[col_idx]}\n" if row_idx == 0 else ""
+                is_r_type = bool(row.get("is_type_bool", False))
+                type_tag = " [TYPE]" if is_r_type else ""
+                if row_idx == 0:
+                    if c_idx == 0:
+                        hdr_label = "Type Anchor / 20th %ile" if is_r_type else "20th %ile (Compact)"
+                    else:
+                        hdr_label = pct_labels[c_idx]
+                    col_hdr = f"{hdr_label}\n"
+                else:
+                    col_hdr = ""
                 ax_t.set_title(f"{col_hdr}{cat_num}{type_tag} (L{leaf_id}) | AR={ar_v:.2f}, Sol={sol_v:.2f}", fontsize=7.6, fontweight="bold")
-                if col_idx == 0:
+                if c_idx == 0:
                     ax_t.set_ylabel(SPECIES_ITALIC[sp_name], fontsize=9.8, fontweight="bold", color=sp_col, labelpad=6)
                 ax_t.set_xticks([])
                 ax_t.set_yticks([])
 
         fig_b.suptitle(
-            f"Phase 02 — Taxon-Stratified Basal Leaf Silhouettes (20th–80th %ile Aspect Ratio), Midrib Axes & Petiole Anchors{title_suffix}",
+            f"Phase 02 - Taxon-Stratified Basal Leaf Silhouettes (20th-80th %ile Aspect Ratio), Midrib Axes & Petiole Anchors{title_suffix}",
             fontsize=11.5,
             fontweight="bold",
             y=0.99,

@@ -992,6 +992,17 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             self.assertEqual(res.returncode, 0, f"SDM & raster cropping test failed:\n{res.stderr}\n{res.stdout}")
             self.assertIn("SDM_AND_CROP_OK", res.stdout)
 
+    def test_step05_eastern_na_figure_refinements(self):
+        sdm_src = (PROJECT_ROOT / "scripts" / "analysis" / "step05_sdm_maxent.R").read_text(encoding="utf-8")
+        pheno_src = (PROJECT_ROOT / "scripts" / "analysis" / "step05_phenology_ecotypes.R").read_text(encoding="utf-8")
+
+        self.assertIn("keep_pairs <- head(unique(perm_df$pair[order(!grepl(\"dubia\", perm_df$pair, ignore.case = TRUE), seq_len(nrow(perm_df)))]), 6L)", sdm_src)
+        self.assertIn("focal_artifacts$X_comb[focal_artifacts$p_vec == 1L, , drop = FALSE]", sdm_src)
+        self.assertIn("med_row <- apply(pres_mat, 2, stats::median, na.rm = TRUE)", sdm_src)
+        self.assertIn("decimalLatitude >= 22.0", pheno_src)
+        self.assertIn("doy = pmin(365.0, pmax(1.0, b0_use + b1_use * lat_seq))", pheno_src)
+        self.assertIn("hopkins_expected = pmin(365.0, pmax(1.0, pred_min_lat + 4.0 * (lat_seq - min_lat)))", pheno_src)
+
 
 if __name__ == "__main__":
     unittest.main()

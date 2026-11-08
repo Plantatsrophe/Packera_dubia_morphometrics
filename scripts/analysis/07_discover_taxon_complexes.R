@@ -616,7 +616,9 @@ build_taxon_morphotype_subclusters <- function(morph_df, min_vouchers = 5L) {
     ks <- stats::na.omit(as.integer(morph_df$gmm_cluster[raw_sp == sp]))
     length(unique(ks)) >= 2L && sum(table(ks) >= min_vouchers) >= 2L
   }, logical(1))) else FALSE
-  if (n_sp > 2L && !within_sp_gmm) return(list(morph_df = morph_df, subcluster_mode = FALSE))
+  if (n_sp > 3L || (n_sp > 2L && (!within_sp_gmm || nrow(morph_df) > 100L))) {
+    return(list(morph_df = morph_df, subcluster_mode = FALSE))
+  }
 
   k_vec <- if (has_gmm) ifelse(is.na(morph_df$gmm_cluster), 1L, as.integer(morph_df$gmm_cluster)) else rep(1L, nrow(morph_df))
   short_sp <- sub("^Packera\\s+", "P. ", raw_sp); cand_lbl <- sprintf("%s [K%d]", short_sp, k_vec)

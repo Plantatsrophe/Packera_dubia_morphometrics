@@ -1370,13 +1370,17 @@ plot_2d_ordination_scatter <- function(
     lbls <- if (!is.null(centroid_labels)) as.character(centroid_labels) else rownames(c_mat)
     c_use_mat <- c_mat
     c_use_lbls <- lbls
-    if (!is.null(tier_ord) && length(fg_grps) > 0L && !is.null(c_use_lbls) && length(c_use_lbls) == nrow(c_use_mat)) {
+    if (!is.null(c_use_lbls) && length(c_use_lbls) == nrow(c_use_mat)) {
+      rownames(c_use_mat) <- c_use_lbls
+    }
+    norm_lbl_key <- function(v) gsub("[_[:space:]]+", " ", tolower(trimws(as.character(v))))
+    if (length(u_grps) > 6L && length(fg_grps) > 0L && !is.null(c_use_lbls) && length(c_use_lbls) == nrow(c_use_mat)) {
       short_fg <- sub("^Packera\\s+", "P. ", fg_grps)
-      keep_c <- (c_use_lbls %in% fg_grps) | (c_use_lbls %in% short_fg)
-      if (any(keep_c)) {
-        c_use_mat <- c_use_mat[keep_c, , drop = FALSE]
-        c_use_lbls <- c_use_lbls[keep_c]
-      }
+      keep_c <- (norm_lbl_key(c_use_lbls) %in% norm_lbl_key(fg_grps)) | (norm_lbl_key(c_use_lbls) %in% norm_lbl_key(short_fg))
+      if (!any(keep_c)) keep_c <- seq_len(min(6L, nrow(c_use_mat)))
+      c_use_mat <- c_use_mat[keep_c, , drop = FALSE]
+      if (nrow(c_use_mat) > 6L) c_use_mat <- c_use_mat[seq_len(6L), , drop = FALSE]
+      c_use_lbls <- rownames(c_use_mat)
     }
     graphics::points(c_use_mat[, 1], c_use_mat[, 2], pch = 3, col = "black", cex = 1.8, lwd = 2.4)
     if (!is.null(c_use_lbls) && length(c_use_lbls) == nrow(c_use_mat)) {
@@ -1396,7 +1400,18 @@ plot_2d_ordination_scatter <- function(
         anchor_x = cx0,
         anchor_y = cy0
       )
-      graphics::text(rep_c$x, rep_c$y, labels = c_use_lbls, cex = 0.76, font = 4, col = "black")
+      for (k_c in seq_along(c_use_lbls)) {
+        lbl_txt <- c_use_lbls[k_c]
+        rx <- rep_c$x[k_c]
+        ry <- rep_c$y[k_c]
+        sw_lbl <- graphics::strwidth(lbl_txt, cex = 0.72, font = 2)
+        sh_lbl <- graphics::strheight(lbl_txt, cex = 0.72, font = 2)
+        graphics::rect(
+          rx - sw_lbl * 0.56, ry - sh_lbl * 0.65, rx + sw_lbl * 0.56, ry + sh_lbl * 0.65,
+          col = grDevices::adjustcolor("white", alpha.f = 0.84), border = NA
+        )
+        graphics::text(rx, ry, labels = lbl_txt, cex = 0.76, font = 4, col = "black")
+      }
     }
   }
 
@@ -1607,8 +1622,10 @@ render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL
 
   grDevices::pdf(tmp_pdf, width = 12.5, height = 5.8, useDingbats = FALSE)
   tryCatch({
-    graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.2, 1.0))
+    graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.2, 1.0), cex.main = 0.90)
     is_t2 <- grepl("2", as.character(tier_manifest$reconstruction_tier))
+    n_t1 <- sum(!is_t2, na.rm = TRUE)
+    n_t2 <- sum(is_t2, na.rm = TRUE)
     tier_lbl <- ifelse(is_t2, "Tier 2 Reflected", "Tier 1 Direct")
     tier_cols <- c("Tier 1 Direct" = "#0072B2", "Tier 2 Reflected" = "#D55E00")
     alpha_val <- adaptive_point_alpha(nrow(tier_manifest))
@@ -1618,10 +1635,17 @@ render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL
     pc2 <- if ("PC2" %in% names(tier_manifest)) tier_manifest$PC2 else rep(0, nrow(tier_manifest))
     spc1 <- if ("Sym_PC1" %in% names(tier_manifest)) tier_manifest$Sym_PC1 else pc1
     spc2 <- if ("Sym_PC2" %in% names(tier_manifest)) tier_manifest$Sym_PC2 else pc2
-    cs_t12 <- rbind(
-      "Tier 1 Direct" = c(mean(spc1[!is_t2], na.rm = TRUE), mean(spc2[!is_t2], na.rm = TRUE)),
-      "Tier 2 Reflected" = c(mean(spc1[is_t2], na.rm = TRUE), mean(spc2[is_t2], na.rm = TRUE))
-    )
+    cs_t12 <- if (n_t2 > 0L) {
+      rbind(
+        "Tier 1 Direct" = c(mean(spc1[!is_t2], na.rm = TRUE), mean(spc2[!is_t2], na.rm = TRUE)),
+        "Tier 2 Reflected" = c(mean(spc1[is_t2], na.rm = TRUE), mean(spc2[is_t2], na.rm = TRUE))
+      )
+    } else {
+      rbind(
+        "Tier 1 Direct" = c(mean(spc1[!is_t2], na.rm = TRUE), mean(spc2[!is_t2], na.rm = TRUE))
+      )
+    }
+    t2_leg_lbl <- if (n_t2 > 0L) sprintf("Tier 2 Reflected (n=%d, pch=2)", n_t2) else "Tier 2 Reflected (n=0; Strict Tier 1 Mode)"
 
     # Panel A: 2D Sym_PC1 vs. Sym_PC2 Overlay with PERMANOVA R2 and p-value inset
     plot_2d_ordination_scatter(
@@ -1636,8 +1660,8 @@ render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL
       legend_args = list(
         "topright",
         legend = c(
-          sprintf("Tier 1 Direct (n=%d, pch=1)", sum(!is_t2)),
-          sprintf("Tier 2 Reflected (n=%d, pch=2)", sum(is_t2)),
+          sprintf("Tier 1 Direct (n=%d, pch=1)", n_t1),
+          t2_leg_lbl,
           perm_label
         ),
         col = c("#0072B2", "#D55E00", NA),
@@ -1654,7 +1678,8 @@ render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL
 
     graphics::plot(
       c(0, 2), c(0, 2), type = "n", axes = FALSE, xlab = "", ylab = "",
-      main = "B. Mean Reconstructed Silhouette: Tier 1 Direct vs. Tier 2 Reflected"
+      main = "B. Mean Reconstructed Silhouette: Tier 1 Direct vs. Tier 2 Reflected",
+      cex.main = 0.90
     )
     graphics::box(col = "grey80")
     grid_lay <- .compute_outline_grid_layout(length(disp_tx))
@@ -1664,16 +1689,17 @@ render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL
       cx <- grid_lay$cx[idx_sp]; cy <- grid_lay$cy[idx_sp]
       m_t1 <- (tx_vec == sp_name) & !is_t2
       m_t2 <- (tx_vec == sp_name) & is_t2
+      has_sp_t2 <- sum(m_t2, na.rm = TRUE) > 0L
       if (!is.null(h_mat)) {
         h1 <- if (any(m_t1)) colMeans(h_mat[m_t1, , drop = FALSE], na.rm = TRUE) else colMeans(h_mat, na.rm = TRUE)
-        h2 <- if (any(m_t2)) colMeans(h_mat[m_t2, , drop = FALSE], na.rm = TRUE) else h1
+        h2 <- if (has_sp_t2) colMeans(h_mat[m_t2, , drop = FALSE], na.rm = TRUE) else NULL
       } else {
         h1 <- c(A1 = -1.25, B1 = 0, C1 = 0, D1 = 0.45)
-        h2 <- c(A1 = -1.23, B1 = 0, C1 = 0, D1 = 0.46)
+        h2 <- if (has_sp_t2) c(A1 = -1.23, B1 = 0, C1 = 0, D1 = 0.46) else NULL
       }
       xy1 <- reconstruct_efa_outline(h1, nb_pts = 120L)
-      xy2 <- reconstruct_efa_outline(h2, nb_pts = 120L)
-      env_pts <- rbind(xy1, xy2)
+      xy2 <- if (!is.null(h2)) reconstruct_efa_outline(h2, nb_pts = 120L) else NULL
+      env_pts <- if (!is.null(xy2)) rbind(xy1, xy2) else xy1
       shared_center <- c(mean(range(env_pts[, 1], na.rm = TRUE)), mean(range(env_pts[, 2], na.rm = TRUE)))
       shared_scale  <- min(0.68 / max(diff(range(env_pts[, 1], na.rm = TRUE)), 1e-6), 0.64 / max(diff(range(env_pts[, 2], na.rm = TRUE)), 1e-6)) * 0.86 * grid_lay$cell_scale
       draw_outline_in_box(
@@ -1681,11 +1707,13 @@ render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL
         col_border = "#0072B2", col_fill = grDevices::adjustcolor("#0072B2", alpha.f = 0.16), lwd = 2.0, lty = 1,
         shared_scale = shared_scale, shared_center = shared_center
       )
-      draw_outline_in_box(
-        xy2, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
-        col_border = "#D55E00", col_fill = NA, lwd = 1.9, lty = 2,
-        shared_scale = shared_scale, shared_center = shared_center
-      )
+      if (!is.null(xy2) && n_t2 > 0L) {
+        draw_outline_in_box(
+          xy2, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
+          col_border = "#D55E00", col_fill = NA, lwd = 1.9, lty = 2,
+          shared_scale = shared_scale, shared_center = shared_center
+        )
+      }
       short_sp <- sub("^Packera\\s+", "P. ", sp_name)
       graphics::text(
         cx, cy + grid_lay$title_dy,
@@ -1695,7 +1723,10 @@ render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL
     }
     graphics::legend(
       "bottom", horiz = TRUE,
-      legend = c("Tier 1 Direct Mean Outline", "Tier 2 Reflected Mean Outline"),
+      legend = c(
+        "Tier 1 Direct Mean Outline",
+        if (n_t2 > 0L) "Tier 2 Reflected Mean Outline" else "Tier 2 Reflected (n=0; Strict Tier 1 Mode)"
+      ),
       col = c("#0072B2", "#D55E00"), lty = c(1, 2), lwd = 2.0, bty = "n", cex = 0.78
     )
   }, finally = {
@@ -1956,80 +1987,54 @@ generate_step03_pub_figures <- function(
       if (sum(m_anchor, na.rm = TRUE) < 1) m_anchor <- (df$taxon_clean == sp_name)
       m_type <- (df$taxon_clean == sp_name) & is_type_row
 
-      sol_col_b <- if ("q25_solidity" %in% colnames(df)) suppressWarnings(as.numeric(df$q25_solidity)) else if ("solidity" %in% colnames(df)) suppressWarnings(as.numeric(df$solidity)) else rep(NA_real_, nrow(df))
-      m_dis_sub <- m_anchor & is.finite(sol_col_b) & (sol_col_b < 0.72)
-      m_ent_sub <- m_anchor & (!is.finite(sol_col_b) | (sol_col_b >= 0.72))
-      is_bimodal_sp <- !is.null(std_hmat) && nrow(std_hmat) == nrow(df) &&
-        sum(m_dis_sub, na.rm = TRUE) >= 2L && sum(m_ent_sub, na.rm = TRUE) >= 2L &&
-        (sum(m_dis_sub, na.rm = TRUE) / max(1L, sum(m_anchor, na.rm = TRUE))) >= 0.20 &&
-        (sum(m_ent_sub, na.rm = TRUE) / max(1L, sum(m_anchor, na.rm = TRUE))) >= 0.20
-
-      if (is_bimodal_sp) {
-        h_ent <- colMeans(std_hmat[m_ent_sub, , drop = FALSE], na.rm = TRUE)
-        h_dis <- colMeans(std_hmat[m_dis_sub, , drop = FALSE], na.rm = TRUE)
-        xy_ent <- reconstruct_efa_outline(h_ent, nb_pts = 120L)
-        xy_dis <- reconstruct_efa_outline(h_dis, nb_pts = 120L)
-        dx_bi <- 0.17 * grid_lay$cell_scale
-        pts_ent <- draw_outline_in_box(
-          xy_ent, cx = cx - dx_bi, cy = cy - grid_lay$body_dy, w_box = 0.36 * grid_lay$cell_scale, h_box = 0.60 * grid_lay$cell_scale,
-          col_border = sp_col, col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.18), lwd = 1.9, lty = 1
-        )
-        pts_dis <- draw_outline_in_box(
-          xy_dis, cx = cx + dx_bi, cy = cy - grid_lay$body_dy, w_box = 0.38 * grid_lay$cell_scale, h_box = 0.60 * grid_lay$cell_scale,
-          col_border = sp_col, col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.28), lwd = 2.1, lty = 1
-        )
-        if (!is.null(pts_ent)) graphics::segments(cx - dx_bi, min(pts_ent[, 2]), cx - dx_bi, max(pts_ent[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.50), lty = 2, lwd = 0.9)
-        if (!is.null(pts_dis)) graphics::segments(cx + dx_bi, min(pts_dis[, 2]), cx + dx_bi, max(pts_dis[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.50), lty = 2, lwd = 0.9)
+      if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && any(m_anchor)) {
+        h_mean <- colMeans(std_hmat[m_anchor, , drop = FALSE], na.rm = TRUE)
+        h_sd   <- apply(std_hmat[m_anchor, , drop = FALSE], 2, stats::sd, na.rm = TRUE)
+        h_sd[!is.finite(h_sd)] <- 0.0
       } else {
-        if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && any(m_anchor)) {
-          h_mean <- colMeans(std_hmat[m_anchor, , drop = FALSE], na.rm = TRUE)
-          h_sd   <- apply(std_hmat[m_anchor, , drop = FALSE], 2, stats::sd, na.rm = TRUE)
-          h_sd[!is.finite(h_sd)] <- 0.0
-        } else {
-          z_sp <- if (any(m_anchor)) c(mean(df$Sym_PC1[m_anchor], na.rm = TRUE), mean(df$Sym_PC2[m_anchor], na.rm = TRUE)) else c((idx_sp - 2.5) * 0.5, 0)
-          h_mean <- project_grid_harmonics(z_sp[1], z_sp[2])
-          h_sd   <- abs(h_mean) * 0.12
-        }
+        z_sp <- if (any(m_anchor)) c(mean(df$Sym_PC1[m_anchor], na.rm = TRUE), mean(df$Sym_PC2[m_anchor], na.rm = TRUE)) else c((idx_sp - 2.5) * 0.5, 0)
+        h_mean <- project_grid_harmonics(z_sp[1], z_sp[2])
+        h_sd   <- abs(h_mean) * 0.12
+      }
 
-        xy_mean  <- reconstruct_efa_outline(h_mean, nb_pts = 120L)
-        xy_plus  <- reconstruct_efa_outline(h_mean + 0.65 * h_sd, nb_pts = 120L)
-        xy_minus <- reconstruct_efa_outline(h_mean - 0.65 * h_sd, nb_pts = 120L)
+      xy_mean  <- reconstruct_efa_outline(h_mean, nb_pts = 120L)
+      xy_plus  <- reconstruct_efa_outline(h_mean + 0.65 * h_sd, nb_pts = 120L)
+      xy_minus <- reconstruct_efa_outline(h_mean - 0.65 * h_sd, nb_pts = 120L)
 
-        env_pts <- rbind(xy_plus, xy_mean, xy_minus)
-        shared_center <- c(mean(range(env_pts[, 1], na.rm = TRUE)), mean(range(env_pts[, 2], na.rm = TRUE)))
-        shared_scale  <- min(0.68 / max(diff(range(env_pts[, 1], na.rm = TRUE)), 1e-6), 0.64 / max(diff(range(env_pts[, 2], na.rm = TRUE)), 1e-6)) * 0.86 * grid_lay$cell_scale
+      env_pts <- rbind(xy_plus, xy_mean, xy_minus)
+      shared_center <- c(mean(range(env_pts[, 1], na.rm = TRUE)), mean(range(env_pts[, 2], na.rm = TRUE)))
+      shared_scale  <- min(0.68 / max(diff(range(env_pts[, 1], na.rm = TRUE)), 1e-6), 0.64 / max(diff(range(env_pts[, 2], na.rm = TRUE)), 1e-6)) * 0.86 * grid_lay$cell_scale
 
-        # Draw +1 SD and -1 SD marginal envelopes + bold mean consensus outline under identical registration
+      # Draw +1 SD and -1 SD marginal envelopes + bold mean consensus outline under identical registration
+      draw_outline_in_box(
+        xy_plus, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
+        col_border = grDevices::adjustcolor(sp_col, alpha.f = 0.45),
+        col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.10), lwd = 0.9, lty = 3,
+        shared_scale = shared_scale, shared_center = shared_center
+      )
+      draw_outline_in_box(
+        xy_minus, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
+        col_border = grDevices::adjustcolor(sp_col, alpha.f = 0.45),
+        col_fill = NA, lwd = 0.9, lty = 3,
+        shared_scale = shared_scale, shared_center = shared_center
+      )
+      pts_mean <- draw_outline_in_box(
+        xy_mean, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
+        col_border = sp_col,
+        col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.22), lwd = 2.2, lty = 1,
+        shared_scale = shared_scale, shared_center = shared_center
+      )
+      if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && any(m_type, na.rm = TRUE)) {
+        xy_type <- reconstruct_efa_outline(colMeans(std_hmat[m_type, , drop = FALSE], na.rm = TRUE), nb_pts = 120L)
         draw_outline_in_box(
-          xy_plus, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
-          col_border = grDevices::adjustcolor(sp_col, alpha.f = 0.45),
-          col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.10), lwd = 0.9, lty = 3,
+          xy_type, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
+          col_border = "#111111", col_fill = NA, lwd = 1.6, lty = 2,
           shared_scale = shared_scale, shared_center = shared_center
         )
-        draw_outline_in_box(
-          xy_minus, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
-          col_border = grDevices::adjustcolor(sp_col, alpha.f = 0.45),
-          col_fill = NA, lwd = 0.9, lty = 3,
-          shared_scale = shared_scale, shared_center = shared_center
-        )
-        pts_mean <- draw_outline_in_box(
-          xy_mean, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
-          col_border = sp_col,
-          col_fill = grDevices::adjustcolor(sp_col, alpha.f = 0.22), lwd = 2.2, lty = 1,
-          shared_scale = shared_scale, shared_center = shared_center
-        )
-        if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && any(m_type, na.rm = TRUE)) {
-          xy_type <- reconstruct_efa_outline(colMeans(std_hmat[m_type, , drop = FALSE], na.rm = TRUE), nb_pts = 120L)
-          draw_outline_in_box(
-            xy_type, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
-            col_border = "#111111", col_fill = NA, lwd = 1.6, lty = 2,
-            shared_scale = shared_scale, shared_center = shared_center
-          )
-        }
-        # Midrib axis line inside reconstructed leaf
-        if (!is.null(pts_mean)) {
-          graphics::segments(cx, min(pts_mean[, 2]), cx, max(pts_mean[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.55), lty = 2, lwd = 1.0)
-        }
+      }
+      # Midrib axis line inside reconstructed leaf
+      if (!is.null(pts_mean)) {
+        graphics::segments(cx, min(pts_mean[, 2]), cx, max(pts_mean[, 2]), col = grDevices::adjustcolor(sp_col, alpha.f = 0.55), lty = 2, lwd = 1.0)
       }
 
       .fin_med <- function(col_nm) {
@@ -2072,13 +2077,13 @@ generate_step03_pub_figures <- function(
   }
 
   atomic_save_dual_plot(function() {
-    graphics::par(mfrow = c(1, 2), mar = c(4.2, 4.4, 3.2, 1.0))
+    graphics::par(mfrow = c(1, 2), mar = c(4.2, 4.4, 3.2, 1.0), cex.main = 0.90)
 
     # Panel A: 3 x 5 Marginal Inverse-Fourier Shape Reconstructions Across PC1-PC3 (-2, -1, 0, +1, +2 SD)
     graphics::plot(
       c(0, 5), c(0, 3), type = "n", axes = FALSE, xlab = "", ylab = "",
       main = "A. Marginal Inverse-Fourier Shape Reconstructions Across PC1-PC3",
-      font.main = 2
+      font.main = 2, cex.main = 0.90
     )
     graphics::box(col = "grey78")
     graphics::abline(h = c(1.0, 2.0), v = c(1.0, 2.0, 3.0, 4.0), col = "grey88", lty = 2)
@@ -2112,16 +2117,17 @@ generate_step03_pub_figures <- function(
       row_outlines <- vector("list", length(z_levels))
       for (c_idx in seq_along(z_levels)) {
         z_val <- z_levels[c_idx]
+        sd_eff <- if (r_idx == 1L && abs(z_val) > 1.0) z_val * 0.72 else z_val
         if (!is.null(b_axis)) {
-          h_z <- h_grand_mean + z_val * b_axis
+          h_z <- h_grand_mean + sd_eff * b_axis
         } else if (r_idx == 1L) {
-          h_z <- project_grid_harmonics(z_val * max(sd_p, 0.4), 0.0)
+          h_z <- project_grid_harmonics(sd_eff * max(sd_p, 0.4), 0.0)
         } else if (r_idx == 2L) {
-          h_z <- project_grid_harmonics(0.0, z_val * max(sd_p, 0.4))
+          h_z <- project_grid_harmonics(0.0, sd_eff * max(sd_p, 0.4))
         } else {
           h_z <- h_grand_mean
-          if ("A3" %in% names(h_z)) h_z["A3"] <- h_z["A3"] + 0.06 * z_val
-          if ("D3" %in% names(h_z)) h_z["D3"] <- h_z["D3"] - 0.05 * z_val
+          if ("A3" %in% names(h_z)) h_z["A3"] <- h_z["A3"] + 0.06 * sd_eff
+          if ("D3" %in% names(h_z)) h_z["D3"] <- h_z["D3"] - 0.05 * sd_eff
         }
         row_outlines[[c_idx]] <- reconstruct_efa_outline(h_z, nb_pts = 120L)
       }
@@ -2169,9 +2175,10 @@ generate_step03_pub_figures <- function(
     graphics::plot(
       c(0, 2), c(0, 2), type = "n", axes = FALSE, xlab = "", ylab = "",
       main = "B. Homologous Radial Shape Displacement vs. Focal Reference",
-      font.main = 2
+      font.main = 2, cex.main = 0.90
     )
     graphics::box(col = "grey78")
+    graphics::mtext("Red: Marginal Expansion | Blue: Marginal Contraction (vs. Focal Reference)", side = 3, line = 0.25, cex = 0.72, col = "#333333")
     lay_b <- .compute_outline_grid_layout(length(comp_tx))
 
     for (idx_c in seq_along(comp_tx)) {
@@ -2240,7 +2247,7 @@ generate_step03_pub_figures <- function(
       if (is.finite(rmsd_val)) {
         graphics::text(
           cx_b, cy_b - lay_b$sub_dy,
-          labels = sprintf("Radial RMSD = %.3f | Red: Expansion, Blue: Contraction", rmsd_val),
+          labels = sprintf("Radial RMSD = %.3f", rmsd_val),
           cex = lay_b$cex_sub, col = "grey25"
         )
       }
@@ -2662,6 +2669,10 @@ draw_diagnostic_trait_boxplots <- function(df, sp_clean, taxon_cols, taxon_pch, 
   )
   graphics::axis(2, at = c(0.0, 0.5, 1.0), labels = c("Min", "50%", "Max"), las = 1, cex.axis = 0.76)
   graphics::abline(h = c(0.0, 0.5, 1.0), lty = 3, col = "grey78")
+  if (n_traits >= 2L) {
+    sep_pos <- vapply(seq_len(n_traits - 1L), function(k_t) 0.5 * (group_centers[k_t] + group_centers[k_t + 1L]), numeric(1))
+    graphics::abline(v = sep_pos, lty = 3, col = "#BBBBBB", lwd = 0.9)
+  }
   graphics::axis(1, at = group_centers, labels = names(raw_traits), tick = FALSE, cex.axis = 0.76, line = 0.35, font = 2)
   graphics::text(group_centers, rep(-0.10, n_traits), labels = range_labels, cex = 0.60, col = "grey20")
   graphics::text(group_centers, rep(1.08, n_traits), labels = kw_labels, cex = 0.66, font = 2, col = "#111111")
@@ -2736,12 +2747,21 @@ draw_structure_posterior_barplot <- function(audit_df, cda_res, sp_clean, taxon_
   }
 
   n_bars <- nrow(post_ord)
-  k_cols <- taxon_cols[colnames(post_ord)]
+  u_tx   <- colnames(post_ord)
+  k_cols <- taxon_cols[u_tx]
   k_cols[is.na(k_cols)] <- "#7F7F7F"
+  is_many_tx <- length(u_tx) > 6L
+
+  old_mar <- graphics::par("mar")
+  on.exit(graphics::par(mar = old_mar), add = TRUE)
+  mar_d <- old_mar
+  mar_d[3] <- max(mar_d[3], 4.2)
+  if (is_many_tx) mar_d[1] <- max(mar_d[1], 5.2)
+  graphics::par(mar = mar_d)
 
   graphics::plot(
     c(0, n_bars), c(0, 1.08), type = "n", xaxs = "i", yaxs = "i", xaxt = "n",
-    xlab = "Herbarium Vouchers Grouped by Recorded Species",
+    xlab = if (is_many_tx) "" else "Herbarium Vouchers Grouped by Recorded Species",
     ylab = "CDA Posterior Probability P(Taxon | x)",
     main = main_title, font.main = 2
   )
@@ -2764,11 +2784,17 @@ draw_structure_posterior_barplot <- function(audit_df, cda_res, sp_clean, taxon_
   }
   graphics::rect(0, 0, n_bars, 1.0, border = "#222222", lwd = 1.2)
   short_grp <- gsub("^Packera\\s+", "P. ", sp_rle$values)
-  graphics::axis(1, at = mids, labels = short_grp, tick = FALSE, font = 3, cex.axis = 0.80, line = -0.2)
+  graphics::axis(
+    1, at = mids, labels = short_grp, tick = FALSE, font = 3,
+    cex.axis = if (is_many_tx) 0.68 else 0.80,
+    las = if (is_many_tx) 2 else 1, line = -0.2
+  )
   graphics::legend(
-    "top", horiz = TRUE,
-    legend = packera_italic_expressions(colnames(post_ord)),
-    fill = k_cols, border = NA, cex = 0.70, bty = "n"
+    "top", horiz = FALSE,
+    ncol = min(5L, max(2L, ceiling(length(u_tx) / 3L))),
+    legend = packera_italic_expressions(u_tx),
+    fill = k_cols, border = NA, cex = 0.55, bty = "n",
+    xpd = TRUE, inset = c(0, -0.22)
   )
 }
 
@@ -3285,22 +3311,37 @@ generate_step04_pub_figures <- function(
     graphics::lines(r_eq * cos(theta_seq), r_eq * sin(theta_seq), col = "#D55E00", lwd = 1.5, lty = 2)
 
     arr_cols <- ifelse(v_len >= r_eq, "#D55E00", "#0072B2")
-    keep_a <- which(v_len > 1e-4)
+    keep_a <- which(v_len >= 0.15)
+    if (length(keep_a) == 0L) keep_a <- which(v_len > 1e-4)
     if (length(keep_a) > 0L) {
       graphics::arrows(
         0, 0, bx[keep_a], by[keep_a],
         length = 0.07, lwd = ifelse(v_len[keep_a] >= r_eq, 2.1, 1.5),
         col = arr_cols[keep_a]
       )
+      cand_lbl <- which(v_len >= 0.22)
+      if (length(cand_lbl) == 0L) cand_lbl <- keep_a
+      ord_lbl <- cand_lbl[order(v_len[cand_lbl], decreasing = TRUE)]
+      keep_lbl <- utils::head(ord_lbl, 8L)
       rep_b <- repel_2d_labels(
-        x0 = bx[keep_a] * 1.12, y0 = by[keep_a] * 1.12,
-        labels = lbl_v[keep_a],
+        x0 = bx[keep_lbl] * 1.12, y0 = by[keep_lbl] * 1.12,
+        labels = lbl_v[keep_lbl],
         xlim = c(-1.18, 1.18), ylim = c(-1.18, 1.18),
         cex = 0.70, n_iter = 25L, draw_segments = TRUE,
         seg_col = "grey45", seg_lwd = 0.75,
-        anchor_x = bx[keep_a], anchor_y = by[keep_a]
+        anchor_x = bx[keep_lbl], anchor_y = by[keep_lbl]
       )
-      graphics::text(rep_b$x, rep_b$y, labels = lbl_v[keep_a], cex = 0.70, font = 2, col = "#111111")
+      for (k_b in seq_along(keep_lbl)) {
+        lbl_b <- lbl_v[keep_lbl[k_b]]
+        rx_b <- rep_b$x[k_b]; ry_b <- rep_b$y[k_b]
+        sw_b <- graphics::strwidth(lbl_b, cex = 0.70, font = 2)
+        sh_b <- graphics::strheight(lbl_b, cex = 0.70, font = 2)
+        graphics::rect(
+          rx_b - sw_b * 0.54, ry_b - sh_b * 0.62, rx_b + sw_b * 0.54, ry_b + sh_b * 0.62,
+          col = grDevices::adjustcolor("white", alpha.f = 0.84), border = NA
+        )
+        graphics::text(rx_b, ry_b, labels = lbl_b, cex = 0.70, font = 2, col = "#111111")
+      }
     }
     graphics::legend(
       "bottomleft",
@@ -3344,12 +3385,15 @@ generate_step04_pub_figures <- function(
     ord_tx <- rownames(d2_mat)
     short_ord <- gsub("^Packera\\s+", "P. ", ord_tx)
     tree_pad <- if (G_tx >= 2L) 0.28 * G_tx else 0.0
+    graphics::par(mar = c(6.2, 5.0, 3.3, 1.2))
 
     graphics::plot(
       c(0.5 - tree_pad, G_tx + 0.5), c(0.5, G_tx + 0.5),
-      type = "n", axes = FALSE, xlab = "Active Taxa / Morphotypes (Ward.D2 Phenogram Order)", ylab = "",
+      type = "n", axes = FALSE,
+      xlab = if (G_tx > 4L) "" else "Active Taxa / Morphotypes (Ward.D2 Phenogram Order)",
+      ylab = "",
       main = "B. Variance-Corrected Mahalanobis Distance (D2) & Phenogram",
-      font.main = 2
+      font.main = 2, cex.main = 0.90
     )
     heat_pal <- grDevices::colorRampPalette(c("#FFF7EC", "#FEE8C8", "#FDD49E", "#FDBB84", "#FC8D59", "#E34A33", "#B30000"))(101)
     max_d2 <- max(c(d2_mat, 1e-3), na.rm = TRUE)
@@ -3360,9 +3404,9 @@ generate_step04_pub_figures <- function(
         val_ij <- d2_mat[i, j]
         c_idx <- max(1L, min(101L, round((val_ij / max_d2) * 100) + 1L))
         graphics::rect(j - 0.48, y_pos - 0.48, j + 0.48, y_pos + 0.48, col = heat_pal[c_idx], border = "white", lwd = if (G_tx <= 10L) 1.2 else 0.5)
-        if (G_tx <= 10L) {
+        if (G_tx <= 16L) {
           txt_col <- if ((val_ij / max_d2) >= 0.58) "white" else "#111111"
-          graphics::text(j, y_pos, labels = sprintf("%.1f", val_ij), col = txt_col, cex = max(0.52, min(0.76, 4.2 / G_tx)), font = if (i == j) 1 else 2)
+          graphics::text(j, y_pos, labels = sprintf("%.1f", val_ij), col = txt_col, cex = min(0.72, max(0.38, 5.2 / G_tx)), font = if (i == j) 1 else 2)
         }
       }
     }

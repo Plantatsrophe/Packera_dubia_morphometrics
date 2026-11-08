@@ -44,7 +44,7 @@ compute_dynamic_na_map_bounds <- function(lon_v, lat_v) {
   list(valid_geo = valid_geo, xlim = xlim_map, ylim = ylim_map)
 }
 
-draw_us_state_basemap_base_r <- function(xlim = c(-98, -73), ylim = c(28, 46), main = "", xlab = "Longitude (deg W, WGS84)", ylab = "Latitude (deg N, WGS84)") {
+draw_us_state_basemap_base_r <- function(xlim = c(-98, -73), ylim = c(28, 46), main = "", xlab = "Longitude (deg E, WGS84)", ylab = "Latitude (deg N, WGS84)") {
   graphics::plot(
     xlim, ylim, type = "n", xlim = xlim, ylim = ylim, asp = 1.25,
     xlab = xlab, ylab = ylab, main = main, font.main = 2
@@ -151,10 +151,17 @@ export_step06b_geographic_and_hopkins <- function(
   tier_info <- if (length(present_tx) > 6L) {
     .unpack_synthesis_display_tier(tx_clean, present_tx, max_fg = 6L)
   } else {
-    list(foreground_taxa = present_tx, background_taxa = character(0), is_tiered = FALSE)
+    focal_p <- present_tx[grepl("dubia", present_tx, ignore.case = TRUE)]
+    list(foreground_taxa = unique(c(focal_p, present_tx)), background_taxa = character(0), is_tiered = FALSE)
   }
   fg_tx <- tier_info$foreground_taxa
   bg_tx <- tier_info$background_taxa
+  dyn_pal_fg <- tryCatch(get_dynamic_packera_palette(fg_tx, preserve_order = TRUE), error = function(e) dyn_pal[fg_tx])
+  dyn_pch_fg <- tryCatch(get_dynamic_packera_shapes(fg_tx, preserve_order = TRUE), error = function(e) dyn_pch[fg_tx])
+  for (nm_f in names(dyn_pal_fg)) dyn_pal[[nm_f]] <- dyn_pal_fg[[nm_f]]
+  for (nm_f in names(dyn_pch_fg)) dyn_pch[[nm_f]] <- dyn_pch_fg[[nm_f]]
+  cols_tx <- grDevices::adjustcolor(dyn_pal[tx_clean], alpha.f = alpha_val)
+  pch_tx  <- dyn_pch[tx_clean]; pch_tx[is.na(pch_tx)] <- 1L
 
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(4.6, 4.6, 3.2, 1.2))
@@ -174,6 +181,22 @@ export_step06b_geographic_and_hopkins <- function(
     }
     conflict_v[is.na(conflict_v)] <- FALSE
 
+    prio_v6b <- if ("synthesis_triage_priority" %in% colnames(vouchers_df)) {
+      as.character(vouchers_df$synthesis_triage_priority)
+    } else if ("triage_priority" %in% colnames(vouchers_df)) {
+      as.character(vouchers_df$triage_priority)
+    } else {
+      rep("", nrow(vouchers_df))
+    }
+    prob_v6b <- if ("cda_posterior_prob" %in% colnames(vouchers_df)) {
+      suppressWarnings(as.numeric(vouchers_df$cda_posterior_prob))
+    } else {
+      rep(0.0, nrow(vouchers_df))
+    }
+    prob_v6b[!is.finite(prob_v6b)] <- 0.0
+    is_crit_conf <- conflict_v & (toupper(trimws(prio_v6b)) == "CRITICAL" | prob_v6b >= 0.85)
+    if (!any(is_crit_conf) && sum(conflict_v) <= 50L) is_crit_conf <- conflict_v
+
     xlim_map <- geo_b$xlim
     ylim_map <- geo_b$ylim
 
@@ -183,33 +206,37 @@ export_step06b_geographic_and_hopkins <- function(
     # Panel A: North American Geographic Distribution Map with Dynamic Bounds
     draw_us_state_basemap_base_r(
       xlim = xlim_map, ylim = ylim_map,
-      main = "A. Geographic Distribution & Contact Zone Map (WGS84)"
+      main = "A. Geographic Distribution & Contact Zone Map (WGS84)",
+      xlab = "Longitude (deg E, WGS84)"
     )
     if (any(valid_geo)) {
       if (length(bg_tx) > 0L) {
-        m_bg <- valid_geo & !conflict_v & (tx_clean %in% bg_tx)
+        m_bg <- valid_geo & (tx_clean %in% bg_tx)
         if (any(m_bg)) {
           graphics::points(
             lon_v[m_bg], lat_v[m_bg],
             pch = 1L, bg = NA,
-            col = grDevices::adjustcolor("grey68", alpha.f = 0.35), cex = 0.68, lwd = 0.7
+            col = grDevices::adjustcolor("grey68", alpha.f = 0.32), cex = 0.64, lwd = 0.65
           )
         }
       }
-      m_fg <- valid_geo & !conflict_v & (tx_clean %in% fg_tx)
-      if (any(m_fg)) {
+      if (any(valid_geo & is_crit_conf)) {
         graphics::points(
-          lon_v[m_fg], lat_v[m_fg],
-          pch = pch_tx[m_fg], bg = NA,
-          col = cols_tx[m_fg], cex = 0.85, lwd = 1.0
+          lon_v[valid_geo & is_crit_conf], lat_v[valid_geo & is_crit_conf],
+          pch = 5L, bg = NA,
+          col = grDevices::adjustcolor("#CC79A7", alpha.f = 0.42), cex = 0.58, lwd = 0.85
         )
       }
-      if (any(valid_geo & conflict_v)) {
-        graphics::points(
-          lon_v[valid_geo & conflict_v], lat_v[valid_geo & conflict_v],
-          pch = 5L, bg = NA,
-          col = grDevices::adjustcolor("#CC79A7", alpha.f = 0.90), cex = 1.10, lwd = 1.4
-        )
+      fg_draw_order <- c(setdiff(fg_tx, fg_tx[grepl("dubia", fg_tx, ignore.case = TRUE)]), fg_tx[grepl("dubia", fg_tx, ignore.case = TRUE)])
+      for (sp_fg in fg_draw_order) {
+        m_sp_fg <- valid_geo & (tx_clean == sp_fg)
+        if (any(m_sp_fg)) {
+          graphics::points(
+            lon_v[m_sp_fg], lat_v[m_sp_fg],
+            pch = pch_tx[m_sp_fg], bg = NA,
+            col = cols_tx[m_sp_fg], cex = 0.82, lwd = 0.95
+          )
+        }
       }
       if (any(valid_geo & is_type_6b)) {
         m_t6 <- which(valid_geo & is_type_6b)
@@ -739,7 +766,7 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
       main = "B. Recorded vs. Recommended Determination Matrix", font.main = 2
     )
     ramp_b <- grDevices::colorRampPalette(c("#F7FBFF", "#C6DBEF", "#6BAED6", "#2171B5", "#084594"))(101)
-    cex_cell <- min(0.74, max(0.38, 5.2 / max(nr, nc)))
+    cex_cell <- min(0.64, max(0.34, 4.4 / max(nr, nc)))
     for (i in seq_len(nr)) {
       y_pos <- nr - i + 1
       for (j in seq_len(nc)) {
@@ -834,7 +861,7 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
     tbl_treat_tx <- table(treat_f, tx_f)
     col_totals <- colSums(tbl_treat_tx)
     if (length(tx_levels) > 6L) {
-      graphics::par(mar = c(5.2, 7.6, 3.6, 1.4))
+      graphics::par(mar = c(5.2, 7.6, 4.2, 1.4))
       prop_treat_tx <- sweep(tbl_treat_tx, 2, pmax(col_totals, 1), "/") * 100
       cex_nm <- min(0.78, max(0.40, 6.4 / length(tx_levels)))
       bp_b <- graphics::barplot(
@@ -859,10 +886,10 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
       )
       graphics::grid(nx = NULL, ny = NA, col = "grey85")
       graphics::legend(
-        "bottomright",
+        x = 50, y = max(bp_b) + 1.35, xjust = 0.5, horiz = FALSE, ncol = 3,
         legend = treat_levels,
         fill = treat_pal[treat_levels],
-        cex = 0.64, bg = grDevices::adjustcolor("white", alpha.f = 0.88)
+        cex = 0.62, xpd = TRUE, bty = "n"
       )
     } else {
       y_top_b <- max(c(5, col_totals), na.rm = TRUE) * 1.25
@@ -938,16 +965,17 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   tier_info <- if (length(active_tx) > 6L) {
     .unpack_synthesis_display_tier(df$plot_group, active_tx, max_fg = 6L)
   } else {
-    list(foreground_taxa = active_tx, background_taxa = character(0), is_tiered = FALSE)
+    focal_a <- active_tx[grepl("dubia", active_tx, ignore.case = TRUE)]
+    list(foreground_taxa = unique(c(focal_a, active_tx)), background_taxa = character(0), is_tiered = FALSE)
   }
   fg_tx <- tier_info$foreground_taxa
   bg_tx <- tier_info$background_taxa
 
-  dyn_pal <- get_dynamic_packera_palette(active_tx)
-  dyn_shapes <- get_dynamic_packera_ggplot_shapes(active_tx)
+  dyn_pal <- tryCatch(get_dynamic_packera_palette(fg_tx, preserve_order = TRUE), error = function(e) get_dynamic_packera_palette(active_tx)[fg_tx])
+  dyn_shapes <- tryCatch(get_dynamic_packera_ggplot_shapes(fg_tx, preserve_order = TRUE), error = function(e) get_dynamic_packera_ggplot_shapes(active_tx)[fg_tx])
   thm <- ggplot2::theme_bw(base_size = 9) +
-    ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 9.5),
-                   plot.subtitle = ggplot2::element_text(size = 7.6, color = "grey25"),
+    ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 8.6),
+                   plot.subtitle = ggplot2::element_text(size = 7.0, color = "#333333"),
                    panel.grid.minor = ggplot2::element_blank(),
                    legend.title = ggplot2::element_text(size = 8, face = "bold"),
                    legend.text = ggplot2::element_text(size = 7.3))
@@ -960,10 +988,11 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   pt_alpha <- adaptive_point_alpha(nrow(cda_sub))
   fg_cda <- cda_sub[cda_sub$plot_group %in% fg_tx, , drop = FALSE]
   if (nrow(fg_cda) == 0) fg_cda <- cda_sub
+  fg_cda$plot_group <- factor(as.character(fg_cda$plot_group), levels = fg_tx)
   bg_cda <- if (length(bg_tx) > 0L) cda_sub[cda_sub$plot_group %in% bg_tx, , drop = FALSE] else cda_sub[FALSE, , drop = FALSE]
 
-  cent_rows <- lapply(intersect(fg_tx, unique(fg_cda$plot_group)), function(tx) {
-    m <- fg_cda$plot_group == tx
+  cent_rows <- lapply(intersect(fg_tx, unique(as.character(fg_cda$plot_group))), function(tx) {
+    m <- as.character(fg_cda$plot_group) == tx
     data.frame(plot_group = tx, cx = mean(fg_cda$can1[m], na.rm = TRUE), cy = mean(fg_cda$can2[m], na.rm = TRUE),
                label = gsub("^Packera\\s+", "P. ", tx), stringsAsFactors = FALSE)
   })
@@ -1001,8 +1030,8 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     ggplot2::stat_ellipse(level = 0.95, linetype = 1, linewidth = 0.85, show.legend = FALSE) +
     ggplot2::geom_point(fill = NA, stroke = 0.72, alpha = pt_alpha, size = 1.55) +
     ggplot2::geom_point(data = cent_df, ggplot2::aes(x = cx, y = cy), shape = 3, size = 2.8, stroke = 1.3, color = "black", inherit.aes = FALSE) +
-    ggplot2::scale_color_manual(values = dyn_pal[fg_tx]) +
-    ggplot2::scale_shape_manual(values = dyn_shapes[fg_tx]) +
+    ggplot2::scale_color_manual(values = dyn_pal[fg_tx], drop = FALSE) +
+    ggplot2::scale_shape_manual(values = dyn_shapes[fg_tx], drop = FALSE) +
     thm + ggplot2::labs(
       title = "A. Integrative Canonical Discriminant & Type Baseline Projection",
       subtitle = if (!is.na(loocv_acc)) sprintf("Gold/Silver Anchor CDA (LOOCV = %.1f%%) | 95%% Ellipses & Double-Ringed Types", loocv_acc) else "95% Confidence Ellipses, Group Centroids (+) & Type Anchors",
@@ -1037,11 +1066,17 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   treat_clean[grepl("Cryptic", raw_treat, ignore.case = TRUE)] <- "Putative Cryptic Species"
   treat_levels <- c("Confirmed Species", "Variety / Ecotype", "Hybrid / Introgressant", "Misidentification (Reassign)", "Putative Cryptic Species")
   df_comp$Treatment_Clean <- factor(treat_clean, levels = treat_levels)
-  df_comp$Species_Short <- gsub("^Packera\\s+", "P. ", as.character(df_comp$plot_group))
+  sp_short_raw <- gsub("^Packera\\s+", "P. ", as.character(df_comp$plot_group))
+  pct_conf_by_sp <- tapply(df_comp$Treatment_Clean == "Confirmed Species", sp_short_raw, mean, na.rm = TRUE)
+  dubia_short <- names(pct_conf_by_sp)[grepl("dubia", names(pct_conf_by_sp), ignore.case = TRUE)]
+  other_short <- setdiff(names(sort(pct_conf_by_sp, decreasing = TRUE)), dubia_short)
+  sp_order_top_first <- unique(c(dubia_short, other_short))
+  sp_fac_lvls <- if (length(active_tx) > 5L) rev(sp_order_top_first) else sp_order_top_first
+  df_comp$Species_Short <- factor(sp_short_raw, levels = sp_fac_lvls)
   n_by_sp <- stats::aggregate(catalogNumber ~ Species_Short, data = df_comp, FUN = length)
   p2_sz <- min(2.6, max(1.7, 18.0 / max(nrow(n_by_sp), 1L)))
   p2 <- ggplot2::ggplot(df_comp, ggplot2::aes(x = Species_Short, fill = Treatment_Clean)) +
-    ggplot2::geom_bar(position = "fill", width = 0.65, color = "white", linewidth = 0.25) +
+    ggplot2::geom_bar(position = ggplot2::position_fill(reverse = TRUE), width = 0.65, color = "white", linewidth = 0.25) +
     ggplot2::geom_text(data = n_by_sp, ggplot2::aes(x = Species_Short, y = 1.04, label = paste0("n=", catalogNumber)), inherit.aes = FALSE, size = p2_sz, fontface = "bold") +
     ggplot2::scale_y_continuous(labels = function(x) paste0(round(x * 100), "%"), limits = c(0, 1.12)) +
     ggplot2::scale_fill_manual(values = TAXONOMIC_TREATMENT_PALETTE[treat_levels], drop = FALSE) +
@@ -1245,10 +1280,21 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     )
   }
   if (nrow(fg_geo) > 0L) {
-    p5 <- p5 + ggplot2::geom_point(
-      data = fg_geo, ggplot2::aes(x = lon_plot_e, y = lat_plot_e, color = Triage_Highlight, shape = Triage_Highlight),
-      fill = NA, stroke = 0.95, alpha = 0.92, size = 1.95
-    ) +
+    fg_geo_mod <- fg_geo[fg_geo$Triage_Highlight %in% c("Misidentification (Reassign)", "Hybrid / Introgressant"), , drop = FALSE]
+    fg_geo_cry <- fg_geo[fg_geo$Triage_Highlight == "Putative Cryptic Species", , drop = FALSE]
+    if (nrow(fg_geo_mod) > 0L) {
+      p5 <- p5 + ggplot2::geom_point(
+        data = fg_geo_mod, ggplot2::aes(x = lon_plot_e, y = lat_plot_e, color = Triage_Highlight, shape = Triage_Highlight),
+        fill = NA, stroke = 0.55, alpha = 0.28, size = 1.0
+      )
+    }
+    if (nrow(fg_geo_cry) > 0L) {
+      p5 <- p5 + ggplot2::geom_point(
+        data = fg_geo_cry, ggplot2::aes(x = lon_plot_e, y = lat_plot_e, color = Triage_Highlight, shape = Triage_Highlight),
+        fill = NA, stroke = 0.95, alpha = 0.92, size = 2.0
+      )
+    }
+    p5 <- p5 +
       ggplot2::scale_color_manual(
         values = c(
           "Misidentification (Reassign)" = "#E69F00",
@@ -1271,11 +1317,11 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     p5 <- p5 +
       ggplot2::geom_point(
         data = type_geo, ggplot2::aes(x = lon_plot_e, y = lat_plot_e),
-        shape = 5, fill = NA, stroke = 1.35, size = 2.8, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
+        shape = 5, fill = NA, stroke = 1.35, size = 3.2, color = "#111111", inherit.aes = FALSE, show.legend = FALSE
       ) +
       ggplot2::geom_point(
         data = type_geo, ggplot2::aes(x = lon_plot_e, y = lat_plot_e),
-        shape = 1, fill = NA, stroke = 1.15, size = 3.5, color = "#D55E00", inherit.aes = FALSE, show.legend = FALSE
+        shape = 1, fill = NA, stroke = 1.15, size = 3.8, color = "#D55E00", inherit.aes = FALSE, show.legend = FALSE
       )
   }
   p5 <- p5 +
@@ -1283,12 +1329,12 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     thm + ggplot2::labs(
       title = "E. Geographic Contact Zones, Triage Flags & Type Localities",
       subtitle = "Confirmed vouchers muted (alpha = 0.35) | Triage flags & double-ringed Types highlighted",
-      x = "Longitude (deg W)", y = "Latitude (deg N)",
+      x = "Longitude (deg E)", y = "Latitude (deg N)",
       color = "Triage Flag", shape = "Triage Flag"
     )
 
   # ----------------------------------------------------------------------------
-  # Panel F (p6): Multi-Evidence Delimitation Concordance Grid — Wettstein Matrix
+  # Panel F (p6): Multi-Evidence Delimitation Concordance Grid (Wettstein Matrix)
   # ----------------------------------------------------------------------------
   wett_tx <- if (length(active_tx) > 10L) {
     .unpack_synthesis_display_tier(df_comp$plot_group, active_tx, max_fg = 8L)$foreground_taxa
@@ -1331,17 +1377,19 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     }
     pct_t <- 100 * mean(t_ok, na.rm = TRUE); if (!is.finite(pct_t)) pct_t <- pct_m
 
-    # 3. DINOv2 Vision Audit
-    v_ok <- if ("vision_conflict_flag" %in% names(sub_t) && any(!is.na(sub_t$vision_conflict_flag))) {
-      !as.logical(sub_t$vision_conflict_flag)
+    # 3. DINOv2 Vision / Unsupervised GMM Morphotype Core Audit
+    pct_v <- if ("vision_conflict_flag" %in% names(sub_t) && any(!is.na(sub_t$vision_conflict_flag))) {
+      100 * mean(!as.logical(sub_t$vision_conflict_flag), na.rm = TRUE)
     } else if ("dinov2_predicted_taxon" %in% names(sub_t) && any(!is.na(sub_t$dinov2_predicted_taxon))) {
-      sub_t$dinov2_predicted_taxon == tx | sub_t$dinov2_predicted_taxon == sp_t
-    } else if ("ect_outlier_flag" %in% names(sub_t) && any(!is.na(sub_t$ect_outlier_flag))) {
-      !as.logical(sub_t$ect_outlier_flag)
+      100 * mean(sub_t$dinov2_predicted_taxon == tx | sub_t$dinov2_predicted_taxon == sp_t, na.rm = TRUE)
+    } else if ("is_typical_morphotype" %in% names(sub_t) && any(!is.na(sub_t$is_typical_morphotype))) {
+      100 * mean(suppressWarnings(as.numeric(as.logical(sub_t$is_typical_morphotype))) > 0, na.rm = TRUE)
+    } else if ("gmm_uncertainty" %in% names(sub_t) && any(is.finite(suppressWarnings(as.numeric(sub_t$gmm_uncertainty))))) {
+      100 * mean(suppressWarnings(as.numeric(sub_t$gmm_uncertainty)) <= 0.30, na.rm = TRUE)
     } else {
-      m_ok
+      50.0
     }
-    pct_v <- 100 * mean(v_ok, na.rm = TRUE); if (!is.finite(pct_v)) pct_v <- pct_m
+    if (!is.finite(pct_v)) pct_v <- 50.0
 
     # 4. 10m-30m Edaphic Niche
     e_ok <- if ("edaphic_best_fit_taxon" %in% names(sub_t) && any(!is.na(sub_t$edaphic_best_fit_taxon))) {
@@ -1417,7 +1465,7 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
       axis.text.y = ggplot2::element_text(face = if (is_subcluster_mode) "bold" else "italic", size = min(7.8, max(5.2, 48.0 / max(length(sp_wett_lvls), 1L))))
     ) +
     ggplot2::labs(
-      title = "F. Multi-Evidence Delimitation Concordance Grid — Wettstein Matrix",
+      title = "F. Multi-Evidence Delimitation Concordance Grid (Wettstein Matrix)",
       subtitle = "5 evidence streams + right-hand modal Padial et al. (2010) status code (CCS, ECS, HYB, UCS)",
       x = "Independent Evidence Stream & Padial Summary",
       y = if (is_subcluster_mode) "Target Morphotype / Subcluster" else "Target Species",
@@ -1606,6 +1654,17 @@ render_step08_complex_discovery_pdf <- function(W, part_res, morph_res, vis_res,
       }
     }
     lbl_cex_net <- min(0.76, max(0.48, 7.2 / max(n_taxa, 1L)))
+    for (k_i in seq_along(short_names)) {
+      if (is.finite(lx[k_i]) && is.finite(ly[k_i]) && nzchar(short_names[k_i])) {
+        sw <- graphics::strwidth(short_names[k_i], cex = lbl_cex_net, font = 3) * 0.56
+        sh <- graphics::strheight(short_names[k_i], cex = lbl_cex_net, font = 3) * 0.68
+        graphics::rect(
+          lx[k_i] - sw, ly[k_i] - sh, lx[k_i] + sw, ly[k_i] + sh,
+          col = grDevices::adjustcolor("white", alpha.f = 0.82),
+          border = NA
+        )
+      }
+    }
     graphics::text(lx, ly, labels = short_names, cex = lbl_cex_net, font = 3, col = "black")
 
     u_cl <- sort(unique(cdf$complex_id))

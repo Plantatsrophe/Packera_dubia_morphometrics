@@ -793,6 +793,33 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             hyp_nn = str(comp_df.loc[comp_df["taxon"] == "Packera hyperborea", "nearest_neighbor_taxon"].iloc[0])
             self.assertEqual(hyp_nn, "Packera contermina")
 
+    def test_multi_species_subcluster_suppression_and_line_budget(self):
+        """Verify 07_discover_taxon_complexes.R returns subcluster_mode = FALSE when n_sp > 3L and stays <= 800 lines."""
+        src_lines = DISCOVERY_R_SCRIPT.read_text(encoding="utf-8").splitlines()
+        self.assertLessEqual(len(src_lines), 800, f"07_discover_taxon_complexes.R has {len(src_lines)} lines (> 800)")
+        src_text = "\n".join(src_lines)
+        self.assertIn("n_sp > 3L", src_text)
+
+        r_code = f"""
+        source("{DISCOVERY_R_SCRIPT.as_posix()}")
+        df4 <- data.frame(
+          catalogNumber = sprintf("SP4_%02d", 1:40),
+          plant_individual_id = 1L,
+          species_standardized = rep(c("Packera dubia", "Packera aurea", "Packera anonyma", "Packera obovata"), each = 10),
+          gmm_cluster = rep(c(1L, 2L), 20),
+          can1 = seq(-2, 2, length.out = 40),
+          can2 = seq(1, -1, length.out = 40),
+          stringsAsFactors = FALSE
+        )
+        sub_res <- build_taxon_morphotype_subclusters(df4, min_vouchers = 3L)
+        stopifnot(identical(sub_res$subcluster_mode, FALSE))
+        stopifnot(length(unique(sub_res$morph_df$species_standardized)) == 4L)
+        cat("SUBCLUSTER_MULTI_SP_GUARD_OK\\n")
+        """
+        res = subprocess.run(["Rscript", "-e", r_code], cwd=str(REPO_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"Subcluster multi-species guard test failed:\n{res.stderr}\n{res.stdout}")
+        self.assertIn("SUBCLUSTER_MULTI_SP_GUARD_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
