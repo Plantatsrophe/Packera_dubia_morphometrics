@@ -374,13 +374,15 @@ def _build_native_lm3_crop_masks(
     """
     Constructs `best_mask` (`cls == 0`), `petiole_crop_mask` (`cls == 1`), and `hole_crop_mask` (`cls == 2`)
     delegating component isolation to `leafmachine3.inference.leaf_segmenter._largest_component`,
-    `_components`, `_outer_polygons`, and `leafmachine3.core.imaging.polygon_mask`, while retaining
-    rachis-bridged lateral pinnae in deeply dissected leaves:
-      - Union all `cls == 0` (`Leaf`) candidate masks -> extract `leaf_primary = _largest_component(leaf_union)`.
-      - Check `all_leaf_comps = _components(leaf_union, min_area=64)`. When secondary pinna components (`>= 64` px)
-        are present alongside `leaf_primary` (`>= 64` px), retain any component connected to `leaf_primary`
-        through a `7x7` ellipse-dilated `petiole_mask` / `specimen_paper_cleaned_mask` bridge or within
-        `max(6, int(0.03 * max(ch, cw)))` px of `leaf_primary` or `petiole_mask`.
+    `_components`, `_outer_polygons`, and `leafmachine3.core.imaging.polygon_mask`, while isolating
+    the focal leaf from overlapping neighbor leaves and retaining petiole-bridged lateral pinnae:
+      - Rank `cls == 0` (`Leaf`) candidate instance masks by confidence, crop centrality, and area to
+        select the primary focal leaf instance (`leaf_primary = _largest_component(primary_inst)`),
+        preventing touching neighbor leaf instances from fusing into the focal leaf.
+      - When a `cls == 1` (`Petiole`) mask is present alongside `leaf_primary` (`>= 64` px), retain
+        secondary pinna components (`>= 64` px) only when connected to `leaf_primary` through a
+        `7x7` ellipse-dilated `petiole_mask` bridge (`dilated_pet_bridge`), never bridging across
+        the whole-specimen UNet++ mask (`specimen_paper_cleaned_mask`).
       - Rasterize outer polygons of `leaf_mask` via `_outer_polygons` + `polygon_mask` as `silhouette`.
       - Union all `cls == 1` (`Petiole`) candidate masks -> keep `_largest_component` (`area >= 64` px).
       - Union all `cls == 2` (`Hole`) candidate masks -> keep `_components(min_area=64)` -> rasterize outer
@@ -388,12 +390,13 @@ def _build_native_lm3_crop_masks(
       - Compute `best_mask = np.where((silhouette > 0) & (hole_crop_mask == 0), 255, 0).astype(np.uint8)`
         (`lamina = silhouette & ~hole`), never subtracting `petiole_crop_mask`.
     """
+    _ = specimen_paper_cleaned_mask
     crop_h, crop_w = int(crop_shape[0]), int(crop_shape[1])
     if crop_h <= 0 or crop_w <= 0 or not crop_preds:
         return None, 0.0, None, None
 
     leaf_scores: List[float] = []
-    leaf_union = np.zeros((crop_h, crop_w), dtype=np.uint8)
+    leaf_instances: List[Tuple[float, int, np.ndarray]] = []
     pet_union = np.zeros((crop_h, crop_w), dtype=np.uint8)
     hole_union = np.zeros((crop_h, crop_w), dtype=np.uint8)
     has_pet = False
@@ -417,8 +420,9 @@ def _build_native_lm3_crop_masks(
         if cls_i == 0:
             if min_leaf_area > 0 and fg_area < min_leaf_area:
                 continue
-            leaf_scores.append(float(pr_score))
-            np.maximum(leaf_union, m_u8, out=leaf_union)
+            sc_f = float(pr_score)
+            leaf_scores.append(sc_f)
+            leaf_instances.append((sc_f, fg_area, m_u8 > 0))
         elif cls_i == 1:
             has_pet = True
             np.maximum(pet_union, m_u8, out=pet_union)
@@ -426,7 +430,7 @@ def _build_native_lm3_crop_masks(
             has_hole = True
             np.maximum(hole_union, m_u8, out=hole_union)
 
-    if not leaf_scores or not np.any(leaf_union > 0):
+    if not leaf_instances:
         return None, 0.0, None, None
 
     best_score = float(max(leaf_scores))
@@ -444,74 +448,88 @@ def _build_native_lm3_crop_masks(
             pet_sil |= pet_primary
             petiole_crop_mask = np.where(pet_sil, 255, 0).astype(np.uint8)
 
-    leaf_primary = _largest_component(leaf_union > 0)
+    if len(leaf_instances) == 1:
+        primary_inst_bool = leaf_instances[0][2]
+    else:
+        cx_mid = 0.5 * float(crop_w)
+        cy_mid = 0.5 * float(crop_h)
+        crop_diag = max(1.0, math.hypot(float(crop_w), float(crop_h)))
+        best_focal_idx = 0
+        best_focal_rank = -1.0
+        for idx_li, (sc_li, area_li, mask_li) in enumerate(leaf_instances):
+            ys_li, xs_li = np.where(mask_li)
+            if len(xs_li) == 0:
+                continue
+            mx_li = float(np.mean(xs_li))
+            my_li = float(np.mean(ys_li))
+            dist_norm = math.hypot(mx_li - cx_mid, my_li - cy_mid) / (0.65 * crop_diag)
+            cent_w = max(0.35, 1.0 - dist_norm)
+            rank_li = float(sc_li) * cent_w * (float(area_li) ** 0.35)
+            if rank_li > best_focal_rank:
+                best_focal_rank = rank_li
+                best_focal_idx = idx_li
+        primary_inst_bool = leaf_instances[best_focal_idx][2]
+
+    leaf_primary = _largest_component(primary_inst_bool)
     if int(leaf_primary.sum()) < min_cc_area:
         if is_full_crop:
-            leaf_primary = np.zeros_like(leaf_union, dtype=bool)
             return None, 0.0, None, None
         if int(leaf_primary.sum()) <= 0:
             return None, 0.0, None, None
 
     leaf_mask_bool = leaf_primary.copy()
-    raw_leaf_comps = _components(leaf_union > 0, min_area=64)
-    if isinstance(raw_leaf_comps, list):
-        comp_list = [np.asarray(c, dtype=bool) for c in raw_leaf_comps if np.any(c)]
-        all_leaf_comps = (
-            np.logical_or.reduce(comp_list)
-            if comp_list
-            else np.zeros((crop_h, crop_w), dtype=bool)
-        )
-    else:
-        all_leaf_comps = np.asarray(raw_leaf_comps > 0, dtype=bool)
-        n_ac, lbl_ac = cv2.connectedComponents(all_leaf_comps.astype(np.uint8), connectivity=8)
-        comp_list = [lbl_ac == ci for ci in range(1, n_ac)]
-
-    if int(all_leaf_comps.sum()) > int(leaf_primary.sum()) and int(leaf_primary.sum()) >= 64:
+    pet_src = (petiole_crop_mask > 0) if petiole_crop_mask is not None else (pet_union > 0)
+    if np.any(pet_src) and int(leaf_primary.sum()) >= 64:
         k_bridge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        pet_src = (petiole_crop_mask > 0) if petiole_crop_mask is not None else (pet_union > 0)
-        dilated_pet_bridge = (
-            cv2.dilate(pet_src.astype(np.uint8), k_bridge, iterations=1) > 0
-            if np.any(pet_src)
-            else np.zeros((crop_h, crop_w), dtype=bool)
-        )
-        bridge_mask = dilated_pet_bridge.copy()
-        if (
-            specimen_paper_cleaned_mask is not None
-            and isinstance(specimen_paper_cleaned_mask, np.ndarray)
-            and specimen_paper_cleaned_mask.size > 0
-        ):
-            if specimen_paper_cleaned_mask.shape[:2] != (crop_h, crop_w):
-                spec_rsz = cv2.resize(
-                    (specimen_paper_cleaned_mask > 0).astype(np.uint8),
-                    (crop_w, crop_h),
-                    interpolation=cv2.INTER_NEAREST,
-                ) > 0
-            else:
-                spec_rsz = specimen_paper_cleaned_mask > 0
-            bridge_mask |= spec_rsz
+        dilated_pet_bridge = cv2.dilate(pet_src.astype(np.uint8), k_bridge, iterations=1) > 0
+        if np.any(dilated_pet_bridge & leaf_primary):
+            primary_touch_guard = (
+                cv2.dilate(leaf_primary.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1) > 0
+            )
+            cand_pinna_masks: List[np.ndarray] = []
+            raw_primary_comps = _components(primary_inst_bool, min_area=64)
+            if isinstance(raw_primary_comps, list):
+                cand_pinna_masks.extend(np.asarray(c, dtype=bool) for c in raw_primary_comps if np.any(c))
+            elif np.any(raw_primary_comps > 0):
+                n_pc, lbl_pc = cv2.connectedComponents(
+                    np.asarray(raw_primary_comps > 0, dtype=np.uint8), connectivity=8
+                )
+                cand_pinna_masks.extend(lbl_pc == ci for ci in range(1, n_pc))
 
-        prox_px = max(6, int(0.03 * max(crop_h, crop_w)))
-        k_prox = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * prox_px + 1, 2 * prox_px + 1))
-        anchor_prox = cv2.dilate(
-            (leaf_primary | pet_src).astype(np.uint8),
-            k_prox,
-            iterations=1,
-        ) > 0
+            for _sc_li, _area_li, mask_li in leaf_instances:
+                if mask_li is primary_inst_bool:
+                    continue
+                raw_sec_comps = _components(mask_li, min_area=64)
+                if isinstance(raw_sec_comps, list):
+                    sec_list = [np.asarray(c, dtype=bool) for c in raw_sec_comps if np.any(c)]
+                elif np.any(raw_sec_comps > 0):
+                    n_sc, lbl_sc = cv2.connectedComponents(
+                        np.asarray(raw_sec_comps > 0, dtype=np.uint8), connectivity=8
+                    )
+                    sec_list = [lbl_sc == ci for ci in range(1, n_sc)]
+                else:
+                    sec_list = []
+                for sc_comp in sec_list:
+                    # Exclude separate overlapping leaves that touch leaf_primary directly without petiole attachment
+                    if np.any(sc_comp & primary_touch_guard) and not np.any(sc_comp & dilated_pet_bridge):
+                        continue
+                    cand_pinna_masks.append(sc_comp)
 
-        combined_bridge = all_leaf_comps | bridge_mask
-        _, br_lbls = cv2.connectedComponents(combined_bridge.astype(np.uint8), connectivity=8)
-        primary_br_ids = set(np.unique(br_lbls[leaf_primary]).tolist()) - {0}
-
-        for comp_mask in comp_list:
-            if int(comp_mask.sum()) < 64:
-                continue
-            if np.any(comp_mask & leaf_primary):
-                continue
-            comp_br_ids = set(np.unique(br_lbls[comp_mask]).tolist()) - {0}
-            connected_via_bridge = bool(primary_br_ids & comp_br_ids)
-            within_prox = bool(np.any(comp_mask & anchor_prox))
-            if connected_via_bridge or within_prox:
-                leaf_mask_bool |= comp_mask
+            if cand_pinna_masks:
+                all_leaf_comps = leaf_primary.copy()
+                for c_mask in cand_pinna_masks:
+                    all_leaf_comps |= c_mask
+                combined_bridge = all_leaf_comps | dilated_pet_bridge
+                _, br_lbls = cv2.connectedComponents(combined_bridge.astype(np.uint8), connectivity=8)
+                primary_br_ids = set(np.unique(br_lbls[leaf_primary]).tolist()) - {0}
+                for comp_mask in cand_pinna_masks:
+                    if int(comp_mask.sum()) < 64 or np.any(comp_mask & leaf_primary):
+                        continue
+                    if not np.any(comp_mask & dilated_pet_bridge):
+                        continue
+                    comp_br_ids = set(np.unique(br_lbls[comp_mask]).tolist()) - {0}
+                    if primary_br_ids & comp_br_ids:
+                        leaf_mask_bool |= comp_mask
 
     silhouette_bool = np.zeros((crop_h, crop_w), dtype=bool)
     for poly_l in _outer_polygons(leaf_mask_bool):
@@ -2531,6 +2549,9 @@ class SegmentAndExtractPipeline:
                 offset_xy=(0, 0),
             )
             inst.archetype_score = float(lm3_bm_qc.get("archetype_score", 0.0))
+            _lm3_bilateral_dice = float(lm3_bm_qc.get("bilateral_dice", 1.0))
+            _lm3_si_a = abs(float(lm3_bm_qc.get("si_a", 0.0)))
+            _lm3_sym_ok = bool(lm3_bm_qc.get("success", False))
 
             # 6c. Classical dimensionless shape descriptors (Krieger 2017; Russ 2011): Solidity, Circularity, Extent
             ref_bbox = inst.pcd_bbox if inst.pcd_bbox is not None else inst.bbox
@@ -2624,6 +2645,23 @@ class SegmentAndExtractPipeline:
             reflection_applied = False
             tier: str = "Failed QC"
             assigned_tier: str = "rejected"
+
+            # LeafMachine3 Voronoi bilateral symmetry veto across the midvein (SYM_DICE_ZERO = 0.70, SYM_SIA_ZERO = 0.35):
+            # Rejects merged multi-leaf or leaf-stem blobs (e.g. 1202203_leaf19 where bilateral_dice=0.510, si_a=0.436).
+            if self.enable_geometric_qc and _lm3_sym_ok and not is_folded:
+                _min_sym_dice = 0.45 if is_dissected else 0.70
+                _max_sym_sia = 0.48 if is_dissected else 0.35
+                if _lm3_bilateral_dice < _min_sym_dice or _lm3_si_a >= _max_sym_sia:
+                    _telem_deltas["rejected_solidity_extent"] += 1
+                    inst.assigned_tier = "rejected"
+                    inst.rejection_reason = "UNRESOLVED_CLUMP"
+                    logger.debug(
+                        f"Voucher {catalog_number} leaf {inst.leaf_id} rejected by LM3 bilateral symmetry gate: "
+                        f"bilateral_dice={_lm3_bilateral_dice:.3f} < {_min_sym_dice:.2f} or "
+                        f"|si_a|={_lm3_si_a:.3f} >= {_max_sym_sia:.2f} (is_dissected={is_dissected})."
+                    )
+                    rejected_instances.append(inst)
+                    continue
 
             # Routing Decision Tree
             if not is_folded and routing_res.solidity >= self.min_solidity and routing_res.ucs >= self.min_ucs and routing_res.assigned_tier == "tier1" and not is_dissected:

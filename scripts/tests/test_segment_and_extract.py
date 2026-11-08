@@ -2658,6 +2658,83 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         self.assertEqual(by_lid[3]["leaf_zone"], "cauline")
         self.assertGreater(float(by_lid[3].get("dist_from_crown_norm", 0.60)), 0.55)
 
+    def test_overlapping_leaf_disentanglement_and_bilateral_symmetry_veto(self) -> None:
+        """
+        Verify:
+          1. Two touching/overlapping cls == 0 (Leaf) instance predictions in the same crop
+             without a Petiole (cls == 1) bridge are NOT fused together by _build_native_lm3_crop_masks.
+          2. specimen_paper_cleaned_mask does NOT bridge an adjacent stem or neighbor leaf component
+             into leaf_primary.
+          3. Asymmetric merged leaf/stem masks violating LeafMachine3's midvein Voronoi symmetry
+             thresholds (bilateral_dice < 0.70 or |si_a| >= 0.35, modeled on 1202203_leaf19) are
+             rejected by classify_and_route_leaf and Step 02 gatekeeping.
+        """
+        from scripts.vision.leaf_gatekeeper import classify_and_route_leaf
+        from scripts.vision.lm3_inference_engines import orient_and_score_leaf_lm3
+        from scripts.vision.leaf_geometry_utils import compute_geometric_metrics
+
+        crop_shape = (300, 260)
+        focal_leaf = np.zeros(crop_shape, dtype=np.uint8)
+        cv2.ellipse(focal_leaf, (125, 145), (38, 75), 0, 0, 360, 255, -1)
+
+        # Touching overlapping neighbor leaf on the upper-right (touches focal_leaf along x=155..163)
+        neighbor_leaf = np.zeros(crop_shape, dtype=np.uint8)
+        cv2.ellipse(neighbor_leaf, (195, 110), (42, 65), 25, 0, 360, 255, -1)
+
+        # Whole-specimen UNet++ mask covering both leaves and a connecting stem
+        spec_cleaned = ((focal_leaf > 0) | (neighbor_leaf > 0)).astype(np.uint8) * 255
+        cv2.rectangle(spec_cleaned, (120, 110), (200, 150), 255, -1)
+
+        crop_preds_overlap = [
+            ((65, 85, 225, 165), focal_leaf, 0.94, 0),
+            ((45, 150, 180, 240), neighbor_leaf, 0.79, 0),
+        ]
+        best_m_ov, best_sc_ov, _, _ = step02._build_native_lm3_crop_masks(
+            crop_preds_overlap,
+            crop_shape=crop_shape,
+            is_high_dpi=True,
+            specimen_paper_cleaned_mask=spec_cleaned,
+        )
+        self.assertIsNotNone(best_m_ov)
+        self.assertAlmostEqual(best_sc_ov, 0.94, places=3)
+        self.assertGreater(int(best_m_ov[145, 125]), 0, "Focal central leaf must be retained.")
+        self.assertEqual(
+            int(best_m_ov[100, 210]),
+            0,
+            "Overlapping neighbor leaf instance and whole-specimen UNet++ mask must not be fused into focal leaf.",
+        )
+
+        # Construct a fused asymmetric leaf+stem blob modeled on 1202203_leaf19 (solidity > 0.72, ucs > 0.85,
+        # but unilateral lobe/stem fusion causes bilateral_dice < 0.70 and |si_a| >= 0.35 across the midrib).
+        merged_blob = np.zeros((280, 220), dtype=np.uint8)
+        pts_merged = np.array(
+            [
+                [70, 240],   # base
+                [66, 180],   # straight left margin
+                [64, 115],
+                [70, 50],    # primary apex
+                [98, 72],
+                [158, 88],   # fused right-side second leaf / stem protrusion
+                [166, 150],
+                [132, 205],
+                [82, 238],
+            ],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(merged_blob, [pts_merged], 255)
+        ucs_m, sol_m, _, pa_m, pb_m = compute_geometric_metrics(merged_blob)
+        lm3_qc = orient_and_score_leaf_lm3(merged_blob, p_base=pb_m, p_apex=pa_m)
+        self.assertLess(float(lm3_qc["bilateral_dice"]), 0.70)
+        self.assertGreaterEqual(abs(float(lm3_qc["si_a"])), 0.35)
+
+        routed_merged = classify_and_route_leaf(
+            merged_blob,
+            lm3_bilateral_dice=float(lm3_qc["bilateral_dice"]),
+            lm3_si_a=float(lm3_qc["si_a"]),
+        )
+        self.assertEqual(routed_merged.assigned_tier, "rejected")
+        self.assertEqual(routed_merged.rejection_reason, "UNRESOLVED_CLUMP")
+
 
 if __name__ == "__main__":
     unittest.main()

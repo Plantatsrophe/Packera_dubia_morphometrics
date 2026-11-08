@@ -1808,6 +1808,8 @@ def classify_and_route_leaf(
     keypoints_31: Optional[Dict[str, Tuple[float, float, float]]] = None,
     specimen_paper_cleaned_mask: Optional[np.ndarray] = None,
     lm3_symmetry_score: Optional[float] = None,
+    lm3_bilateral_dice: Optional[float] = None,
+    lm3_si_a: Optional[float] = None,
 ) -> LeafRoutingResult:
     """
     Comprehensive 100% label-blind geometric quality gatekeeper and routing engine
@@ -2183,7 +2185,26 @@ def classify_and_route_leaf(
                 metadata=meta
             )
 
-    # 2. Standard Tier 1 Pristine Check
+    # 2. Standard Tier 1 Pristine Check (with optional LeafMachine3 Voronoi bilateral symmetry gate)
+    if (
+        (lm3_bilateral_dice is not None and float(lm3_bilateral_dice) < 0.70)
+        or (lm3_si_a is not None and abs(float(lm3_si_a)) >= 0.35)
+    ):
+        meta["lm3_bilateral_dice"] = lm3_bilateral_dice
+        meta["lm3_si_a"] = lm3_si_a
+        return LeafRoutingResult(
+            tier="Failed QC",
+            assigned_tier="rejected",
+            solidity=solidity,
+            ucs=ucs,
+            is_folded=False,
+            is_irregular_fold=False,
+            is_dissected=False,
+            processed_mask=mask,
+            rejection_reason="UNRESOLVED_CLUMP",
+            metadata=meta,
+        )
+
     if ucs >= min_ucs and solidity >= min_solidity:
         coords = resample_normalized_contour(mask, num_contour_points, petiole_attachment_pt=p_base) if extract_contours else None
         meta["reflection_applied"] = False
