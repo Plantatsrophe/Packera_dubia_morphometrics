@@ -2462,7 +2462,7 @@ def purge_segments_and_runs(
                 _shutil.rmtree(d, ignore_errors=True)
         d.mkdir(parents=True, exist_ok=True)
 
-    for sub in ("tier1_intact", "tier1_pristine", "tier2_reflected"):
+    for sub in ("tier1_intact", "tier2_reflected"):
         (data_root / "masks" / sub).mkdir(parents=True, exist_ok=True)
     for sub in ("capitula", "rosettes"):
         (data_root / "cropped_patches" / sub).mkdir(parents=True, exist_ok=True)

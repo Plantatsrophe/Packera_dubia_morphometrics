@@ -68,6 +68,8 @@ class TestSegmentAndExtract(unittest.TestCase):
 
         saved_path = extract_tier1_pristine(mask, "TEST001", 1, self.temp_dir)
         self.assertTrue(Path(saved_path).exists(), "Exported Tier 1 mask file must exist.")
+        self.assertEqual(Path(saved_path).parent.name, "tier1_intact")
+        self.assertFalse((self.temp_dir / "masks" / "TEST001_leaf1.png").exists())
 
         read_mask = cv2.imread(saved_path, cv2.IMREAD_GRAYSCALE)
         self.assertIsNotNone(read_mask)
@@ -89,6 +91,8 @@ class TestSegmentAndExtract(unittest.TestCase):
             mask, "TEST002", 1, p_apex, p_base, self.temp_dir
         )
         self.assertIsNotNone(saved_path, "Tier 2 bilateral reflection should succeed for intact half.")
+        self.assertEqual(Path(saved_path).parent.name, "tier2_reflected")
+        self.assertFalse((self.temp_dir / "masks" / "TEST002_leaf1.png").exists())
         self.assertIsNotNone(reflected_mask)
 
         # Reflected silhouette should have high solidity and be symmetric
@@ -649,10 +653,11 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         plant_ids = sorted({r["plant_individual_id"] for r in records})
         self.assertEqual(plant_ids, [0, 1])
 
-        # Verify Tier 1 binary leaf masks exist in data/masks/tier1_intact/
+        # Verify Tier 1 binary leaf masks exist in data/masks/tier1_intact/ without duplicate top-level copies
         for leaf_id in [1, 2, 3]:
             leaf_mask = self.pipeline.masks_dir / "tier1_intact" / f"NCU123_leaf{leaf_id}.png"
             self.assertTrue(leaf_mask.exists(), f"Tier 1 binary leaf mask {leaf_mask} must exist.")
+            self.assertFalse((self.pipeline.masks_dir / f"NCU123_leaf{leaf_id}.png").exists())
 
     def test_lm3_ruler_calibration_resolution(self) -> None:
         """Verify load_ruler_calibrations() resolves measured_from_ruler and predicted_from_megapixels scales."""

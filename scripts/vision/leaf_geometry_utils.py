@@ -528,29 +528,24 @@ def extract_tier1_pristine(
 ) -> str:
     """
     Tier 1: Direct Pristine Silhouette extraction.
-    Saves binary mask to output_dir/masks/ and output_dir/masks/tier1_intact/.
+    Saves binary mask strictly once to output_dir/masks/tier1_intact/.
     """
     out_base = (output_dir / "data") if (output_dir.name != "data" and (output_dir / "data").is_dir()) else output_dir
     mask_dir = out_base / "masks"
-    mask_dir.mkdir(parents=True, exist_ok=True)
     tier1_dir = mask_dir / "tier1_intact"
     tier1_dir.mkdir(parents=True, exist_ok=True)
 
     filename = f"{catalog_number}_leaf{leaf_id}.png"
-    main_save_path = mask_dir / filename
     tier_save_path = tier1_dir / filename
 
     _ = (petiole_mask, hole_mask)
     binary_mask = np.where(mask > 0, 255, 0).astype(np.uint8)
     ok, png_buf = cv2.imencode(".png", binary_mask)
     if ok:
-        png_bytes = png_buf.tobytes()
-        main_save_path.write_bytes(png_bytes)
-        tier_save_path.write_bytes(png_bytes)
+        tier_save_path.write_bytes(png_buf.tobytes())
     else:
-        cv2.imwrite(str(main_save_path), binary_mask)
-        shutil.copyfile(str(main_save_path), str(tier_save_path))
-    return str(main_save_path)
+        cv2.imwrite(str(tier_save_path), binary_mask)
+    return str(tier_save_path)
 
 
 # Backward compatibility alias
@@ -769,22 +764,23 @@ def extract_tier2_reflected(
     else:
         reflected_bin = roi_bin
 
-    main_save_path = None
+    tier_save_path = None
     if output_dir is not None:
         out_base = (output_dir / "data") if (output_dir.name != "data" and (output_dir / "data").is_dir()) else output_dir
         mask_dir = out_base / "masks"
-        mask_dir.mkdir(parents=True, exist_ok=True)
         tier2_dir = mask_dir / "tier2_reflected"
         tier2_dir.mkdir(parents=True, exist_ok=True)
 
         filename = f"{catalog_number}_leaf{leaf_id}.png"
-        main_save_path = mask_dir / filename
         tier_save_path = tier2_dir / filename
 
-        cv2.imwrite(str(main_save_path), reflected_bin)
-        shutil.copyfile(str(main_save_path), str(tier_save_path))
+        ok, png_buf = cv2.imencode(".png", reflected_bin)
+        if ok:
+            tier_save_path.write_bytes(png_buf.tobytes())
+        else:
+            cv2.imwrite(str(tier_save_path), reflected_bin)
 
-    return str(main_save_path) if main_save_path else None, reflected_bin
+    return str(tier_save_path) if tier_save_path else None, reflected_bin
 
 
 def route_tier2_reflected(

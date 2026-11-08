@@ -2959,39 +2959,24 @@ class SegmentAndExtractPipeline:
                 out_base = (self.output_dir / "data") if (self.output_dir.name != "data" and (self.output_dir / "data").is_dir()) else self.output_dir
                 mask_dir = out_base / "masks"
                 tier2_dir = mask_dir / "tier2_reflected"
-                mask_dir.mkdir(parents=True, exist_ok=True)
                 tier2_dir.mkdir(parents=True, exist_ok=True)
 
                 filename = f"{catalog_number}_leaf{inst.leaf_id}.png"
-                main_save_path = mask_dir / filename
                 tier_save_path = tier2_dir / filename
 
                 ok_enc, enc_buf = cv2.imencode(".png", routing_res.processed_mask)
                 if ok_enc:
-                    png_bytes = enc_buf.tobytes()
-                    main_save_path.write_bytes(png_bytes)
-                    tier_save_path.write_bytes(png_bytes)
+                    tier_save_path.write_bytes(enc_buf.tobytes())
                 else:
-                    cv2.imwrite(str(main_save_path), routing_res.processed_mask)
                     cv2.imwrite(str(tier_save_path), routing_res.processed_mask)
 
                 contour_path = _export_homologized(routing_res.processed_mask, is_reflected=True)
-                inst.mask_path = str(tier_save_path) if tier_save_path.exists() else str(main_save_path)
+                inst.mask_path = str(tier_save_path)
                 inst.contour_path = contour_path
             else:
                 mask_path = extract_tier1_pristine(routing_res.processed_mask, catalog_number, inst.leaf_id, self.output_dir)
-                dst_intact = self.tier1_intact_dir / f"{catalog_number}_leaf{inst.leaf_id}.png"
-                if not dst_intact.exists():
-                    try:
-                        self.tier1_intact_dir.mkdir(parents=True, exist_ok=True)
-                        if Path(mask_path).exists():
-                            shutil.copyfile(str(mask_path), str(dst_intact))
-                        else:
-                            cv2.imwrite(str(dst_intact), routing_res.processed_mask)
-                    except Exception:
-                        pass
                 contour_path = _export_homologized(routing_res.processed_mask, is_reflected=False)
-                inst.mask_path = str(dst_intact) if dst_intact.exists() else mask_path
+                inst.mask_path = mask_path
                 inst.contour_path = contour_path
 
             pid_pet = by_plant_petiole.get(int(inst.plant_individual_id), petiole_scape_res)
