@@ -62,6 +62,7 @@ from scripts.core.db import (
     get_db_connection,
     is_canonical_or_explicit_db_context,
     populate_run_active_cohort,
+    purge_segments_and_runs,
 )
 from scripts.core.logger import setup_logging
 
@@ -791,6 +792,8 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd.extend(["--prep-workers", str(args.prep_workers)])
     if getattr(args, "post_workers", None) is not None:
         cmd.extend(["--post-workers", str(args.post_workers)])
+    if getattr(args, "purge_segments", False):
+        cmd.append("--purge-segments")
     if getattr(args, "force", False):
         cmd.append("--force")
 
@@ -1278,8 +1281,38 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--purge-segments",
+        "--purge-old-data",
+        dest="purge_segments",
+        action="store_true",
+        default=False,
+        help="Purge all previous Step 02 to 07 segments, masks, contours, run directories, and SQLite segmentation tables while preserving Step 01 vouchers and raw images.",
+    )
+    parser.add_argument(
+        "--no-purge-runs",
+        dest="purge_runs",
+        action="store_false",
+        default=True,
+        help="When purging segments, preserve historical runs/ directories.",
+    )
 
-    subparsers = parser.add_subparsers(dest="subcommand", required=True, help="Pipeline phase to execute")
+    subparsers = parser.add_subparsers(dest="subcommand", required=False, help="Pipeline phase to execute")
+
+    # Subcommand: purge-segments
+    p_purge = subparsers.add_parser(
+        "purge-segments",
+        aliases=["purge-old-data"],
+        help="Purge all previous Step 02 to 07 segments, masks, contours, run directories, and SQLite segmentation tables",
+    )
+    _add_common_subparser_args(p_purge, include_gpu=False)
+    p_purge.add_argument(
+        "--no-purge-runs",
+        dest="purge_runs",
+        action="store_false",
+        default=True,
+        help="Preserve historical runs/ directories when purging Step 02 segments.",
+    )
 
     # Subcommand: check-env
     p_check = subparsers.add_parser(
@@ -1384,6 +1417,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Enable Packera botanical gatekeeper, dissected-rachis bridging, and per-plant adaptive blade-area filtering (default: False for unconstrained LeafMachine3 extraction)",
+    )
+    p_segment.add_argument(
+        "--purge-segments",
+        "--purge-old-data",
+        dest="purge_segments",
+        action="store_true",
+        default=False,
+        help="Purge all previous Step 02 to 07 segments, masks, contours, run directories, and SQLite segmentation tables before segmenting.",
     )
     p_segment.add_argument(
         "--force",
@@ -1492,6 +1533,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--concurrency", type=int, default=None, help="Download concurrency")
     p_all.add_argument("--download-images", action="store_true", default=False, help="Download specimen images")
     p_all.add_argument(
+        "--purge-segments",
+        "--purge-old-data",
+        dest="purge_segments",
+        action="store_true",
+        default=False,
+        help="Purge all previous Step 02 to 07 segments, masks, contours, run directories, and SQLite segmentation tables before running.",
+    )
+    p_all.add_argument(
         "--force",
         dest="force",
         action="store_true",
@@ -1539,6 +1588,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_purge_segments(args: argparse.Namespace, cfg: Optional[PipelineConfig] = None) -> None:
+    """Purges all Step 02 to 07 segments, masks, contours, run directories, and SQLite tables."""
+    _ = cfg
+    _apply_explicit_db_arg(args)
+    summary = purge_segments_and_runs(
+        workspace_root=PROJECT_ROOT,
+        db_path=getattr(args, "db", None),
+        output_dir=getattr(args, "output_dir", None),
+        purge_runs=True,
+        vacuum=True,
+    )
+    logger.info(
+        "Purge complete: removed %d artifact files and %d SQLite rows (Step 01 vouchers & raw images preserved).",
+        summary["removed_files"],
+        summary["purged_db_rows"],
+    )
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -1547,15 +1614,31 @@ def main() -> None:
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
+    if args.subcommand in ("purge-segments", "purge-old-data"):
+        run_purge_segments(args)
+        return
+
+    if getattr(args, "purge_segments", False) and not args.subcommand:
+        run_purge_segments(args)
+        return
+
+    if not args.subcommand:
+        parser.error("the following arguments are required: subcommand")
+
     if args.subcommand == "check-env":
         run_check_env(args)
         return
+
+    if getattr(args, "purge_segments", False) and args.subcommand != "segment":
+        run_purge_segments(args)
 
     cfg = PipelineConfig.from_yaml(args.config)
 
     dispatch = {
         "check-env": run_check_env,
         "download-weights": run_download_weights,
+        "purge-segments": run_purge_segments,
+        "purge-old-data": run_purge_segments,
         "harvest": run_harvest,
         "segment": run_segment,
         "morphometrics": run_morphometrics,

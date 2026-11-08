@@ -86,6 +86,7 @@ Herbarium sheets present challenging visual artifacts: white mounting tape, frag
   $$\text{effective\_min\_area} = \min(0.75, \max(0.15, 0.25 \times \text{median\_area}))\text{ cm}^2$$
   and the post-gatekeeper relative area floor ($0.15 \times \max\text{area}$) separately per `plant_individual_id` (`effective_min_area_by_pid`). I retain all passing leaves per plant individual without a sheet-wide 6-leaf cap, preventing dwarf or alpine specimens from being discarded.
 * **Post-QC Basal Masking (`crop_dense_rosette_tier4`):** I replace non-basal pixels outside the 5-pixel dilated union of verified basal masks with neutral paper `[242, 239, 230]`.
+* **Segment and Run Reset (`purge_segments_and_runs`):** When I invoke the `purge-segments` (`purge_segments` or `purge_old_data`) CLI control in `run_pipeline.sh`, `main.py`, or `02_segment_and_extract.py`, `purge_segments_and_runs()` in `scripts/core/db.py` clears all Step 02 to 07 masks, 120-vertex contours, ECT matrices, organ crops, downstream CSV tables, run directories (`runs/`), and SQLite Step 02 to 07 rows (followed by `VACUUM`), while preserving Step 01 `vouchers`, `taxon_synonyms`, `environmental_cache`, `data/raw_vouchers/`, and `data/tables/curated_vouchers.csv`.
 
 By filtering out cauline leaves and mounting tape artifacts at this stage, I guarantee that only verified, biologically homologous basal leaves enter geometric shape analysis.
 

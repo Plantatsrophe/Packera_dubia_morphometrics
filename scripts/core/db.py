@@ -2387,3 +2387,111 @@ def ingest_existing_csvs_to_db(
         return counts
     finally:
         conn.close()
+
+
+def purge_segments_and_runs(
+    workspace_root: Optional[Union[str, Path]] = None,
+    db_path: Optional[Union[str, Path]] = None,
+    output_dir: Optional[Union[str, Path]] = None,
+    purge_runs: bool = True,
+    vacuum: bool = True,
+) -> Dict[str, int]:
+    """
+    Purges all Step 02 to 07 segmentation artifacts (masks, contours, ECT matrices,
+    cropped patches, non-Step-01 tables, figures, reports, and run directories) and
+    clears Step 02 to 07 SQLite tables while preserving Step 01 harvested vouchers,
+    raw voucher imagery, taxon synonyms, and the environmental cache.
+    """
+    import shutil as _shutil
+
+    ws = Path(workspace_root).resolve() if workspace_root is not None else PROJECT_ROOT
+    data_root = Path(output_dir).resolve() if output_dir is not None else (ws / "data")
+
+    target_dirs = [
+        data_root / "contours",
+        data_root / "masks",
+        data_root / "ect",
+        data_root / "cropped_patches",
+    ]
+    if data_root == (ws / "data").resolve():
+        target_dirs.extend([
+            ws / "outputs" / "figures",
+            ws / "outputs" / "reports",
+        ])
+        if purge_runs:
+            target_dirs.append(ws / "runs")
+
+    removed_files = 0
+    for d in target_dirs:
+        if d.exists() or d.is_symlink():
+            if d.is_symlink() or d.is_file():
+                try:
+                    d.unlink(missing_ok=True)
+                    removed_files += 1
+                except OSError:
+                    pass
+            else:
+                removed_files += sum(1 for p in d.rglob("*") if p.is_file() or p.is_symlink())
+                _shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True, exist_ok=True)
+
+    for sub in ("tier1_intact", "tier1_pristine", "tier2_reflected"):
+        (data_root / "masks" / sub).mkdir(parents=True, exist_ok=True)
+    for sub in ("capitula", "rosettes"):
+        (data_root / "cropped_patches" / sub).mkdir(parents=True, exist_ok=True)
+
+    tables_dir = data_root / "tables"
+    if tables_dir.exists():
+        for f in tables_dir.iterdir():
+            if f.is_file() and f.name != "curated_vouchers.csv":
+                try:
+                    f.unlink(missing_ok=True)
+                    removed_files += 1
+                except OSError:
+                    pass
+
+    resolved_db = resolve_db_path(db_path=db_path, workspace_root=ws)
+    purged_rows = 0
+    if resolved_db != ":memory:" and Path(resolved_db).exists():
+        conn = get_db_connection(db_path=resolved_db, init_schema=True, workspace_root=ws)
+        try:
+            conn.execute("PRAGMA foreign_keys = OFF;")
+            purge_tables = (
+                "curation_triage",
+                "spatial_rf_predictions",
+                "vision_xai_audit",
+                "otu_morphometrics",
+                "leaf_efa_harmonics",
+                "run_active_cohort",
+                "pipeline_runs",
+                "voucher_reproductive_phenology",
+                "extracted_leaves",
+                "plant_individuals",
+                "dinov2_feature_cache",
+            )
+            for tbl in purge_tables:
+                try:
+                    cur = conn.execute(f"DELETE FROM {tbl};")
+                    if cur.rowcount and cur.rowcount > 0:
+                        purged_rows += int(cur.rowcount)
+                except sqlite3.Error:
+                    pass
+            try:
+                conn.execute(
+                    "UPDATE vouchers SET qc_status = NULL, failure_reason = NULL, failure_details = NULL;"
+                )
+            except sqlite3.Error:
+                pass
+            conn.commit()
+            if vacuum:
+                try:
+                    conn.execute("VACUUM;")
+                    conn.commit()
+                except sqlite3.Error:
+                    pass
+        finally:
+            conn.close()
+
+    summary = {"removed_files": int(removed_files), "purged_db_rows": int(purged_rows)}
+    logger.info("Purged Step 02-07 segments and run artifacts: %s", summary)
+    return summary

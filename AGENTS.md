@@ -41,6 +41,7 @@ Subagents dispatched for parallel work must maintain file-disjoint ownership acr
 Central SQLite WAL database (`data/packera_pipeline.sqlite`) paired with synchronized atomic CSV snapshots:
 * **Tier A: Canonical Shared Store (`data/`):** Invariant Step 01 to 02 assets, masks, 120-vertex contours, crops, environmental cache, and canonical tables.
 * **Tier B: Run-Scoped Stores (`runs/<RUN_ID>/` with `runs/latest`):** Active cohort filtering, Step 03 to 07 statistics, reports, figures, and run logs.
+* **Segment and Run Reset (`--purge-segments` / `--purge-old-data`):** Invoking `./run_pipeline.sh --purge-segments`, `python main.py purge-segments` (`python main.py --purge-segments`), or `02_segment_and_extract.py --purge-segments` executes `purge_segments_and_runs()` in `scripts/core/db.py`, wiping Step 02 to 07 masks, contours, ECT matrices, crops, tables, `runs/`, and SQLite rows (`VACUUM`) while preserving Step 01 `vouchers`, `taxon_synonyms`, `environmental_cache`, `data/raw_vouchers/`, and `data/tables/curated_vouchers.csv`.
 
 ### Database Tables and Master View (`data/packera_pipeline.sqlite`)
 | Tier & Table / View | Primary Key | Key Invariants |

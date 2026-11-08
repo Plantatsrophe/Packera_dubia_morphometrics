@@ -76,6 +76,7 @@ from scripts.core.db import (
     get_db_connection,
     is_canonical_or_explicit_db_context,
     load_step02_records_from_db,
+    purge_segments_and_runs,
     record_voucher_segmentation_transaction,
     upsert_vouchers_records,
 )
@@ -3896,6 +3897,14 @@ def parse_args() -> argparse.Namespace:
         help="Optional override for Stage C contour/ECT/rosette post-processing worker thread count.",
     )
     parser.add_argument(
+        "--purge-segments",
+        "--purge-old-data",
+        dest="purge_segments",
+        action="store_true",
+        default=False,
+        help="Purge all previous Step 02 to 07 segments, masks, contours, run directories, and SQLite segmentation tables before running.",
+    )
+    parser.add_argument(
         "--force",
         dest="force",
         action="store_true",
@@ -3933,6 +3942,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if getattr(args, "purge_segments", False):
+        purge_segments_and_runs(
+            workspace_root=PROJECT_ROOT,
+            db_path=getattr(args, "db", None),
+            output_dir=getattr(args, "output_dir", None),
+            purge_runs=False,
+            vacuum=True,
+        )
     if getattr(args, "regenerate_figures_only", False):
         regenerate_step02_figures_from_tables(
             output_dir=args.output_dir,
@@ -3947,7 +3964,7 @@ def main() -> None:
         min_solidity=args.min_solidity,
         min_ucs=args.min_ucs,
         score_thresh=args.score_thresh,
-        force=args.force,
+        force=bool(args.force or getattr(args, "purge_segments", False)),
         lm3_project_dir=getattr(args, "lm3_project_dir", None),
         db_path=getattr(args, "db", None),
         enable_geometric_qc=getattr(args, "enable_geometric_qc", False),

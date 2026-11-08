@@ -26,6 +26,7 @@ CUSTOM_DB_PATH=""
 SKIP_HARVEST=false
 FORCE_FLAG=""
 RESEGMENT=false
+PURGE_SEGMENTS=false
 START_STEP=1
 START_STEP_EXPLICIT=false
 FOCAL_TAXON=""
@@ -72,6 +73,7 @@ Run & Compute Controls:
   --skip-harvest                     Skip Step 01 network harvest; seed cohort from SQLite / curated_vouchers.csv
   --force                            Force re-execution and overwrite cached artifacts (with --start-step 2, re-segments)
   --resegment                        Force Step 02 LeafMachine3 ONNX re-segmentation (--force-reprocess)
+  --purge-segments, --purge-old-data Purge all previous Step 02 to 07 segments, masks, contours, runs, and SQLite tables (preserves Step 01 vouchers & raw images)
   -j, --threads, --workers <INT>     CPU worker thread limit across Python & R stages (exports PACKERA_MAX_WORKERS)
   --gpu-batch-size, --batch-size <N> GPU inference batch size for Step 02 LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime)
   --wave-size <N>                    Cross-voucher GPU wave size in Step 02 (default: 16 or --gpu-batch-size)
@@ -199,6 +201,11 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --resegment|--force-segment)
+      RESEGMENT=true
+      shift
+      ;;
+    --purge-segments|--purge-old-data|--purge-runs)
+      PURGE_SEGMENTS=true
       RESEGMENT=true
       shift
       ;;
@@ -424,6 +431,37 @@ if [[ -n "${FOCAL_TAXON}" ]]; then
 fi
 if [[ "${INTRASPECIFIC_MODE}" == "true" ]]; then
   INTRASPECIFIC_ARGS=("--intraspecific-mode")
+fi
+
+# Resolve Python interpreter early if --purge-segments was requested
+if [[ "${PURGE_SEGMENTS}" == "true" ]]; then
+  if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
+    _PURGE_PY="${PROJECT_ROOT}/.venv/bin/python"
+  else
+    _PURGE_PY="python3"
+  fi
+  echo "[Purge] Purging all previous Step 02 to 07 segments, masks, contours, run directories, and SQLite segmentation tables..."
+  "${_PURGE_PY}" -c "
+from pathlib import Path
+from scripts.core.db import purge_segments_and_runs
+db_override = '${CUSTOM_DB_PATH}' or None
+res = purge_segments_and_runs(workspace_root=Path('${PROJECT_ROOT}'), db_path=db_override, purge_runs=True, vacuum=True)
+print(f'[Purge] Removed {res[\"removed_files\"]} artifact files and {res[\"purged_db_rows\"]} SQLite rows (Step 01 vouchers & raw images preserved).')
+"
+  # If invoked standalone (e.g. ./run_pipeline.sh --purge-segments [--db <path>]), exit cleanly after purge
+  _NON_PURGE_ARGS=0
+  for _arg in "${ORIG_ARGS[@]}"; do
+    case "${_arg}" in
+      --purge-segments|--purge-old-data|--purge-runs)
+        ;;
+      *)
+        _NON_PURGE_ARGS=$((_NON_PURGE_ARGS + 1))
+        ;;
+    esac
+  done
+  if [[ "${_NON_PURGE_ARGS}" -eq 0 ]]; then
+    exit 0
+  fi
 fi
 
 if [[ -n "${CUSTOM_RUN_ID}" ]]; then

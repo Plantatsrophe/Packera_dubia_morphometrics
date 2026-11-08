@@ -977,8 +977,116 @@ REUSE_CANONICAL_DATA="false"
         self.assertIn("-j, --threads", res.stdout)
         self.assertIn("--gpu-batch-size", res.stdout)
         self.assertIn("--taxon", res.stdout)
-        for active_flag in ("--skip-harvest", "--resegment", "--gold-only", "--auto-neighbors"):
+        for active_flag in ("--skip-harvest", "--resegment", "--purge-segments", "--purge-old-data", "--gold-only", "--auto-neighbors"):
             self.assertIn(active_flag, res.stdout)
+
+    def test_purge_segments_cli_and_purge_segments_and_runs_execution(self):
+        """Verify --purge-segments / --purge-old-data CLI parsing and purge_segments_and_runs execution."""
+        import importlib
+        import sqlite3
+        from scripts.core.db import get_db_connection, purge_segments_and_runs
+
+        parser = main.build_parser()
+
+        # Top-level flag without subcommand
+        args_top = parser.parse_args(["--purge-segments"])
+        self.assertTrue(args_top.purge_segments)
+        self.assertIsNone(args_top.subcommand)
+
+        args_top_alias = parser.parse_args(["--purge-old-data", "--no-purge-runs"])
+        self.assertTrue(args_top_alias.purge_segments)
+        self.assertFalse(args_top_alias.purge_runs)
+
+        # Standalone subcommand and alias
+        args_sub = parser.parse_args(["purge-segments"])
+        self.assertEqual(args_sub.subcommand, "purge-segments")
+        args_sub_alias = parser.parse_args(["purge-old-data", "--no-purge-runs"])
+        self.assertEqual(args_sub_alias.subcommand, "purge-old-data")
+        self.assertFalse(args_sub_alias.purge_runs)
+
+        # Subcommand flag on segment and run-all
+        args_seg_purge = parser.parse_args(["segment", "--purge-segments"])
+        self.assertTrue(args_seg_purge.purge_segments)
+        args_run_all_purge = parser.parse_args(["run-all", "--purge-old-data"])
+        self.assertTrue(args_run_all_purge.purge_segments)
+
+        # 02_segment_and_extract.py flag parsing
+        fake_mods = {
+            k: MagicMock()
+            for k in (
+                "pandas", "numpy", "cv2", "PIL", "PIL.Image", "scipy",
+                "scipy.ndimage", "scipy.spatial", "scipy.spatial.distance",
+                "sklearn", "sklearn.cluster", "sklearn.linear_model",
+                "sklearn.calibration", "sklearn.model_selection", "sklearn.metrics",
+                "sklearn.preprocessing",
+                "matplotlib", "matplotlib.pyplot", "matplotlib.patches", "matplotlib.gridspec",
+                "pygbif", "aiohttp", "tqdm",
+                "torch", "torch.nn", "torch.nn.functional", "torch.utils", "torch.utils.data",
+                "torchvision", "torchvision.transforms",
+            )
+            if k not in sys.modules
+        }
+        with patch.dict(sys.modules, fake_mods):
+            mod_02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
+            with patch.object(sys, "argv", ["02_segment_and_extract.py", "--purge-segments"]):
+                p02 = mod_02.parse_args()
+                self.assertTrue(p02.purge_segments)
+
+        # End-to-end execution of purge_segments_and_runs in isolated temp workspace
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws = Path(tmpdir)
+            (ws / "data" / "raw_vouchers").mkdir(parents=True)
+            (ws / "data" / "raw_vouchers" / "NCU0001.webp").write_bytes(b"WEBP")
+            (ws / "data" / "tables").mkdir(parents=True)
+            (ws / "data" / "tables" / "curated_vouchers.csv").write_text("catalogNumber\nNCU0001\n", encoding="utf-8")
+            (ws / "data" / "tables" / "extracted_leaf_traits.csv").write_text("catalogNumber\nNCU0001\n", encoding="utf-8")
+            (ws / "data" / "contours").mkdir(parents=True)
+            (ws / "data" / "contours" / "NCU0001_leaf_1.csv").write_text("x,y\n0,0\n", encoding="utf-8")
+            (ws / "data" / "masks" / "tier1_intact").mkdir(parents=True)
+            (ws / "data" / "masks" / "tier1_intact" / "NCU0001_leaf_1.png").write_bytes(b"PNG")
+            (ws / "data" / "ect").mkdir(parents=True)
+            (ws / "data" / "ect" / "NCU0001_leaf_1_ect.npy").write_bytes(b"NPY")
+            (ws / "data" / "cropped_patches" / "tier1_intact").mkdir(parents=True)
+            (ws / "data" / "cropped_patches" / "tier1_intact" / "NCU0001_leaf_1.webp").write_bytes(b"WEBP")
+            (ws / "runs" / "20260101_000000").mkdir(parents=True)
+            (ws / "runs" / "20260101_000000" / "run.log").write_text("log", encoding="utf-8")
+
+            db_file = ws / "data" / "packera_pipeline.sqlite"
+            conn = get_db_connection(db_file, init_schema=True)
+            conn.execute(
+                "INSERT INTO vouchers (catalogNumber, scientificName, qc_status) VALUES ('NCU0001', 'Packera aurea', 'PASS')"
+            )
+            conn.execute(
+                "INSERT INTO plant_individuals (catalogNumber, plant_individual_id) VALUES ('NCU0001', 1)"
+            )
+            conn.execute(
+                "INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, assigned_tier, contour_xy_json) VALUES ('NCU0001', 1, 'L1', 'Tier_1_Direct', '[[0,0]]')"
+            )
+            conn.commit()
+            conn.close()
+
+            summary = purge_segments_and_runs(workspace_root=ws, db_path=db_file, purge_runs=True, vacuum=True)
+            self.assertGreaterEqual(summary["removed_files"], 5)
+            self.assertEqual(summary["purged_db_rows"], 2)
+
+            # Step 01 preserved
+            self.assertTrue((ws / "data" / "raw_vouchers" / "NCU0001.webp").exists())
+            self.assertTrue((ws / "data" / "tables" / "curated_vouchers.csv").exists())
+            # Step 02-07 files removed and directories recreated
+            self.assertFalse((ws / "data" / "tables" / "extracted_leaf_traits.csv").exists())
+            self.assertEqual(list((ws / "data" / "contours").glob("*.csv")), [])
+            self.assertEqual(list((ws / "data" / "ect").glob("*.npy")), [])
+            self.assertTrue((ws / "data" / "masks" / "tier1_intact").is_dir())
+            self.assertEqual(list((ws / "data" / "masks" / "tier1_intact").glob("*")), [])
+            self.assertEqual(list((ws / "runs").iterdir()), [])
+
+            # SQLite check: vouchers preserved with qc_status=NULL, Step 02 tables empty
+            conn_check = sqlite3.connect(str(db_file))
+            v_row = conn_check.execute("SELECT catalogNumber, qc_status FROM vouchers").fetchone()
+            self.assertEqual(v_row, ("NCU0001", None))
+            self.assertEqual(conn_check.execute("SELECT COUNT(*) FROM plant_individuals").fetchone()[0], 0)
+            self.assertEqual(conn_check.execute("SELECT COUNT(*) FROM extracted_leaves").fetchone()[0], 0)
+            conn_check.close()
 
 
 if __name__ == "__main__":
