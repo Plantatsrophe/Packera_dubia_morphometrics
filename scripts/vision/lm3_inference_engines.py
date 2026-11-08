@@ -1512,28 +1512,22 @@ def _reduce_crop_predictions_native_lm3(
 ) -> List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]:
     """
     Reduces raw per-instance YOLO26x-seg crop predictions to canonical LeafMachine3
-    per-class masks matching `YoloLeafSegmenter.build_instances` and `Reporter._build_mask_products`:
-      - Groups `raw_dets` by `cls_id` (`0`: Leaf, `1`: Petiole, `2`: Hole), unioning `(m > 0)`
-        into a boolean mask per class and tracking the maximum score `max_score` per class.
-      - For `cls_id in (0, 1)` (`Leaf` and `Petiole`): finds 8-connected components via
-        `cv2.connectedComponentsWithStats(union_u8, connectivity=8)`, keeps only the single
-        largest component if its area `>= min_area_px` (`64`), extracts its outer contours
-        (`cv2.findContours(comp_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)`), and
-        rasterizes via `cv2.fillPoly` (`silhouette` for `cls_id == 0`, `petiole` for `cls_id == 1`).
-      - For `cls_id == 2` (`Hole`): finds all 8-connected components with area `>= min_area_px` (`64`),
-        extracts each component's outer contour (`cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE`),
-        and rasterizes all qualifying hole polygons via `cv2.fillPoly` into `hole_mask_u8`.
-      - If `cls_id == 0` (`Leaf`) is present and `hole_mask_u8` is non-empty, computes
-        `lamina = silhouette & ~hole` (`leaf_mask_u8[hole_mask_u8 > 0] = 0`) and keeps the
-        largest 8-connected component of `leaf_mask_u8` (if area `>= min_area_px`).
-      - Computes the tight bounding box `(ymin, xmin, ymax, xmax)` for each surviving class
-        (`0`, `1`, `2`) and returns `[(bbox, mask_u8, max_score, cls_id), ...]`.
+    masks matching `YoloLeafSegmenter.build_instances` and `Reporter._build_mask_products`
+    while preserving distinct `cls_id == 0` (`Leaf`) instances so touching neighbor leaves
+    are never fused together:
+      - Unions `cls_id == 1` (`Petiole`) into its largest 8-connected component (`area >= min_area_px`)
+        and `cls_id == 2` (`Hole`) into all 8-connected components (`area >= min_area_px`).
+      - Processes each `cls_id == 0` (`Leaf`) instance individually (keeping its largest
+        8-connected component with `area >= min_area_px`, rasterizing its outer polygon, and
+        subtracting `hole_mask_u8` as `lamina = silhouette & ~hole`), ordered with the primary
+        focal leaf instance first.
     """
     ch, cw = int(crop_shape[0]), int(crop_shape[1])
     if not raw_dets or ch <= 0 or cw <= 0:
         return []
     min_area = max(1, int(min_area_px))
 
+    raw_leaf_dets: List[Tuple[float, np.ndarray]] = []
     union_by_cls: Dict[int, np.ndarray] = {}
     max_score_by_cls: Dict[int, float] = {}
     for _bbox, mask_arr, score, cls_id in raw_dets:
@@ -1545,39 +1539,37 @@ def _reduce_crop_predictions_native_lm3(
             m_u8 = cv2.resize(m_u8, (cw, ch), interpolation=cv2.INTER_NEAREST)
         if not np.any(m_u8):
             continue
-        if cid not in union_by_cls:
-            union_by_cls[cid] = m_u8 > 0
-            max_score_by_cls[cid] = float(score)
-        else:
-            union_by_cls[cid] |= (m_u8 > 0)
-            if float(score) > max_score_by_cls[cid]:
+        if cid == 0:
+            raw_leaf_dets.append((float(score), m_u8))
+        elif cid in (1, 2):
+            if cid not in union_by_cls:
+                union_by_cls[cid] = m_u8 > 0
                 max_score_by_cls[cid] = float(score)
+            else:
+                union_by_cls[cid] |= (m_u8 > 0)
+                if float(score) > max_score_by_cls[cid]:
+                    max_score_by_cls[cid] = float(score)
 
-    if not union_by_cls:
+    if not raw_leaf_dets and not union_by_cls:
         return []
 
     class_masks_u8: Dict[int, np.ndarray] = {}
 
-    for cid in (0, 1):
-        if cid not in union_by_cls:
-            continue
-        union_u8 = union_by_cls[cid].astype(np.uint8)
+    if 1 in union_by_cls:
+        union_u8 = union_by_cls[1].astype(np.uint8)
         n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(union_u8, connectivity=8)
-        if n_cc <= 1:
-            continue
-        best_lbl = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        best_area = int(stats[best_lbl, cv2.CC_STAT_AREA])
-        if best_area < min_area:
-            continue
-        comp_u8 = (labels == best_lbl).astype(np.uint8)
-        cnts, _ = cv2.findContours(comp_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        polys = [c.reshape(-1, 1, 2).astype(np.int32) for c in cnts if c.reshape(-1, 2).shape[0] >= 3]
-        if not polys:
-            continue
-        raster_u8 = np.zeros((ch, cw), dtype=np.uint8)
-        cv2.fillPoly(raster_u8, polys, 255)
-        if int(np.count_nonzero(raster_u8)) >= min_area:
-            class_masks_u8[cid] = raster_u8
+        if n_cc > 1:
+            best_lbl = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+            best_area = int(stats[best_lbl, cv2.CC_STAT_AREA])
+            if best_area >= min_area:
+                comp_u8 = (labels == best_lbl).astype(np.uint8)
+                cnts, _ = cv2.findContours(comp_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                polys = [c.reshape(-1, 1, 2).astype(np.int32) for c in cnts if c.reshape(-1, 2).shape[0] >= 3]
+                if polys:
+                    raster_u8 = np.zeros((ch, cw), dtype=np.uint8)
+                    cv2.fillPoly(raster_u8, polys, 255)
+                    if int(np.count_nonzero(raster_u8)) >= min_area:
+                        class_masks_u8[1] = raster_u8
 
     if 2 in union_by_cls:
         union_hole_u8 = union_by_cls[2].astype(np.uint8)
@@ -1597,22 +1589,61 @@ def _reduce_crop_predictions_native_lm3(
             if int(np.count_nonzero(hole_mask_u8)) >= min_area:
                 class_masks_u8[2] = hole_mask_u8
 
-    if 0 in class_masks_u8 and 2 in class_masks_u8:
-        leaf_mask_u8 = class_masks_u8[0].copy()
-        leaf_mask_u8[class_masks_u8[2] > 0] = 0
-        n_cc, labels, stats, _ = cv2.connectedComponentsWithStats((leaf_mask_u8 > 0).astype(np.uint8), connectivity=8)
-        if n_cc > 1:
-            best_lbl = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-            best_area = int(stats[best_lbl, cv2.CC_STAT_AREA])
-            if best_area >= min_area:
-                class_masks_u8[0] = (labels == best_lbl).astype(np.uint8) * 255
-            else:
-                del class_masks_u8[0]
-        else:
-            del class_masks_u8[0]
+    hole_sub_u8 = class_masks_u8.get(2)
+    cx_mid = 0.5 * float(cw)
+    cy_mid = 0.5 * float(ch)
+    crop_diag = max(1.0, math.hypot(float(cw), float(ch)))
 
-    reduced: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]] = []
-    for cid in (0, 1, 2):
+    ranked_leaf_entries: List[Tuple[float, Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]] = []
+    for l_score, l_u8 in raw_leaf_dets:
+        n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(l_u8, connectivity=8)
+        if n_cc <= 1:
+            continue
+        best_lbl = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        best_area = int(stats[best_lbl, cv2.CC_STAT_AREA])
+        if best_area < min_area:
+            continue
+        comp_u8 = (labels == best_lbl).astype(np.uint8)
+        cnts, _ = cv2.findContours(comp_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        polys = [c.reshape(-1, 1, 2).astype(np.int32) for c in cnts if c.reshape(-1, 2).shape[0] >= 3]
+        if not polys:
+            continue
+        raster_u8 = np.zeros((ch, cw), dtype=np.uint8)
+        cv2.fillPoly(raster_u8, polys, 255)
+        if hole_sub_u8 is not None:
+            raster_u8[hole_sub_u8 > 0] = 0
+            n_cc_h, labels_h, stats_h, _ = cv2.connectedComponentsWithStats((raster_u8 > 0).astype(np.uint8), connectivity=8)
+            if n_cc_h <= 1:
+                continue
+            best_lbl_h = 1 + int(np.argmax(stats_h[1:, cv2.CC_STAT_AREA]))
+            if int(stats_h[best_lbl_h, cv2.CC_STAT_AREA]) < min_area:
+                continue
+            raster_u8 = (labels_h == best_lbl_h).astype(np.uint8) * 255
+        fg_count = int(np.count_nonzero(raster_u8))
+        if fg_count < min_area:
+            continue
+        ys, xs = np.where(raster_u8 > 0)
+        if ys.size == 0 or xs.size == 0:
+            continue
+        ymin = int(ys.min())
+        ymax = min(ch, int(ys.max()) + 1)
+        xmin = int(xs.min())
+        xmax = min(cw, int(xs.max()) + 1)
+        if ymax <= ymin or xmax <= xmin:
+            continue
+        mx_l = float(np.mean(xs))
+        my_l = float(np.mean(ys))
+        dist_norm = math.hypot(mx_l - cx_mid, my_l - cy_mid) / (0.65 * crop_diag)
+        cent_w = max(0.35, 1.0 - dist_norm)
+        focal_rank = float(l_score) * cent_w * (float(fg_count) ** 0.35)
+        ranked_leaf_entries.append((focal_rank, ((ymin, xmin, ymax, xmax), raster_u8, float(l_score), 0)))
+
+    ranked_leaf_entries.sort(key=lambda item: item[0], reverse=True)
+    reduced: List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]] = [
+        entry for _rank, entry in ranked_leaf_entries
+    ]
+
+    for cid in (1, 2):
         if cid not in class_masks_u8:
             continue
         m_u8 = class_masks_u8[cid]
@@ -2030,8 +2061,9 @@ class LM3LeafSegmenterEngine:
 
         for _bbox, mask_u8, score, cls_id in reduced:
             if int(cls_id) == 0:
-                lamina_mask = mask_u8
-                best_score = float(score)
+                if lamina_mask is None:
+                    lamina_mask = mask_u8
+                    best_score = float(score)
             elif int(cls_id) == 1:
                 petiole_mask = mask_u8
             elif int(cls_id) == 2:

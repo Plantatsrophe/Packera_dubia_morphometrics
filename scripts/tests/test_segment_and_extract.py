@@ -2549,7 +2549,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             cand_crops_dis = unpacked_dis[0]
             kept_boxes = [c[0] for c in cand_crops_dis]
             kept_classes = [c[2] for c in cand_crops_dis]
-            self.assertIn(1, kept_classes, "Default Stage 1 unpacking must retain Leaf_PARTIAL (cls == 1) alongside Leaf_WHOLE.")
+            self.assertNotIn(1, kept_classes, "Default Stage 1 unpacking must exclude Leaf_PARTIAL (cls == 1) when Leaf_WHOLE (cls == 0) is present.")
             self.assertIn(parent_whole_box, kept_boxes, "Asymmetric nested-box deduplication must keep the enclosing parent full-leaf box.")
             self.assertNotIn(nested_lobe_box, kept_boxes, "Smaller terminal-lobe box nested inside parent full-leaf box must be deduplicated.")
 
@@ -2689,8 +2689,23 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             ((65, 85, 225, 165), focal_leaf, 0.94, 0),
             ((45, 150, 180, 240), neighbor_leaf, 0.79, 0),
         ]
+        from scripts.vision.lm3_inference_engines import _reduce_crop_predictions_native_lm3
+
+        reduced_ov = _reduce_crop_predictions_native_lm3(crop_preds_overlap, crop_shape, min_area_px=64)
+        cls0_reduced = [r for r in reduced_ov if int(r[3]) == 0]
+        self.assertEqual(
+            len(cls0_reduced),
+            2,
+            "_reduce_crop_predictions_native_lm3 must preserve separate cls_id == 0 (Leaf) instances without OR-unioning them.",
+        )
+        self.assertEqual(
+            int(cls0_reduced[0][1][100, 210]),
+            0,
+            "Primary cls_id == 0 mask in _reduce_crop_predictions_native_lm3 must not fuse the touching neighbor leaf.",
+        )
+
         best_m_ov, best_sc_ov, _, _ = step02._build_native_lm3_crop_masks(
-            crop_preds_overlap,
+            reduced_ov,
             crop_shape=crop_shape,
             is_high_dpi=True,
             specimen_paper_cleaned_mask=spec_cleaned,
@@ -2734,6 +2749,44 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         )
         self.assertEqual(routed_merged.assigned_tier, "rejected")
         self.assertEqual(routed_merged.rejection_reason, "UNRESOLVED_CLUMP")
+
+        # Also verify default process_voucher (enable_geometric_qc=False) rejects merged_blob via native LM3 bilateral symmetry
+        with tempfile.TemporaryDirectory() as tmp_v:
+            tmp_vp = Path(tmp_v)
+            dummy_w = tmp_vp / "dummy.pt"
+            dummy_w.write_bytes(b"0")
+            v_csv = tmp_vp / "v.csv"
+            img_p = tmp_vp / "1202203.jpg"
+            img_p.write_bytes(b"\xff\xd8\xff" + b"0" * 200)
+            pd.DataFrame([{"catalogNumber": "1202203", "image_path": str(img_p), "scientificName": "Packera aurea"}]).to_csv(
+                v_csv, index=False
+            )
+            with patch.object(step02, "LM3LeafSegmenterEngine"), patch.object(step02, "LM3PlantDetector"):
+                pipe_def = step02.SegmentAndExtractPipeline(
+                    vouchers_csv=v_csv,
+                    model_weights=dummy_w,
+                    stage1_weights=dummy_w,
+                    output_dir=tmp_vp / "out",
+                    device="cpu",
+                    db_path=tmp_vp / "test.sqlite",
+                    enable_geometric_qc=False,
+                )
+            sheet_canvas = np.full((600, 500, 3), 230, dtype=np.uint8)
+            full_merged = np.zeros((600, 500), dtype=np.uint8)
+            full_merged[100:380, 100:320] = merged_blob
+            with patch("cv2.imread", return_value=sheet_canvas):
+                with patch.object(
+                    pipe_def.model_engine,
+                    "predict",
+                    return_value=[((100, 100, 380, 320), full_merged, 0.91, 0)],
+                ):
+                    recs_def, fail_def = pipe_def.process_voucher("1202203", img_p)
+            self.assertEqual(
+                len(recs_def),
+                0,
+                "Default process_voucher (enable_geometric_qc=False) must reject merged leaf/stem blobs failing native LM3 bilateral symmetry.",
+            )
+            self.assertIsNotNone(fail_def)
 
 
 if __name__ == "__main__":

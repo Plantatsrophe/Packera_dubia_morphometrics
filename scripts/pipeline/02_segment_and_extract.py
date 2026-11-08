@@ -990,10 +990,14 @@ class SegmentAndExtractPipeline:
         rosette_bbox_fallback_used = False
         rejected_leaflet_delta = 0
         crop_pad = 0.0
-        seg_partial_cfg = bool(
+        _cfg_partial = getattr(self.config.segmentation, "segment_partial_leaves", None)
+        _lm3_partial = (
             self.lm3_config.get("leafmachine", {})
             .get("leaf_segmentation", {})
-            .get("segment_partial_leaves", True)
+            .get("segment_partial_leaves", None)
+        )
+        seg_partial_cfg = bool(
+            _cfg_partial if _cfg_partial is not None else (_lm3_partial if _lm3_partial is not None else False)
         )
 
         if not self.enable_geometric_qc:
@@ -1030,23 +1034,38 @@ class SegmentAndExtractPipeline:
                     c1_items.append((s1_bbox, float(s1_score), 1))
 
             selected_s1_leaves: List[Tuple[Tuple[int, int, int, int], float, int]] = list(c0_items)
-            if seg_partial_cfg or not c0_items:
+            if not c0_items:
                 selected_s1_leaves.extend(c1_items)
+            elif seg_partial_cfg:
+                for c1_box, c1_sc, c1_cl in c1_items:
+                    area_c1 = float(max(1, (c1_box[2] - c1_box[0]) * (c1_box[3] - c1_box[1])))
+                    overlaps_c0 = False
+                    for c0_box, _c0_sc, _c0_cl in c0_items:
+                        area_c0 = float(max(1, (c0_box[2] - c0_box[0]) * (c0_box[3] - c0_box[1])))
+                        iy0, ix0 = max(c1_box[0], c0_box[0]), max(c1_box[1], c0_box[1])
+                        iy1, ix1 = min(c1_box[2], c0_box[2]), min(c1_box[3], c0_box[3])
+                        if iy1 > iy0 and ix1 > ix0:
+                            inter_c = float((iy1 - iy0) * (ix1 - ix0))
+                            if (inter_c / max(min(area_c1, area_c0), 1.0)) >= 0.20:
+                                overlaps_c0 = True
+                                break
+                    if not overlaps_c0:
+                        selected_s1_leaves.append((c1_box, c1_sc, c1_cl))
 
-            # Asymmetric confidence-ordered nested-box deduplication:
+            # Confidence-ordered nested-box deduplication:
             #   1. Already-kept box `k` suppresses candidate `b` if symmetric `IoU >= 0.70` OR `k` encloses `b`
             #      (`area_k >= 0.85 * area_b` and `inter / max(area_b, 1.0) >= 0.90`).
-            #   2. Conversely, if candidate `b` is a larger whole-leaf box that encloses an already-kept
-            #      smaller sub-lobe box `k` (`area_b >= 1.35 * area_k` and `inter / max(area_k, 1.0) >= 0.90`
-            #      and `b_score >= 0.25`), replace `k` in `deduped_s1` with the enclosing parent leaf box `b`.
+            #   2. Conversely, if candidate `b` is a whole-leaf box (`b_cls == 0`) that encloses an already-kept
+            #      smaller sub-lobe box `k` (`k_cls == 0`, `area_b >= 1.35 * area_k` and `inter / max(area_k, 1.0) >= 0.90`
+            #      and `b_score >= 0.50`), replace `k` in `deduped_s1` with the enclosing parent leaf box `b`.
             if len(selected_s1_leaves) >= 2:
-                selected_s1_leaves.sort(key=lambda x: float(x[1]), reverse=True)
+                selected_s1_leaves.sort(key=lambda x: (int(x[2]) == 0, float(x[1])), reverse=True)
                 deduped_s1: List[Tuple[Tuple[int, int, int, int], float, int]] = []
                 for b_box, b_score, b_cls in selected_s1_leaves:
                     area_b = float(max(1, (b_box[2] - b_box[0]) * (b_box[3] - b_box[1])))
                     suppressed = False
                     replaced_indices: List[int] = []
-                    for idx_k, (k_box, _k_score, _k_cls) in enumerate(deduped_s1):
+                    for idx_k, (k_box, _k_score, k_cls) in enumerate(deduped_s1):
                         area_k = float(max(1, (k_box[2] - k_box[0]) * (k_box[3] - k_box[1])))
                         iy0, ix0 = max(b_box[0], k_box[0]), max(b_box[1], k_box[1])
                         iy1, ix1 = min(b_box[2], k_box[2]), min(b_box[3], k_box[3])
@@ -1054,9 +1073,11 @@ class SegmentAndExtractPipeline:
                             inter = float((iy1 - iy0) * (ix1 - ix0))
                             iou = inter / max(area_b + area_k - inter, 1.0)
                             if (
-                                area_b >= 1.35 * area_k
+                                int(b_cls) == 0
+                                and int(k_cls) == 0
+                                and area_b >= 1.35 * area_k
                                 and (inter / max(area_k, 1.0)) >= 0.90
-                                and float(b_score) >= 0.25
+                                and float(b_score) >= 0.50
                             ):
                                 replaced_indices.append(idx_k)
                             elif iou >= 0.70 or (
@@ -1149,26 +1170,33 @@ class SegmentAndExtractPipeline:
                 eligible_s1_items.append((s1_bbox, s1_score, s1_cls, s1_bh, s1_bw, s1_cy))
 
             if len(eligible_s1_items) >= 2:
-                eligible_s1_items.sort(key=lambda x: float(x[1]), reverse=True)
+                eligible_s1_items.sort(key=lambda x: (int(x[2]) == 0, float(x[1])), reverse=True)
                 deduped_s1_qc: List[Tuple[Tuple[int, int, int, int], float, int, int, int, float]] = []
                 for item_b in eligible_s1_items:
                     b_box = item_b[0]
                     b_score = float(item_b[1])
+                    b_cls = int(item_b[2])
                     area_b = float(max(1, (b_box[2] - b_box[0]) * (b_box[3] - b_box[1])))
                     suppressed = False
                     replaced_indices_qc: List[int] = []
                     for idx_k, item_k in enumerate(deduped_s1_qc):
                         k_box = item_k[0]
+                        k_cls = int(item_k[2])
                         area_k = float(max(1, (k_box[2] - k_box[0]) * (k_box[3] - k_box[1])))
                         iy0, ix0 = max(b_box[0], k_box[0]), max(b_box[1], k_box[1])
                         iy1, ix1 = min(b_box[2], k_box[2]), min(b_box[3], k_box[3])
                         if iy1 > iy0 and ix1 > ix0:
                             inter = float((iy1 - iy0) * (ix1 - ix0))
                             iou = inter / max(area_b + area_k - inter, 1.0)
+                            if b_cls == 1 and k_cls == 0 and (inter / max(min(area_b, area_k), 1.0)) >= 0.20:
+                                suppressed = True
+                                break
                             if (
-                                area_b >= 1.35 * area_k
+                                b_cls == 0
+                                and k_cls == 0
+                                and area_b >= 1.35 * area_k
                                 and (inter / max(area_k, 1.0)) >= 0.90
-                                and b_score >= 0.25
+                                and b_score >= 0.50
                             ):
                                 replaced_indices_qc.append(idx_k)
                             elif iou >= 0.70 or (
@@ -2333,9 +2361,47 @@ class SegmentAndExtractPipeline:
                     p_apex=p_apex_use,
                     offset_xy=(0, 0),
                 )
-                inst.archetype_score = float(lm3_bm_raw.get("archetype_score", 0.0))
+                lm3_bm_geom = (
+                    orient_and_score_leaf_lm3(
+                        inst.mask,
+                        keypoints_31=None,
+                        p_base=raw_pb,
+                        p_apex=raw_pa,
+                        offset_xy=(0, 0),
+                    )
+                    if inst.keypoints_31 is not None
+                    else lm3_bm_raw
+                )
+                inst.archetype_score = float(
+                    min(
+                        float(lm3_bm_raw.get("archetype_score", 0.0)),
+                        float(lm3_bm_geom.get("archetype_score", 0.0)),
+                    )
+                )
+                _raw_b_dice = min(
+                    float(lm3_bm_raw.get("bilateral_dice", 1.0)),
+                    float(lm3_bm_geom.get("bilateral_dice", 1.0)),
+                )
+                _raw_si_a = max(
+                    abs(float(lm3_bm_raw.get("si_a", 0.0))),
+                    abs(float(lm3_bm_geom.get("si_a", 0.0))),
+                )
+                _raw_sym_ok = bool(lm3_bm_raw.get("success", False) or lm3_bm_geom.get("success", False))
 
                 is_dissected = bool(inst.solidity < self.min_solidity and is_botanical_dissection(inst.mask))
+                _min_sym_dice = 0.45 if is_dissected else 0.70
+                _max_sym_sia = 0.48 if is_dissected else 0.35
+                if (
+                    (_raw_sym_ok and (_raw_b_dice < _min_sym_dice or _raw_si_a >= _max_sym_sia))
+                    or (not is_dissected and inst.solidity < 0.65)
+                    or inst.extent < (0.16 if is_dissected else 0.25)
+                    or inst.circularity < 0.05
+                ):
+                    _telem_deltas["rejected_solidity_extent"] += 1
+                    inst.assigned_tier = "rejected"
+                    inst.rejection_reason = "UNRESOLVED_CLUMP"
+                    rejected_instances.append(inst)
+                    continue
                 if is_dissected:
                     # Normalize UCS by convex-hull solidity so deeply dissected pinnatisect/lyrate leaves
                     # are not penalized for inter-lobe sinus area
