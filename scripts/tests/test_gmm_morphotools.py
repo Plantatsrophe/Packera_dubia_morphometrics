@@ -1596,6 +1596,93 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertTrue(flags_df["open_set_novelty_p"].notna().all())
             self.assertTrue(flags_df["is_confident_label_noise"].notna().all())
 
+    def test_hierarchical_deme_shrinkage_and_per_species_typical_morphotype(self):
+        """
+        Verify that:
+        1. `apply_hierarchical_population_deme_shrinkage()` exists in
+           `scripts/morphometrics/authority_weighting_utils.R` and shrinks variance
+           among conspecific individuals within a 10 km population deme and
+           same-sheet `catalogNumber`.
+        2. `compute_type_specimen_morph_control()` evaluates `is_typical_morphotype`
+           per-species rather than requiring global `gmm_cluster == 1L`.
+        """
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        r_code = """
+        source("scripts/morphometrics/authority_weighting_utils.R")
+        stopifnot(exists("apply_hierarchical_population_deme_shrinkage", mode = "function"))
+
+        # 1. Test Level 2 (same-sheet catalogNumber) and Level 3 (10 km conspecific deme) shrinkage
+        df_deme <- data.frame(
+          catalogNumber = c("SHEET-001", "SHEET-001", "SHEET-002", "SHEET-003", "SHEET-ISOLATE"),
+          plant_individual_id = c(0L, 1L, 0L, 0L, 0L),
+          species_standardized = rep("Packera dubia", 5L),
+          determiner_tier = rep("Tier_1_Gold", 5L),
+          authority_weight = rep(0.95, 5L),
+          n_tier1_leaves = c(2L, 2L, 4L, 4L, 3L),
+          decimalLatitude = c(35.910, 35.910, 35.914, 35.918, 37.500),
+          decimalLongitude = c(-79.050, -79.050, -79.054, -79.058, -81.200),
+          PC1 = c(-2.60, -1.40, -2.05, -1.95, -2.10),
+          PC2 = c(0.60, -0.40, 0.12, 0.08, 0.10),
+          stringsAsFactors = FALSE
+        )
+        shrunk_df <- apply_hierarchical_population_deme_shrinkage(
+          df_deme,
+          feature_cols = c("PC1", "PC2"),
+          deme_radius_km = 10.0,
+          kappa_sheet = 1.5,
+          kappa_deme = 1.25
+        )
+        stopifnot("population_deme_id" %in% names(shrunk_df))
+        stopifnot("deme_n_specimens" %in% names(shrunk_df))
+        stopifnot("PC1_raw_individual" %in% names(shrunk_df))
+        # First 4 rows are within 10 km of each other and share a deme
+        stopifnot(length(unique(shrunk_df$population_deme_id[1:4])) == 1L)
+        stopifnot(all(shrunk_df$deme_n_specimens[1:4] == 4L))
+        # Same-sheet spread (rows 1 & 2) and within-deme variance (rows 1..4) must shrink
+        raw_sheet_gap <- abs(df_deme$PC1[1] - df_deme$PC1[2])
+        shrunk_sheet_gap <- abs(shrunk_df$PC1[1] - shrunk_df$PC1[2])
+        stopifnot(shrunk_sheet_gap < raw_sheet_gap)
+        stopifnot(stats::var(shrunk_df$PC1[1:4]) < stats::var(df_deme$PC1[1:4]))
+
+        # 2. Test per-species evaluation of is_typical_morphotype in compute_type_specimen_morph_control()
+        df_typ <- data.frame(
+          catalogNumber = c("DUB-TYPE", "DUB-GOLD-1", "DUB-GOLD-2", "OBO-TYPE", "OBO-GOLD-1", "OBO-GOLD-2"),
+          plant_individual_id = rep(0L, 6L),
+          species_standardized = c(rep("Packera dubia", 3L), rep("Packera obovata", 3L)),
+          determiner_tier = rep("Tier_1_Gold", 6L),
+          authority_weight = rep(0.98, 6L),
+          type_status = c("Holotype", "None", "None", "Holotype", "None", "None"),
+          is_type_specimen = c(TRUE, FALSE, FALSE, TRUE, FALSE, FALSE),
+          gmm_cluster = c(1L, 1L, 1L, 2L, 2L, 2L),
+          PC1 = c(-2.20, -2.15, -2.25, 2.30, 2.25, 2.35),
+          PC2 = c(0.10, 0.12, 0.08, -0.10, -0.12, -0.08),
+          stringsAsFactors = FALSE
+        )
+        ctrl <- compute_type_specimen_morph_control(
+          df = df_typ,
+          X_mat = as.matrix(df_typ[, c("PC1", "PC2")]),
+          taxon_col = "species_standardized"
+        )
+        # Both Packera dubia (in gmm_cluster 1) and Packera obovata (in gmm_cluster 2) must be recognized as typical morphotypes for their respective species
+        stopifnot(all(ctrl$is_typical_morphotype[1:3]))
+        stopifnot(all(ctrl$is_typical_morphotype[4:6]))
+        cat("DEME_SHRINKAGE_AND_PER_SPECIES_TYPICAL_OK\\n")
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            r_file = Path(tmpdir) / "test_deme_and_typical.R"
+            r_file.write_text(r_code, encoding="utf-8")
+            proc = subprocess.run(
+                ["Rscript", str(r_file)],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(proc.returncode, 0, f"Deme shrinkage / typical morphotype R test failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("DEME_SHRINKAGE_AND_PER_SPECIES_TYPICAL_OK", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

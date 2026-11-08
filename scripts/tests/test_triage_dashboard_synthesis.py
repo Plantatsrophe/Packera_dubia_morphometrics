@@ -896,6 +896,102 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             self.assertNotEqual(str(singleton_row["taxonomic_status_call"]), "Putative_Cryptic_Species")
             self.assertNotEqual(str(singleton_row["taxonomic_treatment_subtype"]), "Putative_Cryptic_Species")
 
+    def test_sibling_ramet_propagation_and_morph_concordance_protection(self):
+        """
+        Verify in `apply_taxonomic_decision_matrix()` (`scripts/analysis/06_triage_dashboard_synthesis.R`):
+        1. Leafless ramets on a multi-plant sheet (`catalogNumber`) inherit sibling sheet-mate
+           morphology and are never assigned `Putative_Hybrid_Introgression` / `Hybrid_Introgressant`
+           via an imputed `cda_margin = 0.15` fallback.
+        2. Specimens with concordant leaf morphology (`cda_predicted_taxon == species_standardized`
+           and `cda_posterior_prob >= 0.80`) are protected from edaphic-only
+           `Misidentification_Reassign` overrides (`Rule B` / `congener_osr_reassign`).
+        """
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        r_code = """
+        suppressPackageStartupMessages({ library(readr); library(dplyr) })
+        source("scripts/analysis/06_triage_dashboard_synthesis.R")
+
+        df_test <- data.frame(
+          catalogNumber = c(
+            "MULTI-SHEET-001",
+            "MULTI-SHEET-001",
+            "LEAFLESS-SOLO-002",
+            "MORPH-CONCORDANT-EDAPH-CONFLICT-003"
+          ),
+          plant_individual_id = c(0L, 1L, 0L, 0L),
+          species_raw = rep("Packera dubia", 4L),
+          species_standardized = rep("Packera dubia", 4L),
+          determiner_tier = c("Tier_1_Gold", "Tier_1_Gold", "Tier_2_Silver", "Tier_1_Gold"),
+          type_status = rep("None", 4L),
+          is_type_specimen = rep(FALSE, 4L),
+          morph_tier_source = c("Tier_1_Pure", "No_Leaves", "No_Leaves", "Tier_1_Pure"),
+          n_tier1_leaves = c(3L, 0L, 0L, 4L),
+          cda_predicted_taxon = c("Packera dubia", NA_character_, NA_character_, "Packera dubia"),
+          cda_posterior_prob = c(0.94, NA_real_, NA_real_, 0.91),
+          cda_posterior_margin = c(0.88, NA_real_, NA_real_, 0.82),
+          morphometric_outlier_flag = c(FALSE, FALSE, FALSE, FALSE),
+          edaphic_best_fit_taxon = c("Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata"),
+          rf_predicted_taxon = c("Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata"),
+          rf_predicted_prob = c(0.92, 0.92, 0.78, 0.89),
+          edaphic_schoener_d = c(0.82, 0.82, 0.40, 0.35),
+          delta_doy_resid = c(1.0, 1.0, 2.0, 1.5),
+          is_active_anthesis = rep(TRUE, 4L),
+          gmm_cluster = c(1L, NA_integer_, NA_integer_, 1L),
+          gmm_2_delta_bic = rep(8.0, 4L),
+          gmm_uncertainty = c(0.04, NA_real_, NA_real_, 0.05),
+          is_typical_morphotype = c(TRUE, NA, NA, TRUE),
+          type_morph_mahal_d2 = c(0.55, NA_real_, NA_real_, 0.70),
+          nearest_type_morph_taxon = c("Packera dubia", NA_character_, NA_character_, "Packera dubia"),
+          type_morph_concordance = c(0.95, NA_real_, NA_real_, 0.92),
+          type_edaphic_z_score = c(0.40, 0.40, 1.60, 2.95),
+          nearest_type_niche_taxon = c("Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata"),
+          min_congener_mahal_d2 = c(9.50, NA_real_, NA_real_, 3.10),
+          min_congener_taxon = c("Packera obovata", NA_character_, NA_character_, "Packera obovata"),
+          stringsAsFactors = FALSE
+        )
+
+        res <- apply_taxonomic_decision_matrix(df_test)
+
+        # 1a. Multi-plant sheet leafless ramet (row 2) inherits sibling morphology from row 1
+        stopifnot(isTRUE(res$has_observed_or_sheet_morph[2]))
+        stopifnot(identical(res$cda_predicted_taxon[2], "Packera dubia"))
+        stopifnot(is.finite(res$cda_posterior_prob[2]) && res$cda_posterior_prob[2] > 0.80)
+        stopifnot(identical(res$taxonomic_treatment_subtype[2], "Confirmed_Species"))
+
+        # 1b. Solo leafless ramet (row 3) without observed or sibling morphology is never assigned
+        #     Hybrid_Introgressant / Putative_Hybrid_Introgression via an imputed cda_margin = 0.15 fallback
+        stopifnot(!isTRUE(res$has_observed_or_sheet_morph[3]))
+        stopifnot(!identical(res$taxonomic_treatment_subtype[3], "Hybrid_Introgressant"))
+        stopifnot(!identical(res$taxonomic_status_call[3], "Putative_Hybrid_Introgression"))
+        stopifnot(!identical(res$taxonomic_status_call[3], "Hybrid_Intergrade_Swarm"))
+
+        # 2. Morphologically concordant specimen (row 4: cda_predicted_taxon == species_standardized,
+        #    cda_posterior_prob == 0.91 >= 0.80, type_morph_mahal_d2 == 0.70) is protected from
+        #    edaphic-only Misidentification_Reassign overrides (Rule B / congener_osr_reassign)
+        stopifnot(!identical(res$taxonomic_treatment_subtype[4], "Misidentification_Reassign"))
+        stopifnot(identical(res$recommended_determination[4], "Packera dubia"))
+
+        cat("SIBLING_PROPAGATION_AND_MORPH_PROTECTION_OK\\n")
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            r_script = Path(tmpdir) / "test_sibling_and_morph_protection.R"
+            r_script.write_text(r_code, encoding="utf-8")
+            proc = subprocess.run(
+                ["Rscript", str(r_script)],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"Sibling ramet propagation / morph concordance protection test failed:\n{proc.stderr}\n{proc.stdout}",
+        )
+        self.assertIn("SIBLING_PROPAGATION_AND_MORPH_PROTECTION_OK", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

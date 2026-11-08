@@ -2321,6 +2321,56 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             seen_vouchers = [t.split("\n")[-1].split(" ")[0] for t in leaf_titles]
             self.assertEqual(len(seen_vouchers), len(set(seen_vouchers)), "No duplicate leaf IDs across a row.")
 
+    def test_enclosed_sinus_hole_subtraction_and_bridge_opening(self) -> None:
+        """
+        Verify that _prepare_lamina_mask() and classify_and_route_leaf() subtract
+        internal hole_mask / inter-lobe background paper pockets rather than refilling
+        them to 255, and open narrow inter-lobe bridges so the outer contour traces
+        into the sinus.
+        """
+        from scripts.vision.leaf_geometry_utils import _prepare_lamina_mask
+        from scripts.vision.leaf_gatekeeper import classify_and_route_leaf
+
+        mask = np.zeros((200, 160), dtype=np.uint8)
+        cv2.ellipse(mask, (80, 100), (45, 80), 0, 0, 360, 255, -1)
+
+        hole_mask = np.zeros_like(mask)
+        # Enclosed inter-lobe background paper pocket separated from right exterior by a 4-px bridge
+        hole_mask[85:115, 85:121] = 255
+        # Small true interior insect hole deep inside the blade
+        hole_mask[60:64, 75:79] = 255
+        mask[60:64, 75:79] = 0
+
+        prep_mask = _prepare_lamina_mask(mask.copy(), hole_mask=hole_mask)
+        self.assertEqual(int(prep_mask[100, 100]), 0, "Inter-lobe sinus pocket must be subtracted, not refilled to 255.")
+        self.assertEqual(int(prep_mask[62, 77]), 255, "Small true interior insect hole should be filled to 255.")
+
+        cnts_prep, _ = cv2.findContours(prep_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        self.assertTrue(len(cnts_prep) >= 1)
+        pts_prep = max(cnts_prep, key=cv2.contourArea).reshape(-1, 2)
+        sinus_pts_prep = pts_prep[(pts_prep[:, 1] >= 90) & (pts_prep[:, 1] <= 110) & (pts_prep[:, 0] >= 80)]
+        self.assertTrue(len(sinus_pts_prep) > 0)
+        self.assertLessEqual(
+            int(np.min(sinus_pts_prep[:, 0])),
+            87,
+            "Outer contour from _prepare_lamina_mask() must enter the opened inter-lobe sinus.",
+        )
+
+        gate_res = classify_and_route_leaf(mask=mask.copy(), hole_mask=hole_mask)
+        proc_mask = gate_res.processed_mask
+        self.assertEqual(int(proc_mask[100, 100]), 0, "classify_and_route_leaf() must subtract inter-lobe sinus hole_mask.")
+
+        cnts_gate, _ = cv2.findContours(proc_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        self.assertTrue(len(cnts_gate) >= 1)
+        pts_gate = max(cnts_gate, key=cv2.contourArea).reshape(-1, 2)
+        sinus_pts_gate = pts_gate[(pts_gate[:, 1] >= 90) & (pts_gate[:, 1] <= 110) & (pts_gate[:, 0] >= 80)]
+        self.assertTrue(len(sinus_pts_gate) > 0)
+        self.assertLessEqual(
+            int(np.min(sinus_pts_gate[:, 0])),
+            87,
+            "Outer contour from classify_and_route_leaf() must trace into the opened inter-lobe sinus.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

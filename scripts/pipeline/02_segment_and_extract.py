@@ -149,6 +149,7 @@ from scripts.vision.lm3_inference_engines import (
     _VoucherFinalizeBundle,
     _extract_native_lm3_petiole_anchor,
     _merge_and_bridge_dissected_crop_mask,
+    apply_llr_hyst_keep_blobs,
     compute_capitulum_metrics,
     compute_leaf_ect_descriptor,
     crop_leaf_bbox_with_padding,
@@ -157,6 +158,82 @@ from scripts.vision.lm3_inference_engines import (
     reproject_crop_mask_to_sheet,
     torch_cuda_available,
 )
+
+
+def _clean_leaf_instance_mounting_paper(
+    inst: DetectedInstance,
+    crop_bgr: Optional[np.ndarray] = None,
+    specimen_paper_cleaned_mask: Optional[np.ndarray] = None,
+) -> None:
+    """
+    Subtracts internal `hole_mask` voids (`report.masks.subtract_holes: true`) and transfers
+    inter-lobe mounting paper pixels inside `inst.mask` into `inst.hole_mask`, opening narrow
+    touching-lobe sinus bridges via `_prepare_lamina_mask`.
+    """
+    if inst.mask is None or inst.mask.size == 0:
+        return
+    mh, mw = inst.mask.shape[:2]
+    lam_u8 = (inst.mask > 0).astype(np.uint8) * 255
+    fg_orig = int(np.count_nonzero(lam_u8))
+    if fg_orig < 32:
+        return
+
+    hole_u8 = (
+        ((inst.hole_mask > 0).astype(np.uint8) * 255)
+        if (inst.hole_mask is not None and isinstance(inst.hole_mask, np.ndarray) and inst.hole_mask.shape[:2] == (mh, mw))
+        else np.zeros((mh, mw), dtype=np.uint8)
+    )
+
+    eff_crop = crop_bgr if crop_bgr is not None else getattr(inst, "crop_bgr", None)
+    paper_cand = np.zeros((mh, mw), dtype=bool)
+
+    if (
+        specimen_paper_cleaned_mask is not None
+        and isinstance(specimen_paper_cleaned_mask, np.ndarray)
+        and specimen_paper_cleaned_mask.shape[:2] == (mh, mw)
+    ):
+        spec_fg = int(np.count_nonzero((specimen_paper_cleaned_mask > 0) & (lam_u8 > 0)))
+        if spec_fg >= int(0.40 * fg_orig):
+            paper_cand |= (lam_u8 > 0) & (specimen_paper_cleaned_mask == 0)
+
+    if (
+        eff_crop is not None
+        and isinstance(eff_crop, np.ndarray)
+        and eff_crop.ndim == 3
+        and eff_crop.shape[:2] == (mh, mw)
+        and float(np.std(eff_crop)) >= 5.0
+    ):
+        cleaned_llr: Optional[np.ndarray] = None
+        try:
+            from leafmachine3.core.paper_removal import paperclean_llr_hyst_keepblobs
+            rgb_crop = cv2.cvtColor(eff_crop, cv2.COLOR_BGR2RGB)
+            res_p = paperclean_llr_hyst_keepblobs(rgb_crop, lam_u8)
+            cleaned_llr = res_p[0] if isinstance(res_p, tuple) else res_p
+        except Exception:
+            cleaned_llr = apply_llr_hyst_keep_blobs((lam_u8 > 0).astype(np.float32), image_bgr=eff_crop, max_work_dim=3200)
+        if cleaned_llr is not None and cleaned_llr.shape[:2] == (mh, mw):
+            llr_fg = int(np.count_nonzero((cleaned_llr > 0) & (lam_u8 > 0)))
+            if llr_fg >= int(0.40 * fg_orig):
+                paper_cand |= (lam_u8 > 0) & (cleaned_llr == 0)
+
+    if np.any(paper_cand):
+        n_pc, pc_lbls, pc_stats, _ = cv2.connectedComponentsWithStats(paper_cand.astype(np.uint8), connectivity=8)
+        for pid_c in range(1, n_pc):
+            c_area = int(pc_stats[pid_c, cv2.CC_STAT_AREA])
+            if c_area >= 16 and c_area <= int(0.55 * fg_orig):
+                c_mask = pc_lbls == pid_c
+                lam_u8[c_mask] = 0
+                hole_u8[c_mask] = 255
+
+    if np.any(hole_u8 > 0):
+        inst.hole_mask = hole_u8
+        if isinstance(inst.trim_meta, dict):
+            inst.trim_meta["hole_mask"] = hole_u8
+        prep_m = _prepare_lamina_mask(lam_u8, petiole_mask=None, hole_mask=hole_u8)
+        if int(np.count_nonzero(prep_m)) >= int(0.35 * fg_orig):
+            lam_u8 = prep_m
+
+    inst.mask = lam_u8
 
 
 # =============================================================================
@@ -1923,6 +2000,28 @@ class SegmentAndExtractPipeline:
 
         _neighbor_dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         for inst in instances:
+            ox, oy = inst.mask_origin
+            mh, mw = inst.mask.shape[:2]
+            cy0_m = max(0, oy)
+            cx0_m = max(0, ox)
+            cy1_m = min(sheet_h, oy + mh)
+            cx1_m = min(sheet_w, ox + mw)
+            inst_crop_bgr = (
+                img_bgr[cy0_m:cy1_m, cx0_m:cx1_m]
+                if (cy1_m > cy0_m and cx1_m > cx0_m)
+                else None
+            )
+            inst_spec_mask = (
+                specimen_paper_cleaned_mask[cy0_m:cy1_m, cx0_m:cx1_m]
+                if (specimen_paper_cleaned_mask is not None and cy1_m > cy0_m and cx1_m > cx0_m)
+                else None
+            )
+            _clean_leaf_instance_mounting_paper(
+                inst,
+                crop_bgr=inst_crop_bgr,
+                specimen_paper_cleaned_mask=inst_spec_mask,
+            )
+
             if not self.enable_geometric_qc:
                 # 100% Raw Unconstrained LeafMachine3 Mode:
                 # Retain every LeafMachine3 `Leaf` mask untouched with zero post-hoc
@@ -2013,18 +2112,6 @@ class SegmentAndExtractPipeline:
                     m_area,
                 ))
                 continue
-
-            ox, oy = inst.mask_origin
-            mh, mw = inst.mask.shape[:2]
-            cy0_m = max(0, oy)
-            cx0_m = max(0, ox)
-            cy1_m = min(sheet_h, oy + mh)
-            cx1_m = min(sheet_w, ox + mw)
-            inst_crop_bgr = (
-                img_bgr[cy0_m:cy1_m, cx0_m:cx1_m]
-                if (cy1_m > cy0_m and cx1_m > cx0_m)
-                else None
-            )
 
             rc_sheet = rosette_centroids_by_pid.get(inst.plant_individual_id)
             rc_local = (rc_sheet[0] - ox, rc_sheet[1] - oy) if rc_sheet is not None else None

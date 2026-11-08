@@ -90,6 +90,15 @@ project:
   batch_size: 4
   num_workers: 4
 ingest:
+  recursive: true
+  allowed_exts:
+    - ".jpg"
+    - ".jpeg"
+    - ".png"
+    - ".tif"
+    - ".tiff"
+    - ".bmp"
+    - ".webp"
   max_working_dim: 3200
   jpg_quality: 95
 modules:
@@ -107,6 +116,7 @@ modules:
   specimen_segmenter:
     enabled: true
     model: "lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain"
+    conf: 0.50
     paperclean: true
     LLR_Hyst_KeepBlobs: true
   phenology_detector:
@@ -129,6 +139,14 @@ modules:
     enabled: true
     model: "lm3_leaf_segmenter__yolo26x_seg_1024"
     conf_thres: 0.50
+    conf: 0.30
+    iou: 0.50
+    imgsz: 1024
+    max_det: 300
+    retina_masks: true
+    overlap: 0.95
+    include_partial: false
+    crop_pad: 0.0
   morphology:
     enabled: true
     rotated_box_method: "pca"
@@ -156,6 +174,14 @@ modules:
     enabled: true
     include_petiole: false
     oriented: true
+report:
+  masks:
+    subtract_holes: true
+  leaf_products:
+    enabled: true
+    products:
+      lamina_mask: true
+      hole_mask: true
 """
 
 DEFAULT_PACKERA_LM3_CONFIG_TEMPLATE: Dict[str, Any] = yaml.safe_load(BASE_LM3_TEMPLATE_YAML)
@@ -594,6 +620,8 @@ def generate_lm3_config(
 
     # 2. Ingest settings
     ingest = cfg.setdefault("ingest", {})
+    ingest["recursive"] = True
+    ingest["allowed_exts"] = [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"]
     ingest["max_working_dim"] = max_working_dim
     ingest["jpg_quality"] = DEFAULT_JPG_QUALITY
 
@@ -616,6 +644,7 @@ def generate_lm3_config(
     modules["specimen_segmenter"] = {
         "enabled": True,
         "model": specimen_seg_model,
+        "conf": 0.50,
         "paperclean": paperclean,
         "LLR_Hyst_KeepBlobs": llr_hyst_keep_blobs,
     }
@@ -640,6 +669,14 @@ def generate_lm3_config(
         "enabled": True,
         "model": leaf_seg_model,
         "conf_thres": leaf_seg_conf,
+        "conf": 0.30,
+        "iou": 0.50,
+        "imgsz": 1024,
+        "max_det": 300,
+        "retina_masks": True,
+        "overlap": 0.95,
+        "include_partial": False,
+        "crop_pad": 0.0,
     }
     modules["morphology"] = {
         "enabled": True,
@@ -679,6 +716,14 @@ def generate_lm3_config(
         "oriented": True,
     }
 
+    report = cfg.setdefault("report", {})
+    report["masks"] = {"subtract_holes": True}
+    leaf_prods = report.setdefault("leaf_products", {"enabled": True, "products": {}})
+    leaf_prods["enabled"] = True
+    prods_dict = leaf_prods.setdefault("products", {})
+    prods_dict["lamina_mask"] = True
+    prods_dict["hole_mask"] = True
+
     valid, err = validate_lm3_config(cfg)
     if not valid:
         raise ValueError(f"Invalid LeafMachine3 configuration: {err}")
@@ -686,6 +731,43 @@ def generate_lm3_config(
     if config_out_path is not None:
         save_config_yaml(cfg, config_out_path)
 
+    return cfg
+
+
+def _default_local_settings(**kwargs: Any) -> Dict[str, Any]:
+    """Returns canonical LeafMachine3 local settings dictionary."""
+    return generate_lm3_config(**kwargs)
+
+
+def patch_local_settings(yaml_path: Union[str, Path]) -> Dict[str, Any]:
+    """Enforces high-resolution paper-cleaning and hole-subtraction settings on an existing LM3 YAML."""
+    cfg = load_config_yaml(yaml_path) if Path(yaml_path).exists() else generate_lm3_config()
+    ingest = cfg.setdefault("ingest", {})
+    ingest["recursive"] = True
+    ingest["allowed_exts"] = [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"]
+    ingest["max_working_dim"] = 3200
+    modules = cfg.setdefault("modules", {})
+    spec_seg = modules.setdefault("specimen_segmenter", {"enabled": True})
+    spec_seg["conf"] = 0.50
+    spec_seg["paperclean"] = True
+    spec_seg["LLR_Hyst_KeepBlobs"] = True
+    leaf_seg = modules.setdefault("leaf_segmenter", {"enabled": True})
+    leaf_seg["retina_masks"] = True
+    leaf_seg.setdefault("conf", 0.30)
+    leaf_seg.setdefault("iou", 0.50)
+    leaf_seg.setdefault("imgsz", 1024)
+    leaf_seg.setdefault("max_det", 300)
+    leaf_seg.setdefault("overlap", 0.95)
+    leaf_seg.setdefault("include_partial", False)
+    leaf_seg.setdefault("crop_pad", 0.0)
+    report = cfg.setdefault("report", {})
+    report.setdefault("masks", {})["subtract_holes"] = True
+    lp = report.setdefault("leaf_products", {"enabled": True, "products": {}})
+    lp["enabled"] = True
+    lp_prods = lp.setdefault("products", {})
+    lp_prods["lamina_mask"] = True
+    lp_prods["hole_mask"] = True
+    save_config_yaml(cfg, yaml_path)
     return cfg
 
 

@@ -1899,6 +1899,7 @@ def classify_and_route_leaf(
             lam_area_h = max(1, int(np.count_nonzero(lam_u8)))
             cand_holes = ((hole_bool | (lam_u8 == 0)) & (filled_ext_h > 0)).astype(np.uint8)
             n_hc, hc_lbls, hc_stats, _ = cv2.connectedComponentsWithStats(cand_holes, connectivity=8)
+            max_bridge_px_h = 24.0
             for hid in range(1, n_hc):
                 h_comp = hc_lbls == hid
                 if not np.any(h_comp & hole_bool):
@@ -1906,7 +1907,12 @@ def classify_and_route_leaf(
                 h_area = int(hc_stats[hid, cv2.CC_STAT_AREA])
                 min_d_ext = float(np.min(dist_to_ext_h[h_comp])) if h_area > 0 else 999.0
                 area_frac = float(h_area) / float(lam_area_h)
-                is_enclosed_sinus = (min_d_ext <= 6.0 and area_frac >= 0.012) or (min_d_ext <= 12.0 and area_frac >= 0.065)
+                hole_overlap_h = float(np.count_nonzero(h_comp & hole_bool)) / float(max(h_area, 1))
+                is_enclosed_sinus = (
+                    (h_area >= 25 and 0.0 < min_d_ext <= max_bridge_px_h and (area_frac >= 0.008 or hole_overlap_h > 0.15))
+                    or (min_d_ext <= max_bridge_px_h and area_frac >= 0.05)
+                    or (area_frac >= 0.08)
+                )
                 if is_enclosed_sinus:
                     lam_u8[h_comp] = 0
                     hys, hxs = np.where(h_comp)

@@ -445,8 +445,11 @@ class SegmentationConfig:
     mp_conversion_model: str = "lm3_mp_conversion_factor__sqrt_fit"
     detector_version: str = "lm3_plant_detector__yolo26x_det_1280"
     max_working_dim: int = 3200
+    specimen_max_working_dim: int = 3200
     paperclean: bool = True
     llr_hyst_keep_blobs: bool = True
+    paperclean_llr_hyst_keepblobs: bool = True
+    subtract_holes: bool = True
     use_cf_predicted_by_mp: bool = True
     ect_num_dirs: int = 360
     minimum_confidence_threshold: float = 0.50
@@ -461,6 +464,14 @@ class SegmentationConfig:
     min_blade_area_cm2: float = 0.75
     max_tissue_border_ratio: float = 0.15
     device: str = "cuda"
+
+
+@dataclass(frozen=True)
+class LeafMachine3VisionConfig:
+    """LeafMachine3 vision settings for high-resolution paper cleanup and hole subtraction."""
+    subtract_holes: bool = True
+    paperclean_llr_hyst_keepblobs: bool = True
+    specimen_max_working_dim: int = 3200
 
 
 @dataclass(frozen=True)
@@ -783,7 +794,17 @@ SPECIALIST_PATTERNS: List[str] = [
     r"\bWeakley\b", r"\bA\.?\s*S\.?\s*Weakley\b", r"\bAlan\s+S\.?\s+Weakley\b",
     r"\bBain\b", r"\bJ\.?\s*F\.?\s*Bain\b", r"\bJohn\s+F\.?\s+Bain\b",
     r"\bMahoney\b", r"\bA\.?\s*M\.?\s*Mahoney\b", r"\bAlison\s+M\.?\s+Mahoney\b",
+    r"\bSoderholm\b", r"\bJ\.?\s*Soderholm\b",
+    r"\bPacker\b", r"\bJ\.?\s*G\.?\s*Packer\b", r"\bJohn\s+G\.?\s+Packer\b",
+    r"\bJeffrey\b", r"\bC\.?\s*Jeffrey\b", r"\bCharles\s+Jeffrey\b",
+    r"\bMabberley\b", r"\bD\.?\s*J\.?\s*Mabberley\b",
     r"\bFuller\b", r"\bJ\.?\s*B\.?\s*Fuller\b", r"\bBrandon\s+Fuller\b",
+    r"\bMandel\b", r"\bJ\.?\s*R\.?\s*Mandel\b", r"\bJennifer\s+R\.?\s+Mandel\b",
+    r"\bMoore[-\s]?Pollard\b",
+    r"\b(?:E\.?\s*R\.?|Erika\s+R\.?)\s+Moore\b|\bMoore\s*,\s*(?:E\.?\s*R\.?|Erika)\b",
+    r"\bBoufford\b", r"\bD\.?\s*E\.?\s*Boufford\b",
+    r"\bKartesz\b", r"\bJ\.?\s*T\.?\s*Kartesz\b",
+    r"\bGramling\b", r"\bA\.?\s*Gramling\b",
     r"\bFreeman\b", r"\bC\.?\s*C\.?\s*Freeman\b", r"\bCraig\s+(?:C\.?\s+)?Freeman\b",
     r"\bCronquist\b", r"\bA\.?\s*Cronquist\b", r"\bArthur\s+(?:J\.?\s+)?Cronquist\b",
     r"\bGreenman\b", r"\bJ\.?\s*M\.?\s*Greenman\b", r"\bJesse\s+M(?:ore)?\.?\s+Greenman\b",
@@ -793,8 +814,25 @@ SPECIALIST_PATTERNS: List[str] = [
     r"\bSpellenberg\b", r"\bR\.?\s*(?:W\.?\s*)?Spellenberg\b", r"\bRichard\s+Spellenberg\b",
     r"\bPippen\b", r"\bR\.?\s*W\.?\s*Pippen\b", r"\bRichard\s+W\.?\s+Pippen\b",
     r"\bUttal\b", r"\bL\.?\s*J\.?\s*Uttal\b", r"\bLeonard\s+J\.?\s+Uttal\b",
+    r"\bJudziewicz\b", r"\bE\.?\s*J\.?\s*Judziewicz\b",
+    r"\bO['’]?Kennon\b", r"\bR\.?\s*J\.?\s*O['’]?Kennon\b",
+    r"\bWelsh\b", r"\bS\.?\s*L\.?\s*Welsh\b",
+    r"\bAtwood\b", r"\bN\.?\s*D\.?\s*Atwood\b",
+    r"\bDorn\b", r"\bR\.?\s*D\.?\s*Dorn\b",
+    r"\bO['’]?Kane\b", r"\bS\.?\s*L\.?\s*O['’]?Kane\b",
+    r"\bYeatts\b", r"\bL\.?\s*Yeatts\b",
+    r"\bRuyle[-\s]?Douglas\b",
+    r"\b(?:G\.?\s*W\.?|George\s+W\.?)\s+Douglas\b|\bDouglas\s*,\s*(?:G\.?\s*W\.?|George)\b",
+    r"\bBoivin\b", r"\bB\.?\s*Boivin\b",
     r"\bFernald\b", r"\bM\.?\s*L\.?\s*Fernald\b", r"\bMerritt\s+L(?:yndon)?\.?\s+Fernald\b",
     r"\bRydberg\b", r"\bP\.?\s*A\.?\s*Rydberg\b", r"\bPer\s+Axel\s+Rydberg\b",
+    r"\bBritton\b", r"\bN\.?\s*L\.?\s*Britton\b",
+    r"\b(?:E\.?\s*L\.?|Edward\s+Lee)\s+Greene\b|\bGreene\s*,\s*(?:E\.?\s*L\.?|Edward)\b",
+    r"\b(?:A\.?|Asa)\s+Gray\b|\bGray\s*,\s*(?:A\.?|Asa)\b",
+    r"\b(?:J\.?\s*K\.?|John\s+Kunkel)\s+Small\b|\bSmall\s*,\s*(?:J\.?\s*K\.?|John)\b",
+    r"\b(?:Alph\.?|Alphonso)\s+Wood\b|\bWood\s*,\s*(?:Alph\.?|Alphonso)\b",
+    r"\b(?:S\.?\s*F\.?|Sidney\s+Fay)\s+Blake\b|\bBlake\s*,\s*(?:S\.?\s*F\.?|sidney)\b",
+    r"\b(?:S\.?|Sereno)\s+Watson\b|\bWatson\s*,\s*(?:S\.?|Sereno)\b",
     r"\bHeller\b", r"\bA\.?\s*A\.?\s*Heller\b", r"\bAmos\s+A(?:rthur)?\.?\s+Heller\b",
     r"\bKral\b", r"\bR\.?\s*Kral\b", r"\bRobert\s+Kral\b",
     r"\bGodfrey\b", r"\bR\.?\s*K\.?\s*Godfrey\b", r"\bRobert\s+K\.?\s+Godfrey\b",
@@ -803,6 +841,15 @@ SPECIALIST_PATTERNS: List[str] = [
     r"\bStrother\b", r"\bJ\.?\s*L\.?\s*Strother\b", r"\bJohn\s+L\.?\s+Strother\b",
     r"\bTurner\b", r"\bB\.?\s*L\.?\s*Turner\b", r"\bBillie\s+L(?:ee)?\.?\s+Turner\b",
     r"\bGolden\b", r"\bJ\.?\s*L\.?\s*Golden\b", r"\bJudith\s+L\.?\s+Golden\b",
+    r"\bBrouillet\b", r"\bL\.?\s*Brouillet\b",
+    r"\bSemple\b", r"\bJ\.?\s*C\.?\s*Semple\b",
+    r"\bSchilling\b", r"\bE\.?\s*E\.?\s*Schilling\b",
+    r"\bFloden\b", r"\bA\.?\s*J\.?\s*Floden\b",
+    r"\bEstes\b", r"\bL\.?\s*D\.?\s*Estes\b",
+    r"\bPoindexter\b", r"\bD\.?\s*B\.?\s*Poindexter\b",
+    r"\bWieboldt\b", r"\bT\.?\s*F\.?\s*Wieboldt\b",
+    r"\bMcMillan\b", r"\bP\.?\s*D\.?\s*McMillan\b",
+    r"\bBeauchamp\b", r"\bR\.?\s*M\.?\s*Beauchamp\b",
 ]
 MAJOR_HERBARIA_CODES: Set[str] = {
     "NCU", "GA", "US", "NY", "BRIT", "MO", "WIS", "VDB", "FLAS", "TEX", "LL", "TENN", "F",

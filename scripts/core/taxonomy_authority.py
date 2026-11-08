@@ -1058,6 +1058,29 @@ _IPNI_AUTHOR_ABBREVIATIONS: Dict[str, str] = {
     "bip": "schultz-bipontinus",
     "dc": "candolle",
     "l": "linnaeus",
+    "boivin": "boivin",
+    "pippen": "pippen",
+    "kral": "kral",
+    "godfrey": "godfrey",
+    "sorrie": "sorrie",
+    "strother": "strother",
+    "brouillet": "brouillet",
+    "semple": "semple",
+    "schill": "schilling",
+    "floden": "floden",
+    "estes": "estes",
+    "poind": "poindexter",
+    "wieboldt": "wieboldt",
+    "mcmillan": "mcmillan",
+    "beauchamp": "beauchamp",
+    "judz": "judziewicz",
+    "okennon": "okennon",
+    "atwood": "atwood",
+    "okane": "okane",
+    "yeatts": "yeatts",
+    "mandel": "mandel",
+    "gramling": "gramling",
+    "soderholm": "soderholm",
 }
 
 GENERIC_DETERMINER_TOKENS: Set[str] = {
@@ -1225,16 +1248,63 @@ _AMBIGUOUS_COMMON_SURNAMES: Set[str] = {
     "ward", "watson", "white", "williams", "wilson", "wood", "wright", "young",
 }
 PACKERA_SPECIALISTS: Set[str] = {
-    "barkley", "trock", "kowal", "weakley", "bain", "mahoney", "fuller",
-    "freeman", "cronquist", "greenman", "weber", "love", "löve",
-    "spellenberg", "pippen", "uttal", "fernald", "rydberg", "heller",
-    "kral", "godfrey", "sorrie", "nesom", "strother", "turner", "golden",
+    "trock", "barkley", "kowal", "mahoney", "soderholm", "bain", "golden",
+    "freeman", "greenman", "love", "löve", "weber", "packer", "jeffrey", "mabberley",
+    "fuller", "mandel", "moore-pollard", "weakley", "boufford", "kartesz",
+    "gramling", "uttal", "judziewicz", "okennon", "welsh", "atwood", "dorn",
+    "okane", "yeatts", "ruyle-douglas", "boivin", "cronquist", "fernald",
+    "rydberg", "britton", "heller", "spellenberg", "pippen", "kral",
+    "godfrey", "sorrie", "nesom", "turner", "strother", "brouillet",
+    "semple", "schilling", "floden", "estes", "poindexter", "wieboldt",
+    "mcmillan", "beauchamp",
 }
+_QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = tuple(
+    re.compile(pat, re.IGNORECASE)
+    for pat in (
+        r"\b(?:e\.?\s*r\.?|erika\s+r\.?)\s+moore\b|\bmoore\s*,\s*(?:e\.?\s*r\.?|erika)\b",
+        r"\b(?:g\.?\s*w\.?|george\s+w\.?)\s+douglas\b|\bdouglas\s*,\s*(?:g\.?\s*w\.?|george)\b",
+        r"\b(?:e\.?\s*l\.?|edward\s+lee)\s+greene\b|\bgreene\s*,\s*(?:e\.?\s*l\.?|edward)\b",
+        r"\b(?:a\.?|asa)\s+gray\b|\bgray\s*,\s*(?:a\.?|asa)\b",
+        r"\b(?:j\.?\s*k\.?|john\s+kunkel)\s+small\b|\bsmall\s*,\s*(?:j\.?\s*k\.?|john)\b",
+        r"\b(?:alph\.?|alphonso)\s+wood\b|\bwood\s*,\s*(?:alph\.?|alphonso)\b",
+        r"\b(?:s\.?\s*f\.?|sidney\s+fay)\s+blake\b|\bblake\s*,\s*(?:s\.?\s*f\.?|sidney)\b",
+        r"\b(?:s\.?|sereno)\s+watson\b|\bwatson\s*,\s*(?:s\.?|sereno)\b",
+        r"\bo['’]?kennon\b|\br\.?\s*j\.?\s*o['’]?kennon\b",
+        r"\bo['’]?kane\b|\bs\.?\s*l\.?\s*o['’]?kane\b",
+        r"(?:^|[\s|,;(])[áa]\.?\s*l[öo]ve\b|\bd\.?\s*l[öo]ve\b|\b[áa]skell\s+l[öo]ve\b|\bdoris\s+l[öo]ve\b",
+    )
+)
 _COLLECTOR_REFERENCE_REGEX = re.compile(
     r"^(?:(?:id(?:entified)?|det(?:ermined)?|annot(?:ated)?|ver(?:ified)?|conf(?:irmed)?)\.?\s*(?:by\s+)?)?"
     r"(?:the\s+)?(?:collector(?:s)?|same(?:\s+as\s+collector(?:s)?)?)\.?$",
     re.IGNORECASE,
 )
+
+
+def _has_specialist_match(text: str, extra_patterns: Optional[Sequence[str]] = None) -> bool:
+    """
+    Returns True if `text` matches a recognized North American Packera / Senecioneae
+    taxonomic specialist via normalized surnames (`PACKERA_SPECIALISTS`), initial-qualified
+    specialist regexes (`_QUALIFIED_SPECIALIST_REGEXES`), `SPECIALIST_PATTERNS`, or optional
+    `extra_patterns`.
+    """
+    if not text or not str(text).strip():
+        return False
+    s_str = str(text).strip()
+    surnames = set(normalize_determiner_surnames(s_str))
+    if surnames & PACKERA_SPECIALISTS:
+        return True
+    for q_rx in _QUALIFIED_SPECIALIST_REGEXES:
+        if q_rx.search(s_str):
+            return True
+    for pat in SPECIALIST_PATTERNS:
+        if re.search(pat, s_str, re.IGNORECASE):
+            return True
+    if extra_patterns:
+        for pat in extra_patterns:
+            if pat and re.search(pat, s_str, re.IGNORECASE):
+                return True
+    return False
 
 
 def _has_non_person_determination_token(val: Optional[Any]) -> bool:
@@ -1721,10 +1791,7 @@ def parse_determiner_tier(
 
     is_specialist = False
     if not (is_non_person_det and not eff_hist_for_specialist and type_rank <= 0):
-        for pattern in SPECIALIST_PATTERNS:
-            if re.search(pattern, determiner_audit_text, re.IGNORECASE):
-                is_specialist = True
-                break
+        is_specialist = _has_specialist_match(determiner_audit_text)
 
     # Dynamic specialists and protologue authors apply ONLY to explicit determinations/history,
     # NEVER via collector fallback (recordedBy alone or collector reference).
@@ -1784,7 +1851,8 @@ def apply_corpus_authority_tiers(
       - Collects per-taxon protologue authors from Darwin Core `scientificName` / `species_raw`.
       - Detects undated institutional batch transfers (>= 25 sheets at 1 institution across >= 10
         collectors) and demotes non-type historical sheets collected by others from `Tier_1_Gold`
-        to `Tier_2_Silver` for out-of-sample screening.
+        to `Tier_2_Silver` for out-of-sample screening, while exempting recognized *Packera*
+        specialists who annotate across multiple herbaria or multiple species in a batch.
       - Re-evaluates `determiner_tier` across all rows cleanly without downgrading pre-scored
         Silver rows whose `locality` / `habitat` columns were already omitted upon CSV persistence.
     """
@@ -1808,6 +1876,9 @@ def apply_corpus_authority_tiers(
     batch_voucher_counts: Dict[Tuple[str, str], int] = {}
     batch_collectors: Dict[Tuple[str, str], Set[str]] = {}
     batch_dates: Dict[Tuple[str, str], Set[str]] = {}
+    det_institutions: Dict[str, Set[str]] = {}
+    surname_institutions: Dict[str, Set[str]] = {}
+    key_species_counts: Dict[Tuple[str, str], Dict[str, int]] = {}
 
     for _, row in out.iterrows():
         raw_names_row = [
@@ -1819,6 +1890,8 @@ def apply_corpus_authority_tiers(
             std_sp = standardize_packera_taxon(rn)
             if std_sp:
                 break
+        if not std_sp:
+            std_sp = _resolve_row_standardized_packera(row)
         if std_sp:
             extra_cached = list(_DYNAMIC_TAXON_AUTHOR_STRINGS.get(std_sp, set()))
             auths = extract_protologue_authors([*raw_names_row, *extra_cached])
@@ -1828,7 +1901,8 @@ def apply_corpus_authority_tiers(
         inst_r = row.get("institutionCode")
         inst_key = "" if (inst_r is None or pd.isna(inst_r)) else str(inst_r).strip().upper()
         id_r = row.get("_raw_identified_by") if "_raw_identified_by" in out.columns else row.get("identifiedBy")
-        id_key = "" if (id_r is None or pd.isna(id_r)) else re.sub(r"\s+", " ", str(id_r).strip().lower())
+        id_str_clean = "" if (id_r is None or pd.isna(id_r)) else str(id_r).strip()
+        id_key = re.sub(r"\s+", " ", id_str_clean.lower()) if id_str_clean else ""
         if (
             inst_key
             and inst_key not in _INVALID_INSTITUTION_CODES
@@ -1839,6 +1913,13 @@ def apply_corpus_authority_tiers(
         ):
             b_key = (inst_key, id_key)
             batch_voucher_counts[b_key] = batch_voucher_counts.get(b_key, 0) + 1
+            det_institutions.setdefault(id_key, set()).add(inst_key)
+            for s_n in normalize_determiner_surnames(id_str_clean):
+                surname_institutions.setdefault(s_n, set()).add(inst_key)
+            sp_val = str(std_sp or "").strip().lower()
+            if sp_val:
+                sp_map = key_species_counts.setdefault(b_key, {})
+                sp_map[sp_val] = sp_map.get(sp_val, 0) + 1
             rec_r = row.get("recordedBy")
             col_norm = normalize_collector("" if (rec_r is None or pd.isna(rec_r)) else str(rec_r))
             if col_norm and col_norm != "unknown":
@@ -1848,11 +1929,43 @@ def apply_corpus_authority_tiers(
             if dt_id_str and dt_id_str.lower() not in {"none", "nan", "null", "na", "n/a", "unknown"}:
                 batch_dates.setdefault(b_key, set()).add(dt_id_str)
 
-    flagged_batch_keys: Set[Tuple[str, str]] = {
-        b_key
-        for b_key, v_cnt in batch_voucher_counts.items()
-        if v_cnt >= 25 and len(batch_collectors.get(b_key, set())) >= 10
-    }
+    flagged_batch_keys: Set[Tuple[str, str]] = set()
+    for b_key, v_cnt in batch_voucher_counts.items():
+        if v_cnt < 25 or len(batch_collectors.get(b_key, set())) < 10:
+            continue
+        _inst_k, _id_k = b_key
+        if _has_specialist_match(_id_k):
+            inst_set_for_det = set(det_institutions.get(_id_k, set()))
+            for _sn in normalize_determiner_surnames(_id_k):
+                if _sn in PACKERA_SPECIALISTS:
+                    inst_set_for_det |= surname_institutions.get(_sn, set())
+            n_inst_for_det = len(inst_set_for_det)
+            sp_counts = key_species_counts.get(b_key, {})
+            n_species_in_batch = len(sp_counts)
+            max_sp_share = (
+                (max(sp_counts.values()) / max(1, sum(sp_counts.values())))
+                if sp_counts
+                else 1.0
+            )
+            if n_inst_for_det >= 2 or (n_species_in_batch >= 2 and max_sp_share < 0.85):
+                continue
+        flagged_batch_keys.add(b_key)
+
+    has_determiner_cols = any(
+        c in out.columns
+        for c in (
+            "_raw_identified_by",
+            "identifiedBy",
+            "recordedBy",
+            "_raw_type_status",
+            "type_status",
+            "typeStatus",
+            "_raw_history",
+            "verbatimIdentificationHistory",
+        )
+    )
+    if not has_determiner_cols and "determiner_tier" in out.columns:
+        return out
 
     has_locality_cols = any(
         c in out.columns for c in ("_raw_locality", "locality", "verbatimLocality", "_raw_habitat", "habitat")
@@ -1905,15 +2018,17 @@ def apply_corpus_authority_tiers(
             t_rank, _ = classify_nomenclatural_type_rank(t_raw)
             if t_rank == 0:
                 inst_key = "" if (inst_raw is None or pd.isna(inst_raw)) else str(inst_raw).strip().upper()
-                id_key = "" if (id_raw is None or pd.isna(id_raw)) else re.sub(r"\s+", " ", str(id_raw).strip().lower())
+                id_str_row = "" if (id_raw is None or pd.isna(id_raw)) else str(id_raw).strip()
+                id_key = re.sub(r"\s+", " ", id_str_row.lower()) if id_str_row else ""
                 b_key = (inst_key, id_key)
                 if b_key in flagged_batch_keys:
                     dt_id_r = row.get("_raw_date_identified") if "_raw_date_identified" in out.columns else row.get("dateIdentified")
                     dt_id_str = "" if (dt_id_r is None or pd.isna(dt_id_r)) else str(dt_id_r).strip()
+                    has_embedded_year = bool(id_str_row and re.search(r"\b(19|20)\d{2}\b", id_str_row))
+                    has_date = bool(dt_id_str and re.search(r"\b(19|20)\d{2}\b", dt_id_str)) or has_embedded_year
                     has_blank_or_batch_date = (
-                        not dt_id_str
-                        or dt_id_str.lower() in {"none", "nan", "null", "na", "n/a", "unknown"}
-                        or len(batch_dates.get(b_key, set())) <= 1
+                        not has_date
+                        or (not has_embedded_year and len(batch_dates.get(b_key, set())) <= 1)
                     )
                     if has_blank_or_batch_date:
                         det_surnames = set(normalize_determiner_surnames(id_raw))

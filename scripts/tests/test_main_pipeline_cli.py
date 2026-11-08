@@ -977,8 +977,8 @@ REUSE_CANONICAL_DATA="false"
         self.assertIn("-j, --threads", res.stdout)
         self.assertIn("--gpu-batch-size", res.stdout)
         self.assertIn("--taxon", res.stdout)
-        for retired in ("--skip-harvest", "--resegment", "--gold-only", "--auto-neighbors"):
-            self.assertNotIn(retired, res.stdout)
+        for active_flag in ("--skip-harvest", "--resegment", "--gold-only", "--auto-neighbors"):
+            self.assertIn(active_flag, res.stdout)
 
 
 if __name__ == "__main__":

@@ -303,6 +303,19 @@ run_fourier_extraction <- function(opts) {
   db_ing <- if (exists("fetch_step03_contours_from_db", mode = "function")) fetch_step03_contours_from_db(opts$vouchers, opts$manifest, opts$contours_dir, active_catalogs = if (length(active_voucher_cats) > 0L) setdiff(active_voucher_cats, sec_dup_cats) else NULL, align_fn = function(coo, ...) sweep(coo, 2, colMeans(coo, na.rm = TRUE), "-"), centsize_fn = compute_centsize_robust) else NULL
   if (!is.null(db_ing)) {
     coo_list <- db_ing$coords_list; fac_df <- db_ing$meta_df; shape_names_vec <- names(coo_list)
+    if (exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE) && !all(c("leaf_zone", "area_mm2") %in% names(fac_df))) {
+      tryCatch({ con_lz <- connect_packera_db(read_only = TRUE); on.exit(tryCatch(DBI::dbDisconnect(con_lz), error = function(e) NULL), add = TRUE)
+        if (!is.null(con_lz) && DBI::dbExistsTable(con_lz, "extracted_leaves")) {
+          f_el <- DBI::dbListFields(con_lz, "extracted_leaves"); sel_el <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "contour_xy_json", "leaf_zone", "area_mm2", "area_px"), f_el)
+          if (all(c("catalogNumber", "leaf_id") %in% sel_el)) {
+            el_lz <- DBI::dbGetQuery(con_lz, sprintf("SELECT %s FROM extracted_leaves", paste(setdiff(sel_el, "contour_xy_json"), collapse = ", ")))
+            k_el <- paste(el_lz$catalogNumber, ifelse(is.na(el_lz$plant_individual_id), 0L, as.integer(el_lz$plant_individual_id)), as.integer(el_lz$leaf_id), sep = "__")
+            m_el <- match(paste(fac_df$catalogNumber, ifelse(is.na(fac_df$plant_individual_id), 0L, as.integer(fac_df$plant_individual_id)), as.integer(fac_df$leaf_id), sep = "__"), k_el)
+            for (cn_el in intersect(c("leaf_zone", "area_mm2", "area_px"), names(el_lz))) if (!(cn_el %in% names(fac_df))) fac_df[[cn_el]] <- el_lz[[cn_el]][m_el]
+          }
+        }
+      }, error = function(e) NULL)
+    }
     message("Ingested ", length(coo_list), " Tier 1 intact 120-vertex contours directly from SQLite extracted_leaves.")
   } else {
   contour_files <- character(0); use_masks_fallback <- FALSE
@@ -405,10 +418,12 @@ run_fourier_extraction <- function(opts) {
     }
     aspect_ratio <- round(as.numeric(lw[1] / lw[2]), 4)
     shape_name <- meta$shape_id
+    m_zone <- if (!is.null(m_match) && nrow(m_match) > 0 && "leaf_zone" %in% names(m_match) && !is.na(m_match$leaf_zone[1])) as.character(m_match$leaf_zone[1]) else NA_character_
+    m_amm2 <- if (!is.na(m_num("area_mm2"))) m_num("area_mm2") else if (is_calibrated_mm) round(area_px / (resolved_ppm^2), 2) else NA_real_
     rec <- data.frame(
       shape_id = shape_name, catalogNumber = meta$catalogNumber, plant_individual_id = resolved_pid,
       leaf_id = meta$leaf_id, assigned_tier = resolved_tier, tier_assignment = resolved_tier,
-      pixels_per_mm = resolved_ppm, is_calibrated_mm = is_calibrated_mm, aspect_ratio = aspect_ratio,
+      leaf_zone = m_zone, area_mm2 = m_amm2, pixels_per_mm = resolved_ppm, is_calibrated_mm = is_calibrated_mm, aspect_ratio = aspect_ratio,
       circularity = circularity, solidity = resolved_solidity, dissection_index = dissection_index, ucs_score = resolved_ucs,
       petiole_length_mm = m_num("petiole_length_mm"), blade_length_mm = m_num("blade_length_mm"),
       petiole_to_blade_ratio = m_num("petiole_to_blade_ratio"), is_dissected = m_dis,
@@ -617,16 +632,21 @@ run_fourier_extraction <- function(opts) {
     message("Individual leaf EFA harmonics archive exported: ", opts$output_individual, " (Rows: ", nrow(efa_df), ")")
   }
 
-  # 5b. Unweighted Specimen-Level (OTU) Coordinate-Wise Median Harmonic Aggregation (Slenker et al. 2022)
-  message("Computing unweighted specimen-level (OTU) coordinate-wise median harmonic vectors across intact Tier 1 leaves (Slenker et al. 2022)...")
+  # 5b. Level 1 Heteroblasty-Weighted Specimen-Level (OTU) Coordinate-Wise Median Harmonic Aggregation (Slenker et al. 2022)
+  message("Computing heteroblasty-weighted specimen-level (OTU) coordinate-wise median harmonic vectors across intact Tier 1 leaves (Slenker et al. 2022)...")
   valid_closed_mask <- grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE) & (efa_df$assigned_tier == "Tier_1_Direct") & complete.cases(efa_df[, sym_names])
   closed_leaf_df <- efa_df[valid_closed_mask, , drop = FALSE]
   all_harm_cols <- intersect(c(harmonic_names, grep("Chebyshev", names(efa_df), value = TRUE)), names(efa_df))
   specimen_df <- if (exists("aggregate_step03_otu_medians_fast", mode = "function")) {
-    aggregate_step03_otu_medians_fast(closed_leaf_df, all_harm_cols, sym_names)
+    agg_tmp <- aggregate_step03_otu_medians_fast(closed_leaf_df, all_harm_cols, sym_names)
+    if (exists("apply_step03_heteroblasty_weighted_otu_aggregation", mode = "function")) apply_step03_heteroblasty_weighted_otu_aggregation(agg_tmp, closed_leaf_df, all_harm_cols, sym_names) else agg_tmp
   } else {
     do.call(rbind, lapply(split(closed_leaf_df, paste(closed_leaf_df$catalogNumber, closed_leaf_df$plant_individual_id, sep = "__")), function(grp) {
       grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]; out <- grp[1, , drop = FALSE]
+      w_zone <- ifelse(tolower(as.character(grp$leaf_zone)) == "basal", 1.00, ifelse(tolower(as.character(grp$leaf_zone)) == "cauline", 0.35, 0.70)); w_zone[is.na(w_zone)] <- 0.70
+      a_val <- if ("area_mm2" %in% names(grp) && any(is.finite(grp$area_mm2) & grp$area_mm2 > 0)) grp$area_mm2 else if ("area_px" %in% names(grp)) grp$area_px else rep(1.0, nrow(grp))
+      w_area <- pmin(1.0, pmax(0.35, sqrt(pmax(1e-6, a_val) / max(a_val, 1e-6, na.rm = TRUE)))); w_l <- w_zone * w_area
+      for (hc in unique(c(all_harm_cols, sym_names))) out[[hc]] <- weighted_otu_stat(grp[[hc]], w_l, 6L)
       out$morph_tier_source <- ifelse(nrow(grp) >= 1L, "Tier_1_Pure", "Tier_2_Fallback"); out
     }))
   }

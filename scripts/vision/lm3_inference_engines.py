@@ -1202,6 +1202,7 @@ def apply_llr_hyst_keep_blobs(
     low_thresh: float = 0.35,
     high_thresh: float = 0.65,
     min_blob_area: int = 64,
+    max_work_dim: int = 3200,
 ) -> np.ndarray:
     """
     Applies LeafMachine3 `LLR_Hyst_KeepBlobs` paper-vs-plant log-likelihood ratio modulation
@@ -1231,7 +1232,7 @@ def apply_llr_hyst_keep_blobs(
         prob = np.clip(np.nan_to_num(prob, nan=0.0), 0.0, 1.0)
 
     orig_h, orig_w = prob.shape[:2]
-    max_work_dim = 1024
+    max_work_dim = max(256, int(max_work_dim))
     if max(orig_h, orig_w) > max_work_dim:
         w_scale = float(max_work_dim) / float(max(orig_h, orig_w))
         h = max(1, int(round(orig_h * w_scale)))

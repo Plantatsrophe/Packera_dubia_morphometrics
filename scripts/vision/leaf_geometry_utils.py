@@ -294,6 +294,14 @@ def _prepare_lamina_mask(
     n_voids, void_lbls, void_stats, _ = cv2.connectedComponentsWithStats(
         (internal_voids > 0).astype(np.uint8), connectivity=8
     )
+    has_hole_arr = (
+        hole_mask is not None
+        and isinstance(hole_mask, np.ndarray)
+        and hole_mask.shape[:2] == work_mask.shape[:2]
+        and np.count_nonzero(hole_mask) > 0
+    )
+    hole_bool_arr = (hole_mask > 0) if has_hole_arr else None
+    max_bridge_px = 24.0
     for v_id in range(1, n_voids):
         v_mask = void_lbls == v_id
         v_area = int(void_stats[v_id, cv2.CC_STAT_AREA])
@@ -301,9 +309,18 @@ def _prepare_lamina_mask(
             continue
         min_d_ext = float(np.min(dist_to_ext[v_mask])) if np.any(v_mask) else 999.0
         area_frac = float(v_area) / float(max(lamina_fg, 1))
-        # Enclosed inter-lobe sinus: separated from exterior by a narrow touching-lobe bridge (<= 6 px)
-        # and at least 1.2% of lamina area, or a massive enclosed background region (>= 6.5% of lamina).
-        is_enclosed_sinus = (min_d_ext <= 6.0 and area_frac >= 0.012) or (min_d_ext <= 12.0 and area_frac >= 0.065)
+        hole_overlap = (
+            float(np.count_nonzero(v_mask & hole_bool_arr)) / float(max(v_area, 1))
+            if hole_bool_arr is not None
+            else 0.0
+        )
+        # Enclosed inter-lobe sinus / background paper pocket: separated from exterior background
+        # by a lobe bridge (<= 24 px) with area >= 25 px, or a large enclosed background region.
+        is_enclosed_sinus = (
+            (v_area >= 25 and 0.0 < min_d_ext <= max_bridge_px and (area_frac >= 0.008 or hole_overlap > 0.15))
+            or (min_d_ext <= max_bridge_px and area_frac >= 0.05)
+            or (area_frac >= 0.08)
+        )
         if is_enclosed_sinus:
             work_mask[v_mask] = 0
             # Carve open the narrow contact bottleneck to exterior background so RETR_EXTERNAL enters the sinus

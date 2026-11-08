@@ -2199,8 +2199,15 @@ compute_type_specimen_morph_control <- function(
   type_centroids <- matrix(0.0, nrow = G, ncol = p, dimnames = list(active_taxa, colnames(X_mat)))
   has_emp_map <- stats::setNames(rep(FALSE, G), active_taxa)
   typical_cl_map <- stats::setNames(rep(NA_integer_, G), active_taxa)
+  typical_cl_list <- stats::setNames(vector("list", G), active_taxa)
   n_eff_type_vec <- stats::setNames(numeric(G), active_taxa)
   type_anchor_rows_list <- stats::setNames(vector("list", G), active_taxa)
+  is_noise_vec <- if (!is.null(df) && "is_confident_label_noise" %in% names(df)) {
+    as.logical(df$is_confident_label_noise)
+  } else {
+    rep(FALSE, n)
+  }
+  is_noise_vec[is.na(is_noise_vec)] <- FALSE
 
   for (k in seq_len(G)) {
     tx_k <- active_taxa[k]
@@ -2226,9 +2233,9 @@ compute_type_specimen_morph_control <- function(
     } else {
       has_emp_map[tx_k] <- FALSE
       type_anchor_rows_list[[tx_k]] <- integer(0)
-      gold_rows_k <- tx_rows[(det_tier[tx_rows] == "Tier_1_Gold") & is_t1_pure[tx_rows]]
+      gold_rows_k <- tx_rows[(det_tier[tx_rows] == "Tier_1_Gold") & is_t1_pure[tx_rows] & !is_noise_vec[tx_rows]]
       if (length(gold_rows_k) == 0L) {
-        gold_rows_k <- tx_rows[det_tier[tx_rows] == "Tier_1_Gold"]
+        gold_rows_k <- tx_rows[(det_tier[tx_rows] == "Tier_1_Gold") & !is_noise_vec[tx_rows]]
       }
       if (length(gold_rows_k) > 0L) {
         max_w_k <- max(auth_w[gold_rows_k], na.rm = TRUE)
@@ -2242,32 +2249,56 @@ compute_type_specimen_morph_control <- function(
     }
     type_centroids[k, ] <- mu_k
 
-    # Identify typical GMM morphotype cluster c^* for taxon k
+    # Identify per-species typical GMM morphotype cluster(s) for taxon k
     if (length(u_clusters) > 0L) {
-      type_cl_vals <- stats::na.omit(gmm_cl[type_rows_k])
-      if (length(type_cl_vals) > 0L) {
-        prim_cl_vals <- stats::na.omit(gmm_cl[type_rows_k[type_rank[type_rows_k] == 2L]])
-        cand_cl_vals <- if (length(prim_cl_vals) > 0L) prim_cl_vals else type_cl_vals
-        tab_cl <- table(cand_cl_vals)
-        top_cls <- as.integer(names(tab_cl[tab_cl == max(tab_cl)]))
-        if (length(top_cls) == 1L) {
-          typical_cl_map[tx_k] <- top_cls[1L]
-        } else {
-          d2_top <- vapply(top_cls, function(cv) {
-            dv <- cl_centroids[as.character(cv), ] - mu_k
-            as.numeric(t(dv) %*% S_inv %*% dv)
-          }, numeric(1L))
-          typical_cl_map[tx_k] <- top_cls[which.min(d2_top)]
+      valid_cl_rows <- tx_rows[!is.na(gmm_cl[tx_rows]) & !is_noise_vec[tx_rows]]
+      if (length(valid_cl_rows) == 0L) {
+        valid_cl_rows <- tx_rows[!is.na(gmm_cl[tx_rows])]
+      }
+      gold_type_cl_rows <- valid_cl_rows[is_type_specimen[valid_cl_rows] | (det_tier[valid_cl_rows] == "Tier_1_Gold")]
+      if (length(gold_type_cl_rows) >= 3L) {
+        d2_gt <- rowSums((sweep(X_mat[gold_type_cl_rows, , drop = FALSE], 2L, mu_k, "-") %*% S_inv) *
+                         sweep(X_mat[gold_type_cl_rows, , drop = FALSE], 2L, mu_k, "-"))
+        inlier_gt <- gold_type_cl_rows[is_type_specimen[gold_type_cl_rows] | (is.finite(d2_gt) & d2_gt <= stats::qchisq(0.975, df = max(1L, p)))]
+        if (length(inlier_gt) >= 2L) gold_type_cl_rows <- inlier_gt
+      }
+      ref_k <- if (length(gold_type_cl_rows) >= 2L) gold_type_cl_rows else valid_cl_rows
+      typ_k <- integer(0)
+      if (length(ref_k) > 0L) {
+        cl_mass <- tapply(auth_w[ref_k], gmm_cl[ref_k], sum, na.rm = TRUE)
+        cl_mass[is.na(cl_mass)] <- 0.0
+        tot_mass <- sum(cl_mass, na.rm = TRUE)
+        if (tot_mass > 0.0) {
+          max_mass <- max(cl_mass, na.rm = TRUE)
+          top_cls <- as.integer(names(cl_mass[cl_mass >= max_mass - 1e-9]))
+          if (length(top_cls) == 1L) {
+            modal_cl <- top_cls[1L]
+          } else {
+            d2_top <- vapply(top_cls, function(cv) {
+              dv <- cl_centroids[as.character(cv), ] - mu_k
+              as.numeric(t(dv) %*% S_inv %*% dv)
+            }, numeric(1L))
+            modal_cl <- top_cls[which.min(d2_top)]
+          }
+          sec_cls <- as.integer(names(cl_mass[cl_mass >= 0.30 * tot_mass]))
+          typ_k <- unique(c(modal_cl, sec_cls))
         }
-      } else {
+      }
+      type_cl_vals <- as.integer(stats::na.omit(gmm_cl[type_rows_k]))
+      if (length(type_cl_vals) > 0L) {
+        typ_k <- unique(c(type_cl_vals, typ_k))
+      }
+      if (length(typ_k) == 0L) {
         tx_cls <- sort(unique(stats::na.omit(gmm_cl[tx_rows])))
         cand_cls <- if (length(tx_cls) > 0L) tx_cls else u_clusters
         d2_cls <- vapply(cand_cls, function(cv) {
           dv <- cl_centroids[as.character(cv), ] - mu_k
           as.numeric(t(dv) %*% S_inv %*% dv)
         }, numeric(1L))
-        typical_cl_map[tx_k] <- cand_cls[which.min(d2_cls)]
+        typ_k <- cand_cls[which.min(d2_cls)]
       }
+      typical_cl_map[tx_k] <- typ_k[1L]
+      typical_cl_list[[tx_k]] <- typ_k
     }
   }
 
@@ -2308,10 +2339,22 @@ compute_type_specimen_morph_control <- function(
   }
 
   has_empirical_type_anchor <- ifelse(!is.na(given_idx), unname(has_emp_map[active_taxa[given_idx]]), FALSE)
-  is_typical_morphotype <- rep(FALSE, n)
-  if (length(valid_g) > 0L && length(u_clusters) > 0L) {
-    c_star_vec <- unname(typical_cl_map[active_taxa[given_idx[valid_g]]])
-    is_typical_morphotype[valid_g] <- !is.na(gmm_cl[valid_g]) & !is.na(c_star_vec) & (gmm_cl[valid_g] == c_star_vec)
+  is_typical_morphotype <- rep(NA, n)
+  chisq_typ_90 <- stats::qchisq(0.90, df = max(1L, p))
+  if (length(valid_g) > 0L) {
+    for (ii in valid_g) {
+      tx_ii <- active_taxa[given_idx[ii]]
+      typ_cls_ii <- typical_cl_list[[tx_ii]]
+      has_cl_ii <- !is.na(gmm_cl[ii])
+      has_d2_ii <- is.finite(type_morph_mahal_d2[ii])
+      in_typ_cl <- has_cl_ii && (length(typ_cls_ii) > 0L) && (gmm_cl[ii] %in% typ_cls_ii)
+      in_d2_90 <- has_d2_ii && (type_morph_mahal_d2[ii] <= chisq_typ_90)
+      if (in_typ_cl || in_d2_90) {
+        is_typical_morphotype[ii] <- TRUE
+      } else if (has_cl_ii || has_d2_ii) {
+        is_typical_morphotype[ii] <- FALSE
+      }
+    }
   }
 
   if (!is.null(flags) && !is.null(triage) && !is.null(reasons) && any(is_type_specimen)) {
@@ -2536,4 +2579,349 @@ compute_type_specimen_morph_control <- function(
     }
   }
   list(cls_sub = cls_sub, n_eff_ratio = n_eff_ratio)
+}
+
+# ==============================================================================
+# LEVEL 1: WITHIN-PLANT BASAL VS. CAULINE HETEROBLASTY WEIGHTED OTU AGGREGATION
+# ==============================================================================
+
+weighted_otu_stat <- function(x, w = NULL, digits = NULL) {
+  xv <- suppressWarnings(as.numeric(x))
+  if (length(xv) == 0L || all(!is.finite(xv))) return(NA_real_)
+  fin <- is.finite(xv)
+  xv <- xv[fin]
+  if (length(xv) == 1L) return(if (!is.null(digits)) round(xv[1L], digits) else xv[1L])
+  if (is.null(w) || length(w) != length(x)) {
+    val <- stats::median(xv, na.rm = TRUE)
+    return(if (!is.null(digits)) round(val, digits) else val)
+  }
+  wv <- suppressWarnings(as.numeric(w))[fin]
+  wv[!is.finite(wv) | wv <= 0.0] <- 1.0
+  w_sum <- sum(wv)
+  if (!is.finite(w_sum) || w_sum <= 1e-12 || max(wv) - min(wv) <= 1e-9) {
+    val <- stats::median(xv, na.rm = TRUE)
+    return(if (!is.null(digits)) round(val, digits) else val)
+  }
+  ord <- order(xv)
+  xv <- xv[ord]
+  wv <- wv[ord] / w_sum
+  cw <- cumsum(wv)
+  idx <- which(cw >= 0.50 - 1e-9)[1L]
+  if (is.na(idx)) idx <- length(xv)
+  val <- if (abs(cw[idx] - 0.50) <= 1e-9 && idx < length(xv)) 0.5 * (xv[idx] + xv[idx + 1L]) else xv[idx]
+  if (!is.null(digits)) round(val, digits) else val
+}
+
+w_median <- weighted_otu_stat
+
+compute_heteroblasty_leaf_weights <- function(df_sub) {
+  if (is.null(df_sub) || nrow(df_sub) == 0L) return(numeric(0))
+  n_l <- nrow(df_sub)
+  w_zone <- rep(0.70, n_l)
+  if ("leaf_zone" %in% names(df_sub)) {
+    lz <- tolower(trimws(as.character(df_sub$leaf_zone)))
+    w_zone[!is.na(lz) & lz == "basal"] <- 1.00
+    w_zone[!is.na(lz) & lz == "cauline"] <- 0.35
+  }
+  area_v <- rep(NA_real_, n_l)
+  if ("area_mm2" %in% names(df_sub)) {
+    a_mm <- suppressWarnings(as.numeric(df_sub$area_mm2))
+    has_mm <- is.finite(a_mm) & a_mm > 0.0
+    area_v[has_mm] <- a_mm[has_mm]
+  }
+  if (any(!is.finite(area_v)) && "blade_area_cm2" %in% names(df_sub)) {
+    a_cm <- suppressWarnings(as.numeric(df_sub$blade_area_cm2)) * 100.0
+    has_cm <- !is.finite(area_v) & is.finite(a_cm) & a_cm > 0.0
+    area_v[has_cm] <- a_cm[has_cm]
+  }
+  if (any(!is.finite(area_v)) && "area_px" %in% names(df_sub)) {
+    a_px <- suppressWarnings(as.numeric(df_sub$area_px))
+    has_px <- !is.finite(area_v) & is.finite(a_px) & a_px > 0.0
+    area_v[has_px] <- a_px[has_px]
+  }
+  w_area <- rep(1.0, n_l)
+  fin_a <- is.finite(area_v) & area_v > 0.0
+  if (any(fin_a)) {
+    max_a <- max(area_v[fin_a], na.rm = TRUE)
+    if (is.finite(max_a) && max_a > 0.0) {
+      w_area[fin_a] <- pmin(1.0, pmax(0.35, sqrt(area_v[fin_a] / max_a)))
+    }
+  }
+  w_zone * w_area
+}
+
+apply_step03_heteroblasty_weighted_otu_aggregation <- function(specimen_df, closed_leaf_df, all_harm_cols = character(0), sym_names = character(0)) {
+  if (is.null(specimen_df) || is.null(closed_leaf_df) || nrow(specimen_df) == 0L || nrow(closed_leaf_df) == 0L) {
+    return(specimen_df)
+  }
+  pids_leaf <- if ("plant_individual_id" %in% names(closed_leaf_df)) ifelse(is.na(closed_leaf_df$plant_individual_id), 0L, as.integer(closed_leaf_df$plant_individual_id)) else rep(0L, nrow(closed_leaf_df))
+  pids_spec <- if ("plant_individual_id" %in% names(specimen_df)) ifelse(is.na(specimen_df$plant_individual_id), 0L, as.integer(specimen_df$plant_individual_id)) else rep(0L, nrow(specimen_df))
+  leaf_keys <- paste(as.character(closed_leaf_df$catalogNumber), pids_leaf, sep = "__")
+  spec_keys <- paste(as.character(specimen_df$catalogNumber), pids_spec, sep = "__")
+  idx_by_key <- split(seq_len(nrow(closed_leaf_df)), leaf_keys)
+  harm_cols <- intersect(unique(c(all_harm_cols, sym_names)), names(specimen_df))
+  trait_digits <- list(
+    aspect_ratio = 4L, circularity = 4L, solidity = 4L, dissection_index = 4L,
+    ucs_score = 4L, area_px = 1L, area_mm2 = 2L, centroid_size = 4L,
+    log_centsize = 6L, harmonic_roughness = 6L, leaf_quality_weight = 4L,
+    asymmetry_index = 6L
+  )
+  for (i in seq_len(nrow(specimen_df))) {
+    rows_i <- idx_by_key[[spec_keys[i]]]
+    if (length(rows_i) < 2L) next
+    grp <- closed_leaf_df[rows_i, , drop = FALSE]
+    if ("tier_assignment" %in% names(grp) && any(grp$tier_assignment == "Tier_1_Direct", na.rm = TRUE)) {
+      grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]
+    }
+    if (nrow(grp) < 2L) next
+    w_l <- compute_heteroblasty_leaf_weights(grp)
+    for (hc in harm_cols) {
+      if (hc %in% names(grp)) {
+        specimen_df[[hc]][i] <- weighted_otu_stat(grp[[hc]], w_l, digits = 6L)
+      }
+    }
+    for (tc in names(trait_digits)) {
+      if ((tc %in% names(specimen_df)) && (tc %in% names(grp))) {
+        val_t <- weighted_otu_stat(grp[[tc]], w_l, digits = trait_digits[[tc]])
+        if (is.finite(val_t)) specimen_df[[tc]][i] <- val_t
+      }
+    }
+  }
+  specimen_df
+}
+
+# ==============================================================================
+# LEVEL 2 & LEVEL 3: WITHIN-SHEET GATHERING & 10 KM POPULATION-DEME SHRINKAGE
+# ==============================================================================
+
+apply_hierarchical_population_deme_shrinkage <- function(
+    df,
+    feature_cols,
+    deme_radius_km = 10.0,
+    kappa_sheet = 1.5,
+    kappa_deme = 1.25
+) {
+  if (is.null(df) || !is.data.frame(df)) return(df)
+  n <- nrow(df)
+  if (!("population_deme_id" %in% names(df))) df$population_deme_id <- rep(NA_character_, n)
+  if (!("deme_n_specimens" %in% names(df))) df$deme_n_specimens <- rep(1L, n)
+  if (n < 2L || length(feature_cols) == 0L) {
+    if (n == 1L && is.na(df$population_deme_id[1L])) {
+      sp1 <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized[1L]) else "Packera"
+      df$population_deme_id[1L] <- paste0(gsub("[^A-Za-z0-9]+", "_", sp1), "__DEME_001")
+      df$deme_n_specimens[1L] <- 1L
+    }
+    return(df)
+  }
+
+  feature_cols <- intersect(as.character(feature_cols), names(df))
+  feature_cols <- feature_cols[vapply(feature_cols, function(cl) is.numeric(df[[cl]]), logical(1L))]
+  if ("PC1" %in% names(df) && !("PC1_raw_individual" %in% names(df))) df$PC1_raw_individual <- df$PC1
+  if ("PC2" %in% names(df) && !("PC2_raw_individual" %in% names(df))) df$PC2_raw_individual <- df$PC2
+  if (length(feature_cols) == 0L) return(df)
+
+  n_i <- rep(1.0, n)
+  for (lc_col in c("n_leaves", "leaf_count", "n_tier1_leaves")) {
+    if (lc_col %in% names(df)) {
+      lc_v <- suppressWarnings(as.numeric(df[[lc_col]]))
+      has_lc <- is.finite(lc_v) & lc_v >= 1.0
+      n_i[has_lc] <- pmax(n_i[has_lc], lc_v[has_lc])
+      break
+    }
+  }
+
+  t_info <- .identify_type_specimen_vec(df)
+  is_type <- as.logical(t_info$is_type_specimen) | (t_info$type_rank >= 1L)
+  is_type[is.na(is_type)] <- FALSE
+
+  auth_w <- if ("authority_weight" %in% names(df)) suppressWarnings(as.numeric(df$authority_weight)) else rep(1.0, n)
+  auth_w[!is.finite(auth_w)] <- 1.0
+  det_tier <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_2_Silver", n)
+  det_tier[is.na(det_tier) | !nzchar(det_tier)] <- "Tier_2_Silver"
+  is_noise <- if ("is_confident_label_noise" %in% names(df)) as.logical(df$is_confident_label_noise) else rep(FALSE, n)
+  is_noise[is.na(is_noise)] <- FALSE
+  is_active_ref <- (auth_w > 0.0) & (det_tier != "Tier_3_Bronze") & !is_noise
+
+  sp_vec <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else if ("scientificName" %in% names(df)) as.character(df$scientificName) else rep("Packera_sp", n)
+  sp_vec[is.na(sp_vec) | !nzchar(trimws(sp_vec))] <- "Unknown"
+  cat_vec <- if ("catalogNumber" %in% names(df)) trimws(as.character(df$catalogNumber)) else as.character(seq_len(n))
+  cat_vec[is.na(cat_vec) | !nzchar(cat_vec)] <- as.character(seq_len(n))[is.na(cat_vec) | !nzchar(cat_vec)]
+  exs_vec <- if ("exsiccatae_key" %in% names(df)) trimws(as.character(df$exsiccatae_key)) else rep("", n)
+  exs_vec[is.na(exs_vec)] <- ""
+
+  # Build Level 2 gathering groups: (species_standardized, catalogNumber) unioned with non-empty (species_standardized, exsiccatae_key)
+  gath_id <- paste0(sp_vec, "__CAT__", cat_vec)
+  has_exs <- nzchar(exs_vec) & !(tolower(exs_vec) %in% c("na", "none", "unknown"))
+  if (any(has_exs)) {
+    exs_keys <- paste0(sp_vec[has_exs], "__EXS__", exs_vec[has_exs])
+    for (uk in unique(exs_keys)) {
+      idx_e <- which(has_exs)[exs_keys == uk]
+      if (length(idx_e) >= 2L) {
+        cats_e <- unique(gath_id[idx_e])
+        gath_id[gath_id %in% cats_e] <- paste0(uk, "__MERGED")
+      }
+    }
+  }
+
+  X_work <- as.matrix(df[, feature_cols, drop = FALSE])
+  storage.mode(X_work) <- "double"
+  n_eff <- n_i
+
+  # Level 2: Within-Sheet / Same-Gathering Shrinkage
+  bad_sp <- c("Unknown", "Unassigned_Packera", "NA", "")
+  gath_groups <- split(seq_len(n), gath_id)
+  for (g_idx in gath_groups) {
+    if (length(g_idx) < 2L || (sp_vec[g_idx[1L]] %in% bad_sp)) next
+    act_g <- g_idx[is_active_ref[g_idx]]
+    ref_pool_g <- if (length(act_g) >= 1L) act_g else g_idx
+    for (ii in g_idx) {
+      peers_ii <- if (is_active_ref[ii] && length(act_g) >= 1L) setdiff(act_g, ii) else setdiff(g_idx, ii)
+      if (length(peers_ii) >= 1L) {
+        n_eff[ii] <- n_i[ii] + 0.5 * sum(n_i[peers_ii])
+      }
+    }
+    for (col_j in seq_along(feature_cols)) {
+      xv_all <- X_work[g_idx, col_j]
+      if (sum(is.finite(xv_all)) < 2L) next
+      ref_j <- ref_pool_g[is.finite(X_work[ref_pool_g, col_j])]
+      if (length(ref_j) < 1L) next
+      if (length(ref_j) >= 3L) {
+        med_g <- stats::median(X_work[ref_j, col_j], na.rm = TRUE)
+        mad_g <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), 0.35)
+        inl_g <- ref_j[abs(X_work[ref_j, col_j] - med_g) <= 4.0 * mad_g]
+        if (length(inl_g) >= 2L) ref_j <- inl_g
+      }
+      x_bar_g <- sum(n_i[ref_j] * X_work[ref_j, col_j]) / max(1e-12, sum(n_i[ref_j]))
+      for (ii in g_idx) {
+        if (!is.finite(X_work[ii, col_j])) next
+        g_size_ii <- if (is_active_ref[ii] && length(act_g) >= 1L) length(ref_j) else sum(is.finite(xv_all))
+        if (g_size_ii < 2L) next
+        lam_sheet <- (kappa_sheet / (n_i[ii] + kappa_sheet)) * ((g_size_ii - 1.0) / g_size_ii)
+        if (is_type[ii]) lam_sheet <- min(lam_sheet, 0.15)
+        if (length(ref_j) >= 2L) {
+          med_g <- stats::median(X_work[ref_j, col_j], na.rm = TRUE)
+          mad_g <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), 0.35)
+          if (abs(X_work[ii, col_j] - med_g) > 4.5 * mad_g) lam_sheet <- 0.0
+        }
+        X_work[ii, col_j] <- (1.0 - lam_sheet) * X_work[ii, col_j] + lam_sheet * x_bar_g
+      }
+    }
+  }
+
+  # Level 3: Within-Population Center (10 km Conspecific Deme) Shrinkage
+  lat_v <- rep(NA_real_, n)
+  lon_v <- rep(NA_real_, n)
+  for (lc in c("decimalLatitude", "latitude")) {
+    if (lc %in% names(df)) {
+      v <- suppressWarnings(as.numeric(df[[lc]]))
+      m <- !is.finite(lat_v) & is.finite(v)
+      lat_v[m] <- v[m]
+    }
+  }
+  for (lc in c("decimalLongitude", "longitude")) {
+    if (lc %in% names(df)) {
+      v <- suppressWarnings(as.numeric(df[[lc]]))
+      m <- !is.finite(lon_v) & is.finite(v)
+      lon_v[m] <- v[m]
+    }
+  }
+  has_coord <- is.finite(lat_v) & is.finite(lon_v) & (abs(lat_v) <= 90.0) & (abs(lon_v) <= 180.0)
+
+  deme_id_vec <- rep(NA_character_, n)
+  deme_n_vec <- rep(1L, n)
+  sp_groups <- split(seq_len(n), sp_vec)
+
+  for (sp_nm in names(sp_groups)) {
+    sp_rows <- sp_groups[[sp_nm]]
+    sp_slug <- gsub("[^A-Za-z0-9]+", "_", sp_nm)
+    coord_rows <- sp_rows[has_coord[sp_rows]]
+    no_coord_rows <- sp_rows[!has_coord[sp_rows]]
+    if (length(no_coord_rows) > 0L) {
+      deme_id_vec[no_coord_rows] <- sprintf("%s__ISOLATE_%s", sp_slug, cat_vec[no_coord_rows])
+      deme_n_vec[no_coord_rows] <- 1L
+    }
+    nc <- length(coord_rows)
+    if (nc == 0L) next
+    if (nc == 1L || (sp_nm %in% bad_sp)) {
+      deme_id_vec[coord_rows] <- sprintf("%s__DEME_%03d", sp_slug, seq_len(nc))
+      deme_n_vec[coord_rows] <- 1L
+      next
+    }
+
+    # Single-linkage connected components within deme_radius_km using Haversine great-circle distance
+    lat_r <- lat_v[coord_rows] * (pi / 180.0)
+    lon_r <- lon_v[coord_rows] * (pi / 180.0)
+    comp_id <- seq_len(nc)
+    for (a in seq_len(nc - 1L)) {
+      b_seq <- (a + 1L):nc
+      dlat <- lat_r[b_seq] - lat_r[a]
+      dlon <- lon_r[b_seq] - lon_r[a]
+      hav_a <- sin(dlat * 0.5)^2 + cos(lat_r[a]) * cos(lat_r[b_seq]) * (sin(dlon * 0.5)^2)
+      dist_km <- 2.0 * 6371.0088 * asin(pmin(1.0, sqrt(pmax(0.0, hav_a))))
+      nbrs <- b_seq[is.finite(dist_km) & (dist_km <= deme_radius_km)]
+      if (length(nbrs) > 0L) {
+        c_old <- unique(c(comp_id[a], comp_id[nbrs]))
+        c_min <- min(c_old)
+        comp_id[comp_id %in% c_old] <- c_min
+      }
+    }
+    u_comp <- sort(unique(comp_id))
+    comp_rank <- match(comp_id, u_comp)
+    for (cid in seq_along(u_comp)) {
+      d_local <- which(comp_rank == cid)
+      d_rows <- coord_rows[d_local]
+      d_label <- sprintf("%s__DEME_%03d", sp_slug, cid)
+      deme_id_vec[d_rows] <- d_label
+      act_d <- d_rows[is_active_ref[d_rows]]
+      deme_n_vec[d_rows] <- if (length(act_d) >= 1L) length(act_d) else length(d_rows)
+      if (length(d_rows) < 2L) next
+
+      # Only apply Level 3 cross-gathering deme shrinkage when the deme contains >= 2 gatherings
+      # (same-gathering shrinkage was already applied in Level 2)
+      ref_pool_d <- if (length(act_d) >= 1L) act_d else d_rows
+      if (length(unique(gath_id[d_rows])) < 2L) next
+
+      w_deme_all <- pmax(0.1, ifelse(auth_w[d_rows] > 0.0, auth_w[d_rows], 0.1)) * sqrt(n_eff[d_rows])
+      names(w_deme_all) <- as.character(d_rows)
+
+      for (col_j in seq_along(feature_cols)) {
+        xv_d <- X_work[d_rows, col_j]
+        if (sum(is.finite(xv_d)) < 2L) next
+        ref_j <- ref_pool_d[is.finite(X_work[ref_pool_d, col_j])]
+        if (length(ref_j) < 1L) next
+        med_d <- stats::median(X_work[ref_j, col_j], na.rm = TRUE)
+        mad_d <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), 0.35)
+        if (length(ref_j) >= 3L) {
+          inl_d <- ref_j[abs(X_work[ref_j, col_j] - med_d) <= 4.0 * mad_d]
+          if (length(inl_d) >= 2L) {
+            ref_j <- inl_d
+            med_d <- stats::median(X_work[ref_j, col_j], na.rm = TRUE)
+            mad_d <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), 0.35)
+          }
+        }
+        w_ref <- w_deme_all[as.character(ref_j)]
+        x_bar_d <- sum(w_ref * X_work[ref_j, col_j]) / max(1e-12, sum(w_ref))
+
+        for (ii in d_rows) {
+          if (!is.finite(X_work[ii, col_j])) next
+          d_size_ii <- if (is_active_ref[ii] && length(act_d) >= 1L) length(ref_j) else sum(is.finite(xv_d))
+          if (d_size_ii < 2L) next
+          # Skip additional shrinkage if all reference specimens in the deme belong to the same gathering as ii
+          if (length(unique(gath_id[c(ii, ref_j)])) < 2L) next
+          lam_deme <- min(0.55, (kappa_deme / (n_eff[ii] + kappa_deme)) * ((d_size_ii - 1.0) / d_size_ii))
+          if (is_type[ii]) lam_deme <- min(lam_deme, 0.15)
+          if (abs(X_work[ii, col_j] - med_d) > 4.5 * mad_d) lam_deme <- 0.0
+          X_work[ii, col_j] <- (1.0 - lam_deme) * X_work[ii, col_j] + lam_deme * x_bar_d
+        }
+      }
+    }
+  }
+
+  df$population_deme_id <- as.character(deme_id_vec)
+  df$deme_n_specimens <- as.integer(pmax(1L, deme_n_vec))
+  for (col_j in seq_along(feature_cols)) {
+    cn <- feature_cols[col_j]
+    df[[cn]] <- X_work[, col_j]
+  }
+  df
 }

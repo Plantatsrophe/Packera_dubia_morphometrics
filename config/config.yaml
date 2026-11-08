@@ -141,8 +141,11 @@ segmentation:
   mp_conversion_model: "lm3_mp_conversion_factor__sqrt_fit"
   detector_version: "lm3_plant_detector__yolo26x_det_1280"
   max_working_dim: 3200
+  specimen_max_working_dim: 3200
   paperclean: true
   llr_hyst_keep_blobs: true
+  paperclean_llr_hyst_keepblobs: true
+  subtract_holes: true
   use_cf_predicted_by_mp: true
   ect_num_dirs: 360
   minimum_confidence_threshold: 0.50
@@ -175,13 +178,22 @@ leaf_segmentation:
   landmark_detector_model: "lm3_landmark_detector__yolo26x_pose_640"
   mp_conversion_model: "lm3_mp_conversion_factor__sqrt_fit"
   max_working_dim: 3200
+  specimen_max_working_dim: 3200
   paperclean: true
   llr_hyst_keep_blobs: true
+  paperclean_llr_hyst_keepblobs: true
+  subtract_holes: true
   use_cf_predicted_by_mp: true
   ect_num_dirs: 360
   treat_leaflet_as_leaf_whole: false
   use_efds_for_png_masks: false
   do_apply_landmarks: true
+
+vision:
+  leafmachine3:
+    subtract_holes: true
+    paperclean_llr_hyst_keepblobs: true
+    specimen_max_working_dim: 3200
 
 # Phase 3 & 4: Elliptic Fourier Analysis & Statistical Morphometrics (Momocs / MorphoTools2)
 # Cohort-adaptive mode dynamically calibrates EFD harmonic order (A1..D24, >=99% cumulative
