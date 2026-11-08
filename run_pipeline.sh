@@ -343,7 +343,7 @@ esac
 if [[ "${START_STEP}" -ge 2 ]]; then
   SKIP_HARVEST=true
 fi
-if [[ "${START_STEP_EXPLICIT}" == "true" && "${START_STEP}" -eq 2 && -n "${FORCE_FLAG}" ]]; then
+if [[ "${START_STEP_EXPLICIT}" == "true" && "${START_STEP}" -eq 2 && -n "${FORCE_FLAG} $([[ "${RESEGMENT}" == "true" ]] && echo "--force")" ]]; then
   RESEGMENT=true
 fi
 if [[ "${DISCOVER_COMPLEXES}" == "true" && -n "${FOCAL_TAXON}" ]]; then
@@ -497,7 +497,7 @@ fi
 
 if [[ "${HAS_UPSTREAM_VOUCHERS}" == "true" && "${HAS_UPSTREAM_STEP02}" == "true" ]]; then
   if [[ "${RESEGMENT}" == "false" && ${#LIMIT_ARG[@]} -eq 0 ]]; then
-    if [[ "${START_STEP}" -ge 3 ]] || [[ -z "${FORCE_FLAG}" && ( "${CUSTOM_GEO_SCOPE}" == "false" || "${SKIP_HARVEST}" == "true" || "${HAS_EXPLICIT_SOURCE_RUN}" == "true" ) ]]; then
+    if [[ "${START_STEP}" -ge 3 ]] || [[ -z "${FORCE_FLAG} $([[ "${RESEGMENT}" == "true" ]] && echo "--force")" && ( "${CUSTOM_GEO_SCOPE}" == "false" || "${SKIP_HARVEST}" == "true" || "${HAS_EXPLICIT_SOURCE_RUN}" == "true" ) ]]; then
       REUSE_CANONICAL_DATA=true
     fi
   fi
@@ -582,7 +582,7 @@ write_run_metadata(
 # Step 01: Voucher Harvesting & Authority Stratification
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
-  if [[ "${SKIP_HARVEST}" == "false" && ( -n "${FORCE_FLAG}" || ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ) ]]; then
+  if [[ "${SKIP_HARVEST}" == "false" && ( -n "${FORCE_FLAG} $([[ "${RESEGMENT}" == "true" ]] && echo "--force")" || ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ) ]]; then
     echo "[Step 01/07] Running Voucher Harvester (with high-res image downloads & quality audit)..."
     HARVEST_TAXON_ARGS=()
     if [[ ${#CUSTOM_TAXA_RAW[@]} -gt 0 ]]; then
@@ -619,7 +619,7 @@ if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
       "${HARVEST_GEO_ARGS[@]}" \
       "${HARVEST_SPATIAL_ARGS[@]}" \
       --download-images \
-      ${FORCE_FLAG}
+      ${FORCE_FLAG} $([[ "${RESEGMENT}" == "true" ]] && echo "--force")
     if [[ "${CUSTOM_GEO_SCOPE}" != "true" && -z "${FOCAL_TAXON}" && -z "${EXCLUDE_TAXON_CSV}" && -z "${DETERMINER_TIER}" && "${GOLD_ONLY}" != "true" && "${EXCLUDE_MISIDENTIFIED}" != "true" && ( -z "${SPATIAL_THIN_KM}" || "${SPATIAL_THIN_KM}" == "0" || "${SPATIAL_THIN_KM}" == "0.0" ) && -z "${MAX_PER_STATE}" && -z "${MAX_PER_REGION}" && -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
       mkdir -p "${PROJECT_ROOT}/data/tables"
       cp -f "${RUN_DIR}/data/tables/curated_vouchers.csv" "${PROJECT_ROOT}/data/tables/curated_vouchers.csv.tmp"
@@ -1112,7 +1112,7 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --output-dir "${RUN_DIR}/data" \
     --enable-geometric-qc \
-    ${FORCE_FLAG} \
+    ${FORCE_FLAG} $([[ "${RESEGMENT}" == "true" ]] && echo "--force") \
     "${LIMIT_ARG[@]}" \
     "${COMPUTE_ARGS[@]}"
 
