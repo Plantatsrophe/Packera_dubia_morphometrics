@@ -963,6 +963,11 @@ class TestFourierExtractor(unittest.TestCase):
             pd.DataFrame(basal_rows).to_csv(manifest_basal_only_csv, index=False)
             pd.DataFrame(basal_rows + [cauline_row]).to_csv(manifest_mixed_csv, index=False)
 
+            figs_b_dir = tmp_p / "figs_b"
+            figs_m_dir = tmp_p / "figs_m"
+            figs_b_dir.mkdir(parents=True, exist_ok=True)
+            figs_m_dir.mkdir(parents=True, exist_ok=True)
+
             out_spec_basal = tmp_p / "spec_basal_only.csv"
             out_ind_basal = tmp_p / "ind_basal_only.csv"
             proc_b = subprocess.run(
@@ -976,7 +981,8 @@ class TestFourierExtractor(unittest.TestCase):
                     "--output", str(out_spec_basal),
                     "--output-individual", str(out_ind_basal),
                     "--report-out", str(tmp_p / "rep_b.csv"),
-                    "--plot-out", str(tmp_p / "fig_b.pdf"),
+                    "--plot-out", str(figs_b_dir / "fig_b.pdf"),
+                    "--figures-dir", str(figs_b_dir),
                     "--permutations", "9",
                 ],
                 cwd=str(PROJECT_ROOT),
@@ -999,7 +1005,8 @@ class TestFourierExtractor(unittest.TestCase):
                     "--output", str(out_spec_mix),
                     "--output-individual", str(out_ind_mix),
                     "--report-out", str(tmp_p / "rep_m.csv"),
-                    "--plot-out", str(tmp_p / "fig_m.pdf"),
+                    "--plot-out", str(figs_m_dir / "fig_m.pdf"),
+                    "--figures-dir", str(figs_m_dir),
                     "--permutations", "9",
                 ],
                 cwd=str(PROJECT_ROOT),
@@ -1008,6 +1015,12 @@ class TestFourierExtractor(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(proc_m.returncode, 0, f"Mixed basal+cauline Step 03 failed:\n{proc_m.stderr}\n{proc_m.stdout}")
+
+            # Verify Step 03 publication figures separate basal and cauline morphospaces
+            self.assertTrue((figs_b_dir / "fig03_efa_morphospace_reconstruction.pdf").exists())
+            self.assertFalse((figs_b_dir / "fig03c_cauline_efa_morphospace.pdf").exists())
+            self.assertTrue((figs_m_dir / "fig03_efa_morphospace_reconstruction.pdf").exists())
+            self.assertTrue((figs_m_dir / "fig03c_cauline_efa_morphospace.pdf").exists())
 
             ind_mix = pd.read_csv(out_ind_mix)
             spec_basal = pd.read_csv(out_spec_basal)
