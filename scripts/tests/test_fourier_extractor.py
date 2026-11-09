@@ -1016,11 +1016,15 @@ class TestFourierExtractor(unittest.TestCase):
             )
             self.assertEqual(proc_m.returncode, 0, f"Mixed basal+cauline Step 03 failed:\n{proc_m.stderr}\n{proc_m.stdout}")
 
-            # Verify Step 03 publication figures separate basal and cauline morphospaces
+            # Verify Step 03 publication figures separate basal and cauline morphospaces (EFA & ECT)
             self.assertTrue((figs_b_dir / "fig03_efa_morphospace_reconstruction.pdf").exists())
             self.assertFalse((figs_b_dir / "fig03c_cauline_efa_morphospace.pdf").exists())
+            self.assertTrue((figs_b_dir / "fig03d_basal_ect_morphospace.pdf").exists())
+            self.assertFalse((figs_b_dir / "fig03e_cauline_ect_morphospace.pdf").exists())
             self.assertTrue((figs_m_dir / "fig03_efa_morphospace_reconstruction.pdf").exists())
             self.assertTrue((figs_m_dir / "fig03c_cauline_efa_morphospace.pdf").exists())
+            self.assertTrue((figs_m_dir / "fig03d_basal_ect_morphospace.pdf").exists())
+            self.assertTrue((figs_m_dir / "fig03e_cauline_ect_morphospace.pdf").exists())
 
             ind_mix = pd.read_csv(out_ind_mix)
             spec_basal = pd.read_csv(out_spec_basal)
@@ -1048,12 +1052,23 @@ class TestFourierExtractor(unittest.TestCase):
                         msg=f"Primary OTU harmonic {h_col} must match pure basal leaves without cauline contamination.",
                     )
 
-            # 3. Separate cauline track columns are populated on the mixed specimen
+            # 3. Separate cauline track columns (EFA & ECT) are populated on the mixed specimen
             self.assertEqual(int(row_m["cauline_leaf_count"]), 1)
             self.assertAlmostEqual(float(row_m["cauline_solidity_med"]), 0.48, places=2)
             self.assertGreater(float(row_m["cauline_dissection_index_med"]), 1.8)
             self.assertGreater(float(row_m["basal_vs_cauline_length_ratio"]), 1.5)
             self.assertGreater(float(row_m["heteroblasty_efa_distance"]), 0.01)
+            self.assertIn("ECT_PC1", ind_mix.columns)
+            self.assertIn("ect_lobe_complexity", ind_mix.columns)
+            self.assertIn("ECT_PC1", spec_mix.columns)
+            self.assertIn("Cauline_ECT_PC1", spec_mix.columns)
+            self.assertIn("ect_lobe_complexity", spec_mix.columns)
+            self.assertIn("cauline_ect_lobe_complexity", spec_mix.columns)
+            self.assertIn("heteroblasty_ect_distance", spec_mix.columns)
+            self.assertTrue(np.isfinite(float(row_m["ECT_PC1"])))
+            self.assertTrue(np.isfinite(float(row_m["ect_lobe_complexity"])))
+            self.assertTrue(np.isfinite(float(row_m["cauline_ect_lobe_complexity"])))
+            self.assertGreater(float(row_m["heteroblasty_ect_distance"]), 0.0)
 
 
 if __name__ == "__main__":

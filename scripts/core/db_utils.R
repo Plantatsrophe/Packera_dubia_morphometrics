@@ -181,6 +181,7 @@ PACKERA_DB_WC_BIO_COLS <- c(
 .dynamic_sqlite_table_specs_r <- function(table_name) {
   if (identical(table_name, "extracted_leaves")) {
     return(c(
+      ect_path = "TEXT",
       leaf_zone = "TEXT DEFAULT 'basal'",
       leaf_zone_confidence = "REAL",
       dist_from_crown_norm = "REAL",
@@ -206,7 +207,12 @@ PACKERA_DB_WC_BIO_COLS <- c(
         leaf_zone = "TEXT",
         leaf_zone_confidence = "REAL",
         dist_from_crown_norm = "REAL",
-        cy_rel_plant_bbox = "REAL"
+        cy_rel_plant_bbox = "REAL",
+        ECT_PC1 = "REAL",
+        ECT_PC2 = "REAL",
+        ECT_PC3 = "REAL",
+        ect_lobe_complexity = "REAL",
+        ect_bilateral_asym = "REAL"
       )
     ))
   }
@@ -234,6 +240,14 @@ PACKERA_DB_WC_BIO_COLS <- c(
         Cauline_PC1 = "REAL",
         Cauline_PC2 = "REAL",
         Cauline_PC3 = "REAL",
+        ECT_PC1 = "REAL",
+        ECT_PC2 = "REAL",
+        ECT_PC3 = "REAL",
+        Cauline_ECT_PC1 = "REAL",
+        Cauline_ECT_PC2 = "REAL",
+        ect_lobe_complexity = "REAL",
+        cauline_ect_lobe_complexity = "REAL",
+        heteroblasty_ect_distance = "REAL",
         type_status = "TEXT",
         is_type_specimen = "INTEGER",
         has_empirical_type_anchor = "INTEGER",
@@ -466,10 +480,10 @@ connect_packera_db <- function(
   .apply_packera_sqlite_pragmas_r(conn, read_only = FALSE)
 
   cur_ver <- .get_sqlite_user_version_r(conn)
-  el_has_zone <- !db_table_exists_safe(conn, "extracted_leaves") ||
-    ("leaf_zone" %in% tryCatch(DBI::dbListFields(conn, "extracted_leaves"), error = function(e) character(0)))
-  om_has_cauline <- !db_table_exists_safe(conn, "otu_morphometrics") ||
-    ("cauline_leaf_count" %in% tryCatch(DBI::dbListFields(conn, "otu_morphometrics"), error = function(e) character(0)))
+  el_fields_chk <- if (db_table_exists_safe(conn, "extracted_leaves")) tryCatch(DBI::dbListFields(conn, "extracted_leaves"), error = function(e) character(0)) else c("leaf_zone", "ect_path")
+  om_fields_chk <- if (db_table_exists_safe(conn, "otu_morphometrics")) tryCatch(DBI::dbListFields(conn, "otu_morphometrics"), error = function(e) character(0)) else c("cauline_leaf_count", "ECT_PC1")
+  el_has_zone <- all(c("leaf_zone", "ect_path") %in% el_fields_chk)
+  om_has_cauline <- all(c("cauline_leaf_count", "ECT_PC1") %in% om_fields_chk)
   if (cur_ver >= PACKERA_SCHEMA_USER_VERSION &&
       el_has_zone && om_has_cauline &&
       (identical(eff_path, ":memory:") || db_table_exists_safe(conn, "v_integrative_triage_master"))) {
@@ -486,6 +500,7 @@ connect_packera_db <- function(
         "bio19_precip_coldest_qtr", "dissection_index", "q25_solidity",
         "dissected_leaf_fraction", "basal_leaf_count", "cauline_leaf_count",
         "basal_vs_cauline_length_ratio", "heteroblasty_efa_distance", "is_type_specimen",
+        "ECT_PC1", "Cauline_ECT_PC1", "ect_lobe_complexity", "heteroblasty_ect_distance",
         "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance",
         "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon",
         "open_set_novelty_p", "is_confident_label_noise",
@@ -584,9 +599,7 @@ db_upsert_dataframe <- function(
   if (is.null(conn) || is.null(df) || nrow(df) == 0L) return(0L)
   if (!db_table_exists_safe(conn, table_name)) return(0L)
 
-  if (.get_sqlite_user_version_r(conn) < PACKERA_SCHEMA_USER_VERSION) {
-    .migrate_dynamic_sqlite_table_r(conn, table_name)
-  }
+  .migrate_dynamic_sqlite_table_r(conn, table_name)
   tbl_fields <- DBI::dbListFields(conn, table_name)
   keep_cols <- intersect(names(df), tbl_fields)
   if (!all(pk_cols %in% keep_cols)) {
@@ -703,6 +716,7 @@ fetch_step03_contours_from_db <- function(
   }
 
   el_fields <- tryCatch(DBI::dbListFields(conn, "extracted_leaves"), error = function(e) character(0))
+  sel_ect <- if ("ect_path" %in% el_fields) "el.ect_path" else "NULL AS ect_path"
   sel_zone <- if ("leaf_zone" %in% el_fields) "el.leaf_zone" else "'basal' AS leaf_zone"
   sel_zone_conf <- if ("leaf_zone_confidence" %in% el_fields) "el.leaf_zone_confidence" else "NULL AS leaf_zone_confidence"
   sel_dist_cr <- if ("dist_from_crown_norm" %in% el_fields) "el.dist_from_crown_norm" else "NULL AS dist_from_crown_norm"
@@ -715,7 +729,7 @@ fetch_step03_contours_from_db <- function(
     "  el.assigned_tier, COALESCE(el.tier_assignment, el.assigned_tier) AS tier_assignment, ",
     "  el.solidity, COALESCE(el.ucs_score, el.ucs) AS ucs_score, ",
     "  el.aspect_ratio, el.area_px, el.blade_area_cm2, el.is_dissected, ",
-    "  ", sel_zone, ", ", sel_zone_conf, ", ", sel_dist_cr, ", ", sel_cy_rel, ", ", sel_eff_min, ", ",
+    "  ", sel_ect, ", ", sel_zone, ", ", sel_zone_conf, ", ", sel_dist_cr, ", ", sel_cy_rel, ", ", sel_eff_min, ", ",
     "  COALESCE(el.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm, ",
     "  COALESCE(el.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm, ",
     "  COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm, ",
@@ -991,6 +1005,19 @@ fetch_step03_contours_from_db <- function(
       db_zone_vec[hit_pos_z[valid_z]] <- cand_z[valid_z]
     }
   }
+  db_ect_vec <- if ("ect_path" %in% names(sub_rows)) trimws(as.character(sub_rows$ect_path)) else rep(NA_character_, n_kept)
+  db_ect_vec[is.na(db_ect_vec) | !nzchar(db_ect_vec)] <- NA_character_
+  if (!is.null(m_hdr) && "ect_path" %in% names(m_hdr) && any(!is.na(m_hit_vec))) {
+    hit_m_e <- !is.na(m_hit_vec) & is.na(db_ect_vec)
+    if (any(hit_m_e)) {
+      cand_e <- trimws(as.character(m_hdr[["ect_path"]][m_hit_vec[hit_m_e]]))
+      valid_e <- !is.na(cand_e) & nzchar(cand_e)
+      if (any(valid_e)) {
+        hit_pos_e <- which(hit_m_e)
+        db_ect_vec[hit_pos_e[valid_e]] <- cand_e[valid_e]
+      }
+    }
+  }
   diss_raw_vec <- sub_rows$is_dissected
   eff_diss_vec <- ifelse(is.na(diss_raw_vec), NA, as.integer(diss_raw_vec) != 0L)
   cs_kept <- merged$cs[ok_idx]
@@ -1016,6 +1043,7 @@ fetch_step03_contours_from_db <- function(
     blade_length_mm = suppressWarnings(as.numeric(sub_rows$blade_length_mm)),
     petiole_to_blade_ratio = suppressWarnings(as.numeric(sub_rows$petiole_to_blade_ratio)),
     is_dissected = eff_diss_vec,
+    ect_path = db_ect_vec,
     leaf_zone = db_zone_vec,
     leaf_zone_confidence = pull_manifest_num("leaf_zone_confidence", db_zone_conf_vec),
     dist_from_crown_norm = pull_manifest_num("dist_from_crown_norm", db_dist_cr_vec),
@@ -1059,7 +1087,11 @@ fetch_step03_contours_from_db <- function(
       "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med",
       "cauline_blade_length_mm", "basal_vs_cauline_length_ratio",
       "basal_vs_cauline_solidity_delta", "heteroblasty_efa_distance",
-      "Cauline_PC1", "Cauline_PC2", "Cauline_PC3"),
+      "Cauline_PC1", "Cauline_PC2", "Cauline_PC3",
+      "ECT_PC1", "ECT_PC2", "ECT_PC3",
+      "Cauline_ECT_PC1", "Cauline_ECT_PC2",
+      "ect_lobe_complexity", "cauline_ect_lobe_complexity",
+      "ect_bilateral_asym", "heteroblasty_ect_distance"),
     names(df)
   )
   for (nc in dyn_num_cols) {
@@ -1543,7 +1575,7 @@ persist_step07_to_sqlite <- function(
 
 .discover_step08_dynamic_morph_cols <- function(col_names) {
   if (is.null(col_names) || length(col_names) == 0L) return(character(0))
-  morph_pattern <- "^(Sym_PC[0-9]+|PC[0-9]+|[ABCD][0-9]+|efd_harmonic_opt|efd_k95_pcs|selected_morph_features)$"
+  morph_pattern <- "^(Sym_PC[0-9]+|PC[0-9]+|Cauline_PC[0-9]+|ECT_PC[0-9]+|Cauline_ECT_PC[0-9]+|[ABCD][0-9]+|efd_harmonic_opt|efd_k95_pcs|selected_morph_features|ect_lobe_complexity|cauline_ect_lobe_complexity|heteroblasty_ect_distance)$"
   grep(morph_pattern, col_names, value = TRUE)
 }
 

@@ -3021,7 +3021,7 @@ def compute_leaf_ect_descriptor(
     eff_num_thresh = int(num_thresh)
 
     _ensure_ect_module_loaded()
-    from leafmachine3.core.ect_compute import compute_ect, ect_product_for
+    from leafmachine3.core.ect_compute import compute_ect, ect_product_for, tip_up_directions
     from leafmachine3.reporting.leaf_products import render_leaf_products
 
     mask_u8 = ((mask > 0).astype(np.uint8)) * 255
@@ -3066,9 +3066,14 @@ def compute_leaf_ect_descriptor(
     if res is None or getattr(res, "ect_matrix", None) is None:
         return None
 
-    ect_mat = np.asarray(res.ect_matrix, dtype=np.float32)
-    if ect_mat.shape != (eff_num_dirs, eff_num_thresh):
-        ect_mat = cv2.resize(ect_mat, (eff_num_thresh, eff_num_dirs), interpolation=cv2.INTER_LINEAR).astype(
+    ect_raw = np.asarray(res.ect_matrix, dtype=np.float32)
+    thetas = getattr(res, "thetas", None)
+    if thetas is not None and len(thetas) == ect_raw.shape[1]:
+        ect_mat = np.asarray(tip_up_directions(ect_raw, thetas)[0], dtype=np.float32)
+    else:
+        ect_mat = ect_raw
+    if ect_mat.shape != (eff_num_thresh, eff_num_dirs):
+        ect_mat = cv2.resize(ect_mat, (eff_num_dirs, eff_num_thresh), interpolation=cv2.INTER_LINEAR).astype(
             np.float32
         )
 

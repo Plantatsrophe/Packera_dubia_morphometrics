@@ -2323,8 +2323,12 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             self.assertIn("fig02a_pdf", saved)
             self.assertIn("fig02b_pdf", saved)
             self.assertIn("fig02c_pdf", saved)
+            self.assertIn("fig02d_pdf", saved)
+            self.assertIn("fig02e_pdf", saved)
             self.assertTrue(Path(saved["fig02b_pdf"]).exists())
             self.assertTrue(Path(saved["fig02c_pdf"]).exists())
+            self.assertTrue(Path(saved["fig02d_pdf"]).exists())
+            self.assertTrue(Path(saved["fig02e_pdf"]).exists())
 
 
 if __name__ == "__main__":

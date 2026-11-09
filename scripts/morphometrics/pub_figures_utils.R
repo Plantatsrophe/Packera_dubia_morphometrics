@@ -2324,6 +2324,285 @@ generate_step03_pub_figures <- function(
     }, fdir, "fig03c_cauline_efa_morphospace", width = 13.5, height = 6.2, dpi = 300)
   }
 
+  # ----------------------------------------------------------------------------
+  # Figure 03d (Basal Rosette ECT) & Figure 03e (Cauline Stem ECT):
+  #   32x32 Euler Characteristic Transform Morphospace & Radial Consensus Rings
+  # ----------------------------------------------------------------------------
+  .cycle_ect_from_xy <- function(xy_pts, n_dirs = 32L, n_thresh = 32L) {
+    if (exists(".compute_cycle_ect_32x32_r", mode = "function")) {
+      m <- tryCatch(.compute_cycle_ect_32x32_r(xy_pts, n_dirs = n_dirs, n_thresh = n_thresh), error = function(e) NULL)
+      if (!is.null(m) && is.matrix(m)) return(m)
+    }
+    xy <- as.matrix(xy_pts[, 1:2, drop = FALSE])
+    cx <- mean(xy[, 1], na.rm = TRUE); cy <- mean(xy[, 2], na.rm = TRUE)
+    pts <- cbind(xy[, 1] - cx, xy[, 2] - cy)
+    rmax <- max(sqrt(rowSums(pts^2)), na.rm = TRUE)
+    if (!is.finite(rmax) || rmax <= 1e-8) return(matrix(0.0, nrow = n_thresh, ncol = n_dirs))
+    pts <- pts / rmax
+    nv <- nrow(pts)
+    n_nxt <- c(seq(2L, nv), 1L)
+    phis <- seq(0.0, 2.0 * pi * (1.0 - 1.0 / n_dirs), length.out = n_dirs)
+    dirs <- rbind(sin(phis), cos(phis))
+    H <- pts %*% dirs
+    E_max <- pmax(H[seq_len(nv), , drop = FALSE], H[n_nxt, , drop = FALSE])
+    t_grid <- seq(-1.0, 1.0, length.out = n_thresh)
+    ect_m <- matrix(0.0, nrow = n_thresh, ncol = n_dirs)
+    for (j in seq_len(n_dirs)) {
+      hj <- H[, j]; ej <- E_max[, j]
+      ect_m[, j] <- vapply(t_grid, function(ti) as.numeric(sum(hj <= ti) - sum(ej <= ti)), numeric(1L))
+    }
+    ect_m
+  }
+
+  .draw_group_radial_ect_rings <- function(sub_df, group_vec, group_cols, main_title, allow_cauline = FALSE) {
+    if (!isTRUE(allow_cauline) && !is.null(sub_df) && nrow(sub_df) > 0L) {
+      bas_ok <- rep(TRUE, nrow(sub_df))
+      if ("leaf_zone" %in% names(sub_df)) {
+        lz_v <- tolower(trimws(as.character(sub_df$leaf_zone)))
+        bas_ok <- bas_ok & (is.na(lz_v) | !nzchar(lz_v) | lz_v != "cauline")
+      }
+      if ("morph_tier_source" %in% names(sub_df)) {
+        mts_v <- trimws(as.character(sub_df$morph_tier_source))
+        bas_ok <- bas_ok & (is.na(mts_v) | mts_v != "Cauline_Only_Fallback")
+      }
+      if (any(bas_ok, na.rm = TRUE)) {
+        k_idx <- which(bas_ok)
+        sub_df <- sub_df[k_idx, , drop = FALSE]
+        if (length(group_vec) >= max(k_idx)) group_vec <- group_vec[k_idx]
+      }
+    }
+    tier_info <- resolve_taxon_display_tier(sub_df, group_vec)
+    disp_grp <- utils::head(tier_info$ordered_groups, 9L)
+    if (length(disp_grp) == 0L) disp_grp <- "Morphotype_K1"
+    n_disp <- length(disp_grp)
+
+    graphics::plot(
+      c(0, 2), c(0, 2), type = "n", axes = FALSE, xlab = "", ylab = "",
+      main = main_title, font.main = 2
+    )
+    graphics::box(col = "grey80")
+    grid_lay <- .compute_outline_grid_layout(n_disp)
+    std_hm <- extract_standardized_harmonic_matrix(sub_df, max_k = 12L)
+    ect_ramp <- grDevices::colorRampPalette(c("#0D0887", "#6A00A8", "#B12A90", "#E16462", "#FCA636", "#F0F921"))(64)
+
+    for (idx_g in seq_len(n_disp)) {
+      g_name <- disp_grp[idx_g]
+      g_col <- if (g_name %in% names(group_cols)) group_cols[[g_name]] else if (g_name %in% names(tier_info$palette)) tier_info$palette[[g_name]] else "#0072B2"
+      cx <- grid_lay$cx[idx_g]; cy <- grid_lay$cy[idx_g] - grid_lay$body_dy
+      m_grp <- which(group_vec == g_name)
+
+      h_mean <- if (!is.null(std_hm) && nrow(std_hm) == nrow(sub_df) && length(m_grp) > 0L) {
+        colMeans(std_hm[m_grp, , drop = FALSE], na.rm = TRUE)
+      } else {
+        c(A1 = -1.25, B1 = 0, C1 = 0, D1 = 0.48, A2 = -0.04, B2 = 0, C2 = 0, D2 = -0.01, A3 = -0.08, B3 = 0, C3 = 0, D3 = 0.03)
+      }
+      xy_mean <- reconstruct_efa_outline(h_mean, nb_pts = 120L)
+      # Rotate leaf outline so major axis points North (+Y) to match tip-up radial ECT convention
+      xy_rot <- cbind(-xy_mean[, 2], -xy_mean[, 1])
+      ect_mat <- .cycle_ect_from_xy(xy_rot, n_dirs = 32L, n_thresh = 16L)
+      ect_vis <- sign(ect_mat) * log2(1.0 + abs(ect_mat))
+      v_rng <- range(ect_vis, na.rm = TRUE)
+      if (!all(is.finite(v_rng)) || diff(v_rng) < 1e-6) v_rng <- c(0.0, 1.0)
+
+      r_in <- 0.16 * grid_lay$cell_scale
+      r_out <- 0.30 * grid_lay$cell_scale
+      n_r <- nrow(ect_vis); n_th <- ncol(ect_vis)
+      r_breaks <- seq(r_in, r_out, length.out = n_r + 1L)
+      th_breaks <- seq(0.0, 2.0 * pi, length.out = n_th + 1L)
+
+      for (ir in seq_len(n_r)) {
+        r1 <- r_breaks[ir]; r2 <- r_breaks[ir + 1L]
+        for (ith in seq_len(n_th)) {
+          # Clockwise from North (+Y)
+          a1 <- (pi / 2.0) - th_breaks[ith]
+          a2 <- (pi / 2.0) - th_breaks[ith + 1L]
+          val <- ect_vis[ir, ith]
+          c_idx <- max(1L, min(64L, 1L + floor(63.0 * (val - v_rng[1]) / max(diff(v_rng), 1e-6))))
+          px <- cx + c(r1 * cos(a1), r2 * cos(a1), r2 * cos(a2), r1 * cos(a2))
+          py <- cy + c(r1 * sin(a1), r2 * sin(a1), r2 * sin(a2), r1 * sin(a2))
+          graphics::polygon(px, py, col = ect_ramp[c_idx], border = NA)
+        }
+      }
+      th_seq <- seq(0.0, 2.0 * pi, length.out = 90L)
+      graphics::lines(cx + r_in * cos(th_seq), cy + r_in * sin(th_seq), col = "grey30", lwd = 0.8)
+      graphics::lines(cx + r_out * cos(th_seq), cy + r_out * sin(th_seq), col = g_col, lwd = 1.5)
+      graphics::segments(cx, cy + r_out, cx, cy + r_out + 0.025 * grid_lay$cell_scale, col = "#111111", lwd = 1.4)
+
+      draw_outline_in_box(
+        xy_rot, cx = cx, cy = cy, w_box = 1.75 * r_in, h_box = 1.75 * r_in,
+        col_border = g_col, col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.24), lwd = 1.6
+      )
+
+      short_g <- sub("^Packera\\s+", "P. ", g_name)
+      graphics::text(cx, grid_lay$cy[idx_g] + grid_lay$title_dy, labels = sprintf("%s (n=%d)", short_g, length(m_grp)), font = 2, cex = grid_lay$cex_title, col = "#111111")
+      lobe_col <- if (isTRUE(allow_cauline) && "cauline_ect_lobe_complexity" %in% names(sub_df)) "cauline_ect_lobe_complexity" else "ect_lobe_complexity"
+      lobe_v <- if (lobe_col %in% names(sub_df) && length(m_grp) > 0L) suppressWarnings(as.numeric(sub_df[[lobe_col]][m_grp])) else NA_real_
+      lobe_med <- if (any(is.finite(lobe_v))) stats::median(lobe_v[is.finite(lobe_v)]) else mean(pmax(0.0, ect_mat - 1.0))
+      graphics::text(cx, grid_lay$cy[idx_g] - grid_lay$sub_dy, labels = sprintf("ECT Lobe Complexity = %.3f", lobe_med), cex = grid_lay$cex_sub, col = "grey25")
+    }
+  }
+
+  # Render Figure 03d: Basal Rosette 32x32 ECT Morphospace & Consensus Radial Rings
+  atomic_save_dual_plot(function() {
+    graphics::layout(matrix(c(1, 2), nrow = 1), widths = c(1.18, 1.0))
+    graphics::par(mar = c(4.6, 4.6, 3.2, 1.0), oma = c(0, 0, 1.6, 0), family = "sans")
+
+    b_ect_x <- if ("ECT_PC1" %in% colnames(df) && any(is.finite(suppressWarnings(as.numeric(df$ECT_PC1))))) {
+      suppressWarnings(as.numeric(df$ECT_PC1))
+    } else {
+      x_val
+    }
+    b_ect_y <- if ("ECT_PC2" %in% colnames(df) && any(is.finite(suppressWarnings(as.numeric(df$ECT_PC2))))) {
+      suppressWarnings(as.numeric(df$ECT_PC2))
+    } else {
+      y_val
+    }
+    b_ect_x[!is.finite(b_ect_x)] <- 0.0
+    b_ect_y[!is.finite(b_ect_y)] <- 0.0
+
+    b_ect_cent <- do.call(rbind, lapply(present_taxa, function(tx) {
+      m <- which(df$taxon_clean == tx)
+      c(mean(b_ect_x[m], na.rm = TRUE), mean(b_ect_y[m], na.rm = TRUE))
+    }))
+    rownames(b_ect_cent) <- gsub("Packera ", "P. ", present_taxa)
+
+    plot_2d_ordination_scatter(
+      x = b_ect_x,
+      y = b_ect_y,
+      col = grDevices::adjustcolor(pal[df$taxon_clean], alpha.f = alpha_val),
+      pch = pch_map[df$taxon_clean],
+      cex = 0.85,
+      lwd = 1.0,
+      xlab = "Basal Rosette 32x32 ECT PC1",
+      ylab = "Basal Rosette 32x32 ECT PC2",
+      main = sprintf("A. 2D Basal Rosette ECT Morphospace (n = %d)", nrow(df)),
+      group_vec = df$taxon_clean,
+      group_cols = pal,
+      ellipse_level = 0.95,
+      centroids = b_ect_cent,
+      is_type_vec = is_type_row,
+      legend_args = list(
+        "topright",
+        legend = packera_italic_expressions(present_taxa),
+        col = pal[present_taxa],
+        pch = pch_map[present_taxa],
+        pt.bg = NA, cex = 0.72, bty = "n"
+      )
+    )
+
+    .draw_group_radial_ect_rings(
+      sub_df = df,
+      group_vec = df$taxon_clean,
+      group_cols = pal,
+      main_title = "B. Species Basal Rosette Radial ECT Rings (log2 |chi|)",
+      allow_cauline = FALSE
+    )
+    graphics::title(format_active_complex_title(df$taxon, "Basal Rosette Euler Characteristic Transform (ECT) Morphometrics"), outer = TRUE, cex.main = 1.22)
+  }, fdir, "fig03d_basal_ect_morphospace", width = 13.5, height = 6.2, dpi = 300)
+
+  # Render Figure 03e: Dedicated Cauline Stem 32x32 ECT Morphospace & Consensus Radial Rings
+  has_cauline_ect <- all(c("Cauline_ECT_PC1", "Cauline_ECT_PC2") %in% colnames(df_full)) &&
+    any(is.finite(suppressWarnings(as.numeric(df_full$Cauline_ECT_PC1))) &
+        is.finite(suppressWarnings(as.numeric(df_full$Cauline_ECT_PC2))) &
+        (suppressWarnings(as.numeric(df_full$Cauline_ECT_PC1)) != 0 | suppressWarnings(as.numeric(df_full$Cauline_ECT_PC2)) != 0))
+  if (has_cauline_efa || has_cauline_pcs || has_cauline_ect) {
+    atomic_save_dual_plot(function() {
+      graphics::layout(matrix(c(1, 2), nrow = 1), widths = c(1.18, 1.0))
+      graphics::par(mar = c(4.6, 4.6, 3.2, 1.0), oma = c(0, 0, 1.6, 0), family = "sans")
+
+      caul_ect_df <- if (has_cauline_ect) {
+        c_keep <- is.finite(suppressWarnings(as.numeric(df_full$Cauline_ECT_PC1))) &
+          is.finite(suppressWarnings(as.numeric(df_full$Cauline_ECT_PC2)))
+        if ("cauline_leaf_count" %in% colnames(df_full)) {
+          clc <- suppressWarnings(as.numeric(df_full$cauline_leaf_count))
+          if (any(is.finite(clc) & clc > 0)) c_keep <- c_keep & is.finite(clc) & (clc > 0)
+        }
+        df_full[which(c_keep), , drop = FALSE]
+      } else if (nrow(ldf_cauline) > 0L) {
+        ldf_cauline
+      } else {
+        df_full
+      }
+
+      if (nrow(caul_ect_df) > 0L) {
+        ce_grp <- resolve_plot_group_column(caul_ect_df)
+        ce_pal <- get_dynamic_packera_palette(ce_grp)
+        ce_pch <- get_dynamic_packera_shapes(ce_grp)
+        ce_valid <- ce_grp[!is.na(ce_grp) & nzchar(ce_grp) & ce_grp != "Unknown"]
+        ce_def <- if (length(ce_valid) > 0L) ce_valid[1L] else default_grp
+        caul_ect_df$taxon_clean <- ifelse(ce_grp %in% names(ce_pal), as.character(ce_grp), ce_def)
+
+        ce_x <- if ("Cauline_ECT_PC1" %in% colnames(caul_ect_df) && any(is.finite(suppressWarnings(as.numeric(caul_ect_df$Cauline_ECT_PC1))))) {
+          suppressWarnings(as.numeric(caul_ect_df$Cauline_ECT_PC1))
+        } else if ("ECT_PC1" %in% colnames(caul_ect_df) && any(is.finite(suppressWarnings(as.numeric(caul_ect_df$ECT_PC1))))) {
+          suppressWarnings(as.numeric(caul_ect_df$ECT_PC1))
+        } else if ("Cauline_PC1" %in% colnames(caul_ect_df)) {
+          suppressWarnings(as.numeric(caul_ect_df$Cauline_PC1))
+        } else {
+          suppressWarnings(as.numeric(caul_ect_df$PC1))
+        }
+        ce_y <- if ("Cauline_ECT_PC2" %in% colnames(caul_ect_df) && any(is.finite(suppressWarnings(as.numeric(caul_ect_df$Cauline_ECT_PC2))))) {
+          suppressWarnings(as.numeric(caul_ect_df$Cauline_ECT_PC2))
+        } else if ("ECT_PC2" %in% colnames(caul_ect_df) && any(is.finite(suppressWarnings(as.numeric(caul_ect_df$ECT_PC2))))) {
+          suppressWarnings(as.numeric(caul_ect_df$ECT_PC2))
+        } else if ("Cauline_PC2" %in% colnames(caul_ect_df)) {
+          suppressWarnings(as.numeric(caul_ect_df$Cauline_PC2))
+        } else {
+          suppressWarnings(as.numeric(caul_ect_df$PC2))
+        }
+        ce_x[!is.finite(ce_x)] <- 0.0
+        ce_y[!is.finite(ce_y)] <- 0.0
+
+        ce_present <- sort(unique(caul_ect_df$taxon_clean[caul_ect_df$taxon_clean != "Unknown" & !is.na(caul_ect_df$taxon_clean)]))
+        if (length(ce_present) == 0L) ce_present <- ce_def
+        ce_cent <- do.call(rbind, lapply(ce_present, function(tx) {
+          m <- which(caul_ect_df$taxon_clean == tx)
+          c(mean(ce_x[m], na.rm = TRUE), mean(ce_y[m], na.rm = TRUE))
+        }))
+        rownames(ce_cent) <- gsub("Packera ", "P. ", ce_present)
+        ce_alpha <- adaptive_point_alpha(nrow(caul_ect_df))
+        ce_is_type <- if ("is_type_specimen" %in% colnames(caul_ect_df)) as.logical(caul_ect_df$is_type_specimen) else rep(FALSE, nrow(caul_ect_df))
+        ce_is_type[is.na(ce_is_type)] <- FALSE
+
+        plot_2d_ordination_scatter(
+          x = ce_x,
+          y = ce_y,
+          col = grDevices::adjustcolor(ce_pal[caul_ect_df$taxon_clean], alpha.f = ce_alpha),
+          pch = ce_pch[caul_ect_df$taxon_clean],
+          cex = 0.85,
+          lwd = 1.0,
+          xlab = "Cauline Stem 32x32 ECT PC1",
+          ylab = "Cauline Stem 32x32 ECT PC2",
+          main = sprintf("A. 2D Cauline Stem ECT Morphospace (n = %d)", nrow(caul_ect_df)),
+          group_vec = caul_ect_df$taxon_clean,
+          group_cols = ce_pal,
+          ellipse_level = 0.95,
+          centroids = ce_cent,
+          is_type_vec = ce_is_type,
+          legend_args = list(
+            "topright",
+            legend = packera_italic_expressions(ce_present),
+            col = ce_pal[ce_present],
+            pch = ce_pch[ce_present],
+            pt.bg = NA, cex = 0.72, bty = "n"
+          )
+        )
+
+        caul_ect_src <- if (nrow(ldf_cauline) > 0L) ldf_cauline else caul_ect_df
+        caul_ect_src_grp <- resolve_plot_group_column(caul_ect_src)
+        caul_ect_src$taxon_clean <- ifelse(caul_ect_src_grp %in% names(ce_pal), as.character(caul_ect_src_grp), ce_def)
+        .draw_group_radial_ect_rings(
+          sub_df = caul_ect_src,
+          group_vec = caul_ect_src$taxon_clean,
+          group_cols = ce_pal,
+          main_title = "B. Species Cauline Stem Radial ECT Rings (log2 |chi|)",
+          allow_cauline = TRUE
+        )
+      }
+      graphics::title(format_active_complex_title(df_full$taxon, "Cauline Stem Euler Characteristic Transform (ECT) Morphometrics"), outer = TRUE, cex.main = 1.22)
+    }, fdir, "fig03e_cauline_ect_morphospace", width = 13.5, height = 6.2, dpi = 300)
+  }
+
   invisible(TRUE)
 }
 
@@ -2377,6 +2656,22 @@ format_cda_loading_labels <- function(raw_vars) {
     "Cauline_PC2_std"                  = "Cauline PC2 [Stem]",
     "Cauline_PC3"                      = "Cauline PC3 [Stem]",
     "Cauline_PC3_std"                  = "Cauline PC3 [Stem]",
+    "ECT_PC1"                          = "ECT PC1 [Basal Topology]",
+    "ECT_PC1_std"                      = "ECT PC1 [Basal Topology]",
+    "ECT_PC2"                          = "ECT PC2 [Basal Topology]",
+    "ECT_PC2_std"                      = "ECT PC2 [Basal Topology]",
+    "ECT_PC3"                          = "ECT PC3 [Basal Topology]",
+    "ECT_PC3_std"                      = "ECT PC3 [Basal Topology]",
+    "ect_lobe_complexity"              = "ECT Lobe Complexity [Basal]",
+    "ect_lobe_complexity_std"          = "ECT Lobe Complexity [Basal]",
+    "Cauline_ECT_PC1"                  = "Cauline ECT PC1 [Stem]",
+    "Cauline_ECT_PC1_std"              = "Cauline ECT PC1 [Stem]",
+    "Cauline_ECT_PC2"                  = "Cauline ECT PC2 [Stem]",
+    "Cauline_ECT_PC2_std"              = "Cauline ECT PC2 [Stem]",
+    "cauline_ect_lobe_complexity"      = "Cauline ECT Lobing [Stem]",
+    "cauline_ect_lobe_complexity_std"  = "Cauline ECT Lobing [Stem]",
+    "heteroblasty_ect_distance"        = "Heteroblasty ECT Dist.",
+    "heteroblasty_ect_distance_std"    = "Heteroblasty ECT Dist.",
     "pheno_sin"                        = "pheno_sin",
     "pheno_cos"                        = "pheno_cos"
   )

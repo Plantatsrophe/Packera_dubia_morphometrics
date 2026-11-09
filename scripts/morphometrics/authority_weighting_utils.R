@@ -2687,7 +2687,8 @@ apply_step03_heteroblasty_weighted_otu_aggregation <- function(specimen_df, clos
     aspect_ratio = 4L, circularity = 4L, solidity = 4L, dissection_index = 4L,
     ucs_score = 4L, area_px = 1L, area_mm2 = 2L, centroid_size = 4L,
     log_centsize = 6L, harmonic_roughness = 6L, leaf_quality_weight = 4L,
-    asymmetry_index = 6L
+    asymmetry_index = 6L, ECT_PC1 = 6L, ECT_PC2 = 6L, ECT_PC3 = 6L,
+    ect_lobe_complexity = 4L
   )
   pet_cols <- intersect(c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"), names(specimen_df))
   for (i in seq_len(nrow(specimen_df))) {

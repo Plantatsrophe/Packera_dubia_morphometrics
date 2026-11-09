@@ -281,6 +281,14 @@ def _build_master_view_ddl() -> str:
         om.Cauline_PC1 AS Cauline_PC1,
         om.Cauline_PC2 AS Cauline_PC2,
         om.Cauline_PC3 AS Cauline_PC3,
+        om.ECT_PC1 AS ECT_PC1,
+        om.ECT_PC2 AS ECT_PC2,
+        om.ECT_PC3 AS ECT_PC3,
+        om.Cauline_ECT_PC1 AS Cauline_ECT_PC1,
+        om.Cauline_ECT_PC2 AS Cauline_ECT_PC2,
+        om.ect_lobe_complexity AS ect_lobe_complexity,
+        om.cauline_ect_lobe_complexity AS cauline_ect_lobe_complexity,
+        om.heteroblasty_ect_distance AS heteroblasty_ect_distance,
         om.ucs_score AS ucs_score,
         om.aspect_ratio AS aspect_ratio,
         om.area_px AS area_px,
@@ -558,6 +566,7 @@ def _build_schema_ddl() -> str:
         mask_path TEXT,
         crop_path TEXT,
         contour_path TEXT,
+        ect_path TEXT,
         contour_n_pts INTEGER DEFAULT 120,
         contour_xy_json TEXT NOT NULL,
         leaf_zone TEXT DEFAULT 'basal',
@@ -701,6 +710,11 @@ def _build_schema_ddl() -> str:
         leaf_zone_confidence REAL,
         dist_from_crown_norm REAL,
         cy_rel_plant_bbox REAL,
+        ECT_PC1 REAL,
+        ECT_PC2 REAL,
+        ECT_PC3 REAL,
+        ect_lobe_complexity REAL,
+        ect_bilateral_asym REAL,
         {pc_ddl},
         {sym_pc_ddl},
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id, leaf_id),
@@ -735,6 +749,14 @@ def _build_schema_ddl() -> str:
         Cauline_PC1 REAL,
         Cauline_PC2 REAL,
         Cauline_PC3 REAL,
+        ECT_PC1 REAL,
+        ECT_PC2 REAL,
+        ECT_PC3 REAL,
+        Cauline_ECT_PC1 REAL,
+        Cauline_ECT_PC2 REAL,
+        ect_lobe_complexity REAL,
+        cauline_ect_lobe_complexity REAL,
+        heteroblasty_ect_distance REAL,
         ucs_score REAL,
         aspect_ratio REAL,
         area_px REAL,
@@ -880,6 +902,7 @@ _VOUCHERS_MIGRATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
 
 _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
     "extracted_leaves": (
+        ("ect_path", "TEXT"),
         ("leaf_zone", "TEXT DEFAULT 'basal'"),
         ("leaf_zone_confidence", "REAL"),
         ("dist_from_crown_norm", "REAL"),
@@ -902,6 +925,11 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("leaf_zone_confidence", "REAL"),
             ("dist_from_crown_norm", "REAL"),
             ("cy_rel_plant_bbox", "REAL"),
+            ("ECT_PC1", "REAL"),
+            ("ECT_PC2", "REAL"),
+            ("ECT_PC3", "REAL"),
+            ("ect_lobe_complexity", "REAL"),
+            ("ect_bilateral_asym", "REAL"),
         ]
     ),
     "otu_morphometrics": tuple(
@@ -927,6 +955,14 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("Cauline_PC1", "REAL"),
             ("Cauline_PC2", "REAL"),
             ("Cauline_PC3", "REAL"),
+            ("ECT_PC1", "REAL"),
+            ("ECT_PC2", "REAL"),
+            ("ECT_PC3", "REAL"),
+            ("Cauline_ECT_PC1", "REAL"),
+            ("Cauline_ECT_PC2", "REAL"),
+            ("ect_lobe_complexity", "REAL"),
+            ("cauline_ect_lobe_complexity", "REAL"),
+            ("heteroblasty_ect_distance", "REAL"),
             ("type_status", "TEXT"),
             ("is_type_specimen", "INTEGER DEFAULT 0"),
             ("has_empirical_type_anchor", "INTEGER"),
@@ -1082,7 +1118,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
         if required_objs.issubset(existing_objs):
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
-            if "leaf_zone" not in el_cols or "cauline_leaf_count" not in om_cols:
+            if "leaf_zone" not in el_cols or "ect_path" not in el_cols or "cauline_leaf_count" not in om_cols or "ECT_PC1" not in om_cols:
                 _migrate_dynamic_schema_columns(conn, recreate_view=True)
             conn.execute("PRAGMA foreign_keys = ON;")
             return

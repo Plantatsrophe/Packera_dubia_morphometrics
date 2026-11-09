@@ -33,6 +33,7 @@ from scripts.vision.leaf_geometry_utils import (
     compute_geometric_metrics,
     is_botanical_dissection,
 )
+from scripts.vision.lm3_inference_engines import _ensure_ect_module_loaded
 
 logger = logging.getLogger("SegmentAndExtract")
 
@@ -1072,6 +1073,7 @@ def generate_step02_publication_figures(
         title_suffix: str = "",
         pool_df: Optional[pd.DataFrame] = None,
         zone_label: str = "Basal",
+        render_mode: str = "silhouette",
     ) -> Tuple[Path, Path]:
         active_pool = pool_df if pool_df is not None else t1_basal_pool
         n_sp_rows = max(1, len(montage_sp_list))
@@ -1366,54 +1368,73 @@ def generate_step02_publication_figures(
                                 p_base = (float(p_base[0] - rx0), float(p_base[1] - ry0))
                                 p_apex = (float(p_apex[0] - rx0), float(p_apex[1] - ry0))
 
-                    h_m, w_m = crop_m.shape[:2]
-                    canvas_rgb = np.full((h_m, w_m, 3), 248, dtype=np.uint8)
-                    rgb_hex = sp_col.lstrip("#")
-                    r_c, g_c, b_c = int(rgb_hex[0:2], 16), int(rgb_hex[2:4], 16), int(rgb_hex[4:6], 16)
-                    canvas_rgb[crop_m > 0] = (r_c, g_c, b_c)
+                    if render_mode == "ect_radial":
+                        _ensure_ect_module_loaded()
+                        from leafmachine3.core.ect_compute import compute_ect
+                        from leafmachine3.reporting.ect_viz import render_radial_ect_overlay, visual_log
 
-                    pad_bot = max(18, int(round(canvas_rgb.shape[0] * 0.16)))
-                    canvas_rgb = np.pad(
-                        canvas_rgb,
-                        ((0, pad_bot), (0, 0), (0, 0)),
-                        mode="constant",
-                        constant_values=248,
-                    )
-                    h_c, w_c = canvas_rgb.shape[:2]
+                        ect_res = compute_ect(crop_m, num_dirs=160, bound_radius=1.0, want_simple=True)
+                        if ect_res is not None:
+                            bgr_ect = render_radial_ect_overlay(
+                                visual_log(ect_res.ect_matrix),
+                                ect_res.thetas,
+                                ect_res.thresholds,
+                                ect_res.bound_radius,
+                                ect_res.outline_norm,
+                                cmap="viridis",
+                            )
+                            ax_t.imshow(bgr_ect[..., ::-1])
+                        else:
+                            ax_t.set_facecolor("#F8F8F8")
+                    else:
+                        h_m, w_m = crop_m.shape[:2]
+                        canvas_rgb = np.full((h_m, w_m, 3), 248, dtype=np.uint8)
+                        rgb_hex = sp_col.lstrip("#")
+                        r_c, g_c, b_c = int(rgb_hex[0:2], 16), int(rgb_hex[2:4], 16), int(rgb_hex[4:6], 16)
+                        canvas_rgb[crop_m > 0] = (r_c, g_c, b_c)
 
-                    ax_t.imshow(canvas_rgb)
-                    ax_t.plot(
-                        [p_base[0], p_apex[0]],
-                        [p_base[1], p_apex[1]],
-                        color="#111111",
-                        linestyle="--",
-                        linewidth=1.3,
-                    )
-                    ax_t.scatter(
-                        [p_base[0]],
-                        [p_base[1]],
-                        facecolors="none",
-                        edgecolors="#E69F00",
-                        linewidths=1.5,
-                        s=48,
-                        zorder=5,
-                    )
-                    # Draw 10 mm physical scale bar in dedicated bottom footer band
-                    if np.isfinite(ppm_val) and ppm_val > 0:
-                        bar_px = min(w_c * 0.45, 10.0 * ppm_val)
-                        bx0 = w_c * 0.08
-                        by0 = h_c - pad_bot * 0.45
-                        ax_t.plot([bx0, bx0 + bar_px], [by0, by0], color="#111111", linewidth=2.2)
-                        ax_t.text(
-                            bx0 + bar_px / 2.0,
-                            by0 - max(3.0, pad_bot * 0.18),
-                            "10 mm",
-                            fontsize=6.5,
-                            fontweight="bold",
-                            ha="center",
-                            va="bottom",
-                            color="#111111",
+                        pad_bot = max(18, int(round(canvas_rgb.shape[0] * 0.16)))
+                        canvas_rgb = np.pad(
+                            canvas_rgb,
+                            ((0, pad_bot), (0, 0), (0, 0)),
+                            mode="constant",
+                            constant_values=248,
                         )
+                        h_c, w_c = canvas_rgb.shape[:2]
+
+                        ax_t.imshow(canvas_rgb)
+                        ax_t.plot(
+                            [p_base[0], p_apex[0]],
+                            [p_base[1], p_apex[1]],
+                            color="#111111",
+                            linestyle="--",
+                            linewidth=1.3,
+                        )
+                        ax_t.scatter(
+                            [p_base[0]],
+                            [p_base[1]],
+                            facecolors="none",
+                            edgecolors="#E69F00",
+                            linewidths=1.5,
+                            s=48,
+                            zorder=5,
+                        )
+                        # Draw 10 mm physical scale bar in dedicated bottom footer band
+                        if np.isfinite(ppm_val) and ppm_val > 0:
+                            bar_px = min(w_c * 0.45, 10.0 * ppm_val)
+                            bx0 = w_c * 0.08
+                            by0 = h_c - pad_bot * 0.45
+                            ax_t.plot([bx0, bx0 + bar_px], [by0, by0], color="#111111", linewidth=2.2)
+                            ax_t.text(
+                                bx0 + bar_px / 2.0,
+                                by0 - max(3.0, pad_bot * 0.18),
+                                "10 mm",
+                                fontsize=6.5,
+                                fontweight="bold",
+                                ha="center",
+                                va="bottom",
+                                color="#111111",
+                            )
                 else:
                     c_path_res = _resolve_asset_path(row.get("contour_path", ""), out_dir)
                     pts_xy = None
@@ -1448,18 +1469,42 @@ def generate_step02_publication_figures(
                             ])
                             p_base_pt = pts_xy[0]
                             p_apex_pt = pts_xy[int(np.argmax(dists))]
-                        ax_t.set_facecolor("#F8F8F8")
-                        ax_t.fill(pts_xy[:, 0], pts_xy[:, 1], color=sp_col, alpha=0.82)
-                        ax_t.plot(
-                            [p_base_pt[0], p_apex_pt[0]],
-                            [p_base_pt[1], p_apex_pt[1]],
-                            color="#111111",
-                            linestyle="--",
-                            linewidth=1.3,
-                        )
-                        ax_t.scatter([p_base_pt[0]], [p_base_pt[1]], facecolors="none", edgecolors="#E69F00", linewidths=1.5, s=48, zorder=5)
-                        ax_t.set_aspect("equal", adjustable="datalim")
-                        ax_t.invert_yaxis()
+                        if render_mode == "ect_radial":
+                            _ensure_ect_module_loaded()
+                            from leafmachine3.core.ect_compute import compute_ect
+                            from leafmachine3.reporting.ect_viz import render_radial_ect_overlay, visual_log
+
+                            min_xy = pts_xy.min(axis=0)
+                            span_xy = max(float((pts_xy.max(axis=0) - min_xy).max()), 1e-6)
+                            norm_pts = np.round(((pts_xy - min_xy) / span_xy) * 200.0 + 28.0).astype(np.int32)
+                            poly_m = np.zeros((256, 256), dtype=np.uint8)
+                            cv2.fillPoly(poly_m, [norm_pts], 255)
+                            ect_res = compute_ect(poly_m, num_dirs=160, bound_radius=1.0, want_simple=True)
+                            if ect_res is not None:
+                                bgr_ect = render_radial_ect_overlay(
+                                    visual_log(ect_res.ect_matrix),
+                                    ect_res.thetas,
+                                    ect_res.thresholds,
+                                    ect_res.bound_radius,
+                                    ect_res.outline_norm,
+                                    cmap="viridis",
+                                )
+                                ax_t.imshow(bgr_ect[..., ::-1])
+                            else:
+                                ax_t.set_facecolor("#F8F8F8")
+                        else:
+                            ax_t.set_facecolor("#F8F8F8")
+                            ax_t.fill(pts_xy[:, 0], pts_xy[:, 1], color=sp_col, alpha=0.82)
+                            ax_t.plot(
+                                [p_base_pt[0], p_apex_pt[0]],
+                                [p_base_pt[1], p_apex_pt[1]],
+                                color="#111111",
+                                linestyle="--",
+                                linewidth=1.3,
+                            )
+                            ax_t.scatter([p_base_pt[0]], [p_base_pt[1]], facecolors="none", edgecolors="#E69F00", linewidths=1.5, s=48, zorder=5)
+                            ax_t.set_aspect("equal", adjustable="datalim")
+                            ax_t.invert_yaxis()
 
                 is_r_type = bool(row.get("is_type_bool", False))
                 type_tag = " [TYPE]" if is_r_type else ""
@@ -1477,12 +1522,20 @@ def generate_step02_publication_figures(
                 ax_t.set_xticks([])
                 ax_t.set_yticks([])
 
-        fig_b.suptitle(
-            f"Phase 02 - Taxon-Stratified {zone_label} Leaf Silhouettes (20th-80th %ile Aspect Ratio), Midrib Axes & Petiole Anchors{title_suffix}",
-            fontsize=11.5,
-            fontweight="bold",
-            y=0.99,
-        )
+        if render_mode == "ect_radial":
+            fig_b.suptitle(
+                f"Phase 02 - Taxon-Stratified {zone_label} Leaf Radial ECT Overlays (20th-80th %ile Aspect Ratio, Tip at North){title_suffix}",
+                fontsize=11.5,
+                fontweight="bold",
+                y=0.99,
+            )
+        else:
+            fig_b.suptitle(
+                f"Phase 02 - Taxon-Stratified {zone_label} Leaf Silhouettes (20th-80th %ile Aspect Ratio), Midrib Axes & Petiole Anchors{title_suffix}",
+                fontsize=11.5,
+                fontweight="bold",
+                y=0.99,
+            )
         fig_b.tight_layout(rect=[0.01, 0, 1, 0.965])
         page_pdf, page_png = _save_fig_fn(fig_b, out_dir / out_stem, dpi=300)
         plt.close(fig_b)
@@ -1498,6 +1551,16 @@ def generate_step02_publication_figures(
     )
     saved_paths["fig02b_pdf"] = fig02b_pdf
     saved_paths["fig02b_png"] = fig02b_png
+
+    fig02d_pdf, fig02d_png = _render_montage_page(
+        fg_montage_sp,
+        "fig02d_basal_ect_radial_montage",
+        pool_df=t1_basal_pool,
+        zone_label="Basal",
+        render_mode="ect_radial",
+    )
+    saved_paths["fig02d_pdf"] = fig02d_pdf
+    saved_paths["fig02d_png"] = fig02d_png
 
     if len(basal_sp_list) > 8:
         supp_montage_sp = basal_sp_list[8:]
@@ -1523,6 +1586,15 @@ def generate_step02_publication_figures(
             )
             saved_paths["fig02c_pdf"] = fig02c_pdf
             saved_paths["fig02c_png"] = fig02c_png
+            fig02e_pdf, fig02e_png = _render_montage_page(
+                fg_caul_sp,
+                "fig02e_cauline_ect_radial_montage",
+                pool_df=t1_cauline_pool,
+                zone_label="Cauline",
+                render_mode="ect_radial",
+            )
+            saved_paths["fig02e_pdf"] = fig02e_pdf
+            saved_paths["fig02e_png"] = fig02e_png
             if len(cauline_sp_list) > 8:
                 supp_caul_sp = cauline_sp_list[8:]
                 supp_c_pdf, supp_c_png = _render_montage_page(

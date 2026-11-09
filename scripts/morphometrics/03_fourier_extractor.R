@@ -415,10 +415,11 @@ run_fourier_extraction <- function(opts) {
     aspect_ratio <- round(as.numeric(lw[1] / lw[2]), 4)
     shape_name <- meta$shape_id
     m_zone <- if (!is.null(m_match) && nrow(m_match) > 0 && "leaf_zone" %in% names(m_match) && !is.na(m_match$leaf_zone[1])) as.character(m_match$leaf_zone[1]) else NA_character_
+    m_ect <- if (!is.null(m_match) && nrow(m_match) > 0 && "ect_path" %in% names(m_match) && !is.na(m_match$ect_path[1])) as.character(m_match$ect_path[1]) else NA_character_
     m_amm2 <- if (!is.na(m_num("area_mm2"))) m_num("area_mm2") else if (is_calibrated_mm) round(area_px / (resolved_ppm^2), 2) else NA_real_
     rec <- data.frame(
       shape_id = shape_name, catalogNumber = meta$catalogNumber, plant_individual_id = resolved_pid,
-      leaf_id = meta$leaf_id, assigned_tier = resolved_tier, tier_assignment = resolved_tier,
+      leaf_id = meta$leaf_id, assigned_tier = resolved_tier, tier_assignment = resolved_tier, ect_path = m_ect,
       leaf_zone = m_zone, leaf_zone_confidence = m_num("leaf_zone_confidence"), dist_from_crown_norm = m_num("dist_from_crown_norm"),
       area_mm2 = m_amm2, pixels_per_mm = resolved_ppm, is_calibrated_mm = is_calibrated_mm, aspect_ratio = aspect_ratio,
       circularity = circularity, solidity = resolved_solidity, dissection_index = dissection_index, ucs_score = resolved_ucs,
@@ -617,14 +618,17 @@ run_fourier_extraction <- function(opts) {
   harm_mat <- as.matrix(efa_df[, harmonic_names, drop = FALSE])
   sym_harmonics <- as.matrix(efa_df[, sym_names, drop = FALSE])
   efa_df$reconstruction_tier <- "Tier 1"; efa_df$efd_harmonic_opt <- as.integer(h_opt); efa_df$efd_k95_pcs <- as.integer(k_95)
+  if (exists("compute_leaf_ect_features", mode = "function")) efa_df <- compute_leaf_ect_features(efa_df, coo_list, opts$contours)
+  ect_attrs <- attributes(efa_df)[c("ect_sym_mats", "ect_sym_vecs", "ect_coo_list", "ect_basal_var_exp")]
   exp_pc_cols <- paste0("PC", seq_len(k_export))
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "tier_assignment", "reconstruction_tier", "leaf_zone", "leaf_zone_confidence", "dist_from_crown_norm", "cy_rel_plant_bbox", "pixels_per_mm", "is_calibrated_mm",
-                 "species_standardized", "scientificName", "species_raw", "determiner_tier", "type_status", "is_type_specimen", "anchor_tier_source", "authority_weight", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "aspect_ratio", "circularity", "solidity", "dissection_index", "ucs_score",
+                 "species_standardized", "scientificName", "species_raw", "determiner_tier", "type_status", "is_type_specimen", "anchor_tier_source", "authority_weight", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", "ect_bilateral_asym", "aspect_ratio", "circularity", "solidity", "dissection_index", "ucs_score",
                  "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
                  "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
+  for (anm in intersect(c("ect_sym_mats", "ect_sym_vecs", "ect_coo_list", "ect_basal_var_exp"), names(ect_attrs))) attr(efa_df, anm) <- ect_attrs[[anm]]
 
   # 5a. Export Disaggregated Individual Leaf Harmonics Archive (Atomic write-then-replace)
   if (!is.null(opts$output_individual) && nzchar(opts$output_individual)) {
@@ -637,6 +641,8 @@ run_fourier_extraction <- function(opts) {
   message("Computing primary basal OTU median harmonic vectors and separate cauline morphometric track across intact Tier 1 leaves...")
   valid_closed_mask <- grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE) & (efa_df$assigned_tier == "Tier_1_Direct") & complete.cases(efa_df[, sym_names])
   closed_leaf_df <- efa_df[valid_closed_mask, , drop = FALSE]
+  if (!is.null(ect_attrs$ect_sym_vecs)) attr(closed_leaf_df, "ect_sym_vecs") <- ect_attrs$ect_sym_vecs[valid_closed_mask]
+  attr(closed_leaf_df, "ect_basal_var_exp") <- ect_attrs$ect_basal_var_exp
   all_harm_cols <- intersect(c(harmonic_names, grep("Chebyshev", names(efa_df), value = TRUE)), names(efa_df))
   specimen_df <- if (exists("aggregate_step03_otu_medians_fast", mode = "function")) {
     agg_tmp <- aggregate_step03_otu_medians_fast(closed_leaf_df, all_harm_cols, sym_names)
@@ -650,6 +656,7 @@ run_fourier_extraction <- function(opts) {
     }))
   }
   if (exists("compute_separate_cauline_otu_track", mode = "function")) specimen_df <- compute_separate_cauline_otu_track(closed_leaf_df, specimen_df, sym_names)
+  spec_ect_attrs <- attributes(specimen_df)[c("ect_basal_var_exp", "ect_cauline_var_exp")]
   specimen_df$efd_harmonic_opt <- as.integer(h_opt); specimen_df$efd_k95_pcs <- as.integer(k_95)
   for (p in seq_len(k_export)) { specimen_df[[paste0("PC", p)]] <- NA_real_; specimen_df[[paste0("Sym_PC", p)]] <- 0.0 }
   # Fit OTU-level ordination on Empirical Bayes active reference anchors (with Adaptive Anchor Promotion for 0-Gold/Silver taxa)
@@ -687,8 +694,9 @@ run_fourier_extraction <- function(opts) {
     for (p in seq_len(k_export)) specimen_df[[paste0("Sym_PC", p)]] <- if (p <= ncol(spec_sym_pcs)) round(spec_sym_pcs[, p], 6) else 0.0
   }
 
-  lead_spec_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_count", "basal_leaf_count", "cauline_leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source", "foliar_variance", "heteroblasty_index", "heteroblasty_efa_distance", "assigned_tier", "tier_assignment", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm", "species_standardized", "scientificName", "species_raw", "determiner_tier", "type_status", "is_type_specimen", "anchor_tier_source", "authority_weight", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "aspect_ratio", "circularity", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "ucs_score", "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize"), names(specimen_df))
+  lead_spec_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_count", "basal_leaf_count", "cauline_leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source", "foliar_variance", "heteroblasty_index", "heteroblasty_efa_distance", "heteroblasty_ect_distance", "assigned_tier", "tier_assignment", "reconstruction_tier", "pixels_per_mm", "is_calibrated_mm", "species_standardized", "scientificName", "species_raw", "determiner_tier", "type_status", "is_type_specimen", "anchor_tier_source", "authority_weight", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "aspect_ratio", "circularity", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "ucs_score", "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_px", "centroid_size", "log_centsize"), names(specimen_df))
   specimen_df <- specimen_df[, c(lead_spec_cols, setdiff(names(specimen_df), lead_spec_cols))]
+  for (anm in intersect(c("ect_basal_var_exp", "ect_cauline_var_exp"), names(spec_ect_attrs))) attr(specimen_df, anm) <- spec_ect_attrs[[anm]]
   write_step03_csv_fast(specimen_df, opts$output); message("Specimen-aggregated EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(specimen_df), ")")
   if (exists("persist_step03_to_sqlite", mode = "function")) tryCatch(persist_step03_to_sqlite(efa_df, specimen_df, opts$vouchers), error = function(e) warning("SQLite Step 03 persistence note: ", e$message))
   tryCatch({
