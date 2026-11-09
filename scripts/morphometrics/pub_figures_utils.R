@@ -2100,13 +2100,13 @@ generate_step03_pub_figures <- function(
       arr_idx <- seq(1L, n_v, by = 6L)
       dx_v <- pts_comp[arr_idx, 1] - pts_ref[arr_idx, 1]
       dy_v <- pts_comp[arr_idx, 2] - pts_ref[arr_idx, 2]
-      keep_arr <- which(is.finite(dx_v) & is.finite(dy_v) & (sqrt(dx_v^2 + dy_v^2) > 1e-4))
+      keep_arr <- which(is.finite(dx_v) & is.finite(dy_v) & (sqrt(dx_v^2 + dy_v^2) > 1e-3))
       if (length(keep_arr) > 0L) {
-        graphics::arrows(
+        suppressWarnings(graphics::arrows(
           pts_ref[arr_idx[keep_arr], 1], pts_ref[arr_idx[keep_arr], 2],
           pts_comp[arr_idx[keep_arr], 1], pts_comp[arr_idx[keep_arr], 2],
           length = 0.04, lwd = 1.15, col = "#111111"
-        )
+        ))
       }
 
       rmsd_val <- sqrt(mean(rowSums((xy_comp - xy_ref)^2), na.rm = TRUE))
