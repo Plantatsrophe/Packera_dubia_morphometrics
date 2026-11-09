@@ -497,15 +497,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             return [((10, 10, ch - 10, cw - 10), m, 0.96, 0)]
 
         prev_seg_partial = getattr(self.pipeline.config.segmentation, "segment_partial_leaves", False)
-        prev_lm3_partial = (
-            self.pipeline.lm3_config.get("leafmachine", {})
-            .get("leaf_segmentation", {})
-            .get("segment_partial_leaves", False)
-        )
         object.__setattr__(self.pipeline.config.segmentation, "segment_partial_leaves", True)
-        self.pipeline.lm3_config.setdefault("leafmachine", {}).setdefault(
-            "leaf_segmentation", {}
-        )["segment_partial_leaves"] = True
         try:
             with patch("cv2.imread", return_value=sheet_img):
                 with patch.object(self.pipeline.stage1_detector, "predict", return_value=stage1_dets):
@@ -513,9 +505,6 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                         records, failure = self.pipeline.process_voucher("NCU123", self.img_path)
         finally:
             object.__setattr__(self.pipeline.config.segmentation, "segment_partial_leaves", prev_seg_partial)
-            self.pipeline.lm3_config.setdefault("leafmachine", {}).setdefault(
-                "leaf_segmentation", {}
-            )["segment_partial_leaves"] = prev_lm3_partial
 
         self.assertIsNone(failure)
         # Stage 2 LM3LeafSegmenterEngine must be called ONLY for class 0 (leaf_whole) and class 1 (leaf_partial)
@@ -770,15 +759,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             ]
 
         prev_seg_partial = getattr(self.pipeline.config.segmentation, "segment_partial_leaves", False)
-        prev_lm3_partial = (
-            self.pipeline.lm3_config.get("leafmachine", {})
-            .get("leaf_segmentation", {})
-            .get("segment_partial_leaves", False)
-        )
         object.__setattr__(self.pipeline.config.segmentation, "segment_partial_leaves", False)
-        self.pipeline.lm3_config.setdefault("leafmachine", {}).setdefault(
-            "leaf_segmentation", {}
-        )["segment_partial_leaves"] = False
         try:
             with patch("cv2.imread", return_value=sheet_img):
                 with patch.object(self.pipeline.stage1_detector, "predict", return_value=stage1_dets):
@@ -786,9 +767,6 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                         records, failure = self.pipeline.process_voucher("NCU_HIGHDPI", self.img_path)
         finally:
             object.__setattr__(self.pipeline.config.segmentation, "segment_partial_leaves", prev_seg_partial)
-            self.pipeline.lm3_config.setdefault("leafmachine", {}).setdefault(
-                "leaf_segmentation", {}
-            )["segment_partial_leaves"] = prev_lm3_partial
 
         self.assertIsNone(failure)
         # Stage 2 LM3LeafSegmenterEngine is called for all 3 Class 0 (`Leaf_WHOLE`) boxes (Class 1 skipped)
@@ -1204,15 +1182,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             return out
 
         prev_seg_partial = getattr(self.pipeline.config.segmentation, "segment_partial_leaves", True)
-        prev_lm3_partial = (
-            self.pipeline.lm3_config.get("leafmachine", {})
-            .get("leaf_segmentation", {})
-            .get("segment_partial_leaves", True)
-        )
         object.__setattr__(self.pipeline.config.segmentation, "segment_partial_leaves", False)
-        self.pipeline.lm3_config.setdefault("leafmachine", {}).setdefault(
-            "leaf_segmentation", {}
-        )["segment_partial_leaves"] = False
         try:
             with patch("cv2.imread", return_value=sheet_img):
                 with patch.object(self.pipeline.stage1_detector, "predict", return_value=s1_dets):
@@ -1220,9 +1190,6 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                         records, failure = self.pipeline.process_voucher("NCU_RAW_LM3", self.img_path)
         finally:
             object.__setattr__(self.pipeline.config.segmentation, "segment_partial_leaves", prev_seg_partial)
-            self.pipeline.lm3_config.setdefault("leafmachine", {}).setdefault(
-                "leaf_segmentation", {}
-            )["segment_partial_leaves"] = prev_lm3_partial
 
         self.assertIsNone(failure)
         # Only the 7 Class 0 (`leaf_whole`) boxes enter Stage 2; all 7 are retained with zero rejections and zero top-6 cap
@@ -1463,9 +1430,6 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                 self.assertEqual({c[2] for c in candidate_crops_b_default}, {0, 1})
 
             object.__setattr__(pipe.config.segmentation, "segment_partial_leaves", False)
-            pipe.lm3_config.setdefault("leafmachine", {}).setdefault(
-                "leaf_segmentation", {}
-            )["segment_partial_leaves"] = False
             unpacked_b = pipe._unpack_stage1_candidates("TEST_GLABELLA_1", sheet_img, s1_mixed, 10.0)
             candidate_crops_b = unpacked_b[0]
             self.assertEqual(len(candidate_crops_b), 1)

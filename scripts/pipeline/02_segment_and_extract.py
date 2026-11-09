@@ -80,7 +80,6 @@ from scripts.core.db import (
     record_voucher_segmentation_transaction,
     upsert_vouchers_records,
 )
-from scripts.vision.configure_leafmachine3 import generate_lm3_config
 from scripts.vision.lm3_data_loader import (
     compute_blade_area_cm2,
     DEFAULT_HERBARIUM_DPI,
@@ -435,15 +434,8 @@ class SegmentAndExtractPipeline:
         self.force = force
         self.ruler_confidence_thresh = ruler_confidence_thresh
 
-        # Resolve LM3 project directory and build canonical LM3 runtime config
+        # Resolve LM3 project directory
         self.lm3_project_dir: Optional[Path] = Path(lm3_project_dir) if lm3_project_dir is not None else None
-
-        self.lm3_config = generate_lm3_config(
-            pipeline_cfg=self.config,
-            output_dir=str(self.lm3_project_dir / "Data" / "output") if self.lm3_project_dir else None,
-            batch_size=self.gpu_batch_size,
-            num_workers=max(1, int(self.threads)) if self.threads is not None else 4,
-        )
 
         # Output artifact directories
         self.masks_dir = self.output_dir / "masks"
@@ -763,15 +755,7 @@ class SegmentAndExtractPipeline:
         rosette_bbox_fallback_used = False
         rejected_leaflet_delta = 0
         crop_pad = 0.0
-        _cfg_partial = getattr(self.config.segmentation, "segment_partial_leaves", None)
-        _lm3_partial = (
-            self.lm3_config.get("leafmachine", {})
-            .get("leaf_segmentation", {})
-            .get("segment_partial_leaves", None)
-        )
-        seg_partial_cfg = bool(
-            _cfg_partial if _cfg_partial is not None else (_lm3_partial if _lm3_partial is not None else False)
-        )
+        seg_partial_cfg = bool(getattr(self.config.segmentation, "segment_partial_leaves", False))
 
         # Native LeafMachine3 Two-Stage Handshake:
         #   Stage 1 (`lm3_plant_detector__yolo26x_det_1280` 9-class YOLO26x) separates
