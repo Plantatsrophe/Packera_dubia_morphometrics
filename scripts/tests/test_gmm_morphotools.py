@@ -1749,6 +1749,20 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         w_caul <- compute_heteroblasty_leaf_weights(df_caul_only)
         stopifnot(length(w_caul) == 2L)
         stopifnot(all(w_caul > 0.0))
+
+        # 3. Foliar architecture augmentation includes both petiole_to_blade_ratio_std and petiole_length_mm_std
+        df_arch <- data.frame(
+          PC1 = c(-2.1, -1.8, -1.5, 0.2, 1.4, 1.9, 2.3),
+          authority_weight = rep(1.0, 7L),
+          petiole_to_blade_ratio = c(0.35, 0.42, 0.50, 0.65, 0.72, 0.85, 0.95),
+          petiole_length_mm = c(14.0, 28.0, 19.0, 42.0, 24.0, 58.0, 36.0),
+          solidity = c(0.91, 0.89, 0.87, 0.78, 0.72, 0.64, 0.58),
+          stringsAsFactors = FALSE
+        )
+        aug_res <- .augment_foliar_architecture_features(df_arch, feature_cols = c("PC1"))
+        stopifnot("petiole_to_blade_ratio_std" %in% aug_res$feature_cols)
+        stopifnot("petiole_length_mm_std" %in% aug_res$feature_cols)
+        stopifnot("solidity_std" %in% aug_res$feature_cols)
         cat("HETEROBLASTY_PURE_BASAL_AND_CAULINE_FALLBACK_OK\\n")
         """
         with tempfile.TemporaryDirectory() as tmpdir:

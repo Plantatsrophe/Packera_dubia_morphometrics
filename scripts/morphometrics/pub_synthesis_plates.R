@@ -1453,6 +1453,20 @@ merge_manifest_petiole_traits_by_individual <- function(agg_df, man_cand) {
     v <- suppressWarnings(as.numeric(x)); v <- v[is.finite(v)]
     if (length(v) > 0L) round(stats::quantile(v, probs = 0.75, na.rm = TRUE, names = FALSE), 4) else NA_real_
   }
+  if ("leaf_zone" %in% names(man_df)) {
+    lz_low <- tolower(trimws(as.character(man_df$leaf_zone)))
+    lz_low[is.na(lz_low) | !nzchar(lz_low)] <- "basal"
+    if (any(lz_low != "cauline")) {
+      grp_k <- if ("plant_individual_id" %in% names(man_df)) {
+        mp_tmp <- ifelse(is.na(man_df$plant_individual_id), 0L, suppressWarnings(as.integer(man_df$plant_individual_id)))
+        mp_tmp[is.na(mp_tmp)] <- 0L
+        paste0(man_df$catalogNumber, "__", mp_tmp)
+      } else man_df$catalogNumber
+      has_basal_grp <- tapply(lz_low != "cauline", grp_k, any)
+      keep_row <- (lz_low != "cauline") | !has_basal_grp[grp_k]
+      man_df <- man_df[which(keep_row), , drop = FALSE]
+    }
+  }
   has_pid <- ("plant_individual_id" %in% names(man_df)) && ("plant_individual_id" %in% names(agg_df))
   agg_cat <- stats::aggregate(man_df[, p_cols, drop = FALSE], by = list(catalogNumber = man_df$catalogNumber), FUN = q75_fn)
   agg_pid <- if (has_pid) {

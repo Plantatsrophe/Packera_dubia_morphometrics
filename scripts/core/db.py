@@ -971,18 +971,24 @@ def record_voucher_segmentation_transaction(
         pet_px = _to_float(p_pet_info.get("petiole_length_px"))
         bld_px = _to_float(p_pet_info.get("blade_length_px"))
 
-        if pet_mm is None and leaves_by_pid.get(pid):
-            vals = [_to_float(x.get("petiole_length_mm")) for x in leaves_by_pid[pid]]
+        pid_leaves = leaves_by_pid.get(pid) or []
+        basal_pid_leaves = [
+            x for x in pid_leaves
+            if str(x.get("leaf_zone") or "basal").strip().lower() != "cauline"
+        ]
+        summary_pid_leaves = basal_pid_leaves if basal_pid_leaves else pid_leaves
+        if pet_mm is None and summary_pid_leaves:
+            vals = [_to_float(x.get("petiole_length_mm")) for x in summary_pid_leaves]
             vals_clean = sorted(v for v in vals if v is not None)
             if vals_clean:
                 pet_mm = vals_clean[min(len(vals_clean) - 1, int(0.75 * (len(vals_clean) - 1)))]
-        if bld_mm is None and leaves_by_pid.get(pid):
-            vals = [_to_float(x.get("blade_length_mm")) for x in leaves_by_pid[pid]]
+        if bld_mm is None and summary_pid_leaves:
+            vals = [_to_float(x.get("blade_length_mm")) for x in summary_pid_leaves]
             vals_clean = sorted(v for v in vals if v is not None)
             if vals_clean:
                 bld_mm = vals_clean[min(len(vals_clean) - 1, int(0.75 * (len(vals_clean) - 1)))]
-        if p2b is None and leaves_by_pid.get(pid):
-            vals = [_to_float(x.get("petiole_to_blade_ratio")) for x in leaves_by_pid[pid]]
+        if p2b is None and summary_pid_leaves:
+            vals = [_to_float(x.get("petiole_to_blade_ratio")) for x in summary_pid_leaves]
             vals_clean = sorted(v for v in vals if v is not None)
             if vals_clean:
                 p2b = vals_clean[min(len(vals_clean) - 1, int(0.75 * (len(vals_clean) - 1)))]

@@ -1781,28 +1781,29 @@ class SegmentAndExtractPipeline:
             is_bent_stem=bool(repro_summary.get("is_bent_stem", False)),
             sheet_shape=(sheet_h, sheet_w),
         )
-        basal_only_pose_inputs = [
-            p_in
-            for p_in in pose_inputs
-            if str((leaf_zones_by_id.get(int(p_in["leaf_id"])) or {}).get("leaf_zone", "basal")).lower() == "basal"
-        ]
-        if basal_only_pose_inputs and len(basal_only_pose_inputs) < len(pose_inputs):
-            basal_petiole_res = approximate_petiole_and_scape_metrics(
-                basal_leaves=basal_only_pose_inputs,
+        has_cauline_zone = False
+        for p_in in pose_inputs:
+            _lz = str((leaf_zones_by_id.get(int(p_in["leaf_id"])) or {}).get("leaf_zone", "basal") or "basal").lower()
+            p_in["leaf_zone"] = _lz
+            if _lz == "cauline":
+                has_cauline_zone = True
+        if has_cauline_zone:
+            petiole_scape_res = approximate_petiole_and_scape_metrics(
+                basal_leaves=pose_inputs,
                 p_crown=crowns_by_pid,
                 px_per_cm=px_per_cm_sheet,
                 upper_cauline_detections=upper_cauline_pts,
                 root_boxes=root_detections,
                 capitula_detections=[b for b, _, _, _ in capitulum_detections],
             )
-            by_plant_petiole = dict(petiole_scape_res.get("by_plant", {}) or {})
-            for b_pid, b_pdict in (basal_petiole_res.get("by_plant", {}) or {}).items():
-                if isinstance(b_pdict, dict):
-                    by_plant_petiole[int(b_pid)] = dict(b_pdict)
-            if np.isfinite(basal_petiole_res.get("scape_to_basal_leaf_ratio", np.nan)):
-                repro_summary["scape_to_basal_leaf_ratio"] = basal_petiole_res.get("scape_to_basal_leaf_ratio", np.nan)
-        else:
-            by_plant_petiole = petiole_scape_res.get("by_plant", {})
+            if np.isfinite(petiole_scape_res.get("scape_to_basal_leaf_ratio", np.nan)):
+                repro_summary["scape_to_basal_leaf_ratio"] = petiole_scape_res.get("scape_to_basal_leaf_ratio", np.nan)
+        by_plant_petiole = petiole_scape_res.get("by_plant", {}) or {}
+        per_leaf_petiole: Dict[int, Dict[str, Any]] = {
+            int(r["leaf_id"]): r
+            for r in (petiole_scape_res.get("leaf_metrics") or [])
+            if isinstance(r, dict) and r.get("leaf_id") is not None
+        }
         _centroids_out = {
             int(k): (float(v[0]), float(v[1]))
             for k, v in rosette_centroids_by_pid.items()
@@ -1925,6 +1926,7 @@ class SegmentAndExtractPipeline:
             inst.contour_path = contour_path
 
             pid_pet = by_plant_petiole.get(int(inst.plant_individual_id), petiole_scape_res)
+            leaf_pet = per_leaf_petiole.get(int(inst.leaf_id), {})
             _inst_ar_val = inst_geom_map.get(inst.leaf_id, (0.0, 0.0, 0.0, np.nan, 1.0))[3]
             _inst_area_px_val = _raw_px_by_leaf_id.get(inst.leaf_id, np.nan)
             _lz_info = leaf_zones_by_id.get(int(inst.leaf_id), {}) if isinstance(leaf_zones_by_id, dict) else {}
@@ -1934,6 +1936,24 @@ class SegmentAndExtractPipeline:
             _eff_min_cm2_leaf = effective_min_area_by_pid.get(
                 int(inst.plant_individual_id),
                 effective_min_blade_area_cm2,
+            )
+            _is_basal_leaf = _leaf_zone_str.lower() != "cauline"
+            _pet_len_mm = leaf_pet.get(
+                "petiole_length_mm",
+                pid_pet.get("petiole_length_mm", np.nan) if _is_basal_leaf else np.nan,
+            )
+            _blade_len_mm = leaf_pet.get(
+                "blade_length_mm",
+                pid_pet.get("blade_length_mm", np.nan) if _is_basal_leaf else np.nan,
+            )
+            _pet_ratio = leaf_pet.get(
+                "petiole_to_blade_ratio",
+                pid_pet.get("petiole_to_blade_ratio", np.nan) if _is_basal_leaf else np.nan,
+            )
+            _pet_w_mm = (
+                round(float(inst.petiole_width_mm), 4)
+                if inst.petiole_width_mm is not None and np.isfinite(inst.petiole_width_mm)
+                else leaf_pet.get("petiole_width_mm", np.nan)
             )
             # Record successfully extracted leaf with diagnostic classification flags
             extracted_records.append({
@@ -1962,14 +1982,10 @@ class SegmentAndExtractPipeline:
                 "cf_source": inst.cf_source,
                 "mask_path": inst.mask_path,
                 "ect_path": inst.ect_path,
-                "petiole_length_mm": pid_pet.get("petiole_length_mm", np.nan),
-                "petiole_width_mm": (
-                    round(float(inst.petiole_width_mm), 4)
-                    if inst.petiole_width_mm is not None and np.isfinite(inst.petiole_width_mm)
-                    else np.nan
-                ),
-                "blade_length_mm": pid_pet.get("blade_length_mm", np.nan),
-                "petiole_to_blade_ratio": pid_pet.get("petiole_to_blade_ratio", np.nan),
+                "petiole_length_mm": _pet_len_mm,
+                "petiole_width_mm": _pet_w_mm,
+                "blade_length_mm": _blade_len_mm,
+                "petiole_to_blade_ratio": _pet_ratio,
                 "capitula_count": capitula_count,
                 "involucre_height_px": repro_summary["involucre_height_px"],
                 "involucre_width_px": repro_summary["involucre_width_px"],
@@ -2072,35 +2088,33 @@ class SegmentAndExtractPipeline:
                     extracted_df[pet_col] = np.nan
                 else:
                     extracted_df[pet_col] = pd.to_numeric(extracted_df[pet_col], errors="coerce")
-            # Enforce 75th-percentile outer-rosette aggregation over basal rows per specimen (catalogNumber, plant_individual_id)
+            # Preserve per-leaf petiole and blade metrics while filling missing basal values from outer-rosette P75
             if "catalogNumber" in extracted_df.columns and len(extracted_df) > 1:
                 grp_keys = [extracted_df["catalogNumber"].astype(str), extracted_df["plant_individual_id"].fillna(0).astype(int)]
                 has_zone_col = "leaf_zone" in extracted_df.columns
                 for pet_col, r_dig in (("petiole_length_mm", 3), ("blade_length_mm", 3), ("petiole_to_blade_ratio", 4)):
-                    if extracted_df[pet_col].notna().any():
+                    if extracted_df[pet_col].notna().any() and extracted_df[pet_col].isna().any():
                         if has_zone_col:
-                            def _agg_basal_p75(grp_df: pd.DataFrame) -> pd.Series:
+                            def _fill_missing_basal_p75(grp_df: pd.DataFrame) -> pd.Series:
                                 z_ser = grp_df["leaf_zone"].fillna("basal").astype(str).str.lower()
                                 b_mask = z_ser == "basal"
                                 b_vals = grp_df.loc[b_mask, pet_col].dropna()
+                                out_s = grp_df[pet_col].copy()
                                 if len(b_vals) > 0:
                                     p75_val = round(float(np.nanpercentile(b_vals, 75)), r_dig)
-                                    out_s = grp_df[pet_col].copy()
-                                    out_s.loc[b_mask] = p75_val
-                                    out_s.loc[~b_mask] = out_s.loc[~b_mask].fillna(p75_val)
-                                    return out_s
-                                all_vals = grp_df[pet_col].dropna()
-                                if len(all_vals) > 0:
-                                    p75_all = round(float(np.nanpercentile(all_vals, 75)), r_dig)
-                                    return pd.Series(p75_all, index=grp_df.index)
-                                return grp_df[pet_col]
+                                    out_s.loc[b_mask] = out_s.loc[b_mask].fillna(p75_val)
+                                return out_s
 
                             for _, _g_df in extracted_df.groupby(grp_keys, sort=False):
-                                extracted_df.loc[_g_df.index, pet_col] = _agg_basal_p75(_g_df)
+                                extracted_df.loc[_g_df.index, pet_col] = _fill_missing_basal_p75(_g_df)
                         else:
                             extracted_df[pet_col] = (
                                 extracted_df.groupby(grp_keys)[pet_col]
-                                .transform(lambda s: round(float(np.nanpercentile(s, 75)), r_dig) if s.notna().any() else np.nan)
+                                .transform(
+                                    lambda s: s.fillna(round(float(np.nanpercentile(s, 75)), r_dig))
+                                    if s.notna().any()
+                                    else s
+                                )
                             )
             for c in manifest_cols:
                 if c not in extracted_df.columns:

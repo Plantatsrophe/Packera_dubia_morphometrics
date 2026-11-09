@@ -2523,7 +2523,7 @@ compute_type_specimen_morph_control <- function(
   } else {
     seq_len(n)
   }
-  for (tr_nm in c("petiole_to_blade_ratio", "solidity")) {
+  for (tr_nm in c("petiole_to_blade_ratio", "petiole_length_mm", "solidity")) {
     std_nm <- paste0(tr_nm, "_std")
     if ((tr_nm %in% feature_cols) || (std_nm %in% feature_cols)) next
     if (!(tr_nm %in% names(df))) next
@@ -2540,7 +2540,20 @@ compute_type_specimen_morph_control <- function(
     v_imp <- v
     v_imp[!is.finite(v_imp)] <- if (is.finite(med_ref)) med_ref else 0.0
     m_ref <- mean(v_imp[r_fin], na.rm = TRUE)
-    df[[std_nm]] <- round((v_imp - m_ref) / sd_ref, 5)
+    cand_std <- round((v_imp - m_ref) / sd_ref, 5)
+    df[[std_nm]] <- cand_std
+    if (tr_nm == "petiole_length_mm" && length(feature_cols) > 0L) {
+      ex_cols <- intersect(feature_cols, names(df))
+      max_abs_r <- 0.0
+      for (ec in ex_cols) {
+        ev <- suppressWarnings(as.numeric(df[[ec]][r_fin]))
+        if (sum(is.finite(ev)) >= 3L && is.finite(stats::sd(ev, na.rm = TRUE)) && stats::sd(ev, na.rm = TRUE) > 1e-6) {
+          r_val <- suppressWarnings(abs(stats::cor(cand_std[r_fin], ev, use = "complete.obs")))
+          if (is.finite(r_val) && r_val > max_abs_r) max_abs_r <- r_val
+        }
+      }
+      if (max_abs_r >= 0.85) next
+    }
     feature_cols <- unique(c(feature_cols, std_nm))
   }
   list(df = df, feature_cols = feature_cols)

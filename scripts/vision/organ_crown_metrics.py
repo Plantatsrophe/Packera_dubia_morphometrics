@@ -168,6 +168,7 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
     petiole_width_px: Optional[float] = None
     petiole_width_mm: Optional[float] = None
     leaf_id: Optional[int] = None
+    leaf_zone: str = "basal"
     keypoints_31: Optional[Dict[str, Any]] = None
     kp_in_sheet_space = False
 
@@ -183,6 +184,7 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
     if isinstance(item, dict):
         pid = int(item.get("plant_individual_id", 0) or 0)
         leaf_id = item.get("leaf_id")
+        leaf_zone = str(item.get("leaf_zone", "basal") or "basal").strip().lower()
         origin = item.get("mask_origin") or item.get("origin")
         if origin is not None and len(origin) == 2 and not item.get("coords_in_sheet_space", False):
             ox, oy = float(origin[0]), float(origin[1])
@@ -260,6 +262,7 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
     elif hasattr(item, "p_base") or hasattr(item, "mask") or hasattr(item, "keypoints_31"):
         pid = int(getattr(item, "plant_individual_id", 0) or 0)
         leaf_id = getattr(item, "leaf_id", None)
+        leaf_zone = str(getattr(item, "leaf_zone", "basal") or "basal").strip().lower()
         origin = getattr(item, "mask_origin", (0, 0)) or (0, 0)
         ox, oy = float(origin[0]), float(origin[1])
         keypoints_31 = getattr(item, "keypoints_31", None)
@@ -414,6 +417,7 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
     return {
         "leaf_id": leaf_id,
         "plant_individual_id": pid,
+        "leaf_zone": leaf_zone if leaf_zone in ("basal", "cauline") else "basal",
         "p_base": p_base,
         "p_apex": p_apex,
         "p_petiole_tip": p_petiole_tip,
@@ -802,17 +806,22 @@ def approximate_petiole_and_scape_metrics(
         if blade_px <= 0.0:
             blade_px = float(math.hypot(pa[0] - pb[0], pa[1] - pb[1]))
 
+        is_caul_leaf = str(p.get("leaf_zone", "basal") or "basal").strip().lower() == "cauline"
         base_poly_px = float(p.get("pose_petiole_polyline_px", 0.0) or 0.0)
         p_tip = p.get("p_petiole_tip")
         d_pose_polyline = base_poly_px
-        if base_poly_px > 0.0 and p_tip is not None:
+        if not is_caul_leaf and base_poly_px > 0.0 and p_tip is not None:
             tip_to_crown_px = float(math.hypot(p_tip[0] - c_pt[0], p_tip[1] - c_pt[1]))
             # Add continuation to p_crown if petiole_6 terminates short of p_crown along the inward direction
             dot_inward = (p_tip[0] - pb[0]) * (c_pt[0] - p_tip[0]) + (p_tip[1] - pb[1]) * (c_pt[1] - p_tip[1])
             if dot_inward > 0.0 and tip_to_crown_px > 1.0 and tip_to_crown_px <= 1.75 * max(blade_px, 1.0):
                 d_pose_polyline = base_poly_px + tip_to_crown_px
 
-        crown_fallback_px = crown_dist_px if (blade_px > 0.0 and crown_dist_px <= 1.75 * blade_px) else 0.0
+        crown_fallback_px = (
+            crown_dist_px
+            if (not is_caul_leaf and blade_px > 0.0 and crown_dist_px <= 1.75 * blade_px)
+            else 0.0
+        )
         petiole_px = max(d_pose_polyline, geodesic_px, crown_fallback_px)
         pet_to_blade = (petiole_px / blade_px) if blade_px > 1e-6 else np.nan
         petiole_mm = (petiole_px / px_per_mm) if (px_per_mm is not None and px_per_mm > 0.0) else np.nan
@@ -828,6 +837,7 @@ def approximate_petiole_and_scape_metrics(
         leaf_metrics.append({
             "leaf_id": p["leaf_id"] if p["leaf_id"] is not None else (idx_l + 1),
             "plant_individual_id": pid,
+            "leaf_zone": "cauline" if is_caul_leaf else "basal",
             "p_base": pb,
             "p_apex": pa,
             "p_petiole_tip": p_tip,
@@ -854,7 +864,9 @@ def approximate_petiole_and_scape_metrics(
     by_plant_summary: Dict[int, Dict[str, Any]] = {}
     pids = sorted({int(r["plant_individual_id"]) for r in leaf_metrics})
     for pid in pids:
-        sub_r = [r for r in leaf_metrics if int(r["plant_individual_id"]) == pid]
+        sub_all = [r for r in leaf_metrics if int(r["plant_individual_id"]) == pid]
+        sub_bas = [r for r in sub_all if r.get("leaf_zone") != "cauline"]
+        sub_r = sub_bas if sub_bas else sub_all
         by_plant_summary[pid] = {
             "p_crown": crowns_by_pid.get(pid, primary_crown),
             "petiole_length_px": _agg_p75(sub_r, "petiole_length_px", 4),
@@ -866,13 +878,15 @@ def approximate_petiole_and_scape_metrics(
             "petiole_width_mm": _agg_p75(sub_r, "petiole_width_mm", 3),
         }
 
-    petiole_px_p75 = _agg_p75(leaf_metrics, "petiole_length_px", 4)
-    blade_px_p75 = _agg_p75(leaf_metrics, "blade_length_px", 4)
-    petiole_mm_p75 = _agg_p75(leaf_metrics, "petiole_length_mm", 3)
-    blade_mm_p75 = _agg_p75(leaf_metrics, "blade_length_mm", 3)
-    pet_to_blade_p75 = _agg_p75(leaf_metrics, "petiole_to_blade_ratio", 4)
-    petiole_width_px_p75 = _agg_p75(leaf_metrics, "petiole_width_px", 4)
-    petiole_width_mm_p75 = _agg_p75(leaf_metrics, "petiole_width_mm", 3)
+    bas_all = [r for r in leaf_metrics if r.get("leaf_zone") != "cauline"]
+    agg_pool = bas_all if bas_all else leaf_metrics
+    petiole_px_p75 = _agg_p75(agg_pool, "petiole_length_px", 4)
+    blade_px_p75 = _agg_p75(agg_pool, "blade_length_px", 4)
+    petiole_mm_p75 = _agg_p75(agg_pool, "petiole_length_mm", 3)
+    blade_mm_p75 = _agg_p75(agg_pool, "blade_length_mm", 3)
+    pet_to_blade_p75 = _agg_p75(agg_pool, "petiole_to_blade_ratio", 4)
+    petiole_width_px_p75 = _agg_p75(agg_pool, "petiole_width_px", 4)
+    petiole_width_mm_p75 = _agg_p75(agg_pool, "petiole_width_mm", 3)
 
     # Resolve flowering capitula centroid p_corymb
     resolved_corymb: Optional[Tuple[float, float]] = None

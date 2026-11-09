@@ -347,6 +347,29 @@ class TestGeometryEdgeCases(unittest.TestCase):
         self.assertAlmostEqual(res_bent["plant_height_cm"], 12.0, places=2)
         self.assertGreater(res_bent["plant_height_cm"], res_straight["plant_height_cm"])
 
+        # Verify cauline leaf petiole length is not inflated by distance to p_crown
+        leaves_with_cauline = leaves + [
+            {
+                "leaf_id": 3,
+                "plant_individual_id": 0,
+                "leaf_zone": "cauline",
+                "p_base": (200.0, 320.0),
+                "p_apex": (200.0, 240.0),
+                "geodesic_petiole_skeleton_px": 0.0,
+            }
+        ]
+        res_caul = approximate_petiole_and_scape_metrics(
+            basal_leaves=leaves_with_cauline,
+            p_crown=(200.0, 800.0),
+            px_per_cm=100.0,
+            p_corymb=(200.0, 200.0),
+        )
+        self.assertEqual(len(res_caul["leaf_metrics"]), 3)
+        m_caul = [r for r in res_caul["leaf_metrics"] if r["leaf_id"] == 3][0]
+        self.assertAlmostEqual(m_caul["petiole_length_mm"], 0.0, places=3)
+        self.assertAlmostEqual(m_caul["blade_length_mm"], 8.0, places=3)
+        self.assertAlmostEqual(res_caul["petiole_length_mm"], 8.25, places=2)
+
     def test_resample_normalized_contour(self) -> None:
         """Verify resampled contour normalization coordinates."""
         mask = np.zeros((200, 200), dtype=np.uint8)
