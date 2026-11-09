@@ -78,6 +78,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_USDA_CACHE_DIR = PROJECT_ROOT / "data" / "environmental" / "usda_plants"
 USDA_PLANTLST_URL = "https://plants.sc.egov.usda.gov/DocumentLibrary/Txt/plantlst.txt"
 USDA_PLANT_SEARCH_API_URL = "https://plantsservices.sc.egov.usda.gov/api/PlantSearch"
+USDA_PLANT_PROFILE_API_URL = "https://plantsservices.sc.egov.usda.gov/api/PlantProfile"
+USDA_DISTRIBUTION_DOCS_API_URL = (
+    "https://plantsservices.sc.egov.usda.gov/api/PlantProfile/getDownloadDistributionDocumentation"
+)
 USDA_DISTRIBUTION_CSV_API_URL = "https://plantsservices.sc.egov.usda.gov/api/PlantProfileDataDownload"
 USDA_USER_AGENT = "PackeraResearchBot/1.0 (UNC Chapel Hill Herbarium; Evolutionary Morphometrics Lab)"
 
@@ -150,7 +154,7 @@ def _http_get_text(url: str, timeout: float = 12.0) -> Optional[str]:
         url,
         headers={
             "User-Agent": USDA_USER_AGENT,
-            "Accept": "text/csv, text/plain, application/json, */*",
+            "Accept": "application/json, text/csv, text/plain, */*",
         },
         method="GET",
     )
@@ -160,18 +164,15 @@ def _http_get_text(url: str, timeout: float = 12.0) -> Optional[str]:
                 return None
             raw_bytes = resp.read()
             return raw_bytes.decode("utf-8-sig", errors="replace")
-    except urllib.error.HTTPError as http_err:
-        if http_err.code in {400, 404}:
-            return None
-        _USDA_NETWORK_UNAVAILABLE = True
+    except urllib.error.HTTPError:
         return None
     except Exception:
         _USDA_NETWORK_UNAVAILABLE = True
         return None
 
 
-def _http_post_json(url: str, payload: Mapping[str, Any], timeout: float = 10.0) -> Optional[Dict[str, Any]]:
-    """Perform an unauthenticated HTTP POST with JSON payload returning parsed dict or None."""
+def _http_post_text(url: str, payload: Mapping[str, Any], timeout: float = 15.0) -> Optional[str]:
+    """Perform an unauthenticated HTTP POST with JSON payload returning raw UTF-8 text (CSV or JSON)."""
     global _USDA_NETWORK_UNAVAILABLE
     if _USDA_NETWORK_UNAVAILABLE:
         return None
@@ -182,7 +183,7 @@ def _http_post_json(url: str, payload: Mapping[str, Any], timeout: float = 10.0)
         headers={
             "User-Agent": USDA_USER_AGENT,
             "Content-Type": "application/json;charset=UTF-8",
-            "Accept": "application/json",
+            "Accept": "text/csv, application/json, text/plain, */*",
         },
         method="POST",
     )
@@ -190,16 +191,23 @@ def _http_post_json(url: str, payload: Mapping[str, Any], timeout: float = 10.0)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if getattr(resp, "status", 200) != 200:
                 return None
-            txt = resp.read().decode("utf-8-sig", errors="replace")
-            parsed = json.loads(txt)
-            return parsed if isinstance(parsed, dict) else None
-    except urllib.error.HTTPError as http_err:
-        if http_err.code in {400, 404}:
-            return None
-        _USDA_NETWORK_UNAVAILABLE = True
+            return resp.read().decode("utf-8-sig", errors="replace")
+    except urllib.error.HTTPError:
         return None
     except Exception:
         _USDA_NETWORK_UNAVAILABLE = True
+        return None
+
+
+def _http_post_json(url: str, payload: Mapping[str, Any], timeout: float = 10.0) -> Optional[Dict[str, Any]]:
+    """Perform an unauthenticated HTTP POST with JSON payload returning parsed dict or None."""
+    txt = _http_post_text(url, payload=payload, timeout=timeout)
+    if not txt:
+        return None
+    try:
+        parsed = json.loads(txt)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
         return None
 
 
@@ -370,15 +378,126 @@ def resolve_usda_symbols_for_taxon(
     return symbols
 
 
+def _slice_csv_from_header(raw_text: str) -> str:
+    """Strip any leading metadata/title lines prior to the actual CSV header row."""
+    cleaned = raw_text.lstrip("\ufeff").strip()
+    if not cleaned:
+        return ""
+    lines = cleaned.splitlines()
+    for idx, ln in enumerate(lines[:12]):
+        low = ln.lower()
+        if "," in low and any(h in low for h in ("state", "county", "fips", "symbol")):
+            return "\n".join(lines[idx:])
+    return cleaned
+
+
+def _convert_usda_json_records_to_csv(records: Sequence[Mapping[str, Any]], default_symbol: str = "") -> str:
+    """Serialize USDA JSON distribution dicts into canonical 7-column CSV text."""
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(["Symbol", "Scientific Name", "Common Name", "State", "County", "FIPS Code", "Distribution Status"])
+    wrote = 0
+    for rec in records:
+        if not isinstance(rec, Mapping):
+            continue
+        norm = {re.sub(r"[\s_]+", " ", str(k or "").strip().lower()): v for k, v in rec.items()}
+        sym = str(norm.get("symbol") or norm.get("acceptedsymbol") or default_symbol).strip().upper()
+        sci = str(norm.get("scientific name") or norm.get("scientificname") or "").strip()
+        com = str(norm.get("common name") or norm.get("commonname") or "").strip()
+        st = str(
+            norm.get("state")
+            or norm.get("state and province")
+            or norm.get("statename")
+            or norm.get("state name")
+            or norm.get("stateprovince")
+            or norm.get("location")
+            or ""
+        ).strip()
+        co = str(
+            norm.get("county")
+            or norm.get("county name")
+            or norm.get("countyname")
+            or ""
+        ).strip()
+        st_fip = str(norm.get("state fip") or norm.get("statefip") or "").strip()
+        co_fip = str(norm.get("county fip") or norm.get("countyfip") or "").strip()
+        fips = str(norm.get("fips code") or norm.get("fips") or norm.get("fipscode") or "").strip()
+        if not fips and (st_fip or co_fip):
+            fips = f"{st_fip.zfill(2)}{co_fip.zfill(3)}" if (st_fip and co_fip) else (co_fip or st_fip)
+        status = str(
+            norm.get("distribution status")
+            or norm.get("distributionstatus")
+            or norm.get("native status")
+            or norm.get("nativestatus")
+            or norm.get("status")
+            or ""
+        ).strip()
+        if st:
+            writer.writerow([sym, sci, com, st, co, fips, status])
+            wrote += 1
+    return buf.getvalue() if wrote > 0 else ""
+
+
+def _normalize_usda_distribution_payload(raw_text: Optional[str], default_symbol: str = "") -> Optional[str]:
+    """Accept raw CSV text, JSON-wrapped CSV text, or JSON distribution objects/arrays from USDA PLANTS."""
+    if not raw_text:
+        return None
+    s = raw_text.lstrip("\ufeff").strip()
+    if not s:
+        return None
+
+    if s[0] in ('{', '[', '"') and (s[0] != '"' or s.endswith('"')):
+        try:
+            obj = json.loads(s)
+        except Exception:
+            obj = None
+        if isinstance(obj, str):
+            return _normalize_usda_distribution_payload(obj, default_symbol=default_symbol)
+        if isinstance(obj, list):
+            csv_conv = _convert_usda_json_records_to_csv(obj, default_symbol=default_symbol)
+            return csv_conv or None
+        if isinstance(obj, dict):
+            for str_key in ("Csv", "CsvData", "csv", "csvData", "FileContents", "Content", "Data", "data"):
+                val = obj.get(str_key)
+                if isinstance(val, str) and "," in val:
+                    res = _normalize_usda_distribution_payload(val, default_symbol=default_symbol)
+                    if res:
+                        return res
+            for list_key in (
+                "PlantsDistributionResults",
+                "plantsDistributionResults",
+                "DistributionDocumentation",
+                "Distributions",
+                "distributions",
+                "Counties",
+                "counties",
+                "Data",
+                "data",
+                "Results",
+                "results",
+            ):
+                val = obj.get(list_key)
+                if isinstance(val, list) and val:
+                    csv_conv = _convert_usda_json_records_to_csv(val, default_symbol=default_symbol)
+                    if csv_conv:
+                        return csv_conv
+            return None
+
+    sliced = _slice_csv_from_header(s)
+    parsed_probe = parse_usda_distribution_csv(sliced, default_symbol=default_symbol)
+    if parsed_probe["counties"] or parsed_probe["state_only_states"]:
+        return sliced
+    return None
+
+
 def parse_usda_distribution_csv(
     csv_text: str,
     default_symbol: str = "",
 ) -> Dict[str, Any]:
     """
-    Parse raw CSV returned by `PlantProfileDataDownload?symbol=<SYMBOL>`.
-
-    Expected columns:
-        `Symbol,Scientific Name,Common Name,State,County,FIPS Code,Native Status`
+    Parse USDA PLANTS distribution CSV across both USDA PLANTS 3.0 export schemas:
+      - `Symbol,Scientific Name,Common Name,State and Province,County Name,FIPS Code,Distribution Status`
+      - `Symbol,Synonym Symbol,Scientific Name,State FIP,State,County FIP,County,Native Status`
 
     Distinguishes county-resolved states from state-only (`No County Data`) states:
     a state is marked `state_only` ONLY when USDA records non-excluded presence for
@@ -397,18 +516,46 @@ def parse_usda_distribution_csv(
             "rows": db_rows,
         }
 
-    reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
+    sliced_csv = _slice_csv_from_header(csv_text)
+    reader = csv.DictReader(io.StringIO(sliced_csv))
     raw_parsed_rows: List[Tuple[str, str, Optional[str], str, str]] = []
 
     for row in reader:
         if not isinstance(row, dict):
             continue
-        norm_row = {str(k or "").strip().lower(): str(v or "").strip() for k, v in row.items()}
+        norm_row = {
+            re.sub(r"[\s_]+", " ", str(k or "").strip().lower()): str(v or "").strip()
+            for k, v in row.items()
+            if k is not None
+        }
         sym = (norm_row.get("symbol") or default_symbol).strip().upper()
-        raw_state = norm_row.get("state") or norm_row.get("stateprovince") or ""
-        raw_county = norm_row.get("county") or ""
-        fips = norm_row.get("fips code") or norm_row.get("fips") or norm_row.get("county fip") or ""
-        native_status = norm_row.get("native status") or norm_row.get("nativestatus") or ""
+        raw_state = (
+            norm_row.get("state")
+            or norm_row.get("state and province")
+            or norm_row.get("stateprovince")
+            or norm_row.get("state name")
+            or norm_row.get("statename")
+            or ""
+        )
+        raw_county = (
+            norm_row.get("county")
+            or norm_row.get("county name")
+            or norm_row.get("countyname")
+            or ""
+        )
+        st_fip = norm_row.get("state fip") or norm_row.get("statefip") or ""
+        co_fip = norm_row.get("county fip") or norm_row.get("countyfip") or ""
+        fips = norm_row.get("fips code") or norm_row.get("fips") or norm_row.get("fipscode") or ""
+        if not fips and (st_fip or co_fip):
+            fips = f"{st_fip.zfill(2)}{co_fip.zfill(3)}" if (st_fip and co_fip) else (co_fip or st_fip)
+        native_status = (
+            norm_row.get("native status")
+            or norm_row.get("distribution status")
+            or norm_row.get("nativestatus")
+            or norm_row.get("distributionstatus")
+            or norm_row.get("status")
+            or ""
+        )
 
         low_status = native_status.lower()
         if any(tok in low_status for tok in _EXCLUDED_STATUS_TOKENS):
@@ -569,6 +716,71 @@ def _persist_taxon_range_to_sqlite(
     return len(payload)
 
 
+def _fetch_usda_symbol_distribution_csv(sym: str, timeout: float = 15.0) -> Optional[str]:
+    """
+    Download county distribution CSV for USDA symbol `sym` using:
+      1. `GET /api/PlantProfile?symbol=<SYM>` (extracts numeric `Id`/`MasterId` or inline records,
+         and short-circuits if mocked `_http_get_text` returns CSV directly).
+      2. `POST /api/PlantProfile/getDownloadDistributionDocumentation` with `MasterId` + `Symbol`.
+      3. `GET /api/PlantProfileDataDownload?symbol=<SYM>` legacy fallback.
+    """
+    master_id: Optional[int] = None
+    prof_url = f"{USDA_PLANT_PROFILE_API_URL}?{urllib.parse.urlencode({'symbol': sym})}"
+    prof_raw = _http_get_text(prof_url, timeout=timeout)
+    if prof_raw:
+        direct_norm = _normalize_usda_distribution_payload(prof_raw, default_symbol=sym)
+        if direct_norm:
+            return direct_norm
+        try:
+            prof_obj = json.loads(prof_raw)
+            if isinstance(prof_obj, dict):
+                raw_id = (
+                    prof_obj.get("Id")
+                    or prof_obj.get("MasterId")
+                    or prof_obj.get("PlantId")
+                    or prof_obj.get("id")
+                    or prof_obj.get("masterId")
+                )
+                if raw_id is not None and str(raw_id).strip().isdigit():
+                    master_id = int(str(raw_id).strip())
+        except Exception:
+            pass
+
+    if master_id is None and not _USDA_NETWORK_UNAVAILABLE:
+        srch = _http_post_json(USDA_PLANT_SEARCH_API_URL, {"SearchCriterion": sym, "SearchType": 0}, timeout=10.0)
+        if srch and isinstance(srch.get("PlantSearchResults"), list):
+            for item in srch["PlantSearchResults"]:
+                if isinstance(item, dict):
+                    item_sym = str(item.get("Symbol") or item.get("AcceptedSymbol") or "").strip().upper()
+                    raw_id = item.get("Id") or item.get("MasterId") or item.get("PlantId")
+                    if item_sym == sym and raw_id is not None and str(raw_id).strip().isdigit():
+                        master_id = int(str(raw_id).strip())
+                        break
+
+    if not _USDA_NETWORK_UNAVAILABLE:
+        post_payload: Dict[str, Any] = {
+            "Field": "Symbol",
+            "SortBy": "sortSciName",
+            "Offset": None,
+            "MasterId": master_id,
+            "Symbol": sym,
+            "Value": sym,
+        }
+        docs_raw = _http_post_text(USDA_DISTRIBUTION_DOCS_API_URL, payload=post_payload, timeout=timeout)
+        docs_norm = _normalize_usda_distribution_payload(docs_raw, default_symbol=sym)
+        if docs_norm:
+            return docs_norm
+
+    if not _USDA_NETWORK_UNAVAILABLE:
+        dl_url = f"{USDA_DISTRIBUTION_CSV_API_URL}?{urllib.parse.urlencode({'symbol': sym})}"
+        legacy_raw = _http_get_text(dl_url, timeout=timeout)
+        legacy_norm = _normalize_usda_distribution_payload(legacy_raw, default_symbol=sym)
+        if legacy_norm:
+            return legacy_norm
+
+    return None
+
+
 def fetch_or_load_usda_taxon_range(
     canonical_packera: str,
     synonym_names: Optional[Iterable[str]] = None,
@@ -667,11 +879,14 @@ def fetch_or_load_usda_taxon_range(
             except Exception:
                 csv_text = None
 
+        if csv_text is not None:
+            probe_cached = parse_usda_distribution_csv(csv_text, default_symbol=sym)
+            if not probe_cached["counties"] and not probe_cached["state_only_states"] and allow_network:
+                csv_text = None
+
         if csv_text is None and allow_network and not _USDA_NETWORK_UNAVAILABLE:
-            dl_url = f"{USDA_DISTRIBUTION_CSV_API_URL}?{urllib.parse.urlencode({'symbol': sym})}"
-            fetched_csv = _http_get_text(dl_url, timeout=15.0)
-            if fetched_csv and ("State" in fetched_csv[:256] or "FIPS" in fetched_csv[:256]):
-                csv_text = fetched_csv
+            csv_text = _fetch_usda_symbol_distribution_csv(sym, timeout=15.0)
+            if csv_text:
                 try:
                     _atomic_write_text(sym_csv_path, csv_text)
                 except Exception as exc:

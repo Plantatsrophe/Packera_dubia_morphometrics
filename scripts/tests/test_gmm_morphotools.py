@@ -1851,6 +1851,14 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         df_geo$PC2 <- ifelse(west_m, 1.8, -1.2) + rnorm(n_sym, 0, 0.30)
         gmm_geo <- run_gmm_cluster_analysis(df_geo, c("PC1", "PC2", "PC3"), max_k = 5L, intraspecific_mode = TRUE)
         stopifnot(gmm_geo$best_k >= 2L)
+
+        # Case C: Direct matrix-dimension regression checks on compute_cluster_spatial_segregation_p & compute_spca_global_test
+        p_seg_sym <- compute_cluster_spatial_segregation_p(rep(1:2, length.out = n_sym), df_sym, permutations = 99L)
+        p_seg_geo <- compute_cluster_spatial_segregation_p(ifelse(west_m, 1L, 2L), df_geo, permutations = 99L)
+        spca_geo <- compute_spca_global_test(as.matrix(df_geo[, c("PC1", "PC2", "PC3")]), df_geo, permutations = 99L)
+        stopifnot(is.finite(p_seg_sym) && p_seg_sym > 0.05)
+        stopifnot(is.finite(p_seg_geo) && p_seg_geo <= 0.05)
+        stopifnot(is.finite(spca_geo$lambda_max) && is.finite(spca_geo$p_value) && spca_geo$p_value <= 0.05)
         cat("PLASTICITY_MITIGATION_R_OK\n")
         """
         proc = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)

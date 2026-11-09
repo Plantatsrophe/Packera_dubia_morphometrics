@@ -342,7 +342,7 @@ whiten_intraspecific_deme_plasticity <- function(
   S_w <- if (exists("compute_ledoit_wolf_cov", mode = "function")) {
     compute_ledoit_wolf_cov(S_w_raw, X_centered = R_w, n_obs = nrow(R_w))
   } else {
-    S_w_raw + diag(0.05 * mean(diag(S_w_raw)) + 1e-4, p)
+    S_w_raw + diag(0.05 * mean(diag(as.matrix(S_w_raw))) + 1e-4, nrow = p, ncol = p)
   }
 
   grand_mu <- colSums(deme_means * deme_wts) / max(sum(deme_wts), 1e-12)
@@ -352,7 +352,7 @@ whiten_intraspecific_deme_plasticity <- function(
   eig_w <- eigen(S_w, symmetric = TRUE)
   U_w <- eig_w$vectors
   lam_w <- pmax(eig_w$values, 1e-6)
-  var_b_proj <- pmax(0.0, diag(t(U_w) %*% S_b %*% U_w))
+  var_b_proj <- pmax(0.0, as.numeric(diag(as.matrix(t(U_w) %*% S_b %*% U_w))))
   # Subtract expected sampling noise (lam_w / harmonic_mean_deme_n) from between-deme variance
   harm_n <- length(u_demes) / sum(1.0 / as.numeric(d_tab))
   var_b_net <- pmax(0.0, var_b_proj - (lam_w / max(harm_n, 1.5)))
@@ -425,7 +425,11 @@ compute_cluster_spatial_segregation_p <- function(
   dlat <- outer(lat_r, lat_r, "-")
   dlon <- outer(lon_r, lon_r, "-")
   hav <- sin(dlat * 0.5)^2 + (cos(lat_r) %o% cos(lat_r)) * (sin(dlon * 0.5)^2)
-  dist_km <- 2.0 * 6371.0088 * asin(pmin(1.0, sqrt(pmax(0.0, hav))))
+  dist_km <- matrix(
+    2.0 * 6371.0088 * asin(pmin(1.0, sqrt(pmax(0.0, as.numeric(hav))))),
+    nrow = nc,
+    ncol = nc
+  )
   diag(dist_km) <- Inf
 
   # Require >= 2 distinct spatial locations (> 5 km apart)
@@ -501,7 +505,11 @@ compute_spca_global_test <- function(
   dlat <- outer(lat_r, lat_r, "-")
   dlon <- outer(lon_r, lon_r, "-")
   hav <- sin(dlat * 0.5)^2 + (cos(lat_r) %o% cos(lat_r)) * (sin(dlon * 0.5)^2)
-  dist_km <- 2.0 * 6371.0088 * asin(pmin(1.0, sqrt(pmax(0.0, hav))))
+  dist_km <- matrix(
+    2.0 * 6371.0088 * asin(pmin(1.0, sqrt(pmax(0.0, as.numeric(hav))))),
+    nrow = ng,
+    ncol = ng
+  )
   diag(dist_km) <- Inf
   if (max(ifelse(is.finite(dist_km), dist_km, 0.0)) <= 5.0) {
     return(list(lambda_max = NA_real_, p_value = 1.0, scores = X_core))
@@ -546,10 +554,10 @@ compute_spca_global_test <- function(
 
 .compute_ridgeline_valley_ratio <- function(pi_j, mu_j, Sig_j, pi_l, mu_l, Sig_l, n_grid = 101L) {
   p <- length(mu_j)
-  reg_j <- Sig_j + diag(1e-5, p)
-  reg_l <- Sig_l + diag(1e-5, p)
-  inv_j <- tryCatch(solve(reg_j), error = function(e) diag(1.0 / pmax(diag(reg_j), 1e-5), p))
-  inv_l <- tryCatch(solve(reg_l), error = function(e) diag(1.0 / pmax(diag(reg_l), 1e-5), p))
+  reg_j <- Sig_j + diag(1e-5, nrow = p, ncol = p)
+  reg_l <- Sig_l + diag(1e-5, nrow = p, ncol = p)
+  inv_j <- tryCatch(solve(reg_j), error = function(e) diag(x = 1.0 / pmax(diag(as.matrix(reg_j)), 1e-5), nrow = p, ncol = p))
+  inv_l <- tryCatch(solve(reg_l), error = function(e) diag(x = 1.0 / pmax(diag(as.matrix(reg_l)), 1e-5), nrow = p, ncol = p))
   ldet_j <- as.numeric(determinant(reg_j, logarithm = TRUE)$modulus)
   ldet_l <- as.numeric(determinant(reg_l, logarithm = TRUE)$modulus)
 
@@ -652,7 +660,7 @@ merge_plastic_gmm_components_ridgeline <- function(
       wk <- Z_core[, k]
       Xc_k <- sweep(X_core, 2L, mus[[k]], "-")
       Sk <- crossprod(Xc_k * sqrt(wk)) / max(sum(wk), 1.0)
-      Sk + diag(0.02 * mean(diag(Sk)) + 1e-4, p)
+      Sk + diag(0.02 * mean(diag(as.matrix(Sk))) + 1e-4, nrow = p, ncol = p)
     })
 
     best_pair <- NULL

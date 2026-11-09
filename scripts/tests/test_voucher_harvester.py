@@ -2750,6 +2750,43 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
             self.assertEqual(r_sql["counties"], {"north carolina|orange", "north carolina|wake"})
             self.assertEqual(r_sql["state_only_states"], {"delaware"})
 
+            # 3. Verify USDA PLANTS 3.0 "State and Province,County Name,Distribution Status" CSV schema
+            #    and two-step GET /api/PlantProfile -> POST /api/PlantProfile/getDownloadDistributionDocumentation flow
+            v3_csv = (
+                "Symbol,Scientific Name,Common Name,State and Province,County Name,FIPS Code,Distribution Status\n"
+                "PATO4,Packera tomentosa (Michx.) C. Jeffrey,woolly ragwort,Alabama,Autauga County,01001,Native\n"
+                "PATO4,Packera tomentosa (Michx.) C. Jeffrey,woolly ragwort,North Carolina,Durham County,37063,Native\n"
+                "PATO4,Packera tomentosa (Michx.) C. Jeffrey,woolly ragwort,Michigan,Washtenaw County,26161,Excluded\n"
+            )
+            parsed_v3 = parse_usda_distribution_csv(v3_csv, default_symbol="PATO4")
+            self.assertEqual(parsed_v3["counties"], {"alabama|autauga", "north carolina|durham"})
+
+            db_v3 = tmp_p / "test_usda_v3.sqlite"
+            cache_v3 = tmp_p / "usda_cache_v3"
+            (cache_v3 / "plantlst.txt").parent.mkdir(parents=True, exist_ok=True)
+            (cache_v3 / "plantlst.txt").write_text(plantlst_sample, encoding="utf-8")
+            reset_usda_network_state()
+            with patch(
+                "scripts.core.usda_plants_ranges._http_get_text",
+                return_value='{"Id": 38530, "Symbol": "PATO4"}',
+            ) as m_prof, patch(
+                "scripts.core.usda_plants_ranges._http_post_text",
+                return_value=v3_csv,
+            ) as m_post:
+                r_v3 = fetch_or_load_usda_taxon_range(
+                    canonical_packera="Packera dubia",
+                    cache_dir=cache_v3,
+                    db_path=db_v3,
+                    workspace_dir=tmp_p,
+                    allow_network=True,
+                )
+                self.assertEqual(m_prof.call_count, 1)
+                self.assertEqual(m_post.call_count, 1)
+                post_payload_sent = m_post.call_args.kwargs.get("payload") or m_post.call_args[0][1]
+                self.assertEqual(post_payload_sent["MasterId"], 38530)
+                self.assertEqual(post_payload_sent["Symbol"], "PATO4")
+                self.assertEqual(r_v3["counties"], {"alabama|autauga", "north carolina|durham"})
+
     def test_buffered_usda_county_filter_exemptions_and_harvester_integration(self):
         """Verify 1-ring/geodesic county buffer, Type & Gold exemptions, out-of-range misidentification removal, and 26-column CSV invariant."""
         with tempfile.TemporaryDirectory() as tmp_d:
