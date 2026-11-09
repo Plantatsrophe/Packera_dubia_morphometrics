@@ -2450,42 +2450,42 @@ generate_step03_pub_figures <- function(
     b_ect_x <- if ("ECT_PC1" %in% colnames(df) && any(is.finite(suppressWarnings(as.numeric(df$ECT_PC1))))) {
       suppressWarnings(as.numeric(df$ECT_PC1))
     } else {
-      x_val
+      as.numeric(df$Sym_PC1)
     }
     b_ect_y <- if ("ECT_PC2" %in% colnames(df) && any(is.finite(suppressWarnings(as.numeric(df$ECT_PC2))))) {
       suppressWarnings(as.numeric(df$ECT_PC2))
     } else {
-      y_val
+      as.numeric(df$Sym_PC2)
     }
     b_ect_x[!is.finite(b_ect_x)] <- 0.0
     b_ect_y[!is.finite(b_ect_y)] <- 0.0
 
-    b_ect_cent <- do.call(rbind, lapply(present_taxa, function(tx) {
+    b_ect_cent <- do.call(rbind, lapply(present_tx, function(tx) {
       m <- which(df$taxon_clean == tx)
       c(mean(b_ect_x[m], na.rm = TRUE), mean(b_ect_y[m], na.rm = TRUE))
     }))
-    rownames(b_ect_cent) <- gsub("Packera ", "P. ", present_taxa)
+    rownames(b_ect_cent) <- gsub("Packera ", "P. ", present_tx)
 
     plot_2d_ordination_scatter(
       x = b_ect_x,
       y = b_ect_y,
-      col = grDevices::adjustcolor(pal[df$taxon_clean], alpha.f = alpha_val),
-      pch = pch_map[df$taxon_clean],
+      col = cols,
+      pch = pt_pch,
       cex = 0.85,
       lwd = 1.0,
       xlab = "Basal Rosette 32x32 ECT PC1",
       ylab = "Basal Rosette 32x32 ECT PC2",
       main = sprintf("A. 2D Basal Rosette ECT Morphospace (n = %d)", nrow(df)),
       group_vec = df$taxon_clean,
-      group_cols = pal,
+      group_cols = dyn_pal,
       ellipse_level = 0.95,
       centroids = b_ect_cent,
       is_type_vec = is_type_row,
       legend_args = list(
         "topright",
-        legend = packera_italic_expressions(present_taxa),
-        col = pal[present_taxa],
-        pch = pch_map[present_taxa],
+        legend = packera_italic_expressions(present_tx),
+        col = dyn_pal[present_tx],
+        pch = dyn_pch[present_tx],
         pt.bg = NA, cex = 0.72, bty = "n"
       )
     )
@@ -2493,7 +2493,7 @@ generate_step03_pub_figures <- function(
     .draw_group_radial_ect_rings(
       sub_df = df,
       group_vec = df$taxon_clean,
-      group_cols = pal,
+      group_cols = dyn_pal,
       main_title = "B. Species Basal Rosette Radial ECT Rings (log2 |chi|)",
       allow_cauline = FALSE
     )

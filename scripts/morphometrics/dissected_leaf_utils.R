@@ -634,6 +634,29 @@ summarize_otu_dissection_metrics <- function(grp_df) {
     return(NULL)
   }
   nr <- nrow(ect_mat); nc <- ncol(ect_mat)
+  # Ensure column 1 is aligned with the leaf major axis (handles pre-roll .npy files from active runs)
+  if ((nc %% 2L) == 0L) {
+    half_span <- as.integer(nc %/% 2L)
+    sup_j <- vapply(seq_len(nc), function(j) {
+      nz <- which(abs(ect_mat[, j]) > 1e-6)
+      if (length(nz) > 0L) max(nz) else 0L
+    }, integer(1L))
+    axis_score <- sup_j[seq_len(half_span)] + sup_j[seq_len(half_span) + half_span]
+    if (max(axis_score) > (axis_score[1L] + 2L)) {
+      # Prefer native 3*pi/2 index (0.75 * nc + 1) when tied within 1 threshold step of the peak
+      tip_raw_idx <- as.integer((3L * nc) %/% 4L) + 1L
+      best_half <- which.max(axis_score)
+      k_start <- if (tip_raw_idx <= nc && (sup_j[tip_raw_idx] + sup_j[((tip_raw_idx - 1L + half_span) %% nc) + 1L]) >= (max(axis_score) - 1L)) {
+        tip_raw_idx
+      } else if (sup_j[best_half + half_span] > sup_j[best_half]) {
+        best_half + half_span
+      } else {
+        best_half
+      }
+      roll_idx <- ((seq.int(k_start - 1L, k_start + nc - 2L)) %% nc) + 1L
+      ect_mat <- ect_mat[, roll_idx, drop = FALSE]
+    }
+  }
   # Column 1 is phi = 0 (North/Tip); Columns 2..nc reflect via nc + 2 - j
   refl_cols <- c(1L, seq.int(nc, 2L, by = -1L))
   ect_refl <- ect_mat[, refl_cols, drop = FALSE]
