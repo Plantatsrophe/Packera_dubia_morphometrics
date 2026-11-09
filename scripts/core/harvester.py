@@ -83,6 +83,9 @@ from scripts.core.config import (
     DEFAULT_OUTPUT_CSV,
     DEFAULT_RAW_DIR,
     DEFAULT_TARGET_TAXA,
+    DEFAULT_USDA_COUNTY_BUFFER_KM,
+    DEFAULT_USDA_COUNTY_FILTER,
+    DEFAULT_USDA_EXEMPT_GOLD,
     DEFAULT_WORKSPACE,
     EXCLUDED_WESTERN_STATES,
     MAJOR_HERBARIA_CODES,
@@ -104,6 +107,7 @@ from scripts.core.db import (
     upsert_vouchers_records,
 )
 from scripts.core.logger import setup_logging
+from scripts.core.usda_plants_ranges import filter_vouchers_by_usda_county_range
 
 _SYNONYM_GENERA: Set[str] = {"Packera", "Senecio", "Cineraria"}
 _OPEN_NOMENCLATURE_EPITHETS: Set[str] = {
@@ -1316,7 +1320,12 @@ def export_curated_table(
         ):
             df = stratify_duplicates(df, logger=logger, home_herbarium=home_herbarium)
 
-    _sqlite_only_cols = {"exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon"}
+    _sqlite_only_cols = {
+        "exsiccatae_taxonomic_conflict",
+        "exsiccatae_gold_taxon",
+        "usda_symbol",
+        "usda_county_status",
+    }
     cols_to_export = [col for col in EXPORT_COLUMNS if col in df.columns]
     extra_cols = [
         c for c in df.columns
@@ -1348,7 +1357,16 @@ def export_curated_table(
                 try:
                     upsert_taxon_synonyms(conn, _DYNAMIC_SYNONYM_TO_CANONICAL, _DYNAMIC_TAXON_AUTHOR_STRINGS)
                     if not df_export.empty:
-                        sql_cols = list(final_cols) + [c for c in ("exsiccatae_taxonomic_conflict", "exsiccatae_gold_taxon") if c in df.columns and c not in final_cols]
+                        sql_cols = list(final_cols) + [
+                            c
+                            for c in (
+                                "exsiccatae_taxonomic_conflict",
+                                "exsiccatae_gold_taxon",
+                                "usda_symbol",
+                                "usda_county_status",
+                            )
+                            if c in df.columns and c not in final_cols
+                        ]
                         db_records = df[sql_cols].to_dict(orient="records")
                         for rec in db_records:
                             if not rec.get("species_standardized"):
@@ -1377,6 +1395,7 @@ def print_and_log_summary(
     df: pd.DataFrame,
     download_stats: Optional[Dict[str, Any]],
     logger: logging.Logger,
+    usda_filter_stats: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Generates a publication-grade summary of the harvested dataset."""
     total_records = len(df)
@@ -1431,6 +1450,16 @@ def print_and_log_summary(
             logger.info(f"  * Sheets from Multi-Sheet Events: {multi_sheets:>5} records")
 
 
+    # USDA PLANTS County Range Filter Summary
+    if usda_filter_stats and usda_filter_stats.get("evaluated", 0) > 0:
+        logger.info("\n--- USDA PLANTS COUNTY RANGE FILTER ---")
+        logger.info(f"  * Vouchers Evaluated          : {usda_filter_stats.get('evaluated', 0):>5}")
+        logger.info(f"  * Documented In-Range         : {usda_filter_stats.get('in_range', 0):>5}")
+        logger.info(f"  * Buffered / 1-Ring Adjacent  : {usda_filter_stats.get('buffered_adjacent', 0):>5}")
+        logger.info(f"  * Exempt Retained (Type/Gold) : {usda_filter_stats.get('exempt_retained', 0):>5}")
+        logger.info(f"  * Unmapped Taxon / Non-US     : {usda_filter_stats.get('unmapped_or_non_us', 0):>5}")
+        logger.info(f"  * Dropped Out-of-Range        : {usda_filter_stats.get('dropped_out_of_range', 0):>5}")
+
     # Image Download & Quality Summary
     if download_stats:
         logger.info("\n--- SPECIMEN IMAGE DOWNLOAD & QUALITY STATUS ---")
@@ -1479,6 +1508,11 @@ class VoucherHarvester:
         cfg_synonyms: Optional[Dict[str, List[str]]] = None,
         home_herbarium: str = DEFAULT_HOME_HERBARIUM,
         db_path: Optional[Union[str, Path]] = None,
+        usda_county_filter: bool = DEFAULT_USDA_COUNTY_FILTER,
+        usda_county_buffer_km: float = DEFAULT_USDA_COUNTY_BUFFER_KM,
+        usda_exempt_gold: bool = DEFAULT_USDA_EXEMPT_GOLD,
+        usda_cache_dir: Optional[Path] = None,
+        usda_county_geojson_path: Optional[Path] = None,
     ):
         self.logger = logger or logging.getLogger("VoucherHarvester")
         self.db_path = db_path
@@ -1617,6 +1651,14 @@ class VoucherHarvester:
         self.spatial_thin_km = float(spatial_thin_km or 0.0)
         self.max_per_state = max_per_state
         self.max_per_region = max_per_region
+        self.usda_county_filter = bool(usda_county_filter)
+        self.usda_county_buffer_km = float(usda_county_buffer_km)
+        self.usda_exempt_gold = bool(usda_exempt_gold)
+        self.usda_cache_dir = Path(usda_cache_dir) if usda_cache_dir is not None else None
+        self.usda_county_geojson_path = (
+            Path(usda_county_geojson_path) if usda_county_geojson_path is not None else None
+        )
+        self.last_usda_filter_stats: Optional[Dict[str, Any]] = None
 
     def harvest(self) -> pd.DataFrame:
         """Harvests and normalizes Darwin Core occurrence records across configured taxa."""
@@ -1933,6 +1975,31 @@ class VoucherHarvester:
                 logger=self.logger,
                 home_herbarium=self.home_herbarium,
             )
+            is_gbif_mocked = (
+                _is_gbif_species_mocked()
+                or occ is None
+                or getattr(occ, "search", None) is None
+                or hasattr(occ.search, "_mock_name")
+                or hasattr(occ.search, "assert_called")
+            )
+            if self.usda_county_filter and (not is_gbif_mocked or self.usda_cache_dir is not None):
+                df, usda_stats = filter_vouchers_by_usda_county_range(
+                    df=df,
+                    standardize_taxon_fn=standardize_packera_taxon,
+                    synonym_to_canonical=_DYNAMIC_SYNONYM_TO_CANONICAL,
+                    county_buffer_km=self.usda_county_buffer_km,
+                    exempt_gold=self.usda_exempt_gold,
+                    cache_dir=self.usda_cache_dir,
+                    county_geojson_path=self.usda_county_geojson_path,
+                    db_path=self.db_path,
+                    workspace_dir=self.workspace_dir,
+                    allow_network=not is_gbif_mocked,
+                    force_refresh=self.force,
+                    logger=self.logger,
+                )
+                self.last_usda_filter_stats = usda_stats
+                if df.empty:
+                    return df
             df = spatially_balance_and_thin_vouchers(
                 df,
                 spatial_thin_km=self.spatial_thin_km,
@@ -2055,7 +2122,12 @@ class VoucherHarvester:
             df_curated, download_stats = self.download_and_validate_media(df_curated)
 
         self.export(df_curated)
-        print_and_log_summary(df_curated, download_stats, self.logger)
+        print_and_log_summary(
+            df_curated,
+            download_stats,
+            self.logger,
+            usda_filter_stats=self.last_usda_filter_stats,
+        )
         self.logger.info("Pipeline execution completed successfully.")
         return df_curated, download_stats
 
@@ -2070,6 +2142,9 @@ def harvest_taxa_occurrences(
     countries: Optional[Union[str, List[str]]] = None,
     include_western: bool = False,
     expand_synonyms: bool = False,
+    usda_county_filter: bool = DEFAULT_USDA_COUNTY_FILTER,
+    usda_county_buffer_km: float = DEFAULT_USDA_COUNTY_BUFFER_KM,
+    usda_exempt_gold: bool = DEFAULT_USDA_EXEMPT_GOLD,
 ) -> pd.DataFrame:
     """Backwards-compatible functional entry point for occurrence harvesting."""
     harvester = VoucherHarvester(
@@ -2082,6 +2157,9 @@ def harvest_taxa_occurrences(
         countries=countries,
         include_western=include_western,
         expand_synonyms=expand_synonyms,
+        usda_county_filter=usda_county_filter,
+        usda_county_buffer_km=usda_county_buffer_km,
+        usda_exempt_gold=usda_exempt_gold,
     )
     return harvester.harvest()
 

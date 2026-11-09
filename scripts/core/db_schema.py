@@ -468,6 +468,20 @@ def _build_schema_ddl() -> str:
         updated_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS usda_county_ranges (
+        canonical_packera TEXT NOT NULL,
+        usda_symbol TEXT NOT NULL,
+        state_norm TEXT NOT NULL,
+        county_norm TEXT NOT NULL DEFAULT '',
+        fips_code TEXT,
+        native_status TEXT,
+        is_state_only INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT,
+        PRIMARY KEY (canonical_packera, state_norm, county_norm)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_usda_county_ranges_taxon ON usda_county_ranges(canonical_packera);
+
     CREATE TABLE IF NOT EXISTS vouchers (
         catalogNumber TEXT PRIMARY KEY,
         institutionCode TEXT,
@@ -501,6 +515,8 @@ def _build_schema_ddl() -> str:
         duplicate_count INTEGER,
         exsiccatae_taxonomic_conflict INTEGER DEFAULT 0,
         exsiccatae_gold_taxon TEXT,
+        usda_symbol TEXT,
+        usda_county_status TEXT,
         species_standardized TEXT,
         pixels_per_mm REAL,
         is_calibrated_mm INTEGER,
@@ -898,6 +914,8 @@ SCHEMA_DDL: str = _build_schema_ddl()
 _VOUCHERS_MIGRATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("exsiccatae_taxonomic_conflict", "INTEGER DEFAULT 0"),
     ("exsiccatae_gold_taxon", "TEXT"),
+    ("usda_symbol", "TEXT"),
+    ("usda_county_status", "TEXT"),
 )
 
 _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
@@ -1110,12 +1128,16 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
         }
         required_objs = set(_MASTER_VIEW_REQUIRED_TABLES) | {
             "taxon_synonyms",
+            "usda_county_ranges",
             "extracted_leaves",
             "pipeline_runs",
             "leaf_efa_harmonics",
             "v_integrative_triage_master",
         }
         if required_objs.issubset(existing_objs):
+            v_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(vouchers);").fetchall()}
+            if "usda_symbol" not in v_cols or "usda_county_status" not in v_cols:
+                _migrate_vouchers_schema_columns(conn)
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
             if "leaf_zone" not in el_cols or "ect_path" not in el_cols or "cauline_leaf_count" not in om_cols or "ECT_PC1" not in om_cols:

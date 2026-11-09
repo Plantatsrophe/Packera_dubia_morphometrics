@@ -659,6 +659,10 @@ def upsert_vouchers_records(
             row_dict["exsiccatae_taxonomic_conflict"] = _to_bool_int(rec.get("exsiccatae_taxonomic_conflict"), default=0)
         if "exsiccatae_gold_taxon" in rec and not _is_missing(rec.get("exsiccatae_gold_taxon")):
             row_dict["exsiccatae_gold_taxon"] = _to_str(rec.get("exsiccatae_gold_taxon"))
+        if "usda_symbol" in rec and not _is_missing(rec.get("usda_symbol")):
+            row_dict["usda_symbol"] = _to_str(rec.get("usda_symbol"))
+        if "usda_county_status" in rec and not _is_missing(rec.get("usda_county_status")):
+            row_dict["usda_county_status"] = _to_str(rec.get("usda_county_status"))
         qc_val = _to_str(rec.get("qc_status"))
         if qc_val in {"PASS", "FAILED_QC", "PENDING"}:
             row_dict["qc_status"] = qc_val

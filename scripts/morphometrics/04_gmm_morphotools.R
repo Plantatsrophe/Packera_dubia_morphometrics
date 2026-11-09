@@ -39,9 +39,8 @@ calculate_circular_phenology <- function(df) {
 for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "pub_figures_utils.R"))) {
   if (!exists("compute_spatial_balance_weights", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
 }
-for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "authority_weighting_utils.R"))) {
-  if (!exists("compute_empirical_bayes_authority_weights", mode = "function") && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
-}
+for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "authority_weighting_utils.R"))) if (!exists("compute_empirical_bayes_authority_weights", mode = "function") && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
+for (.pm_p in c("scripts/morphometrics/plasticity_mitigation_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "plasticity_mitigation_utils.R"))) if (!exists("merge_plastic_gmm_components_ridgeline", mode = "function") && !is.na(.pm_p) && nzchar(.pm_p) && file.exists(.pm_p)) { source(.pm_p); break }
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
   if (!exists("fetch_step04_morphometrics_from_db", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
@@ -134,9 +133,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
       F = c(round(F_size, 4), round(F_taxa, 4), round(F_int, 4), NA_real_, NA_real_),
       p_value = c(round(stats::pf(F_size, df_size, df_res, lower.tail = FALSE), 5), p_taxa, p_int, NA_real_, NA_real_), stringsAsFactors = FALSE)
   }
-  if (!is.null(output_pairwise) && nzchar(output_pairwise) && !is.null(pw_df)) {
-    dir.create(dirname(output_pairwise), recursive = TRUE, showWarnings = FALSE); tmp_pw <- paste0(output_pairwise, ".tmp"); write.csv(pw_df, file = tmp_pw, row.names = FALSE); file.rename(tmp_pw, output_pairwise)
-  }
+  if (!is.null(output_pairwise) && nzchar(output_pairwise) && !is.null(pw_df)) { dir.create(dirname(output_pairwise), recursive = TRUE, showWarnings = FALSE); tmp_pw <- paste0(output_pairwise, ".tmp"); write.csv(pw_df, file = tmp_pw, row.names = FALSE); file.rename(tmp_pw, output_pairwise) }
   anova_df$Term <- gsub("^Residuals$", "Residual", anova_df$Term)
   if ("Total" %in% anova_df$Term) anova_df$R2[anova_df$Term == "Total"] <- 1.0
   anova_df <- anova_df[, intersect(c("Term", "Df", "SumOfSqs", "R2", "F", "p_value"), names(anova_df)), drop = FALSE]
@@ -215,35 +212,30 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
     cvs <- if (exists("run_bounded_clustvarsel", mode = "function")) run_bounded_clustvarsel(X, core_idx, max_k = max_k) else tryCatch({ set.seed(42); clustvarsel::clustvarsel(X[if (length(core_idx) > 350L) core_idx[seq_len(350L)] else core_idx, , drop = FALSE], G = seq_len(min(max_k, 5L)), itermax = 100, parallel = FALSE, verbose = FALSE) }, error = function(e) NULL)
     if (!is.null(cvs) && length(cvs$subset) >= 2) { selected_cols <- colnames(X)[cvs$subset]; X <- X[, cvs$subset, drop = FALSE] }
   }
-  X_pcs <- X; X_core <- X_pcs[core_idx, , drop = FALSE]; eff_k <- max(2L, min(if (nrow(X_core) > 100 && max_k >= 7L) 6L else max_k, nrow(X_core) - 1L))
-  modelNames <- if ((nrow(X_core) / ncol(X_pcs)) < 5.0) c("EII", "VII", "EEI", "VEI", "EVI", "VVI") else NULL
   is_intra_gmm <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2L)
+  if (is_intra_gmm && exists("whiten_intraspecific_deme_plasticity", mode = "function")) X <- whiten_intraspecific_deme_plasticity(X, sub_v, core_idx)$X
+  X_pcs <- X; X_core <- X_pcs[core_idx, , drop = FALSE]; eff_k <- max(2L, min(if (nrow(X_core) > 100 && max_k >= 7L) 6L else max_k, nrow(X_core) - 1L))
+  modelNames <- if ((nrow(X_core) / ncol(X_pcs)) < 5.0) c("EII", "VII", "EEI", "VEI", "EVI", "VVI") else NULL; z_eval_mat <- NULL
   if (requireNamespace("mclust", quietly = TRUE)) {
     fit_mclust_fn <- function(G_arg) if (exists("fit_parallel_mclust_gmm", mode = "function")) fit_parallel_mclust_gmm(X_core, G_arg, modelNames) else mclust::Mclust(X_core, G = G_arg, modelNames = modelNames, verbose = FALSE)
     gmm_fit <- tryCatch(fit_mclust_fn(seq_len(eff_k)), error = function(e) NULL)
     if (!is.null(gmm_fit)) {
       bic_vals <- apply(gmm_fit$BIC, 1, function(row) if (all(is.na(row))) NA_real_ else max(row, na.rm = TRUE))
       bic_table <- data.frame(K = seq_len(eff_k), BIC = round(bic_vals[seq_len(eff_k)], 2))
-      if (!is.null(colnames(gmm_fit$BIC))) {
-        for (mn in colnames(gmm_fit$BIC)) bic_table[[paste0("BIC_", mn)]] <- round(as.numeric(gmm_fit$BIC[seq_len(eff_k), mn]), 2)
-      }
-      use_fit <- if (is_intra_gmm && gmm_fit$G < 2L) tryCatch(fit_mclust_fn(2:eff_k), error = function(e) NULL) else gmm_fit
-      if (!is.null(use_fit)) {
-        best_k <- use_fit$G; best_name <- use_fit$modelName; gmm_pred <- predict(use_fit, newdata = X_pcs)
-        cls_sub <- as.integer(gmm_pred$classification)
-        unc_sub <- if (!is.null(gmm_pred$uncertainty)) gmm_pred$uncertainty else 1.0 - apply(as.matrix(gmm_pred$z), 1, max)
-      }
+      if (!is.null(colnames(gmm_fit$BIC))) for (mn in colnames(gmm_fit$BIC)) bic_table[[paste0("BIC_", mn)]] <- round(as.numeric(gmm_fit$BIC[seq_len(eff_k), mn]), 2)
+      best_k <- gmm_fit$G; best_name <- gmm_fit$modelName; gmm_pred <- predict(gmm_fit, newdata = X_pcs); z_eval_mat <- as.matrix(gmm_pred$z)
+      cls_sub <- as.integer(gmm_pred$classification); unc_sub <- if (!is.null(gmm_pred$uncertainty)) gmm_pred$uncertainty else 1.0 - apply(z_eval_mat, 1, max)
     }
   }
   if (is.null(bic_table)) {
     pure_res <- fit_gmm_em_pure(X_core, max_k = eff_k, X_eval = X_pcs); bic_table <- pure_res$bic_table
-    if (!is_intra_gmm || pure_res$best$k >= 2L) { best_k <- pure_res$best$k; cls_sub <- pure_res$best$classification; unc_sub <- pure_res$best$uncertainty }
+    best_k <- pure_res$best$k; cls_sub <- pure_res$best$classification; unc_sub <- pure_res$best$uncertainty; z_eval_mat <- pure_res$best$z
   }
-  if (is.null(cls_sub) || (is_intra_gmm && length(unique(stats::na.omit(cls_sub))) < 2L)) {
-    set.seed(42); km <- stats::kmeans(X_core, centers = 2L, nstart = 20L); best_k <- 2L; best_name <- "kmeans_K2_fallback"
-    d1 <- sqrt(rowSums(sweep(X_pcs, 2, km$centers[1, ], "-")^2)); d2 <- sqrt(rowSums(sweep(X_pcs, 2, km$centers[2, ], "-")^2))
-    cls_sub <- ifelse(d1 <= d2, 1L, 2L); unc_sub <- pmin(d1, d2) / pmax(d1 + d2, 1e-9)
+  if (!is.null(z_eval_mat) && ncol(z_eval_mat) >= 2L && exists("merge_plastic_gmm_components_ridgeline", mode = "function")) {
+    mrg <- merge_plastic_gmm_components_ridgeline(X_pcs, X_core, z_eval_mat, z_eval_mat[core_idx, , drop = FALSE], df_core = sub_v[core_idx, , drop = FALSE], intraspecific_mode = is_intra_gmm)
+    if (isTRUE(mrg$merged_any)) { message(sprintf("[Plasticity Gate] Ridgeline/sympatry test merged GMM K=%d -> K=%d.", best_k, mrg$best_k)); best_k <- mrg$best_k; cls_sub <- mrg$classification; unc_sub <- mrg$uncertainty; best_name <- paste0(best_name, "_RidgelineMerged") }
   }
+  if (is.null(cls_sub)) { best_k <- 1L; best_name <- "Unimodal_G1_Null"; cls_sub <- rep(1L, nrow(X_pcs)); unc_sub <- rep(0.0, nrow(X_pcs)) }
   relab <- .canonical_relabel_gmm_clusters(sub_v, cls_sub, best_k, ref_cand, core_idx); cls_sub <- relab$cls_sub; cls <- rep(NA_integer_, nrow(df)); unc <- rep(NA_real_, nrow(df)); cls[valid_rows] <- cls_sub; unc[valid_rows] <- unc_sub
   bic_table$Delta_BIC_prev <- c(0, diff(bic_table$BIC)); bic_table$Two_Delta_BIC <- round(bic_table$BIC - bic_table$BIC[1], 2)
   bic_table$BayesFactor_vs_Null <- round(bic_table$Two_Delta_BIC * relab$n_eff_ratio, 2)
@@ -267,20 +259,17 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   has_pcs <- complete.cases(df[, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE])
   screened_by_adaptive_anchors <- FALSE; df$is_confident_label_noise <- rep(FALSE, nrow(df))
   if (is_intra) {
-    cl_u <- if (!is.null(gmm_res) && length(unique(stats::na.omit(gmm_res$classification))) >= 2L) as.integer(gmm_res$classification) else NULL
-    if (is.null(cl_u)) {
-      set.seed(42); km_fb <- stats::kmeans(as.matrix(df[has_pcs, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE]), centers = 2L, nstart = 20L)
-      cl_u <- rep(NA_integer_, nrow(df)); cl_u[has_pcs] <- as.integer(km_fb$cluster)
-    }
+    cl_u <- if (!is.null(gmm_res) && !is.null(gmm_res$classification)) as.integer(gmm_res$classification) else rep(1L, nrow(df))
+    cl_u[has_pcs & is.na(cl_u)] <- 1L; n_intra_k <- length(unique(stats::na.omit(cl_u[has_pcs])))
     df$grouping_col <- ifelse(is.na(cl_u), NA_character_, paste0("Morphotype_K", cl_u))
     unc_v <- if (!is.null(gmm_res) && !is.null(gmm_res$uncertainty)) gmm_res$uncertainty else rep(0.0, nrow(df))
-    u_cut <- stats::quantile(unc_v, 0.70, na.rm = TRUE)
+    u_cut <- stats::quantile(unc_v, 0.70, na.rm = TRUE); min_grp_k <- min(2L, max(1L, n_intra_k))
     is_active <- (df$authority_weight > 0) & is_tier1_pure & !is.na(df$grouping_col) & !is.na(unc_v) & (unc_v <= u_cut) & has_pcs
-    if (sum(table(df$grouping_col[is_active]) >= 2L) < 2L) is_active <- (df$authority_weight > 0) & is_tier1_pure & !is.na(df$grouping_col) & has_pcs
-    if (sum(table(df$grouping_col[is_active]) >= 2L) < 2L) is_active <- is_tier1_pure & !is.na(df$grouping_col) & has_pcs
-    if (sum(table(df$grouping_col[is_active]) >= 2L) < 2L) is_active <- !is.na(df$grouping_col) & has_pcs
+    if (sum(table(df$grouping_col[is_active]) >= 2L) < min_grp_k) is_active <- (df$authority_weight > 0) & is_tier1_pure & !is.na(df$grouping_col) & has_pcs
+    if (sum(table(df$grouping_col[is_active]) >= 2L) < min_grp_k) is_active <- is_tier1_pure & !is.na(df$grouping_col) & has_pcs
+    if (sum(table(df$grouping_col[is_active]) >= 2L) < min_grp_k) is_active <- !is.na(df$grouping_col) & has_pcs
     act_tab <- table(df$grouping_col[is_active]); target_taxa <- sort(names(act_tab[act_tab >= 2L]))
-    if (length(target_taxa) < 2L) target_taxa <- sort(unique(stats::na.omit(df$grouping_col[is_active])))
+    if (length(target_taxa) < min_grp_k) target_taxa <- sort(unique(stats::na.omit(df$grouping_col[is_active])))
     is_active <- is_active & (df$grouping_col %in% target_taxa); is_train_cand <- is_active
   } else {
     df$grouping_col <- df$species_standardized; used_unscreened_fb <- FALSE
@@ -330,6 +319,20 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   message(sprintf("CDA Leave-One-Out Cross-Validation Accuracy (loocv_accuracy): %.4f", loocv_accuracy))
 
   g_levels <- target_taxa; g <- length(g_levels); grand_mean <- colSums(X_a * w_a) / sum(w_a)
+  if (g == 1L) {
+    X_cent1 <- sweep(X_a, 2L, grand_mean, "-"); S_w1 <- crossprod(X_cent1 * sqrt(w_a)) / max(sum(w_a) - 1.0, 1.0)
+    S_reg1 <- compute_ledoit_wolf_cov(S_w1, X_centered = X_cent1, n_obs = N_a, weights = w_a); eig1 <- eigen(S_reg1, symmetric = TRUE)
+    X_p1 <- X; for (ci in seq_len(p)) if (any(is.na(X_p1[, ci]))) X_p1[is.na(X_p1[, ci]), ci] <- grand_mean[ci]
+    Z1 <- sweep(X_p1, 2L, grand_mean, "-") %*% eig1$vectors[, seq_len(min(3L, p)), drop = FALSE]
+    while (ncol(Z1) < 3L) Z1 <- cbind(Z1, 0.0); colnames(Z1) <- c("Can1", "Can2", "Can3")
+    vp1 <- round(100.0 * pmax(eig1$values, 0) / max(sum(pmax(eig1$values, 0)), 1e-12), 2); sc1 <- suppressWarnings(stats::cor(X_a, Z1[active_idx, 1:2, drop = FALSE])); sc1[!is.finite(sc1)] <- 0.0
+    c_mat1 <- matrix(0.0, nrow = 1L, ncol = 3L, dimnames = list(g_levels, colnames(Z1))); pp1 <- matrix(1.0, nrow = nrow(df), ncol = 1L, dimnames = list(NULL, g_levels))
+    return(list(eigenvalues = pmax(eig1$values, 0), variance_pct = vp1, canonical_scores = Z1, centroids = c_mat1, canonical_scores_full = Z1[, 1, drop = FALSE], centroids_full = c_mat1[, 1, drop = FALSE],
+                num_canonical_axes = 1L, shrinkage_lambda = attr(S_reg1, "shrinkage_lambda"), selected_features = feature_cols, predicted_taxon = rep(g_levels[1L], nrow(df)), posterior_prob = rep(1.0, nrow(df)),
+                second_taxon = rep(NA_character_, nrow(df)), second_posterior_prob = rep(0.0, nrow(df)), post_probs = pp1, posterior_margin = rep(1.0, nrow(df)), is_active = is_active,
+                is_promoted_bronze = df$is_promoted_bronze, is_confident_label_noise = df$is_confident_label_noise, anchor_tier_source = df$anchor_tier_source, authority_weight = df$authority_weight,
+                structure_loadings = sc1, loocv_accuracy = 1.0, grouping_col = df$grouping_col, X_proj = X_p1, S_reg = S_reg1))
+  }
   B <- matrix(0, p, p); W <- matrix(0, p, p); X_centered <- matrix(0, N_a, p, dimnames = dimnames(X_a))
   group_means <- matrix(0, g, p, dimnames = list(g_levels, feature_cols)); group_counts <- integer(g)
   for (k in seq_along(g_levels)) {
@@ -354,18 +357,14 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   Z_anchors_full <- sweep(X_a, 2L, grand_mean, "-") %*% eig_vecs_full
   struct_corr <- suppressWarnings(stats::cor(X_a, Z_anchors_full)); struct_corr[!is.finite(struct_corr)] <- 0.0
   X_proj <- X
-  for (col_idx in seq_len(p)) {
-    na_mask <- is.na(X_proj[, col_idx]); if (any(na_mask)) X_proj[na_mask, col_idx] <- grand_mean[col_idx]
-  }
+  for (col_idx in seq_len(p)) { na_mask <- is.na(X_proj[, col_idx]); if (any(na_mask)) X_proj[na_mask, col_idx] <- grand_mean[col_idx] }
   Z_all_full <- sweep(X_proj, 2L, grand_mean, "-") %*% eig_vecs_full
   centroids_full <- sweep(group_means, 2L, grand_mean, "-") %*% eig_vecs_full
   colnames(Z_all_full) <- colnames(Z_anchors_full) <- colnames(centroids_full) <- paste0("Can", seq_len(k_full))
   rownames(centroids_full) <- g_levels
 
   priors <- rep(1/g, g); post_probs <- .compute_soft_geo_range_log_prior(df, df$grouping_col, w_vec = df$authority_weight, active_mask = is_active, g_levels = g_levels); dimnames(post_probs) <- list(NULL, g_levels)
-  for (k in seq_along(g_levels)) {
-    diff_z <- sweep(Z_all_full, 2L, centroids_full[k, ], "-"); post_probs[, k] <- post_probs[, k] + log(priors[k]) - 0.5 * rowSums(diff_z^2)
-  }
+  for (k in seq_along(g_levels)) { diff_z <- sweep(Z_all_full, 2L, centroids_full[k, ], "-"); post_probs[, k] <- post_probs[, k] + log(priors[k]) - 0.5 * rowSums(diff_z^2) }
   post_probs <- exp(post_probs - apply(post_probs, 1, max, na.rm = TRUE))
   post_probs <- post_probs / pmax(rowSums(post_probs, na.rm = TRUE), 1e-12); pred_idx <- max.col(post_probs, ties.method = "first")
   posterior_prob <- apply(post_probs, 1, max)
@@ -496,9 +495,7 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   }
   if (length(rows_out) == 0L) return(NULL)
   anova_df <- do.call(rbind, rows_out); anova_df$p_value_bh[anova_df$Term == "institutionCode"] <- signif(stats::p.adjust(raw_ps, method = "BH"), 4)
-  if (!is.null(output_csv) && nzchar(output_csv)) {
-    dir.create(dirname(output_csv), recursive = TRUE, showWarnings = FALSE); tmp_ba <- paste0(output_csv, ".tmp"); write.csv(anova_df, file = tmp_ba, row.names = FALSE); file.rename(tmp_ba, output_csv)
-  }
+  if (!is.null(output_csv) && nzchar(output_csv)) { dir.create(dirname(output_csv), recursive = TRUE, showWarnings = FALSE); tmp_ba <- paste0(output_csv, ".tmp"); write.csv(anova_df, file = tmp_ba, row.names = FALSE); file.rename(tmp_ba, output_csv) }
   return(invisible(list(lm_pc1 = fits[["PC1"]], lm_pc2 = fits[["PC2"]], models = fits, anova_table = anova_df)))
 }
 
@@ -622,6 +619,10 @@ run_gmm_morphotools_pipeline <- function(opts) {
   cand_taxa <- sort(unique(closed_df$species_standardized[!is.na(closed_df$species_standardized) & grepl("^Packera\\s+", closed_df$species_standardized)]))
   tx_n <- table(factor(closed_df$species_standardized, levels = cand_taxa)); target_taxa <- if (sum(tx_n >= 2L) >= 2L) names(tx_n[tx_n >= 2L]) else if (length(cand_taxa) > 0L) cand_taxa else sort(unique(stats::na.omit(closed_df$species_standardized)))
   is_intra_mode <- isTRUE(opts$intraspecific_mode) || (length(target_taxa) < 2L)
+  if (exists("merge_voucher_phenophase_covariates", mode = "function")) closed_df <- merge_voucher_phenophase_covariates(closed_df, opts$harmonics, opts$vouchers)
+  std_plast_cols <- grep("_std$", names(closed_df), value = TRUE)
+  if (exists("residualize_within_deme_phenophase_plasticity", mode = "function")) closed_df <- residualize_within_deme_phenophase_plasticity(closed_df, target_cols = unique(c(if (is_intra_mode) pca_cols else character(0), std_plast_cols)), ref_mask = (closed_df$authority_weight > 0) & (closed_df$morph_tier_source == "Tier_1_Pure"), intraspecific_mode = is_intra_mode)
+  if (length(std_plast_cols) > 0L && exists("apply_hierarchical_population_deme_shrinkage", mode = "function")) closed_df <- apply_hierarchical_population_deme_shrinkage(closed_df, feature_cols = std_plast_cols, deme_radius_km = 10.0, kappa_sheet = 1.5, kappa_deme = 2.5)
   gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel), intraspecific_mode = is_intra_mode)
   dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE); tmp_bic <- paste0(opts$output_report, ".tmp"); write.csv(gmm_res$bic_table, file = tmp_bic, row.names = FALSE); file.rename(tmp_bic, opts$output_report)
   veg_cda <- if (!isTRUE(opts$outline_only)) prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = intersect(c("log_centsize_std", "aspect_ratio_std"), names(closed_df)), active_mask = (closed_df$authority_weight > 0), group_vec = closed_df$species_standardized, max_r = 0.75) else character(0)

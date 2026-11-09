@@ -1779,5 +1779,84 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertIn("HETEROBLASTY_PURE_BASAL_AND_CAULINE_FALLBACK_OK", proc.stdout)
 
 
+
+    def test_step04_plasticity_mitigation_module_and_sympatric_unimodal_collapse(self) -> None:
+        """
+        Verify plasticity_mitigation_utils.R contracts and end-to-end R behavior:
+          1. Static verification that plasticity_mitigation_utils.R defines phenophase residualization,
+             within-deme Q_ST covariance whitening, sPCA global test, and Hennig/Ray-Lindsay ridgeline merging,
+             and is wired into 04_gmm_morphotools.R without forcing G >= 2.
+          2. When Rscript is available, verify that a skewed, phenophase-confounded sympatric panmictic cloud
+             collapses to K = 1 (Morphotype_K1) while a geographically segregated bimodal cohort retains K = 2.
+        """
+        pm_path = PROJECT_ROOT / "scripts" / "morphometrics" / "plasticity_mitigation_utils.R"
+        self.assertTrue(pm_path.is_file(), "plasticity_mitigation_utils.R must exist")
+        pm_src = pm_path.read_text(encoding="utf-8")
+        for fn_tok in (
+            "merge_voucher_phenophase_covariates",
+            "residualize_within_deme_phenophase_plasticity",
+            "whiten_intraspecific_deme_plasticity",
+            "compute_cluster_spatial_segregation_p",
+            "compute_spca_global_test",
+            "merge_plastic_gmm_components_ridgeline",
+        ):
+            self.assertIn(fn_tok, pm_src, f"Missing {fn_tok} in plasticity_mitigation_utils.R")
+
+        r04_src = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("plasticity_mitigation_utils.R", r04_src)
+        self.assertNotIn("kmeans_K2_fallback", r04_src)
+
+        if not shutil.which("Rscript"):
+            return
+
+        r_code = """
+        source("scripts/morphometrics/pub_figures_utils.R")
+        source("scripts/morphometrics/authority_weighting_utils.R")
+        source("scripts/morphometrics/plasticity_mitigation_utils.R")
+        source("scripts/morphometrics/04_gmm_morphotools.R")
+        set.seed(20261109)
+
+        # Case A: Sympatric skewed plastic cloud across 4 shared localities -> must collapse to K = 1 (Morphotype_K1)
+        n_sym <- 48L
+        site_lats <- rep(c(31.5, 33.8, 35.9, 38.4), length.out = n_sym)
+        site_lons <- rep(c(-93.2, -84.1, -79.0, -76.1), length.out = n_sym)
+        ecos <- rep(c("South_Central_Plains", "Piedmont", "Piedmont", "Middle_Atlantic_Coastal_Plain"), length.out = n_sym)
+        # Skewed log-normal microhabitat plasticity completely randomized within every site
+        plast_shock <- rexp(n_sym, rate = 1.0) - 1.0
+        df_sym <- data.frame(
+          catalogNumber = sprintf("SYM_%03d", seq_len(n_sym)),
+          plant_individual_id = 0L,
+          species_standardized = "Packera dubia",
+          determiner_tier = "Tier_1_Gold",
+          morph_tier_source = "Tier_1_Pure",
+          decimalLatitude = site_lats + rnorm(n_sym, 0, 0.02),
+          decimalLongitude = site_lons + rnorm(n_sym, 0, 0.02),
+          regional_group = ecos,
+          solidity = 0.88,
+          is_dissected = FALSE,
+          PC1 = 1.6 * plast_shock + rnorm(n_sym, 0, 0.25),
+          PC2 = -0.8 * plast_shock + rnorm(n_sym, 0, 0.25),
+          PC3 = rnorm(n_sym, 0, 0.20),
+          stringsAsFactors = FALSE
+        )
+        gmm_sym <- run_gmm_cluster_analysis(df_sym, c("PC1", "PC2", "PC3"), max_k = 5L, intraspecific_mode = TRUE)
+        cda_sym <- run_canonical_discriminant_analysis(df_sym, c("PC1", "PC2", "PC3"), "Packera dubia", gmm_res = gmm_sym, intraspecific_mode = TRUE)
+        stopifnot(gmm_sym$best_k == 1L)
+        stopifnot(all(cda_sym$predicted_taxon == "Morphotype_K1"))
+
+        # Case B: Geographically segregated true morphotypes -> must retain K = 2
+        df_geo <- df_sym
+        west_m <- df_geo$decimalLongitude < -88.0
+        df_geo$PC1 <- ifelse(west_m, -3.2, 2.2) + rnorm(n_sym, 0, 0.30)
+        df_geo$PC2 <- ifelse(west_m, 1.8, -1.2) + rnorm(n_sym, 0, 0.30)
+        gmm_geo <- run_gmm_cluster_analysis(df_geo, c("PC1", "PC2", "PC3"), max_k = 5L, intraspecific_mode = TRUE)
+        stopifnot(gmm_geo$best_k >= 2L)
+        cat("PLASTICITY_MITIGATION_R_OK\n")
+        """
+        proc = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0, f"Plasticity mitigation R test failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("PLASTICITY_MITIGATION_R_OK", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

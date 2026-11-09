@@ -202,6 +202,33 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Maximum vouchers retained per (species, regional_group) (default: None, unlimited).",
     )
     parser.add_argument(
+        "--usda-county-filter",
+        action=argparse.BooleanOptionalAction,
+        default=cfg.harvesting.usda_county_filter,
+        help=(
+            "Filter out non-exempt US vouchers outside USDA PLANTS documented counties "
+            f"(plus 1-ring neighbors and geodesic buffer; default: {cfg.harvesting.usda_county_filter})."
+        ),
+    )
+    parser.add_argument(
+        "--usda-county-buffer-km",
+        type=float,
+        default=cfg.harvesting.usda_county_buffer_km,
+        help=(
+            "Geodesic buffer distance in km around USDA PLANTS documented counties "
+            f"(default: {cfg.harvesting.usda_county_buffer_km})."
+        ),
+    )
+    parser.add_argument(
+        "--usda-exempt-gold",
+        action=argparse.BooleanOptionalAction,
+        default=cfg.harvesting.usda_exempt_gold,
+        help=(
+            "Exempt Tier_1_Gold specialist determinations from USDA county filtering "
+            f"(nomenclatural types are always exempt; default: {cfg.harvesting.usda_exempt_gold})."
+        ),
+    )
+    parser.add_argument(
         "--db",
         type=str,
         default=None,
@@ -277,6 +304,9 @@ def main() -> None:
         cfg_synonyms=cfg.taxa.synonyms,
         home_herbarium=getattr(args, "home_herbarium", cfg.harvesting.home_herbarium),
         db_path=getattr(args, "db", None),
+        usda_county_filter=bool(getattr(args, "usda_county_filter", cfg.harvesting.usda_county_filter)),
+        usda_county_buffer_km=float(getattr(args, "usda_county_buffer_km", cfg.harvesting.usda_county_buffer_km)),
+        usda_exempt_gold=bool(getattr(args, "usda_exempt_gold", cfg.harvesting.usda_exempt_gold)),
     )
 
     harvester.run(download_images=args.download_images)

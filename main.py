@@ -652,6 +652,16 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd.extend(["--countries", *[str(c) for c in args.countries]])
     if getattr(args, "expand_synonyms", None) is False:
         cmd.append("--no-expand-synonyms")
+    if getattr(args, "usda_county_filter", None) is True:
+        cmd.append("--usda-county-filter")
+    elif getattr(args, "usda_county_filter", None) is False:
+        cmd.append("--no-usda-county-filter")
+    if getattr(args, "usda_county_buffer_km", None) is not None:
+        cmd.extend(["--usda-county-buffer-km", str(args.usda_county_buffer_km)])
+    if getattr(args, "usda_exempt_gold", None) is True:
+        cmd.append("--usda-exempt-gold")
+    elif getattr(args, "usda_exempt_gold", None) is False:
+        cmd.append("--no-usda-exempt-gold")
 
     if args.download_images:
         cmd.append("--download-images")
@@ -1376,6 +1386,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Toggle GBIF Backbone synonym/basionym expansion (default: True)",
     )
+    p_harvest.add_argument(
+        "--usda-county-filter",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle USDA PLANTS county range filtering during Step 01 harvest (default: from config.yaml)",
+    )
+    p_harvest.add_argument(
+        "--usda-county-buffer-km",
+        type=float,
+        default=None,
+        help="Geodesic buffer in km around USDA PLANTS documented counties (default: from config.yaml)",
+    )
+    p_harvest.add_argument(
+        "--usda-exempt-gold",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle Tier_1_Gold specialist exemption during USDA county range filtering",
+    )
     p_harvest.add_argument("--include-western", action="store_true", default=False, help=argparse.SUPPRESS)
     p_harvest.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
     p_harvest.add_argument("--output-csv", type=Path, default=None, help="Curated vouchers output CSV")
@@ -1522,6 +1550,24 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Toggle GBIF Backbone synonym/basionym expansion (default: True)",
+    )
+    p_all.add_argument(
+        "--usda-county-filter",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle USDA PLANTS county range filtering during Step 01 harvest (default: from config.yaml)",
+    )
+    p_all.add_argument(
+        "--usda-county-buffer-km",
+        type=float,
+        default=None,
+        help="Geodesic buffer in km around USDA PLANTS documented counties (default: from config.yaml)",
+    )
+    p_all.add_argument(
+        "--usda-exempt-gold",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle Tier_1_Gold specialist exemption during USDA county range filtering",
     )
     p_all.add_argument("--include-western", action="store_true", default=False, help=argparse.SUPPRESS)
     p_all.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
