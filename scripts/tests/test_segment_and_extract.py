@@ -2330,6 +2330,190 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             self.assertTrue(Path(saved["fig02d_pdf"]).exists())
             self.assertTrue(Path(saved["fig02e_pdf"]).exists())
 
+    def test_four_organ_pole_cases_and_vascular_ray_tracing(self) -> None:
+        """
+        Verify classify_leaf_zone_anatomical across all 4 biological organ-pole cases:
+          - Case 1 (Roots + Capitula): Inverted mount (NCU00385199: roots at top y=197,
+            capitula at bottom y=1572) preserves top root crown without overwriting and
+            classifies top rosette leaf as basal and lower stem leaves as cauline.
+          - Case 2 (Roots Only, No Capitula): Erect long-petiolate basal tuft (NCU00438219:
+            roots at bottom y=2027, no capitula, elevated lamina blades at y=1580 with
+            downward petiole rays tracing into root crown) classifies all tuft leaves as basal.
+          - Case 3 (Capitula Only, No Roots): Clipped upper flowering stem (capitula at top,
+            no roots, spaced sessile stem leaves without basal convergence hub) classifies
+            internodal leaves as cauline.
+          - Case 4 (Neither Roots Nor Capitula): Multi-plant sheet (NCSC00103660: pid=0
+            flowering stem on right, pid=1 detached sterile basal rosette on upper-left)
+            does not leak pid=0 capitula onto pid=1 and classifies all pid=1 rosette leaves
+            as basal regardless of sheet y-position.
+        """
+        from scripts.vision.organ_crown_metrics import classify_leaf_zone_anatomical
+
+        # Case 1: Inverted mount (roots at top y=197, capitula at bottom y=1572)
+        inverted_leaves = [
+            {
+                "leaf_id": 2,
+                "plant_individual_id": 0,
+                "p_base_sheet": (723.0, 349.0),
+                "p_apex_sheet": (640.0, 480.0),
+                "p_petiole_tip": (760.0, 245.0),
+                "blade_length_px": 155.0,
+                "has_petiole_mask": True,
+            },
+            {
+                "leaf_id": 4,
+                "plant_individual_id": 0,
+                "p_base_sheet": (1085.0, 1061.0),
+                "p_apex_sheet": (1165.0, 1185.0),
+                "blade_length_px": 148.0,
+                "has_petiole_mask": False,
+                "petiole_to_blade_ratio": 0.02,
+            },
+        ]
+        res_case1 = classify_leaf_zone_anatomical(
+            inverted_leaves,
+            crowns_by_pid={0: (781.0, 206.0)},
+            rosette_centroids_by_pid={0: (980.0, 920.0)},
+            root_boxes=[((160, 740, 235, 820), 0.88, 7)],
+            capitula_detections=[(1520, 1280, 1620, 1360)],
+        )
+        self.assertEqual(res_case1[2]["leaf_zone"], "basal")
+        self.assertEqual(res_case1[4]["leaf_zone"], "cauline")
+
+        # Case 2: Erect long-petiolate basal tuft with Roots only and no Capitula (NCU00438219)
+        tuft_leaves = [
+            {
+                "leaf_id": 1,
+                "plant_individual_id": 0,
+                "p_base_sheet": (855.0, 1910.0),
+                "p_apex_sheet": (845.0, 1730.0),
+                "p_petiole_tip": (860.0, 1995.0),
+                "ray_dir": (0.04, 0.999),
+                "blade_length_px": 180.0,
+                "has_petiole_mask": True,
+            },
+            {
+                "leaf_id": 2,
+                "plant_individual_id": 0,
+                "p_base_sheet": (820.0, 1580.0),
+                "p_apex_sheet": (790.0, 1370.0),
+                "p_petiole_tip": (832.0, 1665.0),
+                "ray_dir": (0.09, 0.996),
+                "blade_length_px": 210.0,
+                "has_petiole_mask": True,
+            },
+            {
+                "leaf_id": 3,
+                "plant_individual_id": 0,
+                "p_base_sheet": (910.0, 1595.0),
+                "p_apex_sheet": (945.0, 1390.0),
+                "p_petiole_tip": (895.0, 1680.0),
+                "ray_dir": (-0.09, 0.996),
+                "blade_length_px": 205.0,
+                "has_petiole_mask": True,
+            },
+        ]
+        res_case2 = classify_leaf_zone_anatomical(
+            tuft_leaves,
+            crowns_by_pid={0: (863.0, 2027.0)},
+            root_boxes=[((1980, 810, 2080, 915), 0.91, 7)],
+            capitula_detections=[],
+        )
+        self.assertEqual(res_case2[1]["leaf_zone"], "basal")
+        self.assertEqual(res_case2[2]["leaf_zone"], "basal")
+        self.assertEqual(res_case2[3]["leaf_zone"], "basal")
+
+        # Case 3: Capitula only, no Roots, clipped upper flowering stem without basal rosette hub
+        clipped_top_leaves = [
+            {
+                "leaf_id": 10,
+                "plant_individual_id": 0,
+                "p_base_sheet": (600.0, 1150.0),
+                "p_apex_sheet": (510.0, 1060.0),
+                "blade_length_px": 125.0,
+                "has_petiole_mask": False,
+                "petiole_to_blade_ratio": 0.0,
+            },
+            {
+                "leaf_id": 11,
+                "plant_individual_id": 0,
+                "p_base_sheet": (605.0, 780.0),
+                "p_apex_sheet": (700.0, 690.0),
+                "blade_length_px": 115.0,
+                "has_petiole_mask": False,
+                "petiole_to_blade_ratio": 0.0,
+            },
+        ]
+        res_case3 = classify_leaf_zone_anatomical(
+            clipped_top_leaves,
+            root_boxes=[],
+            capitula_detections=[(380, 560, 460, 650)],
+        )
+        self.assertEqual(res_case3[10]["leaf_zone"], "cauline")
+        self.assertEqual(res_case3[11]["leaf_zone"], "cauline")
+
+        # Case 4: Multi-plant sheet where pid=1 is a detached sterile basal rosette (NCSC00103660)
+        multi_plant_leaves = [
+            # pid=0: flowering plant on right side (x ~ 1350)
+            {
+                "leaf_id": 1,
+                "plant_individual_id": 0,
+                "p_base_sheet": (1340.0, 1820.0),
+                "p_apex_sheet": (1240.0, 1690.0),
+                "p_petiole_tip": (1365.0, 1870.0),
+                "blade_length_px": 165.0,
+                "has_petiole_mask": True,
+            },
+            {
+                "leaf_id": 2,
+                "plant_individual_id": 0,
+                "p_base_sheet": (1360.0, 920.0),
+                "p_apex_sheet": (1450.0, 810.0),
+                "blade_length_px": 140.0,
+                "has_petiole_mask": False,
+                "petiole_to_blade_ratio": 0.02,
+            },
+            # pid=1: detached sterile basal rosette on upper-left (x ~ 440, y ~ 725)
+            {
+                "leaf_id": 3,
+                "plant_individual_id": 1,
+                "p_base_sheet": (380.0, 740.0),
+                "p_apex_sheet": (220.0, 780.0),
+                "p_petiole_tip": (435.0, 728.0),
+                "blade_length_px": 165.0,
+                "has_petiole_mask": True,
+            },
+            {
+                "leaf_id": 4,
+                "plant_individual_id": 1,
+                "p_base_sheet": (500.0, 755.0),
+                "p_apex_sheet": (650.0, 810.0),
+                "p_petiole_tip": (448.0, 730.0),
+                "blade_length_px": 160.0,
+                "has_petiole_mask": True,
+            },
+            {
+                "leaf_id": 5,
+                "plant_individual_id": 1,
+                "p_base_sheet": (442.0, 650.0),
+                "p_apex_sheet": (440.0, 480.0),
+                "p_petiole_tip": (442.0, 720.0),
+                "blade_length_px": 170.0,
+                "has_petiole_mask": True,
+            },
+        ]
+        res_case4 = classify_leaf_zone_anatomical(
+            multi_plant_leaves,
+            crowns_by_pid={0: (1370.0, 1890.0), 1: (442.0, 725.0)},
+            root_boxes=[((1870, 1330, 1960, 1420), 0.90, 7)],
+            capitula_detections=[(380, 1310, 470, 1410)],
+        )
+        self.assertEqual(res_case4[1]["leaf_zone"], "basal")
+        self.assertEqual(res_case4[2]["leaf_zone"], "cauline")
+        self.assertEqual(res_case4[3]["leaf_zone"], "basal")
+        self.assertEqual(res_case4[4]["leaf_zone"], "basal")
+        self.assertEqual(res_case4[5]["leaf_zone"], "basal")
+
 
 if __name__ == "__main__":
     unittest.main()

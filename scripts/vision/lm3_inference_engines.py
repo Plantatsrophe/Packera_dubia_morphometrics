@@ -157,6 +157,7 @@ __all__ = [
     "compute_capitulum_metrics",
     "resolve_onnx_providers",
     "LM3PlantDetector",
+    "LM3SpecimenSegmenter",
     "LM3LeafSegmenterEngine",
     "LM3PoseResult",
     "LM3PoseLandmarkEngine",
@@ -2374,19 +2375,34 @@ def _extract_native_lm3_petiole_anchor(
         except Exception:
             pass
 
-        lb_kp = norm_kps.get("lamina_base") or norm_kps.get("base_center") or norm_kps.get("base_2")
-        if lb_kp is not None and len(lb_kp) >= 3 and float(lb_kp[2]) >= min_kp_conf:
+        lb_kp = (
+            norm_kps.get("lamina_base")
+            or norm_kps.get("base_center")
+            or norm_kps.get("base_2")
+            or norm_kps.get("midvein_14")
+        )
+        if lb_kp is not None and len(lb_kp) >= 3 and float(lb_kp[2]) >= 0.25:
             dists_lb = np.hypot(leaf_pts[:, 0] - float(lb_kp[0]), leaf_pts[:, 1] - float(lb_kp[1]))
             min_lb_idx = int(np.argmin(dists_lb))
             if float(dists_lb[min_lb_idx]) <= max(36.0, 0.35 * float(max(bw_l, bh_l))):
                 p_base_crop = (int(leaf_pts[min_lb_idx, 0]), int(leaf_pts[min_lb_idx, 1]))
-                used_native_lm3 = True
+            else:
+                p_base_crop = (int(round(float(lb_kp[0]))), int(round(float(lb_kp[1]))))
+            used_native_lm3 = True
 
-        lt_kp = norm_kps.get("lamina_tip") or norm_kps.get("apex_center") or norm_kps.get("apex_2")
-        if lt_kp is not None and len(lt_kp) >= 3 and float(lt_kp[2]) >= min_kp_conf:
+        lt_kp = (
+            norm_kps.get("lamina_tip")
+            or norm_kps.get("apex_center")
+            or norm_kps.get("apex_2")
+            or norm_kps.get("midvein_0")
+        )
+        if lt_kp is not None and len(lt_kp) >= 3 and float(lt_kp[2]) >= 0.25:
             dists_lt = np.hypot(leaf_pts[:, 0] - float(lt_kp[0]), leaf_pts[:, 1] - float(lt_kp[1]))
             min_lt_idx = int(np.argmin(dists_lt))
-            p_apex_crop = (int(leaf_pts[min_lt_idx, 0]), int(leaf_pts[min_lt_idx, 1]))
+            if float(dists_lt[min_lt_idx]) <= max(36.0, 0.35 * float(max(bw_l, bh_l))):
+                p_apex_crop = (int(leaf_pts[min_lt_idx, 0]), int(leaf_pts[min_lt_idx, 1]))
+            else:
+                p_apex_crop = (int(round(float(lt_kp[0]))), int(round(float(lt_kp[1]))))
 
         if p_base_crop is not None:
             pet_chain.append((float(p_base_crop[0]), float(p_base_crop[1])))
@@ -2432,7 +2448,7 @@ def _extract_native_lm3_petiole_anchor(
                 pet_junction = (int(leaf_pts[min_idx, 0]), int(leaf_pts[min_idx, 1]))
                 if p_base_crop is None:
                     p_base_crop = pet_junction
-                elif p_apex_crop is not None:
+                elif p_apex_crop is not None and not norm_kps:
                     d_base_pet = math.hypot(p_base_crop[0] - pet_junction[0], p_base_crop[1] - pet_junction[1])
                     d_apex_pet = math.hypot(p_apex_crop[0] - pet_junction[0], p_apex_crop[1] - pet_junction[1])
                     if d_apex_pet < d_base_pet:
@@ -2712,7 +2728,8 @@ def orient_and_score_leaf_lm3(
         pts_2d["lamina_tip"] = (float(p_apex[0]) - float(offset_xy[0]), float(p_apex[1]) - float(offset_xy[1]))
 
     if (
-        petiole_mask is not None
+        not norm_kps
+        and petiole_mask is not None
         and petiole_mask.size > 0
         and int(np.count_nonzero(petiole_mask)) > 0
         and "lamina_base" in pts_2d
@@ -2724,13 +2741,6 @@ def orient_and_score_leaf_lm3(
         lt_pt = pts_2d["lamina_tip"]
         if math.hypot(lt_pt[0] - pet_cx, lt_pt[1] - pet_cy) < math.hypot(lb_pt[0] - pet_cx, lb_pt[1] - pet_cy):
             pts_2d["lamina_base"], pts_2d["lamina_tip"] = lt_pt, lb_pt
-            if "base_center" in pts_2d or "apex_center" in pts_2d:
-                pts_2d["base_center"] = pts_2d["lamina_base"]
-                pts_2d["apex_center"] = pts_2d["lamina_tip"]
-            mv_pts = [pts_2d[f"midvein_{i}"] for i in range(15) if f"midvein_{i}" in pts_2d]
-            if len(mv_pts) == 15:
-                for i, mpt in enumerate(reversed(mv_pts)):
-                    pts_2d[f"midvein_{i}"] = mpt
 
     # Populate synthetic midvein_0..14 along p_apex -> p_base if pose keypoints were not supplied
     if "lamina_tip" in pts_2d and "lamina_base" in pts_2d and "midvein_0" not in pts_2d:
@@ -2888,6 +2898,90 @@ def orient_and_score_leaf_lm3(
             "gates_pass": True,
             "is_archetypal": True,
         }
+
+
+class LM3SpecimenSegmenter:
+    """
+    LeafMachine3 Stage 2b ONNX Whole-Specimen Segmenter
+    (`lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain`).
+    Delegates directly to `leafmachine3.inference.specimen_segmenter` (`prep_letterbox_imagenet`,
+    `post_letterbox_imagenet`) and `leafmachine3.core.paper_removal.run_paperclean`
+    (`METHOD_LLR_HYST_KEEPBLOBS` in CIE L*a*b* space) to produce the cleaned plant-vs-paper
+    binary mask (`specimen_paper_cleaned_mask`).
+    """
+
+    MODEL_NAME: str = "lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain"
+
+    def __init__(
+        self,
+        weights_path: Optional[Union[str, Path]] = None,
+        device: str = "cuda",
+        conf_thres: float = 0.50,
+        img_size: int = 1024,
+        max_working_dim: int = 3200,
+        paperclean: bool = True,
+        providers: Optional[Sequence[str]] = None,
+    ) -> None:
+        self.device = device if (device == "cuda" and torch_cuda_available()) else "cpu"
+        self.conf_thres = float(conf_thres)
+        self.img_size = int(img_size)
+        self.max_working_dim = int(max_working_dim)
+        self.paperclean = bool(paperclean)
+        self.weights_path, self.model_name, self.providers, self.session = _load_onnx_session(
+            weights_path=weights_path,
+            default_model_name=self.MODEL_NAME,
+            device=self.device,
+            providers=providers,
+        )
+        self.model = self.session
+
+    def predict_mask(
+        self,
+        image_bgr: np.ndarray,
+        max_working_dim: Optional[int] = None,
+        return_sheet_size: bool = False,
+    ) -> Optional[np.ndarray]:
+        """
+        Runs UNet++ v9 whole-specimen segmentation + LLR hysteresis paper cleanup on `image_bgr`.
+        Returns a uint8 binary mask (`0` or `255`) at working resolution (or full-sheet resolution
+        when `return_sheet_size=True`). Returns `None` when ONNX weights are unavailable.
+        """
+        active_sess = self.session if self.session is not None else self.model
+        if active_sess is None or image_bgr is None or image_bgr.size == 0:
+            return None
+        try:
+            from leafmachine3.core.paper_removal import METHOD_LLR_HYST_KEEPBLOBS, run_paperclean
+            from leafmachine3.inference.specimen_segmenter import (
+                _sigmoid,
+                 post_letterbox_imagenet,
+                prep_letterbox_imagenet,
+            )
+
+            sh, sw = image_bgr.shape[:2]
+            w_dim = int(max_working_dim) if max_working_dim is not None else self.max_working_dim
+            work_img, _ = _prepare_working_image(image_bgr, max_working_dim=w_dim)
+            wh, ww = work_img.shape[:2]
+            inp_tensor, meta = prep_letterbox_imagenet(work_img, self.img_size)
+            input_name = active_sess.get_inputs()[0].name
+            output_name = active_sess.get_outputs()[0].name
+            with _ONNX_GPU_LOCK:
+                raw_out = active_sess.run([output_name], {input_name: inp_tensor})[0]
+            prob_sq = _sigmoid(raw_out[0, 0])
+            raw_mask = post_letterbox_imagenet(prob_sq, meta, wh, ww, self.conf_thres)
+            if self.paperclean:
+                cleaned_mask, _, _ = run_paperclean(work_img, raw_mask, METHOD_LLR_HYST_KEEPBLOBS)
+            else:
+                cleaned_mask = raw_mask
+            mask_u8 = (cleaned_mask > 0).astype(np.uint8) * 255
+            if return_sheet_size and (wh != sh or ww != sw):
+                mask_u8 = cv2.resize(mask_u8, (sw, sh), interpolation=cv2.INTER_NEAREST)
+            return mask_u8
+        except Exception as exc:
+            logger.debug(f"LM3SpecimenSegmenter inference fallback: {exc}")
+            return None
+
+    def __call__(self, image_bgr: np.ndarray, **kwargs: Any) -> Optional[np.ndarray]:
+        return self.predict_mask(image_bgr, **kwargs)
 
 
 class LM3ScaleCalibrator:

@@ -136,6 +136,7 @@ from scripts.vision.lm3_inference_engines import (
     LM3PlantDetector,
     LM3PoseLandmarkEngine,
     LM3ScaleCalibrator,
+    LM3SpecimenSegmenter,
     _VoucherFinalizeBundle,
     _extract_native_lm3_petiole_anchor,
     compute_capitulum_metrics,
@@ -530,6 +531,13 @@ class SegmentAndExtractPipeline:
 
         # 4. LeafMachine3 Archival Ruler Detector + Lattice Solver + Megapixel Scale Calibrator
         self.scale_calibrator = LM3ScaleCalibrator(
+            device=self.device,
+            providers=([] if _is_dummy_test_weights else None),
+        )
+
+        # 5. LeafMachine3 Full-Sheet Specimen Segmenter (UNet++ v9 + CIE L*a*b* paper-clean)
+        self.specimen_segmenter = LM3SpecimenSegmenter(
+            weights_path=_aux_default_weights,
             device=self.device,
             providers=([] if _is_dummy_test_weights else None),
         )
@@ -1192,29 +1200,6 @@ class SegmentAndExtractPipeline:
                         petiole_width_px_crop = pose_res.petiole_width_px
                     except Exception:
                         keypoints_31_crop = None
-                if (
-                    isinstance(keypoints_31_crop, dict)
-                    and best_petiole_mask is not None
-                    and np.any(best_petiole_mask > 0)
-                    and "lamina_base" in keypoints_31_crop
-                    and "lamina_tip" in keypoints_31_crop
-                ):
-                    _pys_c, _pxs_c = np.where(best_petiole_mask > 0)
-                    _pcx_c, _pcy_c = float(np.mean(_pxs_c)), float(np.mean(_pys_c))
-                    _lb_c = keypoints_31_crop["lamina_base"]
-                    _lt_c = keypoints_31_crop["lamina_tip"]
-                    if math.hypot(float(_lt_c[0]) - _pcx_c, float(_lt_c[1]) - _pcy_c) < math.hypot(
-                        float(_lb_c[0]) - _pcx_c, float(_lb_c[1]) - _pcy_c
-                    ):
-                        keypoints_31_crop = dict(keypoints_31_crop)
-                        keypoints_31_crop["lamina_base"], keypoints_31_crop["lamina_tip"] = _lt_c, _lb_c
-                        if "base_2" in keypoints_31_crop or "apex_2" in keypoints_31_crop:
-                            keypoints_31_crop["base_2"] = _lt_c
-                            keypoints_31_crop["apex_2"] = _lb_c
-                        _mv_c = [keypoints_31_crop[f"midvein_{_i}"] for _i in range(1, 16) if f"midvein_{_i}" in keypoints_31_crop]
-                        if len(_mv_c) == 15:
-                            for _i, _mv_v in enumerate(reversed(_mv_c), start=1):
-                                keypoints_31_crop[f"midvein_{_i}"] = _mv_v
 
                 cy0, cx0, cy1, cx1 = crop_box
                 m_raw = best_mask
@@ -1606,25 +1591,63 @@ class SegmentAndExtractPipeline:
             sheet_shape=(sheet_h, sheet_w),
         )
 
-        # Detected whole-plant vertical bounding box [ymin_plant, ymax_plant] across all detected plant organs
-        _plant_ymins: List[float] = [float(i.bbox[0]) for i in instances]
-        _plant_ymaxs: List[float] = [float(i.bbox[2]) for i in instances]
-        for _cap_b, _, _, _ in capitulum_detections:
-            _plant_ymins.append(float(_cap_b[0]))
-            _plant_ymaxs.append(float(_cap_b[2]))
-        for _root_b in root_detections:
-            _plant_ymins.append(float(_root_b[0]))
-            _plant_ymaxs.append(float(_root_b[2]))
-        for _uc_x, _uc_y in upper_cauline_pts:
-            _plant_ymins.append(float(_uc_y))
-            _plant_ymaxs.append(float(_uc_y))
-        ymin_plant = float(min(_plant_ymins)) if _plant_ymins else 0.0
-        ymax_plant = float(max(_plant_ymaxs)) if _plant_ymaxs else float(sheet_h)
-        plant_bbox_span = max(1.0, ymax_plant - ymin_plant)
-        inst_cy_rel_plant_bbox: Dict[int, float] = {
-            i.leaf_id: max(0.0, min(1.0, (inst_geom_map[i.leaf_id][1] - ymin_plant) / plant_bbox_span))
-            for i in instances
-        }
+        # Detected per-plant vertical bounding box [ymin_pid, ymax_pid] scoped per plant_individual_id
+        _pid_ymins: Dict[int, List[float]] = {}
+        _pid_ymaxs: Dict[int, List[float]] = {}
+        _pid_xs: Dict[int, List[float]] = {}
+        for _inst_b in instances:
+            _p_id = int(_inst_b.plant_individual_id)
+            _pid_ymins.setdefault(_p_id, []).append(float(_inst_b.bbox[0]))
+            _pid_ymaxs.setdefault(_p_id, []).append(float(_inst_b.bbox[2]))
+            _pid_xs.setdefault(_p_id, []).extend([float(_inst_b.bbox[1]), float(_inst_b.bbox[3])])
+
+        if len(_pid_ymins) == 1:
+            _sole_pid = next(iter(_pid_ymins.keys()))
+            for _cap_b, _, _, _ in capitulum_detections:
+                _pid_ymins[_sole_pid].append(float(_cap_b[0]))
+                _pid_ymaxs[_sole_pid].append(float(_cap_b[2]))
+            for _root_b in root_detections:
+                _pid_ymins[_sole_pid].append(float(_root_b[0]))
+                _pid_ymaxs[_sole_pid].append(float(_root_b[2]))
+            for _uc_x, _uc_y in upper_cauline_pts:
+                _pid_ymins[_sole_pid].append(float(_uc_y))
+                _pid_ymaxs[_sole_pid].append(float(_uc_y))
+        elif len(_pid_ymins) > 1:
+            _pid_centers_xy = {
+                _k: (float(np.median(_pid_xs[_k])), float(np.median(_pid_ymins[_k] + _pid_ymaxs[_k])))
+                for _k in _pid_ymins.keys()
+            }
+            for _cap_b, _, _, _ in capitulum_detections:
+                _cx_b = 0.5 * (float(_cap_b[1]) + float(_cap_b[3]))
+                _cy_b = 0.5 * (float(_cap_b[0]) + float(_cap_b[2]))
+                _best_k = min(
+                    _pid_centers_xy.keys(),
+                    key=lambda k: math.hypot(_cx_b - _pid_centers_xy[k][0], _cy_b - _pid_centers_xy[k][1]),
+                )
+                if math.hypot(_cx_b - _pid_centers_xy[_best_k][0], _cy_b - _pid_centers_xy[_best_k][1]) <= 0.35 * max(sheet_h, sheet_w):
+                    _pid_ymins[_best_k].append(float(_cap_b[0]))
+                    _pid_ymaxs[_best_k].append(float(_cap_b[2]))
+            for _root_b in root_detections:
+                _rx_b = 0.5 * (float(_root_b[1]) + float(_root_b[3]))
+                _ry_b = 0.5 * (float(_root_b[0]) + float(_root_b[2]))
+                _best_k = min(
+                    _pid_centers_xy.keys(),
+                    key=lambda k: math.hypot(_rx_b - _pid_centers_xy[k][0], _ry_b - _pid_centers_xy[k][1]),
+                )
+                if math.hypot(_rx_b - _pid_centers_xy[_best_k][0], _ry_b - _pid_centers_xy[_best_k][1]) <= 0.35 * max(sheet_h, sheet_w):
+                    _pid_ymins[_best_k].append(float(_root_b[0]))
+                    _pid_ymaxs[_best_k].append(float(_root_b[2]))
+
+        inst_cy_rel_plant_bbox: Dict[int, float] = {}
+        for _inst_b in instances:
+            _p_id = int(_inst_b.plant_individual_id)
+            _ymin_p = float(min(_pid_ymins.get(_p_id, [0.0])))
+            _ymax_p = float(max(_pid_ymaxs.get(_p_id, [float(sheet_h)])))
+            _span_p = max(1.0, _ymax_p - _ymin_p)
+            inst_cy_rel_plant_bbox[_inst_b.leaf_id] = max(
+                0.0,
+                min(1.0, (inst_geom_map[_inst_b.leaf_id][1] - _ymin_p) / _span_p),
+            )
 
         def _compute_inst_blade_area_cm2(inst_obj: DetectedInstance) -> Tuple[float, float]:
             _raw_px = float(np.count_nonzero(inst_obj.mask))
@@ -1662,17 +1685,6 @@ class SegmentAndExtractPipeline:
             ref_bbox = inst.pcd_bbox if inst.pcd_bbox is not None else inst.bbox
             raw_desc = compute_classical_shape_descriptors(inst.mask, bbox=ref_bbox)
             if (
-                isinstance(inst.trim_meta, dict)
-                and inst.trim_meta.get("native_lm3_petiole")
-                and inst.trim_meta.get("p_base") is not None
-                and inst.trim_meta.get("p_apex") is not None
-            ):
-                p_base_use = inst.trim_meta["p_base"]
-                p_apex_use = inst.trim_meta["p_apex"]
-                midrib_ang_use = float(
-                    math.degrees(math.atan2(p_apex_use[1] - p_base_use[1], p_apex_use[0] - p_base_use[0]))
-                )
-            elif (
                 isinstance(inst.keypoints_31, dict)
                 and "lamina_base" in inst.keypoints_31
                 and "lamina_tip" in inst.keypoints_31
@@ -1685,6 +1697,17 @@ class SegmentAndExtractPipeline:
                 p_apex_use = (int(round(float(_lt_inst[0]))), int(round(float(_lt_inst[1]))))
                 midrib_ang_use = float(
                     math.degrees(math.atan2(float(_lt_inst[1]) - float(_lb_inst[1]), float(_lt_inst[0]) - float(_lb_inst[0])))
+                )
+            elif (
+                isinstance(inst.trim_meta, dict)
+                and inst.trim_meta.get("native_lm3_petiole")
+                and inst.trim_meta.get("p_base") is not None
+                and inst.trim_meta.get("p_apex") is not None
+            ):
+                p_base_use = inst.trim_meta["p_base"]
+                p_apex_use = inst.trim_meta["p_apex"]
+                midrib_ang_use = float(
+                    math.degrees(math.atan2(p_apex_use[1] - p_base_use[1], p_apex_use[0] - p_base_use[0]))
                 )
             else:
                 p_base_use = raw_pb
@@ -1784,6 +1807,7 @@ class SegmentAndExtractPipeline:
             pose_inputs.append({
                 "leaf_id": _inst.leaf_id,
                 "plant_individual_id": _inst.plant_individual_id,
+                "mask_origin": (_ox, _oy),
                 "p_base_sheet": _pb_sheet,
                 "p_apex_sheet": _pa_sheet,
                 "geodesic_petiole_skeleton_px": _geod_px,
@@ -1816,6 +1840,17 @@ class SegmentAndExtractPipeline:
         repro_summary["scape_to_basal_leaf_ratio"] = petiole_scape_res.get("scape_to_basal_leaf_ratio", np.nan)
         repro_summary["is_bent_stem"] = bool(petiole_scape_res.get("is_bent_stem", False))
 
+        _spec_mask_sheet: Optional[np.ndarray] = None
+        if (
+            len(_pid_ymins) > 1
+            and getattr(self, "specimen_segmenter", None) is not None
+            and getattr(self.specimen_segmenter, "model", None) is not None
+        ):
+            try:
+                _spec_mask_sheet = self.specimen_segmenter.predict_mask(img_bgr)
+            except Exception:
+                _spec_mask_sheet = None
+
         leaf_zones_by_id = classify_leaf_zone_anatomical(
             pose_inputs,
             crowns_by_pid=crowns_by_pid if isinstance(crowns_by_pid, dict) else None,
@@ -1825,6 +1860,7 @@ class SegmentAndExtractPipeline:
             root_boxes=root_detections,
             is_bent_stem=bool(repro_summary.get("is_bent_stem", False)),
             sheet_shape=(sheet_h, sheet_w),
+            specimen_mask=_spec_mask_sheet,
         )
         has_cauline_zone = False
         for p_in in pose_inputs:
@@ -1976,6 +2012,14 @@ class SegmentAndExtractPipeline:
                 effective_min_blade_area_cm2,
             )
             _is_basal_leaf = _leaf_zone_str.lower() != "cauline"
+            _pet_len_px = leaf_pet.get(
+                "petiole_length_px",
+                pid_pet.get("petiole_length_px", np.nan) if _is_basal_leaf else np.nan,
+            )
+            _blade_len_px = leaf_pet.get(
+                "blade_length_px",
+                pid_pet.get("blade_length_px", np.nan) if _is_basal_leaf else np.nan,
+            )
             _pet_len_mm = leaf_pet.get(
                 "petiole_length_mm",
                 pid_pet.get("petiole_length_mm", np.nan) if _is_basal_leaf else np.nan,
@@ -2020,6 +2064,8 @@ class SegmentAndExtractPipeline:
                 "cf_source": inst.cf_source,
                 "mask_path": inst.mask_path,
                 "ect_path": inst.ect_path,
+                "petiole_length_px": _pet_len_px,
+                "blade_length_px": _blade_len_px,
                 "petiole_length_mm": _pet_len_mm,
                 "petiole_width_mm": _pet_w_mm,
                 "blade_length_mm": _blade_len_mm,
@@ -2731,6 +2777,8 @@ class SegmentAndExtractPipeline:
                         ):
                             pose_indices: List[int] = []
                             pose_crops: List[np.ndarray] = []
+                            pose_lamina_masks: List[Optional[np.ndarray]] = []
+                            pose_petiole_masks: List[Optional[np.ndarray]] = []
                             for idx_f, (c_bgr, c_preds) in enumerate(zip(flat_crops, flat_preds)):
                                 if not c_preds:
                                     continue
@@ -2739,13 +2787,21 @@ class SegmentAndExtractPipeline:
                                     for _bb, pm_u8, _p_sc, p_cls in c_preds
                                 )
                                 if has_leaf_f:
+                                    _bm_f, _, _pm_f, _ = _build_native_lm3_crop_masks(
+                                        c_preds,
+                                        c_bgr.shape[:2],
+                                        is_high_dpi=True,
+                                        min_leaf_area=0,
+                                    )
                                     pose_indices.append(idx_f)
                                     pose_crops.append(c_bgr)
+                                    pose_lamina_masks.append(_bm_f)
+                                    pose_petiole_masks.append(_pm_f)
                             if pose_crops:
                                 pose_batch_out = self.pose_engine.predict_batch(
                                     pose_crops,
-                                    lamina_masks=None,
-                                    petiole_masks=None,
+                                    lamina_masks=pose_lamina_masks,
+                                    petiole_masks=pose_petiole_masks,
                                     batch_size=max(8, self.stage2_batch_size),
                                 )
                                 for idx_f, p_res in zip(pose_indices, pose_batch_out):

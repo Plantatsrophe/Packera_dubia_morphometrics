@@ -13,6 +13,7 @@ Description:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -47,6 +48,7 @@ __all__ = [
     "_discover_downstream_table",
     "generate_step02_publication_figures",
     "regenerate_step02_figures_from_tables",
+    "export_taxon_ect_exemplars",
 ]
 
 
@@ -185,7 +187,7 @@ def _is_valid_smooth_closed_mask(m_path_str: Any, out_dir: Path) -> bool:
     if sig_comps != 1:
         best_cc = 1 + int(np.argmax(cc_areas))
         best_cc_area = int(stats_cc[best_cc, cv2.CC_STAT_AREA])
-        if float(best_cc_area) / float(max(total_fg, 1)) >= 0.92:
+        if float(best_cc_area) / float(max(total_fg, 1)) >= 0.85:
             fg = (lbls_cc == best_cc).astype(np.uint8)
             total_fg = best_cc_area
             min_sig_area = max(25, int(0.01 * total_fg))
@@ -216,7 +218,7 @@ def _is_valid_smooth_closed_mask(m_path_str: Any, out_dir: Path) -> bool:
     hull_area_c = float(cv2.contourArea(hull_c))
     sol_c = area_c / max(hull_area_c, 1.0)
 
-    min_hole_area = max(12.0, (0.025 if sol_c < 0.72 else 0.002) * float(total_fg))
+    min_hole_area = max(12.0, (0.025 if sol_c < 0.80 else 0.005) * float(total_fg))
     for idx_c, c in enumerate(cnts):
         parent_idx = int(hier[0][idx_c][3])
         if parent_idx != -1 and float(cv2.contourArea(c)) >= min_hole_area:
@@ -225,7 +227,13 @@ def _is_valid_smooth_closed_mask(m_path_str: Any, out_dir: Path) -> bool:
     # 4. Require smooth closed contour geometry
     circ = (4.0 * math.pi * area_c) / (perim_c * perim_c)
     if circ < 0.12:
-        if not (circ >= 0.025 and sol_c < 0.75 and is_botanical_dissection(main_cnt, solidity=sol_c, check_solidity_range=False)):
+        if not (
+            circ >= 0.025
+            and (
+                sol_c < 0.78
+                or is_botanical_dissection(main_cnt, solidity=sol_c, check_solidity_range=False)
+            )
+        ):
             return False
     return True
 
@@ -407,22 +415,48 @@ def generate_step02_publication_figures(
                 ind_sub = ind_df[["cat_str", "leaf_id_int"] + enrich_cols].drop_duplicates(
                     subset=["cat_str", "leaf_id_int"]
                 )
+                has_live_s2 = (
+                    pd.to_numeric(df_plot["petiole_length_px"], errors="coerce").notna()
+                    if "petiole_length_px" in df_plot.columns
+                    else pd.Series(False, index=df_plot.index)
+                )
+                df_plot["_has_live_s2"] = has_live_s2
                 df_plot = df_plot.merge(
-                    ind_sub,
+                    ind_sub.assign(_in_ind_efa=True),
                     on=["cat_str", "leaf_id_int"],
-                    how="inner",
+                    how="left",
                     suffixes=("", "_efa"),
                 )
+                df_plot = (
+                    df_plot[df_plot["_in_ind_efa"].fillna(False) | df_plot["_has_live_s2"].fillna(False)]
+                    .drop(columns=["_in_ind_efa"])
+                    .copy()
+                )
+                is_live_row = df_plot["_has_live_s2"].fillna(False)
                 for col_e in enrich_cols:
                     efa_col = f"{col_e}_efa"
                     if efa_col in df_plot.columns:
                         if col_e not in df_plot.columns:
-                            df_plot[col_e] = df_plot[efa_col]
+                            df_plot[col_e] = np.where(is_live_row, np.nan, df_plot[efa_col])
                         else:
-                            df_plot[col_e] = df_plot[col_e].where(df_plot[col_e].notna(), df_plot[efa_col])
+                            df_plot[col_e] = np.where(
+                                is_live_row,
+                                df_plot[col_e],
+                                df_plot[col_e].where(df_plot[col_e].notna(), df_plot[efa_col]),
+                            )
                         df_plot.drop(columns=[efa_col], inplace=True)
+                    elif is_live_row.any() and col_e in {"is_contour_outlier", "pct_asymmetry", "harmonic_roughness"}:
+                        # Do not apply stale leaf_id QC flags from prior runs to newly segmented leaves
+                        df_plot.loc[is_live_row, col_e] = np.nan
         except Exception as e_ind:
             logger.warning(f"Could not apply leaf_efa_harmonics_individual.csv filter: {e_ind}")
+
+    if "_has_live_s2" not in df_plot.columns:
+        df_plot["_has_live_s2"] = (
+            pd.to_numeric(df_plot["petiole_length_px"], errors="coerce").notna()
+            if "petiole_length_px" in df_plot.columns
+            else False
+        )
 
     # Also apply Step 03 leaf-level QC columns if directly present on df_plot
     if "is_contour_outlier" in df_plot.columns:
@@ -449,7 +483,7 @@ def generate_step02_publication_figures(
                 if "is_contour_outlier" in otu_df.columns:
                     otu_df = otu_df[~otu_df["is_contour_outlier"].apply(_parse_bool_val)]
                 retained_cats = set(otu_df["catalogNumber"].astype(str).str.strip())
-                df_plot = df_plot[df_plot["cat_str"].isin(retained_cats)].copy()
+                df_plot = df_plot[df_plot["cat_str"].isin(retained_cats) | df_plot["_has_live_s2"].fillna(False)].copy()
         except Exception as e_otu:
             logger.warning(f"Could not apply leaf_efa_harmonics.csv filter: {e_otu}")
 
@@ -472,10 +506,12 @@ def generate_step02_publication_figures(
                 else:
                     valid_mflag_cats = set(mf_df["cat_str"])
                 df_plot = df_plot[
-                    df_plot["cat_str"].isin(valid_mflag_cats) & (~df_plot["cat_str"].isin(misid_cats))
+                    (df_plot["cat_str"].isin(valid_mflag_cats) & (~df_plot["cat_str"].isin(misid_cats)))
+                    | df_plot["_has_live_s2"].fillna(False)
                 ].copy()
         except Exception as e_mf:
             logger.warning(f"Could not apply morphometric_flags.csv filter: {e_mf}")
+    df_plot.drop(columns=["_has_live_s2"], errors="ignore", inplace=True)
 
     if "misidentification_flag" in df_plot.columns:
         df_plot = df_plot[~df_plot["misidentification_flag"].apply(_parse_bool_val)].copy()
@@ -489,11 +525,21 @@ def generate_step02_publication_figures(
         df_plot["species_clean"] = df_plot["scientificName"].apply(_standardize_packera_species_py)
     elif "species_raw" in df_plot.columns and df_plot["species_raw"].notna().any():
         df_plot["species_clean"] = df_plot["species_raw"].apply(_standardize_packera_species_py)
-    elif cat_to_species:
-        df_plot["species_clean"] = df_plot["cat_str"].map(lambda c: cat_to_species.get(c, "")).replace("", np.nan)
+    else:
+        df_plot["species_clean"] = ""
+
+    if cat_to_species:
+        missing_sp = df_plot["species_clean"].isna() | df_plot["species_clean"].astype(str).str.strip().isin(
+            {"", "Unassigned_Packera"}
+        )
+        if missing_sp.any():
+            df_plot.loc[missing_sp, "species_clean"] = df_plot.loc[missing_sp, "cat_str"].map(
+                lambda c: cat_to_species.get(c, "")
+            )
+        df_plot["species_clean"] = df_plot["species_clean"].replace({"": np.nan, "Unassigned_Packera": np.nan})
         if df_plot["species_clean"].isna().any():
             df_plot = df_plot[df_plot["species_clean"].notna()].copy()
-    else:
+    elif (df_plot["species_clean"].isna() | (df_plot["species_clean"].astype(str).str.strip() == "")).all():
         # Fallback label when synthetic unit-test fixture lacks voucher metadata
         df_plot["species_clean"] = "Unassigned_Packera"
 
@@ -1114,9 +1160,45 @@ def generate_step02_publication_figures(
                 sp_all["area_val"] = pd.to_numeric(sp_all["blade_area_cm2"], errors="coerce").fillna(1.0)
             else:
                 sp_all["area_val"] = 1.0
+
+            is_cauline_zone = str(zone_label).strip().lower() == "cauline"
+            if is_cauline_zone and len(sp_all) > 0:
+                caul_conf = (
+                    pd.to_numeric(sp_all["leaf_zone_confidence"], errors="coerce").fillna(1.0)
+                    if "leaf_zone_confidence" in sp_all.columns
+                    else pd.Series(1.0, index=sp_all.index)
+                )
+                caul_dist = (
+                    pd.to_numeric(sp_all["dist_from_crown_norm"], errors="coerce").fillna(1.0)
+                    if "dist_from_crown_norm" in sp_all.columns
+                    else pd.Series(1.0, index=sp_all.index)
+                )
+                caul_pet_r = (
+                    pd.to_numeric(sp_all["petiole_to_blade_ratio"], errors="coerce").fillna(1.0)
+                    if "petiole_to_blade_ratio" in sp_all.columns
+                    else pd.Series(0.0, index=sp_all.index)
+                )
+                sp_caul_strict = sp_all[
+                    (caul_conf >= 0.62)
+                    & (caul_dist >= 0.35)
+                    & (
+                        (caul_pet_r <= 0.35)
+                        | ((sp_all["ar_val"] >= 3.0) & (sp_all["sol_val"] <= 0.83) & (caul_pet_r <= 0.75))
+                        | ((sp_all["sol_val"] <= 0.72) & (caul_pet_r <= 1.35))
+                    )
+                    & ((sp_all["ar_val"] >= 1.65) | (sp_all["sol_val"] <= 0.72))
+                    & (sp_all["sol_val"] <= 0.88)
+                ].copy()
+                if "petiole_length_px" in sp_caul_strict.columns:
+                    has_live_pet = pd.to_numeric(sp_caul_strict["petiole_length_px"], errors="coerce").notna()
+                    if int(has_live_pet.sum()) >= 4:
+                        sp_caul_strict = sp_caul_strict[has_live_pet].copy()
+                if len(sp_caul_strict) > 0:
+                    sp_all = sp_caul_strict
+
             sp_med_area = float(sp_all["area_val"].median()) if len(sp_all) > 0 else 1.0
             if len(sp_all) >= 8 and sp_med_area > 0:
-                sp_size_ok = sp_all[sp_all["area_val"] >= 0.35 * sp_med_area]
+                sp_size_ok = sp_all[sp_all["area_val"] >= (0.20 if is_cauline_zone else 0.35) * sp_med_area]
                 if len(sp_size_ok) >= 4:
                     sp_all = sp_size_ok.copy()
 
@@ -1145,9 +1227,9 @@ def generate_step02_publication_figures(
                 sp_hq = sp_all[
                     (sp_all["eff_ucs"] >= 0.78)
                     & (sp_all["sol_val"] >= 0.22)
-                    & (sp_all["sol_val"] < 0.65)
-                    & (sp_all["area_val"] >= 0.55 * sp_med_area)
-                    & (is_diss_col | (sp_all["sol_val"] < 0.65))
+                    & (sp_all["sol_val"] < (0.78 if is_cauline_zone else 0.65))
+                    & (sp_all["area_val"] >= (0.35 if is_cauline_zone else 0.55) * sp_med_area)
+                    & (is_diss_col | (sp_all["sol_val"] < (0.78 if is_cauline_zone else 0.65)))
                 ].copy()
                 if len(sp_hq) >= 4:
                     sp_hq["mask_valid"] = [
@@ -1158,9 +1240,27 @@ def generate_step02_publication_figures(
                     sp_hq = sp_all[
                         (sp_all["eff_ucs"] >= 0.75)
                         & (sp_all["sol_val"] >= 0.20)
-                        & (sp_all["sol_val"] < 0.68)
-                        & (is_diss_col | (sp_all["sol_val"] < 0.68))
+                        & (sp_all["sol_val"] < (0.80 if is_cauline_zone else 0.68))
+                        & (is_diss_col | (sp_all["sol_val"] < (0.80 if is_cauline_zone else 0.68)))
                     ].copy()
+                    sp_hq["mask_valid"] = [
+                        _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()
+                    ]
+                    sp_hq = sp_hq[sp_hq["mask_valid"].astype(bool)].sort_values("ar_val").copy()
+            elif is_cauline_zone:
+                sp_hq = sp_all[
+                    (
+                        (sp_all["eff_ucs"] >= 0.76)
+                        & (sp_all["sol_val"] >= 0.20)
+                        & (sp_all["sol_val"] < 0.82)
+                    )
+                    | (
+                        (sp_all["ucs_val"] >= 0.84)
+                        & (sp_all["ar_val"] >= 1.85)
+                        & (sp_all["sol_val"] < 0.995)
+                    )
+                ].copy()
+                if len(sp_hq) > 0:
                     sp_hq["mask_valid"] = [
                         _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()
                     ]
@@ -1171,15 +1271,15 @@ def generate_step02_publication_figures(
             if len(sp_hq) < 4:
                 sp_hq = sp_all[
                     (
-                        (sp_all["ucs_val"] >= 0.88)
-                        & (sp_all["sol_val"] >= 0.80)
+                        (sp_all["ucs_val"] >= (0.82 if is_cauline_zone else 0.88))
+                        & (sp_all["sol_val"] >= (0.20 if is_cauline_zone else 0.80))
                         & (sp_all["sol_val"] < 0.995)
                     )
                     | (
-                        is_dissected_cohort
-                        & (sp_all["eff_ucs"] >= 0.80)
+                        (is_dissected_cohort or is_cauline_zone)
+                        & (sp_all["eff_ucs"] >= 0.76)
                         & (sp_all["sol_val"] >= 0.18)
-                        & is_diss_col
+                        & (is_diss_col | (sp_all["sol_val"] < 0.80))
                     )
                 ].copy()
                 sp_hq["mask_valid"] = [
@@ -1220,10 +1320,10 @@ def generate_step02_publication_figures(
 
             type_candidates = (
                 sp_hq[sp_hq["is_type_bool"].astype(bool)]
-                if "is_type_bool" in sp_hq.columns
+                if ("is_type_bool" in sp_hq.columns and not is_cauline_zone)
                 else pd.DataFrame()
             )
-            if len(type_candidates) == 0 and not is_dissected_cohort and "is_type_bool" in sp_all.columns:
+            if len(type_candidates) == 0 and not is_dissected_cohort and not is_cauline_zone and "is_type_bool" in sp_all.columns:
                 type_candidates = sp_all[sp_all["is_type_bool"].astype(bool)]
 
             if len(type_candidates) > 0:
@@ -1275,6 +1375,7 @@ def generate_step02_publication_figures(
                 best_row = max(
                     win_unused,
                     key=lambda r: (
+                        -abs(float(r.get("q_rank", q_target)) - q_target) if len(win_df) == 0 else 0.0,
                         int(bool(r.get("is_gold_silver", False))),
                         int(bool(r.get("is_cal_bool", False))),
                         float(r.get("rep_score", r.get("qual_weight", 0.0))),
@@ -1284,6 +1385,12 @@ def generate_step02_publication_figures(
                 used_keys.add((str(best_row.get("cat_str", "")), int(best_row.get("leaf_id_int", 1))))
                 used_row_ids.add(best_row.name)
                 selected_rows.append(best_row)
+
+            valid_sel = sorted(
+                [r for r in selected_rows if r is not None],
+                key=lambda r: float(r.get("ar_val", 0.0)),
+            )
+            selected_rows = valid_sel + [None] * max(0, 4 - len(valid_sel))
 
             for c_idx in range(4):
                 ax_t = axes_b[row_idx, c_idx]
@@ -1332,51 +1439,126 @@ def generate_step02_publication_figures(
                             mask_img = ((lbls == best_l).astype(np.uint8)) * 255
 
                 if mask_img is not None and np.count_nonzero(mask_img) > 0:
-                    ys, xs = np.where(mask_img > 0)
+                    from leafmachine3.core.bilateral import apply_affine, oriented_affine
+                    from leafmachine3.core.imaging import crop_to_box, mask_bbox, rotate_image
+
                     pad = 14
-                    y0, y1 = max(0, int(ys.min()) - pad), min(mask_img.shape[0], int(ys.max()) + pad + 1)
-                    x0, x1 = max(0, int(xs.min()) - pad), min(mask_img.shape[1], int(xs.max()) + pad + 1)
-                    crop_m = (mask_img[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
+                    m_u8 = (mask_img > 0).astype(np.uint8) * 255
                     # Seal any tiny internal herbivory pinholes (< 2.5% of blade area) for clean silhouette rendering
-                    cnts_fill, hier_fill = cv2.findContours(crop_m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+                    cnts_fill, hier_fill = cv2.findContours(m_u8, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
                     if cnts_fill and hier_fill is not None:
-                        fg_cnt_px = float(np.count_nonzero(crop_m))
+                        fg_cnt_px = float(np.count_nonzero(m_u8))
                         for idx_h, c_h in enumerate(cnts_fill):
                             if int(hier_fill[0][idx_h][3]) != -1 and float(cv2.contourArea(c_h)) < 0.025 * fg_cnt_px:
-                                cv2.drawContours(crop_m, cnts_fill, idx_h, 255, thickness=cv2.FILLED)
-                    _, _, _, p_apex, p_base = compute_geometric_metrics(crop_m)
+                                cv2.drawContours(m_u8, cnts_fill, idx_h, 255, thickness=cv2.FILLED)
 
-                    if p_base is not None and p_apex is not None and p_base != p_apex:
-                        from leafmachine3.core.bilateral import apply_affine, oriented_affine
-                        from leafmachine3.core.imaging import crop_to_box, mask_bbox, rotate_image
-                        from leafmachine3.core.orientation import compute_orientation
+                    midrib_raw = row.get("midrib_angle_deg", np.nan)
+                    midrib_deg = (
+                        float(midrib_raw)
+                        if pd.notna(midrib_raw) and str(midrib_raw).strip() != ""
+                        else -90.0
+                    )
+                    signed_cw = -(midrib_deg + 90.0)
+                    angle_cw_m = 0.0 if abs(signed_cw) <= 0.25 else float(signed_cw % 360.0)
 
-                        ori_m = compute_orientation({
-                            "lamina_tip": (float(p_apex[0]), float(p_apex[1])),
-                            "lamina_base": (float(p_base[0]), float(p_base[1])),
-                        })
-                        if ori_m.success and ori_m.angle_cw is not None:
-                            angle_cw_m = float(ori_m.angle_cw)
-                            mat_m, _ = oriented_affine(crop_m.shape[:2], angle_cw_m)
-                            crop_m = rotate_image(crop_m, angle_cw_m, bg=0, nearest=True)
-                            rot_pts_m = apply_affine(
-                                mat_m,
-                                np.asarray(
-                                    [[float(p_base[0]), float(p_base[1])], [float(p_apex[0]), float(p_apex[1])]],
-                                    dtype=np.float64,
-                                ),
+                    cxy_loaded: Optional[np.ndarray] = None
+                    c_path_m = _resolve_asset_path(row.get("contour_path", ""), out_dir)
+                    if c_path_m is not None and c_path_m.exists():
+                        try:
+                            cdf_m = pd.read_csv(c_path_m)
+                            if {"x", "y"}.issubset(cdf_m.columns) and len(cdf_m) >= 3:
+                                cxy_loaded = cdf_m[["x", "y"]].to_numpy(dtype=np.float64)
+                        except Exception:
+                            cxy_loaded = None
+
+                    mat_m, _ = oriented_affine(m_u8.shape[:2], angle_cw_m)
+                    crop_m = rotate_image(m_u8, angle_cw_m, bg=0, nearest=True)
+
+                    rot_cxy: Optional[np.ndarray] = None
+                    if cxy_loaded is not None and len(cxy_loaded) >= 3:
+                        rot_rad = float(np.deg2rad(signed_cw))
+                        cos_r, sin_r = float(np.cos(rot_rad)), float(np.sin(rot_rad))
+                        c_mean = np.mean(cxy_loaded, axis=0)
+                        rel_c = cxy_loaded - c_mean
+                        unrot_xy = np.column_stack([
+                            cos_r * rel_c[:, 0] + sin_r * rel_c[:, 1] + c_mean[0],
+                            -sin_r * rel_c[:, 0] + cos_r * rel_c[:, 1] + c_mean[1],
+                        ])
+                        rot_cxy = apply_affine(mat_m, unrot_xy)
+
+                    bbox_m = mask_bbox(crop_m)
+                    if bbox_m is not None:
+                        rx0 = max(0, int(bbox_m[0]) - pad)
+                        ry0 = max(0, int(bbox_m[1]) - pad)
+                        rx1 = min(crop_m.shape[1], int(bbox_m[2]) + pad)
+                        ry1 = min(crop_m.shape[0], int(bbox_m[3]) + pad)
+                        crop_m = crop_to_box(crop_m, (rx0, ry0, rx1, ry1), pad=0)
+                        if rot_cxy is not None:
+                            rot_cxy = rot_cxy - np.asarray([[float(rx0), float(ry0)]], dtype=np.float64)
+
+                    ys_r, xs_r = np.where(crop_m > 0)
+                    x_med_r = float(np.median(xs_r)) if len(xs_r) > 0 else float(crop_m.shape[1] * 0.5)
+                    y_min_r = float(ys_r.min()) if len(ys_r) > 0 else 0.0
+                    y_max_r = float(ys_r.max()) if len(ys_r) > 0 else float(crop_m.shape[0] - 1)
+                    y_span_r = max(y_max_r - y_min_r, 1.0)
+                    x_span_r = max(float(xs_r.max() - xs_r.min()) if len(xs_r) > 0 else 1.0, 1.0)
+
+                    cnts_m, _ = cv2.findContours(crop_m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                    if cnts_m:
+                        cnt_pts = max(cnts_m, key=cv2.contourArea).reshape(-1, 2).astype(np.float64)
+                    else:
+                        cnt_pts = np.column_stack([xs_r, ys_r]).astype(np.float64)
+
+                    # Use cxy[0] snapped to crop_m boundary when it sits in a recessed cordate sinus on a broad undivided blade;
+                    # for dissected or elongate blades, anchor at the bottom of the upright rachis / petiole base on crop_m.
+                    p_base = None
+                    if (
+                        rot_cxy is not None
+                        and len(rot_cxy) >= 3
+                        and ar_v < 1.80
+                        and sol_v >= 0.80
+                    ):
+                        cand_bx, cand_by = float(rot_cxy[0, 0]), float(rot_cxy[0, 1])
+                        if (
+                            cand_by >= (y_max_r - 0.25 * y_span_r)
+                            and abs(cand_bx - x_med_r) <= 0.16 * x_span_r
+                        ):
+                            bot_cnt = cnt_pts[
+                                (cnt_pts[:, 1] >= y_max_r - 0.28 * y_span_r)
+                                & (np.abs(cnt_pts[:, 0] - x_med_r) <= 0.18 * x_span_r)
+                            ]
+                            if len(bot_cnt) > 0:
+                                d_sinus = np.hypot(bot_cnt[:, 0] - cand_bx, bot_cnt[:, 1] - cand_by)
+                                s_idx = int(np.argmin(d_sinus))
+                                p_base = (float(bot_cnt[s_idx, 0]), float(bot_cnt[s_idx, 1]))
+
+                    if p_base is None:
+                        bot_band = cnt_pts[cnt_pts[:, 1] >= (y_max_r - 0.06 * y_span_r)]
+                        if len(bot_band) > 0:
+                            x_bot_med = float(np.median(bot_band[:, 0]))
+                            b_idx = int(
+                                np.argmin(
+                                    (y_max_r - bot_band[:, 1])
+                                    + 0.75 * np.abs(bot_band[:, 0] - x_bot_med)
+                                )
                             )
-                            p_base = (float(rot_pts_m[0, 0]), float(rot_pts_m[0, 1]))
-                            p_apex = (float(rot_pts_m[1, 0]), float(rot_pts_m[1, 1]))
-                            bbox_m = mask_bbox(crop_m)
-                            if bbox_m is not None:
-                                rx0 = max(0, int(bbox_m[0]) - pad)
-                                ry0 = max(0, int(bbox_m[1]) - pad)
-                                rx1 = min(crop_m.shape[1], int(bbox_m[2]) + pad)
-                                ry1 = min(crop_m.shape[0], int(bbox_m[3]) + pad)
-                                crop_m = crop_to_box(crop_m, (rx0, ry0, rx1, ry1), pad=0)
-                                p_base = (float(p_base[0] - rx0), float(p_base[1] - ry0))
-                                p_apex = (float(p_apex[0] - rx0), float(p_apex[1] - ry0))
+                            p_base = (float(bot_band[b_idx, 0]), float(bot_band[b_idx, 1]))
+                        else:
+                            p_base = (x_med_r, y_max_r)
+
+                    upper_xs = xs_r[ys_r <= (y_min_r + 0.18 * y_span_r)]
+                    x_top_ref = float(np.median(upper_xs)) if len(upper_xs) > 0 else x_med_r
+                    top_band = cnt_pts[cnt_pts[:, 1] <= (y_min_r + 0.08 * y_span_r)]
+                    if len(top_band) > 0:
+                        a_idx = int(
+                            np.argmin(
+                                (top_band[:, 1] - y_min_r)
+                                + 1.15 * np.abs(top_band[:, 0] - x_top_ref)
+                            )
+                        )
+                        p_apex = (float(top_band[a_idx, 0]), float(top_band[a_idx, 1]))
+                    else:
+                        p_apex = (x_top_ref, y_min_r)
 
                     if render_mode == "ect_radial":
                         _ensure_ect_module_loaded()
@@ -1465,20 +1647,23 @@ def generate_step02_publication_figures(
                         )
                     else:
                         p_base_pt = pts_xy[0].copy()
-                        dists = np.hypot(pts_xy[:, 0] - p_base_pt[0], pts_xy[:, 1] - p_base_pt[1])
-                        p_apex_pt = pts_xy[int(np.argmax(dists))].copy()
-                        dx_pt = float(p_apex_pt[0] - p_base_pt[0])
-                        dy_pt = float(p_apex_pt[1] - p_base_pt[1])
-                        if np.hypot(dx_pt, dy_pt) > 1e-6:
-                            rot_rad = -(float(np.arctan2(dy_pt, dx_pt)) + 0.5 * np.pi)
-                            cos_r, sin_r = float(np.cos(rot_rad)), float(np.sin(rot_rad))
-                            rel_xy = pts_xy - p_base_pt
-                            pts_xy = np.column_stack([
-                                cos_r * rel_xy[:, 0] - sin_r * rel_xy[:, 1],
-                                sin_r * rel_xy[:, 0] + cos_r * rel_xy[:, 1],
-                            ])
-                            p_base_pt = pts_xy[0]
-                            p_apex_pt = pts_xy[int(np.argmax(dists))]
+                        y_min_pt = float(pts_xy[:, 1].min())
+                        y_span_pt = max(float(pts_xy[:, 1].max() - y_min_pt), 1.0)
+                        top_band_pt = np.where(pts_xy[:, 1] <= y_min_pt + 0.12 * y_span_pt)[0]
+                        if len(top_band_pt) > 0:
+                            apex_idx_pt = int(
+                                top_band_pt[
+                                    int(
+                                        np.argmin(
+                                            pts_xy[top_band_pt, 1]
+                                            + 0.45 * np.abs(pts_xy[top_band_pt, 0] - p_base_pt[0])
+                                        )
+                                    )
+                                ]
+                            )
+                        else:
+                            apex_idx_pt = int(np.argmin(pts_xy[:, 1]))
+                        p_apex_pt = pts_xy[apex_idx_pt].copy()
                         if render_mode == "ect_radial":
                             _ensure_ect_module_loaded()
                             from leafmachine3.core.ect_compute import compute_ect
@@ -1617,6 +1802,24 @@ def generate_step02_publication_figures(
                 saved_paths["fig02c_supplement_pdf"] = supp_c_pdf
                 saved_paths["fig02c_supplement_png"] = supp_c_png
 
+    # Export authentic LeafMachine3 radial ECT overlays for downstream Step 03 publication figures
+    try:
+        export_taxon_ect_exemplars(
+            extracted_df=df_plot,
+            figures_dir=out_dir,
+            zone="basal",
+            n_dirs=160,
+        )
+        if len(cauline_sp_list) > 0:
+            export_taxon_ect_exemplars(
+                extracted_df=df_plot,
+                figures_dir=out_dir,
+                zone="cauline",
+                n_dirs=160,
+            )
+    except Exception as e_ect:
+        logger.warning(f"Could not export taxon ECT exemplars: {e_ect}")
+
     logger.info(f"Step 02 publication figures exported to: {out_dir}")
     return saved_paths
 
@@ -1667,3 +1870,225 @@ def regenerate_step02_figures_from_tables(
         pheno_df=pheno_df,
         figures_dir=figures_dir,
     )
+
+
+def export_taxon_ect_exemplars(
+    extracted_df: Optional[pd.DataFrame] = None,
+    figures_dir: Union[str, Path] = "outputs/figures",
+    zone: str = "basal",
+    n_dirs: int = 160,
+    max_taxa: int = 9,
+    vouchers_csv: Optional[Union[str, Path]] = None,
+    tables_dir: Optional[Union[str, Path]] = None,
+    db_path: Optional[Union[str, Path]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Exports authentic LeafMachine3 radial ECT overlays (Chitwood polar pcolormesh + leaf contour)
+    for taxon medoid/exemplar leaves directly into `<figures_dir>/ect_overlays/<zone>_<taxon_slug>.png`,
+    accompanied by `<figures_dir>/ect_overlays/manifest_<zone>.json`.
+    """
+    fig_dir = Path(figures_dir).resolve()
+    overlays_dir = fig_dir / "ect_overlays"
+    overlays_dir.mkdir(parents=True, exist_ok=True)
+    zone_clean = str(zone).lower().strip()
+
+    # Load extracted_df if missing
+    if extracted_df is None or len(extracted_df) == 0:
+        cand_tables = []
+        if tables_dir is not None:
+            cand_tables.append(Path(tables_dir) / "extracted_leaf_manifest.csv")
+            cand_tables.append(Path(tables_dir) / "leaf_efa_harmonics_individual.csv")
+            cand_tables.append(Path(tables_dir) / "leaf_efa_harmonics.csv")
+        for base in (fig_dir.parent.parent / "data" / "tables", fig_dir.parent / "data" / "tables", PROJECT_ROOT / "data" / "tables"):
+            cand_tables.append(base / "extracted_leaf_manifest.csv")
+            cand_tables.append(base / "leaf_efa_harmonics_individual.csv")
+            cand_tables.append(base / "leaf_efa_harmonics.csv")
+        for ct in cand_tables:
+            if ct.exists() and ct.stat().st_size > 0:
+                try:
+                    extracted_df = pd.read_csv(ct, low_memory=False)
+                    break
+                except Exception:
+                    pass
+
+    if extracted_df is None or len(extracted_df) == 0:
+        logger.warning(f"export_taxon_ect_exemplars: No extracted leaf data found to export for zone '{zone_clean}'.")
+        return {}
+
+    df_work = extracted_df.copy()
+
+    # Map species_standardized from vouchers if missing or uninformative
+    has_sp = "species_standardized" in df_work.columns or "species_clean" in df_work.columns
+    if not has_sp and vouchers_csv is not None and Path(vouchers_csv).exists():
+        try:
+            v_df = pd.read_csv(vouchers_csv, dtype=str)
+            if "catalogNumber" in v_df.columns and "species_standardized" in v_df.columns:
+                v_map = dict(zip(v_df["catalogNumber"].astype(str).str.strip(), v_df["species_standardized"]))
+                df_work["species_standardized"] = df_work["catalogNumber"].astype(str).str.strip().map(v_map)
+        except Exception:
+            pass
+
+    if "species_clean" not in df_work.columns:
+        sp_src = df_work.get("species_standardized", df_work.get("scientificName", df_work.get("species_raw", df_work.get("taxon", ""))))
+        df_work["species_clean"] = sp_src.astype(str).apply(_standardize_packera_species_py)
+
+    # Normalize assigned_tier
+    t_col = df_work.get("assigned_tier", df_work.get("tier_assignment", df_work.get("tier", "Tier_1_Direct")))
+    is_t1 = t_col.astype(str).str.strip().str.lower().isin({
+        "tier_1_direct", "tier1", "tier 1", "tier 1 (dissected)", "tier 1 (bipinnatisect)"
+    })
+    df_t1 = df_work[is_t1].copy()
+    if len(df_t1) == 0:
+        df_t1 = df_work.copy()
+
+    # Filter by leaf_zone
+    if "leaf_zone" in df_t1.columns:
+        lz_norm = df_t1["leaf_zone"].astype(str).str.strip().str.lower()
+        if zone_clean == "cauline":
+            df_zone = df_t1[lz_norm == "cauline"].copy()
+        else:
+            df_zone = df_t1[lz_norm.isin({"basal", "", "nan", "none"})].copy()
+            if len(df_zone) == 0:
+                df_zone = df_t1.copy()
+    else:
+        df_zone = df_t1.copy()
+
+    # Rank taxa by abundance
+    sp_counts = df_zone["species_clean"].value_counts()
+    valid_sp = [s for s in sp_counts.index if s not in {"Unassigned_Packera", "Unknown", ""} and pd.notna(s)]
+    target_sp = valid_sp[:max_taxa]
+
+    _ensure_ect_module_loaded()
+    from leafmachine3.core.ect_compute import compute_ect
+    from leafmachine3.reporting.ect_viz import render_radial_ect_overlay, visual_log
+
+    manifest: Dict[str, Dict[str, Any]] = {}
+    for sp_name in target_sp:
+        sp_df = df_zone[df_zone["species_clean"] == sp_name]
+        if len(sp_df) == 0:
+            continue
+
+        # Exemplar selection (medoid)
+        has_ect_pcs = "ECT_PC1" in sp_df.columns and "ECT_PC2" in sp_df.columns
+        if has_ect_pcs:
+            pc1 = pd.to_numeric(sp_df["ECT_PC1"], errors="coerce")
+            pc2 = pd.to_numeric(sp_df["ECT_PC2"], errors="coerce")
+            valid_pcs = pc1.notna() & pc2.notna()
+        else:
+            valid_pcs = pd.Series(False, index=sp_df.index)
+
+        best_row = None
+        if valid_pcs.sum() >= 2:
+            sub_pc = sp_df[valid_pcs]
+            m_pc1 = sub_pc["ECT_PC1"].astype(float).mean()
+            m_pc2 = sub_pc["ECT_PC2"].astype(float).mean()
+            dist_pc = np.sqrt((sub_pc["ECT_PC1"].astype(float) - m_pc1)**2 + (sub_pc["ECT_PC2"].astype(float) - m_pc2)**2)
+            # Prioritize type specimen if within 1.5 * median distance
+            is_type_s = sub_pc["is_type_specimen"].apply(_parse_bool_val) if "is_type_specimen" in sub_pc.columns else pd.Series(False, index=sub_pc.index)
+            type_hits = sub_pc[is_type_s & (dist_pc <= 1.5 * dist_pc.median())]
+            if len(type_hits) > 0:
+                best_row = type_hits.iloc[0]
+            else:
+                best_row = sub_pc.loc[dist_pc.idxmin()]
+        else:
+            sol_s = pd.to_numeric(sp_df.get("solidity", sp_df.get("sol_val", 0.88)), errors="coerce").fillna(0.88)
+            ar_s = pd.to_numeric(sp_df.get("aspect_ratio", sp_df.get("ar_val", 2.10)), errors="coerce").fillna(2.10)
+            d_geom = (sol_s - sol_s.median())**2 + (ar_s - ar_s.median())**2
+            best_row = sp_df.loc[d_geom.idxmin()]
+
+        if best_row is None:
+            continue
+
+        cat_num = str(best_row.get("catalogNumber", "Unknown"))
+        leaf_id = int(best_row.get("leaf_id", 1)) if pd.notna(best_row.get("leaf_id", 1)) else 1
+        taxon_slug = re.sub(r"[^A-Za-z0-9_]+", "_", sp_name.lower())
+        out_png = overlays_dir / f"{zone_clean}_{taxon_slug}.png"
+
+        bgr_rendered = None
+        # Try loading existing pre-rendered radial overlay if valid
+        if out_png.exists() and out_png.stat().st_size > 1000:
+            bgr_rendered = cv2.imread(str(out_png))
+
+        if bgr_rendered is None:
+            mask_img = None
+            m_path_res = _resolve_asset_path(best_row.get("mask_path", ""), fig_dir)
+            if m_path_res is not None and m_path_res.exists():
+                mask_img = cv2.imread(str(m_path_res), cv2.IMREAD_GRAYSCALE)
+                if mask_img is not None and mask_img.ndim == 3:
+                    mask_img = mask_img[:, :, 0]
+            if mask_img is None or np.count_nonzero(mask_img) == 0:
+                # Fallback: check contour coordinates
+                c_path_res = _resolve_asset_path(best_row.get("contour_path", ""), fig_dir)
+                if c_path_res is not None and c_path_res.exists():
+                    try:
+                        c_df = pd.read_csv(c_path_res)
+                        pts = c_df[["x", "y"]].to_numpy(dtype=np.float32)
+                        if len(pts) >= 6:
+                            # Normalize into 400x400 canvas
+                            min_xy = pts.min(axis=0)
+                            span_xy = np.maximum(pts.max(axis=0) - min_xy, 1.0)
+                            scale_f = 340.0 / float(np.max(span_xy))
+                            norm_pts = ((pts - min_xy) * scale_f + 30.0).astype(np.int32)
+                            poly_m = np.zeros((400, 400), dtype=np.uint8)
+                            cv2.fillPoly(poly_m, [norm_pts], 255)
+                            mask_img = poly_m
+                    except Exception:
+                        pass
+
+            if mask_img is not None and np.count_nonzero(mask_img) > 0:
+                m_u8 = (mask_img > 0).astype(np.uint8) * 255
+                ect_res = compute_ect(m_u8, num_dirs=n_dirs, bound_radius=1.0, want_simple=True)
+                if ect_res is not None:
+                    bgr_rendered = render_radial_ect_overlay(
+                        visual_log(ect_res.ect_matrix),
+                        ect_res.thetas,
+                        ect_res.thresholds,
+                        ect_res.bound_radius,
+                        ect_res.outline_norm,
+                        cmap="viridis",
+                    )
+                    cv2.imwrite(str(out_png), bgr_rendered)
+
+        comp_val = best_row.get("ect_lobe_complexity", best_row.get("cauline_ect_lobe_complexity", np.nan))
+        comp_float = float(comp_val) if pd.notna(comp_val) else np.nan
+        manifest[sp_name] = {
+            "image_path": str(out_png),
+            "catalogNumber": cat_num,
+            "leaf_id": leaf_id,
+            "taxon": sp_name,
+            "taxon_slug": taxon_slug,
+            "is_type": bool(_parse_bool_val(best_row.get("is_type_specimen", False))),
+            "ect_lobe_complexity": round(comp_float, 4) if np.isfinite(comp_float) else None,
+            "aspect_ratio": round(float(best_row.get("aspect_ratio", np.nan)), 4) if pd.notna(best_row.get("aspect_ratio")) else None,
+            "solidity": round(float(best_row.get("solidity", np.nan)), 4) if pd.notna(best_row.get("solidity")) else None,
+        }
+
+    manifest_path = overlays_dir / f"manifest_{zone_clean}.json"
+    with open(manifest_path, "w", encoding="utf-8") as f_m:
+        json.dump(manifest, f_m, indent=2)
+
+    logger.info(f"Exported {len(manifest)} authentic LeafMachine3 radial ECT overlays to {overlays_dir}")
+    return manifest
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Step 02 Figures and LeafMachine3 ECT Exemplar Exporter")
+    parser.add_argument("--export-ect-exemplars", action="store_true", help="Export authentic LeafMachine3 radial ECT overlays for taxon exemplars")
+    parser.add_argument("--output-dir", type=str, default="outputs/figures", help="Output directory for figures/overlays")
+    parser.add_argument("--zone", type=str, default="all", choices=["basal", "cauline", "all"], help="Leaf zone (basal, cauline, or all)")
+    parser.add_argument("--vouchers-csv", type=str, default="", help="Path to curated_vouchers.csv")
+    parser.add_argument("--manifest-csv", type=str, default="", help="Path to extracted_leaf_manifest.csv")
+    parser.add_argument("--regenerate-figures-only", action="store_true", help="Regenerate Step 02 publication figures")
+    args = parser.parse_args()
+
+    if args.export_ect_exemplars:
+        out_fdir = Path(args.output_dir)
+        v_csv = args.vouchers_csv or None
+        zones = ["basal", "cauline"] if args.zone == "all" else [args.zone]
+        for z in zones:
+            export_taxon_ect_exemplars(figures_dir=out_fdir, zone=z, vouchers_csv=v_csv)
+    elif args.regenerate_figures_only:
+        regenerate_step02_figures_from_tables(output_dir=args.output_dir, vouchers_csv=args.vouchers_csv or None)
+
