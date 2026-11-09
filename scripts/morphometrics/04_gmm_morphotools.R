@@ -175,8 +175,9 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
     morpho_matrix_for_gmm <- Y_adj; morpho_df[valid_idx, sym_names] <- round(Y_adj, 6)
     all_sym_idx <- which(complete.cases(morpho_df[, sym_names]))
     proj_pcs <- scale(as.matrix(morpho_df[all_sym_idx, sym_names[active_cols], drop = FALSE]), center = pca_resids$center, scale = FALSE) %*% pca_resids$rotation
-    pc_allom_cols <- discover_sorted_morph_cols(morpho_df, "^PC[0-9]+$")
+    pc_allom_cols <- discover_sorted_morph_cols(morpho_df, "^PC[0-9]+$"); sym_allom_cols <- discover_sorted_morph_cols(morpho_df, "^Sym_PC[0-9]+$")
     for (p in seq_len(min(length(pc_allom_cols), ncol(proj_pcs)))) morpho_df[all_sym_idx, pc_allom_cols[p]] <- round(proj_pcs[, p], 6)
+    for (p in seq_len(min(length(sym_allom_cols), ncol(proj_pcs)))) morpho_df[all_sym_idx, sym_allom_cols[p]] <- round(proj_pcs[, p], 6)
   } else {
     message(sprintf("[INFO] Foliar allometry negligible (R2 = %.2f). Analyzing raw symmetric harmonics.", r2_size))
     morpho_matrix_for_gmm <- Y_all

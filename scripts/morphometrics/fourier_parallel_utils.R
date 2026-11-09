@@ -36,13 +36,10 @@ align_contour_horizontal_xax <- function(coo) {
     }
     return(coo)
   }
-  if (abs(c_xy[1L, 1L]) <= 0.20 * max(abs(c_xy[1L, 2L]), 1e-8) && abs(v_anchor[2L]) > abs(v_anchor[1L])) {
-    theta <- -sign(v_anchor[2L]) * (pi / 2.0)
-  } else if (abs(v_anchor[2L]) <= 0.05 * v_norm && v_anchor[1L] >= 0.0) {
+  if (abs(v_anchor[2L]) <= 1e-7 * v_norm && v_anchor[1L] >= 0.0) {
     return(coo)
-  } else {
-    theta <- -atan2(v_anchor[2L], v_anchor[1L])
   }
+  theta <- -atan2(v_anchor[2L], v_anchor[1L])
   cs_t <- cos(theta)
   sn_t <- sin(theta)
   rot_x <- c_xy[, 1L] * cs_t - c_xy[, 2L] * sn_t + cx

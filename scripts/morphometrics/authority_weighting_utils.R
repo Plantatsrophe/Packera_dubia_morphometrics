@@ -1160,6 +1160,7 @@ compute_weighted_shrinkage_cda_loocv <- function(X_a, y_a, w_a = NULL, active_ma
   denom_w <- max(sum(w_a) - w_corr_sum, 1.0)
   S_w <- W_mat / denom_w
   S_reg <- compute_ledoit_wolf_cov(S_w, X_centered = X_c, n_obs = N_a, weights = w_a)
+  lw_lambda <- if (!is.null(attr(S_reg, "shrinkage_lambda"))) as.numeric(attr(S_reg, "shrinkage_lambda")) else 0.0
   if (is.list(S_reg) && !is.null(S_reg$S_reg)) S_reg <- S_reg$S_reg
   S_inv <- tryCatch(solve(S_reg), error = function(e) diag(1.0 / pmax(diag(S_reg), 1e-6), nrow = p, ncol = p))
 
@@ -1176,6 +1177,16 @@ compute_weighted_shrinkage_cda_loocv <- function(X_a, y_a, w_a = NULL, active_ma
     }
     diff_i <- sweep(mu_k_loo, 2L, X_a[i, ], "-")
     d2_raw_i <- rowSums((diff_i %*% S_inv) * diff_i)
+    if (W_k > w_i + 1e-8 && lw_lambda < 0.999) {
+      delta_i <- X_c[i, ]
+      c_i <- (1.0 - lw_lambda) * (w_i * W_k) / ((W_k - w_i) * denom_w)
+      v_i <- as.vector(S_inv %*% delta_i)
+      denom_sm <- 1.0 - c_i * sum(delta_i * v_i)
+      if (is.finite(denom_sm) && denom_sm > 0.10) {
+        proj_i <- as.vector(diff_i %*% v_i)
+        d2_raw_i <- pmax(0.0, d2_raw_i + (c_i * (proj_i^2)) / denom_sm)
+      }
+    }
     ll_i <- -0.5 * d2_raw_i + log(priors) + geo_ll_mat[i, ]
     pred_loo[i] <- g_levels[which.max(ll_i)]
   }
@@ -2808,6 +2819,12 @@ apply_hierarchical_population_deme_shrinkage <- function(
 
   X_work <- as.matrix(df[, feature_cols, drop = FALSE])
   storage.mode(X_work) <- "double"
+  col_mad_floors <- vapply(seq_along(feature_cols), function(j) {
+    vj <- X_work[, j]
+    vj <- vj[is.finite(vj)]
+    if (length(vj) < 2L) return(0.05)
+    min(0.35, max(0.25 * stats::sd(vj), 0.35 * stats::mad(vj), 1e-4))
+  }, numeric(1L))
   n_eff <- n_i
 
   # Level 2: Within-Sheet / Same-Gathering Shrinkage
@@ -2830,7 +2847,7 @@ apply_hierarchical_population_deme_shrinkage <- function(
       if (length(ref_j) < 1L) next
       if (length(ref_j) >= 3L) {
         med_g <- stats::median(X_work[ref_j, col_j], na.rm = TRUE)
-        mad_g <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), 0.35)
+        mad_g <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), col_mad_floors[col_j])
         inl_g <- ref_j[abs(X_work[ref_j, col_j] - med_g) <= 4.0 * mad_g]
         if (length(inl_g) >= 2L) ref_j <- inl_g
       }
@@ -2843,7 +2860,7 @@ apply_hierarchical_population_deme_shrinkage <- function(
         if (is_type[ii]) lam_sheet <- min(lam_sheet, 0.15)
         if (length(ref_j) >= 2L) {
           med_g <- stats::median(X_work[ref_j, col_j], na.rm = TRUE)
-          mad_g <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), 0.35)
+          mad_g <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), col_mad_floors[col_j])
           if (abs(X_work[ii, col_j] - med_g) > 4.5 * mad_g) lam_sheet <- 0.0
         }
         X_work[ii, col_j] <- (1.0 - lam_sheet) * X_work[ii, col_j] + lam_sheet * x_bar_g
@@ -2933,13 +2950,13 @@ apply_hierarchical_population_deme_shrinkage <- function(
         ref_j <- ref_pool_d[is.finite(X_work[ref_pool_d, col_j])]
         if (length(ref_j) < 1L) next
         med_d <- stats::median(X_work[ref_j, col_j], na.rm = TRUE)
-        mad_d <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), 0.35)
+        mad_d <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), col_mad_floors[col_j])
         if (length(ref_j) >= 3L) {
           inl_d <- ref_j[abs(X_work[ref_j, col_j] - med_d) <= 4.0 * mad_d]
           if (length(inl_d) >= 2L) {
             ref_j <- inl_d
             med_d <- stats::median(X_work[ref_j, col_j], na.rm = TRUE)
-            mad_d <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), 0.35)
+            mad_d <- max(stats::mad(X_work[ref_j, col_j], na.rm = TRUE), col_mad_floors[col_j])
           }
         }
         w_ref <- w_deme_all[as.character(ref_j)]
