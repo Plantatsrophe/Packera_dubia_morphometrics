@@ -306,6 +306,7 @@ def _build_native_lm3_crop_masks(
                 combined_bridge = all_leaf_comps | dilated_pet_bridge
                 _, br_lbls = cv2.connectedComponents(combined_bridge.astype(np.uint8), connectivity=8)
                 primary_br_ids = set(np.unique(br_lbls[leaf_primary]).tolist()) - {0}
+                any_pinna_bridged = False
                 for comp_mask in cand_pinna_masks:
                     if int(comp_mask.sum()) < 64 or np.any(comp_mask & leaf_primary):
                         continue
@@ -314,6 +315,23 @@ def _build_native_lm3_crop_masks(
                     comp_br_ids = set(np.unique(br_lbls[comp_mask]).tolist()) - {0}
                     if primary_br_ids & comp_br_ids:
                         leaf_mask_bool |= comp_mask
+                        any_pinna_bridged = True
+                if any_pinna_bridged:
+                    pinna_ys, pinna_xs = np.where(leaf_mask_bool)
+                    if len(pinna_xs) >= 3:
+                        hull_pts = cv2.convexHull(
+                            np.column_stack((pinna_xs, pinna_ys)).astype(np.int32)
+                        )
+                        pinna_hull_u8 = np.zeros((crop_h, crop_w), dtype=np.uint8)
+                        cv2.fillConvexPoly(pinna_hull_u8, hull_pts, 1)
+                        rachis_bridge = dilated_pet_bridge & (pinna_hull_u8 > 0)
+                        leaf_mask_bool |= rachis_bridge
+                        if petiole_crop_mask is not None:
+                            petiole_crop_mask = np.where(
+                                (petiole_crop_mask > 0) & (~(pinna_hull_u8 > 0)),
+                                255,
+                                0,
+                            ).astype(np.uint8)
 
     silhouette_bool = np.zeros((crop_h, crop_w), dtype=bool)
     for poly_l in _outer_polygons(leaf_mask_bool):
@@ -1067,6 +1085,8 @@ class SegmentAndExtractPipeline:
                     all_crop_pose_preds = [None] * len(candidate_s1_crops)
                     p_idxs: List[int] = []
                     p_crops: List[np.ndarray] = []
+                    p_lamina_masks: List[Optional[np.ndarray]] = []
+                    p_petiole_masks: List[Optional[np.ndarray]] = []
                     for idx_c, (c_item, c_preds) in enumerate(zip(candidate_s1_crops, all_crop_preds)):
                         if not c_preds:
                             continue
@@ -1075,15 +1095,23 @@ class SegmentAndExtractPipeline:
                             for _pb, pm_u8, _p_sc, p_cls in c_preds
                         )
                         if has_leaf_cand:
+                            _bm_c, _, _pm_c, _ = _build_native_lm3_crop_masks(
+                                c_preds,
+                                c_item[3].shape[:2],
+                                is_high_dpi=is_high_dpi,
+                                min_leaf_area=0,
+                            )
                             p_idxs.append(idx_c)
                             p_crops.append(c_item[3])
+                            p_lamina_masks.append(_bm_c)
+                            p_petiole_masks.append(_pm_c)
                     if p_crops:
                         for idx_c, p_res in zip(
                             p_idxs,
                             self.pose_engine.predict_batch(
                                 p_crops,
-                                lamina_masks=None,
-                                petiole_masks=None,
+                                lamina_masks=p_lamina_masks,
+                                petiole_masks=p_petiole_masks,
                                 batch_size=max(8, self.stage2_batch_size),
                             ),
                         ):
@@ -1158,12 +1186,35 @@ class SegmentAndExtractPipeline:
                 ):
                     try:
                         pose_res = self.pose_engine.predict_landmarks(
-                            crop_bgr, lamina_mask=None, petiole_mask=None
+                            crop_bgr, lamina_mask=best_mask, petiole_mask=best_petiole_mask
                         )
                         keypoints_31_crop = pose_res.keypoints_31 or None
                         petiole_width_px_crop = pose_res.petiole_width_px
                     except Exception:
                         keypoints_31_crop = None
+                if (
+                    isinstance(keypoints_31_crop, dict)
+                    and best_petiole_mask is not None
+                    and np.any(best_petiole_mask > 0)
+                    and "lamina_base" in keypoints_31_crop
+                    and "lamina_tip" in keypoints_31_crop
+                ):
+                    _pys_c, _pxs_c = np.where(best_petiole_mask > 0)
+                    _pcx_c, _pcy_c = float(np.mean(_pxs_c)), float(np.mean(_pys_c))
+                    _lb_c = keypoints_31_crop["lamina_base"]
+                    _lt_c = keypoints_31_crop["lamina_tip"]
+                    if math.hypot(float(_lt_c[0]) - _pcx_c, float(_lt_c[1]) - _pcy_c) < math.hypot(
+                        float(_lb_c[0]) - _pcx_c, float(_lb_c[1]) - _pcy_c
+                    ):
+                        keypoints_31_crop = dict(keypoints_31_crop)
+                        keypoints_31_crop["lamina_base"], keypoints_31_crop["lamina_tip"] = _lt_c, _lb_c
+                        if "base_2" in keypoints_31_crop or "apex_2" in keypoints_31_crop:
+                            keypoints_31_crop["base_2"] = _lt_c
+                            keypoints_31_crop["apex_2"] = _lb_c
+                        _mv_c = [keypoints_31_crop[f"midvein_{_i}"] for _i in range(1, 16) if f"midvein_{_i}" in keypoints_31_crop]
+                        if len(_mv_c) == 15:
+                            for _i, _mv_v in enumerate(reversed(_mv_c), start=1):
+                                keypoints_31_crop[f"midvein_{_i}"] = _mv_v
 
                 cy0, cx0, cy1, cx1 = crop_box
                 m_raw = best_mask
@@ -1621,6 +1672,20 @@ class SegmentAndExtractPipeline:
                 midrib_ang_use = float(
                     math.degrees(math.atan2(p_apex_use[1] - p_base_use[1], p_apex_use[0] - p_base_use[0]))
                 )
+            elif (
+                isinstance(inst.keypoints_31, dict)
+                and "lamina_base" in inst.keypoints_31
+                and "lamina_tip" in inst.keypoints_31
+                and len(inst.keypoints_31["lamina_base"]) >= 2
+                and len(inst.keypoints_31["lamina_tip"]) >= 2
+            ):
+                _lb_inst = inst.keypoints_31["lamina_base"]
+                _lt_inst = inst.keypoints_31["lamina_tip"]
+                p_base_use = (int(round(float(_lb_inst[0]))), int(round(float(_lb_inst[1]))))
+                p_apex_use = (int(round(float(_lt_inst[0]))), int(round(float(_lt_inst[1]))))
+                midrib_ang_use = float(
+                    math.degrees(math.atan2(float(_lt_inst[1]) - float(_lb_inst[1]), float(_lt_inst[0]) - float(_lb_inst[0])))
+                )
             else:
                 p_base_use = raw_pb
                 p_apex_use = raw_pa
@@ -1639,33 +1704,13 @@ class SegmentAndExtractPipeline:
                 p_base=p_base_use,
                 p_apex=p_apex_use,
                 offset_xy=(0, 0),
+                hole_mask=inst.hole_mask,
+                petiole_mask=inst.petiole_mask,
             )
-            lm3_bm_geom = (
-                orient_and_score_leaf_lm3(
-                    inst.mask,
-                    keypoints_31=None,
-                    p_base=raw_pb,
-                    p_apex=raw_pa,
-                    offset_xy=(0, 0),
-                )
-                if inst.keypoints_31 is not None
-                else lm3_bm_raw
-            )
-            inst.archetype_score = float(
-                min(
-                    float(lm3_bm_raw.get("archetype_score", 0.0)),
-                    float(lm3_bm_geom.get("archetype_score", 0.0)),
-                )
-            )
-            _raw_b_dice = min(
-                float(lm3_bm_raw.get("bilateral_dice", 1.0)),
-                float(lm3_bm_geom.get("bilateral_dice", 1.0)),
-            )
-            _raw_si_a = max(
-                abs(float(lm3_bm_raw.get("si_a", 0.0))),
-                abs(float(lm3_bm_geom.get("si_a", 0.0))),
-            )
-            _raw_sym_ok = bool(lm3_bm_raw.get("success", False) or lm3_bm_geom.get("success", False))
+            inst.archetype_score = float(lm3_bm_raw.get("archetype_score", 0.0))
+            _raw_b_dice = float(lm3_bm_raw.get("bilateral_dice", 1.0))
+            _raw_si_a = abs(float(lm3_bm_raw.get("si_a", 0.0)))
+            _raw_sym_ok = bool(lm3_bm_raw.get("success", False))
 
             is_dissected = bool(inst.solidity < self.min_solidity and is_botanical_dissection(inst.mask))
             _min_sym_dice = 0.45 if is_dissected else 0.70
@@ -1842,26 +1887,19 @@ class SegmentAndExtractPipeline:
                     mask_for_contour = (mask_proc > 0).astype(np.uint8) * 255
                 p_base_pt = routing_res.metadata.get("p_base")
                 p_apex_pt = routing_res.metadata.get("p_apex")
-                if (
-                    p_base_pt is None
-                    or p_base_pt == (0, 0)
-                    or inst.petiole_mask is not None
-                ):
-                    _, _, _, _pa_lam, _pb_lam = compute_geometric_metrics(mask_for_contour)
-                    if p_base_pt is None or p_base_pt == (0, 0):
-                        p_base_pt = _pb_lam
-                        p_apex_pt = _pa_lam
-                    elif inst.petiole_mask is not None:
-                        _cnts_lam, _ = cv2.findContours(
-                            mask_for_contour, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
-                        )
-                        if _cnts_lam:
-                            _c_lam = max(_cnts_lam, key=cv2.contourArea).reshape(-1, 2)
-                            _d_lam = np.linalg.norm(_c_lam - np.asarray(p_base_pt, dtype=np.float64), axis=1)
-                            _nearest_pt = _c_lam[int(np.argmin(_d_lam))]
-                            p_base_pt = (int(_nearest_pt[0]), int(_nearest_pt[1]))
-                        if p_apex_pt is None or p_apex_pt == (0, 0):
-                            p_apex_pt = _pa_lam
+                if p_base_pt is None or p_base_pt == (0, 0):
+                    _, _, _, _pa_lam, _pb_lam = compute_geometric_metrics(mask_for_contour, rosette_centroid=rc_local)
+                    p_base_pt = _pb_lam
+                    p_apex_pt = _pa_lam
+                elif inst.petiole_mask is not None:
+                    _cnts_lam, _ = cv2.findContours(
+                        mask_for_contour, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+                    )
+                    if _cnts_lam:
+                        _c_lam = max(_cnts_lam, key=cv2.contourArea).reshape(-1, 2)
+                        _d_lam = np.linalg.norm(_c_lam - np.asarray(p_base_pt, dtype=np.float64), axis=1)
+                        _nearest_pt = _c_lam[int(np.argmin(_d_lam))]
+                        p_base_pt = (int(_nearest_pt[0]), int(_nearest_pt[1]))
 
                 angle_cw: Optional[float] = None
                 if isinstance(inst.keypoints_31, dict):

@@ -133,7 +133,13 @@ def _extract_canonical_binomial(
     return f"{genus} {epithet}"
 
 
-_DYNAMIC_SYNONYM_TO_CANONICAL: Dict[str, str] = {}
+_DYNAMIC_SYNONYM_TO_CANONICAL: Dict[str, str] = {
+    "packera dubia": "Packera dubia",
+    "packera tomentosa": "Packera dubia",
+    "senecio tomentosus": "Packera dubia",
+    "cineraria tomentosa": "Packera dubia",
+    "senecio dubius": "Packera dubia",
+}
 for _cfg_canon, _cfg_syns in (_DEFAULT_CONFIG.taxa.synonyms or {}).items():
     _canon_norm = _extract_canonical_binomial(_cfg_canon, {"Packera"}) or _cfg_canon.strip()
     if _canon_norm:
@@ -159,14 +165,10 @@ def _hydrate_synonyms_from_sqlite(db_path: Optional[Union[str, Path]] = None) ->
                 for raw_low, canon in load_taxon_synonyms(conn).items():
                     if not raw_low or not canon:
                         continue
-                    raw_p_bin = _extract_canonical_binomial(raw_low, {"Packera"})
-                    if (
-                        raw_p_bin
-                        and raw_p_bin.lower() != canon.lower()
-                        and not re.search(r"\b(?:var|subsp|ssp|f)\b", raw_low)
-                    ):
-                        continue
                     _DYNAMIC_SYNONYM_TO_CANONICAL.setdefault(raw_low, canon)
+                    raw_bin = _extract_canonical_binomial(raw_low, _SYNONYM_GENERA)
+                    if raw_bin:
+                        _DYNAMIC_SYNONYM_TO_CANONICAL.setdefault(raw_bin.lower(), canon)
             finally:
                 conn.close()
     except Exception:
@@ -196,7 +198,7 @@ def _register_dynamic_synonyms(
     canonical_packera: str,
     synonyms: Iterable[Any],
     author_strings: Optional[Iterable[str]] = None,
-    allow_packera_species_remap: bool = False,
+    allow_packera_species_remap: bool = True,
 ) -> None:
     """Register discovered synonyms and author strings in the in-memory standardization cache."""
     if not canonical_packera or not canonical_packera.startswith("Packera "):
@@ -647,7 +649,7 @@ def expand_taxon_synonyms_gbif(
     if canonical_packera and canonical_packera.startswith("Packera "):
         if cfg_group_matched:
             _register_dynamic_synonyms(canonical_packera, cfg_group_matched, None, allow_packera_species_remap=True)
-        _register_dynamic_synonyms(canonical_packera, expanded, gbif_author_names, allow_packera_species_remap=False)
+        _register_dynamic_synonyms(canonical_packera, expanded, gbif_author_names, allow_packera_species_remap=True)
         _persist_dynamic_synonyms_for_taxon(canonical_packera)
 
     return expanded

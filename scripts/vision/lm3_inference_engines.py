@@ -1956,7 +1956,28 @@ class LM3PoseLandmarkEngine:
             else:
                 base_pt, tip_pt = p_max, p_min
         else:
-            if p_min[1] >= p_max[1]:
+            dt_fb = cv2.distanceTransform((mask_use > 0).astype(np.uint8), cv2.DIST_L2, 5)
+            h_fb, w_fb = dt_fb.shape[:2]
+            span_fb = float(np.linalg.norm(p_max - p_min))
+            win_fb = max(2, min(6, int(round(0.015 * span_fb))))
+            r_min_vals: List[float] = []
+            r_max_vals: List[float] = []
+            for frac_fb in (0.01, 0.02, 0.03, 0.04, 0.05):
+                pt_a = p_min + frac_fb * (p_max - p_min)
+                pt_b = p_max + frac_fb * (p_min - p_max)
+                xa, ya = int(round(pt_a[0])), int(round(pt_a[1]))
+                xb, yb = int(round(pt_b[0])), int(round(pt_b[1]))
+                pa = dt_fb[max(0, ya - win_fb) : min(h_fb, ya + win_fb + 1), max(0, xa - win_fb) : min(w_fb, xa + win_fb + 1)]
+                pb = dt_fb[max(0, yb - win_fb) : min(h_fb, yb + win_fb + 1), max(0, xb - win_fb) : min(w_fb, xb + win_fb + 1)]
+                if pa.size > 0:
+                    r_min_vals.append(float(np.max(pa)))
+                if pb.size > 0:
+                    r_max_vals.append(float(np.max(pb)))
+            r_min_m = float(np.mean(r_min_vals)) if r_min_vals else 0.0
+            r_max_m = float(np.mean(r_max_vals)) if r_max_vals else 0.0
+            if abs(r_min_m - r_max_m) > 0.35:
+                base_pt, tip_pt = (p_min, p_max) if r_min_m < r_max_m else (p_max, p_min)
+            elif p_min[1] >= p_max[1]:
                 base_pt, tip_pt = p_min, p_max
             else:
                 base_pt, tip_pt = p_max, p_min
@@ -2408,8 +2429,15 @@ def _extract_native_lm3_petiole_anchor(
             min_idx = int(np.argmin(dists_to_pet))
             min_dist = float(dists_to_pet[min_idx])
             if min_dist <= max(28.0, 0.30 * float(max(bw_l, bh_l))):
+                pet_junction = (int(leaf_pts[min_idx, 0]), int(leaf_pts[min_idx, 1]))
                 if p_base_crop is None:
-                    p_base_crop = (int(leaf_pts[min_idx, 0]), int(leaf_pts[min_idx, 1]))
+                    p_base_crop = pet_junction
+                elif p_apex_crop is not None:
+                    d_base_pet = math.hypot(p_base_crop[0] - pet_junction[0], p_base_crop[1] - pet_junction[1])
+                    d_apex_pet = math.hypot(p_apex_crop[0] - pet_junction[0], p_apex_crop[1] - pet_junction[1])
+                    if d_apex_pet < d_base_pet:
+                        p_base_crop = pet_junction
+                        p_apex_crop = None
                 used_native_lm3 = True
                 cnts_p, _ = cv2.findContours(
                     pet_u8[by_p : by_p + bh_p, bx_p : bx_p + bw_p],
@@ -2683,6 +2711,27 @@ def orient_and_score_leaf_lm3(
     if p_apex is not None and "lamina_tip" not in pts_2d:
         pts_2d["lamina_tip"] = (float(p_apex[0]) - float(offset_xy[0]), float(p_apex[1]) - float(offset_xy[1]))
 
+    if (
+        petiole_mask is not None
+        and petiole_mask.size > 0
+        and int(np.count_nonzero(petiole_mask)) > 0
+        and "lamina_base" in pts_2d
+        and "lamina_tip" in pts_2d
+    ):
+        pys, pxs = np.where(petiole_mask > 0)
+        pet_cx, pet_cy = float(np.mean(pxs)), float(np.mean(pys))
+        lb_pt = pts_2d["lamina_base"]
+        lt_pt = pts_2d["lamina_tip"]
+        if math.hypot(lt_pt[0] - pet_cx, lt_pt[1] - pet_cy) < math.hypot(lb_pt[0] - pet_cx, lb_pt[1] - pet_cy):
+            pts_2d["lamina_base"], pts_2d["lamina_tip"] = lt_pt, lb_pt
+            if "base_center" in pts_2d or "apex_center" in pts_2d:
+                pts_2d["base_center"] = pts_2d["lamina_base"]
+                pts_2d["apex_center"] = pts_2d["lamina_tip"]
+            mv_pts = [pts_2d[f"midvein_{i}"] for i in range(15) if f"midvein_{i}" in pts_2d]
+            if len(mv_pts) == 15:
+                for i, mpt in enumerate(reversed(mv_pts)):
+                    pts_2d[f"midvein_{i}"] = mpt
+
     # Populate synthetic midvein_0..14 along p_apex -> p_base if pose keypoints were not supplied
     if "lamina_tip" in pts_2d and "lamina_base" in pts_2d and "midvein_0" not in pts_2d:
         tx, ty = pts_2d["lamina_tip"]
@@ -2698,24 +2747,47 @@ def orient_and_score_leaf_lm3(
 
         ori = compute_orientation(pts_2d)
         angle_cw = float(ori.angle_cw) if (ori.success and ori.angle_cw is not None) else 0.0
+        signed_cw = ((angle_cw + 180.0) % 360.0) - 180.0
+        if abs(signed_cw) <= 0.25:
+            angle_cw = 0.0
         method = str(ori.method) if ori.success else "fallback"
 
         mask_u8 = ((lamina_mask > 0).astype(np.uint8)) * 255
         orig_h, orig_w = int(mask_u8.shape[0]), int(mask_u8.shape[1])
-        mat, (nh, nw) = oriented_affine((orig_h, orig_w), angle_cw)
-        rot_mask = rotate_image(mask_u8, angle_cw, bg=0, nearest=True)
+        if angle_cw == 0.0:
+            mat = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
+            nh, nw = orig_h, orig_w
+            rot_mask = mask_u8.copy()
+            rot_hole = (
+                (((hole_mask > 0).astype(np.uint8)) * 255)
+                if (hole_mask is not None and hole_mask.size > 0 and hole_mask.shape[:2] == (orig_h, orig_w))
+                else None
+            )
+            rot_petiole = (
+                (((petiole_mask > 0).astype(np.uint8)) * 255)
+                if (petiole_mask is not None and petiole_mask.size > 0 and petiole_mask.shape[:2] == (orig_h, orig_w))
+                else None
+            )
+            rot_bgr = (
+                crop_bgr.copy()
+                if (crop_bgr is not None and crop_bgr.size > 0 and crop_bgr.shape[:2] == (orig_h, orig_w))
+                else None
+            )
+        else:
+            mat, (nh, nw) = oriented_affine((orig_h, orig_w), angle_cw)
+            rot_mask = rotate_image(mask_u8, angle_cw, bg=0, nearest=True)
 
-        rot_hole: Optional[np.ndarray] = None
-        if hole_mask is not None and hole_mask.size > 0 and hole_mask.shape[:2] == (orig_h, orig_w):
-            rot_hole = rotate_image(((hole_mask > 0).astype(np.uint8)) * 255, angle_cw, bg=0, nearest=True)
+            rot_hole = None
+            if hole_mask is not None and hole_mask.size > 0 and hole_mask.shape[:2] == (orig_h, orig_w):
+                rot_hole = rotate_image(((hole_mask > 0).astype(np.uint8)) * 255, angle_cw, bg=0, nearest=True)
 
-        rot_petiole: Optional[np.ndarray] = None
-        if petiole_mask is not None and petiole_mask.size > 0 and petiole_mask.shape[:2] == (orig_h, orig_w):
-            rot_petiole = rotate_image(((petiole_mask > 0).astype(np.uint8)) * 255, angle_cw, bg=0, nearest=True)
+            rot_petiole = None
+            if petiole_mask is not None and petiole_mask.size > 0 and petiole_mask.shape[:2] == (orig_h, orig_w):
+                rot_petiole = rotate_image(((petiole_mask > 0).astype(np.uint8)) * 255, angle_cw, bg=0, nearest=True)
 
-        rot_bgr: Optional[np.ndarray] = None
-        if crop_bgr is not None and crop_bgr.size > 0 and crop_bgr.shape[:2] == (orig_h, orig_w):
-            rot_bgr = rotate_image(crop_bgr, angle_cw, bg=0, nearest=False)
+            rot_bgr = None
+            if crop_bgr is not None and crop_bgr.size > 0 and crop_bgr.shape[:2] == (orig_h, orig_w):
+                rot_bgr = rotate_image(crop_bgr, angle_cw, bg=0, nearest=False)
 
         pt_keys = list(pts_2d.keys())
         if pt_keys:

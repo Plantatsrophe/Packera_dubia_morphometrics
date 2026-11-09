@@ -378,12 +378,15 @@ def generate_step02_publication_figures(
                     ind_df = ind_df[ind_tier.isin({"tier_1_direct", "tier1", "tier 1"})]
                 if "is_contour_outlier" in ind_df.columns:
                     ind_df = ind_df[~ind_df["is_contour_outlier"].apply(_parse_bool_val)]
+                ind_sol_col = pd.to_numeric(ind_df["solidity"], errors="coerce") if "solidity" in ind_df.columns else pd.Series(0.85, index=ind_df.index)
+                ind_is_diss = ind_sol_col < 0.72
                 if "pct_asymmetry" in ind_df.columns:
                     ind_asym = pd.to_numeric(ind_df["pct_asymmetry"], errors="coerce")
-                    ind_df = ind_df[ind_asym.isna() | (ind_asym <= 0.22)]
+                    ind_df = ind_df[ind_asym.isna() | (ind_asym <= np.where(ind_is_diss, 0.42, 0.22))]
+                    ind_is_diss = ind_is_diss.loc[ind_df.index]
                 if "harmonic_roughness" in ind_df.columns:
                     ind_hr = pd.to_numeric(ind_df["harmonic_roughness"], errors="coerce")
-                    ind_df = ind_df[ind_hr.isna() | (ind_hr <= 0.22)]
+                    ind_df = ind_df[ind_hr.isna() | (ind_hr <= np.where(ind_is_diss, 0.65, 0.22))]
 
                 enrich_cols = [
                     c for c in (
@@ -424,12 +427,15 @@ def generate_step02_publication_figures(
     # Also apply Step 03 leaf-level QC columns if directly present on df_plot
     if "is_contour_outlier" in df_plot.columns:
         df_plot = df_plot[~df_plot["is_contour_outlier"].apply(_parse_bool_val)].copy()
+    plot_sol_s = pd.to_numeric(df_plot["solidity"], errors="coerce") if "solidity" in df_plot.columns else pd.Series(0.85, index=df_plot.index)
+    plot_is_diss = plot_sol_s < 0.72
     if "pct_asymmetry" in df_plot.columns:
         asym_s = pd.to_numeric(df_plot["pct_asymmetry"], errors="coerce")
-        df_plot = df_plot[asym_s.isna() | (asym_s <= 0.22)].copy()
+        df_plot = df_plot[asym_s.isna() | (asym_s <= np.where(plot_is_diss, 0.42, 0.22))].copy()
+        plot_is_diss = plot_is_diss.loc[df_plot.index]
     if "harmonic_roughness" in df_plot.columns:
         hr_s = pd.to_numeric(df_plot["harmonic_roughness"], errors="coerce")
-        df_plot = df_plot[hr_s.isna() | (hr_s <= 0.22)].copy()
+        df_plot = df_plot[hr_s.isna() | (hr_s <= np.where(plot_is_diss, 0.65, 0.22))].copy()
 
     # Filter to vouchers retained in leaf_efa_harmonics.csv when present
     otu_efa_path = _discover_downstream_table("leaf_efa_harmonics.csv", out_dir, active_cats)
@@ -1130,19 +1136,31 @@ def generate_step02_publication_figures(
                 ),
                 sp_all["ucs_val"],
             )
-            sp_diss_frac = float((is_diss_col | (sp_all["sol_val"] < 0.65)).mean()) if len(sp_all) > 0 else 0.0
+            sp_diss_frac = float((is_diss_col | (sp_all["sol_val"] < 0.68)).mean()) if len(sp_all) > 0 else 0.0
             sp_med_sol = float(sp_all["sol_val"].median()) if len(sp_all) > 0 else 0.85
-            is_dissected_cohort = bool(sp_med_sol < 0.60 or sp_diss_frac >= 0.60)
+            is_dissected_cohort = bool(sp_med_sol < 0.76 or sp_diss_frac >= 0.30)
 
             if is_dissected_cohort:
                 # Dissected / pinnatisect species: prioritize authentic dissected blades over undivided terminal lobes
                 sp_hq = sp_all[
                     (sp_all["eff_ucs"] >= 0.78)
                     & (sp_all["sol_val"] >= 0.22)
-                    & (sp_all["sol_val"] < 0.70)
-                    & (is_diss_col | (sp_all["sol_val"] < 0.68))
+                    & (sp_all["sol_val"] < 0.65)
+                    & (sp_all["area_val"] >= 0.55 * sp_med_area)
+                    & (is_diss_col | (sp_all["sol_val"] < 0.65))
                 ].copy()
                 if len(sp_hq) >= 4:
+                    sp_hq["mask_valid"] = [
+                        _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()
+                    ]
+                    sp_hq = sp_hq[sp_hq["mask_valid"].astype(bool)].sort_values("ar_val").copy()
+                if len(sp_hq) < 4:
+                    sp_hq = sp_all[
+                        (sp_all["eff_ucs"] >= 0.75)
+                        & (sp_all["sol_val"] >= 0.20)
+                        & (sp_all["sol_val"] < 0.68)
+                        & (is_diss_col | (sp_all["sol_val"] < 0.68))
+                    ].copy()
                     sp_hq["mask_valid"] = [
                         _is_valid_smooth_closed_mask(r.get("mask_path", ""), out_dir) for _, r in sp_hq.iterrows()
                     ]
@@ -1205,7 +1223,7 @@ def generate_step02_publication_figures(
                 if "is_type_bool" in sp_hq.columns
                 else pd.DataFrame()
             )
-            if len(type_candidates) == 0 and "is_type_bool" in sp_all.columns:
+            if len(type_candidates) == 0 and not is_dissected_cohort and "is_type_bool" in sp_all.columns:
                 type_candidates = sp_all[sp_all["is_type_bool"].astype(bool)]
 
             if len(type_candidates) > 0:
@@ -1328,43 +1346,35 @@ def generate_step02_publication_figures(
                                 cv2.drawContours(crop_m, cnts_fill, idx_h, 255, thickness=cv2.FILLED)
                     _, _, _, p_apex, p_base = compute_geometric_metrics(crop_m)
 
-                    if p_base is not None and p_apex is not None:
-                        dx = float(p_apex[0] - p_base[0])
-                        dy = float(p_apex[1] - p_base[1])
-                        if np.hypot(dx, dy) > 4.0:
-                            h0, w0 = crop_m.shape[:2]
-                            cx, cy = w0 / 2.0, h0 / 2.0
-                            rot_deg = float(np.degrees(np.arctan2(dy, dx))) + 90.0
-                            rot_mat = cv2.getRotationMatrix2D((cx, cy), rot_deg, 1.0)
-                            cos_v = abs(float(rot_mat[0, 0]))
-                            sin_v = abs(float(rot_mat[0, 1]))
-                            new_w = max(1, int(round(h0 * sin_v + w0 * cos_v)))
-                            new_h = max(1, int(round(h0 * cos_v + w0 * sin_v)))
-                            rot_mat[0, 2] += (new_w / 2.0) - cx
-                            rot_mat[1, 2] += (new_h / 2.0) - cy
-                            crop_m = cv2.warpAffine(
-                                crop_m,
-                                rot_mat,
-                                (new_w, new_h),
-                                flags=cv2.INTER_NEAREST,
-                                borderMode=cv2.BORDER_CONSTANT,
-                                borderValue=0,
+                    if p_base is not None and p_apex is not None and p_base != p_apex:
+                        from leafmachine3.core.bilateral import apply_affine, oriented_affine
+                        from leafmachine3.core.imaging import crop_to_box, mask_bbox, rotate_image
+                        from leafmachine3.core.orientation import compute_orientation
+
+                        ori_m = compute_orientation({
+                            "lamina_tip": (float(p_apex[0]), float(p_apex[1])),
+                            "lamina_base": (float(p_base[0]), float(p_base[1])),
+                        })
+                        if ori_m.success and ori_m.angle_cw is not None:
+                            angle_cw_m = float(ori_m.angle_cw)
+                            mat_m, _ = oriented_affine(crop_m.shape[:2], angle_cw_m)
+                            crop_m = rotate_image(crop_m, angle_cw_m, bg=0, nearest=True)
+                            rot_pts_m = apply_affine(
+                                mat_m,
+                                np.asarray(
+                                    [[float(p_base[0]), float(p_base[1])], [float(p_apex[0]), float(p_apex[1])]],
+                                    dtype=np.float64,
+                                ),
                             )
-                            p_base = (
-                                float(rot_mat[0, 0] * p_base[0] + rot_mat[0, 1] * p_base[1] + rot_mat[0, 2]),
-                                float(rot_mat[1, 0] * p_base[0] + rot_mat[1, 1] * p_base[1] + rot_mat[1, 2]),
-                            )
-                            p_apex = (
-                                float(rot_mat[0, 0] * p_apex[0] + rot_mat[0, 1] * p_apex[1] + rot_mat[0, 2]),
-                                float(rot_mat[1, 0] * p_apex[0] + rot_mat[1, 1] * p_apex[1] + rot_mat[1, 2]),
-                            )
-                            ys_r, xs_r = np.where(crop_m > 0)
-                            if len(ys_r) > 0:
-                                ry0 = max(0, int(ys_r.min()) - pad)
-                                ry1 = min(crop_m.shape[0], int(ys_r.max()) + pad + 1)
-                                rx0 = max(0, int(xs_r.min()) - pad)
-                                rx1 = min(crop_m.shape[1], int(xs_r.max()) + pad + 1)
-                                crop_m = crop_m[ry0:ry1, rx0:rx1]
+                            p_base = (float(rot_pts_m[0, 0]), float(rot_pts_m[0, 1]))
+                            p_apex = (float(rot_pts_m[1, 0]), float(rot_pts_m[1, 1]))
+                            bbox_m = mask_bbox(crop_m)
+                            if bbox_m is not None:
+                                rx0 = max(0, int(bbox_m[0]) - pad)
+                                ry0 = max(0, int(bbox_m[1]) - pad)
+                                rx1 = min(crop_m.shape[1], int(bbox_m[2]) + pad)
+                                ry1 = min(crop_m.shape[0], int(bbox_m[3]) + pad)
+                                crop_m = crop_to_box(crop_m, (rx0, ry0, rx1, ry1), pad=0)
                                 p_base = (float(p_base[0] - rx0), float(p_base[1] - ry0))
                                 p_apex = (float(p_apex[0] - rx0), float(p_apex[1] - ry0))
 

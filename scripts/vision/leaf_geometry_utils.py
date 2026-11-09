@@ -71,16 +71,16 @@ def _endpoint_local_dt_radius(
     ep_start: Tuple[int, int],
     ep_other: Tuple[int, int],
 ) -> float:
-    """Estimates local inscribed radius near `ep_start` along the terminal 20% of the axis."""
+    """Estimates local inscribed radius near `ep_start` along the terminal 1-5% petiole neck of the axis."""
     h, w = dt_map.shape[:2]
     axis_len = math.hypot(ep_other[0] - ep_start[0], ep_other[1] - ep_start[1])
     if axis_len < 4.0:
         ix = max(0, min(w - 1, int(ep_start[0])))
         iy = max(0, min(h - 1, int(ep_start[1])))
         return float(dt_map[iy, ix])
-    win_r = max(2, min(20, int(round(0.08 * axis_len))))
+    win_r = max(2, min(6, int(round(0.015 * axis_len))))
     radii: List[float] = []
-    for frac in (0.04, 0.08, 0.12, 0.16, 0.20):
+    for frac in (0.01, 0.02, 0.03, 0.04, 0.05):
         px = int(round(ep_start[0] + frac * (ep_other[0] - ep_start[0])))
         py = int(round(ep_start[1] + frac * (ep_other[1] - ep_start[1])))
         x0 = max(0, px - win_r)
@@ -236,7 +236,7 @@ def compute_geometric_metrics(
     p_apex = (p_apex_sub[0] + x0_pad, p_apex_sub[1] + y0_pad)
     p_base = (p_base_sub[0] + x0_pad, p_base_sub[1] + y0_pad)
     angle_deg = math.degrees(
-        math.atan2(float(p_base[1] - p_apex[1]), float(p_base[0] - p_apex[0]))
+        math.atan2(float(p_apex[1] - p_base[1]), float(p_apex[0] - p_base[0]))
     )
     eff_angle_cw = angle_cw
     if eff_angle_cw is None:
@@ -455,6 +455,19 @@ def resample_normalized_contour(
             largest_cnt = np.asarray(extracted_xy, dtype=np.float64).reshape(-1, 2)
 
     anchor_pt = petiole_attachment_pt if petiole_attachment_pt is not None else lamina_base
+    if keypoints_31 is not None:
+        try:
+            from scripts.vision.lm3_inference_engines import normalize_lm3_keypoints_dict
+
+            norm_kps = normalize_lm3_keypoints_dict(keypoints_31)
+            lb_kp = norm_kps.get("lamina_base") or norm_kps.get("base_center")
+            lt_kp = norm_kps.get("lamina_tip") or norm_kps.get("apex_center")
+            if lb_kp is not None and len(lb_kp) >= 3 and float(lb_kp[2]) >= 0.25 and (abs(float(lb_kp[0])) + abs(float(lb_kp[1]))) > 0.0:
+                anchor_pt = (float(lb_kp[0]), float(lb_kp[1]))
+            if lt_kp is not None and len(lt_kp) >= 3 and float(lt_kp[2]) >= 0.25 and (abs(float(lt_kp[0])) + abs(float(lt_kp[1]))) > 0.0:
+                p_apex_pt = (float(lt_kp[0]), float(lt_kp[1]))
+        except Exception:
+            pass
     if anchor_pt is not None:
         diffs = largest_cnt - np.array([float(anchor_pt[0]), float(anchor_pt[1])], dtype=np.float64)
         start_idx = int(np.argmin(np.hypot(diffs[:, 0], diffs[:, 1])))
@@ -582,26 +595,18 @@ def export_standardized_contour(
 
     anchor_pt = petiole_attachment_pt if petiole_attachment_pt is not None else lamina_base
     if keypoints_31 is not None:
-        if isinstance(keypoints_31, dict):
-            lb_kp = keypoints_31.get("lamina_base") or keypoints_31.get("base_2") or keypoints_31.get("base_center")
-            lt_kp = keypoints_31.get("lamina_tip") or keypoints_31.get("apex_2") or keypoints_31.get("apex_center")
-            if anchor_pt is None and lb_kp is not None and len(lb_kp) >= 2:
-                c1 = float(lb_kp[2]) if len(lb_kp) >= 3 else 1.0
-                if c1 >= 0.25 and (abs(float(lb_kp[0])) + abs(float(lb_kp[1]))) > 0.0:
-                    anchor_pt = (float(lb_kp[0]), float(lb_kp[1]))
-            if p_apex_pt is None and lt_kp is not None and len(lt_kp) >= 2:
-                c0 = float(lt_kp[2]) if len(lt_kp) >= 3 else 1.0
-                if c0 >= 0.25 and (abs(float(lt_kp[0])) + abs(float(lt_kp[1]))) > 0.0:
-                    p_apex_pt = (float(lt_kp[0]), float(lt_kp[1]))
-        else:
-            kp_arr = np.asarray(keypoints_31, dtype=np.float64)
-            if kp_arr.ndim == 2 and kp_arr.shape[0] >= 2 and kp_arr.shape[1] >= 2:
-                c0 = float(kp_arr[0, 2]) if kp_arr.shape[1] >= 3 else 1.0
-                c1 = float(kp_arr[1, 2]) if kp_arr.shape[1] >= 3 else 1.0
-                if anchor_pt is None and c1 >= 0.25 and (abs(kp_arr[1, 0]) + abs(kp_arr[1, 1])) > 0.0:
-                    anchor_pt = (float(kp_arr[1, 0]), float(kp_arr[1, 1]))
-                if p_apex_pt is None and c0 >= 0.25 and (abs(kp_arr[0, 0]) + abs(kp_arr[0, 1])) > 0.0:
-                    p_apex_pt = (float(kp_arr[0, 0]), float(kp_arr[0, 1]))
+        try:
+            from scripts.vision.lm3_inference_engines import normalize_lm3_keypoints_dict
+
+            norm_kps = normalize_lm3_keypoints_dict(keypoints_31)
+            lb_kp = norm_kps.get("lamina_base") or norm_kps.get("base_center")
+            lt_kp = norm_kps.get("lamina_tip") or norm_kps.get("apex_center")
+            if lb_kp is not None and len(lb_kp) >= 3 and float(lb_kp[2]) >= 0.25 and (abs(float(lb_kp[0])) + abs(float(lb_kp[1]))) > 0.0:
+                anchor_pt = (float(lb_kp[0]), float(lb_kp[1]))
+            if lt_kp is not None and len(lt_kp) >= 3 and float(lt_kp[2]) >= 0.25 and (abs(float(lt_kp[0])) + abs(float(lt_kp[1]))) > 0.0:
+                p_apex_pt = (float(lt_kp[0]), float(lt_kp[1]))
+        except Exception:
+            pass
     if anchor_pt is None and work_mask is not None:
         try:
             _, _, _, calc_apex, calc_base = compute_geometric_metrics(work_mask)
