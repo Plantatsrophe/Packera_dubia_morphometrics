@@ -197,8 +197,9 @@ def compute_geometric_metrics(
 
     p_min = float(np.min(projections))
     p_max = float(np.max(projections))
-    near_min = np.where(projections <= p_min + 1.5)[0]
-    near_max = np.where(projections >= p_max - 1.5)[0]
+    cap_tol = max(2.5, 0.03 * max(1.0, p_max - p_min))
+    near_min = np.where(projections <= p_min + cap_tol)[0]
+    near_max = np.where(projections >= p_max - cap_tol)[0]
 
     min_idx = int(near_min[np.argmin(perp_dist[near_min])]) if len(near_min) > 0 else int(np.argmin(projections))
     max_idx = int(near_max[np.argmin(perp_dist[near_max])]) if len(near_max) > 0 else int(np.argmax(projections))
