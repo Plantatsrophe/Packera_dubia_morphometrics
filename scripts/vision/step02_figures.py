@@ -597,136 +597,177 @@ def generate_step02_publication_figures(
         if c_val and pd.notna(sp_val) and str(sp_val).strip() and c_val not in cat_to_species:
             cat_to_species[c_val] = str(sp_val).strip()
 
+    if "leaf_zone" in df_plot.columns:
+        df_plot["leaf_zone_norm"] = (
+            df_plot["leaf_zone"]
+            .fillna("basal")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .map(lambda z: "cauline" if z == "cauline" else "basal")
+        )
+    else:
+        df_plot["leaf_zone_norm"] = "basal"
+
+    df_basal = df_plot[df_plot["leaf_zone_norm"] == "basal"].copy()
+    df_cauline = df_plot[df_plot["leaf_zone_norm"] == "cauline"].copy()
+    if len(df_basal) == 0:
+        df_basal = df_plot.copy()
+    has_cauline_zone = len(df_cauline) > 0
+
     alpha_pt = 0.45 if len(df_plot) > 1000 else 0.75
 
     # -------------------------------------------------------------------------
-    # Figure 02a: Lamina Solidity vs. Aspect Ratio & Taxon Reproductive Traits
+    # Figure 02a: Lamina Solidity vs. Aspect Ratio (Separated Basal vs. Cauline)
+    #             & Taxon Reproductive Traits
     # -------------------------------------------------------------------------
-    fig_a_height = max(5.8, 0.34 * min(16, len(present_sp)) + 2.4)
+    base_fig_h = 7.4 if has_cauline_zone else 5.8
+    fig_a_height = max(base_fig_h, 0.34 * min(16, len(present_sp)) + (3.2 if has_cauline_zone else 2.4))
     fig_a = plt.figure(figsize=(13.0, fig_a_height), dpi=300)
     gs_a = GridSpec(1, 2, figure=fig_a, width_ratios=[1.15, 1.05], wspace=0.28)
 
-    # Panel A: Lamina Solidity vs. Blade Aspect Ratio colored and shaped by Species
-    ax_sc = fig_a.add_subplot(gs_a[0, 0])
     x_min = max(0.15, min(0.48, float(df_plot["sol_val"].min()) - 0.04))
     y_max = min(6.0, max(4.2, float(df_plot["ar_val"].max()) + 0.35))
-
-    # Shaded gatekeeper zones
-    ax_sc.add_patch(
-        Rectangle(
-            (0.72, 1.0), 1.02 - 0.72, y_max - 1.0,
-            facecolor="#009E73", alpha=0.06, edgecolor="none", zorder=0,
-            label="Tier 1 Intact Zone (Solidity >= 0.72)"
-        )
-    )
-    ax_sc.add_patch(
-        Rectangle(
-            (0.48, 1.0), 0.72 - 0.48, y_max - 1.0,
-            facecolor="#CC79A7", alpha=0.08, edgecolor="none", zorder=0,
-            label="Pinnatifid Dissection Zone (0.48-0.72)"
-        )
-    )
-
-    dense_panel_a = len(df_plot) > 1500
-    fg_s = 18 if dense_panel_a else 38
-    fg_alpha = 0.35 if dense_panel_a else alpha_pt
-    fg_lw = 0.75 if dense_panel_a else 1.0
-    bg_s = 12 if dense_panel_a else 22
-    bg_alpha = 0.18 if dense_panel_a else 0.30
-
     fg_sp = present_sp if len(present_sp) <= 6 else present_sp[:6]
     bg_sp = [] if len(present_sp) <= 6 else present_sp[6:]
 
-    if bg_sp:
-        bg_sub = df_plot[df_plot["species_clean"].isin(bg_sp)]
-        if len(bg_sub) > 0:
-            ax_sc.scatter(
-                bg_sub["sol_val"],
-                bg_sub["ar_val"],
-                facecolors="none",
-                edgecolors="#B0B0B0",
-                marker="o",
-                label=f"Other Packera ({len(bg_sp)} spp., n={len(bg_sub)})",
-                alpha=bg_alpha,
-                s=bg_s,
-                linewidths=0.7,
-                zorder=2,
-            )
-
-    for sp_name in fg_sp:
-        sub = df_plot[df_plot["species_clean"] == sp_name]
-        if len(sub) > 0:
-            col_hex = SPECIES_PALETTE[sp_name]
-            mk_sym = SPECIES_MARKERS[sp_name]
-            ax_sc.scatter(
-                sub["sol_val"],
-                sub["ar_val"],
-                facecolors="none",
-                edgecolors=col_hex,
-                marker=mk_sym,
-                label=f"{SPECIES_ITALIC[sp_name]} (n={len(sub)})",
-                alpha=fg_alpha,
-                s=fg_s,
-                linewidths=fg_lw,
-                zorder=4,
-            )
-            sub_xy = sub[["sol_val", "ar_val"]].dropna()
-            if len(sub_xy) >= 10:
-                xv = sub_xy["sol_val"].to_numpy(dtype=float)
-                yv = sub_xy["ar_val"].to_numpy(dtype=float)
-                valid_m = np.isfinite(xv) & np.isfinite(yv)
-                xv, yv = xv[valid_m], yv[valid_m]
-                if len(xv) >= 10:
-                    mx = float(np.mean(xv))
-                    my = float(np.mean(yv))
-                    cov_mat = np.cov(np.vstack([xv, yv]))
-                    if cov_mat.shape == (2, 2) and np.all(np.isfinite(cov_mat)):
-                        eigvals, eigvecs = np.linalg.eigh(cov_mat)
-                        eigvals = np.maximum(eigvals, 1e-6)
-                        chi2_val = 2.7726
-                        theta_t = np.linspace(0.0, 2.0 * np.pi, 64)
-                        unit_circle = np.vstack([np.cos(theta_t), np.sin(theta_t)])
-                        ell_pts = eigvecs @ (np.sqrt(chi2_val * eigvals)[:, None] * unit_circle)
-                        ex = mx + ell_pts[0, :]
-                        ey = my + ell_pts[1, :]
-                        ax_sc.plot(ex, ey, color="white", linewidth=2.8, zorder=5)
-                        ax_sc.plot(ex, ey, color=col_hex, linewidth=1.6, zorder=6)
-                        ax_sc.scatter(
-                            [mx],
-                            [my],
-                            s=58,
-                            facecolors=col_hex,
-                            edgecolors="#111111",
-                            linewidths=1.1,
-                            marker=mk_sym,
-                            zorder=7,
-                        )
-
     env_focal = os.environ.get("PACKERA_FOCAL_TAXON", "").strip()
     title_focal_std = _standardize_packera_species_py(env_focal) if env_focal else (present_sp[0] if len(present_sp) == 1 else "")
-    if title_focal_std and title_focal_std != "Unassigned_Packera":
-        sp_title = title_focal_std.replace("_", " ").replace(" ", r"\ ")
-        panel_a_title = r"A. Foliar Solidity vs. Blade Elongation ($\it{" + sp_title + r"}$)"
-    elif len(present_sp) == 1 and present_sp[0] != "Unassigned_Packera":
-        sp_title = present_sp[0].replace("_", " ").replace(" ", r"\ ")
-        panel_a_title = r"A. Foliar Solidity vs. Blade Elongation ($\it{" + sp_title + r"}$)"
-    else:
-        panel_a_title = f"A. Foliar Solidity vs. Blade Elongation ($N = {len(present_sp)}$ Taxa)"
 
-    ax_sc.axvline(0.72, color="#222222", linestyle="--", linewidth=1.3)
-    ax_sc.axvline(0.48, color="#CC79A7", linestyle=":", linewidth=1.2)
-    ax_sc.set_xlabel("Lamina Solidity (Area / Convex Hull Area)", fontsize=10, fontweight="bold")
-    ax_sc.set_ylabel("Blade Aspect Ratio (Length / Width)", fontsize=10, fontweight="bold")
-    ax_sc.set_title(
-        panel_a_title,
-        fontsize=10.8,
-        fontweight="bold",
-        loc="left",
-    )
-    ax_sc.set_xlim(x_min, 1.02)
-    ax_sc.set_ylim(1.0, y_max)
-    ax_sc.grid(True, linestyle=":", alpha=0.45)
-    ax_sc.legend(loc="upper left", fontsize=7.8, frameon=True, framealpha=0.90)
+    def _draw_solidity_vs_ar_zone_panel(
+        ax_sc: Any,
+        zone_df: pd.DataFrame,
+        panel_prefix: str,
+        zone_title_lbl: str,
+        show_xlabel: bool = True,
+    ) -> None:
+        ax_sc.add_patch(
+            Rectangle(
+                (0.72, 1.0), 1.02 - 0.72, y_max - 1.0,
+                facecolor="#009E73", alpha=0.06, edgecolor="none", zorder=0,
+                label="Tier 1 Intact Zone (Solidity >= 0.72)"
+            )
+        )
+        ax_sc.add_patch(
+            Rectangle(
+                (0.48, 1.0), 0.72 - 0.48, y_max - 1.0,
+                facecolor="#CC79A7", alpha=0.08, edgecolor="none", zorder=0,
+                label="Pinnatifid Dissection Zone (0.48-0.72)"
+            )
+        )
+
+        dense_zone = len(zone_df) > 1500
+        fg_s = 18 if dense_zone else 38
+        fg_alpha = 0.35 if dense_zone else alpha_pt
+        fg_lw = 0.75 if dense_zone else 1.0
+        bg_s = 12 if dense_zone else 22
+        bg_alpha = 0.18 if dense_zone else 0.30
+
+        if bg_sp:
+            bg_sub = zone_df[zone_df["species_clean"].isin(bg_sp)]
+            if len(bg_sub) > 0:
+                ax_sc.scatter(
+                    bg_sub["sol_val"],
+                    bg_sub["ar_val"],
+                    facecolors="none",
+                    edgecolors="#B0B0B0",
+                    marker="o",
+                    label=f"Other Packera ({len(bg_sp)} spp., n={len(bg_sub)})",
+                    alpha=bg_alpha,
+                    s=bg_s,
+                    linewidths=0.7,
+                    zorder=2,
+                )
+
+        for sp_name in fg_sp:
+            sub = zone_df[zone_df["species_clean"] == sp_name]
+            if len(sub) > 0:
+                col_hex = SPECIES_PALETTE[sp_name]
+                mk_sym = SPECIES_MARKERS[sp_name]
+                ax_sc.scatter(
+                    sub["sol_val"],
+                    sub["ar_val"],
+                    facecolors="none",
+                    edgecolors=col_hex,
+                    marker=mk_sym,
+                    label=f"{SPECIES_ITALIC[sp_name]} (n={len(sub)})",
+                    alpha=fg_alpha,
+                    s=fg_s,
+                    linewidths=fg_lw,
+                    zorder=4,
+                )
+                sub_xy = sub[["sol_val", "ar_val"]].dropna()
+                if len(sub_xy) >= 10:
+                    xv = sub_xy["sol_val"].to_numpy(dtype=float)
+                    yv = sub_xy["ar_val"].to_numpy(dtype=float)
+                    valid_m = np.isfinite(xv) & np.isfinite(yv)
+                    xv, yv = xv[valid_m], yv[valid_m]
+                    if len(xv) >= 10:
+                        mx = float(np.mean(xv))
+                        my = float(np.mean(yv))
+                        cov_mat = np.cov(np.vstack([xv, yv]))
+                        if cov_mat.shape == (2, 2) and np.all(np.isfinite(cov_mat)):
+                            eigvals, eigvecs = np.linalg.eigh(cov_mat)
+                            eigvals = np.maximum(eigvals, 1e-6)
+                            chi2_val = 2.7726
+                            theta_t = np.linspace(0.0, 2.0 * np.pi, 64)
+                            unit_circle = np.vstack([np.cos(theta_t), np.sin(theta_t)])
+                            ell_pts = eigvecs @ (np.sqrt(chi2_val * eigvals)[:, None] * unit_circle)
+                            ex = mx + ell_pts[0, :]
+                            ey = my + ell_pts[1, :]
+                            ax_sc.plot(ex, ey, color="white", linewidth=2.8, zorder=5)
+                            ax_sc.plot(ex, ey, color=col_hex, linewidth=1.6, zorder=6)
+                            ax_sc.scatter(
+                                [mx],
+                                [my],
+                                s=58,
+                                facecolors=col_hex,
+                                edgecolors="#111111",
+                                linewidths=1.1,
+                                marker=mk_sym,
+                                zorder=7,
+                            )
+
+        if title_focal_std and title_focal_std != "Unassigned_Packera":
+            sp_title = title_focal_std.replace("_", " ").replace(" ", r"\ ")
+            panel_title = rf"{panel_prefix}. {zone_title_lbl} Solidity vs. Blade Elongation ($\it{{{sp_title}}}$)"
+        elif len(present_sp) == 1 and present_sp[0] != "Unassigned_Packera":
+            sp_title = present_sp[0].replace("_", " ").replace(" ", r"\ ")
+            panel_title = rf"{panel_prefix}. {zone_title_lbl} Solidity vs. Blade Elongation ($\it{{{sp_title}}}$)"
+        else:
+            panel_title = f"{panel_prefix}. {zone_title_lbl} Solidity vs. Blade Elongation ($N = {len(present_sp)}$ Taxa)"
+
+        ax_sc.axvline(0.72, color="#222222", linestyle="--", linewidth=1.3)
+        ax_sc.axvline(0.48, color="#CC79A7", linestyle=":", linewidth=1.2)
+        if show_xlabel:
+            ax_sc.set_xlabel("Lamina Solidity (Area / Convex Hull Area)", fontsize=9.8, fontweight="bold")
+        ax_sc.set_ylabel("Blade Aspect Ratio (L/W)", fontsize=9.8, fontweight="bold")
+        ax_sc.set_title(
+            panel_title,
+            fontsize=10.2 if has_cauline_zone else 10.8,
+            fontweight="bold",
+            loc="left",
+        )
+        ax_sc.set_xlim(x_min, 1.02)
+        ax_sc.set_ylim(1.0, y_max)
+        ax_sc.grid(True, linestyle=":", alpha=0.45)
+        ax_sc.legend(loc="upper left", fontsize=7.4 if has_cauline_zone else 7.8, frameon=True, framealpha=0.90)
+
+    if has_cauline_zone:
+        gs_left = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs_a[0, 0], height_ratios=[1.0, 1.0], hspace=0.42)
+        ax_sc_bas = fig_a.add_subplot(gs_left[0, 0])
+        _draw_solidity_vs_ar_zone_panel(
+            ax_sc_bas, df_basal, panel_prefix="A1", zone_title_lbl="Basal Rosette", show_xlabel=False
+        )
+        ax_sc_caul = fig_a.add_subplot(gs_left[1, 0])
+        _draw_solidity_vs_ar_zone_panel(
+            ax_sc_caul, df_cauline, panel_prefix="A2", zone_title_lbl="Cauline Stem", show_xlabel=True
+        )
+    else:
+        ax_sc = fig_a.add_subplot(gs_a[0, 0])
+        _draw_solidity_vs_ar_zone_panel(
+            ax_sc, df_basal, panel_prefix="A", zone_title_lbl="Basal Rosette", show_xlabel=True
+        )
 
     # Panel B: Taxon-Stratified Reproductive Trait Distributions (B1: Involucre AR, B2: Phenological State)
     gs_b = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs_a[0, 1], height_ratios=[1.15, 1.0], hspace=0.52)
@@ -1020,11 +1061,19 @@ def generate_step02_publication_figures(
     fallback_qw = t1_pool["sol_val"] * t1_pool["ucs_val"]
     t1_pool["qual_weight"] = lqw_num.where(lqw_num.notna() & (lqw_num > 0), fallback_qw)
 
+    t1_basal_pool = t1_pool[t1_pool["leaf_zone_norm"] == "basal"].copy()
+    if len(t1_basal_pool) == 0:
+        t1_basal_pool = t1_pool.copy()
+    t1_cauline_pool = t1_pool[t1_pool["leaf_zone_norm"] == "cauline"].copy()
+
     def _render_montage_page(
         montage_sp_list: List[str],
         out_stem: str,
         title_suffix: str = "",
+        pool_df: Optional[pd.DataFrame] = None,
+        zone_label: str = "Basal",
     ) -> Tuple[Path, Path]:
+        active_pool = pool_df if pool_df is not None else t1_basal_pool
         n_sp_rows = max(1, len(montage_sp_list))
         fig_height = min(24.0, max(3.6, 3.0 * n_sp_rows))
         fig_b, axes_b = plt.subplots(
@@ -1033,8 +1082,8 @@ def generate_step02_publication_figures(
 
         for row_idx, sp_name in enumerate(montage_sp_list):
             sp_col = SPECIES_PALETTE[sp_name]
-            # Strictly restrict to this species; never substitute another species' leaves
-            sp_all = t1_pool[t1_pool["species_clean"] == sp_name].copy()
+            # Strictly restrict to this species and leaf_zone pool; never substitute another species' or zone's leaves
+            sp_all = active_pool[active_pool["species_clean"] == sp_name].copy()
             # Only real on-disk silhouettes are eligible (never render fabricated geometry)
             sp_all["asset_ok"] = pd.Series(
                 [
@@ -1429,7 +1478,7 @@ def generate_step02_publication_figures(
                 ax_t.set_yticks([])
 
         fig_b.suptitle(
-            f"Phase 02 - Taxon-Stratified Basal Leaf Silhouettes (20th-80th %ile Aspect Ratio), Midrib Axes & Petiole Anchors{title_suffix}",
+            f"Phase 02 - Taxon-Stratified {zone_label} Leaf Silhouettes (20th-80th %ile Aspect Ratio), Midrib Axes & Petiole Anchors{title_suffix}",
             fontsize=11.5,
             fontweight="bold",
             y=0.99,
@@ -1439,22 +1488,52 @@ def generate_step02_publication_figures(
         plt.close(fig_b)
         return page_pdf, page_png
 
-    fg_montage_sp = present_sp[:8]
+    basal_sp_list = [sp for sp in present_sp if (t1_basal_pool["species_clean"] == sp).any()] or list(present_sp)
+    fg_montage_sp = basal_sp_list[:8]
     fig02b_pdf, fig02b_png = _render_montage_page(
-        fg_montage_sp, "fig02b_silhouette_montage"
+        fg_montage_sp,
+        "fig02b_silhouette_montage",
+        pool_df=t1_basal_pool,
+        zone_label="Basal",
     )
     saved_paths["fig02b_pdf"] = fig02b_pdf
     saved_paths["fig02b_png"] = fig02b_png
 
-    if len(present_sp) > 8:
-        supp_montage_sp = present_sp[8:]
+    if len(basal_sp_list) > 8:
+        supp_montage_sp = basal_sp_list[8:]
         supp_pdf, supp_png = _render_montage_page(
             supp_montage_sp,
             "fig02b_silhouette_montage_supplement",
             title_suffix=" (Supplementary Taxa)",
+            pool_df=t1_basal_pool,
+            zone_label="Basal",
         )
         saved_paths["fig02b_supplement_pdf"] = supp_pdf
-        saved_paths["fig02b_supplement_png"] = supp_png
+        saved_paths["fig02b_supplement_png"] = supp_pdf.with_suffix(".png") if supp_png is None else supp_png
+
+    if len(t1_cauline_pool) > 0:
+        cauline_sp_list = [sp for sp in present_sp if (t1_cauline_pool["species_clean"] == sp).any()]
+        if cauline_sp_list:
+            fg_caul_sp = cauline_sp_list[:8]
+            fig02c_pdf, fig02c_png = _render_montage_page(
+                fg_caul_sp,
+                "fig02c_cauline_silhouette_montage",
+                pool_df=t1_cauline_pool,
+                zone_label="Cauline",
+            )
+            saved_paths["fig02c_pdf"] = fig02c_pdf
+            saved_paths["fig02c_png"] = fig02c_png
+            if len(cauline_sp_list) > 8:
+                supp_caul_sp = cauline_sp_list[8:]
+                supp_c_pdf, supp_c_png = _render_montage_page(
+                    supp_caul_sp,
+                    "fig02c_cauline_silhouette_montage_supplement",
+                    title_suffix=" (Supplementary Taxa)",
+                    pool_df=t1_cauline_pool,
+                    zone_label="Cauline",
+                )
+                saved_paths["fig02c_supplement_pdf"] = supp_c_pdf
+                saved_paths["fig02c_supplement_png"] = supp_c_png
 
     logger.info(f"Step 02 publication figures exported to: {out_dir}")
     return saved_paths

@@ -2267,6 +2267,59 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             )
             self.assertIsNotNone(fail_def)
 
+    def test_step02_figures_basal_vs_cauline_separation(self) -> None:
+        """
+        Verify Step 02 publication figures separate basal and cauline leaves into
+        distinct subplots (`A1. Basal Rosette` and `A2. Cauline Stem` in `fig02a`)
+        and separate silhouette montages (`fig02b_silhouette_montage` for basal
+        and `fig02c_cauline_silhouette_montage` for cauline) without overlaying them.
+        """
+        from scripts.vision.step02_figures import generate_step02_pub_figures
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            tmp_path = Path(tmp_d)
+            rows = []
+            for idx in range(8):
+                is_caul = idx >= 4
+                m_p = tmp_path / f"mask_{idx}.png"
+                canvas = np.zeros((160, 120), dtype=np.uint8)
+                cv2.ellipse(
+                    canvas,
+                    (60, 80),
+                    (22 if is_caul else 36, 56),
+                    0,
+                    0,
+                    360,
+                    255,
+                    -1,
+                )
+                cv2.imwrite(str(m_p), canvas)
+                rows.append(
+                    {
+                        "catalogNumber": f"NCU_BC_{idx}",
+                        "leaf_id": 1,
+                        "plant_individual_id": 1,
+                        "species_name": "Packera anonyma" if idx % 2 == 0 else "Packera aurea",
+                        "assigned_tier": "Tier_1_Direct",
+                        "leaf_zone": "cauline" if is_caul else "basal",
+                        "solidity": 0.62 + 0.02 * idx if is_caul else 0.86 + 0.01 * idx,
+                        "blade_length_to_width_ratio": 2.9 + 0.1 * idx if is_caul else 1.6 + 0.1 * idx,
+                        "aspect_ratio": 2.9 + 0.1 * idx if is_caul else 1.6 + 0.1 * idx,
+                        "ucs_score": 0.91,
+                        "area_px": 4200 + idx * 100,
+                        "blade_area_cm2": 3.5 + idx * 0.2,
+                        "mask_path": str(m_p),
+                    }
+                )
+            df_bc = pd.DataFrame(rows)
+            fig_dir = tmp_path / "figs_bc"
+            saved = generate_step02_pub_figures(df_bc, pd.DataFrame(), output_dir=fig_dir)
+            self.assertIn("fig02a_pdf", saved)
+            self.assertIn("fig02b_pdf", saved)
+            self.assertIn("fig02c_pdf", saved)
+            self.assertTrue(Path(saved["fig02b_pdf"]).exists())
+            self.assertTrue(Path(saved["fig02c_pdf"]).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

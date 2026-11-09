@@ -1431,6 +1431,11 @@ plot_2d_ordination_scatter <- function(
 render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL, sym_pca = NULL, permanova_df = NULL) {
   dir.create(dirname(plot_out), recursive = TRUE, showWarnings = FALSE)
   tmp_pdf <- paste0(plot_out, ".tmp")
+  if (!is.null(tier_manifest) && nrow(tier_manifest) > 0L && "leaf_zone" %in% names(tier_manifest)) {
+    lz_t <- tolower(trimws(as.character(tier_manifest$leaf_zone)))
+    bas_idx <- which(is.na(lz_t) | !nzchar(lz_t) | lz_t != "cauline")
+    if (length(bas_idx) > 0L) tier_manifest <- tier_manifest[bas_idx, , drop = FALSE]
+  }
 
   var_pct <- c(48.2, 21.4)
   if (!is.null(pca_fit) && !is.null(pca_fit$sdev) && length(pca_fit$sdev) >= 2) {
@@ -1640,8 +1645,26 @@ generate_step03_pub_figures <- function(
   sym_pca = NULL
 ) {
   fdir <- resolve_active_figures_dir(explicit_dir = figures_dir, reference_path = output_csv_path)
-  df <- if (!is.null(specimen_df) && nrow(specimen_df) > 0) specimen_df else efa_df
-  if (is.null(df) || nrow(df) == 0) return(invisible(NULL))
+  df_full <- if (!is.null(specimen_df) && nrow(specimen_df) > 0) specimen_df else efa_df
+  if (is.null(df_full) || nrow(df_full) == 0) return(invisible(NULL))
+
+  # Isolate pure basal rosette rows for primary Step 03 morphospace & outline reconstructions (never overlay cauline rows)
+  bas_keep <- rep(TRUE, nrow(df_full))
+  if ("leaf_zone" %in% colnames(df_full)) {
+    lz_df <- tolower(trimws(as.character(df_full$leaf_zone)))
+    bas_keep <- bas_keep & (is.na(lz_df) | !nzchar(lz_df) | lz_df != "cauline")
+  }
+  if ("morph_tier_source" %in% colnames(df_full)) {
+    mts_df <- trimws(as.character(df_full$morph_tier_source))
+    bas_keep <- bas_keep & (is.na(mts_df) | mts_df != "Cauline_Only_Fallback")
+  }
+  if ("basal_leaf_count" %in% colnames(df_full)) {
+    blc_df <- suppressWarnings(as.numeric(df_full$basal_leaf_count))
+    if (any(is.finite(blc_df) & blc_df > 0)) {
+      bas_keep <- bas_keep & (is.na(blc_df) | blc_df > 0)
+    }
+  }
+  df <- if (any(bas_keep, na.rm = TRUE)) df_full[which(bas_keep), , drop = FALSE] else df_full
 
   if (!"taxon" %in% colnames(df)) {
     raw_tx <- if ("species_standardized" %in% colnames(df)) df$species_standardized else if ("scientificName" %in% colnames(df)) df$scientificName else if ("species_raw" %in% colnames(df)) df$species_raw else rep(NA_character_, nrow(df))
@@ -1708,8 +1731,13 @@ generate_step03_pub_figures <- function(
   rownames(cent_sym) <- gsub("Packera ", "P. ", present_tx)
 
   std_hmat <- extract_standardized_harmonic_matrix(df, max_k = NULL)
-  if (is.null(std_hmat) && !is.null(efa_df)) {
-    std_hmat <- extract_standardized_harmonic_matrix(efa_df, max_k = NULL)
+  if (is.null(std_hmat) && !is.null(efa_df) && nrow(efa_df) > 0) {
+    efa_bas_idx <- if ("leaf_zone" %in% colnames(efa_df)) {
+      lz_e <- tolower(trimws(as.character(efa_df$leaf_zone)))
+      which(is.na(lz_e) | !nzchar(lz_e) | lz_e != "cauline")
+    } else seq_len(nrow(efa_df))
+    if (length(efa_bas_idx) == 0L) efa_bas_idx <- seq_len(nrow(efa_df))
+    std_hmat <- extract_standardized_harmonic_matrix(efa_df[efa_bas_idx, , drop = FALSE], max_k = NULL)
   }
 
   # Precompute linear projection from (Sym_PC1, Sym_PC2) to standardized harmonics once
@@ -1782,7 +1810,7 @@ generate_step03_pub_figures <- function(
       lwd = 1.05,
       xlab = sprintf("Sym_PC1 (%.1f%% -- Blade Elongation & Petiole Ratio)", sym_var_pct[1]),
       ylab = sprintf("Sym_PC2 (%.1f%% -- Lamina Base Shape & Ovate Taper)", sym_var_pct[2]),
-      main = "A. 2D EFA Morphospace & Inverse-Fourier Grid",
+      main = "A. 2D Basal Rosette EFA Morphospace & Inverse-Fourier Grid",
       group_vec = df$taxon_clean,
       group_cols = dyn_pal,
       ellipse_level = 0.95,
@@ -1801,10 +1829,10 @@ generate_step03_pub_figures <- function(
       )
     )
 
-    # Panel B: Mean Consensus Leaf Silhouettes (+/- 1 SD Envelope) by Species
+    # Panel B: Mean Consensus Basal Leaf Silhouettes (+/- 1 SD Envelope) by Species
     graphics::plot(
       c(0, 2), c(0, 2), type = "n", axes = FALSE, xlab = "", ylab = "",
-      main = "B. Species Mean Consensus Silhouettes (+/- 1 SD Envelope)"
+      main = "B. Species Basal Mean Consensus Silhouettes (+/- 1 SD Envelope)"
     )
     graphics::box(col = "grey80")
 
@@ -2101,52 +2129,47 @@ generate_step03_pub_figures <- function(
 
   # ----------------------------------------------------------------------------
   # Figure 03b: Cumulative Harmonic Power (n=1..12) & Asymmetry vs. Roughness
+  #             (Basal Rosette & Cauline Stem separated into distinct panels)
   # ----------------------------------------------------------------------------
-  atomic_save_dual_plot(function() {
-    graphics::par(mfrow = c(1, 2), mar = c(4.6, 4.6, 3.2, 1.2))
-    n_harm <- 12L
-    harm_pwr <- numeric(n_harm)
-    h_source <- if (!is.null(std_hmat)) std_hmat else harm_mat
-    if (!is.null(h_source) && ncol(h_source) >= 4) {
-      n_harm <- min(24L, max(6L, floor(ncol(h_source) / 4L)))
-      harm_pwr <- numeric(n_harm)
-      for (k in seq_len(n_harm)) {
+  ldf_all <- if (!is.null(efa_df) && nrow(efa_df) > 0) efa_df else df_full
+  if ("leaf_zone" %in% colnames(ldf_all)) {
+    lz_all <- tolower(trimws(as.character(ldf_all$leaf_zone)))
+    bas_l_idx <- which(is.na(lz_all) | !nzchar(lz_all) | lz_all != "cauline")
+    caul_l_idx <- which(!is.na(lz_all) & lz_all == "cauline")
+  } else {
+    bas_l_idx <- seq_len(nrow(ldf_all))
+    caul_l_idx <- integer(0)
+  }
+  ldf_basal <- if (length(bas_l_idx) > 0L) ldf_all[bas_l_idx, , drop = FALSE] else ldf_all
+  ldf_cauline <- if (length(caul_l_idx) > 0L) ldf_all[caul_l_idx, , drop = FALSE] else ldf_all[0, , drop = FALSE]
+  has_cauline_efa <- nrow(ldf_cauline) > 0L
+
+  .compute_cum_harmonic_power <- function(h_mat_in, n_h = 12L) {
+    hp <- numeric(n_h)
+    if (!is.null(h_mat_in) && ncol(h_mat_in) >= 4) {
+      for (k in seq_len(n_h)) {
         c_idx <- c(paste0("A", k), paste0("B", k), paste0("C", k), paste0("D", k))
-        avail <- intersect(c_idx, colnames(h_source))
+        avail <- intersect(c_idx, colnames(h_mat_in))
         if (length(avail) > 0) {
-          harm_pwr[k] <- mean(rowSums(h_source[, avail, drop = FALSE]^2, na.rm = TRUE), na.rm = TRUE)
+          hp[k] <- mean(rowSums(h_mat_in[, avail, drop = FALSE]^2, na.rm = TRUE), na.rm = TRUE)
         } else {
-          harm_pwr[k] <- 1 / (k^2.2)
+          hp[k] <- 1 / (k^2.2)
         }
       }
     } else {
-      harm_pwr <- 1 / ((1:n_harm)^2.2)
+      hp <- 1 / ((1:n_h)^2.2)
     }
-    if (sum(harm_pwr, na.rm = TRUE) <= 0) harm_pwr <- 1 / ((1:n_harm)^2.2)
-    cum_pwr <- cumsum(harm_pwr) / sum(harm_pwr) * 100
+    if (sum(hp, na.rm = TRUE) <= 0) hp <- 1 / ((1:n_h)^2.2)
+    cumsum(hp) / sum(hp) * 100
+  }
 
-    graphics::plot(
-      seq_len(n_harm), cum_pwr, type = "b", pch = 1, bg = NA, lwd = 2.0, col = "#0072B2",
-      ylim = c(min(cum_pwr) * 0.95, 101),
-      xlab = sprintf("Elliptic Fourier Harmonic Order (n = 1..%d)", n_harm),
-      ylab = "Cumulative Shape Variance Explained (%)",
-      main = "A. Cumulative EFA Harmonic Power Spectrum"
-    )
-    graphics::abline(h = 99.0, lty = 2, lwd = 1.4, col = "#D55E00")
-    graphics::grid(col = "grey85")
-    graphics::legend(
-      "bottomright",
-      legend = c("Cumulative Fourier Power", "99% Shape Capture Threshold"),
-      col = c("#0072B2", "#D55E00"), lty = c(1, 2), pch = c(1, NA), pt.bg = NA, lwd = 2, cex = 0.82, bty = "n"
-    )
-
-    ldf <- if (!is.null(efa_df) && nrow(efa_df) > 0) efa_df else df
-    asym_v <- if ("pct_asymmetry" %in% colnames(ldf)) as.numeric(ldf$pct_asymmetry) else rep(0.05, nrow(ldf))
-    rough_v <- if ("harmonic_roughness" %in% colnames(ldf)) as.numeric(ldf$harmonic_roughness) else rep(0.02, nrow(ldf))
-    out_flag <- if ("is_contour_outlier" %in% colnames(ldf)) as.logical(ldf$is_contour_outlier) else (asym_v > 0.22 | rough_v > 0.15)
+  .draw_contour_qc_panel <- function(sub_ldf, panel_title) {
+    asym_v <- if ("pct_asymmetry" %in% colnames(sub_ldf)) as.numeric(sub_ldf$pct_asymmetry) else rep(0.05, nrow(sub_ldf))
+    rough_v <- if ("harmonic_roughness" %in% colnames(sub_ldf)) as.numeric(sub_ldf$harmonic_roughness) else rep(0.02, nrow(sub_ldf))
+    out_flag <- if ("is_contour_outlier" %in% colnames(sub_ldf)) as.logical(sub_ldf$is_contour_outlier) else (asym_v > 0.22 | rough_v > 0.15)
     out_flag[is.na(out_flag)] <- FALSE
 
-    alpha_l <- adaptive_point_alpha(nrow(ldf))
+    alpha_l <- adaptive_point_alpha(nrow(sub_ldf))
     pt_cols <- ifelse(out_flag, grDevices::adjustcolor("#D55E00", alpha.f = 0.85), grDevices::adjustcolor("#009E73", alpha.f = alpha_l))
     pt_pch_b <- ifelse(out_flag, 2L, 1L)
     graphics::plot(
@@ -2156,7 +2179,7 @@ generate_step03_pub_figures <- function(
       ylim = c(0, max(c(0.18, rough_v), na.rm = TRUE) * 1.05),
       xlab = "Bilateral Asymmetry Ratio (pct_asymmetry)",
       ylab = "High-Frequency Harmonic Roughness (n = 9..12)",
-      main = "B. Contour Quality Gating: Asymmetry vs. Roughness"
+      main = panel_title
     )
     graphics::abline(v = 0.22, lty = 2, lwd = 1.4, col = "#D55E00")
     graphics::abline(h = 0.15, lty = 2, lwd = 1.4, col = "#CC79A7")
@@ -2167,7 +2190,139 @@ generate_step03_pub_figures <- function(
       col = c("#009E73", "#D55E00", "#D55E00", "#CC79A7"),
       pch = c(1, 2, NA, NA), pt.bg = NA, lty = c(NA, NA, 2, 2), lwd = c(1.0, 1.0, 1.4, 1.4), cex = 0.78, bty = "n"
     )
-  }, fdir, "fig03b_harmonic_power_and_asymmetry", width = 12, height = 5.4, dpi = 300)
+  }
+
+  fig03b_w <- if (has_cauline_efa) 16.5 else 12.0
+  atomic_save_dual_plot(function() {
+    graphics::par(mfrow = c(1, if (has_cauline_efa) 3L else 2L), mar = c(4.6, 4.6, 3.2, 1.2))
+    h_source <- if (!is.null(std_hmat)) std_hmat else harm_mat
+    n_harm <- if (!is.null(h_source) && ncol(h_source) >= 4) min(24L, max(6L, floor(ncol(h_source) / 4L))) else 12L
+    cum_pwr <- .compute_cum_harmonic_power(h_source, n_h = n_harm)
+    caul_hmat_b <- if (has_cauline_efa) extract_standardized_harmonic_matrix(ldf_cauline, max_k = n_harm) else NULL
+    cum_pwr_caul <- if (!is.null(caul_hmat_b) && nrow(caul_hmat_b) > 0L) .compute_cum_harmonic_power(caul_hmat_b, n_h = n_harm) else NULL
+
+    y_min_pwr <- min(c(cum_pwr, cum_pwr_caul), na.rm = TRUE) * 0.95
+    graphics::plot(
+      seq_len(n_harm), cum_pwr, type = "b", pch = 1, bg = NA, lwd = 2.0, col = "#0072B2",
+      ylim = c(y_min_pwr, 101),
+      xlab = sprintf("Elliptic Fourier Harmonic Order (n = 1..%d)", n_harm),
+      ylab = "Cumulative Shape Variance Explained (%)",
+      main = "A. Cumulative EFA Harmonic Power Spectrum"
+    )
+    if (!is.null(cum_pwr_caul)) {
+      graphics::lines(seq_len(n_harm), cum_pwr_caul, type = "b", pch = 2, lty = 4, lwd = 1.9, col = "#009E73")
+    }
+    graphics::abline(h = 99.0, lty = 2, lwd = 1.4, col = "#D55E00")
+    graphics::grid(col = "grey85")
+    if (!is.null(cum_pwr_caul)) {
+      graphics::legend(
+        "bottomright",
+        legend = c("Basal Rosette Power", "Cauline Stem Power", "99% Shape Capture Threshold"),
+        col = c("#0072B2", "#009E73", "#D55E00"), lty = c(1, 4, 2), pch = c(1, 2, NA), pt.bg = NA, lwd = 2, cex = 0.80, bty = "n"
+      )
+    } else {
+      graphics::legend(
+        "bottomright",
+        legend = c("Basal Cumulative Fourier Power", "99% Shape Capture Threshold"),
+        col = c("#0072B2", "#D55E00"), lty = c(1, 2), pch = c(1, NA), pt.bg = NA, lwd = 2, cex = 0.82, bty = "n"
+      )
+    }
+
+    if (has_cauline_efa) {
+      .draw_contour_qc_panel(ldf_basal, sprintf("B. Basal Rosette Contour QC (n = %d)", nrow(ldf_basal)))
+      .draw_contour_qc_panel(ldf_cauline, sprintf("C. Cauline Stem Contour QC (n = %d)", nrow(ldf_cauline)))
+    } else {
+      .draw_contour_qc_panel(ldf_basal, "B. Basal Contour Quality Gating: Asymmetry vs. Roughness")
+    }
+  }, fdir, "fig03b_harmonic_power_and_asymmetry", width = fig03b_w, height = 5.4, dpi = 300)
+
+  # ----------------------------------------------------------------------------
+  # Figure 03c: Dedicated Cauline Stem Leaf EFA Morphospace & Silhouettes
+  # ----------------------------------------------------------------------------
+  has_cauline_pcs <- all(c("Cauline_PC1", "Cauline_PC2") %in% colnames(df_full)) &&
+    any(is.finite(suppressWarnings(as.numeric(df_full$Cauline_PC1))) &
+        is.finite(suppressWarnings(as.numeric(df_full$Cauline_PC2))) &
+        (suppressWarnings(as.numeric(df_full$Cauline_PC1)) != 0 | suppressWarnings(as.numeric(df_full$Cauline_PC2)) != 0))
+  if (has_cauline_efa || has_cauline_pcs) {
+    atomic_save_dual_plot(function() {
+      graphics::layout(matrix(c(1, 2), nrow = 1), widths = c(1.18, 1.0))
+      graphics::par(mar = c(4.6, 4.6, 3.2, 1.0), oma = c(0, 0, 1.6, 0), family = "sans")
+
+      caul_df <- if (has_cauline_pcs) {
+        c_keep <- is.finite(suppressWarnings(as.numeric(df_full$Cauline_PC1))) &
+          is.finite(suppressWarnings(as.numeric(df_full$Cauline_PC2)))
+        if ("cauline_leaf_count" %in% colnames(df_full)) {
+          clc <- suppressWarnings(as.numeric(df_full$cauline_leaf_count))
+          if (any(is.finite(clc) & clc > 0)) c_keep <- c_keep & is.finite(clc) & (clc > 0)
+        }
+        df_full[which(c_keep), , drop = FALSE]
+      } else {
+        ldf_cauline
+      }
+
+      if (nrow(caul_df) > 0L) {
+        c_grp <- resolve_plot_group_column(caul_df)
+        c_pal <- get_dynamic_packera_palette(c_grp)
+        c_pch_map <- get_dynamic_packera_shapes(c_grp)
+        c_valid <- c_grp[!is.na(c_grp) & nzchar(c_grp) & c_grp != "Unknown"]
+        c_def <- if (length(c_valid) > 0L) c_valid[1L] else default_grp
+        caul_df$taxon_clean <- ifelse(c_grp %in% names(c_pal), as.character(c_grp), c_def)
+
+        c_x <- if ("Cauline_PC1" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$Cauline_PC1)) else if ("Sym_PC1" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$Sym_PC1)) else suppressWarnings(as.numeric(caul_df$PC1))
+        c_y <- if ("Cauline_PC2" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$Cauline_PC2)) else if ("Sym_PC2" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$Sym_PC2)) else suppressWarnings(as.numeric(caul_df$PC2))
+        c_x[!is.finite(c_x)] <- 0.0
+        c_y[!is.finite(c_y)] <- 0.0
+
+        c_present <- sort(unique(caul_df$taxon_clean[caul_df$taxon_clean != "Unknown" & !is.na(caul_df$taxon_clean)]))
+        if (length(c_present) == 0L) c_present <- c_def
+        c_cent <- do.call(rbind, lapply(c_present, function(tx) {
+          m <- which(caul_df$taxon_clean == tx)
+          c(mean(c_x[m], na.rm = TRUE), mean(c_y[m], na.rm = TRUE))
+        }))
+        rownames(c_cent) <- gsub("Packera ", "P. ", c_present)
+        c_alpha <- adaptive_point_alpha(nrow(caul_df))
+        c_is_type <- if ("is_type_specimen" %in% colnames(caul_df)) as.logical(caul_df$is_type_specimen) else rep(FALSE, nrow(caul_df))
+        c_is_type[is.na(c_is_type)] <- FALSE
+
+        plot_2d_ordination_scatter(
+          x = c_x,
+          y = c_y,
+          col = grDevices::adjustcolor(c_pal[caul_df$taxon_clean], alpha.f = c_alpha),
+          pch = c_pch_map[caul_df$taxon_clean],
+          cex = 0.85,
+          lwd = 1.0,
+          xlab = "Cauline Stem Symmetric EFA PC1",
+          ylab = "Cauline Stem Symmetric EFA PC2",
+          main = sprintf("A. 2D Cauline Stem EFA Morphospace (n = %d)", nrow(caul_df)),
+          group_vec = caul_df$taxon_clean,
+          group_cols = c_pal,
+          ellipse_level = 0.95,
+          centroids = c_cent,
+          is_type_vec = c_is_type,
+          legend_args = list(
+            "topright",
+            legend = packera_italic_expressions(c_present),
+            col = c_pal[c_present],
+            pch = c_pch_map[c_present],
+            pt.bg = NA, cex = 0.72, bty = "n"
+          )
+        )
+
+        # Panel B: Cauline stem mean silhouettes reconstructed strictly from cauline contours
+        caul_src <- if (nrow(ldf_cauline) > 0L) ldf_cauline else caul_df
+        caul_src_grp <- resolve_plot_group_column(caul_src)
+        caul_src$taxon_clean <- ifelse(caul_src_grp %in% names(c_pal), as.character(caul_src_grp), c_def)
+        draw_group_mean_leaf_outlines(
+          df = caul_src,
+          group_vec = caul_src$taxon_clean,
+          group_cols = c_pal,
+          main_title = "B. Species Cauline Stem Mean Silhouettes (+/- 1 SD Envelope)",
+          allow_cauline = TRUE
+        )
+      }
+      graphics::title(format_active_complex_title(df_full$taxon, "Cauline Stem Leaf Elliptic Fourier Morphometrics"), outer = TRUE, cex.main = 1.22)
+    }, fdir, "fig03c_cauline_efa_morphospace", width = 13.5, height = 6.2, dpi = 300)
+  }
 
   invisible(TRUE)
 }
@@ -2180,30 +2335,50 @@ generate_step03_pub_figures <- function(
 # ==============================================================================
 format_cda_loading_labels <- function(raw_vars) {
   dict <- c(
-    "PC1"              = "PC1 [Elongation]",
-    "Sym_PC1"          = "PC1 [Elongation]",
-    "PC2"              = "PC2 [Base Shape]",
-    "Sym_PC2"          = "PC2 [Base Shape]",
-    "PC3"              = "PC3 [Dissection]",
-    "Sym_PC3"          = "PC3 [Dissection]",
-    "PC4"              = "PC4 [Apex Taper]",
-    "PC5"              = "PC5 [Lobe Depth]",
-    "AR_inv"           = "AR_inv [Involucre Ratio]",
-    "AR_inv_std"       = "AR_inv [Involucre Ratio]",
-    "log_centsize"     = "CS [Leaf Size]",
-    "log_centsize_std" = "CS [Leaf Size]",
-    "aspect_ratio"     = "AR [Blade L/W]",
-    "aspect_ratio_std" = "AR [Blade L/W]",
-    "solidity"               = "Solidity [Dissection]",
-    "solidity_std"           = "Solidity [Dissection]",
-    "q25_solidity"           = "Q25 Solidity [Basal Lobing]",
-    "q25_solidity_std"       = "Q25 Solidity [Basal Lobing]",
-    "dissection_index"       = "DI [Margin Complexity]",
-    "dissection_index_std"   = "DI [Margin Complexity]",
-    "heteroblasty_index"     = "Heteroblasty [Rosette Disp.]",
-    "heteroblasty_index_std" = "Heteroblasty [Rosette Disp.]",
-    "pheno_sin"              = "pheno_sin",
-    "pheno_cos"        = "pheno_cos"
+    "PC1"                              = "PC1 [Basal Elongation]",
+    "Sym_PC1"                          = "PC1 [Basal Elongation]",
+    "PC2"                              = "PC2 [Basal Base Shape]",
+    "Sym_PC2"                          = "PC2 [Basal Base Shape]",
+    "PC3"                              = "PC3 [Basal Dissection]",
+    "Sym_PC3"                          = "PC3 [Basal Dissection]",
+    "PC4"                              = "PC4 [Basal Apex Taper]",
+    "PC5"                              = "PC5 [Basal Lobe Depth]",
+    "AR_inv"                           = "AR_inv [Involucre Ratio]",
+    "AR_inv_std"                       = "AR_inv [Involucre Ratio]",
+    "log_centsize"                     = "CS [Basal Leaf Size]",
+    "log_centsize_std"                 = "CS [Basal Leaf Size]",
+    "aspect_ratio"                     = "AR [Basal Blade L/W]",
+    "aspect_ratio_std"                 = "AR [Basal Blade L/W]",
+    "blade_length_to_width_ratio"      = "Blade L/W [Basal]",
+    "blade_length_to_width_ratio_std"  = "Blade L/W [Basal]",
+    "petiole_to_blade_ratio"           = "Petiole/Blade [Basal]",
+    "petiole_to_blade_ratio_std"       = "Petiole/Blade [Basal]",
+    "solidity"                         = "Solidity [Basal Dissection]",
+    "solidity_std"                     = "Solidity [Basal Dissection]",
+    "q25_solidity"                     = "Q25 Solidity [Basal Lobing]",
+    "q25_solidity_std"                 = "Q25 Solidity [Basal Lobing]",
+    "dissection_index"                 = "DI [Basal Margin Complexity]",
+    "dissection_index_std"             = "DI [Basal Margin Complexity]",
+    "heteroblasty_index"               = "Heteroblasty [Rosette Disp.]",
+    "heteroblasty_index_std"           = "Heteroblasty [Rosette Disp.]",
+    "basal_vs_cauline_length_ratio"    = "Basal/Cauline Length",
+    "basal_vs_cauline_length_ratio_std"= "Basal/Cauline Length",
+    "basal_vs_cauline_solidity_delta"  = "Basal-Cauline Solidity",
+    "basal_vs_cauline_solidity_delta_std" = "Basal-Cauline Solidity",
+    "heteroblasty_efa_distance"        = "Heteroblasty EFA Dist.",
+    "heteroblasty_efa_distance_std"    = "Heteroblasty EFA Dist.",
+    "cauline_solidity_med"             = "Cauline Solidity [Stem]",
+    "cauline_solidity_med_std"         = "Cauline Solidity [Stem]",
+    "cauline_dissection_index_med"     = "Cauline DI [Stem]",
+    "cauline_dissection_index_med_std" = "Cauline DI [Stem]",
+    "Cauline_PC1"                      = "Cauline PC1 [Stem]",
+    "Cauline_PC1_std"                  = "Cauline PC1 [Stem]",
+    "Cauline_PC2"                      = "Cauline PC2 [Stem]",
+    "Cauline_PC2_std"                  = "Cauline PC2 [Stem]",
+    "Cauline_PC3"                      = "Cauline PC3 [Stem]",
+    "Cauline_PC3_std"                  = "Cauline PC3 [Stem]",
+    "pheno_sin"                        = "pheno_sin",
+    "pheno_cos"                        = "pheno_cos"
   )
   vapply(as.character(raw_vars), function(v) {
     if (v %in% names(dict)) unname(dict[v]) else v
@@ -2229,6 +2404,25 @@ compute_ari_pure <- function(labels_true, labels_pred) {
 render_allometry_diagnostic_pdf <- function(sub_df, r2_size, p_size, r2_int, output_pdf, p_int = 1.0) {
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
   tmp_pdf <- paste0(output_pdf, ".tmp")
+  # Isolate basal rosette specimens for allometric regression (never overlay Cauline_Only_Fallback on basal allometry)
+  bas_allom_ok <- rep(TRUE, nrow(sub_df))
+  if ("leaf_zone" %in% colnames(sub_df)) {
+    lz_a <- tolower(trimws(as.character(sub_df$leaf_zone)))
+    bas_allom_ok <- bas_allom_ok & (is.na(lz_a) | !nzchar(lz_a) | lz_a != "cauline")
+  }
+  if ("morph_tier_source" %in% colnames(sub_df)) {
+    mts_a <- trimws(as.character(sub_df$morph_tier_source))
+    bas_allom_ok <- bas_allom_ok & (is.na(mts_a) | mts_a != "Cauline_Only_Fallback")
+  }
+  if ("basal_leaf_count" %in% colnames(sub_df)) {
+    blc_a <- suppressWarnings(as.numeric(sub_df$basal_leaf_count))
+    if (any(is.finite(blc_a) & blc_a > 0)) {
+      bas_allom_ok <- bas_allom_ok & (is.na(blc_a) | blc_a > 0)
+    }
+  }
+  if (any(bas_allom_ok, na.rm = TRUE) && sum(bas_allom_ok, na.rm = TRUE) >= 3L) {
+    sub_df <- sub_df[which(bas_allom_ok), , drop = FALSE]
+  }
   sub_df$sp_clean <- resolve_plot_group_column(sub_df)
   tier_info <- resolve_taxon_display_tier(sub_df, sub_df$sp_clean)
   taxon_cols <- tier_info$palette
@@ -2429,33 +2623,57 @@ draw_diagnostic_trait_boxplots <- function(df, sp_clean, taxon_cols, taxon_pch, 
   present_tx <- tier_info$fg_groups
   if (length(present_tx) == 0L) present_tx <- "Unassigned_Packera"
 
-  .get_raw_trait <- function(col_candidates, fallback_val, transform_fn = NULL) {
+  # Mask Cauline_Only_Fallback rows from basal trait vectors when true basal rows exist
+  bas_row_mask <- rep(TRUE, nrow(df))
+  if ("leaf_zone" %in% names(df)) {
+    lz_b <- tolower(trimws(as.character(df$leaf_zone)))
+    bas_row_mask <- bas_row_mask & (is.na(lz_b) | !nzchar(lz_b) | lz_b != "cauline")
+  }
+  if ("morph_tier_source" %in% names(df)) {
+    mts_b <- trimws(as.character(df$morph_tier_source))
+    bas_row_mask <- bas_row_mask & (is.na(mts_b) | mts_b != "Cauline_Only_Fallback")
+  }
+  if ("basal_leaf_count" %in% names(df)) {
+    blc_b <- suppressWarnings(as.numeric(df$basal_leaf_count))
+    if (any(is.finite(blc_b) & blc_b > 0)) {
+      bas_row_mask <- bas_row_mask & (is.na(blc_b) | blc_b > 0)
+    }
+  }
+  use_basal_mask <- any(bas_row_mask, na.rm = TRUE) && !all(bas_row_mask, na.rm = TRUE)
+
+  .get_raw_trait <- function(col_candidates, fallback_val, transform_fn = NULL, basal_only = FALSE) {
     for (cn in col_candidates) {
       if (cn %in% names(df)) {
         v <- suppressWarnings(as.numeric(df[[cn]]))
+        if (basal_only && use_basal_mask) v[!bas_row_mask] <- NA_real_
         if (any(is.finite(v))) {
           if (!is.null(transform_fn)) v <- transform_fn(v)
           return(v)
         }
       }
     }
+    if (is.na(fallback_val)) return(rep(NA_real_, nrow(df)))
     rep(fallback_val, nrow(df))
   }
 
-  ar_leaf <- .get_raw_trait(c("aspect_ratio"), 2.2)
-  sol_v   <- .get_raw_trait(c("solidity"), 0.90)
-  cs_mm   <- .get_raw_trait(c("centroid_size"), NA_real_)
+  ar_leaf <- .get_raw_trait(c("blade_length_to_width_ratio", "aspect_ratio"), 2.2, basal_only = TRUE)
+  sol_v   <- .get_raw_trait(c("solidity"), 0.90, basal_only = TRUE)
+  cs_mm   <- .get_raw_trait(c("centroid_size"), NA_real_, basal_only = TRUE)
   if (!any(is.finite(cs_mm))) {
-    cs_mm <- .get_raw_trait(c("log_centsize"), 12.2, transform_fn = function(x) exp(pmin(x, 8.0)))
+    cs_mm <- .get_raw_trait(c("log_centsize"), 12.2, transform_fn = function(x) exp(pmin(x, 8.0)), basal_only = TRUE)
   }
-  ar_inv  <- .get_raw_trait(c("AR_inv", "capitulum_aspect_ratio"), 1.15)
+  caul_sol <- .get_raw_trait(c("cauline_solidity_med"), NA_real_, basal_only = FALSE)
+  ar_inv   <- .get_raw_trait(c("AR_inv", "capitulum_aspect_ratio"), 1.15, basal_only = FALSE)
 
   raw_traits <- list(
-    "Blade Aspect\nRatio (L/W)"     = list(vec = ar_leaf, unit = "L/W", fmt = "%.2f"),
-    "Lamina Solidity\n(Area/Hull)"  = list(vec = sol_v,   unit = "ratio", fmt = "%.2f"),
-    "Centroid Size\n(Raw mm)"       = list(vec = cs_mm,   unit = "mm", fmt = "%.1f"),
-    "Involucre Ratio\n(AR_inv L/W)" = list(vec = ar_inv,  unit = "L/W", fmt = "%.2f")
+    "Basal Blade\nAspect (L/W)"     = list(vec = ar_leaf, unit = "L/W", fmt = "%.2f"),
+    "Basal Solidity\n(Area/Hull)"   = list(vec = sol_v,   unit = "ratio", fmt = "%.2f"),
+    "Basal Centroid\nSize (mm)"     = list(vec = cs_mm,   unit = "mm", fmt = "%.1f")
   )
+  if (any(is.finite(caul_sol))) {
+    raw_traits[["Cauline Solidity\n(Stem Leaves)"]] <- list(vec = caul_sol, unit = "ratio", fmt = "%.2f")
+  }
+  raw_traits[["Involucre Ratio\n(AR_inv L/W)"]] <- list(vec = ar_inv, unit = "L/W", fmt = "%.2f")
 
   n_traits <- length(raw_traits)
   n_sp <- length(present_tx)
@@ -2643,7 +2861,29 @@ draw_structure_posterior_barplot <- function(audit_df, cda_res, sp_clean, taxon_
   )
 }
 
-draw_group_mean_leaf_outlines <- function(df, group_vec, group_cols, main_title = "B. Mean Leaf Outline Reconstructions (+/- 1 SD)") {
+draw_group_mean_leaf_outlines <- function(df, group_vec, group_cols, main_title = "B. Basal Mean Leaf Outline Reconstructions (+/- 1 SD)", allow_cauline = FALSE) {
+  if (!isTRUE(allow_cauline) && !is.null(df) && nrow(df) > 0L) {
+    bas_out_ok <- rep(TRUE, nrow(df))
+    if ("leaf_zone" %in% names(df)) {
+      lz_o <- tolower(trimws(as.character(df$leaf_zone)))
+      bas_out_ok <- bas_out_ok & (is.na(lz_o) | !nzchar(lz_o) | lz_o != "cauline")
+    }
+    if ("morph_tier_source" %in% names(df)) {
+      mts_o <- trimws(as.character(df$morph_tier_source))
+      bas_out_ok <- bas_out_ok & (is.na(mts_o) | mts_o != "Cauline_Only_Fallback")
+    }
+    if ("basal_leaf_count" %in% names(df)) {
+      blc_o <- suppressWarnings(as.numeric(df$basal_leaf_count))
+      if (any(is.finite(blc_o) & blc_o > 0)) {
+        bas_out_ok <- bas_out_ok & (is.na(blc_o) | blc_o > 0)
+      }
+    }
+    if (any(bas_out_ok, na.rm = TRUE)) {
+      keep_o <- which(bas_out_ok)
+      df <- df[keep_o, , drop = FALSE]
+      if (length(group_vec) >= max(keep_o)) group_vec <- group_vec[keep_o]
+    }
+  }
   tier_info <- resolve_taxon_display_tier(df, group_vec)
   disp_grp <- utils::head(tier_info$ordered_groups, 9L)
   if (length(disp_grp) == 0L) disp_grp <- "Morphotype_K1"

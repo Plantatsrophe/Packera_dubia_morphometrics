@@ -696,8 +696,10 @@ run_fourier_extraction <- function(opts) {
     if (exists("generate_step03_pub_figures", mode = "function")) { export_step03_fourier_pc_tables(specimen_df, efa_df, opts$output); generate_step03_pub_figures(efa_df, specimen_df, harm_mat, if (exists("pca_fit")) pca_fit else NULL, opts$figures_dir, opts$output, sym_res$pca) }
   }, error = function(e) warning("Step 03 publication figures/tables export warning: ", e$message))
 
-  # 6. Empirical Tier Validation Test (PERMANOVA via adonis2 / fallback stats::manova)
-  valid_tier_idx <- which(!is.na(efa_df$reconstruction_tier) & !is.na(efa_df$scientificName) & nzchar(as.character(efa_df$scientificName)) &
+  # 6. Empirical Tier Validation Test (PERMANOVA via adonis2 / fallback stats::manova on basal leaves)
+  t_zone_ok <- if ("leaf_zone" %in% names(efa_df)) tolower(trimws(as.character(efa_df$leaf_zone))) != "cauline" else rep(TRUE, nrow(efa_df))
+  if (!any(t_zone_ok, na.rm = TRUE)) t_zone_ok <- rep(TRUE, nrow(efa_df))
+  valid_tier_idx <- which(t_zone_ok & !is.na(efa_df$reconstruction_tier) & !is.na(efa_df$scientificName) & nzchar(as.character(efa_df$scientificName)) &
                           !is.na(efa_df$determiner_tier) & nzchar(as.character(efa_df$determiner_tier)) & complete.cases(sym_harmonics))
   if (length(valid_tier_idx) >= 10) {
     tier_manifest <- efa_df[valid_tier_idx, , drop = FALSE]; tier_sym <- sym_harmonics[valid_tier_idx, , drop = FALSE]
