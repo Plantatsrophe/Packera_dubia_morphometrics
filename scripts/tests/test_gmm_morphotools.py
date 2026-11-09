@@ -1853,7 +1853,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         stopifnot(gmm_geo$best_k >= 2L)
 
         # Case C: Direct matrix-dimension regression checks on compute_cluster_spatial_segregation_p & compute_spca_global_test
-        p_seg_sym <- compute_cluster_spatial_segregation_p(rep(1:2, length.out = n_sym), df_sym, permutations = 99L)
+        p_seg_sym <- compute_cluster_spatial_segregation_p(rep(rep(1:2, each = 4L), length.out = n_sym), df_sym, permutations = 99L)
         p_seg_geo <- compute_cluster_spatial_segregation_p(ifelse(west_m, 1L, 2L), df_geo, permutations = 99L)
         spca_geo <- compute_spca_global_test(as.matrix(df_geo[, c("PC1", "PC2", "PC3")]), df_geo, permutations = 99L)
         stopifnot(is.finite(p_seg_sym) && p_seg_sym > 0.05)
