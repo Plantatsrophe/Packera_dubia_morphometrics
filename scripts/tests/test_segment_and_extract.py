@@ -2274,7 +2274,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         and separate silhouette montages (`fig02b_silhouette_montage` for basal
         and `fig02c_cauline_silhouette_montage` for cauline) without overlaying them.
         """
-        from scripts.vision.step02_figures import generate_step02_pub_figures
+        from scripts.vision.step02_figures import generate_step02_publication_figures
 
         with tempfile.TemporaryDirectory() as tmp_d:
             tmp_path = Path(tmp_d)
@@ -2313,7 +2313,13 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                 )
             df_bc = pd.DataFrame(rows)
             fig_dir = tmp_path / "figs_bc"
-            saved = generate_step02_pub_figures(df_bc, pd.DataFrame(), output_dir=fig_dir)
+            saved = generate_step02_publication_figures(
+                df_bc,
+                pd.DataFrame(),
+                pd.DataFrame(),
+                pd.DataFrame(),
+                figures_dir=fig_dir,
+            )
             self.assertIn("fig02a_pdf", saved)
             self.assertIn("fig02b_pdf", saved)
             self.assertIn("fig02c_pdf", saved)
