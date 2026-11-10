@@ -1111,8 +1111,10 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             stopifnot(file.exists(file.path(tmp_root, "k1_fig", "fig05_ecological_niche_phenology.png")))
             cat("NONCIRCULAR_K1_IBE_AND_HYGIENE_OK\n")
             """
-            res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
-            self.assertEqual(res.returncode, 0, f"Non-circular K=1 & edaphic hygiene test failed:\n{{res.stderr}}\n{{res.stdout}}")
+            r_script_file = Path(tmp_d) / "test_noncircular_k1_hygiene.R"
+            r_script_file.write_text(r_code, encoding="utf-8")
+            res = subprocess.run(["Rscript", str(r_script_file)], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0, f"Non-circular K=1 & edaphic hygiene test failed:\n{res.stderr}\n{res.stdout}")
             self.assertIn("NONCIRCULAR_K1_IBE_AND_HYGIENE_OK", res.stdout)
 
     def test_step05_eastern_na_figure_refinements(self):

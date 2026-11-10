@@ -1210,7 +1210,13 @@ resolve_analysis_group <- function(
     #   Gate 3 (Independent Phenotypic Coupling when Step 04 morphology returned G = 1): significant morphological or allochronic divergence
     if (isTRUE(allow_unimodal_null)) {
       var_red <- if (is.finite(tot_ss) && tot_ss > 1e-8) (1.0 - best_tot_within / tot_ss) else 0.0
-      pass_env_gap <- is.finite(best_sil) && (best_sil >= 0.42) && (var_red >= 0.50) && (min(table(best_cl)) >= 5L)
+      pc1_vec <- as.numeric(pca_scores[, 1])
+      pc1_tot_ss <- sum((pc1_vec - mean(pc1_vec))^2)
+      pc1_within_ss <- sum(tapply(pc1_vec, best_cl, function(z) sum((z - mean(z))^2)))
+      var_red_pc1 <- if (is.finite(pc1_tot_ss) && pc1_tot_ss > 1e-8) (1.0 - pc1_within_ss / pc1_tot_ss) else 0.0
+      pass_env_gap <- is.finite(best_sil) && (best_sil >= 0.42) &&
+                      ((var_red >= 0.50) || (var_red >= 0.42 && var_red_pc1 >= 0.65)) &&
+                      (min(table(best_cl)) >= 5L)
 
       geo_kappa <- if (has_coords) compute_geo_knn_kappa(df[, c("longitude", "latitude"), drop = FALSE], best_cl, k_nn = 5L) else NA_real_
       symp_10km <- if (!is.null(attr(geo_kappa, "sympatric_10km_rate"))) as.numeric(attr(geo_kappa, "sympatric_10km_rate")) else 0.0
@@ -1218,10 +1224,11 @@ resolve_analysis_group <- function(
 
       pheno_cpl <- evaluate_phenotypic_ecotype_coupling(df, best_cl)
       # If Step 04 evaluated leaf morphology and found G = 1 unimodal morphology, require independent phenotypic coupling
-      pass_pheno_gate <- if (isTRUE(has_step04_gmm) || isTRUE(pheno_cpl$has_independent_modality && has_step04_gmm)) {
+      pass_pheno_gate <- if (isTRUE(has_step04_gmm)) {
         isTRUE(pheno_cpl$pass)
       } else {
-        !isTRUE(pheno_cpl$has_independent_modality) || isTRUE(pheno_cpl$pass) || (is.finite(geo_kappa) && geo_kappa >= 0.75 && best_sil >= 0.55)
+        !isTRUE(pheno_cpl$has_independent_modality) || isTRUE(pheno_cpl$pass) ||
+          (is.finite(geo_kappa) && geo_kappa >= 0.75 && symp_10km <= 0.10 && best_sil >= 0.42)
       }
 
       if (!(pass_env_gap && pass_geo && pass_pheno_gate)) {

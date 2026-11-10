@@ -340,12 +340,19 @@ extract_sgmc_lithology <- function(df, env_dir = "data/environmental", demo = FA
         hits <- sf::st_intersects(pts_sf, sgmc_sf)
         v_idx <- which(valid_pts)
         cn_up <- toupper(names(sgmc_sf))
-        col_r1 <- names(sgmc_sf)[match("ROCKTYPE1", cn_up)]
-        col_r2 <- names(sgmc_sf)[match("ROCKTYPE2", cn_up)]
-        col_m1 <- names(sgmc_sf)[match("MAJOR1", cn_up)]
-        col_un <- names(sgmc_sf)[match("UNIT_NAME", cn_up)]
-        col_gn <- names(sgmc_sf)[match("GENERALIZE", cn_up)]
-        col_rt <- names(sgmc_sf)[match("ROCK_TYPE", cn_up)]
+        pick_sgmc_col <- function(cands) {
+          for (cc in cands) {
+            idx_c <- match(cc, cn_up)
+            if (!is.na(idx_c)) return(names(sgmc_sf)[idx_c])
+          }
+          NA_character_
+        }
+        col_r1 <- pick_sgmc_col(c("ROCKTYPE1", "MAJOR1"))
+        col_r2 <- pick_sgmc_col(c("ROCKTYPE2", "MAJOR2", "MINOR1"))
+        col_m1 <- pick_sgmc_col(c("MAJOR1", "ROCKTYPE1"))
+        col_un <- pick_sgmc_col(c("UNIT_NAME", "UNITNAME"))
+        col_gn <- pick_sgmc_col(c("GENERALIZE", "GENERALIZED_LITH", "GEN_LITH"))
+        col_rt <- pick_sgmc_col(c("ROCK_TYPE", "ORIG_LABEL"))
         for (k in seq_along(v_idx)) {
           h_k <- hits[[k]]
           if (length(h_k) > 0L) {
@@ -497,12 +504,36 @@ flag_coordinate_uncertainty <- function(
 
 .list_real_fine_rasters <- function(dir_path, exclude_pattern = "^dem_3dep_regional\\.tif$") {
   if (is.null(dir_path) || !nzchar(dir_path) || !dir.exists(dir_path)) return(character(0))
-  fls <- list.files(dir_path, pattern = "\\.(tif|tiff)$", full.names = TRUE, ignore.case = TRUE)
+  fls <- list.files(dir_path, pattern = "\\.(tif|tiff|hgt)$", full.names = TRUE, ignore.case = TRUE)
   if (length(fls) == 0L) return(character(0))
   if (!is.null(exclude_pattern) && nzchar(exclude_pattern)) {
     fls <- fls[!grepl(exclude_pattern, basename(fls), ignore.case = TRUE)]
   }
   fls[file.exists(fls) & file.info(fls)$size > 256]
+}
+
+.project_vect_to_rast <- function(v_geom, r_rast) {
+  if (is.null(v_geom) || is.null(r_rast)) return(v_geom)
+  r_crs <- tryCatch(terra::crs(r_rast), error = function(e) "")
+  v_crs <- tryCatch(terra::crs(v_geom), error = function(e) "")
+  if (nzchar(r_crs) && nzchar(v_crs) && !isTRUE(tryCatch(terra::same.crs(v_geom, r_rast), error = function(e) FALSE))) {
+    v_geom <- tryCatch(terra::project(v_geom, r_crs), error = function(e) v_geom)
+  }
+  v_geom
+}
+
+.rescale_solus_ph_vec <- function(v_raw) {
+  v <- suppressWarnings(as.numeric(v_raw))
+  fin <- v[is.finite(v)]
+  if (length(fin) == 0L) return(v)
+  med_v <- stats::median(fin, na.rm = TRUE)
+  if (is.finite(med_v) && med_v > 100.0) {
+    v <- v / 100.0
+  } else if (is.finite(med_v) && med_v > 14.5) {
+    v <- v / 10.0
+  }
+  v[!is.finite(v) | v < 2.0 | v > 11.5] <- NA_real_
+  v
 }
 
 extract_uncertainty_buffered_predictors <- function(df, env_dir = "data/environmental", demo = FALSE) {
@@ -547,33 +578,49 @@ extract_uncertainty_buffered_predictors <- function(df, env_dir = "data/environm
       } else NULL
 
       if (!is.null(buf_v)) {
-        ph_tifs <- pol_files[grepl("^ph_", basename(pol_files), ignore.case = TRUE)]
+        ph_tifs <- c(
+          pol_files[grepl("^ph_", basename(pol_files), ignore.case = TRUE)],
+          sol_files[grepl("^ph1to1h2o.*_5_cm_p|^ph1to1h2o|^ph_", basename(sol_files), ignore.case = TRUE)]
+        )
         if (length(ph_tifs) > 0L) {
           tryCatch({
             r_ph <- terra::rast(ph_tifs[1L])
-            ex_q10 <- terra::extract(r_ph, buf_v, fun = function(x) stats::quantile(x, probs = 0.10, na.rm = TRUE))[[2]]
-            ex_q90 <- terra::extract(r_ph, buf_v, fun = function(x) stats::quantile(x, probs = 0.90, na.rm = TRUE))[[2]]
+            buf_ph <- .project_vect_to_rast(buf_v, r_ph)
+            ex_q10 <- .rescale_solus_ph_vec(terra::extract(r_ph, buf_ph, fun = function(x) stats::quantile(x, probs = 0.10, na.rm = TRUE))[[2]])
+            ex_q90 <- .rescale_solus_ph_vec(terra::extract(r_ph, buf_ph, fun = function(x) stats::quantile(x, probs = 0.90, na.rm = TRUE))[[2]])
             df$ph_q10_buffer[v_idx] <- round(as.numeric(ex_q10), 2)
             df$ph_q90_buffer[v_idx] <- round(as.numeric(ex_q90), 2)
           }, error = function(e) NULL)
         }
-        res_tifs <- sol_files[grepl("resdept|bdricm", basename(sol_files), ignore.case = TRUE)]
+        res_tifs <- sol_files[grepl("anylithicdpt|resdept|bdricm", basename(sol_files), ignore.case = TRUE)]
         if (length(res_tifs) > 0L) {
-          tryCatch({
-            r_bd <- terra::rast(res_tifs[1L])
-            ex_min <- terra::extract(r_bd, buf_v, fun = function(x) min(x, na.rm = TRUE))[[2]]
-            ex_min[!is.finite(ex_min)] <- NA_real_
-            df$min_bedrock_depth_buffer_cm[v_idx] <- round(pmin(200.0, pmax(0.0, as.numeric(ex_min))), 1)
-          }, error = function(e) NULL)
+          min_accum <- rep(Inf, length(v_idx))
+          for (rt_p in res_tifs) {
+            tryCatch({
+              r_bd <- terra::rast(rt_p)
+              buf_bd <- .project_vect_to_rast(buf_v, r_bd)
+              ex_m <- suppressWarnings(as.numeric(terra::extract(r_bd, buf_bd, fun = function(x) min(x, na.rm = TRUE))[[2]]))
+              ok_m <- is.finite(ex_m) & ex_m >= 0.0
+              min_accum[ok_m] <- pmin(min_accum[ok_m], ex_m[ok_m])
+            }, error = function(e) NULL)
+          }
+          min_accum[!is.finite(min_accum)] <- NA_real_
+          df$min_bedrock_depth_buffer_cm[v_idx] <- round(pmin(200.0, pmax(0.0, min_accum)), 1)
         }
-        cf_tifs <- sol_files[grepl("fragvol|cfvo", basename(sol_files), ignore.case = TRUE)]
+        cf_tifs <- sol_files[grepl("fragvol_0_cm_p|fragvol_5_cm_p|fragvol_15_cm_p|fragvol|cfvo", basename(sol_files), ignore.case = TRUE)]
         if (length(cf_tifs) > 0L) {
-          tryCatch({
-            r_cf <- terra::rast(cf_tifs[1L])
-            ex_max <- terra::extract(r_cf, buf_v, fun = function(x) max(x, na.rm = TRUE))[[2]]
-            ex_max[!is.finite(ex_max)] <- NA_real_
-            df$max_cfvo_buffer_pct[v_idx] <- round(pmin(100.0, pmax(0.0, as.numeric(ex_max))), 1)
-          }, error = function(e) NULL)
+          max_cf <- rep(-Inf, length(v_idx))
+          for (cf_p in utils::head(cf_tifs, 3L)) {
+            tryCatch({
+              r_cf <- terra::rast(cf_p)
+              buf_cf <- .project_vect_to_rast(buf_v, r_cf)
+              ex_c <- suppressWarnings(as.numeric(terra::extract(r_cf, buf_cf, fun = function(x) max(x, na.rm = TRUE))[[2]]))
+              ok_c <- is.finite(ex_c) & ex_c >= 0.0
+              max_cf[ok_c] <- pmax(max_cf[ok_c], ex_c[ok_c])
+            }, error = function(e) NULL)
+          }
+          max_cf[!is.finite(max_cf)] <- NA_real_
+          df$max_cfvo_buffer_pct[v_idx] <- round(pmin(100.0, pmax(0.0, max_cf)), 1)
         }
       }
     }
@@ -1106,7 +1153,8 @@ extract_polaris_and_solus_predictors <- function(coords_df, env_dir = "data/envi
         for (f_i in seq_along(files_vec)) {
           vals_mat[, f_i] <- tryCatch({
             r_tile <- terra::rast(files_vec[f_i])
-            as.numeric(terra::extract(r_tile, pts_vect)[[2]])
+            pts_tile <- .project_vect_to_rast(pts_vect, r_tile)
+            as.numeric(terra::extract(r_tile, pts_tile)[[2]])
           }, error = function(e) rep(NA_real_, length(conus_idx)))
         }
         has_v <- rowSums(!is.na(vals_mat)) > 0
@@ -1136,7 +1184,8 @@ extract_polaris_and_solus_predictors <- function(coords_df, env_dir = "data/envi
       }
     }
 
-    # 2. Check data/environmental/solus_100m/ and gssurgo_30m/ for resdept/bdricm, fragvol/cfvo (0-5 & 5-15cm), and awc
+    # 2. Check data/environmental/solus_100m/ and gssurgo_30m/ for anylithicdpt/resdept/bdricm, fragvol/cfvo, and ph1to1h2o
+    solus_ph_vec <- rep(NA_real_, n)
     existing_solus <- c(
       list.files(solus_dir, pattern = "\\.(tif|tiff)$", full.names = TRUE, ignore.case = TRUE),
       if (dir.exists(gssurgo_dir)) list.files(gssurgo_dir, pattern = "\\.(tif|tiff)$", full.names = TRUE, ignore.case = TRUE) else character(0)
@@ -1145,31 +1194,65 @@ extract_polaris_and_solus_predictors <- function(coords_df, env_dir = "data/envi
       pts_vect <- terra::vect(df[in_conus, c("longitude", "latitude"), drop = FALSE],
                               geom = c("longitude", "latitude"), crs = "EPSG:4326")
       conus_idx <- which(in_conus)
-      resdept_files <- existing_solus[grepl("resdept|bdricm", basename(existing_solus), ignore.case = TRUE)]
-      if (length(resdept_files) > 0) {
-        v_res <- tryCatch({
-          r_sol <- terra::rast(resdept_files[1])
-          as.numeric(terra::extract(r_sol, pts_vect)[[2]])
+      ext_solus_1 <- function(r_path) {
+        tryCatch({
+          r_sol <- terra::rast(r_path)
+          pts_proj <- .project_vect_to_rast(pts_vect, r_sol)
+          as.numeric(terra::extract(r_sol, pts_proj)[[2]])
         }, error = function(e) rep(NA_real_, length(conus_idx)))
+      }
+      resdept_files <- existing_solus[grepl("anylithicdpt|resdept|bdricm", basename(existing_solus), ignore.case = TRUE)]
+      if (length(resdept_files) > 0) {
+        v_res <- rep(Inf, length(conus_idx))
+        for (rf_p in resdept_files) {
+          vr_i <- ext_solus_1(rf_p)
+          ok_i <- is.finite(vr_i) & vr_i >= 0.0
+          v_res[ok_i] <- pmin(v_res[ok_i], vr_i[ok_i])
+        }
+        v_res[!is.finite(v_res)] <- NA_real_
         ok_r <- !is.na(v_res) & is.finite(v_res)
-        if (any(ok_r)) df$solus_resdept_cm[conus_idx[ok_r]] <- pmin(200.0, pmax(0.0, v_res[ok_r]))
+        if (any(ok_r)) df$solus_resdept_cm[conus_idx[ok_r]] <- round(pmin(200.0, pmax(0.0, v_res[ok_r])), 1)
       }
       frag_files <- existing_solus[grepl("fragvol|cfvo", basename(existing_solus), ignore.case = TRUE)]
       if (length(frag_files) > 0) {
         f_0_5  <- frag_files[grepl("0_5|0-5", basename(frag_files), ignore.case = TRUE)]
         f_5_15 <- frag_files[grepl("5_15|5-15", basename(frag_files), ignore.case = TRUE)]
+        f_0cm  <- frag_files[grepl("(^|_)0_cm(_|\\.)", basename(frag_files), ignore.case = TRUE)]
+        f_5cm  <- frag_files[grepl("(^|_)5_cm(_|\\.)", basename(frag_files), ignore.case = TRUE)]
+        f_15cm <- frag_files[grepl("(^|_)15_cm(_|\\.)", basename(frag_files), ignore.case = TRUE)]
         if (length(f_0_5) > 0 && length(f_5_15) > 0) {
-          v_f1 <- tryCatch(as.numeric(terra::extract(terra::rast(f_0_5[1]), pts_vect)[[2]]), error = function(e) rep(NA_real_, length(conus_idx)))
-          v_f2 <- tryCatch(as.numeric(terra::extract(terra::rast(f_5_15[1]), pts_vect)[[2]]), error = function(e) rep(NA_real_, length(conus_idx)))
-          v_frg <- compute_rhizosphere_0_15cm(v_f1, v_f2)
+          v_frg <- compute_rhizosphere_0_15cm(ext_solus_1(f_0_5[1]), ext_solus_1(f_5_15[1]))
+        } else if (length(f_0cm) > 0 && length(f_5cm) > 0 && length(f_15cm) > 0) {
+          x0  <- ext_solus_1(f_0cm[1])
+          x5  <- ext_solus_1(f_5cm[1])
+          x15 <- ext_solus_1(f_15cm[1])
+          v_frg <- compute_rhizosphere_0_15cm(0.5 * (x0 + x5), 0.5 * (x5 + x15))
         } else {
-          v_frg <- tryCatch(as.numeric(terra::extract(terra::rast(frag_files[1]), pts_vect)[[2]]), error = function(e) rep(NA_real_, length(conus_idx)))
+          v_frg <- ext_solus_1(frag_files[1])
         }
         ok_f <- !is.na(v_frg) & is.finite(v_frg)
-        if (any(ok_f)) df$solus_fragvol_pct[conus_idx[ok_f]] <- pmin(100.0, pmax(0.0, v_frg[ok_f]))
+        if (any(ok_f)) df$solus_fragvol_pct[conus_idx[ok_f]] <- round(pmin(100.0, pmax(0.0, v_frg[ok_f])), 1)
+      }
+      ph_sol_files <- existing_solus[grepl("^ph1to1h2o|^ph_solus", basename(existing_solus), ignore.case = TRUE)]
+      if (length(ph_sol_files) > 0) {
+        p_0cm  <- ph_sol_files[grepl("(^|_)0_cm(_|\\.)", basename(ph_sol_files), ignore.case = TRUE)]
+        p_5cm  <- ph_sol_files[grepl("(^|_)5_cm(_|\\.)", basename(ph_sol_files), ignore.case = TRUE)]
+        p_15cm <- ph_sol_files[grepl("(^|_)15_cm(_|\\.)", basename(ph_sol_files), ignore.case = TRUE)]
+        if (length(p_0cm) > 0 && length(p_5cm) > 0 && length(p_15cm) > 0) {
+          p0  <- .rescale_solus_ph_vec(ext_solus_1(p_0cm[1]))
+          p5  <- .rescale_solus_ph_vec(ext_solus_1(p_5cm[1]))
+          p15 <- .rescale_solus_ph_vec(ext_solus_1(p_15cm[1]))
+          v_phs <- compute_rhizosphere_0_15cm(0.5 * (p0 + p5), 0.5 * (p5 + p15))
+        } else {
+          v_phs <- .rescale_solus_ph_vec(ext_solus_1(ph_sol_files[1]))
+        }
+        ok_p <- !is.na(v_phs) & is.finite(v_phs)
+        if (any(ok_p)) solus_ph_vec[conus_idx[ok_p]] <- round(v_phs[ok_p], 2)
       }
     }
   }
+
+  if (!exists("solus_ph_vec", inherits = FALSE)) solus_ph_vec <- rep(NA_real_, n)
 
   # 3. Calibrate missing POLARIS 30m / SOLUS 100m estimates using a strict non-blended coalesce hierarchy
   # (use 100% SSURGO / 30m POLARIS / 100m SOLUS100 whenever non-NA, falling back to 250m SoilGrids sg_* ONLY when both SSURGO and POLARIS are NA outside CONUS)
@@ -1252,10 +1335,11 @@ extract_polaris_and_solus_predictors <- function(coords_df, env_dir = "data/envi
 
   # 4. Strict non-blended coalesce hierarchy into canonical fine_soil_* and physical outcrop columns
   # (use 100% SSURGO / 30m POLARIS / 100m SOLUS100 whenever non-NA, falling back to sg_* ONLY when both SSURGO and POLARIS are NA outside CONUS):
+  fine_ph_raster <- ifelse(!is.na(df$polaris_ph_30m), df$polaris_ph_30m, solus_ph_vec)
   df$fine_soil_ph <- round(ifelse(
-    !is.na(ss_ph) & !is.na(df$polaris_ph_30m),
-    ifelse(is_out | ss_out >= 15.0, 0.70 * ss_ph + 0.30 * df$polaris_ph_30m, 0.50 * ss_ph + 0.50 * df$polaris_ph_30m),
-    ifelse(!is.na(ss_ph), ss_ph, ifelse(!is.na(df$polaris_ph_30m), df$polaris_ph_30m, sg_ph))
+    !is.na(ss_ph) & !is.na(fine_ph_raster),
+    ifelse(is_out | ss_out >= 15.0, 0.70 * ss_ph + 0.30 * fine_ph_raster, 0.50 * ss_ph + 0.50 * fine_ph_raster),
+    ifelse(!is.na(ss_ph), ss_ph, ifelse(!is.na(fine_ph_raster), fine_ph_raster, sg_ph))
   ), 2)
 
   df$fine_soil_sand <- round(ifelse(
@@ -1347,33 +1431,74 @@ extract_micro_topography_3dep <- function(coords_df, env_dir = "data/environment
     tryCatch(unlink(stale_regional_dem), error = function(e) NULL)
   }
 
-  dem_rast <- NULL
   has_real_dem <- FALSE
   if (!isTRUE(demo) && any(valid_pts) && requireNamespace("terra", quietly = TRUE)) {
-    dem_files <- .list_real_fine_rasters(dem_dir)
+    dem_files <- .list_real_fine_rasters(dem_dir, exclude_pattern = "^dem_3dep_regional\\.tif$")
     if (length(dem_files) > 0L) {
-      dem_rast <- tryCatch(terra::rast(dem_files[1L]), error = function(e) NULL)
-    }
+      v_idx <- which(valid_pts)
+      stems_up <- toupper(sub("\\.(tif|tiff|hgt)$", "", basename(dem_files), ignore.case = TRUE))
+      is_grid_tile <- grepl("^[NS][0-9]{2}[EW][0-9]{3}$", stems_up)
 
-    if (!is.null(dem_rast)) {
-      tryCatch({
-        pts_vect <- terra::vect(df[valid_pts, c("longitude", "latitude"), drop = FALSE],
-                                geom = c("longitude", "latitude"), crs = "EPSG:4326")
-        focal_mean <- terra::focal(dem_rast, w = 5, fun = mean, na.rm = TRUE)
-        tpi_rast   <- dem_rast - focal_mean
-        rough_rast <- terra::terrain(dem_rast, v = "roughness")
-        slope_rast <- terra::terrain(dem_rast, v = "slope", unit = "degrees")
+      extract_from_single_dem <- function(r_dem, sub_rows_idx) {
+        if (is.null(r_dem) || length(sub_rows_idx) == 0L) return(invisible(NULL))
+        tryCatch({
+          pts_sub <- terra::vect(df[sub_rows_idx, c("longitude", "latitude"), drop = FALSE],
+                                 geom = c("longitude", "latitude"), crs = "EPSG:4326")
+          pts_proj <- .project_vect_to_rast(pts_sub, r_dem)
+          ext_pts <- terra::ext(pts_proj)
+          res_xy <- terra::res(r_dem)
+          pad_x <- max(res_xy[1] * 12.0, 1e-4)
+          pad_y <- max(res_xy[2] * 12.0, 1e-4)
+          crop_win <- terra::ext(ext_pts[1] - pad_x, ext_pts[2] + pad_x, ext_pts[3] - pad_y, ext_pts[4] + pad_y)
+          r_sub <- tryCatch(terra::crop(r_dem, crop_win), error = function(e) NULL)
+          if (is.null(r_sub) || terra::ncell(r_sub) < 9L) return(invisible(NULL))
 
-        v_tpi   <- as.numeric(terra::extract(tpi_rast, pts_vect)[[2]])
-        v_rough <- as.numeric(terra::extract(rough_rast, pts_vect)[[2]])
-        v_slope <- as.numeric(terra::extract(slope_rast, pts_vect)[[2]])
+          focal_mean <- terra::focal(r_sub, w = 5, fun = mean, na.rm = TRUE)
+          tpi_rast   <- r_sub - focal_mean
+          rough_rast <- terra::terrain(r_sub, v = "roughness")
+          slope_rast <- terra::terrain(r_sub, v = "slope", unit = "degrees")
 
-        v_idx <- which(valid_pts)
-        df$topo_tpi_30m[v_idx]       <- round(v_tpi, 2)
-        df$topo_roughness_30m[v_idx] <- round(v_rough, 2)
-        df$topo_slope_deg[v_idx]     <- round(v_slope, 2)
-        has_real_dem <- any(is.finite(v_tpi) | is.finite(v_slope))
-      }, error = function(e) NULL)
+          v_tpi   <- as.numeric(terra::extract(tpi_rast, pts_proj)[[2]])
+          v_rough <- as.numeric(terra::extract(rough_rast, pts_proj)[[2]])
+          v_slope <- as.numeric(terra::extract(slope_rast, pts_proj)[[2]])
+
+          ok_t <- is.finite(v_tpi)
+          ok_r <- is.finite(v_rough)
+          ok_s <- is.finite(v_slope)
+          if (any(ok_t)) df$topo_tpi_30m[sub_rows_idx[ok_t]]       <<- round(v_tpi[ok_t], 2)
+          if (any(ok_r)) df$topo_roughness_30m[sub_rows_idx[ok_r]] <<- round(v_rough[ok_r], 2)
+          if (any(ok_s)) df$topo_slope_deg[sub_rows_idx[ok_s]]     <<- round(v_slope[ok_s], 2)
+        }, error = function(e) NULL)
+      }
+
+      if (any(is_grid_tile)) {
+        tile_map <- stats::setNames(dem_files[is_grid_tile], stems_up[is_grid_tile])
+        lat_fl <- as.integer(floor(lat_v[v_idx]))
+        lon_fl <- as.integer(floor(lon_v[v_idx]))
+        pt_tiles <- sprintf("%s%02d%s%03d", ifelse(lat_fl >= 0L, "N", "S"), abs(lat_fl), ifelse(lon_fl >= 0L, "E", "W"), abs(lon_fl))
+        for (tid in unique(pt_tiles)) {
+          if (tid %in% names(tile_map)) {
+            rows_tid <- v_idx[pt_tiles == tid]
+            r_tile <- tryCatch(terra::rast(tile_map[[tid]]), error = function(e) NULL)
+            extract_from_single_dem(r_tile, rows_tid)
+          }
+        }
+      }
+
+      other_dems <- dem_files[!is_grid_tile]
+      if (length(other_dems) > 0L) {
+        rem_idx <- v_idx[is.na(df$topo_tpi_30m[v_idx])]
+        if (length(rem_idx) > 0L) {
+          for (od_p in other_dems) {
+            r_od <- tryCatch(terra::rast(od_p), error = function(e) NULL)
+            extract_from_single_dem(r_od, rem_idx)
+            rem_idx <- v_idx[is.na(df$topo_tpi_30m[v_idx])]
+            if (length(rem_idx) == 0L) break
+          }
+        }
+      }
+
+      has_real_dem <- any(is.finite(df$topo_tpi_30m[v_idx]) | is.finite(df$topo_roughness_30m[v_idx]))
     }
   }
 
@@ -1509,11 +1634,14 @@ load_and_update_fine_grain_cache <- function(
       }
     }
 
-    has_pol_disk <- length(c(.list_real_fine_rasters(file.path(env_dir, "polaris_30m")), .list_real_fine_rasters(file.path(env_dir, "gssurgo_30m")))) > 0L
-    has_sol_disk <- length(c(.list_real_fine_rasters(file.path(env_dir, "solus_100m")), .list_real_fine_rasters(file.path(env_dir, "gssurgo_30m")))) > 0L
+    pol_disk_fls <- c(.list_real_fine_rasters(file.path(env_dir, "polaris_30m")), .list_real_fine_rasters(file.path(env_dir, "gssurgo_30m")))
+    sol_disk_fls <- c(.list_real_fine_rasters(file.path(env_dir, "solus_100m")), .list_real_fine_rasters(file.path(env_dir, "gssurgo_30m")))
+    has_pol_disk <- length(pol_disk_fls) > 0L
+    has_sol_disk <- length(sol_disk_fls) > 0L
+    has_sol_ph_disk <- any(grepl("^ph1to1h2o|^ph_", basename(sol_disk_fls), ignore.case = TRUE))
     stale_dem_p <- file.path(env_dir, "dem_3dep_30m", "dem_3dep_regional.tif")
     if (!isTRUE(demo) && file.exists(stale_dem_p)) tryCatch(unlink(stale_dem_p), error = function(e) NULL)
-    has_dem_disk <- length(.list_real_fine_rasters(file.path(env_dir, "dem_3dep_30m"))) > 0L
+    has_dem_disk <- length(.list_real_fine_rasters(file.path(env_dir, "dem_3dep_30m"), exclude_pattern = "^dem_3dep_regional\\.tif$")) > 0L
 
     uncached_mask <- is.na(df$fine_soil_ph) | is.na(df$fine_soil_sand) | is.na(df$fine_bedrock_depth_cm) |
                      (has_dem_disk & (is.na(df$topo_tpi_30m) | is.na(df$topo_twi_30m)))
@@ -1539,10 +1667,15 @@ load_and_update_fine_grain_cache <- function(
     }
 
     # Backfill extended physical outcrop predictors, SGMC lithology, and uncertainty-buffered extrema ONLY on rows missing them
+    miss_solus_vals <- if (has_sol_disk) {
+      (!("solus_resdept_cm" %in% names(df)) | is.na(df$solus_resdept_cm) |
+       !("solus_fragvol_pct" %in% names(df)) | is.na(df$solus_fragvol_pct))
+    } else rep(FALSE, n)
     need_polaris_ext <- !("bdricm" %in% names(df)) | is.na(df$bdricm) |
                         !("awc" %in% names(df)) | is.na(df$awc) |
                         !("alr_sand_clay" %in% names(df)) | is.na(df$alr_sand_clay) |
-                        !("fine_soil_cec" %in% names(df)) | is.na(df$fine_soil_cec)
+                        !("fine_soil_cec" %in% names(df)) | is.na(df$fine_soil_cec) |
+                        miss_solus_vals
     if (any(need_polaris_ext)) {
       p_sub <- extract_polaris_and_solus_predictors(df[need_polaris_ext, , drop = FALSE], env_dir = env_dir, demo = demo)
       for (col in setdiff(names(p_sub), c("catalogNumber", "lat_lon_key", "latitude", "longitude"))) {
@@ -1595,7 +1728,9 @@ load_and_update_fine_grain_cache <- function(
         }
       }
       if (!has_pol_disk) {
-        pol_c <- intersect(c("polaris_ph_30m", "polaris_sand_30m", "polaris_clay_30m", "polaris_om_30m", "polaris_bd_30m", "polaris_ksat_30m", "ph_q10_buffer", "ph_q90_buffer"), names(df))
+        pol_only_cols <- c("polaris_ph_30m", "polaris_sand_30m", "polaris_clay_30m", "polaris_om_30m", "polaris_bd_30m", "polaris_ksat_30m")
+        if (!has_sol_ph_disk) pol_only_cols <- c(pol_only_cols, "ph_q10_buffer", "ph_q90_buffer")
+        pol_c <- intersect(pol_only_cols, names(df))
         if (any(vapply(pol_c, function(cc) any(!is.na(df[[cc]])), logical(1)))) {
           for (cc in pol_c) df[[cc]] <- rep(NA_real_, n)
           sanitized_stale <- TRUE

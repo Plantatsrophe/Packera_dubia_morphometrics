@@ -52,6 +52,8 @@ NO_SPATIAL_WEIGHTS=false
 USDA_COUNTY_FILTER=""
 USDA_COUNTY_BUFFER_KM=""
 USDA_EXEMPT_GOLD=""
+SKIP_ENV_DOWNLOAD=false
+FORCE_ENV_DOWNLOAD=false
 LIMIT_ARG=()
 DEMO_FLAG=()
 FOCAL_ARGS=()
@@ -117,6 +119,8 @@ Geographic Scope & Spatial Sampling:
   --usda-county-buffer-km <FLOAT>    Geodesic buffer in km around USDA PLANTS documented counties (default: 50.0)
   --usda-exempt-gold / --no-usda-exempt-gold
                                      Toggle Tier_1_Gold exemption for USDA county range filtering (default: true)
+  --skip-env-download                Skip automatic preflight verification/download of SOLUS100, SGMC, and 3DEP layers
+  --force-env-download               Force re-download of SOLUS100, SGMC, and 3DEP environmental layers
 EOF
 }
 
@@ -400,6 +404,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-usda-exempt-gold)
       USDA_EXEMPT_GOLD="false"
+      shift
+      ;;
+    --skip-env-download)
+      SKIP_ENV_DOWNLOAD=true
+      shift
+      ;;
+    --force-env-download)
+      FORCE_ENV_DOWNLOAD=true
       shift
       ;;
     *)
@@ -1287,6 +1299,29 @@ if reuse_canonical or start_step_val >= 3:
 }
 
 run_preflight_subset_filter
+
+# ------------------------------------------------------------------------------
+# Preflight Environmental Layer Provisioning (SOLUS100 100m, USGS SGMC, 3DEP 30m DEM)
+# Automatically skips when layers exist on disk; downloads missing layers otherwise.
+# ------------------------------------------------------------------------------
+run_preflight_env_layers() {
+  if [[ "${#DEMO_FLAG[@]}" -gt 0 || "${SKIP_ENV_DOWNLOAD}" == "true" ]]; then
+    return 0
+  fi
+  local env_extra_args=()
+  if [[ -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
+    env_extra_args+=("--vouchers" "${RUN_DIR}/data/tables/curated_vouchers.csv")
+  fi
+  if [[ -n "${CUSTOM_DB_PATH}" ]]; then
+    env_extra_args+=("--db" "${CUSTOM_DB_PATH}")
+  fi
+  if [[ "${FORCE_ENV_DOWNLOAD}" == "true" ]]; then
+    env_extra_args+=("--force")
+  fi
+  "${PYTHON_MAIN}" scripts/data_prep/download_environmental_layers.py     --env-dir "${PROJECT_ROOT}/data/environmental"     "${env_extra_args[@]}"
+}
+
+run_preflight_env_layers
 
 # ------------------------------------------------------------------------------
 # Step 02: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) Segmentation, Geometric Gatekeeper & 2-Tier Leaf Extraction
