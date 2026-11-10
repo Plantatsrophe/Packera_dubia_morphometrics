@@ -1208,14 +1208,23 @@ resolve_analysis_group <- function(
     #   Gate 1 (Continuous PCA-env Multimodality): silhouette >= 0.42 & variance reduction (1 - W_K/W_1) >= 0.50
     #   Gate 2 (Geographic Cohesion / Anti-Sympatric-Mixing): 5-NN spatial cluster kappa >= 0.55 & <= 15% 10km sympatric mixing
     #   Gate 3 (Independent Phenotypic Coupling when Step 04 morphology returned G = 1): significant morphological or allochronic divergence
+    eta2_by_pred <- vapply(seq_len(ncol(E_scaled)), function(j) {
+      vj <- as.numeric(E_scaled[, j])
+      tss_j <- sum((vj - mean(vj))^2)
+      if (!is.finite(tss_j) || tss_j <= 1e-8) return(0.0)
+      wss_j <- sum(tapply(vj, best_cl, function(z) sum((z - mean(z))^2)))
+      max(0.0, 1.0 - wss_j / tss_j)
+    }, numeric(1))
+    names(eta2_by_pred) <- colnames(E_scaled)
+    max_pred_var_red <- if (length(eta2_by_pred) > 0L) max(eta2_by_pred, na.rm = TRUE) else 0.0
+    if (length(eta2_by_pred) > 0L && is.finite(max_pred_var_red) && max_pred_var_red > 0.0) {
+      top_var <- names(which.max(eta2_by_pred))[1L]
+    }
+
     if (isTRUE(allow_unimodal_null)) {
       var_red <- if (is.finite(tot_ss) && tot_ss > 1e-8) (1.0 - best_tot_within / tot_ss) else 0.0
-      pc1_vec <- as.numeric(pca_scores[, 1])
-      pc1_tot_ss <- sum((pc1_vec - mean(pc1_vec))^2)
-      pc1_within_ss <- sum(tapply(pc1_vec, best_cl, function(z) sum((z - mean(z))^2)))
-      var_red_pc1 <- if (is.finite(pc1_tot_ss) && pc1_tot_ss > 1e-8) (1.0 - pc1_within_ss / pc1_tot_ss) else 0.0
       pass_env_gap <- is.finite(best_sil) && (best_sil >= 0.42) &&
-                      ((var_red >= 0.50) || (var_red >= 0.42 && var_red_pc1 >= 0.65)) &&
+                      ((var_red >= 0.50) || (var_red >= 0.42 && max_pred_var_red >= 0.75)) &&
                       (min(table(best_cl)) >= 5L)
 
       geo_kappa <- if (has_coords) compute_geo_knn_kappa(df[, c("longitude", "latitude"), drop = FALSE], best_cl, k_nn = 5L) else NA_real_
