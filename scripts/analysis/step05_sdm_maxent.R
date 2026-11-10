@@ -161,6 +161,13 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
       # Background environmental availability contours: 100% (solid grey55) and 50% (dashed grey65) (Broennimann et al. 2012)
       if (sum(ok_xy) >= 3L) {
         x_bg <- xv[ok_xy]; y_bg <- yv[ok_xy]
+        if (!is.null(srf_res) && !is.null(srf_res$accessible_background) && is.matrix(srf_res$accessible_background$X_bg)) {
+          X_m <- srf_res$accessible_background$X_bg
+          if (all(c(top_env_1, top_env_2) %in% colnames(X_m))) {
+            x_bg <- c(x_bg, as.numeric(X_m[, top_env_1]))
+            y_bg <- c(y_bg, as.numeric(X_m[, top_env_2]))
+          }
+        }
         ch_100 <- tryCatch(grDevices::chull(x_bg, y_bg), error = function(e) integer(0))
         if (length(ch_100) >= 3L) {
           graphics::polygon(x_bg[ch_100], y_bg[ch_100], border = "grey55", lty = 1L, lwd = 1.15, col = NA)
@@ -244,8 +251,10 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
     ok_ed <- is.finite(ed_v) & (tx_clean %in% present_tx)
     short_tx <- gsub("^Packera\\s+", "P. ", present_tx)
     if (sum(ok_ed) > 0L) {
-      kw_p <- tryCatch(stats::kruskal.test(ed_v[ok_ed] ~ factor(tx_clean[ok_ed]))$p.value, error = function(e) NA_real_)
-      p_str <- if (is.finite(kw_p)) sprintf("Kruskal-Wallis p = %.2e", kw_p) else "Edaphic Divergence"
+      kw_p <- if (length(unique(tx_clean[ok_ed])) >= 2L) {
+        tryCatch(stats::kruskal.test(ed_v[ok_ed] ~ factor(tx_clean[ok_ed]))$p.value, error = function(e) NA_real_)
+      } else NA_real_
+      p_str <- if (is.finite(kw_p)) sprintf("Kruskal-Wallis p = %.2e", kw_p) else sprintf("Unimodal K=1, Median = %.2f", stats::median(ed_v[ok_ed], na.rm = TRUE))
       if (length(present_tx) > 6L) {
         graphics::par(mar = c(4.5, 8.2, 3.0, 1.2))
         grp_meds <- vapply(present_tx, function(tx) {
@@ -309,9 +318,38 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
       graphics::text(0.5, 0.5, "No finite edaphic values available")
     }
 
-    # Panel D: Pairwise Schoener's D Niche Overlap Matrix (Benjamini-Hochberg FDR Adjusted)
+    # Panel D: Pairwise Schoener's D & Background Similarity (or K=1 Isolation-by-Environment Summary)
     graphics::par(mar = c(4.5, 6.2, 3.0, 1.2))
     n_sp <- length(present_tx)
+    if (n_sp == 1L) {
+      vp_d <- if (!is.null(srf_res) && !is.null(srf_res$variance_partition)) srf_res$variance_partition else NULL
+      ibe_d <- if (!is.null(srf_res) && !is.null(srf_res$ibe_summary)) srf_res$ibe_summary else NULL
+      if (!is.null(vp_d) && nrow(vp_d) > 0L) {
+        vp_vals <- as.numeric(vp_d$Variance_Pct)
+        vp_nms <- gsub("^\\[[ABC]\\]\\s*", "", as.character(vp_d$Component))
+        ibe_sub <- if (!is.null(ibe_d) && nrow(ibe_d) > 0L) {
+          paste(sprintf("%s: AdjR2=%.3f (p=%.3f)", ibe_d$Modality, ibe_d$Pure_Edaphic_AdjR2 + ibe_d$Pure_Climate_AdjR2, ibe_d$Partial_RDA_p), collapse = " | ")
+        } else "Optimal Ecotype K = 1 (Unimodal Niche Breadth)"
+        graphics::barplot(
+          rev(vp_vals), names.arg = rev(vp_nms), horiz = TRUE, las = 1,
+          col = rev(c("#009E73", "#0072B2", "#CC79A7")[seq_len(nrow(vp_d))]),
+          border = "white", xlim = c(0, max(100, max(vp_vals, na.rm = TRUE) * 1.15)),
+          xlab = "Explained Niche Suitability Variance (%)",
+          main = "D. Single-Lineage (K=1) Niche Partition & IBE", font.main = 2, cex.names = 0.74
+        )
+        graphics::grid(nx = NULL, ny = NA, col = "grey88")
+        graphics::mtext(ibe_sub, side = 3, line = 0.15, cex = 0.66, col = "grey25")
+      } else {
+        graphics::plot(c(0, 1), c(0, 1), type = "n", axes = FALSE, xlab = "", ylab = "",
+                       main = "D. Single-Lineage (K=1) Unimodal Niche Breadth", font.main = 2)
+        graphics::text(0.5, 0.5, sprintf("%s: Unimodal Ecological Niche (K = 1)", short_tx[1L]), font = 2)
+        graphics::box(col = "grey75")
+      }
+      u_sp_hdr <- get_active_packera_taxa(df$species_standardized)
+      hdr_lbl <- if (length(u_sp_hdr) == 1L) u_sp_hdr[1] else sprintf("Packera Multi-Taxon Cohort (%d Active Groups)", length(present_tx))
+      graphics::title(sprintf("%s: Multi-Scale Ecological Niche, Top RF Predictors & IBE", hdr_lbl), outer = TRUE, cex.main = 1.20)
+      return(invisible(NULL))
+    }
     d_mat <- matrix(1.0, nrow = n_sp, ncol = n_sp, dimnames = list(short_tx, short_tx))
     p_mat <- matrix(NA_real_, nrow = n_sp, ncol = n_sp, dimnames = list(short_tx, short_tx))
     niche_df <- if (!is.null(niche_res) && is.list(niche_res) && !is.data.frame(niche_res) && !is.null(niche_res$summary)) {
@@ -322,7 +360,11 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
       NULL
     }
     if (!is.null(niche_df) && nrow(niche_df) > 0L) {
-      p_col_use <- intersect(c("p_value_D", "Equivalency_p_value"), names(niche_df))[1]
+      p_col_use <- if ("p_bg_D_joint" %in% names(niche_df) && any(is.finite(suppressWarnings(as.numeric(niche_df$p_bg_D_joint))))) {
+        "p_bg_D_joint"
+      } else {
+        intersect(c("p_value_D", "Equivalency_p_value"), names(niche_df))[1]
+      }
       p_adj_vec <- if (!is.na(p_col_use)) stats::p.adjust(as.numeric(niche_df[[p_col_use]]), method = "BH") else rep(NA_real_, nrow(niche_df))
       t1_col <- intersect(c("Taxon1", "Taxon_1"), names(niche_df))[1]
       t2_col <- intersect(c("Taxon2", "Taxon_2"), names(niche_df))[1]
@@ -353,7 +395,7 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
     graphics::plot(
       c(0.5, n_sp + 0.5), c(0.5, n_sp + 0.5), type = "n", axes = FALSE,
       xlab = if (n_sp > 6L) "" else "Active Group", ylab = "",
-      main = "D. Pairwise Schoener's D Niche Overlap & Equivalency", font.main = 2
+      main = "D. Pairwise Schoener's D & Background Similarity", font.main = 2
     )
     ramp_d <- grDevices::colorRampPalette(c("#FFF5EB", "#FDD0A2", "#FD8D3C", "#D94801", "#7F2704"))(101)
     cell_cex <- min(0.74, max(0.38, 5.0 / n_sp))
@@ -439,7 +481,7 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
         ("grouping_col" %in% names(df) && any(grepl("Morphotype_K|^LatTertile_|Ecotype|Subcluster", df$grouping_col, ignore.case = TRUE)))) {
       if ("analysis_group" %in% names(df) && length(unique(stats::na.omit(df$analysis_group))) >= 2L) as.character(df$analysis_group)
       else if ("grouping_col" %in% names(df) && length(unique(stats::na.omit(df$grouping_col))) >= 2L) as.character(df$grouping_col)
-      else if ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster))) paste0("Morphotype_K", ifelse(is.na(df$gmm_cluster), 1L, as.integer(df$gmm_cluster)))
+      else if ("gmm_cluster" %in% names(df) && length(unique(stats::na.omit(df$gmm_cluster))) >= 2L) paste0("Morphotype_K", ifelse(is.na(df$gmm_cluster), 1L, as.integer(df$gmm_cluster)))
       else sp_v
     } else sp_v
   }

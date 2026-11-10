@@ -49,6 +49,11 @@ SPATIAL_THIN_KM="0"
 MAX_PER_STATE=""
 MAX_PER_REGION=""
 NO_SPATIAL_WEIGHTS=false
+USDA_COUNTY_FILTER=""
+USDA_COUNTY_BUFFER_KM=""
+USDA_EXEMPT_GOLD=""
+SKIP_ENV_DOWNLOAD=false
+FORCE_ENV_DOWNLOAD=false
 LIMIT_ARG=()
 DEMO_FLAG=()
 FOCAL_ARGS=()
@@ -109,6 +114,13 @@ Geographic Scope & Spatial Sampling:
   --max-per-state <INT>              Cap maximum vouchers retained per (species, stateProvince)
   --max-per-region <INT>             Cap maximum vouchers retained per EPA Level III Ecoregion
   --no-spatial-weights               Disable inverse spatial-density weighting during reference model fitting
+  --usda-county-filter / --no-usda-county-filter
+                                     Toggle USDA PLANTS county range filter (1-ring neighbors + geodesic buffer)
+  --usda-county-buffer-km <FLOAT>    Geodesic buffer in km around USDA PLANTS documented counties (default: 50.0)
+  --usda-exempt-gold / --no-usda-exempt-gold
+                                     Toggle Tier_1_Gold exemption for USDA county range filtering (default: true)
+  --skip-env-download                Skip automatic preflight verification/download of SOLUS100, SGMC, and 3DEP layers
+  --force-env-download               Force re-download of SOLUS100, SGMC, and 3DEP environmental layers
 EOF
 }
 
@@ -368,6 +380,38 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-spatial-weights)
       NO_SPATIAL_WEIGHTS=true
+      shift
+      ;;
+    --usda-county-filter)
+      USDA_COUNTY_FILTER="true"
+      shift
+      ;;
+    --no-usda-county-filter)
+      USDA_COUNTY_FILTER="false"
+      shift
+      ;;
+    --usda-county-buffer-km)
+      USDA_COUNTY_BUFFER_KM="$2"
+      shift 2
+      ;;
+    --usda-county-buffer-km=*)
+      USDA_COUNTY_BUFFER_KM="${1#*=}"
+      shift
+      ;;
+    --usda-exempt-gold)
+      USDA_EXEMPT_GOLD="true"
+      shift
+      ;;
+    --no-usda-exempt-gold)
+      USDA_EXEMPT_GOLD="false"
+      shift
+      ;;
+    --skip-env-download)
+      SKIP_ENV_DOWNLOAD=true
+      shift
+      ;;
+    --force-env-download)
+      FORCE_ENV_DOWNLOAD=true
       shift
       ;;
     *)
@@ -711,6 +755,19 @@ if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
     if [[ -n "${MAX_PER_REGION}" ]]; then
       HARVEST_SPATIAL_ARGS+=(--max-per-region "${MAX_PER_REGION}")
     fi
+    if [[ "${USDA_COUNTY_FILTER}" == "true" ]]; then
+      HARVEST_SPATIAL_ARGS+=(--usda-county-filter)
+    elif [[ "${USDA_COUNTY_FILTER}" == "false" ]]; then
+      HARVEST_SPATIAL_ARGS+=(--no-usda-county-filter)
+    fi
+    if [[ -n "${USDA_COUNTY_BUFFER_KM}" ]]; then
+      HARVEST_SPATIAL_ARGS+=(--usda-county-buffer-km "${USDA_COUNTY_BUFFER_KM}")
+    fi
+    if [[ "${USDA_EXEMPT_GOLD}" == "true" ]]; then
+      HARVEST_SPATIAL_ARGS+=(--usda-exempt-gold)
+    elif [[ "${USDA_EXEMPT_GOLD}" == "false" ]]; then
+      HARVEST_SPATIAL_ARGS+=(--no-usda-exempt-gold)
+    fi
     "${PYTHON_MAIN}" scripts/data_prep/01_voucher_harvester.py \
       --out-dir "data/raw_vouchers" \
       --output-csv "${RUN_DIR}/data/tables/curated_vouchers.csv" \
@@ -777,6 +834,9 @@ reuse_canonical = sys.argv[16].lower() == 'true' if len(sys.argv) > 16 else Fals
 custom_taxa_csv = sys.argv[17].strip() if len(sys.argv) > 17 else ''
 seed_data = Path(sys.argv[18]).resolve() if len(sys.argv) > 18 and sys.argv[18].strip() else root_data
 start_step_val = int(sys.argv[19]) if len(sys.argv) > 19 and sys.argv[19].strip().isdigit() else 1
+usda_filter_arg = sys.argv[20].strip().lower() if len(sys.argv) > 20 else ''
+usda_buffer_arg = float(sys.argv[21]) if len(sys.argv) > 21 and sys.argv[21].strip() else 50.0
+usda_exempt_gold_arg = (sys.argv[22].strip().lower() != 'false') if len(sys.argv) > 22 and sys.argv[22].strip() else True
 
 from scripts.core.harvester import (
     select_cascading_outgroup_anchors,
@@ -1005,6 +1065,36 @@ if exclude_taxa:
     retained_taxa = sorted([str(t).strip() for t in df['species_standardized'].dropna().unique().tolist() if str(t).strip()])
     print(f'[Preflight: Exclude Taxa] Excluded {sorted([str(t) for t in exclude_taxa if t])}: retained {len(df)} / {before_n} vouchers across {retained_taxa}.')
 
+if usda_filter_arg == 'true' and (reuse_canonical or start_step_val >= 2):
+    from scripts.core.db import load_taxon_synonyms
+    from scripts.core.usda_plants_ranges import filter_vouchers_by_usda_county_range
+    syn_map_pf = {}
+    if os.environ.get('PACKERA_DEMO_MODE') != '1' and Path(target_db_path).is_file():
+        try:
+            conn_syn = get_db_connection(db_path=target_db_path, read_only=True, workspace_root=root_data.parent)
+            try:
+                syn_map_pf = load_taxon_synonyms(conn_syn)
+            finally:
+                conn_syn.close()
+        except Exception:
+            syn_map_pf = {}
+    before_usda_n = len(df)
+    df_usda, usda_pf_stats = filter_vouchers_by_usda_county_range(
+        df=df,
+        standardize_taxon_fn=standardize_packera_taxon,
+        synonym_to_canonical=syn_map_pf,
+        county_buffer_km=usda_buffer_arg,
+        exempt_gold=usda_exempt_gold_arg,
+        db_path=target_db_path if os.environ.get('PACKERA_DEMO_MODE') != '1' else None,
+        workspace_dir=root_data.parent,
+        allow_network=(os.environ.get('PACKERA_DEMO_MODE') != '1'),
+    )
+    df = df_usda.drop(columns=[c for c in ('usda_symbol', 'usda_county_status') if c in df_usda.columns])
+    print(
+        f'[Preflight: USDA County Range Filter] Retained {len(df)} / {before_usda_n} vouchers '
+        f'(buffer={usda_buffer_arg:.1f} km, exempt_gold={usda_exempt_gold_arg}; stats={usda_pf_stats}).'
+    )
+
 if focal_raw:
     focal_taxon = standardize_packera_taxon(focal_raw)
     focal_df = df[df['species_standardized'] == focal_taxon].copy()
@@ -1205,10 +1295,33 @@ if reuse_canonical or start_step_val >= 3:
         elif dst_sub.is_dir() and next(dst_sub.iterdir(), None) is None:
             dst_sub.rmdir()
             os.symlink(src_sub, dst_sub)
-" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}" "${SPATIAL_THIN_KM:-0}" "${MAX_PER_STATE:-}" "${MAX_PER_REGION:-}" "${NO_SPATIAL_WEIGHTS:-false}" "${REUSE_CANONICAL_DATA:-false}" "${CUSTOM_TAXA_CSV:-}" "${SEED_DATA_DIR:-}" "${START_STEP:-1}"
+" "${RUN_DIR}" "${PROJECT_ROOT}/data" "${FOCAL_TAXON:-}" "${EXCLUDE_TAXON_CSV:-}" "${INTRASPECIFIC_MODE:-false}" "${GOLD_ANCHORS:-30}" "${DETERMINER_TIER:-}" "${EXCLUDE_MISIDENTIFIED:-false}" "${TRIAGE_SOURCE:-ALL}" "${AUTO_NEIGHBORS:-false}" "${MIN_AFFINITY:-0.03}" "${SPATIAL_THIN_KM:-0}" "${MAX_PER_STATE:-}" "${MAX_PER_REGION:-}" "${NO_SPATIAL_WEIGHTS:-false}" "${REUSE_CANONICAL_DATA:-false}" "${CUSTOM_TAXA_CSV:-}" "${SEED_DATA_DIR:-}" "${START_STEP:-1}" "${USDA_COUNTY_FILTER:-}" "${USDA_COUNTY_BUFFER_KM:-50.0}" "${USDA_EXEMPT_GOLD:-true}"
 }
 
 run_preflight_subset_filter
+
+# ------------------------------------------------------------------------------
+# Preflight Environmental Layer Provisioning (SOLUS100 100m, USGS SGMC, 3DEP 30m DEM)
+# Automatically skips when layers exist on disk; downloads missing layers otherwise.
+# ------------------------------------------------------------------------------
+run_preflight_env_layers() {
+  if [[ "${#DEMO_FLAG[@]}" -gt 0 || "${SKIP_ENV_DOWNLOAD}" == "true" ]]; then
+    return 0
+  fi
+  local env_extra_args=()
+  if [[ -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ]]; then
+    env_extra_args+=("--vouchers" "${RUN_DIR}/data/tables/curated_vouchers.csv")
+  fi
+  if [[ -n "${CUSTOM_DB_PATH}" ]]; then
+    env_extra_args+=("--db" "${CUSTOM_DB_PATH}")
+  fi
+  if [[ "${FORCE_ENV_DOWNLOAD}" == "true" ]]; then
+    env_extra_args+=("--force")
+  fi
+  "${PYTHON_MAIN}" scripts/data_prep/download_environmental_layers.py     --env-dir "${PROJECT_ROOT}/data/environmental"     "${env_extra_args[@]}"
+}
+
+run_preflight_env_layers
 
 # ------------------------------------------------------------------------------
 # Step 02: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) Segmentation, Geometric Gatekeeper & 2-Tier Leaf Extraction

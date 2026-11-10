@@ -652,6 +652,16 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd.extend(["--countries", *[str(c) for c in args.countries]])
     if getattr(args, "expand_synonyms", None) is False:
         cmd.append("--no-expand-synonyms")
+    if getattr(args, "usda_county_filter", None) is True:
+        cmd.append("--usda-county-filter")
+    elif getattr(args, "usda_county_filter", None) is False:
+        cmd.append("--no-usda-county-filter")
+    if getattr(args, "usda_county_buffer_km", None) is not None:
+        cmd.extend(["--usda-county-buffer-km", str(args.usda_county_buffer_km)])
+    if getattr(args, "usda_exempt_gold", None) is True:
+        cmd.append("--usda-exempt-gold")
+    elif getattr(args, "usda_exempt_gold", None) is False:
+        cmd.append("--no-usda-exempt-gold")
 
     if args.download_images:
         cmd.append("--download-images")
@@ -953,6 +963,50 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     logger.info("Phase 3 completed successfully.")
 
 
+def _maybe_ensure_environmental_layers(
+    args: argparse.Namespace,
+    env_dir: Path,
+    vouchers_csv: Optional[Path] = None,
+) -> None:
+    """Ensure SOLUS100, USGS SGMC, and 30 m DEM layers exist before Step 05 unless in demo/test mode."""
+    if (
+        getattr(args, "demo", False)
+        or getattr(args, "skip_env_download", False)
+        or os.environ.get("PACKERA_DEMO_MODE") == "1"
+        or os.environ.get("PACKERA_SKIP_ENV_DOWNLOAD") == "1"
+        or "PYTEST_CURRENT_TEST" in os.environ
+        or getattr(subprocess.run, "__module__", "") != "subprocess"
+    ):
+        return
+    try:
+        from scripts.data_prep.download_environmental_layers import ensure_environmental_layers
+        ensure_environmental_layers(
+            env_dir=env_dir,
+            vouchers_csv=vouchers_csv,
+            workspace_root=PROJECT_ROOT,
+            db_path=getattr(args, "db", None),
+            force=bool(getattr(args, "force_env_download", False)),
+        )
+    except Exception as exc:
+        logger.warning(f"Environmental layer preflight check could not complete: {exc}")
+
+
+def run_download_env(args: argparse.Namespace, cfg: Optional[PipelineConfig] = None) -> None:
+    """Verify or download SOLUS100, USGS SGMC, and 3DEP 30 m DEM layers."""
+    _ = cfg
+    from scripts.data_prep.download_environmental_layers import ensure_environmental_layers
+    env_dir = Path(getattr(args, "env_dir", None) or (PROJECT_ROOT / "data" / "environmental"))
+    vouchers_csv = getattr(args, "vouchers", None)
+    ensure_environmental_layers(
+        env_dir=env_dir,
+        vouchers_csv=vouchers_csv,
+        workspace_root=PROJECT_ROOT,
+        db_path=getattr(args, "db", None),
+        force=bool(getattr(args, "force", False)),
+        demo=bool(getattr(args, "demo", False)),
+    )
+
+
 def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     """Executes Phases 5 and 6: Spatial Macroecology and Synthesis Triage."""
     logger.info("=== Starting Synthesis Workflow (Phases 5, 6) ===")
@@ -1002,6 +1056,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     verify_file_exists(spatial_rf_script, "Spatial RF R script")
 
     env_dir = Path(getattr(args, "env_dir", None) or "data/environmental")
+    _maybe_ensure_environmental_layers(args, env_dir=env_dir, vouchers_csv=vouchers_csv)
     pheno_states = Path(getattr(args, "pheno_states", None) or (tables_dir / "voucher_phenological_states.csv"))
     ssurgo_table = Path(getattr(args, "ssurgo_table", None) or (tables_dir / "ssurgo_edaphic_metrics.csv"))
     contingency_table = Path(getattr(args, "contingency_table", None) or (tables_dir / "lithology_taxon_contingency_audit.csv"))
@@ -1346,6 +1401,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
 
+    # Subcommand: download-env
+    p_env = subparsers.add_parser(
+        "download-env",
+        help="Verify or download SOLUS100 (100 m), USGS SGMC, and 3DEP 30 m DEM environmental layers",
+    )
+    _add_common_subparser_args(p_env, include_gpu=False)
+    p_env.add_argument("--env-dir", type=Path, default=None, help="Target environmental directory (default: data/environmental)")
+    p_env.add_argument("--vouchers", type=Path, default=None, help="Optional curated_vouchers.csv to scope 30 m DEM tiles")
+    p_env.add_argument("--force", action="store_true", default=False, help="Force re-download even if cached layers exist")
+
     # Subcommand: harvest
     p_harvest = subparsers.add_parser("harvest", help="Phase 1: Ingest GBIF occurrences & download images")
     _add_common_subparser_args(p_harvest, include_gpu=False)
@@ -1375,6 +1440,24 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Toggle GBIF Backbone synonym/basionym expansion (default: True)",
+    )
+    p_harvest.add_argument(
+        "--usda-county-filter",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle USDA PLANTS county range filtering during Step 01 harvest (default: from config.yaml)",
+    )
+    p_harvest.add_argument(
+        "--usda-county-buffer-km",
+        type=float,
+        default=None,
+        help="Geodesic buffer in km around USDA PLANTS documented counties (default: from config.yaml)",
+    )
+    p_harvest.add_argument(
+        "--usda-exempt-gold",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle Tier_1_Gold specialist exemption during USDA county range filtering",
     )
     p_harvest.add_argument("--include-western", action="store_true", default=False, help=argparse.SUPPRESS)
     p_harvest.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
@@ -1475,6 +1558,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_synth.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
     p_synth.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
     p_synth.add_argument("--env-dir", type=Path, default=None, help="Directory containing environmental rasters")
+    p_synth.add_argument("--skip-env-download", action="store_true", default=False, help="Skip preflight environmental layer download check")
+    p_synth.add_argument("--force-env-download", action="store_true", default=False, help="Force re-download of SOLUS100, SGMC, and 3DEP layers")
     p_synth.add_argument("--ssurgo-batch-size", type=int, default=None, help="Batch size for USDA SDA SSURGO queries")
     p_synth.add_argument("--ssurgo-table", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--contingency-table", type=Path, default=None, help=argparse.SUPPRESS)
@@ -1522,6 +1607,24 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Toggle GBIF Backbone synonym/basionym expansion (default: True)",
+    )
+    p_all.add_argument(
+        "--usda-county-filter",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle USDA PLANTS county range filtering during Step 01 harvest (default: from config.yaml)",
+    )
+    p_all.add_argument(
+        "--usda-county-buffer-km",
+        type=float,
+        default=None,
+        help="Geodesic buffer in km around USDA PLANTS documented counties (default: from config.yaml)",
+    )
+    p_all.add_argument(
+        "--usda-exempt-gold",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle Tier_1_Gold specialist exemption during USDA county range filtering",
     )
     p_all.add_argument("--include-western", action="store_true", default=False, help=argparse.SUPPRESS)
     p_all.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
@@ -1580,6 +1683,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--num-pcs", type=int, default=None, help="Number of PCA dimensions")
     p_all.add_argument("--max-k", type=int, default=None, help="Max GMM mixture components")
     p_all.add_argument("--ssurgo-batch-size", type=int, default=None, help="Batch size for USDA SDA SSURGO queries")
+    p_all.add_argument("--skip-env-download", action="store_true", default=False, help="Skip preflight environmental layer download check")
+    p_all.add_argument("--force-env-download", action="store_true", default=False, help="Force re-download of SOLUS100, SGMC, and 3DEP layers")
     p_all.add_argument("--export-figures", action="store_true", default=True, help="Export diagnostic figures")
     p_all.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
     p_all.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")
@@ -1637,6 +1742,7 @@ def main() -> None:
     dispatch = {
         "check-env": run_check_env,
         "download-weights": run_download_weights,
+        "download-env": run_download_env,
         "purge-segments": run_purge_segments,
         "purge-old-data": run_purge_segments,
         "harvest": run_harvest,

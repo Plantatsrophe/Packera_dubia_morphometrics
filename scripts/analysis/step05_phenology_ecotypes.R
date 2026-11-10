@@ -768,11 +768,267 @@ compute_mean_silhouette_base <- function(cl_vec, D_mat) {
   mean(sil, na.rm = TRUE)
 }
 
+compute_geo_knn_kappa <- function(coords_lon_lat, cluster_vec, k_nn = 5L, max_dist_km = 180.0) {
+  lon <- suppressWarnings(as.numeric(coords_lon_lat[, 1]))
+  lat <- suppressWarnings(as.numeric(coords_lon_lat[, 2]))
+  cl <- as.integer(factor(cluster_vec))
+  ok <- is.finite(lon) & is.finite(lat) & !is.na(cl)
+  if (sum(ok) < 8L || length(unique(cl[ok])) < 2L) return(NA_real_)
+  lon <- lon[ok]; lat <- lat[ok]; cl <- cl[ok]
+  n <- length(cl)
+  k_use <- min(as.integer(k_nn), n - 1L)
+  if (k_use < 1L) return(NA_real_)
+
+  rad <- pi / 180.0
+  lat_r <- lat * rad; lon_r <- lon * rad
+  dlat <- outer(lat_r, lat_r, "-")
+  dlon <- outer(lon_r, lon_r, "-")
+  hav <- sin(dlat * 0.5)^2 + outer(cos(lat_r), cos(lat_r), "*") * sin(dlon * 0.5)^2
+  dist_km <- matrix(2.0 * 6371.0 * asin(pmin(1.0, sqrt(pmax(0.0, hav)))), nrow = n, ncol = n)
+  diag(dist_km) <- Inf
+
+  nn_maj <- integer(n)
+  sympatric_conflict <- logical(n)
+  for (i in seq_len(n)) {
+    d_i <- dist_km[i, ]
+    ord_i <- order(d_i)[seq_len(k_use)]
+    near_i <- ord_i[is.finite(d_i[ord_i]) & d_i[ord_i] <= max_dist_km]
+    if (length(near_i) == 0L) near_i <- ord_i[1L]
+    tbl_i <- table(cl[near_i])
+    nn_maj[i] <- as.integer(names(tbl_i)[which.max(tbl_i)][1L])
+    close_10km <- which(d_i <= 10.0)
+    sympatric_conflict[i] <- length(close_10km) > 0L && any(cl[close_10km] != cl[i])
+  }
+
+  p_obs <- mean(nn_maj == cl)
+  lvls <- sort(unique(cl))
+  p_exp <- sum(vapply(lvls, function(lv) mean(cl == lv) * mean(nn_maj == lv), numeric(1)))
+  kappa_geo <- if ((1.0 - p_exp) > 1e-6) (p_obs - p_exp) / (1.0 - p_exp) else 0.0
+  attr(kappa_geo, "sympatric_10km_rate") <- mean(sympatric_conflict)
+  kappa_geo
+}
+
+evaluate_phenotypic_ecotype_coupling <- function(df, cluster_vec) {
+  n <- nrow(df)
+  cl_fac <- factor(cluster_vec)
+  if (n < 10L || length(levels(cl_fac)) < 2L) {
+    return(list(has_independent_modality = FALSE, pass = FALSE, morph_p = NA_real_, morph_r2_adj = NA_real_, pheno_p = NA_real_, pheno_diff_days = 0.0))
+  }
+  morph_cands <- unique(c(
+    grep("^(Sym_PC|ECT_PC)[1-4]$", names(df), value = TRUE),
+    intersect(c("can1", "can2", "blade_length_to_width_ratio", "petiole_to_blade_ratio", "solidity", "dissection_index"), names(df))
+  ))
+  morph_cols <- morph_cands[vapply(morph_cands, function(cn) {
+    v <- suppressWarnings(as.numeric(df[[cn]]))
+    sum(is.finite(v)) >= 8L && stats::sd(v[is.finite(v)]) > 1e-6
+  }, logical(1))]
+
+  morph_p <- NA_real_
+  morph_r2_adj <- NA_real_
+  if (length(morph_cols) >= 1L) {
+    Y_m <- scale(as.matrix(df[, morph_cols, drop = FALSE]))
+    for (j in seq_len(ncol(Y_m))) {
+      bad <- !is.finite(Y_m[, j])
+      if (any(bad)) Y_m[bad, j] <- 0.0
+    }
+    lat_v <- if ("latitude" %in% names(df)) suppressWarnings(as.numeric(df$latitude)) else rep(0.0, n)
+    lon_v <- if ("longitude" %in% names(df)) suppressWarnings(as.numeric(df$longitude)) else rep(0.0, n)
+    lat_v[!is.finite(lat_v)] <- stats::median(lat_v, na.rm = TRUE)
+    lon_v[!is.finite(lon_v)] <- stats::median(lon_v, na.rm = TRUE)
+
+    # Partial multivariate F-test of morphology ~ cluster | (latitude + longitude)
+    X0 <- stats::model.matrix(~ lat_v + lon_v)
+    X1 <- stats::model.matrix(~ lat_v + lon_v + cl_fac)
+    rss0 <- sum( qr.resid(qr(X0), Y_m)^2 )
+    rss1 <- sum( qr.resid(qr(X1), Y_m)^2 )
+    df1 <- ncol(X1) - ncol(X0)
+    df2 <- max(1L, n - ncol(X1))
+    if (rss0 > 1e-8 && df1 >= 1L && df2 >= 4L) {
+      r2_part <- max(0.0, (rss0 - rss1) / rss0)
+      morph_r2_adj <- 1.0 - (1.0 - r2_part) * ((n - ncol(X0)) / df2)
+      f_val <- ((rss0 - rss1) / df1) / max(rss1 / df2, 1e-8)
+      morph_p <- stats::pf(f_val, df1 = df1 * ncol(Y_m), df2 = df2 * ncol(Y_m), lower.tail = FALSE)
+    }
+  }
+
+  pheno_p <- NA_real_
+  pheno_diff <- 0.0
+  has_pheno <- "delta_doy" %in% names(df) && sum(is.finite(suppressWarnings(as.numeric(df$delta_doy)))) >= 10L
+  if (has_pheno) {
+    dd <- suppressWarnings(as.numeric(df$delta_doy))
+    ok_d <- is.finite(dd) & !is.na(cl_fac)
+    if (sum(ok_d) >= 10L && length(unique(cl_fac[ok_d])) >= 2L) {
+      meds <- tapply(dd[ok_d], cl_fac[ok_d], stats::median, na.rm = TRUE)
+      pheno_diff <- max(meds, na.rm = TRUE) - min(meds, na.rm = TRUE)
+      pheno_p <- tryCatch(stats::kruskal.test(dd[ok_d] ~ droplevels(cl_fac[ok_d]))$p.value, error = function(e) NA_real_)
+    }
+  }
+
+  has_indep <- (length(morph_cols) >= 1L) || has_pheno
+  pass_morph <- is.finite(morph_p) && is.finite(morph_r2_adj) && (morph_p < 0.01) && (morph_r2_adj >= 0.05)
+  pass_pheno <- is.finite(pheno_p) && (pheno_p < 0.01) && (pheno_diff >= 10.0)
+  list(
+    has_independent_modality = has_indep,
+    pass = isTRUE(pass_morph || pass_pheno),
+    morph_p = morph_p,
+    morph_r2_adj = morph_r2_adj,
+    pheno_p = pheno_p,
+    pheno_diff_days = pheno_diff
+  )
+}
+
+compute_isolation_by_environment <- function(df, edaph_vars = character(0), clim_vars = character(0), mem_mat = NULL, n_perm = 99L) {
+  # Non-circular Isolation-by-Environment (IBE; Wang & Bradburd 2014) variance decomposition
+  # testing continuous Morphological + Phenological divergence as a function of
+  # [A] Edaphics and [B] Macro-Climate conditioned on [C] Spatial MEMs.
+  n <- nrow(df)
+  empty_ibe <- data.frame(
+    Modality = character(0), N_Specimens = integer(0),
+    Pure_Edaphic_AdjR2 = numeric(0), Pure_Climate_AdjR2 = numeric(0),
+    Pure_Space_MEM_AdjR2 = numeric(0), Total_Explained_AdjR2 = numeric(0),
+    Partial_RDA_F = numeric(0), Partial_RDA_p = numeric(0),
+    IBE_Inference = character(0), stringsAsFactors = FALSE
+  )
+  if (is.null(df) || n < 8L) return(empty_ibe)
+
+  ed_cols <- intersect(as.character(edaph_vars), names(df))
+  cl_cols <- intersect(setdiff(as.character(clim_vars), "delta_doy"), names(df))
+  clean_block <- function(cols) {
+    if (length(cols) == 0L) return(NULL)
+    M <- matrix(0.0, nrow = n, ncol = length(cols), dimnames = list(NULL, cols))
+    keep <- logical(length(cols))
+    for (j in seq_along(cols)) {
+      v <- suppressWarnings(as.numeric(df[[cols[j]]]))
+      fin <- is.finite(v)
+      if (sum(fin) >= 5L && stats::sd(v[fin]) > 1e-8) {
+        v[!fin] <- stats::median(v[fin], na.rm = TRUE)
+        M[, j] <- as.numeric(scale(v))
+        keep[j] <- TRUE
+      }
+    }
+    if (!any(keep)) return(NULL)
+    M[, keep, drop = FALSE]
+  }
+
+  X_ed <- clean_block(ed_cols)
+  X_cl <- clean_block(cl_cols)
+  if (is.null(X_ed) && is.null(X_cl)) return(empty_ibe)
+
+  if (is.null(mem_mat) || nrow(as.matrix(mem_mat)) != n) {
+    if (all(c("longitude", "latitude") %in% names(df))) {
+      lon <- suppressWarnings(as.numeric(df$longitude)); lat <- suppressWarnings(as.numeric(df$latitude))
+      lon[!is.finite(lon)] <- stats::median(lon, na.rm = TRUE)
+      lat[!is.finite(lat)] <- stats::median(lat, na.rm = TRUE)
+      mem_mat <- scale(cbind(MEM_Lon = lon, MEM_Lat = lat))
+    } else {
+      mem_mat <- matrix(0.0, nrow = n, ncol = 1L, dimnames = list(NULL, "MEM1"))
+    }
+  } else {
+    mem_mat <- scale(as.matrix(mem_mat))
+    mem_mat[!is.finite(mem_mat)] <- 0.0
+  }
+
+  eval_response_block <- function(Y_raw, mod_name) {
+    if (is.null(Y_raw) || ncol(Y_raw) == 0L) return(NULL)
+    Y <- scale(as.matrix(Y_raw))
+    Y[!is.finite(Y)] <- 0.0
+    X_env <- cbind(X_ed, X_cl)
+
+    adj_r2_ols <- function(X_mat) {
+      if (is.null(X_mat) || ncol(X_mat) == 0L) return(0.0)
+      X_d <- cbind(1.0, X_mat)
+      qr_x <- qr(X_d)
+      p_k <- qr_x$rank - 1L
+      if (p_k < 1L || (n - qr_x$rank) < 2L) return(0.0)
+      rss <- sum(qr.resid(qr_x, Y)^2)
+      tss <- sum(sweep(Y, 2L, colMeans(Y), "-")^2)
+      if (tss <= 1e-10) return(0.0)
+      r2 <- max(0.0, 1.0 - rss / tss)
+      1.0 - (1.0 - r2) * ((n - 1.0) / max(1.0, n - p_k - 1.0))
+    }
+
+    r2_all <- adj_r2_ols(cbind(X_ed, X_cl, mem_mat))
+    r2_no_ed <- adj_r2_ols(cbind(X_cl, mem_mat))
+    r2_no_cl <- adj_r2_ols(cbind(X_ed, mem_mat))
+    r2_no_sp <- adj_r2_ols(cbind(X_ed, X_cl))
+
+    pure_ed <- max(0.0, r2_all - r2_no_ed)
+    pure_cl <- max(0.0, r2_all - r2_no_cl)
+    pure_sp <- max(0.0, r2_all - r2_no_sp)
+
+    f_obs <- NA_real_; p_perm <- NA_real_
+    if (requireNamespace("vegan", quietly = TRUE) && ncol(X_env) >= 1L && (n - ncol(X_env) - ncol(mem_mat)) >= 4L) {
+      rda_res <- tryCatch({
+        fit_r <- vegan::rda(Y ~ X_env + Condition(mem_mat))
+        an_r <- suppressMessages(suppressWarnings(vegan::anova.cca(fit_r, permutations = as.integer(max(19L, n_perm)))))
+        list(F_val = as.numeric(an_r$F[1L]), p_val = as.numeric(an_r$`Pr(>F)`[1L]))
+      }, error = function(e) NULL)
+      if (!is.null(rda_res)) {
+        f_obs <- rda_res$F_val; p_perm <- rda_res$p_val
+      }
+    }
+    if (!is.finite(p_perm)) {
+      X0 <- cbind(1.0, mem_mat)
+      X1 <- cbind(1.0, mem_mat, X_env)
+      q0 <- qr(X0); q1 <- qr(X1)
+      rss0 <- sum(qr.resid(q0, Y)^2); rss1 <- sum(qr.resid(q1, Y)^2)
+      df1 <- max(1L, q1$rank - q0$rank); df2 <- max(1L, n - q1$rank)
+      f_obs <- ((rss0 - rss1) / df1) / max(rss1 / df2, 1e-8)
+      Y_res0 <- qr.resid(q0, Y)
+      f_null <- numeric(n_perm)
+      for (b in seq_len(n_perm)) {
+        Yp <- Y_res0[sample.int(n), , drop = FALSE]
+        rss0_b <- sum(qr.resid(q0, Yp)^2)
+        rss1_b <- sum(qr.resid(q1, Yp)^2)
+        f_null[b] <- ((rss0_b - rss1_b) / df1) / max(rss1_b / df2, 1e-8)
+      }
+      p_perm <- (sum(f_null >= f_obs) + 1.0) / (n_perm + 1.0)
+    }
+
+    pure_env <- pure_ed + pure_cl
+    inf_lbl <- if (is.finite(p_perm) && p_perm < 0.01 && pure_env >= 0.05) {
+      "Significant Isolation by Environment (Adaptive Divergence Candidate)"
+    } else if (is.finite(p_perm) && p_perm < 0.05) {
+      "Weak Environmental Cline (Plasticity / Gradual Ecotone)"
+    } else {
+      "Null IBE (Panmictic / Facultative Niche Breadth)"
+    }
+
+    data.frame(
+      Modality = mod_name,
+      N_Specimens = as.integer(n),
+      Pure_Edaphic_AdjR2 = round(pure_ed, 4),
+      Pure_Climate_AdjR2 = round(pure_cl, 4),
+      Pure_Space_MEM_AdjR2 = round(pure_sp, 4),
+      Total_Explained_AdjR2 = round(max(0.0, r2_all), 4),
+      Partial_RDA_F = round(f_obs, 4),
+      Partial_RDA_p = round(p_perm, 4),
+      IBE_Inference = inf_lbl,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  rows_out <- list()
+  morph_cols <- unique(c(
+    grep("^(Sym_PC|ECT_PC)[1-4]$", names(df), value = TRUE),
+    intersect(c("blade_length_to_width_ratio", "petiole_to_blade_ratio", "solidity", "dissection_index"), names(df))
+  ))
+  Y_morph <- clean_block(morph_cols)
+  if (!is.null(Y_morph)) rows_out[[length(rows_out) + 1L]] <- eval_response_block(Y_morph, "Foliar_Morphology_IBE")
+
+  Y_pheno <- clean_block(intersect("delta_doy", names(df)))
+  if (!is.null(Y_pheno)) rows_out[[length(rows_out) + 1L]] <- eval_response_block(Y_pheno, "Anthesis_Phenology_IBE")
+
+  if (length(rows_out) == 0L) return(empty_ibe)
+  do.call(rbind, rows_out)
+}
+
 resolve_analysis_group <- function(
   df,
   intraspecific_mode = FALSE,
   primary_env_vars = NULL,
-  rf_var_weights = NULL
+  rf_var_weights = NULL,
+  allow_unimodal_null = NULL
 ) {
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   if (!is_intra) {
@@ -780,8 +1036,10 @@ resolve_analysis_group <- function(
     df$is_missing_gmm_cluster <- rep(FALSE, nrow(df))
     return(df)
   }
+
+  has_step04_gmm <- "gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster) & nzchar(trimws(as.character(df$gmm_cluster))))
   used_gmm <- FALSE
-  if ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster))) {
+  if (has_step04_gmm) {
     miss_gmm <- is.na(df$gmm_cluster) | !nzchar(trimws(as.character(df$gmm_cluster)))
     g_raw <- ifelse(miss_gmm, 1L, suppressWarnings(as.integer(df$gmm_cluster)))
     g_raw[is.na(g_raw)] <- 1L
@@ -791,10 +1049,11 @@ resolve_analysis_group <- function(
       df$analysis_group <- as.character(grp_cand)
       df$is_missing_gmm_cluster <- as.logical(miss_gmm)
       used_gmm <- TRUE
-      message(sprintf("[Intraspecific Mode] Using Step 04 GMM morphotypes as analysis_group (%s).",
+      message(sprintf("[Intraspecific Mode] Using independent Step 04 GMM morphotypes as analysis_group (%s).",
                       paste(names(tbl), tbl, sep = "=", collapse = ", ")))
     }
   }
+
   if (!used_gmm) {
     df$is_missing_gmm_cluster <- rep(FALSE, nrow(df))
     n_rows <- nrow(df)
@@ -802,12 +1061,32 @@ resolve_analysis_group <- function(
       df$analysis_group <- character(0)
       return(df)
     }
+
+    sp_std <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("Packera dubia", n_rows)
+    valid_sp <- sp_std[!is.na(sp_std) & nzchar(trimws(sp_std)) & sp_std != "Unknown"]
+    canon_sp <- if (length(valid_sp) > 0L) valid_sp[1L] else "Packera dubia"
+
+    has_coords <- all(c("latitude", "longitude") %in% names(df)) &&
+                  sum(is.finite(suppressWarnings(as.numeric(df$latitude))) & is.finite(suppressWarnings(as.numeric(df$longitude)))) >= 10L
+    if (is.null(allow_unimodal_null)) {
+      env_flag <- Sys.getenv("PACKERA_ALLOW_UNIMODAL_ECOTYPE", unset = "")
+      allow_unimodal_null <- if (nzchar(env_flag)) {
+        !(tolower(env_flag) %in% c("0", "false", "no"))
+      } else {
+        isTRUE(has_step04_gmm || has_coords)
+      }
+    }
+
+    # Exclude coordinate columns AND binary/synthetic indicator columns from continuous environmental PCA
     exclude_cols <- c(
       "catalogNumber", "plant_individual_id", "latitude", "longitude",
       "decimalLatitude", "decimalLongitude", "coordinateUncertainty",
       "coordinateUncertaintyInMeters", "buffer_radius_m",
       "high_coord_uncertainty_flag", "is_training_eligible_coord",
-      "edaphic_best_fit_taxon", "edaphic_z_score", "climatic_z_score", "soil_silt_pct"
+      "is_clim_eligible_coord", "is_edaphic_eligible_coord", "edaphic_coord_weight",
+      "edaphic_best_fit_taxon", "edaphic_z_score", "climatic_z_score", "soil_silt_pct",
+      "is_rock_outcrop", "is_azonal_lithology", "azonal_lithology_presence_buffer",
+      "azonal_contact_dist_m", "resdept_r", "bdricm"
     )
     cand_cols <- if (!is.null(primary_env_vars) && length(primary_env_vars) > 0L) {
       setdiff(intersect(as.character(primary_env_vars), names(df)), exclude_cols)
@@ -816,19 +1095,22 @@ resolve_analysis_group <- function(
     }
     if (length(cand_cols) == 0L) {
       env_pattern <- paste0(
-        "^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bio[0-9]*_|bdricm$|resdept_r$|cfvo$|awc$|",
-        "alr_|clr_|is_azonal_lithology$|azonal_contact_dist_m$|azonal_proximity_index$|",
-        "ph_q10_buffer$|ph_q90_buffer$|min_bedrock_depth_buffer_cm$|max_cfvo_buffer_pct$|",
-        "azonal_lithology_presence_buffer$|elevation$|elev_|clim_|edaph_|env_)"
+        "^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bio[0-9]*_|cfvo$|awc$|",
+        "alr_|clr_|azonal_proximity_index$|ph_q10_buffer$|ph_q90_buffer$|",
+        "min_bedrock_depth_buffer_cm$|max_cfvo_buffer_pct$|elevation$|elev_|clim_|edaph_|env_)"
       )
       cand_cols <- setdiff(grep(env_pattern, names(df), value = TRUE, ignore.case = TRUE), exclude_cols)
     }
+
     num_env <- list()
-    min_fin <- min(3L, max(2L, n_rows))
+    min_fin <- min(5L, max(2L, n_rows))
     for (cl in cand_cols) {
-      if (is.numeric(df[[cl]]) || is.logical(df[[cl]])) {
+      if (is.numeric(df[[cl]]) || is.integer(df[[cl]])) {
         v <- suppressWarnings(as.numeric(df[[cl]]))
-        if (sum(is.finite(v)) >= min_fin) {
+        u_vals <- unique(round(v[is.finite(v)], 6))
+        # Require strictly continuous/multi-valued environmental predictors (>= 4 distinct finite values when n >= 10)
+        min_distinct <- if (n_rows >= 10L) 4L else 2L
+        if (sum(is.finite(v)) >= min_fin && length(u_vals) >= min_distinct) {
           med_v <- stats::median(v[is.finite(v)], na.rm = TRUE)
           v[!is.finite(v)] <- if (is.finite(med_v)) med_v else 0.0
           if (stats::sd(v) > 1e-8) {
@@ -837,44 +1119,43 @@ resolve_analysis_group <- function(
         }
       }
     }
-    if (is.null(primary_env_vars) || length(primary_env_vars) == 0L) {
-      if ("fine_soil_ph" %in% names(num_env)) num_env[["soil_ph"]] <- NULL
-      if ("fine_soil_sand" %in% names(num_env)) num_env[["soil_sand"]] <- NULL
-      if ("fine_soil_cec" %in% names(num_env)) num_env[["soil_cec"]] <- NULL
-    }
+    if ("fine_soil_ph" %in% names(num_env)) num_env[["soil_ph"]] <- NULL
+    if ("fine_soil_sand" %in% names(num_env)) num_env[["soil_sand"]] <- NULL
+    if ("fine_soil_cec" %in% names(num_env)) num_env[["soil_cec"]] <- NULL
+    if ("fine_soil_ph" %in% names(num_env) && "ssurgo_ph" %in% names(num_env)) num_env[["ssurgo_ph"]] <- NULL
+    if ("fine_soil_sand" %in% names(num_env) && "ssurgo_sand_pct" %in% names(num_env)) num_env[["ssurgo_sand_pct"]] <- NULL
+    if ("fine_soil_clay" %in% names(num_env) && "ssurgo_clay_pct" %in% names(num_env)) num_env[["ssurgo_clay_pct"]] <- NULL
+    if ("fine_soil_cec" %in% names(num_env) && "ssurgo_cec" %in% names(num_env)) num_env[["ssurgo_cec"]] <- NULL
+    if ("awc" %in% names(num_env) && "ssurgo_aws_0_50cm" %in% names(num_env)) num_env[["ssurgo_aws_0_50cm"]] <- NULL
 
     if (length(num_env) == 0L || n_rows < 2L) {
-      idx_half <- seq_len(n_rows) <= max(1L, floor(n_rows / 2))
-      df$analysis_group <- ifelse(idx_half, "Ecotype_Cluster_1", "Ecotype_Cluster_2")
-      tbl <- table(df$analysis_group)
-      message(sprintf("[Intraspecific Mode] Zero environmental variance; fallback ecotypes (%s).",
-                      paste(names(tbl), tbl, sep = "=", collapse = ", ")))
+      if (isTRUE(allow_unimodal_null)) {
+        df$analysis_group <- rep(canon_sp, n_rows)
+        message(sprintf("[Intraspecific Mode] Unimodal environmental variance; retaining single taxon '%s' (K=1).", canon_sp))
+      } else {
+        idx_half <- seq_len(n_rows) <= max(1L, floor(n_rows / 2))
+        df$analysis_group <- ifelse(idx_half, "Ecotype_Cluster_1", "Ecotype_Cluster_2")
+      }
       return(df)
     }
 
     E_mat <- do.call(cbind, num_env)
-    E_scaled <- scale(E_mat, center = TRUE, scale = TRUE)
-    E_scaled[!is.finite(E_scaled)] <- 0.0
-    if (!is.null(rf_var_weights) && length(rf_var_weights) > 0L && !is.null(names(rf_var_weights))) {
-      w_hit <- intersect(colnames(E_scaled), names(rf_var_weights))
-      if (length(w_hit) > 0L) {
-        w_vec <- rep(1.0 / ncol(E_scaled), ncol(E_scaled))
-        names(w_vec) <- colnames(E_scaled)
-        w_pos <- suppressWarnings(as.numeric(rf_var_weights[w_hit]))
-        w_pos[!is.finite(w_pos) | w_pos <= 0] <- 1e-4
-        w_vec[w_hit] <- w_pos
-        w_vec <- w_vec / max(mean(w_vec), 1e-8)
-        E_scaled <- sweep(E_scaled, 2L, sqrt(w_vec), "*")
+    # Prune collinear variables before PCA-env so redundant blocks cannot dominate PC1 (Dormann et al. 2013)
+    if (ncol(E_mat) >= 3L && exists("screen_collinear_predictors", mode = "function")) {
+      pruned_e <- tryCatch(screen_collinear_predictors(E_mat, cor.threshold = 0.70, vif.threshold = 5.0)$kept_vars, error = function(e) colnames(E_mat))
+      if (length(intersect(colnames(E_mat), pruned_e)) >= 2L) {
+        E_mat <- E_mat[, intersect(colnames(E_mat), pruned_e), drop = FALSE]
       }
     }
+    # Never weight E_scaled by rf_var_weights inside resolve_analysis_group (prevents post-clustering circularity)
+    E_scaled <- scale(E_mat, center = TRUE, scale = TRUE)
+    E_scaled[!is.finite(E_scaled)] <- 0.0
 
     if (ncol(E_scaled) >= 2L) {
       pca_fit <- stats::prcomp(E_scaled, center = FALSE, scale. = FALSE)
       n_pcs <- min(2L, ncol(pca_fit$x))
       pca_scores <- as.matrix(pca_fit$x[, seq_len(n_pcs), drop = FALSE])
-      if (ncol(pca_scores) == 1L) {
-        pca_scores <- cbind(PC1 = pca_scores[, 1], PC2 = rep(0.0, n_rows))
-      }
+      if (ncol(pca_scores) == 1L) pca_scores <- cbind(PC1 = pca_scores[, 1], PC2 = rep(0.0, n_rows))
       pc1_load <- abs(pca_fit$rotation[, 1])
       top_var <- names(which.max(pc1_load))[1]
     } else {
@@ -884,34 +1165,109 @@ resolve_analysis_group <- function(
 
     n_distinct <- nrow(unique(round(pca_scores, 8)))
     if (n_distinct < 2L) {
-      idx_half <- seq_len(n_rows) <= max(1L, floor(n_rows / 2))
-      df$analysis_group <- ifelse(idx_half, "Ecotype_Cluster_1", "Ecotype_Cluster_2")
+      if (isTRUE(allow_unimodal_null)) {
+        df$analysis_group <- rep(canon_sp, n_rows)
+      } else {
+        idx_half <- seq_len(n_rows) <= max(1L, floor(n_rows / 2))
+        df$analysis_group <- ifelse(idx_half, "Ecotype_Cluster_1", "Ecotype_Cluster_2")
+      }
       return(df)
     }
 
     old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
       get(".Random.seed", envir = .GlobalEnv)
-    } else {
-      NULL
-    }
+    } else NULL
     set.seed(42)
     on.exit({
       if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = .GlobalEnv)
     }, add = TRUE)
 
+    D_pca <- as.matrix(stats::dist(pca_scores))
     km2 <- stats::kmeans(pca_scores, centers = 2, nstart = 25)
     best_cl <- km2$cluster
     best_k <- 2L
+    best_tot_within <- km2$tot.withinss
+    tot_ss <- km2$totss
+    sil2 <- compute_mean_silhouette_base(km2$cluster, D_pca)
+    best_sil <- sil2
+
     if (n_rows >= 30L && n_distinct >= 3L) {
       km3 <- tryCatch(stats::kmeans(pca_scores, centers = 3, nstart = 25), error = function(e) NULL)
       if (!is.null(km3) && min(table(km3$cluster)) >= 5L) {
-        D_pca <- as.matrix(stats::dist(pca_scores))
-        sil2 <- compute_mean_silhouette_base(km2$cluster, D_pca)
         sil3 <- compute_mean_silhouette_base(km3$cluster, D_pca)
         if (is.finite(sil3) && is.finite(sil2) && sil3 > (sil2 + 0.05)) {
           best_cl <- km3$cluster
           best_k <- 3L
+          best_tot_within <- km3$tot.withinss
+          best_sil <- sil3
         }
+      }
+    }
+
+    # Non-Circular 3-Gate Validation of Candidate K >= 2 vs Unimodal K = 1 Null:
+    #   Gate 1 (Continuous PCA-env Multimodality): silhouette >= 0.42 & variance reduction (1 - W_K/W_1) >= 0.50
+    #   Gate 2 (Geographic Cohesion / Anti-Sympatric-Mixing): 5-NN spatial cluster kappa >= 0.55 & <= 15% 10km sympatric mixing
+    #   Gate 3 (Independent Phenotypic Coupling when Step 04 morphology returned G = 1): significant morphological or allochronic divergence
+    eta2_by_pred <- vapply(seq_len(ncol(E_scaled)), function(j) {
+      vj <- as.numeric(E_scaled[, j])
+      tss_j <- sum((vj - mean(vj))^2)
+      if (!is.finite(tss_j) || tss_j <= 1e-8) return(0.0)
+      wss_j <- sum(tapply(vj, best_cl, function(z) sum((z - mean(z))^2)))
+      max(0.0, 1.0 - wss_j / tss_j)
+    }, numeric(1))
+    names(eta2_by_pred) <- colnames(E_scaled)
+    max_pred_var_red <- if (length(eta2_by_pred) > 0L) max(eta2_by_pred, na.rm = TRUE) else 0.0
+    if (length(eta2_by_pred) > 0L && is.finite(max_pred_var_red) && max_pred_var_red > 0.0) {
+      top_var <- names(which.max(eta2_by_pred))[1L]
+    }
+
+    if (isTRUE(allow_unimodal_null)) {
+      var_red <- if (is.finite(tot_ss) && tot_ss > 1e-8) (1.0 - best_tot_within / tot_ss) else 0.0
+      pass_env_gap <- is.finite(best_sil) && (best_sil >= 0.42) &&
+                      ((var_red >= 0.50) || (var_red >= 0.42 && max_pred_var_red >= 0.75)) &&
+                      (min(table(best_cl)) >= 5L)
+
+      geo_kappa <- if (has_coords) compute_geo_knn_kappa(df[, c("longitude", "latitude"), drop = FALSE], best_cl, k_nn = 5L) else NA_real_
+      symp_10km <- if (!is.null(attr(geo_kappa, "sympatric_10km_rate"))) as.numeric(attr(geo_kappa, "sympatric_10km_rate")) else 0.0
+      pass_geo <- !has_coords || (is.finite(geo_kappa) && geo_kappa >= 0.55 && symp_10km <= 0.15)
+
+      pheno_cpl <- evaluate_phenotypic_ecotype_coupling(df, best_cl)
+      # If Step 04 evaluated leaf morphology and found G = 1 unimodal morphology, require independent phenotypic coupling
+      pass_pheno_gate <- if (isTRUE(has_step04_gmm)) {
+        isTRUE(pheno_cpl$pass)
+      } else {
+        !isTRUE(pheno_cpl$has_independent_modality) || isTRUE(pheno_cpl$pass) ||
+          (is.finite(geo_kappa) && geo_kappa >= 0.75 && symp_10km <= 0.10 && best_sil >= 0.42)
+      }
+
+      if (!(pass_env_gap && pass_geo && pass_pheno_gate)) {
+        df$analysis_group <- rep(canon_sp, n_rows)
+        attr(df, "ecotype_diagnostics") <- list(
+          optimal_k = 1L,
+          status = "Unimodal_Single_Lineage_Facultative_Breadth",
+          candidate_k = best_k,
+          pca_silhouette = round(best_sil, 4),
+          variance_reduction = round(var_red, 4),
+          geo_knn_kappa = round(geo_kappa, 4),
+          sympatric_10km_rate = round(symp_10km, 4),
+          morph_coupling_p = pheno_cpl$morph_p,
+          morph_coupling_r2_adj = pheno_cpl$morph_r2_adj,
+          pheno_coupling_p = pheno_cpl$pheno_p
+        )
+        message(sprintf(
+          paste0(
+            "[Intraspecific Mode: Non-Circular Ecotype Gate] Retained K=1 single taxon '%s' ",
+            "(rejected sympatric/unimodal k-means split: sil=%.3f, var_red=%.3f, geo_kappa=%s, symp_10km=%.2f, morph_p=%s, pheno_p=%s)."
+          ),
+          canon_sp,
+          ifelse(is.finite(best_sil), best_sil, NA_real_),
+          var_red,
+          ifelse(is.finite(geo_kappa), sprintf("%.3f", geo_kappa), "NA"),
+          symp_10km,
+          ifelse(is.finite(pheno_cpl$morph_p), sprintf("%.3g", pheno_cpl$morph_p), "NA"),
+          ifelse(is.finite(pheno_cpl$pheno_p), sprintf("%.3g", pheno_cpl$pheno_p), "NA")
+        ))
+        return(df)
       }
     }
 
@@ -935,7 +1291,7 @@ resolve_analysis_group <- function(
     }
     df$analysis_group <- unname(lbl_map[as.character(best_cl)])
     tbl <- table(df$analysis_group)
-    message(sprintf("[Intraspecific Mode] Partitioned single-taxon cohort into PCA-env ecotypes (K=%d, Axis-1 driver=%s: %s).",
+    message(sprintf("[Intraspecific Mode] Validated allopatric/divergent PCA-env ecotypes (K=%d, Axis-1 driver=%s: %s).",
                     best_k, clean_top_var, paste(names(tbl), tbl, sep = "=", collapse = ", ")))
   }
   return(df)

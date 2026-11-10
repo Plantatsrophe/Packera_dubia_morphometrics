@@ -992,6 +992,131 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             self.assertEqual(res.returncode, 0, f"SDM & raster cropping test failed:\n{res.stderr}\n{res.stdout}")
             self.assertIn("SDM_AND_CROP_OK", res.stdout)
 
+    def test_noncircular_k1_ibe_background_similarity_and_empty_raster_hygiene(self):
+        """Verify Step 05 non-circular K=1 ecotype gate, IBE partial RDA, accessible background M similarity, and zero synthetic POLARIS/3DEP fabrication when demo=FALSE."""
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        with tempfile.TemporaryDirectory() as tmp_d:
+            r_code = f"""
+            suppressPackageStartupMessages({{ library(readr); library(dplyr) }})
+            source("scripts/core/db_utils.R")
+            source("scripts/morphometrics/authority_weighting_utils.R")
+            source("scripts/morphometrics/pub_figures_utils.R")
+            source("scripts/analysis/edaphic_fine_grain_utils.R")
+            source("scripts/analysis/05_multimodal_spatial_rf.R")
+
+            tmp_root <- {repr(str(tmp_d))}
+            empty_env <- file.path(tmp_root, "empty_env")
+            dir.create(file.path(empty_env, "polaris_30m"), recursive = TRUE, showWarnings = FALSE)
+            dir.create(file.path(empty_env, "solus_100m"), recursive = TRUE, showWarnings = FALSE)
+            dir.create(file.path(empty_env, "dem_3dep_30m"), recursive = TRUE, showWarnings = FALSE)
+
+            # 1. Verify zero synthetic POLARIS / SOLUS / 3DEP / buffer fabrication when demo = FALSE and raster folders are empty
+            df_real <- data.frame(
+              catalogNumber = c("R1", "R2", "R3", "R4"),
+              latitude = c(35.6, 35.7, 34.2, 33.9),
+              longitude = c(-79.1, -80.2, -78.4, -79.5),
+              coordinateUncertaintyInMeters = c(120, 450, 2500, 14000),
+              muname = c("Rion sandy loam, 8 to 15 percent slopes", "Mecklenburg clay loam, 2 to 8 percent slopes", "Wake-Rock outcrop complex, 2 to 15 percent slopes", "Wagram loamy sand, 0 to 6 percent slopes"),
+              compname = c("Rion", "Mecklenburg", "Wake", "Wagram"),
+              ssurgo_ph = c(5.3, 6.2, 4.8, 5.1),
+              ssurgo_sand_pct = c(66.0, 38.0, 76.0, 84.0),
+              ssurgo_clay_pct = c(15.0, 32.0, 8.0, 6.0),
+              ssurgo_cec = c(5.8, 19.5, 4.1, 3.6),
+              ssurgo_aws_0_50cm = c(6.4, 7.2, 2.1, 4.0),
+              ssurgo_bedrock_depth_cm = c(160.0, 110.0, 18.0, 200.0),
+              ssurgo_rock_outcrop_pct = c(0.0, 0.0, 45.0, 0.0),
+              stringsAsFactors = FALSE
+            )
+            cl_rion <- classify_ssurgo_outcrop(muname = df_real$muname[1], compname = "Rion", bedrock_depth_cm = 160.0, rock_outcrop_pct = 0.0, is_demo = FALSE)
+            cl_meck <- classify_ssurgo_outcrop(muname = df_real$muname[2], compname = "Mecklenburg", bedrock_depth_cm = 110.0, rock_outcrop_pct = 0.0, is_demo = FALSE)
+            cl_wake <- classify_ssurgo_outcrop(muname = df_real$muname[3], compname = "Wake", bedrock_depth_cm = 18.0, rock_outcrop_pct = 45.0, is_demo = FALSE)
+            stopifnot(!isTRUE(cl_rion$is_rock_outcrop) && cl_rion$outcrop_class == "Non-outcrop matrix")
+            stopifnot(!isTRUE(cl_meck$is_rock_outcrop) && cl_meck$outcrop_class == "Non-outcrop matrix")
+            stopifnot(isTRUE(cl_wake$is_rock_outcrop) && cl_wake$outcrop_class == "Granitic flatrock")
+
+            df_real$is_rock_outcrop <- c(FALSE, FALSE, TRUE, FALSE)
+            df_real$outcrop_class <- c("Non-outcrop matrix", "Non-outcrop matrix", "Granitic flatrock", "Non-outcrop matrix")
+            df_ps <- extract_polaris_and_solus_predictors(df_real, env_dir = empty_env, demo = FALSE)
+            df_ps <- extract_micro_topography_3dep(df_ps, env_dir = empty_env, demo = FALSE)
+            df_ps <- extract_sgmc_lithology(df_ps, env_dir = empty_env, demo = FALSE)
+            df_ps <- extract_uncertainty_buffered_predictors(df_ps, env_dir = empty_env, demo = FALSE)
+
+            stopifnot(all(is.na(df_ps$polaris_ph_30m)))
+            stopifnot(all(is.na(df_ps$solus_fragvol_pct)))
+            stopifnot(all(is.na(df_ps$topo_tpi_30m)))
+            stopifnot(all(is.na(df_ps$topo_twi_30m)))
+            stopifnot(all(is.finite(df_ps$topo_slope_deg)))
+            stopifnot(all(is.na(df_ps$ph_q10_buffer)))
+            stopifnot(all(is.na(df_ps$azonal_lithology_presence_buffer)))
+            stopifnot(identical(df_ps$is_edaphic_eligible_coord, c(TRUE, TRUE, FALSE, FALSE)))
+            stopifnot(identical(df_ps$is_clim_eligible_coord, c(TRUE, TRUE, TRUE, FALSE)))
+            stopifnot(!df_ps$is_azonal_lithology[1] && !df_ps$is_azonal_lithology[2] && df_ps$is_azonal_lithology[3])
+
+            # 2. Verify sympatrically intermixed Packera dubia with G=1 unimodal morphology resolves to K=1 (not false Ecotype_1 / Ecotype_2!)
+            set.seed(2026)
+            n_dub <- 60
+            # Sympatric coordinates spanning Coastal Plain & Piedmont (intermixed substrates in same localities)
+            base_lat <- rep(seq(32.0, 37.5, length.out = 30), each = 2) + rnorm(n_dub, 0, 0.03)
+            base_lon <- rep(seq(-84.0, -77.0, length.out = 30), each = 2) + rnorm(n_dub, 0, 0.03)
+            is_flatrock_microsite <- rep(c(FALSE, TRUE), 30)
+            df_sym <- data.frame(
+              catalogNumber = sprintf("DUB_%03d", seq_len(n_dub)),
+              plant_individual_id = 1L,
+              species_standardized = rep("Packera dubia", n_dub),
+              determiner_tier = c(rep(c("Tier_1_Gold", "Tier_2_Silver"), 28), rep("Tier_3_Bronze", 3), "Tier_1_Gold"),
+              coordinateUncertaintyInMeters = c(rep(180.0, n_dub - 1), 16000.0),
+              latitude = base_lat,
+              longitude = base_lon,
+              gmm_cluster = rep(1L, n_dub),
+              Sym_PC1 = rnorm(n_dub, 0, 1.0),
+              Sym_PC2 = rnorm(n_dub, 0, 0.8),
+              blade_length_to_width_ratio = rnorm(n_dub, 2.2, 0.25),
+              doy = round(95 + 4.0 * (base_lat - 32.0) + rnorm(n_dub, 0, 6)),
+              delta_doy = rnorm(n_dub, 0, 5.5),
+              fine_soil_ph = rnorm(n_dub, 5.3, 0.35),
+              fine_soil_sand = ifelse(is_flatrock_microsite, rnorm(n_dub, 74, 5), rnorm(n_dub, 78, 6)),
+              fine_soil_clay = rnorm(n_dub, 9.0, 2.0),
+              fine_soil_cec = rnorm(n_dub, 4.8, 1.1),
+              fine_bedrock_depth_cm = ifelse(is_flatrock_microsite, rnorm(n_dub, 28, 8), rnorm(n_dub, 165, 20)),
+              ssurgo_rock_outcrop_pct = ifelse(is_flatrock_microsite, runif(n_dub, 20, 55), rep(0.0, n_dub)),
+              awc = ifelse(is_flatrock_microsite, rnorm(n_dub, 0.06, 0.015), rnorm(n_dub, 0.11, 0.02)),
+              alr_sand_clay = rnorm(n_dub, 2.0, 0.3),
+              is_azonal_lithology = is_flatrock_microsite,
+              bio10_mean_temp_warmest_qtr = 27.2 - 0.55 * (base_lat - 32.0) + rnorm(n_dub, 0, 0.35),
+              bio12_precip_annual = rnorm(n_dub, 1220, 75),
+              bio15_precip_seasonality = rnorm(n_dub, 16, 2.2),
+              stringsAsFactors = FALSE
+            )
+            cand_v <- discover_candidate_eco_predictors(df_sym, include_pheno = TRUE)
+            stopifnot(!("is_azonal_lithology" %in% cand_v))
+            df_res <- resolve_analysis_group(df_sym, intraspecific_mode = TRUE)
+            stopifnot(identical(unique(df_res$analysis_group), "Packera dubia"))
+            stopifnot(identical(unique(resolve_plot_group_column(df_res)), "Packera dubia"))
+
+            srf_k1 <- compute_spatial_rf_mems(df_res, cand_v, n_trees = 60, intraspecific_mode = TRUE)
+            stopifnot(isTRUE(srf_k1$single_lineage_mode))
+            stopifnot(all(srf_k1$rf_predicted_taxon == "Packera dubia"))
+            stopifnot(srf_k1$rf_prediction_source[n_dub] == "Passive_Projection_High_Uncertainty")
+            stopifnot(srf_k1$rf_prediction_source[n_dub - 1] == "Passive_Projection_Bronze")
+            stopifnot(!is.null(srf_k1$ibe_summary) && nrow(srf_k1$ibe_summary) >= 1L)
+            stopifnot(all(srf_k1$ibe_summary$Partial_RDA_p > 0.01))
+
+            niche_k1 <- run_warren_niche_identity_tests(df_res, cand_v, n_perm = 15, intraspecific_mode = TRUE)
+            stopifnot(nrow(niche_k1$summary) == 1L)
+            stopifnot(niche_k1$summary$Schoener_D[1] == 1.0)
+            fig_k1_pdf <- file.path(tmp_root, "k1_fig", "spatial_rf_niche_summary.pdf")
+            export_spatial_rf_figures(df_res, srf_k1, niche_k1, fig_k1_pdf)
+            stopifnot(file.exists(fig_k1_pdf))
+            stopifnot(file.exists(file.path(tmp_root, "k1_fig", "fig05_ecological_niche_phenology.png")))
+            cat("NONCIRCULAR_K1_IBE_AND_HYGIENE_OK\n")
+            """
+            r_script_file = Path(tmp_d) / "test_noncircular_k1_hygiene.R"
+            r_script_file.write_text(r_code, encoding="utf-8")
+            res = subprocess.run(["Rscript", str(r_script_file)], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0, f"Non-circular K=1 & edaphic hygiene test failed:\n{res.stderr}\n{res.stdout}")
+            self.assertIn("NONCIRCULAR_K1_IBE_AND_HYGIENE_OK", res.stdout)
+
     def test_step05_eastern_na_figure_refinements(self):
         sdm_src = (PROJECT_ROOT / "scripts" / "analysis" / "step05_sdm_maxent.R").read_text(encoding="utf-8")
         pheno_src = (PROJECT_ROOT / "scripts" / "analysis" / "step05_phenology_ecotypes.R").read_text(encoding="utf-8")

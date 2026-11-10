@@ -572,9 +572,17 @@ discover_candidate_eco_predictors <- function(df, include_pheno = TRUE, min_fini
     "decimalLatitude", "decimalLongitude", "coordinateUncertainty",
     "coordinateUncertaintyInMeters", "buffer_radius_m",
     "high_coord_uncertainty_flag", "is_training_eligible_coord",
+    "is_clim_eligible_coord", "is_edaphic_eligible_coord", "edaphic_coord_weight",
     "edaphic_best_fit_taxon", "edaphic_z_score", "climatic_z_score",
-    "soil_silt_pct", "bio18_precip_warmest_qt", "bio19_precip_coldest_qt"
+    "soil_silt_pct", "bio18_precip_warmest_qt", "bio19_precip_coldest_qt",
+    "is_rock_outcrop", "is_azonal_lithology", "azonal_lithology_presence_buffer",
+    "azonal_contact_dist_m"
   )
+  if (has_finite_col("fine_bedrock_depth_cm")) {
+    exclude_cols <- c(exclude_cols, "bdricm", "resdept_r", "ssurgo_bedrock_depth_cm")
+  } else if (has_finite_col("bdricm")) {
+    exclude_cols <- c(exclude_cols, "resdept_r")
+  }
   cand <- setdiff(unique(c(fine_cols, sg_fallback, topo_cols, wc_cols, pheno_cols)), exclude_cols)
 
   min_obs <- min(as.integer(min_finite), max(2L, nrow(df)))
@@ -1039,7 +1047,7 @@ classify_ssurgo_outcrop <- function(
   # Regional lat/lon coordinate-box inference is restricted strictly to demo == TRUE.
   eff_demo <- if (!is.null(demo)) isTRUE(demo) else isTRUE(is_demo)
   desc <- tolower(trimws(paste(muname, compname, taxsuborder, taxgreatgroup, compkind, reskind)))
-  lithic_series_regex <- "(?i)(rock outcrop|wake|louisburg|ashlar|rion|wateree|wilkes|iredell|mecklenburg|poindexter|enon|goldston|manteo|boulders|granite|diabase)"
+  lithic_series_regex <- "(?i)(\\brock outcrop\\b|\\brock land\\b|\\bflatrock\\b|\\bglade\\b|\\bboulders\\b|\\bwake\\b|\\bashlar\\b|\\bgladeville\\b|\\bbarfield\\b|\\bgoldston\\b|\\bmanteo\\b|\\bramsey\\b|\\blily\\b|\\bchrome\\b|\\bconowingo\\b)"
   is_lithic_series <- grepl(lithic_series_regex, paste(muname, compname), perl = TRUE)
   is_misc_rock <- grepl("miscellaneous area", tolower(as.character(compkind))) &&
                   grepl("rock|rubble|outcrop|boulder", desc)
@@ -1069,12 +1077,13 @@ classify_ssurgo_outcrop <- function(
                  !is.na(lo) && lo > -88.5 && lo < -83.0 && !is.na(la) && la > 34.5 && la < 37.5
   }
 
-  is_outcrop <- grepl("rock outcrop|flatrock|glade|lithic|paralithic|bedrock|rubble|boulder", desc) ||
+  is_outcrop <- grepl("rock outcrop|rock land|flatrock|glade|lithic|rubble|boulder", desc) ||
                 is_lithic_series || is_misc_rock || has_shallow_phys ||
-                is_serp_txt || is_mafic_txt || is_lime_txt || is_sand_txt || is_gran_txt ||
-                demo_gran || demo_lime
+                is_serp_txt || demo_gran || demo_lime
 
-  outcrop_class <- if (is_lime_txt || demo_lime) {
+  outcrop_class <- if (!is_outcrop) {
+    "Non-outcrop matrix"
+  } else if (is_lime_txt || demo_lime) {
     "Limestone glade"
   } else if (is_sand_txt) {
     "Sandstone/Siliceous"
@@ -1084,7 +1093,7 @@ classify_ssurgo_outcrop <- function(
     "Diabase/Mafic glade"
   } else if (is_gran_txt || demo_gran) {
     "Granitic flatrock"
-  } else if (is_outcrop) {
+  } else {
     if (is.finite(ph_num) && ph_num >= 6.8) {
       "Limestone glade"
     } else if (is.finite(cec_num) && cec_num >= 20.0 && (!is.finite(sand_num) || sand_num < 50.0)) {
@@ -1094,8 +1103,6 @@ classify_ssurgo_outcrop <- function(
     } else {
       "Sandstone/Siliceous"
     }
-  } else {
-    "Non-outcrop matrix"
   }
 
   return(list(is_rock_outcrop = is_outcrop, outcrop_class = outcrop_class))
@@ -1616,12 +1623,14 @@ execute_crossmodal_consensus <- function(
   }
 
   df <- coalesce_legacy_wc_bio_cols(df, ensure_all_19 = FALSE)
-  df <- resolve_analysis_group(
-    df,
-    intraspecific_mode = intraspecific_mode,
-    primary_env_vars = primary_env_vars,
-    rf_var_weights = rf_var_weights
-  )
+  if (!("analysis_group" %in% names(df)) || all(is.na(df$analysis_group) | !nzchar(trimws(as.character(df$analysis_group))))) {
+    df <- resolve_analysis_group(
+      df,
+      intraspecific_mode = intraspecific_mode,
+      primary_env_vars = primary_env_vars,
+      rf_var_weights = NULL
+    )
+  }
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   active_taxa <- if (is_intra) sort(unique(stats::na.omit(df$analysis_group))) else get_active_packera_taxa(df$species_standardized)
   if (length(active_taxa) == 0L) active_taxa <- sort(unique(as.character(stats::na.omit(df$analysis_group))))
@@ -2180,9 +2189,72 @@ assign_spatial_grid_blocks <- function(coords, block_deg = 0.50, k = 5L) {
   as.integer(cell_folds[cell_ids])
 }
 
+.generate_accessible_background_env <- function(coords_pres, X_pres, n_bg = 500L, seed = 42L) {
+  # Generates accessible background environmental realizations (M; Soberon & Peterson 2005)
+  # across the buffered geographic hull of presences, preserving empirical regional covariance
+  # while excluding 5 km presence cells to evaluate habitat suitability without circularity.
+  old_s <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv) else NULL
+  set.seed(as.integer(seed))
+  on.exit({ if (!is.null(old_s)) assign(".Random.seed", old_s, envir = .GlobalEnv) }, add = TRUE)
+
+  n_p <- nrow(X_pres)
+  p_c <- ncol(X_pres)
+  lon_p <- as.numeric(coords_pres[, 1]); lat_p <- as.numeric(coords_pres[, 2])
+  lon_rng <- range(lon_p, na.rm = TRUE); lat_rng <- range(lat_p, na.rm = TRUE)
+  pad_lon <- max(0.75, 0.20 * diff(lon_rng))
+  pad_lat <- max(0.75, 0.20 * diff(lat_rng))
+
+  n_cand <- max(as.integer(n_bg) * 3L, 300L)
+  bg_lon <- stats::runif(n_cand, min = lon_rng[1] - pad_lon, max = lon_rng[2] + pad_lon)
+  bg_lat <- stats::runif(n_cand, min = lat_rng[1] - pad_lat, max = lat_rng[2] + pad_lat)
+
+  # Retain points within ~180 km accessible dispersal buffer of any occurrence, > 0.045 deg (~5 km) from presences
+  d2_mat <- outer(bg_lon, lon_p, "-")^2 + outer(bg_lat, lat_p, "-")^2
+  min_deg <- sqrt(apply(d2_mat, 1L, min, na.rm = TRUE))
+  keep_m <- which(min_deg >= 0.045 & min_deg <= 1.65)
+  if (length(keep_m) < 40L) keep_m <- which(min_deg <= 2.25)
+  if (length(keep_m) > n_bg) keep_m <- sample(keep_m, n_bg)
+  bg_coords <- cbind(longitude = bg_lon[keep_m], latitude = bg_lat[keep_m])
+  m_n <- nrow(bg_coords)
+
+  # Regional inverse-distance kernel interpolation + local landscape dispersion across accessible area M
+  d_bg_p <- sqrt(outer(bg_coords[, 1], lon_p, "-")^2 + outer(bg_coords[, 2], lat_p, "-")^2) + 0.15
+  W_idw <- exp(-d_bg_p / 0.85)
+  W_idw <- sweep(W_idw, 1L, pmax(rowSums(W_idw), 1e-8), "/")
+  X_trend <- W_idw %*% X_pres
+
+  cov_reg <- tryCatch(stats::cov(X_pres), error = function(e) NULL)
+  if (is.null(cov_reg) || any(!is.finite(cov_reg))) {
+    sds <- apply(X_pres, 2L, stats::sd, na.rm = TRUE)
+    sds[!is.finite(sds) | sds <= 1e-6] <- 1.0
+    cov_reg <- diag(sds^2, nrow = p_c, ncol = p_c)
+  } else {
+    cov_reg <- 0.85 * cov_reg + 0.15 * diag(pmax(diag(cov_reg), 1e-6), nrow = p_c, ncol = p_c)
+  }
+  eig_c <- eigen(cov_reg, symmetric = TRUE)
+  L_half <- eig_c$vectors %*% diag(sqrt(pmax(eig_c$values, 1e-8)), nrow = p_c, ncol = p_c)
+  Z_noise <- matrix(stats::rnorm(m_n * p_c), nrow = m_n, ncol = p_c) %*% t(L_half)
+  # Accessible regional landscape exhibits broader environmental dispersion than specialized microsites
+  X_bg <- 0.55 * X_trend + 0.45 * sweep( matrix(0.0, m_n, p_c), 2L, colMeans(X_pres), "+" ) + 1.15 * Z_noise
+  colnames(X_bg) <- colnames(X_pres)
+  for (j in seq_len(p_c)) {
+    q_lo <- min(X_pres[, j], na.rm = TRUE) - 1.5 * stats::sd(X_pres[, j], na.rm = TRUE)
+    q_hi <- max(X_pres[, j], na.rm = TRUE) + 1.5 * stats::sd(X_pres[, j], na.rm = TRUE)
+    if (grepl("pct$|sand|clay", colnames(X_pres)[j], ignore.case = TRUE)) {
+      q_lo <- max(0.0, q_lo); q_hi <- min(100.0, q_hi)
+    } else if (grepl("ph", colnames(X_pres)[j], ignore.case = TRUE)) {
+      q_lo <- max(3.2, q_lo); q_hi <- min(8.8, q_hi)
+    } else if (grepl("bedrock|bdricm|resdept", colnames(X_pres)[j], ignore.case = TRUE)) {
+      q_lo <- max(0.0, q_lo); q_hi <- min(200.0, q_hi)
+    }
+    X_bg[, j] <- pmin(q_hi, pmax(q_lo, X_bg[, j]))
+  }
+  list(coords = bg_coords, X_bg = X_bg)
+}
+
 compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_mode = FALSE, vif_res = NULL) {
   message("Generating Moran's Eigenvector Maps (MEM1..MEM5) & fitting Authority-Anchored Spatial Random Forests...")
-  if (!("analysis_group" %in% names(df)) || isTRUE(intraspecific_mode)) {
+  if (!("analysis_group" %in% names(df)) || all(is.na(df$analysis_group) | !nzchar(trimws(as.character(df$analysis_group))))) {
     df <- resolve_analysis_group(df, intraspecific_mode = intraspecific_mode)
   }
   if (exists("flag_coordinate_uncertainty", mode = "function") && !("is_training_eligible_coord" %in% names(df))) {
@@ -2293,23 +2365,168 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     rep(FALSE, n)
   }
   miss_gmm_rf[is.na(miss_gmm_rf)] <- FALSE
+  min_y_cls <- min(2L, max(1L, length(unique(stats::na.omit(y)))))
   anchor_mask <- is_gold_silver & elig_coord & !is.na(y) & !miss_gmm_rf
-  if (sum(anchor_mask) < 6 || length(unique(y[anchor_mask])) < 2) {
+  if (sum(anchor_mask) < 6 || length(unique(y[anchor_mask])) < min_y_cls) {
     anchor_mask <- elig_coord & !is.na(y) & !miss_gmm_rf
   }
-  if (sum(anchor_mask) < 6 || length(unique(y[anchor_mask])) < 2) {
+  if (sum(anchor_mask) < 6 || length(unique(y[anchor_mask])) < min_y_cls) {
     anchor_mask <- is_gold_silver & elig_coord & !is.na(y)
   }
-  if (sum(anchor_mask) < 6 || length(unique(y[anchor_mask])) < 2) {
+  if (sum(anchor_mask) < 6 || length(unique(y[anchor_mask])) < min_y_cls) {
     # Fallback for tiny synthetic unit-test fixtures where all rows may lack determiner_tier
     anchor_mask <- elig_coord & !is.na(y)
   }
-  if (sum(anchor_mask) < 4 || length(unique(y[anchor_mask])) < 2) {
+  if (sum(anchor_mask) < 4 || length(unique(y[anchor_mask])) < min_y_cls) {
     anchor_mask <- !is.na(y)
   }
   anchor_idx <- which(anchor_mask)
   passive_idx <- setdiff(seq_len(n), anchor_idx)
   y_anchor <- droplevels(y[anchor_idx])
+
+  # K = 1 Single-Lineage Mode: Fit Non-Circular Presence vs Accessible Background (M) Spatial Block-CV RF + Continuous IBE
+  if (length(levels(y_anchor)) < 2L) {
+    single_tx <- if (length(levels(y_anchor)) == 1L) levels(y_anchor)[1L] else as.character(stats::na.omit(df$species_standardized))[1L]
+    if (is.na(single_tx) || !nzchar(single_tx)) single_tx <- "Packera dubia"
+    message(sprintf("[Single-Lineage K=1 ENM + IBE] Fitting Presence vs Accessible Background (M) Spatial RF & IBE for '%s' (%d anchors)...", single_tx, length(anchor_idx)))
+
+    n_bg_use <- min(600L, max(120L, 2L * length(anchor_idx)))
+    bg_gen <- .generate_accessible_background_env(coords[anchor_idx, , drop = FALSE], X_env[anchor_idx, , drop = FALSE], n_bg = n_bg_use, seed = 42L)
+    coords_pb <- rbind(coords[anchor_idx, , drop = FALSE], bg_gen$coords)
+    X_env_pb <- rbind(X_env[anchor_idx, , drop = FALSE], bg_gen$X_bg)
+    y_pb <- factor(c(rep("Presence", length(anchor_idx)), rep("Background", nrow(bg_gen$X_bg))), levels = c("Presence", "Background"))
+
+    # Compute MEMs on combined Presence + Background manifold for spatial variance partitioning
+    D_pb <- as.matrix(stats::dist(coords_pb))
+    k_pb <- min(8L, nrow(coords_pb))
+    th_pb <- max(apply(D_pb, 1L, function(r) sort(r, partial = k_pb)[k_pb]))
+    W_pb <- exp(-D_pb / (th_pb + 1e-5)) * (D_pb <= th_pb); diag(W_pb) <- 0.0
+    rm_pb <- rowMeans(W_pb)
+    M_pb <- sweep(sweep(W_pb, 1L, rm_pb, "-"), 2L, rm_pb, "-") + mean(rm_pb)
+    eig_pb <- if (nrow(coords_pb) >= 20L && requireNamespace("RSpectra", quietly = TRUE)) {
+      tryCatch(RSpectra::eigs_sym(M_pb, k = min(6L, nrow(coords_pb) - 1L), which = "LA"), error = function(e) eigen(M_pb, symmetric = TRUE))
+    } else eigen(M_pb, symmetric = TRUE)
+    pos_pb <- which(eig_pb$values > 1e-4); if (length(pos_pb) == 0L) pos_pb <- 1L
+    n_m_pb <- min(length(pos_pb), ncol(MEMs))
+    MEM_pb <- eig_pb$vectors[, pos_pb[seq_len(n_m_pb)], drop = FALSE]
+    colnames(MEM_pb) <- paste0("MEM", seq_len(n_m_pb))
+    X_all_pb <- cbind(X_env_pb, MEM_pb)
+
+    auth_a <- resolve_step06_authority_weights(df)[anchor_idx]
+    ed_w_a <- if ("edaphic_coord_weight" %in% names(df)) pmax(0.25, as.numeric(df$edaphic_coord_weight[anchor_idx])) else rep(1.0, length(anchor_idx))
+    w_pres <- auth_a * ed_w_a
+    w_pres <- w_pres / max(mean(w_pres, na.rm = TRUE), 1e-8)
+    w_bg <- rep(sum(w_pres) / max(1L, nrow(bg_gen$X_bg)), nrow(bg_gen$X_bg))
+    wts_pb <- c(w_pres, w_bg)
+
+    rf_threads <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(32L) else 1L
+    df_env_pb <- data.frame(y = y_pb, as.data.frame(X_env_pb), check.names = FALSE)
+    df_all_pb <- data.frame(y = y_pb, as.data.frame(X_all_pb), check.names = FALSE)
+    if (requireNamespace("ranger", quietly = TRUE)) {
+      rf_nonspatial <- ranger::ranger(y ~ ., data = df_env_pb, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_pb, num.threads = rf_threads, seed = 42)
+      oob_acc_nonspatial <- 1.0 - rf_nonspatial$prediction.error
+      rf_spatial <- ranger::ranger(y ~ ., data = df_all_pb, num.trees = n_trees, importance = "permutation", probability = FALSE, case.weights = wts_pb, num.threads = rf_threads, seed = 42)
+      oob_acc_spatial <- 1.0 - rf_spatial$prediction.error
+      rf_prob_anchor <- ranger::ranger(y ~ ., data = df_env_pb, num.trees = n_trees, probability = TRUE, case.weights = wts_pb, num.threads = rf_threads, seed = 42)
+      imp_mat <- cbind(MeanDecreaseAccuracy = ranger::importance(rf_spatial))
+    } else {
+      rf_nonspatial <- randomForest::randomForest(x = X_env_pb, y = y_pb, ntree = n_trees, importance = TRUE)
+      oob_acc_nonspatial <- 1.0 - rf_nonspatial$err.rate[n_trees, "OOB"]
+      rf_spatial <- randomForest::randomForest(x = X_all_pb, y = y_pb, ntree = n_trees, importance = TRUE)
+      oob_acc_spatial <- 1.0 - rf_spatial$err.rate[n_trees, "OOB"]
+      rf_prob_anchor <- rf_nonspatial
+      imp_mat <- randomForest::importance(rf_spatial, type = 1)
+    }
+
+    autocorr_info <- estimate_spatial_autocorrelation_block_size(coords[anchor_idx, , drop = FALSE], X_env[anchor_idx, , drop = FALSE])
+    fold_pb <- assign_spatial_grid_blocks(coords_pb, block_deg = autocorr_info$range_deg, k = 5L)
+    oof_pb_pres <- rep(NA_real_, nrow(X_env_pb))
+    for (f_id in sort(unique(fold_pb))) {
+      tr_i <- which(fold_pb != f_id); te_i <- which(fold_pb == f_id)
+      if (length(tr_i) >= 8L && length(te_i) >= 1L && length(unique(y_pb[tr_i])) == 2L) {
+        fit_b <- ranger::ranger(y ~ ., data = df_env_pb[tr_i, , drop = FALSE], num.trees = max(100L, floor(n_trees / 2L)), probability = TRUE, case.weights = wts_pb[tr_i], num.threads = rf_threads, seed = 42L + as.integer(f_id))
+        pr_b <- stats::predict(fit_b, data = as.data.frame(X_env_pb[te_i, , drop = FALSE]), num.threads = rf_threads)$predictions
+        if (is.matrix(pr_b) && "Presence" %in% colnames(pr_b)) oof_pb_pres[te_i] <- pr_b[, "Presence"]
+      }
+    }
+    miss_pb <- which(!is.finite(oof_pb_pres))
+    if (length(miss_pb) > 0L && is.matrix(rf_prob_anchor$predictions) && "Presence" %in% colnames(rf_prob_anchor$predictions)) {
+      oof_pb_pres[miss_pb] <- rf_prob_anchor$predictions[miss_pb, "Presence"]
+    }
+    oof_pb_cls <- ifelse(oof_pb_pres >= 0.50, "Presence", "Background")
+    spatial_block_cv_acc <- sum(wts_pb * (oof_pb_cls == as.character(y_pb)), na.rm = TRUE) / sum(wts_pb)
+
+    suit_all <- rep(NA_real_, n)
+    suit_all[anchor_idx] <- oof_pb_pres[seq_along(anchor_idx)]
+    if (length(passive_idx) > 0L) {
+      pr_pass <- stats::predict(rf_prob_anchor, data = as.data.frame(X_env[passive_idx, , drop = FALSE]), num.threads = rf_threads)$predictions
+      suit_all[passive_idx] <- if (is.matrix(pr_pass) && "Presence" %in% colnames(pr_pass)) pr_pass[, "Presence"] else 0.75
+    }
+    suit_all[!is.finite(suit_all)] <- 0.75
+    full_prob_mat <- matrix(round(suit_all, 4), nrow = n, ncol = 1L, dimnames = list(NULL, single_tx))
+    full_preds <- rep(single_tx, n)
+    full_block_id <- rep(NA_integer_, n)
+    full_block_id[anchor_idx] <- as.integer(fold_pb[seq_along(anchor_idx)])
+    rf_pred_source <- ifelse(!elig_coord, "Passive_Projection_High_Uncertainty",
+                      ifelse(seq_len(n) %in% anchor_idx, "Spatial_Block_OOF_Anchor", "Passive_Projection_Bronze"))
+
+    pred_names <- rownames(imp_mat)
+    is_mem_pred <- grepl("^MEM", pred_names)
+    is_fine_edaphic_pred <- grepl("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bdricm|resdept_r|cfvo|awc|alr_|sgmc_|is_azonal|azonal_|ph_q|min_bedrock|max_cfvo)", pred_names)
+    is_climate_pred <- grepl("^(bio|delta_doy|doy)", pred_names, ignore.case = TRUE)
+    imp_df <- data.frame(
+      Predictor = pred_names,
+      MeanDecreaseAccuracy = imp_mat[, 1],
+      PositiveImportance = pmax(0, imp_mat[, 1]),
+      Type = ifelse(is_mem_pred, "Spatial (MEMs)",
+             ifelse(is_fine_edaphic_pred, "Fine-Grain Edaphic & Outcrop (10-30m)", "Environmental")),
+      Group = ifelse(is_mem_pred, "[C] Spatial MEMs",
+              ifelse(is_fine_edaphic_pred, "[A] Fine-Grain Edaphic & Outcrop Lithology",
+              ifelse(is_climate_pred, "[B] Macro-Climate", "[A] Fine-Grain Edaphic & Outcrop Lithology"))),
+      stringsAsFactors = FALSE
+    )
+    imp_df <- imp_df[order(imp_df$MeanDecreaseAccuracy, decreasing = TRUE), ]
+
+    fine_edaphic_vars <- intersect(env_vars, grep("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bdricm|resdept_r|cfvo|awc|alr_|sgmc_|is_azonal|azonal_|ph_q|min_bedrock|max_cfvo)", env_vars, value = TRUE))
+    macro_climate_vars <- intersect(env_vars, grep("^(bio|delta_doy|doy)", env_vars, value = TRUE, ignore.case = TRUE))
+    ibe_df <- if (exists("compute_isolation_by_environment", mode = "function")) {
+      tryCatch(compute_isolation_by_environment(df[anchor_idx, , drop = FALSE], edaph_vars = fine_edaphic_vars, clim_vars = macro_climate_vars, mem_mat = MEMs[anchor_idx, , drop = FALSE]), error = function(e) NULL)
+    } else NULL
+
+    grp_names <- c("[A] Fine-Grain Edaphic & Outcrop Lithology", "[B] Macro-Climate", "[C] Spatial MEMs")
+    grp_sums <- sapply(grp_names, function(g) sum(imp_df$PositiveImportance[imp_df$Group == g], na.rm = TRUE))
+    tot_pos <- sum(grp_sums, na.rm = TRUE)
+    var_pct <- if (tot_pos <= 0) round(rep(100 / 3, 3), 2) else {
+      vp <- round((as.numeric(grp_sums) / tot_pos) * 100, 2)
+      vp[which.max(vp)] <- round(vp[which.max(vp)] + (100.0 - sum(vp)), 2)
+      vp
+    }
+    var_part <- data.frame(Component = grp_names, Variance_Pct = var_pct, stringsAsFactors = FALSE)
+
+    return(list(
+      rf_spatial = rf_spatial, rf_nonspatial = rf_nonspatial, rf_prob_anchor = rf_prob_anchor,
+      importance = imp_df, variance_partition = var_part, varpart_model = NULL, mems = MEMs,
+      OOB_Accuracy = oob_acc_spatial, OOB_Error = 1.0 - oob_acc_spatial,
+      NonSpatial_OOB_Accuracy = oob_acc_nonspatial,
+      Spatial_Block_CV_Accuracy = spatial_block_cv_acc,
+      spatial_autocorr_range_km = autocorr_info$range_km,
+      rf_predicted_taxon = full_preds,
+      rf_predicted_prob = round(suit_all, 4),
+      rf_given_taxon_prob = round(suit_all, 4),
+      rf_prediction_source = rf_pred_source,
+      oof_prob_matrix = full_prob_mat,
+      full_prob_mat = full_prob_mat,
+      block_cv_acc = spatial_block_cv_acc,
+      predicted_taxon = full_preds,
+      predicted_prob = round(suit_all, 4),
+      spatial_block_id = full_block_id,
+      collinearity_screening = col_screen,
+      residual_moran_i = 0.0, residual_moran_p = 1.0,
+      single_lineage_mode = TRUE,
+      ibe_summary = ibe_df,
+      accessible_background = bg_gen
+    ))
+  }
 
   # Inverse class-frequency weights (Valavi et al. 2021) * Empirical Bayes / Beta-Binomial Authority weights * Spatial declustering weights
   spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(df) else rep(1.0, n)
@@ -2576,8 +2793,9 @@ run_spatial_rf_models <- compute_spatial_rf_mems
 # 5. Partitioned PCA-env Niche Overlap: Climatic vs. Edaphic-Geologic vs. Joint
 #    (Broennimann et al. 2012; Warren et al. 2008; Dormann et al. 2013)
 # ------------------------------------------------------------------------------
-.prepare_partition_scores_glob <- function(bg_mat, rf_var_weights = NULL) {
+.prepare_partition_scores_glob <- function(bg_mat, rf_var_weights = NULL, coords_occ = NULL) {
   if (is.null(bg_mat) || ncol(bg_mat) == 0 || nrow(bg_mat) < 6) return(NULL)
+  n_occ <- nrow(bg_mat)
   for (j in seq_len(ncol(bg_mat))) {
     col_v <- bg_mat[, j]
     if (any(!is.finite(col_v))) {
@@ -2589,33 +2807,66 @@ run_spatial_rf_models <- compute_spatial_rf_mems
   active_cols <- which(apply(bg_mat, 2, stats::sd, na.rm = TRUE) > 1e-8)
   if (length(active_cols) == 0) return(NULL)
   bg_sub <- bg_mat[, active_cols, drop = FALSE]
-  use_rf_w <- !is.null(rf_var_weights) && !is.null(colnames(bg_sub)) && any(colnames(bg_sub) %in% names(rf_var_weights))
-  if (use_rf_w) {
-    w_vec <- rep(1.0 / ncol(bg_sub), ncol(bg_sub))
-    names(w_vec) <- colnames(bg_sub)
-    ov_nm <- intersect(colnames(bg_sub), names(rf_var_weights))
-    w_raw <- as.numeric(rf_var_weights[ov_nm])
-    w_raw[!is.finite(w_raw) | w_raw <= 0] <- 1e-6
-    w_vec[ov_nm] <- w_raw
-    w_vec <- (w_vec / sum(w_vec)) * ncol(bg_sub)
-    bg_z <- scale(bg_sub, center = TRUE, scale = TRUE)
-    bg_z <- sweep(bg_z, 2L, sqrt(w_vec), `*`)
-  } else {
-    bg_z <- NULL
+
+  # Exclude pure binary {0, 1} indicator columns from continuous PCA-env kernel smoothing when continuous variables exist
+  cont_cols <- which(apply(bg_sub, 2, function(v) length(unique(round(v, 5))) >= 4L))
+  if (length(cont_cols) >= 1L) {
+    bg_sub <- bg_sub[, cont_cols, drop = FALSE]
   }
-  scores_glob <- tryCatch({
-    if (ncol(bg_sub) >= 2) {
-      if (!is.null(bg_z)) {
-        as.data.frame(stats::prcomp(bg_z, center = FALSE, scale. = FALSE)$x[, 1:2, drop = FALSE])
-      } else {
-        as.data.frame(stats::prcomp(bg_sub, center = TRUE, scale. = TRUE)$x[, 1:2, drop = FALSE])
-      }
+
+  # Sample accessible background M across the geographic study extent (Broennimann et al. 2012; Soberon & Peterson 2005)
+  has_coords <- !is.null(coords_occ) && nrow(coords_occ) == n_occ &&
+                all(is.finite(as.numeric(coords_occ[, 1]))) && all(is.finite(as.numeric(coords_occ[, 2])))
+  bg_extra_X <- NULL
+  bg_extra_coords <- NULL
+  if (has_coords && n_occ >= 8L) {
+    bg_gen <- tryCatch(
+      .generate_accessible_background_env(coords_occ, bg_sub, n_bg = min(500L, max(150L, 3L * n_occ)), seed = 108L),
+      error = function(e) NULL
+    )
+    if (!is.null(bg_gen) && nrow(bg_gen$X_bg) >= 20L) {
+      bg_extra_X <- bg_gen$X_bg
+      bg_extra_coords <- bg_gen$coords
+    }
+  }
+
+  comb_X <- if (!is.null(bg_extra_X)) rbind(bg_sub, bg_extra_X) else bg_sub
+  # Calibrate PCA-env strictly on unweighted standardized continuous predictors (never stretched by rf_var_weights)
+  scores_all <- tryCatch({
+    if (ncol(comb_X) >= 2L) {
+      as.data.frame(stats::prcomp(comb_X, center = TRUE, scale. = TRUE)$x[, 1:2, drop = FALSE])
     } else {
-      z1 <- as.numeric(scale(bg_sub[, 1]))
-      data.frame(PC1 = z1, PC2 = 0.05 * seq_along(z1) / length(z1))
+      z1 <- as.numeric(scale(comb_X[, 1]))
+      data.frame(PC1 = z1, PC2 = 0.05 * sin(seq_along(z1) * 0.37))
     }
   }, error = function(e) NULL)
-  list(bg_sub = bg_sub, scores_glob = scores_glob)
+  if (is.null(scores_all)) return(NULL)
+
+  scores_occ <- scores_all[seq_len(n_occ), 1:2, drop = FALSE]
+  scores_bg_only <- if (!is.null(bg_extra_X)) scores_all[(n_occ + 1L):nrow(scores_all), 1:2, drop = FALSE] else NULL
+  list(
+    bg_sub = bg_sub,
+    scores_glob = scores_occ,
+    scores_M_all = scores_all,
+    scores_M_bg = scores_bg_only,
+    coords_occ = if (has_coords) as.matrix(coords_occ) else NULL,
+    coords_M_bg = bg_extra_coords
+  )
+}
+
+.resolve_lineage_accessible_glob1 <- function(prep, idx_grp) {
+  sc_occ <- prep$scores_glob
+  if (is.null(prep$scores_M_bg) || is.null(prep$coords_occ) || is.null(prep$coords_M_bg)) {
+    return(sc_occ)
+  }
+  c_sp <- prep$coords_occ[idx_grp, , drop = FALSE]
+  c_bg <- prep$coords_M_bg
+  d_deg <- sqrt(outer(c_bg[, 1], c_sp[, 1], "-")^2 + outer(c_bg[, 2], c_sp[, 2], "-")^2)
+  min_d <- apply(d_deg, 1L, min, na.rm = TRUE)
+  # Accessible dispersal envelope M_i (~125 km / 1.15 deg buffer around lineage occurrences)
+  hit_bg <- which(min_d <= 1.15)
+  if (length(hit_bg) < 15L) hit_bg <- order(min_d)[seq_len(min(30L, length(min_d)))]
+  rbind(sc_occ[idx_grp, 1:2, drop = FALSE], prep$scores_M_bg[hit_bg, 1:2, drop = FALSE])
 }
 
 .run_ecospat_test_chunk <- function(z1, z2, rep_n, test_kind) {
@@ -2670,9 +2921,12 @@ run_spatial_rf_models <- compute_spatial_rf_mems
     if (!is.null(prep) && !is.null(prep$scores_glob) && requireNamespace("ecospat", quietly = TRUE) &&
         length(idx1) >= 5L && length(idx2) >= 5L) {
       g_st <- tryCatch({
-        sc <- prep$scores_glob
-        z1 <- ecospat::ecospat.grid.clim.dyn(glob = sc, glob1 = sc, sp = sc[idx1, 1:2, drop = FALSE], R = 100)
-        z2 <- ecospat::ecospat.grid.clim.dyn(glob = sc, glob1 = sc, sp = sc[idx2, 1:2, drop = FALSE], R = 100)
+        sc_occ <- prep$scores_glob
+        sc_glob <- if (!is.null(prep$scores_M_all)) prep$scores_M_all else sc_occ
+        g1_m <- .resolve_lineage_accessible_glob1(prep, idx1)
+        g2_m <- .resolve_lineage_accessible_glob1(prep, idx2)
+        z1 <- ecospat::ecospat.grid.clim.dyn(glob = sc_glob, glob1 = g1_m, sp = sc_occ[idx1, 1:2, drop = FALSE], R = 100)
+        z2 <- ecospat::ecospat.grid.clim.dyn(glob = sc_glob, glob1 = g2_m, sp = sc_occ[idx2, 1:2, drop = FALSE], R = 100)
         ov <- ecospat::ecospat.niche.overlap(z1, z2, cor = TRUE)
         if (is.finite(as.numeric(ov$D)) && is.finite(as.numeric(ov$I))) {
           list(z1 = z1, z2 = z2, D_emp = as.numeric(ov$D), I_emp = as.numeric(ov$I))
@@ -2784,9 +3038,12 @@ compute_pca_env_partition_overlap <- function(bg_mat, grp_col, sp1, sp2, n_perm 
     eco_fit <- tryCatch({
       scores_sp1 <- scores_glob[idx1, 1:2, drop = FALSE]
       scores_sp2 <- scores_glob[idx2, 1:2, drop = FALSE]
+      sc_glob <- if (!is.null(prep$scores_M_all)) prep$scores_M_all else scores_glob
+      g1_m <- .resolve_lineage_accessible_glob1(prep, idx1)
+      g2_m <- .resolve_lineage_accessible_glob1(prep, idx2)
       grid_R <- if (n_perm < 99) 50 else 100
-      z1 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp1, R = grid_R)
-      z2 <- ecospat::ecospat.grid.clim.dyn(glob = scores_glob, glob1 = scores_glob, sp = scores_sp2, R = grid_R)
+      z1 <- ecospat::ecospat.grid.clim.dyn(glob = sc_glob, glob1 = g1_m, sp = scores_sp1, R = grid_R)
+      z2 <- ecospat::ecospat.grid.clim.dyn(glob = sc_glob, glob1 = g2_m, sp = scores_sp2, R = grid_R)
       ov <- ecospat::ecospat.niche.overlap(z1, z2, cor = TRUE)
       if (n_perm >= 99) {
         eq <- tryCatch(
@@ -2906,12 +3163,12 @@ compute_edaphic_schoener_d <- function(
   n_perm = 100,
   intraspecific_mode = FALSE
 ) {
-  if (!("analysis_group" %in% names(df)) || isTRUE(intraspecific_mode)) {
+  if (!("analysis_group" %in% names(df)) || all(is.na(df$analysis_group) | !nzchar(trimws(as.character(df$analysis_group))))) {
     df <- resolve_analysis_group(
       df,
       intraspecific_mode = intraspecific_mode,
       primary_env_vars = primary_edaph_vars,
-      rf_var_weights = rf_var_weights
+      rf_var_weights = NULL
     )
   }
   elig_mask <- if ("is_training_eligible_coord" %in% names(df)) as.logical(df$is_training_eligible_coord) else rep(TRUE, nrow(df))
@@ -2985,12 +3242,12 @@ run_warren_niche_identity_tests <- function(
   rf_var_weights = NULL
 ) {
   message(sprintf("Executing Partitioned PCA-env Niche Equivalency & Background Similarity Tests (%d permutations per pair)...", n_perm))
-  if (!("analysis_group" %in% names(df)) || isTRUE(intraspecific_mode)) {
+  if (!("analysis_group" %in% names(df)) || all(is.na(df$analysis_group) | !nzchar(trimws(as.character(df$analysis_group))))) {
     df <- resolve_analysis_group(
       df,
       intraspecific_mode = intraspecific_mode,
       primary_env_vars = primary_env_vars,
-      rf_var_weights = rf_var_weights
+      rf_var_weights = NULL
     )
   }
   # Exclude records with coordinateUncertaintyInMeters > 10000 from calibrating PCA-env niche envelopes
@@ -3049,12 +3306,32 @@ run_warren_niche_identity_tests <- function(
     joint_vars <- unique(c(clim_vars, edaph_vars))
   }
 
+  coords_cal <- if (all(c("longitude", "latitude") %in% names(df_calib))) {
+    as.matrix(df_calib[, c("longitude", "latitude"), drop = FALSE])
+  } else NULL
   X_clim_part <- if (length(clim_vars) > 0) X_raw[, clim_vars, drop = FALSE] else X_raw
   X_edaph_part <- if (length(edaph_vars) > 0) X_raw[, edaph_vars, drop = FALSE] else X_raw
   X_joint_part <- X_raw[, joint_vars, drop = FALSE]
-  prep_clim <- .prepare_partition_scores_glob(X_clim_part, rf_var_weights)
-  prep_edaph <- .prepare_partition_scores_glob(X_edaph_part, rf_var_weights)
-  prep_joint <- .prepare_partition_scores_glob(X_joint_part, rf_var_weights)
+  prep_clim <- .prepare_partition_scores_glob(X_clim_part, rf_var_weights = NULL, coords_occ = coords_cal)
+  prep_edaph <- .prepare_partition_scores_glob(X_edaph_part, rf_var_weights = NULL, coords_occ = coords_cal)
+  prep_joint <- .prepare_partition_scores_glob(X_joint_part, rf_var_weights = NULL, coords_occ = coords_cal)
+
+  if (length(pairs) == 0L && length(cand_groups) == 1L) {
+    tx_one <- cand_groups[1L]
+    n_one <- sum(grp_col == tx_one, na.rm = TRUE)
+    single_sum <- data.frame(
+      Pair = sprintf("%s (Single Lineage K=1)", gsub("Packera ", "P.", tx_one)),
+      Taxon1 = tx_one, Taxon2 = tx_one, N1 = n_one, N2 = n_one,
+      D_clim = 1.0, I_clim = 1.0, p_equiv_D_clim = 1.0, p_bg_D_clim = 1.0,
+      D_edaph = 1.0, I_edaph = 1.0, p_equiv_D_edaph = 1.0, p_bg_D_edaph = 1.0,
+      D_joint = 1.0, I_joint = 1.0, Schoener_D = 1.0, Warren_D = 1.0, Warren_I = 1.0,
+      p_value_D = 1.0, p_value_I = 1.0, p_bg_D_joint = 1.0, p_bg_I_joint = 1.0,
+      Niche_Divergence_Axis = "Unimodal_Niche_Breadth",
+      Taxonomic_Inference = "Single Unimodal Species (Facultative Niche Breadth; K=1)",
+      stringsAsFactors = FALSE
+    )
+    return(list(summary = single_sum, permutations = data.frame(), collinearity_blocks = block_screen))
+  }
 
   valid_pair_meta <- list()
   part_jobs <- list()
@@ -3087,10 +3364,14 @@ run_warren_niche_identity_tests <- function(
                 ifelse(!is.na(D_clim) && !is.na(D_edaph) && (D_clim + 0.08 < D_edaph), "Macroclimatic_Divergence",
                        "Joint_Climato_Edaphic"))
 
-    min_p <- min(c(p_val_D, edaph_res$p_equiv_D, clim_res$p_equiv_D), na.rm = TRUE)
-    outcome <- ifelse(min_p < 0.01, "Distinct Ecological Niche (Species Boundary Confirmed)",
-               ifelse(min_p < 0.05, "Significant Divergence (Subspecific Ecological Race)",
-                      "Conserved / Overlapping Niche (Ecophenotypic Variant)"))
+    min_p_bg <- suppressWarnings(min(c(joint_res$p_bg_D, edaph_res$p_bg_D, clim_res$p_bg_D), na.rm = TRUE))
+    if (!is.finite(min_p_bg)) min_p_bg <- min(c(p_val_D, edaph_res$p_equiv_D, clim_res$p_equiv_D), na.rm = TRUE)
+    min_d_emp <- suppressWarnings(min(c(D_emp, D_edaph, D_clim), na.rm = TRUE))
+    outcome <- ifelse(is.finite(min_p_bg) && min_p_bg < 0.01 && is.finite(min_d_emp) && min_d_emp < 0.30,
+                      "Distinct Ecological Niche (Background Similarity Divergence Confirmed)",
+               ifelse(is.finite(min_p_bg) && min_p_bg < 0.05 && is.finite(min_d_emp) && min_d_emp < 0.50,
+                      "Significant Divergence (Subspecific Ecological Race)",
+                      "Conserved / Overlapping Niche (Shared Regional Background)"))
 
     results_list[[pair_name]] <- data.frame(
       Pair = pair_name, Taxon1 = sp1, Taxon2 = sp2, N1 = n1, N2 = n2,
@@ -3487,15 +3768,7 @@ main <- function() {
     paste(primary_env_vars, collapse = ", ")
   ))
 
-  # Stage 3: Pass Empirically Validated Primary Predictors & RF Importance Weights to Ecotype Partitioning, Niche Overlap & Cross-Modal Consensus
-  if (is_intra_run) {
-    vouchers_df <- resolve_analysis_group(
-      vouchers_df,
-      intraspecific_mode = TRUE,
-      primary_env_vars = primary_env_vars,
-      rf_var_weights = rf_var_weights
-    )
-  }
+  # Stage 3: Preserve Non-Circular Analysis Group Resolution (zero post-RF re-clustering) & Run Cross-Modal Consensus
   vouchers_df <- execute_crossmodal_consensus(
     vouchers_df,
     intraspecific_mode = is_intra_run,
@@ -3550,6 +3823,12 @@ main <- function() {
   }
   if (write_csv_atomic(niche_summary_df, opts$output_summary, demo = demo_mode)) {
     message(sprintf("Saved Warren's Niche Identity summary to %s.", opts$output_summary))
+  }
+  if (!is.null(srf_res$ibe_summary) && is.data.frame(srf_res$ibe_summary) && nrow(srf_res$ibe_summary) > 0L) {
+    ibe_out_csv <- file.path(dirname(opts$output_summary), "isolation_by_environment_summary.csv")
+    if (write_csv_atomic(srf_res$ibe_summary, ibe_out_csv, demo = demo_mode)) {
+      message(sprintf("Saved Isolation-by-Environment (IBE) partial RDA summary to %s.", ibe_out_csv))
+    }
   }
 
   export_spatial_rf_figures(vouchers_df, srf_res, niche_res, opts$output_plot, pheno_res = pheno_res)

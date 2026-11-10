@@ -450,3 +450,5 @@ pytest.ini
 Rplots.pdf
 *.npy
 *.pdf
+usda_and_plasticity_mitigation.patch
+hotfix_r_diag_and_usda_api.patch

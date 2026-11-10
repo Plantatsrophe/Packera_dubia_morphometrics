@@ -427,6 +427,9 @@ class HarvestingConfig:
     min_file_size_kb: float = 500.0
     min_sharpness_laplacian: float = 80.0
     download_concurrency: int = 15
+    usda_county_filter: bool = True
+    usda_county_buffer_km: float = 50.0
+    usda_exempt_gold: bool = True
 
 
 @dataclass(frozen=True)
@@ -703,6 +706,12 @@ class PipelineConfig:
             harv_kwargs["countries"] = []
         if "home_herbarium" in harv_kwargs:
             harv_kwargs["home_herbarium"] = str(harv_kwargs["home_herbarium"]).strip().upper() or "NCU"
+        if "usda_county_filter" in harv_kwargs:
+            harv_kwargs["usda_county_filter"] = bool(harv_kwargs["usda_county_filter"])
+        if "usda_county_buffer_km" in harv_kwargs and harv_kwargs["usda_county_buffer_km"] is not None:
+            harv_kwargs["usda_county_buffer_km"] = float(harv_kwargs["usda_county_buffer_km"])
+        if "usda_exempt_gold" in harv_kwargs:
+            harv_kwargs["usda_exempt_gold"] = bool(harv_kwargs["usda_exempt_gold"])
         harvesting = HarvestingConfig(**harv_kwargs)
 
         seg_dict = raw_cfg.get("segmentation", {})
@@ -879,6 +888,9 @@ WESTERN_LONGITUDE_THRESHOLD = _DEFAULT_CONFIG.thresholds.western_longitude_thres
 DEFAULT_GEOGRAPHIC_SCOPE = _DEFAULT_CONFIG.harvesting.geographic_scope
 DEFAULT_COUNTRIES = _DEFAULT_CONFIG.harvesting.countries
 DEFAULT_HOME_HERBARIUM = _DEFAULT_CONFIG.harvesting.home_herbarium
+DEFAULT_USDA_COUNTY_FILTER = _DEFAULT_CONFIG.harvesting.usda_county_filter
+DEFAULT_USDA_COUNTY_BUFFER_KM = _DEFAULT_CONFIG.harvesting.usda_county_buffer_km
+DEFAULT_USDA_EXEMPT_GOLD = _DEFAULT_CONFIG.harvesting.usda_exempt_gold
 
 
 def resolve_cpu_threads(
@@ -945,4 +957,3 @@ def resolve_gpu_batch_size(
     if default is not None:
         return max(1, int(default))
     return max(1, int(default_cuda) if use_cuda else int(default_cpu))
-
