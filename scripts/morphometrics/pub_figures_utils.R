@@ -625,7 +625,7 @@ resolve_plot_group_column <- function(df, cda_res = NULL, gmm_res = NULL) {
         }
       }
     }
-    if ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster))) {
+    if ("gmm_cluster" %in% names(df) && length(unique(stats::na.omit(df$gmm_cluster))) >= 2L) {
       return(paste0("Morphotype_K", ifelse(is.na(df$gmm_cluster), 1L, as.integer(df$gmm_cluster))))
     }
   }
