@@ -582,9 +582,14 @@ select_adaptive_reference_anchors <- function(
     dis_gold_frac <- if (n_gold_k > 0L) (dis_gold_n / n_gold_k) else if (length(idx_gs) > 0L) mean(is_dis_mode[idx_gs], na.rm = TRUE) else 0.0
     if (!is.finite(dis_gold_frac)) dis_gold_frac <- 0.0
     gold_sol_pool <- if (n_gold_k > 0L) eff_sol[idx_gs[gs_gold_local]] else eff_sol[idx_gs]
-    gold_med_sol <- if (any(is.finite(gold_sol_pool))) stats::median(gold_sol_pool, na.rm = TRUE) else NA_real_
-    is_entire_basal_sp <- is.finite(gold_med_sol) && (gold_med_sol >= 0.85)
-    min_dis_gold_frac <- if (is_entire_basal_sp) 0.25 else if (dis_gold_n >= 5L) 0.15 else 0.25
+    dis_Mode_pool <- if (n_gold_k > 0L) is_dis_mode[idx_gs[gs_gold_local]] else is_dis_mode[idx_gs]
+    ent_sol_vals <- gold_sol_pool[!dis_Mode_pool & is.finite(gold_sol_pool)]
+    dis_sol_vals <- gold_sol_pool[dis_Mode_pool & is.finite(gold_sol_pool)]
+    ent_med_sol <- if (length(ent_sol_vals) > 0L) stats::median(ent_sol_vals, na.rm = TRUE) else NA_real_
+    dis_med_sol <- if (length(dis_sol_vals) > 0L) stats::median(dis_sol_vals, na.rm = TRUE) else NA_real_
+    has_bimodal_dis_cluster <- (dis_gold_n >= 5L) && is.finite(dis_med_sol) &&
+      ((dis_med_sol <= 0.65) || (is.finite(ent_med_sol) && ((ent_med_sol - dis_med_sol) >= 0.18)))
+    min_dis_gold_frac <- if (has_bimodal_dis_cluster) 0.15 else 0.25
     allow_dis_split <- isTRUE(if (n_gold_k > 0L) (dis_gold_frac >= min_dis_gold_frac) else (dis_gold_frac >= 0.30))
     idx_type_k <- idx_gs[gs_type_local]
     n_type_k <- length(idx_type_k)
