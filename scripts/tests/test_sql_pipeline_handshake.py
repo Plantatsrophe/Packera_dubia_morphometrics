@@ -625,9 +625,10 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                                 "fine_soil_clay": 24.0 - 0.5 * idx_o,
                                 "fine_bedrock_depth_cm": 135.0 if is_aur else 48.0,
                                 "ssurgo_rock_outcrop_pct": 2.0 if is_aur else 22.0,
-                                "topo_elev_m": 180.0 + 5.0 * idx_o if is_aur else 460.0 + 8.0 * idx_o,
+                                "elevation_m": 180.0 + 5.0 * idx_o if is_aur else 460.0 + 8.0 * idx_o,
                                 "topo_slope_deg": 4.5 if is_aur else 16.0,
                                 "topo_tpi_30m": -0.8 if is_aur else 2.4,
+                                "topo_hli_30m": 0.72 if is_aur else 0.94,
                                 "topo_twi_30m": 9.8 if is_aur else 5.2,
                                 "sgmc_lithology_class": "Felsic_Crystalline" if is_aur else "Carbonate",
                                 "musym": "WkB" if is_aur else "GlC",
@@ -642,8 +643,8 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                                 "bio4_temp_seasonality": 740.0 + 5.0 * idx_o,
                                 "bio12_precip_annual": 1180.0 if is_aur else 980.0,
                                 "bio15_precip_seasonality": 14.0 + 0.3 * idx_o,
-                                "bio18_precip_warmest_qt": 345.0 if is_aur else 290.0,
-                                "bio19_precip_coldest_qt": 265.0 if is_aur else 215.0,
+                                "bio18_precip_warmest_qtr": 345.0 if is_aur else 290.0,
+                                "bio19_precip_coldest_qtr": 265.0 if is_aur else 215.0,
                                 "is_training_eligible_coord": True,
                             }
                         )

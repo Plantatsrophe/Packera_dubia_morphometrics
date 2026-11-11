@@ -11,12 +11,12 @@
 #     - Parameterized transactional upserts (`db_upsert_dataframe`).
 #     - Single-query 120-vertex LeafMachine3 contour ingestion for Step 03.
 #     - Step 04 OTU + plant_individuals + reproductive SQLite joins & updates.
-#     - Step 06 environmental_cache + environmental_rtree spatial bbox queries.
+#     - Step 05 environmental_cache + environmental_rtree spatial bbox queries.
 #     - Step 07 & Step 08 `fetch_run_master_view()` (`v_integrative_triage_master`)
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20261112L
+PACKERA_SCHEMA_USER_VERSION <- 20261113L
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -104,11 +104,10 @@ PACKERA_DB_LOGICAL_COLS <- c(
   "is_primary_duplicate", "is_calibrated_mm", "is_bent_stem",
   "is_dissected", "lm3_gates_pass", "mask_is_upright", "is_verified_anthesis",
   "is_rock_outcrop", "is_azonal_lithology", "high_coord_uncertainty_flag",
-  "is_training_eligible_coord", "azonal_lithology_presence_buffer",
+  "is_training_eligible_coord", "is_clim_eligible_coord", "is_edaphic_eligible_coord", "azonal_lithology_presence_buffer",
   "is_promoted_bronze", "is_promoted_anchor", "is_passive",
   "is_contour_outlier", "morphometric_outlier_flag", "misidentification_flag",
-  "substrate_specialist_flag",
-  "piedmont_outcrop_specialist_flag", "multimodal_conflict_flag",
+  "substrate_specialist_flag", "multimodal_conflict_flag",
   "is_completed_voucher", "is_type_specimen", "has_empirical_type_anchor",
   "is_typical_morphotype", "matches_type_lithology",
   "is_confident_label_noise", "cryptic_cluster_cohesion_pass"
@@ -142,28 +141,6 @@ PACKERA_DB_WC_BIO_COLS <- c(
   "bio18_precip_warmest_qtr",
   "bio19_precip_coldest_qtr"
 )
-
-.coalesce_wc_bio_qt_qtr_df <- function(df) {
-  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(df)
-  pairs <- list(
-    c("bio18_precip_warmest_qtr", "bio18_precip_warmest_qt"),
-    c("bio19_precip_coldest_qtr", "bio19_precip_coldest_qt")
-  )
-  for (pr in pairs) {
-    qtr_c <- pr[1]
-    qt_c <- pr[2]
-    has_qtr <- qtr_c %in% names(df)
-    has_qt <- qt_c %in% names(df)
-    if (!has_qtr && !has_qt) next
-    v_qtr <- if (has_qtr) suppressWarnings(as.numeric(df[[qtr_c]])) else rep(NA_real_, nrow(df))
-    v_qt <- if (has_qt) suppressWarnings(as.numeric(df[[qt_c]])) else rep(NA_real_, nrow(df))
-    v_qtr[!is.finite(v_qtr)] <- NA_real_
-    v_qt[!is.finite(v_qt)] <- NA_real_
-    df[[qtr_c]] <- ifelse(!is.na(v_qtr), v_qtr, v_qt)
-    df[[qt_c]] <- ifelse(!is.na(v_qt), v_qt, v_qtr)
-  }
-  df
-}
 
 .normalize_semicolon_col_r <- function(v) {
   if (is.null(v)) return(NULL)
@@ -300,8 +277,8 @@ PACKERA_DB_WC_BIO_COLS <- c(
     return(c(
       stats::setNames(rep("REAL", length(PACKERA_DB_WC_BIO_COLS)), PACKERA_DB_WC_BIO_COLS),
       c(
-        bio18_precip_warmest_qt = "REAL",
-        bio19_precip_coldest_qt = "REAL",
+        rf_prediction_source = "TEXT",
+        n_observed_modalities = "INTEGER",
         climatic_z_score = "REAL",
         primary_env_predictors = "TEXT",
         primary_clim_predictors = "TEXT",
@@ -316,8 +293,24 @@ PACKERA_DB_WC_BIO_COLS <- c(
     return(c(
       stats::setNames(rep("REAL", length(PACKERA_DB_WC_BIO_COLS)), PACKERA_DB_WC_BIO_COLS),
       c(
-        bio18_precip_warmest_qt = "REAL",
-        bio19_precip_coldest_qt = "REAL"
+        solus_sand_pct = "REAL",
+        solus_clay_pct = "REAL",
+        solus_silt_pct = "REAL",
+        solus_cec = "REAL",
+        topo_hli_30m = "REAL",
+        elevation_m = "REAL",
+        ilr_texture_1 = "REAL",
+        ilr_texture_2 = "REAL",
+        fine_cfvo_pct = "REAL",
+        is_clim_eligible_coord = "INTEGER",
+        is_edaphic_eligible_coord = "INTEGER",
+        edaphic_coord_weight = "REAL",
+        soil_clay = "REAL",
+        soil_silt = "REAL",
+        soil_cfvo = "REAL",
+        soil_clay_soilgrids = "REAL",
+        soil_silt_soilgrids = "REAL",
+        soil_cfvo_soilgrids = "REAL"
       )
     ))
   }
@@ -345,30 +338,6 @@ PACKERA_DB_WC_BIO_COLS <- c(
     if (isTRUE(ok)) added_any <- TRUE
   }
 
-  updated_fields <- tryCatch(DBI::dbListFields(conn, table_name), error = function(e) existing)
-  if (all(c("bio18_precip_warmest_qtr", "bio18_precip_warmest_qt",
-            "bio19_precip_coldest_qtr", "bio19_precip_coldest_qt") %in% updated_fields)) {
-    tryCatch(
-      DBI::dbExecute(
-        conn,
-        sprintf(
-          paste0(
-            "UPDATE %s SET ",
-            "bio18_precip_warmest_qtr = COALESCE(bio18_precip_warmest_qtr, bio18_precip_warmest_qt), ",
-            "bio18_precip_warmest_qt = COALESCE(bio18_precip_warmest_qt, bio18_precip_warmest_qtr), ",
-            "bio19_precip_coldest_qtr = COALESCE(bio19_precip_coldest_qtr, bio19_precip_coldest_qt), ",
-            "bio19_precip_coldest_qt = COALESCE(bio19_precip_coldest_qt, bio19_precip_coldest_qtr) ",
-            "WHERE (bio18_precip_warmest_qtr IS NULL AND bio18_precip_warmest_qt IS NOT NULL) ",
-            "   OR (bio18_precip_warmest_qt IS NULL AND bio18_precip_warmest_qtr IS NOT NULL) ",
-            "   OR (bio19_precip_coldest_qtr IS NULL AND bio19_precip_coldest_qt IS NOT NULL) ",
-            "   OR (bio19_precip_coldest_qt IS NULL AND bio19_precip_coldest_qtr IS NOT NULL);"
-          ),
-          q_tbl
-        )
-      ),
-      error = function(e) NULL
-    )
-  }
   added_any
 }
 
@@ -1443,7 +1412,7 @@ persist_step04_to_sqlite <- function(
 }
 
 # ==============================================================================
-# Step 06: Environmental Cache + R*Tree Spatial Index & Spatial RF Predictions
+# Step 05: Environmental Cache + R*Tree Spatial Index & Spatial RF Predictions
 # ==============================================================================
 
 query_environmental_cache_sqlite <- function(
@@ -1477,7 +1446,7 @@ query_environmental_cache_sqlite <- function(
       error = function(e) NULL
     )
     if (is.null(res) || nrow(res) == 0L) return(NULL)
-    return(.coalesce_wc_bio_qt_qtr_df(coerce_sqlite_logical_cols(res)))
+    return(coerce_sqlite_logical_cols(res))
   }
 
   clauses <- character(0)
@@ -1505,7 +1474,7 @@ query_environmental_cache_sqlite <- function(
   }
   res <- tryCatch(DBI::dbGetQuery(conn, sql), error = function(e) NULL)
   if (is.null(res) || nrow(res) == 0L) return(NULL)
-  .coalesce_wc_bio_qt_qtr_df(coerce_sqlite_logical_cols(res))
+  coerce_sqlite_logical_cols(res)
 }
 
 upsert_environmental_cache_sqlite <- function(
@@ -1521,8 +1490,8 @@ upsert_environmental_cache_sqlite <- function(
   on.exit(disconnect_packera_db(conn), add = TRUE)
   if (!db_table_exists_safe(conn, "environmental_cache")) return(invisible(0L))
 
-  env_df <- .coalesce_wc_bio_qt_qtr_df(as.data.frame(df, stringsAsFactors = FALSE))
-  for (bc in intersect(c(PACKERA_DB_WC_BIO_COLS, "bio18_precip_warmest_qt", "bio19_precip_coldest_qt"), names(env_df))) {
+  env_df <- as.data.frame(df, stringsAsFactors = FALSE)
+  for (bc in intersect(PACKERA_DB_WC_BIO_COLS, names(env_df))) {
     env_df[[bc]] <- suppressWarnings(as.numeric(env_df[[bc]]))
   }
   if (!("latitude" %in% names(env_df)) && "decimalLatitude" %in% names(env_df)) {
@@ -1556,7 +1525,7 @@ upsert_environmental_cache_sqlite <- function(
   invisible(n_up)
 }
 
-persist_step06_to_sqlite <- function(
+persist_step05_to_sqlite <- function(
   vouchers_df,
   vouchers_path = NULL,
   run_id = NULL,
@@ -1565,7 +1534,7 @@ persist_step06_to_sqlite <- function(
   if (isTRUE(demo) || is.null(vouchers_df) || nrow(vouchers_df) == 0L) return(invisible(FALSE))
   if (!is_sqlite_active_for_inputs(vouchers_path, demo = demo)) return(invisible(FALSE))
 
-  srf_df <- .coalesce_wc_bio_qt_qtr_df(as.data.frame(vouchers_df, stringsAsFactors = FALSE))
+  srf_df <- as.data.frame(vouchers_df, stringsAsFactors = FALSE)
   upsert_environmental_cache_sqlite(srf_df, cache_path = vouchers_path, demo = demo)
 
   conn <- connect_packera_db(read_only = FALSE, demo = FALSE)
@@ -1583,7 +1552,7 @@ persist_step06_to_sqlite <- function(
   for (pc in intersect(c("primary_env_predictors", "primary_clim_predictors", "primary_edaph_predictors"), names(srf_df))) {
     srf_df[[pc]] <- .normalize_semicolon_col_r(srf_df[[pc]])
   }
-  for (nc in intersect(c("edaphic_z_score", "climatic_z_score", "type_edaphic_z_score", PACKERA_DB_WC_BIO_COLS, "bio18_precip_warmest_qt", "bio19_precip_coldest_qt"), names(srf_df))) {
+  for (nc in intersect(c("edaphic_z_score", "climatic_z_score", "type_edaphic_z_score", PACKERA_DB_WC_BIO_COLS), names(srf_df))) {
     srf_df[[nc]] <- suppressWarnings(as.numeric(srf_df[[nc]]))
   }
 
@@ -1627,7 +1596,7 @@ fetch_run_master_view <- function(conn, run_id = resolve_packera_run_id()) {
   )
   if (is.null(res) || nrow(res) == 0L) return(NULL)
   res$run_id <- NULL
-  .coalesce_wc_bio_qt_qtr_df(coerce_sqlite_logical_cols(res))
+  coerce_sqlite_logical_cols(res)
 }
 
 try_fetch_master_view_for_cohort <- function(
@@ -1713,8 +1682,8 @@ persist_step07_to_sqlite <- function(
 .discover_step08_eco_cols <- function(col_names) {
   if (is.null(col_names) || length(col_names) == 0L) return(character(0))
   eco_pattern <- paste0(
-    "^(bio[0-9]+_|fine_|ssurgo_|soil_|topo_|polaris_|solus_|sgmc_|primary_.*_predictors$)",
-    "|(^|_)(schoener_d|edaphic_z_score|climatic_z_score|type_edaphic_z_score|nearest_type_niche_taxon|matches_type_lithology|delta_doy|hopkins_)"
+    "^(bio[0-9]+_|fine_|ssurgo_|soil_|topo_|polaris_|solus_|sgmc_|ilr_texture_|elevation_m$|primary_.*_predictors$)",
+    "|(^|_)(schoener_d|edaphic_z_score|climatic_z_score|type_edaphic_z_score|nearest_type_niche_taxon|matches_type_lithology|delta_doy|hopkins_|substrate_specialist_flag|rf_prediction_source|n_observed_modalities)"
   )
   setdiff(
     grep(eco_pattern, col_names, value = TRUE, ignore.case = TRUE),
@@ -1780,7 +1749,7 @@ load_step07_merged_inputs <- function(opts, standardize_fn) {
   )
 
   if (!is.null(master_df) && nrow(master_df) > 0L) {
-    morph_df <- .coalesce_wc_bio_qt_qtr_df(as.data.frame(master_df, stringsAsFactors = FALSE))
+    morph_df <- as.data.frame(master_df, stringsAsFactors = FALSE)
     morph_df$catalogNumber <- as.character(morph_df$catalogNumber)
 
     # Backfill any dynamic morphometric or ecological columns from disk snapshots if absent/NA in view
@@ -1799,10 +1768,8 @@ load_step07_merged_inputs <- function(opts, standardize_fn) {
     if (!is.null(opts$multimodal) && nzchar(opts$multimodal) && file.exists(opts$multimodal)) {
       mm_disk <- tryCatch(utils::read.csv(opts$multimodal, stringsAsFactors = FALSE), error = function(e) NULL)
       if (!is.null(mm_disk) && nrow(mm_disk) > 0L) {
-        mm_disk <- .coalesce_wc_bio_qt_qtr_df(mm_disk)
         eco_cols_disk <- .discover_step08_eco_cols(names(mm_disk))
         morph_df <- .backfill_cols_by_composite_key(morph_df, mm_disk, eco_cols_disk)
-        morph_df <- .coalesce_wc_bio_qt_qtr_df(morph_df)
       }
     }
 
@@ -1847,10 +1814,8 @@ load_step07_merged_inputs <- function(opts, standardize_fn) {
   if (!is.null(opts$multimodal) && nzchar(opts$multimodal) && file.exists(opts$multimodal)) {
     mm_df <- tryCatch(utils::read.csv(opts$multimodal, stringsAsFactors = FALSE), error = function(e) NULL)
     if (!is.null(mm_df) && nrow(mm_df) > 0 && "catalogNumber" %in% names(mm_df)) {
-      mm_df <- .coalesce_wc_bio_qt_qtr_df(mm_df)
       eco_cols <- .discover_step08_eco_cols(names(mm_df))
       morph_df <- .backfill_cols_by_composite_key(morph_df, mm_df, eco_cols)
-      morph_df <- .coalesce_wc_bio_qt_qtr_df(morph_df)
     }
   }
 

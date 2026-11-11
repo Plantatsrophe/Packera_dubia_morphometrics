@@ -2223,10 +2223,21 @@ compute_authority_precision_weights <- function(df, tier_col = "determiner_tier"
   compute_empirical_bayes_authority_weights(df, mode = "active_passive", active_mask = active_mask, target_modality = target_modality)
 }
 
-resolve_step06_authority_weights <- function(df) {
+resolve_ecological_authority_weights <- function(df, allow_bronze_prior = FALSE) {
   n <- if (is.null(df) || !is.data.frame(df)) 0L else nrow(df)
   if (n == 0L) return(numeric(0))
-  round(compute_empirical_bayes_authority_weights(df, mode = "continuous_prior_posterior", target_modality = "ecological"), 4)
+  w_eb <- compute_empirical_bayes_authority_weights(
+    df,
+    mode = if (isTRUE(allow_bronze_prior)) "continuous_prior_posterior" else "active_passive",
+    target_modality = "ecological"
+  )
+  if (!isTRUE(allow_bronze_prior) && "is_confident_label_noise" %in% names(df)) {
+    cl_noise <- as.logical(df$is_confident_label_noise)
+    cl_noise[is.na(cl_noise)] <- FALSE
+    ti <- .identify_type_specimen_vec(df)
+    w_eb[cl_noise & !ti$is_type_specimen] <- 0.0
+  }
+  round(w_eb, 4)
 }
 
 screen_gmm_point_mass_columns <- function(X_mat, ref_mask = NULL, max_tie_frac = 0.25) {

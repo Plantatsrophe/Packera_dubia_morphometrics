@@ -87,11 +87,12 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
   }
   cont_edaph_cands <- unique(intersect(c(
     top_edaph_1,
-    "ssurgo_ph", "ssurgo_om_pct", "polaris_bd_30m", "fine_soil_ph",
-    "fine_soil_sand", "awc_0_15cm", "elev_3dep_m",
+    "fine_soil_ph", "ilr_texture_1", "ilr_texture_2", "fine_soil_cec",
+    "fine_cfvo_pct", "fine_bedrock_depth_cm", "topo_hli_30m", "topo_twi_30m",
+    "topo_tpi_30m", "topo_slope_deg", "fine_soil_sand", "ssurgo_ph", "polaris_bd_30m",
     if (!is.null(imp_df) && "Predictor" %in% names(imp_df)) {
       ed_ord <- as.character(imp_df$Predictor[order(as.numeric(imp_df$MeanDecreaseAccuracy), decreasing = TRUE)])
-      ed_ord[grepl("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bdricm|resdept_r|cfvo|awc|alr_|sgmc_|elev_)", ed_ord)]
+      ed_ord[grepl("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal)", ed_ord)]
     } else character(0)
   ), names(df)))
   if (length(cont_edaph_cands) > 0L) {
@@ -108,8 +109,8 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
     top_edaph_1
   }
 
-  top_env_lbls <- format_step06_predictor_labels(c(top_env_1, top_env_2))
-  top_edaph_lbl <- format_step06_predictor_labels(top_edaph_1)[1]
+  top_env_lbls <- format_step05_predictor_labels(c(top_env_1, top_env_2))
+  top_edaph_lbl <- format_step05_predictor_labels(top_edaph_1)[1]
 
   render_plate <- function() {
     graphics::par(mfrow = c(2, 2), mar = c(4.5, 16.4, 3.0, 1.2), oma = c(0.5, 0.5, 1.8, 0.5))
@@ -122,9 +123,9 @@ export_dynamic_fig05_ecological_niche_phenology <- function(df, srf_res = NULL, 
       pred_raw <- as.character(imp_df$Predictor[ord])
       imp_vals <- pmax(0, as.numeric(imp_df$MeanDecreaseAccuracy[ord]))
     }
-    pred_lbls <- format_step06_predictor_labels(pred_raw)
+    pred_lbls <- format_step05_predictor_labels(pred_raw)
     bar_cols <- ifelse(
-      grepl("^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bdricm|resdept_r|cfvo|awc|alr_|sgmc_|is_azonal|azonal_|ph_q|min_bedrock|max_cfvo)", pred_raw),
+      grepl("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal)", pred_raw),
       "#009E73",
       ifelse(grepl("^MEM", pred_raw), "#CC79A7", "#0072B2")
     )
@@ -448,8 +449,8 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
 
   # Panel A: Spatial RF Variable Importance (Human-Readable Ecological Labels & Okabe-Ito Palette)
   imp_df <- srf_res$importance
-  imp_df$Label <- if (exists("format_step06_predictor_labels", mode = "function")) {
-    format_step06_predictor_labels(as.character(imp_df$Predictor))
+  imp_df$Label <- if (exists("format_step05_predictor_labels", mode = "function")) {
+    format_step05_predictor_labels(as.character(imp_df$Predictor))
   } else if (exists("format_predictor_labels", mode = "function")) {
     format_predictor_labels(as.character(imp_df$Predictor))
   } else {
@@ -477,8 +478,8 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
   } else {
     sp_v <- as.character(df$species_standardized)
     if (length(unique(stats::na.omit(sp_v))) < 2L ||
-        ("analysis_group" %in% names(df) && any(grepl("Morphotype_K|^LatTertile_|Ecotype|Subcluster", df$analysis_group, ignore.case = TRUE))) ||
-        ("grouping_col" %in% names(df) && any(grepl("Morphotype_K|^LatTertile_|Ecotype|Subcluster", df$grouping_col, ignore.case = TRUE)))) {
+        ("analysis_group" %in% names(df) && any(grepl("Morphotype_K|Ecotype|Subcluster", df$analysis_group, ignore.case = TRUE))) ||
+        ("grouping_col" %in% names(df) && any(grepl("Morphotype_K|Ecotype|Subcluster", df$grouping_col, ignore.case = TRUE)))) {
       if ("analysis_group" %in% names(df) && length(unique(stats::na.omit(df$analysis_group))) >= 2L) as.character(df$analysis_group)
       else if ("grouping_col" %in% names(df) && length(unique(stats::na.omit(df$grouping_col))) >= 2L) as.character(df$grouping_col)
       else if ("gmm_cluster" %in% names(df) && length(unique(stats::na.omit(df$gmm_cluster))) >= 2L) paste0("Morphotype_K", ifelse(is.na(df$gmm_cluster), 1L, as.integer(df$gmm_cluster)))
@@ -488,7 +489,7 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
   active_tx <- sort(unique(stats::na.omit(df$plot_group)))
   active_tx <- active_tx[nzchar(active_tx) & active_tx != "Unknown"]
   if (length(active_tx) == 0) active_tx <- get_active_packera_taxa(df$species_standardized)
-  is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|Ecotype|Subcluster", active_tx, ignore.case = TRUE)) ||
+  is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|Ecotype|Subcluster", active_tx, ignore.case = TRUE)) ||
     length(unique(stats::na.omit(df$species_standardized))) < 2L
   grp_lbl <- if (is_subcluster_mode) "Ecotype / Morphotype" else "Taxon"
   dyn_pal <- resolve_dynamic_group_palette(active_tx)
@@ -511,8 +512,9 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
   }
   cont_edaph_srf <- unique(intersect(c(
     top_edaph_1,
-    "ssurgo_ph", "ssurgo_om_pct", "polaris_bd_30m", "fine_soil_ph",
-    "fine_soil_sand", "awc_0_15cm", "elev_3dep_m"
+    "fine_soil_ph", "ilr_texture_1", "ilr_texture_2", "fine_soil_cec",
+    "fine_cfvo_pct", "fine_bedrock_depth_cm", "topo_hli_30m", "topo_twi_30m",
+    "topo_tpi_30m", "topo_slope_deg", "fine_soil_sand", "ssurgo_ph", "polaris_bd_30m"
   ), names(plot_df)))
   if (length(cont_edaph_srf) > 0L) {
     u_cnts_srf <- vapply(cont_edaph_srf, function(cn) .count_unique_finite_srf(plot_df[[cn]]), integer(1))
@@ -522,12 +524,12 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
   }
 
   env_axis_lbls <- format_predictor_labels(c(top_env_1, top_env_2))
-  if (exists("format_step06_predictor_labels", mode = "function")) {
-    env_axis_lbls <- format_step06_predictor_labels(c(top_env_1, top_env_2))
+  if (exists("format_step05_predictor_labels", mode = "function")) {
+    env_axis_lbls <- format_step05_predictor_labels(c(top_env_1, top_env_2))
   }
   edaph_lbl <- format_predictor_labels(top_edaph_1)[1]
-  if (exists("format_step06_predictor_labels", mode = "function")) {
-    edaph_lbl <- format_step06_predictor_labels(top_edaph_1)[1]
+  if (exists("format_step05_predictor_labels", mode = "function")) {
+    edaph_lbl <- format_step05_predictor_labels(top_edaph_1)[1]
   }
 
   plot_df$top_env_1_val <- suppressWarnings(as.numeric(plot_df[[top_env_1]]))
@@ -702,30 +704,21 @@ export_spatial_rf_figures <- function(df, srf_res, niche_res, out_pdf, pheno_res
   if (file.exists(tmp_png)) file.rename(tmp_png, out_png)
 
   # Atomically render dynamic top-RF-importance fig05_ecological_niche_phenology.{pdf,png}
-  # and fig06b_geographic_map_and_hopkins_phenology.{pdf,png} without redundant double-render
+  # and fig05d_geographic_map_and_hopkins_phenology.{pdf,png} without redundant double-render
   tryCatch(
     export_dynamic_fig05_ecological_niche_phenology(df, srf_res, niche_res, out_pdf),
     error = function(e) warning("export_dynamic_fig05_ecological_niche_phenology warning: ", e$message)
   )
-  if (exists("export_step06b_geographic_and_hopkins", mode = "function")) {
+  if (exists("export_step05d_geographic_and_hopkins", mode = "function")) {
     tryCatch({
-      format_predictor_labels <<- format_step06_predictor_labels
-      fn_fmls <- names(formals(export_step06b_geographic_and_hopkins))
-      if (length(fn_fmls) >= 5L) {
-        export_step06b_geographic_and_hopkins(df, srf_res, niche_res, pheno_res, out_pdf)
-      } else if (length(fn_fmls) == 4L) {
-        export_step06b_geographic_and_hopkins(df, srf_res, pheno_res, out_pdf)
-      } else if (length(fn_fmls) == 3L) {
-        export_step06b_geographic_and_hopkins(df, pheno_res, out_pdf)
-      } else {
-        export_step06b_geographic_and_hopkins(df, out_pdf)
-      }
-    }, error = function(e) warning("export_step06b_geographic_and_hopkins warning: ", e$message))
+      format_predictor_labels <<- format_step05_predictor_labels
+      export_step05d_geographic_and_hopkins(df, out_pdf)
+    }, error = function(e) warning("export_step05d_geographic_and_hopkins warning: ", e$message))
   }
 }
 
 # ------------------------------------------------------------------------------
-# 6b. Default MaxEnt (maxnet / dismo / IPP-Cloglog GLM) & Spatial RF Ensemble SDM
+# 6b. Default MaxEnt (maxnet / Authority-Weighted IPP-Cloglog GLM) & Spatial RF Ensemble SDM
 #     Projection, Continuous Boyce Index (Hirzel et al. 2006), & Habitat Maps
 # ------------------------------------------------------------------------------
 compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_bins = 20L) {
@@ -800,72 +793,221 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   list(auc = round(min(1.0, max(0.0, auc_val)), 4), fpr = fpr, tpr = tpr)
 }
 
-.fit_single_maxent_model <- function(p_vec, X_df, w_vec = NULL, use_java_maxent = TRUE) {
+.fit_single_maxent_model <- function(p_vec, X_df, w_vec = NULL) {
+  if (requireNamespace("glmnet", quietly = TRUE)) {
+    tryCatch(glmnet::glmnet.control(factory = TRUE), error = function(e) NULL)
+    on.exit(tryCatch(glmnet::glmnet.control(factory = TRUE), error = function(e) NULL), add = TRUE)
+  }
+
   p_num <- as.integer(as.numeric(p_vec) > 0.5)
   X_mat <- as.data.frame(X_df)
   pred_cols <- colnames(X_mat)
   n_rows <- nrow(X_mat)
+  for (cn in pred_cols) {
+    v <- suppressWarnings(as.numeric(X_mat[[cn]]))
+    med_v <- stats::median(v[is.finite(v)], na.rm = TRUE)
+    if (!is.finite(med_v)) med_v <- 0.0
+    v[!is.finite(v)] <- med_v
+    X_mat[[cn]] <- v
+  }
   w_use <- if (is.null(w_vec) || length(w_vec) != n_rows) rep(1.0, n_rows) else as.numeric(w_vec)
   w_use[!is.finite(w_use) | w_use <= 0] <- 1.0
   n_pres <- sum(p_num == 1L)
+  n_bg_raw <- sum(p_num == 0L)
 
   has_nonuniform_weights <- (length(w_use[p_num == 1L]) >= 2L) && (stats::sd(w_use[p_num == 1L], na.rm = TRUE) > 1e-4)
-  # 1. Primary Engine (uniform weights or when glmnet unavailable): maxnet (Phillips et al. 2017) WITHOUT row duplication
-  if (requireNamespace("maxnet", quietly = TRUE) && (!has_nonuniform_weights || !requireNamespace("glmnet", quietly = TRUE)) && n_pres >= 3L && ncol(X_mat) >= 1L) {
-    p_mx <- p_num
-    X_mx <- X_mat
-    cls_cascade <- if (n_pres >= 15L) c("lqh", "lq", "l") else if (n_pres >= 8L) c("lq", "l") else c("l")
-    for (cl_opt in cls_cascade) {
-      mod_mx <- tryCatch({
-        f_mx <- maxnet::maxnet.formula(p_mx, X_mx, classes = cl_opt)
-        suppressWarnings(maxnet::maxnet(p = p_mx, data = X_mx, f = f_mx))
-      }, error = function(e) NULL)
-      if (!is.null(mod_mx)) {
-        test_pr <- tryCatch(
-          as.numeric(stats::predict(mod_mx, newdata = X_mat[seq_len(min(5L, n_rows)), , drop = FALSE], type = "cloglog")),
-          error = function(e) NULL
-        )
-        if (!is.null(test_pr) && any(is.finite(test_pr))) {
-          return(list(
-            engine = sprintf("maxnet (%s/cloglog)", cl_opt),
-            model = mod_mx,
-            predict_cloglog = function(new_df) {
-              nd <- as.data.frame(new_df)[, pred_cols, drop = FALSE]
-              for (cn in pred_cols) {
-                v <- suppressWarnings(as.numeric(nd[[cn]]))
-                v[!is.finite(v)] <- stats::median(X_mat[[cn]], na.rm = TRUE)
-                nd[[cn]] <- v
-              }
-              pr <- tryCatch(as.numeric(stats::predict(mod_mx, newdata = nd, type = "cloglog")), error = function(e) rep(0.5, nrow(nd)))
-              pr[!is.finite(pr)] <- 0.0
-              pmin(1.0, pmax(0.0, pr))
-            }
-          ))
+
+  # Inhomogeneous Poisson Process (IPP) quadrature augmentation (Phillips et al. 2017,
+  # addsamplestobackground = TRUE): include unique presence environments in the background
+  # quadrature set with weight 100 so density-ratio estimation is strictly concave and
+  # never diverges on small or separable target-group background sets.
+  pres_idx <- which(p_num == 1L)
+  bg_idx <- which(p_num == 0L)
+  X_pres <- X_mat[pres_idx, , drop = FALSE]
+  X_bg <- X_mat[bg_idx, , drop = FALSE]
+  w_pres_raw <- w_use[pres_idx]
+  w_pres_norm <- w_pres_raw / max(mean(w_pres_raw, na.rm = TRUE), 1e-6)
+
+  if (nrow(X_pres) > 0L) {
+    bg_keys <- if (nrow(X_bg) > 0L) do.call(paste, c(lapply(X_bg, function(z) round(as.numeric(z), 6)), sep = "\r")) else character(0)
+    pr_keys <- do.call(paste, c(lapply(X_pres, function(z) round(as.numeric(z), 6)), sep = "\r"))
+    miss_in_bg <- !(pr_keys %in% bg_keys) & !duplicated(pr_keys)
+    X_bg_aug <- if (any(miss_in_bg)) rbind(X_bg, X_pres[miss_in_bg, , drop = FALSE]) else X_bg
+  } else {
+    X_bg_aug <- X_bg
+  }
+  X_ipp <- rbind(X_pres, X_bg_aug)
+  p_ipp <- c(rep(1L, nrow(X_pres)), rep(0L, nrow(X_bg_aug)))
+  w_ipp <- c(w_pres_norm, rep(100.0, nrow(X_bg_aug)))
+  n_bg_ipp <- nrow(X_bg_aug)
+
+  # Unified [0, 1]-Rescaled, Collinearity-Pruned Inhomogeneous Poisson Process (IPP) MaxEnt Engine
+  # (Phillips & Dudik 2008; Renner & Warton 2013; Phillips et al. 2017):
+  #   - Avoids calling maxnet::maxnet() directly because maxnet mutates global glmnet.control(fdev = 0)
+  #     and passes unscaled quadratic (~10^6) + 98-knot collinear hinge columns with standardize = FALSE,
+  #     which causes coordinate-descent non-convergence on collinear raster surfaces.
+  #   - Rescales all linear, quadratic, and 10-knot piecewise-linear hinge features strictly onto [0, 1],
+  #     prunes redundant collinear basis functions (|r| > 0.985), and solves the exact Phillips & Dudik (2008)
+  #     class-penalized IPP objective via standardized single-pass glmnet in milliseconds.
+  vmin_ipp <- vapply(pred_cols, function(cn) min(as.numeric(X_ipp[[cn]]), na.rm = TRUE), numeric(1))
+  vmax_ipp <- vapply(pred_cols, function(cn) max(as.numeric(X_ipp[[cn]]), na.rm = TRUE), numeric(1))
+  vrng_ipp <- pmax(vmax_ipp - vmin_ipp, 1e-6)
+  med_ipp  <- vapply(pred_cols, function(cn) stats::median(as.numeric(X_mat[[cn]]), na.rm = TRUE), numeric(1))
+  hinge_knots <- seq(1.0 / 11.0, 10.0 / 11.0, length.out = 10L)
+
+  .build_ipp_maxent_basis <- function(df_in, cl_mode = "lq") {
+    nr <- nrow(df_in)
+    np <- length(pred_cols)
+    U <- matrix(0.0, nrow = nr, ncol = np, dimnames = list(NULL, paste0("l__", pred_cols)))
+    for (j in seq_len(np)) {
+      cn <- pred_cols[j]
+      v <- if (cn %in% names(df_in)) suppressWarnings(as.numeric(df_in[[cn]])) else rep(med_ipp[j], nr)
+      v[!is.finite(v)] <- med_ipp[j]
+      U[, j] <- pmin(1.0, pmax(0.0, (v - vmin_ipp[j]) / vrng_ipp[j]))
+    }
+    mats <- list(U)
+    ftypes <- rep("l", np)
+    if (grepl("q", cl_mode, fixed = TRUE)) {
+      Uq <- U * U
+      colnames(Uq) <- paste0("q__", pred_cols)
+      mats[[length(mats) + 1L]] <- Uq
+      ftypes <- c(ftypes, rep("q", np))
+    }
+    if (grepl("h", cl_mode, fixed = TRUE)) {
+      nk <- length(hinge_knots)
+      H_mat <- matrix(0.0, nrow = nr, ncol = 2L * nk * np)
+      h_nms <- character(2L * nk * np)
+      col_ptr <- 1L
+      for (j in seq_len(np)) {
+        uj <- U[, j]
+        cn <- pred_cols[j]
+        for (ki in seq_len(nk)) {
+          tk <- hinge_knots[ki]
+          H_mat[, col_ptr] <- pmax(0.0, (uj - tk) / (1.0 - tk))
+          h_nms[col_ptr] <- sprintf("hf_%s_%02d", cn, ki)
+          col_ptr <- col_ptr + 1L
+          H_mat[, col_ptr] <- pmax(0.0, (tk - uj) / tk)
+          h_nms[col_ptr] <- sprintf("hr_%s_%02d", cn, ki)
+          col_ptr <- col_ptr + 1L
         }
       }
+      colnames(H_mat) <- h_nms
+      mats[[length(mats) + 1L]] <- H_mat
+      ftypes <- c(ftypes, rep("h", 2L * nk * np))
     }
+    B_out <- do.call(cbind, mats)
+    attr(B_out, "ftypes") <- ftypes
+    B_out
   }
 
-  # 2. Secondary Engine: dismo::maxent when maxent.jar is available
-  if (isTRUE(use_java_maxent) && requireNamespace("dismo", quietly = TRUE) && requireNamespace("rJava", quietly = TRUE)) {
-    jar_p <- system.file("java", "maxent.jar", package = "dismo")
-    if (nzchar(jar_p) && file.exists(jar_p) && n_pres >= 4L) {
-      mx_args <- c("nothreshold", "noproduct", "noplots", "nopictures", "threads=4")
-      if (n_pres < 15L) mx_args <- c(mx_args, "nohinge")
-      mod_dm <- tryCatch(suppressWarnings(dismo::maxent(x = X_mat, p = p_num, args = mx_args)), error = function(e) NULL)
-      if (!is.null(mod_dm)) {
-        return(list(
-          engine = "dismo::maxent (cloglog)",
-          model = mod_dm,
-          predict_cloglog = function(new_df) {
-            nd <- as.data.frame(new_df)[, pred_cols, drop = FALSE]
-            for (cn in pred_cols) {
-              v <- suppressWarnings(as.numeric(nd[[cn]]))
-              v[!is.finite(v)] <- stats::median(X_mat[[cn]], na.rm = TRUE)
-              nd[[cn]] <- v
+  cls_cascade <- if (n_pres >= 15L && n_bg_raw >= 60L) c("lqh", "lq", "l") else if (n_pres >= 8L) c("lq", "l") else c("l")
+
+  if (requireNamespace("glmnet", quietly = TRUE) && n_pres >= 3L && n_bg_ipp >= 4L && length(pred_cols) >= 1L) {
+    for (cl_opt in cls_cascade) {
+      w_fit <- tryCatch({
+        glmnet::glmnet.control(factory = TRUE)
+        mm_raw <- .build_ipp_maxent_basis(X_ipp, cl_mode = cl_opt)
+        ft_raw <- attr(mm_raw, "ftypes")
+        col_sds <- apply(mm_raw, 2L, stats::sd)
+        keep_v <- which(is.finite(col_sds) & col_sds > 1e-5)
+        if (length(keep_v) < 1L) stop("zero-variance basis")
+        mm <- mm_raw[, keep_v, drop = FALSE]
+        ft <- ft_raw[keep_v]
+
+        # Deduplicate near-collinear basis columns (|r| > 0.985), prioritizing strongest presence-background contrast
+        if (ncol(mm) > 2L) {
+          mu_pr <- colMeans(mm[p_ipp == 1L, , drop = FALSE])
+          mu_bg <- colMeans(mm[p_ipp == 0L, , drop = FALSE])
+          sep_score <- abs(mu_pr - mu_bg)
+          ord_c <- order(sep_score, decreasing = TRUE)
+          C_mat <- suppressWarnings(abs(stats::cor(mm[, ord_c, drop = FALSE])))
+          C_mat[!is.finite(C_mat)] <- 0.0
+          keep_ord <- logical(ncol(mm))
+          for (ci in seq_len(ncol(mm))) {
+            if (ci == 1L || all(C_mat[ci, which(keep_ord)] <= 0.985)) {
+              keep_ord[ci] <- TRUE
             }
-            pr <- tryCatch(as.numeric(dismo::predict(mod_dm, nd, args = c("outputformat=cloglog"))), error = function(e) rep(0.5, nrow(nd)))
-            if (length(pr) != nrow(nd)) pr <- rep(0.5, nrow(nd))
+          }
+          sel_idx <- sort(ord_c[keep_ord])
+          mm <- mm[, sel_idx, drop = FALSE]
+          ft <- ft[sel_idx]
+        }
+
+        # Phillips & Dudik (2008, Table 1 & Eq. 4) empirical feature-dispersion L1 regularization schedule
+        c_lq <- stats::approx(x = c(0, 10, 15, 30, 100), y = c(1.00, 0.80, 0.50, 0.25, 0.05), xout = n_pres, rule = 2)$y
+        c_mult <- ifelse(ft == "h", 0.50, c_lq)
+        mm_pr <- mm[p_ipp == 1L, , drop = FALSE]
+        wp_norm <- w_ipp[p_ipp == 1L] / max(sum(w_ipp[p_ipp == 1L]), 1e-8)
+        mu_p <- as.numeric(crossprod(wp_norm, mm_pr))
+        var_p <- as.numeric(crossprod(wp_norm, sweep(mm_pr, 2L, mu_p, "-")^2))
+        reg <- c_mult * sqrt(pmax(var_p, 0.0) + (1.0 / max(n_pres, 1L))) / sqrt(max(n_pres, 1L))
+        reg[!is.finite(reg) | reg <= 1e-6] <- 1e-3
+
+        # Rescale penalty.factor by weighted column SD so standardize = TRUE optimizes exact IPP objective with O(1) conditioning
+        w_tot <- sum(w_ipp)
+        w_rel <- w_ipp / max(w_tot, 1e-8)
+        mu_all <- as.numeric(crossprod(w_rel, mm))
+        sd_all <- sqrt(pmax(as.numeric(crossprod(w_rel, sweep(mm, 2L, mu_all, "-")^2)), 1e-8))
+        pf <- pmax(1e-4, reg / sd_all)
+        pf <- pf / max(mean(pf), 1e-8)
+
+        sum_p_eff <- sum(w_ipp[p_ipp == 1L])
+        lam_seq <- (10^seq(3.2, 0.0, length.out = 50L)) * mean(reg) * (sum_p_eff / w_tot)
+        pad_added <- FALSE
+        if (ncol(mm) == 1L) {
+          mm <- cbind(mm, `__zero_pad__` = 0.0)
+          pf <- c(pf, 1.0)
+          pad_added <- TRUE
+        }
+        gn <- suppressWarnings(glmnet::glmnet(
+          x = mm,
+          y = as.factor(p_ipp),
+          family = "binomial",
+          standardize = TRUE,
+          penalty.factor = pf,
+          lambda = lam_seq,
+          weights = w_ipp,
+          thresh = 1e-5,
+          maxit = 1500L
+        ))
+        if (is.null(gn$beta) || ncol(gn$beta) < 1L) stop("glmnet returned empty path")
+        bb <- as.numeric(gn$beta[, ncol(gn$beta)])
+        names(bb) <- rownames(gn$beta)
+        if (pad_added) bb <- bb[names(bb) != "__zero_pad__"]
+        betas <- bb[is.finite(bb) & abs(bb) > 0.0]
+        mm_bg <- mm[p_ipp == 0L, , drop = FALSE]
+        lp_bg <- if (length(betas) > 0L) as.numeric(mm_bg[, names(betas), drop = FALSE] %*% betas) else rep(0.0, nrow(mm_bg))
+        lp_shift <- max(lp_bg, na.rm = TRUE)
+        if (!is.finite(lp_shift)) lp_shift <- 0.0
+        rr <- exp(pmin(50.0, pmax(-50.0, lp_bg - lp_shift)))
+        sum_rr <- max(sum(rr), 1e-12)
+        raw <- rr / sum_rr
+        ent <- -sum(raw * ifelse(raw > 1e-15, log(raw), 0.0))
+        alp <- -log(sum_rr) - lp_shift
+        list(cl_opt = cl_opt, betas = betas, entropy = ent, alpha = alp)
+      }, error = function(e) NULL)
+
+      if (!is.null(w_fit)) {
+        cl_saved <- w_fit$cl_opt
+        betas_saved <- w_fit$betas
+        ent_saved <- w_fit$entropy
+        alp_saved <- w_fit$alpha
+        eng_lbl <- if (has_nonuniform_weights) sprintf("weighted_maxnet_glmnet (%s/cloglog)", cl_saved) else sprintf("maxnet_ipp_glmnet (%s/cloglog)", cl_saved)
+        return(list(
+          engine = eng_lbl,
+          model = w_fit,
+          predict_cloglog = function(new_df) {
+            nd <- as.data.frame(new_df)
+            if (length(betas_saved) == 0L) {
+              pr0 <- rep(1.0 - exp(-exp(ent_saved + alp_saved)), nrow(nd))
+              pr0[!is.finite(pr0)] <- 0.5
+              return(pmin(1.0, pmax(0.0, pr0)))
+            }
+            B_new <- .build_ipp_maxent_basis(nd, cl_mode = cl_saved)
+            use_b <- intersect(names(betas_saved), colnames(B_new))
+            if (length(use_b) == 0L) return(rep(0.5, nrow(nd)))
+            lp <- as.numeric(B_new[, use_b, drop = FALSE] %*% betas_saved[use_b]) + alp_saved
+            pr <- 1.0 - exp(-exp(pmin(10.0, pmax(-20.0, ent_saved + lp))))
             pr[!is.finite(pr)] <- 0.0
             pmin(1.0, pmax(0.0, pr))
           }
@@ -874,79 +1016,36 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
     }
   }
 
-  # 3. Deterministic Fallback Engine: Authority-Weighted Inhomogeneous Poisson Process (IPP)
-  #    Quadratic-Hinge Cloglog Regularized GLM (Phillips et al. 2017 equivalence)
-  mu_vec <- vapply(pred_cols, function(cn) mean(as.numeric(X_mat[[cn]]), na.rm = TRUE), numeric(1))
-  sd_vec <- vapply(pred_cols, function(cn) max(stats::sd(as.numeric(X_mat[[cn]]), na.rm = TRUE), 1e-4), numeric(1))
-  q50_vec <- vapply(pred_cols, function(cn) stats::median(as.numeric(X_mat[[cn]]), na.rm = TRUE), numeric(1))
-  use_quad <- n_pres >= 6L
-  use_hinge <- n_pres >= 15L
-
-  .build_basis <- function(df_in) {
-    Z <- matrix(0.0, nrow = nrow(df_in), ncol = length(pred_cols), dimnames = list(NULL, pred_cols))
-    for (j in seq_along(pred_cols)) {
-      cn <- pred_cols[j]
-      v <- if (cn %in% names(df_in)) suppressWarnings(as.numeric(df_in[[cn]])) else rep(mu_vec[j], nrow(df_in))
-      v[!is.finite(v)] <- mu_vec[j]
-      Z[, j] <- pmin(4.5, pmax(-4.5, (v - mu_vec[j]) / sd_vec[j]))
-    }
-    B <- Z
-    if (isTRUE(use_quad)) {
-      Z2 <- Z^2
-      dim(Z2) <- dim(Z)
-      colnames(Z2) <- paste0(pred_cols, "__q2")
-      B <- cbind(B, Z2)
-    }
-    if (isTRUE(use_hinge)) {
-      Zh <- sweep(Z, 2L, (q50_vec - mu_vec) / sd_vec, "-")
-      Zh[Zh < 0.0] <- 0.0
-      dim(Zh) <- dim(Z)
-      colnames(Zh) <- paste0(pred_cols, "__hg")
-      B <- cbind(B, Zh)
-    }
-    B
-  }
-
-  Phi <- .build_basis(X_mat)
-  # Balance total background weight against authority-weighted presences
-  w_glm <- w_use
-  sum_wp <- max(sum(w_glm[p_num == 1L]), 1e-6)
-  sum_wb <- max(sum(w_glm[p_num == 0L]), 1e-6)
-  w_glm[p_num == 0L] <- w_glm[p_num == 0L] * (2.0 * sum_wp / sum_wb)
-
-  if (requireNamespace("glmnet", quietly = TRUE) && ncol(Phi) >= 2L && n_pres >= 4L && sum(p_num == 0L) >= 4L) {
-    # Deterministic spatial/environmental block fold assignment for weighted IPP cross-validated regularization
-    n_folds_cv <- max(3L, min(5L, n_pres))
-    ord_env1 <- order(Phi[, 1L])
-    foldid_cv <- integer(nrow(Phi))
-    pres_ord <- ord_env1[p_num[ord_env1] == 1L]
-    bg_ord <- ord_env1[p_num[ord_env1] == 0L]
-    foldid_cv[pres_ord] <- rep_len(seq_len(n_folds_cv), length(pres_ord))
-    foldid_cv[bg_ord] <- rep_len(seq_len(n_folds_cv), length(bg_ord))
-    cv_gn <- tryCatch(
+  # 2. Secondary Fallback Engine: Standardized IPP Cloglog Cross-Validated GLM (glmnet::cv.glmnet)
+  Phi <- .build_ipp_maxent_basis(X_ipp, cl_mode = if (n_pres >= 8L) "lq" else "l")
+  if (requireNamespace("glmnet", quietly = TRUE) && ncol(Phi) >= 2L && n_pres >= 4L && n_bg_ipp >= 4L) {
+    glmnet::glmnet.control(factory = TRUE)
+    sum_p_eff <- sum(w_ipp[p_ipp == 1L])
+    lam_fb <- (10^seq(3.0, 0.0, length.out = 40L)) * (sum_p_eff / sum(w_ipp))
+    nf_fb <- min(5L, max(3L, as.integer(floor(min(n_pres, n_bg_ipp) / 2L))))
+    fid_ipp <- integer(length(p_ipp))
+    fid_ipp[p_ipp == 1L] <- rep_len(seq_len(nf_fb), sum(p_ipp == 1L))
+    fid_ipp[p_ipp == 0L] <- rep_len(seq_len(nf_fb), sum(p_ipp == 0L))
+    cv_fit <- tryCatch(
       suppressWarnings(glmnet::cv.glmnet(
-        x = Phi, y = p_num, family = "binomial", weights = w_glm,
-        foldid = foldid_cv, alpha = 0.85, type.measure = "deviance"
+        x = Phi, y = as.factor(p_ipp), family = "binomial", standardize = TRUE,
+        weights = w_ipp, alpha = 0.85, lambda = lam_fb, foldid = fid_ipp, thresh = 1e-5, maxit = 1000L
       )),
       error = function(e) NULL
     )
-    fit_gn <- if (!is.null(cv_gn) && !is.null(cv_gn$glmnet.fit)) cv_gn$glmnet.fit else tryCatch(
-      suppressWarnings(glmnet::glmnet(x = Phi, y = p_num, family = "binomial", weights = w_glm, alpha = 0.85)),
-      error = function(e) NULL
-    )
-    if (!is.null(fit_gn) && length(fit_gn$lambda) > 0L) {
-      s_use <- if (!is.null(cv_gn) && is.finite(cv_gn$lambda.1se)) cv_gn$lambda.1se else if (!is.null(cv_gn) && is.finite(cv_gn$lambda.min)) cv_gn$lambda.min else fit_gn$lambda[max(1L, floor(0.50 * length(fit_gn$lambda)))]
-      eta_tr <- as.numeric(stats::predict(fit_gn, newx = Phi, s = s_use, type = "link"))
-      # Calibrate entropy offset so median presence cloglog suitability = 1 - exp(-1) ~ 0.632 (Phillips et al. 2017)
-      med_eta_p <- stats::median(eta_tr[p_num == 1L], na.rm = TRUE)
+    if (!is.null(cv_fit)) {
+      s_use <- if (is.finite(cv_fit$lambda.1se)) cv_fit$lambda.1se else cv_fit$lambda.min
+      eta_tr <- as.numeric(stats::predict(cv_fit, newx = Phi, s = s_use, type = "link"))
+      med_eta_p <- stats::median(eta_tr[p_ipp == 1L], na.rm = TRUE)
       if (!is.finite(med_eta_p)) med_eta_p <- 0.0
       c_ent <- -med_eta_p
+      cl_fb <- if (n_pres >= 8L) "lq" else "l"
       return(list(
-        engine = sprintf("glmnet_maxent (%s/cloglog)", if (use_hinge) "lqh" else if (use_quad) "lq" else "l"),
-        model = fit_gn,
+        engine = sprintf("glmnet_maxent (%s/cloglog)", cl_fb),
+        model = cv_fit,
         predict_cloglog = function(new_df) {
-          B_new <- .build_basis(as.data.frame(new_df))
-          eta <- tryCatch(as.numeric(stats::predict(fit_gn, newx = B_new, s = s_use, type = "link")) + c_ent, error = function(e) rep(0.0, nrow(B_new)))
+          B_new <- .build_ipp_maxent_basis(as.data.frame(new_df), cl_mode = cl_fb)
+          eta <- tryCatch(as.numeric(stats::predict(cv_fit, newx = B_new, s = s_use, type = "link")) + c_ent, error = function(e) rep(0.0, nrow(B_new)))
           eta <- pmin(10.0, pmax(-15.0, eta))
           pr <- 1.0 - exp(-exp(eta))
           pr[!is.finite(pr)] <- 0.0
@@ -956,26 +1055,28 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
     }
   }
 
-  # Ridge-stabilized weighted cloglog GLM fallback
+  # 3. Ridge-stabilized weighted cloglog GLM fallback (zero external package dependency)
   X_des <- cbind(Intercept = 1.0, Phi)
+  w_glm <- c(w_pres_norm, rep(2.0 * max(sum(w_pres_norm), 1e-6) / max(n_bg_ipp, 1L), n_bg_ipp))
   W_diag <- w_glm / max(mean(w_glm), 1e-6)
   P_pen <- diag(c(0.0, rep(0.25, ncol(Phi))), nrow = ncol(X_des), ncol = ncol(X_des))
-  y_target <- ifelse(p_num == 1L, 0.85, -1.25)
+  y_target <- ifelse(p_ipp == 1L, 0.85, -1.25)
   beta_hat <- tryCatch(
     solve(crossprod(X_des * sqrt(W_diag)) + P_pen, crossprod(X_des, W_diag * y_target)),
     error = function(e) rep(0.0, ncol(X_des))
   )
   beta_hat <- as.numeric(beta_hat)
   eta_tr <- as.numeric(X_des %*% beta_hat)
-  med_eta_p <- stats::median(eta_tr[p_num == 1L], na.rm = TRUE)
+  med_eta_p <- stats::median(eta_tr[p_ipp == 1L], na.rm = TRUE)
   if (!is.finite(med_eta_p)) med_eta_p <- 0.0
   c_ent <- -med_eta_p
+  cl_fb2 <- if (n_pres >= 8L) "lq" else "l"
 
   list(
-    engine = sprintf("weighted_glm_maxent (%s/cloglog)", if (use_quad) "lq" else "l"),
+    engine = sprintf("weighted_glm_maxent (%s/cloglog)", cl_fb2),
     model = list(beta = beta_hat, c_ent = c_ent),
     predict_cloglog = function(new_df) {
-      B_new <- cbind(Intercept = 1.0, .build_basis(as.data.frame(new_df)))
+      B_new <- cbind(Intercept = 1.0, .build_ipp_maxent_basis(as.data.frame(new_df), cl_mode = cl_fb2))
       eta <- pmin(10.0, pmax(-15.0, as.numeric(B_new %*% beta_hat) + c_ent))
       pr <- 1.0 - exp(-exp(eta))
       pr[!is.finite(pr)] <- 0.0
@@ -998,7 +1099,8 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   y_fac <- factor(ifelse(p_num == 1L, "Presence", "Background"), levels = c("Background", "Presence"))
 
   if (requireNamespace("ranger", quietly = TRUE) && sum(p_num == 1L) >= 2L && sum(p_num == 0L) >= 2L) {
-    rf_threads <- if (exists("resolve_packera_workers", mode = "function")) resolve_packera_workers(16L) else 1L
+    max_w <- if (n_rows <= 2500L) 2L else 16L
+    rf_threads <- if (exists("resolve_packera_workers", mode = "function")) min(max_w, resolve_packera_workers(max_w)) else 1L
     tr_df <- data.frame(y = y_fac, X_mat, check.names = FALSE)
     fit_rg <- tryCatch(
       ranger::ranger(y ~ ., data = tr_df, num.trees = n_trees, probability = TRUE, case.weights = w_rf, num.threads = rf_threads, seed = 42),
@@ -1046,7 +1148,7 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   list(model = mx_fb$model, predict_prob = mx_fb$predict_cloglog)
 }
 
-.build_regional_sdm_raster_stack <- function(df, env_dir, kept_vars, ncols = 110L, nrows = 90L) {
+.build_regional_sdm_raster_stack <- function(df, env_dir, kept_vars, ncols = 110L, nrows = 90L, demo = FALSE) {
   if (!requireNamespace("terra", quietly = TRUE)) return(NULL)
   lon_v <- suppressWarnings(as.numeric(df$longitude))
   lat_v <- suppressWarnings(as.numeric(df$latitude))
@@ -1073,42 +1175,116 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   study_ext <- terra::ext(xmin, xmax, ymin, ymax)
   tmpl_rast <- terra::rast(ext = study_ext, ncols = ncols, nrows = nrows, crs = "EPSG:4326")
 
-  # Discover any local cropped rasters in env_dir
+  .crop_resample_to_tmpl <- function(r_src, nm_out, scale_div = 1.0) {
+    tryCatch({
+      r_p <- r_src
+      if (!isTRUE(tryCatch(terra::same.crs(r_p, tmpl_rast), error = function(e) FALSE))) {
+        ext_src <- terra::project(terra::as.polygons(study_ext, crs = "EPSG:4326"), terra::crs(r_p))
+        r_c <- terra::crop(r_p, ext_src)
+        rs <- terra::project(r_c, tmpl_rast, method = "bilinear")
+      } else {
+        rc <- terra::crop(r_p, study_ext)
+        rs <- terra::resample(rc, tmpl_rast, method = "bilinear")
+      }
+      if (scale_div != 1.0) rs <- rs / scale_div
+      names(rs) <- nm_out
+      rs
+    }, error = function(e) NULL)
+  }
+
   loaded_layers <- list()
+  raw_aux_rasters <- list()
   if (!is.null(env_dir) && nzchar(env_dir) && dir.exists(env_dir)) {
     tif_files <- discover_env_rasters(env_dir, recursive = TRUE, crop_global = TRUE)
     if (length(tif_files) > 0L) {
       for (tf in tif_files) {
+        bn <- tolower(basename(tf))
         r_t <- tryCatch(terra::rast(tf), error = function(e) NULL)
-        if (!is.null(r_t)) {
-          nms_t <- names(r_t)
-          for (li in seq_along(nms_t)) {
-            lnm <- nms_t[li]
-            mapped_nm <- lnm
-            if (!(mapped_nm %in% kept_vars)) {
-              m_bio <- regmatches(lnm, regexec("bio[_.-]?([0-9]{1,2})$", tolower(lnm)))[[1]]
-              if (length(m_bio) == 2L && m_bio[2] %in% names(WC_BIO_LOOKUP)) {
-                mapped_nm <- WC_BIO_LOOKUP[[m_bio[2]]]
-              }
+        if (is.null(r_t)) next
+        nms_t <- names(r_t)
+        for (li in seq_along(nms_t)) {
+          lnm <- nms_t[li]
+          mapped_nm <- lnm
+          scale_div <- 1.0
+          if (!(mapped_nm %in% kept_vars)) {
+            m_bio <- regmatches(lnm, regexec("bio[_.-]?([0-9]{1,2})$", tolower(lnm)))[[1]]
+            if (length(m_bio) == 2L && m_bio[2] %in% names(WC_BIO_LOOKUP)) {
+              mapped_nm <- WC_BIO_LOOKUP[[m_bio[2]]]
+            } else if (grepl("^ph1to1h2o_5_cm", bn)) {
+              mapped_nm <- "fine_soil_ph"; scale_div <- 100.0
+            } else if (grepl("phh2o.*5-15|phh2o.*5_15", paste(bn, tolower(lnm)))) {
+              mapped_nm <- if ("fine_soil_ph" %in% kept_vars && !("fine_soil_ph" %in% names(loaded_layers))) "fine_soil_ph" else "soil_ph"
+              v_med <- stats::median(terra::values(r_t[[li]]), na.rm = TRUE)
+              if (is.finite(v_med) && v_med > 14.5) scale_div <- 10.0
+            } else if (grepl("^cec7_5_cm", bn)) {
+              mapped_nm <- "fine_soil_cec"; scale_div <- 10.0
+            } else if (grepl("cec.*5-15|cec.*5_15", paste(bn, tolower(lnm)))) {
+              mapped_nm <- if ("fine_soil_cec" %in% kept_vars && !("fine_soil_cec" %in% names(loaded_layers))) "fine_soil_cec" else "soil_cec"
+              v_med <- stats::median(terra::values(r_t[[li]]), na.rm = TRUE)
+              if (is.finite(v_med) && v_med > 90.0) scale_div <- 10.0
+            } else if (grepl("^fragvol_5_cm", bn)) {
+              mapped_nm <- "fine_cfvo_pct"
+            } else if (grepl("cfvo.*5-15|cfvo.*5_15", paste(bn, tolower(lnm)))) {
+              mapped_nm <- if ("fine_cfvo_pct" %in% kept_vars && !("fine_cfvo_pct" %in% names(loaded_layers))) "fine_cfvo_pct" else "soil_cfvo"
+              v_med <- stats::median(terra::values(r_t[[li]]), na.rm = TRUE)
+              if (is.finite(v_med) && v_med > 105.0) scale_div <- 10.0
+            } else if (grepl("^anylithicdpt|^resdept", bn)) {
+              mapped_nm <- "fine_bedrock_depth_cm"
+            } else if (grepl("^sandtotal_5_cm|sand.*5-15|sand.*5_15", paste(bn, tolower(lnm)))) {
+              raw_aux_rasters[["sand"]] <- .crop_resample_to_tmpl(r_t[[li]], "sand", if (grepl("sandtotal", bn)) 1.0 else { vm <- stats::median(terra::values(r_t[[li]]), na.rm = TRUE); if (is.finite(vm) && vm > 105) 10.0 else 1.0 })
+            } else if (grepl("^claytotal_5_cm|clay.*5-15|clay.*5_15", paste(bn, tolower(lnm)))) {
+              raw_aux_rasters[["clay"]] <- .crop_resample_to_tmpl(r_t[[li]], "clay", if (grepl("claytotal", bn)) 1.0 else { vm <- stats::median(terra::values(r_t[[li]]), na.rm = TRUE); if (is.finite(vm) && vm > 105) 10.0 else 1.0 })
+            } else if (grepl("^silttotal_5_cm|silt.*5-15|silt.*5_15", paste(bn, tolower(lnm)))) {
+              raw_aux_rasters[["silt"]] <- .crop_resample_to_tmpl(r_t[[li]], "silt", if (grepl("silttotal", bn)) 1.0 else { vm <- stats::median(terra::values(r_t[[li]]), na.rm = TRUE); if (is.finite(vm) && vm > 105) 10.0 else 1.0 })
             }
-            if (mapped_nm %in% kept_vars && !(mapped_nm %in% names(loaded_layers))) {
-              r_sub <- tryCatch({
-                rc <- terra::crop(r_t[[li]], study_ext)
-                rs <- terra::resample(rc, tmpl_rast, method = "bilinear")
-                names(rs) <- mapped_nm
-                rs
-              }, error = function(e) NULL)
-              if (!is.null(r_sub)) loaded_layers[[mapped_nm]] <- r_sub
-            }
+          }
+          if (mapped_nm %in% kept_vars && !(mapped_nm %in% names(loaded_layers))) {
+            r_sub <- .crop_resample_to_tmpl(r_t[[li]], mapped_nm, scale_div = scale_div)
+            if (!is.null(r_sub)) loaded_layers[[mapped_nm]] <- r_sub
           }
         }
       }
     }
   }
 
+  # Derive continuous ilr_texture_1 / ilr_texture_2 rasters when sand + clay rasters exist
+  if ((("ilr_texture_1" %in% kept_vars && !("ilr_texture_1" %in% names(loaded_layers))) ||
+       ("ilr_texture_2" %in% kept_vars && !("ilr_texture_2" %in% names(loaded_layers)))) &&
+      !is.null(raw_aux_rasters[["sand"]]) && !is.null(raw_aux_rasters[["clay"]])) {
+    sv <- terra::values(raw_aux_rasters[["sand"]])[, 1]
+    cv <- terra::values(raw_aux_rasters[["clay"]])[, 1]
+    siv <- if (!is.null(raw_aux_rasters[["silt"]])) terra::values(raw_aux_rasters[["silt"]])[, 1] else NULL
+    tex_g <- compute_soil_texture_log_ratios(sv, cv, silt_pct = siv)
+    if ("ilr_texture_1" %in% kept_vars && !("ilr_texture_1" %in% names(loaded_layers))) {
+      r_i1 <- terra::rast(tmpl_rast); terra::values(r_i1) <- tex_g$ilr_texture_1; names(r_i1) <- "ilr_texture_1"
+      loaded_layers[["ilr_texture_1"]] <- r_i1
+    }
+    if ("ilr_texture_2" %in% kept_vars && !("ilr_texture_2" %in% names(loaded_layers))) {
+      r_i2 <- terra::rast(tmpl_rast); terra::values(r_i2) <- tex_g$ilr_texture_2; names(r_i2) <- "ilr_texture_2"
+      loaded_layers[["ilr_texture_2"]] <- r_i2
+    }
+  }
+
+  # Enforce domain-coverage integrity when demo == FALSE: never fabricate continental rasters via point IDW!
+  if (!isTRUE(demo)) {
+    if (length(loaded_layers) == 0L) {
+      warning("Skipping Step 05 continuous SDM raster map projection: zero real GeoTIFF layers matched kept_vars in env_dir (IDW raster fabrication is disabled when demo == FALSE).")
+      return(NULL)
+    }
+    cov_counts <- vapply(loaded_layers, function(rl) sum(is.finite(terra::values(rl)[, 1])), integer(1))
+    ref_land_cells <- max(cov_counts, 1L)
+    valid_cov_nms <- names(cov_counts)[cov_counts >= floor(0.70 * ref_land_cells)]
+    loaded_layers <- loaded_layers[intersect(kept_vars, valid_cov_nms)]
+    if (length(loaded_layers) < 2L) {
+      warning(sprintf("Skipping Step 05 continuous SDM raster map projection: only %d raster layer(s) cover >=70%% of study domain in '%s' (demo == FALSE).", length(loaded_layers), env_dir))
+      return(NULL)
+    }
+    return(terra::rast(loaded_layers))
+  }
+
   land_mask_rast <- if (length(loaded_layers) > 0L) loaded_layers[[1L]] else NULL
 
-  # Interpolate any remaining kept_vars across template_rast via fast vectorized IDW
+  # Demonstration mode ONLY (demo == TRUE): interpolate missing demo rasters across template_rast
   miss_vars <- setdiff(kept_vars, names(loaded_layers))
   if (length(miss_vars) > 0L) {
     u_key <- paste(round(lon_v[ok_ll], 4), round(lat_v[ok_ll], 4), sep = "_")
@@ -1214,7 +1390,7 @@ fit_and_project_maxent_sdm_maps <- function(
 
   # Identify top climatic and edaphic predictors
   imp_df <- if (!is.null(srf_res) && is.data.frame(srf_res$importance)) srf_res$importance else NULL
-  edaph_rx <- "^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bdricm|resdept_r|cfvo|awc|alr_|sgmc_|is_azonal|azonal_|ph_q|min_bedrock|max_cfvo)"
+  edaph_rx <- "^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_|sgmc_|is_azonal)"
   clim_cand <- if (!is.null(primary_clim_vars) && length(intersect(primary_clim_vars, kept_vars)) > 0L) {
     intersect(primary_clim_vars, kept_vars)
   } else {
@@ -1233,17 +1409,15 @@ fit_and_project_maxent_sdm_maps <- function(
   top_clim_pred <- if (length(clim_cand) > 0L) clim_cand[1L] else kept_vars[1L]
   top_edaph_pred <- if (length(edaph_cand) > 0L) edaph_cand[1L] else kept_vars[min(2L, length(kept_vars))]
 
-  # Resolve authority prior weights (Combined_Prior_Weight / authority_weight, Nomenclatural Types pinned at 1.00 on [0,1])
+  # Resolve authority prior weights (preserving 0.0 on unpromoted Tier_3_Bronze & Cleanlab noise!)
   raw_auth_w <- if ("Combined_Prior_Weight" %in% names(df)) {
     suppressWarnings(as.numeric(df$Combined_Prior_Weight))
   } else if ("authority_weight" %in% names(df)) {
     suppressWarnings(as.numeric(df$authority_weight))
   } else {
-    resolve_step06_authority_weights(df)
+    resolve_ecological_authority_weights(df)
   }
-  raw_auth_w[!is.finite(raw_auth_w) | raw_auth_w <= 0] <- 0.5
-  w_max_curr <- max(raw_auth_w, 1e-6)
-  auth_w_01 <- pmin(1.0, pmax(0.20, raw_auth_w / w_max_curr))
+  raw_auth_w[!is.finite(raw_auth_w) | raw_auth_w < 0.0] <- 0.0
   type_info <- if (exists(".identify_type_specimen_vec", mode = "function")) {
     .identify_type_specimen_vec(df)
   } else {
@@ -1251,6 +1425,12 @@ fit_and_project_maxent_sdm_maps <- function(
     is_t[is.na(is_t)] <- FALSE
     list(is_type_specimen = is_t, type_rank = ifelse(is_t, 2L, 0L))
   }
+  cl_sdm <- if ("is_confident_label_noise" %in% names(df)) as.logical(df$is_confident_label_noise) else rep(FALSE, nrow(df))
+  cl_sdm[is.na(cl_sdm)] <- FALSE
+  raw_auth_w[cl_sdm & !type_info$is_type_specimen] <- 0.0
+  pos_m <- raw_auth_w > 0.0
+  w_max_curr <- if (any(pos_m)) max(raw_auth_w[pos_m], 1e-6) else 1.0
+  auth_w_01 <- ifelse(pos_m, pmin(1.0, pmax(0.20, raw_auth_w / w_max_curr)), 0.0)
   auth_w_01[type_info$is_type_specimen] <- 1.00
   df$sdm_prior_weight_01 <- auth_w_01
 
@@ -1264,11 +1444,21 @@ fit_and_project_maxent_sdm_maps <- function(
   } else {
     rep(NA_real_, nrow(df))
   }
-  elig_mask <- is.finite(lon_all) & is.finite(lat_all) & (is.na(unc_col) | unc_col <= 10000.0 | type_info$is_type_specimen)
-  if (sum(elig_mask) < 4L) elig_mask <- is.finite(lon_all) & is.finite(lat_all)
+  elig_coord_only <- is.finite(lon_all) & is.finite(lat_all) & (is.na(unc_col) | unc_col <= 10000.0 | type_info$is_type_specimen)
+  if (sum(elig_coord_only) < 4L) elig_coord_only <- is.finite(lon_all) & is.finite(lat_all)
+  elig_mask <- elig_coord_only & (df$sdm_prior_weight_01 > 0.0)
+  if (sum(elig_mask) < 4L) {
+    elig_mask <- elig_coord_only & (!cl_sdm | type_info$is_type_specimen)
+    df$sdm_prior_weight_01[elig_mask & df$sdm_prior_weight_01 <= 0.0] <- 0.50
+  }
 
-  # Build regional environmental SpatRaster stack across the study bounding box
-  env_stack <- .build_regional_sdm_raster_stack(df[elig_mask, , drop = FALSE], env_dir = env_dir, kept_vars = kept_vars)
+  # Build regional environmental SpatRaster stack across the study bounding box (no IDW when demo == FALSE)
+  env_stack <- .build_regional_sdm_raster_stack(df[elig_coord_only, , drop = FALSE], env_dir = env_dir, kept_vars = kept_vars, demo = demo)
+  if (!is.null(env_stack) && length(intersect(kept_vars, names(env_stack))) >= 2L) {
+    kept_vars <- intersect(kept_vars, names(env_stack))
+    if (!(top_clim_pred %in% kept_vars)) top_clim_pred <- kept_vars[1L]
+    if (!(top_edaph_pred %in% kept_vars)) top_edaph_pred <- kept_vars[min(2L, length(kept_vars))]
+  }
 
   # Generate supplemental random background cells from env_stack so target-group + random background >= 1,000 points
   set.seed(42)
@@ -1340,8 +1530,8 @@ fit_and_project_maxent_sdm_maps <- function(
     n_pres <- nrow(pres_df)
     if (n_pres < 2L) next
 
-    # Target-group background points (Phillips et al. 2009): all other Packera localities + supplemental raster cells up to >= 1,000
-    tg_bg_mask <- elig_mask & !pres_mask
+    # Target-group background points (Phillips et al. 2009): all other georeferenced Packera localities + supplemental raster cells up to >= 1,000
+    tg_bg_mask <- elig_coord_only & !(if (tg %in% df$species_standardized && !(tg %in% grp_vec)) (df$species_standardized == tg) else (grp_vec == tg))
     tg_bg_df <- df[tg_bg_mask, c("longitude", "latitude", kept_vars, "sdm_prior_weight_01"), drop = FALSE]
     if (nrow(tg_bg_df) > 0L) tg_bg_df$sdm_prior_weight_01 <- 1.0
     n_need_supp <- max(0L, 1000L - nrow(tg_bg_df))
@@ -1379,7 +1569,7 @@ fit_and_project_maxent_sdm_maps <- function(
       tr_idx <- which(block_ids != fid)
       te_idx <- which(block_ids == fid)
       if (sum(p_vec[tr_idx] == 1L) >= 2L && sum(p_vec[tr_idx] == 0L) >= 2L && length(te_idx) >= 1L) {
-        mx_cv <- .fit_single_maxent_model(p_vec[tr_idx], X_comb[tr_idx, , drop = FALSE], w_vec[tr_idx], use_java_maxent = FALSE)
+        mx_cv <- .fit_single_maxent_model(p_vec[tr_idx], X_comb[tr_idx, , drop = FALSE], w_vec[tr_idx])
         rf_cv <- .fit_single_srf_binary_model(p_vec[tr_idx], X_comb[tr_idx, , drop = FALSE], w_vec[tr_idx], n_trees = 200L)
         oof_mx[te_idx] <- mx_cv$predict_cloglog(X_comb[te_idx, , drop = FALSE])
         oof_rf[te_idx] <- rf_cv$predict_prob(X_comb[te_idx, , drop = FALSE])
@@ -1518,18 +1708,46 @@ fit_and_project_maxent_sdm_maps <- function(
     # Select top 3 climatic + edaphic predictors for Panel C marginal response curves
     resp_vars <- unique(c(top_clim_pred, top_edaph_pred, clim_cand, edaph_cand, kept_vars))
     resp_vars <- resp_vars[seq_len(min(3L, length(resp_vars)))]
-    resp_lbls <- format_step06_predictor_labels(resp_vars)
+    resp_lbls <- format_step05_predictor_labels(resp_vars)
 
-    # Optional EPA Level III Ecoregion shapefile overlay
+    # Optional EPA Level III Ecoregion boundary overlay (env_dir-scoped, pre-simplified GeoJSON/GPKG first, crop-before-project)
     epa_vect <- NULL
     if (requireNamespace("terra", quietly = TRUE)) {
-      epa_shp <- list.files("data/environmental/epa_ecoregions_l3", pattern = "\\.shp$", full.names = TRUE, recursive = TRUE)
-      if (length(epa_shp) > 0L) {
-        epa_vect <- tryCatch({
-          v_e <- terra::vect(epa_shp[1L])
-          v_e <- terra::project(v_e, "EPSG:4326")
-          terra::crop(v_e, terra::ext(focal_artifacts$rast_mx))
-        }, error = function(e) NULL)
+      cand_epa_dirs <- character(0)
+      if (!is.null(env_dir) && nzchar(env_dir)) {
+        cand_epa_dirs <- c(cand_epa_dirs, file.path(env_dir, "epa_ecoregions_l3"))
+      }
+      if (is_canonical_prod_path(env_dir)) {
+        cand_epa_dirs <- unique(c(cand_epa_dirs, "data/environmental/epa_ecoregions_l3"))
+      }
+      cand_epa_dirs <- cand_epa_dirs[dir.exists(cand_epa_dirs)]
+      if (length(cand_epa_dirs) > 0L) {
+        epa_dir_use <- cand_epa_dirs[1L]
+        gjs <- file.path(epa_dir_use, "us_eco_l3.geojson")
+        gpk <- file.path(epa_dir_use, "us_eco_l3.gpkg")
+        shps <- list.files(epa_dir_use, pattern = "\\.shp$", full.names = TRUE, recursive = TRUE)
+        epa_src <- if (file.exists(gjs)) gjs else if (file.exists(gpk)) gpk else if (length(shps) > 0L) shps[1L] else ""
+        if (nzchar(epa_src)) {
+          epa_vect <- tryCatch({
+            r_ext_wgs <- terra::ext(focal_artifacts$rast_mx)
+            v_e <- if (grepl("\\.gpkg$", epa_src, ignore.case = TRUE)) {
+              terra::vect(epa_src, layer = "us_eco_l3", extent = r_ext_wgs)
+            } else {
+              terra::vect(epa_src)
+            }
+            if (!isTRUE(terra::is.lonlat(v_e))) {
+              ext_poly_nat <- terra::project(terra::as.polygons(r_ext_wgs, crs = "EPSG:4326"), terra::crs(v_e))
+              v_e <- terra::crop(v_e, terra::ext(ext_poly_nat))
+              if (nrow(v_e) > 0L) v_e <- terra::project(v_e, "EPSG:4326")
+            } else {
+              v_e <- terra::crop(v_e, r_ext_wgs)
+            }
+            if (nrow(v_e) > 0L) {
+              v_e <- tryCatch(terra::simplifyGeom(v_e, tolerance = 0.008, preserveTopology = TRUE), error = function(e) v_e)
+            }
+            if (nrow(v_e) > 0L) v_e else NULL
+          }, error = function(e) NULL)
+        }
       }
     }
 
@@ -1733,7 +1951,7 @@ fit_and_project_maxent_sdm_maps <- function(
         cex = 0.62, bg = grDevices::adjustcolor("white", alpha.f = 0.85)
       )
       graphics::title(
-        sprintf("Step 06 Species Distribution Modeling (MaxEnt & Spatial RF): %s", focal_artifacts$taxon),
+        sprintf("Step 05 Species Distribution Modeling (MaxEnt & Spatial RF): %s", focal_artifacts$taxon),
         outer = TRUE, cex.main = 1.18
       )
     }
@@ -1758,8 +1976,8 @@ fit_and_project_maxent_sdm_maps <- function(
         is_focal_art <- (art_taxa == focal_tx_name) | grepl("dubia", art_taxa, ignore.case = TRUE)
         n_pres_art <- vapply(valid_multi_arts, function(a) sum(a$pres_mask, na.rm = TRUE), numeric(1))
         valid_multi_arts <- valid_multi_arts[order(!is_focal_art, -n_pres_art, art_taxa)]
-        grid_pdf_out <- file.path(fig_dir, "fig06c_multispecies_maxent_sdm_grid.pdf")
-        grid_png_out <- file.path(fig_dir, "fig06c_multispecies_maxent_sdm_grid.png")
+        grid_pdf_out <- file.path(fig_dir, "fig05c_multispecies_maxent_sdm_grid.pdf")
+        grid_png_out <- file.path(fig_dir, "fig05c_multispecies_maxent_sdm_grid.png")
         n_sp_m <- length(valid_multi_arts)
         n_cols_m <- if (n_sp_m <= 4L) 2L else if (n_sp_m <= 9L) 3L else 4L
         n_rows_m <- as.integer(ceiling(n_sp_m / n_cols_m))
@@ -1808,7 +2026,7 @@ fit_and_project_maxent_sdm_maps <- function(
             graphics::box(col = "grey40")
           }
           graphics::title(
-            sprintf("Step 06 Multi-Species MaxEnt (cloglog) Habitat Suitability Maps (%d Modeled Taxa)", n_sp_m),
+            sprintf("Step 05 Multi-Species MaxEnt (cloglog) Habitat Suitability Maps (%d Modeled Taxa)", n_sp_m),
             outer = TRUE, cex.main = 1.15
           )
         }

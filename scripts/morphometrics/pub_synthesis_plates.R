@@ -14,7 +14,7 @@
 # Step 06 Figures:
 #   - spatial_rf_niche_importance.png (300-DPI companion to .pdf)
 #   - fig05_ecological_niche_phenology.{pdf,png} (4-panel ecological niche plate)
-#   - fig06b_geographic_map_and_hopkins_phenology.{pdf,png} (US state map + Hopkins)
+#   - fig05d_geographic_map_and_hopkins_phenology.{pdf,png} (US state map + Hopkins)
 # ==============================================================================
 compute_dynamic_na_map_bounds <- function(lon_v, lat_v) {
   lon_num <- suppressWarnings(as.numeric(lon_v))
@@ -127,7 +127,7 @@ draw_us_state_basemap_base_r <- function(xlim = c(-98, -73), ylim = c(28, 46), m
   )
 }
 
-export_step06b_geographic_and_hopkins <- function(
+export_step05d_geographic_and_hopkins <- function(
   vouchers_df,
   fig_dir = "outputs/figures"
 ) {
@@ -313,8 +313,22 @@ export_step06b_geographic_and_hopkins <- function(
         graphics::points(lat_v[m_t6], doy_v[m_t6], pch = 5L, bg = NA, col = cols_tx[m_t6], cex = 1.45, lwd = 2.0)
         graphics::points(lat_v[m_t6], doy_v[m_t6], pch = 1L, bg = NA, col = "#111111", cex = 1.85, lwd = 1.4)
       }
+      is_act_6b <- rep(TRUE, nrow(vouchers_df))
+      if ("determiner_tier" %in% colnames(vouchers_df)) {
+        dt_6b <- as.character(vouchers_df$determiner_tier)
+        dt_6b[is.na(dt_6b)] <- "Tier_3_Bronze"
+        pr_6b <- rep(FALSE, nrow(vouchers_df))
+        if ("is_promoted_bronze" %in% colnames(vouchers_df)) { p1 <- as.logical(vouchers_df$is_promoted_bronze); p1[is.na(p1)] <- FALSE; pr_6b <- pr_6b | p1 }
+        if ("is_promoted_anchor" %in% colnames(vouchers_df)) { p2 <- as.logical(vouchers_df$is_promoted_anchor); p2[is.na(p2)] <- FALSE; pr_6b <- pr_6b | p2 }
+        is_act_6b <- grepl("Tier_1|Gold|Tier_2|Silver", dt_6b, ignore.case = TRUE) | pr_6b | is_type_6b
+      }
+      if ("is_confident_label_noise" %in% colnames(vouchers_df)) {
+        cn_6b <- as.logical(vouchers_df$is_confident_label_noise); cn_6b[is.na(cn_6b)] <- FALSE
+        is_act_6b <- is_act_6b & (!cn_6b | is_type_6b)
+      }
       for (sp in fg_tx) {
-        m_sp <- which(valid_pheno & (tx_clean == sp))
+        m_sp_act <- which(valid_pheno & is_act_6b & (tx_clean == sp))
+        m_sp <- if (length(m_sp_act) >= 4L) m_sp_act else which(valid_pheno & (tx_clean == sp))
         if (length(m_sp) >= 4L && is.finite(stats::sd(lat_v[m_sp], na.rm = TRUE)) && stats::sd(lat_v[m_sp], na.rm = TRUE) > 0.2) {
           lm_sp <- tryCatch(stats::lm(doy_v[m_sp] ~ lat_v[m_sp]), error = function(e) NULL)
           if (!is.null(lm_sp)) {
@@ -346,7 +360,7 @@ export_step06b_geographic_and_hopkins <- function(
       graphics::box(col = "grey75")
       graphics::text(0.5, 0.5, "No verified flowering DOY observations (1..366) available", col = "grey35", cex = 0.85)
     }
-  }, fdir, "fig06b_geographic_map_and_hopkins_phenology", width = 12.8, height = 5.6, dpi = 300)
+  }, fdir, "fig05d_geographic_map_and_hopkins_phenology", width = 12.8, height = 5.6, dpi = 300)
 
   invisible(TRUE)
 }

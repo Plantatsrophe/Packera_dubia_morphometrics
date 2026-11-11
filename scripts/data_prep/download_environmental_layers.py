@@ -125,6 +125,90 @@ SOLUS100_REQUIRED_LAYERS: Tuple[Dict[str, Any], ...] = (
         "units": "pH_x100",
         "description": "Soil pH (1:1 H2O) at 15 cm (divide integer raster by 100)",
     },
+    {
+        "filename": "sandtotal_0_cm_p.tif",
+        "property": "sandtotal",
+        "scalar": 1,
+        "units": "percent_weight",
+        "description": "Total sand (0.05-2.0 mm, %) at 0 cm",
+    },
+    {
+        "filename": "sandtotal_5_cm_p.tif",
+        "property": "sandtotal",
+        "scalar": 1,
+        "units": "percent_weight",
+        "description": "Total sand (0.05-2.0 mm, %) at 5 cm",
+    },
+    {
+        "filename": "sandtotal_15_cm_p.tif",
+        "property": "sandtotal",
+        "scalar": 1,
+        "units": "percent_weight",
+        "description": "Total sand (0.05-2.0 mm, %) at 15 cm",
+    },
+    {
+        "filename": "claytotal_0_cm_p.tif",
+        "property": "claytotal",
+        "scalar": 1,
+        "units": "percent_weight",
+        "description": "Total clay (<0.002 mm, %) at 0 cm",
+    },
+    {
+        "filename": "claytotal_5_cm_p.tif",
+        "property": "claytotal",
+        "scalar": 1,
+        "units": "percent_weight",
+        "description": "Total clay (<0.002 mm, %) at 5 cm",
+    },
+    {
+        "filename": "claytotal_15_cm_p.tif",
+        "property": "claytotal",
+        "scalar": 1,
+        "units": "percent_weight",
+        "description": "Total clay (<0.002 mm, %) at 15 cm",
+    },
+    {
+        "filename": "silttotal_0_cm_p.tif",
+        "property": "silttotal",
+        "scalar": 1,
+        "units": "percent_weight",
+        "description": "Total silt (0.002-0.05 mm, %) at 0 cm",
+    },
+    {
+        "filename": "silttotal_5_cm_p.tif",
+        "property": "silttotal",
+        "scalar": 1,
+        "units": "percent_weight",
+        "description": "Total silt (0.002-0.05 mm, %) at 5 cm",
+    },
+    {
+        "filename": "silttotal_15_cm_p.tif",
+        "property": "silttotal",
+        "scalar": 1,
+        "units": "percent_weight",
+        "description": "Total silt (0.002-0.05 mm, %) at 15 cm",
+    },
+    {
+        "filename": "cec7_0_cm_p.tif",
+        "property": "cec7",
+        "scalar": 10,
+        "units": "cmol_kg_x10",
+        "description": "Cation exchange capacity (pH 7, cmol+/kg x 10) at 0 cm",
+    },
+    {
+        "filename": "cec7_5_cm_p.tif",
+        "property": "cec7",
+        "scalar": 10,
+        "units": "cmol_kg_x10",
+        "description": "Cation exchange capacity (pH 7, cmol+/kg x 10) at 5 cm",
+    },
+    {
+        "filename": "cec7_15_cm_p.tif",
+        "property": "cec7",
+        "scalar": 10,
+        "units": "cmol_kg_x10",
+        "description": "Cation exchange capacity (pH 7, cmol+/kg x 10) at 15 cm",
+    },
 )
 
 # Official USGS SGMC ScienceBase catalog item (Horton et al. 2017; doi:10.5066/F7WH2N65)
@@ -250,12 +334,18 @@ def inspect_solus_cache(solus_dir: Path) -> Tuple[bool, List[Dict[str, Any]]]:
     if not missing:
         return True, []
 
-    # Also honor pre-existing custom-named SOLUS rasters if bedrock + fragvol + pH are all present
+    # Also honor pre-existing custom-named SOLUS rasters only when bedrock, fragvol, pH, texture, and CEC all exist
     tifs = [p for p in solus_dir.glob("*.tif*") if _is_valid_tiff(p)]
-    has_bed = any(re.search(r"(anylithicdpt|resdept|bdricm)", p.name, re.I) for p in tifs)
+    has_bed = any(re.search(r"(anylithicdpt|resdept)", p.name, re.I) for p in tifs)
     has_frg = any(re.search(r"(fragvol|cfvo)", p.name, re.I) for p in tifs)
     has_ph = any(re.search(r"^ph(_|1to1h2o)", p.name, re.I) for p in tifs)
-    if has_bed and has_frg and has_ph:
+    has_tex = (
+        any(re.search(r"sandtotal", p.name, re.I) for p in tifs)
+        and any(re.search(r"claytotal", p.name, re.I) for p in tifs)
+        and any(re.search(r"silttotal", p.name, re.I) for p in tifs)
+    )
+    has_cec = any(re.search(r"cec7", p.name, re.I) for p in tifs)
+    if has_bed and has_frg and has_ph and has_tex and has_cec:
         return True, []
 
     return False, missing

@@ -165,7 +165,7 @@ resolve_active_anthesis_mask <- function(df) {
   if (col_nm %in% names(df)) as.character(df[[col_nm]]) else rep(default, n)
 }
 
-resolve_step06_authority_weights <- function(df) {
+resolve_ecological_authority_weights <- function(df, allow_bronze_prior = TRUE) {
   n <- nrow(df)
   if (n == 0L) return(numeric(0))
   if (file.exists("scripts/morphometrics/authority_weighting_utils.R") &&
@@ -174,11 +174,15 @@ resolve_step06_authority_weights <- function(df) {
   }
   if (exists("compute_empirical_bayes_authority_weights", mode = "function")) {
     eb_w <- tryCatch(
-      compute_empirical_bayes_authority_weights(df, mode = "continuous_prior_posterior", target_modality = "ecological"),
+      compute_empirical_bayes_authority_weights(
+        df,
+        mode = if (isTRUE(allow_bronze_prior)) "continuous_prior_posterior" else "active_passive",
+        target_modality = "ecological"
+      ),
       error = function(e) NULL
     )
     if (!is.null(eb_w) && length(eb_w) == n && any(is.finite(eb_w) & eb_w > 0)) {
-      return(round(pmax(0.01, eb_w), 4))
+      return(round(if (isTRUE(allow_bronze_prior)) pmax(0.01, eb_w) else eb_w, 4))
     }
   }
   tier_raw <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", n)
@@ -186,7 +190,7 @@ resolve_step06_authority_weights <- function(df) {
   tier_std <- ifelse(grepl("Tier_1|Gold|Tier 1", tier_raw, ignore.case = TRUE), "Tier_1_Gold",
               ifelse(grepl("Tier_2|Silver|Tier 2", tier_raw, ignore.case = TRUE), "Tier_2_Silver", "Tier_3_Bronze"))
   is_t_fb <- if ("is_type_specimen" %in% names(df)) (!is.na(df$is_type_specimen) & as.logical(df$is_type_specimen)) else rep(FALSE, n)
-  round(ifelse(is_t_fb, 3.0, ifelse(tier_std == "Tier_1_Gold", 2.0, ifelse(tier_std == "Tier_2_Silver", 0.75, 0.50))), 4)
+  round(ifelse(is_t_fb, 3.0, ifelse(tier_std == "Tier_1_Gold", 2.0, ifelse(tier_std == "Tier_2_Silver", 0.75, if (isTRUE(allow_bronze_prior)) 0.50 else 0.0))), 4)
 }
 
 .load_step07_pheno_config_defaults <- function(cfg_path = "config/config.yaml") {
@@ -288,7 +292,7 @@ compute_hopkins_adjusted_phenology <- function(df) {
 
   lat_col <- intersect(c("decimalLatitude", "latitude"), names(df))
   lat_vec <- if (length(lat_col) > 0L) suppressWarnings(as.numeric(df[[lat_col[1L]]])) else rep(NA_real_, n)
-  elev_col <- intersect(c("topo_elev_m", "elevation_m", "elevation"), names(df))
+  elev_col <- intersect(c("elevation_m", "elevation", "minimumElevationInMeters"), names(df))
   elev_vec <- if (length(elev_col) > 0L) suppressWarnings(as.numeric(df[[elev_col[1L]]])) else rep(NA_real_, n)
   mat_col <- intersect(c("bio1_temp_mean", "bio1", "mat_c"), names(df))
   mat_vec <- if (length(mat_col) > 0L) suppressWarnings(as.numeric(df[[mat_col[1L]]])) else rep(NA_real_, n)
@@ -302,7 +306,7 @@ compute_hopkins_adjusted_phenology <- function(df) {
   ref_mat <- if (length(mat_pool) > 0L) stats::median(mat_pool, na.rm = TRUE) else 14.5
 
   lat_shift <- ifelse(is.finite(lat_vec), 4.0 * (lat_vec - ref_lat), 0.0)
-  elev_shift <- ifelse(is.finite(elev_vec), 1.25 * ((elev_vec - ref_elev) / 100.0), 0.0)
+  elev_shift <- ifelse(is.finite(elev_vec), (4.0 / 121.92) * (elev_vec - ref_elev), 0.0)
   mat_shift <- ifelse(is.finite(mat_vec), -1.5 * (mat_vec - ref_mat), 0.0)
   has_geo_cov <- is.finite(lat_vec) | is.finite(elev_vec)
   has_mat_cov <- is.finite(mat_vec)
@@ -579,7 +583,7 @@ compute_probabilistic_consensus_scores <- function(df) {
   if (length(p_edaph) > 0L) return(p_edaph)
   p_env <- keep_finite_num(.parse_step07_semicolon_cols(df, "primary_env_predictors"))
   if (length(p_env) > 0L) return(p_env)
-  p_fine <- keep_finite_num(grep("^(fine_|ssurgo_|polaris_|solus_|cfvo|awc|bdricm|resdept|alr_|clr_|azonal_)", names(df), value = TRUE))
+  p_fine <- keep_finite_num(grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_)", names(df), value = TRUE))
   if (length(p_fine) > 0L) return(p_fine)
   keep_finite_num(grep("^(soil_|bio[0-9]+_)", names(df), value = TRUE))
 }
@@ -1391,7 +1395,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   }
 
   # Same-Sheet (catalogNumber) Gathering Coherence Post-Filter across sibling plant_individual_id ramets
-  aw_sheet_vec <- resolve_step06_authority_weights(df)
+  aw_sheet_vec <- resolve_ecological_authority_weights(df, allow_bronze_prior = TRUE)
   chisq99_type_morph <- stats::qchisq(0.99, df = p_type_morph)
   for (s_idx in sheet_idx_list) {
     if (length(s_idx) < 2L) next
@@ -1711,7 +1715,7 @@ build_triage_queue <- function(opts) {
     if ("plant_height_mm" %in% names(mm_df) && !("plant_height_cm" %in% names(mm_df))) {
       mm_df$plant_height_cm <- round(suppressWarnings(as.numeric(mm_df$plant_height_mm)) / 10.0, 2)
     }
-    dyn_mm_num <- grep("^(bio[0-9]+_|fine_|ssurgo_|polaris_|solus_|topo_|cfvo|awc|bdricm|resdept|alr_|clr_|azonal_)", names(mm_df), value = TRUE)
+    dyn_mm_num <- grep("^(bio[0-9]+_|fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_)", names(mm_df), value = TRUE)
     dyn_mm_num <- dyn_mm_num[vapply(dyn_mm_num, function(cc) !is.character(mm_df[[cc]]) && !is.logical(mm_df[[cc]]), logical(1))]
     mm_num_all <- unique(c(mm_numeric_coalesce, dyn_mm_num))
     vouchers <- safe_left_join_and_coalesce(vouchers, mm_df, numeric_coalesce_cols = mm_num_all)

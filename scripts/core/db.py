@@ -129,48 +129,51 @@ ENVIRONMENTAL_CACHE_COLUMNS: Tuple[str, ...] = (
     "polaris_ksat_30m",
     "solus_resdept_cm",
     "solus_fragvol_pct",
+    "solus_sand_pct",
+    "solus_clay_pct",
+    "solus_silt_pct",
+    "solus_cec",
     "topo_tpi_30m",
-    "topo_roughness_30m",
     "topo_slope_deg",
+    "topo_hli_30m",
     "topo_twi_30m",
-    "topo_elev_m",
+    "elevation_m",
     "fine_soil_ph",
     "fine_soil_sand",
     "fine_soil_clay",
-    "fine_bedrock_depth_cm",
-    "fine_rock_outcrop_prob",
-    "bdricm",
-    "resdept_r",
-    "cfvo",
-    "awc",
-    "fine_soil_cec",
     "soil_silt_pct",
-    "alr_sand_clay",
-    "alr_silt_clay",
-    "clr_sand_silt",
-    "clr_clay_geom",
+    "ilr_texture_1",
+    "ilr_texture_2",
+    "fine_soil_cec",
+    "fine_cfvo_pct",
+    "fine_bedrock_depth_cm",
     "sgmc_lithology_class",
     "is_azonal_lithology",
-    "azonal_contact_dist_m",
-    "azonal_proximity_index",
     "buffer_radius_m",
     "high_coord_uncertainty_flag",
     "is_training_eligible_coord",
+    "is_clim_eligible_coord",
+    "is_edaphic_eligible_coord",
+    "edaphic_coord_weight",
     "ph_q10_buffer",
     "ph_q90_buffer",
     "min_bedrock_depth_buffer_cm",
     "max_cfvo_buffer_pct",
     "azonal_lithology_presence_buffer",
     *WC_BIO_COLUMNS,
-    "bio18_precip_warmest_qt",
-    "bio19_precip_coldest_qt",
     "soil_ph",
     "soil_cec",
     "soil_sand",
+    "soil_clay",
+    "soil_silt",
+    "soil_cfvo",
     "soil_bulk_density",
     "soil_ph_soilgrids",
     "soil_cec_soilgrids",
     "soil_sand_soilgrids",
+    "soil_clay_soilgrids",
+    "soil_silt_soilgrids",
+    "soil_cfvo_soilgrids",
     "soil_bulk_density_soilgrids",
 )
 
@@ -189,6 +192,8 @@ ENVIRONMENTAL_BOOL_COLS: Set[str] = {
     "is_azonal_lithology",
     "high_coord_uncertainty_flag",
     "is_training_eligible_coord",
+    "is_clim_eligible_coord",
+    "is_edaphic_eligible_coord",
     "azonal_lithology_presence_buffer",
 }
 
@@ -1639,27 +1644,6 @@ def query_misidentified_vouchers_from_db(
 # Environmental Cache Upsert & R*Tree Spatial Bounding-Box Query
 # =============================================================================
 
-def _coalesce_wc_bio_fields(src: Mapping[str, Any], dst: Dict[str, Any]) -> None:
-    """
-    Bidirectionally coalesce canonical WorldClim `_qtr` (`bio18_precip_warmest_qtr`,
-    `bio19_precip_coldest_qtr`) and legacy `_qt` (`bio18_precip_warmest_qt`,
-    `bio19_precip_coldest_qt`) fields so 19-variable runs and legacy 6-variable
-    offline cache fixtures interoperate seamlessly.
-    """
-    for qtr_col, qt_col in (
-        ("bio18_precip_warmest_qtr", "bio18_precip_warmest_qt"),
-        ("bio19_precip_coldest_qtr", "bio19_precip_coldest_qt"),
-    ):
-        if qtr_col in src or qt_col in src or qtr_col in dst or qt_col in dst:
-            v_qtr = _to_float(dst.get(qtr_col) if qtr_col in dst else src.get(qtr_col))
-            v_qt = _to_float(dst.get(qt_col) if qt_col in dst else src.get(qt_col))
-            resolved_qtr = v_qtr if v_qtr is not None else v_qt
-            resolved_qt = v_qt if v_qt is not None else v_qtr
-            if resolved_qtr is not None or qtr_col in src or qt_col in src:
-                dst[qtr_col] = resolved_qtr
-                dst[qt_col] = resolved_qt
-
-
 def _normalize_semicolon_list_str(val: Any) -> Optional[str]:
     if val is None:
         return None
@@ -1686,7 +1670,7 @@ def upsert_environmental_cache_records(
     """
     UPSERT fine-grain SSURGO / POLARIS / SOLUS100 / 3DEP / SGMC / 19-variable WorldClim
     rows into `environmental_cache` (automatically updating `environmental_rtree` via
-    triggers and coalescing `bio18/19` `_qtr <-> _qt`). Strictly no-ops when `demo=True`.
+    triggers). Strictly no-ops when `demo=True`.
     """
     if demo or not records:
         return 0
@@ -1715,7 +1699,6 @@ def upsert_environmental_cache_records(
                 d[col] = _to_bool_int(r.get(col))
             else:
                 d[col] = _to_float(r.get(col))
-        _coalesce_wc_bio_fields(r, d)
         norm_rows.append(d)
 
     return upsert_rows_generic(
@@ -1747,9 +1730,7 @@ def query_environmental_bbox(
     )
     out: List[Dict[str, Any]] = []
     for r in cur.fetchall():
-        d = dict(r)
-        _coalesce_wc_bio_fields(d, d)
-        out.append(d)
+        out.append(dict(r))
     return out
 
 
@@ -2002,12 +1983,15 @@ def persist_otu_morphometrics(
 
 _SRF_BOOL_COLS: Tuple[str, ...] = (
     "substrate_specialist_flag",
-    "piedmont_outcrop_specialist_flag",
     "multimodal_conflict_flag",
     "matches_type_lithology",
 )
+_SRF_INT_COLS: Tuple[str, ...] = (
+    "n_observed_modalities",
+)
 _SRF_STR_COLS: Tuple[str, ...] = (
     "rf_predicted_taxon",
+    "rf_prediction_source",
     "edaphic_best_fit_taxon",
     "nearest_type_niche_taxon",
     "spatial_block_id",
@@ -2036,8 +2020,6 @@ _SRF_FLOAT_COLS: Tuple[str, ...] = (
     "climatic_z_score",
     "type_edaphic_z_score",
     *WC_BIO_COLUMNS,
-    "bio18_precip_warmest_qt",
-    "bio19_precip_coldest_qt",
 )
 
 
@@ -2049,8 +2031,8 @@ def persist_spatial_rf_predictions(
     also_upsert_env_cache: bool = False,
 ) -> int:
     """
-    Persist Step 06 Spatial Random Forest predictions, Hopkins phenology residuals,
-    all 19 WorldClim bioclimatic variables (with `_qtr <-> _qt` coalescing),
+    Persist Step 05 Spatial Random Forest predictions, Hopkins phenology residuals,
+    all 19 WorldClim bioclimatic variables,
     `climatic_z_score`, and `primary_*_predictors` into `spatial_rf_predictions`.
     """
     if demo or not srf_rows:
@@ -2087,10 +2069,12 @@ def persist_spatial_rf_predictions(
         for col in _SRF_BOOL_COLS:
             if col in r:
                 d[col] = _to_bool_int(r.get(col))
+        for col in _SRF_INT_COLS:
+            if col in r:
+                d[col] = _to_int(r.get(col))
         for col in _SRF_FLOAT_COLS:
             if col in r:
                 d[col] = _to_float(r.get(col))
-        _coalesce_wc_bio_fields(r, d)
         norm_rows.append(d)
 
     return upsert_rows_generic(
@@ -2124,7 +2108,7 @@ def ingest_existing_run_tables_into_db(
     `leaf_efa_harmonics.csv`, `morphometric_flags.csv`,
     `multimodal_conflict_flags.csv`, `triage_queue.csv` / `final_curation_triage.csv`)
     into Tier B SQLite tables with full dynamic `A1..D24`, `PC1..PC15`,
-    `Sym_PC1..Sym_PC15`, and 19-variable `bio1..bio19` (`_qtr <-> _qt`) support.
+    `Sym_PC1..Sym_PC15`, and 19-variable `bio1..bio19` support.
     """
     if demo:
         return {}

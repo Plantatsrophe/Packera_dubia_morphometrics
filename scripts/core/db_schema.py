@@ -70,48 +70,51 @@ ENVIRONMENTAL_CACHE_COLUMNS: Tuple[str, ...] = (
     "polaris_ksat_30m",
     "solus_resdept_cm",
     "solus_fragvol_pct",
+    "solus_sand_pct",
+    "solus_clay_pct",
+    "solus_silt_pct",
+    "solus_cec",
     "topo_tpi_30m",
-    "topo_roughness_30m",
     "topo_slope_deg",
+    "topo_hli_30m",
     "topo_twi_30m",
-    "topo_elev_m",
+    "elevation_m",
     "fine_soil_ph",
     "fine_soil_sand",
     "fine_soil_clay",
-    "fine_bedrock_depth_cm",
-    "fine_rock_outcrop_prob",
-    "bdricm",
-    "resdept_r",
-    "cfvo",
-    "awc",
-    "fine_soil_cec",
     "soil_silt_pct",
-    "alr_sand_clay",
-    "alr_silt_clay",
-    "clr_sand_silt",
-    "clr_clay_geom",
+    "ilr_texture_1",
+    "ilr_texture_2",
+    "fine_soil_cec",
+    "fine_cfvo_pct",
+    "fine_bedrock_depth_cm",
     "sgmc_lithology_class",
     "is_azonal_lithology",
-    "azonal_contact_dist_m",
-    "azonal_proximity_index",
     "buffer_radius_m",
     "high_coord_uncertainty_flag",
     "is_training_eligible_coord",
+    "is_clim_eligible_coord",
+    "is_edaphic_eligible_coord",
+    "edaphic_coord_weight",
     "ph_q10_buffer",
     "ph_q90_buffer",
     "min_bedrock_depth_buffer_cm",
     "max_cfvo_buffer_pct",
     "azonal_lithology_presence_buffer",
     *WC_BIO_COLUMNS,
-    "bio18_precip_warmest_qt",
-    "bio19_precip_coldest_qt",
     "soil_ph",
     "soil_cec",
     "soil_sand",
+    "soil_clay",
+    "soil_silt",
+    "soil_cfvo",
     "soil_bulk_density",
     "soil_ph_soilgrids",
     "soil_cec_soilgrids",
     "soil_sand_soilgrids",
+    "soil_clay_soilgrids",
+    "soil_silt_soilgrids",
+    "soil_cfvo_soilgrids",
     "soil_bulk_density_soilgrids",
 )
 
@@ -130,6 +133,8 @@ ENVIRONMENTAL_BOOL_COLS: Set[str] = {
     "is_azonal_lithology",
     "high_coord_uncertainty_flag",
     "is_training_eligible_coord",
+    "is_clim_eligible_coord",
+    "is_edaphic_eligible_coord",
     "azonal_lithology_presence_buffer",
 }
 
@@ -140,8 +145,6 @@ def _build_master_view_ddl() -> str:
         "catalogNumber",
         "latitude",
         "longitude",
-        "bio18_precip_warmest_qt",
-        "bio19_precip_coldest_qt",
         *WC_BIO_COLUMNS,
     }
     env_view_selects = ",\n        ".join(
@@ -150,29 +153,10 @@ def _build_master_view_ddl() -> str:
         if col not in wc_excluded_from_env
     )
 
-    wc_select_parts: List[str] = []
-    for col in WC_BIO_COLUMNS:
-        if col == "bio18_precip_warmest_qtr":
-            wc_select_parts.append(
-                "COALESCE(srf.bio18_precip_warmest_qtr, srf.bio18_precip_warmest_qt, "
-                "ec.bio18_precip_warmest_qtr, ec.bio18_precip_warmest_qt) AS bio18_precip_warmest_qtr"
-            )
-        elif col == "bio19_precip_coldest_qtr":
-            wc_select_parts.append(
-                "COALESCE(srf.bio19_precip_coldest_qtr, srf.bio19_precip_coldest_qt, "
-                "ec.bio19_precip_coldest_qtr, ec.bio19_precip_coldest_qt) AS bio19_precip_coldest_qtr"
-            )
-        else:
-            wc_select_parts.append(f"COALESCE(srf.{col}, ec.{col}) AS {col}")
-    wc_select_parts.append(
-        "COALESCE(srf.bio18_precip_warmest_qt, ec.bio18_precip_warmest_qt, "
-        "srf.bio18_precip_warmest_qtr, ec.bio18_precip_warmest_qtr) AS bio18_precip_warmest_qt"
+    wc_view_selects = ",\n        ".join(
+        f"COALESCE(srf.{col}, ec.{col}) AS {col}"
+        for col in WC_BIO_COLUMNS
     )
-    wc_select_parts.append(
-        "COALESCE(srf.bio19_precip_coldest_qt, ec.bio19_precip_coldest_qt, "
-        "srf.bio19_precip_coldest_qtr, ec.bio19_precip_coldest_qtr) AS bio19_precip_coldest_qt"
-    )
-    wc_view_selects = ",\n        ".join(wc_select_parts)
 
     harm_view_selects = ",\n        ".join(f"om.{h} AS {h}" for h in HARMONIC_COLS)
     pc_view_selects = ",\n        ".join(f"om.{p} AS {p}" for p in PC_COLS)
@@ -350,6 +334,7 @@ def _build_master_view_ddl() -> str:
         srf.rf_predicted_taxon AS rf_predicted_taxon,
         srf.rf_predicted_prob AS rf_predicted_prob,
         srf.rf_given_taxon_prob AS rf_given_taxon_prob,
+        srf.rf_prediction_source AS rf_prediction_source,
         srf.edaphic_best_fit_taxon AS edaphic_best_fit_taxon,
         srf.spatial_block_cv_acc AS spatial_block_cv_acc,
         srf.spatial_autocorr_range_km AS spatial_autocorr_range_km,
@@ -371,7 +356,7 @@ def _build_master_view_ddl() -> str:
         srf.primary_clim_predictors AS primary_clim_predictors,
         srf.primary_edaph_predictors AS primary_edaph_predictors,
         srf.substrate_specialist_flag AS substrate_specialist_flag,
-        srf.piedmont_outcrop_specialist_flag AS piedmont_outcrop_specialist_flag,
+        srf.n_observed_modalities AS n_observed_modalities,
         srf.multimodal_concordance AS multimodal_concordance,
         srf.multimodal_conflict_flag AS multimodal_conflict_flag,
         srf.triage_category AS triage_category,
@@ -445,7 +430,7 @@ def _build_schema_ddl() -> str:
     sym_pc_ddl = ",\n        ".join(f"{sp} REAL" for sp in SYM_PC_COLS)
     wc_srf_ddl = ",\n        ".join(
         f"{col} REAL"
-        for col in (*WC_BIO_COLUMNS, "bio18_precip_warmest_qt", "bio19_precip_coldest_qt")
+        for col in WC_BIO_COLUMNS
     )
 
     env_col_defs: List[str] = ["lat_lon_key TEXT PRIMARY KEY"]
@@ -866,6 +851,7 @@ def _build_schema_ddl() -> str:
         rf_predicted_taxon TEXT,
         rf_predicted_prob REAL,
         rf_given_taxon_prob REAL,
+        rf_prediction_source TEXT,
         edaphic_best_fit_taxon TEXT,
         spatial_block_cv_acc REAL,
         spatial_autocorr_range_km REAL,
@@ -887,7 +873,7 @@ def _build_schema_ddl() -> str:
         primary_edaph_predictors TEXT,
         {wc_srf_ddl},
         substrate_specialist_flag INTEGER,
-        piedmont_outcrop_specialist_flag INTEGER,
+        n_observed_modalities INTEGER,
         multimodal_concordance TEXT,
         multimodal_conflict_flag INTEGER,
         triage_category TEXT,
@@ -1054,8 +1040,8 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
     "spatial_rf_predictions": tuple(
         [
             *((col, "REAL") for col in WC_BIO_COLUMNS),
-            ("bio18_precip_warmest_qt", "REAL"),
-            ("bio19_precip_coldest_qt", "REAL"),
+            ("rf_prediction_source", "TEXT"),
+            ("n_observed_modalities", "INTEGER"),
             ("climatic_z_score", "REAL"),
             ("type_edaphic_z_score", "REAL"),
             ("nearest_type_niche_taxon", "TEXT"),
@@ -1105,7 +1091,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261112
+PACKERA_SCHEMA_USER_VERSION: int = 20261113
 
 
 def _migrate_dynamic_schema_columns(
@@ -1120,9 +1106,7 @@ def _migrate_dynamic_schema_columns(
          PCA (`PC1..PC15`, `Sym_PC1..Sym_PC15`), adaptive EFD metadata (`efd_harmonic_opt`,
          `efd_k95_pcs`, `selected_morph_features`), dissection scalars, 19-variable WorldClim
          (`bio1..bio19`), `climatic_z_score`, or `primary_*_predictors` columns.
-      3. Backfills bidirectional `bio18_precip_warmest_qtr <-> bio18_precip_warmest_qt` and
-         `bio19_precip_coldest_qtr <-> bio19_precip_coldest_qt` values on existing tables.
-      4. Optionally drops and recreates `v_integrative_triage_master` whenever all base tables exist.
+      3. Optionally drops and recreates `v_integrative_triage_master` whenever all base tables exist.
     """
     existing_tables: Set[str] = {
         str(r[0])
@@ -1148,25 +1132,7 @@ def _migrate_dynamic_schema_columns(
                 conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_ddl};")
                 existing_cols.add(col_name)
 
-        if {
-            "bio18_precip_warmest_qtr",
-            "bio18_precip_warmest_qt",
-            "bio19_precip_coldest_qtr",
-            "bio19_precip_coldest_qt",
-        }.issubset(existing_cols):
-            conn.execute(
-                f"""
-                UPDATE {table_name}
-                SET bio18_precip_warmest_qtr = COALESCE(bio18_precip_warmest_qtr, bio18_precip_warmest_qt),
-                    bio18_precip_warmest_qt = COALESCE(bio18_precip_warmest_qt, bio18_precip_warmest_qtr),
-                    bio19_precip_coldest_qtr = COALESCE(bio19_precip_coldest_qtr, bio19_precip_coldest_qt),
-                    bio19_precip_coldest_qt = COALESCE(bio19_precip_coldest_qt, bio19_precip_coldest_qtr)
-                WHERE (bio18_precip_warmest_qtr IS NULL AND bio18_precip_warmest_qt IS NOT NULL)
-                   OR (bio18_precip_warmest_qt IS NULL AND bio18_precip_warmest_qtr IS NOT NULL)
-                   OR (bio19_precip_coldest_qtr IS NULL AND bio19_precip_coldest_qt IS NOT NULL)
-                   OR (bio19_precip_coldest_qt IS NULL AND bio19_precip_coldest_qtr IS NOT NULL);
-                """
-            )
+
 
     if recreate_view and set(_MASTER_VIEW_REQUIRED_TABLES).issubset(existing_tables):
         conn.executescript(MASTER_VIEW_DDL)

@@ -1905,12 +1905,13 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
 
             # Step 05 assertions
             self.assertTrue(any("05_multimodal_spatial_rf.R" in tok for tok in cmd_step06))
+            reports_dir = tmp_run / "outputs" / "reports"
             self.assertEqual(_arg_value(cmd_step06, "--pheno-states"), str(tables_dir / "voucher_phenological_states.csv"))
-            self.assertEqual(_arg_value(cmd_step06, "--ssurgo-table"), str(tables_dir / "ssurgo_edaphic_metrics.csv"))
-            self.assertEqual(_arg_value(cmd_step06, "--contingency-table"), str(tables_dir / "lithology_taxon_contingency_audit.csv"))
-            self.assertEqual(_arg_value(cmd_step06, "--pheno-anomalies"), str(tables_dir / "phenological_allochrony_anomalies.csv"))
-            self.assertEqual(_arg_value(cmd_step06, "--pheno-summary"), str(tables_dir / "phenological_model_summary.csv"))
-            self.assertEqual(_arg_value(cmd_step06, "--pheno-plot"), str(figures_dir / "Phenological_Allochrony_SpaceTime.pdf"))
+            self.assertEqual(_arg_value(cmd_step06, "--ssurgo-table"), str(tables_dir / "ssurgo_edaphic_validation.csv"))
+            self.assertEqual(_arg_value(cmd_step06, "--contingency-table"), str(reports_dir / "micro_edaphic_outcrop_contingency.csv"))
+            self.assertEqual(_arg_value(cmd_step06, "--pheno-anomalies"), str(tables_dir / "phenological_anomalies.csv"))
+            self.assertEqual(_arg_value(cmd_step06, "--pheno-summary"), str(reports_dir / "phenological_anomaly_summary.csv"))
+            self.assertEqual(_arg_value(cmd_step06, "--pheno-plot"), str(figures_dir / "phenological_latitudinal_anomaly.pdf"))
             self.assertEqual(_arg_value(cmd_step06, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step06)
 

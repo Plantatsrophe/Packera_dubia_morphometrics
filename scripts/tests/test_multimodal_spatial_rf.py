@@ -73,9 +73,11 @@ class TestMultimodalSpatialRF(unittest.TestCase):
               stopifnot(abs(rhizo[3] - 5.8) < 1e-8)
               stopifnot(abs(rhizo[4] - 5.2) < 1e-8)
 
-              tex <- compute_soil_texture_log_ratios(sand_pct = c(70.0, 30.0), clay_pct = c(10.0, 35.0))
-              stopifnot(all(c("soil_silt_pct", "alr_sand_clay", "alr_silt_clay") %in% names(tex)))
-              stopifnot(tex$alr_sand_clay[1] > 0 && tex$alr_sand_clay[2] < 0)
+              tex <- compute_soil_texture_log_ratios(sand_pct = c(70.0, 30.0, NA), clay_pct = c(10.0, 35.0, 20.0))
+              stopifnot(all(c("soil_silt_pct", "ilr_texture_1", "ilr_texture_2") %in% names(tex)))
+              stopifnot(!any(c("alr_sand_clay", "alr_silt_clay") %in% names(tex)))
+              stopifnot(tex$ilr_texture_1[1] > 0 && tex$ilr_texture_1[2] < 0)
+              stopifnot(is.na(tex$ilr_texture_1[3]) && is.na(tex$ilr_texture_2[3]))
 
               df_in <- data.frame(
                 catalogNumber = c("V1", "V2", "V3"),
@@ -96,10 +98,10 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 stringsAsFactors = FALSE
               )
               df_out <- extract_polaris_and_solus_predictors(df_in, env_dir = tempdir(), demo = TRUE)
-              req_cols <- c("bdricm", "resdept_r", "cfvo", "awc", "fine_soil_cec", "alr_sand_clay", "alr_silt_clay")
+              req_cols <- c("fine_bedrock_depth_cm", "fine_cfvo_pct", "fine_soil_cec", "ilr_texture_1", "ilr_texture_2")
               stopifnot(all(req_cols %in% names(df_out)))
-              stopifnot(df_out$bdricm[1] < df_out$bdricm[2])
-              stopifnot(df_out$cfvo[1] > df_out$cfvo[2])
+              stopifnot(df_out$fine_bedrock_depth_cm[1] < df_out$fine_bedrock_depth_cm[2])
+              stopifnot(df_out$fine_cfvo_pct[1] > df_out$fine_cfvo_pct[2])
               stopifnot(abs(df_out$fine_soil_ph[1] - 4.7) < 1e-6 && abs(df_out$fine_soil_ph[2] - 6.5) < 1e-6 && abs(df_out$fine_soil_ph[3] - 5.8) < 1e-6)
               stopifnot(abs(df_out$fine_soil_sand[1] - 74.0) < 1e-6 && abs(df_out$fine_soil_sand[2] - 32.0) < 1e-6 && abs(df_out$fine_soil_sand[3] - 62.0) < 1e-6)
               stopifnot(abs(df_out$fine_soil_cec[1] - 4.2) < 1e-6 && abs(df_out$fine_soil_cec[2] - 19.5) < 1e-6 && abs(df_out$fine_soil_cec[3] - 14.5) < 1e-6)
@@ -148,11 +150,10 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 stringsAsFactors = FALSE
               )
               df_geo <- extract_sgmc_lithology(df_geo, env_dir = tempdir(), demo = TRUE)
-              stopifnot(all(c("sgmc_lithology_class", "is_azonal_lithology", "azonal_contact_dist_m", "azonal_proximity_index") %in% names(df_geo)))
+              stopifnot(all(c("sgmc_lithology_class", "is_azonal_lithology") %in% names(df_geo)))
+              stopifnot(!any(c("azonal_contact_dist_m", "azonal_proximity_index") %in% names(df_geo)))
               stopifnot(all(df_geo$is_azonal_lithology[1:4]))
               stopifnot(!df_geo$is_azonal_lithology[6])
-              stopifnot(df_geo$azonal_contact_dist_m[4] < df_geo$azonal_contact_dist_m[6])
-              stopifnot(df_geo$azonal_proximity_index[4] > df_geo$azonal_proximity_index[6])
               cat("SGMC_LITHOLOGY_OK\\n")
             }})
 
@@ -168,7 +169,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 coordinateUncertaintyInMeters = c(NA, 45, 750, 15000),
                 fine_soil_ph = c(4.9, 5.1, 6.2, 5.4),
                 fine_bedrock_depth_cm = c(22, 35, 110, 160),
-                cfvo = c(32, 24, 12, 6),
+                fine_cfvo_pct = c(32, 24, 12, 6),
                 ssurgo_rock_outcrop_pct = c(55, 30, 5, 0),
                 is_rock_outcrop = c(TRUE, TRUE, FALSE, FALSE),
                 stringsAsFactors = FALSE
@@ -182,7 +183,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
               stopifnot(all(df_buf$ph_q10_buffer <= df_buf$fine_soil_ph))
               stopifnot(all(df_buf$ph_q90_buffer >= df_buf$fine_soil_ph))
               stopifnot(all(df_buf$min_bedrock_depth_buffer_cm <= df_buf$fine_bedrock_depth_cm))
-              stopifnot(all(df_buf$max_cfvo_buffer_pct >= df_buf$cfvo))
+              stopifnot(all(df_buf$max_cfvo_buffer_pct >= df_buf$fine_cfvo_pct))
               stopifnot(df_buf$azonal_lithology_presence_buffer[1] == TRUE)
               cat("UNCERTAINTY_BUFFER_OK\\n")
             }})
@@ -207,18 +208,17 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 bio15_precip_seasonality = rnorm(n, 18, 2.0),
                 delta_doy = ifelse(is_dub, rnorm(n, -10, 4), rnorm(n, 8, 4)),
                 fine_soil_ph = ifelse(is_dub, rnorm(n, 4.6, 0.25), rnorm(n, 5.9, 0.30)),
-                fine_soil_sand = ifelse(is_dub, rnorm(n, 78, 5), rnorm(n, 42, 6)),
+                ilr_texture_1 = ifelse(is_dub, rnorm(n, 1.8, 0.22), rnorm(n, 0.2, 0.22)),
+                ilr_texture_2 = ifelse(is_dub, rnorm(n, -0.3, 0.18), rnorm(n, 0.4, 0.18)),
                 fine_bedrock_depth_cm = ifelse(is_dub, rnorm(n, 22, 6), rnorm(n, 135, 20)),
-                cfvo = ifelse(is_dub, rnorm(n, 38, 6), rnorm(n, 9, 3)),
-                awc = ifelse(is_dub, rnorm(n, 0.06, 0.015), rnorm(n, 0.16, 0.02)),
-                alr_sand_clay = ifelse(is_dub, rnorm(n, 2.1, 0.25), rnorm(n, 0.4, 0.25)),
-                azonal_proximity_index = ifelse(is_dub, rnorm(n, 0.82, 0.08), rnorm(n, 0.15, 0.06)),
+                fine_cfvo_pct = ifelse(is_dub, rnorm(n, 38, 6), rnorm(n, 9, 3)),
+                topo_hli_30m = ifelse(is_dub, rnorm(n, 0.96, 0.04), rnorm(n, 0.72, 0.04)),
                 stringsAsFactors = FALSE
               )
               df$bio1_collinear_dup <- df$bio1_temp_mean * 1.01 + rnorm(n, 0, 0.005)
               env_vars <- c("bio1_temp_mean", "bio1_collinear_dup", "bio4_temp_seasonality", "bio12_precip_annual",
-                            "bio15_precip_seasonality", "delta_doy", "fine_soil_ph", "fine_soil_sand",
-                            "fine_bedrock_depth_cm", "cfvo", "awc", "alr_sand_clay", "azonal_proximity_index")
+                            "bio15_precip_seasonality", "fine_soil_ph", "ilr_texture_1", "ilr_texture_2",
+                            "fine_bedrock_depth_cm", "fine_cfvo_pct", "topo_hli_30m")
               bs <- screen_collinear_predictors_by_block(df[, env_vars], cor.threshold = 0.70, vif.threshold = 5.0)
               stopifnot(length(bs$climatic_variables) >= 1)
               stopifnot(length(bs$edaphic_variables) >= 1)
@@ -232,7 +232,8 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                             "D_joint", "I_joint", "Schoener_D", "Warren_D", "Warren_I",
                             "p_value_D", "p_value_I", "p_bg_D_joint", "Niche_Divergence_Axis", "Taxonomic_Inference")
               stopifnot(all(req_cols %in% names(sum_df)))
-              stopifnot((sum_df$N1[1] + sum_df$N2[1]) == (n - 2))
+              exp_active_n <- sum(df$determiner_tier %in% c("Tier_1_Gold", "Tier_2_Silver") & df$coordinateUncertaintyInMeters <= 10000)
+              stopifnot((sum_df$N1[1] + sum_df$N2[1]) == exp_active_n)
               stopifnot(sum_df$D_edaph[1] < sum_df$D_clim[1])
               cat("PARTITIONED_NICHE_OK\\n")
             }})
@@ -309,7 +310,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
 
               cons_df <- execute_crossmodal_consensus(df, intraspecific_mode = FALSE)
               stopifnot("substrate_specialist_flag" %in% names(cons_df))
-              stopifnot("piedmont_outcrop_specialist_flag" %in% names(cons_df))
+              stopifnot(!("piedmont_outcrop_specialist_flag" %in% names(cons_df)))
               stopifnot(sum(cons_df$substrate_specialist_flag[cons_df$species_standardized == "Packera serpenticola"]) >= 14)
               stopifnot(sum(cons_df$substrate_specialist_flag[cons_df$species_standardized == "Packera aurea"]) == 0)
               cat("NON_DUBIA_CONTINGENCY_OK\\n")
@@ -349,7 +350,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 stringsAsFactors = FALSE
               )
               res_flat <- resolve_analysis_group(df_flat, intraspecific_mode = TRUE)
-              stopifnot(identical(sort(unique(res_flat$analysis_group)), c("Ecotype_Cluster_1", "Ecotype_Cluster_2")))
+              stopifnot(identical(unique(res_flat$analysis_group), "Packera aurea"))
 
               env_vars <- c("fine_bedrock_depth_cm", "bio1_temp_mean", "fine_soil_ph", "fine_soil_sand", "topo_twi_30m")
               srf_res <- compute_spatial_rf_mems(resolved, env_vars, n_trees = 50, intraspecific_mode = TRUE)
@@ -578,9 +579,11 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             "fine_soil_sand",
             "fine_soil_clay",
             "fine_bedrock_depth_cm",
-            "fine_rock_outcrop_prob",
+            "fine_cfvo_pct",
+            "ilr_texture_1",
+            "ilr_texture_2",
             "topo_tpi_30m",
-            "topo_roughness_30m",
+            "topo_hli_30m",
             "topo_slope_deg",
             "topo_twi_30m",
             "fine_grain_edaphic_cache.csv",
@@ -762,10 +765,12 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 "rf_prediction_source",
                 "spatial_block_cv_acc",
                 "sgmc_lithology_class",
-                "bdricm",
-                "cfvo",
-                "awc",
-                "alr_sand_clay",
+                "fine_bedrock_depth_cm",
+                "fine_cfvo_pct",
+                "ilr_texture_1",
+                "ilr_texture_2",
+                "topo_hli_30m",
+                "n_observed_modalities",
                 "ph_q10_buffer",
                 "ph_q90_buffer",
                 "min_bedrock_depth_buffer_cm",
@@ -849,7 +854,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
           voucher_phenological_state = c(rep("Peak_Anthesis", 10), "Unknown", "Unknown"),
           stringsAsFactors = FALSE
         )
-        ph_res <- evaluate_circular_phenology(arctic_df, demo = FALSE)
+        ph_res <- compute_phenological_anomalies(arctic_df, demo = FALSE)
         stopifnot(sum(ph_res$df$is_verified_anthesis, na.rm = TRUE) >= 10L)
         stopifnot(all(is.finite(ph_res$df$delta_doy)))
 
@@ -957,10 +962,36 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             df_sdm$rf_predicted_prob <- srf_res$rf_predicted_prob
             df_sdm$rf_given_taxon_prob <- srf_res$rf_given_taxon_prob
 
-            sdm_out <- fit_and_project_maxent_sdm_maps(
+            # 2a. Verify empty_env with demo=FALSE NEVER fabricates IDW GeoTIFF rasters, while still reporting tabular CV performance
+            out_empty <- file.path(tmp_root, "outputs_empty")
+            suppressWarnings(fit_and_project_maxent_sdm_maps(
               df = df_sdm,
               srf_res = srf_res,
               env_dir = file.path(tmp_root, "empty_env"),
+              out_dir = out_empty,
+              kept_vars = kept_v,
+              primary_clim_vars = c("bio1_temp_mean", "bio12_precip_annual"),
+              primary_edaph_vars = c("fine_soil_sand", "fine_soil_ph"),
+              focal_taxon = "Packera dubia",
+              intraspecific_mode = FALSE,
+              demo = FALSE
+            ))
+            stopifnot(file.exists(file.path(out_empty, "reports", "sdm_model_performance.csv")))
+            stopifnot(!file.exists(file.path(out_empty, "rasters", "sdm_packera_dubia_maxent_cloglog.tif")))
+
+            # 2b. Provide real continuous GeoTIFF rasters in env_dir and verify full MaxEnt + Spatial RF projection (fig05b + fig05c)
+            r_tmpl <- terra::rast(xmin = -90, xmax = -72, ymin = 28, ymax = 42, res = 0.25, crs = "EPSG:4326")
+            xy_g <- terra::xyFromCell(r_tmpl, seq_len(terra::ncell(r_tmpl)))
+            r_b1 <- r_tmpl; terra::values(r_b1) <- 22.0 - 0.55 * (xy_g[, 2] - 28.0); names(r_b1) <- "bio1_temp_mean"
+            r_b12 <- r_tmpl; terra::values(r_b12) <- 1100.0 + 18.0 * (xy_g[, 1] + 85.0); names(r_b12) <- "bio12_precip_annual"
+            r_snd <- r_tmpl; terra::values(r_snd) <- pmin(92.0, pmax(15.0, 65.0 + 3.5 * (xy_g[, 1] + 80.0))); names(r_snd) <- "fine_soil_sand"
+            r_ph <- r_tmpl; terra::values(r_ph) <- pmin(7.5, pmax(4.2, 5.4 - 0.12 * (xy_g[, 1] + 80.0))); names(r_ph) <- "fine_soil_ph"
+            terra::writeRaster(c(r_b1, r_b12, r_snd, r_ph), file.path(env_dir, "regional_predictors.tif"), overwrite = TRUE)
+
+            sdm_out <- fit_and_project_maxent_sdm_maps(
+              df = df_sdm,
+              srf_res = srf_res,
+              env_dir = env_dir,
               out_dir = out_dir,
               kept_vars = kept_v,
               primary_clim_vars = c("bio1_temp_mean", "bio12_precip_annual"),
@@ -973,12 +1004,14 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             perf_csv <- file.path(out_dir, "reports", "sdm_model_performance.csv")
             fig_pdf <- file.path(out_dir, "figures", "fig05b_sdm_habitat_suitability_map.pdf")
             fig_png <- file.path(out_dir, "figures", "fig05b_sdm_habitat_suitability_map.png")
+            grid_pdf <- file.path(out_dir, "figures", "fig05c_multispecies_maxent_sdm_grid.pdf")
             tif_maxent <- file.path(out_dir, "rasters", "sdm_packera_dubia_maxent_cloglog.tif")
             tif_ens <- file.path(out_dir, "rasters", "sdm_packera_dubia_ensemble.tif")
 
             stopifnot(file.exists(perf_csv) && file.info(perf_csv)$size > 0)
             stopifnot(file.exists(fig_pdf) && file.info(fig_pdf)$size > 0)
             stopifnot(file.exists(fig_png) && file.info(fig_png)$size > 0)
+            stopifnot(file.exists(grid_pdf) && file.info(grid_pdf)$size > 0)
             stopifnot(file.exists(tif_maxent) && file.info(tif_maxent)$size > 0)
             stopifnot(file.exists(tif_ens) && file.info(tif_ens)$size > 0)
 
@@ -1079,15 +1112,15 @@ class TestMultimodalSpatialRF(unittest.TestCase):
               fine_soil_cec = rnorm(n_dub, 4.8, 1.1),
               fine_bedrock_depth_cm = ifelse(is_flatrock_microsite, rnorm(n_dub, 28, 8), rnorm(n_dub, 165, 20)),
               ssurgo_rock_outcrop_pct = ifelse(is_flatrock_microsite, runif(n_dub, 20, 55), rep(0.0, n_dub)),
-              awc = ifelse(is_flatrock_microsite, rnorm(n_dub, 0.06, 0.015), rnorm(n_dub, 0.11, 0.02)),
-              alr_sand_clay = rnorm(n_dub, 2.0, 0.3),
+              ilr_texture_1 = rnorm(n_dub, 1.6, 0.25),
+              ilr_texture_2 = rnorm(n_dub, 0.1, 0.20),
               is_azonal_lithology = is_flatrock_microsite,
               bio10_mean_temp_warmest_qtr = 27.2 - 0.55 * (base_lat - 32.0) + rnorm(n_dub, 0, 0.35),
               bio12_precip_annual = rnorm(n_dub, 1220, 75),
               bio15_precip_seasonality = rnorm(n_dub, 16, 2.2),
               stringsAsFactors = FALSE
             )
-            cand_v <- discover_candidate_eco_predictors(df_sym, include_pheno = TRUE)
+            cand_v <- discover_candidate_eco_predictors(df_sym, include_pheno = FALSE)
             stopifnot(!("is_azonal_lithology" %in% cand_v))
             df_res <- resolve_analysis_group(df_sym, intraspecific_mode = TRUE)
             stopifnot(identical(unique(df_res$analysis_group), "Packera dubia"))
@@ -1126,6 +1159,233 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertIn("decimalLatitude >= 22.0", pheno_src)
         self.assertIn("doy = pmin(365.0, pmax(1.0, b0_use + b1_use * lat_seq))", pheno_src)
         self.assertIn("hopkins_expected = pmin(365.0, pmax(1.0, pred_min_lat + 4.0 * (lat_seq - min_lat)))", pheno_src)
+
+
+    def test_step05_zero_trust_scientific_and_anti_leakage_suite(self):
+        """
+        Zero-trust scientific, mathematical, and anti-leakage regression suite for Step 05:
+          1. Zero target-label leakage when northern/non-CONUS rows have NA edaphic predictors.
+          2. Strict 23-predictor physiological ENM whitelist (excludes bio8/9/18/19, bio3/7,
+             elevation, delta_doy, uncertainty-buffer order statistics, and raw duplicate soil layers).
+          3. Hopkins' Bioclimatic Law exactness (+4.0 d / 400 ft = +0.0328084 d/m, NOT 0.0125 d/m)
+             plus application of b_lon and b_year in compute_phenological_anomalies().
+          4. Exact zero-influence invariance to Tier_3_Bronze and is_confident_label_noise corruption.
+          5. Sterile/fruiting/undated specimen protection (never flagged as Phenological_Anomaly_Outlier)
+             and passive retention of non-georeferenced vouchers (Passive_Ungeoreferenced).
+          6. Real 30 m DEM McCune & Keon (2002) HLI (SW > NE) and D8 hydrological TWI (valley > ridge).
+        """
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+        with tempfile.TemporaryDirectory() as tmp_d:
+            r_code = f"""
+            suppressPackageStartupMessages({{ library(readr); library(dplyr); library(terra) }})
+            source("scripts/core/db_utils.R")
+            source("scripts/morphometrics/authority_weighting_utils.R")
+            source("scripts/morphometrics/pub_figures_utils.R")
+            source("scripts/analysis/edaphic_fine_grain_utils.R")
+            source("scripts/analysis/05_multimodal_spatial_rf.R")
+
+            tmp_root <- {repr(str(tmp_d))}
+
+            # 1. Strict 23-predictor whitelist check
+            df_w <- data.frame(
+              catalogNumber = paste0("W", 1:12),
+              fine_soil_ph = seq(4.5, 6.7, length.out = 12),
+              ilr_texture_1 = seq(-1.2, 1.5, length.out = 12),
+              ilr_texture_2 = seq(-0.6, 0.8, length.out = 12),
+              fine_soil_sand = seq(25, 80, length.out = 12),
+              fine_soil_clay = seq(35, 8, length.out = 12),
+              soil_silt_pct = seq(40, 12, length.out = 12),
+              fine_soil_cec = seq(4, 22, length.out = 12),
+              fine_cfvo_pct = seq(2, 42, length.out = 12),
+              fine_bedrock_depth_cm = seq(20, 180, length.out = 12),
+              polaris_ph_30m = seq(4.5, 6.7, length.out = 12),
+              ssurgo_ph = seq(4.6, 6.8, length.out = 12),
+              ph_q10_buffer = seq(4.1, 6.2, length.out = 12),
+              min_bedrock_depth_buffer_cm = seq(10, 140, length.out = 12),
+              elevation_m = seq(100, 1200, length.out = 12),
+              topo_slope_deg = seq(1.5, 24.0, length.out = 12),
+              topo_tpi_30m = seq(-3.0, 4.0, length.out = 12),
+              topo_hli_30m = seq(0.62, 1.02, length.out = 12),
+              topo_twi_30m = seq(4.5, 11.5, length.out = 12),
+              bio1_temp_mean = seq(7.0, 18.0, length.out = 12),
+              bio3_isothermality = seq(28, 39, length.out = 12),
+              bio7_temp_annual_range = seq(26, 37, length.out = 12),
+              bio8_mean_temp_wettest_qtr = seq(15, 24, length.out = 12),
+              bio9_mean_temp_driest_qtr = seq(2, 14, length.out = 12),
+              bio12_precip_annual = seq(850, 1450, length.out = 12),
+              bio18_precip_warmest_qtr = seq(240, 420, length.out = 12),
+              bio19_precip_coldest_qtr = seq(180, 340, length.out = 12),
+              delta_doy = seq(-15, 15, length.out = 12),
+              doy = seq(95, 150, length.out = 12),
+              stringsAsFactors = FALSE
+            )
+            cand_w <- discover_candidate_eco_predictors(df_w)
+            forbidden_w <- c(
+              "bio3_isothermality", "bio7_temp_annual_range",
+              "bio8_mean_temp_wettest_qtr", "bio9_mean_temp_driest_qtr",
+              "bio18_precip_warmest_qtr", "bio19_precip_coldest_qtr",
+              "delta_doy", "doy", "elevation_m", "ph_q10_buffer", "min_bedrock_depth_buffer_cm",
+              "polaris_ph_30m", "ssurgo_ph", "soil_silt_pct", "fine_soil_sand", "fine_soil_clay"
+            )
+            stopifnot(!any(forbidden_w %in% cand_w))
+            expected_w <- c(
+              "fine_soil_ph", "ilr_texture_1", "ilr_texture_2", "fine_soil_cec", "fine_cfvo_pct", "fine_bedrock_depth_cm",
+              "topo_slope_deg", "topo_tpi_30m", "topo_hli_30m", "topo_twi_30m",
+              "bio1_temp_mean", "bio12_precip_annual"
+            )
+            stopifnot(all(expected_w %in% cand_w))
+
+            # 2. Hopkins' Bioclimatic Law (+4.0 d / 400 ft = +0.0328084 d/m) + b_lon + b_year exactness
+            set.seed(77)
+            n_h <- 24
+            lat_h <- seq(34.0, 38.0, length.out = n_h)
+            lon_h <- rep(c(-83.0, -78.0), length.out = n_h) # 5 deg lon span -> +4.0 d eastward
+            elev_h <- c(rep(200.0, n_h - 2), 1200.0, 1400.0) # +1000..1200 m Blue Ridge sheets
+            yr_h <- rep(seq(1960, 2020, length.out = 6), 4)
+            # Generate exact Hopkins synthetic truth: -0.10 d/yr secular shift
+            true_doy <- round(115.0 + 4.0 * (lat_h - 34.0) + 0.80 * (lon_h - median(lon_h)) + (4.0 / 121.92) * (elev_h - median(elev_h)) - 0.10 * (yr_h - median(yr_h)))
+            df_hop <- data.frame(
+              catalogNumber = paste0("HOP_", seq_len(n_h)),
+              species_standardized = "Packera dubia",
+              determiner_tier = "Tier_1_Gold",
+              decimalLatitude = lat_h,
+              decimalLongitude = lon_h,
+              elevation_m = elev_h,
+              year = yr_h,
+              doy = true_doy,
+              reproductiveCondition = "fl",
+              voucher_phenological_state = "anthesis",
+              total_capitula = 5,
+              n_anthesis = 4,
+              stringsAsFactors = FALSE
+            )
+            hop_res <- compute_phenological_anomalies(df_hop, demo = FALSE)
+            stopifnot(abs(hop_res$baseline$b_elev - (4.0 / 121.92)) < 1e-6)
+            stopifnot(abs(hop_res$baseline$b_lon - 0.80) < 1e-6)
+            stopifnot(hop_res$baseline$b_year < -0.04)
+            # High-elevation Blue Ridge specimens (rows 23-24) must have near-zero residual (< 3 days), NOT +20 days!
+            stopifnot(all(abs(hop_res$df$delta_doy[23:24]) < 3.0))
+
+            # 3. Zero target-label leakage on trans-border NA soil values + Tier_3_Bronze & Cleanlab noise invariance
+            set.seed(99)
+            n_lk <- 40
+            sp_lk <- rep(c("Packera dubia", "Packera paupercula"), each = 20)
+            lat_lk <- rep(seq(36.0, 47.0, length.out = 20), 2) + rnorm(n_lk, 0, 0.05)
+            lon_lk <- rep(seq(-84.0, -76.0, length.out = 20), 2) + rnorm(n_lk, 0, 0.05)
+            # Identical indistinguishable noise across both species on all observed columns; 60% of rows have NA bedrock depth
+            bed_lk <- ifelse(seq_len(n_lk) %% 5 %in% c(1, 2), ifelse(sp_lk == "Packera dubia", 35.0, 140.0), NA_real_)
+            # Make observed rows overlap completely except 2 rows so species-median imputation WOULD leak 100% of NA rows!
+            bed_lk <- rep(NA_real_, n_lk)
+            bed_lk[c(1, 2, 3)] <- c(30.0, 32.0, 34.0)      # only 3 observed in sp1
+            bed_lk[c(21, 22, 23)] <- c(150.0, 155.0, 160.0) # only 3 observed in sp2
+            df_lk <- data.frame(
+              catalogNumber = paste0("LK_", seq_len(n_lk)),
+              species_standardized = sp_lk,
+              analysis_group = sp_lk,
+              determiner_tier = "Tier_1_Gold",
+              coordinateUncertaintyInMeters = 200.0,
+              latitude = lat_lk,
+              longitude = lon_lk,
+              bio1_temp_mean = rnorm(n_lk, 11.0, 1.0),
+              bio12_precip_annual = rnorm(n_lk, 1050.0, 40.0),
+              fine_bedrock_depth_cm = bed_lk,
+              stringsAsFactors = FALSE
+            )
+            rf_noleak <- compute_spatial_rf_mems(df_lk, c("bio1_temp_mean", "bio12_precip_annual", "fine_bedrock_depth_cm"), n_trees = 100)
+            # Without target-label NA leakage, 34/40 rows share identical training-median bedrock depth and pure-noise climate -> accuracy must NOT hit >0.82!
+            stopifnot(rf_noleak$Spatial_Block_CV_Accuracy < 0.80)
+
+            # 4. Tier_3_Bronze & is_confident_label_noise zero-influence invariance
+            df_clean <- data.frame(
+              catalogNumber = paste0("INV_", 1:24),
+              species_standardized = rep(c("Packera dubia", "Packera anonyma"), each = 12),
+              analysis_group = rep(c("Packera dubia", "Packera anonyma"), each = 12),
+              determiner_tier = rep(c(rep("Tier_1_Gold", 5), rep("Tier_2_Silver", 4), rep("Tier_3_Bronze", 2), "Tier_1_Gold"), 2),
+              is_confident_label_noise = rep(c(rep(FALSE, 11), TRUE), 2),
+              coordinateUncertaintyInMeters = 180.0,
+              latitude = rep(seq(34.0, 36.5, length.out = 12), 2),
+              longitude = rep(seq(-81.0, -78.5, length.out = 12), 2),
+              fine_soil_ph = c(rnorm(12, 4.9, 0.2), rnorm(12, 6.3, 0.2)),
+              ilr_texture_1 = c(rnorm(12, 1.6, 0.2), rnorm(12, -0.3, 0.2)),
+              bio1_temp_mean = c(rnorm(12, 16.0, 0.4), rnorm(12, 13.5, 0.4)),
+              is_verified_anthesis = c(rep(TRUE, 10), FALSE, FALSE, rep(TRUE, 10), FALSE, FALSE),
+              doy = c(rep(108, 10), NA, 260, rep(132, 10), NA, 25),
+              cda_predicted_taxon = rep(c("Packera dubia", "Packera anonyma"), each = 12),
+              cda_posterior_prob = 0.94,
+              stringsAsFactors = FALSE
+            )
+            df_corrupt <- df_clean
+            bad_rows <- which(df_corrupt$determiner_tier == "Tier_3_Bronze" | df_corrupt$is_confident_label_noise)
+            df_corrupt$fine_soil_ph[bad_rows] <- c(9.5, 2.5, 9.8, 2.2, 9.2, 2.8)
+            df_corrupt$ilr_texture_1[bad_rows] <- c(-5.0, 5.0, -4.8, 4.8, -5.2, 5.2)
+            df_corrupt$bio1_temp_mean[bad_rows] <- c(-10.0, 35.0, -8.0, 38.0, -12.0, 40.0)
+
+            rf_c1 <- compute_spatial_rf_mems(df_clean, c("fine_soil_ph", "ilr_texture_1", "bio1_temp_mean"), n_trees = 80)
+            rf_c2 <- compute_spatial_rf_mems(df_corrupt, c("fine_soil_ph", "ilr_texture_1", "bio1_temp_mean"), n_trees = 80)
+            act_rows <- setdiff(seq_len(24), bad_rows)
+            stopifnot(max(abs(rf_c1$oof_prob_matrix[act_rows, ] - rf_c2$oof_prob_matrix[act_rows, ])) < 1e-9)
+
+            cons_c1 <- execute_crossmodal_consensus(df_clean, rf_res = rf_c1, primary_env_vars = c("fine_soil_ph", "ilr_texture_1", "bio1_temp_mean"), primary_edaph_vars = c("fine_soil_ph", "ilr_texture_1"), primary_clim_vars = "bio1_temp_mean")
+            cons_c2 <- execute_crossmodal_consensus(df_corrupt, rf_res = rf_c2, primary_env_vars = c("fine_soil_ph", "ilr_texture_1", "bio1_temp_mean"), primary_edaph_vars = c("fine_soil_ph", "ilr_texture_1"), primary_clim_vars = "bio1_temp_mean")
+            stopifnot(max(abs(cons_c1$edaphic_z_score[act_rows] - cons_c2$edaphic_z_score[act_rows])) < 1e-9)
+            # Sterile / non-anthesis rows (11, 12, 23, 24) with extreme DOY 260 / 25 or NA must NEVER be flagged as Phenological_Anomaly_Outlier!
+            stopifnot(!any(cons_c1$triage_category[c(11, 12, 23, 24)] == "Phenological_Anomaly_Outlier"))
+            stopifnot(all(cons_c1$n_observed_modalities[c(11, 12, 23, 24)] == 2L))
+
+            # 5. Real 30 m DEM McCune & Keon (2002) HLI & D8 Hydrological TWI
+            dem_dir <- file.path(tmp_root, "dem_env", "dem_3dep_30m")
+            dir.create(dem_dir, recursive = TRUE, showWarnings = FALSE)
+            r_dem <- terra::rast(xmin = -79.20, xmax = -78.80, ymin = 35.40, ymax = 35.80, nrows = 160, ncols = 160, crs = "EPSG:4326")
+            xy_d <- terra::xyFromCell(r_dem, seq_len(terra::ncell(r_dem)))
+            # Create a V-shaped valley draining south along lon = -79.00, plus an E-W ridge at lat = 35.70 for SSW vs NNE aspect check
+            v_valley <- 200.0 + 1800.0 * abs(xy_d[, 1] - (-79.00)) + 400.0 * (xy_d[, 2] - 35.40)
+            terra::values(r_dem) <- v_valley
+            terra::writeRaster(r_dem, file.path(dem_dir, "N35W080.tif"), overwrite = TRUE)
+
+            pts_dem <- data.frame(
+              catalogNumber = c("VALLEY_FLOOR", "UPPER_FLANK_WEST_FACING", "UPPER_FLANK_EAST_FACING"),
+              latitude = c(35.55, 35.55, 35.55),
+              longitude = c(-79.00, -78.95, -79.05),
+              stringsAsFactors = FALSE
+            )
+            dem_out <- extract_micro_topography_3dep(pts_dem, env_dir = file.path(tmp_root, "dem_env"), demo = FALSE)
+            stopifnot(all(is.finite(dem_out$topo_hli_30m)))
+            stopifnot(all(is.finite(dem_out$topo_twi_30m)))
+            stopifnot(all(is.finite(dem_out$elevation_m)))
+            # Valley floor (-79.00) receives D8 upslope convergence -> higher TWI & negative TPI vs upper flanks!
+            stopifnot(dem_out$topo_twi_30m[1] > dem_out$topo_twi_30m[2])
+            stopifnot(dem_out$topo_tpi_30m[1] < 0.0)
+            # East side of N-S valley (-78.95) faces West/SW (warmer HLI) vs West side (-79.05) facing East/NE (cooler HLI)!
+            stopifnot(dem_out$topo_hli_30m[2] > dem_out$topo_hli_30m[3])
+
+            # 6. Verify ilr_texture_1/2 edaphic group routing & fast IPP MaxEnt convergence with glmnet.control hygiene
+            imp_ilr <- rf_c1$importance
+            ilr_grp <- imp_ilr$Group[imp_ilr$Predictor == "ilr_texture_1"]
+            stopifnot(identical(as.character(ilr_grp), "[A] Fine-Grain Edaphic & Outcrop Lithology"))
+            top_ilr <- select_top_rf_predictors(imp_ilr, df_clean)
+            stopifnot(top_ilr$top_edaph_1 %in% c("fine_soil_ph", "ilr_texture_1"))
+            t0_mx <- proc.time()[["elapsed"]]
+            mx_sep <- .fit_single_maxent_model(
+              p_vec = c(rep(1L, 15), rep(0L, 15)),
+              X_df = data.frame(
+                bio1_temp_mean = c(rnorm(15, 16.5, 0.3), rnorm(15, 11.0, 0.3)),
+                fine_soil_ph = c(rnorm(15, 4.8, 0.15), rnorm(15, 6.6, 0.15))
+              ),
+              w_vec = c(1.0, rep(0.85, 14), rep(1.0, 15))
+            )
+            dt_mx <- proc.time()[["elapsed"]] - t0_mx
+            stopifnot(dt_mx < 10.0)
+            stopifnot(all(is.finite(mx_sep$predict_cloglog(data.frame(bio1_temp_mean = c(16.5, 11.0), fine_soil_ph = c(4.8, 6.6))))))
+            if (requireNamespace("glmnet", quietly = TRUE)) stopifnot(glmnet::glmnet.control()$fdev > 0)
+
+            cat("STEP05_ZERO_TRUST_SUITE_OK\n")
+            """
+            r_file = Path(tmp_d) / "test_step05_zero_trust.R"
+            r_file.write_text(r_code, encoding="utf-8")
+            res = subprocess.run(["Rscript", str(r_file)], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0, f"Step 05 zero-trust suite failed:\n{res.stderr}\n{res.stdout}")
+            self.assertIn("STEP05_ZERO_TRUST_SUITE_OK", res.stdout)
 
 
 if __name__ == "__main__":

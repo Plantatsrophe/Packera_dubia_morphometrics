@@ -1103,12 +1103,18 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
 
     env_dir = Path(getattr(args, "env_dir", None) or "data/environmental")
     _maybe_ensure_environmental_layers(args, env_dir=env_dir, vouchers_csv=vouchers_csv)
+    reports_dir_s05 = (
+        run_dir / "outputs" / "reports"
+        if run_dir is not None
+        else Path(cfg.get("paths", {}).get("reports_dir", str(figures_dir.parent / "reports")))
+    )
+    reports_dir_s05.mkdir(parents=True, exist_ok=True)
     pheno_states = Path(getattr(args, "pheno_states", None) or (tables_dir / "voucher_phenological_states.csv"))
-    ssurgo_table = Path(getattr(args, "ssurgo_table", None) or (tables_dir / "ssurgo_edaphic_metrics.csv"))
-    contingency_table = Path(getattr(args, "contingency_table", None) or (tables_dir / "lithology_taxon_contingency_audit.csv"))
-    pheno_anomalies = Path(getattr(args, "pheno_anomalies", None) or (tables_dir / "phenological_allochrony_anomalies.csv"))
-    pheno_summary = Path(getattr(args, "pheno_summary", None) or (tables_dir / "phenological_model_summary.csv"))
-    pheno_plot = Path(getattr(args, "pheno_plot", None) or (figures_dir / "Phenological_Allochrony_SpaceTime.pdf"))
+    ssurgo_table = Path(getattr(args, "ssurgo_table", None) or (tables_dir / "ssurgo_edaphic_validation.csv"))
+    contingency_table = Path(getattr(args, "contingency_table", None) or (reports_dir_s05 / "micro_edaphic_outcrop_contingency.csv"))
+    pheno_anomalies = Path(getattr(args, "pheno_anomalies", None) or (tables_dir / "phenological_anomalies.csv"))
+    pheno_summary = Path(getattr(args, "pheno_summary", None) or (reports_dir_s05 / "phenological_anomaly_summary.csv"))
+    pheno_plot = Path(getattr(args, "pheno_plot", None) or (figures_dir / "phenological_latitudinal_anomaly.pdf"))
     conflict_flags = Path(
         getattr(args, "conflict_flags", None)
         or (tables_dir / "multimodal_conflict_flags.csv")
@@ -1119,7 +1125,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     )
     spatial_summary = Path(
         getattr(args, "spatial_summary", None)
-        or ((run_dir / "outputs" / "reports" / "multimodal_spatial_rf_summary.csv") if run_dir is not None else "outputs/reports/multimodal_spatial_rf_summary.csv")
+        or (reports_dir_s05 / "multimodal_spatial_rf_summary.csv")
     )
 
     cmd_spatial = [

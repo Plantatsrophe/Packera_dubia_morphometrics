@@ -1274,8 +1274,8 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertAlmostEqual(float(aligned_cord[0, 1]), float(aligned_cord[60, 1]), places=10)
 
         # SQLite schema version & Step 03 column parity
-        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261112)
-        self.assertIn("20261112L", dbu)
+        self.assertGreaterEqual(PACKERA_SCHEMA_USER_VERSION, 20261113)
+        self.assertIn(f"{PACKERA_SCHEMA_USER_VERSION}L", dbu)
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "step03_schema_check.sqlite"
             conn = get_db_connection(db_path)

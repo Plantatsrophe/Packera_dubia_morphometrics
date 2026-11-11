@@ -174,8 +174,9 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
   valid_trimmed$hopkins_expected <- hopkins_expected
 
   # Multivariate Hopkins (1918) + herbarium secular spring-advancement (Davis et al. 2015) baseline:
-  # Controls jointly for latitude, longitude (+0.8 d per deg E = -4 d per 5 deg W), elevation (+0.0125 d/m),
-  # and collection year without double-subtracting collinear MAT (bio1_temp_mean) when spatial covariates exist.
+  # Controls jointly for latitude (+4.0 d / deg N), longitude (+0.8 d / deg E = -4 d per 5 deg W),
+  # elevation (+4.0 d per 400 ft = +4.0 / 121.92 m = +0.0328084 d/m = +3.28 d / 100 m; Hopkins 1918),
+  # and collection year without double-subtracting collinear MAT (bio1_temp_mean) when elevation exists.
   lon_col <- if ("decimalLongitude" %in% names(valid_trimmed)) {
     suppressWarnings(as.numeric(valid_trimmed$decimalLongitude))
   } else if ("longitude" %in% names(valid_trimmed)) {
@@ -183,10 +184,9 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
   } else {
     rep(NA_real_, nrow(valid_trimmed))
   }
-  elev_col <- if ("topo_elev_m" %in% names(valid_trimmed)) {
-    suppressWarnings(as.numeric(valid_trimmed$topo_elev_m))
-  } else if ("elevation" %in% names(valid_trimmed)) {
-    suppressWarnings(as.numeric(valid_trimmed$elevation))
+  elev_col_nm <- intersect(c("elevation_m", "elevation", "minimumElevationInMeters"), names(valid_trimmed))
+  elev_col <- if (length(elev_col_nm) > 0L) {
+    suppressWarnings(as.numeric(valid_trimmed[[elev_col_nm[1L]]]))
   } else {
     rep(NA_real_, nrow(valid_trimmed))
   }
@@ -199,10 +199,10 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
   }
 
   b_elev <- 0.0; ref_elev <- 0.0; b_lon <- 0.0; ref_lon <- 0.0; b_year <- 0.0; ref_year <- 1990.0; b_mat <- 0.0; ref_mat <- 0.0
-  has_elev <- sum(is.finite(elev_col)) >= 10L && stats::sd(elev_col, na.rm = TRUE) > 5.0
+  has_elev <- sum(is.finite(elev_col)) >= 5L && stats::sd(elev_col, na.rm = TRUE) > 5.0
   if (has_elev) {
     ref_elev <- stats::median(elev_col, na.rm = TRUE)
-    b_elev <- 0.0125 # Hopkins' Bioclimatic Law: +1.25 days per +100 m elevation (+0.0125 d/m)
+    b_elev <- 4.0 / 121.92 # Hopkins' Bioclimatic Law (1918): +4.0 days per +400 ft (+121.92 m) = +0.0328084 d/m
   }
   if (sum(is.finite(lon_col)) >= 10L && stats::sd(lon_col, na.rm = TRUE) > 0.5) {
     ref_lon <- stats::median(lon_col, na.rm = TRUE)
@@ -385,10 +385,31 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   message(sprintf("[INFO] Filtered phenology vouchers: %d verified anthesis, %d fruiting-only (excluded), %d sterile (excluded).",
                   n_verified, n_fruit, n_sterile))
 
-  anthesis_cohort <- df[df$is_verified_anthesis, , drop = FALSE]
+  # Active reference filter for baseline & ANOVA (excludes unpromoted Tier_3_Bronze and Cleanlab label noise)
+  is_active_ref <- rep(TRUE, nrow(df))
+  is_t_ph <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, nrow(df))
+  is_t_ph[is.na(is_t_ph)] <- FALSE
+  if ("determiner_tier" %in% names(df)) {
+    dt_ph <- as.character(df$determiner_tier); dt_ph[is.na(dt_ph)] <- "Tier_3_Bronze"
+    pr_ph <- rep(FALSE, nrow(df))
+    if ("is_promoted_bronze" %in% names(df)) { p1 <- as.logical(df$is_promoted_bronze); p1[is.na(p1)] <- FALSE; pr_ph <- pr_ph | p1 }
+    if ("is_promoted_anchor" %in% names(df)) { p2 <- as.logical(df$is_promoted_anchor); p2[is.na(p2)] <- FALSE; pr_ph <- pr_ph | p2 }
+    cand_act <- grepl("Tier_1|Gold|Tier_2|Silver", dt_ph, ignore.case = TRUE) | pr_ph | is_t_ph
+    if (sum(cand_act & df$is_verified_anthesis) >= 5L || any(cand_act)) {
+      is_active_ref <- cand_act
+    }
+  }
+  if ("is_confident_label_noise" %in% names(df)) {
+    cl_ph <- as.logical(df$is_confident_label_noise); cl_ph[is.na(cl_ph)] <- FALSE
+    is_active_ref <- is_active_ref & (!cl_ph | is_t_ph)
+  }
+
+  anthesis_cohort <- df[df$is_verified_anthesis & is_active_ref, , drop = FALSE]
+  if (nrow(anthesis_cohort) < 5L) anthesis_cohort <- df[df$is_verified_anthesis, , drop = FALSE]
   if (nrow(anthesis_cohort) < 5L) {
     message("[WARN] Verified anthesis cohort has < 5 vouchers; using calendar-gated cohort as baseline fallback.")
-    anthesis_cohort <- df[pass_calendar, , drop = FALSE]
+    anthesis_cohort <- df[pass_calendar & is_active_ref, , drop = FALSE]
+    if (nrow(anthesis_cohort) < 5L) anthesis_cohort <- df[pass_calendar, , drop = FALSE]
     if (nrow(anthesis_cohort) == 0L) anthesis_cohort <- df[valid_doy & valid_lat, , drop = FALSE]
   }
   baseline <- model_latitudinal_spring_baseline(
@@ -400,30 +421,42 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   df$expected_doy <- NA_real_
   df$hopkins_expected <- NA_real_
   has_lat <- valid_lat
-  elev_v <- if ("topo_elev_m" %in% names(df)) {
-    suppressWarnings(as.numeric(df$topo_elev_m))
-  } else if ("elevation" %in% names(df)) {
-    suppressWarnings(as.numeric(df$elevation))
+  lon_v <- if ("decimalLongitude" %in% names(df)) {
+    suppressWarnings(as.numeric(df$decimalLongitude))
+  } else if ("longitude" %in% names(df)) {
+    suppressWarnings(as.numeric(df$longitude))
   } else {
     rep(NA_real_, nrow(df))
   }
+  elev_col_df <- intersect(c("elevation_m", "elevation", "minimumElevationInMeters"), names(df))
+  elev_v <- if (length(elev_col_df) > 0L) {
+    suppressWarnings(as.numeric(df[[elev_col_df[1L]]]))
+  } else {
+    rep(NA_real_, nrow(df))
+  }
+  yr_v <- if ("year" %in% names(df)) suppressWarnings(as.numeric(df$year)) else rep(NA_real_, nrow(df))
+  yr_v[!is.finite(yr_v) | yr_v < 1750 | yr_v > 2100] <- NA_real_
   mat_v <- if ("bio1_temp_mean" %in% names(df)) {
     suppressWarnings(as.numeric(df$bio1_temp_mean))
   } else {
     rep(NA_real_, nrow(df))
   }
+  lon_adj <- ifelse(is.finite(lon_v) & !is.null(baseline$b_lon) & baseline$b_lon != 0,
+                    baseline$b_lon * (lon_v - baseline$ref_lon), 0.0)
   elev_adj <- ifelse(is.finite(elev_v) & !is.null(baseline$b_elev) & baseline$b_elev != 0,
                      baseline$b_elev * (elev_v - baseline$ref_elev), 0.0)
+  yr_adj <- ifelse(is.finite(yr_v) & !is.null(baseline$b_year) & baseline$b_year != 0,
+                   baseline$b_year * (yr_v - baseline$ref_year), 0.0)
   mat_adj <- ifelse(is.finite(mat_v) & !is.null(baseline$b_mat) & baseline$b_mat != 0,
                     baseline$b_mat * (mat_v - baseline$ref_mat), 0.0)
 
   if (any(has_lat) && is.finite(baseline$intercept) && is.finite(baseline$slope)) {
     exp_unwrapped <- baseline$intercept + baseline$slope * df$decimalLatitude[has_lat] +
-                     elev_adj[has_lat] + mat_adj[has_lat]
+                     lon_adj[has_lat] + elev_adj[has_lat] + yr_adj[has_lat] + mat_adj[has_lat]
     df$expected_doy[has_lat] <- wrap_doy_365(exp_unwrapped)
     if (is.finite(baseline$min_lat) && is.finite(baseline$pred_min_lat)) {
       hop_unwrapped <- baseline$pred_min_lat + 4.0 * (df$decimalLatitude[has_lat] - baseline$min_lat) +
-                       elev_adj[has_lat]
+                       lon_adj[has_lat] + elev_adj[has_lat]
       df$hopkins_expected[has_lat] <- wrap_doy_365(hop_unwrapped)
     }
   }
@@ -456,7 +489,7 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   df$pheno_timing_category[has_both & abs(df$delta_doy) <= 7.0] <- "Synchronous_with_Cline"
 
   if (!is.null(output_csv)) {
-    keep_cols <- c("catalogNumber", "institutionCode", "scientificName", "species_raw",
+    keep_cols <- c("catalogNumber", "plant_individual_id", "institutionCode", "scientificName", "species_raw",
                    "species_standardized", "decimalLatitude", "decimalLongitude", "latitude", "longitude",
                    "eventDate", "year", "month", "day", "doy", "expected_doy", "delta_doy",
                    "pheno_timing_category", "is_verified_anthesis", "anthesis_filter_status",
@@ -467,10 +500,14 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     }
   }
 
-  # Statistical divergence testing across target taxa strictly on verified anthesis cohort
+  # Statistical divergence testing across target taxa strictly on active verified-anthesis reference cohort
   active_tx <- get_active_packera_taxa(df$species_standardized)
-  target_flowering <- df[df$species_standardized %in% active_tx &
-                         !is.na(df$delta_doy) & df$is_verified_anthesis, , drop = FALSE]
+  tf_mask <- df$species_standardized %in% active_tx & !is.na(df$delta_doy) & df$is_verified_anthesis
+  target_flowering <- if (sum(tf_mask & is_active_ref) >= 5L) {
+    df[tf_mask & is_active_ref, , drop = FALSE]
+  } else {
+    df[tf_mask, , drop = FALSE]
+  }
 
   if (nrow(target_flowering) >= 5L && length(unique(target_flowering$species_standardized)) > 1L) {
     aov_fit <- stats::aov(delta_doy ~ species_standardized, data = target_flowering)
@@ -551,8 +588,6 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   return(list(df = df, baseline = baseline, anova = aov_fit, tukey = tukey_res, summary = summary_report))
 }
 
-evaluate_circular_phenology <- compute_phenological_anomalies
-
 export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   message(sprintf("Generating 2-panel phenological latitudinal anomaly figure to %s...", out_pdf))
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
@@ -561,7 +596,7 @@ export_phenological_latitudinal_figures <- function(df, baseline, out_pdf) {
   } else {
     sp_v <- as.character(df$species_standardized)
     if (length(unique(stats::na.omit(sp_v))) < 2L ||
-        ("analysis_group" %in% names(df) && any(grepl("Morphotype_K|^LatTertile_|Ecotype|Subcluster", df$analysis_group, ignore.case = TRUE)))) {
+        ("analysis_group" %in% names(df) && any(grepl("Morphotype_K|Ecotype|Subcluster", df$analysis_group, ignore.case = TRUE)))) {
       if ("analysis_group" %in% names(df) && length(unique(stats::na.omit(df$analysis_group))) >= 2L) as.character(df$analysis_group)
       else if ("grouping_col" %in% names(df) && length(unique(stats::na.omit(df$grouping_col))) >= 2L) as.character(df$grouping_col)
       else if ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster))) paste0("Morphotype_K", ifelse(is.na(df$gmm_cluster), 1L, as.integer(df$gmm_cluster)))
@@ -1108,28 +1143,27 @@ resolve_analysis_group <- function(
       }
     }
 
-    # Exclude coordinate columns AND binary/synthetic indicator columns from continuous environmental PCA
+    # Exclude coordinate columns, elevation proxies, phenology, and binary indicators from continuous environmental PCA
     exclude_cols <- c(
       "catalogNumber", "plant_individual_id", "latitude", "longitude",
       "decimalLatitude", "decimalLongitude", "coordinateUncertainty",
-      "coordinateUncertaintyInMeters", "buffer_radius_m",
+      "coordinateUncertaintyInMeters", "buffer_radius_m", "elevation_m", "elevation",
       "high_coord_uncertainty_flag", "is_training_eligible_coord",
       "is_clim_eligible_coord", "is_edaphic_eligible_coord", "edaphic_coord_weight",
       "edaphic_best_fit_taxon", "edaphic_z_score", "climatic_z_score", "soil_silt_pct",
       "is_rock_outcrop", "is_azonal_lithology", "azonal_lithology_presence_buffer",
-      "azonal_contact_dist_m", "resdept_r", "bdricm"
+      "ph_q10_buffer", "ph_q90_buffer", "min_bedrock_depth_buffer_cm", "max_cfvo_buffer_pct",
+      "doy", "delta_doy", "expected_doy", "hopkins_expected", "hopkins_adjusted_doy", "sin_doy", "cos_doy"
     )
     cand_cols <- if (!is.null(primary_env_vars) && length(primary_env_vars) > 0L) {
       setdiff(intersect(as.character(primary_env_vars), names(df)), exclude_cols)
+    } else if (exists("discover_candidate_eco_predictors", mode = "function")) {
+      setdiff(discover_candidate_eco_predictors(df, include_pheno = FALSE, min_finite = 2L), exclude_cols)
     } else {
       character(0)
     }
     if (length(cand_cols) == 0L) {
-      env_pattern <- paste0(
-        "^(fine_|ssurgo_|polaris_|solus_|topo_|soil_|bio[0-9]*_|cfvo$|awc$|",
-        "alr_|clr_|azonal_proximity_index$|ph_q10_buffer$|ph_q90_buffer$|",
-        "min_bedrock_depth_buffer_cm$|max_cfvo_buffer_pct$|elevation$|elev_|clim_|edaph_|env_)"
-      )
+      env_pattern <- "^(fine_soil_ph$|fine_soil_sand$|fine_soil_clay$|ilr_texture_|fine_soil_cec$|fine_cfvo_pct$|fine_bedrock_depth_cm$|topo_(slope_deg|tpi_30m|hli_30m|twi_30m)$|soil_(ph|sand|clay|cec|cfvo)$|bio(1|2|4|5|6|10|11|12|13|14|15|16|17)_|clim_|edaph_|env_)"
       cand_cols <- setdiff(grep(env_pattern, names(df), value = TRUE, ignore.case = TRUE), exclude_cols)
     }
 
@@ -1160,20 +1194,17 @@ resolve_analysis_group <- function(
     if ("awc" %in% names(num_env) && "ssurgo_aws_0_50cm" %in% names(num_env)) num_env[["ssurgo_aws_0_50cm"]] <- NULL
 
     if (length(num_env) == 0L || n_rows < 2L) {
-      if (isTRUE(allow_unimodal_null)) {
-        df$analysis_group <- rep(canon_sp, n_rows)
-        message(sprintf("[Intraspecific Mode] Unimodal environmental variance; retaining single taxon '%s' (K=1).", canon_sp))
-      } else {
-        idx_half <- seq_len(n_rows) <= max(1L, floor(n_rows / 2))
-        df$analysis_group <- ifelse(idx_half, "Ecotype_Cluster_1", "Ecotype_Cluster_2")
-      }
+      df$analysis_group <- rep(canon_sp, n_rows)
+      message(sprintf("[Intraspecific Mode] Unimodal environmental variance; retaining single taxon '%s' (K=1).", canon_sp))
       return(df)
     }
 
     E_mat <- do.call(cbind, num_env)
-    # Prune collinear variables before PCA-env so redundant blocks cannot dominate PC1 (Dormann et al. 2013)
+    # Deduplicate only near-identical duplicate columns (|r| > 0.95) before PCA-env so
+    # genuinely co-varying multi-domain ecotype axes (climatic + edaphic + topographic)
+    # reinforce PC1 rather than being dropped in favor of orthogonal white-noise columns
     if (ncol(E_mat) >= 3L && exists("screen_collinear_predictors", mode = "function")) {
-      pruned_e <- tryCatch(screen_collinear_predictors(E_mat, cor.threshold = 0.70, vif.threshold = 5.0)$kept_vars, error = function(e) colnames(E_mat))
+      pruned_e <- tryCatch(screen_collinear_predictors(E_mat, cor.threshold = 0.95, vif.threshold = 20.0)$kept_vars, error = function(e) colnames(E_mat))
       if (length(intersect(colnames(E_mat), pruned_e)) >= 2L) {
         E_mat <- E_mat[, intersect(colnames(E_mat), pruned_e), drop = FALSE]
       }
@@ -1196,12 +1227,7 @@ resolve_analysis_group <- function(
 
     n_distinct <- nrow(unique(round(pca_scores, 8)))
     if (n_distinct < 2L) {
-      if (isTRUE(allow_unimodal_null)) {
-        df$analysis_group <- rep(canon_sp, n_rows)
-      } else {
-        idx_half <- seq_len(n_rows) <= max(1L, floor(n_rows / 2))
-        df$analysis_group <- ifelse(idx_half, "Ecotype_Cluster_1", "Ecotype_Cluster_2")
-      }
+      df$analysis_group <- rep(canon_sp, n_rows)
       return(df)
     }
 
@@ -1348,11 +1374,14 @@ resolve_active_anchor_groups <- function(df, intraspecific_mode = FALSE) {
     u_m <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
     elig <- elig & (is.na(u_m) | u_m <= 10000.0)
   }
-  det_t <- if ("determiner_tier" %in% names(df)) {
+  has_det_col <- "determiner_tier" %in% names(df)
+  det_t <- if (has_det_col) {
     ifelse(is.na(df$determiner_tier) | !nzchar(trimws(as.character(df$determiner_tier))), "Tier_3_Bronze", as.character(df$determiner_tier))
   } else {
     rep("Tier_1_Gold", n_r)
   }
+  is_t_anc <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, n_r)
+  is_t_anc[is.na(is_t_anc)] <- FALSE
   is_prom <- rep(FALSE, n_r)
   if ("is_promoted_anchor" %in% names(df)) {
     pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_prom <- is_prom | pa
@@ -1360,6 +1389,10 @@ resolve_active_anchor_groups <- function(df, intraspecific_mode = FALSE) {
   if ("is_promoted_bronze" %in% names(df)) {
     pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_prom <- is_prom | pb
   }
+  cl_noise <- if ("is_confident_label_noise" %in% names(df)) as.logical(df$is_confident_label_noise) else rep(FALSE, n_r)
+  cl_noise[is.na(cl_noise)] <- FALSE
+  not_noise <- (!cl_noise) | is_t_anc
+
   miss_gmm <- if (is_intra && "is_missing_gmm_cluster" %in% names(df)) {
     as.logical(df$is_missing_gmm_cluster)
   } else if (is_intra && "analysis_group" %in% names(df) && all(grepl("^Morphotype_K", stats::na.omit(df$analysis_group))) && "gmm_cluster" %in% names(df)) {
@@ -1368,19 +1401,15 @@ resolve_active_anchor_groups <- function(df, intraspecific_mode = FALSE) {
     rep(FALSE, n_r)
   }
   miss_gmm[is.na(miss_gmm)] <- FALSE
-  base_anc <- ((det_t %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_prom) & elig & !is.na(g_raw) & nzchar(g_raw) & (g_raw != "Unknown")
+
+  tier_ok <- grepl("Tier_1|Gold|Tier_2|Silver", det_t, ignore.case = TRUE) | is_prom | is_t_anc
+  valid_g <- !is.na(g_raw) & nzchar(g_raw) & (g_raw != "Unknown") & not_noise
+  base_anc <- tier_ok & elig & valid_g
   is_anc <- base_anc & !miss_gmm
-  if (sum(is_anc) < 6L || length(unique(g_raw[is_anc])) < 2L) {
-    is_anc <- (elig & !is.na(g_raw) & nzchar(g_raw) & (g_raw != "Unknown")) & !miss_gmm
-  }
-  if (sum(is_anc) < 6L || length(unique(g_raw[is_anc])) < 2L) {
-    is_anc <- base_anc
-  }
-  if (sum(is_anc) < 6L || length(unique(g_raw[is_anc])) < 2L) {
-    is_anc <- elig & !is.na(g_raw) & nzchar(g_raw) & (g_raw != "Unknown")
-  }
-  if (sum(is_anc) < 4L || length(unique(g_raw[is_anc])) < 2L) {
-    is_anc <- !is.na(g_raw) & nzchar(g_raw) & (g_raw != "Unknown")
+  if (sum(is_anc) < 4L) is_anc <- base_anc
+  if (!any(tier_ok) && sum(is_anc) == 0L) {
+    is_anc <- elig & valid_g & !miss_gmm
+    if (sum(is_anc) == 0L) is_anc <- valid_g
   }
   ifelse(is_anc, g_raw, NA_character_)
 }
@@ -1404,7 +1433,7 @@ select_primary_predictors_from_rf <- function(
     cand_vars <- as.character(rf_res$importance$Predictor)
   }
   if (length(cand_vars) == 0L && !is.null(df_env) && is.data.frame(df_env)) {
-    cand_vars <- discover_candidate_eco_predictors(df_env, include_pheno = TRUE, min_finite = 3L)
+    cand_vars <- discover_candidate_eco_predictors(df_env, include_pheno = FALSE, min_finite = 3L)
   }
   cand_vars <- unique(cand_vars[!is.na(cand_vars) & nzchar(cand_vars) & !grepl("^MEM[0-9]*$", cand_vars)])
   if (!is.null(df_env) && is.data.frame(df_env)) {
@@ -1562,8 +1591,8 @@ compute_specimen_edaphic_z <- function(
   grp_vec <- if (is_intra && "analysis_group" %in% names(df)) as.character(df$analysis_group) else as.character(df$species_standardized)
   active_taxa <- sort(unique(grp_vec[!is.na(grp_vec) & nzchar(grp_vec) & grp_vec != "Unknown"]))
 
-  clim_pat <- "^(bio[0-9]*_|delta_doy$|doy$|hopkins_|sin_doy$|cos_doy$)"
-  cand_all <- discover_candidate_eco_predictors(df, include_pheno = TRUE, min_finite = 3L)
+  clim_pat <- "^bio[0-9]*_"
+  cand_all <- discover_candidate_eco_predictors(df, include_pheno = FALSE, min_finite = 3L)
 
   if (is.null(primary_env_vars) || length(primary_env_vars) == 0L) {
     primary_env_vars <- unique(c(as.character(primary_edaph_vars), as.character(primary_clim_vars)))
@@ -1598,8 +1627,8 @@ compute_specimen_edaphic_z <- function(
     (cl %in% names(df)) && sum(is.finite(suppressWarnings(as.numeric(df[[cl]])))) >= min(3L, max(2L, n))
   }, logical(1))]
 
-  auth_w <- if ("authority_weight" %in% names(df)) suppressWarnings(as.numeric(df$authority_weight)) else resolve_step06_authority_weights(df)
-  auth_w[!is.finite(auth_w) | auth_w <= 0] <- 1.0
+  auth_w <- if ("authority_weight" %in% names(df)) suppressWarnings(as.numeric(df$authority_weight)) else resolve_ecological_authority_weights(df)
+  auth_w[!is.finite(auth_w) | auth_w < 0] <- 0.0
   spat_w <- if ("spatial_balance_weight" %in% names(df)) {
     suppressWarnings(as.numeric(df$spatial_balance_weight))
   } else if (exists("compute_spatial_balance_weights", mode = "function")) {
@@ -1608,7 +1637,6 @@ compute_specimen_edaphic_z <- function(
     rep(1.0, n)
   }
   spat_w[!is.finite(spat_w) | spat_w <= 0] <- 1.0
-  row_wts <- auth_w * spat_w
 
   elig_coord <- if ("is_training_eligible_coord" %in% names(df)) as.logical(df$is_training_eligible_coord) else rep(TRUE, n)
   elig_coord[is.na(elig_coord)] <- TRUE
@@ -1617,6 +1645,8 @@ compute_specimen_edaphic_z <- function(
   } else {
     rep("Tier_1_Gold", n)
   }
+  is_t_z <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, n)
+  is_t_z[is.na(is_t_z)] <- FALSE
   is_prom <- rep(FALSE, n)
   if ("is_promoted_anchor" %in% names(df)) {
     pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_prom <- is_prom | pa
@@ -1624,9 +1654,15 @@ compute_specimen_edaphic_z <- function(
   if ("is_promoted_bronze" %in% names(df)) {
     pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_prom <- is_prom | pb
   }
-  is_anchor <- ((det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_prom) & elig_coord & (grp_vec %in% active_taxa)
-  if (sum(is_anchor) < min(6L, n)) is_anchor <- elig_coord & (grp_vec %in% active_taxa)
-  if (sum(is_anchor) < min(4L, n)) is_anchor <- grp_vec %in% active_taxa
+  cl_z <- if ("is_confident_label_noise" %in% names(df)) as.logical(df$is_confident_label_noise) else rep(FALSE, n)
+  cl_z[is.na(cl_z)] <- FALSE
+  tier_ok_z <- (grepl("Tier_1|Gold|Tier_2|Silver", det_tier, ignore.case = TRUE) | is_prom | is_t_z) & (!cl_z | is_t_z)
+  row_wts <- ifelse(tier_ok_z, pmax(auth_w, 0.25), 0.0) * spat_w
+  is_anchor <- tier_ok_z & elig_coord & (grp_vec %in% active_taxa)
+  if (!any(tier_ok_z)) {
+    is_anchor <- (!cl_z) & elig_coord & (grp_vec %in% active_taxa)
+    row_wts <- spat_w
+  }
 
   w_mean_z <- function(x, w) {
     ok <- is.finite(x) & is.finite(w) & w > 0
@@ -1657,9 +1693,10 @@ compute_specimen_edaphic_z <- function(
   if (length(active_taxa) > 0L && length(all_z_vars) > 0L) {
     for (tx in active_taxa) {
       idx_tx <- which(is_anchor & grp_vec == tx)
-      if (length(idx_tx) < 3L) idx_tx <- which(elig_coord & grp_vec == tx)
-      if (length(idx_tx) < 2L) idx_tx <- which(grp_vec == tx)
-      w_tx <- row_wts[idx_tx]
+      if (length(idx_tx) == 0L) idx_tx <- which(tier_ok_z & grp_vec == tx)
+      if (length(idx_tx) == 0L) idx_tx <- which((!cl_z) & elig_coord & grp_vec == tx)
+      if (length(idx_tx) == 0L) idx_tx <- which(grp_vec == tx)
+      w_tx <- pmax(row_wts[idx_tx], 1e-4)
       mu_v <- stats::setNames(numeric(length(all_z_vars)), all_z_vars)
       sd_v <- stats::setNames(numeric(length(all_z_vars)), all_z_vars)
       for (cl in all_z_vars) {
@@ -1785,16 +1822,24 @@ compute_type_locality_ecological_control <- function(
   active_taxa <- sort(unique(grp_vec[!is.na(grp_vec) & nzchar(grp_vec) & grp_vec != "Unknown"]))
   if (length(active_taxa) == 0L) active_taxa <- "Unknown"
 
-  cand_all <- discover_candidate_eco_predictors(df, include_pheno = TRUE, min_finite = 2L)
+  if ((is.null(primary_env_vars) || length(primary_env_vars) == 0L) && "primary_env_predictors" %in% names(df)) {
+    raw_pe <- stats::na.omit(as.character(df$primary_env_predictors))
+    if (length(raw_pe) > 0L && nzchar(raw_pe[1L])) primary_env_vars <- trimws(unlist(strsplit(raw_pe[1L], ";", fixed = TRUE)))
+  }
+  if ((is.null(primary_edaph_vars) || length(primary_edaph_vars) == 0L) && "primary_edaph_predictors" %in% names(df)) {
+    raw_ped <- stats::na.omit(as.character(df$primary_edaph_predictors))
+    if (length(raw_ped) > 0L && nzchar(raw_ped[1L])) primary_edaph_vars <- trimws(unlist(strsplit(raw_ped[1L], ";", fixed = TRUE)))
+  }
+  cand_all <- discover_candidate_eco_predictors(df, include_pheno = FALSE, min_finite = 2L)
   env_use <- if (!is.null(primary_env_vars) && length(primary_env_vars) > 0L) {
     intersect(as.character(primary_env_vars), names(df))
   } else {
     cand_all
   }
   if (length(env_use) == 0L) {
-    env_use <- intersect(c("fine_soil_ph", "fine_soil_sand", "fine_soil_cec", "soil_ph", "soil_sand", "soil_cec", "bio1_temp_mean", "bio12_precip_annual"), names(df))
+    env_use <- intersect(c("fine_soil_ph", "ilr_texture_1", "ilr_texture_2", "fine_soil_sand", "fine_soil_cec", "soil_ph", "soil_sand", "soil_cec", "bio1_temp_mean", "bio12_precip_annual"), names(df))
   }
-  clim_pat <- "^(bio[0-9]*_|delta_doy$|doy$|hopkins_|sin_doy$|cos_doy$)"
+  clim_pat <- "^bio[0-9]*_"
   edaph_use <- if (!is.null(primary_edaph_vars) && length(primary_edaph_vars) > 0L) {
     intersect(as.character(primary_edaph_vars), names(df))
   } else {
@@ -1809,16 +1854,20 @@ compute_type_locality_ecological_control <- function(
   lat_v <- if ("decimalLatitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLatitude)) else if ("latitude" %in% names(df)) suppressWarnings(as.numeric(df$latitude)) else rep(NA_real_, n)
   lon_v <- if ("decimalLongitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLongitude)) else if ("longitude" %in% names(df)) suppressWarnings(as.numeric(df$longitude)) else rep(NA_real_, n)
   has_xy <- is.finite(lat_v) & is.finite(lon_v)
+  has_unc_col <- ("coordinateUncertaintyInMeters" %in% names(df)) || ("coordinateUncertainty" %in% names(df))
   unc_v <- if ("coordinateUncertaintyInMeters" %in% names(df)) {
     suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
   } else if ("coordinateUncertainty" %in% names(df)) {
     suppressWarnings(as.numeric(df$coordinateUncertainty))
   } else {
-    rep(0.0, n)
+    rep(NA_real_, n)
   }
-  unc_v[!is.finite(unc_v) | unc_v < 0.0] <- 0.0
-  is_precise_edaph <- unc_v <= 2000.0
-  is_precise_clim <- unc_v <= 10000.0
+  yr_tc <- if ("year" %in% names(df)) suppressWarnings(as.numeric(df$year)) else rep(NA_real_, n)
+  has_yr_tc <- ("year" %in% names(df)) && any(is.finite(yr_tc))
+  # Never coerce missing coordinateUncertaintyInMeters on pre-GPS historical types to 0 m (Daru et al. 2018)
+  modern_gps_tc <- if (has_yr_tc) (is.finite(yr_tc) & yr_tc >= 2000) else !has_unc_col
+  is_precise_edaph <- (is.finite(unc_v) & unc_v > 0.0 & unc_v <= 2000.0) | (!is.finite(unc_v) & modern_gps_tc)
+  is_precise_clim <- !is.finite(unc_v) | (unc_v >= 0.0 & unc_v <= 10000.0)
   reg_v <- if ("regional_group" %in% names(df)) trimws(as.character(df$regional_group)) else rep("", n)
   reg_v[is.na(reg_v) | tolower(reg_v) %in% c("na", "unknown", "unknown_ecoregion")] <- ""
   det_t <- if ("determiner_tier" %in% names(df)) {

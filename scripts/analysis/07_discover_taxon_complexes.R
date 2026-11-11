@@ -79,7 +79,7 @@ load_and_merge_inputs <- function(opts) {
       idx_m <- match(m_key, mm_key); s_cats <- names(which(table(mm$catalogNumber) == 1L))
       idx_fb <- ifelse(m_df$catalogNumber %in% s_cats, match(m_df$catalogNumber, mm$catalogNumber), NA_integer_)
       idx_m <- ifelse(!is.na(idx_m), idx_m, idx_fb)
-      extra_cols <- grep("^(primary_(env|clim|edaph)_predictors|edaphic_z_score|climatic_z_score|type_edaphic_z_score|nearest_type_niche_taxon|matches_type_lithology|edaphic_schoener_d|schoener_d|edaphic_niche_overlap_d|bio[0-9]+_|fine_|ssurgo_|polaris_|solus_|topo_|cfvo|awc|bdricm|resdept|alr_|clr_|azonal_|soil_)", names(mm), value = TRUE)
+      extra_cols <- grep("^(primary_(env|clim|edaph)_predictors|edaphic_z_score|climatic_z_score|type_edaphic_z_score|nearest_type_niche_taxon|matches_type_lithology|edaphic_schoener_d|schoener_d|edaphic_niche_overlap_d|bio[0-9]+_|fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_|soil_)", names(mm), value = TRUE)
       for (ec in extra_cols) {
         if (!(ec %in% names(m_df))) m_df[[ec]] <- mm[[ec]][idx_m]
         else { na_e <- is.na(m_df[[ec]]) & !is.na(idx_m); if (any(na_e)) m_df[[ec]][na_e] <- mm[[ec]][idx_m[na_e]] }
@@ -349,7 +349,7 @@ compute_hopkins_phenological_affinity <- function(morph_df, taxa) {
 
   lat_col <- intersect(c("decimalLatitude", "latitude"), names(morph_df))
   lat_vec <- if (length(lat_col) > 0L) suppressWarnings(as.numeric(morph_df[[lat_col[1L]]])) else rep(NA_real_, n)
-  elev_col <- intersect(c("topo_elev_m", "elevation_m", "elevation"), names(morph_df))
+  elev_col <- intersect(c("elevation_m", "elevation", "minimumElevationInMeters"), names(morph_df))
   elev_vec <- if (length(elev_col) > 0L) suppressWarnings(as.numeric(morph_df[[elev_col[1L]]])) else rep(NA_real_, n)
   bio1_col <- intersect(c("bio1_temp_mean", "bio1", "mat_c"), names(morph_df))
   bio1_vec <- if (length(bio1_col) > 0L) suppressWarnings(as.numeric(morph_df[[bio1_col[1L]]])) else rep(NA_real_, n)
