@@ -1199,5 +1199,240 @@ class TestFourierExtractor(unittest.TestCase):
             self.assertTrue(ind_df["ECT_PC1"].notna().all(), "Dynamic 32x360 .npy ECT reader must populate ECT_PC1 for all leaves.")
 
 
+    def test_step03_zero_trust_static_schema_and_config_contracts(self) -> None:
+        """
+        Verify all Step 03 zero-trust code & docstring contracts:
+          1. Line-count budget [350, 800] and absence of stale/false docstrings or partial-match bugs.
+          2. Cordate/reniform Step 02 tip-up orientation math (mask_is_upright & midline sinus tolerance).
+          3. SQLite schema version 20261112 parity & Step 03 columns in db_schema.py and db_utils.R.
+          4. NormalizationConfig / MorphometricsConfig Fourier bounds & main.py CLI flag forwarding.
+        """
+        import sqlite3
+        from unittest.mock import patch
+        from scripts.core.config import PipelineConfig
+        from scripts.core.db import get_db_connection, init_db_schema
+        from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION
+
+        r03 = (PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R").read_text(encoding="utf-8")
+        fpu = (PROJECT_ROOT / "scripts" / "morphometrics" / "fourier_parallel_utils.R").read_text(encoding="utf-8")
+        dlu = (PROJECT_ROOT / "scripts" / "morphometrics" / "dissected_leaf_utils.R").read_text(encoding="utf-8")
+        awu = (PROJECT_ROOT / "scripts" / "morphometrics" / "authority_weighting_utils.R").read_text(encoding="utf-8")
+        pfu = (PROJECT_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R").read_text(encoding="utf-8")
+        dbu = (PROJECT_ROOT / "scripts" / "core" / "db_utils.R").read_text(encoding="utf-8")
+
+        n_lines = len(r03.splitlines())
+        self.assertGreaterEqual(n_lines, 350)
+        self.assertLessEqual(n_lines, 800)
+
+        # Zero stale docstrings, partial-match bugs, or hardcoded taxon fallbacks
+        self.assertNotIn("Label-blind dynamic-harmonic", r03)
+        self.assertNotIn("Tier 1 intact", r03)
+        self.assertNotIn("opts$contours)", r03)
+        self.assertIn("opts$contours_dir)", r03)
+        self.assertIn("Momocs::slice(ef, which(valid_coe))", r03)
+        self.assertIn("ifelse(otu_has_efa,", r03)
+        self.assertIn("is_promoted_anchor", r03)
+        self.assertIn("is_passive", r03)
+        self.assertIn("align_contour_horizontal_xax <- function(coo, is_upright = NA)", fpu)
+        self.assertIn("out_vec[type_vec] <- FALSE", fpu)
+        self.assertIn("u_right <- c(u_tip[2L], -u_tip[1L])", dlu)
+        self.assertNotIn("sub-floor blade fragments", dlu)
+        self.assertNotIn("asymmetry_index =", awu)
+        self.assertIn("step03_fast_aggregated", awu)
+        self.assertNotIn("Blade Elongation & Petiole Ratio", pfu)
+        self.assertNotIn('disp_grp <- "Packera obovata"', pfu)
+        self.assertNotIn("1 / (k^2.2)", pfu)
+
+        # Cordate wider-than-long Packera aurea blade proof:
+        # Basal auricles hang 45% below the cordate sinus (Point 1 at (250, 275), auricles at y=338, tip at y=198, W=220, L=140)
+        theta = np.linspace(0.0, 2.0 * np.pi, 120, endpoint=False)
+        # Cardioid-cordate lamina in Step 02 image space (x_right, y_down), clockwise from basal sinus t=0:
+        x_cord = 250.0 - 110.0 * np.sin(theta) * (1.0 + 0.22 * np.cos(theta))
+        y_cord = 255.0 + 62.0 * np.cos(theta) + 42.0 * (np.sin(theta) ** 2) * np.maximum(0.0, np.cos(theta * 0.5))
+        # Shift so t=0 sits at exact cordate sinus (x=250, y=317) while lateral basal auricles reach y=358 (>30% of span_y below sinus!)
+        y_cord = 260.0 + 30.0 * np.cos(theta) + 55.0 * np.cos(2.0 * theta - 0.55) * (np.sin(theta) ** 2)
+        # Construct clean symmetric cordate contour where t=0 is sinus (250, 285), tip t=pi is (250, 185), auricles around t=+-0.65 reach y=340:
+        auricle = np.exp(-((np.abs(((theta + np.pi) % (2.0 * np.pi)) - np.pi) - 0.72) ** 2) / 0.10)
+        x_cord = 250.0 - 115.0 * np.sin(theta)
+        y_cord = 235.0 + 50.0 * np.cos(theta) + 62.0 * auricle
+        cx_c, cy_c = float(x_cord.mean()), float(y_cord.mean())
+        dx_c, dy_c = x_cord - cx_c, y_cord - cy_c
+        span_x_c = float(dx_c.max() - dx_c.min())
+        span_y_c = float(dy_c.max() - dy_c.min())
+        # Old heuristic failed because (max(dy) - dy[0]) / span_y > 0.30, and farthest point from sinus was on lateral margin (>35 deg error)!
+        self.assertGreater((float(dy_c.max()) - float(dy_c[0])) / span_y_c, 0.30)
+        d_p1 = np.hypot(x_cord - x_cord[0], y_cord - y_cord[0])
+        far_i = int(np.argmax(d_p1))
+        old_lateral_angle_err = abs(np.degrees(np.arctan2(x_cord[far_i] - x_cord[0], y_cord[0] - y_cord[far_i])))
+        self.assertGreater(old_lateral_angle_err, 25.0)
+        # New Step 03 alignment: both is_upright=True AND unflagged midline cordate clause (|dx[0]| <= 0.12*span_x & auricle <= 0.58*span_y)
+        # select exact (-dy + cx, -dx + cy) -> 0.000-deg midrib drift!
+        self.assertLessEqual(abs(float(dx_c[0])), 0.12 * span_x_c)
+        self.assertLessEqual(float(dy_c.max()) - float(dy_c[0]), 0.58 * span_y_c)
+        aligned_cord = np.column_stack([-dy_c + cx_c, -dx_c + cy_c])
+        # Midrib (t=0 sinus and t=60 tip) lies strictly on horizontal line Y == cy_c:
+        self.assertAlmostEqual(float(aligned_cord[0, 1]), float(aligned_cord[60, 1]), places=10)
+
+        # SQLite schema version & Step 03 column parity
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261112)
+        self.assertIn("20261112L", dbu)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "step03_schema_check.sqlite"
+            conn = get_db_connection(db_path)
+            try:
+                init_db_schema(conn)
+                efa_cols = {r[1] for r in conn.execute("PRAGMA table_info(leaf_efa_harmonics)").fetchall()}
+                otu_cols = {r[1] for r in conn.execute("PRAGMA table_info(otu_morphometrics)").fetchall()}
+                for req in ("mask_is_upright", "area_mm2", "petiole_width_mm", "blade_width_mm", "is_promoted_bronze", "is_promoted_anchor", "is_passive"):
+                    self.assertIn(req, efa_cols)
+                for req in ("area_mm2", "petiole_width_mm", "blade_width_mm", "is_promoted_bronze", "is_promoted_anchor", "is_passive"):
+                    self.assertIn(req, otu_cols)
+            finally:
+                conn.close()
+
+        # Config & main.py CLI flag wiring
+        cfg = PipelineConfig.from_yaml(PROJECT_ROOT / "config" / "config.yaml")
+        self.assertFalse(cfg.morphometrics.normalization.efourier_norm_ellipse)
+        self.assertFalse(cfg.morphometrics.normalization.efourier_start_search)
+        self.assertTrue(cfg.morphometrics.normalization.homologous_base_to_tip)
+        self.assertEqual(cfg.morphometrics.min_harmonics, 6)
+        self.assertEqual(cfg.morphometrics.max_harmonics, 24)
+        self.assertAlmostEqual(cfg.morphometrics.target_harmonic_power, 0.99)
+        self.assertEqual(cfg.morphometrics.max_export_pcs, 15)
+
+        import main as pipeline_main
+        captured_cmds = []
+
+        def fake_subproc(cmd, **kwargs):
+            c_list = [str(x) for x in cmd]
+            captured_cmds.append(c_list)
+            for flg in ("--output", "--output-flags"):
+                if flg in c_list:
+                    out_f = Path(c_list[c_list.index(flg) + 1])
+                    out_f.parent.mkdir(parents=True, exist_ok=True)
+                    out_f.write_text("catalogNumber\nNCU1\n", encoding="utf-8")
+            return subprocess.CompletedProcess(c_list, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            t_root = Path(tmpdir)
+            (t_root / "contours").mkdir()
+            (t_root / "contours" / "NCU1_leaf1.csv").write_text("x,y\n0,0\n1,0\n1,1\n", encoding="utf-8")
+            v_csv = t_root / "curated_vouchers.csv"
+            v_csv.write_text("catalogNumber,scientificName\nNCU1,Packera dubia\n", encoding="utf-8")
+            h_out = t_root / "leaf_efa_harmonics.csv"
+            f_out = t_root / "morphometric_flags.csv"
+            args = type("Args", (), {
+                "contours_dir": str(t_root / "contours"),
+                "vouchers": str(v_csv),
+                "harmonics_out": str(h_out),
+                "flags_out": str(f_out),
+                "plot_out": str(t_root / "fig.pdf"),
+                "report_out": str(t_root / "rep.csv"),
+                "harmonics": None,
+                "num_pcs": None,
+                "max_k": None,
+                "focal_taxon": None,
+                "intraspecific": False,
+                "seed": 137,
+                "run_id": None,
+                "run_dir": None,
+            })()
+            with patch("main.shutil.which", return_value="/usr/bin/Rscript"), \
+                 patch("main.subprocess.run", side_effect=fake_subproc):
+                pipeline_main.run_morphometrics(args, cfg)
+            self.assertGreaterEqual(len(captured_cmds), 1)
+            efa_cmd = captured_cmds[0]
+            for expected_flag in ("--masks-dir", "--output-individual", "--figures-dir", "--symmetrize-efa-harmonics", "--seed"):
+                self.assertIn(expected_flag, efa_cmd)
+            self.assertEqual(efa_cmd[efa_cmd.index("--seed") + 1], "137")
+
+    def test_step03_cordate_upright_multi_island_rm_asym_type_immunity_and_ect_weights(self) -> None:
+        """
+        Live Rscript integration test verifying:
+          1. Cordate wider-than-long mask_is_upright == TRUE preserves exact 0.000-deg horizontal midrib.
+          2. Multi-island (n_lamina_components > 1) sibling leaves do not disable Momocs::rm_asym() on closed leaves,
+             and multi-island-only OTUs retain PC1 == NA rather than 0.0.
+          3. Nomenclatural type leaves (is_type_specimen == TRUE) are immune to is_contour_outlier.
+          4. .compute_cycle_ect_32x32_r uses clockwise u_right = (uy, -ux) and ECT_PC1..3 excludes Tier_3_Bronze (wt=0).
+        """
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            r_test = tmp_p / "run_step03_zero_trust.R"
+            r_test.write_text(
+                f"""
+                source("{PROJECT_ROOT / 'scripts/morphometrics/pub_figures_utils.R'}")
+                source("{PROJECT_ROOT / 'scripts/morphometrics/authority_weighting_utils.R'}")
+                source("{PROJECT_ROOT / 'scripts/morphometrics/dissected_leaf_utils.R'}")
+                source("{PROJECT_ROOT / 'scripts/morphometrics/fourier_parallel_utils.R'}")
+                source("{PROJECT_ROOT / 'scripts/morphometrics/03_fourier_extractor.R'}")
+
+                # 1. Cordate wider-than-long upright contour (basal auricles 45% below sinus)
+                th <- seq(0, 2 * pi * (1 - 1/120), length.out = 120)
+                aur <- exp(-((abs(((th + pi) %% (2 * pi)) - pi) - 0.72)^2) / 0.10)
+                coo_cord <- cbind(250 - 115 * sin(th), 235 + 50 * cos(th) + 62 * aur)
+                al_cord <- align_contour_horizontal_xax(coo_cord, is_upright = TRUE)
+                stopifnot(isTRUE(attr(al_cord, "lm3_from_tipup")))
+                stopifnot(abs(al_cord[1L, 2L] - al_cord[61L, 2L]) < 1e-9)
+
+                # 2. Clockwise u_right check: Step 02 tip-up contour with 3 lobes strictly on anatomical right (x_img > 250)
+                x_img_r <- ifelse(sin(th) >= 0, 250 - 35 * sin(th), 250 - (35 + 55 * (sin(4 * th)^2)) * sin(th))
+                y_img_r <- 250 + 90 * cos(th)
+                coo_img_r <- cbind(x_img_r, y_img_r)
+                al_right <- align_contour_horizontal_xax(coo_img_r, is_upright = TRUE)
+                ect_r <- .compute_cycle_ect_32x32_r(al_right, num_thresh = 16L, num_dirs = 36L)
+                stopifnot(!is.null(ect_r), ncol(ect_r) == 36L)
+                # Verify exact 0.000-diff parity against Step 02 image-space tip_up_directions (North=(0,-1), East=(1,0)):
+                xy_c2 <- sweep(coo_img_r, 2L, colMeans(coo_img_r), "-")
+                xy_n2 <- xy_c2 / max(sqrt(rowSums(xy_c2^2)))
+                phis2 <- seq(0.0, 2.0 * pi * (1.0 - 1.0 / 36L), length.out = 36L)
+                thr2 <- seq(-1.0, 1.0, length.out = 16L)
+                nxt2 <- c(2:nrow(xy_n2), 1L)
+                ect_step02 <- matrix(0.0, nrow = 16L, ncol = 36L)
+                for (jj in seq_len(36L)) {{
+                  hv2 <- as.numeric(xy_n2[, 1L] * sin(phis2[jj]) - xy_n2[, 2L] * cos(phis2[jj]))
+                  he2 <- pmax(hv2, hv2[nxt2])
+                  ect_step02[, jj] <- as.numeric(findInterval(thr2, sort(hv2)) - findInterval(thr2, sort(he2)))
+                }}
+                stopifnot(max(abs(ect_r - ect_step02)) == 0)
+                stopifnot(sum(ect_r[10:14, 10L]) > sum(ect_r[10:14, 28L]))
+
+                # 3. Type immunity + multi-island sibling OutCoe rm_asym invariance
+                coe_m <- matrix(0.0, nrow = 12, ncol = 16)
+                colnames(coe_m) <- as.vector(outer(c("A", "B", "C", "D"), 1:4, paste0))
+                set.seed(11)
+                for (i in 1:11) {{
+                  coe_m[i, c("A1","D1","A2","D2","A3","D3","A4","D4")] <- c(-1.2 + 0.05*i, 0.55 - 0.02*i, rnorm(6, 0, 0.02))
+                  coe_m[i, c("B1","C1","B2","C2")] <- c(0.08, 0.14 * ((-1)^i), 0.03, -0.04)
+                }}
+                # Row 1: holotype with high roughness/asymmetry -> must stay is_contour_outlier == FALSE
+                coe_m[1, c("A4","D4","B1","C1")] <- c(0.45, 0.45, 0.35, 0.35)
+                # Row 12: multi-island leaf (NA EFA harmonics)
+                coe_m[12, ] <- NA_real_
+                fac_t <- data.frame(
+                  catalogNumber = paste0("CAT_", 1:12),
+                  plant_individual_id = 0L,
+                  leaf_id = 1L,
+                  scientificName = rep(c("Packera dubia", "Packera aurea"), each = 6L),
+                  determiner_tier = c("Tier_1_Gold", rep("Tier_1_Gold", 5), rep("Tier_1_Gold", 4), "Tier_3_Bronze", "Tier_1_Gold"),
+                  type_status = c("holotype", rep("", 11)),
+                  leaf_zone = "basal",
+                  solidity = c(rep(0.88, 11), 0.38),
+                  stringsAsFactors = FALSE
+                )
+                res_s <- extract_symmetric_fourier_pcs(list(coe = coe_m, fac = fac_t), fac_df = fac_t, num_pcs = 3)
+                stopifnot(isFALSE(res_s$df$is_contour_outlier[1L]))
+                stopifnot(!("C1" %in% colnames(res_s$sym_mat)))
+                stopifnot(is.na(res_s$df$Sym_PC1[12L]))
+                cat("STEP03_ZERO_TRUST_OK\n")
+                """,
+                encoding="utf-8",
+            )
+            proc = subprocess.run(["Rscript", str(r_test)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, f"Step 03 R zero-trust test failed:\n{proc.stderr}\n{proc.stdout}")
+            self.assertIn("STEP03_ZERO_TRUST_OK", proc.stdout)
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20260407L
+PACKERA_SCHEMA_USER_VERSION <- 20261112L
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -102,7 +102,7 @@ packera_mclapply <- function(X, FUN, mc.cores = 1L, mc.preschedule = TRUE) {
 
 PACKERA_DB_LOGICAL_COLS <- c(
   "is_primary_duplicate", "is_calibrated_mm", "is_bent_stem",
-  "is_dissected", "lm3_gates_pass", "is_verified_anthesis",
+  "is_dissected", "lm3_gates_pass", "mask_is_upright", "is_verified_anthesis",
   "is_rock_outcrop", "is_azonal_lithology", "high_coord_uncertainty_flag",
   "is_training_eligible_coord", "azonal_lithology_presence_buffer",
   "is_promoted_bronze", "is_promoted_anchor", "is_passive",
@@ -191,7 +191,12 @@ PACKERA_DB_WC_BIO_COLS <- c(
       si_a = "REAL",
       lm3_gates_pass = "INTEGER",
       n_lamina_components = "INTEGER",
-      scale_source = "TEXT"
+      scale_source = "TEXT",
+      petiole_width_px = "REAL",
+      petiole_width_mm = "REAL",
+      blade_width_px = "REAL",
+      blade_width_mm = "REAL",
+      mask_is_upright = "INTEGER DEFAULT 1"
     ))
   }
   if (identical(table_name, "run_active_cohort")) {
@@ -217,7 +222,19 @@ PACKERA_DB_WC_BIO_COLS <- c(
         ECT_PC2 = "REAL",
         ECT_PC3 = "REAL",
         ect_lobe_complexity = "REAL",
-        ect_bilateral_asym = "REAL"
+        ect_bilateral_asym = "REAL",
+        mask_is_upright = "INTEGER",
+        area_mm2 = "REAL",
+        petiole_width_mm = "REAL",
+        blade_width_mm = "REAL",
+        type_status = "TEXT",
+        is_type_specimen = "INTEGER DEFAULT 0",
+        is_promoted_bronze = "INTEGER DEFAULT 0",
+        is_promoted_anchor = "INTEGER DEFAULT 0",
+        anchor_tier_source = "TEXT",
+        authority_weight = "REAL",
+        is_passive = "INTEGER DEFAULT 0",
+        spatial_balance_weight = "REAL"
       )
     ))
   }
@@ -263,7 +280,14 @@ PACKERA_DB_WC_BIO_COLS <- c(
         min_congener_mahal_d2 = "REAL",
         min_congener_taxon = "TEXT",
         open_set_novelty_p = "REAL",
-        is_confident_label_noise = "INTEGER"
+        is_confident_label_noise = "INTEGER",
+        is_promoted_bronze = "INTEGER",
+        is_promoted_anchor = "INTEGER",
+        is_passive = "INTEGER",
+        spatial_balance_weight = "REAL",
+        area_mm2 = "REAL",
+        petiole_width_mm = "REAL",
+        blade_width_mm = "REAL"
       )
     ))
   }
@@ -763,6 +787,7 @@ fetch_step03_contours_from_db <- function(
   }
 
   el_fields <- tryCatch(DBI::dbListFields(conn, "extracted_leaves"), error = function(e) character(0))
+  pi_fields <- tryCatch(DBI::dbListFields(conn, "plant_individuals"), error = function(e) character(0))
   sel_ect <- if ("ect_path" %in% el_fields) "el.ect_path" else "NULL AS ect_path"
   sel_zone <- if ("leaf_zone" %in% el_fields) "el.leaf_zone" else "'basal' AS leaf_zone"
   sel_zone_conf <- if ("leaf_zone_confidence" %in% el_fields) "el.leaf_zone_confidence" else "NULL AS leaf_zone_confidence"
@@ -774,6 +799,18 @@ fetch_step03_contours_from_db <- function(
   sel_lgates <- if ("lm3_gates_pass" %in% el_fields) "el.lm3_gates_pass" else "NULL AS lm3_gates_pass"
   sel_ncc <- if ("n_lamina_components" %in% el_fields) "el.n_lamina_components" else "1 AS n_lamina_components"
   sel_scale_src <- if ("scale_source" %in% el_fields) "el.scale_source" else "NULL AS scale_source"
+  sel_upright <- if ("mask_is_upright" %in% el_fields) "el.mask_is_upright" else "NULL AS mask_is_upright"
+  sel_amm2 <- if ("area_mm2" %in% el_fields) "el.area_mm2" else "NULL AS area_mm2"
+  sel_bw_mm <- if ("blade_width_mm" %in% el_fields) "el.blade_width_mm" else "NULL AS blade_width_mm"
+  sel_pw_mm <- if ("petiole_width_mm" %in% el_fields && "petiole_width_mm" %in% pi_fields) {
+    "COALESCE(el.petiole_width_mm, pi.petiole_width_mm) AS petiole_width_mm"
+  } else if ("petiole_width_mm" %in% el_fields) {
+    "el.petiole_width_mm AS petiole_width_mm"
+  } else if ("petiole_width_mm" %in% pi_fields) {
+    "pi.petiole_width_mm AS petiole_width_mm"
+  } else {
+    "NULL AS petiole_width_mm"
+  }
   sel_eqc <- if ("efa_qc_pass" %in% el_fields) "el.efa_qc_pass" else "NULL AS efa_qc_pass"
   sel_qfr <- if ("qc_flag_reason" %in% el_fields) "el.qc_flag_reason" else "NULL AS qc_flag_reason"
 
@@ -782,7 +819,8 @@ fetch_step03_contours_from_db <- function(
     "  el.catalogNumber, el.plant_individual_id, el.leaf_id, el.shape_id, ",
     "  el.solidity, el.aspect_ratio, el.area_px, el.blade_area_cm2, ",
     "  ", sel_ect, ", ", sel_zone, ", ", sel_zone_conf, ", ", sel_dist_cr, ", ", sel_cy_rel, ", ",
-    "  ", sel_arch, ", ", sel_bdice, ", ", sel_sia, ", ", sel_lgates, ", ", sel_ncc, ", ", sel_scale_src, ", ", sel_eqc, ", ", sel_qfr, ", ",
+    "  ", sel_arch, ", ", sel_bdice, ", ", sel_sia, ", ", sel_lgates, ", ", sel_ncc, ", ", sel_scale_src, ", ",
+    "  ", sel_upright, ", ", sel_amm2, ", ", sel_bw_mm, ", ", sel_pw_mm, ", ", sel_eqc, ", ", sel_qfr, ", ",
     "  COALESCE(el.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm, ",
     "  COALESCE(el.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm, ",
     "  COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm, ",
@@ -802,7 +840,7 @@ fetch_step03_contours_from_db <- function(
     "LEFT JOIN voucher_reproductive_phenology vrp0 ON vrp0.catalogNumber = el.catalogNumber AND vrp0.plant_individual_id = 0 "
   )
 
-  tier1_pred <- "el.contour_xy_json IS NOT NULL AND el.contour_xy_json != ''"
+  contour_pred <- "el.contour_xy_json IS NOT NULL AND el.contour_xy_json != ''"
 
   if (!is.null(active_catalogs) && length(active_catalogs) > 0L) {
     cats <- unique(trimws(as.character(active_catalogs)))
@@ -811,18 +849,18 @@ fetch_step03_contours_from_db <- function(
     q_cats <- paste(vapply(cats, function(x) as.character(DBI::dbQuoteString(conn, x)), character(1)), collapse = ", ")
     sql <- paste0(
       base_sql,
-      sprintf("WHERE %s AND el.catalogNumber IN (%s) ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;", tier1_pred, q_cats)
+      sprintf("WHERE %s AND el.catalogNumber IN (%s) ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;", contour_pred, q_cats)
     )
     rows <- tryCatch(DBI::dbGetQuery(conn, sql), error = function(e) NULL)
   } else if (has_cohort) {
     sql <- paste0(
       base_sql,
       "INNER JOIN run_active_cohort rac ON rac.catalogNumber = el.catalogNumber AND rac.plant_individual_id = el.plant_individual_id ",
-      "WHERE rac.run_id = $1 AND ", tier1_pred, " ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;"
+      "WHERE rac.run_id = $1 AND ", contour_pred, " ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;"
     )
     rows <- tryCatch(DBI::dbGetQuery(conn, sql, params = list(rid)), error = function(e) NULL)
   } else {
-    sql <- paste0(base_sql, "WHERE ", tier1_pred, " ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;")
+    sql <- paste0(base_sql, "WHERE ", contour_pred, " ORDER BY el.catalogNumber, el.plant_individual_id, el.leaf_id;")
     rows <- tryCatch(DBI::dbGetQuery(conn, sql), error = function(e) NULL)
   }
 
@@ -895,6 +933,28 @@ fetch_step03_contours_from_db <- function(
   is_cal_vec <- !is.na(ppm_vec) & is.finite(ppm_vec) & (ppm_vec > 0) & cal_flag_vec &
     !(raw_ss_col %in% c("mp_estimated", "predicted_from_megapixels", "uncalibrated"))
   db_ar_vec <- if ("aspect_ratio" %in% names(rows)) suppressWarnings(as.numeric(rows$aspect_ratio)) else rep(NA_real_, nrow(rows))
+  db_upright_vec <- rep(NA, nrow(rows))
+  if ("mask_is_upright" %in% names(rows)) {
+    raw_up <- toupper(trimws(as.character(rows$mask_is_upright)))
+    db_upright_vec[raw_up %in% c("1", "1.0", "TRUE", "T", "YES")] <- TRUE
+    db_upright_vec[raw_up %in% c("0", "0.0", "FALSE", "F", "NO")] <- FALSE
+  }
+  if (!is.null(m_hdr) && "mask_is_upright" %in% names(m_hdr) && any(is.na(db_upright_vec))) {
+    rc_v <- trimws(as.character(rows$catalogNumber))
+    rp_v <- ifelse(is.na(rows$plant_individual_id), 0L, suppressWarnings(as.integer(rows$plant_individual_id)))
+    rl_v <- suppressWarnings(as.integer(rows$leaf_id))
+    mh_up <- if (!is.null(m_idx_3k)) unname(m_idx_3k[paste(rc_v, rp_v, rl_v, sep = "__")]) else rep(NA_integer_, nrow(rows))
+    if (any(is.na(mh_up)) && !is.null(m_idx_2k)) {
+      miss_u <- is.na(mh_up)
+      mh_up[miss_u] <- unname(m_idx_2k[paste(rc_v[miss_u], rl_v[miss_u], sep = "__")])
+    }
+    fill_u <- which(is.na(db_upright_vec) & !is.na(mh_up))
+    if (length(fill_u) > 0L) {
+      m_up_raw <- toupper(trimws(as.character(m_hdr$mask_is_upright[mh_up[fill_u]])))
+      db_upright_vec[fill_u[m_up_raw %in% c("1", "1.0", "TRUE", "T", "YES")]] <- TRUE
+      db_upright_vec[fill_u[m_up_raw %in% c("0", "0.0", "FALSE", "F", "NO")]] <- FALSE
+    }
+  }
   db_area_vec <- suppressWarnings(as.numeric(rows$area_px))
   db_sol_vec <- suppressWarnings(as.numeric(rows$solidity))
   js_vec <- as.character(rows$contour_xy_json)
@@ -920,7 +980,7 @@ fetch_step03_contours_from_db <- function(
       colnames(coo) <- c("x", "y")
       was_tipup_db <- FALSE
       if (exists("align_contour_horizontal_xax", mode = "function")) {
-        coo <- align_contour_horizontal_xax(coo)
+        coo <- align_contour_horizontal_xax(coo, is_upright = db_upright_vec[i])
         was_tipup_db <- isTRUE(attr(coo, "lm3_from_tipup"))
       }
       if (has_momocs) coo <- tryCatch(Momocs::coo_cw(coo), error = function(e) coo)
@@ -1110,8 +1170,17 @@ fetch_step03_contours_from_db <- function(
     pixels_per_mm = ppm_vec[ok_idx],
     is_calibrated_mm = is_cal_vec[ok_idx],
     scale_source = ifelse(is_cal_vec[ok_idx], "ruler_calibrated", ifelse(!is.na(ppm_vec[ok_idx]) & ppm_vec[ok_idx] > 0, "mp_estimated", "uncalibrated")),
+    mask_is_upright = ifelse(is.na(db_upright_vec[ok_idx]), isTRUE(attr(coords_list[[1L]], "lm3_from_tipup")), as.logical(db_upright_vec[ok_idx])),
+    area_mm2 = {
+      db_am <- if ("area_mm2" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$area_mm2)) else rep(NA_real_, n_kept)
+      db_am[!is.finite(db_am)] <- NA_real_
+      am_m <- pull_manifest_num("area_mm2", db_am)
+      ifelse(is.finite(am_m), am_m, ifelse(is_cal_vec[ok_idx] & is.finite(ppm_vec[ok_idx]) & ppm_vec[ok_idx] > 0, round(merged$area[ok_idx] / (ppm_vec[ok_idx]^2), 2), NA_real_))
+    },
     petiole_length_mm = suppressWarnings(as.numeric(sub_rows$petiole_length_mm)),
+    petiole_width_mm = pull_manifest_num("petiole_width_mm", if ("petiole_width_mm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$petiole_width_mm)) else rep(NA_real_, n_kept)),
     blade_length_mm = suppressWarnings(as.numeric(sub_rows$blade_length_mm)),
+    blade_width_mm = pull_manifest_num("blade_width_mm", if ("blade_width_mm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_width_mm)) else rep(NA_real_, n_kept)),
     petiole_to_blade_ratio = suppressWarnings(as.numeric(sub_rows$petiole_to_blade_ratio)),
     is_dissected = eff_diss_vec,
     ect_path = db_ect_vec,
@@ -1161,7 +1230,8 @@ fetch_step03_contours_from_db <- function(
       "ECT_PC1", "ECT_PC2", "ECT_PC3",
       "Cauline_ECT_PC1", "Cauline_ECT_PC2",
       "ect_lobe_complexity", "cauline_ect_lobe_complexity",
-      "ect_bilateral_asym", "heteroblasty_ect_distance"),
+      "ect_bilateral_asym", "heteroblasty_ect_distance",
+      "area_mm2", "petiole_width_mm", "blade_width_mm", "spatial_balance_weight"),
     names(df)
   )
   for (nc in dyn_num_cols) {
@@ -1225,6 +1295,15 @@ persist_step03_to_sqlite <- function(
     otu_out$run_id <- rid
     if (!("plant_individual_id" %in% names(otu_out))) otu_out$plant_individual_id <- 0L
     otu_out$plant_individual_id[is.na(otu_out$plant_individual_id)] <- 0L
+    if (("is_promoted_bronze" %in% names(otu_out)) && !("is_promoted_anchor" %in% names(otu_out))) {
+      otu_out$is_promoted_anchor <- as.logical(otu_out$is_promoted_bronze)
+    } else if (("is_promoted_anchor" %in% names(otu_out)) && !("is_promoted_bronze" %in% names(otu_out))) {
+      otu_out$is_promoted_bronze <- as.logical(otu_out$is_promoted_anchor)
+    }
+    if (!("is_passive" %in% names(otu_out)) && ("authority_weight" %in% names(otu_out))) {
+      aw_v <- suppressWarnings(as.numeric(otu_out$authority_weight))
+      otu_out$is_passive <- !is.finite(aw_v) | (aw_v <= 0.0)
+    }
     tryCatch(DBI::dbExecute(conn, "DELETE FROM otu_morphometrics WHERE run_id = $1;", params = list(rid)), error = function(e) NULL)
     db_upsert_dataframe(
       conn,

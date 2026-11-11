@@ -877,19 +877,41 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     )
     efa_out = Path(args.harmonics_out or default_efa_out)
     efa_out.parent.mkdir(parents=True, exist_ok=True)
+    efa_ind_out = Path(
+        getattr(args, "output_individual", None)
+        or (efa_out.parent / "leaf_efa_harmonics_individual.csv")
+    )
+    default_masks = (
+        (run_dir / "data" / "masks")
+        if run_dir is not None
+        else cfg.get("paths", {}).get("masks_dir", "data/masks")
+    )
+    masks_dir = Path(getattr(args, "masks_dir", None) or default_masks)
+    efa_figures_dir = (
+        run_dir / "outputs" / "figures"
+        if run_dir is not None
+        else Path(cfg.get("paths", {}).get("figures_dir", "outputs/figures"))
+    )
 
-    harmonics = args.harmonics or cfg.get("morphometrics", {}).get("harmonics", 12)
-    num_pcs = args.num_pcs or cfg.get("morphometrics", {}).get("num_pcs", 5)
+    m_cfg = cfg.morphometrics
+    harmonics = args.harmonics if getattr(args, "harmonics", None) is not None else m_cfg.harmonics
+    num_pcs = args.num_pcs if getattr(args, "num_pcs", None) is not None else m_cfg.num_pcs
+    sym_flag = "TRUE" if bool(getattr(m_cfg, "symmetrize_efa_harmonics", True)) else "FALSE"
 
     # Step 3A: Fourier EFA
     cmd_efa = [
         rscript_bin, str(efa_script),
         "--input", str(contours_dir),
+        "--masks-dir", str(masks_dir),
         "--manifest", str(manifest_csv),
         "--vouchers", str(vouchers_csv),
         "--output", str(efa_out),
+        "--output-individual", str(efa_ind_out),
+        "--figures-dir", str(efa_figures_dir),
         "--harmonics", str(harmonics),
         "--num-pcs", str(num_pcs),
+        "--symmetrize-efa-harmonics", sym_flag,
+        "--seed", str(args.seed if getattr(args, "seed", None) is not None else getattr(m_cfg, "random_seed", 42)),
     ]
     logger.info(f"Running EFA: {' '.join(cmd_efa)}")
     subprocess.run(cmd_efa, check=True)

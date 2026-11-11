@@ -3007,8 +3007,15 @@ compute_heteroblasty_leaf_weights <- function(df_sub) {
   w_zone * w_area
 }
 
+# Reconciles Step 03 specimen-level OTU basal medians (unweighted across clean basal rosette
+# leaves; cauline leaves excluded whenever >= 1 basal leaf exists) and 75th-percentile petiole/blade
+# architecture traits. Short-circuits when aggregate_step03_otu_medians_fast() already populated all fields.
 apply_step03_heteroblasty_weighted_otu_aggregation <- function(specimen_df, closed_leaf_df, all_harm_cols = character(0), sym_names = character(0)) {
   if (is.null(specimen_df) || is.null(closed_leaf_df) || nrow(specimen_df) == 0L || nrow(closed_leaf_df) == 0L) {
+    return(specimen_df)
+  }
+  expected_fast_cols <- intersect(c("area_mm2", "petiole_width_mm", "blade_width_mm", "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity"), names(closed_leaf_df))
+  if (isTRUE(attr(specimen_df, "step03_fast_aggregated")) && all(expected_fast_cols %in% names(specimen_df))) {
     return(specimen_df)
   }
   pids_leaf <- if ("plant_individual_id" %in% names(closed_leaf_df)) ifelse(is.na(closed_leaf_df$plant_individual_id), 0L, as.integer(closed_leaf_df$plant_individual_id)) else rep(0L, nrow(closed_leaf_df))
@@ -3020,18 +3027,18 @@ apply_step03_heteroblasty_weighted_otu_aggregation <- function(specimen_df, clos
   trait_digits <- list(
     aspect_ratio = 4L, circularity = 4L, solidity = 4L, dissection_index = 4L,
     area_px = 1L, area_mm2 = 2L, centroid_size = 4L,
-    log_centsize = 6L, harmonic_roughness = 6L, leaf_quality_weight = 4L,
-    asymmetry_index = 6L, ECT_PC1 = 6L, ECT_PC2 = 6L, ECT_PC3 = 6L,
+    log_centsize = 6L, harmonic_roughness = 6L, leaf_quality_weight = 6L,
+    pct_asymmetry = 6L, ECT_PC1 = 6L, ECT_PC2 = 6L, ECT_PC3 = 6L,
     ect_lobe_complexity = 4L
   )
-  pet_cols <- intersect(c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"), names(specimen_df))
+  pet_cols <- intersect(c("petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio"), names(specimen_df))
   for (i in seq_len(nrow(specimen_df))) {
     rows_i <- idx_by_key[[spec_keys[i]]]
     if (length(rows_i) < 1L) next
     grp <- closed_leaf_df[rows_i, , drop = FALSE]
-
-    if ("is_contour_outlier" %in% names(grp) && any(!as.logical(grp$is_contour_outlier), na.rm = TRUE)) {
-      grp <- grp[!is.na(grp$is_contour_outlier) & !as.logical(grp$is_contour_outlier), , drop = FALSE]
+    typ_g <- if ("is_type_specimen" %in% names(grp)) (!is.na(grp$is_type_specimen) & as.logical(grp$is_type_specimen)) else rep(FALSE, nrow(grp))
+    if ("is_contour_outlier" %in% names(grp) && any((!as.logical(grp$is_contour_outlier)) | typ_g, na.rm = TRUE)) {
+      grp <- grp[(!is.na(grp$is_contour_outlier) & !as.logical(grp$is_contour_outlier)) | typ_g, , drop = FALSE]
     }
     if ("leaf_zone" %in% names(grp)) {
       lz_g <- tolower(trimws(as.character(grp$leaf_zone)))

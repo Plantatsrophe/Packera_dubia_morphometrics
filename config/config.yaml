@@ -215,11 +215,18 @@ morphometrics:
   gmm:
     cohort_adaptive_mode: true
     min_anchor_n_for_empirical: 5
+  # Step 03 achieves scale, rotation, and start-point homology via LeafMachine3's
+  # landmark-anchored `lamina_base -> lamina_tip` frame (`coo_center() %>% coo_scale()`
+  # + `Momocs::efourier(..., norm = FALSE, start = FALSE)`), NOT via first-harmonic
+  # ellipse normalization (`norm = TRUE`), which flips obovate and reniform blades.
   normalization:
     align_major_axis: true
     scale_invariant: true
     rotation_invariant: true
     start_point_invariant: true
+    homologous_base_to_tip: true
+    efourier_norm_ellipse: false
+    efourier_start_search: false
 
 # Phase 6: Macroecology, 19-Variable Bioclimatic/Edaphic Spatial RF & Hopkins Phenology
 # Cohort-adaptive mode derives empirical flowering DOY/latitude envelopes and prunes

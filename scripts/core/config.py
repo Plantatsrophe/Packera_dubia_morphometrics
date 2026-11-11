@@ -330,19 +330,36 @@ class ThresholdsConfig:
 
 @dataclass(frozen=True)
 class NormalizationConfig:
-    """Fourier elliptic contour normalization invariants."""
+    """
+    Homologized Elliptic Fourier contour invariants.
+    Scale, rotation, and start-point homology are enforced via LeafMachine3's
+    `lamina_base -> lamina_tip` anatomical frame (`coo_center() %>% coo_scale()`
+    followed by `Momocs::efourier(..., norm = FALSE, start = FALSE)`), never via
+    first-ellipse major-axis normalization (`efourier_norm_ellipse = False`).
+    """
     align_major_axis: bool = True
     scale_invariant: bool = True
     rotation_invariant: bool = True
     start_point_invariant: bool = True
+    homologous_base_to_tip: bool = True
+    efourier_norm_ellipse: bool = False
+    efourier_start_search: bool = False
 
 
 @dataclass(frozen=True)
 class MorphometricsConfig:
     """Elliptic Fourier Analysis and downstream clustering parameters."""
+    cohort_adaptive_mode: bool = True
+    min_anchor_n_for_empirical: int = 5
     nb_harmonics: int = 12
     harmonics: int = 12
+    min_harmonics: int = 6
+    max_harmonics: int = 24
+    target_harmonic_power: float = 0.99
+    target_pca_variance: float = 0.95
     num_pcs: int = 5
+    min_export_pcs: int = 5
+    max_export_pcs: int = 15
     max_k: int = 8
     random_seed: int = 42
     normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
@@ -586,12 +603,24 @@ class PipelineConfig:
             k: bool(v) for k, v in norm_dict.items() if k in NormalizationConfig.__dataclass_fields__
         })
 
-        m_dict = raw_cfg.get("morphometrics", {})
+        m_dict = raw_cfg.get("morphometrics", {}) or {}
+        f_dict = m_dict.get("fourier", {}) if isinstance(m_dict.get("fourier"), dict) else {}
         nb_h = int(m_dict.get("nb_harmonics", m_dict.get("harmonics", 12)))
         morph = MorphometricsConfig(
-            nb_harmonics=nb_h, harmonics=int(m_dict.get("harmonics", nb_h)),
-            num_pcs=int(m_dict.get("num_pcs", 5)), max_k=int(m_dict.get("max_k", 8)),
-            random_seed=int(m_dict.get("random_seed", 42)), normalization=norm,
+            cohort_adaptive_mode=bool(f_dict.get("cohort_adaptive_mode", m_dict.get("cohort_adaptive_mode", True))),
+            min_anchor_n_for_empirical=int(f_dict.get("min_anchor_n_for_empirical", m_dict.get("min_anchor_n_for_empirical", 5))),
+            nb_harmonics=nb_h,
+            harmonics=int(m_dict.get("harmonics", nb_h)),
+            min_harmonics=int(f_dict.get("min_harmonics", 6)),
+            max_harmonics=int(f_dict.get("max_harmonics", 24)),
+            target_harmonic_power=float(f_dict.get("target_harmonic_power", 0.99)),
+            target_pca_variance=float(f_dict.get("target_pca_variance", 0.95)),
+            num_pcs=int(m_dict.get("num_pcs", 5)),
+            min_export_pcs=int(f_dict.get("min_export_pcs", 5)),
+            max_export_pcs=int(f_dict.get("max_export_pcs", 15)),
+            max_k=int(m_dict.get("max_k", 8)),
+            random_seed=int(m_dict.get("random_seed", 42)),
+            normalization=norm,
             correct_allometry=str(m_dict.get("correct_allometry", "auto")),
             allometry_r2_threshold=float(m_dict.get("allometry_r2_threshold", 0.10)),
             symmetrize_efa_harmonics=bool(m_dict.get("symmetrize_efa_harmonics", True)),

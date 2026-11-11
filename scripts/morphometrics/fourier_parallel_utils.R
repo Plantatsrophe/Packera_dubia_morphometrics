@@ -5,10 +5,11 @@
 # Description:
 #   Multi-threaded Step 03 Elliptic Fourier & OTU median aggregation utilities:
 #     - Fast atomic CSV export via data.table::fwrite (fallback utils::write.csv).
-#     - 32-core chunked Momocs centering, scaling, & efourier decomposition
-#       (mathematically bit-identical to single-core Momocs::efourier).
-#     - Vectorized & multi-threaded OTU coordinate-wise median harmonic and
-#       dissection-metric aggregation across (catalogNumber, plant_individual_id).
+#     - Dynamic multi-core chunked Momocs centering, scaling, & homologized
+#       efourier(norm = FALSE, start = FALSE) decomposition (bit-identical to single-core).
+#     - Unweighted basal-rosette OTU coordinate-wise median harmonic, ECT, and
+#       dissection-metric aggregation across (catalogNumber, plant_individual_id)
+#       with full Tier_0 nomenclatural type immunity from outlier dropping.
 # ==============================================================================
 
 write_step03_csv_fast <- function(df, target_path) {
@@ -22,7 +23,7 @@ write_step03_csv_fast <- function(df, target_path) {
   file.rename(tmp_p, target_path)
 }
 
-align_contour_horizontal_xax <- function(coo) {
+align_contour_horizontal_xax <- function(coo, is_upright = NA) {
   if (is.null(coo) || !is.matrix(coo) || nrow(coo) < 5L || ncol(coo) < 2L) return(coo)
   if (isTRUE(attr(coo, "lm3_xax_aligned"))) return(coo)
   cx <- mean(coo[, 1L], na.rm = TRUE)
@@ -35,14 +36,17 @@ align_contour_horizontal_xax <- function(coo) {
   max_abs_y <- max(abs(dy), 1e-8)
 
   # 1. Step 02 canonical image-space vertical tip-up contour:
-  #    Point 1 (lamina_base) sits in the basal region (+y_img, dy[1] > 0) near horizontal midline,
-  #    lamina_tip sits at top (-y_img, min(dy) < 0), traced clockwise in (x_right, y_down).
-  #    Apply exact chart-preserving rigid orthogonal map (X = -dy + cx, Y = -dx + cy)
+  #    When Step 02 LM3 momocs_prep explicitly certifies mask_is_upright == TRUE,
+  #    or when unflagged contours carry the Step 02 tip-up signature (including deeply
+  #    cordate/reniform blades whose basal auricles hang up to 55% below the sinus),
+  #    apply the exact chart-preserving rigid orthogonal map (X = -dy + cx, Y = -dx + cy)
   #    so lamina_base sits at (-X, 0), lamina_tip at (+X, 0), anatomical left at (+Y),
-  #    clockwise in Momocs Cartesian space with 0.000-deg midrib drift on dissected leaves.
-  is_step02_tipup <- is.finite(dy[1L]) && (dy[1L] > 0.0) && (min(dy, na.rm = TRUE) < 0.0) &&
-    ((max(dy, na.rm = TRUE) - dy[1L]) <= 0.30 * max(span_y, 1e-8)) &&
-    (abs(dx[1L]) <= 0.28 * max(span_x, 1e-8))
+  #    clockwise in Momocs Cartesian space with 0.000-deg midrib drift.
+  is_step02_tipup <- isTRUE(is_upright) || (
+    !identical(is_upright, FALSE) && is.finite(dy[1L]) && (dy[1L] > 0.0) && (min(dy, na.rm = TRUE) < 0.0) &&
+    ((((max(dy, na.rm = TRUE) - dy[1L]) <= 0.30 * max(span_y, 1e-8)) && (abs(dx[1L]) <= 0.28 * max(span_x, 1e-8))) ||
+     ((abs(dx[1L]) <= 0.12 * max(span_x, 1e-8)) && ((max(dy, na.rm = TRUE) - dy[1L]) <= 0.58 * max(span_y, 1e-8))))
+  )
   if (isTRUE(is_step02_tipup)) {
     out_coo <- cbind(-dy + cx, -dx + cy)
     colnames(out_coo) <- colnames(coo)
@@ -66,7 +70,10 @@ align_contour_horizontal_xax <- function(coo) {
     attr(coo, "lm3_xax_aligned") <- TRUE
     return(coo)
   }
-  cap_idx <- which(d_from_p1 >= 0.985 * max_d)
+  mid_tip_idx <- if (is.finite(dy[1L]) && dy[1L] > 0.0 && min(dy, na.rm = TRUE) < 0.0 && abs(dx[1L]) <= 0.18 * max(span_x, 1e-8)) {
+    which(abs(dx) <= 0.18 * max(span_x, 1e-8) & dy <= (min(dy, na.rm = TRUE) + 0.08 * max(span_y, 1e-8)))
+  } else integer(0L)
+  cap_idx <- if (length(mid_tip_idx) >= 1L) mid_tip_idx else which(d_from_p1 >= 0.985 * max_d)
   ap_x <- stats::median(coo[cap_idx, 1L], na.rm = TRUE)
   ap_y <- stats::median(coo[cap_idx, 2L], na.rm = TRUE)
   v_apical <- c(ap_x - coo[1L, 1L], ap_y - coo[1L, 2L])
@@ -153,7 +160,9 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
 
   has_out_col <- "is_contour_outlier" %in% names(closed_leaf_df)
   out_vec <- if (has_out_col) as.logical(closed_leaf_df$is_contour_outlier) else rep(FALSE, n_rows)
-  t1_vec <- rep(TRUE, n_rows)
+  out_vec[is.na(out_vec)] <- FALSE
+  type_vec <- if ("is_type_specimen" %in% names(closed_leaf_df)) (!is.na(closed_leaf_df$is_type_specimen) & as.logical(closed_leaf_df$is_type_specimen)) else rep(FALSE, n_rows)
+  out_vec[type_vec] <- FALSE
   lz_vec <- if ("leaf_zone" %in% names(closed_leaf_df)) tolower(trimws(as.character(closed_leaf_df$leaf_zone))) else rep("basal", n_rows)
   lz_vec[is.na(lz_vec) | !(lz_vec %in% c("basal", "cauline"))] <- "basal"
 
@@ -165,9 +174,8 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     idx <- raw_groups[[g]]
     if (length(idx) == 0L) next
     if (has_out_col && any(!out_vec[idx], na.rm = TRUE)) {
-      idx <- idx[!is.na(out_vec[idx]) & !out_vec[idx]]
+      idx <- idx[!out_vec[idx]]
     }
-    idx <- idx[t1_vec[idx]]
     if (length(idx) == 0L) next
     bas_idx <- idx[lz_vec[idx] == "basal"]
     kept_g <- kept_g + 1L
@@ -207,17 +215,31 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   circ_v <- pull_num("circularity")
   arch_v <- pull_num("archetype_score")
   area_v <- pull_num("area_px")
+  has_amm2 <- "area_mm2" %in% names(closed_leaf_df)
+  amm2_v <- if (has_amm2) pull_num("area_mm2") else NULL
   svar_v <- pull_num("sym_var")
   avar_v <- pull_num("asym_var")
   pasym_v <- pull_num("pct_asymmetry")
   hrough_v <- pull_num("harmonic_roughness")
   lqw_v <- pull_num("leaf_quality_weight")
   has_pet <- "petiole_length_mm" %in% names(closed_leaf_df)
+  has_petw <- "petiole_width_mm" %in% names(closed_leaf_df)
   has_bld <- "blade_length_mm" %in% names(closed_leaf_df)
+  has_bldw <- "blade_width_mm" %in% names(closed_leaf_df)
   has_pbr <- "petiole_to_blade_ratio" %in% names(closed_leaf_df)
   pet_v <- if (has_pet) pull_num("petiole_length_mm") else NULL
+  petw_v <- if (has_petw) pull_num("petiole_width_mm") else NULL
   bld_v <- if (has_bld) pull_num("blade_length_mm") else NULL
+  bldw_v <- if (has_bldw) pull_num("blade_width_mm") else NULL
   pbr_v <- if (has_pbr) pull_num("petiole_to_blade_ratio") else NULL
+  has_ect1 <- "ECT_PC1" %in% names(closed_leaf_df)
+  has_ect2 <- "ECT_PC2" %in% names(closed_leaf_df)
+  has_ect3 <- "ECT_PC3" %in% names(closed_leaf_df)
+  has_ectlc <- "ect_lobe_complexity" %in% names(closed_leaf_df)
+  ect1_v <- if (has_ect1) pull_num("ECT_PC1") else NULL
+  ect2_v <- if (has_ect2) pull_num("ECT_PC2") else NULL
+  ect3_v <- if (has_ect3) pull_num("ECT_PC3") else NULL
+  ectlc_v <- if (has_ectlc) pull_num("ect_lobe_complexity") else NULL
   has_dis <- "is_dissected" %in% names(closed_leaf_df)
   dis_v <- if (has_dis) as.logical(closed_leaf_df$is_dissected) else NULL
 
@@ -245,14 +267,21 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     circ_m <- rep(NA_real_, m)
     arch_m <- rep(NA_real_, m)
     area_m <- rep(NA_real_, m)
+    amm2_m <- rep(NA_real_, m)
     sv_m <- rep(NA_real_, m)
     av_m <- rep(NA_real_, m)
     pa_m <- rep(NA_real_, m)
     hr_m <- rep(NA_real_, m)
     lq_m <- rep(NA_real_, m)
     pet_m <- rep(NA_real_, m)
+    petw_m <- rep(NA_real_, m)
     bld_m <- rep(NA_real_, m)
+    bldw_m <- rep(NA_real_, m)
     pbr_m <- rep(NA_real_, m)
+    ect1_m <- rep(NA_real_, m)
+    ect2_m <- rep(NA_real_, m)
+    ect3_m <- rep(NA_real_, m)
+    ectlc_m <- rep(NA_real_, m)
     dis_m <- rep(NA, m)
     out_m <- logical(m)
 
@@ -290,14 +319,21 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
       circ_m[k] <- med_fin(circ_v[idx], 4L)
       arch_m[k] <- med_fin(arch_v[idx], 4L)
       area_m[k] <- med_fin(area_v[idx], 1L)
+      if (has_amm2) amm2_m[k] <- med_fin(amm2_v[idx], 2L)
       sv_m[k] <- med_fin(svar_v[idx], 6L)
       av_m[k] <- med_fin(avar_v[idx], 6L)
       pa_m[k] <- med_fin(pasym_v[idx], 6L)
       hr_m[k] <- med_fin(hrough_v[idx], 6L)
       lq_m[k] <- med_fin(lqw_v[idx], 6L)
       if (has_pet) pet_m[k] <- q75_fin(pet_v[idx])
+      if (has_petw) petw_m[k] <- q75_fin(petw_v[idx])
       if (has_bld) bld_m[k] <- q75_fin(bld_v[idx])
+      if (has_bldw) bldw_m[k] <- q75_fin(bldw_v[idx])
       if (has_pbr) pbr_m[k] <- q75_fin(pbr_v[idx])
+      if (has_ect1) ect1_m[k] <- med_fin(ect1_v[idx], 6L)
+      if (has_ect2) ect2_m[k] <- med_fin(ect2_v[idx], 6L)
+      if (has_ect3) ect3_m[k] <- med_fin(ect3_v[idx], 6L)
+      if (has_ectlc) ectlc_m[k] <- med_fin(ectlc_v[idx], 4L)
       if (has_dis) dis_m[k] <- if (any(!is.na(dr))) any(dr, na.rm = TRUE) else NA
       if (has_out_col) out_m[k] <- all(out_vec[idx], na.rm = TRUE)
     }
@@ -305,9 +341,11 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     list(
       h = h_out, nl = n_lv, fv = f_var, hi = h_idx, cs = cs_m,
       sol = sol_m, q25 = q25_m, di = di_m, df = dfrac_m,
-      ar = ar_m, circ = circ_m, arch = arch_m, area = area_m,
+      ar = ar_m, circ = circ_m, arch = arch_m, area = area_m, amm2 = amm2_m,
       sv = sv_m, av = av_m, pa = pa_m, hr = hr_m, lq = lq_m,
-      pet = pet_m, bld = bld_m, pbr = pbr_m, dis = dis_m, out = out_m
+      pet = pet_m, petw = petw_m, bld = bld_m, bldw = bldw_m, pbr = pbr_m,
+      ect1 = ect1_m, ect2 = ect2_m, ect3 = ect3_m, ectlc = ectlc_m,
+      dis = dis_m, out = out_m
     )
   }
 
@@ -326,9 +364,11 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
       h = do.call(rbind, lapply(c_list, `[[`, "h")),
       nl = pull_c("nl"), fv = pull_c("fv"), hi = pull_c("hi"), cs = pull_c("cs"),
       sol = pull_c("sol"), q25 = pull_c("q25"), di = pull_c("di"), df = pull_c("df"),
-      ar = pull_c("ar"), circ = pull_c("circ"), arch = pull_c("arch"), area = pull_c("area"),
+      ar = pull_c("ar"), circ = pull_c("circ"), arch = pull_c("arch"), area = pull_c("area"), amm2 = pull_c("amm2"),
       sv = pull_c("sv"), av = pull_c("av"), pa = pull_c("pa"), hr = pull_c("hr"), lq = pull_c("lq"),
-      pet = pull_c("pet"), bld = pull_c("bld"), pbr = pull_c("pbr"), dis = pull_c("dis"), out = pull_c("out")
+      pet = pull_c("pet"), petw = pull_c("petw"), bld = pull_c("bld"), bldw = pull_c("bldw"), pbr = pull_c("pbr"),
+      ect1 = pull_c("ect1"), ect2 = pull_c("ect2"), ect3 = pull_c("ect3"), ectlc = pull_c("ectlc"),
+      dis = pull_c("dis"), out = pull_c("out")
     )
   }
   colnames(res$h) <- all_harm_cols
@@ -356,7 +396,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   )
 
   other_meta <- intersect(
-    c("pixels_per_mm", "is_calibrated_mm", "species_standardized", "taxon", "institutionCode", "determiner_raw", "authority_tier", "type_status", "is_type_specimen", "anchor_tier_source",
+    c("pixels_per_mm", "is_calibrated_mm", "scale_source", "mask_is_upright", "species_standardized", "taxon", "institutionCode", "determiner_raw", "authority_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "is_promoted_anchor", "anchor_tier_source",
       "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "coordinateUncertainty",
       "year", "month", "day", "eventDate", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"),
     names(closed_leaf_df)
@@ -384,16 +424,25 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   spec_df$circularity <- res$circ
   spec_df$archetype_score <- res$arch
   spec_df$area_px <- res$area
+  if (has_amm2) spec_df$area_mm2 <- res$amm2
   spec_df$sym_var <- res$sv
   spec_df$asym_var <- res$av
   spec_df$pct_asymmetry <- res$pa
   spec_df$harmonic_roughness <- res$hr
   spec_df$leaf_quality_weight <- res$lq
   if (has_pet) spec_df$petiole_length_mm <- res$pet
+  if (has_petw) spec_df$petiole_width_mm <- res$petw
   if (has_bld) spec_df$blade_length_mm <- res$bld
+  if (has_bldw) spec_df$blade_width_mm <- res$bldw
   if (has_pbr) spec_df$petiole_to_blade_ratio <- res$pbr
+  if (has_ect1) spec_df$ECT_PC1 <- res$ect1
+  if (has_ect2) spec_df$ECT_PC2 <- res$ect2
+  if (has_ect3) spec_df$ECT_PC3 <- res$ect3
+  if (has_ectlc) spec_df$ect_lobe_complexity <- res$ectlc
   if (has_dis) spec_df$is_dissected <- res$dis
   if (has_out_col) spec_df$is_contour_outlier <- res$out
 
-  cbind(spec_df, as.data.frame(res$h))
+  out_spec_df <- cbind(spec_df, as.data.frame(res$h))
+  attr(out_spec_df, "step03_fast_aggregated") <- TRUE
+  out_spec_df
 }

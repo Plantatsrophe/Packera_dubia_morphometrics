@@ -228,7 +228,8 @@ def _build_master_view_ddl() -> str:
         v.infraspecific_taxon AS infraspecific_taxon,
         v.georef_qc_status AS georef_qc_status,
         COALESCE(rac.species_standardized, om.species_standardized, v.species_standardized) AS species_standardized,
-        COALESCE(rac.is_promoted_bronze, om.is_promoted_anchor, 0) AS is_promoted_anchor,
+        COALESCE(rac.is_promoted_bronze, om.is_promoted_anchor, om.is_promoted_bronze, 0) AS is_promoted_anchor,
+        COALESCE(rac.is_promoted_bronze, om.is_promoted_bronze, om.is_promoted_anchor, 0) AS is_promoted_bronze,
         COALESCE(rac.authority_weight, om.authority_weight) AS authority_weight,
         COALESCE(rac.spatial_balance_weight, v.spatial_balance_weight, 1.0) AS spatial_balance_weight,
         COALESCE(om.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm,
@@ -245,8 +246,10 @@ def _build_master_view_ddl() -> str:
         pi.is_bent_stem AS is_bent_stem,
         pi.petiole_length_px AS petiole_length_px,
         COALESCE(om.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm,
+        COALESCE(om.petiole_width_mm, pi.petiole_width_mm) AS petiole_width_mm,
         pi.blade_length_px AS blade_length_px,
         COALESCE(om.blade_length_mm, pi.blade_length_mm) AS blade_length_mm,
+        om.blade_width_mm AS blade_width_mm,
         COALESCE(om.petiole_to_blade_ratio, pi.petiole_to_blade_ratio) AS petiole_to_blade_ratio,
         pi.scape_to_basal_leaf_ratio AS scape_to_basal_leaf_ratio,
         pi.rosette_patch_path AS rosette_patch_path,
@@ -296,6 +299,7 @@ def _build_master_view_ddl() -> str:
         om.heteroblasty_ect_distance AS heteroblasty_ect_distance,
         om.aspect_ratio AS aspect_ratio,
         om.area_px AS area_px,
+        om.area_mm2 AS area_mm2,
         om.is_dissected AS is_dissected,
         om.centroid_size AS centroid_size,
         om.log_centsize AS log_centsize,
@@ -705,16 +709,28 @@ def _build_schema_ddl() -> str:
         catalogNumber TEXT NOT NULL,
         plant_individual_id INTEGER NOT NULL DEFAULT 0,
         leaf_id INTEGER NOT NULL,
+        mask_is_upright INTEGER,
         solidity REAL,
         dissection_index REAL,
         aspect_ratio REAL,
         area_px REAL,
+        area_mm2 REAL,
         is_dissected INTEGER,
         pixels_per_mm REAL,
         is_calibrated_mm INTEGER,
         petiole_length_mm REAL,
+        petiole_width_mm REAL,
         blade_length_mm REAL,
+        blade_width_mm REAL,
         petiole_to_blade_ratio REAL,
+        type_status TEXT,
+        is_type_specimen INTEGER DEFAULT 0,
+        is_promoted_bronze INTEGER DEFAULT 0,
+        is_promoted_anchor INTEGER DEFAULT 0,
+        anchor_tier_source TEXT,
+        authority_weight REAL,
+        is_passive INTEGER DEFAULT 0,
+        spatial_balance_weight REAL,
         {harm_ddl},
         sym_var REAL,
         asym_var REAL,
@@ -747,8 +763,10 @@ def _build_schema_ddl() -> str:
         plant_individual_id INTEGER NOT NULL DEFAULT 0,
         species_standardized TEXT,
         determiner_tier TEXT,
+        is_promoted_bronze INTEGER,
         is_promoted_anchor INTEGER,
         authority_weight REAL,
+        spatial_balance_weight REAL,
         is_passive INTEGER,
         pixels_per_mm REAL,
         is_calibrated_mm INTEGER,
@@ -778,9 +796,12 @@ def _build_schema_ddl() -> str:
         heteroblasty_ect_distance REAL,
         aspect_ratio REAL,
         area_px REAL,
+        area_mm2 REAL,
         is_dissected INTEGER,
         petiole_length_mm REAL,
+        petiole_width_mm REAL,
         blade_length_mm REAL,
+        blade_width_mm REAL,
         petiole_to_blade_ratio REAL,
         centroid_size REAL,
         log_centsize REAL,
@@ -965,6 +986,18 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("ECT_PC3", "REAL"),
             ("ect_lobe_complexity", "REAL"),
             ("ect_bilateral_asym", "REAL"),
+            ("mask_is_upright", "INTEGER"),
+            ("area_mm2", "REAL"),
+            ("petiole_width_mm", "REAL"),
+            ("blade_width_mm", "REAL"),
+            ("type_status", "TEXT"),
+            ("is_type_specimen", "INTEGER DEFAULT 0"),
+            ("is_promoted_bronze", "INTEGER DEFAULT 0"),
+            ("is_promoted_anchor", "INTEGER DEFAULT 0"),
+            ("anchor_tier_source", "TEXT"),
+            ("authority_weight", "REAL"),
+            ("is_passive", "INTEGER DEFAULT 0"),
+            ("spatial_balance_weight", "REAL"),
         ]
     ),
     "otu_morphometrics": tuple(
@@ -1009,6 +1042,13 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("min_congener_taxon", "TEXT"),
             ("open_set_novelty_p", "REAL"),
             ("is_confident_label_noise", "INTEGER"),
+            ("is_promoted_bronze", "INTEGER"),
+            ("is_promoted_anchor", "INTEGER"),
+            ("is_passive", "INTEGER"),
+            ("spatial_balance_weight", "REAL"),
+            ("area_mm2", "REAL"),
+            ("petiole_width_mm", "REAL"),
+            ("blade_width_mm", "REAL"),
         ]
     ),
     "spatial_rf_predictions": tuple(
@@ -1065,7 +1105,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261111
+PACKERA_SCHEMA_USER_VERSION: int = 20261112
 
 
 def _migrate_dynamic_schema_columns(
@@ -1157,7 +1197,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
                 _migrate_vouchers_schema_columns(conn)
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
-            if "leaf_zone" not in el_cols or "ect_path" not in el_cols or "mask_is_upright" not in el_cols or "petiole_width_mm" not in el_cols or "cauline_leaf_count" not in om_cols or "ECT_PC1" not in om_cols:
+            if "leaf_zone" not in el_cols or "ect_path" not in el_cols or "mask_is_upright" not in el_cols or "petiole_width_mm" not in el_cols or "cauline_leaf_count" not in om_cols or "ECT_PC1" not in om_cols or "blade_width_mm" not in om_cols or "is_promoted_bronze" not in om_cols:
                 _migrate_dynamic_schema_columns(conn, recreate_view=True)
             conn.execute("PRAGMA foreign_keys = ON;")
             return

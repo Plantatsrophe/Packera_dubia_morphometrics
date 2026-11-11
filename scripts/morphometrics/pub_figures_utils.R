@@ -1444,24 +1444,28 @@ export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path
 
   # 1. fourier_pcs.csv
   fourier_pcs_path <- file.path(tables_dir, "fourier_pcs.csv")
-  fourier_tmp <- paste0(fourier_pcs_path, ".tmp")
+  fourier_tmp <- paste0(fourier_pcs_path, ".", Sys.getpid(), ".tmp")
   .write_pub_csv(specimen_df, fourier_tmp)
   file.rename(fourier_tmp, fourier_pcs_path)
 
   # 2. symmetric_fourier_pcs.csv
   sym_cols <- intersect(
     c(
-      "catalogNumber", "plant_individual_id", "taxon", "scientificName", "determiner_tier",
-      "n_leaves", "leaf_quality_weight", "pct_asymmetry",
-      "sym_var", "asym_var", "harmonic_roughness", "is_contour_outlier",
-      "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
-      paste0("Sym_PC", 1:10), paste0("PC", 1:10)
+      "catalogNumber", "plant_individual_id", "taxon", "species_standardized", "scientificName",
+      "determiner_tier", "is_type_specimen", "is_promoted_anchor", "authority_weight", "is_passive",
+      "leaf_count", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source",
+      "leaf_quality_weight", "pct_asymmetry", "sym_var", "asym_var",
+      "harmonic_roughness", "is_contour_outlier", "area_mm2",
+      "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm",
+      "petiole_to_blade_ratio", "is_dissected",
+      "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity",
+      paste0("Sym_PC", 1:15), paste0("PC", 1:15)
     ),
     colnames(specimen_df)
   )
   sym_df <- if (length(sym_cols) > 0) specimen_df[, sym_cols, drop = FALSE] else specimen_df
   sym_pcs_path <- file.path(tables_dir, "symmetric_fourier_pcs.csv")
-  sym_tmp <- paste0(sym_pcs_path, ".tmp")
+  sym_tmp <- paste0(sym_pcs_path, ".", Sys.getpid(), ".tmp")
   .write_pub_csv(sym_df, sym_tmp)
   file.rename(sym_tmp, sym_pcs_path)
 
@@ -1529,21 +1533,31 @@ generate_step03_pub_figures <- function(
     default_grp
   )
 
-  var_pct <- c(48.2, 21.4)
-  if (!is.null(pca_fit) && !is.null(pca_fit$sdev) && length(pca_fit$sdev) >= 2) {
-    v <- (pca_fit$sdev^2) / max(sum(pca_fit$sdev^2), 1e-12) * 100
-    var_pct <- round(v[1:2], 1)
-  } else if (all(c("PC1", "PC2") %in% colnames(df))) {
-    v_emp <- c(stats::var(df$PC1, na.rm = TRUE), stats::var(df$PC2, na.rm = TRUE))
-    v_emp[!is.finite(v_emp)] <- 0
-    if (sum(v_emp) > 0) var_pct <- round((v_emp / sum(v_emp)) * 75.0, 1)
+  .empirical_pc_var_pct <- function(df_in, prefix = "PC", k_out = 3L) {
+    pc_c <- intersect(paste0(prefix, seq_len(15L)), colnames(df_in))
+    if (length(pc_c) == 0L) return(rep(0.0, k_out))
+    vv <- vapply(pc_c, function(cn) { v0 <- stats::var(suppressWarnings(as.numeric(df_in[[cn]])), na.rm = TRUE); if (is.finite(v0) && v0 > 0) v0 else 0.0 }, numeric(1))
+    tot_v <- sum(vv)
+    pct_v <- if (tot_v > 1e-12) round((vv / tot_v) * 100.0, 1) else rep(0.0, length(vv))
+    out_v <- rep(0.0, k_out)
+    out_v[seq_len(min(k_out, length(pct_v)))] <- pct_v[seq_len(min(k_out, length(pct_v)))]
+    out_v
   }
 
-  sym_var_pct <- var_pct
+  var_pct3 <- .empirical_pc_var_pct(df, "PC", 3L)
+  if (!is.null(pca_fit) && !is.null(pca_fit$sdev) && length(pca_fit$sdev) >= 2) {
+    v <- (pca_fit$sdev^2) / max(sum(pca_fit$sdev^2), 1e-12) * 100
+    var_pct3[seq_len(min(3L, length(v)))] <- round(v[seq_len(min(3L, length(v)))], 1)
+  }
+  var_pct <- var_pct3[1:2]
+
+  sym_var_pct3_emp <- .empirical_pc_var_pct(df, "Sym_PC", 3L)
+  if (sum(sym_var_pct3_emp) <= 0.0) sym_var_pct3_emp <- var_pct3
   if (!is.null(sym_pca) && !is.null(sym_pca$sdev) && length(sym_pca$sdev) >= 2) {
     vs <- (sym_pca$sdev^2) / max(sum(sym_pca$sdev^2), 1e-12) * 100
-    sym_var_pct <- round(vs[1:2], 1)
+    sym_var_pct3_emp[seq_len(min(3L, length(vs)))] <- round(vs[seq_len(min(3L, length(vs)))], 1)
   }
+  sym_var_pct <- sym_var_pct3_emp[1:2]
 
   if (!"PC1" %in% colnames(df)) df$PC1 <- 0
   if (!"PC2" %in% colnames(df)) df$PC2 <- 0
@@ -1649,7 +1663,7 @@ generate_step03_pub_figures <- function(
       pch = pt_pch,
       cex = 0.85,
       lwd = 1.05,
-      xlab = sprintf("Sym_PC1 (%.1f%% -- Blade Elongation & Petiole Ratio)", sym_var_pct[1]),
+      xlab = sprintf("Sym_PC1 (%.1f%% -- Lamina Elongation & Outline Taper)", sym_var_pct[1]),
       ylab = sprintf("Sym_PC2 (%.1f%% -- Lamina Base Shape & Ovate Taper)", sym_var_pct[2]),
       main = "A. 2D Basal Rosette EFA Morphospace & Inverse-Fourier Grid",
       group_vec = df$taxon_clean,
@@ -1687,7 +1701,7 @@ generate_step03_pub_figures <- function(
     cy_vec <- grid_lay$cy
 
     is_t1_pure <- if ("morph_tier_source" %in% colnames(df)) (is.na(df$morph_tier_source) | df$morph_tier_source != "Cauline_Only_Fallback") else rep(TRUE, nrow(df))
-    is_promo_row <- if ("is_promoted_anchor" %in% colnames(df)) as.logical(df$is_promoted_anchor) else rep(FALSE, nrow(df))
+    is_promo_row <- if ("is_promoted_anchor" %in% colnames(df)) as.logical(df$is_promoted_anchor) else if ("is_promoted_bronze" %in% colnames(df)) as.logical(df$is_promoted_bronze) else rep(FALSE, nrow(df))
     is_promo_row[is.na(is_promo_row)] <- FALSE
     is_gold_silv <- if ("determiner_tier" %in% colnames(df)) (df$determiner_tier %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver") | is_type_row | is_promo_row) else rep(TRUE, nrow(df))
 
@@ -1781,14 +1795,7 @@ generate_step03_pub_figures <- function(
 
   # Companion Figure 03a: Momocs Marginal Eigenleaf Matrix (PC1-PC3) & Homologous Radial Displacement vs. Focal Reference
   spc3 <- if ("Sym_PC3" %in% colnames(df)) as.numeric(df$Sym_PC3) else if ("PC3" %in% colnames(df)) as.numeric(df$PC3) else rep(0.0, nrow(df))
-  sym_var_pct3 <- c(sym_var_pct[1], sym_var_pct[2], 10.5)
-  if (!is.null(sym_pca) && !is.null(sym_pca$sdev) && length(sym_pca$sdev) >= 3) {
-    vs3 <- (sym_pca$sdev^2) / max(sum(sym_pca$sdev^2), 1e-12) * 100
-    sym_var_pct3 <- round(vs3[1:3], 1)
-  } else if (!is.null(pca_fit) && !is.null(pca_fit$sdev) && length(pca_fit$sdev) >= 3) {
-    vp3 <- (pca_fit$sdev^2) / max(sum(pca_fit$sdev^2), 1e-12) * 100
-    sym_var_pct3 <- round(vp3[1:3], 1)
-  }
+  sym_var_pct3 <- sym_var_pct3_emp
 
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(4.2, 4.4, 3.2, 1.0), cex.main = 0.90)
@@ -1987,21 +1994,19 @@ generate_step03_pub_figures <- function(
 
   .compute_cum_harmonic_power <- function(h_mat_in, n_h = 12L) {
     hp <- numeric(n_h)
-    if (!is.null(h_mat_in) && ncol(h_mat_in) >= 4) {
+    if (!is.null(h_mat_in) && ncol(h_mat_in) >= 2) {
       for (k in seq_len(n_h)) {
         c_idx <- c(paste0("A", k), paste0("B", k), paste0("C", k), paste0("D", k))
         avail <- intersect(c_idx, colnames(h_mat_in))
-        if (length(avail) > 0) {
-          hp[k] <- mean(rowSums(h_mat_in[, avail, drop = FALSE]^2, na.rm = TRUE), na.rm = TRUE)
-        } else {
-          hp[k] <- 1 / (k^2.2)
+        if (length(avail) > 0L) {
+          v_k <- mean(rowSums(h_mat_in[, avail, drop = FALSE]^2, na.rm = TRUE), na.rm = TRUE)
+          hp[k] <- if (is.finite(v_k) && v_k > 0.0) v_k else 0.0
         }
       }
-    } else {
-      hp <- 1 / ((1:n_h)^2.2)
     }
-    if (sum(hp, na.rm = TRUE) <= 0) hp <- 1 / ((1:n_h)^2.2)
-    cumsum(hp) / sum(hp) * 100
+    tot_hp <- sum(hp, na.rm = TRUE)
+    if (!is.finite(tot_hp) || tot_hp <= 0.0) return(rep(0.0, n_h))
+    cumsum(hp) / tot_hp * 100.0
   }
 
   .draw_contour_qc_panel <- function(sub_ldf, panel_title) {
@@ -2193,9 +2198,11 @@ generate_step03_pub_figures <- function(
     }
 
     if (is.null(manifest_path)) {
-      py_exec <- ".venv_LM3/bin/python"
+      py_cands <- c("LeafMachine3/.venv/bin/python", ".venv_LM3/bin/python", ".venv/bin/python", Sys.which("python3"))
+      py_cands <- py_cands[nzchar(py_cands) & file.exists(py_cands)]
+      py_exec <- if (length(py_cands) >= 1L) py_cands[1L] else ""
       script_p <- "scripts/vision/step02_figures.py"
-      if (file.exists(py_exec) && file.exists(script_p)) {
+      if (nzchar(py_exec) && file.exists(script_p)) {
         system2(py_exec, args = c(script_p, "--export-ect-exemplars", "--figures-dir", fdir, "--zone", zone), stdout = FALSE, stderr = FALSE)
         mp <- file.path(fdir, "ect_overlays", manifest_name)
         if (file.exists(mp)) manifest_path <- mp
@@ -2220,7 +2227,7 @@ generate_step03_pub_figures <- function(
   .draw_lm3_radial_ect_gallery <- function(sub_df, group_vec, group_cols, main_title, zone = "basal", fdir = NULL) {
     tier_info <- resolve_taxon_display_tier(sub_df, group_vec)
     disp_grp <- utils::head(tier_info$ordered_groups, 9L)
-    if (length(disp_grp) == 0L) disp_grp <- "Packera obovata"
+    if (length(disp_grp) == 0L) disp_grp <- default_grp
     n_disp <- length(disp_grp)
 
     manifest <- resolve_lm3_ect_overlays(sub_df, fdir, zone = zone)

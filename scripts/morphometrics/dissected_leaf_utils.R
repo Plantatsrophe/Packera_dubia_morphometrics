@@ -79,7 +79,6 @@ classify_and_partition_leaf_zones <- function(
   pbr <- if ("petiole_to_blade_ratio" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$petiole_to_blade_ratio)) else rep(NA_real_, n)
   area_px <- if ("area_px" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$area_px)) else rep(NA_real_, n)
   ba_cm2 <- if ("blade_area_cm2" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$blade_area_cm2)) else rep(NA_real_, n)
-  area_ok <- rep(TRUE, n)
 
   leaf_zone <- raw_zone
   is_fallback_vec <- rep(FALSE, n)
@@ -88,8 +87,7 @@ classify_and_partition_leaf_zones <- function(
   idx_by_grp <- split(seq_len(n), grp_keys)
 
   for (g_idx in idx_by_grp) {
-    lam_ok <- g_idx[area_ok[g_idx]]
-    if (length(lam_ok) == 0L) lam_ok <- g_idx
+    lam_ok <- g_idx
     if (length(lam_ok) == 0L) next
     all_explicit_cauline <- all(!is.na(raw_zone[lam_ok]) & raw_zone[lam_ok] == "cauline")
 
@@ -156,7 +154,6 @@ classify_and_partition_leaf_zones <- function(
   fac_df$dist_from_crown_norm <- d_crown
   fac_df$is_basal_fallback <- is_fallback_vec
   fac_df$is_cauline_only_individual <- is_caul_only_vec
-  fac_df$area_ok_flag <- area_ok
   fac_df
 }
 
@@ -204,40 +201,30 @@ filter_basal_lamina_contours <- function(
     min_cy_sheet = min_cy_sheet,
     fallback_band = fallback_band
   )
-  area_ok <- as.logical(fac_df$area_ok_flag)
-  fac_df$area_ok_flag <- NULL
   is_fallback_vec <- as.logical(fac_df$is_basal_fallback)
   grp_keys <- paste0(trimws(as.character(fac_df$catalogNumber)), "__", fac_df$plant_individual_id)
   idx_by_grp <- split(seq_len(n), grp_keys)
   n_fb_individuals <- sum(vapply(idx_by_grp, function(g_idx) any(is_fallback_vec[g_idx] & !fac_df$is_cauline_only_individual[g_idx]), logical(1)))
 
-  basal_keep <- area_ok & ((fac_df$leaf_zone == "basal") | is_fallback_vec)
+  basal_keep <- (fac_df$leaf_zone == "basal") | is_fallback_vec
   for (g_idx in idx_by_grp) {
-    if (!any(basal_keep[g_idx])) {
-      lam_ok <- g_idx[area_ok[g_idx]]
-      if (length(lam_ok) == 0L) lam_ok <- g_idx
-      if (length(lam_ok) > 0L) basal_keep[lam_ok[1L]] <- TRUE
+    if (!any(basal_keep[g_idx]) && length(g_idx) > 0L) {
+      basal_keep[g_idx[1L]] <- TRUE
     }
   }
   if (!any(basal_keep)) basal_keep <- rep(TRUE, n)
 
-  n_area_drop <- sum(!area_ok & !basal_keep)
-  n_caul_drop <- sum(area_ok & !basal_keep)
-  keep_mask <- if (isTRUE(retain_cauline_tagged)) {
-    km <- area_ok | basal_keep
-    if (!any(km)) rep(TRUE, n) else km
-  } else {
-    basal_keep
-  }
+  n_area_drop <- 0L
+  n_caul_drop <- sum(!basal_keep)
+  keep_mask <- if (isTRUE(retain_cauline_tagged)) rep(TRUE, n) else basal_keep
 
-  if (n_area_drop > 0L || n_caul_drop > 0L || n_fb_individuals > 0L) {
+  if (n_caul_drop > 0L || n_fb_individuals > 0L) {
     message(sprintf(
       paste0(
-        "Positional Homology & Basal Lamina Gate: retained %d / %d Tier 1 basal blades ",
-        "(excluded %d upper cauline, %d sub-floor blade fragments; ",
-        "lowest-lamina fallback individuals = %d)."
+        "Positional Homology & Basal Lamina Gate: classified %d / %d primary basal blades ",
+        "(cauline-partitioned = %d; lowest-lamina fallback individuals = %d)."
       ),
-      sum(basal_keep), n, n_caul_drop, n_area_drop, n_fb_individuals
+      sum(basal_keep), n, n_caul_drop, n_fb_individuals
     ))
   }
   fac_sub <- fac_df[keep_mask, , drop = FALSE]
@@ -647,14 +634,16 @@ summarize_otu_dissection_metrics <- function(grp_df) {
   } else {
     u_tip <- v_axis / v_len
   }
-  u_right <- c(-u_tip[2L], u_tip[1L])
+  # In Momocs Cartesian space (+X = lamina_tip, +Y = anatomical left, -Y = anatomical right),
+  # 90-deg clockwise from u_tip = (ux, uy) is u_right = (uy, -ux), matching Step 02 tip_up_directions().
+  u_right <- c(u_tip[2L], -u_tip[1L])
   cx <- mean(xy[, 1L]); cy <- mean(xy[, 2L])
   xy_c <- cbind(xy[, 1L] - cx, xy[, 2L] - cy)
   radii <- sqrt(xy_c[, 1L]^2 + xy_c[, 2L]^2)
   r_max <- max(radii, na.rm = TRUE)
   if (!is.finite(r_max) || r_max <= 1e-8) return(NULL)
   xy_n <- xy_c / r_max
-  # Project onto (u_right, -u_tip) in y-down screen frame so phi = 0 is North (leaf tip) ascending clockwise
+  # Sweep phi in [0, 2*pi) starting at phi = 0 (lamina_tip) and ascending clockwise toward u_right
   phis <- seq(0.0, 2.0 * pi * (1.0 - 1.0 / num_dirs), length.out = num_dirs)
   thresh <- seq(-1.0, 1.0, length.out = num_thresh)
   n_v <- nrow(xy_n)
@@ -665,7 +654,6 @@ summarize_otu_dissection_metrics <- function(grp_df) {
     dir_vec <- cos(phi_j) * u_tip + sin(phi_j) * u_right
     h_v <- as.numeric(xy_n[, 1L] * dir_vec[1L] + xy_n[, 2L] * dir_vec[2L])
     h_e <- pmax(h_v, h_v[next_idx])
-    v_counts <- tabulate(findInterval(thresh, sort(h_v)) + 1L, nbins = n_v + 1L)
     # Exact Euler characteristic of EmbeddedGraph cycle: chi(phi_j, t_i) = #V(h <= t_i) - #E(max(h_u, h_v) <= t_i)
     n_v_le <- findInterval(thresh, sort(h_v))
     n_e_le <- findInterval(thresh, sort(h_e))
@@ -673,6 +661,9 @@ summarize_otu_dissection_metrics <- function(grp_df) {
   }
   ect_mat
 }
+
+read_numpy_ect_r <- .read_numpy_ect_32x32_r
+compute_cycle_ect_r <- .compute_cycle_ect_32x32_r
 
 .summarize_and_symmetrize_ect_matrix <- function(ect_mat) {
   if (is.null(ect_mat) || !is.matrix(ect_mat) || nrow(ect_mat) < 4L || ncol(ect_mat) < 4L) {
@@ -725,11 +716,15 @@ compute_leaf_ect_features <- function(efa_df, coo_list = NULL, contours_dir = NU
 
   for (i in seq_len(n_leaves)) {
     cat_i <- trimws(as.character(efa_df$catalogNumber[i]))
+    pid_i <- if ("plant_individual_id" %in% names(efa_df) && !is.na(efa_df$plant_individual_id[i])) as.integer(efa_df$plant_individual_id[i]) else 0L
     lid_i <- if ("leaf_id" %in% names(efa_df) && !is.na(efa_df$leaf_id[i])) as.integer(efa_df$leaf_id[i]) else i
+    sid_i <- if ("shape_id" %in% names(efa_df) && !is.na(efa_df$shape_id[i])) trimws(as.character(efa_df$shape_id[i])) else ""
     ep_i <- if ("ect_path" %in% names(efa_df)) as.character(efa_df$ect_path[i]) else NA_character_
     cand_paths <- character(0)
     if (!is.na(ep_i) && nzchar(trimws(ep_i))) cand_paths <- c(cand_paths, trimws(ep_i))
     for (ed in ect_dirs) {
+      if (nzchar(sid_i)) cand_paths <- c(cand_paths, file.path(ed, sprintf("%s_ect.npy", sid_i)))
+      if (pid_i > 0L) cand_paths <- c(cand_paths, file.path(ed, sprintf("%s_p%d_leaf%d_ect.npy", cat_i, pid_i, lid_i)))
       cand_paths <- c(cand_paths, file.path(ed, sprintf("%s_leaf%d_ect.npy", cat_i, lid_i)))
     }
     for (cp in unique(cand_paths)) {
@@ -779,21 +774,37 @@ compute_leaf_ect_features <- function(efa_df, coo_list = NULL, contours_dir = NU
     storage.mode(M_ect) <- "double"
     M_ect[!is.finite(M_ect)] <- 0.0
     lz <- if ("leaf_zone" %in% names(efa_df)) tolower(trimws(as.character(efa_df$leaf_zone[valid_idx]))) else rep("basal", length(valid_idx))
-    bas_pos <- which(is.na(lz) | lz == "basal")
+    out_v <- if ("is_contour_outlier" %in% names(efa_df)) as.logical(efa_df$is_contour_outlier[valid_idx]) else rep(FALSE, length(valid_idx))
+    typ_v <- if ("is_type_specimen" %in% names(efa_df)) (!is.na(efa_df$is_type_specimen[valid_idx]) & as.logical(efa_df$is_type_specimen[valid_idx])) else rep(FALSE, length(valid_idx))
+    out_v[is.na(out_v) | typ_v] <- FALSE
+    wt_v <- if ("authority_weight" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$authority_weight[valid_idx])) else rep(1.0, length(valid_idx))
+    wt_v[!is.finite(wt_v) | wt_v < 0.0] <- 0.0
+
+    bas_pos <- which((is.na(lz) | lz == "basal") & !out_v)
+    if (length(bas_pos) < 2L) bas_pos <- which(is.na(lz) | lz == "basal")
     if (length(bas_pos) < 2L) bas_pos <- seq_along(valid_idx)
-    M_fit <- M_ect[bas_pos, , drop = FALSE]
+    ref_pos <- bas_pos[wt_v[bas_pos] > 0.0]
+    if (length(ref_pos) < 2L) ref_pos <- bas_pos
+
+    M_fit <- M_ect[ref_pos, , drop = FALSE]
+    w_fit <- wt_v[ref_pos]
+    if (sum(w_fit, na.rm = TRUE) <= 1e-12) w_fit <- rep(1.0, nrow(M_fit))
+    w_norm <- w_fit / sum(w_fit)
     col_v <- apply(M_fit, 2L, stats::var, na.rm = TRUE)
     act_c <- which(is.finite(col_v) & col_v > 1e-10)
     if (length(act_c) >= 1L) {
-      mu_fit <- colMeans(M_fit[, act_c, drop = FALSE], na.rm = TRUE)
+      mu_fit <- as.numeric(crossprod(w_norm, M_fit[, act_c, drop = FALSE]))
       X_fit <- sweep(M_fit[, act_c, drop = FALSE], 2L, mu_fit, "-")
-      svd_e <- tryCatch(svd(X_fit, nu = 0L, nv = min(3L, nrow(X_fit), ncol(X_fit))), error = function(e) NULL)
+      Z_fit <- sweep(X_fit, 1L, sqrt(w_norm), "*")
+      svd_e <- tryCatch(svd(Z_fit, nu = 0L, nv = min(3L, nrow(Z_fit), ncol(Z_fit))), error = function(e) NULL)
       if (!is.null(svd_e) && !is.null(svd_e$v) && ncol(svd_e$v) >= 1L) {
         X_all <- sweep(M_ect[, act_c, drop = FALSE], 2L, mu_fit, "-")
         sc_all <- X_all %*% svd_e$v
-        # Align ECT_PC1 sign positively with ect_lobe_complexity so higher ECT_PC1 = deeper dissection/lobe complexity
-        if (sum(is.finite(lobe_comp[valid_idx])) >= 3L && stats::sd(sc_all[, 1L], na.rm = TRUE) > 1e-8 && stats::sd(lobe_comp[valid_idx], na.rm = TRUE) > 1e-8) {
-          r_sign <- suppressWarnings(stats::cor(sc_all[, 1L], lobe_comp[valid_idx], use = "complete.obs"))
+        sc_ref <- sc_all[ref_pos, 1L]
+        lc_ref <- lobe_comp[valid_idx[ref_pos]]
+        # Align ECT_PC1 sign positively with ect_lobe_complexity strictly on active basal reference anchors
+        if (sum(is.finite(lc_ref)) >= 3L && stats::sd(sc_ref, na.rm = TRUE) > 1e-8 && stats::sd(lc_ref, na.rm = TRUE) > 1e-8) {
+          r_sign <- suppressWarnings(stats::cor(sc_ref, lc_ref, use = "complete.obs"))
           if (is.finite(r_sign) && r_sign < 0.0) {
             sc_all[, 1L] <- -sc_all[, 1L]
             svd_e$v[, 1L] <- -svd_e$v[, 1L]
@@ -802,8 +813,10 @@ compute_leaf_ect_features <- function(efa_df, coo_list = NULL, contours_dir = NU
         efa_df$ECT_PC1[valid_idx] <- round(sc_all[, 1L], 6)
         if (ncol(sc_all) >= 2L) efa_df$ECT_PC2[valid_idx] <- round(sc_all[, 2L], 6) else efa_df$ECT_PC2[valid_idx] <- 0.0
         if (ncol(sc_all) >= 3L) efa_df$ECT_PC3[valid_idx] <- round(sc_all[, 3L], 6) else efa_df$ECT_PC3[valid_idx] <- 0.0
-        ev_vals <- (svd_e$d^2) / max(1L, nrow(X_fit) - 1L)
-        attr(efa_df, "ect_basal_var_exp") <- round(ev_vals / max(sum(col_v[act_c]), 1e-12) * 100.0, 2)
+        denom_w <- max(1e-8, 1.0 - sum(w_norm^2))
+        tot_wvar <- sum(colSums(Z_fit^2, na.rm = TRUE)) / denom_w
+        ev_vals <- (svd_e$d^2) / denom_w
+        attr(efa_df, "ect_basal_var_exp") <- round(ev_vals / max(tot_wvar, 1e-12) * 100.0, 2)
       }
     }
   }
@@ -863,8 +876,9 @@ compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = 
       grp <- efa_df[r_idx, , drop = FALSE]
       keep_sub <- rep(TRUE, nrow(grp))
 
-      if ("is_contour_outlier" %in% names(grp) && any(!as.logical(grp$is_contour_outlier[keep_sub]), na.rm = TRUE)) {
-        keep_sub <- keep_sub & !is.na(grp$is_contour_outlier) & !as.logical(grp$is_contour_outlier)
+      is_type_grp <- if ("is_type_specimen" %in% names(grp)) (!is.na(grp$is_type_specimen) & as.logical(grp$is_type_specimen)) else rep(FALSE, nrow(grp))
+      if ("is_contour_outlier" %in% names(grp) && any((!as.logical(grp$is_contour_outlier[keep_sub])) | is_type_grp[keep_sub], na.rm = TRUE)) {
+        keep_sub <- keep_sub & ((!is.na(grp$is_contour_outlier) & !as.logical(grp$is_contour_outlier)) | is_type_grp)
       }
       grp <- grp[keep_sub, , drop = FALSE]
       r_idx_kept <- r_idx[keep_sub]
