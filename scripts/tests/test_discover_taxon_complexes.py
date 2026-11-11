@@ -263,7 +263,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
               stopifnot(file.exists(f_srf) && file.info(f_srf)$size > 1000)
 
               f_s07 <- file.path("{intra_fig_dir.as_posix()}", "integrative_taxonomic_synthesis.pdf")
-              render_step07_synthesis_plate_pdf(df, f_s07)
+              render_step06_synthesis_plate_pdf(df, f_s07)
               stopifnot(file.exists(f_s07) && file.info(f_s07)$size > 1000)
               cat("STEP08_INTRA_FIGS_OK\\n")
             }})

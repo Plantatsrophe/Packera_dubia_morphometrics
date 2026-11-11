@@ -985,16 +985,16 @@ if exclude_misidentified:
 
     runs_candidates = [run_dir.parent, root_data.parent / 'runs', Path.cwd() / 'runs']
     runs_base = next(
-        (rc for rc in runs_candidates if rc.is_dir() and any(rc.glob('*/outputs/reports/final_curation_triage.csv'))),
+        (rc for rc in runs_candidates if rc.is_dir() and any(rc.glob('*/data/tables/triage_queue.csv'))),
         run_dir.parent,
     )
     triage_files = []
     seen_resolved = set()
-    self_triage = (run_dir / 'outputs' / 'reports' / 'final_curation_triage.csv').resolve()
+    self_triage = (run_dir / 'data' / 'tables' / 'triage_queue.csv').resolve()
 
     for tok in tokens:
         if tok.upper() in ('ALL', '*'):
-            for p in sorted(runs_base.glob('*/outputs/reports/final_curation_triage.csv')):
+            for p in sorted(runs_base.glob('*/data/tables/triage_queue.csv')):
                 rp = p.resolve()
                 if rp != self_triage and rp not in seen_resolved and p.is_file() and p.stat().st_size > 0:
                     seen_resolved.add(rp)
@@ -1002,15 +1002,15 @@ if exclude_misidentified:
         else:
             cand_paths = [
                 Path(tok),
-                Path(tok) / 'outputs' / 'reports' / 'final_curation_triage.csv',
-                runs_base / tok / 'outputs' / 'reports' / 'final_curation_triage.csv',
-                root_data.parent / 'runs' / tok / 'outputs' / 'reports' / 'final_curation_triage.csv',
-                Path.cwd() / 'runs' / tok / 'outputs' / 'reports' / 'final_curation_triage.csv',
+                Path(tok) / 'data' / 'tables' / 'triage_queue.csv',
+                runs_base / tok / 'data' / 'tables' / 'triage_queue.csv',
+                root_data.parent / 'runs' / tok / 'data' / 'tables' / 'triage_queue.csv',
+                Path.cwd() / 'runs' / tok / 'data' / 'tables' / 'triage_queue.csv',
             ]
             matched = next((cp for cp in cand_paths if cp.is_file() and cp.stat().st_size > 0), None)
             if matched is None and db_run_count == 0:
                 print(
-                    f'[ERROR] --triage-source {tok!r} could not be resolved to a SQLite curation_triage run or final_curation_triage.csv file.',
+                    f'[ERROR] --triage-source {tok!r} could not be resolved to a SQLite curation_triage run or triage_queue.csv file.',
                     file=sys.stderr,
                 )
                 sys.exit(1)
@@ -1022,18 +1022,14 @@ if exclude_misidentified:
 
     if db_run_count == 0 and not triage_files:
         print(
-            f'[ERROR] --exclude-misidentified requested (triage_source={triage_source_raw!r}), but no SQLite curation_triage rows or runs/*/outputs/reports/final_curation_triage.csv files were found.',
+            f'[ERROR] --exclude-misidentified requested (triage_source={triage_source_raw!r}), but no SQLite curation_triage rows or runs/*/data/tables/triage_queue.csv files were found.',
             file=sys.stderr,
         )
         sys.exit(1)
 
     for tf in triage_files:
         tdf_tri = pd.read_csv(tf, low_memory=False)
-        sub_col = (
-            'taxonomic_treatment_subtype'
-            if 'taxonomic_treatment_subtype' in tdf_tri.columns
-            else ('taxonomic_treatment_sub' if 'taxonomic_treatment_sub' in tdf_tri.columns else None)
-        )
+        sub_col = 'taxonomic_treatment_subtype' if 'taxonomic_treatment_subtype' in tdf_tri.columns else None
         if sub_col is None or 'catalogNumber' not in tdf_tri.columns:
             print(
                 f'[ERROR] Triage report {tf} is missing required columns (catalogNumber, taxonomic_treatment_subtype).',
@@ -1482,12 +1478,12 @@ if [[ "${START_STEP}" -le 6 ]]; then
     --gmm-summary "${RUN_DIR}/outputs/reports/gmm_bayes_factors_summary.csv" \
     --niche-summary "${RUN_DIR}/outputs/reports/multimodal_spatial_rf_summary.csv" \
     --output-queue "${RUN_DIR}/data/tables/triage_queue.csv" \
-    --output-triage "${RUN_DIR}/outputs/reports/final_curation_triage.csv" \
-    --output-figure "${STEP06_FIGURE}" \
+    --output-plot "${STEP06_FIGURE}" \
     --output-report "${STEP06_REPORT}" \
     --output-html "${RUN_DIR}/outputs/reports/Triage_Dashboard_Interactive.html" \
     "${FOCAL_ARGS[@]}" \
-    "${INTRASPECIFIC_ARGS[@]}"
+    "${INTRASPECIFIC_ARGS[@]}" \
+    "${DEMO_FLAG[@]}"
 fi
 
 # Finalize run_metadata.json and SQLite pipeline_runs with end timestamp and table row counts

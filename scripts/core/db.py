@@ -2103,7 +2103,7 @@ def ingest_existing_run_tables_into_db(
     """
     Ingest Step 03-07 run-scoped CSV outputs (`leaf_efa_harmonics_individual.csv`,
     `leaf_efa_harmonics.csv`, `morphometric_flags.csv`,
-    `multimodal_conflict_flags.csv`, `triage_queue.csv` / `final_curation_triage.csv`)
+    `multimodal_conflict_flags.csv`, `triage_queue.csv`)
     into Tier B SQLite tables with full dynamic `A1..D24`, `PC1..PC15`,
     and 19-variable `bio1..bio19` support.
     """
@@ -2141,8 +2141,6 @@ def ingest_existing_run_tables_into_db(
         )
 
     tri_path = t_dir / "triage_queue.csv"
-    if not tri_path.is_file():
-        tri_path = t_dir.parent / "outputs" / "reports" / "final_curation_triage.csv"
     tri_rows = _read_csv_dicts(tri_path)
     if tri_rows:
         norm_tri: List[Dict[str, Any]] = []
@@ -2150,12 +2148,39 @@ def ingest_existing_run_tables_into_db(
             cat = _to_str(r.get("catalogNumber"))
             if not cat:
                 continue
-            d_tri: Dict[str, Any] = dict(r)
-            d_tri["run_id"] = eff_run
-            d_tri["catalogNumber"] = cat
-            d_tri["plant_individual_id"] = _to_int(r.get("plant_individual_id"), default=0) or 0
-            if "is_completed_voucher" in d_tri:
-                d_tri["is_completed_voucher"] = _to_bool_int(d_tri.get("is_completed_voucher"))
+            d_tri: Dict[str, Any] = {
+                "run_id": eff_run,
+                "catalogNumber": cat,
+                "plant_individual_id": _to_int(r.get("plant_individual_id"), default=0) or 0,
+            }
+            for sc in (
+                "taxonomic_status_call",
+                "recommended_determination",
+                "taxonomic_treatment_broad",
+                "taxonomic_treatment_subtype",
+                "synthesis_triage_priority",
+                "synthesis_triage_action",
+                "synthesis_rationale",
+            ):
+                if sc in r:
+                    d_tri[sc] = _to_str(r.get(sc))
+            for ic in ("n_available_modalities",):
+                if ic in r:
+                    d_tri[ic] = _to_int(r.get(ic))
+            for bc in ("cryptic_cluster_cohesion_pass", "is_completed_voucher"):
+                if bc in r:
+                    d_tri[bc] = _to_bool_int(r.get(bc))
+            for fc in (
+                "w_morph_kappa",
+                "w_edaphic_kappa",
+                "w_pheno_kappa",
+                "probabilistic_consensus_conflict",
+                "probabilistic_consensus_score",
+                "hopkins_adjusted_doy",
+                "delta_doy_resid",
+            ):
+                if fc in r:
+                    d_tri[fc] = _to_float(r.get(fc))
             norm_tri.append(d_tri)
         run_counts["curation_triage"] = upsert_rows_generic(
             conn, "curation_triage", norm_tri, ("run_id", "catalogNumber", "plant_individual_id")

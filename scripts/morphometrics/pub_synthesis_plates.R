@@ -363,14 +363,14 @@ export_step05d_geographic_and_hopkins <- function(
 }
 
 # ==============================================================================
-# Step 07 Figures:
-#   - fig07_multimodal_discordance_summary.{pdf,png}:
+# Step 06 Figures:
+#   - fig06_multimodal_discordance_summary.{pdf,png}:
 #       Panel A: Modality-Specific Conflict Rates
 #       Panel B: Recorded Taxon x Recommended Determination Reassignment Matrix
-#   - fig07b_taxonomic_treatment_summary.{pdf,png}:
+#   - fig06b_taxonomic_treatment_summary.{pdf,png}:
 #       5-Category Canonical Taxonomic Treatment Palette
 # ==============================================================================
-generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
+generate_step06_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
   fdir <- resolve_active_figures_dir(reference_path = out_fig_pdf)
   if (is.null(triage_df) || nrow(triage_df) == 0) return(invisible(NULL))
 
@@ -415,7 +415,7 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
   }
 
   # ----------------------------------------------------------------------------
-  # Figure 07a: Modality-Specific Discordance & Recorded x Recommended Reassignment Matrix
+  # Figure 06a: Modality-Specific Discordance & Recorded x Recommended Reassignment Matrix
   # ----------------------------------------------------------------------------
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(5.4, 5.4, 3.4, 1.2))
@@ -496,10 +496,10 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
     graphics::axis(1, at = seq_len(nc), labels = col_labels, tick = FALSE, font = 3, cex.axis = cex_ax_x, las = if (nc > 5L) 2 else 1)
     graphics::axis(2, at = rev(seq_len(nr)), labels = tx_labels, las = 1, tick = FALSE, font = 3, cex.axis = cex_ax_y)
     graphics::box(col = "grey75")
-  }, fdir, "fig07_multimodal_discordance_summary", width = 13.0, height = 5.6, dpi = 300)
+  }, fdir, "fig06_multimodal_discordance_summary", width = 13.0, height = 5.6, dpi = 300)
 
   # ----------------------------------------------------------------------------
-  # Figure 07b: Biological Taxonomic Treatments (5-Category Canonical Palette)
+  # Figure 06b: Biological Taxonomic Treatments (5-Category Canonical Palette)
   # ----------------------------------------------------------------------------
   sub_col <- if ("taxonomic_treatment_subtype" %in% colnames(triage_df)) {
     as.character(triage_df$taxonomic_treatment_subtype)
@@ -622,18 +622,18 @@ generate_step07_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
         cex = 0.72, bty = "n"
       )
     }
-  }, fdir, "fig07b_taxonomic_treatment_summary", width = 13.5, height = 5.8, dpi = 300)
+  }, fdir, "fig06b_taxonomic_treatment_summary", width = 13.5, height = 5.8, dpi = 300)
 
   invisible(TRUE)
 }
 
 # ==============================================================================
-# Offloaded Reusable Synthesis & Complex Discovery Plates (Steps 07 & 08)
+# Offloaded Reusable Synthesis & Complex Discovery Plates (Steps 06 & 07)
 # ==============================================================================
-render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
+render_step06_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   message("Rendering 6-panel integrative synthesis figure to ", out_pdf, "...")
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
-  if (!("can3" %in% names(df))) df$can3 <- if ("PC3" %in% names(df)) suppressWarnings(as.numeric(df$PC3)) else 0.0
+  if (!("can3" %in% names(df))) df$can3 <- if ("PC3" %in% names(df)) suppressWarnings(as.numeric(df$PC3)) else NA_real_
   can1_pct <- NA_real_; can2_pct <- NA_real_
   loocv_acc <- if ("loocv_accuracy" %in% names(df) && any(!is.na(df$loocv_accuracy))) round(100 * stats::median(as.numeric(df$loocv_accuracy), na.rm = TRUE), 1) else NA_real_
   cda_candidates <- unique(stats::na.omit(c(cda_summary, "data/tables/cda_summary.csv", "outputs/reports/cda_summary.csv")))
@@ -872,7 +872,7 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   # ----------------------------------------------------------------------------
   conf_sub <- df_comp
   conf_score <- rep(NA_real_, nrow(conf_sub))
-  for (cc in c("consensus_confidence", "multimodal_consensus_prob", "cda_posterior_prob", "edaphic_rf_prob")) {
+  for (cc in c("probabilistic_consensus_score", "consensus_confidence", "cda_posterior_prob", "rf_predicted_prob")) {
     if (cc %in% names(conf_sub)) {
       v_cc <- suppressWarnings(as.numeric(conf_sub[[cc]]))
       conf_score <- ifelse(is.finite(conf_score), conf_score, v_cc)
@@ -1047,11 +1047,19 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   stream_lvls <- c(
     "1. Type Baseline Control",
     "2. EFA/CDA Morphology",
-    "3. DINOv2 Vision Audit",
+    "3. Topological ECT & OSR",
     "4. 10m-30m Edaphic Niche",
     "5. Hopkins Anthesis Phenology",
     "6. Padial Status"
   )
+  sel_f_toks <- if ("selected_morph_features" %in% names(df_comp)) {
+    raw_sf <- as.character(stats::na.omit(df_comp$selected_morph_features))
+    raw_sf <- trimws(raw_sf[nzchar(trimws(raw_sf))])
+    if (length(raw_sf) > 0L) intersect(unique(trimws(unlist(strsplit(raw_sf, ";", fixed = TRUE)))), names(df_comp)) else character(0)
+  } else character(0)
+  p_wett_df <- max(2L, if (length(sel_f_toks) > 0L) length(sel_f_toks) else length(intersect(c("PC1", "PC2", "PC3", "can1", "can2", "can3"), names(df_comp))))
+  chisq95_wett <- stats::qchisq(0.95, df = p_wett_df)
+
   ev_rows <- list()
   for (tx in wett_tx) {
     sub_t <- df_comp[df_comp$plot_group == tx, , drop = FALSE]
@@ -1059,62 +1067,68 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     sp_t <- as.character(sub_t$species_standardized)
 
     # 2. EFA/CDA Morphology
-    m_ok <- if ("cda_predicted_taxon" %in% names(sub_t) && any(!is.na(sub_t$cda_predicted_taxon))) {
-      sub_t$cda_predicted_taxon == tx | sub_t$cda_predicted_taxon == sp_t
-    } else if ("morphometric_outlier_flag" %in% names(sub_t)) {
+    m_ok <- if ("cda_predicted_taxon" %in% names(sub_t) && any(!is.na(sub_t$cda_predicted_taxon) & nzchar(trimws(as.character(sub_t$cda_predicted_taxon))))) {
+      has_m_row <- !is.na(sub_t$cda_predicted_taxon) & nzchar(trimws(as.character(sub_t$cda_predicted_taxon)))
+      ifelse(has_m_row, sub_t$cda_predicted_taxon == tx | sub_t$cda_predicted_taxon == sp_t, NA)
+    } else if ("morphometric_outlier_flag" %in% names(sub_t) && any(!is.na(sub_t$morphometric_outlier_flag))) {
       !as.logical(sub_t$morphometric_outlier_flag)
     } else {
-      sub_t$Treatment_Clean == "Confirmed Species"
+      rep(NA, nrow(sub_t))
     }
-    pct_m <- 100 * mean(m_ok, na.rm = TRUE); if (!is.finite(pct_m)) pct_m <- 0.0
+    pct_m <- if (any(!is.na(m_ok))) 100 * mean(m_ok, na.rm = TRUE) else NA_real_
 
     # 1. Type Baseline Control
-    t_ok <- if ("type_outlier_flag" %in% names(sub_t) && any(!is.na(sub_t$type_outlier_flag))) {
-      !as.logical(sub_t$type_outlier_flag)
-    } else if ("mahalanobis_d2_type" %in% names(sub_t) && any(is.finite(suppressWarnings(as.numeric(sub_t$mahalanobis_d2_type))))) {
-      suppressWarnings(as.numeric(sub_t$mahalanobis_d2_type)) <= stats::qchisq(0.95, df = 2)
-    } else if ("nearest_type_morph_taxon" %in% names(sub_t) && any(!is.na(sub_t$nearest_type_morph_taxon))) {
-      sub_t$nearest_type_morph_taxon == tx | sub_t$nearest_type_morph_taxon == sp_t
+    t_ok <- if ("type_morph_mahal_d2" %in% names(sub_t) && any(is.finite(suppressWarnings(as.numeric(sub_t$type_morph_mahal_d2))))) {
+      d2_t <- suppressWarnings(as.numeric(sub_t$type_morph_mahal_d2))
+      ifelse(is.finite(d2_t), d2_t <= chisq95_wett, NA)
+    } else if ("nearest_type_morph_taxon" %in% names(sub_t) && any(!is.na(sub_t$nearest_type_morph_taxon) & nzchar(trimws(as.character(sub_t$nearest_type_morph_taxon))))) {
+      has_nt <- !is.na(sub_t$nearest_type_morph_taxon) & nzchar(trimws(as.character(sub_t$nearest_type_morph_taxon)))
+      ifelse(has_nt, sub_t$nearest_type_morph_taxon == tx | sub_t$nearest_type_morph_taxon == sp_t, NA)
     } else {
-      m_ok
+      rep(NA, nrow(sub_t))
     }
-    pct_t <- 100 * mean(t_ok, na.rm = TRUE); if (!is.finite(pct_t)) pct_t <- pct_m
+    pct_t <- if (any(!is.na(t_ok))) 100 * mean(t_ok, na.rm = TRUE) else NA_real_
 
-    # 3. DINOv2 Vision / Unsupervised GMM Morphotype Core Audit
-    pct_v <- if ("vision_conflict_flag" %in% names(sub_t) && any(!is.na(sub_t$vision_conflict_flag))) {
-      100 * mean(!as.logical(sub_t$vision_conflict_flag), na.rm = TRUE)
-    } else if ("dinov2_predicted_taxon" %in% names(sub_t) && any(!is.na(sub_t$dinov2_predicted_taxon))) {
-      100 * mean(sub_t$dinov2_predicted_taxon == tx | sub_t$dinov2_predicted_taxon == sp_t, na.rm = TRUE)
+    # 3. Topological ECT & Open-Set Recognition (OSR)
+    pct_v <- if ("open_set_novelty_p" %in% names(sub_t) && any(is.finite(suppressWarnings(as.numeric(sub_t$open_set_novelty_p))))) {
+      osr_p <- suppressWarnings(as.numeric(sub_t$open_set_novelty_p))
+      100 * mean(osr_p[is.finite(osr_p)] >= 0.05)
     } else if ("is_typical_morphotype" %in% names(sub_t) && any(!is.na(sub_t$is_typical_morphotype))) {
       100 * mean(suppressWarnings(as.numeric(as.logical(sub_t$is_typical_morphotype))) > 0, na.rm = TRUE)
     } else if ("gmm_uncertainty" %in% names(sub_t) && any(is.finite(suppressWarnings(as.numeric(sub_t$gmm_uncertainty))))) {
-      100 * mean(suppressWarnings(as.numeric(sub_t$gmm_uncertainty)) <= 0.30, na.rm = TRUE)
+      gu <- suppressWarnings(as.numeric(sub_t$gmm_uncertainty))
+      100 * mean(gu[is.finite(gu)] <= 0.30)
     } else {
-      50.0
+      NA_real_
     }
-    if (!is.finite(pct_v)) pct_v <- 50.0
+    if (!is.finite(pct_v)) pct_v <- NA_real_
 
-    # 4. 10m-30m Edaphic Niche
-    e_ok <- if ("edaphic_best_fit_taxon" %in% names(sub_t) && any(!is.na(sub_t$edaphic_best_fit_taxon))) {
-      sub_t$edaphic_best_fit_taxon == tx | sub_t$edaphic_best_fit_taxon == sp_t
-    } else if ("edaphic_conflict_flag" %in% names(sub_t) && any(!is.na(sub_t$edaphic_conflict_flag))) {
-      !as.logical(sub_t$edaphic_conflict_flag)
+    # 4. 10m-30m Edaphic Niche (strictly observed ecological rows; NA if taxon lacks georeferenced predictions)
+    ed_col_f <- if ("edaphic_best_fit_taxon" %in% names(sub_t) && any(!is.na(sub_t$edaphic_best_fit_taxon) & nzchar(trimws(as.character(sub_t$edaphic_best_fit_taxon))))) {
+      as.character(sub_t$edaphic_best_fit_taxon)
+    } else if ("rf_predicted_taxon" %in% names(sub_t) && any(!is.na(sub_t$rf_predicted_taxon) & nzchar(trimws(as.character(sub_t$rf_predicted_taxon))))) {
+      as.character(sub_t$rf_predicted_taxon)
     } else {
-      m_ok
+      rep(NA_character_, nrow(sub_t))
     }
-    pct_e <- 100 * mean(e_ok, na.rm = TRUE); if (!is.finite(pct_e)) pct_e <- pct_m
+    valid_ed_f <- !is.na(ed_col_f) & nzchar(trimws(ed_col_f))
+    pct_e <- if (any(valid_ed_f)) 100 * mean(ed_col_f[valid_ed_f] == tx | ed_col_f[valid_ed_f] == sp_t[valid_ed_f], na.rm = TRUE) else NA_real_
+    if (!is.finite(pct_e)) pct_e <- NA_real_
 
-    # 5. Hopkins Anthesis Phenology
-    p_ok <- if ("phenology_conflict_flag" %in% names(sub_t) && any(!is.na(sub_t$phenology_conflict_flag))) {
-      !as.logical(sub_t$phenology_conflict_flag)
-    } else if ("delta_doy_resid" %in% names(sub_t) && any(!is.na(sub_t$delta_doy_resid))) {
-      abs(suppressWarnings(as.numeric(sub_t$delta_doy_resid))) < 14.0
-    } else if ("delta_doy" %in% names(sub_t) && any(!is.na(sub_t$delta_doy))) {
-      abs(suppressWarnings(as.numeric(sub_t$delta_doy))) < 14.0
+    # 5. Hopkins Anthesis Phenology (strictly observed active-anthesis residuals; NA if taxon lacks dated anthesis sheets)
+    dd_col_f <- if ("delta_doy_resid" %in% names(sub_t)) {
+      suppressWarnings(as.numeric(sub_t$delta_doy_resid))
+    } else if ("delta_doy" %in% names(sub_t)) {
+      anth_f <- if ("is_active_anthesis" %in% names(sub_t)) as.logical(sub_t$is_active_anthesis) else rep(TRUE, nrow(sub_t))
+      anth_f[is.na(anth_f)] <- FALSE
+      dd_tmp <- suppressWarnings(as.numeric(sub_t$delta_doy))
+      ifelse(anth_f, dd_tmp, NA_real_)
     } else {
-      m_ok
+      rep(NA_real_, nrow(sub_t))
     }
-    pct_p <- 100 * mean(p_ok, na.rm = TRUE); if (!is.finite(pct_p)) pct_p <- pct_m
+    valid_ph_f <- is.finite(dd_col_f)
+    pct_p <- if (any(valid_ph_f)) 100 * mean(abs(dd_col_f[valid_ph_f]) < 14.0, na.rm = TRUE) else NA_real_
+    if (!is.finite(pct_p)) pct_p <- NA_real_
 
     # Modal Padial et al. (2010) status code (CCS, ECS, HYB, UCS)
     pad_vec <- if ("padial_status_code" %in% names(sub_t) && any(nzchar(as.character(stats::na.omit(sub_t$padial_status_code))))) {
@@ -1127,10 +1141,11 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     }
     pad_vec <- pad_vec[pad_vec %in% c("CCS", "ECS", "HYB", "UCS")]
     modal_padial <- if (length(pad_vec) > 0L) names(sort(table(pad_vec), decreasing = TRUE))[1L] else "CCS"
-    mean_pct <- round(mean(c(pct_t, pct_m, pct_v, pct_e, pct_p), na.rm = TRUE), 1)
+    obs_streams <- c(pct_t, pct_m, pct_v, pct_e, pct_p)
+    mean_pct <- if (any(is.finite(obs_streams))) round(mean(obs_streams[is.finite(obs_streams)]), 1) else NA_real_
 
-    pct_vals <- round(c(pct_t, pct_m, pct_v, pct_e, pct_p, mean_pct), 1)
-    cell_lbls <- c(sprintf("%.0f%%", pct_vals[1:5]), modal_padial)
+    pct_vals <- c(round(obs_streams, 1), mean_pct)
+    cell_lbls <- c(ifelse(is.finite(pct_vals[1:5]), sprintf("%.0f%%", pct_vals[1:5]), "NA"), modal_padial)
 
     ev_rows[[length(ev_rows) + 1L]] <- data.frame(
       Species = gsub("^Packera\\s+", "P. ", tx),
@@ -1146,8 +1161,8 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
     data.frame(
       Species = gsub("^Packera\\s+", "P. ", active_tx[1L]),
       Stream = factor(stream_lvls, levels = stream_lvls),
-      Concordance_Pct = c(90, 90, 90, 90, 90, 90),
-      Cell_Label = c("90%", "90%", "90%", "90%", "90%", "CCS"),
+      Concordance_Pct = rep(NA_real_, 6L),
+      Cell_Label = c(rep("NA", 5L), "CCS"),
       stringsAsFactors = FALSE
     )
   }
@@ -1159,9 +1174,9 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
       ggplot2::aes(label = Cell_Label),
       size = min(2.8, max(1.8, 18.0 / max(length(sp_wett_lvls), 1L))),
       fontface = "bold",
-      color = ifelse(ev_df$Concordance_Pct >= 55, "white", "#111111")
+      color = ifelse(!is.finite(ev_df$Concordance_Pct), "#475569", ifelse(ev_df$Concordance_Pct >= 55, "white", "#111111"))
     ) +
-    ggplot2::scale_fill_gradient2(low = "#E69F00", mid = "#56B4E9", high = "#0072B2", midpoint = 65, limits = c(0, 100)) +
+    ggplot2::scale_fill_gradient2(low = "#E69F00", mid = "#56B4E9", high = "#0072B2", midpoint = 65, limits = c(0, 100), na.value = "#E2E8F0") +
     thm +
     ggplot2::theme(
       axis.text.x = ggplot2::element_text(angle = 24, hjust = 1, size = 7.0, face = "bold"),
@@ -1192,7 +1207,7 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   invisible(out_pdf)
 }
 
-render_step08_complex_discovery_pdf <- function(W, part_res, morph_res, vis_res, out_pdf) {
+render_step07_complex_discovery_pdf <- function(W, part_res, out_pdf) {
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
   cdf <- part_res$complexes_df
   taxa <- cdf$species_standardized

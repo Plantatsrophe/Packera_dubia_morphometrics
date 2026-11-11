@@ -3737,8 +3737,7 @@ main <- function() {
   if (!file.exists(opts$morphometrics)) {
     for (cand_m in c(
       file.path(dirname(opts$vouchers), "morphometric_flags.csv"),
-      "data/tables/morphometric_flags.csv",
-      file.path(dirname(opts$vouchers), "morphometrics_misidentification_flags.csv")
+      "data/tables/morphometric_flags.csv"
     )) {
       if (file.exists(cand_m)) { opts$morphometrics <- cand_m; break }
     }

@@ -1167,28 +1167,29 @@ def resolve_voucher_us_county(
             idx = int(hit) if (np is not None and isinstance(hit, (int, np.integer))) or isinstance(hit, int) else geom_id_map.get(id(hit), -1)
             if idx >= 0 and geoms[idx].covers(pt):
                 st_hit, co_hit = ck_list[idx].split("|", 1)
-                return st_hit, co_hit, False
+                return st_hit, co_hit, (st_hit not in _US_FULL_STATE_NAMES)
 
-        # Coastal / estuarine tolerance (~2 km)
-        pt_buf = pt.buffer(0.02)
-        best_idx = -1
-        best_dist = float("inf")
-        for hit in tree.query(pt_buf):
-            idx = int(hit) if (np is not None and isinstance(hit, (int, np.integer))) or isinstance(hit, int) else geom_id_map.get(id(hit), -1)
-            if idx >= 0 and geoms[idx].intersects(pt_buf):
-                st_cand = ck_list[idx].split("|", 1)[0]
-                if st_dwc and st_dwc in _US_FULL_STATE_NAMES and st_cand != st_dwc:
-                    continue
-                d_val = float(geoms[idx].distance(pt))
-                if d_val < best_dist:
-                    best_dist = d_val
-                    best_idx = idx
-        if best_idx >= 0:
-            st_hit, co_hit = ck_list[best_idx].split("|", 1)
-            return st_hit, co_hit, False
+        # Coastal / estuarine tolerance (~2 km) strictly for US / unlabeled coastal points (never snap non-US border points into US counties)
+        if not is_explicit_non_us:
+            pt_buf = pt.buffer(0.02)
+            best_idx = -1
+            best_dist = float("inf")
+            for hit in tree.query(pt_buf):
+                idx = int(hit) if (np is not None and isinstance(hit, (int, np.integer))) or isinstance(hit, int) else geom_id_map.get(id(hit), -1)
+                if idx >= 0 and geoms[idx].intersects(pt_buf):
+                    st_cand = ck_list[idx].split("|", 1)[0]
+                    if st_dwc and st_dwc in _US_FULL_STATE_NAMES and st_cand != st_dwc:
+                        continue
+                    d_val = float(geoms[idx].distance(pt))
+                    if d_val < best_dist:
+                        best_dist = d_val
+                        best_idx = idx
+            if best_idx >= 0:
+                st_hit, co_hit = ck_list[best_idx].split("|", 1)
+                return st_hit, co_hit, (st_hit not in _US_FULL_STATE_NAMES)
 
     if is_explicit_non_us:
-        return st_dwc, None, True
+        return st_dwc, _normalize_us_county_name(county, state_norm=st_dwc), True
 
     if st_dwc and st_dwc in _US_FULL_STATE_NAMES:
         co_dwc = _normalize_us_county_name(county, state_norm=st_dwc)

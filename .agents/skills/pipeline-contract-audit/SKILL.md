@@ -103,7 +103,7 @@ if missing:
     print(f"[FAIL] Missing pipeline scripts: {missing}")
     sys.exit(1)
 
-s_db = Path("scripts/core/db.py").read_text()
+s_db = Path("scripts/core/db.py").read_text() + Path("scripts/core/db_schema.py").read_text()
 s_db_r = Path("scripts/core/db_utils.R").read_text()
 s_harv = Path("scripts/core/harvester.py").read_text()
 s02 = Path("scripts/pipeline/02_segment_and_extract.py").read_text()
@@ -163,8 +163,8 @@ python3 -c '
 import re, sys
 from pathlib import Path
 banned = [
-    "clean" + "lab", "dino" + "v2", "vision_" + "xai", "05_clean" + "lab", "06_multi" + "modal",
-    "07_tri" + "age", "08_dis" + "cover", "step" + "06_", "fig" + "08", "target_" + "species",
+    "clean" + "lab", "dino" + "v2", "vision_" + "xai", "05_clean" + "lab", "06_multimodal_" + "spatial",
+    "07_tri" + "age", "08_dis" + "cover", "step07_" + "pub", "fig" + "08", "target_" + "species",
     "hard" + "coded", "operational" + "iz", "lever" + "ag", "util" + "iz", "holis" + "tic",
     "multi" + "faceted", "para" + "digm",
 ]

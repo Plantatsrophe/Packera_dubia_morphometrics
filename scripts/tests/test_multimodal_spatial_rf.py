@@ -1300,12 +1300,12 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             stopifnot(!("fine_bedrock_depth_cm" %in% rf_noleak$importance$Predictor))
             stopifnot(rf_noleak$Spatial_Block_CV_Accuracy < 0.72)
 
-            # 3b. Retained predictor (44/80 = 55% finite, 45% NA) with bimodal symmetric overlap (Bayes ceiling = 52.5%):
-            # Leaky species-median imputation would assign 39.0 to all sp1 NAs and 161.0 to all sp2 NAs (>75% acc);
+            # 3b. Retained predictor (44/80 = 55% finite, 45% NA) sharing identical values {40.0, 160.0} (Bayes ceiling = 52.5%):
+            # Leaky species-median imputation would assign 40.0 to all sp1 NAs and 160.0 to all sp2 NAs (75% acc);
             # taxon-blind fold-median imputation keeps accuracy near 50% (< 0.72)!
             bed_55 <- rep(NA_real_, n_lk)
-            bed_55[1:22] <- c(rep(39.0, 12), rep(160.0, 10))
-            bed_55[41:62] <- c(rep(40.0, 10), rep(161.0, 12))
+            bed_55[1:22] <- c(rep(40.0, 12), rep(160.0, 10))
+            bed_55[41:62] <- c(rep(40.0, 10), rep(160.0, 12))
             df_lk_55 <- df_lk_sparse
             df_lk_55$fine_bedrock_depth_cm <- bed_55
             rf_noleak_55 <- compute_spatial_rf_mems(df_lk_55, c("bio1_temp_mean", "bio12_precip_annual", "fine_bedrock_depth_cm"), n_trees = 100)

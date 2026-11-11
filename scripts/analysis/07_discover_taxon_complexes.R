@@ -91,10 +91,8 @@ load_and_merge_inputs <- function(opts) {
   if (!is.null(res$morph_df) && nrow(res$morph_df) > 0L && !("taxonomic_treatment_subtype" %in% names(res$morph_df))) {
     run_d <- Sys.getenv("PACKERA_RUN_DIR", unset = "")
     tri_cands <- unique(c(
-      if (nzchar(run_d)) file.path(run_d, "outputs/reports/final_curation_triage.csv") else character(0),
       if (nzchar(run_d)) file.path(run_d, "data/tables/triage_queue.csv") else character(0),
       file.path(dirname(opts$morphometrics), "triage_queue.csv"),
-      "outputs/reports/final_curation_triage.csv",
       "data/tables/triage_queue.csv"
     ))
     tri_hit <- tri_cands[file.exists(tri_cands) & file.info(tri_cands)$size > 0][1L]
@@ -703,14 +701,14 @@ build_taxon_morphotype_subclusters <- function(morph_df, min_vouchers = 5L) {
 }
 
 render_complex_discovery_figure <- function(W, part_res, morph_res, out_pdf) {
-  if (exists("render_step08_complex_discovery_pdf", mode = "function")) return(render_step08_complex_discovery_pdf(W = W, part_res = part_res, out_pdf = out_pdf))
+  if (exists("render_step07_complex_discovery_pdf", mode = "function")) return(render_step07_complex_discovery_pdf(W = W, part_res = part_res, out_pdf = out_pdf))
   invisible(out_pdf)
 }
 
 # 9. Main Execution Entrypoint
 main <- function() {
   set.seed(42); opts <- parse_discovery_args()
-  message("=== Phase 08: Unsupervised Quantitative Taxon-Complex Discovery Engine ===")
+  message("=== Phase 07: Unsupervised Quantitative Taxon-Complex Discovery Engine ===")
   inputs <- load_and_merge_inputs(opts)
   sub_res <- build_taxon_morphotype_subclusters(inputs$morph_df, min_vouchers = 5L)
   morph_df <- sub_res$morph_df

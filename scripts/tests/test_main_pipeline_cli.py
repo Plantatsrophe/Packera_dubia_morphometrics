@@ -706,11 +706,11 @@ START_STEP=3
                 tables_dir = run_dir / "data" / "tables"
                 tables_dir.mkdir(parents=True, exist_ok=True)
 
-                # Create two historical runs with final_curation_triage.csv
-                run_a_rep = runs_root / "run_A" / "outputs" / "reports"
-                run_b_rep = runs_root / "run_B" / "outputs" / "reports"
-                run_a_rep.mkdir(parents=True, exist_ok=True)
-                run_b_rep.mkdir(parents=True, exist_ok=True)
+                # Create two historical runs with canonical data/tables/triage_queue.csv
+                run_a_tbl = runs_root / "run_A" / "data" / "tables"
+                run_b_tbl = runs_root / "run_B" / "data" / "tables"
+                run_a_tbl.mkdir(parents=True, exist_ok=True)
+                run_b_tbl.mkdir(parents=True, exist_ok=True)
 
                 pd.DataFrame({
                     "catalogNumber": ["CAT_CONF", "CAT_HYB", "CAT_SUB", "CAT_ECO", "CAT_CRYPT", "CAT_MISID_1"],
@@ -722,7 +722,7 @@ START_STEP=3
                         "Putative_Cryptic_Species",
                         "Misidentification_Reassign",
                     ],
-                }).to_csv(run_a_rep / "final_curation_triage.csv", index=False)
+                }).to_csv(run_a_tbl / "triage_queue.csv", index=False)
 
                 pd.DataFrame({
                     "catalogNumber": ["CAT_CONF", "CAT_MISID_2"],
@@ -730,7 +730,7 @@ START_STEP=3
                         "Confirmed_Species",
                         "Misidentification_Reassign",
                     ],
-                }).to_csv(run_b_rep / "final_curation_triage.csv", index=False)
+                }).to_csv(run_b_tbl / "triage_queue.csv", index=False)
 
                 for sub in ("capitula",):
                     pdir = root_data / "cropped_patches" / sub

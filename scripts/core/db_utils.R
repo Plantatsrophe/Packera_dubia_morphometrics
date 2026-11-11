@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20261114L
+PACKERA_SCHEMA_USER_VERSION <- 20261115L
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -492,7 +492,7 @@ connect_packera_db <- function(
 
   schema_migrated <- .migrate_dynamic_sqlite_schema_r(conn)
   if (!identical(eff_path, ":memory:")) {
-    view_needs_refresh <- schema_migrated
+    view_needs_refresh <- schema_migrated || (cur_ver < PACKERA_SCHEMA_USER_VERSION)
     if (!view_needs_refresh && db_table_exists_safe(conn, "v_integrative_triage_master")) {
       v_cols <- tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0))
       req_v_cols <- c(
@@ -1641,7 +1641,7 @@ try_fetch_master_view_for_cohort <- function(
   master_df
 }
 
-persist_step07_to_sqlite <- function(
+persist_step06_to_sqlite <- function(
   triage_df,
   vouchers_path = NULL,
   run_id = NULL,
@@ -1775,10 +1775,6 @@ load_step07_merged_inputs <- function(opts, standardize_fn) {
   }
 
   morph_path <- opts$morphometrics
-  if (!file.exists(morph_path)) {
-    alt_m <- file.path(dirname(morph_path), "morphometrics_misidentification_flags.csv")
-    if (file.exists(alt_m)) morph_path <- alt_m
-  }
   if (!file.exists(morph_path)) stop("Morphometrics table not found at: ", opts$morphometrics)
   morph_df <- utils::read.csv(morph_path, stringsAsFactors = FALSE)
   morph_df$catalogNumber <- as.character(morph_df$catalogNumber)
@@ -1820,4 +1816,3 @@ load_step07_merged_inputs <- function(opts, standardize_fn) {
 
   list(morph_df = morph_df)
 }
-load_step08_merged_inputs <- load_step07_merged_inputs

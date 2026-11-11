@@ -228,7 +228,7 @@ morphometrics:
     efourier_norm_ellipse: false
     efourier_start_search: false
 
-# Phase 6: Macroecology, 19-Variable Bioclimatic/Edaphic Spatial RF & Hopkins Phenology
+# Phase 5: Macroecology, 19-Variable Bioclimatic/Edaphic Spatial RF & Hopkins Phenology
 # Cohort-adaptive mode derives empirical flowering DOY/latitude envelopes and prunes
 # collinear predictors (|r| < cor_threshold, VIF < vif_threshold) across all 19 WorldClim
 # bioclimatic rasters and 0-15 cm rhizosphere/outcrop layers when N_anchor >= 5; configured
@@ -259,16 +259,10 @@ spatial_rf:
   vif_threshold: 5.0
   cumulative_importance_cutoff: 0.85
 
-# Phase 7: Integrative Taxonomic Triage & Consensus Decision Matrix
+# Phase 6: Integrative Taxonomic Triage & Consensus Decision Matrix
 # Cohort-adaptive mode derives empirical Hopkins-adjusted phenological residual cutoffs
 # from anchor dispersion when N_anchor >= 5; ecotype_ddoy_cutoff_days (14.0) and
 # cryptic_ddoy_cutoff_days (18.0) serve as safety bounds / fallbacks when N_anchor < 5.
-triage:
-  cohort_adaptive_mode: true
-  min_anchor_n_for_empirical: 5
-  ecotype_ddoy_cutoff_days: 14.0
-  cryptic_ddoy_cutoff_days: 18.0
-
 synthesis:
   cohort_adaptive_mode: true
   min_anchor_n_for_empirical: 5

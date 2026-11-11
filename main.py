@@ -1174,7 +1174,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     gmm_summary = Path(getattr(args, "gmm_summary", None) or default_gmm_summary)
     output_queue = Path(
         getattr(args, "output_queue", None)
-        or ((run_dir / "outputs" / "reports" / "final_curation_triage.csv") if run_dir is not None else str(tables_dir / "triage_queue.csv"))
+        or ((run_dir / "data" / "tables" / "triage_queue.csv") if run_dir is not None else str(tables_dir / "triage_queue.csv"))
     )
     focal_taxon_raw = focal_taxon or ""
     if focal_taxon_raw:
@@ -1197,6 +1197,10 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         getattr(args, "synthesis_report", None)
         or ((run_dir / "outputs" / "reports" / default_rep_name) if run_dir is not None else fallback_rep)
     )
+    synthesis_html = Path(
+        getattr(args, "synthesis_html", None)
+        or (reports_dir_s05 / "Triage_Dashboard_Interactive.html")
+    )
 
     cmd_triage = [
         rscript_bin, str(triage_script),
@@ -1208,6 +1212,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         "--output-queue", str(output_queue),
         "--output-plot", str(synthesis_plot),
         "--output-report", str(synthesis_report),
+        "--output-html", str(synthesis_html),
     ]
     if focal_taxon:
         cmd_triage.extend(["--focal-taxon", focal_taxon])
@@ -1219,6 +1224,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     subprocess.run(cmd_triage, check=True)
     verify_file_exists(output_queue, "triage queue CSV")
     verify_file_exists(synthesis_report, "taxonomic revision summary markdown report")
+    verify_file_exists(synthesis_html, "interactive triage HTML dashboard")
 
     if run_dir is not None:
         write_run_metadata(run_dir, start_time=start_ts)
@@ -1614,7 +1620,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_morph.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
 
     # Subcommand: synthesis
-    p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Phases 6-7: Spatial RF & Triage Dashboard")
+    p_synth = subparsers.add_parser("synthesis", aliases=["analyze"], help="Phases 5-6: Spatial RF & Triage Dashboard")
     _add_common_subparser_args(p_synth, include_gpu=True)
     p_synth.add_argument("--vouchers", type=Path, default=None, help="Curated vouchers CSV")
     p_synth.add_argument("--manifest", dest="manifest_csv", type=Path, default=None, help="Extracted leaf manifest CSV")
@@ -1642,6 +1648,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_synth.add_argument("--output-queue", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--synthesis-plot", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--synthesis-report", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--synthesis-html", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")
     p_synth.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
 

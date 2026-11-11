@@ -126,6 +126,23 @@ FORBIDDEN_OBSOLETE_SAM2_AND_PRUNED_HELPER_TOKENS = (
     "residualize_within_deme_phenophase_plasticity",
     ".augment_foliar_architecture_features",
     ".compute_soft_geo_range_log_prior",
+    # Purged Step 6 twin columns, obsolete vision hooks, and misnumbered step07/08 helpers
+    "w_vision_kappa",
+    "dinov2_predicted_taxon",
+    "vision_conflict_flag",
+    "final_curation_triage",
+    "morphometrics_misidentification_flags",
+    "probabilistic_anomaly_score",
+    "composite_conflict_score",
+    "integrative_consensus_prob",
+    "n_active_modalities",
+    "render_step07_synthesis_plate_pdf",
+    "generate_step07_pub_figures",
+    "persist_step07_to_sqlite",
+    "render_step08_complex_discovery_pdf",
+    "load_step08_merged_inputs",
+    "fig07_multimodal_discordance_summary",
+    "fig07b_taxonomic_treatment_summary",
     # LeafMachine2 tokens
     *FORBIDDEN_LEGACY_LM2_TOKENS,
 )

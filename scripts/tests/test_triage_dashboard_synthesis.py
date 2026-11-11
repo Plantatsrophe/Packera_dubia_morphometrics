@@ -256,7 +256,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
               stopifnot(row_corrob$recommended_determination == "Packera obovata")
               stopifnot(all(res7$probabilistic_consensus_conflict >= 0.0 & res7$probabilistic_consensus_conflict <= 1.0))
 
-              anc_m <- .resolve_step07_anchor_mask(df7)
+              anc_m <- .resolve_step06_anchor_mask(df7)
               prec_edaph <- .compute_oof_class_precision_map(df7$species_standardized[anc_m], df7$edaphic_best_fit_taxon[anc_m])
               prec_mor <- .compute_oof_class_precision_map(df7$species_standardized[anc_m], df7$cda_predicted_taxon[anc_m])
               stopifnot(prec_edaph[["Packera obovata"]] < prec_mor[["Packera obovata"]])
@@ -431,7 +431,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             mm_csv = tmp / "multimodal_conflict_flags.csv"
             niche_csv = tmp / "niche_identity_tests.csv"
             out_queue = tmp / "triage_queue.csv"
-            out_triage = tmp / "final_curation_triage.csv"
+            out_html = tmp / "Triage_Dashboard_Interactive.html"
             out_rep = tmp / "Packera_Taxonomic_Revision_Summary.md"
             out_fig = tmp / "Figure_Integrative_Packera_Revision.pdf"
 
@@ -498,7 +498,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                     "--multimodal-flags", str(mm_csv),
                     "--niche-summary", str(niche_csv),
                     "--output-queue", str(out_queue),
-                    "--output-triage", str(out_triage),
+                    "--output-html", str(out_html),
                     "--output-report", str(out_rep),
                     "--output-plot", str(out_fig),
                 ],
@@ -507,9 +507,9 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                 text=True,
                 check=False,
             )
-            self.assertEqual(proc.returncode, 0, f"Step 07 handoff run failed:\n{proc.stderr}\n{proc.stdout}")
-            self.assertTrue(out_triage.exists() and out_rep.exists())
-            tdf = pd.read_csv(out_triage)
+            self.assertEqual(proc.returncode, 0, f"Step 06 handoff run failed:\n{proc.stderr}\n{proc.stdout}")
+            self.assertTrue(out_queue.exists() and out_rep.exists() and out_html.exists())
+            tdf = pd.read_csv(out_queue)
             self.assertEqual(len(tdf), 10, "Expected 10 rows (preserving ungeoreferenced NCU-HIST-2 and both individuals on CAT-MULTI-SHEET).")
 
             required_cols = [
@@ -523,7 +523,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                 "ssurgo_rock_outcrop_pct", "edaphic_z_score", "rf_predicted_taxon",
             ]
             for col in required_cols:
-                self.assertIn(col, tdf.columns, f"Missing expected column {col} in final_curation_triage.csv")
+                self.assertIn(col, tdf.columns, f"Missing expected column {col} in triage_queue.csv")
 
             # 1. RESOLVED vs CRITICAL priority assignments
             resolved_row = tdf[tdf["catalogNumber"] == "CAT-ANCHOR-A1"].iloc[0]
@@ -537,7 +537,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             self.assertEqual(str(hist_row["cda_predicted_taxon"]), "Packera obovata")
             self.assertEqual(str(hist_row["taxonomic_treatment_subtype"]), "Misidentification_Reassign")
             self.assertEqual(int(hist_row["n_available_modalities"]), 2)
-            self.assertGreater(float(hist_row["composite_conflict_score"]), 0.80)
+            self.assertGreater(float(hist_row["probabilistic_consensus_conflict"]), 0.80)
 
             # 3. Moderate morph outlier contradicted by high-confidence edaphic RF MUST NOT trigger Stage 1 Misidentification_Reassign
             art_row = tdf[tdf["catalogNumber"] == "CAT-ART-SHORTCUT"].iloc[0]
@@ -562,7 +562,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
 
         if not shutil.which("Rscript"):
             self.skipTest("Rscript not installed.")
-        r_code = """
+        r_code = r"""
         suppressPackageStartupMessages({ library(readr); library(dplyr) })
         source("scripts/analysis/06_triage_dashboard_synthesis.R")
 
@@ -741,9 +741,13 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertIn("STEP06_07_TYPE_RULES_OK", res.stdout)
 
     def test_synthesis_plate_stream_independence_and_fill_reversal(self):
-        """Ensure render_step07_synthesis_plate_pdf avoids pct_v <- pct_m duplication and uses position_fill(reverse = TRUE)."""
+        """Ensure render_step06_synthesis_plate_pdf avoids pct_v <- pct_m duplication, labels Stream 3 Topological ECT & OSR, and uses position_fill(reverse = TRUE)."""
         plates_src = (PROJECT_ROOT / "scripts" / "morphometrics" / "pub_synthesis_plates.R").read_text(encoding="utf-8")
         self.assertNotIn("pct_v <- pct_m", plates_src)
+        self.assertNotIn("pct_e <- pct_m", plates_src)
+        self.assertNotIn("pct_p <- pct_m", plates_src)
+        self.assertIn("3. Topological ECT & OSR", plates_src)
+        self.assertIn("probabilistic_consensus_score", plates_src)
         self.assertIn("position_fill(reverse = TRUE)", plates_src)
 
     def test_triage_queue_cryptic_cluster_cohesion_pass_blocks_singleton_cryptic(self):
@@ -764,7 +768,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             mm_csv = tmp_p / "multimodal_flags.csv"
             niche_csv = tmp_p / "niche_summary.csv"
             out_queue = tmp_p / "triage_queue.csv"
-            out_triage = tmp_p / "final_curation_triage.csv"
+            out_html = tmp_p / "Triage_Dashboard_Interactive.html"
             out_rep = tmp_p / "revision_report.md"
             out_fig = tmp_p / "synthesis.pdf"
 
@@ -879,7 +883,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                     "--multimodal-flags", str(mm_csv),
                     "--niche-summary", str(niche_csv),
                     "--output-queue", str(out_queue),
-                    "--output-triage", str(out_triage),
+                    "--output-html", str(out_html),
                     "--output-report", str(out_rep),
                     "--output-plot", str(out_fig),
                 ],
@@ -992,6 +996,162 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             f"Sibling ramet propagation / morph concordance protection test failed:\n{proc.stderr}\n{proc.stdout}",
         )
         self.assertIn("SIBLING_PROPAGATION_AND_MORPH_PROTECTION_OK", proc.stdout)
+
+
+
+    def test_step06_zero_trust_four_gates_and_offline_html_dashboard(self):
+        """
+        Zero-trust regression suite for Step 06 Four-Gate Overhaul:
+          1. Canonical single-column contract (zero twin/obsolete columns in R output & SQLite).
+          2. p_type_morph adapts dynamically to selected_morph_features dimensionality.
+          3. Stage 4 late-season foliar wear evaluates circular Hopkins-adjusted DOY quantiles
+             (protecting high-latitude summer sheets from false Ecophenotypic_Plasticity).
+          4. Rule B vote_edaph requires posterior support (rf_predicted_prob >= 0.55) with 1 vote
+             per modality, and Rule A Type_Synonymy_Candidate requires cda_posterior_prob >= 0.80.
+          5. Anchor mask & dynamic edaphic z-score exclude is_confident_label_noise & is_passive,
+             and p_e has zero cross-modality leakage from multimodal_conflict_flag.
+          6. Offline HTML dashboard (Triage_Dashboard_Interactive.html) has zero external CDN links,
+             and revision Markdown report has zero em/en dashes.
+        """
+        r_src = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("generate_interactive_triage_html", r_src)
+        self.assertIn("Triage_Dashboard_Interactive.html", r_src)
+        self.assertIn("persist_step06_to_sqlite", r_src)
+        self.assertIn("generate_step06_pub_figures", r_src)
+        self.assertIn("render_step06_synthesis_plate_pdf", r_src)
+
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        r_code = """
+        suppressPackageStartupMessages({ library(readr); library(dplyr) })
+        source("scripts/analysis/06_triage_dashboard_synthesis.R")
+
+        # 1. p_type_morph dimensionality (p=6: chisq_0.95,6 = 12.592 vs df=3: 7.815) & Rule B rf_prob floor
+        df_dim <- data.frame(
+          catalogNumber = c("ANC_1", "ANC_2", "ANC_3", "ANC_4", "LOW_RF_PROB", "BORDERLINE_TYPE_HOLO"),
+          plant_individual_id = 0L,
+          species_raw = c("Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata", "Packera dubia", "Packera dubia"),
+          species_standardized = c("Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata", "Packera dubia", "Packera dubia"),
+          determiner_tier = c("Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_3_Bronze", "Tier_1_Gold"),
+          is_type_specimen = c(FALSE, FALSE, FALSE, FALSE, FALSE, TRUE),
+          type_status = c("None", "None", "None", "None", "None", "Holotype"),
+          morph_tier_source = "Basal_Rosette",
+          basal_leaf_count = 3L,
+          selected_morph_features = "PC1;PC2;PC3;PC4;PC5;ECT_PC1",
+          PC1 = c(-2.0, -2.1, 2.0, 2.1, 0.2, 1.5),
+          PC2 = c(0.1, 0.2, -0.1, -0.2, 0.0, -0.1),
+          PC3 = c(0.0, 0.1, 0.0, -0.1, 0.1, 0.0),
+          PC4 = c(0.1, 0.0, -0.1, 0.0, 0.0, 0.1),
+          PC5 = c(0.0, -0.1, 0.1, 0.0, -0.1, 0.0),
+          ECT_PC1 = c(-1.0, -1.1, 1.0, 1.1, 0.1, 0.8),
+          cda_predicted_taxon = c("Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata", "Packera obovata", "Packera obovata"),
+          cda_posterior_prob = c(0.96, 0.95, 0.96, 0.95, 0.58, 0.62),
+          cda_posterior_margin = c(0.92, 0.90, 0.92, 0.90, 0.32, 0.24),
+          morphometric_outlier_flag = c(FALSE, FALSE, FALSE, FALSE, FALSE, TRUE),
+          edaphic_best_fit_taxon = c("Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata", "Packera obovata", "Packera obovata"),
+          rf_predicted_taxon = c("Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata", "Packera obovata", "Packera obovata"),
+          rf_predicted_prob = c(0.92, 0.91, 0.93, 0.90, 0.24, 0.65),
+          edaphic_schoener_d = c(0.82, 0.80, 0.84, 0.81, 0.62, 0.30),
+          type_morph_mahal_d2 = c(1.2, 1.4, 1.1, 1.3, 10.5, 9.0),
+          nearest_type_morph_taxon = c("Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata", "Packera obovata", "Packera obovata"),
+          type_edaphic_z_score = c(0.4, 0.5, 0.3, 0.4, 1.2, 1.5),
+          nearest_type_niche_taxon = c("Packera dubia", "Packera dubia", "Packera obovata", "Packera obovata", "Packera obovata", "Packera obovata"),
+          gmm_cluster = 1L,
+          gmm_uncertainty = 0.05,
+          stringsAsFactors = FALSE
+        )
+        res_dim <- apply_taxonomic_decision_matrix(df_dim)
+        # Canonical columns present; twin columns absent
+        stopifnot(all(c("n_available_modalities", "probabilistic_consensus_conflict", "probabilistic_consensus_score", "taxonomic_treatment_broad", "taxonomic_treatment_subtype") %in% names(res_dim)))
+        stopifnot(!(paste0("taxonomic_", "treatment") %in% names(res_dim)))
+        stopifnot(!(paste0("taxonomic_treatment_", "sub") %in% names(res_dim)))
+        # Row 5: type_morph_mahal_d2 = 10.5 <= qchisq(0.95, df=6)=12.592 AND rf_predicted_prob=0.24 < 0.55 -> NOT Misidentification_Reassign!
+        stopifnot(!identical(res_dim$taxonomic_treatment_subtype[5], "Misidentification_Reassign"))
+        # Row 6: Holotype with cda_posterior_prob = 0.62 < 0.80 -> Confirmed_Type_Control (NOT Type_Synonymy_Candidate)
+        stopifnot(identical(res_dim$taxonomic_status_call[6], "Confirmed_Type_Control"))
+
+        # 2. Circular Hopkins-adjusted DOY protects northern summer sheets from false Ecophenotypic_Plasticity
+        df_lat <- data.frame(
+          catalogNumber = c("S1", "S2", "S3", "S4", "S5", "OB1", "OB2", "NORTH_NORMAL", "SOUTH_LATE"),
+          plant_individual_id = 0L,
+          species_raw = c(rep("Packera aurea", 5), rep("Packera obovata", 2), "Packera aurea", "Packera aurea"),
+          species_standardized = c(rep("Packera aurea", 5), rep("Packera obovata", 2), "Packera aurea", "Packera aurea"),
+          determiner_tier = c(rep("Tier_1_Gold", 7), "Tier_3_Bronze", "Tier_3_Bronze"),
+          morph_tier_source = "Basal_Rosette",
+          basal_leaf_count = 3L,
+          decimalLatitude = c(34.8, 35.0, 35.2, 35.4, 35.6, 35.1, 35.3, 45.0, 35.2),
+          decimalLongitude = rep(-82.0, 9),
+          doy = c(116, 118, 120, 122, 124, 119, 121, 159, 132),
+          is_verified_anthesis = TRUE,
+          cda_predicted_taxon = c(rep("Packera aurea", 5), rep("Packera obovata", 2), "Packera obovata", "Packera obovata"),
+          cda_posterior_prob = c(0.95, 0.94, 0.95, 0.96, 0.95, 0.95, 0.94, 0.58, 0.58),
+          cda_posterior_margin = c(0.90, 0.88, 0.90, 0.92, 0.90, 0.90, 0.88, 0.30, 0.30),
+          morphometric_outlier_flag = FALSE,
+          edaphic_best_fit_taxon = c(rep("Packera aurea", 5), rep("Packera obovata", 2), "Packera aurea", "Packera aurea"),
+          edaphic_z_score = rep(0.5, 9),
+          edaphic_schoener_d = rep(0.80, 9),
+          gmm_cluster = 1L,
+          gmm_uncertainty = 0.05,
+          stringsAsFactors = FALSE
+        )
+        res_lat <- apply_taxonomic_decision_matrix(df_lat)
+        # Row 8 (NORTH_NORMAL: lat=45.0, doy=159 -> hopkins_adjusted_doy ~ 119.8 < sp_q75) is protected as Confirmed_Species;
+        # Row 9 (SOUTH_LATE: lat=35.2, doy=132 -> +12d past species median >= sp_q75, < 18d cryptic barrier) is Ecophenotypic_Plasticity!
+        stopifnot(res_lat$hopkins_adjusted_doy[8] < 121.0)
+        stopifnot(identical(res_lat$taxonomic_treatment_subtype[8], "Confirmed_Species"))
+        stopifnot(identical(res_lat$taxonomic_treatment_subtype[9], "Ecophenotypic_Plasticity"))
+
+        # 3. Zero leakage from is_confident_label_noise / is_passive & multimodal_conflict_flag
+        df_clean <- df_dim[1:4, ]
+        df_clean$fine_soil_ph <- c(5.2, 5.3, 7.2, 7.3)
+        df_clean$primary_edaph_predictors <- "fine_soil_ph"
+        df_clean$edaphic_z_score <- NA_real_
+        df_clean$multimodal_conflict_flag <- FALSE
+
+        df_noisy <- rbind(df_clean, df_clean[1, ])
+        df_noisy$catalogNumber[5] <- "CORRUPT_NOISE"
+        df_noisy$is_confident_label_noise <- c(FALSE, FALSE, FALSE, FALSE, TRUE)
+        df_noisy$cda_predicted_taxon[5] <- "Packera obovata"
+        df_noisy$edaphic_best_fit_taxon[5] <- "Packera obovata"
+        df_noisy$fine_soil_ph[5] <- 99.0
+
+        w_clean <- compute_modality_reliability_weights(df_clean)
+        w_noisy <- compute_modality_reliability_weights(df_noisy)
+        stopifnot(all(abs(w_clean - w_noisy) < 1e-9))
+
+        res_c1 <- compute_probabilistic_consensus_scores(df_clean)
+        df_clean_mm <- df_clean
+        df_clean_mm$multimodal_conflict_flag <- TRUE
+        res_c2 <- compute_probabilistic_consensus_scores(df_clean_mm)
+        stopifnot(all(abs(res_c1$probabilistic_consensus_conflict - res_c2$probabilistic_consensus_conflict) < 1e-9))
+
+        # 4. Offline HTML Dashboard + Zero Em/En-Dash Markdown Report
+        tf_html <- tempfile(fileext = ".html")
+        tf_md <- tempfile(fileext = ".md")
+        generate_interactive_triage_html(res_dim, tf_html, focal_taxon = "Packera dubia")
+        generate_taxonomic_revision_report(res_dim, list(output_report = tf_md, output_plot = "", focal_taxon = "Packera dubia", gmm_bic = "", gmm_summary = ""))
+        html_txt <- paste(readLines(tf_html, warn = FALSE), collapse = "\n")
+        md_txt <- paste(readLines(tf_md, warn = FALSE), collapse = "\n")
+        stopifnot(file.exists(tf_html) && nchar(html_txt) > 500)
+        stopifnot(!grepl("https?://", html_txt, ignore.case = TRUE))
+        stopifnot(grepl("Export Filtered CSV", html_txt, fixed = TRUE))
+        stopifnot(!grepl("[\u2013\u2014]", md_txt))
+
+        cat("STEP06_ZERO_TRUST_OK\n")
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            r_script = Path(tmpdir) / "test_step06_zero_trust.R"
+            r_script.write_text(r_code, encoding="utf-8")
+            proc = subprocess.run(
+                ["Rscript", str(r_script)],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(proc.returncode, 0, f"Step 06 zero-trust suite failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("STEP06_ZERO_TRUST_OK", proc.stdout)
 
 
 if __name__ == "__main__":

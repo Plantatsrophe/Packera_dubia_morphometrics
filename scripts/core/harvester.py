@@ -1576,9 +1576,13 @@ def export_curated_table(
             df["species_raw"] = df["scientificName"]
 
         if "decimalLatitude" not in df.columns:
-            df["decimalLatitude"] = np.nan
+            df["decimalLatitude"] = df["latitude"] if "latitude" in df.columns else np.nan
+        elif "latitude" in df.columns:
+            df["decimalLatitude"] = df["decimalLatitude"].where(df["decimalLatitude"].notna(), df["latitude"])
         if "decimalLongitude" not in df.columns:
-            df["decimalLongitude"] = np.nan
+            df["decimalLongitude"] = df["longitude"] if "longitude" in df.columns else np.nan
+        elif "longitude" in df.columns:
+            df["decimalLongitude"] = df["decimalLongitude"].where(df["decimalLongitude"].notna(), df["longitude"])
         if "identifiedBy" not in df.columns:
             df["identifiedBy"] = ""
 
@@ -1608,18 +1612,28 @@ def export_curated_table(
         ):
             df = stratify_duplicates(df, logger=logger, home_herbarium=home_herbarium)
 
-    _sqlite_only_cols = {
-        "exsiccatae_taxonomic_conflict",
-        "exsiccatae_gold_taxon",
-        "usda_symbol",
-        "usda_county_status",
-        "infraspecific_taxon",
-        "georef_qc_status",
+    _allowed_extra_voucher_cols = {
+        "locality",
+        "doy",
+        "species_standardized",
+        "pixels_per_mm",
+        "is_calibrated_mm",
+        "scale_source",
+        "qc_status",
+        "failure_reason",
+        "failure_details",
+        "spatial_balance_weight",
+        "countryCode",
+        "gbifID",
+        "occurrenceID",
+        "minimumElevationInMeters",
+        "elevation_m",
     }
     cols_to_export = [col for col in EXPORT_COLUMNS if col in df.columns]
     extra_cols = [
         c for c in df.columns
-        if c not in cols_to_export and not c.startswith("_") and c not in _sqlite_only_cols
+        if c not in cols_to_export
+        and c in _allowed_extra_voucher_cols
     ]
     final_cols = cols_to_export + extra_cols
 

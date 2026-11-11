@@ -47,10 +47,10 @@ for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(d
   if (!exists(".identify_type_specimen_vec", mode = "function") && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
 }
 for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "pub_figures_utils.R"))) {
-  if (!exists("generate_step07_pub_figures", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
+  if (!exists("generate_step06_pub_figures", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
 }
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
-  if (!exists("persist_step07_to_sqlite", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+  if (!exists("persist_step06_to_sqlite", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
 
 # ------------------------------------------------------------------------------
@@ -62,7 +62,7 @@ parse_args_robust <- function() {
   option_list <- list(
     optparse::make_option(c("-v", "--vouchers"), type = "character", default = rp("data/tables/curated_vouchers.csv")),
     optparse::make_option(c("--phenology"), type = "character", default = ""),
-    optparse::make_option(c("-m", "--morphometrics"), type = "character", default = rp("data/tables/morphometrics_misidentification_flags.csv")),
+    optparse::make_option(c("-m", "--morphometrics"), type = "character", default = rp("data/tables/morphometric_flags.csv")),
     optparse::make_option(c("--linear-traits"), type = "character", default = ""),
     optparse::make_option(c("-c", "--multimodal-flags"), type = "character", default = rp("data/tables/multimodal_conflict_flags.csv")),
     optparse::make_option(c("--spatial-flags"), type = "character", default = ""),
@@ -71,11 +71,9 @@ parse_args_robust <- function() {
     optparse::make_option(c("--cda-summary"), type = "character", default = rp("data/tables/cda_summary.csv")),
     optparse::make_option(c("-s", "--niche-summary"), type = "character", default = rp("outputs/reports/multimodal_spatial_rf_summary.csv")),
     optparse::make_option(c("-q", "--output-queue"), type = "character", default = rp("data/tables/triage_queue.csv")),
-    optparse::make_option(c("--output-triage"), type = "character", default = ""),
     optparse::make_option(c("-p", "--output-plot"), type = "character", default = rp("outputs/figures/Figure_Integrative_Packera_Revision.pdf")),
-    optparse::make_option(c("--output-figure"), type = "character", default = ""),
     optparse::make_option(c("-r", "--output-report"), type = "character", default = rp("outputs/reports/Packera_Taxonomic_Revision_Summary.md")),
-    optparse::make_option(c("--output-html"), type = "character", default = ""),
+    optparse::make_option(c("--output-html"), type = "character", default = rp("outputs/reports/Triage_Dashboard_Interactive.html")),
     optparse::make_option(c("--focal-taxon"), type = "character", default = ""),
     optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE),
     optparse::make_option(c("--demo"), action = "store_true", default = FALSE)
@@ -84,16 +82,15 @@ parse_args_robust <- function() {
     opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
     names(opts) <- gsub("-", "_", names(opts))
     if (!is.null(opts$spatial_flags) && nzchar(opts$spatial_flags)) opts$multimodal_flags <- opts$spatial_flags
-    if (!is.null(opts$output_triage) && nzchar(opts$output_triage) && (is.null(opts$output_queue) || opts$output_queue == "data/tables/triage_queue.csv")) opts$output_queue <- opts$output_triage
-    if (!is.null(opts$output_figure) && nzchar(opts$output_figure)) opts$output_plot <- opts$output_figure
     return(opts)
   }
-  list(vouchers = "data/tables/curated_vouchers.csv", morphometrics = "data/tables/morphometrics_misidentification_flags.csv",
+  list(vouchers = "data/tables/curated_vouchers.csv", morphometrics = "data/tables/morphometric_flags.csv",
        multimodal_flags = "data/tables/multimodal_conflict_flags.csv",
        gmm_summary = "outputs/reports/gmm_bayes_factors_summary.csv", gmm_bic = "data/tables/gmm_bic_model_selection.csv",
        cda_summary = "data/tables/cda_summary.csv", niche_summary = "outputs/reports/multimodal_spatial_rf_summary.csv",
        output_queue = "data/tables/triage_queue.csv", output_plot = "outputs/figures/Figure_Integrative_Packera_Revision.pdf",
-       output_report = "outputs/reports/Packera_Taxonomic_Revision_Summary.md", focal_taxon = "", intraspecific_mode = FALSE)
+       output_report = "outputs/reports/Packera_Taxonomic_Revision_Summary.md",
+       output_html = "outputs/reports/Triage_Dashboard_Interactive.html", focal_taxon = "", intraspecific_mode = FALSE, demo = FALSE)
 }
 
 .base_std_taxon <- if (exists("standardize_taxon_name", mode = "function")) standardize_taxon_name else NULL
@@ -193,7 +190,7 @@ resolve_ecological_authority_weights <- function(df, allow_bronze_prior = TRUE) 
   round(ifelse(is_t_fb, 3.0, ifelse(tier_std == "Tier_1_Gold", 2.0, ifelse(tier_std == "Tier_2_Silver", 0.75, if (isTRUE(allow_bronze_prior)) 0.50 else 0.0))), 4)
 }
 
-.load_step07_pheno_config_defaults <- function(cfg_path = "config/config.yaml") {
+.load_step06_pheno_config_defaults <- function(cfg_path = "config/config.yaml") {
   defs <- list(tau_ecotype = 14.0, tau_cryptic = 18.0)
   if (file.exists(cfg_path) && requireNamespace("yaml", quietly = TRUE)) {
     cfg <- tryCatch(yaml::read_yaml(cfg_path), error = function(e) NULL)
@@ -214,9 +211,48 @@ resolve_ecological_authority_weights <- function(df, allow_bronze_prior = TRUE) 
   (365.25 / (2.0 * pi)) * sqrt(-2.0 * log(r_clamped))
 }
 
+.resolve_step06_anchor_mask <- function(df) {
+  n <- nrow(df)
+  if (n == 0L) return(logical(0))
+  tier_col <- if ("determiner_tier" %in% names(df)) {
+    if (exists(".standardize_determiner_tier_vec", mode = "function")) .standardize_determiner_tier_vec(df)
+    else ifelse(is.na(df$determiner_tier) | !nzchar(trimws(as.character(df$determiner_tier))), "Tier_3_Bronze", as.character(df$determiner_tier))
+  } else {
+    rep("Tier_1_Gold", n)
+  }
+  promo_mask <- rep(FALSE, n)
+  for (pcol in intersect(c("is_promoted_bronze", "is_type_specimen"), names(df))) {
+    pv <- suppressWarnings(as.logical(df[[pcol]]))
+    pv[is.na(pv)] <- FALSE
+    promo_mask <- promo_mask | pv
+  }
+  if (exists(".identify_type_specimen_vec", mode = "function")) {
+    promo_mask <- promo_mask | .identify_type_specimen_vec(df)$is_type_specimen
+  }
+  noise_mask <- if ("is_confident_label_noise" %in% names(df)) (!is.na(df$is_confident_label_noise) & as.logical(df$is_confident_label_noise)) else rep(FALSE, n)
+  passive_mask <- if ("is_passive" %in% names(df)) (!is.na(df$is_passive) & as.logical(df$is_passive)) else rep(FALSE, n)
+  if ("authority_weight" %in% names(df)) {
+    aw_v <- suppressWarnings(as.numeric(df$authority_weight))
+    if (any(is.finite(aw_v) & aw_v > 0.0)) {
+      passive_mask <- passive_mask | (is.finite(aw_v) & aw_v <= 0.0)
+    }
+  }
+  is_type_m <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(df)$is_type_specimen else rep(FALSE, n)
+  if ("is_type_specimen" %in% names(df)) {
+    tv <- suppressWarnings(as.logical(df$is_type_specimen)); tv[is.na(tv)] <- FALSE
+    is_type_m <- is_type_m | tv
+  }
+  anchor_mask <- (((tier_col %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze_Promoted")) | promo_mask) & !noise_mask & !passive_mask) | (is_type_m & !noise_mask)
+  if (sum(anchor_mask, na.rm = TRUE) < 4L) {
+    clean_fb <- !noise_mask & !passive_mask
+    anchor_mask <- if (sum(clean_fb, na.rm = TRUE) >= 1L) clean_fb else if (sum(!noise_mask, na.rm = TRUE) >= 1L) !noise_mask else rep(TRUE, n)
+  }
+  anchor_mask
+}
+
 .compute_taxon_pheno_thresholds <- function(df) {
   n <- nrow(df)
-  defs <- .load_step07_pheno_config_defaults()
+  defs <- .load_step06_pheno_config_defaults()
   if (n == 0L) return(list(tau_ecotype = numeric(0), tau_cryptic = numeric(0), sigma_by_taxon = numeric(0)))
 
   sp_vec <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("Unknown", n)
@@ -225,13 +261,14 @@ resolve_ecological_authority_weights <- function(df, allow_bronze_prior = TRUE) 
   ddoy_vec <- if ("delta_doy_resid" %in% names(df)) suppressWarnings(as.numeric(df$delta_doy_resid)) else if ("delta_doy" %in% names(df)) suppressWarnings(as.numeric(df$delta_doy)) else rep(NA_real_, n)
   valid_ph <- is_anth & is.finite(ddoy_vec)
 
-  anchor_mask <- .resolve_step07_anchor_mask(df)
+  anchor_mask <- .resolve_step06_anchor_mask(df)
   mo_m <- if ("morphometric_outlier_flag" %in% names(df)) (!is.na(df$morphometric_outlier_flag) & as.logical(df$morphometric_outlier_flag)) else rep(FALSE, n)
-  clean_anch <- anchor_mask & !mo_m
+  noise_m <- if ("is_confident_label_noise" %in% names(df)) (!is.na(df$is_confident_label_noise) & as.logical(df$is_confident_label_noise)) else rep(FALSE, n)
+  clean_anch <- anchor_mask & !mo_m & !noise_m
 
   coh_idx <- which(clean_anch & valid_ph)
-  if (length(coh_idx) < 5L) coh_idx <- which(!mo_m & valid_ph)
-  if (length(coh_idx) < 5L) coh_idx <- which(valid_ph)
+  if (length(coh_idx) < 5L) coh_idx <- which(!mo_m & !noise_m & valid_ph)
+  if (length(coh_idx) < 5L) coh_idx <- which(!noise_m & valid_ph)
   sigma_cohort <- if (length(coh_idx) >= 5L) .circular_sd_days_from_residuals(ddoy_vec[coh_idx]) else NA_real_
 
   u_taxa <- unique(sp_vec[!is.na(sp_vec) & nzchar(sp_vec)])
@@ -249,8 +286,8 @@ resolve_ecological_authority_weights <- function(df, allow_bronze_prior = TRUE) 
   for (tx in u_taxa) {
     idx_t <- which(sp_vec == tx)
     tx_pool <- idx_t[clean_anch[idx_t] & valid_ph[idx_t]]
-    if (length(tx_pool) < 5L) tx_pool <- idx_t[!mo_m[idx_t] & valid_ph[idx_t]]
-    if (length(tx_pool) < 5L) tx_pool <- idx_t[valid_ph[idx_t]]
+    if (length(tx_pool) < 5L) tx_pool <- idx_t[!mo_m[idx_t] & !noise_m[idx_t] & valid_ph[idx_t]]
+    if (length(tx_pool) < 5L) tx_pool <- idx_t[!noise_m[idx_t] & valid_ph[idx_t]]
     if (length(tx_pool) >= 5L) {
       sig_tx <- .circular_sd_days_from_residuals(ddoy_vec[tx_pool])
       if (is.finite(sig_tx)) {
@@ -277,7 +314,13 @@ compute_hopkins_adjusted_phenology <- function(df) {
   doy_raw <- if ("doy" %in% names(df)) suppressWarnings(as.numeric(df$doy)) else rep(NA_real_, n)
   has_valid_doy <- is.finite(doy_raw) & (doy_raw >= 1.0) & (doy_raw <= 366.0)
 
-  doy_pool <- doy_raw[is_anthesis & has_valid_doy]
+  anchor_mask <- .resolve_step06_anchor_mask(df)
+  mo_m <- if ("morphometric_outlier_flag" %in% names(df)) (!is.na(df$morphometric_outlier_flag) & as.logical(df$morphometric_outlier_flag)) else rep(FALSE, n)
+  noise_m <- if ("is_confident_label_noise" %in% names(df)) (!is.na(df$is_confident_label_noise) & as.logical(df$is_confident_label_noise)) else rep(FALSE, n)
+  clean_anth_doy <- is_anthesis & has_valid_doy & anchor_mask & !mo_m & !noise_m
+
+  doy_pool <- doy_raw[clean_anth_doy]
+  if (length(doy_pool) == 0L) doy_pool <- doy_raw[is_anthesis & has_valid_doy & !noise_m]
   if (length(doy_pool) == 0L) doy_pool <- doy_raw[has_valid_doy]
   if (length(doy_pool) > 0L) {
     th_pool <- 2.0 * pi * (doy_pool / 365.25)
@@ -297,9 +340,9 @@ compute_hopkins_adjusted_phenology <- function(df) {
   mat_col <- intersect(c("bio1_temp_mean", "bio1", "mat_c"), names(df))
   mat_vec <- if (length(mat_col) > 0L) suppressWarnings(as.numeric(df[[mat_col[1L]]])) else rep(NA_real_, n)
 
-  lat_pool <- lat_vec[is_anthesis & is.finite(lat_vec)]; if (length(lat_pool) == 0L) lat_pool <- lat_vec[is.finite(lat_vec)]
-  elev_pool <- elev_vec[is_anthesis & is.finite(elev_vec)]; if (length(elev_pool) == 0L) elev_pool <- elev_vec[is.finite(elev_vec)]
-  mat_pool <- mat_vec[is_anthesis & is.finite(mat_vec)]; if (length(mat_pool) == 0L) mat_pool <- mat_vec[is.finite(mat_vec)]
+  lat_pool <- lat_vec[clean_anth_doy & is.finite(lat_vec)]; if (length(lat_pool) == 0L) lat_pool <- lat_vec[is_anthesis & is.finite(lat_vec)]; if (length(lat_pool) == 0L) lat_pool <- lat_vec[is.finite(lat_vec)]
+  elev_pool <- elev_vec[clean_anth_doy & is.finite(elev_vec)]; if (length(elev_pool) == 0L) elev_pool <- elev_vec[is_anthesis & is.finite(elev_vec)]; if (length(elev_pool) == 0L) elev_pool <- elev_vec[is.finite(elev_vec)]
+  mat_pool <- mat_vec[clean_anth_doy & is.finite(mat_vec)]; if (length(mat_pool) == 0L) mat_pool <- mat_vec[is_anthesis & is.finite(mat_vec)]; if (length(mat_pool) == 0L) mat_pool <- mat_vec[is.finite(mat_vec)]
 
   ref_lat <- if (length(lat_pool) > 0L) stats::median(lat_pool, na.rm = TRUE) else 35.0
   ref_elev <- if (length(elev_pool) > 0L) stats::median(elev_pool, na.rm = TRUE) else 150.0
@@ -321,11 +364,9 @@ compute_hopkins_adjusted_phenology <- function(df) {
   theta_theo <- ref_theta + 2.0 * pi * (theo_shift / 365.25)
   sin_theo <- sin(theta_theo); cos_theo <- cos(theta_theo)
 
-  anchor_mask <- .resolve_step07_anchor_mask(df)
-  mo_m <- if ("morphometric_outlier_flag" %in% names(df)) (!is.na(df$morphometric_outlier_flag) & as.logical(df$morphometric_outlier_flag)) else rep(FALSE, n)
-  fit_mask <- is_anthesis & has_valid_doy & has_any_cov & anchor_mask & !mo_m
-  if (sum(fit_mask) < 5L) fit_mask <- is_anthesis & has_valid_doy & has_any_cov & anchor_mask
-  if (sum(fit_mask) < 5L) fit_mask <- is_anthesis & has_valid_doy & has_any_cov
+  fit_mask <- is_anthesis & has_valid_doy & has_any_cov & anchor_mask & !mo_m & !noise_m
+  if (sum(fit_mask) < 5L) fit_mask <- is_anthesis & has_valid_doy & has_any_cov & anchor_mask & !noise_m
+  if (sum(fit_mask) < 5L) fit_mask <- is_anthesis & has_valid_doy & has_any_cov & !noise_m
   n_anthesis_fit <- sum(fit_mask)
 
   cov_raw <- list(decimalLatitude = lat_vec, elevation = elev_vec, bio1_temp_mean = mat_vec)
@@ -368,24 +409,30 @@ compute_hopkins_adjusted_phenology <- function(df) {
   delta_theta_env <- ifelse(has_any_cov, atan2(sin(theta_blend - theta_blend_ref), cos(theta_blend - theta_blend_ref)), 0.0)
   theta_adj <- theta_obs - delta_theta_env
   shift_days <- delta_theta_env * (365.25 / (2.0 * pi))
-  adj_doy <- ((doy_vec - shift_days - 1.0) %% 365.25) + 1.0
-  df$hopkins_adjusted_doy <- round(adj_doy, 2)
-  df$sin_doy <- round(sin(theta_obs), 4)
-  df$cos_doy <- round(cos(theta_obs), 4)
+  adj_doy_calc <- ifelse(has_valid_doy, round(((doy_vec - shift_days - 1.0) %% 365.25) + 1.0, 2), NA_real_)
+  adj_in <- if ("hopkins_adjusted_doy" %in% names(df)) suppressWarnings(as.numeric(df$hopkins_adjusted_doy)) else rep(NA_real_, n)
+  df$hopkins_adjusted_doy <- ifelse(has_valid_doy & is.finite(adj_in), round(adj_in, 2), adj_doy_calc)
+  df$sin_doy <- ifelse(has_valid_doy, round(sin(theta_obs), 4), NA_real_)
+  df$cos_doy <- ifelse(has_valid_doy, round(cos(theta_obs), 4), NA_real_)
 
+  theta_adj_use <- ifelse(is.finite(df$hopkins_adjusted_doy), 2.0 * pi * (df$hopkins_adjusted_doy / 365.25), theta_adj)
   circ_resid_days <- numeric(n)
   sp_vec <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("Unassigned_Packera", n)
   for (tx in unique(sp_vec[!is.na(sp_vec)])) {
-    idx_tx <- which(sp_vec == tx); anth_tx <- idx_tx[is_anthesis[idx_tx] & has_valid_doy[idx_tx]]
-    theta_tx_center <- if (length(anth_tx) > 0L) atan2(mean(sin(theta_adj[anth_tx]), na.rm = TRUE), mean(cos(theta_adj[anth_tx]), na.rm = TRUE)) else ref_theta
-    d_theta <- theta_adj[idx_tx] - theta_tx_center
+    idx_tx <- which(sp_vec == tx)
+    anth_clean_tx <- idx_tx[is_anthesis[idx_tx] & has_valid_doy[idx_tx] & anchor_mask[idx_tx] & !mo_m[idx_tx] & !noise_m[idx_tx]]
+    if (length(anth_clean_tx) < 2L) anth_clean_tx <- idx_tx[is_anthesis[idx_tx] & has_valid_doy[idx_tx] & !noise_m[idx_tx]]
+    if (length(anth_clean_tx) == 0L) anth_clean_tx <- idx_tx[is_anthesis[idx_tx] & has_valid_doy[idx_tx]]
+    theta_tx_center <- if (length(anth_clean_tx) > 0L) atan2(mean(sin(theta_adj_use[anth_clean_tx]), na.rm = TRUE), mean(cos(theta_adj_use[anth_clean_tx]), na.rm = TRUE)) else ref_theta
+    d_theta <- theta_adj_use[idx_tx] - theta_tx_center
     circ_resid_days[idx_tx] <- atan2(sin(d_theta), cos(d_theta)) * (365.25 / (2.0 * pi))
   }
   circ_resid_gated <- ifelse(is_anthesis & has_valid_doy, round(circ_resid_days, 2), NA_real_)
   ddoy_in <- if ("delta_doy_resid" %in% names(df)) suppressWarnings(as.numeric(df$delta_doy_resid)) else if ("delta_doy" %in% names(df)) suppressWarnings(as.numeric(df$delta_doy)) else rep(NA_real_, n)
-  ddoy_use <- ifelse(is.finite(ddoy_in), ddoy_in, circ_resid_gated)
+  ddoy_use <- ifelse(is_anthesis & (has_valid_doy | is.finite(ddoy_in)) & is.finite(ddoy_in), ddoy_in, circ_resid_gated)
   ddoy_use[!is_anthesis] <- NA_real_
-  df$delta_doy_resid <- ddoy_use; df$delta_doy <- ifelse(is.finite(ddoy_use), ddoy_use, 0.0)
+  df$delta_doy_resid <- ddoy_use
+  df$delta_doy <- ddoy_use
   return(df)
 }
 
@@ -404,29 +451,6 @@ compute_cohens_kappa <- function(y_true, y_pred, default_kappa = 0.70) {
   kappa_val <- (p_o - p_e) / (1.0 - p_e)
   if (!is.finite(kappa_val)) return(max(0.05, default_kappa))
   max(0.05, min(0.99, round(kappa_val, 4)))
-}
-
-.resolve_step07_anchor_mask <- function(df) {
-  n <- nrow(df)
-  if (n == 0L) return(logical(0))
-  tier_col <- if ("determiner_tier" %in% names(df)) {
-    if (exists(".standardize_determiner_tier_vec", mode = "function")) .standardize_determiner_tier_vec(df)
-    else ifelse(is.na(df$determiner_tier) | !nzchar(trimws(as.character(df$determiner_tier))), "Tier_3_Bronze", as.character(df$determiner_tier))
-  } else {
-    rep("Tier_1_Gold", n)
-  }
-  promo_mask <- rep(FALSE, n)
-  for (pcol in intersect(c("is_promoted_bronze", "is_type_specimen"), names(df))) {
-    pv <- suppressWarnings(as.logical(df[[pcol]]))
-    pv[is.na(pv)] <- FALSE
-    promo_mask <- promo_mask | pv
-  }
-  if (exists(".identify_type_specimen_vec", mode = "function")) {
-    promo_mask <- promo_mask | .identify_type_specimen_vec(df)$is_type_specimen
-  }
-  anchor_mask <- (tier_col %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver", "Tier_3_Bronze_Promoted")) | promo_mask
-  if (sum(anchor_mask, na.rm = TRUE) < 4L) anchor_mask <- rep(TRUE, n)
-  anchor_mask
 }
 
 .compute_oof_class_precision_map <- function(y_true_vec, y_pred_vec, prior_alpha = 0.5) {
@@ -463,7 +487,7 @@ compute_modality_reliability_weights <- function(df) {
   # Evaluates out-of-fold Cohen's kappa (w_m = max(0.05, kappa_m)) on Gold/Silver/promoted anchors
   # across the 3 independent biological modalities: Morphometrics, Edaphic/Climatic Niche, and Phenology
   n <- nrow(df); if (n == 0L) return(c(morph = 0.80, edaphic = 0.65, pheno = 0.55))
-  anchor_mask <- .resolve_step07_anchor_mask(df)
+  anchor_mask <- .resolve_step06_anchor_mask(df)
   sub_a <- df[anchor_mask, , drop = FALSE]; y_true <- as.character(sub_a$species_standardized)
 
   m_pure <- if ("morph_tier_source" %in% names(sub_a)) (is.na(sub_a$morph_tier_source) | sub_a$morph_tier_source == "Basal_Rosette") else rep(TRUE, nrow(sub_a))
@@ -490,7 +514,7 @@ compute_probabilistic_consensus_scores <- function(df) {
   df$w_morph_kappa <- w_vec[["morph"]]
   df$w_edaphic_kappa <- w_vec[["edaphic"]]; df$w_pheno_kappa <- w_vec[["pheno"]]
 
-  anchor_mask <- .resolve_step07_anchor_mask(df)
+  anchor_mask <- .resolve_step06_anchor_mask(df)
   sub_a <- df[anchor_mask, , drop = FALSE]
   y_true_a <- if ("species_standardized" %in% names(sub_a)) as.character(sub_a$species_standardized) else rep(NA_character_, nrow(sub_a))
   m_pure_a <- if ("morph_tier_source" %in% names(sub_a)) (is.na(sub_a$morph_tier_source) | sub_a$morph_tier_source == "Basal_Rosette") else rep(TRUE, nrow(sub_a))
@@ -514,18 +538,40 @@ compute_probabilistic_consensus_scores <- function(df) {
   has_geo_cv <- if ("decimalLatitude" %in% df_nms_c) is.finite(suppressWarnings(as.numeric(df$decimalLatitude))) else rep(FALSE, n)
   edaph_sp_cv <- if ("edaphic_best_fit_taxon" %in% df_nms_c) as.character(df$edaphic_best_fit_taxon) else if ("rf_predicted_taxon" %in% df_nms_c) as.character(df$rf_predicted_taxon) else rep(NA_character_, n)
   edaph_sp_cv[!is.na(edaph_sp_cv) & !nzchar(edaph_sp_cv)] <- NA_character_
-  mm_conf_cv <- if ("multimodal_conflict_flag" %in% df_nms_c) as.logical(df$multimodal_conflict_flag) else rep(NA, n)
+  rf_p_cv <- if ("rf_predicted_prob" %in% df_nms_c) suppressWarnings(as.numeric(df$rf_predicted_prob)) else rep(NA_real_, n)
+  rf_g_cv <- if ("rf_given_taxon_prob" %in% df_nms_c) suppressWarnings(as.numeric(df$rf_given_taxon_prob)) else rep(NA_real_, n)
+  ez_cv <- if ("edaphic_z_score" %in% df_nms_c) suppressWarnings(as.numeric(df$edaphic_z_score)) else rep(NA_real_, n)
+  tez_cv <- if ("type_edaphic_z_score" %in% df_nms_c) suppressWarnings(as.numeric(df$type_edaphic_z_score)) else rep(NA_real_, n)
+  ded_cv <- if ("edaphic_niche_overlap_d" %in% df_nms_c) suppressWarnings(as.numeric(df$edaphic_niche_overlap_d)) else if ("edaphic_schoener_d" %in% df_nms_c) suppressWarnings(as.numeric(df$edaphic_schoener_d)) else rep(NA_real_, n)
   ddoy_r_cv <- if ("delta_doy_resid" %in% df_nms_c) suppressWarnings(as.numeric(df$delta_doy_resid)) else rep(NA_real_, n)
   is_anth_cv <- if ("is_active_anthesis" %in% df_nms_c) (!is.na(df$is_active_anthesis) & as.logical(df$is_active_anthesis)) else rep(TRUE, n)
   w_morph_base <- w_vec[["morph"]]; w_edaph_base <- w_vec[["edaphic"]]; w_pheno_base <- w_vec[["pheno"]]
 
   for (i in seq_len(n)) {
     given_sp <- given_sp_cv[i]; morph_sp <- morph_sp_cv[i]; cda_p <- cda_p_cv[i]; is_mo <- is_mo_cv[i]
-    has_geo <- has_geo_cv[i]; edaph_sp <- edaph_sp_cv[i]; mm_conf_i <- mm_conf_cv[i]
+    has_geo <- has_geo_cv[i]; edaph_sp <- edaph_sp_cv[i]
+    rf_p <- rf_p_cv[i]; rf_g <- rf_g_cv[i]; ez_i <- ez_cv[i]; tez_i <- tez_cv[i]; ded_i <- ded_cv[i]
     ddoy_r <- ddoy_r_cv[i]; is_anth <- is_anth_cv[i]
 
     p_m <- if (!is.na(morph_sp)) (if (morph_sp != given_sp) max(if (is.finite(cda_p)) cda_p else 0.75, if (is_mo) 0.80 else 0.55) else if (is_mo) 0.65 else if (is.finite(cda_p)) max(0.0, 1.0 - cda_p) else 0.10) else NA_real_
-    p_e <- if (!is.na(edaph_sp)) (if (edaph_sp != given_sp) (if (isTRUE(mm_conf_i)) 0.85 else 0.65) else 0.10) else if (has_geo && !is.na(mm_conf_i)) (if (isTRUE(mm_conf_i)) 0.75 else 0.10) else NA_real_
+    p_e <- if (!is.na(edaph_sp)) {
+      if (edaph_sp != given_sp) {
+        if (is.finite(rf_p)) max(0.55, min(0.98, rf_p))
+        else if (is.finite(ez_i) && ez_i > 2.0) min(0.95, 0.55 + 0.10 * (ez_i - 2.0))
+        else if (is.finite(ded_i) && ded_i < 0.35) 0.80
+        else 0.65
+      } else {
+        if (is.finite(rf_g)) max(0.05, min(0.85, 1.0 - rf_g))
+        else if (is.finite(rf_p)) max(0.05, min(0.85, 1.0 - rf_p))
+        else if (is.finite(ez_i) && ez_i > 2.5) min(0.75, 0.25 * ez_i)
+        else 0.10
+      }
+    } else if (has_geo && (is.finite(ez_i) || is.finite(tez_i))) {
+      z_use <- if (is.finite(ez_i)) ez_i else tez_i
+      min(0.95, max(0.05, stats::pchisq(z_use^2, df = 1) * 0.85))
+    } else {
+      NA_real_
+    }
     p_p <- if (is_anth && is.finite(ddoy_r)) min(1.0, abs(ddoy_r) / 30.0) else NA_real_
 
     w_i_vec <- c(
@@ -538,10 +584,9 @@ compute_probabilistic_consensus_scores <- function(df) {
     p_conf_i <- if (any(avail)) sum(w_i_vec[avail] * p_vec[avail]) / sum(w_i_vec[avail]) else 0.0
     p_conf_out[i] <- round(min(1.0, max(0.0, p_conf_i)), 4); p_score_out[i] <- round(1.0 - p_conf_out[i], 4)
   }
-  df$n_active_modalities <- n_mod_out; df$n_available_modalities <- n_mod_out
-  df$probabilistic_consensus_conflict <- p_conf_out; df$probabilistic_anomaly_score <- p_conf_out
-  df$composite_conflict_score <- p_conf_out; df$probabilistic_consensus_score <- p_score_out
-  df$integrative_consensus_prob <- p_score_out
+  df$n_available_modalities <- n_mod_out
+  df$probabilistic_consensus_conflict <- p_conf_out
+  df$probabilistic_consensus_score <- p_score_out
   return(df)
 }
 
@@ -549,7 +594,7 @@ compute_probabilistic_consensus_scores <- function(df) {
 # 4. Five-Stage Hierarchical Integrative Decision Matrix
 #    (Padial et al. 2010; Schlick-Steiner et al. 2010; Rieseberg 1995; Slenker et al. 2022)
 # ------------------------------------------------------------------------------
-.parse_step07_semicolon_cols <- function(df, col_name) {
+.parse_step06_semicolon_cols <- function(df, col_name) {
   if (!(col_name %in% names(df))) return(character(0))
   raw_vals <- as.character(stats::na.omit(df[[col_name]]))
   raw_vals <- trimws(raw_vals[nzchar(trimws(raw_vals))])
@@ -565,7 +610,7 @@ compute_probabilistic_consensus_scores <- function(df) {
   cols[order(idx, cols)]
 }
 
-.resolve_step07_edaphic_predictors <- function(df) {
+.resolve_step06_edaphic_predictors <- function(df) {
   exclude_cols <- c(
     "edaphic_z_score", "climatic_z_score", "edaphic_niche_overlap_d", "edaphic_schoener_d",
     "schoener_d", "sgmc_lithology_class", "Dominant_Lithology_Class", "edaphic_best_fit_taxon",
@@ -578,28 +623,31 @@ compute_probabilistic_consensus_scores <- function(df) {
       cc %in% names(df) && !is.logical(df[[cc]]) && any(is.finite(suppressWarnings(as.numeric(df[[cc]]))))
     }, logical(1))]
   }
-  p_edaph <- keep_finite_num(.parse_step07_semicolon_cols(df, "primary_edaph_predictors"))
+  p_edaph <- keep_finite_num(.parse_step06_semicolon_cols(df, "primary_edaph_predictors"))
   if (length(p_edaph) > 0L) return(p_edaph)
-  p_env <- keep_finite_num(.parse_step07_semicolon_cols(df, "primary_env_predictors"))
+  p_env <- keep_finite_num(.parse_step06_semicolon_cols(df, "primary_env_predictors"))
   if (length(p_env) > 0L) return(p_env)
   p_fine <- keep_finite_num(grep("^(fine_|ilr_texture_|ssurgo_|polaris_|solus_|topo_)", names(df), value = TRUE))
   if (length(p_fine) > 0L) return(p_fine)
   keep_finite_num(grep("^(soil_|bio[0-9]+_)", names(df), value = TRUE))
 }
 
-.compute_dynamic_edaphic_z_scores <- function(df, sp_all_vec, active_taxa, ref_idx_by_taxon) {
+.compute_dynamic_edaphic_z_scores <- function(df, sp_all_vec, active_taxa, ref_idx_by_taxon, clean_coh_mask = NULL) {
   n <- nrow(df)
   out_z <- if ("edaphic_z_score" %in% names(df)) suppressWarnings(as.numeric(df$edaphic_z_score)) else rep(NA_real_, n)
   out_z[!is.finite(out_z)] <- NA_real_
   need_idx <- which(is.na(out_z))
   if (length(need_idx) == 0L) return(round(out_z, 4))
 
-  pred_cols <- .resolve_step07_edaphic_predictors(df)
+  pred_cols <- .resolve_step06_edaphic_predictors(df)
   if (length(pred_cols) == 0L) return(round(out_z, 4))
 
   p_env <- length(pred_cols)
   E_mat <- matrix(NA_real_, nrow = n, ncol = p_env, dimnames = list(NULL, pred_cols))
   for (j in seq_len(p_env)) E_mat[, j] <- suppressWarnings(as.numeric(df[[pred_cols[j]]]))
+
+  noise_m <- if ("is_confident_label_noise" %in% names(df)) (!is.na(df$is_confident_label_noise) & as.logical(df$is_confident_label_noise)) else rep(FALSE, n)
+  coh_mask <- if (!is.null(clean_coh_mask) && length(clean_coh_mask) == n) (clean_coh_mask & !noise_m) else (!noise_m)
 
   robust_disp <- function(v) {
     v <- v[is.finite(v)]
@@ -617,7 +665,9 @@ compute_probabilistic_consensus_scores <- function(df) {
 
   coh_center <- numeric(p_env); coh_disp <- numeric(p_env)
   for (j in seq_len(p_env)) {
-    vj <- E_mat[is.finite(E_mat[, j]), j]
+    vj <- E_mat[coh_mask & is.finite(E_mat[, j]), j]
+    if (length(vj) < 3L) vj <- E_mat[!noise_m & is.finite(E_mat[, j]), j]
+    if (length(vj) == 0L) vj <- E_mat[is.finite(E_mat[, j]), j]
     coh_center[j] <- if (length(vj) > 0L) stats::median(vj) else NA_real_
     coh_disp[j] <- robust_disp(vj)
   }
@@ -626,10 +676,10 @@ compute_probabilistic_consensus_scores <- function(df) {
   tx_disp <- matrix(NA_real_, nrow = length(active_taxa), ncol = p_env, dimnames = list(active_taxa, pred_cols))
   for (tx in active_taxa) {
     r_idx <- ref_idx_by_taxon[[tx]]
-    all_t_idx <- which(sp_all_vec == tx)
+    clean_t_idx <- which(sp_all_vec == tx & !noise_m)
     for (j in seq_len(p_env)) {
       v_ref <- E_mat[r_idx[is.finite(E_mat[r_idx, j])], j]
-      if (length(v_ref) == 0L) v_ref <- E_mat[all_t_idx[is.finite(E_mat[all_t_idx, j])], j]
+      if (length(v_ref) == 0L) v_ref <- E_mat[clean_t_idx[is.finite(E_mat[clean_t_idx, j])], j]
       tx_center[tx, j] <- if (length(v_ref) > 0L) stats::median(v_ref) else coh_center[j]
       if (length(v_ref) >= 3L) {
         d_t <- robust_disp(v_ref)
@@ -735,12 +785,15 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
 
   # 1. Precompute empirical per-taxon reference envelopes on active Gold/Silver/promoted anchors
   #    (falling back to non-outlier records of each taxon when < 2 anchors exist)
-  anchor_all <- .resolve_step07_anchor_mask(df)
+  anchor_all <- .resolve_step06_anchor_mask(df)
   mo_all <- if ("morphometric_outlier_flag" %in% names(df)) as.logical(df$morphometric_outlier_flag) else rep(FALSE, n)
   mo_all[is.na(mo_all)] <- FALSE
+  noise_all <- if ("is_confident_label_noise" %in% names(df)) (!is.na(df$is_confident_label_noise) & as.logical(df$is_confident_label_noise)) else rep(FALSE, n)
 
   doy_num_all <- if ("doy" %in% names(df)) suppressWarnings(as.numeric(df$doy)) else rep(NA_real_, n)
   valid_doy_all <- is.finite(doy_num_all) & doy_num_all >= 1.0 & doy_num_all <= 366.0
+  hop_doy_all <- if ("hopkins_adjusted_doy" %in% names(df)) suppressWarnings(as.numeric(df$hopkins_adjusted_doy)) else doy_num_all
+  hop_doy_all <- ifelse(valid_doy_all & is.finite(hop_doy_all), hop_doy_all, ifelse(valid_doy_all, doy_num_all, NA_real_))
   anth_all <- if ("is_active_anthesis" %in% names(df)) as.logical(df$is_active_anthesis) else rep(TRUE, n)
   anth_all[is.na(anth_all)] <- TRUE
 
@@ -749,31 +802,51 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   sand_num_all <- if ("fine_soil_sand" %in% names(df)) suppressWarnings(as.numeric(df$fine_soil_sand)) else rep(NA_real_, n)
   if ("soil_sand" %in% names(df)) sand_num_all <- ifelse(is.finite(sand_num_all), sand_num_all, suppressWarnings(as.numeric(df$soil_sand)))
 
-  glob_doy_pool <- doy_num_all[valid_doy_all & anth_all]
-  if (length(glob_doy_pool) == 0L) glob_doy_pool <- doy_num_all[valid_doy_all]
-  glob_q75_doy <- if (length(glob_doy_pool) > 0L) as.numeric(stats::quantile(glob_doy_pool, probs = 0.75, na.rm = TRUE, names = FALSE)) else 135.0
-  glob_med_doy <- if (length(glob_doy_pool) > 0L) stats::median(glob_doy_pool, na.rm = TRUE) else 120.0
+  .circ_hop_stats <- function(h_vals) {
+    hv <- h_vals[is.finite(h_vals)]
+    if (length(hv) == 0L) return(list(mu_theta = 2.0 * pi * (120.0 / 365.25), q75_arc = 15.0, q75_doy = 135.0, med_doy = 120.0))
+    th <- 2.0 * pi * (hv / 365.25)
+    mu_th <- atan2(mean(sin(th)), mean(cos(th)))
+    if (mu_th < 0.0) mu_th <- mu_th + 2.0 * pi
+    arcs <- atan2(sin(th - mu_th), cos(th - mu_th)) * (365.25 / (2.0 * pi))
+    q75_a <- as.numeric(stats::quantile(arcs, probs = 0.75, na.rm = TRUE, names = FALSE))
+    med_d <- ((mu_th * (365.25 / (2.0 * pi)) - 1.0) %% 365.25) + 1.0
+    q75_d <- ((med_d + q75_a - 1.0) %% 365.25) + 1.0
+    list(mu_theta = mu_th, q75_arc = q75_a, q75_doy = q75_d, med_doy = med_d)
+  }
 
-  q75_doy <- stats::setNames(rep(glob_q75_doy, length(active_taxa)), active_taxa)
-  med_doy <- stats::setNames(rep(glob_med_doy, length(active_taxa)), active_taxa)
+  glob_hop_pool <- hop_doy_all[valid_doy_all & anth_all & anchor_all & !mo_all & !noise_all]
+  if (length(glob_hop_pool) == 0L) glob_hop_pool <- hop_doy_all[valid_doy_all & anth_all & !noise_all]
+  if (length(glob_hop_pool) == 0L) glob_hop_pool <- hop_doy_all[valid_doy_all]
+  glob_circ <- .circ_hop_stats(glob_hop_pool)
+
+  mu_theta_hop <- stats::setNames(rep(glob_circ$mu_theta, length(active_taxa)), active_taxa)
+  q75_arc_hop <- stats::setNames(rep(glob_circ$q75_arc, length(active_taxa)), active_taxa)
+  q75_doy <- stats::setNames(rep(glob_circ$q75_doy, length(active_taxa)), active_taxa)
+  med_doy <- stats::setNames(rep(glob_circ$med_doy, length(active_taxa)), active_taxa)
 
   ref_idx_by_taxon <- list()
   for (tx in active_taxa) {
     idx_t <- which(sp_all_vec == tx)
-    idx_gs <- idx_t[anchor_all[idx_t] & !mo_all[idx_t]]
-    idx_clean <- idx_t[!mo_all[idx_t]]
-    ref_idx <- if (length(idx_gs) >= 2L) idx_gs else if (length(idx_clean) >= 2L) idx_clean else idx_t
+    idx_gs <- idx_t[anchor_all[idx_t] & !mo_all[idx_t] & !noise_all[idx_t]]
+    idx_clean <- idx_t[!mo_all[idx_t] & !noise_all[idx_t]]
+    idx_nonoise <- idx_t[!noise_all[idx_t]]
+    ref_idx <- if (length(idx_gs) >= 2L) idx_gs else if (length(idx_clean) >= 2L) idx_clean else if (length(idx_nonoise) >= 1L) idx_nonoise else idx_t
     ref_idx_by_taxon[[tx]] <- ref_idx
 
-    d_ref <- doy_num_all[ref_idx[valid_doy_all[ref_idx] & anth_all[ref_idx]]]
-    if (length(d_ref) == 0L) d_ref <- doy_num_all[idx_t[valid_doy_all[idx_t]]]
+    d_ref <- hop_doy_all[ref_idx[valid_doy_all[ref_idx] & anth_all[ref_idx]]]
+    if (length(d_ref) == 0L) d_ref <- hop_doy_all[idx_t[valid_doy_all[idx_t] & anth_all[idx_t] & !noise_all[idx_t]]]
+    if (length(d_ref) == 0L) d_ref <- hop_doy_all[idx_t[valid_doy_all[idx_t]]]
     if (length(d_ref) > 0L) {
-      q75_doy[[tx]] <- as.numeric(stats::quantile(d_ref, probs = 0.75, na.rm = TRUE, names = FALSE))
-      med_doy[[tx]] <- stats::median(d_ref, na.rm = TRUE)
+      tx_circ <- .circ_hop_stats(d_ref)
+      mu_theta_hop[[tx]] <- tx_circ$mu_theta
+      q75_arc_hop[[tx]] <- tx_circ$q75_arc
+      q75_doy[[tx]] <- tx_circ$q75_doy
+      med_doy[[tx]] <- tx_circ$med_doy
     }
   }
 
-  edaph_z_vec <- .compute_dynamic_edaphic_z_scores(df, sp_all_vec, active_taxa, ref_idx_by_taxon)
+  edaph_z_vec <- .compute_dynamic_edaphic_z_scores(df, sp_all_vec, active_taxa, ref_idx_by_taxon, clean_coh_mask = (anchor_all & !mo_all & !noise_all))
   pheno_taus <- .compute_taxon_pheno_thresholds(df)
   tau_ecotype_vec <- pheno_taus$tau_ecotype
   tau_cryptic_vec <- pheno_taus$tau_cryptic
@@ -781,7 +854,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   # Precompute morphospace centroids and regularized inverse covariance in (can1, can2, can3) / dynamic PCs
   # for nearest-neighbor Mahalanobis hybrid parent resolution when predicted modalities match given_sp
   max_mc_p <- max(2L, min(15L, n - length(active_taxa) - 1L))
-  sel_mc <- .parse_step07_semicolon_cols(df, "selected_morph_features")
+  sel_mc <- .parse_step06_semicolon_cols(df, "selected_morph_features")
   sel_mc <- sel_mc[vapply(sel_mc, function(cc) !is.logical(df[[cc]]) && sum(is.finite(suppressWarnings(as.numeric(df[[cc]])))) >= 2L, logical(1))]
   can_cand <- intersect(c("can1", "can2", "can3"), names(df))
   can_cand <- can_cand[vapply(can_cand, function(cc) sum(is.finite(suppressWarnings(as.numeric(df[[cc]])))) >= 2L, logical(1))]
@@ -916,12 +989,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         if (is_intra) {
           ifelse(is.finite(edaph_z_all), exp(-0.5 * (edaph_z_all / 1.8)^2), 0.75)
         } else {
-          ifelse(ed_sp_all != sp_clean_vec & ((is.finite(edaph_z_all) & edaph_z_all > 2.0) | (!is.finite(edaph_z_all) & n < 50L)), 0.22, 0.75)
+          ifelse(ed_sp_all != sp_clean_vec & is.finite(edaph_z_all) & edaph_z_all > 2.0, 0.22, 0.75)
         }
       )
     )
   )
-  ddoy_all <- ifelse(is.finite(ddoy1_dv), ddoy1_dv, ifelse(is.finite(ddoy2_dv), ddoy2_dv, 0.0))
+  ddoy_all <- ifelse(is.finite(ddoy1_dv), ddoy1_dv, ifelse(is.finite(ddoy2_dv), ddoy2_dv, NA_real_))
   bf_all <- ifelse(is.finite(bf1_dv), bf1_dv, ifelse(is.finite(bf2_dv), bf2_dv, gmm_two_delta_bic))
   rec_by_v <- .chr_col(df, "recordedBy", n, default = NA_character_)
   yr_v <- .chr_col(df, "year", n, default = NA_character_)
@@ -966,7 +1039,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       pass_events <- (n_ind_events >= 5L) && pass_src
     }
     cong_fin <- min_cong_d2_dv[idx_cl][is.finite(min_cong_d2_dv[idx_cl])]
-    pass_osr <- if (length(cong_fin) > 0L) (stats::median(cong_fin) > stats::qchisq(0.95, df = 3)) else TRUE
+    pass_osr <- if (length(cong_fin) > 0L) (stats::median(cong_fin) > type_morph_chisq95) else TRUE
     div_vec <- (is.finite(d_edaph_all[idx_cl]) & d_edaph_all[idx_cl] < 0.30) |
                (is.finite(edaph_z_all[idx_cl]) & edaph_z_all[idx_cl] > 2.5) |
                (is_anth_dv[idx_cl] & is.finite(ddoy_all[idx_cl]) & abs(ddoy_all[idx_cl]) >= tau_cryptic_vec[idx_cl])
@@ -986,9 +1059,16 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     tier     <- if (!is.na(tier_dv[i])) tier_dv[i] else "Tier_3_Bronze"
     det_t    <- tier
     has_obs_doy_i <- valid_doy_all[i]
-    sp_med_doy <- if (given_sp %in% names(med_doy)) med_doy[[given_sp]] else glob_med_doy
-    sp_q75_doy <- if (given_sp %in% names(q75_doy)) q75_doy[[given_sp]] else glob_q75_doy
-    doy      <- if (has_obs_doy_i) doy_num_all[i] else sp_med_doy
+    sp_med_doy <- if (given_sp %in% names(med_doy)) med_doy[[given_sp]] else glob_circ$med_doy
+    sp_q75_doy <- if (given_sp %in% names(q75_doy)) q75_doy[[given_sp]] else glob_circ$q75_doy
+    sp_mu_theta <- if (given_sp %in% names(mu_theta_hop)) mu_theta_hop[[given_sp]] else glob_circ$mu_theta
+    sp_q75_arc <- if (given_sp %in% names(q75_arc_hop)) q75_arc_hop[[given_sp]] else glob_circ$q75_arc
+    hop_doy_i  <- if (has_obs_doy_i && is.finite(hop_doy_all[i])) hop_doy_all[i] else sp_med_doy
+    doy        <- hop_doy_i
+    hop_arc_i  <- if (has_obs_doy_i && is.finite(hop_doy_all[i])) {
+      th_i <- 2.0 * pi * (hop_doy_all[i] / 365.25)
+      atan2(sin(th_i - sp_mu_theta), cos(th_i - sp_mu_theta)) * (365.25 / (2.0 * pi))
+    } else NA_real_
 
     morph_sp <- if (!is.na(cda_pred_dv[i]) && nzchar(cda_pred_dv[i])) cda_pred_dv[i] else NULL
     cda_sec_taxon <- if (!is.na(cda_sec1_dv[i]) && nzchar(cda_sec1_dv[i])) cda_sec1_dv[i] else if (!is.na(cda_sec2_dv[i]) && nzchar(cda_sec2_dv[i])) cda_sec2_dv[i] else NULL
@@ -1020,7 +1100,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     } else if (is_intra) {
       if (is.finite(edaph_z)) exp(-0.5 * (edaph_z / 1.8)^2) else 0.75
     } else {
-      if (edaph_sp != given_sp && ((is.finite(edaph_z) && edaph_z > 2.0) || (!is.finite(edaph_z) && n < 50L))) 0.22 else 0.75
+      if (edaph_sp != given_sp && is.finite(edaph_z) && edaph_z > 2.0) 0.22 else 0.75
     }
     ph_str   <- if (is.finite(ph_num_all[i])) sprintf("%.2f", ph_num_all[i]) else "NA"
     sand_str <- if (is.finite(sand_num_all[i])) sprintf("%.1f%%", sand_num_all[i]) else "NA"
@@ -1059,25 +1139,31 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     cryptic_cluster_cohesion_pass[i] <- if (g_cl > 1L && (cl_key_i %in% names(cryptic_cluster_pass_map))) {
       isTRUE(cryptic_cluster_pass_map[[cl_key_i]])
     } else if (n < 50L && g_cl == 1L && is_mo_flag && ((is_anth && abs(ddoy) >= tau_cryptic_i) || d_edaph < 0.30)) {
-      !is.finite(min_cong_d2_dv[i]) || (min_cong_d2_dv[i] > stats::qchisq(0.95, df = 3))
+      !is.finite(min_cong_d2_dv[i]) || (min_cong_d2_dv[i] > type_morph_chisq95)
     } else {
       FALSE
     }
     osr_cryptic_ok_i <- if (is.finite(osr_p_dv[i])) {
-      (osr_p_dv[i] < 0.05) || is.na(min_cong_d2_dv[i]) || !is.finite(min_cong_d2_dv[i]) || (min_cong_d2_dv[i] > stats::qchisq(0.95, df = 3))
+      (osr_p_dv[i] < 0.05) || is.na(min_cong_d2_dv[i]) || !is.finite(min_cong_d2_dv[i]) || (min_cong_d2_dv[i] > type_morph_chisq95)
     } else {
-      is.na(min_cong_d2_dv[i]) || !is.finite(min_cong_d2_dv[i]) || (min_cong_d2_dv[i] > stats::qchisq(0.95, df = 3))
+      is.na(min_cong_d2_dv[i]) || !is.finite(min_cong_d2_dv[i]) || (min_cong_d2_dv[i] > type_morph_chisq95)
     }
 
-    morph_edaph_alt_agree <- (!is.null(morph_sp) && morph_is_taxon && morph_sp != given_sp && ((edaph_is_taxon && edaph_sp == morph_sp) || (!is.na(nt_e_i) && nt_e_i == morph_sp)) && (is.na(cda_prob) || cda_prob >= 0.55))
+    edaph_strong_support <- (is.finite(rf_prob) && rf_prob >= 0.55) || (!is.finite(rf_prob) && ((is.finite(d_edaph) && d_edaph < 0.35) || (is.finite(edaph_z) && edaph_z > 2.0)))
+    morph_edaph_alt_agree <- (!is.null(morph_sp) && morph_is_taxon && morph_sp != given_sp && ((edaph_is_taxon && edaph_sp == morph_sp && edaph_strong_support) || (!is.na(nt_e_i) && nt_e_i == morph_sp && is.finite(te_z_i) && te_z_i > 2.0)) && (is.na(cda_prob) || cda_prob >= 0.55))
     type_morph_alt_agree <- (!is.null(morph_sp) && morph_is_taxon && morph_sp != given_sp && !is.na(nt_m_i) && nt_m_i == morph_sp && (!is.na(cda_prob) && cda_prob >= 0.85))
     both_alt_agree <- morph_edaph_alt_agree || type_morph_alt_agree
+    type_synonymy_agree <- (!is.null(morph_sp) && morph_is_taxon && morph_sp != given_sp && is.finite(cda_prob) && cda_prob >= 0.80 && (
+      (edaph_is_taxon && edaph_sp == morph_sp && edaph_strong_support) ||
+      (!is.na(nt_e_i) && nt_e_i == morph_sp) ||
+      (!is.na(nt_m_i) && nt_m_i == morph_sp && cda_prob >= 0.85)
+    ))
 
     # Rule A: Nomenclatural Type Control Pinning
     if (is_type_specimen_i) {
       alt_aff_cands <- c(
         if (morph_is_taxon && morph_sp != given_sp) morph_sp else NA_character_,
-        if (edaph_is_taxon && edaph_sp != given_sp) edaph_sp else NA_character_,
+        if (edaph_is_taxon && edaph_sp != given_sp && edaph_strong_support) edaph_sp else NA_character_,
         if (!is.na(nt_m_i) && nt_m_i != given_sp) nt_m_i else NA_character_,
         if (!is.na(nt_e_i) && nt_e_i != given_sp) nt_e_i else NA_character_
       )
@@ -1085,7 +1171,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       rec_taxa[i] <- given_sp
       treat_broad[i] <- "Confirmed Species"
       treat_sub[i] <- "Confirmed_Species"
-      if (both_alt_agree) {
+      if (type_synonymy_agree) {
         status_calls[i] <- "Type_Synonymy_Candidate"
         triage_prios[i] <- "CRITICAL"
         triage_acts[i] <- "Evaluate_Heterotypic_Synonymy"
@@ -1137,7 +1223,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       osr_cda_support &&
       (!isTRUE(typ_m_i))
 
-    # Rule B: Stage 1 Type-Control Consensus Reassignment (type_control_reassign) with Orthogonal Modality Voting
+    # Rule B: Stage 1 Type-Control Consensus Reassignment (type_control_reassign) with 1-Vote-Per-Modality & Posterior Floor
     morph_concordant_self <- (morph_is_taxon && morph_sp == given_sp && is.finite(cda_prob) && cda_prob >= 0.65) ||
                              (isTRUE(typ_m_i) && is.finite(tm_d2_i) && tm_d2_i <= type_morph_chisq95)
     vote_morph <- if (morph_concordant_self) {
@@ -1151,18 +1237,18 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     } else {
       NA_character_
     }
-    ed_mod_cands <- c(
-      nt_e_i,
-      if (edaph_is_taxon) edaph_sp else NA_character_,
-      if (rf_is_taxon && is.finite(rf_prob) && rf_prob >= 0.55) rf_sp else NA_character_
-    )
-    ed_mod_cands <- ed_mod_cands[!is.na(ed_mod_cands) & nzchar(ed_mod_cands)]
-    vote_edaph <- if (length(ed_mod_cands) > 0L) {
-      u_ed <- unique(ed_mod_cands)
-      cnt_ed <- vapply(u_ed, function(x) sum(ed_mod_cands == x), integer(1))
-      u_ed[which.max(cnt_ed)]
+    rf_cand_sp <- if (rf_is_taxon && rf_sp != given_sp) rf_sp else if (edaph_is_taxon && edaph_sp != given_sp) edaph_sp else if (edaph_is_taxon) edaph_sp else if (rf_is_taxon) rf_sp else NA_character_
+    rf_vote <- if (!is.na(rf_cand_sp) && ((is.finite(rf_prob) && rf_prob >= 0.55) || (!is.finite(rf_prob) && ((is.finite(d_edaph) && d_edaph < 0.30) || (is.finite(edaph_z_i) && edaph_z_i > 2.0))))) rf_cand_sp else NA_character_
+    nt_e_vote <- if (!is.na(nt_e_i) && nzchar(nt_e_i) && is.finite(te_z_i) && te_z_i > 2.0) nt_e_i else NA_character_
+    vote_edaph <- if (!is.na(nt_e_vote) && !is.na(rf_vote)) {
+      if (nt_e_vote == rf_vote) nt_e_vote
+      else if (is.finite(te_z_i) && te_z_i > 2.5 && (!is.finite(rf_prob) || rf_prob < 0.70)) nt_e_vote
+      else if (is.finite(rf_prob) && rf_prob >= 0.70) rf_vote
+      else NA_character_
+    } else if (!is.na(nt_e_vote)) {
+      nt_e_vote
     } else {
-      NA_character_
+      rf_vote
     }
     deviates_from_given_type <- (is.finite(tm_d2_i) && tm_d2_i > type_morph_chisq95) ||
                                 (is.finite(tm_conc_dv[i]) && tm_conc_dv[i] < 0.25) ||
@@ -1175,7 +1261,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
                              deviates_from_given_type
     type_control_target_sp <- if (type_control_reassign) vote_morph else NULL
 
-    # 2. General Ontogenetic / Taphonomic Plasticity Rule (taxon-agnostic empirical quantile & edaphic envelope)
+    # 2. General Ontogenetic / Taphonomic Plasticity Rule (circular Hopkins-adjusted DOY quantile & edaphic envelope)
     in_edaphic_envelope <- (is.finite(edaph_z_i) && edaph_z_i <= 2.0) || (edaph_is_taxon && edaph_sp == given_sp)
     morph_div_i <- (!is.null(morph_sp) && morph_is_taxon && morph_sp != given_sp) || is_mo_flag
     single_borderline_div <- morph_div_i &&
@@ -1183,7 +1269,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     dlf_i <- dlf_dv[i]; asym_i <- asym_dv[i]
     is_sym_dissected_i <- ((is.finite(dlf_i) && dlf_i > 0.0) || is_dis_dv[i]) &&
                           !(is.finite(asym_i) && asym_i > 0.22)
-    is_late_foliar_wear <- has_obs_doy_i && (doy >= sp_q75_doy) && (g_cl == 1L) && single_borderline_div && !is_sym_dissected_i
+    is_late_foliar_wear <- has_obs_doy_i && is.finite(hop_arc_i) && is.finite(sp_q75_arc) && (hop_arc_i >= sp_q75_arc) && (g_cl == 1L) && single_borderline_div && !is_sym_dissected_i
     is_taphonomic_plasticity <- (triage_cat != "Severe_Triple_Stream_Conflict") &&
                                 !both_alt_agree && !morph_edaph_alt_agree &&
                                 !type_control_reassign && !congener_osr_reassign &&
@@ -1276,7 +1362,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"; triage_acts[i] <- "Flag_Putative_Cryptic_Species"
         rationales[i] <- sprintf("Congruent Basal_Rosette morphometric outlier + evolutionary barrier (delta_DOY=%.1fd, tau=%.1fd, D_edaph=%.2f)", ddoy, tau_cryptic_i, d_edaph)
         treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Putative_Cryptic_Species"; next
-      } else if (!is_tier1_pure_morph && is_mo_flag && !morph_concordant_self && (d_edaph < 0.30 || (mm_conf && n < 50L))) {
+      } else if (!is_tier1_pure_morph && is_mo_flag && !morph_concordant_self && (d_edaph < 0.30 || (is.finite(edaph_z) && edaph_z > 2.5))) {
         status_calls[i] <- "Misidentification_Severe"; rec_taxa[i] <- if (!is.na(min_cong_tx_i) && min_cong_tx_i != given_sp) min_cong_tx_i else if (edaph_is_taxon && edaph_sp != given_sp) edaph_sp else given_sp
         triage_prios[i] <- "HIGH"; triage_acts[i] <- "Reassign_Determination"
         rationales[i] <- "Cauline_Only_Fallback morphology with severe multimodal discordance routed to Misidentification_Reassign"
@@ -1420,7 +1506,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         } else {
           NA_real_
         }
-        chisq95_indep <- stats::qchisq(0.95, df = min(3L, p_type_morph))
+        chisq95_indep <- type_morph_chisq95
         extreme_indep_div_r <- (orig_n_leaves_v[r] >= 2L) && orig_has_obs_morph_v[r] &&
           !is.na(orig_cda_pred_v[r]) && nzchar(orig_cda_pred_v[r]) && (orig_cda_pred_v[r] != sp_clean_vec[r]) &&
           is.finite(orig_cda_prob_v[r]) && (orig_cda_prob_v[r] >= 0.85) &&
@@ -1464,8 +1550,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   df$cryptic_cluster_cohesion_pass <- as.logical(cryptic_cluster_cohesion_pass)
   df$taxonomic_status_call <- status_calls; df$recommended_determination <- rec_taxa
   df$synthesis_triage_priority <- triage_prios; df$synthesis_triage_action <- triage_acts
-  df$synthesis_rationale <- rationales; df$taxonomic_treatment <- treat_broad
-  df$taxonomic_treatment_broad <- treat_broad; df$taxonomic_treatment_subtype <- treat_sub; df$taxonomic_treatment_sub <- treat_sub
+  df$synthesis_rationale <- rationales
+  df$taxonomic_treatment_broad <- treat_broad; df$taxonomic_treatment_subtype <- treat_sub
   has_morph <- if ("can1" %in% names(df)) !is.na(df$can1) else if ("cda_predicted_taxon" %in% names(df)) !is.na(df$cda_predicted_taxon) else rep(TRUE, n)
   has_edaph <- if ("edaphic_best_fit_taxon" %in% names(df)) !is.na(df$edaphic_best_fit_taxon) else rep(FALSE, n)
   df$is_completed_voucher <- has_morph | has_edaph
@@ -1475,14 +1561,14 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
 # ------------------------------------------------------------------------------
 # 5. Taxon-Adjusted Institutional Batch Audit (Marginal ANCOVA + Partial Eta^2)
 # ------------------------------------------------------------------------------
-.resolve_step07_ancova_features <- function(df) {
+.resolve_step06_ancova_features <- function(df) {
   is_usable_num <- function(cc) {
     if (!(cc %in% names(df)) || is.logical(df[[cc]]) || is.character(df[[cc]]) || is.factor(df[[cc]])) return(FALSE)
     v <- suppressWarnings(as.numeric(df[[cc]]))
     v <- v[is.finite(v)]
     length(v) >= 6L && is.finite(stats::sd(v)) && stats::sd(v) > 1e-8
   }
-  sel_cols <- .parse_step07_semicolon_cols(df, "selected_morph_features")
+  sel_cols <- .parse_step06_semicolon_cols(df, "selected_morph_features")
   sel_cols <- sel_cols[vapply(sel_cols, is_usable_num, logical(1))]
   if (length(sel_cols) > 0L) return(sel_cols)
 
@@ -1495,11 +1581,22 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
 
 audit_institutional_batch_effects_ancova <- function(df, min_obs = 5L) {
   if (!("institutionCode" %in% names(df))) return(NULL)
-  resp_cols <- .resolve_step07_ancova_features(df)
+  resp_cols <- .resolve_step06_ancova_features(df)
   if (length(resp_cols) == 0L) return(NULL)
+  n_all <- nrow(df)
   inst_clean <- trimws(as.character(df$institutionCode))
-  sp_clean <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("Unassigned_Packera", nrow(df))
-  base_valid <- !is.na(inst_clean) & nzchar(inst_clean) & !is.na(sp_clean) & nzchar(sp_clean)
+  sp_clean <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else rep("Unassigned_Packera", n_all)
+  noise_m <- if ("is_confident_label_noise" %in% names(df)) (!is.na(df$is_confident_label_noise) & as.logical(df$is_confident_label_noise)) else rep(FALSE, n_all)
+  pass_m <- if ("is_passive" %in% names(df)) (!is.na(df$is_passive) & as.logical(df$is_passive)) else rep(FALSE, n_all)
+  aw_v <- if ("authority_weight" %in% names(df)) suppressWarnings(as.numeric(df$authority_weight)) else rep(1.0, n_all)
+  aw_v[!is.finite(aw_v) | aw_v <= 0.0] <- 1.0
+  sbw_v <- if ("spatial_balance_weight" %in% names(df)) suppressWarnings(as.numeric(df$spatial_balance_weight)) else rep(1.0, n_all)
+  sbw_v[!is.finite(sbw_v) | sbw_v <= 0.0] <- 1.0
+  w_all <- pmax(0.05, aw_v * sbw_v)
+
+  base_raw <- !is.na(inst_clean) & nzchar(inst_clean) & !is.na(sp_clean) & nzchar(sp_clean)
+  base_clean <- base_raw & !noise_m & !pass_m
+  base_valid <- if (sum(base_clean) >= 6L) base_clean else base_raw
   if (sum(base_valid) < 6L) return(NULL)
 
   rows_out <- list()
@@ -1509,6 +1606,7 @@ audit_institutional_batch_effects_ancova <- function(df, min_obs = 5L) {
     if (sum(valid_rc) < 6L) next
     sub_df <- df[valid_rc, , drop = FALSE]
     sub_df[[rc]] <- rc_num[valid_rc]
+    sub_df$.w_ancova <- w_all[valid_rc]
     inst_tab <- table(sub_df$institutionCode)
     keep_inst <- names(inst_tab[inst_tab >= min_obs])
     if (length(keep_inst) >= 2L) sub_df <- sub_df[sub_df$institutionCode %in% keep_inst, , drop = FALSE]
@@ -1517,10 +1615,27 @@ audit_institutional_batch_effects_ancova <- function(df, min_obs = 5L) {
     sub_df$species_standardized <- droplevels(factor(sub_df$species_standardized))
     if (nlevels(sub_df$institutionCode) < 2L) next
 
-    fit_ancova <- if (nlevels(sub_df$species_standardized) >= 2L) {
-      if (rc == "PC1") stats::lm(PC1 ~ species_standardized + institutionCode, data = sub_df)
-      else stats::lm(stats::as.formula(paste(rc, "~ species_standardized + institutionCode")), data = sub_df)
-    } else stats::lm(stats::as.formula(paste(rc, "~ institutionCode")), data = sub_df)
+    has_reg <- ("regional_group" %in% names(sub_df)) && {
+      rg_v <- trimws(as.character(sub_df$regional_group))
+      rg_ok <- !is.na(rg_v) & nzchar(rg_v) & !(tolower(rg_v) %in% c("na", "unknown", "unassigned"))
+      sum(rg_ok) == nrow(sub_df) && length(unique(rg_v[rg_ok])) >= 2L &&
+        (nrow(sub_df) - nlevels(sub_df$species_standardized) - length(unique(rg_v[rg_ok])) - nlevels(sub_df$institutionCode) >= 3L)
+    }
+    if (has_reg) sub_df$regional_group <- droplevels(factor(trimws(as.character(sub_df$regional_group))))
+
+    model_lbl <- if (nlevels(sub_df$species_standardized) >= 2L && has_reg) {
+      "lm(Response ~ species_standardized + regional_group + institutionCode)"
+    } else if (nlevels(sub_df$species_standardized) >= 2L) {
+      "lm(Response ~ species_standardized + institutionCode)"
+    } else {
+      "lm(Response ~ institutionCode)"
+    }
+    fit_ancova <- if (nlevels(sub_df$species_standardized) >= 2L && has_reg) {
+      stats::lm(stats::as.formula(paste(rc, "~ species_standardized + regional_group + institutionCode")), data = sub_df, weights = sub_df$.w_ancova)
+    } else if (nlevels(sub_df$species_standardized) >= 2L) {
+      if (rc == "PC1") stats::lm(PC1 ~ species_standardized + institutionCode, data = sub_df, weights = sub_df$.w_ancova)
+      else stats::lm(stats::as.formula(paste(rc, "~ species_standardized + institutionCode")), data = sub_df, weights = sub_df$.w_ancova)
+    } else stats::lm(stats::as.formula(paste(rc, "~ institutionCode")), data = sub_df, weights = sub_df$.w_ancova)
     aov_tab <- tryCatch(stats::anova(fit_ancova), error = function(e) NULL)
     if (is.null(aov_tab)) next
     rn <- rownames(aov_tab)
@@ -1530,7 +1645,7 @@ audit_institutional_batch_effects_ancova <- function(df, min_obs = 5L) {
       ss_tot <- sum(as.numeric(aov_tab$`Sum Sq`), na.rm = TRUE)
       partial_eta_sq <- if ((ss_inst + ss_res) > 0) ss_inst / (ss_inst + ss_res) else 0.0
       rows_out[[length(rows_out) + 1L]] <- data.frame(
-        Response = rc, Model = "lm(Response ~ species_standardized + institutionCode)",
+        Response = rc, Model = model_lbl,
         Term = "institutionCode", Df = as.integer(aov_tab$Df[inst_idx]),
         Sum_Sq = round(ss_inst, 4), Residual_Sum_Sq = round(ss_res, 4),
         F_value = round(as.numeric(aov_tab$`F value`[inst_idx]), 4),
@@ -1687,7 +1802,7 @@ build_triage_queue <- function(opts) {
   if (!is.null(sql_master) && nrow(sql_master) > 0L) {
     vouchers <- sql_master
     if ("plant_height_mm" %in% names(vouchers) && !("plant_height_cm" %in% names(vouchers))) vouchers$plant_height_cm <- round(suppressWarnings(as.numeric(vouchers$plant_height_mm)) / 10.0, 2)
-    if (!("can3" %in% names(vouchers))) vouchers$can3 <- if ("PC3" %in% names(vouchers)) suppressWarnings(as.numeric(vouchers$PC3)) else 0.0
+    if (!("can3" %in% names(vouchers))) vouchers$can3 <- if ("PC3" %in% names(vouchers)) suppressWarnings(as.numeric(vouchers$PC3)) else NA_real_
     message(sprintf("Hydrated %d specimen rows from SQLite v_integrative_triage_master.", nrow(vouchers)))
   } else {
   mm_numeric_coalesce <- c(
@@ -1763,12 +1878,12 @@ build_triage_queue <- function(opts) {
     if (!("plant_individual_id" %in% names(mo_df))) mo_df$plant_individual_id <- 0L
     mo_df$plant_individual_id <- ifelse(is.na(mo_df$plant_individual_id), 0L, suppressWarnings(as.integer(mo_df$plant_individual_id)))
     mo_df$plant_individual_id[is.na(mo_df$plant_individual_id)] <- 0L
-    if (!("can3" %in% names(mo_df))) mo_df$can3 <- if ("PC3" %in% names(mo_df)) suppressWarnings(as.numeric(mo_df$PC3)) else 0.0
+    if (!("can3" %in% names(mo_df))) mo_df$can3 <- if ("PC3" %in% names(mo_df)) suppressWarnings(as.numeric(mo_df$PC3)) else NA_real_
     if (!("PC1" %in% names(mo_df))) mo_df$PC1 <- if ("can1" %in% names(mo_df)) suppressWarnings(as.numeric(mo_df$can1)) else NA_real_
     if (!("PC2" %in% names(mo_df))) mo_df$PC2 <- if ("can2" %in% names(mo_df)) suppressWarnings(as.numeric(mo_df$can2)) else NA_real_
     for (nc in c(
       "cda_posterior_prob", "cda_second_posterior_prob", "cda_posterior_margin", "loocv_accuracy",
-      "can1", "can2",
+      "can1", "can2", "gmm_uncertainty",
       "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
       "plant_height_cm", "scape_to_basal_leaf_ratio",
       "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv",
@@ -1785,8 +1900,7 @@ build_triage_queue <- function(opts) {
     if (!("is_typical_morphotype" %in% names(mo_df))) mo_df$is_typical_morphotype <- NA
     if (!("has_empirical_type_anchor" %in% names(mo_df))) mo_df$has_empirical_type_anchor <- NA
     if (!("is_type_specimen" %in% names(mo_df))) mo_df$is_type_specimen <- NA
-    if (!("gmm_cluster" %in% names(mo_df))) mo_df$gmm_cluster <- 1L
-    if (!("gmm_uncertainty" %in% names(mo_df))) mo_df$gmm_uncertainty <- 0.05
+    if (!("gmm_cluster" %in% names(mo_df))) mo_df$gmm_cluster <- NA_integer_
     if (!("morph_tier_source" %in% names(mo_df))) mo_df$morph_tier_source <- NA_character_
     for (ic in c("leaf_count", "basal_leaf_count", "cauline_leaf_count")) if (!(ic %in% names(mo_df))) mo_df[[ic]] <- NA_integer_
 
@@ -1827,19 +1941,30 @@ build_triage_queue <- function(opts) {
       morphometric_outlier_flag = any(morphometric_outlier_flag == TRUE, na.rm = TRUE),
       misidentification_flag = any(misidentification_flag == TRUE, na.rm = TRUE), .groups = "drop"
     )
-    extra_pc_cols <- setdiff(grep("^PC[0-9]+$", names(mo_df), value = TRUE), c("PC1", "PC2"))
-    extra_num_meta <- intersect(c("efd_harmonic_opt", "efd_k95_pcs", "min_congener_mahal_d2", "open_set_novelty_p"), names(mo_df))
-    extra_chr_meta <- intersect(c("selected_morph_features", "type_status", "min_congener_taxon"), names(mo_df))
-    if (length(c(extra_pc_cols, extra_num_meta, extra_chr_meta)) > 0L) {
+    # Losslessly propagate all remaining Step 03/04 columns (ECT, cauline, heteroblasty, harmonics, PCs, OSR, weights)
+    rem_mo_cols <- setdiff(names(mo_df), c(names(mo_agg), "species_standardized", "scientificName", "species_raw", "determiner_tier"))
+    dyn_mo_num_cols <- character(0)
+    if (length(rem_mo_cols) > 0L) {
       mo_key <- paste0(mo_df$catalogNumber, "__", mo_df$plant_individual_id)
       agg_key <- paste0(mo_agg$catalogNumber, "__", mo_agg$plant_individual_id)
-      for (epc in c(extra_pc_cols, extra_num_meta)) {
-        vals_by_k <- tapply(mo_df[[epc]], mo_key, med_or_na)
-        mo_agg[[epc]] <- as.numeric(vals_by_k[agg_key])
-      }
-      for (ecc in extra_chr_meta) {
-        vals_by_k <- tapply(mo_df[[ecc]], mo_key, first_chr_or_na)
-        mo_agg[[ecc]] <- as.character(vals_by_k[agg_key])
+      lgl_known <- c("is_dissected", "is_contour_outlier", "is_confident_label_noise", "is_passive", "is_calibrated_mm", "cryptic_cluster_cohesion_pass")
+      int_known <- c("efd_harmonic_opt", "efd_k95_pcs")
+      for (rmc in rem_mo_cols) {
+        col_v <- mo_df[[rmc]]
+        if (is.logical(col_v) || rmc %in% lgl_known) {
+          vals_by_k <- tapply(col_v, mo_key, any_lgl_or_na)
+          mo_agg[[rmc]] <- as.logical(vals_by_k[agg_key])
+        } else if (is.integer(col_v) || rmc %in% int_known) {
+          vals_by_k <- tapply(col_v, mo_key, first_int_or_na)
+          mo_agg[[rmc]] <- as.integer(vals_by_k[agg_key])
+        } else if (is.numeric(col_v)) {
+          vals_by_k <- tapply(col_v, mo_key, med_or_na)
+          mo_agg[[rmc]] <- as.numeric(vals_by_k[agg_key])
+          dyn_mo_num_cols <- c(dyn_mo_num_cols, rmc)
+        } else {
+          vals_by_k <- tapply(col_v, mo_key, first_chr_or_na)
+          mo_agg[[rmc]] <- as.character(vals_by_k[agg_key])
+        }
       }
     }
     vouchers <- safe_left_join_and_coalesce(
@@ -1852,7 +1977,7 @@ build_triage_queue <- function(opts) {
         "gmm_uncertainty", "loocv_accuracy", "PC1", "PC2",
         "can1", "can2", "can3", "ecoregion_cda_posterior_prob", "authority_weight",
         "type_morph_mahal_d2", "type_morph_concordance",
-        extra_pc_cols, extra_num_meta
+        dyn_mo_num_cols
       ))
     )
   }
@@ -1884,7 +2009,18 @@ build_triage_queue <- function(opts) {
 
   gmm_stats <- resolve_gmm_bic_stats(opts)
   vouchers <- apply_taxonomic_decision_matrix(vouchers, intraspecific_mode = isTRUE(opts$intraspecific_mode), gmm_two_delta_bic = gmm_stats$two_delta_bic)
-  if (!is.null(opts$focal_taxon) && nzchar(trimws(opts$focal_taxon))) vouchers <- vouchers[vouchers$species_standardized == standardize_packera_taxon(opts$focal_taxon), , drop = FALSE]
+
+  # Persist full evaluated cohort (including outgroup anchors and incoming reassignments) to SQLite BEFORE --focal-taxon filtering
+  if (!isTRUE(opts$demo) && exists("persist_step06_to_sqlite", mode = "function")) {
+    tryCatch(persist_step06_to_sqlite(vouchers, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo)), error = function(e) warning("SQLite Step 06 persistence note: ", e$message))
+  }
+
+  if (!is.null(opts$focal_taxon) && nzchar(trimws(opts$focal_taxon))) {
+    f_std <- standardize_packera_taxon(opts$focal_taxon)
+    rec_det_v <- if ("recommended_determination" %in% names(vouchers)) as.character(vouchers$recommended_determination) else rep(NA_character_, nrow(vouchers))
+    keep_focal <- (vouchers$species_standardized == f_std) | (!is.na(rec_det_v) & rec_det_v == f_std)
+    vouchers <- vouchers[keep_focal, , drop = FALSE]
+  }
 
   prio_order <- c("CRITICAL" = 1, "HIGH" = 2, "MEDIUM" = 3, "LOW" = 4, "RESOLVED" = 5)
   vouchers$prio_rank <- prio_order[vouchers$synthesis_triage_priority]
@@ -1896,13 +2032,6 @@ build_triage_queue <- function(opts) {
   }
   dir.create(dirname(opts$output_queue), recursive = TRUE, showWarnings = FALSE)
   tmp_queue <- paste0(opts$output_queue, ".tmp"); .write_triage_fast(vouchers, tmp_queue, na_str = "NA"); file.rename(tmp_queue, opts$output_queue)
-  if (!is.null(opts$output_triage) && nzchar(opts$output_triage) && opts$output_triage != opts$output_queue) {
-    dir.create(dirname(opts$output_triage), recursive = TRUE, showWarnings = FALSE)
-    tmp_tr <- paste0(opts$output_triage, ".tmp"); .write_triage_fast(vouchers, tmp_tr, na_str = "NA"); file.rename(tmp_tr, opts$output_triage)
-  }
-  if (!isTRUE(opts$demo) && exists("persist_step07_to_sqlite", mode = "function")) {
-    tryCatch(persist_step07_to_sqlite(vouchers, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo)), error = function(e) warning("SQLite Step 07 persistence note: ", e$message))
-  }
   return(vouchers)
 }
 load_and_merge_modalities <- build_triage_queue
@@ -1928,9 +2057,9 @@ load_and_merge_modalities <- build_triage_queue
 }
 
 render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL, focal_taxon = "") {
-  if (!exists("render_step07_synthesis_plate_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
-  if (exists("render_step07_synthesis_plate_pdf", mode = "function")) {
-    render_step07_synthesis_plate_pdf(df, out_pdf, cda_summary = cda_summary)
+  if (!exists("render_step06_synthesis_plate_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+  if (exists("render_step06_synthesis_plate_pdf", mode = "function")) {
+    render_step06_synthesis_plate_pdf(df, out_pdf, cda_summary = cda_summary)
   }
   f_info <- .resolve_focal_taxon_slug(focal_taxon)
   if (nzchar(f_info$taxon) && nzchar(f_info$slug) && !is.null(out_pdf) && nzchar(out_pdf)) {
@@ -2029,7 +2158,7 @@ generate_taxonomic_revision_report <- function(df, opts) {
     doy_str <- if (length(d_valid) > 0L) {
       q10 <- as.integer(round(stats::quantile(d_valid, probs = 0.10, na.rm = TRUE, names = FALSE)))
       q90 <- as.integer(round(stats::quantile(d_valid, probs = 0.90, na.rm = TRUE, names = FALSE)))
-      sprintf("DOY %d–%d (10th–90th pct; n=%d; Hopkins 1918; Pewsey et al. 2013)", q10, q90, length(d_valid))
+      sprintf("DOY %d to %d (10th to 90th pct; n=%d; Hopkins 1918; Pewsey et al. 2013)", q10, q90, length(d_valid))
     } else "NA (no dated anthesis vouchers; Hopkins 1918; Pewsey et al. 2013)"
 
     st_sp <- if ("taxonomic_treatment_subtype" %in% names(sub_sp)) as.character(sub_sp$taxonomic_treatment_subtype) else if ("taxonomic_status_call" %in% names(sub_sp)) as.character(sub_sp$taxonomic_status_call) else rep("Confirmed_Species", n_sp)
@@ -2084,10 +2213,10 @@ generate_taxonomic_revision_report <- function(df, opts) {
     sprintf("- **Total Examined Vouchers:** %s specimens (including coalesced non-georeferenced historic vouchers).", format(tot_n, big.mark = ",")),
     sprintf("- **GMM Bayes Factors (2ΔBIC):** Decisive evidence for **K = %d discrete morphological clusters** ($2\\Delta\\text{BIC} = %s$ over $K=1$).", gmm_stats$opt_k, bic_str),
     sprintf("- **Institutional Batch Audit:** %s", batch_str),
-    sprintf("- **Stage 1 — Herbarium Misidentifications (Reassign):** %d vouchers (%0.1f%%) evaluated prior to hybridity.", misid_n, (misid_n / max(tot_n, 1)) * 100),
-    sprintf("- **Stage 2 — Hybrid Swarms & Mosaic Introgressants:** %d introgressants (%0.1f%%) (Rieseberg 1995; Slenker et al. 2022).", hybr_n, (hybr_n / max(tot_n, 1)) * 100),
-    sprintf("- **Stage 3 — Putative Cryptic Lineages:** %d vouchers (%0.1f%%) satisfying strict Integration by Congruence (Padial et al. 2010).", crypt_n, (crypt_n / max(tot_n, 1)) * 100),
-    sprintf("- **Stage 4 — Subspecific Ecotypes & Taphonomic/Ontogenetic Plasticity:** %d cohesive ecotypes (%0.1f%%) and %d within-envelope plastic variants (%0.1f%%).", ecotype_n, (ecotype_n / max(tot_n, 1)) * 100, ecoph_n, (ecoph_n / max(tot_n, 1)) * 100), "",
+    sprintf("- **Stage 1 (Herbarium Misidentifications, Reassign):** %d vouchers (%0.1f%%) evaluated prior to hybridity.", misid_n, (misid_n / max(tot_n, 1)) * 100),
+    sprintf("- **Stage 2 (Hybrid Swarms and Mosaic Introgressants):** %d introgressants (%0.1f%%) (Rieseberg 1995; Slenker et al. 2022).", hybr_n, (hybr_n / max(tot_n, 1)) * 100),
+    sprintf("- **Stage 3 (Putative Cryptic Lineages):** %d vouchers (%0.1f%%) satisfying strict Integration by Congruence (Padial et al. 2010).", crypt_n, (crypt_n / max(tot_n, 1)) * 100),
+    sprintf("- **Stage 4 (Subspecific Ecotypes and Taphonomic/Ontogenetic Plasticity):** %d cohesive ecotypes (%0.1f%%) and %d within-envelope plastic variants (%0.1f%%).", ecotype_n, (ecotype_n / max(tot_n, 1)) * 100, ecoph_n, (ecoph_n / max(tot_n, 1)) * 100), "",
     "## 2. Multi-Evidence Taxonomic Treatment",
     treatment_lines, "",
     "## 3. Herbarium Triage Queue Audit Summary",
@@ -2113,30 +2242,241 @@ generate_taxonomic_revision_report <- function(df, opts) {
   }
 }
 
+.html_escape_vec <- function(x) {
+  s <- ifelse(is.na(x), "", as.character(x))
+  s <- gsub("&", "&amp;", s, fixed = TRUE)
+  s <- gsub("<", "&lt;", s, fixed = TRUE)
+  s <- gsub(">", "&gt;", s, fixed = TRUE)
+  s <- gsub("\"", "&quot;", s, fixed = TRUE)
+  s
+}
+
+.json_escape_vec <- function(x) {
+  s <- ifelse(is.na(x), "", as.character(x))
+  s <- gsub("\\", "\\\\", s, fixed = TRUE)
+  s <- gsub("\"", "\\\"", s, fixed = TRUE)
+  s <- gsub("\r", " ", s, fixed = TRUE)
+  s <- gsub("\n", " ", s, fixed = TRUE)
+  s <- gsub("\t", " ", s, fixed = TRUE)
+  s <- gsub("</", "<\\/", s, fixed = TRUE)
+  paste0("\"", s, "\"")
+}
+
+generate_interactive_triage_html <- function(df, html_path, focal_taxon = "") {
+  if (is.null(html_path) || !nzchar(trimws(as.character(html_path)))) return(invisible(NULL))
+  dir.create(dirname(html_path), recursive = TRUE, showWarnings = FALSE)
+  n <- nrow(df)
+
+  get_c <- function(nm, def = "") if (nm %in% names(df)) ifelse(is.na(df[[nm]]), def, as.character(df[[nm]])) else rep(def, n)
+  get_f <- function(nm, digits = 2) {
+    if (!(nm %in% names(df))) return(rep("NA", n))
+    v <- suppressWarnings(as.numeric(df[[nm]]))
+    ifelse(is.finite(v), sprintf("%.*f", digits, v), "NA")
+  }
+
+  f_info <- .resolve_focal_taxon_slug(focal_taxon)
+  sp_vec <- get_c("species_standardized", "Unknown")
+  active_taxa <- sort(unique(sp_vec[nzchar(sp_vec) & sp_vec != "Unknown"]))
+  hdr_taxon <- if (nzchar(f_info$taxon)) f_info$taxon else if (length(active_taxa) == 1L) active_taxa[1L] else ""
+  title_html <- if (nzchar(hdr_taxon)) {
+    sprintf("NCU Herbarium Integrative Triage Dashboard: <em>%s</em>", .html_escape_vec(hdr_taxon))
+  } else {
+    sprintf("NCU Herbarium Integrative Triage Dashboard: <em>Packera</em> (%d Taxa)", length(active_taxa))
+  }
+
+  w_m <- if ("w_morph_kappa" %in% names(df) && any(is.finite(as.numeric(df$w_morph_kappa)))) sprintf("%.3f", stats::median(as.numeric(df$w_morph_kappa), na.rm = TRUE)) else "NA"
+  w_e <- if ("w_edaphic_kappa" %in% names(df) && any(is.finite(as.numeric(df$w_edaphic_kappa)))) sprintf("%.3f", stats::median(as.numeric(df$w_edaphic_kappa), na.rm = TRUE)) else "NA"
+  w_p <- if ("w_pheno_kappa" %in% names(df) && any(is.finite(as.numeric(df$w_pheno_kappa)))) sprintf("%.3f", stats::median(as.numeric(df$w_pheno_kappa), na.rm = TRUE)) else "NA"
+
+  prio_v <- get_c("synthesis_triage_priority", "RESOLVED")
+  sub_v  <- get_c("taxonomic_treatment_subtype", "Confirmed_Species")
+  n_crit_high <- sum(prio_v %in% c("CRITICAL", "HIGH"))
+  n_misid     <- sum(sub_v == "Misidentification_Reassign")
+  n_hyb       <- sum(sub_v == "Hybrid_Introgressant")
+  n_crypt     <- sum(sub_v == "Putative_Cryptic_Species")
+  n_eco       <- sum(sub_v %in% c("Subspecies_Ecotype", "Ecophenotypic_Plasticity"))
+  n_conf      <- sum(sub_v == "Confirmed_Species")
+
+  cat_v   <- get_c("catalogNumber", "")
+  pid_v   <- get_c("plant_individual_id", "0")
+  inst_v  <- get_c("institutionCode", "")
+  coll_v  <- get_c("recordedBy", "")
+  tier_v  <- get_c("determiner_tier", "")
+  rec_v   <- get_c("recommended_determination", "")
+  cda_v   <- get_c("cda_predicted_taxon", "")
+  cdap_v  <- get_f("cda_posterior_prob", 2)
+  ed_v    <- get_c("edaphic_best_fit_taxon", "")
+  edz_v   <- get_f("edaphic_z_score", 2)
+  ddoy_v  <- get_f("delta_doy_resid", 1)
+  cscore_v <- get_f("probabilistic_consensus_score", 3)
+  act_v   <- get_c("synthesis_triage_action", "")
+  rat_v   <- get_c("synthesis_rationale", "")
+
+  json_rows <- if (n > 0L) {
+    paste0(
+      "[",
+      .json_escape_vec(cat_v), ",",
+      .json_escape_vec(pid_v), ",",
+      .json_escape_vec(inst_v), ",",
+      .json_escape_vec(coll_v), ",",
+      .json_escape_vec(tier_v), ",",
+      .json_escape_vec(sp_vec), ",",
+      .json_escape_vec(rec_v), ",",
+      .json_escape_vec(prio_v), ",",
+      .json_escape_vec(sub_v), ",",
+      .json_escape_vec(cda_v), ",",
+      .json_escape_vec(cdap_v), ",",
+      .json_escape_vec(ed_v), ",",
+      .json_escape_vec(edz_v), ",",
+      .json_escape_vec(ddoy_v), ",",
+      .json_escape_vec(cscore_v), ",",
+      .json_escape_vec(act_v), ",",
+      .json_escape_vec(rat_v),
+      "]",
+      collapse = ",\n"
+    )
+  } else ""
+
+  taxon_opts <- paste0(
+    "<option value=\"ALL\">All Recorded Taxa</option>",
+    if (length(active_taxa) > 0L) paste0("<option value=\"", .html_escape_vec(active_taxa), "\">", .html_escape_vec(active_taxa), "</option>", collapse = "") else ""
+  )
+
+  html_doc <- c(
+    "<!DOCTYPE html>",
+    "<html lang=\"en\">",
+    "<head>",
+    "<meta charset=\"utf-8\">",
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+    "<title>Packera Integrative Triage Dashboard (NCU Herbarium)</title>",
+    "<style>",
+    ":root{--bg:#f8fafc;--card:#ffffff;--ink:#0f172a;--muted:#475569;--border:#cbd5e1;--accent:#0072B2;}",
+    "*{box-sizing:border-box;}body{margin:0;padding:20px 24px;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink);line-height:1.45;}",
+    "header{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 20px;margin-bottom:16px;}",
+    "h1{margin:0 0 6px 0;font-size:1.28rem;}",
+    ".meta{font-size:0.86rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:16px;}",
+    ".kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin-bottom:16px;}",
+    ".kpi{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;}",
+    ".kpi .lbl{font-size:0.75rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);}",
+    ".kpi .val{font-size:1.35rem;font-weight:700;margin-top:2px;}",
+    ".toolbar{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;}",
+    ".toolbar input,.toolbar select,.toolbar button{padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:0.86rem;background:#fff;color:var(--ink);}",
+    ".toolbar input{flex:1 1 240px;}",
+    ".toolbar button{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600;cursor:pointer;}",
+    ".table-wrap{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow-x:auto;}",
+    "table{width:100%;border-collapse:collapse;font-size:0.83rem;}",
+    "th,td{padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top;}",
+    "th{background:#f1f5f9;font-weight:700;cursor:pointer;user-select:none;white-space:nowrap;}",
+    "tr:hover td{background:#f8fafc;}",
+    ".badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:0.73rem;font-weight:700;color:#fff;}",
+    ".p-CRITICAL{background:#D55E00;}.p-HIGH{background:#E69F00;color:#111;}.p-MEDIUM{background:#CC79A7;}.p-LOW{background:#56B4E9;color:#111;}.p-RESOLVED{background:#009E73;}",
+    ".sci{font-style:italic;}",
+    ".rat{max-width:360px;color:#334155;font-size:0.79rem;}",
+    "</style>",
+    "</head>",
+    "<body>",
+    "<header>",
+    sprintf("<h1>%s</h1>", title_html),
+    sprintf("<div class=\"meta\"><span><strong>SOP:</strong> UNC-BOT-SOP-2026-04-REV5</span><span><strong>OOF Reliability (&kappa;):</strong> Morph = %s | Edaphic = %s | Phenology = %s</span><span id=\"shownCount\">Showing %d of %d vouchers</span></div>", w_m, w_e, w_p, n, n),
+    "</header>",
+    "<section class=\"kpis\">",
+    sprintf("<div class=\"kpi\"><div class=\"lbl\">Examined Vouchers</div><div class=\"val\">%d</div></div>", n),
+    sprintf("<div class=\"kpi\"><div class=\"lbl\">Critical / High Queue</div><div class=\"val\">%d</div></div>", n_crit_high),
+    sprintf("<div class=\"kpi\"><div class=\"lbl\">Misident. (Reassign)</div><div class=\"val\">%d</div></div>", n_misid),
+    sprintf("<div class=\"kpi\"><div class=\"lbl\">Hybrid / Introgressant</div><div class=\"val\">%d</div></div>", n_hyb),
+    sprintf("<div class=\"kpi\"><div class=\"lbl\">Putative Cryptic</div><div class=\"val\">%d</div></div>", n_crypt),
+    sprintf("<div class=\"kpi\"><div class=\"lbl\">Variety / Plasticity</div><div class=\"val\">%d</div></div>", n_eco),
+    sprintf("<div class=\"kpi\"><div class=\"lbl\">Confirmed Species</div><div class=\"val\">%d</div></div>", n_conf),
+    "</section>",
+    "<section class=\"toolbar\">",
+    "<input type=\"search\" id=\"qSearch\" placeholder=\"Search catalogNumber, collector, herbarium, taxon, rationale...\">",
+    "<select id=\"qPrio\"><option value=\"ALL\">All Priorities</option><option value=\"CRITICAL\">CRITICAL</option><option value=\"HIGH\">HIGH</option><option value=\"MEDIUM\">MEDIUM</option><option value=\"LOW\">LOW</option><option value=\"RESOLVED\">RESOLVED</option></select>",
+    "<select id=\"qSub\"><option value=\"ALL\">All Treatments</option><option value=\"Misidentification_Reassign\">Misidentification_Reassign</option><option value=\"Putative_Cryptic_Species\">Putative_Cryptic_Species</option><option value=\"Hybrid_Introgressant\">Hybrid_Introgressant</option><option value=\"Subspecies_Ecotype\">Subspecies_Ecotype</option><option value=\"Ecophenotypic_Plasticity\">Ecophenotypic_Plasticity</option><option value=\"Confirmed_Species\">Confirmed_Species</option></select>",
+    sprintf("<select id=\"qTaxon\">%s</select>", taxon_opts),
+    "<button type=\"button\" id=\"btnExport\">Export Filtered CSV</button>",
+    "</section>",
+    "<div class=\"table-wrap\"><table id=\"triTable\"><thead><tr>",
+    "<th data-col=\"0\">Catalog #</th><th data-col=\"1\">Ind</th><th data-col=\"2\">Herb.</th><th data-col=\"4\">Tier</th>",
+    "<th data-col=\"5\">Recorded Taxon</th><th data-col=\"6\">Recommended Determination</th><th data-col=\"7\">Priority</th>",
+    "<th data-col=\"8\">Treatment Subtype</th><th data-col=\"9\">CDA Pred (p)</th><th data-col=\"11\">Edaphic Fit (z)</th>",
+    "<th data-col=\"13\">&Delta;DOY (d)</th><th data-col=\"14\">Consensus</th><th data-col=\"16\">Synthesis Rationale</th>",
+    "</tr></thead><tbody id=\"triBody\"></tbody></table></div>",
+    "<script>",
+    paste0("const ROWS = [\n", json_rows, "\n];"),
+    "const PRIO_RANK = {CRITICAL:1,HIGH:2,MEDIUM:3,LOW:4,RESOLVED:5};",
+    "let sortCol = 7, sortAsc = true, filtered = ROWS.slice();",
+    "function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}",
+    "function fmtSci(s){const t=esc(s);return /^Packera\\s+/i.test(t)?'<span class=\"sci\">'+t+'</span>':t;}",
+    "function applyFilter(){",
+    "  const q=document.getElementById('qSearch').value.trim().toLowerCase();",
+    "  const pr=document.getElementById('qPrio').value;",
+    "  const sb=document.getElementById('qSub').value;",
+    "  const tx=document.getElementById('qTaxon').value;",
+    "  filtered = ROWS.filter(r=>{",
+    "    if(pr!=='ALL' && r[7]!==pr) return false;",
+    "    if(sb!=='ALL' && r[8]!==sb) return false;",
+    "    if(tx!=='ALL' && r[5]!==tx) return false;",
+    "    if(q && !r.join(' ').toLowerCase().includes(q)) return false;",
+    "    return true;",
+    "  });",
+    "  filtered.sort((a,b)=>{",
+    "    let va=a[sortCol], vb=b[sortCol];",
+    "    if(sortCol===7){va=PRIO_RANK[va]||9;vb=PRIO_RANK[vb]||9;}",
+    "    else if([1,10,12,13,14].includes(sortCol)){va=parseFloat(va);vb=parseFloat(vb);if(isNaN(va))va=9999;if(isNaN(vb))vb=9999;}",
+    "    if(va<vb) return sortAsc?-1:1; if(va>vb) return sortAsc?1:-1; return 0;",
+    "  });",
+    "  const html = filtered.map(r=>'<tr>'+",
+    "    '<td><strong>'+esc(r[0])+'</strong></td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(r[4])+'</td>'+",
+    "    '<td>'+fmtSci(r[5])+'</td><td>'+fmtSci(r[6])+'</td>'+",
+    "    '<td><span class=\"badge p-'+esc(r[7])+'\">'+esc(r[7])+'</span></td>'+",
+    "    '<td>'+esc(r[8])+'</td>'+",
+    "    '<td>'+fmtSci(r[9])+(r[10]!=='NA'?' ('+esc(r[10])+')':'')+'</td>'+",
+    "    '<td>'+fmtSci(r[11])+(r[12]!=='NA'?' (z='+esc(r[12])+')':'')+'</td>'+",
+    "    '<td>'+esc(r[13])+'</td><td>'+esc(r[14])+'</td><td class=\"rat\">'+esc(r[16])+'</td></tr>').join('');",
+    "  document.getElementById('triBody').innerHTML = html;",
+    "  document.getElementById('shownCount').textContent = 'Showing '+filtered.length+' of '+ROWS.length+' vouchers';",
+    "}",
+    "document.querySelectorAll('#triTable th').forEach(th=>th.addEventListener('click',()=>{",
+    "  const c=parseInt(th.getAttribute('data-col'),10); if(sortCol===c) sortAsc=!sortAsc; else {sortCol=c;sortAsc=true;} applyFilter();",
+    "}));",
+    "['qSearch','qPrio','qSub','qTaxon'].forEach(id=>document.getElementById(id).addEventListener('input',applyFilter));",
+    "document.getElementById('btnExport').addEventListener('click',()=>{",
+    "  const hdr=['catalogNumber','plant_individual_id','institutionCode','recordedBy','determiner_tier','species_standardized','recommended_determination','synthesis_triage_priority','taxonomic_treatment_subtype','cda_predicted_taxon','cda_posterior_prob','edaphic_best_fit_taxon','edaphic_z_score','delta_doy_resid','probabilistic_consensus_score','synthesis_triage_action','synthesis_rationale'];",
+    "  const csv=[hdr.join(',')].concat(filtered.map(r=>r.map(v=>'\"'+String(v||'').replace(/\"/g,'\"\"')+'\"').join(','))).join('\\n');",
+    "  const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});",
+    "  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='triage_queue_filtered.csv'; a.click(); URL.revokeObjectURL(a.href);",
+    "});",
+    "applyFilter();",
+    "</script>",
+    "</body>",
+    "</html>"
+  )
+
+  tmp_html <- paste0(html_path, ".", Sys.getpid(), ".tmp")
+  writeLines(html_doc, tmp_html, useBytes = TRUE)
+  file.rename(tmp_html, html_path)
+  invisible(html_path)
+}
+
 # ------------------------------------------------------------------------------
 # 8. Main Execution Pipeline
 # ------------------------------------------------------------------------------
 main <- function() {
   set.seed(42)
   opts <- parse_args_robust()
-  message("=== Starting Final Triage Dashboard & Taxonomic Synthesis ===")
+  message("=== Starting Step 06 Triage Dashboard & Taxonomic Synthesis ===")
   triage_df <- build_triage_queue(opts)
   render_synthesis_figure_pdf(triage_df, opts$output_plot, cda_summary = opts$cda_summary, focal_taxon = opts$focal_taxon)
   tryCatch({
-    if (!exists("generate_step07_pub_figures", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
+    if (!exists("generate_step06_pub_figures", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) {
       source("scripts/morphometrics/pub_figures_utils.R")
     }
-    if (exists("generate_step07_pub_figures", mode = "function")) generate_step07_pub_figures(triage_df, opts$output_plot)
-    env_run <- Sys.getenv("PACKERA_RUN_DIR", unset = "")
-    rep_triage <- if (!is.null(opts$output_triage) && nzchar(opts$output_triage)) opts$output_triage else if (nzchar(env_run)) file.path(env_run, "outputs", "reports", "final_curation_triage.csv") else ""
-    if (nzchar(rep_triage) && rep_triage != opts$output_queue) {
-      dir.create(dirname(rep_triage), recursive = TRUE, showWarnings = FALSE)
-      tmp_rt <- paste0(rep_triage, ".tmp")
-      if (requireNamespace("data.table", quietly = TRUE)) data.table::fwrite(triage_df, file = tmp_rt, na = "NA", quote = "auto", logical01 = FALSE) else utils::write.csv(triage_df, file = tmp_rt, row.names = FALSE)
-      file.rename(tmp_rt, rep_triage)
-    }
-  }, error = function(e) warning("Step 07 publication figures/triage export warning: ", e$message))
+    if (exists("generate_step06_pub_figures", mode = "function")) generate_step06_pub_figures(triage_df, opts$output_plot)
+  }, error = function(e) warning("Step 06 publication figures export warning: ", e$message))
   generate_taxonomic_revision_report(triage_df, opts)
+  if (!is.null(opts$output_html) && nzchar(trimws(opts$output_html))) {
+    generate_interactive_triage_html(triage_df, opts$output_html, focal_taxon = opts$focal_taxon)
+  }
   message("=== Taxonomic Synthesis & Triage Dashboard Complete ===")
 }
 

@@ -21,6 +21,7 @@ from scripts.core.config import (
     EXCLUDED_WESTERN_STATES,
     WESTERN_LONGITUDE_THRESHOLD,
 )
+from scripts.core.taxonomy_authority import EXPORT_COLUMNS
 from scripts.core.harvester import (
     VoucherHarvester,
     export_curated_table,
@@ -426,8 +427,40 @@ class TestAtomicTableExport(unittest.TestCase):
             self.assertIn(col, df.columns, f"Contract column '{col}' missing from curated_vouchers.csv")
 
         self.assertIn("species_raw", df.columns)
-        for purged_col in ("latitude", "longitude"):
-            self.assertNotIn(purged_col, df.columns)
+        allowed_voucher_cols = set(EXPORT_COLUMNS) | {
+            "locality",
+            "doy",
+            "species_standardized",
+            "pixels_per_mm",
+            "is_calibrated_mm",
+            "scale_source",
+            "qc_status",
+            "failure_reason",
+            "failure_details",
+            "spatial_balance_weight",
+            "countryCode",
+            "gbifID",
+            "occurrenceID",
+            "minimumElevationInMeters",
+            "elevation_m",
+        }
+        if not set(df.columns).issubset(allowed_voucher_cols):
+            # Pre-migration untracked data/tables/curated_vouchers.csv on disk: verify export_curated_table strips non-contract legacy columns cleanly
+            with tempfile.TemporaryDirectory() as mig_tmp:
+                mig_csv = Path(mig_tmp) / "curated_vouchers_migrated.csv"
+                mig_db = Path(mig_tmp) / "mig.sqlite"
+                export_curated_table(df, mig_csv, db_path=mig_db)
+                df_mig = pd.read_csv(mig_csv)
+            self.assertEqual(len(df_mig), len(df))
+            for col in contract_cols:
+                self.assertIn(col, df_mig.columns)
+            self.assertTrue(
+                set(df_mig.columns).issubset(allowed_voucher_cols),
+                f"Unexpected columns retained after export_curated_table: {set(df_mig.columns) - allowed_voucher_cols}",
+            )
+        else:
+            for purged_col in ("latitude", "longitude"):
+                self.assertNotIn(purged_col, df.columns)
 
 
 class TestVoucherHarvesterCLI(unittest.TestCase):
@@ -1602,9 +1635,10 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                 return {"results": [], "count": 0}
             sci = kwargs.get("scientificName")
             queried_names.append(sci)
+            sci_ord = len(dict.fromkeys(queried_names))
             recs = [
                 {
-                    "key": abs(hash(sci)) % 100000 + idx + 1,
+                    "key": sci_ord * 10000 + idx + 1,
                     "scientificName": f"{sci} Auth.",
                     "stateProvince": "Texas",
                     "decimalLatitude": 31.20 + idx * 0.05,
@@ -1614,7 +1648,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                     "month": 5,
                     "day": 14 + idx,
                     "recordedBy": "R. Collector",
-                    "recordNumber": str((abs(hash(sci)) % 900 + 100) * 10 + idx),
+                    "recordNumber": str(sci_ord * 1000 + idx),
                     "media": [{"identifier": f"https://example.com/{sci.replace(' ', '_')}_{idx}.jpg", "type": "StillImage", "format": "image/jpeg"}],
                     "catalogNumber": f"CAT_{sci.replace(' ', '_').upper()}_{idx}",
                     "institutionCode": "TEX",
@@ -1910,6 +1944,8 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
 
             # Step 06 assertions
             self.assertTrue(any("06_triage_dashboard_synthesis.R" in tok for tok in cmd_step07))
+            self.assertEqual(_arg_value(cmd_step07, "--output-queue"), str(tables_dir / "triage_queue.csv"))
+            self.assertEqual(_arg_value(cmd_step07, "--output-html"), str(reports_dir / "Triage_Dashboard_Interactive.html"))
             self.assertEqual(_arg_value(cmd_step07, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step07)
 

@@ -411,7 +411,8 @@ class TestSteps1To4ZeroTrustVariableContracts(unittest.TestCase):
         sg_ca = load_us_county_spatial_graph()
         st_ca, co_ca, is_non_us = resolve_voucher_us_county(45.42, -75.69, "Ontario", "Ottawa", sg_ca)
         self.assertEqual(st_ca, "ontario")
-        self.assertFalse(is_non_us)
+        self.assertEqual(co_ca, "ottawa")
+        self.assertTrue(is_non_us)
         eco_on = infer_regional_group(43.70, -79.40, state_province="Ontario", county="Toronto")
         self.assertTrue(bool(eco_on) and eco_on != "Unmapped_Ecoregion")
 
@@ -451,15 +452,29 @@ class TestSteps1To4ZeroTrustVariableContracts(unittest.TestCase):
         self.assertLess(camp_m["AR_inv"], 0.70)
         self.assertGreaterEqual(camp_m["AR_inv"], 0.25)
 
-        # 3. SQLite schema user_version == 20261114 & zero twin columns across tables and v_integrative_triage_master
-        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261114)
+        # 3. SQLite schema user_version == 20261115 & zero twin columns across tables and v_integrative_triage_master
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261115)
         conn = get_db_connection(":memory:", init_schema=True)
         try:
             init_db_schema(conn)
             v_cols = {r[1] for r in conn.execute("PRAGMA table_info(vouchers)").fetchall()}
             el_cols = {r[1] for r in conn.execute("PRAGMA table_info(extracted_leaves)").fetchall()}
             otu_cols = {r[1] for r in conn.execute("PRAGMA table_info(otu_morphometrics)").fetchall()}
+            ct_cols = {r[1] for r in conn.execute("PRAGMA table_info(curation_triage)").fetchall()}
             view_cols = {r[1] for r in conn.execute("PRAGMA table_info(v_integrative_triage_master)").fetchall()}
+            self.assertEqual(
+                ct_cols,
+                {
+                    "run_id", "catalogNumber", "plant_individual_id",
+                    "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa",
+                    "n_available_modalities", "probabilistic_consensus_conflict",
+                    "probabilistic_consensus_score", "hopkins_adjusted_doy",
+                    "delta_doy_resid", "taxonomic_status_call", "recommended_determination",
+                    "taxonomic_treatment_broad", "taxonomic_treatment_subtype",
+                    "synthesis_triage_priority", "synthesis_triage_action",
+                    "synthesis_rationale", "cryptic_cluster_cohesion_pass", "is_completed_voucher",
+                },
+            )
             for twin in ("latitude", "longitude"):
                 self.assertNotIn(twin, v_cols)
                 self.assertNotIn(twin, otu_cols)

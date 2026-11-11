@@ -711,8 +711,8 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             conflict_csv.unlink()
 
             triage_queue_csv = tables_dir / "triage_queue.csv"
-            final_triage_csv = reports_dir / "final_curation_triage.csv"
             rev_report_md = reports_dir / "Packera_Taxonomic_Revision_Summary.md"
+            rev_html = reports_dir / "Triage_Dashboard_Interactive.html"
             rev_fig_pdf = figures_dir / "Figure_Integrative_Packera_Revision.pdf"
 
             cmd_step06 = [
@@ -723,17 +723,18 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 "--multimodal-flags", str(conflict_csv),
                 "--niche-summary", str(srf_summary_csv),
                 "--output-queue", str(triage_queue_csv),
-                "--output-triage", str(final_triage_csv),
-                "--output-figure", str(rev_fig_pdf),
+                "--output-plot", str(rev_fig_pdf),
                 "--output-report", str(rev_report_md),
+                "--output-html", str(rev_html),
             ]
             proc06 = subprocess.run(cmd_step06, cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=False)
             combined06 = proc06.stdout + "\n" + proc06.stderr
             self.assertEqual(proc06.returncode, 0, f"Step 06 failed:\n{combined06}")
             self.assertIn("v_integrative_triage_master", combined06)
-            self.assertTrue(final_triage_csv.is_file())
+            self.assertTrue(triage_queue_csv.is_file())
+            self.assertTrue(rev_html.is_file())
 
-            with open(final_triage_csv, "r", encoding="utf-8", newline="") as tf:
+            with open(triage_queue_csv, "r", encoding="utf-8", newline="") as tf:
                 triage_rows = list(csv.DictReader(tf))
             self.assertEqual(len(triage_rows), 13)
             by_key = {(r["catalogNumber"], int(float(r["plant_individual_id"]))): r for r in triage_rows}

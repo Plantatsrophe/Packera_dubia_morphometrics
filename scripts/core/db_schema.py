@@ -356,21 +356,17 @@ def _build_master_view_ddl() -> str:
         -- Environmental Cache (Fine-grain SSURGO / POLARIS / SOLUS / 3DEP / SGMC & 19 WorldClim Rasters)
         {env_view_selects},
         {wc_view_selects},
-        -- Step 07 Curation Triage
+        -- Step 06 Curation Triage
         ct.w_morph_kappa AS w_morph_kappa,
-        ct.w_vision_kappa AS w_vision_kappa,
         ct.w_edaphic_kappa AS w_edaphic_kappa,
         ct.w_pheno_kappa AS w_pheno_kappa,
-        ct.n_active_modalities AS n_active_modalities,
         ct.n_available_modalities AS n_available_modalities,
         ct.probabilistic_consensus_conflict AS probabilistic_consensus_conflict,
-        ct.composite_conflict_score AS composite_conflict_score,
         ct.probabilistic_consensus_score AS probabilistic_consensus_score,
         COALESCE(ct.hopkins_adjusted_doy, srf.hopkins_adjusted_doy) AS hopkins_adjusted_doy,
         ct.delta_doy_resid AS delta_doy_resid,
         ct.taxonomic_status_call AS taxonomic_status_call,
         ct.recommended_determination AS recommended_determination,
-        ct.taxonomic_treatment AS taxonomic_treatment,
         ct.taxonomic_treatment_broad AS taxonomic_treatment_broad,
         ct.taxonomic_treatment_subtype AS taxonomic_treatment_subtype,
         ct.synthesis_triage_priority AS synthesis_triage_priority,
@@ -868,19 +864,15 @@ def _build_schema_ddl() -> str:
         catalogNumber TEXT NOT NULL,
         plant_individual_id INTEGER NOT NULL DEFAULT 0,
         w_morph_kappa REAL,
-        w_vision_kappa REAL,
         w_edaphic_kappa REAL,
         w_pheno_kappa REAL,
-        n_active_modalities INTEGER,
         n_available_modalities INTEGER,
         probabilistic_consensus_conflict REAL,
-        composite_conflict_score REAL,
         probabilistic_consensus_score REAL,
         hopkins_adjusted_doy REAL,
         delta_doy_resid REAL,
         taxonomic_status_call TEXT,
         recommended_determination TEXT,
-        taxonomic_treatment TEXT,
         taxonomic_treatment_broad TEXT,
         taxonomic_treatment_subtype TEXT,
         synthesis_triage_priority TEXT,
@@ -1070,7 +1062,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261114
+PACKERA_SCHEMA_USER_VERSION: int = 20261115
 
 
 def _migrate_dynamic_schema_columns(
@@ -1112,6 +1104,72 @@ def _migrate_dynamic_schema_columns(
                 existing_cols.add(col_name)
 
 
+
+    if "curation_triage" in existing_tables:
+        ct_cols_now = {
+            str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()
+        }
+        if ct_cols_now and not {
+            "run_id", "catalogNumber", "plant_individual_id",
+            "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa",
+            "n_available_modalities", "probabilistic_consensus_conflict",
+            "probabilistic_consensus_score", "hopkins_adjusted_doy",
+            "delta_doy_resid", "taxonomic_status_call", "recommended_determination",
+            "taxonomic_treatment_broad", "taxonomic_treatment_subtype",
+            "synthesis_triage_priority", "synthesis_triage_action",
+            "synthesis_rationale", "cryptic_cluster_cohesion_pass", "is_completed_voucher",
+        }.issuperset(ct_cols_now):
+            canon_ct_cols = (
+                "run_id", "catalogNumber", "plant_individual_id",
+                "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa",
+                "n_available_modalities", "probabilistic_consensus_conflict",
+                "probabilistic_consensus_score", "hopkins_adjusted_doy",
+                "delta_doy_resid", "taxonomic_status_call", "recommended_determination",
+                "taxonomic_treatment_broad", "taxonomic_treatment_subtype",
+                "synthesis_triage_priority", "synthesis_triage_action",
+                "synthesis_rationale", "cryptic_cluster_cohesion_pass", "is_completed_voucher",
+            )
+            shared_ct = [c for c in canon_ct_cols if c in ct_cols_now]
+            conn.executescript(
+                """
+                DROP TABLE IF EXISTS _curation_triage_v20261115;
+                CREATE TABLE _curation_triage_v20261115 (
+                    run_id TEXT NOT NULL,
+                    catalogNumber TEXT NOT NULL,
+                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
+                    w_morph_kappa REAL,
+                    w_edaphic_kappa REAL,
+                    w_pheno_kappa REAL,
+                    n_available_modalities INTEGER,
+                    probabilistic_consensus_conflict REAL,
+                    probabilistic_consensus_score REAL,
+                    hopkins_adjusted_doy REAL,
+                    delta_doy_resid REAL,
+                    taxonomic_status_call TEXT,
+                    recommended_determination TEXT,
+                    taxonomic_treatment_broad TEXT,
+                    taxonomic_treatment_subtype TEXT,
+                    synthesis_triage_priority TEXT,
+                    synthesis_triage_action TEXT,
+                    synthesis_rationale TEXT,
+                    cryptic_cluster_cohesion_pass INTEGER,
+                    is_completed_voucher INTEGER,
+                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
+                    FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
+                );
+                """
+            )
+            if shared_ct:
+                cols_csv = ", ".join(shared_ct)
+                conn.execute(
+                    f"INSERT OR REPLACE INTO _curation_triage_v20261115 ({cols_csv}) SELECT {cols_csv} FROM curation_triage;"
+                )
+            conn.executescript(
+                """
+                DROP TABLE curation_triage;
+                ALTER TABLE _curation_triage_v20261115 RENAME TO curation_triage;
+                """
+            )
 
     if recreate_view and set(_MASTER_VIEW_REQUIRED_TABLES).issubset(existing_tables):
         conn.executescript(MASTER_VIEW_DDL)
