@@ -905,27 +905,33 @@ def record_voucher_segmentation_transaction(
     petiole_by_pid = dict(by_plant_petiole or {})
     coords_map = dict(contour_coords_by_leaf or {})
 
-    # Determine voucher-level calibration & QC status
+    # Determine voucher-level calibration & QC status (preserving is_calibrated_mm == 0 for mp_estimated)
     ppm_val: Optional[float] = None
     is_cal_val: Optional[int] = None
     for r in extracted_records:
         p = _to_float(r.get("pixels_per_mm"))
+        c_flag = _to_bool_int(r.get("is_calibrated_mm"))
+        s_src = (_to_str(r.get("scale_source")) or _to_str(r.get("cf_source")) or "").strip().lower()
+        is_mp_est = s_src in {"mp_estimated", "predicted_from_megapixels", "uncalibrated"}
         if p is not None and p > 0:
             ppm_val = p
-            is_cal_val = 1
+            if c_flag is not None:
+                is_cal_val = 0 if is_mp_est else c_flag
+            else:
+                is_cal_val = 0 if is_mp_est else 1
             break
-        c_flag = _to_bool_int(r.get("is_calibrated_mm"))
         if c_flag is not None and is_cal_val is None:
-            is_cal_val = c_flag
+            is_cal_val = 0 if is_mp_est else c_flag
     if ppm_val is None and failure_record:
         p_fail = _to_float(failure_record.get("pixels_per_mm"))
+        c_fail = _to_bool_int(failure_record.get("is_calibrated_mm"))
+        s_fail = (_to_str(failure_record.get("scale_source")) or _to_str(failure_record.get("cf_source")) or "").strip().lower()
+        is_mp_fail = s_fail in {"mp_estimated", "predicted_from_megapixels", "uncalibrated"}
         if p_fail is not None and p_fail > 0:
             ppm_val = p_fail
-            is_cal_val = 1
-        elif is_cal_val is None:
-            c_fail = _to_bool_int(failure_record.get("is_calibrated_mm"))
-            if c_fail is not None:
-                is_cal_val = c_fail
+            is_cal_val = 0 if is_mp_fail else (c_fail if c_fail is not None else 1)
+        elif is_cal_val is None and c_fail is not None:
+            is_cal_val = 0 if is_mp_fail else c_fail
 
     qc_status = "PASS" if len(extracted_records) > 0 else "FAILED_QC"
     fail_reason = _to_str(failure_record.get("failure_reason")) if failure_record else None
@@ -1092,8 +1098,12 @@ def record_voucher_segmentation_transaction(
         l_ppm = _to_float(r.get("pixels_per_mm"))
         if l_ppm is None:
             l_ppm = ppm_val
+        l_src_raw = (_to_str(r.get("scale_source")) or _to_str(r.get("cf_source")) or "").strip().lower()
+        l_is_mp = l_src_raw in {"mp_estimated", "predicted_from_megapixels", "uncalibrated"}
         l_cal = _to_bool_int(r.get("is_calibrated_mm"))
-        if l_cal is None:
+        if l_is_mp:
+            l_cal = 0
+        elif l_cal is None:
             l_cal = 1 if (l_ppm is not None and l_ppm > 0) else 0
 
         leaf_rows.append((
@@ -1115,7 +1125,7 @@ def record_voucher_segmentation_transaction(
             _to_float(r.get("petiole_to_blade_ratio")),
             l_ppm,
             l_cal,
-            _to_str(r.get("scale_source")) or ("ruler_calibrated" if l_cal == 1 else "uncalibrated"),
+            _to_str(r.get("scale_source")) or ("mp_estimated" if (l_cal == 0 and l_ppm is not None and l_ppm > 0) else ("ruler_calibrated" if l_cal == 1 else "uncalibrated")),
             _to_str(r.get("mask_path")),
             crop_p,
             _to_str(r.get("contour_path")),

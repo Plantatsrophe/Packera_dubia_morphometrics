@@ -144,9 +144,9 @@ def _resolve_asset_path(p_str: Any, out_dir: Path) -> Optional[Path]:
 
 def _is_valid_smooth_closed_mask(m_path_str: Any, out_dir: Path) -> bool:
     """
-    Verify that a binary silhouette mask has a single smooth closed contour
-    without internal holes or clipped border edges.
-    Returns True if no on-disk mask path is configured (e.g., synthetic contour-only fixtures).
+    Verify that a binary mask has a single dominant closed contour (>= 85% of foreground area),
+    no clipped canvas-border edges, and no significant interior holes (>= 2.5% of blade area)
+    for closed-contour figure rendering. Returns True when no on-disk mask path is configured.
     """
     resolved = _resolve_asset_path(m_path_str, out_dir)
     raw_str = str(m_path_str or "").strip()
@@ -1454,20 +1454,40 @@ def generate_step02_publication_figures(
                         except Exception:
                             cxy_loaded = None
 
-                    mat_m, _ = oriented_affine(m_u8.shape[:2], angle_cw_m)
-                    crop_m = rotate_image(m_u8, angle_cw_m, bg=0, nearest=True)
+                    # Step 02 persists upright base-to-tip masks directly in data/masks/;
+                    # detect upright masks via mask_is_upright or contour-frame agreement to prevent double-rotation
+                    mask_already_upright = (
+                        _parse_bool_val(row.get("mask_is_upright", False))
+                        if ("mask_is_upright" in row and pd.notna(row.get("mask_is_upright")))
+                        else False
+                    )
+                    if not mask_already_upright and cxy_loaded is not None and len(cxy_loaded) >= 3 and angle_cw_m > 0.25:
+                        mb_raw = mask_bbox(m_u8)
+                        if mb_raw is not None:
+                            mw_raw = float(mb_raw[2] - mb_raw[0])
+                            mh_raw = float(mb_raw[3] - mb_raw[1])
+                            cw_tip = float(np.ptp(cxy_loaded[:, 0]))
+                            ch_tip = float(np.ptp(cxy_loaded[:, 1]))
+                            if abs(mw_raw - cw_tip) <= max(4.0, 0.06 * max(cw_tip, 1.0)) and abs(mh_raw - ch_tip) <= max(4.0, 0.06 * max(ch_tip, 1.0)):
+                                mask_already_upright = True
 
-                    rot_cxy: Optional[np.ndarray] = None
-                    if cxy_loaded is not None and len(cxy_loaded) >= 3:
-                        rot_rad = float(np.deg2rad(signed_cw))
-                        cos_r, sin_r = float(np.cos(rot_rad)), float(np.sin(rot_rad))
-                        c_mean = np.mean(cxy_loaded, axis=0)
-                        rel_c = cxy_loaded - c_mean
-                        unrot_xy = np.column_stack([
-                            cos_r * rel_c[:, 0] + sin_r * rel_c[:, 1] + c_mean[0],
-                            -sin_r * rel_c[:, 0] + cos_r * rel_c[:, 1] + c_mean[1],
-                        ])
-                        rot_cxy = apply_affine(mat_m, unrot_xy)
+                    if mask_already_upright or angle_cw_m == 0.0:
+                        crop_m = m_u8.copy()
+                        rot_cxy = cxy_loaded.copy() if (cxy_loaded is not None and len(cxy_loaded) >= 3) else None
+                    else:
+                        mat_m, _ = oriented_affine(m_u8.shape[:2], angle_cw_m)
+                        crop_m = rotate_image(m_u8, angle_cw_m, bg=0, nearest=True)
+                        rot_cxy = None
+                        if cxy_loaded is not None and len(cxy_loaded) >= 3:
+                            rot_rad = float(np.deg2rad(signed_cw))
+                            cos_r, sin_r = float(np.cos(rot_rad)), float(np.sin(rot_rad))
+                            c_mean = np.mean(cxy_loaded, axis=0)
+                            rel_c = cxy_loaded - c_mean
+                            unrot_xy = np.column_stack([
+                                cos_r * rel_c[:, 0] + sin_r * rel_c[:, 1] + c_mean[0],
+                                -sin_r * rel_c[:, 0] + cos_r * rel_c[:, 1] + c_mean[1],
+                            ])
+                            rot_cxy = apply_affine(mat_m, unrot_xy)
 
                     bbox_m = mask_bbox(crop_m)
                     if bbox_m is not None:
@@ -2014,6 +2034,18 @@ def export_taxon_ect_exemplars(
 
             if mask_img is not None and np.count_nonzero(mask_img) > 0:
                 m_u8 = (mask_img > 0).astype(np.uint8) * 255
+                _is_up_ov = (
+                    _parse_bool_val(best_row.get("mask_is_upright", True))
+                    if ("mask_is_upright" in best_row and pd.notna(best_row.get("mask_is_upright")))
+                    else True
+                )
+                if not _is_up_ov:
+                    _m_ang = best_row.get("midrib_angle_deg", np.nan)
+                    if pd.notna(_m_ang) and str(_m_ang).strip() != "":
+                        _scw = -(float(_m_ang) + 90.0)
+                        if abs(_scw) > 0.25:
+                            from leafmachine3.core.imaging import rotate_image
+                            m_u8 = rotate_image(m_u8, float(_scw % 360.0), bg=0, nearest=True)
                 ect_res = compute_ect(m_u8, num_dirs=n_dirs, bound_radius=1.0, want_simple=True)
                 if ect_res is not None:
                     bgr_rendered = render_radial_ect_overlay(

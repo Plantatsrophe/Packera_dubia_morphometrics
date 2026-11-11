@@ -1051,6 +1051,153 @@ class TestFourierExtractor(unittest.TestCase):
             self.assertTrue(np.isfinite(float(row_m["cauline_ect_lobe_complexity"])))
             self.assertGreater(float(row_m["heteroblasty_ect_distance"]), 0.0)
 
+    def test_step03_rigid_tipup_dissected_homology_reniform_lw_and_32x360_ect(self) -> None:
+        """
+        Verify Step 02 -> Step 03 rigid (-dy, -dx) contour handoff, reniform L/W < 1.0 preservation,
+        mp_estimated centroid_size gating, and dynamic 32x360 .npy ECT ingestion.
+        """
+        # 1. Verify fourier_parallel_utils.R and dissected_leaf_utils.R static contracts
+        fpu_content = (PROJECT_ROOT / "scripts" / "morphometrics" / "fourier_parallel_utils.R").read_text(encoding="utf-8")
+        dlu_content = (PROJECT_ROOT / "scripts" / "morphometrics" / "dissected_leaf_utils.R").read_text(encoding="utf-8")
+        dbu_content = (PROJECT_ROOT / "scripts" / "core" / "db_utils.R").read_text(encoding="utf-8")
+        self.assertIn("is_step02_tipup", fpu_content)
+        self.assertIn("cbind(-dy + cx, -dx + cy)", fpu_content)
+        self.assertNotIn("floor(nrow(c_xy) / 2L) + 1L", fpu_content)
+        self.assertIn("524288L", dlu_content)
+        self.assertIn(".resample_ect_directions_r", dlu_content)
+        self.assertIn("mp_estimated", dbu_content)
+
+        # Mathematical verification: asymmetrically pinnatifid Step 02 tip-up leaf (extra lobes on left margin)
+        # preserves exact 0.000-deg midrib alignment under (-dy + cx, -dx + cy) whereas vertex-61 drifts off-axis
+        t = np.linspace(0.0, 2.0 * np.pi, 120, endpoint=False)
+        # Clockwise in image space (x_right, y_down): t=0 base (250, 340), t=pi/2 left (x<250), t=pi tip (250, 160), t=3pi/2 right (x>250)
+        y_img = 250.0 + 90.0 * np.cos(t)
+        left_mask = np.sin(t) > 0.0
+        lobe_asym = np.where(left_mask, 1.0 + 0.42 * np.sin(5.0 * t) ** 2, 1.0)
+        x_img = 250.0 - 38.0 * np.sin(t) * lobe_asym
+        # Resample by equal perimeter arc-length (just like Step 02 resample_closed) so asymmetric left perimeter shifts index 60 off tip!
+        xy_raw = np.column_stack([x_img, y_img])
+        closed = np.vstack([xy_raw, xy_raw[0:1]])
+        seg = np.hypot(np.diff(closed[:, 0]), np.diff(closed[:, 1]))
+        cum = np.concatenate([[0.0], np.cumsum(seg)])
+        targets = np.linspace(0.0, cum[-1], 120, endpoint=False)
+        coo_step02 = np.column_stack([np.interp(targets, cum, closed[:, 0]), np.interp(targets, cum, closed[:, 1])])
+
+        # Old vertex-60 heuristic drifts significantly off the vertical midrib x=250:
+        old_drift_deg = abs(np.degrees(np.arctan2(coo_step02[60, 0] - coo_step02[0, 0], coo_step02[0, 1] - coo_step02[60, 1])))
+        self.assertGreater(old_drift_deg, 3.0)
+
+        # New Step 03 rigid transform (-dy + cx, -dx + cy) maps true midrib (x_img == 250) onto constant Y == cy_m (0.000-deg drift)
+        cx_m, cy_m = float(coo_step02[:, 0].mean()), float(coo_step02[:, 1].mean())
+        dx_m, dy_m = coo_step02[:, 0] - cx_m, coo_step02[:, 1] - cy_m
+        momocs_xy = np.column_stack([-dy_m + cx_m, -dx_m + cy_m])
+        # Clockwise in Cartesian Momocs space (shoelace signed area < 0)
+        shoelace = 0.5 * np.sum(momocs_xy[:, 0] * np.roll(momocs_xy[:, 1], -1) - np.roll(momocs_xy[:, 0], -1) * momocs_xy[:, 1])
+        self.assertLess(shoelace, 0.0)
+        s_03_chk = (PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R").read_text(encoding="utf-8")
+        s_db_chk = (PROJECT_ROOT / "scripts" / "core" / "db_utils.R").read_text(encoding="utf-8")
+        self.assertIn("allow_multi_component_ect = TRUE", s_03_chk)
+        self.assertIn("allow_multi_component_ect = TRUE", s_db_chk)
+
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            contours_dir = tmp_p / "contours"
+            ect_dir = tmp_p / "ect"
+            contours_dir.mkdir(parents=True, exist_ok=True)
+            ect_dir.mkdir(parents=True, exist_ok=True)
+            vouchers_csv = tmp_p / "curated_vouchers.csv"
+            manifest_csv = tmp_p / "extracted_leaf_manifest.csv"
+
+            vouchers = []
+            manifest_rows = []
+            for idx in range(6):
+                cat = f"STEP23_HO_{idx:02d}"
+                is_reniform = idx >= 3
+                sp = "Packera aurea" if is_reniform else "Packera paupercula"
+                if is_reniform:
+                    # Reniform wider-than-long tip-up blade: L = 110 (y span), W = 160 (x span) -> L/W = 0.6875 < 1.0
+                    y_c = 250.0 + 55.0 * np.cos(t)
+                    x_c = 250.0 - 80.0 * np.sin(t)
+                    lw_true = 110.0 / 160.0
+                    sol_v = 0.93
+                else:
+                    y_c = coo_step02[:, 1]
+                    x_c = coo_step02[:, 0]
+                    lw_true = 2.15
+                    sol_v = 0.64
+
+                cpath = contours_dir / f"{cat}_leaf1.csv"
+                pd.DataFrame({
+                    "catalogNumber": cat,
+                    "leaf_id": 1,
+                    "point_index": np.arange(120),
+                    "x": x_c,
+                    "y": y_c,
+                }).to_csv(cpath, index=False)
+
+                epath = ect_dir / f"{cat}_leaf1_ect.npy"
+                theta_grid = np.linspace(0.0, 2.0 * np.pi, 360, endpoint=False, dtype=np.float32)
+                rad_grid = np.linspace(-1.0, 1.0, 32, dtype=np.float32)[:, None]
+                ect_32x360 = (
+                    np.exp(-(rad_grid ** 2) * (2.0 + (0.0 if is_reniform else 1.5 * np.cos(4.0 * theta_grid)[None, :])))
+                ).astype(np.float32)
+                np.save(str(epath), ect_32x360)
+
+                is_mp = idx == 5
+                vouchers.append({
+                    "catalogNumber": cat,
+                    "species_raw": sp,
+                    "scientificName": sp,
+                    "determiner_tier": "Tier_1_Gold",
+                })
+                manifest_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "leaf_id": 1,
+                    "pixels_per_mm": 10.5 if is_mp else 10.0,
+                    "is_calibrated_mm": (not is_mp),
+                    "scale_source": "mp_estimated" if is_mp else "ruler_calibrated",
+                    "aspect_ratio": round(lw_true, 4),
+                    "blade_length_to_width_ratio": round(lw_true, 4),
+                    "solidity": sol_v,
+                    "archetype_score": 0.94,
+                    "contour_path": str(cpath),
+                    "ect_path": str(epath),
+                })
+
+            pd.DataFrame(vouchers).to_csv(vouchers_csv, index=False)
+            pd.DataFrame(manifest_rows).to_csv(manifest_csv, index=False)
+
+            out_spec = tmp_p / "leaf_efa_harmonics.csv"
+            out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
+            proc = subprocess.run(
+                [
+                    "Rscript",
+                    str(self.r_script_path),
+                    "--contours-dir", str(contours_dir),
+                    "--masks-dir", str(tmp_p / "masks"),
+                    "--vouchers", str(vouchers_csv),
+                    "--manifest", str(manifest_csv),
+                    "--output", str(out_spec),
+                    "--output-ind", str(out_ind),
+                    "--figures-dir", str(tmp_p / "figs"),
+                    "--harmonics", "12",
+                    "--num-pcs", "5",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 03 handoff Rscript test failed:\n{proc.stderr}\n{proc.stdout}")
+            ind_df = pd.read_csv(out_ind)
+            ren_rows = ind_df[ind_df["catalogNumber"].isin(["STEP23_HO_03", "STEP23_HO_04", "STEP23_HO_05"])]
+            self.assertTrue((ren_rows["aspect_ratio"].astype(float) < 0.80).all(), "Reniform Packera aurea leaves must retain aspect_ratio < 1.0 in Step 03.")
+            mp_row = ind_df[ind_df["catalogNumber"] == "STEP23_HO_05"].iloc[0]
+            self.assertTrue(pd.isna(mp_row["centroid_size"]), "mp_estimated leaf must keep centroid_size == NA in Step 03.")
+            self.assertTrue(ind_df["ECT_PC1"].notna().all(), "Dynamic 32x360 .npy ECT reader must populate ECT_PC1 for all leaves.")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -787,8 +787,9 @@ def approximate_petiole_and_scape_metrics(
     """
     Compute empirical approximations for basal petiole length, petiole width, and flowering plant height:
       1. Per-leaf:
-         - When `keypoints_31` has >= 2 valid `petiole_1..6` keypoints (confidence >= 0.50),
-           computes the polyline arc length along `lamina_base -> petiole_1 -> ... -> petiole_6`
+         - When `keypoints_31` has valid `petiole_0..4` / `petiole_tip` (or `petiole_1..6`)
+           keypoints (`confidence >= 0.25` via `_parse_basal_leaf_pose`), computes the polyline
+           arc length along `lamina_base -> petiole_0..4 -> petiole_tip`
            (plus continuation to `p_crown` if `petiole_6` terminates short of `p_crown`), taking
            `petiole_length_px = max(d_pose_polyline, geodesic_petiole_skeleton_px, ||p_base - p_crown||_2)`
          - `blade_length_px = ||p_apex - p_base||_2`

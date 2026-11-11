@@ -553,7 +553,7 @@ summarize_otu_dissection_metrics <- function(grp_df) {
   )
 }
 
-.read_numpy_ect_32x32_r <- function(npy_path, num_thresh = 32L, num_dirs = 32L) {
+.read_numpy_ect_32x32_r <- function(npy_path, num_thresh = NULL, num_dirs = NULL) {
   if (is.null(npy_path) || is.na(npy_path) || !nzchar(trimws(as.character(npy_path))) || !file.exists(npy_path)) {
     return(NULL)
   }
@@ -561,7 +561,8 @@ summarize_otu_dissection_metrics <- function(grp_df) {
   if (is.na(fsize) || fsize < 80L) return(NULL)
   con <- file(npy_path, "rb")
   on.exit(close(con), add = TRUE)
-  raw_b <- readBin(con, what = "raw", n = min(as.integer(fsize), 65536L))
+  # Support full 32x360 float32/float64 LM3 ECT matrices (up to 512 KB)
+  raw_b <- readBin(con, what = "raw", n = min(as.integer(fsize), 524288L))
   if (length(raw_b) < 16L || as.integer(raw_b[1L]) != 147L) return(NULL)
   if (rawToChar(raw_b[2:6]) != "NUMPY") return(NULL)
   ver_maj <- as.integer(raw_b[7L])
@@ -577,23 +578,69 @@ summarize_otu_dissection_metrics <- function(grp_df) {
   is_f8 <- grepl("<f8|float64", hdr_str)
   is_fortran <- grepl("'fortran_order':\\s*True", hdr_str)
   elem_sz <- if (is_f8) 8L else 4L
-  n_need <- as.integer(num_thresh) * as.integer(num_dirs)
+  nr_use <- if (!is.null(num_thresh) && is.finite(num_thresh)) as.integer(num_thresh) else 32L
+  nc_use <- if (!is.null(num_dirs) && is.finite(num_dirs)) as.integer(num_dirs) else 360L
+  sh_m <- regmatches(hdr_str, regexec("'shape'\\s*:\\s*\\(\\s*([0-9]+)\\s*,\\s*([0-9]+)\\s*\\)", hdr_str))[[1L]]
+  if (length(sh_m) >= 3L) {
+    nr_hdr <- suppressWarnings(as.integer(sh_m[2L]))
+    nc_hdr <- suppressWarnings(as.integer(sh_m[3L]))
+    if (is.finite(nr_hdr) && nr_hdr >= 4L && is.finite(nc_hdr) && nc_hdr >= 4L) {
+      nr_use <- nr_hdr
+      nc_use <- nc_hdr
+    }
+  }
+  n_need <- as.integer(nr_use) * as.integer(nc_use)
   payload <- raw_b[seq.int(data_start + 1L, length(raw_b))]
   if (length(payload) < n_need * elem_sz) return(NULL)
   vals <- readBin(payload, what = "numeric", n = n_need, size = elem_sz, endian = "little")
   if (length(vals) != n_need || any(!is.finite(vals))) return(NULL)
-  matrix(vals, nrow = as.integer(num_thresh), ncol = as.integer(num_dirs), byrow = !is_fortran)
+  matrix(vals, nrow = as.integer(nr_use), ncol = as.integer(nc_use), byrow = !is_fortran)
 }
 
-.compute_cycle_ect_32x32_r <- function(coo, num_thresh = 32L, num_dirs = 32L) {
+.resample_ect_directions_r <- function(ect_mat, target_nr = 32L, target_nc = 360L) {
+  if (is.null(ect_mat) || !is.matrix(ect_mat)) return(NULL)
+  if (nrow(ect_mat) == target_nr && ncol(ect_mat) == target_nc) return(ect_mat)
+  # Periodic linear interpolation along phi in [0, 2*pi) preserving Column 1 = phi = 0 (lamina_tip)
+  if (nrow(ect_mat) != target_nr) {
+    x_old <- seq(0.0, 1.0, length.out = nrow(ect_mat))
+    x_new <- seq(0.0, 1.0, length.out = target_nr)
+    ect_r <- matrix(0.0, nrow = target_nr, ncol = ncol(ect_mat))
+    for (j in seq_len(ncol(ect_mat))) {
+      ect_r[, j] <- stats::approx(x_old, ect_mat[, j], xout = x_new, rule = 2)$y
+    }
+    ect_mat <- ect_r
+  }
+  if (ncol(ect_mat) != target_nc) {
+    nc_old <- ncol(ect_mat)
+    phi_ext <- seq(0.0, 1.0, length.out = nc_old + 1L)
+    phi_new <- seq(0.0, 1.0 - 1.0 / target_nc, length.out = target_nc)
+    ect_c <- matrix(0.0, nrow = target_nr, ncol = target_nc)
+    for (i in seq_len(target_nr)) {
+      y_ext <- c(ect_mat[i, ], ect_mat[i, 1L])
+      ect_c[i, ] <- stats::approx(phi_ext, y_ext, xout = phi_new, rule = 2)$y
+    }
+    ect_mat <- ect_c
+  }
+  ect_mat
+}
+
+.compute_cycle_ect_32x32_r <- function(coo, num_thresh = 32L, num_dirs = 360L) {
   if (is.null(coo) || !is.matrix(coo) || nrow(coo) < 6L || ncol(coo) < 2L) return(NULL)
   xy <- matrix(as.numeric(coo[, 1:2]), ncol = 2L)
   if (any(!is.finite(xy))) return(NULL)
-  # Orient tip-up: base is vertex 1, apex is farthest vertex from base
-  p_base <- xy[1L, ]
-  d_base <- sqrt((xy[, 1L] - p_base[1L])^2 + (xy[, 2L] - p_base[2L])^2)
-  idx_apex <- which.max(d_base)
-  v_axis <- xy[idx_apex, ] - p_base
+  # Orient tip-up: when coo is already horizontally aligned by Step 03 (+X = lamina_tip or -X = lamina_base),
+  # use the exact horizontal midrib axis; otherwise project from vertex 1 (lamina_base) to apical midline cap
+  if (isTRUE(attr(coo, "lm3_xax_aligned"))) {
+    cx0 <- mean(xy[, 1L]); p_base <- xy[1L, ]
+    u_tip <- if (p_base[1L] <= cx0) c(1.0, 0.0) else c(-1.0, 0.0)
+    v_len <- 1.0
+    v_axis <- u_tip
+  } else {
+    p_base <- xy[1L, ]
+    d_base <- sqrt((xy[, 1L] - p_base[1L])^2 + (xy[, 2L] - p_base[2L])^2)
+    cap_i <- which(d_base >= 0.985 * max(d_base, na.rm = TRUE))
+    v_axis <- c(stats::median(xy[cap_i, 1L]) - p_base[1L], stats::median(xy[cap_i, 2L]) - p_base[2L])
+  }
   v_len <- sqrt(sum(v_axis^2))
   if (!is.finite(v_len) || v_len <= 1e-8) {
     u_tip <- c(1.0, 0.0)
@@ -632,29 +679,8 @@ summarize_otu_dissection_metrics <- function(grp_df) {
     return(NULL)
   }
   nr <- nrow(ect_mat); nc <- ncol(ect_mat)
-  # Ensure column 1 is aligned with the leaf major axis (handles pre-roll .npy files from active runs)
-  if ((nc %% 2L) == 0L) {
-    half_span <- as.integer(nc %/% 2L)
-    sup_j <- vapply(seq_len(nc), function(j) {
-      nz <- which(abs(ect_mat[, j]) > 1e-6)
-      if (length(nz) > 0L) max(nz) else 0L
-    }, integer(1L))
-    axis_score <- sup_j[seq_len(half_span)] + sup_j[seq_len(half_span) + half_span]
-    if (max(axis_score) > (axis_score[1L] + 2L)) {
-      # Prefer native 3*pi/2 index (0.75 * nc + 1) when tied within 1 threshold step of the peak
-      tip_raw_idx <- as.integer((3L * nc) %/% 4L) + 1L
-      best_half <- which.max(axis_score)
-      k_start <- if (tip_raw_idx <= nc && (sup_j[tip_raw_idx] + sup_j[((tip_raw_idx - 1L + half_span) %% nc) + 1L]) >= (max(axis_score) - 1L)) {
-        tip_raw_idx
-      } else if (sup_j[best_half + half_span] > sup_j[best_half]) {
-        best_half + half_span
-      } else {
-        best_half
-      }
-      roll_idx <- ((seq.int(k_start - 1L, k_start + nc - 2L)) %% nc) + 1L
-      ect_mat <- ect_mat[, roll_idx, drop = FALSE]
-    }
-  }
+  # Step 02 tip_up_directions() and .compute_cycle_ect_32x32_r() place phi = 0 (lamina_tip)
+  # strictly at Column 1; never re-roll onto wider lateral axes on reniform (W > L) blades!
   # Column 1 is phi = 0 (North/Tip); Columns 2..nc reflect via nc + 2 - j
   refl_cols <- c(1L, seq.int(nc, 2L, by = -1L))
   ect_refl <- ect_mat[, refl_cols, drop = FALSE]
@@ -691,6 +717,7 @@ compute_leaf_ect_features <- function(efa_df, coo_list = NULL, contours_dir = NU
   ))
   ect_dirs <- ect_dirs[dir.exists(ect_dirs)]
 
+  raw_mats <- vector("list", n_leaves)
   ect_mats <- vector("list", n_leaves)
   sym_vecs <- vector("list", n_leaves)
   lobe_comp <- rep(NA_real_, n_leaves)
@@ -705,19 +732,31 @@ compute_leaf_ect_features <- function(efa_df, coo_list = NULL, contours_dir = NU
     for (ed in ect_dirs) {
       cand_paths <- c(cand_paths, file.path(ed, sprintf("%s_leaf%d_ect.npy", cat_i, lid_i)))
     }
-    mat_i <- NULL
     for (cp in unique(cand_paths)) {
       if (file.exists(cp)) {
-        mat_i <- .read_numpy_ect_32x32_r(cp)
-        if (!is.null(mat_i)) break
+        m_try <- .read_numpy_ect_32x32_r(cp)
+        if (!is.null(m_try)) {
+          raw_mats[[i]] <- m_try
+          break
+        }
       }
     }
+  }
+
+  # Resolve canonical (num_thresh, num_dirs) from loaded .npy matrices (default 32 x 360 per LM3_settings.yaml)
+  loaded_dims <- Filter(Negate(is.null), lapply(raw_mats, dim))
+  target_nr <- if (length(loaded_dims) > 0L) as.integer(stats::median(vapply(loaded_dims, `[`, integer(1L), 1L))) else 32L
+  target_nc <- if (length(loaded_dims) > 0L) as.integer(stats::median(vapply(loaded_dims, `[`, integer(1L), 2L))) else 360L
+
+  for (i in seq_len(n_leaves)) {
+    mat_i <- raw_mats[[i]]
     if (is.null(mat_i) && !is.null(coo_list)) {
       sid_i <- if ("shape_id" %in% names(efa_df) && !is.na(efa_df$shape_id[i])) as.character(efa_df$shape_id[i]) else rownames(efa_df)[i]
       coo_i <- if (!is.null(sid_i) && sid_i %in% names(coo_list)) coo_list[[sid_i]] else if (i <= length(coo_list)) coo_list[[i]] else NULL
-      mat_i <- .compute_cycle_ect_32x32_r(coo_i)
+      mat_i <- .compute_cycle_ect_32x32_r(coo_i, num_thresh = target_nr, num_dirs = target_nc)
     }
     if (!is.null(mat_i)) {
+      mat_i <- .resample_ect_directions_r(mat_i, target_nr = target_nr, target_nc = target_nc)
       s_res <- .summarize_and_symmetrize_ect_matrix(mat_i)
       if (!is.null(s_res)) {
         ect_mats[[i]] <- s_res$ect_sym
@@ -850,6 +889,18 @@ compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = 
         ECT_PC2[i] <- med_col(prim_rows, "ECT_PC2", 6L)
         ECT_PC3[i] <- med_col(prim_rows, "ECT_PC3", 6L)
         ect_lobe_complexity[i] <- med_col(prim_rows, "ect_lobe_complexity", 4L)
+        if ("n_lamina_components" %in% names(prim_rows) && any(!is.na(prim_rows$n_lamina_components) & as.integer(prim_rows$n_lamina_components) > 1L)) {
+          if ("solidity" %in% names(specimen_df)) specimen_df$solidity[i] <- med_col(prim_rows, "solidity", 4L)
+          if ("q25_solidity" %in% names(specimen_df) && "solidity" %in% names(prim_rows)) {
+            sv_p <- suppressWarnings(as.numeric(prim_rows$solidity)); sv_p <- sv_p[is.finite(sv_p)]
+            if (length(sv_p) >= 1L) specimen_df$q25_solidity[i] <- round(as.numeric(stats::quantile(sv_p, probs = 0.25, names = FALSE)), 4)
+          }
+          if ("dissection_index" %in% names(specimen_df)) specimen_df$dissection_index[i] <- med_col(prim_rows, "dissection_index", 4L)
+          if ("dissected_leaf_fraction" %in% names(specimen_df) && "is_dissected" %in% names(prim_rows)) {
+            dv_p <- as.logical(prim_rows$is_dissected); dv_p <- dv_p[!is.na(dv_p)]
+            if (length(dv_p) >= 1L) specimen_df$dissected_leaf_fraction[i] <- round(mean(dv_p), 4)
+          }
+        }
       }
 
       if (n_caul >= 1L) {
@@ -885,19 +936,23 @@ compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = 
         if (length(sym_names) >= 1L) {
           caul_mat_i <- as.matrix(cauline_rows[, sym_names, drop = FALSE])
           storage.mode(caul_mat_i) <- "double"
-          caul_med_h <- apply(caul_mat_i, 2L, stats::median, na.rm = TRUE)
-          caul_med_h[!is.finite(caul_med_h)] <- 0.0
-          caul_harm_list[[i]] <- caul_med_h
-          if (n_bas >= 1L) {
-            bas_mat_i <- as.matrix(basal_rows[, sym_names, drop = FALSE])
-            storage.mode(bas_mat_i) <- "double"
-            bas_med_h <- apply(bas_mat_i, 2L, stats::median, na.rm = TRUE)
-            bas_med_h[!is.finite(bas_med_h)] <- 0.0
-            d_efa <- sqrt(sum((bas_med_h - caul_med_h)^2, na.rm = TRUE))
-            if (is.finite(d_efa)) {
-              heteroblasty_efa_distance[i] <- round(d_efa, 6)
-              if ("heteroblasty_index" %in% names(specimen_df)) {
-                specimen_df$heteroblasty_index[i] <- round(d_efa, 6)
+          if (any(complete.cases(caul_mat_i))) {
+            caul_med_h <- apply(caul_mat_i, 2L, stats::median, na.rm = TRUE)
+            caul_med_h[!is.finite(caul_med_h)] <- 0.0
+            caul_harm_list[[i]] <- caul_med_h
+            if (n_bas >= 1L) {
+              bas_mat_i <- as.matrix(basal_rows[, sym_names, drop = FALSE])
+              storage.mode(bas_mat_i) <- "double"
+              if (any(complete.cases(bas_mat_i))) {
+                bas_med_h <- apply(bas_mat_i, 2L, stats::median, na.rm = TRUE)
+                bas_med_h[!is.finite(bas_med_h)] <- 0.0
+                d_efa <- sqrt(sum((bas_med_h - caul_med_h)^2, na.rm = TRUE))
+                if (is.finite(d_efa)) {
+                  heteroblasty_efa_distance[i] <- round(d_efa, 6)
+                  if ("heteroblasty_index" %in% names(specimen_df)) {
+                    specimen_df$heteroblasty_index[i] <- round(d_efa, 6)
+                  }
+                }
               }
             }
           }

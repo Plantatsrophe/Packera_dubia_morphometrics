@@ -24,28 +24,63 @@ write_step03_csv_fast <- function(df, target_path) {
 
 align_contour_horizontal_xax <- function(coo) {
   if (is.null(coo) || !is.matrix(coo) || nrow(coo) < 5L || ncol(coo) < 2L) return(coo)
+  if (isTRUE(attr(coo, "lm3_xax_aligned"))) return(coo)
   cx <- mean(coo[, 1L], na.rm = TRUE)
   cy <- mean(coo[, 2L], na.rm = TRUE)
-  c_xy <- cbind(coo[, 1L] - cx, coo[, 2L] - cy)
-  opp_idx <- min(nrow(c_xy), floor(nrow(c_xy) / 2L) + 1L)
-  v_anchor <- c(c_xy[1L, 1L] - c_xy[opp_idx, 1L], c_xy[1L, 2L] - c_xy[opp_idx, 2L])
-  v_norm <- sqrt(sum(v_anchor^2))
+  dx <- coo[, 1L] - cx
+  dy <- coo[, 2L] - cy
+  span_x <- diff(range(dx, na.rm = TRUE))
+  span_y <- diff(range(dy, na.rm = TRUE))
+  max_abs_x <- max(abs(dx), 1e-8)
+  max_abs_y <- max(abs(dy), 1e-8)
+
+  # 1. Step 02 canonical image-space vertical tip-up contour:
+  #    Point 1 (lamina_base) sits in the basal region (+y_img, dy[1] > 0) near horizontal midline,
+  #    lamina_tip sits at top (-y_img, min(dy) < 0), traced clockwise in (x_right, y_down).
+  #    Apply exact chart-preserving rigid orthogonal map (X = -dy + cx, Y = -dx + cy)
+  #    so lamina_base sits at (-X, 0), lamina_tip at (+X, 0), anatomical left at (+Y),
+  #    clockwise in Momocs Cartesian space with 0.000-deg midrib drift on dissected leaves.
+  is_step02_tipup <- is.finite(dy[1L]) && (dy[1L] > 0.0) && (min(dy, na.rm = TRUE) < 0.0) &&
+    ((max(dy, na.rm = TRUE) - dy[1L]) <= 0.30 * max(span_y, 1e-8)) &&
+    (abs(dx[1L]) <= 0.28 * max(span_x, 1e-8))
+  if (isTRUE(is_step02_tipup)) {
+    out_coo <- cbind(-dy + cx, -dx + cy)
+    colnames(out_coo) <- colnames(coo)
+    attr(out_coo, "lm3_xax_aligned") <- TRUE
+    attr(out_coo, "lm3_from_tipup") <- TRUE
+    return(out_coo)
+  }
+
+  # 2. Already horizontally aligned along X-axis (Point 1 at basal/apical X pole):
+  #    Preserve exact midrib orientation without vertex-61 perimeter-asymmetry drift.
+  if (abs(dx[1L]) >= 0.42 * max_abs_x && abs(dy[1L]) <= 0.22 * max_abs_y) {
+    attr(coo, "lm3_xax_aligned") <- TRUE
+    return(coo)
+  }
+
+  # 3. Fallback for arbitrary oblique legacy contours lacking Step 02 tip-up frame:
+  #    Align Point 1 -> apical cap median onto +X without relying on 50% perimeter index.
+  d_from_p1 <- sqrt((coo[, 1L] - coo[1L, 1L])^2 + (coo[, 2L] - coo[1L, 2L])^2)
+  max_d <- max(d_from_p1, na.rm = TRUE)
+  if (!is.finite(max_d) || max_d < 1e-8) {
+    attr(coo, "lm3_xax_aligned") <- TRUE
+    return(coo)
+  }
+  cap_idx <- which(d_from_p1 >= 0.985 * max_d)
+  ap_x <- stats::median(coo[cap_idx, 1L], na.rm = TRUE)
+  ap_y <- stats::median(coo[cap_idx, 2L], na.rm = TRUE)
+  v_apical <- c(ap_x - coo[1L, 1L], ap_y - coo[1L, 2L])
+  v_norm <- sqrt(sum(v_apical^2))
   if (!is.finite(v_norm) || v_norm < 1e-8) {
-    if (requireNamespace("Momocs", quietly = TRUE)) {
-      return(tryCatch(Momocs::coo_alignxax(coo), error = function(e) coo))
-    }
+    attr(coo, "lm3_xax_aligned") <- TRUE
     return(coo)
   }
-  if (abs(v_anchor[2L]) <= 1e-7 * v_norm && v_anchor[1L] >= 0.0) {
-    return(coo)
-  }
-  theta <- -atan2(v_anchor[2L], v_anchor[1L])
+  theta <- -atan2(v_apical[2L], v_apical[1L])
   cs_t <- cos(theta)
   sn_t <- sin(theta)
-  rot_x <- c_xy[, 1L] * cs_t - c_xy[, 2L] * sn_t + cx
-  rot_y <- c_xy[, 1L] * sn_t + c_xy[, 2L] * cs_t + cy
-  out_coo <- cbind(rot_x, rot_y)
+  out_coo <- cbind(dx * cs_t - dy * sn_t + cx, dx * sn_t + dy * cs_t + cy)
   colnames(out_coo) <- colnames(coo)
+  attr(out_coo, "lm3_xax_aligned") <- TRUE
   out_coo
 }
 

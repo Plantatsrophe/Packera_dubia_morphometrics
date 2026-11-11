@@ -1195,10 +1195,12 @@ def _reduce_crop_predictions_native_lm3(
     are never fused together:
       - Unions `cls_id == 1` (`Petiole`) into its largest 8-connected component (`area >= min_area_px`)
         and `cls_id == 2` (`Hole`) into all 8-connected components (`area >= min_area_px`).
-      - Processes each `cls_id == 0` (`Leaf`) instance individually (keeping its largest
-        8-connected component with `area >= min_area_px`, rasterizing its outer polygon, and
-        subtracting `hole_mask_u8` as `lamina = silhouette & ~hole`), ordered with the primary
-        focal leaf instance first.
+      - Processes each `cls_id == 0` (`Leaf`) instance individually, retaining its primary
+        8-connected component (`area >= min_area_px`) plus any unbridged lateral pinna islands
+        (`area >= min_area_px`) within that same instance that attach along the segmented
+        `petiole` stalk (`cls_id == 1`) or lie interior to the crop adjacent to the primary
+        blade (while rejecting border-clipped neighbor bleed), subtracting `hole_mask_u8` as
+        `lamina = silhouette & ~hole` without adding any synthetic bridging pixels.
     """
     ch, cw = int(crop_shape[0]), int(crop_shape[1])
     if not raw_dets or ch <= 0 or cw <= 0:
@@ -1267,6 +1269,11 @@ def _reduce_crop_predictions_native_lm3(
             if int(np.count_nonzero(hole_mask_u8)) >= min_area:
                 class_masks_u8[2] = hole_mask_u8
 
+    pet_ref_u8 = class_masks_u8.get(1)
+    pet_corridor_bool: Optional[np.ndarray] = None
+    if pet_ref_u8 is not None and int(np.count_nonzero(pet_ref_u8)) > 0:
+        kern_pet_adj = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        pet_corridor_bool = cv2.dilate((pet_ref_u8 > 0).astype(np.uint8), kern_pet_adj, iterations=1) > 0
     hole_sub_u8 = class_masks_u8.get(2)
     cx_mid = 0.5 * float(cw)
     cy_mid = 0.5 * float(ch)
@@ -1281,7 +1288,31 @@ def _reduce_crop_predictions_native_lm3(
         best_area = int(stats[best_lbl, cv2.CC_STAT_AREA])
         if best_area < min_area:
             continue
-        comp_u8 = (labels == best_lbl).astype(np.uint8)
+        keep_lbls: List[int] = [best_lbl]
+        if n_cc > 2:
+            prim_bool = labels == best_lbl
+            prim_touches_pet = bool(pet_corridor_bool is not None and np.any(prim_bool & pet_corridor_bool))
+            dist_to_prim = cv2.distanceTransform((~prim_bool).astype(np.uint8), cv2.DIST_L2, 3)
+            max_pinna_gap = max(10.0, 0.16 * math.sqrt(float(best_area)))
+            for cid_sub in range(1, n_cc):
+                if cid_sub == best_lbl:
+                    continue
+                sub_area = int(stats[cid_sub, cv2.CC_STAT_AREA])
+                if sub_area < min_area:
+                    continue
+                sub_bool = labels == cid_sub
+                sx0 = int(stats[cid_sub, cv2.CC_STAT_LEFT])
+                sy0 = int(stats[cid_sub, cv2.CC_STAT_TOP])
+                sx1 = sx0 + int(stats[cid_sub, cv2.CC_STAT_WIDTH])
+                sy1 = sy0 + int(stats[cid_sub, cv2.CC_STAT_HEIGHT])
+                touches_crop_edge = (sx0 <= 1) or (sy0 <= 1) or (sx1 >= cw - 1) or (sy1 >= ch - 1)
+                on_same_petiole = bool(
+                    prim_touches_pet and pet_corridor_bool is not None and np.any(sub_bool & pet_corridor_bool)
+                )
+                min_gap_px = float(np.min(dist_to_prim[sub_bool])) if np.any(sub_bool) else float("inf")
+                if on_same_petiole or ((not touches_crop_edge) and min_gap_px <= max_pinna_gap):
+                    keep_lbls.append(cid_sub)
+        comp_u8 = np.isin(labels, keep_lbls).astype(np.uint8)
         cnts, _ = cv2.findContours(comp_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         polys = [c.reshape(-1, 1, 2).astype(np.int32) for c in cnts if c.reshape(-1, 2).shape[0] >= 3]
         if not polys:
@@ -1293,10 +1324,12 @@ def _reduce_crop_predictions_native_lm3(
             n_cc_h, labels_h, stats_h, _ = cv2.connectedComponentsWithStats((raster_u8 > 0).astype(np.uint8), connectivity=8)
             if n_cc_h <= 1:
                 continue
-            best_lbl_h = 1 + int(np.argmax(stats_h[1:, cv2.CC_STAT_AREA]))
-            if int(stats_h[best_lbl_h, cv2.CC_STAT_AREA]) < min_area:
+            valid_h_lbls = [
+                lbl_h for lbl_h in range(1, n_cc_h) if int(stats_h[lbl_h, cv2.CC_STAT_AREA]) >= min_area
+            ]
+            if not valid_h_lbls:
                 continue
-            raster_u8 = (labels_h == best_lbl_h).astype(np.uint8) * 255
+            raster_u8 = np.isin(labels_h, valid_h_lbls).astype(np.uint8) * 255
         fg_count = int(np.count_nonzero(raster_u8))
         if fg_count < min_area:
             continue
@@ -1914,10 +1947,13 @@ class LM3PoseLandmarkEngine:
         lamina_mask: Optional[np.ndarray] = None,
         petiole_mask: Optional[np.ndarray] = None,
         offset_xy: Tuple[float, float] = (0.0, 0.0),
+        crown_hint_xy: Optional[Tuple[float, float]] = None,
     ) -> LM3PoseResult:
         """
         Derives the 31 canonical `mid15_pet5` keypoints deterministically from `lamina_mask`
-        and `petiole_mask` (or `crop_bgr`) when ONNX weights are absent in unit tests.
+        and `petiole_mask` (or `crop_bgr`) when ONNX weights are absent in unit tests,
+        anchoring reniform/cordate (`W > L`) blades along the petiole-to-centroid axis
+        rather than rotating `90 deg` onto lateral lobes.
         """
         ox, oy = float(offset_xy[0]), float(offset_xy[1])
         mask_use = lamina_mask
@@ -1938,17 +1974,46 @@ class LM3PoseLandmarkEngine:
         cov = np.cov(centered, rowvar=False) if len(pts) >= 3 else np.eye(2)
         eigvals, eigvecs = np.linalg.eigh(cov)
         major_vec = eigvecs[:, int(np.argmax(eigvals))]
-        minor_vec = np.array([-major_vec[1], major_vec[0]], dtype=np.float64)
 
         proj_major = centered @ major_vec
         p_min = centroid + float(np.min(proj_major)) * major_vec
         p_max = centroid + float(np.max(proj_major)) * major_vec
 
-        # Orient base toward petiole_mask if present, otherwise lower y (herbarium basal mount)
+        # Orient base -> tip along petiole attachment axis (preserving reniform W > L blades),
+        # else crown_hint_xy proximity, else apex/base taper & mount orientation
         if petiole_mask is not None and petiole_mask.size > 0 and int(np.count_nonzero(petiole_mask)) > 0:
             pys, pxs = np.where(petiole_mask > 0)
             pet_cent = np.array([float(np.mean(pxs)), float(np.mean(pys))], dtype=np.float64)
-            if np.linalg.norm(p_min - pet_cent) <= np.linalg.norm(p_max - pet_cent):
+            junc_pt = pet_cent
+            if petiole_mask.shape[:2] == mask_use.shape[:2]:
+                kern = np.ones((5, 5), dtype=np.uint8)
+                pet_dil = cv2.dilate((petiole_mask > 0).astype(np.uint8), kern, iterations=1)
+                jys, jxs = np.where((pet_dil > 0) & (mask_use > 0))
+                if len(jxs) > 0:
+                    junc_pt = np.array([float(np.mean(jxs)), float(np.mean(jys))], dtype=np.float64)
+            v_from_pet = centroid - junc_pt
+            v_norm = float(np.linalg.norm(v_from_pet))
+            if v_norm > 1.0:
+                u_pet = v_from_pet / v_norm
+                e0 = eigvecs[:, 0]
+                e1 = eigvecs[:, 1]
+                d0 = abs(float(np.dot(e0, u_pet)))
+                d1 = abs(float(np.dot(e1, u_pet)))
+                best_e = e0 if d0 >= d1 else e1
+                if max(d0, d1) >= 0.9063:
+                    axis_dir = best_e if float(np.dot(best_e, u_pet)) >= 0.0 else -best_e
+                else:
+                    axis_dir = u_pet
+                proj_ax = centered @ axis_dir
+                base_pt = centroid + float(np.min(proj_ax)) * axis_dir
+                tip_pt = centroid + float(np.max(proj_ax)) * axis_dir
+            elif np.linalg.norm(p_min - pet_cent) <= np.linalg.norm(p_max - pet_cent):
+                base_pt, tip_pt = p_min, p_max
+            else:
+                base_pt, tip_pt = p_max, p_min
+        elif crown_hint_xy is not None:
+            cr_local = np.array([float(crown_hint_xy[0]) - ox, float(crown_hint_xy[1]) - oy], dtype=np.float64)
+            if np.linalg.norm(p_min - cr_local) <= np.linalg.norm(p_max - cr_local):
                 base_pt, tip_pt = p_min, p_max
             else:
                 base_pt, tip_pt = p_max, p_min
@@ -2431,7 +2496,34 @@ def _extract_native_lm3_petiole_anchor(
         if p_base_crop is None:
             pys, pxs = np.where(pet_u8 > 0)
             pet_cx, pet_cy = float(np.mean(pxs)), float(np.mean(pys))
-            j_idx = int(np.argmin(np.hypot(leaf_pts[:, 0] - pet_cx, leaf_pts[:, 1] - pet_cy)))
+            kern_j = np.ones((5, 5), dtype=np.uint8)
+            jys_c, jxs_c = np.where((cv2.dilate(pet_u8, kern_j, iterations=1) > 0) & (lam_u8 > 0))
+            if len(jxs_c) > 0:
+                j_cx, j_cy = float(np.median(jxs_c)), float(np.median(jys_c))
+                j_idx = int(np.argmin(np.hypot(leaf_pts[:, 0] - j_cx, leaf_pts[:, 1] - j_cy)))
+            else:
+                lys_c, lxs_c = np.where(lam_u8 > 0)
+                lam_cx = float(np.mean(lxs_c)) if len(lxs_c) > 0 else float(np.mean(leaf_pts[:, 0]))
+                lam_cy = float(np.mean(lys_c)) if len(lys_c) > 0 else float(np.mean(leaf_pts[:, 1]))
+                rx_p, ry_p = lam_cx - pet_cx, lam_cy - pet_cy
+                rn_p = math.hypot(rx_p, ry_p)
+                if rn_p > 1.0:
+                    ux_p, uy_p = rx_p / rn_p, ry_p / rn_p
+                    dx_lp = leaf_pts[:, 0] - pet_cx
+                    dy_lp = leaf_pts[:, 1] - pet_cy
+                    along_p = dx_lp * ux_p + dy_lp * uy_p
+                    perp_p = np.abs(dx_lp * (-uy_p) + dy_lp * ux_p)
+                    corridor = (perp_p <= max(8.0, 0.06 * float(max(bw_l, bh_l)))) & (along_p <= rn_p)
+                    if np.any(corridor):
+                        c_idxs = np.where(corridor)[0]
+                        min_al = float(np.min(along_p[c_idxs]))
+                        tie_pts = leaf_pts[c_idxs[along_p[c_idxs] <= (min_al + 1.5)]]
+                        t_cx, t_cy = float(np.median(tie_pts[:, 0])), float(np.median(tie_pts[:, 1]))
+                        j_idx = int(np.argmin(np.hypot(leaf_pts[:, 0] - t_cx, leaf_pts[:, 1] - t_cy)))
+                    else:
+                        j_idx = int(np.argmin(np.hypot(dx_lp, dy_lp)))
+                else:
+                    j_idx = int(np.argmin(np.hypot(leaf_pts[:, 0] - pet_cx, leaf_pts[:, 1] - pet_cy)))
             p_base_crop = (int(leaf_pts[j_idx, 0]), int(leaf_pts[j_idx, 1]))
             used_native_lm3 = True
             if len(pet_chain) < 2:
@@ -2452,11 +2544,32 @@ def _extract_native_lm3_petiole_anchor(
             except Exception:
                 pass
 
+    def _select_midline_apex(base_xy: Tuple[int, int]) -> Tuple[int, int]:
+        ys_m, xs_m = np.where(leaf_mask > 0)
+        if len(xs_m) > 0:
+            cx_m, cy_m = float(np.mean(xs_m)), float(np.mean(ys_m))
+        else:
+            cx_m, cy_m = float(np.mean(leaf_pts[:, 0])), float(np.mean(leaf_pts[:, 1]))
+        vx_a = cx_m - float(base_xy[0])
+        vy_a = cy_m - float(base_xy[1])
+        vn_a = math.hypot(vx_a, vy_a)
+        if vn_a > 1.0:
+            ux_a, uy_a = vx_a / vn_a, vy_a / vn_a
+            proj_a = (leaf_pts[:, 0] - float(base_xy[0])) * ux_a + (leaf_pts[:, 1] - float(base_xy[1])) * uy_a
+            max_p = float(np.max(proj_a))
+            cap_pts = leaf_pts[proj_a >= (max_p - 1.5)]
+            if len(cap_pts) > 0:
+                cap_cx = float(np.median(cap_pts[:, 0]))
+                cap_cy = float(np.median(cap_pts[:, 1]))
+                a_i = int(np.argmin(np.hypot(cap_pts[:, 0] - cap_cx, cap_pts[:, 1] - cap_cy)))
+                return (int(cap_pts[a_i, 0]), int(cap_pts[a_i, 1]))
+        d_fb = np.hypot(leaf_pts[:, 0] - float(base_xy[0]), leaf_pts[:, 1] - float(base_xy[1]))
+        a_fb = int(np.argmax(d_fb))
+        return (int(leaf_pts[a_fb, 0]), int(leaf_pts[a_fb, 1]))
+
     if p_base_crop is not None:
         if p_apex_crop is None:
-            dists_from_base = np.hypot(leaf_pts[:, 0] - p_base_crop[0], leaf_pts[:, 1] - p_base_crop[1])
-            apex_idx = int(np.argmax(dists_from_base))
-            p_apex_crop = (int(leaf_pts[apex_idx, 0]), int(leaf_pts[apex_idx, 1]))
+            p_apex_crop = _select_midline_apex(p_base_crop)
         out_anchor: Dict[str, Any] = {
             "is_trimmed": False,
             "native_lm3_petiole": bool(used_native_lm3),
@@ -2474,12 +2587,13 @@ def _extract_native_lm3_petiole_anchor(
         out_anchor.update({k: v for k, v in lm_metrics_dict.items() if v is not None})
         return out_anchor
 
-    # 3. Fallback to basal-most contour vertex when both keypoints and petiole_mask are absent
-    base_idx = int(np.argmax(leaf_pts[:, 1]))
-    p_base_crop = (int(leaf_pts[base_idx, 0]), int(leaf_pts[base_idx, 1]))
-    dists_from_base = np.hypot(leaf_pts[:, 0] - p_base_crop[0], leaf_pts[:, 1] - p_base_crop[1])
-    apex_idx = int(np.argmax(dists_from_base))
-    p_apex_crop = (int(leaf_pts[apex_idx, 0]), int(leaf_pts[apex_idx, 1]))
+    # 3. Fallback to basal-most midline contour vertex when both keypoints and petiole_mask are absent
+    y_max_lp = float(np.max(leaf_pts[:, 1]))
+    bot_cap = leaf_pts[leaf_pts[:, 1] >= (y_max_lp - 1.5)]
+    bot_cx = float(np.median(bot_cap[:, 0])) if len(bot_cap) > 0 else float(np.mean(leaf_pts[:, 0]))
+    b_sub_i = int(np.argmin(np.abs(bot_cap[:, 0] - bot_cx))) if len(bot_cap) > 0 else int(np.argmax(leaf_pts[:, 1]))
+    p_base_crop = (int(bot_cap[b_sub_i, 0]), int(bot_cap[b_sub_i, 1])) if len(bot_cap) > 0 else (int(leaf_pts[b_sub_i, 0]), int(leaf_pts[b_sub_i, 1]))
+    p_apex_crop = _select_midline_apex(p_base_crop)
     out_fallback: Dict[str, Any] = {
         "is_trimmed": False,
         "native_lm3_petiole": False,
@@ -2662,6 +2776,7 @@ def orient_and_score_leaf_lm3(
     hole_mask: Optional[np.ndarray] = None,
     petiole_mask: Optional[np.ndarray] = None,
     crop_bgr: Optional[np.ndarray] = None,
+    crown_hint_xy: Optional[Tuple[float, float]] = None,
 ) -> Dict[str, Any]:
     """
     Computes LeafMachine3 native tip-up rotation angle (`compute_orientation`), rotates
@@ -2693,20 +2808,56 @@ def orient_and_score_leaf_lm3(
     if p_apex is not None and "lamina_tip" not in pts_2d:
         pts_2d["lamina_tip"] = (float(p_apex[0]) - float(offset_xy[0]), float(p_apex[1]) - float(offset_xy[1]))
 
+    _kp_conf_min = (
+        min(
+            float(norm_kps.get("lamina_base", (0.0, 0.0, 0.0))[2]),
+            float(norm_kps.get("lamina_tip", (0.0, 0.0, 0.0))[2]),
+        )
+        if norm_kps
+        else 0.0
+    )
+
+    def _swap_midvein_poles(pts_map: Dict[str, Tuple[float, float]]) -> None:
+        pts_map["lamina_base"], pts_map["lamina_tip"] = pts_map["lamina_tip"], pts_map["lamina_base"]
+        if "base_center" in pts_map and "apex_center" in pts_map:
+            pts_map["base_center"], pts_map["apex_center"] = pts_map["apex_center"], pts_map["base_center"]
+        mv_keys = [f"midvein_{i}" for i in range(15) if f"midvein_{i}" in pts_map]
+        if len(mv_keys) == 15:
+            rev_vals = [pts_map[f"midvein_{14 - i}"] for i in range(15)]
+            for i in range(15):
+                pts_map[f"midvein_{i}"] = rev_vals[i]
+
     if (
-        not norm_kps
-        and petiole_mask is not None
+        petiole_mask is not None
         and petiole_mask.size > 0
         and int(np.count_nonzero(petiole_mask)) > 0
         and "lamina_base" in pts_2d
         and "lamina_tip" in pts_2d
+        and (not norm_kps or _kp_conf_min < 0.55)
     ):
         pys, pxs = np.where(petiole_mask > 0)
-        pet_cx, pet_cy = float(np.mean(pxs)), float(np.mean(pys))
         lb_pt = pts_2d["lamina_base"]
         lt_pt = pts_2d["lamina_tip"]
-        if math.hypot(lt_pt[0] - pet_cx, lt_pt[1] - pet_cy) < math.hypot(lb_pt[0] - pet_cx, lb_pt[1] - pet_cy):
-            pts_2d["lamina_base"], pts_2d["lamina_tip"] = lt_pt, lb_pt
+        d_lb_pet = float(np.min(np.hypot(pxs - lb_pt[0], pys - lb_pt[1])))
+        d_lt_pet = float(np.min(np.hypot(pxs - lt_pt[0], pys - lt_pt[1])))
+        span_bt = math.hypot(lt_pt[0] - lb_pt[0], lt_pt[1] - lb_pt[1])
+        if (not norm_kps and d_lt_pet < d_lb_pet) or (d_lt_pet + 0.15 * span_bt < d_lb_pet):
+            _swap_midvein_poles(pts_2d)
+    elif (
+        crown_hint_xy is not None
+        and "lamina_base" in pts_2d
+        and "lamina_tip" in pts_2d
+        and (not norm_kps or _kp_conf_min < 0.45)
+    ):
+        cr_x = float(crown_hint_xy[0]) - float(offset_xy[0])
+        cr_y = float(crown_hint_xy[1]) - float(offset_xy[1])
+        lb_pt = pts_2d["lamina_base"]
+        lt_pt = pts_2d["lamina_tip"]
+        d_lb_cr = math.hypot(lb_pt[0] - cr_x, lb_pt[1] - cr_y)
+        d_lt_cr = math.hypot(lt_pt[0] - cr_x, lt_pt[1] - cr_y)
+        span_bt = math.hypot(lt_pt[0] - lb_pt[0], lt_pt[1] - lb_pt[1])
+        if (not norm_kps and d_lt_cr < d_lb_cr) or (d_lt_cr + 0.15 * span_bt < d_lb_cr):
+            _swap_midvein_poles(pts_2d)
 
     # Populate synthetic midvein_0..14 along p_apex -> p_base if pose keypoints were not supplied
     if "lamina_tip" in pts_2d and "lamina_base" in pts_2d and "midvein_0" not in pts_2d:
@@ -2800,10 +2951,74 @@ def orient_and_score_leaf_lm3(
             shifted_pts = rot_pts
             det_box = (0, 0, int(nw), int(nh))
 
-        lam_bool = (crop_rot > 0).astype(bool)
-        holes_bool = (crop_hole > 0).astype(bool) if crop_hole is not None else np.zeros_like(lam_bool, dtype=bool)
+        holes_bool = (
+            (crop_hole > 0).astype(bool)
+            if (crop_hole is not None and crop_hole.shape == crop_rot.shape)
+            else np.zeros(crop_rot.shape[:2], dtype=bool)
+        )
+        lam_bool = (crop_rot > 0).astype(bool) & (~holes_bool)
+        if not np.any(lam_bool):
+            lam_bool = (crop_rot > 0).astype(bool)
+        crop_lamina_u8 = (lam_bool.astype(np.uint8)) * 255
+        # Trim any empty petiole-only margin around upright lamina so oriented_mask frames the upright blade
+        lam_bbox = mask_bbox(crop_lamina_u8)
+        if lam_bbox is not None and lam_bbox != (0, 0, crop_lamina_u8.shape[1], crop_lamina_u8.shape[0]):
+            lx0, ly0, lx1, ly1 = lam_bbox
+            crop_lamina_u8 = crop_to_box(crop_lamina_u8, lam_bbox)
+            crop_hole = crop_to_box(crop_hole, lam_bbox) if crop_hole is not None else None
+            crop_pet = crop_to_box(crop_pet, lam_bbox) if crop_pet is not None else None
+            crop_img = crop_to_box(crop_img, lam_bbox) if crop_img is not None else None
+            shifted_pts = {k: (pt[0] - float(lx0), pt[1] - float(ly0)) for k, pt in shifted_pts.items()}
+            lam_bool = (crop_lamina_u8 > 0).astype(bool)
+            holes_bool = (
+                (crop_hole > 0).astype(bool)
+                if (crop_hole is not None and crop_hole.shape == crop_lamina_u8.shape)
+                else np.zeros(crop_lamina_u8.shape[:2], dtype=bool)
+            )
+        orig_edge_clipped = bool(
+            orig_h >= 8
+            and orig_w >= 8
+            and (
+                int(np.count_nonzero(mask_u8[0, :])) > max(3, int(0.02 * max(orig_h, orig_w)))
+                or int(np.count_nonzero(mask_u8[-1, :])) > max(3, int(0.02 * max(orig_h, orig_w)))
+                or int(np.count_nonzero(mask_u8[:, 0])) > max(3, int(0.02 * max(orig_h, orig_w)))
+                or int(np.count_nonzero(mask_u8[:, -1])) > max(3, int(0.02 * max(orig_h, orig_w)))
+            )
+        )
+        if not orig_edge_clipped and crop_lamina_u8.size > 0:
+            crop_lamina_u8 = np.pad(crop_lamina_u8, ((2, 2), (2, 2)), mode="constant", constant_values=0)
+            if crop_hole is not None:
+                crop_hole = np.pad(crop_hole, ((2, 2), (2, 2)), mode="constant", constant_values=0)
+            if crop_pet is not None:
+                crop_pet = np.pad(crop_pet, ((2, 2), (2, 2)), mode="constant", constant_values=0)
+            if crop_img is not None and crop_img.ndim == 3:
+                crop_img = np.pad(crop_img, ((2, 2), (2, 2), (0, 0)), mode="constant", constant_values=0)
+            shifted_pts = {k: (pt[0] + 2.0, pt[1] + 2.0) for k, pt in shifted_pts.items()}
+            lam_bool = (crop_lamina_u8 > 0).astype(bool)
+            holes_bool = (
+                (crop_hole > 0).astype(bool)
+                if (crop_hole is not None and crop_hole.shape == crop_lamina_u8.shape)
+                else np.zeros(crop_lamina_u8.shape[:2], dtype=bool)
+            )
         sil_bool = lam_bool | holes_bool
         pet_bool = (crop_pet > 0).astype(bool) if crop_pet is not None else None
+
+        cnts_lw, _ = cv2.findContours(crop_lamina_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if cnts_lw:
+            sig_lw = [c.reshape(-1, 2).astype(np.float64) for c in cnts_lw if cv2.contourArea(c) >= 16.0]
+            c_lw = (
+                np.vstack(sig_lw)
+                if sig_lw
+                else max(cnts_lw, key=cv2.contourArea).reshape(-1, 2).astype(np.float64)
+            )
+            blade_l_px = float(np.ptp(c_lw[:, 1]))
+            blade_w_px = float(np.ptp(c_lw[:, 0]))
+        else:
+            ys_lw, xs_lw = np.where(lam_bool)
+            blade_l_px = float(ys_lw.max() - ys_lw.min()) if len(ys_lw) > 0 else 0.0
+            blade_w_px = float(xs_lw.max() - xs_lw.min()) if len(xs_lw) > 0 else 0.0
+        anatomical_lw = (blade_l_px / max(blade_w_px, 1e-6)) if (blade_l_px > 0.0 and blade_w_px > 0.0) else np.nan
+
         kpt_conf = {
             k: (float(norm_kps[k][2]) if k in norm_kps and len(norm_kps[k]) >= 3 else 0.95)
             for k in shifted_pts
@@ -2836,7 +3051,10 @@ def orient_and_score_leaf_lm3(
                 "largest_frac": 1.0,
                 "gates_pass": True,
                 "is_archetypal": True,
-                "oriented_mask": crop_rot,
+                "blade_length_px": round(blade_l_px, 4),
+                "blade_width_px": round(blade_w_px, 4),
+                "blade_length_to_width_ratio": round(float(anatomical_lw), 4) if np.isfinite(anatomical_lw) else np.nan,
+                "oriented_mask": crop_lamina_u8,
                 "oriented_hole_mask": crop_hole,
                 "oriented_petiole_mask": crop_pet,
                 "oriented_crop_bgr": crop_img,
@@ -2852,7 +3070,10 @@ def orient_and_score_leaf_lm3(
             "largest_frac": round(float(bm.largest_frac), 4) if np.isfinite(bm.largest_frac) else 1.0,
             "gates_pass": bool(bm.gates_pass),
             "is_archetypal": bool(bm.is_archetypal),
-            "oriented_mask": crop_rot,
+            "blade_length_px": round(blade_l_px, 4),
+            "blade_width_px": round(blade_w_px, 4),
+            "blade_length_to_width_ratio": round(float(anatomical_lw), 4) if np.isfinite(anatomical_lw) else np.nan,
+            "oriented_mask": crop_lamina_u8,
             "oriented_hole_mask": crop_hole,
             "oriented_petiole_mask": crop_pet,
             "oriented_crop_bgr": crop_img,
@@ -3000,8 +3221,15 @@ class LM3ScaleCalibrator:
 
         cls_onnx = LM3_PACKAGE_ROOT / "models" / "ruler_classifier" / "model.onnx"
         if not cls_onnx.is_file():
-            cand_cls = resolve_lm3_weights("lm3_ruler_classifier__effnet_b4", explicit_path=None)
-            cls_onnx = Path(cand_cls[1]) if isinstance(cand_cls, tuple) else Path(cand_cls)
+            for _cls_stem in (
+                "lm3_ruler_classifier__dinov3_vits16_tile_four_896_mlp",
+                "lm3_ruler_classifier__effnet_b4",
+            ):
+                cand_cls = resolve_lm3_weights(_cls_stem, explicit_path=None)
+                cand_path = Path(cand_cls[1]) if isinstance(cand_cls, tuple) else Path(cand_cls)
+                if cand_path.is_file():
+                    cls_onnx = cand_path
+                    break
         if cls_onnx.is_file():
             try:
                 from leafmachine3.inference.ruler_classifier import RulerClassifierModel
@@ -3135,7 +3363,7 @@ class LM3ScaleCalibrator:
 
 def compute_leaf_ect_descriptor(
     mask: np.ndarray,
-    num_dirs: Union[int, str, Path, None] = 32,
+    num_dirs: Union[int, str, Path, None] = 360,
     num_thresh: int = 32,
     output_path: Optional[Union[str, Path]] = None,
     hole_mask: Optional[np.ndarray] = None,
@@ -3143,11 +3371,13 @@ def compute_leaf_ect_descriptor(
     angle_cw: Optional[float] = None,
     include_petiole: bool = False,
     include_holes: bool = True,
+    already_oriented: bool = False,
 ) -> Optional[np.ndarray]:
     """
     Computes the LeafMachine3 Module 18 Euler Characteristic Transform (ECT) matrix
-    by delegating directly to `leafmachine3.core.ect_compute.compute_ect`,
-    `ect_product_for`, and `leafmachine3.reporting.leaf_products.render_leaf_products`.
+    (default `32 x 360` per `config/LM3_settings.yaml`) by delegating directly to
+    `leafmachine3.core.ect_compute.compute_ect`, `ect_product_for`, and
+    `leafmachine3.reporting.leaf_products.render_leaf_products`.
     """
     if mask is None or mask.size == 0 or int(np.count_nonzero(mask)) == 0:
         return None
@@ -3156,7 +3386,7 @@ def compute_leaf_ect_descriptor(
     if isinstance(num_dirs, (str, Path)) or num_dirs is None:
         if output_path is None and isinstance(num_dirs, (str, Path)):
             output_path = num_dirs
-        eff_num_dirs = 32
+        eff_num_dirs = 360
     else:
         eff_num_dirs = int(num_dirs)
     eff_num_thresh = int(num_thresh)
@@ -3166,7 +3396,7 @@ def compute_leaf_ect_descriptor(
     from leafmachine3.reporting.leaf_products import render_leaf_products
 
     mask_u8 = ((mask > 0).astype(np.uint8)) * 255
-    if angle_cw is not None or hole_mask is not None or petiole_mask is not None:
+    if not already_oriented and (angle_cw is not None or hole_mask is not None or petiole_mask is not None):
         h_m, w_m = mask_u8.shape[:2]
         dummy_rgb = np.zeros((h_m, w_m, 3), dtype=np.uint8)
         lam_bool = mask_u8 > 0

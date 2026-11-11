@@ -51,7 +51,7 @@ def compute_lm3_shape_metrics(
     angle_cw: Optional[float] = None,
     bbox: Optional[Tuple[int, int, int, int]] = None,
 ) -> Dict[str, float]:
-    """Reads polygon morphology scalars directly from LeafMachine3 `polygon_morphology`."""
+    """Computes polygon morphology scalars (`area_px`, `solidity`, `circularity`, `extent`, anatomical `aspect_ratio`) via LeafMachine3 `polygon_morphology`, aggregating across all retained pinna islands on multi-component leaves."""
     empty = {
         "area_px": 0.0,
         "solidity": 0.0,
@@ -69,6 +69,8 @@ def compute_lm3_shape_metrics(
     if bw <= 0 or bh <= 0:
         return empty
     sub = mask_u8[by : by + bh, bx : bx + bw]
+    cnts_ext, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    sig_cnts = [c for c in cnts_ext if len(c) >= 3 and abs(float(cv2.contourArea(c))) >= 16.0]
     cnt_xy = extract_contour(sub)
     if cnt_xy is None or len(cnt_xy) < 3:
         return {
@@ -79,15 +81,34 @@ def compute_lm3_shape_metrics(
             "aspect_ratio": float(max(bw, bh)) / float(max(min(bw, bh), 1)),
         }
     morph = polygon_morphology(cnt_xy, method="minarearect")
-    solidity = float(getattr(morph, "solidity", getattr(morph, "convexity", 0.0)) or 0.0) if morph is not None else 0.0
-    circularity = float(getattr(morph, "circularity", 0.0) or 0.0) if morph is not None else 0.0
+    if len(sig_cnts) > 1:
+        all_pts_mc = np.vstack([c.reshape(-1, 2) for c in sig_cnts]).astype(np.float64)
+        tot_area_mc = float(sum(abs(cv2.contourArea(c)) for c in sig_cnts))
+        tot_perim_mc = float(sum(cv2.arcLength(c, True) for c in sig_cnts))
+        hull_mc = cv2.convexHull(all_pts_mc.astype(np.float32).reshape(-1, 1, 2))
+        hull_area_mc = float(abs(cv2.contourArea(hull_mc))) if hull_mc is not None and len(hull_mc) >= 3 else 0.0
+        solidity = (tot_area_mc / hull_area_mc) if hull_area_mc > 0.0 else 0.0
+        circularity = (4.0 * math.pi * tot_area_mc / (tot_perim_mc * tot_perim_mc)) if tot_perim_mc > 0.0 else 0.0
+        pts_for_span = all_pts_mc
+    else:
+        solidity = float(getattr(morph, "solidity", getattr(morph, "convexity", 0.0)) or 0.0) if morph is not None else 0.0
+        circularity = float(getattr(morph, "circularity", 0.0) or 0.0) if morph is not None else 0.0
+        pts_for_span = np.asarray(cnt_xy, dtype=np.float64).reshape(-1, 2)
     aspect_ratio = float(getattr(morph, "aspect_ratio", 0.0) or 0.0) if morph is not None else 0.0
-    if angle_cw is not None and morph is not None and getattr(morph, "rotated_bbox", None) is not None:
-        rbox = np.asarray(morph.rotated_bbox, dtype=np.float64)
-        if rbox.shape == (4, 2):
-            l_px, w_px = length_width_from_box(rbox, float(angle_cw))
-            if l_px > 0.0 and w_px > 0.0:
-                aspect_ratio = float(max(l_px, w_px)) / float(max(min(l_px, w_px), 1e-6))
+    if angle_cw is not None:
+        rad_ar = math.radians(float(angle_cw))
+        cos_ar, sin_ar = math.cos(rad_ar), math.sin(rad_ar)
+        pts_ar = pts_for_span
+        xr_ar = pts_ar[:, 0] * cos_ar - pts_ar[:, 1] * sin_ar
+        yr_ar = pts_ar[:, 0] * sin_ar + pts_ar[:, 1] * cos_ar
+        l_px = float(np.ptp(yr_ar))
+        w_px = float(np.ptp(xr_ar))
+        if (l_px <= 0.0 or w_px <= 0.0) and morph is not None and getattr(morph, "rotated_bbox", None) is not None:
+            rbox = np.asarray(morph.rotated_bbox, dtype=np.float64)
+            if rbox.shape == (4, 2):
+                l_px, w_px = length_width_from_box(rbox, float(angle_cw))
+        if l_px > 0.0 and w_px > 0.0:
+            aspect_ratio = float(l_px) / float(max(w_px, 1e-6))
     rect_w = float(getattr(morph, "dim_max", 0.0) or 0.0) if morph is not None else 0.0
     rect_h = float(getattr(morph, "dim_min", 0.0) or 0.0) if morph is not None else 0.0
     if (rect_w <= 0.0 or rect_h <= 0.0) and morph is not None and getattr(morph, "rotated_bbox", None) is not None:
@@ -204,9 +225,12 @@ def _extract_resampled_contour_pts(
     contour: Optional[np.ndarray] = None,
     p_apex_pt: Optional[Tuple[float, float]] = None,
     keypoints_31: Optional[Any] = None,
+    already_oriented: bool = False,
 ) -> Optional[np.ndarray]:
+    is_preoriented = bool(already_oriented)
     if momocs_outline_xy is not None and len(np.asarray(momocs_outline_xy)) >= 10:
         largest_cnt = np.asarray(momocs_outline_xy, dtype=np.float64).reshape(-1, 2)
+        is_preoriented = True
     elif contour is not None and len(contour) >= 10:
         largest_cnt = np.asarray(contour, dtype=np.float64).reshape(-1, 2)
     else:
@@ -221,7 +245,7 @@ def _extract_resampled_contour_pts(
                 return None
         else:
             raw_u8 = (arr_in > 0).astype(np.uint8) * 255
-            if hole_mask is not None and isinstance(hole_mask, np.ndarray) and hole_mask.shape[:2] == raw_u8.shape[:2]:
+            if not is_preoriented and hole_mask is not None and isinstance(hole_mask, np.ndarray) and hole_mask.shape[:2] == raw_u8.shape[:2]:
                 raw_u8 = np.where((raw_u8 > 0) & (hole_mask == 0), 255, 0).astype(np.uint8)
             extracted_xy = extract_contour(raw_u8)
             if extracted_xy is None or len(extracted_xy) < 10:
@@ -229,7 +253,7 @@ def _extract_resampled_contour_pts(
             largest_cnt = np.asarray(extracted_xy, dtype=np.float64).reshape(-1, 2)
 
     anchor_pt = petiole_attachment_pt if petiole_attachment_pt is not None else lamina_base
-    if keypoints_31 is not None:
+    if not is_preoriented and keypoints_31 is not None:
         try:
             from scripts.vision.lm3_inference_engines import normalize_lm3_keypoints_dict
 
@@ -243,9 +267,23 @@ def _extract_resampled_contour_pts(
         except Exception:
             pass
 
-    if anchor_pt is not None:
+    if momocs_outline_xy is not None and petiole_attachment_pt is None and lamina_base is None:
+        start_idx = 0
+    elif anchor_pt is not None:
         diffs = largest_cnt - np.array([float(anchor_pt[0]), float(anchor_pt[1])], dtype=np.float64)
         start_idx = int(np.argmin(np.hypot(diffs[:, 0], diffs[:, 1])))
+    elif is_preoriented:
+        y_max_c = float(np.max(largest_cnt[:, 1]))
+        y_span_c = max(float(np.ptp(largest_cnt[:, 1])), 1.0)
+        x_med_c = float(np.median(largest_cnt[:, 0]))
+        bot_mask = largest_cnt[:, 1] >= (y_max_c - 0.08 * y_span_c)
+        bot_idx = np.where(bot_mask)[0]
+        if len(bot_idx) > 0:
+            sub_b = largest_cnt[bot_idx]
+            pick_b = int(np.argmin((y_max_c - sub_b[:, 1]) + 0.65 * np.abs(sub_b[:, 0] - x_med_c)))
+            start_idx = int(bot_idx[pick_b])
+        else:
+            start_idx = int(np.argmax(largest_cnt[:, 1]))
     else:
         start_idx = int(np.argmax(largest_cnt[:, 1]))
 
@@ -264,6 +302,8 @@ def _extract_resampled_contour_pts(
     resamp_pts = resample_closed(pts, int(num_points))
     if momocs_signed_area(resamp_pts) > 0 or cv2.contourArea(resamp_pts.reshape(-1, 1, 2).astype(np.float32), oriented=True) > 0:
         resamp_pts = np.vstack([resamp_pts[0:1], resamp_pts[1:][::-1]])
+    if is_preoriented:
+        return resamp_pts
     return _rotate_contour_to_tip_up(
         resamp_pts,
         anchor_pt=anchor_pt,
@@ -283,6 +323,7 @@ def resample_normalized_contour(
     p_apex_pt: Optional[Tuple[float, float]] = None,
     keypoints_31: Optional[Any] = None,
     n_pts: Optional[int] = None,
+    already_oriented: bool = False,
 ) -> Optional[np.ndarray]:
     """Extracts resampled, tip-up normalized 2D coordinates `(x_norm, y_norm)` via LeafMachine3 helpers."""
     _ = petiole_mask
@@ -297,6 +338,7 @@ def resample_normalized_contour(
         momocs_outline_xy=momocs_outline_xy,
         p_apex_pt=p_apex_pt,
         keypoints_31=keypoints_31,
+        already_oriented=already_oriented,
     )
     if resamp_pts is None:
         return None
@@ -325,6 +367,7 @@ def export_standardized_contour(
     lamina_base: Optional[Tuple[float, float]] = None,
     momocs_outline_xy: Optional[np.ndarray] = None,
     keypoints_31: Optional[Any] = None,
+    already_oriented: bool = False,
 ) -> Any:
     """Exports LeafMachine3 120-vertex clockwise tip-up contour CSV to `output_dir/contours/{catalogNumber}_leaf{id}.csv`."""
     _ = petiole_mask
@@ -339,6 +382,7 @@ def export_standardized_contour(
         contour=contour,
         p_apex_pt=p_apex_pt,
         keypoints_31=keypoints_31,
+        already_oriented=already_oriented,
     )
     if resamp_pts is None:
         return empty_ret

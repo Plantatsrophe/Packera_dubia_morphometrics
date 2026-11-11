@@ -491,30 +491,47 @@ def _fb_compute_ect(
     u8 = (np.asarray(mask_u8) > 0).astype(np.uint8) * 255
     if u8.size == 0 or int(np.count_nonzero(u8)) == 0:
         return None
-    cnt_xy = _fb_extract_contour(u8)
-    if cnt_xy is None or len(cnt_xy) < 3:
+    cnts_raw, hier = cv2.findContours(u8, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+    if not cnts_raw or hier is None:
         return None
-    pts = _fb_resample_closed(cnt_xy, n_points=min(256, max(64, len(cnt_xy))))
-    centroid = np.mean(pts, axis=0)
-    centered = pts - centroid
-    max_r = float(np.max(np.hypot(centered[:, 0], centered[:, 1])))
+    cycles: List[Tuple[float, np.ndarray]] = []
+    for idx_c, c_raw in enumerate(cnts_raw):
+        c_xy = c_raw.reshape(-1, 2).astype(np.float64)
+        if len(c_xy) < 3 or abs(float(cv2.contourArea(c_raw))) < 4.0:
+            continue
+        sign_c = 1.0 if int(hier[0][idx_c][3]) < 0 else -1.0
+        n_res = min(256, max(48, len(c_xy)))
+        cycles.append((sign_c, _fb_resample_closed(c_xy, n_points=n_res)))
+    if not cycles:
+        cnt_xy = _fb_extract_contour(u8)
+        if cnt_xy is None or len(cnt_xy) < 3:
+            return None
+        cycles = [(1.0, _fb_resample_closed(cnt_xy, n_points=min(256, max(64, len(cnt_xy)))))]
+
+    outer_stack = np.vstack([pts_c for s_c, pts_c in cycles if s_c > 0] or [cycles[0][1]])
+    centroid = np.mean(outer_stack, axis=0)
+    centered_outer = outer_stack - centroid
+    max_r = float(np.max(np.hypot(centered_outer[:, 0], centered_outer[:, 1])))
     scale = (float(bound_radius) * 0.95 / max_r) if max_r > 1e-9 else 1.0
-    outline_norm = (centered * scale).astype(np.float32)
+    outline_norm = ((cycles[0][1] - centroid) * scale).astype(np.float32)
 
     n_dirs = max(4, int(num_dirs))
     n_thr = max(4, int(num_thresh))
     thetas = np.linspace(0.0, 2.0 * np.pi, n_dirs, endpoint=False, dtype=np.float32)
     thresholds = np.linspace(-float(bound_radius), float(bound_radius), n_thr, dtype=np.float32)
 
-    # Polygonal boundary Euler Characteristic Transform chi(h_theta <= t) = #V(<=t) - #E(<=t)
+    # Multi-component polygonal Euler Characteristic Transform: sum_c sign_c * (#V_c(<=t) - #E_c(<=t))
     dirs = np.stack([np.cos(thetas), np.sin(thetas)], axis=1)  # (D, 2)
-    heights = outline_norm @ dirs.T  # (N, D)
-    heights_next = np.roll(heights, -1, axis=0)
-    edge_max = np.maximum(heights, heights_next)
-
-    v_le = (heights[None, :, :] <= thresholds[:, None, None]).sum(axis=1)  # (T, D)
-    e_le = (edge_max[None, :, :] <= thresholds[:, None, None]).sum(axis=1)  # (T, D)
-    ect_mat = (v_le - e_le).astype(np.float32)
+    ect_acc = np.zeros((n_thr, n_dirs), dtype=np.float32)
+    for sign_c, pts_c in cycles:
+        c_norm = ((pts_c - centroid) * scale).astype(np.float32)
+        heights = c_norm @ dirs.T  # (N_c, D)
+        heights_next = np.roll(heights, -1, axis=0)
+        edge_max = np.maximum(heights, heights_next)
+        v_le = (heights[None, :, :] <= thresholds[:, None, None]).sum(axis=1)
+        e_le = (edge_max[None, :, :] <= thresholds[:, None, None]).sum(axis=1)
+        ect_acc += np.float32(sign_c) * (v_le - e_le).astype(np.float32)
+    ect_mat = ect_acc.astype(np.float32)
     return SimpleNamespace(
         ect_matrix=ect_mat,
         thetas=thetas,

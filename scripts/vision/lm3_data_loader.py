@@ -365,6 +365,50 @@ def load_ruler_calibration_records(
     return records
 
 
+class RulerCalibrationMap(dict):
+    """
+    Dictionary mapping `catalogNumber -> pixels_per_mm` (`float`) while preserving
+    empirical vs. megapixel-prior provenance in `.sources` (`cf_source`) and `.records`
+    so `predicted_from_megapixels` estimates are never promoted to `is_calibrated_mm = True`.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.sources: Dict[str, str] = {}
+        self.records: Dict[str, Dict[str, Any]] = {}
+        super().__init__(*args, **kwargs)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
+        if args:
+            other = args[0]
+            other_sources = getattr(other, "sources", None)
+            other_records = getattr(other, "records", None)
+            if isinstance(other_sources, dict):
+                for cat_k, src_v in other_sources.items():
+                    prev_src = self.sources.get(cat_k, "")
+                    prev_emp = prev_src in {"measured_from_ruler", "measured_from_fieldprism"}
+                    new_emp = src_v in {"measured_from_ruler", "measured_from_fieldprism"}
+                    if prev_emp and not new_emp:
+                        continue
+                    self.sources[str(cat_k)] = str(src_v)
+                    if isinstance(other, dict) and cat_k in other:
+                        super().__setitem__(cat_k, other[cat_k])
+                    if isinstance(other_records, dict) and cat_k in other_records:
+                        self.records[str(cat_k)] = dict(other_records[cat_k])
+                for cat_k, val_v in (other.items() if isinstance(other, dict) else other):
+                    if str(cat_k) not in self.sources:
+                        super().__setitem__(cat_k, val_v)
+                if kwargs:
+                    super().update(**kwargs)
+                return
+        super().update(*args, **kwargs)
+
+    def copy(self) -> "RulerCalibrationMap":
+        dup = RulerCalibrationMap(super().copy())
+        dup.sources = dict(self.sources)
+        dup.records = {k: dict(v) for k, v in self.records.items()}
+        return dup
+
+
 def load_ruler_calibrations(
     lm3_dir: Path,
     min_confidence: float = 0.50,
@@ -372,14 +416,16 @@ def load_ruler_calibrations(
     """
     Fast loader for specimen scale calibrations (`pixels_per_mm`) across LeafMachine3
     SQLite (`<run_name>.sqlite`) and CSV (`Data/specimen_summary.csv`,
-    `Data/ruler_conversion_factor.csv`) outputs.
+    `Data/ruler_conversion_factor.csv`) outputs, preserving per-voucher `cf_source`
+    provenance (`measured_from_ruler`, `measured_from_fieldprism`, `predicted_from_megapixels`).
     """
     records = load_ruler_calibration_records(lm3_dir=lm3_dir, min_confidence=min_confidence)
-    calibrations: Dict[str, float] = {
-        cat: float(rec["pixels_per_mm"])
-        for cat, rec in records.items()
-        if rec.get("pixels_per_mm") is not None and float(rec["pixels_per_mm"]) > 0.0
-    }
+    calibrations = RulerCalibrationMap()
+    for cat, rec in records.items():
+        if rec.get("pixels_per_mm") is not None and float(rec["pixels_per_mm"]) > 0.0:
+            calibrations[cat] = float(rec["pixels_per_mm"])
+            calibrations.sources[cat] = str(rec.get("cf_source", "measured_from_ruler"))
+            calibrations.records[cat] = dict(rec)
     logger.info("Loaded %d specimen ruler scale calibrations from LM3.", len(calibrations))
     return calibrations
 
@@ -438,6 +484,7 @@ __all__ = [
     "unscale_working_bbox_to_sheet",
     "resolve_px_per_cm",
     "compute_blade_area_cm2",
+    "RulerCalibrationMap",
     "load_ruler_calibration_records",
     "load_ruler_calibrations",
     "load_precomputed_plant_labels",

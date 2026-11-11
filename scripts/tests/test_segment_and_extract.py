@@ -552,7 +552,8 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
 
                 recs_mp, _ = self.pipeline.process_voucher("NCU_MP_PRIOR", self.img_path)
                 self.assertAlmostEqual(recs_mp[0]["pixels_per_mm"], 10.5, places=3)
-                self.assertTrue(recs_mp[0]["is_calibrated_mm"])
+                self.assertFalse(recs_mp[0]["is_calibrated_mm"])
+                self.assertEqual(recs_mp[0]["scale_source"], "mp_estimated")
 
     def test_export_standardized_contour_isotropic_aspect_ratio_preservation(self) -> None:
         """
@@ -2229,6 +2230,225 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         self.assertEqual(res_case4[3]["leaf_zone"], "basal")
         self.assertEqual(res_case4[4]["leaf_zone"], "basal")
         self.assertEqual(res_case4[5]["leaf_zone"], "basal")
+
+    def test_step02_upright_mask_persistence_reniform_lw_crown_tiebreak_and_32x360_ect(self) -> None:
+        """
+        Verify Step 2 botanical systematics & LM3 downstream handoff invariants:
+          1. Oblique / inverted leaves persist upright base-to-tip binary masks in `data/masks/*.png`
+             with `mask_is_upright == True` and `32 x 360` ECT `.npy` matrices matching `LM3_settings.yaml`.
+          2. Reniform / cordate wider-than-long blades (`W > L`, e.g., Packera aurea) preserve true
+             anatomical `aspect_ratio < 1.0` (`blade_length / blade_width`) without `90 deg` sideways rotation.
+          3. Downward-radiating rosette / inverted-mount leaves (`NCU00385199` pattern) tie-break `lamina_base`
+             toward the root/crown hub rather than flipping `180 deg` via `argmax(y)`.
+          4. `RulerCalibrationMap` keeps `predicted_from_megapixels` as `is_calibrated_mm == False`
+             (`scale_source == "mp_estimated"`) in both CSV manifests and SQLite `vouchers` / `extracted_leaves`.
+          5. Pre-oriented `momocs_outline_xy` passed to `export_standardized_contour` is never double-rotated.
+        """
+        from scripts.core.db import get_db_connection, record_voucher_segmentation_transaction
+        from scripts.vision.leaf_geometry_utils import export_standardized_contour
+        from scripts.vision.lm3_data_loader import load_ruler_calibrations
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            vouchers_csv = tmp_p / "vouchers.csv"
+            img_obl = tmp_p / "NCU_OBLIQUE.jpg"
+            img_ren = tmp_p / "NCU_RENIFORM.jpg"
+            img_inv = tmp_p / "NCU_INVERTED.jpg"
+            for ip in (img_obl, img_ren, img_inv):
+                cv2.imwrite(str(ip), np.full((1200, 1000, 3), 235, dtype=np.uint8))
+
+            pd.DataFrame([
+                {"catalogNumber": "NCU_OBLIQUE", "scientificName": "Packera anonyma", "image_path": str(img_obl)},
+                {"catalogNumber": "NCU_RENIFORM", "scientificName": "Packera aurea", "image_path": str(img_ren)},
+                {"catalogNumber": "NCU_INVERTED", "scientificName": "Packera dubia", "image_path": str(img_inv)},
+            ]).to_csv(vouchers_csv, index=False)
+
+            # Set up LM3 ruler CSV with one empirical ruler and one megapixel prior
+            ruler_dir = tmp_p / "lm3_proj" / "Data" / "Ruler"
+            ruler_dir.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([
+                {
+                    "filename": "NCU_OBLIQUE__R__10-10-100-500",
+                    "ruler_success": True,
+                    "conversion_mean": 100.0,
+                    "ruler_class_confidence": 95.0,
+                    "conversion_determination": "measured_from_ruler",
+                },
+                {
+                    "filename": "NCU_RENIFORM__R__10-10-100-500",
+                    "ruler_success": True,
+                    "conversion_mean": 105.0,
+                    "ruler_class_confidence": 88.0,
+                    "conversion_determination": "predicted_from_megapixels",
+                },
+            ]).to_csv(ruler_dir / "ruler_summary.csv", index=False)
+
+            calibs = load_ruler_calibrations(tmp_p / "lm3_proj", min_confidence=0.50)
+            self.assertEqual(calibs.sources["NCU_OBLIQUE"], "measured_from_ruler")
+            self.assertEqual(calibs.sources["NCU_RENIFORM"], "predicted_from_megapixels")
+
+            pipe = SegmentAndExtractPipeline(
+                vouchers_csv=vouchers_csv,
+                model_weights=Path("models/dummy.pth"),
+                output_dir=tmp_p / "out_data",
+                lm3_project_dir=tmp_p / "lm3_proj",
+                device="cpu",
+                force=True,
+            )
+            try:
+                # 1. Oblique 135-deg leaf (base at top-left, tip at bottom-right) -> saved mask must be upright (H > 1.8 * W)
+                obl_crop = np.zeros((420, 420), dtype=np.uint8)
+                cv2.ellipse(obl_crop, (210, 210), (110, 42), 45.0, 0, 360, 255, -1)
+                obl_pet = np.zeros((420, 420), dtype=np.uint8)
+                cv2.line(obl_pet, (132, 132), (92, 92), 255, thickness=6)
+
+                with patch.object(pipe.stage1_detector, "predict", return_value=[((200, 200, 620, 620), 0.96, 0)]):
+                    with patch.object(
+                        pipe.model_engine,
+                        "predict_batch",
+                        return_value=[[((10, 10, 410, 410), obl_crop, 0.96, 0), ((85, 85, 140, 140), obl_pet, 0.90, 1)]],
+                    ):
+                        recs_obl, fail_obl = pipe.process_voucher("NCU_OBLIQUE", img_obl)
+
+                self.assertIsNone(fail_obl)
+                self.assertEqual(len(recs_obl), 1)
+                r_obl = recs_obl[0]
+                self.assertTrue(bool(r_obl["is_calibrated_mm"]))
+                self.assertEqual(r_obl["scale_source"], "ruler_calibrated")
+                self.assertTrue(bool(r_obl["mask_is_upright"]))
+                saved_obl_mask = cv2.imread(str(r_obl["mask_path"]), cv2.IMREAD_GRAYSCALE)
+                self.assertIsNotNone(saved_obl_mask)
+                ys_o, xs_o = np.where(saved_obl_mask > 0)
+                h_obl = float(ys_o.max() - ys_o.min())
+                w_obl = float(xs_o.max() - xs_o.min())
+                self.assertGreater(h_obl, 1.8 * w_obl, "Saved PNG mask in data/masks/ must be rotated upright base-to-tip.")
+                ect_obl = np.load(str(r_obl["ect_path"]))
+                self.assertEqual(ect_obl.shape, (32, 360), "Step 02 ECT .npy must honor LM3_settings.yaml 32x360 grid.")
+
+                # 2. Reniform wider-than-long leaf (L ~ 120, W ~ 190 -> L/W < 0.72) + mp_estimated provenance
+                ren_crop = np.zeros((380, 380), dtype=np.uint8)
+                cv2.ellipse(ren_crop, (190, 160), (95, 62), 0.0, 0, 360, 255, -1)
+                cv2.ellipse(ren_crop, (190, 220), (34, 24), 0.0, 0, 360, 0, -1)
+                ren_pet = np.zeros((380, 380), dtype=np.uint8)
+                cv2.line(ren_pet, (190, 222), (190, 315), 255, thickness=6)
+
+                with patch.object(pipe.stage1_detector, "predict", return_value=[((300, 300, 680, 680), 0.97, 0)]):
+                    with patch.object(
+                        pipe.model_engine,
+                        "predict_batch",
+                        return_value=[[((10, 10, 370, 370), ren_crop, 0.96, 0), ((220, 184, 320, 196), ren_pet, 0.91, 1)]],
+                    ):
+                        recs_ren, fail_ren = pipe.process_voucher("NCU_RENIFORM", img_ren)
+
+                self.assertIsNone(fail_ren)
+                r_ren = recs_ren[0]
+                self.assertLess(float(r_ren["aspect_ratio"]), 0.80, "Reniform W > L blade must preserve aspect_ratio < 1.0.")
+                self.assertAlmostEqual(float(r_ren["aspect_ratio"]), float(r_ren["blade_length_to_width_ratio"]), places=4)
+                self.assertFalse(bool(r_ren["is_calibrated_mm"]), "predicted_from_megapixels must not set is_calibrated_mm=True.")
+                self.assertEqual(r_ren["scale_source"], "mp_estimated")
+                self.assertTrue(pd.isna(r_ren["blade_area_cm2"]))
+
+                # Verify SQLite persistence keeps is_calibrated_mm == 0 for mp_estimated
+                db_file = tmp_p / "test_step02_prov.sqlite"
+                conn = get_db_connection(db_file, init_schema=True)
+                try:
+                    record_voucher_segmentation_transaction(
+                        conn,
+                        catalog_number="NCU_RENIFORM",
+                        image_path=str(img_ren),
+                        extracted_records=recs_ren,
+                        failure_record=None,
+                        output_dir=pipe.output_dir,
+                    )
+                    v_cal = conn.execute("SELECT is_calibrated_mm FROM vouchers WHERE catalogNumber = 'NCU_RENIFORM';").fetchone()[0]
+                    el_cal, el_ss = conn.execute(
+                        "SELECT is_calibrated_mm, scale_source FROM extracted_leaves WHERE catalogNumber = 'NCU_RENIFORM';"
+                    ).fetchone()
+                    self.assertEqual(int(v_cal), 0)
+                    self.assertEqual(int(el_cal), 0)
+                    self.assertEqual(str(el_ss), "mp_estimated")
+                finally:
+                    conn.close()
+
+                # 3. Inverted herbarium mount (root crown at top y=150, downward-pointing blade lacking petiole_mask)
+                #    Draw ovate blade wider near top base (y ~ 310) and tapering to acute apex at bottom (y ~ 480)
+                inv_crop = np.zeros((320, 320), dtype=np.uint8)
+                pts_inv = np.array([[160, 40], [215, 95], [195, 190], [160, 280], [125, 190], [105, 95]], dtype=np.int32)
+                cv2.fillPoly(inv_crop, [pts_inv], 255)
+                s1_inv = [
+                    ((120, 460, 190, 540), 0.93, 7),   # Root tuft at top of sheet (inverted mount)
+                    ((240, 340, 560, 660), 0.95, 0),   # Downward-pointing rosette leaf below top root crown
+                ]
+                with patch.object(pipe.stage1_detector, "predict", return_value=s1_inv):
+                    with patch.object(
+                        pipe.model_engine,
+                        "predict_batch",
+                        return_value=[[((10, 10, 310, 310), inv_crop, 0.95, 0)]],
+                    ):
+                        recs_inv, fail_inv = pipe.process_voucher("NCU_INVERTED", img_inv)
+
+                self.assertIsNone(fail_inv)
+                # Sheet-space midrib points downward (~ +90 deg), so Step 02 rotates ~180 deg to make upright mask tip-up
+                self.assertGreater(float(recs_inv[0]["midrib_angle_deg"]), 45.0)
+                inv_saved = cv2.imread(str(recs_inv[0]["mask_path"]), cv2.IMREAD_GRAYSCALE)
+                # After 180-deg upright rotation, broader lamina base sits in lower half and acute apex sits at top
+                h_i = inv_saved.shape[0]
+                top_w = int(np.count_nonzero(inv_saved[: h_i // 3, :]))
+                bot_w = int(np.count_nonzero(inv_saved[(2 * h_i) // 3 :, :]))
+                self.assertGreater(bot_w, top_w, "Crown-hub tie-breaker must orient broader basal half to bottom (+Y) and acute apex to top (-Y).")
+
+                # 4. Double-rotation guard when pre-oriented momocs_outline_xy is supplied alongside sheet keypoints
+                th = np.linspace(0.0, 2.0 * np.pi, 120, endpoint=False)
+                pre_oriented_xy = np.column_stack([200.0 - 35.0 * np.sin(th), 200.0 + 95.0 * np.cos(th)])
+                kp_oblique = {
+                    "lamina_base": (120.0, 120.0, 0.95),
+                    "lamina_tip": (280.0, 280.0, 0.95),
+                }
+                c_pre = export_standardized_contour(
+                    None,
+                    catalog_number="PRE_ORI",
+                    leaf_id=1,
+                    output_dir=tmp_p / "pre_ori_out",
+                    momocs_outline_xy=pre_oriented_xy,
+                    keypoints_31=kp_oblique,
+                )
+                df_pre = pd.read_csv(c_pre)
+                span_y_pre = float(df_pre["y"].max() - df_pre["y"].min())
+                span_x_pre = float(df_pre["x"].max() - df_pre["x"].min())
+                self.assertGreater(span_y_pre, 2.2 * span_x_pre, "Pre-oriented momocs_outline_xy must not be double-rotated by sheet keypoints.")
+
+                # 5. Unbridged focal multi-pinna retention in _reduce_crop_predictions_native_lm3 + 32x360 multi-component ECT
+                from scripts.vision import lm3_inference_engines as lm3_eng_chk
+                pinna_crop_shape = (320, 240)
+                p_inst_u8 = np.zeros(pinna_crop_shape, dtype=np.uint8)
+                cv2.ellipse(p_inst_u8, (120, 80), (42, 48), 0, 0, 360, 255, -1)   # terminal lobe
+                cv2.ellipse(p_inst_u8, (82, 168), (24, 14), 0, 0, 360, 255, -1)   # detached left pinna
+                cv2.ellipse(p_inst_u8, (158, 168), (24, 14), 0, 0, 360, 255, -1)  # detached right pinna
+                cv2.rectangle(p_inst_u8, (0, 270), (35, 319), 255, -1)            # border-clipped neighbor bleed -> rejected
+                pet_stalk_u8 = np.zeros(pinna_crop_shape, dtype=np.uint8)
+                cv2.rectangle(pet_stalk_u8, (110, 122), (130, 260), 255, -1)
+                reduced_pinna = lm3_eng_chk._reduce_crop_predictions_native_lm3(
+                    [
+                        ((0, 0, 320, 240), p_inst_u8, 0.94, 0),
+                        ((122, 110, 260, 130), pet_stalk_u8, 0.91, 1),
+                    ],
+                    pinna_crop_shape,
+                    min_area_px=64,
+                )
+                lam_pinna_u8 = [m for _b, m, _s, cid in reduced_pinna if cid == 0][0]
+                n_cc_p, _, stats_p, _ = cv2.connectedComponentsWithStats((lam_pinna_u8 > 0).astype(np.uint8), connectivity=8)
+                sig_p = sum(1 for cid in range(1, n_cc_p) if int(stats_p[cid, cv2.CC_STAT_AREA]) >= 64)
+                self.assertEqual(sig_p, 3, "Unbridged terminal lobe + 2 petiole-attached lateral pinnae must be retained (rejecting border neighbor bleed).")
+                self.assertEqual(int(np.count_nonzero(lam_pinna_u8[130:150, 112:128])), 0, "Zero synthetic petiole bridge pixels may be added to lamina mask.")
+                term_only_u8 = np.zeros(pinna_crop_shape, dtype=np.uint8)
+                term_only_u8[:135, :] = p_inst_u8[:135, :]
+                ect_term_only = lm3_eng_chk.compute_leaf_ect_descriptor(term_only_u8, num_dirs=360, num_thresh=32, already_oriented=True)
+                ect_multi_pinna = lm3_eng_chk.compute_leaf_ect_descriptor(lam_pinna_u8, num_dirs=360, num_thresh=32, already_oriented=True)
+                self.assertGreater(float(np.max(ect_multi_pinna)), float(np.max(ect_term_only)), "Multi-pinna 32x360 ECT must capture higher multi-component Euler characteristic than terminal-lobe-only.")
+                mc_metrics = compute_lm3_shape_metrics(lam_pinna_u8, angle_cw=0.0)
+                self.assertLess(mc_metrics["solidity"], 0.82, "Multi-pinna solidity must reflect inter-pinna sinuses across all islands.")
+            finally:
+                pipe.shutdown()
 
 
 if __name__ == "__main__":

@@ -696,7 +696,7 @@ db_upsert_dataframe <- function(
 #     & `si_a` with relaxed bounds on genuinely dissected Packera leaves (`dice >= 0.45`, `|si_a| < 0.48`)
 #     while excluding fused overlapping clumps (`UNRESOLVED_CLUMP`) and unbridged multi-island pinnae
 #     (`n_lamina_components > 1`, which remain in SQLite for multi-component ECT).
-evaluate_step03_lm3_efa_qc <- function(df) {
+evaluate_step03_lm3_efa_qc <- function(df, allow_multi_component_ect = FALSE) {
   if (is.null(df) || nrow(df) == 0L) return(logical(0))
   n <- nrow(df)
   keep <- rep(TRUE, n)
@@ -709,7 +709,9 @@ evaluate_step03_lm3_efa_qc <- function(df) {
     keep[!is.na(raw_qfr) & nzchar(raw_qfr) & !(raw_qfr %in% c("PASS", "OK", "NONE", "NA"))] <- FALSE
   }
   sol <- if ("solidity" %in% names(df)) suppressWarnings(as.numeric(df$solidity)) else rep(NA_real_, n)
-  is_diss <- !is.na(sol) & is.finite(sol) & (sol < 0.72)
+  n_cc_vec <- if ("n_lamina_components" %in% names(df)) suppressWarnings(as.integer(df$n_lamina_components)) else rep(1L, n)
+  is_multi_cc <- !is.na(n_cc_vec) & n_cc_vec > 1L
+  is_diss <- (!is.na(sol) & is.finite(sol) & (sol < 0.72)) | is_multi_cc
   if ("lm3_gates_pass" %in% names(df)) {
     raw_gp <- tolower(trimws(as.character(df$lm3_gates_pass)))
     gp_fail <- !is.na(raw_gp) & raw_gp %in% c("0", "false", "f", "no")
@@ -725,9 +727,8 @@ evaluate_step03_lm3_efa_qc <- function(df) {
     max_sia <- ifelse(is_diss, 0.48, 0.35)
     keep[!is.na(sia) & is.finite(sia) & sia >= max_sia] <- FALSE
   }
-  if ("n_lamina_components" %in% names(df)) {
-    n_cc <- suppressWarnings(as.integer(df$n_lamina_components))
-    keep[!is.na(n_cc) & n_cc > 1L] <- FALSE
+  if (!isTRUE(allow_multi_component_ect) && any(is_multi_cc)) {
+    keep[is_multi_cc] <- FALSE
   }
   keep
 }
@@ -871,7 +872,7 @@ fetch_step03_contours_from_db <- function(
   }
 
   n_rows <- nrow(rows)
-  keep_qc <- evaluate_step03_lm3_efa_qc(rows) & !is.na(rows$contour_xy_json) & nzchar(as.character(rows$contour_xy_json))
+  keep_qc <- evaluate_step03_lm3_efa_qc(rows, allow_multi_component_ect = TRUE) & !is.na(rows$contour_xy_json) & nzchar(as.character(rows$contour_xy_json))
   n_excl_qc <- sum(!keep_qc, na.rm = TRUE)
   if (n_excl_qc > 0L) {
     message(sprintf("Step 03 SQLite EFA QC filter: excluded %d clump/multi-island contours (retained in SQLite extracted_leaves for audit/ECT).", n_excl_qc))
@@ -883,8 +884,17 @@ fetch_step03_contours_from_db <- function(
   }
 
   ppm_vec <- suppressWarnings(as.numeric(rows$pixels_per_mm))
-  is_cal_vec <- !is.na(ppm_vec) & is.finite(ppm_vec) & (ppm_vec > 0)
-  ppm_vec[!is_cal_vec] <- NA_real_
+  raw_cal_col <- if ("is_calibrated_mm" %in% names(rows)) rows$is_calibrated_mm else rep(1L, nrow(rows))
+  cal_flag_vec <- ifelse(
+    is.na(raw_cal_col),
+    TRUE,
+    toupper(trimws(as.character(raw_cal_col))) %in% c("1", "TRUE", "T", "YES")
+  )
+  raw_ss_col <- if ("scale_source" %in% names(rows)) tolower(trimws(as.character(rows$scale_source))) else rep("", nrow(rows))
+  raw_ss_col[is.na(raw_ss_col)] <- ""
+  is_cal_vec <- !is.na(ppm_vec) & is.finite(ppm_vec) & (ppm_vec > 0) & cal_flag_vec &
+    !(raw_ss_col %in% c("mp_estimated", "predicted_from_megapixels", "uncalibrated"))
+  db_ar_vec <- if ("aspect_ratio" %in% names(rows)) suppressWarnings(as.numeric(rows$aspect_ratio)) else rep(NA_real_, nrow(rows))
   db_area_vec <- suppressWarnings(as.numeric(rows$area_px))
   db_sol_vec <- suppressWarnings(as.numeric(rows$solidity))
   js_vec <- as.character(rows$contour_xy_json)
@@ -908,6 +918,11 @@ fetch_step03_contours_from_db <- function(
       coo <- matrix(as.numeric(coo[, 1:2]), ncol = 2L)
       if (any(!is.finite(coo))) next
       colnames(coo) <- c("x", "y")
+      was_tipup_db <- FALSE
+      if (exists("align_contour_horizontal_xax", mode = "function")) {
+        coo <- align_contour_horizontal_xax(coo)
+        was_tipup_db <- isTRUE(attr(coo, "lm3_from_tipup"))
+      }
       if (has_momocs) coo <- tryCatch(Momocs::coo_cw(coo), error = function(e) coo)
 
       x_next <- c(coo[-1L, 1L], coo[1L, 1L])
@@ -932,14 +947,23 @@ fetch_step03_contours_from_db <- function(
       if (!is.null(align_fn)) {
         coo <- align_fn(coo, circularity = circ_val, has_momocs = has_momocs)
       }
+      attr(coo, "lm3_xax_aligned") <- TRUE
+      attr(coo, "lm3_from_tipup") <- was_tipup_db
 
-      lw <- if (has_momocs) tryCatch(Momocs::coo_lw(coo), error = function(e) NULL) else NULL
-      if (is.null(lw) || length(lw) < 2L || is.na(lw[2]) || lw[2] <= 1e-6) {
-        coo_centered <- scale(coo, center = TRUE, scale = FALSE)
-        svd_rot <- coo_centered %*% svd(coo_centered)$v
-        lw <- c(diff(range(svd_rot[, 1], na.rm = TRUE)), diff(range(svd_rot[, 2], na.rm = TRUE)))
+      db_ar_i <- db_ar_vec[i]
+      if (is.finite(db_ar_i) && db_ar_i > 0.0) {
+        ar_val <- round(as.numeric(db_ar_i), 4)
+      } else if (was_tipup_db && diff(range(coo[, 2L], na.rm = TRUE)) > 1e-6) {
+        ar_val <- round(as.numeric(diff(range(coo[, 1L], na.rm = TRUE)) / diff(range(coo[, 2L], na.rm = TRUE))), 4)
+      } else {
+        lw <- if (has_momocs) tryCatch(Momocs::coo_lw(coo), error = function(e) NULL) else NULL
+        if (is.null(lw) || length(lw) < 2L || is.na(lw[2]) || lw[2] <= 1e-6) {
+          coo_centered <- scale(coo, center = TRUE, scale = FALSE)
+          svd_rot <- coo_centered %*% svd(coo_centered)$v
+          lw <- c(diff(range(svd_rot[, 1], na.rm = TRUE)), diff(range(svd_rot[, 2], na.rm = TRUE)))
+        }
+        ar_val <- round(as.numeric(lw[1] / lw[2]), 4)
       }
-      ar_val <- round(as.numeric(lw[1] / lw[2]), 4)
 
       db_a <- db_area_vec[i]
       eff_area <- if (!is.na(db_a) && is.finite(db_a) && db_a > 0) db_a else round(area_px, 1)
@@ -1079,11 +1103,13 @@ fetch_step03_contours_from_db <- function(
     catalogNumber = cat_vec,
     plant_individual_id = pid_vec,
     leaf_id = lid_vec,
+    n_lamina_components = if ("n_lamina_components" %in% names(sub_rows)) pmax(1L, ifelse(is.na(suppressWarnings(as.integer(sub_rows$n_lamina_components))), 1L, suppressWarnings(as.integer(sub_rows$n_lamina_components)))) else rep(1L, n_kept),
     solidity = sol_kept,
     dissection_index = merged$di[ok_idx],
     archetype_score = arch_kept,
     pixels_per_mm = ppm_vec[ok_idx],
     is_calibrated_mm = is_cal_vec[ok_idx],
+    scale_source = ifelse(is_cal_vec[ok_idx], "ruler_calibrated", ifelse(!is.na(ppm_vec[ok_idx]) & ppm_vec[ok_idx] > 0, "mp_estimated", "uncalibrated")),
     petiole_length_mm = suppressWarnings(as.numeric(sub_rows$petiole_length_mm)),
     blade_length_mm = suppressWarnings(as.numeric(sub_rows$blade_length_mm)),
     petiole_to_blade_ratio = suppressWarnings(as.numeric(sub_rows$petiole_to_blade_ratio)),
