@@ -824,7 +824,7 @@ run_multivariate_manova_audit <- function(
 
   is_t1 <- if ("morph_tier_source" %in% names(df)) {
     !is.na(df$morph_tier_source) & (as.character(df$morph_tier_source) == "Basal_Rosette")
-  
+
   } else {
     rep(TRUE, n)
   }

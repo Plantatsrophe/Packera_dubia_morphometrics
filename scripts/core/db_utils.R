@@ -700,6 +700,14 @@ evaluate_step03_lm3_efa_qc <- function(df) {
   if (is.null(df) || nrow(df) == 0L) return(logical(0))
   n <- nrow(df)
   keep <- rep(TRUE, n)
+  if ("efa_qc_pass" %in% names(df)) {
+    raw_eqc <- tolower(trimws(as.character(df$efa_qc_pass)))
+    keep[!is.na(raw_eqc) & raw_eqc %in% c("0", "false", "f", "no")] <- FALSE
+  }
+  if ("qc_flag_reason" %in% names(df)) {
+    raw_qfr <- toupper(trimws(as.character(df$qc_flag_reason)))
+    keep[!is.na(raw_qfr) & nzchar(raw_qfr) & !(raw_qfr %in% c("PASS", "OK", "NONE", "NA"))] <- FALSE
+  }
   sol <- if ("solidity" %in% names(df)) suppressWarnings(as.numeric(df$solidity)) else rep(NA_real_, n)
   is_diss <- !is.na(sol) & is.finite(sol) & (sol < 0.72)
   if ("lm3_gates_pass" %in% names(df)) {
@@ -765,13 +773,15 @@ fetch_step03_contours_from_db <- function(
   sel_lgates <- if ("lm3_gates_pass" %in% el_fields) "el.lm3_gates_pass" else "NULL AS lm3_gates_pass"
   sel_ncc <- if ("n_lamina_components" %in% el_fields) "el.n_lamina_components" else "1 AS n_lamina_components"
   sel_scale_src <- if ("scale_source" %in% el_fields) "el.scale_source" else "NULL AS scale_source"
+  sel_eqc <- if ("efa_qc_pass" %in% el_fields) "el.efa_qc_pass" else "NULL AS efa_qc_pass"
+  sel_qfr <- if ("qc_flag_reason" %in% el_fields) "el.qc_flag_reason" else "NULL AS qc_flag_reason"
 
   base_sql <- paste0(
     "SELECT ",
     "  el.catalogNumber, el.plant_individual_id, el.leaf_id, el.shape_id, ",
     "  el.solidity, el.aspect_ratio, el.area_px, el.blade_area_cm2, ",
     "  ", sel_ect, ", ", sel_zone, ", ", sel_zone_conf, ", ", sel_dist_cr, ", ", sel_cy_rel, ", ",
-    "  ", sel_arch, ", ", sel_bdice, ", ", sel_sia, ", ", sel_lgates, ", ", sel_ncc, ", ", sel_scale_src, ", ",
+    "  ", sel_arch, ", ", sel_bdice, ", ", sel_sia, ", ", sel_lgates, ", ", sel_ncc, ", ", sel_scale_src, ", ", sel_eqc, ", ", sel_qfr, ", ",
     "  COALESCE(el.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm, ",
     "  COALESCE(el.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm, ",
     "  COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm, ",

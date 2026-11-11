@@ -36,7 +36,8 @@ parse_args_robust <- function() {
     optparse::make_option(c("--output-individual"), type = "character", default = "data/tables/leaf_efa_harmonics_individual.csv", help = "Output individual leaf harmonics CSV [default: %default]"),
     optparse::make_option(c("-k", "--harmonics"), type = "integer", default = 12, help = "Number of Fourier harmonics (nb.h) [default: %default]"),
     optparse::make_option(c("-p", "--num-pcs"), type = "integer", default = 5, help = "Number of PCA dimensions to extract [default: %default]"),
-
+    optparse::make_option(c("-r", "--report-out"), type = "character", default = "", help = "Optional validation report CSV path (deprecated no-op compatibility flag)"),
+    optparse::make_option(c("-g", "--plot-out"), type = "character", default = "", help = "Optional validation plot PDF path (deprecated no-op compatibility flag)"),
     optparse::make_option(c("--figures-dir"), type = "character", default = "", help = "Optional output directory for Step 03 publication figures"),
     optparse::make_option(c("--symmetrize-efa-harmonics"), type = "logical", default = TRUE, help = "Uniformly apply Momocs::rm_asym() across Tier 1 contours [default: %default]"),
     optparse::make_option(c("--permutations"), type = "integer", default = 999, help = "Number of permutations for PERMANOVA [default: %default]"),
@@ -52,7 +53,7 @@ parse_args_robust <- function() {
   opts <- list(input = "data/contours/", contours_dir = "data/contours/", manifest = "data/tables/extracted_leaf_manifest.csv",
                masks_dir = "data/masks/", vouchers = "data/tables/curated_vouchers.csv", output = "data/tables/leaf_efa_harmonics.csv",
                output_individual = "data/tables/leaf_efa_harmonics_individual.csv", harmonics = 12, num_pcs = 5, symmetrize_efa_harmonics = TRUE,
-               figures_dir = "", permutations = 999, seed = 42)
+               report_out = "", plot_out = "", figures_dir = "", permutations = 999, seed = 42)
   i <- 1
   while (i <= length(raw_args)) {
     arg <- raw_args[i]
@@ -289,7 +290,7 @@ run_fourier_extraction <- function(opts) {
   if (!is.null(db_ing)) {
     coo_list <- db_ing$coords_list; fac_df <- db_ing$meta_df; shape_names_vec <- names(coo_list)
     if (exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE) && !all(c("leaf_zone", "leaf_zone_confidence", "dist_from_crown_norm", "area_mm2") %in% names(fac_df))) {
-      tryCatch({ con_lz <- connect_packera_db(read_only = TRUE); on.exit(tryCatch(DBI::dbDisconnect(con_lz), error = function(e) NULL), add = TRUE)
+      tryCatch({ con_lz <- connect_packera_db(read_only = TRUE); on.exit(tryCatch(if (!is.null(con_lz) && DBI::dbIsValid(con_lz)) DBI::dbDisconnect(con_lz), error = function(e) NULL), add = TRUE)
         if (!is.null(con_lz) && DBI::dbExistsTable(con_lz, "extracted_leaves")) {
           f_el <- DBI::dbListFields(con_lz, "extracted_leaves"); sel_el <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "contour_xy_json", "leaf_zone", "leaf_zone_confidence", "dist_from_crown_norm", "cy_rel_plant_bbox", "area_mm2", "area_px"), f_el)
           if (all(c("catalogNumber", "leaf_id") %in% sel_el)) {
@@ -376,7 +377,7 @@ run_fourier_extraction <- function(opts) {
     raw_scale_src <- if (!is.null(m_match) && nrow(m_match) > 0 && "scale_source" %in% names(m_match) && !is.na(m_match$scale_source[1])) tolower(trimws(as.character(m_match$scale_source[1]))) else ""
     resolved_ppm <- if (!is.null(m_match) && nrow(m_match) > 0 && "pixels_per_mm" %in% names(m_match)) suppressWarnings(as.numeric(m_match$pixels_per_mm[1])) else NA_real_
     is_calibrated_mm <- !is.na(resolved_ppm) && is.finite(resolved_ppm) && resolved_ppm > 0 && !(raw_scale_src %in% c("mp_estimated", "predicted_from_megapixels", "uncalibrated"))
-    scale_source <- if (is_calibrated_mm) "ruler_calibrated" else if (!is.na(resolved_ppm) && is.finite(resolved_ppm) && resolved_ppm > 0) "mp_estimated" else "uncalibrated" 
+    scale_source <- if (is_calibrated_mm) "ruler_calibrated" else if (!is.na(resolved_ppm) && is.finite(resolved_ppm) && resolved_ppm > 0) "mp_estimated" else "uncalibrated"
 
     # Calculate raw pixel area, circularity, Dissection Index & polygon solidity before coordinate scaling
     area_px <- abs(0.5 * sum(coo[, 1] * c(coo[-1, 2], coo[1, 2]) - coo[, 2] * c(coo[-1, 1], coo[1, 1])))
@@ -385,7 +386,7 @@ run_fourier_extraction <- function(opts) {
     dissection_index <- compute_dissection_index_from_coo(area_val = area_px, perim_val = perim_px)
     resolved_solidity <- if (!is.null(m_match) && nrow(m_match) > 0 && "solidity" %in% names(m_match) && !is.na(m_match$solidity[1])) round(suppressWarnings(as.numeric(m_match$solidity[1])), 4) else compute_polygon_solidity(coo, area_px)
     m_num <- function(cn) if (!is.null(m_match) && nrow(m_match) > 0 && cn %in% names(m_match) && !is.na(m_match[[cn]][1])) suppressWarnings(as.numeric(m_match[[cn]][1])) else NA_real_
-    m_dis <- !is.na(resolved_solidity) && is.finite(resolved_solidity) && (resolved_solidity < 0.72)
+    m_dis <- if (!is.null(m_match) && nrow(m_match) > 0 && "is_dissected" %in% names(m_match) && !is.na(m_match$is_dissected[1])) as.logical(m_match$is_dissected[1]) else (!is.na(resolved_solidity) && is.finite(resolved_solidity) && (resolved_solidity < 0.72))
 
     # Calibrate contour coordinates to physical millimeters (mm) strictly when ruler_calibrated
     centsize_px <- compute_centsize_robust(coo); if (is_calibrated_mm) coo <- coo / resolved_ppm

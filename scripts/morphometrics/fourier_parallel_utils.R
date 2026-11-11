@@ -78,8 +78,9 @@ run_parallel_momocs_efa <- function(coo_list, fac_df, nb_h, calibrate_fn) {
   scaled_coos <- unlist(lapply(prep_chunks, `[[`, "coo"), recursive = FALSE, use.names = FALSE)
   names(scaled_coos) <- names(coo_list)
   if (length(cs_vals) == nrow(fac_df)) {
-    fac_df$centroid_size <- round(as.numeric(cs_vals), 4)
-    fac_df$log_centsize <- ifelse(!is.na(fac_df$centroid_size) & fac_df$centroid_size > 0, round(log(fac_df$centroid_size), 6), NA_real_)
+    cal_ok <- if ("is_calibrated_mm" %in% names(fac_df)) (!is.na(fac_df$is_calibrated_mm) & as.logical(fac_df$is_calibrated_mm)) else rep(TRUE, nrow(fac_df))
+    fac_df$centroid_size <- ifelse(cal_ok, round(as.numeric(cs_vals), 4), NA_real_)
+    fac_df$log_centsize <- ifelse(cal_ok & !is.na(fac_df$centroid_size) & fac_df$centroid_size > 0, round(log10(fac_df$centroid_size), 6), NA_real_)
   }
   out_obj <- Momocs::Out(scaled_coos, fac = fac_df)
   h_opt <- calibrate_fn(out_obj, nb_h = nb_h)
@@ -169,6 +170,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   di_v <- pull_num("dissection_index")
   ar_v <- pull_num("aspect_ratio")
   circ_v <- pull_num("circularity")
+  arch_v <- pull_num("archetype_score")
   area_v <- pull_num("area_px")
   svar_v <- pull_num("sym_var")
   avar_v <- pull_num("asym_var")
@@ -206,7 +208,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     dfrac_m <- rep(NA_real_, m)
     ar_m <- rep(NA_real_, m)
     circ_m <- rep(NA_real_, m)
-    ucs_m <- rep(NA_real_, m)
+    arch_m <- rep(NA_real_, m)
     area_m <- rep(NA_real_, m)
     sv_m <- rep(NA_real_, m)
     av_m <- rep(NA_real_, m)
@@ -251,7 +253,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
       di_m[k] <- med_fin(di_v[idx], 4L)
       ar_m[k] <- med_fin(ar_v[idx], 4L)
       circ_m[k] <- med_fin(circ_v[idx], 4L)
-      ucs_m[k] <- med_fin(ucs_v[idx], 4L)
+      arch_m[k] <- med_fin(arch_v[idx], 4L)
       area_m[k] <- med_fin(area_v[idx], 1L)
       sv_m[k] <- med_fin(svar_v[idx], 6L)
       av_m[k] <- med_fin(avar_v[idx], 6L)
@@ -268,7 +270,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     list(
       h = h_out, nl = n_lv, fv = f_var, hi = h_idx, cs = cs_m,
       sol = sol_m, q25 = q25_m, di = di_m, df = dfrac_m,
-      ar = ar_m, circ = circ_m, area = area_m,
+      ar = ar_m, circ = circ_m, arch = arch_m, area = area_m,
       sv = sv_m, av = av_m, pa = pa_m, hr = hr_m, lq = lq_m,
       pet = pet_m, bld = bld_m, pbr = pbr_m, dis = dis_m, out = out_m
     )
@@ -289,7 +291,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
       h = do.call(rbind, lapply(c_list, `[[`, "h")),
       nl = pull_c("nl"), fv = pull_c("fv"), hi = pull_c("hi"), cs = pull_c("cs"),
       sol = pull_c("sol"), q25 = pull_c("q25"), di = pull_c("di"), df = pull_c("df"),
-      ar = pull_c("ar"), circ = pull_c("circ"), area = pull_c("area"),
+      ar = pull_c("ar"), circ = pull_c("circ"), arch = pull_c("arch"), area = pull_c("area"),
       sv = pull_c("sv"), av = pull_c("av"), pa = pull_c("pa"), hr = pull_c("hr"), lq = pull_c("lq"),
       pet = pull_c("pet"), bld = pull_c("bld"), pbr = pull_c("pbr"), dis = pull_c("dis"), out = pull_c("out")
     )
@@ -300,7 +302,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   det_vec[is.na(det_vec) | !nzchar(det_vec)] <- "Tier_3_Bronze"
   auth_init <- if ("authority_weight" %in% names(closed_leaf_df)) suppressWarnings(as.numeric(closed_leaf_df$authority_weight[first_idx])) else rep(0.0, n_spec)
   auth_init[!is.finite(auth_init)] <- 0.0
-  log_cs <- ifelse(!is.na(res$cs) & res$cs > 0, round(log(res$cs), 6), NA_real_)
+  log_cs <- ifelse(!is.na(res$cs) & res$cs > 0, round(log10(res$cs), 6), NA_real_)
 
   spec_df <- data.frame(
     catalogNumber = cat_col[first_idx],
@@ -345,6 +347,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   spec_df$dissected_leaf_fraction <- res$df
   spec_df$aspect_ratio <- res$ar
   spec_df$circularity <- res$circ
+  spec_df$archetype_score <- res$arch
   spec_df$area_px <- res$area
   spec_df$sym_var <- res$sv
   spec_df$asym_var <- res$av

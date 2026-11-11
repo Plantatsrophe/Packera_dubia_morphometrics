@@ -683,10 +683,11 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   cda_prob_init <- if ("cda_posterior_prob" %in% names(df)) suppressWarnings(as.numeric(df$cda_posterior_prob)) else rep(NA_real_, n)
   tm_d2_init <- if ("type_morph_mahal_d2" %in% names(df)) suppressWarnings(as.numeric(df$type_morph_mahal_d2)) else rep(NA_real_, n)
   n_lvs_raw <- if ("n_leaves" %in% names(df)) suppressWarnings(as.integer(df$n_leaves)) else rep(NA_integer_, n)
-  n_t1_raw <- rep(NA_integer_, n)
-  n_t2_raw <- rep(NA_integer_, n)
-  n_lvs_sum <- ifelse(is.na(n_t1_raw) & is.na(n_t2_raw), NA_integer_, ifelse(is.na(n_t1_raw), 0L, n_t1_raw) + ifelse(is.na(n_t2_raw), 0L, n_t2_raw))
-  n_leaves_init <- ifelse(!is.na(n_lvs_raw), n_lvs_raw, n_lvs_sum)
+  leaf_cnt_raw <- if ("leaf_count" %in% names(df)) suppressWarnings(as.integer(df$leaf_count)) else rep(NA_integer_, n)
+  bas_cnt_raw <- if ("basal_leaf_count" %in% names(df)) suppressWarnings(as.integer(df$basal_leaf_count)) else rep(NA_integer_, n)
+  caul_cnt_raw <- if ("cauline_leaf_count" %in% names(df)) suppressWarnings(as.integer(df$cauline_leaf_count)) else rep(NA_integer_, n)
+  bc_sum <- ifelse(is.na(bas_cnt_raw) & is.na(caul_cnt_raw), NA_integer_, ifelse(is.na(bas_cnt_raw), 0L, bas_cnt_raw) + ifelse(is.na(caul_cnt_raw), 0L, caul_cnt_raw))
+  n_leaves_init <- dplyr::coalesce(n_lvs_raw, leaf_cnt_raw, bc_sum, bas_cnt_raw)
 
   orig_has_obs_morph_v <- !is.na(cda_pred_init) & nzchar(trimws(cda_pred_init)) & is.finite(cda_prob_init)
   orig_n_leaves_v <- ifelse(!is.na(n_leaves_init), pmax(0L, n_leaves_init), ifelse(orig_has_obs_morph_v, 1L, 0L))
@@ -876,7 +877,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   bf1_dv <- if ("two_delta_bic" %in% df_nms_d) suppressWarnings(as.numeric(df$two_delta_bic)) else rep(NA_real_, n)
   bf2_dv <- if ("gmm_2_delta_bic" %in% df_nms_d) suppressWarnings(as.numeric(df$gmm_2_delta_bic)) else rep(NA_real_, n)
   m_tier_src_dv <- if ("morph_tier_source" %in% df_nms_d) as.character(df$morph_tier_source) else rep(NA_character_, n)
-  n_t1_dv <- rep(NA_integer_, n)
+  bas_dv <- if ("basal_leaf_count" %in% df_nms_d) suppressWarnings(as.integer(df$basal_leaf_count)) else rep(NA_integer_, n)
+  lcnt_dv <- if ("leaf_count" %in% df_nms_d) suppressWarnings(as.integer(df$leaf_count)) else rep(NA_integer_, n)
+  n_t1_dv <- dplyr::coalesce(bas_dv, lcnt_dv)
   dlf_dv <- if ("dissected_leaf_fraction" %in% df_nms_d) suppressWarnings(as.numeric(df$dissected_leaf_fraction)) else rep(NA_real_, n)
   asym_dv <- if ("pct_asymmetry" %in% df_nms_d) suppressWarnings(as.numeric(df$pct_asymmetry)) else rep(NA_real_, n)
   is_dis_dv <- if ("is_dissected" %in% df_nms_d) (!is.na(df$is_dissected) & as.logical(df$is_dissected)) else rep(FALSE, n)
@@ -1797,9 +1800,13 @@ build_triage_queue <- function(opts) {
     if (!("gmm_cluster" %in% names(mo_df))) mo_df$gmm_cluster <- 1L
     if (!("gmm_uncertainty" %in% names(mo_df))) mo_df$gmm_uncertainty <- 0.05
     if (!("morph_tier_source" %in% names(mo_df))) mo_df$morph_tier_source <- NA_character_
-    
+    for (ic in c("leaf_count", "basal_leaf_count", "cauline_leaf_count")) if (!(ic %in% names(mo_df))) mo_df[[ic]] <- NA_integer_
+
     mo_agg <- mo_df %>% dplyr::group_by(catalogNumber, plant_individual_id) %>% dplyr::summarise(
       morph_tier_source = first_chr_or_na(morph_tier_source),
+      leaf_count = first_int_or_na(leaf_count),
+      basal_leaf_count = first_int_or_na(basal_leaf_count),
+      cauline_leaf_count = first_int_or_na(cauline_leaf_count),
       cda_predicted_taxon = first_chr_or_na(cda_predicted_taxon),
       cda_second_taxon = first_chr_or_na(cda_second_taxon),
       cda_posterior_prob = med_or_na(cda_posterior_prob),

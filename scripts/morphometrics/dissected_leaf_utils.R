@@ -78,6 +78,7 @@ classify_and_partition_leaf_zones <- function(
   cy_s <- if ("cy_rel_sheet" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$cy_rel_sheet)) else rep(NA_real_, n)
   pbr <- if ("petiole_to_blade_ratio" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$petiole_to_blade_ratio)) else rep(NA_real_, n)
   area_px <- if ("area_px" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$area_px)) else rep(NA_real_, n)
+  ba_cm2 <- if ("blade_area_cm2" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$blade_area_cm2)) else rep(NA_real_, n)
   area_ok <- rep(TRUE, n)
 
   leaf_zone <- raw_zone

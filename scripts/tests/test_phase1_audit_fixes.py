@@ -308,6 +308,59 @@ class TestPhase1AuditFixes(unittest.TestCase):
         self.assertNotIn("exp(-(delta_circ / 18.0))", r07)
         self.assertIn(".circular_watson_williams_or_perm_p", r07)
 
+    def test_phase1_nine_audit_regressions(self) -> None:
+        """Verify fixes for aiohttp counter tallying, Step 03 CLI/OTU/QC contracts, ba_cm2, and Step 06 multi-plant leaf_count coalescing."""
+        import asyncio
+        from scripts.core.harvester import download_all_voucher_images
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            tp = Path(tmp_d)
+            img_exist = tp / "NCU_EXIST.jpg"
+            img_exist.write_bytes(b"\xff\xd8\xff" + b"Z" * 1500)
+            img_pend = tp / "NCU_PEND.jpg"
+            records = [
+                ("https://example.com/1.jpg", img_exist),
+                ("https://example.com/2.jpg", img_pend),
+            ]
+
+            class _DummySessionCM:
+                async def __aenter__(self):
+                    return MagicMock()
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+            fake_aiohttp = MagicMock()
+            fake_aiohttp.TCPConnector.return_value = MagicMock()
+            fake_aiohttp.ClientSession.return_value = _DummySessionCM()
+
+            with patch("scripts.core.harvester.aiohttp", fake_aiohttp):
+                with patch("scripts.core.harvester.download_single_image", return_value=(True, False)):
+                    stats_aio = asyncio.run(
+                        download_all_voucher_images(records_to_download=records, concurrency_limit=2, force=False)
+                    )
+            self.assertEqual(stats_aio["total"], 2)
+            self.assertEqual(stats_aio["skipped"], 1)
+            self.assertEqual(stats_aio["success"], 1)
+
+        r03 = (PROJECT_ROOT / "scripts/morphometrics/03_fourier_extractor.R").read_text(encoding="utf-8")
+        rfpu = (PROJECT_ROOT / "scripts/morphometrics/fourier_parallel_utils.R").read_text(encoding="utf-8")
+        rdlu = (PROJECT_ROOT / "scripts/morphometrics/dissected_leaf_utils.R").read_text(encoding="utf-8")
+        rdb = (PROJECT_ROOT / "scripts/core/db_utils.R").read_text(encoding="utf-8")
+        r06 = (PROJECT_ROOT / "scripts/analysis/06_triage_dashboard_synthesis.R").read_text(encoding="utf-8")
+
+        self.assertIn('make_option(c("-r", "--report-out")', r03)
+        self.assertIn('make_option(c("-g", "--plot-out")', r03)
+        self.assertNotIn("ucs_v", rfpu)
+        self.assertNotIn("ucs_m", rfpu)
+        self.assertIn('pull_num("archetype_score")', rfpu)
+        self.assertIn("spec_df$archetype_score <- res$arch", rfpu)
+        self.assertIn("log10(res$cs)", rfpu)
+        self.assertIn('ba_cm2 <- if ("blade_area_cm2" %in% names(fac_df))', rdlu)
+        self.assertIn('if ("efa_qc_pass" %in% names(df))', rdb)
+        self.assertIn('if ("qc_flag_reason" %in% names(df))', rdb)
+        self.assertIn("dplyr::coalesce(n_lvs_raw, leaf_cnt_raw, bc_sum, bas_cnt_raw)", r06)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1125,14 +1125,15 @@ async def download_all_voucher_images(
             if async_tqdm is not None
             else await asyncio.gather(*tasks)
         )
-        for success, was_skipped in results:
-            if success:
-                if was_skipped:
-                    stats["skipped"] += 1
-                else:
-                    stats["success"] += 1
+
+    for success, was_skipped in results:
+        if success:
+            if was_skipped:
+                stats["skipped"] += 1
             else:
-                stats["failed"] += 1
+                stats["success"] += 1
+        else:
+            stats["failed"] += 1
 
     if logger:
         logger.info(
