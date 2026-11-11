@@ -1464,16 +1464,22 @@ extract_micro_topography_3dep <- function(coords_df, env_dir = "data/environment
         }
       }
 
-      other_dems <- dem_files[!is_grid_tile]
-      if (length(other_dems) > 0L) {
-        rem_idx <- v_idx[is.na(df$topo_tpi_30m[v_idx])]
-        if (length(rem_idx) > 0L) {
-          for (od_p in other_dems) {
-            r_od <- tryCatch(terra::rast(od_p), error = function(e) NULL)
+      rem_idx <- v_idx[is.na(df$topo_tpi_30m[v_idx])]
+      if (length(rem_idx) > 0L) {
+        cand_fb_dems <- c(dem_files[!is_grid_tile], dem_files[is_grid_tile])
+        for (od_p in cand_fb_dems) {
+          r_od <- tryCatch(terra::rast(od_p), error = function(e) NULL)
+          if (is.null(r_od)) next
+          ex_od <- tryCatch(terra::ext(r_od), error = function(e) NULL)
+          if (!is.null(ex_od)) {
+            in_ex <- rem_idx[lon_v[rem_idx] >= ex_od[1] & lon_v[rem_idx] <= ex_od[2] &
+                             lat_v[rem_idx] >= ex_od[3] & lat_v[rem_idx] <= ex_od[4]]
+            if (length(in_ex) > 0L) extract_from_single_dem(r_od, in_ex)
+          } else {
             extract_from_single_dem(r_od, rem_idx)
-            rem_idx <- v_idx[is.na(df$topo_tpi_30m[v_idx])]
-            if (length(rem_idx) == 0L) break
           }
+          rem_idx <- v_idx[is.na(df$topo_tpi_30m[v_idx])]
+          if (length(rem_idx) == 0L) break
         }
       }
     }
@@ -1556,7 +1562,26 @@ load_and_update_fine_grain_cache <- function(
   if (!is.null(sql_cached) && nrow(sql_cached) > 0L) {
     sql_cached$catalogNumber <- as.character(sql_cached$catalogNumber)
     if (!("lat_lon_key" %in% names(sql_cached))) sql_cached$lat_lon_key <- format_lat_lon_key(sql_cached$latitude, sql_cached$longitude)
-    cached_df <- if (!is.null(cached_df) && nrow(cached_df) > 0L) dplyr::bind_rows(sql_cached, cached_df) else sql_cached
+    cached_df <- if (!is.null(cached_df) && nrow(cached_df) > 0L) {
+      if (exists(".bind_rows_schema_safe", mode = "function")) {
+        .bind_rows_schema_safe(sql_cached, cached_df)
+      } else {
+        for (.cn in intersect(names(sql_cached), names(cached_df))) {
+          if (!identical(typeof(sql_cached[[.cn]]), typeof(cached_df[[.cn]]))) {
+            if (is.logical(cached_df[[.cn]]) && (is.numeric(sql_cached[[.cn]]) || is.integer(sql_cached[[.cn]]))) {
+              sql_cached[[.cn]] <- ifelse(is.na(sql_cached[[.cn]]), NA, sql_cached[[.cn]] != 0)
+            } else if ((is.numeric(sql_cached[[.cn]]) || is.integer(sql_cached[[.cn]])) && (is.numeric(cached_df[[.cn]]) || is.integer(cached_df[[.cn]]))) {
+              sql_cached[[.cn]] <- suppressWarnings(as.numeric(sql_cached[[.cn]]))
+              cached_df[[.cn]] <- suppressWarnings(as.numeric(cached_df[[.cn]]))
+            } else {
+              sql_cached[[.cn]] <- as.character(sql_cached[[.cn]])
+              cached_df[[.cn]] <- as.character(cached_df[[.cn]])
+            }
+          }
+        }
+        dplyr::bind_rows(sql_cached, cached_df)
+      }
+    } else sql_cached
   }
 
   pol_disk_fls <- c(.list_real_fine_rasters(file.path(env_dir, "polaris_30m")), .list_real_fine_rasters(file.path(env_dir, "gssurgo_30m")))

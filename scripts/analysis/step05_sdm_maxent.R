@@ -998,6 +998,7 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
           model = w_fit,
           predict_cloglog = function(new_df) {
             nd <- as.data.frame(new_df)
+            if (nrow(nd) == 0L) return(numeric(0))
             if (length(betas_saved) == 0L) {
               pr0 <- rep(1.0 - exp(-exp(ent_saved + alp_saved)), nrow(nd))
               pr0[!is.finite(pr0)] <- 0.5
@@ -1111,6 +1112,7 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
         model = fit_rg,
         predict_prob = function(new_df) {
           nd <- as.data.frame(new_df)[, pred_cols, drop = FALSE]
+          if (nrow(nd) == 0L) return(numeric(0))
           for (cn in pred_cols) {
             v <- suppressWarnings(as.numeric(nd[[cn]]))
             v[!is.finite(v)] <- stats::median(X_mat[[cn]], na.rm = TRUE)

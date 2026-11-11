@@ -502,6 +502,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             cls.r_unit_proc = subprocess.run(
                 ["Rscript", str(r_batch_file)],
                 cwd=str(PROJECT_ROOT),
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -744,7 +745,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 "--n-trees", "50",
                 "--demo",
             ]
-            res = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            res = subprocess.run(cmd, cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
             self.assertEqual(res.returncode, 0, f"Step 06 Rscript failed: {res.stderr}\n{res.stdout}")
 
             # Verify synthetic SSURGO records are never cached into ssurgo_cache under --demo
@@ -812,7 +813,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 "--output-report", str(out_report),
                 "--output-plot", str(out_triage_plot),
             ]
-            res07 = subprocess.run(cmd06, cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            res07 = subprocess.run(cmd06, cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
             self.assertEqual(res07.returncode, 0, f"Step 06 execution failed: {res07.stderr}\n{res07.stdout}")
             self.assertTrue(out_queue.exists(), "Step 06 triage_queue.csv must be generated from Step 05 outputs.")
             queue_df = pd.read_csv(out_queue)
@@ -897,7 +898,10 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         stopifnot(all(is.finite(cons_tb$edaphic_z_score)))
         cat("STEP06_COHORT_ADAPTIVE_OK\\n")
         """
-        res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        with tempfile.TemporaryDirectory() as tmp_ca:
+            r_ca_file = Path(tmp_ca) / "test_cohort_adaptive.R"
+            r_ca_file.write_text(r_code, encoding="utf-8")
+            res = subprocess.run(["Rscript", str(r_ca_file)], cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
         self.assertEqual(res.returncode, 0, f"Step 05 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("STEP06_COHORT_ADAPTIVE_OK", res.stdout)
 
@@ -1020,7 +1024,9 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             stopifnot(all(c("AUC_Block_MaxEnt", "CBI_MaxEnt", "AUC_Block_SpatialRF", "CBI_SpatialRF", "AUC_Block_Ensemble", "CBI_Ensemble") %in% names(perf_df)))
             cat("SDM_AND_CROP_OK\\n")
             """
-            res = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            r_sdm_file = Path(tmp_d) / "test_na_raster_sdm.R"
+            r_sdm_file.write_text(r_code, encoding="utf-8")
+            res = subprocess.run(["Rscript", str(r_sdm_file)], cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
             self.assertEqual(res.returncode, 0, f"SDM & raster cropping test failed:\n{res.stderr}\n{res.stdout}")
             self.assertIn("SDM_AND_CROP_OK", res.stdout)
 
@@ -1145,7 +1151,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             """
             r_script_file = Path(tmp_d) / "test_noncircular_k1_hygiene.R"
             r_script_file.write_text(r_code, encoding="utf-8")
-            res = subprocess.run(["Rscript", str(r_script_file)], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            res = subprocess.run(["Rscript", str(r_script_file)], cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
             self.assertEqual(res.returncode, 0, f"Non-circular K=1 & edaphic hygiene test failed:\n{res.stderr}\n{res.stdout}")
             self.assertIn("NONCIRCULAR_K1_IBE_AND_HYGIENE_OK", res.stdout)
 
@@ -1267,19 +1273,17 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             # High-elevation Blue Ridge specimens (rows 23-24) must have near-zero residual (< 3 days), NOT +20 days!
             stopifnot(all(abs(hop_res$df$delta_doy[23:24]) < 3.0))
 
-            # 3. Zero target-label leakage on trans-border NA soil values + Tier_3_Bronze & Cleanlab noise invariance
-            set.seed(99)
-            n_lk <- 40
-            sp_lk <- rep(c("Packera dubia", "Packera paupercula"), each = 20)
-            lat_lk <- rep(seq(36.0, 47.0, length.out = 20), 2) + rnorm(n_lk, 0, 0.05)
-            lon_lk <- rep(seq(-84.0, -76.0, length.out = 20), 2) + rnorm(n_lk, 0, 0.05)
-            # Identical indistinguishable noise across both species on all observed columns; 60% of rows have NA bedrock depth
-            bed_lk <- ifelse(seq_len(n_lk) %% 5 %in% c(1, 2), ifelse(sp_lk == "Packera dubia", 35.0, 140.0), NA_real_)
-            # Make observed rows overlap completely except 2 rows so species-median imputation WOULD leak 100% of NA rows!
-            bed_lk <- rep(NA_real_, n_lk)
-            bed_lk[c(1, 2, 3)] <- c(30.0, 32.0, 34.0)      # only 3 observed in sp1
-            bed_lk[c(21, 22, 23)] <- c(150.0, 155.0, 160.0) # only 3 observed in sp2
-            df_lk <- data.frame(
+            # 3. Zero target-label leakage on trans-border NA soil values (<50% sparse pruning + >=50% fold-median non-leakage)
+            set.seed(101)
+            n_lk <- 80
+            sp_lk <- rep(c("Packera dubia", "Packera paupercula"), each = 40)
+            lat_lk <- rep(seq(36.0, 47.0, length.out = 40), 2) + rnorm(n_lk, 0, 0.05)
+            lon_lk <- rep(seq(-84.0, -76.0, length.out = 40), 2) + rnorm(n_lk, 0, 0.05)
+            # 3a. Sparse (<50% finite) CONUS-only predictor (6/80 = 7.5% finite) must be pruned rather than median-spiked
+            bed_sparse <- rep(NA_real_, n_lk)
+            bed_sparse[c(1, 2, 3)] <- c(30.0, 32.0, 34.0)
+            bed_sparse[c(41, 42, 43)] <- c(150.0, 155.0, 160.0)
+            df_lk_sparse <- data.frame(
               catalogNumber = paste0("LK_", seq_len(n_lk)),
               species_standardized = sp_lk,
               analysis_group = sp_lk,
@@ -1289,12 +1293,24 @@ class TestMultimodalSpatialRF(unittest.TestCase):
               longitude = lon_lk,
               bio1_temp_mean = rnorm(n_lk, 11.0, 1.0),
               bio12_precip_annual = rnorm(n_lk, 1050.0, 40.0),
-              fine_bedrock_depth_cm = bed_lk,
+              fine_bedrock_depth_cm = bed_sparse,
               stringsAsFactors = FALSE
             )
-            rf_noleak <- compute_spatial_rf_mems(df_lk, c("bio1_temp_mean", "bio12_precip_annual", "fine_bedrock_depth_cm"), n_trees = 100)
-            # Without target-label NA leakage, 34/40 rows share identical training-median bedrock depth and pure-noise climate -> accuracy must NOT hit >0.82!
-            stopifnot(rf_noleak$Spatial_Block_CV_Accuracy < 0.80)
+            rf_noleak <- compute_spatial_rf_mems(df_lk_sparse, c("bio1_temp_mean", "bio12_precip_annual", "fine_bedrock_depth_cm"), n_trees = 100)
+            stopifnot(!("fine_bedrock_depth_cm" %in% rf_noleak$importance$Predictor))
+            stopifnot(rf_noleak$Spatial_Block_CV_Accuracy < 0.72)
+
+            # 3b. Retained predictor (44/80 = 55% finite, 45% NA) with bimodal symmetric overlap (Bayes ceiling = 52.5%):
+            # Leaky species-median imputation would assign 39.0 to all sp1 NAs and 161.0 to all sp2 NAs (>75% acc);
+            # taxon-blind fold-median imputation keeps accuracy near 50% (< 0.72)!
+            bed_55 <- rep(NA_real_, n_lk)
+            bed_55[1:22] <- c(rep(39.0, 12), rep(160.0, 10))
+            bed_55[41:62] <- c(rep(40.0, 10), rep(161.0, 12))
+            df_lk_55 <- df_lk_sparse
+            df_lk_55$fine_bedrock_depth_cm <- bed_55
+            rf_noleak_55 <- compute_spatial_rf_mems(df_lk_55, c("bio1_temp_mean", "bio12_precip_annual", "fine_bedrock_depth_cm"), n_trees = 100)
+            stopifnot("fine_bedrock_depth_cm" %in% rf_noleak_55$importance$Predictor)
+            stopifnot(rf_noleak_55$Spatial_Block_CV_Accuracy < 0.72)
 
             # 4. Tier_3_Bronze & is_confident_label_noise zero-influence invariance
             df_clean <- data.frame(
@@ -1383,7 +1399,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             """
             r_file = Path(tmp_d) / "test_step05_zero_trust.R"
             r_file.write_text(r_code, encoding="utf-8")
-            res = subprocess.run(["Rscript", str(r_file)], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+            res = subprocess.run(["Rscript", str(r_file)], cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
             self.assertEqual(res.returncode, 0, f"Step 05 zero-trust suite failed:\n{res.stderr}\n{res.stdout}")
             self.assertIn("STEP05_ZERO_TRUST_SUITE_OK", res.stdout)
 

@@ -354,6 +354,47 @@ is_canonical_prod_path <- function(p) {
   startsWith(norm_p, paste0(repo_data, "/")) || startsWith(norm_p, paste0(repo_outputs, "/"))
 }
 
+.bind_rows_schema_safe <- function(df1, df2) {
+  if (is.null(df1) || nrow(df1) == 0L) return(df2)
+  if (is.null(df2) || nrow(df2) == 0L) return(df1)
+  log_cols <- if (exists("PACKERA_DB_LOGICAL_COLS", inherits = TRUE)) get("PACKERA_DB_LOGICAL_COLS", inherits = TRUE) else character(0)
+  shared <- intersect(names(df1), names(df2))
+  .to_bool <- function(x) {
+    if (is.logical(x)) return(x)
+    if (is.numeric(x) || is.integer(x)) return(ifelse(is.na(x), NA, x != 0))
+    xu <- toupper(trimws(as.character(x)))
+    ifelse(is.na(x) | !nzchar(xu) | xu == "NA", NA, xu %in% c("TRUE", "T", "1", "YES"))
+  }
+  for (cn in shared) {
+    v1 <- df1[[cn]]
+    v2 <- df2[[cn]]
+    if (identical(typeof(v1), typeof(v2)) && identical(class(v1), class(v2))) next
+    if (cn %in% log_cols) {
+      df1[[cn]] <- .to_bool(v1)
+      df2[[cn]] <- .to_bool(v2)
+    } else if (is.logical(v1) && all(is.na(v1)) && !is.logical(v2)) {
+      if (is.character(v2) || is.factor(v2)) df1[[cn]] <- rep(NA_character_, nrow(df1))
+      else if (is.integer(v2)) df1[[cn]] <- rep(NA_integer_, nrow(df1))
+      else if (is.numeric(v2)) df1[[cn]] <- rep(NA_real_, nrow(df1))
+    } else if (is.logical(v2) && all(is.na(v2)) && !is.logical(v1)) {
+      if (is.character(v1) || is.factor(v1)) df2[[cn]] <- rep(NA_character_, nrow(df2))
+      else if (is.integer(v1)) df2[[cn]] <- rep(NA_integer_, nrow(df2))
+      else if (is.numeric(v1)) df2[[cn]] <- rep(NA_real_, nrow(df2))
+    } else if (is.logical(v1) && (is.numeric(v2) || is.integer(v2)) && all(is.na(v2) | v2 %in% c(0, 1))) {
+      df2[[cn]] <- .to_bool(v2)
+    } else if (is.logical(v2) && (is.numeric(v1) || is.integer(v1)) && all(is.na(v1) | v1 %in% c(0, 1))) {
+      df1[[cn]] <- .to_bool(v1)
+    } else if ((is.numeric(v1) || is.integer(v1)) && (is.numeric(v2) || is.integer(v2)) && !is.factor(v1) && !is.factor(v2)) {
+      df1[[cn]] <- suppressWarnings(as.numeric(v1))
+      df2[[cn]] <- suppressWarnings(as.numeric(v2))
+    } else {
+      df1[[cn]] <- as.character(v1)
+      df2[[cn]] <- as.character(v2)
+    }
+  }
+  dplyr::bind_rows(df1, df2)
+}
+
 write_csv_atomic <- function(df, target_path, demo = FALSE) {
   if (isTRUE(demo) && is_canonical_prod_path(target_path)) {
     message(sprintf("[DEMO MODE] Skipping write of synthetic records to canonical production table: %s", target_path))
@@ -508,10 +549,15 @@ VALID_TOPO_PREDICTORS <- c(
   "topo_twi_30m"
 )
 
-discover_candidate_eco_predictors <- function(df, include_pheno = FALSE, min_finite = 3L) {
+discover_candidate_eco_predictors <- function(df, include_pheno = FALSE, min_finite = 3L, min_coverage_frac = 0.50) {
   if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(character(0))
   nms <- names(df)
-  min_obs <- min(as.integer(min_finite), max(2L, nrow(df)))
+  min_obs_strict <- if (nrow(df) >= 8L) {
+    max(min(as.integer(min_finite), max(2L, nrow(df))), as.integer(ceiling(min_coverage_frac * nrow(df))))
+  } else {
+    min(as.integer(min_finite), max(2L, nrow(df)))
+  }
+  min_obs_use <- min_obs_strict
 
   has_finite_col <- function(col_nm) {
     if (!(col_nm %in% nms)) return(FALSE)
@@ -519,7 +565,7 @@ discover_candidate_eco_predictors <- function(df, include_pheno = FALSE, min_fin
     if (!(is.numeric(raw_col) || is.integer(raw_col) || is.logical(raw_col))) return(FALSE)
     v <- suppressWarnings(as.numeric(raw_col))
     fin <- is.finite(v)
-    sum(fin) >= min_obs && is.finite(stats::sd(v[fin])) && stats::sd(v[fin]) > 1e-8
+    sum(fin) >= min_obs_use && is.finite(stats::sd(v[fin])) && stats::sd(v[fin]) > 1e-8
   }
 
   # Block A1: 6 harmonized cross-border 0-15 cm rhizosphere edaphic predictors
@@ -567,7 +613,11 @@ discover_candidate_eco_predictors <- function(df, include_pheno = FALSE, min_fin
   # Phenology is an organismal reproductive trait, excluded from X_env by default (include_pheno = FALSE)
   pheno_cols <- if (isTRUE(include_pheno) && has_finite_col("delta_doy")) "delta_doy" else character(0)
 
-  unique(c(edaph_cols, topo_cols, wc_cols, pheno_cols))
+  cand_out <- unique(c(edaph_cols, topo_cols, wc_cols, pheno_cols))
+  if (length(cand_out) == 0L && min_coverage_frac > 0.0) {
+    return(discover_candidate_eco_predictors(df, include_pheno = include_pheno, min_finite = min_finite, min_coverage_frac = 0.0))
+  }
+  cand_out
 }
 
 crop_and_compress_na_rasters <- function(rast_obj = NULL, env_dir = NULL, na_bbox = c(-130.0, -50.0, 14.0, 66.0)) {
@@ -1744,7 +1794,8 @@ execute_crossmodal_consensus <- function(
   anchor_df <- df[is_anchor, , drop = FALSE]
   if (nrow(anchor_df) == 0L) anchor_df <- df[grp_vec %in% active_taxa, , drop = FALSE]
 
-  cand_eco <- discover_candidate_eco_predictors(df, include_pheno = FALSE, min_finite = 3L)
+  disc_ref_df <- if (nrow(anchor_df) >= 3L) anchor_df else df
+  cand_eco <- discover_candidate_eco_predictors(disc_ref_df, include_pheno = FALSE, min_finite = 3L)
   eco_cols <- if (!is.null(primary_env_vars) && length(intersect(primary_env_vars, cand_eco)) > 0L) {
     intersect(as.character(primary_env_vars), cand_eco)
   } else {
@@ -1755,8 +1806,12 @@ execute_crossmodal_consensus <- function(
     eco_cols <- fallback_c[vapply(fallback_c, function(cl) any(is.finite(suppressWarnings(as.numeric(df[[cl]])))), logical(1))]
   }
   min_sd_map <- stats::setNames(vapply(eco_cols, function(cl) {
-    v <- suppressWarnings(as.numeric(df[[cl]]))
-    vf <- v[is.finite(v)]
+    v_anc <- suppressWarnings(as.numeric(anchor_df[[cl]]))
+    vf <- v_anc[is.finite(v_anc)]
+    if (length(vf) < 2L) {
+      v_all <- suppressWarnings(as.numeric(df[[cl]]))
+      vf <- v_all[is.finite(v_all)]
+    }
     if (length(vf) < 2L) return(1e-3)
     disp_g <- max(c(stats::sd(vf), stats::IQR(vf) / 1.349), na.rm = TRUE)
     if (!is.finite(disp_g) || disp_g <= 1e-8) 1e-3 else max(0.15 * disp_g, 1e-4)
@@ -2323,6 +2378,9 @@ assign_spatial_grid_blocks <- function(coords, block_deg = 0.50, k = 5L) {
 
 compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_mode = FALSE, vif_res = NULL, env_dir = NULL, demo = FALSE) {
   message("Generating Moran's Eigenvector Maps (MEM1..MEM5) & fitting Authority-Anchored Spatial Random Forests...")
+  .old_seed_srf <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) get(".Random.seed", envir = .GlobalEnv) else NULL
+  set.seed(42L)
+  on.exit({ if (!is.null(.old_seed_srf)) assign(".Random.seed", .old_seed_srf, envir = .GlobalEnv) }, add = TRUE)
   if (!("analysis_group" %in% names(df)) || all(is.na(df$analysis_group) | !nzchar(trimws(as.character(df$analysis_group))))) {
     df <- resolve_analysis_group(df, intraspecific_mode = intraspecific_mode)
   }
@@ -2451,6 +2509,28 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     out_M
   }
 
+  # Prune predictors with < 50% finite anchor coverage (e.g. CONUS-only soil/bedrock layers on trans-border cohorts)
+  # so median imputation never fabricates a majority point-mass spike encoding geographic coverage boundaries
+  if (ncol(X_env_raw) > 1L && length(anchor_idx) >= 8L) {
+    min_fin_anc <- max(3L, as.integer(ceiling(0.50 * length(anchor_idx))))
+    fin_ok_cols <- colnames(X_env_raw)[vapply(seq_len(ncol(X_env_raw)), function(jj) {
+      vj <- X_env_raw[anchor_idx, jj]
+      fj <- is.finite(vj)
+      sum(fj) >= min_fin_anc && is.finite(stats::sd(vj[fj])) && stats::sd(vj[fj]) > 1e-8
+    }, logical(1))]
+    if (length(fin_ok_cols) >= 1L && length(fin_ok_cols) < ncol(X_env_raw)) {
+      dropped_sparse <- setdiff(colnames(X_env_raw), fin_ok_cols)
+      message(sprintf("[Predictor Coverage Gate] Dropped %d sparse predictor(s) with <50%% finite anchor coverage: %s",
+                      length(dropped_sparse), paste(dropped_sparse, collapse = ", ")))
+      env_vars <- fin_ok_cols
+      X_env_raw <- X_env_raw[, env_vars, drop = FALSE]
+      if (!is.null(vif_res) && is.list(vif_res)) {
+        if (!is.null(vif_res$kept_vars)) vif_res$kept_vars <- intersect(vif_res$kept_vars, env_vars)
+        if (!is.null(vif_res$selected_variables)) vif_res$selected_variables <- intersect(vif_res$selected_variables, env_vars)
+      }
+    }
+  }
+
   anc_grp_for_vif <- resolve_active_anchor_groups(df, intraspecific_mode = intraspecific_mode)
   col_screen <- if (!is.null(vif_res) && is.list(vif_res) && (!is.null(vif_res$kept_vars) || !is.null(vif_res$selected_variables))) {
     vif_res
@@ -2551,8 +2631,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     suit_all[!is.finite(suit_all)] <- 0.75
     full_prob_mat <- matrix(round(suit_all, 4), nrow = n, ncol = 1L, dimnames = list(NULL, single_tx))
     full_preds <- rep(single_tx, n)
-    full_block_id <- rep(NA_integer_, n)
-    full_block_id[anchor_idx] <- as.integer(fold_pb[seq_along(anchor_idx)])
+    full_block_id <- rep(NA_character_, n)
+    full_block_id[anchor_idx] <- as.character(fold_pb[seq_along(anchor_idx)])
     rf_pred_source <- ifelse(!elig_coord, "Passive_Projection_High_Uncertainty",
                       ifelse(seq_len(n) %in% anchor_idx, "Spatial_Block_OOF_Anchor", "Passive_Projection_Bronze"))
 
@@ -2659,12 +2739,12 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
       sb <- tryCatch(
         suppressMessages(suppressWarnings(
           blockCV::cv_spatial(x = pts_sf, column = "y", size = autocorr_info$range_m, k = 5, selection = "random",
-                              iteration = 10, progress = FALSE, report = FALSE, plot = FALSE)
+                              iteration = 10, extend = 0.5, seed = 42L, progress = FALSE, report = FALSE, plot = FALSE)
         )),
         error = function(e) {
           suppressMessages(suppressWarnings(
             blockCV::cv_spatial(x = pts_sf, column = "y", k = 5, selection = "random",
-                                iteration = 10, progress = FALSE, report = FALSE, plot = FALSE)
+                                iteration = 10, extend = 0.5, seed = 42L, progress = FALSE, report = FALSE, plot = FALSE)
           ))
         }
       )
@@ -2687,11 +2767,13 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     if (length(tr_sub) >= 4 && length(te_sub) >= 1 && length(unique(y_anchor[tr_sub])) >= 2) {
       X_tr_f <- .impute_by_train_medians(X_env_raw_anc[tr_sub, , drop = FALSE], X_env_raw_anc[tr_sub, , drop = FALSE])
       X_te_f <- .impute_by_train_medians(X_env_raw_anc[te_sub, , drop = FALSE], X_env_raw_anc[tr_sub, , drop = FALSE])
+      wts_tr_f <- auth_wts[anchor_idx[tr_sub]] * spatial_balance_weight[anchor_idx[tr_sub]] * compute_inverse_class_frequency_weights(droplevels(y_anchor[tr_sub]))
+      wts_tr_f <- pmin(4.0, pmax(0.25, wts_tr_f / max(mean(wts_tr_f, na.rm = TRUE), 1e-8)))
       if (requireNamespace("ranger", quietly = TRUE)) {
         tr_df <- data.frame(y = droplevels(y_anchor[tr_sub]), as.data.frame(X_tr_f), check.names = FALSE)
         te_df <- as.data.frame(X_te_f)
         fit_cv <- ranger::ranger(y ~ ., data = tr_df, num.trees = max(100, floor(n_trees / 2)),
-                                 probability = TRUE, case.weights = wts_anc[tr_sub], num.threads = rf_threads, seed = 42 + as.integer(f_id))
+                                 probability = TRUE, case.weights = wts_tr_f, num.threads = rf_threads, seed = 42 + as.integer(f_id))
         pr_mat <- stats::predict(fit_cv, data = te_df, num.threads = rf_threads)$predictions
         if (!is.matrix(pr_mat)) pr_mat <- matrix(pr_mat, nrow = length(te_sub), dimnames = list(NULL, names(pr_mat)))
         for (cl_nm in intersect(colnames(pr_mat), cls_levels)) {
@@ -2736,8 +2818,8 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   full_prob_mat[anchor_idx, ] <- oof_prob_mat
   full_preds <- rep(NA_character_, n)
   full_preds[anchor_idx] <- oof_preds_anc
-  full_block_id <- rep(NA_integer_, n)
-  full_block_id[anchor_idx] <- as.integer(fold_ids_anc)
+  full_block_id <- rep(NA_character_, n)
+  full_block_id[anchor_idx] <- as.character(fold_ids_anc)
 
   if (length(passive_idx) > 0) {
     if (requireNamespace("ranger", quietly = TRUE)) {
@@ -3586,7 +3668,7 @@ left_join_by_voucher_individual <- function(base_df, mod_df, keep_cols) {
     if (nrow(mod_nz) > 0L) {
       keep_b <- !(base_df$catalogNumber %in% unique(mod_nz$catalogNumber))
       exp_b <- dplyr::left_join(base_df[!keep_b, setdiff(names(base_df), "plant_individual_id"), drop = FALSE], mod_nz, by = "catalogNumber")
-      base_df <- dplyr::bind_rows(base_df[keep_b, , drop = FALSE], exp_b[, names(base_df), drop = FALSE])
+      base_df <- .bind_rows_schema_safe(base_df[keep_b, , drop = FALSE], exp_b[, names(base_df), drop = FALSE])
     }
 
     join_sub <- mod_sub[, unique(c("catalogNumber", "plant_individual_id", add_cols)), drop = FALSE]
@@ -3914,6 +3996,7 @@ main <- function() {
       } else rep(vouchers_df$analysis_group[1L], nrow(non_geo_df))
     } else non_geo_df$species_standardized
     non_geo_df$rf_prediction_source <- "Passive_Ungeoreferenced"
+    non_geo_df$spatial_block_id <- NA_character_
     non_geo_df$high_coord_uncertainty_flag <- TRUE
     non_geo_df$is_training_eligible_coord <- FALSE
     non_geo_df$is_clim_eligible_coord <- FALSE
@@ -3928,7 +4011,7 @@ main <- function() {
       primary_edaph_vars = primary_edaph_vars,
       rf_var_weights = rf_var_weights
     )
-    vouchers_df <- dplyr::bind_rows(geo_vouchers_df, non_geo_df)
+    vouchers_df <- .bind_rows_schema_safe(geo_vouchers_df, non_geo_df)
   }
 
   # Stage 5: Export Conflict Flags, Summary Report & Figures (Atomic write-then-replace)

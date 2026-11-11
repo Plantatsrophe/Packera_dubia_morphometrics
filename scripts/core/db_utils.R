@@ -531,7 +531,10 @@ connect_packera_db <- function(
 
 disconnect_packera_db <- function(conn) {
   if (!is.null(conn)) {
-    tryCatch(DBI::dbDisconnect(conn), error = function(e) NULL)
+    is_val <- tryCatch(DBI::dbIsValid(conn), error = function(e) FALSE)
+    if (isTRUE(is_val)) {
+      tryCatch(suppressWarnings(DBI::dbDisconnect(conn)), error = function(e) NULL)
+    }
   }
   invisible(NULL)
 }

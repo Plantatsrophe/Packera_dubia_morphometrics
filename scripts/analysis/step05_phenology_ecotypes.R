@@ -68,11 +68,23 @@ compute_circular_mean_doy <- function(doy_vec) {
 
 circular_signed_doy_offset <- function(doy_vec, center_doy) {
   v <- suppressWarnings(as.numeric(doy_vec))
-  if (is.null(center_doy) || length(center_doy) == 0L || !is.finite(center_doy[1])) {
+  if (length(v) == 0L) return(numeric(0))
+  c_v <- suppressWarnings(as.numeric(center_doy))
+  if (length(c_v) == 0L || all(!is.finite(c_v))) {
     return(rep(NA_real_, length(v)))
   }
-  d_theta <- 2.0 * pi * ((v - as.numeric(center_doy[1])) / 365.25)
-  atan2(sin(d_theta), cos(d_theta)) * 365.25 / (2.0 * pi)
+  if (length(c_v) == 1L) {
+    c_v <- rep(c_v, length(v))
+  } else if (length(c_v) != length(v)) {
+    stop(sprintf("circular_signed_doy_offset length mismatch: %d vs %d", length(v), length(c_v)))
+  }
+  out <- rep(NA_real_, length(v))
+  ok <- is.finite(v) & is.finite(c_v)
+  if (any(ok)) {
+    d_theta <- 2.0 * pi * ((v[ok] - c_v[ok]) / 365.25)
+    out[ok] <- atan2(sin(d_theta), cos(d_theta)) * 365.25 / (2.0 * pi)
+  }
+  out
 }
 
 wrap_doy_365 <- function(doy_vec) {
@@ -131,10 +143,44 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
   valid$doy_offset <- circular_signed_doy_offset(valid$doy, ref_circ_doy)
   valid$doy_unwrapped <- ref_circ_doy + valid$doy_offset
 
-  if (nrow(valid) >= 10L) {
-    p1 <- as.numeric(stats::quantile(valid$doy_offset, 0.01, na.rm = TRUE))
-    p99 <- as.numeric(stats::quantile(valid$doy_offset, 0.99, na.rm = TRUE))
-    valid_trimmed <- valid[valid$doy_offset >= p1 & valid$doy_offset <= p99, , drop = FALSE]
+  # Multivariate Hopkins (1918) + herbarium secular spring-advancement (Davis et al. 2015) baseline:
+  # Standardize physical elevation (+4.0 d per 400 ft = +4.0 / 121.92 m = +0.0328084 d/m; Hopkins 1918)
+  # and longitude (+0.8 d / deg E = -4 d per 5 deg W) BEFORE outlier trimming and latitudinal regression
+  # so high-elevation montane sheets neither get trimmed as raw DOY outliers nor bias the latitudinal slope.
+  lon_full <- if ("decimalLongitude" %in% names(valid)) {
+    suppressWarnings(as.numeric(valid$decimalLongitude))
+  } else if ("longitude" %in% names(valid)) {
+    suppressWarnings(as.numeric(valid$longitude))
+  } else {
+    rep(NA_real_, nrow(valid))
+  }
+  elev_col_nm <- intersect(c("elevation_m", "elevation", "minimumElevationInMeters"), names(valid))
+  elev_full <- if (length(elev_col_nm) > 0L) {
+    suppressWarnings(as.numeric(valid[[elev_col_nm[1L]]]))
+  } else {
+    rep(NA_real_, nrow(valid))
+  }
+
+  b_elev <- 0.0; ref_elev <- 0.0; b_lon <- 0.0; ref_lon <- 0.0; b_year <- 0.0; ref_year <- 1990.0; b_mat <- 0.0; ref_mat <- 0.0
+  has_elev <- sum(is.finite(elev_full)) >= 5L && stats::sd(elev_full, na.rm = TRUE) > 5.0
+  if (has_elev) {
+    ref_elev <- stats::median(elev_full, na.rm = TRUE)
+    b_elev <- 4.0 / 121.92 # Hopkins' Bioclimatic Law (1918): +4.0 days per +400 ft (+121.92 m) = +0.0328084 d/m
+  }
+  if (sum(is.finite(lon_full)) >= 10L && stats::sd(lon_full, na.rm = TRUE) > 0.5) {
+    ref_lon <- stats::median(lon_full, na.rm = TRUE)
+    b_lon <- 0.80 # Hopkins' Bioclimatic Law: +4.0 days per 5 deg eastward (+0.80 d / deg lon)
+  }
+
+  valid$lon_adj_hop <- ifelse(is.finite(lon_full) & b_lon != 0.0, b_lon * (lon_full - ref_lon), 0.0)
+  valid$elev_adj_hop <- ifelse(is.finite(elev_full) & b_elev != 0.0, b_elev * (elev_full - ref_elev), 0.0)
+  valid$doy_hop_std <- valid$doy_unwrapped - valid$lon_adj_hop - valid$elev_adj_hop
+  valid$doy_hop_offset <- valid$doy_hop_std - stats::median(valid$doy_hop_std, na.rm = TRUE)
+
+  if (nrow(valid) >= 30L) {
+    p1 <- as.numeric(stats::quantile(valid$doy_hop_offset, 0.01, na.rm = TRUE))
+    p99 <- as.numeric(stats::quantile(valid$doy_hop_offset, 0.99, na.rm = TRUE))
+    valid_trimmed <- valid[valid$doy_hop_offset >= p1 & valid$doy_hop_offset <= p99, , drop = FALSE]
     if (nrow(valid_trimmed) < 3L) valid_trimmed <- valid
   } else {
     valid_trimmed <- valid
@@ -149,7 +195,8 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
     hopkins_expected <- pred_min_lat + 4.0 * (valid_trimmed$decimalLatitude - min_lat)
     return(list(
       intercept = b0, slope = b_lat,
-      b_elev = 0.0, ref_elev = 0.0, b_mat = 0.0, ref_mat = 0.0,
+      b_lon = b_lon, ref_lon = ref_lon, b_year = 0.0, ref_year = ref_year,
+      b_elev = b_elev, ref_elev = ref_elev, b_mat = 0.0, ref_mat = 0.0,
       min_lat = min_lat, pred_min_lat = pred_min_lat,
       circ_mean_doy = ref_circ_doy,
       hopkins_expected = hopkins_expected, r_squared = 0.0, p_value = NA_real_,
@@ -159,11 +206,11 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
 
   fit <- if (requireNamespace("MASS", quietly = TRUE)) {
     tryCatch(
-      MASS::rlm(doy_unwrapped ~ decimalLatitude, data = valid_trimmed),
-      error = function(e) stats::lm(doy_unwrapped ~ decimalLatitude, data = valid_trimmed)
+      MASS::rlm(doy_hop_std ~ decimalLatitude, data = valid_trimmed),
+      error = function(e) stats::lm(doy_hop_std ~ decimalLatitude, data = valid_trimmed)
     )
   } else {
-    stats::lm(doy_unwrapped ~ decimalLatitude, data = valid_trimmed)
+    stats::lm(doy_hop_std ~ decimalLatitude, data = valid_trimmed)
   }
   coefs <- stats::coef(fit)
   b0 <- as.numeric(coefs[1])
@@ -173,23 +220,6 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
   hopkins_expected <- pred_min_lat + 4.0 * (decimalLatitude - min_lat)
   valid_trimmed$hopkins_expected <- hopkins_expected
 
-  # Multivariate Hopkins (1918) + herbarium secular spring-advancement (Davis et al. 2015) baseline:
-  # Controls jointly for latitude (+4.0 d / deg N), longitude (+0.8 d / deg E = -4 d per 5 deg W),
-  # elevation (+4.0 d per 400 ft = +4.0 / 121.92 m = +0.0328084 d/m = +3.28 d / 100 m; Hopkins 1918),
-  # and collection year without double-subtracting collinear MAT (bio1_temp_mean) when elevation exists.
-  lon_col <- if ("decimalLongitude" %in% names(valid_trimmed)) {
-    suppressWarnings(as.numeric(valid_trimmed$decimalLongitude))
-  } else if ("longitude" %in% names(valid_trimmed)) {
-    suppressWarnings(as.numeric(valid_trimmed$longitude))
-  } else {
-    rep(NA_real_, nrow(valid_trimmed))
-  }
-  elev_col_nm <- intersect(c("elevation_m", "elevation", "minimumElevationInMeters"), names(valid_trimmed))
-  elev_col <- if (length(elev_col_nm) > 0L) {
-    suppressWarnings(as.numeric(valid_trimmed[[elev_col_nm[1L]]]))
-  } else {
-    rep(NA_real_, nrow(valid_trimmed))
-  }
   yr_col <- if ("year" %in% names(valid_trimmed)) suppressWarnings(as.numeric(valid_trimmed$year)) else rep(NA_real_, nrow(valid_trimmed))
   yr_col[!is.finite(yr_col) | yr_col < 1750 | yr_col > 2100] <- NA_real_
   mat_col <- if ("bio1_temp_mean" %in% names(valid_trimmed)) {
@@ -198,23 +228,9 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
     rep(NA_real_, nrow(valid_trimmed))
   }
 
-  b_elev <- 0.0; ref_elev <- 0.0; b_lon <- 0.0; ref_lon <- 0.0; b_year <- 0.0; ref_year <- 1990.0; b_mat <- 0.0; ref_mat <- 0.0
-  has_elev <- sum(is.finite(elev_col)) >= 5L && stats::sd(elev_col, na.rm = TRUE) > 5.0
-  if (has_elev) {
-    ref_elev <- stats::median(elev_col, na.rm = TRUE)
-    b_elev <- 4.0 / 121.92 # Hopkins' Bioclimatic Law (1918): +4.0 days per +400 ft (+121.92 m) = +0.0328084 d/m
-  }
-  if (sum(is.finite(lon_col)) >= 10L && stats::sd(lon_col, na.rm = TRUE) > 0.5) {
-    ref_lon <- stats::median(lon_col, na.rm = TRUE)
-    b_lon <- 0.80 # Hopkins' Bioclimatic Law: +4.0 days per 5 deg eastward (+0.80 d / deg lon)
-  }
   if (sum(is.finite(yr_col)) >= 15L && stats::sd(yr_col, na.rm = TRUE) >= 10.0) {
     ref_year <- stats::median(yr_col, na.rm = TRUE)
-    resid_hop <- valid_trimmed$doy_unwrapped - (
-      (b0 + b_lat * decimalLatitude) +
-      ifelse(is.finite(lon_col), b_lon * (lon_col - ref_lon), 0.0) +
-      ifelse(is.finite(elev_col), b_elev * (elev_col - ref_elev), 0.0)
-    )
+    resid_hop <- valid_trimmed$doy_hop_std - (b0 + b_lat * decimalLatitude)
     fit_yr <- tryCatch(stats::lm(resid_hop ~ yr_col), error = function(e) NULL)
     if (!is.null(fit_yr) && length(stats::coef(fit_yr)) >= 2L && is.finite(stats::coef(fit_yr)[2])) {
       b_year <- max(-0.25, min(0.10, as.numeric(stats::coef(fit_yr)[2])))
@@ -224,7 +240,7 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
   if (!has_elev && sum(is.finite(mat_col)) >= 10L && stats::sd(mat_col, na.rm = TRUE) > 0.5) {
     ref_mat <- stats::median(mat_col, na.rm = TRUE)
     fit_mat <- tryCatch(
-      stats::lm(I(doy_unwrapped - (b0 + b_lat * decimalLatitude)) ~ mat_col, data = valid_trimmed),
+      stats::lm(I(doy_hop_std - (b0 + b_lat * decimalLatitude)) ~ mat_col, data = valid_trimmed),
       error = function(e) NULL
     )
     if (!is.null(fit_mat) && length(stats::coef(fit_mat)) >= 2L && is.finite(stats::coef(fit_mat)[2])) {
@@ -232,7 +248,7 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
     }
   }
 
-  fit_ols <- stats::lm(doy_unwrapped ~ decimalLatitude, data = valid_trimmed)
+  fit_ols <- stats::lm(doy_hop_std ~ decimalLatitude, data = valid_trimmed)
   s_ols <- summary(fit_ols)
   r2 <- if (!is.null(s_ols$r.squared) && is.finite(s_ols$r.squared)) s_ols$r.squared else 0.0
   p_val <- if (nrow(s_ols$coefficients) >= 2L && ncol(s_ols$coefficients) >= 4L) s_ols$coefficients[2, 4] else NA_real_
@@ -1678,10 +1694,12 @@ compute_specimen_edaphic_z <- function(
     max(sqrt(max(wv, 0.0, na.rm = TRUE)), floor_sd, na.rm = TRUE)
   }
 
-  # Data-driven cohort dispersion floor per variable (15% of pooled SD/IQR across cohort, avoiding unit hardcoding)
+  # Data-driven cohort dispersion floor per variable strictly across active anchors (zero Bronze / label-noise leakage)
   scale_floors <- stats::setNames(vapply(all_z_vars, function(cl) {
-    v <- suppressWarnings(as.numeric(df[[cl]]))
-    vf <- v[is.finite(v)]
+    v_all <- suppressWarnings(as.numeric(df[[cl]]))
+    v_anc <- v_all[is_anchor]
+    vf <- v_anc[is.finite(v_anc)]
+    if (length(vf) < 2L) vf <- v_all[is.finite(v_all)]
     if (length(vf) < 2L) return(1e-3)
     sd_g <- stats::sd(vf)
     iqr_g <- stats::IQR(vf) / 1.349
