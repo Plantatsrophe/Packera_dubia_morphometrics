@@ -173,7 +173,16 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
   hopkins_expected <- pred_min_lat + 4.0 * (decimalLatitude - min_lat)
   valid_trimmed$hopkins_expected <- hopkins_expected
 
-  # Multivariate bioclimatic adjustment for latitude, elevation, and MAT (Hopkins 1918) when covariates are available
+  # Multivariate Hopkins (1918) + herbarium secular spring-advancement (Davis et al. 2015) baseline:
+  # Controls jointly for latitude, longitude (+0.8 d per deg E = -4 d per 5 deg W), elevation (+0.0125 d/m),
+  # and collection year without double-subtracting collinear MAT (bio1_temp_mean) when spatial covariates exist.
+  lon_col <- if ("decimalLongitude" %in% names(valid_trimmed)) {
+    suppressWarnings(as.numeric(valid_trimmed$decimalLongitude))
+  } else if ("longitude" %in% names(valid_trimmed)) {
+    suppressWarnings(as.numeric(valid_trimmed$longitude))
+  } else {
+    rep(NA_real_, nrow(valid_trimmed))
+  }
   elev_col <- if ("topo_elev_m" %in% names(valid_trimmed)) {
     suppressWarnings(as.numeric(valid_trimmed$topo_elev_m))
   } else if ("elevation" %in% names(valid_trimmed)) {
@@ -181,17 +190,38 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
   } else {
     rep(NA_real_, nrow(valid_trimmed))
   }
+  yr_col <- if ("year" %in% names(valid_trimmed)) suppressWarnings(as.numeric(valid_trimmed$year)) else rep(NA_real_, nrow(valid_trimmed))
+  yr_col[!is.finite(yr_col) | yr_col < 1750 | yr_col > 2100] <- NA_real_
   mat_col <- if ("bio1_temp_mean" %in% names(valid_trimmed)) {
     suppressWarnings(as.numeric(valid_trimmed$bio1_temp_mean))
   } else {
     rep(NA_real_, nrow(valid_trimmed))
   }
-  b_elev <- 0.0; ref_elev <- 0.0; b_mat <- 0.0; ref_mat <- 0.0
-  if (sum(is.finite(elev_col)) >= 10L && stats::sd(elev_col, na.rm = TRUE) > 5.0) {
+
+  b_elev <- 0.0; ref_elev <- 0.0; b_lon <- 0.0; ref_lon <- 0.0; b_year <- 0.0; ref_year <- 1990.0; b_mat <- 0.0; ref_mat <- 0.0
+  has_elev <- sum(is.finite(elev_col)) >= 10L && stats::sd(elev_col, na.rm = TRUE) > 5.0
+  if (has_elev) {
     ref_elev <- stats::median(elev_col, na.rm = TRUE)
     b_elev <- 0.0125 # Hopkins' Bioclimatic Law: +1.25 days per +100 m elevation (+0.0125 d/m)
   }
-  if (sum(is.finite(mat_col)) >= 10L && stats::sd(mat_col, na.rm = TRUE) > 0.5) {
+  if (sum(is.finite(lon_col)) >= 10L && stats::sd(lon_col, na.rm = TRUE) > 0.5) {
+    ref_lon <- stats::median(lon_col, na.rm = TRUE)
+    b_lon <- 0.80 # Hopkins' Bioclimatic Law: +4.0 days per 5 deg eastward (+0.80 d / deg lon)
+  }
+  if (sum(is.finite(yr_col)) >= 15L && stats::sd(yr_col, na.rm = TRUE) >= 10.0) {
+    ref_year <- stats::median(yr_col, na.rm = TRUE)
+    resid_hop <- valid_trimmed$doy_unwrapped - (
+      (b0 + b_lat * decimalLatitude) +
+      ifelse(is.finite(lon_col), b_lon * (lon_col - ref_lon), 0.0) +
+      ifelse(is.finite(elev_col), b_elev * (elev_col - ref_elev), 0.0)
+    )
+    fit_yr <- tryCatch(stats::lm(resid_hop ~ yr_col), error = function(e) NULL)
+    if (!is.null(fit_yr) && length(stats::coef(fit_yr)) >= 2L && is.finite(stats::coef(fit_yr)[2])) {
+      b_year <- max(-0.25, min(0.10, as.numeric(stats::coef(fit_yr)[2])))
+    }
+  }
+  # Only use bio1_temp_mean fallback when elevation is unavailable (prevents double-subtracting lapse rate!)
+  if (!has_elev && sum(is.finite(mat_col)) >= 10L && stats::sd(mat_col, na.rm = TRUE) > 0.5) {
     ref_mat <- stats::median(mat_col, na.rm = TRUE)
     fit_mat <- tryCatch(
       stats::lm(I(doy_unwrapped - (b0 + b_lat * decimalLatitude)) ~ mat_col, data = valid_trimmed),
@@ -207,10 +237,11 @@ model_latitudinal_spring_baseline <- function(flowering_df, circ_mean_doy = NULL
   r2 <- if (!is.null(s_ols$r.squared) && is.finite(s_ols$r.squared)) s_ols$r.squared else 0.0
   p_val <- if (nrow(s_ols$coefficients) >= 2L && ncol(s_ols$coefficients) >= 4L) s_ols$coefficients[2, 4] else NA_real_
 
-  message(sprintf("Empirical Baseline (Hopkins 1918): DOY = %.3f + %.3f * decimalLatitude (circ_mean = %.1f, b_elev = %.4f d/m, b_mat = %.3f d/C, R2 = %.4f, p = %.4e, N = %d)",
-                  b0, b_lat, ref_circ_doy, b_elev, b_mat, r2, p_val, nrow(valid_trimmed)))
+  message(sprintf("Empirical Baseline (Hopkins 1918 + Secular Year): DOY = %.3f + %.3f*Lat (circ_mean=%.1f, b_lon=%.2f d/deg, b_elev=%.4f d/m, b_year=%.4f d/yr, R2=%.4f, p=%.4e, N=%d)",
+                  b0, b_lat, ref_circ_doy, b_lon, b_elev, b_year, r2, p_val, nrow(valid_trimmed)))
   return(list(
     intercept = b0, slope = b_lat,
+    b_lon = b_lon, ref_lon = ref_lon, b_year = b_year, ref_year = ref_year,
     b_elev = b_elev, ref_elev = ref_elev, b_mat = b_mat, ref_mat = ref_mat,
     min_lat = min_lat, pred_min_lat = pred_min_lat,
     circ_mean_doy = ref_circ_doy,

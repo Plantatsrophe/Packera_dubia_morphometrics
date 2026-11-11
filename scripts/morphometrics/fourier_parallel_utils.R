@@ -117,7 +117,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
 
   has_out_col <- "is_contour_outlier" %in% names(closed_leaf_df)
   out_vec <- if (has_out_col) as.logical(closed_leaf_df$is_contour_outlier) else rep(FALSE, n_rows)
-  t1_vec <- as.character(closed_leaf_df$tier_assignment) == "Tier_1_Direct"
+  t1_vec <- rep(TRUE, n_rows)
   lz_vec <- if ("leaf_zone" %in% names(closed_leaf_df)) tolower(trimws(as.character(closed_leaf_df$leaf_zone))) else rep("basal", n_rows)
   lz_vec[is.na(lz_vec) | !(lz_vec %in% c("basal", "cauline"))] <- "basal"
 
@@ -169,7 +169,6 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   di_v <- pull_num("dissection_index")
   ar_v <- pull_num("aspect_ratio")
   circ_v <- pull_num("circularity")
-  ucs_v <- pull_num("ucs_score")
   area_v <- pull_num("area_px")
   svar_v <- pull_num("sym_var")
   avar_v <- pull_num("asym_var")
@@ -269,7 +268,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     list(
       h = h_out, nl = n_lv, fv = f_var, hi = h_idx, cs = cs_m,
       sol = sol_m, q25 = q25_m, di = di_m, df = dfrac_m,
-      ar = ar_m, circ = circ_m, ucs = ucs_m, area = area_m,
+      ar = ar_m, circ = circ_m, area = area_m,
       sv = sv_m, av = av_m, pa = pa_m, hr = hr_m, lq = lq_m,
       pet = pet_m, bld = bld_m, pbr = pbr_m, dis = dis_m, out = out_m
     )
@@ -290,7 +289,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
       h = do.call(rbind, lapply(c_list, `[[`, "h")),
       nl = pull_c("nl"), fv = pull_c("fv"), hi = pull_c("hi"), cs = pull_c("cs"),
       sol = pull_c("sol"), q25 = pull_c("q25"), di = pull_c("di"), df = pull_c("df"),
-      ar = pull_c("ar"), circ = pull_c("circ"), ucs = pull_c("ucs"), area = pull_c("area"),
+      ar = pull_c("ar"), circ = pull_c("circ"), area = pull_c("area"),
       sv = pull_c("sv"), av = pull_c("av"), pa = pull_c("pa"), hr = pull_c("hr"), lq = pull_c("lq"),
       pet = pull_c("pet"), bld = pull_c("bld"), pbr = pull_c("pbr"), dis = pull_c("dis"), out = pull_c("out")
     )
@@ -307,14 +306,9 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     catalogNumber = cat_col[first_idx],
     plant_individual_id = pid_col[first_idx],
     leaf_count = res$nl,
-    n_tier1_leaves = res$nl,
-    n_tier2_leaves = rep(0L, n_spec),
-    morph_tier_source = ifelse(is_caul_fb_vec, "Cauline_Only_Fallback", ifelse(res$nl >= 1L, "Tier_1_Pure", "Tier_2_Fallback")),
+    morph_tier_source = ifelse(is_caul_fb_vec, "Cauline_Only_Fallback", "Basal_Rosette"),
     foliar_variance = res$fv,
     heteroblasty_index = res$hi,
-    assigned_tier = rep("Tier_1_Direct", n_spec),
-    tier_assignment = rep("Tier_1_Direct", n_spec),
-    reconstruction_tier = rep("Tier 1", n_spec),
     scientificName = closed_leaf_df$scientificName[first_idx],
     species_raw = closed_leaf_df$species_raw[first_idx],
     determiner_tier = det_vec,
@@ -351,7 +345,6 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   spec_df$dissected_leaf_fraction <- res$df
   spec_df$aspect_ratio <- res$ar
   spec_df$circularity <- res$circ
-  spec_df$ucs_score <- res$ucs
   spec_df$area_px <- res$area
   spec_df$sym_var <- res$sv
   spec_df$asym_var <- res$av

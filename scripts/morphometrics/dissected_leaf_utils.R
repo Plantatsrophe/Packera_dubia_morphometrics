@@ -78,9 +78,7 @@ classify_and_partition_leaf_zones <- function(
   cy_s <- if ("cy_rel_sheet" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$cy_rel_sheet)) else rep(NA_real_, n)
   pbr <- if ("petiole_to_blade_ratio" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$petiole_to_blade_ratio)) else rep(NA_real_, n)
   area_px <- if ("area_px" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$area_px)) else rep(NA_real_, n)
-  ba_cm2 <- if ("blade_area_cm2" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$blade_area_cm2)) else rep(NA_real_, n)
-  min_ba <- if ("effective_min_blade_area_cm2" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$effective_min_blade_area_cm2)) else rep(NA_real_, n)
-  area_ok <- ifelse(is.finite(ba_cm2) & is.finite(min_ba) & min_ba > 0, ba_cm2 >= min_ba, TRUE)
+  area_ok <- rep(TRUE, n)
 
   leaf_zone <- raw_zone
   is_fallback_vec <- rep(FALSE, n)
@@ -545,7 +543,6 @@ summarize_otu_dissection_metrics <- function(grp_df) {
     dissected_leaf_fraction = dis_frac,
     aspect_ratio = med_num("aspect_ratio", 4L),
     circularity = med_num("circularity", 4L),
-    ucs_score = med_num("ucs_score", 4L),
     area_px = med_num("area_px", 1L),
     sym_var = med_num("sym_var", 6L),
     asym_var = med_num("asym_var", 6L),
@@ -825,9 +822,7 @@ compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = 
       if (length(r_idx) == 0L) next
       grp <- efa_df[r_idx, , drop = FALSE]
       keep_sub <- rep(TRUE, nrow(grp))
-      if ("tier_assignment" %in% names(grp) && any(grp$tier_assignment == "Tier_1_Direct", na.rm = TRUE)) {
-        keep_sub <- keep_sub & (grp$tier_assignment == "Tier_1_Direct")
-      }
+
       if ("is_contour_outlier" %in% names(grp) && any(!as.logical(grp$is_contour_outlier[keep_sub]), na.rm = TRUE)) {
         keep_sub <- keep_sub & !is.na(grp$is_contour_outlier) & !as.logical(grp$is_contour_outlier)
       }

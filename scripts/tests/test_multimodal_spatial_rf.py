@@ -374,8 +374,8 @@ class TestMultimodalSpatialRF(unittest.TestCase):
               morph_df <- data.frame(
                 catalogNumber = c("NCU_MULTI", "NCU_MULTI", "NCU_SINGLE"),
                 plant_individual_id = c(1L, 2L, 1L),
-                morph_tier_source = rep("Tier_1_Pure", 3),
-                n_tier1_leaves = c(3L, 2L, 4L),
+                morph_tier_source = rep("Basal_Rosette", 3),
+                basal_leaf_count = c(3L, 2L, 4L),
                 gmm_cluster = c(1L, 2L, 1L),
                 gmm_uncertainty = c(0.04, 0.18, 0.03),
                 cda_predicted_taxon = c("Packera aurea", "Packera obovata", "Packera obovata"),
@@ -693,9 +693,8 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 {
                     "catalogNumber": r["catalogNumber"],
                     "plant_individual_id": 1,
-                    "morph_tier_source": "Tier_1_Pure",
-                    "n_tier1_leaves": 3,
-                    "n_tier2_leaves": 0,
+                    "morph_tier_source": "Basal_Rosette",
+                    "basal_leaf_count": 3,
                     "cda_predicted_taxon": r["species_raw"],
                     "cda_posterior_prob": 0.92,
                     "can1": 1.1,

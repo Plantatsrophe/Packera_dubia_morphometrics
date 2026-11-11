@@ -18,6 +18,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 cd "${PROJECT_ROOT}"
 
 ORIG_ARGS=("$@")
@@ -702,8 +703,7 @@ else
     fi
   done
   mkdir -p \
-    "${RUN_DIR}/data/masks/tier1_intact" \
-    "${RUN_DIR}/data/masks/tier2_reflected" \
+    "${RUN_DIR}/data/masks" \
     "${RUN_DIR}/data/contours" \
     "${RUN_DIR}/data/cropped_patches/capitula"
 fi
@@ -837,6 +837,10 @@ start_step_val = int(sys.argv[19]) if len(sys.argv) > 19 and sys.argv[19].strip(
 usda_filter_arg = sys.argv[20].strip().lower() if len(sys.argv) > 20 else ''
 usda_buffer_arg = float(sys.argv[21]) if len(sys.argv) > 21 and sys.argv[21].strip() else 50.0
 usda_exempt_gold_arg = (sys.argv[22].strip().lower() != 'false') if len(sys.argv) > 22 and sys.argv[22].strip() else True
+
+for _cand_root in ([Path('${PROJECT_ROOT}').resolve(), root_data.parent, Path.cwd()]):
+    if (_cand_root / 'scripts').is_dir() and str(_cand_root) not in sys.path:
+        sys.path.insert(0, str(_cand_root))
 
 from scripts.core.harvester import (
     select_cascading_outgroup_anchors,
@@ -1332,7 +1336,6 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
   "${PYTHON_LM3}" scripts/pipeline/02_segment_and_extract.py \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --output-dir "${RUN_DIR}/data" \
-    --enable-geometric-qc \
     ${FORCE_FLAG} $([[ "${RESEGMENT}" == "true" ]] && echo "--force") \
     "${LIMIT_ARG[@]}" \
     "${COMPUTE_ARGS[@]}"
@@ -1340,8 +1343,7 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
   # Sync newly extracted masks, contours, cropped patches, and Step 02 manifests back to canonical root data/
   echo "[Step 02/07] Syncing newly extracted Step 02 assets back to canonical root data/ store..."
   mkdir -p \
-    "${PROJECT_ROOT}/data/masks/tier1_intact" \
-    "${PROJECT_ROOT}/data/masks/tier2_reflected" \
+    "${PROJECT_ROOT}/data/masks" \
     "${PROJECT_ROOT}/data/contours" \
     "${PROJECT_ROOT}/data/ect" \
     "${PROJECT_ROOT}/data/cropped_patches/capitula" \
@@ -1389,8 +1391,6 @@ if [[ "${START_STEP}" -le 3 ]]; then
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --output "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
     --output-individual "${RUN_DIR}/data/tables/leaf_efa_harmonics_individual.csv" \
-    --report-out "${RUN_DIR}/outputs/reports/tier_symmetry_validation.csv" \
-    --plot-out "${RUN_DIR}/outputs/figures/tier1_vs_tier2_density_overlay.pdf" \
     --figures-dir "${RUN_DIR}/outputs/figures"
 fi
 

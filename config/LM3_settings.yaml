@@ -1,0 +1,36 @@
+# Canonical LeafMachine3 Settings Snapshot (Bundled Fallback for Headless/Venv Runs)
+ingest:
+  max_working_dim: 3200
+  jpg_quality: 100
+
+modules:
+  plant_detector:
+    model_name: "lm3_plant_detector__yolo26x_det_1280"
+    conf_thres: 0.25
+    iou_thres: 0.55
+  archival_detector:
+    model_name: "lm3_archival_detector__yolo26x_det_1280"
+    conf_thres: 0.25
+  specimen_segmenter:
+    model_name: "lm3_specimen_segmenter__unetpp_effb7_1024_dinov3_vith16plus_2048_selftrain"
+    paperclean: true
+    llr_hyst_keep_blobs: true
+    max_working_dim: 3200
+  leaf_segmenter:
+    model_name: "lm3_leaf_segmenter__yolo26x_seg_1024"
+    retina_masks: true
+    conf_thres: 0.25
+  landmark_detector:
+    model_name: "lm3_landmark_detector__yolo26x_pose_640"
+    conf_thres: 0.25
+  ect:
+    num_dirs: 360
+    num_thresh: 32
+  momocs:
+    include_petiole: false
+    oriented: true
+    num_points: 120
+
+report:
+  masks:
+    subtract_holes: true

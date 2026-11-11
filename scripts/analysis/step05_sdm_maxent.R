@@ -809,18 +809,11 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   w_use[!is.finite(w_use) | w_use <= 0] <- 1.0
   n_pres <- sum(p_num == 1L)
 
-  # 1. Primary Engine: maxnet (Phillips et al. 2017) with lqh -> lq -> l cascade
-  if (requireNamespace("maxnet", quietly = TRUE) && n_pres >= 3L && ncol(X_mat) >= 1L) {
-    # Weight high-authority & Nomenclatural Type presences via importance replication
-    pres_idx <- which(p_num == 1L)
-    bg_idx <- which(p_num == 0L)
-    w_p <- w_use[pres_idx]
-    w_p_max <- max(w_p, 1e-6)
-    rep_p <- pmax(1L, pmin(3L, as.integer(round(1.0 + 1.5 * (w_p / w_p_max)))))
-    exp_pres <- rep(pres_idx, times = rep_p)
-    idx_mx <- c(exp_pres, bg_idx)
-    p_mx <- p_num[idx_mx]
-    X_mx <- X_mat[idx_mx, , drop = FALSE]
+  has_nonuniform_weights <- (length(w_use[p_num == 1L]) >= 2L) && (stats::sd(w_use[p_num == 1L], na.rm = TRUE) > 1e-4)
+  # 1. Primary Engine (uniform weights or when glmnet unavailable): maxnet (Phillips et al. 2017) WITHOUT row duplication
+  if (requireNamespace("maxnet", quietly = TRUE) && (!has_nonuniform_weights || !requireNamespace("glmnet", quietly = TRUE)) && n_pres >= 3L && ncol(X_mat) >= 1L) {
+    p_mx <- p_num
+    X_mx <- X_mat
     cls_cascade <- if (n_pres >= 15L) c("lqh", "lq", "l") else if (n_pres >= 8L) c("lq", "l") else c("l")
     for (cl_opt in cls_cascade) {
       mod_mx <- tryCatch({
@@ -922,12 +915,27 @@ compute_continuous_boyce_index <- function(suitability_all, suitability_pres, n_
   w_glm[p_num == 0L] <- w_glm[p_num == 0L] * (2.0 * sum_wp / sum_wb)
 
   if (requireNamespace("glmnet", quietly = TRUE) && ncol(Phi) >= 2L && n_pres >= 4L && sum(p_num == 0L) >= 4L) {
-    fit_gn <- tryCatch(
+    # Deterministic spatial/environmental block fold assignment for weighted IPP cross-validated regularization
+    n_folds_cv <- max(3L, min(5L, n_pres))
+    ord_env1 <- order(Phi[, 1L])
+    foldid_cv <- integer(nrow(Phi))
+    pres_ord <- ord_env1[p_num[ord_env1] == 1L]
+    bg_ord <- ord_env1[p_num[ord_env1] == 0L]
+    foldid_cv[pres_ord] <- rep_len(seq_len(n_folds_cv), length(pres_ord))
+    foldid_cv[bg_ord] <- rep_len(seq_len(n_folds_cv), length(bg_ord))
+    cv_gn <- tryCatch(
+      suppressWarnings(glmnet::cv.glmnet(
+        x = Phi, y = p_num, family = "binomial", weights = w_glm,
+        foldid = foldid_cv, alpha = 0.85, type.measure = "deviance"
+      )),
+      error = function(e) NULL
+    )
+    fit_gn <- if (!is.null(cv_gn) && !is.null(cv_gn$glmnet.fit)) cv_gn$glmnet.fit else tryCatch(
       suppressWarnings(glmnet::glmnet(x = Phi, y = p_num, family = "binomial", weights = w_glm, alpha = 0.85)),
       error = function(e) NULL
     )
     if (!is.null(fit_gn) && length(fit_gn$lambda) > 0L) {
-      s_use <- fit_gn$lambda[max(1L, floor(0.65 * length(fit_gn$lambda)))]
+      s_use <- if (!is.null(cv_gn) && is.finite(cv_gn$lambda.1se)) cv_gn$lambda.1se else if (!is.null(cv_gn) && is.finite(cv_gn$lambda.min)) cv_gn$lambda.min else fit_gn$lambda[max(1L, floor(0.50 * length(fit_gn$lambda)))]
       eta_tr <- as.numeric(stats::predict(fit_gn, newx = Phi, s = s_use, type = "link"))
       # Calibrate entropy offset so median presence cloglog suitability = 1 - exp(-1) ~ 0.632 (Phillips et al. 2017)
       med_eta_p <- stats::median(eta_tr[p_num == 1L], na.rm = TRUE)

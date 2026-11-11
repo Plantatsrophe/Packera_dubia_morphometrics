@@ -7,7 +7,6 @@
 #   Empirical Bayes circular Hopkins phenology, 5-Stage Decision Matrix (Padial
 #   et al. 2010; Schlick-Steiner et al. 2010), and Leiden/Louvain + Ward.D2.
 # ==============================================================================
-
 suppressPackageStartupMessages({
   for (.pkg in c("optparse", "igraph", "cluster", "MASS")) if (requireNamespace(.pkg, quietly = TRUE)) library(.pkg, character.only = TRUE)
 })
@@ -20,7 +19,6 @@ for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(d
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
   if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
-
 # 1. CLI Argument Parser & Atomic Export Helpers
 parse_discovery_args <- function() {
   run_dir <- Sys.getenv("PACKERA_RUN_DIR", unset = "")
@@ -52,25 +50,21 @@ parse_discovery_args <- function() {
   }
   opts
 }
-
 atomic_write_csv <- function(df, path) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   tmp <- paste0(path, ".", Sys.getpid(), ".tmp"); utils::write.csv(df, file = tmp, row.names = FALSE)
   file.rename(tmp, path); invisible(path)
 }
-
 atomic_write_lines <- function(lines_vec, path) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   tmp <- paste0(path, ".", Sys.getpid(), ".tmp"); writeLines(as.character(lines_vec), con = tmp)
   file.rename(tmp, path); invisible(path)
 }
-
 std_taxon <- function(x) {
   if (exists("standardize_taxon_name", mode = "function")) { res <- standardize_taxon_name(x); return(ifelse(is.na(res), as.character(x), res)) }
   as.character(x)
 }
-
-# 2. Step A: Load & Filter Tier_1_Pure Gold/Silver Anchor Specimens
+# 2. Step A: Load & Filter Basal_Rosette Gold/Silver Anchor Specimens
 load_and_merge_inputs <- function(opts) {
   res <- load_step07_merged_inputs(opts, std_taxon)
   if (!is.null(opts$multimodal) && nzchar(opts$multimodal) && file.exists(opts$multimodal) && !is.null(res$morph_df) && nrow(res$morph_df) > 0L) {
@@ -93,15 +87,36 @@ load_and_merge_inputs <- function(opts) {
       res$morph_df <- m_df
     }
   }
+  # Hydrate canonical Step 06 curation_triage subtypes when Step 06 outputs exist (eliminates Step 06 vs Step 07 drift)
+  if (!is.null(res$morph_df) && nrow(res$morph_df) > 0L && !("taxonomic_treatment_subtype" %in% names(res$morph_df))) {
+    run_d <- Sys.getenv("PACKERA_RUN_DIR", unset = "")
+    tri_cands <- unique(c(
+      if (nzchar(run_d)) file.path(run_d, "outputs/reports/final_curation_triage.csv") else character(0),
+      if (nzchar(run_d)) file.path(run_d, "data/tables/triage_queue.csv") else character(0),
+      file.path(dirname(opts$morphometrics), "triage_queue.csv"),
+      "outputs/reports/final_curation_triage.csv",
+      "data/tables/triage_queue.csv"
+    ))
+    tri_hit <- tri_cands[file.exists(tri_cands) & file.info(tri_cands)$size > 0][1L]
+    if (!is.na(tri_hit) && nzchar(tri_hit)) {
+      tdf <- tryCatch(utils::read.csv(tri_hit, stringsAsFactors = FALSE, check.names = FALSE), error = function(e) NULL)
+      if (!is.null(tdf) && "catalogNumber" %in% names(tdf) && "taxonomic_treatment_subtype" %in% names(tdf)) {
+        t_pid <- if ("plant_individual_id" %in% names(tdf)) ifelse(is.na(tdf$plant_individual_id), 0L, suppressWarnings(as.integer(tdf$plant_individual_id))) else rep(0L, nrow(tdf))
+        m_pid <- if ("plant_individual_id" %in% names(res$morph_df)) ifelse(is.na(res$morph_df$plant_individual_id), 0L, suppressWarnings(as.integer(res$morph_df$plant_individual_id))) else rep(0L, nrow(res$morph_df))
+        idx_t <- match(paste0(res$morph_df$catalogNumber, "__", m_pid), paste0(tdf$catalogNumber, "__", t_pid))
+        s_tri <- names(which(table(tdf$catalogNumber) == 1L))
+        idx_t_fb <- ifelse(res$morph_df$catalogNumber %in% s_tri, match(res$morph_df$catalogNumber, tdf$catalogNumber), NA_integer_)
+        idx_t <- ifelse(!is.na(idx_t), idx_t, idx_t_fb)
+        res$morph_df$taxonomic_treatment_subtype <- as.character(tdf$taxonomic_treatment_subtype[idx_t])
+      }
+    }
+  }
   res
 }
-
 select_taxon_anchors <- function(morph_df) {
   is_t1_pure <- rep(TRUE, nrow(morph_df))
-  if ("n_tier1_leaves" %in% names(morph_df)) {
-    n_t1 <- suppressWarnings(as.numeric(morph_df$n_tier1_leaves)); if (any(!is.na(n_t1))) is_t1_pure <- !is.na(n_t1) & (n_t1 >= 1)
-  } else if ("morph_tier_source" %in% names(morph_df)) {
-    mts <- as.character(morph_df$morph_tier_source); if (any(!is.na(mts) & nzchar(mts))) is_t1_pure <- !is.na(mts) & (mts == "Tier_1_Pure")
+  if ("morph_tier_source" %in% names(morph_df)) {
+    mts <- as.character(morph_df$morph_tier_source); if (any(!is.na(mts) & nzchar(mts))) is_t1_pure <- !is.na(mts) & (mts == "Basal_Rosette")
   }
   type_info <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(morph_df) else list(type_rank = rep(0L, nrow(morph_df)), is_type_specimen = rep(FALSE, nrow(morph_df)))
   is_type <- as.logical(type_info$is_type_specimen); is_type[is.na(is_type)] <- FALSE
@@ -118,7 +133,6 @@ select_taxon_anchors <- function(morph_df) {
   }
   list(anchor_df = morph_df[anchor_mask, , drop = FALSE], anchor_mask = anchor_mask, n_gold_silver = n_gs_vec, n_type_specimens = n_type_vec)
 }
-
 # 3. Step B: Empirical Cohen's Kappa Reliability Weights (Dawid & Skene 1979)
 compute_cohens_kappa_stat <- function(y_true, y_pred) {
   valid <- !is.na(y_true) & nzchar(y_true) & !is.na(y_pred) & nzchar(y_pred) & !(y_pred %in% c("Unknown", "Unresolved", "NA"))
@@ -130,7 +144,6 @@ compute_cohens_kappa_stat <- function(y_true, y_pred) {
   if (p_e >= 1.0 - 1e-12) return(1.0)
   (p_o - p_e) / (1.0 - p_e)
 }
-
 compute_modality_kappa_weights <- function(morph_df, anchor_mask = NULL, ...) {
   if (is.logical(anchor_mask) && length(anchor_mask) == nrow(morph_df)) {
     anch_df <- morph_df[anchor_mask, , drop = FALSE]
@@ -151,7 +164,6 @@ compute_modality_kappa_weights <- function(morph_df, anchor_mask = NULL, ...) {
   norm_w[avail] <- present_w[avail] / sum(present_w[avail]); norm_w[!avail] <- 0.0
   list(w_morph_raw = w_morph, w_eco_raw = w_eco, w_morph = unname(norm_w["morph"]), w_eco = unname(norm_w["eco"]))
 }
-
 # 4. Step C: Dynamic Morphometric & Ecological Affinity Matrices
 .parse_step08_semicolon <- function(df, col_nm) {
   if (!(col_nm %in% names(df))) return(character(0))
@@ -160,12 +172,10 @@ compute_modality_kappa_weights <- function(morph_df, anchor_mask = NULL, ...) {
   toks <- unique(trimws(unlist(strsplit(raw, ";", fixed = TRUE))))
   intersect(toks[nzchar(toks) & !(tolower(toks) %in% c("na", "none", "null"))], names(df))
 }
-
 .sort_step08_pcs <- function(cols, pfx) {
   if (length(cols) <= 1L) return(cols)
   cols[order(suppressWarnings(as.integer(sub(paste0("^", pfx), "", cols))), cols)]
 }
-
 resolve_step08_morph_features <- function(morph_df, anchor_df = morph_df, n_taxa = 2L) {
   max_p <- max(2L, min(15L, nrow(anchor_df) - as.integer(n_taxa) - 1L))
   ok_num <- function(cc) {
@@ -185,7 +195,6 @@ resolve_step08_morph_features <- function(morph_df, anchor_df = morph_df, n_taxa
   can_cols <- intersect(c("can1", "can2", "can3"), names(anchor_df)); can_cols <- can_cols[vapply(can_cols, ok_num, logical(1))]
   cands <- if (length(sym_cols) >= 2L) sym_cols else if (length(pc_cols) >= 2L) pc_cols else unique(c(can_cols, sym_cols, pc_cols))
   if (length(cands) <= 2L) return(cands)
-
   X_c <- as.matrix(anchor_df[, cands, drop = FALSE]); storage.mode(X_c) <- "double"
   ev <- apply(X_c, 2L, stats::var, na.rm = TRUE); ev[!is.finite(ev) | ev < 0] <- 0.0
   m <- length(ev); ev_prop <- ev / max(sum(ev), 1e-12); bs_prop <- rev(cumsum(1.0 / (m:1L))) / m
@@ -198,7 +207,6 @@ resolve_step08_morph_features <- function(morph_df, anchor_df = morph_df, n_taxa
   keep_k <- max(2L, min(max_p, sum(cumprod(as.integer(ev_prop >= bs_prop | ev_prop >= pa_q95)) == 1L)))
   cands[seq_len(min(length(cands), keep_k))]
 }
-
 resolve_step08_eco_predictors <- function(df) {
   excl <- c("edaphic_z_score", "climatic_z_score", "edaphic_schoener_d", "schoener_d", "edaphic_niche_overlap_d",
             "sgmc_lithology_class", "Dominant_Lithology_Class", "edaphic_best_fit_taxon", "rf_predicted_taxon",
@@ -224,7 +232,6 @@ resolve_step08_eco_predictors <- function(df) {
   }
   kept
 }
-
 compute_ecological_affinity <- function(morph_df, taxa) {
   n_taxa <- length(taxa); S_env <- matrix(0.0, nrow = n_taxa, ncol = n_taxa, dimnames = list(taxa, taxa))
   D_env <- matrix(1.0, nrow = n_taxa, ncol = n_taxa, dimnames = list(taxa, taxa)); diag(D_env) <- 0.0
@@ -254,7 +261,6 @@ compute_ecological_affinity <- function(morph_df, taxa) {
   }
   list(S_env = S_env, D_env = D_env, has_env = sum(has_row_env) >= 4L, eco_predictors = eco_cols, specimen_schoener_d = spec_d)
 }
-
 compute_morphometric_affinity <- function(morph_df, anchor_df, taxa) {
   n_taxa <- length(taxa); feat_cols <- resolve_step08_morph_features(morph_df, anchor_df, n_taxa)
   if (length(feat_cols) == 0L) feat_cols <- intersect(c("can1", "can2", "can3"), names(anchor_df))
@@ -413,12 +419,46 @@ compute_hopkins_phenological_affinity <- function(morph_df, taxa) {
     } else mu_theta[tx] <- ref_theta
   }
 
+  .circular_watson_williams_or_perm_p <- function(th1, th2) {
+    th1 <- th1[is.finite(th1)]; th2 <- th2[is.finite(th2)]
+    n1 <- length(th1); n2 <- length(th2); N <- n1 + n2
+    if (n1 < 2L || n2 < 2L) return(1.0)
+    R1 <- sqrt(sum(sin(th1))^2 + sum(cos(th1))^2)
+    R2 <- sqrt(sum(sin(th2))^2 + sum(cos(th2))^2)
+    th_all <- c(th1, th2)
+    R_tot <- sqrt(sum(sin(th_all))^2 + sum(cos(th_all))^2)
+    rbar <- (R1 + R2) / N
+    # Watson-Williams two-sample circular F-statistic (Mardia & Jupp 2000) with permutation verification
+    denom_ww <- max(N - R1 - R2, 1e-8)
+    num_ww <- max(0.0, R1 + R2 - R_tot)
+    k_corr <- if (rbar < 0.95) (1.0 + 3.0 / max(8.0 * max(rbar, 0.15), 1.0)) else 1.0
+    F_obs <- k_corr * (N - 2.0) * num_ww / denom_ww
+    p_ww <- stats::pf(F_obs, df1 = 1.0, df2 = max(1.0, N - 2.0), lower.tail = FALSE)
+    if (N <= 60L) {
+      B_perm <- 199L
+      s_all <- sin(th_all); c_all <- cos(th_all)
+      ge_cnt <- 0L
+      for (b in seq_len(B_perm)) {
+        idx1 <- sample.int(N, size = n1, replace = FALSE)
+        R1_b <- sqrt(sum(s_all[idx1])^2 + sum(c_all[idx1])^2)
+        R2_b <- sqrt(sum(s_all[-idx1])^2 + sum(c_all[-idx1])^2)
+        if ((R1_b + R2_b - R_tot) >= (num_ww - 1e-12)) ge_cnt <- ge_cnt + 1L
+      }
+      return((ge_cnt + 1.0) / (B_perm + 1.0))
+    }
+    pmin(1.0, pmax(0.0, as.numeric(p_ww)))
+  }
+
   raw_p <- numeric(0)
   for (i in seq_len(n_taxa)) for (j in seq_len(n_taxa)) if (i != j) {
     arc_rad <- abs(atan2(sin(mu_theta[i] - mu_theta[j]), cos(mu_theta[i] - mu_theta[j])))
     delta_circ <- arc_rad * (365.25 / (2.0 * pi))
     S_pheno[i, j] <- exp(-(delta_circ^2) / (2.0 * (21.0^2)))
-    if (i < j) raw_p <- c(raw_p, exp(-(delta_circ / 18.0)))
+    if (i < j) {
+      th_i <- theta_adj[morph_df$species_standardized == taxa[i] & anthesis_mask]
+      th_j <- theta_adj[morph_df$species_standardized == taxa[j] & anthesis_mask]
+      raw_p <- c(raw_p, .circular_watson_williams_or_perm_p(th_i, th_j))
+    }
   }
   pheno_fdr_p <- if (length(raw_p) > 0L) stats::p.adjust(raw_p, method = "BH") else numeric(0)
   diag(S_pheno) <- 0.0
@@ -431,6 +471,13 @@ compute_hopkins_phenological_affinity <- function(morph_df, taxa) {
 #    (Padial et al. 2010; Schlick-Steiner et al. 2010; Rieseberg 1995; Slenker et al. 2022)
 # ------------------------------------------------------------------------------
 evaluate_hierarchical_complex_delimitation <- function(morph_df, pheno_res = NULL, eco_res = NULL, ...) {
+  # Prefer canonical Step 06 `taxonomic_treatment_subtype` whenever precomputed (zero cross-stage decision drift)
+  if ("taxonomic_treatment_subtype" %in% names(morph_df)) {
+    st_pre <- trimws(as.character(morph_df$taxonomic_treatment_subtype))
+    if (length(st_pre) == nrow(morph_df) && all(!is.na(st_pre) & nzchar(st_pre) & st_pre != "NA")) {
+      return(st_pre)
+    }
+  }
   if (!is.list(pheno_res) || !("delta_doy_resid" %in% names(pheno_res))) {
     dots <- list(...)
     if (length(dots) >= 1L && is.list(dots[[1L]]) && ("delta_doy_resid" %in% names(dots[[1L]]))) {
@@ -481,8 +528,8 @@ evaluate_hierarchical_complex_delimitation <- function(morph_df, pheno_res = NUL
   }
 
   is_t1_pure <- rep(TRUE, n)
-  if ("n_tier1_leaves" %in% names(morph_df)) {
-    nt1 <- suppressWarnings(as.numeric(morph_df$n_tier1_leaves))
+  if ("leaf_count" %in% names(morph_df)) {
+    nt1 <- suppressWarnings(as.numeric(morph_df$leaf_count))
     if (any(!is.na(nt1))) is_t1_pure <- !is.na(nt1) & (nt1 >= 1)
   }
 
@@ -498,14 +545,18 @@ evaluate_hierarchical_complex_delimitation <- function(morph_df, pheno_res = NUL
   edaph_disagrees <- !is.na(ed_pred) & (ed_pred != sp_given) & (d_edaph < 0.45)
   both_alt_agree <- morph_disagrees & edaph_disagrees & (cda_pred == ed_pred)
   inter_modal_mosaic <- morph_disagrees & edaph_disagrees & (cda_pred != ed_pred)
-  single_strong_reassign <- !inter_modal_mosaic & !type_concordant_block & (morph_disagrees & cda_prob >= 0.80)
+  min_cong_d2 <- if ("min_congener_mahal_d2" %in% names(morph_df)) suppressWarnings(as.numeric(morph_df$min_congener_mahal_d2)) else rep(NA_real_, n)
+  min_cong_tx <- if ("min_congener_taxon" %in% names(morph_df)) as.character(morph_df$min_congener_taxon) else rep(NA_character_, n)
+  congener_osr_reassign <- is.finite(min_cong_d2) & (min_cong_d2 <= stats::qchisq(0.95, df = 3L)) & !is.na(min_cong_tx) & nzchar(min_cong_tx) & (min_cong_tx != sp_given) & m_flag
+  single_strong_reassign <- !inter_modal_mosaic & !type_concordant_block & ((morph_disagrees & cda_prob >= 0.80) | congener_osr_reassign)
   # Stage 1: Misidentification_Reassign (evaluated BEFORE hybridity; Nomenclatural Type Immunity Rule A)
   is_stage1_misid <- !is_type_spec & (both_alt_agree | single_strong_reassign)
   # Stage 2: Hybrid_Introgressant (Rieseberg 1995; Slenker et al. 2022)
   is_stage2_hybrid <- !is_type_spec & !is_stage1_misid & (inter_modal_mosaic | (cda_margin < 0.25 & (morph_disagrees | edaph_disagrees) & d_edaph >= 0.30))
   # Stage 3: Putative_Cryptic_Species via Integration by Congruence (Padial et al. 2010)
   has_evol_barrier <- (!is.na(d_doy) & abs(d_doy) >= tau_cry_vec) | (d_edaph < 0.30) | (is.finite(type_edaph_z) & type_edaph_z >= 3.0)
-  is_stage3_cryptic <- !is_type_spec & !is_stage1_misid & !is_stage2_hybrid & is_t1_pure & (cda_prob < 0.70) &
+  coh_pass <- if ("cryptic_cluster_cohesion_pass" %in% names(morph_df)) { cp <- as.logical(morph_df$cryptic_cluster_cohesion_pass); cp[is.na(cp)] <- FALSE; cp } else rep(TRUE, n)
+  is_stage3_cryptic <- !is_type_spec & !is_stage1_misid & !is_stage2_hybrid & is_t1_pure & coh_pass & (cda_prob < 0.70) &
     (m_flag | non_typical_morph | (gmm_cl > length(unique(sp_given)) & gmm_bf >= 6.0)) & has_evol_barrier
   # Stage 4: Subspecies_Ecotype vs. Ecophenotypic_Plasticity
   is_stage4_ecotype <- !is_type_spec & !is_stage1_misid & !is_stage2_hybrid & !is_stage3_cryptic &
@@ -671,7 +722,7 @@ main <- function() {
   n_vouchers_vec <- table(morph_df$species_standardized)[taxa]
   anc <- select_taxon_anchors(morph_df)
   kappa_wts <- compute_modality_kappa_weights(morph_df, anc$anchor_mask)
-  message(sprintf("Evaluated %d vouchers across %d Packera groups (%d Tier_1_Pure Gold/Silver anchors; kappa weights: morph=%.3f, eco=%.3f).",
+  message(sprintf("Evaluated %d vouchers across %d Packera groups (%d Basal_Rosette Gold/Silver anchors; kappa weights: morph=%.3f, eco=%.3f).",
                   nrow(morph_df), n_taxa, nrow(anc$anchor_df), kappa_wts$w_morph, kappa_wts$w_eco))
 
   morph_res <- compute_morphometric_affinity(morph_df, anc$anchor_df, taxa)

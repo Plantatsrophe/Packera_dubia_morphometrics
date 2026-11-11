@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import cv2
+import scripts.vision.lm3_compat  # noqa: F401
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -183,24 +184,20 @@ class DetectedInstance:
     score: float
     class_id: int
     plant_individual_id: int = 0
-    assigned_tier: str = "unassigned"
-    ucs_score: float = 0.0
     solidity: float = 0.0
     midrib_angle_deg: float = 0.0
     pixels_per_mm: Optional[float] = None
     is_calibrated_mm: bool = False
-    crop_offset: Tuple[int, int] = (0, 0)  # (x0, y0) crop offset on full sheet
-    mask_origin: Tuple[int, int] = (0, 0)  # (x0, y0) origin of mask array on full sheet
-    already_trimmed: bool = False
+    crop_offset: Tuple[int, int] = (0, 0)
+    mask_origin: Tuple[int, int] = (0, 0)
     trim_meta: Optional[Dict[str, Any]] = None
     pcd_bbox: Optional[Tuple[int, int, int, int]] = None
     circularity: float = 0.0
     extent: float = 0.0
+    aspect_ratio: float = 0.0
     blade_area_cm2: float = 0.0
-    is_severed_lobe: bool = False
     mask_path: Optional[str] = None
     contour_path: Optional[str] = None
-    rejection_reason: Optional[str] = None
     petiole_mask: Optional[np.ndarray] = None
     hole_mask: Optional[np.ndarray] = None
     keypoints_31: Optional[Dict[str, Tuple[float, float, float]]] = None
@@ -224,7 +221,6 @@ class _VoucherFinalizeBundle:
     rosette_centroids_by_pid: Dict[int, Tuple[float, float]] = field(default_factory=dict)
     by_plant_petiole: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     contour_coords_by_leaf: Dict[int, List[List[float]]] = field(default_factory=dict)
-    telemetry_deltas: Dict[str, int] = field(default_factory=dict)
 
 
 def crop_leaf_bbox_with_padding(
@@ -2423,7 +2419,7 @@ def _extract_native_lm3_petiole_anchor(
                 )
             petiole_len_px = max(petiole_len_px, float(arc_len))
 
-    # 2. Use explicit Stage 2 `petiole_mask` (`class_id == 1`) when present
+    # 2. Delegate orthogonal petiole measurement directly to LeafMachine3 `measure_petiole`
     if (
         petiole_mask is not None
         and petiole_mask.size > 0
@@ -2432,59 +2428,29 @@ def _extract_native_lm3_petiole_anchor(
     ):
         pet_u8 = (petiole_mask > 0).astype(np.uint8)
         lam_u8 = (leaf_mask > 0).astype(np.uint8)
-        bx_p, by_p, bw_p, bh_p = cv2.boundingRect(pet_u8)
-        if bw_p > 0 and bh_p > 0:
-            h_full, w_full = leaf_mask.shape[:2]
-            ux0 = max(0, min(bx_l, bx_p) - 2)
-            uy0 = max(0, min(by_l, by_p) - 2)
-            ux1 = min(w_full, max(bx_l + bw_l, bx_p + bw_p) + 2)
-            uy1 = min(h_full, max(by_l + bh_l, by_p + bh_p) + 2)
-            inv_pet_sub = (pet_u8[uy0:uy1, ux0:ux1] == 0).astype(np.uint8)
-            dt_pet = cv2.distanceTransform(inv_pet_sub, cv2.DIST_L2, 3)
-            dists_to_pet = dt_pet[leaf_pts[:, 1] - uy0, leaf_pts[:, 0] - ux0]
-            min_idx = int(np.argmin(dists_to_pet))
-            min_dist = float(dists_to_pet[min_idx])
-            if min_dist <= max(28.0, 0.30 * float(max(bw_l, bh_l))):
-                pet_junction = (int(leaf_pts[min_idx, 0]), int(leaf_pts[min_idx, 1]))
-                if p_base_crop is None:
-                    p_base_crop = pet_junction
-                elif p_apex_crop is not None and not norm_kps:
-                    d_base_pet = math.hypot(p_base_crop[0] - pet_junction[0], p_base_crop[1] - pet_junction[1])
-                    d_apex_pet = math.hypot(p_apex_crop[0] - pet_junction[0], p_apex_crop[1] - pet_junction[1])
-                    if d_apex_pet < d_base_pet:
-                        p_base_crop = pet_junction
-                        p_apex_crop = None
-                used_native_lm3 = True
-                cnts_p, _ = cv2.findContours(
-                    pet_u8[by_p : by_p + bh_p, bx_p : bx_p + bw_p],
-                    cv2.RETR_EXTERNAL,
-                    cv2.CHAIN_APPROX_NONE,
-                    offset=(bx_p, by_p),
-                )
-                if cnts_p and p_base_crop is not None:
-                    pet_pts = np.vstack([c.reshape(-1, 2) for c in cnts_p])
-                    pet_span_dists = np.hypot(pet_pts[:, 0] - p_base_crop[0], pet_pts[:, 1] - p_base_crop[1])
-                    if len(pet_span_dists) > 0:
-                        far_idx = int(np.argmax(pet_span_dists))
-                        petiole_len_px = max(petiole_len_px, float(pet_span_dists[far_idx]))
-                        if len(pet_chain) < 2:
-                            pet_chain = [
-                                (float(p_base_crop[0]), float(p_base_crop[1])),
-                                (float(pet_pts[far_idx, 0]), float(pet_pts[far_idx, 1])),
-                            ]
-            if len(pet_chain) >= 2:
-                try:
-                    from leafmachine3.core.petiole import measure_petiole
+        if p_base_crop is None:
+            pys, pxs = np.where(pet_u8 > 0)
+            pet_cx, pet_cy = float(np.mean(pxs)), float(np.mean(pys))
+            j_idx = int(np.argmin(np.hypot(leaf_pts[:, 0] - pet_cx, leaf_pts[:, 1] - pet_cy)))
+            p_base_crop = (int(leaf_pts[j_idx, 0]), int(leaf_pts[j_idx, 1]))
+            used_native_lm3 = True
+            if len(pet_chain) < 2:
+                far_i = int(np.argmax(np.hypot(pxs - p_base_crop[0], pys - p_base_crop[1])))
+                pet_chain = [(float(p_base_crop[0]), float(p_base_crop[1])), (float(pxs[far_i]), float(pys[far_i]))]
+                petiole_len_px = max(petiole_len_px, math.hypot(pet_chain[1][0] - pet_chain[0][0], pet_chain[1][1] - pet_chain[0][1]))
+        if len(pet_chain) >= 2:
+            try:
+                from leafmachine3.core.petiole import measure_petiole
 
-                    pet_res = measure_petiole(pet_u8, lam_u8, pet_chain)
-                    if pet_res is not None:
-                        touches_leaf = bool(pet_res.touches_leaf)
-                        if pet_res.width_px is not None and np.isfinite(pet_res.width_px) and pet_res.width_px > 0:
-                            petiole_width_px = round(float(pet_res.width_px), 3)
-                        if pet_res.length_px is not None and np.isfinite(pet_res.length_px) and pet_res.length_px > 0:
-                            petiole_len_px = float(pet_res.length_px)
-                except Exception:
-                    pass
+                pet_res = measure_petiole(pet_u8, lam_u8, pet_chain)
+                if pet_res is not None:
+                    touches_leaf = bool(pet_res.touches_leaf)
+                    if pet_res.width_px is not None and np.isfinite(pet_res.width_px) and pet_res.width_px > 0:
+                        petiole_width_px = round(float(pet_res.width_px), 3)
+                    if pet_res.length_px is not None and np.isfinite(pet_res.length_px) and pet_res.length_px > 0:
+                        petiole_len_px = float(pet_res.length_px)
+            except Exception:
+                pass
 
     if p_base_crop is not None:
         if p_apex_crop is None:
@@ -2751,9 +2717,16 @@ def orient_and_score_leaf_lm3(
             pts_2d[f"midvein_{i}"] = (tx + frac * (bx - tx), ty + frac * (by - ty))
 
     try:
-        from leafmachine3.core.orientation import compute_orientation
-        from leafmachine3.core.bilateral import OrientedLeaf, apply_affine, measure_leaf, oriented_affine
-        from leafmachine3.core.imaging import crop_to_box, mask_bbox, rotate_image
+        from scripts.vision.lm3_compat import (
+            OrientedLeaf,
+            apply_affine,
+            compute_orientation,
+            crop_to_box,
+            mask_bbox,
+            measure_leaf,
+            oriented_affine,
+            rotate_image,
+        )
 
         ori = compute_orientation(pts_2d)
         angle_cw = float(ori.angle_cw) if (ori.success and ori.angle_cw is not None) else 0.0
@@ -3146,6 +3119,7 @@ class LM3ScaleCalibrator:
                             "pixels_per_mm": px_per_mm,
                             "is_calibrated_mm": True,
                             "cf_source": "measured_from_ruler",
+                            "scale_source": "ruler_calibrated",
                         }
                 except Exception:
                     continue
@@ -3153,8 +3127,9 @@ class LM3ScaleCalibrator:
         px_per_mm, cf_source = self.predict_megapixel_scale(sh, sw)
         return {
             "pixels_per_mm": px_per_mm,
-            "is_calibrated_mm": True,
+            "is_calibrated_mm": cf_source != "predicted_from_megapixels",
             "cf_source": cf_source,
+            "scale_source": "mp_estimated" if cf_source == "predicted_from_megapixels" else "ruler_calibrated",
         }
 
 

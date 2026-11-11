@@ -264,7 +264,6 @@ def _build_master_view_ddl() -> str:
         COALESCE(vrp.reproductive_stage_confidence, vrp0.reproductive_stage_confidence) AS reproductive_stage_confidence,
         COALESCE(vrp.dominant_pappus_ratio, vrp0.dominant_pappus_ratio) AS dominant_pappus_ratio,
         -- Step 03 & Step 04 OTU Morphometrics & CDA
-        om.assigned_tier AS assigned_tier,
         om.solidity AS solidity,
         om.dissection_index AS dissection_index,
         om.q25_solidity AS q25_solidity,
@@ -289,7 +288,6 @@ def _build_master_view_ddl() -> str:
         om.ect_lobe_complexity AS ect_lobe_complexity,
         om.cauline_ect_lobe_complexity AS cauline_ect_lobe_complexity,
         om.heteroblasty_ect_distance AS heteroblasty_ect_distance,
-        om.ucs_score AS ucs_score,
         om.aspect_ratio AS aspect_ratio,
         om.area_px AS area_px,
         om.is_dissected AS is_dissected,
@@ -303,8 +301,6 @@ def _build_master_view_ddl() -> str:
         om.is_contour_outlier AS is_contour_outlier,
         om.leaf_quality_weight AS leaf_quality_weight,
         om.leaf_count AS leaf_count,
-        om.n_tier1_leaves AS n_tier1_leaves,
-        om.n_tier2_leaves AS n_tier2_leaves,
         om.morph_tier_source AS morph_tier_source,
         om.foliar_variance AS foliar_variance,
         om.heteroblasty_index AS heteroblasty_index,
@@ -557,20 +553,12 @@ def _build_schema_ddl() -> str:
         plant_individual_id INTEGER NOT NULL DEFAULT 0,
         leaf_id INTEGER NOT NULL,
         shape_id TEXT UNIQUE,
-        tier TEXT,
-        assigned_tier TEXT NOT NULL CHECK(assigned_tier IN ('Tier_1_Direct', 'Tier_2_Reflected')),
-        tier_assignment TEXT,
-        ucs REAL,
-        ucs_score REAL,
         solidity REAL,
         circularity REAL,
         extent REAL,
         aspect_ratio REAL,
         area_px REAL,
         blade_area_cm2 REAL,
-        is_folded INTEGER,
-        is_dissected INTEGER,
-        reflection_applied INTEGER,
         midrib_angle_deg REAL,
         petiole_length_px REAL,
         petiole_length_mm REAL,
@@ -579,6 +567,7 @@ def _build_schema_ddl() -> str:
         petiole_to_blade_ratio REAL,
         pixels_per_mm REAL,
         is_calibrated_mm INTEGER,
+        scale_source TEXT,
         mask_path TEXT,
         crop_path TEXT,
         contour_path TEXT,
@@ -589,16 +578,17 @@ def _build_schema_ddl() -> str:
         leaf_zone_confidence REAL,
         dist_from_crown_norm REAL,
         cy_rel_plant_bbox REAL,
-        effective_min_blade_area_cm2 REAL,
+        archetype_score REAL,
+        bilateral_dice REAL,
+        si_a REAL,
+        lm3_gates_pass INTEGER,
+        n_lamina_components INTEGER DEFAULT 1,
         PRIMARY KEY (catalogNumber, plant_individual_id, leaf_id),
         FOREIGN KEY (catalogNumber, plant_individual_id)
             REFERENCES plant_individuals(catalogNumber, plant_individual_id) ON DELETE CASCADE
     );
 
-    CREATE INDEX IF NOT EXISTS idx_extracted_leaves_tier ON extracted_leaves(assigned_tier);
     CREATE INDEX IF NOT EXISTS idx_extracted_leaves_cat ON extracted_leaves(catalogNumber);
-    CREATE INDEX IF NOT EXISTS idx_extracted_leaves_cat_pid_tier
-        ON extracted_leaves(catalogNumber, plant_individual_id, assigned_tier);
 
     CREATE TABLE IF NOT EXISTS voucher_reproductive_phenology (
         catalogNumber TEXT NOT NULL,
@@ -699,10 +689,8 @@ def _build_schema_ddl() -> str:
         catalogNumber TEXT NOT NULL,
         plant_individual_id INTEGER NOT NULL DEFAULT 0,
         leaf_id INTEGER NOT NULL,
-        assigned_tier TEXT,
         solidity REAL,
         dissection_index REAL,
-        ucs_score REAL,
         aspect_ratio REAL,
         area_px REAL,
         is_dissected INTEGER,
@@ -741,7 +729,6 @@ def _build_schema_ddl() -> str:
         run_id TEXT NOT NULL,
         catalogNumber TEXT NOT NULL,
         plant_individual_id INTEGER NOT NULL DEFAULT 0,
-        assigned_tier TEXT,
         species_standardized TEXT,
         determiner_tier TEXT,
         is_promoted_anchor INTEGER,
@@ -773,7 +760,6 @@ def _build_schema_ddl() -> str:
         ect_lobe_complexity REAL,
         cauline_ect_lobe_complexity REAL,
         heteroblasty_ect_distance REAL,
-        ucs_score REAL,
         aspect_ratio REAL,
         area_px REAL,
         is_dissected INTEGER,
@@ -793,8 +779,6 @@ def _build_schema_ddl() -> str:
         is_contour_outlier INTEGER,
         leaf_quality_weight REAL,
         leaf_count INTEGER,
-        n_tier1_leaves INTEGER,
-        n_tier2_leaves INTEGER,
         morph_tier_source TEXT,
         foliar_variance REAL,
         heteroblasty_index REAL,
@@ -925,7 +909,12 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("leaf_zone_confidence", "REAL"),
         ("dist_from_crown_norm", "REAL"),
         ("cy_rel_plant_bbox", "REAL"),
-        ("effective_min_blade_area_cm2", "REAL"),
+        ("archetype_score", "REAL"),
+        ("bilateral_dice", "REAL"),
+        ("si_a", "REAL"),
+        ("lm3_gates_pass", "INTEGER"),
+        ("n_lamina_components", "INTEGER DEFAULT 1"),
+        ("scale_source", "TEXT"),
     ),
     "run_active_cohort": (
         ("type_status", "TEXT"),
@@ -1140,7 +1129,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
                 _migrate_vouchers_schema_columns(conn)
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
-            if "leaf_zone" not in el_cols or "ect_path" not in el_cols or "cauline_leaf_count" not in om_cols or "ECT_PC1" not in om_cols:
+            if "leaf_zone" not in el_cols or "ect_path" not in el_cols or "efa_qc_pass" not in el_cols or "cauline_leaf_count" not in om_cols or "ECT_PC1" not in om_cols:
                 _migrate_dynamic_schema_columns(conn, recreate_view=True)
             conn.execute("PRAGMA foreign_keys = ON;")
             return

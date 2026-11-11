@@ -7,9 +7,9 @@ Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
     Unit and integration tests for Step 02:
-    LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) segmentation, 2-path botanical
-    leaf extraction (Tier 1 Pristine and Tier 2 Bilateral Reflection), LM3 ruler
-    scale calibration, centroid spatial clustering, and standardized contour CSV generation.
+    Read-only LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) segmentation adapter,
+    LM3 ruler scale calibration, centroid spatial clustering, anatomical leaf_zone
+    classification, and standardized contour / ECT export.
 ===============================================================================
 """
 
@@ -34,9 +34,9 @@ DetectedInstance = step02.DetectedInstance
 SegmentAndExtractPipeline = step02.SegmentAndExtractPipeline
 parse_args = step02.parse_args
 cluster_plant_individuals = step02.cluster_plant_individuals
-compute_geometric_metrics = step02.compute_geometric_metrics
+compute_lm3_shape_metrics = step02.compute_lm3_shape_metrics
 export_standardized_contour = step02.export_standardized_contour
-extract_tier1_pristine = step02.extract_tier1_pristine
+save_leaf_mask_png = step02.save_leaf_mask_png
 compute_capitulum_metrics = step02.compute_capitulum_metrics
 
 
@@ -50,26 +50,17 @@ class TestSegmentAndExtract(unittest.TestCase):
         if self.temp_dir.exists():
             shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_geometric_metrics_pristine_ellipse(self) -> None:
-        """Verify that a solid elliptic silhouette meets Tier 1 thresholds."""
-        mask = np.zeros((300, 300), dtype=np.uint8)
-        cv2.ellipse(mask, (150, 150), (40, 100), 0, 0, 360, 255, -1)
-
-        ucs, solidity, angle_deg, p_apex, p_base = compute_geometric_metrics(mask)
-        self.assertGreaterEqual(solidity, 0.72, "Solid ellipse must pass Tier 1 solidity threshold (>=0.72).")
-        self.assertGreaterEqual(ucs, 0.85, "Solid ellipse must pass Tier 1 UCS threshold (>=0.85).")
-        self.assertNotEqual(p_apex, p_base, "Apex and base points must be distinct.")
-
-    def test_tier1_extraction_export(self) -> None:
-        """Verify that Tier 1 pristine silhouette is exported cleanly as binary mask."""
+    def test_compute_lm3_shape_metrics_and_mask_export(self) -> None:
+        """Verify LM3 shape metrics and direct binary mask export to data/masks/."""
         mask = np.zeros((200, 200), dtype=np.uint8)
         cv2.ellipse(mask, (100, 100), (30, 70), 0, 0, 360, 255, -1)
+        desc = compute_lm3_shape_metrics(mask)
+        self.assertGreaterEqual(desc["solidity"], 0.90)
+        self.assertGreaterEqual(desc["aspect_ratio"], 2.0)
 
-        saved_path = extract_tier1_pristine(mask, "TEST001", 1, self.temp_dir)
-        self.assertTrue(Path(saved_path).exists(), "Exported Tier 1 mask file must exist.")
-        self.assertEqual(Path(saved_path).parent.name, "tier1_intact")
-        self.assertFalse((self.temp_dir / "masks" / "TEST001_leaf1.png").exists())
-
+        saved_path = save_leaf_mask_png(mask, "TEST001", 1, self.temp_dir)
+        self.assertTrue(Path(saved_path).exists(), "Exported LM3 mask file must exist.")
+        self.assertEqual(Path(saved_path).parent.name, "masks")
         read_mask = cv2.imread(saved_path, cv2.IMREAD_GRAYSCALE)
         self.assertIsNotNone(read_mask)
         self.assertEqual(np.count_nonzero(read_mask > 128), np.count_nonzero(mask > 0))
@@ -273,8 +264,7 @@ class TestSegmentAndExtract(unittest.TestCase):
             "catalogNumber": "NCU001",
             "plant_individual_id": 1,
             "leaf_id": 1,
-            "assigned_tier": "tier1",
-            "ucs_score": 0.90,
+            "archetype_score": 0.90,
             "solidity": 0.85,
             "midrib_angle_deg": 12.0,
             "pixels_per_mm": 10.5,
@@ -294,8 +284,7 @@ class TestSegmentAndExtract(unittest.TestCase):
             "catalogNumber": "NCU002",
             "plant_individual_id": 1,
             "leaf_id": 1,
-            "assigned_tier": "tier1",
-            "ucs_score": 0.88,
+            "archetype_score": 0.88,
             "solidity": 0.82,
             "midrib_angle_deg": 5.0,
             "pixels_per_mm": 10.0,
@@ -374,90 +363,6 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         if self.temp_dir.exists():
             shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_manifest_schema_columns(self) -> None:
-        """Verify extracted leaf manifest contains required diagnostic classification columns."""
-        # Create a mock extracted record
-        mock_records = [{
-            "catalogNumber": "NCU123",
-            "plant_individual_id": 1,
-            "leaf_id": 1,
-            "tier": "Tier 1",
-            "assigned_tier": "tier1",
-            "solidity": 0.88,
-            "ucs": 0.92,
-            "ucs_score": 0.92,
-            "is_folded": False,
-            "is_dissected": False,
-            "reflection_applied": False,
-            "midrib_angle_deg": 10.0,
-            "pixels_per_mm": 12.0,
-            "mask_path": "data/masks/NCU123_leaf1.png",
-            "contour_path": "data/contours/NCU123_leaf1.csv",
-        }]
-
-        from unittest.mock import patch
-        with patch.object(self.pipeline, "process_voucher", return_value=(mock_records, None)):
-            extracted_df, _ = self.pipeline.run()
-
-        expected_prefix = [
-            "catalogNumber", "leaf_id", "tier", "solidity", "ucs",
-            "is_folded", "is_dissected", "reflection_applied", "contour_path"
-        ]
-        self.assertEqual(list(extracted_df.columns[:9]), expected_prefix)
-        self.assertEqual(extracted_df.iloc[0]["tier"], "Tier 1")
-        self.assertEqual(extracted_df.iloc[0]["assigned_tier"], "Tier_1_Direct")
-        self.assertFalse(bool(extracted_df.iloc[0]["reflection_applied"]))
-        self.assertFalse(bool(extracted_df.iloc[0]["is_folded"]))
-        self.assertFalse(bool(extracted_df.iloc[0]["is_dissected"]))
-
-    def test_routing_pristine_whole_leaf(self) -> None:
-        """Verify pristine whole leaf routes to Tier 1 with reflection_applied=False."""
-        # Pristine ellipse (solidity > 0.72, ucs > 0.85, W/L > 0.45)
-        mask = np.zeros((300, 300), dtype=np.uint8)
-        cv2.ellipse(mask, (150, 150), (65, 120), 0, 0, 360, 255, -1)
-
-        from unittest.mock import patch
-        with patch.object(self.pipeline.model_engine, "predict", return_value=[((30, 85, 270, 215), mask, 0.95, 0)]):
-            with patch("cv2.imread", return_value=np.full((400, 400, 3), 200, dtype=np.uint8)):
-                records, failure = self.pipeline.process_voucher("NCU123", self.img_path)
-
-        self.assertIsNone(failure)
-        self.assertEqual(len(records), 1)
-        rec = records[0]
-        self.assertEqual(rec["tier"], "Tier 1")
-        self.assertEqual(rec["assigned_tier"], "Tier_1_Direct")
-        self.assertFalse(rec["reflection_applied"])
-        self.assertFalse(rec["is_folded"])
-        self.assertFalse(rec["is_dissected"])
-
-    def test_routing_botanical_dissection_to_tier1_dissected(self) -> None:
-        """Verify dissected leaf with lyrate taxon routes to Tier 1 (Dissected)."""
-        # Create a synthetic pinnatifid/lyrate leaf
-        mask = np.zeros((400, 400), dtype=np.uint8)
-        cx, cy = 200, 200
-        # Terminal lobe
-        cv2.ellipse(mask, (cx, cy - 70), (35, 45), 0, 0, 360, 255, -1)
-        # Midrib
-        cv2.line(mask, (cx, cy - 100), (cx, cy + 100), 255, thickness=16)
-        # Bilateral lobes
-        for y_off in [-20, 20, 60]:
-            cv2.ellipse(mask, (cx - 35, cy + y_off), (35, 12), -15, 0, 360, 255, -1)
-            cv2.ellipse(mask, (cx + 35, cy + y_off), (35, 12), 15, 0, 360, 255, -1)
-
-        from unittest.mock import patch
-        with patch.object(self.pipeline.model_engine, "predict", return_value=[((100, 160, 300, 240), mask, 0.90, 0)]):
-            with patch("cv2.imread", return_value=np.full((400, 400, 3), 200, dtype=np.uint8)):
-                records, failure = self.pipeline.process_voucher("NCU123", self.img_path, taxon="Packera paupercula")
-
-        self.assertIsNone(failure)
-        self.assertEqual(len(records), 1)
-        rec = records[0]
-        self.assertEqual(rec["tier"], "Tier 1 (Dissected)")
-        self.assertEqual(rec["assigned_tier"], "Tier_1_Direct")
-        self.assertTrue(rec["is_dissected"])
-        self.assertFalse(rec["reflection_applied"])
-        self.assertFalse(rec["is_folded"])
-
     def test_stage1_to_stage2_crop_reprojection(self) -> None:
         """Verify Stage 1 (LM3PlantDetector 11-class) -> 12%-padded crop -> Stage 2 LM3LeafSegmenterEngine reprojection."""
         from unittest.mock import patch
@@ -511,7 +416,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertEqual(mock_s2.call_count, 2)
         self.assertEqual(len(records), 2)
         for rec in records:
-            self.assertEqual(rec["assigned_tier"], "Tier_1_Direct")
+            self.assertTrue(bool(rec["lm3_gates_pass"]))
             self.assertTrue(Path(rec["contour_path"]).exists())
             self.assertTrue(Path(rec["mask_path"]).exists())
 
@@ -593,11 +498,10 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         plant_ids = sorted({r["plant_individual_id"] for r in records})
         self.assertEqual(plant_ids, [0, 1])
 
-        # Verify Tier 1 binary leaf masks exist in data/masks/tier1_intact/ without duplicate top-level copies
+        # Verify binary leaf masks exist directly in data/masks/
         for leaf_id in [1, 2, 3]:
-            leaf_mask = self.pipeline.masks_dir / "tier1_intact" / f"NCU123_leaf{leaf_id}.png"
-            self.assertTrue(leaf_mask.exists(), f"Tier 1 binary leaf mask {leaf_mask} must exist.")
-            self.assertFalse((self.pipeline.masks_dir / f"NCU123_leaf{leaf_id}.png").exists())
+            leaf_mask = self.pipeline.masks_dir / f"NCU123_leaf{leaf_id}.png"
+            self.assertTrue(leaf_mask.exists(), f"Binary leaf mask {leaf_mask} must exist.")
 
     def test_lm3_ruler_calibration_resolution(self) -> None:
         """Verify load_ruler_calibrations() resolves measured_from_ruler and predicted_from_megapixels scales."""
@@ -650,21 +554,6 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                 self.assertAlmostEqual(recs_mp[0]["pixels_per_mm"], 10.5, places=3)
                 self.assertTrue(recs_mp[0]["is_calibrated_mm"])
 
-    @staticmethod
-    def _build_synthetic_lyrate_mask(size: int = 400) -> np.ndarray:
-        """Synthesizes a deeply lyrate-pinnatifid basal leaf mask with terminal + bilateral lobes and deep sinuses."""
-        mask = np.zeros((size, size), dtype=np.uint8)
-        cx, cy = size // 2, size // 2
-        # Terminal lobe
-        cv2.ellipse(mask, (cx, cy - 70), (35, 45), 0, 0, 360, 255, -1)
-        # Central midrib/rachis
-        cv2.line(mask, (cx, cy - 100), (cx, cy + 100), 255, thickness=16)
-        # Bilateral pinnae lobes with deep inter-lobe sinuses
-        for y_off in [-20, 20, 60]:
-            cv2.ellipse(mask, (cx - 35, cy + y_off), (35, 12), -15, 0, 360, 255, -1)
-            cv2.ellipse(mask, (cx + 35, cy + y_off), (35, 12), 15, 0, 360, 255, -1)
-        return mask
-
     def test_export_standardized_contour_isotropic_aspect_ratio_preservation(self) -> None:
         """
         Verify an oblong tip-up leaf with L/W = 3.0 exported via export_standardized_contour()
@@ -694,32 +583,6 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             delta=1e-3,
             msg=f"Isotropically normalized contour must preserve L/W = 3.0 within 1e-3 (got {lw_ratio:.6f}).",
         )
-
-    def test_base_apex_polarity_disambiguation_and_label_blind_dissection(self) -> None:
-        """
-        Verify compute_geometric_metrics() disambiguates p_base (narrow tapering stalk end)
-        from p_apex (broad lamina tip) regardless of cv2.fitLine sign, and is_botanical_dissection()
-        rejects unilateral bites.
-        """
-        from scripts.vision.leaf_geometry_utils import is_botanical_dissection
-
-        # 1. Oblanceolate/spathulate leaf with narrow stalk at TOP (y=60) and broad rounded apex at BOTTOM (y=300)
-        mask = np.zeros((400, 400), dtype=np.uint8)
-        cv2.ellipse(mask, (200, 240), (45, 70), 0.0, 0, 360, 255, -1)
-        cv2.rectangle(mask, (194, 60), (206, 185), 255, -1)
-
-        _, _, _, p_apex, p_base = compute_geometric_metrics(mask)
-        self.assertLess(
-            p_base[1],
-            p_apex[1],
-            f"Narrow tapering petiole stalk at top (y~60) must be identified as p_base, got p_base={p_base}, p_apex={p_apex}.",
-        )
-
-        # 2. Unilateral bite on low-solidity leaf must NOT be accepted as dissected
-        bitten = np.zeros((400, 400), dtype=np.uint8)
-        cv2.ellipse(bitten, (200, 200), (65, 110), 0.0, 0, 360, 255, -1)
-        cv2.ellipse(bitten, (145, 200), (58, 65), 0.0, 0, 360, 0, -1)
-        self.assertFalse(is_botanical_dissection(bitten))
 
     def test_stage1_high_dpi_filtering_and_single_primary_blade_selection(self) -> None:
         """Verify on high-DPI herbarium sheets (>2000px), Stage 1 forwards all Class 0 (`Leaf_WHOLE`) boxes to Stage 2 while skipping Class 1 (`Leaf_PARTIAL`)."""
@@ -772,7 +635,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         # Stage 2 LM3LeafSegmenterEngine is called for all 3 Class 0 (`Leaf_WHOLE`) boxes (Class 1 skipped)
         self.assertEqual(mock_s2.call_count, 3)
         self.assertEqual(len(records), 3)
-        self.assertTrue(all(r["assigned_tier"] == "Tier_1_Direct" for r in records))
+        self.assertTrue(all(bool(r["lm3_gates_pass"]) for r in records))
 
     def test_stage1_use_cache_flag(self) -> None:
         """Verify LM3PlantDetector.predict respects use_cache flag."""
@@ -809,7 +672,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
 
         run_dir = Path(self.temp_dir) / "run_qc_test"
         tables_dir = run_dir / "data" / "tables"
-        masks_dir = run_dir / "data" / "masks" / "tier1_intact"
+        masks_dir = run_dir / "data" / "masks"
         figures_dir = run_dir / "outputs" / "figures"
         tables_dir.mkdir(parents=True, exist_ok=True)
         masks_dir.mkdir(parents=True, exist_ok=True)
@@ -856,9 +719,8 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                     "catalogNumber": cat,
                     "plant_individual_id": 1,
                     "leaf_id": 1,
-                    "assigned_tier": "Tier_1_Direct",
                     "solidity": 0.90,
-                    "ucs_score": 0.94,
+                    "archetype_score": 0.94,
                     "aspect_ratio": ar_v,
                     "pixels_per_mm": 12.0 if is_cal else np.nan,
                     "is_calibrated_mm": is_cal,
@@ -871,11 +733,10 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                     "leaf_id": 1,
                     "species_standardized": sp_name,
                     "determiner_tier": det_tier,
-                    "assigned_tier": "Tier_1_Direct",
                     "is_calibrated_mm": "TRUE" if is_cal else "FALSE",
                     "pixels_per_mm": 12.0 if is_cal else np.nan,
                     "solidity": 0.90,
-                    "ucs_score": 0.94,
+                    "archetype_score": 0.94,
                     "aspect_ratio": ar_v,
                     "pct_asymmetry": 0.04,
                     "harmonic_roughness": 0.01,
@@ -901,15 +762,15 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             voucher_rows.append({"catalogNumber": cat_out, "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold"})
             manifest_rows.append({
                 "catalogNumber": cat_out, "plant_individual_id": 1, "leaf_id": 1,
-                "assigned_tier": "Tier_1_Direct", "solidity": 0.95, "ucs_score": 0.98,
+                "solidity": 0.95, "archetype_score": 0.98,
                 "aspect_ratio": 1.48, "pixels_per_mm": 12.0, "is_calibrated_mm": True,
                 "mask_path": str(m_out), "contour_path": "",
             })
             ind_efa_rows.append({
                 "catalogNumber": cat_out, "plant_individual_id": 1, "leaf_id": 1,
                 "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold",
-                "assigned_tier": "Tier_1_Direct", "is_calibrated_mm": "TRUE", "pixels_per_mm": 12.0,
-                "solidity": 0.95, "ucs_score": 0.98, "aspect_ratio": 1.48,
+                "is_calibrated_mm": "TRUE", "pixels_per_mm": 12.0,
+                "solidity": 0.95, "archetype_score": 0.98, "aspect_ratio": 1.48,
                 "pct_asymmetry": 0.02, "harmonic_roughness": 0.01,
                 "is_contour_outlier": "TRUE", "leaf_quality_weight": 0.999,
             })
@@ -923,15 +784,15 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             voucher_rows.append({"catalogNumber": cat_mis, "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold"})
             manifest_rows.append({
                 "catalogNumber": cat_mis, "plant_individual_id": 1, "leaf_id": 1,
-                "assigned_tier": "Tier_1_Direct", "solidity": 0.95, "ucs_score": 0.98,
+                "solidity": 0.95, "archetype_score": 0.98,
                 "aspect_ratio": 1.78, "pixels_per_mm": 12.0, "is_calibrated_mm": True,
                 "mask_path": str(m_mis), "contour_path": "",
             })
             ind_efa_rows.append({
                 "catalogNumber": cat_mis, "plant_individual_id": 1, "leaf_id": 1,
                 "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold",
-                "assigned_tier": "Tier_1_Direct", "is_calibrated_mm": "TRUE", "pixels_per_mm": 12.0,
-                "solidity": 0.95, "ucs_score": 0.98, "aspect_ratio": 1.78,
+                "is_calibrated_mm": "TRUE", "pixels_per_mm": 12.0,
+                "solidity": 0.95, "archetype_score": 0.98, "aspect_ratio": 1.78,
                 "pct_asymmetry": 0.02, "harmonic_roughness": 0.01,
                 "is_contour_outlier": "FALSE", "leaf_quality_weight": 0.999,
             })
@@ -945,15 +806,15 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             voucher_rows.append({"catalogNumber": cat_clip, "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold"})
             manifest_rows.append({
                 "catalogNumber": cat_clip, "plant_individual_id": 1, "leaf_id": 1,
-                "assigned_tier": "Tier_1_Direct", "solidity": 0.95, "ucs_score": 0.98,
+                "solidity": 0.95, "archetype_score": 0.98,
                 "aspect_ratio": 2.08, "pixels_per_mm": 12.0, "is_calibrated_mm": True,
                 "mask_path": str(m_clip), "contour_path": "",
             })
             ind_efa_rows.append({
                 "catalogNumber": cat_clip, "plant_individual_id": 1, "leaf_id": 1,
                 "species_standardized": sp_name, "determiner_tier": "Tier_1_Gold",
-                "assigned_tier": "Tier_1_Direct", "is_calibrated_mm": "TRUE", "pixels_per_mm": 12.0,
-                "solidity": 0.95, "ucs_score": 0.98, "aspect_ratio": 2.08,
+                "is_calibrated_mm": "TRUE", "pixels_per_mm": 12.0,
+                "solidity": 0.95, "archetype_score": 0.98, "aspect_ratio": 2.08,
                 "pct_asymmetry": 0.02, "harmonic_roughness": 0.01,
                 "is_contour_outlier": "FALSE", "leaf_quality_weight": 0.999,
             })
@@ -1015,34 +876,6 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertIn("PAU_V03", joined_titles)
         self.assertIn("PAU_V05", joined_titles)
         self.assertIn("PAU_V07", joined_titles)
-
-    def test_sheet_adaptive_min_blade_area_and_rosette_bbox_vertical_fallback(self):
-        """Verify Task 1A cohort-adaptive min_blade_area_cm2 floor for dwarf/alpine Packera and upper-sheet rosette plant-bbox relaxation."""
-        # 1. Dwarf alpine rosette (e.g., Packera cymbalaria / P. hyperborea) with ~0.30 cm^2 mature leaves:
-        #    0.25 * median(0.30) = 0.075 -> clamped to absolute_floor_cm2 = 0.15 cm^2 so 0.30 cm^2 blades pass!
-        eff_dwarf = step02.compute_sheet_adaptive_min_blade_area_cm2([0.28, 0.30, 0.32, 0.31], config_min_blade_area_cm2=0.75)
-        self.assertAlmostEqual(eff_dwarf, 0.15, places=4)
-        self.assertLess(eff_dwarf, 0.28)
-
-        # 2. Compact subalpine rosette with ~1.20 cm^2 leaves:
-        #    0.25 * 1.20 = 0.30 cm^2 (< 0.75 cm^2)
-        eff_compact = step02.compute_sheet_adaptive_min_blade_area_cm2([1.10, 1.20, 1.30], config_min_blade_area_cm2=0.75)
-        self.assertAlmostEqual(eff_compact, 0.30, places=4)
-
-        # 3. Large-leaved temperate sheet (~4.0 cm^2 median):
-        #    0.25 * 4.0 = 1.00 -> capped at config_min_blade_area_cm2 = 0.75 so ~0.19 cm^2 fragments still fail!
-        eff_large = step02.compute_sheet_adaptive_min_blade_area_cm2([3.8, 4.0, 4.2, 0.19], config_min_blade_area_cm2=0.75)
-        self.assertAlmostEqual(eff_large, 0.75, places=4)
-
-        # 4. Empty / uncalibrated candidate list falls back safely to config_min_blade_area_cm2
-        eff_empty = step02.compute_sheet_adaptive_min_blade_area_cm2([], config_min_blade_area_cm2=0.75)
-        self.assertAlmostEqual(eff_empty, 0.75, places=4)
-
-        # 5. Verify plant-bbox vertical rosette fallback tokens & telemetry exist in 02_segment_and_extract.py
-        step02_src = (PROJECT_ROOT / "scripts" / "pipeline" / "02_segment_and_extract.py").read_text(encoding="utf-8")
-        self.assertIn("compute_sheet_adaptive_min_blade_area_cm2", step02_src)
-        self.assertIn("cy_rel_plant_bbox", step02_src)
-        self.assertIn("rosette_bbox_fallback_used", step02_src)
 
     def test_macro_basal_leaf_survival_and_sqlite_descriptor_persistence(self) -> None:
         """Verify macro-basal leaves survive high-DPI Stage 1/2 bounds and SQLite persists shape descriptors & failed calibration."""
@@ -1120,7 +953,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
 
     def test_raw_unconstrained_lm3_native_leaf_and_petiole_segmentation(self) -> None:
         """
-        Verify default 100% Raw Unconstrained LeafMachine3 Mode (`enable_geometric_qc=False`):
+        Verify default 100% Raw Unconstrained LeafMachine3 Mode (read-only Step 02 adapter):
           1. Stage 1 (`LM3PlantDetector`) unpacks all Class 0 (`leaf_whole`) boxes regardless of size
              or vertical sheet position, while natively excluding `leaf_partial` (1), `leaflet` (2),
              `specimen` (8), and `wood`/stems (10).
@@ -1129,10 +962,9 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
              pairs the top-scoring `'petiole'` (`class_id == 1`) mask to locate `p_base` and native petiole length,
              and retains >6 leaves without any post-hoc geometric/photometric rejections or top-6 cap.
         """
-        self.assertFalse(self.pipeline.enable_geometric_qc)
         with patch("sys.argv", ["02_segment_and_extract.py"]):
             parsed_default = step02.parse_args()
-            self.assertFalse(parsed_default.enable_geometric_qc)
+            self.assertEqual(parsed_default.score_thresh, self.pipeline.config.segmentation.score_thresh)
 
         sheet_h, sheet_w = 3600, 2600
         sheet_img = np.full((sheet_h, sheet_w, 3), (225, 232, 236), dtype=np.uint8)
@@ -1196,9 +1028,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertEqual(len(mock_s2.call_args[0][0]), 7)
         self.assertEqual(len(records), 7)
         for idx, rec in enumerate(records):
-            self.assertEqual(rec["assigned_tier"], "Tier_1_Direct")
-            self.assertFalse(bool(rec["reflection_applied"]))
-            self.assertFalse(bool(rec["is_folded"]))
+            self.assertIn("lm3_gates_pass", rec)
             # Saved binary mask foreground pixel count must equal raw LM3 leaf_m 100% identically (zero petiole trimming!)
             saved_m = cv2.imread(str(rec["mask_path"]), cv2.IMREAD_GRAYSCALE)
             self.assertIsNotNone(saved_m)
@@ -1307,8 +1137,8 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertEqual(len(df_seq), 12)
 
         compare_cols = [
-            "catalogNumber", "leaf_id", "plant_individual_id", "assigned_tier",
-            "solidity", "ucs_score", "circularity", "extent", "area_px",
+            "catalogNumber", "leaf_id", "plant_individual_id", "lm3_gates_pass",
+            "solidity", "archetype_score", "circularity", "extent", "area_px",
             "blade_area_cm2", "petiole_length_mm", "blade_length_mm",
         ]
         pd.testing.assert_frame_equal(
@@ -1333,57 +1163,6 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
 
 class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
     """Tests for high-DPI dissected leaf geometry, rachis bridging, and petiole trimming."""
-
-    @staticmethod
-    def _build_high_dpi_pinnatisect_mask(sever_rachis: bool = False, include_petiole: bool = False) -> np.ndarray:
-        """Synthesize a high-DPI (1200x900, minor_w > 480 px) lyrate-pinnatisect leaf mask."""
-        mask = np.zeros((1200, 900), dtype=np.uint8)
-        cx = 450
-        # Central rachis spine (from y=180 terminal lobe down to y=880 lowest pinna pair)
-        if not sever_rachis:
-            cv2.rectangle(mask, (cx - 10, 200), (cx + 10, 880), 255, -1)
-
-        # Terminal rounded-lobate segment
-        cv2.ellipse(mask, (cx, 210), (135, 95), 0, 0, 360, 255, -1)
-        cv2.ellipse(mask, (cx - 95, 220), (55, 40), -15, 0, 360, 255, -1)
-        cv2.ellipse(mask, (cx + 95, 220), (55, 40), 15, 0, 360, 255, -1)
-
-        # 3 pairs of opposing lateral pinnae spanning width ~520 px (> 360 px high-DPI threshold)
-        pinna_specs = [
-            (410, 250, 48, 12),
-            (610, 235, 44, 10),
-            (800, 195, 38, 8),
-        ]
-        for y_c, span_x, lobe_h, angle in pinna_specs:
-            # Left pinna
-            cv2.ellipse(mask, (cx - span_x // 2, y_c), (span_x // 2, lobe_h), -angle, 0, 360, 255, -1)
-            # Right pinna
-            cv2.ellipse(mask, (cx + span_x // 2, y_c), (span_x // 2, lobe_h), angle, 0, 360, 255, -1)
-            if sever_rachis:
-                # Carve a narrow gap across the central rachis internode above this pinna pair
-                cv2.rectangle(mask, (cx - 35, y_c - lobe_h - 32), (cx + 35, y_c - lobe_h - 4), 0, -1)
-
-        if include_petiole:
-            # Narrow basal petiole stalk below the lowest pinna pair (y=840..1090, width=14 px)
-            cv2.rectangle(mask, (cx - 7, 835), (cx + 7, 1090), 255, -1)
-
-        return mask
-
-    def test_high_dpi_dissected_leaf_passes_is_botanical_dissection_and_tier1_routing(self) -> None:
-        """High-DPI dissected leaves (minor_w > 360 px) must pass is_botanical_dissection."""
-        from scripts.vision.leaf_geometry_utils import is_botanical_dissection
-
-        mask = self._build_high_dpi_pinnatisect_mask(sever_rachis=False, include_petiole=False)
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        main_cnt = max(cnts, key=cv2.contourArea)
-        (_, (w_rect, h_rect), _) = cv2.minAreaRect(main_cnt)
-        minor_w = float(min(w_rect, h_rect))
-        self.assertGreater(minor_w, 400.0, "Fixture must exercise native high-DPI minor_w > 360 px regime.")
-
-        self.assertTrue(
-            is_botanical_dissection(mask),
-            "High-DPI pinnatisect leaf with minor_w > 360 px must be recognized as botanical dissection.",
-        )
 
     def test_stage1_rescues_leaf_partial_when_leaf_whole_absent(self) -> None:
         """When Stage 1 finds 0 Class 0 (leaf_whole) boxes, Class 1 (leaf_partial) boxes are rescued for LM3LeafSegmenterEngine."""
@@ -1541,42 +1320,18 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         self.assertGreater(float(pet_metrics["petiole_length_px"]), 50.0)
         self.assertGreater(float(pet_metrics["petiole_length_mm"]), 5.0)
 
-    def test_dissected_sinus_topology_opening_and_canonical_tip_up_ect_export(self) -> None:
+    def test_canonical_tip_up_contour_ect_and_scale_calibrator(self) -> None:
         """
-        Verify topology-aware inter-lobe sinus opening vs interior hole filling,
-        canonical tip-up contour rotation in export_standardized_contour,
+        Verify canonical tip-up contour rotation in export_standardized_contour,
         LM3ScaleCalibrator megapixel prior, orient_and_score_leaf_lm3, and
         compute_leaf_ect_descriptor.
         """
-        from scripts.vision.leaf_geometry_utils import (
-            _prepare_lamina_mask,
-            export_standardized_contour,
-        )
+        from scripts.vision.leaf_geometry_utils import export_standardized_contour
         from scripts.vision.lm3_inference_engines import (
             LM3ScaleCalibrator,
             compute_leaf_ect_descriptor,
             orient_and_score_leaf_lm3,
         )
-
-        # 1. Native LeafMachine3 lamina = silhouette & ~hole component gating (min_area_px = 64):
-        #    qualifying hole_mask components (>= 64 px) are subtracted, tiny specks (< 64 px) are ignored,
-        #    and zero 3px cv2.line trenches are carved into the outer margin.
-        mask = self._build_high_dpi_pinnatisect_mask(sever_rachis=False, include_petiole=False)
-        cv2.line(mask, (565, 410), (565, 610), 255, thickness=2)
-        hole_mask = np.zeros_like(mask)
-        # Qualifying large hole_mask component (x=475..562, y=455..565; area >= 64 px)
-        cv2.rectangle(hole_mask, (475, 455), (562, 565), 255, -1)
-        # Tiny 3x3 = 9 px speck (< 64 px) at (450, 210) deep inside the terminal lobe
-        hole_mask[209:212, 449:452] = 255
-
-        prep_mask = _prepare_lamina_mask(mask.copy(), hole_mask=hole_mask)
-        self.assertIsNotNone(prep_mask)
-        # Tiny 3x3 speck (< 64 px) at (450, 210) is ignored by min_area_px = 64 so lamina remains > 0
-        self.assertGreater(int(prep_mask[210, 450]), 0)
-        # Qualifying hole_mask component (>= 64 px) at (515, 510) is subtracted (== 0)
-        self.assertEqual(int(prep_mask[510, 515]), 0)
-        # Zero 3px cv2.line trenches are carved into the outer margin at x=565
-        np.testing.assert_array_equal(prep_mask[410:611, 564:567] > 0, mask[410:611, 564:567] > 0)
 
         # 2. Canonical tip-up contour rotation on an oblique 135-degree leaf
         oblique_mask = np.zeros((400, 400), dtype=np.uint8)
@@ -1833,12 +1588,11 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                     "catalogNumber": ["NCU0001", "NCU0002", "NCU0003"],
                     "leaf_id": [1, 2, 3],
                     "species_standardized": ["Packera millefolia"] * 3,
-                    "assigned_tier": ["Tier_1_Direct"] * 3,
                     "determiner_tier": ["Tier_1_Gold"] * 3,
                     "is_type_specimen": [False, False, False],
                     "solidity": [0.86, 0.88, 0.90],
                     "aspect_ratio": [1.65, 2.05, 2.55],
-                    "ucs_score": [0.93, 0.94, 0.95],
+                    "archetype_score": [0.93, 0.94, 0.95],
                     "pixels_per_mm": [10.0, 10.0, 10.0],
                     "is_calibrated_mm": [True, True, True],
                     "mask_path": mask_paths,
@@ -1872,33 +1626,6 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             seen_vouchers = [t.split("\n")[-1].split(" ")[0] for t in leaf_titles]
             self.assertEqual(len(seen_vouchers), len(set(seen_vouchers)), "No duplicate leaf IDs across a row.")
 
-    def test_enclosed_sinus_hole_subtraction_and_bridge_opening(self) -> None:
-        """
-        Verify that _prepare_lamina_mask() applies native
-        LeafMachine3 lamina = silhouette & ~hole subtraction for qualifying hole_mask
-        components (>= 64 px), ignores tiny specks (< 64 px), and carves zero synthetic
-        3px cv2.line trenches across the exterior wall.
-        """
-        from scripts.vision.leaf_geometry_utils import _prepare_lamina_mask
-
-        mask = np.zeros((200, 160), dtype=np.uint8)
-        cv2.ellipse(mask, (80, 100), (45, 80), 0, 0, 360, 255, -1)
-
-        hole_mask = np.zeros_like(mask)
-        # Qualifying hole_mask component >= 64 px (30 x 36 = 1080 px)
-        hole_mask[85:115, 85:121] = 255
-        # Tiny speck < 64 px (4 x 4 = 16 px) deep inside the blade
-        hole_mask[60:64, 75:79] = 255
-
-        prep_mask = _prepare_lamina_mask(mask.copy(), hole_mask=hole_mask)
-        self.assertEqual(int(prep_mask[100, 100]), 0, "Qualifying hole_mask component (>= 64 px) must be subtracted.")
-        self.assertEqual(int(prep_mask[62, 77]), 255, "Tiny hole_mask speck (< 64 px) must be ignored.")
-        np.testing.assert_array_equal(
-            prep_mask[:, 121:],
-            mask[:, 121:],
-            "Zero synthetic 3px cv2.line trenches may be carved across the right exterior wall.",
-        )
-
     def test_native_lm3_delegation_dissected_pcd_and_anatomical_leaf_zone(self) -> None:
         """
         Verify:
@@ -1910,8 +1637,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                returns a valid (32, 32) np.float32 matrix.
              - _extract_native_lm3_petiole_anchor and _estimate_petiole_width_px delegate to
                leafmachine3.core.petiole.measure_petiole and leafmachine3.core.landmark_metrics.compute_measurements.
-             - compute_geometric_metrics and compute_classical_shape_descriptors delegate to
-               leafmachine3.core.morphometrics.polygon_morphology.
+             - compute_lm3_shape_metrics delegates to leafmachine3.core.morphometrics.polygon_morphology.
           2. Dissected-Leaf PCD & Stage 2 enhancements:
              - Stage 1 _unpack_stage1_candidates includes Leaf_PARTIAL (cls_id == 1) dissected leaf
                boxes alongside Leaf_WHOLE (cls_id == 0) by default, and asymmetric nested-box
@@ -1996,12 +1722,10 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                 "_estimate_petiole_width_px must delegate to leafmachine3.core.landmark_metrics.compute_measurements.",
             )
 
-        # 1d. compute_geometric_metrics and compute_classical_shape_descriptors delegate to polygon_morphology
+        # 1d. compute_lm3_shape_metrics delegates to polygon_morphology
         with patch.object(lgu, "polygon_morphology", wraps=lm3_morph.polygon_morphology) as spy_pmorph:
-            ucs_v, sol_v, ang_v, p_ap, p_ba = lgu.compute_geometric_metrics(leaf_mask)
-            desc_v = lgu.compute_classical_shape_descriptors(leaf_mask)
-            self.assertTrue(spy_pmorph.called, "compute_geometric_metrics / compute_classical_shape_descriptors must invoke polygon_morphology.")
-        self.assertGreater(sol_v, 0.85)
+            desc_v = lgu.compute_lm3_shape_metrics(leaf_mask)
+            self.assertTrue(spy_pmorph.called, "compute_lm3_shape_metrics must invoke polygon_morphology.")
         self.assertGreater(desc_v["solidity"], 0.85)
 
         # 2a. Stage 1 _unpack_stage1_candidates includes Leaf_PARTIAL (cls == 1) alongside Leaf_WHOLE (cls == 0)
@@ -2041,16 +1765,15 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             self.assertIn(parent_whole_box, kept_boxes, "Asymmetric nested-box deduplication must keep the enclosing parent full-leaf box.")
             self.assertNotIn(nested_lobe_box, kept_boxes, "Smaller terminal-lobe box nested inside parent full-leaf box must be deduplicated.")
 
-        # 2b. Stage 2 _build_native_lm3_crop_masks retains secondary pinna Leaf (cls == 0) components (>= 64 px)
-        #     when bridged to the primary lamina by the Petiole/rachis mask (cls == 1).
+        # 2b. Stage 2 _build_native_lm3_crop_masks extracts top-scoring LM3 Leaf (cls == 0) and Petiole (cls == 1)
+        #     masks without synthesizing OpenCV rachis bridges across separate instance masks.
         crop_shape = (300, 240)
         terminal_lobe = np.zeros(crop_shape, dtype=np.uint8)
         cv2.ellipse(terminal_lobe, (120, 80), (45, 50), 0, 0, 360, 255, -1)
         lateral_pinna = np.zeros(crop_shape, dtype=np.uint8)
-        cv2.ellipse(lateral_pinna, (85, 185), (28, 16), 0, 0, 360, 255, -1)  # area > 1000 px >= 64 px, disconnected in cls 0
+        cv2.ellipse(lateral_pinna, (85, 185), (28, 16), 0, 0, 360, 255, -1)
         rachis_petiole = np.zeros(crop_shape, dtype=np.uint8)
         cv2.rectangle(rachis_petiole, (105, 115), (125, 250), 255, -1)
-        cv2.rectangle(rachis_petiole, (95, 175), (120, 195), 255, -1)  # bridges rachis to lateral_pinna
         crop_preds_pinna = [
             ((25, 70, 135, 170), terminal_lobe, 0.93, 0),
             ((165, 55, 205, 115), lateral_pinna, 0.86, 0),
@@ -2063,12 +1786,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         )
         self.assertIsNotNone(best_m_pinna)
         self.assertIsNotNone(pet_m_pinna)
-        self.assertGreater(int(best_m_pinna[80, 120]), 0, "Primary terminal lobe must be retained.")
-        self.assertGreater(
-            int(best_m_pinna[185, 85]),
-            0,
-            "Secondary lateral pinna (>= 64 px) bridged by the Petiole/rachis mask must be retained.",
-        )
+        np.testing.assert_array_equal(best_m_pinna > 0, terminal_lobe > 0)
 
         # 3. Post-segmentation anatomical leaf_zone classification (classify_leaf_zone_anatomical)
         classify_fn = getattr(ocm, "classify_leaf_zone_anatomical", None) or getattr(
@@ -2158,7 +1876,6 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
              rejected by Step 02 gatekeeping.
         """
         from scripts.vision.lm3_inference_engines import orient_and_score_leaf_lm3
-        from scripts.vision.leaf_geometry_utils import compute_geometric_metrics
 
         crop_shape = (300, 260)
         focal_leaf = np.zeros(crop_shape, dtype=np.uint8)
@@ -2224,8 +1941,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             dtype=np.int32,
         )
         cv2.fillPoly(merged_blob, [pts_merged], 255)
-        ucs_m, sol_m, _, pa_m, pb_m = compute_geometric_metrics(merged_blob)
-        lm3_qc = orient_and_score_leaf_lm3(merged_blob, p_base=pb_m, p_apex=pa_m)
+        lm3_qc = orient_and_score_leaf_lm3(merged_blob, p_base=(70, 240), p_apex=(70, 50))
         self.assertLess(float(lm3_qc["bilateral_dice"]), 0.70)
         self.assertGreaterEqual(abs(float(lm3_qc["si_a"])), 0.35)
 
@@ -2248,7 +1964,6 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                     output_dir=tmp_vp / "out",
                     device="cpu",
                     db_path=tmp_vp / "test.sqlite",
-                    enable_geometric_qc=False,
                 )
             sheet_canvas = np.full((600, 500, 3), 230, dtype=np.uint8)
             full_merged = np.zeros((600, 500), dtype=np.uint8)
@@ -2262,10 +1977,12 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                     recs_def, fail_def = pipe_def.process_voucher("1202203", img_p)
             self.assertEqual(
                 len(recs_def),
-                0,
-                "Default process_voucher (enable_geometric_qc=False) must reject merged leaf/stem blobs failing native LM3 bilateral symmetry.",
+                1,
+                "Read-only Step 02 adapter must persist all LM3 masks with efa_qc_pass=False rather than dropping in Python.",
             )
-            self.assertIsNotNone(fail_def)
+            self.assertIsNone(fail_def)
+            self.assertFalse(bool(recs_def[0]["lm3_gates_pass"]))
+            self.assertLess(float(recs_def[0]["bilateral_dice"]), 0.70)
 
     def test_step02_figures_basal_vs_cauline_separation(self) -> None:
         """
@@ -2300,12 +2017,11 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                         "leaf_id": 1,
                         "plant_individual_id": 1,
                         "species_name": "Packera anonyma" if idx % 2 == 0 else "Packera aurea",
-                        "assigned_tier": "Tier_1_Direct",
                         "leaf_zone": "cauline" if is_caul else "basal",
                         "solidity": 0.62 + 0.02 * idx if is_caul else 0.86 + 0.01 * idx,
                         "blade_length_to_width_ratio": 2.9 + 0.1 * idx if is_caul else 1.6 + 0.1 * idx,
                         "aspect_ratio": 2.9 + 0.1 * idx if is_caul else 1.6 + 0.1 * idx,
-                        "ucs_score": 0.91,
+                        "archetype_score": 0.91,
                         "area_px": 4200 + idx * 100,
                         "blade_area_cm2": 3.5 + idx * 0.2,
                         "mask_path": str(m_p),

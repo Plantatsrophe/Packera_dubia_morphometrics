@@ -352,7 +352,7 @@ parse_args_robust <- function() {
     pheno_plot = "outputs/figures/phenological_latitudinal_anomaly.pdf",
     ssurgo_cache = "data/environmental/ssurgo_cache", ssurgo_table = "data/tables/ssurgo_edaphic_validation.csv",
     contingency_table = "outputs/reports/micro_edaphic_outcrop_contingency.csv", batch_size = 75,
-    permutations = 100, n_trees = 500, intraspecific_mode = FALSE, focal_taxon = "", demo = FALSE
+    permutations = 999, n_trees = 500, intraspecific_mode = FALSE, focal_taxon = "", demo = FALSE
   ))
 }
 
@@ -536,7 +536,7 @@ assign_wc_bio_from_extracted <- function(df, wc_vals) {
   coalesce_legacy_wc_bio_cols(df)
 }
 
-discover_candidate_eco_predictors <- function(df, include_pheno = TRUE, min_finite = 3L) {
+discover_candidate_eco_predictors <- function(df, include_pheno = FALSE, min_finite = 3L) {
   if (is.null(df) || !is.data.frame(df) || nrow(df) == 0L) return(character(0))
   df <- coalesce_legacy_wc_bio_cols(df, ensure_all_19 = FALSE)
   nms <- names(df)
@@ -545,7 +545,7 @@ discover_candidate_eco_predictors <- function(df, include_pheno = TRUE, min_fini
 
   fine_pattern <- paste0(
     "^(fine_|ssurgo_|polaris_|solus_|bdricm$|resdept_r$|cfvo$|awc$|",
-    "alr_|clr_|is_azonal_lithology$|azonal_|",
+    "ilr_|alr_|clr_|is_azonal_lithology$|azonal_|",
     "ph_q10_buffer$|ph_q90_buffer$|min_bedrock_depth_buffer_cm$|max_cfvo_buffer_pct$|",
     "azonal_lithology_presence_buffer$)"
   )
@@ -578,6 +578,9 @@ discover_candidate_eco_predictors <- function(df, include_pheno = TRUE, min_fini
     "is_rock_outcrop", "is_azonal_lithology", "azonal_lithology_presence_buffer",
     "azonal_contact_dist_m"
   )
+  if (has_finite_col("ilr_texture_1") && has_finite_col("ilr_texture_2")) {
+    exclude_cols <- c(exclude_cols, grep("^(alr_|clr_)", nms, value = TRUE, ignore.case = TRUE))
+  }
   if (has_finite_col("fine_bedrock_depth_cm")) {
     exclude_cols <- c(exclude_cols, "bdricm", "resdept_r", "ssurgo_bedrock_depth_cm")
   } else if (has_finite_col("bdricm")) {
@@ -2334,13 +2337,20 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
   y <- factor(df$analysis_group)
 
   # Authority-Anchored Training Cohort Selection:
-  # Strictly Tier_1_Gold + Tier_2_Silver + promoted Bronze anchors with coordinateUncertaintyInMeters <= 10000
-  elig_coord <- if ("is_training_eligible_coord" %in% names(df)) as.logical(df$is_training_eligible_coord) else rep(TRUE, n)
-  elig_coord[is.na(elig_coord)] <- TRUE
+  # Enforce <= 2000 m explicit coordinate uncertainty (is_edaphic_eligible_coord) when 30 m edaphic predictors are active,
+  # falling back to <= 10000 m macro-climatic eligibility only when edaphic anchors have < 6 total records.
+  elig_clim <- if ("is_training_eligible_coord" %in% names(df)) as.logical(df$is_training_eligible_coord) else rep(TRUE, n)
+  elig_clim[is.na(elig_clim)] <- TRUE
   if ("coordinateUncertaintyInMeters" %in% names(df)) {
     u_m <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
-    elig_coord <- elig_coord & (is.na(u_m) | u_m <= 10000.0)
+    elig_clim <- elig_clim & (is.na(u_m) | u_m <= 10000.0)
   }
+  has_30m_edaph <- any(grepl("^(fine_|ssurgo_|polaris_|solus_|topo_|bdricm|resdept|cfvo|awc|ilr_|alr_)", env_vars, ignore.case = TRUE))
+  elig_edaph <- if ("is_edaphic_eligible_coord" %in% names(df)) as.logical(df$is_edaphic_eligible_coord) else if ("coordinateUncertaintyInMeters" %in% names(df)) {
+    u_m2 <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters)); is.finite(u_m2) & u_m2 > 0 & u_m2 <= 2000.0
+  } else elig_clim
+  elig_edaph[is.na(elig_edaph)] <- FALSE
+  elig_coord <- if (has_30m_edaph && sum(elig_clim & elig_edaph & !is.na(y)) >= 6L) (elig_clim & elig_edaph) else elig_clim
   det_tier <- if (exists(".standardize_determiner_tier_vec", mode = "function")) {
     .standardize_determiner_tier_vec(df)
   } else if ("determiner_tier" %in% names(df)) {
@@ -3595,7 +3605,7 @@ main <- function() {
     }
     dyn_pc_cols <- grep("^(Sym_|Asym_)?PC[0-9]+$", names(morph_df), value = TRUE)
     m_cols <- intersect(names(morph_df), unique(c(
-      "catalogNumber", "plant_individual_id", "morph_tier_source", "n_tier1_leaves", "n_tier2_leaves",
+      "catalogNumber", "plant_individual_id", "morph_tier_source",
       "gmm_cluster", "gmm_uncertainty", "is_novel_morphotype",
       "cda_predicted_taxon", "cda_predicted", "cda_posterior_prob",
       "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin",

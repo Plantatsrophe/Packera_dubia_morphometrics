@@ -187,8 +187,6 @@ class TestMainPipelineCLI(unittest.TestCase):
             },
             "segmentation": {
                 "device": "cpu",
-                "min_solidity": 0.72,
-                "min_ucs": 0.85,
                 "score_thresh": 0.40,
             },
         }
@@ -318,8 +316,6 @@ class TestMainPipelineCLI(unittest.TestCase):
             },
             "segmentation": {
                 "device": "cpu",
-                "min_solidity": 0.72,
-                "min_ucs": 0.85,
                 "score_thresh": 0.40,
             },
         }
@@ -352,8 +348,6 @@ class TestMainPipelineCLI(unittest.TestCase):
             },
             "segmentation": {
                 "device": "cpu",
-                "min_solidity": 0.72,
-                "min_ucs": 0.85,
                 "score_thresh": 0.40,
             },
         }
@@ -886,10 +880,9 @@ REUSE_CANONICAL_DATA="false"
         parser = main.build_parser()
 
         # Global and subcommand -j/--threads and --gpu-batch-size (plus hidden --batch-size alias)
-        args_seg = parser.parse_args(["segment", "-j", "12", "--gpu-batch-size", "24", "--enable-geometric-qc"])
+        args_seg = parser.parse_args(["segment", "-j", "12", "--gpu-batch-size", "24"])
         self.assertEqual(args_seg.threads, 12)
         self.assertEqual(args_seg.gpu_batch_size, 24)
-        self.assertTrue(args_seg.enable_geometric_qc)
 
         args_alias = parser.parse_args(["synthesis", "--threads", "6", "--batch-size", "16", "--ssurgo-batch-size", "50"])
         self.assertEqual(args_alias.threads, 6)
@@ -937,11 +930,10 @@ REUSE_CANONICAL_DATA="false"
             self.assertTrue(p01_legacy.force)
 
             mod_02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
-            with patch.object(sys, "argv", ["02_segment_and_extract.py", "-j", "10", "--gpu-batch-size", "20", "--enable-geometric-qc"]):
+            with patch.object(sys, "argv", ["02_segment_and_extract.py", "-j", "10", "--gpu-batch-size", "20"]):
                 p02 = mod_02.parse_args()
                 self.assertEqual(p02.threads, 10)
                 self.assertEqual(p02.gpu_batch_size, 20)
-                self.assertTrue(p02.enable_geometric_qc)
 
     def test_subcommand_help_hides_suppressed_internal_and_legacy_flags(self):
         """Verify --help output exposes consolidated flags and hides internal/retired aliases."""
@@ -1042,12 +1034,12 @@ REUSE_CANONICAL_DATA="false"
             (ws / "data" / "tables" / "extracted_leaf_traits.csv").write_text("catalogNumber\nNCU0001\n", encoding="utf-8")
             (ws / "data" / "contours").mkdir(parents=True)
             (ws / "data" / "contours" / "NCU0001_leaf_1.csv").write_text("x,y\n0,0\n", encoding="utf-8")
-            (ws / "data" / "masks" / "tier1_intact").mkdir(parents=True)
-            (ws / "data" / "masks" / "tier1_intact" / "NCU0001_leaf_1.png").write_bytes(b"PNG")
+            (ws / "data" / "masks").mkdir(parents=True)
+            (ws / "data" / "masks" / "NCU0001_leaf_1.png").write_bytes(b"PNG")
             (ws / "data" / "ect").mkdir(parents=True)
             (ws / "data" / "ect" / "NCU0001_leaf_1_ect.npy").write_bytes(b"NPY")
-            (ws / "data" / "cropped_patches" / "tier1_intact").mkdir(parents=True)
-            (ws / "data" / "cropped_patches" / "tier1_intact" / "NCU0001_leaf_1.webp").write_bytes(b"WEBP")
+            (ws / "data" / "cropped_patches" / "rosette").mkdir(parents=True)
+            (ws / "data" / "cropped_patches" / "rosette" / "NCU0001_leaf_1.webp").write_bytes(b"WEBP")
             (ws / "runs" / "20260101_000000").mkdir(parents=True)
             (ws / "runs" / "20260101_000000" / "run.log").write_text("log", encoding="utf-8")
 
@@ -1060,7 +1052,7 @@ REUSE_CANONICAL_DATA="false"
                 "INSERT INTO plant_individuals (catalogNumber, plant_individual_id) VALUES ('NCU0001', 1)"
             )
             conn.execute(
-                "INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, assigned_tier, contour_xy_json) VALUES ('NCU0001', 1, 'L1', 'Tier_1_Direct', '[[0,0]]')"
+                "INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, contour_xy_json) VALUES ('NCU0001', 1, 'L1', '[[0,0]]')"
             )
             conn.commit()
             conn.close()
@@ -1076,8 +1068,8 @@ REUSE_CANONICAL_DATA="false"
             self.assertFalse((ws / "data" / "tables" / "extracted_leaf_traits.csv").exists())
             self.assertEqual(list((ws / "data" / "contours").glob("*.csv")), [])
             self.assertEqual(list((ws / "data" / "ect").glob("*.npy")), [])
-            self.assertTrue((ws / "data" / "masks" / "tier1_intact").is_dir())
-            self.assertEqual(list((ws / "data" / "masks" / "tier1_intact").glob("*")), [])
+            self.assertTrue((ws / "data" / "masks").is_dir())
+            self.assertEqual(list((ws / "data" / "masks").glob("*")), [])
             self.assertEqual(list((ws / "runs").iterdir()), [])
 
             # SQLite check: vouchers preserved with qc_status=NULL, Step 02 tables empty

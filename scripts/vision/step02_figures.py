@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import cv2
+import scripts.vision.lm3_compat  # noqa: F401
 import numpy as np
 import pandas as pd
 
@@ -30,10 +31,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.vision.leaf_geometry_utils import (
-    compute_geometric_metrics,
-    is_botanical_dissection,
-)
+
 from scripts.vision.lm3_inference_engines import _ensure_ect_module_loaded
 
 logger = logging.getLogger("SegmentAndExtract")
@@ -227,13 +225,7 @@ def _is_valid_smooth_closed_mask(m_path_str: Any, out_dir: Path) -> bool:
     # 4. Require smooth closed contour geometry
     circ = (4.0 * math.pi * area_c) / (perim_c * perim_c)
     if circ < 0.12:
-        if not (
-            circ >= 0.025
-            and (
-                sol_c < 0.78
-                or is_botanical_dissection(main_cnt, solidity=sol_c, check_solidity_range=False)
-            )
-        ):
+        if not (circ >= 0.025 and sol_c < 0.78):
             return False
     return True
 
@@ -294,7 +286,7 @@ def generate_step02_publication_figures(
              (B2) Anthesis Phenological State proportions across species.
       2. fig02b_silhouette_montage.{pdf,png}:
          Taxon-stratified grid (rows = active Packera species present in df_plot;
-         4 representative Tier_1_Direct leaves per row spanning the 20th, 40th, 60th, and 80th
+         4 representative leaves per row spanning the 20th, 40th, 60th, and 80th
          percentiles of blade aspect ratio/dissection within q +/- 0.08 quantile windows),
          with 10 mm physical scale bar on calibrated tiles, homologized p_base attachment point,
          and midrib axis.
@@ -364,14 +356,7 @@ def generate_step02_publication_figures(
         except Exception:
             pass
 
-    # 1. Enforce assigned_tier == "Tier_1_Direct"
-    tier_series = df_plot.get("assigned_tier", pd.Series("Tier_1_Direct", index=df_plot.index)).astype(str).str.strip()
-    df_plot["norm_tier"] = tier_series.apply(
-        lambda t: "Tier_1_Direct"
-        if t.lower() in {"tier_1_direct", "tier1", "tier 1", "tier 1 (dissected)", "tier 1 (bipinnatisect)"}
-        else ("Tier_2_Reflected" if "2" in t else t)
-    )
-    df_plot = df_plot[df_plot["norm_tier"] == "Tier_1_Direct"].copy()
+    df_plot = df_plot.copy()
 
     # 2. Inner-join / filter against downstream Step 03 & Step 04 QC tables when present
     ind_efa_path = _discover_downstream_table("leaf_efa_harmonics_individual.csv", out_dir, active_cats)
@@ -381,9 +366,7 @@ def generate_step02_publication_figures(
             if "catalogNumber" in ind_df.columns and "leaf_id" in ind_df.columns:
                 ind_df["cat_str"] = ind_df["catalogNumber"].astype(str).str.strip()
                 ind_df["leaf_id_int"] = pd.to_numeric(ind_df["leaf_id"], errors="coerce").fillna(-1).astype(int)
-                if "assigned_tier" in ind_df.columns:
-                    ind_tier = ind_df["assigned_tier"].astype(str).str.strip().str.lower()
-                    ind_df = ind_df[ind_tier.isin({"tier_1_direct", "tier1", "tier 1"})]
+
                 if "is_contour_outlier" in ind_df.columns:
                     ind_df = ind_df[~ind_df["is_contour_outlier"].apply(_parse_bool_val)]
                 ind_sol_col = pd.to_numeric(ind_df["solidity"], errors="coerce") if "solidity" in ind_df.columns else pd.Series(0.85, index=ind_df.index)
@@ -405,7 +388,7 @@ def generate_step02_publication_figures(
                         "is_calibrated_mm",
                         "pixels_per_mm",
                         "solidity",
-                        "ucs_score",
+                        "archetype_score",
                         "pct_asymmetry",
                         "harmonic_roughness",
                         "is_contour_outlier",
@@ -558,10 +541,10 @@ def generate_step02_publication_figures(
         if "solidity" in df_plot.columns
         else pd.Series(0.86, index=df_plot.index)
     )
-    ucs_col = "ucs_score" if "ucs_score" in df_plot.columns else ("ucs" if "ucs" in df_plot.columns else None)
+    arch_col = "archetype_score" if "archetype_score" in df_plot.columns else None
     df_plot["ucs_val"] = (
-        pd.to_numeric(df_plot[ucs_col], errors="coerce").fillna(0.90)
-        if ucs_col is not None
+        pd.to_numeric(df_plot[arch_col], errors="coerce").fillna(0.90)
+        if arch_col is not None
         else pd.Series(0.90, index=df_plot.index)
     )
 
@@ -618,7 +601,7 @@ def generate_step02_publication_figures(
         os.environ.get("PACKERA_FOCAL_TAXON", "").strip() or "Packera dubia"
     )
     t1_counts = (
-        df_plot[df_plot["norm_tier"] == "Tier_1_Direct"]["species_clean"]
+        df_plot["species_clean"]
         .dropna()
         .astype(str)
         .str.strip()
@@ -1078,7 +1061,7 @@ def generate_step02_publication_figures(
     default_quantiles = (0.20, 0.40, 0.60, 0.80)
     type_anchored_quantiles = (0.35, 0.60, 0.85)
 
-    t1_pool = df_plot[df_plot["norm_tier"] == "Tier_1_Direct"].copy()
+    t1_pool = df_plot.copy()
     if len(t1_pool) == 0:
         t1_pool = df_plot.copy()
 
@@ -1151,7 +1134,7 @@ def generate_step02_publication_figures(
             n_missing_assets = int((~sp_all["asset_ok"]).sum())
             if n_missing_assets:
                 logger.warning(
-                    f"fig02b: {n_missing_assets} / {len(sp_all)} {sp_name} Tier_1_Direct leaves have no resolvable mask/contour asset on disk."
+                    f"fig02b: {n_missing_assets} / {len(sp_all)} {sp_name} extracted leaves have no resolvable mask/contour asset on disk."
                 )
             sp_all = sp_all[sp_all["asset_ok"]].copy()
             if "area_px" in sp_all.columns:
@@ -1769,6 +1752,7 @@ def generate_step02_publication_figures(
         saved_paths["fig02b_supplement_pdf"] = supp_pdf
         saved_paths["fig02b_supplement_png"] = supp_pdf.with_suffix(".png") if supp_png is None else supp_png
 
+    cauline_sp_list: List[str] = []
     if len(t1_cauline_pool) > 0:
         cauline_sp_list = [sp for sp in present_sp if (t1_cauline_pool["species_clean"] == sp).any()]
         if cauline_sp_list:
@@ -1932,14 +1916,7 @@ def export_taxon_ect_exemplars(
         sp_src = df_work.get("species_standardized", df_work.get("scientificName", df_work.get("species_raw", df_work.get("taxon", ""))))
         df_work["species_clean"] = sp_src.astype(str).apply(_standardize_packera_species_py)
 
-    # Normalize assigned_tier
-    t_col = df_work.get("assigned_tier", df_work.get("tier_assignment", df_work.get("tier", "Tier_1_Direct")))
-    is_t1 = t_col.astype(str).str.strip().str.lower().isin({
-        "tier_1_direct", "tier1", "tier 1", "tier 1 (dissected)", "tier 1 (bipinnatisect)"
-    })
-    df_t1 = df_work[is_t1].copy()
-    if len(df_t1) == 0:
-        df_t1 = df_work.copy()
+    df_t1 = df_work.copy()
 
     # Filter by leaf_zone
     if "leaf_zone" in df_t1.columns:

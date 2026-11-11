@@ -139,7 +139,7 @@ residualize_within_deme_phenophase_plasticity <- function(
 
   if (is.null(ref_mask) || length(ref_mask) != n) {
     auth_w <- if ("authority_weight" %in% names(df)) suppressWarnings(as.numeric(df$authority_weight)) else rep(1.0, n)
-    is_t1 <- if ("morph_tier_source" %in% names(df)) (!is.na(df$morph_tier_source) & df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, n)
+    is_t1 <- if ("morph_tier_source" %in% names(df)) (!is.na(df$morph_tier_source) & df$morph_tier_source == "Basal_Rosette") else rep(TRUE, n)
     ref_mask <- is.finite(auth_w) & (auth_w > 0.0) & is_t1
   }
   ref_idx <- which(as.logical(ref_mask))

@@ -18,7 +18,6 @@ import numpy as np
 import pandas as pd
 
 from scripts.core.harvester import standardize_packera_taxon
-from scripts.vision.leaf_geometry_utils import is_botanical_dissection
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DISCOVERY_R_SCRIPT = REPO_ROOT / "scripts" / "analysis" / "07_discover_taxon_complexes.R"
@@ -43,8 +42,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             mm_csv = mm_dir / "multimodal_conflict_flags.csv"
 
             pd.DataFrame([
-                {"catalogNumber": "MM_01", "plant_individual_id": 1, "species_standardized": "Packera aurea", "determiner_tier": "Tier_1_Gold", "n_tier1_leaves": 3, "Sym_PC1": -1.2, "Sym_PC2": 0.3},
-                {"catalogNumber": "MM_02", "plant_individual_id": 1, "species_standardized": "Packera obovata", "determiner_tier": "Tier_1_Gold", "n_tier1_leaves": 3, "Sym_PC1": 1.4, "Sym_PC2": -0.2},
+                {"catalogNumber": "MM_01", "plant_individual_id": 1, "species_standardized": "Packera aurea", "determiner_tier": "Tier_1_Gold", "basal_leaf_count": 3, "Sym_PC1": -1.2, "Sym_PC2": 0.3},
+                {"catalogNumber": "MM_02", "plant_individual_id": 1, "species_standardized": "Packera obovata", "determiner_tier": "Tier_1_Gold", "basal_leaf_count": 3, "Sym_PC1": 1.4, "Sym_PC2": -0.2},
             ]).to_csv(morph_csv, index=False)
             pd.DataFrame([
                 {
@@ -140,7 +139,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                 gmm_cluster = c(1L, 2L, 2L, 5L, 5L, 2L),
                 gmm_2_delta_bic = c(0, 0, 0, 12.0, 12.0, 0),
                 edaphic_schoener_d = c(0.75, 0.60, 0.55, 0.18, 0.72, 0.80),
-                n_tier1_leaves = rep(3L, 6),
+                basal_leaf_count = rep(3L, 6),
                 stringsAsFactors = FALSE
               )
               kw_missing <- tryCatch(
@@ -375,34 +374,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         """Verify R standardize_taxon_name(), get_dynamic_packera_palette(), shapes, titles, and italic expressions are 100% species-agnostic."""
         self.assertIn("STEP08_R_PALETTE_OK", self._require_batched_r())
 
-    def test_bipinnatisect_dissection_gate_tier1_routing(self):
-        """Verify finely dissected/bipinnatisect leaf (0.18 <= solidity < 0.48, >=4 deep sinuses) routes to Tier_1_Direct."""
-        mask = np.zeros((400, 400), dtype=np.uint8)
-        # Central rachis along x = 200, y in [60, 340], width = 10 px
-        cv2.rectangle(mask, (195, 60), (205, 340), 255, -1)
-        # 5 pairs of symmetric narrow pinnae creating >= 8 deep bilateral sinuses
-        # with solidity in [0.18, 0.48] and high bilateral symmetry (UCS >= 0.85)
-        pinna_ys = [85, 135, 185, 235, 285]
-        half_spans = [75, 95, 105, 90, 65]
-        for y_c, span in zip(pinna_ys, half_spans):
-            cv2.rectangle(mask, (200 - span, y_c - 6), (200 + span, y_c + 6), 255, -1)
-        # Apical lobe
-        cv2.rectangle(mask, (182, 45), (218, 65), 255, -1)
-
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        self.assertTrue(len(cnts) > 0)
-        cnt = max(cnts, key=cv2.contourArea)
-        area = cv2.contourArea(cnt)
-        hull = cv2.convexHull(cnt)
-        solidity = area / cv2.contourArea(hull)
-        self.assertGreaterEqual(solidity, 0.18)
-        self.assertLess(solidity, 0.48)
-
-        self.assertTrue(
-            is_botanical_dissection(mask, contour=cnt, solidity=solidity),
-            f"Expected bipinnatisect silhouette (solidity={solidity:.3f}) to be recognized as botanical dissection.",
-        )
-
     def test_discover_taxon_complexes_8_species_3_complexes(self):
         """Verify 07_discover_taxon_complexes.R recovers 3 true complexes across 8 species with 100% accuracy."""
         rng = np.random.default_rng(20261025)
@@ -464,9 +435,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                         "species_standardized": taxon,
                         "determiner_tier": det_tier,
                         "authority_weight": auth_wt,
-                        "n_tier1_leaves": 3,
-                        "n_tier2_leaves": 0,
-                        "morph_tier_source": "Tier_1_Pure",
+                        "basal_leaf_count": 3,
+                        "morph_tier_source": "Basal_Rosette",
                         "Sym_PC1": float(pcs[0]),
                         "Sym_PC2": float(pcs[1]),
                         "Sym_PC3": float(pcs[2]),
@@ -487,8 +457,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                         "species_standardized": taxon,
                         "determiner_tier": det_tier,
                         "authority_weight": auth_wt,
-                        "n_tier1_leaves": 3,
-                        "morph_tier_source": "Tier_1_Pure",
+                        "basal_leaf_count": 3,
+                        "morph_tier_source": "Basal_Rosette",
                         "Sym_PC1": float(pcs[0]),
                         "Sym_PC2": float(pcs[1]),
                         "Sym_PC3": float(pcs[2]),
@@ -540,6 +510,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                 "--output-figure",
                 str(out_figure),
             ]
+            if not shutil.which("Rscript"):
+                self.skipTest("Rscript not installed.")
             res = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, check=False)
             self.assertEqual(
                 res.returncode,
@@ -639,8 +611,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                         "plant_individual_id": 1,
                         "species_standardized": sp_name,
                         "determiner_tier": "Tier_1_Gold",
-                        "n_tier1_leaves": 3,
-                        "morph_tier_source": "Tier_1_Pure",
+                        "basal_leaf_count": 3,
+                        "morph_tier_source": "Basal_Rosette",
                         "gmm_cluster": k_id,
                         "Sym_PC1": float(vec[0]),
                         "Sym_PC2": float(vec[1]),
@@ -653,6 +625,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                     })
 
             pd.DataFrame(morph_rows).to_csv(morph_csv, index=False)
+            if not shutil.which("Rscript"):
+                self.skipTest("Rscript not installed.")
 
             res = subprocess.run(
                 [
@@ -722,8 +696,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                         "plant_individual_id": 0,
                         "species_standardized": sp_name,
                         "determiner_tier": "Tier_1_Gold",
-                        "n_tier1_leaves": 3,
-                        "morph_tier_source": "Tier_1_Pure",
+                        "basal_leaf_count": 3,
+                        "morph_tier_source": "Basal_Rosette",
                         "gmm_cluster": 1,
                         "Sym_PC1": float(rng.normal(0.0, 0.15)),
                         "Sym_PC2": float(rng.normal(0.0, 0.15)),
@@ -757,6 +731,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
 
             pd.DataFrame(morph_rows).to_csv(morph_csv, index=False)
             pd.DataFrame(mm_rows).to_csv(mm_csv, index=False)
+            if not shutil.which("Rscript"):
+                self.skipTest("Rscript not installed.")
 
             res = subprocess.run(
                 [
@@ -803,6 +779,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         stopifnot(length(unique(sub_res$morph_df$species_standardized)) == 4L)
         cat("SUBCLUSTER_MULTI_SP_GUARD_OK\\n")
         """
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
         res = subprocess.run(["Rscript", "-e", r_code], cwd=str(REPO_ROOT), capture_output=True, text=True, check=False)
         self.assertEqual(res.returncode, 0, f"Subcluster multi-species guard test failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("SUBCLUSTER_MULTI_SP_GUARD_OK", res.stdout)

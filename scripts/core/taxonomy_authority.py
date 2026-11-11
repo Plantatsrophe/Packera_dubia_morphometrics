@@ -704,16 +704,7 @@ def spatially_balance_and_thin_vouchers(
     # Step B: Candidate Priority Ranking
     t1_leaf_counts: Dict[str, int] = {}
     if manifest_df is not None and not manifest_df.empty and "catalogNumber" in manifest_df.columns:
-        tier_col = "assigned_tier" if "assigned_tier" in manifest_df.columns else (
-            "tier_assignment" if "tier_assignment" in manifest_df.columns else None
-        )
-        if tier_col is not None:
-            t1_rows = manifest_df[
-                manifest_df[tier_col].astype(str).str.strip().str.lower().str.match(r"^tier_?1")
-            ]
-        else:
-            t1_rows = manifest_df
-        for cat_k, cnt in t1_rows["catalogNumber"].astype(str).value_counts().items():
+        for cat_k, cnt in manifest_df["catalogNumber"].astype(str).value_counts().items():
             t1_leaf_counts[str(cat_k)] = int(cnt)
 
     lat_col = "decimalLatitude" if "decimalLatitude" in out_df.columns else (
@@ -747,12 +738,12 @@ def spatially_balance_and_thin_vouchers(
         tier_score = 3 if (tier_str == "Tier_1_Gold" or has_type >= 1) else (2 if tier_str == "Tier_2_Silver" else 1)
         is_gold_flags.append(tier_str == "Tier_1_Gold" or has_type >= 1)
 
-        # 3. n_tier1_leaves
+        # 3. Extracted leaf count
         if cat_str in t1_leaf_counts:
             n_t1 = t1_leaf_counts[cat_str]
-        elif "n_tier1_leaves" in out_df.columns and not pd.isna(row.get("n_tier1_leaves")):
+        elif "leaf_count" in out_df.columns and not pd.isna(row.get("leaf_count")):
             try:
-                n_t1 = int(float(row.get("n_tier1_leaves", 0)))
+                n_t1 = int(float(row.get("leaf_count", 0)))
             except (ValueError, TypeError):
                 n_t1 = 0
         else:

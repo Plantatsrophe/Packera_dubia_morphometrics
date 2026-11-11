@@ -8,22 +8,17 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-import yaml
 
-# Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.core.config import (
-    DEFAULT_CONFIG_PATH,
     PROJECT_ROOT as CONFIG_ROOT,
     PipelineConfig,
     PathsConfig,
     TaxaConfig,
     ThresholdsConfig,
-    DissectionConfig,
-    FoldDetectionConfig,
     MorphometricsConfig,
     HarvestingConfig,
     SegmentationConfig,
@@ -54,34 +49,12 @@ class TestPipelineConfig(unittest.TestCase):
             self.assertIn(str(CONFIG_ROOT), str(path_val), f"{field_name} should be anchored to {CONFIG_ROOT}")
 
     def test_thresholds_values(self):
-        """Verify key pipeline quality and segmentation thresholds match expected parameters."""
+        """Verify key pipeline image-quality and detection thresholds match expected parameters."""
         cfg = PipelineConfig.from_yaml()
         self.assertAlmostEqual(cfg.thresholds.pcd_conf, 0.25)
-        self.assertAlmostEqual(cfg.thresholds.min_solidity, 0.72)
-        self.assertAlmostEqual(cfg.thresholds.min_ucs, 0.85)
         self.assertAlmostEqual(cfg.thresholds.min_megapixels, 8.0)
         self.assertAlmostEqual(cfg.thresholds.min_file_size_kb, 500.0)
         self.assertAlmostEqual(cfg.thresholds.min_sharpness_laplacian, 80.0)
-
-        # Dissection parameters (calibrated; genus-wide dynamic defaults have zero hardcoded taxa)
-        self.assertIsInstance(cfg.thresholds.dissection, DissectionConfig)
-        self.assertTrue(cfg.thresholds.dissection.enabled)
-        self.assertAlmostEqual(cfg.thresholds.dissection.min_solidity_dissected, 0.50)
-        self.assertAlmostEqual(cfg.thresholds.dissection.sinus_defect_min_depth_ratio, 0.08)
-        self.assertEqual(cfg.thresholds.dissection.min_bilateral_sinus_count, 3)
-        self.assertEqual(cfg.thresholds.dissection.taxa_with_lyrate_tendency, [])
-
-        # Backward compatibility for solidity property
-        self.assertAlmostEqual(cfg.thresholds.solidity.default, 0.72)
-        self.assertAlmostEqual(cfg.thresholds.solidity.min_dissected, 0.50)
-        self.assertEqual(cfg.thresholds.solidity.taxa_with_lyrate_tendency, cfg.thresholds.dissection.taxa_with_lyrate_tendency)
-
-        # Fold detection parameters (calibrated)
-        self.assertIsInstance(cfg.thresholds.fold_detection, FoldDetectionConfig)
-        self.assertTrue(cfg.thresholds.fold_detection.enabled)
-        self.assertAlmostEqual(cfg.thresholds.fold_detection.max_chord_deviation_ratio, 0.035)
-        self.assertAlmostEqual(cfg.thresholds.fold_detection.max_folded_aspect_ratio, 0.42)
-        self.assertEqual(cfg.thresholds.fold_detection.min_chord_length_px, 150)
 
     def test_thresholds_safe_fallbacks_when_subkeys_missing(self):
         """Verify PipelineConfig.from_yaml safely falls back when threshold sub-keys are absent."""
@@ -98,24 +71,9 @@ class TestPipelineConfig(unittest.TestCase):
             cfg_file = Path(tmp_dir) / "minimal.yaml"
             cfg_file.write_text(minimal_yaml, encoding="utf-8")
             cfg = PipelineConfig.from_yaml(cfg_file)
-
-            # Standard baseline defaults
             self.assertAlmostEqual(cfg.thresholds.pcd_conf, 0.75)
-            self.assertAlmostEqual(cfg.thresholds.min_solidity, 0.72)
-            self.assertAlmostEqual(cfg.thresholds.min_ucs, 0.85)
-
-            # Dissection safe defaults
-            self.assertTrue(cfg.thresholds.dissection.enabled)
-            self.assertAlmostEqual(cfg.thresholds.dissection.min_solidity_dissected, 0.50)
-            self.assertAlmostEqual(cfg.thresholds.dissection.sinus_defect_min_depth_ratio, 0.08)
-            self.assertEqual(cfg.thresholds.dissection.min_bilateral_sinus_count, 3)
-            self.assertEqual(cfg.thresholds.dissection.taxa_with_lyrate_tendency, [])
-
-            # Fold detection safe defaults
-            self.assertTrue(cfg.thresholds.fold_detection.enabled)
-            self.assertAlmostEqual(cfg.thresholds.fold_detection.max_folded_aspect_ratio, 0.42)
-            self.assertAlmostEqual(cfg.thresholds.fold_detection.max_chord_deviation_ratio, 0.035)
-            self.assertEqual(cfg.thresholds.fold_detection.min_chord_length_px, 150)
+            self.assertAlmostEqual(cfg.thresholds.min_megapixels, 8.0)
+            self.assertAlmostEqual(cfg.thresholds.min_file_size_kb, 500.0)
 
     def test_taxa_structure_and_synonyms(self):
         """Verify dynamic genus-wide empty defaults and explicit YAML taxa/synonyms parsing."""
@@ -226,15 +184,11 @@ class TestPipelineConfig(unittest.TestCase):
         seg_module = importlib.import_module("scripts.pipeline.02_segment_and_extract")
         harv_module = importlib.import_module("scripts.data_prep.01_voucher_harvester")
 
-        # Segmentation parser
         seg_parse_args = seg_module.parse_args
         with patch.object(sys, "argv", ["02_segment_and_extract.py"]):
             seg_args = seg_parse_args()
-        self.assertEqual(seg_args.min_solidity, cfg.thresholds.min_solidity)
-        self.assertEqual(seg_args.min_ucs, cfg.thresholds.min_ucs)
         self.assertEqual(seg_args.score_thresh, cfg.segmentation.score_thresh)
 
-        # Harvester parser
         harv_parser = harv_module.build_cli_parser()
         harv_args = harv_parser.parse_args([])
         self.assertEqual(harv_args.max_records, cfg.harvesting.max_records_per_taxon)

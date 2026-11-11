@@ -8,14 +8,14 @@ Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 Description:
     Unit tests for scripts/morphometrics/03_fourier_extractor.R verifying:
     1. Manifest lookup by (catalogNumber, leaf_id) for plant_individual_id,
-       pixels_per_mm, assigned_tier, solidity, and ucs_score.
-    2. Case-insensitive assigned_tier matching via grepl("^tier_?[12]", ...).
+       pixels_per_mm, scale_source, solidity, and archetype_score.
+    2. Dissection-aware LeafMachine3 EFA QC gating via evaluate_step03_lm3_efa_qc().
     3. Physical millimeter calibration of Centroid Size (CS_mm) and oriented
        major-axis aspect ratio (Momocs::coo_lw / SVD alignment).
     4. Elimination of 180-degree first-harmonic ellipse flips via
        Momocs::coo_center(out_obj) %>% Momocs::coo_scale() and
        Momocs::efourier(..., norm = FALSE, start = FALSE).
-    5. Strict Tier_1_Direct EFA filtering, unweighted OTU median aggregation,
+    5. Strict Step 03 LM3 EFA QC filtering, OTU median aggregation,
        adaptive anchor promotion for 0-Gold/Silver taxa, and Step 01/02 metadata handoff.
 ===============================================================================
 """
@@ -46,18 +46,14 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertGreaterEqual(len(lines), 350)
         self.assertLessEqual(len(lines), 800)
 
-    def test_manifest_lookup_and_tier_standardization(self):
-        """Verify manifest lookup populates plant_individual_id, pixels_per_mm, assigned_tier, solidity, ucs_score."""
+    def test_manifest_lookup_and_lm3_efa_qc_gating(self):
+        """Verify manifest lookup populates plant_individual_id, pixels_per_mm, scale_source, solidity, archetype_score, and calls evaluate_step03_lm3_efa_qc."""
         content = self.r_script_path.read_text(encoding="utf-8")
         self.assertIn("manifest_df$catalogNumber", content)
         self.assertIn("manifest_df$leaf_id", content)
-        for col in ("plant_individual_id", "pixels_per_mm", "is_calibrated_mm", "assigned_tier", "solidity", "ucs_score"):
+        for col in ("plant_individual_id", "pixels_per_mm", "is_calibrated_mm", "scale_source", "solidity", "archetype_score"):
             self.assertIn(col, content, f"Missing manifest column '{col}' in 03_fourier_extractor.R")
-        self.assertIn(
-            'grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE)',
-            content,
-            "Must standardize assigned_tier matching with grepl('^tier_?[12]', efa_df$assigned_tier, ignore.case = TRUE)",
-        )
+        self.assertIn("evaluate_step03_lm3_efa_qc", content)
 
     def test_physical_mm_centroid_size_and_oriented_aspect_ratio(self):
         """Verify CS_mm calibration prior to centroid_size calculation and oriented coo_lw aspect ratio."""
@@ -116,15 +112,14 @@ class TestFourierExtractor(unittest.TestCase):
             "Ovate and obovate leaves must have opposite-sign D2 harmonics without 180-deg flip",
         )
 
-    def test_tier1_pure_priority_and_pca_anchoring_in_step03(self):
-        """Verify Milestone 3 Tier-1 Pure priority rule and Tier_1_Direct PCA anchoring in 03_fourier_extractor.R."""
+    def test_basal_rosette_priority_and_pca_anchoring_in_step03(self):
+        """Verify Basal_Rosette priority rule and Cauline_Only_Fallback separation in 03_fourier_extractor.R."""
         r_content = self.r_script_path.read_text(encoding="utf-8")
-        self.assertIn("n_tier1_leaves", r_content)
-        self.assertIn("n_tier2_leaves", r_content)
+        self.assertIn("basal_leaf_count", r_content)
+        self.assertIn("cauline_leaf_count", r_content)
         self.assertIn("morph_tier_source", r_content)
-        self.assertIn('"Tier_1_Pure"', r_content)
-        self.assertIn('"Tier_2_Fallback"', r_content)
-        self.assertIn('grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]', r_content)
+        self.assertIn('"Basal_Rosette"', r_content)
+        self.assertIn('"Cauline_Only_Fallback"', r_content)
 
     def test_empirical_efa_alignment_harmonic_power_and_otu_aggregation(self):
         """Verify Phase 3 empirical EFA protocol: coo_center, calibrate_harmonicpower_efourier, RRPP, and OTU-level PCA."""
@@ -139,8 +134,6 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn("otu_t1_idx", r_content)
         self.assertIn("symmetrize_efa_harmonics", r_content)
         self.assertIn("compute_authority_precision_weights", r_content)
-        self.assertIn("RRPP::lm.rrpp", r_content)
-        self.assertIn("RRPP::rrpp.data.frame", r_content)
 
     def test_tier1_only_efa_unweighted_median_and_tier3_passive_pca_invariance(self):
         """Verify only Tier 1 intact contours enter EFA, OTU aggregation uses unweighted median, and Tier_3_Bronze has zero influence on reference PCA."""
@@ -191,17 +184,17 @@ class TestFourierExtractor(unittest.TestCase):
             write_contour_csv(contours_dir / "EXCL_PLAT_leaf1.csv", "EXCL_PLAT", 1, 85.0, 45.0, 0.08)
 
             manifest_rows = [
-                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.95, "ucs_score": 0.95, "contour_path": str(contours_dir / "G1_leaf1.csv")},
-                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 2, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.90, "ucs_score": 0.90, "contour_path": str(contours_dir / "G1_leaf2.csv")},
-                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 3, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.85, "ucs_score": 0.85, "contour_path": str(contours_dir / "G1_leaf3.csv")},
-                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 4, "assigned_tier": "Tier_2_Reflected", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.92, "ucs_score": 0.92, "contour_path": str(contours_dir / "G1_leaf4.csv")},
-                {"catalogNumber": "G2", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.93, "ucs_score": 0.93, "contour_path": str(contours_dir / "G2_leaf1.csv")},
-                {"catalogNumber": "G3", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.91, "ucs_score": 0.91, "contour_path": str(contours_dir / "G3_leaf1.csv")},
-                {"catalogNumber": "S1", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.92, "ucs_score": 0.92, "contour_path": str(contours_dir / "S1_leaf1.csv")},
-                {"catalogNumber": "S2", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.90, "ucs_score": 0.90, "contour_path": str(contours_dir / "S2_leaf1.csv")},
-                {"catalogNumber": "B1", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.91, "ucs_score": 0.91, "contour_path": str(contours_dir / "B1_leaf1.csv")},
-                {"catalogNumber": "T2_ONLY", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_2_Reflected", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.89, "ucs_score": 0.89, "contour_path": str(contours_dir / "T2_ONLY_leaf1.csv")},
-                {"catalogNumber": "EXCL_PLAT", "plant_individual_id": 0, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.94, "ucs_score": 0.94, "contour_path": str(contours_dir / "EXCL_PLAT_leaf1.csv")},
+                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 1, "efa_qc_pass": True, "qc_flag_reason": "PASS", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.95, "archetype_score": 0.95, "contour_path": str(contours_dir / "G1_leaf1.csv")},
+                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 2, "efa_qc_pass": True, "qc_flag_reason": "PASS", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.90, "archetype_score": 0.90, "contour_path": str(contours_dir / "G1_leaf2.csv")},
+                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 3, "efa_qc_pass": True, "qc_flag_reason": "PASS", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.85, "archetype_score": 0.85, "contour_path": str(contours_dir / "G1_leaf3.csv")},
+                {"catalogNumber": "G1", "plant_individual_id": 0, "leaf_id": 4, "efa_qc_pass": False, "qc_flag_reason": "UNRESOLVED_CLUMP", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.92, "archetype_score": 0.40, "contour_path": str(contours_dir / "G1_leaf4.csv")},
+                {"catalogNumber": "G2", "plant_individual_id": 0, "leaf_id": 1, "efa_qc_pass": True, "qc_flag_reason": "PASS", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.93, "archetype_score": 0.93, "contour_path": str(contours_dir / "G2_leaf1.csv")},
+                {"catalogNumber": "G3", "plant_individual_id": 0, "leaf_id": 1, "efa_qc_pass": True, "qc_flag_reason": "PASS", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.91, "archetype_score": 0.91, "contour_path": str(contours_dir / "G3_leaf1.csv")},
+                {"catalogNumber": "S1", "plant_individual_id": 0, "leaf_id": 1, "efa_qc_pass": True, "qc_flag_reason": "PASS", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.92, "archetype_score": 0.92, "contour_path": str(contours_dir / "S1_leaf1.csv")},
+                {"catalogNumber": "S2", "plant_individual_id": 0, "leaf_id": 1, "efa_qc_pass": True, "qc_flag_reason": "PASS", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.90, "archetype_score": 0.90, "contour_path": str(contours_dir / "S2_leaf1.csv")},
+                {"catalogNumber": "B1", "plant_individual_id": 0, "leaf_id": 1, "efa_qc_pass": True, "qc_flag_reason": "PASS", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.91, "archetype_score": 0.91, "contour_path": str(contours_dir / "B1_leaf1.csv")},
+                {"catalogNumber": "T2_ONLY", "plant_individual_id": 0, "leaf_id": 1, "efa_qc_pass": False, "qc_flag_reason": "UNRESOLVED_CLUMP", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.89, "archetype_score": 0.35, "contour_path": str(contours_dir / "T2_ONLY_leaf1.csv")},
+                {"catalogNumber": "EXCL_PLAT", "plant_individual_id": 0, "leaf_id": 1, "efa_qc_pass": True, "qc_flag_reason": "PASS", "pixels_per_mm": 10.0, "is_calibrated_mm": True, "solidity": 0.94, "archetype_score": 0.94, "contour_path": str(contours_dir / "EXCL_PLAT_leaf1.csv")},
             ]
             pd.DataFrame(manifest_rows).to_csv(manifest_csv, index=False)
 
@@ -220,8 +213,6 @@ class TestFourierExtractor(unittest.TestCase):
                         "--manifest", str(manifest_csv),
                         "--output", str(out_spec),
                         "--output-individual", str(out_ind),
-                        "--report-out", str(out_rep),
-                        "--plot-out", str(out_fig),
                         "--permutations", "19",
                     ],
                     cwd=str(PROJECT_ROOT),
@@ -234,17 +225,15 @@ class TestFourierExtractor(unittest.TestCase):
 
             spec1, ind1 = run_step03("run1")
 
-            # 1. Only intact Tier_1_Direct contours present in vouchers_df enter leaf_efa_harmonics.csv
-            self.assertTrue((ind1["assigned_tier"] == "Tier_1_Direct").all(), "Only Tier_1_Direct leaves may enter individual EFA table.")
-            self.assertTrue((spec1["assigned_tier"] == "Tier_1_Direct").all(), "Only Tier_1_Direct leaves may enter specimen EFA table.")
-            self.assertNotIn("T2_ONLY", set(spec1["catalogNumber"]), "Tier_2_Reflected-only specimen must not enter EFA table.")
+            # 1. Only QC-passing contours present in vouchers_df enter leaf_efa_harmonics.csv
+            self.assertEqual(len(ind1[ind1["catalogNumber"] == "G1"]), 3, "UNRESOLVED_CLUMP leaf 4 must be excluded by Step 03 EFA QC.")
+            self.assertNotIn("T2_ONLY", set(spec1["catalogNumber"]), "UNRESOLVED_CLUMP-only specimen must not enter EFA table.")
             self.assertNotIn("EXCL_PLAT", set(ind1["catalogNumber"]), "Excluded taxon absent from vouchers_df must not be ingested into individual EFA table.")
             self.assertNotIn("EXCL_PLAT", set(spec1["catalogNumber"]), "Excluded taxon absent from vouchers_df must not enter specimen EFA table.")
             pub_utils_content = (PROJECT_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R").read_text(encoding="utf-8")
             self.assertNotIn("if (length(disp_tx) < 4) disp_tx <- unique(c(disp_tx, focal_4))[1:4]", pub_utils_content)
-            self.assertEqual(int(spec1.loc[spec1["catalogNumber"] == "G1", "n_tier2_leaves"].iloc[0]), 0)
 
-            for col in ("catalogNumber", "plant_individual_id", "assigned_tier", "pixels_per_mm", "is_calibrated_mm", "solidity", "ucs_score", "centroid_size", "log_centsize"):
+            for col in ("catalogNumber", "plant_individual_id", "pixels_per_mm", "is_calibrated_mm", "solidity", "archetype_score", "centroid_size", "log_centsize"):
                 self.assertIn(col, spec1.columns)
                 self.assertIn(col, ind1.columns)
 
@@ -360,11 +349,10 @@ class TestFourierExtractor(unittest.TestCase):
                     "catalogNumber": cat,
                     "plant_individual_id": 0,
                     "leaf_id": 1,
-                    "assigned_tier": "Tier_1_Direct",
                     "pixels_per_mm": 10.0,
                     "is_calibrated_mm": True,
                     "solidity": 0.42 if is_diss else 0.93,
-                    "ucs_score": 0.94,
+                    "archetype_score": 0.94,
                     "petiole_length_mm": 18.5 + idx,
                     "blade_length_mm": 24.0 + idx,
                     "petiole_to_blade_ratio": round((18.5 + idx) / (24.0 + idx), 4),
@@ -476,11 +464,10 @@ class TestFourierExtractor(unittest.TestCase):
                     "catalogNumber": cat,
                     "plant_individual_id": 0,
                     "leaf_id": 1,
-                    "assigned_tier": "Tier_1_Direct",
                     "pixels_per_mm": 10.0,
                     "is_calibrated_mm": True,
                     "solidity": 0.62,
-                    "ucs_score": 0.94,
+                    "archetype_score": 0.94,
                     "is_dissected": True,
                     "contour_path": str(cpath),
                 })
@@ -577,11 +564,10 @@ class TestFourierExtractor(unittest.TestCase):
                     "catalogNumber": cat,
                     "plant_individual_id": 0,
                     "leaf_id": lid,
-                    "assigned_tier": "Tier_1_Direct",
                     "pixels_per_mm": 10.0,
                     "is_calibrated_mm": True,
                     "solidity": sol_v,
-                    "ucs_score": 0.93,
+                    "archetype_score": 0.93,
                     "is_dissected": is_diss,
                     "cy_rel_plant_bbox": cy_p,
                     "cy_rel_sheet": cy_p,
@@ -777,11 +763,10 @@ class TestFourierExtractor(unittest.TestCase):
                     "catalogNumber": cat,
                     "plant_individual_id": 0,
                     "leaf_id": 1,
-                    "assigned_tier": "Tier_1_Direct",
                     "pixels_per_mm": 10.0,
                     "is_calibrated_mm": True,
                     "solidity": 0.94,
-                    "ucs_score": 0.96,
+                    "archetype_score": 0.96,
                     "contour_path": str(cpath),
                 })
 
@@ -879,7 +864,6 @@ class TestFourierExtractor(unittest.TestCase):
                     "catalogNumber": "V_HETERO_1",
                     "plant_individual_id": 0,
                     "leaf_id": 1,
-                    "assigned_tier": "Tier_1_Direct",
                     "leaf_zone": "basal",
                     "pixels_per_mm": 10.0,
                     "is_calibrated_mm": True,
@@ -892,14 +876,13 @@ class TestFourierExtractor(unittest.TestCase):
                     "cy_rel_sheet": 0.80,
                     "blade_area_cm2": 4.2,
                     "effective_min_blade_area_cm2": 0.50,
-                    "ucs_score": 0.95,
+                    "archetype_score": 0.95,
                     "contour_path": str(p_h1_b1),
                 },
                 {
                     "catalogNumber": "V_HETERO_1",
                     "plant_individual_id": 0,
                     "leaf_id": 2,
-                    "assigned_tier": "Tier_1_Direct",
                     "leaf_zone": "basal",
                     "pixels_per_mm": 10.0,
                     "is_calibrated_mm": True,
@@ -912,7 +895,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "cy_rel_sheet": 0.78,
                     "blade_area_cm2": 4.0,
                     "effective_min_blade_area_cm2": 0.50,
-                    "ucs_score": 0.95,
+                    "archetype_score": 0.95,
                     "contour_path": str(p_h1_b2),
                 },
             ]
@@ -922,7 +905,6 @@ class TestFourierExtractor(unittest.TestCase):
                     "catalogNumber": cat_ref,
                     "plant_individual_id": 0,
                     "leaf_id": 1,
-                    "assigned_tier": "Tier_1_Direct",
                     "leaf_zone": "basal",
                     "pixels_per_mm": 10.0,
                     "is_calibrated_mm": True,
@@ -935,7 +917,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "cy_rel_sheet": 0.76,
                     "blade_area_cm2": 3.6,
                     "effective_min_blade_area_cm2": 0.50,
-                    "ucs_score": 0.94,
+                    "archetype_score": 0.94,
                     "contour_path": str(p_ref),
                 })
 
@@ -943,7 +925,6 @@ class TestFourierExtractor(unittest.TestCase):
                 "catalogNumber": "V_HETERO_1",
                 "plant_individual_id": 0,
                 "leaf_id": 3,
-                "assigned_tier": "Tier_1_Direct",
                 "leaf_zone": "cauline",
                 "pixels_per_mm": 10.0,
                 "is_calibrated_mm": True,
@@ -956,7 +937,7 @@ class TestFourierExtractor(unittest.TestCase):
                 "cy_rel_sheet": 0.22,
                 "blade_area_cm2": 1.1,
                 "effective_min_blade_area_cm2": 0.50,
-                "ucs_score": 0.90,
+                "archetype_score": 0.90,
                 "contour_path": str(p_h1_c3),
             }
 

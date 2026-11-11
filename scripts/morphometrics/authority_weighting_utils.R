@@ -10,7 +10,7 @@
 #   Dawid & Skene 1979; Gelman et al. 2013; Kaufman & Rousseeuw 1990).
 #
 #   1. select_adaptive_reference_anchors():
-#      - Identifies clean Tier_1_Pure specimens across all active Packera taxa.
+#      - Identifies clean Basal_Rosette specimens across all active Packera taxa.
 #      - Prunes within-taxon Gold + Silver mislabeled outliers via robust MCD /
 #        coordinate-wise medoid Mahalanobis distance (chi-sq_0.95,p).
 #      - Promotes clean Mahalanobis-screened Tier_3_Bronze vouchers (within
@@ -122,22 +122,9 @@
 .identify_tier1_pure_mask <- function(df) {
   n <- nrow(df)
   if (n == 0L) return(logical(0))
-  has_mts <- "morph_tier_source" %in% names(df)
-  has_nt1 <- "n_tier1_leaves" %in% names(df)
-  if (has_mts) {
+  if ("morph_tier_source" %in% names(df)) {
     mts <- trimws(as.character(df$morph_tier_source))
-    is_t1 <- !is.na(mts) & (mts == "Tier_1_Pure")
-    if (has_nt1) {
-      nt1 <- suppressWarnings(as.numeric(df$n_tier1_leaves))
-      is_t1 <- is_t1 | (is.na(mts) & !is.na(nt1) & nt1 >= 1)
-    }
-  } else if (has_nt1) {
-    nt1 <- suppressWarnings(as.numeric(df$n_tier1_leaves))
-    is_t1 <- !is.na(nt1) & (nt1 >= 1)
-  } else if ("tier_assignment" %in% names(df)) {
-    is_t1 <- grepl("^tier_?1", as.character(df$tier_assignment), ignore.case = TRUE)
-  } else if ("assigned_tier" %in% names(df)) {
-    is_t1 <- grepl("^tier_?1", as.character(df$assigned_tier), ignore.case = TRUE)
+    is_t1 <- is.na(mts) | !nzchar(mts) | !(mts %in% c("Cauline_Only_Fallback", "No_Leaves"))
   } else {
     is_t1 <- rep(TRUE, n)
   }
@@ -1103,12 +1090,96 @@ compute_ledoit_wolf_cov <- function(
   geo_ll
 }
 
-compute_weighted_shrinkage_cda_loocv <- function(X_a, y_a, w_a = NULL, active_mask = NULL, coords_df = NULL) {
+build_taxon_blind_gathering_deme_folds <- function(coords_df, n_obs, deme_radius_km = 10.0) {
+  if (is.null(coords_df) || !is.data.frame(coords_df) || nrow(coords_df) != n_obs || n_obs < 2L) {
+    return(seq_len(n_obs))
+  }
+  if ("cv_deme_id" %in% names(coords_df) && any(!is.na(coords_df$cv_deme_id) & nzchar(as.character(coords_df$cv_deme_id)))) {
+    cv_raw <- as.character(coords_df$cv_deme_id)
+    cv_raw[is.na(cv_raw) | !nzchar(cv_raw)] <- paste0("ISO_", seq_len(n_obs))[is.na(cv_raw) | !nzchar(cv_raw)]
+    return(match(cv_raw, unique(cv_raw)))
+  }
+  cat_v <- if ("catalogNumber" %in% names(coords_df)) trimws(as.character(coords_df$catalogNumber)) else as.character(seq_len(n_obs))
+  cat_v[is.na(cat_v) | !nzchar(cat_v)] <- as.character(seq_len(n_obs))[is.na(cat_v) | !nzchar(cat_v)]
+  exs_v <- if ("exsiccatae_key" %in% names(coords_df)) trimws(as.character(coords_df$exsiccatae_key)) else rep("", n_obs)
+  exs_v[is.na(exs_v) | tolower(exs_v) %in% c("na", "none", "unknown")] <- ""
+  grp_key <- ifelse(nzchar(exs_v), paste0("EXS__", exs_v), paste0("CAT__", cat_v))
+  fold_id <- match(grp_key, unique(grp_key))
+
+  lat_v <- rep(NA_real_, n_obs); lon_v <- rep(NA_real_, n_obs)
+  for (lc in c("decimalLatitude", "latitude")) if (lc %in% names(coords_df)) {
+    vv <- suppressWarnings(as.numeric(coords_df[[lc]])); m <- !is.finite(lat_v) & is.finite(vv); lat_v[m] <- vv[m]
+  }
+  for (lc in c("decimalLongitude", "longitude")) if (lc %in% names(coords_df)) {
+    vv <- suppressWarnings(as.numeric(coords_df[[lc]])); m <- !is.finite(lon_v) & is.finite(vv); lon_v[m] <- vv[m]
+  }
+  ok_c <- which(is.finite(lat_v) & is.finite(lon_v) & abs(lat_v) <= 90.0 & abs(lon_v) <= 180.0)
+  if (length(ok_c) >= 2L && is.finite(deme_radius_km) && deme_radius_km > 0.0) {
+    # Complete-linkage (diameter-bounded) taxon-blind 10 km spatial locality grouping (prevents single-linkage chaining)
+    lat_r <- lat_v[ok_c] * (pi / 180.0); lon_r <- lon_v[ok_c] * (pi / 180.0)
+    clusters <- list()
+    for (ii in seq_along(ok_c)) {
+      placed <- FALSE
+      for (cl_idx in seq_along(clusters)) {
+        members <- clusters[[cl_idx]]
+        dlat <- lat_r[members] - lat_r[ii]; dlon <- lon_r[members] - lon_r[ii]
+        hav <- sin(dlat * 0.5)^2 + cos(lat_r[ii]) * cos(lat_r[members]) * (sin(dlon * 0.5)^2)
+        dkm <- 2.0 * 6371.0088 * asin(pmin(1.0, sqrt(pmax(0.0, hav))))
+        if (all(is.finite(dkm) & dkm <= deme_radius_km)) {
+          clusters[[cl_idx]] <- c(members, ii); placed <- TRUE; break
+        }
+      }
+      if (!placed) clusters[[length(clusters) + 1L]] <- ii
+    }
+    for (cl_idx in seq_along(clusters)) {
+      rows_cl <- ok_c[clusters[[cl_idx]]]
+      if (length(rows_cl) >= 2L) {
+        old_f <- unique(fold_id[rows_cl])
+        fold_id[fold_id %in% old_f] <- min(old_f)
+      }
+    }
+  }
+  match(fold_id, unique(fold_id))
+}
+
+assign_spatial_gathering_demes <- function(df, deme_radius_km = 10.0) {
+  # Feature-preserving, taxon-blind spatial/gathering deme metadata assignment (ZERO feature shrinkage!)
+  if (is.null(df) || !is.data.frame(df)) return(df)
+  n <- nrow(df)
+  if (n == 0L) return(df)
+  if ("PC1" %in% names(df) && !("PC1_raw_individual" %in% names(df))) df$PC1_raw_individual <- df$PC1
+  if ("PC2" %in% names(df) && !("PC2_raw_individual" %in% names(df))) df$PC2_raw_individual <- df$PC2
+  fold_ids <- build_taxon_blind_gathering_deme_folds(df, n_obs = n, deme_radius_km = deme_radius_km)
+  df$cv_deme_id <- sprintf("LOC_DEME_%04d", as.integer(fold_ids))
+  df$population_deme_id <- df$cv_deme_id
+  tab_d <- table(df$population_deme_id)
+  df$deme_n_specimens <- as.integer(tab_d[df$population_deme_id])
+  df
+}
+
+compute_weighted_shrinkage_cda_loocv <- function(
+  X_a,
+  y_a,
+  w_a = NULL,
+  active_mask = NULL,
+  coords_df = NULL,
+  X_cand = NULL,
+  deme_radius_km = 10.0
+) {
+  # Purely morphological gathering/deme-grouped cross-validation:
+  #   - Zero geographic coordinate priors (preserves Padial et al. 2010 modality independence)
+  #   - Holds out entire gatherings / 10 km spatial localities together to prevent pseudoreplication leakage
+  #   - Re-estimates feature subspace (when X_cand is supplied) and Ledoit-Wolf covariance strictly inside each training fold
   X_a <- as.matrix(X_a)
   storage.mode(X_a) <- "double"
+  if (!is.null(X_cand)) {
+    X_cand <- as.matrix(X_cand)
+    storage.mode(X_cand) <- "double"
+  }
   if (!is.null(active_mask) && length(active_mask) == nrow(X_a) && sum(active_mask, na.rm = TRUE) < nrow(X_a)) {
     act_idx <- which(as.logical(active_mask) & !is.na(active_mask))
     X_a <- X_a[act_idx, , drop = FALSE]
+    if (!is.null(X_cand) && nrow(X_cand) == length(active_mask)) X_cand <- X_cand[act_idx, , drop = FALSE]
     y_a <- y_a[act_idx]
     if (!is.null(w_a) && length(w_a) == length(active_mask)) w_a <- w_a[act_idx]
     if (!is.null(coords_df) && is.data.frame(coords_df) && nrow(coords_df) == length(active_mask)) {
@@ -1117,7 +1188,9 @@ compute_weighted_shrinkage_cda_loocv <- function(X_a, y_a, w_a = NULL, active_ma
   } else if (!is.null(coords_df) && is.data.frame(coords_df) && nrow(coords_df) != nrow(X_a) &&
              !is.null(active_mask) && length(active_mask) == nrow(coords_df) &&
              sum(active_mask, na.rm = TRUE) == nrow(X_a)) {
-    coords_df <- coords_df[which(as.logical(active_mask) & !is.na(active_mask)), , drop = FALSE]
+    act_idx2 <- which(as.logical(active_mask) & !is.na(active_mask))
+    coords_df <- coords_df[act_idx2, , drop = FALSE]
+    if (!is.null(X_cand) && nrow(X_cand) == length(active_mask)) X_cand <- X_cand[act_idx2, , drop = FALSE]
   }
   y_f <- droplevels(as.factor(y_a))
   g_levels <- levels(y_f)
@@ -1133,64 +1206,80 @@ compute_weighted_shrinkage_cda_loocv <- function(X_a, y_a, w_a = NULL, active_ma
     if (sum(w_a) <= 1e-12) w_a <- rep(1.0, N_a)
   }
 
-  mu_k <- matrix(0.0, nrow = K, ncol = p, dimnames = list(g_levels, colnames(X_a)))
-  W_mat <- matrix(0.0, nrow = p, ncol = p)
-  X_c <- matrix(0.0, nrow = N_a, ncol = p)
-  W_vec <- numeric(K)
-  w_corr_sum <- 0.0
-
+  fold_vec <- build_taxon_blind_gathering_deme_folds(coords_df, n_obs = N_a, deme_radius_km = deme_radius_km)
+  # Ensure holding out a spatial deme never wipes out an entire class in small cohorts; fall back to gathering/LOO for singleton-deme taxa
   for (k in seq_len(K)) {
     idx_k <- which(as.integer(y_f) == k)
-    wk <- w_a[idx_k]
-    sw_k <- sum(wk)
-    if (sw_k <= 1e-12) {
-      wk <- rep(1.0, length(idx_k))
-      sw_k <- sum(wk)
+    if (length(unique(fold_vec[idx_k])) < 2L && length(idx_k) >= 2L) {
+      max_f <- max(fold_vec, na.rm = TRUE)
+      fold_vec[idx_k] <- max_f + seq_along(idx_k)
     }
-    W_vec[k] <- sw_k
-    w_corr_sum <- w_corr_sum + (sum(wk^2) / sw_k)
-    Xk <- X_a[idx_k, , drop = FALSE]
-    mk <- colSums(Xk * wk) / sw_k
-    mu_k[k, ] <- mk
-    diff_k <- sweep(Xk, 2L, mk, "-")
-    X_c[idx_k, ] <- diff_k
-    W_mat <- W_mat + crossprod(diff_k, diff_k * wk)
   }
-
-  denom_w <- max(sum(w_a) - w_corr_sum, 1.0)
-  S_w <- W_mat / denom_w
-  S_reg <- compute_ledoit_wolf_cov(S_w, X_centered = X_c, n_obs = N_a, weights = w_a)
-  lw_lambda <- if (!is.null(attr(S_reg, "shrinkage_lambda"))) as.numeric(attr(S_reg, "shrinkage_lambda")) else 0.0
-  if (is.list(S_reg) && !is.null(S_reg$S_reg)) S_reg <- S_reg$S_reg
-  S_inv <- tryCatch(solve(S_reg), error = function(e) diag(1.0 / pmax(diag(S_reg), 1e-6), nrow = p, ncol = p))
-
-  geo_ll_mat <- .compute_soft_geo_range_log_prior(coords_df, y_f, w_vec = w_a, g_levels = g_levels)
+  u_folds <- sort(unique(fold_vec))
   priors <- rep(1.0 / K, K)
-  pred_loo <- character(N_a)
-  for (i in seq_len(N_a)) {
-    k_i <- as.integer(y_f[i])
-    w_i <- w_a[i]
-    W_k <- W_vec[k_i]
-    mu_k_loo <- mu_k
-    if (W_k > w_i + 1e-8) {
-      mu_k_loo[k_i, ] <- (W_k * mu_k[k_i, ] - w_i * X_a[i, ]) / (W_k - w_i)
+  pred_cv <- character(N_a)
+
+  for (fid in u_folds) {
+    test_idx <- which(fold_vec == fid)
+    train_idx <- which(fold_vec != fid)
+    if (length(train_idx) < K) train_idx <- setdiff(seq_len(N_a), test_idx[1L])
+
+    if (!is.null(X_cand) && nrow(X_cand) == N_a && ncol(X_cand) >= 2L && exists("select_morphometric_subspace", mode = "function")) {
+      aux_tr <- if (!is.null(coords_df) && is.data.frame(coords_df)) coords_df[train_idx, , drop = FALSE] else NULL
+      sel_f <- tryCatch(
+        suppressMessages(select_morphometric_subspace(X_cand[train_idx, , drop = FALSE], group_vec = y_f[train_idx], aux_df = aux_tr)),
+        error = function(e) colnames(X_a)
+      )
+      sel_f <- intersect(sel_f, colnames(X_cand))
+      X_tr <- if (length(sel_f) >= 1L) X_cand[train_idx, sel_f, drop = FALSE] else X_a[train_idx, , drop = FALSE]
+      X_te <- if (length(sel_f) >= 1L) X_cand[test_idx, sel_f, drop = FALSE] else X_a[test_idx, , drop = FALSE]
+    } else {
+      X_tr <- X_a[train_idx, , drop = FALSE]
+      X_te <- X_a[test_idx, , drop = FALSE]
     }
-    diff_i <- sweep(mu_k_loo, 2L, X_a[i, ], "-")
-    d2_raw_i <- rowSums((diff_i %*% S_inv) * diff_i)
-    if (W_k > w_i + 1e-8 && lw_lambda < 0.999) {
-      delta_i <- X_c[i, ]
-      c_i <- (1.0 - lw_lambda) * (w_i * W_k) / ((W_k - w_i) * denom_w)
-      v_i <- as.vector(S_inv %*% delta_i)
-      denom_sm <- 1.0 - c_i * sum(delta_i * v_i)
-      if (is.finite(denom_sm) && denom_sm > 0.10) {
-        proj_i <- as.vector(diff_i %*% v_i)
-        d2_raw_i <- pmax(0.0, d2_raw_i + (c_i * (proj_i^2)) / denom_sm)
+
+    p_f <- ncol(X_tr)
+    y_tr <- y_f[train_idx]
+    w_tr <- w_a[train_idx]
+    mu_k_f <- matrix(0.0, nrow = K, ncol = p_f)
+    W_mat_f <- matrix(0.0, nrow = p_f, ncol = p_f)
+    X_c_f <- matrix(0.0, nrow = nrow(X_tr), ncol = p_f)
+    w_corr_f <- 0.0
+
+    for (k in seq_len(K)) {
+      ik <- which(as.integer(y_tr) == k)
+      if (length(ik) == 0L) {
+        # Fallback only if class had a single total anchor
+        ik_all <- which(as.integer(y_f) == k)
+        mu_k_f[k, ] <- colMeans(if (!is.null(X_cand) && all(colnames(X_tr) %in% colnames(X_cand))) X_cand[ik_all, colnames(X_tr), drop = FALSE] else X_a[ik_all, , drop = FALSE])
+        next
       }
+      wk <- w_tr[ik]; sw_k <- sum(wk)
+      if (sw_k <= 1e-12) { wk <- rep(1.0, length(ik)); sw_k <- sum(wk) }
+      w_corr_f <- w_corr_f + (sum(wk^2) / sw_k)
+      Xk <- X_tr[ik, , drop = FALSE]
+      mk <- colSums(Xk * wk) / sw_k
+      mu_k_f[k, ] <- mk
+      dk <- sweep(Xk, 2L, mk, "-")
+      X_c_f[ik, ] <- dk
+      W_mat_f <- W_mat_f + crossprod(dk, dk * wk)
     }
-    ll_i <- -0.5 * d2_raw_i + log(priors) + geo_ll_mat[i, ]
-    pred_loo[i] <- g_levels[which.max(ll_i)]
+
+    denom_f <- max(sum(w_tr) - w_corr_f, 1.0)
+    S_w_f <- W_mat_f / denom_f
+    S_reg_f <- compute_ledoit_wolf_cov(S_w_f, X_centered = X_c_f, n_obs = nrow(X_tr), weights = w_tr)
+    if (is.list(S_reg_f) && !is.null(S_reg_f$S_reg)) S_reg_f <- S_reg_f$S_reg
+    S_inv_f <- tryCatch(solve(S_reg_f), error = function(e) diag(1.0 / pmax(diag(S_reg_f), 1e-6), nrow = p_f, ncol = p_f))
+
+    for (ti in seq_along(test_idx)) {
+      obs_i <- test_idx[ti]
+      diff_i <- sweep(mu_k_f, 2L, X_te[ti, ], "-")
+      d2_i <- rowSums((diff_i %*% S_inv_f) * diff_i)
+      ll_i <- -0.5 * d2_i + log(priors)
+      pred_cv[obs_i] <- g_levels[which.max(ll_i)]
+    }
   }
-  round(mean(pred_loo == as.character(y_f), na.rm = TRUE), 4)
+  round(mean(pred_cv == as.character(y_f), na.rm = TRUE), 4)
 }
 
 solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
@@ -2696,7 +2785,7 @@ apply_step03_heteroblasty_weighted_otu_aggregation <- function(specimen_df, clos
   harm_cols <- intersect(unique(c(all_harm_cols, sym_names)), names(specimen_df))
   trait_digits <- list(
     aspect_ratio = 4L, circularity = 4L, solidity = 4L, dissection_index = 4L,
-    ucs_score = 4L, area_px = 1L, area_mm2 = 2L, centroid_size = 4L,
+    area_px = 1L, area_mm2 = 2L, centroid_size = 4L,
     log_centsize = 6L, harmonic_roughness = 6L, leaf_quality_weight = 4L,
     asymmetry_index = 6L, ECT_PC1 = 6L, ECT_PC2 = 6L, ECT_PC3 = 6L,
     ect_lobe_complexity = 4L
@@ -2706,9 +2795,7 @@ apply_step03_heteroblasty_weighted_otu_aggregation <- function(specimen_df, clos
     rows_i <- idx_by_key[[spec_keys[i]]]
     if (length(rows_i) < 1L) next
     grp <- closed_leaf_df[rows_i, , drop = FALSE]
-    if ("tier_assignment" %in% names(grp) && any(grp$tier_assignment == "Tier_1_Direct", na.rm = TRUE)) {
-      grp <- grp[grp$tier_assignment == "Tier_1_Direct", , drop = FALSE]
-    }
+
     if ("is_contour_outlier" %in% names(grp) && any(!as.logical(grp$is_contour_outlier), na.rm = TRUE)) {
       grp <- grp[!is.na(grp$is_contour_outlier) & !as.logical(grp$is_contour_outlier), , drop = FALSE]
     }
@@ -2775,7 +2862,7 @@ apply_hierarchical_population_deme_shrinkage <- function(
   if (length(feature_cols) == 0L) return(df)
 
   n_i <- rep(1.0, n)
-  for (lc_col in c("n_leaves", "leaf_count", "n_tier1_leaves")) {
+  for (lc_col in c("n_leaves", "leaf_count", "basal_leaf_count")) {
     if (lc_col %in% names(df)) {
       lc_v <- suppressWarnings(as.numeric(df[[lc_col]]))
       has_lc <- is.finite(lc_v) & lc_v >= 1.0

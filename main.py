@@ -782,14 +782,10 @@ def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         "--model-weights", str(model_weights),
         "--output-dir", str(out_dir),
         "--device", device,
-        "--min-solidity", str(args.min_solidity or cfg["segmentation"]["min_solidity"]),
-        "--min-ucs", str(args.min_ucs or cfg["segmentation"]["min_ucs"]),
         "--score-thresh", str(args.score_thresh or cfg["segmentation"]["score_thresh"]),
     ]
     if args.limit:
         cmd.extend(["--limit", str(args.limit)])
-    if getattr(args, "enable_geometric_qc", False):
-        cmd.append("--enable-geometric-qc")
     if getattr(args, "threads", None) is not None:
         cmd.extend(["--threads", str(args.threads)])
     if getattr(args, "gpu_batch_size", None) is not None:
@@ -1490,17 +1486,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_segment.add_argument("--weights", type=Path, default=None, help="LeafMachine3 model weights checkpoint (.onnx / .pt)")
     p_segment.add_argument("--output-dir", type=Path, default=None, help="Root output directory")
     p_segment.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Inference device")
-    p_segment.add_argument("--min-solidity", type=float, default=None, help="Tier 1 min solidity")
-    p_segment.add_argument("--min-ucs", type=float, default=None, help="Tier 1 min UCS score")
     p_segment.add_argument("--score-thresh", type=float, default=None, help="PCD detection score threshold")
     p_segment.add_argument("--limit", type=int, default=None, help="Limit number of vouchers to process")
-    p_segment.add_argument(
-        "--enable-geometric-qc",
-        dest="enable_geometric_qc",
-        action="store_true",
-        default=False,
-        help="Enable Packera botanical gatekeeper, dissected-rachis bridging, and per-plant adaptive blade-area filtering (default: False for unconstrained LeafMachine3 extraction)",
-    )
     p_segment.add_argument(
         "--purge-segments",
         "--purge-old-data",
@@ -1569,7 +1556,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_synth.add_argument("--conflict-flags", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--spatial-plot", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--spatial-summary", type=Path, default=None, help=argparse.SUPPRESS)
-    p_synth.add_argument("--permutations", type=int, default=100, help="Warren's identity test permutations")
+    p_synth.add_argument("--permutations", type=int, default=999, help="Warren's identity test permutations (default: 999)")
     p_synth.add_argument("--n-trees", type=int, default=500, help="Random forest trees")
     p_synth.add_argument("--gmm-summary", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--output-queue", type=Path, default=None, help=argparse.SUPPRESS)
@@ -1661,17 +1648,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--weights", type=Path, default=None, help="LeafMachine3 model weights checkpoint (.onnx / .pt)")
     p_all.add_argument("--output-dir", type=Path, default=None, help="Root output directory")
     p_all.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Inference device")
-    p_all.add_argument("--min-solidity", type=float, default=None, help="Tier 1 min solidity")
-    p_all.add_argument("--min-ucs", type=float, default=None, help="Tier 1 min UCS score")
     p_all.add_argument("--score-thresh", type=float, default=None, help="PCD detection score threshold")
     p_all.add_argument("--limit", type=int, default=None, help="Limit number of vouchers to process")
-    p_all.add_argument(
-        "--enable-geometric-qc",
-        dest="enable_geometric_qc",
-        action="store_true",
-        default=False,
-        help="Enable Packera botanical gatekeeper, dissected-rachis bridging, and per-plant adaptive blade-area filtering (default: False for unconstrained LeafMachine3 extraction)",
-    )
     p_all.add_argument("--input", type=Path, default=None, help=argparse.SUPPRESS)
     p_all.add_argument("--manifest", type=Path, default=None, help="Extracted leaf manifest CSV")
     p_all.add_argument("--contours-dir", type=Path, default=None, help="Input contours directory")

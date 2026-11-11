@@ -307,9 +307,9 @@ run_supervised_ecoregion_cda <- function(
   has_pcs <- stats::complete.cases(df[, req_cols, drop = FALSE])
   auth_w <- if ("authority_weight" %in% names(df)) suppressWarnings(as.numeric(df$authority_weight)) else rep(1.0, n)
   auth_w[is.na(auth_w)] <- 0.0
-  is_t1 <- if ("morph_tier_source" %in% names(df)) (!is.na(df$morph_tier_source) & df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, n)
+  is_t1 <- if ("morph_tier_source" %in% names(df)) (!is.na(df$morph_tier_source) & df$morph_tier_source == "Basal_Rosette") else rep(TRUE, n)
 
-  # Strictly prefer Tier_1_Pure Gold/Silver anchors (>= 3 per EPA Level III Ecoregion), with valid Tier_1_Pure fallback only when Gold/Silver < 2 groups
+  # Strictly prefer Basal_Rosette Gold/Silver anchors (>= 3 per EPA Level III Ecoregion), with valid Basal_Rosette fallback only when Gold/Silver < 2 groups
   cand_mask <- !is.na(rg) & has_pcs & is_t1 & (auth_w > 0)
   tab_cand <- table(rg[cand_mask])
   active_ecos <- sort(names(tab_cand[tab_cand >= min_anchors_per_ecoregion]))
@@ -713,7 +713,8 @@ run_multivariate_manova_audit <- function(
   feature_cols,
   gmm_res = NULL,
   output_group_csv = "outputs/reports/manova_group_significance.csv",
-  output_pairwise_csv = "outputs/reports/manova_pairwise_posthoc.csv"
+  output_pairwise_csv = "outputs/reports/manova_pairwise_posthoc.csv",
+  include_gmm_clusters = TRUE
 ) {
   run_dir <- trimws(Sys.getenv("PACKERA_RUN_DIR", unset = ""))
   if (nzchar(run_dir)) {
@@ -822,9 +823,8 @@ run_multivariate_manova_audit <- function(
   has_positive_anchors <- any(auth_w > 0)
 
   is_t1 <- if ("morph_tier_source" %in% names(df)) {
-    !is.na(df$morph_tier_source) & (as.character(df$morph_tier_source) == "Tier_1_Pure")
-  } else if ("assigned_tier" %in% names(df)) {
-    grepl("^tier_?1", as.character(df$assigned_tier), ignore.case = TRUE)
+    !is.na(df$morph_tier_source) & (as.character(df$morph_tier_source) == "Basal_Rosette")
+  
   } else {
     rep(TRUE, n)
   }
@@ -885,11 +885,11 @@ run_multivariate_manova_audit <- function(
     }
   }
 
-  factor_specs <- list(
+  factor_specs <- Filter(Negate(is.null), list(
     list(name = "species_standardized", label = "Taxonomic Species (species_standardized)", vec = sp_vec, min_n = 2L),
-    list(name = "gmm_cluster", label = "Unsupervised GMM Morphotype (Morphotype_K1..Kn)", vec = cl_vec, min_n = 2L),
+    if (isTRUE(include_gmm_clusters)) list(name = "gmm_cluster", label = "Unsupervised GMM Morphotype (Morphotype_K1..Kn)", vec = cl_vec, min_n = 2L) else NULL,
     list(name = "regional_group", label = "US EPA Level III Ecoregion (regional_group)", vec = rg_vec, min_n = 3L)
-  )
+  ))
 
   group_rows <- list()
   pairwise_rows <- list()

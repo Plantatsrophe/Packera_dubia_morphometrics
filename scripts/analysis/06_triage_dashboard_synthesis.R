@@ -24,7 +24,7 @@
 #        Stage 2: Hybrid_Introgressant (inter-modal mosaicism or canonical
 #                 intermediacy cda_posterior_margin < 0.25 with niche overlap)
 #        Stage 3: Putative_Cryptic_Species (Integration by Congruence:
-#                 Tier_1_Pure, non-assigned to known taxa, morph/GMM outlier
+#                 Basal_Rosette, non-assigned to known taxa, morph/GMM outlier
 #                 with 2*delta_BIC >= 6, and allochronic |delta_doy_resid| >= 18d
 #                 or edaphic divergence D_edaph < 0.30)
 #        Stage 4: Subspecies_Ecotype vs. Ecophenotypic_Plasticity
@@ -465,7 +465,7 @@ compute_modality_reliability_weights <- function(df) {
   anchor_mask <- .resolve_step07_anchor_mask(df)
   sub_a <- df[anchor_mask, , drop = FALSE]; y_true <- as.character(sub_a$species_standardized)
 
-  m_pure <- if ("morph_tier_source" %in% names(sub_a)) (is.na(sub_a$morph_tier_source) | sub_a$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(sub_a))
+  m_pure <- if ("morph_tier_source" %in% names(sub_a)) (is.na(sub_a$morph_tier_source) | sub_a$morph_tier_source == "Basal_Rosette") else rep(TRUE, nrow(sub_a))
   y_morph <- if ("cda_predicted_taxon" %in% names(sub_a)) as.character(sub_a$cda_predicted_taxon) else rep(NA_character_, nrow(sub_a))
   def_morph <- if ("loocv_accuracy" %in% names(df) && any(is.finite(as.numeric(df$loocv_accuracy)))) stats::median(as.numeric(df$loocv_accuracy), na.rm = TRUE) else 0.80
   w_morph <- max(0.05, compute_cohens_kappa(y_true[m_pure], y_morph[m_pure], default_kappa = def_morph))
@@ -492,7 +492,7 @@ compute_probabilistic_consensus_scores <- function(df) {
   anchor_mask <- .resolve_step07_anchor_mask(df)
   sub_a <- df[anchor_mask, , drop = FALSE]
   y_true_a <- if ("species_standardized" %in% names(sub_a)) as.character(sub_a$species_standardized) else rep(NA_character_, nrow(sub_a))
-  m_pure_a <- if ("morph_tier_source" %in% names(sub_a)) (is.na(sub_a$morph_tier_source) | sub_a$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(sub_a))
+  m_pure_a <- if ("morph_tier_source" %in% names(sub_a)) (is.na(sub_a$morph_tier_source) | sub_a$morph_tier_source == "Basal_Rosette") else rep(TRUE, nrow(sub_a))
   y_morph_a <- if ("cda_predicted_taxon" %in% names(sub_a)) as.character(sub_a$cda_predicted_taxon) else rep(NA_character_, nrow(sub_a))
   y_edaph_a <- if ("edaphic_best_fit_taxon" %in% names(sub_a)) as.character(sub_a$edaphic_best_fit_taxon) else if ("rf_predicted_taxon" %in% names(sub_a)) as.character(sub_a$rf_predicted_taxon) else rep(NA_character_, nrow(sub_a))
 
@@ -683,8 +683,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   cda_prob_init <- if ("cda_posterior_prob" %in% names(df)) suppressWarnings(as.numeric(df$cda_posterior_prob)) else rep(NA_real_, n)
   tm_d2_init <- if ("type_morph_mahal_d2" %in% names(df)) suppressWarnings(as.numeric(df$type_morph_mahal_d2)) else rep(NA_real_, n)
   n_lvs_raw <- if ("n_leaves" %in% names(df)) suppressWarnings(as.integer(df$n_leaves)) else rep(NA_integer_, n)
-  n_t1_raw <- if ("n_tier1_leaves" %in% names(df)) suppressWarnings(as.integer(df$n_tier1_leaves)) else rep(NA_integer_, n)
-  n_t2_raw <- if ("n_tier2_leaves" %in% names(df)) suppressWarnings(as.integer(df$n_tier2_leaves)) else rep(NA_integer_, n)
+  n_t1_raw <- rep(NA_integer_, n)
+  n_t2_raw <- rep(NA_integer_, n)
   n_lvs_sum <- ifelse(is.na(n_t1_raw) & is.na(n_t2_raw), NA_integer_, ifelse(is.na(n_t1_raw), 0L, n_t1_raw) + ifelse(is.na(n_t2_raw), 0L, n_t2_raw))
   n_leaves_init <- ifelse(!is.na(n_lvs_raw), n_lvs_raw, n_lvs_sum)
 
@@ -876,7 +876,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   bf1_dv <- if ("two_delta_bic" %in% df_nms_d) suppressWarnings(as.numeric(df$two_delta_bic)) else rep(NA_real_, n)
   bf2_dv <- if ("gmm_2_delta_bic" %in% df_nms_d) suppressWarnings(as.numeric(df$gmm_2_delta_bic)) else rep(NA_real_, n)
   m_tier_src_dv <- if ("morph_tier_source" %in% df_nms_d) as.character(df$morph_tier_source) else rep(NA_character_, n)
-  n_t1_dv <- if ("n_tier1_leaves" %in% df_nms_d) suppressWarnings(as.integer(df$n_tier1_leaves)) else rep(NA_integer_, n)
+  n_t1_dv <- rep(NA_integer_, n)
   dlf_dv <- if ("dissected_leaf_fraction" %in% df_nms_d) suppressWarnings(as.numeric(df$dissected_leaf_fraction)) else rep(NA_real_, n)
   asym_dv <- if ("pct_asymmetry" %in% df_nms_d) suppressWarnings(as.numeric(df$pct_asymmetry)) else rep(NA_real_, n)
   is_dis_dv <- if ("is_dissected" %in% df_nms_d) (!is.na(df$is_dissected) & as.logical(df$is_dissected)) else rep(FALSE, n)
@@ -906,7 +906,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   # Precompute cluster-level population cohesion (cryptic_cluster_cohesion_pass) before specimen loop
   sp_clean_vec <- ifelse(!is.na(sp_all_vec) & nzchar(sp_all_vec), sp_all_vec, "Unknown")
   g_cl_all <- ifelse(!is.na(gmm_cl_dv), gmm_cl_dv, 1L)
-  t1_pure_all <- (is.na(m_tier_src_dv) | !nzchar(m_tier_src_dv) | m_tier_src_dv == "Tier_1_Pure") & (is.na(n_t1_dv) | n_t1_dv >= 1L)
+  t1_pure_all <- (is.na(m_tier_src_dv) | !nzchar(m_tier_src_dv) | m_tier_src_dv == "Basal_Rosette") & (is.na(n_t1_dv) | n_t1_dv >= 1L)
   edaph_z_all <- ifelse(is.finite(edaph_z_vec), edaph_z_vec, te_z_dv)
   ed_sp_all <- ifelse(!is.na(edaph_sp_dv) & nzchar(edaph_sp_dv), edaph_sp_dv, ifelse(!is.na(rf_pred_dv) & nzchar(rf_pred_dv), rf_pred_dv, sp_clean_vec))
   d_edaph_all <- ifelse(
@@ -1042,7 +1042,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
 
     m_tier_src     <- m_tier_src_dv[i]
     n_t1_i         <- n_t1_dv[i]
-    is_tier1_pure_morph <- (is.na(m_tier_src) || !nzchar(m_tier_src) || m_tier_src == "Tier_1_Pure") && (is.na(n_t1_i) || n_t1_i >= 1L)
+    is_tier1_pure_morph <- (is.na(m_tier_src) || !nzchar(m_tier_src) || m_tier_src == "Basal_Rosette") && (is.na(n_t1_i) || n_t1_i >= 1L)
     is_tier1_pure_i <- is_tier1_pure_morph
 
     is_type_specimen_i <- isTRUE(is_type_dv[i])
@@ -1276,12 +1276,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       if (is_cryptic_intra) {
         status_calls[i] <- "Putative_Cryptic_Species"; rec_taxa[i] <- sprintf("%s (Putative Cryptic Lineage K%d)", given_sp, g_cl)
         triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"; triage_acts[i] <- "Flag_Putative_Cryptic_Species"
-        rationales[i] <- sprintf("Congruent Tier_1_Pure morphometric outlier + evolutionary barrier (delta_DOY=%.1fd, tau=%.1fd, D_edaph=%.2f)", ddoy, tau_cryptic_i, d_edaph)
+        rationales[i] <- sprintf("Congruent Basal_Rosette morphometric outlier + evolutionary barrier (delta_DOY=%.1fd, tau=%.1fd, D_edaph=%.2f)", ddoy, tau_cryptic_i, d_edaph)
         treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Putative_Cryptic_Species"; next
       } else if (!is_tier1_pure_morph && is_mo_flag && !morph_concordant_self && (d_edaph < 0.30 || (mm_conf && n < 50L))) {
         status_calls[i] <- "Misidentification_Severe"; rec_taxa[i] <- if (!is.na(min_cong_tx_i) && min_cong_tx_i != given_sp) min_cong_tx_i else if (edaph_is_taxon && edaph_sp != given_sp) edaph_sp else given_sp
         triage_prios[i] <- "HIGH"; triage_acts[i] <- "Reassign_Determination"
-        rationales[i] <- "Tier_2_Fallback morphology with severe multimodal discordance routed to Misidentification_Reassign"
+        rationales[i] <- "Cauline_Only_Fallback morphology with severe multimodal discordance routed to Misidentification_Reassign"
         treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Misidentification_Reassign"; next
       } else if (!is_sensu_stricto_locked_i && (g_cl > 1L)) {
         if (has_edaph_pheno_div) {
@@ -1362,7 +1362,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     } else if (is_crypt) {
       status_calls[i] <- "Putative_Cryptic_Species"; rec_taxa[i] <- sprintf("%s (Putative Cryptic Lineage K%d)", given_sp, g_cl)
       triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"; triage_acts[i] <- "Flag_Putative_Cryptic_Species"
-      rationales[i] <- sprintf("Stage 3 Cryptic Congruence (Padial et al. 2010): Tier_1_Pure outlier unassigned to known taxa (CDA_p=%.2f) + barrier (|delta_DOY|=%.1fd >= %.1fd, D_edaph=%.2f)", ifelse(is.na(cda_prob), 0.45, cda_prob), abs(ddoy), tau_cryptic_i, d_edaph)
+      rationales[i] <- sprintf("Stage 3 Cryptic Congruence (Padial et al. 2010): Basal_Rosette outlier unassigned to known taxa (CDA_p=%.2f) + barrier (|delta_DOY|=%.1fd >= %.1fd, D_edaph=%.2f)", ifelse(is.na(cda_prob), 0.45, cda_prob), abs(ddoy), tau_cryptic_i, d_edaph)
       treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Putative_Cryptic_Species"
     } else if (is_cohesive_ecotype) {
       infra_lbl <- if (has_infraspecific_rank) {
@@ -1797,12 +1797,9 @@ build_triage_queue <- function(opts) {
     if (!("gmm_cluster" %in% names(mo_df))) mo_df$gmm_cluster <- 1L
     if (!("gmm_uncertainty" %in% names(mo_df))) mo_df$gmm_uncertainty <- 0.05
     if (!("morph_tier_source" %in% names(mo_df))) mo_df$morph_tier_source <- NA_character_
-    for (ic in c("n_tier1_leaves", "n_tier2_leaves")) if (!(ic %in% names(mo_df))) mo_df[[ic]] <- NA_integer_
-
+    
     mo_agg <- mo_df %>% dplyr::group_by(catalogNumber, plant_individual_id) %>% dplyr::summarise(
       morph_tier_source = first_chr_or_na(morph_tier_source),
-      n_tier1_leaves = first_int_or_na(n_tier1_leaves),
-      n_tier2_leaves = first_int_or_na(n_tier2_leaves),
       cda_predicted_taxon = first_chr_or_na(cda_predicted_taxon),
       cda_second_taxon = first_chr_or_na(cda_second_taxon),
       cda_posterior_prob = med_or_na(cda_posterior_prob),

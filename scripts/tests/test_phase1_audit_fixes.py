@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""
+===============================================================================
+Script: test_phase1_audit_fixes.py
+Project: Packera Species Delimitation & Morphometrics Pipeline
+Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
+
+Description:
+    Regression test suite verifying all Phase 1 Scientific, Statistical, and
+    Software Audit remediation patches across Steps 01-07.
+===============================================================================
+"""
+
+from __future__ import annotations
+
+import importlib
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import pandas as pd
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import main as root_main
+from scripts.core.config import PipelineConfig
+from scripts.core.epa_ecoregions import infer_regional_group
+from scripts.core.harvester import VoucherHarvester
+from scripts.vision import lm3_data_loader
+from scripts.vision.configure_leafmachine3 import NATIVE_LM3_SETTINGS_PATH, load_native_lm3_config
+from scripts.vision.lm3_compat import DBSCAN
+
+
+class TestPhase1AuditFixes(unittest.TestCase):
+    """Verify all Phase 1 codebase bug fixes and statistical anti-leakage safeguards."""
+
+    def test_config_and_cli_readonly_lm3_and_usda_defaults(self) -> None:
+        """Verify Phase 1 defaults: legacy Python gatekeeper purged, usda_county_filter=False, use_cf_predicted_by_mp=False, min_flowering_doy=30, permutations=999."""
+        cfg = PipelineConfig.from_yaml()
+        self.assertFalse(cfg.harvesting.usda_county_filter)
+        self.assertFalse(cfg.segmentation.use_cf_predicted_by_mp)
+        self.assertEqual(cfg.macroecology.phenology.min_flowering_doy, 30)
+        self.assertFalse(any(p.name.endswith("gatekeeper.py") for p in (PROJECT_ROOT / "scripts/vision").glob("*.py")))
+
+        parser = root_main.build_parser()
+        synth_args = parser.parse_args(["synthesis"])
+        self.assertEqual(synth_args.permutations, 999)
+
+        step02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
+        with patch.object(sys, "argv", ["02_segment_and_extract.py"]):
+            p02_def = step02.parse_args()
+            self.assertEqual(p02_def.score_thresh, cfg.segmentation.score_thresh)
+
+    def test_step02_readonly_lm3_sqlite_persistence_and_step03_qc_contract(self) -> None:
+        """Verify Step 02 persists 100% of LM3 leaves + native QC flags to SQLite and Step 03 filters clumps in R."""
+        import cv2
+        from scripts.core.db import get_db_connection, load_step02_records_from_db, record_voucher_segmentation_transaction
+
+        step02 = importlib.import_module("scripts.pipeline.02_segment_and_extract")
+        with tempfile.TemporaryDirectory() as tmp_d:
+            tmp_p = Path(tmp_d)
+            dummy_w = tmp_p / "dummy.onnx"
+            dummy_w.write_bytes(b"0")
+            v_csv = tmp_p / "vouchers.csv"
+            img_p = tmp_p / "NCU_RO_01.jpg"
+            img_p.write_bytes(b"\xff\xd8\xff" + b"0" * 200)
+            pd.DataFrame([{"catalogNumber": "NCU_RO_01", "image_path": str(img_p), "scientificName": "Packera aurea"}]).to_csv(
+                v_csv, index=False
+            )
+            db_file = tmp_p / "readonly.sqlite"
+            with patch.object(step02, "LM3LeafSegmenterEngine"), patch.object(step02, "LM3PlantDetector"):
+                pipe = step02.SegmentAndExtractPipeline(
+                    vouchers_csv=v_csv,
+                    model_weights=dummy_w,
+                    stage1_weights=dummy_w,
+                    output_dir=tmp_p / "out",
+                    device="cpu",
+                    db_path=db_file,
+                )
+            pipe.ruler_calibrations["NCU_RO_01"] = 12.0
+
+            sheet = np.full((600, 800, 3), 232, dtype=np.uint8)
+            clean_leaf = np.zeros((600, 800), dtype=np.uint8)
+            cv2.ellipse(clean_leaf, (200, 300), (45, 95), 0, 0, 360, 255, -1)
+
+            clump_leaf = np.zeros((600, 800), dtype=np.uint8)
+            pts_clump = np.array(
+                [[520, 420], [516, 360], [514, 295], [520, 230], [548, 252], [608, 268], [616, 330], [582, 385], [532, 418]],
+                dtype=np.int32,
+            )
+            cv2.fillPoly(clump_leaf, [pts_clump], 255)
+
+            with patch("cv2.imread", return_value=sheet):
+                with patch.object(
+                    pipe.model_engine,
+                    "predict",
+                    return_value=[
+                        ((180, 140, 420, 260), clean_leaf, 0.96, 0),
+                        ((210, 500, 440, 630), clump_leaf, 0.91, 0),
+                    ],
+                ):
+                    recs, fail = pipe.process_voucher("NCU_RO_01", img_p)
+
+            self.assertIsNone(fail)
+            self.assertEqual(len(recs), 2, "Read-only Step 02 must persist both clean and clump LM3 leaves.")
+            gates_vals = {bool(r["lm3_gates_pass"]) for r in recs}
+            self.assertEqual(gates_vals, {True, False})
+
+            conn = get_db_connection(db_path=db_file, init_schema=True)
+            record_voucher_segmentation_transaction(
+                conn,
+                catalog_number="NCU_RO_01",
+                image_path=str(img_p),
+                extracted_records=recs,
+                failure_record=None,
+                output_dir=pipe.output_dir,
+            )
+            rows = conn.execute(
+                "SELECT leaf_id, bilateral_dice, si_a, lm3_gates_pass, n_lamina_components, scale_source FROM extracted_leaves WHERE catalogNumber = 'NCU_RO_01' ORDER BY leaf_id"
+            ).fetchall()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual({int(r["lm3_gates_pass"]) for r in rows}, {0, 1})
+            loaded_ext, _, _, _ = load_step02_records_from_db(conn, ["NCU_RO_01"])
+            conn.close()
+            self.assertEqual(len(loaded_ext["NCU_RO_01"]), 2)
+
+        s_db_r = (PROJECT_ROOT / "scripts/core/db_utils.R").read_text(encoding="utf-8")
+        s_03_r = (PROJECT_ROOT / "scripts/morphometrics/03_fourier_extractor.R").read_text(encoding="utf-8")
+        self.assertIn("evaluate_step03_lm3_efa_qc", s_db_r)
+        self.assertIn("evaluate_step03_lm3_efa_qc", s_03_r)
+
+    def test_audit_only_usda_county_tagging_retains_disjuncts_by_default(self) -> None:
+        """Verify usda_county_filter=False retains out-of-range vouchers while persisting usda_county_status in SQLite."""
+        with tempfile.TemporaryDirectory() as tmp_d:
+            tmp_p = Path(tmp_d)
+            usda_dir = tmp_p / "usda_plants"
+            (usda_dir / "distributions").mkdir(parents=True, exist_ok=True)
+            db_file = tmp_p / "audit_usda.sqlite"
+            out_csv = tmp_p / "curated_vouchers.csv"
+
+            cnty_geojson_path = tmp_p / "counties.geojson"
+            cnty_geojson_path.write_text(
+                json.dumps({
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"state_name": "north carolina", "county_norm": "orange", "centroid_lon": -79.10, "centroid_lat": 36.05},
+                            "geometry": {"type": "Polygon", "coordinates": [[[-79.25, 35.90], [-78.95, 35.90], [-78.95, 36.20], [-79.25, 36.20], [-79.25, 35.90]]]},
+                        },
+                        {
+                            "type": "Feature",
+                            "properties": {"state_name": "new york", "county_norm": "essex", "centroid_lon": -73.90, "centroid_lat": 44.10},
+                            "geometry": {"type": "Polygon", "coordinates": [[[-74.20, 43.80], [-73.50, 43.80], [-73.50, 44.40], [-74.20, 44.40], [-74.20, 43.80]]]},
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            (usda_dir / "plantlst.txt").write_text(
+                '"Symbol","Synonym Symbol","Scientific Name with Author","Common Name","Family"\n'
+                '"PATO4","","Packera tomentosa (Michx.) C. Jeffrey","woolly ragwort","Asteraceae"\n',
+                encoding="utf-8",
+            )
+            (usda_dir / "distributions" / "PATO4.csv").write_text(
+                '"Symbol","Scientific Name","Common Name","State","County","FIPS Code","Native Status"\n'
+                '"PATO4","Packera tomentosa","woolly ragwort","NC","Orange","37135","L48 (N)"\n',
+                encoding="utf-8",
+            )
+
+            mock_occ = MagicMock()
+            mock_occ.search.side_effect = lambda **kw: (
+                {"results": [], "endOfRecords": True}
+                if "typeStatus" in kw
+                else {
+                    "results": [
+                        {
+                            "catalogNumber": "NCU-IN-01", "institutionCode": "NCU", "scientificName": "Packera dubia",
+                            "recordedBy": "Coll A", "recordNumber": "1", "identifiedBy": "Botanist",
+                            "stateProvince": "North Carolina", "county": "Orange",
+                            "decimalLatitude": 36.05, "decimalLongitude": -79.10, "coordinateUncertaintyInMeters": 50.0,
+                            "eventDate": "2022-04-15", "year": 2022, "month": 4, "day": 15,
+                            "media": [{"type": "StillImage", "identifier": "https://example.org/1.jpg"}],
+                        },
+                        {
+                            "catalogNumber": "NY-DISJUNCT-02", "institutionCode": "NY", "scientificName": "Packera dubia",
+                            "recordedBy": "Coll B", "recordNumber": "2", "identifiedBy": "Student",
+                            "stateProvince": "New York", "county": "Essex",
+                            "decimalLatitude": 44.10, "decimalLongitude": -73.90, "coordinateUncertaintyInMeters": 150.0,
+                            "eventDate": "2022-05-15", "year": 2022, "month": 5, "day": 15,
+                            "media": [{"type": "StillImage", "identifier": "https://example.org/2.jpg"}],
+                        },
+                    ],
+                    "endOfRecords": True,
+                }
+            )
+
+            with patch("scripts.core.harvester.occ", mock_occ):
+                harv = VoucherHarvester(
+                    taxa=["Packera dubia"],
+                    expand_synonyms=False,
+                    output_csv=out_csv,
+                    raw_dir=tmp_p / "raw",
+                    workspace_dir=tmp_p,
+                    db_path=db_file,
+                    usda_cache_dir=usda_dir,
+                    usda_county_geojson_path=cnty_geojson_path,
+                )
+                self.assertFalse(harv.usda_county_filter)
+                df_res = harv.harvest()
+                harv.export(df_res)
+
+            self.assertEqual(set(df_res["catalogNumber"]), {"NCU-IN-01", "NY-DISJUNCT-02"})
+            import sqlite3
+            conn = sqlite3.connect(str(db_file))
+            try:
+                rows = dict(conn.execute("SELECT catalogNumber, usda_county_status FROM vouchers;").fetchall())
+            finally:
+                conn.close()
+            self.assertEqual(rows["NCU-IN-01"], "in_range")
+            self.assertEqual(rows["NY-DISJUNCT-02"], "out_of_range")
+
+    def test_scale_source_separation_and_baxter_county_ozarks(self) -> None:
+        """Verify scale_source distinguishes ruler_calibrated vs mp_estimated, and Baxter Co. AR maps to Ozark_Highlands."""
+        self.assertEqual(
+            infer_regional_group(None, None, state_province="Arkansas", county="Baxter County"),
+            "Ozark_Highlands",
+        )
+        self.assertTrue(NATIVE_LM3_SETTINGS_PATH.exists())
+        lm3_cfg = load_native_lm3_config()
+        self.assertEqual(int(lm3_cfg["modules"]["ect"]["num_dirs"]), 360)
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            rdir = Path(tmp_d) / "Data" / "Ruler"
+            rdir.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([
+                {
+                    "filename": "NCU_RUL__R__1", "ruler_success": True,
+                    "conversion_mean": 120.0, "ruler_class_confidence": 95.0,
+                    "conversion_determination": "measured_from_ruler",
+                },
+                {
+                    "filename": "NCU_MP__R__1", "ruler_success": True,
+                    "conversion_mean": 100.0, "ruler_class_confidence": 85.0,
+                    "conversion_determination": "predicted_from_megapixels",
+                },
+            ]).to_csv(rdir / "ruler_summary.csv", index=False)
+            recs = lm3_data_loader.load_ruler_calibration_records(Path(tmp_d))
+            self.assertEqual(recs["NCU_RUL"]["scale_source"], "ruler_calibrated")
+            self.assertTrue(recs["NCU_RUL"]["is_empirical_ruler"])
+            self.assertEqual(recs["NCU_MP"]["scale_source"], "mp_estimated")
+            self.assertFalse(recs["NCU_MP"]["is_empirical_ruler"])
+
+    def test_numpy_dbscan_fallback_clusters_and_outliers(self) -> None:
+        """Verify lm3_compat DBSCAN separates spatial clusters and marks isolated noise as -1."""
+        pts = np.array([
+            [10.0, 10.0], [11.0, 10.5], [9.5, 10.2],
+            [100.0, 100.0], [101.0, 99.5], [99.8, 100.4],
+            [500.0, 500.0],
+        ])
+        labels = DBSCAN(eps=5.0, min_samples=2).fit_predict(pts)
+        self.assertEqual(len(set(labels[:3])), 1)
+        self.assertEqual(len(set(labels[3:6])), 1)
+        self.assertNotEqual(labels[0], labels[3])
+        self.assertEqual(int(labels[6]), -1)
+
+    def test_r_phase1_statistical_validity_contracts(self) -> None:
+        """Verify Steps 03-07 R scripts enforce Phase 1 anti-leakage, log10(CS), uncertainty, IPP, and circular p-value contracts."""
+        r03 = (PROJECT_ROOT / "scripts/morphometrics/03_fourier_extractor.R").read_text(encoding="utf-8")
+        r04 = (PROJECT_ROOT / "scripts/morphometrics/04_gmm_morphotools.R").read_text(encoding="utf-8")
+        raw = (PROJECT_ROOT / "scripts/morphometrics/authority_weighting_utils.R").read_text(encoding="utf-8")
+        rman = (PROJECT_ROOT / "scripts/morphometrics/pub_ecoregion_manova_utils.R").read_text(encoding="utf-8")
+        red = (PROJECT_ROOT / "scripts/analysis/edaphic_fine_grain_utils.R").read_text(encoding="utf-8")
+        r05 = (PROJECT_ROOT / "scripts/analysis/05_multimodal_spatial_rf.R").read_text(encoding="utf-8")
+        rph = (PROJECT_ROOT / "scripts/analysis/step05_phenology_ecotypes.R").read_text(encoding="utf-8")
+        rsdm = (PROJECT_ROOT / "scripts/analysis/step05_sdm_maxent.R").read_text(encoding="utf-8")
+        r07 = (PROJECT_ROOT / "scripts/analysis/07_discover_taxon_complexes.R").read_text(encoding="utf-8")
+
+        # Step 03: base-10 log10(centsize), centroid_size_px separated, NA when uncalibrated
+        self.assertIn("log10(centsize)", r03)
+        self.assertIn("centroid_size_px", r03)
+        self.assertIn("scale_source", r03)
+
+        # Step 04: zero pre-CV deme shrinkage, zero soft geo prior in CDA, zero u_cut <= 0.70 boundary trimming, include_gmm_clusters = !is_intra_mode
+        self.assertNotIn("apply_hierarchical_population_deme_shrinkage(closed_df", r04)
+        self.assertIn("assign_spatial_gathering_demes(closed_df", r04)
+        self.assertNotIn(".compute_soft_geo_range_log_prior", r04)
+        self.assertNotIn("quantile(unc_v, 0.70", r04)
+        self.assertIn("include_gmm_clusters = !is_intra_mode", r04)
+        self.assertIn("include_gmm_clusters = TRUE", rman)
+        self.assertIn("build_taxon_blind_gathering_deme_folds", raw)
+        self.assertNotIn("geo_ll_mat[i, ]", raw)
+
+        # Steps 05-07: <= 2000 m edaphic gate, ILR texture, include_pheno = FALSE, Hopkins lon+year, cv.glmnet IPP, Watson-Williams circular p-values
+        self.assertIn("max_edaphic_uncertainty_m = 2000.0", red)
+        self.assertIn("ilr_texture_1", red)
+        self.assertIn("include_pheno = FALSE", r05)
+        self.assertIn("b_lon", rph)
+        self.assertIn("b_year", rph)
+        self.assertNotIn("rep(pres_idx, times = rep_p)", rsdm)
+        self.assertIn("glmnet::cv.glmnet", rsdm)
+        self.assertNotIn("exp(-(delta_circ / 18.0))", r07)
+        self.assertIn(".circular_watson_williams_or_perm_p", r07)
+
+
+if __name__ == "__main__":
+    unittest.main()

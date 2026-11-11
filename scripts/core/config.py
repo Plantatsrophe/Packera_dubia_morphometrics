@@ -74,7 +74,7 @@ def initialize_run_directory(
 ) -> Path:
     """
     Create the standardized self-contained run directory structure under `runs/<run_id>/`:
-      - data/masks/{tier1_intact,tier2_reflected}
+      - data/masks
       - data/contours
       - data/cropped_patches/capitula
       - data/tables
@@ -88,8 +88,7 @@ def initialize_run_directory(
         run_dir = (workspace_root / "runs" / eff_id).resolve()
 
     subdirs = [
-        run_dir / "data" / "masks" / "tier1_intact",
-        run_dir / "data" / "masks" / "tier2_reflected",
+        run_dir / "data" / "masks",
         run_dir / "data" / "contours",
         run_dir / "data" / "cropped_patches" / "capitula",
         run_dir / "data" / "tables",
@@ -278,39 +277,6 @@ class TaxaConfig:
 
 
 @dataclass(frozen=True)
-class FoldDetectionConfig:
-    """Empirical straight-chord fold detection parameters (calibrated)."""
-    enabled: bool = True
-    max_folded_aspect_ratio: float = 0.42
-    max_chord_deviation_ratio: float = 0.035
-    min_chord_length_px: int = 150
-
-
-@dataclass(frozen=True)
-class DissectionConfig:
-    """Empirical dissection & lyrate sinus parameters (calibrated)."""
-    enabled: bool = True
-    min_solidity_dissected: float = 0.50
-    sinus_defect_min_depth_ratio: float = 0.08
-    min_bilateral_sinus_count: int = 3
-    taxa_with_lyrate_tendency: List[str] = field(default_factory=list)
-
-    @property
-    def default(self) -> float:
-        """Backward-compatible alias for standard baseline min_solidity."""
-        return 0.72
-
-    @property
-    def min_dissected(self) -> float:
-        """Backward-compatible alias for min_solidity_dissected."""
-        return self.min_solidity_dissected
-
-
-# Backward-compatibility alias for legacy callers importing SolidityThresholdsConfig
-SolidityThresholdsConfig = DissectionConfig
-
-
-@dataclass(frozen=True)
 class CapitulumPhenologyConfig:
     """Thresholds for capitulum phenology biomarker classification."""
     min_pappus_luminance: float = 75.0
@@ -349,15 +315,9 @@ def normalize_countries_list(raw_countries: Any, default: Optional[List[str]] = 
 
 @dataclass(frozen=True)
 class ThresholdsConfig:
-    """Botanical optical quality, geometry, and detection thresholds."""
-    pcd_conf: float = 0.72
+    """Botanical optical quality and harvesting thresholds."""
+    pcd_conf: float = 0.25
     minimum_confidence_threshold: float = 0.65
-    min_solidity: float = 0.72
-    min_circularity: float = 0.25
-    min_extent: float = 0.35
-    min_blade_area_cm2: float = 0.75
-    max_tissue_border_ratio: float = 0.15
-    min_ucs: float = 0.85
     min_megapixels: float = 8.0
     min_file_size_kb: float = 500.0
     min_sharpness_laplacian: float = 80.0
@@ -365,14 +325,7 @@ class ThresholdsConfig:
     western_longitude_threshold: float = -98.0
     geographic_scope: str = "eastern_na"
     countries: List[str] = field(default_factory=lambda: ["US"])
-    fold_detection: FoldDetectionConfig = field(default_factory=FoldDetectionConfig)
-    dissection: DissectionConfig = field(default_factory=DissectionConfig)
     capitulum_phenology: CapitulumPhenologyConfig = field(default_factory=CapitulumPhenologyConfig)
-
-    @property
-    def solidity(self) -> DissectionConfig:
-        """Backward-compatible alias for dissection thresholds."""
-        return self.dissection
 
 
 @dataclass(frozen=True)
@@ -401,7 +354,7 @@ class MorphometricsConfig:
 @dataclass(frozen=True)
 class PhenologyConfig:
     """Phenological modeling, latitudinal spring progression, and anomaly detection."""
-    min_flowering_doy: int = 60
+    min_flowering_doy: int = 30
     max_flowering_doy: int = 220
     robust_regression: bool = True
 
@@ -427,7 +380,7 @@ class HarvestingConfig:
     min_file_size_kb: float = 500.0
     min_sharpness_laplacian: float = 80.0
     download_concurrency: int = 15
-    usda_county_filter: bool = True
+    usda_county_filter: bool = False
     usda_county_buffer_km: float = 50.0
     usda_exempt_gold: bool = True
 
@@ -453,19 +406,13 @@ class SegmentationConfig:
     llr_hyst_keep_blobs: bool = True
     paperclean_llr_hyst_keepblobs: bool = True
     subtract_holes: bool = True
-    use_cf_predicted_by_mp: bool = True
+    use_cf_predicted_by_mp: bool = False
     ect_num_dirs: int = 360
     minimum_confidence_threshold: float = 0.50
     treat_leaflet_as_leaf_whole: bool = False
     use_efds_for_png_masks: bool = False
     do_apply_landmarks: bool = True
-    score_thresh: float = 0.35
-    min_ucs: float = 0.85
-    min_solidity: float = 0.72
-    min_circularity: float = 0.25
-    min_extent: float = 0.35
-    min_blade_area_cm2: float = 0.75
-    max_tissue_border_ratio: float = 0.15
+    score_thresh: float = 0.25
     device: str = "cuda"
 
 
@@ -594,47 +541,6 @@ class PipelineConfig:
         )
 
         thresh_dict = raw_cfg.get("thresholds", {})
-
-        # Parse dissection parameters with safe fallbacks
-        diss_dict = thresh_dict.get("dissection") or thresh_dict.get("solidity")
-        if isinstance(diss_dict, dict):
-            dissection_cfg = DissectionConfig(
-                enabled=bool(diss_dict.get("enabled", True)),
-                min_solidity_dissected=float(
-                    diss_dict.get("min_solidity_dissected", diss_dict.get("min_dissected", 0.50))
-                ),
-                sinus_defect_min_depth_ratio=float(
-                    diss_dict.get("sinus_defect_min_depth_ratio", 0.08)
-                ),
-                min_bilateral_sinus_count=int(
-                    diss_dict.get("min_bilateral_sinus_count", 3)
-                ),
-                taxa_with_lyrate_tendency=list(
-                    diss_dict.get("taxa_with_lyrate_tendency", [])
-                ),
-            )
-        else:
-            dissection_cfg = DissectionConfig()
-
-        # Parse fold detection parameters with safe fallbacks
-        fold_dict = thresh_dict.get("fold_detection")
-        if isinstance(fold_dict, dict):
-            fold_cfg = FoldDetectionConfig(
-                enabled=bool(fold_dict.get("enabled", True)),
-                max_folded_aspect_ratio=float(
-                    fold_dict.get("max_folded_aspect_ratio", 0.42)
-                ),
-                max_chord_deviation_ratio=float(
-                    fold_dict.get("max_chord_deviation_ratio", 0.035)
-                ),
-                min_chord_length_px=int(
-                    fold_dict.get("min_chord_length_px", 150)
-                ),
-            )
-        else:
-            fold_cfg = FoldDetectionConfig()
-
-        # Parse capitulum phenology parameters with safe fallbacks
         pheno_dict = thresh_dict.get("capitulum_phenology")
         if isinstance(pheno_dict, dict):
             pheno_cfg = CapitulumPhenologyConfig(
@@ -649,13 +555,7 @@ class PipelineConfig:
             pheno_cfg = CapitulumPhenologyConfig()
 
         harv_dict = raw_cfg.get("harvesting", {})
-        non_float_thresh_fields = {
-            "fold_detection",
-            "dissection",
-            "capitulum_phenology",
-            "geographic_scope",
-            "countries",
-        }
+        non_float_thresh_fields = {"capitulum_phenology", "geographic_scope", "countries"}
         thresh_kwargs: Dict[str, Any] = {
             k: float(v)
             for k, v in thresh_dict.items()
@@ -669,11 +569,7 @@ class PipelineConfig:
             thresh_dict.get("countries", harv_dict.get("countries", ["US"])),
             default=["US"],
         )
-        thresh_kwargs["fold_detection"] = fold_cfg
-        thresh_kwargs["dissection"] = dissection_cfg
         thresh_kwargs["capitulum_phenology"] = pheno_cfg
-        if "min_solidity" not in thresh_kwargs:
-            thresh_kwargs["min_solidity"] = dissection_cfg.default
 
         thresholds = ThresholdsConfig(**thresh_kwargs)
 
@@ -745,7 +641,7 @@ class PipelineConfig:
         macro_dict = raw_cfg.get("macroecology", {})
         pheno_dict = macro_dict.get("phenology", {})
         phenology_cfg = PhenologyConfig(
-            min_flowering_doy=int(pheno_dict.get("min_flowering_doy", 60)),
+            min_flowering_doy=int(pheno_dict.get("min_flowering_doy", 30)),
             max_flowering_doy=int(pheno_dict.get("max_flowering_doy", 220)),
             robust_regression=bool(pheno_dict.get("robust_regression", True)),
         )
