@@ -49,12 +49,36 @@ try:
     from PIL import Image
 except ImportError:
     Image = None  # type: ignore[assignment]
+class _MissingPygbifSubmodule:
+    """Mock-friendly stub when optional `pygbif` is not installed in the current environment."""
+
+    _is_missing_pygbif = True
+
+    def __init__(self, module_name: str) -> None:
+        self._module_name = module_name
+
+    def _raise(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError(
+            f"Optional dependency '{self._module_name}' (pygbif) is required for live GBIF API queries. "
+            "Install via `pip install pygbif`."
+        )
+
+    search = _raise
+    name_backbone = _raise
+    name_usage = _raise
+    name_lookup = _raise
+
+
 try:
     import pygbif
     import pygbif.occurrences as occ
     import pygbif.species as species
 except ImportError:
-    pygbif = occ = species = None  # type: ignore[assignment]
+    pygbif = None  # type: ignore[assignment]
+    occ = _MissingPygbifSubmodule("pygbif.occurrences")  # type: ignore[assignment]
+    species = _MissingPygbifSubmodule("pygbif.species")  # type: ignore[assignment]
+
+_AIOHTTP_CLIENT_ERRORS: Tuple[type, ...] = (aiohttp.ClientError,) if aiohttp is not None else ()
 try:
     from shapely.geometry import Point, Polygon, shape
     from shapely.strtree import STRtree
@@ -964,11 +988,27 @@ async def download_single_image(
         for attempt in range(1, max_retries + 1):
             temp_path: Optional[Path] = None
             try:
-                timeout = aiohttp.ClientTimeout(total=45, connect=15)
-                async with session.get(image_url, timeout=timeout) as response:
-                    if response.status == 200:
-                        content_type = response.headers.get("Content-Type", "").lower()
-                        content = await response.read()
+                if session is None:
+                    req = urllib.request.Request(
+                        image_url,
+                        headers={"User-Agent": "PackeraResearchBot/1.0 (UNC Chapel Hill Herbarium)"},
+                    )
+
+                    def _fetch_urllib() -> Tuple[int, str, bytes]:
+                        with urllib.request.urlopen(req, timeout=45) as resp:
+                            st = int(getattr(resp, "status", 200))
+                            ct = str(resp.headers.get("Content-Type", "")).lower()
+                            return st, ct, resp.read()
+
+                    status_code, content_type, content = await asyncio.to_thread(_fetch_urllib)
+                else:
+                    timeout = aiohttp.ClientTimeout(total=45, connect=15) if aiohttp is not None else 45
+                    async with session.get(image_url, timeout=timeout) as response:
+                        status_code = response.status
+                        content_type = response.headers.get("Content-Type", "").lower() if response.status == 200 else ""
+                        content = await response.read() if response.status == 200 else b""
+                if status_code == 200:
+                    if True:
                         if len(content) > 1024 and (
                             not content_type
                             or "image" in content_type
@@ -1003,9 +1043,9 @@ async def download_single_image(
                             temp_file.close()
                             temp_path.replace(destination_path)
                             return True, False
-                    elif response.status in {404, 410}:
-                        return False, False
-            except (aiohttp.ClientError, asyncio.TimeoutError, Exception):
+                elif status_code in {404, 410}:
+                    return False, False
+            except (*_AIOHTTP_CLIENT_ERRORS, asyncio.TimeoutError, Exception):
                 if temp_path and temp_path.exists():
                     try:
                         temp_path.unlink()
@@ -1063,21 +1103,37 @@ async def download_all_voucher_images(
             f"[Processed: 0 | Skipped: {stats['skipped']} | Total: {total_records}]"
         )
 
-    connector = aiohttp.TCPConnector(limit=concurrency_limit, limit_per_host=5, ssl=False)
-    async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+    if aiohttp is not None:
+        connector = aiohttp.TCPConnector(limit=concurrency_limit, limit_per_host=5, ssl=False)
+        async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+            tasks = [
+                download_single_image(session, url, dest, semaphore, force=force, logger=logger)
+                for url, dest in pending
+            ]
+            results = (
+                await async_tqdm.gather(*tasks, desc="Downloading Voucher Sheets", unit="img")
+                if async_tqdm is not None
+                else await asyncio.gather(*tasks)
+            )
+    else:
         tasks = [
-            download_single_image(session, url, dest, semaphore, force=force, logger=logger)
+            download_single_image(None, url, dest, semaphore, force=force, logger=logger)
             for url, dest in pending
         ]
-        results = await async_tqdm.gather(*tasks, desc="Downloading Voucher Sheets", unit="img")
-        for success, was_skipped in results:
-            if success:
-                if was_skipped:
-                    stats["skipped"] += 1
-                else:
-                    stats["success"] += 1
+        results = (
+            await async_tqdm.gather(*tasks, desc="Downloading Voucher Sheets", unit="img")
+            if async_tqdm is not None
+            else await asyncio.gather(*tasks)
+        )
+
+    for success, was_skipped in results:
+        if success:
+            if was_skipped:
+                stats["skipped"] += 1
             else:
-                stats["failed"] += 1
+                stats["success"] += 1
+        else:
+            stats["failed"] += 1
 
     if logger:
         logger.info(
@@ -1978,11 +2034,14 @@ class VoucherHarvester:
             is_gbif_mocked = (
                 _is_gbif_species_mocked()
                 or occ is None
+                or getattr(occ, "_is_missing_pygbif", False)
                 or getattr(occ, "search", None) is None
                 or hasattr(occ.search, "_mock_name")
                 or hasattr(occ.search, "assert_called")
             )
-            if self.usda_county_filter and (not is_gbif_mocked or self.usda_cache_dir is not None):
+            if (self.usda_county_filter and (not is_gbif_mocked or self.usda_cache_dir is not None)) or (
+                not self.usda_county_filter and self.usda_cache_dir is not None
+            ):
                 df, usda_stats = filter_vouchers_by_usda_county_range(
                     df=df,
                     standardize_taxon_fn=standardize_packera_taxon,
@@ -1993,8 +2052,9 @@ class VoucherHarvester:
                     county_geojson_path=self.usda_county_geojson_path,
                     db_path=self.db_path,
                     workspace_dir=self.workspace_dir,
-                    allow_network=not is_gbif_mocked,
+                    allow_network=(not is_gbif_mocked) and bool(self.usda_county_filter),
                     force_refresh=self.force,
+                    drop_out_of_range=bool(self.usda_county_filter),
                     logger=self.logger,
                 )
                 self.last_usda_filter_stats = usda_stats

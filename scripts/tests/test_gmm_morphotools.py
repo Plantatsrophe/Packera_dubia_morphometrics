@@ -69,7 +69,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 catalogNumber = sprintf("V%02d", 1:18),
                 species_standardized = rep("Packera dubia", 18),
                 determiner_tier = rep("Tier_1_Gold", 18),
-                morph_tier_source = rep("Tier_1_Pure", 18),
+                morph_tier_source = rep("Basal_Rosette", 18),
                 regional_group = c(rep("Piedmont", 10), rep("Blue_Ridge", 2), rep(NA_character_, 6)),
                 PC1 = c(rnorm(9, -3.0, 0.3), rnorm(9, 3.0, 0.3)),
                 PC2 = c(rnorm(9, 1.5, 0.3), rnorm(9, -1.5, 0.3)),
@@ -179,7 +179,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     plant_individual_id = 1L,
                     species_standardized = taxa5[g_i],
                     determiner_tier = "Tier_1_Gold",
-                    morph_tier_source = "Tier_1_Pure",
+                    morph_tier_source = "Basal_Rosette",
                     PC1 = centers5[g_i, 1] + rnorm(1, 0, 0.18),
                     PC2 = centers5[g_i, 2] + rnorm(1, 0, 0.18),
                     PC3 = centers5[g_i, 3] + rnorm(1, 0, 0.18),
@@ -275,16 +275,13 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             "Tier_1_Gold",
             "lm(Y ~ log_centsize + scientificName",
             "Y_adj <- Y - outer(log_centsize - mean(log_centsize, na.rm = TRUE), beta_within)",
-            'grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE)',
             "RRPP::lm.rrpp",
             "RRPP::pairwise",
             "allometry_pairwise_trajectories.csv",
             "clustvarsel::clustvarsel",
             "is_tier1_pure",
             "morph_tier_source",
-            "n_tier1_leaves",
-            "n_tier2_leaves",
-            '"Tier_1_Pure"',
+            '"Basal_Rosette"',
             "PC1 ~ log_centsize * scientificName",
             "select_morphometric_subspace",
             "floor(N_min / 3",
@@ -388,10 +385,9 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "catalogNumber": f"FIG_{idx}_{k}",
                     "plant_individual_id": 0,
                     "leaf_id": 1,
-                    "assigned_tier": "Tier_1_Direct",
                     "scientificName": sp,
                     "solidity": 0.35 + 0.05 * k if sp == "Packera millefolium" else 0.80 + 0.03 * k,
-                    "ucs_score": 0.92,
+                    "archetype_score": 0.92,
                     "aspect_ratio": 1.4 + 0.3 * k,
                     "pixels_per_mm": 10.0,
                     "is_calibrated_mm": True,
@@ -416,7 +412,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertNotIn("mod05.TARGET_TAXA", sh_src)
 
     def test_dual_intraspecific_allometry_morphotype_and_supervised_epa_ecoregion_cda(self):
-        """Verify single-taxon (--intraspecific-mode) allometry, partial AR_inv & Tier_2_Fallback retention, Track 1 Morphotype_K* CDA, and Track 2 EPA Level III Ecoregion CDA."""
+        """Verify single-taxon (--intraspecific-mode) allometry, partial AR_inv & Cauline_Only_Fallback retention, Track 1 Morphotype_K* CDA, and Track 2 EPA Level III Ecoregion CDA."""
         if not shutil.which("Rscript"):
             self.skipTest("Rscript not installed.")
         rng = np.random.default_rng(202610)
@@ -440,10 +436,8 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 rec = {
                     "catalogNumber": cat,
                     "plant_individual_id": 0,
-                    "assigned_tier": "Tier_2_Reflected" if is_t2_fb else "Tier_1_Direct",
-                    "n_tier1_leaves": 0 if is_t2_fb else 3,
-                    "n_tier2_leaves": 2 if is_t2_fb else 0,
-                    "morph_tier_source": "Tier_2_Fallback" if is_t2_fb else "Tier_1_Pure",
+                    "basal_leaf_count": 0 if is_t2_fb else 3,
+                    "morph_tier_source": "Cauline_Only_Fallback" if is_t2_fb else "Basal_Rosette",
                     "species_raw": "Packera anonyma",
                     "scientificName": "Packera anonyma",
                     "determiner_tier": tier,
@@ -459,7 +453,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "is_calibrated_mm": True,
                     "aspect_ratio": float(1.9 + 0.25 * (c1 > 0) + rng.normal(0.0, 0.05)),
                     "solidity": float(0.88 + rng.normal(0.0, 0.02)),
-                    "ucs_score": 0.94,
+                    "archetype_score": 0.94,
                     "capitulum_aspect_ratio": np.nan if j % 5 == 0 else float(1.15 + 0.08 * c1 + rng_ar.normal(0.0, 0.015)),
                 }
                 for k in range(1, 13):
@@ -550,11 +544,11 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, f"Dual/Intraspecific Step 04 failed:\n{proc.stderr}\n{proc.stdout}")
 
-            # 0. Single-taxon allometry audit CSV & PDF + zero dropped Tier_1 / Tier_2_Fallback / partial-AR_inv vouchers
+            # 0. Single-taxon allometry audit CSV & PDF + zero dropped Tier_1 / Cauline_Only_Fallback / partial-AR_inv vouchers
             self.assertTrue(allom_csv.exists(), "Allometry audit CSV must be exported in single-taxon mode")
             self.assertTrue(allom_pdf.exists() and allom_pdf.read_bytes()[:5] == b"%PDF-")
             flags_df = pd.read_csv(flags_csv)
-            self.assertEqual(len(flags_df), 40, "All 40 vouchers (including Tier_2_Fallback and partial AR_inv) must be retained")
+            self.assertEqual(len(flags_df), 40, "All 40 vouchers (including Cauline_Only_Fallback and partial AR_inv) must be retained")
             self.assertFalse(flags_df["gmm_cluster"].isna().any(), "No voucher should have NA gmm_cluster when AR_inv is partially missing")
             self.assertFalse(flags_df["cda_predicted_taxon"].isna().any(), "No voucher should have NA cda_predicted_taxon")
 
@@ -639,10 +633,8 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 row = {
                     "catalogNumber": cat,
                     "plant_individual_id": 0,
-                    "assigned_tier": "Tier_1_Direct",
-                    "n_tier1_leaves": 3,
-                    "n_tier2_leaves": 0,
-                    "morph_tier_source": "Tier_1_Pure",
+                    "basal_leaf_count": 3,
+                    "morph_tier_source": "Basal_Rosette",
                     "species_raw": sp,
                     "scientificName": sp,
                     "determiner_tier": det_tier,
@@ -658,7 +650,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "is_calibrated_mm": True,
                     "aspect_ratio": float(2.0 + 0.3 * s_idx + rng.normal(0.0, 0.05)),
                     "solidity": float(0.89 + 0.02 * s_idx),
-                    "ucs_score": 0.94,
+                    "archetype_score": 0.94,
                 }
                 for k in range(1, 13):
                     row[f"A{k}"] = float((-1.25 - 0.06 * pc1 + 0.03 * log_cs) / k + rng.normal(0.0, 0.003))
@@ -889,10 +881,8 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 row = {
                     "catalogNumber": cat,
                     "plant_individual_id": pid,
-                    "assigned_tier": "Tier_1_Direct",
-                    "n_tier1_leaves": 3,
-                    "n_tier2_leaves": 0,
-                    "morph_tier_source": "Tier_1_Pure",
+                    "basal_leaf_count": 3,
+                    "morph_tier_source": "Basal_Rosette",
                     "species_raw": raw_syn if j % 2 == 0 else canon_sp,
                     "scientificName": canon_sp,
                     "determiner_tier": tier,
@@ -908,7 +898,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "is_calibrated_mm": True,
                     "aspect_ratio": float(1.8 + 0.25 * idx + rng.normal(0.0, 0.04)),
                     "solidity": float(0.42 if canon_sp == "Packera millefolium" else 0.89),
-                    "ucs_score": 0.94,
+                    "archetype_score": 0.94,
                 }
                 for k in range(1, 13):
                     row[f"A{k}"] = float((c1 * 0.06) / k + rng.normal(0.0, 0.003))
@@ -953,10 +943,10 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         })
 
         man_rows = [
-            {"catalogNumber": "MULTI_SHEET_01", "plant_individual_id": 1, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "petiole_length_mm": 32.0, "blade_length_mm": 28.0, "petiole_to_blade_ratio": round(32.0 / 28.0, 4)},
-            {"catalogNumber": "MULTI_SHEET_01", "plant_individual_id": 1, "leaf_id": 2, "assigned_tier": "Tier_1_Direct", "petiole_length_mm": 32.0, "blade_length_mm": 28.0, "petiole_to_blade_ratio": round(32.0 / 28.0, 4)},
-            {"catalogNumber": "MULTI_SHEET_01", "plant_individual_id": 2, "leaf_id": 1, "assigned_tier": "Tier_1_Direct", "petiole_length_mm": 12.0, "blade_length_mm": 30.0, "petiole_to_blade_ratio": round(12.0 / 30.0, 4)},
-            {"catalogNumber": "MULTI_SHEET_01", "plant_individual_id": 2, "leaf_id": 2, "assigned_tier": "Tier_1_Direct", "petiole_length_mm": 12.0, "blade_length_mm": 30.0, "petiole_to_blade_ratio": round(12.0 / 30.0, 4)},
+            {"catalogNumber": "MULTI_SHEET_01", "plant_individual_id": 1, "leaf_id": 1, "petiole_length_mm": 32.0, "blade_length_mm": 28.0, "petiole_to_blade_ratio": round(32.0 / 28.0, 4)},
+            {"catalogNumber": "MULTI_SHEET_01", "plant_individual_id": 1, "leaf_id": 2, "petiole_length_mm": 32.0, "blade_length_mm": 28.0, "petiole_to_blade_ratio": round(32.0 / 28.0, 4)},
+            {"catalogNumber": "MULTI_SHEET_01", "plant_individual_id": 2, "leaf_id": 1, "petiole_length_mm": 12.0, "blade_length_mm": 30.0, "petiole_to_blade_ratio": round(12.0 / 30.0, 4)},
+            {"catalogNumber": "MULTI_SHEET_01", "plant_individual_id": 2, "leaf_id": 2, "petiole_length_mm": 12.0, "blade_length_mm": 30.0, "petiole_to_blade_ratio": round(12.0 / 30.0, 4)},
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1072,10 +1062,8 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 row = {
                     "catalogNumber": cat,
                     "plant_individual_id": 0,
-                    "assigned_tier": "Tier_1_Direct",
-                    "n_tier1_leaves": 3,
-                    "n_tier2_leaves": 0,
-                    "morph_tier_source": "Tier_1_Pure",
+                    "basal_leaf_count": 3,
+                    "morph_tier_source": "Basal_Rosette",
                     "species_raw": sp,
                     "scientificName": sp,
                     "determiner_tier": tier,
@@ -1091,7 +1079,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "is_calibrated_mm": True,
                     "aspect_ratio": float(1.9 + 0.2 * s_idx + rng.normal(0.0, 0.04)),
                     "solidity": 0.90,
-                    "ucs_score": 0.94,
+                    "archetype_score": 0.94,
                 }
                 for k in range(1, 13):
                     row[f"A{k}"] = float((pc1 * 0.06) / k + rng.normal(0.0, 0.002))
@@ -1186,10 +1174,8 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 row = {
                     "catalogNumber": cat,
                     "plant_individual_id": 0,
-                    "assigned_tier": "Tier_1_Direct",
-                    "n_tier1_leaves": 3,
-                    "n_tier2_leaves": 0,
-                    "morph_tier_source": "Tier_1_Pure",
+                    "basal_leaf_count": 3,
+                    "morph_tier_source": "Basal_Rosette",
                     "species_raw": sp,
                     "scientificName": sp,
                     "determiner_tier": "Tier_1_Gold",
@@ -1200,7 +1186,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "is_calibrated_mm": True,
                     "aspect_ratio": float(1.55 + rng.normal(0.0, 0.02)),
                     "solidity": 0.91,
-                    "ucs_score": 0.95,
+                    "archetype_score": 0.95,
                 }
                 # 6 orthogonal high-variance signal PCs (PC1..PC6, Sym_PC1..Sym_PC6) + 2 low-noise PCs (PC7..PC8)
                 for p in range(1, 7):
@@ -1328,14 +1314,14 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           data.frame(
             catalogNumber = paste0("E", 1:26), plant_individual_id = 0L,
             species_standardized = "Packera paupercula", determiner_tier = "Tier_1_Gold",
-            morph_tier_source = "Tier_1_Pure", solidity = rnorm(26, 0.90, 0.02),
+            morph_tier_source = "Basal_Rosette", solidity = rnorm(26, 0.90, 0.02),
             q25_solidity = rnorm(26, 0.88, 0.02),
             PC1 = rnorm(26, -1.4, 0.2), PC2 = rnorm(26, 0.3, 0.2), PC3 = rnorm(26, -0.4, 0.15)
           ),
           data.frame(
             catalogNumber = paste0("D", 1:6), plant_individual_id = 0L,
             species_standardized = "Packera paupercula", determiner_tier = "Tier_1_Gold",
-            morph_tier_source = "Tier_1_Pure", solidity = rnorm(6, 0.46, 0.03),
+            morph_tier_source = "Basal_Rosette", solidity = rnorm(6, 0.46, 0.03),
             q25_solidity = rnorm(6, 0.42, 0.03),
             PC1 = rnorm(6, 2.9, 0.2), PC2 = rnorm(6, -1.5, 0.2), PC3 = rnorm(6, 3.1, 0.2)
           )
@@ -1393,7 +1379,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           species_standardized = c(rep("Packera dubia", 20), rep("Packera obovata", 12)),
           determiner_tier = "Tier_1_Gold",
           type_status = c("Holotype", "None", rep("None", 18), "Lectotype", rep("None", 11)),
-          morph_tier_source = "Tier_1_Pure",
+          morph_tier_source = "Basal_Rosette",
           PC1 = c(-4.8, 14.5, rnorm(18, -1.8, 0.18), 4.2, rnorm(11, 3.8, 0.18)),
           PC2 = c(3.9, -12.0, rnorm(18, 0.4, 0.18), -1.1, rnorm(11, -0.9, 0.18)),
           PC3 = c(2.6, 9.5, rnorm(18, 0.1, 0.15), -0.4, rnorm(11, -0.3, 0.15)),
@@ -1507,10 +1493,8 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 row = {
                     "catalogNumber": cat,
                     "plant_individual_id": 0,
-                    "assigned_tier": "Tier_1_Direct",
-                    "n_tier1_leaves": 3,
-                    "n_tier2_leaves": 0,
-                    "morph_tier_source": "Tier_1_Pure",
+                    "basal_leaf_count": 3,
+                    "morph_tier_source": "Basal_Rosette",
                     "species_raw": sp,
                     "scientificName": sp,
                     "determiner_tier": tier,
@@ -1522,7 +1506,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "is_calibrated_mm": True,
                     "aspect_ratio": 1.55,
                     "solidity": 0.90,
-                    "ucs_score": 0.94,
+                    "archetype_score": 0.94,
                     "PC1": pc1,
                     "PC2": pc2,
                     "PC3": pc3,
@@ -1620,7 +1604,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           species_standardized = rep("Packera dubia", 5L),
           determiner_tier = rep("Tier_1_Gold", 5L),
           authority_weight = rep(0.95, 5L),
-          n_tier1_leaves = c(2L, 2L, 4L, 4L, 3L),
+          basal_leaf_count = c(2L, 2L, 4L, 4L, 3L),
           decimalLatitude = c(35.910, 35.910, 35.914, 35.918, 37.500),
           decimalLongitude = c(-79.050, -79.050, -79.054, -79.058, -81.200),
           PC1 = c(-2.60, -1.40, -2.05, -1.95, -2.10),
@@ -1700,7 +1684,6 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           catalogNumber = rep("SPEC_MIX", 3L),
           plant_individual_id = rep(0L, 3L),
           leaf_id = 1:3,
-          tier_assignment = rep("Tier_1_Direct", 3L),
           leaf_zone = c("basal", "basal", "cauline"),
           area_mm2 = c(400.0, 380.0, 90.0),
           solidity = c(0.92, 0.90, 0.42),
@@ -1738,7 +1721,6 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           catalogNumber = rep("SPEC_CAUL", 2L),
           plant_individual_id = rep(0L, 2L),
           leaf_id = 1:2,
-          tier_assignment = rep("Tier_1_Direct", 2L),
           leaf_zone = c("cauline", "cauline"),
           area_mm2 = c(120.0, 100.0),
           solidity = c(0.52, 0.48),
@@ -1765,6 +1747,8 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         stopifnot("solidity_std" %in% aug_res$feature_cols)
         cat("HETEROBLASTY_PURE_BASAL_AND_CAULINE_FALLBACK_OK\\n")
         """
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
         with tempfile.TemporaryDirectory() as tmpdir:
             r_file = Path(tmpdir) / "test_heteroblasty_weights.R"
             r_file.write_text(r_code, encoding="utf-8")
@@ -1828,7 +1812,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           plant_individual_id = 0L,
           species_standardized = "Packera dubia",
           determiner_tier = "Tier_1_Gold",
-          morph_tier_source = "Tier_1_Pure",
+          morph_tier_source = "Basal_Rosette",
           decimalLatitude = site_lats + rnorm(n_sym, 0, 0.02),
           decimalLongitude = site_lons + rnorm(n_sym, 0, 0.02),
           regional_group = ecos,

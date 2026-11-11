@@ -1428,165 +1428,6 @@ plot_2d_ordination_scatter <- function(
   invisible(list(xlim = xlim, ylim = ylim))
 }
 
-render_tier1_vs_tier2_2d_pdf <- function(tier_manifest, plot_out, pca_fit = NULL, sym_pca = NULL, permanova_df = NULL) {
-  dir.create(dirname(plot_out), recursive = TRUE, showWarnings = FALSE)
-  tmp_pdf <- paste0(plot_out, ".tmp")
-  if (!is.null(tier_manifest) && nrow(tier_manifest) > 0L && "leaf_zone" %in% names(tier_manifest)) {
-    lz_t <- tolower(trimws(as.character(tier_manifest$leaf_zone)))
-    bas_idx <- which(is.na(lz_t) | !nzchar(lz_t) | lz_t != "cauline")
-    if (length(bas_idx) > 0L) tier_manifest <- tier_manifest[bas_idx, , drop = FALSE]
-  }
-
-  var_pct <- c(48.2, 21.4)
-  if (!is.null(pca_fit) && !is.null(pca_fit$sdev) && length(pca_fit$sdev) >= 2) {
-    v <- (pca_fit$sdev^2) / max(sum(pca_fit$sdev^2), 1e-12) * 100
-    var_pct <- round(v[1:2], 1)
-  } else if (all(c("PC1", "PC2") %in% names(tier_manifest))) {
-    v_emp <- c(stats::var(tier_manifest$PC1, na.rm = TRUE), stats::var(tier_manifest$PC2, na.rm = TRUE))
-    v_emp[!is.finite(v_emp)] <- 0
-    if (sum(v_emp) > 0) var_pct <- round((v_emp / sum(v_emp)) * 75.0, 1)
-  }
-
-  sym_var_pct <- var_pct
-  if (!is.null(sym_pca) && !is.null(sym_pca$sdev) && length(sym_pca$sdev) >= 2) {
-    vs <- (sym_pca$sdev^2) / max(sum(sym_pca$sdev^2), 1e-12) * 100
-    sym_var_pct <- round(vs[1:2], 1)
-  }
-
-  perm_label <- "PERMANOVA Tier Effect: R2 < 0.01 (Non-Significant)"
-  if (!is.null(permanova_df) && is.data.frame(permanova_df) && "Term" %in% names(permanova_df)) {
-    permanova_df <- apply_bh_fdr_correction(permanova_df)
-    t_row <- permanova_df[grepl("reconstruction_tier", permanova_df$Term, ignore.case = TRUE), , drop = FALSE]
-    if (nrow(t_row) > 0) {
-      r2_v <- suppressWarnings(as.numeric(t_row$R2[1]))
-      p_v  <- if ("p_adj_bh" %in% names(t_row)) suppressWarnings(as.numeric(t_row$p_adj_bh[1])) else suppressWarnings(as.numeric(t_row$p_value[1]))
-      if (is.finite(r2_v)) {
-        perm_label <- sprintf(
-          "PERMANOVA Tier Effect: R2 = %.4f (%.2f%%), q_BH = %s",
-          r2_v, r2_v * 100,
-          if (is.finite(p_v)) sprintf("%.3f", p_v) else "NS"
-        )
-      }
-    }
-  }
-
-  grDevices::pdf(tmp_pdf, width = 12.5, height = 5.8, useDingbats = FALSE)
-  tryCatch({
-    graphics::par(mfrow = c(1, 2), mar = c(4.4, 4.4, 3.2, 1.0), cex.main = 0.90)
-    is_t2 <- grepl("2", as.character(tier_manifest$reconstruction_tier))
-    n_t1 <- sum(!is_t2, na.rm = TRUE)
-    n_t2 <- sum(is_t2, na.rm = TRUE)
-    tier_lbl <- ifelse(is_t2, "Tier 2 Reflected", "Tier 1 Direct")
-    tier_cols <- c("Tier 1 Direct" = "#0072B2", "Tier 2 Reflected" = "#D55E00")
-    alpha_val <- adaptive_point_alpha(nrow(tier_manifest))
-    pt_col <- grDevices::adjustcolor(ifelse(is_t2, "#D55E00", "#0072B2"), alpha.f = alpha_val)
-    pt_pch <- ifelse(is_t2, 2L, 1L)
-    pc1 <- if ("PC1" %in% names(tier_manifest)) tier_manifest$PC1 else rep(0, nrow(tier_manifest))
-    pc2 <- if ("PC2" %in% names(tier_manifest)) tier_manifest$PC2 else rep(0, nrow(tier_manifest))
-    spc1 <- if ("Sym_PC1" %in% names(tier_manifest)) tier_manifest$Sym_PC1 else pc1
-    spc2 <- if ("Sym_PC2" %in% names(tier_manifest)) tier_manifest$Sym_PC2 else pc2
-    cs_t12 <- if (n_t2 > 0L) {
-      rbind(
-        "Tier 1 Direct" = c(mean(spc1[!is_t2], na.rm = TRUE), mean(spc2[!is_t2], na.rm = TRUE)),
-        "Tier 2 Reflected" = c(mean(spc1[is_t2], na.rm = TRUE), mean(spc2[is_t2], na.rm = TRUE))
-      )
-    } else {
-      rbind(
-        "Tier 1 Direct" = c(mean(spc1[!is_t2], na.rm = TRUE), mean(spc2[!is_t2], na.rm = TRUE))
-      )
-    }
-    t2_leg_lbl <- if (n_t2 > 0L) sprintf("Tier 2 Reflected (n=%d, pch=2)", n_t2) else "Tier 2 Reflected (n=0; Strict Tier 1 Mode)"
-
-    # Panel A: 2D Sym_PC1 vs. Sym_PC2 Overlay with PERMANOVA R2 and p-value inset
-    plot_2d_ordination_scatter(
-      x = spc1, y = spc2, col = pt_col, pch = pt_pch, cex = 0.85, lwd = 1.0,
-      xlab = sprintf("Sym_PC1 (%.1f%%)", sym_var_pct[1]),
-      ylab = sprintf("Sym_PC2 (%.1f%%)", sym_var_pct[2]),
-      main = "A. 2D Symmetric EFA Morphospace: Tier 1 Direct vs. Tier 2 Reflected",
-      group_vec = tier_lbl,
-      group_cols = tier_cols,
-      ellipse_level = 0.95,
-      centroids = cs_t12,
-      legend_args = list(
-        "topright",
-        legend = c(
-          sprintf("Tier 1 Direct (n=%d, pch=1)", n_t1),
-          t2_leg_lbl,
-          perm_label
-        ),
-        col = c("#0072B2", "#D55E00", NA),
-        pch = c(1, 2, NA), pt.bg = NA, bty = "n", cex = 0.74
-      )
-    )
-
-    # Panel B: Superimposed Mean Reconstructed Leaf Silhouette of Tier 1 Direct vs. Tier 2 Reflected per Species / Morphotype
-    h_mat <- extract_standardized_harmonic_matrix(tier_manifest, max_k = 12L)
-    tx_vec <- resolve_plot_group_column(tier_manifest)
-    tier_info <- resolve_taxon_display_tier(tier_manifest, tx_vec)
-    disp_tx <- utils::head(tier_info$ordered_groups, 9L)
-    if (length(disp_tx) == 0L) disp_tx <- "Unassigned_Packera"
-
-    graphics::plot(
-      c(0, 2), c(0, 2), type = "n", axes = FALSE, xlab = "", ylab = "",
-      main = "B. Mean Reconstructed Silhouette: Tier 1 Direct vs. Tier 2 Reflected",
-      cex.main = 0.90
-    )
-    graphics::box(col = "grey80")
-    grid_lay <- .compute_outline_grid_layout(length(disp_tx))
-
-    for (idx_sp in seq_along(disp_tx)) {
-      sp_name <- disp_tx[idx_sp]
-      cx <- grid_lay$cx[idx_sp]; cy <- grid_lay$cy[idx_sp]
-      m_t1 <- (tx_vec == sp_name) & !is_t2
-      m_t2 <- (tx_vec == sp_name) & is_t2
-      has_sp_t2 <- sum(m_t2, na.rm = TRUE) > 0L
-      if (!is.null(h_mat)) {
-        h1 <- if (any(m_t1)) colMeans(h_mat[m_t1, , drop = FALSE], na.rm = TRUE) else colMeans(h_mat, na.rm = TRUE)
-        h2 <- if (has_sp_t2) colMeans(h_mat[m_t2, , drop = FALSE], na.rm = TRUE) else NULL
-      } else {
-        h1 <- c(A1 = -1.25, B1 = 0, C1 = 0, D1 = 0.45)
-        h2 <- if (has_sp_t2) c(A1 = -1.23, B1 = 0, C1 = 0, D1 = 0.46) else NULL
-      }
-      xy1 <- reconstruct_efa_outline(h1, nb_pts = 120L)
-      xy2 <- if (!is.null(h2)) reconstruct_efa_outline(h2, nb_pts = 120L) else NULL
-      env_pts <- if (!is.null(xy2)) rbind(xy1, xy2) else xy1
-      shared_center <- c(mean(range(env_pts[, 1], na.rm = TRUE)), mean(range(env_pts[, 2], na.rm = TRUE)))
-      shared_scale  <- min(0.68 / max(diff(range(env_pts[, 1], na.rm = TRUE)), 1e-6), 0.64 / max(diff(range(env_pts[, 2], na.rm = TRUE)), 1e-6)) * 0.86 * grid_lay$cell_scale
-      draw_outline_in_box(
-        xy1, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
-        col_border = "#0072B2", col_fill = grDevices::adjustcolor("#0072B2", alpha.f = 0.16), lwd = 2.0, lty = 1,
-        shared_scale = shared_scale, shared_center = shared_center
-      )
-      if (!is.null(xy2) && n_t2 > 0L) {
-        draw_outline_in_box(
-          xy2, cx = cx, cy = cy - grid_lay$body_dy, w_box = 0.68, h_box = 0.64,
-          col_border = "#D55E00", col_fill = NA, lwd = 1.9, lty = 2,
-          shared_scale = shared_scale, shared_center = shared_center
-        )
-      }
-      short_sp <- sub("^Packera\\s+", "P. ", sp_name)
-      graphics::text(
-        cx, cy + grid_lay$title_dy,
-        labels = as.expression(bquote(bolditalic(.(short_sp)) ~ .(sprintf("(T1:%d / T2:%d)", sum(m_t1), sum(m_t2))))),
-        cex = grid_lay$cex_title
-      )
-    }
-    graphics::legend(
-      "bottom", horiz = TRUE,
-      legend = c(
-        "Tier 1 Direct Mean Outline",
-        if (n_t2 > 0L) "Tier 2 Reflected Mean Outline" else "Tier 2 Reflected (n=0; Strict Tier 1 Mode)"
-      ),
-      col = c("#0072B2", "#D55E00"), lty = c(1, 2), lwd = 2.0, bty = "n", cex = 0.78
-    )
-  }, finally = {
-    grDevices::dev.off()
-  })
-  if (file.exists(tmp_pdf)) file.rename(tmp_pdf, plot_out)
-  invisible(plot_out)
-}
-render_tier1_vs_tier2_3d_pdf <- render_tier1_vs_tier2_2d_pdf
-
 export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path) {
   tables_dir <- dirname(as.character(output_csv_path))
   if (!dir.exists(tables_dir)) {
@@ -1611,7 +1452,7 @@ export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path
   sym_cols <- intersect(
     c(
       "catalogNumber", "plant_individual_id", "taxon", "scientificName", "determiner_tier",
-      "assigned_tier", "n_leaves", "leaf_quality_weight", "pct_asymmetry",
+      "n_leaves", "leaf_quality_weight", "pct_asymmetry",
       "sym_var", "asym_var", "harmonic_roughness", "is_contour_outlier",
       "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "is_dissected",
       paste0("Sym_PC", 1:10), paste0("PC", 1:10)
@@ -1845,7 +1686,7 @@ generate_step03_pub_figures <- function(
     cx_vec <- grid_lay$cx
     cy_vec <- grid_lay$cy
 
-    is_t1_pure <- if ("morph_tier_source" %in% colnames(df)) (df$morph_tier_source == "Tier_1_Pure") else !grepl("2", as.character(df$assigned_tier))
+    is_t1_pure <- if ("morph_tier_source" %in% colnames(df)) (is.na(df$morph_tier_source) | df$morph_tier_source != "Cauline_Only_Fallback") else rep(TRUE, nrow(df))
     is_promo_row <- if ("is_promoted_anchor" %in% colnames(df)) as.logical(df$is_promoted_anchor) else rep(FALSE, nrow(df))
     is_promo_row[is.na(is_promo_row)] <- FALSE
     is_gold_silv <- if ("determiner_tier" %in% colnames(df)) (df$determiner_tier %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver") | is_type_row | is_promo_row) else rep(TRUE, nrow(df))

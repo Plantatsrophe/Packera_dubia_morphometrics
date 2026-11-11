@@ -78,7 +78,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   valid_idx <- which(cal_mask & !is.na(morpho_df$log_centsize) & is.finite(morpho_df$log_centsize) & complete.cases(morpho_df[, sym_names]))
   if (length(valid_idx) < 10) return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df))
   sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$scientificName <- factor(standardize_packera_taxon(as.character(if ("species_standardized" %in% names(sub_df)) sub_df$species_standardized else sub_df$scientificName)))
-  is_tier1_pure <- if ("morph_tier_source" %in% names(sub_df)) (!is.na(sub_df$morph_tier_source) & sub_df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(sub_df))
+  is_tier1_pure <- if ("morph_tier_source" %in% names(sub_df)) (is.na(sub_df$morph_tier_source) | sub_df$morph_tier_source != "Cauline_Only_Fallback") else rep(TRUE, nrow(sub_df))
   anc_allom <- select_adaptive_reference_anchors(sub_df, feature_matrix = as.matrix(sub_df[, sym_names[seq_len(min(4L, length(sym_names)))], drop = FALSE]), taxon_col = "scientificName")
   sub_df$is_promoted_bronze <- anc_allom$is_promoted_bronze; sub_df$authority_weight <- compute_authority_precision_weights(sub_df)
   if (!"spatial_balance_weight" %in% names(sub_df) || !any(is.finite(suppressWarnings(as.numeric(sub_df$spatial_balance_weight))))) sub_df$spatial_balance_weight <- compute_spatial_balance_weights(sub_df); sub_df$eff_weight <- sub_df$authority_weight
@@ -195,7 +195,7 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
                 selected_features = feature_cols, bic_table = data.frame(K = seq_len(max_k), BIC = NA_real_, Two_Delta_BIC = NA_real_, Evidence = "Inconclusive")))
   }
   sub_v <- df[valid_rows, , drop = FALSE]
-  is_tier1_pure <- if ("morph_tier_source" %in% names(sub_v)) (!is.na(sub_v$morph_tier_source) & sub_v$morph_tier_source == "Tier_1_Pure") else rep(TRUE, N_valid)
+  is_tier1_pure <- if ("morph_tier_source" %in% names(sub_v)) (is.na(sub_v$morph_tier_source) | sub_v$morph_tier_source != "Cauline_Only_Fallback") else rep(TRUE, N_valid)
   anc_gmm <- select_adaptive_reference_anchors(sub_v, feature_matrix = as.matrix(sub_v[, req_cols, drop = FALSE]), taxon_col = "species_standardized")
   ref_cand <- anc_gmm$active_mask & !anc_gmm$is_confident_label_noise & is_tier1_pure
   if (sum(ref_cand, na.rm = TRUE) < 6L) ref_cand <- if (sum(is_tier1_pure) >= 6L) is_tier1_pure else rep(TRUE, N_valid)
@@ -237,8 +237,11 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   }
   if (is.null(cls_sub)) { best_k <- 1L; best_name <- "Unimodal_G1_Null"; cls_sub <- rep(1L, nrow(X_pcs)); unc_sub <- rep(0.0, nrow(X_pcs)) }
   relab <- .canonical_relabel_gmm_clusters(sub_v, cls_sub, best_k, ref_cand, core_idx); cls_sub <- relab$cls_sub; cls <- rep(NA_integer_, nrow(df)); unc <- rep(NA_real_, nrow(df)); cls[valid_rows] <- cls_sub; unc[valid_rows] <- unc_sub
+  n_core_g <- max(2.0, nrow(X_core)); n_eff_g <- max(2.0, n_core_g * min(1.0, max(0.10, relab$n_eff_ratio))); p_g <- ncol(X_pcs)
+  k_par_vec <- bic_table$K * p_g + (bic_table$K - 1L) + bic_table$K * p_g
+  bic_neff <- bic_table$BIC + k_par_vec * (log(n_core_g) - log(n_eff_g))
   bic_table$Delta_BIC_prev <- c(0, diff(bic_table$BIC)); bic_table$Two_Delta_BIC <- round(bic_table$BIC - bic_table$BIC[1], 2)
-  bic_table$BayesFactor_vs_Null <- round(bic_table$Two_Delta_BIC * relab$n_eff_ratio, 2)
+  bic_table$BayesFactor_vs_Null <- round(bic_neff - bic_neff[1], 2)
   bic_table$Evidence <- sapply(seq_len(nrow(bic_table)), function(idx_b) { # Kass & Raftery (1995) 2 * Delta_BIC vs G = 1
     if (idx_b == 1L) return("Null Model (G = 1)"); val <- bic_table$Two_Delta_BIC[idx_b]
     if (is.na(val) || val < 0) return("Negative (favors G = 1)")
@@ -253,7 +256,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   message("Configuring Canonical Discriminant Analysis in MorphoTools2 Architecture (Tier_3_Bronze weight = 0.0)...")
   df$authority_weight <- compute_authority_precision_weights(df); if (!"spatial_balance_weight" %in% names(df) || !any(is.finite(suppressWarnings(as.numeric(df$spatial_balance_weight))))) df$spatial_balance_weight <- compute_spatial_balance_weights(df)
   authority_weight <- df$authority_weight; spatial_balance_weight <- df$spatial_balance_weight; eff_weight <- authority_weight
-  is_tier1_pure <- if ("morph_tier_source" %in% names(df)) (!is.na(df$morph_tier_source) & df$morph_tier_source == "Tier_1_Pure") else rep(TRUE, nrow(df))
+  is_tier1_pure <- if ("morph_tier_source" %in% names(df)) (is.na(df$morph_tier_source) | df$morph_tier_source != "Cauline_Only_Fallback") else rep(TRUE, nrow(df))
   is_intra <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2)
   pc_req <- grep("^(Sym_)?PC[0-9]+$", feature_cols, value = TRUE)
   has_pcs <- complete.cases(df[, if (length(pc_req) > 0) pc_req else feature_cols, drop = FALSE])
@@ -261,11 +264,8 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   if (is_intra) {
     cl_u <- if (!is.null(gmm_res) && !is.null(gmm_res$classification)) as.integer(gmm_res$classification) else rep(1L, nrow(df))
     cl_u[has_pcs & is.na(cl_u)] <- 1L; n_intra_k <- length(unique(stats::na.omit(cl_u[has_pcs])))
-    df$grouping_col <- ifelse(is.na(cl_u), NA_character_, paste0("Morphotype_K", cl_u))
-    unc_v <- if (!is.null(gmm_res) && !is.null(gmm_res$uncertainty)) gmm_res$uncertainty else rep(0.0, nrow(df))
-    u_cut <- stats::quantile(unc_v, 0.70, na.rm = TRUE); min_grp_k <- min(2L, max(1L, n_intra_k))
-    is_active <- (df$authority_weight > 0) & is_tier1_pure & !is.na(df$grouping_col) & !is.na(unc_v) & (unc_v <= u_cut) & has_pcs
-    if (sum(table(df$grouping_col[is_active]) >= 2L) < min_grp_k) is_active <- (df$authority_weight > 0) & is_tier1_pure & !is.na(df$grouping_col) & has_pcs
+    df$grouping_col <- ifelse(is.na(cl_u), NA_character_, paste0("Morphotype_K", cl_u)); min_grp_k <- min(2L, max(1L, n_intra_k))
+    is_active <- (df$authority_weight > 0) & is_tier1_pure & !is.na(df$grouping_col) & has_pcs
     if (sum(table(df$grouping_col[is_active]) >= 2L) < min_grp_k) is_active <- is_tier1_pure & !is.na(df$grouping_col) & has_pcs
     if (sum(table(df$grouping_col[is_active]) >= 2L) < min_grp_k) is_active <- !is.na(df$grouping_col) & has_pcs
     act_tab <- table(df$grouping_col[is_active]); target_taxa <- sort(names(act_tab[act_tab >= 2L]))
@@ -313,10 +313,12 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
 
   X_a <- X[active_idx, , drop = FALSE]; y_a <- df$grouping_col[active_idx]; eff_weight <- eff_weight[active_idx]; if (all(eff_weight <= 0)) eff_weight <- rep(1.0, length(active_idx)); w_a <- eff_weight; N_a <- nrow(X_a)
   X_mat <- X_a; grp_factor <- droplevels(factor(y_a))
-  lda_cv <- if (requireNamespace("MASS", quietly = TRUE) && nlevels(grp_factor) >= 2) tryCatch(MASS::lda(x = X_mat, grouping = grp_factor, prior = rep(1.0 / nlevels(grp_factor), nlevels(grp_factor)), CV = TRUE), error = function(e) NULL) else NULL
-  loocv_accuracy <- tryCatch(compute_weighted_shrinkage_cda_loocv(X_a, grp_factor, w_a, coords_df = df[active_idx, , drop = FALSE]), error = function(e) NA_real_)
-  if (is.na(loocv_accuracy) && !is.null(lda_cv) && !is.null(lda_cv$class)) loocv_accuracy <- round(mean(as.character(lda_cv$class) == as.character(grp_factor), na.rm = TRUE), 4)
-  message(sprintf("CDA Leave-One-Out Cross-Validation Accuracy (loocv_accuracy): %.4f", loocv_accuracy))
+  loocv_accuracy <- if (is_intra && all(grepl("^Morphotype_K", levels(grp_factor)))) NA_real_ else tryCatch(compute_weighted_shrinkage_cda_loocv(X_a, grp_factor, w_a, coords_df = df[active_idx, , drop = FALSE], X_cand = X_full[active_idx, , drop = FALSE]), error = function(e) NA_real_)
+  if (is.na(loocv_accuracy) && !is_intra && requireNamespace("MASS", quietly = TRUE) && nlevels(grp_factor) >= 2) {
+    lda_cv <- tryCatch(MASS::lda(x = X_mat, grouping = grp_factor, prior = rep(1.0 / nlevels(grp_factor), nlevels(grp_factor)), CV = TRUE), error = function(e) NULL)
+    if (!is.null(lda_cv) && !is.null(lda_cv$class)) loocv_accuracy <- round(mean(as.character(lda_cv$class) == as.character(grp_factor), na.rm = TRUE), 4)
+  }
+  message(sprintf("CDA Gathering/Deme-Blocked Morphological CV Accuracy (loocv_accuracy): %s", ifelse(is.na(loocv_accuracy), "NA (post-clustering descriptive ordination)", sprintf("%.4f", loocv_accuracy))))
 
   g_levels <- target_taxa; g <- length(g_levels); grand_mean <- colSums(X_a * w_a) / sum(w_a)
   if (g == 1L) {
@@ -363,8 +365,8 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   colnames(Z_all_full) <- colnames(Z_anchors_full) <- colnames(centroids_full) <- paste0("Can", seq_len(k_full))
   rownames(centroids_full) <- g_levels
 
-  priors <- rep(1/g, g); post_probs <- .compute_soft_geo_range_log_prior(df, df$grouping_col, w_vec = df$authority_weight, active_mask = is_active, g_levels = g_levels); dimnames(post_probs) <- list(NULL, g_levels)
-  for (k in seq_along(g_levels)) { diff_z <- sweep(Z_all_full, 2L, centroids_full[k, ], "-"); post_probs[, k] <- post_probs[, k] + log(priors[k]) - 0.5 * rowSums(diff_z^2) }
+  priors <- rep(1/g, g); post_probs <- matrix(0.0, nrow = nrow(df), ncol = g, dimnames = list(NULL, g_levels))
+  for (k in seq_along(g_levels)) { diff_z <- sweep(Z_all_full, 2L, centroids_full[k, ], "-"); post_probs[, k] <- log(priors[k]) - 0.5 * rowSums(diff_z^2) }
   post_probs <- exp(post_probs - apply(post_probs, 1, max, na.rm = TRUE))
   post_probs <- post_probs / pmax(rowSums(post_probs, na.rm = TRUE), 1e-12); pred_idx <- max.col(post_probs, ties.method = "first")
   posterior_prob <- apply(post_probs, 1, max)
@@ -524,22 +526,19 @@ run_gmm_morphotools_pipeline <- function(opts) {
   pc_cols <- discover_sorted_morph_cols(efa_df, "^PC[0-9]+$"); sym_pc_cols <- discover_sorted_morph_cols(efa_df, "^Sym_PC[0-9]+$")
   pca_cols <- if (length(pc_cols) > 0L) pc_cols else sym_pc_cols
   if (length(pca_cols) < 2L) stop("Missing PCA columns in EFA table (need >= 2 PC/Sym_PC axes).")
-  closed_mask <- grepl("^tier_?[12]", efa_df$assigned_tier, ignore.case = TRUE)
-  efa_df$assigned_tier <- ifelse(grepl("^tier_?1", efa_df$assigned_tier, ignore.case = TRUE), "Tier_1_Direct", ifelse(grepl("^tier_?2", efa_df$assigned_tier, ignore.case = TRUE), "Tier_2_Reflected", efa_df$assigned_tier))
-  closed_df <- efa_df[closed_mask, ]; valid_idx <- which(complete.cases(closed_df[, pca_cols[seq_len(min(2L, length(pca_cols)))], drop = FALSE])); closed_df <- closed_df[valid_idx, ]
+  valid_idx <- which(complete.cases(efa_df[, pca_cols[seq_len(min(2L, length(pca_cols)))], drop = FALSE])); closed_df <- efa_df[valid_idx, , drop = FALSE]
   # Ensure primary GMM and CDA run on specimen-level table (1 row = 1 voucher collection event; group_by(catalogNumber) & plant_individual_id)
   if (!"plant_individual_id" %in% names(closed_df)) closed_df$plant_individual_id <- 0L
   spec_keys <- paste0(closed_df$catalogNumber, "_", closed_df$plant_individual_id)
   if (any(duplicated(spec_keys))) {
     disagg_leaf_df <- closed_df; pc_sym_cols <- unique(c(pc_cols, sym_pc_cols)); pet_cols <- intersect(c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"), names(closed_df))
     lin_med_cols <- intersect(c("median_area_mm2", "median_perimeter_mm", "median_length_mm", "median_width_mm", "median_circularity", "median_aspect_ratio", "median_solidity", "median_dissection_index", "area_mm2", "perimeter_mm", "length_mm", "width_mm", "circularity"), names(closed_df))
-    num_cols <- intersect(c(pc_sym_cols, pet_cols, lin_med_cols, "plant_height_cm", "scape_to_basal_leaf_ratio", "foliar_variance", "leaf_count", "aspect_ratio", "solidity", "dissection_index", "ucs_score", "area_px", "centroid_size", "log_centsize", "harmonic_roughness", "leaf_quality_weight"), names(closed_df))
+    num_cols <- intersect(c(pc_sym_cols, pet_cols, lin_med_cols, "plant_height_cm", "scape_to_basal_leaf_ratio", "foliar_variance", "leaf_count", "aspect_ratio", "solidity", "dissection_index", "area_px", "centroid_size", "log_centsize", "harmonic_roughness", "leaf_quality_weight"), names(closed_df))
     other_num <- setdiff(num_cols, c(pc_sym_cols, pet_cols)); has_w <- "leaf_quality_weight" %in% names(closed_df); has_lz <- "leaf_zone" %in% names(closed_df)
-    meta_cols <- setdiff(names(closed_df), c(num_cols, "catalogNumber", "plant_individual_id", "shape_id", "leaf_id", "mask_source", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source"))
+    meta_cols <- setdiff(names(closed_df), c(num_cols, "catalogNumber", "plant_individual_id", "shape_id", "leaf_id", "mask_source", "morph_tier_source"))
     grp_list <- split(closed_df, list(closed_df$catalogNumber, closed_df$plant_individual_id), drop = TRUE)
     agg_rows <- (if (length(grp_list) >= 200L && exists("packera_mclapply", mode = "function")) packera_mclapply else lapply)(grp_list, function(grp) {
-      n_t1 <- sum(grp$assigned_tier == "Tier_1_Direct", na.rm = TRUE); n_t2 <- sum(grp$assigned_tier == "Tier_2_Reflected", na.rm = TRUE)
-      if (n_t1 >= 1L) { grp <- grp[grp$assigned_tier == "Tier_1_Direct", , drop = FALSE]; m_src <- "Tier_1_Pure" } else { m_src <- "Tier_2_Fallback" }
+      m_src <- "Basal_Rosette"
       if (has_lz) { lz_g <- tolower(trimws(as.character(grp$leaf_zone))); if (any(!is.na(lz_g) & lz_g == "basal")) grp <- grp[!is.na(lz_g) & lz_g == "basal", , drop = FALSE] else if (all(!is.na(lz_g) & lz_g == "cauline")) m_src <- "Cauline_Only_Fallback" }
       leaf_quality_weight <- if (has_w) suppressWarnings(as.numeric(grp$leaf_quality_weight)) else rep(1.0, nrow(grp))
       leaf_quality_weight[is.na(leaf_quality_weight) | leaf_quality_weight <= 0] <- 1.0
@@ -557,17 +556,14 @@ run_gmm_morphotools_pipeline <- function(opts) {
       for (d_nm in c("basal_leaf_count", "q25_solidity", "dissection_index", "dissected_leaf_fraction")) if (!is.na(dm_sub[[d_nm]])) out[[d_nm]] <- dm_sub[[d_nm]]
       for (col in pet_cols) out[[col]] <- stats::quantile(suppressWarnings(as.numeric(grp[[col]])), probs = 0.75, na.rm = TRUE, names = FALSE)
       if ("leaf_count" %in% names(out)) out$leaf_count <- nrow(grp)
-      out$n_tier1_leaves <- n_t1; out$n_tier2_leaves <- n_t2; out$morph_tier_source <- m_src
+      out$morph_tier_source <- m_src
       for (col in meta_cols) { v <- stats::na.omit(grp[[col]]); out[[col]] <- if (length(v) > 0) v[1] else grp[[col]][1] }
       out
     })
     closed_df <- if (requireNamespace("data.table", quietly = TRUE) && length(agg_rows) >= 200L) as.data.frame(data.table::rbindlist(agg_rows, use.names = TRUE, fill = TRUE)) else do.call(rbind, agg_rows); rownames(closed_df) <- NULL
     if (!("cauline_leaf_count" %in% names(closed_df)) && exists("compute_separate_cauline_otu_track", mode = "function")) closed_df <- compute_separate_cauline_otu_track(disagg_leaf_df, closed_df)
   } else {
-    lc <- if ("leaf_count" %in% names(closed_df) && !any(is.na(closed_df$leaf_count))) as.integer(closed_df$leaf_count) else rep(1L, nrow(closed_df))
-    if (!"n_tier1_leaves" %in% names(closed_df)) closed_df$n_tier1_leaves <- ifelse(closed_df$assigned_tier == "Tier_1_Direct", lc, 0L)
-    if (!"n_tier2_leaves" %in% names(closed_df)) closed_df$n_tier2_leaves <- ifelse(closed_df$assigned_tier == "Tier_2_Reflected", lc, 0L)
-    if (!"morph_tier_source" %in% names(closed_df)) closed_df$morph_tier_source <- ifelse(closed_df$n_tier1_leaves >= 1L | closed_df$assigned_tier == "Tier_1_Direct", "Tier_1_Pure", "Tier_2_Fallback")
+    if (!"morph_tier_source" %in% names(closed_df)) closed_df$morph_tier_source <- "Basal_Rosette"
   }
   if (!is.null(vouchers_df)) {
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), , drop = FALSE]; v_idx <- match(as.character(closed_df$catalogNumber), as.character(v_sub$catalogNumber))
@@ -580,8 +576,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   allom_res <- test_and_correct_allometry(closed_df, correct_mode = opts$correct_allometry, permutations = opts$permutations, seed = opts$seed, output_report = opts$allometry_report, output_plot = opts$allometry_plot, output_pairwise = opts$allometry_pairwise)
   if (!is.null(allom_res$df)) closed_df <- allom_res$df
   pc_cols <- discover_sorted_morph_cols(closed_df, "^PC[0-9]+$"); sym_pc_cols <- discover_sorted_morph_cols(closed_df, "^Sym_PC[0-9]+$"); pca_cols <- if (length(pc_cols) > 0L) pc_cols else sym_pc_cols
-  shrink_cols <- intersect(c(pc_cols, sym_pc_cols, "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", "log_centsize", "log_centroid_size", "blade_length_to_width_ratio", "petiole_length_mm", "petiole_to_blade_ratio", "basal_vs_cauline_length_ratio", "dissection_index", "solidity", "circularity", "aspect_ratio", "median_circularity", "median_aspect_ratio"), names(closed_df))
-  if (exists("apply_hierarchical_population_deme_shrinkage", mode = "function")) closed_df <- apply_hierarchical_population_deme_shrinkage(closed_df, feature_cols = shrink_cols, deme_radius_km = 10.0, kappa_sheet = 1.5, kappa_deme = 1.25)
+  if (exists("assign_spatial_gathering_demes", mode = "function")) closed_df <- assign_spatial_gathering_demes(closed_df, deme_radius_km = 10.0)
   include_repro <- FALSE; feature_cols <- pca_cols
   if (!isTRUE(opts$outline_only)) {
     if ("capitulum_aspect_ratio" %in% names(closed_df)) closed_df$AR_inv <- suppressWarnings(as.numeric(closed_df$capitulum_aspect_ratio)) else if ("AR_inv" %in% names(closed_df)) closed_df$AR_inv <- suppressWarnings(as.numeric(closed_df$AR_inv))
@@ -604,11 +599,14 @@ run_gmm_morphotools_pipeline <- function(opts) {
   caul_het_raw <- c("basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "heteroblasty_efa_distance", "heteroblasty_ect_distance", "cauline_dissection_index_med", "cauline_solidity_med", "cauline_ect_lobe_complexity", "Cauline_PC1", "Cauline_ECT_PC1")
   veg_all <- intersect(c("log_centsize", "aspect_ratio", "solidity", "q25_solidity", "dissection_index", "heteroblasty_index", "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", caul_het_raw), names(closed_df))
   ref_std_idx <- which(closed_df$authority_weight > 0); if (length(ref_std_idx) < 3L) ref_std_idx <- seq_len(nrow(closed_df))
+  cal_ok_s04 <- if ("is_calibrated_mm" %in% names(closed_df)) (!is.na(closed_df$is_calibrated_mm) & as.logical(closed_df$is_calibrated_mm)) else rep(TRUE, nrow(closed_df))
+  if ("scale_source" %in% names(closed_df)) cal_ok_s04 <- cal_ok_s04 & !(tolower(trimws(as.character(closed_df$scale_source))) %in% c("mp_estimated", "predicted_from_megapixels", "uncalibrated"))
   for (vc in veg_all) {
-    vv <- suppressWarnings(as.numeric(closed_df[[vc]])); closed_df[[vc]] <- vv; v_fin <- which(is.finite(vv)); v_ref <- intersect(v_fin, ref_std_idx); if (length(v_ref) < 3L) v_ref <- v_fin
-    min_req <- if (vc %in% caul_het_raw) max(5L, ceiling(0.50 * length(ref_std_idx))) else 5L
+    vv <- suppressWarnings(as.numeric(closed_df[[vc]])); if (vc == "log_centsize") vv[!cal_ok_s04] <- NA_real_; closed_df[[vc]] <- vv
+    v_fin <- which(is.finite(vv)); v_ref <- intersect(v_fin, ref_std_idx); if (length(v_ref) < 3L) v_ref <- v_fin
+    min_req <- if (vc %in% caul_het_raw) max(5L, ceiling(0.85 * length(ref_std_idx))) else 5L
     if (length(v_ref) >= min_req && is.finite(stats::sd(vv[v_ref])) && stats::sd(vv[v_ref]) > 1e-6) {
-      closed_df[[paste0(vc, "_std")]] <- if (vc %in% caul_het_raw) 0.0 else NA_real_; closed_df[[paste0(vc, "_std")]][v_fin] <- round((vv[v_fin] - mean(vv[v_ref])) / stats::sd(vv[v_ref]), 5)
+      closed_df[[paste0(vc, "_std")]] <- NA_real_; closed_df[[paste0(vc, "_std")]][v_fin] <- round((vv[v_fin] - mean(vv[v_ref])) / stats::sd(vv[v_ref]), 5)
     }
   }
   if (!isTRUE(opts$outline_only)) {
@@ -621,8 +619,8 @@ run_gmm_morphotools_pipeline <- function(opts) {
   is_intra_mode <- isTRUE(opts$intraspecific_mode) || (length(target_taxa) < 2L)
   if (exists("merge_voucher_phenophase_covariates", mode = "function")) closed_df <- merge_voucher_phenophase_covariates(closed_df, opts$harmonics, opts$vouchers)
   std_plast_cols <- grep("_std$", names(closed_df), value = TRUE)
-  if (exists("residualize_within_deme_phenophase_plasticity", mode = "function")) closed_df <- residualize_within_deme_phenophase_plasticity(closed_df, target_cols = unique(c(if (is_intra_mode) pca_cols else character(0), std_plast_cols)), ref_mask = (closed_df$authority_weight > 0) & (closed_df$morph_tier_source == "Tier_1_Pure"), intraspecific_mode = is_intra_mode)
-  if (length(std_plast_cols) > 0L && exists("apply_hierarchical_population_deme_shrinkage", mode = "function")) closed_df <- apply_hierarchical_population_deme_shrinkage(closed_df, feature_cols = std_plast_cols, deme_radius_km = 10.0, kappa_sheet = 1.5, kappa_deme = 2.5)
+  if (exists("residualize_within_deme_phenophase_plasticity", mode = "function")) closed_df <- residualize_within_deme_phenophase_plasticity(closed_df, target_cols = unique(c(if (is_intra_mode) pca_cols else character(0), std_plast_cols)), ref_mask = (closed_df$authority_weight > 0) & (is.na(closed_df$morph_tier_source) | closed_df$morph_tier_source != "Cauline_Only_Fallback"), intraspecific_mode = is_intra_mode)
+  # Pre-modeling deme double-shrinkage removed to preserve CV & MANOVA independence
   gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel), intraspecific_mode = is_intra_mode)
   dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE); tmp_bic <- paste0(opts$output_report, ".tmp"); write.csv(gmm_res$bic_table, file = tmp_bic, row.names = FALSE); file.rename(tmp_bic, opts$output_report)
   veg_cda <- if (!isTRUE(opts$outline_only)) prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = intersect(c("log_centsize_std", "aspect_ratio_std"), names(closed_df)), active_mask = (closed_df$authority_weight > 0), group_vec = closed_df$species_standardized, max_r = 0.75) else character(0)
@@ -633,9 +631,9 @@ run_gmm_morphotools_pipeline <- function(opts) {
   audit_institutional_batch_effects(audited_df, output_csv = opts$output_batch_audit, selected_features = selected_features)
   rep_dir <- dirname(opts$output_report); eco_sum_csv <- file.path(rep_dir, "ecoregion_supervised_cda_summary.csv")
   eco_cda_res <- if (exists("run_supervised_ecoregion_cda", mode = "function")) run_supervised_ecoregion_cda(audited_df, cda_cols, gmm_res = gmm_res, output_summary_csv = eco_sum_csv, permutations = opts$permutations, seed = opts$seed) else NULL
-  if (!is.null(eco_cda_res)) { audited_df$regional_group <- eco_cda_res$ecoregion_vec; audited_df$ecoregion_cda_predicted <- eco_cda_res$ecoregion_cda_predicted; audited_df$ecoregion_cda_posterior_prob <- eco_cda_res$ecoregion_cda_posterior_prob; audited_df$ecoregion_can1 <- eco_cda_res$ecoregion_can1; audited_df$ecoregion_can2 <- eco_cda_res$ecoregion_can2 }
-  manova_res <- if (exists("run_multivariate_manova_audit", mode = "function")) run_multivariate_manova_audit(audited_df, cda_cols, gmm_res, output_group_csv = file.path(rep_dir, "manova_group_significance.csv"), output_pairwise_csv = file.path(rep_dir, "manova_pairwise_posthoc.csv")) else NULL
-  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "assigned_tier", "basal_leaf_count", "cauline_leaf_count", "n_tier1_leaves", "n_tier2_leaves", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "determiner_tier", "type_status", "is_type_specimen", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "population_deme_id", "deme_n_specimens", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "is_confident_label_noise", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", "pheno_sin", "pheno_cos", pc_cols, sym_pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "heteroblasty_ect_distance", "PC1_raw_individual", "PC2_raw_individual", "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "heteroblasty_index", "heteroblasty_efa_distance", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "ucs_score", "petiole_length_mm", "petiole_length_mm_std", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std", "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
+  if (!is.null(eco_cda_res)) { audited_df$regional_group <- eco_cda_res$ecoregion_vec; audited_df$ecoregion_cda_predicted <- eco_cda_res$ecoregion_cda_predicted; audited_df$ecoregion_cda_posterior_prob <- eco_cda_res$ecoregion_cda_posterior_prob; audited_df$ecoregion_can1 <- eco_cda_res$ecoregion_can1; audited_df$ecoregion_can2 <- eco_cda_res$ecoregion_can2; if (is_intra_mode && all(is.na(audited_df$loocv_accuracy)) && !is.null(eco_cda_res$loocv_accuracy)) audited_df$loocv_accuracy <- eco_cda_res$loocv_accuracy }
+  manova_res <- if (exists("run_multivariate_manova_audit", mode = "function")) run_multivariate_manova_audit(audited_df, cda_cols, gmm_res, output_group_csv = file.path(rep_dir, "manova_group_significance.csv"), output_pairwise_csv = file.path(rep_dir, "manova_pairwise_posthoc.csv"), include_gmm_clusters = !is_intra_mode) else NULL
+  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "determiner_tier", "type_status", "is_type_specimen", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "population_deme_id", "deme_n_specimens", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "is_confident_label_noise", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", "pheno_sin", "pheno_cos", pc_cols, sym_pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "heteroblasty_ect_distance", "PC1_raw_individual", "PC2_raw_individual", "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "heteroblasty_index", "heteroblasty_efa_distance", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "petiole_length_mm", "petiole_length_mm_std", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std", "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]; dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".tmp"); .write_csv_s04(out_df, tmp_flags, na = ""); file.rename(tmp_flags, opts$output_flags)
   if (exists("persist_step04_to_sqlite", mode = "function")) tryCatch(persist_step04_to_sqlite(out_df, opts$vouchers, focal_taxon = opts$focal_taxon, intraspecific_mode = is_intra_mode), error = function(e) warning("SQLite Step 04 persistence note: ", e$message))
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, selected_features, manova_res = manova_res)

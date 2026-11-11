@@ -172,7 +172,7 @@ def _parse_calibration_row(
     if not cat:
         return None
 
-    cf_source = str(row.get("cf_source") or "").strip()
+    cf_source = str(row.get("cf_source") or row.get("conversion_determination") or "").strip()
     work_scale_raw = row.get("work_scale", 1.0)
     try:
         work_scale = float(work_scale_raw) if pd.notna(work_scale_raw) and float(work_scale_raw) > 0 else 1.0
@@ -208,6 +208,7 @@ def _parse_calibration_row(
                     "cf_px_per_cm": val_mm * 10.0,
                     "fp_cf_px_per_cm": None,
                     "cf_source": cf_source or "measured_from_ruler",
+                    "scale_source": "mp_estimated" if cf_source == "predicted_from_megapixels" else "ruler_calibrated",
                     "work_scale": work_scale,
                     "is_empirical_ruler": cf_source != "predicted_from_megapixels",
                 }
@@ -251,6 +252,7 @@ def _parse_calibration_row(
             "cf_px_per_cm": cf_val,
             "fp_cf_px_per_cm": fp_val,
             "cf_source": eff_source,
+            "scale_source": "ruler_calibrated" if eff_source in {"measured_from_ruler", "measured_from_fieldprism"} else "mp_estimated",
             "work_scale": work_scale,
             "is_empirical_ruler": eff_source in {"measured_from_ruler", "measured_from_fieldprism"},
         }
@@ -279,6 +281,7 @@ def _parse_calibration_row(
             "cf_px_per_cm": conversion_val,
             "fp_cf_px_per_cm": fp_val,
             "cf_source": inferred_source,
+            "scale_source": "ruler_calibrated" if inferred_source in {"measured_from_ruler", "measured_from_fieldprism"} else "mp_estimated",
             "work_scale": work_scale,
             "is_empirical_ruler": inferred_source in {"measured_from_ruler", "measured_from_fieldprism"},
         }

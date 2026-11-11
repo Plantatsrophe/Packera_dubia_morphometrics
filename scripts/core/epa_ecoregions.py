@@ -184,6 +184,7 @@ def _build_offline_epa_l3_fallback_index() -> Dict[str, Any]:
         "north carolina|new hanover": {"geom": Polygon([(-78.02, 34.05), (-77.78, 34.05), (-77.78, 34.35), (-78.02, 34.35)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -77.90, "centroid_lat": 34.20},
         "north carolina|wake": {"geom": Polygon([(-79.00, 35.50), (-77.80, 35.50), (-77.80, 36.05), (-79.00, 36.05)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -78.40, "centroid_lat": 35.78},
         "texas|nacogdoches": {"geom": Polygon([(-94.90, 31.40), (-94.40, 31.40), (-94.40, 31.85), (-94.90, 31.85)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -94.65, "centroid_lat": 31.62},
+        "arkansas|baxter": {"geom": Polygon([(-92.65, 36.05), (-92.10, 36.05), (-92.10, 36.50), (-92.65, 36.50)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -92.38, "centroid_lat": 36.28},
         "arkansas|garland": {"geom": Polygon([(-93.40, 34.42), (-92.90, 34.42), (-92.90, 34.78), (-93.40, 34.78)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -93.15, "centroid_lat": 34.60},
     }
     return {

@@ -60,12 +60,6 @@ thresholds:
   # Standard baseline gatekeepers (existing)
   pcd_conf: 0.25
   minimum_confidence_threshold: 0.65
-  min_ucs: 0.85
-  min_solidity: 0.72
-  min_circularity: 0.25
-  min_extent: 0.35
-  min_blade_area_cm2: 0.75
-  max_tissue_border_ratio: 0.15
   min_megapixels: 8.0
   min_file_size_kb: 500.0
   min_sharpness_laplacian: 80.0
@@ -74,20 +68,6 @@ thresholds:
   geographic_scope: "eastern_na"
   countries:
     - "US"
-
-  # Empirical fold-detection parameters (calibrated)
-  fold_detection:
-    enabled: true
-    max_folded_aspect_ratio: 0.42
-    max_chord_deviation_ratio: 0.035
-    min_chord_length_px: 150
-
-  # Empirical dissection & lyrate sinus parameters (calibrated)
-  dissection:
-    enabled: true
-    min_solidity_dissected: 0.50
-    sinus_defect_min_depth_ratio: 0.08
-    min_bilateral_sinus_count: 3
 
   # Strict active/passive reference split & Dawid-Skene empirical precision weights (Slenker et al. 2022; Dawid & Skene 1979)
   # Tier_3_Bronze has weight 0.0 (passive projection only); Tier_1_Gold and Tier_2_Silver are weighted 1.0
@@ -122,7 +102,7 @@ harvesting:
   min_file_size_kb: 500.0
   min_sharpness_laplacian: 80.0
   download_concurrency: 15
-  usda_county_filter: true
+  usda_county_filter: false
   usda_county_buffer_km: 50.0
   usda_exempt_gold: true
 
@@ -149,7 +129,7 @@ segmentation:
   llr_hyst_keep_blobs: true
   paperclean_llr_hyst_keepblobs: true
   subtract_holes: true
-  use_cf_predicted_by_mp: true
+  use_cf_predicted_by_mp: false
   ect_num_dirs: 360
   minimum_confidence_threshold: 0.50
   treat_leaflet_as_leaf_whole: false
@@ -157,16 +137,7 @@ segmentation:
   do_apply_landmarks: true
   segment_partial_leaves: true
   score_thresh: 0.25
-  min_ucs: 0.85
-  min_solidity: 0.72
-  min_circularity: 0.25
-  min_extent: 0.35
-  min_blade_area_cm2: 0.75
-  min_blade_area_floor_cm2: 0.15
   rosette_plant_bbox_lower_fraction: 0.60
-  max_tissue_border_ratio: 0.15
-  max_petiole_width_ratio: 0.105
-  cordate_guard_width_ratio: 0.165
   device: "cuda"
 
 # Empirical LeafMachine3 Component Detector & Segmentation Settings
@@ -191,7 +162,7 @@ leaf_segmentation:
   llr_hyst_keep_blobs: true
   paperclean_llr_hyst_keepblobs: true
   subtract_holes: true
-  use_cf_predicted_by_mp: true
+  use_cf_predicted_by_mp: false
   ect_num_dirs: 360
   treat_leaflet_as_leaf_whole: false
   use_efds_for_png_masks: false
@@ -249,7 +220,7 @@ macroecology:
   phenology:
     cohort_adaptive_mode: true
     min_anchor_n_for_empirical: 5
-    min_flowering_doy: 60
+    min_flowering_doy: 30
     max_flowering_doy: 220
     min_flowering_lat: 24.0
     max_flowering_lat: 55.0

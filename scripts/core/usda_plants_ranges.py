@@ -1196,6 +1196,7 @@ def filter_vouchers_by_usda_county_range(
     workspace_dir: Path = PROJECT_ROOT,
     allow_network: bool = True,
     force_refresh: bool = False,
+    drop_out_of_range: bool = True,
     logger: Optional[logging.Logger] = None,
 ) -> Tuple["pd.DataFrame", Dict[str, int]]:
     """
@@ -1397,6 +1398,8 @@ def filter_vouchers_by_usda_county_range(
         usda_status_col.append("out_of_range")
         if is_exempt:
             stats["exempt_retained"] += 1
+            keep_mask.append(True)
+        elif not drop_out_of_range:
             keep_mask.append(True)
         else:
             stats["dropped_out_of_range"] += 1

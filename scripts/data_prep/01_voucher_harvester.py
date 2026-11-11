@@ -245,15 +245,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse CLI arguments for 01_voucher_harvester.py."""
+    """Parse CLI arguments for 01_voucher_harvester.py (defaults to empty argv when imported under unittest runner)."""
+    if argv is None and len(sys.argv) > 0 and Path(sys.argv[0]).name in {"run_audit.py", "unittest", "__main__.py"}:
+        argv = []
     return build_cli_parser().parse_args(argv)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """CLI execution entrypoint."""
     cfg = PipelineConfig.from_yaml()
-    parser = build_cli_parser()
-    args = parser.parse_args()
+    args = parse_args(argv)
 
     log_file_path = Path(args.log_file)
     logger = setup_logger(log_file_path=log_file_path, verbose=args.verbose)

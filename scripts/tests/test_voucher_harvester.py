@@ -966,8 +966,8 @@ class TestSpatialBalancingAndThinning(unittest.TestCase):
 
         df_in = pd.DataFrame(records)
         manifest_df = pd.DataFrame([
-            {"catalogNumber": "NC_VOUCHER_010", "leaf_id": 1, "assigned_tier": "Tier_1_Direct"},
-            {"catalogNumber": "NC_VOUCHER_010", "leaf_id": 2, "assigned_tier": "Tier_1_Direct"},
+            {"catalogNumber": "NC_VOUCHER_010", "leaf_id": 1, "efa_qc_pass": True},
+            {"catalogNumber": "NC_VOUCHER_010", "leaf_id": 2, "efa_qc_pass": True},
         ])
 
         thinned = spatially_balance_and_thin_vouchers(
@@ -1575,7 +1575,6 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
         self.assertEqual(cfg.taxa.target_species, [])
         self.assertEqual(cfg.taxa.synonyms, {})
         self.assertEqual(cfg.taxa.outgroups, [])
-        self.assertEqual(cfg.thresholds.dissection.taxa_with_lyrate_tendency, [])
         self.assertFalse(hasattr(core_harv, "EASTERN_NA_PACKERA_TAXA"))
         self.assertFalse(hasattr(core_harv, "EASTERN_NA_GBIF_QUERY_TAXA"))
 

@@ -9,7 +9,7 @@
 #       transparent fallback to CSV when RSQLite is absent or standalone unit
 #       test fixtures outside the workspace are invoked.
 #     - Parameterized transactional upserts (`db_upsert_dataframe`).
-#     - Single-query 120-vertex Tier_1_Direct contour ingestion for Step 03.
+#     - Single-query 120-vertex LeafMachine3 contour ingestion for Step 03.
 #     - Step 04 OTU + plant_individuals + reproductive SQLite joins & updates.
 #     - Step 06 environmental_cache + environmental_rtree spatial bbox queries.
 #     - Step 07 & Step 08 `fetch_run_master_view()` (`v_integrative_triage_master`)
@@ -101,8 +101,8 @@ packera_mclapply <- function(X, FUN, mc.cores = 1L, mc.preschedule = TRUE) {
 }
 
 PACKERA_DB_LOGICAL_COLS <- c(
-  "is_primary_duplicate", "is_calibrated_mm", "is_bent_stem", "is_folded",
-  "is_dissected", "reflection_applied", "is_verified_anthesis",
+  "is_primary_duplicate", "is_calibrated_mm", "is_bent_stem",
+  "is_dissected", "lm3_gates_pass", "is_verified_anthesis",
   "is_rock_outcrop", "is_azonal_lithology", "high_coord_uncertainty_flag",
   "is_training_eligible_coord", "azonal_lithology_presence_buffer",
   "is_promoted_bronze", "is_promoted_anchor", "is_passive",
@@ -186,7 +186,12 @@ PACKERA_DB_WC_BIO_COLS <- c(
       leaf_zone_confidence = "REAL",
       dist_from_crown_norm = "REAL",
       cy_rel_plant_bbox = "REAL",
-      effective_min_blade_area_cm2 = "REAL"
+      archetype_score = "REAL",
+      bilateral_dice = "REAL",
+      si_a = "REAL",
+      lm3_gates_pass = "INTEGER",
+      n_lamina_components = "INTEGER",
+      scale_source = "TEXT"
     ))
   }
   if (identical(table_name, "run_active_cohort")) {
@@ -686,6 +691,47 @@ db_upsert_dataframe <- function(
 # Step 03: Single-Query 120-Vertex Contour & Leaf Metadata Ingestion + Persistence
 # ==============================================================================
 
+# Reproducible Step 03 EFA inclusion rule on read-only LeafMachine3 SQLite / manifest records:
+#   - Respects explicit `efa_qc_pass` when present, and evaluates LeafMachine3's native `bilateral_dice`
+#     & `si_a` with relaxed bounds on genuinely dissected Packera leaves (`dice >= 0.45`, `|si_a| < 0.48`)
+#     while excluding fused overlapping clumps (`UNRESOLVED_CLUMP`) and unbridged multi-island pinnae
+#     (`n_lamina_components > 1`, which remain in SQLite for multi-component ECT).
+evaluate_step03_lm3_efa_qc <- function(df) {
+  if (is.null(df) || nrow(df) == 0L) return(logical(0))
+  n <- nrow(df)
+  keep <- rep(TRUE, n)
+  if ("efa_qc_pass" %in% names(df)) {
+    raw_eqc <- tolower(trimws(as.character(df$efa_qc_pass)))
+    keep[!is.na(raw_eqc) & raw_eqc %in% c("0", "false", "f", "no")] <- FALSE
+  }
+  if ("qc_flag_reason" %in% names(df)) {
+    raw_qfr <- toupper(trimws(as.character(df$qc_flag_reason)))
+    keep[!is.na(raw_qfr) & nzchar(raw_qfr) & !(raw_qfr %in% c("PASS", "OK", "NONE", "NA"))] <- FALSE
+  }
+  sol <- if ("solidity" %in% names(df)) suppressWarnings(as.numeric(df$solidity)) else rep(NA_real_, n)
+  is_diss <- !is.na(sol) & is.finite(sol) & (sol < 0.72)
+  if ("lm3_gates_pass" %in% names(df)) {
+    raw_gp <- tolower(trimws(as.character(df$lm3_gates_pass)))
+    gp_fail <- !is.na(raw_gp) & raw_gp %in% c("0", "false", "f", "no")
+    keep[!is_diss & gp_fail] <- FALSE
+  }
+  if ("bilateral_dice" %in% names(df)) {
+    bd <- suppressWarnings(as.numeric(df$bilateral_dice))
+    min_bd <- ifelse(is_diss, 0.45, 0.70)
+    keep[!is.na(bd) & is.finite(bd) & bd < min_bd] <- FALSE
+  }
+  if ("si_a" %in% names(df)) {
+    sia <- abs(suppressWarnings(as.numeric(df$si_a)))
+    max_sia <- ifelse(is_diss, 0.48, 0.35)
+    keep[!is.na(sia) & is.finite(sia) & sia >= max_sia] <- FALSE
+  }
+  if ("n_lamina_components" %in% names(df)) {
+    n_cc <- suppressWarnings(as.integer(df$n_lamina_components))
+    keep[!is.na(n_cc) & n_cc > 1L] <- FALSE
+  }
+  keep
+}
+
 fetch_step03_contours_from_db <- function(
   vouchers_path = NULL,
   manifest_path = NULL,
@@ -721,15 +767,21 @@ fetch_step03_contours_from_db <- function(
   sel_zone_conf <- if ("leaf_zone_confidence" %in% el_fields) "el.leaf_zone_confidence" else "NULL AS leaf_zone_confidence"
   sel_dist_cr <- if ("dist_from_crown_norm" %in% el_fields) "el.dist_from_crown_norm" else "NULL AS dist_from_crown_norm"
   sel_cy_rel <- if ("cy_rel_plant_bbox" %in% el_fields) "el.cy_rel_plant_bbox" else "NULL AS cy_rel_plant_bbox"
-  sel_eff_min <- if ("effective_min_blade_area_cm2" %in% el_fields) "el.effective_min_blade_area_cm2" else "NULL AS effective_min_blade_area_cm2"
+  sel_arch <- if ("archetype_score" %in% el_fields) "el.archetype_score" else "NULL AS archetype_score"
+  sel_bdice <- if ("bilateral_dice" %in% el_fields) "el.bilateral_dice" else "NULL AS bilateral_dice"
+  sel_sia <- if ("si_a" %in% el_fields) "el.si_a" else "NULL AS si_a"
+  sel_lgates <- if ("lm3_gates_pass" %in% el_fields) "el.lm3_gates_pass" else "NULL AS lm3_gates_pass"
+  sel_ncc <- if ("n_lamina_components" %in% el_fields) "el.n_lamina_components" else "1 AS n_lamina_components"
+  sel_scale_src <- if ("scale_source" %in% el_fields) "el.scale_source" else "NULL AS scale_source"
+  sel_eqc <- if ("efa_qc_pass" %in% el_fields) "el.efa_qc_pass" else "NULL AS efa_qc_pass"
+  sel_qfr <- if ("qc_flag_reason" %in% el_fields) "el.qc_flag_reason" else "NULL AS qc_flag_reason"
 
   base_sql <- paste0(
     "SELECT ",
     "  el.catalogNumber, el.plant_individual_id, el.leaf_id, el.shape_id, ",
-    "  el.assigned_tier, COALESCE(el.tier_assignment, el.assigned_tier) AS tier_assignment, ",
-    "  el.solidity, COALESCE(el.ucs_score, el.ucs) AS ucs_score, ",
-    "  el.aspect_ratio, el.area_px, el.blade_area_cm2, el.is_dissected, ",
-    "  ", sel_ect, ", ", sel_zone, ", ", sel_zone_conf, ", ", sel_dist_cr, ", ", sel_cy_rel, ", ", sel_eff_min, ", ",
+    "  el.solidity, el.aspect_ratio, el.area_px, el.blade_area_cm2, ",
+    "  ", sel_ect, ", ", sel_zone, ", ", sel_zone_conf, ", ", sel_dist_cr, ", ", sel_cy_rel, ", ",
+    "  ", sel_arch, ", ", sel_bdice, ", ", sel_sia, ", ", sel_lgates, ", ", sel_ncc, ", ", sel_scale_src, ", ", sel_eqc, ", ", sel_qfr, ", ",
     "  COALESCE(el.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm, ",
     "  COALESCE(el.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm, ",
     "  COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm, ",
@@ -749,11 +801,7 @@ fetch_step03_contours_from_db <- function(
     "LEFT JOIN voucher_reproductive_phenology vrp0 ON vrp0.catalogNumber = el.catalogNumber AND vrp0.plant_individual_id = 0 "
   )
 
-  tier1_pred <- paste0(
-    "el.contour_xy_json IS NOT NULL AND el.contour_xy_json != '' AND (",
-    "LOWER(COALESCE(NULLIF(el.tier_assignment, ''), el.assigned_tier)) LIKE 'tier_1%' OR ",
-    "LOWER(COALESCE(NULLIF(el.tier_assignment, ''), el.assigned_tier)) LIKE 'tier1%')"
-  )
+  tier1_pred <- "el.contour_xy_json IS NOT NULL AND el.contour_xy_json != ''"
 
   if (!is.null(active_catalogs) && length(active_catalogs) > 0L) {
     cats <- unique(trimws(as.character(active_catalogs)))
@@ -823,16 +871,14 @@ fetch_step03_contours_from_db <- function(
   }
 
   n_rows <- nrow(rows)
-  raw_tier_vec <- ifelse(
-    !is.na(rows$tier_assignment) & nzchar(as.character(rows$tier_assignment)),
-    as.character(rows$tier_assignment),
-    as.character(rows$assigned_tier)
-  )
-  keep_t1 <- !is.na(raw_tier_vec) & grepl("^tier_?1", raw_tier_vec, ignore.case = TRUE) &
-    !is.na(rows$contour_xy_json) & nzchar(as.character(rows$contour_xy_json))
-  if (!any(keep_t1)) return(NULL)
-  if (!all(keep_t1)) {
-    rows <- rows[keep_t1, , drop = FALSE]
+  keep_qc <- evaluate_step03_lm3_efa_qc(rows) & !is.na(rows$contour_xy_json) & nzchar(as.character(rows$contour_xy_json))
+  n_excl_qc <- sum(!keep_qc, na.rm = TRUE)
+  if (n_excl_qc > 0L) {
+    message(sprintf("Step 03 SQLite EFA QC filter: excluded %d clump/multi-island contours (retained in SQLite extracted_leaves for audit/ECT).", n_excl_qc))
+  }
+  if (!any(keep_qc)) return(NULL)
+  if (!all(keep_qc)) {
+    rows <- rows[keep_qc, , drop = FALSE]
     n_rows <- nrow(rows)
   }
 
@@ -871,12 +917,16 @@ fetch_step03_contours_from_db <- function(
       circ_val <- if (is.finite(perim_px) && perim_px > 1e-6) round(min(1.0, (4 * pi * area_px) / (perim_px^2)), 4) else NA_real_
       di_val <- if (is.finite(perim_px) && is.finite(area_px) && area_px > 1e-6) round(max(1.0, perim_px / (2.0 * sqrt(pi * area_px))), 4) else NA_real_
 
-      if (is_cal_vec[i]) coo <- coo / ppm_vec[i]
-      cs_val <- if (!is.null(centsize_fn)) {
-        centsize_fn(coo)
+      if (is_cal_vec[i]) {
+        coo <- coo / ppm_vec[i]
+        cs_val <- if (!is.null(centsize_fn)) {
+          centsize_fn(coo)
+        } else {
+          cx <- mean(coo[, 1L]); cy <- mean(coo[, 2L])
+          sqrt(sum((coo[, 1L] - cx)^2 + (coo[, 2L] - cy)^2))
+        }
       } else {
-        cx <- mean(coo[, 1L]); cy <- mean(coo[, 2L])
-        sqrt(sum((coo[, 1L] - cx)^2 + (coo[, 2L] - cy)^2))
+        cs_val <- NA_real_
       }
 
       if (!is.null(align_fn)) {
@@ -988,8 +1038,6 @@ fetch_step03_contours_from_db <- function(
   db_ba_vec[!is.finite(db_ba_vec)] <- NA_real_
   db_cy_rel_vec <- if ("cy_rel_plant_bbox" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$cy_rel_plant_bbox)) else rep(NA_real_, n_kept)
   db_cy_rel_vec[!is.finite(db_cy_rel_vec)] <- NA_real_
-  db_eff_min_vec <- if ("effective_min_blade_area_cm2" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$effective_min_blade_area_cm2)) else rep(NA_real_, n_kept)
-  db_eff_min_vec[!is.finite(db_eff_min_vec)] <- NA_real_
   db_zone_conf_vec <- if ("leaf_zone_confidence" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$leaf_zone_confidence)) else rep(NA_real_, n_kept)
   db_zone_conf_vec[!is.finite(db_zone_conf_vec)] <- NA_real_
   db_dist_cr_vec <- if ("dist_from_crown_norm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$dist_from_crown_norm)) else rep(NA_real_, n_kept)
@@ -1018,11 +1066,11 @@ fetch_step03_contours_from_db <- function(
       }
     }
   }
-  diss_raw_vec <- sub_rows$is_dissected
-  eff_diss_vec <- ifelse(is.na(diss_raw_vec), NA, as.integer(diss_raw_vec) != 0L)
+  sol_kept <- merged$sol[ok_idx]
+  eff_diss_vec <- is.finite(sol_kept) & (sol_kept < 0.72)
   cs_kept <- merged$cs[ok_idx]
-  log_cs_kept <- ifelse(!is.na(cs_kept) & cs_kept > 0, log(cs_kept), NA_real_)
-  t1_str <- rep("Tier_1_Direct", n_kept)
+  log_cs_kept <- ifelse(!is.na(cs_kept) & cs_kept > 0, round(log10(cs_kept), 6), NA_real_)
+  arch_kept <- if ("archetype_score" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$archetype_score)) else rep(NA_real_, n_kept)
 
   coords_list <- merged$coo[ok_idx]
   names(coords_list) <- sid_vec
@@ -1031,12 +1079,9 @@ fetch_step03_contours_from_db <- function(
     catalogNumber = cat_vec,
     plant_individual_id = pid_vec,
     leaf_id = lid_vec,
-    tier_assignment = t1_str,
-    assigned_tier = t1_str,
-    reconstruction_tier = t1_str,
-    solidity = merged$sol[ok_idx],
+    solidity = sol_kept,
     dissection_index = merged$di[ok_idx],
-    ucs_score = suppressWarnings(as.numeric(sub_rows$ucs_score)),
+    archetype_score = arch_kept,
     pixels_per_mm = ppm_vec[ok_idx],
     is_calibrated_mm = is_cal_vec[ok_idx],
     petiole_length_mm = suppressWarnings(as.numeric(sub_rows$petiole_length_mm)),
@@ -1050,7 +1095,6 @@ fetch_step03_contours_from_db <- function(
     cy_rel_plant_bbox = pull_manifest_num("cy_rel_plant_bbox", db_cy_rel_vec),
     cy_rel_sheet = pull_manifest_num("cy_rel_sheet"),
     blade_area_cm2 = pull_manifest_num("blade_area_cm2", db_ba_vec),
-    effective_min_blade_area_cm2 = pull_manifest_num("effective_min_blade_area_cm2", db_eff_min_vec),
     AR_inv = suppressWarnings(as.numeric(sub_rows$AR_inv)),
     capitula_count = suppressWarnings(as.numeric(sub_rows$capitula_count)),
     involucre_height_px = suppressWarnings(as.numeric(sub_rows$involucre_height_px)),

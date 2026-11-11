@@ -250,13 +250,6 @@ def _to_bool_int(val: Any, default: Optional[int] = None) -> Optional[int]:
     return default
 
 
-def _normalize_tier(raw_tier: Any) -> str:
-    s = str(raw_tier or "").strip().lower()
-    if "2" in s or "reflect" in s:
-        return "Tier_2_Reflected"
-    return "Tier_1_Direct"
-
-
 def format_lat_lon_key(lat: Any, lon: Any) -> Optional[str]:
     f_lat = _to_float(lat)
     f_lon = _to_float(lon)
@@ -1065,11 +1058,6 @@ def record_voucher_segmentation_transaction(
     for r in extracted_records:
         leaf_id = _to_int(r.get("leaf_id"), default=1) or 1
         pid = _to_int(r.get("plant_individual_id"), default=0) or 0
-        assigned_tier = _normalize_tier(r.get("assigned_tier") or r.get("tier_assignment") or r.get("tier"))
-        tier_str = _to_str(r.get("tier")) or ("Tier 2" if assigned_tier == "Tier_2_Reflected" else "Tier 1")
-        ucs_val = _to_float(r.get("ucs_score"))
-        if ucs_val is None:
-            ucs_val = _to_float(r.get("ucs"))
 
         xy_pts: Optional[List[List[float]]] = None
         if r.get("contour_xy_json"):
@@ -1107,20 +1095,12 @@ def record_voucher_segmentation_transaction(
             pid,
             leaf_id,
             shape_id,
-            tier_str,
-            assigned_tier,
-            _to_str(r.get("tier_assignment")) or assigned_tier,
-            _to_float(r.get("ucs")) or ucs_val,
-            ucs_val,
             _to_float(r.get("solidity")),
             _to_float(r.get("circularity")),
             _to_float(r.get("extent")),
             _to_float(r.get("aspect_ratio")),
             _to_float(r.get("area_px")),
             _to_float(r.get("blade_area_cm2")),
-            _to_bool_int(r.get("is_folded"), default=0),
-            _to_bool_int(r.get("is_dissected"), default=0),
-            _to_bool_int(r.get("reflection_applied"), default=(1 if assigned_tier == "Tier_2_Reflected" else 0)),
             _to_float(r.get("midrib_angle_deg")),
             _to_float(r.get("petiole_length_px")),
             _to_float(r.get("petiole_length_mm")),
@@ -1129,6 +1109,7 @@ def record_voucher_segmentation_transaction(
             _to_float(r.get("petiole_to_blade_ratio")),
             l_ppm,
             l_cal,
+            _to_str(r.get("scale_source")) or ("ruler_calibrated" if l_cal == 1 else "uncalibrated"),
             _to_str(r.get("mask_path")),
             crop_p,
             _to_str(r.get("contour_path")),
@@ -1139,7 +1120,11 @@ def record_voucher_segmentation_transaction(
             _to_float(r.get("leaf_zone_confidence")),
             _to_float(r.get("dist_from_crown_norm")),
             _to_float(r.get("cy_rel_plant_bbox")),
-            _to_float(r.get("effective_min_blade_area_cm2")),
+            _to_float(r.get("archetype_score")),
+            _to_float(r.get("bilateral_dice")),
+            _to_float(r.get("si_a")),
+            _to_bool_int(r.get("lm3_gates_pass"), default=1),
+            max(1, int(_to_int(r.get("n_lamina_components")) or 1)),
         ))
 
     if extracted_records and not leaf_rows:
@@ -1200,16 +1185,15 @@ def record_voucher_segmentation_transaction(
                 """
                 INSERT INTO extracted_leaves (
                     catalogNumber, plant_individual_id, leaf_id, shape_id,
-                    tier, assigned_tier, tier_assignment,
-                    ucs, ucs_score, solidity, circularity, extent, aspect_ratio,
-                    area_px, blade_area_cm2, is_folded, is_dissected, reflection_applied,
+                    solidity, circularity, extent, aspect_ratio,
+                    area_px, blade_area_cm2,
                     midrib_angle_deg, petiole_length_px, petiole_length_mm,
                     blade_length_px, blade_length_mm, petiole_to_blade_ratio,
-                    pixels_per_mm, is_calibrated_mm,
+                    pixels_per_mm, is_calibrated_mm, scale_source,
                     mask_path, crop_path, contour_path, ect_path, contour_n_pts, contour_xy_json,
-                    leaf_zone, leaf_zone_confidence, dist_from_crown_norm,
-                    cy_rel_plant_bbox, effective_min_blade_area_cm2
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    leaf_zone, leaf_zone_confidence, dist_from_crown_norm, cy_rel_plant_bbox,
+                    archetype_score, bilateral_dice, si_a, lm3_gates_pass, n_lamina_components
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 leaf_rows,
             )
@@ -1251,15 +1235,12 @@ def load_step02_records_from_db(
         cur_l = conn.execute(
             f"""
             SELECT
-                el.catalogNumber, el.leaf_id, el.tier, el.solidity,
-                COALESCE(el.ucs, el.ucs_score) AS ucs,
-                el.is_folded, el.is_dissected, el.reflection_applied, el.contour_path, el.ect_path,
-                el.plant_individual_id, el.assigned_tier,
-                COALESCE(el.tier_assignment, el.assigned_tier) AS tier_assignment,
-                el.ucs_score, el.midrib_angle_deg, el.pixels_per_mm, el.is_calibrated_mm,
-                el.mask_path,
-                el.leaf_zone, el.leaf_zone_confidence, el.dist_from_crown_norm,
-                el.cy_rel_plant_bbox, el.effective_min_blade_area_cm2,
+                el.catalogNumber, el.plant_individual_id, el.leaf_id, el.solidity,
+                el.circularity, el.extent, el.aspect_ratio, el.area_px, el.blade_area_cm2,
+                el.contour_path, el.ect_path, el.mask_path,
+                el.midrib_angle_deg, el.pixels_per_mm, el.is_calibrated_mm, el.scale_source,
+                el.leaf_zone, el.leaf_zone_confidence, el.dist_from_crown_norm, el.cy_rel_plant_bbox,
+                el.archetype_score, el.bilateral_dice, el.si_a, el.lm3_gates_pass, el.n_lamina_components,
                 COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm,
                 COALESCE(el.blade_length_mm, pi.blade_length_mm) AS blade_length_mm,
                 COALESCE(el.petiole_to_blade_ratio, pi.petiole_to_blade_ratio) AS petiole_to_blade_ratio,
@@ -1280,10 +1261,9 @@ def load_step02_records_from_db(
         )
         for row in cur_l.fetchall():
             d = dict(row)
-            d["is_folded"] = bool(d.get("is_folded"))
-            d["is_dissected"] = bool(d.get("is_dissected"))
-            d["reflection_applied"] = bool(d.get("reflection_applied"))
             d["is_calibrated_mm"] = bool(d.get("is_calibrated_mm"))
+            if d.get("lm3_gates_pass") is not None:
+                d["lm3_gates_pass"] = bool(d.get("lm3_gates_pass"))
             extracted_by_cat.setdefault(str(d["catalogNumber"]), []).append(d)
 
         cur_f = conn.execute(
@@ -1729,11 +1709,10 @@ _LEAF_EFA_INT_COLS: Tuple[str, ...] = (
     "efd_harmonic_opt",
     "efd_k95_pcs",
 )
-_LEAF_EFA_STR_COLS: Tuple[str, ...] = ("assigned_tier", "leaf_zone")
+_LEAF_EFA_STR_COLS: Tuple[str, ...] = ("leaf_zone",)
 _LEAF_EFA_FLOAT_COLS: Tuple[str, ...] = (
     "solidity",
     "dissection_index",
-    "ucs_score",
     "aspect_ratio",
     "area_px",
     "pixels_per_mm",
@@ -1828,15 +1807,12 @@ _OTU_MORPH_BOOL_COLS: Tuple[str, ...] = (
 )
 _OTU_MORPH_INT_COLS: Tuple[str, ...] = (
     "leaf_count",
-    "n_tier1_leaves",
-    "n_tier2_leaves",
     "efd_harmonic_opt",
     "efd_k95_pcs",
     "basal_leaf_count",
     "cauline_leaf_count",
 )
 _OTU_MORPH_STR_COLS: Tuple[str, ...] = (
-    "assigned_tier",
     "species_standardized",
     "determiner_tier",
     "type_status",
@@ -1875,7 +1851,6 @@ _OTU_MORPH_FLOAT_COLS: Tuple[str, ...] = (
     "ect_lobe_complexity",
     "cauline_ect_lobe_complexity",
     "heteroblasty_ect_distance",
-    "ucs_score",
     "aspect_ratio",
     "area_px",
     "petiole_length_mm",
@@ -2391,8 +2366,7 @@ def purge_segments_and_runs(
                 _shutil.rmtree(d, ignore_errors=True)
         d.mkdir(parents=True, exist_ok=True)
 
-    for sub in ("tier1_intact", "tier2_reflected"):
-        (data_root / "masks" / sub).mkdir(parents=True, exist_ok=True)
+
     for sub in ("capitula", "rosettes"):
         (data_root / "cropped_patches" / sub).mkdir(parents=True, exist_ok=True)
 

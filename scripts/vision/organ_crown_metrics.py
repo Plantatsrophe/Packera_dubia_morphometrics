@@ -21,12 +21,22 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 import cv2
 import numpy as np
 import pandas as pd
-from sklearn.cluster import DBSCAN
+from scripts.vision.lm3_compat import DBSCAN
 
-from scripts.vision.leaf_geometry_utils import (
-    compute_geometric_metrics,
-    find_lamina_midrib_endpoints,
-)
+def _mask_basal_apical_fallback(mask: np.ndarray) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """Minimal contour endpoint fallback `(p_apex, p_base)` when bare 2D masks lack LM3 pose keypoints."""
+    if mask is None or mask.size == 0:
+        return (0, 0), (0, 0)
+    m_u8 = (mask > 0).astype(np.uint8) * 255
+    cnts, _ = cv2.findContours(m_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return (0, 0), (0, 0)
+    pts = max(cnts, key=cv2.contourArea).reshape(-1, 2)
+    base_idx = int(np.argmax(pts[:, 1]))
+    pb = (int(pts[base_idx, 0]), int(pts[base_idx, 1]))
+    apex_idx = int(np.argmax(np.hypot(pts[:, 0] - pb[0], pts[:, 1] - pb[1])))
+    pa = (int(pts[apex_idx, 0]), int(pts[apex_idx, 1]))
+    return pa, pb
 
 __all__ = [
     "cluster_plant_individuals",
@@ -222,7 +232,7 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
         petiole_width_px = _safe_pos_float(item.get("petiole_width_px", item.get("petiole_width")))
 
         if (p_base is None or p_apex is None) and isinstance(item.get("mask"), np.ndarray):
-            _, _, _, pa_m, pb_m = compute_geometric_metrics(item["mask"])
+            pa_m, pb_m = _mask_basal_apical_fallback(item["mask"])
             if p_base is None:
                 p_base = (float(pb_m[0]) + ox, float(pb_m[1]) + oy)
             if p_apex is None:
@@ -240,7 +250,7 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
             blade_px = float(item["blade_length_px"])
 
     elif isinstance(item, np.ndarray) and item.ndim == 2:
-        pa_m, pb_m = find_lamina_midrib_endpoints(item)
+        pa_m, pb_m = _mask_basal_apical_fallback(item)
         p_base = (float(pb_m[0]), float(pb_m[1]))
         p_apex = (float(pa_m[0]), float(pa_m[1]))
         geodesic_px = 0.0
@@ -274,7 +284,7 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
         pb = getattr(item, "p_base", None)
         pa = getattr(item, "p_apex", None)
         if (pb is None or pa is None) and getattr(item, "mask", None) is not None:
-            _, _, _, pa, pb = compute_geometric_metrics(getattr(item, "mask"))
+            pa, pb = _mask_basal_apical_fallback(getattr(item, "mask"))
         if pb is not None and pa is not None:
             p_base = (float(pb[0]) + ox, float(pb[1]) + oy)
             p_apex = (float(pa[0]) + ox, float(pa[1]) + oy)

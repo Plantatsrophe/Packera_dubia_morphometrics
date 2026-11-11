@@ -25,9 +25,32 @@ _script_root = Path(__file__).resolve().parents[2]
 if str(_script_root) not in sys.path:
     sys.path.insert(0, str(_script_root))
 
+import importlib.util
+
 from scripts.core.config import PROJECT_ROOT, PipelineConfig
 
-NATIVE_LM3_SETTINGS_PATH: Path = PROJECT_ROOT / "LeafMachine3" / "LM3_settings.yaml"
+
+def _resolve_default_lm3_settings_path(project_root: Path = PROJECT_ROOT) -> Path:
+    """Resolve LM3_settings.yaml across local LeafMachine3 clone, installed leafmachine3 package, and bundled config fallback."""
+    candidates: List[Path] = [project_root / "LeafMachine3" / "LM3_settings.yaml"]
+    try:
+        spec = importlib.util.find_spec("leafmachine3")
+        if spec is not None and spec.origin:
+            pkg_dir = Path(spec.origin).resolve().parent
+            candidates.extend([
+                pkg_dir / "LM3_settings.yaml",
+                pkg_dir.parent / "LM3_settings.yaml",
+            ])
+    except Exception:
+        pass
+    candidates.append(project_root / "config" / "LM3_settings.yaml")
+    for cand in candidates:
+        if cand.is_file():
+            return cand.resolve()
+    return candidates[0].resolve()
+
+
+NATIVE_LM3_SETTINGS_PATH: Path = _resolve_default_lm3_settings_path()
 DEFAULT_PLANT_DETECTOR_MODEL: str = "lm3_plant_detector__yolo26x_det_1280"
 
 _LM3_MODELHUB_SUBPATHS: Dict[str, List[str]] = {
@@ -78,8 +101,8 @@ _LM3_MODELHUB_SUBPATHS: Dict[str, List[str]] = {
 def load_native_lm3_config(
     settings_path: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
-    """Load the canonical LeafMachine3 configuration directly from `LeafMachine3/LM3_settings.yaml`."""
-    target = Path(settings_path).resolve() if settings_path is not None else NATIVE_LM3_SETTINGS_PATH.resolve()
+    """Load the canonical LeafMachine3 configuration across local clone, installed package, or bundled fallback."""
+    target = Path(settings_path).resolve() if settings_path is not None else _resolve_default_lm3_settings_path()
     if not target.exists():
         raise FileNotFoundError(f"Native LeafMachine3 settings file not found: {target}")
     with open(target, "r", encoding="utf-8") as f:

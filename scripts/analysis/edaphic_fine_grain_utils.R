@@ -65,7 +65,7 @@ CORE_FINE_GRAIN_CACHE_COLS <- c(
 FINE_GRAIN_CACHE_COLS <- c(
   CORE_FINE_GRAIN_CACHE_COLS,
   "bdricm", "resdept_r", "cfvo", "awc", "fine_soil_cec",
-  "soil_silt_pct", "alr_sand_clay", "alr_silt_clay",
+  "soil_silt_pct", "alr_sand_clay", "alr_silt_clay", "ilr_texture_1", "ilr_texture_2",
   "sgmc_lithology_class", "is_azonal_lithology",
   "azonal_contact_dist_m", "azonal_proximity_index",
   "buffer_radius_m", "high_coord_uncertainty_flag", "is_training_eligible_coord",
@@ -123,7 +123,9 @@ compute_soil_texture_log_ratios <- function(sand_pct, clay_pct, silt_pct = NULL)
     return(data.frame(
       soil_silt_pct = numeric(0),
       alr_sand_clay = numeric(0),
-      alr_silt_clay = numeric(0)
+      alr_silt_clay = numeric(0),
+      ilr_texture_1 = numeric(0),
+      ilr_texture_2 = numeric(0)
     ))
   }
   if (length(s) != n) s <- rep_len(s, n)
@@ -153,6 +155,8 @@ compute_soil_texture_log_ratios <- function(sand_pct, clay_pct, silt_pct = NULL)
     soil_silt_pct = round(si_clean, 2),
     alr_sand_clay = round(alr_sc, 4),
     alr_silt_clay = round(alr_sic, 4),
+    ilr_texture_1 = round(sqrt(2.0 / 3.0) * log(pmax(s_clean, 0.5) / sqrt(pmax(si_clean, 0.5) * pmax(c_clean, 0.5))), 4),
+    ilr_texture_2 = round(sqrt(0.5) * log(pmax(si_clean, 0.5) / pmax(c_clean, 0.5)), 4),
     stringsAsFactors = FALSE
   )
 }
@@ -465,7 +469,7 @@ compute_uncertainty_buffer_radius <- function(
 flag_coordinate_uncertainty <- function(
   df,
   max_uncertainty_m = 10000.0,
-  max_edaphic_uncertainty_m = 1000.0,
+  max_edaphic_uncertainty_m = 2000.0,
   default_r = 250.0,
   min_r = 100.0,
   max_r = 1000.0
@@ -490,11 +494,15 @@ flag_coordinate_uncertainty <- function(
   df$high_coord_uncertainty_flag <- !is.na(unc_raw) & is.finite(unc_raw) & (unc_raw > as.numeric(max_uncertainty_m))
   df$is_training_eligible_coord <- !df$high_coord_uncertainty_flag
   df$is_clim_eligible_coord <- !df$high_coord_uncertainty_flag
-  df$is_edaphic_eligible_coord <- is.na(unc_raw) | !is.finite(unc_raw) | (unc_raw <= as.numeric(max_edaphic_uncertainty_m))
+  yr_raw <- if ("year" %in% names(df)) suppressWarnings(as.numeric(df$year)) else rep(NA_real_, n)
+  has_year_col <- ("year" %in% names(df)) && any(is.finite(yr_raw))
+  modern_gps_fallback <- if (has_year_col) (is.finite(yr_raw) & yr_raw >= 2000) else rep(TRUE, n)
+  df$is_edaphic_eligible_coord <- (is.finite(unc_raw) & unc_raw > 0 & (unc_raw <= as.numeric(max_edaphic_uncertainty_m))) |
+                                  ((is.na(unc_raw) | !is.finite(unc_raw)) & modern_gps_fallback)
   df$edaphic_coord_weight <- ifelse(
-    is.na(unc_raw) | !is.finite(unc_raw) | unc_raw <= 0,
-    0.75,
-    ifelse(unc_raw <= 500.0, 1.0, ifelse(unc_raw <= as.numeric(max_edaphic_uncertainty_m), 0.65, 0.0))
+    is.finite(unc_raw) & unc_raw > 0,
+    ifelse(unc_raw <= 500.0, 1.0, ifelse(unc_raw <= as.numeric(max_edaphic_uncertainty_m), 0.70, 0.0)),
+    ifelse(modern_gps_fallback, 0.60, 0.0)
   )
   df$buffer_radius_m <- compute_uncertainty_buffer_radius(
     unc_raw, default_r = default_r, min_r = min_r, max_r = max_r
@@ -599,7 +607,7 @@ extract_uncertainty_buffered_predictors <- function(df, env_dir = "data/environm
             tryCatch({
               r_bd <- terra::rast(rt_p)
               buf_bd <- .project_vect_to_rast(buf_v, r_bd)
-              ex_m <- suppressWarnings(as.numeric(terra::extract(r_bd, buf_bd, fun = function(x) min(x, na.rm = TRUE))[[2]]))
+              ex_m <- suppressWarnings(as.numeric(terra::extract(r_bd, buf_bd, fun = function(x) mean(x, na.rm = TRUE))[[2]]))
               ok_m <- is.finite(ex_m) & ex_m >= 0.0
               min_accum[ok_m] <- pmin(min_accum[ok_m], ex_m[ok_m])
             }, error = function(e) NULL)

@@ -128,8 +128,8 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                         conn.execute(
                             """
                             INSERT INTO extracted_leaves (
-                                catalogNumber, plant_individual_id, leaf_id, assigned_tier
-                            ) VALUES ('ORPHAN-1', 0, 1, 'Tier_1_Direct');
+                                catalogNumber, plant_individual_id, leaf_id
+                            ) VALUES ('ORPHAN-1', 0, 1);
                             """
                         )
 
@@ -155,8 +155,8 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                     conn.execute(
                         """
                         INSERT INTO extracted_leaves (
-                            catalogNumber, plant_individual_id, leaf_id, assigned_tier, contour_xy_json, contour_n_pts
-                        ) VALUES ('NCU-FK-01', 0, 1, 'Tier_1_Direct', '[[0,0],[1,0],[1,1]]', 3);
+                            catalogNumber, plant_individual_id, leaf_id, contour_xy_json, contour_n_pts
+                        ) VALUES ('NCU-FK-01', 0, 1, '[[0,0],[1,0],[1,1]]', 3);
                         """
                     )
                 with conn:
@@ -218,7 +218,8 @@ class TestSQLPipelineHandshake(unittest.TestCase):
 
             # Verify R db_utils.R spatial R*Tree bounding-box helper against the same SQLite DB
             rscript_bin = shutil.which("Rscript")
-            self.assertIsNotNone(rscript_bin, "Rscript must be installed in PATH")
+            if not rscript_bin:
+                self.skipTest("Rscript not installed.")
             r_expr = (
                 "source('scripts/core/db_utils.R'); "
                 f"df <- query_environmental_cache_sqlite(db_path = '{db_file.as_posix()}', "
@@ -240,7 +241,8 @@ class TestSQLPipelineHandshake(unittest.TestCase):
     def test_contour_migration_and_step03_efa_zero_csv_reads(self) -> None:
         """Migrate CSVs + 120-vertex contours to SQLite, delete contour CSVs, and run Step 03 EFA purely from SQLite."""
         rscript_bin = shutil.which("Rscript")
-        self.assertIsNotNone(rscript_bin, "Rscript must be installed in PATH")
+        if not rscript_bin:
+            self.skipTest("Rscript not installed.")
 
         with tempfile.TemporaryDirectory() as tmp_d:
             ws = Path(tmp_d) / "ws"
@@ -322,11 +324,10 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                                 "catalogNumber": cat,
                                 "plant_individual_id": pid,
                                 "leaf_id": leaf_id,
-                                "assigned_tier": "Tier_1_Direct",
                                 "solidity": 0.91,
                                 "circularity": 0.68 if is_aurea else 0.54,
                                 "extent": 0.73,
-                                "ucs_score": 0.94,
+                                "archetype_score": 0.94,
                                 "area_px": 18500.0,
                                 "pixels_per_mm": 10.0,
                                 "is_calibrated_mm": "True",
@@ -370,9 +371,6 @@ class TestSQLPipelineHandshake(unittest.TestCase):
 
             out_otu_csv = tables_dir / "leaf_efa_harmonics.csv"
             out_ind_csv = tables_dir / "leaf_efa_harmonics_individual.csv"
-            out_rep_csv = reports_dir / "tier_symmetry_validation.csv"
-            out_fig_pdf = figures_dir / "tier1_vs_tier2_density_overlay.pdf"
-
             env = os.environ.copy()
             env["PACKERA_DB_PATH"] = str(db_path)
             env["RUN_ID"] = run_id
@@ -387,8 +385,6 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 "--vouchers", str(vouchers_csv),
                 "--output", str(out_otu_csv),
                 "--output-individual", str(out_ind_csv),
-                "--report-out", str(out_rep_csv),
-                "--plot-out", str(out_fig_pdf),
                 "--permutations", "19",
             ]
             proc = subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=False)
@@ -404,7 +400,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             self.assertIn(("NCU-A1", 0), otu_keys)
             self.assertIn(("NCU-A1", 1), otu_keys)
             for r in otu_rows:
-                self.assertEqual(r["morph_tier_source"], "Tier_1_Pure")
+                self.assertEqual(r["morph_tier_source"], "Basal_Rosette")
                 self.assertTrue(math.isfinite(float(r["Sym_PC1"])))
 
             # Verify SQLite persistence in leaf_efa_harmonics and otu_morphometrics
@@ -424,7 +420,8 @@ class TestSQLPipelineHandshake(unittest.TestCase):
     def test_multi_plant_and_non_georeferenced_retention_across_step06_and_step07(self) -> None:
         """Verify multi-plant (catalogNumber, plant_individual_id) & non-georeferenced retention across Step 06, Step 07, and v_integrative_triage_master."""
         rscript_bin = shutil.which("Rscript")
-        self.assertIsNotNone(rscript_bin, "Rscript must be installed in PATH")
+        if not rscript_bin:
+            self.skipTest("Rscript not installed.")
 
         with tempfile.TemporaryDirectory() as tmp_d:
             ws = Path(tmp_d) / "ws_master"
@@ -593,9 +590,8 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                             "run_id": run_id,
                             "catalogNumber": cat,
                             "plant_individual_id": pid,
-                            "morph_tier_source": "Tier_1_Pure",
-                            "n_tier1_leaves": 3,
-                            "n_tier2_leaves": 0,
+                            "morph_tier_source": "Basal_Rosette",
+                            "basal_leaf_count": 3,
                             "PC1": (-1.6 + 0.05 * idx_o) if is_aur else (1.7 + 0.05 * idx_o),
                             "PC2": 0.12 * ((idx_o % 3) - 1),
                             "PC3": 0.05 * ((idx_o % 2) - 0.5),

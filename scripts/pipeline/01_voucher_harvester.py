@@ -33,6 +33,7 @@ from scripts.core.harvester import (
 
 _data_prep_harvester = importlib.import_module("scripts.data_prep.01_voucher_harvester")
 build_cli_parser = _data_prep_harvester.build_cli_parser
+parse_args = _data_prep_harvester.parse_args
 main = _data_prep_harvester.main
 
 if __name__ == "__main__":
