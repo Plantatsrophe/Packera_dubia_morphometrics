@@ -729,11 +729,11 @@ def collect_voucher_dem_tiles(
                 if not reader.fieldnames:
                     continue
                 lat_col = next(
-                    (c for c in ("decimalLatitude", "latitude", "lat") if c in reader.fieldnames),
+                    (c for c in ("decimalLatitude", "lat") if c in reader.fieldnames),
                     None,
                 )
                 lon_col = next(
-                    (c for c in ("decimalLongitude", "longitude", "lon") if c in reader.fieldnames),
+                    (c for c in ("decimalLongitude", "lon") if c in reader.fieldnames),
                     None,
                 )
                 if not lat_col or not lon_col:

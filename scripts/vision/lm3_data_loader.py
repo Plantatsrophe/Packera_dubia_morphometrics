@@ -32,6 +32,7 @@ LM3_PLANT_CLASSES: Dict[int, str] = {
 }
 LM3_LEAF_CLASS_IDS: Tuple[int, ...] = (0, 1)
 LM3_REPRODUCTIVE_CLASS_IDS: Tuple[int, ...] = (2, 3, 4, 5, 6)
+LM3_SINGLE_CAPITULUM_CLASS_IDS: Tuple[int, ...] = (2, 4, 6)
 
 DEFAULT_HERBARIUM_DPI: float = 600.0
 DEFAULT_PX_PER_CM: float = DEFAULT_HERBARIUM_DPI / 2.54  # ~236.2205 px/cm
@@ -140,27 +141,22 @@ def resolve_px_per_cm(
     return fallback_px_cm
 
 
-def compute_blade_area_cm2(
+def compute_area_mm2(
     mask_area_px: float,
     pixels_per_mm: Optional[float] = None,
-    px_per_cm: Optional[float] = None,
-    default_dpi: float = DEFAULT_HERBARIUM_DPI,
-    sheet_shape: Optional[Tuple[int, int]] = None,
+    is_calibrated_mm: bool = True,
 ) -> float:
     """
-    Converts pixel mask area (`mask_area_px`) into physical blade area in square
-    centimeters (`cm^2`) using `px_per_cm` (or `pixels_per_mm * 10.0`), with a
-    standard herbarium DPI fallback when ruler detection is absent.
+    Converts pixel mask area (`mask_area_px`) into physical lamina area in square
+    millimeters (`mm^2`) strictly when `is_calibrated_mm` is True and `pixels_per_mm > 0`.
+    Returns `np.nan` on uncalibrated or megapixel-estimated sheets.
     """
-    if mask_area_px <= 0.0:
-        return 0.0
-    eff_px_cm = resolve_px_per_cm(
-        pixels_per_mm=pixels_per_mm,
-        px_per_cm=px_per_cm,
-        default_dpi=default_dpi,
-        sheet_shape=sheet_shape,
-    )
-    return float(mask_area_px) / max(eff_px_cm * eff_px_cm, 1e-6)
+    if not is_calibrated_mm or mask_area_px is None or float(mask_area_px) <= 0.0:
+        return np.nan
+    ppm = normalize_pixels_per_mm(pixels_per_mm)
+    if ppm is None or ppm <= 0.0:
+        return np.nan
+    return float(mask_area_px) / max(ppm * ppm, 1e-8)
 
 
 def _extract_catalog_number(raw_identifier: Any) -> str:
@@ -519,6 +515,7 @@ __all__ = [
     "LM3_PLANT_CLASSES",
     "LM3_LEAF_CLASS_IDS",
     "LM3_REPRODUCTIVE_CLASS_IDS",
+    "LM3_SINGLE_CAPITULUM_CLASS_IDS",
     "DEFAULT_HERBARIUM_DPI",
     "DEFAULT_PX_PER_CM",
     "DEFAULT_PX_PER_MM",
@@ -527,7 +524,7 @@ __all__ = [
     "unscale_working_bbox_to_sheet",
     "normalize_pixels_per_mm",
     "resolve_px_per_cm",
-    "compute_blade_area_cm2",
+    "compute_area_mm2",
     "RulerCalibrationMap",
     "load_ruler_calibration_records",
     "load_ruler_calibrations",

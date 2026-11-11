@@ -16,6 +16,8 @@ Description:
 
 from __future__ import annotations
 
+import re
+
 import ast
 import sys
 import unittest
@@ -106,6 +108,24 @@ FORBIDDEN_OBSOLETE_SAM2_AND_PRUNED_HELPER_TOKENS = (
     "tier_symmetry_validation",
     "tier1_vs_tier2_density_overlay",
     "find_lamina_midrib_endpoints",
+    # Purged Steps 1-4 twin columns & circular helpers (Zero-Trust Variable Overhaul)
+    "determiner_raw",
+    "pheno_sin",
+    "pheno_cos",
+    "calculate_circular_phenology",
+    "capitulum_aspect_ratio",
+    "blade_length_to_width_ratio",
+    "blade_area_cm2",
+    "x_norm",
+    "y_norm",
+    "Sym_PC",
+    "is_promoted_anchor",
+    "heteroblasty_index",
+    "whiten_intraspecific_deme_plasticity",
+    "compute_cluster_spatial_segregation_p",
+    "residualize_within_deme_phenophase_plasticity",
+    ".augment_foliar_architecture_features",
+    ".compute_soft_geo_range_log_prior",
     # LeafMachine2 tokens
     *FORBIDDEN_LEGACY_LM2_TOKENS,
 )
@@ -235,7 +255,11 @@ class TestCodeHygiene(unittest.TestCase):
             rel = src_path.relative_to(PROJECT_ROOT)
             for lineno, line in enumerate(content.splitlines(), start=1):
                 for token in FORBIDDEN_OBSOLETE_SAM2_AND_PRUNED_HELPER_TOKENS:
-                    if token in line:
+                    if token in ("x_norm", "y_norm"):
+                        hit = bool(re.search(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", line))
+                    else:
+                        hit = token in line
+                    if hit:
                         violations.append(f"{rel}:{lineno} [{token}]: {line.strip()}")
 
         self.assertEqual(

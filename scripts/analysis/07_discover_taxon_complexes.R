@@ -185,15 +185,13 @@ resolve_step08_morph_features <- function(morph_df, anchor_df = morph_df, n_taxa
   }
   sel <- .parse_step08_semicolon(morph_df, "selected_morph_features"); sel <- sel[vapply(sel, ok_num, logical(1))]
   if (length(sel) >= 2L) {
-    is_pc <- grepl("^(Sym_)?PC[0-9]+$", sel)
-    ord_pc <- c(.sort_step08_pcs(grep("^Sym_PC[0-9]+$", sel, value = TRUE), "Sym_PC"),
-                .sort_step08_pcs(grep("^PC[0-9]+$", sel, value = TRUE), "PC"))
+    is_pc <- grepl("^PC[0-9]+$", sel)
+    ord_pc <- .sort_step08_pcs(grep("^PC[0-9]+$", sel, value = TRUE), "PC")
     return(utils::head(unique(c(ord_pc, sel[!is_pc])), max_p))
   }
-  sym_cols <- .sort_step08_pcs(grep("^Sym_PC[0-9]+$", names(anchor_df), value = TRUE), "Sym_PC"); sym_cols <- sym_cols[vapply(sym_cols, ok_num, logical(1))]
   pc_cols <- .sort_step08_pcs(grep("^PC[0-9]+$", names(anchor_df), value = TRUE), "PC"); pc_cols <- pc_cols[vapply(pc_cols, ok_num, logical(1))]
   can_cols <- intersect(c("can1", "can2", "can3"), names(anchor_df)); can_cols <- can_cols[vapply(can_cols, ok_num, logical(1))]
-  cands <- if (length(sym_cols) >= 2L) sym_cols else if (length(pc_cols) >= 2L) pc_cols else unique(c(can_cols, sym_cols, pc_cols))
+  cands <- if (length(pc_cols) >= 2L) pc_cols else unique(c(can_cols, pc_cols))
   if (length(cands) <= 2L) return(cands)
   X_c <- as.matrix(anchor_df[, cands, drop = FALSE]); storage.mode(X_c) <- "double"
   ev <- apply(X_c, 2L, stats::var, na.rm = TRUE); ev[!is.finite(ev) | ev < 0] <- 0.0
@@ -264,7 +262,7 @@ compute_ecological_affinity <- function(morph_df, taxa) {
 compute_morphometric_affinity <- function(morph_df, anchor_df, taxa) {
   n_taxa <- length(taxa); feat_cols <- resolve_step08_morph_features(morph_df, anchor_df, n_taxa)
   if (length(feat_cols) == 0L) feat_cols <- intersect(c("can1", "can2", "can3"), names(anchor_df))
-  for (rc in setdiff(intersect(c("involucre_height_mm", "involucre_width_mm", "capitulum_aspect_ratio", "AR_inv_std", "W_inv_std"), names(anchor_df)), feat_cols)) {
+  for (rc in setdiff(intersect(c("involucre_height_mm", "involucre_width_mm", "AR_inv_std", "W_inv_std"), names(anchor_df)), feat_cols)) {
     vals <- suppressWarnings(as.numeric(anchor_df[[rc]]))
     if (sum(is.finite(vals) & vals > 0) >= 0.5 * nrow(anchor_df) && stats::sd(vals, na.rm = TRUE) > 1e-6) {
       col_nm <- paste0("log_", rc); anchor_df[[col_nm]] <- log10(pmax(suppressWarnings(as.numeric(anchor_df[[rc]])), 1e-3))
@@ -347,7 +345,7 @@ compute_hopkins_phenological_affinity <- function(morph_df, taxa) {
   ref_doy <- ref_theta * (365.25 / (2.0 * pi))
   doy_clean <- ifelse(is.finite(doy_vec) & doy_vec >= 1 & doy_vec <= 366, doy_vec, ref_doy)
 
-  lat_col <- intersect(c("decimalLatitude", "latitude"), names(morph_df))
+  lat_col <- intersect(c("decimalLatitude"), names(morph_df))
   lat_vec <- if (length(lat_col) > 0L) suppressWarnings(as.numeric(morph_df[[lat_col[1L]]])) else rep(NA_real_, n)
   elev_col <- intersect(c("elevation_m", "elevation", "minimumElevationInMeters"), names(morph_df))
   elev_vec <- if (length(elev_col) > 0L) suppressWarnings(as.numeric(morph_df[[elev_col[1L]]])) else rep(NA_real_, n)

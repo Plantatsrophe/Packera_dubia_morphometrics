@@ -62,15 +62,12 @@ EXPORT_COLUMNS = [
     "recordedBy",
     "recordNumber",
     "identifiedBy",
-    "determiner_raw",
     "determiner_tier",
     "type_status",
     "county",
     "stateProvince",
     "decimalLatitude",
-    "latitude",
     "decimalLongitude",
-    "longitude",
     "coordinateUncertainty",
     "year",
     "month",
@@ -335,7 +332,7 @@ def stratify_duplicates(
 
     # Ensure metadata columns exist
     if "recordedBy" not in df.columns:
-        df["recordedBy"] = df.get("determiner_raw", df.get("identifiedBy", ""))
+        df["recordedBy"] = df.get("identifiedBy", "")
     if "recordNumber" not in df.columns:
         df["recordNumber"] = ""
     if "image_path" not in df.columns:
@@ -362,14 +359,14 @@ def stratify_duplicates(
 
         lat_val = None
         lon_val = None
-        for col_lat in ["latitude", "decimalLatitude"]:
+        for col_lat in ["decimalLatitude"]:
             if col_lat in row and not pd.isna(row[col_lat]):
                 try:
                     lat_val = float(row[col_lat])
                     break
                 except (ValueError, TypeError):
                     pass
-        for col_lon in ["longitude", "decimalLongitude"]:
+        for col_lon in ["decimalLongitude"]:
             if col_lon in row and not pd.isna(row[col_lon]):
                 try:
                     lon_val = float(row[col_lon])
@@ -612,7 +609,7 @@ def stratify_duplicates(
         gold_det = str(
             gold_row.get("identifiedBy")
             if (not pd.isna(gold_row.get("identifiedBy", "")) and str(gold_row.get("identifiedBy", "")).strip())
-            else (gold_row.get("determiner_raw", "") if not pd.isna(gold_row.get("determiner_raw", "")) else "")
+            else ""
         ).strip() or "Tier_1_Gold specialist"
         if "scientificName" in df.columns:
             df.at[prim_idx, "scientificName"] = gold_tx
@@ -724,12 +721,8 @@ def spatially_balance_and_thin_vouchers(
         for cat_k, cnt in manifest_df["catalogNumber"].astype(str).value_counts().items():
             t1_leaf_counts[str(cat_k)] = int(cnt)
 
-    lat_col = "decimalLatitude" if "decimalLatitude" in out_df.columns else (
-        "latitude" if "latitude" in out_df.columns else None
-    )
-    lon_col = "decimalLongitude" if "decimalLongitude" in out_df.columns else (
-        "longitude" if "longitude" in out_df.columns else None
-    )
+    lat_col = "decimalLatitude" if "decimalLatitude" in out_df.columns else None
+    lon_col = "decimalLongitude" if "decimalLongitude" in out_df.columns else None
 
     n_rows = len(out_df)
     lats: List[Optional[float]] = [None] * n_rows
@@ -788,9 +781,9 @@ def spatially_balance_and_thin_vouchers(
                 if math.isfinite(unc_f) and unc_f >= 0.0:
                     coord_prec = 1.0 / (1.0 + unc_f)
                 else:
-                    coord_prec = 1.0 / (1.0 + 5000.0)
+                    coord_prec = 1.0 / (1.0 + 1000.0)
             except (ValueError, TypeError):
-                coord_prec = 1.0 / (1.0 + 5000.0)
+                coord_prec = 1.0 / (1.0 + 1000.0)
 
         # 5. image_resolution_score
         img_p = str(row.get("image_path", "") if not pd.isna(row.get("image_path", "")) else "")
@@ -1589,7 +1582,7 @@ def discover_corpus_authorities(
     id_col = (
         "_raw_identified_by"
         if "_raw_identified_by" in df.columns
-        else ("identifiedBy" if "identifiedBy" in df.columns else ("determiner_raw" if "determiner_raw" in df.columns else None))
+        else ("identifiedBy" if "identifiedBy" in df.columns else None)
     )
     sp_col = (
         "species_standardized"
@@ -1804,7 +1797,7 @@ def parse_determiner_tier(
       - Tier_3_Bronze: Unverified candidate collections, general collectors, or missing determiner.
 
     Returns:
-        Tuple[str, str, str]: (determiner_tier, type_status_clean, determiner_raw_combined)
+        Tuple[str, str, str]: (determiner_tier, type_status_clean, identified_by_combined)
     """
     type_status = "" if (type_status_raw is None or (isinstance(type_status_raw, float) and math.isnan(type_status_raw))) else str(type_status_raw).strip()
     identified_by = "" if (identified_by_raw is None or (isinstance(identified_by_raw, float) and math.isnan(identified_by_raw))) else str(identified_by_raw).strip()
@@ -1832,11 +1825,11 @@ def parse_determiner_tier(
     )
 
     if has_collector_ref and recorded_by:
-        determiner_raw = recorded_by
+        identified_by_combined = recorded_by
     elif has_explicit_det:
-        determiner_raw = identified_by
+        identified_by_combined = identified_by
     else:
-        determiner_raw = history if history else (recorded_by if recorded_by else identified_by)
+        identified_by_combined = history if history else (recorded_by if recorded_by else identified_by)
 
     # Match specialists strictly on current determination (`identifiedBy`), only consulting
     # `verbatimIdentificationHistory` when `identifiedBy` is absent/collector-ref (so an older
@@ -1889,13 +1882,13 @@ def parse_determiner_tier(
                         break
 
     if is_type or is_specialist:
-        return "Tier_1_Gold", type_status_clean, determiner_raw
+        return "Tier_1_Gold", type_status_clean, identified_by_combined
 
     if is_regional_collector_fallback_silver:
-        return "Tier_2_Silver", type_status_clean, determiner_raw
+        return "Tier_2_Silver", type_status_clean, identified_by_combined
 
     if "[exsiccatae " in identified_by.lower():
-        return "Tier_2_Silver", type_status_clean, determiner_raw
+        return "Tier_2_Silver", type_status_clean, identified_by_combined
 
     dyn_herb_set = {str(h).strip().upper() for h in dynamic_herbaria if h} if dynamic_herbaria else set()
     is_major_herbarium = (institution in MAJOR_HERBARIA_CODES) or (institution in dyn_herb_set)
@@ -1912,9 +1905,9 @@ def parse_determiner_tier(
     )
 
     if is_major_herbarium and has_rich_locality and has_determiner:
-        return "Tier_2_Silver", type_status_clean, determiner_raw
+        return "Tier_2_Silver", type_status_clean, identified_by_combined
 
-    return "Tier_3_Bronze", type_status_clean, determiner_raw
+    return "Tier_3_Bronze", type_status_clean, identified_by_combined
 
 
 def apply_corpus_authority_tiers(
@@ -2179,7 +2172,7 @@ def is_excluded_western_region(
 ) -> bool:
     """
     Determines whether a record originates from a western state/province (`EXCLUDED_WESTERN_STATES`)
-    or west of `western_longitude_threshold` (default `-98.0`), while exempting Eastern Canadian
+    or west of `western_longitude_threshold` (default `-104.05`), while exempting Eastern Canadian
     provinces, Washington D.C., and verified nomenclatural type specimens (`is_type_specimen=True`).
     """
     if not exclude_western:

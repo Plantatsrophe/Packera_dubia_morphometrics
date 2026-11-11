@@ -2129,7 +2129,6 @@ evaluate_multiclass_substrate_contingency <- function(
     dt_v <- as.character(d$determiner_tier); dt_v[is.na(dt_v)] <- "Tier_3_Bronze"
     pr_v <- rep(FALSE, nrow(d))
     if ("is_promoted_bronze" %in% names(d)) { p1 <- as.logical(d$is_promoted_bronze); p1[is.na(p1)] <- FALSE; pr_v <- pr_v | p1 }
-    if ("is_promoted_anchor" %in% names(d)) { p2 <- as.logical(d$is_promoted_anchor); p2[is.na(p2)] <- FALSE; pr_v <- pr_v | p2 }
     is_t2 <- if ("is_type_specimen" %in% names(d)) as.logical(d$is_type_specimen) else rep(FALSE, nrow(d))
     is_t2[is.na(is_t2)] <- FALSE
     act_mask <- in_grp_mask & (grepl("Tier_1|Gold|Tier_2|Silver", dt_v, ignore.case = TRUE) | pr_v | is_t2)

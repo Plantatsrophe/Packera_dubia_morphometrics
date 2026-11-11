@@ -396,10 +396,10 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
   df$anthesis_filter_status[is_verified_anthesis] <- "Verified_Anthesis"
 
   n_verified <- sum(is_verified_anthesis)
-  n_fruit <- sum(is_fruit_excluded)
+  n_fruit_excl <- sum(is_fruit_excluded)
   n_sterile <- sum(is_sterile_excluded)
   message(sprintf("[INFO] Filtered phenology vouchers: %d verified anthesis, %d fruiting-only (excluded), %d sterile (excluded).",
-                  n_verified, n_fruit, n_sterile))
+                  n_verified, n_fruit_excl, n_sterile))
 
   # Active reference filter for baseline & ANOVA (excludes unpromoted Tier_3_Bronze and Cleanlab label noise)
   is_active_ref <- rep(TRUE, nrow(df))
@@ -409,7 +409,6 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
     dt_ph <- as.character(df$determiner_tier); dt_ph[is.na(dt_ph)] <- "Tier_3_Bronze"
     pr_ph <- rep(FALSE, nrow(df))
     if ("is_promoted_bronze" %in% names(df)) { p1 <- as.logical(df$is_promoted_bronze); p1[is.na(p1)] <- FALSE; pr_ph <- pr_ph | p1 }
-    if ("is_promoted_anchor" %in% names(df)) { p2 <- as.logical(df$is_promoted_anchor); p2[is.na(p2)] <- FALSE; pr_ph <- pr_ph | p2 }
     cand_act <- grepl("Tier_1|Gold|Tier_2|Silver", dt_ph, ignore.case = TRUE) | pr_ph | is_t_ph
     if (sum(cand_act & df$is_verified_anthesis) >= 5L || any(cand_act)) {
       is_active_ref <- cand_act
@@ -506,7 +505,7 @@ compute_phenological_anomalies <- function(df, output_csv = NULL, summary_csv = 
 
   if (!is.null(output_csv)) {
     keep_cols <- c("catalogNumber", "plant_individual_id", "institutionCode", "scientificName", "species_raw",
-                   "species_standardized", "decimalLatitude", "decimalLongitude", "latitude", "longitude",
+                   "species_standardized", "decimalLatitude", "decimalLongitude",
                    "eventDate", "year", "month", "day", "doy", "expected_doy", "delta_doy",
                    "pheno_timing_category", "is_verified_anthesis", "anthesis_filter_status",
                    "voucher_phenological_state", "regional_group")
@@ -897,8 +896,8 @@ evaluate_phenotypic_ecotype_coupling <- function(df, cluster_vec) {
     return(list(has_independent_modality = FALSE, pass = FALSE, morph_p = NA_real_, morph_r2_adj = NA_real_, pheno_p = NA_real_, pheno_diff_days = 0.0))
   }
   morph_cands <- unique(c(
-    grep("^(Sym_PC|ECT_PC)[1-4]$", names(df), value = TRUE),
-    intersect(c("can1", "can2", "blade_length_to_width_ratio", "petiole_to_blade_ratio", "solidity", "dissection_index"), names(df))
+    grep("^(PC|ECT_PC)[1-4]$", names(df), value = TRUE),
+    intersect(c("can1", "can2", "aspect_ratio", "petiole_to_blade_ratio", "solidity", "dissection_index"), names(df))
   ))
   morph_cols <- morph_cands[vapply(morph_cands, function(cn) {
     v <- suppressWarnings(as.numeric(df[[cn]]))
@@ -1092,8 +1091,8 @@ compute_isolation_by_environment <- function(df, edaph_vars = character(0), clim
 
   rows_out <- list()
   morph_cols <- unique(c(
-    grep("^(Sym_PC|ECT_PC)[1-4]$", names(df), value = TRUE),
-    intersect(c("blade_length_to_width_ratio", "petiole_to_blade_ratio", "solidity", "dissection_index"), names(df))
+    grep("^(PC|ECT_PC)[1-4]$", names(df), value = TRUE),
+    intersect(c("aspect_ratio", "petiole_to_blade_ratio", "solidity", "dissection_index"), names(df))
   ))
   Y_morph <- clean_block(morph_cols)
   if (!is.null(Y_morph)) rows_out[[length(rows_out) + 1L]] <- eval_response_block(Y_morph, "Foliar_Morphology_IBE")
@@ -1399,9 +1398,7 @@ resolve_active_anchor_groups <- function(df, intraspecific_mode = FALSE) {
   is_t_anc <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, n_r)
   is_t_anc[is.na(is_t_anc)] <- FALSE
   is_prom <- rep(FALSE, n_r)
-  if ("is_promoted_anchor" %in% names(df)) {
-    pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_prom <- is_prom | pa
-  }
+
   if ("is_promoted_bronze" %in% names(df)) {
     pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_prom <- is_prom | pb
   }
@@ -1664,9 +1661,7 @@ compute_specimen_edaphic_z <- function(
   is_t_z <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, n)
   is_t_z[is.na(is_t_z)] <- FALSE
   is_prom <- rep(FALSE, n)
-  if ("is_promoted_anchor" %in% names(df)) {
-    pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_prom <- is_prom | pa
-  }
+
   if ("is_promoted_bronze" %in% names(df)) {
     pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_prom <- is_prom | pb
   }

@@ -282,15 +282,12 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                         "species_raw": taxon,
                         "species_standardized": taxon,
                         "identifiedBy": "T.M. Barkley",
-                        "determiner_raw": "T.M. Barkley",
                         "determiner_tier": "Tier_1_Gold",
                         "type_status": "",
                         "county": "Orange",
                         "stateProvince": "North Carolina",
                         "decimalLatitude": round(35.5 + 0.05 * v_idx, 5),
-                        "latitude": round(35.5 + 0.05 * v_idx, 5),
                         "decimalLongitude": round(-79.5 + 0.05 * v_idx, 5),
-                        "longitude": round(-79.5 + 0.05 * v_idx, 5),
                         "coordinateUncertainty": 250.0,
                         "year": 2019,
                         "month": 4,
@@ -401,7 +398,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             self.assertIn(("NCU-A1", 1), otu_keys)
             for r in otu_rows:
                 self.assertEqual(r["morph_tier_source"], "Basal_Rosette")
-                self.assertTrue(math.isfinite(float(r["Sym_PC1"])))
+                self.assertTrue(math.isfinite(float(r["PC1"])))
 
             # Verify SQLite persistence in leaf_efa_harmonics and otu_morphometrics
             conn = get_db_connection(db_path=db_path, read_only=True)
@@ -595,8 +592,6 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                             "PC1": (-1.6 + 0.05 * idx_o) if is_aur else (1.7 + 0.05 * idx_o),
                             "PC2": 0.12 * ((idx_o % 3) - 1),
                             "PC3": 0.05 * ((idx_o % 2) - 0.5),
-                            "Sym_PC1": (-1.6 + 0.05 * idx_o) if is_aur else (1.7 + 0.05 * idx_o),
-                            "Sym_PC2": 0.12 * ((idx_o % 3) - 1),
                             "can1": (-2.4 + 0.06 * idx_o) if is_aur else (2.5 + 0.06 * idx_o),
                             "can2": 0.15 * ((idx_o % 3) - 1),
                             "can3": 0.05,

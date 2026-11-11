@@ -166,9 +166,7 @@ export_step05d_geographic_and_hopkins <- function(
   atomic_save_dual_plot(function() {
     graphics::par(mfrow = c(1, 2), mar = c(4.6, 4.6, 3.2, 1.2))
     lat_v <- if ("decimalLatitude" %in% colnames(vouchers_df)) suppressWarnings(as.numeric(vouchers_df$decimalLatitude)) else rep(NA_real_, nrow(vouchers_df))
-    if ("latitude" %in% colnames(vouchers_df)) lat_v <- ifelse(is.finite(lat_v), lat_v, suppressWarnings(as.numeric(vouchers_df$latitude)))
     lon_v <- if ("decimalLongitude" %in% colnames(vouchers_df)) suppressWarnings(as.numeric(vouchers_df$decimalLongitude)) else rep(NA_real_, nrow(vouchers_df))
-    if ("longitude" %in% colnames(vouchers_df)) lon_v <- ifelse(is.finite(lon_v), lon_v, suppressWarnings(as.numeric(vouchers_df$longitude)))
     geo_b <- compute_dynamic_na_map_bounds(lon_v, lat_v)
     valid_geo <- geo_b$valid_geo
 
@@ -319,7 +317,6 @@ export_step05d_geographic_and_hopkins <- function(
         dt_6b[is.na(dt_6b)] <- "Tier_3_Bronze"
         pr_6b <- rep(FALSE, nrow(vouchers_df))
         if ("is_promoted_bronze" %in% colnames(vouchers_df)) { p1 <- as.logical(vouchers_df$is_promoted_bronze); p1[is.na(p1)] <- FALSE; pr_6b <- pr_6b | p1 }
-        if ("is_promoted_anchor" %in% colnames(vouchers_df)) { p2 <- as.logical(vouchers_df$is_promoted_anchor); p2[is.na(p2)] <- FALSE; pr_6b <- pr_6b | p2 }
         is_act_6b <- grepl("Tier_1|Gold|Tier_2|Silver", dt_6b, ignore.case = TRUE) | pr_6b | is_type_6b
       }
       if ("is_confident_label_noise" %in% colnames(vouchers_df)) {
@@ -952,10 +949,8 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   # ----------------------------------------------------------------------------
   # Panel E (p5): Geographic Contact Zones, Triage Flags & Type Localities
   # ----------------------------------------------------------------------------
-  lon_col_e <- if ("longitude" %in% names(df_comp)) suppressWarnings(as.numeric(df_comp$longitude)) else rep(NA_real_, nrow(df_comp))
-  if ("decimalLongitude" %in% names(df_comp)) lon_col_e <- ifelse(is.finite(lon_col_e), lon_col_e, suppressWarnings(as.numeric(df_comp$decimalLongitude)))
-  lat_col_e <- if ("latitude" %in% names(df_comp)) suppressWarnings(as.numeric(df_comp$latitude)) else rep(NA_real_, nrow(df_comp))
-  if ("decimalLatitude" %in% names(df_comp)) lat_col_e <- ifelse(is.finite(lat_col_e), lat_col_e, suppressWarnings(as.numeric(df_comp$decimalLatitude)))
+  lon_col_e <- if ("decimalLongitude" %in% names(df_comp)) suppressWarnings(as.numeric(df_comp$decimalLongitude)) else rep(NA_real_, nrow(df_comp))
+  lat_col_e <- if ("decimalLatitude" %in% names(df_comp)) suppressWarnings(as.numeric(df_comp$decimalLatitude)) else rep(NA_real_, nrow(df_comp))
   df_comp$lon_plot_e <- lon_col_e
   df_comp$lat_plot_e <- lat_col_e
   df_comp$is_type_flag_e <- if ("is_type_specimen" %in% names(df_comp)) as.logical(df_comp$is_type_specimen) else rep(FALSE, nrow(df_comp))
@@ -1518,9 +1513,6 @@ merge_reproductive_traits_by_individual <- function(agg_df, repro_path) {
   if (is.null(agg_df) || nrow(agg_df) == 0L || is.null(repro_path) || !nzchar(repro_path) || !file.exists(repro_path)) return(agg_df)
   repro_df <- tryCatch(utils::read.csv(repro_path, stringsAsFactors = FALSE), error = function(e) NULL)
   if (is.null(repro_df) || nrow(repro_df) == 0L || !("catalogNumber" %in% names(repro_df))) return(agg_df)
-  if ("capitulum_aspect_ratio" %in% names(repro_df) && !("AR_inv" %in% names(repro_df))) {
-    repro_df$AR_inv <- suppressWarnings(as.numeric(repro_df$capitulum_aspect_ratio))
-  }
   if ("plant_height_mm" %in% names(repro_df) && !("plant_height_cm" %in% names(repro_df))) {
     repro_df$plant_height_cm <- round(suppressWarnings(as.numeric(repro_df$plant_height_mm)) / 10.0, 2)
   }

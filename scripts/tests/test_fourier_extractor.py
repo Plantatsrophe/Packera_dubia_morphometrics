@@ -130,7 +130,7 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn("Momocs::coo_scale", r_content)
         self.assertIn("verify_harmonic_power_calibration", r_content)
         self.assertIn("calibrate_harmonicpower_efourier", r_content)
-        self.assertIn("heteroblasty_index", r_content)
+        self.assertIn("within_rosette_efa_dispersion", r_content)
         self.assertIn("otu_t1_idx", r_content)
         self.assertIn("symmetrize_efa_harmonics", r_content)
         self.assertIn("compute_authority_precision_weights", r_content)
@@ -254,7 +254,7 @@ class TestFourierExtractor(unittest.TestCase):
 
             ref1 = spec1[spec1["catalogNumber"] != "B1"].sort_values("catalogNumber")
             ref2 = spec2[spec2["catalogNumber"] != "B1"].sort_values("catalogNumber")
-            for pc_col in ["PC1", "PC2", "PC3", "Sym_PC1", "Sym_PC2"]:
+            for pc_col in ["PC1", "PC2", "PC3"]:
                 np.testing.assert_allclose(
                     ref1[pc_col].to_numpy(),
                     ref2[pc_col].to_numpy(),
@@ -263,7 +263,7 @@ class TestFourierExtractor(unittest.TestCase):
                 )
             ref_ind1 = ind1[ind1["catalogNumber"] != "B1"].sort_values(["catalogNumber", "leaf_id"])
             ref_ind2 = ind2[ind2["catalogNumber"] != "B1"].sort_values(["catalogNumber", "leaf_id"])
-            for pc_col in ["PC1", "PC2", "PC3", "Sym_PC1", "Sym_PC2"]:
+            for pc_col in ["PC1", "PC2", "PC3"]:
                 np.testing.assert_allclose(
                     ref_ind1[pc_col].to_numpy(),
                     ref_ind2[pc_col].to_numpy(),
@@ -418,7 +418,7 @@ class TestFourierExtractor(unittest.TestCase):
             self.assertTrue(bool(row_diss["is_dissected"]))
 
     def test_dynamic_harmonic_calibration_and_dynamic_pc_export(self):
-        """Verify Task 1B dynamic H_opt in [6, 24] harmonic calibration and dynamic PC1..PC{k_export} / Sym_PC1..Sym_PC{k_export} export (>5 PCs when k_95 > 5)."""
+        """Verify Task 1B dynamic H_opt in [6, 24] harmonic calibration and dynamic PC1..PC{k_export} export (>5 PCs when k_95 > 5)."""
         content = self.r_script_path.read_text(encoding="utf-8")
         self.assertIn("Momocs::efourier(out_obj, nb.h = h_opt, norm = FALSE, start = FALSE)", content)
         self.assertIn("efd_harmonic_opt", content)
@@ -506,7 +506,6 @@ class TestFourierExtractor(unittest.TestCase):
             self.assertLessEqual(h_opt_val, 24)
             self.assertGreaterEqual(k95_val, 6, f"Expected k_95 >= 6 on 8-mode outlines, got {k95_val}")
             self.assertIn("PC6", spec_df.columns)
-            self.assertIn("Sym_PC6", spec_df.columns)
 
     def test_basal_positional_gate_lowest_lamina_fallback_ribbon_filter_and_otu_medians(self):
         """Verify basal positional homology filter, lowest-lamina fallback, and OTU median/q25 dissection summaries."""
@@ -571,8 +570,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "is_dissected": is_diss,
                     "cy_rel_plant_bbox": cy_p,
                     "cy_rel_sheet": cy_p,
-                    "blade_area_cm2": 2.0,
-                    "effective_min_blade_area_cm2": 0.4,
+                    "area_mm2": 200.0,
                     "contour_path": str(cpath),
                 })
             pd.DataFrame(manifest_rows).to_csv(manifest_csv, index=False)
@@ -874,8 +872,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "petiole_to_blade_ratio": 0.67,
                     "cy_rel_plant_bbox": 0.86,
                     "cy_rel_sheet": 0.80,
-                    "blade_area_cm2": 4.2,
-                    "effective_min_blade_area_cm2": 0.50,
+                    "area_mm2": 420.0,
                     "archetype_score": 0.95,
                     "contour_path": str(p_h1_b1),
                 },
@@ -893,8 +890,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "petiole_to_blade_ratio": 0.625,
                     "cy_rel_plant_bbox": 0.84,
                     "cy_rel_sheet": 0.78,
-                    "blade_area_cm2": 4.0,
-                    "effective_min_blade_area_cm2": 0.50,
+                    "area_mm2": 400.0,
                     "archetype_score": 0.95,
                     "contour_path": str(p_h1_b2),
                 },
@@ -915,8 +911,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "petiole_to_blade_ratio": 0.53,
                     "cy_rel_plant_bbox": 0.82,
                     "cy_rel_sheet": 0.76,
-                    "blade_area_cm2": 3.6,
-                    "effective_min_blade_area_cm2": 0.50,
+                    "area_mm2": 360.0,
                     "archetype_score": 0.94,
                     "contour_path": str(p_ref),
                 })
@@ -935,8 +930,7 @@ class TestFourierExtractor(unittest.TestCase):
                 "petiole_to_blade_ratio": 0.039,
                 "cy_rel_plant_bbox": 0.20,
                 "cy_rel_sheet": 0.22,
-                "blade_area_cm2": 1.1,
-                "effective_min_blade_area_cm2": 0.50,
+                "area_mm2": 110.0,
                 "archetype_score": 0.90,
                 "contour_path": str(p_h1_c3),
             }
@@ -1161,7 +1155,6 @@ class TestFourierExtractor(unittest.TestCase):
                     "is_calibrated_mm": (not is_mp),
                     "scale_source": "mp_estimated" if is_mp else "ruler_calibrated",
                     "aspect_ratio": round(lw_true, 4),
-                    "blade_length_to_width_ratio": round(lw_true, 4),
                     "solidity": sol_v,
                     "archetype_score": 0.94,
                     "contour_path": str(cpath),
@@ -1231,7 +1224,7 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn("opts$contours_dir)", r03)
         self.assertIn("Momocs::slice(ef, which(valid_coe))", r03)
         self.assertIn("ifelse(otu_has_efa,", r03)
-        self.assertIn("is_promoted_anchor", r03)
+        self.assertIn("is_promoted_bronze", r03)
         self.assertIn("is_passive", r03)
         self.assertIn("align_contour_horizontal_xax <- function(coo, is_upright = NA)", fpu)
         self.assertIn("out_vec[type_vec] <- FALSE", fpu)
@@ -1283,9 +1276,9 @@ class TestFourierExtractor(unittest.TestCase):
                 init_db_schema(conn)
                 efa_cols = {r[1] for r in conn.execute("PRAGMA table_info(leaf_efa_harmonics)").fetchall()}
                 otu_cols = {r[1] for r in conn.execute("PRAGMA table_info(otu_morphometrics)").fetchall()}
-                for req in ("mask_is_upright", "area_mm2", "petiole_width_mm", "blade_width_mm", "is_promoted_bronze", "is_promoted_anchor", "is_passive"):
+                for req in ("mask_is_upright", "area_mm2", "petiole_width_mm", "blade_width_mm", "is_promoted_bronze", "is_passive"):
                     self.assertIn(req, efa_cols)
-                for req in ("area_mm2", "petiole_width_mm", "blade_width_mm", "is_promoted_bronze", "is_promoted_anchor", "is_passive"):
+                for req in ("area_mm2", "petiole_width_mm", "blade_width_mm", "is_promoted_bronze", "is_passive"):
                     self.assertIn(req, otu_cols)
             finally:
                 conn.close()
@@ -1425,8 +1418,8 @@ class TestFourierExtractor(unittest.TestCase):
                 res_s <- extract_symmetric_fourier_pcs(list(coe = coe_m, fac = fac_t), fac_df = fac_t, num_pcs = 3)
                 stopifnot(isFALSE(res_s$df$is_contour_outlier[1L]))
                 stopifnot(!("C1" %in% colnames(res_s$sym_mat)))
-                stopifnot(is.na(res_s$df$Sym_PC1[12L]))
-                cat("STEP03_ZERO_TRUST_OK\n")
+                stopifnot(is.na(res_s$df$PC1[12L]))
+                cat("STEP03_ZERO_TRUST_OK\\n")
                 """,
                 encoding="utf-8",
             )

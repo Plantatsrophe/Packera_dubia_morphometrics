@@ -325,7 +325,7 @@ def resample_normalized_contour(
     n_pts: Optional[int] = None,
     already_oriented: bool = False,
 ) -> Optional[np.ndarray]:
-    """Extracts resampled, tip-up normalized 2D coordinates `(x_norm, y_norm)` via LeafMachine3 helpers."""
+    """Extracts resampled, tip-up unit-scaled 2D coordinates via LeafMachine3 helpers."""
     _ = petiole_mask
     if n_pts is not None:
         num_points = int(n_pts)
@@ -388,12 +388,6 @@ def export_standardized_contour(
         return empty_ret
 
     x_resamp, y_resamp = resamp_pts[:, 0], resamp_pts[:, 1]
-    min_x, max_x = float(np.min(x_resamp)), float(np.max(x_resamp))
-    min_y, max_y = float(np.min(y_resamp)), float(np.max(y_resamp))
-    max_span = max(max_x - min_x, max_y - min_y, 1e-6)
-
-    x_norm = np.round((x_resamp - min_x) / max_span, 6).tolist()
-    y_norm = np.round((y_resamp - min_y) / max_span, 6).tolist()
     x_r = np.round(x_resamp, 2).tolist()
     y_r = np.round(y_resamp, 2).tolist()
 
@@ -402,10 +396,10 @@ def export_standardized_contour(
     contour_dir.mkdir(parents=True, exist_ok=True)
     out_csv = contour_dir / f"{catalog_number}_leaf{leaf_id}.csv"
     prefix = f"{catalog_number},{leaf_id},"
-    lines = ["catalogNumber,leaf_id,point_index,x,y,x_norm,y_norm\n"]
+    lines = ["catalogNumber,leaf_id,point_index,x,y\n"]
     lines.extend(
-        f"{prefix}{idx},{xv},{yv},{xnv},{ynv}\n"
-        for idx, (xv, yv, xnv, ynv) in enumerate(zip(x_r, y_r, x_norm, y_norm))
+        f"{prefix}{idx},{xv},{yv}\n"
+        for idx, (xv, yv) in enumerate(zip(x_r, y_r))
     )
     out_csv.write_text("".join(lines), encoding="utf-8")
     if return_coords:

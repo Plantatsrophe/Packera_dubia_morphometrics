@@ -179,7 +179,7 @@ if (!exists("packera_mclapply", mode = "function")) {
   }
 }
 
-.select_morphometric_subspace_core <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL, aux_df = NULL) {
+.select_morphometric_subspace_core <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL, aux_df = NULL, allow_supervised_f = FALSE) {
   X <- as.matrix(X)
   M <- ncol(X); N <- nrow(X)
   if (is.null(colnames(X))) colnames(X) <- paste0("V", seq_len(M))
@@ -194,14 +194,14 @@ if (!exists("packera_mclapply", mode = "function")) {
   }
 
   g_fac <- NULL
-  if (!is.null(group_vec) && length(group_vec) == N && length(g_tab_multi) >= 2L) {
+  if (isTRUE(allow_supervised_f) && !is.null(group_vec) && length(group_vec) == N && length(g_tab_multi) >= 2L) {
     g_chr <- as.character(group_vec)
     g_chr[!(g_chr %in% names(g_tab_multi))] <- NA_character_
     g_fac <- droplevels(factor(g_chr))
     if (nlevels(g_fac) < 2L) g_fac <- NULL
   }
 
-  pc_idx <- grep("^(Sym_)?PC[0-9]+$", colnames(X))
+  pc_idx <- grep("^PC[0-9]+$", colnames(X))
   non_pc_idx <- setdiff(seq_len(M), pc_idx)
   kept_pc_cols <- pc_idx
   if (length(pc_idx) >= 3L) {
@@ -259,7 +259,6 @@ if (!exists("packera_mclapply", mode = "function")) {
         if (is.finite(fv)) as.numeric(fv) else 0.0
       }, numeric(1))
       pick_pool <- pool_idx[order(f_pool, decreasing = TRUE)][seq_len(min(length(pool_idx), P_max - length(core_idx)))]
-      # Preserve original column order among selected features
       final_idx <- cand_idx[cand_idx %in% c(core_idx, pick_pool)]
       return(colnames(X)[final_idx])
     }
@@ -267,8 +266,8 @@ if (!exists("packera_mclapply", mode = "function")) {
   colnames(X)[cand_idx[seq_len(P_max)]]
 }
 
-select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL, aux_df = NULL) {
-  sel <- .select_morphometric_subspace_core(X, group_vec = group_vec, min_p = min_p, max_p = max_p, aux_df = aux_df)
+select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p = NULL, aux_df = NULL, allow_supervised_f = FALSE) {
+  sel <- .select_morphometric_subspace_core(X, group_vec = group_vec, min_p = min_p, max_p = max_p, aux_df = aux_df, allow_supervised_f = allow_supervised_f)
   message(sprintf("Subspace Selection (Horn Parallel Analysis / Broken-Stick & Williams & Titus 1988 P <= floor(N_min / 3)): retained P = %d / %d features.", length(sel), ncol(as.matrix(X))))
   sel
 }
@@ -277,7 +276,6 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
   n <- nrow(df)
   if (is.null(feature_matrix)) {
     auto_cols <- .discover_numeric_sorted_cols(names(df), "^PC[0-9]+$")
-    if (length(auto_cols) == 0L) auto_cols <- .discover_numeric_sorted_cols(names(df), "^Sym_PC[0-9]+$")
     if (length(auto_cols) == 0L) auto_cols <- .discover_numeric_sorted_cols(names(df), "^[AD][0-9]+$")
     if (length(auto_cols) == 0L) return(NULL)
     feature_matrix <- df[, auto_cols, drop = FALSE]
@@ -287,7 +285,7 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
   if (nrow(X) != n || ncol(X) == 0L) return(NULL)
   if (is.null(colnames(X))) colnames(X) <- paste0("V", seq_len(ncol(X)))
 
-  primary_cols <- grep("^(Sym_)?PC[0-9]+$|^[AD]_?[0-9]+$", colnames(X))
+  primary_cols <- grep("^PC[0-9]+$|^[AD]_?[0-9]+$", colnames(X))
   if (length(primary_cols) == 0L) primary_cols <- seq_len(ncol(X))
   has_feat <- apply(X[, primary_cols, drop = FALSE], 1, function(r) all(is.finite(r)))
   if (sum(has_feat) < 2L) {
@@ -309,7 +307,7 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
       X_use[bad_j, j] <- if (is.finite(med_j)) med_j else 0.0
     }
   }
-  if (!any(grepl("^(Sym_)?PC[0-9]+$", colnames(X_use))) && all(grepl("^[ABCD]_?[0-9]+$", colnames(X_use)))) {
+  if (!any(grepl("^PC[0-9]+$", colnames(X_use))) && all(grepl("^[ABCD]_?[0-9]+$", colnames(X_use)))) {
     h_nums <- suppressWarnings(as.integer(gsub("[^0-9]", "", colnames(X_use))))
     if (!any(is.na(h_nums))) X_use <- X_use[, order(h_nums, colnames(X_use)), drop = FALSE]
   }
@@ -518,7 +516,6 @@ select_adaptive_reference_anchors <- function(
       is_gold_anchor = logical(0),
       is_silver_anchor = logical(0),
       is_promoted_bronze = logical(0),
-      is_promoted_anchor = logical(0),
       is_confident_label_noise = logical(0),
       anchor_tier_source = character(0)
     ))
@@ -942,7 +939,6 @@ select_adaptive_reference_anchors <- function(
     is_gold_anchor = as.logical(is_gold),
     is_silver_anchor = as.logical(is_silver),
     is_promoted_bronze = as.logical(is_promoted_bronze),
-    is_promoted_anchor = as.logical(is_promoted_bronze),
     is_confident_label_noise = as.logical(is_confident_label_noise),
     anchor_tier_source = as.character(anchor_tier_source)
   )
@@ -1050,107 +1046,6 @@ compute_ledoit_wolf_cov <- function(
   S_reg
 }
 
-.compute_soft_geo_range_log_prior <- function(
-  coords_df,
-  grp_vec,
-  w_vec = NULL,
-  active_mask = NULL,
-  g_levels = NULL
-) {
-  n <- if (!is.null(coords_df) && is.data.frame(coords_df)) nrow(coords_df) else length(grp_vec)
-  if (is.null(g_levels)) {
-    g_levels <- sort(unique(stats::na.omit(as.character(grp_vec))))
-  }
-  K <- length(g_levels)
-  geo_ll <- matrix(0.0, nrow = n, ncol = K, dimnames = list(NULL, g_levels))
-  if (is.null(coords_df) || !is.data.frame(coords_df) || nrow(coords_df) != n || K < 2L) {
-    return(geo_ll)
-  }
-  if (any(grepl("^Morphotype_K", g_levels))) {
-    return(geo_ll)
-  }
-  lat <- if ("decimalLatitude" %in% names(coords_df)) {
-    suppressWarnings(as.numeric(coords_df$decimalLatitude))
-  } else if ("latitude" %in% names(coords_df)) {
-    suppressWarnings(as.numeric(coords_df$latitude))
-  } else {
-    NULL
-  }
-  if ("latitude" %in% names(coords_df) && !is.null(lat)) {
-    lat_alt <- suppressWarnings(as.numeric(coords_df$latitude))
-    lat[!is.finite(lat)] <- lat_alt[!is.finite(lat)]
-  }
-  lon <- if ("decimalLongitude" %in% names(coords_df)) {
-    suppressWarnings(as.numeric(coords_df$decimalLongitude))
-  } else if ("longitude" %in% names(coords_df)) {
-    suppressWarnings(as.numeric(coords_df$longitude))
-  } else {
-    NULL
-  }
-  if ("longitude" %in% names(coords_df) && !is.null(lon)) {
-    lon_alt <- suppressWarnings(as.numeric(coords_df$longitude))
-    lon[!is.finite(lon)] <- lon_alt[!is.finite(lon)]
-  }
-  if (is.null(lat) || is.null(lon)) return(geo_ll)
-  fin_geo <- is.finite(lat) & is.finite(lon)
-  if (sum(fin_geo) < 4L) return(geo_ll)
-
-  act <- if (!is.null(active_mask) && length(active_mask) == n) {
-    as.logical(active_mask) & !is.na(active_mask)
-  } else {
-    rep(TRUE, n)
-  }
-  wv <- if (!is.null(w_vec) && length(w_vec) == n) {
-    suppressWarnings(as.numeric(w_vec))
-  } else {
-    rep(1.0, n)
-  }
-  wv[!is.finite(wv) | wv <= 0.0] <- 1.0
-
-  w_median <- function(x, w) {
-    ok <- is.finite(x) & is.finite(w) & (w > 0.0)
-    if (!any(ok)) return(stats::median(x, na.rm = TRUE))
-    xo <- x[ok]; wo <- w[ok]
-    ord <- order(xo)
-    xo <- xo[ord]; wo <- wo[ord]
-    cw <- cumsum(wo) / sum(wo)
-    xo[which(cw >= 0.50)[1L]]
-  }
-
-  grp_chr <- as.character(grp_vec)
-  med_lat <- rep(NA_real_, K)
-  med_lon <- rep(NA_real_, K)
-  mad_lat <- rep(3.5, K)
-  mad_lon <- rep(3.5, K)
-
-  for (k in seq_len(K)) {
-    gk <- g_levels[k]
-    idx_k <- which(act & fin_geo & !is.na(grp_chr) & (grp_chr == gk))
-    if (length(idx_k) < 2L) {
-      idx_k <- which(fin_geo & !is.na(grp_chr) & (grp_chr == gk))
-    }
-    if (length(idx_k) >= 2L) {
-      med_lat[k] <- w_median(lat[idx_k], wv[idx_k])
-      med_lon[k] <- w_median(lon[idx_k], wv[idx_k])
-      mad_lat[k] <- max(3.5, stats::mad(lat[idx_k], center = med_lat[k], na.rm = TRUE))
-      mad_lon[k] <- max(3.5, stats::mad(lon[idx_k], center = med_lon[k], na.rm = TRUE))
-    }
-  }
-  if (any(!is.finite(med_lat)) || any(!is.finite(med_lon))) {
-    return(geo_ll)
-  }
-  dist_cent <- stats::dist(cbind(med_lat, med_lon))
-  if (length(dist_cent) == 0L || max(dist_cent, na.rm = TRUE) < 1.5) {
-    return(geo_ll)
-  }
-
-  obs_geo <- which(fin_geo)
-  for (k in seq_len(K)) {
-    d2_g <- ((lat[obs_geo] - med_lat[k]) / mad_lat[k])^2 + ((lon[obs_geo] - med_lon[k]) / mad_lon[k])^2
-    geo_ll[obs_geo, k] <- -0.5 * pmin(9.0, pmax(0.0, d2_g - 4.0))
-  }
-  geo_ll
-}
 
 build_taxon_blind_gathering_deme_folds <- function(coords_df, n_obs, deme_radius_km = 10.0) {
   if (is.null(coords_df) || !is.data.frame(coords_df) || nrow(coords_df) != n_obs || n_obs < 2L) {
@@ -1168,13 +1063,8 @@ build_taxon_blind_gathering_deme_folds <- function(coords_df, n_obs, deme_radius
   grp_key <- ifelse(nzchar(exs_v), paste0("EXS__", exs_v), paste0("CAT__", cat_v))
   fold_id <- match(grp_key, unique(grp_key))
 
-  lat_v <- rep(NA_real_, n_obs); lon_v <- rep(NA_real_, n_obs)
-  for (lc in c("decimalLatitude", "latitude")) if (lc %in% names(coords_df)) {
-    vv <- suppressWarnings(as.numeric(coords_df[[lc]])); m <- !is.finite(lat_v) & is.finite(vv); lat_v[m] <- vv[m]
-  }
-  for (lc in c("decimalLongitude", "longitude")) if (lc %in% names(coords_df)) {
-    vv <- suppressWarnings(as.numeric(coords_df[[lc]])); m <- !is.finite(lon_v) & is.finite(vv); lon_v[m] <- vv[m]
-  }
+  lat_v <- if ("decimalLatitude" %in% names(coords_df)) suppressWarnings(as.numeric(coords_df$decimalLatitude)) else rep(NA_real_, n_obs)
+  lon_v <- if ("decimalLongitude" %in% names(coords_df)) suppressWarnings(as.numeric(coords_df$decimalLongitude)) else rep(NA_real_, n_obs)
   ok_c <- which(is.finite(lat_v) & is.finite(lon_v) & abs(lat_v) <= 90.0 & abs(lon_v) <= 180.0)
   if (length(ok_c) >= 2L && is.finite(deme_radius_km) && deme_radius_km > 0.0) {
     # Complete-linkage (diameter-bounded) taxon-blind 10 km spatial locality grouping (prevents single-linkage chaining)
@@ -1289,7 +1179,7 @@ compute_weighted_shrinkage_cda_loocv <- function(
     if (!is.null(X_cand) && nrow(X_cand) == N_a && ncol(X_cand) >= 2L && exists("select_morphometric_subspace", mode = "function")) {
       aux_tr <- if (!is.null(coords_df) && is.data.frame(coords_df)) coords_df[train_idx, , drop = FALSE] else NULL
       sel_f <- tryCatch(
-        suppressMessages(select_morphometric_subspace(X_cand[train_idx, , drop = FALSE], group_vec = y_f[train_idx], aux_df = aux_tr)),
+        suppressMessages(select_morphometric_subspace(X_cand[train_idx, , drop = FALSE], group_vec = y_f[train_idx], aux_df = aux_tr, allow_supervised_f = TRUE)),
         error = function(e) colnames(X_a)
       )
       sel_f <- intersect(sel_f, colnames(X_cand))
@@ -1397,7 +1287,7 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
   n <- nrow(df)
   raw_det <- rep("", n)
   invalid_raw <- c("na", "n/a", "none", "unknown", "null", "anonymous", "anon", "unspecified", "not recorded", "s.n.", "sn", "indet", "indet.")
-  for (col in intersect(c("identifiedBy", "determiner_raw"), names(df))) {
+  for (col in intersect(c("identifiedBy"), names(df))) {
     v <- as.character(df[[col]])
     v[is.na(v)] <- ""
     v <- trimws(v)
@@ -1436,17 +1326,7 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
   G <- length(valid_taxa)
   if (G < 2L) return(NULL)
 
-  pc_cols <- .discover_numeric_sorted_cols(names(df), "^PC[0-9]+$")
-  sym_cols <- .discover_numeric_sorted_cols(names(df), "^Sym_PC[0-9]+$")
-  use_cols <- if (length(pc_cols) >= 2L) {
-    pc_cols
-  } else if (length(sym_cols) >= 2L) {
-    sym_cols
-  } else if (length(pc_cols) == 1L) {
-    pc_cols
-  } else {
-    sym_cols
-  }
+  use_cols <- .discover_numeric_sorted_cols(names(df), "^PC[0-9]+$")
   if (length(use_cols) > 0L) {
     use_cols <- use_cols[vapply(use_cols, function(col) sum(is.finite(suppressWarnings(as.numeric(df[[col]])))) >= 3L, logical(1))]
   }
@@ -1668,9 +1548,6 @@ compute_empirical_bayes_authority_weights <- function(
   } else if ("is_promoted_bronze" %in% names(df)) {
     is_promoted <- as.logical(df$is_promoted_bronze)
     is_promoted[is.na(is_promoted)] <- FALSE
-  } else if ("is_promoted_anchor" %in% names(df)) {
-    is_promoted <- (det_tier == "Tier_3_Bronze") & as.logical(df$is_promoted_anchor)
-    is_promoted[is.na(is_promoted)] <- FALSE
   } else if ("anchor_tier_source" %in% names(df)) {
     is_promoted <- as.character(df$anchor_tier_source) == "Tier_3_Bronze_Promoted"
     is_promoted[is.na(is_promoted)] <- FALSE
@@ -1824,7 +1701,7 @@ compute_empirical_bayes_authority_weights <- function(
     names(df)
   )
   has_exog_signals <- length(exog_cols) > 0L && any(vapply(exog_cols, function(cl) any(!is.na(df[[cl]]) & nzchar(trimws(as.character(df[[cl]])))), logical(1)))
-  use_loo_pc <- (G >= 2L)
+  use_loo_pc <- (G >= 2L) && (target_modality != "morph")
   L_pc <- if (use_loo_pc) .compute_loo_pc_likelihoods(df, taxa_vec, det_tier, is_promoted, eval_mask, valid_taxa, pi_vec) else NULL
 
   y_idx <- match(taxa_vec, valid_taxa)
@@ -2251,7 +2128,7 @@ screen_gmm_point_mass_columns <- function(X_mat, ref_mask = NULL, max_tie_frac =
   }
   if (length(ref_idx) < 30L) return(cn)
   keep <- vapply(seq_len(ncol(X_mat)), function(j) {
-    if (grepl("^(Sym_)?PC[0-9]+$", cn[j])) return(TRUE)
+    if (grepl("^PC[0-9]+$", cn[j])) return(TRUE)
     v <- X_mat[ref_idx, j]
     v <- round(v[is.finite(v)], 5)
     if (length(v) < 10L) return(FALSE)
@@ -2315,7 +2192,7 @@ run_bounded_clustvarsel <- function(X_mat, core_idx, max_k = 8L, timeout_sec = 2
   if (is.null(cvs_res) || length(cvs_res$subset) < 2L) return(NULL)
   sub_pos <- as.integer(cvs_res$subset)
   if (has_ties && !is.null(colnames(X_mat))) {
-    lead_pc <- which(colnames(X_mat) %in% c("PC1", "Sym_PC1"))
+    lead_pc <- which(colnames(X_mat) == "PC1")
     if (length(lead_pc) > 0L && !(lead_pc[1L] %in% sub_pos)) {
       sub_pos <- c(lead_pc[1L], sub_pos)
     }
@@ -2466,7 +2343,7 @@ compute_type_specimen_morph_control <- function(
       character(0)
     }
     if (length(cand_cols) == 0L) {
-      cand_cols <- .discover_numeric_sorted_cols(names(df), "^(Sym_)?PC[0-9]+$")
+      cand_cols <- .discover_numeric_sorted_cols(names(df), "^PC[0-9]+$")
     }
     if (length(cand_cols) > 0L) {
       X_mat <- as.matrix(df[, cand_cols, drop = FALSE])
@@ -2779,7 +2656,7 @@ compute_type_specimen_morph_control <- function(
 
   # Single-taxon intraspecific mode: query canonical SQLite for congeneric Packera centroids
   # in run-invariant standardized harmonic + topology space (A1..A6, D1..D6, solidity, dissection_index),
-  # falling back strictly to same-run_id Sym_PC1..3 or PC1..3 when harmonics are absent.
+  # falling back strictly to same-run_id PC1..3 when harmonics are absent.
   db_osr <- tryCatch({
     if (!is.null(df) && exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE)) {
       con <- connect_packera_db(read_only = TRUE)
@@ -2787,8 +2664,6 @@ compute_type_specimen_morph_control <- function(
       if (is.null(con)) return(NULL)
       inv_cands <- intersect(c(paste0("A", 1:6), paste0("D", 1:6), "solidity", "dissection_index"), names(df))
       inv_cands <- inv_cands[vapply(inv_cands, function(cl) is.numeric(df[[cl]]) && mean(is.finite(df[[cl]])) >= 0.50, logical(1))]
-      sym_cands <- intersect(c("Sym_PC1", "Sym_PC2", "Sym_PC3"), names(df))
-      sym_cands <- sym_cands[vapply(sym_cands, function(cl) is.numeric(df[[cl]]) && mean(is.finite(df[[cl]])) >= 0.80, logical(1))]
       raw_pc_cands <- intersect(c("PC1", "PC2", "PC3"), names(df))
       raw_pc_cands <- raw_pc_cands[vapply(raw_pc_cands, function(cl) is.numeric(df[[cl]]) && mean(is.finite(df[[cl]])) >= 0.80, logical(1))]
       active_rid <- if (exists("resolve_packera_run_id", mode = "function")) tryCatch(as.character(resolve_packera_run_id(NULL)), error = function(e) "") else ""
@@ -2908,8 +2783,6 @@ compute_type_specimen_morph_control <- function(
       res_inv <- if (length(inv_cands) >= 3L) eval_db_space(inv_cands, require_same_run = FALSE) else NULL
       if (!is.null(res_inv)) {
         res_inv
-      } else if (length(sym_cands) >= 2L) {
-        eval_db_space(sym_cands, require_same_run = TRUE)
       } else if (length(raw_pc_cands) >= 2L) {
         eval_db_space(raw_pc_cands, require_same_run = TRUE)
       } else {
@@ -2929,51 +2802,6 @@ compute_type_specimen_morph_control <- function(
   list(min_congener_mahal_d2 = min_congener_mahal_d2, min_congener_taxon = min_congener_taxon, open_set_novelty_p = open_set_novelty_p)
 }
 
-.augment_foliar_architecture_features <- function(df, feature_cols, ref_mask = NULL) {
-  if (is.null(df) || nrow(df) < 5L) return(list(df = df, feature_cols = feature_cols))
-  n <- nrow(df)
-  ref_idx <- if (!is.null(ref_mask) && length(ref_mask) == n && sum(ref_mask, na.rm = TRUE) >= 3L) {
-    which(as.logical(ref_mask))
-  } else if ("authority_weight" %in% names(df) && sum(suppressWarnings(as.numeric(df$authority_weight)) > 0, na.rm = TRUE) >= 3L) {
-    which(suppressWarnings(as.numeric(df$authority_weight)) > 0)
-  } else {
-    seq_len(n)
-  }
-  for (tr_nm in c("petiole_to_blade_ratio", "petiole_length_mm", "solidity")) {
-    std_nm <- paste0(tr_nm, "_std")
-    if ((tr_nm %in% feature_cols) || (std_nm %in% feature_cols)) next
-    if (!(tr_nm %in% names(df))) next
-    v <- suppressWarnings(as.numeric(df[[tr_nm]]))
-    fin_idx <- which(is.finite(v))
-    if ((length(fin_idx) / n) < 0.70) next
-    r_fin <- intersect(fin_idx, ref_idx)
-    if (length(r_fin) < 3L) r_fin <- fin_idx
-    v_ref_r <- round(v[r_fin], 5)
-    tie_frac <- max(tabulate(match(v_ref_r, unique(v_ref_r)))) / length(v_ref_r)
-    sd_ref <- stats::sd(v[r_fin], na.rm = TRUE)
-    if (!is.finite(sd_ref) || sd_ref <= 1e-6 || tie_frac > 0.25) next
-    med_ref <- stats::median(v[r_fin], na.rm = TRUE)
-    v_imp <- v
-    v_imp[!is.finite(v_imp)] <- if (is.finite(med_ref)) med_ref else 0.0
-    m_ref <- mean(v_imp[r_fin], na.rm = TRUE)
-    cand_std <- round((v_imp - m_ref) / sd_ref, 5)
-    df[[std_nm]] <- cand_std
-    if (tr_nm == "petiole_length_mm" && length(feature_cols) > 0L) {
-      ex_cols <- intersect(feature_cols, names(df))
-      max_abs_r <- 0.0
-      for (ec in ex_cols) {
-        ev <- suppressWarnings(as.numeric(df[[ec]][r_fin]))
-        if (sum(is.finite(ev)) >= 3L && is.finite(stats::sd(ev, na.rm = TRUE)) && stats::sd(ev, na.rm = TRUE) > 1e-6) {
-          r_val <- suppressWarnings(abs(stats::cor(cand_std[r_fin], ev, use = "complete.obs")))
-          if (is.finite(r_val) && r_val > max_abs_r) max_abs_r <- r_val
-        }
-      }
-      if (max_abs_r >= 0.85) next
-    }
-    feature_cols <- unique(c(feature_cols, std_nm))
-  }
-  list(df = df, feature_cols = feature_cols)
-}
 
 .canonical_relabel_gmm_clusters <- function(sub_v, cls_sub, best_k, ref_cand, core_idx = NULL) {
   n_eff_ratio <- 1.0
@@ -3188,7 +3016,7 @@ reconcile_step03_basal_otu_medians <- function(specimen_df, closed_leaf_df, all_
     c("aspect_ratio_std", "aspect_ratio"),
     c("AR_inv_std", "AR_inv"),
     c("petiole_to_blade_ratio_std", "petiole_to_blade_ratio"),
-    c("plant_height_cm_std", "plant_height_cm")
+    c("scape_to_basal_leaf_ratio_std", "scape_to_basal_leaf_ratio")
   )
   act_idx <- which(as.logical(cda_res$is_active))
   shared_cols <- character(0)
@@ -3217,7 +3045,8 @@ reconcile_step03_basal_otu_medians <- function(specimen_df, closed_leaf_df, all_
     obs_counts <- rowSums(is.finite(X_sh_raw[no_efa_idx, , drop = FALSE]))
     y_act <- as.character(cda_res$grouping_col[act_idx])
     g_lvls <- if (!is.null(cda_res$post_probs) && !is.null(colnames(cda_res$post_probs))) colnames(cda_res$post_probs) else sort(unique(stats::na.omit(y_act)))
-    w_act <- if (!is.null(cda_res$authority_weight)) as.numeric(cda_res$authority_weight[act_idx]) else rep(1.0, length(act_idx))
+    w_sb_sh <- if ("spatial_balance_weight" %in% names(df)) suppressWarnings(as.numeric(df$spatial_balance_weight[act_idx])) else rep(1.0, length(act_idx)); w_sb_sh[!is.finite(w_sb_sh) | w_sb_sh <= 0] <- 1.0
+    w_act <- (if (!is.null(cda_res$authority_weight)) as.numeric(cda_res$authority_weight[act_idx]) else rep(1.0, length(act_idx))) * w_sb_sh
     w_act[!is.finite(w_act) | w_act <= 0.0] <- 1.0
     G_sh <- length(g_lvls)
     if (G_sh >= 2L) {
@@ -3342,11 +3171,8 @@ reconcile_step03_basal_otu_medians <- function(specimen_df, closed_leaf_df, all_
   proj_pcs <- scale(as.matrix(morpho_df[all_sym_idx, sym_names[active_cols], drop = FALSE]), center = pca_resids$center, scale = FALSE) %*% pca_resids$rotation
   pc_allom_cols <- grep("^PC[0-9]+$", names(morpho_df), value = TRUE)
   if (length(pc_allom_cols) > 1L) pc_allom_cols <- pc_allom_cols[order(as.integer(gsub("[^0-9]", "", pc_allom_cols)))]
-  sym_allom_cols <- grep("^Sym_PC[0-9]+$", names(morpho_df), value = TRUE)
-  if (length(sym_allom_cols) > 1L) sym_allom_cols <- sym_allom_cols[order(as.integer(gsub("[^0-9]", "", sym_allom_cols)))]
   asym_names <- c(grep("^B[0-9]+$", names(morpho_df), value = TRUE), grep("^C[0-9]+$", names(morpho_df), value = TRUE))
   has_asym <- length(asym_names) > 0L && any(vapply(asym_names, function(ac) isTRUE(stats::sd(morpho_df[[ac]][all_sym_idx], na.rm = TRUE) > 1e-6), logical(1)))
-  for (p in seq_along(sym_allom_cols)) morpho_df[all_sym_idx, sym_allom_cols[p]] <- if (p <= ncol(proj_pcs)) round(proj_pcs[, p], 6) else 0.0
   if (!has_asym) {
     for (p in seq_along(pc_allom_cols)) morpho_df[all_sym_idx, pc_allom_cols[p]] <- if (p <= ncol(proj_pcs)) round(proj_pcs[, p], 6) else 0.0
   } else {
@@ -3365,5 +3191,30 @@ reconcile_step03_basal_otu_medians <- function(specimen_df, closed_leaf_df, all_
       for (p in seq_along(pc_allom_cols)) morpho_df[all_fh_idx, pc_allom_cols[p]] <- if (p <= ncol(proj_fh)) round(proj_fh[, p], 6) else 0.0
     }
   }
+  morpho_df
+}
+
+.update_step04_allometry_scalars <- function(morpho_df, sub_df, gold_df, valid_idx, ref_mean_cs) {
+  sc_allom_cands <- intersect(c("ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", "solidity", "q25_solidity", "dissection_index", "aspect_ratio", "petiole_to_blade_ratio", "scape_to_basal_leaf_ratio"), names(morpho_df))
+  for (sc_nm in sc_allom_cands) {
+    yv_g <- suppressWarnings(as.numeric(gold_df[[sc_nm]])); ok_g <- is.finite(yv_g) & is.finite(gold_df$log_centsize)
+    if (sum(ok_g) >= 10L && stats::sd(yv_g[ok_g]) > 1e-6) {
+      g_sub <- gold_df[ok_g, , drop = FALSE]; g_sub$.y_sc <- yv_g[ok_g]; g_sub$scientificName <- droplevels(factor(g_sub$scientificName))
+      p_int_sc <- 1.0
+      if (nlevels(g_sub$scientificName) >= 2L) {
+        fit_i_sc <- tryCatch(stats::lm(.y_sc ~ log_centsize * scientificName, data = g_sub, weights = eff_weight), error = function(e) NULL)
+        if (!is.null(fit_i_sc)) { aov_i <- stats::anova(fit_i_sc); idx_i <- grep(":", rownames(aov_i))[1L]; if (!is.na(idx_i) && is.finite(aov_i[["Pr(>F)"]][idx_i])) p_int_sc <- aov_i[["Pr(>F)"]][idx_i] }
+      }
+      if (p_int_sc > 0.05) {
+        fit_s_sc <- if (nlevels(g_sub$scientificName) >= 2L) stats::lm(.y_sc ~ log_centsize + scientificName, data = g_sub, weights = eff_weight) else stats::lm(.y_sc ~ log_centsize, data = g_sub, weights = eff_weight)
+        b_sc <- unname(stats::coef(fit_s_sc)["log_centsize"]); p_s_sc <- tryCatch(summary(fit_s_sc)$coefficients["log_centsize", "Pr(>|t|)"], error = function(e) 1.0)
+        if (is.finite(b_sc) && is.finite(p_s_sc) && p_s_sc < 0.05) {
+          yv_all <- suppressWarnings(as.numeric(morpho_df[[sc_nm]][valid_idx])); fin_v <- is.finite(yv_all)
+          if (any(fin_v)) morpho_df[[sc_nm]][valid_idx[fin_v]] <- round(yv_all[fin_v] - b_sc * (sub_df$log_centsize[fin_v] - ref_mean_cs), 6)
+        }
+      }
+    }
+  }
+  attr(morpho_df, "allometry_corrected_scalars") <- TRUE
   morpho_df
 }

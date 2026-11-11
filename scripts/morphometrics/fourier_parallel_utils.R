@@ -226,12 +226,17 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   has_petw <- "petiole_width_mm" %in% names(closed_leaf_df)
   has_bld <- "blade_length_mm" %in% names(closed_leaf_df)
   has_bldw <- "blade_width_mm" %in% names(closed_leaf_df)
-  has_pbr <- "petiole_to_blade_ratio" %in% names(closed_leaf_df)
   pet_v <- if (has_pet) pull_num("petiole_length_mm") else NULL
   petw_v <- if (has_petw) pull_num("petiole_width_mm") else NULL
   bld_v <- if (has_bld) pull_num("blade_length_mm") else NULL
   bldw_v <- if (has_bldw) pull_num("blade_width_mm") else NULL
-  pbr_v <- if (has_pbr) pull_num("petiole_to_blade_ratio") else NULL
+  pbr_raw <- if ("petiole_to_blade_ratio" %in% names(closed_leaf_df)) pull_num("petiole_to_blade_ratio") else rep(NA_real_, n_rows)
+  if (has_pet && has_bld) {
+    miss_pbr <- !is.finite(pbr_raw) & is.finite(pet_v) & is.finite(bld_v) & (bld_v > 1e-6)
+    if (any(miss_pbr)) pbr_raw[miss_pbr] <- round(pet_v[miss_pbr] / bld_v[miss_pbr], 4)
+  }
+  has_pbr <- ("petiole_to_blade_ratio" %in% names(closed_leaf_df)) || any(is.finite(pbr_raw))
+  pbr_v <- if (has_pbr) pbr_raw else NULL
   has_ect1 <- "ECT_PC1" %in% names(closed_leaf_df)
   has_ect2 <- "ECT_PC2" %in% names(closed_leaf_df)
   has_ect3 <- "ECT_PC3" %in% names(closed_leaf_df)
@@ -385,7 +390,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     leaf_count = res$nl,
     morph_tier_source = ifelse(is_caul_fb_vec, "Cauline_Only_Fallback", "Basal_Rosette"),
     foliar_variance = res$fv,
-    heteroblasty_index = res$hi,
+    within_rosette_efa_dispersion = res$hi,
     scientificName = closed_leaf_df$scientificName[first_idx],
     species_raw = closed_leaf_df$species_raw[first_idx],
     determiner_tier = det_vec,
@@ -396,9 +401,9 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   )
 
   other_meta <- intersect(
-    c("pixels_per_mm", "is_calibrated_mm", "scale_source", "mask_is_upright", "species_standardized", "taxon", "institutionCode", "determiner_raw", "authority_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "is_promoted_anchor", "anchor_tier_source",
-      "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude", "latitude", "longitude", "coordinateUncertainty",
-      "year", "month", "day", "eventDate", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"),
+    c("pixels_per_mm", "is_calibrated_mm", "scale_source", "mask_is_upright", "species_standardized", "taxon", "institutionCode", "identifiedBy", "authority_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "anchor_tier_source",
+      "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude", "coordinateUncertainty",
+      "year", "month", "day", "eventDate", "regional_group", "spatial_balance_weight"),
     names(closed_leaf_df)
   )
   for (m_col in other_meta) {

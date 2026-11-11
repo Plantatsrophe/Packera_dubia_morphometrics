@@ -384,8 +384,8 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 cda_second_taxon = c("Packera obovata", "Packera aurea", "Packera aurea"),
                 cda_second_posterior_prob = c(0.06, 0.12, 0.04),
                 cda_posterior_margin = c(0.88, 0.76, 0.92),
-                Sym_PC1 = c(-1.4, 1.3, 1.5),
-                Sym_PC2 = c(0.2, -0.3, -0.1),
+                PC1 = c(-1.4, 1.3, 1.5),
+                PC2 = c(0.2, -0.3, -0.1),
                 petiole_length_mm = c(28.0, 11.5, 10.0),
                 blade_length_mm = c(25.0, 29.0, 30.0),
                 petiole_to_blade_ratio = c(1.12, 0.3966, 0.3333),
@@ -425,7 +425,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
               stopifnot(nrow(mv_joined) == 3L)
               multi_sub <- mv_joined[mv_joined$catalogNumber == "NCU_MULTI", ]
               stopifnot(identical(sort(as.integer(multi_sub$plant_individual_id)), c(1L, 2L)))
-              stopifnot(all(c("cda_second_taxon", "Sym_PC1", "petiole_to_blade_ratio", "plant_height_cm",
+              stopifnot(all(c("cda_second_taxon", "PC1", "petiole_to_blade_ratio", "plant_height_cm",
                               "AR_inv", "ecoregion_cda_predicted", "vision_ood_score", "vision_is_ood",
                               "foreground_attention_ratio", "is_artifact_driven", "surface_orientation",
                               "tomentum_taxon_discordance") %in% names(mv_joined)))
@@ -717,7 +717,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                     "catalogNumber": r["catalogNumber"],
                     "total_capitula": 4,
                     "n_anthesis": 3,
-                    "n_fruit": 1,
+                    "n_fruiting": 1,
                     "n_bud": 0,
                     "voucher_phenological_state": "anthesis",
                     "dominant_pappus_ratio": 0.10,
@@ -1107,9 +1107,9 @@ class TestMultimodalSpatialRF(unittest.TestCase):
               latitude = base_lat,
               longitude = base_lon,
               gmm_cluster = rep(1L, n_dub),
-              Sym_PC1 = rnorm(n_dub, 0, 1.0),
-              Sym_PC2 = rnorm(n_dub, 0, 0.8),
-              blade_length_to_width_ratio = rnorm(n_dub, 2.2, 0.25),
+              PC1 = rnorm(n_dub, 0, 1.0),
+              PC2 = rnorm(n_dub, 0, 0.8),
+              aspect_ratio = rnorm(n_dub, 2.2, 0.25),
               doy = round(95 + 4.0 * (base_lat - 32.0) + rnorm(n_dub, 0, 6)),
               delta_doy = rnorm(n_dub, 0, 5.5),
               fine_soil_ph = rnorm(n_dub, 5.3, 0.35),

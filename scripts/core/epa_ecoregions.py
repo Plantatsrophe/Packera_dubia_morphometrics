@@ -111,13 +111,37 @@ def standardize_epa_l3_label(raw_name: Optional[str]) -> Optional[str]:
     return cleaned or None
 
 
+_CANADIAN_PROV_ABBR_TO_FULL: Dict[str, str] = {
+    "on": "ontario", "ont": "ontario", "ontario": "ontario",
+    "qc": "quebec", "pq": "quebec", "que": "quebec", "quebec": "quebec", "québec": "quebec",
+    "nb": "new brunswick", "nouveau-brunswick": "new brunswick", "new brunswick": "new brunswick",
+    "ns": "nova scotia", "nouvelle-écosse": "nova scotia", "nouvelle-ecosse": "nova scotia", "nova scotia": "nova scotia",
+    "pe": "prince edward island", "pei": "prince edward island", "prince edward island": "prince edward island",
+    "nl": "newfoundland and labrador", "nf": "newfoundland and labrador", "newfoundland": "newfoundland and labrador",
+    "labrador": "newfoundland and labrador", "newfoundland and labrador": "newfoundland and labrador",
+    "mb": "manitoba", "man": "manitoba", "manitoba": "manitoba",
+    "sk": "saskatchewan", "sask": "saskatchewan", "saskatchewan": "saskatchewan",
+    "ab": "alberta", "alta": "alberta", "alberta": "alberta",
+    "bc": "british columbia", "colombie-britannique": "british columbia", "british columbia": "british columbia",
+    "yt": "yukon", "yukon": "yukon", "yukon territory": "yukon",
+    "nt": "northwest territories", "nwt": "northwest territories", "northwest territories": "northwest territories",
+    "nu": "nunavut", "nunavut": "nunavut",
+}
+
+_VA_DISTINCT_INDEPENDENT_CITIES = {"baltimore", "bedford", "carson", "fairfax", "franklin", "richmond", "roanoke", "st louis"}
+
+
 def _normalize_us_state_name(state_province: Optional[str]) -> Optional[str]:
     if state_province is None or (isinstance(state_province, float) and math.isnan(state_province)):
         return None
     s = re.sub(r"\s+", " ", str(state_province).strip().lower().rstrip("."))
     if not s or s in {"na", "nan", "none", "unknown"}:
         return None
-    return _US_STATE_ABBR_TO_FULL.get(s, s)
+    if s in _US_STATE_ABBR_TO_FULL:
+        return _US_STATE_ABBR_TO_FULL[s]
+    if s in _CANADIAN_PROV_ABBR_TO_FULL:
+        return _CANADIAN_PROV_ABBR_TO_FULL[s]
+    return s
 
 
 def _normalize_us_county_name(county: Optional[str], state_norm: Optional[str] = None) -> Optional[str]:
@@ -129,9 +153,10 @@ def _normalize_us_county_name(county: Optional[str], state_norm: Optional[str] =
     if " or " in raw or "/" in raw or "?" in raw:
         return None
     c_str = re.sub(r"[\[\]\(\)]", "", raw)
-    c_str = re.sub(r"^city\s+of\s+", "", c_str)
+    explicit_city = bool(re.search(r"(?:^city\s+of\s+|\s+city$|\s+independent\s+city$)", c_str))
+    c_str = re.sub(r"^(?:city\s+of|regional\s+municipality\s+of|united\s+counties\s+of|county\s+of|mrc\s+de|mrc\s+d['’])\s+", "", c_str)
     c_str = re.sub(
-        r"\s+(?:county|parish|par\.?|borough|census\s+area|municipality|co\.?|city\s+and\s+borough|independent\s+city|independent)$",
+        r"\s+(?:county|parish|par\.?|borough|census\s+area|census\s+division|regional\s+municipality|united\s+counties|district|mrc|municipality|co\.?|city\s+and\s+borough|independent\s+city|independent)$",
         "",
         c_str,
     )
@@ -143,6 +168,8 @@ def _normalize_us_county_name(county: Optional[str], state_norm: Optional[str] =
         return None
     if state_norm is not None and (state_norm, c_str) in _HISTORIC_COUNTY_CONSOLIDATIONS:
         c_str = _HISTORIC_COUNTY_CONSOLIDATIONS[(state_norm, c_str)]
+    if explicit_city and state_norm in {"virginia", "maryland", "missouri"} and c_str in _VA_DISTINCT_INDEPENDENT_CITIES:
+        return f"{c_str} city"
     return c_str
 
 
@@ -235,6 +262,12 @@ def _build_offline_epa_l3_fallback_index() -> Dict[str, Any]:
         "texas|nacogdoches": {"geom": Polygon([(-94.90, 31.40), (-94.40, 31.40), (-94.40, 31.85), (-94.90, 31.85)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -94.65, "centroid_lat": 31.62},
         "arkansas|baxter": {"geom": Polygon([(-92.65, 36.05), (-92.10, 36.05), (-92.10, 36.50), (-92.65, 36.50)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -92.38, "centroid_lat": 36.28},
         "arkansas|garland": {"geom": Polygon([(-93.40, 34.42), (-92.90, 34.42), (-92.90, 34.78), (-93.40, 34.78)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -93.15, "centroid_lat": 34.60},
+        "ontario|essex": {"geom": Polygon([(-83.12, 41.95), (-82.45, 41.95), (-82.45, 42.32), (-83.12, 42.32)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -82.78, "centroid_lat": 42.14},
+        "ontario|ottawa": {"geom": Polygon([(-76.35, 45.10), (-75.35, 45.10), (-75.35, 45.52), (-76.35, 45.52)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -75.70, "centroid_lat": 45.32},
+        "quebec|gatineau": {"geom": Polygon([(-76.10, 45.45), (-75.40, 45.45), (-75.40, 45.85), (-76.10, 45.85)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -75.72, "centroid_lat": 45.62},
+        "new brunswick|york": {"geom": Polygon([(-67.40, 45.65), (-66.45, 45.65), (-66.45, 46.35), (-67.40, 46.35)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -66.85, "centroid_lat": 45.98},
+        "nova scotia|halifax": {"geom": Polygon([(-64.20, 44.45), (-62.80, 44.45), (-62.80, 45.15), (-64.20, 45.15)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -63.55, "centroid_lat": 44.82},
+        "manitoba|winnipeg": {"geom": Polygon([(-97.35, 49.72), (-96.95, 49.72), (-96.95, 49.99), (-97.35, 49.99)]), "top_ecoregion": None, "top_area_share": None, "n_ecoregions": None, "centroid_lon": -97.14, "centroid_lat": 49.88},
     }
     return {
         "eco_tree": STRtree(eco_geoms),
@@ -498,11 +531,16 @@ def infer_regional_group(
     cnty_geom = cnty_rec["geom"]
     use_live = idx_bundle.get("use_live_county_intersection", False) or (cnty_rec.get("top_area_share") is None)
 
+    eff_eco_bundle = idx_bundle
+    if ecoregion_path is None and _is_canadian_province_label(st_norm):
+        eff_eco_bundle = load_cec_na_level3_spatial_index(allow_download=not _is_epa_download_mocked())
+        use_live = True
+
     if use_live:
-        eco_tree = idx_bundle["eco_tree"]
-        eco_geoms = idx_bundle["eco_geoms"]
-        eco_labels = idx_bundle["eco_labels"]
-        eco_id_map = idx_bundle["eco_id_map"]
+        eco_tree = eff_eco_bundle["eco_tree"]
+        eco_geoms = eff_eco_bundle["eco_geoms"]
+        eco_labels = eff_eco_bundle["eco_labels"]
+        eco_id_map = eff_eco_bundle["eco_id_map"]
         cos_w = max(math.cos(math.radians(cnty_geom.centroid.y)), 0.1)
         area_by_eco: Dict[str, float] = {}
         for item in eco_tree.query(cnty_geom):
@@ -536,11 +574,11 @@ def infer_regional_group(
             c_pt = cnty_geom.representative_point()
         c_lon, c_lat = c_pt.x, c_pt.y
 
-    cent_hit = _point_in_epa_l3(float(c_lon), float(c_lat), idx_bundle)
+    cent_hit = _point_in_epa_l3(float(c_lon), float(c_lat), eff_eco_bundle)
     if cent_hit == top_eco:
         return cent_hit
     rep_pt = cnty_geom.representative_point()
-    rep_hit = _point_in_epa_l3(float(rep_pt.x), float(rep_pt.y), idx_bundle)
+    rep_hit = _point_in_epa_l3(float(rep_pt.x), float(rep_pt.y), eff_eco_bundle)
     if rep_hit == top_eco:
         return rep_hit
     return top_eco if cent_hit is None else None

@@ -51,7 +51,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             source("scripts/morphometrics/authority_weighting_utils.R")
             source("scripts/morphometrics/04_gmm_morphotools.R")
 
-            # Block 1: EPA Level III Ecoregion spatial helper agreement
+            # Block 1: EPA Level III Ecoregion spatial helper agreement (offline + on-disk county_norm GeoJSON schema)
             local({{
               res <- infer_epa_level3_ecoregion(
                 lat = c(35.9132, 34.2257, 32.5404, 31.6035, NA, NA, NA),
@@ -59,6 +59,20 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 state_province = c("NC", "NC", "GA", "TX", "North Carolina", "North Carolina", "NC"),
                 county = c("", "", "", "", "Orange County", "Wake County", "")
               )
+              off_b <- .build_offline_epa_l3_sf_r()
+              eco_gj <- file.path("{cls._class_tmp_path.as_posix()}", "test_eco_l3.geojson")
+              cnty_gj <- file.path("{cls._class_tmp_path.as_posix()}", "test_us_counties.geojson")
+              sf::st_write(off_b$eco_sf, eco_gj, driver = "GeoJSON", quiet = TRUE, delete_dsn = TRUE)
+              sf::st_write(off_b$cnty_sf[, c("county_key", "state_name", "county_norm", "centroid_lon", "centroid_lat")], cnty_gj, driver = "GeoJSON", quiet = TRUE, delete_dsn = TRUE)
+              res_disk <- infer_epa_level3_ecoregion(
+                lat = c(NA, NA),
+                lon = c(NA, NA),
+                state_province = c("North Carolina", "North Carolina"),
+                county = c("Orange County", "Wake County"),
+                ecoregion_path = eco_gj,
+                county_path = cnty_gj
+              )
+              stopifnot(identical(res_disk, c("Piedmont", NA_character_)))
               cat("EPA_L3:", paste(ifelse(is.na(res), "NA", res), collapse = "|"), "\\n", sep = "")
             }})
 
@@ -467,7 +481,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "aspect_ratio": float(1.9 + 0.25 * (c1 > 0) + rng.normal(0.0, 0.05)),
                     "solidity": float(0.88 + rng.normal(0.0, 0.02)),
                     "archetype_score": 0.94,
-                    "capitulum_aspect_ratio": np.nan if j % 5 == 0 else float(1.15 + 0.08 * c1 + rng_ar.normal(0.0, 0.015)),
+                    "AR_inv": np.nan if j % 5 == 0 else float(1.15 + 0.08 * c1 + rng_ar.normal(0.0, 0.015)),
                 }
                 for k in range(1, 13):
                     rec[f"A{k}"] = float((c1 * 0.06) / k + rng.normal(0.0, 0.003))
@@ -1201,15 +1215,13 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "solidity": 0.91,
                     "archetype_score": 0.95,
                 }
-                # 6 orthogonal high-variance signal PCs (PC1..PC6, Sym_PC1..Sym_PC6) + 2 low-noise PCs (PC7..PC8)
+                # 6 orthogonal high-variance signal PCs (PC1..PC6) + 2 low-noise PCs (PC7..PC8)
                 for p in range(1, 7):
                     val = float(rng.normal(2.5 if (s_idx == 0 and p == 1) else (-2.5 if (s_idx == 1 and p == 1) else 0.0), 4.0))
                     row[f"PC{p}"] = val
-                    row[f"Sym_PC{p}"] = val
                 for p in range(7, 9):
                     val = float(rng.normal(0.0, 0.03))
                     row[f"PC{p}"] = val
-                    row[f"Sym_PC{p}"] = val
                 for k in range(1, 13):
                     row[f"A{k}"] = float(0.05 / k + rng.normal(0.0, 0.002))
                     row[f"B{k}"] = 0.0
@@ -1286,18 +1298,18 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           solidity_std = as.numeric(scale(s)),
           q25_solidity_std = as.numeric(scale(s + rnorm(n, 0, 0.02))),
           dissection_index_std = as.numeric(scale(1 / sqrt(s) + rnorm(n, 0, 0.35))),
-          heteroblasty_index_std = as.numeric(scale(rnorm(n)))
+          within_rosette_efa_dispersion_std = as.numeric(scale(rnorm(n)))
         )
         kept_sc <- prune_collinear_dissection_scalars(
           df_sc,
           base_cols = character(0),
-          cand_scalars = c("solidity_std", "q25_solidity_std", "dissection_index_std", "heteroblasty_index_std"),
+          cand_scalars = c("solidity_std", "q25_solidity_std", "dissection_index_std", "within_rosette_efa_dispersion_std"),
           active_mask = rep(TRUE, n),
           group_vec = rep(c("SpA", "SpB"), each = 30),
           max_r = 0.75
         )
         stopifnot(!all(c("solidity_std", "q25_solidity_std") %in% kept_sc))
-        stopifnot("heteroblasty_index_std" %in% kept_sc)
+        stopifnot("within_rosette_efa_dispersion_std" %in% kept_sc)
 
         # 2. Subspace rescue of lobing PC4 within floor(N_min / 3)
         n_sub <- 72
@@ -1356,13 +1368,17 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         stopifnot(abs(fp$F - vp$F[1]) < 1e-8)
         cat("STEP04_DISSECTION_HELPERS_OK\\n")
         """
-        proc = subprocess.run(
-            ["Rscript", "-e", r_code],
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        with tempfile.TemporaryDirectory() as tmp_r:
+            r_tmp = Path(tmp_r) / "check_step04.R"
+            r_tmp.write_text(r_code, encoding="utf-8")
+            proc = subprocess.run(
+                ["Rscript", str(r_tmp)],
+                cwd=str(PROJECT_ROOT),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         self.assertEqual(proc.returncode, 0, f"Step 04 dissection R helper test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("STEP04_DISSECTION_HELPERS_OK", proc.stdout)
 
@@ -1453,13 +1469,17 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         stopifnot(identical(aud_df$nearest_type_morph_taxon[21], "Packera obovata"))
         cat("STEP04_TYPE_CONTROL_OK\\n")
         """
-        proc = subprocess.run(
-            ["Rscript", "-e", r_code],
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        with tempfile.TemporaryDirectory() as tmp_r:
+            r_tmp = Path(tmp_r) / "check_step04.R"
+            r_tmp.write_text(r_code, encoding="utf-8")
+            proc = subprocess.run(
+                ["Rscript", str(r_tmp)],
+                cwd=str(PROJECT_ROOT),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         self.assertEqual(proc.returncode, 0, f"Step 04 type control R test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("STEP04_TYPE_CONTROL_OK", proc.stdout)
 
@@ -1523,9 +1543,6 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "PC1": pc1,
                     "PC2": pc2,
                     "PC3": pc3,
-                    "Sym_PC1": pc1,
-                    "Sym_PC2": pc2,
-                    "Sym_PC3": pc3,
                 }
                 for k in range(1, 13):
                     row[f"A{k}"] = float((pc1 * 0.04) / k)
@@ -1745,19 +1762,23 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         stopifnot(abs(spec_caul$solidity[1L] - 0.50) < 1e-6)
         stopifnot(abs(spec_caul$A1[1L] - 0.42) < 1e-6)
 
-        # 3. Foliar architecture augmentation includes both petiole_to_blade_ratio_std and petiole_length_mm_std
+        # 3. Scale-invariant foliar architecture scalar filtering retains dimensionless traits without ruler-missingness bias
         df_arch <- data.frame(
           PC1 = c(-2.1, -1.8, -1.5, 0.2, 1.4, 1.9, 2.3),
           authority_weight = rep(1.0, 7L),
           petiole_to_blade_ratio = c(0.35, 0.42, 0.50, 0.65, 0.72, 0.85, 0.95),
-          petiole_length_mm = c(14.0, 28.0, 19.0, 42.0, 24.0, 58.0, 36.0),
           solidity = c(0.91, 0.89, 0.87, 0.78, 0.72, 0.64, 0.58),
+          petiole_to_blade_ratio_std = as.numeric(scale(c(0.35, 0.42, 0.50, 0.65, 0.72, 0.85, 0.95))),
+          solidity_std = as.numeric(scale(c(0.91, 0.89, 0.87, 0.78, 0.72, 0.64, 0.58))),
           stringsAsFactors = FALSE
         )
-        aug_res <- .augment_foliar_architecture_features(df_arch, feature_cols = c("PC1"))
-        stopifnot("petiole_to_blade_ratio_std" %in% aug_res$feature_cols)
-        stopifnot("petiole_length_mm_std" %in% aug_res$feature_cols)
-        stopifnot("solidity_std" %in% aug_res$feature_cols)
+        kept_arch <- filter_biologically_variable_dissection_scalars(
+          df_arch,
+          c("petiole_to_blade_ratio_std", "solidity_std"),
+          active_mask = (df_arch$authority_weight > 0)
+        )
+        stopifnot("petiole_to_blade_ratio_std" %in% kept_arch)
+        stopifnot("solidity_std" %in% kept_arch)
         cat("HETEROBLASTY_PURE_BASAL_AND_CAULINE_FALLBACK_OK\\n")
         """
         if not shutil.which("Rscript"):
@@ -1791,9 +1812,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         pm_src = pm_path.read_text(encoding="utf-8")
         for fn_tok in (
             "merge_voucher_phenophase_covariates",
-            "residualize_within_deme_phenophase_plasticity",
-            "whiten_intraspecific_deme_plasticity",
-            "compute_cluster_spatial_segregation_p",
+            "residualize_ontogenetic_phenophase_plasticity",
             "merge_plastic_gmm_components_ridgeline",
         ):
             self.assertIn(fn_tok, pm_src, f"Missing {fn_tok} in plasticity_mitigation_utils.R")
@@ -1849,14 +1868,17 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         gmm_geo <- run_gmm_cluster_analysis(df_geo, c("PC1", "PC2", "PC3"), max_k = 5L, intraspecific_mode = TRUE)
         stopifnot(gmm_geo$best_k >= 2L)
 
-        # Case C: Direct permutation checks on compute_cluster_spatial_segregation_p
-        p_seg_sym <- compute_cluster_spatial_segregation_p(rep(rep(1:2, each = 4L), length.out = n_sym), df_sym, permutations = 99L)
-        p_seg_geo <- compute_cluster_spatial_segregation_p(ifelse(west_m, 1L, 2L), df_geo, permutations = 99L)
-        stopifnot(is.finite(p_seg_sym) && p_seg_sym > 0.05)
-        stopifnot(is.finite(p_seg_geo) && p_seg_geo <= 0.05)
+        # Case C: Purely morphological ridgeline valley check preserves modality independence
+        rl_unimodal <- .compute_ridgeline_valley_ratio(0.5, c(0, 0), diag(2), 0.5, c(0.6, 0.0), diag(2))
+        rl_bimodal  <- .compute_ridgeline_valley_ratio(0.5, c(-3, 0), diag(2) * 0.25, 0.5, c(3, 0), diag(2) * 0.25)
+        stopifnot(rl_unimodal$n_modes == 1L || rl_unimodal$ridge_ratio >= 0.45)
+        stopifnot(rl_bimodal$n_modes >= 2L && rl_bimodal$ridge_ratio < 0.10)
         cat("PLASTICITY_MITIGATION_R_OK\n")
         """
-        proc = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+        with tempfile.TemporaryDirectory() as tmp_r:
+            r_tmp = Path(tmp_r) / "check_step04_plast.R"
+            r_tmp.write_text(r_code, encoding="utf-8")
+            proc = subprocess.run(["Rscript", str(r_tmp)], cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
         self.assertEqual(proc.returncode, 0, f"Plasticity mitigation R test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("PLASTICITY_MITIGATION_R_OK", proc.stdout)
 
@@ -1871,7 +1893,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
              heteroblasty features enter Step 04 at >=50% anchor coverage.
           4. Single-group (g = 1) CDA sets loocv_accuracy = NA (not 1.0), and post-GMM intraspecific figures
              never print fabricated "LOOCV = 85.0%".
-          5. Cross-run SQLite open-set recognition uses run-invariant harmonics + topology (immune to Sym_PC sign flips).
+          5. Cross-run SQLite open-set recognition uses run-invariant harmonics + topology (immune to PC sign flips).
         """
         if not shutil.which("Rscript"):
             self.skipTest("Rscript not installed.")
@@ -1924,9 +1946,6 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                       PC1 = if (is_mi) NA_real_ else rnorm(1, pc1_mu, 0.20),
                       PC2 = if (is_mi) NA_real_ else rnorm(1, 0.5 * pc1_mu, 0.20),
                       PC3 = if (is_mi) NA_real_ else rnorm(1, 0.0, 0.15),
-                      Sym_PC1 = if (is_mi) NA_real_ else rnorm(1, pc1_mu, 0.20),
-                      Sym_PC2 = if (is_mi) NA_real_ else rnorm(1, 0.5 * pc1_mu, 0.20),
-                      Sym_PC3 = if (is_mi) NA_real_ else rnorm(1, 0.0, 0.15),
                       ECT_PC1 = rnorm(1, ect1_mu, 0.18),
                       ECT_PC2 = rnorm(1, -0.4 * ect1_mu, 0.18),
                       ECT_PC3 = rnorm(1, 0.0, 0.12),
@@ -2003,16 +2022,16 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 intra_pdf <- file.path({repr(str(tmp_p))}, "intra_no_fake_loocv.pdf")
                 render_cda_biplot_4panel_pdf(aud_two, cda_two, gmm_two, intra_pdf, c("PC1", "PC2"))
 
-                # 6. Cross-run SQLite open-set recognition invariance under Sym_PC sign flips
+                # 6. Cross-run SQLite open-set recognition invariance under PC sign flips
                 if (requireNamespace("DBI", quietly = TRUE) && requireNamespace("RSQLite", quietly = TRUE)) {{
                   db_p <- file.path({repr(str(tmp_p))}, "osr_cross_run.sqlite")
                   con <- DBI::dbConnect(RSQLite::SQLite(), db_p)
                   db_cong <- rbind(
                     data.frame(run_id = "old_run_A", catalogNumber = paste0("AN_", 1:8), species_standardized = "Packera anonyma", authority_weight = 1.0, morph_tier_source = "Basal_Rosette",
-                               Sym_PC1 = rnorm(8, 9.0, 0.1), Sym_PC2 = rnorm(8, -9.0, 0.1),
+                               PC1 = rnorm(8, 9.0, 0.1), PC2 = rnorm(8, -9.0, 0.1),
                                A1 = rnorm(8, -0.92, 0.01), A2 = rnorm(8, 0.12, 0.005), D1 = rnorm(8, 0.35, 0.01), D2 = rnorm(8, -0.08, 0.005), solidity = rnorm(8, 0.88, 0.01), dissection_index = rnorm(8, 1.25, 0.03)),
                     data.frame(run_id = "old_run_A", catalogNumber = paste0("AU_", 1:8), species_standardized = "Packera aurea", authority_weight = 1.0, morph_tier_source = "Basal_Rosette",
-                               Sym_PC1 = rnorm(8, -9.0, 0.1), Sym_PC2 = rnorm(8, 9.0, 0.1),
+                               PC1 = rnorm(8, -9.0, 0.1), PC2 = rnorm(8, 9.0, 0.1),
                                A1 = rnorm(8, -1.35, 0.01), A2 = rnorm(8, -0.18, 0.005), D1 = rnorm(8, 0.68, 0.01), D2 = rnorm(8, 0.14, 0.005), solidity = rnorm(8, 0.82, 0.01), dissection_index = rnorm(8, 1.45, 0.03))
                   )
                   DBI::dbWriteTable(con, "otu_morphometrics", db_cong, overwrite = TRUE)
@@ -2020,12 +2039,12 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                   Sys.setenv(PACKERA_DB_PATH = db_p)
                   df_q <- data.frame(
                     catalogNumber = paste0("Q_", 1:6), species_standardized = "Packera dubia",
-                    Sym_PC1 = rnorm(6, -9.0, 0.1), Sym_PC2 = rnorm(6, 9.0, 0.1), # deliberately flipped Sym_PC signs matching aurea if PCs were leaked!
+                    PC1 = rnorm(6, -9.0, 0.1), PC2 = rnorm(6, 9.0, 0.1), # deliberately flipped PC signs matching aurea if PCs were leaked!
                     A1 = rnorm(6, -0.92, 0.01), A2 = rnorm(6, 0.12, 0.005), D1 = rnorm(6, 0.35, 0.01), D2 = rnorm(6, -0.08, 0.005), # true harmonics match anonyma!
                     solidity = rnorm(6, 0.88, 0.01), dissection_index = rnorm(6, 1.25, 0.03),
                     stringsAsFactors = FALSE
                   )
-                  osr_res <- compute_type_specimen_morph_control(df_q, X_mat = as.matrix(df_q[, c("Sym_PC1", "Sym_PC2")]), S_reg = diag(2), taxon_col = "species_standardized")
+                  osr_res <- compute_type_specimen_morph_control(df_q, X_mat = as.matrix(df_q[, c("PC1", "PC2")]), S_reg = diag(2), taxon_col = "species_standardized")
                   Sys.unsetenv("PACKERA_DB_PATH")
                   stopifnot(all(osr_res$min_congener_taxon == "Packera anonyma"))
                 }}

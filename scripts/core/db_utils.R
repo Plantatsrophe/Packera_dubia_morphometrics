@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20261113L
+PACKERA_SCHEMA_USER_VERSION <- 20261114L
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -105,7 +105,7 @@ PACKERA_DB_LOGICAL_COLS <- c(
   "is_dissected", "lm3_gates_pass", "mask_is_upright", "is_verified_anthesis",
   "is_rock_outcrop", "is_azonal_lithology", "high_coord_uncertainty_flag",
   "is_training_eligible_coord", "is_clim_eligible_coord", "is_edaphic_eligible_coord", "azonal_lithology_presence_buffer",
-  "is_promoted_bronze", "is_promoted_anchor", "is_passive",
+  "is_promoted_bronze", "is_passive",
   "is_contour_outlier", "morphometric_outlier_flag", "misidentification_flag",
   "substrate_specialist_flag", "multimodal_conflict_flag",
   "is_completed_voucher", "is_type_specimen", "has_empirical_type_anchor",
@@ -118,8 +118,12 @@ PACKERA_DB_HARMONIC_COLS <- as.vector(vapply(
   function(i) paste0(c("A", "B", "C", "D"), i),
   character(4)
 ))
+PACKERA_DB_SYM_HARMONIC_COLS <- as.vector(vapply(
+  1:24,
+  function(i) paste0(c("A", "D"), i),
+  character(2)
+))
 PACKERA_DB_PC_COLS <- paste0("PC", 1:15)
-PACKERA_DB_SYM_PC_COLS <- paste0("Sym_PC", 1:15)
 PACKERA_DB_WC_BIO_COLS <- c(
   "bio1_temp_mean",
   "bio2_mean_diurnal_range",
@@ -173,7 +177,8 @@ PACKERA_DB_WC_BIO_COLS <- c(
       petiole_width_mm = "REAL",
       blade_width_px = "REAL",
       blade_width_mm = "REAL",
-      mask_is_upright = "INTEGER DEFAULT 1"
+      mask_is_upright = "INTEGER DEFAULT 1",
+      area_mm2 = "REAL"
     ))
   }
   if (identical(table_name, "run_active_cohort")) {
@@ -186,7 +191,6 @@ PACKERA_DB_WC_BIO_COLS <- c(
     return(c(
       stats::setNames(rep("REAL", length(PACKERA_DB_HARMONIC_COLS)), PACKERA_DB_HARMONIC_COLS),
       stats::setNames(rep("REAL", length(PACKERA_DB_PC_COLS)), PACKERA_DB_PC_COLS),
-      stats::setNames(rep("REAL", length(PACKERA_DB_SYM_PC_COLS)), PACKERA_DB_SYM_PC_COLS),
       c(
         efd_harmonic_opt = "INTEGER",
         efd_k95_pcs = "INTEGER",
@@ -207,7 +211,6 @@ PACKERA_DB_WC_BIO_COLS <- c(
         type_status = "TEXT",
         is_type_specimen = "INTEGER DEFAULT 0",
         is_promoted_bronze = "INTEGER DEFAULT 0",
-        is_promoted_anchor = "INTEGER DEFAULT 0",
         anchor_tier_source = "TEXT",
         authority_weight = "REAL",
         is_passive = "INTEGER DEFAULT 0",
@@ -217,9 +220,8 @@ PACKERA_DB_WC_BIO_COLS <- c(
   }
   if (identical(table_name, "otu_morphometrics")) {
     return(c(
-      stats::setNames(rep("REAL", length(PACKERA_DB_HARMONIC_COLS)), PACKERA_DB_HARMONIC_COLS),
+      stats::setNames(rep("REAL", length(PACKERA_DB_SYM_HARMONIC_COLS)), PACKERA_DB_SYM_HARMONIC_COLS),
       stats::setNames(rep("REAL", length(PACKERA_DB_PC_COLS)), PACKERA_DB_PC_COLS),
-      stats::setNames(rep("REAL", length(PACKERA_DB_SYM_PC_COLS)), PACKERA_DB_SYM_PC_COLS),
       c(
         efd_harmonic_opt = "INTEGER",
         efd_k95_pcs = "INTEGER",
@@ -259,12 +261,12 @@ PACKERA_DB_WC_BIO_COLS <- c(
         open_set_novelty_p = "REAL",
         is_confident_label_noise = "INTEGER",
         is_promoted_bronze = "INTEGER",
-        is_promoted_anchor = "INTEGER",
         is_passive = "INTEGER",
         spatial_balance_weight = "REAL",
         area_mm2 = "REAL",
         petiole_width_mm = "REAL",
-        blade_width_mm = "REAL"
+        blade_width_mm = "REAL",
+        within_rosette_efa_dispersion = "REAL"
       )
     ))
   }
@@ -494,7 +496,7 @@ connect_packera_db <- function(
     if (!view_needs_refresh && db_table_exists_safe(conn, "v_integrative_triage_master")) {
       v_cols <- tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0))
       req_v_cols <- c(
-        "PC15", "Sym_PC15", "selected_morph_features", "climatic_z_score",
+        "PC15", "within_rosette_efa_dispersion", "selected_morph_features", "climatic_z_score",
         "bio19_precip_coldest_qtr", "dissection_index", "q25_solidity",
         "dissected_leaf_fraction", "basal_leaf_count", "cauline_leaf_count",
         "basal_vs_cauline_length_ratio", "heteroblasty_efa_distance", "is_type_specimen",
@@ -789,7 +791,7 @@ fetch_step03_contours_from_db <- function(
   base_sql <- paste0(
     "SELECT ",
     "  el.catalogNumber, el.plant_individual_id, el.leaf_id, el.shape_id, ",
-    "  el.solidity, el.aspect_ratio, el.area_px, el.blade_area_cm2, ",
+    "  el.solidity, el.aspect_ratio, el.area_px, ",
     "  ", sel_ect, ", ", sel_zone, ", ", sel_zone_conf, ", ", sel_dist_cr, ", ", sel_cy_rel, ", ",
     "  ", sel_arch, ", ", sel_bdice, ", ", sel_sia, ", ", sel_lgates, ", ", sel_ncc, ", ", sel_scale_src, ", ",
     "  ", sel_upright, ", ", sel_amm2, ", ", sel_bw_mm, ", ", sel_pw_mm, ", ", sel_eqc, ", ", sel_qfr, ", ",
@@ -798,12 +800,12 @@ fetch_step03_contours_from_db <- function(
     "  COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm, ",
     "  COALESCE(el.blade_length_mm, pi.blade_length_mm) AS blade_length_mm, ",
     "  COALESCE(el.petiole_to_blade_ratio, pi.petiole_to_blade_ratio) AS petiole_to_blade_ratio, ",
-    "  COALESCE(vrp.AR_inv, vrp.capitulum_aspect_ratio, vrp0.AR_inv, vrp0.capitulum_aspect_ratio) AS AR_inv, ",
-    "  COALESCE(vrp.capitula_count, vrp0.capitula_count) AS capitula_count, ",
-    "  COALESCE(vrp.involucre_height_px, vrp0.involucre_height_px) AS involucre_height_px, ",
-    "  COALESCE(vrp.involucre_width_px, vrp0.involucre_width_px) AS involucre_width_px, ",
-    "  COALESCE(vrp.involucre_height_mm, vrp0.involucre_height_mm) AS involucre_height_mm, ",
-    "  COALESCE(vrp.involucre_width_mm, vrp0.involucre_width_mm) AS involucre_width_mm, ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.AR_inv ELSE vrp0.AR_inv END AS AR_inv, ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.capitula_count ELSE vrp0.capitula_count END AS capitula_count, ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_height_px ELSE vrp0.involucre_height_px END AS involucre_height_px, ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_px ELSE vrp0.involucre_width_px END AS involucre_width_px, ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_height_mm ELSE vrp0.involucre_height_mm END AS involucre_height_mm, ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_mm ELSE vrp0.involucre_width_mm END AS involucre_width_mm, ",
     "  el.contour_xy_json ",
     "FROM extracted_leaves el ",
     "LEFT JOIN vouchers v ON v.catalogNumber = el.catalogNumber ",
@@ -1090,8 +1092,6 @@ fetch_step03_contours_from_db <- function(
     out_v
   }
 
-  db_ba_vec <- if ("blade_area_cm2" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_area_cm2)) else rep(NA_real_, n_kept)
-  db_ba_vec[!is.finite(db_ba_vec)] <- NA_real_
   db_cy_rel_vec <- if ("cy_rel_plant_bbox" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$cy_rel_plant_bbox)) else rep(NA_real_, n_kept)
   db_cy_rel_vec[!is.finite(db_cy_rel_vec)] <- NA_real_
   db_zone_conf_vec <- if ("leaf_zone_confidence" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$leaf_zone_confidence)) else rep(NA_real_, n_kept)
@@ -1161,7 +1161,6 @@ fetch_step03_contours_from_db <- function(
     dist_from_crown_norm = pull_manifest_num("dist_from_crown_norm", db_dist_cr_vec),
     cy_rel_plant_bbox = pull_manifest_num("cy_rel_plant_bbox", db_cy_rel_vec),
     cy_rel_sheet = pull_manifest_num("cy_rel_sheet"),
-    blade_area_cm2 = pull_manifest_num("blade_area_cm2", db_ba_vec),
     AR_inv = suppressWarnings(as.numeric(sub_rows$AR_inv)),
     capitula_count = suppressWarnings(as.numeric(sub_rows$capitula_count)),
     involucre_height_px = suppressWarnings(as.numeric(sub_rows$involucre_height_px)),
@@ -1192,7 +1191,7 @@ fetch_step03_contours_from_db <- function(
     df[["selected_morph_features"]] <- .normalize_semicolon_col_r(df[["selected_morph_features"]])
   }
   dyn_num_cols <- intersect(
-    c(PACKERA_DB_HARMONIC_COLS, PACKERA_DB_PC_COLS, PACKERA_DB_SYM_PC_COLS,
+    c(PACKERA_DB_HARMONIC_COLS, PACKERA_DB_PC_COLS, "within_rosette_efa_dispersion",
       "dissection_index", "q25_solidity", "dissected_leaf_fraction",
       "leaf_zone_confidence", "dist_from_crown_norm", "cy_rel_plant_bbox",
       "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med",
@@ -1267,11 +1266,6 @@ persist_step03_to_sqlite <- function(
     otu_out$run_id <- rid
     if (!("plant_individual_id" %in% names(otu_out))) otu_out$plant_individual_id <- 0L
     otu_out$plant_individual_id[is.na(otu_out$plant_individual_id)] <- 0L
-    if (("is_promoted_bronze" %in% names(otu_out)) && !("is_promoted_anchor" %in% names(otu_out))) {
-      otu_out$is_promoted_anchor <- as.logical(otu_out$is_promoted_bronze)
-    } else if (("is_promoted_anchor" %in% names(otu_out)) && !("is_promoted_bronze" %in% names(otu_out))) {
-      otu_out$is_promoted_bronze <- as.logical(otu_out$is_promoted_anchor)
-    }
     if (!("is_passive" %in% names(otu_out)) && ("authority_weight" %in% names(otu_out))) {
       aw_v <- suppressWarnings(as.numeric(otu_out$authority_weight))
       otu_out$is_passive <- !is.finite(aw_v) | (aw_v <= 0.0)
@@ -1317,12 +1311,12 @@ fetch_step04_morphometrics_from_db <- function(
     "  COALESCE(om.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm_joined, ",
     "  COALESCE(om.blade_length_mm, pi.blade_length_mm) AS blade_length_mm_joined, ",
     "  COALESCE(om.petiole_to_blade_ratio, pi.petiole_to_blade_ratio) AS petiole_to_blade_ratio_joined, ",
-    "  COALESCE(om.AR_inv, vrp.AR_inv, vrp.capitulum_aspect_ratio, vrp0.AR_inv, vrp0.capitulum_aspect_ratio) AS AR_inv_joined, ",
-    "  COALESCE(vrp.capitula_count, vrp0.capitula_count) AS capitula_count_joined, ",
-    "  COALESCE(vrp.involucre_height_px, vrp0.involucre_height_px) AS involucre_height_px_joined, ",
-    "  COALESCE(vrp.involucre_width_px, vrp0.involucre_width_px) AS involucre_width_px_joined, ",
-    "  COALESCE(vrp.involucre_height_mm, vrp0.involucre_height_mm) AS involucre_height_mm_joined, ",
-    "  COALESCE(vrp.involucre_width_mm, vrp0.involucre_width_mm) AS involucre_width_mm_joined ",
+    "  COALESCE(om.AR_inv, CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.AR_inv ELSE vrp0.AR_inv END) AS AR_inv_joined, ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.capitula_count ELSE vrp0.capitula_count END AS capitula_count_joined, ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_height_px ELSE vrp0.involucre_height_px END AS involucre_height_px_joined, ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_px ELSE vrp0.involucre_width_px END AS involucre_width_px_joined, ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_height_mm ELSE vrp0.involucre_height_mm END AS involucre_height_mm_joined, ",
+    "  CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_mm ELSE vrp0.involucre_width_mm END AS involucre_width_mm_joined ",
     "FROM otu_morphometrics om ",
     "LEFT JOIN plant_individuals pi ON pi.catalogNumber = om.catalogNumber AND pi.plant_individual_id = om.plant_individual_id ",
     "LEFT JOIN voucher_reproductive_phenology vrp ON vrp.catalogNumber = om.catalogNumber AND vrp.plant_individual_id = om.plant_individual_id ",
@@ -1393,9 +1387,6 @@ persist_step04_to_sqlite <- function(
     v_cats <- tryCatch(DBI::dbGetQuery(conn, "SELECT catalogNumber FROM vouchers;")$catalogNumber, error = function(e) character(0))
     coh_sub <- df_db[df_db$catalogNumber %in% v_cats, , drop = FALSE]
     if (nrow(coh_sub) > 0L) {
-      if ("is_promoted_anchor" %in% names(coh_sub) && !("is_promoted_bronze" %in% names(coh_sub))) {
-        coh_sub$is_promoted_bronze <- coh_sub$is_promoted_anchor
-      }
       coh_cols <- intersect(
         c("run_id", "catalogNumber", "plant_individual_id", "species_standardized",
           "determiner_tier", "type_status", "is_type_specimen",
@@ -1696,7 +1687,7 @@ persist_step07_to_sqlite <- function(
 
 .discover_step08_dynamic_morph_cols <- function(col_names) {
   if (is.null(col_names) || length(col_names) == 0L) return(character(0))
-  morph_pattern <- "^(Sym_PC[0-9]+|PC[0-9]+|Cauline_PC[0-9]+|ECT_PC[0-9]+|Cauline_ECT_PC[0-9]+|[ABCD][0-9]+|efd_harmonic_opt|efd_k95_pcs|selected_morph_features|ect_lobe_complexity|cauline_ect_lobe_complexity|heteroblasty_ect_distance)$"
+  morph_pattern <- "^(PC[0-9]+|Cauline_PC[0-9]+|ECT_PC[0-9]+|Cauline_ECT_PC[0-9]+|[AD][0-9]+|within_rosette_efa_dispersion|efd_harmonic_opt|efd_k95_pcs|selected_morph_features|ect_lobe_complexity|cauline_ect_lobe_complexity|heteroblasty_ect_distance)$"
   grep(morph_pattern, col_names, value = TRUE)
 }
 

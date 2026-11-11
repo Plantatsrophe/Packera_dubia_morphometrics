@@ -322,7 +322,7 @@ class ThresholdsConfig:
     min_file_size_kb: float = 500.0
     min_sharpness_laplacian: float = 80.0
     max_uncertainty_meters: float = 5000.0
-    western_longitude_threshold: float = -98.0
+    western_longitude_threshold: float = -104.05
     geographic_scope: str = "eastern_na"
     countries: List[str] = field(default_factory=lambda: ["US", "CA"])
     capitulum_phenology: CapitulumPhenologyConfig = field(default_factory=CapitulumPhenologyConfig)
@@ -393,7 +393,7 @@ class HarvestingConfig:
     exclude_western: bool = True
     harvest_full_continental_range: bool = True
     min_eastern_residency_records: int = 3
-    western_longitude_threshold: float = -98.0
+    western_longitude_threshold: float = -104.05
     home_herbarium: str = "NCU"
     min_megapixels: float = 8.0
     min_file_size_kb: float = 500.0

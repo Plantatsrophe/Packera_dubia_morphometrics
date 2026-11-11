@@ -78,7 +78,7 @@ classify_and_partition_leaf_zones <- function(
   cy_s <- if ("cy_rel_sheet" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$cy_rel_sheet)) else rep(NA_real_, n)
   pbr <- if ("petiole_to_blade_ratio" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$petiole_to_blade_ratio)) else rep(NA_real_, n)
   area_px <- if ("area_px" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$area_px)) else rep(NA_real_, n)
-  ba_cm2 <- if ("blade_area_cm2" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$blade_area_cm2)) else rep(NA_real_, n)
+  area_mm2 <- if ("area_mm2" %in% names(fac_df)) suppressWarnings(as.numeric(fac_df$area_mm2)) else rep(NA_real_, n)
 
   leaf_zone <- raw_zone
   is_fallback_vec <- rep(FALSE, n)
@@ -91,16 +91,21 @@ classify_and_partition_leaf_zones <- function(
     if (length(lam_ok) == 0L) next
     all_explicit_cauline <- all(!is.na(raw_zone[lam_ok]) & raw_zone[lam_ok] == "cauline")
 
-    a_pool <- ifelse(is.finite(area_px[lam_ok]) & area_px[lam_ok] > 0, area_px[lam_ok],
-                     ifelse(is.finite(ba_cm2[lam_ok]) & ba_cm2[lam_ok] > 0, ba_cm2[lam_ok] * 100.0, 1.0))
-    max_pid_a <- max(a_pool, 1.0, na.rm = TRUE)
+    use_px_pool <- any(is.finite(area_px[lam_ok]) & area_px[lam_ok] > 0.0)
+    a_pool <- if (use_px_pool) {
+      ifelse(is.finite(area_px[lam_ok]) & area_px[lam_ok] > 0.0, area_px[lam_ok], NA_real_)
+    } else {
+      ifelse(is.finite(area_mm2[lam_ok]) & area_mm2[lam_ok] > 0.0, area_mm2[lam_ok], NA_real_)
+    }
+    max_pid_a <- if (any(is.finite(a_pool))) max(a_pool, na.rm = TRUE) else 1.0
 
     for (ii in g_idx) {
       if (!is.na(leaf_zone[ii])) {
         if (!is.finite(zone_conf[ii])) zone_conf[ii] <- 0.90
         next
       }
-      rel_a <- if (is.finite(area_px[ii]) && area_px[ii] > 0) area_px[ii] / max_pid_a else if (is.finite(ba_cm2[ii]) && ba_cm2[ii] > 0) (ba_cm2[ii] * 100.0) / max_pid_a else 1.0
+      pos_ii <- match(ii, lam_ok)
+      rel_a <- if (!is.na(pos_ii) && is.finite(a_pool[pos_ii]) && max_pid_a > 0.0) a_pool[pos_ii] / max_pid_a else 1.0
       if (is.finite(d_crown[ii])) {
         s_b <- if (d_crown[ii] <= 0.42) 0.76 else if (d_crown[ii] > 0.45) 0.22 else 0.50
         if (is.finite(cy_p[ii])) s_b <- s_b + (if (cy_p[ii] >= min_cy_plant) 0.12 else -0.12)
@@ -139,7 +144,7 @@ classify_and_partition_leaf_zones <- function(
           d_min <- min(d_crown[lam_ok[has_dc]], na.rm = TRUE)
           fb_hit <- has_dc & (d_crown[lam_ok] <= (d_min + fallback_band))
         } else {
-          fb_hit <- seq_along(lam_ok) == which.max(a_pool)
+          fb_hit <- seq_along(lam_ok) == which.max(ifelse(is.finite(a_pool), a_pool, 0.0))
         }
         if (any(fb_hit)) {
           leaf_zone[lam_ok[fb_hit]] <- "basal"
@@ -189,8 +194,8 @@ filter_basal_lamina_contours <- function(
   raw_dis <- if ("is_dissected" %in% names(fac_df)) as.logical(fac_df$is_dissected) else rep(NA, n)
   fac_df$is_dissected <- ifelse(
     !is.na(raw_dis),
-    raw_dis | (is.finite(sol_vec) & sol_vec < 0.68),
-    (is.finite(sol_vec) & sol_vec < 0.68)
+    raw_dis | (is.finite(sol_vec) & sol_vec < 0.72),
+    (is.finite(sol_vec) & sol_vec < 0.72)
   )
 
   fac_df <- classify_and_partition_leaf_zones(
@@ -774,6 +779,9 @@ compute_leaf_ect_features <- function(efa_df, coo_list = NULL, contours_dir = NU
     out_v[is.na(out_v) | typ_v] <- FALSE
     wt_v <- if ("authority_weight" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$authority_weight[valid_idx])) else rep(1.0, length(valid_idx))
     wt_v[!is.finite(wt_v) | wt_v < 0.0] <- 0.0
+    sb_v <- if ("spatial_balance_weight" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$spatial_balance_weight[valid_idx])) else rep(1.0, length(valid_idx))
+    sb_v[!is.finite(sb_v) | sb_v <= 0.0] <- 1.0
+    eff_wt_v <- wt_v * sb_v
 
     bas_pos <- which((is.na(lz) | lz == "basal") & !out_v)
     if (length(bas_pos) < 2L) bas_pos <- which(is.na(lz) | lz == "basal")
@@ -782,7 +790,7 @@ compute_leaf_ect_features <- function(efa_df, coo_list = NULL, contours_dir = NU
     if (length(ref_pos) < 2L) ref_pos <- bas_pos
 
     M_fit <- M_ect[ref_pos, , drop = FALSE]
-    w_fit <- wt_v[ref_pos]
+    w_fit <- if (any(eff_wt_v[ref_pos] > 0.0)) eff_wt_v[ref_pos] else wt_v[ref_pos]
     if (sum(w_fit, na.rm = TRUE) <= 1e-12) w_fit <- rep(1.0, nrow(M_fit))
     w_norm <- w_fit / sum(w_fit)
     col_v <- apply(M_fit, 2L, stats::var, na.rm = TRUE)
@@ -814,6 +822,7 @@ compute_leaf_ect_features <- function(efa_df, coo_list = NULL, contours_dir = NU
         attr(efa_df, "ect_basal_var_exp") <- round(ev_vals / max(tot_wvar, 1e-12) * 100.0, 2)
       }
     }
+    attr(efa_df, "ect_sym_dim") <- ncol(M_ect)
   }
   attr(efa_df, "ect_sym_mats") <- ect_mats
   attr(efa_df, "ect_sym_vecs") <- sym_vecs
@@ -919,7 +928,9 @@ compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = 
         cauline_ect_lobe_complexity[i] <- med_col(cauline_rows, "ect_lobe_complexity", 4L)
         c_bl <- med_col(cauline_rows, "blade_length_mm", 3L, pos_only = TRUE)
         c_cs <- med_col(cauline_rows, "centroid_size", 3L, pos_only = TRUE)
-        cauline_blade_length_mm[i] <- if (is.finite(c_bl)) c_bl else c_cs
+        c_cs_px <- med_col(cauline_rows, "centroid_size_px", 3L, pos_only = TRUE)
+        c_apx <- med_col(cauline_rows, "area_px", 1L, pos_only = TRUE)
+        cauline_blade_length_mm[i] <- if (is.finite(c_bl)) c_bl else NA_real_
 
         b_bl <- if (n_bas >= 1L) med_col(basal_rows, "blade_length_mm", 4L, pos_only = TRUE) else NA_real_
         if (!is.finite(b_bl) && ("blade_length_mm" %in% names(specimen_df))) {
@@ -931,10 +942,16 @@ compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = 
           v_c <- suppressWarnings(as.numeric(specimen_df$centroid_size[i]))
           if (is.finite(v_c) && v_c > 0.0) b_cs <- v_c
         }
+        b_cs_px <- if (n_bas >= 1L) med_col(basal_rows, "centroid_size_px", 3L, pos_only = TRUE) else NA_real_
+        b_apx <- if (n_bas >= 1L) med_col(basal_rows, "area_px", 1L, pos_only = TRUE) else NA_real_
         if (is.finite(b_bl) && is.finite(c_bl) && c_bl > 1e-6) {
           basal_vs_cauline_length_ratio[i] <- round(b_bl / c_bl, 4)
         } else if (is.finite(b_cs) && is.finite(c_cs) && c_cs > 1e-6) {
           basal_vs_cauline_length_ratio[i] <- round(b_cs / c_cs, 4)
+        } else if (is.finite(b_cs_px) && is.finite(c_cs_px) && c_cs_px > 1e-6) {
+          basal_vs_cauline_length_ratio[i] <- round(b_cs_px / c_cs_px, 4)
+        } else if (is.finite(b_apx) && is.finite(c_apx) && c_apx > 1e-6) {
+          basal_vs_cauline_length_ratio[i] <- round(sqrt(b_apx / c_apx), 4)
         }
 
         b_sol <- if ("solidity" %in% names(specimen_df)) suppressWarnings(as.numeric(specimen_df$solidity[i])) else med_col(basal_rows, "solidity", 4L)
@@ -958,9 +975,6 @@ compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = 
                 d_efa <- sqrt(sum((bas_med_h - caul_med_h)^2, na.rm = TRUE))
                 if (is.finite(d_efa)) {
                   heteroblasty_efa_distance[i] <- round(d_efa, 6)
-                  if ("heteroblasty_index" %in% names(specimen_df)) {
-                    specimen_df$heteroblasty_index[i] <- round(d_efa, 6)
-                  }
                 }
               }
             }
@@ -1000,41 +1014,60 @@ compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = 
               med_col(basal_rows, "ECT_PC3", 6L)
             )
             b_epc[!is.finite(b_epc)] <- 0.0
-            d_ect <- sqrt(sum((b_epc - c_epc)^2, na.rm = TRUE))
+            ect_dim_ref <- attr(efa_df, "ect_sym_dim")
+            ect_dim_use <- if (!is.null(ect_dim_ref) && is.finite(ect_dim_ref) && ect_dim_ref >= 3L) as.numeric(ect_dim_ref) else 5792.0
+            d_ect <- sqrt(sum((b_epc - c_epc)^2, na.rm = TRUE) / ect_dim_use)
             if (is.finite(d_ect)) heteroblasty_ect_distance[i] <- round(d_ect, 6)
           }
         }
       }
     }
 
+    auth_spec_v <- if ("authority_weight" %in% names(specimen_df)) suppressWarnings(as.numeric(specimen_df$authority_weight)) else rep(1.0, n_spec)
+    auth_spec_v[!is.finite(auth_spec_v) | auth_spec_v < 0.0] <- 0.0
+    sb_spec_v <- if ("spatial_balance_weight" %in% names(specimen_df)) suppressWarnings(as.numeric(specimen_df$spatial_balance_weight)) else rep(1.0, n_spec)
+    sb_spec_v[!is.finite(sb_spec_v) | sb_spec_v <= 0.0] <- 1.0
+    eff_spec_v <- auth_spec_v * sb_spec_v
+
     caul_spec_idx <- which(cauline_leaf_count >= 1L & !vapply(caul_harm_list, is.null, logical(1)))
     if (length(caul_spec_idx) >= 1L && length(sym_names) >= 1L) {
       M_caul <- do.call(rbind, caul_harm_list[caul_spec_idx])
       storage.mode(M_caul) <- "double"
+      ref_c_pos <- which(auth_spec_v[caul_spec_idx] > 0.0)
+      if (length(ref_c_pos) < 3L) ref_c_pos <- seq_len(nrow(M_caul))
       for (jc in seq_len(ncol(M_caul))) {
         bad_c <- !is.finite(M_caul[, jc])
-        if (any(bad_c)) M_caul[bad_c, jc] <- if (any(!bad_c)) stats::median(M_caul[!bad_c, jc], na.rm = TRUE) else 0.0
+        if (any(bad_c)) {
+          ok_r <- intersect(ref_c_pos, which(!bad_c))
+          M_caul[bad_c, jc] <- if (length(ok_r) > 0L) stats::median(M_caul[ok_r, jc], na.rm = TRUE) else if (any(!bad_c)) stats::median(M_caul[!bad_c, jc], na.rm = TRUE) else 0.0
+        }
       }
       c_scores <- NULL
-      if (nrow(M_caul) >= 3L) {
-        c_vars <- apply(M_caul, 2L, stats::var, na.rm = TRUE)
+      if (length(ref_c_pos) >= 3L) {
+        M_ref_c <- M_caul[ref_c_pos, , drop = FALSE]
+        c_vars <- apply(M_ref_c, 2L, stats::var, na.rm = TRUE)
         act_c <- which(is.finite(c_vars) & c_vars > 1e-12)
         if (length(act_c) >= 1L) {
-          M_sub <- scale(M_caul[, act_c, drop = FALSE], center = TRUE, scale = FALSE)
-          eig_c <- eigen(stats::cov(M_sub), symmetric = TRUE)
-          c_scores <- M_sub %*% eig_c$vectors
+          w_c <- eff_spec_v[caul_spec_idx[ref_c_pos]]
+          if (sum(w_c, na.rm = TRUE) <= 1e-12) w_c <- rep(1.0, length(ref_c_pos))
+          wt_c <- stats::cov.wt(M_ref_c[, act_c, drop = FALSE], wt = w_c, center = TRUE)
+          eig_c <- eigen(wt_c$cov, symmetric = TRUE)
+          c_scores <- sweep(M_caul[, act_c, drop = FALSE], 2L, wt_c$center, "-") %*% eig_c$vectors
         }
       }
       if (is.null(c_scores)) {
         all_sym_m <- as.matrix(efa_df[, sym_names, drop = FALSE])
         storage.mode(all_sym_m) <- "double"
         all_sym_m[!is.finite(all_sym_m)] <- 0.0
-        if (nrow(all_sym_m) >= 2L) {
-          c_vars <- apply(all_sym_m, 2L, stats::var, na.rm = TRUE)
+        auth_leaf_v <- if ("authority_weight" %in% names(efa_df)) suppressWarnings(as.numeric(efa_df$authority_weight)) else rep(1.0, nrow(efa_df))
+        ref_l_pos <- which(is.finite(auth_leaf_v) & auth_leaf_v > 0.0)
+        if (length(ref_l_pos) < 2L) ref_l_pos <- seq_len(nrow(all_sym_m))
+        if (length(ref_l_pos) >= 2L) {
+          c_vars <- apply(all_sym_m[ref_l_pos, , drop = FALSE], 2L, stats::var, na.rm = TRUE)
           act_c <- which(is.finite(c_vars) & c_vars > 1e-12)
           if (length(act_c) >= 1L) {
-            mu_all <- colMeans(all_sym_m[, act_c, drop = FALSE])
-            eig_all <- eigen(stats::cov(all_sym_m[, act_c, drop = FALSE]), symmetric = TRUE)
+            mu_all <- colMeans(all_sym_m[ref_l_pos, act_c, drop = FALSE])
+            eig_all <- eigen(stats::cov(all_sym_m[ref_l_pos, act_c, drop = FALSE]), symmetric = TRUE)
             c_scores <- sweep(M_caul[, act_c, drop = FALSE], 2L, mu_all, "-") %*% eig_all$vectors
           }
         }
@@ -1052,16 +1085,26 @@ compute_separate_cauline_otu_track <- function(efa_df, specimen_df, sym_names = 
       storage.mode(M_cect) <- "double"
       M_cect[!is.finite(M_cect)] <- 0.0
       ce_scores <- NULL
-      if (nrow(M_cect) >= 2L) {
-        ce_vars <- apply(M_cect, 2L, stats::var, na.rm = TRUE)
+      ref_ce_pos <- which(auth_spec_v[caul_ect_idx] > 0.0)
+      if (length(ref_ce_pos) < 2L) ref_ce_pos <- seq_len(nrow(M_cect))
+      if (length(ref_ce_pos) >= 2L) {
+        M_ref_ce <- M_cect[ref_ce_pos, , drop = FALSE]
+        ce_vars <- apply(M_ref_ce, 2L, stats::var, na.rm = TRUE)
         act_ce <- which(is.finite(ce_vars) & ce_vars > 1e-12)
         if (length(act_ce) >= 1L) {
-          X_ce <- scale(M_cect[, act_ce, drop = FALSE], center = TRUE, scale = FALSE)
-          svd_ce <- tryCatch(svd(X_ce, nu = 0L, nv = min(2L, nrow(X_ce), ncol(X_ce))), error = function(e) NULL)
+          w_ce <- eff_spec_v[caul_ect_idx[ref_ce_pos]]
+          if (sum(w_ce, na.rm = TRUE) <= 1e-12) w_ce <- rep(1.0, length(ref_ce_pos))
+          w_ce_n <- w_ce / sum(w_ce)
+          mu_ce <- as.numeric(crossprod(w_ce_n, M_ref_ce[, act_ce, drop = FALSE]))
+          X_ce_ref <- sweep(M_ref_ce[, act_ce, drop = FALSE], 2L, mu_ce, "-")
+          Z_ce_ref <- sweep(X_ce_ref, 1L, sqrt(w_ce_n), "*")
+          svd_ce <- tryCatch(svd(Z_ce_ref, nu = 0L, nv = min(2L, nrow(Z_ce_ref), ncol(Z_ce_ref))), error = function(e) NULL)
           if (!is.null(svd_ce) && !is.null(svd_ce$v) && ncol(svd_ce$v) >= 1L) {
-            ce_scores <- X_ce %*% svd_ce$v
-            ev_ce <- (svd_ce$d^2) / max(1L, nrow(X_ce) - 1L)
-            attr(specimen_df, "ect_cauline_var_exp") <- round(ev_ce / max(sum(ce_vars[act_ce]), 1e-12) * 100.0, 2)
+            ce_scores <- sweep(M_cect[, act_ce, drop = FALSE], 2L, mu_ce, "-") %*% svd_ce$v
+            denom_ce <- max(1e-8, 1.0 - sum(w_ce_n^2))
+            ev_ce <- (svd_ce$d^2) / denom_ce
+            tot_ce <- sum(colSums(Z_ce_ref^2, na.rm = TRUE)) / denom_ce
+            attr(specimen_df, "ect_cauline_var_exp") <- round(ev_ce / max(tot_ce, 1e-12) * 100.0, 2)
           }
         }
       }
@@ -1125,7 +1168,7 @@ filter_biologically_variable_dissection_scalars <- function(df, cand_scalars, ac
       (is.finite(sd_v) && sd_v >= 0.045) || any(raw_v < 0.75) || (is.finite(q_span) && q_span >= 0.10)
     } else if (raw_nm %in% c("dissection_index", "cauline_dissection_index_med")) {
       (is.finite(sd_v) && sd_v >= 0.12) || any(raw_v > 1.35)
-    } else if (raw_nm %in% c("heteroblasty_index", "heteroblasty_efa_distance", "heteroblasty_ect_distance")) {
+    } else if (raw_nm %in% c("within_rosette_efa_dispersion", "heteroblasty_efa_distance", "heteroblasty_ect_distance")) {
       (is.finite(sd_v) && sd_v >= 0.015) && (sum(raw_v > 0) >= 5L)
     } else if (raw_nm %in% c("basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "Cauline_PC1",
                              "ECT_PC1", "ECT_PC2", "Cauline_ECT_PC1", "ect_lobe_complexity", "cauline_ect_lobe_complexity")) {

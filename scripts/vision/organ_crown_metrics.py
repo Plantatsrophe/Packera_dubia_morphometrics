@@ -810,14 +810,16 @@ def approximate_petiole_and_scape_metrics(
            capitula centroid (`p_corymb`), exporting `plant_height_cm`, `scape_to_basal_leaf_ratio`,
            and `is_bent_stem`.
     """
-    # Resolve scale conversion (px_per_cm and px_per_mm = px_per_cm / 10.0)
+    # Resolve scale conversion strictly when ruler-calibrated (`is_calibrated_mm` is not False)
+    is_cal_arg = kwargs.get("is_calibrated_mm", True)
     eff_px_per_cm: Optional[float] = None
-    if px_per_cm is not None and not np.isnan(px_per_cm) and float(px_per_cm) > 0.0:
-        eff_px_per_cm = float(px_per_cm)
-    else:
-        ppm = kwargs.get("pixels_per_mm")
-        if ppm is not None and not np.isnan(ppm) and float(ppm) > 0.0:
-            eff_px_per_cm = float(ppm) * 10.0
+    if is_cal_arg is not False:
+        if px_per_cm is not None and not np.isnan(px_per_cm) and float(px_per_cm) > 0.0:
+            eff_px_per_cm = float(px_per_cm)
+        else:
+            ppm = kwargs.get("pixels_per_mm")
+            if ppm is not None and not np.isnan(ppm) and float(ppm) > 0.0:
+                eff_px_per_cm = float(ppm) * 10.0
     px_per_mm = (eff_px_per_cm / 10.0) if (eff_px_per_cm is not None and eff_px_per_cm > 0.0) else None
 
     # Parse basal leaf poses
@@ -901,9 +903,17 @@ def approximate_petiole_and_scape_metrics(
             if (not is_caul_leaf and blade_px > 0.0 and crown_dist_px <= 1.75 * blade_px)
             else 0.0
         )
-        petiole_px = max(d_pose_polyline, geodesic_px, crown_fallback_px)
-        pet_to_blade = (petiole_px / blade_px) if blade_px > 1e-6 else np.nan
-        petiole_mm = (petiole_px / px_per_mm) if (px_per_mm is not None and px_per_mm > 0.0) else np.nan
+        direct_petiole_px = max(float(d_pose_polyline), float(geodesic_px))
+        if direct_petiole_px > 0.0:
+            petiole_px = direct_petiole_px
+        elif is_caul_leaf:
+            petiole_px = 0.0
+        elif crown_fallback_px > 0.0:
+            petiole_px = crown_fallback_px
+        else:
+            petiole_px = np.nan
+        pet_to_blade = (petiole_px / blade_px) if (np.isfinite(petiole_px) and blade_px > 1e-6) else np.nan
+        petiole_mm = (petiole_px / px_per_mm) if (np.isfinite(petiole_px) and px_per_mm is not None and px_per_mm > 0.0) else np.nan
         blade_mm = (blade_px / px_per_mm) if (px_per_mm is not None and px_per_mm > 0.0) else np.nan
 
         pw_px = p.get("petiole_width_px")
@@ -924,7 +934,7 @@ def approximate_petiole_and_scape_metrics(
             "pose_petiole_polyline_px": round(float(d_pose_polyline), 4),
             "geodesic_petiole_skeleton_px": round(max(geodesic_px, float(d_pose_polyline)), 4),
             "crown_distance_px": round(crown_dist_px, 4),
-            "petiole_length_px": round(petiole_px, 4),
+            "petiole_length_px": round(float(petiole_px), 4) if np.isfinite(petiole_px) else np.nan,
             "blade_length_px": round(blade_px, 4),
             "petiole_to_blade_ratio": round(float(pet_to_blade), 4) if np.isfinite(pet_to_blade) else np.nan,
             "petiole_length_mm": round(float(petiole_mm), 3) if np.isfinite(petiole_mm) else np.nan,
@@ -946,15 +956,38 @@ def approximate_petiole_and_scape_metrics(
         sub_all = [r for r in leaf_metrics if int(r["plant_individual_id"]) == pid]
         sub_bas = [r for r in sub_all if r.get("leaf_zone") != "cauline"]
         sub_r = sub_bas if sub_bas else sub_all
+        pid_cr = crowns_by_pid.get(pid, primary_crown)
+        pid_pet_p75 = _agg_p75(sub_r, "petiole_length_px", 4)
+        pid_bld_p75 = _agg_p75(sub_r, "blade_length_px", 4)
+        pid_scape_px = np.nan
+        pid_height_cm = np.nan
+        pid_scape_ratio = np.nan
+        pid_bent = False
+        caps_by_pid = kwargs.get("capitula_by_pid")
+        if isinstance(caps_by_pid, dict):
+            pid_caps = caps_by_pid.get(pid) or []
+            pid_cap_pts = [pt for c_it in pid_caps if (pt := _extract_xy_point(c_it, ref_pt=pid_cr)) is not None]
+            if pid_cap_pts:
+                pid_cor = (float(np.median([p[0] for p in pid_cap_pts])), float(np.median([p[1] for p in pid_cap_pts])))
+                pid_scape_px = float(math.hypot(pid_cor[0] - pid_cr[0], pid_cor[1] - pid_cr[1]))
+                if eff_px_per_cm is not None and eff_px_per_cm > 0.0:
+                    pid_height_cm = round(float(pid_scape_px / eff_px_per_cm), 3)
+                pid_ref = (pid_pet_p75 + pid_bld_p75) if (np.isfinite(pid_pet_p75) and np.isfinite(pid_bld_p75) and (pid_pet_p75 + pid_bld_p75) > 1e-6) else (pid_bld_p75 if (np.isfinite(pid_bld_p75) and pid_bld_p75 > 1e-6) else np.nan)
+                if np.isfinite(pid_ref) and pid_ref > 1e-6:
+                    pid_scape_ratio = round(float(pid_scape_px / pid_ref), 4)
         by_plant_summary[pid] = {
-            "p_crown": crowns_by_pid.get(pid, primary_crown),
-            "petiole_length_px": _agg_p75(sub_r, "petiole_length_px", 4),
-            "blade_length_px": _agg_p75(sub_r, "blade_length_px", 4),
+            "p_crown": pid_cr,
+            "petiole_length_px": pid_pet_p75,
+            "blade_length_px": pid_bld_p75,
             "petiole_length_mm": _agg_p75(sub_r, "petiole_length_mm", 3),
             "blade_length_mm": _agg_p75(sub_r, "blade_length_mm", 3),
             "petiole_to_blade_ratio": _agg_p75(sub_r, "petiole_to_blade_ratio", 4),
             "petiole_width_px": _agg_p75(sub_r, "petiole_width_px", 4),
             "petiole_width_mm": _agg_p75(sub_r, "petiole_width_mm", 3),
+            "scape_length_px": round(float(pid_scape_px), 2) if np.isfinite(pid_scape_px) else np.nan,
+            "plant_height_cm": pid_height_cm,
+            "scape_to_basal_leaf_ratio": pid_scape_ratio,
+            "is_bent_stem": pid_bent,
         }
 
     bas_all = [r for r in leaf_metrics if r.get("leaf_zone") != "cauline"]

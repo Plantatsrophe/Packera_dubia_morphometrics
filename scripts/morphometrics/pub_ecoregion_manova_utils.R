@@ -47,15 +47,34 @@ standardize_epa_l3_label_r <- function(raw_vec) {
 }
 
 .norm_us_state_r <- function(st_vec) {
-  abbr_map <- stats::setNames(tolower(datasets::state.name), tolower(datasets::state.abb))
-  abbr_map["dc"] <- "district of columbia"
+  abbr_map <- c(
+    stats::setNames(tolower(datasets::state.name), tolower(datasets::state.abb)),
+    "dc" = "district of columbia", "d.c." = "district of columbia",
+    "on" = "ontario", "ont" = "ontario",
+    "qc" = "quebec", "pq" = "quebec", "que" = "quebec",
+    "nb" = "new brunswick", "ns" = "nova scotia",
+    "pe" = "prince edward island", "pei" = "prince edward island",
+    "nl" = "newfoundland and labrador", "nf" = "newfoundland and labrador", "nfld" = "newfoundland and labrador",
+    "mb" = "manitoba", "man" = "manitoba",
+    "sk" = "saskatchewan", "sask" = "saskatchewan",
+    "ab" = "alberta", "alta" = "alberta",
+    "bc" = "british columbia", "yt" = "yukon", "nt" = "northwest territories", "nu" = "nunavut"
+  )
   vapply(as.character(st_vec), function(s) {
     if (is.na(s)) return(NA_character_)
-    s_clean <- gsub("\\.$", "", gsub("\\s+", " ", tolower(trimws(s))))
+    s_ascii <- iconv(s, from = "", to = "ASCII//TRANSLIT")
+    if (is.na(s_ascii)) s_ascii <- s
+    s_clean <- gsub("\\.$", "", gsub("\\s+", " ", tolower(trimws(s_ascii))))
     if (!nzchar(s_clean) || s_clean %in% c("na", "nan", "none", "unknown")) return(NA_character_)
     if (s_clean %in% names(abbr_map)) unname(abbr_map[[s_clean]]) else s_clean
   }, character(1), USE.NAMES = FALSE)
 }
+
+.HOMONYMOUS_INDEP_CITIES_R <- list(
+  "virginia" = c("fairfax", "franklin", "richmond", "roanoke"),
+  "maryland" = c("baltimore"),
+  "missouri" = c("st louis")
+)
 
 .norm_us_county_r <- function(co_vec, st_norm_vec = NULL) {
   n <- length(co_vec)
@@ -63,14 +82,17 @@ standardize_epa_l3_label_r <- function(raw_vec) {
   vapply(seq_len(n), function(i) {
     raw <- as.character(co_vec[i])
     if (is.na(raw)) return(NA_character_)
-    c_str <- tolower(trimws(raw))
+    c_ascii <- iconv(raw, from = "", to = "ASCII//TRANSLIT")
+    if (is.na(c_ascii)) c_ascii <- raw
+    c_str <- tolower(trimws(c_ascii))
     if (!nzchar(c_str) || c_str %in% c("na", "nan", "none", "unknown", "unplaced", "indeterminate")) {
       return(NA_character_)
     }
     if (grepl(" or |/|\\?", c_str)) return(NA_character_)
     c_str <- gsub("\\[|\\]|\\(|\\)", "", c_str)
-    c_str <- gsub("^city\\s+of\\s+", "", c_str)
-    c_str <- gsub("\\s+(county|parish|par\\.?|borough|census\\s+area|municipality|co\\.?|city\\s+and\\s+borough|independent\\s+city|independent)$", "", c_str)
+    was_explicit_city <- grepl("^city\\s+of\\s+|\\b(independent\\s+city|city)$", c_str) && !grepl("\\bcounty\\b", c_str)
+    c_str <- gsub("^(regional\\s+municipality\\s+of|united\\s+counties\\s+of|county\\s+of|city\\s+of|mrc\\s+de|mrc\\s+d'|municipalite\\s+regionale\\s+de\\s+comte\\s+de)\\s+", "", c_str)
+    c_str <- gsub("\\s+(regional\\s+municipality|united\\s+counties|county\\s+municipality|census\\s+division|census\\s+area|city\\s+and\\s+borough|independent\\s+city|independent|municipality|county|parish|par\\.?|borough|district|mrc|co\\.?)$", "", c_str)
     c_str <- gsub("\\s+city$", "", c_str)
     c_str <- gsub("^(st\\.|saint)\\s+", "st ", c_str)
     c_str <- gsub("^ste\\.\\s*", "ste ", c_str)
@@ -80,9 +102,12 @@ standardize_epa_l3_label_r <- function(raw_vec) {
     if (!is.na(st_i)) {
       if (st_i == "virginia" && c_str == "nansemond") c_str <- "suffolk"
       else if (st_i == "virginia" && c_str == "princess anne") c_str <- "virginia beach"
-      else if (st_i == "virginia" && c_str == "chesapeake") c_str <- "norfolk"
+      else if (st_i == "virginia" && c_str == "bedford") was_explicit_city <- FALSE
       else if (st_i == "georgia" && c_str == "columbus") c_str <- "muscogee"
       else if (st_i == "south dakota" && c_str == "shannon") c_str <- "oglala lakota"
+      if (isTRUE(was_explicit_city) && (st_i %in% names(.HOMONYMOUS_INDEP_CITIES_R)) && (c_str %in% .HOMONYMOUS_INDEP_CITIES_R[[st_i]])) {
+        c_str <- paste0(c_str, " city")
+      }
     }
     c_str
   }, character(1), USE.NAMES = FALSE)
@@ -95,7 +120,9 @@ standardize_epa_l3_label_r <- function(raw_vec) {
       "Blue_Ridge", "Ridge_and_Valley", "Piedmont", "Middle_Atlantic_Coastal_Plain",
       "Southeastern_Plains", "Southern_Coastal_Plain", "Mississippi_Alluvial_Plain",
       "South_Central_Plains", "East_Central_Texas_Plains", "Ouachita_Mountains",
-      "Ozark_Highlands", "Interior_Plateau", "Southwestern_Appalachians"
+      "Ozark_Highlands", "Interior_Plateau", "Southwestern_Appalachians",
+      "Mixed_Wood_Plains", "Northern_Lakes_and_Forests", "Atlantic_Highlands",
+      "Lake_Manitoba_and_Lake_Winnipeg_Plain", "Aspen_Parkland_Northern_Glaciated_Plains"
     ),
     stringsAsFactors = FALSE
   )
@@ -113,18 +140,23 @@ standardize_epa_l3_label_r <- function(raw_vec) {
     mk_poly(matrix(c(-94.8,35.7, -91.0,35.8, -90.5,38.2, -94.6,38.1), ncol = 2, byrow = TRUE)),
     mk_poly(matrix(c(-88.5,34.8, -85.5,35.2, -84.5,38.2, -87.8,38.8), ncol = 2, byrow = TRUE)),
     mk_poly(matrix(c(-86.8,33.6, -85.6,34.2, -84.2,36.8, -85.5,36.8), ncol = 2, byrow = TRUE)),
+    mk_poly(matrix(c(-83.5,41.8, -71.0,45.0, -71.0,47.2, -83.5,44.8), ncol = 2, byrow = TRUE)),
+    mk_poly(matrix(c(-95.2,46.0, -76.0,45.2, -76.0,50.5, -95.2,50.5), ncol = 2, byrow = TRUE)),
+    mk_poly(matrix(c(-71.0,45.0, -64.0,45.0, -64.0,49.2, -71.0,49.2), ncol = 2, byrow = TRUE)),
+    mk_poly(matrix(c(-99.5,49.0, -96.0,49.0, -96.0,53.0, -99.5,53.0), ncol = 2, byrow = TRUE)),
+    mk_poly(matrix(c(-104.05,49.0, -99.5,49.0, -99.5,53.5, -104.05,53.5), ncol = 2, byrow = TRUE)),
     crs = 4326
   )
   eco_sf <- sf::st_sf(eco_df, geometry = eco_geoms)
   cnty_df <- data.frame(
-    county_key = c("north carolina|orange", "north carolina|new hanover", "north carolina|wake", "texas|nacogdoches"),
-    state_name = c("north carolina", "north carolina", "north carolina", "texas"),
-    county_norm = c("orange", "new hanover", "wake", "nacogdoches"),
-    centroid_lon = c(-79.10, -77.90, -78.40, -94.65),
-    centroid_lat = c(36.05, 34.20, 35.78, 31.62),
-    n_ecoregions = c(NA_integer_, NA_integer_, NA_integer_, NA_integer_),
-    top_ecoregion = c(NA_character_, NA_character_, NA_character_, NA_character_),
-    top_area_share = c(NA_real_, NA_real_, NA_real_, NA_real_),
+    county_key = c("north carolina|orange", "north carolina|new hanover", "north carolina|wake", "texas|nacogdoches", "ontario|essex", "quebec|gatineau"),
+    state_name = c("north carolina", "north carolina", "north carolina", "texas", "ontario", "quebec"),
+    county_norm = c("orange", "new hanover", "wake", "nacogdoches", "essex", "gatineau"),
+    centroid_lon = c(-79.10, -77.90, -78.40, -94.65, -82.80, -75.95),
+    centroid_lat = c(36.05, 34.20, 35.78, 31.62, 42.15, 46.10),
+    n_ecoregions = rep(NA_integer_, 6L),
+    top_ecoregion = rep(NA_character_, 6L),
+    top_area_share = rep(NA_real_, 6L),
     stringsAsFactors = FALSE
   )
   cnty_geoms <- sf::st_sfc(
@@ -132,6 +164,8 @@ standardize_epa_l3_label_r <- function(raw_vec) {
     mk_poly(matrix(c(-78.02,34.05, -77.78,34.05, -77.78,34.35, -78.02,34.35), ncol = 2, byrow = TRUE)),
     mk_poly(matrix(c(-79.00,35.50, -77.80,35.50, -77.80,36.05, -79.00,36.05), ncol = 2, byrow = TRUE)),
     mk_poly(matrix(c(-94.90,31.40, -94.40,31.40, -94.40,31.85, -94.90,31.85), ncol = 2, byrow = TRUE)),
+    mk_poly(matrix(c(-83.10,41.95, -82.50,41.95, -82.50,42.32, -83.10,42.32), ncol = 2, byrow = TRUE)),
+    mk_poly(matrix(c(-76.30,45.75, -75.65,45.75, -75.65,46.45, -76.30,46.45), ncol = 2, byrow = TRUE)),
     crs = 4326
   )
   cnty_sf <- sf::st_sf(cnty_df, geometry = cnty_geoms)
@@ -143,7 +177,9 @@ load_epa_level3_spatial_r <- function(ecoregion_path = NULL, county_path = NULL)
   custom_paths <- !is.null(ecoregion_path) || !is.null(county_path)
   default_dir <- "data/environmental/epa_ecoregions_l3"
   gpkg_p <- file.path(default_dir, "us_eco_l3.gpkg")
-  eco_json_p <- if (!is.null(ecoregion_path)) as.character(ecoregion_path) else file.path(default_dir, "us_eco_l3.geojson")
+  na_eco_p <- file.path(default_dir, "na_cec_eco_l3.geojson")
+  ca_cnty_p <- file.path(default_dir, "ca_census_divisions.geojson")
+  eco_json_p <- if (!is.null(ecoregion_path)) as.character(ecoregion_path) else if (file.exists(na_eco_p)) na_eco_p else file.path(default_dir, "us_eco_l3.geojson")
   cnty_json_p <- if (!is.null(county_path)) as.character(county_path) else file.path(default_dir, "us_counties.geojson")
 
   cache_id <- paste(
@@ -155,23 +191,66 @@ load_epa_level3_spatial_r <- function(ecoregion_path = NULL, county_path = NULL)
     return(get(cache_id, envir = .epa_l3_r_cache, inherits = FALSE))
   }
 
+  .merge_ca_cec_r <- function(eco_sf_in, cnty_sf_in) {
+    if (!custom_paths && file.exists(na_eco_p) && !identical(eco_json_p, na_eco_p)) {
+      na_sf <- tryCatch(sf::st_read(na_eco_p, quiet = TRUE), error = function(e) NULL)
+      if (!is.null(na_sf) && nrow(na_sf) > 0L) {
+        na_lbl <- if ("ecoregion_label" %in% names(na_sf)) na_sf$ecoregion_label else if ("NA_L3NAME" %in% names(na_sf)) na_sf$NA_L3NAME else if ("US_L3NAME" %in% names(na_sf)) na_sf$US_L3NAME else na_sf[[1]]
+        na_sf$ecoregion_label <- standardize_epa_l3_label_r(na_lbl)
+        na_sf <- sf::st_transform(na_sf[, "ecoregion_label", drop = FALSE], sf::st_crs(eco_sf_in))
+        gcol_e <- attr(eco_sf_in, "sf_column")
+        if (!is.null(gcol_e) && !identical(attr(na_sf, "sf_column"), gcol_e)) sf::st_geometry(na_sf) <- gcol_e
+        eco_sf_in <- rbind(eco_sf_in[, "ecoregion_label", drop = FALSE], na_sf[, "ecoregion_label", drop = FALSE])
+      }
+    }
+    if (!is.null(eco_sf_in) && !is.na(sf::st_crs(eco_sf_in)) && !isTRUE(sf::st_is_longlat(eco_sf_in))) {
+      eco_sf_in <- sf::st_transform(eco_sf_in, 4326)
+    }
+    if (!is.null(cnty_sf_in) && !is.na(sf::st_crs(cnty_sf_in)) && !isTRUE(sf::st_is_longlat(cnty_sf_in))) {
+      cnty_sf_in <- sf::st_transform(cnty_sf_in, 4326)
+    }
+    if (!custom_paths && file.exists(ca_cnty_p) && !is.null(cnty_sf_in)) {
+      ca_sf <- tryCatch(sf::st_read(ca_cnty_p, quiet = TRUE), error = function(e) NULL)
+      if (!is.null(ca_sf) && nrow(ca_sf) > 0L) {
+        ca_sf <- sf::st_transform(ca_sf, sf::st_crs(cnty_sf_in))
+        gcol_c <- attr(cnty_sf_in, "sf_column")
+        if (!is.null(gcol_c) && !identical(attr(ca_sf, "sf_column"), gcol_c)) sf::st_geometry(ca_sf) <- gcol_c
+        ca_st_c <- intersect(c("state_name", "PRNAME", "STATE_NAME", "state"), names(ca_sf))
+        ca_co_c <- intersect(c("county_norm", "CDNAME", "NAME", "county"), names(ca_sf))
+        if (length(ca_st_c) > 0L && length(ca_co_c) > 0L) {
+          ca_st_v <- .norm_us_state_r(ca_sf[[ca_st_c[1L]]])
+          ca_co_v <- .norm_us_county_r(ca_sf[[ca_co_c[1L]]], ca_st_v)
+          ca_sf$state_name <- ca_st_v
+          ca_sf$county_norm <- ca_co_v
+          ca_sf$county_key <- paste0(ca_st_v, "|", ca_co_v)
+        }
+        non_geom_c <- setdiff(names(cnty_sf_in), gcol_c)
+        for (miss_c in setdiff(non_geom_c, names(ca_sf))) ca_sf[[miss_c]] <- NA
+        cnty_sf_in <- rbind(cnty_sf_in[, c(non_geom_c, gcol_c), drop = FALSE], ca_sf[, c(non_geom_c, gcol_c), drop = FALSE])
+      }
+    }
+    list(eco_sf = eco_sf_in, cnty_sf = cnty_sf_in)
+  }
+
   if (!custom_paths && file.exists(gpkg_p)) {
     eco_sf <- sf::st_read(gpkg_p, layer = "us_eco_l3", quiet = TRUE)
     cnty_sf <- tryCatch(sf::st_read(gpkg_p, layer = "us_counties", quiet = TRUE), error = function(e) NULL)
     eco_sf$ecoregion_label <- standardize_epa_l3_label_r(
-      if ("ecoregion_label" %in% names(eco_sf)) eco_sf$ecoregion_label else eco_sf$US_L3NAME
+      if ("ecoregion_label" %in% names(eco_sf)) eco_sf$ecoregion_label else if ("NA_L3NAME" %in% names(eco_sf)) eco_sf$NA_L3NAME else eco_sf$US_L3NAME
     )
-    bundle <- list(eco_sf = eco_sf, cnty_sf = cnty_sf, use_live_county_intersection = FALSE)
+    m_ca <- .merge_ca_cec_r(eco_sf, cnty_sf)
+    bundle <- list(eco_sf = m_ca$eco_sf, cnty_sf = m_ca$cnty_sf, use_live_county_intersection = FALSE)
     assign(cache_id, bundle, envir = .epa_l3_r_cache)
     return(bundle)
   }
 
   if (file.exists(eco_json_p)) {
     eco_sf <- sf::st_read(eco_json_p, quiet = TRUE)
-    raw_lbl <- if ("ecoregion_label" %in% names(eco_sf)) eco_sf$ecoregion_label else if ("US_L3NAME" %in% names(eco_sf)) eco_sf$US_L3NAME else eco_sf[[1]]
+    raw_lbl <- if ("ecoregion_label" %in% names(eco_sf)) eco_sf$ecoregion_label else if ("NA_L3NAME" %in% names(eco_sf)) eco_sf$NA_L3NAME else if ("US_L3NAME" %in% names(eco_sf)) eco_sf$US_L3NAME else eco_sf[[1]]
     eco_sf$ecoregion_label <- standardize_epa_l3_label_r(raw_lbl)
     cnty_sf <- if (file.exists(cnty_json_p)) tryCatch(sf::st_read(cnty_json_p, quiet = TRUE), error = function(e) NULL) else NULL
-    bundle <- list(eco_sf = eco_sf, cnty_sf = cnty_sf, use_live_county_intersection = custom_paths)
+    m_ca <- .merge_ca_cec_r(eco_sf, cnty_sf)
+    bundle <- list(eco_sf = m_ca$eco_sf, cnty_sf = m_ca$cnty_sf, use_live_county_intersection = custom_paths || identical(eco_json_p, na_eco_p))
     assign(cache_id, bundle, envir = .epa_l3_r_cache)
     return(bundle)
   }
@@ -222,8 +301,10 @@ infer_epa_level3_ecoregion <- function(
   if (length(miss_idx) > 0L && !is.null(cnty_sf) && nrow(cnty_sf) > 0L) {
     st_norm <- .norm_us_state_r(st_vec[miss_idx])
     co_norm <- .norm_us_county_r(co_vec[miss_idx], st_norm)
-    c_st <- .norm_us_state_r(if ("state_name" %in% names(cnty_sf)) cnty_sf$state_name else cnty_sf[[1]])
-    c_co <- .norm_us_county_r(if ("county_norm" %in% names(cnty_sf)) cnty_sf$county_norm else cnty_sf[[2]], c_st)
+    c_st_col <- intersect(c("state_name", "STATE_NAME", "state", "PRNAME"), names(cnty_sf))
+    c_st <- .norm_us_state_r(if (length(c_st_col) > 0L) cnty_sf[[c_st_col[1L]]] else if ("county_key" %in% names(cnty_sf)) sub("\\|.*$", "", as.character(cnty_sf$county_key)) else cnty_sf[[1]])
+    c_co_col <- intersect(c("county_norm", "NAME", "CDNAME", "county"), names(cnty_sf))
+    c_co <- .norm_us_county_r(if (length(c_co_col) > 0L) cnty_sf[[c_co_col[1L]]] else if ("county_key" %in% names(cnty_sf)) sub("^.*\\|", "", as.character(cnty_sf$county_key)) else cnty_sf[[min(2L, ncol(cnty_sf))]], c_st)
     c_keys <- paste0(c_st, "|", c_co)
     c_keys_ns <- paste0(c_st, "|", gsub(" ", "", c_co))
 
@@ -291,8 +372,8 @@ run_supervised_ecoregion_cda <- function(
 
   # If regional_group was absent or contained only legacy non-EPA heuristic strings, infer via polygon lookup
   if (all(is.na(rg))) {
-    lat_col <- intersect(c("decimalLatitude", "latitude"), names(df))
-    lon_col <- intersect(c("decimalLongitude", "longitude"), names(df))
+    lat_col <- intersect(c("decimalLatitude"), names(df))
+    lon_col <- intersect(c("decimalLongitude"), names(df))
     if (length(lat_col) > 0L && length(lon_col) > 0L || any(c("stateProvince", "county") %in% names(df))) {
       lat_v <- if (length(lat_col) > 0L) df[[lat_col[1]]] else rep(NA_real_, n)
       lon_v <- if (length(lon_col) > 0L) df[[lon_col[1]]] else rep(NA_real_, n)
@@ -382,7 +463,7 @@ run_supervised_ecoregion_cda <- function(
     }
 
     sel_cols <- if (exists("select_morphometric_subspace", mode = "function")) {
-      select_morphometric_subspace(X_full[is_train, , drop = FALSE], group_vec = rg[is_train])
+      select_morphometric_subspace(X_full[is_train, , drop = FALSE], group_vec = rg[is_train], allow_supervised_f = FALSE)
     } else {
       n_min_g <- min(as.integer(table(rg[is_train])))
       feature_cols[seq_len(max(1L, min(length(feature_cols), floor(n_min_g / 3L))))]
@@ -409,54 +490,93 @@ run_supervised_ecoregion_cda <- function(
     g_n <- nlevels(grp_a)
     priors_u <- rep(1.0 / g_n, g_n)
 
-    if (g_n >= 2L && requireNamespace("MASS", quietly = TRUE)) {
-      # Drop any near-constant predictor inside active training anchors to prevent singular covariance
+    if (g_n >= 2L) {
       sds_a <- apply(X_a, 2, stats::sd, na.rm = TRUE)
       keep_sd <- is.finite(sds_a) & (sds_a > 1e-7)
       if (!any(keep_sd)) keep_sd[1] <- TRUE
       X_a_fit <- X_a[, keep_sd, drop = FALSE]
       X_proj_fit <- X_use[, keep_sd, drop = FALSE]
+      p_ef <- ncol(X_a_fit)
 
-      lda_cv <- tryCatch(MASS::lda(x = X_a_fit, grouping = grp_a, prior = priors_u, CV = TRUE), error = function(e) NULL)
-      if (!is.null(lda_cv) && !is.null(lda_cv$class)) {
-        loocv_acc <- round(mean(as.character(lda_cv$class) == as.character(grp_a), na.rm = TRUE), 4)
+      sp_w_eco <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(df, active_mask = is_train, recompute = TRUE) else rep(1.0, n)
+      w_eco_a <- auth_w[active_idx] * sp_w_eco[active_idx]
+      if (!any(is.finite(w_eco_a) & w_eco_a > 0.0)) w_eco_a <- rep(1.0, length(active_idx))
+
+      if (exists("compute_weighted_shrinkage_cda_loocv", mode = "function")) {
+        loocv_acc <- tryCatch(
+          compute_weighted_shrinkage_cda_loocv(
+            X_a_fit, grp_a, w_a = w_eco_a,
+            coords_df = df[active_idx, , drop = FALSE],
+            X_cand = X_full[active_idx, , drop = FALSE],
+            deme_radius_km = 10.0
+          ),
+          error = function(e) NA_real_
+        )
       }
 
-      lda_fit <- tryCatch(MASS::lda(x = X_a_fit, grouping = grp_a, prior = priors_u), error = function(e) NULL)
-      if (!is.null(lda_fit)) {
-        lda_pred <- stats::predict(lda_fit, newdata = X_proj_fit)
-        pred_eco <- as.character(lda_pred$class)
-        post_mat <- as.matrix(lda_pred$posterior)
-        post_max <- round(apply(post_mat, 1, max, na.rm = TRUE), 4)
-
-        Z_raw <- as.matrix(lda_pred$x)
-        if (ncol(Z_raw) == 1L) {
-          v1 <- as.numeric(Z_raw[, 1])
-          src2 <- if ("PC2" %in% colnames(X_full)) X_full[, "PC2"] else if (ncol(X_full) >= 2L) X_full[, 2] else X_full[, 1]
-          v2 <- as.numeric(src2) - mean(src2, na.rm = TRUE)
-          b1 <- v1 - mean(v1, na.rm = TRUE)
-          v2 <- v2 - (sum(v2 * b1, na.rm = TRUE) / max(sum(b1^2, na.rm = TRUE), 1e-12)) * b1
-          Z_raw <- cbind(LD1 = v1, LD2 = v2)
-        }
-        can1_out <- round(as.numeric(Z_raw[, 1]), 5)
-        can2_out <- round(as.numeric(Z_raw[, 2]), 5)
-
-        svd_sq <- lda_fit$svd^2
-        if (length(svd_sq) >= 2L) {
-          var_pct <- round(100.0 * svd_sq[1:2] / max(sum(svd_sq), 1e-12), 2)
-        } else if (length(svd_sq) == 1L) {
-          var_pct <- c(100.0, 0.0)
-        }
-
-        Z_act_2d <- cbind(can1_out[active_idx], can2_out[active_idx])
-        struct_load <- tryCatch(stats::cor(X_a_fit, Z_act_2d), error = function(e) NULL)
-        centroids_2d <- do.call(rbind, lapply(levels(grp_a), function(eg) {
-          m_e <- active_idx[grp_a == eg]
-          c(mean(can1_out[m_e], na.rm = TRUE), mean(can2_out[m_e], na.rm = TRUE))
-        }))
-        rownames(centroids_2d) <- levels(grp_a)
-        colnames(centroids_2d) <- c("Can1", "Can2")
+      eco_lvls <- levels(grp_a)
+      gm_e <- colSums(X_a_fit * w_eco_a) / sum(w_eco_a)
+      B_e <- matrix(0.0, p_ef, p_ef); W_e <- matrix(0.0, p_ef, p_ef)
+      Xc_e <- matrix(0.0, nrow(X_a_fit), p_ef)
+      mu_e_mat <- matrix(0.0, g_n, p_ef, dimnames = list(eco_lvls, colnames(X_a_fit)))
+      for (ki in seq_len(g_n)) {
+        km <- which(grp_a == eco_lvls[ki])
+        wk <- w_eco_a[km]; if (sum(wk) <= 0.0) wk <- rep(1.0, length(km))
+        mk <- colSums(X_a_fit[km, , drop = FALSE] * wk) / sum(wk)
+        mu_e_mat[ki, ] <- mk
+        dm <- mk - gm_e; B_e <- B_e + sum(wk) * tcrossprod(dm)
+        dx <- sweep(X_a_fit[km, , drop = FALSE], 2L, mk, "-"); Xc_e[km, ] <- dx
+        W_e <- W_e + crossprod(dx, dx * wk)
       }
+      denom_e <- max(sum(w_eco_a) - sum(vapply(eco_lvls, function(eg) { wk <- w_eco_a[grp_a == eg]; if (sum(wk) > 0) sum(wk^2) / sum(wk) else 1.0 }, numeric(1))), 1.0)
+      S_w_e <- W_e / denom_e
+      S_reg_e <- if (exists("compute_ledoit_wolf_cov", mode = "function")) {
+        compute_ledoit_wolf_cov(S_w_e, X_centered = Xc_e, n_obs = nrow(X_a_fit), weights = w_eco_a)
+      } else {
+        S_w_e + diag(1e-4, p_ef)
+      }
+      k_ef <- max(1L, min(p_ef, g_n - 1L))
+      eig_e <- solve_shrinkage_cda_eigen(S_reg_e, B_e, max_axes = k_ef)
+      Z_full_e <- sweep(X_proj_fit, 2L, gm_e, "-") %*% eig_e$vectors
+      cent_full_e <- sweep(mu_e_mat, 2L, gm_e, "-") %*% eig_e$vectors
+
+      lp_mat <- matrix(0.0, nrow = n, ncol = g_n, dimnames = list(NULL, eco_lvls))
+      for (ki in seq_len(g_n)) {
+        dz <- sweep(Z_full_e, 2L, cent_full_e[ki, ], "-")
+        lp_mat[, ki] <- log(priors_u[ki]) - 0.5 * rowSums(dz^2)
+      }
+      post_mat <- exp(lp_mat - apply(lp_mat, 1L, max, na.rm = TRUE))
+      post_mat <- post_mat / pmax(rowSums(post_mat, na.rm = TRUE), 1e-12)
+      pred_eco <- eco_lvls[max.col(post_mat, ties.method = "first")]
+      post_max <- round(apply(post_mat, 1L, max, na.rm = TRUE), 4)
+
+      Z_raw <- Z_full_e
+      if (ncol(Z_raw) == 1L) {
+        v1 <- as.numeric(Z_raw[, 1])
+        src2 <- if ("PC2" %in% colnames(X_full)) X_full[, "PC2"] else if (ncol(X_full) >= 2L) X_full[, 2] else X_full[, 1]
+        v2 <- as.numeric(src2) - mean(src2, na.rm = TRUE)
+        b1 <- v1 - mean(v1, na.rm = TRUE)
+        v2 <- v2 - (sum(v2 * b1, na.rm = TRUE) / max(sum(b1^2, na.rm = TRUE), 1e-12)) * b1
+        Z_raw <- cbind(Can1 = v1, Can2 = v2)
+      }
+      can1_out <- round(as.numeric(Z_raw[, 1]), 5)
+      can2_out <- round(as.numeric(Z_raw[, 2]), 5)
+
+      ev_e <- pmax(eig_e$values, 0.0)
+      if (length(ev_e) >= 2L) {
+        var_pct <- round(100.0 * ev_e[1:2] / max(sum(ev_e), 1e-12), 2)
+      } else {
+        var_pct <- c(100.0, 0.0)
+      }
+      Z_act_2d <- cbind(can1_out[active_idx], can2_out[active_idx])
+      struct_load <- tryCatch(stats::cor(X_a_fit, Z_act_2d), error = function(e) NULL)
+      centroids_2d <- do.call(rbind, lapply(eco_lvls, function(eg) {
+        m_e <- active_idx[grp_a == eg]
+        w_m <- w_eco_a[grp_a == eg]
+        c(stats::weighted.mean(can1_out[m_e], w = w_m, na.rm = TRUE), stats::weighted.mean(can2_out[m_e], w = w_m, na.rm = TRUE))
+      }))
+      rownames(centroids_2d) <- eco_lvls
+      colnames(centroids_2d) <- c("Can1", "Can2")
     }
 
     # Euclidean PERMANOVA across active EPA Level III Ecoregions
@@ -566,14 +686,13 @@ run_supervised_ecoregion_cda <- function(
       paste0("PC", seq_len(5)),
       "AR_inv_std",
       "petiole_to_blade_ratio_std",
-      "plant_height_cm_std",
-      "log_centsize_std",
+      "scape_to_basal_leaf_ratio_std",
       "aspect_ratio_std",
       "solidity_std"
     )
   }
   avail <- intersect(unique(cand), names(df))
-  if (length(avail) == 0L) avail <- intersect(c(paste0("PC", seq_len(5)), paste0("Sym_PC", seq_len(5))), names(df))
+  if (length(avail) == 0L) avail <- intersect(paste0("PC", seq_len(5)), names(df))
   avail
 }
 
@@ -865,8 +984,8 @@ run_multivariate_manova_audit <- function(
   # 3. Non-NA regional_group US EPA Level III Ecoregions (>= 2 regions with >= 3 vouchers)
   rg_vec <- if ("regional_group" %in% names(df)) standardize_epa_l3_label_r(df$regional_group) else rep(NA_character_, n)
   if (all(is.na(rg_vec))) {
-    lat_col <- intersect(c("decimalLatitude", "latitude"), names(df))
-    lon_col <- intersect(c("decimalLongitude", "longitude"), names(df))
+    lat_col <- intersect(c("decimalLatitude"), names(df))
+    lon_col <- intersect(c("decimalLongitude"), names(df))
     if ((length(lat_col) > 0L && length(lon_col) > 0L) || any(c("stateProvince", "county") %in% names(df))) {
       lat_v <- if (length(lat_col) > 0L) df[[lat_col[1]]] else rep(NA_real_, n)
       lon_v <- if (length(lon_col) > 0L) df[[lon_col[1]]] else rep(NA_real_, n)
@@ -930,6 +1049,7 @@ run_multivariate_manova_audit <- function(
 
     if (length(act_lvls) < 2L) next
     is_train <- cand_mask & (g_raw %in% act_lvls)
+    if (has_positive_anchors && exists("compute_spatial_balance_weights", mode = "function")) w_use <- auth_w * compute_spatial_balance_weights(df, active_mask = is_train, recompute = TRUE)
 
     X_full <- as.matrix(df[, avail_cols, drop = FALSE])
     storage.mode(X_full) <- "double"
@@ -943,7 +1063,7 @@ run_multivariate_manova_audit <- function(
     }
 
     sel_cols <- if (exists("select_morphometric_subspace", mode = "function")) {
-      suppressMessages(select_morphometric_subspace(X_full[is_train, , drop = FALSE], group_vec = g_raw[is_train]))
+      suppressMessages(select_morphometric_subspace(X_full[is_train, , drop = FALSE], group_vec = g_raw[is_train], allow_supervised_f = FALSE))
     } else {
       n_min_g <- min(as.integer(table(g_raw[is_train])))
       p_max_wt <- if (n_min_g >= 6L) max(2L, floor(n_min_g / 3L)) else ncol(X_full)
@@ -1161,8 +1281,8 @@ draw_dynamic_ecoregion_mean_silhouettes <- function(
   }
 
   std_hmat <- extract_standardized_harmonic_matrix(df, max_k = 12L)
-  pc1_v <- if ("Sym_PC1" %in% names(df)) as.numeric(df$Sym_PC1) else if ("PC1" %in% names(df)) as.numeric(df$PC1) else rep(0.0, nrow(df))
-  pc2_v <- if ("Sym_PC2" %in% names(df)) as.numeric(df$Sym_PC2) else if ("PC2" %in% names(df)) as.numeric(df$PC2) else rep(0.0, nrow(df))
+  pc1_v <- if ("PC1" %in% names(df)) as.numeric(df$PC1) else rep(0.0, nrow(df))
+  pc2_v <- if ("PC2" %in% names(df)) as.numeric(df$PC2) else rep(0.0, nrow(df))
 
   for (idx_g in seq_len(m_disp)) {
     g_name <- ecos_present[idx_g]

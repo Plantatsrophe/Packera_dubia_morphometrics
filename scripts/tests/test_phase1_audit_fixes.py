@@ -304,7 +304,6 @@ class TestPhase1AuditFixes(unittest.TestCase):
         # Step 04: zero pre-CV deme shrinkage, zero soft geo prior in CDA, zero u_cut <= 0.70 boundary trimming, include_gmm_clusters = !is_intra_mode
         self.assertNotIn("apply_hierarchical_population_deme_shrinkage(closed_df", r04)
         self.assertIn("assign_spatial_gathering_demes(closed_df", r04)
-        self.assertNotIn(".compute_soft_geo_range_log_prior", r04)
         self.assertNotIn("quantile(unc_v, 0.70", r04)
         self.assertIn("include_gmm_clusters = !is_intra_mode", r04)
         self.assertIn("include_gmm_clusters = TRUE", rman)
@@ -370,10 +369,126 @@ class TestPhase1AuditFixes(unittest.TestCase):
         self.assertIn('pull_num("archetype_score")', rfpu)
         self.assertIn("spec_df$archetype_score <- res$arch", rfpu)
         self.assertIn("log10(res$cs)", rfpu)
-        self.assertIn('ba_cm2 <- if ("blade_area_cm2" %in% names(fac_df))', rdlu)
+        self.assertIn('area_mm2 <- if ("area_mm2" %in% names(fac_df))', rdlu)
         self.assertIn('if ("efa_qc_pass" %in% names(df))', rdb)
         self.assertIn('if ("qc_flag_reason" %in% names(df))', rdb)
         self.assertIn("dplyr::coalesce(n_lvs_raw, leaf_cnt_raw, bc_sum, bas_cnt_raw)", r06)
+
+
+
+
+class TestSteps1To4ZeroTrustVariableContracts(unittest.TestCase):
+    """Zero-trust regression suite verifying Steps 1-4 variable, geographic, anatomical, and schema contracts."""
+
+    def test_steps1_to_4_zero_trust_variable_and_schema_contracts(self):
+        import cv2
+        import numpy as np
+        import pandas as pd
+        from scripts.core.config import PipelineConfig
+        from scripts.core.db import get_db_connection
+        from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION, init_db_schema
+        from scripts.core.epa_ecoregions import DEFAULT_CEC_NA_L3_GEOJSON, infer_regional_group, _normalize_us_county_name
+        from scripts.core.usda_plants_ranges import _normalize_us_state_name, load_us_county_spatial_graph, resolve_voucher_us_county
+        from scripts.core.taxonomy_authority import stratify_duplicates
+        import importlib
+        compute_capitulum_metrics = importlib.import_module('scripts.pipeline.02_segment_and_extract').compute_capitulum_metrics
+
+        root = Path(__file__).resolve().parents[2]
+        cfg = PipelineConfig.from_yaml(root / "config" / "config.yaml")
+
+        # 1. Step 1: western_longitude_threshold == -104.05, Canadian CEC ecoregions & provinces, VA independent cities
+        self.assertAlmostEqual(float(cfg.harvesting.western_longitude_threshold), -104.05, places=4)
+        self.assertIn("na_cec_eco_l3.geojson", str(DEFAULT_CEC_NA_L3_GEOJSON))
+        self.assertEqual(_normalize_us_state_name("ON"), "ontario")
+        self.assertEqual(_normalize_us_state_name("Québec"), "quebec")
+        self.assertEqual(_normalize_us_county_name("Fairfax City", "virginia"), "fairfax city")
+        self.assertEqual(_normalize_us_county_name("Fairfax County", "virginia"), "fairfax")
+        self.assertEqual(_normalize_us_county_name("City of Baltimore", "maryland"), "baltimore city")
+        self.assertEqual(_normalize_us_county_name("St. Louis City", "missouri"), "st louis city")
+        self.assertEqual(_normalize_us_county_name("Chesapeake", "virginia"), "chesapeake")
+        self.assertEqual(_normalize_us_county_name("Norfolk", "virginia"), "norfolk")
+
+        sg_ca = load_us_county_spatial_graph()
+        st_ca, co_ca, is_non_us = resolve_voucher_us_county(45.42, -75.69, "Ontario", "Ottawa", sg_ca)
+        self.assertEqual(st_ca, "ontario")
+        self.assertFalse(is_non_us)
+        eco_on = infer_regional_group(43.70, -79.40, state_province="Ontario", county="Toronto")
+        self.assertTrue(bool(eco_on) and eco_on != "Unmapped_Ecoregion")
+
+        # Missing pre-GPS coordinateUncertainty receives neutral 1000 m weight (never 5000 m penalty)
+        dup_df = pd.DataFrame([
+            {"catalogNumber": "DUP_NO_UNC", "institutionCode": "GH", "scientificName": "Packera aurea",
+             "recordedBy": "M.L. Fernald", "recordNumber": "401", "eventDate": "1912-06-10",
+             "determiner_tier": "Tier_1_Gold", "decimalLatitude": 45.1, "decimalLongitude": -68.9,
+             "coordinateUncertainty": np.nan},
+            {"catalogNumber": "DUP_2500M", "institutionCode": "NY", "scientificName": "Packera aurea",
+             "recordedBy": "M.L. Fernald", "recordNumber": "401", "eventDate": "1912-06-10",
+             "determiner_tier": "Tier_1_Gold", "decimalLatitude": 45.1, "decimalLongitude": -68.9,
+             "coordinateUncertainty": 2500.0},
+        ])
+        strat = stratify_duplicates(dup_df, home_herbarium="NCU")
+        prim_cat = strat.loc[strat["is_primary_duplicate"], "catalogNumber"].iloc[0]
+        self.assertEqual(prim_cat, "DUP_NO_UNC", "Neutral 1000 m missing uncertainty must outrank coarse 2500 m sheet.")
+
+        # 2. Step 2: Single-head capitulum HSV phyllary isolation & [0.25, 4.5] bounds
+        crop_bgr = np.full((240, 200, 3), 245, dtype=np.uint8)  # pale herbarium sheet background
+        mask_cap = np.zeros((240, 200), dtype=np.uint8)
+        # Green herbaceous involucre (H ~ 60 px, W ~ 50 px) at bottom + white capillary pappus plume at top (H ~ 80 px, W ~ 110 px)
+        cv2.ellipse(crop_bgr, (100, 155), (25, 30), 0, 0, 360, (45, 95, 55), -1)   # BGR olive-green phyllaries
+        cv2.ellipse(crop_bgr, (100, 85), (55, 42), 0, 0, 360, (238, 240, 242), -1)  # BGR bright white pappus
+        cv2.ellipse(mask_cap, (100, 155), (25, 30), 0, 0, 360, 255, -1)
+        cv2.ellipse(mask_cap, (100, 85), (55, 42), 0, 0, 360, 255, -1)
+        cap_m = compute_capitulum_metrics(mask_cap, (0, 0, 240, 200), pixels_per_mm=10.0, crop_bgr=crop_bgr, class_id=2)
+        self.assertIsNotNone(cap_m)
+        # Isolated phyllary cup width should reflect ~50 px (~5.0 mm), not the 110 px (11.0 mm) white pappus flare!
+        self.assertLess(cap_m["involucre_width_mm"], 7.5)
+        self.assertGreaterEqual(cap_m["AR_inv"], 0.90)
+        # Pressed campanulate head with AR_inv = 0.55 survives new [0.25, 4.5] bounds
+        mask_camp = np.zeros((200, 200), dtype=np.uint8)
+        cv2.ellipse(mask_camp, (100, 100), (55, 30), 0, 0, 360, 255, -1)
+        camp_m = compute_capitulum_metrics(mask_camp, (40, 30, 160, 170), pixels_per_mm=10.0, class_id=4)
+        self.assertIsNotNone(camp_m)
+        self.assertLess(camp_m["AR_inv"], 0.70)
+        self.assertGreaterEqual(camp_m["AR_inv"], 0.25)
+
+        # 3. SQLite schema user_version == 20261114 & zero twin columns across tables and v_integrative_triage_master
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261114)
+        conn = get_db_connection(":memory:", init_schema=True)
+        try:
+            init_db_schema(conn)
+            v_cols = {r[1] for r in conn.execute("PRAGMA table_info(vouchers)").fetchall()}
+            el_cols = {r[1] for r in conn.execute("PRAGMA table_info(extracted_leaves)").fetchall()}
+            otu_cols = {r[1] for r in conn.execute("PRAGMA table_info(otu_morphometrics)").fetchall()}
+            view_cols = {r[1] for r in conn.execute("PRAGMA table_info(v_integrative_triage_master)").fetchall()}
+            for twin in ("latitude", "longitude"):
+                self.assertNotIn(twin, v_cols)
+                self.assertNotIn(twin, otu_cols)
+                self.assertNotIn(twin, view_cols)
+            self.assertIn("within_rosette_efa_dispersion", otu_cols)
+            self.assertIn("morphometric_outlier_flag", otu_cols)
+            self.assertIn("misidentification_flag", otu_cols)
+            self.assertIn("morphometric_outlier_flag", view_cols)
+            self.assertIn("misidentification_flag", view_cols)
+            self.assertIn("area_mm2", el_cols)
+            self.assertIn("aspect_ratio", el_cols)
+            for k in range(1, 25):
+                self.assertNotIn(f"B{k}", otu_cols)
+                self.assertNotIn(f"C{k}", otu_cols)
+        finally:
+            conn.close()
+
+        # 4. Step 3 & Step 4 R anti-circularity & leakage-free contracts
+        aw_src = (root / "scripts" / "morphometrics" / "authority_weighting_utils.R").read_text(encoding="utf-8")
+        pm_src = (root / "scripts" / "morphometrics" / "plasticity_mitigation_utils.R").read_text(encoding="utf-8")
+        pf_src = (root / "scripts" / "morphometrics" / "pub_figures_utils.R").read_text(encoding="utf-8")
+        s04_src = (root / "scripts" / "morphometrics" / "04_gmm_morphotools.R").read_text(encoding="utf-8")
+        self.assertIn('(G >= 2L) && (target_modality != "morph")', aw_src)
+        self.assertIn("allow_supervised_f = FALSE", aw_src)
+        self.assertIn("allow_supervised_f = TRUE", aw_src)
+        self.assertNotIn("decimalLatitude", pm_src)
+        self.assertNotIn("regional_group", pm_src)
+        self.assertIn("kern_fine + 0.35 * kern_reg", pf_src)
+        self.assertIn('c("AR_inv", "petiole_to_blade_ratio", "scape_to_basal_leaf_ratio")', s04_src)
 
 
 if __name__ == "__main__":

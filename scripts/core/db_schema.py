@@ -18,8 +18,10 @@ from typing import Dict, List, Set, Tuple
 HARMONIC_COLS: Tuple[str, ...] = tuple(
     f"{coef}{idx}" for idx in range(1, 25) for coef in ("A", "B", "C", "D")
 )
+SYM_HARMONIC_COLS: Tuple[str, ...] = tuple(
+    f"{coef}{idx}" for idx in range(1, 25) for coef in ("A", "D")
+)
 PC_COLS: Tuple[str, ...] = tuple(f"PC{idx}" for idx in range(1, 16))
-SYM_PC_COLS: Tuple[str, ...] = tuple(f"Sym_PC{idx}" for idx in range(1, 16))
 
 WC_BIO_COLUMNS: Tuple[str, ...] = (
     "bio1_temp_mean",
@@ -158,9 +160,8 @@ def _build_master_view_ddl() -> str:
         for col in WC_BIO_COLUMNS
     )
 
-    harm_view_selects = ",\n        ".join(f"om.{h} AS {h}" for h in HARMONIC_COLS)
+    harm_view_selects = ",\n        ".join(f"om.{h} AS {h}" for h in SYM_HARMONIC_COLS)
     pc_view_selects = ",\n        ".join(f"om.{p} AS {p}" for p in PC_COLS)
-    sym_pc_view_selects = ",\n        ".join(f"om.{sp} AS {sp}" for sp in SYM_PC_COLS)
 
     return f"""
     DROP VIEW IF EXISTS v_integrative_triage_master;
@@ -175,7 +176,6 @@ def _build_master_view_ddl() -> str:
         v.recordedBy AS recordedBy,
         v.recordNumber AS recordNumber,
         v.identifiedBy AS identifiedBy,
-        v.determiner_raw AS determiner_raw,
         COALESCE(rac.determiner_tier, om.determiner_tier, v.determiner_tier) AS determiner_tier,
         COALESCE(rac.type_status, v.type_status, om.type_status) AS type_status,
         COALESCE(
@@ -191,10 +191,8 @@ def _build_master_view_ddl() -> str:
         v.county AS county,
         v.stateProvince AS stateProvince,
         v.locality AS locality,
-        COALESCE(v.decimalLatitude, v.latitude) AS decimalLatitude,
-        COALESCE(v.latitude, v.decimalLatitude) AS latitude,
-        COALESCE(v.decimalLongitude, v.longitude) AS decimalLongitude,
-        COALESCE(v.longitude, v.decimalLongitude) AS longitude,
+        v.decimalLatitude AS decimalLatitude,
+        v.decimalLongitude AS decimalLongitude,
         v.coordinateUncertainty AS coordinateUncertainty,
         v.year AS year,
         v.month AS month,
@@ -212,8 +210,7 @@ def _build_master_view_ddl() -> str:
         v.infraspecific_taxon AS infraspecific_taxon,
         v.georef_qc_status AS georef_qc_status,
         COALESCE(rac.species_standardized, om.species_standardized, v.species_standardized) AS species_standardized,
-        COALESCE(rac.is_promoted_bronze, om.is_promoted_anchor, om.is_promoted_bronze, 0) AS is_promoted_anchor,
-        COALESCE(rac.is_promoted_bronze, om.is_promoted_bronze, om.is_promoted_anchor, 0) AS is_promoted_bronze,
+        COALESCE(rac.is_promoted_bronze, om.is_promoted_bronze, 0) AS is_promoted_bronze,
         COALESCE(rac.authority_weight, om.authority_weight) AS authority_weight,
         COALESCE(rac.spatial_balance_weight, v.spatial_balance_weight, 1.0) AS spatial_balance_weight,
         COALESCE(om.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm,
@@ -238,24 +235,22 @@ def _build_master_view_ddl() -> str:
         pi.scape_to_basal_leaf_ratio AS scape_to_basal_leaf_ratio,
         pi.rosette_patch_path AS rosette_patch_path,
         pi.rosette_mask_path AS rosette_mask_path,
-        -- Reproductive & phenological traits (with sheet-level pid=0 fallback)
-        COALESCE(vrp.capitula_count, vrp0.capitula_count) AS capitula_count,
-        COALESCE(vrp.involucre_height_px, vrp0.involucre_height_px) AS involucre_height_px,
-        COALESCE(vrp.involucre_width_px, vrp0.involucre_width_px) AS involucre_width_px,
-        COALESCE(vrp.involucre_height_mm, vrp0.involucre_height_mm) AS involucre_height_mm,
-        COALESCE(vrp.involucre_width_mm, vrp0.involucre_width_mm) AS involucre_width_mm,
-        COALESCE(om.AR_inv, vrp.AR_inv, vrp.capitulum_aspect_ratio, vrp0.AR_inv, vrp0.capitulum_aspect_ratio) AS AR_inv,
-        COALESCE(vrp.capitulum_aspect_ratio, vrp.AR_inv, vrp0.capitulum_aspect_ratio, vrp0.AR_inv) AS capitulum_aspect_ratio,
-        COALESCE(vrp.total_capitula, vrp0.total_capitula, vrp.capitula_count, vrp0.capitula_count) AS total_capitula,
-        COALESCE(vrp.n_anthesis, vrp0.n_anthesis) AS n_anthesis,
-        COALESCE(vrp.n_bud, vrp0.n_bud) AS n_bud,
-        COALESCE(vrp.n_fruiting, vrp.n_fruit, vrp0.n_fruiting, vrp0.n_fruit) AS n_fruiting,
-        COALESCE(vrp.n_fruit, vrp.n_fruiting, vrp0.n_fruit, vrp0.n_fruiting) AS n_fruit,
-        COALESCE(vrp.n_senescent, vrp0.n_senescent) AS n_senescent,
-        COALESCE(vrp.voucher_phenological_state, vrp0.voucher_phenological_state) AS voucher_phenological_state,
-        COALESCE(vrp.is_verified_anthesis, vrp0.is_verified_anthesis) AS is_verified_anthesis,
-        COALESCE(vrp.reproductive_stage_confidence, vrp0.reproductive_stage_confidence) AS reproductive_stage_confidence,
-        COALESCE(vrp.dominant_pappus_ratio, vrp0.dominant_pappus_ratio) AS dominant_pappus_ratio,
+        -- Reproductive & phenological traits (strict per-individual isolation; pid=0 fallback ONLY when vrp row is absent)
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.capitula_count ELSE vrp0.capitula_count END AS capitula_count,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_height_px ELSE vrp0.involucre_height_px END AS involucre_height_px,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_px ELSE vrp0.involucre_width_px END AS involucre_width_px,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_height_mm ELSE vrp0.involucre_height_mm END AS involucre_height_mm,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_mm ELSE vrp0.involucre_width_mm END AS involucre_width_mm,
+        COALESCE(om.AR_inv, CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.AR_inv ELSE vrp0.AR_inv END) AS AR_inv,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN COALESCE(vrp.total_capitula, vrp.capitula_count) ELSE COALESCE(vrp0.total_capitula, vrp0.capitula_count) END AS total_capitula,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.n_anthesis ELSE vrp0.n_anthesis END AS n_anthesis,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.n_bud ELSE vrp0.n_bud END AS n_bud,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.n_fruiting ELSE vrp0.n_fruiting END AS n_fruiting,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.n_senescent ELSE vrp0.n_senescent END AS n_senescent,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.voucher_phenological_state ELSE vrp0.voucher_phenological_state END AS voucher_phenological_state,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.is_verified_anthesis ELSE vrp0.is_verified_anthesis END AS is_verified_anthesis,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.reproductive_stage_confidence ELSE vrp0.reproductive_stage_confidence END AS reproductive_stage_confidence,
+        CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.dominant_pappus_ratio ELSE vrp0.dominant_pappus_ratio END AS dominant_pappus_ratio,
         -- Step 03 & Step 04 OTU Morphometrics & CDA
         om.solidity AS solidity,
         om.dissection_index AS dissection_index,
@@ -297,12 +292,11 @@ def _build_master_view_ddl() -> str:
         om.leaf_count AS leaf_count,
         om.morph_tier_source AS morph_tier_source,
         om.foliar_variance AS foliar_variance,
-        om.heteroblasty_index AS heteroblasty_index,
+        om.within_rosette_efa_dispersion AS within_rosette_efa_dispersion,
         om.efd_harmonic_opt AS efd_harmonic_opt,
         om.efd_k95_pcs AS efd_k95_pcs,
         om.selected_morph_features AS selected_morph_features,
         {pc_view_selects},
-        {sym_pc_view_selects},
         om.gmm_cluster AS gmm_cluster,
         om.gmm_uncertainty AS gmm_uncertainty,
         om.cda_predicted_taxon AS cda_predicted_taxon,
@@ -317,7 +311,7 @@ def _build_master_view_ddl() -> str:
         om.ecoregion_cda_predicted AS ecoregion_cda_predicted,
         om.ecoregion_cda_posterior_prob AS ecoregion_cda_posterior_prob,
         om.morphometric_outlier_flag AS morphometric_outlier_flag,
-        COALESCE(om.misidentification_flag, om.morphometric_outlier_flag) AS misidentification_flag,
+        om.misidentification_flag AS misidentification_flag,
         om.triage_priority AS triage_priority,
         om.discordance_reason AS morph_discordance_reason,
         om.has_empirical_type_anchor AS has_empirical_type_anchor,
@@ -340,8 +334,6 @@ def _build_master_view_ddl() -> str:
         srf.spatial_autocorr_range_km AS spatial_autocorr_range_km,
         srf.spatial_block_id AS spatial_block_id,
         COALESCE(srf.doy, v.doy) AS doy,
-        v.pheno_sin AS pheno_sin,
-        v.pheno_cos AS pheno_cos,
         srf.expected_doy AS expected_doy,
         srf.hopkins_expected AS hopkins_expected,
         srf.delta_doy AS delta_doy,
@@ -410,9 +402,9 @@ def _build_master_view_ddl() -> str:
         ON ec.lat_lon_key = COALESCE(
             srf.lat_lon_key,
             CASE
-                WHEN COALESCE(v.latitude, v.decimalLatitude) IS NOT NULL
-                 AND COALESCE(v.longitude, v.decimalLongitude) IS NOT NULL
-                THEN printf('%.5f_%.5f', COALESCE(v.latitude, v.decimalLatitude), COALESCE(v.longitude, v.decimalLongitude))
+                WHEN v.decimalLatitude IS NOT NULL
+                 AND v.decimalLongitude IS NOT NULL
+                THEN printf('%.5f_%.5f', v.decimalLatitude, v.decimalLongitude)
                 ELSE NULL
             END,
             (SELECT ec2.lat_lon_key FROM environmental_cache ec2 WHERE ec2.catalogNumber = rac.catalogNumber LIMIT 1)
@@ -426,8 +418,8 @@ def _build_master_view_ddl() -> str:
 
 def _build_schema_ddl() -> str:
     harm_ddl = ",\n        ".join(f"{h} REAL" for h in HARMONIC_COLS)
+    sym_harm_ddl = ",\n        ".join(f"{h} REAL" for h in SYM_HARMONIC_COLS)
     pc_ddl = ",\n        ".join(f"{p} REAL" for p in PC_COLS)
-    sym_pc_ddl = ",\n        ".join(f"{sp} REAL" for sp in SYM_PC_COLS)
     wc_srf_ddl = ",\n        ".join(
         f"{col} REAL"
         for col in WC_BIO_COLUMNS
@@ -481,24 +473,19 @@ def _build_schema_ddl() -> str:
         recordedBy TEXT,
         recordNumber TEXT,
         identifiedBy TEXT,
-        determiner_raw TEXT,
         determiner_tier TEXT,
         type_status TEXT,
         county TEXT,
         stateProvince TEXT,
         locality TEXT,
         decimalLatitude REAL,
-        latitude REAL,
         decimalLongitude REAL,
-        longitude REAL,
         coordinateUncertainty REAL,
         year INTEGER,
         month INTEGER,
         day INTEGER,
         eventDate TEXT,
         doy REAL,
-        pheno_sin REAL,
-        pheno_cos REAL,
         regional_group TEXT,
         image_path TEXT,
         exsiccatae_key TEXT,
@@ -558,7 +545,7 @@ def _build_schema_ddl() -> str:
         extent REAL,
         aspect_ratio REAL,
         area_px REAL,
-        blade_area_cm2 REAL,
+        area_mm2 REAL,
         midrib_angle_deg REAL,
         petiole_length_px REAL,
         petiole_length_mm REAL,
@@ -604,12 +591,10 @@ def _build_schema_ddl() -> str:
         involucre_height_mm REAL,
         involucre_width_mm REAL,
         AR_inv REAL,
-        capitulum_aspect_ratio REAL,
         total_capitula INTEGER,
         n_anthesis INTEGER,
         n_bud INTEGER,
         n_fruiting INTEGER,
-        n_fruit INTEGER,
         n_senescent INTEGER,
         voucher_phenological_state TEXT,
         is_verified_anthesis INTEGER,
@@ -711,7 +696,6 @@ def _build_schema_ddl() -> str:
         type_status TEXT,
         is_type_specimen INTEGER DEFAULT 0,
         is_promoted_bronze INTEGER DEFAULT 0,
-        is_promoted_anchor INTEGER DEFAULT 0,
         anchor_tier_source TEXT,
         authority_weight REAL,
         is_passive INTEGER DEFAULT 0,
@@ -737,7 +721,6 @@ def _build_schema_ddl() -> str:
         ect_lobe_complexity REAL,
         ect_bilateral_asym REAL,
         {pc_ddl},
-        {sym_pc_ddl},
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id, leaf_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
@@ -749,7 +732,6 @@ def _build_schema_ddl() -> str:
         species_standardized TEXT,
         determiner_tier TEXT,
         is_promoted_bronze INTEGER,
-        is_promoted_anchor INTEGER,
         authority_weight REAL,
         spatial_balance_weight REAL,
         is_passive INTEGER,
@@ -793,7 +775,7 @@ def _build_schema_ddl() -> str:
         AR_inv REAL,
         AR_inv_std REAL,
         reproductive_trait_status TEXT,
-        {harm_ddl},
+        {sym_harm_ddl},
         sym_var REAL,
         asym_var REAL,
         pct_asymmetry REAL,
@@ -803,12 +785,11 @@ def _build_schema_ddl() -> str:
         leaf_count INTEGER,
         morph_tier_source TEXT,
         foliar_variance REAL,
-        heteroblasty_index REAL,
+        within_rosette_efa_dispersion REAL,
         efd_harmonic_opt INTEGER,
         efd_k95_pcs INTEGER,
         selected_morph_features TEXT,
         {pc_ddl},
-        {sym_pc_ddl},
         gmm_cluster TEXT,
         gmm_uncertainty REAL,
         cda_predicted_taxon TEXT,
@@ -950,6 +931,7 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("blade_width_px", "REAL"),
         ("blade_width_mm", "REAL"),
         ("mask_is_upright", "INTEGER DEFAULT 1"),
+        ("area_mm2", "REAL"),
     ),
     "run_active_cohort": (
         ("type_status", "TEXT"),
@@ -959,7 +941,6 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         [
             *((h, "REAL") for h in HARMONIC_COLS),
             *((p, "REAL") for p in PC_COLS),
-            *((sp, "REAL") for sp in SYM_PC_COLS),
             ("efd_harmonic_opt", "INTEGER"),
             ("efd_k95_pcs", "INTEGER"),
             ("dissection_index", "REAL"),
@@ -979,7 +960,6 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("type_status", "TEXT"),
             ("is_type_specimen", "INTEGER DEFAULT 0"),
             ("is_promoted_bronze", "INTEGER DEFAULT 0"),
-            ("is_promoted_anchor", "INTEGER DEFAULT 0"),
             ("anchor_tier_source", "TEXT"),
             ("authority_weight", "REAL"),
             ("is_passive", "INTEGER DEFAULT 0"),
@@ -988,9 +968,8 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
     ),
     "otu_morphometrics": tuple(
         [
-            *((h, "REAL") for h in HARMONIC_COLS),
+            *((h, "REAL") for h in SYM_HARMONIC_COLS),
             *((p, "REAL") for p in PC_COLS),
-            *((sp, "REAL") for sp in SYM_PC_COLS),
             ("efd_harmonic_opt", "INTEGER"),
             ("efd_k95_pcs", "INTEGER"),
             ("selected_morph_features", "TEXT"),
@@ -1029,12 +1008,12 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("open_set_novelty_p", "REAL"),
             ("is_confident_label_noise", "INTEGER"),
             ("is_promoted_bronze", "INTEGER"),
-            ("is_promoted_anchor", "INTEGER"),
             ("is_passive", "INTEGER"),
             ("spatial_balance_weight", "REAL"),
             ("area_mm2", "REAL"),
             ("petiole_width_mm", "REAL"),
             ("blade_width_mm", "REAL"),
+            ("within_rosette_efa_dispersion", "REAL"),
         ]
     ),
     "spatial_rf_predictions": tuple(
@@ -1091,7 +1070,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261113
+PACKERA_SCHEMA_USER_VERSION: int = 20261114
 
 
 def _migrate_dynamic_schema_columns(
@@ -1103,7 +1082,7 @@ def _migrate_dynamic_schema_columns(
       1. Inspects `PRAGMA table_info(...)` on `leaf_efa_harmonics`, `otu_morphometrics`,
          `spatial_rf_predictions`, and `environmental_cache`.
       2. Issues `ALTER TABLE ... ADD COLUMN ...` for any missing dynamic harmonic (`A1..D24`),
-         PCA (`PC1..PC15`, `Sym_PC1..Sym_PC15`), adaptive EFD metadata (`efd_harmonic_opt`,
+         PCA (`PC1..PC15`), adaptive EFD metadata (`efd_harmonic_opt`,
          `efd_k95_pcs`, `selected_morph_features`), dissection scalars, 19-variable WorldClim
          (`bio1..bio19`), `climatic_z_score`, or `primary_*_predictors` columns.
       3. Optionally drops and recreates `v_integrative_triage_master` whenever all base tables exist.
@@ -1163,7 +1142,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
                 _migrate_vouchers_schema_columns(conn)
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
-            if "leaf_zone" not in el_cols or "ect_path" not in el_cols or "mask_is_upright" not in el_cols or "petiole_width_mm" not in el_cols or "cauline_leaf_count" not in om_cols or "ECT_PC1" not in om_cols or "blade_width_mm" not in om_cols or "is_promoted_bronze" not in om_cols:
+            if "leaf_zone" not in el_cols or "area_mm2" not in el_cols or "ect_path" not in el_cols or "mask_is_upright" not in el_cols or "petiole_width_mm" not in el_cols or "cauline_leaf_count" not in om_cols or "ECT_PC1" not in om_cols or "blade_width_mm" not in om_cols or "is_promoted_bronze" not in om_cols or "within_rosette_efa_dispersion" not in om_cols:
                 _migrate_dynamic_schema_columns(conn, recreate_view=True)
             conn.execute("PRAGMA foreign_keys = ON;")
             return

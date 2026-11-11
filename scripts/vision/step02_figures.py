@@ -566,14 +566,7 @@ def generate_step02_publication_figures(
             if c_path_res is not None and c_path_res.exists():
                 try:
                     cdf = pd.read_csv(c_path_res)
-                    if {"x_norm", "y_norm"}.issubset(cdf.columns) and len(cdf) >= 5:
-                        xn = cdf["x_norm"].to_numpy(dtype=float)
-                        yn = cdf["y_norm"].to_numpy(dtype=float)
-                        w_sp = float(np.ptp(xn))
-                        l_sp = float(np.ptp(yn))
-                        if w_sp > 1e-6 and l_sp > 1e-6:
-                            ar_v = float(np.clip(l_sp / w_sp, 0.30, 5.8))
-                    if np.isnan(ar_v) and {"x", "y"}.issubset(cdf.columns) and len(cdf) >= 5:
+                    if {"x", "y"}.issubset(cdf.columns) and len(cdf) >= 5:
                         pts = cdf[["x", "y"]].to_numpy(dtype=float)
                         pts = pts - pts.mean(axis=0)
                         _, s_vals, _ = np.linalg.svd(pts, full_matrices=False)
@@ -832,11 +825,7 @@ def generate_step02_publication_figures(
             rep_df["sp_clean"] = rep_df["cat_str"].map(lambda c: cat_to_species.get(c, "Unassigned_Packera"))
         else:
             rep_df["sp_clean"] = "Unassigned_Packera"
-        ar_col = (
-            "capitulum_aspect_ratio"
-            if "capitulum_aspect_ratio" in rep_df.columns
-            else ("AR_inv" if "AR_inv" in rep_df.columns else "involucre_width_mm")
-        )
+        ar_col = "AR_inv" if "AR_inv" in rep_df.columns else "involucre_width_mm"
         rep_df["trait_v"] = (
             pd.to_numeric(rep_df[ar_col], errors="coerce")
             if ar_col in rep_df.columns
@@ -1148,8 +1137,8 @@ def generate_step02_publication_figures(
             sp_all = sp_all[sp_all["asset_ok"]].copy()
             if "area_px" in sp_all.columns:
                 sp_all["area_val"] = pd.to_numeric(sp_all["area_px"], errors="coerce").fillna(1.0)
-            elif "blade_area_cm2" in sp_all.columns:
-                sp_all["area_val"] = pd.to_numeric(sp_all["blade_area_cm2"], errors="coerce").fillna(1.0)
+            elif "area_mm2" in sp_all.columns:
+                sp_all["area_val"] = pd.to_numeric(sp_all["area_mm2"], errors="coerce").fillna(1.0)
             else:
                 sp_all["area_val"] = 1.0
 

@@ -483,16 +483,16 @@ def classify_voucher_phenology(
     """
     total_capitula = len(head_classifications)
     n_anthesis = sum(1 for h in head_classifications if h.get("head_state") == HEAD_ANTHESIS)
-    n_fruit = sum(1 for h in head_classifications if h.get("head_state") == HEAD_FRUIT)
+    n_fruiting = sum(1 for h in head_classifications if h.get("head_state") == HEAD_FRUIT)
     n_bud = sum(1 for h in head_classifications if h.get("head_state") == HEAD_BUD)
 
     if n_anthesis >= max(1, int(min_anthesis_heads_for_flowering)):
         voucher_state = VOUCHER_ANTHESIS
-    elif n_fruit > 0 and n_anthesis == 0:
+    elif n_fruiting > 0 and n_anthesis == 0:
         voucher_state = VOUCHER_FRUIT
     elif total_capitula == 0:
         voucher_state = VOUCHER_STERILE
-    elif n_bud > 0 and n_anthesis == 0 and n_fruit == 0:
+    elif n_bud > 0 and n_anthesis == 0 and n_fruiting == 0:
         voucher_state = VOUCHER_BUD
     else:
         voucher_state = VOUCHER_UNKNOWN
@@ -508,7 +508,7 @@ def classify_voucher_phenology(
         "catalogNumber": str(catalog_number).strip(),
         "total_capitula": int(total_capitula),
         "n_anthesis": int(n_anthesis),
-        "n_fruit": int(n_fruit),
+        "n_fruiting": int(n_fruiting),
         "n_bud": int(n_bud),
         "voucher_phenological_state": voucher_state,
         "dominant_pappus_ratio": float(dominant_pappus_ratio),

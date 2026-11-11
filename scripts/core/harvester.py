@@ -1539,7 +1539,7 @@ def export_curated_table(
     db_path: Optional[Union[str, Path]] = None,
 ) -> Path:
     """
-    Atomically exports the 26-column Darwin Core `EXPORT_COLUMNS` voucher table to `output_path`
+    Atomically exports the 23-column Darwin Core `EXPORT_COLUMNS` voucher table to `output_path`
     (merging by `catalogNumber` on resume) while synchronizing extended diagnostic metadata
     (`infraspecific_taxon`, `georef_qc_status`, `usda_symbol`, `usda_county_status`,
     `exsiccatae_taxonomic_conflict`, `exsiccatae_gold_taxon`, `spatial_balance_weight`)
@@ -1575,20 +1575,12 @@ def export_curated_table(
         elif "species_raw" not in df.columns and "scientificName" in df.columns:
             df["species_raw"] = df["scientificName"]
 
-        if "decimalLatitude" not in df.columns and "latitude" in df.columns:
-            df["decimalLatitude"] = df["latitude"]
-        elif "latitude" not in df.columns and "decimalLatitude" in df.columns:
-            df["latitude"] = df["decimalLatitude"]
-
-        if "decimalLongitude" not in df.columns and "longitude" in df.columns:
-            df["decimalLongitude"] = df["longitude"]
-        elif "longitude" not in df.columns and "decimalLongitude" in df.columns:
-            df["longitude"] = df["decimalLongitude"]
-
-        if "identifiedBy" not in df.columns and "determiner_raw" in df.columns:
-            df["identifiedBy"] = df["determiner_raw"]
-        elif "determiner_raw" not in df.columns and "identifiedBy" in df.columns:
-            df["determiner_raw"] = df["identifiedBy"]
+        if "decimalLatitude" not in df.columns:
+            df["decimalLatitude"] = np.nan
+        if "decimalLongitude" not in df.columns:
+            df["decimalLongitude"] = np.nan
+        if "identifiedBy" not in df.columns:
+            df["identifiedBy"] = ""
 
         dwc_contract_cols = [
             "catalogNumber",
@@ -2350,7 +2342,7 @@ class VoucherHarvester:
                 )
 
                 # 5. Initial Layer 1 + Layer 2 Determiner Tier Stratification
-                determiner_tier, type_status, determiner_raw = parse_determiner_tier(
+                determiner_tier, type_status, identified_by_clean = parse_determiner_tier(
                     type_status_raw=rec.get("typeStatus"),
                     identified_by_raw=rec.get("identifiedBy"),
                     recorded_by_raw=rec.get("recordedBy"),
@@ -2380,16 +2372,13 @@ class VoucherHarvester:
                     "georef_qc_status": georef_qc_status,
                     "recordedBy": str(rec.get("recordedBy") or "").strip(),
                     "recordNumber": str(rec.get("recordNumber") or "").strip(),
-                    "identifiedBy": determiner_raw,
-                    "determiner_raw": determiner_raw,
+                    "identifiedBy": identified_by_clean,
                     "determiner_tier": determiner_tier,
                     "type_status": type_status,
                     "county": rec.get("county") or "",
                     "stateProvince": state_prov or "",
                     "decimalLatitude": lat_val,
-                    "latitude": lat_val,
                     "decimalLongitude": lon_val,
-                    "longitude": lon_val,
                     "coordinateUncertainty": uncertainty_val,
                     "year": year_val,
                     "month": month_val,

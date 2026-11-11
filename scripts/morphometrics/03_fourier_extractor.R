@@ -223,23 +223,23 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
     ifelse(is.na(av) | !is.finite(av) | av <= 0, 1.0, pmin(pmax(av, 0.20), 1.0))
   } else rep(1.0, nrow(out_df))
   leaf_quality_weight <- pmax(0.05, arch_w * ((1.0 - pmin(pct_asymmetry, 0.95))^2) * ifelse(is_contour_outlier, 0.10, 1.0))
-  spatial_wt <- if ("spatial_balance_weight" %in% names(out_df) && any(is.finite(out_df$spatial_balance_weight))) as.numeric(out_df$spatial_balance_weight) else if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(out_df) else rep(1.0, nrow(out_df))
   active_ref_mask <- if (sum(fit_pca_mask, na.rm = TRUE) >= 2L) prune_within_taxon_mahalanobis(sym_mat, out_df, fit_pca_mask, q = 0.95) else fit_pca_mask
   out_df$is_promoted_bronze <- if (!is.null(attr(active_ref_mask, "is_promoted_bronze"))) attr(active_ref_mask, "is_promoted_bronze") else rep(FALSE, nrow(out_df))
   out_df$is_type_specimen <- if (!is.null(attr(active_ref_mask, "is_type_specimen"))) attr(active_ref_mask, "is_type_specimen") else if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(out_df)$is_type_specimen else rep(FALSE, nrow(out_df))
   out_df$anchor_tier_source <- if (!is.null(attr(active_ref_mask, "anchor_tier_source"))) attr(active_ref_mask, "anchor_tier_source") else ifelse(out_df$is_type_specimen, "Tier_0_Type_Anchor", "Passive_Unpromoted")
   tier_wt <- compute_authority_precision_weights(out_df, active_mask = active_ref_mask)
   if (sum(active_ref_mask, na.rm = TRUE) < 2L) active_ref_mask <- fit_pca_mask
+  spatial_wt <- if (exists("compute_spatial_balance_weights", mode = "function")) compute_spatial_balance_weights(out_df, active_mask = active_ref_mask, recompute = TRUE) else rep(1.0, nrow(out_df))
   col_vars <- apply(sym_mat[active_ref_mask, , drop = FALSE], 2, stats::var, na.rm = TRUE)
   sym_mat <- sym_mat[, names(col_vars[!is.na(col_vars) & col_vars > 1e-10]), drop = FALSE]
 
   out_df$authority_weight <- tier_wt; out_df$spatial_balance_weight <- round(spatial_wt, 6)
   out_df$sym_var <- round(sym_var, 6); out_df$asym_var <- round(asym_var, 6); out_df$pct_asymmetry <- round(pct_asymmetry, 6)
   out_df$harmonic_roughness <- round(harmonic_roughness, 6); out_df$is_contour_outlier <- is_contour_outlier; out_df$leaf_quality_weight <- round(leaf_quality_weight, 6)
-  for (pc_col in paste0("Sym_PC", seq_len(5L))) out_df[[pc_col]] <- ifelse(valid_coe, 0.0, NA_real_)
+  for (pc_col in paste0("PC", seq_len(5L))) out_df[[pc_col]] <- ifelse(valid_coe, 0.0, NA_real_)
   pca_sym <- NULL; k_95_sym <- 5L
   if (sum(active_ref_mask, na.rm = TRUE) >= 2L && ncol(sym_mat) >= 1) {
-    X_cl <- sym_mat[active_ref_mask, , drop = FALSE]; w_cl <- tier_wt[active_ref_mask]; if (sum(w_cl, na.rm = TRUE) <= 0) w_cl <- rep(1.0, nrow(X_cl))
+    X_cl <- sym_mat[active_ref_mask, , drop = FALSE]; w_cl <- tier_wt[active_ref_mask] * spatial_wt[active_ref_mask]; if (sum(w_cl, na.rm = TRUE) <= 0) w_cl <- rep(1.0, nrow(X_cl))
     wt_cov <- stats::cov.wt(X_cl, wt = w_cl, center = TRUE); eig <- eigen(wt_cov$cov, symmetric = TRUE)
     colnames(eig$vectors) <- paste0("PC", seq_len(ncol(eig$vectors))); rownames(eig$vectors) <- colnames(sym_mat)
     sym_scores <- sweep(sym_mat, 2, wt_cov$center, "-") %*% eig$vectors
@@ -247,7 +247,7 @@ extract_symmetric_fourier_pcs <- function(ef, fac_df = NULL, num_pcs = 5, permut
     pca_sym <- structure(list(sdev = sqrt(pmax(eig$values, 0)), rotation = eig$vectors, center = wt_cov$center, scale = FALSE, x = sym_scores), class = "prcomp")
     sv2 <- pca_sym$sdev^2; k_95_sym <- which((cumsum(sv2) / max(sum(sv2), 1e-12)) >= 0.95)[1]; if (is.na(k_95_sym)) k_95_sym <- ncol(sym_scores)
     k_sym_exp <- max(5L, min(max(as.integer(num_pcs), as.integer(k_95_sym)), 15L, ncol(sym_scores)))
-    for (p in seq_len(k_sym_exp)) out_df[[paste0("Sym_PC", p)]] <- if (p <= ncol(sym_scores)) ifelse(valid_coe, round(sym_scores[, p], 6), NA_real_) else ifelse(valid_coe, 0.0, NA_real_)
+    for (p in seq_len(k_sym_exp)) out_df[[paste0("PC", p)]] <- if (p <= ncol(sym_scores)) ifelse(valid_coe, round(sym_scores[, p], 6), NA_real_) else ifelse(valid_coe, 0.0, NA_real_)
   }
   list(df = out_df, sym_mat = sym_mat, pca = pca_sym, k_95 = as.integer(k_95_sym), permanova = NULL, active_ref_mask = active_ref_mask)
 }
@@ -271,8 +271,6 @@ load_contour_file <- function(filepath) {
   if (is.null(df) || nrow(df) < 10) return(NULL)
   if (all(c("x", "y") %in% names(df))) {
     return(as.matrix(cbind(as.numeric(df$x), as.numeric(df$y))))
-  } else if (all(c("x_norm", "y_norm") %in% names(df))) {
-    return(as.matrix(cbind(as.numeric(df$x_norm), as.numeric(df$y_norm))))
   }
   return(NULL)
 }
@@ -435,7 +433,7 @@ run_fourier_extraction <- function(opts) {
       coo_centered <- scale(coo, center = TRUE, scale = FALSE); svd_rot <- coo_centered %*% svd(coo_centered)$v
       lw <- c(diff(range(svd_rot[, 1], na.rm = TRUE)), diff(range(svd_rot[, 2], na.rm = TRUE)))
     }
-    m_lw_anat <- m_num("blade_length_to_width_ratio"); if (!is.finite(m_lw_anat) || m_lw_anat <= 0) m_lw_anat <- m_num("aspect_ratio")
+    m_lw_anat <- m_num("aspect_ratio")
     anat_lw_coo <- if (was_tipup && diff(range(coo[, 2], na.rm = TRUE)) > 1e-6) diff(range(coo[, 1], na.rm = TRUE)) / diff(range(coo[, 2], na.rm = TRUE)) else NA_real_
     aspect_ratio <- round(as.numeric(if (is.finite(m_lw_anat) && m_lw_anat > 0) m_lw_anat else if (is.finite(anat_lw_coo) && anat_lw_coo > 0) anat_lw_coo else (lw[1] / lw[2])), 4)
     shape_name <- meta$shape_id
@@ -452,7 +450,6 @@ run_fourier_extraction <- function(opts) {
       blade_length_mm = m_num("blade_length_mm"), blade_width_mm = m_num("blade_width_mm"),
       petiole_to_blade_ratio = m_num("petiole_to_blade_ratio"), is_dissected = m_dis,
       cy_rel_plant_bbox = m_num("cy_rel_plant_bbox"), cy_rel_sheet = m_num("cy_rel_sheet"),
-      blade_area_cm2 = m_num("blade_area_cm2"),
       area_px = round(area_px, 1), centroid_size_px = if (!is.na(centsize_px)) round(centsize_px, 2) else NA_real_, centroid_size = if (!is.na(centsize)) round(centsize, 4) else NA_real_,
       log_centsize = log_cs, mask_source = f, stringsAsFactors = FALSE
     )
@@ -537,9 +534,9 @@ run_fourier_extraction <- function(opts) {
   }
   if (!is.null(vouchers_df)) {
     meta_cols <- intersect(colnames(vouchers_df), c("catalogNumber", "taxon", "species_standardized", "scientificName", "species_raw", "institutionCode",
-      "determiner_raw", "determiner_tier", "authority_tier", "type_status", "dawid_skene_error_rate", "label_error_rate",
-      "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude", "latitude", "longitude",
-      "coordinateUncertainty", "year", "month", "day", "eventDate", "pheno_sin", "pheno_cos", "regional_group", "spatial_balance_weight"))
+      "identifiedBy", "determiner_tier", "authority_tier", "type_status", "dawid_skene_error_rate", "label_error_rate",
+      "stateProvince", "county", "locality", "decimalLatitude", "decimalLongitude",
+      "coordinateUncertainty", "year", "month", "day", "eventDate", "regional_group", "spatial_balance_weight"))
     v_sub <- vouchers_df[!duplicated(vouchers_df$catalogNumber), meta_cols, drop = FALSE]
     fac_df$.row_ord <- seq_len(nrow(fac_df))
     fac_df <- merge(fac_df, v_sub, by = "catalogNumber", all.x = TRUE, sort = FALSE)
@@ -582,10 +579,11 @@ run_fourier_extraction <- function(opts) {
         if (!is.null(sub_ef_h) && !is.null(sub_ef_h$coe)) harm_mat[which(valid_hm), colnames(sub_ef_h$coe)] <- as.matrix(sub_ef_h$coe)
       }
     }
-    if (any(valid_hm)) harm_mat[which(valid_hm), intersect(asym_names, colnames(harm_mat))] <- 0.0
+    harm_mat <- harm_mat[, intersect(sym_names, colnames(harm_mat)), drop = FALSE]
+    harmonic_names <- colnames(harm_mat)
   }
 
-  sym_harmonics <- harm_mat[, sym_names, drop = FALSE]
+  sym_harmonics <- harm_mat[, intersect(sym_names, colnames(harm_mat)), drop = FALSE]
   efa_df <- cbind(fac_df, as.data.frame(harm_mat))
   for (scol in c("is_promoted_bronze", "is_type_specimen", "anchor_tier_source", "authority_weight", "spatial_balance_weight", "sym_var", "asym_var", "pct_asymmetry", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight")) {
     if (scol %in% names(sym_res$df)) efa_df[[scol]] <- sym_res$df[[scol]]
@@ -597,7 +595,7 @@ run_fourier_extraction <- function(opts) {
   complete_idx <- which(complete.cases(harm_mat))
   k_95 <- if (!is.null(sym_res$k_95) && is.finite(sym_res$k_95)) as.integer(sym_res$k_95) else 5L
   k_export <- max(5L, min(k_95, 15L))
-  for (p in seq_len(k_export)) { efa_df[[paste0("PC", p)]] <- NA_real_; efa_df[[paste0("Sym_PC", p)]] <- if (paste0("Sym_PC", p) %in% names(sym_res$df)) sym_res$df[[paste0("Sym_PC", p)]] else 0.0 }
+  for (p in seq_len(k_export)) efa_df[[paste0("PC", p)]] <- NA_real_
 
   if (length(complete_idx) >= 2L) {
     clean_idx <- if (length(complete_idx) >= 10 && sum(!efa_df$is_contour_outlier[complete_idx]) >= 5) complete_idx[!efa_df$is_contour_outlier[complete_idx]] else complete_idx
@@ -619,12 +617,13 @@ run_fourier_extraction <- function(opts) {
       efa_df$authority_weight <- compute_authority_precision_weights(efa_df, active_mask = ref_mask); tier_wt <- efa_df$authority_weight
     }
     if (sum(ref_mask, na.rm = TRUE) < 2L) ref_mask <- base_mask
+    efa_df$spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) round(compute_spatial_balance_weights(efa_df, active_mask = ref_mask, recompute = TRUE), 6) else rep(1.0, nrow(efa_df))
     fit_idx <- which(ref_mask)
     col_vars <- apply(harm_mat[fit_idx, , drop = FALSE], 2, stats::var, na.rm = TRUE)
     active_full_cols <- names(col_vars[!is.na(col_vars) & col_vars > 1e-10])
     if (length(active_full_cols) == 0L) active_full_cols <- sym_names[seq_len(min(length(sym_names), ncol(harm_mat)))]
     message(sprintf("Active harmonic dimensions with non-zero variance: %d / %d", length(active_full_cols), ncol(harm_mat)))
-    w_fit <- tier_wt[fit_idx]; if (sum(w_fit, na.rm = TRUE) <= 0) w_fit <- rep(1.0, length(fit_idx))
+    w_fit <- tier_wt[fit_idx] * efa_df$spatial_balance_weight[fit_idx]; if (sum(w_fit, na.rm = TRUE) <= 0) w_fit <- rep(1.0, length(fit_idx))
     wt_cov <- stats::cov.wt(harm_mat[fit_idx, active_full_cols, drop = FALSE], wt = w_fit, center = TRUE)
     eig <- eigen(wt_cov$cov, symmetric = TRUE)
     colnames(eig$vectors) <- paste0("PC", seq_len(ncol(eig$vectors))); rownames(eig$vectors) <- active_full_cols
@@ -637,11 +636,9 @@ run_fourier_extraction <- function(opts) {
     k_export <- max(5L, min(as.integer(k_95), 15L, ncol(pc_scores)))
     message(sprintf("=== Dynamic %d-Harmonic Morphospace PCA (k_95 = %d, k_export = %d) ===", h_opt, k_95, k_export))
     for (p in seq_len(min(k_export, length(var_exp)))) message(sprintf("  PC%d: %5.2f%% variance", p, var_exp[p]))
-    sym_sc_m <- if (!is.null(sym_res$pca) && !is.null(sym_res$pca$x)) sym_res$pca$x else NULL
     for (p in seq_len(k_export)) {
       efa_df[[paste0("PC", p)]] <- NA_real_
       efa_df[complete_idx, paste0("PC", p)] <- if (p <= ncol(pc_scores)) round(pc_scores[, p], 6) else 0.0
-      efa_df[[paste0("Sym_PC", p)]] <- if (!is.null(sym_sc_m) && p <= ncol(sym_sc_m)) round(sym_sc_m[, p], 6) else if (paste0("Sym_PC", p) %in% names(sym_res$df)) sym_res$df[[paste0("Sym_PC", p)]] else 0.0
     }
     k_mcd <- max(2L, min(k_95_full, ncol(pc_scores), max(2L, floor(nrow(pc_scores) / 3L))))
     mcd_out <- screen_regime_stratified_mcd_outliers(pc_scores, fit_pos = match(fit_idx, complete_idx), solidity_vec = efa_df$solidity[complete_idx], is_dissected_vec = efa_df$is_dissected[complete_idx], k_mcd = k_mcd, p_cutoff = 0.001, seed = opts$seed)
@@ -656,22 +653,21 @@ run_fourier_extraction <- function(opts) {
 
   # 5. Darwin Core Metadata Standardization & Export
   efa_df$is_promoted_bronze <- if ("is_promoted_bronze" %in% names(efa_df)) (!is.na(efa_df$is_promoted_bronze) & as.logical(efa_df$is_promoted_bronze)) else rep(FALSE, nrow(efa_df))
-  efa_df$is_promoted_anchor <- efa_df$is_promoted_bronze
   efa_df$is_passive <- !(is.finite(efa_df$authority_weight) & efa_df$authority_weight > 0.0)
   harm_mat <- as.matrix(efa_df[, harmonic_names, drop = FALSE])
-  sym_harmonics <- as.matrix(efa_df[, sym_names, drop = FALSE])
+  sym_harmonics <- as.matrix(efa_df[, intersect(sym_names, colnames(efa_df)), drop = FALSE])
   efa_df$efd_harmonic_opt <- as.integer(h_opt); efa_df$efd_k95_pcs <- as.integer(k_95)
   if (exists("compute_leaf_ect_features", mode = "function")) efa_df <- compute_leaf_ect_features(efa_df, coo_list, opts$contours_dir)
-  ect_attrs <- attributes(efa_df)[c("ect_sym_mats", "ect_sym_vecs", "ect_coo_list", "ect_basal_var_exp")]
+  ect_attrs <- attributes(efa_df)[c("ect_sym_mats", "ect_sym_vecs", "ect_coo_list", "ect_basal_var_exp", "ect_sym_dim")]
   exp_pc_cols <- paste0("PC", seq_len(k_export))
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "mask_is_upright", "leaf_zone", "leaf_zone_confidence", "dist_from_crown_norm", "cy_rel_plant_bbox", "pixels_per_mm", "is_calibrated_mm", "scale_source",
-                 "species_standardized", "scientificName", "species_raw", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "is_promoted_anchor", "anchor_tier_source", "authority_weight", "is_passive", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", "ect_bilateral_asym", "aspect_ratio", "circularity", "solidity", "dissection_index", "archetype_score",
+                 "species_standardized", "scientificName", "species_raw", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "anchor_tier_source", "authority_weight", "is_passive", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", "ect_bilateral_asym", "aspect_ratio", "circularity", "solidity", "dissection_index", "archetype_score",
                  "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio", "is_dissected",
                  "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_mm2", "area_px", "centroid_size_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
-  for (anm in intersect(c("ect_sym_mats", "ect_sym_vecs", "ect_coo_list", "ect_basal_var_exp"), names(ect_attrs))) attr(efa_df, anm) <- ect_attrs[[anm]]
+  for (anm in intersect(c("ect_sym_mats", "ect_sym_vecs", "ect_coo_list", "ect_basal_var_exp", "ect_sym_dim"), names(ect_attrs))) attr(efa_df, anm) <- ect_attrs[[anm]]
 
   # 5a. Export Disaggregated Individual Leaf Harmonics Archive (Atomic write-then-replace)
   if (!is.null(opts$output_individual) && nzchar(opts$output_individual)) {
@@ -689,7 +685,8 @@ run_fourier_extraction <- function(opts) {
   closed_leaf_df <- efa_df[agg_keep_mask, , drop = FALSE]
   if (!is.null(ect_attrs$ect_sym_vecs)) attr(closed_leaf_df, "ect_sym_vecs") <- ect_attrs$ect_sym_vecs[agg_keep_mask]
   attr(closed_leaf_df, "ect_basal_var_exp") <- ect_attrs$ect_basal_var_exp
-  all_harm_cols <- intersect(c(harmonic_names, grep("Chebyshev", names(efa_df), value = TRUE)), names(efa_df))
+  attr(closed_leaf_df, "ect_sym_dim") <- ect_attrs$ect_sym_dim
+  all_harm_cols <- intersect(harmonic_names, names(efa_df))
   specimen_df <- if (exists("aggregate_step03_otu_medians_fast", mode = "function")) {
     agg_tmp <- aggregate_step03_otu_medians_fast(closed_leaf_df, all_harm_cols, sym_names)
     if (exists("reconcile_step03_basal_otu_medians", mode = "function")) reconcile_step03_basal_otu_medians(agg_tmp, closed_leaf_df, all_harm_cols, sym_names) else agg_tmp
@@ -710,25 +707,25 @@ run_fourier_extraction <- function(opts) {
   specimen_df$efd_harmonic_opt <- as.integer(h_opt); specimen_df$efd_k95_pcs <- as.integer(k_95)
   otu_h_cols <- intersect(if (exists("active_full_cols") && length(active_full_cols) >= 1L) active_full_cols else sym_names, names(specimen_df))
   otu_has_efa <- if (length(otu_h_cols) >= 1L) complete.cases(specimen_df[, otu_h_cols, drop = FALSE]) else rep(FALSE, nrow(specimen_df))
-  for (p in seq_len(k_export)) { specimen_df[[paste0("PC", p)]] <- NA_real_; specimen_df[[paste0("Sym_PC", p)]] <- ifelse(otu_has_efa, 0.0, NA_real_) }
+  for (p in seq_len(k_export)) specimen_df[[paste0("PC", p)]] <- NA_real_
   # Fit OTU-level ordination on Empirical Bayes active reference anchors (with Adaptive Anchor Promotion for 0-Gold/Silver taxa)
   specimen_df$is_type_specimen <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(specimen_df)$is_type_specimen else rep(FALSE, nrow(specimen_df))
   otu_base_mask <- otu_has_efa & (specimen_df$morph_tier_source != "Cauline_Only_Fallback") & (!as.logical(specimen_df$is_contour_outlier) | as.logical(specimen_df$is_type_specimen))
   if (sum(otu_base_mask, na.rm = TRUE) < 2L) otu_base_mask <- otu_has_efa
   otu_ref_mask <- if (sum(otu_base_mask, na.rm = TRUE) >= 2L && length(otu_h_cols) >= 1L) prune_within_taxon_mahalanobis(as.matrix(specimen_df[, otu_h_cols, drop = FALSE]), specimen_df, otu_base_mask, q = 0.95) else otu_base_mask
   specimen_df$is_promoted_bronze <- if (!is.null(attr(otu_ref_mask, "is_promoted_bronze"))) as.logical(attr(otu_ref_mask, "is_promoted_bronze")) else rep(FALSE, nrow(specimen_df))
-  specimen_df$is_promoted_anchor <- specimen_df$is_promoted_bronze
   specimen_df$anchor_tier_source <- if (!is.null(attr(otu_ref_mask, "anchor_tier_source"))) attr(otu_ref_mask, "anchor_tier_source") else ifelse(specimen_df$is_type_specimen, "Tier_0_Type_Anchor", "Passive_Unpromoted")
   specimen_df$authority_weight <- compute_authority_precision_weights(specimen_df, active_mask = otu_ref_mask)
   specimen_df$is_passive <- !(is.finite(specimen_df$authority_weight) & specimen_df$authority_weight > 0.0)
   if (sum(otu_ref_mask, na.rm = TRUE) < 2L) otu_ref_mask <- otu_base_mask
+  specimen_df$spatial_balance_weight <- if (exists("compute_spatial_balance_weights", mode = "function")) round(compute_spatial_balance_weights(specimen_df, active_mask = otu_ref_mask, recompute = TRUE), 6) else rep(1.0, nrow(specimen_df))
   otu_fitted <- FALSE; sym_pca_export <- sym_res$pca
   if (sum(otu_ref_mask, na.rm = TRUE) >= max(opts$num_pcs, 6L) && exists("active_full_cols") && length(active_full_cols) >= 2L) {
     otu_t1_idx <- which(otu_ref_mask)
     otu_v <- apply(specimen_df[otu_t1_idx, active_full_cols, drop = FALSE], 2, stats::var, na.rm = TRUE)
     otu_cols <- names(otu_v[!is.na(otu_v) & otu_v > 1e-10])
     if (length(otu_cols) >= 2L) {
-      w_otu <- specimen_df$authority_weight[otu_t1_idx]; if (sum(w_otu, na.rm = TRUE) <= 0) w_otu <- rep(1.0, length(otu_t1_idx))
+      w_otu <- specimen_df$authority_weight[otu_t1_idx] * specimen_df$spatial_balance_weight[otu_t1_idx]; if (sum(w_otu, na.rm = TRUE) <= 0) w_otu <- rep(1.0, length(otu_t1_idx))
       wt_otu <- stats::cov.wt(as.matrix(specimen_df[otu_t1_idx, otu_cols, drop = FALSE]), wt = w_otu, center = TRUE)
       eig_otu <- eigen(wt_otu$cov, symmetric = TRUE); colnames(eig_otu$vectors) <- paste0("PC", seq_len(ncol(eig_otu$vectors))); rownames(eig_otu$vectors) <- otu_cols
       spec_pcs <- sweep(as.matrix(specimen_df[, otu_cols, drop = FALSE]), 2, wt_otu$center, "-") %*% eig_otu$vectors
@@ -736,37 +733,15 @@ run_fourier_extraction <- function(opts) {
       pca_fit <- structure(list(sdev = sqrt(pmax(eig_otu$values, 0)), rotation = eig_otu$vectors, center = wt_otu$center, scale = FALSE, x = spec_pcs), class = "prcomp")
       for (p in seq_len(k_export)) specimen_df[[paste0("PC", p)]] <- ifelse(otu_has_efa, if (p <= ncol(spec_pcs)) round(spec_pcs[, p], 6) else 0.0, NA_real_)
       otu_fitted <- TRUE
-      if (!isTRUE(opts$symmetrize_efa_harmonics)) {
-        otu_sym_cols <- intersect(sym_names, otu_cols)
-        if (length(otu_sym_cols) >= 2L) {
-          wt_sym_o <- stats::cov.wt(as.matrix(specimen_df[otu_t1_idx, otu_sym_cols, drop = FALSE]), wt = w_otu, center = TRUE)
-          eig_sym_o <- eigen(wt_sym_o$cov, symmetric = TRUE); colnames(eig_sym_o$vectors) <- paste0("PC", seq_len(ncol(eig_sym_o$vectors))); rownames(eig_sym_o$vectors) <- otu_sym_cols
-          spec_sym_o <- sweep(as.matrix(specimen_df[, otu_sym_cols, drop = FALSE]), 2, wt_sym_o$center, "-") %*% eig_sym_o$vectors
-          spec_sym_o[!otu_has_efa, ] <- NA_real_
-          sym_pca_export <- structure(list(sdev = sqrt(pmax(eig_sym_o$values, 0)), rotation = eig_sym_o$vectors, center = wt_sym_o$center, scale = FALSE, x = spec_sym_o), class = "prcomp")
-        }
-      } else {
-        sym_pca_export <- pca_fit
-      }
+      sym_pca_export <- pca_fit
     }
   }
   if (!otu_fitted && nrow(specimen_df) >= 1L && exists("pca_fit") && !is.null(pca_fit)) {
     spec_pcs <- stats::predict(pca_fit, newdata = as.matrix(specimen_df[, active_full_cols, drop = FALSE]))
     for (p in seq_len(k_export)) specimen_df[[paste0("PC", p)]] <- ifelse(otu_has_efa, if (p <= ncol(spec_pcs)) round(spec_pcs[, p], 6) else 0.0, NA_real_)
   }
-  if (nrow(specimen_df) >= 1L && !is.null(sym_pca_export)) {
-    sym_cols_p <- intersect(rownames(sym_pca_export$rotation), names(specimen_df))
-    if (otu_fitted && isTRUE(opts$symmetrize_efa_harmonics)) {
-      for (p in seq_len(k_export)) specimen_df[[paste0("Sym_PC", p)]] <- specimen_df[[paste0("PC", p)]]
-    } else if (otu_fitted && !is.null(sym_pca_export$x) && nrow(sym_pca_export$x) == nrow(specimen_df)) {
-      for (p in seq_len(k_export)) specimen_df[[paste0("Sym_PC", p)]] <- ifelse(otu_has_efa, if (p <= ncol(sym_pca_export$x)) round(sym_pca_export$x[, p], 6) else 0.0, NA_real_)
-    } else if (length(sym_cols_p) >= 1L) {
-      spec_sym_pcs <- stats::predict(sym_pca_export, newdata = as.matrix(specimen_df[, sym_cols_p, drop = FALSE]))
-      for (p in seq_len(k_export)) specimen_df[[paste0("Sym_PC", p)]] <- ifelse(otu_has_efa, if (p <= ncol(spec_sym_pcs)) round(spec_sym_pcs[, p], 6) else 0.0, NA_real_)
-    }
-  }
 
-  lead_spec_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_count", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "foliar_variance", "heteroblasty_index", "heteroblasty_efa_distance", "heteroblasty_ect_distance", "pixels_per_mm", "is_calibrated_mm", "scale_source", "mask_is_upright", "species_standardized", "scientificName", "species_raw", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "is_promoted_anchor", "anchor_tier_source", "authority_weight", "is_passive", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "aspect_ratio", "circularity", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "archetype_score", "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio", "is_dissected", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_mm2", "area_px", "centroid_size", "log_centsize"), names(specimen_df))
+  lead_spec_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_count", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "foliar_variance", "within_rosette_efa_dispersion", "heteroblasty_efa_distance", "heteroblasty_ect_distance", "pixels_per_mm", "is_calibrated_mm", "scale_source", "mask_is_upright", "species_standardized", "scientificName", "species_raw", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "anchor_tier_source", "authority_weight", "is_passive", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "aspect_ratio", "circularity", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "archetype_score", "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio", "is_dissected", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_mm2", "area_px", "centroid_size", "log_centsize"), names(specimen_df))
   specimen_df <- specimen_df[, c(lead_spec_cols, setdiff(names(specimen_df), lead_spec_cols))]
   for (anm in intersect(c("ect_basal_var_exp", "ect_cauline_var_exp"), names(spec_ect_attrs))) attr(specimen_df, anm) <- spec_ect_attrs[[anm]]
   write_step03_csv_fast(specimen_df, opts$output); message("Specimen-aggregated EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(specimen_df), ")")

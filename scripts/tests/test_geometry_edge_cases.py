@@ -85,16 +85,17 @@ class TestGeometryEdgeCases(unittest.TestCase):
         )
         self.assertEqual(len(res_straight["leaf_metrics"]), 2)
         m1, m2 = res_straight["leaf_metrics"]
-        self.assertAlmostEqual(m1["petiole_length_px"], 60.0, places=3)
+        # Direct petiole mask (35.0 px) takes strict priority over crown_fallback_px (60.0 px)
+        self.assertAlmostEqual(m1["petiole_length_px"], 35.0, places=3)
         self.assertAlmostEqual(m1["blade_length_px"], 120.0, places=3)
-        self.assertAlmostEqual(m1["petiole_to_blade_ratio"], 0.50, places=3)
-        self.assertAlmostEqual(m1["petiole_length_mm"], 6.0, places=3)
+        self.assertAlmostEqual(m1["petiole_to_blade_ratio"], 35.0 / 120.0, places=3)
+        self.assertAlmostEqual(m1["petiole_length_mm"], 3.5, places=3)
         self.assertAlmostEqual(m2["petiole_length_px"], 90.0, places=3)
         self.assertAlmostEqual(m2["petiole_to_blade_ratio"], 0.90, places=3)
         self.assertAlmostEqual(m2["petiole_length_mm"], 9.0, places=3)
 
-        self.assertAlmostEqual(res_straight["petiole_length_mm"], 8.25, places=2)
-        self.assertAlmostEqual(res_straight["petiole_to_blade_ratio"], 0.80, places=3)
+        self.assertAlmostEqual(res_straight["petiole_length_mm"], 7.625, places=2)
+        self.assertAlmostEqual(res_straight["petiole_to_blade_ratio"], 0.75 * 0.90 + 0.25 * (35.0 / 120.0), places=3)
         self.assertFalse(res_straight["is_bent_stem"])
         self.assertAlmostEqual(res_straight["plant_height_cm"], 6.0, places=3)
         self.assertGreater(res_straight["scape_to_basal_leaf_ratio"], 2.5)
@@ -131,7 +132,16 @@ class TestGeometryEdgeCases(unittest.TestCase):
         m_caul = [r for r in res_caul["leaf_metrics"] if r["leaf_id"] == 3][0]
         self.assertAlmostEqual(m_caul["petiole_length_mm"], 0.0, places=3)
         self.assertAlmostEqual(m_caul["blade_length_mm"], 8.0, places=3)
-        self.assertAlmostEqual(res_caul["petiole_length_mm"], 8.25, places=2)
+        self.assertAlmostEqual(res_caul["petiole_length_mm"], 7.625, places=2)
+
+        # Verify crown_fallback_px activates when direct petiole skeleton is absent (None)
+        res_fb = approximate_petiole_and_scape_metrics(
+            basal_leaves=[{"leaf_id": 1, "plant_individual_id": 0, "p_base": (200.0, 740.0), "p_apex": (200.0, 620.0), "geodesic_petiole_skeleton_px": None}],
+            p_crown=(200.0, 800.0),
+            px_per_cm=100.0,
+            p_corymb=(200.0, 200.0),
+        )
+        self.assertAlmostEqual(res_fb["leaf_metrics"][0]["petiole_length_px"], 60.0, places=3)
 
     def test_resample_normalized_contour(self) -> None:
         """Verify resampled contour normalization coordinates."""

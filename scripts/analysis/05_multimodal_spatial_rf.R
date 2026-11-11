@@ -186,7 +186,6 @@ if (!exists("resolve_ecological_authority_weights", mode = "function")) {
     tier_raw[is.na(tier_raw) | !nzchar(tier_raw)] <- "Tier_3_Bronze"
     is_pr <- rep(FALSE, n)
     if ("is_promoted_bronze" %in% names(df)) { p1 <- as.logical(df$is_promoted_bronze); p1[is.na(p1)] <- FALSE; is_pr <- is_pr | p1 }
-    if ("is_promoted_anchor" %in% names(df)) { p2 <- as.logical(df$is_promoted_anchor); p2[is.na(p2)] <- FALSE; is_pr <- is_pr | p2 }
     w_fb <- ifelse(ti_vec$is_type_specimen, 1.0,
             ifelse(grepl("Tier_1|Gold", tier_raw, ignore.case = TRUE), 0.95,
             ifelse(grepl("Tier_2|Silver", tier_raw, ignore.case = TRUE), 0.72,
@@ -1772,7 +1771,6 @@ execute_crossmodal_consensus <- function(
   elig_coord <- if ("is_training_eligible_coord" %in% names(df)) as.logical(df$is_training_eligible_coord) else rep(TRUE, nrow(df))
   elig_coord[is.na(elig_coord)] <- TRUE
   is_prom_anc <- rep(FALSE, n)
-  if ("is_promoted_anchor" %in% names(df)) { pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_prom_anc <- is_prom_anc | pa }
   if ("is_promoted_bronze" %in% names(df)) { pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_prom_anc <- is_prom_anc | pb }
   is_t_con <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, n)
   is_t_con[is.na(is_t_con)] <- FALSE
@@ -2459,7 +2457,6 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     list(is_type_specimen = is_tf)
   }
   is_promoted <- rep(FALSE, n)
-  if ("is_promoted_anchor" %in% names(df)) { pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_promoted <- is_promoted | pa }
   if ("is_promoted_bronze" %in% names(df)) { pb <- as.logical(df$is_promoted_bronze); pb[is.na(pb)] <- FALSE; is_promoted <- is_promoted | pb }
   cl_noise_rf <- if ("is_confident_label_noise" %in% names(df)) as.logical(df$is_confident_label_noise) else rep(FALSE, n)
   cl_noise_rf[is.na(cl_noise_rf)] <- FALSE
@@ -3755,18 +3752,12 @@ main <- function() {
     if ("is_outlier" %in% names(morph_df) && !("morphometric_outlier_flag" %in% names(morph_df))) {
       morph_df$morphometric_outlier_flag <- as.logical(morph_df$is_outlier)
     }
-    if ("morphometric_outlier_flag" %in% names(morph_df) && !("misidentification_flag" %in% names(morph_df))) {
-      morph_df$misidentification_flag <- morph_df$morphometric_outlier_flag
-    } else if ("misidentification_flag" %in% names(morph_df) && !("morphometric_outlier_flag" %in% names(morph_df))) {
-      morph_df$morphometric_outlier_flag <- morph_df$misidentification_flag
-    }
+    if (!("morphometric_outlier_flag" %in% names(morph_df))) morph_df$morphometric_outlier_flag <- FALSE
+    if (!("misidentification_flag" %in% names(morph_df))) morph_df$misidentification_flag <- FALSE
     if ("plant_height_mm" %in% names(morph_df) && !("plant_height_cm" %in% names(morph_df))) {
       morph_df$plant_height_cm <- round(suppressWarnings(as.numeric(morph_df$plant_height_mm)) / 10.0, 2)
     }
-    if ("is_promoted_anchor" %in% names(morph_df) && !("is_promoted_bronze" %in% names(morph_df))) {
-      morph_df$is_promoted_bronze <- as.logical(morph_df$is_promoted_anchor)
-    }
-    dyn_pc_cols <- grep("^(Sym_|Asym_|ECT_|Cauline_)?PC[0-9]+$|^ECT_[0-9]+$", names(morph_df), value = TRUE)
+    dyn_pc_cols <- grep("^(ECT_|Cauline_)?PC[0-9]+$|^ECT_[0-9]+$", names(morph_df), value = TRUE)
     dyn_het_cols <- grep("^(Cauline_|heteroblasty_|basal_vs_cauline_)", names(morph_df), value = TRUE)
     m_cols <- intersect(names(morph_df), unique(c(
       "catalogNumber", "plant_individual_id", "morph_tier_source",
@@ -3778,7 +3769,7 @@ main <- function() {
       "can1", "can2", "can3", dyn_pc_cols, dyn_het_cols,
       "efd_harmonic_opt", "efd_k95_pcs", "selected_morph_features",
       "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction",
-      "basal_leaf_count", "n_basal_leaves", "n_cauline_leaves", "heteroblasty_index", "is_dissected",
+      "basal_leaf_count", "n_basal_leaves", "n_cauline_leaves", "within_rosette_efa_dispersion", "is_dissected",
       "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
       "plant_height_mm", "plant_height_cm", "scape_to_basal_leaf_ratio", "is_bent_stem",
       "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv",
@@ -3786,7 +3777,7 @@ main <- function() {
       "type_status", "is_type_specimen", "has_empirical_type_anchor",
       "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype",
       "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p",
-      "is_promoted_bronze", "is_promoted_anchor", "authority_weight"
+      "is_promoted_bronze", "authority_weight"
     )))
     vouchers_df <- left_join_by_voucher_individual(vouchers_df, morph_df, m_cols)
   }
@@ -3797,7 +3788,7 @@ main <- function() {
     pheno_states_df <- readr::read_csv(opts$pheno_states, show_col_types = FALSE)
     pheno_states_df$catalogNumber <- as.character(pheno_states_df$catalogNumber)
     vouchers_df$catalogNumber <- as.character(vouchers_df$catalogNumber)
-    p_cols <- intersect(names(pheno_states_df), c("catalogNumber", "total_capitula", "n_anthesis", "n_fruit", "n_fruiting", "n_bud", "n_senescent", "voucher_phenological_state", "reproductive_stage_confidence", "dominant_pappus_ratio"))
+    p_cols <- intersect(names(pheno_states_df), c("catalogNumber", "total_capitula", "n_anthesis", "n_fruiting", "n_bud", "n_senescent", "voucher_phenological_state", "reproductive_stage_confidence", "dominant_pappus_ratio"))
     pheno_states_df <- pheno_states_df[!duplicated(pheno_states_df$catalogNumber), p_cols, drop = FALSE]
     vouchers_df <- dplyr::left_join(vouchers_df, pheno_states_df, by = "catalogNumber")
     message(sprintf("Left-joined %d vouchers with phenological states.", nrow(vouchers_df)))
@@ -3806,7 +3797,7 @@ main <- function() {
     vouchers_df$voucher_phenological_state <- NA_character_
     vouchers_df$total_capitula <- NA_real_
     vouchers_df$n_anthesis <- NA_real_
-    vouchers_df$n_fruit <- NA_real_
+    vouchers_df$n_fruiting <- NA_real_
     vouchers_df$n_bud <- NA_real_
     vouchers_df$dominant_pappus_ratio <- NA_real_
   }
@@ -4015,7 +4006,8 @@ main <- function() {
   }
 
   # Stage 5: Export Conflict Flags, Summary Report & Figures (Atomic write-then-replace)
-  if (write_csv_atomic(vouchers_df, opts$output_flags, demo = demo_mode)) {
+  export_flags_df <- if (all(c("decimalLatitude", "decimalLongitude") %in% names(vouchers_df))) vouchers_df[, setdiff(names(vouchers_df), c("latitude", "longitude")), drop = FALSE] else vouchers_df
+  if (write_csv_atomic(export_flags_df, opts$output_flags, demo = demo_mode)) {
     message(sprintf("Saved %d multimodal conflict flags to %s.", nrow(vouchers_df), opts$output_flags))
   }
   if (!isTRUE(demo_mode) && exists("persist_step05_to_sqlite", mode = "function")) {

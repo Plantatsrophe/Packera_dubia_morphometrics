@@ -74,10 +74,10 @@ TAXONOMIC_TREATMENT_PALETTE <- c(
   "Misidentification / Cryptic Species" = "#D55E00"
 )
 
-compute_spatial_balance_weights <- function(df, bandwidth_km = 25.0) {
+compute_spatial_balance_weights <- function(df, bandwidth_km = 25.0, regional_bandwidth_km = 75.0, active_mask = NULL, recompute = FALSE) {
   if (is.null(df) || nrow(df) == 0L) return(numeric(0))
   n_rows <- nrow(df)
-  if ("spatial_balance_weight" %in% names(df)) {
+  if (!isTRUE(recompute) && is.null(active_mask) && ("spatial_balance_weight" %in% names(df))) {
     w_in <- suppressWarnings(as.numeric(df$spatial_balance_weight))
     if (any(is.finite(w_in) & w_in > 0)) {
       w_in[!is.finite(w_in) | w_in <= 0] <- 1.0
@@ -88,65 +88,71 @@ compute_spatial_balance_weights <- function(df, bandwidth_km = 25.0) {
   taxa <- if (!is.null(sp_col)) as.character(df[[sp_col]]) else rep("Unknown", n_rows)
   taxa[is.na(taxa) | !nzchar(trimws(taxa))] <- "Unknown"
 
-  lat_col <- if ("decimalLatitude" %in% names(df)) "decimalLatitude" else if ("latitude" %in% names(df)) "latitude" else NULL
-  lon_col <- if ("decimalLongitude" %in% names(df)) "decimalLongitude" else if ("longitude" %in% names(df)) "longitude" else NULL
-  if (is.null(lat_col) || is.null(lon_col)) return(rep(1.0, n_rows))
-  lats <- suppressWarnings(as.numeric(df[[lat_col]]))
-  lons <- suppressWarnings(as.numeric(df[[lon_col]]))
+  if (!("decimalLatitude" %in% names(df)) || !("decimalLongitude" %in% names(df))) return(rep(1.0, n_rows))
+  lats <- suppressWarnings(as.numeric(df$decimalLatitude))
+  lons <- suppressWarnings(as.numeric(df$decimalLongitude))
+  ok_geo <- is.finite(lats) & is.finite(lons) & (abs(lats) <= 90.0) & (abs(lons) <= 180.0)
 
-  st_col <- if ("stateProvince" %in% names(df)) "stateProvince" else if ("regional_group" %in% names(df)) "regional_group" else NULL
-  states <- if (!is.null(st_col)) toupper(trimws(as.character(df[[st_col]]))) else rep("", n_rows)
-  states[is.na(states)] <- ""
+  eval_cohort_kernel <- function(cohort_idx) {
+    w_c <- rep(1.0, length(cohort_idx))
+    if (length(cohort_idx) == 0L) return(w_c)
+    tx_c <- taxa[cohort_idx]
+    for (sp in unique(tx_c)) {
+      pos_sp <- which(tx_c == sp)
+      rows_sp <- cohort_idx[pos_sp]
+      geo_pos <- pos_sp[ok_geo[rows_sp]]
+      if (length(geo_pos) < 2L) next
+      geo_rows <- cohort_idx[geo_pos]
+      rlat <- (lats[geo_rows] * (pi / 180.0)) + 0.0
+      rlon <- (lons[geo_rows] * (pi / 180.0)) + 0.0
+      coord_key <- paste(rlat, rlon, sep = "_")
+      u_keys <- unique(coord_key)
+      inv_idx <- match(coord_key, u_keys)
+      first_idx <- match(u_keys, coord_key)
+      counts_u <- as.numeric(tabulate(inv_idx, nbins = length(u_keys)))
+      u_rlat <- rlat[first_idx]
+      u_rlon <- rlon[first_idx]
+      n_u <- length(u_keys)
+      dlat <- outer(u_rlat, u_rlat, "-")
+      dlon <- outer(u_rlon, u_rlon, "-")
+      a_mat <- sin(dlat / 2.0)^2 + (cos(u_rlat) %o% cos(u_rlat)) * (sin(dlon / 2.0)^2)
+      dist_km <- 2.0 * 6371.0088 * asin(pmin(1.0, pmax(0.0, sqrt(pmax(0.0, a_mat)))))
+      kern_fine <- exp(-(dist_km^2) / (2.0 * (bandwidth_km^2)))
+      kern_reg <- exp(-(dist_km^2) / (2.0 * (regional_bandwidth_km^2)))
+      kern_u <- matrix(kern_fine + 0.35 * kern_reg, nrow = n_u, ncol = n_u)
+      diag(kern_u) <- 1.35
+      # Exact identity to 1.0 + sum_{j != i} (kern_fine[i,j] + 0.35*kern_reg[i,j]):
+      d_local <- (as.numeric(kern_u %*% counts_u) - 0.35)[inv_idx]
+      w_raw <- 1.0 / sqrt(pmax(d_local, 1e-8))
+      w_sp <- pmin(3.0, pmax(0.20, w_raw))
+      for (iter in 1:3) {
+        m_cur <- mean(w_sp, na.rm = TRUE)
+        if (is.finite(m_cur) && m_cur > 0) w_sp <- pmin(3.0, pmax(0.20, w_sp / m_cur))
+      }
+      w_c[geo_pos] <- round(w_sp, 6)
+    }
+    w_c
+  }
 
   w_out <- rep(1.0, n_rows)
-  for (sp in unique(taxa)) {
-    t_idx <- which(taxa == sp)
-    geo_idx <- t_idx[is.finite(lats[t_idx]) & is.finite(lons[t_idx])]
-    if (length(geo_idx) == 0L) next
-
-    st_sub <- states[t_idx]
-    st_valid <- st_sub[nzchar(st_sub)]
-    if (length(st_valid) > 0L) {
-      st_tab <- table(st_valid)
-      med_s <- max(as.numeric(stats::median(as.numeric(st_tab))), 1.0)
-      st_geo <- states[geo_idx]
-      st_lookup <- pmax(as.numeric(st_tab) / med_s, 1e-6)
-      names(st_lookup) <- names(st_tab)
-      f_state <- unname(st_lookup[st_geo])
-      f_state[is.na(f_state) | !nzchar(st_geo)] <- 1.0
-    } else {
-      f_state <- rep(1.0, length(geo_idx))
+  use_split <- !is.null(active_mask) && (length(active_mask) == n_rows) && any(as.logical(active_mask), na.rm = TRUE)
+  if (!use_split && ("authority_weight" %in% names(df))) {
+    aw_v <- suppressWarnings(as.numeric(df$authority_weight))
+    if (any(is.finite(aw_v) & aw_v > 0.0) && any(!is.finite(aw_v) | aw_v <= 0.0)) {
+      active_mask <- is.finite(aw_v) & (aw_v > 0.0)
+      use_split <- TRUE
     }
-
-    rlat <- (lats[geo_idx] * (pi / 180.0)) + 0.0
-    rlon <- (lons[geo_idx] * (pi / 180.0)) + 0.0
-    coord_key <- paste(rlat, rlon, sep = "_")
-    u_keys <- unique(coord_key)
-    inv_idx <- match(coord_key, u_keys)
-    first_idx <- match(u_keys, coord_key)
-    counts_u <- as.numeric(tabulate(inv_idx, nbins = length(u_keys)))
-    u_rlat <- rlat[first_idx]
-    u_rlon <- rlon[first_idx]
-    n_u <- length(u_keys)
-    dlat <- outer(u_rlat, u_rlat, "-")
-    dlon <- outer(u_rlon, u_rlon, "-")
-    a_mat <- sin(dlat / 2.0)^2 + (cos(u_rlat) %o% cos(u_rlat)) * (sin(dlon / 2.0)^2)
-    dist_km <- 2.0 * 6371.0 * asin(pmin(1.0, pmax(0.0, sqrt(pmax(0.0, a_mat)))))
-    kern_u <- matrix(exp(-(dist_km^2) / (2.0 * (bandwidth_km^2))), nrow = n_u, ncol = n_u)
-    diag(kern_u) <- 1.0
-    d_local <- as.numeric(kern_u %*% counts_u)[inv_idx]
-
-    w_raw <- 1.0 / sqrt(pmax(d_local * f_state, 1e-8))
-    m_raw <- mean(w_raw, na.rm = TRUE)
-    w_sp <- if (is.finite(m_raw) && m_raw > 0) w_raw / m_raw else rep(1.0, length(geo_idx))
-    w_sp <- pmin(3.0, pmax(0.20, w_sp))
-    for (iter in 1:3) {
-      m_cur <- mean(w_sp, na.rm = TRUE)
-      if (is.finite(m_cur) && m_cur > 0) w_sp <- pmin(3.0, pmax(0.20, w_sp / m_cur))
-    }
-    w_out[geo_idx] <- round(w_sp, 6)
   }
-  return(w_out)
+  if (use_split) {
+    act_m <- !is.na(active_mask) & as.logical(active_mask)
+    act_idx <- which(act_m)
+    pas_idx <- which(!act_m)
+    w_out[act_idx] <- eval_cohort_kernel(act_idx)
+    if (length(pas_idx) > 0L) w_out[pas_idx] <- eval_cohort_kernel(pas_idx)
+  } else {
+    w_out <- eval_cohort_kernel(seq_len(n_rows))
+  }
+  w_out
 }
 
 format_predictor_labels <- function(var_vec) {
@@ -782,7 +788,7 @@ extract_standardized_harmonic_matrix <- function(df, max_k = NULL) {
   }
   interleaved_nms <- as.vector(outer(c("A", "B", "C", "D"), seq_len(max_k), paste0))
   avail <- intersect(interleaved_nms, colnames(df))
-  if (length(avail) < 8L) return(NULL)
+  if (length(avail) < 4L) return(NULL)
   mat <- as.matrix(df[, avail, drop = FALSE])
   storage.mode(mat) <- "double"
   mat[!is.finite(mat)] <- 0.0
@@ -1429,14 +1435,14 @@ export_step03_fourier_pc_tables <- function(specimen_df, efa_df, output_csv_path
   sym_cols <- intersect(
     c(
       "catalogNumber", "plant_individual_id", "taxon", "species_standardized", "scientificName",
-      "determiner_tier", "is_type_specimen", "is_promoted_anchor", "authority_weight", "is_passive",
+      "determiner_tier", "is_type_specimen", "is_promoted_bronze", "authority_weight", "is_passive",
       "leaf_count", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source",
       "leaf_quality_weight", "pct_asymmetry", "sym_var", "asym_var",
       "harmonic_roughness", "is_contour_outlier", "area_mm2",
       "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm",
       "petiole_to_blade_ratio", "is_dissected",
       "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity",
-      paste0("Sym_PC", 1:15), paste0("PC", 1:15)
+      paste0("PC", 1:15)
     ),
     colnames(specimen_df)
   )
@@ -1528,7 +1534,7 @@ generate_step03_pub_figures <- function(
   }
   var_pct <- var_pct3[1:2]
 
-  sym_var_pct3_emp <- .empirical_pc_var_pct(df, "Sym_PC", 3L)
+  sym_var_pct3_emp <- .empirical_pc_var_pct(df, "PC", 3L)
   if (sum(sym_var_pct3_emp) <= 0.0) sym_var_pct3_emp <- var_pct3
   if (!is.null(sym_pca) && !is.null(sym_pca$sdev) && length(sym_pca$sdev) >= 2) {
     vs <- (sym_pca$sdev^2) / max(sum(sym_pca$sdev^2), 1e-12) * 100
@@ -1538,8 +1544,6 @@ generate_step03_pub_figures <- function(
 
   if (!"PC1" %in% colnames(df)) df$PC1 <- 0
   if (!"PC2" %in% colnames(df)) df$PC2 <- 0
-  if (!"Sym_PC1" %in% colnames(df)) df$Sym_PC1 <- df$PC1
-  if (!"Sym_PC2" %in% colnames(df)) df$Sym_PC2 <- df$PC2
 
   alpha_val <- adaptive_point_alpha(nrow(df))
   pt_pch <- dyn_pch[df$taxon_clean]
@@ -1557,8 +1561,8 @@ generate_step03_pub_figures <- function(
   cent_sym <- do.call(rbind, lapply(present_tx, function(tx) {
     m <- which(df$taxon_clean == tx)
     w_m <- if (any(auth_w_3[m] > 0)) pmax(auth_w_3[m], 1e-6) else rep(1.0, length(m))
-    c(stats::weighted.mean(df$Sym_PC1[m], w = w_m, na.rm = TRUE),
-      stats::weighted.mean(df$Sym_PC2[m], w = w_m, na.rm = TRUE))
+    c(stats::weighted.mean(df$PC1[m], w = w_m, na.rm = TRUE),
+      stats::weighted.mean(df$PC2[m], w = w_m, na.rm = TRUE))
   }))
   rownames(cent_sym) <- gsub("Packera ", "P. ", present_tx)
 
@@ -1572,11 +1576,11 @@ generate_step03_pub_figures <- function(
     std_hmat <- extract_standardized_harmonic_matrix(efa_df[efa_bas_idx, , drop = FALSE], max_k = NULL)
   }
 
-  # Precompute linear projection from (Sym_PC1, Sym_PC2) to standardized harmonics once
+  # Precompute linear projection from (PC1, PC2) to standardized harmonics once
   grid_B_hat <- NULL
   grid_h_bar <- NULL
   if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && nrow(df) >= 5) {
-    s1 <- df$Sym_PC1; s2 <- df$Sym_PC2
+    s1 <- df$PC1; s2 <- df$PC2
     if (stats::sd(s1, na.rm = TRUE) > 1e-6 && stats::sd(s2, na.rm = TRUE) > 1e-6) {
       grid_B_hat <- tryCatch(qr.solve(cbind(1, s1, s2), std_hmat), error = function(e) NULL)
     }
@@ -1607,10 +1611,10 @@ generate_step03_pub_figures <- function(
   draw_fig03_reconstruction <- function() {
     graphics::par(mfrow = c(1, 2), mar = c(4.5, 4.5, 3.2, 1.1))
     # Panel A: 2D Symmetric EFA Morphospace with 5x3 Background Inverse-Fourier Grid
-    sd1 <- max(stats::sd(df$Sym_PC1, na.rm = TRUE), 0.08)
-    sd2 <- max(stats::sd(df$Sym_PC2, na.rm = TRUE), 0.06)
-    m1  <- mean(df$Sym_PC1, na.rm = TRUE)
-    m2  <- mean(df$Sym_PC2, na.rm = TRUE)
+    sd1 <- max(stats::sd(df$PC1, na.rm = TRUE), 0.08)
+    sd2 <- max(stats::sd(df$PC2, na.rm = TRUE), 0.06)
+    m1  <- mean(df$PC1, na.rm = TRUE)
+    m2  <- mean(df$PC2, na.rm = TRUE)
 
     bg_fourier_grid <- function(xlim, ylim) {
       z1_seq <- c(-2.0, -1.0, 0.0, 1.0, 2.0)
@@ -1634,14 +1638,14 @@ generate_step03_pub_figures <- function(
     }
 
     plot_2d_ordination_scatter(
-      x = df$Sym_PC1,
-      y = df$Sym_PC2,
+      x = df$PC1,
+      y = df$PC2,
       col = cols,
       pch = pt_pch,
       cex = 0.85,
       lwd = 1.05,
-      xlab = sprintf("Sym_PC1 (%.1f%% -- Lamina Elongation & Outline Taper)", sym_var_pct[1]),
-      ylab = sprintf("Sym_PC2 (%.1f%% -- Lamina Base Shape & Ovate Taper)", sym_var_pct[2]),
+      xlab = sprintf("PC1 (%.1f%% -- Lamina Elongation & Outline Taper)", sym_var_pct[1]),
+      ylab = sprintf("PC2 (%.1f%% -- Lamina Base Shape & Ovate Taper)", sym_var_pct[2]),
       main = "A. 2D Basal Rosette EFA Morphospace & Inverse-Fourier Grid",
       group_vec = df$taxon_clean,
       group_cols = dyn_pal,
@@ -1678,7 +1682,7 @@ generate_step03_pub_figures <- function(
     cy_vec <- grid_lay$cy
 
     is_t1_pure <- if ("morph_tier_source" %in% colnames(df)) (is.na(df$morph_tier_source) | df$morph_tier_source != "Cauline_Only_Fallback") else rep(TRUE, nrow(df))
-    is_promo_row <- if ("is_promoted_anchor" %in% colnames(df)) as.logical(df$is_promoted_anchor) else if ("is_promoted_bronze" %in% colnames(df)) as.logical(df$is_promoted_bronze) else rep(FALSE, nrow(df))
+    is_promo_row <- if ("is_promoted_bronze" %in% colnames(df)) as.logical(df$is_promoted_bronze) else rep(FALSE, nrow(df))
     is_promo_row[is.na(is_promo_row)] <- FALSE
     is_gold_silv <- if ("determiner_tier" %in% colnames(df)) (df$determiner_tier %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver") | is_type_row | is_promo_row) else rep(TRUE, nrow(df))
 
@@ -1697,7 +1701,7 @@ generate_step03_pub_figures <- function(
         h_sd   <- apply(std_hmat[m_anchor, , drop = FALSE], 2, stats::sd, na.rm = TRUE)
         h_sd[!is.finite(h_sd)] <- 0.0
       } else {
-        z_sp <- if (any(m_anchor)) c(mean(df$Sym_PC1[m_anchor], na.rm = TRUE), mean(df$Sym_PC2[m_anchor], na.rm = TRUE)) else c((idx_sp - 2.5) * 0.5, 0)
+        z_sp <- if (any(m_anchor)) c(mean(df$PC1[m_anchor], na.rm = TRUE), mean(df$PC2[m_anchor], na.rm = TRUE)) else c((idx_sp - 2.5) * 0.5, 0)
         h_mean <- project_grid_harmonics(z_sp[1], z_sp[2])
         h_sd   <- abs(h_mean) * 0.12
       }
@@ -1771,7 +1775,7 @@ generate_step03_pub_figures <- function(
   atomic_save_dual_plot(draw_fig03_reconstruction, fdir, "fig03_efa_morphospace_reconstruction", width = 13.0, height = 6.0, dpi = 300)
 
   # Companion Figure 03a: Momocs Marginal Eigenleaf Matrix (PC1-PC3) & Homologous Radial Displacement vs. Focal Reference
-  spc3 <- if ("Sym_PC3" %in% colnames(df)) as.numeric(df$Sym_PC3) else if ("PC3" %in% colnames(df)) as.numeric(df$PC3) else rep(0.0, nrow(df))
+  spc3 <- if ("PC3" %in% colnames(df)) as.numeric(df$PC3) else rep(0.0, nrow(df))
   sym_var_pct3 <- sym_var_pct3_emp
 
   atomic_save_dual_plot(function() {
@@ -1790,13 +1794,13 @@ generate_step03_pub_figures <- function(
     z_headers <- c("-2.0 SD", "-1.0 SD", "Mean (0 SD)", "+1.0 SD", "+2.0 SD")
     graphics::axis(3, at = seq(0.5, 4.5, by = 1.0), labels = z_headers, tick = FALSE, line = -0.6, cex.axis = 0.76, font = 2)
     row_labels <- c(
-      sprintf("Sym_PC1\n(%.1f%%)", sym_var_pct3[1]),
-      sprintf("Sym_PC2\n(%.1f%%)", sym_var_pct3[2]),
-      sprintf("Sym_PC3\n(%.1f%%)", sym_var_pct3[3])
+      sprintf("PC1\n(%.1f%%)", sym_var_pct3[1]),
+      sprintf("PC2\n(%.1f%%)", sym_var_pct3[2]),
+      sprintf("PC3\n(%.1f%%)", sym_var_pct3[3])
     )
     graphics::axis(2, at = c(2.5, 1.5, 0.5), labels = row_labels, tick = FALSE, las = 1, line = -0.4, cex.axis = 0.74, font = 2)
 
-    pc_scores_3 <- cbind(as.numeric(df$Sym_PC1), as.numeric(df$Sym_PC2), as.numeric(spc3))
+    pc_scores_3 <- cbind(as.numeric(df$PC1), as.numeric(df$PC2), as.numeric(spc3))
     h_grand_mean <- if (!is.null(std_hmat) && nrow(std_hmat) >= 1L) colMeans(std_hmat, na.rm = TRUE) else project_grid_harmonics(0, 0)
 
     for (r_idx in 1:3) {
@@ -2091,8 +2095,8 @@ generate_step03_pub_figures <- function(
         c_def <- if (length(c_valid) > 0L) c_valid[1L] else default_grp
         caul_df$taxon_clean <- ifelse(c_grp %in% names(c_pal), as.character(c_grp), c_def)
 
-        c_x <- if ("Cauline_PC1" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$Cauline_PC1)) else if ("Sym_PC1" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$Sym_PC1)) else suppressWarnings(as.numeric(caul_df$PC1))
-        c_y <- if ("Cauline_PC2" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$Cauline_PC2)) else if ("Sym_PC2" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$Sym_PC2)) else suppressWarnings(as.numeric(caul_df$PC2))
+        c_x <- if ("Cauline_PC1" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$Cauline_PC1)) else if ("PC1" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$PC1)) else rep(0.0, nrow(caul_df))
+        c_y <- if ("Cauline_PC2" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$Cauline_PC2)) else if ("PC2" %in% colnames(caul_df)) suppressWarnings(as.numeric(caul_df$PC2)) else rep(0.0, nrow(caul_df))
         c_x[!is.finite(c_x)] <- 0.0
         c_y[!is.finite(c_y)] <- 0.0
 
@@ -2342,8 +2346,7 @@ generate_step03_pub_figures <- function(
     if (length(disp_grp) == 0L) disp_grp <- sort(unique(group_vec[!is.na(group_vec) & group_vec != "Unknown"]))
 
     avail_pcs <- intersect(pc_cols, colnames(sub_df))
-    if (length(avail_pcs) < 2) avail_pcs <- intersect(c("Sym_PC1", "Sym_PC2", "Sym_PC3"), colnames(sub_df))
-    X <- as.matrix(sub_df[, avail_pcs, drop = FALSE])
+        X <- as.matrix(sub_df[, avail_pcs, drop = FALSE])
     storage.mode(X) <- "double"
 
     ok <- stats::complete.cases(X) & !is.na(group_vec) & (group_vec %in% disp_grp)
@@ -2476,12 +2479,12 @@ generate_step03_pub_figures <- function(
     b_ect_x <- if ("ECT_PC1" %in% colnames(df) && any(is.finite(suppressWarnings(as.numeric(df$ECT_PC1))))) {
       suppressWarnings(as.numeric(df$ECT_PC1))
     } else {
-      as.numeric(df$Sym_PC1)
+      as.numeric(df$PC1)
     }
     b_ect_y <- if ("ECT_PC2" %in% colnames(df) && any(is.finite(suppressWarnings(as.numeric(df$ECT_PC2))))) {
       suppressWarnings(as.numeric(df$ECT_PC2))
     } else {
-      as.numeric(df$Sym_PC2)
+      as.numeric(df$PC2)
     }
     b_ect_x[!is.finite(b_ect_x)] <- 0.0
     b_ect_y[!is.finite(b_ect_y)] <- 0.0
@@ -2703,11 +2706,8 @@ generate_step03_pub_figures <- function(
 format_cda_loading_labels <- function(raw_vars) {
   dict <- c(
     "PC1"                              = "PC1 [Basal Elongation]",
-    "Sym_PC1"                          = "PC1 [Basal Elongation]",
     "PC2"                              = "PC2 [Basal Base Shape]",
-    "Sym_PC2"                          = "PC2 [Basal Base Shape]",
     "PC3"                              = "PC3 [Basal Dissection]",
-    "Sym_PC3"                          = "PC3 [Basal Dissection]",
     "PC4"                              = "PC4 [Basal Apex Taper]",
     "PC5"                              = "PC5 [Basal Lobe Depth]",
     "AR_inv"                           = "AR_inv [Involucre Ratio]",
@@ -2716,8 +2716,7 @@ format_cda_loading_labels <- function(raw_vars) {
     "log_centsize_std"                 = "CS [Basal Leaf Size]",
     "aspect_ratio"                     = "AR [Basal Blade L/W]",
     "aspect_ratio_std"                 = "AR [Basal Blade L/W]",
-    "blade_length_to_width_ratio"      = "Blade L/W [Basal]",
-    "blade_length_to_width_ratio_std"  = "Blade L/W [Basal]",
+
     "petiole_to_blade_ratio"           = "Petiole/Blade [Basal]",
     "petiole_to_blade_ratio_std"       = "Petiole/Blade [Basal]",
     "solidity"                         = "Solidity [Basal Dissection]",
@@ -2726,8 +2725,8 @@ format_cda_loading_labels <- function(raw_vars) {
     "q25_solidity_std"                 = "Q25 Solidity [Basal Lobing]",
     "dissection_index"                 = "DI [Basal Margin Complexity]",
     "dissection_index_std"             = "DI [Basal Margin Complexity]",
-    "heteroblasty_index"               = "Heteroblasty [Rosette Disp.]",
-    "heteroblasty_index_std"           = "Heteroblasty [Rosette Disp.]",
+    "within_rosette_efa_dispersion"    = "Rosette Disp. [Basal EFA]",
+    "within_rosette_efa_dispersion_std"= "Rosette Disp. [Basal EFA]",
     "basal_vs_cauline_length_ratio"    = "Basal/Cauline Length",
     "basal_vs_cauline_length_ratio_std"= "Basal/Cauline Length",
     "basal_vs_cauline_solidity_delta"  = "Basal-Cauline Solidity",
@@ -2759,9 +2758,7 @@ format_cda_loading_labels <- function(raw_vars) {
     "cauline_ect_lobe_complexity"      = "Cauline ECT Lobing [Stem]",
     "cauline_ect_lobe_complexity_std"  = "Cauline ECT Lobing [Stem]",
     "heteroblasty_ect_distance"        = "Heteroblasty ECT Dist.",
-    "heteroblasty_ect_distance_std"    = "Heteroblasty ECT Dist.",
-    "pheno_sin"                        = "pheno_sin",
-    "pheno_cos"                        = "pheno_cos"
+    "heteroblasty_ect_distance_std"    = "Heteroblasty ECT Dist."
   )
   vapply(as.character(raw_vars), function(v) {
     if (v %in% names(dict)) unname(dict[v]) else v
@@ -3044,14 +3041,14 @@ draw_diagnostic_trait_boxplots <- function(df, sp_clean, taxon_cols, taxon_pch, 
     rep(fallback_val, nrow(df))
   }
 
-  ar_leaf <- .get_raw_trait(c("blade_length_to_width_ratio", "aspect_ratio"), NA_real_, basal_only = TRUE)
+  ar_leaf <- .get_raw_trait(c("aspect_ratio"), NA_real_, basal_only = TRUE)
   sol_v   <- .get_raw_trait(c("solidity"), NA_real_, basal_only = TRUE)
   cs_mm   <- .get_raw_trait(c("centroid_size"), NA_real_, basal_only = TRUE)
   if (!any(is.finite(cs_mm))) {
     cs_mm <- .get_raw_trait(c("log_centsize"), NA_real_, transform_fn = function(x) 10.0^pmin(x, 4.0), basal_only = TRUE)
   }
   caul_sol <- .get_raw_trait(c("cauline_solidity_med"), NA_real_, basal_only = FALSE)
-  ar_inv   <- .get_raw_trait(c("AR_inv", "capitulum_aspect_ratio"), NA_real_, basal_only = FALSE)
+  ar_inv   <- .get_raw_trait(c("AR_inv"), NA_real_, basal_only = FALSE)
 
   cand_traits <- list(
     "Basal Blade\nAspect (L/W)"     = list(vec = ar_leaf, unit = "L/W", fmt = "%.2f"),
@@ -3292,8 +3289,8 @@ draw_group_mean_leaf_outlines <- function(df, group_vec, group_cols, main_title 
   cy_vec <- grid_lay$cy
 
   std_hmat <- extract_standardized_harmonic_matrix(df, max_k = 12L)
-  pc1_v <- if ("Sym_PC1" %in% names(df)) as.numeric(df$Sym_PC1) else if ("PC1" %in% names(df)) as.numeric(df$PC1) else rep(0.0, nrow(df))
-  pc2_v <- if ("Sym_PC2" %in% names(df)) as.numeric(df$Sym_PC2) else if ("PC2" %in% names(df)) as.numeric(df$PC2) else rep(0.0, nrow(df))
+  pc1_v <- if ("PC1" %in% names(df)) as.numeric(df$PC1) else rep(0.0, nrow(df))
+  pc2_v <- if ("PC2" %in% names(df)) as.numeric(df$PC2) else rep(0.0, nrow(df))
   is_type_row <- if ("is_type_specimen" %in% names(df)) as.logical(df$is_type_specimen) else rep(FALSE, nrow(df))
   is_type_row[is.na(is_type_row)] <- FALSE
 
@@ -3575,8 +3572,8 @@ generate_step04_pub_figures <- function(
   if (!is.null(s_load) && ncol(s_load) == 1L) s_load <- cbind(s_load, 0.0)
   s_lbls <- if (!is.null(s_load) && !is.null(rownames(s_load))) format_cda_loading_labels(rownames(s_load)) else NULL
 
-  x_v <- if ("PC1" %in% colnames(audited_df)) as.numeric(audited_df$PC1) else if ("Sym_PC1" %in% colnames(audited_df)) as.numeric(audited_df$Sym_PC1) else seq_len(nrow(audited_df))
-  y_v <- if ("PC2" %in% colnames(audited_df)) as.numeric(audited_df$PC2) else if ("Sym_PC2" %in% colnames(audited_df)) as.numeric(audited_df$Sym_PC2) else rep(0, nrow(audited_df))
+  x_v <- if ("PC1" %in% colnames(audited_df)) as.numeric(audited_df$PC1) else seq_len(nrow(audited_df))
+  y_v <- if ("PC2" %in% colnames(audited_df)) as.numeric(audited_df$PC2) else rep(0, nrow(audited_df))
   cl_v <- if ("gmm_cluster" %in% colnames(audited_df)) as.integer(audited_df$gmm_cluster) else rep(1L, nrow(audited_df))
   cl_v[is.na(cl_v)] <- 1L
   pal_cl <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#333333")

@@ -124,7 +124,7 @@ resolve_active_anthesis_mask <- function(df) {
   na_cnt  <- if ("n_anthesis" %in% names(df)) suppressWarnings(as.numeric(df$n_anthesis)) else if ("n_anthesis_heads" %in% names(df)) suppressWarnings(as.numeric(df$n_anthesis_heads)) else rep(NA_real_, n)
   non_anth_cnt <- rep(0.0, n)
   has_non_anth_col <- FALSE
-  for (nc in intersect(c("n_bud", "n_fruiting", "n_fruit", "n_senescent"), names(df))) {
+  for (nc in intersect(c("n_bud", "n_fruiting", "n_senescent"), names(df))) {
     has_non_anth_col <- TRUE
     v <- suppressWarnings(as.numeric(df[[nc]]))
     non_anth_cnt <- non_anth_cnt + ifelse(is.finite(v), v, 0.0)
@@ -290,7 +290,7 @@ compute_hopkins_adjusted_phenology <- function(df) {
   }
   doy_vec <- ifelse(has_valid_doy, doy_raw, ref_doy)
 
-  lat_col <- intersect(c("decimalLatitude", "latitude"), names(df))
+  lat_col <- intersect(c("decimalLatitude"), names(df))
   lat_vec <- if (length(lat_col) > 0L) suppressWarnings(as.numeric(df[[lat_col[1L]]])) else rep(NA_real_, n)
   elev_col <- intersect(c("elevation_m", "elevation", "minimumElevationInMeters"), names(df))
   elev_vec <- if (length(elev_col) > 0L) suppressWarnings(as.numeric(df[[elev_col[1L]]])) else rep(NA_real_, n)
@@ -416,7 +416,7 @@ compute_cohens_kappa <- function(y_true, y_pred, default_kappa = 0.70) {
     rep("Tier_1_Gold", n)
   }
   promo_mask <- rep(FALSE, n)
-  for (pcol in intersect(c("is_promoted_anchor", "is_promoted_bronze", "is_type_specimen"), names(df))) {
+  for (pcol in intersect(c("is_promoted_bronze", "is_type_specimen"), names(df))) {
     pv <- suppressWarnings(as.logical(df[[pcol]]))
     pv[is.na(pv)] <- FALSE
     promo_mask <- promo_mask | pv
@@ -511,8 +511,7 @@ compute_probabilistic_consensus_scores <- function(df) {
   morph_sp_cv[!is.na(morph_sp_cv) & !nzchar(morph_sp_cv)] <- NA_character_
   cda_p_cv <- if ("cda_posterior_prob" %in% df_nms_c) suppressWarnings(as.numeric(df$cda_posterior_prob)) else rep(NA_real_, n)
   is_mo_cv <- if ("morphometric_outlier_flag" %in% df_nms_c) (!is.na(df$morphometric_outlier_flag) & as.logical(df$morphometric_outlier_flag)) else rep(FALSE, n)
-  has_geo_cv <- (if ("latitude" %in% df_nms_c) is.finite(suppressWarnings(as.numeric(df$latitude))) else rep(FALSE, n)) |
-                (if ("decimalLatitude" %in% df_nms_c) is.finite(suppressWarnings(as.numeric(df$decimalLatitude))) else rep(FALSE, n))
+  has_geo_cv <- if ("decimalLatitude" %in% df_nms_c) is.finite(suppressWarnings(as.numeric(df$decimalLatitude))) else rep(FALSE, n)
   edaph_sp_cv <- if ("edaphic_best_fit_taxon" %in% df_nms_c) as.character(df$edaphic_best_fit_taxon) else if ("rf_predicted_taxon" %in% df_nms_c) as.character(df$rf_predicted_taxon) else rep(NA_character_, n)
   edaph_sp_cv[!is.na(edaph_sp_cv) & !nzchar(edaph_sp_cv)] <- NA_character_
   mm_conf_cv <- if ("multimodal_conflict_flag" %in% df_nms_c) as.logical(df$multimodal_conflict_flag) else rep(NA, n)
@@ -664,11 +663,8 @@ compute_probabilistic_consensus_scores <- function(df) {
 
 apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_two_delta_bic = 12.0) {
   message("Evaluating vouchers across Five-Stage Hierarchical Integrative Decision Matrix...")
-  if ("morphometric_outlier_flag" %in% names(df) && !("misidentification_flag" %in% names(df))) {
-    df$misidentification_flag <- df$morphometric_outlier_flag
-  } else if ("misidentification_flag" %in% names(df) && !("morphometric_outlier_flag" %in% names(df))) {
-    df$morphometric_outlier_flag <- df$misidentification_flag
-  }
+  if (!("morphometric_outlier_flag" %in% names(df))) df$morphometric_outlier_flag <- FALSE
+  if (!("misidentification_flag" %in% names(df))) df$misidentification_flag <- FALSE
 
   is_intra <- isTRUE(intraspecific_mode)
   n <- nrow(df)
@@ -789,11 +785,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   sel_mc <- sel_mc[vapply(sel_mc, function(cc) !is.logical(df[[cc]]) && sum(is.finite(suppressWarnings(as.numeric(df[[cc]])))) >= 2L, logical(1))]
   can_cand <- intersect(c("can1", "can2", "can3"), names(df))
   can_cand <- can_cand[vapply(can_cand, function(cc) sum(is.finite(suppressWarnings(as.numeric(df[[cc]])))) >= 2L, logical(1))]
-  sym_cand <- .sort_numbered_pc_cols(grep("^Sym_PC[0-9]+$", names(df), value = TRUE), "Sym_PC")
-  sym_cand <- sym_cand[vapply(sym_cand, function(cc) sum(is.finite(suppressWarnings(as.numeric(df[[cc]])))) >= 2L, logical(1))]
   raw_pc_cand <- .sort_numbered_pc_cols(grep("^PC[0-9]+$", names(df), value = TRUE), "PC")
   raw_pc_cand <- raw_pc_cand[vapply(raw_pc_cand, function(cc) sum(is.finite(suppressWarnings(as.numeric(df[[cc]])))) >= 2L, logical(1))]
-  pc_cand <- if (length(sel_mc) >= 2L) utils::head(sel_mc, max_mc_p) else if (length(sym_cand) >= 2L) utils::head(sym_cand, max_mc_p) else utils::head(c(raw_pc_cand, sym_cand), max_mc_p)
+  pc_cand <- if (length(sel_mc) >= 2L) utils::head(sel_mc, max_mc_p) else utils::head(raw_pc_cand, max_mc_p)
   morph_coord_cols <- if (length(active_taxa) > 4L && length(pc_cand) >= 2L) pc_cand else if (length(can_cand) >= 2L) can_cand else if (length(pc_cand) >= 1L) pc_cand else can_cand
 
   morph_X <- NULL; morph_centroids <- NULL; morph_S_inv <- NULL
@@ -933,7 +927,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   yr_v <- .chr_col(df, "year", n, default = NA_character_)
   if (all(is.na(yr_v)) && "eventDate" %in% df_nms_d) yr_v <- substr(as.character(df$eventDate), 1L, 4L)
   cnty_v <- .chr_col(df, "county", n, default = NA_character_)
-  lat_v_cl <- if ("decimalLatitude" %in% df_nms_d) suppressWarnings(as.numeric(df$decimalLatitude)) else .num_col(df, "latitude", n, default = NA_real_)
+  lat_v_cl <- if ("decimalLatitude" %in% df_nms_d) suppressWarnings(as.numeric(df$decimalLatitude)) else rep(NA_real_, n)
   inst_v <- .chr_col(df, "institutionCode", n, default = NA_character_)
 
   cryptic_cluster_pass_map <- list()
@@ -1492,11 +1486,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   sel_cols <- sel_cols[vapply(sel_cols, is_usable_num, logical(1))]
   if (length(sel_cols) > 0L) return(sel_cols)
 
-  sym_cols <- .sort_numbered_pc_cols(grep("^Sym_PC[0-9]+$", names(df), value = TRUE), "Sym_PC")
-  sym_cols <- sym_cols[vapply(sym_cols, is_usable_num, logical(1))]
   pc_cols <- .sort_numbered_pc_cols(grep("^PC[0-9]+$", names(df), value = TRUE), "PC")
   pc_cols <- pc_cols[vapply(pc_cols, is_usable_num, logical(1))]
-  if (length(sym_cols) > 0L) return(sym_cols)
   if (length(pc_cols) > 0L) return(pc_cols)
   can_cols <- intersect(c("can1", "can2", "can3"), names(df))
   can_cols[vapply(can_cols, is_usable_num, logical(1))]
@@ -1561,8 +1552,8 @@ validate_upstream_contracts <- function(vouchers_df = NULL, morpho_df = NULL, mu
   if (!is.null(vouchers_df) && !("catalogNumber" %in% names(vouchers_df))) warning("Upstream vouchers missing canonical column: catalogNumber")
   if (!is.null(morpho_df)) {
     if (!("plant_individual_id" %in% names(morpho_df))) morpho_df$plant_individual_id <- 0L
-    if ("morphometric_outlier_flag" %in% names(morpho_df) && !("misidentification_flag" %in% names(morpho_df))) morpho_df$misidentification_flag <- morpho_df$morphometric_outlier_flag
-    else if ("misidentification_flag" %in% names(morpho_df) && !("morphometric_outlier_flag" %in% names(morpho_df))) morpho_df$morphometric_outlier_flag <- morpho_df$misidentification_flag
+    if (!("morphometric_outlier_flag" %in% names(morpho_df))) morpho_df$morphometric_outlier_flag <- FALSE
+    if (!("misidentification_flag" %in% names(morpho_df))) morpho_df$misidentification_flag <- FALSE
   }
   return(TRUE)
 }
@@ -1700,7 +1691,7 @@ build_triage_queue <- function(opts) {
     message(sprintf("Hydrated %d specimen rows from SQLite v_integrative_triage_master.", nrow(vouchers)))
   } else {
   mm_numeric_coalesce <- c(
-    "doy", "latitude", "longitude", "decimalLatitude", "decimalLongitude",
+    "doy", "decimalLatitude", "decimalLongitude",
     "soil_ph", "soil_sand", "soil_cec", "soil_bulk_density", "delta_doy",
     "fine_soil_ph", "fine_soil_sand", "fine_bedrock_depth_cm", "ssurgo_rock_outcrop_pct",
     "edaphic_z_score", "type_edaphic_z_score", "climatic_z_score", "spatial_block_cv_acc", "rf_predicted_prob",
@@ -1729,10 +1720,9 @@ build_triage_queue <- function(opts) {
   if (length(pheno_state_candidates) > 0L) {
     ph_df <- tryCatch(readr::read_csv(pheno_state_candidates[1L], show_col_types = FALSE), error = function(e) NULL)
     if (!is.null(ph_df) && "catalogNumber" %in% names(ph_df)) {
-      if ("n_fruit" %in% names(ph_df) && !("n_fruiting" %in% names(ph_df))) ph_df$n_fruiting <- ph_df$n_fruit
       vouchers <- safe_left_join_and_coalesce(
         vouchers, ph_df,
-        numeric_coalesce_cols = c("n_anthesis", "n_bud", "n_fruiting", "n_fruit", "n_senescent", "reproductive_stage_confidence", "total_capitula"),
+        numeric_coalesce_cols = c("n_anthesis", "n_bud", "n_fruiting", "n_senescent", "reproductive_stage_confidence", "total_capitula"),
         append_missing = TRUE
       )
     }
@@ -1767,12 +1757,9 @@ build_triage_queue <- function(opts) {
     if ("plant_height_mm" %in% names(mo_df) && !("plant_height_cm" %in% names(mo_df))) {
       mo_df$plant_height_cm <- round(suppressWarnings(as.numeric(mo_df$plant_height_mm)) / 10.0, 2)
     }
-    if (!("is_promoted_bronze" %in% names(mo_df))) {
-      mo_df$is_promoted_bronze <- if ("is_promoted_anchor" %in% names(mo_df)) as.logical(mo_df$is_promoted_anchor) else NA
-    }
-    if ("morphometric_outlier_flag" %in% names(mo_df) && !("misidentification_flag" %in% names(mo_df))) mo_df$misidentification_flag <- mo_df$morphometric_outlier_flag
-    else if ("misidentification_flag" %in% names(mo_df) && !("morphometric_outlier_flag" %in% names(mo_df))) mo_df$morphometric_outlier_flag <- mo_df$misidentification_flag
-    else if (!("misidentification_flag" %in% names(mo_df)) && !("morphometric_outlier_flag" %in% names(mo_df))) { mo_df$misidentification_flag <- FALSE; mo_df$morphometric_outlier_flag <- FALSE }
+    if (!("is_promoted_bronze" %in% names(mo_df))) mo_df$is_promoted_bronze <- NA
+    if (!("morphometric_outlier_flag" %in% names(mo_df))) mo_df$morphometric_outlier_flag <- FALSE
+    if (!("misidentification_flag" %in% names(mo_df))) mo_df$misidentification_flag <- FALSE
     if (!("plant_individual_id" %in% names(mo_df))) mo_df$plant_individual_id <- 0L
     mo_df$plant_individual_id <- ifelse(is.na(mo_df$plant_individual_id), 0L, suppressWarnings(as.integer(mo_df$plant_individual_id)))
     mo_df$plant_individual_id[is.na(mo_df$plant_individual_id)] <- 0L
@@ -1781,7 +1768,7 @@ build_triage_queue <- function(opts) {
     if (!("PC2" %in% names(mo_df))) mo_df$PC2 <- if ("can2" %in% names(mo_df)) suppressWarnings(as.numeric(mo_df$can2)) else NA_real_
     for (nc in c(
       "cda_posterior_prob", "cda_second_posterior_prob", "cda_posterior_margin", "loocv_accuracy",
-      "can1", "can2", "Sym_PC1", "Sym_PC2",
+      "can1", "can2",
       "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
       "plant_height_cm", "scape_to_basal_leaf_ratio",
       "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv",
@@ -1815,7 +1802,6 @@ build_triage_queue <- function(opts) {
       cda_posterior_margin = med_or_na(cda_posterior_margin),
       loocv_accuracy = med_or_na(loocv_accuracy),
       PC1 = med_or_na(PC1), PC2 = med_or_na(PC2),
-      Sym_PC1 = med_or_na(Sym_PC1), Sym_PC2 = med_or_na(Sym_PC2),
       can1 = med_or_na(can1), can2 = med_or_na(can2), can3 = med_or_na(can3),
       gmm_cluster = first_int_or_na(gmm_cluster), gmm_uncertainty = med_or_na(gmm_uncertainty),
       is_typical_morphotype = any_lgl_or_na(is_typical_morphotype),
@@ -1841,7 +1827,7 @@ build_triage_queue <- function(opts) {
       morphometric_outlier_flag = any(morphometric_outlier_flag == TRUE, na.rm = TRUE),
       misidentification_flag = any(misidentification_flag == TRUE, na.rm = TRUE), .groups = "drop"
     )
-    extra_pc_cols <- setdiff(grep("^(Sym_)?PC[0-9]+$", names(mo_df), value = TRUE), c("PC1", "PC2", "Sym_PC1", "Sym_PC2"))
+    extra_pc_cols <- setdiff(grep("^PC[0-9]+$", names(mo_df), value = TRUE), c("PC1", "PC2"))
     extra_num_meta <- intersect(c("efd_harmonic_opt", "efd_k95_pcs", "min_congener_mahal_d2", "open_set_novelty_p"), names(mo_df))
     extra_chr_meta <- intersect(c("selected_morph_features", "type_status", "min_congener_taxon"), names(mo_df))
     if (length(c(extra_pc_cols, extra_num_meta, extra_chr_meta)) > 0L) {
@@ -1863,7 +1849,7 @@ build_triage_queue <- function(opts) {
         "plant_height_cm", "scape_to_basal_leaf_ratio",
         "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv",
         "cda_posterior_prob", "cda_second_posterior_prob", "cda_posterior_margin",
-        "gmm_uncertainty", "loocv_accuracy", "PC1", "PC2", "Sym_PC1", "Sym_PC2",
+        "gmm_uncertainty", "loocv_accuracy", "PC1", "PC2",
         "can1", "can2", "can3", "ecoregion_cda_posterior_prob", "authority_weight",
         "type_morph_mahal_d2", "type_morph_concordance",
         extra_pc_cols, extra_num_meta

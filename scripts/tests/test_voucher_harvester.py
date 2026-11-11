@@ -209,9 +209,7 @@ class TestVoucherHarvesterGeographicFiltering(unittest.TestCase):
             self.assertIn("day", df.columns)
             self.assertIn("eventDate", df.columns)
 
-            # Verify circular phenology features are DECOUPLED and not present
-            self.assertNotIn("pheno_sin", df.columns)
-            self.assertNotIn("pheno_cos", df.columns)
+            # Verify derived calendar day-of-year is decoupled from Step 01 curated export
             self.assertNotIn("doy", df.columns)
 
             # Check Determiner Tier Stratification (NCU001 was identified by Debra Trock -> Tier_1_Gold)
@@ -358,14 +356,15 @@ class TestAtomicTableExport(unittest.TestCase):
                 {
                     "catalogNumber": "NCU001",
                     "institutionCode": "NCU",
+                    "scientificName": "Packera dubia",
                     "species_raw": "Packera dubia",
-                    "determiner_raw": "D.K. Trock",
+                    "identifiedBy": "D.K. Trock",
                     "determiner_tier": "Tier_1_Gold",
                     "type_status": "None",
                     "county": "Wake",
                     "stateProvince": "North Carolina",
-                    "latitude": 35.8,
-                    "longitude": -78.6,
+                    "decimalLatitude": 35.8,
+                    "decimalLongitude": -78.6,
                     "coordinateUncertainty": 500.0,
                     "year": 1998,
                     "month": 5,
@@ -398,20 +397,14 @@ class TestAtomicTableExport(unittest.TestCase):
             for col in expected_contract_headers:
                 self.assertIn(col, read_df.columns, f"Missing required contract header '{col}'")
 
-            # Validate backwards-compatible legacy column preservation
-            legacy_headers = ["species_raw", "determiner_raw", "latitude", "longitude"]
-            for col in legacy_headers:
-                self.assertIn(col, read_df.columns, f"Missing backwards-compatible header '{col}'")
-
-            # Check value consistency between DwC and legacy aliases
+            self.assertIn("species_raw", read_df.columns)
+            for purged_col in ("latitude", "longitude"):
+                self.assertNotIn(purged_col, read_df.columns)
             self.assertEqual(read_df.iloc[0]["scientificName"], "Packera dubia")
             self.assertEqual(read_df.iloc[0]["species_raw"], "Packera dubia")
             self.assertEqual(read_df.iloc[0]["identifiedBy"], "D.K. Trock")
-            self.assertEqual(read_df.iloc[0]["determiner_raw"], "D.K. Trock")
             self.assertAlmostEqual(read_df.iloc[0]["decimalLatitude"], 35.8)
-            self.assertAlmostEqual(read_df.iloc[0]["latitude"], 35.8)
             self.assertAlmostEqual(read_df.iloc[0]["decimalLongitude"], -78.6)
-            self.assertAlmostEqual(read_df.iloc[0]["longitude"], -78.6)
 
     def test_curated_vouchers_table_contract(self):
         """Verify production curated_vouchers.csv adheres to Darwin Core contract headers."""
@@ -432,9 +425,9 @@ class TestAtomicTableExport(unittest.TestCase):
         for col in contract_cols:
             self.assertIn(col, df.columns, f"Contract column '{col}' missing from curated_vouchers.csv")
 
-        legacy_cols = ["species_raw", "determiner_raw", "latitude", "longitude"]
-        for col in legacy_cols:
-            self.assertIn(col, df.columns, f"Legacy column '{col}' missing from curated_vouchers.csv")
+        self.assertIn("species_raw", df.columns)
+        for purged_col in ("latitude", "longitude"):
+            self.assertNotIn(purged_col, df.columns)
 
 
 class TestVoucherHarvesterCLI(unittest.TestCase):
@@ -778,8 +771,8 @@ class TestExsiccataeFingerprintingAndStratification(unittest.TestCase):
                 "recordedBy": "J. Brandon Fuller",
                 "recordNumber": "s.n.",
                 "eventDate": "1984-05-12",
-                "latitude": 35.91230,
-                "longitude": -79.05120,
+                "decimalLatitude": 35.91230,
+                "decimalLongitude": -79.05120,
                 "determiner_tier": "Tier_2_Silver",
             },
             {
@@ -788,8 +781,8 @@ class TestExsiccataeFingerprintingAndStratification(unittest.TestCase):
                 "recordedBy": "Fuller",
                 "recordNumber": "",
                 "eventDate": "1984-05-12",
-                "latitude": 35.91245,  # ~17 m away (< 50 m)
-                "longitude": -79.05125,
+                "decimalLatitude": 35.91245,  # ~17 m away (< 50 m)
+                "decimalLongitude": -79.05125,
                 "determiner_tier": "Tier_3_Bronze",
             },
             {
@@ -798,8 +791,8 @@ class TestExsiccataeFingerprintingAndStratification(unittest.TestCase):
                 "recordedBy": "Fuller",
                 "recordNumber": "s.n.",
                 "eventDate": "1984-05-12",
-                "latitude": 36.50000,  # ~65 km away (> 50 m)
-                "longitude": -79.05120,
+                "decimalLatitude": 36.50000,  # ~65 km away (> 50 m)
+                "decimalLongitude": -79.05120,
                 "determiner_tier": "Tier_3_Bronze",
             },
         ])
@@ -2066,15 +2059,12 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
                 "recordedBy": "J. B. Fuller",
                 "recordNumber": "1042",
                 "identifiedBy": "Field Student",
-                "determiner_raw": "Field Student",
                 "determiner_tier": "Tier_3_Bronze",
                 "type_status": "",
                 "county": "Wake",
                 "stateProvince": "North Carolina",
                 "decimalLatitude": 35.85,
-                "latitude": 35.85,
                 "decimalLongitude": -78.55,
-                "longitude": -78.55,
                 "coordinateUncertainty": 50.0,
                 "year": 2022,
                 "month": 5,
@@ -2091,15 +2081,12 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
                 "recordedBy": "J. B. Fuller",
                 "recordNumber": "1042",
                 "identifiedBy": "T.M. Barkley",
-                "determiner_raw": "T.M. Barkley",
                 "determiner_tier": "Tier_1_Gold",
                 "type_status": "",
                 "county": "Wake",
                 "stateProvince": "North Carolina",
                 "decimalLatitude": 35.85,
-                "latitude": 35.85,
                 "decimalLongitude": -78.55,
-                "longitude": -78.55,
                 "coordinateUncertainty": 50.0,
                 "year": 2022,
                 "month": 5,
@@ -2120,9 +2107,9 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
         self.assertTrue(bool(prim["is_primary_duplicate"]))
         self.assertEqual(prim["scientificName"], "Packera obovata")
         self.assertEqual(prim["determiner_tier"], "Tier_2_Silver")
-        # Verbatim original determination fields remain intact for auditability
+        # Verbatim original taxon field and exsiccatae provenance remain intact for auditability
         self.assertEqual(prim["species_raw"], "Packera aurea")
-        self.assertEqual(prim["determiner_raw"], "Field Student")
+        self.assertIn("[exsiccatae Tier_1_Gold duplicate MO-DUP-2]", prim["identifiedBy"])
 
         with tempfile.TemporaryDirectory() as tmp_d:
             tmp_p = Path(tmp_d)
@@ -2133,7 +2120,7 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
             csv_df = pd.read_csv(out_csv)
             from scripts.core.harvester import EXPORT_COLUMNS
             self.assertEqual(list(csv_df.columns), EXPORT_COLUMNS)
-            self.assertEqual(len(csv_df.columns), 26)
+            self.assertEqual(len(csv_df.columns), 23)
 
             conn = sqlite3.connect(str(db_path))
             try:

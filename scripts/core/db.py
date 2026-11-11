@@ -53,15 +53,12 @@ DWC_VOUCHER_COLUMNS: Tuple[str, ...] = (
     "recordedBy",
     "recordNumber",
     "identifiedBy",
-    "determiner_raw",
     "determiner_tier",
     "type_status",
     "county",
     "stateProvince",
     "decimalLatitude",
-    "latitude",
     "decimalLongitude",
-    "longitude",
     "coordinateUncertainty",
     "year",
     "month",
@@ -77,8 +74,10 @@ DWC_VOUCHER_COLUMNS: Tuple[str, ...] = (
 HARMONIC_COLS: Tuple[str, ...] = tuple(
     f"{coef}{idx}" for idx in range(1, 25) for coef in ("A", "B", "C", "D")
 )
+SYM_HARMONIC_COLS: Tuple[str, ...] = tuple(
+    f"{coef}{idx}" for idx in range(1, 25) for coef in ("A", "D")
+)
 PC_COLS: Tuple[str, ...] = tuple(f"PC{idx}" for idx in range(1, 16))
-SYM_PC_COLS: Tuple[str, ...] = tuple(f"Sym_PC{idx}" for idx in range(1, 16))
 
 WC_BIO_COLUMNS: Tuple[str, ...] = (
     "bio1_temp_mean",
@@ -598,22 +597,9 @@ def upsert_vouchers_records(
             continue
         sci = _to_str(rec.get("scientificName")) or _to_str(rec.get("species_raw"))
         sp_raw = _to_str(rec.get("species_raw")) or sci
-        lat = _to_float(rec.get("latitude"))
         dec_lat = _to_float(rec.get("decimalLatitude"))
-        if lat is None:
-            lat = dec_lat
-        if dec_lat is None:
-            dec_lat = lat
-
-        lon = _to_float(rec.get("longitude"))
         dec_lon = _to_float(rec.get("decimalLongitude"))
-        if lon is None:
-            lon = dec_lon
-        if dec_lon is None:
-            dec_lon = lon
-
-        ident = _to_str(rec.get("identifiedBy")) or _to_str(rec.get("determiner_raw"))
-        det_raw = _to_str(rec.get("determiner_raw")) or ident
+        ident = _to_str(rec.get("identifiedBy"))
         sp_std = _to_str(rec.get("species_standardized")) or _infer_species_standardized_fallback(sci, sp_raw, syn_map)
 
         row_dict: Dict[str, Any] = {
@@ -624,24 +610,19 @@ def upsert_vouchers_records(
             "recordedBy": _to_str(rec.get("recordedBy")),
             "recordNumber": _to_str(rec.get("recordNumber")),
             "identifiedBy": ident,
-            "determiner_raw": det_raw,
             "determiner_tier": _to_str(rec.get("determiner_tier")),
             "type_status": _to_str(rec.get("type_status")),
             "county": _to_str(rec.get("county")),
             "stateProvince": _to_str(rec.get("stateProvince")),
             "locality": _to_str(rec.get("locality")),
             "decimalLatitude": dec_lat,
-            "latitude": lat,
             "decimalLongitude": dec_lon,
-            "longitude": lon,
             "coordinateUncertainty": _to_float(rec.get("coordinateUncertainty")),
             "year": _to_int(rec.get("year")),
             "month": _to_int(rec.get("month")),
             "day": _to_int(rec.get("day")),
             "eventDate": _to_str(rec.get("eventDate")),
             "doy": _to_float(rec.get("doy")),
-            "pheno_sin": _to_float(rec.get("pheno_sin")),
-            "pheno_cos": _to_float(rec.get("pheno_cos")),
             "regional_group": _to_str(rec.get("regional_group")),
             "image_path": _to_str(rec.get("image_path")),
             "exsiccatae_key": _to_str(rec.get("exsiccatae_key")),
@@ -823,7 +804,7 @@ def get_completed_qc_vouchers(
 def read_contour_csv_xy(contour_path: Union[str, Path]) -> Optional[List[List[float]]]:
     """
     Read a 120-vertex contour CSV from disk and return compact `[[x, y], ...]`
-    coordinates (preferring raw pixel `x, y` over `x_norm, y_norm` so Step 03
+    coordinates (`x, y` pixel contour vertices so Step 03
     metric scale calibration `coo / resolved_ppm` and `area_px` remain exact).
     """
     p = Path(contour_path)
@@ -835,8 +816,7 @@ def read_contour_csv_xy(contour_path: Union[str, Path]) -> Optional[List[List[fl
             fnames = set(reader.fieldnames or [])
             if {"x", "y"}.issubset(fnames):
                 xk, yk = "x", "y"
-            elif {"x_norm", "y_norm"}.issubset(fnames):
-                xk, yk = "x_norm", "y_norm"
+
             else:
                 return None
             pts: List[List[float]] = []
@@ -885,6 +865,8 @@ def record_voucher_segmentation_transaction(
     failure_record: Optional[Mapping[str, Any]] = None,
     repro_record: Optional[Mapping[str, Any]] = None,
     pheno_record: Optional[Mapping[str, Any]] = None,
+    repro_by_pid: Optional[Mapping[int, Mapping[str, Any]]] = None,
+    pheno_by_pid: Optional[Mapping[int, Mapping[str, Any]]] = None,
     crowns_by_pid: Optional[Mapping[int, Tuple[float, float]]] = None,
     rosette_centroids_by_pid: Optional[Mapping[int, Tuple[float, float]]] = None,
     by_plant_petiole: Optional[Mapping[int, Mapping[str, Any]]] = None,
@@ -960,13 +942,9 @@ def record_voucher_segmentation_transaction(
     repro_pheno_rows: List[Tuple[Any, ...]] = []
     leaf_rows: List[Tuple[Any, ...]] = []
 
-    p_height_cm = _to_float(repro.get("plant_height_cm"))
-    p_height_mm = (p_height_cm * 10.0) if p_height_cm is not None else _to_float(repro.get("plant_height_mm"))
-    p_height_px = _to_float(repro.get("plant_height_px"))
-    if p_height_px is None and p_height_mm is not None and ppm_val:
-        p_height_px = p_height_mm * ppm_val
-    scape_ratio = _to_float(repro.get("scape_to_basal_leaf_ratio"))
-    is_bent = _to_bool_int(repro.get("is_bent_stem"), default=0)
+    repro_pid_map: Dict[int, Mapping[str, Any]] = {int(k): v for k, v in (repro_by_pid or {}).items() if v is not None}
+    pheno_pid_map: Dict[int, Mapping[str, Any]] = {int(k): v for k, v in (pheno_by_pid or {}).items() if v is not None}
+    is_multi_pid = len([p for p in pids if p != 0]) > 1 or (len(pids) > 1 and 0 not in pids)
 
     # Group leaf-level petiole/blade metrics by pid as fallback
     leaves_by_pid: Dict[int, List[Mapping[str, Any]]] = {pid: [] for pid in pids}
@@ -978,6 +956,25 @@ def record_voucher_segmentation_transaction(
         rc_xy = centroids.get(pid)
         cr_xy = crowns.get(pid)
         p_pet_info = dict(petiole_by_pid.get(pid) or {})
+        pid_repro: Mapping[str, Any] = repro_pid_map.get(pid) if pid in repro_pid_map else ({} if (is_multi_pid and repro_pid_map) else repro)
+        pid_pheno: Mapping[str, Any] = pheno_pid_map.get(pid) if pid in pheno_pid_map else ({} if (is_multi_pid and pheno_pid_map) else pheno)
+
+        p_height_cm = _to_float(pid_repro.get("plant_height_cm"))
+        if p_height_cm is None:
+            p_height_cm = _to_float(p_pet_info.get("plant_height_cm"))
+        p_height_mm = (p_height_cm * 10.0) if p_height_cm is not None else _to_float(pid_repro.get("plant_height_mm"))
+        p_height_px = _to_float(pid_repro.get("plant_height_px"))
+        if p_height_px is None:
+            p_height_px = _to_float(p_pet_info.get("scape_length_px"))
+        if p_height_px is None and p_height_mm is not None and ppm_val:
+            p_height_px = p_height_mm * ppm_val
+        scape_ratio = _to_float(pid_repro.get("scape_to_basal_leaf_ratio"))
+        if scape_ratio is None:
+            scape_ratio = _to_float(p_pet_info.get("scape_to_basal_leaf_ratio"))
+        is_bent = _to_bool_int(
+            pid_repro.get("is_bent_stem") if pid_repro.get("is_bent_stem") is not None else p_pet_info.get("is_bent_stem"),
+            default=0,
+        )
 
         pet_mm = _to_float(p_pet_info.get("petiole_length_mm"))
         bld_mm = _to_float(p_pet_info.get("blade_length_mm"))
@@ -1045,21 +1042,11 @@ def record_voucher_segmentation_transaction(
             r_mask,
         ))
 
-        if repro or pheno:
-            ar_inv = _to_float(repro.get("AR_inv"))
-            cap_ar = _to_float(repro.get("capitulum_aspect_ratio"))
-            if ar_inv is None:
-                ar_inv = cap_ar
-            if cap_ar is None:
-                cap_ar = ar_inv
-            n_fr = _to_int(pheno.get("n_fruit"))
-            n_fr_ing = _to_int(pheno.get("n_fruiting"))
-            if n_fr is None:
-                n_fr = n_fr_ing
-            if n_fr_ing is None:
-                n_fr_ing = n_fr
-            ph_state = _to_str(pheno.get("voucher_phenological_state"))
-            is_ver_anth = _to_bool_int(pheno.get("is_verified_anthesis"))
+        if pid_repro or pid_pheno:
+            ar_inv = _to_float(pid_repro.get("AR_inv"))
+            n_fr_ing = _to_int(pid_pheno.get("n_fruiting"))
+            ph_state = _to_str(pid_pheno.get("voucher_phenological_state"))
+            is_ver_anth = _to_bool_int(pid_pheno.get("is_verified_anthesis"))
             if is_ver_anth is None and ph_state:
                 low_st = ph_state.lower()
                 is_ver_anth = 1 if ("anthesis" in low_st and "pre" not in low_st) else 0
@@ -1067,23 +1054,21 @@ def record_voucher_segmentation_transaction(
             repro_pheno_rows.append((
                 cat,
                 pid,
-                _to_int(repro.get("capitula_count")),
-                _to_float(repro.get("involucre_height_px")),
-                _to_float(repro.get("involucre_width_px")),
-                _to_float(repro.get("involucre_height_mm")),
-                _to_float(repro.get("involucre_width_mm")),
+                _to_int(pid_repro.get("capitula_count")),
+                _to_float(pid_repro.get("involucre_height_px")),
+                _to_float(pid_repro.get("involucre_width_px")),
+                _to_float(pid_repro.get("involucre_height_mm")),
+                _to_float(pid_repro.get("involucre_width_mm")),
                 ar_inv,
-                cap_ar,
-                _to_int(pheno.get("total_capitula"), default=_to_int(repro.get("capitula_count"))),
-                _to_int(pheno.get("n_anthesis")),
-                _to_int(pheno.get("n_bud")),
+                _to_int(pid_pheno.get("total_capitula"), default=_to_int(pid_repro.get("capitula_count"))),
+                _to_int(pid_pheno.get("n_anthesis")),
+                _to_int(pid_pheno.get("n_bud")),
                 n_fr_ing,
-                n_fr,
-                _to_int(pheno.get("n_senescent")),
+                _to_int(pid_pheno.get("n_senescent")),
                 ph_state,
                 is_ver_anth,
-                _to_float(pheno.get("reproductive_stage_confidence")),
-                _to_float(pheno.get("dominant_pappus_ratio")),
+                _to_float(pid_pheno.get("reproductive_stage_confidence")),
+                _to_float(pid_pheno.get("dominant_pappus_ratio")),
             ))
 
     for r in extracted_records:
@@ -1135,7 +1120,7 @@ def record_voucher_segmentation_transaction(
             _to_float(r.get("extent")),
             _to_float(r.get("aspect_ratio")),
             _to_float(r.get("area_px")),
-            _to_float(r.get("blade_area_cm2")),
+            _to_float(r.get("area_mm2")) if r.get("area_mm2") is not None else ((round(float(_to_float(r.get("area_px"))) / (float(l_ppm) ** 2), 2)) if (l_cal == 1 and l_ppm is not None and l_ppm > 0 and _to_float(r.get("area_px")) is not None) else None),
             _to_float(r.get("midrib_angle_deg")),
             _to_float(r.get("petiole_length_px")),
             _to_float(r.get("petiole_length_mm")),
@@ -1214,11 +1199,11 @@ def record_voucher_segmentation_transaction(
                 INSERT INTO voucher_reproductive_phenology (
                     catalogNumber, plant_individual_id,
                     capitula_count, involucre_height_px, involucre_width_px,
-                    involucre_height_mm, involucre_width_mm, AR_inv, capitulum_aspect_ratio,
-                    total_capitula, n_anthesis, n_bud, n_fruiting, n_fruit, n_senescent,
+                    involucre_height_mm, involucre_width_mm, AR_inv,
+                    total_capitula, n_anthesis, n_bud, n_fruiting, n_senescent,
                     voucher_phenological_state, is_verified_anthesis,
                     reproductive_stage_confidence, dominant_pappus_ratio
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 repro_pheno_rows,
             )
@@ -1228,7 +1213,7 @@ def record_voucher_segmentation_transaction(
                 INSERT INTO extracted_leaves (
                     catalogNumber, plant_individual_id, leaf_id, shape_id,
                     solidity, circularity, extent, aspect_ratio,
-                    area_px, blade_area_cm2,
+                    area_px, area_mm2,
                     midrib_angle_deg, petiole_length_px, petiole_length_mm,
                     petiole_width_px, petiole_width_mm,
                     blade_length_px, blade_length_mm, blade_width_px, blade_width_mm,
@@ -1282,23 +1267,22 @@ def load_step02_records_from_db(
             SELECT
                 el.catalogNumber, el.plant_individual_id, el.leaf_id, el.solidity,
                 el.circularity, el.extent, el.aspect_ratio,
-                el.aspect_ratio AS blade_length_to_width_ratio,
-                el.area_px, el.blade_area_cm2,
+                el.area_px, el.area_mm2,
                 el.contour_path, el.ect_path, el.mask_path, el.mask_is_upright,
                 el.midrib_angle_deg, el.pixels_per_mm, el.is_calibrated_mm, el.scale_source,
                 el.leaf_zone, el.leaf_zone_confidence, el.dist_from_crown_norm, el.cy_rel_plant_bbox,
                 el.archetype_score, el.bilateral_dice, el.si_a, el.lm3_gates_pass, el.n_lamina_components,
-                COALESCE(el.petiole_length_px, pi.petiole_length_px) AS petiole_length_px,
-                COALESCE(el.blade_length_px, pi.blade_length_px) AS blade_length_px,
+                el.petiole_length_px,
+                el.blade_length_px,
                 el.blade_width_px, el.blade_width_mm,
-                COALESCE(el.petiole_width_px, pi.petiole_width_px) AS petiole_width_px,
-                COALESCE(el.petiole_width_mm, pi.petiole_width_mm) AS petiole_width_mm,
-                COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm,
-                COALESCE(el.blade_length_mm, pi.blade_length_mm) AS blade_length_mm,
-                COALESCE(el.petiole_to_blade_ratio, pi.petiole_to_blade_ratio) AS petiole_to_blade_ratio,
+                el.petiole_width_px,
+                el.petiole_width_mm,
+                el.petiole_length_mm,
+                el.blade_length_mm,
+                el.petiole_to_blade_ratio,
                 vrp.capitula_count, vrp.involucre_height_px, vrp.involucre_width_px,
                 vrp.involucre_height_mm, vrp.involucre_width_mm,
-                COALESCE(vrp.capitulum_aspect_ratio, vrp.AR_inv) AS capitulum_aspect_ratio
+                vrp.AR_inv
             FROM extracted_leaves el
             LEFT JOIN plant_individuals pi
                 ON pi.catalogNumber = el.catalogNumber
@@ -1343,12 +1327,12 @@ def load_step02_records_from_db(
         cur_rp = conn.execute(
             f"""
             SELECT
-                vrp.catalogNumber,
+                vrp.catalogNumber, vrp.plant_individual_id,
                 vrp.capitula_count, vrp.involucre_height_px, vrp.involucre_width_px,
                 vrp.involucre_height_mm, vrp.involucre_width_mm,
-                COALESCE(vrp.capitulum_aspect_ratio, vrp.AR_inv) AS capitulum_aspect_ratio,
+                vrp.AR_inv,
                 pi.plant_height_cm, pi.scape_to_basal_leaf_ratio, pi.is_bent_stem,
-                vrp.total_capitula, vrp.n_anthesis, COALESCE(vrp.n_fruit, vrp.n_fruiting) AS n_fruit,
+                vrp.total_capitula, vrp.n_anthesis, vrp.n_fruiting,
                 vrp.n_bud, vrp.voucher_phenological_state, vrp.dominant_pappus_ratio
             FROM voucher_reproductive_phenology vrp
             LEFT JOIN plant_individuals pi
@@ -1365,12 +1349,13 @@ def load_step02_records_from_db(
             if c not in repro_by_cat:
                 repro_by_cat[c] = {
                     "catalogNumber": c,
+                    "plant_individual_id": int(d.get("plant_individual_id") or 0),
                     "capitula_count": d.get("capitula_count"),
                     "involucre_height_px": d.get("involucre_height_px"),
                     "involucre_width_px": d.get("involucre_width_px"),
                     "involucre_height_mm": d.get("involucre_height_mm"),
                     "involucre_width_mm": d.get("involucre_width_mm"),
-                    "capitulum_aspect_ratio": d.get("capitulum_aspect_ratio"),
+                    "AR_inv": d.get("AR_inv"),
                     "plant_height_cm": d.get("plant_height_cm"),
                     "scape_to_basal_leaf_ratio": d.get("scape_to_basal_leaf_ratio"),
                     "is_bent_stem": bool(d.get("is_bent_stem")),
@@ -1378,9 +1363,10 @@ def load_step02_records_from_db(
             if c not in pheno_by_cat and d.get("voucher_phenological_state") is not None:
                 pheno_by_cat[c] = {
                     "catalogNumber": c,
+                    "plant_individual_id": int(d.get("plant_individual_id") or 0),
                     "total_capitula": d.get("total_capitula"),
                     "n_anthesis": d.get("n_anthesis"),
-                    "n_fruit": d.get("n_fruit"),
+                    "n_fruiting": d.get("n_fruiting"),
                     "n_bud": d.get("n_bud"),
                     "voucher_phenological_state": d.get("voucher_phenological_state"),
                     "dominant_pappus_ratio": d.get("dominant_pappus_ratio"),
@@ -1506,7 +1492,7 @@ def populate_run_active_cohort(
                 )
                 else 0
             )
-        is_prom = _to_bool_int(r.get("is_promoted_bronze") or r.get("is_promoted_anchor"), default=0) or 0
+        is_prom = _to_bool_int(r.get("is_promoted_bronze"), default=0) or 0
         auth_wt = _to_float(r.get("authority_weight"))
         sp_wt = _to_float(r.get("spatial_balance_weight"))
         if sp_wt is None:
@@ -1742,18 +1728,27 @@ _LEAF_EFA_BOOL_COLS: Tuple[str, ...] = (
     "is_dissected",
     "is_calibrated_mm",
     "is_contour_outlier",
+    "mask_is_upright",
+    "is_type_specimen",
+    "is_promoted_bronze",
+    "is_passive",
 )
 _LEAF_EFA_INT_COLS: Tuple[str, ...] = (
     "efd_harmonic_opt",
     "efd_k95_pcs",
 )
-_LEAF_EFA_STR_COLS: Tuple[str, ...] = ("leaf_zone",)
+_LEAF_EFA_STR_COLS: Tuple[str, ...] = ("leaf_zone", "type_status", "anchor_tier_source")
 _LEAF_EFA_FLOAT_COLS: Tuple[str, ...] = (
     "solidity",
     "dissection_index",
     "aspect_ratio",
     "area_px",
+    "area_mm2",
     "pixels_per_mm",
+    "authority_weight",
+    "spatial_balance_weight",
+    "petiole_width_mm",
+    "blade_width_mm",
     "petiole_length_mm",
     "blade_length_mm",
     "petiole_to_blade_ratio",
@@ -1765,7 +1760,7 @@ _LEAF_EFA_FLOAT_COLS: Tuple[str, ...] = (
     "ECT_PC3",
     "ect_lobe_complexity",
     "ect_bilateral_asym",
-    *HARMONIC_COLS,
+    *SYM_HARMONIC_COLS,
     "sym_var",
     "asym_var",
     "pct_asymmetry",
@@ -1774,7 +1769,6 @@ _LEAF_EFA_FLOAT_COLS: Tuple[str, ...] = (
     "centroid_size",
     "log_centsize",
     *PC_COLS,
-    *SYM_PC_COLS,
 )
 
 
@@ -1786,7 +1780,7 @@ def persist_leaf_efa_harmonics(
 ) -> int:
     """
     Persist Step 03 leaf-level Elliptic Fourier harmonics (`A1..D24`), leaf PCs
-    (`PC1..PC15`, `Sym_PC1..Sym_PC15`), and adaptive calibration metadata
+    (`PC1..PC15`), and adaptive calibration metadata
     (`efd_harmonic_opt`, `efd_k95_pcs`) into `leaf_efa_harmonics`.
     """
     if demo or not efa_rows:
@@ -1832,7 +1826,7 @@ def persist_leaf_efa_harmonics(
 
 
 _OTU_MORPH_BOOL_COLS: Tuple[str, ...] = (
-    "is_promoted_anchor",
+    "is_promoted_bronze",
     "is_passive",
     "is_calibrated_mm",
     "is_dissected",
@@ -1866,7 +1860,11 @@ _OTU_MORPH_STR_COLS: Tuple[str, ...] = (
 )
 _OTU_MORPH_FLOAT_COLS: Tuple[str, ...] = (
     "authority_weight",
+    "spatial_balance_weight",
     "pixels_per_mm",
+    "area_mm2",
+    "petiole_width_mm",
+    "blade_width_mm",
     "solidity",
     "dissection_index",
     "q25_solidity",
@@ -1898,16 +1896,15 @@ _OTU_MORPH_FLOAT_COLS: Tuple[str, ...] = (
     "log_centsize",
     "AR_inv",
     "AR_inv_std",
-    *HARMONIC_COLS,
+    *SYM_HARMONIC_COLS,
     "sym_var",
     "asym_var",
     "pct_asymmetry",
     "harmonic_roughness",
     "leaf_quality_weight",
     "foliar_variance",
-    "heteroblasty_index",
+    "within_rosette_efa_dispersion",
     *PC_COLS,
-    *SYM_PC_COLS,
     "gmm_uncertainty",
     "cda_posterior_prob",
     "cda_second_posterior_prob",
@@ -1933,7 +1930,7 @@ def persist_otu_morphometrics(
 ) -> int:
     """
     Persist Step 03/04 specimen-level OTU medians (`A1..D24`, `PC1..PC15`,
-    `Sym_PC1..Sym_PC15`), adaptive EFD/feature metadata (`efd_harmonic_opt`,
+    adaptive EFD/feature metadata (`efd_harmonic_opt`,
     `efd_k95_pcs`, `selected_morph_features`), GMM clusters, and CDA scores
     into `otu_morphometrics`.
     """
@@ -2108,7 +2105,7 @@ def ingest_existing_run_tables_into_db(
     `leaf_efa_harmonics.csv`, `morphometric_flags.csv`,
     `multimodal_conflict_flags.csv`, `triage_queue.csv` / `final_curation_triage.csv`)
     into Tier B SQLite tables with full dynamic `A1..D24`, `PC1..PC15`,
-    `Sym_PC1..Sym_PC15`, and 19-variable `bio1..bio19` support.
+    and 19-variable `bio1..bio19` support.
     """
     if demo:
         return {}
@@ -2273,25 +2270,23 @@ def ingest_existing_csvs_to_db(
                 if cat in repro_by_cat or cat in pheno_by_cat:
                     rep = repro_by_cat.get(cat, {})
                     phe = pheno_by_cat.get(cat, {})
-                    ar_val = _to_float(rep.get("AR_inv")) or _to_float(rep.get("capitulum_aspect_ratio"))
+                    ar_val = _to_float(rep.get("AR_inv"))
                     upsert_rows_generic(
                         conn,
                         "voucher_reproductive_phenology",
                         [{
                             "catalogNumber": cat,
-                            "plant_individual_id": 0,
+                            "plant_individual_id": _to_int(rep.get("plant_individual_id"), default=0) or 0,
                             "capitula_count": _to_int(rep.get("capitula_count")),
                             "involucre_height_px": _to_float(rep.get("involucre_height_px")),
                             "involucre_width_px": _to_float(rep.get("involucre_width_px")),
                             "involucre_height_mm": _to_float(rep.get("involucre_height_mm")),
                             "involucre_width_mm": _to_float(rep.get("involucre_width_mm")),
                             "AR_inv": ar_val,
-                            "capitulum_aspect_ratio": ar_val,
                             "total_capitula": _to_int(phe.get("total_capitula")),
                             "n_anthesis": _to_int(phe.get("n_anthesis")),
                             "n_bud": _to_int(phe.get("n_bud")),
-                            "n_fruiting": _to_int(phe.get("n_fruit")),
-                            "n_fruit": _to_int(phe.get("n_fruit")),
+                            "n_fruiting": _to_int(phe.get("n_fruiting")),
                             "voucher_phenological_state": _to_str(phe.get("voucher_phenological_state")),
                             "dominant_pappus_ratio": _to_float(phe.get("dominant_pappus_ratio")),
                         }],

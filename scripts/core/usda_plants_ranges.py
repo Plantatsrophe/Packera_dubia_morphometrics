@@ -1156,7 +1156,7 @@ def resolve_voucher_us_county(
         except (TypeError, ValueError):
             has_coords = False
 
-    tree = spatial_graph.get("tree")
+    tree = (spatial_graph or {}).get("tree")
     geoms = spatial_graph.get("geoms") or []
     ck_list = spatial_graph.get("ck_list") or []
     geom_id_map = spatial_graph.get("geom_id_map") or {}
@@ -1398,7 +1398,7 @@ def filter_vouchers_by_usda_county_range(
 
         lat_v: Optional[float] = None
         lon_v: Optional[float] = None
-        for c_lat in ("decimalLatitude", "latitude"):
+        for c_lat in ("decimalLatitude",):
             if c_lat in row and row[c_lat] is not None and not pd.isna(row[c_lat]):
                 try:
                     fv = float(row[c_lat])
@@ -1407,7 +1407,7 @@ def filter_vouchers_by_usda_county_range(
                         break
                 except (TypeError, ValueError):
                     pass
-        for c_lon in ("decimalLongitude", "longitude"):
+        for c_lon in ("decimalLongitude",):
             if c_lon in row and row[c_lon] is not None and not pd.isna(row[c_lon]):
                 try:
                     fv = float(row[c_lon])

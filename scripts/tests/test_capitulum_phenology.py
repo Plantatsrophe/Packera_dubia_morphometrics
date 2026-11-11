@@ -213,7 +213,7 @@ class TestCapitulumPhenologyClassifier(unittest.TestCase):
         self.assertEqual(res, "anthesis")
         self.assertEqual(res["voucher_phenological_state"], VOUCHER_ANTHESIS)
         self.assertEqual(res["n_anthesis"], 4)
-        self.assertEqual(res["n_fruit"], 2)
+        self.assertEqual(res["n_fruiting"], 2)
         self.assertEqual(res["total_capitula"], 6)
 
     def test_voucher_case_2_all_fruit_cyme(self) -> None:
@@ -225,7 +225,7 @@ class TestCapitulumPhenologyClassifier(unittest.TestCase):
         self.assertEqual(res, "fruit")
         self.assertEqual(res["voucher_phenological_state"], VOUCHER_FRUIT)
         self.assertEqual(res["n_anthesis"], 0)
-        self.assertEqual(res["n_fruit"], 5)
+        self.assertEqual(res["n_fruiting"], 5)
         self.assertEqual(res["total_capitula"], 5)
 
     def test_voucher_case_3_sterile_rosette(self) -> None:
@@ -236,7 +236,7 @@ class TestCapitulumPhenologyClassifier(unittest.TestCase):
         self.assertEqual(res["voucher_phenological_state"], VOUCHER_STERILE)
         self.assertEqual(res["total_capitula"], 0)
         self.assertEqual(res["n_anthesis"], 0)
-        self.assertEqual(res["n_fruit"], 0)
+        self.assertEqual(res["n_fruiting"], 0)
         self.assertEqual(res["n_bud"], 0)
         self.assertEqual(res["dominant_pappus_ratio"], 0.0)
 
@@ -322,7 +322,7 @@ class TestCapitulumPhenologyClassifier(unittest.TestCase):
         res1 = classify_voucher_phenology(cat_num, heads_anthesis)
         self.assertEqual(res1["voucher_phenological_state"], VOUCHER_ANTHESIS)
         self.assertEqual(res1["n_anthesis"], 1)
-        self.assertEqual(res1["n_fruit"], 1)
+        self.assertEqual(res1["n_fruiting"], 1)
         self.assertEqual(res1["n_bud"], 1)
         self.assertEqual(res1["total_capitula"], 3)
         self.assertAlmostEqual(res1["dominant_pappus_ratio"], 0.35, places=4)
@@ -335,7 +335,7 @@ class TestCapitulumPhenologyClassifier(unittest.TestCase):
         res2 = classify_voucher_phenology(cat_num, heads_fruit)
         self.assertEqual(res2["voucher_phenological_state"], VOUCHER_FRUIT)
         self.assertEqual(res2["n_anthesis"], 0)
-        self.assertEqual(res2["n_fruit"], 2)
+        self.assertEqual(res2["n_fruiting"], 2)
         self.assertAlmostEqual(res2["dominant_pappus_ratio"], 0.42, places=4)
 
         # Case 3: Only buds -> VOUCHER_BUD
@@ -386,7 +386,7 @@ class TestCapitulumPhenologyClassifier(unittest.TestCase):
             "catalogNumber",
             "total_capitula",
             "n_anthesis",
-            "n_fruit",
+            "n_fruiting",
             "n_bud",
             "voucher_phenological_state",
             "dominant_pappus_ratio",

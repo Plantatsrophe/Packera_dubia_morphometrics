@@ -195,7 +195,7 @@ class DetectedInstance:
     circularity: float = 0.0
     extent: float = 0.0
     aspect_ratio: float = 0.0
-    blade_area_cm2: float = 0.0
+    area_mm2: float = np.nan
     mask_path: Optional[str] = None
     contour_path: Optional[str] = None
     petiole_mask: Optional[np.ndarray] = None
@@ -220,6 +220,8 @@ class _VoucherFinalizeBundle:
     failure_record: Optional[Dict[str, Any]]
     repro_record: Optional[Dict[str, Any]] = None
     pheno_record: Optional[Dict[str, Any]] = None
+    repro_by_pid: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    pheno_by_pid: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     crowns_by_pid: Dict[int, Tuple[float, float]] = field(default_factory=dict)
     rosette_centroids_by_pid: Dict[int, Tuple[float, float]] = field(default_factory=dict)
     by_plant_petiole: Dict[int, Dict[str, Any]] = field(default_factory=dict)
@@ -305,24 +307,89 @@ def compute_capitulum_metrics(
     mask: Optional[np.ndarray],
     bbox: Tuple[int, int, int, int],
     pixels_per_mm: Optional[float] = None,
-    min_ar: float = 0.7,
-    max_ar: float = 2.0,
+    min_ar: float = 0.25,
+    max_ar: float = 4.5,
+    crop_bgr: Optional[np.ndarray] = None,
+    class_id: Optional[int] = None,
+    peduncle_dir_xy: Optional[Tuple[float, float]] = None,
+    is_calibrated_mm: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """
-    Computes involucre height (H_inv), width (W_inv), and aspect ratio (AR_inv = H/W)
-    for a detected reproductive / capitulum instance.
+    Computes herbaceous involucre height (H_inv), width (W_inv), and aspect ratio (AR_inv = H/W)
+    strictly for single-capitulum detections (`Seed_Fruit_ONE = 2`, `Flower_ONE = 4`, `Bud = 6`).
 
-    Filters for valid cylindrical capitula where min_ar <= H/W <= max_ar (default 0.7 to 2.0).
-    Dimensions are computed via oriented bounding box (cv2.minAreaRect), resolving the longitudinal
-    axis (peduncle-to-apex height) versus transverse diameter (involucre width) based on dominant vertical
-    alignment on the herbarium sheet.
+    Anatomical & Geometric Safeguards:
+      1. Rejects multi-head corymbose cluster detections (`Seed_Fruit_MANY = 3`, `Flower_MANY = 5`).
+      2. When `crop_bgr` is supplied, isolates the green/olive/anthocyanic herbaceous phyllary cup
+         by masking out sheet paper background, yellow/gold ray/disc corollas, and bright white
+         capillary pappus plumes in HSV/RGB space.
+      3. Resolves longitudinal `involucre_height_px` vs. transverse `involucre_width_px` along the
+         anatomical peduncle-to-apex vector (from phyllary cup centroid to distal floret/pappus
+         centroid when present, else `peduncle_dir_xy`, else upward sheet axis), avoiding gravity
+         axis inversions on tilted or nodding peduncles.
+      4. Uses wide artifact-only bounds (`0.25 <= AR_inv <= 4.5`) so genuine campanulate/hemispheric
+         fruiting involucres and slender cylindrical buds are never censored.
     """
+    if class_id is not None and int(class_id) not in (2, 4, 6):
+        return None
+
+    eff_mask: Optional[np.ndarray] = None
+    if mask is not None and isinstance(mask, np.ndarray) and mask.size > 0:
+        eff_mask = (mask > 0).astype(np.uint8) * 255
+
+    axis_ux, axis_uy = 0.0, -1.0
+    has_anatomical_axis = False
+    if peduncle_dir_xy is not None and len(peduncle_dir_xy) >= 2:
+        px_d, py_d = float(peduncle_dir_xy[0]), float(peduncle_dir_xy[1])
+        p_norm = float(np.hypot(px_d, py_d))
+        if np.isfinite(p_norm) and p_norm > 1e-6:
+            axis_ux, axis_uy = px_d / p_norm, py_d / p_norm
+            has_anatomical_axis = True
+
+    if crop_bgr is not None and isinstance(crop_bgr, np.ndarray) and crop_bgr.ndim == 3 and crop_bgr.shape[0] >= 5 and crop_bgr.shape[1] >= 5:
+        ch, cw = crop_bgr.shape[:2]
+        hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+        H_ch = hsv[:, :, 0]
+        S_ch = hsv[:, :, 1]
+        V_ch = hsv[:, :, 2]
+
+        border_pts = np.concatenate([
+            crop_bgr[0, :, :],
+            crop_bgr[-1, :, :],
+            crop_bgr[:, 0, :],
+            crop_bgr[:, -1, :],
+        ], axis=0).astype(np.float32)
+        bg_med = np.median(border_pts, axis=0)
+        bg_dist = np.linalg.norm(crop_bgr.astype(np.float32) - bg_med[None, None, :], axis=2)
+        paper_mask = (bg_dist < 18.0) & (S_ch <= 42)
+
+        fg_plant = ~paper_mask
+        if eff_mask is not None and eff_mask.shape[:2] == (ch, cw) and np.any(eff_mask > 0):
+            fg_plant = fg_plant & (eff_mask > 0)
+
+        floret_mask = fg_plant & (H_ch >= 10) & (H_ch <= 36) & (S_ch >= 76) & (V_ch >= 85)
+        pappus_mask = fg_plant & (~floret_mask) & (V_ch >= 158) & (S_ch <= 48)
+        involucre_cand = fg_plant & (~floret_mask) & (~pappus_mask) & (V_ch <= 198)
+
+        min_inv_px = max(12, int(0.04 * ch * cw))
+        if int(np.count_nonzero(involucre_cand)) >= min_inv_px:
+            eff_mask = involucre_cand.astype(np.uint8) * 255
+            distal_mask = floret_mask | pappus_mask
+            if int(np.count_nonzero(distal_mask)) >= 8:
+                iy_inv, ix_inv = np.where(involucre_cand)
+                iy_dst, ix_dst = np.where(distal_mask)
+                dx_a = float(np.mean(ix_dst) - np.mean(ix_inv))
+                dy_a = float(np.mean(iy_dst) - np.mean(iy_inv))
+                d_norm = float(np.hypot(dx_a, dy_a))
+                if d_norm >= 2.0:
+                    axis_ux, axis_uy = dx_a / d_norm, dy_a / d_norm
+                    has_anatomical_axis = True
+
     h_inv_px = 0.0
     w_inv_px = 0.0
-
     contours = []
-    if mask is not None and isinstance(mask, np.ndarray) and mask.size > 0:
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if eff_mask is not None and eff_mask.size > 0:
+        contours, _ = cv2.findContours(eff_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours and cv2.contourArea(max(contours, key=cv2.contourArea)) >= 10:
         main_contour = max(contours, key=cv2.contourArea)
         rect = cv2.minAreaRect(main_contour)
@@ -331,22 +398,22 @@ def compute_capitulum_metrics(
         v2 = box[2] - box[1]
         len1 = float(np.linalg.norm(v1))
         len2 = float(np.linalg.norm(v2))
-
         norm1 = max(len1, 1e-6)
         norm2 = max(len2, 1e-6)
-        vert1 = abs(float(v1[1])) / norm1
-        vert2 = abs(float(v2[1])) / norm2
-
-        if vert1 >= vert2:
-            h_inv_px = len1
-            w_inv_px = len2
+        proj1 = abs(float(v1[0]) * axis_ux + float(v1[1]) * axis_uy) / norm1
+        proj2 = abs(float(v2[0]) * axis_ux + float(v2[1]) * axis_uy) / norm2
+        if proj1 >= proj2:
+            h_inv_px, w_inv_px = len1, len2
         else:
-            h_inv_px = len2
-            w_inv_px = len1
+            h_inv_px, w_inv_px = len2, len1
     else:
         ymin, xmin, ymax, xmax = bbox
-        h_inv_px = float(max(ymax - ymin, 1))
-        w_inv_px = float(max(xmax - xmin, 1))
+        dy_box = float(max(ymax - ymin, 1))
+        dx_box = float(max(xmax - xmin, 1))
+        if has_anatomical_axis and abs(axis_ux) > abs(axis_uy):
+            h_inv_px, w_inv_px = dx_box, dy_box
+        else:
+            h_inv_px, w_inv_px = dy_box, dx_box
 
     if w_inv_px <= 1e-6:
         return None
@@ -355,15 +422,16 @@ def compute_capitulum_metrics(
     if not (min_ar <= aspect_ratio <= max_ar):
         return None
 
-    h_inv_mm = (h_inv_px / pixels_per_mm) if (pixels_per_mm and pixels_per_mm > 0) else np.nan
-    w_inv_mm = (w_inv_px / pixels_per_mm) if (pixels_per_mm and pixels_per_mm > 0) else np.nan
+    use_cal = bool(is_calibrated_mm and pixels_per_mm is not None and not np.isnan(pixels_per_mm) and float(pixels_per_mm) > 0.0)
+    h_inv_mm = (h_inv_px / float(pixels_per_mm)) if use_cal else np.nan
+    w_inv_mm = (w_inv_px / float(pixels_per_mm)) if use_cal else np.nan
 
     return {
         "involucre_height_px": round(h_inv_px, 2),
         "involucre_width_px": round(w_inv_px, 2),
         "involucre_height_mm": round(h_inv_mm, 3) if not np.isnan(h_inv_mm) else np.nan,
         "involucre_width_mm": round(w_inv_mm, 3) if not np.isnan(w_inv_mm) else np.nan,
-        "capitulum_aspect_ratio": round(aspect_ratio, 4),
+        "AR_inv": round(aspect_ratio, 4),
     }
 
 
@@ -3062,9 +3130,9 @@ def orient_and_score_leaf_lm3(
                 "largest_frac": 1.0,
                 "gates_pass": True,
                 "is_archetypal": True,
+                "aspect_ratio": round(float(anatomical_lw), 4) if np.isfinite(anatomical_lw) else np.nan,
                 "blade_length_px": round(blade_l_px, 4),
                 "blade_width_px": round(blade_w_px, 4),
-                "blade_length_to_width_ratio": round(float(anatomical_lw), 4) if np.isfinite(anatomical_lw) else np.nan,
                 "oriented_mask": crop_lamina_u8,
                 "oriented_hole_mask": crop_hole,
                 "oriented_petiole_mask": crop_pet,
@@ -3081,9 +3149,9 @@ def orient_and_score_leaf_lm3(
             "largest_frac": round(float(bm.largest_frac), 4) if np.isfinite(bm.largest_frac) else 1.0,
             "gates_pass": bool(bm.gates_pass),
             "is_archetypal": bool(bm.is_archetypal),
+            "aspect_ratio": round(float(anatomical_lw), 4) if np.isfinite(anatomical_lw) else np.nan,
             "blade_length_px": round(blade_l_px, 4),
             "blade_width_px": round(blade_w_px, 4),
-            "blade_length_to_width_ratio": round(float(anatomical_lw), 4) if np.isfinite(anatomical_lw) else np.nan,
             "oriented_mask": crop_lamina_u8,
             "oriented_hole_mask": crop_hole,
             "oriented_petiole_mask": crop_pet,

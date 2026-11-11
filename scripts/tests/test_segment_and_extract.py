@@ -122,10 +122,9 @@ class TestSegmentAndExtract(unittest.TestCase):
 
         df = pd.read_csv(csv_path)
         self.assertEqual(len(df), 120, "Resampled contour must contain exactly requested points.")
-        expected_cols = {"catalogNumber", "leaf_id", "point_index", "x", "y", "x_norm", "y_norm"}
-        self.assertTrue(expected_cols.issubset(set(df.columns)))
-        self.assertGreaterEqual(df["x_norm"].min(), 0.0)
-        self.assertLessEqual(df["x_norm"].max(), 1.0)
+        expected_cols = {"catalogNumber", "leaf_id", "point_index", "x", "y"}
+        self.assertEqual(set(df.columns), expected_cols)
+        self.assertGreater(float(df["x"].max() - df["x"].min()), 0.0)
 
     def test_in_sheet_centroid_clustering(self) -> None:
         """Verify that distant leaf candidates receive different plant_individual_id values."""
@@ -155,25 +154,30 @@ class TestSegmentAndExtract(unittest.TestCase):
 
         metrics = compute_capitulum_metrics(mask, (80, 100, 220, 200), pixels_per_mm=10.0)
         self.assertIsNotNone(metrics)
-        self.assertGreaterEqual(metrics["capitulum_aspect_ratio"], 0.7)
-        self.assertLessEqual(metrics["capitulum_aspect_ratio"], 2.0)
-        self.assertAlmostEqual(metrics["capitulum_aspect_ratio"], 1.4, delta=0.15)
+        self.assertGreaterEqual(metrics["AR_inv"], 0.25)
+        self.assertLessEqual(metrics["AR_inv"], 4.5)
+        self.assertAlmostEqual(metrics["AR_inv"], 1.4, delta=0.15)
         self.assertAlmostEqual(metrics["involucre_height_mm"], 14.0, delta=1.5)
         self.assertAlmostEqual(metrics["involucre_width_mm"], 10.0, delta=1.5)
 
     def test_compute_capitulum_metrics_filter_extremes(self) -> None:
-        """Verify aberrant non-cylindrical shapes are rejected by 0.7 <= H/W <= 2.0 gating."""
-        # 1. Extreme flattened horizontal disc (AR < 0.7)
+        """Verify aberrant non-capitulum shapes are rejected by 0.25 <= AR_inv <= 4.5 gating while single-head filter rejects clusters."""
+        # 1. Extreme flattened horizontal artifact (AR < 0.25)
         mask_flat = np.zeros((200, 200), dtype=np.uint8)
         cv2.rectangle(mask_flat, (20, 90), (180, 110), 255, -1)  # W=160, H=20, AR=0.125
         metrics_flat = compute_capitulum_metrics(mask_flat, (90, 20, 110, 180))
-        self.assertIsNone(metrics_flat, "Excessively flat outline must be rejected (AR < 0.7).")
+        self.assertIsNone(metrics_flat, "Excessively flat outline must be rejected (AR_inv < 0.25).")
 
-        # 2. Extreme vertical stem fragment (AR > 2.0)
+        # 2. Extreme vertical stem fragment (AR > 4.5)
         mask_stem = np.zeros((300, 100), dtype=np.uint8)
         cv2.rectangle(mask_stem, (40, 20), (60, 280), 255, -1)  # W=20, H=260, AR=13.0
         metrics_stem = compute_capitulum_metrics(mask_stem, (20, 40, 280, 60))
-        self.assertIsNone(metrics_stem, "Excessively elongated stem fragment must be rejected (AR > 2.0).")
+        self.assertIsNone(metrics_stem, "Excessively elongated stem fragment must be rejected (AR_inv > 4.5).")
+
+        # 3. Multi-head cluster class_id=5 (Flower_MANY) must return None
+        mask_ok = np.zeros((300, 300), dtype=np.uint8)
+        cv2.ellipse(mask_ok, (150, 150), (50, 70), 0, 0, 360, 255, -1)
+        self.assertIsNone(compute_capitulum_metrics(mask_ok, (80, 100, 220, 200), class_id=5))
 
     def test_lm3_tip_up_contour_export_preserves_lamina_base_anchor(self) -> None:
         """Verify 120-vertex clockwise contour export anchored at lamina_base (petiole_attachment_pt) via resample_normalized_contour and export_standardized_contour."""
@@ -558,7 +562,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
     def test_export_standardized_contour_isotropic_aspect_ratio_preservation(self) -> None:
         """
         Verify an oblong tip-up leaf with L/W = 3.0 exported via export_standardized_contour()
-        retains (max(y_norm) - min(y_norm)) / (max(x_norm) - min(x_norm)) == 3.0 within 1e-3.
+        retains (max(y) - min(y)) / (max(x) - min(x)) == 3.0 within 1e-3.
         """
         mask = np.zeros((500, 500), dtype=np.uint8)
         # Oblong tip-up leaf with semi-axes a=150 (L=300 along y), b=50 (W=100 along x) -> L/W = 3.0
@@ -575,9 +579,9 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertIsNotNone(csv_path)
         df = pd.read_csv(csv_path)
 
-        span_x_norm = float(df["x_norm"].max() - df["x_norm"].min())
-        span_y_norm = float(df["y_norm"].max() - df["y_norm"].min())
-        lw_ratio = max(span_x_norm, span_y_norm) / max(min(span_x_norm, span_y_norm), 1e-9)
+        span_x = float(df["x"].max() - df["x"].min())
+        span_y = float(df["y"].max() - df["y"].min())
+        lw_ratio = max(span_x, span_y) / max(min(span_x, span_y), 1e-9)
         self.assertAlmostEqual(
             lw_ratio,
             3.0,
@@ -910,7 +914,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         self.assertIsNone(failure)
         self.assertEqual(len(records), 1)
         rec = records[0]
-        for col in ("circularity", "extent", "aspect_ratio", "area_px", "blade_area_cm2"):
+        for col in ("circularity", "extent", "aspect_ratio", "area_px", "area_mm2"):
             self.assertIn(col, rec)
             self.assertTrue(np.isfinite(float(rec[col])), f"{col} should be finite, got {rec[col]}")
 
@@ -937,10 +941,10 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
             output_dir=self.pipeline.output_dir,
         )
         row_leaf = conn.execute(
-            "SELECT circularity, extent, aspect_ratio, area_px, blade_area_cm2 FROM extracted_leaves WHERE catalogNumber = 'NCU_MACRO'"
+            "SELECT circularity, extent, aspect_ratio, area_px, area_mm2 FROM extracted_leaves WHERE catalogNumber = 'NCU_MACRO'"
         ).fetchone()
         self.assertIsNotNone(row_leaf)
-        for col in ("circularity", "extent", "aspect_ratio", "area_px", "blade_area_cm2"):
+        for col in ("circularity", "extent", "aspect_ratio", "area_px", "area_mm2"):
             self.assertIsNotNone(row_leaf[col], f"SQLite extracted_leaves.{col} must not be NULL")
 
         row_fail_v = conn.execute(
@@ -1140,7 +1144,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         compare_cols = [
             "catalogNumber", "leaf_id", "plant_individual_id", "lm3_gates_pass",
             "solidity", "archetype_score", "circularity", "extent", "area_px",
-            "blade_area_cm2", "petiole_length_mm", "blade_length_mm",
+            "area_mm2", "petiole_length_mm", "blade_length_mm",
         ]
         pd.testing.assert_frame_equal(
             df_wave[compare_cols].reset_index(drop=True),
@@ -1357,11 +1361,12 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             )
             self.assertIsNotNone(c_path)
             cdf = pd.read_csv(c_path)
-            # Point 0 (lamina_base) must sit at the bottom (high y_norm), and point 60 (lamina_tip) at the top (low y_norm)
-            self.assertGreater(float(cdf.loc[0, "y_norm"]), 0.65)
-            self.assertLess(float(cdf.loc[60, "y_norm"]), 0.15)
-            span_y = float(cdf["y_norm"].max() - cdf["y_norm"].min())
-            span_x = float(cdf["x_norm"].max() - cdf["x_norm"].min())
+            # Point 0 (lamina_base) must sit near the bottom (max y), and point 60 (lamina_tip) near the top (min y)
+            y_min_c, y_max_c = float(cdf["y"].min()), float(cdf["y"].max())
+            span_y = max(y_max_c - y_min_c, 1e-6)
+            span_x = float(cdf["x"].max() - cdf["x"].min())
+            self.assertGreater((float(cdf.loc[0, "y"]) - y_min_c) / span_y, 0.85)
+            self.assertLess((float(cdf.loc[60, "y"]) - y_min_c) / span_y, 0.15)
             self.assertGreater(span_y, 1.8 * span_x)
 
             # 3. Module 18 ECT descriptor export
@@ -1802,7 +1807,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                 "p_base": (480.0, 1790.0),
                 "p_apex": (360.0, 1580.0),
                 "area_px": 28500.0,
-                "blade_area_cm2": 4.20,
+                "area_mm2": 420.0,
                 "petiole_length_px": 140.0,
                 "blade_length_px": 240.0,
                 "petiole_to_blade_ratio": 0.58,
@@ -1817,7 +1822,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                 "p_base": (525.0, 1805.0),
                 "p_apex": (660.0, 1600.0),
                 "area_px": 26400.0,
-                "blade_area_cm2": 3.90,
+                "area_mm2": 390.0,
                 "petiole_length_px": 125.0,
                 "blade_length_px": 230.0,
                 "petiole_to_blade_ratio": 0.54,
@@ -1832,7 +1837,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                 "p_base": (500.0, 665.0),
                 "p_apex": (485.0, 530.0),
                 "area_px": 5400.0,
-                "blade_area_cm2": 0.80,
+                "area_mm2": 80.0,
                 "petiole_length_px": 4.0,
                 "blade_length_px": 135.0,
                 "petiole_to_blade_ratio": 0.03,
@@ -2020,11 +2025,10 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                         "species_name": "Packera anonyma" if idx % 2 == 0 else "Packera aurea",
                         "leaf_zone": "cauline" if is_caul else "basal",
                         "solidity": 0.62 + 0.02 * idx if is_caul else 0.86 + 0.01 * idx,
-                        "blade_length_to_width_ratio": 2.9 + 0.1 * idx if is_caul else 1.6 + 0.1 * idx,
                         "aspect_ratio": 2.9 + 0.1 * idx if is_caul else 1.6 + 0.1 * idx,
                         "archetype_score": 0.91,
                         "area_px": 4200 + idx * 100,
-                        "blade_area_cm2": 3.5 + idx * 0.2,
+                        "area_mm2": 350.0 + idx * 20.0,
                         "mask_path": str(m_p),
                     }
                 )
@@ -2343,10 +2347,9 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                 self.assertIsNone(fail_ren)
                 r_ren = recs_ren[0]
                 self.assertLess(float(r_ren["aspect_ratio"]), 0.80, "Reniform W > L blade must preserve aspect_ratio < 1.0.")
-                self.assertAlmostEqual(float(r_ren["aspect_ratio"]), float(r_ren["blade_length_to_width_ratio"]), places=4)
                 self.assertFalse(bool(r_ren["is_calibrated_mm"]), "predicted_from_megapixels must not set is_calibrated_mm=True.")
                 self.assertEqual(r_ren["scale_source"], "mp_estimated")
-                self.assertTrue(pd.isna(r_ren["blade_area_cm2"]))
+                self.assertTrue(pd.isna(r_ren["area_mm2"]))
 
                 # Verify SQLite persistence keeps is_calibrated_mm == 0 for mp_estimated
                 db_file = tmp_p / "test_step02_prov.sqlite"

@@ -42,8 +42,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             mm_csv = mm_dir / "multimodal_conflict_flags.csv"
 
             pd.DataFrame([
-                {"catalogNumber": "MM_01", "plant_individual_id": 1, "species_standardized": "Packera aurea", "determiner_tier": "Tier_1_Gold", "basal_leaf_count": 3, "Sym_PC1": -1.2, "Sym_PC2": 0.3},
-                {"catalogNumber": "MM_02", "plant_individual_id": 1, "species_standardized": "Packera obovata", "determiner_tier": "Tier_1_Gold", "basal_leaf_count": 3, "Sym_PC1": 1.4, "Sym_PC2": -0.2},
+                {"catalogNumber": "MM_01", "plant_individual_id": 1, "species_standardized": "Packera aurea", "determiner_tier": "Tier_1_Gold", "basal_leaf_count": 3, "PC1": -1.2, "PC2": 0.3},
+                {"catalogNumber": "MM_02", "plant_individual_id": 1, "species_standardized": "Packera obovata", "determiner_tier": "Tier_1_Gold", "basal_leaf_count": 3, "PC1": 1.4, "PC2": -0.2},
             ]).to_csv(morph_csv, index=False)
             pd.DataFrame([
                 {
@@ -199,8 +199,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                 PC1 = c(rnorm(8, -2), rnorm(8, 0), rnorm(8, 2)),
                 PC2 = c(rnorm(8, 1), rnorm(8, -1.5), rnorm(8, 1)),
                 PC3 = rnorm(n),
-                Sym_PC1 = c(rnorm(8, -2), rnorm(8, 0), rnorm(8, 2)),
-                Sym_PC2 = c(rnorm(8, 1), rnorm(8, -1.5), rnorm(8, 1)),
                 aspect_ratio = runif(n, 1.5, 3.2),
                 solidity = runif(n, 0.75, 0.95),
                 log_centsize = runif(n, 2.0, 3.5),
@@ -437,11 +435,6 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                         "authority_weight": auth_wt,
                         "basal_leaf_count": 3,
                         "morph_tier_source": "Basal_Rosette",
-                        "Sym_PC1": float(pcs[0]),
-                        "Sym_PC2": float(pcs[1]),
-                        "Sym_PC3": float(pcs[2]),
-                        "Sym_PC4": float(pcs[3]),
-                        "Sym_PC5": float(pcs[4]),
                         "PC1": float(pcs[0]),
                         "PC2": float(pcs[1]),
                         "PC3": float(pcs[2]),
@@ -459,11 +452,11 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                         "authority_weight": auth_wt,
                         "basal_leaf_count": 3,
                         "morph_tier_source": "Basal_Rosette",
-                        "Sym_PC1": float(pcs[0]),
-                        "Sym_PC2": float(pcs[1]),
-                        "Sym_PC3": float(pcs[2]),
-                        "Sym_PC4": float(pcs[3]),
-                        "Sym_PC5": float(pcs[4]),
+                        "PC1": float(pcs[0]),
+                        "PC2": float(pcs[1]),
+                        "PC3": float(pcs[2]),
+                        "PC4": float(pcs[3]),
+                        "PC5": float(pcs[4]),
                         "involucre_length_width_ratio": float(inv_ratio + rng.normal(0.0, 0.05)),
                         "cda_predicted_taxon": cda_pred,
                         "cda_posterior_prob": cda_post,
@@ -614,11 +607,11 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                         "basal_leaf_count": 3,
                         "morph_tier_source": "Basal_Rosette",
                         "gmm_cluster": k_id,
-                        "Sym_PC1": float(vec[0]),
-                        "Sym_PC2": float(vec[1]),
-                        "Sym_PC3": float(vec[2]),
-                        "Sym_PC4": float(vec[3]),
-                        "Sym_PC5": float(vec[4]),
+                        "PC1": float(vec[0]),
+                        "PC2": float(vec[1]),
+                        "PC3": float(vec[2]),
+                        "PC4": float(vec[3]),
+                        "PC5": float(vec[4]),
                         "cda_predicted_taxon": sp_name,
                         "cda_posterior_prob": 0.90,
                         "cda_second_posterior_prob": 0.08,
@@ -676,8 +669,8 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             out_neighbors = tmp_path / "focal_auto_neighbors.txt"
             out_fig = tmp_path / "fig_empirical_taxon_complex_network.pdf"
 
-            # 3 taxa separated ONLY on Sym_PC6..Sym_PC7 and bio10_mean_temp_warmest_qtr + polaris_ksat_30m
-            # (proving Step 08 does not truncate at Sym_PC1..5 or hardcode only bio1/bio4/bio12/bio15!)
+            # 3 taxa separated ONLY on PC6..PC7 and bio10_mean_temp_warmest_qtr + polaris_ksat_30m
+            # (proving Step 08 does not truncate at PC1..5 or hardcode only bio1/bio4/bio12/bio15!)
             taxa_specs = [
                 ("Packera hyperborea", (-3.5, -3.0), (5.5, 1.8)),
                 ("Packera contermina", (-3.2, -2.8), (5.8, 1.9)),
@@ -699,14 +692,14 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
                         "basal_leaf_count": 3,
                         "morph_tier_source": "Basal_Rosette",
                         "gmm_cluster": 1,
-                        "Sym_PC1": float(rng.normal(0.0, 0.15)),
-                        "Sym_PC2": float(rng.normal(0.0, 0.15)),
-                        "Sym_PC3": float(rng.normal(0.0, 0.15)),
-                        "Sym_PC4": float(rng.normal(0.0, 0.15)),
-                        "Sym_PC5": float(rng.normal(0.0, 0.15)),
-                        "Sym_PC6": float(pc6_mu + rng.normal(0.0, 0.20)),
-                        "Sym_PC7": float(pc7_mu + rng.normal(0.0, 0.20)),
-                        "selected_morph_features": "Sym_PC1;Sym_PC2;Sym_PC3;Sym_PC4;Sym_PC5;Sym_PC6;Sym_PC7",
+                        "PC1": float(rng.normal(0.0, 0.15)),
+                        "PC2": float(rng.normal(0.0, 0.15)),
+                        "PC3": float(rng.normal(0.0, 0.15)),
+                        "PC4": float(rng.normal(0.0, 0.15)),
+                        "PC5": float(rng.normal(0.0, 0.15)),
+                        "PC6": float(pc6_mu + rng.normal(0.0, 0.20)),
+                        "PC7": float(pc7_mu + rng.normal(0.0, 0.20)),
+                        "selected_morph_features": "PC1;PC2;PC3;PC4;PC5;PC6;PC7",
                         "cda_predicted_taxon": sp_name,
                         "cda_posterior_prob": 0.92,
                         "cda_second_posterior_prob": 0.05,
@@ -781,7 +774,10 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
         """
         if not shutil.which("Rscript"):
             self.skipTest("Rscript not installed.")
-        res = subprocess.run(["Rscript", "-e", r_code], cwd=str(REPO_ROOT), capture_output=True, text=True, check=False)
+        with tempfile.TemporaryDirectory() as tmp_r:
+            r_tmp = Path(tmp_r) / "check_step07_guard.R"
+            r_tmp.write_text(r_code, encoding="utf-8")
+            res = subprocess.run(["Rscript", str(r_tmp)], cwd=str(REPO_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
         self.assertEqual(res.returncode, 0, f"Subcluster multi-species guard test failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("SUBCLUSTER_MULTI_SP_GUARD_OK", res.stdout)
 

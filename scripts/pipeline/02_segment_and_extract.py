@@ -89,7 +89,7 @@ import yaml
 from scripts.vision.configure_leafmachine3 import load_native_lm3_config
 from scripts.vision.lm3_data_loader import (
     RulerCalibrationMap,
-    compute_blade_area_cm2,
+    compute_area_mm2,
     DEFAULT_HERBARIUM_DPI,
     DEFAULT_PX_PER_CM,
     LM3_LEAF_CLASS_IDS,
@@ -560,6 +560,8 @@ class SegmentAndExtractPipeline:
         self.is_stock_lm3 = is_stock_lm3_weights(self.model_weights)
         self.voucher_repro_records: Dict[str, Dict[str, Any]] = {}
         self.voucher_pheno_records: Dict[str, Dict[str, Any]] = {}
+        self.voucher_repro_by_pid: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        self.voucher_pheno_by_pid: Dict[str, Dict[int, Dict[str, Any]]] = {}
         self.voucher_crowns_by_pid: Dict[str, Dict[int, Tuple[float, float]]] = {}
         self.voucher_rosette_centroids_by_pid: Dict[str, Dict[int, Tuple[float, float]]] = {}
         self.voucher_petiole_by_pid: Dict[str, Dict[int, Dict[str, Any]]] = {}
@@ -615,6 +617,10 @@ class SegmentAndExtractPipeline:
             self.voucher_repro_records[cat] = bundle.repro_record
         if bundle.pheno_record is not None:
             self.voucher_pheno_records[cat] = bundle.pheno_record
+        if bundle.repro_by_pid:
+            self.voucher_repro_by_pid[cat] = bundle.repro_by_pid
+        if bundle.pheno_by_pid:
+            self.voucher_pheno_by_pid[cat] = bundle.pheno_by_pid
         if bundle.crowns_by_pid:
             self.voucher_crowns_by_pid[cat] = bundle.crowns_by_pid
         if bundle.rosette_centroids_by_pid:
@@ -912,6 +918,8 @@ class SegmentAndExtractPipeline:
             centroids_out: Optional[Dict[int, Tuple[float, float]]] = None,
             petiole_out: Optional[Dict[int, Dict[str, Any]]] = None,
             contours_out: Optional[Dict[int, List[List[float]]]] = None,
+            repro_pid_out: Optional[Dict[int, Dict[str, Any]]] = None,
+            pheno_pid_out: Optional[Dict[int, Dict[str, Any]]] = None,
         ) -> Any:
             bundle = _VoucherFinalizeBundle(
                 catalog_number=catalog_number,
@@ -920,6 +928,8 @@ class SegmentAndExtractPipeline:
                 failure_record=fail_rec,
                 repro_record=repro_rec,
                 pheno_record=pheno_rec,
+                repro_by_pid=repro_pid_out or {},
+                pheno_by_pid=pheno_pid_out or {},
                 crowns_by_pid=crowns_out or {},
                 rosette_centroids_by_pid=centroids_out or {},
                 by_plant_petiole=petiole_out or {},
@@ -1370,12 +1380,13 @@ class SegmentAndExtractPipeline:
             }
             empty_repro = {
                 "catalogNumber": catalog_number,
+                "plant_individual_id": 0,
                 "capitula_count": 0,
                 "involucre_height_px": np.nan,
                 "involucre_width_px": np.nan,
                 "involucre_height_mm": np.nan,
                 "involucre_width_mm": np.nan,
-                "capitulum_aspect_ratio": np.nan,
+                "AR_inv": np.nan,
                 "plant_height_cm": np.nan,
                 "scape_to_basal_leaf_ratio": np.nan,
                 "is_bent_stem": False,
@@ -1399,17 +1410,20 @@ class SegmentAndExtractPipeline:
         _min_anth_heads = int(getattr(_pheno_cfg, "min_anthesis_heads_for_flowering", 1) or 1) if _pheno_cfg is not None else 1
         valid_capitula: List[Dict[str, Any]] = []
         head_pheno_results: List[Dict[str, Any]] = []
+        raw_cap_items: List[Dict[str, Any]] = []
         for cap_idx, (bbox, mask, score, class_id) in enumerate(capitulum_detections, 1):
-            metrics = compute_capitulum_metrics(mask, bbox, pixels_per_mm if is_calibrated_mm else None)
-            if metrics is not None:
-                metrics["score"] = score
-                metrics["class_id"] = class_id
-                valid_capitula.append(metrics)
-
             ymin, xmin, ymax, xmax = [int(v) for v in bbox]
             y0, y1 = max(0, ymin), min(sheet_h, max(0, ymax))
             x0, x1 = max(0, xmin), min(sheet_w, max(0, xmax))
             crop_bgr = img_bgr[y0:y1, x0:x1]
+            local_cap_mask: Optional[np.ndarray] = None
+            if mask is not None and isinstance(mask, np.ndarray) and mask.size > 0:
+                if mask.shape[:2] == (sheet_h, sheet_w):
+                    local_cap_mask = mask[y0:y1, x0:x1]
+                else:
+                    local_cap_mask = mask
+
+            head_pheno_item: Optional[Dict[str, Any]] = None
             if crop_bgr.size > 0:
                 cap_patch_path = self.capitula_patches_dir / f"{catalog_number}_cap{cap_idx}.jpg"
                 try:
@@ -1419,7 +1433,7 @@ class SegmentAndExtractPipeline:
 
                 if crop_bgr.shape[0] >= 5 and crop_bgr.shape[1] >= 5:
                     crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-                    head_pheno = classify_single_capitulum(
+                    head_pheno_item = classify_single_capitulum(
                         crop_rgb,
                         min_pappus_luminance=_min_pappus_lum,
                         max_pappus_saturation=_max_pappus_sat,
@@ -1427,42 +1441,66 @@ class SegmentAndExtractPipeline:
                         min_floret_yellow_saturation=_min_floret_sat,
                         min_floret_yellow_ratio=_min_floret_rat,
                     )
-                    head_pheno_results.append(head_pheno)
+                    head_pheno_results.append(head_pheno_item)
 
-        _pheno_rec = classify_voucher_phenology(
+            metrics = compute_capitulum_metrics(
+                local_cap_mask if local_cap_mask is not None else mask,
+                bbox,
+                pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
+                crop_bgr=crop_bgr if crop_bgr.size > 0 else None,
+                class_id=int(class_id),
+                is_calibrated_mm=is_calibrated_mm,
+            )
+            if metrics is not None:
+                metrics["score"] = score
+                metrics["class_id"] = int(class_id)
+                valid_capitula.append(metrics)
+
+            raw_cap_items.append({
+                "bbox": bbox,
+                "center_xy": (0.5 * float(xmin + xmax), 0.5 * float(ymin + ymax)),
+                "mask": local_cap_mask if local_cap_mask is not None else mask,
+                "crop_bgr": crop_bgr if crop_bgr.size > 0 else None,
+                "score": float(score),
+                "class_id": int(class_id),
+                "metrics": metrics,
+                "head_pheno": head_pheno_item,
+            })
+
+        def _summarize_repro_subset(cap_metrics_sub: List[Dict[str, Any]], pid_val: int = 0) -> Dict[str, Any]:
+            c_cnt = len(cap_metrics_sub)
+            if c_cnt > 0:
+                mh_px = float(np.median([c["involucre_height_px"] for c in cap_metrics_sub]))
+                mw_px = float(np.median([c["involucre_width_px"] for c in cap_metrics_sub]))
+                hmm_l = [c["involucre_height_mm"] for c in cap_metrics_sub if not np.isnan(c["involucre_height_mm"])]
+                wmm_l = [c["involucre_width_mm"] for c in cap_metrics_sub if not np.isnan(c["involucre_width_mm"])]
+                mh_mm = float(np.median(hmm_l)) if hmm_l else np.nan
+                mw_mm = float(np.median(wmm_l)) if wmm_l else np.nan
+                m_ar = float(np.median([c["AR_inv"] for c in cap_metrics_sub]))
+            else:
+                mh_px = mw_px = mh_mm = mw_mm = m_ar = np.nan
+            return {
+                "catalogNumber": catalog_number,
+                "plant_individual_id": int(pid_val),
+                "capitula_count": int(c_cnt),
+                "involucre_height_px": round(mh_px, 2) if not np.isnan(mh_px) else np.nan,
+                "involucre_width_px": round(mw_px, 2) if not np.isnan(mw_px) else np.nan,
+                "involucre_height_mm": round(mh_mm, 3) if not np.isnan(mh_mm) else np.nan,
+                "involucre_width_mm": round(mw_mm, 3) if not np.isnan(mw_mm) else np.nan,
+                "AR_inv": round(m_ar, 4) if not np.isnan(m_ar) else np.nan,
+                "plant_height_cm": np.nan,
+                "scape_to_basal_leaf_ratio": np.nan,
+                "is_bent_stem": False,
+            }
+
+        _pheno_rec = dict(classify_voucher_phenology(
             catalog_number,
             head_pheno_results,
             min_anthesis_heads_for_flowering=_min_anth_heads,
-        )
-
+        ))
+        _pheno_rec["plant_individual_id"] = 0
         capitula_count = len(valid_capitula)
-        if capitula_count > 0:
-            med_h_px = float(np.median([c["involucre_height_px"] for c in valid_capitula]))
-            med_w_px = float(np.median([c["involucre_width_px"] for c in valid_capitula]))
-            h_mm_list = [c["involucre_height_mm"] for c in valid_capitula if not np.isnan(c["involucre_height_mm"])]
-            w_mm_list = [c["involucre_width_mm"] for c in valid_capitula if not np.isnan(c["involucre_width_mm"])]
-            med_h_mm = float(np.median(h_mm_list)) if h_mm_list else np.nan
-            med_w_mm = float(np.median(w_mm_list)) if w_mm_list else np.nan
-            med_ar = float(np.median([c["capitulum_aspect_ratio"] for c in valid_capitula]))
-        else:
-            med_h_px = np.nan
-            med_w_px = np.nan
-            med_h_mm = np.nan
-            med_w_mm = np.nan
-            med_ar = np.nan
-
-        repro_summary = {
-            "catalogNumber": catalog_number,
-            "capitula_count": capitula_count,
-            "involucre_height_px": round(med_h_px, 2) if not np.isnan(med_h_px) else np.nan,
-            "involucre_width_px": round(med_w_px, 2) if not np.isnan(med_w_px) else np.nan,
-            "involucre_height_mm": round(med_h_mm, 3) if not np.isnan(med_h_mm) else np.nan,
-            "involucre_width_mm": round(med_w_mm, 3) if not np.isnan(med_w_mm) else np.nan,
-            "capitulum_aspect_ratio": round(med_ar, 4) if not np.isnan(med_ar) else np.nan,
-            "plant_height_cm": np.nan,
-            "scape_to_basal_leaf_ratio": np.nan,
-            "is_bent_stem": False,
-        }
+        repro_summary = _summarize_repro_subset(valid_capitula, pid_val=0)
 
         if not leaf_detections:
             failure_record = {
@@ -1704,7 +1742,7 @@ class SegmentAndExtractPipeline:
         for _inst_pre in instances:
             _rpx = float(np.count_nonzero(_inst_pre.mask))
             _raw_px_by_leaf_id[_inst_pre.leaf_id] = _rpx
-            _inst_pre.blade_area_cm2 = compute_blade_area_cm2(_rpx, px_per_cm=px_per_cm_sheet) if is_calibrated_mm else np.nan
+            _inst_pre.area_mm2 = compute_area_mm2(_rpx, pixels_per_mm=pixels_per_mm, is_calibrated_mm=is_calibrated_mm)
 
         # Pre-compute per-individual crown / root / rosette hub hints for 180-deg tie-breaking
         _crown_hints_sheet: Dict[int, Optional[Tuple[float, float]]] = {}
@@ -1802,7 +1840,7 @@ class SegmentAndExtractPipeline:
             inst.solidity = float(lm3_morph["solidity"])
             inst.circularity = float(lm3_morph["circularity"])
             inst.extent = float(lm3_morph["extent"])
-            _bm_lw = lm3_bm_raw.get("blade_length_to_width_ratio", np.nan)
+            _bm_lw = lm3_bm_raw.get("aspect_ratio", np.nan)
             _bm_bl_px = lm3_bm_raw.get("blade_length_px", None)
             _bm_bw_px = lm3_bm_raw.get("blade_width_px", None)
             if lm3_bm_raw.get("success") and _bm_lw is not None and np.isfinite(float(_bm_lw)) and float(_bm_lw) > 0.0:
@@ -1873,7 +1911,7 @@ class SegmentAndExtractPipeline:
                 "bbox": _inst.bbox,
                 "mask": _inst.mask,
                 "area_px": _raw_px_by_leaf_id.get(_inst.leaf_id, float(np.count_nonzero(_inst.mask))),
-                "blade_area_cm2": _inst.blade_area_cm2,
+                "area_mm2": _inst.area_mm2,
                 "blade_length_px": _inst.blade_length_px,
                 "blade_width_px": _inst.blade_width_px,
                 "petiole_width_px": _inst.petiole_width_px,
@@ -1893,18 +1931,6 @@ class SegmentAndExtractPipeline:
             root_boxes=root_detections,
             rosette_centroids=rosette_centroids_by_pid,
         )
-        petiole_scape_res = approximate_petiole_and_scape_metrics(
-            basal_leaves=pose_inputs,
-            p_crown=crowns_by_pid,
-            px_per_cm=px_per_cm_sheet,
-            upper_cauline_detections=upper_cauline_pts,
-            root_boxes=root_detections,
-            capitula_detections=[b for b, _, _, _ in capitulum_detections],
-        )
-        repro_summary["plant_height_cm"] = petiole_scape_res.get("plant_height_cm", np.nan)
-        repro_summary["scape_to_basal_leaf_ratio"] = petiole_scape_res.get("scape_to_basal_leaf_ratio", np.nan)
-        repro_summary["is_bent_stem"] = bool(petiole_scape_res.get("is_bent_stem", False))
-
         _spec_mask_sheet: Optional[np.ndarray] = None
         if (
             pose_inputs
@@ -1917,6 +1943,122 @@ class SegmentAndExtractPipeline:
                 _spec_mask_sheet = self.specimen_segmenter.predict_mask(img_bgr, return_sheet_size=True)
             except Exception:
                 _spec_mask_sheet = None
+
+        # Partition capitula across plant_individual_id so sterile individuals never inherit another plant's scape/involucre
+        unique_leaf_pids = sorted({int(p["plant_individual_id"]) for p in pose_inputs})
+        caps_by_pid_boxes: Dict[int, List[Tuple[int, int, int, int]]] = {pid: [] for pid in unique_leaf_pids}
+        cap_items_by_pid: Dict[int, List[Dict[str, Any]]] = {pid: [] for pid in unique_leaf_pids}
+
+        if len(unique_leaf_pids) <= 1:
+            only_pid = unique_leaf_pids[0] if unique_leaf_pids else 0
+            cr_only = crowns_by_pid.get(only_pid) if isinstance(crowns_by_pid, dict) else None
+            refreshed_valid: List[Dict[str, Any]] = []
+            for c_it in raw_cap_items:
+                if cr_only is not None:
+                    ped_dir = (c_it["center_xy"][0] - float(cr_only[0]), c_it["center_xy"][1] - float(cr_only[1]))
+                    m_ref = compute_capitulum_metrics(
+                        c_it["mask"],
+                        c_it["bbox"],
+                        pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
+                        crop_bgr=c_it["crop_bgr"],
+                        class_id=c_it["class_id"],
+                        peduncle_dir_xy=ped_dir,
+                        is_calibrated_mm=is_calibrated_mm,
+                    )
+                    if m_ref is not None:
+                        m_ref["score"] = c_it["score"]
+                        m_ref["class_id"] = c_it["class_id"]
+                    c_it["metrics"] = m_ref
+                if c_it["metrics"] is not None:
+                    refreshed_valid.append(c_it["metrics"])
+                caps_by_pid_boxes.setdefault(only_pid, []).append(c_it["bbox"])
+                cap_items_by_pid.setdefault(only_pid, []).append(c_it)
+            valid_capitula = refreshed_valid
+            capitula_count = len(valid_capitula)
+            repro_summary = _summarize_repro_subset(valid_capitula, pid_val=only_pid)
+            _pheno_rec["plant_individual_id"] = int(only_pid)
+        else:
+            cc_labels_sheet: Optional[np.ndarray] = None
+            pid_cc_sets: Dict[int, Set[int]] = {pid: set() for pid in unique_leaf_pids}
+            if isinstance(_spec_mask_sheet, np.ndarray) and _spec_mask_sheet.shape[:2] == (sheet_h, sheet_w) and np.any(_spec_mask_sheet > 0):
+                _, cc_labels_sheet = cv2.connectedComponents((_spec_mask_sheet > 0).astype(np.uint8), connectivity=8)
+                for p_in in pose_inputs:
+                    px_i = int(np.clip(round(p_in["p_base"][0]), 0, sheet_w - 1))
+                    py_i = int(np.clip(round(p_in["p_base"][1]), 0, sheet_h - 1))
+                    lbl_p = int(cc_labels_sheet[py_i, px_i])
+                    if lbl_p > 0:
+                        pid_cc_sets[int(p_in["plant_individual_id"])].add(lbl_p)
+            max_link_dist = 0.55 * float(max(sheet_h, sheet_w))
+            refreshed_valid = []
+            for c_it in raw_cap_items:
+                cx_c, cy_c = c_it["center_xy"]
+                assigned_pid: Optional[int] = None
+                if cc_labels_sheet is not None:
+                    cxi = int(np.clip(round(cx_c), 0, sheet_w - 1))
+                    cyi = int(np.clip(round(cy_c), 0, sheet_h - 1))
+                    lbl_c = int(cc_labels_sheet[cyi, cxi])
+                    if lbl_c > 0:
+                        matching_pids = [pid for pid, s_lbls in pid_cc_sets.items() if lbl_c in s_lbls]
+                        if len(matching_pids) == 1:
+                            assigned_pid = matching_pids[0]
+                if assigned_pid is None:
+                    best_d = float("inf")
+                    for pid in unique_leaf_pids:
+                        pid_pts = [p["p_base"] for p in pose_inputs if int(p["plant_individual_id"]) == pid] + [
+                            p["p_apex"] for p in pose_inputs if int(p["plant_individual_id"]) == pid
+                        ]
+                        cr_p = crowns_by_pid.get(pid) if isinstance(crowns_by_pid, dict) else None
+                        if cr_p is not None:
+                            pid_pts.append((float(cr_p[0]), float(cr_p[1])))
+                        if not pid_pts:
+                            continue
+                        min_leaf_d = min(math.hypot(cx_c - px_p, cy_c - py_p) for px_p, py_p in pid_pts)
+                        # Penalize assigning an upper-sheet corymb to a rosette situated far laterally or above the capitulum
+                        below_pen = 1.35 if (cr_p is not None and cy_c > float(cr_p[1]) + 40.0) else 1.0
+                        eff_d = min_leaf_d * below_pen
+                        if eff_d < best_d:
+                            best_d = eff_d
+                            assigned_pid = pid
+                    if best_d > max_link_dist:
+                        assigned_pid = None
+                if assigned_pid is not None:
+                    cr_ass = crowns_by_pid.get(assigned_pid) if isinstance(crowns_by_pid, dict) else None
+                    if cr_ass is not None:
+                        ped_dir = (cx_c - float(cr_ass[0]), cy_c - float(cr_ass[1]))
+                        m_ref = compute_capitulum_metrics(
+                            c_it["mask"],
+                            c_it["bbox"],
+                            pixels_per_mm=pixels_per_mm if is_calibrated_mm else None,
+                            crop_bgr=c_it["crop_bgr"],
+                            class_id=c_it["class_id"],
+                            peduncle_dir_xy=ped_dir,
+                            is_calibrated_mm=is_calibrated_mm,
+                        )
+                        if m_ref is not None:
+                            m_ref["score"] = c_it["score"]
+                            m_ref["class_id"] = c_it["class_id"]
+                        c_it["metrics"] = m_ref
+                    caps_by_pid_boxes[assigned_pid].append(c_it["bbox"])
+                    cap_items_by_pid[assigned_pid].append(c_it)
+                if c_it["metrics"] is not None:
+                    refreshed_valid.append(c_it["metrics"])
+            valid_capitula = refreshed_valid
+            capitula_count = len(valid_capitula)
+            repro_summary = _summarize_repro_subset(valid_capitula, pid_val=0)
+
+        petiole_scape_res = approximate_petiole_and_scape_metrics(
+            basal_leaves=pose_inputs,
+            p_crown=crowns_by_pid,
+            px_per_cm=px_per_cm_sheet,
+            is_calibrated_mm=is_calibrated_mm,
+            upper_cauline_detections=upper_cauline_pts,
+            root_boxes=root_detections,
+            capitula_detections=[b for b, _, _, _ in capitulum_detections],
+            capitula_by_pid=caps_by_pid_boxes,
+        )
+        repro_summary["plant_height_cm"] = petiole_scape_res.get("plant_height_cm", np.nan)
+        repro_summary["scape_to_basal_leaf_ratio"] = petiole_scape_res.get("scape_to_basal_leaf_ratio", np.nan)
+        repro_summary["is_bent_stem"] = bool(petiole_scape_res.get("is_bent_stem", False))
 
         leaf_zones_by_id = classify_leaf_zone_anatomical(
             pose_inputs,
@@ -1940,9 +2082,11 @@ class SegmentAndExtractPipeline:
                 basal_leaves=pose_inputs,
                 p_crown=crowns_by_pid,
                 px_per_cm=px_per_cm_sheet,
+                is_calibrated_mm=is_calibrated_mm,
                 upper_cauline_detections=upper_cauline_pts,
                 root_boxes=root_detections,
                 capitula_detections=[b for b, _, _, _ in capitulum_detections],
+                capitula_by_pid=caps_by_pid_boxes,
             )
             if np.isfinite(petiole_scape_res.get("scape_to_basal_leaf_ratio", np.nan)):
                 repro_summary["scape_to_basal_leaf_ratio"] = petiole_scape_res.get("scape_to_basal_leaf_ratio", np.nan)
@@ -1975,6 +2119,31 @@ class SegmentAndExtractPipeline:
             if isinstance(by_plant_petiole, dict)
             else {}
         )
+        _repro_by_pid_out: Dict[int, Dict[str, Any]] = {}
+        _pheno_by_pid_out: Dict[int, Dict[str, Any]] = {}
+        for _pid_r in unique_leaf_pids:
+            _p_caps = cap_items_by_pid.get(_pid_r) or []
+            _p_valid_m = [it["metrics"] for it in _p_caps if it.get("metrics") is not None]
+            _p_heads_ph = [it["head_pheno"] for it in _p_caps if it.get("head_pheno") is not None]
+            _r_sub = _summarize_repro_subset(_p_valid_m, pid_val=_pid_r)
+            _pet_sub = _petiole_out.get(_pid_r, {})
+            if len(unique_leaf_pids) <= 1:
+                _r_sub["plant_height_cm"] = repro_summary["plant_height_cm"]
+                _r_sub["scape_to_basal_leaf_ratio"] = repro_summary["scape_to_basal_leaf_ratio"]
+                _r_sub["is_bent_stem"] = repro_summary["is_bent_stem"]
+            else:
+                _r_sub["plant_height_cm"] = _pet_sub.get("plant_height_cm", np.nan)
+                _r_sub["scape_to_basal_leaf_ratio"] = _pet_sub.get("scape_to_basal_leaf_ratio", np.nan)
+                _r_sub["is_bent_stem"] = bool(_pet_sub.get("is_bent_stem", False))
+            _repro_by_pid_out[_pid_r] = _r_sub
+            _ph_sub = dict(classify_voucher_phenology(
+                catalog_number,
+                _p_heads_ph,
+                min_anthesis_heads_for_flowering=_min_anth_heads,
+            ))
+            _ph_sub["plant_individual_id"] = int(_pid_r)
+            _pheno_by_pid_out[_pid_r] = _ph_sub
+
         _contours_by_leaf: Dict[int, List[List[float]]] = {}
 
         for inst, p_base_pt, p_apex_pt, angle_cw, persisted_mask_u8, ori_pts_map, is_upright_mask in candidate_extractions:
@@ -2038,12 +2207,12 @@ class SegmentAndExtractPipeline:
             _leaf_zone_str = str(_lz_info.get("leaf_zone", "basal") or "basal")
             _leaf_zone_conf = _lz_info.get("leaf_zone_confidence", np.nan)
             _dist_crown_norm = _lz_info.get("dist_from_crown_norm", np.nan)
-            _is_basal_leaf = _leaf_zone_str.lower() != "cauline"
-            _pet_len_px = leaf_pet.get("petiole_length_px", pid_pet.get("petiole_length_px", np.nan) if _is_basal_leaf else np.nan)
-            _blade_len_px = leaf_pet.get("blade_length_px", pid_pet.get("blade_length_px", np.nan) if _is_basal_leaf else np.nan)
-            _pet_len_mm = leaf_pet.get("petiole_length_mm", pid_pet.get("petiole_length_mm", np.nan) if _is_basal_leaf else np.nan)
-            _blade_len_mm = leaf_pet.get("blade_length_mm", pid_pet.get("blade_length_mm", np.nan) if _is_basal_leaf else np.nan)
-            _pet_ratio = leaf_pet.get("petiole_to_blade_ratio", pid_pet.get("petiole_to_blade_ratio", np.nan) if _is_basal_leaf else np.nan)
+            _pet_len_px = leaf_pet.get("petiole_length_px", np.nan)
+            _blade_len_px = leaf_pet.get("blade_length_px", np.nan)
+            _pet_len_mm = leaf_pet.get("petiole_length_mm", np.nan)
+            _blade_len_mm = leaf_pet.get("blade_length_mm", np.nan)
+            _pet_ratio = leaf_pet.get("petiole_to_blade_ratio", np.nan)
+            _pid_repro_rec = _repro_by_pid_out.get(int(inst.plant_individual_id), repro_summary)
             _pet_w_px = (
                 round(float(inst.petiole_width_px), 4)
                 if inst.petiole_width_px is not None and np.isfinite(inst.petiole_width_px)
@@ -2088,9 +2257,8 @@ class SegmentAndExtractPipeline:
                 "circularity": round(float(inst.circularity), 4) if np.isfinite(inst.circularity) else np.nan,
                 "extent": round(float(inst.extent), 4) if np.isfinite(inst.extent) else np.nan,
                 "aspect_ratio": round(float(inst.aspect_ratio), 4) if np.isfinite(inst.aspect_ratio) else np.nan,
-                "blade_length_to_width_ratio": round(float(inst.aspect_ratio), 4) if np.isfinite(inst.aspect_ratio) else np.nan,
                 "area_px": round(float(_inst_area_px_val), 1) if np.isfinite(_inst_area_px_val) else np.nan,
-                "blade_area_cm2": round(float(inst.blade_area_cm2), 4) if np.isfinite(inst.blade_area_cm2) else np.nan,
+                "area_mm2": round(float(inst.area_mm2), 2) if np.isfinite(inst.area_mm2) else np.nan,
                 "archetype_score": round(float(inst.archetype_score), 4),
                 "bilateral_dice": round(float(getattr(inst, "bilateral_dice", 1.0)), 4),
                 "si_a": round(float(getattr(inst, "si_a", 0.0)), 4),
@@ -2121,12 +2289,12 @@ class SegmentAndExtractPipeline:
                 "blade_length_mm": _blade_len_mm,
                 "blade_width_mm": _blade_w_mm,
                 "petiole_to_blade_ratio": _pet_ratio,
-                "capitula_count": capitula_count,
-                "involucre_height_px": repro_summary["involucre_height_px"],
-                "involucre_width_px": repro_summary["involucre_width_px"],
-                "involucre_height_mm": repro_summary["involucre_height_mm"],
-                "involucre_width_mm": repro_summary["involucre_width_mm"],
-                "capitulum_aspect_ratio": repro_summary["capitulum_aspect_ratio"],
+                "capitula_count": _pid_repro_rec["capitula_count"],
+                "involucre_height_px": _pid_repro_rec["involucre_height_px"],
+                "involucre_width_px": _pid_repro_rec["involucre_width_px"],
+                "involucre_height_mm": _pid_repro_rec["involucre_height_mm"],
+                "involucre_width_mm": _pid_repro_rec["involucre_width_mm"],
+                "AR_inv": _pid_repro_rec["AR_inv"],
                 "leaf_zone": _leaf_zone_str,
                 "leaf_zone_confidence": round(float(_leaf_zone_conf), 4) if _leaf_zone_conf is not None and np.isfinite(_leaf_zone_conf) else np.nan,
                 "dist_from_crown_norm": round(float(_dist_crown_norm), 4) if _dist_crown_norm is not None and np.isfinite(_dist_crown_norm) else np.nan,
@@ -2154,6 +2322,8 @@ class SegmentAndExtractPipeline:
             centroids_out=_centroids_out,
             petiole_out=_petiole_out,
             contours_out=_contours_by_leaf,
+            repro_pid_out=_repro_by_pid_out,
+            pheno_pid_out=_pheno_by_pid_out,
         )
 
     def _flush_manifests(
@@ -2168,7 +2338,7 @@ class SegmentAndExtractPipeline:
         """Builds and atomically persists all 4 canonical Phase 2 output tables."""
         manifest_cols = [
             "catalogNumber", "plant_individual_id", "leaf_id", "solidity",
-            "circularity", "extent", "aspect_ratio", "blade_length_to_width_ratio", "area_px", "blade_area_cm2",
+            "circularity", "extent", "aspect_ratio", "area_px", "area_mm2",
             "archetype_score", "bilateral_dice", "si_a", "lm3_gates_pass",
             "n_lamina_components", "scale_source", "pixels_per_mm", "is_calibrated_mm",
             "mask_path", "mask_is_upright", "contour_path", "ect_path", "leaf_zone",
@@ -2176,10 +2346,11 @@ class SegmentAndExtractPipeline:
         extracted_df = pd.DataFrame(all_extracted_records)
         if extracted_df.empty:
             extracted_df = pd.DataFrame(columns=manifest_cols + [
-                "midrib_angle_deg", "petiole_length_mm", "blade_length_mm",
+                "midrib_angle_deg", "petiole_length_px", "blade_length_px",
+                "petiole_length_mm", "blade_length_mm",
                 "petiole_to_blade_ratio", "capitula_count", "involucre_height_px",
                 "involucre_width_px", "involucre_height_mm", "involucre_width_mm",
-                "capitulum_aspect_ratio",
+                "AR_inv",
             ])
         else:
             if "scale_source" not in extracted_df.columns:
@@ -2201,34 +2372,6 @@ class SegmentAndExtractPipeline:
                     extracted_df[pet_col] = np.nan
                 else:
                     extracted_df[pet_col] = pd.to_numeric(extracted_df[pet_col], errors="coerce")
-            # Preserve per-leaf petiole and blade metrics while filling missing basal values from outer-rosette P75
-            if "catalogNumber" in extracted_df.columns and len(extracted_df) > 1:
-                grp_keys = [extracted_df["catalogNumber"].astype(str), extracted_df["plant_individual_id"].fillna(0).astype(int)]
-                has_zone_col = "leaf_zone" in extracted_df.columns
-                for pet_col, r_dig in (("petiole_length_mm", 3), ("blade_length_mm", 3), ("petiole_to_blade_ratio", 4)):
-                    if extracted_df[pet_col].notna().any() and extracted_df[pet_col].isna().any():
-                        if has_zone_col:
-                            def _fill_missing_basal_p75(grp_df: pd.DataFrame) -> pd.Series:
-                                z_ser = grp_df["leaf_zone"].fillna("basal").astype(str).str.lower()
-                                b_mask = z_ser == "basal"
-                                b_vals = grp_df.loc[b_mask, pet_col].dropna()
-                                out_s = grp_df[pet_col].copy()
-                                if len(b_vals) > 0:
-                                    p75_val = round(float(np.nanpercentile(b_vals, 75)), r_dig)
-                                    out_s.loc[b_mask] = out_s.loc[b_mask].fillna(p75_val)
-                                return out_s
-
-                            for _, _g_df in extracted_df.groupby(grp_keys, sort=False):
-                                extracted_df.loc[_g_df.index, pet_col] = _fill_missing_basal_p75(_g_df)
-                        else:
-                            extracted_df[pet_col] = (
-                                extracted_df.groupby(grp_keys)[pet_col]
-                                .transform(
-                                    lambda s: s.fillna(round(float(np.nanpercentile(s, 75)), r_dig))
-                                    if s.notna().any()
-                                    else s
-                                )
-                            )
             for c in manifest_cols:
                 if c not in extracted_df.columns:
                     extracted_df[c] = np.nan
@@ -2243,15 +2386,28 @@ class SegmentAndExtractPipeline:
             ])
 
         repro_cols = [
-            "catalogNumber", "capitula_count", "involucre_height_px",
+            "catalogNumber", "plant_individual_id", "capitula_count", "involucre_height_px",
             "involucre_width_px", "involucre_height_mm", "involucre_width_mm",
-            "capitulum_aspect_ratio", "plant_height_cm",
+            "AR_inv", "plant_height_cm",
             "scape_to_basal_leaf_ratio", "is_bent_stem"
         ]
-        repro_df = pd.DataFrame(list(self.voucher_repro_records.values()))
+        repro_rows_all: List[Dict[str, Any]] = []
+        for c_k, base_rep in self.voucher_repro_records.items():
+            pid_map_r = self.voucher_repro_by_pid.get(c_k)
+            if pid_map_r and len(pid_map_r) > 1:
+                for p_k in sorted(pid_map_r.keys()):
+                    repro_rows_all.append(pid_map_r[p_k])
+            elif pid_map_r and len(pid_map_r) == 1:
+                repro_rows_all.append(next(iter(pid_map_r.values())))
+            else:
+                repro_rows_all.append(base_rep)
+
+        repro_df = pd.DataFrame(repro_rows_all)
         if repro_df.empty:
             repro_df = pd.DataFrame(columns=repro_cols)
         else:
+            if "plant_individual_id" not in repro_df.columns:
+                repro_df["plant_individual_id"] = 0
             if "plant_height_cm" not in repro_df.columns:
                 repro_df["plant_height_cm"] = np.nan
             if "scape_to_basal_leaf_ratio" not in repro_df.columns:
@@ -2260,17 +2416,27 @@ class SegmentAndExtractPipeline:
                 repro_df["is_bent_stem"] = False
             repro_df = repro_df[[c for c in repro_cols if c in repro_df.columns]]
 
-        pheno_df = pd.DataFrame(list(self.voucher_pheno_records.values()))
+        pheno_cols = [
+            "catalogNumber", "plant_individual_id", "total_capitula", "n_anthesis", "n_fruiting",
+            "n_bud", "voucher_phenological_state", "dominant_pappus_ratio"
+        ]
+        pheno_rows_all: List[Dict[str, Any]] = []
+        for c_k, base_phe in self.voucher_pheno_records.items():
+            pid_map_p = self.voucher_pheno_by_pid.get(c_k)
+            if pid_map_p and len(pid_map_p) > 1:
+                for p_k in sorted(pid_map_p.keys()):
+                    pheno_rows_all.append(pid_map_p[p_k])
+            elif pid_map_p and len(pid_map_p) == 1:
+                pheno_rows_all.append(next(iter(pid_map_p.values())))
+            else:
+                pheno_rows_all.append(base_phe)
+
+        pheno_df = pd.DataFrame(pheno_rows_all)
         if pheno_df.empty:
-            pheno_df = pd.DataFrame(columns=[
-                "catalogNumber", "total_capitula", "n_anthesis", "n_fruit",
-                "n_bud", "voucher_phenological_state", "dominant_pappus_ratio"
-            ])
+            pheno_df = pd.DataFrame(columns=pheno_cols)
         else:
-            pheno_cols = [
-                "catalogNumber", "total_capitula", "n_anthesis", "n_fruit",
-                "n_bud", "voucher_phenological_state", "dominant_pappus_ratio"
-            ]
+            if "plant_individual_id" not in pheno_df.columns:
+                pheno_df["plant_individual_id"] = 0
             pheno_df = pheno_df[[c for c in pheno_cols if c in pheno_df.columns]]
 
         self._atomic_save_csv(extracted_df, manifest_path)
@@ -2666,6 +2832,8 @@ class SegmentAndExtractPipeline:
                                                 failure_record=b_item.failure_record,
                                                 repro_record=b_item.repro_record,
                                                 pheno_record=b_item.pheno_record,
+                                                repro_by_pid=b_item.repro_by_pid,
+                                                pheno_by_pid=b_item.pheno_by_pid,
                                                 crowns_by_pid=b_item.crowns_by_pid,
                                                 rosette_centroids_by_pid=b_item.rosette_centroids_by_pid,
                                                 by_plant_petiole=b_item.by_plant_petiole,
@@ -2934,6 +3102,8 @@ class SegmentAndExtractPipeline:
                                 failure_record=failure,
                                 repro_record=self.voucher_repro_records.get(cat_num),
                                 pheno_record=self.voucher_pheno_records.get(cat_num),
+                                repro_by_pid=self.voucher_repro_by_pid.get(cat_num),
+                                pheno_by_pid=self.voucher_pheno_by_pid.get(cat_num),
                                 crowns_by_pid=self.voucher_crowns_by_pid.get(cat_num),
                                 rosette_centroids_by_pid=self.voucher_rosette_centroids_by_pid.get(cat_num),
                                 by_plant_petiole=self.voucher_petiole_by_pid.get(cat_num),
