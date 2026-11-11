@@ -496,7 +496,6 @@ class TestMainPipelineCLI(unittest.TestCase):
 
             for tbl_name in (
                 "extracted_leaf_manifest.csv",
-                "extracted_leaves_manifest.csv",
                 "failed_qc_vouchers.csv",
                 "voucher_reproductive_metrics.csv",
                 "voucher_phenological_states.csv",
@@ -540,7 +539,6 @@ REUSE_CANONICAL_DATA="true"
 
             for tbl_name in (
                 "extracted_leaf_manifest.csv",
-                "extracted_leaves_manifest.csv",
                 "failed_qc_vouchers.csv",
                 "voucher_reproductive_metrics.csv",
                 "voucher_phenological_states.csv",
@@ -749,7 +747,6 @@ START_STEP=3
 
                 for tbl_name in (
                     "extracted_leaf_manifest.csv",
-                    "extracted_leaves_manifest.csv",
                     "failed_qc_vouchers.csv",
                     "voucher_reproductive_metrics.csv",
                     "voucher_phenological_states.csv",
@@ -785,7 +782,6 @@ REUSE_CANONICAL_DATA="true"
 
                 for tbl_name in (
                     "extracted_leaf_manifest.csv",
-                    "extracted_leaves_manifest.csv",
                     "failed_qc_vouchers.csv",
                     "voucher_reproductive_metrics.csv",
                     "voucher_phenological_states.csv",

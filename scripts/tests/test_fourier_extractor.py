@@ -1353,7 +1353,7 @@ class TestFourierExtractor(unittest.TestCase):
           2. Multi-island (n_lamina_components > 1) sibling leaves do not disable Momocs::rm_asym() on closed leaves,
              and multi-island-only OTUs retain PC1 == NA rather than 0.0.
           3. Nomenclatural type leaves (is_type_specimen == TRUE) are immune to is_contour_outlier.
-          4. .compute_cycle_ect_32x32_r uses clockwise u_right = (uy, -ux) and ECT_PC1..3 excludes Tier_3_Bronze (wt=0).
+          4. compute_cycle_ect_r uses clockwise u_right = (uy, -ux) and ECT_PC1..3 excludes Tier_3_Bronze (wt=0).
         """
         if not shutil.which("Rscript"):
             self.skipTest("Rscript not installed.")
@@ -1382,7 +1382,7 @@ class TestFourierExtractor(unittest.TestCase):
                 y_img_r <- 250 + 90 * cos(th)
                 coo_img_r <- cbind(x_img_r, y_img_r)
                 al_right <- align_contour_horizontal_xax(coo_img_r, is_upright = TRUE)
-                ect_r <- .compute_cycle_ect_32x32_r(al_right, num_thresh = 16L, num_dirs = 36L)
+                ect_r <- compute_cycle_ect_r(al_right, num_thresh = 16L, num_dirs = 36L)
                 stopifnot(!is.null(ect_r), ncol(ect_r) == 36L)
                 # Verify exact 0.000-diff parity against Step 02 image-space tip_up_directions (North=(0,-1), East=(1,0)):
                 xy_c2 <- sweep(coo_img_r, 2L, colMeans(coo_img_r), "-")

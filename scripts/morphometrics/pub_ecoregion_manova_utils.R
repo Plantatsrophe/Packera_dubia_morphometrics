@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 # ==============================================================================
 # Script: scripts/morphometrics/pub_ecoregion_manova_utils.R
-# Project: Packera dubia Species Delimitation & Morphometrics Pipeline
+# Project: Packera Genus-Wide Species Delimitation & Morphometrics Pipeline
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
@@ -526,7 +526,7 @@ run_supervised_ecoregion_cda <- function(
 
   if (!is.null(output_summary_csv) && nzchar(output_summary_csv)) {
     dir.create(dirname(output_summary_csv), recursive = TRUE, showWarnings = FALSE)
-    tmp_sum <- paste0(output_summary_csv, ".tmp")
+    tmp_sum <- paste0(output_summary_csv, ".", Sys.getpid(), ".tmp")
     utils::write.csv(summary_df, file = tmp_sum, row.names = FALSE)
     file.rename(tmp_sum, output_summary_csv)
   }

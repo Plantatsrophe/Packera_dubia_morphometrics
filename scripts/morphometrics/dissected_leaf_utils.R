@@ -157,8 +157,6 @@ classify_and_partition_leaf_zones <- function(
   fac_df
 }
 
-partition_basal_and_cauline_contours <- classify_and_partition_leaf_zones
-
 filter_basal_lamina_contours <- function(
   fac_df,
   coo_list,
@@ -540,7 +538,7 @@ summarize_otu_dissection_metrics <- function(grp_df) {
   )
 }
 
-.read_numpy_ect_32x32_r <- function(npy_path, num_thresh = NULL, num_dirs = NULL) {
+read_numpy_ect_r <- function(npy_path, num_thresh = NULL, num_dirs = NULL) {
   if (is.null(npy_path) || is.na(npy_path) || !nzchar(trimws(as.character(npy_path))) || !file.exists(npy_path)) {
     return(NULL)
   }
@@ -611,7 +609,7 @@ summarize_otu_dissection_metrics <- function(grp_df) {
   ect_mat
 }
 
-.compute_cycle_ect_32x32_r <- function(coo, num_thresh = 32L, num_dirs = 360L) {
+compute_cycle_ect_r <- function(coo, num_thresh = 32L, num_dirs = 360L) {
   if (is.null(coo) || !is.matrix(coo) || nrow(coo) < 6L || ncol(coo) < 2L) return(NULL)
   xy <- matrix(as.numeric(coo[, 1:2]), ncol = 2L)
   if (any(!is.finite(xy))) return(NULL)
@@ -662,15 +660,12 @@ summarize_otu_dissection_metrics <- function(grp_df) {
   ect_mat
 }
 
-read_numpy_ect_r <- .read_numpy_ect_32x32_r
-compute_cycle_ect_r <- .compute_cycle_ect_32x32_r
-
 .summarize_and_symmetrize_ect_matrix <- function(ect_mat) {
   if (is.null(ect_mat) || !is.matrix(ect_mat) || nrow(ect_mat) < 4L || ncol(ect_mat) < 4L) {
     return(NULL)
   }
   nr <- nrow(ect_mat); nc <- ncol(ect_mat)
-  # Step 02 tip_up_directions() and .compute_cycle_ect_32x32_r() place phi = 0 (lamina_tip)
+  # Step 02 tip_up_directions() and compute_cycle_ect_r() place phi = 0 (lamina_tip)
   # strictly at Column 1; never re-roll onto wider lateral axes on reniform (W > L) blades!
   # Column 1 is phi = 0 (North/Tip); Columns 2..nc reflect via nc + 2 - j
   refl_cols <- c(1L, seq.int(nc, 2L, by = -1L))
@@ -729,7 +724,7 @@ compute_leaf_ect_features <- function(efa_df, coo_list = NULL, contours_dir = NU
     }
     for (cp in unique(cand_paths)) {
       if (file.exists(cp)) {
-        m_try <- .read_numpy_ect_32x32_r(cp)
+        m_try <- read_numpy_ect_r(cp)
         if (!is.null(m_try)) {
           raw_mats[[i]] <- m_try
           break
@@ -748,7 +743,7 @@ compute_leaf_ect_features <- function(efa_df, coo_list = NULL, contours_dir = NU
     if (is.null(mat_i) && !is.null(coo_list)) {
       sid_i <- if ("shape_id" %in% names(efa_df) && !is.na(efa_df$shape_id[i])) as.character(efa_df$shape_id[i]) else rownames(efa_df)[i]
       coo_i <- if (!is.null(sid_i) && sid_i %in% names(coo_list)) coo_list[[sid_i]] else if (i <= length(coo_list)) coo_list[[i]] else NULL
-      mat_i <- .compute_cycle_ect_32x32_r(coo_i, num_thresh = target_nr, num_dirs = target_nc)
+      mat_i <- compute_cycle_ect_r(coo_i, num_thresh = target_nr, num_dirs = target_nc)
     }
     if (!is.null(mat_i)) {
       mat_i <- .resample_ect_directions_r(mat_i, target_nr = target_nr, target_nc = target_nc)

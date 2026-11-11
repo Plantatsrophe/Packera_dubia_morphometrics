@@ -961,13 +961,24 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     plot_out.parent.mkdir(parents=True, exist_ok=True)
     report_out.parent.mkdir(parents=True, exist_ok=True)
 
-    max_k = args.max_k or cfg.get("morphometrics", {}).get("max_k", 9)
+    m_cfg = cfg.get("morphometrics", {}) or {}
+    max_k = args.max_k if getattr(args, "max_k", None) is not None else m_cfg.get("max_k", 8)
+    correct_allometry = getattr(args, "correct_allometry", None)
+    if correct_allometry is None:
+        correct_allometry = m_cfg.get("correct_allometry", "auto")
+    gmm_seed = getattr(args, "seed", None)
+    if gmm_seed is None:
+        gmm_seed = m_cfg.get("random_seed", 42)
+    gmm_perms = getattr(args, "permutations", None)
+    if gmm_perms is None:
+        gmm_perms = m_cfg.get("permutations", None)
 
     cmd_gmm = [
         rscript_bin, str(gmm_script),
         "--vouchers", str(vouchers_csv),
         "--harmonics", str(efa_out),
         "--reproductive", str(reproductive_csv),
+        "--correct-allometry", str(correct_allometry).lower() if isinstance(correct_allometry, bool) else str(correct_allometry),
         "--allometry-report", str(allometry_report),
         "--allometry-pairwise", str(allometry_pairwise),
         "--allometry-plot", str(allometry_plot),
@@ -977,7 +988,14 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         "--output-report", str(report_out),
         "--max-k", str(max_k),
         "--num-pcs", str(num_pcs),
+        "--seed", str(gmm_seed),
     ]
+    if gmm_perms is not None:
+        cmd_gmm.extend(["--permutations", str(gmm_perms)])
+    if getattr(args, "outline_only", False) or m_cfg.get("outline_only", False):
+        cmd_gmm.append("--outline-only")
+    if getattr(args, "use_clustvarsel", False) or m_cfg.get("use_clustvarsel", False):
+        cmd_gmm.append("--use-clustvarsel")
     focal_taxon, intraspecific_mode = _resolve_focal_and_intraspecific(args, cfg)
     if focal_taxon:
         cmd_gmm.extend(["--focal-taxon", focal_taxon])

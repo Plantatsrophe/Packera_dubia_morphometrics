@@ -2161,12 +2161,11 @@ class SegmentAndExtractPipeline:
         all_extracted_records: List[Dict[str, Any]],
         all_failed_records: List[Dict[str, Any]],
         manifest_path: Path,
-        legacy_manifest_path: Path,
         failed_qc_path: Path,
         repro_manifest_path: Path,
         pheno_manifest_path: Path,
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Builds and atomically persists all 5 Phase 2 output tables."""
+        """Builds and atomically persists all 4 canonical Phase 2 output tables."""
         manifest_cols = [
             "catalogNumber", "plant_individual_id", "leaf_id", "solidity",
             "circularity", "extent", "aspect_ratio", "blade_length_to_width_ratio", "area_px", "blade_area_cm2",
@@ -2275,7 +2274,6 @@ class SegmentAndExtractPipeline:
             pheno_df = pheno_df[[c for c in pheno_cols if c in pheno_df.columns]]
 
         self._atomic_save_csv(extracted_df, manifest_path)
-        self._atomic_save_csv(extracted_df, legacy_manifest_path)
         self._atomic_save_csv(failed_df, failed_qc_path)
         self._atomic_save_csv(repro_df, repro_manifest_path)
         self._atomic_save_csv(pheno_df, pheno_manifest_path)
@@ -2344,7 +2342,6 @@ class SegmentAndExtractPipeline:
             logger.info(f"Applied execution limit: processing first {limit} vouchers.")
 
         manifest_path = self.tables_dir / "extracted_leaf_manifest.csv"
-        legacy_manifest_path = self.tables_dir / "extracted_leaves_manifest.csv"
         failed_qc_path = self.tables_dir / "failed_qc_vouchers.csv"
         repro_manifest_path = self.tables_dir / "voucher_reproductive_metrics.csv"
         pheno_manifest_path = self.tables_dir / "voucher_phenological_states.csv"
@@ -2381,18 +2378,16 @@ class SegmentAndExtractPipeline:
                 except Exception as db_load_exc:
                     logger.warning(f"Could not query completed vouchers from SQLite: {db_load_exc}")
 
-            for path in [manifest_path, legacy_manifest_path]:
-                if path.exists() and path.stat().st_size > 0:
-                    try:
-                        prev_manifest = pd.read_csv(path)
-                        if not prev_manifest.empty and "catalogNumber" in prev_manifest.columns:
-                            for rec in prev_manifest.to_dict(orient="records"):
-                                c_key = str(rec["catalogNumber"]).strip()
-                                if c_key not in existing_extracted_by_cat:
-                                    existing_extracted_by_cat[c_key].append(rec)
-                        break  # Found a valid manifest, don't need to check the legacy one
-                    except Exception as e:
-                        logger.warning(f"Could not load previous manifest at {path}: {e}")
+            if manifest_path.exists() and manifest_path.stat().st_size > 0:
+                try:
+                    prev_manifest = pd.read_csv(manifest_path)
+                    if not prev_manifest.empty and "catalogNumber" in prev_manifest.columns:
+                        for rec in prev_manifest.to_dict(orient="records"):
+                            c_key = str(rec["catalogNumber"]).strip()
+                            if c_key not in existing_extracted_by_cat:
+                                existing_extracted_by_cat[c_key].append(rec)
+                except Exception as e:
+                    logger.warning(f"Could not load previous manifest at {manifest_path}: {e}")
 
             if failed_qc_path.exists() and failed_qc_path.stat().st_size > 0:
                 try:
@@ -2986,7 +2981,6 @@ class SegmentAndExtractPipeline:
             all_extracted_records,
             all_failed_records,
             manifest_path,
-            legacy_manifest_path,
             failed_qc_path,
             repro_manifest_path,
             pheno_manifest_path,
@@ -2995,7 +2989,6 @@ class SegmentAndExtractPipeline:
         logger.info("==================================================================")
         logger.info(f"Extraction completed!")
         logger.info(f"  Extracted Leaves: {len(extracted_df)} -> {manifest_path}")
-        logger.info(f"  Legacy Manifest: {len(extracted_df)} -> {legacy_manifest_path}")
         logger.info(f"  Failed QC Vouchers: {len(failed_df)} -> {failed_qc_path}")
         logger.info(f"  Reproductive Metrics: {len(repro_df)} -> {repro_manifest_path}")
         logger.info(f"  Phenological States: {len(pheno_df)} -> {pheno_manifest_path}")

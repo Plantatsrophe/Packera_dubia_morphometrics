@@ -270,11 +270,11 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             "generate_allometry_diagnostic_plot",
             "[INFO] Foliar allometry detected",
             "[INFO] Foliar allometry negligible",
-            "evaluate_ontogenetic_allometry",
+            "run_canonical_discriminant_analysis",
             "is_calibrated_mm",
             "Tier_1_Gold",
             "lm(Y ~ log_centsize + scientificName",
-            "Y_adj <- Y - outer(log_centsize - mean(log_centsize, na.rm = TRUE), beta_within)",
+            "Y_adj <- Y_all - outer(log_centsize - ref_mean_cs, beta_within)",
             "RRPP::lm.rrpp",
             "RRPP::pairwise",
             "allometry_pairwise_trajectories.csv",
@@ -291,6 +291,19 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         ):
             self.assertIn(required_token, content, f"Missing expected Step 04 contract token: {required_token}")
 
+        for banned_legacy in (
+            "evaluate_ontogenetic_allometry",
+            "run_cda_with_passive_projection",
+            "run_weighted_cda_loocv",
+            "run_cda_ordination",
+            "Y_adj <- Y - outer(log_centsize - mean(log_centsize, na.rm = TRUE), beta_within)",
+        ):
+            self.assertNotIn(banned_legacy, content)
+        pf_src = (PROJECT_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R").read_text(encoding="utf-8")
+        self.assertNotIn("loocv_pct", pf_src)
+        self.assertNotIn("copied_from_cda_pdf", pf_src)
+        self.assertNotIn("fig04_cand", pf_src)
+        self.assertIn('sprintf("A. Canonical Structure Loading Circle (%s)", loocv_tag_s04)', pf_src)
         self.assertNotIn("Glabrescent_P_dubia_Misidentified_as_P_anonyma", content)
         self.assertNotIn(
             'target_taxa <- c("Packera anonyma", "Packera dubia", "Packera plattensis", "Packera paupercula")',
@@ -1580,13 +1593,12 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertTrue(flags_df["open_set_novelty_p"].notna().all())
             self.assertTrue(flags_df["is_confident_label_noise"].notna().all())
 
-    def test_hierarchical_deme_shrinkage_and_per_species_typical_morphotype(self):
+    def test_spatial_gathering_demes_and_per_species_typical_morphotype(self):
         """
         Verify that:
-        1. `apply_hierarchical_population_deme_shrinkage()` exists in
-           `scripts/morphometrics/authority_weighting_utils.R` and shrinks variance
-           among conspecific individuals within a 10 km population deme and
-           same-sheet `catalogNumber`.
+        1. `assign_spatial_gathering_demes()` groups conspecific individuals within
+           a 10 km Haversine deme without pre-shrinking feature coordinates (and
+           dead `apply_hierarchical_population_deme_shrinkage` is purged).
         2. `compute_type_specimen_morph_control()` evaluates `is_typical_morphotype`
            per-species rather than requiring global `gmm_cluster == 1L`.
         """
@@ -1595,9 +1607,11 @@ class TestGMMAndMorphoTools(unittest.TestCase):
 
         r_code = """
         source("scripts/morphometrics/authority_weighting_utils.R")
-        stopifnot(exists("apply_hierarchical_population_deme_shrinkage", mode = "function"))
+        source("scripts/morphometrics/plasticity_mitigation_utils.R")
+        stopifnot(!exists("apply_hierarchical_population_deme_shrinkage", mode = "function"))
+        stopifnot(exists("assign_spatial_gathering_demes", mode = "function"))
 
-        # 1. Test Level 2 (same-sheet catalogNumber) and Level 3 (10 km conspecific deme) shrinkage
+        # 1. Test 10 km conspecific deme assignment without pre-modeling coordinate shrinkage
         df_deme <- data.frame(
           catalogNumber = c("SHEET-001", "SHEET-001", "SHEET-002", "SHEET-003", "SHEET-ISOLATE"),
           plant_individual_id = c(0L, 1L, 0L, 0L, 0L),
@@ -1611,24 +1625,14 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           PC2 = c(0.60, -0.40, 0.12, 0.08, 0.10),
           stringsAsFactors = FALSE
         )
-        shrunk_df <- apply_hierarchical_population_deme_shrinkage(
-          df_deme,
-          feature_cols = c("PC1", "PC2"),
-          deme_radius_km = 10.0,
-          kappa_sheet = 1.5,
-          kappa_deme = 1.25
-        )
-        stopifnot("population_deme_id" %in% names(shrunk_df))
-        stopifnot("deme_n_specimens" %in% names(shrunk_df))
-        stopifnot("PC1_raw_individual" %in% names(shrunk_df))
-        # First 4 rows are within 10 km of each other and share a deme
-        stopifnot(length(unique(shrunk_df$population_deme_id[1:4])) == 1L)
-        stopifnot(all(shrunk_df$deme_n_specimens[1:4] == 4L))
-        # Same-sheet spread (rows 1 & 2) and within-deme variance (rows 1..4) must shrink
-        raw_sheet_gap <- abs(df_deme$PC1[1] - df_deme$PC1[2])
-        shrunk_sheet_gap <- abs(shrunk_df$PC1[1] - shrunk_df$PC1[2])
-        stopifnot(shrunk_sheet_gap < raw_sheet_gap)
-        stopifnot(stats::var(shrunk_df$PC1[1:4]) < stats::var(df_deme$PC1[1:4]))
+        deme_df <- assign_spatial_gathering_demes(df_deme, deme_radius_km = 10.0)
+        stopifnot("population_deme_id" %in% names(deme_df))
+        stopifnot("deme_n_specimens" %in% names(deme_df))
+        # First 4 rows are within 10 km of each other and share a deme; raw PC1 coordinates stay untouched
+        stopifnot(length(unique(deme_df$population_deme_id[1:4])) == 1L)
+        stopifnot(deme_df$population_deme_id[5L] != deme_df$population_deme_id[1L])
+        stopifnot(all(deme_df$deme_n_specimens[1:4] == 4L))
+        stopifnot(max(abs(deme_df$PC1 - df_deme$PC1)) == 0.0)
 
         # 2. Test per-species evaluation of is_typical_morphotype in compute_type_specimen_morph_control()
         df_typ <- data.frame(
@@ -1649,10 +1653,9 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           X_mat = as.matrix(df_typ[, c("PC1", "PC2")]),
           taxon_col = "species_standardized"
         )
-        # Both Packera dubia (in gmm_cluster 1) and Packera obovata (in gmm_cluster 2) must be recognized as typical morphotypes for their respective species
         stopifnot(all(ctrl$is_typical_morphotype[1:3]))
         stopifnot(all(ctrl$is_typical_morphotype[4:6]))
-        cat("DEME_SHRINKAGE_AND_PER_SPECIES_TYPICAL_OK\\n")
+        cat("DEME_ASSIGNMENT_AND_PER_SPECIES_TYPICAL_OK\\n")
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             r_file = Path(tmpdir) / "test_deme_and_typical.R"
@@ -1664,28 +1667,30 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 text=True,
                 check=False,
             )
-        self.assertEqual(proc.returncode, 0, f"Deme shrinkage / typical morphotype R test failed:\n{proc.stderr}\n{proc.stdout}")
-        self.assertIn("DEME_SHRINKAGE_AND_PER_SPECIES_TYPICAL_OK", proc.stdout)
+        self.assertEqual(proc.returncode, 0, f"Deme assignment / typical morphotype R test failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("DEME_ASSIGNMENT_AND_PER_SPECIES_TYPICAL_OK", proc.stdout)
 
     def test_heteroblasty_leaf_weights_pure_basal_and_cauline_fallback(self) -> None:
         """
-        Verify compute_heteroblasty_leaf_weights and apply_step03_heteroblasty_weighted_otu_aggregation:
-          1. When a specimen has >= 1 basal leaf (leaf_zone == "basal"), cauline leaves receive
-             weight 0.0 (w_cauline == 0.0) in the primary basal OTU aggregation so primary
-             OTU harmonics and solidity are uncontaminated by cauline leaves.
-          2. When a specimen has only cauline leaves (0 basal leaves), cauline leaves receive
-             positive fallback weights (> 0.0) so the specimen still receives valid OTU coordinates.
+        Verify reconcile_step03_basal_otu_medians (and absence of legacy weighted_otu_stat / compute_heteroblasty_leaf_weights):
+          1. When a specimen has >= 1 basal leaf (leaf_zone == "basal"), cauline leaves are strictly
+             excluded from primary OTU unweighted basal medians so harmonics and solidity are uncontaminated.
+          2. When a specimen has only cauline leaves (0 basal leaves), unweighted cauline medians populate
+             valid fallback OTU coordinates.
         """
         r_code = """
         source("scripts/morphometrics/authority_weighting_utils.R")
+        stopifnot(!exists("compute_heteroblasty_leaf_weights", mode = "function"))
+        stopifnot(!exists("weighted_otu_stat", mode = "function"))
+        stopifnot(exists("reconcile_step03_basal_otu_medians", mode = "function"))
 
-        # 1. Mixed basal + cauline specimen -> w_cauline == 0.0 on primary basal track
+        # 1. Mixed basal + cauline specimen -> unweighted basal median (0.91, 1.01) uncontaminated by cauline leaf
         df_mixed <- data.frame(
           catalogNumber = rep("SPEC_MIX", 3L),
           plant_individual_id = rep(0L, 3L),
           leaf_id = 1:3,
           leaf_zone = c("basal", "basal", "cauline"),
-          area_mm2 = c(400.0, 380.0, 90.0),
+          area_mm2 = c(400.0, 100.0, 90.0),
           solidity = c(0.92, 0.90, 0.42),
           dissection_index = c(1.08, 1.10, 2.40),
           blade_length_mm = c(40.0, 38.0, 19.0),
@@ -1693,11 +1698,6 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           D1 = c(0.50, 0.52, 0.95),
           stringsAsFactors = FALSE
         )
-        w_mix <- compute_heteroblasty_leaf_weights(df_mixed)
-        stopifnot(length(w_mix) == 3L)
-        stopifnot(all(w_mix[1:2] > 0.0))
-        stopifnot(abs(w_mix[3L]) < 1e-12)
-
         spec_init <- data.frame(
           catalogNumber = "SPEC_MIX",
           plant_individual_id = 0L,
@@ -1707,16 +1707,16 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           D1 = 0.0,
           stringsAsFactors = FALSE
         )
-        spec_agg <- apply_step03_heteroblasty_weighted_otu_aggregation(
+        spec_agg <- reconcile_step03_basal_otu_medians(
           spec_init,
           df_mixed,
           all_harm_cols = c("A1", "D1"),
           sym_names = c("A1", "D1")
         )
-        stopifnot(abs(spec_agg$solidity[1L] - 0.91) < 0.02)
-        stopifnot(abs(spec_agg$A1[1L] - 1.01) < 0.02)
+        stopifnot(abs(spec_agg$solidity[1L] - 0.91) < 1e-6)
+        stopifnot(abs(spec_agg$A1[1L] - 1.01) < 1e-6)
 
-        # 2. Cauline-only specimen -> positive fallback weights (> 0.0)
+        # 2. Cauline-only specimen -> unweighted cauline fallback median (0.50, 0.42)
         df_caul_only <- data.frame(
           catalogNumber = rep("SPEC_CAUL", 2L),
           plant_individual_id = rep(0L, 2L),
@@ -1728,9 +1728,22 @@ class TestGMMAndMorphoTools(unittest.TestCase):
           D1 = c(0.80, 0.84),
           stringsAsFactors = FALSE
         )
-        w_caul <- compute_heteroblasty_leaf_weights(df_caul_only)
-        stopifnot(length(w_caul) == 2L)
-        stopifnot(all(w_caul > 0.0))
+        spec_caul_init <- data.frame(
+          catalogNumber = "SPEC_CAUL",
+          plant_individual_id = 0L,
+          solidity = 0.0,
+          A1 = 0.0,
+          D1 = 0.0,
+          stringsAsFactors = FALSE
+        )
+        spec_caul <- reconcile_step03_basal_otu_medians(
+          spec_caul_init,
+          df_caul_only,
+          all_harm_cols = c("A1", "D1"),
+          sym_names = c("A1", "D1")
+        )
+        stopifnot(abs(spec_caul$solidity[1L] - 0.50) < 1e-6)
+        stopifnot(abs(spec_caul$A1[1L] - 0.42) < 1e-6)
 
         # 3. Foliar architecture augmentation includes both petiole_to_blade_ratio_std and petiole_length_mm_std
         df_arch <- data.frame(
@@ -1781,10 +1794,10 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             "residualize_within_deme_phenophase_plasticity",
             "whiten_intraspecific_deme_plasticity",
             "compute_cluster_spatial_segregation_p",
-            "compute_spca_global_test",
             "merge_plastic_gmm_components_ridgeline",
         ):
             self.assertIn(fn_tok, pm_src, f"Missing {fn_tok} in plasticity_mitigation_utils.R")
+        self.assertNotIn("compute_spca_global_test", pm_src)
 
         r04_src = self.r_script_path.read_text(encoding="utf-8")
         self.assertIn("plasticity_mitigation_utils.R", r04_src)
@@ -1836,18 +1849,202 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         gmm_geo <- run_gmm_cluster_analysis(df_geo, c("PC1", "PC2", "PC3"), max_k = 5L, intraspecific_mode = TRUE)
         stopifnot(gmm_geo$best_k >= 2L)
 
-        # Case C: Direct matrix-dimension regression checks on compute_cluster_spatial_segregation_p & compute_spca_global_test
+        # Case C: Direct permutation checks on compute_cluster_spatial_segregation_p
         p_seg_sym <- compute_cluster_spatial_segregation_p(rep(rep(1:2, each = 4L), length.out = n_sym), df_sym, permutations = 99L)
         p_seg_geo <- compute_cluster_spatial_segregation_p(ifelse(west_m, 1L, 2L), df_geo, permutations = 99L)
-        spca_geo <- compute_spca_global_test(as.matrix(df_geo[, c("PC1", "PC2", "PC3")]), df_geo, permutations = 99L)
         stopifnot(is.finite(p_seg_sym) && p_seg_sym > 0.05)
         stopifnot(is.finite(p_seg_geo) && p_seg_geo <= 0.05)
-        stopifnot(is.finite(spca_geo$lambda_max) && is.finite(spca_geo$p_value) && spca_geo$p_value <= 0.05)
         cat("PLASTICITY_MITIGATION_R_OK\n")
         """
         proc = subprocess.run(["Rscript", "-e", r_code], cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
         self.assertEqual(proc.returncode, 0, f"Plasticity mitigation R test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("PLASTICITY_MITIGATION_R_OK", proc.stdout)
+
+
+    def test_step04_zero_trust_multi_island_cauline_osr_and_no_fake_loocv(self) -> None:
+        """
+        Zero-trust regression suite for Step 04 fixes:
+          1. Pure-R CLI fallback (.parse_step04_cli_fallback) parses all flags without optparse.
+          2. Partial-NA reproductive & petiole trait backfilling populates NA rows even when other rows are finite.
+          3. Whole + multi-island dissected vouchers (PC1 = NA, finite ECT_PC1..3 + solidity + dissection_index)
+             are retained and classified accurately via shared topology + architecture space, and cauline
+             heteroblasty features enter Step 04 at >=50% anchor coverage.
+          4. Single-group (g = 1) CDA sets loocv_accuracy = NA (not 1.0), and post-GMM intraspecific figures
+             never print fabricated "LOOCV = 85.0%".
+          5. Cross-run SQLite open-set recognition uses run-invariant harmonics + topology (immune to Sym_PC sign flips).
+        """
+        if not shutil.which("Rscript"):
+            self.skipTest("Rscript not installed.")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            r_script = tmp_p / "zero_trust_step04.R"
+            r_script.write_text(
+                f"""
+                options(rgl.useNULL = TRUE)
+                source("scripts/morphometrics/04_gmm_morphotools.R")
+
+                # 1. Pure-R CLI fallback
+                defs <- list(vouchers = "a.csv", max_k = 8L, seed = 42L, outline_only = FALSE, intraspecific_mode = FALSE, correct_allometry = "auto")
+                parsed <- .parse_step04_cli_fallback(c("--vouchers=b.csv", "--max-k", "6", "--seed", "99", "--outline-only", "--intraspecific-mode", "--correct-allometry", "false"), defs)
+                stopifnot(parsed$vouchers == "b.csv", parsed$max_k == 6L, parsed$seed == 99L, isTRUE(parsed$outline_only), isTRUE(parsed$intraspecific_mode), parsed$correct_allometry == "false")
+
+                # 2. Exact mclust parameter counts (EII vs VVI vs VVV)
+                np_eii <- .compute_exact_mclust_params(c(1L, 3L), p_dim = 4L, default_model = "EII")
+                np_vvi <- .compute_exact_mclust_params(c(1L, 3L), p_dim = 4L, default_model = "VVI")
+                np_vvv <- .compute_exact_mclust_params(c(1L, 3L), p_dim = 4L, default_model = "VVV")
+                stopifnot(np_eii[2] < np_vvi[2], np_vvi[2] < np_vvv[2])
+
+                # 3. Partial-NA reproductive & petiole backfilling
+                repro_csv <- file.path({repr(str(tmp_p))}, "repro_partial.csv")
+                man_csv <- file.path({repr(str(tmp_p))}, "extracted_leaf_manifest.csv")
+                write.csv(data.frame(catalogNumber = c("C1", "C2"), plant_individual_id = c(0L, 0L), AR_inv = c(1.10, 1.45)), repro_csv, row.names = FALSE)
+                write.csv(data.frame(catalogNumber = c("C1", "C2"), plant_individual_id = c(0L, 0L), leaf_zone = c("basal", "basal"), petiole_length_mm = c(15.0, 28.0), blade_length_mm = c(30.0, 28.0), petiole_to_blade_ratio = c(0.5, 1.0)), man_csv, row.names = FALSE)
+                agg_part <- data.frame(catalogNumber = c("C1", "C2"), plant_individual_id = c(0L, 0L), AR_inv = c(1.10, NA_real_), petiole_length_mm = c(15.0, NA_real_), blade_length_mm = c(30.0, NA_real_), petiole_to_blade_ratio = c(0.5, NA_real_), stringsAsFactors = FALSE)
+                agg_part <- merge_reproductive_traits_by_individual(agg_part, repro_csv)
+                agg_part <- merge_manifest_petiole_traits_by_individual(agg_part, man_csv)
+                stopifnot(abs(agg_part$AR_inv[2] - 1.45) < 1e-6, abs(agg_part$petiole_length_mm[2] - 28.0) < 1e-6)
+
+                # 4. Whole + multi-island (PC1 = NA) joint classification & 60% cauline heteroblasty retention
+                set.seed(77)
+                n_sp <- 12L
+                mk_sp <- function(sp, idx0, pc1_mu, ect1_mu, sol_mu, di_mu, caul_sol_mu, n_multi = 0L) {{
+                  rows <- lapply(seq_len(n_sp), function(j) {{
+                    is_mi <- j > (n_sp - n_multi)
+                    has_caul <- j <= 8L # 67% cauline coverage (< 85%, >= 50%)
+                    data.frame(
+                      catalogNumber = sprintf("%s_%02d", idx0, j),
+                      plant_individual_id = 0L,
+                      basal_leaf_count = 3L,
+                      cauline_leaf_count = if (has_caul) 2L else 0L,
+                      morph_tier_source = "Basal_Rosette",
+                      species_raw = sp,
+                      scientificName = sp,
+                      determiner_tier = if (j <= 8L) "Tier_1_Gold" else "Tier_3_Bronze",
+                      PC1 = if (is_mi) NA_real_ else rnorm(1, pc1_mu, 0.20),
+                      PC2 = if (is_mi) NA_real_ else rnorm(1, 0.5 * pc1_mu, 0.20),
+                      PC3 = if (is_mi) NA_real_ else rnorm(1, 0.0, 0.15),
+                      Sym_PC1 = if (is_mi) NA_real_ else rnorm(1, pc1_mu, 0.20),
+                      Sym_PC2 = if (is_mi) NA_real_ else rnorm(1, 0.5 * pc1_mu, 0.20),
+                      Sym_PC3 = if (is_mi) NA_real_ else rnorm(1, 0.0, 0.15),
+                      ECT_PC1 = rnorm(1, ect1_mu, 0.18),
+                      ECT_PC2 = rnorm(1, -0.4 * ect1_mu, 0.18),
+                      ECT_PC3 = rnorm(1, 0.0, 0.12),
+                      ect_lobe_complexity = max(0.05, 1.2 + 0.6 * ect1_mu + rnorm(1, 0, 0.08)),
+                      solidity = rnorm(1, sol_mu, 0.02),
+                      q25_solidity = rnorm(1, sol_mu - 0.03, 0.02),
+                      dissection_index = rnorm(1, di_mu, 0.08),
+                      cauline_solidity_med = if (has_caul) rnorm(1, caul_sol_mu, 0.02) else NA_real_,
+                      basal_vs_cauline_solidity_delta = if (has_caul) rnorm(1, sol_mu - caul_sol_mu, 0.02) else NA_real_,
+                      aspect_ratio = rnorm(1, 1.8, 0.05),
+                      centroid_size = 24.0 + 1.2 * j,
+                      log_centsize = log10(24.0 + 1.2 * j),
+                      is_calibrated_mm = TRUE,
+                      scale_source = "ruler_calibrated",
+                      A1 = if (is_mi) NA_real_ else rnorm(1, -1.1 + 0.05 * pc1_mu, 0.004),
+                      B1 = if (is_mi) NA_real_ else 0.0,
+                      C1 = if (is_mi) NA_real_ else 0.0,
+                      D1 = if (is_mi) NA_real_ else rnorm(1, 0.45 - 0.03 * pc1_mu, 0.004),
+                      A2 = if (is_mi) NA_real_ else rnorm(1, 0.03 * pc1_mu, 0.004),
+                      B2 = if (is_mi) NA_real_ else 0.0,
+                      C2 = if (is_mi) NA_real_ else 0.0,
+                      D2 = if (is_mi) NA_real_ else rnorm(1, -0.02 * pc1_mu, 0.004),
+                      stringsAsFactors = FALSE
+                    )
+                  }})
+                  do.call(rbind, rows)
+                }}
+                df_h <- rbind(
+                  mk_sp("Packera dubia", "DUB", -3.0, -2.2, 0.90, 1.15, 0.55, n_multi = 0L),
+                  mk_sp("Packera millefolium", "MIL", 3.0, 2.8, 0.36, 3.20, 0.32, n_multi = 2L)
+                )
+                df_v <- data.frame(
+                  catalogNumber = df_h$catalogNumber,
+                  species_raw = df_h$species_raw,
+                  determiner_tier = df_h$determiner_tier,
+                  institutionCode = rep(c("NCU", "DUKE"), length.out = nrow(df_h)),
+                  stateProvince = "NC",
+                  decimalLatitude = 35.8,
+                  decimalLongitude = -79.1,
+                  doy = 125,
+                  stringsAsFactors = FALSE
+                )
+                h_path <- file.path({repr(str(tmp_p))}, "harm_mi.csv")
+                v_path <- file.path({repr(str(tmp_p))}, "vouch_mi.csv")
+                f_path <- file.path({repr(str(tmp_p))}, "flags_mi.csv")
+                p_path <- file.path({repr(str(tmp_p))}, "cda_mi.pdf")
+                write.csv(df_h, h_path, row.names = FALSE)
+                write.csv(df_v, v_path, row.names = FALSE)
+
+                opts_mi <- parse_args_robust()
+                opts_mi$vouchers <- v_path; opts_mi$harmonics <- h_path; opts_mi$output_flags <- f_path
+                opts_mi$output_plot <- p_path; opts_mi$output_report <- file.path({repr(str(tmp_p))}, "bic_mi.csv")
+                opts_mi$output_batch_audit <- file.path({repr(str(tmp_p))}, "batch_mi.csv")
+                opts_mi$allometry_report <- file.path({repr(str(tmp_p))}, "allom_mi.csv"); opts_mi$allometry_pairwise <- file.path({repr(str(tmp_p))}, "pw_mi.csv")
+                opts_mi$allometry_plot <- file.path({repr(str(tmp_p))}, "allom_mi.pdf")
+                opts_mi$permutations <- 19L; opts_mi$seed <- 123L
+                out_mi <- run_gmm_morphotools_pipeline(opts_mi)
+                stopifnot(nrow(out_mi) == 24L)
+                mi_rows <- out_mi[out_mi$catalogNumber %in% c("MIL_11", "MIL_12"), , drop = FALSE]
+                stopifnot(nrow(mi_rows) == 2L, all(is.na(mi_rows$PC1)))
+                stopifnot(all(mi_rows$cda_predicted_taxon == "Packera millefolium"))
+                stopifnot(all(mi_rows$cda_posterior_prob > 0.75))
+                stopifnot("cauline_solidity_med_std" %in% names(out_mi) || "basal_vs_cauline_solidity_delta_std" %in% names(out_mi))
+
+                # 5. Single-group (g = 1) CDA sets loocv_accuracy = NA (not 1.0) & post-GMM plot omits fake 85.0%
+                df_one <- df_h[1:12, , drop = FALSE]
+                gmm_one <- list(classification = rep(1L, 12L), uncertainty = rep(0.0, 12L), best_k = 1L, model_name = "EII", selected_features = c("PC1", "PC2"))
+                cda_one <- run_canonical_discriminant_analysis(df_one, c("PC1", "PC2"), "Packera dubia", gmm_res = gmm_one, intraspecific_mode = TRUE)
+                stopifnot(is.na(cda_one$loocv_accuracy))
+                gmm_two <- list(classification = rep(1:2, each = 6L), uncertainty = rep(0.05, 12L), best_k = 2L, model_name = "VVI", selected_features = c("PC1", "PC2"), bic_table = data.frame(K = 1:2, BIC = c(-40, -28), Two_Delta_BIC = c(0, 12)))
+                cda_two <- run_canonical_discriminant_analysis(df_one, c("PC1", "PC2"), "Packera dubia", gmm_res = gmm_two, intraspecific_mode = TRUE)
+                stopifnot(is.na(cda_two$loocv_accuracy))
+                aud_two <- audit_misidentifications(df_one, cda_two, gmm_two, selected_features = c("PC1", "PC2"))
+                intra_pdf <- file.path({repr(str(tmp_p))}, "intra_no_fake_loocv.pdf")
+                render_cda_biplot_4panel_pdf(aud_two, cda_two, gmm_two, intra_pdf, c("PC1", "PC2"))
+
+                # 6. Cross-run SQLite open-set recognition invariance under Sym_PC sign flips
+                if (requireNamespace("DBI", quietly = TRUE) && requireNamespace("RSQLite", quietly = TRUE)) {{
+                  db_p <- file.path({repr(str(tmp_p))}, "osr_cross_run.sqlite")
+                  con <- DBI::dbConnect(RSQLite::SQLite(), db_p)
+                  db_cong <- rbind(
+                    data.frame(run_id = "old_run_A", catalogNumber = paste0("AN_", 1:8), species_standardized = "Packera anonyma", authority_weight = 1.0, morph_tier_source = "Basal_Rosette",
+                               Sym_PC1 = rnorm(8, 9.0, 0.1), Sym_PC2 = rnorm(8, -9.0, 0.1),
+                               A1 = rnorm(8, -0.92, 0.01), A2 = rnorm(8, 0.12, 0.005), D1 = rnorm(8, 0.35, 0.01), D2 = rnorm(8, -0.08, 0.005), solidity = rnorm(8, 0.88, 0.01), dissection_index = rnorm(8, 1.25, 0.03)),
+                    data.frame(run_id = "old_run_A", catalogNumber = paste0("AU_", 1:8), species_standardized = "Packera aurea", authority_weight = 1.0, morph_tier_source = "Basal_Rosette",
+                               Sym_PC1 = rnorm(8, -9.0, 0.1), Sym_PC2 = rnorm(8, 9.0, 0.1),
+                               A1 = rnorm(8, -1.35, 0.01), A2 = rnorm(8, -0.18, 0.005), D1 = rnorm(8, 0.68, 0.01), D2 = rnorm(8, 0.14, 0.005), solidity = rnorm(8, 0.82, 0.01), dissection_index = rnorm(8, 1.45, 0.03))
+                  )
+                  DBI::dbWriteTable(con, "otu_morphometrics", db_cong, overwrite = TRUE)
+                  DBI::dbDisconnect(con)
+                  Sys.setenv(PACKERA_DB_PATH = db_p)
+                  df_q <- data.frame(
+                    catalogNumber = paste0("Q_", 1:6), species_standardized = "Packera dubia",
+                    Sym_PC1 = rnorm(6, -9.0, 0.1), Sym_PC2 = rnorm(6, 9.0, 0.1), # deliberately flipped Sym_PC signs matching aurea if PCs were leaked!
+                    A1 = rnorm(6, -0.92, 0.01), A2 = rnorm(6, 0.12, 0.005), D1 = rnorm(6, 0.35, 0.01), D2 = rnorm(6, -0.08, 0.005), # true harmonics match anonyma!
+                    solidity = rnorm(6, 0.88, 0.01), dissection_index = rnorm(6, 1.25, 0.03),
+                    stringsAsFactors = FALSE
+                  )
+                  osr_res <- compute_type_specimen_morph_control(df_q, X_mat = as.matrix(df_q[, c("Sym_PC1", "Sym_PC2")]), S_reg = diag(2), taxon_col = "species_standardized")
+                  Sys.unsetenv("PACKERA_DB_PATH")
+                  stopifnot(all(osr_res$min_congener_taxon == "Packera anonyma"))
+                }}
+                cat("STEP04_ZERO_TRUST_OK\n")
+                """,
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                ["Rscript", str(r_script)],
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 04 zero-trust R test failed:\n{proc.stderr}\n{proc.stdout}")
+            self.assertIn("STEP04_ZERO_TRUST_OK", proc.stdout)
+            pdf_txt = self._extract_pdf_text_streams(tmp_p / "intra_no_fake_loocv.pdf")
+            self.assertNotIn("LOOCV = 85.0%", pdf_txt)
+            self.assertIn("Descriptive Post-GMM Ordination", pdf_txt)
 
 
 if __name__ == "__main__":

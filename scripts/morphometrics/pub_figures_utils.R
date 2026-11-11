@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 # ==============================================================================
 # Script: scripts/morphometrics/pub_figures_utils.R
-# Project: Packera dubia Species Delimitation & Morphometrics Pipeline
+# Project: Packera Genus-Wide Species Delimitation & Morphometrics Pipeline
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
@@ -303,7 +303,7 @@ standardize_taxon_name <- function(raw_vec) {
     if (!nzchar(s_orig) || s %in% c("none", "nan", "null", "na", "unknown", "unassigned", "unassigned_packera", "packera")) {
       std_u[i] <- NA_character_; next
     }
-    if (grepl("^Morphotype_K[0-9]+$|^Ecotype_|^LatTertile_|_Coastal$|_Outcrop$|\\[K[0-9]+\\]$", s_orig, ignore.case = TRUE)) {
+    if (grepl("^Morphotype_K[0-9]+$|^Ecotype_|\\[K[0-9]+\\]$", s_orig, ignore.case = TRUE)) {
       std_u[i] <- s_orig; next
     }
     if (has_syn && (s %in% names(syn_map))) {
@@ -588,7 +588,7 @@ resolve_plot_group_column <- function(df, cda_res = NULL, gmm_res = NULL) {
   is_subcluster_vec <- function(vc) {
     if (!has_valid_multi(vc)) return(FALSE)
     vv <- unique(vc[!is.na(vc) & vc != "Unknown"])
-    any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster|Region_", vv, ignore.case = TRUE)) ||
+    any(grepl("Morphotype_K|\\[K[0-9]+\\]|Ecotype|Subcluster|Region_", vv, ignore.case = TRUE)) ||
       !all(grepl("^Packera\\s+", vv))
   }
 
@@ -732,17 +732,6 @@ reconstruct_efa_outline <- function(harm_vec, nb_pts = 120L) {
       if (paste0("C", k) %in% clean_nms) C[k] <- v_num[paste0("C", k)][1]
       if (paste0("D", k) %in% clean_nms) D[k] <- v_num[paste0("D", k)][1]
     }
-    # Detect legacy block-ordered Momocs vector stored under interleaved names
-    if (K >= 10L && length(v_num) >= 4L * K && abs(A[10]) > 0.15 && abs(D[1]) < 0.08) {
-      interleaved_nms <- as.vector(outer(c("A", "B", "C", "D"), seq_len(K), paste0))
-      if (all(interleaved_nms %in% clean_nms)) {
-        raw_4k <- unname(v_num[interleaved_nms])
-        A <- raw_4k[1:K]
-        B <- raw_4k[(K + 1L):(2L * K)]
-        C <- raw_4k[(2L * K + 1L):(3L * K)]
-        D <- raw_4k[(3L * K + 1L):(4L * K)]
-      }
-    }
   } else {
     K <- max(1L, floor(length(v_num) / 4L))
     A <- v_num[seq(1, by = 4, length.out = K)]
@@ -794,21 +783,6 @@ extract_standardized_harmonic_matrix <- function(df, max_k = NULL) {
   mat <- as.matrix(df[, avail, drop = FALSE])
   storage.mode(mat) <- "double"
   mat[!is.finite(mat)] <- 0.0
-  # Check if legacy block-ordered Momocs matrix was labeled with interleaved names
-  if (all(interleaved_nms %in% colnames(mat)) && max_k >= 10L) {
-    med_a10 <- stats::median(abs(mat[, "A10"]), na.rm = TRUE)
-    med_d1  <- stats::median(abs(mat[, "D1"]), na.rm = TRUE)
-    if (is.finite(med_a10) && is.finite(med_d1) && med_a10 > 0.15 && med_d1 < 0.08) {
-      raw_4k <- mat[, interleaved_nms, drop = FALSE]
-      colnames(raw_4k) <- c(
-        paste0("A", seq_len(max_k)),
-        paste0("B", seq_len(max_k)),
-        paste0("C", seq_len(max_k)),
-        paste0("D", seq_len(max_k))
-      )
-      mat <- raw_4k[, interleaved_nms, drop = FALSE]
-    }
-  }
   mat
 }
 
@@ -2491,7 +2465,7 @@ generate_step03_pub_figures <- function(
     }
   }
 
-  # Render Figure 03d: Basal Rosette 32x32 ECT Morphospace & Authentic LM3 Overlays
+  # Render Figure 03d: Basal Rosette 32x360 ECT Morphospace & Authentic LM3 Overlays
   atomic_save_dual_plot(function() {
     graphics::layout(matrix(c(1, 2, 3, 4), nrow = 2, byrow = TRUE), widths = c(1.05, 1.0), heights = c(1.0, 1.0))
     graphics::par(mar = c(4.4, 4.4, 3.2, 1.2), oma = c(0, 0, 2.0, 0), family = "sans")
@@ -2533,8 +2507,8 @@ generate_step03_pub_figures <- function(
       pch = pt_pch,
       cex = 0.85,
       lwd = 1.0,
-      xlab = sprintf("Basal Rosette 32x32 ECT PC1 (%.1f%%)", b_ect_var_exp[1]),
-      ylab = sprintf("Basal Rosette 32x32 ECT PC2 (%.1f%%)", b_ect_var_exp[2]),
+      xlab = sprintf("Basal Rosette 32x360 ECT PC1 (%.1f%%)", b_ect_var_exp[1]),
+      ylab = sprintf("Basal Rosette 32x360 ECT PC2 (%.1f%%)", b_ect_var_exp[2]),
       main = sprintf("A. 2D Basal Rosette ECT Morphospace (n = %d)", nrow(df)),
       group_vec = df$taxon_clean,
       group_cols = dyn_pal,
@@ -2581,7 +2555,7 @@ generate_step03_pub_figures <- function(
     graphics::title(format_active_complex_title(df$taxon, "Basal Rosette Euler Characteristic Transform (ECT) Morphometrics"), outer = TRUE, cex.main = 1.25)
   }, fdir, "fig03d_basal_ect_morphospace", width = 14.5, height = 11.0, dpi = 300)
 
-  # Render Figure 03e: Dedicated Cauline Stem 32x32 ECT Morphospace & Authentic LM3 Overlays
+  # Render Figure 03e: Dedicated Cauline Stem 32x360 ECT Morphospace & Authentic LM3 Overlays
   has_cauline_ect <- all(c("Cauline_ECT_PC1", "Cauline_ECT_PC2") %in% colnames(df_full)) &&
     any(is.finite(suppressWarnings(as.numeric(df_full$Cauline_ECT_PC1))) &
         is.finite(suppressWarnings(as.numeric(df_full$Cauline_ECT_PC2))) &
@@ -2663,8 +2637,8 @@ generate_step03_pub_figures <- function(
           pch = ce_pch[caul_ect_df$taxon_clean],
           cex = 0.85,
           lwd = 1.0,
-          xlab = sprintf("Cauline Stem 32x32 ECT PC1 (%.1f%%)", c_ect_var_exp[1]),
-          ylab = sprintf("Cauline Stem 32x32 ECT PC2 (%.1f%%)", c_ect_var_exp[2]),
+          xlab = sprintf("Cauline Stem 32x360 ECT PC1 (%.1f%%)", c_ect_var_exp[1]),
+          ylab = sprintf("Cauline Stem 32x360 ECT PC2 (%.1f%%)", c_ect_var_exp[2]),
           main = sprintf("A. 2D Cauline Stem ECT Morphospace (n = %d)", nrow(caul_ect_df)),
           group_vec = caul_ect_df$taxon_clean,
           group_cols = ce_pal,
@@ -2809,7 +2783,7 @@ compute_ari_pure <- function(labels_true, labels_pred) {
 
 render_allometry_diagnostic_pdf <- function(sub_df, r2_size, p_size, r2_int, output_pdf, p_int = 1.0) {
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
-  tmp_pdf <- paste0(output_pdf, ".tmp")
+  tmp_pdf <- paste0(output_pdf, ".", Sys.getpid(), ".tmp")
   # Isolate basal rosette specimens for allometric regression (never overlay Cauline_Only_Fallback on basal allometry)
   bas_allom_ok <- rep(TRUE, nrow(sub_df))
   if ("leaf_zone" %in% colnames(sub_df)) {
@@ -2994,14 +2968,19 @@ draw_gmm_species_contingency_heatmap <- function(sp_clean, cl_v, gmm_res, main_p
   ari_val <- compute_ari_pure(sp_clean, cl_v)
   opt_mod <- if (!is.null(gmm_res$optimal_model)) gmm_res$optimal_model else if (!is.null(gmm_res$model_name)) gmm_res$model_name else "VVI"
   opt_k   <- if (!is.null(gmm_res$best_k)) gmm_res$best_k else length(u_cl)
-  max_bf  <- if (!is.null(gmm_res$bic_table) && "Two_Delta_BIC" %in% names(gmm_res$bic_table)) {
+  max_bf  <- if (!is.null(gmm_res$bic_table) && "Two_Delta_BIC" %in% names(gmm_res$bic_table) && any(is.finite(gmm_res$bic_table$Two_Delta_BIC))) {
     round(max(gmm_res$bic_table$Two_Delta_BIC, na.rm = TRUE), 1)
-  } else 24.5
+  } else NA_real_
+  xlab_gmm <- if (is.finite(max_bf)) {
+    sprintf("Unsupervised GMM Cluster (Optimal K = %s, %s, max 2*ln(BF) = %.1f)", opt_k, opt_mod, max_bf)
+  } else {
+    sprintf("Unsupervised GMM Cluster (Optimal K = %s, %s)", opt_k, opt_mod)
+  }
 
   nr <- nrow(tab_mat); nc <- ncol(tab_mat)
   graphics::plot(
     c(0.5, nc + 0.5), c(0.5, nr + 0.5), type = "n", axes = FALSE,
-    xlab = sprintf("Unsupervised GMM Cluster (Optimal K = %s, %s, max 2*Delta*BIC = %.1f)", opt_k, opt_mod, max_bf),
+    xlab = xlab_gmm,
     ylab = "",
     main = sprintf("%s (ARI = %.3f)", main_prefix, ari_val),
     font.main = 2
@@ -3062,24 +3041,29 @@ draw_diagnostic_trait_boxplots <- function(df, sp_clean, taxon_cols, taxon_pch, 
     rep(fallback_val, nrow(df))
   }
 
-  ar_leaf <- .get_raw_trait(c("blade_length_to_width_ratio", "aspect_ratio"), 2.2, basal_only = TRUE)
-  sol_v   <- .get_raw_trait(c("solidity"), 0.90, basal_only = TRUE)
+  ar_leaf <- .get_raw_trait(c("blade_length_to_width_ratio", "aspect_ratio"), NA_real_, basal_only = TRUE)
+  sol_v   <- .get_raw_trait(c("solidity"), NA_real_, basal_only = TRUE)
   cs_mm   <- .get_raw_trait(c("centroid_size"), NA_real_, basal_only = TRUE)
   if (!any(is.finite(cs_mm))) {
-    cs_mm <- .get_raw_trait(c("log_centsize"), 12.2, transform_fn = function(x) exp(pmin(x, 8.0)), basal_only = TRUE)
+    cs_mm <- .get_raw_trait(c("log_centsize"), NA_real_, transform_fn = function(x) 10.0^pmin(x, 4.0), basal_only = TRUE)
   }
   caul_sol <- .get_raw_trait(c("cauline_solidity_med"), NA_real_, basal_only = FALSE)
-  ar_inv   <- .get_raw_trait(c("AR_inv", "capitulum_aspect_ratio"), 1.15, basal_only = FALSE)
+  ar_inv   <- .get_raw_trait(c("AR_inv", "capitulum_aspect_ratio"), NA_real_, basal_only = FALSE)
 
-  raw_traits <- list(
+  cand_traits <- list(
     "Basal Blade\nAspect (L/W)"     = list(vec = ar_leaf, unit = "L/W", fmt = "%.2f"),
     "Basal Solidity\n(Area/Hull)"   = list(vec = sol_v,   unit = "ratio", fmt = "%.2f"),
-    "Basal Centroid\nSize (mm)"     = list(vec = cs_mm,   unit = "mm", fmt = "%.1f")
+    "Basal Centroid\nSize (mm)"     = list(vec = cs_mm,   unit = "mm", fmt = "%.1f"),
+    "Cauline Solidity\n(Stem Leaves)" = list(vec = caul_sol, unit = "ratio", fmt = "%.2f"),
+    "Involucre Ratio\n(AR_inv L/W)" = list(vec = ar_inv, unit = "L/W", fmt = "%.2f")
   )
-  if (any(is.finite(caul_sol))) {
-    raw_traits[["Cauline Solidity\n(Stem Leaves)"]] <- list(vec = caul_sol, unit = "ratio", fmt = "%.2f")
+  raw_traits <- Filter(function(tr) any(is.finite(tr$vec)), cand_traits)
+  if (length(raw_traits) == 0L) {
+    graphics::plot(c(0, 1), c(0, 1), type = "n", axes = FALSE, xlab = "", ylab = "", main = main_title, font.main = 2)
+    graphics::box(col = "grey75")
+    graphics::text(0.5, 0.5, "No finite diagnostic vegetative or capitulum traits measured", col = "grey35", cex = 0.85)
+    return(invisible(NULL))
   }
-  raw_traits[["Involucre Ratio\n(AR_inv L/W)"]] <- list(vec = ar_inv, unit = "L/W", fmt = "%.2f")
 
   n_traits <- length(raw_traits)
   n_sp <- length(present_tx)
@@ -3395,18 +3379,6 @@ draw_group_mean_leaf_outlines <- function(df, group_vec, group_cols, main_title 
 
 render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf, feature_cols = NULL, manova_res = NULL) {
   dir.create(dirname(output_pdf), recursive = TRUE, showWarnings = FALSE)
-  fig04_cand <- file.path(dirname(output_pdf), "fig04_gmm_cda_clustering.pdf")
-  if (file.exists(fig04_cand) &&
-      normalizePath(fig04_cand, mustWork = FALSE) != normalizePath(output_pdf, mustWork = FALSE)) {
-    fi <- file.info(fig04_cand)
-    if (is.finite(fi$size) && fi$size > 1024 && abs(as.numeric(difftime(Sys.time(), fi$mtime, units = "secs"))) < 20.0) {
-      tmp_cp <- paste0(output_pdf, ".tmp")
-      if (file.copy(fig04_cand, tmp_cp, overwrite = TRUE)) {
-        file.rename(tmp_cp, output_pdf)
-        return(invisible(output_pdf))
-      }
-    }
-  }
   if (is.null(manova_res) && exists("run_multivariate_manova_audit", mode = "function")) {
     manova_res <- tryCatch(
       run_multivariate_manova_audit(
@@ -3419,7 +3391,7 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
       error = function(e) NULL
     )
   }
-  tmp_pdf <- paste0(output_pdf, ".tmp")
+  tmp_pdf <- paste0(output_pdf, ".", Sys.getpid(), ".tmp")
   grDevices::pdf(tmp_pdf, width = 13.0, height = 10.2, pointsize = 11, useDingbats = FALSE)
   tryCatch({
     graphics::par(mfrow = c(2, 2), mar = c(4.4, 5.2, 3.2, 1.2), oma = c(0.8, 0.8, 2.0, 0.8), family = "sans")
@@ -3427,7 +3399,7 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
     tier_cda <- resolve_taxon_display_tier(audit_df, sp_clean)
     taxon_cols <- tier_cda$palette
     taxon_pch  <- tier_cda$shapes
-    is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", sp_clean, ignore.case = TRUE)) ||
+    is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|Ecotype|Subcluster", sp_clean, ignore.case = TRUE)) ||
       length(unique(stats::na.omit(audit_df$species_standardized))) < 2L
     cda_sub <- format_manova_pillai_subtitle(
       manova_res,
@@ -3435,16 +3407,18 @@ render_cda_biplot_4panel_pdf <- function(audit_df, cda_res, gmm_res, output_pdf,
       alt_factor = if (is_subcluster_mode) "species_standardized" else "gmm_cluster"
     )
     is_joint <- !is.null(feature_cols) && ("AR_inv_std" %in% feature_cols)
-    loocv_pct <- if (!is.null(cda_res$loocv_accuracy) && !is.na(cda_res$loocv_accuracy)) round(100 * cda_res$loocv_accuracy, 1) else 85.0
-    cda_title <- sprintf(
-      "A. 2D %s CDA Biplot & Trait Vectors (LOOCV = %.1f%%)",
-      if (is_joint) "Joint Vegetative + Reproductive" else "Passive", loocv_pct
-    )
-    var1 <- if (length(cda_res$variance_pct) >= 1 && !is.na(cda_res$variance_pct[1])) max(0, cda_res$variance_pct[1]) else 55.0
-    var2 <- if (length(cda_res$variance_pct) >= 2 && !is.na(cda_res$variance_pct[2])) max(0, cda_res$variance_pct[2]) else 28.0
-
     can1_v <- if ("can1" %in% names(audit_df)) audit_df$can1 else cda_res$canonical_scores[, 1]
     can2_v <- if ("can2" %in% names(audit_df)) audit_df$can2 else if (ncol(cda_res$canonical_scores) >= 2) cda_res$canonical_scores[, 2] else rep(0, nrow(audit_df))
+    has_loocv <- !is.null(cda_res$loocv_accuracy) && is.finite(cda_res$loocv_accuracy)
+    loocv_tag <- if (has_loocv) sprintf("LOOCV = %.1f%%", round(100 * cda_res$loocv_accuracy, 1)) else "Descriptive Post-GMM Ordination"
+    cda_title <- sprintf(
+      "A. 2D %s CDA Biplot & Trait Vectors (%s)",
+      if (is_joint) "Joint Vegetative + Reproductive" else "Passive", loocv_tag
+    )
+    emp_v12 <- c(stats::var(can1_v, na.rm = TRUE), stats::var(can2_v, na.rm = TRUE)); emp_v12[!is.finite(emp_v12) | emp_v12 < 0] <- 0.0
+    emp_pct <- if (sum(emp_v12) > 1e-12) round(100.0 * emp_v12 / sum(emp_v12), 1) else c(100.0, 0.0)
+    var1 <- if (length(cda_res$variance_pct) >= 1 && is.finite(cda_res$variance_pct[1])) max(0, cda_res$variance_pct[1]) else emp_pct[1]
+    var2 <- if (length(cda_res$variance_pct) >= 2 && is.finite(cda_res$variance_pct[2])) max(0, cda_res$variance_pct[2]) else if (length(cda_res$variance_pct) == 1L && is.finite(cda_res$variance_pct[1])) 0.0 else emp_pct[2]
 
     present_tx <- tier_cda$ordered_groups
     if (length(present_tx) == 0) present_tx <- "Unassigned_Packera"
@@ -3559,7 +3533,7 @@ generate_step04_pub_figures <- function(
   tier_s04 <- resolve_taxon_display_tier(audited_df, tx_clean)
   dyn_pal <- tier_s04$palette
   dyn_pch <- tier_s04$shapes
-  is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", tx_clean, ignore.case = TRUE)) ||
+  is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|Ecotype|Subcluster", tx_clean, ignore.case = TRUE)) ||
     length(unique(stats::na.omit(audited_df$species_standardized))) < 2L
   cda_manova_sub <- format_manova_pillai_subtitle(
     manova_res,
@@ -3572,9 +3546,12 @@ generate_step04_pub_figures <- function(
 
   cv1 <- if ("can1" %in% colnames(audited_df)) as.numeric(audited_df$can1) else if ("CDA1" %in% colnames(audited_df)) as.numeric(audited_df$CDA1) else rep(0, nrow(audited_df))
   cv2 <- if ("can2" %in% colnames(audited_df)) as.numeric(audited_df$can2) else if ("CDA2" %in% colnames(audited_df)) as.numeric(audited_df$CDA2) else rep(0, nrow(audited_df))
-  loocv_pct <- if (!is.null(cda_res$loocv_accuracy) && !is.na(cda_res$loocv_accuracy)) round(100 * cda_res$loocv_accuracy, 1) else 85.0
-  var1 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 1) cda_res$variance_pct[1] else 55.0
-  var2 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 2) cda_res$variance_pct[2] else 28.0
+  has_loocv_s04 <- !is.null(cda_res$loocv_accuracy) && is.finite(cda_res$loocv_accuracy)
+  loocv_tag_s04 <- if (has_loocv_s04) sprintf("LOOCV = %.1f%%", round(100 * cda_res$loocv_accuracy, 1)) else "Descriptive Post-GMM Ordination"
+  emp_cv <- c(stats::var(cv1, na.rm = TRUE), stats::var(cv2, na.rm = TRUE)); emp_cv[!is.finite(emp_cv) | emp_cv < 0] <- 0.0
+  emp_cv_pct <- if (sum(emp_cv) > 1e-12) round(100.0 * emp_cv / sum(emp_cv), 1) else c(100.0, 0.0)
+  var1 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 1 && is.finite(cda_res$variance_pct[1])) max(0, cda_res$variance_pct[1]) else emp_cv_pct[1]
+  var2 <- if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) >= 2 && is.finite(cda_res$variance_pct[2])) max(0, cda_res$variance_pct[2]) else if (!is.null(cda_res$variance_pct) && length(cda_res$variance_pct) == 1L && is.finite(cda_res$variance_pct[1])) 0.0 else emp_cv_pct[2]
 
   present_tx <- tier_s04$ordered_groups
   if (length(present_tx) == 0) present_tx <- "Unassigned_Packera"
@@ -3718,20 +3695,23 @@ generate_step04_pub_figures <- function(
         pt.bg = NA, lwd = 1.8, cex = 0.72, bty = "n"
       )
     } else {
-      graphics::plot(1:4, c(-120, -95, -88, -92), type = "b", pch = 1, bg = NA, col = "#0072B2",
-                     xlab = "Mixture Components (G)", ylab = "BIC", main = "A. mclust BIC Model Selection")
+      graphics::plot(c(0, 1), c(0, 1), type = "n", axes = FALSE, xlab = "Mixture Components (G)", ylab = "BIC", main = "A. mclust BIC Model Selection")
+      graphics::box(col = "grey75")
+      graphics::text(0.5, 0.5, "BIC model selection table unavailable", col = "grey35", cex = 0.85)
     }
 
+    fin_gmm_xy <- which(is.finite(x_v) & is.finite(y_v))
+    if (length(fin_gmm_xy) == 0L) fin_gmm_xy <- seq_along(x_v)
     plot_2d_ordination_scatter(
-      x = x_v, y = y_v,
-      col = pt_cols_cl, pch = HOLLOW_PCH_CYCLE[(cl_v - 1L) %% length(HOLLOW_PCH_CYCLE) + 1L], cex = cex_unc, lwd = 1.0,
+      x = x_v[fin_gmm_xy], y = y_v[fin_gmm_xy],
+      col = pt_cols_cl[fin_gmm_xy], pch = HOLLOW_PCH_CYCLE[(cl_v[fin_gmm_xy] - 1L) %% length(HOLLOW_PCH_CYCLE) + 1L], cex = cex_unc[fin_gmm_xy], lwd = 1.0,
       xlab = "Morphospace PC1", ylab = "Morphospace PC2",
       main = sprintf("B. 2D GMM Posterior Clusters & Uncertainty (Optimal K = %s)", opt_g),
-      group_vec = cl_lbl,
+      group_vec = cl_lbl[fin_gmm_xy],
       group_cols = cl_col_map,
       ellipse_level = 0.95,
       centroids = cent_gmm,
-      is_type_vec = is_type_v,
+      is_type_vec = is_type_v[fin_gmm_xy],
       legend_args = list(
         "topright",
         legend = c(paste0("Morphotype_K", u_cl), "Point Size ~ Uncertainty"),
@@ -3751,8 +3731,11 @@ generate_step04_pub_figures <- function(
     # Panel A: Unit-Circle Canonical Structure Loading Biplot (MorphoTools2::plotBiplot style)
     s_mat <- s_load
     if (is.null(s_mat) || nrow(s_mat) == 0L) {
-      cand_tr <- intersect(c("PC1", "PC2", "PC3", "aspect_ratio", "solidity", "log_centsize", "AR_inv"), colnames(audited_df))
-      if (length(cand_tr) >= 2L) {
+      cand_tr <- intersect(
+        c("PC1", "PC2", "PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "solidity", "dissection_index", "aspect_ratio", "log_centsize", "AR_inv"),
+        colnames(audited_df)
+      )
+      if (length(cand_tr) >= 1L) {
         s_mat <- do.call(rbind, lapply(cand_tr, function(cn) {
           vv <- suppressWarnings(as.numeric(audited_df[[cn]]))
           r1 <- suppressWarnings(stats::cor(vv, cv1, use = "complete.obs"))
@@ -3761,17 +3744,14 @@ generate_step04_pub_figures <- function(
         }))
         rownames(s_mat) <- cand_tr
       } else {
-        s_mat <- rbind(
-          "PC1" = c(0.82, 0.24),
-          "PC2" = c(-0.35, 0.78),
-          "solidity" = c(-0.64, -0.42),
-          "log_centsize" = c(0.48, -0.55)
-        )
+        s_mat <- matrix(0.0, nrow = 0L, ncol = 2L)
       }
     }
     if (ncol(s_mat) == 1L) s_mat <- cbind(s_mat, 0.0)
-    bx <- suppressWarnings(as.numeric(s_mat[, 1])); bx[!is.finite(bx)] <- 0.0
-    by <- suppressWarnings(as.numeric(s_mat[, 2])); by[!is.finite(by)] <- 0.0
+    bx <- if (nrow(s_mat) > 0L) suppressWarnings(as.numeric(s_mat[, 1])) else numeric(0)
+    by <- if (nrow(s_mat) > 0L) suppressWarnings(as.numeric(s_mat[, 2])) else numeric(0)
+    bx[!is.finite(bx)] <- 0.0
+    by[!is.finite(by)] <- 0.0
     v_len <- sqrt(bx^2 + by^2)
     over_unit <- v_len > 1.0
     if (any(over_unit)) {
@@ -3781,7 +3761,7 @@ generate_step04_pub_figures <- function(
     }
     p_vars <- max(2L, nrow(s_mat))
     r_eq <- sqrt(2.0 / p_vars)
-    lbl_v <- if (!is.null(rownames(s_mat))) format_cda_loading_labels(rownames(s_mat)) else paste0("Trait_", seq_len(nrow(s_mat)))
+    lbl_v <- if (nrow(s_mat) == 0L) character(0) else if (!is.null(rownames(s_mat))) format_cda_loading_labels(rownames(s_mat)) else paste0("Trait_", seq_len(nrow(s_mat)))
 
     graphics::plot(
       c(-1.22, 1.22), c(-1.22, 1.22), type = "n", asp = 1,
@@ -3790,7 +3770,7 @@ generate_step04_pub_figures <- function(
       main = "",
       font.main = 2
     )
-    graphics::title(main = sprintf("A. Canonical Structure Loading Circle (LOOCV = %.1f%%)", loocv_pct), line = 1.45, font.main = 2)
+    graphics::title(main = sprintf("A. Canonical Structure Loading Circle (%s)", loocv_tag_s04), line = 1.45, font.main = 2)
     if (!is.null(cda_manova_sub) && nzchar(trimws(as.character(cda_manova_sub)))) {
       graphics::mtext(trimws(as.character(cda_manova_sub)), side = 3, line = 0.28, cex = 0.72, col = "grey20")
     }
@@ -3957,7 +3937,7 @@ generate_step04_pub_figures <- function(
       col = cols_tx, pch = pch_tx, cex = 0.85, lwd = 1.0,
       xlab = sprintf("Can1 (%.1f%%)", var1),
       ylab = sprintf("Can2 (%.1f%%)", var2),
-      main = sprintf("A. 2D Passive CDA Biplot & Trait Vectors (LOOCV = %.1f%%)", loocv_pct),
+      main = sprintf("A. 2D Passive CDA Biplot & Trait Vectors (%s)", loocv_tag_s04),
       subtitle = cda_manova_sub,
       group_vec = tx_clean,
       group_cols = dyn_pal,
@@ -3988,38 +3968,13 @@ generate_step04_pub_figures <- function(
     graphics::title(format_active_complex_title(title_taxa, "Integrative Morphometrics, Trait Vectors & Posterior Delimitation"), outer = TRUE, cex.main = 1.25)
   }
 
-  # Single-render + atomic copy optimization if cda_passive_projection.pdf is already fresh
   target_fig04_pdf <- file.path(fdir, "fig04_gmm_cda_clustering.pdf")
-  target_fig04_png <- file.path(fdir, "fig04_gmm_cda_clustering.png")
-  copied_from_cda_pdf <- FALSE
-  if (!is.null(output_plot_path) && nzchar(as.character(output_plot_path)) && file.exists(output_plot_path)) {
-    fi_out <- file.info(output_plot_path)
-    if (is.finite(fi_out$size) && fi_out$size > 1024 && abs(as.numeric(difftime(Sys.time(), fi_out$mtime, units = "secs"))) < 30.0) {
-      if (normalizePath(output_plot_path, mustWork = FALSE) != normalizePath(target_fig04_pdf, mustWork = FALSE)) {
-        tmp_cp <- paste0(target_fig04_pdf, ".tmp")
-        if (file.copy(output_plot_path, tmp_cp, overwrite = TRUE)) {
-          file.rename(tmp_cp, target_fig04_pdf)
-          copied_from_cda_pdf <- TRUE
-        }
-      } else {
-        copied_from_cda_pdf <- TRUE
-      }
-    }
-  }
-
-  if (copied_from_cda_pdf) {
-    tmp_png <- paste0(target_fig04_png, ".tmp.png")
-    grDevices::png(tmp_png, width = 13.0, height = 10.2, units = "in", res = 300, pointsize = 11)
-    tryCatch(draw_fig04_combined(), finally = grDevices::dev.off())
-    if (file.exists(tmp_png)) file.rename(tmp_png, target_fig04_png)
-  } else {
-    atomic_save_dual_plot(draw_fig04_combined, fdir, "fig04_gmm_cda_clustering", width = 13.0, height = 10.2, dpi = 300)
-    if (!is.null(output_plot_path) && nzchar(as.character(output_plot_path)) && !file.exists(output_plot_path) && file.exists(target_fig04_pdf)) {
-      dir.create(dirname(output_plot_path), recursive = TRUE, showWarnings = FALSE)
-      tmp_out_cp <- paste0(output_plot_path, ".tmp")
-      if (file.copy(target_fig04_pdf, tmp_out_cp, overwrite = TRUE)) {
-        file.rename(tmp_out_cp, output_plot_path)
-      }
+  atomic_save_dual_plot(draw_fig04_combined, fdir, "fig04_gmm_cda_clustering", width = 13.0, height = 10.2, dpi = 300)
+  if (!is.null(output_plot_path) && nzchar(as.character(output_plot_path)) && !file.exists(output_plot_path) && file.exists(target_fig04_pdf)) {
+    dir.create(dirname(output_plot_path), recursive = TRUE, showWarnings = FALSE)
+    tmp_out_cp <- paste0(output_plot_path, ".", Sys.getpid(), ".tmp")
+    if (file.copy(target_fig04_pdf, tmp_out_cp, overwrite = TRUE)) {
+      file.rename(tmp_out_cp, output_plot_path)
     }
   }
 

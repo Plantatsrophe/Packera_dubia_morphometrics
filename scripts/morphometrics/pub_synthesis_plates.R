@@ -1,17 +1,17 @@
 #!/usr/bin/env Rscript
 # ==============================================================================
 # Script: scripts/morphometrics/pub_synthesis_plates.R
-# Project: Packera dubia Species Delimitation & Morphometrics Pipeline
+# Project: Packera Genus-Wide Species Delimitation & Morphometrics Pipeline
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
-#   Step 05 ecological niche & geographic map publication figures, Step 06
-#   integrative synthesis plates, Step 07 complex discovery plates, pure-R
+#   Step 06 ecological niche & geographic map publication figures, Step 07
+#   integrative synthesis plates, Step 08 complex discovery plates, pure-R
 #   Gaussian Mixture Model EM solver, and individual-level trait mergers.
 # ==============================================================================
 
 # ==============================================================================
-# Step 05 Figures:
+# Step 06 Figures:
 #   - spatial_rf_niche_importance.png (300-DPI companion to .pdf)
 #   - fig05_ecological_niche_phenology.{pdf,png} (4-panel ecological niche plate)
 #   - fig06b_geographic_map_and_hopkins_phenology.{pdf,png} (US state map + Hopkins)
@@ -652,7 +652,7 @@ render_step07_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   active_tx <- sort(unique(as.character(stats::na.omit(df$plot_group))))
   active_tx <- active_tx[nzchar(active_tx) & active_tx != "Unknown"]
   if (length(active_tx) == 0) active_tx <- "Unassigned_Packera"
-  is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|^LatTertile_|_Coastal|_Outcrop|Ecotype|Subcluster", active_tx, ignore.case = TRUE)) ||
+  is_subcluster_mode <- any(grepl("Morphotype_K|\\[K[0-9]+\\]|Ecotype|Subcluster", active_tx, ignore.case = TRUE)) ||
     length(unique(stats::na.omit(df$species_standardized))) < 2L
   grp_legend_lbl <- if (is_subcluster_mode) "Morphotype" else "Species"
 
@@ -1389,12 +1389,13 @@ render_step08_complex_discovery_pdf <- function(W, part_res, morph_res, vis_res,
 # ==============================================================================
 # Shared Cross-Stage Morphometric Helpers (GMM EM Fallback & Composite-Key Joins)
 # ==============================================================================
-fit_gmm_em_pure <- function(X, max_k = 8, tol = 1e-5, max_iter = 150, X_eval = NULL) {
+fit_gmm_em_pure <- function(X, max_k = 8, tol = 1e-5, max_iter = 150, X_eval = NULL, seed = 42L) {
   if (is.null(X_eval)) X_eval <- X
   N <- nrow(X); p <- ncol(X); best_bic <- -Inf; best_model <- NULL
+  base_seed <- as.integer(if (!is.null(seed) && is.finite(seed)) seed else 42L)
   bic_table <- data.frame(K = seq_len(max_k), LogLik = NA_real_, n_params = NA_integer_, BIC = NA_real_)
   for (k in seq_len(max_k)) {
-    set.seed(42 + k)
+    set.seed(base_seed + k)
     if (k == 1) {
       mu <- matrix(colMeans(X), nrow = 1); sigma <- list(stats::cov(X) + diag(1e-6, p)); pi_k <- c(1.0)
     } else {
@@ -1441,7 +1442,7 @@ fit_gmm_em_pure <- function(X, max_k = 8, tol = 1e-5, max_iter = 150, X_eval = N
 merge_manifest_petiole_traits_by_individual <- function(agg_df, man_cand) {
   if (is.null(agg_df) || nrow(agg_df) == 0L || is.null(man_cand) || !nzchar(man_cand) || !file.exists(man_cand)) return(agg_df)
   target_pcols <- c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio")
-  need_cols <- target_pcols[vapply(target_pcols, function(cl) !(cl %in% names(agg_df)) || all(is.na(agg_df[[cl]])), logical(1))]
+  need_cols <- target_pcols[vapply(target_pcols, function(cl) !(cl %in% names(agg_df)) || any(is.na(agg_df[[cl]])), logical(1))]
   if (length(need_cols) == 0L) return(agg_df)
   man_df <- tryCatch(utils::read.csv(man_cand, stringsAsFactors = FALSE), error = function(e) NULL)
   if (is.null(man_df) || nrow(man_df) == 0L || !("catalogNumber" %in% names(man_df))) return(agg_df)
@@ -1512,7 +1513,7 @@ merge_reproductive_traits_by_individual <- function(agg_df, repro_path) {
   cand_r <- c("AR_inv", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm",
               "involucre_width_mm", "plant_height_mm", "plant_height_cm", "scape_to_basal_leaf_ratio", "is_bent_stem", "petiole_to_blade_ratio")
   r_val_cols <- intersect(names(repro_df), cand_r)
-  r_val_cols <- r_val_cols[vapply(r_val_cols, function(cl) !(cl %in% names(agg_df)) || all(is.na(agg_df[[cl]])), logical(1))]
+  r_val_cols <- r_val_cols[vapply(r_val_cols, function(cl) !(cl %in% names(agg_df)) || any(is.na(agg_df[[cl]])), logical(1))]
   if (length(r_val_cols) == 0L) return(agg_df)
   repro_df$catalogNumber <- as.character(repro_df$catalogNumber)
   agg_df$catalogNumber <- as.character(agg_df$catalogNumber)

@@ -259,7 +259,7 @@ class TestSegmentAndExtract(unittest.TestCase):
         contour_file.write_text("catalogNumber,leaf_id\nNCU001,1\n")
 
         # Setup pre-existing manifest with entry for NCU001
-        manifest_file = self.tables_dir / "extracted_leaves_manifest.csv"
+        manifest_file = self.tables_dir / "extracted_leaf_manifest.csv"
         pd.DataFrame([{
             "catalogNumber": "NCU001",
             "plant_individual_id": 1,

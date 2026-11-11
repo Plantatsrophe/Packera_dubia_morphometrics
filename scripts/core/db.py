@@ -2221,8 +2221,6 @@ def ingest_existing_csvs_to_db(
         # 3. Step 02 tables + 120-vertex contours
         failed_rows = _read_csv_dicts(t_dir / "failed_qc_vouchers.csv")
         manifest_path = t_dir / "extracted_leaf_manifest.csv"
-        if not manifest_path.is_file():
-            manifest_path = t_dir / "extracted_leaves_manifest.csv"
         leaf_manifest_rows = _read_csv_dicts(manifest_path)
         repro_rows = _read_csv_dicts(t_dir / "voucher_reproductive_metrics.csv")
         pheno_rows = _read_csv_dicts(t_dir / "voucher_phenological_states.csv")

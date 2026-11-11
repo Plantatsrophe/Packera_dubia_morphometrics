@@ -20,10 +20,11 @@ parse_args_robust <- function() {
     optparse::make_option(c("--seed"), type = "integer", default = 42), optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE), optparse::make_option(c("--focal-taxon"), type = "character", default = "")
   )
   if (requireNamespace("optparse", quietly = TRUE)) { opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list)); names(opts) <- gsub("-", "_", names(opts)); return(opts) }
-  list(vouchers = "data/tables/curated_vouchers.csv", harmonics = "data/tables/leaf_efa_harmonics.csv", reproductive = "data/tables/voucher_reproductive_metrics.csv", outline_only = FALSE, correct_allometry = "auto",
+  defs <- list(vouchers = "data/tables/curated_vouchers.csv", harmonics = "data/tables/leaf_efa_harmonics.csv", reproductive = "data/tables/voucher_reproductive_metrics.csv", outline_only = FALSE, correct_allometry = "auto",
        allometry_report = "outputs/reports/allometry_significance_audit.csv", allometry_pairwise = "outputs/reports/allometry_pairwise_trajectories.csv", allometry_plot = "outputs/figures/shape_allometry_regression.pdf",
        use_clustvarsel = FALSE, output_flags = "data/tables/morphometric_flags.csv", output_plot = "outputs/figures/cda_passive_projection.pdf", output_report = "outputs/reports/gmm_bayes_factors_summary.csv",
-       output_batch_audit = "outputs/reports/institutional_batch_effect_audit.csv", max_k = 8, num_pcs = 5, permutations = 999, seed = 42, intraspecific_mode = FALSE, focal_taxon = "")
+       output_batch_audit = "outputs/reports/institutional_batch_effect_audit.csv", max_k = 8L, num_pcs = 5L, permutations = 999L, seed = 42L, intraspecific_mode = FALSE, focal_taxon = "")
+  if (exists(".parse_step04_cli_fallback", mode = "function")) .parse_step04_cli_fallback(commandArgs(trailingOnly = TRUE), defs) else defs
 }
 
 # 2. Circular Phenology & Taxonomic Concept Standardization
@@ -75,6 +76,7 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
     return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df))
   }
   cal_mask <- if ("is_calibrated_mm" %in% names(morpho_df)) (!is.na(morpho_df$is_calibrated_mm) & as.logical(morpho_df$is_calibrated_mm)) else rep(TRUE, nrow(morpho_df))
+  if ("scale_source" %in% names(morpho_df)) cal_mask <- cal_mask & !(tolower(trimws(as.character(morpho_df$scale_source))) %in% c("mp_estimated", "predicted_from_megapixels", "uncalibrated"))
   valid_idx <- which(cal_mask & !is.na(morpho_df$log_centsize) & is.finite(morpho_df$log_centsize) & complete.cases(morpho_df[, sym_names]))
   if (length(valid_idx) < 10) return(list(morpho_matrix = NULL, corrected = FALSE, anova_table = NULL, df = morpho_df))
   sub_df <- morpho_df[valid_idx, , drop = FALSE]; sub_df$scientificName <- factor(standardize_packera_taxon(as.character(if ("species_standardized" %in% names(sub_df)) sub_df$species_standardized else sub_df$scientificName)))
@@ -133,31 +135,31 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
       F = c(round(F_size, 4), round(F_taxa, 4), round(F_int, 4), NA_real_, NA_real_),
       p_value = c(round(stats::pf(F_size, df_size, df_res, lower.tail = FALSE), 5), p_taxa, p_int, NA_real_, NA_real_), stringsAsFactors = FALSE)
   }
-  if (!is.null(output_pairwise) && nzchar(output_pairwise) && !is.null(pw_df)) { dir.create(dirname(output_pairwise), recursive = TRUE, showWarnings = FALSE); tmp_pw <- paste0(output_pairwise, ".tmp"); write.csv(pw_df, file = tmp_pw, row.names = FALSE); file.rename(tmp_pw, output_pairwise) }
+  if (!is.null(output_pairwise) && nzchar(output_pairwise) && !is.null(pw_df)) { dir.create(dirname(output_pairwise), recursive = TRUE, showWarnings = FALSE); tmp_pw <- paste0(output_pairwise, ".", Sys.getpid(), ".tmp"); write.csv(pw_df, file = tmp_pw, row.names = FALSE); file.rename(tmp_pw, output_pairwise) }
   anova_df$Term <- gsub("^Residuals$", "Residual", anova_df$Term)
   if ("Total" %in% anova_df$Term) anova_df$R2[anova_df$Term == "Total"] <- 1.0
   anova_df <- anova_df[, intersect(c("Term", "Df", "SumOfSqs", "R2", "F", "p_value"), names(anova_df)), drop = FALSE]
   if (!is.null(output_report) && nzchar(output_report)) {
-    dir.create(dirname(output_report), recursive = TRUE, showWarnings = FALSE); tmp_rep <- paste0(output_report, ".tmp"); write.csv(anova_df, file = tmp_rep, row.names = FALSE); file.rename(tmp_rep, output_report)
+    dir.create(dirname(output_report), recursive = TRUE, showWarnings = FALSE); tmp_rep <- paste0(output_report, ".", Sys.getpid(), ".tmp"); write.csv(anova_df, file = tmp_rep, row.names = FALSE); file.rename(tmp_rep, output_report)
     message("Allometry significance audit report exported -> ", output_report)
   }
   size_row <- anova_df[grepl("^log_centsize$", anova_df$Term, ignore.case = TRUE), ]
-  r2_size <- if (nrow(size_row) > 0) size_row$R2[1] else 0.0; p_size <- if (nrow(size_row) > 0 && !is.na(size_row$p_value[1])) size_row$p_value[1] else 0.0
+  r2_size <- if (nrow(size_row) > 0 && is.finite(size_row$R2[1])) size_row$R2[1] else 0.0; p_size <- if (nrow(size_row) > 0 && !is.na(size_row$p_value[1]) && is.finite(size_row$p_value[1])) size_row$p_value[1] else 1.0
   int_row <- anova_df[grepl("log_centsize:scientificName|scientificName:log_centsize", anova_df$Term, ignore.case = TRUE), ]
-  r2_int <- if (nrow(int_row) > 0) r2_int <- int_row$R2[1] else 0.0; p_int <- if (nrow(int_row) > 0 && !is.na(int_row$p_value[1])) int_row$p_value[1] else 1.0
+  r2_int <- if (nrow(int_row) > 0 && is.finite(int_row$R2[1])) int_row$R2[1] else 0.0; p_int <- if (nrow(int_row) > 0) int_row$p_value[1] else NA_real_
   authority_weight <- gold_df$authority_weight; spatial_balance_weight <- gold_df$spatial_balance_weight; eff_weight <- gold_df$eff_weight
-  # Test homogeneity of allometric slopes (PC ~ log_centsize * taxon, Klingenberg 2016) on active reference anchors
-  if (nlevels(gold_df$scientificName) >= 2 && "PC1" %in% names(gold_df)) {
+  # Fallback to univariate PC1 ~ log_centsize * scientificName only when multivariate interaction p_int is unavailable
+  used_pc1_fb <- FALSE
+  if (nlevels(gold_df$scientificName) >= 2 && (is.na(p_int) || !is.finite(p_int)) && "PC1" %in% names(gold_df)) {
     pc_slope_fit <- tryCatch(stats::lm(PC1 ~ log_centsize * scientificName, data = gold_df, weights = eff_weight), error = function(e) NULL)
-    if (!is.null(pc_slope_fit) && is.na(p_int)) { aov_pc <- stats::anova(pc_slope_fit); p_int <- aov_pc[["Pr(>F)"]][grep(":", rownames(aov_pc))[1]] }
+    if (!is.null(pc_slope_fit)) { aov_pc <- stats::anova(pc_slope_fit); p_int <- aov_pc[["Pr(>F)"]][grep(":", rownames(aov_pc))[1]]; used_pc1_fb <- TRUE }
   }
-  correct_flag <- tolower(trimws(as.character(correct_mode))); slopes_homogeneous <- is.na(p_int) || (p_int > 0.05)
-  message(sprintf("Klingenberg (2016) Homogeneity of Allometric Slopes (PC ~ log_centsize * taxon): R2_int = %.4f, p_int = %.4f (homogeneous = %s)", r2_int, p_int, slopes_homogeneous))
-  should_correct <- (correct_flag %in% c("true", "1", "yes")) || (correct_flag == "auto" && !is.na(r2_size) && r2_size >= r2_threshold && slopes_homogeneous)
+  if (is.na(p_int) || !is.finite(p_int)) p_int <- 1.0
+  correct_flag <- tolower(trimws(as.character(correct_mode))); slopes_homogeneous <- p_int > 0.05
+  message(sprintf("Klingenberg (2016) Homogeneity of Allometric Slopes (%s): R2_int = %.4f, p_int = %.4f (homogeneous = %s)", ifelse(used_pc1_fb, "PC1 ~ log_centsize * taxon fallback", "Y ~ log_centsize * taxon"), r2_int, p_int, slopes_homogeneous))
+  should_correct <- (correct_flag %in% c("true", "1", "yes")) || (correct_flag == "auto" && !is.na(r2_size) && r2_size >= r2_threshold && !is.na(p_size) && p_size < 0.05 && slopes_homogeneous)
   fit_within <- if (nlevels(gold_df$scientificName) >= 2) stats::lm(Y ~ log_centsize + scientificName, data = gold_df, weights = eff_weight) else stats::lm(Y ~ log_centsize, data = gold_df, weights = eff_weight)
   beta_within <- stats::coef(fit_within)["log_centsize", ]; beta_within[is.na(beta_within)] <- 0.0
-  log_centsize <- gold_df$log_centsize
-  Y_adj <- Y - outer(log_centsize - mean(log_centsize, na.rm = TRUE), beta_within)
   ref_mean_cs <- stats::weighted.mean(gold_df$log_centsize, w = eff_weight, na.rm = TRUE)
   Y_ref_adj <- Y - outer(gold_df$log_centsize - ref_mean_cs, beta_within)
   active_cols <- which(apply(Y_ref_adj, 2, stats::var, na.rm = TRUE) > 1e-8); if (length(active_cols) == 0L) active_cols <- seq_len(ncol(Y_ref_adj))
@@ -168,13 +170,9 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   pca_resids <- structure(list(sdev = sqrt(pmax(eig_res$values, 0)), rotation = eig_res$vectors, center = wt_res_cov$center, scale = FALSE, x = res_scores), class = "prcomp")
   sub_df$PC1_raw <- sub_df$PC1; sub_df$PC2_raw <- sub_df$PC2; sub_df$PC1_corrected <- round(pca_resids$x[, 1], 6); sub_df$PC2_corrected <- round(pca_resids$x[, 2], 6)
   if (should_correct) {
-    message(sprintf("[INFO] Foliar allometry detected (R2 = %.2f, p = %.2f). Analyzing allometry-free shape residuals.", r2_size, p_size))
+    message(sprintf("[INFO] Foliar allometry detected (R2 = %.2f, p = %.4f). Analyzing allometry-free shape residuals.", r2_size, p_size))
     morpho_matrix_for_gmm <- Y_adj; morpho_df[valid_idx, sym_names] <- round(Y_adj, 6)
-    all_sym_idx <- which(complete.cases(morpho_df[, sym_names]))
-    proj_pcs <- scale(as.matrix(morpho_df[all_sym_idx, sym_names[active_cols], drop = FALSE]), center = pca_resids$center, scale = FALSE) %*% pca_resids$rotation
-    pc_allom_cols <- discover_sorted_morph_cols(morpho_df, "^PC[0-9]+$"); sym_allom_cols <- discover_sorted_morph_cols(morpho_df, "^Sym_PC[0-9]+$")
-    for (p in seq_len(min(length(pc_allom_cols), ncol(proj_pcs)))) morpho_df[all_sym_idx, pc_allom_cols[p]] <- round(proj_pcs[, p], 6)
-    for (p in seq_len(min(length(sym_allom_cols), ncol(proj_pcs)))) morpho_df[all_sym_idx, sym_allom_cols[p]] <- round(proj_pcs[, p], 6)
+    morpho_df <- .update_step04_allometry_pcs(morpho_df, sub_df, gold_df, valid_idx, sym_names, active_cols, pca_resids, ref_mean_cs, eff_weight)
   } else {
     message(sprintf("[INFO] Foliar allometry negligible (R2 = %.2f). Analyzing raw symmetric harmonics.", r2_size))
     morpho_matrix_for_gmm <- Y_all
@@ -183,10 +181,9 @@ test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permuta
   return(list(morpho_matrix = morpho_matrix_for_gmm, corrected = should_correct, beta_within = beta_within,
               r2_size = r2_size, p_size = p_size, r2_interaction = r2_int, p_interaction = p_int, anova_table = anova_df, pairwise_table = pw_df, df = morpho_df))
 }
-evaluate_ontogenetic_allometry <- test_and_correct_allometry
 # Subspace Selection: Horn's Parallel Analysis / Broken-Stick & Williams & Titus (1988) Rule (P <= floor(N_min / 3))
-# 3. Gaussian Mixture Modeling & Bayes Factor Testing (Seed = 42; fit_gmm_em_pure in pub_figures_utils.R)
-run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarsel = FALSE, intraspecific_mode = FALSE) {
+# 3. Gaussian Mixture Modeling & deviance-scale 2*ln(BF) Testing (fit_gmm_em_pure in pub_synthesis_plates.R)
+run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarsel = FALSE, intraspecific_mode = FALSE, seed = 42L) {
   pc_guard_cols <- grep("^(Sym_)?PC[0-9]+$", feature_cols, value = TRUE)
   req_cols <- if (length(pc_guard_cols) > 0) pc_guard_cols else feature_cols
   valid_rows <- which(complete.cases(df[, req_cols, drop = FALSE])); N_valid <- length(valid_rows)
@@ -203,13 +200,13 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   for (j in seq_len(ncol(X))) if (any(is.na(X[, j]))) X[is.na(X[, j]), j] <- if (any(!is.na(X[ref_cand, j]))) stats::median(X[ref_cand, j], na.rm = TRUE) else 0.0
   if (exists("screen_gmm_point_mass_columns", mode = "function")) X <- X[, screen_gmm_point_mass_columns(X, ref_cand), drop = FALSE]
   selected_cols <- select_morphometric_subspace(X[ref_cand, , drop = FALSE], aux_df = sub_v[ref_cand, , drop = FALSE]); X <- X[, selected_cols, drop = FALSE]
-  set.seed(42); best_k <- 1; best_name <- "Full_Covariance_EM"; bic_table <- NULL; cls_sub <- NULL; unc_sub <- NULL
+  seed_i <- as.integer(if (!is.null(seed) && is.finite(seed)) seed else 42L); set.seed(seed_i); best_k <- 1; best_name <- "Full_Covariance_EM"; bic_table <- NULL; bic_raw_mat <- NULL; cls_sub <- NULL; unc_sub <- NULL; did_merge <- FALSE
   X_mah <- X[, if (length(intersect(pc_guard_cols, colnames(X))) > 0) intersect(pc_guard_cols, colnames(X)) else colnames(X), drop = FALSE]
-  mahal_outliers <- screen_regime_stratified_mcd_outliers(X_mah, fit_pos = which(ref_cand), solidity_vec = sub_v$solidity, is_dissected_vec = sub_v$is_dissected, k_mcd = ncol(X_mah), p_cutoff = 0.005, seed = 42L)
+  mahal_outliers <- screen_regime_stratified_mcd_outliers(X_mah, fit_pos = which(ref_cand), solidity_vec = sub_v$solidity, is_dissected_vec = sub_v$is_dissected, k_mcd = ncol(X_mah), p_cutoff = 0.005, seed = seed_i)
   anchor_mask <- ref_cand & !mahal_outliers
   core_idx <- if (sum(anchor_mask, na.rm = TRUE) >= 6) which(anchor_mask) else which(ref_cand)
   if (requireNamespace("clustvarsel", quietly = TRUE) && (isTRUE(use_clustvarsel) || ncol(X) >= 4)) {
-    cvs <- if (exists("run_bounded_clustvarsel", mode = "function")) run_bounded_clustvarsel(X, core_idx, max_k = max_k) else tryCatch({ set.seed(42); clustvarsel::clustvarsel(X[if (length(core_idx) > 350L) core_idx[seq_len(350L)] else core_idx, , drop = FALSE], G = seq_len(min(max_k, 5L)), itermax = 100, parallel = FALSE, verbose = FALSE) }, error = function(e) NULL)
+    cvs <- if (exists("run_bounded_clustvarsel", mode = "function")) run_bounded_clustvarsel(X, core_idx, max_k = max_k, seed = seed_i) else tryCatch({ set.seed(seed_i); clustvarsel::clustvarsel(X[if (length(core_idx) > 350L) core_idx[seq_len(350L)] else core_idx, , drop = FALSE], G = seq_len(min(max_k, 5L)), itermax = 100, parallel = FALSE, verbose = FALSE) }, error = function(e) NULL)
     if (!is.null(cvs) && length(cvs$subset) >= 2) { selected_cols <- colnames(X)[cvs$subset]; X <- X[, cvs$subset, drop = FALSE] }
   }
   is_intra_gmm <- isTRUE(intraspecific_mode) || (length(unique(stats::na.omit(df$species_standardized))) < 2L)
@@ -217,43 +214,43 @@ run_gmm_cluster_analysis <- function(df, feature_cols, max_k = 8, use_clustvarse
   X_pcs <- X; X_core <- X_pcs[core_idx, , drop = FALSE]; eff_k <- max(2L, min(if (nrow(X_core) > 100 && max_k >= 7L) 6L else max_k, nrow(X_core) - 1L))
   modelNames <- if ((nrow(X_core) / ncol(X_pcs)) < 5.0) c("EII", "VII", "EEI", "VEI", "EVI", "VVI") else NULL; z_eval_mat <- NULL
   if (requireNamespace("mclust", quietly = TRUE)) {
-    fit_mclust_fn <- function(G_arg) if (exists("fit_parallel_mclust_gmm", mode = "function")) fit_parallel_mclust_gmm(X_core, G_arg, modelNames) else mclust::Mclust(X_core, G = G_arg, modelNames = modelNames, verbose = FALSE)
+    set.seed(seed_i); fit_mclust_fn <- function(G_arg) if (exists("fit_parallel_mclust_gmm", mode = "function")) fit_parallel_mclust_gmm(X_core, G_arg, modelNames) else mclust::Mclust(X_core, G = G_arg, modelNames = modelNames, verbose = FALSE)
     gmm_fit <- tryCatch(fit_mclust_fn(seq_len(eff_k)), error = function(e) NULL)
     if (!is.null(gmm_fit)) {
-      bic_vals <- apply(gmm_fit$BIC, 1, function(row) if (all(is.na(row))) NA_real_ else max(row, na.rm = TRUE))
+      bic_raw_mat <- as.matrix(gmm_fit$BIC); bic_vals <- apply(bic_raw_mat, 1, function(row) if (all(is.na(row))) NA_real_ else max(row, na.rm = TRUE))
       bic_table <- data.frame(K = seq_len(eff_k), BIC = round(bic_vals[seq_len(eff_k)], 2))
-      if (!is.null(colnames(gmm_fit$BIC))) for (mn in colnames(gmm_fit$BIC)) bic_table[[paste0("BIC_", mn)]] <- round(as.numeric(gmm_fit$BIC[seq_len(eff_k), mn]), 2)
+      if (!is.null(colnames(bic_raw_mat))) for (mn in colnames(bic_raw_mat)) bic_table[[paste0("BIC_", mn)]] <- round(as.numeric(bic_raw_mat[seq_len(eff_k), mn]), 2)
       best_k <- gmm_fit$G; best_name <- gmm_fit$modelName; gmm_pred <- predict(gmm_fit, newdata = X_pcs); z_eval_mat <- as.matrix(gmm_pred$z)
       cls_sub <- as.integer(gmm_pred$classification); unc_sub <- if (!is.null(gmm_pred$uncertainty)) gmm_pred$uncertainty else 1.0 - apply(z_eval_mat, 1, max)
     }
   }
   if (is.null(bic_table)) {
-    pure_res <- fit_gmm_em_pure(X_core, max_k = eff_k, X_eval = X_pcs); bic_table <- pure_res$bic_table
+    pure_res <- fit_gmm_em_pure(X_core, max_k = eff_k, X_eval = X_pcs, seed = seed_i); bic_table <- pure_res$bic_table
     best_k <- pure_res$best$k; cls_sub <- pure_res$best$classification; unc_sub <- pure_res$best$uncertainty; z_eval_mat <- pure_res$best$z
   }
   if (!is.null(z_eval_mat) && ncol(z_eval_mat) >= 2L && exists("merge_plastic_gmm_components_ridgeline", mode = "function")) {
-    mrg <- merge_plastic_gmm_components_ridgeline(X_pcs, X_core, z_eval_mat, z_eval_mat[core_idx, , drop = FALSE], df_core = sub_v[core_idx, , drop = FALSE], intraspecific_mode = is_intra_gmm)
-    if (isTRUE(mrg$merged_any)) { message(sprintf("[Plasticity Gate] Ridgeline/sympatry test merged GMM K=%d -> K=%d.", best_k, mrg$best_k)); best_k <- mrg$best_k; cls_sub <- mrg$classification; unc_sub <- mrg$uncertainty; best_name <- paste0(best_name, "_RidgelineMerged") }
+    mrg <- merge_plastic_gmm_components_ridgeline(X_pcs, X_core, z_eval_mat, z_eval_mat[core_idx, , drop = FALSE], df_core = sub_v[core_idx, , drop = FALSE], intraspecific_mode = is_intra_gmm, seed = seed_i)
+    if (isTRUE(mrg$merged_any)) { did_merge <- TRUE; message(sprintf("[Plasticity Gate] Ridgeline/sympatry test merged GMM K=%d -> K=%d.", best_k, mrg$best_k)); best_k <- mrg$best_k; cls_sub <- mrg$classification; unc_sub <- mrg$uncertainty; best_name <- paste0(best_name, "_RidgelineMerged") }
   }
   if (is.null(cls_sub)) { best_k <- 1L; best_name <- "Unimodal_G1_Null"; cls_sub <- rep(1L, nrow(X_pcs)); unc_sub <- rep(0.0, nrow(X_pcs)) }
   relab <- .canonical_relabel_gmm_clusters(sub_v, cls_sub, best_k, ref_cand, core_idx); cls_sub <- relab$cls_sub; cls <- rep(NA_integer_, nrow(df)); unc <- rep(NA_real_, nrow(df)); cls[valid_rows] <- cls_sub; unc[valid_rows] <- unc_sub
   n_core_g <- max(2.0, nrow(X_core)); n_eff_g <- max(2.0, n_core_g * min(1.0, max(0.10, relab$n_eff_ratio))); p_g <- ncol(X_pcs)
-  k_par_vec <- bic_table$K * p_g + (bic_table$K - 1L) + bic_table$K * p_g
+  k_par_vec <- if (exists(".compute_exact_mclust_params", mode = "function")) .compute_exact_mclust_params(bic_table$K, p_g, bic_mat = bic_raw_mat, default_model = best_name, explicit_n_params = if ("n_params" %in% names(bic_table)) bic_table$n_params else NULL) else (bic_table$K * p_g + (bic_table$K - 1L) + bic_table$K * p_g)
   bic_neff <- bic_table$BIC + k_par_vec * (log(n_core_g) - log(n_eff_g))
+  # Note: mclust BIC = 2*logLik - k*log(n) is already on the deviance 2*ln(BF) scale (Kass & Raftery 1995); BayesFactor_vs_Null stores Kish-N_eff-adjusted 2*ln(BF_{K,1}).
   bic_table$Delta_BIC_prev <- c(0, diff(bic_table$BIC)); bic_table$Two_Delta_BIC <- round(bic_table$BIC - bic_table$BIC[1], 2)
   bic_table$BayesFactor_vs_Null <- round(bic_neff - bic_neff[1], 2)
-  bic_table$Evidence <- sapply(seq_len(nrow(bic_table)), function(idx_b) { # Kass & Raftery (1995) 2 * Delta_BIC vs G = 1
+  bic_table$Evidence <- sapply(seq_len(nrow(bic_table)), function(idx_b) { # Kass & Raftery (1995) deviance-scale 2*ln(BF) = Delta_BIC_mclust vs G = 1
     if (idx_b == 1L) return("Null Model (G = 1)"); val <- bic_table$Two_Delta_BIC[idx_b]
-    if (is.na(val) || val < 0) return("Negative (favors G = 1)")
-    if (val < 2) return("Weak / Inconclusive"); if (val < 6) return("Positive Evidence"); if (val < 10) return("Strong Evidence")
-    return("Decisive Evidence (Species Boundary)")
+    ev_str <- if (is.na(val) || val < 0) "Negative (favors G = 1)" else if (val < 2) "Weak / Inconclusive" else if (val < 6) "Positive Evidence" else if (val < 10) "Strong Evidence" else "Decisive Evidence (Species Boundary)"
+    if (did_merge && bic_table$K[idx_b] > best_k) paste0(ev_str, sprintf(" [Ridgeline Merged -> K=%d]", best_k)) else ev_str
   })
   return(list(classification = cls, uncertainty = unc, best_k = best_k, model_name = best_name, selected_features = selected_cols, bic_table = bic_table))
 }
 
 # 4. Canonical Discriminant Analysis with Passive Sample Projection (Track 1: Unsupervised Morphotype_K1..Kn or Multi-Species)
 run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, gmm_res = NULL, intraspecific_mode = FALSE) {
-  message("Configuring Canonical Discriminant Analysis in MorphoTools2 Architecture (Tier_3_Bronze weight = 0.0)...")
+  message("Configuring Weighted Ledoit-Wolf Shrinkage CDA (Tier_0_Type_Anchor / Tier_1_Gold / Tier_2_Silver / Promoted_Bronze vs. passive projection)...")
   df$authority_weight <- compute_authority_precision_weights(df); if (!"spatial_balance_weight" %in% names(df) || !any(is.finite(suppressWarnings(as.numeric(df$spatial_balance_weight))))) df$spatial_balance_weight <- compute_spatial_balance_weights(df)
   authority_weight <- df$authority_weight; spatial_balance_weight <- df$spatial_balance_weight; eff_weight <- authority_weight
   is_tier1_pure <- if ("morph_tier_source" %in% names(df)) (is.na(df$morph_tier_source) | df$morph_tier_source != "Cauline_Only_Fallback") else rep(TRUE, nrow(df))
@@ -309,7 +306,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   if (!is_intra) is_active <- is_train_cand
   active_idx <- which(is_train_cand); passive_idx <- which(!is_active)
   message(sprintf("Active Anchors (Complete): %d | Passive Projected: %d", length(active_idx), length(passive_idx)))
-  if (length(active_idx) < length(target_taxa)) stop("Insufficient complete active Tier 1 Gold anchors for CDA.")
+  if (length(active_idx) < length(target_taxa)) stop("Insufficient complete active reference anchors for CDA.")
 
   X_a <- X[active_idx, , drop = FALSE]; y_a <- df$grouping_col[active_idx]; eff_weight <- eff_weight[active_idx]; if (all(eff_weight <= 0)) eff_weight <- rep(1.0, length(active_idx)); w_a <- eff_weight; N_a <- nrow(X_a)
   X_mat <- X_a; grp_factor <- droplevels(factor(y_a))
@@ -333,7 +330,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
                 num_canonical_axes = 1L, shrinkage_lambda = attr(S_reg1, "shrinkage_lambda"), selected_features = feature_cols, predicted_taxon = rep(g_levels[1L], nrow(df)), posterior_prob = rep(1.0, nrow(df)),
                 second_taxon = rep(NA_character_, nrow(df)), second_posterior_prob = rep(0.0, nrow(df)), post_probs = pp1, posterior_margin = rep(1.0, nrow(df)), is_active = is_active,
                 is_promoted_bronze = df$is_promoted_bronze, is_confident_label_noise = df$is_confident_label_noise, anchor_tier_source = df$anchor_tier_source, authority_weight = df$authority_weight,
-                structure_loadings = sc1, loocv_accuracy = 1.0, grouping_col = df$grouping_col, X_proj = X_p1, S_reg = S_reg1))
+                structure_loadings = sc1, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col, X_proj = X_p1, S_reg = S_reg1))
   }
   B <- matrix(0, p, p); W <- matrix(0, p, p); X_centered <- matrix(0, N_a, p, dimnames = dimnames(X_a))
   group_means <- matrix(0, g, p, dimnames = list(g_levels, feature_cols)); group_counts <- integer(g)
@@ -406,46 +403,40 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
               posterior_margin = posterior_margin, is_active = is_active, is_promoted_bronze = df$is_promoted_bronze, is_confident_label_noise = df$is_confident_label_noise, anchor_tier_source = df$anchor_tier_source,
               authority_weight = df$authority_weight, structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col, X_proj = X_proj, S_reg = S_reg))
 }
-run_cda_with_passive_projection <- run_canonical_discriminant_analysis; run_weighted_cda_loocv <- run_canonical_discriminant_analysis; run_cda_ordination <- run_canonical_discriminant_analysis
 
 # 5. Outlier Flagging & Herbarium Misidentification Auditing
 audit_misidentifications <- function(df, cda_res, gmm_res = NULL, selected_features = NULL) {
   message("Auditing specimens for morphospace outliers & label discordances...")
   n <- nrow(df); flags <- logical(n); triage <- character(n); reasons <- character(n)
   grp_vec <- if (!is.null(cda_res$grouping_col)) cda_res$grouping_col else df$species_standardized
-  is_intra_audit <- length(unique(stats::na.omit(df$species_standardized))) < 2 || any(grepl("^Morphotype_K|^LatTertile_", grp_vec))
+  is_intra_audit <- length(unique(stats::na.omit(df$species_standardized))) < 2 || any(grepl("^Morphotype_K", grp_vec))
   sel_feats <- unique(c(selected_features, cda_res$selected_features, gmm_res$selected_features))
   if (length(sel_feats) == 0L) sel_feats <- discover_sorted_morph_cols(df, "^(Sym_)?PC[0-9]+$")
   sel_feats <- intersect(as.character(sel_feats), names(df))
   pc_c <- sel_feats[vapply(sel_feats, function(fc) is.numeric(df[[fc]]) && sum(is.finite(df[[fc]])) >= 10L, logical(1))]
   if (length(pc_c) < 2L) pc_c <- discover_sorted_morph_cols(df, "^(Sym_)?PC[0-9]+$")
   mahal_out <- if (is_intra_audit && length(pc_c) >= 2 && nrow(df) >= 10) {
-    Xm <- as.matrix(df[, pc_c, drop = FALSE]); for (jc in seq_len(ncol(Xm))) Xm[!is.finite(Xm[, jc]), jc] <- mean(Xm[, jc], na.rm = TRUE)
-    d2 <- tryCatch(stats::mahalanobis(Xm, colMeans(Xm, na.rm = TRUE), stats::cov(Xm, use = "complete.obs") + diag(1e-6, ncol(Xm))), error = function(e) rep(0, n))
-    !is.na(d2) & (d2 > stats::qchisq(0.975, df = ncol(Xm)))
+    Xm <- as.matrix(df[, pc_c, drop = FALSE]); act_m <- which(as.logical(cda_res$is_active)); if (length(act_m) < 5L) act_m <- seq_len(n)
+    for (jc in seq_len(ncol(Xm))) Xm[!is.finite(Xm[, jc]), jc] <- stats::median(Xm[act_m, jc], na.rm = TRUE)
+    rob_f <- if (exists(".fit_fast_mcd_cov", mode = "function")) .fit_fast_mcd_cov(Xm[act_m, , drop = FALSE]) else NULL
+    mu_m <- if (!is.null(rob_f)) rob_f$center else apply(Xm[act_m, , drop = FALSE], 2, stats::median, na.rm = TRUE)
+    S_m <- if (!is.null(rob_f)) (rob_f$cov + diag(1e-5, ncol(Xm))) else (stats::cov(Xm[act_m, , drop = FALSE]) + diag(1e-5, ncol(Xm)))
+    d2 <- tryCatch(stats::mahalanobis(Xm, mu_m, S_m), error = function(e) rep(0, n))
+    out_m <- !is.na(d2) & (d2 > stats::qchisq(0.975, df = ncol(Xm))) & stats::complete.cases(df[, pc_c, drop = FALSE])
+    out_m[.identify_type_specimen_vec(df)$is_type_specimen] <- FALSE; out_m
   } else rep(FALSE, n)
   for (i in seq_len(nrow(df))) {
     raw_sp <- as.character(grp_vec[i]); if (is.na(raw_sp) || !nzchar(raw_sp)) raw_sp <- as.character(df$species_standardized[i])
-    pred_sp <- as.character(cda_res$predicted_taxon[i]); if (is.na(pred_sp) || !nzchar(pred_sp)) pred_sp <- raw_sp
-    post_p <- cda_res$posterior_prob[i]; is_act <- isTRUE(cda_res$is_active[i])
-    if (is_act) {
-      if (raw_sp == pred_sp) { flags[i] <- FALSE; triage[i] <- "CLEAN"; reasons[i] <- "Verified_Tier1_Gold_Anchor" }
-      else if (post_p >= 0.85) { flags[i] <- TRUE; triage[i] <- "HIGH"; reasons[i] <- sprintf("Tier_1_Gold_Morphological_Discordance_to_%s", gsub(" ", "_", pred_sp)) }
-      else { flags[i] <- FALSE; triage[i] <- "MEDIUM"; reasons[i] <- "Tier_1_Gold_Borderline_Variant" }
-    } else {
-      if (raw_sp == pred_sp && post_p >= 0.75) { flags[i] <- FALSE; triage[i] <- "CLEAN"; reasons[i] <- "Congruent_Bronze_Determination" }
-      else if (raw_sp != pred_sp && post_p >= 0.70) {
-        flags[i] <- TRUE; triage[i] <- "HIGH"; reasons[i] <- sprintf("%s_Discordant_to_%s", gsub(" ", "_", raw_sp), gsub(" ", "_", pred_sp))
-      } else if (post_p < 0.60) { flags[i] <- FALSE; triage[i] <- "MEDIUM"; reasons[i] <- "Morphological_Intermediate_Ambiguous" }
-      else { flags[i] <- (raw_sp != pred_sp); triage[i] <- if (raw_sp != pred_sp) "MEDIUM" else "LOW"
-             reasons[i] <- if (raw_sp != pred_sp) "Candidate_Discordance_Moderate_Posterior" else "Minor_Uncertainty" }
-    }
+    pred_sp <- as.character(cda_res$predicted_taxon[i]); post_p <- cda_res$posterior_prob[i]; is_act <- isTRUE(cda_res$is_active[i])
+    ar_i <- .format_step04_anchor_audit_reason(i, df, cda_res, raw_sp, pred_sp, post_p, is_act)
+    flags[i] <- ar_i$flag; triage[i] <- ar_i$triage; reasons[i] <- ar_i$reason
     if (is_intra_audit && !flags[i] && isTRUE(mahal_out[i])) { flags[i] <- TRUE; triage[i] <- "HIGH"; reasons[i] <- "Intraspecific_Mahalanobis_Morphospace_Outlier" }
   }
   tc <- compute_type_specimen_morph_control(df, cda_res$X_proj, cda_res$S_reg, cda_res, gmm_res, flags = flags, triage = triage, reasons = reasons)
   flags <- tc$flags; triage <- tc$triage; reasons <- tc$reasons
   for (cn in c("type_status", "is_type_specimen", "has_empirical_type_anchor", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p")) df[[cn]] <- tc[[cn]]
-  if (!is.null(cda_res$is_promoted_bronze)) df$is_promoted_bronze <- cda_res$is_promoted_bronze; df$is_confident_label_noise <- if (!is.null(cda_res$is_confident_label_noise)) as.logical(cda_res$is_confident_label_noise) else rep(FALSE, n)
+  if (!is.null(cda_res$is_promoted_bronze)) { df$is_promoted_bronze <- as.logical(cda_res$is_promoted_bronze); df$is_promoted_anchor <- df$is_promoted_bronze }
+  df$is_confident_label_noise <- if (!is.null(cda_res$is_confident_label_noise)) as.logical(cda_res$is_confident_label_noise) else rep(FALSE, n)
   if (!is.null(cda_res$anchor_tier_source)) df$anchor_tier_source <- cda_res$anchor_tier_source
   df$authority_weight <- if (!is.null(cda_res$authority_weight)) cda_res$authority_weight else compute_authority_precision_weights(df)
   if (!is.null(gmm_res$classification)) df$gmm_cluster <- gmm_res$classification
@@ -472,6 +463,8 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   test_feats <- unique(c(intersect(c("PC1", "PC2"), names(morpho_df)), dyn_sel))
   test_feats <- test_feats[vapply(test_feats, function(fc) is.numeric(morpho_df[[fc]]) && sum(is.finite(morpho_df[[fc]])) >= 10L, logical(1))]
   valid_df <- morpho_df[!is.na(morpho_df$institutionCode) & trimws(morpho_df$institutionCode) != "", , drop = FALSE]
+  clean_b <- (!("authority_weight" %in% names(valid_df)) | (!is.na(valid_df$authority_weight) & valid_df$authority_weight > 0)) & (!("morph_tier_source" %in% names(valid_df)) | is.na(valid_df$morph_tier_source) | valid_df$morph_tier_source == "Basal_Rosette")
+  if (sum(clean_b, na.rm = TRUE) >= 10L && length(unique(valid_df$institutionCode[clean_b])) >= 2L) valid_df <- valid_df[clean_b, , drop = FALSE]
   if (nrow(valid_df) < 10 || length(test_feats) == 0L) return(NULL)
   inst_counts <- table(valid_df$institutionCode); rep_insts <- names(inst_counts[inst_counts >= min_obs])
   audit_subset <- if (length(rep_insts) >= 2) valid_df[valid_df$institutionCode %in% rep_insts, , drop = FALSE] else valid_df
@@ -497,7 +490,7 @@ audit_institutional_batch_effects <- function(morpho_df, output_csv = "outputs/r
   }
   if (length(rows_out) == 0L) return(NULL)
   anova_df <- do.call(rbind, rows_out); anova_df$p_value_bh[anova_df$Term == "institutionCode"] <- signif(stats::p.adjust(raw_ps, method = "BH"), 4)
-  if (!is.null(output_csv) && nzchar(output_csv)) { dir.create(dirname(output_csv), recursive = TRUE, showWarnings = FALSE); tmp_ba <- paste0(output_csv, ".tmp"); write.csv(anova_df, file = tmp_ba, row.names = FALSE); file.rename(tmp_ba, output_csv) }
+  if (!is.null(output_csv) && nzchar(output_csv)) { dir.create(dirname(output_csv), recursive = TRUE, showWarnings = FALSE); tmp_ba <- paste0(output_csv, ".", Sys.getpid(), ".tmp"); write.csv(anova_df, file = tmp_ba, row.names = FALSE); file.rename(tmp_ba, output_csv) }
   return(invisible(list(lm_pc1 = fits[["PC1"]], lm_pc2 = fits[["PC2"]], models = fits, anova_table = anova_df)))
 }
 
@@ -523,17 +516,19 @@ run_gmm_morphotools_pipeline <- function(opts) {
     if (!file.exists(opts$harmonics)) stop("Harmonics file not found: ", opts$harmonics)
     efa_df <- .read_csv_s04(opts$harmonics)
   }
-  pc_cols <- discover_sorted_morph_cols(efa_df, "^PC[0-9]+$"); sym_pc_cols <- discover_sorted_morph_cols(efa_df, "^Sym_PC[0-9]+$")
-  pca_cols <- if (length(pc_cols) > 0L) pc_cols else sym_pc_cols
-  if (length(pca_cols) < 2L) stop("Missing PCA columns in EFA table (need >= 2 PC/Sym_PC axes).")
-  valid_idx <- which(complete.cases(efa_df[, pca_cols[seq_len(min(2L, length(pca_cols)))], drop = FALSE])); closed_df <- efa_df[valid_idx, , drop = FALSE]
+  pc_cols <- discover_sorted_morph_cols(efa_df, "^PC[0-9]+$"); sym_pc_cols <- discover_sorted_morph_cols(efa_df, "^Sym_PC[0-9]+$"); ect_pc_cols <- discover_sorted_morph_cols(efa_df, "^ECT_PC[0-9]+$")
+  pca_cols <- if (length(pc_cols) >= 2L) pc_cols else if (length(sym_pc_cols) >= 2L) sym_pc_cols else ect_pc_cols
+  if (length(pca_cols) < 2L) stop("Missing PCA columns in EFA/ECT table (need >= 2 PC/Sym_PC/ECT_PC axes).")
+  has_primary_pc <- complete.cases(efa_df[, pca_cols[seq_len(min(2L, length(pca_cols)))], drop = FALSE])
+  has_ect_topo <- (if (length(ect_pc_cols) >= 2L) complete.cases(efa_df[, ect_pc_cols[1:2], drop = FALSE]) else rep(FALSE, nrow(efa_df))) | (if (all(c("solidity", "dissection_index") %in% names(efa_df))) is.finite(suppressWarnings(as.numeric(efa_df$solidity))) & is.finite(suppressWarnings(as.numeric(efa_df$dissection_index))) else rep(FALSE, nrow(efa_df)))
+  valid_idx <- which(has_primary_pc | has_ect_topo); closed_df <- efa_df[valid_idx, , drop = FALSE]
   # Ensure primary GMM and CDA run on specimen-level table (1 row = 1 voucher collection event; group_by(catalogNumber) & plant_individual_id)
   if (!"plant_individual_id" %in% names(closed_df)) closed_df$plant_individual_id <- 0L
   spec_keys <- paste0(closed_df$catalogNumber, "_", closed_df$plant_individual_id)
   if (any(duplicated(spec_keys))) {
-    disagg_leaf_df <- closed_df; pc_sym_cols <- unique(c(pc_cols, sym_pc_cols)); pet_cols <- intersect(c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio"), names(closed_df))
+    disagg_leaf_df <- closed_df; pc_sym_cols <- unique(c(pc_cols, sym_pc_cols, ect_pc_cols)); pet_cols <- intersect(c("petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio"), names(closed_df))
     lin_med_cols <- intersect(c("median_area_mm2", "median_perimeter_mm", "median_length_mm", "median_width_mm", "median_circularity", "median_aspect_ratio", "median_solidity", "median_dissection_index", "area_mm2", "perimeter_mm", "length_mm", "width_mm", "circularity"), names(closed_df))
-    num_cols <- intersect(c(pc_sym_cols, pet_cols, lin_med_cols, "plant_height_cm", "scape_to_basal_leaf_ratio", "foliar_variance", "leaf_count", "aspect_ratio", "solidity", "dissection_index", "area_px", "centroid_size", "log_centsize", "harmonic_roughness", "leaf_quality_weight"), names(closed_df))
+    num_cols <- intersect(c(pc_sym_cols, pet_cols, lin_med_cols, "plant_height_cm", "scape_to_basal_leaf_ratio", "foliar_variance", "leaf_count", "aspect_ratio", "solidity", "dissection_index", "ect_lobe_complexity", "area_px", "centroid_size", "log_centsize", "harmonic_roughness", "leaf_quality_weight"), names(closed_df))
     other_num <- setdiff(num_cols, c(pc_sym_cols, pet_cols)); has_w <- "leaf_quality_weight" %in% names(closed_df); has_lz <- "leaf_zone" %in% names(closed_df)
     meta_cols <- setdiff(names(closed_df), c(num_cols, "catalogNumber", "plant_individual_id", "shape_id", "leaf_id", "mask_source", "morph_tier_source"))
     grp_list <- split(closed_df, list(closed_df$catalogNumber, closed_df$plant_individual_id), drop = TRUE)
@@ -542,16 +537,16 @@ run_gmm_morphotools_pipeline <- function(opts) {
       if (has_lz) { lz_g <- tolower(trimws(as.character(grp$leaf_zone))); if (any(!is.na(lz_g) & lz_g == "basal")) grp <- grp[!is.na(lz_g) & lz_g == "basal", , drop = FALSE] else if (all(!is.na(lz_g) & lz_g == "cauline")) m_src <- "Cauline_Only_Fallback" }
       leaf_quality_weight <- if (has_w) suppressWarnings(as.numeric(grp$leaf_quality_weight)) else rep(1.0, nrow(grp))
       leaf_quality_weight[is.na(leaf_quality_weight) | leaf_quality_weight <= 0] <- 1.0
-      is_contour_outlier <- if ("is_contour_outlier" %in% names(grp)) as.logical(grp$is_contour_outlier) else rep(FALSE, nrow(grp)); is_contour_outlier[is.na(is_contour_outlier)] <- FALSE
-      if (nrow(grp) >= 3) {
+      is_type_g <- .identify_type_specimen_vec(grp)$is_type_specimen
+      is_contour_outlier <- if ("is_contour_outlier" %in% names(grp)) as.logical(grp$is_contour_outlier) else rep(FALSE, nrow(grp)); is_contour_outlier[is.na(is_contour_outlier) | is_type_g] <- FALSE
+      if (nrow(grp) >= 3 && !any(is_type_g)) {
         pc_mat <- as.matrix(grp[, intersect(pca_cols, names(grp)), drop = FALSE]); med_pc <- apply(pc_mat, 2, stats::median, na.rm = TRUE)
         dist <- sqrt(rowSums(sweep(pc_mat, 2, med_pc, "-")^2, na.rm = TRUE)); iqr_d <- stats::IQR(dist, na.rm = TRUE); med_d <- stats::median(dist, na.rm = TRUE)
         drop_leaf <- ((dist > 2.0 * iqr_d & iqr_d > 0) | (dist > 2.5 * med_d)) & (is_contour_outlier | nrow(grp) >= 3)
         if (sum(!drop_leaf) < 2) drop_leaf[utils::head(order(leaf_quality_weight, -dist, decreasing = TRUE), 2)] <- FALSE
         grp <- grp[!drop_leaf, , drop = FALSE]
-      }
-      w_l <- if (exists("compute_heteroblasty_leaf_weights", mode = "function")) compute_heteroblasty_leaf_weights(grp) else rep(1.0, nrow(grp))
-      out <- grp[1, , drop = FALSE]; for (col in c(pc_sym_cols, other_num)) out[[col]] <- w_median(grp[[col]], w_l)
+      } else if (any(!is_contour_outlier)) { grp <- grp[!is_contour_outlier, , drop = FALSE] }
+      out <- grp[1, , drop = FALSE]; for (col in c(pc_sym_cols, other_num)) { vv <- suppressWarnings(as.numeric(grp[[col]])); vv <- vv[is.finite(vv)]; out[[col]] <- if (length(vv) > 0L) stats::median(vv) else NA_real_ }
       dm_sub <- summarize_otu_dissection_metrics(grp)
       for (d_nm in c("basal_leaf_count", "q25_solidity", "dissection_index", "dissected_leaf_fraction")) if (!is.na(dm_sub[[d_nm]])) out[[d_nm]] <- dm_sub[[d_nm]]
       for (col in pet_cols) out[[col]] <- stats::quantile(suppressWarnings(as.numeric(grp[[col]])), probs = 0.75, na.rm = TRUE, names = FALSE)
@@ -575,7 +570,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   if (!"spatial_balance_weight" %in% names(closed_df) || !any(is.finite(suppressWarnings(as.numeric(closed_df$spatial_balance_weight))))) closed_df$spatial_balance_weight <- compute_spatial_balance_weights(closed_df)
   allom_res <- test_and_correct_allometry(closed_df, correct_mode = opts$correct_allometry, permutations = opts$permutations, seed = opts$seed, output_report = opts$allometry_report, output_plot = opts$allometry_plot, output_pairwise = opts$allometry_pairwise)
   if (!is.null(allom_res$df)) closed_df <- allom_res$df
-  pc_cols <- discover_sorted_morph_cols(closed_df, "^PC[0-9]+$"); sym_pc_cols <- discover_sorted_morph_cols(closed_df, "^Sym_PC[0-9]+$"); pca_cols <- if (length(pc_cols) > 0L) pc_cols else sym_pc_cols
+  pc_cols <- discover_sorted_morph_cols(closed_df, "^PC[0-9]+$"); sym_pc_cols <- discover_sorted_morph_cols(closed_df, "^Sym_PC[0-9]+$"); ect_pc_cols <- discover_sorted_morph_cols(closed_df, "^ECT_PC[0-9]+$"); pca_cols <- if (length(pc_cols) >= 2L) pc_cols else if (length(sym_pc_cols) >= 2L) sym_pc_cols else ect_pc_cols
   if (exists("assign_spatial_gathering_demes", mode = "function")) closed_df <- assign_spatial_gathering_demes(closed_df, deme_radius_km = 10.0)
   include_repro <- FALSE; feature_cols <- pca_cols
   if (!isTRUE(opts$outline_only)) {
@@ -604,7 +599,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   for (vc in veg_all) {
     vv <- suppressWarnings(as.numeric(closed_df[[vc]])); if (vc == "log_centsize") vv[!cal_ok_s04] <- NA_real_; closed_df[[vc]] <- vv
     v_fin <- which(is.finite(vv)); v_ref <- intersect(v_fin, ref_std_idx); if (length(v_ref) < 3L) v_ref <- v_fin
-    min_req <- if (vc %in% caul_het_raw) max(5L, ceiling(0.85 * length(ref_std_idx))) else 5L
+    min_req <- if (vc %in% caul_het_raw) max(5L, ceiling(0.50 * length(ref_std_idx))) else 5L
     if (length(v_ref) >= min_req && is.finite(stats::sd(vv[v_ref])) && stats::sd(vv[v_ref]) > 1e-6) {
       closed_df[[paste0(vc, "_std")]] <- NA_real_; closed_df[[paste0(vc, "_std")]][v_fin] <- round((vv[v_fin] - mean(vv[v_ref])) / stats::sd(vv[v_ref]), 5)
     }
@@ -621,11 +616,12 @@ run_gmm_morphotools_pipeline <- function(opts) {
   std_plast_cols <- grep("_std$", names(closed_df), value = TRUE)
   if (exists("residualize_within_deme_phenophase_plasticity", mode = "function")) closed_df <- residualize_within_deme_phenophase_plasticity(closed_df, target_cols = unique(c(if (is_intra_mode) pca_cols else character(0), std_plast_cols)), ref_mask = (closed_df$authority_weight > 0) & (is.na(closed_df$morph_tier_source) | closed_df$morph_tier_source != "Cauline_Only_Fallback"), intraspecific_mode = is_intra_mode)
   # Pre-modeling deme double-shrinkage removed to preserve CV & MANOVA independence
-  gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel), intraspecific_mode = is_intra_mode)
-  dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE); tmp_bic <- paste0(opts$output_report, ".tmp"); write.csv(gmm_res$bic_table, file = tmp_bic, row.names = FALSE); file.rename(tmp_bic, opts$output_report)
+  gmm_res <- run_gmm_cluster_analysis(closed_df, feature_cols, max_k = opts$max_k, use_clustvarsel = isTRUE(opts$use_clustvarsel), intraspecific_mode = is_intra_mode, seed = opts$seed)
+  dir.create(dirname(opts$output_report), recursive = TRUE, showWarnings = FALSE); tmp_bic <- paste0(opts$output_report, ".", Sys.getpid(), ".tmp"); write.csv(gmm_res$bic_table, file = tmp_bic, row.names = FALSE); file.rename(tmp_bic, opts$output_report)
   veg_cda <- if (!isTRUE(opts$outline_only)) prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = intersect(c("log_centsize_std", "aspect_ratio_std"), names(closed_df)), active_mask = (closed_df$authority_weight > 0), group_vec = closed_df$species_standardized, max_r = 0.75) else character(0)
   cda_cols <- unique(c(feature_cols, veg_cda))
-  cda_unsupervised <- run_cda_with_passive_projection(closed_df, cda_cols, target_taxa, gmm_res = gmm_res, intraspecific_mode = is_intra_mode); cda_res <- cda_unsupervised
+  cda_res <- run_canonical_discriminant_analysis(closed_df, cda_cols, target_taxa, gmm_res = gmm_res, intraspecific_mode = is_intra_mode)
+  if (exists(".project_shared_topology_rows_step04", mode = "function")) { tp_proj <- .project_shared_topology_rows_step04(closed_df, cda_res, gmm_res, pca_cols); cda_res <- tp_proj$cda_res; gmm_res <- tp_proj$gmm_res }
   selected_features <- unique(c(cda_res$selected_features, gmm_res$selected_features)); if (length(selected_features) == 0L) selected_features <- feature_cols
   audited_df <- audit_misidentifications(closed_df, cda_res, gmm_res, selected_features = selected_features)
   audit_institutional_batch_effects(audited_df, output_csv = opts$output_batch_audit, selected_features = selected_features)
@@ -634,7 +630,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   if (!is.null(eco_cda_res)) { audited_df$regional_group <- eco_cda_res$ecoregion_vec; audited_df$ecoregion_cda_predicted <- eco_cda_res$ecoregion_cda_predicted; audited_df$ecoregion_cda_posterior_prob <- eco_cda_res$ecoregion_cda_posterior_prob; audited_df$ecoregion_can1 <- eco_cda_res$ecoregion_can1; audited_df$ecoregion_can2 <- eco_cda_res$ecoregion_can2; if (is_intra_mode && all(is.na(audited_df$loocv_accuracy)) && !is.null(eco_cda_res$loocv_accuracy)) audited_df$loocv_accuracy <- eco_cda_res$loocv_accuracy }
   manova_res <- if (exists("run_multivariate_manova_audit", mode = "function")) run_multivariate_manova_audit(audited_df, cda_cols, gmm_res, output_group_csv = file.path(rep_dir, "manova_group_significance.csv"), output_pairwise_csv = file.path(rep_dir, "manova_pairwise_posthoc.csv"), include_gmm_clusters = !is_intra_mode) else NULL
   lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "determiner_tier", "type_status", "is_type_specimen", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "population_deme_id", "deme_n_specimens", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "is_confident_label_noise", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", "pheno_sin", "pheno_cos", pc_cols, sym_pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "heteroblasty_ect_distance", "PC1_raw_individual", "PC2_raw_individual", "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "heteroblasty_index", "heteroblasty_efa_distance", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "petiole_length_mm", "petiole_length_mm_std", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std", "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
-  out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]; dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".tmp"); .write_csv_s04(out_df, tmp_flags, na = ""); file.rename(tmp_flags, opts$output_flags)
+  out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]; dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".", Sys.getpid(), ".tmp"); .write_csv_s04(out_df, tmp_flags, na = ""); file.rename(tmp_flags, opts$output_flags)
   if (exists("persist_step04_to_sqlite", mode = "function")) tryCatch(persist_step04_to_sqlite(out_df, opts$vouchers, focal_taxon = opts$focal_taxon, intraspecific_mode = is_intra_mode), error = function(e) warning("SQLite Step 04 persistence note: ", e$message))
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, selected_features, manova_res = manova_res)
   tryCatch({ if (exists("generate_step04_pub_figures", mode = "function")) generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot, eco_cda_res = eco_cda_res, manova_res = manova_res) }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))

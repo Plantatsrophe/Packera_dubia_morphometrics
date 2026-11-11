@@ -692,7 +692,7 @@ run_fourier_extraction <- function(opts) {
   all_harm_cols <- intersect(c(harmonic_names, grep("Chebyshev", names(efa_df), value = TRUE)), names(efa_df))
   specimen_df <- if (exists("aggregate_step03_otu_medians_fast", mode = "function")) {
     agg_tmp <- aggregate_step03_otu_medians_fast(closed_leaf_df, all_harm_cols, sym_names)
-    if (exists("apply_step03_heteroblasty_weighted_otu_aggregation", mode = "function")) apply_step03_heteroblasty_weighted_otu_aggregation(agg_tmp, closed_leaf_df, all_harm_cols, sym_names) else agg_tmp
+    if (exists("reconcile_step03_basal_otu_medians", mode = "function")) reconcile_step03_basal_otu_medians(agg_tmp, closed_leaf_df, all_harm_cols, sym_names) else agg_tmp
   } else {
     do.call(rbind, lapply(split(closed_leaf_df, paste(closed_leaf_df$catalogNumber, closed_leaf_df$plant_individual_id, sep = "__")), function(grp) {
       out_g <- if ("is_contour_outlier" %in% names(grp)) as.logical(grp$is_contour_outlier) else rep(FALSE, nrow(grp))

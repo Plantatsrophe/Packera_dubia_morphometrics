@@ -653,7 +653,7 @@ if [[ "${REUSE_CANONICAL_DATA}" == "true" ]]; then
   if [[ "${START_STEP}" -le 2 ]] || [[ "${START_STEP}" -eq 3 && "${HAS_EXPLICIT_SOURCE_RUN}" == "true" ]]; then
     OVERWRITE_SEED_TABLES=true
   fi
-  for tbl in curated_vouchers.csv extracted_leaf_manifest.csv extracted_leaves_manifest.csv failed_qc_vouchers.csv voucher_reproductive_metrics.csv voucher_phenological_states.csv; do
+  for tbl in curated_vouchers.csv extracted_leaf_manifest.csv failed_qc_vouchers.csv voucher_reproductive_metrics.csv voucher_phenological_states.csv; do
     if [[ "${OVERWRITE_SEED_TABLES}" == "true" || ! -s "${RUN_DIR}/data/tables/${tbl}" ]]; then
       SRC_TBL=""
       if [[ -s "${SEED_DATA_DIR}/tables/${tbl}" ]]; then
@@ -1244,7 +1244,7 @@ has_subset_filter = bool(
 
 if has_subset_filter:
     # Filter all Step 02 tables in ${RUN_DIR}/data/tables/ to retained catalogNumbers
-    for tbl_name in ('extracted_leaf_manifest.csv', 'extracted_leaves_manifest.csv', 'failed_qc_vouchers.csv', 'voucher_reproductive_metrics.csv', 'voucher_phenological_states.csv'):
+    for tbl_name in ('extracted_leaf_manifest.csv', 'failed_qc_vouchers.csv', 'voucher_reproductive_metrics.csv', 'voucher_phenological_states.csv'):
         tp = tables_dir / tbl_name
         if tp.exists() and tp.stat().st_size > 0:
             tdf = pd.read_csv(tp)
@@ -1360,7 +1360,7 @@ import os
 from pathlib import Path
 run_tables = Path('${RUN_DIR}/data/tables')
 root_tables = Path('${PROJECT_ROOT}/data/tables')
-for tbl in ('extracted_leaf_manifest.csv', 'extracted_leaves_manifest.csv', 'failed_qc_vouchers.csv', 'voucher_reproductive_metrics.csv', 'voucher_phenological_states.csv'):
+for tbl in ('extracted_leaf_manifest.csv', 'failed_qc_vouchers.csv', 'voucher_reproductive_metrics.csv', 'voucher_phenological_states.csv'):
     src = run_tables / tbl
     if not src.exists():
         continue
