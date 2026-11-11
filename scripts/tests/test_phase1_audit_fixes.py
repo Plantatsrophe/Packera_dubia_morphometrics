@@ -294,7 +294,7 @@ class TestPhase1AuditFixes(unittest.TestCase):
         r05 = (PROJECT_ROOT / "scripts/analysis/05_multimodal_spatial_rf.R").read_text(encoding="utf-8")
         rph = (PROJECT_ROOT / "scripts/analysis/step05_phenology_ecotypes.R").read_text(encoding="utf-8")
         rsdm = (PROJECT_ROOT / "scripts/analysis/step05_sdm_maxent.R").read_text(encoding="utf-8")
-        r07 = (PROJECT_ROOT / "scripts/analysis/07_discover_taxon_complexes.R").read_text(encoding="utf-8")
+        r07 = (PROJECT_ROOT / "scripts/analysis/taxon_complex_discovery_utils.R").read_text(encoding="utf-8")
 
         # Step 03: base-10 log10(centsize), centroid_size_px separated, NA when uncalibrated
         self.assertIn("log10(centsize)", r03)
@@ -452,8 +452,8 @@ class TestSteps1To4ZeroTrustVariableContracts(unittest.TestCase):
         self.assertLess(camp_m["AR_inv"], 0.70)
         self.assertGreaterEqual(camp_m["AR_inv"], 0.25)
 
-        # 3. SQLite schema user_version == 20261115 & zero twin columns across tables and v_integrative_triage_master
-        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261115)
+        # 3. SQLite schema user_version == 20261116 & zero twin columns across tables and v_integrative_triage_master
+        self.assertEqual(PACKERA_SCHEMA_USER_VERSION, 20261116)
         conn = get_db_connection(":memory:", init_schema=True)
         try:
             init_db_schema(conn)
@@ -461,7 +461,23 @@ class TestSteps1To4ZeroTrustVariableContracts(unittest.TestCase):
             el_cols = {r[1] for r in conn.execute("PRAGMA table_info(extracted_leaves)").fetchall()}
             otu_cols = {r[1] for r in conn.execute("PRAGMA table_info(otu_morphometrics)").fetchall()}
             ct_cols = {r[1] for r in conn.execute("PRAGMA table_info(curation_triage)").fetchall()}
+            tc_cols = {r[1] for r in conn.execute("PRAGMA table_info(taxon_complexes)").fetchall()}
             view_cols = {r[1] for r in conn.execute("PRAGMA table_info(v_integrative_triage_master)").fetchall()}
+            self.assertEqual(
+                tc_cols,
+                {
+                    "run_id", "species_standardized", "n_vouchers", "n_gold_silver_anchors",
+                    "n_type_specimens", "consensus_complex_id", "complex_label",
+                    "leiden_complex_id", "ward_complex_id", "silhouette_width",
+                    "within_complex_mean_affinity", "nearest_neighbor_taxon",
+                    "nearest_neighbor_affinity", "second_neighbor_taxon",
+                    "second_neighbor_affinity", "hopkins_pheno_overlap",
+                    "eco_schoener_overlap", "integrative_congruence",
+                    "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa",
+                    "n_misidentification_reassign", "n_hybrid_introgressant",
+                    "n_putative_cryptic",
+                },
+            )
             self.assertEqual(
                 ct_cols,
                 {

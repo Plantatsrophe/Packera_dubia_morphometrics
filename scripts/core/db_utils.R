@@ -4,7 +4,7 @@
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
-#   Cross-language SQLite (WAL mode) DBI interface for R pipeline stages (03-08):
+#   Cross-language SQLite (WAL mode) DBI interface for R pipeline stages (03-06):
 #     - Connection management with WAL, foreign keys, busy_timeout = 30000, and
 #       transparent fallback to CSV when RSQLite is absent or standalone unit
 #       test fixtures outside the workspace are invoked.
@@ -12,11 +12,11 @@
 #     - Single-query 120-vertex LeafMachine3 contour ingestion for Step 03.
 #     - Step 04 OTU + plant_individuals + reproductive SQLite joins & updates.
 #     - Step 05 environmental_cache + environmental_rtree spatial bbox queries.
-#     - Step 07 & Step 08 `fetch_run_master_view()` (`v_integrative_triage_master`)
+#     - Step 06 `fetch_run_master_view()` (`v_integrative_triage_master`)
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20261115L
+PACKERA_SCHEMA_USER_VERSION <- 20261116L
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -1673,7 +1673,47 @@ persist_step06_to_sqlite <- function(
   invisible(TRUE)
 }
 
-.discover_step08_eco_cols <- function(col_names) {
+persist_step06_complexes_to_sqlite <- function(
+  complexes_df,
+  vouchers_path = NULL,
+  run_id = NULL,
+  demo = FALSE
+) {
+  if (isTRUE(demo) || is.null(complexes_df) || nrow(complexes_df) == 0L) return(invisible(FALSE))
+  if (!is_sqlite_active_for_inputs(vouchers_path, demo = demo)) return(invisible(FALSE))
+
+  conn <- connect_packera_db(read_only = FALSE, demo = FALSE)
+  if (is.null(conn)) return(invisible(FALSE))
+  on.exit(disconnect_packera_db(conn), add = TRUE)
+
+  rid <- resolve_packera_run_id(run_id)
+  ensure_pipeline_run_r(conn, run_id = rid)
+
+  tc_df <- as.data.frame(complexes_df, stringsAsFactors = FALSE)
+  tc_df$run_id <- rid
+  if ("integrative_congruence" %in% names(tc_df)) {
+    tc_df$integrative_congruence <- ifelse(is.na(tc_df$integrative_congruence), NA_integer_, as.integer(as.logical(tc_df$integrative_congruence)))
+  }
+
+  db_upsert_dataframe(
+    conn,
+    table_name = "taxon_complexes",
+    df = tc_df,
+    pk_cols = c("run_id", "species_standardized"),
+    preserve_existing_on_null = FALSE
+  )
+  DBI::dbExecute(
+    conn,
+    sprintf(
+      "DELETE FROM taxon_complexes WHERE run_id = %s AND species_standardized NOT IN (%s);",
+      as.character(DBI::dbQuoteString(conn, rid)),
+      paste(vapply(as.character(tc_df$species_standardized), function(s) as.character(DBI::dbQuoteString(conn, s)), character(1)), collapse = ", ")
+    )
+  )
+  invisible(TRUE)
+}
+
+.discover_step06_eco_cols <- function(col_names) {
   if (is.null(col_names) || length(col_names) == 0L) return(character(0))
   eco_pattern <- paste0(
     "^(bio[0-9]+_|fine_|ssurgo_|soil_|topo_|polaris_|solus_|sgmc_|ilr_texture_|elevation_m$|primary_.*_predictors$)",
@@ -1685,134 +1725,8 @@ persist_step06_to_sqlite <- function(
   )
 }
 
-.discover_step08_dynamic_morph_cols <- function(col_names) {
+.discover_step06_dynamic_morph_cols <- function(col_names) {
   if (is.null(col_names) || length(col_names) == 0L) return(character(0))
   morph_pattern <- "^(PC[0-9]+|Cauline_PC[0-9]+|ECT_PC[0-9]+|Cauline_ECT_PC[0-9]+|[AD][0-9]+|within_rosette_efa_dispersion|efd_harmonic_opt|efd_k95_pcs|selected_morph_features|ect_lobe_complexity|cauline_ect_lobe_complexity|heteroblasty_ect_distance)$"
   grep(morph_pattern, col_names, value = TRUE)
-}
-
-.backfill_cols_by_composite_key <- function(target_df, src_df, cols_to_merge) {
-  if (is.null(target_df) || nrow(target_df) == 0L || is.null(src_df) || nrow(src_df) == 0L) {
-    return(target_df)
-  }
-  if (!("catalogNumber" %in% names(target_df)) || !("catalogNumber" %in% names(src_df))) {
-    return(target_df)
-  }
-  cols_eff <- intersect(setdiff(cols_to_merge, c("catalogNumber", "plant_individual_id")), names(src_df))
-  if (length(cols_eff) == 0L) return(target_df)
-
-  src_df$catalogNumber <- as.character(src_df$catalogNumber)
-  has_pid <- ("plant_individual_id" %in% names(target_df)) && ("plant_individual_id" %in% names(src_df))
-  idx_pid <- if (has_pid) {
-    t_pid <- ifelse(is.na(target_df$plant_individual_id), 0L, as.integer(target_df$plant_individual_id))
-    s_pid <- ifelse(is.na(src_df$plant_individual_id), 0L, as.integer(src_df$plant_individual_id))
-    match(paste0(target_df$catalogNumber, "__", t_pid), paste0(src_df$catalogNumber, "__", s_pid))
-  } else {
-    rep(NA_integer_, nrow(target_df))
-  }
-  src_cat <- src_df[!duplicated(src_df$catalogNumber), , drop = FALSE]
-  idx_cat <- match(target_df$catalogNumber, src_cat$catalogNumber)
-
-  for (cl in cols_eff) {
-    cur <- if (cl %in% names(target_df)) target_df[[cl]] else rep(NA, nrow(target_df))
-    miss_cur <- is.na(cur) | (is.character(cur) & !nzchar(trimws(cur)))
-    hp <- miss_cur & !is.na(idx_pid)
-    if (any(hp)) cur[hp] <- src_df[[cl]][idx_pid[hp]]
-    miss_cur2 <- is.na(cur) | (is.character(cur) & !nzchar(trimws(cur)))
-    hc <- miss_cur2 & !is.na(idx_cat)
-    if (any(hc)) cur[hc] <- src_cat[[cl]][idx_cat[hc]]
-    target_df[[cl]] <- cur
-  }
-  target_df
-}
-
-load_step07_merged_inputs <- function(opts, standardize_fn) {
-  in_paths <- c(opts$morphometrics, opts$harmonics, opts$vouchers, opts$multimodal)
-  active_cats <- NULL
-  if (!is.null(opts$vouchers) && nzchar(opts$vouchers) && file.exists(opts$vouchers)) {
-    v_tmp <- tryCatch(utils::read.csv(opts$vouchers, stringsAsFactors = FALSE), error = function(e) NULL)
-    if (!is.null(v_tmp) && "catalogNumber" %in% names(v_tmp)) {
-      active_cats <- unique(trimws(as.character(v_tmp$catalogNumber)))
-    }
-  }
-
-  master_df <- try_fetch_master_view_for_cohort(
-    input_paths = in_paths,
-    active_catalogs = active_cats,
-    require_step04 = TRUE
-  )
-
-  if (!is.null(master_df) && nrow(master_df) > 0L) {
-    morph_df <- as.data.frame(master_df, stringsAsFactors = FALSE)
-    morph_df$catalogNumber <- as.character(morph_df$catalogNumber)
-
-    # Backfill any dynamic morphometric or ecological columns from disk snapshots if absent/NA in view
-    for (supp_m in c(opts$morphometrics, opts$harmonics)) {
-      if (!is.null(supp_m) && nzchar(supp_m) && file.exists(supp_m)) {
-        sm_df <- tryCatch(utils::read.csv(supp_m, stringsAsFactors = FALSE), error = function(e) NULL)
-        if (!is.null(sm_df) && nrow(sm_df) > 0L) {
-          dyn_m_cols <- union(
-            setdiff(names(sm_df), names(morph_df)),
-            .discover_step08_dynamic_morph_cols(names(sm_df))
-          )
-          morph_df <- .backfill_cols_by_composite_key(morph_df, sm_df, dyn_m_cols)
-        }
-      }
-    }
-    if (!is.null(opts$multimodal) && nzchar(opts$multimodal) && file.exists(opts$multimodal)) {
-      mm_disk <- tryCatch(utils::read.csv(opts$multimodal, stringsAsFactors = FALSE), error = function(e) NULL)
-      if (!is.null(mm_disk) && nrow(mm_disk) > 0L) {
-        eco_cols_disk <- .discover_step08_eco_cols(names(mm_disk))
-        morph_df <- .backfill_cols_by_composite_key(morph_df, mm_disk, eco_cols_disk)
-      }
-    }
-
-    raw_sp <- if ("species_standardized" %in% names(morph_df)) morph_df$species_standardized else if ("scientificName" %in% names(morph_df)) morph_df$scientificName else morph_df$species_raw
-    morph_df$species_standardized <- standardize_fn(raw_sp)
-    morph_df <- morph_df[!is.na(morph_df$species_standardized) & nzchar(morph_df$species_standardized) & morph_df$species_standardized != "Unknown", , drop = FALSE]
-    if ("cda_predicted_taxon" %in% names(morph_df)) morph_df$cda_predicted_taxon <- standardize_fn(morph_df$cda_predicted_taxon)
-    return(list(morph_df = morph_df))
-  }
-
-  morph_path <- opts$morphometrics
-  if (!file.exists(morph_path)) stop("Morphometrics table not found at: ", opts$morphometrics)
-  morph_df <- utils::read.csv(morph_path, stringsAsFactors = FALSE)
-  morph_df$catalogNumber <- as.character(morph_df$catalogNumber)
-
-  for (supp_path in c(opts$harmonics, opts$vouchers)) {
-    if (!is.null(supp_path) && nzchar(supp_path) && file.exists(supp_path)) {
-      s_df <- tryCatch(utils::read.csv(supp_path, stringsAsFactors = FALSE), error = function(e) NULL)
-      if (!is.null(s_df) && nrow(s_df) > 0 && "catalogNumber" %in% names(s_df)) {
-        merge_cols <- union(
-          setdiff(names(s_df), names(morph_df)),
-          .discover_step08_dynamic_morph_cols(names(s_df))
-        )
-        morph_df <- .backfill_cols_by_composite_key(morph_df, s_df, merge_cols)
-      }
-    }
-  }
-
-  pheno_path <- file.path(dirname(morph_path), "voucher_phenological_states.csv")
-  if (file.exists(pheno_path)) {
-    ph_df <- tryCatch(utils::read.csv(pheno_path, stringsAsFactors = FALSE), error = function(e) NULL)
-    if (!is.null(ph_df) && nrow(ph_df) > 0 && "catalogNumber" %in% names(ph_df)) {
-      add_ph <- setdiff(names(ph_df), names(morph_df))
-      morph_df <- .backfill_cols_by_composite_key(morph_df, ph_df, add_ph)
-    }
-  }
-
-  if (!is.null(opts$multimodal) && nzchar(opts$multimodal) && file.exists(opts$multimodal)) {
-    mm_df <- tryCatch(utils::read.csv(opts$multimodal, stringsAsFactors = FALSE), error = function(e) NULL)
-    if (!is.null(mm_df) && nrow(mm_df) > 0 && "catalogNumber" %in% names(mm_df)) {
-      eco_cols <- .discover_step08_eco_cols(names(mm_df))
-      morph_df <- .backfill_cols_by_composite_key(morph_df, mm_df, eco_cols)
-    }
-  }
-
-  raw_sp <- if ("species_standardized" %in% names(morph_df)) morph_df$species_standardized else if ("scientificName" %in% names(morph_df)) morph_df$scientificName else if ("species_raw" %in% names(morph_df)) morph_df$species_raw else if ("taxon" %in% names(morph_df)) morph_df$taxon else rep("Unknown", nrow(morph_df))
-  morph_df$species_standardized <- standardize_fn(raw_sp)
-  morph_df <- morph_df[!is.na(morph_df$species_standardized) & nzchar(morph_df$species_standardized) & morph_df$species_standardized != "Unknown", , drop = FALSE]
-  if ("cda_predicted_taxon" %in% names(morph_df)) morph_df$cda_predicted_taxon <- standardize_fn(morph_df$cda_predicted_taxon)
-
-  list(morph_df = morph_df)
 }

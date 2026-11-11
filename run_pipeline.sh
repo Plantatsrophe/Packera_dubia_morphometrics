@@ -96,9 +96,9 @@ Taxonomic Scope & Complex Discovery:
   --intraspecific-mode               Single-taxon intraspecific morphotype/ecotype delimitation mode
   --expand-synonyms / --no-expand-synonyms
                                      Toggle GBIF synonym/basionym expansion (default: --expand-synonyms)
-  --discover-complexes               Run Step 07 unsupervised taxon-complex discovery (auto-scopes focal neighbors)
-  --auto-neighbors                   Append high-affinity neighbor taxa from prior Step 07 network output
-  --min-affinity <FLOAT>             Minimum multimodal affinity weight threshold in Step 07 (default: 0.03)
+  --discover-complexes               Enable focal auto-neighbor complex scoping in unified Step 06 synthesis
+  --auto-neighbors                   Append high-affinity neighbor taxa from Step 06 complex network output
+  --min-affinity <FLOAT>             Minimum multimodal affinity weight threshold in Step 06 (default: 0.03)
 
 Authority Tiering & Curation Filters:
   --gold-only                        Restrict active cohort to Nomenclatural Types and Tier_1_Gold vouchers
@@ -726,7 +726,7 @@ write_run_metadata(
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 1 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
   if [[ "${SKIP_HARVEST}" == "false" && ( -n "${FORCE_FLAG} $([[ "${RESEGMENT}" == "true" ]] && echo "--force")" || ! -s "${RUN_DIR}/data/tables/curated_vouchers.csv" ) ]]; then
-    echo "[Step 01/07] Running Voucher Harvester (with high-res image downloads & quality audit)..."
+    echo "[Step 01/06] Running Voucher Harvester (with high-res image downloads & quality audit)..."
     HARVEST_TAXON_ARGS=()
     if [[ ${#CUSTOM_TAXA_RAW[@]} -gt 0 ]]; then
       HARVEST_TAXON_ARGS=(--taxon "${CUSTOM_TAXA_RAW[@]}" "${EXPAND_SYNONYMS_FLAG}")
@@ -1125,8 +1125,9 @@ if focal_raw:
             aff_file = next((p for p in aff_candidates if p.is_file() and p.stat().st_size > 0), None)
             if comp_file is not None:
                 cdf = pd.read_csv(comp_file)
-                if 'taxon' in cdf.columns and 'consensus_complex_id' in cdf.columns:
-                    cdf['taxon_std'] = cdf['taxon'].apply(standardize_packera_taxon)
+                sp_c_col = 'species_standardized' if 'species_standardized' in cdf.columns else ('taxon' if 'taxon' in cdf.columns else None)
+                if sp_c_col is not None and 'consensus_complex_id' in cdf.columns:
+                    cdf['taxon_std'] = cdf[sp_c_col].apply(standardize_packera_taxon)
                     focal_rows = cdf[cdf['taxon_std'] == focal_taxon]
                     if not focal_rows.empty:
                         f_cid = focal_rows['consensus_complex_id'].iloc[0]
@@ -1137,12 +1138,13 @@ if focal_raw:
                         discovered_neighbors.extend(same_c)
             if aff_file is not None:
                 adf = pd.read_csv(aff_file)
-                if 'taxon' in adf.columns:
-                    adf['taxon_std'] = adf['taxon'].apply(standardize_packera_taxon)
+                sp_a_col = 'species_standardized' if 'species_standardized' in adf.columns else ('taxon' if 'taxon' in adf.columns else None)
+                if sp_a_col is not None:
+                    adf['taxon_std'] = adf[sp_a_col].apply(standardize_packera_taxon)
                     frow = adf[adf['taxon_std'] == focal_taxon]
                     if not frow.empty:
                         for col in adf.columns:
-                            if col in ('taxon', 'taxon_std'):
+                            if col in ('species_standardized', 'taxon', 'taxon_std'):
                                 continue
                             col_std = standardize_packera_taxon(col)
                             if isinstance(col_std, str) and col_std.startswith('Packera ') and col_std != focal_taxon:
@@ -1327,7 +1329,7 @@ run_preflight_env_layers
 # Step 02: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) Segmentation, Geometric Gatekeeper & 2-Tier Leaf Extraction
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
-  echo "[Step 02/07] Running LeafMachine3 Segmentation & Organ Extraction..."
+  echo "[Step 02/06] Running LeafMachine3 Segmentation & Organ Extraction..."
   find "${RUN_DIR}/data/cropped_patches" -type l -delete 2>/dev/null || true
   "${PYTHON_LM3}" scripts/pipeline/02_segment_and_extract.py \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
@@ -1337,7 +1339,7 @@ if [[ "${START_STEP}" -le 2 && "${REUSE_CANONICAL_DATA}" == "false" ]]; then
     "${COMPUTE_ARGS[@]}"
 
   # Sync newly extracted masks, contours, cropped patches, and Step 02 manifests back to canonical root data/
-  echo "[Step 02/07] Syncing newly extracted Step 02 assets back to canonical root data/ store..."
+  echo "[Step 02/06] Syncing newly extracted Step 02 assets back to canonical root data/ store..."
   mkdir -p \
     "${PROJECT_ROOT}/data/masks" \
     "${PROJECT_ROOT}/data/contours" \
@@ -1379,7 +1381,7 @@ fi
 # Step 03: Elliptic Fourier Analysis (Momocs) & Bilateral Symmetry Decomposition
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 3 ]]; then
-  echo "[Step 03/07] Running Elliptic Fourier Extractor..."
+  echo "[Step 03/06] Running Elliptic Fourier Extractor..."
   Rscript scripts/morphometrics/03_fourier_extractor.R \
     --input "${RUN_DIR}/data/contours" \
     --contours-dir "${RUN_DIR}/data/contours" \
@@ -1394,7 +1396,7 @@ fi
 # Step 04: Gaussian Mixture Modeling (mclust), Passive CDA & Allometry
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 4 ]]; then
-  echo "[Step 04/07] Running GMM Clustering & Passive CDA..."
+  echo "[Step 04/06] Running GMM Clustering & Passive CDA..."
   Rscript scripts/morphometrics/04_gmm_morphotools.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --harmonics "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
@@ -1409,7 +1411,7 @@ if [[ "${START_STEP}" -le 4 ]]; then
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}"
 
-  echo "[Step 04/07] Regenerating post-QC Step 02 publication figures..."
+  echo "[Step 04/06] Regenerating post-QC Step 02 publication figures..."
   "${PYTHON_MAIN}" scripts/pipeline/02_segment_and_extract.py \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --output-dir "${RUN_DIR}/data" \
@@ -1420,7 +1422,7 @@ fi
 # Step 05: Multimodal Spatial Random Forests, SoilGrids/SSURGO & Hopkins Phenology
 # ------------------------------------------------------------------------------
 if [[ "${START_STEP}" -le 5 ]]; then
-  echo "[Step 05/07] Running Multimodal Spatial RF & Niche Identity Tests..."
+  echo "[Step 05/06] Running Multimodal Spatial RF & Niche Identity Tests..."
   Rscript scripts/analysis/05_multimodal_spatial_rf.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
     --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
@@ -1440,29 +1442,10 @@ if [[ "${START_STEP}" -le 5 ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Step 07 (Optional): Unsupervised Quantitative Taxon-Complex Discovery
-# (--discover-complexes / --auto-neighbors)
+# Step 06: Multi-Evidence Taxonomic Synthesis, Complex Delimitation & Dashboard
 # ------------------------------------------------------------------------------
-if [[ "${DISCOVER_COMPLEXES}" == "true" || "${AUTO_NEIGHBORS}" == "true" || "${START_STEP}" -eq 7 ]]; then
-  echo "[Step 07/07] Running Quantitative Taxon-Complex Discovery Engine..."
-  Rscript scripts/analysis/07_discover_taxon_complexes.R \
-    --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
-    --harmonics "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
-    --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
-    --multimodal "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv" \
-    --min-affinity "${MIN_AFFINITY}" \
-    --output-complexes "${RUN_DIR}/outputs/reports/empirical_taxon_complexes.csv" \
-    --output-affinity "${RUN_DIR}/outputs/reports/pairwise_taxon_affinity_matrix.csv" \
-    --output-neighbors "${RUN_DIR}/outputs/reports/focal_auto_neighbors.txt" \
-    --output-figure "${RUN_DIR}/outputs/figures/fig_empirical_taxon_complex_network.pdf" \
-    "${FOCAL_ARGS[@]}"
-fi
-
-# ------------------------------------------------------------------------------
-# Step 06: Multi-Evidence Taxonomic Decision Matrix & Triage Dashboard Synthesis
-# ------------------------------------------------------------------------------
-if [[ "${START_STEP}" -le 6 ]]; then
-  echo "[Step 06/07] Running Triage Dashboard Synthesis..."
+if [[ "${START_STEP}" -le 6 || "${START_STEP}" -eq 7 ]]; then
+  echo "[Step 06/06] Running Integrative Taxonomic Synthesis & Complex Delimitation..."
   if [[ -n "${FOCAL_TAXON}" ]]; then
     FOCAL_TAXON_SLUG="$(printf '%s' "${FOCAL_TAXON}" | sed -E 's/[^A-Za-z0-9]+/_/g; s/^_+|_+$//g')"
     STEP06_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_${FOCAL_TAXON_SLUG}_Revision.pdf"
@@ -1473,6 +1456,7 @@ if [[ "${START_STEP}" -le 6 ]]; then
   fi
   Rscript scripts/analysis/06_triage_dashboard_synthesis.R \
     --vouchers "${RUN_DIR}/data/tables/curated_vouchers.csv" \
+    --harmonics "${RUN_DIR}/data/tables/leaf_efa_harmonics.csv" \
     --morphometrics "${RUN_DIR}/data/tables/morphometric_flags.csv" \
     --multimodal-flags "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv" \
     --gmm-summary "${RUN_DIR}/outputs/reports/gmm_bayes_factors_summary.csv" \
@@ -1481,6 +1465,11 @@ if [[ "${START_STEP}" -le 6 ]]; then
     --output-plot "${STEP06_FIGURE}" \
     --output-report "${STEP06_REPORT}" \
     --output-html "${RUN_DIR}/outputs/reports/Triage_Dashboard_Interactive.html" \
+    --min-affinity "${MIN_AFFINITY}" \
+    --output-complexes "${RUN_DIR}/outputs/reports/empirical_taxon_complexes.csv" \
+    --output-affinity "${RUN_DIR}/outputs/reports/pairwise_taxon_affinity_matrix.csv" \
+    --output-neighbors "${RUN_DIR}/outputs/reports/focal_auto_neighbors.txt" \
+    --output-complex-plot "${RUN_DIR}/outputs/figures/fig06c_taxon_complex_network.pdf" \
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}" \
     "${DEMO_FLAG[@]}"

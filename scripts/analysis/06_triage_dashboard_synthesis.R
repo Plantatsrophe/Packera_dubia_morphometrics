@@ -52,6 +52,9 @@ for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
   if (!exists("persist_step06_to_sqlite", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
+for (.tc_p in c("scripts/analysis/taxon_complex_discovery_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "taxon_complex_discovery_utils.R"))) {
+  if (!exists("run_step06_complex_discovery", mode = "function") && !is.na(.tc_p) && nzchar(.tc_p) && file.exists(.tc_p)) { source(.tc_p); break }
+}
 
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing & Taxonomic Normalization
@@ -70,27 +73,43 @@ parse_args_robust <- function() {
     optparse::make_option(c("--gmm-bic"), type = "character", default = rp("data/tables/gmm_bic_model_selection.csv")),
     optparse::make_option(c("--cda-summary"), type = "character", default = rp("data/tables/cda_summary.csv")),
     optparse::make_option(c("-s", "--niche-summary"), type = "character", default = rp("outputs/reports/multimodal_spatial_rf_summary.csv")),
+    optparse::make_option(c("-e", "--harmonics"), type = "character", default = rp("data/tables/leaf_efa_harmonics.csv")),
     optparse::make_option(c("-q", "--output-queue"), type = "character", default = rp("data/tables/triage_queue.csv")),
     optparse::make_option(c("-p", "--output-plot"), type = "character", default = rp("outputs/figures/Figure_Integrative_Packera_Revision.pdf")),
     optparse::make_option(c("-r", "--output-report"), type = "character", default = rp("outputs/reports/Packera_Taxonomic_Revision_Summary.md")),
     optparse::make_option(c("--output-html"), type = "character", default = rp("outputs/reports/Triage_Dashboard_Interactive.html")),
+    optparse::make_option(c("--min-affinity"), type = "double", default = 0.03),
+    optparse::make_option(c("--output-complexes"), type = "character", default = rp("outputs/reports/empirical_taxon_complexes.csv")),
+    optparse::make_option(c("--output-affinity"), type = "character", default = rp("outputs/reports/pairwise_taxon_affinity_matrix.csv")),
+    optparse::make_option(c("--output-neighbors"), type = "character", default = rp("outputs/reports/focal_auto_neighbors.txt")),
+    optparse::make_option(c("--output-complex-plot"), type = "character", default = rp("outputs/figures/fig06c_taxon_complex_network.pdf")),
     optparse::make_option(c("--focal-taxon"), type = "character", default = ""),
     optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE),
     optparse::make_option(c("--demo"), action = "store_true", default = FALSE)
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
+    raw_cli <- commandArgs(trailingOnly = TRUE)
     opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
     names(opts) <- gsub("-", "_", names(opts))
     if (!is.null(opts$spatial_flags) && nzchar(opts$spatial_flags)) opts$multimodal_flags <- opts$spatial_flags
+    opts$cli_has_multimodal <- any(grepl("^(-c|--multimodal-flags|--spatial-flags)(=|$)", raw_cli))
+    opts$cli_has_harmonics <- any(grepl("^(-e|--harmonics)(=|$)", raw_cli))
+    opts$cli_has_morphometrics <- any(grepl("^(-m|--morphometrics)(=|$)", raw_cli))
     return(opts)
   }
-  list(vouchers = "data/tables/curated_vouchers.csv", morphometrics = "data/tables/morphometric_flags.csv",
+  list(vouchers = "data/tables/curated_vouchers.csv", harmonics = "data/tables/leaf_efa_harmonics.csv",
+       morphometrics = "data/tables/morphometric_flags.csv",
        multimodal_flags = "data/tables/multimodal_conflict_flags.csv",
        gmm_summary = "outputs/reports/gmm_bayes_factors_summary.csv", gmm_bic = "data/tables/gmm_bic_model_selection.csv",
        cda_summary = "data/tables/cda_summary.csv", niche_summary = "outputs/reports/multimodal_spatial_rf_summary.csv",
        output_queue = "data/tables/triage_queue.csv", output_plot = "outputs/figures/Figure_Integrative_Packera_Revision.pdf",
        output_report = "outputs/reports/Packera_Taxonomic_Revision_Summary.md",
-       output_html = "outputs/reports/Triage_Dashboard_Interactive.html", focal_taxon = "", intraspecific_mode = FALSE, demo = FALSE)
+       output_html = "outputs/reports/Triage_Dashboard_Interactive.html",
+       min_affinity = 0.03, output_complexes = "outputs/reports/empirical_taxon_complexes.csv",
+       output_affinity = "outputs/reports/pairwise_taxon_affinity_matrix.csv",
+       output_neighbors = "outputs/reports/focal_auto_neighbors.txt",
+       output_complex_plot = "outputs/figures/fig06c_taxon_complex_network.pdf",
+       focal_taxon = "", intraspecific_mode = FALSE, demo = FALSE)
 }
 
 .base_std_taxon <- if (exists("standardize_taxon_name", mode = "function")) standardize_taxon_name else NULL
@@ -1815,7 +1834,26 @@ build_triage_queue <- function(opts) {
     "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv"
   )
 
-  if (file.exists(opts$multimodal_flags)) {
+  def_dt_dir <- normalizePath(if (nzchar(Sys.getenv("PACKERA_RUN_DIR", unset = ""))) file.path(Sys.getenv("PACKERA_RUN_DIR"), "data/tables") else "data/tables", mustWork = FALSE)
+  vouch_dir <- normalizePath(dirname(opts$vouchers), mustWork = FALSE)
+  is_isolated_vouch_dir <- !identical(vouch_dir, def_dt_dir)
+  if (is_isolated_vouch_dir && !isTRUE(opts$cli_has_multimodal) && !is.null(opts$multimodal_flags) && nzchar(opts$multimodal_flags) &&
+      identical(normalizePath(dirname(opts$multimodal_flags), mustWork = FALSE), def_dt_dir)) {
+    sib_mm <- file.path(dirname(opts$vouchers), "multimodal_conflict_flags.csv")
+    opts$multimodal_flags <- if (file.exists(sib_mm)) sib_mm else ""
+  }
+  if (is_isolated_vouch_dir && !isTRUE(opts$cli_has_harmonics) && !is.null(opts$harmonics) && nzchar(opts$harmonics) &&
+      identical(normalizePath(dirname(opts$harmonics), mustWork = FALSE), def_dt_dir)) {
+    sib_hm <- file.path(dirname(opts$vouchers), "leaf_efa_harmonics.csv")
+    opts$harmonics <- if (file.exists(sib_hm)) sib_hm else ""
+  }
+  if (is_isolated_vouch_dir && !isTRUE(opts$cli_has_morphometrics) && !is.null(opts$morphometrics) && nzchar(opts$morphometrics) &&
+      identical(normalizePath(dirname(opts$morphometrics), mustWork = FALSE), def_dt_dir)) {
+    sib_mo <- file.path(dirname(opts$vouchers), "morphometric_flags.csv")
+    opts$morphometrics <- if (file.exists(sib_mo)) sib_mo else ""
+  }
+
+  if (!is.null(opts$multimodal_flags) && nzchar(opts$multimodal_flags) && file.exists(opts$multimodal_flags)) {
     mm_df <- readr::read_csv(opts$multimodal_flags, show_col_types = FALSE)
     mm_df$catalogNumber <- as.character(mm_df$catalogNumber)
     if ("plant_height_mm" %in% names(mm_df) && !("plant_height_cm" %in% names(mm_df))) {
@@ -1860,11 +1898,11 @@ build_triage_queue <- function(opts) {
     if (length(v) > 0L) any(v) else NA
   }
 
-  if (!file.exists(opts$morphometrics)) {
+  if (is.null(opts$morphometrics) || !nzchar(opts$morphometrics) || !file.exists(opts$morphometrics)) {
     sibling_morph <- file.path(dirname(opts$vouchers), "morphometric_flags.csv")
-    if (file.exists(sibling_morph)) opts$morphometrics <- sibling_morph else if (file.exists("data/tables/morphometric_flags.csv")) opts$morphometrics <- "data/tables/morphometric_flags.csv"
+    if (file.exists(sibling_morph)) opts$morphometrics <- sibling_morph else if (!is_isolated_vouch_dir && file.exists("data/tables/morphometric_flags.csv")) opts$morphometrics <- "data/tables/morphometric_flags.csv"
   }
-  if (file.exists(opts$morphometrics)) {
+  if (!is.null(opts$morphometrics) && nzchar(opts$morphometrics) && file.exists(opts$morphometrics)) {
     mo_df <- readr::read_csv(opts$morphometrics, show_col_types = FALSE)
     mo_df$catalogNumber <- as.character(mo_df$catalogNumber)
     validate_upstream_contracts(morpho_df = mo_df)
@@ -1988,6 +2026,12 @@ build_triage_queue <- function(opts) {
       vouchers <- safe_left_join_and_coalesce(vouchers, lt_df, append_missing = FALSE)
     }
   }
+  if (!is.null(opts$harmonics) && nzchar(opts$harmonics) && file.exists(opts$harmonics)) {
+    hm_df <- tryCatch(readr::read_csv(opts$harmonics, show_col_types = FALSE), error = function(e) NULL)
+    if (!is.null(hm_df) && "catalogNumber" %in% names(hm_df)) {
+      vouchers <- safe_left_join_and_coalesce(vouchers, hm_df, append_missing = FALSE)
+    }
+  }
   }
 
   if (any(is.na(vouchers$species_standardized) | vouchers$species_standardized == "Unknown")) {
@@ -2015,6 +2059,17 @@ build_triage_queue <- function(opts) {
     tryCatch(persist_step06_to_sqlite(vouchers, vouchers_path = opts$vouchers, demo = isTRUE(opts$demo)), error = function(e) warning("SQLite Step 06 persistence note: ", e$message))
   }
 
+  # Run Unsupervised Quantitative Taxon-Complex Discovery across full multi-taxon cohort BEFORE --focal-taxon filtering
+  comp_res <- if (exists("run_step06_complex_discovery", mode = "function")) {
+    tryCatch(run_step06_complex_discovery(vouchers, opts), error = function(e) { warning("Step 06 complex discovery warning: ", e$message); NULL })
+  } else NULL
+  if (!is.null(comp_res) && !is.null(comp_res$complexes_df) && nrow(comp_res$complexes_df) > 0L && !isTRUE(comp_res$subcluster_mode)) {
+    cdf_m <- comp_res$complexes_df
+    idx_cm <- match(as.character(vouchers$species_standardized), as.character(cdf_m$species_standardized))
+    vouchers$consensus_complex_id <- as.integer(cdf_m$consensus_complex_id[idx_cm])
+    vouchers$complex_label <- as.character(cdf_m$complex_label[idx_cm])
+  }
+
   if (!is.null(opts$focal_taxon) && nzchar(trimws(opts$focal_taxon))) {
     f_std <- standardize_packera_taxon(opts$focal_taxon)
     rec_det_v <- if ("recommended_determination" %in% names(vouchers)) as.character(vouchers$recommended_determination) else rep(NA_character_, nrow(vouchers))
@@ -2026,6 +2081,7 @@ build_triage_queue <- function(opts) {
   vouchers$prio_rank <- prio_order[vouchers$synthesis_triage_priority]
   vouchers <- if ("coordinateUncertainty" %in% names(vouchers)) vouchers[order(vouchers$prio_rank, -vouchers$coordinateUncertainty), ] else vouchers[order(vouchers$prio_rank), ]
   vouchers$prio_rank <- NULL
+  if (!is.null(comp_res)) attr(vouchers, "complex_discovery") <- comp_res
 
   .write_triage_fast <- function(d, p, na_str = "NA") {
     if (requireNamespace("data.table", quietly = TRUE)) data.table::fwrite(d, file = p, na = na_str, quote = "auto", logical01 = FALSE) else readr::write_csv(d, p, na = na_str)
@@ -2219,7 +2275,33 @@ generate_taxonomic_revision_report <- function(df, opts) {
     sprintf("- **Stage 4 (Subspecific Ecotypes and Taphonomic/Ontogenetic Plasticity):** %d cohesive ecotypes (%0.1f%%) and %d within-envelope plastic variants (%0.1f%%).", ecotype_n, (ecotype_n / max(tot_n, 1)) * 100, ecoph_n, (ecoph_n / max(tot_n, 1)) * 100), "",
     "## 2. Multi-Evidence Taxonomic Treatment",
     treatment_lines, "",
-    "## 3. Herbarium Triage Queue Audit Summary",
+    {
+      comp_att <- attr(df, "complex_discovery")
+      cdf_rep <- if (!is.null(comp_att) && !is.null(comp_att$complexes_df)) comp_att$complexes_df else if (!is.null(opts$output_complexes) && nzchar(opts$output_complexes) && file.exists(opts$output_complexes)) tryCatch(utils::read.csv(opts$output_complexes, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
+      if (!is.null(cdf_rep) && nrow(cdf_rep) >= 2L) {
+        fmt_it <- function(s) ifelse(grepl("^Packera\\s+|^P\\.\\s+", s), paste0("*", s, "*"), s)
+        c_rows <- vapply(seq_len(nrow(cdf_rep)), function(ri) {
+          sprintf(
+            "| %s | `%s` | %s (%.3f) | %.3f | %s |",
+            fmt_it(as.character(cdf_rep$species_standardized[ri])),
+            as.character(cdf_rep$complex_label[ri]),
+            fmt_it(as.character(cdf_rep$nearest_neighbor_taxon[ri])),
+            suppressWarnings(as.numeric(cdf_rep$nearest_neighbor_affinity[ri])),
+            suppressWarnings(as.numeric(cdf_rep$silhouette_width[ri])),
+            ifelse(isTRUE(as.logical(cdf_rep$integrative_congruence[ri])), "Yes", "No")
+          )
+        }, character(1))
+        c(
+          "## 3. Empirical Taxon-Complex Delimitation",
+          "| Taxon / Subcluster | Complex | Nearest Neighbor ($W_{ij}$) | Silhouette | Congruent |",
+          "| :--- | :--- | :--- | :--- | :--- |",
+          c_rows, "",
+          "## 4. Herbarium Triage Queue Audit Summary"
+        )
+      } else {
+        "## 3. Herbarium Triage Queue Audit Summary"
+      }
+    },
     "| Triage Priority | Voucher Count | Percentage | Recommended Action |",
     "| :--- | :--- | :--- | :--- |",
     sprintf("| **CRITICAL** | **%d** | **%0.1f%%** | Specialist manual re-inspection & sheet annotation |", crit_n, (crit_n / max(tot_n, 1)) * 100),
@@ -2262,7 +2344,7 @@ generate_taxonomic_revision_report <- function(df, opts) {
   paste0("\"", s, "\"")
 }
 
-generate_interactive_triage_html <- function(df, html_path, focal_taxon = "") {
+generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", opts = NULL) {
   if (is.null(html_path) || !nzchar(trimws(as.character(html_path)))) return(invisible(NULL))
   dir.create(dirname(html_path), recursive = TRUE, showWarnings = FALSE)
   n <- nrow(df)
@@ -2388,6 +2470,18 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "") {
     sprintf("<div class=\"kpi\"><div class=\"lbl\">Variety / Plasticity</div><div class=\"val\">%d</div></div>", n_eco),
     sprintf("<div class=\"kpi\"><div class=\"lbl\">Confirmed Species</div><div class=\"val\">%d</div></div>", n_conf),
     "</section>",
+    {
+      comp_att_h <- attr(df, "complex_discovery")
+      cdf_h <- if (!is.null(comp_att_h) && !is.null(comp_att_h$complexes_df)) comp_att_h$complexes_df else if (!is.null(opts) && !is.null(opts$output_complexes) && nzchar(opts$output_complexes) && file.exists(opts$output_complexes)) tryCatch(utils::read.csv(opts$output_complexes, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
+      if (!is.null(cdf_h) && nrow(cdf_h) >= 2L) {
+        u_cl_h <- unique(as.character(cdf_h$complex_label))
+        cl_chips <- vapply(u_cl_h, function(clb) {
+          m_tx <- as.character(cdf_h$species_standardized[cdf_h$complex_label == clb])
+          sprintf("<span style=\"display:inline-block;margin:2px 8px 2px 0;padding:3px 9px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;font-size:0.81rem;\"><strong>%s:</strong> <span class=\"sci\">%s</span></span>", .html_escape_vec(clb), paste(.html_escape_vec(m_tx), collapse = ", "))
+        }, character(1))
+        paste0("<section style=\"background:#fff;border:1px solid #cbd5e1;border-radius:8px;padding:10px 14px;margin-bottom:14px;\"><div style=\"font-size:0.75rem;text-transform:uppercase;letter-spacing:0.04em;color:#475569;margin-bottom:4px;\">Empirical Species Complexes (Leiden / Metric Ward.D2)</div>", paste(cl_chips, collapse = ""), "</section>")
+      } else ""
+    },
     "<section class=\"toolbar\">",
     "<input type=\"search\" id=\"qSearch\" placeholder=\"Search catalogNumber, collector, herbarium, taxon, rationale...\">",
     "<select id=\"qPrio\"><option value=\"ALL\">All Priorities</option><option value=\"CRITICAL\">CRITICAL</option><option value=\"HIGH\">HIGH</option><option value=\"MEDIUM\">MEDIUM</option><option value=\"LOW\">LOW</option><option value=\"RESOLVED\">RESOLVED</option></select>",
@@ -2475,7 +2569,7 @@ main <- function() {
   }, error = function(e) warning("Step 06 publication figures export warning: ", e$message))
   generate_taxonomic_revision_report(triage_df, opts)
   if (!is.null(opts$output_html) && nzchar(trimws(opts$output_html))) {
-    generate_interactive_triage_html(triage_df, opts$output_html, focal_taxon = opts$focal_taxon)
+    generate_interactive_triage_html(triage_df, opts$output_html, focal_taxon = opts$focal_taxon, opts = opts)
   }
   message("=== Taxonomic Synthesis & Triage Dashboard Complete ===")
 }

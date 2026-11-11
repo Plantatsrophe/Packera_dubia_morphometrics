@@ -1942,26 +1942,30 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             self.assertEqual(_arg_value(cmd_step06, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step06)
 
-            # Step 06 assertions
+            # Unified Step 06 synthesis + complex delimitation assertions
             self.assertTrue(any("06_triage_dashboard_synthesis.R" in tok for tok in cmd_step07))
+            self.assertEqual(_arg_value(cmd_step07, "--harmonics"), str(tables_dir / "leaf_efa_harmonics.csv"))
             self.assertEqual(_arg_value(cmd_step07, "--output-queue"), str(tables_dir / "triage_queue.csv"))
             self.assertEqual(_arg_value(cmd_step07, "--output-html"), str(reports_dir / "Triage_Dashboard_Interactive.html"))
+            self.assertEqual(_arg_value(cmd_step07, "--output-complexes"), str(reports_dir / "empirical_taxon_complexes.csv"))
+            self.assertEqual(_arg_value(cmd_step07, "--output-affinity"), str(reports_dir / "pairwise_taxon_affinity_matrix.csv"))
+            self.assertEqual(_arg_value(cmd_step07, "--output-neighbors"), str(reports_dir / "focal_auto_neighbors.txt"))
+            self.assertEqual(_arg_value(cmd_step07, "--output-complex-plot"), str(figures_dir / "fig06c_taxon_complex_network.pdf"))
             self.assertEqual(_arg_value(cmd_step07, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step07)
 
-        # 3. Verify run_pipeline.sh Step 07 ordering + --multimodal handoff
+        # 3. Verify run_pipeline.sh unified 6-stage ordering (Step 05 -> unified Step 06 with complex discovery)
         run_sh = Path(__file__).resolve().parents[2] / "run_pipeline.sh"
         sh_text = run_sh.read_text(encoding="utf-8")
 
         pos_step05 = sh_text.index("scripts/analysis/05_multimodal_spatial_rf.R")
-        pos_step07 = sh_text.index("scripts/analysis/07_discover_taxon_complexes.R")
         pos_step06 = sh_text.index("scripts/analysis/06_triage_dashboard_synthesis.R")
+        self.assertLess(pos_step05, pos_step06, "Unified Step 06 must run AFTER Step 05 completes in run_pipeline.sh")
 
-        self.assertLess(pos_step05, pos_step07, "Step 07 must run AFTER Step 05 completes in run_pipeline.sh")
-        self.assertLess(pos_step07, pos_step06, "Step 07 must run before Step 06 synthesis in run_pipeline.sh")
-
-        step07_block = sh_text[pos_step07:pos_step06]
-        self.assertIn('--multimodal "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv"', step07_block)
+        step06_block = sh_text[pos_step06:]
+        self.assertIn('--multimodal-flags "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv"', step06_block)
+        self.assertIn('--output-complexes "${RUN_DIR}/outputs/reports/empirical_taxon_complexes.csv"', step06_block)
+        self.assertIn('--output-complex-plot "${RUN_DIR}/outputs/figures/fig06c_taxon_complex_network.pdf"', step06_block)
 
         proc = subprocess.run(["bash", "-n", str(run_sh)], capture_output=True, text=True, check=False)
         self.assertEqual(proc.returncode, 0, f"bash -n run_pipeline.sh failed: {proc.stderr}")
@@ -3514,7 +3518,7 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
         project_root = Path(__file__).resolve().parents[2]
         aw_r = (project_root / "scripts/morphometrics/authority_weighting_utils.R").read_text(encoding="utf-8")
         tri_r = (project_root / "scripts/analysis/06_triage_dashboard_synthesis.R").read_text(encoding="utf-8")
-        disc_r = (project_root / "scripts/analysis/07_discover_taxon_complexes.R").read_text(encoding="utf-8")
+        disc_r = (project_root / "scripts/analysis/taxon_complex_discovery_utils.R").read_text(encoding="utf-8")
 
         self.assertIn(".apply_stratified_silver_pool_cap", aw_r)
         self.assertIn("silver_max_pool_share = 0.40", aw_r)
@@ -3532,7 +3536,7 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
             "scripts/analysis/05_multimodal_spatial_rf.R",
             "scripts/analysis/06_triage_dashboard_synthesis.R",
             "scripts/analysis/step05_phenology_ecotypes.R",
-            "scripts/analysis/07_discover_taxon_complexes.R",
+            "scripts/analysis/taxon_complex_discovery_utils.R",
         ):
             src = (project_root / rel_r).read_text(encoding="utf-8")
             stack = []

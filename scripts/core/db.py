@@ -14,7 +14,7 @@ Description:
       - Tier B (Run-Scoped Analytical Store, partitioned by run_id):
           pipeline_runs, run_active_cohort, leaf_efa_harmonics,
           otu_morphometrics, spatial_rf_predictions,
-          curation_triage, and v_integrative_triage_master.
+          curation_triage, taxon_complexes, and v_integrative_triage_master.
 
     ABI Invariant:
       Relies strictly on Python's built-in standard library (`sqlite3`, `csv`,
@@ -2083,6 +2083,55 @@ def persist_spatial_rf_predictions(
     )
 
 
+def persist_taxon_complexes(
+    conn: sqlite3.Connection,
+    run_id: str,
+    rows: Sequence[Mapping[str, Any]],
+    demo: bool = False,
+) -> int:
+    """Upsert Step 06 empirical species-complex delimitation rows into `taxon_complexes`."""
+    if demo or not rows:
+        return 0
+    eff_run = str(run_id).strip() or "canonical"
+    ensure_pipeline_run(conn, run_id=eff_run)
+    prepared: List[Dict[str, Any]] = []
+    for r in rows:
+        sp = _to_str(r.get("species_standardized"))
+        if not sp:
+            continue
+        rec: Dict[str, Any] = {"run_id": eff_run, "species_standardized": sp}
+        for sc in ("complex_label", "nearest_neighbor_taxon", "second_neighbor_taxon"):
+            if sc in r:
+                rec[sc] = _to_str(r.get(sc))
+        for ic in (
+            "n_vouchers", "n_gold_silver_anchors", "n_type_specimens",
+            "consensus_complex_id", "leiden_complex_id", "ward_complex_id",
+            "n_misidentification_reassign", "n_hybrid_introgressant", "n_putative_cryptic",
+        ):
+            if ic in r:
+                rec[ic] = _to_int(r.get(ic))
+        if "integrative_congruence" in r:
+            rec["integrative_congruence"] = _to_bool_int(r.get("integrative_congruence"))
+        for fc in (
+            "silhouette_width", "within_complex_mean_affinity",
+            "nearest_neighbor_affinity", "second_neighbor_affinity",
+            "hopkins_pheno_overlap", "eco_schoener_overlap",
+            "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa",
+        ):
+            if fc in r:
+                rec[fc] = _to_float(r.get(fc))
+        prepared.append(rec)
+    if not prepared:
+        return 0
+    return upsert_rows_generic(
+        conn,
+        table_name="taxon_complexes",
+        rows=prepared,
+        pk_cols=("run_id", "species_standardized"),
+        preserve_existing_on_null=False,
+    )
+
+
 # =============================================================================
 # Bidirectional Bootstrap Migration (`ingest_existing_csvs_to_db`)
 # =============================================================================
@@ -2101,7 +2150,7 @@ def ingest_existing_run_tables_into_db(
     demo: bool = False,
 ) -> Dict[str, int]:
     """
-    Ingest Step 03-07 run-scoped CSV outputs (`leaf_efa_harmonics_individual.csv`,
+    Ingest Step 03-06 run-scoped CSV outputs (`leaf_efa_harmonics_individual.csv`,
     `leaf_efa_harmonics.csv`, `morphometric_flags.csv`,
     `multimodal_conflict_flags.csv`, `triage_queue.csv`)
     into Tier B SQLite tables with full dynamic `A1..D24`, `PC1..PC15`,
@@ -2387,9 +2436,9 @@ def purge_segments_and_runs(
     vacuum: bool = True,
 ) -> Dict[str, int]:
     """
-    Purges all Step 02 to 07 segmentation artifacts (masks, contours, ECT matrices,
+    Purges all Step 02 to 06 segmentation artifacts (masks, contours, ECT matrices,
     cropped patches, non-Step-01 tables, figures, reports, and run directories) and
-    clears Step 02 to 07 SQLite tables while preserving Step 01 harvested vouchers,
+    clears Step 02 to 06 SQLite tables while preserving Step 01 harvested vouchers,
     raw voucher imagery, taxon synonyms, and the environmental cache.
     """
     import shutil as _shutil
@@ -2446,9 +2495,9 @@ def purge_segments_and_runs(
         try:
             conn.execute("PRAGMA foreign_keys = OFF;")
             purge_tables = (
+                "taxon_complexes",
                 "curation_triage",
                 "spatial_rf_predictions",
-                "vision_xai_audit",
                 "otu_morphometrics",
                 "leaf_efa_harmonics",
                 "run_active_cohort",
@@ -2456,7 +2505,6 @@ def purge_segments_and_runs(
                 "voucher_reproductive_phenology",
                 "extracted_leaves",
                 "plant_individuals",
-                "dinov2_feature_cache",
             )
             for tbl in purge_tables:
                 try:
@@ -2482,5 +2530,5 @@ def purge_segments_and_runs(
             conn.close()
 
     summary = {"removed_files": int(removed_files), "purged_db_rows": int(purged_rows)}
-    logger.info("Purged Step 02-07 segments and run artifacts: %s", summary)
+    logger.info("Purged Step 02-06 segments and run artifacts: %s", summary)
     return summary

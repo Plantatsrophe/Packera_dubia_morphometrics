@@ -5,8 +5,8 @@
 # Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 #
 # Description:
-#   Step 06 ecological niche & geographic map publication figures, Step 07
-#   integrative synthesis plates, Step 08 complex discovery plates, pure-R
+#   Step 05 ecological niche & geographic map publication figures, Step 06
+#   integrative synthesis and complex discovery plates, pure-R
 #   Gaussian Mixture Model EM solver, and individual-level trait mergers.
 # ==============================================================================
 
@@ -1207,7 +1207,7 @@ render_step06_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL) {
   invisible(out_pdf)
 }
 
-render_step07_complex_discovery_pdf <- function(W, part_res, out_pdf) {
+render_step06_complex_discovery_pdf <- function(W, part_res, out_pdf) {
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
   cdf <- part_res$complexes_df
   taxa <- cdf$species_standardized
@@ -1223,7 +1223,7 @@ render_step07_complex_discovery_pdf <- function(W, part_res, out_pdf) {
     W_ord <- W[ord, ord, drop = FALSE]
     diag(W_ord) <- 1.0
     lbl_ord <- short_names[ord]
-    cid_ord <- cdf$complex_id[ord]
+    cid_ord <- cdf$consensus_complex_id[ord]
 
     heat_cols <- grDevices::hcl.colors(64, "YlOrRd", rev = TRUE)
     cex_ax_heat <- min(0.78, max(0.42, 6.8 / max(n_taxa, 1L)))
@@ -1231,7 +1231,7 @@ render_step07_complex_discovery_pdf <- function(W, part_res, out_pdf) {
       x = seq_len(n_taxa), y = seq_len(n_taxa),
       z = t(W_ord[rev(seq_len(n_taxa)), , drop = FALSE]),
       col = heat_cols, axes = FALSE, xlab = "", ylab = "",
-      main = "A. Empirical Taxon Affinity Matrix (W_ij) & Complexes"
+      main = expression(bold("A. Multimodal Taxon Affinity Matrix (" * italic(W)[italic(ij)] * ") & Complexes"))
     )
     graphics::axis(1, at = seq_len(n_taxa), labels = lbl_ord, las = 2, cex.axis = cex_ax_heat, font = 3)
     graphics::axis(2, at = seq_len(n_taxa), labels = rev(lbl_ord), las = 2, cex.axis = cex_ax_heat, font = 3)
@@ -1266,7 +1266,12 @@ render_step07_complex_discovery_pdf <- function(W, part_res, out_pdf) {
       }
     }
 
-    pcoa_2d <- tryCatch(stats::cmdscale(part_res$dist_obj, k = 2), error = function(e) NULL)
+    pcoa_fit <- tryCatch(stats::cmdscale(part_res$dist_obj, k = 2, eig = TRUE, add = TRUE), error = function(e) NULL)
+    pcoa_2d <- if (!is.null(pcoa_fit) && !is.null(pcoa_fit$points)) pcoa_fit$points else NULL
+    eig_pos <- if (!is.null(pcoa_fit) && !is.null(pcoa_fit$eig)) pmax(0.0, as.numeric(pcoa_fit$eig)) else numeric(0)
+    eig_sum <- sum(eig_pos, na.rm = TRUE)
+    pct1 <- if (length(eig_pos) >= 1L && eig_sum > 1e-12) 100.0 * eig_pos[1L] / eig_sum else NA_real_
+    pct2 <- if (length(eig_pos) >= 2L && eig_sum > 1e-12) 100.0 * eig_pos[2L] / eig_sum else NA_real_
     if (is.null(pcoa_2d) || ncol(pcoa_2d) < 2L) {
       ang <- seq(0, 2 * pi, length.out = n_taxa + 1L)[seq_len(n_taxa)]
       pcoa_2d <- cbind(cos(ang), sin(ang))
@@ -1274,18 +1279,20 @@ render_step07_complex_discovery_pdf <- function(W, part_res, out_pdf) {
     px <- as.numeric(pcoa_2d[, 1]); py <- as.numeric(pcoa_2d[, 2])
     xr <- range(px, na.rm = TRUE); xpad <- max(0.18 * diff(xr), 0.15)
     yr <- range(py, na.rm = TRUE); ypad <- max(0.18 * diff(yr), 0.15)
+    xlab_pcoa <- if (is.finite(pct1)) bquote("PCoA Axis 1 (" * .(sprintf("%.1f%%", pct1)) * "; " * sqrt(1 - italic(W)[italic(ij)]) * " Metric)") else expression("PCoA Axis 1 (" * sqrt(1 - italic(W)[italic(ij)]) * " Metric)")
+    ylab_pcoa <- if (is.finite(pct2)) bquote("PCoA Axis 2 (" * .(sprintf("%.1f%%", pct2)) * "; " * sqrt(1 - italic(W)[italic(ij)]) * " Metric)") else expression("PCoA Axis 2 (" * sqrt(1 - italic(W)[italic(ij)]) * " Metric)")
 
     graphics::plot(
       px, py, type = "n",
       xlim = c(xr[1] - xpad, xr[2] + xpad), ylim = c(yr[1] - ypad, yr[2] + ypad),
-      xlab = "PCoA Axis 1 (1 - W_ij Dissimilarity)", ylab = "PCoA Axis 2 (1 - W_ij Dissimilarity)",
+      xlab = xlab_pcoa, ylab = ylab_pcoa,
       main = "B. Unsupervised Taxon-Complex Affinity Network", font.main = 2
     )
     graphics::grid(col = "grey88", lty = "solid")
     graphics::abline(h = 0, v = 0, lty = 3, col = "grey72")
 
-    for (cid in sort(unique(cdf$complex_id))) {
-      m <- which(cdf$complex_id == cid)
+    for (cid in sort(unique(cdf$consensus_complex_id))) {
+      m <- which(cdf$consensus_complex_id == cid)
       h_col <- complex_pal[(cid - 1L) %% length(complex_pal) + 1L]
       if (length(m) >= 3L) {
         hull_idx <- grDevices::chull(px[m], py[m])
@@ -1317,8 +1324,8 @@ render_step07_complex_discovery_pdf <- function(W, part_res, out_pdf) {
       for (i in seq_len(n_taxa - 1L)) {
         for (j in (i + 1L):n_taxa) {
           if (keep_edge[i, j]) {
-            same_c <- cdf$complex_id[i] == cdf$complex_id[j]
-            e_col <- if (same_c) grDevices::adjustcolor(complex_pal[(cdf$complex_id[i] - 1L) %% length(complex_pal) + 1L], alpha.f = 0.70) else grDevices::adjustcolor("grey55", alpha.f = 0.45)
+            same_c <- cdf$consensus_complex_id[i] == cdf$consensus_complex_id[j]
+            e_col <- if (same_c) grDevices::adjustcolor(complex_pal[(cdf$consensus_complex_id[i] - 1L) %% length(complex_pal) + 1L], alpha.f = 0.70) else grDevices::adjustcolor("grey55", alpha.f = 0.45)
             graphics::segments(px[i], py[i], px[j], py[j], col = e_col, lwd = max(0.8, 5.5 * W[i, j]))
           }
         }
@@ -1326,10 +1333,15 @@ render_step07_complex_discovery_pdf <- function(W, part_res, out_pdf) {
     }
 
     node_cex <- pmax(1.1, pmin(2.6, 0.9 + 0.65 * log10(pmax(cdf$n_vouchers, 1))))
-    node_pch <- hollow_pchs[(cdf$complex_id - 1L) %% length(hollow_pchs) + 1L]
+    node_pch <- hollow_pchs[(cdf$consensus_complex_id - 1L) %% length(hollow_pchs) + 1L]
     node_col <- dyn_pal[taxa]
-    node_col[is.na(node_col)] <- complex_pal[(cdf$complex_id[is.na(node_col)] - 1L) %% length(complex_pal) + 1L]
+    node_col[is.na(node_col)] <- complex_pal[(cdf$consensus_complex_id[is.na(node_col)] - 1L) %% length(complex_pal) + 1L]
     graphics::points(px, py, pch = node_pch, bg = NA, col = node_col, cex = node_cex, lwd = 1.8)
+    has_type_node <- if ("n_type_specimens" %in% names(cdf)) (!is.na(cdf$n_type_specimens) & as.integer(cdf$n_type_specimens) >= 1L) else rep(FALSE, n_taxa)
+    if (any(has_type_node)) {
+      t_idx <- which(has_type_node)
+      graphics::points(px[t_idx], py[t_idx], pch = 1L, bg = NA, col = node_col[t_idx], cex = node_cex[t_idx] + 0.55, lwd = 1.3)
+    }
 
     lbl_xy <- NULL
     if (exists("repel_2d_labels", mode = "function")) {
@@ -1385,8 +1397,8 @@ render_step07_complex_discovery_pdf <- function(W, part_res, out_pdf) {
     }
     graphics::text(lx, ly, labels = short_names, cex = lbl_cex_net, font = 3, col = "black")
 
-    u_cl <- sort(unique(cdf$complex_id))
-    cl_names <- vapply(u_cl, function(k) cdf$complex_label[which(cdf$complex_id == k)[1]], character(1))
+    u_cl <- sort(unique(cdf$consensus_complex_id))
+    cl_names <- vapply(u_cl, function(k) cdf$complex_label[which(cdf$consensus_complex_id == k)[1]], character(1))
     graphics::legend(
       "topright", legend = cl_names,
       col = complex_pal[(u_cl - 1L) %% length(complex_pal) + 1L],

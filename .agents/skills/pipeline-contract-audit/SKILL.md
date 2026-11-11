@@ -5,7 +5,7 @@ description: Enforces LeafMachine3 computer vision and morphometric guardrails, 
 
 # Pipeline Contract Audit and CV Guardrails (`UNC-BOT-SOP-2026-04-REV5`)
 
-Use this skill before committing code changes, after modifying pipeline stages (`01` through `07`), or when diagnosing missing-column, coordinate unscaling, or join-key discrepancies across Python and R scripts.
+Use this skill before committing code changes, after modifying pipeline stages (`01` through `06`), or when diagnosing missing-column, coordinate unscaling, or join-key discrepancies across Python and R scripts.
 
 ---
 
@@ -95,7 +95,7 @@ scripts = [
     "scripts/pipeline/02_segment_and_extract.py", "scripts/morphometrics/03_fourier_extractor.R",
     "scripts/morphometrics/04_gmm_morphotools.R", "scripts/morphometrics/authority_weighting_utils.R",
     "scripts/analysis/05_multimodal_spatial_rf.R", "scripts/analysis/06_triage_dashboard_synthesis.R",
-    "scripts/analysis/07_discover_taxon_complexes.R",
+    "scripts/analysis/taxon_complex_discovery_utils.R",
 ]
 
 missing = [s for s in scripts if not Path(s).exists()]
@@ -112,7 +112,7 @@ s04 = Path("scripts/morphometrics/04_gmm_morphotools.R").read_text()
 s_auth = Path("scripts/morphometrics/authority_weighting_utils.R").read_text()
 s05 = Path("scripts/analysis/05_multimodal_spatial_rf.R").read_text()
 s06 = Path("scripts/analysis/06_triage_dashboard_synthesis.R").read_text()
-s07 = Path("scripts/analysis/07_discover_taxon_complexes.R").read_text()
+s07 = Path("scripts/analysis/taxon_complex_discovery_utils.R").read_text()
 
 checks = [
     ("db.py defines schema, WAL mode, tables, and master view", "v_integrative_triage_master" in s_db and "PRAGMA journal_mode = WAL" in s_db),
@@ -137,7 +137,7 @@ checks = [
     ("06 validates contracts & coalesces non-georeferenced vouchers", "validate_upstream_contracts" in s06 and "taxonomic_treatment_broad" in s06 and "is_completed_voucher" in s06),
     ("06 enforces cross-modal precision weighting", "Confirmed_Type_Control" in s06 and ("prec_morph" in s06 or "lookup_prec" in s06)),
     ("06 enforces type control Rules A, B, and C", "Confirmed_Type_Control" in s06 and "Type_Synonymy_Candidate" in s06 and "is_sensu_stricto_locked_i" in s06),
-    ("07 enforces type-anchored complex discovery and delimitation", "select_taxon_anchors" in s07 and "is_type_spec" in s07 and "gamma_k" in s07),
+    ("06 complex discovery enforces type-anchored complex delimitation", "select_taxon_anchors" in s07 and "is_type_spec" in s07 and "gamma_k" in s07),
 ]
 
 failed = False
@@ -164,7 +164,7 @@ import re, sys
 from pathlib import Path
 banned = [
     "clean" + "lab", "dino" + "v2", "vision_" + "xai", "05_clean" + "lab", "06_multimodal_" + "spatial",
-    "07_tri" + "age", "08_dis" + "cover", "step07_" + "pub", "fig" + "08", "target_" + "species",
+    "07_tri" + "age", "07_dis" + "cover", "08_dis" + "cover", "step07_" + "pub", "fig" + "08", "target_" + "species",
     "hard" + "coded", "operational" + "iz", "lever" + "ag", "util" + "iz", "holis" + "tic",
     "multi" + "faceted", "para" + "digm",
 ]
@@ -177,7 +177,7 @@ for p in [Path("README.md"), Path("docs/TAXONOMIC_SOP.md"), Path("AGENTS.md")]:
 if violations:
     print("[FAIL] Banned tokens found:\n" + "\n".join(violations))
     sys.exit(1)
-print("PASS: Docs clean and renumbered to Steps 01 to 07")
+print("PASS: Docs clean and renumbered to Steps 01 to 06")
 '
 
 pytest scripts/tests/ -q

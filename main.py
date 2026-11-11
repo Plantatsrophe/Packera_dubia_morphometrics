@@ -1201,10 +1201,19 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         getattr(args, "synthesis_html", None)
         or (reports_dir_s05 / "Triage_Dashboard_Interactive.html")
     )
+    harmonics_csv = tables_dir / "leaf_efa_harmonics.csv"
+    output_complexes = Path(getattr(args, "output_complexes", None) or (reports_dir_s05 / "empirical_taxon_complexes.csv"))
+    output_affinity = Path(getattr(args, "output_affinity", None) or (reports_dir_s05 / "pairwise_taxon_affinity_matrix.csv"))
+    output_neighbors = Path(getattr(args, "output_neighbors", None) or (reports_dir_s05 / "focal_auto_neighbors.txt"))
+    output_complex_plot = Path(getattr(args, "output_complex_plot", None) or (figures_dir / "fig06c_taxon_complex_network.pdf"))
+    min_affinity_val = getattr(args, "min_affinity", None)
+    if min_affinity_val is None:
+        min_affinity_val = float((cfg.get("synthesis", {}) or {}).get("min_affinity", 0.03))
 
     cmd_triage = [
         rscript_bin, str(triage_script),
         "--vouchers", str(vouchers_csv),
+        "--harmonics", str(harmonics_csv),
         "--morphometrics", str(morph_flags),
         "--multimodal-flags", str(conflict_flags),
         "--gmm-summary", str(gmm_summary),
@@ -1213,6 +1222,11 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         "--output-plot", str(synthesis_plot),
         "--output-report", str(synthesis_report),
         "--output-html", str(synthesis_html),
+        "--min-affinity", str(min_affinity_val),
+        "--output-complexes", str(output_complexes),
+        "--output-affinity", str(output_affinity),
+        "--output-neighbors", str(output_neighbors),
+        "--output-complex-plot", str(output_complex_plot),
     ]
     if focal_taxon:
         cmd_triage.extend(["--focal-taxon", focal_taxon])
@@ -1649,6 +1663,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_synth.add_argument("--synthesis-plot", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--synthesis-report", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--synthesis-html", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--min-affinity", type=float, default=None, help="Minimum multimodal affinity threshold for Step 06 complex neighbors (default: 0.03)")
+    p_synth.add_argument("--output-complexes", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--output-affinity", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--output-neighbors", type=Path, default=None, help=argparse.SUPPRESS)
+    p_synth.add_argument("--output-complex-plot", type=Path, default=None, help=argparse.SUPPRESS)
     p_synth.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")
     p_synth.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
 
@@ -1778,6 +1797,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--no-export-figures", dest="export_figures", action="store_false", help="Disable figure export")
     p_all.add_argument("--focal-taxon", type=str, default=None, help="Optional focal Packera taxon for targeted revision synthesis")
     p_all.add_argument("--intraspecific-mode", action="store_true", default=False, help="Run single-taxon intraspecific delimitation mode")
+    p_all.add_argument("--min-affinity", type=float, default=None, help="Minimum multimodal affinity threshold for Step 06 complex neighbors (default: 0.03)")
 
     return parser
 

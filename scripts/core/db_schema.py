@@ -884,6 +884,35 @@ def _build_schema_ddl() -> str:
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS taxon_complexes (
+        run_id TEXT NOT NULL,
+        species_standardized TEXT NOT NULL,
+        n_vouchers INTEGER,
+        n_gold_silver_anchors INTEGER,
+        n_type_specimens INTEGER,
+        consensus_complex_id INTEGER,
+        complex_label TEXT,
+        leiden_complex_id INTEGER,
+        ward_complex_id INTEGER,
+        silhouette_width REAL,
+        within_complex_mean_affinity REAL,
+        nearest_neighbor_taxon TEXT,
+        nearest_neighbor_affinity REAL,
+        second_neighbor_taxon TEXT,
+        second_neighbor_affinity REAL,
+        hopkins_pheno_overlap REAL,
+        eco_schoener_overlap REAL,
+        integrative_congruence INTEGER,
+        w_morph_kappa REAL,
+        w_edaphic_kappa REAL,
+        w_pheno_kappa REAL,
+        n_misidentification_reassign INTEGER,
+        n_hybrid_introgressant INTEGER,
+        n_putative_cryptic INTEGER,
+        PRIMARY KEY (run_id, species_standardized),
+        FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
+    );
+
     {master_view_ddl}
     """
 
@@ -1062,7 +1091,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261115
+PACKERA_SCHEMA_USER_VERSION: int = 20261116
 
 
 def _migrate_dynamic_schema_columns(
@@ -1192,6 +1221,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             "extracted_leaves",
             "pipeline_runs",
             "leaf_efa_harmonics",
+            "taxon_complexes",
             "v_integrative_triage_master",
         }
         if required_objs.issubset(existing_objs):

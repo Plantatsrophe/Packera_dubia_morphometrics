@@ -268,6 +268,10 @@ synthesis:
   min_anchor_n_for_empirical: 5
   ecotype_ddoy_cutoff_days: 14.0
   cryptic_ddoy_cutoff_days: 18.0
+  min_affinity: 0.03
+  min_subcluster_vouchers: 5
+  leiden_resolutions: [0.6, 0.8, 1.0, 1.2]
+  max_complexes: 8
 
 # Compute & Parallel Execution Controls
 # Governed by CLI flags (-j/--threads and --gpu-batch-size) or environment variables
