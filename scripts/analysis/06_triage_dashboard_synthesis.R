@@ -168,33 +168,25 @@ resolve_active_anthesis_mask <- function(df) {
 resolve_step06_authority_weights <- function(df) {
   n <- nrow(df)
   if (n == 0L) return(numeric(0))
+  if (file.exists("scripts/morphometrics/authority_weighting_utils.R") &&
+      !exists("compute_empirical_bayes_authority_weights", mode = "function")) {
+    try(source("scripts/morphometrics/authority_weighting_utils.R"), silent = TRUE)
+  }
+  if (exists("compute_empirical_bayes_authority_weights", mode = "function")) {
+    eb_w <- tryCatch(
+      compute_empirical_bayes_authority_weights(df, mode = "continuous_prior_posterior", target_modality = "ecological"),
+      error = function(e) NULL
+    )
+    if (!is.null(eb_w) && length(eb_w) == n && any(is.finite(eb_w) & eb_w > 0)) {
+      return(round(pmax(0.01, eb_w), 4))
+    }
+  }
   tier_raw <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", n)
   tier_raw[is.na(tier_raw) | !nzchar(tier_raw)] <- "Tier_3_Bronze"
   tier_std <- ifelse(grepl("Tier_1|Gold|Tier 1", tier_raw, ignore.case = TRUE), "Tier_1_Gold",
               ifelse(grepl("Tier_2|Silver|Tier 2", tier_raw, ignore.case = TRUE), "Tier_2_Silver", "Tier_3_Bronze"))
-  ti_vec <- if (exists(".identify_type_specimen_vec", mode = "function")) {
-    .identify_type_specimen_vec(df)
-  } else {
-    is_t_fb <- if ("is_type_specimen" %in% names(df)) (!is.na(df$is_type_specimen) & as.logical(df$is_type_specimen)) else rep(FALSE, n)
-    list(type_rank = ifelse(is_t_fb, 2L, 0L), is_type_specimen = is_t_fb)
-  }
-  is_type_v <- as.logical(ti_vec$is_type_specimen)
-  is_type_v[is.na(is_type_v)] <- FALSE
-  prop_fb <- ifelse(is_type_v, 3.0, ifelse(tier_std == "Tier_1_Gold", 1.0, ifelse(tier_std == "Tier_2_Silver", 0.85, 0.35)))
-  if ("authority_weight" %in% names(df)) {
-    cur_aw <- suppressWarnings(as.numeric(df$authority_weight))
-    fin_non_type <- cur_aw[is.finite(cur_aw) & cur_aw > 0 & !is_type_v]
-    if (length(fin_non_type) == 0L || max(fin_non_type, na.rm = TRUE) <= 2.2) {
-      out_aw <- ifelse(is.finite(cur_aw) & cur_aw > 0, cur_aw, prop_fb)
-      out_aw[ti_vec$type_rank == 2L] <- 3.0
-      out_aw[ti_vec$type_rank == 1L] <- pmax(out_aw[ti_vec$type_rank == 1L], 2.8)
-      return(round(pmax(0.05, out_aw), 4))
-    } else {
-      legacy_fb <- ifelse(is_type_v | tier_std == "Tier_1_Gold", 3.0, ifelse(tier_std == "Tier_2_Silver", 1.5, 0.5))
-      return(round(ifelse(is.finite(cur_aw) & cur_aw > 0, cur_aw, legacy_fb), 4))
-    }
-  }
-  round(prop_fb, 4)
+  is_t_fb <- if ("is_type_specimen" %in% names(df)) (!is.na(df$is_type_specimen) & as.logical(df$is_type_specimen)) else rep(FALSE, n)
+  round(ifelse(is_t_fb, 3.0, ifelse(tier_std == "Tier_1_Gold", 2.0, ifelse(tier_std == "Tier_2_Silver", 0.75, 0.50))), 4)
 }
 
 .load_step07_pheno_config_defaults <- function(cfg_path = "config/config.yaml") {
@@ -413,7 +405,12 @@ compute_cohens_kappa <- function(y_true, y_pred, default_kappa = 0.70) {
 .resolve_step07_anchor_mask <- function(df) {
   n <- nrow(df)
   if (n == 0L) return(logical(0))
-  tier_col <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
+  tier_col <- if ("determiner_tier" %in% names(df)) {
+    if (exists(".standardize_determiner_tier_vec", mode = "function")) .standardize_determiner_tier_vec(df)
+    else ifelse(is.na(df$determiner_tier) | !nzchar(trimws(as.character(df$determiner_tier))), "Tier_3_Bronze", as.character(df$determiner_tier))
+  } else {
+    rep("Tier_1_Gold", n)
+  }
   promo_mask <- rep(FALSE, n)
   for (pcol in intersect(c("is_promoted_anchor", "is_promoted_bronze", "is_type_specimen"), names(df))) {
     pv <- suppressWarnings(as.logical(df[[pcol]]))

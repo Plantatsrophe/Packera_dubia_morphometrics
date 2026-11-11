@@ -293,7 +293,7 @@ VALID_GEOGRAPHIC_SCOPES: Set[str] = {"eastern_na", "north_america", "global"}
 def normalize_countries_list(raw_countries: Any, default: Optional[List[str]] = None) -> List[str]:
     """Normalize country configuration values (list or comma/whitespace-separated string) to uppercase ISO-2 codes."""
     if raw_countries is None:
-        return list(default) if default is not None else ["US"]
+        return list(default) if default is not None else ["US", "CA"]
     items: List[str] = []
     if isinstance(raw_countries, str):
         raw_items = [tok for part in raw_countries.split(",") for tok in part.strip().split()]
@@ -324,7 +324,7 @@ class ThresholdsConfig:
     max_uncertainty_meters: float = 5000.0
     western_longitude_threshold: float = -98.0
     geographic_scope: str = "eastern_na"
-    countries: List[str] = field(default_factory=lambda: ["US"])
+    countries: List[str] = field(default_factory=lambda: ["US", "CA"])
     capitulum_phenology: CapitulumPhenologyConfig = field(default_factory=CapitulumPhenologyConfig)
 
 
@@ -372,13 +372,17 @@ class HarvestingConfig:
     max_records_per_taxon: int = 5000
     max_uncertainty_meters: float = 5000.0
     geographic_scope: str = "eastern_na"
-    countries: List[str] = field(default_factory=lambda: ["US"])
+    countries: List[str] = field(default_factory=lambda: ["US", "CA"])
     exclude_western: bool = True
+    harvest_full_continental_range: bool = True
+    min_eastern_residency_records: int = 3
     western_longitude_threshold: float = -98.0
     home_herbarium: str = "NCU"
     min_megapixels: float = 8.0
     min_file_size_kb: float = 500.0
     min_sharpness_laplacian: float = 80.0
+    check_sharpness: bool = False
+    webp_quality: int = 92
     download_concurrency: int = 15
     usda_county_filter: bool = False
     usda_county_buffer_km: float = 50.0
@@ -566,8 +570,8 @@ class PipelineConfig:
         raw_t_scope = str(thresh_dict.get("geographic_scope", harv_dict.get("geographic_scope", "eastern_na"))).strip().lower()
         thresh_kwargs["geographic_scope"] = raw_t_scope if raw_t_scope in VALID_GEOGRAPHIC_SCOPES else "eastern_na"
         thresh_kwargs["countries"] = normalize_countries_list(
-            thresh_dict.get("countries", harv_dict.get("countries", ["US"])),
-            default=["US"],
+            thresh_dict.get("countries", harv_dict.get("countries", ["US", "CA"])),
+            default=["US", "CA"],
         )
         thresh_kwargs["capitulum_phenology"] = pheno_cfg
 
@@ -595,7 +599,7 @@ class PipelineConfig:
         raw_h_scope = str(harv_kwargs.get("geographic_scope", thresh_kwargs["geographic_scope"])).strip().lower()
         harv_kwargs["geographic_scope"] = raw_h_scope if raw_h_scope in VALID_GEOGRAPHIC_SCOPES else "eastern_na"
         if "countries" in harv_kwargs:
-            harv_kwargs["countries"] = normalize_countries_list(harv_kwargs["countries"], default=["US"])
+            harv_kwargs["countries"] = normalize_countries_list(harv_kwargs["countries"], default=["US", "CA"])
         elif harv_kwargs["geographic_scope"] == "north_america":
             harv_kwargs["countries"] = ["US", "CA", "MX"]
         elif harv_kwargs["geographic_scope"] == "global":
@@ -683,7 +687,9 @@ CLASS_COLORS_BGR: Dict[int, Tuple[int, int, int]] = {
     3: (0, 215, 255), 4: (50, 100, 200), 5: (0, 140, 70), 6: (230, 30, 230),
 }
 
-# Layer 1: Genus-wide North American Packera / Senecioneae monographers & flora authors
+# Layer 1: Genus-wide North American Packera / Senecioneae monographers & initial-qualified flora authors
+# (Common surnames like Freeman, Turner, Fuller, Weber, Golden, Packer, Estes, Welsh, Dorn, Heller, Britton
+#  are strictly initial/given-name-qualified; checklist compilers like Kartesz are excluded.)
 SPECIALIST_PATTERNS: List[str] = [
     r"\bBarkley\b", r"\bT\.?\s*M\.?\s*Barkley\b", r"\bTheodore\s+M\.?\s+Barkley\b",
     r"\bTrock\b", r"\bD\.?\s*K\.?\s*Trock\b", r"\bDebra\s+K\.?\s+Trock\b",
@@ -692,30 +698,29 @@ SPECIALIST_PATTERNS: List[str] = [
     r"\bBain\b", r"\bJ\.?\s*F\.?\s*Bain\b", r"\bJohn\s+F\.?\s+Bain\b",
     r"\bMahoney\b", r"\bA\.?\s*M\.?\s*Mahoney\b", r"\bAlison\s+M\.?\s+Mahoney\b",
     r"\bSoderholm\b", r"\bJ\.?\s*Soderholm\b",
-    r"\bPacker\b", r"\bJ\.?\s*G\.?\s*Packer\b", r"\bJohn\s+G\.?\s+Packer\b",
-    r"\bJeffrey\b", r"\bC\.?\s*Jeffrey\b", r"\bCharles\s+Jeffrey\b",
+    r"\bJ\.?\s*G\.?\s*Packer\b|\bJohn\s+G\.?\s+Packer\b|\bPacker\s*,\s*(?:J\.?\s*G\.?|John)\b",
+    r"\bC\.?\s*Jeffrey\b|\bCharles\s+Jeffrey\b|\bJeffrey\s*,\s*(?:C\.?|Charles)\b",
     r"\bMabberley\b", r"\bD\.?\s*J\.?\s*Mabberley\b",
-    r"\bFuller\b", r"\bJ\.?\s*B\.?\s*Fuller\b", r"\bBrandon\s+Fuller\b",
+    r"\b(?:J\.?\s*B\.?|(?:J\.?\s+)?Brandon)\s+Fuller\b|\bFuller\s*,\s*(?:J\.?\s*B\.?|J\.?\s*Brandon|Brandon)\b",
     r"\bMandel\b", r"\bJ\.?\s*R\.?\s*Mandel\b", r"\bJennifer\s+R\.?\s+Mandel\b",
     r"\bMoore[-\s]?Pollard\b",
     r"\b(?:E\.?\s*R\.?|Erika\s+R\.?)\s+Moore\b|\bMoore\s*,\s*(?:E\.?\s*R\.?|Erika)\b",
     r"\bBoufford\b", r"\bD\.?\s*E\.?\s*Boufford\b",
-    r"\bKartesz\b", r"\bJ\.?\s*T\.?\s*Kartesz\b",
     r"\bGramling\b", r"\bA\.?\s*Gramling\b",
-    r"\bFreeman\b", r"\bC\.?\s*C\.?\s*Freeman\b", r"\bCraig\s+(?:C\.?\s+)?Freeman\b",
+    r"\bC\.?\s*C\.?\s*Freeman\b|\bCraig\s+(?:C\.?\s+)?Freeman\b|\bFreeman\s*,\s*(?:C\.?\s*C\.?|Craig)\b",
     r"\bCronquist\b", r"\bA\.?\s*Cronquist\b", r"\bArthur\s+(?:J\.?\s+)?Cronquist\b",
     r"\bGreenman\b", r"\bJ\.?\s*M\.?\s*Greenman\b", r"\bJesse\s+M(?:ore)?\.?\s+Greenman\b",
-    r"\bWeber\b", r"\bW\.?\s*A\.?\s*Weber\b", r"\bWilliam\s+A\.?\s+Weber\b",
-    r"\bL[öo]ve\b", r"(?:^|[\s|,;(])[ÁA]\.?\s*L[öo]ve\b", r"\bD\.?\s*L[öo]ve\b",
+    r"\bW\.?\s*A\.?\s*Weber\b|\bWilliam\s+A\.?\s+Weber\b|\bWeber\s*,\s*(?:W\.?\s*A\.?|William)\b",
+    r"(?:^|[\s|,;(])[ÁA]\.?\s*L[öo]ve\b", r"\bD\.?\s*L[öo]ve\b",
     r"\b[ÁA]skell\s+L[öo]ve\b", r"\bDoris\s+L[öo]ve\b",
     r"\bSpellenberg\b", r"\bR\.?\s*(?:W\.?\s*)?Spellenberg\b", r"\bRichard\s+Spellenberg\b",
     r"\bPippen\b", r"\bR\.?\s*W\.?\s*Pippen\b", r"\bRichard\s+W\.?\s+Pippen\b",
     r"\bUttal\b", r"\bL\.?\s*J\.?\s*Uttal\b", r"\bLeonard\s+J\.?\s+Uttal\b",
     r"\bJudziewicz\b", r"\bE\.?\s*J\.?\s*Judziewicz\b",
     r"\bO['’]?Kennon\b", r"\bR\.?\s*J\.?\s*O['’]?Kennon\b",
-    r"\bWelsh\b", r"\bS\.?\s*L\.?\s*Welsh\b",
-    r"\bAtwood\b", r"\bN\.?\s*D\.?\s*Atwood\b",
-    r"\bDorn\b", r"\bR\.?\s*D\.?\s*Dorn\b",
+    r"\bS\.?\s*L\.?\s*Welsh\b|\bStanley\s+L\.?\s+Welsh\b|\bWelsh\s*,\s*(?:S\.?\s*L\.?|Stanley)\b",
+    r"\bN\.?\s*D\.?\s*Atwood\b|\bAtwood\s*,\s*(?:N\.?\s*D\.?|Duane)\b",
+    r"\bR\.?\s*D\.?\s*Dorn\b|\bRobert\s+D\.?\s+Dorn\b|\bDorn\s*,\s*(?:R\.?\s*D\.?|Robert)\b",
     r"\bO['’]?Kane\b", r"\bS\.?\s*L\.?\s*O['’]?Kane\b",
     r"\bYeatts\b", r"\bL\.?\s*Yeatts\b",
     r"\bRuyle[-\s]?Douglas\b",
@@ -723,34 +728,37 @@ SPECIALIST_PATTERNS: List[str] = [
     r"\bBoivin\b", r"\bB\.?\s*Boivin\b",
     r"\bFernald\b", r"\bM\.?\s*L\.?\s*Fernald\b", r"\bMerritt\s+L(?:yndon)?\.?\s+Fernald\b",
     r"\bRydberg\b", r"\bP\.?\s*A\.?\s*Rydberg\b", r"\bPer\s+Axel\s+Rydberg\b",
-    r"\bBritton\b", r"\bN\.?\s*L\.?\s*Britton\b",
+    r"\bN\.?\s*L\.?\s*Britton\b|\bNathaniel\s+L(?:ord)?\.?\s+Britton\b|\bBritton\s*,\s*(?:N\.?\s*L\.?|Nathaniel)\b",
     r"\b(?:E\.?\s*L\.?|Edward\s+Lee)\s+Greene\b|\bGreene\s*,\s*(?:E\.?\s*L\.?|Edward)\b",
     r"\b(?:A\.?|Asa)\s+Gray\b|\bGray\s*,\s*(?:A\.?|Asa)\b",
     r"\b(?:J\.?\s*K\.?|John\s+Kunkel)\s+Small\b|\bSmall\s*,\s*(?:J\.?\s*K\.?|John)\b",
     r"\b(?:Alph\.?|Alphonso)\s+Wood\b|\bWood\s*,\s*(?:Alph\.?|Alphonso)\b",
     r"\b(?:S\.?\s*F\.?|Sidney\s+Fay)\s+Blake\b|\bBlake\s*,\s*(?:S\.?\s*F\.?|sidney)\b",
     r"\b(?:S\.?|Sereno)\s+Watson\b|\bWatson\s*,\s*(?:S\.?|Sereno)\b",
-    r"\bHeller\b", r"\bA\.?\s*A\.?\s*Heller\b", r"\bAmos\s+A(?:rthur)?\.?\s+Heller\b",
+    r"\bA\.?\s*A\.?\s*Heller\b|\bAmos\s+A(?:rthur)?\.?\s+Heller\b|\bHeller\s*,\s*(?:A\.?\s*A\.?|Amos)\b",
     r"\bKral\b", r"\bR\.?\s*Kral\b", r"\bRobert\s+Kral\b",
     r"\bGodfrey\b", r"\bR\.?\s*K\.?\s*Godfrey\b", r"\bRobert\s+K\.?\s+Godfrey\b",
     r"\bSorrie\b", r"\bB\.?\s*A\.?\s*Sorrie\b", r"\bBruce\s+A\.?\s+Sorrie\b",
     r"\bNesom\b", r"\bG\.?\s*L\.?\s*Nesom\b", r"\bGuy\s+L\.?\s+Nesom\b",
     r"\bStrother\b", r"\bJ\.?\s*L\.?\s*Strother\b", r"\bJohn\s+L\.?\s+Strother\b",
-    r"\bTurner\b", r"\bB\.?\s*L\.?\s*Turner\b", r"\bBillie\s+L(?:ee)?\.?\s+Turner\b",
-    r"\bGolden\b", r"\bJ\.?\s*L\.?\s*Golden\b", r"\bJudith\s+L\.?\s+Golden\b",
+    r"\bB\.?\s*L\.?\s*Turner\b|\bBillie\s+L(?:ee)?\.?\s+Turner\b|\bTurner\s*,\s*(?:B\.?\s*L\.?|Billie)\b",
+    r"\bJ\.?\s*L\.?\s*Golden\b|\bJudith\s+L\.?\s+Golden\b|\bGolden\s*,\s*(?:J\.?\s*L\.?|Judith)\b",
     r"\bBrouillet\b", r"\bL\.?\s*Brouillet\b",
     r"\bSemple\b", r"\bJ\.?\s*C\.?\s*Semple\b",
     r"\bSchilling\b", r"\bE\.?\s*E\.?\s*Schilling\b",
     r"\bFloden\b", r"\bA\.?\s*J\.?\s*Floden\b",
-    r"\bEstes\b", r"\bL\.?\s*D\.?\s*Estes\b",
+    r"\bL\.?\s*D\.?\s*Estes\b|\bDwayne\s+Estes\b|\bEstes\s*,\s*(?:L\.?\s*D\.?|Dwayne)\b",
     r"\bPoindexter\b", r"\bD\.?\s*B\.?\s*Poindexter\b",
     r"\bWieboldt\b", r"\bT\.?\s*F\.?\s*Wieboldt\b",
     r"\bMcMillan\b", r"\bP\.?\s*D\.?\s*McMillan\b",
     r"\bBeauchamp\b", r"\bR\.?\s*M\.?\s*Beauchamp\b",
 ]
 MAJOR_HERBARIA_CODES: Set[str] = {
-    "NCU", "GA", "US", "NY", "BRIT", "MO", "WIS", "VDB", "FLAS", "TEX", "LL", "TENN", "F",
+    "NCU", "DUKE", "NCSC", "GA", "US", "NY", "BRIT", "MO", "WIS", "VDB", "FLAS", "TEX", "LL", "TENN", "F",
     "GH", "PH", "KANU", "MSC", "COLO", "RM", "UC", "JEPS", "CAS", "DAO", "CAN", "MEXU",
+    "USCH", "CLEMS", "VPI", "WILLI", "WVA", "CM", "MICH", "MIN", "OS", "ILL", "ILLS", "IND",
+    "NEBC", "VT", "TRT", "MT", "QFA", "ACAD", "UNB", "UARK", "ARK", "LSU", "MISS", "UNA",
+    "APSC", "EKY", "KY", "MU", "PAC", "PENN", "CONN", "NYS", "BH",
 }
 PRIMARY_TYPE_STATUSES: Set[str] = {
     "HOLOTYPE", "LECTOTYPE", "NEOTYPE", "EPITYPE", "ISOTYPE", "ISOLECTOTYPE", "ISONEOTYPE"

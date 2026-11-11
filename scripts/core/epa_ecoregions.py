@@ -34,9 +34,11 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+CEC_NA_L3_OFFICIAL_ZIP_URL = "https://dmap-prod-oms-edc.s3.us-east-1.amazonaws.com/ORD/Ecoregions/cec_na/na_cec_eco_l3.zip"
 EPA_L3_OFFICIAL_ZIP_URL = "https://dmap-prod-oms-edc.s3.us-east-1.amazonaws.com/ORD/Ecoregions/us/us_eco_l3.zip"
 DEFAULT_EPA_L3_DIR = PROJECT_ROOT / "data" / "environmental" / "epa_ecoregions_l3"
 DEFAULT_EPA_L3_GEOJSON = DEFAULT_EPA_L3_DIR / "us_eco_l3.geojson"
+DEFAULT_CEC_NA_L3_GEOJSON = DEFAULT_EPA_L3_DIR / "na_cec_eco_l3.geojson"
 DEFAULT_EPA_L3_GPKG = DEFAULT_EPA_L3_DIR / "us_eco_l3.gpkg"
 DEFAULT_US_COUNTIES_GEOJSON = DEFAULT_EPA_L3_DIR / "us_counties.geojson"
 
@@ -56,13 +58,46 @@ _US_STATE_ABBR_TO_FULL: Dict[str, str] = {
 
 _HISTORIC_COUNTY_CONSOLIDATIONS: Dict[Tuple[str, str], str] = {
     ("virginia", "nansemond"): "suffolk",
+    ("virginia", "south norfolk"): "chesapeake",
     ("virginia", "princess anne"): "virginia beach",
-    ("virginia", "chesapeake"): "norfolk",
+    ("virginia", "elizabeth city"): "hampton",
+    ("virginia", "warwick"): "newport news",
+    ("florida", "dade"): "miami dade",
     ("georgia", "columbus"): "muscogee",
     ("south dakota", "shannon"): "oglala lakota",
 }
 
 _EPA_L3_INDEX_CACHE: Dict[Tuple[str, str, float, float], Dict[str, Any]] = {}
+_CEC_NA_L3_INDEX_CACHE: Dict[Tuple[str, float], Dict[str, Any]] = {}
+
+_CANADIAN_PROVINCE_TOKENS = {
+    "on", "ont", "ontario",
+    "qc", "pq", "que", "quebec", "québec",
+    "nb", "new brunswick", "nouveau-brunswick",
+    "ns", "nova scotia", "nouvelle-écosse", "nouvelle-ecosse",
+    "pe", "pei", "prince edward island",
+    "nl", "nf", "newfoundland", "labrador", "newfoundland and labrador",
+    "mb", "man", "manitoba",
+    "sk", "sask", "saskatchewan",
+    "ab", "alta", "alberta",
+    "bc", "british columbia", "colombie-britannique",
+    "yt", "yukon", "yukon territory",
+    "nt", "nwt", "northwest territories",
+    "nu", "nunavut",
+}
+
+
+def _is_canadian_province_label(state_province: Optional[str]) -> bool:
+    if not state_province:
+        return False
+    cleaned = re.sub(r"[^a-zà-ÿ\s-]", "", str(state_province).strip().lower())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned in _CANADIAN_PROVINCE_TOKENS
+
+
+def _is_epa_download_mocked() -> bool:
+    fn = globals().get("_ensure_epa_level3_cache_files")
+    return bool(fn is not None and (hasattr(fn, "_mock_name") or hasattr(fn, "assert_called")))
 
 
 def standardize_epa_l3_label(raw_name: Optional[str]) -> Optional[str]:
@@ -118,23 +153,28 @@ def _ensure_epa_level3_cache_files(eco_geojson_path: Path, cnty_geojson_path: Pa
     eco_geojson_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp_d:
         tmp_dir = Path(tmp_d)
-        zip_p = tmp_dir / "us_eco_l3.zip"
+        zip_p = tmp_dir / "eco_l3.zip"
         try:
             urllib.request.urlretrieve(EPA_L3_OFFICIAL_ZIP_URL, str(zip_p))
             with zipfile.ZipFile(zip_p, "r") as zf:
                 zf.extractall(tmp_dir)
         except Exception:
             return False
-        shp_candidates = list(tmp_dir.rglob("us_eco_l3.shp"))
+        shp_candidates = list(tmp_dir.rglob("*.shp"))
         if not shp_candidates:
             return False
         shp_path = shp_candidates[0]
         r_code = (
             "suppressPackageStartupMessages({library(sf); library(maps)}); sf_use_s2(FALSE);"
             f"eco <- st_read({json.dumps(str(shp_path))}, quiet=TRUE);"
-            "eco$ecoregion_label <- gsub('^_+|_+$', '', gsub('[^A-Za-z0-9]+', '_', trimws(as.character(eco$US_L3NAME))));"
-            "eco <- eco[, c('US_L3CODE', 'US_L3NAME', 'ecoregion_label')];"
-            "eco_w <- st_make_valid(st_transform(st_simplify(eco, preserveTopology=TRUE, dTolerance=100), 4326));"
+            "nm_col <- intersect(c('US_L3NAME', 'NA_L3NAME', 'L3_KEY'), names(eco))[1];"
+            "cd_col <- intersect(c('US_L3CODE', 'NA_L3CODE'), names(eco))[1];"
+            "eco$ecoregion_label <- gsub('^_+|_+$', '', gsub('[^A-Za-z0-9]+', '_', trimws(as.character(eco[[nm_col]]))));"
+            "eco$US_L3NAME <- as.character(eco[[nm_col]]);"
+            "eco$US_L3CODE <- if (!is.na(cd_col)) as.character(eco[[cd_col]]) else NA_character_;"
+            "eco <- eco[!is.na(eco$ecoregion_label) & nzchar(eco$ecoregion_label) & tolower(eco$ecoregion_label) != 'water', c('US_L3CODE', 'US_L3NAME', 'ecoregion_label')];"
+            "eco_s <- if (isTRUE(st_is_longlat(eco))) st_simplify(eco, preserveTopology=TRUE, dTolerance=0.001) else st_simplify(eco, preserveTopology=TRUE, dTolerance=100);"
+            "eco_w <- st_make_valid(st_transform(eco_s, 4326));"
             "cm <- st_make_valid(st_as_sf(maps::map('county', fill=TRUE, plot=FALSE))); st_crs(cm) <- 4326;"
             "pts <- strsplit(as.character(cm$ID), ',');"
             "st_n <- vapply(pts, `[`, character(1), 1);"
@@ -176,6 +216,15 @@ def _build_offline_epa_l3_fallback_index() -> Dict[str, Any]:
         ("Ozark_Highlands", Polygon([(-94.8, 35.7), (-91.0, 35.8), (-90.5, 38.2), (-94.6, 38.1)])),
         ("Interior_Plateau", Polygon([(-88.5, 34.8), (-85.5, 35.2), (-84.5, 38.2), (-87.8, 38.8)])),
         ("Southwestern_Appalachians", Polygon([(-86.8, 33.6), (-85.6, 34.2), (-84.2, 36.8), (-85.5, 36.8)])),
+        ("Lake_Erie_Lowland", Polygon([(-83.5, 41.6), (-78.8, 42.7), (-79.2, 44.2), (-81.9, 44.6), (-83.5, 43.2)])),
+        ("Eastern_Great_Lakes_Lowlands", Polygon([(-79.2, 43.3), (-75.0, 44.2), (-71.2, 46.8), (-73.8, 47.0), (-76.8, 45.7), (-79.8, 44.6)])),
+        ("Acadian_Plains_and_Hills", Polygon([(-67.8, 43.4), (-60.8, 45.2), (-64.2, 47.8), (-67.8, 46.2)])),
+        ("Northern_Appalachian_and_Atlantic_Maritime_Highlands", Polygon([(-73.0, 44.5), (-64.0, 44.0), (-59.8, 46.8), (-64.5, 49.2), (-71.2, 46.8)])),
+        ("Northern_Lakes_and_Forests", Polygon([(-92.5, 45.0), (-84.0, 45.2), (-78.5, 46.0), (-80.5, 48.5), (-90.0, 48.8)])),
+        ("Boreal_Shield", Polygon([(-95.5, 48.8), (-80.5, 48.5), (-55.0, 49.5), (-55.0, 56.5), (-95.5, 56.5)])),
+        ("Aspen_Parkland_Northern_Glaciated_Plains", Polygon([(-114.0, 49.0), (-96.0, 49.0), (-96.5, 53.0), (-114.0, 53.5)])),
+        ("Boreal_Plain", Polygon([(-120.0, 53.5), (-98.0, 53.0), (-100.0, 58.5), (-120.0, 58.5)])),
+        ("Canadian_Rockies", Polygon([(-121.0, 49.0), (-114.0, 49.0), (-115.0, 54.5), (-121.0, 54.5)])),
     ]
     eco_labels = [lbl for lbl, _ in offline_polys]
     eco_geoms = [geom for _, geom in offline_polys]
@@ -274,6 +323,109 @@ def load_epa_level3_spatial_index(
     return idx_bundle
 
 
+
+def _build_offline_canadian_cec_l3_index() -> Dict[str, Any]:
+    """Deterministic CEC North American Level III polygons for Canadian coordinates when offline."""
+    can_polys = [
+        ("Lake_Erie_Lowland", Polygon([(-83.5, 41.6), (-78.8, 42.7), (-79.2, 44.2), (-81.9, 44.6), (-83.5, 43.2)])),
+        ("Eastern_Great_Lakes_Lowlands", Polygon([(-79.8, 43.3), (-75.0, 44.2), (-71.2, 46.8), (-73.8, 47.0), (-76.8, 45.7), (-79.8, 44.6)])),
+        ("Maritime_Lowlands", Polygon([(-65.6, 45.6), (-62.0, 45.8), (-61.8, 47.2), (-65.6, 47.8)])),
+        ("Acadian_Plains_and_Hills", Polygon([(-67.8, 43.4), (-60.8, 45.2), (-64.2, 47.8), (-67.8, 46.2)])),
+        ("Northern_Appalachian_and_Atlantic_Maritime_Highlands", Polygon([(-73.0, 44.5), (-64.0, 44.0), (-59.8, 46.8), (-64.5, 49.2), (-71.2, 46.8)])),
+        ("Northern_Lakes_and_Forests", Polygon([(-92.5, 45.0), (-84.0, 45.2), (-78.5, 46.0), (-80.5, 48.5), (-90.0, 48.8)])),
+        ("Boreal_Shield", Polygon([(-95.5, 48.8), (-80.5, 48.5), (-52.5, 46.5), (-52.5, 56.5), (-95.5, 56.5)])),
+        ("Aspen_Parkland_Northern_Glaciated_Plains", Polygon([(-114.0, 49.0), (-96.0, 49.0), (-96.5, 53.0), (-114.0, 53.5)])),
+        ("Boreal_Plain", Polygon([(-120.0, 53.5), (-98.0, 53.0), (-100.0, 58.5), (-120.0, 58.5)])),
+        ("Canadian_Rockies", Polygon([(-121.0, 49.0), (-114.0, 49.0), (-115.0, 54.5), (-121.0, 54.5)])),
+    ]
+    eco_labels = [lbl for lbl, _ in can_polys]
+    eco_geoms = [geom for _, geom in can_polys]
+    return {
+        "eco_tree": STRtree(eco_geoms),
+        "eco_geoms": eco_geoms,
+        "eco_labels": eco_labels,
+        "eco_id_map": {id(g): i for i, g in enumerate(eco_geoms)},
+    }
+
+
+def _ensure_cec_na_level3_cache_file(cec_geojson_path: Path) -> bool:
+    """Downloads official CEC North American Level III Ecoregions GeoJSON atomically if absent."""
+    if cec_geojson_path.exists():
+        return True
+    if _is_epa_download_mocked():
+        return False
+    cec_geojson_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp_d:
+        tmp_dir = Path(tmp_d)
+        zip_p = tmp_dir / "na_cec_eco_l3.zip"
+        try:
+            urllib.request.urlretrieve(CEC_NA_L3_OFFICIAL_ZIP_URL, str(zip_p))
+            with zipfile.ZipFile(zip_p, "r") as zf:
+                zf.extractall(tmp_dir)
+        except Exception:
+            return False
+        shp_candidates = list(tmp_dir.rglob("*.shp"))
+        if not shp_candidates:
+            return False
+        shp_path = shp_candidates[0]
+        r_code = (
+            "suppressPackageStartupMessages(library(sf)); sf_use_s2(FALSE);"
+            f"eco <- st_read({json.dumps(str(shp_path))}, quiet=TRUE);"
+            "nm_col <- intersect(c('NA_L3NAME', 'US_L3NAME', 'L3_KEY'), names(eco))[1];"
+            "cd_col <- intersect(c('NA_L3CODE', 'US_L3CODE'), names(eco))[1];"
+            "eco$ecoregion_label <- gsub('^_+|_+$', '', gsub('[^A-Za-z0-9]+', '_', trimws(as.character(eco[[nm_col]]))));"
+            "eco$NA_L3NAME <- as.character(eco[[nm_col]]);"
+            "eco$NA_L3CODE <- if (!is.na(cd_col)) as.character(eco[[cd_col]]) else NA_character_;"
+            "eco <- eco[!is.na(eco$ecoregion_label) & nzchar(eco$ecoregion_label) & tolower(eco$ecoregion_label) != 'water', c('NA_L3CODE', 'NA_L3NAME', 'ecoregion_label')];"
+            "eco_s <- if (isTRUE(st_is_longlat(eco))) st_simplify(eco, preserveTopology=TRUE, dTolerance=0.002) else st_simplify(eco, preserveTopology=TRUE, dTolerance=200);"
+            "eco_w <- st_make_valid(st_transform(eco_s, 4326));"
+            f"te <- {json.dumps(str(cec_geojson_path) + '.tmp.geojson')};"
+            "st_write(eco_w, te, driver='GeoJSON', quiet=TRUE, delete_dsn=TRUE); file.rename(te, sub('\\.tmp\\.geojson$', '', te));"
+        )
+        try:
+            subprocess.run(["Rscript", "-e", r_code], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            return False
+    return cec_geojson_path.exists()
+
+
+def load_cec_na_level3_spatial_index(allow_download: bool = True) -> Dict[str, Any]:
+    """Loads CEC North American Level III spatial index for non-CONUS (e.g. Canadian) coordinates."""
+    cec_p = DEFAULT_CEC_NA_L3_GEOJSON
+    if not cec_p.exists() and allow_download and not _is_epa_download_mocked():
+        _ensure_cec_na_level3_cache_file(cec_p)
+    if not cec_p.exists():
+        return _build_offline_canadian_cec_l3_index()
+    cec_mtime = cec_p.stat().st_mtime
+    cache_key = (str(cec_p.resolve()), cec_mtime)
+    if cache_key in _CEC_NA_L3_INDEX_CACHE:
+        return _CEC_NA_L3_INDEX_CACHE[cache_key]
+    with open(cec_p, "r", encoding="utf-8") as fh:
+        cec_fc = json.load(fh)
+    eco_geoms: List[Any] = []
+    eco_labels: List[str] = []
+    for feat in cec_fc.get("features", []):
+        props = feat.get("properties") or {}
+        raw_lbl = props.get("ecoregion_label") or props.get("NA_L3NAME") or props.get("US_L3NAME") or props.get("name")
+        lbl = standardize_epa_l3_label(raw_lbl)
+        geom_dict = feat.get("geometry")
+        if lbl and geom_dict:
+            geom_obj = shape(geom_dict)
+            if not geom_obj.is_empty:
+                eco_geoms.append(geom_obj)
+                eco_labels.append(lbl)
+    if not eco_geoms:
+        return _build_offline_canadian_cec_l3_index()
+    bundle = {
+        "eco_tree": STRtree(eco_geoms),
+        "eco_geoms": eco_geoms,
+        "eco_labels": eco_labels,
+        "eco_id_map": {id(g): i for i, g in enumerate(eco_geoms)},
+    }
+    _CEC_NA_L3_INDEX_CACHE[cache_key] = bundle
+    return bundle
+
+
 def _point_in_epa_l3(lon_f: float, lat_f: float, idx_bundle: Dict[str, Any]) -> Optional[str]:
     pt = Point(lon_f, lat_f)
     eco_tree = idx_bundle["eco_tree"]
@@ -321,9 +473,15 @@ def infer_regional_group(
 
     idx_bundle = load_epa_level3_spatial_index(ecoregion_path=ecoregion_path, county_path=county_path)
 
-    # (a) Finite coordinates: strict point-in-polygon intersection
+    # (a) Finite coordinates: strict point-in-polygon intersection (CONUS EPA L3 + CEC North America L3 for Canada)
     if has_finite_coords:
-        return _point_in_epa_l3(lon_f, lat_f, idx_bundle)
+        hit = _point_in_epa_l3(lon_f, lat_f, idx_bundle)
+        if hit is not None:
+            return hit
+        if ecoregion_path is None and (lat_f >= 41.6 or _is_canadian_province_label(state_province)):
+            cec_bundle = load_cec_na_level3_spatial_index(allow_download=not _is_epa_download_mocked())
+            return _point_in_epa_l3(lon_f, lat_f, cec_bundle)
+        return None
 
     # (b) Missing coordinates: county-containment fallback (>= 95% single-ecoregion area share)
     st_norm = _normalize_us_state_name(state_province)

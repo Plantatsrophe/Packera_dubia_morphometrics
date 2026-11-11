@@ -59,6 +59,7 @@
   raw_trim <- trimws(raw_vec)
   neg_mask <- grepl("not a type|non-type|non type|false type|no type|unverified|type locality|type species|type collection", raw_trim, ignore.case = TRUE)
   prim_mask <- !neg_mask & grepl("\\b(holotype|lectotype|neotype|epitype|isotype|isolectotype|isoneotype)s?\\b", raw_trim, ignore.case = TRUE)
+  syntype_mask <- !neg_mask & !prim_mask & grepl("\\b(syntype|isosyntype)s?\\b", raw_trim, ignore.case = TRUE)
   sec_mask <- !neg_mask & !prim_mask & grepl("\\b(syntype|isosyntype|paratype|isoparatype|type|cotype)s?\\b", raw_trim, ignore.case = TRUE)
 
   type_rank <- integer(n)
@@ -68,10 +69,25 @@
   if (any(fb_mask)) {
     type_rank[fb_mask] <- 1L
   }
+  is_nb_type <- prim_mask | syntype_mask
+  if (is.data.frame(df) && ("species_standardized" %in% names(df)) && any(is_nb_type)) {
+    sp_std <- tolower(trimws(as.character(df$species_standardized)))
+    sp_ep <- sub("^[a-z]+\\s+([a-z-]+).*$", "\\1", sp_std)
+    has_of_binomial <- grepl("\\bof\\s+(packera|senecio|cineraria)\\s+[a-z]{3,}", raw_trim, ignore.case = TRUE)
+    if (any(is_nb_type & has_of_binomial)) {
+      of_ep <- tolower(sub("^.*\\bof\\s+(?:packera|senecio|cineraria)\\s+([a-z-]+).*$", "\\1", raw_trim))
+      stem6 <- function(s) substr(gsub("(us|a|um)$", "", s), 1L, 6L)
+      known_equiv <- (sp_ep == "anonyma" & of_ep == "smallii") | (sp_ep == "smallii" & of_ep == "anonymus")
+      het_mismatch <- is_nb_type & has_of_binomial & nzchar(sp_ep) & nzchar(of_ep) &
+        (sp_ep != of_ep) & (stem6(sp_ep) != stem6(of_ep)) & !known_equiv
+      is_nb_type[het_mismatch] <- FALSE
+    }
+  }
   clean_lbl <- ifelse(type_rank >= 1L & nzchar(raw_trim), raw_trim, ifelse(type_rank >= 1L, "TYPE", "None"))
   list(
     type_rank = as.integer(type_rank),
     is_type_specimen = as.logical(type_rank >= 1L),
+    is_name_bearing_type = as.logical(is_nb_type),
     type_status_clean = as.character(clean_lbl)
   )
 }
@@ -413,11 +429,16 @@ select_morphometric_subspace <- function(X, group_vec = NULL, min_p = 2L, max_p 
   p <- ncol(X_use)
   u_pool_tx <- setdiff(unique(taxa_vec[valid_pool]), "Unassigned_Packera")
   build_resid <- function(tx) {
+    idx_gold <- which(valid_pool & (taxa_vec == tx) & (det_tier == "Tier_1_Gold"))
     idx_gs <- which(valid_pool & (taxa_vec == tx) & (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")))
     idx_tx <- if (length(idx_gs) >= 3L) idx_gs else which(valid_pool & (taxa_vec == tx))
     if (length(idx_tx) < 3L) return(NULL)
     X_t <- X_use[idx_tx, , drop = FALSE]
-    med_t <- .compute_robust_taxon_medoid(X_t)
+    med_t <- if (length(idx_gold) >= 3L) {
+      .compute_robust_taxon_medoid(X_use[idx_gold, , drop = FALSE])
+    } else {
+      .compute_robust_taxon_medoid(X_t)
+    }
     diff_t <- sweep(X_t, 2, med_t, "-")
     nz_mask <- rowSums(diff_t^2) > 1e-12
     if (sum(nz_mask) >= 2L) diff_t <- diff_t[nz_mask, , drop = FALSE]
@@ -510,6 +531,8 @@ select_adaptive_reference_anchors <- function(
   valid_pool <- is_t1_pure & has_feat
 
   is_type_valid <- (type_rank >= 1L) & valid_pool
+  is_nb_type_valid <- as.logical(type_info$is_name_bearing_type) & valid_pool
+  is_nb_type_valid[is.na(is_nb_type_valid)] <- FALSE
   is_gold <- ((det_tier == "Tier_1_Gold") | (type_rank >= 1L)) & valid_pool
   is_silver <- (det_tier == "Tier_2_Silver") & !is_gold & valid_pool
   is_gs <- is_gold | is_silver
@@ -542,6 +565,8 @@ select_adaptive_reference_anchors <- function(
     idx_gs <- which(is_gs & (taxa_vec == tx))
     idx_gs_clean <- idx_gs
     gs_type_local <- is_type_valid[idx_gs]
+    gs_nb_type_local <- is_nb_type_valid[idx_gs]
+    gs_paratype_local <- gs_type_local & !gs_nb_type_local
     gs_gold_local <- is_gold[idx_gs]
     gs_silver_local <- is_silver[idx_gs]
     n_gold_k <- sum(gs_gold_local)
@@ -601,6 +626,7 @@ select_adaptive_reference_anchors <- function(
             for (pos_m in list(gs_ent_pos, gs_dis_pos)) {
               Xm <- X_gs[pos_m, , drop = FALSE]
               pos_m_gold <- pos_m[gs_gold_local[pos_m] & !extreme_type_local[pos_m]]
+              has_gold_med_m <- length(pos_m_gold) >= 3L
               use_gold_m <- length(pos_m_gold) >= max(5L, p_eff + 3L)
               pos_m_fit <- if (use_gold_m) pos_m_gold else pos_m[!extreme_type_local[pos_m]]
               if (length(pos_m_fit) < 3L) pos_m_fit <- pos_m
@@ -610,7 +636,13 @@ select_adaptive_reference_anchors <- function(
                 q_m <- min(nrow(Xm_fit) - 1L, max(floor(0.80 * nrow(Xm_fit)), floor((nrow(Xm_fit) + p_eff + 1L) / 2L)))
                 rob_m <- .fit_fast_mcd_cov(Xm_fit, q_used = q_m, allow_parallel = !par_taxa)
               }
-              cent_raw_m <- if (!is.null(rob_m)) rob_m$center else .compute_robust_taxon_medoid(Xm_fit)
+              cent_raw_m <- if (has_gold_med_m) {
+                if (!is.null(rob_m) && use_gold_m) rob_m$center else .compute_robust_taxon_medoid(X_gs[pos_m_gold, , drop = FALSE])
+              } else if (!is.null(rob_m)) {
+                rob_m$center
+              } else {
+                .compute_robust_taxon_medoid(Xm_fit)
+              }
               cent_m <- cent_raw_m
               cov_shift_m <- matrix(0.0, nrow = p_eff, ncol = p_eff)
               if (!is.null(mu_type_gs) && gamma_k > 0.0) {
@@ -629,15 +661,20 @@ select_adaptive_reference_anchors <- function(
               }) + cov_shift_m
               d2_m <- tryCatch(stats::mahalanobis(Xm, center = cent_m, cov = cov_m), error = function(e) rep(0.0, nrow(Xm)))
               q_thr_m <- ifelse(
-                gs_silver_local[pos_m] & use_gold_m,
-                stats::qchisq(min(mahal_q_gold_silver, 0.90), df = p_eff),
-                stats::qchisq(mahal_q_gold_silver, df = p_eff)
+                gs_paratype_local[pos_m],
+                stats::qchisq(0.99, df = p_eff),
+                ifelse(
+                  gs_silver_local[pos_m] & has_gold_med_m,
+                  stats::qchisq(min(mahal_q_gold_silver, 0.90), df = p_eff),
+                  stats::qchisq(mahal_q_gold_silver, df = p_eff)
+                )
               )
               dr_m <- is.finite(d2_m) & (d2_m > q_thr_m)
               if (any(dr_m) && sum(!dr_m) >= 2L) drop_gs[pos_m[dr_m]] <- TRUE
             }
           } else {
             gold_core_pos <- which(gs_gold_local & !extreme_type_local)
+            has_gold_medoid <- length(gold_core_pos) >= 3L
             use_gold_core <- length(gold_core_pos) >= max(5L, p_eff + 3L)
             X_gs_fit <- if (use_gold_core) {
               X_gs[gold_core_pos, , drop = FALSE]
@@ -651,7 +688,13 @@ select_adaptive_reference_anchors <- function(
               q_mcd <- min(nrow(X_gs_fit) - 1L, max(floor(0.80 * nrow(X_gs_fit)), floor((nrow(X_gs_fit) + p_eff + 1L) / 2L)))
               rob_gs <- .fit_fast_mcd_cov(X_gs_fit, q_used = q_mcd, allow_parallel = !par_taxa)
             }
-            center_raw_gs <- if (!is.null(rob_gs)) rob_gs$center else .compute_robust_taxon_medoid(X_gs_fit)
+            center_raw_gs <- if (has_gold_medoid) {
+              if (!is.null(rob_gs) && use_gold_core) rob_gs$center else .compute_robust_taxon_medoid(X_gs[gold_core_pos, , drop = FALSE])
+            } else if (!is.null(rob_gs)) {
+              rob_gs$center
+            } else {
+              .compute_robust_taxon_medoid(X_gs_fit)
+            }
             center_gs <- center_raw_gs
             cov_shift_gs <- matrix(0.0, nrow = p_eff, ncol = p_eff)
             if (!is.null(mu_type_gs) && gamma_k > 0.0) {
@@ -668,15 +711,19 @@ select_adaptive_reference_anchors <- function(
             }) + cov_shift_gs
             d2_gs <- tryCatch(stats::mahalanobis(X_gs, center = center_gs, cov = cov_gs), error = function(e) rep(0.0, nrow(X_gs)))
             q_thr_gs <- ifelse(
-              gs_silver_local & use_gold_core,
-              stats::qchisq(min(mahal_q_gold_silver, 0.90), df = p_eff),
-              stats::qchisq(mahal_q_gold_silver, df = p_eff)
+              gs_paratype_local,
+              stats::qchisq(0.99, df = p_eff),
+              ifelse(
+                gs_silver_local & has_gold_medoid,
+                stats::qchisq(min(mahal_q_gold_silver, 0.90), df = p_eff),
+                stats::qchisq(mahal_q_gold_silver, df = p_eff)
+              )
             )
             drop_gs <- is.finite(d2_gs) & (d2_gs > q_thr_gs)
           }
-          # Nomenclatural type pruning immunity: never prune verified type specimens
-          if (any(gs_type_local)) {
-            drop_gs[gs_type_local] <- FALSE
+          # Nomenclatural type pruning immunity: never prune verified name-bearing types (Holotype/Lectotype/Neotype/Epitype/Isotype/Syntype)
+          if (any(gs_nb_type_local)) {
+            drop_gs[gs_nb_type_local] <- FALSE
           }
           if (any(drop_gs) && sum(!drop_gs) >= 3L) {
             pruned_out <- idx_gs[drop_gs]
@@ -760,7 +807,7 @@ select_adaptive_reference_anchors <- function(
   all_pruned <- unlist(lapply(tx_results, `[[`, "pruned"), use.names = FALSE)
   all_promo <- unlist(lapply(tx_results, `[[`, "promo"), use.names = FALSE)
   if (length(all_pruned) > 0L) {
-    all_pruned <- setdiff(all_pruned, which(is_type_valid))
+    all_pruned <- setdiff(all_pruned, which(is_nb_type_valid))
     if (length(all_pruned) > 0L) {
       is_gs[all_pruned] <- FALSE
       is_gold[all_pruned] <- FALSE
@@ -832,7 +879,7 @@ select_adaptive_reference_anchors <- function(
         cand_ii <- integer(0)
         for (ii in m_k) {
           r_i <- cl_act_idx[ii]
-          if (is_type_valid[r_i] || type_info$is_type_specimen[r_i]) next
+          if (is_nb_type_valid[r_i]) next
           p_self <- P_cl[ii, k]
           oth_k <- setdiff(seq_len(K_cl), k)
           best_oth <- oth_k[which.max(P_cl[ii, oth_k])]
@@ -1539,7 +1586,26 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
   }
 
   if ("exsiccatae_taxonomic_conflict" %in% names(df)) {
-    eps_err <- apply_bool_flag(eps_err, df$exsiccatae_taxonomic_conflict, pos_rate = 0.85, neg_rate = 0.05)
+    ex_conf <- as.logical(df$exsiccatae_taxonomic_conflict)
+    if ("exsiccatae_gold_taxon" %in% names(df)) {
+      g_tx <- trimws(as.character(df$exsiccatae_gold_taxon))
+      s_tx <- .resolve_authority_taxon_vec(df)
+      if (exists("standardize_packera_taxon", mode = "function")) {
+        has_g <- !is.na(g_tx) & nzchar(g_tx) & !(tolower(g_tx) %in% c("na", "none", "unknown"))
+        if (any(has_g)) g_tx[has_g] <- as.character(standardize_packera_taxon(g_tx[has_g]))
+      }
+      dt_ex <- .standardize_determiner_tier_vec(df)
+      agrees_gold <- !is.na(ex_conf) & ex_conf & !is.na(g_tx) & nzchar(g_tx) & (g_tx == s_tx)
+      # Specialist sheet itself suffers zero conflict penalty; elevated Silver duplicate gets mild 0.18 uncertainty
+      ex_disagree <- ifelse(agrees_gold, FALSE, ex_conf)
+      eps_err <- apply_bool_flag(eps_err, ex_disagree, pos_rate = 0.85, neg_rate = 0.05)
+      elev_silv <- eval_mask & agrees_gold & (dt_ex == "Tier_2_Silver")
+      if (any(elev_silv)) {
+        eps_err[elev_silv] <- ifelse(is.finite(eps_err[elev_silv]), pmax(eps_err[elev_silv], 0.18), 0.18)
+      }
+    } else {
+      eps_err <- apply_bool_flag(eps_err, ex_conf, pos_rate = 0.85, neg_rate = 0.05)
+    }
   }
   if (target_modality != "vision" && "is_label_corrupted" %in% names(df)) {
     eps_err <- apply_bool_flag(eps_err, df$is_label_corrupted, pos_rate = 0.85, neg_rate = 0.05)
@@ -1767,12 +1833,30 @@ compute_empirical_bayes_authority_weights <- function(
         wt_vec <- c(wt_vec, if (lo_e < 0.0) 2.2 else 1.4)
       }
 
+      has_exog_disc_i <- (is.finite(eps_err[i]) && eps_err[i] > 0.35)
+      if (!has_exog_disc_i && length(pred_sources) > 0L) {
+        for (ps_chk in pred_sources) {
+          if (isTRUE(ps_chk$valid[i]) && !is.na(ps_chk$taxon[i]) && !(ps_chk$taxon[i] %in% bad_tx) && (ps_chk$taxon[i] != valid_taxa[yi])) {
+            has_exog_disc_i <- TRUE
+            break
+          }
+        }
+      }
+
       if (!is.null(L_pc) && all(is.finite(L_pc[i, ]))) {
         p_self_pc <- max(0.002, min(0.998, L_pc[i, yi]))
         odds_pc <- (G - 1.0) * p_self_pc / max(1.0 - p_self_pc, 1e-6)
         lo_pc <- log(max(odds_pc, 1e-4))
-        log_odds_vec <- c(log_odds_vec, lo_pc)
-        wt_vec <- c(wt_vec, if (lo_pc < 0.0) 1.5 else 1.0)
+        # Guard peripheral Tier_1_Gold ecotypes against circular morphology-only down-weighting when exogenous signals do not conflict
+        if (!has_exog_disc_i && (det_tier[i] == "Tier_1_Gold") && (lo_pc < 0.0)) {
+          lo_pc_use <- max(lo_pc, -0.30)
+          wt_pc_use <- 0.45
+        } else {
+          lo_pc_use <- lo_pc
+          wt_pc_use <- if (lo_pc < 0.0) 1.5 else 1.0
+        }
+        log_odds_vec <- c(log_odds_vec, lo_pc_use)
+        wt_vec <- c(wt_vec, wt_pc_use)
         off_v <- L_pc[i, ]
         off_v[yi] <- 0.0
         if (sum(off_v) > 1e-12) {
@@ -1965,26 +2049,147 @@ compute_empirical_bayes_authority_weights <- function(
     w_eb[is_type_mask] <- pi_vec[is_type_mask]
   }
 
+  aw_cfg <- .load_authority_weight_config()
+  is_nb_sec <- (type_rank == 1L) & as.logical(type_info$is_name_bearing_type)
+  is_nb_sec[is.na(is_nb_sec)] <- FALSE
+  base_prec <- ifelse(
+    type_rank == 2L, aw_cfg$tier_0_type,
+    ifelse(
+      is_nb_sec, aw_cfg$tier_0_syntype * (w_eb / 0.985),
+      ifelse(
+        type_rank == 1L, (aw_cfg$tier_1_gold + 0.15) * (w_eb / 0.985),
+        ifelse(
+          det_tier == "Tier_1_Gold", aw_cfg$tier_1_gold * (w_eb / 0.95),
+          ifelse(
+            det_tier == "Tier_2_Silver", aw_cfg$tier_2_silver * (w_eb / 0.85),
+            ifelse(
+              is_promoted, aw_cfg$tier_3_bronze_promoted * (w_eb / 0.65),
+              aw_cfg$tier_3_bronze * (w_eb / 0.35)
+            )
+          )
+        )
+      )
+    )
+  )
+  base_prec[!is.finite(base_prec) | base_prec <= 0.0] <- 0.05
+
   if (mode == "active_passive") {
     w_out <- rep(0.0, n)
     if (any(act_mask)) {
-      w_act <- w_eb[act_mask]
-      if (any(is_type_mask[act_mask])) {
-        w_act[is_type_mask[act_mask]] <- 1.5 * w_act[is_type_mask[act_mask]]
-      }
+      cap_res <- .apply_stratified_silver_pool_cap(
+        w_vec = base_prec,
+        taxa_vec = taxa_vec,
+        det_tier = det_tier,
+        is_type_mask = is_type_mask,
+        is_promoted = is_promoted,
+        act_mask = act_mask,
+        silver_max_share = aw_cfg$silver_max_pool_share,
+        min_type_gold = aw_cfg$min_type_gold_for_cap
+      )
+      w_act <- cap_res$weights[act_mask]
       mean_act <- mean(w_act, na.rm = TRUE)
       w_out[act_mask] <- if (is.finite(mean_act) && mean_act > 1e-12) round(w_act / mean_act, 6) else 1.0
     }
     return(w_out)
   }
 
-  max_w <- max(w_eb, na.rm = TRUE)
-  w_cont <- if (is.finite(max_w) && max_w > 1e-12) (3.0 * w_eb / max_w) else rep(1.0, n)
+  max_w <- max(base_prec, na.rm = TRUE)
+  w_cont <- if (is.finite(max_w) && max_w > 1e-12) (3.0 * base_prec / max_w) else rep(1.0, n)
   w_cont[!is.finite(w_cont)] <- 1.0
   if (any(type_rank == 2L)) {
     w_cont[type_rank == 2L] <- 3.0
   }
-  round(pmax(0.5, pmin(3.0, w_cont)), 6)
+  w_cont <- pmax(0.5, pmin(3.0, w_cont))
+  cap_cont <- .apply_stratified_silver_pool_cap(
+    w_vec = w_cont,
+    taxa_vec = taxa_vec,
+    det_tier = det_tier,
+    is_type_mask = is_type_mask,
+    is_promoted = is_promoted,
+    act_mask = act_mask,
+    silver_max_share = aw_cfg$silver_max_pool_share,
+    min_type_gold = aw_cfg$min_type_gold_for_cap
+  )
+  w_final <- cap_cont$weights
+  if (any(cap_cont$capped_mask)) {
+    w_final[cap_cont$capped_mask] <- pmax(0.01, w_final[cap_cont$capped_mask])
+    w_final[!cap_cont$capped_mask] <- pmax(0.5, pmin(3.0, w_final[!cap_cont$capped_mask]))
+  }
+  round(w_final, 6)
+}
+
+.AUTH_WEIGHT_CFG_ENV <- new.env(parent = emptyenv())
+.load_authority_weight_config <- function(cfg_path = "config/config.yaml") {
+  if (exists("cached", envir = .AUTH_WEIGHT_CFG_ENV, inherits = FALSE)) {
+    return(get("cached", envir = .AUTH_WEIGHT_CFG_ENV, inherits = FALSE))
+  }
+  defs <- list(
+    silver_max_pool_share = 0.40,
+    min_type_gold_for_cap = 5L,
+    tier_0_type = 3.0,
+    tier_0_syntype = 2.5,
+    tier_1_gold = 2.0,
+    tier_2_silver = 0.75,
+    tier_3_bronze_promoted = 0.50,
+    tier_3_bronze = 0.35
+  )
+  if (file.exists(cfg_path) && requireNamespace("yaml", quietly = TRUE)) {
+    cfg <- tryCatch(yaml::read_yaml(cfg_path), error = function(e) NULL)
+    aw <- if (is.list(cfg) && is.list(cfg$authority_weights)) cfg$authority_weights else NULL
+    if (is.list(aw)) {
+      if (!is.null(aw$silver_max_pool_share)) defs$silver_max_pool_share <- min(0.85, max(0.05, as.numeric(aw$silver_max_pool_share)))
+      if (!is.null(aw$min_type_gold_for_cap)) defs$min_type_gold_for_cap <- max(1L, as.integer(aw$min_type_gold_for_cap))
+      if (!is.null(aw$tier_0_type)) defs$tier_0_type <- max(0.5, as.numeric(aw$tier_0_type))
+      if (!is.null(aw$tier_1_gold)) defs$tier_1_gold <- max(0.2, as.numeric(aw$tier_1_gold))
+      if (!is.null(aw$tier_2_silver)) defs$tier_2_silver <- max(0.05, as.numeric(aw$tier_2_silver))
+      if (!is.null(aw$tier_3_bronze_promoted)) defs$tier_3_bronze_promoted <- max(0.05, as.numeric(aw$tier_3_bronze_promoted))
+    }
+  }
+  assign("cached", defs, envir = .AUTH_WEIGHT_CFG_ENV)
+  defs
+}
+
+.apply_stratified_silver_pool_cap <- function(
+  w_vec,
+  taxa_vec,
+  det_tier,
+  is_type_mask,
+  is_promoted = NULL,
+  act_mask = NULL,
+  silver_max_share = 0.40,
+  min_type_gold = 5L
+) {
+  n <- length(w_vec)
+  capped_mask <- rep(FALSE, n)
+  if (n == 0L || !is.finite(silver_max_share) || silver_max_share <= 0.0 || silver_max_share >= 1.0) {
+    return(list(weights = w_vec, capped_mask = capped_mask))
+  }
+  if (is.null(act_mask)) act_mask <- rep(TRUE, n)
+  if (is.null(is_promoted)) is_promoted <- rep(FALSE, n)
+  bad_tx <- c("", "Unknown", "Unassigned_Packera", "NA")
+  u_tx <- unique(taxa_vec[act_mask & !is.na(taxa_vec) & !(taxa_vec %in% bad_tx)])
+  ratio_cap <- silver_max_share / max(1e-6, 1.0 - silver_max_share)
+  for (tx in u_tx) {
+    idx_tx_act <- which(act_mask & (taxa_vec == tx))
+    idx_tg <- idx_tx_act[is_type_mask[idx_tx_act] | (det_tier[idx_tx_act] == "Tier_1_Gold")]
+    idx_sv <- idx_tx_act[!is_type_mask[idx_tx_act] & (det_tier[idx_tx_act] == "Tier_2_Silver")]
+    if (length(idx_tg) >= as.integer(min_type_gold) && length(idx_sv) >= 1L) {
+      w_tg_sum <- sum(w_vec[idx_tg], na.rm = TRUE)
+      w_sv_sum <- sum(w_vec[idx_sv], na.rm = TRUE)
+      max_sv_sum <- ratio_cap * w_tg_sum
+      if (is.finite(w_sv_sum) && is.finite(max_sv_sum) && max_sv_sum > 0.0 && w_sv_sum > (max_sv_sum + 1e-12)) {
+        w_vec[idx_sv] <- w_vec[idx_sv] * (max_sv_sum / w_sv_sum)
+        capped_mask[idx_sv] <- TRUE
+        idx_pr <- idx_tx_act[is_promoted[idx_tx_act]]
+        if (length(idx_pr) >= 1L) {
+          sv_min <- min(w_vec[idx_sv], na.rm = TRUE)
+          w_vec[idx_pr] <- pmin(w_vec[idx_pr], 0.85 * sv_min)
+          capped_mask[idx_pr] <- TRUE
+        }
+      }
+    }
+  }
+  list(weights = w_vec, capped_mask = capped_mask)
 }
 
 compute_authority_precision_weights <- function(df, tier_col = "determiner_tier", active_mask = NULL, target_modality = "morph") {
@@ -1993,6 +2198,12 @@ compute_authority_precision_weights <- function(df, tier_col = "determiner_tier"
     tier_col <- "determiner_tier"
   }
   compute_empirical_bayes_authority_weights(df, mode = "active_passive", active_mask = active_mask, target_modality = target_modality)
+}
+
+resolve_step06_authority_weights <- function(df) {
+  n <- if (is.null(df) || !is.data.frame(df)) 0L else nrow(df)
+  if (n == 0L) return(numeric(0))
+  round(compute_empirical_bayes_authority_weights(df, mode = "continuous_prior_posterior", target_modality = "ecological"), 4)
 }
 
 screen_gmm_point_mass_columns <- function(X_mat, ref_mask = NULL, max_tie_frac = 0.25) {
@@ -2877,11 +3088,11 @@ apply_hierarchical_population_deme_shrinkage <- function(
 
   auth_w <- if ("authority_weight" %in% names(df)) suppressWarnings(as.numeric(df$authority_weight)) else rep(1.0, n)
   auth_w[!is.finite(auth_w)] <- 1.0
-  det_tier <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_2_Silver", n)
-  det_tier[is.na(det_tier) | !nzchar(det_tier)] <- "Tier_2_Silver"
+  has_dt_col <- "determiner_tier" %in% names(df)
+  det_tier <- if (has_dt_col) .standardize_determiner_tier_vec(df) else rep("Tier_3_Bronze", n)
   is_noise <- if ("is_confident_label_noise" %in% names(df)) as.logical(df$is_confident_label_noise) else rep(FALSE, n)
   is_noise[is.na(is_noise)] <- FALSE
-  is_active_ref <- (auth_w > 0.0) & (det_tier != "Tier_3_Bronze") & !is_noise
+  is_active_ref <- if (has_dt_col) ((auth_w > 0.0) & ((det_tier != "Tier_3_Bronze") | is_type) & !is_noise) else ((auth_w > 0.0) & !is_noise)
 
   sp_vec <- if ("species_standardized" %in% names(df)) as.character(df$species_standardized) else if ("scientificName" %in% names(df)) as.character(df$scientificName) else rep("Packera_sp", n)
   sp_vec[is.na(sp_vec) | !nzchar(trimws(sp_vec))] <- "Unknown"

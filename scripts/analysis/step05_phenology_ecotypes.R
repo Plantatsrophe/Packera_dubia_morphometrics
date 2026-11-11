@@ -1348,7 +1348,11 @@ resolve_active_anchor_groups <- function(df, intraspecific_mode = FALSE) {
     u_m <- suppressWarnings(as.numeric(df$coordinateUncertaintyInMeters))
     elig <- elig & (is.na(u_m) | u_m <= 10000.0)
   }
-  det_t <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n_r)
+  det_t <- if ("determiner_tier" %in% names(df)) {
+    ifelse(is.na(df$determiner_tier) | !nzchar(trimws(as.character(df$determiner_tier))), "Tier_3_Bronze", as.character(df$determiner_tier))
+  } else {
+    rep("Tier_1_Gold", n_r)
+  }
   is_prom <- rep(FALSE, n_r)
   if ("is_promoted_anchor" %in% names(df)) {
     pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_prom <- is_prom | pa
@@ -1608,7 +1612,11 @@ compute_specimen_edaphic_z <- function(
 
   elig_coord <- if ("is_training_eligible_coord" %in% names(df)) as.logical(df$is_training_eligible_coord) else rep(TRUE, n)
   elig_coord[is.na(elig_coord)] <- TRUE
-  det_tier <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
+  det_tier <- if ("determiner_tier" %in% names(df)) {
+    ifelse(is.na(df$determiner_tier) | !nzchar(trimws(as.character(df$determiner_tier))), "Tier_3_Bronze", as.character(df$determiner_tier))
+  } else {
+    rep("Tier_1_Gold", n)
+  }
   is_prom <- rep(FALSE, n)
   if ("is_promoted_anchor" %in% names(df)) {
     pa <- as.logical(df$is_promoted_anchor); pa[is.na(pa)] <- FALSE; is_prom <- is_prom | pa
@@ -1813,7 +1821,11 @@ compute_type_locality_ecological_control <- function(
   is_precise_clim <- unc_v <= 10000.0
   reg_v <- if ("regional_group" %in% names(df)) trimws(as.character(df$regional_group)) else rep("", n)
   reg_v[is.na(reg_v) | tolower(reg_v) %in% c("na", "unknown", "unknown_ecoregion")] <- ""
-  det_t <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_1_Gold", n)
+  det_t <- if ("determiner_tier" %in% names(df)) {
+    ifelse(is.na(df$determiner_tier) | !nzchar(trimws(as.character(df$determiner_tier))), "Tier_3_Bronze", as.character(df$determiner_tier))
+  } else {
+    rep("Tier_1_Gold", n)
+  }
   is_gold_v <- grepl("tier_?[01]|gold|type", det_t, ignore.case = TRUE) | is_type_vec
   is_anc_v <- is_gold_v | grepl("tier_?2|silver", det_t, ignore.case = TRUE)
   if ("is_promoted_bronze" %in% names(df)) {

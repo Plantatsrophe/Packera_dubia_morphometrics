@@ -656,6 +656,12 @@ def upsert_vouchers_records(
             row_dict["usda_symbol"] = _to_str(rec.get("usda_symbol"))
         if "usda_county_status" in rec and not _is_missing(rec.get("usda_county_status")):
             row_dict["usda_county_status"] = _to_str(rec.get("usda_county_status"))
+        if "infraspecific_taxon" in rec and not _is_missing(rec.get("infraspecific_taxon")):
+            row_dict["infraspecific_taxon"] = _to_str(rec.get("infraspecific_taxon"))
+        if "georef_qc_status" in rec and not _is_missing(rec.get("georef_qc_status")):
+            row_dict["georef_qc_status"] = _to_str(rec.get("georef_qc_status"))
+        if "spatial_balance_weight" in rec and not _is_missing(rec.get("spatial_balance_weight")):
+            row_dict["spatial_balance_weight"] = _to_float(rec.get("spatial_balance_weight"))
         qc_val = _to_str(rec.get("qc_status"))
         if qc_val in {"PASS", "FAILED_QC", "PENDING"}:
             row_dict["qc_status"] = qc_val

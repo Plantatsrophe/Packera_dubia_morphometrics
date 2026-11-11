@@ -221,10 +221,16 @@ def _build_master_view_ddl() -> str:
         v.exsiccatae_key AS exsiccatae_key,
         v.is_primary_duplicate AS is_primary_duplicate,
         v.duplicate_count AS duplicate_count,
+        v.exsiccatae_taxonomic_conflict AS exsiccatae_taxonomic_conflict,
+        v.exsiccatae_gold_taxon AS exsiccatae_gold_taxon,
+        v.usda_symbol AS usda_symbol,
+        v.usda_county_status AS usda_county_status,
+        v.infraspecific_taxon AS infraspecific_taxon,
+        v.georef_qc_status AS georef_qc_status,
         COALESCE(rac.species_standardized, om.species_standardized, v.species_standardized) AS species_standardized,
         COALESCE(rac.is_promoted_bronze, om.is_promoted_anchor, 0) AS is_promoted_anchor,
         COALESCE(rac.authority_weight, om.authority_weight) AS authority_weight,
-        COALESCE(rac.spatial_balance_weight, 1.0) AS spatial_balance_weight,
+        COALESCE(rac.spatial_balance_weight, v.spatial_balance_weight, 1.0) AS spatial_balance_weight,
         COALESCE(om.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm,
         COALESCE(om.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm,
         v.qc_status AS qc_status,
@@ -513,6 +519,9 @@ def _build_schema_ddl() -> str:
         exsiccatae_gold_taxon TEXT,
         usda_symbol TEXT,
         usda_county_status TEXT,
+        infraspecific_taxon TEXT,
+        georef_qc_status TEXT,
+        spatial_balance_weight REAL,
         species_standardized TEXT,
         pixels_per_mm REAL,
         is_calibrated_mm INTEGER,
@@ -900,6 +909,9 @@ _VOUCHERS_MIGRATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("exsiccatae_gold_taxon", "TEXT"),
     ("usda_symbol", "TEXT"),
     ("usda_county_status", "TEXT"),
+    ("infraspecific_taxon", "TEXT"),
+    ("georef_qc_status", "TEXT"),
+    ("spatial_balance_weight", "REAL"),
 )
 
 _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
@@ -1037,7 +1049,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20260407
+PACKERA_SCHEMA_USER_VERSION: int = 20261110
 
 
 def _migrate_dynamic_schema_columns(

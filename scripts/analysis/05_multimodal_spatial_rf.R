@@ -184,18 +184,7 @@ resolve_step06_authority_weights <- function(df) {
   }
   is_type_v <- as.logical(ti_vec$is_type_specimen)
   is_type_v[is.na(is_type_v)] <- FALSE
-  prop_fb <- ifelse(is_type_v, 3.0, ifelse(tier_std == "Tier_1_Gold", 1.0, ifelse(tier_std == "Tier_2_Silver", 0.85, 0.35)))
-
-  if ("authority_weight" %in% names(df)) {
-    cur_aw <- suppressWarnings(as.numeric(df$authority_weight))
-    fin_non_type <- cur_aw[is.finite(cur_aw) & cur_aw > 0 & !is_type_v]
-    if (length(fin_non_type) > 0L && max(fin_non_type, na.rm = TRUE) <= 2.2) {
-      out_aw <- ifelse(is.finite(cur_aw) & cur_aw > 0, cur_aw, prop_fb)
-      out_aw[ti_vec$type_rank == 2L] <- 3.0
-      out_aw[ti_vec$type_rank == 1L] <- pmax(out_aw[ti_vec$type_rank == 1L], 2.8)
-      return(round(pmax(0.05, out_aw), 4))
-    }
-  }
+  prop_fb <- ifelse(is_type_v, 3.0, ifelse(tier_std == "Tier_1_Gold", 2.0, ifelse(tier_std == "Tier_2_Silver", 0.75, 0.35)))
 
   if (exists("compute_empirical_bayes_authority_weights", mode = "function")) {
     eb_wts <- tryCatch({
@@ -1161,10 +1150,10 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
   } else {
     sprintf("b%04d", batch_idx)
   }
-  
+
   cache_file_rds <- file.path(cache_dir, sprintf("ssurgo_batch_%03d_%s.rds", batch_idx, batch_hash))
   cache_file_csv <- file.path(cache_dir, sprintf("ssurgo_batch_%03d_%s.csv", batch_idx, batch_hash))
-  
+
   if (file.exists(cache_file_rds)) {
     message(sprintf("Loading cached SSURGO batch %d from %s", batch_idx, cache_file_rds))
     return(normalize_ssurgo_cols(readRDS(cache_file_rds)))
@@ -1190,13 +1179,13 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
       }
     }
   }
-  
+
   pts_df <- batch_df[, c("catalogNumber", "longitude", "latitude")]
   n_pts <- nrow(pts_df)
   query_success <- FALSE
   res_df <- NULL
   delays <- c(1, 2, 4, 8)
-  
+
   # Attempt live query via soilDB if available (chunked to batch_size = 75 points with 50m ST_Buffer(ST_Point(lon, lat), 0.00045))
   if (!isTRUE(demo) && requireNamespace("soilDB", quietly = TRUE) && requireNamespace("sf", quietly = TRUE)) {
     chunk_size <- max(1L, min(as.integer(batch_size), 100L))
@@ -1324,7 +1313,7 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
       query_success <- TRUE
     }
   }
-  
+
   if (query_success && !is.null(res_df)) {
     if (!isTRUE(demo)) {
       dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
@@ -1366,11 +1355,11 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
   musyms <- character(n_pts); munames <- character(n_pts)
   suborders <- character(n_pts); greatgroups <- character(n_pts)
   is_outcrops <- logical(n_pts); outcrop_classes <- character(n_pts)
-  
+
   for (i in seq_len(n_pts)) {
     lat <- pts_df$latitude[i]; lon <- pts_df$longitude[i]
     reg <- if ("regional_group" %in% names(batch_df)) batch_df$regional_group[i] else "Unknown"
-    
+
     is_flatrock_zone <- isTRUE(demo) && (grepl("Flatrock", reg, ignore.case = TRUE) ||
                         (lon > -84.5 && lon < -78.5 && lat > 33.2 && lat < 36.8))
     is_sandhill_zone <- isTRUE(demo) && (grepl("Sandhill|Coastal", reg, ignore.case = TRUE) ||
@@ -1378,7 +1367,7 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
     is_prairie_zone  <- isTRUE(demo) && (grepl("Midwest|Prairie", reg, ignore.case = TRUE) || (lon < -88.0))
     is_appalachian   <- isTRUE(demo) && (grepl("Appalachian", reg, ignore.case = TRUE) ||
                         (lon >= -84.0 && lon <= -79.0 && lat >= 35.0 && lat <= 39.0))
-    
+
     if (is_flatrock_zone) {
       if (as.integer(abs(sin(lat * 100 + lon * 100)) * 1000) %% 10 < 7) {
         musyms[i] <- "RoB"; munames[i] <- "Rock outcrop-Wake complex, 2 to 10 percent slopes"; suborders[i] <- "Udepts"; greatgroups[i] <- "Lithic Dystrudepts"
@@ -1398,12 +1387,12 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
     } else {
       musyms[i] <- "MuB"; munames[i] <- "Generic Upland loam, 1 to 5 percent slopes"; suborders[i] <- "Udults"; greatgroups[i] <- "Typic Hapludults"
     }
-    
+
     cl <- classify_ssurgo_outcrop(munames[i], "", suborders[i], greatgroups[i], "", lat, lon, is_demo = TRUE)
     is_outcrops[i] <- cl$is_rock_outcrop
     outcrop_classes[i] <- cl$outcrop_class
   }
-  
+
   res_df <- data.frame(
     catalogNumber = pts_df$catalogNumber,
     latitude = pts_df$latitude,
@@ -1421,14 +1410,14 @@ query_ssurgo_sda_batch <- function(batch_df, cache_dir, batch_idx, max_retries =
 
 query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", batch_size = 75, demo = FALSE) {
   message(sprintf("Initiating USDA SSURGO Vector Pedology SDA Query (cache: %s, batch_size: %d)...", cache_dir, batch_size))
-  
+
   is_conus <- !is.na(df$latitude) & !is.na(df$longitude) &
               df$latitude >= 24.5 & df$latitude <= 49.5 &
               df$longitude >= -125.0 & df$longitude <= -66.5
   conus_df <- df[is_conus, ]
   n_conus <- nrow(conus_df)
   message(sprintf("Found %d vouchers within CONUS spatial domain for SSURGO vector evaluation.", n_conus))
-  
+
   ssurgo_quant_cols <- c(
     "ssurgo_rock_outcrop_pct", "ssurgo_bedrock_depth_cm",
     "ssurgo_sand_pct", "ssurgo_clay_pct", "ssurgo_ph",
@@ -1442,7 +1431,7 @@ query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", 
     for (sc in ssurgo_quant_cols) df[[sc]] <- NA_real_
     return(df)
   }
-  
+
   merged_df <- tryCatch({
     batch_results <- list()
     rem_conus <- conus_df
@@ -1496,12 +1485,12 @@ query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", 
       }
       batch_results <- c(batch_results, rem_batches)
     }
-    
+
     all_ssurgo <- as.data.frame(dplyr::bind_rows(batch_results), stringsAsFactors = FALSE)
     keep_cols <- c("catalogNumber", "musym", "muname", "taxsuborder", "taxgreatgroup",
                    "is_rock_outcrop", "outcrop_class", ssurgo_quant_cols)
     all_ssurgo <- all_ssurgo[!duplicated(all_ssurgo$catalogNumber), intersect(names(all_ssurgo), keep_cols), drop = FALSE]
-    
+
     df$catalogNumber <- as.character(df$catalogNumber)
     all_ssurgo$catalogNumber <- as.character(all_ssurgo$catalogNumber)
     for (col_rm in intersect(setdiff(keep_cols, "catalogNumber"), names(df))) {
@@ -1522,7 +1511,7 @@ query_ssurgo_sda <- function(df, cache_dir = "data/environmental/ssurgo_cache", 
     for (sc in ssurgo_quant_cols) df[[sc]] <- NA_real_
     df
   })
-  
+
   return(merged_df)
 }
 
@@ -1533,7 +1522,7 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
                                           contingency_out = "outputs/reports/micro_edaphic_outcrop_contingency.csv",
                                           demo = FALSE) {
   message("Executing Multi-Scale Edaphic Synthesis & Fisher's Exact Outcrop Fidelity Test...")
-  
+
   val_cols <- c("catalogNumber", "lat_lon_key", "latitude", "longitude", "species_standardized", "regional_group",
                 "coordinateUncertaintyInMeters", "buffer_radius_m", "high_coord_uncertainty_flag", "is_training_eligible_coord",
                 "musym", "muname", "taxsuborder", "taxgreatgroup", "is_rock_outcrop", "outcrop_class",
@@ -1551,11 +1540,11 @@ synthesize_multiscale_edaphics <- function(df, ssurgo_out = "data/tables/ssurgo_
   val_df <- df[, present_cols, drop = FALSE]
   names(val_df)[names(val_df) %in% c("soil_ph", "soil_cec", "soil_sand", "soil_bulk_density")] <-
     paste0(names(val_df)[names(val_df) %in% c("soil_ph", "soil_cec", "soil_sand", "soil_bulk_density")], "_soilgrids")
-  
+
   if (write_csv_atomic(val_df, ssurgo_out, demo = demo)) {
     message(sprintf("Exported specimen-level SSURGO & 10m-30m fine-grain edaphic validation table to %s (%d records).", ssurgo_out, nrow(val_df)))
   }
-  
+
   active_tx <- get_active_packera_taxa(df$species_standardized)
   grp_col_use <- "species_standardized"
   grp_levels <- active_tx
@@ -3555,7 +3544,7 @@ main <- function() {
   set.seed(42)
   opts <- parse_args_robust()
   message("=== Starting Multimodal Spatial RF & Ecological Niche Analysis ===")
-  
+
   if (!file.exists(opts$vouchers)) stop("Missing vouchers file: ", opts$vouchers)
   vouchers_df <- readr::read_csv(opts$vouchers, show_col_types = FALSE)
   vouchers_df$catalogNumber <- as.character(vouchers_df$catalogNumber)

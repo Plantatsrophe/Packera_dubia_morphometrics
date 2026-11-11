@@ -153,9 +153,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--check-sharpness",
-        action="store_true",
-        default=False,
-        help="Enable Laplacian variance edge sharpness evaluation.",
+        action=argparse.BooleanOptionalAction,
+        default=cfg.harvesting.check_sharpness,
+        help=f"Enable Laplacian variance edge sharpness evaluation (default: {cfg.harvesting.check_sharpness}).",
+    )
+    parser.add_argument(
+        "--harvest-full-continental-range",
+        action=argparse.BooleanOptionalAction,
+        default=cfg.harvesting.harvest_full_continental_range,
+        help=(
+            "After passing the Eastern NA species residency screen, harvest the full US + CA "
+            f"continental range for resident species (default: {cfg.harvesting.harvest_full_continental_range})."
+        ),
     )
     parser.add_argument(
         "--min-sharpness",
@@ -308,6 +317,10 @@ def main(argv: list[str] | None = None) -> None:
         usda_county_filter=bool(getattr(args, "usda_county_filter", cfg.harvesting.usda_county_filter)),
         usda_county_buffer_km=float(getattr(args, "usda_county_buffer_km", cfg.harvesting.usda_county_buffer_km)),
         usda_exempt_gold=bool(getattr(args, "usda_exempt_gold", cfg.harvesting.usda_exempt_gold)),
+        harvest_full_continental_range=bool(
+            getattr(args, "harvest_full_continental_range", cfg.harvesting.harvest_full_continental_range)
+        ),
+        min_eastern_residency_records=int(cfg.harvesting.min_eastern_residency_records),
     )
 
     harvester.run(download_images=args.download_images)

@@ -120,7 +120,7 @@ select_taxon_anchors <- function(morph_df) {
   }
   type_info <- if (exists(".identify_type_specimen_vec", mode = "function")) .identify_type_specimen_vec(morph_df) else list(type_rank = rep(0L, nrow(morph_df)), is_type_specimen = rep(FALSE, nrow(morph_df)))
   is_type <- as.logical(type_info$is_type_specimen); is_type[is.na(is_type)] <- FALSE
-  det_tier <- if ("determiner_tier" %in% names(morph_df)) as.character(morph_df$determiner_tier) else rep("Tier_1_Gold", nrow(morph_df))
+  det_tier <- if ("determiner_tier" %in% names(morph_df)) ifelse(is.na(morph_df$determiner_tier) | !nzchar(trimws(as.character(morph_df$determiner_tier))), "Tier_3_Bronze", as.character(morph_df$determiner_tier)) else rep("Tier_1_Gold", nrow(morph_df))
   is_gs <- (det_tier %in% c("Tier_1_Gold", "Tier_2_Silver")) | is_type; taxa <- sort(unique(morph_df$species_standardized))
   anchor_mask <- rep(FALSE, nrow(morph_df)); n_gs_vec <- stats::setNames(integer(length(taxa)), taxa); n_type_vec <- stats::setNames(integer(length(taxa)), taxa)
   for (tx in taxa) {

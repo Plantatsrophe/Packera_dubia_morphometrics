@@ -321,6 +321,7 @@ def resolve_usda_symbols_for_taxon(
     fallback_map = {
         "packera dubia": ("Packera tomentosa", "Senecio tomentosus", "Senecio dubius", "Cineraria tomentosa"),
         "packera crawfordii": ("Senecio crawfordii",),
+        "packera anonyma": ("Packera anonyma", "Senecio anonymus", "Senecio smallii", "Packera smallii"),
         "packera smallii": ("Packera anonyma", "Senecio smallii", "Senecio anonymus"),
     }
     for fallback_syn in fallback_map.get(canonical_packera.strip().lower(), ()):

@@ -68,15 +68,22 @@ thresholds:
   geographic_scope: "eastern_na"
   countries:
     - "US"
+    - "CA"
 
-  # Strict active/passive reference split & Dawid-Skene empirical precision weights (Slenker et al. 2022; Dawid & Skene 1979)
-  # Tier_3_Bronze has weight 0.0 (passive projection only); Tier_1_Gold and Tier_2_Silver are weighted 1.0
-  # (after within-taxon Mahalanobis outlier pruning at chi-square 0.95) or by empirical Dawid-Skene precision (w_k = 1 - error_rate_k).
+  # Stratified Authority Pool Cap & Gold-Core Medoid Anchoring:
+  # - Taxon Mahalanobis outlier medoids anchor strictly on Tier_0 + Tier_1_Gold when N_type_gold >= 3.
+  # - Base precision weights: Tier_0_Type = 3.0, Tier_1_Gold = 2.0, Tier_2_Silver = 0.75, Promoted Bronze = 0.50, Bronze = 0.0.
+  # - When N_type_gold >= 5, Tier_2_Silver pooled weight is capped at <= 40% of the taxon active pool (Type + Gold >= 60%).
   authority_weights:
-    mode: "dawid_skene_or_equal_active"
+    mode: "stratified_pool_cap"
     mahalanobis_pruning_chisq_quantile: 0.95
-    tier_1_gold: 1.0
-    tier_2_silver: 1.0
+    silver_max_pool_share: 0.40
+    min_type_gold_for_cap: 5
+    min_type_gold_for_medoid: 3
+    tier_0_type: 3.0
+    tier_1_gold: 2.0
+    tier_2_silver: 0.75
+    tier_3_bronze_promoted: 0.50
     tier_3_bronze: 0.0
 
   # Visual capitulum phenological biomarker classification
@@ -95,12 +102,17 @@ harvesting:
   geographic_scope: "eastern_na"
   countries:
     - "US"
+    - "CA"
   exclude_western: true
+  harvest_full_continental_range: true
+  min_eastern_residency_records: 3
   western_longitude_threshold: -98.0
   home_herbarium: "NCU"
   min_megapixels: 8.0
   min_file_size_kb: 500.0
   min_sharpness_laplacian: 80.0
+  check_sharpness: false
+  webp_quality: 92
   download_concurrency: 15
   usda_county_filter: false
   usda_county_buffer_km: 50.0

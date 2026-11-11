@@ -125,16 +125,22 @@ def normalize_collector(recorded_by: Optional[str]) -> str:
 
 def normalize_record_number(record_number: Optional[Any]) -> str:
     """
-    Normalizes collection number: strips prefixes and suffixes, extracts pure numeric component.
-    e.g., '#1042' -> '1042', 'No. 1042b' -> '1042', 's.n.' -> ''.
+    Normalizes collection number: strips boilerplate prefixes ('#', 'No.', 'Coll.'),
+    preserves compound/year-prefixed numeric sequences ('2022-014' -> '2022-014') and
+    ICN Art. 8.2 split-gathering letter suffixes ('1042b' -> '1042b', '1042-A' -> '1042a').
     """
     if record_number is None:
         return ""
     s = str(record_number).strip()
-    if not s or s.lower() in {"none", "nan", "null", "s.n.", "sn", "s. n.", "unnumbered"}:
+    if not s or s.lower() in {"none", "nan", "null", "s.n.", "sn", "s. n.", "unnumbered", "sine numero"}:
         return ""
-    match = re.search(r"\d+", s)
-    return match.group(0) if match else ""
+    s_clean = re.sub(r"^(?:coll(?:ection)?\.?\s*)?(?:no\.?|nr\.?|num(?:ber)?\.?|#)\s*", "", s, flags=re.IGNORECASE).strip()
+    match = re.search(r"(\d+(?:[-./]\d+)*)(?:[-\s]*([a-zA-Z])(?![a-zA-Z0-9]))?", s_clean)
+    if not match:
+        return ""
+    num_part = re.sub(r"[./]+", "-", match.group(1))
+    sfx_part = (match.group(2) or "").lower()
+    return f"{num_part}{sfx_part}"
 
 
 def normalize_event_date(
@@ -567,9 +573,18 @@ def stratify_duplicates(
             best_gold_taxon = ranked_gold[0]
             best_gold_source_idx = gold_best_idx[best_gold_taxon]
 
+        multi_gold_disagreement = len(gold_counts) >= 2
         for idx in indices:
             pos_i = idx_to_pos[idx]
-            conflict_list[pos_i] = has_conflict
+            row_tx_i = idx_to_std_tx.get(idx, "")
+            if not has_conflict:
+                row_conflict = False
+            elif multi_gold_disagreement or not best_gold_taxon:
+                row_conflict = True
+            else:
+                # Unanimous Tier_1_Gold consensus exists: flag only sheets whose label disagreed with Gold consensus
+                row_conflict = bool(row_tx_i and row_tx_i != best_gold_taxon)
+            conflict_list[pos_i] = row_conflict
             gold_taxon_list[pos_i] = best_gold_taxon
 
         scored_candidates.sort(key=lambda x: x[0], reverse=True)
@@ -580,6 +595,7 @@ def stratify_duplicates(
         primary_tx = idx_to_std_tx.get(primary_idx, "")
         if (
             best_gold_taxon
+            and not multi_gold_disagreement
             and best_gold_source_idx is not None
             and primary_tier in {"Tier_3_Bronze", ""}
             and primary_tx != best_gold_taxon
@@ -602,8 +618,9 @@ def stratify_duplicates(
             df.at[prim_idx, "scientificName"] = gold_tx
         if "species_standardized" in df.columns:
             df.at[prim_idx, "species_standardized"] = gold_tx
+        # Elevate conflicting Bronze primary to Mahalanobis-screened Tier_2_Silver (guarding against mixed gatherings)
         if "determiner_tier" in df.columns:
-            df.at[prim_idx, "determiner_tier"] = "Tier_1_Gold"
+            df.at[prim_idx, "determiner_tier"] = "Tier_2_Silver"
         if "identifiedBy" in df.columns:
             df.at[prim_idx, "identifiedBy"] = f"{gold_det} [exsiccatae Tier_1_Gold duplicate {gold_cat}]"
         if logger:
@@ -784,11 +801,10 @@ def spatially_balance_and_thin_vouchers(
 
     active_indices = list(range(n_rows))
 
-    # Step C: Spatial Grid Thinning (spatial_thin_km > 0)
+    # Step C: Greedy Priority-Ordered Pairwise Haversine Thinning (spatial_thin_km > 0)
     if spatial_thin_km is not None and float(spatial_thin_km) > 0.0:
-        thin_km = float(spatial_thin_km)
-        dlat = thin_km / 111.32
-        cell_map: Dict[Tuple[str, int, int], List[int]] = {}
+        thin_m = float(spatial_thin_km) * 1000.0
+        sp_geo_groups: Dict[str, List[int]] = {}
         non_geo_indices: List[int] = []
 
         for idx in active_indices:
@@ -797,21 +813,26 @@ def spatially_balance_and_thin_vouchers(
             sp_val = str(out_df.iloc[idx]["species_standardized"])
             if lat_v is None or lon_v is None:
                 non_geo_indices.append(idx)
-                continue
-            cos_lat = max(math.cos(math.radians(lat_v)), 1e-4)
-            dlon = thin_km / (111.32 * cos_lat)
-            lat_bin = int(math.floor(lat_v / dlat))
-            lon_bin = int(math.floor(lon_v / dlon))
-            cell_map.setdefault((sp_val, lat_bin, lon_bin), []).append(idx)
+            else:
+                sp_geo_groups.setdefault(sp_val, []).append(idx)
 
         thinned_indices: List[int] = []
-        for _cell_key, cell_idxs in cell_map.items():
-            cell_idxs_sorted = sorted(cell_idxs, key=lambda i: priority_tuples[i], reverse=True)
-            retained_cell = [cell_idxs_sorted[0]]
-            for i in cell_idxs_sorted[1:]:
-                if is_type_flags[i] or (preserve_all_gold and is_gold_flags[i]):
-                    retained_cell.append(i)
-            thinned_indices.extend(retained_cell)
+        for _sp_k, sp_idxs in sp_geo_groups.items():
+            sp_sorted = sorted(sp_idxs, key=lambda i: priority_tuples[i], reverse=True)
+            kept_sp: List[int] = []
+            for cand_i in sp_sorted:
+                if is_type_flags[cand_i] or (preserve_all_gold and is_gold_flags[cand_i]):
+                    kept_sp.append(cand_i)
+                    continue
+                c_lat = lats[cand_i]
+                c_lon = lons[cand_i]
+                too_close = any(
+                    haversine_distance_meters(c_lat, c_lon, lats[k_i], lons[k_i]) < thin_m
+                    for k_i in kept_sp
+                )
+                if not too_close:
+                    kept_sp.append(cand_i)
+            thinned_indices.extend(kept_sp)
 
         thinned_indices.extend(non_geo_indices)
         active_indices = sorted(set(thinned_indices))
@@ -958,25 +979,8 @@ def spatially_balance_and_thin_vouchers(
         if len(geo_idxs) == 0:
             continue
 
-        # State frequency factor f_state = N_{taxon, state(i)} / median_s(N_{taxon, s})
-        st_counts: Dict[str, int] = {}
-        for k in t_idxs:
-            st_s = ret_states[k]
-            if st_s:
-                st_counts[st_s] = st_counts.get(st_s, 0) + 1
-        med_state_cnt = float(np.median(list(st_counts.values()))) if st_counts else 1.0
-        med_state_cnt = max(med_state_cnt, 1.0)
-
-        f_state = np.array(
-            [
-                max(st_counts.get(ret_states[k], 0) / med_state_cnt, 1e-6)
-                if ret_states[k] in st_counts else 1.0
-                for k in geo_idxs
-            ],
-            dtype=float,
-        )
-
-        # Local 25 km Gaussian kernel specimen density d_local
+        # Continuous geodesic 25 km + 75 km multi-scale Gaussian kernel specimen density d_local
+        # (free of arbitrary US state political-area penalties)
         rad_lat = np.radians(ret_lats[geo_idxs])
         rad_lon = np.radians(ret_lons[geo_idxs])
         dlat_mat = rad_lat[:, None] - rad_lat[None, :]
@@ -986,11 +990,13 @@ def spatially_balance_and_thin_vouchers(
             + np.cos(rad_lat[:, None]) * np.cos(rad_lat[None, :]) * (np.sin(dlon_mat / 2.0) ** 2)
         )
         dist_km_mat = 2.0 * 6371.0 * np.arcsin(np.clip(np.sqrt(a_mat), 0.0, 1.0))
-        kern_mat = np.exp(-(dist_km_mat ** 2) / (2.0 * (bandwidth_km ** 2)))
+        kern_fine = np.exp(-(dist_km_mat ** 2) / (2.0 * (bandwidth_km ** 2)))
+        kern_regional = 0.35 * np.exp(-(dist_km_mat ** 2) / (2.0 * ((3.0 * bandwidth_km) ** 2)))
+        kern_mat = kern_fine + kern_regional
         np.fill_diagonal(kern_mat, 0.0)
         d_local = 1.0 + np.sum(kern_mat, axis=1)
 
-        w_raw = 1.0 / np.sqrt(np.maximum(d_local * f_state, 1e-8))
+        w_raw = 1.0 / np.sqrt(np.maximum(d_local, 1e-8))
         mean_raw = float(np.mean(w_raw))
         if mean_raw > 0.0:
             w_norm = w_raw / mean_raw
@@ -1215,9 +1221,19 @@ _NON_PERSON_DETERMINATION_TOKENS: Tuple[str, ...] = (
     "taxonomic update",
     "taxonomic adjustment",
     "synonymy update",
+    "synonymy",
     "folder update",
+    "herbarium folder",
     "database import",
     "batch update",
+    "flora of ",
+    "fna vol",
+    "fna ",
+    "usda plants",
+    "bonap",
+    "checklist",
+    "kartesz",
+    "[exsiccatae ",
     "sernec",
     "gbif",
     "idigbio",
@@ -1227,32 +1243,52 @@ _NON_PERSON_DETERMINATION_TOKENS: Tuple[str, ...] = (
     "leg. ign",
     "s.n.",
 )
+_FLORA_CITATION_REGEX = re.compile(
+    r"\b(?:fide|sensu|sec\.|according\s+to|per|after|following)\s+[A-Z]"
+    r"|\b(?:FNA|BONAP|USDA)\b"
+    r"|^[A-Z][a-z]+(?:\s+(?:et\s+al\.?|&\s*[A-Z][a-z]+))?\s*\(?\b(?:19|20)\d{2}[a-z]?\)?$",
+    re.IGNORECASE,
+)
 _AMBIGUOUS_COMMON_SURNAMES: Set[str] = {
-    "anderson", "baker", "bell", "brooks", "brown", "bush", "campbell", "carter",
-    "chapman", "clark", "collins", "cook", "cooper", "cox", "davis", "diamond",
-    "duncan", "evans", "fisher", "freeman", "gray", "green", "hall", "hill",
-    "horn", "howard", "jackson", "james", "johnson", "jones", "kelly", "king",
-    "lee", "lewis", "long", "martin", "miller", "mitchell", "moore", "morgan",
-    "morris", "murphy", "nelson", "parker", "perry", "phillips", "powell", "price",
+    "anderson", "atwood", "baker", "bell", "britton", "brooks", "brown", "bush", "campbell", "carter",
+    "chapman", "clark", "collins", "cook", "cooper", "cox", "davis", "diamond", "dorn",
+    "duncan", "estes", "evans", "fisher", "freeman", "fuller", "golden", "gray", "green", "hall", "heller", "hill",
+    "horn", "howard", "jackson", "james", "jeffrey", "johnson", "jones", "kelly", "king",
+    "lee", "lewis", "long", "love", "martin", "miller", "mitchell", "moore", "morgan",
+    "morris", "murphy", "nelson", "packer", "parker", "perry", "phillips", "powell", "price",
     "reed", "richardson", "roberts", "robinson", "rogers", "ross", "russell",
     "scott", "smith", "stewart", "taylor", "thomas", "thompson", "turner", "walker",
-    "ward", "watson", "white", "williams", "wilson", "wood", "wright", "young",
+    "ward", "watson", "weber", "welsh", "white", "williams", "wilson", "wood", "wright", "young",
 }
-PACKERA_SPECIALISTS: Set[str] = {
-    "trock", "barkley", "kowal", "mahoney", "soderholm", "bain", "golden",
-    "freeman", "greenman", "love", "löve", "weber", "packer", "jeffrey", "mabberley",
-    "fuller", "mandel", "moore-pollard", "weakley", "boufford", "kartesz",
-    "gramling", "uttal", "judziewicz", "okennon", "welsh", "atwood", "dorn",
-    "okane", "yeatts", "ruyle-douglas", "boivin", "cronquist", "fernald",
-    "rydberg", "britton", "heller", "spellenberg", "pippen", "kral",
-    "godfrey", "sorrie", "nesom", "turner", "strother", "brouillet",
-    "semple", "schilling", "floden", "estes", "poindexter", "wieboldt",
-    "mcmillan", "beauchamp",
+CORE_PACKERA_MONOGRAPHERS: Set[str] = {
+    "trock", "barkley", "kowal", "mahoney", "soderholm", "bain",
+    "mabberley", "mandel", "moore-pollard", "weakley", "gramling",
+    "uttal", "pippen", "nesom", "greenman",
 }
-_QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = tuple(
+REGIONAL_FLORA_SPECIALISTS: Set[str] = {
+    "boufford", "judziewicz", "okennon", "okane", "yeatts", "ruyle-douglas",
+    "boivin", "cronquist", "fernald", "rydberg", "spellenberg", "kral",
+    "godfrey", "sorrie", "strother", "brouillet", "semple", "schilling",
+    "floden", "poindexter", "wieboldt", "mcmillan", "beauchamp",
+}
+PACKERA_SPECIALISTS: Set[str] = CORE_PACKERA_MONOGRAPHERS | REGIONAL_FLORA_SPECIALISTS
+_CORE_QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = tuple(
     re.compile(pat, re.IGNORECASE)
     for pat in (
+        r"\b(?:j\.?\s*b\.?|b\.?|(?:j\.?\s+)?brandon)\s+fuller\b|\bfuller\s*,\s*(?:j\.?\s*b\.?|b\.?|j\.?\s*brandon|brandon)\b",
+        r"\b(?:c\.?\s*c\.?|craig(?:\s+c\.?)?)\s+freeman\b|\bfreeman\s*,\s*(?:c\.?\s*c\.?|craig)\b",
+        r"\b(?:w\.?\s*a\.?|william\s+a\.?)\s+weber\b|\bweber\s*,\s*(?:w\.?\s*a\.?|william)\b",
+        r"\b(?:j\.?\s*l\.?|judith\s+l\.?)\s+golden\b|\bgolden\s*,\s*(?:j\.?\s*l\.?|judith)\b",
+        r"\b(?:j\.?\s*g\.?|john\s+g\.?)\s+packer\b|\bpacker\s*,\s*(?:j\.?\s*g\.?|john)\b",
+        r"\b(?:c\.?|charles)\s+jeffrey\b|\bjeffrey\s*,\s*(?:c\.?|charles)\b",
+        r"\b(?:b\.?\s*l\.?|billie\s+l(?:ee)?\.?)\s+turner\b|\bturner\s*,\s*(?:b\.?\s*l\.?|billie)\b",
         r"\b(?:e\.?\s*r\.?|erika\s+r\.?)\s+moore\b|\bmoore\s*,\s*(?:e\.?\s*r\.?|erika)\b",
+        r"(?:^|[\s|,;(])[áa]\.?\s*l[öo]ve\b|\bd\.?\s*l[öo]ve\b|\b[áa]skell\s+l[öo]ve\b|\bdoris\s+l[öo]ve\b",
+    )
+)
+_REGIONAL_QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = tuple(
+    re.compile(pat, re.IGNORECASE)
+    for pat in (
         r"\b(?:g\.?\s*w\.?|george\s+w\.?)\s+douglas\b|\bdouglas\s*,\s*(?:g\.?\s*w\.?|george)\b",
         r"\b(?:e\.?\s*l\.?|edward\s+lee)\s+greene\b|\bgreene\s*,\s*(?:e\.?\s*l\.?|edward)\b",
         r"\b(?:a\.?|asa)\s+gray\b|\bgray\s*,\s*(?:a\.?|asa)\b",
@@ -1260,10 +1296,19 @@ _QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = tuple(
         r"\b(?:alph\.?|alphonso)\s+wood\b|\bwood\s*,\s*(?:alph\.?|alphonso)\b",
         r"\b(?:s\.?\s*f\.?|sidney\s+fay)\s+blake\b|\bblake\s*,\s*(?:s\.?\s*f\.?|sidney)\b",
         r"\b(?:s\.?|sereno)\s+watson\b|\bwatson\s*,\s*(?:s\.?|sereno)\b",
+        r"\b(?:s\.?\s*l\.?|stanley\s+l\.?)\s+welsh\b|\bwelsh\s*,\s*(?:s\.?\s*l\.?|stanley)\b",
+        r"\b(?:n\.?\s*d\.?|duane)\s+atwood\b|\batwood\s*,\s*(?:n\.?\s*d\.?|duane)\b",
+        r"\b(?:r\.?\s*d\.?|robert\s+d\.?)\s+dorn\b|\bdorn\s*,\s*(?:r\.?\s*d\.?|robert)\b",
+        r"\b(?:n\.?\s*l\.?|nathaniel\s+l(?:ord)?\.?)\s+britton\b|\bbritton\s*,\s*(?:n\.?\s*l\.?|nathaniel)\b",
+        r"\b(?:a\.?\s*a\.?|amos\s+a(?:rthur)?\.?)\s+heller\b|\bheller\s*,\s*(?:a\.?\s*a\.?|amos)\b",
+        r"\b(?:l\.?\s*d\.?|dwayne)\s+estes\b|\bestes\s*,\s*(?:l\.?\s*d\.?|dwayne)\b",
+        r"\b(?:j\.?\s*j\.?\s*n\.?|julian(?:\s+j\.?\s*n\.?)?)\s+campbell\b|\bcampbell\s*,\s*(?:j\.?\s*j\.?\s*n\.?|julian)\b",
         r"\bo['’]?kennon\b|\br\.?\s*j\.?\s*o['’]?kennon\b",
         r"\bo['’]?kane\b|\bs\.?\s*l\.?\s*o['’]?kane\b",
-        r"(?:^|[\s|,;(])[áa]\.?\s*l[öo]ve\b|\bd\.?\s*l[öo]ve\b|\b[áa]skell\s+l[öo]ve\b|\bdoris\s+l[öo]ve\b",
     )
+)
+_QUALIFIED_SPECIALIST_REGEXES: Tuple[re.Pattern, ...] = (
+    _CORE_QUALIFIED_SPECIALIST_REGEXES + _REGIONAL_QUALIFIED_SPECIALIST_REGEXES
 )
 _COLLECTOR_REFERENCE_REGEX = re.compile(
     r"^(?:(?:id(?:entified)?|det(?:ermined)?|annot(?:ated)?|ver(?:ified)?|conf(?:irmed)?)\.?\s*(?:by\s+)?)?"
@@ -1272,7 +1317,20 @@ _COLLECTOR_REFERENCE_REGEX = re.compile(
 )
 
 
-def _has_specialist_match(text: str, extra_patterns: Optional[Sequence[str]] = None) -> bool:
+def _has_core_monographer_match(text: str) -> bool:
+    """Return True if `text` matches a core Packera / Senecioneae monographer."""
+    if not text or not str(text).strip():
+        return False
+    s_str = str(text).strip()
+    if _has_non_person_determination_token(s_str):
+        return False
+    surnames = set(normalize_determiner_surnames(s_str))
+    if surnames & CORE_PACKERA_MONOGRAPHERS:
+        return True
+    return any(q_rx.search(s_str) for q_rx in _CORE_QUALIFIED_SPECIALIST_REGEXES)
+
+
+def _has_specialist_match(text: str, extra_patterns: Optional[Iterable[str]] = None) -> bool:
     """
     Returns True if `text` matches a recognized North American Packera / Senecioneae
     taxonomic specialist via normalized surnames (`PACKERA_SPECIALISTS`), initial-qualified
@@ -1282,6 +1340,8 @@ def _has_specialist_match(text: str, extra_patterns: Optional[Sequence[str]] = N
     if not text or not str(text).strip():
         return False
     s_str = str(text).strip()
+    if _has_non_person_determination_token(s_str):
+        return False
     surnames = set(normalize_determiner_surnames(s_str))
     if surnames & PACKERA_SPECIALISTS:
         return True
@@ -1303,10 +1363,13 @@ def _has_non_person_determination_token(val: Optional[Any]) -> bool:
         return False
     if pd is not None and pd.isna(val):
         return False
-    s_low = str(val).strip().lower()
+    s_raw = str(val).strip()
+    s_low = s_raw.lower()
     if not s_low:
         return False
-    return any(tok in s_low for tok in _NON_PERSON_DETERMINATION_TOKENS)
+    if any(tok in s_low for tok in _NON_PERSON_DETERMINATION_TOKENS):
+        return True
+    return bool(_FLORA_CITATION_REGEX.search(s_raw))
 
 
 def _is_missing_identified_by(val: Optional[Any]) -> bool:
@@ -1588,6 +1651,12 @@ def discover_corpus_authorities(
         # Never fall back to recordedBy when counting determinations in discover_corpus_authorities
         surnames = normalize_determiner_surnames(raw_id) if has_explicit_det_str else []
         has_attributed_det = len(surnames) > 0
+        raw_rec_by = row.get("recordedBy", "") if "recordedBy" in row else ""
+        rec_col_norm = normalize_collector("" if (raw_rec_by is None or pd.isna(raw_rec_by)) else str(raw_rec_by))
+        cross_collector_surnames = [
+            s_n for s_n in surnames
+            if not (rec_col_norm and rec_col_norm != "unknown" and s_n == rec_col_norm)
+        ]
 
         raw_type = row.get(type_col) if type_col else None
         is_type, _ = _is_verified_type_status(raw_type)
@@ -1596,7 +1665,7 @@ def discover_corpus_authorities(
             if valid_inst and inst != "UNKNOWN" and std_sp:
                 inst_type_sheets[inst] = inst_type_sheets.get(inst, 0) + 1
             if has_explicit_det_str:
-                for s_name in surnames:
+                for s_name in cross_collector_surnames:
                     det_type_annotated.add(s_name)
                     det_type_hits[s_name] = det_type_hits.get(s_name, 0) + 1
 
@@ -1608,9 +1677,9 @@ def discover_corpus_authorities(
                 if has_attributed_det:
                     inst_taxon_attributed[it_key] = inst_taxon_attributed.get(it_key, 0) + 1
 
-        if std_sp and surnames:
+        if std_sp and cross_collector_surnames:
             det_weight = 2 if (is_type and has_explicit_det_str) else 1
-            for s_name in surnames:
+            for s_name in cross_collector_surnames:
                 dt_key = (s_name, std_sp)
                 det_taxon_counts[dt_key] = det_taxon_counts.get(dt_key, 0) + det_weight
                 det_total_counts[s_name] = det_total_counts.get(s_name, 0) + det_weight
@@ -1769,22 +1838,30 @@ def parse_determiner_tier(
     else:
         determiner_raw = history if history else (recorded_by if recorded_by else identified_by)
 
-    # Match core PACKERA_SPECIALISTS (SPECIALIST_PATTERNS) against determiner/annotation fields;
-    # only include recorded_by when fallback_to_collector is True (blank identified_by or collector ref,
-    # and never when identified_by is a non-person adjustment note on a non-type).
+    # Match specialists strictly on current determination (`identifiedBy`), only consulting
+    # `verbatimIdentificationHistory` when `identifiedBy` is absent/collector-ref (so an older
+    # superseded specialist annotation in history never promotes a newer non-specialist override).
     eff_id_for_specialist = "" if is_non_person_det else identified_by
-    eff_hist_for_specialist = "" if _has_non_person_determination_token(history) else history
-    determiner_audit_text = (
-        f"{type_status} | {eff_id_for_specialist} | {eff_hist_for_specialist} | {recorded_by}"
-        if fallback_to_collector
-        else f"{type_status} | {eff_id_for_specialist} | {eff_hist_for_specialist}"
+    eff_hist_for_specialist = (
+        ""
+        if (has_explicit_det or _has_non_person_determination_token(history))
+        else history
     )
 
     is_specialist = False
+    is_regional_collector_fallback_silver = False
     if not (is_non_person_det and not eff_hist_for_specialist and type_rank <= 0):
-        is_specialist = _has_specialist_match(determiner_audit_text)
+        explicit_det_text = f"{eff_id_for_specialist} | {eff_hist_for_specialist}".strip(" |")
+        if explicit_det_text and _has_specialist_match(explicit_det_text):
+            is_specialist = True
+        elif fallback_to_collector and recorded_by:
+            if _has_core_monographer_match(recorded_by):
+                is_specialist = True
+            elif _has_specialist_match(recorded_by):
+                # Prolific regional flora collectors on blank-identifiedBy field labels route to Silver
+                is_regional_collector_fallback_silver = True
 
-    # Dynamic specialists and protologue authors apply ONLY to explicit determinations/history,
+    # Dynamic specialists and protologue authors apply ONLY to explicit determinations/unoverridden history,
     # NEVER via collector fallback (recordedBy alone or collector reference).
     if not is_specialist and dynamic_specialists and (has_explicit_det or eff_hist_for_specialist):
         dyn_spec_set: Set[str] = set()
@@ -1792,7 +1869,7 @@ def parse_determiner_tier(
             if item is None:
                 continue
             s_tok = str(item).strip().lower()
-            if len(s_tok) >= 3:
+            if len(s_tok) >= 3 and s_tok not in _AMBIGUOUS_COMMON_SURNAMES:
                 dyn_spec_set.add(s_tok)
                 dyn_spec_set.add(_fold_ascii(s_tok))
         if dyn_spec_set:
@@ -1814,13 +1891,22 @@ def parse_determiner_tier(
     if is_type or is_specialist:
         return "Tier_1_Gold", type_status_clean, determiner_raw
 
+    if is_regional_collector_fallback_silver:
+        return "Tier_2_Silver", type_status_clean, determiner_raw
+
+    if "[exsiccatae " in identified_by.lower():
+        return "Tier_2_Silver", type_status_clean, determiner_raw
+
     dyn_herb_set = {str(h).strip().upper() for h in dynamic_herbaria if h} if dynamic_herbaria else set()
     is_major_herbarium = (institution in MAJOR_HERBARIA_CODES) or (institution in dyn_herb_set)
-    has_rich_locality = len(locality) > 10 or len(habitat) > 5
+    has_rich_locality = len(locality) > 5 or len(habitat) > 3
     eff_silver_det = "" if is_non_person_det else (recorded_by if (has_collector_ref and recorded_by) else identified_by)
+    silver_low = eff_silver_det.lower()
+    is_student_or_intern = bool(re.search(r"\b(?:student|undergrad(?:uate)?|intern|class|volunteer)\b", silver_low))
     has_determiner = bool(
         eff_silver_det
-        and eff_silver_det.lower() not in GENERIC_DETERMINER_TOKENS
+        and not is_student_or_intern
+        and silver_low not in GENERIC_DETERMINER_TOKENS
         and not _has_non_person_determination_token(eff_silver_det)
         and len(normalize_determiner_surnames(eff_silver_det)) > 0
     )
@@ -1998,8 +2084,11 @@ def apply_corpus_authority_tiers(
 
         prev_tier = str(row.get("determiner_tier", "") if not pd.isna(row.get("determiner_tier", "")) else "").strip()
         ex_gold = str(row.get("exsiccatae_gold_taxon", "") if not pd.isna(row.get("exsiccatae_gold_taxon", "")) else "").strip()
-        if prev_tier == "Tier_1_Gold" and ex_gold and std_sp == ex_gold:
-            tier_eval = "Tier_1_Gold"
+        is_exsiccatae_transfer = "[exsiccatae " in str(id_raw or "").lower()
+        if is_exsiccatae_transfer:
+            tier_eval = "Tier_2_Silver"
+        elif prev_tier in {"Tier_1_Gold", "Tier_2_Silver"} and ex_gold and std_sp == ex_gold and tier_eval == "Tier_3_Bronze":
+            tier_eval = prev_tier
         elif not has_locality_cols and prev_tier == "Tier_2_Silver" and tier_eval == "Tier_3_Bronze":
             tier_eval = "Tier_2_Silver"
 
@@ -2074,7 +2163,7 @@ def resolve_geographic_scope_settings(
     elif scope == "north_america" or bool(include_western):
         eff_countries = ["US", "CA", "MX"]
     else:
-        eff_countries = normalize_countries_list(DEFAULT_COUNTRIES, default=["US"])
+        eff_countries = normalize_countries_list(DEFAULT_COUNTRIES, default=["US", "CA"])
 
     return scope, eff_exclude_western, eff_countries
 
@@ -2099,7 +2188,12 @@ def is_excluded_western_region(
             upper_state = cleaned.upper()
             if upper_state and upper_state not in {"NONE", "NAN", "NA", "N/A", "NULL", "UNKNOWN", "UNSPECIFIED", "UNRECORDED"}:
                 has_valid_state = True
-                if upper_state in {"WASHINGTON, D.C.", "WASHINGTON D.C.", "WASHINGTON DC", "DISTRICT OF COLUMBIA", "DC"}:
+                if upper_state in {
+                    "WASHINGTON, D.C.", "WASHINGTON D.C.", "WASHINGTON DC", "DISTRICT OF COLUMBIA", "DC",
+                    "ON", "ONTARIO", "QC", "QUEBEC", "QUÉBEC", "NB", "NEW BRUNSWICK",
+                    "NS", "NOVA SCOTIA", "PE", "PEI", "PRINCE EDWARD ISLAND",
+                    "NL", "NEWFOUNDLAND", "NEWFOUNDLAND AND LABRADOR", "MB", "MANITOBA",
+                }:
                     return False
 
                 if upper_state in EXCLUDED_WESTERN_STATES:
