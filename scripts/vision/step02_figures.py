@@ -280,7 +280,7 @@ def generate_step02_publication_figures(
     using colorblind-safe Okabe-Ito palettes and italicized Packera taxon labels:
       1. fig02a_segmentation_qc_distributions.{pdf,png}:
          (A) Lamina Solidity vs. Blade Aspect Ratio (Length/Width) colored and shaped by Species
-             (hollow markers) with shaded gatekeeper zones (Tier 1 Intact vs. Botanical Dissection Zone).
+             (hollow markers) with shaded morphological reference zones (Undivided vs. Dissected Lamina).
          (B) Taxon-Stratified Reproductive Trait Distributions:
              (B1) Involucre Aspect Ratio (L/W) boxplots + hollow jittered points by species.
              (B2) Anthesis Phenological State proportions across species.
@@ -411,11 +411,11 @@ def generate_step02_publication_figures(
                     suffixes=("", "_efa"),
                 )
                 df_plot = (
-                    df_plot[df_plot["_in_ind_efa"].fillna(False) | df_plot["_has_live_s2"].fillna(False)]
+                    df_plot[df_plot["_in_ind_efa"].eq(True) | df_plot["_has_live_s2"].eq(True)]
                     .drop(columns=["_in_ind_efa"])
                     .copy()
                 )
-                is_live_row = df_plot["_has_live_s2"].fillna(False)
+                is_live_row = df_plot["_has_live_s2"].eq(True)
                 for col_e in enrich_cols:
                     efa_col = f"{col_e}_efa"
                     if efa_col in df_plot.columns:
@@ -466,7 +466,7 @@ def generate_step02_publication_figures(
                 if "is_contour_outlier" in otu_df.columns:
                     otu_df = otu_df[~otu_df["is_contour_outlier"].apply(_parse_bool_val)]
                 retained_cats = set(otu_df["catalogNumber"].astype(str).str.strip())
-                df_plot = df_plot[df_plot["cat_str"].isin(retained_cats) | df_plot["_has_live_s2"].fillna(False)].copy()
+                df_plot = df_plot[df_plot["cat_str"].isin(retained_cats) | df_plot["_has_live_s2"].eq(True)].copy()
         except Exception as e_otu:
             logger.warning(f"Could not apply leaf_efa_harmonics.csv filter: {e_otu}")
 
@@ -490,7 +490,7 @@ def generate_step02_publication_figures(
                     valid_mflag_cats = set(mf_df["cat_str"])
                 df_plot = df_plot[
                     (df_plot["cat_str"].isin(valid_mflag_cats) & (~df_plot["cat_str"].isin(misid_cats)))
-                    | df_plot["_has_live_s2"].fillna(False)
+                    | df_plot["_has_live_s2"].eq(True)
                 ].copy()
         except Exception as e_mf:
             logger.warning(f"Could not apply morphometric_flags.csv filter: {e_mf}")
@@ -566,12 +566,19 @@ def generate_step02_publication_figures(
             if c_path_res is not None and c_path_res.exists():
                 try:
                     cdf = pd.read_csv(c_path_res)
-                    if {"x", "y"}.issubset(cdf.columns) and len(cdf) >= 5:
+                    if {"x_norm", "y_norm"}.issubset(cdf.columns) and len(cdf) >= 5:
+                        xn = cdf["x_norm"].to_numpy(dtype=float)
+                        yn = cdf["y_norm"].to_numpy(dtype=float)
+                        w_sp = float(np.ptp(xn))
+                        l_sp = float(np.ptp(yn))
+                        if w_sp > 1e-6 and l_sp > 1e-6:
+                            ar_v = float(np.clip(l_sp / w_sp, 0.30, 5.8))
+                    if np.isnan(ar_v) and {"x", "y"}.issubset(cdf.columns) and len(cdf) >= 5:
                         pts = cdf[["x", "y"]].to_numpy(dtype=float)
                         pts = pts - pts.mean(axis=0)
                         _, s_vals, _ = np.linalg.svd(pts, full_matrices=False)
                         if len(s_vals) >= 2 and s_vals[1] > 1e-6:
-                            ar_v = float(np.clip(s_vals[0] / s_vals[1], 1.05, 5.8))
+                            ar_v = float(np.clip(s_vals[0] / s_vals[1], 0.30, 5.8))
                 except Exception:
                     pass
             ar_pass1.append(ar_v)
@@ -593,7 +600,7 @@ def generate_step02_publication_figures(
                 else:
                     sol_i = float(row_r["sol_val"])
                     base_ar = sp_med_ar.get(str(row_r["species_clean"]), global_med_ar)
-                    ar_final.append(float(np.clip(base_ar + 1.8 * (0.90 - sol_i), 1.15, 5.2)))
+                    ar_final.append(float(np.clip(base_ar + 1.8 * (0.90 - sol_i), 0.35, 5.2)))
             df_plot["ar_val"] = ar_final
 
     # Dynamically resolve active species present in df_plot and assign Okabe-Ito colors + hollow markers
@@ -663,6 +670,8 @@ def generate_step02_publication_figures(
     gs_a = GridSpec(1, 2, figure=fig_a, width_ratios=[1.15, 1.05], wspace=0.28)
 
     x_min = max(0.15, min(0.48, float(df_plot["sol_val"].min()) - 0.04))
+    min_ar_obs = float(df_plot["ar_val"].min()) if df_plot["ar_val"].notna().any() else 1.0
+    y_min = max(0.25, min_ar_obs - 0.08) if (np.isfinite(min_ar_obs) and min_ar_obs < 1.0) else 1.0
     y_max = min(6.0, max(4.2, float(df_plot["ar_val"].max()) + 0.35))
     fg_sp = present_sp if len(present_sp) <= 6 else present_sp[:6]
     bg_sp = [] if len(present_sp) <= 6 else present_sp[6:]
@@ -679,14 +688,14 @@ def generate_step02_publication_figures(
     ) -> None:
         ax_sc.add_patch(
             Rectangle(
-                (0.72, 1.0), 1.02 - 0.72, y_max - 1.0,
+                (0.72, y_min), 1.02 - 0.72, y_max - y_min,
                 facecolor="#009E73", alpha=0.06, edgecolor="none", zorder=0,
-                label="Tier 1 Intact Zone (Solidity >= 0.72)"
+                label="Undivided Lamina Zone (Solidity >= 0.72)"
             )
         )
         ax_sc.add_patch(
             Rectangle(
-                (0.48, 1.0), 0.72 - 0.48, y_max - 1.0,
+                (0.48, y_min), 0.72 - 0.48, y_max - y_min,
                 facecolor="#CC79A7", alpha=0.08, edgecolor="none", zorder=0,
                 label="Pinnatifid Dissection Zone (0.48-0.72)"
             )
@@ -785,7 +794,7 @@ def generate_step02_publication_figures(
             loc="left",
         )
         ax_sc.set_xlim(x_min, 1.02)
-        ax_sc.set_ylim(1.0, y_max)
+        ax_sc.set_ylim(y_min, y_max)
         ax_sc.grid(True, linestyle=":", alpha=0.45)
         ax_sc.legend(loc="upper left", fontsize=7.4 if has_cauline_zone else 7.8, frameon=True, framealpha=0.90)
 

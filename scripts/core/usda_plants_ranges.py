@@ -58,6 +58,7 @@ except ImportError:
 from scripts.core.db import (
     get_db_connection,
     is_canonical_or_explicit_db_context,
+    load_taxon_synonyms,
     resolve_db_path,
 )
 from scripts.core.epa_ecoregions import (
@@ -294,17 +295,48 @@ def load_or_fetch_plantlst_index(
         return None
 
 
+def _generate_algorithmic_generic_transfers(binom_lower: str) -> List[str]:
+    """
+    Generate species-agnostic ICN Art. 23.5 generic transfer combinations across
+    `Packera` (feminine), `Senecio` (masculine), and `Cineraria` (feminine) without
+    any hardcoded taxon dictionary.
+    """
+    parts = binom_lower.split(" ", 1)
+    if len(parts) != 2:
+        return []
+    _gen, ep = parts
+    ep_variants: List[str] = [ep]
+    if ep.endswith("a") and len(ep) > 3 and not ep.endswith("ia"):
+        ep_variants.append(ep[:-1] + "us")
+    elif ep.endswith("ia") and len(ep) > 4:
+        ep_variants.append(ep[:-2] + "ius")
+    elif ep.endswith("us") and len(ep) > 4:
+        ep_variants.append(ep[:-2] + "a")
+    out: List[str] = []
+    for g_cand in ("packera", "senecio", "cineraria"):
+        for ep_v in ep_variants:
+            comb = f"{g_cand} {ep_v}"
+            if comb != binom_lower and comb not in out:
+                out.append(comb)
+    return out
+
+
 def resolve_usda_symbols_for_taxon(
     canonical_packera: str,
     synonym_names: Optional[Iterable[str]] = None,
     cache_dir: Optional[Path] = None,
+    db_path: Optional[Union[str, Path]] = None,
     allow_network: bool = True,
     logger: Optional[logging.Logger] = None,
 ) -> List[str]:
     """
-    Resolve one or more USDA PLANTS accepted Symbols for `canonical_packera`
-    across its homotypic and heterotypic synonyms (e.g., mapping `Packera dubia`
-    through `Packera tomentosa` / `Senecio tomentosus` -> `PATO4`).
+    Dynamically resolve one or more USDA PLANTS accepted `Symbol` codes for
+    `canonical_packera` without hardcoded taxon dictionaries, combining:
+      1. Caller-supplied `synonym_names`, in-memory `_DYNAMIC_SYNONYM_TO_CANONICAL`,
+         and persisted SQLite `taxon_synonyms` mappings.
+      2. Algorithmic ICN Art. 23.5 generic transfers across `Packera`/`Senecio`/`Cineraria`.
+      3. Dynamic GBIF Species Backbone synonym expansion when checklist symbols are not yet
+         matched (e.g., resolving post-2006 combinations through their older checklist synonyms).
     """
     candidates: List[str] = []
     seen_cand: Set[str] = set()
@@ -318,14 +350,31 @@ def resolve_usda_symbols_for_taxon(
     _add_cand(canonical_packera)
     for syn in synonym_names or ():
         _add_cand(syn)
-    fallback_map = {
-        "packera dubia": ("Packera tomentosa", "Senecio tomentosus", "Senecio dubius", "Cineraria tomentosa"),
-        "packera crawfordii": ("Senecio crawfordii",),
-        "packera anonyma": ("Packera anonyma", "Senecio anonymus", "Senecio smallii", "Packera smallii"),
-        "packera smallii": ("Packera anonyma", "Senecio smallii", "Senecio anonymus"),
-    }
-    for fallback_syn in fallback_map.get(canonical_packera.strip().lower(), ()):
-        _add_cand(fallback_syn)
+
+    canon_clean_low = str(canonical_packera or "").strip().lower()
+    try:
+        from scripts.core import harvester as _harv_mod
+        for raw_low, mapped_canon in list(_harv_mod._DYNAMIC_SYNONYM_TO_CANONICAL.items()):
+            if str(mapped_canon).strip().lower() == canon_clean_low:
+                _add_cand(raw_low)
+    except Exception:
+        _harv_mod = None  # type: ignore[assignment]
+
+    if db_path is not None and str(db_path) != ":memory:" and Path(db_path).is_file():
+        try:
+            conn_syn = get_db_connection(db_path=db_path, read_only=True)
+            try:
+                for raw_low, mapped_canon in load_taxon_synonyms(conn_syn).items():
+                    if str(mapped_canon).strip().lower() == canon_clean_low:
+                        _add_cand(raw_low)
+            finally:
+                conn_syn.close()
+        except Exception:
+            pass
+
+    for base_c in list(candidates):
+        for gen_comb in _generate_algorithmic_generic_transfers(base_c):
+            _add_cand(gen_comb)
 
     if not candidates:
         return []
@@ -333,22 +382,41 @@ def resolve_usda_symbols_for_taxon(
     eff_dir = Path(cache_dir) if cache_dir is not None else DEFAULT_USDA_CACHE_DIR
     symbols: List[str] = []
 
+    def _match_against_plantlst(idx_obj: Dict[str, Any]) -> List[str]:
+        matched: List[str] = []
+        sp_map: Dict[str, List[str]] = idx_obj["species_map"]
+        infra_map: Dict[str, List[str]] = idx_obj["infra_map"]
+        for cand in candidates:
+            for sym in sp_map.get(cand, ()):
+                if sym not in matched:
+                    matched.append(sym)
+        if not matched:
+            for cand in candidates:
+                for sym in infra_map.get(cand, ()):
+                    if sym not in matched:
+                        matched.append(sym)
+        return matched
+
     # 1. Check local / downloaded plantlst.txt index first (O(1), zero per-species API latency)
     idx = load_or_fetch_plantlst_index(cache_dir=eff_dir, allow_network=allow_network, logger=logger)
     if idx is not None:
-        sp_map: Dict[str, List[str]] = idx["species_map"]
-        infra_map: Dict[str, List[str]] = idx["infra_map"]
-        for cand in candidates:
-            for sym in sp_map.get(cand, ()):
-                if sym not in symbols:
-                    symbols.append(sym)
-        if not symbols:
-            for cand in candidates:
-                for sym in infra_map.get(cand, ()):
-                    if sym not in symbols:
-                        symbols.append(sym)
+        symbols = _match_against_plantlst(idx)
         if symbols:
             return symbols
+
+    # 1b. Dynamic GBIF Backbone synonym query if direct + generic-transfer candidates did not match
+    if _harv_mod is not None and (allow_network or _harv_mod._is_gbif_species_mocked()):
+        pre_n = len(candidates)
+        gbif_acc, gbif_syns, gbif_auths = _harv_mod._query_gbif_backbone_and_synonyms(canonical_packera)
+        for gs in (gbif_acc, *(gbif_syns or []), *(gbif_auths or [])):
+            _add_cand(gs)
+        for base_c in list(candidates[pre_n:]):
+            for gen_comb in _generate_algorithmic_generic_transfers(base_c):
+                _add_cand(gen_comb)
+        if idx is not None and len(candidates) > pre_n:
+            symbols = _match_against_plantlst(idx)
+            if symbols:
+                return symbols
 
     # 2. Fallback: POST /api/PlantSearch per candidate binomial
     if allow_network and not _USDA_NETWORK_UNAVAILABLE:
@@ -854,6 +922,7 @@ def fetch_or_load_usda_taxon_range(
         canonical_packera=canonical_packera,
         synonym_names=synonym_names,
         cache_dir=eff_cache_dir,
+        db_path=resolved_db,
         allow_network=allow_network,
         logger=logger,
     )
@@ -1202,15 +1271,19 @@ def filter_vouchers_by_usda_county_range(
 ) -> Tuple["pd.DataFrame", Dict[str, int]]:
     """
     Evaluate harvested vouchers against USDA PLANTS county distributions (with 1-ring
-    county adjacency and `county_buffer_km` geodesic buffer) and filter out non-exempt
-    `out_of_range` misidentifications prior to Step 01 image downloading.
+    county adjacency and `county_buffer_km` geodesic buffer), recording `usda_symbol`
+    and `usda_county_status` (`in_range`, `buffered_adjacent`, `out_of_range`,
+    `unmapped_taxon`, `non_us_or_unresolved`) for SQLite persistence. When
+    `drop_out_of_range=False` (`config.yaml` default `usda_county_filter: false`), all
+    vouchers are retained in soft audit mode; when `drop_out_of_range=True`, non-exempt
+    `out_of_range` records are removed prior to Step 01 image downloading.
 
-    Exemptions:
+    Exemptions (when `drop_out_of_range=True`):
       - Verified nomenclatural type specimens (`type_rank >= 1`) are unconditionally retained.
       - `Tier_1_Gold` specialist determinations are retained when `exempt_gold=True`.
-      - Taxa with zero mapped US counties in USDA PLANTS (`unmapped_taxon`) and non-US
-        occurrences (`non_us_skip`) fail open so valid records are never dropped due to
-        missing checklist coverage.
+      - Taxa with zero mapped US counties in USDA PLANTS (`unmapped_taxon`) and non-US or
+        ungeoreferenced/unresolved occurrences (`non_us_or_unresolved`) fail open so valid
+        records are never dropped due to missing checklist coverage.
     """
     stats: Dict[str, int] = {
         "evaluated": 0,

@@ -75,11 +75,19 @@
     sp_ep <- sub("^[a-z]+\\s+([a-z-]+).*$", "\\1", sp_std)
     has_of_binomial <- grepl("\\bof\\s+(packera|senecio|cineraria)\\s+[a-z]{3,}", raw_trim, ignore.case = TRUE)
     if (any(is_nb_type & has_of_binomial)) {
-      of_ep <- tolower(sub("^.*\\bof\\s+(?:packera|senecio|cineraria)\\s+([a-z-]+).*$", "\\1", raw_trim))
+      of_binom <- tolower(sub("^.*\\bof\\s+((?:packera|senecio|cineraria)\\s+[a-z-]+).*$", "\\1", raw_trim))
+      of_ep <- sub("^[a-z]+\\s+([a-z-]+).*$", "\\1", of_binom)
       stem6 <- function(s) substr(gsub("(us|a|um)$", "", s), 1L, 6L)
-      known_equiv <- (sp_ep == "anonyma" & of_ep == "smallii") | (sp_ep == "smallii" & of_ep == "anonymus")
+      dyn_equiv <- rep(FALSE, n)
+      if (exists("standardize_taxon_name", mode = "function")) {
+        chk_idx <- which(is_nb_type & has_of_binomial & nzchar(of_binom))
+        if (length(chk_idx) > 0L) {
+          resolved_of <- tolower(trimws(as.character(standardize_taxon_name(of_binom[chk_idx]))))
+          dyn_equiv[chk_idx] <- !is.na(resolved_of) & nzchar(resolved_of) & (resolved_of == sp_std[chk_idx])
+        }
+      }
       het_mismatch <- is_nb_type & has_of_binomial & nzchar(sp_ep) & nzchar(of_ep) &
-        (sp_ep != of_ep) & (stem6(sp_ep) != stem6(of_ep)) & !known_equiv
+        (sp_ep != of_ep) & (stem6(sp_ep) != stem6(of_ep)) & !dyn_equiv
       is_nb_type[het_mismatch] <- FALSE
     }
   }
@@ -573,7 +581,9 @@ select_adaptive_reference_anchors <- function(
     dis_gold_n <- sum(is_dis_mode[idx_gs[gs_gold_local]], na.rm = TRUE)
     dis_gold_frac <- if (n_gold_k > 0L) (dis_gold_n / n_gold_k) else if (length(idx_gs) > 0L) mean(is_dis_mode[idx_gs], na.rm = TRUE) else 0.0
     if (!is.finite(dis_gold_frac)) dis_gold_frac <- 0.0
-    is_entire_basal_sp <- grepl("dubia|tomentosa|obovata|cardamine", as.character(tx), ignore.case = TRUE)
+    gold_sol_pool <- if (n_gold_k > 0L) eff_sol[idx_gs[gs_gold_local]] else eff_sol[idx_gs]
+    gold_med_sol <- if (any(is.finite(gold_sol_pool))) stats::median(gold_sol_pool, na.rm = TRUE) else NA_real_
+    is_entire_basal_sp <- is.finite(gold_med_sol) && (gold_med_sol >= 0.85)
     min_dis_gold_frac <- if (is_entire_basal_sp) 0.25 else if (dis_gold_n >= 5L) 0.15 else 0.25
     allow_dis_split <- isTRUE(if (n_gold_k > 0L) (dis_gold_frac >= min_dis_gold_frac) else (dis_gold_frac >= 0.30))
     idx_type_k <- idx_gs[gs_type_local]
@@ -2135,14 +2145,22 @@ compute_empirical_bayes_authority_weights <- function(
   )
   if (file.exists(cfg_path) && requireNamespace("yaml", quietly = TRUE)) {
     cfg <- tryCatch(yaml::read_yaml(cfg_path), error = function(e) NULL)
-    aw <- if (is.list(cfg) && is.list(cfg$authority_weights)) cfg$authority_weights else NULL
+    aw <- if (is.list(cfg) && is.list(cfg$thresholds) && is.list(cfg$thresholds$authority_weights)) {
+      cfg$thresholds$authority_weights
+    } else if (is.list(cfg) && is.list(cfg$authority_weights)) {
+      cfg$authority_weights
+    } else {
+      NULL
+    }
     if (is.list(aw)) {
       if (!is.null(aw$silver_max_pool_share)) defs$silver_max_pool_share <- min(0.85, max(0.05, as.numeric(aw$silver_max_pool_share)))
       if (!is.null(aw$min_type_gold_for_cap)) defs$min_type_gold_for_cap <- max(1L, as.integer(aw$min_type_gold_for_cap))
       if (!is.null(aw$tier_0_type)) defs$tier_0_type <- max(0.5, as.numeric(aw$tier_0_type))
+      if (!is.null(aw$tier_0_syntype)) defs$tier_0_syntype <- max(0.5, as.numeric(aw$tier_0_syntype))
       if (!is.null(aw$tier_1_gold)) defs$tier_1_gold <- max(0.2, as.numeric(aw$tier_1_gold))
       if (!is.null(aw$tier_2_silver)) defs$tier_2_silver <- max(0.05, as.numeric(aw$tier_2_silver))
       if (!is.null(aw$tier_3_bronze_promoted)) defs$tier_3_bronze_promoted <- max(0.05, as.numeric(aw$tier_3_bronze_promoted))
+      if (!is.null(aw$tier_3_bronze)) defs$tier_3_bronze <- max(0.01, as.numeric(aw$tier_3_bronze))
     }
   }
   assign("cached", defs, envir = .AUTH_WEIGHT_CFG_ENV)

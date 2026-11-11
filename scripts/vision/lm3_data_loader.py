@@ -97,6 +97,23 @@ def unscale_working_bbox_to_sheet(
     return y1, x1, y2, x2
 
 
+def normalize_pixels_per_mm(pixels_per_mm: Optional[float]) -> Optional[float]:
+    """
+    Normalizes a positive linear scale factor to `pixels_per_mm`.
+    Preserves legitimate archival scan densities down to ~65 DPI (`>= 0.25 px/mm`)
+    while inverting legacy `mm_per_pixel` inputs (`< 0.25`, e.g. `0.08 mm/px -> 12.5 px/mm`).
+    """
+    if pixels_per_mm is None:
+        return None
+    try:
+        val = float(pixels_per_mm)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(val) or val <= 0.0:
+        return None
+    return float(1.0 / val) if val < 0.25 else val
+
+
 def resolve_px_per_cm(
     pixels_per_mm: Optional[float] = None,
     px_per_cm: Optional[float] = None,
@@ -104,18 +121,21 @@ def resolve_px_per_cm(
     sheet_shape: Optional[Tuple[int, int]] = None,
 ) -> float:
     """
-    Resolves the empirical ruler conversion factor in pixels per centimeter (`px_per_cm`),
-    falling back to a standard herbarium DPI conversion (`default_dpi / 2.54`) when
-    ruler detection is absent.
+    Resolves the empirical ruler conversion factor in pixels per centimeter (`px_per_cm`):
+      1. Uses `px_per_cm` directly when positive and finite.
+      2. Uses `normalize_pixels_per_mm(pixels_per_mm) * 10.0` when `pixels_per_mm` is supplied
+         (only inverting unambiguous `mm_per_pixel < 0.25` inputs so 150-250 DPI scans with
+         `0.59-0.98 px/mm` are never inverted).
+      3. Falls back to `default_dpi / 2.54`, scaled proportionally (`max(40.0, ...)`) when
+         `sheet_shape` is a synthetic unit-test canvas (`max(sheet_shape) <= 500`).
     """
     if px_per_cm is not None and not np.isnan(px_per_cm) and float(px_per_cm) > 0.0:
         return float(px_per_cm)
-    if pixels_per_mm is not None and not np.isnan(pixels_per_mm) and float(pixels_per_mm) > 0.0:
-        ppm = float(1.0 / pixels_per_mm) if float(pixels_per_mm) < 1.0 else float(pixels_per_mm)
+    ppm = normalize_pixels_per_mm(pixels_per_mm)
+    if ppm is not None:
         return ppm * 10.0
     fallback_px_cm = float(default_dpi) / 2.54 if float(default_dpi) > 0.0 else DEFAULT_PX_PER_CM
     if sheet_shape is not None and max(sheet_shape) <= 500:
-        # Proportional scaling for synthetic low-resolution unit-test fixtures lacking a ruler
         return max(40.0, fallback_px_cm * (float(max(sheet_shape)) / 2400.0))
     return fallback_px_cm
 
@@ -172,7 +192,18 @@ def _parse_calibration_row(
     if not cat:
         return None
 
+    _EMPIRICAL_RULER_SOURCES = {"measured_from_ruler", "measured_from_fieldprism"}
+    raw_scale_src = str(row.get("scale_source") or "").strip().lower()
     cf_source = str(row.get("cf_source") or row.get("conversion_determination") or "").strip()
+    if not cf_source:
+        if raw_scale_src == "mp_estimated":
+            cf_source = "predicted_from_megapixels"
+        elif raw_scale_src == "uncalibrated":
+            cf_source = "uncalibrated"
+        elif raw_scale_src == "ruler_calibrated":
+            cf_source = "measured_from_ruler"
+    if cf_source.lower() == "uncalibrated" or raw_scale_src == "uncalibrated":
+        return None
     work_scale_raw = row.get("work_scale", 1.0)
     try:
         work_scale = float(work_scale_raw) if pd.notna(work_scale_raw) and float(work_scale_raw) > 0 else 1.0
@@ -196,21 +227,33 @@ def _parse_calibration_row(
         except (ValueError, TypeError):
             pass
 
-    # 1. Direct pixels_per_mm column if provided
+    # 1. Explicit mm_per_pixel / mm_per_px or direct pixels_per_mm column if provided
+    mm_per_px_raw = row.get("mm_per_pixel", row.get("mm_per_px", np.nan))
     direct_px_mm = row.get("pixels_per_mm", np.nan)
+    if pd.notna(mm_per_px_raw) and pd.isna(direct_px_mm):
+        try:
+            mpx = float(mm_per_px_raw)
+            if np.isfinite(mpx) and mpx > 0.0:
+                direct_px_mm = 1.0 / mpx
+        except (ValueError, TypeError):
+            pass
     if pd.notna(direct_px_mm):
         try:
-            val_mm = float(direct_px_mm)
-            if val_mm > 0:
+            val_mm = normalize_pixels_per_mm(float(direct_px_mm))
+            if val_mm is not None and val_mm > 0:
+                eff_direct_src = cf_source or "measured_from_ruler"
+                if eff_direct_src.lower() == "mp_estimated":
+                    eff_direct_src = "predicted_from_megapixels"
+                is_emp = eff_direct_src in _EMPIRICAL_RULER_SOURCES
                 return {
                     "catalog_number": cat,
                     "pixels_per_mm": val_mm,
                     "cf_px_per_cm": val_mm * 10.0,
                     "fp_cf_px_per_cm": None,
-                    "cf_source": cf_source or "measured_from_ruler",
-                    "scale_source": "mp_estimated" if cf_source == "predicted_from_megapixels" else "ruler_calibrated",
+                    "cf_source": eff_direct_src,
+                    "scale_source": "ruler_calibrated" if is_emp else "mp_estimated",
                     "work_scale": work_scale,
-                    "is_empirical_ruler": cf_source != "predicted_from_megapixels",
+                    "is_empirical_ruler": is_emp,
                 }
         except (ValueError, TypeError):
             pass
@@ -482,6 +525,7 @@ __all__ = [
     "compute_lm3_work_scale",
     "compute_work_scale",
     "unscale_working_bbox_to_sheet",
+    "normalize_pixels_per_mm",
     "resolve_px_per_cm",
     "compute_blade_area_cm2",
     "RulerCalibrationMap",

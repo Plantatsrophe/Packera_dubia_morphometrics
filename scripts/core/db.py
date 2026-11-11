@@ -979,6 +979,8 @@ def record_voucher_segmentation_transaction(
         p2b = _to_float(p_pet_info.get("petiole_to_blade_ratio"))
         pet_px = _to_float(p_pet_info.get("petiole_length_px"))
         bld_px = _to_float(p_pet_info.get("blade_length_px"))
+        pet_w_px = _to_float(p_pet_info.get("petiole_width_px"))
+        pet_w_mm = _to_float(p_pet_info.get("petiole_width_mm"))
 
         pid_leaves = leaves_by_pid.get(pid) or []
         basal_pid_leaves = [
@@ -991,6 +993,16 @@ def record_voucher_segmentation_transaction(
             vals_clean = sorted(v for v in vals if v is not None)
             if vals_clean:
                 pet_mm = vals_clean[min(len(vals_clean) - 1, int(0.75 * (len(vals_clean) - 1)))]
+        if pet_w_px is None and summary_pid_leaves:
+            vals = [_to_float(x.get("petiole_width_px")) for x in summary_pid_leaves]
+            vals_clean = sorted(v for v in vals if v is not None)
+            if vals_clean:
+                pet_w_px = vals_clean[min(len(vals_clean) - 1, int(0.75 * (len(vals_clean) - 1)))]
+        if pet_w_mm is None and summary_pid_leaves:
+            vals = [_to_float(x.get("petiole_width_mm")) for x in summary_pid_leaves]
+            vals_clean = sorted(v for v in vals if v is not None)
+            if vals_clean:
+                pet_w_mm = vals_clean[min(len(vals_clean) - 1, int(0.75 * (len(vals_clean) - 1)))]
         if bld_mm is None and summary_pid_leaves:
             vals = [_to_float(x.get("blade_length_mm")) for x in summary_pid_leaves]
             vals_clean = sorted(v for v in vals if v is not None)
@@ -1018,6 +1030,8 @@ def record_voucher_segmentation_transaction(
             is_bent,
             pet_px,
             pet_mm,
+            pet_w_px,
+            pet_w_mm,
             bld_px,
             bld_mm,
             p2b,
@@ -1120,13 +1134,18 @@ def record_voucher_segmentation_transaction(
             _to_float(r.get("midrib_angle_deg")),
             _to_float(r.get("petiole_length_px")),
             _to_float(r.get("petiole_length_mm")),
+            _to_float(r.get("petiole_width_px")),
+            _to_float(r.get("petiole_width_mm")),
             _to_float(r.get("blade_length_px")),
             _to_float(r.get("blade_length_mm")),
+            _to_float(r.get("blade_width_px")),
+            _to_float(r.get("blade_width_mm")),
             _to_float(r.get("petiole_to_blade_ratio")),
             l_ppm,
             l_cal,
             _to_str(r.get("scale_source")) or ("mp_estimated" if (l_cal == 0 and l_ppm is not None and l_ppm > 0) else ("ruler_calibrated" if l_cal == 1 else "uncalibrated")),
             _to_str(r.get("mask_path")),
+            _to_bool_int(r.get("mask_is_upright"), default=1),
             crop_p,
             _to_str(r.get("contour_path")),
             _to_str(r.get("ect_path")),
@@ -1148,6 +1167,7 @@ def record_voucher_segmentation_transaction(
         qc_status = "FAILED_QC"
         fail_reason = fail_reason or "MISSING_CONTOUR_COORDINATES"
 
+    _ensure_dynamic_table_migrated(conn, "plant_individuals")
     _ensure_dynamic_table_migrated(conn, "extracted_leaves")
 
     def _apply_sql() -> None:
@@ -1175,10 +1195,11 @@ def record_voucher_segmentation_transaction(
                 catalogNumber, plant_individual_id,
                 rosette_centroid_x, rosette_centroid_y, crown_x, crown_y,
                 plant_height_px, plant_height_mm, plant_height_cm, is_bent_stem,
-                petiole_length_px, petiole_length_mm, blade_length_px, blade_length_mm,
+                petiole_length_px, petiole_length_mm, petiole_width_px, petiole_width_mm,
+                blade_length_px, blade_length_mm,
                 petiole_to_blade_ratio, scape_to_basal_leaf_ratio,
                 rosette_patch_path, rosette_mask_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             plant_rows,
         )
@@ -1204,12 +1225,14 @@ def record_voucher_segmentation_transaction(
                     solidity, circularity, extent, aspect_ratio,
                     area_px, blade_area_cm2,
                     midrib_angle_deg, petiole_length_px, petiole_length_mm,
-                    blade_length_px, blade_length_mm, petiole_to_blade_ratio,
+                    petiole_width_px, petiole_width_mm,
+                    blade_length_px, blade_length_mm, blade_width_px, blade_width_mm,
+                    petiole_to_blade_ratio,
                     pixels_per_mm, is_calibrated_mm, scale_source,
-                    mask_path, crop_path, contour_path, ect_path, contour_n_pts, contour_xy_json,
+                    mask_path, mask_is_upright, crop_path, contour_path, ect_path, contour_n_pts, contour_xy_json,
                     leaf_zone, leaf_zone_confidence, dist_from_crown_norm, cy_rel_plant_bbox,
                     archetype_score, bilateral_dice, si_a, lm3_gates_pass, n_lamina_components
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 leaf_rows,
             )
@@ -1242,6 +1265,7 @@ def load_step02_records_from_db(
     if not cats:
         return extracted_by_cat, failed_by_cat, repro_by_cat, pheno_by_cat
 
+    _ensure_dynamic_table_migrated(conn, "plant_individuals")
     _ensure_dynamic_table_migrated(conn, "extracted_leaves")
     chunk_size = 500
     for i in range(0, len(cats), chunk_size):
@@ -1252,11 +1276,18 @@ def load_step02_records_from_db(
             f"""
             SELECT
                 el.catalogNumber, el.plant_individual_id, el.leaf_id, el.solidity,
-                el.circularity, el.extent, el.aspect_ratio, el.area_px, el.blade_area_cm2,
-                el.contour_path, el.ect_path, el.mask_path,
+                el.circularity, el.extent, el.aspect_ratio,
+                el.aspect_ratio AS blade_length_to_width_ratio,
+                el.area_px, el.blade_area_cm2,
+                el.contour_path, el.ect_path, el.mask_path, el.mask_is_upright,
                 el.midrib_angle_deg, el.pixels_per_mm, el.is_calibrated_mm, el.scale_source,
                 el.leaf_zone, el.leaf_zone_confidence, el.dist_from_crown_norm, el.cy_rel_plant_bbox,
                 el.archetype_score, el.bilateral_dice, el.si_a, el.lm3_gates_pass, el.n_lamina_components,
+                COALESCE(el.petiole_length_px, pi.petiole_length_px) AS petiole_length_px,
+                COALESCE(el.blade_length_px, pi.blade_length_px) AS blade_length_px,
+                el.blade_width_px, el.blade_width_mm,
+                COALESCE(el.petiole_width_px, pi.petiole_width_px) AS petiole_width_px,
+                COALESCE(el.petiole_width_mm, pi.petiole_width_mm) AS petiole_width_mm,
                 COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm,
                 COALESCE(el.blade_length_mm, pi.blade_length_mm) AS blade_length_mm,
                 COALESCE(el.petiole_to_blade_ratio, pi.petiole_to_blade_ratio) AS petiole_to_blade_ratio,
@@ -1278,8 +1309,18 @@ def load_step02_records_from_db(
         for row in cur_l.fetchall():
             d = dict(row)
             d["is_calibrated_mm"] = bool(d.get("is_calibrated_mm"))
+            raw_up = d.get("mask_is_upright")
+            d["mask_is_upright"] = True if raw_up is None else bool(raw_up)
             if d.get("lm3_gates_pass") is not None:
                 d["lm3_gates_pass"] = bool(d.get("lm3_gates_pass"))
+            if "cf_source" not in d or d.get("cf_source") is None:
+                s_src = str(d.get("scale_source") or "").strip().lower()
+                if s_src == "mp_estimated":
+                    d["cf_source"] = "predicted_from_megapixels"
+                elif s_src == "ruler_calibrated":
+                    d["cf_source"] = "measured_from_ruler"
+                else:
+                    d["cf_source"] = "uncalibrated"
             extracted_by_cat.setdefault(str(d["catalogNumber"]), []).append(d)
 
         cur_f = conn.execute(

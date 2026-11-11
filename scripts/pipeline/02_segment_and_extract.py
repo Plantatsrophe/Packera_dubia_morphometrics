@@ -13,8 +13,9 @@ Description:
     Key Capabilities:
       1. Direct Ingestion: Reads curated_vouchers.csv directly without intermediate
          staging or symlink copying.
-      2. LeafMachine3 ONNX Segmentation: Direct inference using YOLO26x plant/leaf/pose
-         engines and UNet++ v9 specimen segmentation (models/lm3_packera_seg_finetuned.onnx).
+      2. LeafMachine3 ONNX Segmentation: Direct inference using canonical LeafMachine3
+         YOLO26x plant/leaf/pose engines (`models/lm3/lm3_leaf_segmenter__yolo26x_seg_1024.onnx`)
+         and UNet++ v9 specimen segmentation.
       3. LeafMachine3 Scale Calibration: Resolves metric scale from LeafMachine3's
          Module 7 Ruler Lattice Solver and Module 1 Megapixel Conversion Prior.
       4. In-Sheet Organ & Rosette Crown Clustering: Groups organs into plant
@@ -33,10 +34,10 @@ Description:
          32 x 360 Euler Characteristic Transform matrices to data/ect/.
 
 Usage:
-    python scripts/pipeline/02_segment_and_extract.py \\
-        --vouchers data/tables/curated_vouchers.csv \\
-        --model-weights models/lm3_packera_seg_finetuned.onnx \\
-        --output-dir data/ \\
+    python scripts/pipeline/02_segment_and_extract.py \
+        --vouchers data/tables/curated_vouchers.csv \
+        --model-weights models/lm3/lm3_leaf_segmenter__yolo26x_seg_1024.onnx \
+        --output-dir data/ \
         --device cuda
 ===============================================================================
 """
@@ -85,6 +86,7 @@ from scripts.core.db import (
 )
 import yaml
 
+from scripts.vision.configure_leafmachine3 import load_native_lm3_config
 from scripts.vision.lm3_data_loader import (
     RulerCalibrationMap,
     compute_blade_area_cm2,
@@ -94,6 +96,7 @@ from scripts.vision.lm3_data_loader import (
     LM3_PLANT_CLASSES,
     LM3_REPRODUCTIVE_CLASS_IDS,
     load_ruler_calibrations,
+    normalize_pixels_per_mm,
     resolve_px_per_cm,
 )
 from scripts.vision.leaf_geometry_utils import (
@@ -157,12 +160,13 @@ def _build_native_lm3_crop_masks(
     is_high_dpi: bool = True,
     min_leaf_area: int = 0,
     specimen_paper_cleaned_mask: Optional[np.ndarray] = None,
+    subtract_holes: bool = True,
 ) -> Tuple[Optional[np.ndarray], float, Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Constructs `best_mask` (`cls == 0`), `petiole_crop_mask` (`cls == 1`), and `hole_crop_mask` (`cls == 2`)
     delegating component isolation to `leafmachine3.inference.leaf_segmenter._largest_component`,
     `_components`, `_outer_polygons`, and `leafmachine3.core.imaging.polygon_mask`, while isolating
-    the focal leaf from overlapping neighbor leaves and retaining petiole-bridged lateral pinnae:
+    the focal leaf from overlapping neighbor leaves and retaining strictly unbridged focal pinnae:
       - Rank `cls == 0` (`Leaf`) candidate instance masks by confidence, crop centrality, and area to
         select the primary focal leaf instance (`leaf_primary = _largest_component(primary_inst)`),
         preventing touching neighbor leaf instances from fusing into the focal leaf.
@@ -173,8 +177,8 @@ def _build_native_lm3_crop_masks(
       - Union all `cls == 1` (`Petiole`) candidate masks -> keep `_largest_component` (`area >= 64` px).
       - Union all `cls == 2` (`Hole`) candidate masks -> keep `_components(min_area=64)` -> rasterize outer
         polygons via `_outer_polygons` + `polygon_mask` as `hole_crop_mask`.
-      - Compute `best_mask = np.where((silhouette > 0) & (hole_crop_mask == 0), 255, 0).astype(np.uint8)`
-        (`lamina = silhouette & ~hole`), never subtracting `petiole_crop_mask`.
+      - When `subtract_holes=True`, compute `best_mask` as `silhouette & ~hole_crop_mask`, keeping
+        `petiole_crop_mask` separate from `best_mask`.
     """
     _ = specimen_paper_cleaned_mask
     crop_h, crop_w = int(crop_shape[0]), int(crop_shape[1])
@@ -296,8 +300,11 @@ def _build_native_lm3_crop_masks(
             hole_bool |= hc_mask
         hole_crop_mask = np.where(hole_bool, 255, 0).astype(np.uint8)
 
-    best_mask = np.where((silhouette > 0) & (hole_crop_mask == 0), 255, 0).astype(np.uint8)
-    if not np.any(best_mask > 0):
+    if subtract_holes:
+        best_mask = np.where((silhouette > 0) & (hole_crop_mask == 0), 255, 0).astype(np.uint8)
+        if not np.any(best_mask > 0):
+            best_mask = silhouette
+    else:
         best_mask = silhouette
 
     hole_out: Optional[np.ndarray] = hole_crop_mask if np.any(hole_crop_mask > 0) else None
@@ -342,9 +349,10 @@ class SegmentAndExtractPipeline:
 
         self.score_thresh = score_thresh
         self.threads: Optional[int] = resolve_cpu_threads(threads, self.config)
-        if self.threads is not None and self.device == "cpu" and torch is not None:
+        if self.threads is not None and self.device == "cpu":
             try:
-                torch.set_num_threads(max(1, int(self.threads)))
+                import torch as _torch_cpu
+                _torch_cpu.set_num_threads(max(1, int(self.threads)))
             except Exception:
                 pass
         self.gpu_batch_size: int = resolve_gpu_batch_size(
@@ -392,26 +400,91 @@ class SegmentAndExtractPipeline:
                 shutil.copy2(shared_vouchers, tmp_v)
                 tmp_v.replace(self.vouchers_csv)
 
-        # Load canonical LeafMachine3 runtime settings from config/LM3_settings.yaml
-        self.lm3_settings: Dict[str, Any] = {}
+        # Load canonical LeafMachine3 runtime settings (native LM3 defaults overlaid with config/LM3_settings.yaml)
+        try:
+            self.lm3_settings: Dict[str, Any] = load_native_lm3_config(project_root=PROJECT_ROOT)
+        except Exception:
+            self.lm3_settings = {}
         _lm3_cfg_path = PROJECT_ROOT / "config" / "LM3_settings.yaml"
         if _lm3_cfg_path.is_file():
             try:
                 _loaded_lm3 = yaml.safe_load(_lm3_cfg_path.read_text(encoding="utf-8"))
                 if isinstance(_loaded_lm3, dict):
-                    self.lm3_settings = _loaded_lm3
+                    for _k_top, _v_top in _loaded_lm3.items():
+                        if isinstance(_v_top, dict) and isinstance(self.lm3_settings.get(_k_top), dict):
+                            _merged_sub = dict(self.lm3_settings[_k_top])
+                            for _k_sub, _v_sub in _v_top.items():
+                                if isinstance(_v_sub, dict) and isinstance(_merged_sub.get(_k_sub), dict):
+                                    _merged_sub[_k_sub] = {**_merged_sub[_k_sub], **_v_sub}
+                                else:
+                                    _merged_sub[_k_sub] = _v_sub
+                            self.lm3_settings[_k_top] = _merged_sub
+                        else:
+                            self.lm3_settings[_k_top] = _v_top
             except Exception:
-                self.lm3_settings = {}
-        _ect_cfg = self.lm3_settings.get("ect") if isinstance(self.lm3_settings.get("ect"), dict) else {}
+                pass
+        _mods_cfg = self.lm3_settings.get("modules") if isinstance(self.lm3_settings.get("modules"), dict) else {}
+
+        def _mod_section(name: str, legacy_alias: Optional[str] = None) -> Dict[str, Any]:
+            sec = _mods_cfg.get(name)
+            if isinstance(sec, dict):
+                return sec
+            if legacy_alias and isinstance(_mods_cfg.get(legacy_alias), dict):
+                return _mods_cfg[legacy_alias]
+            top_sec = self.lm3_settings.get(name)
+            if isinstance(top_sec, dict):
+                return top_sec
+            if legacy_alias and isinstance(self.lm3_settings.get(legacy_alias), dict):
+                return self.lm3_settings[legacy_alias]
+            return {}
+
+        _ect_cfg = _mod_section("ect")
+        _seg_cfg = getattr(self.config, "segmentation", None)
+        _cfg_ect_dirs = int(getattr(_seg_cfg, "ect_num_dirs", 0) or 0) if _seg_cfg is not None else 0
         self.ect_enabled: bool = bool(_ect_cfg.get("enabled", True))
-        self.ect_num_dirs: int = max(8, int(_ect_cfg.get("num_dirs", 360) or 360))
-        self.ect_num_thetas: int = max(8, int(_ect_cfg.get("num_thetas", 32) or 32))
-        _pd_cfg = self.lm3_settings.get("plant_detector") if isinstance(self.lm3_settings.get("plant_detector"), dict) else {}
-        _ls_cfg = self.lm3_settings.get("leaf_segmenter") if isinstance(self.lm3_settings.get("leaf_segmenter"), dict) else {}
-        _kp_cfg = self.lm3_settings.get("pose_detector") if isinstance(self.lm3_settings.get("pose_detector"), dict) else {}
+        self.ect_num_dirs: int = max(8, _cfg_ect_dirs if _cfg_ect_dirs > 0 else int(_ect_cfg.get("num_dirs", 360) or 360))
+        self.ect_num_thetas: int = max(
+            8,
+            int(_ect_cfg.get("num_thresh", _ect_cfg.get("num_thetas", 32)) or 32),
+        )
+        self.ect_include_petiole: bool = bool(_ect_cfg.get("include_petiole", False))
+        self.ect_include_holes: bool = bool(_ect_cfg.get("include_holes", True))
+
+        _pd_cfg = _mod_section("plant_detector")
+        _ad_cfg = _mod_section("archival_detector")
+        _ss_cfg = _mod_section("specimen_segmenter")
+        _ls_cfg = _mod_section("leaf_segmenter")
+        _kp_cfg = _mod_section("landmark_detector", legacy_alias="pose_detector")
+
         _s1_conf_cfg = float(_pd_cfg.get("conf_thres", 0.25) or 0.25)
+        _s1_iou_cfg = float(_pd_cfg.get("iou_thres", 0.95) or 0.95)
+        _s1_img_size = max(320, int(_pd_cfg.get("img_size", 1280) or 1280))
+        _s1_work_dim = max(
+            640,
+            int(getattr(_seg_cfg, "max_working_dim", 0) or _pd_cfg.get("max_working_dim", 3200) or 3200),
+        )
+        _ad_conf_cfg = float(_ad_cfg.get("conf_thres", 0.25) or 0.25)
         _s2_min_area = max(1, int(_ls_cfg.get("min_area_px", 64) or 64))
+        _s2_img_size = max(320, int(_ls_cfg.get("img_size", 1024) or 1024))
         _kp_conf_cfg = float(_kp_cfg.get("conf_thres", 0.25) or 0.25)
+        _kp_img_size = max(256, int(_kp_cfg.get("img_size", 640) or 640))
+        _kp_pad_frac = float(_kp_cfg.get("white_pad_frac", 0.10) if _kp_cfg.get("white_pad_frac") is not None else 0.10)
+        _ss_conf_cfg = float(_ss_cfg.get("conf_thres", 0.50) or 0.50)
+        _ss_img_size = max(320, int(_ss_cfg.get("img_size", 1024) or 1024))
+        _ss_work_dim = max(
+            640,
+            int(getattr(_seg_cfg, "specimen_max_working_dim", 0) or _ss_cfg.get("max_working_dim", 3200) or 3200),
+        )
+        self.paperclean: bool = bool(
+            getattr(_seg_cfg, "paperclean", _ss_cfg.get("paperclean", True))
+            if _seg_cfg is not None
+            else _ss_cfg.get("paperclean", True)
+        )
+        self.subtract_holes: bool = bool(getattr(_seg_cfg, "subtract_holes", True)) if _seg_cfg is not None else True
+        self.do_apply_landmarks: bool = bool(getattr(_seg_cfg, "do_apply_landmarks", True)) if _seg_cfg is not None else True
+        self.use_cf_predicted_by_mp: bool = bool(
+            getattr(_seg_cfg, "use_cf_predicted_by_mp", False)
+        ) if _seg_cfg is not None else False
 
         # Preload LM3 ruler scale calibrations (preserving empirical vs. megapixel-prior provenance)
         self.ruler_calibrations: Dict[str, float] = RulerCalibrationMap()
@@ -439,6 +512,9 @@ class SegmentAndExtractPipeline:
             weights_path=stage1_weights if stage1_weights is not None else _aux_default_weights,
             device=self.device,
             conf_thres=min(self.score_thresh, _s1_conf_cfg),
+            iou_thres=_s1_iou_cfg,
+            img_size=_s1_img_size,
+            max_working_dim=_s1_work_dim,
             lm3_project_dir=self.lm3_project_dir,
         )
         self.plant_detector = self.stage1_detector
@@ -449,6 +525,7 @@ class SegmentAndExtractPipeline:
             device=self.device,
             score_thresh=self.score_thresh,
             min_area_px=_s2_min_area,
+            img_size=_s2_img_size,
         )
         self.leaf_segmenter = self.model_engine
 
@@ -457,18 +534,26 @@ class SegmentAndExtractPipeline:
             weights_path=_aux_default_weights,
             device=self.device,
             conf_thres=_kp_conf_cfg,
+            img_size=_kp_img_size,
+            white_pad_frac=_kp_pad_frac,
         )
 
         # 4. LeafMachine3 Archival Ruler Detector + Lattice Solver + Megapixel Scale Calibrator
         self.scale_calibrator = LM3ScaleCalibrator(
             device=self.device,
             providers=([] if _is_dummy_test_weights else None),
+            use_cf_predicted_by_mp=self.use_cf_predicted_by_mp,
+            archival_conf_thres=_ad_conf_cfg,
         )
 
         # 5. LeafMachine3 Full-Sheet Specimen Segmenter (UNet++ v9 + CIE L*a*b* paper-clean)
         self.specimen_segmenter = LM3SpecimenSegmenter(
             weights_path=_aux_default_weights,
             device=self.device,
+            conf_thres=_ss_conf_cfg,
+            img_size=_ss_img_size,
+            max_working_dim=_ss_work_dim,
+            paperclean=self.paperclean,
             providers=([] if _is_dummy_test_weights else None),
         )
 
@@ -880,13 +965,11 @@ class SegmentAndExtractPipeline:
         scale_f = max(sheet_h, sheet_w) / 5600.0 if max(sheet_h, sheet_w) > 1000 else 0.0
         is_high_dpi = max(sheet_h, sheet_w) > 1000 and scale_f > 0.4
 
-        # 1. Ruler Scale Calibration: LeafMachine3 Module 7 Ruler Lattice Solver & Module 1 Megapixel Prior
+        # 1. Ruler Scale Calibration: LeafMachine3 Module 7 Ruler Lattice Solver & Optional Module 1 Megapixel Prior
         lm3_px_per_mm = self.ruler_calibrations.get(catalog_number)
         _cal_sources = getattr(self.ruler_calibrations, "sources", None)
         if lm3_px_per_mm is not None and not np.isnan(lm3_px_per_mm) and lm3_px_per_mm > 0:
-            pixels_per_mm: Optional[float] = (
-                float(1.0 / lm3_px_per_mm) if lm3_px_per_mm < 1.0 else float(lm3_px_per_mm)
-            )
+            pixels_per_mm: Optional[float] = normalize_pixels_per_mm(lm3_px_per_mm)
             cf_source = (
                 str(_cal_sources.get(catalog_number, "measured_from_ruler"))
                 if isinstance(_cal_sources, dict)
@@ -896,16 +979,20 @@ class SegmentAndExtractPipeline:
             not getattr(self, "_is_dummy_test_weights", True)
             and getattr(self, "scale_calibrator", None) is not None
         ):
-            cal_res = self.scale_calibrator.calibrate_sheet(img_bgr, catalog_number=catalog_number)
-            pixels_per_mm = cal_res.get("pixels_per_mm")
-            cf_source = str(cal_res.get("cf_source", "predicted_from_megapixels"))
+            cal_res = self.scale_calibrator.calibrate_sheet(
+                img_bgr,
+                catalog_number=catalog_number,
+                use_cf_predicted_by_mp=bool(getattr(self, "use_cf_predicted_by_mp", False)),
+            )
+            pixels_per_mm = normalize_pixels_per_mm(cal_res.get("pixels_per_mm"))
+            cf_source = str(cal_res.get("cf_source", "uncalibrated"))
             if pixels_per_mm is not None and float(pixels_per_mm) > 0.0:
                 self.ruler_calibrations[catalog_number] = float(pixels_per_mm)
                 if isinstance(_cal_sources, dict):
                     _cal_sources[catalog_number] = cf_source
         else:
             pixels_per_mm = None
-            cf_source = "predicted_from_megapixels"
+            cf_source = "uncalibrated"
 
         # 2. Stage 1 Full-Sheet Plant Organ Detection (YOLO26x 9-class detector)
         use_s1_cache = bool(self.lm3_project_dir is not None and not self.force)
@@ -1085,6 +1172,7 @@ class SegmentAndExtractPipeline:
                     crop_bgr.shape[:2],
                     is_high_dpi=is_high_dpi,
                     min_leaf_area=0,
+                    subtract_holes=bool(getattr(self, "subtract_holes", True)),
                 )
                 if best_mask is None:
                     continue
@@ -1092,12 +1180,16 @@ class SegmentAndExtractPipeline:
                 keypoints_31_crop: Optional[Dict[str, Tuple[float, float, float]]] = None
                 petiole_width_px_crop: Optional[float] = None
                 pre_pose_crop = all_crop_pose_preds[crop_idx_s2] if crop_idx_s2 < len(all_crop_pose_preds) else None
-                if pre_pose_crop is not None:
+                if pre_pose_crop is not None and bool(getattr(self, "do_apply_landmarks", True)):
                     keypoints_31_crop = getattr(pre_pose_crop, "keypoints_31", None) or None
                     petiole_width_px_crop = getattr(pre_pose_crop, "petiole_width_px", None)
-                elif getattr(self, "pose_engine", None) is not None and (
-                    getattr(self.pose_engine, "model", None) is not None
-                    or "predict_landmarks" in getattr(self.pose_engine, "__dict__", {})
+                elif (
+                    bool(getattr(self, "do_apply_landmarks", True))
+                    and getattr(self, "pose_engine", None) is not None
+                    and (
+                        getattr(self.pose_engine, "model", None) is not None
+                        or "predict_landmarks" in getattr(self.pose_engine, "__dict__", {})
+                    )
                 ):
                     try:
                         pose_res = self.pose_engine.predict_landmarks(
@@ -1288,10 +1380,23 @@ class SegmentAndExtractPipeline:
                 "scape_to_basal_leaf_ratio": np.nan,
                 "is_bent_stem": False,
             }
-            empty_pheno = classify_voucher_phenology(catalog_number, [])
+            _pheno_cfg = getattr(getattr(self.config, "thresholds", None), "capitulum_phenology", None)
+            _min_anth_heads = int(getattr(_pheno_cfg, "min_anthesis_heads_for_flowering", 1) or 1)
+            empty_pheno = classify_voucher_phenology(
+                catalog_number,
+                [],
+                min_anthesis_heads_for_flowering=_min_anth_heads,
+            )
             return _finish([], failure_record, repro_rec=empty_repro, pheno_rec=empty_pheno)
 
         # 3. Route Reproductive Detections (seed_fruit_one/many, flower_one/many, bud) to Phenology Classifier
+        _pheno_cfg = getattr(getattr(self.config, "thresholds", None), "capitulum_phenology", None)
+        _min_pappus_lum = float(getattr(_pheno_cfg, "min_pappus_luminance", 75.0) if _pheno_cfg is not None else 75.0)
+        _max_pappus_sat = float(getattr(_pheno_cfg, "max_pappus_saturation", 0.18) if _pheno_cfg is not None else 0.18)
+        _min_pappus_area = float(getattr(_pheno_cfg, "min_pappus_area_ratio", 0.18) if _pheno_cfg is not None else 0.18)
+        _min_floret_sat = float(getattr(_pheno_cfg, "min_floret_yellow_saturation", 0.32) if _pheno_cfg is not None else 0.32)
+        _min_floret_rat = float(getattr(_pheno_cfg, "min_floret_yellow_ratio", 0.12) if _pheno_cfg is not None else 0.12)
+        _min_anth_heads = int(getattr(_pheno_cfg, "min_anthesis_heads_for_flowering", 1) or 1) if _pheno_cfg is not None else 1
         valid_capitula: List[Dict[str, Any]] = []
         head_pheno_results: List[Dict[str, Any]] = []
         for cap_idx, (bbox, mask, score, class_id) in enumerate(capitulum_detections, 1):
@@ -1314,10 +1419,21 @@ class SegmentAndExtractPipeline:
 
                 if crop_bgr.shape[0] >= 5 and crop_bgr.shape[1] >= 5:
                     crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-                    head_pheno = classify_single_capitulum(crop_rgb)
+                    head_pheno = classify_single_capitulum(
+                        crop_rgb,
+                        min_pappus_luminance=_min_pappus_lum,
+                        max_pappus_saturation=_max_pappus_sat,
+                        min_pappus_area_ratio=_min_pappus_area,
+                        min_floret_yellow_saturation=_min_floret_sat,
+                        min_floret_yellow_ratio=_min_floret_rat,
+                    )
                     head_pheno_results.append(head_pheno)
 
-        _pheno_rec = classify_voucher_phenology(catalog_number, head_pheno_results)
+        _pheno_rec = classify_voucher_phenology(
+            catalog_number,
+            head_pheno_results,
+            min_anthesis_heads_for_flowering=_min_anth_heads,
+        )
 
         capitula_count = len(valid_capitula)
         if capitula_count > 0:
@@ -1365,7 +1481,12 @@ class SegmentAndExtractPipeline:
             _pet_mask = trim_meta.get("petiole_mask") if isinstance(trim_meta, dict) else None
             _hole_mask = trim_meta.get("hole_mask") if isinstance(trim_meta, dict) else None
             _kpts_31 = trim_meta.get("keypoints_31") if isinstance(trim_meta, dict) else None
-            _pw_px = trim_meta.get("petiole_width_px") if isinstance(trim_meta, dict) else None
+            _pw_px_raw = trim_meta.get("petiole_width_px") if isinstance(trim_meta, dict) else None
+            _pw_px = (
+                float(_pw_px_raw)
+                if (_pw_px_raw is not None and np.isfinite(float(_pw_px_raw)) and float(_pw_px_raw) > 0.0)
+                else None
+            )
             _pw_mm = (
                 float(_pw_px) / float(pixels_per_mm)
                 if (_pw_px is not None and is_calibrated_mm and pixels_per_mm and float(pixels_per_mm) > 0.0)
@@ -1386,6 +1507,7 @@ class SegmentAndExtractPipeline:
                 petiole_mask=_pet_mask,
                 hole_mask=_hole_mask,
                 keypoints_31=_kpts_31,
+                petiole_width_px=_pw_px,
                 petiole_width_mm=_pw_mm,
             ))
 
@@ -1431,10 +1553,18 @@ class SegmentAndExtractPipeline:
         inst_geom_map: Dict[int, Tuple[float, float, float, float, float]] = {
             inst.leaf_id: _inst_sheet_geom(inst) for inst in instances
         }
+        _lower_frac_cfg = float(
+            getattr(getattr(self.config, "segmentation", None), "rosette_plant_bbox_lower_fraction", 0.60) or 0.60
+        )
+        _basal_y_quantile = float(np.clip(1.0 - _lower_frac_cfg, 0.05, 0.90))
         all_cx = np.array([inst_geom_map[i.leaf_id][0] for i in instances], dtype=np.float64)
         all_cy = np.array([inst_geom_map[i.leaf_id][1] for i in instances], dtype=np.float64)
         all_area = np.array([inst_geom_map[i.leaf_id][2] for i in instances], dtype=np.float64)
-        sheet_b_mask = all_cy >= float(np.quantile(all_cy, 0.40)) if len(all_cy) > 0 else np.array([], dtype=bool)
+        sheet_b_mask = (
+            all_cy >= float(np.quantile(all_cy, _basal_y_quantile))
+            if len(all_cy) > 0
+            else np.array([], dtype=bool)
+        )
         if len(sheet_b_mask) > 0 and not np.any(sheet_b_mask):
             sheet_b_mask = np.ones(len(all_cy), dtype=bool)
         sheet_basal_cx = float(np.median(all_cx[sheet_b_mask])) if len(all_cx) > 0 else (0.5 * sheet_w)
@@ -1459,8 +1589,8 @@ class SegmentAndExtractPipeline:
             p_cx = np.array([inst_geom_map[i.leaf_id][0] for i in pid_instances], dtype=np.float64)
             p_cy = np.array([inst_geom_map[i.leaf_id][1] for i in pid_instances], dtype=np.float64)
             p_area = np.array([inst_geom_map[i.leaf_id][2] for i in pid_instances], dtype=np.float64)
-            # Lower 60% vertical quantile of detected leaf centroids (in image coords, larger y = lower on sheet)
-            b_mask = p_cy >= float(np.quantile(p_cy, 0.40))
+            # Lower configured vertical quantile of detected leaf centroids (in image coords, larger y = lower on sheet)
+            b_mask = p_cy >= float(np.quantile(p_cy, _basal_y_quantile))
             if not np.any(b_mask):
                 b_mask = np.ones(len(pid_instances), dtype=bool)
             basal_cx_med = float(np.median(p_cx[b_mask]))
@@ -1673,8 +1803,14 @@ class SegmentAndExtractPipeline:
             inst.circularity = float(lm3_morph["circularity"])
             inst.extent = float(lm3_morph["extent"])
             _bm_lw = lm3_bm_raw.get("blade_length_to_width_ratio", np.nan)
+            _bm_bl_px = lm3_bm_raw.get("blade_length_px", None)
+            _bm_bw_px = lm3_bm_raw.get("blade_width_px", None)
             if lm3_bm_raw.get("success") and _bm_lw is not None and np.isfinite(float(_bm_lw)) and float(_bm_lw) > 0.0:
                 inst.aspect_ratio = float(_bm_lw)
+                if _bm_bl_px is not None and np.isfinite(float(_bm_bl_px)) and float(_bm_bl_px) > 0.0:
+                    inst.blade_length_px = float(_bm_bl_px)
+                if _bm_bw_px is not None and np.isfinite(float(_bm_bw_px)) and float(_bm_bw_px) > 0.0:
+                    inst.blade_width_px = float(_bm_bw_px)
             else:
                 inst.aspect_ratio = float(lm3_morph["aspect_ratio"])
             inst.archetype_score = float(lm3_bm_raw.get("archetype_score", 0.0))
@@ -1690,7 +1826,8 @@ class SegmentAndExtractPipeline:
             else:
                 _persisted_mask_u8 = (inst.mask > 0).astype(np.uint8) * 255
                 if (
-                    inst.hole_mask is not None
+                    bool(getattr(self, "subtract_holes", True))
+                    and inst.hole_mask is not None
                     and isinstance(inst.hole_mask, np.ndarray)
                     and inst.hole_mask.shape[:2] == _persisted_mask_u8.shape[:2]
                 ):
@@ -1730,11 +1867,17 @@ class SegmentAndExtractPipeline:
                 "plant_individual_id": _inst.plant_individual_id,
                 "p_base": _pb_sheet,
                 "p_apex": _pa_sheet,
+                "p_base_sheet": _pb_sheet,
+                "p_apex_sheet": _pa_sheet,
                 "mask_origin": (0.0, 0.0),
                 "bbox": _inst.bbox,
                 "mask": _inst.mask,
                 "area_px": _raw_px_by_leaf_id.get(_inst.leaf_id, float(np.count_nonzero(_inst.mask))),
                 "blade_area_cm2": _inst.blade_area_cm2,
+                "blade_length_px": _inst.blade_length_px,
+                "blade_width_px": _inst.blade_width_px,
+                "petiole_width_px": _inst.petiole_width_px,
+                "petiole_width_mm": _inst.petiole_width_mm,
                 "aspect_ratio": _inst.aspect_ratio,
                 "solidity": _inst.solidity,
                 "geodesic_petiole_px": _geod_px,
@@ -1771,7 +1914,7 @@ class SegmentAndExtractPipeline:
             and getattr(self.specimen_segmenter, "model", None) is not None
         ):
             try:
-                _spec_mask_sheet = self.specimen_segmenter.predict_mask(img_bgr)
+                _spec_mask_sheet = self.specimen_segmenter.predict_mask(img_bgr, return_sheet_size=True)
             except Exception:
                 _spec_mask_sheet = None
 
@@ -1879,8 +2022,8 @@ class SegmentAndExtractPipeline:
                         hole_mask=(None if is_upright_mask else inst.hole_mask),
                         petiole_mask=(None if is_upright_mask else inst.petiole_mask),
                         angle_cw=(None if is_upright_mask else angle_cw),
-                        include_petiole=False,
-                        include_holes=True,
+                        include_petiole=bool(getattr(self, "ect_include_petiole", False)),
+                        include_holes=bool(getattr(self, "ect_include_holes", True)),
                         already_oriented=is_upright_mask,
                     )
                 except TypeError:
@@ -1901,10 +2044,40 @@ class SegmentAndExtractPipeline:
             _pet_len_mm = leaf_pet.get("petiole_length_mm", pid_pet.get("petiole_length_mm", np.nan) if _is_basal_leaf else np.nan)
             _blade_len_mm = leaf_pet.get("blade_length_mm", pid_pet.get("blade_length_mm", np.nan) if _is_basal_leaf else np.nan)
             _pet_ratio = leaf_pet.get("petiole_to_blade_ratio", pid_pet.get("petiole_to_blade_ratio", np.nan) if _is_basal_leaf else np.nan)
+            _pet_w_px = (
+                round(float(inst.petiole_width_px), 4)
+                if inst.petiole_width_px is not None and np.isfinite(inst.petiole_width_px)
+                else leaf_pet.get("petiole_width_px", np.nan)
+            )
             _pet_w_mm = (
                 round(float(inst.petiole_width_mm), 4)
                 if inst.petiole_width_mm is not None and np.isfinite(inst.petiole_width_mm)
                 else leaf_pet.get("petiole_width_mm", np.nan)
+            )
+            _blade_w_px = (
+                round(float(inst.blade_width_px), 4)
+                if inst.blade_width_px is not None and np.isfinite(inst.blade_width_px) and inst.blade_width_px > 0.0
+                else (
+                    round(float(_blade_len_px) / float(inst.aspect_ratio), 4)
+                    if (
+                        _blade_len_px is not None
+                        and np.isfinite(float(_blade_len_px))
+                        and float(_blade_len_px) > 0.0
+                        and np.isfinite(float(inst.aspect_ratio))
+                        and float(inst.aspect_ratio) > 1e-6
+                    )
+                    else np.nan
+                )
+            )
+            _blade_w_mm = (
+                round(float(_blade_w_px) / float(inst.pixels_per_mm), 3)
+                if (
+                    np.isfinite(_blade_w_px)
+                    and inst.is_calibrated_mm
+                    and inst.pixels_per_mm is not None
+                    and float(inst.pixels_per_mm) > 0.0
+                )
+                else np.nan
             )
 
             extracted_records.append({
@@ -1929,7 +2102,10 @@ class SegmentAndExtractPipeline:
                 "cf_source": inst.cf_source,
                 "scale_source": (
                     "mp_estimated"
-                    if str(inst.cf_source).strip().lower() == "predicted_from_megapixels"
+                    if (
+                        inst.pixels_per_mm
+                        and str(inst.cf_source).strip().lower() in {"predicted_from_megapixels", "mp_estimated"}
+                    )
                     else ("ruler_calibrated" if (inst.pixels_per_mm and inst.is_calibrated_mm) else "uncalibrated")
                 ),
                 "mask_path": inst.mask_path,
@@ -1937,10 +2113,13 @@ class SegmentAndExtractPipeline:
                 "contour_path": inst.contour_path,
                 "ect_path": inst.ect_path,
                 "petiole_length_px": _pet_len_px,
+                "petiole_width_px": _pet_w_px,
                 "blade_length_px": _blade_len_px,
+                "blade_width_px": _blade_w_px,
                 "petiole_length_mm": _pet_len_mm,
                 "petiole_width_mm": _pet_w_mm,
                 "blade_length_mm": _blade_len_mm,
+                "blade_width_mm": _blade_w_mm,
                 "petiole_to_blade_ratio": _pet_ratio,
                 "capitula_count": capitula_count,
                 "involucre_height_px": repro_summary["involucre_height_px"],
@@ -2126,27 +2305,39 @@ class SegmentAndExtractPipeline:
         if "catalogNumber" not in df_vouchers.columns or "image_path" not in df_vouchers.columns:
             raise KeyError("Vouchers CSV must contain 'catalogNumber' and 'image_path' columns.")
 
-        # Automatic one-time migration of existing uncompressed .jpg in raw_vouchers/ to .webp (quality=85)
+        # Automatic one-time migration of existing uncompressed .jpg/.jpeg in raw_vouchers/ to .webp
         try:
+            from PIL import Image as _PILImage
+
+            _webp_q = int(getattr(getattr(self.config, "harvesting", None), "webp_quality", 92) or 92)
             _raw_vouchers_dir = self.output_dir / "raw_vouchers"
             if _raw_vouchers_dir.is_dir():
+                _migrated_map: Dict[str, str] = {}
                 for _jpg_f in list(_raw_vouchers_dir.glob("*.jpg")) + list(_raw_vouchers_dir.glob("*.jpeg")):
                     _webp_f = _jpg_f.with_suffix(".webp")
                     if not _webp_f.exists() or _webp_f.stat().st_size == 0:
                         try:
-                            with Image.open(_jpg_f) as _im:
-                                _im.convert("RGB").save(_webp_f, format="WEBP", quality=85, method=4)
+                            with _PILImage.open(_jpg_f) as _im:
+                                _im.convert("RGB").save(_webp_f, format="WEBP", quality=_webp_q, method=4)
                             if _webp_f.exists() and _webp_f.stat().st_size > 0:
                                 _jpg_f.unlink()
-                        except Exception:
-                            pass
+                                _migrated_map[_jpg_f.name] = _webp_f.name
+                        except Exception as _mig_exc:
+                            logger.debug(f"Skipped JPEG->WebP migration for {_jpg_f}: {_mig_exc}")
                     elif _webp_f.stat().st_size > 0:
                         try:
                             _jpg_f.unlink()
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+                            _migrated_map[_jpg_f.name] = _webp_f.name
+                        except Exception as _unlink_exc:
+                            logger.debug(f"Could not remove migrated JPEG {_jpg_f}: {_unlink_exc}")
+                if _migrated_map and "image_path" in df_vouchers.columns:
+                    df_vouchers["image_path"] = df_vouchers["image_path"].apply(
+                        lambda p: str(Path(str(p)).with_name(_migrated_map[Path(str(p)).name]))
+                        if pd.notna(p) and Path(str(p)).name in _migrated_map
+                        else p
+                    )
+        except Exception as _outer_mig_exc:
+            logger.debug(f"Raw voucher JPEG->WebP migration check skipped: {_outer_mig_exc}")
 
         if limit and limit > 0:
             df_vouchers = df_vouchers.head(limit)
@@ -2457,8 +2648,8 @@ class SegmentAndExtractPipeline:
                                     failure_record={
                                         "catalogNumber": cat_w,
                                         "image_path": str(path_w),
-                                        "failure_reason": "UNRESOLVED_CLUMP",
-                                        "details": f"Runtime exception during voucher extraction: {exc_w}",
+                                        "failure_reason": "SEGMENTATION_RUNTIME_ERROR",
+                                        "details": f"Runtime exception ({type(exc_w).__name__}) during voucher extraction: {exc_w}",
                                     },
                                 )
                             completed_bundles[a_idx_w] = bundle
@@ -2522,7 +2713,7 @@ class SegmentAndExtractPipeline:
                                 valid_indices.append(local_i)
                                 valid_s1_inputs.append((pre_img, cat_num, pre_s1_lb))
 
-                        # Stage B1: Batched FP16 Stage 1 YOLOv5 organ detection on GPU thread
+                        # Stage B1: Batched Stage 1 LeafMachine3 YOLO26x ONNX organ detection on GPU thread
                         s1_dets_by_local: Dict[int, List[Any]] = {}
                         if valid_s1_inputs:
                             s1_batch_out = self.stage1_detector.predict_batch(
@@ -2551,11 +2742,7 @@ class SegmentAndExtractPipeline:
                                 return local_i, None, ss_pre, needs_ss
 
                             lm3_cal_v = self.ruler_calibrations.get(cat_v)
-                            ppm_v: Optional[float] = (
-                                (float(1.0 / lm3_cal_v) if lm3_cal_v < 1.0 else float(lm3_cal_v))
-                                if (lm3_cal_v is not None and not np.isnan(lm3_cal_v) and lm3_cal_v > 0)
-                                else None
-                            )
+                            ppm_v: Optional[float] = normalize_pixels_per_mm(lm3_cal_v)
                             unpacked = self._unpack_stage1_candidates(
                                 catalog_number=cat_v,
                                 img_bgr=img_v,
@@ -2621,6 +2808,7 @@ class SegmentAndExtractPipeline:
                         if (
                             flat_crops
                             and flat_preds
+                            and bool(getattr(self, "do_apply_landmarks", True))
                             and getattr(self, "pose_engine", None) is not None
                             and getattr(self.pose_engine, "model", None) is not None
                             and "predict_landmarks" not in getattr(self.pose_engine, "__dict__", {})
@@ -2643,6 +2831,7 @@ class SegmentAndExtractPipeline:
                                         c_bgr.shape[:2],
                                         is_high_dpi=True,
                                         min_leaf_area=0,
+                                        subtract_holes=bool(getattr(self, "subtract_holes", True)),
                                     )
                                     pose_indices.append(idx_f)
                                     pose_crops.append(c_bgr)
@@ -2731,8 +2920,8 @@ class SegmentAndExtractPipeline:
                         failure = {
                             "catalogNumber": cat_num,
                             "image_path": str(raw_img_path),
-                            "failure_reason": "UNRESOLVED_CLUMP",
-                            "details": f"Runtime exception during voucher extraction: {exc}",
+                            "failure_reason": "SEGMENTATION_RUNTIME_ERROR",
+                            "details": f"Runtime exception ({type(exc).__name__}) during voucher extraction: {exc}",
                         }
 
                     if extracted:
@@ -2857,7 +3046,7 @@ from scripts.vision.step02_figures import (
 def parse_args() -> argparse.Namespace:
     cfg = PipelineConfig.from_yaml()
     parser = argparse.ArgumentParser(
-        description="Direct LeafMachine3 ONNX segmentation, 2-path leaf extraction, and contour coordinate export."
+        description="Direct LeafMachine3 ONNX segmentation, upright leaf/ECT extraction, and 120-vertex contour export."
     )
     parser.add_argument(
         "--vouchers",
@@ -2869,7 +3058,7 @@ def parse_args() -> argparse.Namespace:
         "--model-weights",
         type=Path,
         default=cfg.segmentation.model_weights,
-        help="Path to fine-tuned LeafMachine3 YOLO26x leaf segmenter ONNX model checkpoint."
+        help="Path to LeafMachine3 YOLO26x leaf segmenter ONNX model checkpoint."
     )
     parser.add_argument(
         "--output-dir",

@@ -2144,7 +2144,8 @@ def resolve_geographic_scope_settings(
     """
     Resolves effective `(geographic_scope, exclude_western, countries)` settings:
       - `eastern_na` (default): `exclude_western=True` (unless `include_western=True` or
-        `exclude_western=False`), `countries=["US"]` (or `["US", "CA", "MX"]` when `include_western=True`).
+        `exclude_western=False`), `countries=["US", "CA"]` from `DEFAULT_COUNTRIES`
+        (or `["US", "CA", "MX"]` when `include_western=True`).
       - `north_america`: automatically sets `exclude_western=False` and expands default
         `countries` to `["US", "CA", "MX"]` unless explicit `countries` were supplied.
       - `global`: automatically sets `exclude_western=False` and sets `countries=[]` (unrestricted
@@ -2176,7 +2177,11 @@ def is_excluded_western_region(
     exclude_western: bool = True,
     is_type_specimen: bool = False,
 ) -> bool:
-    """Determines whether a record originates from a region farther west than TX and OK."""
+    """
+    Determines whether a record originates from a western state/province (`EXCLUDED_WESTERN_STATES`)
+    or west of `western_longitude_threshold` (default `-98.0`), while exempting Eastern Canadian
+    provinces, Washington D.C., and verified nomenclatural type specimens (`is_type_specimen=True`).
+    """
     if not exclude_western:
         return False
 

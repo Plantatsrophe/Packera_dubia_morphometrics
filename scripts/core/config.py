@@ -392,6 +392,8 @@ class HarvestingConfig:
 @dataclass(frozen=True)
 class SegmentationConfig:
     """Phase 2 LeafMachine3 ONNX segmentation and morphological extraction parameters."""
+    cohort_adaptive_mode: bool = True
+    min_anchor_n_for_empirical: int = 5
     lm3_root: Path = PROJECT_ROOT / "LeafMachine3"
     models_dir: Path = PROJECT_ROOT / "models" / "lm3"
     model_weights: Path = (
@@ -416,6 +418,8 @@ class SegmentationConfig:
     treat_leaflet_as_leaf_whole: bool = False
     use_efds_for_png_masks: bool = False
     do_apply_landmarks: bool = True
+    segment_partial_leaves: bool = False
+    rosette_plant_bbox_lower_fraction: float = 0.60
     score_thresh: float = 0.25
     device: str = "cuda"
 
@@ -614,11 +618,34 @@ class PipelineConfig:
             harv_kwargs["usda_exempt_gold"] = bool(harv_kwargs["usda_exempt_gold"])
         harvesting = HarvestingConfig(**harv_kwargs)
 
-        seg_dict = raw_cfg.get("segmentation", {})
-        seg_kwargs = {k: v for k, v in seg_dict.items() if k in SegmentationConfig.__dataclass_fields__}
+        leaf_seg_fallback = raw_cfg.get("leaf_segmentation", {}) or {}
+        seg_dict = {**leaf_seg_fallback, **(raw_cfg.get("segmentation", {}) or {})}
+        seg_kwargs: Dict[str, Any] = {
+            k: v for k, v in seg_dict.items() if k in SegmentationConfig.__dataclass_fields__
+        }
         for path_k in ("model_weights", "lm3_root", "models_dir"):
             if path_k in seg_kwargs and seg_kwargs[path_k] is not None:
                 seg_kwargs[path_k] = _resolve(seg_kwargs[path_k])
+        for bool_k in (
+            "cohort_adaptive_mode",
+            "paperclean",
+            "llr_hyst_keep_blobs",
+            "paperclean_llr_hyst_keepblobs",
+            "subtract_holes",
+            "use_cf_predicted_by_mp",
+            "treat_leaflet_as_leaf_whole",
+            "use_efds_for_png_masks",
+            "do_apply_landmarks",
+            "segment_partial_leaves",
+        ):
+            if bool_k in seg_kwargs and seg_kwargs[bool_k] is not None:
+                seg_kwargs[bool_k] = bool(seg_kwargs[bool_k])
+        for int_k in ("min_anchor_n_for_empirical", "max_working_dim", "specimen_max_working_dim", "ect_num_dirs"):
+            if int_k in seg_kwargs and seg_kwargs[int_k] is not None:
+                seg_kwargs[int_k] = int(seg_kwargs[int_k])
+        for float_k in ("minimum_confidence_threshold", "rosette_plant_bbox_lower_fraction", "score_thresh"):
+            if float_k in seg_kwargs and seg_kwargs[float_k] is not None:
+                seg_kwargs[float_k] = float(seg_kwargs[float_k])
         segmentation = SegmentationConfig(**seg_kwargs)
 
         models_dict = raw_cfg.get("models", {})

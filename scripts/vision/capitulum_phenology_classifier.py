@@ -7,8 +7,9 @@ Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
     Vectorized "Crop-and-Classify" visual biomarker module for Asteraceae capitula
-    (Class 6 detections). Resolves phenological lifecycle transitions across three
-    distinct developmental regimes:
+    (LeafMachine3 reproductive Classes 2..6: Seed_Fruit_ONE, Seed_Fruit_MANY,
+    Flower_ONE, Flower_MANY, and Bud). Resolves phenological lifecycle transitions
+    across three distinct developmental regimes:
       1. Vegetative Bud (HEAD_BUD): Compact, erect, smooth green involucre;
          absence of expanded pappus plume or exposed yellow ligules.
       2. Active Flowering (HEAD_ANTHESIS): Fresh, saturated yellow ligulate and
@@ -349,6 +350,11 @@ def extract_biomarker_involucre_posture(
 def classify_single_capitulum(
     crop_rgb: np.ndarray,
     min_crop_dim: int = 5,
+    min_pappus_luminance: float = 75.0,
+    max_pappus_saturation: float = 0.18,
+    min_pappus_area_ratio: float = 0.18,
+    min_floret_yellow_saturation: float = 0.32,
+    min_floret_yellow_ratio: float = 0.12,
 ) -> Dict[str, Any]:
     """
     Performs head-level phenological biomarker classification on a single cropped capitulum.
@@ -395,10 +401,19 @@ def classify_single_capitulum(
         })
 
     # Extract Biomarker A: Pappus Plume
-    has_pappus_plume, white_fibrous_ratio, diag_a = extract_biomarker_pappus_plume(crop_rgb)
+    has_pappus_plume, white_fibrous_ratio, diag_a = extract_biomarker_pappus_plume(
+        crop_rgb,
+        min_l_star=float(min_pappus_luminance),
+        max_s=float(max_pappus_saturation),
+        plume_threshold=float(min_pappus_area_ratio),
+    )
 
     # Extract Biomarker B: Active Yellow Corollas
-    has_fresh_yellow_corollas, yellow_ratio, diag_b = extract_biomarker_yellow_corollas(crop_rgb)
+    has_fresh_yellow_corollas, yellow_ratio, diag_b = extract_biomarker_yellow_corollas(
+        crop_rgb,
+        s_min=float(min_floret_yellow_saturation),
+        corolla_threshold=float(min_floret_yellow_ratio),
+    )
 
     # Extract Biomarker C: Involucre Posture
     erect_involucre, reflexed_involucre, diag_c = extract_biomarker_involucre_posture(crop_rgb)
@@ -442,6 +457,7 @@ def classify_single_capitulum(
 def classify_voucher_phenology(
     catalog_number: str,
     head_classifications: List[Dict[str, Any]],
+    min_anthesis_heads_for_flowering: int = 1,
 ) -> Dict[str, Any]:
     """
     Aggregates head-level classifications for a voucher into a single phenological state
@@ -470,7 +486,7 @@ def classify_voucher_phenology(
     n_fruit = sum(1 for h in head_classifications if h.get("head_state") == HEAD_FRUIT)
     n_bud = sum(1 for h in head_classifications if h.get("head_state") == HEAD_BUD)
 
-    if n_anthesis >= 1:
+    if n_anthesis >= max(1, int(min_anthesis_heads_for_flowering)):
         voucher_state = VOUCHER_ANTHESIS
     elif n_fruit > 0 and n_anthesis == 0:
         voucher_state = VOUCHER_FRUIT

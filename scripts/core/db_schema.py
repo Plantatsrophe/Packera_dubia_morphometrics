@@ -547,6 +547,8 @@ def _build_schema_ddl() -> str:
         is_bent_stem INTEGER,
         petiole_length_px REAL,
         petiole_length_mm REAL,
+        petiole_width_px REAL,
+        petiole_width_mm REAL,
         blade_length_px REAL,
         blade_length_mm REAL,
         petiole_to_blade_ratio REAL,
@@ -571,13 +573,18 @@ def _build_schema_ddl() -> str:
         midrib_angle_deg REAL,
         petiole_length_px REAL,
         petiole_length_mm REAL,
+        petiole_width_px REAL,
+        petiole_width_mm REAL,
         blade_length_px REAL,
         blade_length_mm REAL,
+        blade_width_px REAL,
+        blade_width_mm REAL,
         petiole_to_blade_ratio REAL,
         pixels_per_mm REAL,
         is_calibrated_mm INTEGER,
         scale_source TEXT,
         mask_path TEXT,
+        mask_is_upright INTEGER DEFAULT 1,
         crop_path TEXT,
         contour_path TEXT,
         ect_path TEXT,
@@ -915,6 +922,10 @@ _VOUCHERS_MIGRATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
 )
 
 _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
+    "plant_individuals": (
+        ("petiole_width_px", "REAL"),
+        ("petiole_width_mm", "REAL"),
+    ),
     "extracted_leaves": (
         ("ect_path", "TEXT"),
         ("leaf_zone", "TEXT DEFAULT 'basal'"),
@@ -927,6 +938,11 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("lm3_gates_pass", "INTEGER"),
         ("n_lamina_components", "INTEGER DEFAULT 1"),
         ("scale_source", "TEXT"),
+        ("petiole_width_px", "REAL"),
+        ("petiole_width_mm", "REAL"),
+        ("blade_width_px", "REAL"),
+        ("blade_width_mm", "REAL"),
+        ("mask_is_upright", "INTEGER DEFAULT 1"),
     ),
     "run_active_cohort": (
         ("type_status", "TEXT"),
@@ -1049,7 +1065,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261110
+PACKERA_SCHEMA_USER_VERSION: int = 20261111
 
 
 def _migrate_dynamic_schema_columns(
@@ -1141,7 +1157,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
                 _migrate_vouchers_schema_columns(conn)
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
-            if "leaf_zone" not in el_cols or "ect_path" not in el_cols or "efa_qc_pass" not in el_cols or "cauline_leaf_count" not in om_cols or "ECT_PC1" not in om_cols:
+            if "leaf_zone" not in el_cols or "ect_path" not in el_cols or "mask_is_upright" not in el_cols or "petiole_width_mm" not in el_cols or "cauline_leaf_count" not in om_cols or "ECT_PC1" not in om_cols:
                 _migrate_dynamic_schema_columns(conn, recreate_view=True)
             conn.execute("PRAGMA foreign_keys = ON;")
             return

@@ -12,8 +12,8 @@ Description:
       - harvest: Queries GBIF occurrences, scores determiner tiers, downloads imagery,
                  persists vouchers and taxon synonyms to SQLite and CSV.
       - segment: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) segmentation,
-                 bilateral midrib reflection, and contour export, storing 120-vertex
-                 JSON contours in extracted_leaves and CSVs.
+                 upright base-to-tip mask & 32x360 ECT extraction, and 120-vertex
+                 contour export to extracted_leaves and CSVs.
       - morphometrics: Rscript EFA (Momocs) and GMM/CDA clustering (MorphoTools2),
                        querying extracted_leaves in batch and persisting OTUs.
       - synthesis: Canonical Phases 6-7 (Spatial RF & Triage Dashboard),
@@ -662,6 +662,16 @@ def run_harvest(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         cmd.append("--usda-exempt-gold")
     elif getattr(args, "usda_exempt_gold", None) is False:
         cmd.append("--no-usda-exempt-gold")
+    if getattr(args, "harvest_full_continental_range", None) is True:
+        cmd.append("--harvest-full-continental-range")
+    elif getattr(args, "harvest_full_continental_range", None) is False:
+        cmd.append("--no-harvest-full-continental-range")
+    if getattr(args, "spatial_thin_km", None) is not None:
+        cmd.extend(["--spatial-thin-km", str(args.spatial_thin_km)])
+    if getattr(args, "max_per_state", None) is not None:
+        cmd.extend(["--max-per-state", str(args.max_per_state)])
+    if getattr(args, "max_per_region", None) is not None:
+        cmd.extend(["--max-per-region", str(args.max_per_region)])
 
     if args.download_images:
         cmd.append("--download-images")
@@ -714,7 +724,7 @@ def get_lm3_python_executable() -> Path:
 
 
 def run_segment(args: argparse.Namespace, cfg: PipelineConfig) -> None:
-    """Executes Phase 2: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) segmentation, midrib reflection, and contour extraction."""
+    """Executes Phase 2: LeafMachine3 (YOLO26x / UNet++ v9 / ONNX Runtime) segmentation, upright mask/ECT export, and 120-vertex contour extraction."""
     logger.info("=== Starting Phase 2: Segmentation & Geometric Leaf Extraction ===")
     start_ts = datetime.now().astimezone().isoformat()
     run_dir, cfg = _resolve_active_run_context(args, cfg)
@@ -1435,7 +1445,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--expand-synonyms",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Toggle GBIF Backbone synonym/basionym expansion (default: True)",
+        help="Toggle dynamic GBIF Backbone unaccepted Packera + Senecio/Cineraria synonym unification (default: True)",
     )
     p_harvest.add_argument(
         "--usda-county-filter",
@@ -1454,6 +1464,30 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Toggle Tier_1_Gold specialist exemption during USDA county range filtering",
+    )
+    p_harvest.add_argument(
+        "--harvest-full-continental-range",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle full US + CA continental range harvesting for verified Eastern NA resident species",
+    )
+    p_harvest.add_argument(
+        "--spatial-thin-km",
+        type=float,
+        default=None,
+        help="Minimum spatial grid thinning distance in km per species (default: 0.0, disabled)",
+    )
+    p_harvest.add_argument(
+        "--max-per-state",
+        type=int,
+        default=None,
+        help="Maximum vouchers retained per (species, stateProvince)",
+    )
+    p_harvest.add_argument(
+        "--max-per-region",
+        type=int,
+        default=None,
+        help="Maximum vouchers retained per (species, regional_group)",
     )
     p_harvest.add_argument("--include-western", action="store_true", default=False, help=argparse.SUPPRESS)
     p_harvest.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")
@@ -1486,7 +1520,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_segment.add_argument("--weights", type=Path, default=None, help="LeafMachine3 model weights checkpoint (.onnx / .pt)")
     p_segment.add_argument("--output-dir", type=Path, default=None, help="Root output directory")
     p_segment.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Inference device")
-    p_segment.add_argument("--score-thresh", type=float, default=None, help="PCD detection score threshold")
+    p_segment.add_argument("--score-thresh", type=float, default=None, help="LeafMachine3 leaf segmentation & Stage 1 confidence threshold")
     p_segment.add_argument("--limit", type=int, default=None, help="Limit number of vouchers to process")
     p_segment.add_argument(
         "--purge-segments",
@@ -1593,7 +1627,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--expand-synonyms",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Toggle GBIF Backbone synonym/basionym expansion (default: True)",
+        help="Toggle dynamic GBIF Backbone unaccepted Packera + Senecio/Cineraria synonym unification (default: True)",
     )
     p_all.add_argument(
         "--usda-county-filter",
@@ -1612,6 +1646,30 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Toggle Tier_1_Gold specialist exemption during USDA county range filtering",
+    )
+    p_all.add_argument(
+        "--harvest-full-continental-range",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle full US + CA continental range harvesting for verified Eastern NA resident species",
+    )
+    p_all.add_argument(
+        "--spatial-thin-km",
+        type=float,
+        default=None,
+        help="Minimum spatial grid thinning distance in km per species (default: 0.0, disabled)",
+    )
+    p_all.add_argument(
+        "--max-per-state",
+        type=int,
+        default=None,
+        help="Maximum vouchers retained per (species, stateProvince)",
+    )
+    p_all.add_argument(
+        "--max-per-region",
+        type=int,
+        default=None,
+        help="Maximum vouchers retained per (species, regional_group)",
     )
     p_all.add_argument("--include-western", action="store_true", default=False, help=argparse.SUPPRESS)
     p_all.add_argument("--out-dir", type=Path, default=None, help="Output directory for raw vouchers")

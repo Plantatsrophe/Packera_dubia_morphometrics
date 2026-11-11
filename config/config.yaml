@@ -147,7 +147,7 @@ segmentation:
   treat_leaflet_as_leaf_whole: false
   use_efds_for_png_masks: false
   do_apply_landmarks: true
-  segment_partial_leaves: true
+  segment_partial_leaves: false
   score_thresh: 0.25
   rosette_plant_bbox_lower_fraction: 0.60
   device: "cuda"
@@ -179,7 +179,7 @@ leaf_segmentation:
   treat_leaflet_as_leaf_whole: false
   use_efds_for_png_masks: false
   do_apply_landmarks: true
-  segment_partial_leaves: true
+  segment_partial_leaves: false
 
 vision:
   leafmachine3:

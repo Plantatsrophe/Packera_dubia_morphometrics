@@ -6,9 +6,9 @@ Project: Packera dubia Species Delimitation & Morphometrics Pipeline
 Affiliation: University of North Carolina at Chapel Hill Herbarium (NCU)
 
 Description:
-    LeafMachine3 (YOLO26x / UNet++ v9) topological connectivity gatekeeping,
-    multi-plant DBSCAN spatial clustering,
-    and 31-keypoint rosette crown / petiole / bent-scape metrics.
+    Multi-plant DBSCAN spatial clustering, 31-keypoint rosette crown / petiole /
+    bent-scape linear trait estimation, and 4-case vascular-topology basal vs.
+    cauline leaf zone classification on LeafMachine3 outputs.
 ===============================================================================
 """
 
@@ -144,15 +144,8 @@ def _extract_xy_point(item: Any, ref_pt: Optional[Tuple[float, float]] = None) -
             return float(seq[0]), float(seq[1])
         if len(seq) == 4 and all(isinstance(v, (int, float, np.number)) for v in seq):
             v0, v1, v2, v3 = float(seq[0]), float(seq[1]), float(seq[2]), float(seq[3])
-            # Canonical repository bbox order is (ymin, xmin, ymax, xmax) -> (cx, cy) = (0.5*(v1+v3), 0.5*(v0+v2))
-            cand_yx = (0.5 * (v1 + v3), 0.5 * (v0 + v2))
-            cand_xy = (0.5 * (v0 + v2), 0.5 * (v1 + v3))
-            if ref_pt is not None:
-                d_yx = math.hypot(cand_yx[0] - ref_pt[0], cand_yx[1] - ref_pt[1])
-                d_xy = math.hypot(cand_xy[0] - ref_pt[0], cand_xy[1] - ref_pt[1])
-                if d_xy + 15.0 < d_yx:
-                    return cand_xy
-            return cand_yx
+            # Canonical repository bbox order is strictly (ymin, xmin, ymax, xmax) -> (cx, cy) = (0.5*(v1+v3), 0.5*(v0+v2))
+            return (0.5 * (v1 + v3), 0.5 * (v0 + v2))
     return None
 
 
@@ -199,6 +192,7 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
         origin = item.get("mask_origin") or item.get("origin")
         if origin is not None and len(origin) == 2 and not item.get("coords_in_sheet_space", False):
             ox, oy = float(origin[0]), float(origin[1])
+        local_kp_origin = item.get("local_mask_origin")
 
         keypoints_31 = item.get("keypoints_31")
         kp_in_sheet_space = bool(item.get("keypoints_in_sheet_space", item.get("coords_in_sheet_space", False)))
@@ -309,14 +303,22 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
         keypoints_31 = _kp_dict
 
     if isinstance(keypoints_31, dict) and len(keypoints_31) > 0:
-        kp_ox = 0.0 if kp_in_sheet_space else ox
-        kp_oy = 0.0 if kp_in_sheet_space else oy
+        if kp_in_sheet_space:
+            kp_ox, kp_oy = 0.0, 0.0
+        elif (
+            isinstance(item, dict)
+            and item.get("local_mask_origin") is not None
+            and len(item["local_mask_origin"]) == 2
+        ):
+            kp_ox = float(item["local_mask_origin"][0])
+            kp_oy = float(item["local_mask_origin"][1])
+        else:
+            kp_ox, kp_oy = ox, oy
         if (
             kp_ox == 0.0
             and kp_oy == 0.0
             and not kp_in_sheet_space
             and isinstance(item, dict)
-            and item.get("p_base_sheet") is not None
             and p_base is not None
         ):
             raw_lb = keypoints_31.get("lamina_base")
@@ -326,7 +328,11 @@ def _parse_basal_leaf_pose(item: Any) -> Optional[Dict[str, Any]]:
                 rx, ry = float(raw_lb.get("x", 0.0)), float(raw_lb.get("y", 0.0))
             else:
                 rx, ry = 0.0, 0.0
-            if (rx != 0.0 or ry != 0.0) and math.hypot(p_base[0] - rx, p_base[1] - ry) > 64.0:
+            if (
+                item.get("p_base_sheet") is not None
+                and (rx != 0.0 or ry != 0.0)
+                and math.hypot(p_base[0] - rx, p_base[1] - ry) > 64.0
+            ):
                 kp_ox = p_base[0] - rx
                 kp_oy = p_base[1] - ry
 

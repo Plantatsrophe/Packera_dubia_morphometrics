@@ -305,7 +305,7 @@ run_fourier_extraction <- function(opts) {
         }
       }, error = function(e) NULL)
     }
-    message("Ingested ", length(coo_list), " Tier 1 intact 120-vertex contours directly from SQLite extracted_leaves.")
+    message("Ingested ", length(coo_list), " QC-passing 120-vertex contours directly from SQLite extracted_leaves.")
   } else {
   contour_files <- character(0); use_masks_fallback <- FALSE
   manifest_df <- if (file.exists(opts$manifest)) read.csv(opts$manifest, stringsAsFactors = FALSE) else NULL

@@ -63,7 +63,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--expand-synonyms",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Dynamically expand target Packera binomials to historical Senecio/Cineraria synonyms via GBIF Backbone taxonomy (default: True).",
+        help=(
+            "Dynamically unify unaccepted Packera synonyms and historical Senecio/Cineraria "
+            "basionyms under accepted Packera species via GBIF Backbone taxonomy (default: True)."
+        ),
     )
     parser.add_argument(
         "--geographic-scope",
@@ -215,8 +218,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=cfg.harvesting.usda_county_filter,
         help=(
-            "Filter out non-exempt US vouchers outside USDA PLANTS documented counties "
-            f"(plus 1-ring neighbors and geodesic buffer; default: {cfg.harvesting.usda_county_filter})."
+            "Drop non-exempt US vouchers outside USDA PLANTS documented counties + 1-ring/buffer "
+            "when enabled; when False, retains all vouchers and records soft usda_county_status in SQLite "
+            f"(default: {cfg.harvesting.usda_county_filter})."
         ),
     )
     parser.add_argument(
@@ -321,6 +325,7 @@ def main(argv: list[str] | None = None) -> None:
             getattr(args, "harvest_full_continental_range", cfg.harvesting.harvest_full_continental_range)
         ),
         min_eastern_residency_records=int(cfg.harvesting.min_eastern_residency_records),
+        webp_quality=int(cfg.harvesting.webp_quality),
     )
 
     harvester.run(download_images=args.download_images)

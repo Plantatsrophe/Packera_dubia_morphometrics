@@ -201,7 +201,21 @@ class TestPhase1AuditFixes(unittest.TestCase):
                 }
             )
 
-            with patch("scripts.core.harvester.occ", mock_occ):
+            mock_sp = MagicMock()
+            mock_sp.name_backbone.return_value = {
+                "matchType": "EXACT",
+                "status": "ACCEPTED",
+                "usageKey": 5387757,
+                "canonicalName": "Packera dubia",
+                "species": "Packera dubia",
+            }
+            mock_sp.name_usage.return_value = {
+                "results": [
+                    {"canonicalName": "Packera tomentosa", "scientificName": "Packera tomentosa (Michx.) C. Jeffrey", "taxonomicStatus": "SYNONYM"},
+                    {"canonicalName": "Senecio tomentosus", "scientificName": "Senecio tomentosus Michx.", "taxonomicStatus": "SYNONYM"},
+                ]
+            }
+            with patch("scripts.core.harvester.occ", mock_occ), patch("scripts.core.harvester.species", mock_sp):
                 harv = VoucherHarvester(
                     taxa=["Packera dubia"],
                     expand_synonyms=False,

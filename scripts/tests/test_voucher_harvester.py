@@ -2777,16 +2777,32 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
                 '"PASE16","","Packera serpenticola Boufford, Kartesz, S.H. Shi & Renchao Zhou","serpentine ragwort","Asteraceae"\n'
             )
             (cache_dir / "plantlst.txt").write_text(plantlst_sample, encoding="utf-8")
-            syms = resolve_usda_symbols_for_taxon(
-                "Packera dubia",
-                cache_dir=cache_dir,
-                allow_network=False,
-            )
+            mock_dubia_sp = MagicMock()
+            mock_dubia_sp.name_backbone.return_value = {
+                "matchType": "EXACT",
+                "status": "ACCEPTED",
+                "usageKey": 5387757,
+                "canonicalName": "Packera dubia",
+                "species": "Packera dubia",
+            }
+            mock_dubia_sp.name_usage.return_value = {
+                "results": [
+                    {"canonicalName": "Packera tomentosa", "scientificName": "Packera tomentosa (Michx.) C. Jeffrey", "taxonomicStatus": "SYNONYM"},
+                    {"canonicalName": "Senecio tomentosus", "scientificName": "Senecio tomentosus Michx.", "taxonomicStatus": "SYNONYM"},
+                ]
+            }
+            with patch("scripts.core.harvester.species", mock_dubia_sp):
+                syms = resolve_usda_symbols_for_taxon(
+                    "Packera dubia",
+                    cache_dir=cache_dir,
+                    allow_network=False,
+                )
             self.assertEqual(syms, ["PATO4"])
 
             # 2. Fetch via mocked HTTP endpoint, verify CSV + SQLite persistence, then reload offline from SQLite
             reset_usda_network_state()
-            with patch("scripts.core.usda_plants_ranges._http_get_text", return_value=raw_csv) as mock_get:
+            with patch("scripts.core.harvester.species", mock_dubia_sp), \
+                 patch("scripts.core.usda_plants_ranges._http_get_text", return_value=raw_csv) as mock_get:
                 r_live = fetch_or_load_usda_taxon_range(
                     canonical_packera="Packera dubia",
                     cache_dir=cache_dir,
@@ -2829,7 +2845,7 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
             (cache_v3 / "plantlst.txt").parent.mkdir(parents=True, exist_ok=True)
             (cache_v3 / "plantlst.txt").write_text(plantlst_sample, encoding="utf-8")
             reset_usda_network_state()
-            with patch(
+            with patch("scripts.core.harvester.species", mock_dubia_sp), patch(
                 "scripts.core.usda_plants_ranges._http_get_text",
                 return_value='{"Id": 38530, "Symbol": "PATO4"}',
             ) as m_prof, patch(
@@ -2991,7 +3007,20 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
                 else {"results": mock_gbif_results, "endOfRecords": True}
             )
 
-            with patch("scripts.core.harvester.occ", mock_occ):
+            mock_dubia_sp2 = MagicMock()
+            mock_dubia_sp2.name_backbone.return_value = {
+                "matchType": "EXACT",
+                "status": "ACCEPTED",
+                "usageKey": 5387757,
+                "canonicalName": "Packera dubia",
+                "species": "Packera dubia",
+            }
+            mock_dubia_sp2.name_usage.return_value = {
+                "results": [
+                    {"canonicalName": "Packera tomentosa", "scientificName": "Packera tomentosa (Michx.) C. Jeffrey", "taxonomicStatus": "SYNONYM"},
+                ]
+            }
+            with patch("scripts.core.harvester.occ", mock_occ), patch("scripts.core.harvester.species", mock_dubia_sp2):
                 harv = VoucherHarvester(
                     taxa=["Packera dubia"],
                     expand_synonyms=False,
@@ -3239,15 +3268,32 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
         from scripts.core.usda_plants_ranges import resolve_usda_symbols_for_taxon
         from scripts.core.epa_ecoregions import _HISTORIC_COUNTY_CONSOLIDATIONS, _normalize_us_county_name, infer_regional_group
 
-        # 1. Packera anonyma offline USDA symbol fallback (resolves via Senecio smallii / Senecio anonymus in plantlst.txt)
+        # 1. Packera anonyma dynamic USDA symbol resolution (resolves via GBIF synonym Senecio smallii + algorithmic ICN generic transfer)
         with tempfile.TemporaryDirectory() as tmp_usda:
             p_lst = Path(tmp_usda) / "plantlst.txt"
             p_lst.write_text(
                 '"Symbol","Synonym Symbol","Scientific Name with Author","Common Name","Family"\n'
-                '"PAAN6","","Senecio smallii Britton","Small\'s ragwort","Asteraceae"\n',
+                '"PAAN6","","Senecio smallii Britton","Small\'s ragwort","Asteraceae"\n'
+                '"PACR11","","Senecio crawfordii (Britton) G.W. Douglas & Ruyle-Douglas","Crawford\'s ragwort","Asteraceae"\n',
                 encoding="utf-8",
             )
-            syms_anon = resolve_usda_symbols_for_taxon("Packera anonyma", cache_dir=Path(tmp_usda), allow_network=False)
+            syms_craw = resolve_usda_symbols_for_taxon("Packera crawfordii", cache_dir=Path(tmp_usda), allow_network=False)
+            self.assertEqual(syms_craw, ["PACR11"])
+            mock_anon_sp = MagicMock()
+            mock_anon_sp.name_backbone.return_value = {
+                "matchType": "EXACT",
+                "status": "ACCEPTED",
+                "usageKey": 3109240,
+                "canonicalName": "Packera anonyma",
+                "species": "Packera anonyma",
+            }
+            mock_anon_sp.name_usage.return_value = {
+                "results": [
+                    {"canonicalName": "Senecio smallii", "scientificName": "Senecio smallii Britton", "taxonomicStatus": "SYNONYM"},
+                ]
+            }
+            with patch("scripts.core.harvester.species", mock_anon_sp):
+                syms_anon = resolve_usda_symbols_for_taxon("Packera anonyma", cache_dir=Path(tmp_usda), allow_network=False)
             self.assertEqual(syms_anon, ["PAAN6"])
 
         # 2. Chesapeake VA county name consolidation fix (not overwritten to 'norfolk'; South Norfolk -> 'chesapeake')
@@ -3495,6 +3541,252 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
                     stack.pop()
             self.assertEqual(len(stack), 0, f"Unclosed delimiters {stack} in {rel_r}")
             self.assertIsNone(in_str, f"Unclosed string literal in {rel_r}")
+
+
+    def test_zero_hardcoded_synonyms_and_dynamic_packera_tomentosa_dubia_unification(self):
+        """Verify zero hardcoded taxon names in source and 100% dynamic unification of Packera tomentosa into Packera dubia."""
+        import subprocess
+        import main as root_main
+        from scripts.core import harvester as ch
+        from scripts.core.harvester import VoucherHarvester
+
+        project_root = Path(__file__).resolve().parents[2]
+        harv_src = (project_root / "scripts/core/harvester.py").read_text(encoding="utf-8")
+        usda_src = (project_root / "scripts/core/usda_plants_ranges.py").read_text(encoding="utf-8")
+        aw_r_src = (project_root / "scripts/morphometrics/authority_weighting_utils.R").read_text(encoding="utf-8")
+        self.assertNotIn('"packera tomentosa"', harv_src.lower())
+        self.assertNotIn('"senecio tomentosus"', harv_src.lower())
+        self.assertNotIn("fallback_map", usda_src)
+        self.assertNotIn('"packera dubia":', usda_src.lower())
+        self.assertNotIn('grepl("dubia|tomentosa', aw_r_src)
+
+        for k in ("packera dubia", "packera tomentosa", "senecio tomentosus", "cineraria dubia", "cineraria tomentosa", "senecio dubius"):
+            ch._DYNAMIC_SYNONYM_TO_CANONICAL.pop(k, None)
+            ch._GBIF_SYNONYM_CACHE.pop(k, None)
+            ch._GBIF_BACKBONE_SYNONYM_FLAG.pop(k, None)
+
+        mock_gbif_sp = MagicMock()
+        def _gbif_bb(**kwargs):
+            nm = str(kwargs.get("name") or kwargs.get("scientificName") or "").strip().lower()
+            if "packera dubia" in nm:
+                return {
+                    "matchType": "EXACT",
+                    "status": "ACCEPTED",
+                    "usageKey": 5387757,
+                    "canonicalName": "Packera dubia",
+                    "scientificName": "Packera dubia (Spreng.) Trock & Mabb.",
+                    "species": "Packera dubia",
+                }
+            if "packera tomentosa" in nm:
+                return {
+                    "matchType": "EXACT",
+                    "status": "SYNONYM",
+                    "usageKey": 3109265,
+                    "acceptedUsageKey": 5387757,
+                    "canonicalName": "Packera tomentosa",
+                    "scientificName": "Packera tomentosa (Michx.) C. Jeffrey",
+                    "accepted": "Packera dubia (Spreng.) Trock & Mabb.",
+                    "species": "Packera dubia",
+                }
+            return {"matchType": "NONE"}
+
+        def _gbif_nu(**kwargs):
+            if kwargs.get("data") == "synonyms":
+                return {
+                    "results": [
+                        {"canonicalName": "Packera tomentosa", "scientificName": "Packera tomentosa (Michx.) C. Jeffrey", "taxonomicStatus": "SYNONYM"},
+                        {"canonicalName": "Senecio tomentosus", "scientificName": "Senecio tomentosus Michx.", "taxonomicStatus": "SYNONYM"},
+                        {"canonicalName": "Cineraria dubia", "scientificName": "Cineraria dubia Spreng.", "taxonomicStatus": "HOMOTYPIC_SYNONYM"},
+                        {"canonicalName": "Senecio dubius", "scientificName": "Senecio dubius (Spreng.)", "taxonomicStatus": "HOMOTYPIC_SYNONYM"},
+                        {"canonicalName": "Packera aurea", "scientificName": "Packera aurea auct. non (L.)", "taxonomicStatus": "MISAPPLIED"},
+                    ]
+                }
+            return {}
+
+        mock_gbif_sp.name_backbone.side_effect = _gbif_bb
+        mock_gbif_sp.name_usage.side_effect = _gbif_nu
+
+        def _gbif_occ(**kwargs):
+            if "typeStatus" in kwargs or kwargs.get("country") == "CA":
+                return {"results": [], "count": 0}
+            sci_q = str(kwargs.get("scientificName") or "")
+            recs = []
+            if sci_q == "Packera dubia":
+                recs.append({
+                    "key": 90101,
+                    "scientificName": "Packera dubia (Spreng.) Trock & Mabb.",
+                    "taxonomicStatus": "ACCEPTED",
+                    "species": "Packera dubia",
+                    "stateProvince": "North Carolina",
+                    "decimalLatitude": 35.91,
+                    "decimalLongitude": -79.05,
+                    "year": 2021, "month": 4, "day": 18,
+                    "recordedBy": "B. Fuller", "recordNumber": "401",
+                    "identifiedBy": "A.S. Weakley",
+                    "media": [{"identifier": "https://example.org/dubia1.jpg", "type": "StillImage"}],
+                    "catalogNumber": "NCU_DUBIA_01",
+                    "institutionCode": "NCU",
+                })
+            elif sci_q == "Packera tomentosa":
+                recs.append({
+                    "key": 90102,
+                    "scientificName": "Packera tomentosa (Michx.) C. Jeffrey",
+                    "taxonomicStatus": "SYNONYM",
+                    "acceptedScientificName": "Packera dubia (Spreng.) Trock & Mabb.",
+                    "species": "Packera dubia",
+                    "stateProvince": "South Carolina",
+                    "decimalLatitude": 34.00,
+                    "decimalLongitude": -81.03,
+                    "year": 1998, "month": 4, "day": 12,
+                    "recordedBy": "J.B. Nelson", "recordNumber": "19200",
+                    "identifiedBy": "T.M. Barkley",
+                    "media": [{"identifier": "https://example.org/tomentosa1.jpg", "type": "StillImage"}],
+                    "catalogNumber": "USCH_TOM_02",
+                    "institutionCode": "USCH",
+                })
+            elif sci_q == "Senecio tomentosus":
+                recs.append({
+                    "key": 90103,
+                    "scientificName": "Senecio tomentosus Michx.",
+                    "taxonomicStatus": "SYNONYM",
+                    "acceptedScientificName": "Packera dubia (Spreng.) Trock & Mabb.",
+                    "species": "Packera dubia",
+                    "stateProvince": "Virginia",
+                    "decimalLatitude": 36.85,
+                    "decimalLongitude": -76.29,
+                    "year": 1968, "month": 5, "day": 3,
+                    "recordedBy": "A.E. Radford", "recordNumber": "45012",
+                    "identifiedBy": "A.E. Radford",
+                    "media": [{"identifier": "https://example.org/sentom1.jpg", "type": "StillImage"}],
+                    "catalogNumber": "NCU_SENTOM_03",
+                    "institutionCode": "NCU",
+                })
+            return {"results": recs, "count": len(recs)}
+
+        # Case A: Querying Packera dubia expands and combines Packera tomentosa + Senecio tomentosus into Packera dubia
+        with patch("scripts.core.harvester.species", mock_gbif_sp), \
+             patch("scripts.core.harvester.occ.search", side_effect=_gbif_occ):
+            harv_dubia = VoucherHarvester(taxa=["Packera dubia"], expand_synonyms=True)
+            self.assertIn("Packera tomentosa", harv_dubia.taxa)
+            self.assertIn("Senecio tomentosus", harv_dubia.taxa)
+            self.assertNotIn("Packera aurea", harv_dubia.taxa)  # MISAPPLIED rejected!
+            df_combined = harv_dubia.harvest()
+
+        self.assertEqual(set(df_combined["catalogNumber"]), {"NCU_DUBIA_01", "USCH_TOM_02", "NCU_SENTOM_03"})
+        self.assertEqual(set(df_combined["species_standardized"]), {"Packera dubia"})
+        tom_row = df_combined[df_combined["catalogNumber"] == "USCH_TOM_02"].iloc[0]
+        self.assertEqual(tom_row["scientificName"], "Packera dubia")
+        self.assertEqual(tom_row["species_raw"], "Packera tomentosa (Michx.) C. Jeffrey")
+
+        # Case B: Querying unaccepted Packera tomentosa directly resolves canonical to Packera dubia and combines both
+        for k in ("packera dubia", "packera tomentosa", "senecio tomentosus", "cineraria dubia", "senecio dubius"):
+            ch._DYNAMIC_SYNONYM_TO_CANONICAL.pop(k, None)
+            ch._GBIF_SYNONYM_CACHE.pop(k, None)
+            ch._GBIF_BACKBONE_SYNONYM_FLAG.pop(k, None)
+
+        with patch("scripts.core.harvester.species", mock_gbif_sp), \
+             patch("scripts.core.harvester.occ.search", side_effect=_gbif_occ):
+            harv_tom = VoucherHarvester(taxa=["Packera tomentosa"], expand_synonyms=True)
+            df_from_tom = harv_tom.harvest()
+            self.assertEqual(set(df_from_tom["catalogNumber"]), {"NCU_DUBIA_01", "USCH_TOM_02", "NCU_SENTOM_03"})
+            self.assertEqual(set(df_from_tom["species_standardized"]), {"Packera dubia"})
+
+        # Case C: Occurrence-level SYNONYM status combines Packera tomentosa into Packera dubia even when expand_synonyms=False
+        for k in ("packera dubia", "packera tomentosa", "senecio tomentosus"):
+            ch._DYNAMIC_SYNONYM_TO_CANONICAL.pop(k, None)
+            ch._GBIF_SYNONYM_CACHE.pop(k, None)
+            ch._GBIF_BACKBONE_SYNONYM_FLAG.pop(k, None)
+
+        def _mixed_occ(**kwargs):
+            if "typeStatus" in kwargs or kwargs.get("country") == "CA":
+                return {"results": [], "count": 0}
+            return {
+                "results": [
+                    {
+                        "key": 90201,
+                        "scientificName": "Packera dubia (Spreng.) Trock & Mabb.",
+                        "taxonomicStatus": "ACCEPTED",
+                        "species": "Packera dubia",
+                        "stateProvince": "North Carolina",
+                        "decimalLatitude": 35.91, "decimalLongitude": -79.05,
+                        "year": 2021, "recordedBy": "B. Fuller", "recordNumber": "401",
+                        "media": [{"identifier": "https://example.org/d.jpg", "type": "StillImage"}],
+                        "catalogNumber": "NCU_D_01", "institutionCode": "NCU",
+                    },
+                    {
+                        "key": 90202,
+                        "scientificName": "Packera tomentosa (Michx.) C. Jeffrey",
+                        "taxonomicStatus": "SYNONYM",
+                        "acceptedScientificName": "Packera dubia (Spreng.) Trock & Mabb.",
+                        "species": "Packera dubia",
+                        "stateProvince": "South Carolina",
+                        "decimalLatitude": 34.00, "decimalLongitude": -81.03,
+                        "year": 1998, "recordedBy": "J.B. Nelson", "recordNumber": "19200",
+                        "media": [{"identifier": "https://example.org/t.jpg", "type": "StillImage"}],
+                        "catalogNumber": "USCH_T_02", "institutionCode": "USCH",
+                    },
+                ],
+                "count": 2,
+            }
+
+        with patch("scripts.core.harvester.occ.search", side_effect=_mixed_occ):
+            harv_occ_syn = VoucherHarvester(taxa=["Packera dubia"], expand_synonyms=False)
+            df_occ_syn = harv_occ_syn.harvest()
+            self.assertEqual(set(df_occ_syn["species_standardized"]), {"Packera dubia"})
+
+        # Verify main.py forwards the 4 Step 1 flags when explicitly specified
+        parser = root_main.build_parser()
+        args_flags = parser.parse_args([
+            "harvest",
+            "--no-harvest-full-continental-range",
+            "--spatial-thin-km", "12.5",
+            "--max-per-state", "40",
+            "--max-per-region", "80",
+        ])
+        cfg_stub = {
+            "paths": {"raw_vouchers_dir": "/tmp/r", "curated_vouchers_csv": "/tmp/c.csv"},
+            "harvesting": {
+                "max_records_per_taxon": 100, "max_uncertainty_meters": 5000,
+                "min_megapixels": 8.0, "min_file_size_kb": 500, "download_concurrency": 5,
+            },
+        }
+        with patch("subprocess.run") as m_sub, patch("main.verify_file_exists"):
+            root_main.run_harvest(args_flags, cfg_stub)
+            sent_cmd = m_sub.call_args[0][0]
+            self.assertIn("--no-harvest-full-continental-range", sent_cmd)
+            self.assertIn("--spatial-thin-km", sent_cmd)
+            self.assertIn("12.5", sent_cmd)
+            self.assertIn("--max-per-state", sent_cmd)
+            self.assertIn("40", sent_cmd)
+            self.assertIn("--max-per-region", sent_cmd)
+            self.assertIn("80", sent_cmd)
+
+        # Verify R .load_authority_weight_config reads nested thresholds$authority_weights from YAML
+        self.assertIn("cfg$thresholds$authority_weights", aw_r_src)
+        self.assertIn("dyn_equiv", aw_r_src)
+        import shutil
+        if shutil.which("Rscript"):
+            with tempfile.TemporaryDirectory() as tmp_r_d:
+                custom_yaml = Path(tmp_r_d) / "cfg.yaml"
+                custom_yaml.write_text(
+                    "thresholds:\n  authority_weights:\n    tier_0_type: 3.5\n    silver_max_pool_share: 0.35\n",
+                    encoding="utf-8",
+                )
+                r_out = subprocess.run(
+                    [
+                        "Rscript", "-e",
+                        f"source('scripts/morphometrics/authority_weighting_utils.R'); "
+                        f"rm(list=ls(envir=.AUTH_WEIGHT_CFG_ENV), envir=.AUTH_WEIGHT_CFG_ENV); "
+                        f"w <- .load_authority_weight_config({repr(str(custom_yaml))}); "
+                        f"stopifnot(abs(w$tier_0_type - 3.5) < 1e-6, abs(w$silver_max_pool_share - 0.35) < 1e-6); "
+                        f"cat('R_CFG_OK\\n')",
+                    ],
+                    cwd=str(project_root),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertIn("R_CFG_OK", r_out.stdout)
 
 
 if __name__ == "__main__":

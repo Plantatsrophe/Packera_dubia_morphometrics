@@ -204,7 +204,10 @@ class DetectedInstance:
     work_scale: float = 1.0
     cf_source: str = "measured_from_ruler"
     archetype_score: float = 0.0
+    petiole_width_px: Optional[float] = None
     petiole_width_mm: Optional[float] = None
+    blade_length_px: Optional[float] = None
+    blade_width_px: Optional[float] = None
     ect_path: Optional[str] = None
 
 
@@ -1433,7 +1436,8 @@ class LM3LeafSegmenterEngine:
         image_bgr: Optional[np.ndarray] = None,
         letterbox_shape: Optional[Tuple[int, int]] = None,
     ) -> List[Tuple[Tuple[int, int, int, int], np.ndarray, float, int]]:
-        """Decodes YOLO26x-seg detection + prototype mask outputs into `(bbox, mask_u8, score, class_id)`."""
+        """Decodes YOLO26x-seg detection + prototype mask outputs into reduced `(bbox, mask_u8, score, class_id)`."""
+        _ = (image_bgr, letterbox_shape)
         if not raw_outs:
             return []
         crop_h, crop_w = int(crop_shape[0]), int(crop_shape[1])
@@ -1761,7 +1765,14 @@ class LM3LeafSegmenterEngine:
 
         crop_h, crop_w = crop_bgr.shape[:2]
         min_fg = max(1, int(getattr(self, "min_area_px", 64)))
-        reduced = _reduce_crop_predictions_native_lm3(preds, (crop_h, crop_w), min_area_px=min_fg)
+        if (
+            "predict" not in self.__dict__
+            and getattr(self.predict, "__func__", None) is LM3LeafSegmenterEngine.predict
+            and (self.session is not None or self.model is not None)
+        ):
+            reduced = list(preds)
+        else:
+            reduced = _reduce_crop_predictions_native_lm3(preds, (crop_h, crop_w), min_area_px=min_fg)
         if not reduced:
             return None, None, None, 0.0
 
@@ -2359,7 +2370,7 @@ class LM3PoseLandmarkEngine:
 
 
 # =============================================================================
-# 5. Native LM3 Petiole / Keypoint Anchoring & Dissected Rachis Bridging
+# 5. Native LM3 Petiole / Keypoint Anchoring (Read-Only, Zero Rachis Bridging)
 # =============================================================================
 
 def _extract_native_lm3_petiole_anchor(
@@ -3193,9 +3204,13 @@ class LM3ScaleCalibrator:
         self,
         device: str = "cuda",
         providers: Optional[Sequence[str]] = None,
+        use_cf_predicted_by_mp: bool = True,
+        archival_conf_thres: float = 0.25,
     ) -> None:
         self.device = device if (device == "cuda" and torch_cuda_available()) else "cpu"
         self.providers = providers
+        self.use_cf_predicted_by_mp: bool = bool(use_cf_predicted_by_mp)
+        self.archival_conf_thres: float = float(archival_conf_thres)
         self.archival_weights_path: Optional[Path] = None
         self.archival_session: Optional[Any] = None
         self.mp_model: Optional[Any] = None
@@ -3293,7 +3308,7 @@ class LM3ScaleCalibrator:
                 for row in arr:
                     sc = float(row[4])
                     cls_id = int(round(float(row[5])))
-                    if cls_id != 0 or sc < 0.25:
+                    if cls_id != 0 or sc < float(getattr(self, 'archival_conf_thres', 0.25)):
                         continue
                     x1_w = max(0.0, min(float(work_w), (float(row[0]) - dw) * inv_r))
                     y1_w = max(0.0, min(float(work_h), (float(row[1]) - dh) * inv_r))
@@ -3314,16 +3329,24 @@ class LM3ScaleCalibrator:
         self,
         image_bgr: np.ndarray,
         catalog_number: str = "",
+        use_cf_predicted_by_mp: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Resolves `pixels_per_mm`, `is_calibrated_mm`, and `cf_source` for a herbarium sheet:
+        Resolves `pixels_per_mm`, `is_calibrated_mm`, `cf_source`, and `scale_source` for a herbarium sheet:
           1. Attempts direct ruler measurement via `lm3_archival_detector__yolo26x_det_1280` +
              `RulerClassifierModel` + `RulerCFLattice` (`cf_source = 'measured_from_ruler'`).
-          2. Falls back to `MpConversionFactorModel` (`cf_source = 'predicted_from_megapixels'`)
-             when no high-confidence ruler is present.
+          2. When `use_cf_predicted_by_mp` is enabled, falls back to `MpConversionFactorModel`
+             (`cf_source = 'predicted_from_megapixels'`, `is_calibrated_mm = False`); otherwise
+             returns `uncalibrated` (`pixels_per_mm = None`, `is_calibrated_mm = False`).
         """
+        _ = catalog_number
         if image_bgr is None or image_bgr.size == 0:
-            return {"pixels_per_mm": None, "is_calibrated_mm": False, "cf_source": "uncalibrated"}
+            return {
+                "pixels_per_mm": None,
+                "is_calibrated_mm": False,
+                "cf_source": "uncalibrated",
+                "scale_source": "uncalibrated",
+            }
 
         sh, sw = image_bgr.shape[:2]
         if self.archival_session is not None and self.ruler_lattice is not None:
@@ -3352,6 +3375,18 @@ class LM3ScaleCalibrator:
                 except Exception:
                     continue
 
+        eff_use_mp = (
+            self.use_cf_predicted_by_mp
+            if use_cf_predicted_by_mp is None
+            else bool(use_cf_predicted_by_mp)
+        )
+        if not eff_use_mp:
+            return {
+                "pixels_per_mm": None,
+                "is_calibrated_mm": False,
+                "cf_source": "uncalibrated",
+                "scale_source": "uncalibrated",
+            }
         px_per_mm, cf_source = self.predict_megapixel_scale(sh, sw)
         return {
             "pixels_per_mm": px_per_mm,
