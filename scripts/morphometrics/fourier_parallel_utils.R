@@ -241,6 +241,10 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   has_ect2 <- "ECT_PC2" %in% names(closed_leaf_df)
   has_ect3 <- "ECT_PC3" %in% names(closed_leaf_df)
   has_ectlc <- "ect_lobe_complexity" %in% names(closed_leaf_df)
+  has_blln <- "blade_cie_l_norm" %in% names(closed_leaf_df)
+  has_bllsd <- "blade_cie_l_sd" %in% names(closed_leaf_df)
+  blln_v <- if (has_blln) pull_num("blade_cie_l_norm") else NULL
+  bllsd_v <- if (has_bllsd) pull_num("blade_cie_l_sd") else NULL
   ect1_v <- if (has_ect1) pull_num("ECT_PC1") else NULL
   ect2_v <- if (has_ect2) pull_num("ECT_PC2") else NULL
   ect3_v <- if (has_ect3) pull_num("ECT_PC3") else NULL
@@ -287,6 +291,8 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
     ect2_m <- rep(NA_real_, m)
     ect3_m <- rep(NA_real_, m)
     ectlc_m <- rep(NA_real_, m)
+    blln_m <- rep(NA_real_, m)
+    bllsd_m <- rep(NA_real_, m)
     dis_m <- rep(NA, m)
     out_m <- logical(m)
 
@@ -339,6 +345,8 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
       if (has_ect2) ect2_m[k] <- med_fin(ect2_v[idx], 6L)
       if (has_ect3) ect3_m[k] <- med_fin(ect3_v[idx], 6L)
       if (has_ectlc) ectlc_m[k] <- med_fin(ectlc_v[idx], 4L)
+      if (has_blln) blln_m[k] <- med_fin(blln_v[idx], 4L)
+      if (has_bllsd) bllsd_m[k] <- med_fin(bllsd_v[idx], 4L)
       if (has_dis) dis_m[k] <- if (any(!is.na(dr))) any(dr, na.rm = TRUE) else NA
       if (has_out_col) out_m[k] <- all(out_vec[idx], na.rm = TRUE)
     }
@@ -350,6 +358,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
       sv = sv_m, av = av_m, pa = pa_m, hr = hr_m, lq = lq_m,
       pet = pet_m, petw = petw_m, bld = bld_m, bldw = bldw_m, pbr = pbr_m,
       ect1 = ect1_m, ect2 = ect2_m, ect3 = ect3_m, ectlc = ectlc_m,
+      blln = blln_m, bllsd = bllsd_m,
       dis = dis_m, out = out_m
     )
   }
@@ -373,6 +382,7 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
       sv = pull_c("sv"), av = pull_c("av"), pa = pull_c("pa"), hr = pull_c("hr"), lq = pull_c("lq"),
       pet = pull_c("pet"), petw = pull_c("petw"), bld = pull_c("bld"), bldw = pull_c("bldw"), pbr = pull_c("pbr"),
       ect1 = pull_c("ect1"), ect2 = pull_c("ect2"), ect3 = pull_c("ect3"), ectlc = pull_c("ectlc"),
+      blln = pull_c("blln"), bllsd = pull_c("bllsd"),
       dis = pull_c("dis"), out = pull_c("out")
     )
   }
@@ -444,6 +454,8 @@ aggregate_step03_otu_medians_fast <- function(closed_leaf_df, all_harm_cols, sym
   if (has_ect2) spec_df$ECT_PC2 <- res$ect2
   if (has_ect3) spec_df$ECT_PC3 <- res$ect3
   if (has_ectlc) spec_df$ect_lobe_complexity <- res$ectlc
+  if (has_blln) spec_df$blade_cie_l_norm <- res$blln
+  if (has_bllsd) spec_df$blade_cie_l_sd <- res$bllsd
   if (has_dis) spec_df$is_dissected <- res$dis
   if (has_out_col) spec_df$is_contour_outlier <- res$out
 

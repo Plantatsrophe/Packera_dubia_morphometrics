@@ -1150,6 +1150,8 @@ def record_voucher_segmentation_transaction(
             _to_float(r.get("si_a")),
             _to_bool_int(r.get("lm3_gates_pass"), default=1),
             max(1, int(_to_int(r.get("n_lamina_components")) or 1)),
+            _to_float(r.get("blade_cie_l_norm")),
+            _to_float(r.get("blade_cie_l_sd")),
         ))
 
     if extracted_records and not leaf_rows:
@@ -1221,8 +1223,9 @@ def record_voucher_segmentation_transaction(
                     pixels_per_mm, is_calibrated_mm, scale_source,
                     mask_path, mask_is_upright, crop_path, contour_path, ect_path, contour_n_pts, contour_xy_json,
                     leaf_zone, leaf_zone_confidence, dist_from_crown_norm, cy_rel_plant_bbox,
-                    archetype_score, bilateral_dice, si_a, lm3_gates_pass, n_lamina_components
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    archetype_score, bilateral_dice, si_a, lm3_gates_pass, n_lamina_components,
+                    blade_cie_l_norm, blade_cie_l_sd
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 leaf_rows,
             )
@@ -1272,6 +1275,7 @@ def load_step02_records_from_db(
                 el.midrib_angle_deg, el.pixels_per_mm, el.is_calibrated_mm, el.scale_source,
                 el.leaf_zone, el.leaf_zone_confidence, el.dist_from_crown_norm, el.cy_rel_plant_bbox,
                 el.archetype_score, el.bilateral_dice, el.si_a, el.lm3_gates_pass, el.n_lamina_components,
+                el.blade_cie_l_norm, el.blade_cie_l_sd,
                 el.petiole_length_px,
                 el.blade_length_px,
                 el.blade_width_px, el.blade_width_mm,

@@ -448,6 +448,7 @@ run_fourier_extraction <- function(opts) {
       circularity = circularity, solidity = resolved_solidity, dissection_index = dissection_index, archetype_score = m_num("archetype_score"),
       petiole_length_mm = m_num("petiole_length_mm"), petiole_width_mm = m_num("petiole_width_mm"),
       blade_length_mm = m_num("blade_length_mm"), blade_width_mm = m_num("blade_width_mm"),
+      blade_cie_l_norm = m_num("blade_cie_l_norm"), blade_cie_l_sd = m_num("blade_cie_l_sd"),
       petiole_to_blade_ratio = m_num("petiole_to_blade_ratio"), is_dissected = m_dis,
       cy_rel_plant_bbox = m_num("cy_rel_plant_bbox"), cy_rel_sheet = m_num("cy_rel_sheet"),
       area_px = round(area_px, 1), centroid_size_px = if (!is.na(centsize_px)) round(centsize_px, 2) else NA_real_, centroid_size = if (!is.na(centsize)) round(centsize, 4) else NA_real_,
@@ -663,7 +664,7 @@ run_fourier_extraction <- function(opts) {
 
   lead_cols <- c("catalogNumber", "plant_individual_id", "leaf_id", "mask_is_upright", "leaf_zone", "leaf_zone_confidence", "dist_from_crown_norm", "cy_rel_plant_bbox", "pixels_per_mm", "is_calibrated_mm", "scale_source",
                  "species_standardized", "scientificName", "species_raw", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "anchor_tier_source", "authority_weight", "is_passive", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", "ect_bilateral_asym", "aspect_ratio", "circularity", "solidity", "dissection_index", "archetype_score",
-                 "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio", "is_dissected",
+                 "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio", "blade_cie_l_norm", "blade_cie_l_sd", "is_dissected",
                  "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_mm2", "area_px", "centroid_size_px", "centroid_size", "log_centsize", "mask_source")
   lead_cols <- intersect(lead_cols, names(efa_df))
   efa_df <- efa_df[, c(lead_cols, setdiff(names(efa_df), lead_cols))]
@@ -698,7 +699,7 @@ run_fourier_extraction <- function(opts) {
       if (any(!out_g)) grp <- grp[!out_g, , drop = FALSE]
       lz_g <- tolower(trimws(as.character(grp$leaf_zone))); has_b <- any(!is.na(lz_g) & lz_g == "basal")
       grp_b <- if (has_b) grp[!is.na(lz_g) & lz_g == "basal", , drop = FALSE] else grp; out <- grp_b[1, , drop = FALSE]
-      for (hc in unique(c(all_harm_cols, sym_names))) { hv <- suppressWarnings(as.numeric(grp_b[[hc]])); hv <- hv[is.finite(hv)]; out[[hc]] <- if (length(hv) > 0L) stats::median(hv) else NA_real_ }
+      for (hc in unique(c(all_harm_cols, sym_names, intersect(c("blade_cie_l_norm", "blade_cie_l_sd"), names(grp_b))))) { hv <- suppressWarnings(as.numeric(grp_b[[hc]])); hv <- hv[is.finite(hv)]; out[[hc]] <- if (length(hv) > 0L) stats::median(hv) else NA_real_ }
       out$morph_tier_source <- if (!has_b && nrow(grp) >= 1L) "Cauline_Only_Fallback" else "Basal_Rosette"; out
     }))
   }
@@ -741,7 +742,7 @@ run_fourier_extraction <- function(opts) {
     for (p in seq_len(k_export)) specimen_df[[paste0("PC", p)]] <- ifelse(otu_has_efa, if (p <= ncol(spec_pcs)) round(spec_pcs[, p], 6) else 0.0, NA_real_)
   }
 
-  lead_spec_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_count", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "foliar_variance", "within_rosette_efa_dispersion", "heteroblasty_efa_distance", "heteroblasty_ect_distance", "pixels_per_mm", "is_calibrated_mm", "scale_source", "mask_is_upright", "species_standardized", "scientificName", "species_raw", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "anchor_tier_source", "authority_weight", "is_passive", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "aspect_ratio", "circularity", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "archetype_score", "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio", "is_dissected", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_mm2", "area_px", "centroid_size", "log_centsize"), names(specimen_df))
+  lead_spec_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_count", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "foliar_variance", "within_rosette_efa_dispersion", "heteroblasty_efa_distance", "heteroblasty_ect_distance", "pixels_per_mm", "is_calibrated_mm", "scale_source", "mask_is_upright", "species_standardized", "scientificName", "species_raw", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "anchor_tier_source", "authority_weight", "is_passive", "spatial_balance_weight", "efd_harmonic_opt", "efd_k95_pcs", exp_pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "aspect_ratio", "circularity", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "archetype_score", "petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio", "blade_cie_l_norm", "blade_cie_l_sd", "is_dissected", "harmonic_roughness", "is_contour_outlier", "leaf_quality_weight", "area_mm2", "area_px", "centroid_size", "log_centsize"), names(specimen_df))
   specimen_df <- specimen_df[, c(lead_spec_cols, setdiff(names(specimen_df), lead_spec_cols))]
   for (anm in intersect(c("ect_basal_var_exp", "ect_cauline_var_exp"), names(spec_ect_attrs))) attr(specimen_df, anm) <- spec_ect_attrs[[anm]]
   write_step03_csv_fast(specimen_df, opts$output); message("Specimen-aggregated EFA harmonics table exported: ", opts$output, " (Rows: ", nrow(specimen_df), ")")

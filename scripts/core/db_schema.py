@@ -245,6 +245,8 @@ def _build_master_view_ddl() -> str:
         CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_mm ELSE vrp0.involucre_width_mm END AS involucre_width_mm,
         COALESCE(om.AR_inv, CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.AR_inv ELSE vrp0.AR_inv END) AS AR_inv,
         om.AR_inv_std AS AR_inv_std,
+        om.log1p_capitulum_count AS log1p_capitulum_count,
+        om.log1p_capitulum_count_std AS log1p_capitulum_count_std,
         om.reproductive_trait_status AS reproductive_trait_status,
         CASE WHEN vrp.catalogNumber IS NOT NULL THEN COALESCE(vrp.total_capitula, vrp.capitula_count) ELSE COALESCE(vrp0.total_capitula, vrp0.capitula_count) END AS total_capitula,
         CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.n_anthesis ELSE vrp0.n_anthesis END AS n_anthesis,
@@ -283,6 +285,8 @@ def _build_master_view_ddl() -> str:
         om.aspect_ratio AS aspect_ratio,
         om.area_px AS area_px,
         om.area_mm2 AS area_mm2,
+        om.blade_cie_l_norm AS blade_cie_l_norm,
+        om.blade_cie_l_sd AS blade_cie_l_sd,
         om.is_dissected AS is_dissected,
         om.centroid_size AS centroid_size,
         om.log_centsize AS log_centsize,
@@ -323,6 +327,8 @@ def _build_master_view_ddl() -> str:
         om.has_empirical_type_anchor AS has_empirical_type_anchor,
         om.type_morph_mahal_d2 AS type_morph_mahal_d2,
         om.nearest_type_morph_taxon AS nearest_type_morph_taxon,
+        om.nearest_type_basionym AS nearest_type_basionym,
+        om.nearest_type_basionym_d2 AS nearest_type_basionym_d2,
         om.type_morph_concordance AS type_morph_concordance,
         om.is_typical_morphotype AS is_typical_morphotype,
         om.min_congener_mahal_d2 AS min_congener_mahal_d2,
@@ -577,6 +583,8 @@ def _build_schema_ddl() -> str:
         si_a REAL,
         lm3_gates_pass INTEGER,
         n_lamina_components INTEGER DEFAULT 1,
+        blade_cie_l_norm REAL,
+        blade_cie_l_sd REAL,
         PRIMARY KEY (catalogNumber, plant_individual_id, leaf_id),
         FOREIGN KEY (catalogNumber, plant_individual_id)
             REFERENCES plant_individuals(catalogNumber, plant_individual_id) ON DELETE CASCADE
@@ -687,6 +695,8 @@ def _build_schema_ddl() -> str:
         aspect_ratio REAL,
         area_px REAL,
         area_mm2 REAL,
+        blade_cie_l_norm REAL,
+        blade_cie_l_sd REAL,
         is_dissected INTEGER,
         pixels_per_mm REAL,
         is_calibrated_mm INTEGER,
@@ -775,8 +785,12 @@ def _build_schema_ddl() -> str:
         petiole_to_blade_ratio REAL,
         centroid_size REAL,
         log_centsize REAL,
+        blade_cie_l_norm REAL,
+        blade_cie_l_sd REAL,
         AR_inv REAL,
         AR_inv_std REAL,
+        log1p_capitulum_count REAL,
+        log1p_capitulum_count_std REAL,
         reproductive_trait_status TEXT,
         {sym_harm_ddl},
         sym_var REAL,
@@ -817,6 +831,8 @@ def _build_schema_ddl() -> str:
         has_empirical_type_anchor INTEGER,
         type_morph_mahal_d2 REAL,
         nearest_type_morph_taxon TEXT,
+        nearest_type_basionym TEXT,
+        nearest_type_basionym_d2 REAL,
         type_morph_concordance REAL,
         is_typical_morphotype INTEGER,
         min_congener_mahal_d2 REAL,
@@ -960,6 +976,8 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("blade_width_mm", "REAL"),
         ("mask_is_upright", "INTEGER DEFAULT 1"),
         ("area_mm2", "REAL"),
+        ("blade_cie_l_norm", "REAL"),
+        ("blade_cie_l_sd", "REAL"),
     ),
     "run_active_cohort": (
         ("type_status", "TEXT"),
@@ -992,6 +1010,8 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("authority_weight", "REAL"),
             ("is_passive", "INTEGER DEFAULT 0"),
             ("spatial_balance_weight", "REAL"),
+            ("blade_cie_l_norm", "REAL"),
+            ("blade_cie_l_sd", "REAL"),
         ]
     ),
     "otu_morphometrics": tuple(
@@ -1043,6 +1063,12 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("blade_width_mm", "REAL"),
             ("scale_source", "TEXT"),
             ("within_rosette_efa_dispersion", "REAL"),
+            ("blade_cie_l_norm", "REAL"),
+            ("blade_cie_l_sd", "REAL"),
+            ("log1p_capitulum_count", "REAL"),
+            ("log1p_capitulum_count_std", "REAL"),
+            ("nearest_type_basionym", "TEXT"),
+            ("nearest_type_basionym_d2", "REAL"),
         ]
     ),
     "spatial_rf_predictions": tuple(
@@ -1099,7 +1125,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261116
+PACKERA_SCHEMA_USER_VERSION: int = 20261117
 
 
 def _migrate_dynamic_schema_columns(
@@ -1239,7 +1265,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2"}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2"}
             if (
                 "leaf_zone" not in el_cols
                 or "area_mm2" not in el_cols

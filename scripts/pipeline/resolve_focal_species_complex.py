@@ -485,7 +485,8 @@ def compile_complex_resolution_summary(
             cat = tr.get("catalogNumber", "Unknown")
             inst = tr.get("institutionCode", "")
             cl = tr.get("gmm_cluster", "N/A")
-            md_lines.append(f"* `{cat}` ({inst}): anchored in cluster `{cl}` (`Confirmed_Type_Control`).")
+            bas = str(tr.get("nearest_type_basionym") or tr.get("species_raw") or focal_std).strip()
+            md_lines.append(f"* `{cat}` ({inst}): basionym *{bas}* anchored in cluster `{cl}` (`Confirmed_Type_Control`).")
     else:
         md_lines.append("* No explicit nomenclatural type specimen was present in the Stage 3 cohort; verify physical type images before formal nomenclatural assignment.")
 

@@ -315,6 +315,130 @@ def _build_native_lm3_crop_masks(
 # Core Pipeline Execution Runner
 # =============================================================================
 
+
+
+def estimate_sheet_paper_cie_l_ref(image_bgr: Optional[np.ndarray]) -> float:
+    """
+    Estimates the clean mounting-paper CIE L* white-point reference (0..100 scale)
+    for a herbarium sheet by taking the 75th percentile of bright, low-chroma
+    background pixels on an 8x strided grid.
+    """
+    if image_bgr is None or not isinstance(image_bgr, np.ndarray) or image_bgr.ndim != 3 or image_bgr.size == 0:
+        return 90.0
+    sample = image_bgr[::8, ::8]
+    if sample.size == 0:
+        sample = image_bgr
+    lab = cv2.cvtColor(sample, cv2.COLOR_BGR2LAB)
+    l_cie = lab[:, :, 0].astype(np.float32) * (100.0 / 255.0)
+    a_c = lab[:, :, 1].astype(np.float32) - 128.0
+    b_c = lab[:, :, 2].astype(np.float32) - 128.0
+    chroma = np.hypot(a_c, b_c)
+    paper_cand = l_cie[(l_cie >= 55.0) & (chroma <= 28.0)]
+    if paper_cand.size >= 16:
+        ref = float(np.percentile(paper_cand, 75.0))
+    else:
+        ref = float(np.percentile(l_cie, 85.0))
+    return float(np.clip(ref, 55.0, 99.0))
+
+
+def compute_eroded_blade_cie_l_metrics(
+    image_bgr: Optional[np.ndarray],
+    mask: Optional[np.ndarray],
+    mask_origin: Tuple[int, int] = (0, 0),
+    hole_mask: Optional[np.ndarray] = None,
+    petiole_mask: Optional[np.ndarray] = None,
+    paper_l_ref: Optional[float] = None,
+) -> Dict[str, float]:
+    """
+    Computes paper-normalized eroded-lamina CIE L* reflectance (`blade_cie_l_norm`)
+    and multi-pixel band-pass floccose texture SD (`blade_cie_l_sd`) from native
+    LeafMachine3 RGB crops and separated lamina/petiole/hole masks:
+      1. Excludes petiole and hole masks so caudex/petiole wool and insect holes
+         never bias lamina vestiture.
+      2. Erodes inward from lamina margins via Euclidean distance transform
+         (`clip(0.12 * r_max, 2.0, 8.0) px`) to eliminate shadow rims and paper bleed.
+      3. Masks out white linen mounting-paper straps crossing the blade
+         (`L* >= paper_l_ref - 3.5` and `C*ab <= 6.0`).
+    """
+    nan_out = {"blade_cie_l_norm": np.nan, "blade_cie_l_sd": np.nan}
+    if (
+        image_bgr is None
+        or mask is None
+        or not isinstance(image_bgr, np.ndarray)
+        or not isinstance(mask, np.ndarray)
+        or image_bgr.ndim != 3
+        or mask.size == 0
+    ):
+        return nan_out
+
+    sh, sw = image_bgr.shape[:2]
+    mh, mw = mask.shape[:2]
+    ox, oy = int(mask_origin[0]), int(mask_origin[1])
+    x0 = max(0, ox)
+    y0 = max(0, oy)
+    x1 = min(sw, ox + mw)
+    y1 = min(sh, oy + mh)
+    if x1 <= x0 or y1 <= y0:
+        return nan_out
+
+    mx0, my0 = x0 - ox, y0 - oy
+    mx1, my1 = mx0 + (x1 - x0), my0 + (y1 - y0)
+    crop_bgr = image_bgr[y0:y1, x0:x1]
+    lam = mask[my0:my1, mx0:mx1] > 0
+    if hole_mask is not None and isinstance(hole_mask, np.ndarray) and hole_mask.shape[:2] == (mh, mw):
+        lam = lam & ~(hole_mask[my0:my1, mx0:mx1] > 0)
+    if petiole_mask is not None and isinstance(petiole_mask, np.ndarray) and petiole_mask.shape[:2] == (mh, mw):
+        lam = lam & ~(petiole_mask[my0:my1, mx0:mx1] > 0)
+    if int(np.count_nonzero(lam)) < 9:
+        return nan_out
+
+    dist = cv2.distanceTransform(lam.astype(np.uint8), cv2.DIST_L2, 3)
+    max_d = float(dist.max())
+    if max_d <= 0.0:
+        return nan_out
+    margin_px = float(np.clip(0.12 * max_d, 2.0, 8.0))
+    interior = dist >= margin_px
+    if int(np.count_nonzero(interior)) < 16:
+        interior = dist >= 1.0
+    if int(np.count_nonzero(interior)) < 9:
+        interior = lam
+
+    eff_paper_l = (
+        float(paper_l_ref)
+        if (paper_l_ref is not None and np.isfinite(float(paper_l_ref)) and float(paper_l_ref) >= 50.0)
+        else estimate_sheet_paper_cie_l_ref(image_bgr)
+    )
+    lab = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2LAB)
+    l_cie = lab[:, :, 0].astype(np.float32) * (100.0 / 255.0)
+    a_c = lab[:, :, 1].astype(np.float32) - 128.0
+    b_c = lab[:, :, 2].astype(np.float32) - 128.0
+    chroma = np.hypot(a_c, b_c)
+
+    if eff_paper_l >= 72.0:
+        is_strap = (l_cie >= (eff_paper_l - 3.5)) & (chroma <= 6.0)
+        non_strap = interior & (~is_strap)
+        if int(np.count_nonzero(non_strap)) >= 16:
+            interior = non_strap
+
+    l_vals = l_cie[interior]
+    if l_vals.size < 9:
+        return nan_out
+
+    l_norm = float(np.clip(float(np.median(l_vals)) / max(eff_paper_l, 50.0), 0.0, 1.25))
+    # Band-pass filter (0.8 px to 3.5 px) captures 0.2 to 1.5 mm arachnoid-floccose wool tufts
+    # while rejecting single-pixel sensor noise and broad lighting gradients across the sheet
+    blur_fine = cv2.GaussianBlur(l_cie, (0, 0), sigmaX=0.8, sigmaY=0.8)
+    blur_coarse = cv2.GaussianBlur(l_cie, (0, 0), sigmaX=3.5, sigmaY=3.5)
+    bp_vals = (blur_fine - blur_coarse)[interior]
+    bp_med = float(np.median(bp_vals))
+    mad_sd = 1.4826 * float(np.median(np.abs(bp_vals - bp_med))) * (90.0 / max(eff_paper_l, 50.0))
+
+    return {
+        "blade_cie_l_norm": round(l_norm, 4),
+        "blade_cie_l_sd": round(max(0.0, mad_sd), 4),
+    }
+
+
 class SegmentAndExtractPipeline:
     """Unified LeafMachine3 ONNX detection, specimen cleanup, leaf segmentation, pose landmarking, and extraction runner."""
 
@@ -1483,6 +1607,7 @@ class SegmentAndExtractPipeline:
                 "catalogNumber": catalog_number,
                 "plant_individual_id": int(pid_val),
                 "capitula_count": int(c_cnt),
+                "log1p_capitulum_count": round(math.log1p(int(c_cnt)), 5) if int(c_cnt) >= 1 else np.nan,
                 "involucre_height_px": round(mh_px, 2) if not np.isnan(mh_px) else np.nan,
                 "involucre_width_px": round(mw_px, 2) if not np.isnan(mw_px) else np.nan,
                 "involucre_height_mm": round(mh_mm, 3) if not np.isnan(mh_mm) else np.nan,
@@ -1764,9 +1889,20 @@ class SegmentAndExtractPipeline:
                     _best_root_pt = _nearest_r
             _crown_hints_sheet[_pid_h] = _best_root_pt if _best_root_pt is not None else _rc_h
 
+        _sheet_paper_l_ref = estimate_sheet_paper_cie_l_ref(img_bgr)
         for inst in instances:
             if int(np.count_nonzero(inst.mask)) <= 0:
                 continue
+            _vest_l = compute_eroded_blade_cie_l_metrics(
+                img_bgr,
+                inst.mask,
+                mask_origin=inst.mask_origin,
+                hole_mask=inst.hole_mask,
+                petiole_mask=inst.petiole_mask,
+                paper_l_ref=_sheet_paper_l_ref,
+            )
+            inst.blade_cie_l_norm = float(_vest_l["blade_cie_l_norm"])
+            inst.blade_cie_l_sd = float(_vest_l["blade_cie_l_sd"])
             _ox_l, _oy_l = inst.mask_origin
             _pid_hint_s = _crown_hints_sheet.get(int(inst.plant_individual_id))
             _crown_local: Optional[Tuple[float, float]] = (
@@ -2264,6 +2400,8 @@ class SegmentAndExtractPipeline:
                 "si_a": round(float(getattr(inst, "si_a", 0.0)), 4),
                 "lm3_gates_pass": bool(getattr(inst, "lm3_gates_pass", True)),
                 "n_lamina_components": int(getattr(inst, "n_lamina_components", 1)),
+                "blade_cie_l_norm": getattr(inst, "blade_cie_l_norm", np.nan),
+                "blade_cie_l_sd": getattr(inst, "blade_cie_l_sd", np.nan),
                 "midrib_angle_deg": round(float(inst.midrib_angle_deg), 2),
                 "pixels_per_mm": round(float(inst.pixels_per_mm), 4) if inst.pixels_per_mm else np.nan,
                 "is_calibrated_mm": bool(inst.is_calibrated_mm),
@@ -2290,6 +2428,7 @@ class SegmentAndExtractPipeline:
                 "blade_width_mm": _blade_w_mm,
                 "petiole_to_blade_ratio": _pet_ratio,
                 "capitula_count": _pid_repro_rec["capitula_count"],
+                "log1p_capitulum_count": _pid_repro_rec.get("log1p_capitulum_count", np.nan),
                 "involucre_height_px": _pid_repro_rec["involucre_height_px"],
                 "involucre_width_px": _pid_repro_rec["involucre_width_px"],
                 "involucre_height_mm": _pid_repro_rec["involucre_height_mm"],
@@ -2340,7 +2479,8 @@ class SegmentAndExtractPipeline:
             "catalogNumber", "plant_individual_id", "leaf_id", "solidity",
             "circularity", "extent", "aspect_ratio", "area_px", "area_mm2",
             "archetype_score", "bilateral_dice", "si_a", "lm3_gates_pass",
-            "n_lamina_components", "scale_source", "pixels_per_mm", "is_calibrated_mm",
+            "n_lamina_components", "blade_cie_l_norm", "blade_cie_l_sd",
+            "scale_source", "pixels_per_mm", "is_calibrated_mm",
             "mask_path", "mask_is_upright", "contour_path", "ect_path", "leaf_zone",
         ]
         extracted_df = pd.DataFrame(all_extracted_records)

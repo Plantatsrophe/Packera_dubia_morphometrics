@@ -148,7 +148,7 @@ fit_gmm_em_pure <- function(X, max_k = 8, tol = 1e-5, max_iter = 150, X_eval = N
 
 merge_manifest_petiole_traits_by_individual <- function(agg_df, man_cand) {
   if (is.null(agg_df) || nrow(agg_df) == 0L || is.null(man_cand) || !nzchar(man_cand) || !file.exists(man_cand)) return(agg_df)
-  target_pcols <- c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio")
+  target_pcols <- c("petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio", "blade_cie_l_norm", "blade_cie_l_sd")
   need_cols <- target_pcols[vapply(target_pcols, function(cl) !(cl %in% names(agg_df)) || any(is.na(agg_df[[cl]])), logical(1))]
   if (length(need_cols) == 0L) return(agg_df)
   man_df <- tryCatch(utils::read.csv(man_cand, stringsAsFactors = FALSE), error = function(e) NULL)
@@ -160,6 +160,10 @@ merge_manifest_petiole_traits_by_individual <- function(agg_df, man_cand) {
   q75_fn <- function(x) {
     v <- suppressWarnings(as.numeric(x)); v <- v[is.finite(v)]
     if (length(v) > 0L) round(stats::quantile(v, probs = 0.75, na.rm = TRUE, names = FALSE), 4) else NA_real_
+  }
+  med_fn <- function(x) {
+    v <- suppressWarnings(as.numeric(x)); v <- v[is.finite(v)]
+    if (length(v) > 0L) round(stats::median(v), 4) else NA_real_
   }
   if ("leaf_zone" %in% names(man_df)) {
     lz_low <- tolower(trimws(as.character(man_df$leaf_zone)))
@@ -176,11 +180,20 @@ merge_manifest_petiole_traits_by_individual <- function(agg_df, man_cand) {
     }
   }
   has_pid <- ("plant_individual_id" %in% names(man_df)) && ("plant_individual_id" %in% names(agg_df))
-  agg_cat <- stats::aggregate(man_df[, p_cols, drop = FALSE], by = list(catalogNumber = man_df$catalogNumber), FUN = q75_fn)
+  q75_cols <- setdiff(p_cols, c("blade_cie_l_norm", "blade_cie_l_sd"))
+  med_cols <- intersect(p_cols, c("blade_cie_l_norm", "blade_cie_l_sd"))
+  agg_by_fn <- function(by_list) {
+    parts <- list()
+    if (length(q75_cols) > 0L) parts[[length(parts) + 1L]] <- stats::aggregate(man_df[, q75_cols, drop = FALSE], by = by_list, FUN = q75_fn)
+    if (length(med_cols) > 0L) parts[[length(parts) + 1L]] <- stats::aggregate(man_df[, med_cols, drop = FALSE], by = by_list, FUN = med_fn)
+    if (length(parts) == 1L) return(parts[[1L]])
+    merge(parts[[1L]], parts[[2L]], by = names(by_list), all = TRUE, sort = FALSE)
+  }
+  agg_cat <- agg_by_fn(list(catalogNumber = man_df$catalogNumber))
   agg_pid <- if (has_pid) {
     mpid <- ifelse(is.na(man_df$plant_individual_id), 0L, suppressWarnings(as.integer(man_df$plant_individual_id)))
     mpid[is.na(mpid)] <- 0L
-    stats::aggregate(man_df[, p_cols, drop = FALSE], by = list(catalogNumber = man_df$catalogNumber, plant_individual_id = mpid), FUN = q75_fn)
+    agg_by_fn(list(catalogNumber = man_df$catalogNumber, plant_individual_id = mpid))
   } else NULL
   idx_pid <- if (has_pid && !is.null(agg_pid)) {
     apid <- ifelse(is.na(agg_df$plant_individual_id), 0L, suppressWarnings(as.integer(agg_df$plant_individual_id)))
@@ -214,7 +227,14 @@ merge_reproductive_traits_by_individual <- function(agg_df, repro_path) {
   if ("plant_height_mm" %in% names(repro_df) && !("plant_height_cm" %in% names(repro_df))) {
     repro_df$plant_height_cm <- round(suppressWarnings(as.numeric(repro_df$plant_height_mm)) / 10.0, 2)
   }
-  cand_r <- c("AR_inv", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm",
+  if (!("capitula_count" %in% names(repro_df)) && ("capitulum_count" %in% names(repro_df))) {
+    repro_df$capitula_count <- repro_df$capitulum_count
+  }
+  if ("capitula_count" %in% names(repro_df) && !("log1p_capitulum_count" %in% names(repro_df))) {
+    cc_num <- suppressWarnings(as.numeric(repro_df$capitula_count))
+    repro_df$log1p_capitulum_count <- ifelse(is.finite(cc_num) & cc_num >= 1, round(log1p(cc_num), 5), NA_real_)
+  }
+  cand_r <- c("AR_inv", "capitula_count", "log1p_capitulum_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm",
               "involucre_width_mm", "plant_height_mm", "plant_height_cm", "scape_to_basal_leaf_ratio", "is_bent_stem", "petiole_to_blade_ratio")
   r_val_cols <- intersect(names(repro_df), cand_r)
   r_val_cols <- r_val_cols[vapply(r_val_cols, function(cl) !(cl %in% names(agg_df)) || any(is.na(agg_df[[cl]])), logical(1))]

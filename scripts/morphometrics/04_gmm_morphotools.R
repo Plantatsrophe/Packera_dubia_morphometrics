@@ -435,7 +435,7 @@ audit_misidentifications <- function(df, cda_res, gmm_res = NULL, selected_featu
   }
   tc <- compute_type_specimen_morph_control(df, cda_res$X_proj, cda_res$S_reg, cda_res, gmm_res, flags = flags, triage = triage, reasons = reasons)
   flags <- tc$flags; triage <- tc$triage; reasons <- tc$reasons
-  for (cn in c("type_status", "is_type_specimen", "has_empirical_type_anchor", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p")) df[[cn]] <- tc[[cn]]
+  for (cn in c("type_status", "is_type_specimen", "has_empirical_type_anchor", "type_morph_mahal_d2", "nearest_type_morph_taxon", "nearest_type_basionym", "nearest_type_basionym_d2", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p")) df[[cn]] <- tc[[cn]]
   p_audit <- max(2L, if (!is.null(cda_res$X_proj)) ncol(cda_res$X_proj) else length(pc_c))
   is_type_audit <- as.logical(df$is_type_specimen); is_type_audit[is.na(is_type_audit)] <- FALSE
   is_osr_novel <- !is.na(df$open_set_novelty_p) & (df$open_set_novelty_p < 0.01)
@@ -537,7 +537,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   if (any(duplicated(spec_keys))) {
     disagg_leaf_df <- closed_df; pc_sym_cols <- unique(c(pc_cols, ect_pc_cols)); pet_cols <- intersect(c("petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio"), names(closed_df))
     lin_med_cols <- intersect(c("median_area_mm2", "median_perimeter_mm", "median_length_mm", "median_width_mm", "median_circularity", "median_aspect_ratio", "median_solidity", "median_dissection_index", "area_mm2", "perimeter_mm", "length_mm", "width_mm", "circularity"), names(closed_df))
-    num_cols <- intersect(c(pc_sym_cols, pet_cols, lin_med_cols, "plant_height_cm", "scape_to_basal_leaf_ratio", "foliar_variance", "leaf_count", "aspect_ratio", "solidity", "dissection_index", "ect_lobe_complexity", "area_px", "centroid_size", "log_centsize", "harmonic_roughness", "leaf_quality_weight"), names(closed_df))
+    num_cols <- intersect(c(pc_sym_cols, pet_cols, lin_med_cols, "plant_height_cm", "scape_to_basal_leaf_ratio", "foliar_variance", "leaf_count", "aspect_ratio", "solidity", "dissection_index", "ect_lobe_complexity", "blade_cie_l_norm", "blade_cie_l_sd", "area_px", "centroid_size", "log_centsize", "harmonic_roughness", "leaf_quality_weight"), names(closed_df))
     other_num <- setdiff(num_cols, c(pc_sym_cols, pet_cols)); has_w <- "leaf_quality_weight" %in% names(closed_df); has_lz <- "leaf_zone" %in% names(closed_df)
     meta_cols <- setdiff(names(closed_df), c(num_cols, "catalogNumber", "plant_individual_id", "shape_id", "leaf_id", "mask_source", "morph_tier_source"))
     grp_list <- split(closed_df, list(closed_df$catalogNumber, closed_df$plant_individual_id), drop = TRUE)
@@ -581,6 +581,13 @@ run_gmm_morphotools_pipeline <- function(opts) {
     if ("AR_inv" %in% names(closed_df)) closed_df$AR_inv <- suppressWarnings(as.numeric(closed_df$AR_inv))
     closed_df <- merge_reproductive_traits_by_individual(closed_df, opts$reproductive)
     closed_df <- merge_manifest_petiole_traits_by_individual(closed_df, file.path(dirname(opts$harmonics), "extracted_leaf_manifest.csv"))
+    if (!("capitula_count" %in% names(closed_df)) && ("capitulum_count" %in% names(closed_df))) closed_df$capitula_count <- closed_df$capitulum_count
+    if ("capitula_count" %in% names(closed_df)) {
+      cc_s04 <- suppressWarnings(as.numeric(closed_df$capitula_count))
+      closed_df$log1p_capitulum_count <- ifelse(is.finite(cc_s04) & cc_s04 >= 1, round(log1p(cc_s04), 5), NA_real_)
+    } else if ("log1p_capitulum_count" %in% names(closed_df)) {
+      closed_df$log1p_capitulum_count <- suppressWarnings(as.numeric(closed_df$log1p_capitulum_count))
+    }
   }
   allom_res <- test_and_correct_allometry(closed_df, correct_mode = opts$correct_allometry, permutations = opts$permutations, seed = opts$seed, output_report = opts$allometry_report, output_plot = opts$allometry_plot, output_pairwise = opts$allometry_pairwise)
   if (!is.null(allom_res$df)) closed_df <- allom_res$df
@@ -588,22 +595,29 @@ run_gmm_morphotools_pipeline <- function(opts) {
   if (exists("assign_spatial_gathering_demes", mode = "function")) closed_df <- assign_spatial_gathering_demes(closed_df, deme_radius_km = 10.0)
   feature_cols <- pca_cols
   if (!isTRUE(opts$outline_only)) {
-    for (tr_col in c("AR_inv", "petiole_to_blade_ratio", "scape_to_basal_leaf_ratio", "petiole_length_mm", "plant_height_cm")) if (tr_col %in% names(closed_df)) {
+    for (tr_col in c("AR_inv", "log1p_capitulum_count", "petiole_to_blade_ratio", "scape_to_basal_leaf_ratio", "petiole_length_mm", "plant_height_cm")) if (tr_col %in% names(closed_df)) {
       closed_df[[tr_col]] <- suppressWarnings(as.numeric(closed_df[[tr_col]])); valid_tr <- which(!is.na(closed_df[[tr_col]]) & is.finite(closed_df[[tr_col]]))
       ref_tr <- intersect(valid_tr, which(closed_df$authority_weight > 0)); if (length(ref_tr) < 3L) ref_tr <- valid_tr
       if (length(valid_tr) >= 5) {
         std_col <- paste0(tr_col, "_std"); closed_df[[std_col]] <- NA_real_; m_tr <- mean(closed_df[[tr_col]][ref_tr]); s_tr <- stats::sd(closed_df[[tr_col]][ref_tr])
         closed_df[[std_col]][valid_tr] <- if (is.finite(s_tr) && s_tr > 1e-6) round((closed_df[[tr_col]][valid_tr] - m_tr) / s_tr, 5) else 0.0
-        # Restrict core multivariate feature matrices strictly to scale-invariant ratios (excluding ruler-calibrated mm/cm traits that spike on uncalibrated sheets)
-        if (tr_col %in% c("AR_inv", "petiole_to_blade_ratio", "scape_to_basal_leaf_ratio")) {
+        # Restrict core multivariate feature matrices strictly to scale-free dimensionless traits & counts (with positive anchor variance)
+        if (tr_col %in% c("AR_inv", "log1p_capitulum_count", "petiole_to_blade_ratio", "scape_to_basal_leaf_ratio") && is.finite(s_tr) && s_tr > 1e-6) {
           act_all <- which(closed_df$authority_weight > 0); if (length(act_all) < 3L) act_all <- seq_len(nrow(closed_df))
-          if ((length(intersect(valid_tr, act_all)) / max(1L, length(act_all))) >= 0.70) feature_cols <- unique(c(feature_cols, std_col))
+          if ((length(intersect(valid_tr, act_all)) / max(1L, length(act_all))) >= 0.70) {
+            if (tr_col == "log1p_capitulum_count") {
+              kept_cc <- prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = std_col, active_mask = (closed_df$authority_weight > 0), group_vec = NULL, max_r = 0.75)
+              if (length(kept_cc) > 0L) feature_cols <- unique(c(feature_cols, kept_cc))
+            } else {
+              feature_cols <- unique(c(feature_cols, std_col))
+            }
+          }
         }
       }
     }
   }
   caul_het_raw <- c("basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "heteroblasty_efa_distance", "heteroblasty_ect_distance", "cauline_dissection_index_med", "cauline_solidity_med", "cauline_ect_lobe_complexity", "Cauline_PC1", "Cauline_ECT_PC1")
-  veg_all <- intersect(c("log_centsize", "aspect_ratio", "solidity", "q25_solidity", "dissection_index", "within_rosette_efa_dispersion", "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", caul_het_raw), names(closed_df))
+  veg_all <- intersect(c("log_centsize", "aspect_ratio", "solidity", "q25_solidity", "dissection_index", "within_rosette_efa_dispersion", "blade_cie_l_norm", "blade_cie_l_sd", "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity", caul_het_raw), names(closed_df))
   ref_std_idx <- which(closed_df$authority_weight > 0); if (length(ref_std_idx) < 3L) ref_std_idx <- seq_len(nrow(closed_df))
   cal_ok_s04 <- if ("is_calibrated_mm" %in% names(closed_df)) (!is.na(closed_df$is_calibrated_mm) & as.logical(closed_df$is_calibrated_mm)) else rep(TRUE, nrow(closed_df))
   if ("scale_source" %in% names(closed_df)) cal_ok_s04 <- cal_ok_s04 & !(tolower(trimws(as.character(closed_df$scale_source))) %in% c("mp_estimated", "predicted_from_megapixels", "uncalibrated"))
@@ -616,7 +630,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
     }
   }
   if (!isTRUE(opts$outline_only)) {
-    dis_cands <- filter_biologically_variable_dissection_scalars(closed_df, intersect(c("solidity_std", "q25_solidity_std", "dissection_index_std", "within_rosette_efa_dispersion_std", "ECT_PC1_std", "ECT_PC2_std", "ECT_PC3_std", "ect_lobe_complexity_std", paste0(caul_het_raw, "_std")), names(closed_df)), active_mask = (closed_df$authority_weight > 0))
+    dis_cands <- filter_biologically_variable_dissection_scalars(closed_df, intersect(c("solidity_std", "q25_solidity_std", "dissection_index_std", "within_rosette_efa_dispersion_std", "blade_cie_l_norm_std", "blade_cie_l_sd_std", "ECT_PC1_std", "ECT_PC2_std", "ECT_PC3_std", "ect_lobe_complexity_std", paste0(caul_het_raw, "_std")), names(closed_df)), active_mask = (closed_df$authority_weight > 0))
     kept_dis <- prune_collinear_dissection_scalars(closed_df, base_cols = feature_cols, cand_scalars = dis_cands, active_mask = (closed_df$authority_weight > 0), group_vec = NULL, max_r = 0.75)
     if (length(kept_dis) > 0L) feature_cols <- unique(c(feature_cols, kept_dis))
   }
@@ -638,8 +652,8 @@ run_gmm_morphotools_pipeline <- function(opts) {
   rep_dir <- dirname(opts$output_report); eco_sum_csv <- file.path(rep_dir, "ecoregion_supervised_cda_summary.csv")
   eco_cda_res <- if (exists("run_supervised_ecoregion_cda", mode = "function")) run_supervised_ecoregion_cda(audited_df, cda_cols, gmm_res = gmm_res, output_summary_csv = eco_sum_csv, permutations = opts$permutations, seed = opts$seed) else NULL
   if (!is.null(eco_cda_res)) { audited_df$regional_group <- eco_cda_res$ecoregion_vec; audited_df$ecoregion_cda_predicted <- eco_cda_res$ecoregion_cda_predicted; audited_df$ecoregion_cda_posterior_prob <- eco_cda_res$ecoregion_cda_posterior_prob; audited_df$ecoregion_can1 <- eco_cda_res$ecoregion_can1; audited_df$ecoregion_can2 <- eco_cda_res$ecoregion_can2; if (is_intra_mode && all(is.na(audited_df$loocv_accuracy)) && !is.null(eco_cda_res$loocv_accuracy)) audited_df$loocv_accuracy <- eco_cda_res$loocv_accuracy }
-  manova_res <- if (exists("run_multivariate_manova_audit", mode = "function")) run_multivariate_manova_audit(audited_df, cda_cols, gmm_res, output_group_csv = file.path(rep_dir, "manova_group_significance.csv"), output_pairwise_csv = file.path(rep_dir, "manova_pairwise_posthoc.csv"), include_gmm_clusters = !is_intra_mode) else NULL
-  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "population_deme_id", "deme_n_specimens", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "is_confident_label_noise", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "heteroblasty_ect_distance", "PC1_raw_individual", "PC2_raw_individual", "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "within_rosette_efa_dispersion", "heteroblasty_efa_distance", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "petiole_length_mm", "petiole_length_mm_std", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std", "AR_inv", "AR_inv_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "scape_to_basal_leaf_ratio_std", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
+  manova_res <- if (exists("run_multivariate_manova_audit", mode = "function")) run_multivariate_manova_audit(audited_df, cda_cols, gmm_res, output_group_csv = file.path(rep_dir, "manova_group_significance.csv"), output_pairwise_csv = file.path(rep_dir, "manova_pairwise_posthoc.csv"), include_gmm_clusters = FALSE) else NULL
+  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "population_deme_id", "deme_n_specimens", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "nearest_type_basionym", "nearest_type_basionym_d2", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "is_confident_label_noise", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "heteroblasty_ect_distance", "PC1_raw_individual", "PC2_raw_individual", "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "within_rosette_efa_dispersion", "heteroblasty_efa_distance", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "petiole_length_mm", "petiole_length_mm_std", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std", "blade_cie_l_norm", "blade_cie_l_sd", "AR_inv", "AR_inv_std", "log1p_capitulum_count", "log1p_capitulum_count_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "scape_to_basal_leaf_ratio_std", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]; dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".", Sys.getpid(), ".tmp"); .write_csv_s04(out_df, tmp_flags, na = ""); file.rename(tmp_flags, opts$output_flags)
   if (exists("persist_step04_to_sqlite", mode = "function")) tryCatch(persist_step04_to_sqlite(out_df, opts$vouchers, focal_taxon = opts$focal_taxon, intraspecific_mode = is_intra_mode), error = function(e) warning("SQLite Step 04 persistence note: ", e$message))
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, selected_features, manova_res = manova_res)

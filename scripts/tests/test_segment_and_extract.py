@@ -2401,6 +2401,49 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             self.assertIn(png_name, combined_r_src)
         self.assertNotIn("grDevices::pdf(", combined_r_src)
 
+    def test_eroded_blade_cie_l_tomentum_and_paper_strap_masking(self) -> None:
+        """Verify compute_eroded_blade_cie_l_metrics separates floccose white tomentum from glabrous blades and masks white paper mounting straps, petioles, and holes."""
+        rng = np.random.default_rng(42)
+        sheet_bgr = np.full((240, 320, 3), (228, 236, 242), dtype=np.uint8)
+        mask = np.zeros((120, 120), dtype=np.uint8)
+        cv2.circle(mask, (60, 60), 46, 255, -1)
+
+        sheet_glab = sheet_bgr.copy()
+        sub_g = sheet_glab[60:180, 40:160].copy()
+        glab_tex = np.clip(68.0 + rng.normal(0.0, 2.0, size=(120, 120, 1)), 40, 95).astype(np.uint8)
+        leaf_glab_bgr = np.concatenate([glab_tex - 18, glab_tex + 8, glab_tex + 4], axis=2)
+        sub_g[mask > 0] = leaf_glab_bgr[mask > 0]
+        sheet_glab[60:180, 40:160] = sub_g
+
+        sheet_glab_strap = sheet_glab.copy()
+        sheet_glab_strap[114:124, 40:160] = (232, 238, 243)
+
+        sheet_tom = sheet_bgr.copy()
+        sub_t = sheet_tom[60:180, 40:160].copy()
+        wool_grid = rng.normal(0.0, 26.0, size=(30, 30)).astype(np.float32)
+        wool_up = cv2.resize(wool_grid, (120, 120), interpolation=cv2.INTER_CUBIC)
+        tom_lum = np.clip(168.0 + wool_up, 95.0, 222.0).astype(np.uint8)
+        leaf_tom_bgr = np.stack([tom_lum, tom_lum, tom_lum], axis=2)
+        sub_t[mask > 0] = leaf_tom_bgr[mask > 0]
+        sheet_tom[60:180, 40:160] = sub_t
+
+        paper_l = step02.estimate_sheet_paper_cie_l_ref(sheet_glab)
+        self.assertGreater(paper_l, 85.0)
+
+        m_glab = step02.compute_eroded_blade_cie_l_metrics(
+            sheet_glab, mask, mask_origin=(40, 60), paper_l_ref=paper_l
+        )
+        m_strap = step02.compute_eroded_blade_cie_l_metrics(
+            sheet_glab_strap, mask, mask_origin=(40, 60), paper_l_ref=paper_l
+        )
+        m_tom = step02.compute_eroded_blade_cie_l_metrics(
+            sheet_tom, mask, mask_origin=(40, 60), paper_l_ref=paper_l
+        )
+
+        self.assertGreater(m_tom["blade_cie_l_norm"], m_glab["blade_cie_l_norm"] + 0.25)
+        self.assertGreater(m_tom["blade_cie_l_sd"], m_glab["blade_cie_l_sd"] * 2.5)
+        self.assertAlmostEqual(m_glab["blade_cie_l_norm"], m_strap["blade_cie_l_norm"], delta=0.02)
+
 
 if __name__ == "__main__":
     unittest.main()

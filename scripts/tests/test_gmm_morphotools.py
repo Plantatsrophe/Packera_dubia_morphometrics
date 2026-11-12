@@ -94,15 +94,28 @@ class TestGMMAndMorphoTools(unittest.TestCase):
               df$PC3_collinear <- df$PC1 + df$PC2
               df$PC4_const <- 0.0
               gmm_res <- list(classification = c(rep(1L, 9), rep(2L, 9)))
-              res <- run_multivariate_manova_audit(
+              # Default include_gmm_clusters = FALSE omits post-selection gmm_cluster inference
+              res_def <- run_multivariate_manova_audit(
                 df,
                 c("PC1", "PC2", "PC3_collinear", "PC4_const"),
                 gmm_res,
                 output_group_csv = "{grp_out.as_posix()}",
                 output_pairwise_csv = "{pw_out.as_posix()}"
               )
+              stopifnot(nrow(res_def$group_table) == 0L)
+              # Even when descriptive gmm_cluster geometry is requested, p_value and q_value are suppressed (NA)
+              res <- run_multivariate_manova_audit(
+                df,
+                c("PC1", "PC2", "PC3_collinear", "PC4_const"),
+                gmm_res,
+                output_group_csv = "{grp_out.as_posix()}",
+                output_pairwise_csv = "{pw_out.as_posix()}",
+                include_gmm_clusters = TRUE
+              )
               stopifnot(nrow(res$group_table) == 1L)
               stopifnot(res$group_table$grouping_factor[1] == "gmm_cluster")
+              stopifnot(is.na(res$group_table$p_value[1]) && is.na(res$group_table$q_value[1]) && is.na(res$group_table$approx_F[1]))
+              stopifnot(all(is.na(res$pairwise_table$p_value)) && all(is.na(res$pairwise_table$q_value)))
               cat("MANOVA_DIRECT_OK\\n")
             }})
 
@@ -297,9 +310,11 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         p_df = pd.read_csv(pw_out)
         self.assertEqual(list(g_df["grouping_factor"]), ["gmm_cluster"])
         self.assertEqual(int(g_df["n_features"].iloc[0]), 2)
+        self.assertTrue(pd.isna(g_df["p_value"].iloc[0]) and pd.isna(g_df["q_value"].iloc[0]))
         self.assertEqual(len(p_df), 1)
         self.assertEqual(p_df["contrast"].iloc[0], "Morphotype_K1 vs Morphotype_K2")
         self.assertGreater(float(p_df["hotelling_t2"].iloc[0]), 20.0)
+        self.assertTrue(pd.isna(p_df["p_value"].iloc[0]) and pd.isna(p_df["q_value"].iloc[0]))
 
         # 3. Empirical Bayes & Dawid-Skene + K_full (>3 axes) CDA
         self.assertIn("EB_OK", out)
@@ -680,7 +695,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 "num_df", "den_df", "partial_eta2", "p_value", "q_value",
             }
             self.assertTrue(req_grp_cols.issubset(set(grp_df.columns)))
-            self.assertEqual(set(grp_df["grouping_factor"]), {"species_standardized", "gmm_cluster", "regional_group"})
+            self.assertEqual(set(grp_df["grouping_factor"]), {"species_standardized", "regional_group"})
             for _, r in grp_df.iterrows():
                 self.assertGreater(float(r["pillai_trace"]), 0.20)
                 self.assertGreater(float(r["wilks_lambda"]), 0.0)
@@ -698,9 +713,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             cl_pw = pw_df[pw_df["grouping_factor"] == "gmm_cluster"]
             self.assertEqual(len(sp_pw), 3)
             self.assertEqual(len(rg_pw), 3)
-            self.assertGreaterEqual(len(cl_pw), 1)
-            for m_lbl in set(cl_pw["group_1"]).union(set(cl_pw["group_2"])):
-                self.assertRegex(str(m_lbl), r"^Morphotype_K[0-9]+$")
+            self.assertEqual(len(cl_pw), 0, "Post-selection gmm_cluster p-values must be excluded from pipeline MANOVA")
             self.assertNotIn("Blue_Ridge", set(rg_pw["group_1"]).union(set(rg_pw["group_2"])))
 
             for _, pr in pw_df.iterrows():
@@ -1854,6 +1867,127 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertIn("STEP04_ZERO_TRUST_OK", proc.stdout)
             self.assertTrue((tmp_p / "intra_no_fake_loocv.png").exists())
             self.assertEqual(list(tmp_p.glob("*.pdf")), [])
+
+
+    def test_basionym_type_centroids_log1p_capitula_and_blade_cie_l_vestiture(self):
+        """Verify basionym-level type centroid preservation (Cineraria dubia vs Senecio alabamensis), sterile-safe log1p_capitulum_count, and eroded-blade CIE L* vestiture integration."""
+        if not rscript_available():
+            self.skipTest("Rscript not installed.")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_p = Path(tmpdir)
+            v_csv = tmp_p / "vouchers.csv"
+            h_csv = tmp_p / "harmonics.csv"
+            r_csv = tmp_p / "repro.csv"
+            f_csv = tmp_p / "flags.csv"
+            rep_csv = tmp_p / "bic.csv"
+            allom_csv = tmp_p / "allometry.csv"
+            batch_csv = tmp_p / "batch.csv"
+            plot_png = tmp_p / "plot.png"
+
+            rng = np.random.default_rng(20261112)
+            v_rows = []
+            h_rows = []
+            r_rows = []
+            for idx in range(24):
+                is_m2 = idx >= 12
+                cat = f"DUB_BAS_{idx:02d}"
+                if idx == 0:
+                    sp_raw = "Cineraria dubia Spreng."
+                    t_stat = "Holotype"
+                elif idx == 12:
+                    sp_raw = "Senecio alabamensis Britton"
+                    t_stat = "Holotype"
+                else:
+                    sp_raw = "Packera dubia"
+                    t_stat = ""
+                pc1 = float(rng.normal(3.2 if is_m2 else -3.2, 0.22))
+                pc2 = float(rng.normal(-1.2 if is_m2 else 1.2, 0.22))
+                cap_cnt = 0 if idx in (5, 17) else (int(rng.integers(24, 42)) if is_m2 else int(rng.integers(4, 9)))
+                l_norm = float(rng.normal(0.41 if is_m2 else 0.74, 0.025))
+                l_sd = float(rng.normal(1.05 if is_m2 else 3.85, 0.18))
+                v_rows.append({
+                    "catalogNumber": cat,
+                    "institutionCode": "NCU" if idx % 2 == 0 else "US",
+                    "scientificName": sp_raw,
+                    "species_raw": sp_raw,
+                    "species_standardized": "Packera dubia",
+                    "determiner_tier": "Tier_1_Gold",
+                    "type_status": t_stat,
+                    "decimalLatitude": 35.2 + 0.08 * idx,
+                    "decimalLongitude": -80.5 + 0.08 * idx,
+                    "stateProvince": "North Carolina",
+                    "regional_group": "Southeastern_Plains" if is_m2 else "Piedmont",
+                })
+                h_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "morph_tier_source": "Basal_Rosette",
+                    "basal_leaf_count": 3,
+                    "scale_source": "ruler_calibrated",
+                    "is_calibrated_mm": True,
+                    "pixels_per_mm": 23.6,
+                    "centroid_size": 45.0,
+                    "log_centsize": float(np.log10(45.0)),
+                    "A1": 1.0, "D1": 0.5, "A2": 0.1 * pc1, "D2": 0.1 * pc2,
+                    "A3": 0.02, "D3": 0.02, "A4": 0.01, "D4": 0.01,
+                    "PC1": pc1, "PC2": pc2, "PC3": float(rng.normal(0.0, 0.15)),
+                    "PC4": float(rng.normal(0.0, 0.12)), "PC5": float(rng.normal(0.0, 0.10)),
+                    "solidity": 0.86,
+                    "dissection_index": 1.22,
+                    "blade_cie_l_norm": round(l_norm, 4),
+                    "blade_cie_l_sd": round(l_sd, 4),
+                })
+                r_rows.append({
+                    "catalogNumber": cat,
+                    "plant_individual_id": 0,
+                    "capitula_count": cap_cnt,
+                    "AR_inv": np.nan if cap_cnt == 0 else 1.28,
+                })
+
+            pd.DataFrame(v_rows).to_csv(v_csv, index=False)
+            pd.DataFrame(h_rows).to_csv(h_csv, index=False)
+            pd.DataFrame(r_rows).to_csv(r_csv, index=False)
+
+            proc = run_warm_r_cmd(
+                [
+                    "Rscript", str(self.r_script_path),
+                    "--vouchers", str(v_csv),
+                    "--harmonics", str(h_csv),
+                    "--reproductive", str(r_csv),
+                    "--output-flags", str(f_csv),
+                    "--output-report", str(rep_csv),
+                    "--allometry-report", str(allom_csv),
+                    "--output-batch-audit", str(batch_csv),
+                    "--output-plot", str(plot_png),
+                    "--intraspecific-mode",
+                    "--focal-taxon", "Packera dubia",
+                    "--permutations", "19",
+                ],
+                stage_key="step04",
+                cwd=PROJECT_ROOT,
+                skip_figures=True,
+            )
+            self.assertEqual(proc.returncode, 0, f"Step 04 basionym/vestiture run failed:\n{proc.stderr}\n{proc.stdout}")
+            flags = pd.read_csv(f_csv)
+            self.assertIn("nearest_type_basionym", flags.columns)
+            self.assertIn("nearest_type_basionym_d2", flags.columns)
+            self.assertIn("log1p_capitulum_count", flags.columns)
+            self.assertIn("blade_cie_l_norm", flags.columns)
+            self.assertIn("blade_cie_l_sd", flags.columns)
+
+            sterile_rows = flags[flags["catalogNumber"].isin(["DUB_BAS_05", "DUB_BAS_17"])]
+            self.assertTrue(sterile_rows["log1p_capitulum_count"].isna().all())
+            fert_rows = flags[~flags["catalogNumber"].isin(["DUB_BAS_05", "DUB_BAS_17"])]
+            self.assertTrue(fert_rows["log1p_capitulum_count"].notna().all())
+
+            g1 = flags[flags["catalogNumber"].isin([f"DUB_BAS_{i:02d}" for i in range(12)])]
+            g2 = flags[flags["catalogNumber"].isin([f"DUB_BAS_{i:02d}" for i in range(12, 24)])]
+            self.assertTrue((g1["nearest_type_basionym"] == "Cineraria dubia").all())
+            self.assertTrue((g2["nearest_type_basionym"] == "Senecio alabamensis").all())
+            t_cin = flags.loc[flags["catalogNumber"] == "DUB_BAS_00", "nearest_type_basionym_d2"].iloc[0]
+            t_ala = flags.loc[flags["catalogNumber"] == "DUB_BAS_12", "nearest_type_basionym_d2"].iloc[0]
+            self.assertAlmostEqual(float(t_cin), 0.0, places=4)
+            self.assertAlmostEqual(float(t_ala), 0.0, places=4)
 
 
 if __name__ == "__main__":

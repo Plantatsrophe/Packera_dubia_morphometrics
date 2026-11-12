@@ -323,7 +323,7 @@ compute_morphometric_affinity <- function(morph_df, anchor_df, taxa) {
     } else {
       all_rows <- which(morph_df$species_standardized == tx); sub_x <- X_all[all_rows, , drop = FALSE]; w_tx <- wt_all[all_rows]
     }
-    w_norm <- w_tx / max(sum(w_tx), 1e-12); mu_base <- as.numeric(colSums(sub_x * w_norm)); type_rows_tx <- tx_rows[anc_type[tx_rows]]
+    w_norm <- w_tx / max(sum(w_tx), 1e-12); mu_base <- as.numeric(colSums(sub_x * w_norm)); type_rows_tx <- if (exists(".filter_homotypic_type_rows", mode = "function")) .filter_homotypic_type_rows(anchor_df, tx_rows[anc_type[tx_rows]], tx) else tx_rows[anc_type[tx_rows]]
     if (length(type_rows_tx) >= 1L) {
       n_eff_t <- if (exists(".count_effective_type_gatherings", mode = "function")) .count_effective_type_gatherings(anchor_df, type_rows_tx) else length(type_rows_tx)
       gamma_k <- if (exists(".compute_type_shrinkage_gamma", mode = "function")) .compute_type_shrinkage_gamma(n_eff_t, nrow(sub_x)) else min(0.35, (2.5 * n_eff_t) / (max(1.0, nrow(sub_x)) + 2.5 * n_eff_t))

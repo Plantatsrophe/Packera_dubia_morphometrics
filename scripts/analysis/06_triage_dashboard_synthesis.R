@@ -982,6 +982,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   is_typ_morph_dv <- if ("is_typical_morphotype" %in% df_nms_d) as.logical(df$is_typical_morphotype) else rep(NA, n)
   tm_d2_dv <- if ("type_morph_mahal_d2" %in% df_nms_d) suppressWarnings(as.numeric(df$type_morph_mahal_d2)) else rep(NA_real_, n)
   nt_morph_dv <- if ("nearest_type_morph_taxon" %in% df_nms_d) as.character(df$nearest_type_morph_taxon) else rep(NA_character_, n)
+  nt_bas_dv <- if ("nearest_type_basionym" %in% df_nms_d) as.character(df$nearest_type_basionym) else rep(NA_character_, n)
   tm_conc_dv <- if ("type_morph_concordance" %in% df_nms_d) suppressWarnings(as.numeric(df$type_morph_concordance)) else rep(NA_real_, n)
   te_z_dv <- if ("type_edaphic_z_score" %in% df_nms_d) suppressWarnings(as.numeric(df$type_edaphic_z_score)) else rep(NA_real_, n)
   nt_niche_dv <- if ("nearest_type_niche_taxon" %in% df_nms_d) as.character(df$nearest_type_niche_taxon) else rep(NA_character_, n)
@@ -1151,8 +1152,11 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     nt_m_i <- if (is_valid_taxon_str(nt_morph_dv[i])) nt_morph_dv[i] else NA_character_
     nt_e_i <- if (is_valid_taxon_str(nt_niche_dv[i])) nt_niche_dv[i] else NA_character_
     in_type_edaphic_env_i <- if (is.finite(te_z_i)) (te_z_i <= 2.0) else (!is.finite(edaph_z_i) || edaph_z_i <= 2.0)
-    # Rule C: Stage 3 & Stage 4 Autonymic (sensu stricto) Locking
-    is_sensu_stricto_locked_i <- is_typical_morph_i && in_type_edaphic_env_i
+    # Rule C: Stage 3 & Stage 4 Autonymic (sensu stricto) Locking (restricted to homotypic basionyms when basionym tracking is present)
+    bas_i <- if (!is.na(nt_bas_dv[i]) && nzchar(trimws(nt_bas_dv[i]))) trimws(nt_bas_dv[i]) else NA_character_
+    is_heterotypic_bas_match_i <- !is.na(bas_i) && exists(".is_homotypic_sensu_stricto_basionym", mode = "function") &&
+                                  !isTRUE(.is_homotypic_sensu_stricto_basionym(bas_i, given_sp)[1L])
+    is_sensu_stricto_locked_i <- is_typical_morph_i && in_type_edaphic_env_i && !is_heterotypic_bas_match_i
 
     cl_key_i <- paste(given_sp, g_cl, sep = "||")
     cryptic_cluster_cohesion_pass[i] <- if (g_cl > 1L && (cl_key_i %in% names(cryptic_cluster_pass_map))) {
@@ -1377,9 +1381,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       has_edaph_pheno_div <- (is_anth && abs(ddoy) >= tau_ecotype_i) || (d_edaph < 0.45) ||
                              (is.finite(edaph_z) && edaph_z > 2.0)
       if (is_cryptic_intra) {
+        bas_note_k <- if (is_heterotypic_bas_match_i) sprintf(" [Available Heterotypic Basionym for Resurrection: %s]", bas_i) else ""
         status_calls[i] <- "Putative_Cryptic_Species"; rec_taxa[i] <- sprintf("%s (Putative Cryptic Lineage K%d)", given_sp, g_cl)
         triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"; triage_acts[i] <- "Flag_Putative_Cryptic_Species"
-        rationales[i] <- sprintf("Congruent Basal_Rosette morphometric outlier + evolutionary barrier (delta_DOY=%.1fd, tau=%.1fd, D_edaph=%.2f)", ddoy, tau_cryptic_i, d_edaph)
+        rationales[i] <- paste0(sprintf("Congruent Basal_Rosette morphometric outlier + evolutionary barrier (delta_DOY=%.1fd, tau=%.1fd, D_edaph=%.2f)", ddoy, tau_cryptic_i, d_edaph), bas_note_k)
         treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Putative_Cryptic_Species"; next
       } else if (!is_tier1_pure_morph && is_mo_flag && !morph_concordant_self && (d_edaph < 0.30 || (is.finite(edaph_z) && edaph_z > 2.5))) {
         status_calls[i] <- "Misidentification_Severe"; rec_taxa[i] <- if (!is.na(min_cong_tx_i) && min_cong_tx_i != given_sp) min_cong_tx_i else if (edaph_is_taxon && edaph_sp != given_sp) edaph_sp else given_sp
@@ -1388,9 +1393,10 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Misidentification_Reassign"; next
       } else if (!is_sensu_stricto_locked_i && (g_cl > 1L)) {
         if (has_edaph_pheno_div) {
+          bas_note_eco <- if (is_heterotypic_bas_match_i) sprintf(" [Available Heterotypic Basionym: %s]", bas_i) else ""
           status_calls[i] <- "Subspecies_Ecotype"; rec_taxa[i] <- sprintf("%s var. morphotype_K%d", given_sp, g_cl)
           triage_prios[i] <- "MEDIUM"; triage_acts[i] <- "Accept_Subspecific_Treatment"
-          rationales[i] <- sprintf("Secondary GMM morphotype (K%d) with cohesive edaphic/phenological divergence (delta_DOY=%.1fd, pH=%s, Sand=%s)", g_cl, ddoy, ph_str, sand_str)
+          rationales[i] <- paste0(sprintf("Secondary GMM morphotype (K%d) with cohesive edaphic/phenological divergence (delta_DOY=%.1fd, pH=%s, Sand=%s)", g_cl, ddoy, ph_str, sand_str), bas_note_eco)
           treat_broad[i] <- "Variety / Ecotype"; treat_sub[i] <- "Subspecies_Ecotype"; next
         } else if (!cryptic_cluster_cohesion_pass[i] && (!is.finite(edaph_z) || edaph_z <= 2.5) && (!is_anth || abs(ddoy) < tau_cryptic_i)) {
           if (is_taphonomic_plasticity || is_mo_flag) {
@@ -1831,7 +1837,7 @@ build_triage_queue <- function(opts) {
     "edaphic_z_score", "type_edaphic_z_score", "climatic_z_score", "spatial_block_cv_acc", "rf_predicted_prob",
     "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
     "plant_height_cm", "scape_to_basal_leaf_ratio",
-    "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv"
+    "capitula_count", "log1p_capitulum_count", "involucre_height_mm", "involucre_width_mm", "AR_inv", "blade_cie_l_norm", "blade_cie_l_sd"
   )
 
   def_dt_dir <- normalizePath(if (nzchar(Sys.getenv("PACKERA_RUN_DIR", unset = ""))) file.path(Sys.getenv("PACKERA_RUN_DIR"), "data/tables") else "data/tables", mustWork = FALSE)
@@ -1924,9 +1930,9 @@ build_triage_queue <- function(opts) {
       "can1", "can2", "gmm_uncertainty",
       "petiole_length_mm", "blade_length_mm", "petiole_to_blade_ratio",
       "plant_height_cm", "scape_to_basal_leaf_ratio",
-      "capitula_count", "involucre_height_mm", "involucre_width_mm", "AR_inv",
-      "ecoregion_cda_posterior_prob", "authority_weight",
-      "type_morph_mahal_d2", "type_morph_concordance"
+      "capitula_count", "log1p_capitulum_count", "involucre_height_mm", "involucre_width_mm", "AR_inv",
+      "blade_cie_l_norm", "blade_cie_l_sd", "ecoregion_cda_posterior_prob", "authority_weight",
+      "type_morph_mahal_d2", "nearest_type_basionym_d2", "type_morph_concordance"
     )) if (!(nc %in% names(mo_df))) mo_df[[nc]] <- NA_real_
     if (!("cda_predicted_taxon" %in% names(mo_df))) mo_df$cda_predicted_taxon <- NA_character_
     if (!("cda_second_taxon" %in% names(mo_df))) {
@@ -1934,6 +1940,8 @@ build_triage_queue <- function(opts) {
     }
     if (!("ecoregion_cda_predicted" %in% names(mo_df))) mo_df$ecoregion_cda_predicted <- NA_character_
     if (!("nearest_type_morph_taxon" %in% names(mo_df))) mo_df$nearest_type_morph_taxon <- NA_character_
+    if (!("nearest_type_basionym" %in% names(mo_df))) mo_df$nearest_type_basionym <- NA_character_
+    if (!("nearest_type_basionym_d2" %in% names(mo_df))) mo_df$nearest_type_basionym_d2 <- NA_real_
     if (!("is_bent_stem" %in% names(mo_df))) mo_df$is_bent_stem <- NA
     if (!("is_typical_morphotype" %in% names(mo_df))) mo_df$is_typical_morphotype <- NA
     if (!("has_empirical_type_anchor" %in% names(mo_df))) mo_df$has_empirical_type_anchor <- NA
@@ -1959,6 +1967,8 @@ build_triage_queue <- function(opts) {
       is_typical_morphotype = any_lgl_or_na(is_typical_morphotype),
       type_morph_mahal_d2 = med_or_na(type_morph_mahal_d2),
       nearest_type_morph_taxon = first_chr_or_na(nearest_type_morph_taxon),
+      nearest_type_basionym = first_chr_or_na(nearest_type_basionym),
+      nearest_type_basionym_d2 = med_or_na(nearest_type_basionym_d2),
       type_morph_concordance = med_or_na(type_morph_concordance),
       has_empirical_type_anchor = any_lgl_or_na(has_empirical_type_anchor),
       is_type_specimen = any_lgl_or_na(is_type_specimen),

@@ -209,6 +209,8 @@ class DetectedInstance:
     blade_length_px: Optional[float] = None
     blade_width_px: Optional[float] = None
     ect_path: Optional[str] = None
+    blade_cie_l_norm: float = np.nan
+    blade_cie_l_sd: float = np.nan
 
 
 @dataclass

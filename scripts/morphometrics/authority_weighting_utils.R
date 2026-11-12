@@ -2291,6 +2291,63 @@ fit_parallel_mclust_gmm <- function(X_core, G_vec, modelNames = NULL, max_hc_sub
   best_fit
 }
 
+
+.canonicalize_type_basionym_vec <- function(df, fallback_taxa = NULL) {
+  n <- if (is.null(df)) 0L else nrow(df)
+  if (n == 0L) return(character(0))
+  fb <- if (!is.null(fallback_taxa) && length(fallback_taxa) == n) {
+    as.character(fallback_taxa)
+  } else if ("species_standardized" %in% names(df)) {
+    as.character(df$species_standardized)
+  } else {
+    rep("Unknown", n)
+  }
+  raw_v <- rep(NA_character_, n)
+  for (sc in intersect(c("species_raw", "scientificName", "taxon", "species_standardized"), names(df))) {
+    cand <- trimws(as.character(df[[sc]]))
+    hit <- is.na(raw_v) & !is.na(cand) & nzchar(cand) & !(tolower(cand) %in% c("na", "nan", "null", "none", "unknown"))
+    raw_v[hit] <- cand[hit]
+  }
+  raw_v[is.na(raw_v) | !nzchar(raw_v)] <- fb[is.na(raw_v) | !nzchar(raw_v)]
+  parse_one <- function(s, fb_one) {
+    if (is.na(s) || !nzchar(s)) return(fb_one)
+    s_clean <- gsub("\\s+", " ", trimws(s))
+    m_infra <- regmatches(s_clean, regexpr("^[A-Z][a-z]+\\s+[a-z][a-z-]+\\s+(var\\.|subsp\\.|ssp\\.|f\\.)\\s+[a-z][a-z-]+", s_clean))
+    if (length(m_infra) > 0L && nzchar(m_infra[1L])) return(m_infra[1L])
+    m_hyb <- regmatches(s_clean, regexpr("^[A-Z][a-z]+\\s+[x×]\\s*[a-z][a-z-]+", s_clean))
+    if (length(m_hyb) > 0L && nzchar(m_hyb[1L])) return(gsub("\\s+", " ", m_hyb[1L]))
+    m_bin <- regmatches(s_clean, regexpr("^[A-Z][a-z]+\\s+[a-z][a-z-]+", s_clean))
+    if (length(m_bin) > 0L && nzchar(m_bin[1L])) return(m_bin[1L])
+    fb_one
+  }
+  vapply(seq_len(n), function(i) parse_one(raw_v[i], fb[i]), character(1))
+}
+
+.extract_terminal_epithet_stem <- function(taxon_vec) {
+  vapply(as.character(taxon_vec), function(s) {
+    if (is.na(s) || !nzchar(trimws(s))) return("")
+    toks <- strsplit(tolower(trimws(s)), "\\s+")[[1L]]
+    toks <- toks[!grepl("^(var\\.?|subsp\\.?|ssp\\.?|f\\.?|x|×)$", toks)]
+    if (length(toks) < 2L) return(toks[length(toks)])
+    ep <- gsub("[^a-z]", "", toks[length(toks)])
+    sub("(us|a|um|is|e)$", "", ep)
+  }, character(1), USE.NAMES = FALSE)
+}
+
+.is_homotypic_sensu_stricto_basionym <- function(basionym_vec, accepted_vec) {
+  b_stem <- .extract_terminal_epithet_stem(basionym_vec)
+  a_stem <- .extract_terminal_epithet_stem(accepted_vec)
+  nzchar(b_stem) & nzchar(a_stem) & (b_stem == a_stem)
+}
+
+.filter_homotypic_type_rows <- function(df, type_rows, accepted_taxon) {
+  if (length(type_rows) <= 1L || is.null(df) || nrow(df) == 0L) return(type_rows)
+  bas_sub <- .canonicalize_type_basionym_vec(df[type_rows, , drop = FALSE], rep(accepted_taxon, length(type_rows)))
+  if (length(unique(bas_sub)) <= 1L) return(type_rows)
+  is_homo <- .is_homotypic_sensu_stricto_basionym(bas_sub, rep(accepted_taxon, length(type_rows)))
+  if (any(is_homo)) type_rows[is_homo] else type_rows
+}
+
 compute_type_specimen_morph_control <- function(
   df,
   X_mat = NULL,
@@ -2311,12 +2368,15 @@ compute_type_specimen_morph_control <- function(
       has_empirical_type_anchor = logical(0),
       type_morph_mahal_d2 = numeric(0),
       nearest_type_morph_taxon = character(0),
+      nearest_type_basionym = character(0),
+      nearest_type_basionym_d2 = numeric(0),
       type_morph_concordance = numeric(0),
       is_typical_morphotype = logical(0),
       min_congener_mahal_d2 = numeric(0),
       min_congener_taxon = character(0),
       open_set_novelty_p = numeric(0),
       type_centroids = NULL,
+      basionym_type_centroids = NULL,
       flags = flags,
       triage = triage,
       reasons = reasons
@@ -2420,18 +2480,34 @@ compute_type_specimen_morph_control <- function(
     NULL
   }
 
+  basionym_vec_all <- .canonicalize_type_basionym_vec(df, taxa_vec)
   type_centroids <- matrix(0.0, nrow = G, ncol = p, dimnames = list(active_taxa, colnames(X_mat)))
   has_emp_map <- stats::setNames(rep(FALSE, G), active_taxa)
   typical_cl_map <- stats::setNames(rep(NA_integer_, G), active_taxa)
   typical_cl_list <- stats::setNames(vector("list", G), active_taxa)
   n_eff_type_vec <- stats::setNames(numeric(G), active_taxa)
   type_anchor_rows_list <- stats::setNames(vector("list", G), active_taxa)
+  basionym_entries <- list()
   is_noise_vec <- if (!is.null(df) && "is_confident_label_noise" %in% names(df)) {
     as.logical(df$is_confident_label_noise)
   } else {
     rep(FALSE, n)
   }
   is_noise_vec[is.na(is_noise_vec)] <- FALSE
+
+  compute_pool_centroid <- function(rows_sub) {
+    prim_s <- rows_sub[type_rank[rows_sub] == 2L]
+    pool_s <- if (length(rows_sub) >= 3L && length(prim_s) > 0L) prim_s else rows_sub
+    mu_s <- if (length(rows_sub) == 1L) {
+      as.numeric(X_mat[rows_sub, ])
+    } else if (length(rows_sub) == 2L) {
+      w_t <- ifelse(type_rank[rows_sub] == 2L, 2.0, 1.0)
+      as.numeric(colSums(X_mat[rows_sub, , drop = FALSE] * w_t) / sum(w_t))
+    } else {
+      .compute_robust_taxon_medoid(X_mat[pool_s, , drop = FALSE], S_inv = S_inv)
+    }
+    list(mu = mu_s, pool = pool_s, n_eff = .count_effective_type_gatherings(df, pool_s))
+  }
 
   for (k in seq_len(G)) {
     tx_k <- active_taxa[k]
@@ -2440,19 +2516,73 @@ compute_type_specimen_morph_control <- function(
     if (length(type_rows_k) == 0L) {
       type_rows_k <- tx_rows[is_type_specimen[tx_rows]]
     }
+    ss_type_rows_k <- type_rows_k
     if (length(type_rows_k) > 0L) {
       has_emp_map[tx_k] <- TRUE
-      prim_k <- type_rows_k[type_rank[type_rows_k] == 2L]
-      pool_k <- if (length(type_rows_k) >= 3L && length(prim_k) > 0L) prim_k else type_rows_k
-      type_anchor_rows_list[[tx_k]] <- pool_k
-      n_eff_type_vec[tx_k] <- .count_effective_type_gatherings(df, pool_k)
-      if (length(type_rows_k) == 1L) {
-        mu_k <- as.numeric(X_mat[type_rows_k, ])
-      } else if (length(type_rows_k) == 2L) {
-        w_t <- ifelse(type_rank[type_rows_k] == 2L, 2.0, 1.0)
-        mu_k <- as.numeric(colSums(X_mat[type_rows_k, , drop = FALSE] * w_t) / sum(w_t))
+      bas_k <- basionym_vec_all[type_rows_k]
+      u_bas_k <- unique(bas_k[!is.na(bas_k) & nzchar(bas_k)])
+      if (length(u_bas_k) == 0L) u_bas_k <- tx_k
+      bas_k_list <- lapply(u_bas_k, function(bn) {
+        b_rows <- type_rows_k[bas_k == bn]
+        if (length(b_rows) == 0L) b_rows <- type_rows_k
+        cp <- compute_pool_centroid(b_rows)
+        is_homo <- isTRUE(.is_homotypic_sensu_stricto_basionym(bn, tx_k)[1L])
+        list(
+          taxon = tx_k,
+          basionym = bn,
+          is_homotypic = is_homo,
+          rows = b_rows,
+          pool = cp$pool,
+          n_eff = cp$n_eff,
+          max_rank = max(type_rank[b_rows], na.rm = TRUE),
+          mu = cp$mu
+        )
+      })
+      for (be in bas_k_list) {
+        basionym_entries[[length(basionym_entries) + 1L]] <- be
+      }
+      if (length(bas_k_list) == 1L) {
+        mu_k <- bas_k_list[[1L]]$mu
+        type_anchor_rows_list[[tx_k]] <- bas_k_list[[1L]]$pool
+        n_eff_type_vec[tx_k] <- bas_k_list[[1L]]$n_eff
+        ss_type_rows_k <- bas_k_list[[1L]]$rows
       } else {
-        mu_k <- .compute_robust_taxon_medoid(X_mat[pool_k, , drop = FALSE], S_inv = S_inv)
+        homo_idx <- which(vapply(bas_k_list, function(x) isTRUE(x$is_homotypic), logical(1L)))
+        if (length(homo_idx) >= 1L) {
+          ss_rows <- unlist(lapply(bas_k_list[homo_idx], `[[`, "rows"), use.names = FALSE)
+          cp_ss <- compute_pool_centroid(ss_rows)
+          mu_k <- cp_ss$mu
+          type_anchor_rows_list[[tx_k]] <- cp_ss$pool
+          n_eff_type_vec[tx_k] <- cp_ss$n_eff
+          ss_type_rows_k <- ss_rows
+        } else {
+          mu_mat_b <- do.call(rbind, lapply(bas_k_list, `[[`, "mu"))
+          max_pair_d2 <- 0.0
+          for (bi in seq_len(nrow(mu_mat_b) - 1L)) {
+            for (bj in (bi + 1L):nrow(mu_mat_b)) {
+              dv_b <- mu_mat_b[bi, ] - mu_mat_b[bj, ]
+              max_pair_d2 <- max(max_pair_d2, as.numeric(t(dv_b) %*% S_inv %*% dv_b))
+            }
+          }
+          if (max_pair_d2 > stats::qchisq(0.95, df = max(1L, p))) {
+            ord_b <- order(
+              vapply(bas_k_list, `[[`, integer(1L), "max_rank"),
+              vapply(bas_k_list, `[[`, numeric(1L), "n_eff"),
+              decreasing = TRUE
+            )
+            best_be <- bas_k_list[[ord_b[1L]]]
+            mu_k <- best_be$mu
+            type_anchor_rows_list[[tx_k]] <- best_be$pool
+            n_eff_type_vec[tx_k] <- best_be$n_eff
+            ss_type_rows_k <- best_be$rows
+          } else {
+            cp_all <- compute_pool_centroid(type_rows_k)
+            mu_k <- cp_all$mu
+            type_anchor_rows_list[[tx_k]] <- cp_all$pool
+            n_eff_type_vec[tx_k] <- cp_all$n_eff
+            ss_type_rows_k <- type_rows_k
+          }
+        }
       }
     } else {
       has_emp_map[tx_k] <- FALSE
@@ -2470,6 +2600,16 @@ compute_type_specimen_morph_control <- function(
         n_eff_type_vec[tx_k] <- as.numeric(max(1L, length(tx_rows)))
         mu_k <- .compute_robust_taxon_medoid(X_mat[tx_rows, , drop = FALSE], S_inv = S_inv)
       }
+      basionym_entries[[length(basionym_entries) + 1L]] <- list(
+        taxon = tx_k,
+        basionym = tx_k,
+        is_homotypic = TRUE,
+        rows = integer(0),
+        pool = integer(0),
+        n_eff = n_eff_type_vec[tx_k],
+        max_rank = 0L,
+        mu = mu_k
+      )
     }
     type_centroids[k, ] <- mu_k
 
@@ -2508,9 +2648,13 @@ compute_type_specimen_morph_control <- function(
           typ_k <- unique(c(modal_cl, sec_cls))
         }
       }
-      type_cl_vals <- as.integer(stats::na.omit(gmm_cl[type_rows_k]))
+      type_cl_vals <- as.integer(stats::na.omit(gmm_cl[ss_type_rows_k]))
       if (length(type_cl_vals) > 0L) {
-        typ_k <- unique(c(type_cl_vals, typ_k))
+        if (length(ss_type_rows_k) < length(type_rows_k)) {
+          typ_k <- unique(type_cl_vals)
+        } else {
+          typ_k <- unique(c(type_cl_vals, typ_k))
+        }
       }
       if (length(typ_k) == 0L) {
         tx_cls <- sort(unique(stats::na.omit(gmm_cl[tx_rows])))
@@ -2524,6 +2668,70 @@ compute_type_specimen_morph_control <- function(
       typical_cl_map[tx_k] <- typ_k[1L]
       typical_cl_list[[tx_k]] <- typ_k
     }
+  }
+
+  n_bas <- length(basionym_entries)
+  bas_keys <- if (n_bas > 0L) {
+    raw_bk <- vapply(basionym_entries, `[[`, character(1L), "basionym")
+    make.unique(raw_bk, sep = "__")
+  } else {
+    character(0)
+  }
+  basionym_type_centroids <- if (n_bas > 0L) {
+    b_mat <- do.call(rbind, lapply(basionym_entries, `[[`, "mu"))
+    rownames(b_mat) <- bas_keys
+    colnames(b_mat) <- colnames(X_mat)
+    attr(b_mat, "accepted_taxon") <- vapply(basionym_entries, `[[`, character(1L), "taxon")
+    attr(b_mat, "basionym_name") <- vapply(basionym_entries, `[[`, character(1L), "basionym")
+    attr(b_mat, "is_homotypic") <- vapply(basionym_entries, `[[`, logical(1L), "is_homotypic")
+    b_mat
+  } else {
+    type_centroids
+  }
+
+  d2_bas_mat <- if (n_bas > 0L) matrix(NA_real_, nrow = n, ncol = n_bas, dimnames = list(NULL, bas_keys)) else NULL
+  if (n_bas > 0L) {
+    for (b_idx in seq_len(n_bas)) {
+      be <- basionym_entries[[b_idx]]
+      diff_b <- sweep(X_mat, 2L, be$mu, "-")
+      raw_b <- rowSums((diff_b %*% S_inv) * diff_b)
+      raw_b[!is.finite(raw_b) | raw_b < 0.0] <- 0.0
+      scale_b <- 1.0 + (1.0 / max(1.0, be$n_eff))
+      sc_b <- raw_b / scale_b
+      if (length(be$pool) > 0L) sc_b[be$pool] <- raw_b[be$pool]
+      d2_bas_mat[, b_idx] <- sc_b
+    }
+  }
+
+  emp_type_all <- which(is_type_specimen)
+  if (any(grepl("^Morphotype_K", active_taxa)) && length(emp_type_all) > 0L) {
+    u_emp_bas <- unique(basionym_vec_all[emp_type_all])
+    emp_bas_d2 <- matrix(NA_real_, nrow = n, ncol = length(u_emp_bas), dimnames = list(NULL, u_emp_bas))
+    emp_bas_mu <- matrix(0.0, nrow = length(u_emp_bas), ncol = p, dimnames = list(u_emp_bas, colnames(X_mat)))
+    for (ebi in seq_along(u_emp_bas)) {
+      eb_nm <- u_emp_bas[ebi]
+      eb_rows <- emp_type_all[basionym_vec_all[emp_type_all] == eb_nm]
+      cp_eb <- compute_pool_centroid(eb_rows)
+      emp_bas_mu[ebi, ] <- cp_eb$mu
+      diff_eb <- sweep(X_mat, 2L, cp_eb$mu, "-")
+      raw_eb <- rowSums((diff_eb %*% S_inv) * diff_eb)
+      raw_eb[!is.finite(raw_eb) | raw_eb < 0.0] <- 0.0
+      sc_eb <- raw_eb / (1.0 + (1.0 / max(1.0, cp_eb$n_eff)))
+      if (length(cp_eb$pool) > 0L) sc_eb[cp_eb$pool] <- raw_eb[cp_eb$pool]
+      emp_bas_d2[, ebi] <- sc_eb
+    }
+    basionym_type_centroids <- emp_bas_mu
+    eb_near_idx <- max.col(-emp_bas_d2, ties.method = "first")
+    nearest_type_basionym <- u_emp_bas[eb_near_idx]
+    nearest_type_basionym_d2 <- round(emp_bas_d2[cbind(seq_len(n), eb_near_idx)], 4)
+  } else if (!is.null(d2_bas_mat) && ncol(d2_bas_mat) >= 1L) {
+    b_near_idx <- max.col(-d2_bas_mat, ties.method = "first")
+    bas_names_clean <- vapply(basionym_entries, `[[`, character(1L), "basionym")
+    nearest_type_basionym <- bas_names_clean[b_near_idx]
+    nearest_type_basionym_d2 <- round(d2_bas_mat[cbind(seq_len(n), b_near_idx)], 4)
+  } else {
+    nearest_type_basionym <- rep(NA_character_, n)
+    nearest_type_basionym_d2 <- rep(NA_real_, n)
   }
 
   d2_mat <- matrix(NA_real_, nrow = n, ncol = G, dimnames = list(NULL, active_taxa))
@@ -2609,12 +2817,15 @@ compute_type_specimen_morph_control <- function(
     has_empirical_type_anchor = as.logical(has_empirical_type_anchor),
     type_morph_mahal_d2 = as.numeric(type_morph_mahal_d2),
     nearest_type_morph_taxon = as.character(nearest_type_morph_taxon),
+    nearest_type_basionym = as.character(nearest_type_basionym),
+    nearest_type_basionym_d2 = as.numeric(nearest_type_basionym_d2),
     type_morph_concordance = as.numeric(type_morph_concordance),
     is_typical_morphotype = as.logical(is_typical_morphotype),
     min_congener_mahal_d2 = as.numeric(osr_res$min_congener_mahal_d2),
     min_congener_taxon = as.character(osr_res$min_congener_taxon),
     open_set_novelty_p = as.numeric(osr_res$open_set_novelty_p),
     type_centroids = type_centroids,
+    basionym_type_centroids = basionym_type_centroids,
     flags = flags,
     triage = triage,
     reasons = reasons
@@ -2851,7 +3062,7 @@ reconcile_step03_basal_otu_medians <- function(specimen_df, closed_leaf_df, all_
   if (is.null(specimen_df) || is.null(closed_leaf_df) || nrow(specimen_df) == 0L || nrow(closed_leaf_df) == 0L) {
     return(specimen_df)
   }
-  expected_fast_cols <- intersect(c("area_mm2", "petiole_width_mm", "blade_width_mm", "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity"), names(closed_leaf_df))
+  expected_fast_cols <- intersect(c("area_mm2", "petiole_width_mm", "blade_width_mm", "blade_cie_l_norm", "blade_cie_l_sd", "ECT_PC1", "ECT_PC2", "ECT_PC3", "ect_lobe_complexity"), names(closed_leaf_df))
   if (isTRUE(attr(specimen_df, "step03_fast_aggregated")) && all(expected_fast_cols %in% names(specimen_df))) {
     return(specimen_df)
   }
@@ -2866,7 +3077,9 @@ reconcile_step03_basal_otu_medians <- function(specimen_df, closed_leaf_df, all_
     area_px = 1L, area_mm2 = 2L, centroid_size = 4L,
     log_centsize = 6L, harmonic_roughness = 6L, leaf_quality_weight = 6L,
     pct_asymmetry = 6L, ECT_PC1 = 6L, ECT_PC2 = 6L, ECT_PC3 = 6L,
-    ect_lobe_complexity = 4L
+    ect_lobe_complexity = 4L,
+    blade_cie_l_norm = 4L,
+    blade_cie_l_sd = 4L
   )
   pet_cols <- intersect(c("petiole_length_mm", "petiole_width_mm", "blade_length_mm", "blade_width_mm", "petiole_to_blade_ratio"), names(specimen_df))
   for (i in seq_len(nrow(specimen_df))) {

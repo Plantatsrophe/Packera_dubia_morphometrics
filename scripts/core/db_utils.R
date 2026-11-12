@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20261116L
+PACKERA_SCHEMA_USER_VERSION <- 20261117L
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -178,7 +178,9 @@ PACKERA_DB_WC_BIO_COLS <- c(
       blade_width_px = "REAL",
       blade_width_mm = "REAL",
       mask_is_upright = "INTEGER DEFAULT 1",
-      area_mm2 = "REAL"
+      area_mm2 = "REAL",
+      blade_cie_l_norm = "REAL",
+      blade_cie_l_sd = "REAL"
     ))
   }
   if (identical(table_name, "run_active_cohort")) {
@@ -214,7 +216,9 @@ PACKERA_DB_WC_BIO_COLS <- c(
         anchor_tier_source = "TEXT",
         authority_weight = "REAL",
         is_passive = "INTEGER DEFAULT 0",
-        spatial_balance_weight = "REAL"
+        spatial_balance_weight = "REAL",
+        blade_cie_l_norm = "REAL",
+        blade_cie_l_sd = "REAL"
       )
     ))
   }
@@ -267,7 +271,13 @@ PACKERA_DB_WC_BIO_COLS <- c(
         petiole_width_mm = "REAL",
         blade_width_mm = "REAL",
         scale_source = "TEXT",
-        within_rosette_efa_dispersion = "REAL"
+        within_rosette_efa_dispersion = "REAL",
+        blade_cie_l_norm = "REAL",
+        blade_cie_l_sd = "REAL",
+        log1p_capitulum_count = "REAL",
+        log1p_capitulum_count_std = "REAL",
+        nearest_type_basionym = "TEXT",
+        nearest_type_basionym_d2 = "REAL"
       )
     ))
   }
@@ -779,6 +789,8 @@ fetch_step03_contours_from_db <- function(
   sel_scale_src <- if ("scale_source" %in% el_fields) "el.scale_source" else "NULL AS scale_source"
   sel_upright <- if ("mask_is_upright" %in% el_fields) "el.mask_is_upright" else "NULL AS mask_is_upright"
   sel_amm2 <- if ("area_mm2" %in% el_fields) "el.area_mm2" else "NULL AS area_mm2"
+  sel_bl_lnorm <- if ("blade_cie_l_norm" %in% el_fields) "el.blade_cie_l_norm" else "NULL AS blade_cie_l_norm"
+  sel_bl_lsd <- if ("blade_cie_l_sd" %in% el_fields) "el.blade_cie_l_sd" else "NULL AS blade_cie_l_sd"
   sel_bw_mm <- if ("blade_width_mm" %in% el_fields) "el.blade_width_mm" else "NULL AS blade_width_mm"
   sel_pw_mm <- if ("petiole_width_mm" %in% el_fields && "petiole_width_mm" %in% pi_fields) {
     "COALESCE(el.petiole_width_mm, pi.petiole_width_mm) AS petiole_width_mm"
@@ -798,7 +810,7 @@ fetch_step03_contours_from_db <- function(
     "  el.solidity, el.aspect_ratio, el.area_px, ",
     "  ", sel_ect, ", ", sel_zone, ", ", sel_zone_conf, ", ", sel_dist_cr, ", ", sel_cy_rel, ", ",
     "  ", sel_arch, ", ", sel_bdice, ", ", sel_sia, ", ", sel_lgates, ", ", sel_ncc, ", ", sel_scale_src, ", ",
-    "  ", sel_upright, ", ", sel_amm2, ", ", sel_bw_mm, ", ", sel_pw_mm, ", ", sel_eqc, ", ", sel_qfr, ", ",
+    "  ", sel_upright, ", ", sel_amm2, ", ", sel_bl_lnorm, ", ", sel_bl_lsd, ", ", sel_bw_mm, ", ", sel_pw_mm, ", ", sel_eqc, ", ", sel_qfr, ", ",
     "  COALESCE(el.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm, ",
     "  COALESCE(el.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm, ",
     "  COALESCE(el.petiole_length_mm, pi.petiole_length_mm) AS petiole_length_mm, ",
@@ -1157,6 +1169,8 @@ fetch_step03_contours_from_db <- function(
     petiole_width_mm = pull_manifest_num("petiole_width_mm", if ("petiole_width_mm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$petiole_width_mm)) else rep(NA_real_, n_kept)),
     blade_length_mm = suppressWarnings(as.numeric(sub_rows$blade_length_mm)),
     blade_width_mm = pull_manifest_num("blade_width_mm", if ("blade_width_mm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_width_mm)) else rep(NA_real_, n_kept)),
+    blade_cie_l_norm = pull_manifest_num("blade_cie_l_norm", if ("blade_cie_l_norm" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_cie_l_norm)) else rep(NA_real_, n_kept)),
+    blade_cie_l_sd = pull_manifest_num("blade_cie_l_sd", if ("blade_cie_l_sd" %in% names(sub_rows)) suppressWarnings(as.numeric(sub_rows$blade_cie_l_sd)) else rep(NA_real_, n_kept)),
     petiole_to_blade_ratio = suppressWarnings(as.numeric(sub_rows$petiole_to_blade_ratio)),
     is_dissected = eff_diss_vec,
     ect_path = db_ect_vec,
@@ -1206,7 +1220,8 @@ fetch_step03_contours_from_db <- function(
       "Cauline_ECT_PC1", "Cauline_ECT_PC2",
       "ect_lobe_complexity", "cauline_ect_lobe_complexity",
       "ect_bilateral_asym", "heteroblasty_ect_distance",
-      "area_mm2", "petiole_width_mm", "blade_width_mm", "spatial_balance_weight"),
+      "area_mm2", "petiole_width_mm", "blade_width_mm", "blade_cie_l_norm", "blade_cie_l_sd",
+      "log1p_capitulum_count", "log1p_capitulum_count_std", "nearest_type_basionym_d2", "spatial_balance_weight"),
     names(df)
   )
   for (nc in dyn_num_cols) {
@@ -1377,7 +1392,7 @@ fetch_step04_morphometrics_from_db <- function(
                 "Cauline_ECT_PC1", "Cauline_ECT_PC2", "aspect_ratio", "solidity", "q25_solidity",
                 "dissection_index", "dissected_leaf_fraction", "within_rosette_efa_dispersion",
                 "heteroblasty_efa_distance", "heteroblasty_ect_distance", "ect_lobe_complexity",
-                "cauline_ect_lobe_complexity", "centroid_size", "log_centsize", "scale_source"),
+                "cauline_ect_lobe_complexity", "blade_cie_l_norm", "blade_cie_l_sd", "centroid_size", "log_centsize", "scale_source"),
               names(hm_raw)
             )
             for (rc in raw_s03_cols) {
@@ -1394,7 +1409,8 @@ fetch_step04_morphometrics_from_db <- function(
       "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2",
       "morphometric_outlier_flag", "misidentification_flag", "triage_priority",
       "discordance_reason", "has_empirical_type_anchor", "type_morph_mahal_d2",
-      "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype",
+      "nearest_type_morph_taxon", "nearest_type_basionym", "nearest_type_basionym_d2",
+      "type_morph_concordance", "is_typical_morphotype",
       "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p",
       "is_confident_label_noise", "selected_morph_features"
     )
