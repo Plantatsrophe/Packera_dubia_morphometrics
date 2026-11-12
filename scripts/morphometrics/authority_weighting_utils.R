@@ -189,6 +189,13 @@ if (!exists("packera_mclapply", mode = "function")) {
   g_tab <- table(valid_g); g_tab_multi <- g_tab[g_tab >= 2L]
   N_min <- if (length(g_tab_multi) >= 2L) min(as.integer(g_tab_multi)) else N
   P_max <- if (N_min >= 6L) max(min_p, floor(N_min / 3)) else M
+  if (isTRUE(allow_supervised_f) && length(g_tab_multi) >= 2L) {
+    # Pooled within-group Ledoit-Wolf CDA estimates a single regularized W across df_W = N - G anchors,
+    # so a single rare endemic with small N_min must not collapse 13-species CDA down to 2 PCs.
+    df_pooled <- max(1L, as.integer(N) - length(g_tab_multi))
+    P_max_pooled <- max(min_p, min(16L, floor(df_pooled / 3L)))
+    P_max <- max(P_max, min(M, P_max_pooled))
+  }
   if (!is.null(max_p) && length(max_p) == 1L && is.finite(as.numeric(max_p)) && as.numeric(max_p) >= 1) {
     P_max <- min(P_max, as.integer(max_p))
   }

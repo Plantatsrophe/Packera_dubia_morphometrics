@@ -58,28 +58,17 @@ def cluster_plant_individuals(
     instances: List[Any],
     sheet_width: int,
     sheet_height: int,
-    eps_ratio: float = 0.15
+    eps_ratio: float = 0.15,
+    specimen_mask: Optional[np.ndarray] = None,
+    root_boxes: Optional[Sequence[Any]] = None,
 ) -> List[Any]:
     """
-    Vectorized centroid clustering across detected organs on a specimen sheet.
-    Assigns plant_individual_id to avoid trait averaging across distinct plants.
-
-    Parameters
-    ----------
-    instances : List[Any]
-        List of candidate objects having `.bbox` (ymin, xmin, ymax, xmax) and
-        `.plant_individual_id`.
-    sheet_width : int
-        Width of specimen image sheet.
-    sheet_height : int
-        Height of specimen image sheet.
-    eps_ratio : float
-        Proportion of max sheet dimension used as DBSCAN neighbourhood radius.
-
-    Returns
-    -------
-    List[Any]
-        Updated instances with plant_individual_id assigned.
+    Stem-aware spatial clustering across detected leaves on a herbarium sheet.
+    Starts from DBSCAN centroid neighbourhoods and merges clusters connected by:
+      1. Shared Specimen_Segmenter foreground plant silhouette components,
+      2. Vertical bolting-scape alignment within a single shoot column (unless
+         anchored to distinct horizontally separated root crowns), or
+      3. Splayed single-leaf outliers within rosette reach of a multi-leaf plant.
     """
     if not instances:
         return instances
@@ -96,16 +85,150 @@ def cluster_plant_individuals(
         centroids.append([cx, cy])
 
     coords = np.array(centroids, dtype=np.float32)
-    eps = eps_ratio * float(max(sheet_width, sheet_height))
+    max_dim = float(max(sheet_width, sheet_height, 1))
+    sw = float(max(sheet_width, 1))
+    sh = float(max(sheet_height, 1))
+    eps = eps_ratio * max_dim
 
     clustering = DBSCAN(eps=eps, min_samples=1).fit(coords)
-    labels = clustering.labels_
+    raw_labels = [int(lbl) for lbl in clustering.labels_]
+    uniq_init = sorted(set(raw_labels))
+    init_map = {lbl: idx for idx, lbl in enumerate(uniq_init)}
+    inst_clusters = [init_map[lbl] for lbl in raw_labels]
+    n_cl = len(uniq_init)
 
-    unique_labels = sorted(list(set(labels)))
-    label_map = {lbl: idx for idx, lbl in enumerate(unique_labels)}
+    if n_cl > 1:
+        parent = list(range(n_cl))
 
-    for inst, lbl in zip(instances, labels):
-        inst.plant_individual_id = label_map.get(lbl, 0)
+        def _find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def _union(a: int, b: int) -> None:
+            ra, rb = _find(a), _find(b)
+            if ra != rb:
+                if ra < rb:
+                    parent[rb] = ra
+                else:
+                    parent[ra] = rb
+
+        # 1. Merge leaf clusters connected on the bridged Specimen_Segmenter mask
+        if (
+            isinstance(specimen_mask, np.ndarray)
+            and specimen_mask.ndim == 2
+            and specimen_mask.shape[0] == sheet_height
+            and specimen_mask.shape[1] == sheet_width
+            and np.any(specimen_mask > 0)
+        ):
+            k_bridge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+            bridged = cv2.dilate((specimen_mask > 0).astype(np.uint8), k_bridge, iterations=1)
+            _, cc_map = cv2.connectedComponents(bridged, connectivity=8)
+            comp_owner: Dict[int, int] = {}
+            for idx_i, (cx_i, cy_i) in enumerate(centroids):
+                xi = int(np.clip(round(cx_i), 0, sheet_width - 1))
+                yi = int(np.clip(round(cy_i), 0, sheet_height - 1))
+                cid = int(cc_map[yi, xi])
+                if cid == 0:
+                    b_ymin, b_xmin, b_ymax, b_xmax = instances[idx_i].bbox
+                    y0 = max(0, min(yi - 8, int(math.floor(b_ymin))))
+                    y1 = min(sheet_height, max(yi + 9, int(math.ceil(b_ymax))))
+                    x0 = max(0, min(xi - 8, int(math.floor(b_xmin))))
+                    x1 = min(sheet_width, max(xi + 9, int(math.ceil(b_xmax))))
+                    nz = cc_map[y0:y1, x0:x1]
+                    nz = nz[nz > 0]
+                    if nz.size > 0:
+                        vals, cnts = np.unique(nz, return_counts=True)
+                        cid = int(vals[int(np.argmax(cnts))])
+                if cid > 0:
+                    if cid in comp_owner:
+                        _union(inst_clusters[idx_i], comp_owner[cid])
+                    else:
+                        comp_owner[cid] = inst_clusters[idx_i]
+
+        # Extract optional root crown points to protect genuine side-by-side rooted plants
+        root_pts: List[Tuple[float, float]] = []
+        if root_boxes:
+            for rb in root_boxes:
+                pt_r = _extract_xy_point(rb)
+                if pt_r is not None and np.isfinite(pt_r[0]) and np.isfinite(pt_r[1]):
+                    root_pts.append((float(pt_r[0]), float(pt_r[1])))
+
+        # 2. Merge vertically aligned bolting-scape clusters in the same shoot column
+        cl_members: Dict[int, List[int]] = {}
+        for idx_i, cid_i in enumerate(inst_clusters):
+            cl_members.setdefault(_find(cid_i), []).append(idx_i)
+
+        cl_keys = sorted(cl_members.keys())
+        cl_med_xy: Dict[int, Tuple[float, float]] = {
+            ck: (
+                float(np.median(coords[idxs, 0])),
+                float(np.median(coords[idxs, 1])),
+            )
+            for ck, idxs in cl_members.items()
+        }
+
+        def _nearest_root_idx(xy: Tuple[float, float]) -> Optional[int]:
+            if len(root_pts) < 2:
+                return None
+            dists = [math.hypot(xy[0] - rx, xy[1] - ry) for rx, ry in root_pts]
+            best_i = int(np.argmin(dists))
+            return best_i if dists[best_i] <= 0.28 * max_dim else None
+
+        cl_root_anchor = {ck: _nearest_root_idx(xy) for ck, xy in cl_med_xy.items()}
+        for i_pos, ck_a in enumerate(cl_keys):
+            for ck_b in cl_keys[i_pos + 1 :]:
+                if _find(ck_a) == _find(ck_b):
+                    continue
+                ra_idx = cl_root_anchor.get(ck_a)
+                rb_idx = cl_root_anchor.get(ck_b)
+                if (
+                    ra_idx is not None
+                    and rb_idx is not None
+                    and ra_idx != rb_idx
+                    and abs(root_pts[ra_idx][0] - root_pts[rb_idx][0]) > 0.20 * sw
+                ):
+                    continue
+                xa, ya = cl_med_xy[ck_a]
+                xb, yb = cl_med_xy[ck_b]
+                if abs(xa - xb) <= 0.22 * sw and abs(ya - yb) <= 0.62 * sh:
+                    _union(ck_a, ck_b)
+
+        # 3. Absorb isolated 1-leaf outliers within rosette/petiole reach of a multi-leaf cluster
+        merged_members: Dict[int, List[int]] = {}
+        for idx_i, cid_i in enumerate(inst_clusters):
+            merged_members.setdefault(_find(cid_i), []).append(idx_i)
+        multi_clusters = [ck for ck, idxs in merged_members.items() if len(idxs) >= 2]
+        if multi_clusters:
+            absorb_rad = 0.34 * max_dim
+            for ck_s, idxs_s in list(merged_members.items()):
+                if len(idxs_s) != 1:
+                    continue
+                pt_s = coords[idxs_s[0]]
+                best_mc: Optional[int] = None
+                best_d = float("inf")
+                for ck_m in multi_clusters:
+                    pts_m = coords[merged_members[ck_m]]
+                    d_m = float(np.min(np.hypot(pts_m[:, 0] - pt_s[0], pts_m[:, 1] - pt_s[1])))
+                    if d_m < best_d:
+                        best_d = d_m
+                        best_mc = ck_m
+                if best_mc is not None and best_d <= absorb_rad:
+                    _union(ck_s, best_mc)
+
+        ordered_roots: List[int] = []
+        root_to_pid: Dict[int, int] = {}
+        for idx_i, cid_i in enumerate(inst_clusters):
+            r_id = _find(cid_i)
+            if r_id not in root_to_pid:
+                root_to_pid[r_id] = len(ordered_roots)
+                ordered_roots.append(r_id)
+            instances[idx_i].plant_individual_id = root_to_pid[r_id]
+        return instances
+
+    for inst, cid_i in zip(instances, inst_clusters):
+        inst.plant_individual_id = cid_i
 
     return instances
 

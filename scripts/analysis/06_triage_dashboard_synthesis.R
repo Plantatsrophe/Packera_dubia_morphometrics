@@ -518,10 +518,40 @@ compute_modality_reliability_weights <- function(df) {
   def_edaph <- if ("spatial_block_cv_acc" %in% names(df) && any(is.finite(as.numeric(df$spatial_block_cv_acc)))) stats::median(as.numeric(df$spatial_block_cv_acc), na.rm = TRUE) else 0.65
   w_edaph <- max(0.05, compute_cohens_kappa(y_true, y_edaph, default_kappa = def_edaph))
 
+  # Evaluate w_pheno on the identical multi-class out-of-fold Cohen's kappa scale (Dawid & Skene 1979)
+  # by testing leave-one-out circular Hopkins-adjusted DOY taxon discrimination across active anchors.
+  anth_a <- if ("is_active_anthesis" %in% names(sub_a)) as.logical(sub_a$is_active_anthesis) else resolve_active_anthesis_mask(sub_a)
+  anth_a[is.na(anth_a)] <- TRUE
+  hop_col_a <- intersect(c("hopkins_adjusted_doy", "doy"), names(sub_a))[1L]
+  doy_a <- if (!is.na(hop_col_a)) suppressWarnings(as.numeric(sub_a[[hop_col_a]])) else rep(NA_real_, nrow(sub_a))
   ddoy_a <- if ("delta_doy_resid" %in% names(sub_a)) suppressWarnings(as.numeric(sub_a$delta_doy_resid)) else if ("delta_doy" %in% names(sub_a)) suppressWarnings(as.numeric(sub_a$delta_doy)) else rep(NA_real_, nrow(sub_a))
-  valid_ph <- which(is.finite(ddoy_a))
-  tau_cry_a <- .compute_taxon_pheno_thresholds(df)$tau_cryptic[anchor_mask]
-  w_pheno <- if (length(valid_ph) >= 4L) max(0.05, min(0.95, round(max(0.05, (mean(abs(ddoy_a[valid_ph]) < tau_cry_a[valid_ph], na.rm = TRUE) - 0.25) / 0.75), 4))) else 0.55
+  ok_ph_cls <- which(anth_a & is.finite(doy_a) & doy_a >= 1.0 & doy_a <= 366.0 & !is.na(y_true) & nzchar(y_true) & y_true != "Unknown")
+  tx_ph_tab <- if (length(ok_ph_cls) >= 4L) table(y_true[ok_ph_cls]) else integer(0)
+  tx_ph_valid <- names(tx_ph_tab[tx_ph_tab >= 2L])
+  ok_ph_cls <- ok_ph_cls[y_true[ok_ph_cls] %in% tx_ph_valid]
+  w_pheno <- if (length(tx_ph_valid) >= 2L && length(ok_ph_cls) >= 4L) {
+    th_ph <- 2.0 * pi * (doy_a[ok_ph_cls] / 365.25)
+    yt_ph <- y_true[ok_ph_cls]
+    yp_ph <- character(length(ok_ph_cls))
+    for (ii in seq_along(ok_ph_cls)) {
+      best_d_th <- Inf; best_tx_ph <- tx_ph_valid[1L]
+      for (tx_k in tx_ph_valid) {
+        jj <- which(yt_ph == tx_k & seq_along(ok_ph_cls) != ii)
+        if (length(jj) == 0L) jj <- which(yt_ph == tx_k)
+        mu_k <- atan2(mean(sin(th_ph[jj])), mean(cos(th_ph[jj])))
+        r_k <- max(1e-4, min(0.9995, sqrt(mean(sin(th_ph[jj]))^2 + mean(cos(th_ph[jj]))^2)))
+        sd_rad_k <- max(2.0 * pi * (6.0 / 365.25), sqrt(-2.0 * log(r_k)))
+        d_z <- abs(atan2(sin(th_ph[ii] - mu_k), cos(th_ph[ii] - mu_k))) / sd_rad_k
+        if (d_z < best_d_th) { best_d_th <- d_z; best_tx_ph <- tx_k }
+      }
+      yp_ph[ii] <- best_tx_ph
+    }
+    max(0.05, min(0.95, compute_cohens_kappa(yt_ph, yp_ph, default_kappa = 0.15)))
+  } else if (sum(is.finite(ddoy_a)) >= 4L) {
+    0.20
+  } else {
+    0.15
+  }
   c(morph = w_morph, edaphic = w_edaph, pheno = w_pheno)
 }
 
@@ -774,11 +804,15 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     ),
     names(df)
   )
+  mts_init_v <- if ("morph_tier_source" %in% names(df)) as.character(df$morph_tier_source) else rep("Basal_Rosette", n)
+  is_caul_fb_init_v <- !is.na(mts_init_v) & (mts_init_v == "Cauline_Only_Fallback")
+  is_basal_obs_init_v <- orig_has_obs_morph_v & !is_caul_fb_init_v
   sheet_idx_list <- split(seq_len(n), sheet_group_key)
   for (s_idx in sheet_idx_list) {
     if (length(s_idx) < 2L) next
-    obs_s <- s_idx[orig_has_obs_morph_v[s_idx]]
-    miss_s <- s_idx[!orig_has_obs_morph_v[s_idx]]
+    has_basal_donor <- any(is_basal_obs_init_v[s_idx])
+    obs_s <- if (has_basal_donor) s_idx[is_basal_obs_init_v[s_idx]] else s_idx[orig_has_obs_morph_v[s_idx]]
+    miss_s <- if (has_basal_donor) s_idx[!orig_has_obs_morph_v[s_idx] | is_caul_fb_init_v[s_idx]] else s_idx[!orig_has_obs_morph_v[s_idx]]
     if (length(obs_s) >= 1L && length(miss_s) >= 1L) {
       ord_don <- order(-orig_n_leaves_v[obs_s], -orig_cda_prob_v[obs_s])
       donor_idx <- obs_s[ord_don[1L]]
@@ -869,6 +903,86 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   pheno_taus <- .compute_taxon_pheno_thresholds(df)
   tau_ecotype_vec <- pheno_taus$tau_ecotype
   tau_cryptic_vec <- pheno_taus$tau_cryptic
+
+  # Build Biogeographic Range Gate (USDA PLANTS state distributions + clean reference anchor envelopes)
+  # so Stage 1 Misidentification_Reassign never reassigns a voucher to a strictly allopatric species.
+  .us_abbr_to_state <- c(
+    AL = "alabama", AK = "alaska", AZ = "arizona", AR = "arkansas", CA = "california",
+    CO = "colorado", CT = "connecticut", DE = "delaware", DC = "district of columbia", FL = "florida",
+    GA = "georgia", HI = "hawaii", ID = "idaho", IL = "illinois", IN = "indiana",
+    IA = "iowa", KS = "kansas", KY = "kentucky", LA = "louisiana", ME = "maine",
+    MD = "maryland", MA = "massachusetts", MI = "michigan", MN = "minnesota", MS = "mississippi",
+    MO = "missouri", MT = "montana", NE = "nebraska", NV = "nevada", NH = "new hampshire",
+    NJ = "new jersey", NM = "new mexico", NY = "new york", NC = "north carolina", ND = "north dakota",
+    OH = "ohio", OK = "oklahoma", OR = "oregon", PA = "pennsylvania", RI = "rhode island",
+    SC = "south carolina", SD = "south dakota", TN = "tennessee", TX = "texas", UT = "utah",
+    VT = "vermont", VA = "virginia", WA = "washington", WV = "west virginia", WI = "wisconsin",
+    WY = "wyoming", ON = "ontario", QC = "quebec", NB = "new brunswick", NS = "nova scotia"
+  )
+  .norm_state_str <- function(sv) {
+    s <- tolower(trimws(as.character(sv)))
+    s[is.na(s) | s %in% c("", "na", "nan", "none", "null", "unknown")] <- ""
+    up <- toupper(s)
+    hit_ab <- nzchar(s) & (up %in% names(.us_abbr_to_state))
+    if (any(hit_ab)) s[hit_ab] <- unname(.us_abbr_to_state[up[hit_ab]])
+    s
+  }
+  state_vec_geo <- if ("stateProvince" %in% names(df)) .norm_state_str(df$stateProvince) else rep("", n)
+  lat_vec_geo <- if ("decimalLatitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLatitude)) else rep(NA_real_, n)
+  lon_vec_geo <- if ("decimalLongitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLongitude)) else rep(NA_real_, n)
+  usda_states_by_tx <- list()
+  if (Sys.getenv("PACKERA_DEMO_MODE", unset = "") != "1" && exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE)) {
+    tryCatch({
+      c_geo <- connect_packera_db(read_only = TRUE, demo = FALSE)
+      on.exit(tryCatch(if (!is.null(c_geo) && DBI::dbIsValid(c_geo)) DBI::dbDisconnect(c_geo), error = function(e) NULL), add = TRUE)
+      if (!is.null(c_geo) && DBI::dbExistsTable(c_geo, "usda_county_ranges")) {
+        u_df <- DBI::dbGetQuery(c_geo, "SELECT DISTINCT canonical_packera, state_norm FROM usda_county_ranges WHERE state_norm IS NOT NULL AND TRIM(state_norm) != '';")
+        if (!is.null(u_df) && nrow(u_df) > 0L) {
+          u_tx <- as.character(u_df$canonical_packera)
+          u_st <- .norm_state_str(u_df$state_norm)
+          ok_u <- nzchar(u_tx) & nzchar(u_st)
+          if (any(ok_u)) usda_states_by_tx <- lapply(split(u_st[ok_u], u_tx[ok_u]), unique)
+        }
+      }
+    }, error = function(e) NULL)
+  }
+  anch_states_by_tx <- list(); anch_coords_by_tx <- list()
+  for (tx in active_taxa) {
+    r_idx <- ref_idx_by_taxon[[tx]]
+    st_r <- unique(state_vec_geo[r_idx][nzchar(state_vec_geo[r_idx])])
+    anch_states_by_tx[[tx]] <- unique(c(st_r, usda_states_by_tx[[tx]]))
+    ok_ll <- r_idx[is.finite(lat_vec_geo[r_idx]) & is.finite(lon_vec_geo[r_idx])]
+    anch_coords_by_tx[[tx]] <- if (length(ok_ll) > 0L) cbind(lat = lat_vec_geo[ok_ll], lon = lon_vec_geo[ok_ll]) else NULL
+  }
+  .eval_taxon_geo_plausibility <- function(row_i, cand_tx) {
+    if (is.null(cand_tx) || is.na(cand_tx) || !nzchar(cand_tx) || !(cand_tx %in% active_taxa)) return(list(plausible = FALSE, weight = 0.0, dist_km = Inf))
+    st_i <- state_vec_geo[row_i]; lat_i <- lat_vec_geo[row_i]; lon_i <- lon_vec_geo[row_i]
+    has_st_i <- nzchar(st_i); has_ll_i <- is.finite(lat_i) && is.finite(lon_i)
+    if (!has_st_i && !has_ll_i) return(list(plausible = TRUE, weight = 1.0, dist_km = 0.0))
+    known_sts <- anch_states_by_tx[[cand_tx]]
+    if (has_st_i && length(known_sts) > 0L && (st_i %in% known_sts)) {
+      return(list(plausible = TRUE, weight = 1.0, dist_km = 0.0))
+    }
+    c_mat <- anch_coords_by_tx[[cand_tx]]
+    if (has_ll_i && !is.null(c_mat) && nrow(c_mat) > 0L) {
+      dlat <- (c_mat[, 1L] - lat_i) * (pi / 180.0)
+      dlon <- (c_mat[, 2L] - lon_i) * (pi / 180.0)
+      a_hav <- sin(dlat / 2.0)^2 + cos(lat_i * (pi / 180.0)) * cos(c_mat[, 1L] * (pi / 180.0)) * sin(dlon / 2.0)^2
+      min_km <- min(6371.0 * 2.0 * atan2(sqrt(pmax(0.0, a_hav)), sqrt(pmax(0.0, 1.0 - a_hav))))
+      # Allow 450 km geodesic dispersal/disjunct buffer around documented anchors (650 km when <4 total anchors in small test fixtures)
+      max_km <- if (nrow(c_mat) >= 4L || length(usda_states_by_tx[[cand_tx]]) > 0L) 450.0 else 650.0
+      if (min_km <= max_km) {
+        w_g <- if (min_km <= 200.0) 1.0 else exp(-0.5 * ((min_km - 200.0) / 250.0)^2)
+        return(list(plausible = TRUE, weight = max(0.35, w_g), dist_km = min_km))
+      }
+      w_far <- exp(-0.5 * ((min_km - 200.0) / 200.0)^2)
+      return(list(plausible = FALSE, weight = max(0.01, w_far), dist_km = min_km))
+    }
+    if (has_st_i && length(usda_states_by_tx[[cand_tx]]) >= 2L && !(st_i %in% known_sts)) {
+      return(list(plausible = FALSE, weight = 0.05, dist_km = 800.0))
+    }
+    list(plausible = TRUE, weight = 0.85, dist_km = NA_real_)
+  }
 
   # Precompute morphospace centroids and regularized inverse covariance in (can1, can2, can3) / dynamic PCs
   # for nearest-neighbor Mahalanobis hybrid parent resolution when predicted modalities match given_sp
@@ -1235,8 +1349,11 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     } else {
       is_mo_flag
     }
-    osr_cda_support <- (!is.null(morph_sp) && !is.na(morph_sp) && morph_sp == min_cong_tx_i && is.finite(cda_prob) && cda_prob >= cda_cut) || is_mo_flag
+    osr_cda_support <- (!is.null(morph_sp) && !is.na(morph_sp) && morph_sp == min_cong_tx_i && is.finite(cda_prob) && cda_prob >= 0.50) ||
+                       (!is.na(nt_m_i) && nzchar(nt_m_i) && nt_m_i == min_cong_tx_i)
+    osr_geo_ok <- !is.na(min_cong_tx_i) && isTRUE(.eval_taxon_geo_plausibility(i, min_cong_tx_i)$plausible)
     congener_osr_reassign <- !is_type_specimen_i &&
+      is_tier1_pure_i &&
       is.finite(min_cong_d2_i) &&
       !is.na(min_cong_tx_i) && nzchar(min_cong_tx_i) &&
       (min_cong_tx_i != given_sp) &&
@@ -1244,6 +1361,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       osr_self_outlier &&
       osr_strictly_closer &&
       osr_cda_support &&
+      osr_geo_ok &&
       (!isTRUE(typ_m_i))
 
     # Rule B: Stage 1 Type-Control Consensus Reassignment (type_control_reassign) with 1-Vote-Per-Modality & Posterior Floor
@@ -1298,9 +1416,14 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
                                 !type_control_reassign && !congener_osr_reassign &&
                                 in_edaphic_envelope && is_late_foliar_wear
 
+    edaph_mosaic_support <- (is.finite(rf_prob) && rf_prob >= 0.60) || (!is.finite(rf_prob) && is.finite(d_edaph) && d_edaph < 0.35)
+    mosaic_geo_ok <- morph_is_taxon && edaph_is_taxon &&
+                     isTRUE(.eval_taxon_geo_plausibility(i, morph_sp)$plausible) &&
+                     isTRUE(.eval_taxon_geo_plausibility(i, edaph_sp)$plausible)
     is_intermodal_mosaic <- !type_control_reassign && !congener_osr_reassign && morph_is_taxon && edaph_is_taxon &&
+                            edaph_mosaic_support && mosaic_geo_ok &&
                             (morph_sp != given_sp) && (edaph_sp != given_sp) && (morph_sp != edaph_sp) &&
-                            (is.na(cda_prob) || cda_prob < 0.85) && (triage_cat != "Severe_Triple_Stream_Conflict")
+                            (is.na(cda_prob) || cda_prob < 0.78) && (triage_cat != "Severe_Triple_Stream_Conflict")
 
     non_assigned_known <- (is.na(cda_prob) || cda_prob < 0.70) && !both_alt_agree && !morph_edaph_alt_agree &&
                           !type_control_reassign && !congener_osr_reassign && !is_intermodal_mosaic
@@ -1318,12 +1441,13 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     edaph_contradicts_morph <- edaph_is_taxon && (edaph_sp == given_sp) && (rf_sp == given_sp) &&
                                is.finite(rf_prob) && (rf_prob >= 0.85) && (is.na(cda_prob) || cda_prob < 0.85) &&
                                (is.finite(d_edaph) && d_edaph >= 0.70)
-    single_morph_reassign <- morph_is_taxon && (morph_sp != given_sp) && !is.na(cda_prob) && (cda_prob >= cda_cut) &&
+    single_morph_reassign <- morph_is_taxon && (morph_sp != given_sp) && !is.na(cda_prob) &&
+                             (cda_prob >= if (is_tier1_pure_i) cda_cut else max(0.85, cda_cut)) &&
                              !edaph_contradicts_morph
     eff_triple_conflict <- (triage_cat == "Severe_Triple_Stream_Conflict") &&
                            (both_alt_agree || morph_edaph_alt_agree || single_morph_reassign || congener_osr_reassign)
     morph_corrupt_cand <- is_mo_flag && morph_is_taxon && (morph_sp != given_sp) &&
-                          ((!is.na(cda_prob) && cda_prob >= 0.68) || !is_tier1_pure_i) &&
+                          (!is.na(cda_prob) && cda_prob >= (if (is_tier1_pure_i) 0.68 else 0.85)) &&
                           !edaph_contradicts_morph
     is_misid <- !morph_concordant_self && (
       (!is_taphonomic_plasticity && !is_crypt && !is_intermodal_mosaic && (
@@ -1335,12 +1459,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     is_severe_misid <- is_misid
 
     if (is_severe_misid) {
-      target_sp <- if (congener_osr_reassign && !is.na(min_cong_tx_i)) {
-        min_cong_tx_i
-      } else if (type_control_reassign && !is.null(type_control_target_sp)) {
+      raw_target_sp <- if (type_control_reassign && !is.null(type_control_target_sp)) {
         type_control_target_sp
       } else if (both_alt_agree && morph_is_taxon) {
         morph_sp
+      } else if (congener_osr_reassign && !is.na(min_cong_tx_i)) {
+        min_cong_tx_i
       } else if (morph_is_taxon && morph_sp != given_sp) {
         morph_sp
       } else if (edaph_is_taxon && edaph_sp != given_sp) {
@@ -1348,24 +1472,75 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       } else {
         given_sp
       }
+      raw_geo <- .eval_taxon_geo_plausibility(i, raw_target_sp)
+      range_gated_note <- ""
+      if (raw_target_sp != given_sp && !isTRUE(raw_geo$plausible)) {
+        cand_pool <- unique(stats::na.omit(c(
+          if (morph_is_taxon && morph_sp != given_sp) morph_sp else NA_character_,
+          if (sec_is_taxon && cda_sec_taxon != given_sp) cda_sec_taxon else NA_character_,
+          if (!is.na(min_cong_tx_i) && min_cong_tx_i != given_sp) min_cong_tx_i else NA_character_,
+          if (!is.na(nt_m_i) && nt_m_i != given_sp) nt_m_i else NA_character_,
+          if (edaph_is_taxon && edaph_sp != given_sp) edaph_sp else NA_character_,
+          if (rf_is_taxon && rf_sp != given_sp) rf_sp else NA_character_,
+          setdiff(active_taxa, given_sp)
+        )))
+        cand_pool <- cand_pool[cand_pool %in% active_taxa & cand_pool != given_sp]
+        plaus_cands <- cand_pool[vapply(cand_pool, function(ctx) isTRUE(.eval_taxon_geo_plausibility(i, ctx)$plausible), logical(1))]
+        if (length(plaus_cands) >= 1L) {
+          score_cand <- function(ctx) {
+            gw <- .eval_taxon_geo_plausibility(i, ctx)$weight
+            ms <- if (!is.null(morph_sp) && morph_sp == ctx && is.finite(cda_prob)) cda_prob
+                  else if (!is.null(cda_sec_taxon) && cda_sec_taxon == ctx && is.finite(cda_sec)) cda_sec
+                  else if (!is.null(morph_X) && !is.null(morph_centroids) && !is.null(morph_S_inv) && (ctx %in% rownames(morph_centroids))) {
+                    xi <- morph_X[i, ]; bm <- if (given_sp %in% rownames(morph_centroids)) morph_centroids[given_sp, ] else colMeans(morph_centroids)
+                    xi[!is.finite(xi)] <- bm[!is.finite(xi)]
+                    dv <- xi - morph_centroids[ctx, ]
+                    exp(-0.25 * max(0.0, as.numeric(t(dv) %*% morph_S_inv %*% dv)))
+                  } else 0.15
+            es <- if (edaph_is_taxon && edaph_sp == ctx) (if (is.finite(rf_prob)) 0.35 * rf_prob else 0.20) else 0.0
+            ts <- if ((!is.na(min_cong_tx_i) && min_cong_tx_i == ctx) || (!is.na(nt_m_i) && nt_m_i == ctx)) 0.20 else 0.0
+            gw * (0.65 * ms + es + ts)
+          }
+          cand_scores <- vapply(plaus_cands, score_cand, numeric(1))
+          best_plaus <- plaus_cands[which.max(cand_scores)]
+          if (max(cand_scores) >= 0.12) {
+            range_gated_note <- sprintf(" [Range-Gated from allopatric %s (%.0f km outside range)]", raw_target_sp, ifelse(is.finite(raw_geo$dist_km), raw_geo$dist_km, 500.0))
+            raw_target_sp <- best_plaus
+          } else {
+            # Allopatric prediction with no supported sympatric congener -> abstain from false reassignment
+            raw_target_sp <- given_sp
+          }
+        }
+      }
+      target_sp <- raw_target_sp
+      if (target_sp == given_sp) {
+        status_calls[i] <- "Ecophenotypic_Plasticity"; rec_taxa[i] <- given_sp
+        triage_prios[i] <- "MEDIUM"; triage_acts[i] <- "Annotate_Taphonomic_Ecophenotype"
+        rationales[i] <- sprintf("Stage 4 Plasticity (Allopatric Reassignment Blocked): Morphological outlier retained as %s because candidate congener lies outside documented geographic range", given_sp)
+        treat_broad[i] <- "Variety / Ecotype"; treat_sub[i] <- "Ecophenotypic_Plasticity"
+        next
+      }
       status_calls[i] <- "Misidentification_Severe"; rec_taxa[i] <- target_sp
       triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"; triage_acts[i] <- "Reassign_Determination"
-      rationales[i] <- if (congener_osr_reassign) {
-        sprintf(
-          "Stage 1 Reassign (Open-Set Congener Match): %s deviates from %s baseline and falls inside the 90%% Mahalanobis ellipsoid of sympatric congener %s (min_congener_mahal_d2=%.2f); reassign to %s",
-          given_sp, given_sp, target_sp, min_cong_d2_i, target_sp
-        )
-      } else if (type_control_reassign) {
-        sprintf(
-          "Stage 1 Reassign (Type-Baseline Concordance): %s deviates from recorded type control (type_mahal_d2=%s, type_edaphic_z=%s) and matches %s nomenclatural type baseline across >=2 modalities; reassign to %s",
-          given_sp,
-          ifelse(is.finite(tm_d2_i), sprintf("%.2f", tm_d2_i), "NA"),
-          ifelse(is.finite(te_z_i), sprintf("%.2f", te_z_i), "NA"),
-          target_sp, target_sp
-        )
-      } else {
-        sprintf("Stage 1 Reassign: %s contradicted across modalities (consensus_conflict=%.2f); reassign to %s", given_sp, p_conf_dv[i], target_sp)
-      }
+      rationales[i] <- paste0(
+        if (congener_osr_reassign && target_sp == min_cong_tx_i) {
+          sprintf(
+            "Stage 1 Reassign (Open-Set Congener Match): %s deviates from %s baseline and falls inside the 90%% Mahalanobis ellipsoid of sympatric congener %s (min_congener_mahal_d2=%.2f); reassign to %s",
+            given_sp, given_sp, target_sp, min_cong_d2_i, target_sp
+          )
+        } else if (type_control_reassign && !is.null(type_control_target_sp) && target_sp == type_control_target_sp) {
+          sprintf(
+            "Stage 1 Reassign (Type-Baseline Concordance): %s deviates from recorded type control (type_mahal_d2=%s, type_edaphic_z=%s) and matches %s nomenclatural type baseline across >=2 modalities; reassign to %s",
+            given_sp,
+            ifelse(is.finite(tm_d2_i), sprintf("%.2f", tm_d2_i), "NA"),
+            ifelse(is.finite(te_z_i), sprintf("%.2f", te_z_i), "NA"),
+            target_sp, target_sp
+          )
+        } else {
+          sprintf("Stage 1 Reassign: %s contradicted across modalities (consensus_conflict=%.2f); reassign to %s", given_sp, p_conf_dv[i], target_sp)
+        },
+        range_gated_note
+      )
       treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Misidentification_Reassign"
       next
     }
@@ -1505,38 +1680,50 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   for (s_idx in sheet_idx_list) {
     if (length(s_idx) < 2L) next
     if (any(is_type_dv[s_idx]) || any(status_calls[s_idx] %in% c("Confirmed_Type_Control", "Type_Synonymy_Candidate"))) next
-    if (length(unique(treat_sub[s_idx])) <= 1L && length(unique(status_calls[s_idx])) <= 1L) next
+    if (length(unique(treat_sub[s_idx])) <= 1L && length(unique(status_calls[s_idx])) <= 1L && length(unique(rec_taxa[s_idx])) <= 1L) next
 
     is_conf_s <- (treat_sub[s_idx] == "Confirmed_Species") | (status_calls[s_idx] == "Species_Confirmed")
-    w_r <- pmax(0.25, aw_sheet_vec[s_idx]) * (1.0 + orig_n_leaves_v[s_idx]) * (1.0 + 0.5 * as.numeric(is_conf_s))
+    is_basal_s <- t1_pure_all[s_idx] & orig_has_obs_morph_v[s_idx] & (orig_n_leaves_v[s_idx] >= 1L)
+    w_r <- pmax(0.25, aw_sheet_vec[s_idx]) *
+           (1.0 + orig_n_leaves_v[s_idx]) *
+           (1.0 + 1.5 * as.numeric(is_basal_s)) *
+           (1.0 + 0.5 * as.numeric(is_conf_s)) *
+           ifelse(is.finite(orig_cda_prob_v[s_idx]), pmax(0.35, orig_cda_prob_v[s_idx]), 0.35)
     has_leaf_s <- orig_has_obs_morph_v[s_idx] & (orig_n_leaves_v[s_idx] >= 1L)
-    conf_leaf_s <- has_leaf_s & is_conf_s & (
+    conf_leaf_s <- is_basal_s & is_conf_s & (
       (!is.na(orig_cda_pred_v[s_idx]) & orig_cda_pred_v[s_idx] == sp_clean_vec[s_idx]) |
       (!is.na(is_typ_morph_dv[s_idx]) & is_typ_morph_dv[s_idx])
     )
+    is_genuine_mixed_ramet <- function(r, ref_r) {
+      if (!t1_pure_all[r] || !t1_pure_all[ref_r]) return(FALSE)
+      n_bas_r <- if (!is.na(bas_dv[r])) bas_dv[r] else orig_n_leaves_v[r]
+      n_bas_ref <- if (!is.na(bas_dv[ref_r])) bas_dv[ref_r] else orig_n_leaves_v[ref_r]
+      if (is.na(n_bas_r) || n_bas_r < 2L || is.na(n_bas_ref) || n_bas_ref < 2L) return(FALSE)
+      if (!orig_has_obs_morph_v[r] || is.na(orig_cda_pred_v[r]) || !nzchar(orig_cda_pred_v[r])) return(FALSE)
+      if (!is.na(orig_cda_pred_v[ref_r]) && orig_cda_pred_v[r] == orig_cda_pred_v[ref_r]) return(FALSE)
+      d2_cand_r <- if (is.finite(orig_tm_d2_v[r])) {
+        orig_tm_d2_v[r]
+      } else if ("mahalanobis_d2" %in% names(df) && is.finite(suppressWarnings(as.numeric(df$mahalanobis_d2[r])))) {
+        suppressWarnings(as.numeric(df$mahalanobis_d2[r]))
+      } else if ("cda_mahal_d2" %in% names(df) && is.finite(suppressWarnings(as.numeric(df$cda_mahal_d2[r])))) {
+        suppressWarnings(as.numeric(df$cda_mahal_d2[r]))
+      } else {
+        NA_real_
+      }
+      marg_r <- if (is.finite(cda_marg_dv[r])) cda_marg_dv[r] else if (is.finite(orig_cda_prob_v[r])) max(0.0, 2.0 * orig_cda_prob_v[r] - 1.0) else 0.0
+      is.finite(orig_cda_prob_v[r]) && (orig_cda_prob_v[r] >= 0.90) && (marg_r >= 0.50) &&
+        ((is.finite(d2_cand_r) && (d2_cand_r > type_morph_chisq95)) || isTRUE(mo_flag_dv[r]))
+    }
     if (any(conf_leaf_s)) {
+      ref_conf_r <- s_idx[which(conf_leaf_s)[which.max(w_r[which(conf_leaf_s)])]]
       for (k_pos in seq_along(s_idx)) {
         r <- s_idx[k_pos]
-        if (is_conf_s[k_pos]) next
+        if (is_conf_s[k_pos] && rec_taxa[r] == sp_clean_vec[r]) next
         if (!(treat_sub[r] %in% c("Hybrid_Introgressant", "Misidentification_Reassign", "Ecophenotypic_Plasticity") ||
               status_calls[r] %in% c("Hybrid_Intergrade_Swarm", "Putative_Hybrid_Introgression", "Ambiguous_Needs_Expert_Review", "Misidentification_Severe"))) {
           next
         }
-        d2_cand_r <- if (is.finite(orig_tm_d2_v[r])) {
-          orig_tm_d2_v[r]
-        } else if ("mahalanobis_d2" %in% names(df) && is.finite(suppressWarnings(as.numeric(df$mahalanobis_d2[r])))) {
-          suppressWarnings(as.numeric(df$mahalanobis_d2[r]))
-        } else if ("cda_mahal_d2" %in% names(df) && is.finite(suppressWarnings(as.numeric(df$cda_mahal_d2[r])))) {
-          suppressWarnings(as.numeric(df$cda_mahal_d2[r]))
-        } else {
-          NA_real_
-        }
-        chisq95_indep <- type_morph_chisq95
-        extreme_indep_div_r <- (orig_n_leaves_v[r] >= 2L) && orig_has_obs_morph_v[r] &&
-          !is.na(orig_cda_pred_v[r]) && nzchar(orig_cda_pred_v[r]) && (orig_cda_pred_v[r] != sp_clean_vec[r]) &&
-          is.finite(orig_cda_prob_v[r]) && (orig_cda_prob_v[r] >= 0.85) &&
-          ((is.finite(d2_cand_r) && (d2_cand_r > chisq95_indep)) || isTRUE(mo_flag_dv[r]))
-        if (!extreme_indep_div_r) {
+        if (!is_genuine_mixed_ramet(r, ref_conf_r)) {
           status_calls[r] <- "Species_Confirmed"
           treat_sub[r] <- "Confirmed_Species"
           treat_broad[r] <- "Confirmed Species"
@@ -1549,11 +1736,12 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
         }
       }
     } else if (any(has_leaf_s)) {
-      leaf_positions <- which(has_leaf_s)
-      best_r <- s_idx[leaf_positions[which.max(w_r[leaf_positions])]]
+      cand_positions <- if (any(is_basal_s)) which(is_basal_s) else which(has_leaf_s)
+      best_r <- s_idx[cand_positions[which.max(w_r[cand_positions])]]
       for (k_pos in seq_along(s_idx)) {
         r <- s_idx[k_pos]
-        if (orig_n_leaves_v[r] == 0L || !orig_has_obs_morph_v[r]) {
+        if (r == best_r) next
+        if (!is_genuine_mixed_ramet(r, best_r)) {
           status_calls[r] <- status_calls[best_r]
           treat_sub[r] <- treat_sub[best_r]
           treat_broad[r] <- treat_broad[best_r]

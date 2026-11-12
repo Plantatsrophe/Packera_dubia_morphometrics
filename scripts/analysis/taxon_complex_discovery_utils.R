@@ -149,16 +149,17 @@ compute_modality_kappa_weights <- function(morph_df, anchor_mask = NULL, ...) {
   }
   kappa_eco <- if (!is.na(ed_col) && any(!is.na(anch_df[[ed_col]]))) compute_cohens_kappa_stat(yt_morph, anch_df[[ed_col]]) else NA_real_
   w_eco_raw <- if (is.finite(kappa_eco)) max(0.05, min(1.0, kappa_eco)) else if (has_eco_obs && "w_edaphic_kappa" %in% names(anch_df) && any(is.finite(as.numeric(anch_df$w_edaphic_kappa)))) stats::median(as.numeric(anch_df$w_edaphic_kappa), na.rm = TRUE) else if (has_eco_obs) 0.55 else NA_real_
-  has_doy <- "doy" %in% names(anch_df) && sum(is.finite(suppressWarnings(as.numeric(anch_df$doy)))) >= 4L
-  dd_col <- intersect(c("delta_doy_resid", "delta_doy"), names(anch_df))[1L]
-  w_pheno_raw <- if (!is.na(dd_col) && sum(is.finite(suppressWarnings(as.numeric(anch_df[[dd_col]])))) >= 4L) {
-    ddv <- abs(suppressWarnings(as.numeric(anch_df[[dd_col]]))); ddv <- ddv[is.finite(ddv)]
-    max(0.05, min(0.95, (mean(ddv < 18.0) - 0.25) / 0.75))
-  } else if (has_doy && "w_pheno_kappa" %in% names(anch_df) && any(is.finite(as.numeric(anch_df$w_pheno_kappa)))) {
-    stats::median(as.numeric(anch_df$w_pheno_kappa), na.rm = TRUE)
-  } else if (has_doy) {
-    0.50
-  } else NA_real_
+  doy_col_k <- intersect(c("hopkins_adjusted_doy", "doy"), names(anch_df))[1L]; dd_col <- intersect(c("delta_doy_resid", "delta_doy"), names(anch_df))[1L]
+  doy_v_k <- if (!is.na(doy_col_k)) suppressWarnings(as.numeric(anch_df[[doy_col_k]])) else numeric(0)
+  has_doy <- length(doy_v_k) == nrow(anch_df) && sum(is.finite(doy_v_k) & doy_v_k >= 1 & doy_v_k <= 366) >= 4L
+  w_pheno_raw <- if ("w_pheno_kappa" %in% names(anch_df) && any(is.finite(suppressWarnings(as.numeric(anch_df$w_pheno_kappa))))) max(0.05, min(0.95, stats::median(suppressWarnings(as.numeric(anch_df$w_pheno_kappa)), na.rm = TRUE))) else if (has_doy && length(unique(yt_morph[is.finite(doy_v_k)])) >= 2L) {
+    ok_p <- which(is.finite(doy_v_k) & doy_v_k >= 1 & doy_v_k <= 366 & !is.na(yt_morph) & nzchar(yt_morph))
+    th_p <- 2 * pi * (doy_v_k[ok_p] / 365.25); tx_p <- sort(unique(yt_morph[ok_p]))
+    mu_p <- vapply(tx_p, function(tx) { jj <- which(yt_morph[ok_p] == tx); atan2(mean(sin(th_p[jj])), mean(cos(th_p[jj]))) }, numeric(1))
+    yp_p <- vapply(seq_along(ok_p), function(ii) tx_p[which.min(abs(atan2(sin(th_p[ii] - mu_p), cos(th_p[ii] - mu_p))))], character(1))
+    kp_p <- compute_cohens_kappa_stat(yt_morph[ok_p], yp_p); if (is.finite(kp_p)) max(0.05, min(0.95, kp_p)) else 0.15
+  } else if (!is.na(dd_col) && sum(is.finite(suppressWarnings(as.numeric(anch_df[[dd_col]])))) >= 4L) { 0.20
+  } else if (has_doy) { 0.20 } else NA_real_
   present_w <- c(morph = w_morph_raw, edaphic = w_eco_raw, pheno = w_pheno_raw); avail <- is.finite(present_w)
   norm_w <- rep(0.0, length(present_w)); names(norm_w) <- names(present_w)
   if (any(avail)) norm_w[avail] <- present_w[avail] / sum(present_w[avail]) else norm_w["morph"] <- 1.0

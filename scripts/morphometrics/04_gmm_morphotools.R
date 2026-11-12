@@ -289,7 +289,7 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
   if (sum(keep_cda_comp) >= 2L) feature_cols <- feature_cols[keep_cda_comp]
   X_full <- as.matrix(df[, feature_cols, drop = FALSE]); storage.mode(X_full) <- "double"
   for (j in seq_len(ncol(X_full))) if (any(is.na(X_full[, j]))) X_full[is.na(X_full[, j]), j] <- if (any(!is.na(X_full[is_train_cand, j]))) stats::median(X_full[is_train_cand, j], na.rm = TRUE) else 0.0
-  feature_cols <- select_morphometric_subspace(X_full[is_train_cand, , drop = FALSE], group_vec = df$grouping_col[is_train_cand], aux_df = df[is_train_cand, , drop = FALSE], allow_supervised_f = FALSE)
+  feature_cols <- select_morphometric_subspace(X_full[is_train_cand, , drop = FALSE], group_vec = df$grouping_col[is_train_cand], aux_df = df[is_train_cand, , drop = FALSE], allow_supervised_f = !is_intra)
   X <- X_full[, feature_cols, drop = FALSE]; p <- ncol(X)
   if (!screened_by_adaptive_anchors) {
     for (grp in target_taxa) {
@@ -439,7 +439,9 @@ audit_misidentifications <- function(df, cda_res, gmm_res = NULL, selected_featu
   p_audit <- max(2L, if (!is.null(cda_res$X_proj)) ncol(cda_res$X_proj) else length(pc_c))
   is_type_audit <- as.logical(df$is_type_specimen); is_type_audit[is.na(is_type_audit)] <- FALSE
   is_osr_novel <- !is.na(df$open_set_novelty_p) & (df$open_set_novelty_p < 0.01)
-  misid_flags <- !is_type_audit & ((!is_intra_audit & flags & !is_osr_novel) | (is_intra_audit & is.finite(df$min_congener_mahal_d2) & is.finite(df$type_morph_mahal_d2) & (df$min_congener_mahal_d2 < stats::qchisq(0.95, df = p_audit)) & (df$type_morph_mahal_d2 > stats::qchisq(0.99, df = p_audit))))
+  is_cauline_fb_audit <- ("morph_tier_source" %in% names(df)) & !is.na(df$morph_tier_source) & (as.character(df$morph_tier_source) == "Cauline_Only_Fallback")
+  cauline_high_conf <- !is_cauline_fb_audit | (!is.na(cda_res$posterior_prob) & cda_res$posterior_prob >= 0.85)
+  misid_flags <- !is_type_audit & cauline_high_conf & ((!is_intra_audit & flags & !is_osr_novel) | (is_intra_audit & is.finite(df$min_congener_mahal_d2) & is.finite(df$type_morph_mahal_d2) & (df$min_congener_mahal_d2 < stats::qchisq(0.95, df = p_audit)) & (df$type_morph_mahal_d2 > stats::qchisq(0.99, df = p_audit))))
   outlier_flags <- !is_type_audit & (is_osr_novel | mahal_out | (!is.na(df$type_morph_mahal_d2) & (df$type_morph_mahal_d2 > stats::qchisq(0.995, df = p_audit)) & !misid_flags))
   novel_only_idx <- which(outlier_flags & !misid_flags & (triage %in% c("CLEAN", "LOW")))
   if (length(novel_only_idx) > 0L) { triage[novel_only_idx] <- "HIGH"; reasons[novel_only_idx] <- "Open_Set_Morphospace_Outlier_Novelty" }

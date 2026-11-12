@@ -677,6 +677,40 @@ run_fourier_extraction <- function(opts) {
     message("Individual leaf EFA harmonics archive exported: ", opts$output_individual, " (Rows: ", nrow(ind_export_df), ")")
   }
 
+  # Consolidate false Step 02 single-plant DBSCAN splits (cauline-only upper stems & 1-leaf strays)
+  # onto the sheet's primary basal rosette individual while preserving genuine multi-rosette sheets (>=2 basal leaves each)
+  if (all(c("catalogNumber", "plant_individual_id") %in% names(efa_df)) && nrow(efa_df) >= 2L) {
+    cat_s03 <- as.character(efa_df$catalogNumber)
+    pid_s03 <- ifelse(is.na(efa_df$plant_individual_id), 0L, as.integer(efa_df$plant_individual_id))
+    lz_s03 <- if ("leaf_zone" %in% names(efa_df)) tolower(trimws(as.character(efa_df$leaf_zone))) else rep("basal", nrow(efa_df))
+    lz_s03[is.na(lz_s03) | !(lz_s03 %in% c("basal", "cauline"))] <- "basal"
+    multi_cats_s03 <- unique(cat_s03[duplicated(paste(cat_s03, pid_s03, sep = "__")) == FALSE])
+    by_cat_s03 <- split(seq_len(nrow(efa_df)), cat_s03)
+    reassigned_s03 <- 0L
+    for (c_idx_vec in by_cat_s03) {
+      u_pids <- sort(unique(pid_s03[c_idx_vec]))
+      if (length(u_pids) < 2L) next
+      bas_counts <- vapply(u_pids, function(p) sum(pid_s03[c_idx_vec] == p & lz_s03[c_idx_vec] == "basal"), integer(1))
+      tot_counts <- vapply(u_pids, function(p) sum(pid_s03[c_idx_vec] == p), integer(1))
+      hub_mask <- bas_counts >= 2L
+      kept_pids <- if (any(hub_mask)) u_pids[hub_mask] else u_pids[which.max(bas_counts * 1000L + tot_counts)]
+      primary_pid <- kept_pids[which.max(bas_counts[match(kept_pids, u_pids)] * 1000L + tot_counts[match(kept_pids, u_pids)])]
+      for (k_p in seq_along(u_pids)) {
+        p_cur <- u_pids[k_p]
+        if (p_cur %in% kept_pids) next
+        if (bas_counts[k_p] == 0L || tot_counts[k_p] <= 1L) {
+          hit_rows <- c_idx_vec[pid_s03[c_idx_vec] == p_cur]
+          pid_s03[hit_rows] <- primary_pid
+          reassigned_s03 <- reassigned_s03 + length(hit_rows)
+        }
+      }
+    }
+    if (reassigned_s03 > 0L) {
+      efa_df$plant_individual_id <- pid_s03
+      message(sprintf("[Step 03 Multi-Plant Hygiene] Consolidated %d cauline-split / single-leaf stray rows onto primary basal individuals.", reassigned_s03))
+    }
+  }
+
   # 5b. Primary Basal Track & Separate Cauline Track Specimen-Level (OTU) Aggregation (Slenker et al. 2022)
   message("Computing primary basal OTU median harmonic vectors and separate cauline morphometric track across QC-passing leaves...")
   valid_closed_mask <- complete.cases(efa_df[, sym_names])

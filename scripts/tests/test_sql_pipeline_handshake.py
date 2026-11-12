@@ -834,5 +834,75 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             conn.close()
 
 
+    def test_phantom_pid0_stub_cleanup_and_false_split_db_consolidation(self) -> None:
+        """Verify SQLite heals phantom pid=0 stubs and cauline/1-leaf splits in place without GPU re-segmentation while preserving true multi-rosette sheets."""
+        from scripts.core.db import consolidate_false_multi_plant_splits_db, populate_run_active_cohort
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            db_file = Path(tmp_d) / "heal_splits.sqlite"
+            conn = get_db_connection(db_path=db_file, init_schema=True)
+            try:
+                v_rows = [
+                    {"catalogNumber": "CAT-PHANTOM", "species_standardized": "Packera dubia", "determiner_tier": "Tier_1_Gold"},
+                    {"catalogNumber": "CAT-CAUL-SPLIT", "species_standardized": "Packera aurea", "determiner_tier": "Tier_2_Silver"},
+                    {"catalogNumber": "CAT-TRUE-MULTI", "species_standardized": "Packera obovata", "determiner_tier": "Tier_1_Gold"},
+                ]
+                upsert_vouchers_records(conn, v_rows)
+                with conn:
+                    # 1. CAT-PHANTOM: all-NULL pid=0 stub alongside real pid=1 individual with 2 basal leaves
+                    conn.execute("INSERT INTO plant_individuals (catalogNumber, plant_individual_id) VALUES ('CAT-PHANTOM', 0);")
+                    conn.execute("INSERT INTO plant_individuals (catalogNumber, plant_individual_id, crown_x, crown_y) VALUES ('CAT-PHANTOM', 1, 900.0, 2400.0);")
+                    conn.execute("INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, shape_id, contour_xy_json, leaf_zone) VALUES ('CAT-PHANTOM', 1, 1, 'CAT-PHANTOM_p1_leaf1', '[[0,0],[1,0],[0,1]]', 'basal');")
+                    conn.execute("INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, shape_id, contour_xy_json, leaf_zone) VALUES ('CAT-PHANTOM', 1, 2, 'CAT-PHANTOM_p1_leaf2', '[[0,0],[1,0],[0,1]]', 'basal');")
+
+                    # 2. CAT-CAUL-SPLIT: pid=0 basal rosette (2 basal leaves) + pid=1 cauline stem (2 cauline leaves + 6 capitula) + pid=2 1-leaf stray
+                    conn.execute("INSERT INTO plant_individuals (catalogNumber, plant_individual_id, crown_x, crown_y) VALUES ('CAT-CAUL-SPLIT', 0, 950.0, 2500.0);")
+                    conn.execute("INSERT INTO plant_individuals (catalogNumber, plant_individual_id, crown_x, crown_y, plant_height_cm) VALUES ('CAT-CAUL-SPLIT', 1, 960.0, 1100.0, 42.5);")
+                    conn.execute("INSERT INTO plant_individuals (catalogNumber, plant_individual_id, crown_x, crown_y) VALUES ('CAT-CAUL-SPLIT', 2, 1350.0, 2480.0);")
+                    conn.execute("INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, shape_id, contour_xy_json, leaf_zone) VALUES ('CAT-CAUL-SPLIT', 0, 1, 'CAT-CAUL-SPLIT_p0_leaf1', '[[0,0],[1,0],[0,1]]', 'basal');")
+                    conn.execute("INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, shape_id, contour_xy_json, leaf_zone) VALUES ('CAT-CAUL-SPLIT', 0, 2, 'CAT-CAUL-SPLIT_p0_leaf2', '[[0,0],[1,0],[0,1]]', 'basal');")
+                    conn.execute("INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, shape_id, contour_xy_json, leaf_zone) VALUES ('CAT-CAUL-SPLIT', 1, 3, 'CAT-CAUL-SPLIT_p1_leaf3', '[[0,0],[1,0],[0,1]]', 'cauline');")
+                    conn.execute("INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, shape_id, contour_xy_json, leaf_zone) VALUES ('CAT-CAUL-SPLIT', 1, 4, 'CAT-CAUL-SPLIT_p1_leaf4', '[[0,0],[1,0],[0,1]]', 'cauline');")
+                    conn.execute("INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, shape_id, contour_xy_json, leaf_zone) VALUES ('CAT-CAUL-SPLIT', 2, 5, 'CAT-CAUL-SPLIT_p2_leaf5', '[[0,0],[1,0],[0,1]]', 'basal');")
+                    conn.execute("INSERT INTO voucher_reproductive_phenology (catalogNumber, plant_individual_id, capitula_count, total_capitula, n_anthesis, voucher_phenological_state, is_verified_anthesis) VALUES ('CAT-CAUL-SPLIT', 0, 0, 0, 0, 'sterile', 0);")
+                    conn.execute("INSERT INTO voucher_reproductive_phenology (catalogNumber, plant_individual_id, capitula_count, total_capitula, n_anthesis, voucher_phenological_state, is_verified_anthesis) VALUES ('CAT-CAUL-SPLIT', 1, 6, 6, 5, 'anthesis', 1);")
+
+                    # 3. CAT-TRUE-MULTI: two independent basal rosettes (>=2 basal leaves each, x=350 vs x=1650)
+                    conn.execute("INSERT INTO plant_individuals (catalogNumber, plant_individual_id, crown_x, crown_y) VALUES ('CAT-TRUE-MULTI', 0, 350.0, 2400.0);")
+                    conn.execute("INSERT INTO plant_individuals (catalogNumber, plant_individual_id, crown_x, crown_y) VALUES ('CAT-TRUE-MULTI', 1, 1650.0, 2420.0);")
+                    for pid_m in (0, 1):
+                        for lid_m in (1, 2):
+                            eff_l = pid_m * 10 + lid_m
+                            conn.execute(
+                                "INSERT INTO extracted_leaves (catalogNumber, plant_individual_id, leaf_id, shape_id, contour_xy_json, leaf_zone) VALUES (?, ?, ?, ?, '[[0,0],[1,0],[0,1]]', 'basal');",
+                                ("CAT-TRUE-MULTI", pid_m, eff_l, f"CAT-TRUE-MULTI_p{pid_m}_leaf{eff_l}"),
+                            )
+
+                n_coh = populate_run_active_cohort(conn, run_id="heal_run", voucher_rows=v_rows, clear_existing=True)
+                # Expect: CAT-PHANTOM -> 1 row (pid=1), CAT-CAUL-SPLIT -> 1 row (pid=0 with all 5 leaves & 6 capitula), CAT-TRUE-MULTI -> 2 rows (pid=0, 1) => total 4 rows
+                self.assertEqual(n_coh, 4)
+
+                phantom_pids = [r[0] for r in conn.execute("SELECT plant_individual_id FROM plant_individuals WHERE catalogNumber = 'CAT-PHANTOM';").fetchall()]
+                self.assertEqual(phantom_pids, [1])
+
+                split_pids = [r[0] for r in conn.execute("SELECT plant_individual_id FROM plant_individuals WHERE catalogNumber = 'CAT-CAUL-SPLIT';").fetchall()]
+                self.assertEqual(split_pids, [0])
+                split_leaves = conn.execute("SELECT COUNT(*) FROM extracted_leaves WHERE catalogNumber = 'CAT-CAUL-SPLIT' AND plant_individual_id = 0;").fetchone()[0]
+                self.assertEqual(int(split_leaves), 5)
+                vrp_merged = conn.execute("SELECT capitula_count, n_anthesis, voucher_phenological_state, is_verified_anthesis FROM voucher_reproductive_phenology WHERE catalogNumber = 'CAT-CAUL-SPLIT' AND plant_individual_id = 0;").fetchone()
+                self.assertEqual((int(vrp_merged[0]), int(vrp_merged[1]), str(vrp_merged[2]), int(vrp_merged[3])), (6, 5, "anthesis", 1))
+                h_cm = conn.execute("SELECT plant_height_cm FROM plant_individuals WHERE catalogNumber = 'CAT-CAUL-SPLIT' AND plant_individual_id = 0;").fetchone()[0]
+                self.assertAlmostEqual(float(h_cm), 42.5)
+
+                true_multi_pids = sorted(r[0] for r in conn.execute("SELECT plant_individual_id FROM plant_individuals WHERE catalogNumber = 'CAT-TRUE-MULTI';").fetchall())
+                self.assertEqual(true_multi_pids, [0, 1])
+
+                # Idempotence check
+                stats_again = consolidate_false_multi_plant_splits_db(conn)
+                self.assertEqual(stats_again, {"phantom_zero_stubs_removed": 0, "false_split_individuals_merged": 0})
+            finally:
+                conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

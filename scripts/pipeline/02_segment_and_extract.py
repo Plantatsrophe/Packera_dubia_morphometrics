@@ -1674,8 +1674,28 @@ class SegmentAndExtractPipeline:
                 petiole_width_mm=_pw_mm,
             ))
 
-        # 4. Vectorized Centroid Spatial Clustering (DBSCAN)
-        instances = cluster_plant_individuals(instances, sheet_w, sheet_h)
+        # 4. Stem-Aware Spatial Clustering (bridged Specimen_Segmenter mask + vertical shoot continuity)
+        _spec_mask_sheet: Optional[np.ndarray] = None
+        if (
+            len(instances) >= 2
+            and is_high_dpi
+            and isinstance(img_bgr, np.ndarray)
+            and img_bgr.ndim >= 2
+            and getattr(self, "specimen_segmenter", None) is not None
+            and getattr(self.specimen_segmenter, "model", None) is not None
+        ):
+            try:
+                _spec_mask_sheet = self.specimen_segmenter.predict_mask(img_bgr, return_sheet_size=True)
+            except Exception:
+                _spec_mask_sheet = None
+
+        instances = cluster_plant_individuals(
+            instances,
+            sheet_w,
+            sheet_h,
+            specimen_mask=_spec_mask_sheet,
+            root_boxes=root_detections,
+        )
 
         # 5. Basal Rosette Zone Statistics per plant_individual_id
         def _inst_sheet_geom(inst_obj: DetectedInstance) -> Tuple[float, float, float, float, float]:
@@ -2067,9 +2087,9 @@ class SegmentAndExtractPipeline:
             root_boxes=root_detections,
             rosette_centroids=rosette_centroids_by_pid,
         )
-        _spec_mask_sheet: Optional[np.ndarray] = None
         if (
-            pose_inputs
+            _spec_mask_sheet is None
+            and pose_inputs
             and len(pose_inputs) >= 2
             and is_high_dpi
             and getattr(self, "specimen_segmenter", None) is not None

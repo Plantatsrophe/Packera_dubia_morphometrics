@@ -2445,5 +2445,39 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
         self.assertAlmostEqual(m_glab["blade_cie_l_norm"], m_strap["blade_cie_l_norm"], delta=0.02)
 
 
+    def test_bolting_scape_specimen_mask_and_splayed_leaf_consolidation(self) -> None:
+        """Verify cluster_plant_individuals reunites bolting stems, mask-bridged shoots, and 1-leaf strays while separating side-by-side rooted plants."""
+        dummy_mask = np.ones((12, 12), dtype=np.uint8)
+        # Single bolting plant on a 2000x3000 sheet: basal rosette at y~2550, upper cauline leaves at y~1250 (dy=1300 > 0.15*3000=450),
+        # plus 1 splayed outer basal leaf 650 px laterally from the rosette.
+        b1 = DetectedInstance(catalog_number="BOLT1", leaf_id=1, bbox=(2500, 860, 2620, 960), mask=dummy_mask, score=0.95, class_id=0)
+        b2 = DetectedInstance(catalog_number="BOLT1", leaf_id=2, bbox=(2520, 930, 2640, 1030), mask=dummy_mask, score=0.94, class_id=0)
+        c1 = DetectedInstance(catalog_number="BOLT1", leaf_id=3, bbox=(1200, 890, 1300, 970), mask=dummy_mask, score=0.92, class_id=0)
+        c2 = DetectedInstance(catalog_number="BOLT1", leaf_id=4, bbox=(1120, 910, 1210, 980), mask=dummy_mask, score=0.91, class_id=0)
+        splay = DetectedInstance(catalog_number="BOLT1", leaf_id=5, bbox=(2530, 1520, 2630, 1620), mask=dummy_mask, score=0.89, class_id=0)
+
+        out_single = cluster_plant_individuals([b1, b2, c1, c2, splay], sheet_width=2000, sheet_height=3000)
+        self.assertEqual([inst.plant_individual_id for inst in out_single], [0, 0, 0, 0, 0])
+
+        # Diagonal V-bent plant bridged by Specimen_Segmenter mask across > 0.22 * sheet_width
+        v1 = DetectedInstance(catalog_number="VBENT", leaf_id=1, bbox=(2400, 300, 2520, 420), mask=dummy_mask, score=0.95, class_id=0)
+        v2 = DetectedInstance(catalog_number="VBENT", leaf_id=2, bbox=(2420, 360, 2540, 480), mask=dummy_mask, score=0.93, class_id=0)
+        v3 = DetectedInstance(catalog_number="VBENT", leaf_id=3, bbox=(900, 1400, 1020, 1520), mask=dummy_mask, score=0.92, class_id=0)
+        v4 = DetectedInstance(catalog_number="VBENT", leaf_id=4, bbox=(940, 1450, 1060, 1560), mask=dummy_mask, score=0.90, class_id=0)
+        spec_mask = np.zeros((3000, 2000), dtype=np.uint8)
+        cv2.line(spec_mask, (390, 2460), (1460, 960), 255, thickness=18)
+        out_bridged = cluster_plant_individuals([v1, v2, v3, v4], sheet_width=2000, sheet_height=3000, specimen_mask=spec_mask)
+        self.assertEqual([inst.plant_individual_id for inst in out_bridged], [0, 0, 0, 0])
+
+        # Two genuinely separate side-by-side rooted rosettes remain distinct [0, 0, 1, 1]
+        p0_a = DetectedInstance(catalog_number="TWO_ROOT", leaf_id=1, bbox=(2300, 250, 2420, 360), mask=dummy_mask, score=0.95, class_id=0)
+        p0_b = DetectedInstance(catalog_number="TWO_ROOT", leaf_id=2, bbox=(2320, 310, 2440, 420), mask=dummy_mask, score=0.94, class_id=0)
+        p1_a = DetectedInstance(catalog_number="TWO_ROOT", leaf_id=3, bbox=(2300, 1480, 2420, 1590), mask=dummy_mask, score=0.93, class_id=0)
+        p1_b = DetectedInstance(catalog_number="TWO_ROOT", leaf_id=4, bbox=(2320, 1540, 2440, 1650), mask=dummy_mask, score=0.92, class_id=0)
+        roots = [(2460, 280, 2580, 380), (2460, 1510, 2580, 1610)]
+        out_two = cluster_plant_individuals([p0_a, p0_b, p1_a, p1_b], sheet_width=2000, sheet_height=3000, root_boxes=roots)
+        self.assertEqual([inst.plant_individual_id for inst in out_two], [0, 0, 1, 1])
+
+
 if __name__ == "__main__":
     unittest.main()
