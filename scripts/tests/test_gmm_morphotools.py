@@ -642,7 +642,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     ],
                     stage_key="step04",
                     cwd=PROJECT_ROOT,
-                    skip_figures=include_tier3,
+                    skip_figures=perturb_bronze,
                 )
                 self.assertEqual(proc.returncode, 0, f"Step 04 run failed ({sub_name}):\n{proc.stderr}\n{proc.stdout}")
                 return tbl_dir, rep_dir, fig_dir
