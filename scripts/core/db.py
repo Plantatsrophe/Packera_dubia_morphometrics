@@ -2593,7 +2593,7 @@ def ingest_existing_run_tables_into_db(
             for ic in ("n_available_modalities",):
                 if ic in r:
                     d_tri[ic] = _to_int(r.get(ic))
-            for bc in ("cryptic_cluster_cohesion_pass", "is_completed_voucher"):
+            for bc in ("cryptic_cluster_cohesion_pass", "hybrid_zone_cohesion_pass", "is_completed_voucher"):
                 if bc in r:
                     d_tri[bc] = _to_bool_int(r.get(bc))
             for fc in (

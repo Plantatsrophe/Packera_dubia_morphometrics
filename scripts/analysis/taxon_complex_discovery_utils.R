@@ -545,11 +545,11 @@ evaluate_hierarchical_complex_delimitation <- function(morph_df, pheno_res = NUL
   morph_disagrees <- !is.na(cda_pred) & nzchar(cda_pred) & (cda_pred != sp_given) & is.finite(cda_prob) & (cda_prob >= 0.50)
   edaph_disagrees <- !is.na(ed_pred) & nzchar(ed_pred) & (ed_pred != sp_given) & is.finite(d_edaph) & (d_edaph < 0.45)
   both_alt_agree <- morph_disagrees & edaph_disagrees & (cda_pred == ed_pred)
-  inter_modal_mosaic <- morph_disagrees & edaph_disagrees & (cda_pred != ed_pred)
+  can_hyb_d <- length(unique(sp_given[!is.na(sp_given) & grepl("^Packera\\s+[a-z][a-z-]+$", sp_given)])) >= 2L
   congener_osr_reassign <- is.finite(min_cong_d2) & (min_cong_d2 <= stats::qchisq(0.90, df = p_morph)) & !is.na(min_cong_tx) & nzchar(min_cong_tx) & (min_cong_tx != sp_given) & m_flag
-  single_strong_reassign <- !inter_modal_mosaic & ((morph_disagrees & is.finite(cda_prob) & cda_prob >= 0.80) | congener_osr_reassign)
+  single_strong_reassign <- (morph_disagrees & is.finite(cda_prob) & cda_prob >= 0.72) | congener_osr_reassign
   is_stage1_misid <- !is_type_spec & (both_alt_agree | single_strong_reassign)
-  is_stage2_hybrid <- !is_type_spec & !is_stage1_misid & (inter_modal_mosaic | (is.finite(cda_margin) & cda_margin < 0.25 & (morph_disagrees | edaph_disagrees) & (!is.finite(d_edaph) | d_edaph >= 0.30)))
+  is_stage2_hybrid <- can_hyb_d & !is_type_spec & !is_stage1_misid & morph_disagrees & is.finite(cda_prob) & (cda_prob >= 0.35 & cda_prob <= 0.65) & is.finite(cda_margin) & (cda_margin <= 0.22) & (!is.finite(cda_sec) | (cda_sec >= 0.25 & (cda_prob + cda_sec) >= 0.75)) & (!is.finite(d_edaph) | d_edaph >= 0.30)
   has_evol_barrier <- (is.finite(d_doy) & abs(d_doy) >= 18.0) | (is.finite(d_edaph) & d_edaph < 0.30)
   coh_pass <- if ("cryptic_cluster_cohesion_pass" %in% names(morph_df)) { cp <- as.logical(morph_df$cryptic_cluster_cohesion_pass); cp[is.na(cp)] <- FALSE; cp } else rep(TRUE, n)
   is_stage3_cryptic <- !is_type_spec & !is_stage1_misid & !is_stage2_hybrid & is_t1_pure & coh_pass & (is.finite(cda_prob) & cda_prob < 0.70) &

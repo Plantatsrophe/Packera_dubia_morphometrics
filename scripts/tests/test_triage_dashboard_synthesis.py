@@ -59,7 +59,13 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                     "catalogNumber": "STAGE1-MISID-OVER-HYB",
                     "species_standardized": "Packera dubia",
                     "determiner_tier": "Tier_2_Silver",
+                    "decimalLatitude": 35.812,
+                    "decimalLongitude": -79.012,
+                    "doy": 122,
+                    "PC1": 2.40,
+                    "PC2": 0.02,
                     "cda_predicted_taxon": "Packera anonyma",
+                    "cda_second_taxon": "Packera dubia",
                     "cda_posterior_prob": 0.91,
                     "cda_second_posterior_prob": 0.09,
                     "cda_posterior_margin": 0.82,
@@ -78,14 +84,20 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                     "catalogNumber": "STAGE2-MOSAIC-HYBRID",
                     "species_standardized": "Packera dubia",
                     "determiner_tier": "Tier_2_Silver",
+                    "decimalLatitude": 35.806,
+                    "decimalLongitude": -79.006,
+                    "doy": 119,
+                    "PC1": -0.05,
+                    "PC2": 0.02,
                     "cda_predicted_taxon": "Packera anonyma",
-                    "cda_posterior_prob": 0.65,
-                    "cda_second_posterior_prob": 0.30,
-                    "cda_posterior_margin": 0.35,
-                    "morphometric_outlier_flag": True,
-                    "edaphic_best_fit_taxon": "Packera paupercula",
-                    "rf_predicted_taxon": "Packera paupercula",
-                    "rf_predicted_prob": 0.72,
+                    "cda_second_taxon": "Packera dubia",
+                    "cda_posterior_prob": 0.52,
+                    "cda_second_posterior_prob": 0.40,
+                    "cda_posterior_margin": 0.12,
+                    "morphometric_outlier_flag": False,
+                    "edaphic_best_fit_taxon": "Packera dubia",
+                    "rf_predicted_taxon": "Packera dubia",
+                    "rf_predicted_prob": 0.48,
                     "edaphic_schoener_d": 0.52,
                     "delta_doy_resid": 4.0,
                     "gmm_cluster": 2,
@@ -97,7 +109,13 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                     "catalogNumber": "STAGE3-TRUE-CRYPTIC",
                     "species_standardized": "Packera dubia",
                     "determiner_tier": "Tier_1_Gold",
+                    "decimalLatitude": 35.803,
+                    "decimalLongitude": -79.003,
+                    "doy": 144,
+                    "PC1": 0.0,
+                    "PC2": 3.6,
                     "cda_predicted_taxon": "Packera dubia",
+                    "cda_second_taxon": "Packera anonyma",
                     "cda_posterior_prob": 0.46,
                     "cda_second_posterior_prob": 0.28,
                     "cda_posterior_margin": 0.18,
@@ -115,7 +133,13 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                     "catalogNumber": "STAGE4-NO-BARRIER-PLASTIC",
                     "species_standardized": "Packera dubia",
                     "determiner_tier": "Tier_1_Gold",
+                    "decimalLatitude": 35.802,
+                    "decimalLongitude": -79.002,
+                    "doy": 118,
+                    "PC1": -2.1,
+                    "PC2": 0.85,
                     "cda_predicted_taxon": "Packera dubia",
+                    "cda_second_taxon": "Packera anonyma",
                     "cda_posterior_prob": 0.48,
                     "cda_second_posterior_prob": 0.25,
                     "cda_posterior_margin": 0.23,
@@ -127,6 +151,119 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
                     "gmm_2_delta_bic": 12.4,
                     "gmm_uncertainty": 0.08,
                     "basal_leaf_count": 4,
+                    "morph_tier_source": "Basal_Rosette",
+                },
+                {
+                    "catalogNumber": "STAGE2-SWARM-MATE",
+                    "species_standardized": "Packera dubia",
+                    "determiner_tier": "Tier_2_Silver",
+                    "decimalLatitude": 35.808,
+                    "decimalLongitude": -79.008,
+                    "doy": 120,
+                    "PC1": 0.10,
+                    "PC2": -0.02,
+                    "cda_predicted_taxon": "Packera anonyma",
+                    "cda_second_taxon": "Packera dubia",
+                    "cda_posterior_prob": 0.51,
+                    "cda_second_posterior_prob": 0.41,
+                    "cda_posterior_margin": 0.10,
+                    "morphometric_outlier_flag": False,
+                    "edaphic_best_fit_taxon": "Packera anonyma",
+                    "rf_predicted_taxon": "Packera anonyma",
+                    "rf_predicted_prob": 0.49,
+                    "edaphic_schoener_d": 0.54,
+                    "delta_doy_resid": 3.0,
+                    "gmm_cluster": 2,
+                    "gmm_uncertainty": 0.39,
+                    "basal_leaf_count": 3,
+                    "morph_tier_source": "Basal_Rosette",
+                },
+                {
+                    "catalogNumber": "DUB-GOLD-ANC-1",
+                    "species_standardized": "Packera dubia",
+                    "determiner_tier": "Tier_1_Gold",
+                    "decimalLatitude": 35.800,
+                    "decimalLongitude": -79.000,
+                    "doy": 115,
+                    "PC1": -2.50,
+                    "PC2": 0.08,
+                    "cda_predicted_taxon": "Packera dubia",
+                    "cda_posterior_prob": 0.96,
+                    "cda_second_posterior_prob": 0.04,
+                    "cda_posterior_margin": 0.92,
+                    "morphometric_outlier_flag": False,
+                    "edaphic_best_fit_taxon": "Packera dubia",
+                    "edaphic_schoener_d": 0.84,
+                    "delta_doy_resid": 0.0,
+                    "gmm_cluster": 1,
+                    "gmm_uncertainty": 0.03,
+                    "basal_leaf_count": 3,
+                    "morph_tier_source": "Basal_Rosette",
+                },
+                {
+                    "catalogNumber": "DUB-GOLD-ANC-2",
+                    "species_standardized": "Packera dubia",
+                    "determiner_tier": "Tier_1_Gold",
+                    "decimalLatitude": 35.805,
+                    "decimalLongitude": -79.005,
+                    "doy": 117,
+                    "PC1": -2.30,
+                    "PC2": -0.08,
+                    "cda_predicted_taxon": "Packera dubia",
+                    "cda_posterior_prob": 0.95,
+                    "cda_second_posterior_prob": 0.05,
+                    "cda_posterior_margin": 0.90,
+                    "morphometric_outlier_flag": False,
+                    "edaphic_best_fit_taxon": "Packera dubia",
+                    "edaphic_schoener_d": 0.82,
+                    "delta_doy_resid": 1.0,
+                    "gmm_cluster": 1,
+                    "gmm_uncertainty": 0.04,
+                    "basal_leaf_count": 3,
+                    "morph_tier_source": "Basal_Rosette",
+                },
+                {
+                    "catalogNumber": "ANO-GOLD-ANC-1",
+                    "species_standardized": "Packera anonyma",
+                    "determiner_tier": "Tier_1_Gold",
+                    "decimalLatitude": 35.810,
+                    "decimalLongitude": -79.010,
+                    "doy": 122,
+                    "PC1": 2.50,
+                    "PC2": 0.08,
+                    "cda_predicted_taxon": "Packera anonyma",
+                    "cda_posterior_prob": 0.96,
+                    "cda_second_posterior_prob": 0.04,
+                    "cda_posterior_margin": 0.92,
+                    "morphometric_outlier_flag": False,
+                    "edaphic_best_fit_taxon": "Packera anonyma",
+                    "edaphic_schoener_d": 0.84,
+                    "delta_doy_resid": 0.0,
+                    "gmm_cluster": 1,
+                    "gmm_uncertainty": 0.03,
+                    "basal_leaf_count": 3,
+                    "morph_tier_source": "Basal_Rosette",
+                },
+                {
+                    "catalogNumber": "ANO-GOLD-ANC-2",
+                    "species_standardized": "Packera anonyma",
+                    "determiner_tier": "Tier_1_Gold",
+                    "decimalLatitude": 35.815,
+                    "decimalLongitude": -79.015,
+                    "doy": 124,
+                    "PC1": 2.30,
+                    "PC2": -0.08,
+                    "cda_predicted_taxon": "Packera anonyma",
+                    "cda_posterior_prob": 0.95,
+                    "cda_second_posterior_prob": 0.05,
+                    "cda_posterior_margin": 0.90,
+                    "morphometric_outlier_flag": False,
+                    "edaphic_best_fit_taxon": "Packera anonyma",
+                    "edaphic_schoener_d": 0.82,
+                    "delta_doy_resid": 1.0,
+                    "gmm_cluster": 1,
+                    "gmm_uncertainty": 0.04,
+                    "basal_leaf_count": 3,
                     "morph_tier_source": "Basal_Rosette",
                 },
             ]).to_csv(cls.prec_in_csv, index=False)
@@ -147,14 +284,17 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
 
             nd_rows = [
                 {"catalogNumber": "AUR-GOLD-1", "institutionCode": "NCU", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_1_Gold", "regional_group": "Blue Ridge", "doy": 120, "decimalLatitude": 35.6, "decimalLongitude": -82.5, "fine_soil_ph": 6.2, "fine_soil_sand": 32.0, "fine_bedrock_depth_cm": 95.0, "can1": -3.0, "can2": 0.1, "can3": 0.0, "PC1": -1.5, "PC2": 0.2, "cda_predicted_taxon": "Packera aurea", "cda_posterior_prob": 0.96, "cda_posterior_margin": 0.92, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.82, "gmm_cluster": 1, "gmm_uncertainty": 0.03, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
-                {"catalogNumber": "AUR-GOLD-2", "institutionCode": "DUKE", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_1_Gold", "regional_group": "Ridge and Valley", "doy": 132, "decimalLatitude": 36.2, "decimalLongitude": -81.7, "fine_soil_ph": 6.4, "fine_soil_sand": 36.0, "fine_bedrock_depth_cm": 110.0, "can1": -2.8, "can2": -0.1, "can3": 0.1, "PC1": -1.4, "PC2": -0.1, "cda_predicted_taxon": "Packera aurea", "cda_posterior_prob": 0.95, "cda_posterior_margin": 0.90, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.80, "gmm_cluster": 1, "gmm_uncertainty": 0.04, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
-                {"catalogNumber": "OBO-GOLD-1", "institutionCode": "NCU", "species_raw": "Packera obovata", "species_standardized": "Packera obovata", "determiner_tier": "Tier_1_Gold", "regional_group": "Interior Plateau", "doy": 105, "decimalLatitude": 36.0, "decimalLongitude": -86.8, "fine_soil_ph": 7.3, "fine_soil_sand": 22.0, "fine_bedrock_depth_cm": 38.0, "can1": 3.1, "can2": 0.2, "can3": -0.1, "PC1": 1.6, "PC2": 0.1, "cda_predicted_taxon": "Packera obovata", "cda_posterior_prob": 0.97, "cda_posterior_margin": 0.94, "edaphic_best_fit_taxon": "Packera obovata", "edaphic_schoener_d": 0.85, "gmm_cluster": 1, "gmm_uncertainty": 0.02, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 4},
-                {"catalogNumber": "OBO-GOLD-2", "institutionCode": "TENN", "scientificName": "Packera obovata (Muhl. ex Willd.) W.A.Weber & Á.Löve", "species_raw": "Packera obovata", "species_standardized": "Packera obovata", "determiner_tier": "Tier_1_Gold", "regional_group": "Interior Plateau", "doy": 115, "decimalLatitude": 37.1, "decimalLongitude": -85.9, "fine_soil_ph": 7.5, "fine_soil_sand": 26.0, "fine_bedrock_depth_cm": 42.0, "can1": 2.9, "can2": -0.2, "can3": 0.1, "PC1": 1.5, "PC2": -0.2, "cda_predicted_taxon": "Packera obovata", "cda_posterior_prob": 0.96, "cda_posterior_margin": 0.92, "edaphic_best_fit_taxon": "Packera obovata", "edaphic_schoener_d": 0.83, "gmm_cluster": 1, "gmm_uncertainty": 0.03, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
+                {"catalogNumber": "AUR-GOLD-2", "institutionCode": "DUKE", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_1_Gold", "regional_group": "Ridge and Valley", "doy": 120, "decimalLatitude": 36.18, "decimalLongitude": -83.42, "fine_soil_ph": 6.4, "fine_soil_sand": 36.0, "fine_bedrock_depth_cm": 110.0, "can1": -2.8, "can2": -0.1, "can3": 0.1, "PC1": -1.4, "PC2": -0.1, "cda_predicted_taxon": "Packera aurea", "cda_posterior_prob": 0.95, "cda_posterior_margin": 0.90, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.80, "gmm_cluster": 1, "gmm_uncertainty": 0.04, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
+                {"catalogNumber": "AUR-GOLD-NORTH", "institutionCode": "GH", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_1_Gold", "regional_group": "Northeastern Highlands", "doy": 158, "decimalLatitude": 44.22, "decimalLongitude": -71.32, "fine_soil_ph": 6.1, "fine_soil_sand": 38.0, "fine_bedrock_depth_cm": 102.0, "can1": -2.9, "can2": 0.0, "can3": 0.0, "PC1": -1.45, "PC2": 0.05, "cda_predicted_taxon": "Packera aurea", "cda_posterior_prob": 0.96, "cda_posterior_margin": 0.92, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.81, "gmm_cluster": 1, "gmm_uncertainty": 0.03, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
+                {"catalogNumber": "OBO-GOLD-1", "institutionCode": "NCU", "species_raw": "Packera obovata", "species_standardized": "Packera obovata", "determiner_tier": "Tier_1_Gold", "regional_group": "Interior Plateau", "doy": 112, "decimalLatitude": 36.0, "decimalLongitude": -86.8, "fine_soil_ph": 7.3, "fine_soil_sand": 22.0, "fine_bedrock_depth_cm": 38.0, "can1": 3.1, "can2": 0.2, "can3": -0.1, "PC1": 1.6, "PC2": 0.1, "cda_predicted_taxon": "Packera obovata", "cda_posterior_prob": 0.97, "cda_posterior_margin": 0.94, "edaphic_best_fit_taxon": "Packera obovata", "edaphic_schoener_d": 0.85, "gmm_cluster": 1, "gmm_uncertainty": 0.02, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 4},
+                {"catalogNumber": "OBO-GOLD-2", "institutionCode": "TENN", "scientificName": "Packera obovata (Muhl. ex Willd.) W.A.Weber & Á.Löve", "species_raw": "Packera obovata", "species_standardized": "Packera obovata", "determiner_tier": "Tier_1_Gold", "regional_group": "Ridge and Valley", "doy": 116, "decimalLatitude": 36.15, "decimalLongitude": -83.39, "fine_soil_ph": 7.5, "fine_soil_sand": 26.0, "fine_bedrock_depth_cm": 42.0, "can1": 2.9, "can2": -0.2, "can3": 0.1, "PC1": 1.5, "PC2": -0.2, "cda_predicted_taxon": "Packera obovata", "cda_posterior_prob": 0.96, "cda_posterior_margin": 0.92, "edaphic_best_fit_taxon": "Packera obovata", "edaphic_schoener_d": 0.83, "gmm_cluster": 1, "gmm_uncertainty": 0.03, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
                 {"catalogNumber": "SCH-GOLD-1", "institutionCode": "GH", "species_raw": "Packera schweinitziana", "species_standardized": "Packera schweinitziana", "determiner_tier": "Tier_1_Gold", "regional_group": "Northeastern Highlands", "doy": 168, "decimalLatitude": 44.2, "decimalLongitude": -71.3, "fine_soil_ph": 5.4, "fine_soil_sand": 48.0, "fine_bedrock_depth_cm": 125.0, "can1": 0.0, "can2": 3.4, "can3": 0.2, "PC1": 0.1, "PC2": 1.9, "cda_predicted_taxon": "Packera schweinitziana", "cda_posterior_prob": 0.97, "cda_posterior_margin": 0.94, "edaphic_best_fit_taxon": "Packera schweinitziana", "edaphic_schoener_d": 0.84, "gmm_cluster": 1, "gmm_uncertainty": 0.03, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
-                {"catalogNumber": "SCH-GOLD-2", "institutionCode": "NY", "species_raw": "Packera schweinitziana", "species_standardized": "Packera schweinitziana", "determiner_tier": "Tier_1_Gold", "regional_group": "Northern Appalachian and Atlantic Maritime Highlands", "doy": 176, "decimalLatitude": 44.6, "decimalLongitude": -72.8, "fine_soil_ph": 5.2, "fine_soil_sand": 52.0, "fine_bedrock_depth_cm": 130.0, "can1": 0.2, "can2": 3.2, "can3": -0.2, "PC1": 0.2, "PC2": 1.8, "cda_predicted_taxon": "Packera schweinitziana", "cda_posterior_prob": 0.96, "cda_posterior_margin": 0.92, "edaphic_best_fit_taxon": "Packera schweinitziana", "edaphic_schoener_d": 0.81, "gmm_cluster": 1, "gmm_uncertainty": 0.04, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
+                {"catalogNumber": "SCH-GOLD-2", "institutionCode": "NY", "species_raw": "Packera schweinitziana", "species_standardized": "Packera schweinitziana", "determiner_tier": "Tier_1_Gold", "regional_group": "Northern Appalachian and Atlantic Maritime Highlands", "doy": 172, "decimalLatitude": 44.6, "decimalLongitude": -72.8, "fine_soil_ph": 5.2, "fine_soil_sand": 52.0, "fine_bedrock_depth_cm": 130.0, "can1": 0.2, "can2": 3.2, "can3": -0.2, "PC1": 0.2, "PC2": 1.8, "cda_predicted_taxon": "Packera schweinitziana", "cda_posterior_prob": 0.96, "cda_posterior_margin": 0.92, "edaphic_best_fit_taxon": "Packera schweinitziana", "edaphic_schoener_d": 0.81, "gmm_cluster": 1, "gmm_uncertainty": 0.04, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
                 {"catalogNumber": "AUR-MISID-OBO", "institutionCode": "NCU", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_3_Bronze", "regional_group": "Interior Plateau", "doy": 110, "decimalLatitude": 36.4, "decimalLongitude": -86.2, "fine_soil_ph": 7.4, "fine_soil_sand": 24.0, "fine_bedrock_depth_cm": 40.0, "can1": 2.95, "can2": 0.05, "can3": 0.0, "PC1": 1.55, "PC2": 0.0, "cda_predicted_taxon": "Packera obovata", "cda_posterior_prob": 0.93, "cda_posterior_margin": 0.86, "edaphic_best_fit_taxon": "Packera obovata", "edaphic_schoener_d": 0.18, "gmm_cluster": 1, "gmm_uncertainty": 0.04, "morphometric_outlier_flag": True, "triage_category": "Severe_Triple_Stream_Conflict", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
-                {"catalogNumber": "AUR-HYB-EXPLICIT", "institutionCode": "DUKE", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_2_Silver", "regional_group": "Ridge and Valley", "doy": 118, "decimalLatitude": 36.1, "decimalLongitude": -83.4, "fine_soil_ph": 6.8, "fine_soil_sand": 29.0, "fine_bedrock_depth_cm": 68.0, "can1": 0.1, "can2": 0.0, "can3": 0.0, "PC1": 0.05, "PC2": 0.0, "cda_predicted_taxon": "Packera obovata", "cda_posterior_prob": 0.52, "cda_posterior_margin": 0.08, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.55, "gmm_cluster": 1, "gmm_uncertainty": 0.40, "morphometric_outlier_flag": False, "triage_category": "Putative_Hybrid_Zone_Intergrade", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
-                {"catalogNumber": "AUR-HYB-MAHAL", "institutionCode": "GH", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_2_Silver", "regional_group": "Northeastern Highlands", "doy": 122, "decimalLatitude": 42.8, "decimalLongitude": -73.2, "fine_soil_ph": 5.9, "fine_soil_sand": 40.0, "fine_bedrock_depth_cm": 105.0, "can1": -0.9, "can2": 2.4, "can3": 0.1, "PC1": -0.4, "PC2": 1.3, "cda_predicted_taxon": "Packera aurea", "cda_posterior_prob": 0.51, "cda_posterior_margin": 0.10, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.58, "gmm_cluster": 1, "gmm_uncertainty": 0.42, "morphometric_outlier_flag": False, "triage_category": "Putative_Hybrid_Zone_Intergrade", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
+                {"catalogNumber": "AUR-HYB-EXPLICIT", "institutionCode": "DUKE", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_2_Silver", "regional_group": "Ridge and Valley", "doy": 118, "decimalLatitude": 36.165, "decimalLongitude": -83.405, "fine_soil_ph": 6.8, "fine_soil_sand": 29.0, "fine_bedrock_depth_cm": 68.0, "can1": 0.05, "can2": 0.0, "can3": 0.0, "PC1": 0.05, "PC2": 0.0, "cda_predicted_taxon": "Packera obovata", "cda_posterior_prob": 0.52, "cda_posterior_margin": 0.08, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.55, "gmm_cluster": 1, "gmm_uncertainty": 0.40, "morphometric_outlier_flag": False, "triage_category": "Putative_Hybrid_Zone_Intergrade", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
+                {"catalogNumber": "AUR-HYB-EXPLICIT-2", "institutionCode": "TENN", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_2_Silver", "regional_group": "Ridge and Valley", "doy": 119, "decimalLatitude": 36.170, "decimalLongitude": -83.410, "fine_soil_ph": 6.7, "fine_soil_sand": 30.0, "fine_bedrock_depth_cm": 72.0, "can1": -0.10, "can2": 0.02, "can3": 0.0, "PC1": -0.05, "PC2": 0.02, "cda_predicted_taxon": "Packera obovata", "cda_posterior_prob": 0.51, "cda_posterior_margin": 0.06, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.54, "gmm_cluster": 1, "gmm_uncertainty": 0.39, "morphometric_outlier_flag": False, "triage_category": "Putative_Hybrid_Zone_Intergrade", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
+                {"catalogNumber": "AUR-HYB-MAHAL", "institutionCode": "GH", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_2_Silver", "regional_group": "Northeastern Highlands", "doy": 162, "decimalLatitude": 44.21, "decimalLongitude": -71.31, "fine_soil_ph": 5.9, "fine_soil_sand": 40.0, "fine_bedrock_depth_cm": 105.0, "can1": -1.35, "can2": 1.70, "can3": 0.02, "PC1": -0.65, "PC2": 0.95, "cda_predicted_taxon": "Packera aurea", "cda_posterior_prob": 0.51, "cda_posterior_margin": 0.10, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.58, "gmm_cluster": 1, "gmm_uncertainty": 0.42, "morphometric_outlier_flag": False, "triage_category": "Putative_Hybrid_Zone_Intergrade", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
+                {"catalogNumber": "AUR-HYB-MAHAL-2", "institutionCode": "NY", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_2_Silver", "regional_group": "Northeastern Highlands", "doy": 163, "decimalLatitude": 44.215, "decimalLongitude": -71.315, "fine_soil_ph": 5.8, "fine_soil_sand": 42.0, "fine_bedrock_depth_cm": 108.0, "can1": -1.25, "can2": 1.80, "can3": 0.0, "PC1": -0.60, "PC2": 1.00, "cda_predicted_taxon": "Packera aurea", "cda_posterior_prob": 0.50, "cda_posterior_margin": 0.08, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.57, "gmm_cluster": 1, "gmm_uncertainty": 0.41, "morphometric_outlier_flag": False, "triage_category": "Putative_Hybrid_Zone_Intergrade", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
                 {"catalogNumber": "AUR-ECOTYPE-VAR", "institutionCode": "NCU", "species_raw": "Packera aurea var. gracilis", "species_standardized": "Packera aurea", "determiner_tier": "Tier_2_Silver", "regional_group": "Blue Ridge", "doy": 125, "decimalLatitude": 35.9, "decimalLongitude": -82.1, "fine_soil_ph": 6.1, "fine_soil_sand": 38.0, "fine_bedrock_depth_cm": 88.0, "can1": -2.5, "can2": 0.4, "can3": 0.0, "PC1": -1.2, "PC2": 0.3, "cda_predicted_taxon": "Packera aurea", "cda_posterior_prob": 0.88, "cda_posterior_margin": 0.76, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.38, "gmm_cluster": 2, "gmm_uncertainty": 0.08, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
                 {"catalogNumber": "AUR-PLASTIC-LATE", "institutionCode": "TENN", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_2_Silver", "regional_group": "Blue Ridge", "doy": 148, "decimalLatitude": 35.7, "decimalLongitude": -82.4, "fine_soil_ph": 6.3, "fine_soil_sand": 35.0, "fine_bedrock_depth_cm": 98.0, "can1": -2.7, "can2": 0.05, "can3": 0.0, "PC1": -1.35, "PC2": 0.05, "cda_predicted_taxon": "Packera aurea", "cda_posterior_prob": 0.65, "cda_posterior_margin": 0.42, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.78, "gmm_cluster": 1, "gmm_uncertainty": 0.06, "morphometric_outlier_flag": True, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
             ]
@@ -330,8 +470,14 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertEqual(res.loc["AUR-MISID-OBO", "recommended_determination"], "Packera obovata")
         self.assertEqual(res.loc["AUR-HYB-EXPLICIT", "taxonomic_treatment_subtype"], "Hybrid_Introgressant")
         self.assertEqual(res.loc["AUR-HYB-EXPLICIT", "recommended_determination"], "Packera aurea x Packera obovata")
+        self.assertEqual(res.loc["AUR-HYB-EXPLICIT", "hybrid_parent_1"], "Packera aurea")
+        self.assertEqual(res.loc["AUR-HYB-EXPLICIT", "hybrid_parent_2"], "Packera obovata")
+        self.assertTrue(bool(res.loc["AUR-HYB-EXPLICIT", "hybrid_zone_cohesion_pass"]))
         self.assertEqual(res.loc["AUR-HYB-MAHAL", "taxonomic_treatment_subtype"], "Hybrid_Introgressant")
         self.assertEqual(res.loc["AUR-HYB-MAHAL", "recommended_determination"], "Packera aurea x Packera schweinitziana")
+        self.assertEqual(res.loc["AUR-HYB-MAHAL", "hybrid_parent_1"], "Packera aurea")
+        self.assertEqual(res.loc["AUR-HYB-MAHAL", "hybrid_parent_2"], "Packera schweinitziana")
+        self.assertTrue(bool(res.loc["AUR-HYB-MAHAL", "hybrid_zone_cohesion_pass"]))
         self.assertEqual(res.loc["AUR-ECOTYPE-VAR", "taxonomic_treatment_subtype"], "Subspecies_Ecotype")
         self.assertEqual(res.loc["AUR-PLASTIC-LATE", "taxonomic_treatment_subtype"], "Ecophenotypic_Plasticity")
         self.assertEqual(res.loc["AUR-PLASTIC-LATE", "recommended_determination"], "Packera aurea")
@@ -1077,6 +1223,252 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             proc = run_warm_r_cmd(['Rscript', str(r_script)], stage_key='step06', cwd=PROJECT_ROOT)
         self.assertEqual(proc.returncode, 0, f"Step 06 zero-trust suite failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("STEP06_ZERO_TRUST_OK", proc.stdout)
+
+    def test_conservative_five_gate_hybrid_swarm_parentage_and_intraspecific_guard(self):
+        """
+        Verify the 5-Gate Conservative Contact-Zone Hybrid Swarm Protocol:
+          1. Blocks soil-only Spatial RF disagreement when morphology matches given_sp.
+          2. Blocks allopatric intermediates (> 15 km from congener parent).
+          3. Blocks allochronic intermediates (> 21 d flowering peak separation).
+          4. Blocks off-axis taphonomic outliers failing orthogonal Mahalanobis residual.
+          5. Blocks isolated n_deme == 1 sympatric intermediates while confirming n_deme >= 2
+             contact-zone swarms with explicit hybrid_parent_1, hybrid_parent_2, HTML chips, & report summary.
+          6. Strictly disables hybrid and parent calls in --intraspecific-mode and 1-taxon cohorts.
+        """
+        r_src = self.r_script_path.read_text(encoding="utf-8")
+        self.assertIn("can_evaluate_hybrids", r_src)
+        self.assertIn(".eval_five_gate_hybrid_pair", r_src)
+        self.assertIn("hybrid_zone_cohesion_pass", r_src)
+        self.assertIn("hybrid_parent_1", r_src)
+        self.assertIn("hybrid_parent_2", r_src)
+        self.assertNotIn("[Admixed Morphotype]", r_src)
+
+        if not rscript_available():
+            self.skipTest("Rscript not installed.")
+
+        r_code = """
+        suppressPackageStartupMessages({ library(readr); library(dplyr) })
+        source("scripts/analysis/06_triage_dashboard_synthesis.R")
+
+        df_hyb <- data.frame(
+          catalogNumber = c(
+            "DUB_ANC_1", "DUB_ANC_2",
+            "ANO_ANC_1", "ANO_ANC_2",
+            "LATE_ANC_1", "LATE_ANC_2",
+            "SOIL_ONLY_DISAGREE",
+            "ALLOPATRIC_INTERM",
+            "ALLOCHRONIC_INTERM",
+            "OFF_CHORD_OUTLIER",
+            "SINGLETON_SYMPATRIC",
+            "SWARM_CONTACT_1",
+            "SWARM_CONTACT_2"
+          ),
+          plant_individual_id = 0L,
+          species_raw = c(
+            "Packera dubia", "Packera dubia",
+            "Packera anonyma", "Packera anonyma",
+            "Packera schweinitziana", "Packera schweinitziana",
+            rep("Packera dubia", 7)
+          ),
+          species_standardized = c(
+            "Packera dubia", "Packera dubia",
+            "Packera anonyma", "Packera anonyma",
+            "Packera schweinitziana", "Packera schweinitziana",
+            rep("Packera dubia", 7)
+          ),
+          determiner_tier = c(rep("Tier_1_Gold", 6), rep("Tier_2_Silver", 7)),
+          morph_tier_source = "Basal_Rosette",
+          basal_leaf_count = 3L,
+          # Contact zone 1 near (35.80, -79.00) has DUB + ANO + LATE; Contact zone 2 near (35.20, -80.80) has DUB + ANO for singleton test
+          decimalLatitude = c(
+            35.800, 35.200,
+            35.808, 35.208,
+            35.805, 35.812,
+            35.804,
+            34.100,
+            35.806,
+            35.805,
+            35.204,
+            35.803,
+            35.807
+          ),
+          decimalLongitude = c(
+            -79.000, -80.800,
+            -79.008, -80.808,
+            -79.005, -79.012,
+            -79.004,
+            -77.900,
+            -79.006,
+            -79.005,
+            -80.804,
+            -79.003,
+            -79.007
+          ),
+          doy = c(
+            114, 116,
+            120, 122,
+            165, 169,
+            116,
+            118,
+            140,
+            118,
+            118,
+            117,
+            119
+          ),
+          is_verified_anthesis = TRUE,
+          PC1 = c(
+            -3.0, -2.8,
+             3.0,  2.8,
+             0.0,  0.2,
+            -2.7,
+             0.0,
+            -1.4,
+             0.0,
+             0.1,
+            -0.1,
+             0.2
+          ),
+          PC2 = c(
+            0.0,  0.1,
+            0.0, -0.1,
+            3.5,  3.3,
+            0.05,
+            0.0,
+            1.7,
+            3.9,
+            0.02,
+            0.03,
+           -0.02
+          ),
+          blade_cie_l_sheet_delta = c(
+            -12.0, -11.0,
+            -28.0, -27.0,
+            -26.0, -25.0,
+            -11.5,
+            -20.0,
+            -18.5,
+            -19.5,
+            -19.5,
+            -19.8,
+            -20.4
+          ),
+          cda_predicted_taxon = c(
+            "Packera dubia", "Packera dubia",
+            "Packera anonyma", "Packera anonyma",
+            "Packera schweinitziana", "Packera schweinitziana",
+            "Packera dubia",
+            "Packera anonyma",
+            "Packera schweinitziana",
+            "Packera anonyma",
+            "Packera anonyma",
+            "Packera anonyma",
+            "Packera anonyma"
+          ),
+          cda_second_taxon = c(
+            "Packera anonyma", "Packera anonyma",
+            "Packera dubia", "Packera dubia",
+            "Packera dubia", "Packera dubia",
+            "Packera anonyma",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera dubia"
+          ),
+          cda_posterior_prob = c(0.96, 0.95, 0.96, 0.95, 0.96, 0.95, 0.74, 0.52, 0.51, 0.52, 0.53, 0.52, 0.54),
+          cda_second_posterior_prob = c(0.04, 0.05, 0.04, 0.05, 0.04, 0.05, 0.24, 0.42, 0.41, 0.40, 0.41, 0.42, 0.40),
+          cda_posterior_margin = c(0.92, 0.90, 0.92, 0.90, 0.92, 0.90, 0.50, 0.10, 0.10, 0.12, 0.12, 0.10, 0.14),
+          morphometric_outlier_flag = FALSE,
+          edaphic_best_fit_taxon = c(
+            "Packera dubia", "Packera dubia",
+            "Packera anonyma", "Packera anonyma",
+            "Packera schweinitziana", "Packera schweinitziana",
+            "Packera anonyma",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera anonyma"
+          ),
+          rf_predicted_taxon = c(
+            "Packera dubia", "Packera dubia",
+            "Packera anonyma", "Packera anonyma",
+            "Packera schweinitziana", "Packera schweinitziana",
+            "Packera anonyma",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera dubia",
+            "Packera anonyma"
+          ),
+          rf_predicted_prob = c(0.92, 0.91, 0.92, 0.91, 0.92, 0.91, 0.68, 0.48, 0.48, 0.48, 0.49, 0.48, 0.49),
+          edaphic_schoener_d = rep(0.62, 13),
+          edaphic_z_score = rep(0.85, 13),
+          gmm_cluster = 1L,
+          gmm_uncertainty = c(rep(0.04, 6), 0.12, 0.38, 0.39, 0.37, 0.38, 0.40, 0.39),
+          triage_category = c(rep("Clean_MultiModal_Consensus", 6), rep("Putative_Hybrid_Zone_Intergrade", 7)),
+          stringsAsFactors = FALSE
+        )
+
+        res_multi <- apply_taxonomic_decision_matrix(df_hyb, intraspecific_mode = FALSE)
+        rownames(res_multi) <- res_multi$catalogNumber
+
+        # Gates 1 to 5 negative controls: ZERO false hybrids
+        for (neg_id in c("SOIL_ONLY_DISAGREE", "ALLOPATRIC_INTERM", "ALLOCHRONIC_INTERM", "OFF_CHORD_OUTLIER", "SINGLETON_SYMPATRIC")) {
+          stopifnot(!identical(res_multi[neg_id, "taxonomic_treatment_subtype"], "Hybrid_Introgressant"))
+          stopifnot(!isTRUE(res_multi[neg_id, "hybrid_zone_cohesion_pass"]))
+          stopifnot(is.na(res_multi[neg_id, "hybrid_parent_1"]))
+          stopifnot(is.na(res_multi[neg_id, "hybrid_parent_2"]))
+        }
+        stopifnot(grepl("Unreplicated sympatric intermediate", res_multi["SINGLETON_SYMPATRIC", "synthesis_rationale"]))
+
+        # Confirmed contact-zone hybrid swarm (n_deme = 2) reports both parent species explicitly
+        for (pos_id in c("SWARM_CONTACT_1", "SWARM_CONTACT_2")) {
+          stopifnot(identical(res_multi[pos_id, "taxonomic_treatment_subtype"], "Hybrid_Introgressant"))
+          stopifnot(isTRUE(res_multi[pos_id, "hybrid_zone_cohesion_pass"]))
+          stopifnot(identical(res_multi[pos_id, "hybrid_parent_1"], "Packera dubia"))
+          stopifnot(identical(res_multi[pos_id, "hybrid_parent_2"], "Packera anonyma"))
+          stopifnot(identical(res_multi[pos_id, "recommended_determination"], "Packera dubia x Packera anonyma"))
+        }
+
+        # Check Markdown report & interactive HTML parent-species reporting
+        tf_rep <- tempfile(fileext = ".md")
+        tf_htm <- tempfile(fileext = ".html")
+        opts_r <- list(output_report = tf_rep, output_plot = "", focal_taxon = "Packera dubia", intraspecific_mode = FALSE, gmm_bic = "", gmm_summary = "")
+        generate_taxonomic_revision_report(res_multi, opts_r)
+        generate_interactive_triage_html(res_multi, tf_htm, focal_taxon = "Packera dubia", opts = opts_r)
+        rep_txt <- paste(readLines(tf_rep, warn = FALSE), collapse = "\n")
+        htm_txt <- paste(readLines(tf_htm, warn = FALSE), collapse = "\n")
+        stopifnot(grepl("Confirmed Hybrid Swarm Parentage", rep_txt, fixed = TRUE))
+        stopifnot(grepl("*Packera anonyma* x *Packera dubia*", rep_txt, fixed = TRUE))
+        stopifnot(grepl("Confirmed Hybrid Swarms (Putative Parent Species)", htm_txt, fixed = TRUE))
+        stopifnot(!grepl("[–—]", rep_txt))
+
+        # Intraspecific mode & single-taxon cohorts NEVER flag hybrids or parent species
+        res_intra <- apply_taxonomic_decision_matrix(df_hyb, intraspecific_mode = TRUE)
+        stopifnot(!any(res_intra$taxonomic_treatment_subtype == "Hybrid_Introgressant"))
+        stopifnot(!any(res_intra$hybrid_zone_cohesion_pass))
+        stopifnot(all(is.na(res_intra$hybrid_parent_1)) && all(is.na(res_intra$hybrid_parent_2)))
+        stopifnot(!any(grepl("Admixed Morphotype", res_intra$recommended_determination, fixed = TRUE)))
+
+        df_single_sp <- df_hyb[df_hyb$species_standardized == "Packera dubia", , drop = FALSE]
+        res_single_sp <- apply_taxonomic_decision_matrix(df_single_sp, intraspecific_mode = FALSE)
+        stopifnot(!any(res_single_sp$taxonomic_treatment_subtype == "Hybrid_Introgressant"))
+        stopifnot(all(is.na(res_single_sp$hybrid_parent_1)) && all(is.na(res_single_sp$hybrid_parent_2)))
+
+        cat("CONSERVATIVE_FIVE_GATE_HYBRID_OK\n")
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            r_script = Path(tmpdir) / "test_five_gate_hybrid.R"
+            r_script.write_text(r_code, encoding="utf-8")
+            proc = run_warm_r_cmd(["Rscript", str(r_script)], stage_key="step06", cwd=PROJECT_ROOT)
+        self.assertEqual(proc.returncode, 0, f"5-gate hybrid test failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("CONSERVATIVE_FIVE_GATE_HYBRID_OK", proc.stdout)
+
 
 
 

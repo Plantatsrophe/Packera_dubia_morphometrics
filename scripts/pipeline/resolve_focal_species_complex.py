@@ -342,6 +342,57 @@ def _extract_stage_metrics(
         "n_type_synonymy_candidate": _count_sub("Type_Synonymy_Candidate"),
         "n_misidentification_reassign": _count_sub("Misidentification_Reassign"),
         "n_hybrid_introgressant": _count_sub("Hybrid_Introgressant"),
+        "hybrid_parent_pairs": "; ".join(
+            f"{pair} (n={cnt})"
+            for pair, cnt in sorted(
+                {
+                    pair_key: sum(
+                        1
+                        for r in eval_rows
+                        if str(r.get("taxonomic_treatment_subtype", "")).strip() == "Hybrid_Introgressant"
+                        and (
+                            " x ".join(
+                                sorted(
+                                    [
+                                        str(r.get("hybrid_parent_1") or "").strip(),
+                                        str(r.get("hybrid_parent_2") or "").strip(),
+                                    ]
+                                )
+                            )
+                            if str(r.get("hybrid_parent_1") or "").strip() and str(r.get("hybrid_parent_2") or "").strip()
+                            else (
+                                " x ".join(sorted(p.strip() for p in str(r.get("recommended_determination") or "").split(" x ", 1)))
+                                if " x " in str(r.get("recommended_determination") or "")
+                                else ""
+                            )
+                        )
+                        == pair_key
+                    )
+                    for pair_key in {
+                        (
+                            " x ".join(
+                                sorted(
+                                    [
+                                        str(r.get("hybrid_parent_1") or "").strip(),
+                                        str(r.get("hybrid_parent_2") or "").strip(),
+                                    ]
+                                )
+                            )
+                            if str(r.get("hybrid_parent_1") or "").strip() and str(r.get("hybrid_parent_2") or "").strip()
+                            else (
+                                " x ".join(sorted(p.strip() for p in str(r.get("recommended_determination") or "").split(" x ", 1)))
+                                if " x " in str(r.get("recommended_determination") or "")
+                                else ""
+                            )
+                        )
+                        for r in eval_rows
+                        if str(r.get("taxonomic_treatment_subtype", "")).strip() == "Hybrid_Introgressant"
+                    }
+                    if pair_key
+                }.items(),
+                key=lambda kv: (-kv[1], kv[0]),
+            )
+        ),
         "n_subspecies_ecotype": _count_sub("Subspecies_Ecotype"),
         "n_ecophenotypic_plasticity": _count_sub("Ecophenotypic_Plasticity"),
         "n_putative_cryptic_species": _count_sub("Putative_Cryptic_Species"),
@@ -458,7 +509,13 @@ def compile_complex_resolution_summary(
         f"* **Primary Delimitation Call:** {verdict}",
         f"* **Complex Neighbor Scope (Stages 1 and 2):** {s2['complex_neighbors'] or s1['complex_neighbors'] or 'None above affinity threshold'}",
         f"* **Interspecific Misidentifications Purged Before Stage 3:** {s2['n_misidentification_reassign']} OTUs",
-        f"* **Sympatric Hybrid / Introgressant Candidates (Stage 2):** {s2['n_hybrid_introgressant']} OTUs",
+        (
+            f"* **Sympatric Hybrid / Introgressant Candidates (Stage 2):** {s2['n_hybrid_introgressant']} OTUs "
+            f"({s2['hybrid_parent_pairs']})"
+            if s2.get("hybrid_parent_pairs")
+            else f"* **Sympatric Hybrid / Introgressant Candidates (Stage 2):** {s2['n_hybrid_introgressant']} OTUs "
+            f"(Stages 3 and 4 run in single-taxon intraspecific mode where interspecific hybridity is disabled)"
+        ),
         f"* **Spatial-Thinning Sensitivity Check (Stage 4):** {thin_note}",
         "",
         "## 2. Cross-Stage Quantitative Summary",

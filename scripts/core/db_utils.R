@@ -1755,6 +1755,9 @@ persist_step06_to_sqlite <- function(
   ct_df$run_id <- rid
   if (!("plant_individual_id" %in% names(ct_df))) ct_df$plant_individual_id <- 0L
   ct_df$plant_individual_id[is.na(ct_df$plant_individual_id)] <- 0L
+  for (.bcol in intersect(c("cryptic_cluster_cohesion_pass", "hybrid_zone_cohesion_pass", "is_completed_voucher"), names(ct_df))) {
+    ct_df[[.bcol]] <- ifelse(is.na(ct_df[[.bcol]]), NA_integer_, as.integer(as.logical(ct_df[[.bcol]])))
+  }
 
   db_upsert_dataframe(
     conn,

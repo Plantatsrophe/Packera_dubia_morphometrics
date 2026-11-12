@@ -904,5 +904,45 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 conn.close()
 
 
+    def test_curation_triage_hybrid_parentage_columns_and_migration(self) -> None:
+        """Verify curation_triage and v_integrative_triage_master expose hybrid_parent_1, hybrid_parent_2, and hybrid_zone_cohesion_pass, and migrate older schemas idempotently."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = Path(tmp) / "legacy_ct.sqlite"
+            raw_conn = sqlite3.connect(db_p)
+            raw_conn.executescript(
+                """
+                CREATE TABLE pipeline_runs (run_id TEXT PRIMARY KEY, start_time TEXT);
+                INSERT INTO pipeline_runs (run_id, start_time) VALUES ('r1', '2026-11-12T00:00:00Z');
+                CREATE TABLE curation_triage (
+                    run_id TEXT NOT NULL,
+                    catalogNumber TEXT NOT NULL,
+                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
+                    taxonomic_treatment_subtype TEXT,
+                    recommended_determination TEXT,
+                    cryptic_cluster_cohesion_pass INTEGER,
+                    is_completed_voucher INTEGER,
+                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
+                );
+                INSERT INTO curation_triage VALUES ('r1', 'NCU-HYB-1', 0, 'Hybrid_Introgressant', 'Packera dubia x Packera anonyma', 0, 1);
+                """
+            )
+            raw_conn.commit()
+            raw_conn.close()
+
+            conn = get_db_connection(db_p, init_schema=True)
+            try:
+                ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
+                mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
+                for req_col in ("hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2"):
+                    self.assertIn(req_col, ct_cols)
+                    self.assertIn(req_col, mv_cols)
+                row = conn.execute(
+                    "SELECT taxonomic_treatment_subtype, recommended_determination FROM curation_triage WHERE catalogNumber = 'NCU-HYB-1';"
+                ).fetchone()
+                self.assertEqual(tuple(row), ("Hybrid_Introgressant", "Packera dubia x Packera anonyma"))
+            finally:
+                conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

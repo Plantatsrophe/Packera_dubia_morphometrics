@@ -2091,6 +2091,35 @@ execute_crossmodal_consensus <- function(
     vapply(seq_len(n), function(ri) any(vapply(eco_cols, function(cl) is.finite(suppressWarnings(as.numeric(df[[cl]][ri]))), logical(1))), logical(1))
   } else rep(FALSE, n)
 
+  # Conservative hybrid-zone screen in Step 05: disabled in intraspecific/single-taxon mode
+  # and gated on local two-parent anchor co-occurrence (<= 25 km) + genuine morphological intermediacy.
+  can_eval_hybrids_s05 <- !is_intra && (K_tx >= 2L) && (sum(grepl("^Packera\\s+[a-z][a-z-]+$", active_taxa)) >= 2L)
+  s05_lat_v <- if ("decimalLatitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLatitude)) else rep(NA_real_, n)
+  s05_lon_v <- if ("decimalLongitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLongitude)) else rep(NA_real_, n)
+  s05_cat_v <- if ("catalogNumber" %in% names(df)) as.character(df$catalogNumber) else as.character(seq_len(n))
+  s05_tier_v <- if ("determiner_tier" %in% names(df)) as.character(df$determiner_tier) else rep("Tier_3_Bronze", n)
+  s05_anc_mask <- s05_tier_v %in% c("Tier_0_Type_Anchor", "Tier_1_Gold", "Tier_2_Silver")
+  s05_coords_by_tx <- list()
+  if (can_eval_hybrids_s05) {
+    for (tx_s05 in active_taxa) {
+      idx_tx_a <- which(grp_vec == tx_s05 & s05_anc_mask & is.finite(s05_lat_v) & is.finite(s05_lon_v))
+      if (length(idx_tx_a) == 0L) idx_tx_a <- which(grp_vec == tx_s05 & is.finite(s05_lat_v) & is.finite(s05_lon_v))
+      s05_coords_by_tx[[tx_s05]] <- idx_tx_a
+    }
+  }
+  .s05_min_parent_km <- function(row_i, tx_name) {
+    if (!is.finite(s05_lat_v[row_i]) || !is.finite(s05_lon_v[row_i])) return(Inf)
+    idx_a <- s05_coords_by_tx[[tx_name]]
+    if (is.null(idx_a) || length(idx_a) == 0L) return(Inf)
+    idx_a <- idx_a[s05_cat_v[idx_a] != s05_cat_v[row_i]]
+    if (length(idx_a) == 0L) return(Inf)
+    dlat <- (s05_lat_v[idx_a] - s05_lat_v[row_i]) * (pi / 180.0)
+    dlon <- (s05_lon_v[idx_a] - s05_lon_v[row_i]) * (pi / 180.0)
+    ah <- sin(dlat / 2.0)^2 + cos(s05_lat_v[row_i] * (pi / 180.0)) * cos(s05_lat_v[idx_a] * (pi / 180.0)) * sin(dlon / 2.0)^2
+    min(6371.0 * 2.0 * atan2(sqrt(pmax(0.0, ah)), sqrt(pmax(0.0, 1.0 - ah))))
+  }
+  cda_marg_s05 <- if ("cda_posterior_margin" %in% names(df)) suppressWarnings(as.numeric(df$cda_posterior_margin)) else rep(NA_real_, n)
+
   for (i in seq_len(n)) {
     given_sp <- grp_vec[i]
     has_m_i <- isTRUE(has_obs_morph_vec[i])
@@ -2185,11 +2214,16 @@ execute_crossmodal_consensus <- function(
       conf_flags[i] <- TRUE; triage_cats[i] <- "Phenological_Anomaly_Outlier"
       discord_notes[i] <- sprintf("Verified-anthesis DOY %.0f diverges from seasonal peak (ang_diff=%.2f rad)", raw_doy[i], ang_diff)
     } else if (morph_disagrees || edaph_disagrees) {
-      if (has_e_i && is.finite(edaph_z_given) && is.finite(edaph_z_alt) &&
-          ((has_m_i && morph_sp != edaph_sp) || (!is.na(cda_prob) && cda_prob >= 0.40 && cda_prob <= 0.65)) &&
-          (edaph_z_given <= 2.5 && edaph_z_alt <= 2.5)) {
+      s05_marg_i <- cda_marg_s05[i]
+      s05_morph_inter <- has_m_i && !is.na(cda_prob) && (cda_prob >= 0.32 && cda_prob <= 0.65) &&
+                         (is.na(s05_marg_i) || s05_marg_i <= 0.22) && !(morph_sp == given_sp && cda_prob >= 0.62)
+      s05_syntopic <- can_eval_hybrids_s05 && (alt_parent != given_sp) &&
+                      (.s05_min_parent_km(i, given_sp) <= 25.0) && (.s05_min_parent_km(i, alt_parent) <= 25.0)
+      if (can_eval_hybrids_s05 && has_e_i && s05_morph_inter && s05_syntopic &&
+          is.finite(edaph_z_given) && is.finite(edaph_z_alt) &&
+          (edaph_z_given <= 2.2 && edaph_z_alt <= 2.2)) {
         conf_flags[i] <- TRUE; triage_cats[i] <- "Putative_Hybrid_Zone_Intergrade"
-        discord_notes[i] <- sprintf("Intermediate morphometrics & fine-grain edaphic overlap between %s and %s", given_sp, alt_parent)
+        discord_notes[i] <- sprintf("Syntopic contact-zone intermediate morphometrics & edaphic overlap between %s and %s", given_sp, alt_parent)
       } else if (morph_disagrees && ((has_e_i && edaph_sp == morph_sp) || is_m_out || (!is.na(cda_prob) && cda_prob >= 0.70))) {
         conf_flags[i] <- TRUE; triage_cats[i] <- "Severe_Triple_Stream_Conflict"
         discord_notes[i] <- sprintf("Cross-modal misidentification signal favoring %s over given %s", alt_parent, given_sp)

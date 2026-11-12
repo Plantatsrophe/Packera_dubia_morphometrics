@@ -385,6 +385,9 @@ def _build_master_view_ddl() -> str:
         ct.synthesis_triage_action AS synthesis_triage_action,
         ct.synthesis_rationale AS synthesis_rationale,
         ct.cryptic_cluster_cohesion_pass AS cryptic_cluster_cohesion_pass,
+        ct.hybrid_zone_cohesion_pass AS hybrid_zone_cohesion_pass,
+        ct.hybrid_parent_1 AS hybrid_parent_1,
+        ct.hybrid_parent_2 AS hybrid_parent_2,
         ct.is_completed_voucher AS is_completed_voucher
     FROM run_active_cohort rac
     LEFT JOIN vouchers v
@@ -902,6 +905,9 @@ def _build_schema_ddl() -> str:
         synthesis_triage_action TEXT,
         synthesis_rationale TEXT,
         cryptic_cluster_cohesion_pass INTEGER,
+        hybrid_zone_cohesion_pass INTEGER,
+        hybrid_parent_1 TEXT,
+        hybrid_parent_2 TEXT,
         is_completed_voucher INTEGER,
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
@@ -1087,6 +1093,9 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
     ),
     "curation_triage": (
         ("cryptic_cluster_cohesion_pass", "INTEGER"),
+        ("hybrid_zone_cohesion_pass", "INTEGER"),
+        ("hybrid_parent_1", "TEXT"),
+        ("hybrid_parent_2", "TEXT"),
     ),
     "environmental_cache": tuple(
         (
@@ -1125,7 +1134,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261117
+PACKERA_SCHEMA_USER_VERSION: int = 20261118
 
 
 def _migrate_dynamic_schema_columns(
@@ -1172,7 +1181,16 @@ def _migrate_dynamic_schema_columns(
         ct_cols_now = {
             str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()
         }
-        if ct_cols_now and not {
+        for _ct_col, _ct_type in (
+            ("cryptic_cluster_cohesion_pass", "INTEGER"),
+            ("hybrid_zone_cohesion_pass", "INTEGER"),
+            ("hybrid_parent_1", "TEXT"),
+            ("hybrid_parent_2", "TEXT"),
+        ):
+            if ct_cols_now and _ct_col not in ct_cols_now:
+                conn.execute(f"ALTER TABLE curation_triage ADD COLUMN {_ct_col} {_ct_type};")
+                ct_cols_now.add(_ct_col)
+        if ct_cols_now and ct_cols_now != {
             "run_id", "catalogNumber", "plant_individual_id",
             "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa",
             "n_available_modalities", "probabilistic_consensus_conflict",
@@ -1180,8 +1198,10 @@ def _migrate_dynamic_schema_columns(
             "delta_doy_resid", "taxonomic_status_call", "recommended_determination",
             "taxonomic_treatment_broad", "taxonomic_treatment_subtype",
             "synthesis_triage_priority", "synthesis_triage_action",
-            "synthesis_rationale", "cryptic_cluster_cohesion_pass", "is_completed_voucher",
-        }.issuperset(ct_cols_now):
+            "synthesis_rationale", "cryptic_cluster_cohesion_pass",
+            "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2",
+            "is_completed_voucher",
+        }:
             canon_ct_cols = (
                 "run_id", "catalogNumber", "plant_individual_id",
                 "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa",
@@ -1190,7 +1210,9 @@ def _migrate_dynamic_schema_columns(
                 "delta_doy_resid", "taxonomic_status_call", "recommended_determination",
                 "taxonomic_treatment_broad", "taxonomic_treatment_subtype",
                 "synthesis_triage_priority", "synthesis_triage_action",
-                "synthesis_rationale", "cryptic_cluster_cohesion_pass", "is_completed_voucher",
+                "synthesis_rationale", "cryptic_cluster_cohesion_pass",
+                "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2",
+                "is_completed_voucher",
             )
             shared_ct = [c for c in canon_ct_cols if c in ct_cols_now]
             conn.executescript(
@@ -1216,6 +1238,9 @@ def _migrate_dynamic_schema_columns(
                     synthesis_triage_action TEXT,
                     synthesis_rationale TEXT,
                     cryptic_cluster_cohesion_pass INTEGER,
+                    hybrid_zone_cohesion_pass INTEGER,
+                    hybrid_parent_1 TEXT,
+                    hybrid_parent_2 TEXT,
                     is_completed_voucher INTEGER,
                     PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
                     FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
@@ -1265,7 +1290,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2"}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2"}
             if (
                 "leaf_zone" not in el_cols
                 or "area_mm2" not in el_cols

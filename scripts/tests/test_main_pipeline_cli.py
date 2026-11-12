@@ -1113,7 +1113,7 @@ REUSE_CANONICAL_DATA="false"
                     [
                         {"catalogNumber": "D_TYPE", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Confirmed_Type_Control", "gmm_cluster": "1"},
                         {"catalogNumber": "D_MIS", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Misidentification_Reassign", "gmm_cluster": "2"},
-                        {"catalogNumber": "D_HYB", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Hybrid_Introgressant", "gmm_cluster": "1"},
+                        {"catalogNumber": "D_HYB", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Hybrid_Introgressant", "hybrid_parent_1": "Packera dubia", "hybrid_parent_2": "Packera anonyma", "recommended_determination": "Packera dubia x Packera anonyma", "gmm_cluster": "1"},
                     ],
                 ),
                 (
@@ -1162,6 +1162,8 @@ REUSE_CANONICAL_DATA="false"
             md_txt = md_out.read_text(encoding="utf-8")
             self.assertIn("Candidate cryptic lineage detected", md_txt)
             self.assertIn("D_CRYP1", md_txt)
+            self.assertIn("Packera anonyma x Packera dubia (n=1)", md_txt)
+            self.assertEqual(str(s2_row["hybrid_parent_pairs"]), "Packera anonyma x Packera dubia (n=1)")
 
 
 if __name__ == "__main__":

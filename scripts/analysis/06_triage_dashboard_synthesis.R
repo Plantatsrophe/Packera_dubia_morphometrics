@@ -927,10 +927,28 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     if (any(hit_ab)) s[hit_ab] <- unname(.us_abbr_to_state[up[hit_ab]])
     s
   }
+  .norm_county_str <- function(cv) {
+    s <- tolower(trimws(as.character(cv)))
+    s[is.na(s) | s %in% c("", "na", "nan", "none", "null", "unknown")] <- ""
+    s <- gsub("\\b(county|parish|co\\.|borough)\\b", "", s)
+    s <- gsub("[^a-z0-9]+", " ", s)
+    trimws(s)
+  }
   state_vec_geo <- if ("stateProvince" %in% names(df)) .norm_state_str(df$stateProvince) else rep("", n)
+  cnty_raw_geo <- if ("county" %in% names(df)) .norm_county_str(df$county) else rep("", n)
+  state_cnty_geo <- ifelse(nzchar(state_vec_geo) & nzchar(cnty_raw_geo), paste(state_vec_geo, cnty_raw_geo, sep = "||"), "")
   lat_vec_geo <- if ("decimalLatitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLatitude)) else rep(NA_real_, n)
   lon_vec_geo <- if ("decimalLongitude" %in% names(df)) suppressWarnings(as.numeric(df$decimalLongitude)) else rep(NA_real_, n)
+
+  is_binomial_packera <- function(v) {
+    s <- trimws(as.character(v))
+    !is.na(s) & grepl("^Packera\\s+[a-z][a-z-]+$", s)
+  }
+  cohort_species <- sort(unique(trimws(sp_all_vec[is_binomial_packera(sp_all_vec)])))
+  can_evaluate_hybrids <- !is_intra && (length(cohort_species) >= 2L)
+
   usda_states_by_tx <- list()
+  db_syntopy_rows <- NULL
   if (Sys.getenv("PACKERA_DEMO_MODE", unset = "") != "1" && exists("connect_packera_db", mode = "function") && requireNamespace("DBI", quietly = TRUE)) {
     tryCatch({
       c_geo <- connect_packera_db(read_only = TRUE, demo = FALSE)
@@ -943,6 +961,17 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           ok_u <- nzchar(u_tx) & nzchar(u_st)
           if (any(ok_u)) usda_states_by_tx <- lapply(split(u_st[ok_u], u_tx[ok_u]), unique)
         }
+      }
+      if (can_evaluate_hybrids && (nzchar(Sys.getenv("RUN_ID", unset = "")) || nzchar(Sys.getenv("PACKERA_DB_PATH", unset = ""))) &&
+          !is.null(c_geo) && DBI::dbExistsTable(c_geo, "vouchers")) {
+        q_syn <- paste(
+          "SELECT v.catalogNumber, v.scientificName, v.species_raw, v.determiner_tier,",
+          "v.stateProvince, v.county, v.decimalLatitude, v.decimalLongitude",
+          "FROM vouchers v",
+          "WHERE v.determiner_tier IN ('Tier_0_Type_Anchor', 'Tier_1_Gold', 'Tier_2_Silver')",
+          "AND NOT EXISTS (SELECT 1 FROM curation_triage ct WHERE ct.catalogNumber = v.catalogNumber AND ct.taxonomic_treatment_subtype = 'Misidentification_Reassign');"
+        )
+        db_syntopy_rows <- tryCatch(DBI::dbGetQuery(c_geo, q_syn), error = function(e) NULL)
       }
     }, error = function(e) NULL)
   }
@@ -1037,17 +1066,203 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   }
 
   resolve_nearest_mahalanobis_taxon <- function(row_idx, given_sp) {
-    other_tx <- setdiff(active_taxa, given_sp)
-    if (length(other_tx) == 0L) return(paste0(given_sp, " [Admixed Morphotype]"))
+    other_tx <- setdiff(cohort_species, given_sp)
+    if (length(other_tx) == 0L) return(NA_character_)
     if (length(other_tx) == 1L || is.null(morph_X) || is.null(morph_centroids) || is.null(morph_S_inv)) return(other_tx[1L])
+    other_in_m <- intersect(other_tx, rownames(morph_centroids))
+    if (length(other_in_m) == 0L) return(other_tx[1L])
     x_i <- morph_X[row_idx, ]
     base_mu <- if (given_sp %in% rownames(morph_centroids)) morph_centroids[given_sp, ] else colMeans(morph_centroids)
     x_i[!is.finite(x_i)] <- base_mu[!is.finite(x_i)]
-    d2_vals <- vapply(other_tx, function(otx) {
+    d2_vals <- vapply(other_in_m, function(otx) {
       diff_v <- x_i - morph_centroids[otx, ]
       max(0.0, as.numeric(t(diff_v) %*% morph_S_inv %*% diff_v))
     }, numeric(1))
-    other_tx[which.min(d2_vals)]
+    other_in_m[which.min(d2_vals)]
+  }
+
+  # Precompute 5-Gate Conservative Hybrid Swarm structures (syntopy pool, co-flowering, and multi-organ envelopes)
+  syntopy_pool_by_tx <- list()
+  has_anthesis_doy_by_tx <- stats::setNames(rep(FALSE, length(cohort_species)), cohort_species)
+  sec_organ_cols <- intersect(
+    c("blade_cie_l_sheet_delta", "blade_cie_l_norm", "blade_cie_l_median", "AR_inv", "involucre_length_width_ratio", "log1p_capitulum_count", "petiole_to_blade_ratio"),
+    names(df)
+  )
+  sec_organ_cols <- sec_organ_cols[vapply(sec_organ_cols, function(cc) sum(is.finite(suppressWarnings(as.numeric(df[[cc]])))) >= 4L, logical(1))]
+  sec_organ_mat <- if (length(sec_organ_cols) > 0L) {
+    m_tmp <- matrix(NA_real_, nrow = n, ncol = length(sec_organ_cols), dimnames = list(NULL, sec_organ_cols))
+    for (sj in seq_along(sec_organ_cols)) m_tmp[, sj] <- suppressWarnings(as.numeric(df[[sec_organ_cols[sj]]]))
+    m_tmp
+  } else NULL
+  sec_organ_med_by_tx <- list()
+  sec_organ_mad_pool <- stats::setNames(rep(NA_real_, length(sec_organ_cols)), sec_organ_cols)
+
+  if (can_evaluate_hybrids) {
+    db_tx_vec <- character(0); db_cat_vec <- character(0); db_lat_vec <- numeric(0); db_lon_vec <- numeric(0); db_sc_vec <- character(0)
+    if (!is.null(db_syntopy_rows) && nrow(db_syntopy_rows) > 0L) {
+      raw_db_nm <- ifelse(!is.na(db_syntopy_rows$scientificName) & nzchar(trimws(as.character(db_syntopy_rows$scientificName))),
+                          as.character(db_syntopy_rows$scientificName), as.character(db_syntopy_rows$species_raw))
+      db_tx_vec <- standardize_packera_taxon(raw_db_nm)
+      db_cat_vec <- trimws(as.character(db_syntopy_rows$catalogNumber))
+      db_lat_vec <- suppressWarnings(as.numeric(db_syntopy_rows$decimalLatitude))
+      db_lon_vec <- suppressWarnings(as.numeric(db_syntopy_rows$decimalLongitude))
+      db_st_v <- .norm_state_str(db_syntopy_rows$stateProvince)
+      db_cn_v <- .norm_county_str(db_syntopy_rows$county)
+      db_sc_vec <- ifelse(nzchar(db_st_v) & nzchar(db_cn_v), paste(db_st_v, db_cn_v, sep = "||"), "")
+    }
+    for (tx in cohort_species) {
+      r_idx <- ref_idx_by_taxon[[tx]]
+      has_anthesis_doy_by_tx[[tx]] <- any(valid_doy_all[r_idx] & anth_all[r_idx] & is.finite(hop_doy_all[r_idx]))
+      cats_t <- cat_sheet_vec[r_idx]
+      lats_t <- lat_vec_geo[r_idx]
+      lons_t <- lon_vec_geo[r_idx]
+      scs_t  <- state_cnty_geo[r_idx]
+      if (length(db_tx_vec) > 0L) {
+        m_db <- which(!is.na(db_tx_vec) & db_tx_vec == tx & !(db_cat_vec %in% cats_t))
+        if (length(m_db) > 0L) {
+          cats_t <- c(cats_t, db_cat_vec[m_db])
+          lats_t <- c(lats_t, db_lat_vec[m_db])
+          lons_t <- c(lons_t, db_lon_vec[m_db])
+          scs_t  <- c(scs_t, db_sc_vec[m_db])
+        }
+      }
+      syntopy_pool_by_tx[[tx]] <- list(cats = cats_t, lats = lats_t, lons = lons_t, scs = scs_t)
+      if (!is.null(sec_organ_mat)) {
+        med_v <- stats::setNames(rep(NA_real_, ncol(sec_organ_mat)), colnames(sec_organ_mat))
+        for (sj in seq_len(ncol(sec_organ_mat))) {
+          vv <- sec_organ_mat[r_idx, sj]; vv <- vv[is.finite(vv)]
+          if (length(vv) >= 2L) med_v[sj] <- stats::median(vv)
+        }
+        sec_organ_med_by_tx[[tx]] <- med_v
+      }
+    }
+    if (!is.null(sec_organ_mat)) {
+      for (sj in seq_len(ncol(sec_organ_mat))) {
+        vv <- sec_organ_mat[anchor_all & !mo_all & !noise_all, sj]; vv <- vv[is.finite(vv)]
+        if (length(vv) < 4L) { vv <- sec_organ_mat[, sj]; vv <- vv[is.finite(vv)] }
+        md <- if (length(vv) >= 2L) stats::mad(vv, constant = 1.4826) else NA_real_
+        sdv <- if (length(vv) >= 2L) stats::sd(vv) else NA_real_
+        sec_organ_mad_pool[sj] <- if (is.finite(md) && md > 1e-6) md else if (is.finite(sdv) && sdv > 1e-6) sdv else NA_real_
+      }
+    }
+  }
+
+  .eval_five_gate_hybrid_pair <- function(row_i, p1_tx, p2_tx, morph_sp_i, cda_prob_i, cda_sec_tx_i, cda_sec_p_i, cda_marg_i, gmm_unc_i, edaph_sp_i, d_edaph_i, edaph_z_i, asym_i) {
+    fail_res <- list(pass = FALSE, d1_km = Inf, d2_km = Inf, ddoy_12 = Inf, t_ab = NA_real_, d2_perp = Inf, score = -Inf)
+    if (!can_evaluate_hybrids || !(p1_tx %in% cohort_species) || !(p2_tx %in% cohort_species) || p1_tx == p2_tx) return(fail_res)
+
+    # Gate 1: Local Two-Parent Physical Syntopy (<= 15 km geodesic, or <= 25 km within exact shared county)
+    pool1 <- syntopy_pool_by_tx[[p1_tx]]; pool2 <- syntopy_pool_by_tx[[p2_tx]]
+    if (is.null(pool1) || is.null(pool2)) return(fail_res)
+    self_cat <- cat_sheet_vec[row_i]
+    lat_i <- lat_vec_geo[row_i]; lon_i <- lon_vec_geo[row_i]; sc_i <- state_cnty_geo[row_i]
+    has_ll_i <- is.finite(lat_i) && is.finite(lon_i); has_sc_i <- nzchar(sc_i)
+    if (!has_ll_i && !has_sc_i) return(fail_res)
+
+    k1 <- which(pool1$cats != self_cat); k2 <- which(pool2$cats != self_cat)
+    if (length(k1) == 0L || length(k2) == 0L) return(fail_res)
+    same_sc1 <- has_sc_i && any(nzchar(pool1$scs[k1]) & pool1$scs[k1] == sc_i)
+    same_sc2 <- has_sc_i && any(nzchar(pool2$scs[k2]) & pool2$scs[k2] == sc_i)
+
+    d1_km <- Inf; d2_km <- Inf
+    if (has_ll_i) {
+      ll1 <- k1[is.finite(pool1$lats[k1]) & is.finite(pool1$lons[k1])]
+      ll2 <- k2[is.finite(pool2$lats[k2]) & is.finite(pool2$lons[k2])]
+      if (length(ll1) > 0L) {
+        dlat1 <- (pool1$lats[ll1] - lat_i) * (pi / 180.0); dlon1 <- (pool1$lons[ll1] - lon_i) * (pi / 180.0)
+        a1 <- sin(dlat1 / 2.0)^2 + cos(lat_i * (pi / 180.0)) * cos(pool1$lats[ll1] * (pi / 180.0)) * sin(dlon1 / 2.0)^2
+        d1_km <- min(6371.0 * 2.0 * atan2(sqrt(pmax(0.0, a1)), sqrt(pmax(0.0, 1.0 - a1))))
+      }
+      if (length(ll2) > 0L) {
+        dlat2 <- (pool2$lats[ll2] - lat_i) * (pi / 180.0); dlon2 <- (pool2$lons[ll2] - lon_i) * (pi / 180.0)
+        a2 <- sin(dlat2 / 2.0)^2 + cos(lat_i * (pi / 180.0)) * cos(pool2$lats[ll2] * (pi / 180.0)) * sin(dlon2 / 2.0)^2
+        d2_km <- min(6371.0 * 2.0 * atan2(sqrt(pmax(0.0, a2)), sqrt(pmax(0.0, 1.0 - a2))))
+      }
+      syntopy_ok <- is.finite(d1_km) && is.finite(d2_km) &&
+                    ((d1_km <= 15.0 && d2_km <= 15.0) || (same_sc1 && same_sc2 && d1_km <= 25.0 && d2_km <= 25.0))
+    } else {
+      syntopy_ok <- same_sc1 && same_sc2
+      if (syntopy_ok) { d1_km <- 0.0; d2_km <- 0.0 }
+    }
+    if (!syntopy_ok) return(fail_res)
+
+    # Gate 2: Reproductive Phenological Co-Flowering (<= 21 d peak separation) & Ecotonal Suitability
+    ddoy_12 <- 0.0
+    if (isTRUE(has_anthesis_doy_by_tx[[p1_tx]]) && isTRUE(has_anthesis_doy_by_tx[[p2_tx]])) {
+      th1 <- mu_theta_hop[[p1_tx]]; th2 <- mu_theta_hop[[p2_tx]]
+      ddoy_12 <- abs(atan2(sin(th1 - th2), cos(th1 - th2))) * (365.25 / (2.0 * pi))
+      if (!is.finite(ddoy_12) || ddoy_12 > 21.0) return(fail_res)
+      if (valid_doy_all[row_i] && anth_all[row_i] && is.finite(hop_doy_all[row_i])) {
+        thi <- 2.0 * pi * (hop_doy_all[row_i] / 365.25)
+        th_mid <- atan2(0.5 * (sin(th1) + sin(th2)), 0.5 * (cos(th1) + cos(th2)))
+        d_p1 <- abs(atan2(sin(thi - th1), cos(thi - th1))) * (365.25 / (2.0 * pi))
+        d_p2 <- abs(atan2(sin(thi - th2), cos(thi - th2))) * (365.25 / (2.0 * pi))
+        d_pm <- abs(atan2(sin(thi - th_mid), cos(thi - th_mid))) * (365.25 / (2.0 * pi))
+        if (min(d_p1, d_p2, d_pm) > 21.0) return(fail_res)
+      }
+    }
+    if ((is.finite(d_edaph_i) && d_edaph_i < 0.25) || (is.finite(edaph_z_i) && edaph_z_i > 2.5)) return(fail_res)
+
+    # Gate 3: Pairwise Parental Mahalanobis Chord Projection (t_AB in [0.22, 0.78] & bounded orthogonal residual)
+    has_row_coords <- !is.null(morph_X) && !is.null(morph_centroids) && !is.null(morph_S_inv) &&
+                      (p1_tx %in% rownames(morph_centroids)) && (p2_tx %in% rownames(morph_centroids)) &&
+                      all(is.finite(morph_X[row_i, ]))
+    if (has_row_coords) {
+      mu1 <- morph_centroids[p1_tx, ]; mu2 <- morph_centroids[p2_tx, ]
+      delta_12 <- mu2 - mu1
+      d2_12 <- max(0.0, as.numeric(t(delta_12) %*% morph_S_inv %*% delta_12))
+      if (!is.finite(d2_12) || d2_12 < 2.25) return(fail_res)
+      xi <- morph_X[row_i, ]
+      t_ab <- as.numeric(t(xi - mu1) %*% morph_S_inv %*% delta_12) / d2_12
+      r_perp <- (xi - mu1) - t_ab * delta_12
+      d2_perp <- max(0.0, as.numeric(t(r_perp) %*% morph_S_inv %*% r_perp))
+      df_perp <- max(1L, ncol(morph_X) - 1L)
+      if (!is.finite(t_ab) || t_ab < 0.22 || t_ab > 0.78 || !is.finite(d2_perp) || d2_perp > stats::qchisq(0.90, df = df_perp)) {
+        return(fail_res)
+      }
+    } else {
+      if (is.null(morph_sp_i) || !(morph_sp_i %in% c(p1_tx, p2_tx)) || !is.finite(cda_prob_i) ||
+          cda_prob_i < 0.32 || cda_prob_i > 0.65 || !is.finite(cda_marg_i) || cda_marg_i > 0.22) {
+        return(fail_res)
+      }
+      if (is.finite(cda_sec_p_i) && (cda_sec_p_i < 0.25 || (cda_prob_i + cda_sec_p_i) < 0.75)) return(fail_res)
+      t_ab <- if (morph_sp_i == p2_tx) cda_prob_i else (1.0 - cda_prob_i)
+      d2_perp <- 0.0
+    }
+
+    # Gate 4: Multi-Organ Admixture / Mosaicism Corroboration & Non-Parental Posterior Split
+    if (is.finite(cda_prob_i) && cda_prob_i >= 0.68) return(fail_res)
+    has_post_split <- (is.finite(cda_marg_i) && cda_marg_i <= 0.25) || (is.finite(gmm_unc_i) && gmm_unc_i >= 0.22)
+    if (!has_post_split) return(fail_res)
+
+    has_p2_signal <- (!is.null(morph_sp_i) && morph_sp_i == p2_tx) ||
+                     (!is.null(cda_sec_tx_i) && cda_sec_tx_i == p2_tx && (!is.finite(cda_sec_p_i) || cda_sec_p_i >= 0.20)) ||
+                     (!is.na(edaph_sp_i) && edaph_sp_i == p2_tx) ||
+                     (is.finite(gmm_unc_i) && gmm_unc_i >= 0.28)
+    if (!has_p2_signal) return(fail_res)
+
+    if (!is.null(sec_organ_mat) && length(sec_organ_cols) > 0L) {
+      m1_v <- sec_organ_med_by_tx[[p1_tx]]; m2_v <- sec_organ_med_by_tx[[p2_tx]]
+      n_diag_org <- 0L; any_org_admix <- FALSE
+      for (sj in seq_along(sec_organ_cols)) {
+        val_ij <- sec_organ_mat[row_i, sj]
+        mad_j <- sec_organ_mad_pool[sj]
+        if (is.finite(val_ij) && !is.null(m1_v) && !is.null(m2_v) &&
+            is.finite(m1_v[sj]) && is.finite(m2_v[sj]) && is.finite(mad_j) &&
+            abs(m2_v[sj] - m1_v[sj]) >= 1.2 * mad_j) {
+          n_diag_org <- n_diag_org + 1L
+          t_org <- (val_ij - m1_v[sj]) / (m2_v[sj] - m1_v[sj])
+          if ((t_org >= 0.15 && t_org <= 0.85) || (t_ab >= 0.50 && t_org <= 0.45) || (t_ab <= 0.50 && t_org >= 0.55)) {
+            any_org_admix <- TRUE
+          }
+        }
+      }
+      high_asym <- is.finite(asym_i) && (asym_i >= 0.18)
+      if (n_diag_org >= 1L && !any_org_admix && !high_asym) return(fail_res)
+    }
+
+    cand_score <- (1.0 - 2.0 * abs(t_ab - 0.50)) - 0.08 * d2_perp - 0.02 * (if (is.finite(d2_km)) d2_km else 10.0)
+    list(pass = TRUE, d1_km = d1_km, d2_km = d2_km, ddoy_12 = ddoy_12, t_ab = t_ab, d2_perp = d2_perp, score = cand_score)
   }
 
   status_calls <- character(n); rec_taxa <- character(n); triage_prios <- character(n)
@@ -1186,6 +1401,17 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     cryptic_cluster_pass_map[[map_key]] <- isTRUE(pass_events && pass_osr && pass_div)
   }
   cryptic_cluster_cohesion_pass <- logical(n)
+  hybrid_zone_cohesion_pass <- logical(n)
+  hybrid_parent_1 <- rep(NA_character_, n)
+  hybrid_parent_2 <- rep(NA_character_, n)
+  hyb_cand_pass <- logical(n)
+  hyb_cand_p1 <- rep(NA_character_, n)
+  hyb_cand_p2 <- rep(NA_character_, n)
+  hyb_cand_d1_km <- rep(Inf, n)
+  hyb_cand_d2_km <- rep(Inf, n)
+  hyb_cand_ddoy <- rep(Inf, n)
+  hyb_cand_t_ab <- rep(NA_real_, n)
+  hyb_cand_d2_perp <- rep(Inf, n)
 
   for (i in seq_len(n)) {
     given_sp <- if (!is.na(sp_all_vec[i]) && nzchar(sp_all_vec[i])) sp_all_vec[i] else "Unknown"
@@ -1416,17 +1642,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
                                 !type_control_reassign && !congener_osr_reassign &&
                                 in_edaphic_envelope && is_late_foliar_wear
 
-    edaph_mosaic_support <- (is.finite(rf_prob) && rf_prob >= 0.60) || (!is.finite(rf_prob) && is.finite(d_edaph) && d_edaph < 0.35)
-    mosaic_geo_ok <- morph_is_taxon && edaph_is_taxon &&
-                     isTRUE(.eval_taxon_geo_plausibility(i, morph_sp)$plausible) &&
-                     isTRUE(.eval_taxon_geo_plausibility(i, edaph_sp)$plausible)
-    is_intermodal_mosaic <- !type_control_reassign && !congener_osr_reassign && morph_is_taxon && edaph_is_taxon &&
-                            edaph_mosaic_support && mosaic_geo_ok &&
-                            (morph_sp != given_sp) && (edaph_sp != given_sp) && (morph_sp != edaph_sp) &&
-                            (is.na(cda_prob) || cda_prob < 0.78) && (triage_cat != "Severe_Triple_Stream_Conflict")
-
+    is_intermodal_mosaic <- FALSE
     non_assigned_known <- (is.na(cda_prob) || cda_prob < 0.70) && !both_alt_agree && !morph_edaph_alt_agree &&
-                          !type_control_reassign && !congener_osr_reassign && !is_intermodal_mosaic
+                          !type_control_reassign && !congener_osr_reassign
     has_morph_or_gmm_outlier <- is_mo_flag || (g_cl > max(2L, n_known_taxa) && bf_val >= 6.0)
     has_allochronic_barrier <- is_anth && (abs(ddoy) >= tau_cryptic_i)
     has_edaphic_barrier <- (d_edaph < 0.30) || (!is_intra && edaph_is_taxon && edaph_sp != given_sp && (is.null(morph_sp) || edaph_sp != morph_sp))
@@ -1435,7 +1653,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     mod_barrier <- has_allochronic_barrier || has_edaphic_barrier
     n_cryptic_modalities <- as.integer(mod_morph) + as.integer(mod_non_assign) + as.integer(has_allochronic_barrier) + as.integer(has_edaphic_barrier)
     is_crypt <- !is_sensu_stricto_locked_i && cryptic_cluster_cohesion_pass[i] && osr_cryptic_ok_i &&
-                !is_intermodal_mosaic && is_tier1_pure_i && mod_morph && mod_non_assign && mod_barrier && (n_cryptic_modalities >= 2L)
+                is_tier1_pure_i && mod_morph && mod_non_assign && mod_barrier && (n_cryptic_modalities >= 2L)
 
     # Stage 1: Misidentification_Reassign BEFORE is_cryptic_intra & Hybrid_Introgressant (Schlick-Steiner et al. 2010; Padial et al. 2010)
     edaph_contradicts_morph <- edaph_is_taxon && (edaph_sp == given_sp) && (rf_sp == given_sp) &&
@@ -1591,66 +1809,71 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       }
     }
 
-    # Stage 2: Hybrid_Introgressant (Rieseberg 1995; Slenker et al. 2022)
-    has_morph_i <- (!is.null(morph_sp) && !is.na(morph_sp) && nzchar(morph_sp) && is.finite(cda_prob) && is.finite(cda_marg))
-    has_niche_overlap <- (d_edaph >= 0.25) || (edaph_is_taxon && edaph_sp %in% c(given_sp, morph_sp)) || (!is_intra && triage_cat == "Putative_Hybrid_Zone_Intergrade")
-    has_congener_donor <- (edaph_is_taxon && edaph_sp != given_sp) ||
-                          (sec_is_taxon && cda_sec_taxon != given_sp) ||
-                          (!is.na(min_cong_tx_i) && nzchar(min_cong_tx_i) && min_cong_tx_i != given_sp) ||
-                          (!is.na(nt_m_i) && nt_m_i != given_sp) ||
-                          (!is.na(nt_e_i) && nt_e_i != given_sp) ||
-                          (!is_intra && triage_cat == "Putative_Hybrid_Zone_Intergrade" && length(setdiff(active_taxa, given_sp)) > 0L)
-    eco_inter_support <- if (is.finite(rf_prob)) (rf_prob < 0.70) else ((is.finite(d_edaph) && d_edaph < 0.70) || (edaph_is_taxon && edaph_sp != given_sp))
-    is_canonical_intermediate <- has_morph_i && has_niche_overlap && (
-      if (morph_sp == given_sp) {
-        (cda_prob < 0.55) && (cda_marg < 0.12) && has_congener_donor && eco_inter_support
-      } else {
-        (cda_marg < 0.25) && (morph_is_taxon || (edaph_is_taxon && edaph_sp != given_sp) || gmm_unc >= 0.25)
+    # Stage 2 Pre-Screen (Gates 1 to 4): Conservative Contact-Zone Hybrid Candidate Evaluation
+    # Strictly disabled in --intraspecific-mode or single-taxon cohorts (can_evaluate_hybrids == FALSE).
+    has_morph_i <- isTRUE(has_observed_or_sheet_morph[i]) && is_tier1_pure_i &&
+                   (!is.null(morph_sp) && !is.na(morph_sp) && nzchar(morph_sp) && is.finite(cda_prob))
+    if (can_evaluate_hybrids && has_morph_i && !is_severe_misid && !both_alt_agree &&
+        !is_sensu_stricto_locked_i && !morph_concordant_self && (given_sp %in% cohort_species)) {
+      nn_mahal_sp <- resolve_nearest_mahalanobis_taxon(i, given_sp)
+      explicit_p2 <- NA_character_
+      if (grepl("(^|\\s)[x×]\\s+[a-z]", raw_sp, ignore.case = TRUE)) {
+        m_hyb <- regmatches(raw_sp, regexpr("[x×]\\s+[A-Za-z-]+(\\s+[a-z-]+)?", raw_sp, ignore.case = TRUE))
+        if (length(m_hyb) > 0L && nzchar(m_hyb[1L])) {
+          rhs_tok <- trimws(sub("^[x×]\\s+", "", m_hyb[1L]))
+          cand_rhs <- if (grepl("^Packera\\s+", rhs_tok, ignore.case = TRUE)) standardize_packera_taxon(rhs_tok) else standardize_packera_taxon(paste("Packera", rhs_tok))
+          if (!is.na(cand_rhs) && (cand_rhs %in% cohort_species) && cand_rhs != given_sp) explicit_p2 <- cand_rhs
+        }
       }
-    )
-    is_hybrid_swarm <- has_morph_i && !is_severe_misid && !both_alt_agree && !is_crypt && (
-      is_intermodal_mosaic || is_canonical_intermediate ||
-      (morph_sp != given_sp && (
-        (!is_intra && triage_cat == "Putative_Hybrid_Zone_Intergrade" && cda_prob < 0.80) ||
-        (gmm_unc >= 0.35 && cda_prob >= 0.35 && cda_prob <= 0.65 && has_niche_overlap)
-      ))
-    )
+      donor_cands <- unique(stats::na.omit(c(
+        explicit_p2,
+        if (morph_is_taxon && morph_sp != given_sp) morph_sp else NA_character_,
+        if (sec_is_taxon && cda_sec_taxon != given_sp) cda_sec_taxon else NA_character_,
+        if (!is.na(min_cong_tx_i) && min_cong_tx_i != given_sp) min_cong_tx_i else NA_character_,
+        if (!is.na(nt_m_i) && nt_m_i != given_sp) nt_m_i else NA_character_,
+        if (edaph_is_taxon && edaph_sp != given_sp) edaph_sp else NA_character_,
+        nn_mahal_sp
+      )))
+      donor_cands <- donor_cands[donor_cands %in% cohort_species & donor_cands != given_sp]
+      best_g <- NULL
+      for (dc in donor_cands) {
+        g_eval <- .eval_five_gate_hybrid_pair(
+          row_i = i, p1_tx = given_sp, p2_tx = dc,
+          morph_sp_i = morph_sp, cda_prob_i = cda_prob, cda_sec_tx_i = cda_sec_taxon,
+          cda_sec_p_i = cda_sec, cda_marg_i = cda_marg, gmm_unc_i = gmm_unc,
+          edaph_sp_i = edaph_sp, d_edaph_i = d_edaph, edaph_z_i = edaph_z, asym_i = asym_i
+        )
+        if (isTRUE(g_eval$pass) && (is.null(best_g) || g_eval$score > best_g$score)) {
+          best_g <- g_eval; best_g$p2 <- dc
+        }
+      }
+      if (!is.null(best_g)) {
+        hyb_cand_pass[i] <- TRUE
+        hyb_cand_p1[i] <- given_sp
+        hyb_cand_p2[i] <- best_g$p2
+        hyb_cand_d1_km[i] <- best_g$d1_km
+        hyb_cand_d2_km[i] <- best_g$d2_km
+        hyb_cand_ddoy[i] <- best_g$ddoy_12
+        hyb_cand_t_ab[i] <- best_g$t_ab
+        hyb_cand_d2_perp[i] <- best_g$d2_perp
+      }
+    }
 
-    # 3. Stage 4: Organic Ecotype Rule vs. Ontogenetic/Taphonomic Plasticity
+    # Assign conservative non-hybrid baseline first (Stages 3 to 5); Pass 2 elevates ONLY Gate-5 population-confirmed hybrid swarms
     has_infraspecific_rank <- grepl("\\b(var\\.|subsp\\.|ssp\\.)\\s+[a-z-]+", raw_sp, ignore.case = TRUE)
-    is_cohesive_ecotype <- !is_sensu_stricto_locked_i && !is_severe_misid && !is_crypt && !is_hybrid_swarm && (
+    is_cohesive_ecotype <- !is_sensu_stricto_locked_i && !is_severe_misid && !is_crypt && (
       has_infraspecific_rank ||
       ((g_cl > 1L) && ((d_edaph < 0.45) || (is.finite(edaph_z) && edaph_z > 2.0) || (is_anth && abs(ddoy) >= tau_ecotype_i)))
     )
-    is_plastic_variant <- !is_sensu_stricto_locked_i && !is_cohesive_ecotype && !is_severe_misid && !is_hybrid_swarm && !is_crypt &&
+    is_plastic_variant <- !is_sensu_stricto_locked_i && !is_cohesive_ecotype && !is_severe_misid && !is_crypt &&
                           (is_taphonomic_plasticity || is_mo_flag)
 
-    if (is_hybrid_swarm) {
-      # 4. Dynamic hybrid parent resolution (first non-given_sp among morph_sp, edaph_sp, cda_second_taxon,
-      #    else nearest neighbor in (can1, can2, can3) / dynamic PC Mahalanobis space)
-      p_a <- if (is_intermodal_mosaic) morph_sp else given_sp
-      if (is_intermodal_mosaic) {
-        p_b <- edaph_sp
-      } else {
-        cand_pb <- c(
-          if (morph_is_taxon) morph_sp else NA_character_,
-          if (edaph_is_taxon) edaph_sp else NA_character_,
-          if (sec_is_taxon) cda_sec_taxon else NA_character_
-        )
-        cand_pb <- cand_pb[!is.na(cand_pb) & nzchar(cand_pb) & cand_pb != given_sp]
-        p_b <- if (length(cand_pb) > 0L) cand_pb[1L] else if (is_intra || length(setdiff(active_taxa, given_sp)) == 0L) paste0(given_sp, " [Admixed Morphotype]") else resolve_nearest_mahalanobis_taxon(i, given_sp)
-      }
-      status_calls[i] <- "Hybrid_Intergrade_Swarm"
-      rec_taxa[i] <- if (endsWith(p_b, "[Admixed Morphotype]")) p_b else sprintf("%s x %s", p_a, p_b)
-      triage_prios[i] <- if (tier == "Tier_1_Gold") "HIGH" else "MEDIUM"; triage_acts[i] <- "Flag_Hybrid_Swarm_Intergrade"
-      rationales[i] <- if (is_intermodal_mosaic) sprintf("Stage 2 Admixture: Inter-modal character mosaicism (Morph=%s vs Edaphic=%s; Rieseberg 1995)", morph_sp, edaph_sp) else sprintf("Stage 2 Admixture: Canonical intermediacy (margin=%.2f, GMM_unc=%.2f) in sympatric contact zone with %s", cda_marg, gmm_unc, p_b)
-      treat_broad[i] <- "Hybrid / Introgressant"; treat_sub[i] <- "Hybrid_Introgressant"
-    } else if (is_crypt) {
+    if (is_crypt && !hyb_cand_pass[i]) {
       status_calls[i] <- "Putative_Cryptic_Species"; rec_taxa[i] <- sprintf("%s (Putative Cryptic Lineage K%d)", given_sp, g_cl)
       triage_prios[i] <- if (tier == "Tier_1_Gold") "CRITICAL" else "HIGH"; triage_acts[i] <- "Flag_Putative_Cryptic_Species"
       rationales[i] <- sprintf("Stage 3 Cryptic Congruence (Padial et al. 2010): Basal_Rosette outlier unassigned to known taxa (CDA_p=%.2f) + barrier (|delta_DOY|=%.1fd >= %.1fd, D_edaph=%.2f)", ifelse(is.na(cda_prob), 0.45, cda_prob), abs(ddoy), tau_cryptic_i, d_edaph)
       treat_broad[i] <- "Misidentification / Cryptic Species"; treat_sub[i] <- "Putative_Cryptic_Species"
-    } else if (is_cohesive_ecotype) {
+    } else if (is_cohesive_ecotype && !hyb_cand_pass[i]) {
       infra_lbl <- if (has_infraspecific_rank) {
         m_inf <- regmatches(raw_sp, regexpr("\\b(var\\.|subsp\\.|ssp\\.)\\s+[A-Za-z-]+", raw_sp, ignore.case = TRUE))
         if (length(m_inf) > 0L && nzchar(m_inf[1L])) paste(given_sp, tolower(m_inf[1L])) else paste0(given_sp, " var. ecotype")
@@ -1663,7 +1886,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       triage_prios[i] <- "LOW"; triage_acts[i] <- "Accept_Subspecific_Treatment"
       rationales[i] <- sprintf("Stage 4 Ecotype: Cohesive intraspecific lineage (GMM K%d, D_edaph=%.2f, delta_DOY=%.1fd, tau=%.1fd)", g_cl, d_edaph, ddoy, tau_ecotype_i)
       treat_broad[i] <- "Variety / Ecotype"; treat_sub[i] <- "Subspecies_Ecotype"
-    } else if (is_plastic_variant) {
+    } else if (is_plastic_variant || hyb_cand_pass[i]) {
       status_calls[i] <- "Ecophenotypic_Plasticity"; rec_taxa[i] <- given_sp
       triage_prios[i] <- "MEDIUM"; triage_acts[i] <- "Annotate_Taphonomic_Ecophenotype"
       rationales[i] <- sprintf("Stage 4 Plasticity: Within-envelope taphonomic/ontogenetic variation (DOY %.0f >= Q75 %.0f, edaphic_z=%s, pH=%s, Sand=%s)", doy, sp_q75_doy, ifelse(is.finite(edaph_z_i), sprintf("%.2f", edaph_z_i), "NA"), ph_str, sand_str)
@@ -1673,6 +1896,76 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
       triage_prios[i] <- "RESOLVED"; triage_acts[i] <- "Accept_Current_Determination"
       rationales[i] <- "Stage 5 Confirmed: Concordant across available morphological, reproductive phenological, and edaphic streams"
       treat_broad[i] <- "Confirmed Species"; treat_sub[i] <- "Confirmed_Species"
+    }
+  }
+
+  # Pass 2 (Gate 5: Population-Level Contact-Zone Hybrid Swarm Cohesion)
+  # Elevates Gate 1-4 candidates to Hybrid_Introgressant ONLY when >= 2 independent vouchers in the local
+  # <= 25 km contact zone (or shared county) corroborate the same parent pair, or label explicitly records nothotaxon cross.
+  if (can_evaluate_hybrids && any(hyb_cand_pass)) {
+    cand_idx_all <- which(hyb_cand_pass)
+    pair_keys_cand <- vapply(cand_idx_all, function(ci) paste(sort(c(hyb_cand_p1[ci], hyb_cand_p2[ci])), collapse = "||"), character(1))
+    for (pos_c in seq_along(cand_idx_all)) {
+      ci <- cand_idx_all[pos_c]
+      pk <- pair_keys_cand[pos_c]
+      same_pk_idx <- cand_idx_all[pair_keys_cand == pk]
+      lat_ci <- lat_vec_geo[ci]; lon_ci <- lon_vec_geo[ci]; sc_ci <- state_cnty_geo[ci]
+      local_peers <- integer(0)
+      for (cj in same_pk_idx) {
+        if (cj == ci) {
+          local_peers <- c(local_peers, cj)
+        } else if (is.finite(lat_ci) && is.finite(lon_ci) && is.finite(lat_vec_geo[cj]) && is.finite(lon_vec_geo[cj])) {
+          dlat_p <- (lat_vec_geo[cj] - lat_ci) * (pi / 180.0); dlon_p <- (lon_vec_geo[cj] - lon_ci) * (pi / 180.0)
+          ah_p <- sin(dlat_p / 2.0)^2 + cos(lat_ci * (pi / 180.0)) * cos(lat_vec_geo[cj] * (pi / 180.0)) * sin(dlon_p / 2.0)^2
+          dkm_p <- 6371.0 * 2.0 * atan2(sqrt(max(0.0, ah_p)), sqrt(max(0.0, 1.0 - ah_p)))
+          if (dkm_p <= 25.0) local_peers <- c(local_peers, cj)
+        } else if (nzchar(sc_ci) && nzchar(state_cnty_geo[cj]) && sc_ci == state_cnty_geo[cj]) {
+          local_peers <- c(local_peers, cj)
+        }
+      }
+      n_deme_vouchers <- length(unique(cat_sheet_vec[local_peers]))
+      raw_ci <- if (!is.na(raw_sp_dv[ci])) raw_sp_dv[ci] else ""
+      has_explicit_cross <- grepl("(^|\\s)[x×]\\s+[a-z]", raw_ci, ignore.case = TRUE)
+      if (n_deme_vouchers >= 2L || has_explicit_cross) {
+        p_a <- hyb_cand_p1[ci]; p_b <- hyb_cand_p2[ci]
+        tier_ci <- if (!is.na(tier_dv[ci])) tier_dv[ci] else "Tier_3_Bronze"
+        hybrid_zone_cohesion_pass[ci] <- TRUE
+        hybrid_parent_1[ci] <- p_a
+        hybrid_parent_2[ci] <- p_b
+        status_calls[ci] <- "Hybrid_Intergrade_Swarm"
+        rec_taxa[ci] <- sprintf("%s x %s", p_a, p_b)
+        triage_prios[ci] <- if (tier_ci == "Tier_1_Gold") "HIGH" else "MEDIUM"
+        triage_acts[ci] <- "Flag_Hybrid_Swarm_Intergrade"
+        rationales[ci] <- sprintf(
+          "Stage 2 Confirmed Hybrid Swarm (%s x %s): Syntopic parents verified within %.1f km and %.1f km (co-flowering |dDOY|=%.1fd), parental chord t_AB=%.2f (d2_perp=%.2f), corroborated across n=%d contact-zone vouchers",
+          p_a, p_b,
+          ifelse(is.finite(hyb_cand_d1_km[ci]), hyb_cand_d1_km[ci], 0.0),
+          ifelse(is.finite(hyb_cand_d2_km[ci]), hyb_cand_d2_km[ci], 0.0),
+          ifelse(is.finite(hyb_cand_ddoy[ci]), hyb_cand_ddoy[ci], 0.0),
+          hyb_cand_t_ab[ci],
+          ifelse(is.finite(hyb_cand_d2_perp[ci]), hyb_cand_d2_perp[ci], 0.0),
+          n_deme_vouchers
+        )
+        treat_broad[ci] <- "Hybrid / Introgressant"
+        treat_sub[ci] <- "Hybrid_Introgressant"
+      } else {
+        # Singleton sympatric intermediate fails Gate 5 deme cohesion -> retain conservatively under parental species
+        if (!isTRUE(mo_flag_dv[ci])) {
+          status_calls[ci] <- "Species_Confirmed"
+          rec_taxa[ci] <- hyb_cand_p1[ci]
+          triage_prios[ci] <- "LOW"
+          triage_acts[ci] <- "Accept_Current_Determination"
+          treat_broad[ci] <- "Confirmed Species"
+          treat_sub[ci] <- "Confirmed_Species"
+        }
+        rationales[ci] <- paste0(
+          rationales[ci],
+          sprintf(
+            " [Unreplicated sympatric intermediate toward %s (t_AB=%.2f, n_deme=1); retained as %s under conservative population hybrid gate]",
+            hyb_cand_p2[ci], hyb_cand_t_ab[ci], hyb_cand_p1[ci]
+          )
+        )
+      }
     }
   }
 
@@ -1730,6 +2023,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           treat_sub[r] <- "Confirmed_Species"
           treat_broad[r] <- "Confirmed Species"
           rec_taxa[r] <- sp_clean_vec[r]
+          hybrid_zone_cohesion_pass[r] <- FALSE
+          hybrid_parent_1[r] <- NA_character_
+          hybrid_parent_2[r] <- NA_character_
           triage_prios[r] <- "RESOLVED"
           triage_acts[r] <- "Accept_Current_Determination"
           if (!grepl("\\[Sheet-Coherent Ramet Consensus\\]", rationales[r])) {
@@ -1748,6 +2044,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           treat_sub[r] <- treat_sub[best_r]
           treat_broad[r] <- treat_broad[best_r]
           rec_taxa[r] <- rec_taxa[best_r]
+          hybrid_zone_cohesion_pass[r] <- hybrid_zone_cohesion_pass[best_r]
+          hybrid_parent_1[r] <- hybrid_parent_1[best_r]
+          hybrid_parent_2[r] <- hybrid_parent_2[best_r]
           triage_prios[r] <- triage_prios[best_r]
           triage_acts[r] <- triage_acts[best_r]
           if (!grepl("\\[Sheet-Coherent Ramet Consensus\\]", rationales[r])) {
@@ -1763,6 +2062,9 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   if (!("type_status" %in% names(df))) df$type_status <- type_stat_dv
   df$edaphic_z_score <- edaph_z_vec
   df$cryptic_cluster_cohesion_pass <- as.logical(cryptic_cluster_cohesion_pass)
+  df$hybrid_zone_cohesion_pass <- as.logical(hybrid_zone_cohesion_pass)
+  df$hybrid_parent_1 <- hybrid_parent_1
+  df$hybrid_parent_2 <- hybrid_parent_2
   df$taxonomic_status_call <- status_calls; df$recommended_determination <- rec_taxa
   df$synthesis_triage_priority <- triage_prios; df$synthesis_triage_action <- triage_acts
   df$synthesis_rationale <- rationales
@@ -1770,6 +2072,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   has_morph <- if ("can1" %in% names(df)) !is.na(df$can1) else if ("cda_predicted_taxon" %in% names(df)) !is.na(df$cda_predicted_taxon) else rep(TRUE, n)
   has_edaph <- if ("edaphic_best_fit_taxon" %in% names(df)) !is.na(df$edaphic_best_fit_taxon) else rep(FALSE, n)
   df$is_completed_voucher <- has_morph | has_edaph
+  attr(df, "can_evaluate_hybrids") <- can_evaluate_hybrids
   return(df)
 }
 
@@ -2276,10 +2579,14 @@ build_triage_queue <- function(opts) {
     vouchers$complex_label <- as.character(cdf_m$complex_label[idx_cm])
   }
 
+  can_eval_hyb_attr <- attr(vouchers, "can_evaluate_hybrids")
   if (!is.null(opts$focal_taxon) && nzchar(trimws(opts$focal_taxon))) {
     f_std <- standardize_packera_taxon(opts$focal_taxon)
     rec_det_v <- if ("recommended_determination" %in% names(vouchers)) as.character(vouchers$recommended_determination) else rep(NA_character_, nrow(vouchers))
-    keep_focal <- (vouchers$species_standardized == f_std) | (!is.na(rec_det_v) & rec_det_v == f_std)
+    hp1_v <- if ("hybrid_parent_1" %in% names(vouchers)) as.character(vouchers$hybrid_parent_1) else rep(NA_character_, nrow(vouchers))
+    hp2_v <- if ("hybrid_parent_2" %in% names(vouchers)) as.character(vouchers$hybrid_parent_2) else rep(NA_character_, nrow(vouchers))
+    keep_focal <- (vouchers$species_standardized == f_std) | (!is.na(rec_det_v) & rec_det_v == f_std) |
+                  (!is.na(hp1_v) & hp1_v == f_std) | (!is.na(hp2_v) & hp2_v == f_std)
     vouchers <- vouchers[keep_focal, , drop = FALSE]
   }
 
@@ -2288,6 +2595,7 @@ build_triage_queue <- function(opts) {
   vouchers <- if ("coordinateUncertainty" %in% names(vouchers)) vouchers[order(vouchers$prio_rank, -vouchers$coordinateUncertainty), ] else vouchers[order(vouchers$prio_rank), ]
   vouchers$prio_rank <- NULL
   if (!is.null(comp_res)) attr(vouchers, "complex_discovery") <- comp_res
+  if (!is.null(can_eval_hyb_attr)) attr(vouchers, "can_evaluate_hybrids") <- can_eval_hyb_attr
 
   .write_triage_fast <- function(d, p, na_str = "NA") {
     if (requireNamespace("data.table", quietly = TRUE)) data.table::fwrite(d, file = p, na = na_str, quote = "auto", logical01 = FALSE) else readr::write_csv(d, p, na = na_str)
@@ -2450,7 +2758,19 @@ generate_taxonomic_revision_report <- function(df, opts) {
         cnt_sub(c("Hybrid_Introgressant", "Hybrid_Intergrade_Swarm")),
         cnt_sub(c("Misidentification_Reassign", "Misidentification_Severe")),
         cnt_sub("Putative_Cryptic_Species")
-      )
+      ),
+      {
+        hyb_sp_mask <- !is.na(st_sp) & (st_sp %in% c("Hybrid_Introgressant", "Hybrid_Intergrade_Swarm"))
+        if (any(hyb_sp_mask) && all(c("hybrid_parent_1", "hybrid_parent_2") %in% names(sub_sp))) {
+          p1_s <- as.character(sub_sp$hybrid_parent_1[hyb_sp_mask]); p2_s <- as.character(sub_sp$hybrid_parent_2[hyb_sp_mask])
+          ok_ps <- !is.na(p1_s) & nzchar(p1_s) & !is.na(p2_s) & nzchar(p2_s)
+          if (any(ok_ps)) {
+            pair_lbls <- sprintf("*%s* x *%s*", p1_s[ok_ps], p2_s[ok_ps])
+            ptab <- sort(table(pair_lbls), decreasing = TRUE)
+            sprintf("  - **Confirmed Hybrid Swarm Parentage:** %s", paste(sprintf("%s (n=%d)", names(ptab), as.integer(ptab)), collapse = "; "))
+          } else character(0)
+        } else character(0)
+      }
     )
   }
   if (length(treatment_lines) == 0L) {
@@ -2472,7 +2792,27 @@ generate_taxonomic_revision_report <- function(df, opts) {
     sprintf("- **GMM Bayes Factors (2ΔBIC):** Decisive evidence for **K = %d discrete morphological clusters** ($2\\Delta\\text{BIC} = %s$ over $K=1$).", gmm_stats$opt_k, bic_str),
     sprintf("- **Institutional Batch Audit:** %s", batch_str),
     sprintf("- **Stage 1 (Herbarium Misidentifications, Reassign):** %d vouchers (%0.1f%%) evaluated prior to hybridity.", misid_n, (misid_n / max(tot_n, 1)) * 100),
-    sprintf("- **Stage 2 (Hybrid Swarms and Mosaic Introgressants):** %d introgressants (%0.1f%%) (Rieseberg 1995; Slenker et al. 2022).", hybr_n, (hybr_n / max(tot_n, 1)) * 100),
+    {
+      is_single_or_intra <- isTRUE(opts$intraspecific_mode) || identical(attr(df, "can_evaluate_hybrids"), FALSE)
+      if (is_single_or_intra) {
+        "- **Stage 2 (Conservative Contact-Zone Hybrid Swarms):** 0 introgressants (0.0%; interspecific hybrid evaluation disabled in single-taxon intraspecific mode)."
+      } else if (hybr_n > 0L && all(c("hybrid_parent_1", "hybrid_parent_2") %in% names(df))) {
+        hm_all <- !is.na(sub_vec) & (sub_vec == "Hybrid_Introgressant") & !is.na(df$hybrid_parent_1) & !is.na(df$hybrid_parent_2)
+        if (any(hm_all)) {
+          canon_pairs <- vapply(which(hm_all), function(ii) {
+            ps <- sort(c(as.character(df$hybrid_parent_1[ii]), as.character(df$hybrid_parent_2[ii])))
+            sprintf("*%s* x *%s*", ps[1L], ps[2L])
+          }, character(1))
+          pt_all <- sort(table(canon_pairs), decreasing = TRUE)
+          pair_summary <- paste(sprintf("%s (n=%d)", names(pt_all), as.integer(pt_all)), collapse = "; ")
+          sprintf("- **Stage 2 (Conservative Contact-Zone Hybrid Swarms):** %d introgressants (%0.1f%%) across confirmed parent pairs: %s.", hybr_n, (hybr_n / max(tot_n, 1)) * 100, pair_summary)
+        } else {
+          sprintf("- **Stage 2 (Conservative Contact-Zone Hybrid Swarms):** %d introgressants (%0.1f%%) (Rieseberg 1995; Slenker et al. 2022).", hybr_n, (hybr_n / max(tot_n, 1)) * 100)
+        }
+      } else {
+        sprintf("- **Stage 2 (Conservative Contact-Zone Hybrid Swarms):** %d introgressants (%0.1f%%; 5-gate syntopic population threshold).", hybr_n, (hybr_n / max(tot_n, 1)) * 100)
+      }
+    },
     sprintf("- **Stage 3 (Putative Cryptic Lineages):** %d vouchers (%0.1f%%) satisfying strict Integration by Congruence (Padial et al. 2010).", crypt_n, (crypt_n / max(tot_n, 1)) * 100),
     sprintf("- **Stage 4 (Subspecific Ecotypes and Taphonomic/Ontogenetic Plasticity):** %d cohesive ecotypes (%0.1f%%) and %d within-envelope plastic variants (%0.1f%%).", ecotype_n, (ecotype_n / max(tot_n, 1)) * 100, ecoph_n, (ecoph_n / max(tot_n, 1)) * 100), "",
     "## 2. Multi-Evidence Taxonomic Treatment",
@@ -2596,6 +2936,10 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
   cscore_v <- get_f("probabilistic_consensus_score", 3)
   act_v   <- get_c("synthesis_triage_action", "")
   rat_v   <- get_c("synthesis_rationale", "")
+  hp1_h   <- get_c("hybrid_parent_1", "")
+  hp2_h   <- get_c("hybrid_parent_2", "")
+  hcoh_h  <- ifelse(isTRUE(df$hybrid_zone_cohesion_pass) | (!is.null(df$hybrid_zone_cohesion_pass) & !is.na(df$hybrid_zone_cohesion_pass) & as.logical(df$hybrid_zone_cohesion_pass)), "TRUE", "FALSE")
+  if (length(hcoh_h) != n) hcoh_h <- rep("FALSE", n)
 
   json_rows <- if (n > 0L) {
     paste0(
@@ -2616,7 +2960,10 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
       .json_escape_vec(ddoy_v), ",",
       .json_escape_vec(cscore_v), ",",
       .json_escape_vec(act_v), ",",
-      .json_escape_vec(rat_v),
+      .json_escape_vec(rat_v), ",",
+      .json_escape_vec(hp1_h), ",",
+      .json_escape_vec(hp2_h), ",",
+      .json_escape_vec(hcoh_h),
       "]",
       collapse = ",\n"
     )
@@ -2668,11 +3015,32 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
     sprintf("<div class=\"kpi\"><div class=\"lbl\">Examined Vouchers</div><div class=\"val\">%d</div></div>", n),
     sprintf("<div class=\"kpi\"><div class=\"lbl\">Critical / High Queue</div><div class=\"val\">%d</div></div>", n_crit_high),
     sprintf("<div class=\"kpi\"><div class=\"lbl\">Misident. (Reassign)</div><div class=\"val\">%d</div></div>", n_misid),
-    sprintf("<div class=\"kpi\"><div class=\"lbl\">Hybrid / Introgressant</div><div class=\"val\">%d</div></div>", n_hyb),
+    {
+      is_intra_h <- (!is.null(opts) && isTRUE(opts$intraspecific_mode)) || identical(attr(df, "can_evaluate_hybrids"), FALSE)
+      if (is_intra_h) {
+        "<div class=\"kpi\"><div class=\"lbl\">Hybrid / Introgressant</div><div class=\"val\">0 <span style=\"font-size:0.72rem;font-weight:500;color:#64748b;\">(1-Taxon N/A)</span></div></div>"
+      } else {
+        sprintf("<div class=\"kpi\"><div class=\"lbl\">Hybrid / Introgressant</div><div class=\"val\">%d</div></div>", n_hyb)
+      }
+    },
     sprintf("<div class=\"kpi\"><div class=\"lbl\">Putative Cryptic</div><div class=\"val\">%d</div></div>", n_crypt),
     sprintf("<div class=\"kpi\"><div class=\"lbl\">Variety / Plasticity</div><div class=\"val\">%d</div></div>", n_eco),
     sprintf("<div class=\"kpi\"><div class=\"lbl\">Confirmed Species</div><div class=\"val\">%d</div></div>", n_conf),
     "</section>",
+    {
+      hm_idx <- which(sub_v == "Hybrid_Introgressant" & nzchar(hp1_h) & nzchar(hp2_h))
+      if (length(hm_idx) > 0L) {
+        pair_vec_h <- vapply(hm_idx, function(ii) {
+          ps <- sort(c(hp1_h[ii], hp2_h[ii]))
+          paste(ps[1L], "x", ps[2L])
+        }, character(1))
+        ptab_h <- sort(table(pair_vec_h), decreasing = TRUE)
+        h_chips <- vapply(names(ptab_h), function(plbl) {
+          sprintf("<span style=\"display:inline-block;margin:2px 8px 2px 0;padding:3px 9px;background:#fdf2f8;border:1px solid #fbcfe8;border-radius:6px;font-size:0.81rem;\"><span class=\"sci\">%s</span> <strong>(n=%d)</strong></span>", .html_escape_vec(plbl), as.integer(ptab_h[[plbl]]))
+        }, character(1))
+        paste0("<section style=\"background:#fff;border:1px solid #cbd5e1;border-radius:8px;padding:10px 14px;margin-bottom:14px;\"><div style=\"font-size:0.75rem;text-transform:uppercase;letter-spacing:0.04em;color:#475569;margin-bottom:4px;\">Confirmed Hybrid Swarms (Putative Parent Species)</div>", paste(h_chips, collapse = ""), "</section>")
+      } else ""
+    },
     {
       comp_att_h <- attr(df, "complex_discovery")
       cdf_h <- if (!is.null(comp_att_h) && !is.null(comp_att_h$complexes_df)) comp_att_h$complexes_df else if (!is.null(opts) && !is.null(opts$output_complexes) && nzchar(opts$output_complexes) && file.exists(opts$output_complexes)) tryCatch(utils::read.csv(opts$output_complexes, stringsAsFactors = FALSE), error = function(e) NULL) else NULL
@@ -2757,7 +3125,7 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
     "}));",
     "['qSearch','qPrio','qSub','qTaxon'].forEach(id=>document.getElementById(id).addEventListener('input',applyFilter));",
     "document.getElementById('btnExport').addEventListener('click',()=>{",
-    "  const hdr=['catalogNumber','plant_individual_id','institutionCode','recordedBy','determiner_tier','species_standardized','recommended_determination','synthesis_triage_priority','taxonomic_treatment_subtype','cda_predicted_taxon','cda_posterior_prob','edaphic_best_fit_taxon','edaphic_z_score','delta_doy_resid','probabilistic_consensus_score','synthesis_triage_action','synthesis_rationale'];",
+    "  const hdr=['catalogNumber','plant_individual_id','institutionCode','recordedBy','determiner_tier','species_standardized','recommended_determination','synthesis_triage_priority','taxonomic_treatment_subtype','cda_predicted_taxon','cda_posterior_prob','edaphic_best_fit_taxon','edaphic_z_score','delta_doy_resid','probabilistic_consensus_score','synthesis_triage_action','synthesis_rationale','hybrid_parent_1','hybrid_parent_2','hybrid_zone_cohesion_pass'];",
     "  const csv=[hdr.join(',')].concat(filtered.map(r=>r.map(v=>'\"'+String(v||'').replace(/\"/g,'\"\"')+'\"').join(','))).join('\\n');",
     "  const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});",
     "  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='triage_queue_filtered.csv'; a.click(); URL.revokeObjectURL(a.href);",
