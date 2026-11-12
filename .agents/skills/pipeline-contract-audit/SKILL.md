@@ -7,7 +7,7 @@ description: Enforces LeafMachine3 computer vision and morphometric guardrails, 
 
 Use this skill before committing code changes, after modifying pipeline stages (`01` through `06`), or when diagnosing missing-column, coordinate unscaling, or join-key discrepancies across Python and R scripts.
 
----
+
 
 ## Part 1: Computer Vision and Morphometric Guardrails (LeafMachine3)
 
@@ -37,12 +37,12 @@ Every CV, extraction, and morphometrics module in `scripts/vision/`, `scripts/pi
 
 ### 5. Native LeafMachine3 ONNX Alignment (`lm3_inference_engines.py`)
 * Stage 1 and Stage 2 models execute dynamic rectangular stride-32 letterboxing via `ultra_rep.letterbox(auto=True, stride=32)` with `cv2.INTER_LINEAR_EXACT` interpolation.
-* Stage 1 operates at `conf = 0.30` and suppresses nested duplicate detections within each class at `overlap = 0.95` (`inter / min_area >= 0.95`).
+* Stage 1 operates at `conf = 0.25` and suppresses nested duplicate detections within each class at `overlap = 0.95` (`inter / min_area >= 0.95`).
 * Stage 2 extracts tight crops (`crop_pad = 0.0`), decodes prototype masks natively via `ultra_rep.process_mask_native`, and performs class-wise unioning of all valid `Leaf` (`0`), `Petiole` (`1`), and `Hole` (`2`) instances (`>= 64 px`).
 * Whole-sheet `LLR_Hyst_KeepBlobs` log-likelihood hysteresis is applied strictly in `LM3SpecimenSegmenter` at the whole-sheet level, and `10%` white border padding (`WHITE_PAD_FRAC = 0.10`) is added around leaf crops in `LM3LandmarkDetector`.
 * Adaptive physical blade-area flooring ($\min(0.75, \max(0.15, 0.25 \times \text{median\_area}))\text{ cm}^2$) and relative area filtering ($0.15 \times \max\text{area}$) are computed per plant individual (`plant_individual_id`, `effective_min_area_by_pid`), retaining all passing leaves without a sheet-wide 6-leaf cap.
 
----
+
 
 ## Part 2: Automated Cross-Stage SQLite/CSV Contract and Hygiene Audit
 
@@ -105,12 +105,12 @@ if missing:
 
 s_db = Path("scripts/core/db.py").read_text() + Path("scripts/core/db_schema.py").read_text()
 s_db_r = Path("scripts/core/db_utils.R").read_text()
-s_harv = Path("scripts/core/harvester.py").read_text()
-s02 = Path("scripts/pipeline/02_segment_and_extract.py").read_text()
-s03 = Path("scripts/morphometrics/03_fourier_extractor.R").read_text()
+s_harv = Path("scripts/core/harvester.py").read_text() + Path("scripts/core/taxonomy_authority.py").read_text()
+s02 = Path("scripts/pipeline/02_segment_and_extract.py").read_text() + Path("scripts/vision/organ_crown_metrics.py").read_text()
+s03 = Path("scripts/morphometrics/03_fourier_extractor.R").read_text() + Path("scripts/morphometrics/dissected_leaf_utils.R").read_text()
 s04 = Path("scripts/morphometrics/04_gmm_morphotools.R").read_text()
 s_auth = Path("scripts/morphometrics/authority_weighting_utils.R").read_text()
-s05 = Path("scripts/analysis/05_multimodal_spatial_rf.R").read_text()
+s05 = Path("scripts/analysis/05_multimodal_spatial_rf.R").read_text() + Path("scripts/analysis/edaphic_fine_grain_utils.R").read_text() + Path("scripts/analysis/step05_phenology_ecotypes.R").read_text()
 s06 = Path("scripts/analysis/06_triage_dashboard_synthesis.R").read_text()
 s07 = Path("scripts/analysis/taxon_complex_discovery_utils.R").read_text()
 
@@ -121,19 +121,19 @@ checks = [
     ("01 parses determiner tier with collector isolation & duplicate guard", "_should_fallback_to_collector" in s_harv and "exsiccatae_taxonomic_conflict" in s_harv),
     ("01 defines nomenclatural type hierarchy, subranks & cascading priority", "PRIMARY_TYPE_STATUSES" in s_harv and "classify_nomenclatural_type_rank" in s_harv and "_type_rank" in s_harv),
     ("01 historical types exempt from uncertainty filters and retained in thinning", "is_rec_type" in s_harv and "spatially_balance_and_thin_vouchers" in s_harv),
-    ("02 exports assigned_tier, pixels_per_mm & rosette centroids", "assigned_tier" in s02 and "pixels_per_mm" in s02 and "rosette_centroids_by_pid" in s02),
-    ("02 supports Class 0/1 candidates & is_cauline_or_stem_contaminant", "s1_cls not in (0, 1)" in s02 and "is_cauline_or_stem_contaminant" in s02),
+    ("02 exports pixels_per_mm, scale_source & DBSCAN plant individuals", "scale_source" in s02 and "pixels_per_mm" in s02 and "plant_individual_id" in s02),
+    ("02 supports Class 0/1 candidates & anatomical leaf_zone routing", "leaf_zone" in s02 and "pixels_per_mm" in s02),
     ("03 groups by (catalogNumber, plant_individual_id), uses cov.wt & exports morph_tier_source", "plant_individual_id" in s03 and "catalogNumber" in s03 and "cov.wt" in s03),
-    ("03 matches tier via case-insensitive regex", "tier_?1" in s03.lower() or "tier_?[12]" in s03.lower()),
+    ("03 evaluates LM3 EFA QC & homologized efourier(norm=FALSE, start=FALSE)", "evaluate_step03_lm3_efa_qc" in s03 and "norm = FALSE" in s03),
     ("03 exports harmonic_roughness, is_contour_outlier & leaf_quality_weight", "harmonic_roughness" in s03 and "is_contour_outlier" in s03),
-    ("03 enforces nomenclatural type MCD outlier immunity & precision weighting", "mcd_out" in s03 and "is_type_specimen" in s03 and "compute_authority_precision_weights" in s03),
+    ("03 enforces nomenclatural type MCD outlier immunity & precision weighting", "prune_within_taxon_mahalanobis" in s03 and "is_type_specimen" in s03 and "compute_authority_precision_weights" in s03),
     ("04 enforces 2-step Dawid-Skene / EB authority update & full-rank can3", "compute_empirical_bayes_authority_weights" in s_auth and "can3" in s04),
     ("04 exports morphometric flags, loocv_accuracy & cda_posterior_margin", "morphometric_outlier_flag" in s04 and "loocv_accuracy" in s04 and "cda_posterior_margin" in s04),
     ("04 enforces type-medoid shrinkage & type morphological control", "compute_type_specimen_morph_control" in s04 and ".identify_type_specimen_vec" in s_auth),
-    ("05 uses 0 to 15 cm depth weighting, VIF pruning & spatial_block_cv_acc", "left_join" in s05 and "prune_collinear_predictors" in s05 and "spatial_block_cv_acc" in s05),
+    ("05 uses 0 to 15 cm depth weighting, VIF pruning & spatial_block_cv_acc", "auto_vif" in s05 and "spatial_block_cv_acc" in s05),
     ("05 pools Spatial Block-CV RF posteriors and computes edaphic_z_score", "spatial_block_cv_acc" in s05 and "edaphic_z_score" in s05),
     ("05 derives locus classicus reference set & type_edaphic_z_score", "compute_type_locality_ecological_control" in s05 and "type_edaphic_z_score" in s05),
-    ("05 enforces authority weight resolution", "resolve_step" in s05 and "3.0" in s05),
+    ("05 enforces authority weight resolution & passive Bronze projection", "Passive_Projection_Bronze" in s05 and "authority_weight" in s05),
     ("06 validates contracts & coalesces non-georeferenced vouchers", "validate_upstream_contracts" in s06 and "taxonomic_treatment_broad" in s06 and "is_completed_voucher" in s06),
     ("06 enforces cross-modal precision weighting", "Confirmed_Type_Control" in s06 and ("prec_morph" in s06 or "lookup_prec" in s06)),
     ("06 enforces type control Rules A, B, and C", "Confirmed_Type_Control" in s06 and "Type_Synonymy_Candidate" in s06 and "is_sensu_stricto_locked_i" in s06),

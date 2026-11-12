@@ -1,0 +1,91 @@
+cff-version: 1.2.0
+message: "If you use this pipeline, its SQLite relational schema, or its integrative species delimitation protocol (UNC-BOT-SOP-2026-04-REV5) in your research, please cite it using the metadata below."
+type: software
+title: "Automated Vegetative Phenotyping and Integrative Species Delimitation Pipeline for North American Packera"
+version: "5.0.0"
+identifiers:
+  - type: other
+    value: "UNC-BOT-SOP-2026-04-REV5"
+    description: "University of North Carolina at Chapel Hill Herbarium (NCU) Standard Operating Procedure Revision 5 (SQLite Schema 20261121)"
+date-released: "2026-11-11"
+license: MIT
+repository-code: "https://github.com/Plantatsrophe/Packera_dubia_morphometrics"
+authors:
+  - family-names: "Fuller"
+    given-names: "J. Brandon"
+    affiliation: "Department of Biology and University of North Carolina Herbarium (NCU), University of North Carolina at Chapel Hill"
+  - family-names: "Weakley"
+    given-names: "Alan S."
+    affiliation: "University of North Carolina Herbarium (NCU), North Carolina Botanical Garden, University of North Carolina at Chapel Hill"
+keywords:
+  - "integrative taxonomy"
+  - "species delimitation"
+  - "Packera"
+  - "Asteraceae"
+  - "geometric morphometrics"
+  - "Elliptic Fourier Analysis"
+  - "Euler Characteristic Transform"
+  - "herbarium computer vision"
+  - "LeafMachine3"
+  - "spatial random forest"
+abstract: >-
+  A six-stage Python and R computational pipeline developed at the University of
+  North Carolina at Chapel Hill Herbarium (NCU) for automated vegetative
+  phenotyping, nomenclatural type anchoring, determiner authority
+  stratification, fine-grain 0 to 15 cm rhizosphere niche modeling, circular
+  Hopkins flowering phenology, and five-stage integrative species delimitation
+  across North American Packera (Asteraceae: Senecioneae).
+references:
+  - type: software
+    title: "LeafMachine3: Automated machine vision for herbarium trait phenotyping"
+    authors:
+      - family-names: "Weaver"
+        given-names: "William N."
+    year: 2026
+    repository-code: "https://github.com/Gene-Weaver/LeafMachine3"
+    license: AGPL-3.0-only
+  - type: article
+    title: "Topological shape descriptors and ECT in plant phenomics"
+    authors:
+      - family-names: "Ayub"
+        given-names: "M. S."
+    year: 2026
+    journal: "bioRxiv"
+    doi: "10.64898/2026.04.13.718293"
+  - type: article
+    title: "The integrative future of taxonomy"
+    authors:
+      - family-names: "Padial"
+        given-names: "José M."
+      - family-names: "Miralles"
+        given-names: "Aurélien"
+      - family-names: "De la Riva"
+        given-names: "Ignacio"
+      - family-names: "Vences"
+        given-names: "Miguel"
+    year: 2010
+    journal: "Frontiers in Zoology"
+    volume: 7
+    start: 16
+    doi: "10.1186/1742-9994-7-16"
+  - type: article
+    title: "Species concepts and species delimitation"
+    authors:
+      - family-names: "de Queiroz"
+        given-names: "Kevin"
+    year: 2007
+    journal: "Systematic Biology"
+    volume: 56
+    issue: 6
+    start: 879
+    end: 886
+    doi: "10.1080/10635150701701083"
+  - type: book
+    title: "Flora of the Southeastern United States"
+    authors:
+      - family-names: "Weakley"
+        given-names: "Alan S."
+    year: 2026
+    publisher:
+      name: "University of North Carolina Herbarium (NCU), North Carolina Botanical Garden"
+      city: "Chapel Hill"

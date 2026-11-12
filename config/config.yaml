@@ -19,7 +19,7 @@ paths:
   masks_dir: "data/masks"
   leaf_efa_harmonics_csv: "data/tables/leaf_efa_harmonics.csv"
   morphometric_flags_csv: "data/tables/morphometric_flags.csv"
-  cda_biplot_pdf: "outputs/figures/Figure_Integrative_Packera_Revision.pdf"
+  cda_biplot_pdf: "outputs/figures/fig06a_integrative_taxonomic_synthesis.png"
   revision_report_md: "outputs/reports/Packera_Taxonomic_Revision_Summary.md"
   gmm_report_csv: "outputs/reports/gmm_bayes_factors_summary.csv"
   summary_log: "outputs/reports/voucher_ingestion_summary.log"

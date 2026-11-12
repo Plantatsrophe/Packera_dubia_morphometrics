@@ -46,7 +46,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         cls.con_out = cls._class_tmp_path / "contingency.csv"
         cls.pca_env_dir = cls._class_tmp_path / "pca_env_plots"
         cls.pca_env_dir.mkdir(parents=True, exist_ok=True)
-        cls.pca_out_pdf = cls.pca_env_dir / "spatial_rf_niche_importance.pdf"
+        cls.pca_out_pdf = cls.pca_env_dir / "fig05a_ecological_niche_and_rf_importance.png"
         cls.r_unit_proc = None
 
         if shutil.which("Rscript"):
@@ -640,9 +640,8 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         self.assertIn("Dominant_Lithology_Class", con_csv_df.columns)
         self.assertIn("P_Value_BH", con_csv_df.columns)
 
-        self.assertTrue(self.pca_out_pdf.exists(), "spatial_rf_niche_importance.pdf must be generated.")
-        self.assertTrue((self.pca_env_dir / "fig05_ecological_niche_phenology.pdf").exists())
-        self.assertTrue((self.pca_env_dir / "fig05_ecological_niche_phenology.png").exists())
+        self.assertTrue(self.pca_out_pdf.exists(), "fig05a_ecological_niche_and_rf_importance.png must be generated.")
+        self.assertEqual(list(self.pca_env_dir.glob("*.pdf")), [])
 
     def test_authority_anchored_spatial_block_cv_zero_synthetic_cache_and_step07_contract(self):
         """Verify authority-anchored Spatial RF training, zero synthetic disk caching under --demo, passive Bronze/high-uncertainty projection, and Step 07 compatibility."""
@@ -659,8 +658,8 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             out_contingency = tmp / "micro_edaphic_outcrop_contingency.csv"
             out_pheno_anom = tmp / "phenological_anomalies.csv"
             out_pheno_sum = tmp / "phenological_anomaly_summary.csv"
-            out_plot = tmp / "spatial_rf_niche_summary.pdf"
-            out_pheno_plot = tmp / "phenological_latitudinal_anomaly.pdf"
+            out_plot = tmp / "fig05a_ecological_niche_and_rf_importance.png"
+            out_pheno_plot = tmp / "fig05b_hopkins_circular_phenology.png"
 
             fixture_taxa = ["Packera aurea", "Packera millefolium", "Packera obovata", "Packera schweinitziana"]
             rows = []
@@ -801,7 +800,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             step06_script = PROJECT_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
             out_queue = tmp / "triage_queue.csv"
             out_report = tmp / "revision_summary.md"
-            out_triage_plot = tmp / "triage_plot.pdf"
+            out_triage_plot = tmp / "fig06a_integrative_taxonomic_synthesis.png"
             cmd06 = [
                 "Rscript",
                 str(step06_script),
@@ -1006,16 +1005,13 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             )
 
             perf_csv <- file.path(out_dir, "reports", "sdm_model_performance.csv")
-            fig_pdf <- file.path(out_dir, "figures", "fig05b_sdm_habitat_suitability_map.pdf")
-            fig_png <- file.path(out_dir, "figures", "fig05b_sdm_habitat_suitability_map.png")
-            grid_pdf <- file.path(out_dir, "figures", "fig05c_multispecies_maxent_sdm_grid.pdf")
+            fig_png <- file.path(out_dir, "figures", "fig05c_sdm_suitability_and_distribution_map.png")
             tif_maxent <- file.path(out_dir, "rasters", "sdm_packera_dubia_maxent_cloglog.tif")
             tif_ens <- file.path(out_dir, "rasters", "sdm_packera_dubia_ensemble.tif")
 
             stopifnot(file.exists(perf_csv) && file.info(perf_csv)$size > 0)
-            stopifnot(file.exists(fig_pdf) && file.info(fig_pdf)$size > 0)
             stopifnot(file.exists(fig_png) && file.info(fig_png)$size > 0)
-            stopifnot(file.exists(grid_pdf) && file.info(grid_pdf)$size > 0)
+            stopifnot(length(list.files(file.path(out_dir, "figures"), pattern = "\\\\.pdf$")) == 0L)
             stopifnot(file.exists(tif_maxent) && file.info(tif_maxent)$size > 0)
             stopifnot(file.exists(tif_ens) && file.info(tif_ens)$size > 0)
 
@@ -1143,10 +1139,10 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             niche_k1 <- run_warren_niche_identity_tests(df_res, cand_v, n_perm = 15, intraspecific_mode = TRUE)
             stopifnot(nrow(niche_k1$summary) == 1L)
             stopifnot(niche_k1$summary$Schoener_D[1] == 1.0)
-            fig_k1_pdf <- file.path(tmp_root, "k1_fig", "spatial_rf_niche_summary.pdf")
-            export_spatial_rf_figures(df_res, srf_k1, niche_k1, fig_k1_pdf)
-            stopifnot(file.exists(fig_k1_pdf))
-            stopifnot(file.exists(file.path(tmp_root, "k1_fig", "fig05_ecological_niche_phenology.png")))
+            fig_k1_png <- file.path(tmp_root, "k1_fig", "fig05a_ecological_niche_and_rf_importance.png")
+            export_spatial_rf_figures(df_res, srf_k1, niche_k1, fig_k1_png)
+            stopifnot(file.exists(fig_k1_png))
+            stopifnot(length(list.files(file.path(tmp_root, "k1_fig"), pattern = "\\\\.pdf$")) == 0L)
             cat("NONCIRCULAR_K1_IBE_AND_HYGIENE_OK\n")
             """
             r_script_file = Path(tmp_d) / "test_noncircular_k1_hygiene.R"
@@ -1158,13 +1154,14 @@ class TestMultimodalSpatialRF(unittest.TestCase):
     def test_step05_eastern_na_figure_refinements(self):
         sdm_src = (PROJECT_ROOT / "scripts" / "analysis" / "step05_sdm_maxent.R").read_text(encoding="utf-8")
         pheno_src = (PROJECT_ROOT / "scripts" / "analysis" / "step05_phenology_ecotypes.R").read_text(encoding="utf-8")
+        f05_src = (PROJECT_ROOT / "scripts" / "figures" / "step05_figures.R").read_text(encoding="utf-8")
 
-        self.assertIn("keep_pairs <- head(unique(perm_df$pair[order(!grepl(\"dubia\", perm_df$pair, ignore.case = TRUE), seq_len(nrow(perm_df)))]), 6L)", sdm_src)
         self.assertIn("focal_artifacts$X_comb[focal_artifacts$p_vec == 1L, , drop = FALSE]", sdm_src)
         self.assertIn("med_row <- apply(pres_mat, 2, stats::median, na.rm = TRUE)", sdm_src)
-        self.assertIn("decimalLatitude >= 22.0", pheno_src)
-        self.assertIn("doy = pmin(365.0, pmax(1.0, b0_use + b1_use * lat_seq))", pheno_src)
-        self.assertIn("hopkins_expected = pmin(365.0, pmax(1.0, pred_min_lat + 4.0 * (lat_seq - min_lat)))", pheno_src)
+        self.assertIn("render_step05b_hopkins_phenology_png", pheno_src)
+        self.assertIn("fig05a_ecological_niche_and_rf_importance.png", f05_src)
+        self.assertIn("fig05b_hopkins_circular_phenology.png", f05_src)
+        self.assertIn("fig05c_sdm_suitability_and_distribution_map.png", f05_src)
 
 
     def test_step05_zero_trust_scientific_and_anti_leakage_suite(self):

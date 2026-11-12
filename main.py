@@ -939,7 +939,7 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         if run_dir is not None
         else cfg.get("paths", {}).get("morphometric_flags_csv", str(tables_dir / "morphometric_flags.csv"))
     )
-    default_plot_out = figures_dir / "cda_passive_projection.pdf"
+    default_plot_out = figures_dir / "fig04b_gmm_cda_morphometrics.png"
     default_report_out = (
         run_dir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv"
         if run_dir is not None
@@ -951,7 +951,7 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     reproductive_csv = Path(getattr(args, "reproductive", None) or (tables_dir / "voucher_reproductive_metrics.csv"))
     allometry_report = Path(getattr(args, "allometry_report", None) or (tables_dir / "allometry_permanova_summary.csv"))
     allometry_pairwise = Path(getattr(args, "allometry_pairwise", None) or (tables_dir / "allometry_pairwise_slopes.csv"))
-    allometry_plot = Path(getattr(args, "allometry_plot", None) or (figures_dir / "Allometry_Lamina_Dissection_Trajectory.pdf"))
+    allometry_plot = Path(getattr(args, "allometry_plot", None) or (figures_dir / "fig04a_foliar_allometry_audit.png"))
     batch_audit_out = Path(getattr(args, "output_batch_audit", None) or (tables_dir / "batch_variance_audit.csv"))
     flags_out.parent.mkdir(parents=True, exist_ok=True)
     plot_out.parent.mkdir(parents=True, exist_ok=True)
@@ -1110,14 +1110,14 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     contingency_table = Path(getattr(args, "contingency_table", None) or (reports_dir_s05 / "micro_edaphic_outcrop_contingency.csv"))
     pheno_anomalies = Path(getattr(args, "pheno_anomalies", None) or (tables_dir / "phenological_anomalies.csv"))
     pheno_summary = Path(getattr(args, "pheno_summary", None) or (reports_dir_s05 / "phenological_anomaly_summary.csv"))
-    pheno_plot = Path(getattr(args, "pheno_plot", None) or (figures_dir / "phenological_latitudinal_anomaly.pdf"))
+    pheno_plot = Path(getattr(args, "pheno_plot", None) or (figures_dir / "fig05b_hopkins_circular_phenology.png"))
     conflict_flags = Path(
         getattr(args, "conflict_flags", None)
         or (tables_dir / "multimodal_conflict_flags.csv")
     )
     spatial_plot = Path(
         getattr(args, "spatial_plot", None)
-        or (figures_dir / "spatial_rf_niche_importance.pdf")
+        or (figures_dir / "fig05a_ecological_niche_and_rf_importance.png")
     )
     spatial_summary = Path(
         getattr(args, "spatial_summary", None)
@@ -1175,12 +1175,12 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     focal_taxon_raw = focal_taxon or ""
     if focal_taxon_raw:
         focal_slug = re.sub(r"[^A-Za-z0-9]+", "_", focal_taxon_raw).strip("_") or "Packera"
-        default_fig_name = f"Figure_Integrative_{focal_slug}_Revision.pdf"
+        default_fig_name = f"Figure_Integrative_{focal_slug}_Revision.png"
         default_rep_name = f"{focal_slug}_Taxonomic_Revision_Summary.md"
         fallback_fig = str(figures_dir / default_fig_name)
         fallback_rep = f"outputs/reports/{default_rep_name}"
     else:
-        default_fig_name = "Figure_Integrative_Packera_Revision.pdf"
+        default_fig_name = "fig06a_integrative_taxonomic_synthesis.png"
         default_rep_name = "Packera_Taxonomic_Revision_Summary.md"
         fallback_fig = cfg.get("paths", {}).get("cda_biplot_pdf", str(figures_dir / default_fig_name))
         fallback_rep = cfg.get("paths", {}).get("revision_report_md", f"outputs/reports/{default_rep_name}")
@@ -1201,7 +1201,7 @@ def run_synthesis(args: argparse.Namespace, cfg: PipelineConfig) -> None:
     output_complexes = Path(getattr(args, "output_complexes", None) or (reports_dir_s05 / "empirical_taxon_complexes.csv"))
     output_affinity = Path(getattr(args, "output_affinity", None) or (reports_dir_s05 / "pairwise_taxon_affinity_matrix.csv"))
     output_neighbors = Path(getattr(args, "output_neighbors", None) or (reports_dir_s05 / "focal_auto_neighbors.txt"))
-    output_complex_plot = Path(getattr(args, "output_complex_plot", None) or (figures_dir / "fig06c_taxon_complex_network.pdf"))
+    output_complex_plot = Path(getattr(args, "output_complex_plot", None) or (figures_dir / "fig06b_taxon_complex_delimitation_network.png"))
     min_affinity_val = getattr(args, "min_affinity", None)
     if min_affinity_val is None:
         min_affinity_val = float((cfg.get("synthesis", {}) or {}).get("min_affinity", 0.03))

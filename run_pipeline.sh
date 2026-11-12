@@ -1403,10 +1403,10 @@ if [[ "${START_STEP}" -le 4 ]]; then
     --reproductive "${RUN_DIR}/data/tables/voucher_reproductive_metrics.csv" \
     --allometry-report "${RUN_DIR}/outputs/reports/allometry_significance_audit.csv" \
     --allometry-pairwise "${RUN_DIR}/outputs/reports/allometry_pairwise_trajectories.csv" \
-    --allometry-plot "${RUN_DIR}/outputs/figures/shape_allometry_regression.pdf" \
+    --allometry-plot "${RUN_DIR}/outputs/figures/fig04a_foliar_allometry_audit.png" \
     --output-batch-audit "${RUN_DIR}/outputs/reports/institutional_batch_effect_audit.csv" \
     --output-flags "${RUN_DIR}/data/tables/morphometric_flags.csv" \
-    --output-plot "${RUN_DIR}/outputs/figures/cda_passive_projection.pdf" \
+    --output-plot "${RUN_DIR}/outputs/figures/fig04b_gmm_cda_morphometrics.png" \
     --output-report "${RUN_DIR}/outputs/reports/gmm_bayes_factors_summary.csv" \
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}"
@@ -1432,10 +1432,10 @@ if [[ "${START_STEP}" -le 5 ]]; then
     --contingency-table "${RUN_DIR}/outputs/reports/micro_edaphic_outcrop_contingency.csv" \
     --pheno-anomalies "${RUN_DIR}/data/tables/phenological_anomalies.csv" \
     --pheno-summary "${RUN_DIR}/outputs/reports/phenological_anomaly_summary.csv" \
-    --pheno-plot "${RUN_DIR}/outputs/figures/phenological_latitudinal_anomaly.pdf" \
+    --pheno-plot "${RUN_DIR}/outputs/figures/fig05b_hopkins_circular_phenology.png" \
     --output-flags "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv" \
     --output-summary "${RUN_DIR}/outputs/reports/multimodal_spatial_rf_summary.csv" \
-    --output-plot "${RUN_DIR}/outputs/figures/spatial_rf_niche_importance.pdf" \
+    --output-plot "${RUN_DIR}/outputs/figures/fig05a_ecological_niche_and_rf_importance.png" \
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}" \
     "${DEMO_FLAG[@]}"
@@ -1448,10 +1448,10 @@ if [[ "${START_STEP}" -le 6 || "${START_STEP}" -eq 7 ]]; then
   echo "[Step 06/06] Running Integrative Taxonomic Synthesis & Complex Delimitation..."
   if [[ -n "${FOCAL_TAXON}" ]]; then
     FOCAL_TAXON_SLUG="$(printf '%s' "${FOCAL_TAXON}" | sed -E 's/[^A-Za-z0-9]+/_/g; s/^_+|_+$//g')"
-    STEP06_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_${FOCAL_TAXON_SLUG}_Revision.pdf"
+    STEP06_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_${FOCAL_TAXON_SLUG}_Revision.png"
     STEP06_REPORT="${RUN_DIR}/outputs/reports/${FOCAL_TAXON_SLUG}_Taxonomic_Revision_Summary.md"
   else
-    STEP06_FIGURE="${RUN_DIR}/outputs/figures/Figure_Integrative_Packera_Revision.pdf"
+    STEP06_FIGURE="${RUN_DIR}/outputs/figures/fig06a_integrative_taxonomic_synthesis.png"
     STEP06_REPORT="${RUN_DIR}/outputs/reports/Packera_Taxonomic_Revision_Summary.md"
   fi
   Rscript scripts/analysis/06_triage_dashboard_synthesis.R \
@@ -1469,7 +1469,7 @@ if [[ "${START_STEP}" -le 6 || "${START_STEP}" -eq 7 ]]; then
     --output-complexes "${RUN_DIR}/outputs/reports/empirical_taxon_complexes.csv" \
     --output-affinity "${RUN_DIR}/outputs/reports/pairwise_taxon_affinity_matrix.csv" \
     --output-neighbors "${RUN_DIR}/outputs/reports/focal_auto_neighbors.txt" \
-    --output-complex-plot "${RUN_DIR}/outputs/figures/fig06c_taxon_complex_network.pdf" \
+    --output-complex-plot "${RUN_DIR}/outputs/figures/fig06b_taxon_complex_delimitation_network.png" \
     "${FOCAL_ARGS[@]}" \
     "${INTRASPECIFIC_ARGS[@]}" \
     "${DEMO_FLAG[@]}"

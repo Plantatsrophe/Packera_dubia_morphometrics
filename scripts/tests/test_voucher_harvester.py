@@ -1584,7 +1584,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
         self.assertNotIn("mod05.TARGET_TAXA", sh_text)
         self.assertNotIn('"Packera dubia" "Packera anonyma" "Packera paupercula" "Packera plattensis"', sh_text)
         self.assertIn("Packera_Taxonomic_Revision_Summary.md", sh_text)
-        self.assertIn("Figure_Integrative_Packera_Revision.pdf", sh_text)
+        self.assertIn("fig06a_integrative_taxonomic_synthesis.png", sh_text)
         self.assertIn("select_cascading_outgroup_anchors", sh_text)
         self.assertIn("--geographic-scope", sh_text)
         self.assertIn("--include-western", sh_text)
@@ -1910,7 +1910,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             self.assertEqual(_arg_value(cmd_step04, "--reproductive"), str(tables_dir / "voucher_reproductive_metrics.csv"))
             self.assertEqual(_arg_value(cmd_step04, "--allometry-report"), str(tables_dir / "allometry_permanova_summary.csv"))
             self.assertEqual(_arg_value(cmd_step04, "--allometry-pairwise"), str(tables_dir / "allometry_pairwise_slopes.csv"))
-            self.assertEqual(_arg_value(cmd_step04, "--allometry-plot"), str(figures_dir / "Allometry_Lamina_Dissection_Trajectory.pdf"))
+            self.assertEqual(_arg_value(cmd_step04, "--allometry-plot"), str(figures_dir / "fig04a_foliar_allometry_audit.png"))
             self.assertEqual(_arg_value(cmd_step04, "--output-batch-audit"), str(tables_dir / "batch_variance_audit.csv"))
             self.assertEqual(_arg_value(cmd_step04, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step04)
@@ -1938,7 +1938,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             self.assertEqual(_arg_value(cmd_step06, "--contingency-table"), str(reports_dir / "micro_edaphic_outcrop_contingency.csv"))
             self.assertEqual(_arg_value(cmd_step06, "--pheno-anomalies"), str(tables_dir / "phenological_anomalies.csv"))
             self.assertEqual(_arg_value(cmd_step06, "--pheno-summary"), str(reports_dir / "phenological_anomaly_summary.csv"))
-            self.assertEqual(_arg_value(cmd_step06, "--pheno-plot"), str(figures_dir / "phenological_latitudinal_anomaly.pdf"))
+            self.assertEqual(_arg_value(cmd_step06, "--pheno-plot"), str(figures_dir / "fig05b_hopkins_circular_phenology.png"))
             self.assertEqual(_arg_value(cmd_step06, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step06)
 
@@ -1950,7 +1950,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
             self.assertEqual(_arg_value(cmd_step07, "--output-complexes"), str(reports_dir / "empirical_taxon_complexes.csv"))
             self.assertEqual(_arg_value(cmd_step07, "--output-affinity"), str(reports_dir / "pairwise_taxon_affinity_matrix.csv"))
             self.assertEqual(_arg_value(cmd_step07, "--output-neighbors"), str(reports_dir / "focal_auto_neighbors.txt"))
-            self.assertEqual(_arg_value(cmd_step07, "--output-complex-plot"), str(figures_dir / "fig06c_taxon_complex_network.pdf"))
+            self.assertEqual(_arg_value(cmd_step07, "--output-complex-plot"), str(figures_dir / "fig06b_taxon_complex_delimitation_network.png"))
             self.assertEqual(_arg_value(cmd_step07, "--focal-taxon"), "Packera aurea")
             self.assertIn("--intraspecific-mode", cmd_step07)
 
@@ -1965,7 +1965,7 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
         step06_block = sh_text[pos_step06:]
         self.assertIn('--multimodal-flags "${RUN_DIR}/data/tables/multimodal_conflict_flags.csv"', step06_block)
         self.assertIn('--output-complexes "${RUN_DIR}/outputs/reports/empirical_taxon_complexes.csv"', step06_block)
-        self.assertIn('--output-complex-plot "${RUN_DIR}/outputs/figures/fig06c_taxon_complex_network.pdf"', step06_block)
+        self.assertIn('--output-complex-plot "${RUN_DIR}/outputs/figures/fig06b_taxon_complex_delimitation_network.png"', step06_block)
 
         proc = subprocess.run(["bash", "-n", str(run_sh)], capture_output=True, text=True, check=False)
         self.assertEqual(proc.returncode, 0, f"bash -n run_pipeline.sh failed: {proc.stderr}")

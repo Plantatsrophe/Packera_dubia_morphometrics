@@ -12,17 +12,17 @@ parse_args_robust <- function() {
     optparse::make_option(c("-v", "--vouchers"), type = "character", default = "data/tables/curated_vouchers.csv"), optparse::make_option(c("-e", "--harmonics"), type = "character", default = "data/tables/leaf_efa_harmonics.csv"),
     optparse::make_option(c("-m", "--reproductive"), type = "character", default = "data/tables/voucher_reproductive_metrics.csv"), optparse::make_option(c("--outline-only"), action = "store_true", default = FALSE),
     optparse::make_option(c("--correct-allometry"), type = "character", default = "auto"), optparse::make_option(c("--allometry-report"), type = "character", default = "outputs/reports/allometry_significance_audit.csv"),
-    optparse::make_option(c("--allometry-pairwise"), type = "character", default = "outputs/reports/allometry_pairwise_trajectories.csv"), optparse::make_option(c("--allometry-plot"), type = "character", default = "outputs/figures/shape_allometry_regression.pdf"),
+    optparse::make_option(c("--allometry-pairwise"), type = "character", default = "outputs/reports/allometry_pairwise_trajectories.csv"), optparse::make_option(c("--allometry-plot"), type = "character", default = "outputs/figures/fig04a_foliar_allometry_audit.png"),
     optparse::make_option(c("--use-clustvarsel"), action = "store_true", default = FALSE), optparse::make_option(c("-f", "--output-flags"), type = "character", default = "data/tables/morphometric_flags.csv"),
-    optparse::make_option(c("-p", "--output-plot"), type = "character", default = "outputs/figures/cda_passive_projection.pdf"), optparse::make_option(c("-r", "--output-report"), type = "character", default = "outputs/reports/gmm_bayes_factors_summary.csv"),
+    optparse::make_option(c("-p", "--output-plot"), type = "character", default = "outputs/figures/fig04b_gmm_cda_morphometrics.png"), optparse::make_option(c("-r", "--output-report"), type = "character", default = "outputs/reports/gmm_bayes_factors_summary.csv"),
     optparse::make_option(c("-b", "--output-batch-audit"), type = "character", default = "outputs/reports/institutional_batch_effect_audit.csv"), optparse::make_option(c("-k", "--max-k"), type = "integer", default = 8),
     optparse::make_option(c("-d", "--num-pcs"), type = "integer", default = 5), optparse::make_option(c("--permutations"), type = "integer", default = 999),
     optparse::make_option(c("--seed"), type = "integer", default = 42), optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE), optparse::make_option(c("--focal-taxon"), type = "character", default = "")
   )
   if (requireNamespace("optparse", quietly = TRUE)) { opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list)); names(opts) <- gsub("-", "_", names(opts)); return(opts) }
   defs <- list(vouchers = "data/tables/curated_vouchers.csv", harmonics = "data/tables/leaf_efa_harmonics.csv", reproductive = "data/tables/voucher_reproductive_metrics.csv", outline_only = FALSE, correct_allometry = "auto",
-       allometry_report = "outputs/reports/allometry_significance_audit.csv", allometry_pairwise = "outputs/reports/allometry_pairwise_trajectories.csv", allometry_plot = "outputs/figures/shape_allometry_regression.pdf",
-       use_clustvarsel = FALSE, output_flags = "data/tables/morphometric_flags.csv", output_plot = "outputs/figures/cda_passive_projection.pdf", output_report = "outputs/reports/gmm_bayes_factors_summary.csv",
+       allometry_report = "outputs/reports/allometry_significance_audit.csv", allometry_pairwise = "outputs/reports/allometry_pairwise_trajectories.csv", allometry_plot = "outputs/figures/fig04a_foliar_allometry_audit.png",
+       use_clustvarsel = FALSE, output_flags = "data/tables/morphometric_flags.csv", output_plot = "outputs/figures/fig04b_gmm_cda_morphometrics.png", output_report = "outputs/reports/gmm_bayes_factors_summary.csv",
        output_batch_audit = "outputs/reports/institutional_batch_effect_audit.csv", max_k = 8L, num_pcs = 5L, permutations = 999L, seed = 42L, intraspecific_mode = FALSE, focal_taxon = "")
   if (exists(".parse_step04_cli_fallback", mode = "function")) .parse_step04_cli_fallback(commandArgs(trailingOnly = TRUE), defs) else defs
 }
@@ -59,7 +59,7 @@ generate_allometry_diagnostic_plot <- function(sub_df, r2_size, p_size, r2_int, 
 
 test_and_correct_allometry <- function(morpho_df, correct_mode = "auto", permutations = 999, seed = 42, r2_threshold = 0.10,
                                        output_report = "outputs/reports/allometry_significance_audit.csv",
-                                       output_plot = "outputs/figures/shape_allometry_regression.pdf",
+                                       output_plot = "outputs/figures/fig04a_foliar_allometry_audit.png",
                                        output_pairwise = "outputs/reports/allometry_pairwise_trajectories.csv") {
   message("=== Foliar Allometry Assessment (Multivariate Size vs. Shape Covariation) ===")
   sym_names <- c(discover_sorted_morph_cols(morpho_df, "^A[0-9]+$"), discover_sorted_morph_cols(morpho_df, "^D[0-9]+$"))
@@ -643,7 +643,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]; dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".", Sys.getpid(), ".tmp"); .write_csv_s04(out_df, tmp_flags, na = ""); file.rename(tmp_flags, opts$output_flags)
   if (exists("persist_step04_to_sqlite", mode = "function")) tryCatch(persist_step04_to_sqlite(out_df, opts$vouchers, focal_taxon = opts$focal_taxon, intraspecific_mode = is_intra_mode), error = function(e) warning("SQLite Step 04 persistence note: ", e$message))
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, selected_features, manova_res = manova_res)
-  tryCatch({ if (exists("generate_step04_pub_figures", mode = "function")) generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot, eco_cda_res = eco_cda_res, manova_res = manova_res) }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
+  tryCatch({ if (exists("generate_step04_pub_figures", mode = "function")) generate_step04_pub_figures(audited_df, cda_res, gmm_res, NULL, opts$output_plot, eco_cda_res = eco_cda_res, manova_res = manova_res, batch_csv = opts$output_batch_audit) }, error = function(e) warning("Step 04 publication figures export warning: ", e$message))
   return(invisible(out_df))
 }
 if (sys.nframe() == 0) run_gmm_morphotools_pipeline(parse_args_robust())

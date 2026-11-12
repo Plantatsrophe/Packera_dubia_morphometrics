@@ -693,10 +693,10 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 "--contingency-table", str(reports_dir / "micro_edaphic_outcrop_contingency.csv"),
                 "--pheno-anomalies", str(tables_dir / "phenological_anomalies.csv"),
                 "--pheno-summary", str(reports_dir / "phenological_anomaly_summary.csv"),
-                "--pheno-plot", str(figures_dir / "phenological_latitudinal_anomaly.pdf"),
+                "--pheno-plot", str(figures_dir / "fig05b_hopkins_circular_phenology.png"),
                 "--output-flags", str(conflict_csv),
                 "--output-summary", str(srf_summary_csv),
-                "--output-plot", str(figures_dir / "spatial_rf_niche_importance.pdf"),
+                "--output-plot", str(figures_dir / "fig05a_ecological_niche_and_rf_importance.png"),
                 "--permutations", "9",
                 "--n-trees", "50",
             ]
@@ -713,7 +713,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             triage_queue_csv = tables_dir / "triage_queue.csv"
             rev_report_md = reports_dir / "Packera_Taxonomic_Revision_Summary.md"
             rev_html = reports_dir / "Triage_Dashboard_Interactive.html"
-            rev_fig_pdf = figures_dir / "Figure_Integrative_Packera_Revision.pdf"
+            rev_fig_pdf = figures_dir / "fig06a_integrative_taxonomic_synthesis.png"
 
             cmd_step06 = [
                 rscript_bin,

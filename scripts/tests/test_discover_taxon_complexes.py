@@ -72,7 +72,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             q_csv = mm_dir / "triage_queue.csv"
             rep_md = mm_dir / "rev.md"
             html_out = mm_dir / "dash.html"
-            fig_out = mm_dir / "rev.pdf"
+            fig_out = mm_dir / "rev.png"
 
             pd.DataFrame([
                 {"catalogNumber": "MM_01", "plant_individual_id": 1, "species_standardized": "Packera aurea", "determiner_tier": "Tier_1_Gold", "basal_leaf_count": 3, "PC1": -1.2, "PC2": 0.3},
@@ -203,7 +203,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
               opts_m$output_complexes <- "{(mm_dir / 'empirical_taxon_complexes.csv').as_posix()}"
               opts_m$output_affinity <- "{(mm_dir / 'pairwise_taxon_affinity_matrix.csv').as_posix()}"
               opts_m$output_neighbors <- "{(mm_dir / 'focal_auto_neighbors.txt').as_posix()}"
-              opts_m$output_complex_plot <- "{(mm_dir / 'fig06c_taxon_complex_network.pdf').as_posix()}"
+              opts_m$output_complex_plot <- "{(mm_dir / 'fig06b_taxon_complex_delimitation_network.png').as_posix()}"
               opts_m$demo <- TRUE
               mdf <- build_triage_queue(opts_m)
               req <- c("fine_soil_ph", "fine_soil_sand", "fine_bedrock_depth_cm", "ssurgo_rock_outcrop_pct",
@@ -269,14 +269,14 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
               )
               gmm_res <- list(optimal_G = 3, best_k = 3, optimal_model = "VVI", classification = df$gmm_cluster)
 
-              f_cda <- file.path("{intra_fig_dir.as_posix()}", "cda_passive_projection.pdf")
+              f_cda <- file.path("{intra_fig_dir.as_posix()}", "fig04b_gmm_cda_morphometrics.png")
               render_cda_biplot_4panel_pdf(df, cda_res, gmm_res, f_cda)
               stopifnot(file.exists(f_cda) && file.info(f_cda)$size > 1000)
 
               generate_step04_pub_figures(df, cda_res, gmm_res, NULL, f_cda)
-              stopifnot(file.exists(file.path("{intra_fig_dir.as_posix()}", "fig04_gmm_cda_clustering.pdf")))
+              stopifnot(file.exists(file.path("{intra_fig_dir.as_posix()}", "fig04b_gmm_cda_morphometrics.png")))
 
-              f_srf <- file.path("{intra_fig_dir.as_posix()}", "spatial_rf_niche_importance.pdf")
+              f_srf <- file.path("{intra_fig_dir.as_posix()}", "fig05a_ecological_niche_and_rf_importance.png")
               srf_mock <- list(
                 OOB_Error = 0.12,
                 Spatial_Block_CV_Accuracy = 0.86,
@@ -297,7 +297,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
               export_spatial_rf_figures(df, srf_mock, niche_mock, f_srf)
               stopifnot(file.exists(f_srf) && file.info(f_srf)$size > 1000)
 
-              f_s06 <- file.path("{intra_fig_dir.as_posix()}", "integrative_taxonomic_synthesis.pdf")
+              f_s06 <- file.path("{intra_fig_dir.as_posix()}", "fig06a_integrative_taxonomic_synthesis.png")
               render_step06_synthesis_plate_pdf(df, f_s06)
               stopifnot(file.exists(f_s06) && file.info(f_s06)$size > 1000)
               cat("STEP06_INTRA_FIGS_OK\\n")
@@ -481,13 +481,13 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             harmonics_csv = tmp_path / "leaf_efa_harmonics.csv"
             morph_csv = tmp_path / "morphometric_flags.csv"
             out_queue = tmp_path / "triage_queue.csv"
-            out_plot = tmp_path / "Figure_Integrative_Packera_dubia_Revision.pdf"
+            out_plot = tmp_path / "Figure_Integrative_Packera_dubia_Revision.png"
             out_report = tmp_path / "Packera_dubia_Taxonomic_Revision_Summary.md"
             out_html = tmp_path / "Triage_Dashboard_Interactive.html"
             out_complexes = tmp_path / "empirical_taxon_complexes.csv"
             out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
             out_neighbors = tmp_path / "focal_auto_neighbors.txt"
-            out_figure = tmp_path / "fig06c_taxon_complex_network.pdf"
+            out_figure = tmp_path / "fig06b_taxon_complex_delimitation_network.png"
 
             pd.DataFrame(vouchers_rows).to_csv(vouchers_csv, index=False)
             pd.DataFrame(harmonics_rows).to_csv(harmonics_csv, index=False)
@@ -520,7 +520,7 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             self.assertTrue(out_affinity.exists() and out_affinity.stat().st_size > 0)
             self.assertTrue(out_neighbors.exists() and out_neighbors.stat().st_size > 0)
             self.assertTrue(out_figure.exists() and out_figure.stat().st_size > 0)
-            self.assertTrue(out_figure.with_suffix(".png").exists())
+            self.assertEqual(list(tmp_path.glob("*.pdf")), [])
             self.assertIn("Empirical Taxon-Complex Delimitation", out_report.read_text(encoding="utf-8"))
             self.assertIn("Empirical Species Complexes", out_html.read_text(encoding="utf-8"))
 
@@ -569,13 +569,13 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             tmp_path = Path(tmpdir)
             morph_csv = tmp_path / "morphometric_flags.csv"
             out_queue = tmp_path / "triage_queue.csv"
-            out_plot = tmp_path / "rev.pdf"
+            out_plot = tmp_path / "rev.png"
             out_report = tmp_path / "rev.md"
             out_html = tmp_path / "dash.html"
             out_complexes = tmp_path / "empirical_taxon_complexes.csv"
             out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
             out_neighbors = tmp_path / "focal_auto_neighbors.txt"
-            out_fig = tmp_path / "fig06c_taxon_complex_network.pdf"
+            out_fig = tmp_path / "fig06b_taxon_complex_delimitation_network.png"
 
             subclusters = [
                 ("Packera dubia", 1, 8, np.array([-2.2, -1.5, 0.0, 0.0, 0.0])),
@@ -654,13 +654,13 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             morph_csv = tmp_path / "morphometric_flags.csv"
             mm_csv = tmp_path / "multimodal_conflict_flags.csv"
             out_queue = tmp_path / "triage_queue.csv"
-            out_plot = tmp_path / "rev.pdf"
+            out_plot = tmp_path / "rev.png"
             out_report = tmp_path / "rev.md"
             out_html = tmp_path / "dash.html"
             out_complexes = tmp_path / "empirical_taxon_complexes.csv"
             out_affinity = tmp_path / "pairwise_taxon_affinity_matrix.csv"
             out_neighbors = tmp_path / "focal_auto_neighbors.txt"
-            out_fig = tmp_path / "fig06c_taxon_complex_network.pdf"
+            out_fig = tmp_path / "fig06b_taxon_complex_delimitation_network.png"
 
             taxa_specs = [
                 ("Packera hyperborea", (-3.5, -3.0), (5.5, 1.8)),

@@ -1,0 +1,54 @@
+MIT License
+
+Copyright (c) 2026 J. Brandon Fuller and the University of North Carolina at Chapel Hill Herbarium (NCU)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+===============================================================================
+Third-Party Software and External Geospatial Data Notice
+===============================================================================
+
+1. LeafMachine3 Computer Vision Engine (AGPL-3.0 Boundary)
+   The automated installer (`setup_leafmachine3.sh`) clones LeafMachine3
+   (Weaver 2026; https://github.com/Gene-Weaver/LeafMachine3) into an isolated
+   local directory (`LeafMachine3/` with virtual environment `LeafMachine3/.venv`)
+   and downloads its pretrained ONNX checkpoints into `models/lm3/`. This
+   repository (`Packera_dubia_morphometrics`) neither bundles nor modifies
+   LeafMachine3 source files, and Step 02 interacts with LeafMachine3 across a
+   read-only configuration and ONNX Runtime boundary. LeafMachine3 itself is
+   distributed separately by its authors under the GNU Affero General Public
+   License v3.0 (AGPL-3.0).
+
+2. Federal and Academic Geospatial Layers
+   Environmental rasters and vector layers fetched at runtime into
+   `data/environmental/` remain subject to the terms of their upstream
+   providers:
+   * U.S. Federal Public Domain (17 U.S.C. Section 105 / CC0 1.0): USDA-NRCS
+     SSURGO Soil Data Access (SDA), USDA-NRCS SOLUS100 (doi:
+     10.15482/USDA.ADC/25033856), USGS State Geologic Map Compilation (SGMC;
+     doi: 10.5066/F7WH2N65), USGS 3D Elevation Program (3DEP) 1-arc-second DEM
+     tiles, US EPA Level III Ecoregions, and USDA PLANTS county distributions.
+   * Academic Research Datasets: POLARIS 30 m soil grids (Chaney et al. 2019;
+     doi: 10.1029/2018WR022797) and WorldClim v2.1 bioclimatic rasters (Fick
+     and Hijmans 2017; doi: 10.1002/joc.5086, distributed for academic and
+     non-commercial research).
+   * Digitized Herbarium Vouchers (GBIF and iDigBio): Specimen images and
+     Darwin Core occurrence records downloaded into `data/raw_vouchers/` retain
+     the copyright and Creative Commons license (`CC0`, `CC BY`, or `CC BY-NC`)
+     assigned by each contributing herbarium (`institutionCode`).

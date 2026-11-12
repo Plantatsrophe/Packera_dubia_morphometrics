@@ -75,14 +75,14 @@ parse_args_robust <- function() {
     optparse::make_option(c("-s", "--niche-summary"), type = "character", default = rp("outputs/reports/multimodal_spatial_rf_summary.csv")),
     optparse::make_option(c("-e", "--harmonics"), type = "character", default = rp("data/tables/leaf_efa_harmonics.csv")),
     optparse::make_option(c("-q", "--output-queue"), type = "character", default = rp("data/tables/triage_queue.csv")),
-    optparse::make_option(c("-p", "--output-plot"), type = "character", default = rp("outputs/figures/Figure_Integrative_Packera_Revision.pdf")),
+    optparse::make_option(c("-p", "--output-plot"), type = "character", default = rp("outputs/figures/fig06a_integrative_taxonomic_synthesis.png")),
     optparse::make_option(c("-r", "--output-report"), type = "character", default = rp("outputs/reports/Packera_Taxonomic_Revision_Summary.md")),
     optparse::make_option(c("--output-html"), type = "character", default = rp("outputs/reports/Triage_Dashboard_Interactive.html")),
     optparse::make_option(c("--min-affinity"), type = "double", default = 0.03),
     optparse::make_option(c("--output-complexes"), type = "character", default = rp("outputs/reports/empirical_taxon_complexes.csv")),
     optparse::make_option(c("--output-affinity"), type = "character", default = rp("outputs/reports/pairwise_taxon_affinity_matrix.csv")),
     optparse::make_option(c("--output-neighbors"), type = "character", default = rp("outputs/reports/focal_auto_neighbors.txt")),
-    optparse::make_option(c("--output-complex-plot"), type = "character", default = rp("outputs/figures/fig06c_taxon_complex_network.pdf")),
+    optparse::make_option(c("--output-complex-plot"), type = "character", default = rp("outputs/figures/fig06b_taxon_complex_delimitation_network.png")),
     optparse::make_option(c("--focal-taxon"), type = "character", default = ""),
     optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE),
     optparse::make_option(c("--demo"), action = "store_true", default = FALSE)
@@ -102,13 +102,13 @@ parse_args_robust <- function() {
        multimodal_flags = "data/tables/multimodal_conflict_flags.csv",
        gmm_summary = "outputs/reports/gmm_bayes_factors_summary.csv", gmm_bic = "data/tables/gmm_bic_model_selection.csv",
        cda_summary = "data/tables/cda_summary.csv", niche_summary = "outputs/reports/multimodal_spatial_rf_summary.csv",
-       output_queue = "data/tables/triage_queue.csv", output_plot = "outputs/figures/Figure_Integrative_Packera_Revision.pdf",
+       output_queue = "data/tables/triage_queue.csv", output_plot = "outputs/figures/fig06a_integrative_taxonomic_synthesis.png",
        output_report = "outputs/reports/Packera_Taxonomic_Revision_Summary.md",
        output_html = "outputs/reports/Triage_Dashboard_Interactive.html",
        min_affinity = 0.03, output_complexes = "outputs/reports/empirical_taxon_complexes.csv",
        output_affinity = "outputs/reports/pairwise_taxon_affinity_matrix.csv",
        output_neighbors = "outputs/reports/focal_auto_neighbors.txt",
-       output_complex_plot = "outputs/figures/fig06c_taxon_complex_network.pdf",
+       output_complex_plot = "outputs/figures/fig06b_taxon_complex_delimitation_network.png",
        focal_taxon = "", intraspecific_mode = FALSE, demo = FALSE)
 }
 
@@ -2114,20 +2114,16 @@ load_and_merge_modalities <- build_triage_queue
 
 render_synthesis_figure_pdf <- function(df, out_pdf, cda_summary = NULL, focal_taxon = "") {
   if (!exists("render_step06_synthesis_plate_pdf", mode = "function") && file.exists("scripts/morphometrics/pub_figures_utils.R")) source("scripts/morphometrics/pub_figures_utils.R")
+  out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) sub("\\.pdf$", ".png", out_pdf, ignore.case = TRUE) else "outputs/figures/fig06a_integrative_taxonomic_synthesis.png"
   if (exists("render_step06_synthesis_plate_pdf", mode = "function")) {
-    render_step06_synthesis_plate_pdf(df, out_pdf, cda_summary = cda_summary)
+    render_step06_synthesis_plate_pdf(df, out_png, cda_summary = cda_summary, focal_taxon = focal_taxon)
   }
   f_info <- .resolve_focal_taxon_slug(focal_taxon)
-  if (nzchar(f_info$taxon) && nzchar(f_info$slug) && !is.null(out_pdf) && nzchar(out_pdf)) {
-    focal_pdf <- file.path(dirname(out_pdf), sprintf("Figure_Integrative_%s_Revision.pdf", f_info$slug))
-    .copy_focal_taxon_artifact(out_pdf, focal_pdf)
-    src_png <- sub("\\.pdf$", ".png", out_pdf, ignore.case = TRUE)
-    if (src_png != out_pdf && file.exists(src_png)) {
-      focal_png <- file.path(dirname(out_pdf), sprintf("Figure_Integrative_%s_Revision.png", f_info$slug))
-      .copy_focal_taxon_artifact(src_png, focal_png)
-    }
+  if (nzchar(f_info$taxon) && nzchar(f_info$slug) && nzchar(out_png) && file.exists(out_png)) {
+    focal_png <- file.path(dirname(out_png), sprintf("Figure_Integrative_%s_Revision.png", f_info$slug))
+    .copy_focal_taxon_artifact(out_png, focal_png)
   }
-  invisible(out_pdf)
+  invisible(out_png)
 }
 
 generate_taxonomic_revision_report <- function(df, opts) {
@@ -2317,9 +2313,10 @@ generate_taxonomic_revision_report <- function(df, opts) {
     if (normalizePath(focal_rep, mustWork = FALSE) != normalizePath(opts$output_report, mustWork = FALSE)) {
       tmp_frep <- paste0(focal_rep, ".tmp"); writeLines(md_lines, tmp_frep); file.rename(tmp_frep, focal_rep)
     }
-    if (!is.null(opts$output_plot) && nzchar(opts$output_plot) && file.exists(opts$output_plot)) {
-      focal_pdf <- file.path(dirname(opts$output_plot), sprintf("Figure_Integrative_%s_Revision.pdf", f_info$slug))
-      .copy_focal_taxon_artifact(opts$output_plot, focal_pdf)
+    out_png_rep <- if (!is.null(opts$output_plot) && nzchar(opts$output_plot)) sub("\\.pdf$", ".png", opts$output_plot, ignore.case = TRUE) else ""
+    if (nzchar(out_png_rep) && file.exists(out_png_rep)) {
+      focal_png <- file.path(dirname(out_png_rep), sprintf("Figure_Integrative_%s_Revision.png", f_info$slug))
+      .copy_focal_taxon_artifact(out_png_rep, focal_png)
     }
   }
 }
@@ -2481,6 +2478,25 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
         }, character(1))
         paste0("<section style=\"background:#fff;border:1px solid #cbd5e1;border-radius:8px;padding:10px 14px;margin-bottom:14px;\"><div style=\"font-size:0.75rem;text-transform:uppercase;letter-spacing:0.04em;color:#475569;margin-bottom:4px;\">Empirical Species Complexes (Leiden / Metric Ward.D2)</div>", paste(cl_chips, collapse = ""), "</section>")
       } else ""
+    },
+    {
+      fig_rel_cands <- c(
+        "Synthesis Plate" = "../figures/fig06a_integrative_taxonomic_synthesis.png",
+        "Complex Network" = "../figures/fig06b_taxon_complex_delimitation_network.png",
+        "LM3 & ECT Exemplars" = "../figures/fig02a_lm3_organ_and_ect_exemplars.png",
+        "EFA Morphospace" = "../figures/fig03a_efa_morphospace_and_harmonics.png",
+        "GMM & CDA" = "../figures/fig04b_gmm_cda_morphometrics.png",
+        "SDM & Niche" = "../figures/fig05c_sdm_suitability_and_distribution_map.png"
+      )
+      fig_links <- character(0)
+      for (fnm in names(fig_rel_cands)) {
+        rel_p <- fig_rel_cands[[fnm]]
+        disk_p <- normalizePath(file.path(dirname(html_path), rel_p), mustWork = FALSE)
+        if (file.exists(disk_p)) {
+          fig_links <- c(fig_links, sprintf("<a href=\"%s\" target=\"_blank\" style=\"display:inline-block;margin:2px 8px 2px 0;padding:3px 9px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;font-size:0.80rem;color:#1d4ed8;text-decoration:none;\">%s (300 DPI PNG)</a>", rel_p, .html_escape_vec(fnm)))
+        }
+      }
+      if (length(fig_links) > 0L) paste0("<section style=\"background:#fff;border:1px solid #cbd5e1;border-radius:8px;padding:8px 14px;margin-bottom:12px;\"><span style=\"font-size:0.75rem;text-transform:uppercase;letter-spacing:0.04em;color:#475569;margin-right:10px;\">300-DPI PNG Plates:</span>", paste(fig_links, collapse = ""), "</section>") else ""
     },
     "<section class=\"toolbar\">",
     "<input type=\"search\" id=\"qSearch\" placeholder=\"Search catalogNumber, collector, herbarium, taxon, rationale...\">",

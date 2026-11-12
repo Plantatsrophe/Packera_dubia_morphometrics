@@ -250,7 +250,7 @@ class PathsConfig:
     masks_dir: Path = PROJECT_ROOT / "data" / "masks"
     leaf_efa_harmonics_csv: Path = PROJECT_ROOT / "data" / "tables" / "leaf_efa_harmonics.csv"
     morphometric_flags_csv: Path = PROJECT_ROOT / "data" / "tables" / "morphometric_flags.csv"
-    cda_biplot_pdf: Path = PROJECT_ROOT / "outputs" / "figures" / "Figure_Integrative_Packera_Revision.pdf"
+    cda_biplot_pdf: Path = PROJECT_ROOT / "outputs" / "figures" / "fig06a_integrative_taxonomic_synthesis.png"
     revision_report_md: Path = PROJECT_ROOT / "outputs" / "reports" / "Packera_Taxonomic_Revision_Summary.md"
     gmm_report_csv: Path = PROJECT_ROOT / "outputs" / "reports" / "gmm_bayes_factors_summary.csv"
     summary_log: Path = PROJECT_ROOT / "outputs" / "reports" / "voucher_ingestion_summary.log"
@@ -508,7 +508,7 @@ class PipelineConfig:
             masks_dir=rdir / "data" / "masks",
             leaf_efa_harmonics_csv=rdir / "data" / "tables" / "leaf_efa_harmonics.csv",
             morphometric_flags_csv=rdir / "data" / "tables" / "morphometric_flags.csv",
-            cda_biplot_pdf=rdir / "outputs" / "figures" / "Figure_Integrative_Packera_Revision.pdf",
+            cda_biplot_pdf=rdir / "outputs" / "figures" / "fig06a_integrative_taxonomic_synthesis.png",
             revision_report_md=rdir / "outputs" / "reports" / "Packera_Taxonomic_Revision_Summary.md",
             gmm_report_csv=rdir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv",
             summary_log=rdir / "logs" / "pipeline.log",

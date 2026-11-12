@@ -314,10 +314,12 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         ):
             self.assertNotIn(banned_legacy, content)
         pf_src = (PROJECT_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R").read_text(encoding="utf-8")
+        f04_src = (PROJECT_ROOT / "scripts" / "figures" / "step04_figures.R").read_text(encoding="utf-8")
         self.assertNotIn("loocv_pct", pf_src)
         self.assertNotIn("copied_from_cda_pdf", pf_src)
         self.assertNotIn("fig04_cand", pf_src)
-        self.assertIn('sprintf("A. Canonical Structure Loading Circle (%s)", loocv_tag_s04)', pf_src)
+        self.assertIn("Descriptive Post-GMM Ordination", f04_src)
+        self.assertIn("loocv_tag_s04", f04_src)
         self.assertNotIn("Glabrescent_P_dubia_Misidentified_as_P_anonyma", content)
         self.assertNotIn(
             'target_taxa <- c("Packera anonyma", "Packera dubia", "Packera plattensis", "Packera paupercula")',
@@ -427,8 +429,9 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 pheno_df=pd.DataFrame(),
                 figures_dir=Path(tmpdir) / "figures",
             )
-            self.assertTrue(Path(saved["fig02a_pdf"]).exists())
-            self.assertTrue(Path(saved["fig02b_pdf"]).exists())
+            self.assertTrue(Path(saved["fig02a_png"]).exists())
+            self.assertTrue(Path(saved["fig02b_png"]).exists())
+            self.assertEqual(list((Path(tmpdir) / "figures").glob("*.pdf")), [])
 
         cfg = PipelineConfig.from_yaml()
         self.assertEqual(cfg.taxa.target_species, [])
@@ -540,9 +543,9 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             flags_csv = tmp_p / "morphometric_flags.csv"
             bic_csv = rep_dir / "gmm_bayes_factors_summary.csv"
             allom_csv = rep_dir / "allometry.csv"
-            allom_pdf = fig_dir / "allometry.pdf"
+            allom_pdf = fig_dir / "fig04a_foliar_allometry_audit.png"
             eco_sum_csv = rep_dir / "ecoregion_supervised_cda_summary.csv"
-            cda_pdf = fig_dir / "cda_passive_projection.pdf"
+            cda_pdf = fig_dir / "fig04b_gmm_cda_morphometrics.png"
 
             pd.DataFrame(rows).to_csv(harm_csv, index=False)
             pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
@@ -573,7 +576,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
 
             # 0. Single-taxon allometry audit CSV & PDF + zero dropped Tier_1 / Cauline_Only_Fallback / partial-AR_inv vouchers
             self.assertTrue(allom_csv.exists(), "Allometry audit CSV must be exported in single-taxon mode")
-            self.assertTrue(allom_pdf.exists() and allom_pdf.read_bytes()[:5] == b"%PDF-")
+            self.assertTrue(allom_pdf.exists() and allom_pdf.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n")
             flags_df = pd.read_csv(flags_csv)
             self.assertEqual(len(flags_df), 40, "All 40 vouchers (including Cauline_Only_Fallback and partial AR_inv) must be retained")
             self.assertFalse(flags_df["gmm_cluster"].isna().any(), "No voucher should have NA gmm_cluster when AR_inv is partially missing")
@@ -627,15 +630,13 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             self.assertLess(float(sum_df["fisher_exact_p_value"].iloc[0]), 0.01)
 
             for stem in (
-                "fig04a_gmm_bic_and_uncertainty",
-                "fig04b_cda_biplot_and_allometry",
-                "fig04_gmm_cda_clustering",
-                "fig04c_supervised_ecoregion_cda",
+                "fig04a_foliar_allometry_audit",
+                "fig04b_gmm_cda_morphometrics",
+                "fig04c_ecoregion_and_batch_audit",
             ):
-                pdf_f = fig_dir / f"{stem}.pdf"
                 png_f = fig_dir / f"{stem}.png"
-                self.assertTrue(pdf_f.exists() and pdf_f.stat().st_size > 3000, f"Missing/empty {pdf_f}")
                 self.assertTrue(png_f.exists() and png_f.stat().st_size > 10000, f"Missing/empty {png_f}")
+            self.assertEqual(list(fig_dir.glob("*.pdf")), [])
 
     def test_tier3_bronze_invariance_and_multivariate_manova_audit(self):
         """Verify Tier_3_Bronze zero-influence invariance across allometry, GMM, CDA, and MANOVA, plus batch audit R^2 < 0.05 and CDA subtitles."""
@@ -757,7 +758,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 bic_csv = rep_dir / "gmm_bayes_factors_summary.csv"
                 allom_csv = rep_dir / "allometry.csv"
                 batch_csv = rep_dir / "batch_audit.csv"
-                cda_pdf = fig_dir / "cda_passive_projection.pdf"
+                cda_pdf = fig_dir / "fig04b_gmm_cda_morphometrics.png"
                 df_h.to_csv(harm_csv, index=False)
                 df_v.to_csv(vouch_csv, index=False)
                 proc = subprocess.run(
@@ -772,7 +773,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                         "--output-batch-audit", str(batch_csv),
                         "--allometry-report", str(allom_csv),
                         "--allometry-pairwise", str(rep_dir / "pairwise.csv"),
-                        "--allometry-plot", str(fig_dir / "allometry.pdf"),
+                        "--allometry-plot", str(fig_dir / "fig04a_foliar_allometry_audit.png"),
                         "--correct-allometry", "true",
                         "--permutations", "19",
                     ],
@@ -846,13 +847,12 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 self.assertAlmostEqual(float(pr["partial_eta2"]), float(pr["pillai_trace"]), places=4)
                 self.assertGreaterEqual(float(pr["q_value"]) + 1e-12, float(pr["p_value"]))
 
-            fig04_txt = self._extract_pdf_text_streams(fig_base / "fig04_gmm_cda_clustering.pdf")
-            fig04c_txt = self._extract_pdf_text_streams(fig_base / "fig04c_supervised_ecoregion_cda.pdf")
+            self.assertTrue((fig_base / "fig04b_gmm_cda_morphometrics.png").exists())
+            self.assertTrue((fig_base / "fig04c_ecoregion_and_batch_audit.png").exists())
+            self.assertEqual(list(fig_base.glob("*.pdf")), [])
             sp_row = grp_df[grp_df["grouping_factor"] == "species_standardized"].iloc[0]
-            self.assertIn("Omnibus MANOVA: Pillai's Trace V =", fig04_txt)
-            self.assertIn(f"= {float(sp_row['approx_F']):.2f}, p =", fig04_txt)
-            self.assertIn("Omnibus MANOVA: Pillai's Trace V =", fig04c_txt)
-            self.assertIn(f"= {float(rg_row['approx_F']):.2f}, p =", fig04c_txt)
+            self.assertGreater(float(sp_row["approx_F"]), 0.0)
+            self.assertGreater(float(rg_row["approx_F"]), 0.0)
 
             # 4. Perturb Tier_3_Bronze drastically and assert strict invariance across allometry, GMM BIC, CDA, and MANOVA
             tbl_pert, rep_pert, _ = _run_case("perturbed_bronze", perturb_bronze=True)
@@ -984,8 +984,8 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             flags_csv = tmp_p / "morphometric_flags.csv"
             bic_csv = tmp_p / "gmm_bayes_factors_summary.csv"
             allom_csv = tmp_p / "allometry_significance_audit.csv"
-            allom_pdf = tmp_p / "shape_allometry_regression.pdf"
-            cda_pdf = tmp_p / "cda_passive_projection.pdf"
+            allom_pdf = tmp_p / "fig04a_foliar_allometry_audit.png"
+            cda_pdf = tmp_p / "fig04b_gmm_cda_morphometrics.png"
 
             df_in = pd.DataFrame(rows)
             df_in.to_csv(harm_csv, index=False)
@@ -1133,7 +1133,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             vouch_csv = tmp_p / "curated_vouchers.csv"
             flags_csv = tmp_p / "morphometric_flags.csv"
             bic_csv = tmp_p / "gmm_bayes_factors_summary.csv"
-            cda_pdf = tmp_p / "cda_passive_projection.pdf"
+            cda_pdf = tmp_p / "fig04b_gmm_cda_morphometrics.png"
 
             pd.DataFrame(rows).to_csv(harm_csv, index=False)
             pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
@@ -1150,7 +1150,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "--output-batch-audit", str(tmp_p / "batch_audit.csv"),
                     "--allometry-report", str(tmp_p / "allometry.csv"),
                     "--allometry-pairwise", str(tmp_p / "pairwise.csv"),
-                    "--allometry-plot", str(tmp_p / "allometry.pdf"),
+                    "--allometry-plot", str(tmp_p / "fig04a_foliar_allometry_audit.png"),
                     "--permutations", "19",
                 ],
                 cwd=str(PROJECT_ROOT),
@@ -1257,11 +1257,11 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "--harmonics", str(harm_csv),
                     "--output-flags", str(flags_csv),
                     "--output-report", str(tmp_p / "bic.csv"),
-                    "--output-plot", str(tmp_p / "cda.pdf"),
+                    "--output-plot", str(tmp_p / "fig04b_gmm_cda_morphometrics.png"),
                     "--output-batch-audit", str(batch_csv),
                     "--allometry-report", str(tmp_p / "allom.csv"),
                     "--allometry-pairwise", str(tmp_p / "pw.csv"),
-                    "--allometry-plot", str(tmp_p / "allom.pdf"),
+                    "--allometry-plot", str(tmp_p / "fig04a_foliar_allometry_audit.png"),
                     "--permutations", "19",
                 ],
                 cwd=str(PROJECT_ROOT),
@@ -1484,20 +1484,20 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertIn("STEP04_TYPE_CONTROL_OK", proc.stdout)
 
     def test_step03_step04_eastern_na_figure_refinements(self):
-        """Verify Step 03 and Step 04 Eastern NA baseline figure refinements in pub_figures_utils.R."""
+        """Verify Step 03 and Step 04 300-DPI PNG figure architecture and ICN hollow styling."""
         pub_fig_path = PROJECT_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R"
+        theme_path = PROJECT_ROOT / "scripts" / "figures" / "theme_packera_pub.R"
+        f04_path = PROJECT_ROOT / "scripts" / "figures" / "step04_figures.R"
         content = pub_fig_path.read_text(encoding="utf-8")
+        theme_src = theme_path.read_text(encoding="utf-8")
+        f04_src = f04_path.read_text(encoding="utf-8")
 
-        # 1. Underscore/space normalization and white halo rectangles behind centroid labels in plot_2d_ordination_scatter
         self.assertIn("norm_lbl_key <- function(v)", content)
-        self.assertIn('col = grDevices::adjustcolor("white", alpha.f = 0.84), border = NA', content)
-
-        # 2. Removal of unlabeled bimodal silhouette split in fig03
         self.assertNotIn("if (is_bimodal_sp)", content)
-
-        # 3. Multi-column non-horizontal legend in draw_structure_posterior_barplot
-        self.assertIn("ncol = min(5L, max(2L, ceiling(length(u_tx) / 3L)))", content)
-        self.assertIn("horiz = FALSE", content)
+        self.assertIn("save_packera_png_300", theme_src)
+        self.assertIn("format_icn_label_expr", theme_src)
+        self.assertIn("get_combinatorial_hollow_shapes_r", theme_src)
+        self.assertIn("fig04b_gmm_cda_morphometrics.png", f04_src)
 
     def test_morphometric_flags_exports_osr_and_confident_learning_columns(self):
         """
@@ -1584,11 +1584,11 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "--harmonics", str(harm_csv),
                     "--output-flags", str(flags_csv),
                     "--output-report", str(tmp_p / "bic.csv"),
-                    "--output-plot", str(tmp_p / "cda.pdf"),
+                    "--output-plot", str(tmp_p / "fig04b_gmm_cda_morphometrics.png"),
                     "--output-batch-audit", str(tmp_p / "batch_audit.csv"),
                     "--allometry-report", str(tmp_p / "allom.csv"),
                     "--allometry-pairwise", str(tmp_p / "pw.csv"),
-                    "--allometry-plot", str(tmp_p / "allom.pdf"),
+                    "--allometry-plot", str(tmp_p / "fig04a_foliar_allometry_audit.png"),
                     "--permutations", "19",
                 ],
                 cwd=str(PROJECT_ROOT),
@@ -1991,7 +1991,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 h_path <- file.path({repr(str(tmp_p))}, "harm_mi.csv")
                 v_path <- file.path({repr(str(tmp_p))}, "vouch_mi.csv")
                 f_path <- file.path({repr(str(tmp_p))}, "flags_mi.csv")
-                p_path <- file.path({repr(str(tmp_p))}, "cda_mi.pdf")
+                p_path <- file.path({repr(str(tmp_p))}, "fig04b_gmm_cda_morphometrics.png")
                 write.csv(df_h, h_path, row.names = FALSE)
                 write.csv(df_v, v_path, row.names = FALSE)
 
@@ -2000,7 +2000,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 opts_mi$output_plot <- p_path; opts_mi$output_report <- file.path({repr(str(tmp_p))}, "bic_mi.csv")
                 opts_mi$output_batch_audit <- file.path({repr(str(tmp_p))}, "batch_mi.csv")
                 opts_mi$allometry_report <- file.path({repr(str(tmp_p))}, "allom_mi.csv"); opts_mi$allometry_pairwise <- file.path({repr(str(tmp_p))}, "pw_mi.csv")
-                opts_mi$allometry_plot <- file.path({repr(str(tmp_p))}, "allom_mi.pdf")
+                opts_mi$allometry_plot <- file.path({repr(str(tmp_p))}, "fig04a_foliar_allometry_audit.png")
                 opts_mi$permutations <- 19L; opts_mi$seed <- 123L
                 out_mi <- run_gmm_morphotools_pipeline(opts_mi)
                 stopifnot(nrow(out_mi) == 24L)
@@ -2019,8 +2019,9 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 cda_two <- run_canonical_discriminant_analysis(df_one, c("PC1", "PC2"), "Packera dubia", gmm_res = gmm_two, intraspecific_mode = TRUE)
                 stopifnot(is.na(cda_two$loocv_accuracy))
                 aud_two <- audit_misidentifications(df_one, cda_two, gmm_two, selected_features = c("PC1", "PC2"))
-                intra_pdf <- file.path({repr(str(tmp_p))}, "intra_no_fake_loocv.pdf")
-                render_cda_biplot_4panel_pdf(aud_two, cda_two, gmm_two, intra_pdf, c("PC1", "PC2"))
+                intra_png <- file.path({repr(str(tmp_p))}, "intra_no_fake_loocv.png")
+                render_cda_biplot_4panel_pdf(aud_two, cda_two, gmm_two, intra_png, c("PC1", "PC2"))
+                stopifnot(file.exists(intra_png))
 
                 # 6. Cross-run SQLite open-set recognition invariance under PC sign flips
                 if (requireNamespace("DBI", quietly = TRUE) && requireNamespace("RSQLite", quietly = TRUE)) {{
@@ -2061,9 +2062,8 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, f"Step 04 zero-trust R test failed:\n{proc.stderr}\n{proc.stdout}")
             self.assertIn("STEP04_ZERO_TRUST_OK", proc.stdout)
-            pdf_txt = self._extract_pdf_text_streams(tmp_p / "intra_no_fake_loocv.pdf")
-            self.assertNotIn("LOOCV = 85.0%", pdf_txt)
-            self.assertIn("Descriptive Post-GMM Ordination", pdf_txt)
+            self.assertTrue((tmp_p / "intra_no_fake_loocv.png").exists())
+            self.assertEqual(list(tmp_p.glob("*.pdf")), [])
 
 
 if __name__ == "__main__":

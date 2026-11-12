@@ -698,10 +698,12 @@ run_supervised_ecoregion_cda <- function(
 
 format_manova_pillai_subtitle <- function(
   manova_res,
-  factor_name,
+  factor_name = NULL,
   alt_factor = NULL,
-  fallback_label = NULL
+  fallback_label = "",
+  group_pattern = NULL
 ) {
+  fb_out <- if (is.null(fallback_label)) "" else as.character(fallback_label)[1L]
   gt <- if (!is.null(manova_res) && is.list(manova_res) && !is.null(manova_res$group_table)) {
     manova_res$group_table
   } else if (is.data.frame(manova_res)) {
@@ -710,9 +712,18 @@ format_manova_pillai_subtitle <- function(
     NULL
   }
   if (!is.null(gt) && nrow(gt) > 0L && "grouping_factor" %in% names(gt)) {
-    idx <- which(gt$grouping_factor == factor_name)
-    if (length(idx) == 0L && !is.null(alt_factor)) {
-      idx <- which(gt$grouping_factor == alt_factor)
+    idx <- integer(0)
+    if (!is.null(factor_name) && nzchar(as.character(factor_name)[1L])) {
+      idx <- which(gt$grouping_factor == as.character(factor_name)[1L])
+    }
+    if (length(idx) == 0L && !is.null(alt_factor) && nzchar(as.character(alt_factor)[1L])) {
+      idx <- which(gt$grouping_factor == as.character(alt_factor)[1L])
+    }
+    if (length(idx) == 0L && !is.null(group_pattern) && nzchar(as.character(group_pattern)[1L])) {
+      pat_g <- as.character(group_pattern)[1L]
+      m_gf <- grepl(pat_g, as.character(gt$grouping_factor), ignore.case = TRUE)
+      m_fl <- if ("factor_label" %in% names(gt)) grepl(pat_g, as.character(gt$factor_label), ignore.case = TRUE) else rep(FALSE, nrow(gt))
+      idx <- which(m_gf | m_fl)
     }
     if (length(idx) > 0L) {
       r <- gt[idx[1], , drop = FALSE]
@@ -729,7 +740,7 @@ format_manova_pillai_subtitle <- function(
       }
     }
   }
-  fallback_label
+  fb_out
 }
 
 .fit_weighted_manova_stats <- function(Y_mat, grp_vec, w_vec) {
@@ -1189,364 +1200,32 @@ run_multivariate_manova_audit <- function(
   gsub("_", " ", as.character(eco_vec))
 }
 
-draw_gmm_ecoregion_contingency_heatmap <- function(rg_vec, cl_v, active_ecos, ari_val = NA_real_, fisher_p = NA_real_) {
-  ecos_use <- if (length(active_ecos) >= 2L) active_ecos else sort(unique(rg_vec[!is.na(rg_vec)]))
-  keep <- !is.na(rg_vec) & (rg_vec %in% ecos_use) & !is.na(cl_v)
-  if (sum(keep) == 0L || length(ecos_use) == 0L) {
-    graphics::plot(c(0, 1), c(0, 1), type = "n", axes = FALSE, xlab = "", ylab = "",
-                   main = "B. Unsupervised Morphotype x EPA Ecoregion Contingency", font.main = 2)
-    graphics::box(col = "grey75")
-    graphics::text(0.5, 0.5, "Insufficient multi-ecoregion vouchers for contingency test", col = "grey35", cex = 0.85)
-    return(invisible(NULL))
-  }
-  # Keep top 12 active ecoregions by count if >12 so heatmap cells stay crisp
-  if (length(ecos_use) > 12L) {
-    cnt_e <- sort(table(rg_vec[keep]), decreasing = TRUE)
-    ecos_use <- names(cnt_e)[seq_len(12L)]
-    keep <- !is.na(rg_vec) & (rg_vec %in% ecos_use) & !is.na(cl_v)
-  }
-
-  u_cl <- sort(unique(as.integer(cl_v[keep])))
-  tab_mat <- table(factor(rg_vec[keep], levels = ecos_use), factor(as.integer(cl_v[keep]), levels = u_cl))
-  row_pct <- sweep(tab_mat, 1, pmax(rowSums(tab_mat), 1), "/") * 100
-
-  p_txt <- if (is.finite(fisher_p)) {
-    if (fisher_p < 1e-4) sprintf("%.2e", fisher_p) else sprintf("%.4f", fisher_p)
-  } else "NA"
-  ari_txt <- if (is.finite(ari_val)) sprintf("%.3f", ari_val) else "NA"
-
-  nr <- nrow(tab_mat); nc <- ncol(tab_mat)
-  graphics::plot(
-    c(0.5, nc + 0.5), c(0.5, nr + 0.5), type = "n", axes = FALSE,
-    xlab = sprintf("Unsupervised GMM Morphotype (K = %d)", length(u_cl)),
-    ylab = "",
-    main = sprintf("B. Morphotype x EPA Ecoregion (ARI = %s, Fisher p = %s)", ari_txt, p_txt),
-    font.main = 2
-  )
-  heat_ramp <- grDevices::colorRampPalette(c("#F7FBFF", "#C6DBEF", "#6BAED6", "#2171B5", "#084594"))(101)
-  cell_cex <- if (nr > 8L) 0.62 else 0.74
-  for (i in seq_len(nr)) {
-    y_pos <- nr - i + 1
-    for (j in seq_len(nc)) {
-      pct_ij <- row_pct[i, j]
-      cnt_ij <- tab_mat[i, j]
-      c_idx <- max(1L, min(101L, round(pct_ij) + 1L))
-      graphics::rect(j - 0.48, y_pos - 0.46, j + 0.48, y_pos + 0.46, col = heat_ramp[c_idx], border = "white", lwd = 1.4)
-      txt_col <- if (pct_ij >= 52) "white" else "#111111"
-      lbl_ij <- if (nr > 7L) sprintf("%d (%.0f%%)", cnt_ij, pct_ij) else sprintf("%d\n(%.0f%%)", cnt_ij, pct_ij)
-      graphics::text(j, y_pos, labels = lbl_ij, col = txt_col, cex = cell_cex, font = if (pct_ij >= 25) 2 else 1)
-    }
-  }
-  graphics::axis(1, at = seq_len(nc), labels = paste0("K", colnames(tab_mat)), tick = FALSE, font = 2, cex.axis = 0.72, gap.axis = 0.05)
-  short_e <- vapply(.short_epa_ecoregion_label(ecos_use), function(s) if (nchar(s) > 26L) paste0(substr(s, 1, 24), "..") else s, character(1))
-  graphics::axis(2, at = rev(seq_len(nr)), labels = short_e, las = 1, tick = FALSE, cex.axis = if (nr > 8L) 0.66 else 0.75)
-  graphics::box(col = "grey75")
-}
-
-draw_dynamic_ecoregion_mean_silhouettes <- function(
-  df,
-  rg_vec,
-  active_ecos,
-  eco_cols,
-  main_title = "C. Mean Consensus Leaf Silhouettes (+/- 1 SD) by EPA Ecoregion"
-) {
-  cand_ecos <- if (length(active_ecos) >= 1L) active_ecos else sort(unique(rg_vec[!is.na(rg_vec)]))
-  # Strictly retain ONLY ecoregions with n >= 1 (zero n=0 placeholders)
-  ecos_present <- cand_ecos[vapply(cand_ecos, function(eg) sum(!is.na(rg_vec) & rg_vec == eg) > 0L, logical(1))]
-  if (length(ecos_present) == 0L) {
-    graphics::plot(c(0, 1), c(0, 1), type = "n", axes = FALSE, xlab = "", ylab = "", main = main_title, font.main = 2)
-    graphics::box(col = "grey80")
-    graphics::text(0.5, 0.5, "No assigned EPA Level III Ecoregion vouchers", col = "grey35", cex = 0.85)
-    return(invisible(NULL))
-  }
-  if (length(ecos_present) > 8L) {
-    cnts <- vapply(ecos_present, function(eg) sum(!is.na(rg_vec) & rg_vec == eg), integer(1))
-    ecos_present <- ecos_present[order(cnts, decreasing = TRUE)[seq_len(8L)]]
-  }
-
-  m_disp <- length(ecos_present)
-  n_cols_g <- if (m_disp <= 2L) m_disp else if (m_disp <= 4L) 2L else if (m_disp <= 6L) 3L else 4L
-  n_rows_g <- ceiling(m_disp / n_cols_g)
-
-  graphics::plot(
-    c(0, n_cols_g), c(0, n_rows_g), type = "n", axes = FALSE, xlab = "", ylab = "",
-    main = main_title, font.main = 2
-  )
-  graphics::box(col = "grey80")
-  if (n_cols_g > 1L) {
-    for (vc in seq_len(n_cols_g - 1L)) graphics::abline(v = vc, col = "grey90", lty = 2)
-  }
-  if (n_rows_g > 1L) {
-    for (hr in seq_len(n_rows_g - 1L)) graphics::abline(h = hr, col = "grey90", lty = 2)
-  }
-
-  std_hmat <- extract_standardized_harmonic_matrix(df, max_k = 12L)
-  pc1_v <- if ("PC1" %in% names(df)) as.numeric(df$PC1) else rep(0.0, nrow(df))
-  pc2_v <- if ("PC2" %in% names(df)) as.numeric(df$PC2) else rep(0.0, nrow(df))
-
-  for (idx_g in seq_len(m_disp)) {
-    g_name <- ecos_present[idx_g]
-    g_col <- if (g_name %in% names(eco_cols)) eco_cols[[g_name]] else "#0072B2"
-    row_g <- ceiling(idx_g / n_cols_g)
-    col_g <- idx_g - (row_g - 1L) * n_cols_g
-    cx <- col_g - 0.5
-    cy <- (n_rows_g - row_g) + 0.5
-    m_grp <- which(!is.na(rg_vec) & rg_vec == g_name)
-
-    if (!is.null(std_hmat) && nrow(std_hmat) == nrow(df) && length(m_grp) > 0L) {
-      h_mean <- colMeans(std_hmat[m_grp, , drop = FALSE], na.rm = TRUE)
-      h_sd <- if (length(m_grp) >= 2L) apply(std_hmat[m_grp, , drop = FALSE], 2, stats::sd, na.rm = TRUE) else rep(0.0, ncol(std_hmat))
-      h_sd[!is.finite(h_sd)] <- 0.0
-    } else {
-      z1 <- mean(pc1_v[m_grp], na.rm = TRUE); if (!is.finite(z1)) z1 <- 0.0
-      z2 <- mean(pc2_v[m_grp], na.rm = TRUE); if (!is.finite(z2)) z2 <- 0.0
-      h_mean <- c(
-        A1 = -1.25 - 0.18 * z1, B1 = 0, C1 = 0, D1 = 0.48 - 0.10 * z1 + 0.08 * z2,
-        A2 = -0.04 + 0.06 * z2, B2 = 0, C2 = 0, D2 = -0.01 + 0.04 * z2,
-        A3 = -0.08 - 0.05 * z1, B3 = 0, C3 = 0, D3 = 0.03 * z2
-      )
-      h_sd <- abs(h_mean) * 0.12
-    }
-
-    xy_mean <- reconstruct_efa_outline(h_mean, nb_pts = 120L)
-    xy_plus <- reconstruct_efa_outline(h_mean + 1.0 * h_sd, nb_pts = 120L)
-    xy_minus <- reconstruct_efa_outline(h_mean - 1.0 * h_sd, nb_pts = 120L)
-
-    env_pts <- rbind(xy_plus, xy_mean, xy_minus)
-    shared_center <- c(mean(range(env_pts[, 1], na.rm = TRUE)), mean(range(env_pts[, 2], na.rm = TRUE)))
-    shared_scale <- min(
-      0.68 / max(diff(range(env_pts[, 1], na.rm = TRUE)), 1e-6),
-      0.64 / max(diff(range(env_pts[, 2], na.rm = TRUE)), 1e-6)
-    ) * 0.86
-
-    draw_outline_in_box(
-      xy_plus, cx = cx, cy = cy - 0.03, w_box = 0.68, h_box = 0.64,
-      col_border = grDevices::adjustcolor(g_col, alpha.f = 0.48),
-      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.10), lwd = 0.9, lty = 3,
-      shared_scale = shared_scale, shared_center = shared_center
-    )
-    draw_outline_in_box(
-      xy_minus, cx = cx, cy = cy - 0.03, w_box = 0.68, h_box = 0.64,
-      col_border = grDevices::adjustcolor(g_col, alpha.f = 0.48),
-      col_fill = NA, lwd = 0.9, lty = 3,
-      shared_scale = shared_scale, shared_center = shared_center
-    )
-    pts_mean <- draw_outline_in_box(
-      xy_mean, cx = cx, cy = cy - 0.03, w_box = 0.68, h_box = 0.64,
-      col_border = g_col,
-      col_fill = grDevices::adjustcolor(g_col, alpha.f = 0.22), lwd = 2.1, lty = 1,
-      shared_scale = shared_scale, shared_center = shared_center
-    )
-    if (!is.null(pts_mean)) {
-      graphics::segments(cx, min(pts_mean[, 2]), cx, max(pts_mean[, 2]), col = grDevices::adjustcolor(g_col, alpha.f = 0.55), lty = 2, lwd = 0.9)
-    }
-
-    short_lbl <- .short_epa_ecoregion_label(g_name)
-    if (nchar(short_lbl) > 22L) short_lbl <- paste0(substr(short_lbl, 1, 20), "..")
-    lbl_cex <- if (n_cols_g >= 4L) 0.62 else if (n_cols_g == 3L) 0.68 else 0.76
-    graphics::text(cx, cy + 0.41, labels = sprintf("%s (n=%d)", short_lbl, length(m_grp)), font = 2, cex = lbl_cex, col = "#111111")
-    med_ar <- if ("aspect_ratio" %in% names(df)) stats::median(as.numeric(df$aspect_ratio[m_grp]), na.rm = TRUE) else NA_real_
-    med_sol <- if ("solidity" %in% names(df)) stats::median(as.numeric(df$solidity[m_grp]), na.rm = TRUE) else NA_real_
-    if (is.finite(med_ar) && is.finite(med_sol)) {
-      graphics::text(cx, cy - 0.43, labels = sprintf("AR=%.2f | Sol=%.2f", med_ar, med_sol), cex = max(0.56, lbl_cex - 0.10), col = "grey25")
-    }
-  }
-}
-
 render_fig04c_supervised_ecoregion_cda <- function(
-  audited_df,
-  eco_cda_res,
-  gmm_res,
+  audit_df,
+  eco_cda_res = NULL,
+  gmm_res = NULL,
+  figures_dir = NULL,
   output_plot_path = NULL,
-  manova_res = NULL
+  manova_res = NULL,
+  batch_csv = NULL
 ) {
-  fdir <- resolve_active_figures_dir(reference_path = output_plot_path)
-  if (is.null(audited_df) || nrow(audited_df) == 0L || is.null(eco_cda_res)) return(invisible(NULL))
-
-  if (is.null(manova_res) && exists("run_multivariate_manova_audit", mode = "function")) {
-    df_m <- audited_df
-    if (!is.null(eco_cda_res$ecoregion_vec) && length(eco_cda_res$ecoregion_vec) == nrow(df_m)) {
-      df_m$regional_group <- eco_cda_res$ecoregion_vec
-    }
-    manova_res <- tryCatch(
-      run_multivariate_manova_audit(
-        df_m,
-        .resolve_default_manova_features(df_m, NULL),
-        gmm_res = gmm_res,
-        output_group_csv = NULL,
-        output_pairwise_csv = NULL
-      ),
-      error = function(e) NULL
-    )
+  fdir <- if (!is.null(figures_dir) && nzchar(figures_dir)) {
+    as.character(figures_dir)
+  } else if (exists("resolve_active_figures_dir", mode = "function")) {
+    resolve_active_figures_dir(NULL, output_plot_path)
+  } else {
+    "outputs/figures"
   }
-  eco_manova_sub <- format_manova_pillai_subtitle(
-    manova_res,
-    factor_name = "regional_group",
-    fallback_label = "Omnibus MANOVA (Pillai's Trace): Insufficient EPA Ecoregions (<2 regions with >=3 vouchers)"
+  if (!exists("render_step04_ecoregion_batch_png", mode = "function") && file.exists("scripts/figures/step04_figures.R")) {
+    if (file.exists("scripts/figures/theme_packera_pub.R")) source("scripts/figures/theme_packera_pub.R")
+    source("scripts/figures/step04_figures.R")
+  }
+  render_step04_ecoregion_batch_png(
+    audit_df = audit_df,
+    eco_cda_res = eco_cda_res,
+    gmm_res = gmm_res,
+    figures_dir = fdir,
+    manova_res = manova_res,
+    batch_csv = batch_csv
   )
-
-  n <- nrow(audited_df)
-  rg_vec <- eco_cda_res$ecoregion_vec
-  active_ecos <- eco_cda_res$active_ecoregions
-  pal_pool <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", EXTENDED_COLORBLIND_HEX)
-  all_ecos <- unique(c(active_ecos, sort(unique(rg_vec[!is.na(rg_vec)]))))
-  eco_cols <- if (length(all_ecos) > 0L) stats::setNames(rep_len(pal_pool, length(all_ecos)), all_ecos) else c("Unassigned" = "#7F7F7F")
-  eco_pch <- if (length(all_ecos) > 0L) stats::setNames(rep_len(HOLLOW_PCH_CYCLE, length(all_ecos)), all_ecos) else c("Unassigned" = 1L)
-
-  draw_fig04c <- function() {
-    graphics::par(mfrow = c(2, 2), mar = c(4.4, 7.6, 3.2, 1.2), oma = c(0.6, 0.4, 2.0, 0.6), family = "sans")
-
-    # Panel A: 2D Supervised CDA Biplot & Trait Vectors across EPA Level III Ecoregions (excluding NA from ellipses)
-    graphics::par(mar = c(4.4, 4.6, 3.2, 1.2))
-    has_2d_cda <- length(active_ecos) >= 2L && any(is.finite(eco_cda_res$ecoregion_can1))
-    x_a <- if (has_2d_cda) eco_cda_res$ecoregion_can1 else if ("PC1" %in% names(audited_df)) as.numeric(audited_df$PC1) else seq_len(n)
-    y_a <- if (has_2d_cda) eco_cda_res$ecoregion_can2 else if ("PC2" %in% names(audited_df)) as.numeric(audited_df$PC2) else rep(0.0, n)
-    alpha_v <- adaptive_point_alpha(n)
-
-    pt_col <- ifelse(
-      !is.na(rg_vec) & (rg_vec %in% names(eco_cols)),
-      grDevices::adjustcolor(eco_cols[rg_vec], alpha.f = alpha_v),
-      grDevices::adjustcolor("grey55", alpha.f = 0.40)
-    )
-    pt_pch <- ifelse(!is.na(rg_vec) & (rg_vec %in% names(eco_pch)), eco_pch[rg_vec], 4L)
-    # Strictly exclude NA ecoregions from active training 95% confidence ellipses
-    ellipse_grp <- ifelse(!is.na(rg_vec) & (rg_vec %in% active_ecos) & as.logical(eco_cda_res$is_active), rg_vec, NA_character_)
-    if (length(unique(stats::na.omit(ellipse_grp))) < length(active_ecos)) {
-      ellipse_grp <- ifelse(!is.na(rg_vec) & (rg_vec %in% active_ecos), rg_vec, NA_character_)
-    }
-
-    loocv_txt <- if (is.finite(eco_cda_res$loocv_accuracy)) sprintf("LOOCV = %.1f%%", 100 * eco_cda_res$loocv_accuracy) else "Insufficient Ecoregions"
-    r2_txt <- if (is.finite(eco_cda_res$permanova_r2)) sprintf(", R2 = %.3f", eco_cda_res$permanova_r2) else ""
-    var1_e <- if (length(eco_cda_res$variance_pct) >= 1L && is.finite(eco_cda_res$variance_pct[1])) eco_cda_res$variance_pct[1] else 100.0
-    var2_e <- if (length(eco_cda_res$variance_pct) >= 2L && is.finite(eco_cda_res$variance_pct[2])) eco_cda_res$variance_pct[2] else 0.0
-
-    s_load_e <- eco_cda_res$structure_loadings
-    s_lbl_e <- if (!is.null(s_load_e) && !is.null(rownames(s_load_e))) format_cda_loading_labels(rownames(s_load_e)) else NULL
-    cent_e <- eco_cda_res$centroids
-    cent_lbl_e <- if (!is.null(cent_e) && !is.null(rownames(cent_e))) .short_epa_ecoregion_label(rownames(cent_e)) else NULL
-
-    leg_ecos <- if (length(active_ecos) > 0L) active_ecos[seq_len(min(7L, length(active_ecos)))] else all_ecos[seq_len(min(7L, length(all_ecos)))]
-    leg_names <- .short_epa_ecoregion_label(leg_ecos)
-    leg_cols <- unname(eco_cols[leg_ecos])
-    leg_pchs <- unname(eco_pch[leg_ecos])
-    if (any(is.na(rg_vec))) {
-      leg_names <- c(leg_names, "Unassigned (NA Projected)")
-      leg_cols <- c(leg_cols, "grey55")
-      leg_pchs <- c(leg_pchs, 4L)
-    }
-    leg_arg <- if (length(leg_names) > 0L) {
-      list("topright", legend = leg_names, col = leg_cols, pch = leg_pchs, pt.bg = NA, cex = 0.64, bty = "n")
-    } else NULL
-
-    is_type_e <- if ("is_type_specimen" %in% names(audited_df)) as.logical(audited_df$is_type_specimen) else rep(FALSE, n)
-    is_type_e[is.na(is_type_e)] <- FALSE
-    plot_2d_ordination_scatter(
-      x = x_a, y = y_a,
-      col = pt_col, pch = pt_pch, cex = 0.84, lwd = 1.0,
-      xlab = if (has_2d_cda) sprintf("Ecoregion Can1 (%.1f%%)", var1_e) else "Morphospace PC1",
-      ylab = if (has_2d_cda) sprintf("Ecoregion Can2 (%.1f%%)", var2_e) else "Morphospace PC2",
-      main = sprintf("A. 2D Supervised EPA Ecoregion CDA (%s%s)", loocv_txt, r2_txt),
-      subtitle = eco_manova_sub,
-      group_vec = ellipse_grp,
-      group_cols = eco_cols,
-      ellipse_level = 0.95,
-      centroids = cent_e,
-      centroid_labels = cent_lbl_e,
-      biplot_vectors = s_load_e,
-      biplot_labels = s_lbl_e,
-      legend_args = leg_arg,
-      is_type_vec = is_type_e
-    )
-
-    # Panel B: Unsupervised GMM Cluster x EPA Level III Ecoregion Contingency Heatmap
-    graphics::par(mar = c(4.4, 9.2, 3.0, 1.0))
-    cl_v <- if ("gmm_cluster" %in% names(audited_df)) as.integer(audited_df$gmm_cluster) else if (!is.null(gmm_res$classification)) as.integer(gmm_res$classification) else rep(1L, n)
-    draw_gmm_ecoregion_contingency_heatmap(
-      rg_vec = rg_vec,
-      cl_v = cl_v,
-      active_ecos = active_ecos,
-      ari_val = eco_cda_res$ari_morphotype_vs_ecoregion,
-      fisher_p = eco_cda_res$fisher_exact_p_value
-    )
-
-    # Panel C: Mean Consensus Leaf Silhouettes (+/- 1 SD) per active EPA Level III Ecoregion
-    graphics::par(mar = c(2.4, 2.2, 3.0, 1.0))
-    draw_dynamic_ecoregion_mean_silhouettes(
-      df = audited_df,
-      rg_vec = rg_vec,
-      active_ecos = active_ecos,
-      eco_cols = eco_cols,
-      main_title = "C. Mean Consensus Leaf Silhouettes (+/- 1 SD) by Active EPA Ecoregion"
-    )
-
-    # Panel D: STRUCTURE-Style Supervised Ecoregion Posterior Probability Barplot
-    graphics::par(mar = c(4.6, 4.6, 3.0, 1.2))
-    post_mat <- eco_cda_res$post_probs
-    if (!is.null(post_mat) && is.matrix(post_mat) && nrow(post_mat) == n && ncol(post_mat) >= 2L) {
-      grp_disp <- ifelse(!is.na(rg_vec) & (rg_vec %in% active_ecos), rg_vec, "Unassigned_NA")
-      grp_order_lvls <- c(active_ecos, if (any(grp_disp == "Unassigned_NA")) "Unassigned_NA" else character(0))
-      self_p <- vapply(seq_len(n), function(i) {
-        gi <- grp_disp[i]
-        if (gi %in% colnames(post_mat)) post_mat[i, gi] else max(post_mat[i, ], na.rm = TRUE)
-      }, numeric(1))
-      ord_i <- order(match(grp_disp, grp_order_lvls), -self_p)
-      post_ord <- post_mat[ord_i, , drop = FALSE]
-      grp_ord <- grp_disp[ord_i]
-      if (nrow(post_ord) > 400L) {
-        keep_s <- unique(round(seq(1, nrow(post_ord), length.out = 400L)))
-        post_ord <- post_ord[keep_s, , drop = FALSE]
-        grp_ord <- grp_ord[keep_s]
-      }
-      nb <- nrow(post_ord)
-      grle <- rle(grp_ord)
-      brks <- cumsum(grle$lengths)
-      mids <- brks - grle$lengths / 2.0
-      use_las2_d <- length(mids) > 4L
-      if (use_las2_d) graphics::par(mar = c(5.8, 4.6, 3.0, 1.2))
-      k_cols <- ifelse(colnames(post_ord) %in% names(eco_cols), eco_cols[colnames(post_ord)], "#7F7F7F")
-      graphics::plot(
-        c(0, nb), c(0, 1.10), type = "n", xaxs = "i", yaxs = "i", xaxt = "n",
-        xlab = if (use_las2_d) "" else "Herbarium Vouchers Grouped by US EPA Level III Ecoregion",
-        ylab = "Posterior Probability P(Ecoregion | x)",
-        main = "D. STRUCTURE-Style Supervised Ecoregion Posterior Probabilities",
-        font.main = 2
-      )
-      cum_l <- rep(0.0, nb)
-      xl <- seq(0, nb - 1L); xr <- seq(1L, nb)
-      for (ki in seq_len(ncol(post_ord))) {
-        pk <- as.numeric(post_ord[, ki]); pk[!is.finite(pk)] <- 0.0
-        cum_h <- pmin(1.0, cum_l + pk)
-        graphics::rect(xl, cum_l, xr, cum_h, col = k_cols[ki], border = NA)
-        cum_l <- cum_h
-      }
-      if (length(brks) > 1L) {
-        graphics::segments(brks[-length(brks)], 0, brks[-length(brks)], 1.0, col = "#111111", lwd = 1.6)
-      }
-      graphics::rect(0, 0, nb, 1.0, border = "#222222", lwd = 1.1)
-      ax_lbls <- vapply(grle$values, function(v) {
-        if (v == "Unassigned_NA") return("NA Proj.")
-        s <- .short_epa_ecoregion_label(v)
-        if (nchar(s) > 14L) paste0(substr(s, 1, 12), "..") else s
-      }, character(1))
-      graphics::axis(1, at = mids, labels = ax_lbls, tick = FALSE, las = if (use_las2_d) 2 else 1, cex.axis = 0.66, line = -0.3)
-      leg_k <- seq_len(min(6L, ncol(post_ord)))
-      graphics::legend(
-        "top", horiz = TRUE,
-        legend = vapply(.short_epa_ecoregion_label(colnames(post_ord)[leg_k]), function(s) if (nchar(s) > 16L) paste0(substr(s, 1, 14), "..") else s, character(1)),
-        fill = k_cols[leg_k], border = NA, cex = 0.62, bty = "n"
-      )
-    } else {
-      graphics::plot(c(0, 1), c(0, 1), type = "n", axes = FALSE, xlab = "", ylab = "",
-                     main = "D. STRUCTURE-Style Supervised Ecoregion Posterior Probabilities", font.main = 2)
-      graphics::box(col = "grey75")
-      graphics::text(0.5, 0.5, "Requires >= 2 active EPA Level III Ecoregions (>= 3 anchors each)", col = "grey35", cex = 0.85)
-    }
-
-    graphics::title(
-      "Supervised US EPA Level III Ecoregion Canonical Discriminant Analysis & Morphotype Congruence",
-      outer = TRUE, cex.main = 1.25
-    )
-  }
-
-  atomic_save_dual_plot(draw_fig04c, fdir, "fig04c_supervised_ecoregion_cda", width = 13.5, height = 10.4, dpi = 300)
 }

@@ -838,7 +838,7 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
         orig_save = step02._atomic_save_matplotlib_fig
 
         def _spy_save(fig, out_base_path, dpi=300):
-            if Path(out_base_path).name == "fig02b_silhouette_montage":
+            if Path(out_base_path).name == "fig02a_lm3_organ_and_ect_exemplars":
                 axes = fig.axes
                 captured_grid_shapes.append((len(axes) // 4, 4))
                 for ax in axes:
@@ -853,11 +853,12 @@ class TestRoutingAndManifestSchema(unittest.TestCase):
                 vouchers_csv=tables_dir / "curated_vouchers.csv",
             )
 
-        for k in ("fig02a_pdf", "fig02a_png", "fig02b_pdf", "fig02b_png"):
+        for k in ("fig02a_png", "fig02b_png"):
             self.assertIn(k, saved)
             self.assertTrue(Path(saved[k]).exists())
+        self.assertEqual(list((run_dir / "outputs" / "figures").glob("*.pdf")), [])
 
-        # 1. Montage grid must have exactly 2 rows (for Packera dubia & P. paupercula) x 4 cols = 8 tiles
+        # 1. Basal-only montage grid has 2 rows (Packera dubia & P. paupercula) x 4 cols (3 LM3 quantiles + 1 radial ECT)
         self.assertEqual(captured_grid_shapes[-1], (2, 4))
         self.assertEqual(len(captured_ylabels), 2)
         self.assertTrue(any("dubia" in yl for yl in captured_ylabels))
@@ -1609,7 +1610,7 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             orig_save = s02_figs._atomic_save_matplotlib_fig
 
             def _spy_save(fig, out_base_path, dpi=300):
-                if Path(out_base_path).name == "fig02b_silhouette_montage":
+                if Path(out_base_path).name == "fig02a_lm3_organ_and_ect_exemplars":
                     captured_titles.extend(ax.get_title() for ax in fig.axes)
                 return orig_save(fig, out_base_path, dpi=dpi)
 
@@ -1624,11 +1625,13 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                     figures_dir=tmp_dir / "figures",
                 )
 
+            self.assertIn("fig02a_png", out_paths)
             self.assertIn("fig02b_png", out_paths)
+            self.assertEqual(list((tmp_dir / "figures").glob("*.pdf")), [])
             self.assertEqual(len(captured_titles), 4)
             self.assertTrue(captured_titles[0].startswith("20th %ile (Compact)\n"))
-            leaf_titles = [t for t in captured_titles if "NCU000" in t]
-            self.assertEqual(len(leaf_titles), 3, "Exactly 3 tiles should render leaf silhouettes for n=3.")
+            leaf_titles = [t for t in captured_titles[:3] if "NCU000" in t]
+            self.assertEqual(len(leaf_titles), 3, "Exactly 3 leaf quantile tiles should render unique silhouettes for n=3.")
             seen_vouchers = [t.split("\n")[-1].split(" ")[0] for t in leaf_titles]
             self.assertEqual(len(seen_vouchers), len(set(seen_vouchers)), "No duplicate leaf IDs across a row.")
 
@@ -2041,15 +2044,12 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
                 pd.DataFrame(),
                 figures_dir=fig_dir,
             )
-            self.assertIn("fig02a_pdf", saved)
-            self.assertIn("fig02b_pdf", saved)
-            self.assertIn("fig02c_pdf", saved)
-            self.assertIn("fig02d_pdf", saved)
-            self.assertIn("fig02e_pdf", saved)
-            self.assertTrue(Path(saved["fig02b_pdf"]).exists())
-            self.assertTrue(Path(saved["fig02c_pdf"]).exists())
-            self.assertTrue(Path(saved["fig02d_pdf"]).exists())
-            self.assertTrue(Path(saved["fig02e_pdf"]).exists())
+            self.assertIn("fig02a_png", saved)
+            self.assertIn("fig02b_png", saved)
+            self.assertTrue(Path(saved["fig02a_png"]).exists())
+            self.assertTrue(Path(saved["fig02b_png"]).exists())
+            self.assertTrue((fig_dir / "ect_overlays").is_dir())
+            self.assertEqual(list(fig_dir.glob("*.pdf")), [])
 
     def test_four_organ_pole_cases_and_vascular_ray_tracing(self) -> None:
         """
@@ -2714,6 +2714,109 @@ class TestDissectedLeafSegmentationEnhancements(unittest.TestCase):
             src_txt = src_p.read_text(encoding="utf-8")
             for bad_tok in stale_tokens:
                 self.assertNotIn(bad_tok, src_txt, f"Stale docstring/comment token {bad_tok!r} found in {src_p.name}")
+
+
+
+    def test_300dpi_png_only_12_figure_suite_and_high_richness_scaling(self) -> None:
+        """
+        Verify the 12-plate 300-DPI PNG-only figure architecture:
+          1. Step 02 scales dynamically across 18 taxa (including subsp., var., and hybrid ranks),
+             writes 300-DPI PNGs only (zero .pdf files), caches unlimited lm3_assets/ + ect_overlays/,
+             and exports capped whole-sheet diagnostic overlays (lm3_sheet_overlays/).
+          2. Steps 03-06 modular R suite (scripts/figures/*.R) defines all 10 R canonical PNG plates
+             with balanced R delimiters and zero grDevices::pdf() calls.
+        """
+        from PIL import Image
+        from scripts.vision.step02_figures import generate_step02_publication_figures
+
+        taxa_18 = [
+            "Packera anonyma", "Packera aurea", "Packera crawfordii", "Packera debilis",
+            "Packera dubia", "Packera glabella", "Packera hyperborealis", "Packera indecora",
+            "Packera millefolium", "Packera obovata", "Packera paupercula",
+            "Packera paupercula var. savannarum", "Packera paupercula subsp. pseudotomentosa",
+            "Packera plattensis", "Packera pseudaurea", "Packera schweinitziana",
+            "Packera tomentosa", "Packera × memmingeri",
+        ]
+        with tempfile.TemporaryDirectory() as tmp_d:
+            tmp_p = Path(tmp_d)
+            raw_dir = tmp_p / "raw"
+            mask_dir = tmp_p / "masks"
+            fig_dir = tmp_p / "outputs" / "figures"
+            raw_dir.mkdir(parents=True)
+            mask_dir.mkdir(parents=True)
+
+            sheet_img = np.full((360, 280, 3), 242, dtype=np.uint8)
+            cv2.rectangle(sheet_img, (20, 40), (120, 180), (65, 115, 70), -1)
+            cv2.rectangle(sheet_img, (150, 170), (245, 310), (55, 105, 65), -1)
+            sheet_file = raw_dir / "NCU_MULTI_RAMET.jpg"
+            cv2.imwrite(str(sheet_file), sheet_img)
+
+            rows = []
+            for idx, tx in enumerate(taxa_18):
+                for l_idx in (1, 2):
+                    m_img = np.zeros((140, 110), dtype=np.uint8)
+                    cv2.ellipse(m_img, (55, 70), (24 + (idx % 4) * 3, 46), 0, 0, 360, 255, -1)
+                    m_p = mask_dir / f"CAT_{idx:02d}_L{l_idx}.png"
+                    cv2.imwrite(str(m_p), m_img)
+                    cat_id = "NCU_MULTI_RAMET" if idx == 0 else f"CAT_{idx:02d}"
+                    rows.append({
+                        "catalogNumber": cat_id,
+                        "leaf_id": l_idx,
+                        "plant_individual_id": l_idx if idx == 0 else 1,
+                        "species_standardized": tx,
+                        "determiner_tier": "Tier_1_Gold",
+                        "is_type_specimen": (idx == 0 and l_idx == 1),
+                        "leaf_zone": "cauline" if (idx % 3 == 0 and l_idx == 2) else "basal",
+                        "solidity": 0.72 + 0.01 * (idx % 12),
+                        "aspect_ratio": 0.78 if idx == 1 else (1.35 + 0.08 * (idx % 10)),
+                        "archetype_score": 0.92,
+                        "pixels_per_mm": 11.5,
+                        "is_calibrated_mm": True,
+                        "scale_source": "ruler_ocr",
+                        "mask_path": str(m_p),
+                        "image_path": str(sheet_file) if idx == 0 else "",
+                        "bbox_x1": 20 if l_idx == 1 else 150,
+                        "bbox_y1": 40 if l_idx == 1 else 170,
+                        "bbox_x2": 120 if l_idx == 1 else 245,
+                        "bbox_y2": 180 if l_idx == 1 else 310,
+                    })
+
+            saved = generate_step02_publication_figures(
+                extracted_df=pd.DataFrame(rows),
+                failed_df=pd.DataFrame(),
+                repro_df=pd.DataFrame({"catalogNumber": ["CAT_01", "CAT_02"], "AR_inv": [1.18, 1.42]}),
+                pheno_df=pd.DataFrame({"catalogNumber": ["CAT_01", "CAT_02"], "voucher_phenological_state": ["anthesis", "fruiting"]}),
+                figures_dir=fig_dir,
+            )
+            self.assertEqual(list(fig_dir.rglob("*.pdf")), [])
+            for key in ("fig02a_png", "fig02b_png"):
+                p_out = Path(saved[key])
+                self.assertTrue(p_out.is_file() and p_out.stat().st_size > 15000)
+                with Image.open(p_out) as im:
+                    dpi_x, dpi_y = im.info.get("dpi", (0, 0))
+                    self.assertAlmostEqual(dpi_x, 300.0, delta=2.0)
+                    self.assertAlmostEqual(dpi_y, 300.0, delta=2.0)
+
+            self.assertGreaterEqual(len(list((fig_dir / "ect_overlays").glob("*.png"))), 18)
+            self.assertGreaterEqual(len(list((fig_dir / "lm3_sheet_overlays").glob("*.png"))), 1)
+
+        expected_r_pngs = {
+            "fig03a_efa_morphospace_and_harmonics.png",
+            "fig03b_topological_ect_and_heteroblasty.png",
+            "fig04a_foliar_allometry_audit.png",
+            "fig04b_gmm_cda_morphometrics.png",
+            "fig04c_ecoregion_and_batch_audit.png",
+            "fig05a_ecological_niche_and_rf_importance.png",
+            "fig05b_hopkins_circular_phenology.png",
+            "fig05c_sdm_suitability_and_distribution_map.png",
+            "fig06a_integrative_taxonomic_synthesis.png",
+            "fig06b_taxon_complex_delimitation_network.png",
+        }
+        r_fig_dir = PROJECT_ROOT / "scripts" / "figures"
+        combined_r_src = "\n".join(p.read_text(encoding="utf-8") for p in sorted(r_fig_dir.glob("*.R")))
+        for png_name in expected_r_pngs:
+            self.assertIn(png_name, combined_r_src)
+        self.assertNotIn("grDevices::pdf(", combined_r_src)
 
 
 if __name__ == "__main__":

@@ -130,13 +130,13 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             cls.nd_out_csv = cls.nd_dir / "non_dubia_triage.csv"
             cls.nd_multi_report = cls.nd_dir / "multi_species_report.md"
             cls.nd_focal_report_default = cls.nd_dir / "Packera_Taxonomic_Revision_Summary.md"
-            cls.nd_focal_plot_default = cls.nd_dir / "Figure_Integrative_Packera_Revision.pdf"
+            cls.nd_focal_plot_default = cls.nd_dir / "fig06a_integrative_taxonomic_synthesis.png"
             cls.nd_helper_check_csv = cls.nd_dir / "pub_fig_helpers.csv"
             cls.dubia_dir = cls.nd_dir / "dubia_focal"
             cls.dubia_dir.mkdir(parents=True, exist_ok=True)
             dubia_rep_def = cls.dubia_dir / "Packera_Taxonomic_Revision_Summary.md"
-            dubia_fig_def = cls.dubia_dir / "Figure_Integrative_Packera_Revision.pdf"
-            dubia_fig_def.write_bytes(b"%PDF-1.4\n%%EOF\n")
+            dubia_fig_def = cls.dubia_dir / "fig06a_integrative_taxonomic_synthesis.png"
+            dubia_fig_def.write_bytes(b"\x89PNG\r\n\x1a\n")
 
             nd_rows = [
                 {"catalogNumber": "AUR-GOLD-1", "institutionCode": "NCU", "species_raw": "Packera aurea", "species_standardized": "Packera aurea", "determiner_tier": "Tier_1_Gold", "regional_group": "Blue Ridge", "doy": 120, "decimalLatitude": 35.6, "decimalLongitude": -82.5, "fine_soil_ph": 6.2, "fine_soil_sand": 32.0, "fine_bedrock_depth_cm": 95.0, "can1": -3.0, "can2": 0.1, "can3": 0.0, "PC1": -1.5, "PC2": 0.2, "cda_predicted_taxon": "Packera aurea", "cda_posterior_prob": 0.96, "cda_posterior_margin": 0.92, "edaphic_best_fit_taxon": "Packera aurea", "edaphic_schoener_d": 0.82, "gmm_cluster": 1, "gmm_uncertainty": 0.03, "morphometric_outlier_flag": False, "triage_category": "Clean_MultiModal_Consensus", "morph_tier_source": "Basal_Rosette", "basal_leaf_count": 3},
@@ -311,7 +311,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             "gmm_bic_model_selection.csv",
             "--focal-taxon",
             "--intraspecific-mode",
-            "outputs/figures/Figure_Integrative_Packera_Revision.pdf",
+            "outputs/figures/fig06a_integrative_taxonomic_synthesis.png",
             "outputs/reports/Packera_Taxonomic_Revision_Summary.md",
             "morph_tier_source",
             "is_tier1_pure_morph",
@@ -337,7 +337,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             "TAXON_COLORS",
             "nomen_citations",
             "Packera_dubia_Taxonomic_Revision_Summary.md",
-            "Figure_Integrative_Packera_dubia_Revision.pdf",
+            "Figure_Integrative_Packera_dubia_Revision.png",
             "Canonical Axis 1 (74.2%)",
             "Canonical Axis 2 (18.6%)",
             "10,815.5",
@@ -392,11 +392,11 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
         self.assertNotIn("Packera dubia", md_multi)
 
         focal_named_md = self.nd_dir / "Packera_aurea_Taxonomic_Revision_Summary.md"
-        focal_named_pdf = self.nd_dir / "Figure_Integrative_Packera_aurea_Revision.pdf"
+        focal_named_png = self.nd_dir / "Figure_Integrative_Packera_aurea_Revision.png"
         self.assertTrue(focal_named_md.exists(), "Expected taxon-named focal Markdown report copy")
-        self.assertTrue(focal_named_pdf.exists(), "Expected taxon-named focal PDF synthesis plate copy")
+        self.assertTrue(focal_named_png.exists(), "Expected taxon-named focal 300-DPI PNG synthesis plate copy")
         self.assertTrue((self.dubia_dir / "Packera_dubia_Taxonomic_Revision_Summary.md").exists())
-        self.assertTrue((self.dubia_dir / "Figure_Integrative_Packera_dubia_Revision.pdf").exists())
+        self.assertTrue((self.dubia_dir / "Figure_Integrative_Packera_dubia_Revision.png").exists())
         md_focal = focal_named_md.read_text(encoding="utf-8")
         self.assertIn(
             "# Taxonomic Revision and Integrative Species Delimitation in the *Packera aurea* Complex (Asteraceae: Senecioneae)",
@@ -433,7 +433,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             out_queue = tmp / "triage_queue.csv"
             out_html = tmp / "Triage_Dashboard_Interactive.html"
             out_rep = tmp / "Packera_Taxonomic_Revision_Summary.md"
-            out_fig = tmp / "Figure_Integrative_Packera_Revision.pdf"
+            out_fig = tmp / "fig06a_integrative_taxonomic_synthesis.png"
 
             pd.DataFrame([
                 {"catalogNumber": "CAT-ANCHOR-A1", "institutionCode": "NCU", "species_raw": "Packera aurea", "scientificName": "Packera aurea", "determiner_tier": "Tier_1_Gold", "decimalLatitude": 35.5, "decimalLongitude": -82.5, "doy": 118},
@@ -742,7 +742,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
 
     def test_synthesis_plate_stream_independence_and_fill_reversal(self):
         """Ensure render_step06_synthesis_plate_pdf avoids pct_v <- pct_m duplication, labels Stream 3 Topological ECT & OSR, and uses position_fill(reverse = TRUE)."""
-        plates_src = (PROJECT_ROOT / "scripts" / "morphometrics" / "pub_synthesis_plates.R").read_text(encoding="utf-8")
+        plates_src = (PROJECT_ROOT / "scripts" / "morphometrics" / "pub_synthesis_plates.R").read_text(encoding="utf-8") + "\n" + (PROJECT_ROOT / "scripts" / "figures" / "step06_figures.R").read_text(encoding="utf-8")
         self.assertNotIn("pct_v <- pct_m", plates_src)
         self.assertNotIn("pct_e <- pct_m", plates_src)
         self.assertNotIn("pct_p <- pct_m", plates_src)
@@ -770,7 +770,7 @@ class TestTriageDashboardSynthesis(unittest.TestCase):
             out_queue = tmp_p / "triage_queue.csv"
             out_html = tmp_p / "Triage_Dashboard_Interactive.html"
             out_rep = tmp_p / "revision_report.md"
-            out_fig = tmp_p / "synthesis.pdf"
+            out_fig = tmp_p / "synthesis.png"
 
             pd.DataFrame(
                 [

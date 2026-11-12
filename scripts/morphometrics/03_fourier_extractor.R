@@ -37,7 +37,7 @@ parse_args_robust <- function() {
     optparse::make_option(c("-k", "--harmonics"), type = "integer", default = 12, help = "Number of Fourier harmonics (nb.h) [default: %default]"),
     optparse::make_option(c("-p", "--num-pcs"), type = "integer", default = 5, help = "Number of PCA dimensions to extract [default: %default]"),
     optparse::make_option(c("-r", "--report-out"), type = "character", default = "", help = "Optional validation report CSV path (deprecated no-op compatibility flag)"),
-    optparse::make_option(c("-g", "--plot-out"), type = "character", default = "", help = "Optional validation plot PDF path (deprecated no-op compatibility flag)"),
+    optparse::make_option(c("-g", "--plot-out"), type = "character", default = "", help = "Optional validation plot PNG path (deprecated no-op compatibility flag)"),
     optparse::make_option(c("--figures-dir"), type = "character", default = "", help = "Optional output directory for Step 03 publication figures"),
     optparse::make_option(c("--symmetrize-efa-harmonics"), type = "logical", default = TRUE, help = "Uniformly apply Momocs::rm_asym() across QC-passing closed contours [default: %default]"),
     optparse::make_option(c("--permutations"), type = "integer", default = 999, help = "Number of permutations for PERMANOVA [default: %default]"),
