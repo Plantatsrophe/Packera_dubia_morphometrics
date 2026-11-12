@@ -2058,7 +2058,13 @@ build_triage_queue <- function(opts) {
   if ("dayOfYear" %in% names(vouchers)) vouchers$doy <- dplyr::coalesce(vouchers$doy, suppressWarnings(as.numeric(vouchers$dayOfYear)))
   if ("eventDate" %in% names(vouchers) && any(is.na(vouchers$doy))) {
     na_d <- which(is.na(vouchers$doy) & !is.na(vouchers$eventDate))
-    if (length(na_d) > 0) vouchers$doy[na_d] <- suppressWarnings(as.numeric(format(as.Date(substr(as.character(vouchers$eventDate[na_d]), 1, 10)), "%j")))
+    if (length(na_d) > 0) {
+      dt_str <- substr(trimws(as.character(vouchers$eventDate[na_d])), 1, 10)
+      parsed_dt <- suppressWarnings(as.Date(dt_str, format = "%Y-%m-%d"))
+      slash_idx <- which(is.na(parsed_dt) & nzchar(dt_str))
+      if (length(slash_idx) > 0) parsed_dt[slash_idx] <- suppressWarnings(as.Date(dt_str[slash_idx], format = "%Y/%m/%d"))
+      vouchers$doy[na_d] <- suppressWarnings(as.numeric(format(parsed_dt, "%j")))
+    }
   }
 
   gmm_stats <- resolve_gmm_bic_stats(opts)

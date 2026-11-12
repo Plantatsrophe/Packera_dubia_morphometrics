@@ -1210,24 +1210,68 @@ def record_voucher_segmentation_transaction(
                 repro_pheno_rows,
             )
         if leaf_rows:
+            el_cols_info = conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()
+            insert_cols = [
+                "catalogNumber",
+                "plant_individual_id",
+                "leaf_id",
+                "shape_id",
+                "solidity",
+                "circularity",
+                "extent",
+                "aspect_ratio",
+                "area_px",
+                "area_mm2",
+                "midrib_angle_deg",
+                "petiole_length_px",
+                "petiole_length_mm",
+                "petiole_width_px",
+                "petiole_width_mm",
+                "blade_length_px",
+                "blade_length_mm",
+                "blade_width_px",
+                "blade_width_mm",
+                "petiole_to_blade_ratio",
+                "pixels_per_mm",
+                "is_calibrated_mm",
+                "scale_source",
+                "mask_path",
+                "mask_is_upright",
+                "crop_path",
+                "contour_path",
+                "ect_path",
+                "contour_n_pts",
+                "contour_xy_json",
+                "leaf_zone",
+                "leaf_zone_confidence",
+                "dist_from_crown_norm",
+                "cy_rel_plant_bbox",
+                "archetype_score",
+                "bilateral_dice",
+                "si_a",
+                "lm3_gates_pass",
+                "n_lamina_components",
+                "blade_cie_l_norm",
+                "blade_cie_l_sd",
+            ]
+            known_set = set(insert_cols)
+            extra_vals: List[Any] = []
+            for _cid, cname, ctype, notnull, dflt_val, _pk in el_cols_info:
+                if cname not in known_set and int(notnull or 0) == 1 and dflt_val is None:
+                    insert_cols.append(cname)
+                    if cname == "assigned_tier":
+                        extra_vals.append("Tier_1_Direct")
+                    elif "INT" in str(ctype or "").upper():
+                        extra_vals.append(0)
+                    elif "REAL" in str(ctype or "").upper():
+                        extra_vals.append(0.0)
+                    else:
+                        extra_vals.append("")
+            rows_to_insert = [tuple(r) + tuple(extra_vals) for r in leaf_rows] if extra_vals else leaf_rows
+            placeholders = ", ".join(["?"] * len(insert_cols))
             conn.executemany(
-                """
-                INSERT INTO extracted_leaves (
-                    catalogNumber, plant_individual_id, leaf_id, shape_id,
-                    solidity, circularity, extent, aspect_ratio,
-                    area_px, area_mm2,
-                    midrib_angle_deg, petiole_length_px, petiole_length_mm,
-                    petiole_width_px, petiole_width_mm,
-                    blade_length_px, blade_length_mm, blade_width_px, blade_width_mm,
-                    petiole_to_blade_ratio,
-                    pixels_per_mm, is_calibrated_mm, scale_source,
-                    mask_path, mask_is_upright, crop_path, contour_path, ect_path, contour_n_pts, contour_xy_json,
-                    leaf_zone, leaf_zone_confidence, dist_from_crown_norm, cy_rel_plant_bbox,
-                    archetype_score, bilateral_dice, si_a, lm3_gates_pass, n_lamina_components,
-                    blade_cie_l_norm, blade_cie_l_sd
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """,
-                leaf_rows,
+                f"INSERT INTO extracted_leaves ({', '.join(insert_cols)}) VALUES ({placeholders});",
+                rows_to_insert,
             )
 
     if commit:
