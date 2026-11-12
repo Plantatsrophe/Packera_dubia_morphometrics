@@ -240,15 +240,17 @@ render_step06b_complex_network_png <- function(
   if (is.null(taxa)) taxa <- as.character(cdf$species_standardized)
   n_t <- length(taxa)
 
-  W_num <- matrix(suppressWarnings(as.numeric(W)), nrow = n_t, ncol = n_t)
-  W_num[!is.finite(W_num)] <- 0.0
-  W_num <- pmin(1.0, pmax(0.0, W_num))
+  w_vec <- suppressWarnings(as.numeric(W))
+  w_vec[!is.finite(w_vec)] <- 0.0
+  w_vec <- pmin(1.0, pmax(0.0, w_vec))
+  W_num <- matrix(w_vec, nrow = n_t, ncol = n_t, dimnames = list(taxa, taxa))
   diag(W_num) <- 0.0
 
   # Order taxa by metric Ward.D2 hierarchical clustering so complexes form contiguous blocks
   ord_idx <- if (n_t >= 3L) {
-    d_mat <- stats::as.dist(sqrt(pmax(0.0, 1.0 - W_num)))
-    tryCatch(stats::hclust(d_mat, method = "ward.D2")$order, error = function(e) seq_len(n_t))
+    D_ward <- matrix(sqrt(pmax(1.0 - as.numeric(W_num), 0.0)), nrow = n_t, ncol = n_t, dimnames = list(taxa, taxa))
+    diag(D_ward) <- 0.0
+    tryCatch(stats::hclust(stats::as.dist(D_ward), method = "ward.D2")$order, error = function(e) seq_len(n_t))
   } else seq_len(n_t)
   taxa_ord <- taxa[ord_idx]
   W_disp <- W_num
@@ -307,7 +309,8 @@ render_step06b_complex_network_png <- function(
   } else if (n_t == 2L) {
     coords[, 1L] <- c(-0.6, 0.6); coords[, 2L] <- c(0.0, 0.0)
   } else {
-    D_net <- sqrt(pmax(0.04, 1.0 - W_num)); diag(D_net) <- 0.0
+    D_net <- matrix(sqrt(pmax(1.0 - as.numeric(W_num), 0.04)), nrow = n_t, ncol = n_t)
+    diag(D_net) <- 0.0
     mds_fit <- tryCatch(suppressWarnings(stats::cmdscale(stats::as.dist(D_net), k = 2L)), error = function(e) NULL)
     if (!is.null(mds_fit) && is.matrix(mds_fit) && ncol(mds_fit) == 2L && all(is.finite(mds_fit)) &&
         stats::sd(mds_fit[, 1L]) > 1e-6 && stats::sd(mds_fit[, 2L]) > 1e-6) {
