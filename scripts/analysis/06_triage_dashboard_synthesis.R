@@ -954,12 +954,13 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
     ok_ll <- r_idx[is.finite(lat_vec_geo[r_idx]) & is.finite(lon_vec_geo[r_idx])]
     anch_coords_by_tx[[tx]] <- if (length(ok_ll) > 0L) cbind(lat = lat_vec_geo[ok_ll], lon = lon_vec_geo[ok_ll]) else NULL
   }
+  is_valid_taxon_str <- function(s) !is.null(s) && !is.na(s) && nzchar(s) && s != "Unknown" && (s %in% active_taxa || grepl("^(Packera|P\\.)\\s+", s))
   .eval_taxon_geo_plausibility <- function(row_i, cand_tx) {
-    if (is.null(cand_tx) || is.na(cand_tx) || !nzchar(cand_tx) || !(cand_tx %in% active_taxa)) return(list(plausible = FALSE, weight = 0.0, dist_km = Inf))
+    if (!is_valid_taxon_str(cand_tx)) return(list(plausible = FALSE, weight = 0.0, dist_km = Inf))
     st_i <- state_vec_geo[row_i]; lat_i <- lat_vec_geo[row_i]; lon_i <- lon_vec_geo[row_i]
     has_st_i <- nzchar(st_i); has_ll_i <- is.finite(lat_i) && is.finite(lon_i)
     if (!has_st_i && !has_ll_i) return(list(plausible = TRUE, weight = 1.0, dist_km = 0.0))
-    known_sts <- anch_states_by_tx[[cand_tx]]
+    known_sts <- unique(c(anch_states_by_tx[[cand_tx]], usda_states_by_tx[[cand_tx]]))
     if (has_st_i && length(known_sts) > 0L && (st_i %in% known_sts)) {
       return(list(plausible = TRUE, weight = 1.0, dist_km = 0.0))
     }
@@ -1106,7 +1107,6 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
   p_type_morph <- max(2L, if (length(sel_mc) > 0L) length(sel_mc) else if (length(morph_coord_cols) > 0L) length(morph_coord_cols) else 3L)
   type_morph_chisq95 <- stats::qchisq(0.95, df = p_type_morph)
 
-  is_valid_taxon_str <- function(s) !is.null(s) && !is.na(s) && nzchar(s) && s != "Unknown" && (s %in% active_taxa || grepl("^(Packera|P\\.)\\s+", s))
 
   # Precompute cluster-level population cohesion (cryptic_cluster_cohesion_pass) before specimen loop
   sp_clean_vec <- ifelse(!is.na(sp_all_vec) & nzchar(sp_all_vec), sp_all_vec, "Unknown")
@@ -1484,7 +1484,7 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
           if (rf_is_taxon && rf_sp != given_sp) rf_sp else NA_character_,
           setdiff(active_taxa, given_sp)
         )))
-        cand_pool <- cand_pool[cand_pool %in% active_taxa & cand_pool != given_sp]
+        cand_pool <- cand_pool[vapply(cand_pool, is_valid_taxon_str, logical(1)) & cand_pool != given_sp]
         plaus_cands <- cand_pool[vapply(cand_pool, function(ctx) isTRUE(.eval_taxon_geo_plausibility(i, ctx)$plausible), logical(1))]
         if (length(plaus_cands) >= 1L) {
           score_cand <- function(ctx) {
@@ -1510,6 +1510,8 @@ apply_taxonomic_decision_matrix <- function(df, intraspecific_mode = FALSE, gmm_
             # Allopatric prediction with no supported sympatric congener -> abstain from false reassignment
             raw_target_sp <- given_sp
           }
+        } else {
+          raw_target_sp <- given_sp
         }
       }
       target_sp <- raw_target_sp
