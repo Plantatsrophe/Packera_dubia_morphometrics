@@ -327,11 +327,15 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     while (ncol(Z1) < 3L) Z1 <- cbind(Z1, 0.0); colnames(Z1) <- c("Can1", "Can2", "Can3")
     vp1 <- round(100.0 * pmax(eig1$values, 0) / max(sum(pmax(eig1$values, 0)), 1e-12), 2); sc1 <- suppressWarnings(stats::cor(X_a, Z1[active_idx, 1:2, drop = FALSE])); sc1[!is.finite(sc1)] <- 0.0
     c_mat1 <- matrix(0.0, nrow = 1L, ncol = 3L, dimnames = list(g_levels, colnames(Z1))); pp1 <- matrix(1.0, nrow = nrow(df), ncol = 1L, dimnames = list(NULL, g_levels))
+    S_inv1 <- tryCatch(solve(S_reg1), error = function(e) diag(1.0 / pmax(diag(S_reg1), 1e-5), nrow = p, ncol = p))
+    d1_diff <- sweep(X_p1, 2L, grand_mean, "-"); neff1 <- max(1.0, (sum(w_a)^2) / max(sum(w_a^2), 1e-12))
+    self_d2_1 <- round(pmax(0.0, rowSums((d1_diff %*% S_inv1) * d1_diff)) / (1.0 + 1.0 / neff1), 4)
     return(list(eigenvalues = pmax(eig1$values, 0), variance_pct = vp1, canonical_scores = Z1, centroids = c_mat1, canonical_scores_full = Z1[, 1, drop = FALSE], centroids_full = c_mat1[, 1, drop = FALSE],
                 num_canonical_axes = 1L, shrinkage_lambda = attr(S_reg1, "shrinkage_lambda"), selected_features = feature_cols, predicted_taxon = rep(g_levels[1L], nrow(df)), posterior_prob = rep(1.0, nrow(df)),
                 second_taxon = rep(NA_character_, nrow(df)), second_posterior_prob = rep(0.0, nrow(df)), post_probs = pp1, posterior_margin = rep(1.0, nrow(df)), is_active = is_active,
                 is_promoted_bronze = df$is_promoted_bronze, is_confident_label_noise = df$is_confident_label_noise, anchor_tier_source = df$anchor_tier_source, authority_weight = df$authority_weight,
-                structure_loadings = sc1, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col, X_proj = X_p1, S_reg = S_reg1))
+                structure_loadings = sc1, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col, X_proj = X_p1, S_reg = S_reg1,
+                self_morph_mahal_d2 = self_d2_1, self_morph_df = rep(as.integer(p), nrow(df)), oof_posterior_prob = rep(1.0, nrow(df)), cl_target_threshold = rep(NA_real_, nrow(df))))
   }
   B <- matrix(0, p, p); W <- matrix(0, p, p); X_centered <- matrix(0, N_a, p, dimnames = dimnames(X_a))
   group_means <- matrix(0, g, p, dimnames = list(g_levels, feature_cols)); group_counts <- integer(g)
@@ -396,13 +400,25 @@ run_canonical_discriminant_analysis <- function(df, feature_cols, target_taxa, g
     }
   }
   colnames(canonical_centroids) <- colnames(Z_all); rownames(canonical_centroids) <- g_levels
+  oof_self <- if (exists(".compute_oof_cda_and_self_ellipsoid", mode = "function")) {
+    .compute_oof_cda_and_self_ellipsoid(
+      X_proj = X_proj, active_idx = active_idx, y_a = y_a, w_a = w_a,
+      g_levels = g_levels, group_means = group_means, S_reg = S_reg,
+      grouping_col_all = df$grouping_col, predicted_taxon_all = g_levels[pred_idx],
+      posterior_prob_all = posterior_prob, coords_df = df, intraspecific_mode = is_intra
+    )
+  } else {
+    list(self_morph_mahal_d2 = rep(NA_real_, nrow(df)), self_morph_df = rep(as.integer(p), nrow(df)), oof_posterior_prob = posterior_prob, cl_target_threshold = rep(NA_real_, nrow(df)), cl_class_map = NULL)
+  }
   return(list(eigenvalues = eig_vals, variance_pct = var_pct, canonical_scores = Z_all, centroids = canonical_centroids,
               canonical_scores_full = Z_all_full, centroids_full = centroids_full, num_canonical_axes = k_full,
               shrinkage_lambda = attr(S_reg, "shrinkage_lambda"), selected_features = feature_cols,
               predicted_taxon = g_levels[pred_idx], posterior_prob = posterior_prob, second_taxon = second_taxon,
               second_posterior_prob = second_posterior_prob, post_probs = post_probs,
               posterior_margin = posterior_margin, is_active = is_active, is_promoted_bronze = df$is_promoted_bronze, is_confident_label_noise = df$is_confident_label_noise, anchor_tier_source = df$anchor_tier_source,
-              authority_weight = df$authority_weight, structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col, X_proj = X_proj, S_reg = S_reg))
+              authority_weight = df$authority_weight, structure_loadings = struct_corr, loocv_accuracy = loocv_accuracy, grouping_col = df$grouping_col, X_proj = X_proj, S_reg = S_reg,
+              self_morph_mahal_d2 = oof_self$self_morph_mahal_d2, self_morph_df = oof_self$self_morph_df,
+              oof_posterior_prob = oof_self$oof_posterior_prob, cl_target_threshold = oof_self$cl_target_threshold, cl_class_map = oof_self$cl_class_map))
 }
 
 # 5. Outlier Flagging & Herbarium Misidentification Auditing
@@ -435,13 +451,18 @@ audit_misidentifications <- function(df, cda_res, gmm_res = NULL, selected_featu
   }
   tc <- compute_type_specimen_morph_control(df, cda_res$X_proj, cda_res$S_reg, cda_res, gmm_res, flags = flags, triage = triage, reasons = reasons)
   flags <- tc$flags; triage <- tc$triage; reasons <- tc$reasons
-  for (cn in c("type_status", "is_type_specimen", "has_empirical_type_anchor", "type_morph_mahal_d2", "nearest_type_morph_taxon", "nearest_type_basionym", "nearest_type_basionym_d2", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p")) df[[cn]] <- tc[[cn]]
+  for (cn in c("type_status", "is_type_specimen", "has_empirical_type_anchor", "type_morph_mahal_d2", "nearest_type_morph_taxon", "nearest_type_basionym", "nearest_type_basionym_d2", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "open_set_df")) df[[cn]] <- tc[[cn]]
+  df$self_morph_mahal_d2 <- if (!is.null(cda_res$self_morph_mahal_d2)) as.numeric(cda_res$self_morph_mahal_d2) else rep(NA_real_, n)
+  df$self_morph_df <- if (!is.null(cda_res$self_morph_df)) as.integer(cda_res$self_morph_df) else rep(NA_integer_, n)
+  df$cda_oof_posterior_prob <- if (!is.null(cda_res$oof_posterior_prob)) round(as.numeric(cda_res$oof_posterior_prob), 4) else round(as.numeric(cda_res$posterior_prob), 4)
+  df$cl_target_threshold <- if (!is.null(cda_res$cl_target_threshold)) round(as.numeric(cda_res$cl_target_threshold), 4) else rep(NA_real_, n)
   p_audit <- max(2L, if (!is.null(cda_res$X_proj)) ncol(cda_res$X_proj) else length(pc_c))
+  osr_df_audit <- ifelse(!is.na(df$open_set_df) & df$open_set_df >= 1L, as.integer(df$open_set_df), p_audit)
   is_type_audit <- as.logical(df$is_type_specimen); is_type_audit[is.na(is_type_audit)] <- FALSE
   is_osr_novel <- !is.na(df$open_set_novelty_p) & (df$open_set_novelty_p < 0.01)
   is_cauline_fb_audit <- ("morph_tier_source" %in% names(df)) & !is.na(df$morph_tier_source) & (as.character(df$morph_tier_source) == "Cauline_Only_Fallback")
   cauline_high_conf <- !is_cauline_fb_audit | (!is.na(cda_res$posterior_prob) & cda_res$posterior_prob >= 0.85)
-  misid_flags <- !is_type_audit & cauline_high_conf & ((!is_intra_audit & flags & !is_osr_novel) | (is_intra_audit & is.finite(df$min_congener_mahal_d2) & is.finite(df$type_morph_mahal_d2) & (df$min_congener_mahal_d2 < stats::qchisq(0.95, df = p_audit)) & (df$type_morph_mahal_d2 > stats::qchisq(0.99, df = p_audit))))
+  misid_flags <- !is_type_audit & cauline_high_conf & ((!is_intra_audit & flags & !is_osr_novel) | (is_intra_audit & is.finite(df$min_congener_mahal_d2) & is.finite(df$type_morph_mahal_d2) & (df$min_congener_mahal_d2 < stats::qchisq(0.95, df = osr_df_audit)) & (df$type_morph_mahal_d2 > stats::qchisq(0.99, df = p_audit))))
   outlier_flags <- !is_type_audit & (is_osr_novel | mahal_out | (!is.na(df$type_morph_mahal_d2) & (df$type_morph_mahal_d2 > stats::qchisq(0.995, df = p_audit)) & !misid_flags))
   novel_only_idx <- which(outlier_flags & !misid_flags & (triage %in% c("CLEAN", "LOW")))
   if (length(novel_only_idx) > 0L) { triage[novel_only_idx] <- "HIGH"; reasons[novel_only_idx] <- "Open_Set_Morphospace_Outlier_Novelty" }
@@ -655,7 +676,7 @@ run_gmm_morphotools_pipeline <- function(opts) {
   eco_cda_res <- if (exists("run_supervised_ecoregion_cda", mode = "function")) run_supervised_ecoregion_cda(audited_df, cda_cols, gmm_res = gmm_res, output_summary_csv = eco_sum_csv, permutations = opts$permutations, seed = opts$seed) else NULL
   if (!is.null(eco_cda_res)) { audited_df$regional_group <- eco_cda_res$ecoregion_vec; audited_df$ecoregion_cda_predicted <- eco_cda_res$ecoregion_cda_predicted; audited_df$ecoregion_cda_posterior_prob <- eco_cda_res$ecoregion_cda_posterior_prob; audited_df$ecoregion_can1 <- eco_cda_res$ecoregion_can1; audited_df$ecoregion_can2 <- eco_cda_res$ecoregion_can2; if (is_intra_mode && all(is.na(audited_df$loocv_accuracy)) && !is.null(eco_cda_res$loocv_accuracy)) audited_df$loocv_accuracy <- eco_cda_res$loocv_accuracy }
   manova_res <- if (exists("run_multivariate_manova_audit", mode = "function")) run_multivariate_manova_audit(audited_df, cda_cols, gmm_res, output_group_csv = file.path(rep_dir, "manova_group_significance.csv"), output_pairwise_csv = file.path(rep_dir, "manova_pairwise_posthoc.csv"), include_gmm_clusters = FALSE) else NULL
-  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "population_deme_id", "deme_n_specimens", "cda_predicted_taxon", "cda_posterior_prob", "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "nearest_type_basionym", "nearest_type_basionym_d2", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "is_confident_label_noise", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "heteroblasty_ect_distance", "PC1_raw_individual", "PC2_raw_individual", "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "within_rosette_efa_dispersion", "heteroblasty_efa_distance", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "petiole_length_mm", "petiole_length_mm_std", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std", "blade_cie_l_norm", "blade_cie_l_sd", "AR_inv", "AR_inv_std", "log1p_capitulum_count", "log1p_capitulum_count_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "scape_to_basal_leaf_ratio_std", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
+  lead_cols <- intersect(c("catalogNumber", "plant_individual_id", "leaf_id", "basal_leaf_count", "cauline_leaf_count", "morph_tier_source", "pixels_per_mm", "is_calibrated_mm", "species_raw", "species_standardized", "identifiedBy", "determiner_tier", "type_status", "is_type_specimen", "is_promoted_bronze", "has_empirical_type_anchor", "authority_weight", "spatial_balance_weight", "population_deme_id", "deme_n_specimens", "cda_predicted_taxon", "cda_posterior_prob", "cda_oof_posterior_prob", "cl_target_threshold", "self_morph_mahal_d2", "self_morph_df", "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin", "type_morph_mahal_d2", "nearest_type_morph_taxon", "nearest_type_basionym", "nearest_type_basionym_d2", "type_morph_concordance", "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "open_set_df", "is_confident_label_noise", "loocv_accuracy", "selected_morph_features", "is_passive", "morphometric_outlier_flag", "misidentification_flag", "triage_priority", "discordance_reason", "gmm_cluster", "gmm_uncertainty", "can1", "can2", "can3", "ecoregion_cda_predicted", "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2", pc_cols, "Cauline_PC1", "Cauline_PC2", "Cauline_PC3", "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_ECT_PC1", "Cauline_ECT_PC2", "ect_lobe_complexity", "cauline_ect_lobe_complexity", "heteroblasty_ect_distance", "PC1_raw_individual", "PC2_raw_individual", "centroid_size", "log_centsize", "solidity", "q25_solidity", "dissection_index", "dissected_leaf_fraction", "within_rosette_efa_dispersion", "heteroblasty_efa_distance", "cauline_solidity_med", "cauline_dissection_index_med", "cauline_aspect_ratio_med", "cauline_blade_length_mm", "basal_vs_cauline_length_ratio", "basal_vs_cauline_solidity_delta", "petiole_length_mm", "petiole_length_mm_std", "blade_length_mm", "petiole_to_blade_ratio", "petiole_to_blade_ratio_std", "blade_cie_l_norm", "blade_cie_l_sd", "AR_inv", "AR_inv_std", "log1p_capitulum_count", "log1p_capitulum_count_std", "plant_height_cm", "plant_height_cm_std", "scape_to_basal_leaf_ratio", "scape_to_basal_leaf_ratio_std", "is_bent_stem", "reproductive_trait_status", "capitula_count", "involucre_height_px", "involucre_width_px", "involucre_height_mm", "involucre_width_mm"), names(audited_df))
   out_df <- audited_df[, c(lead_cols, setdiff(names(audited_df), lead_cols))]; dir.create(dirname(opts$output_flags), recursive = TRUE, showWarnings = FALSE); tmp_flags <- paste0(opts$output_flags, ".", Sys.getpid(), ".tmp"); .write_csv_s04(out_df, tmp_flags, na = ""); file.rename(tmp_flags, opts$output_flags)
   if (exists("persist_step04_to_sqlite", mode = "function")) tryCatch(persist_step04_to_sqlite(out_df, opts$vouchers, focal_taxon = opts$focal_taxon, intraspecific_mode = is_intra_mode), error = function(e) warning("SQLite Step 04 persistence note: ", e$message))
   generate_cda_biplot_pdf(audited_df, cda_res, gmm_res, opts$output_plot, selected_features, manova_res = manova_res)

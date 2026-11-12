@@ -2213,6 +2213,7 @@ _OTU_MORPH_BOOL_COLS: Tuple[str, ...] = (
     "is_type_specimen",
     "has_empirical_type_anchor",
     "is_typical_morphotype",
+    "is_confident_label_noise",
 )
 _OTU_MORPH_INT_COLS: Tuple[str, ...] = (
     "leaf_count",
@@ -2220,11 +2221,14 @@ _OTU_MORPH_INT_COLS: Tuple[str, ...] = (
     "efd_k95_pcs",
     "basal_leaf_count",
     "cauline_leaf_count",
+    "self_morph_df",
+    "open_set_df",
 )
 _OTU_MORPH_STR_COLS: Tuple[str, ...] = (
     "species_standardized",
     "determiner_tier",
     "type_status",
+    "scale_source",
     "reproductive_trait_status",
     "morph_tier_source",
     "gmm_cluster",
@@ -2234,6 +2238,8 @@ _OTU_MORPH_STR_COLS: Tuple[str, ...] = (
     "triage_priority",
     "discordance_reason",
     "nearest_type_morph_taxon",
+    "nearest_type_basionym",
+    "min_congener_taxon",
 )
 _OTU_MORPH_FLOAT_COLS: Tuple[str, ...] = (
     "authority_weight",
@@ -2282,8 +2288,15 @@ _OTU_MORPH_FLOAT_COLS: Tuple[str, ...] = (
     "foliar_variance",
     "within_rosette_efa_dispersion",
     *PC_COLS,
+    "blade_cie_l_norm",
+    "blade_cie_l_sd",
+    "log1p_capitulum_count",
+    "log1p_capitulum_count_std",
     "gmm_uncertainty",
     "cda_posterior_prob",
+    "cda_oof_posterior_prob",
+    "cl_target_threshold",
+    "self_morph_mahal_d2",
     "cda_second_posterior_prob",
     "cda_posterior_margin",
     "loocv_accuracy",
@@ -2294,7 +2307,10 @@ _OTU_MORPH_FLOAT_COLS: Tuple[str, ...] = (
     "ecoregion_can1",
     "ecoregion_can2",
     "type_morph_mahal_d2",
+    "nearest_type_basionym_d2",
     "type_morph_concordance",
+    "min_congener_mahal_d2",
+    "open_set_novelty_p",
 )
 
 
@@ -2587,13 +2603,16 @@ def ingest_existing_run_tables_into_db(
                 "synthesis_triage_priority",
                 "synthesis_triage_action",
                 "synthesis_rationale",
+                "resurrection_basionym",
+                "hybrid_parent_1",
+                "hybrid_parent_2",
             ):
                 if sc in r:
                     d_tri[sc] = _to_str(r.get(sc))
             for ic in ("n_available_modalities",):
                 if ic in r:
                     d_tri[ic] = _to_int(r.get(ic))
-            for bc in ("cryptic_cluster_cohesion_pass", "hybrid_zone_cohesion_pass", "is_completed_voucher"):
+            for bc in ("cryptic_cluster_cohesion_pass", "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass", "is_completed_voucher"):
                 if bc in r:
                     d_tri[bc] = _to_bool_int(r.get(bc))
             for fc in (

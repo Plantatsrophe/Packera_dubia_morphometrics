@@ -2335,6 +2335,236 @@ class TestEasternPackeraAndComplexDiscovery(unittest.TestCase):
             conn.close()
             self.assertEqual(len(rows), 3)
 
+    def test_misidentification_and_cryptic_species_five_step_protocol(self) -> None:
+        """
+        Verify the 5-step Misidentification & Cryptic-Species protocol + AUR-PLASTIC-LATE regression fix:
+          1. Core-cluster g_cl == 1 late-season outlier (AUR-PLASTIC-LATE) never passes cryptic_cluster_cohesion_pass.
+          2. Stage 1 protects vouchers inside their 95% self-Mahalanobis ellipsoid or where Tier_1_Gold / Tier_2_Silver
+             determinations are corroborated by habitat or blade_cie_l_norm vestiture reflectance.
+          3. Intraspecific-mode congener_osr_reassign evaluates exact open_set_df and reassigns outgroup congeners.
+          4. Stage 3 deduplicates duplicate exsiccatae sheets across herbaria and routes smooth allopatric spatial
+             clines (cryptic_non_clinal_pass == FALSE) to Subspecies_Ecotype.
+          5. Stage 3 separates Heterotypic Basionym Resurrection (Taxonomic_Resurrection_Candidate + resurrection_basionym)
+             from unnamed de novo Putative_Cryptic_Species.
+        """
+        r06_path = REPO_ROOT / "scripts" / "analysis" / "06_triage_dashboard_synthesis.R"
+        r06_src = r06_path.read_text(encoding="utf-8")
+        r04_src = (REPO_ROOT / "scripts" / "morphometrics" / "04_gmm_morphotools.R").read_text(encoding="utf-8")
+        auth_src = (REPO_ROOT / "scripts" / "morphometrics" / "authority_weighting_utils.R").read_text(encoding="utf-8")
+        for tok in ("outside_self_morph_95", "tier_authority_gate_ok", "cryptic_non_clinal_pass", "resurrection_basionym", "Taxonomic_Resurrection_Candidate", "osr_chisq90_vec"):
+            self.assertIn(tok, r06_src)
+        self.assertNotIn("n < 50L && g_cl == 1L", r06_src)
+        for tok04 in ("cda_oof_posterior_prob", "cl_target_threshold", "self_morph_mahal_d2", "open_set_df"):
+            self.assertIn(tok04, r04_src)
+        self.assertIn(".compute_oof_cda_and_self_ellipsoid", auth_src)
+
+        if not rscript_available():
+            self.skipTest("Rscript not installed.")
+
+        r_code = """
+        suppressPackageStartupMessages({ library(readr); library(dplyr) })
+        source("scripts/analysis/06_triage_dashboard_synthesis.R")
+
+        # A. Stage 1: Self-ellipsoid protection, Tier_1_Gold/Tier_2_Silver vestiture/habitat protection, vs corroborated reassign
+        df_s1 <- data.frame(
+          catalogNumber = c(
+            "DUB_ANC_1", "DUB_ANC_2", "DUB_ANC_3",
+            "ANO_ANC_1", "ANO_ANC_2", "ANO_ANC_3",
+            "GOLD_IN_SELF_ELLIPSOID",
+            "SILVER_VESTITURE_PROTECTED",
+            "SILVER_CORROBORATED_MISID"
+          ),
+          plant_individual_id = 0L,
+          institutionCode = "NCU",
+          species_raw = c(rep("Packera dubia", 3), rep("Packera anonyma", 3), rep("Packera dubia", 3)),
+          species_standardized = c(rep("Packera dubia", 3), rep("Packera anonyma", 3), rep("Packera dubia", 3)),
+          determiner_tier = c(rep("Tier_1_Gold", 6), "Tier_1_Gold", "Tier_2_Silver", "Tier_2_Silver"),
+          morph_tier_source = "Basal_Rosette",
+          basal_leaf_count = 3L,
+          decimalLatitude = c(35.1, 35.2, 35.3, 35.8, 35.9, 36.0, 35.2, 35.25, 35.95),
+          decimalLongitude = c(-78.5, -78.6, -78.7, -79.1, -79.2, -79.3, -78.55, -78.62, -79.15),
+          doy = c(108, 110, 112, 132, 134, 136, 111, 110, 135),
+          is_verified_anthesis = TRUE,
+          PC1 = c(-2.2, -2.0, -2.1, 2.2, 2.0, 2.1, -1.5, 1.4, 2.1),
+          PC2 = c(0.1, -0.1, 0.0, -0.1, 0.1, 0.0, 0.2, 0.1, 0.0),
+          blade_cie_l_norm = c(14.5, 15.2, 14.8, 1.8, 2.2, 2.0, 14.6, 15.0, 2.1),
+          self_morph_mahal_d2 = c(0.8, 0.7, 0.6, 0.8, 0.7, 0.6, 3.2, 14.5, 18.2),
+          self_morph_df = 3L,
+          cda_predicted_taxon = c(rep("Packera dubia", 3), rep("Packera anonyma", 3), "Packera anonyma", "Packera anonyma", "Packera anonyma"),
+          cda_posterior_prob = c(rep(0.96, 6), 0.79, 0.84, 0.93),
+          cda_oof_posterior_prob = c(rep(0.94, 6), 0.74, 0.81, 0.91),
+          cda_posterior_margin = c(rep(0.90, 6), 0.58, 0.68, 0.86),
+          morphometric_outlier_flag = c(rep(FALSE, 6), FALSE, TRUE, TRUE),
+          edaphic_best_fit_taxon = c(rep("Packera dubia", 3), rep("Packera anonyma", 3), "Packera dubia", "Packera dubia", "Packera anonyma"),
+          rf_predicted_taxon = c(rep("Packera dubia", 3), rep("Packera anonyma", 3), "Packera dubia", "Packera dubia", "Packera anonyma"),
+          rf_predicted_prob = c(rep(0.92, 6), 0.88, 0.86, 0.90),
+          edaphic_schoener_d = c(rep(0.82, 6), 0.79, 0.76, 0.19),
+          gmm_cluster = 1L,
+          gmm_uncertainty = 0.04,
+          stringsAsFactors = FALSE
+        )
+        res_s1 <- apply_taxonomic_decision_matrix(df_s1)
+        stopifnot(res_s1$taxonomic_treatment_subtype[7] != "Misidentification_Reassign")
+        stopifnot(res_s1$recommended_determination[7] == "Packera dubia")
+        stopifnot(res_s1$taxonomic_treatment_subtype[8] != "Misidentification_Reassign")
+        stopifnot(res_s1$recommended_determination[8] == "Packera dubia")
+        stopifnot(res_s1$taxonomic_treatment_subtype[9] == "Misidentification_Reassign")
+        stopifnot(res_s1$recommended_determination[9] == "Packera anonyma")
+
+        # B. Intraspecific-mode congener_osr_reassign with exact open_set_df = 14 (qchisq(0.90, 14) = 21.064)
+        df_intra_osr <- data.frame(
+          catalogNumber = c("DUB_CORE_1", "DUB_CORE_2", "DUB_CORE_3", "DUB_ACTUALLY_ANONYMA"),
+          plant_individual_id = 0L,
+          institutionCode = "NCU",
+          species_raw = "Packera dubia",
+          species_standardized = "Packera dubia",
+          determiner_tier = c("Tier_1_Gold", "Tier_1_Gold", "Tier_1_Gold", "Tier_3_Bronze"),
+          morph_tier_source = "Basal_Rosette",
+          basal_leaf_count = 3L,
+          cda_predicted_taxon = c("Morphotype_K1", "Morphotype_K1", "Morphotype_K1", "Morphotype_K2"),
+          cda_posterior_prob = c(0.95, 0.94, 0.95, 0.88),
+          is_typical_morphotype = c(TRUE, TRUE, TRUE, FALSE),
+          type_morph_mahal_d2 = c(1.1, 1.3, 1.2, 24.5),
+          min_congener_mahal_d2 = c(38.0, 39.5, 37.2, 11.4),
+          min_congener_taxon = "Packera anonyma",
+          open_set_novelty_p = c(0.0004, 0.0003, 0.0005, 0.654),
+          open_set_df = 14L,
+          morphometric_outlier_flag = c(FALSE, FALSE, FALSE, TRUE),
+          edaphic_z_score = c(0.4, 0.5, 0.4, 2.3),
+          gmm_cluster = c(1L, 1L, 1L, 2L),
+          stringsAsFactors = FALSE
+        )
+        res_iosr <- apply_taxonomic_decision_matrix(df_intra_osr, intraspecific_mode = TRUE)
+        stopifnot(res_iosr$taxonomic_treatment_subtype[4] == "Misidentification_Reassign")
+        stopifnot(res_iosr$recommended_determination[4] == "Packera anonyma")
+
+        # C. Stage 3: Duplicate exsiccatae collapse, allopatric spatial-cline rejection, and Basionym Resurrection vs sp. nov.
+        # Build 60-row intraspecific cohort so full >=5 gathering & >=3 10 km deme cohesion gates execute:
+        #   - Rows 1..40: K1 sensu stricto core across Piedmont/Coastal Plain
+        #   - Rows 41..45: K2 duplicate sheets of the SAME gathering ("A. S. Weakley" / "Weakley, Alan S." #4102) -> MUST FAIL cohesion!
+        #   - Rows 46..51: K3 allopatric smooth latitudinal cline (R^2 > 0.85, >100 km away, no flowering/azonal jump) -> Subspecies_Ecotype!
+        #   - Rows 52..57: K4 parapatric serpentine lineage matching heterotypic basionym "Senecio earlei" -> Taxonomic_Resurrection_Candidate!
+        #   - Rows 58..63: K5 parapatric allochronic lineage outside all basionym types -> unnamed Putative_Cryptic_Species!
+        n_tot <- 63L
+        cats <- sprintf("ST3_%02d", seq_len(n_tot))
+        g_cls <- c(rep(1L, 40), rep(2L, 5), rep(3L, 6), rep(4L, 6), rep(5L, 6))
+        insts <- rep(c("NCU", "DUKE", "US", "NY", "GH", "MO"), length.out = n_tot)
+        colls <- c(
+          paste0("Collector_", seq_len(40)),
+          c("A. S. Weakley", "Weakley, Alan S.", "A.S. Weakley et al.", "Dr. Alan Weakley", "Weakley, A. S."),
+          c("R. Kral", "R. K. Godfrey", "A. Cronquist", "D. K. Trock", "T. M. Barkley", "G. L. Nesom"),
+          c("R. Kral", "R. K. Godfrey", "A. Cronquist", "D. K. Trock", "T. M. Barkley", "G. L. Nesom"),
+          c("R. Kral", "R. K. Godfrey", "A. Cronquist", "D. K. Trock", "T. M. Barkley", "G. L. Nesom")
+        )
+        rnums <- c(
+          as.character(1000 + seq_len(40)),
+          rep("4102", 5),
+          as.character(5101:5106),
+          as.character(6101:6106),
+          as.character(7101:7106)
+        )
+        lats <- c(
+          seq(33.5, 36.5, length.out = 40),
+          rep(34.80, 5),
+          seq(39.0, 41.5, length.out = 6),
+          c(35.10, 35.35, 35.60, 35.85, 36.10, 36.35),
+          c(34.90, 35.20, 35.50, 35.80, 36.05, 36.30)
+        )
+        lons <- c(
+          seq(-81.0, -78.5, length.out = 40),
+          rep(-80.20, 5),
+          seq(-76.5, -74.5, length.out = 6),
+          c(-80.8, -80.4, -80.0, -79.6, -79.2, -78.8),
+          c(-80.7, -80.3, -79.9, -79.5, -79.1, -78.7)
+        )
+        pc1 <- c(
+          seq(-2.0, -0.2, length.out = 40),
+          rep(2.6, 5),
+          seq(0.1, 1.8, length.out = 6),
+          rep(3.1, 6),
+          rep(-3.4, 6)
+        )
+        pc2 <- c(
+          rep(0.0, 40),
+          rep(2.2, 5),
+          seq(0.05, 0.30, length.out = 6),
+          rep(2.6, 6),
+          rep(-2.8, 6)
+        )
+        ddoys <- c(rep(1.0, 40), rep(25.0, 5), rep(4.0, 6), rep(24.0, 6), rep(-26.0, 6))
+        dedaph <- c(rep(0.82, 40), rep(0.16, 5), rep(0.24, 6), rep(0.15, 6), rep(0.14, 6))
+        edz <- c(rep(0.4, 40), rep(3.2, 5), rep(2.7, 6), rep(3.4, 6), rep(3.6, 6))
+        nt_bas <- c(rep("Senecio anonymus", 40), rep(NA_character_, 5), rep(NA_character_, 6), rep("Senecio earlei", 6), rep("Senecio smallii", 6))
+        nt_bas_d2 <- c(rep(0.9, 40), rep(NA_real_, 5), rep(NA_real_, 6), rep(2.1, 6), rep(19.5, 6))
+
+        df_st3 <- data.frame(
+          catalogNumber = cats,
+          plant_individual_id = 0L,
+          institutionCode = insts,
+          recordedBy = colls,
+          recordNumber = rnums,
+          year = "2024",
+          species_raw = "Packera anonyma",
+          species_standardized = "Packera anonyma",
+          determiner_tier = "Tier_1_Gold",
+          morph_tier_source = "Basal_Rosette",
+          basal_leaf_count = 3L,
+          decimalLatitude = lats,
+          decimalLongitude = lons,
+          doy = 130 + ddoys,
+          delta_doy_resid = ddoys,
+          is_active_anthesis = TRUE,
+          PC1 = pc1,
+          PC2 = pc2,
+          selected_morph_features = "PC1;PC2",
+          cda_predicted_taxon = paste0("Morphotype_K", g_cls),
+          cda_posterior_prob = ifelse(g_cls == 1L, 0.94, 0.52),
+          morphometric_outlier_flag = g_cls > 1L,
+          is_typical_morphotype = g_cls == 1L,
+          edaphic_schoener_d = dedaph,
+          edaphic_z_score = edz,
+          type_edaphic_z_score = edz,
+          min_congener_mahal_d2 = 34.0,
+          min_congener_taxon = "Packera dubia",
+          open_set_novelty_p = 0.001,
+          open_set_df = 12L,
+          nearest_type_basionym = nt_bas,
+          nearest_type_basionym_d2 = nt_bas_d2,
+          gmm_cluster = g_cls,
+          gmm_2_delta_bic = 16.5,
+          stringsAsFactors = FALSE
+        )
+        res_st3 <- apply_taxonomic_decision_matrix(df_st3, intraspecific_mode = TRUE)
+
+        # K2 (rows 41..45): 5 duplicate sheets of 1 gathering -> cryptic_cluster_cohesion_pass == FALSE
+        stopifnot(all(!res_st3$cryptic_cluster_cohesion_pass[41:45]))
+        stopifnot(all(res_st3$taxonomic_treatment_subtype[41:45] != "Putative_Cryptic_Species"))
+
+        # K3 (rows 46..51): smooth allopatric geographic cline -> cryptic_non_clinal_pass == FALSE -> Subspecies_Ecotype
+        stopifnot(all(!res_st3$cryptic_non_clinal_pass[46:51]))
+        stopifnot(all(!res_st3$cryptic_cluster_cohesion_pass[46:51]))
+        stopifnot(all(res_st3$taxonomic_treatment_subtype[46:51] == "Subspecies_Ecotype"))
+
+        # K4 (rows 52..57): cohesive non-clinal lineage matching heterotypic basionym Senecio earlei -> Taxonomic_Resurrection_Candidate
+        stopifnot(all(res_st3$cryptic_cluster_cohesion_pass[52:57]))
+        stopifnot(all(res_st3$taxonomic_status_call[52:57] == "Taxonomic_Resurrection_Candidate"))
+        stopifnot(all(res_st3$resurrection_basionym[52:57] == "Senecio earlei"))
+        stopifnot(all(grepl("Resurrect Basionym: Senecio earlei", res_st3$recommended_determination[52:57], fixed = TRUE)))
+
+        # K5 (rows 58..63): cohesive non-clinal lineage outside all basionym types (d2=19.5 > qchisq(0.95,2)=5.99) -> de novo Putative_Cryptic_Species
+        stopifnot(all(res_st3$cryptic_cluster_cohesion_pass[58:63]))
+        stopifnot(all(res_st3$taxonomic_status_call[58:63] == "Putative_Cryptic_Species"))
+        stopifnot(all(is.na(res_st3$resurrection_basionym[58:63])))
+        stopifnot(all(grepl("Putative Cryptic Lineage K5", res_st3$recommended_determination[58:63], fixed = TRUE)))
+
+        cat("FIVE_STEP_MISID_AND_CRYPTIC_OK\n")
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            r_file = Path(tmpdir) / "test_five_step_misid_cryptic.R"
+            r_file.write_text(r_code, encoding="utf-8")
+            proc = run_warm_r_cmd(["Rscript", str(r_file)], stage_key="step06", cwd=REPO_ROOT, skip_figures=True)
+        self.assertEqual(proc.returncode, 0, f"Five-step misid/cryptic R suite failed:\n{proc.stderr}\n{proc.stdout}")
+        self.assertIn("FIVE_STEP_MISID_AND_CRYPTIC_OK", proc.stdout)
 
 
 if __name__ == "__main__":

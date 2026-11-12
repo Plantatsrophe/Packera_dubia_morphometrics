@@ -943,6 +943,138 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_misid_and_cryptic_schema_20261119_columns_and_migration(self) -> None:
+        """Verify schema 20261119 migrates and persists OOF CDA, self-ellipsoid, open_set_df, spatial-cline, and resurrection_basionym columns."""
+        from scripts.core.db import (
+            ensure_pipeline_run,
+            persist_otu_morphometrics,
+            populate_run_active_cohort,
+            upsert_rows_generic,
+        )
+        from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION
+
+        self.assertGreaterEqual(PACKERA_SCHEMA_USER_VERSION, 20261119)
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = Path(tmp) / "legacy_20261118.sqlite"
+            raw_conn = sqlite3.connect(db_p)
+            raw_conn.executescript(
+                """
+                PRAGMA user_version = 20261118;
+                CREATE TABLE pipeline_runs (run_id TEXT PRIMARY KEY, run_dir TEXT, start_timestamp TEXT, end_timestamp TEXT, git_commit_sha TEXT, cli_arguments_json TEXT, focal_taxon TEXT, intraspecific_mode INTEGER DEFAULT 0);
+                INSERT INTO pipeline_runs (run_id, start_timestamp) VALUES ('r_res', '2026-11-12T12:00:00Z');
+                CREATE TABLE curation_triage (
+                    run_id TEXT NOT NULL,
+                    catalogNumber TEXT NOT NULL,
+                    plant_individual_id INTEGER NOT NULL DEFAULT 0,
+                    taxonomic_status_call TEXT,
+                    taxonomic_treatment_subtype TEXT,
+                    recommended_determination TEXT,
+                    cryptic_cluster_cohesion_pass INTEGER,
+                    hybrid_zone_cohesion_pass INTEGER,
+                    hybrid_parent_1 TEXT,
+                    hybrid_parent_2 TEXT,
+                    is_completed_voucher INTEGER,
+                    PRIMARY KEY (run_id, catalogNumber, plant_individual_id)
+                );
+                INSERT INTO curation_triage VALUES (
+                    'r_res', 'NCU-OLD-1', 0, 'Species_Confirmed', 'Confirmed_Species', 'Packera dubia', 0, 0, NULL, NULL, 1
+                );
+                """
+            )
+            raw_conn.commit()
+            raw_conn.close()
+
+            conn = get_db_connection(db_p, init_schema=True)
+            try:
+                om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
+                ct_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(curation_triage);").fetchall()}
+                mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
+                for req_om in ("cda_oof_posterior_prob", "cl_target_threshold", "self_morph_mahal_d2", "self_morph_df", "open_set_df"):
+                    self.assertIn(req_om, om_cols)
+                    self.assertIn(req_om, mv_cols)
+                for req_ct in ("cryptic_non_clinal_pass", "resurrection_basionym"):
+                    self.assertIn(req_ct, ct_cols)
+                    self.assertIn(req_ct, mv_cols)
+
+                v_rows = [
+                    {
+                        "catalogNumber": "NCU-RES-01",
+                        "institutionCode": "NCU",
+                        "scientificName": "Packera anonyma",
+                        "species_raw": "Senecio earlei",
+                        "species_standardized": "Packera anonyma",
+                        "determiner_tier": "Tier_1_Gold",
+                        "qc_status": "PASS",
+                    }
+                ]
+                upsert_rows_generic(conn, table_name='vouchers', rows=v_rows, pk_cols=('catalogNumber',))
+                ensure_pipeline_run(conn, run_id="r_res")
+                populate_run_active_cohort(conn, run_id="r_res", voucher_rows=v_rows, clear_existing=True)
+                persist_otu_morphometrics(
+                    conn,
+                    run_id="r_res",
+                    otu_rows=[
+                        {
+                            "catalogNumber": "NCU-RES-01",
+                            "plant_individual_id": 0,
+                            "species_standardized": "Packera anonyma",
+                            "determiner_tier": "Tier_1_Gold",
+                            "cda_predicted_taxon": "Packera anonyma",
+                            "cda_posterior_prob": 0.62,
+                            "cda_oof_posterior_prob": 0.54,
+                            "cl_target_threshold": 0.74,
+                            "self_morph_mahal_d2": 9.85,
+                            "self_morph_df": 4,
+                            "min_congener_mahal_d2": 32.4,
+                            "min_congener_taxon": "Packera dubia",
+                            "open_set_novelty_p": 0.0018,
+                            "open_set_df": 14,
+                            "nearest_type_basionym": "Senecio earlei",
+                            "nearest_type_basionym_d2": 2.15,
+                        }
+                    ],
+                )
+                upsert_rows_generic(
+                    conn,
+                    table_name="curation_triage",
+                    rows=[
+                        {
+                            "run_id": "r_res",
+                            "catalogNumber": "NCU-RES-01",
+                            "plant_individual_id": 0,
+                            "taxonomic_status_call": "Taxonomic_Resurrection_Candidate",
+                            "recommended_determination": "Packera anonyma [Resurrect Basionym: Senecio earlei]",
+                            "taxonomic_treatment_broad": "Misidentification / Cryptic Species",
+                            "taxonomic_treatment_subtype": "Putative_Cryptic_Species",
+                            "cryptic_cluster_cohesion_pass": 1,
+                            "cryptic_non_clinal_pass": 1,
+                            "resurrection_basionym": "Senecio earlei",
+                            "hybrid_zone_cohesion_pass": 0,
+                            "is_completed_voucher": 1,
+                        }
+                    ],
+                    pk_cols=("run_id", "catalogNumber", "plant_individual_id"),
+                )
+                mv_row = conn.execute(
+                    """
+                    SELECT cda_oof_posterior_prob, cl_target_threshold, self_morph_mahal_d2, self_morph_df,
+                           open_set_df, cryptic_non_clinal_pass, resurrection_basionym, taxonomic_status_call
+                    FROM v_integrative_triage_master
+                    WHERE run_id = 'r_res' AND catalogNumber = 'NCU-RES-01';
+                    """
+                ).fetchone()
+                self.assertIsNotNone(mv_row)
+                self.assertAlmostEqual(float(mv_row[0]), 0.54, places=3)
+                self.assertAlmostEqual(float(mv_row[1]), 0.74, places=3)
+                self.assertAlmostEqual(float(mv_row[2]), 9.85, places=3)
+                self.assertEqual(int(mv_row[3]), 4)
+                self.assertEqual(int(mv_row[4]), 14)
+                self.assertEqual(int(mv_row[5]), 1)
+                self.assertEqual(str(mv_row[6]), "Senecio earlei")
+                self.assertEqual(str(mv_row[7]), "Taxonomic_Resurrection_Candidate")
+            finally:
+                conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

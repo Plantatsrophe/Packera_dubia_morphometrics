@@ -309,6 +309,10 @@ def _build_master_view_ddl() -> str:
         om.gmm_uncertainty AS gmm_uncertainty,
         om.cda_predicted_taxon AS cda_predicted_taxon,
         om.cda_posterior_prob AS cda_posterior_prob,
+        om.cda_oof_posterior_prob AS cda_oof_posterior_prob,
+        om.cl_target_threshold AS cl_target_threshold,
+        om.self_morph_mahal_d2 AS self_morph_mahal_d2,
+        om.self_morph_df AS self_morph_df,
         om.cda_second_taxon AS cda_second_taxon,
         om.cda_second_posterior_prob AS cda_second_posterior_prob,
         om.cda_posterior_margin AS cda_posterior_margin,
@@ -334,6 +338,7 @@ def _build_master_view_ddl() -> str:
         om.min_congener_mahal_d2 AS min_congener_mahal_d2,
         om.min_congener_taxon AS min_congener_taxon,
         om.open_set_novelty_p AS open_set_novelty_p,
+        om.open_set_df AS open_set_df,
         om.is_confident_label_noise AS is_confident_label_noise,
         -- Step 06 Spatial RF & Hopkins Phenology
         COALESCE(srf.lat_lon_key, ec.lat_lon_key) AS lat_lon_key,
@@ -385,6 +390,8 @@ def _build_master_view_ddl() -> str:
         ct.synthesis_triage_action AS synthesis_triage_action,
         ct.synthesis_rationale AS synthesis_rationale,
         ct.cryptic_cluster_cohesion_pass AS cryptic_cluster_cohesion_pass,
+        ct.cryptic_non_clinal_pass AS cryptic_non_clinal_pass,
+        ct.resurrection_basionym AS resurrection_basionym,
         ct.hybrid_zone_cohesion_pass AS hybrid_zone_cohesion_pass,
         ct.hybrid_parent_1 AS hybrid_parent_1,
         ct.hybrid_parent_2 AS hybrid_parent_2,
@@ -814,6 +821,10 @@ def _build_schema_ddl() -> str:
         gmm_uncertainty REAL,
         cda_predicted_taxon TEXT,
         cda_posterior_prob REAL,
+        cda_oof_posterior_prob REAL,
+        cl_target_threshold REAL,
+        self_morph_mahal_d2 REAL,
+        self_morph_df INTEGER,
         cda_second_taxon TEXT,
         cda_second_posterior_prob REAL,
         cda_posterior_margin REAL,
@@ -841,6 +852,7 @@ def _build_schema_ddl() -> str:
         min_congener_mahal_d2 REAL,
         min_congener_taxon TEXT,
         open_set_novelty_p REAL,
+        open_set_df INTEGER,
         is_confident_label_noise INTEGER,
         PRIMARY KEY (run_id, catalogNumber, plant_individual_id),
         FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id) ON DELETE CASCADE
@@ -905,6 +917,8 @@ def _build_schema_ddl() -> str:
         synthesis_triage_action TEXT,
         synthesis_rationale TEXT,
         cryptic_cluster_cohesion_pass INTEGER,
+        cryptic_non_clinal_pass INTEGER,
+        resurrection_basionym TEXT,
         hybrid_zone_cohesion_pass INTEGER,
         hybrid_parent_1 TEXT,
         hybrid_parent_2 TEXT,
@@ -1057,9 +1071,14 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("nearest_type_morph_taxon", "TEXT"),
             ("type_morph_concordance", "REAL"),
             ("is_typical_morphotype", "INTEGER"),
+            ("cda_oof_posterior_prob", "REAL"),
+            ("cl_target_threshold", "REAL"),
+            ("self_morph_mahal_d2", "REAL"),
+            ("self_morph_df", "INTEGER"),
             ("min_congener_mahal_d2", "REAL"),
             ("min_congener_taxon", "TEXT"),
             ("open_set_novelty_p", "REAL"),
+            ("open_set_df", "INTEGER"),
             ("is_confident_label_noise", "INTEGER"),
             ("is_promoted_bronze", "INTEGER"),
             ("is_passive", "INTEGER"),
@@ -1093,6 +1112,8 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
     ),
     "curation_triage": (
         ("cryptic_cluster_cohesion_pass", "INTEGER"),
+        ("cryptic_non_clinal_pass", "INTEGER"),
+        ("resurrection_basionym", "TEXT"),
         ("hybrid_zone_cohesion_pass", "INTEGER"),
         ("hybrid_parent_1", "TEXT"),
         ("hybrid_parent_2", "TEXT"),
@@ -1134,7 +1155,7 @@ def _migrate_vouchers_schema_columns(conn: sqlite3.Connection) -> None:
             existing_cols.add(col_name)
 
 
-PACKERA_SCHEMA_USER_VERSION: int = 20261118
+PACKERA_SCHEMA_USER_VERSION: int = 20261119
 
 
 def _migrate_dynamic_schema_columns(
@@ -1183,6 +1204,8 @@ def _migrate_dynamic_schema_columns(
         }
         for _ct_col, _ct_type in (
             ("cryptic_cluster_cohesion_pass", "INTEGER"),
+            ("cryptic_non_clinal_pass", "INTEGER"),
+            ("resurrection_basionym", "TEXT"),
             ("hybrid_zone_cohesion_pass", "INTEGER"),
             ("hybrid_parent_1", "TEXT"),
             ("hybrid_parent_2", "TEXT"),
@@ -1199,6 +1222,7 @@ def _migrate_dynamic_schema_columns(
             "taxonomic_treatment_broad", "taxonomic_treatment_subtype",
             "synthesis_triage_priority", "synthesis_triage_action",
             "synthesis_rationale", "cryptic_cluster_cohesion_pass",
+            "cryptic_non_clinal_pass", "resurrection_basionym",
             "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2",
             "is_completed_voucher",
         }:
@@ -1211,6 +1235,7 @@ def _migrate_dynamic_schema_columns(
                 "taxonomic_treatment_broad", "taxonomic_treatment_subtype",
                 "synthesis_triage_priority", "synthesis_triage_action",
                 "synthesis_rationale", "cryptic_cluster_cohesion_pass",
+                "cryptic_non_clinal_pass", "resurrection_basionym",
                 "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2",
                 "is_completed_voucher",
             )
@@ -1238,6 +1263,8 @@ def _migrate_dynamic_schema_columns(
                     synthesis_triage_action TEXT,
                     synthesis_rationale TEXT,
                     cryptic_cluster_cohesion_pass INTEGER,
+                    cryptic_non_clinal_pass INTEGER,
+                    resurrection_basionym TEXT,
                     hybrid_zone_cohesion_pass INTEGER,
                     hybrid_parent_1 TEXT,
                     hybrid_parent_2 TEXT,
@@ -1290,7 +1317,7 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
             mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
-            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2"}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "log1p_capitulum_count", "blade_cie_l_norm", "nearest_type_basionym", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2", "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2", "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df", "cryptic_non_clinal_pass", "resurrection_basionym"}
             if (
                 "leaf_zone" not in el_cols
                 or "area_mm2" not in el_cols

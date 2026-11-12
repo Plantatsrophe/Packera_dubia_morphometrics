@@ -16,7 +16,7 @@
 #       with seamless CSV fallback merging.
 # ==============================================================================
 
-PACKERA_SCHEMA_USER_VERSION <- 20261117L
+PACKERA_SCHEMA_USER_VERSION <- 20261119L
 
 resolve_packera_workers <- function(max_workers = 32L, n_tasks = NULL) {
   if (!identical(.Platform$OS.type, "unix") || !requireNamespace("parallel", quietly = TRUE)) {
@@ -110,7 +110,8 @@ PACKERA_DB_LOGICAL_COLS <- c(
   "substrate_specialist_flag", "multimodal_conflict_flag",
   "is_completed_voucher", "is_type_specimen", "has_empirical_type_anchor",
   "is_typical_morphotype", "matches_type_lithology",
-  "is_confident_label_noise", "cryptic_cluster_cohesion_pass"
+  "is_confident_label_noise", "cryptic_cluster_cohesion_pass",
+  "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass"
 )
 
 PACKERA_DB_HARMONIC_COLS <- as.vector(vapply(
@@ -260,9 +261,14 @@ PACKERA_DB_WC_BIO_COLS <- c(
         nearest_type_morph_taxon = "TEXT",
         type_morph_concordance = "REAL",
         is_typical_morphotype = "INTEGER",
+        cda_oof_posterior_prob = "REAL",
+        cl_target_threshold = "REAL",
+        self_morph_mahal_d2 = "REAL",
+        self_morph_df = "INTEGER",
         min_congener_mahal_d2 = "REAL",
         min_congener_taxon = "TEXT",
         open_set_novelty_p = "REAL",
+        open_set_df = "INTEGER",
         is_confident_label_noise = "INTEGER",
         is_promoted_bronze = "INTEGER",
         is_passive = "INTEGER",
@@ -283,7 +289,12 @@ PACKERA_DB_WC_BIO_COLS <- c(
   }
   if (identical(table_name, "curation_triage")) {
     return(c(
-      cryptic_cluster_cohesion_pass = "INTEGER"
+      cryptic_cluster_cohesion_pass = "INTEGER",
+      cryptic_non_clinal_pass = "INTEGER",
+      resurrection_basionym = "TEXT",
+      hybrid_zone_cohesion_pass = "INTEGER",
+      hybrid_parent_1 = "TEXT",
+      hybrid_parent_2 = "TEXT"
     ))
   }
   if (identical(table_name, "spatial_rf_predictions")) {
@@ -518,7 +529,10 @@ connect_packera_db <- function(
         "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon",
         "open_set_novelty_p", "is_confident_label_noise",
         "type_edaphic_z_score", "nearest_type_niche_taxon", "matches_type_lithology",
-        "cryptic_cluster_cohesion_pass", "is_passive", "scale_source",
+        "cryptic_cluster_cohesion_pass", "cryptic_non_clinal_pass", "resurrection_basionym",
+        "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2",
+        "cda_oof_posterior_prob", "self_morph_mahal_d2", "open_set_df",
+        "is_passive", "scale_source",
         "AR_inv_std", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
@@ -1404,6 +1418,7 @@ fetch_step04_morphometrics_from_db <- function(
     }
     stale_s04_cols <- c(
       "gmm_cluster", "gmm_uncertainty", "cda_predicted_taxon", "cda_posterior_prob",
+      "cda_oof_posterior_prob", "cl_target_threshold", "self_morph_mahal_d2", "self_morph_df",
       "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin",
       "loocv_accuracy", "can1", "can2", "can3", "ecoregion_cda_predicted",
       "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2",
@@ -1411,7 +1426,7 @@ fetch_step04_morphometrics_from_db <- function(
       "discordance_reason", "has_empirical_type_anchor", "type_morph_mahal_d2",
       "nearest_type_morph_taxon", "nearest_type_basionym", "nearest_type_basionym_d2",
       "type_morph_concordance", "is_typical_morphotype",
-      "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p",
+      "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p", "open_set_df",
       "is_confident_label_noise", "selected_morph_features"
     )
     df <- df[, setdiff(names(df), stale_s04_cols), drop = FALSE]
@@ -1714,7 +1729,9 @@ try_fetch_master_view_for_cohort <- function(
       "delta_doy_resid", "taxonomic_status_call", "recommended_determination",
       "taxonomic_treatment_broad", "taxonomic_treatment_subtype",
       "synthesis_triage_priority", "synthesis_triage_action", "synthesis_rationale",
-      "cryptic_cluster_cohesion_pass", "is_completed_voucher"
+      "cryptic_cluster_cohesion_pass", "cryptic_non_clinal_pass", "resurrection_basionym",
+      "hybrid_zone_cohesion_pass", "hybrid_parent_1", "hybrid_parent_2",
+      "is_completed_voucher"
     )
     master_df <- master_df[, setdiff(names(master_df), stale_ct_cols), drop = FALSE]
   }
@@ -1755,7 +1772,7 @@ persist_step06_to_sqlite <- function(
   ct_df$run_id <- rid
   if (!("plant_individual_id" %in% names(ct_df))) ct_df$plant_individual_id <- 0L
   ct_df$plant_individual_id[is.na(ct_df$plant_individual_id)] <- 0L
-  for (.bcol in intersect(c("cryptic_cluster_cohesion_pass", "hybrid_zone_cohesion_pass", "is_completed_voucher"), names(ct_df))) {
+  for (.bcol in intersect(c("cryptic_cluster_cohesion_pass", "cryptic_non_clinal_pass", "hybrid_zone_cohesion_pass", "is_completed_voucher"), names(ct_df))) {
     ct_df[[.bcol]] <- ifelse(is.na(ct_df[[.bcol]]), NA_integer_, as.integer(as.logical(ct_df[[.bcol]])))
   }
 
