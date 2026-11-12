@@ -266,6 +266,7 @@ PACKERA_DB_WC_BIO_COLS <- c(
         area_mm2 = "REAL",
         petiole_width_mm = "REAL",
         blade_width_mm = "REAL",
+        scale_source = "TEXT",
         within_rosette_efa_dispersion = "REAL"
       )
     ))
@@ -481,11 +482,13 @@ connect_packera_db <- function(
 
   cur_ver <- .get_sqlite_user_version_r(conn)
   el_fields_chk <- if (db_table_exists_safe(conn, "extracted_leaves")) tryCatch(DBI::dbListFields(conn, "extracted_leaves"), error = function(e) character(0)) else c("leaf_zone", "ect_path")
-  om_fields_chk <- if (db_table_exists_safe(conn, "otu_morphometrics")) tryCatch(DBI::dbListFields(conn, "otu_morphometrics"), error = function(e) character(0)) else c("cauline_leaf_count", "ECT_PC1")
+  om_fields_chk <- if (db_table_exists_safe(conn, "otu_morphometrics")) tryCatch(DBI::dbListFields(conn, "otu_morphometrics"), error = function(e) character(0)) else c("cauline_leaf_count", "ECT_PC1", "scale_source")
+  mv_fields_chk <- if (db_table_exists_safe(conn, "v_integrative_triage_master")) tryCatch(DBI::dbListFields(conn, "v_integrative_triage_master"), error = function(e) character(0)) else character(0)
   el_has_zone <- all(c("leaf_zone", "ect_path") %in% el_fields_chk)
-  om_has_cauline <- all(c("cauline_leaf_count", "ECT_PC1") %in% om_fields_chk)
+  om_has_cauline <- all(c("cauline_leaf_count", "ECT_PC1", "scale_source") %in% om_fields_chk)
+  mv_has_latest <- identical(eff_path, ":memory:") || all(c("is_passive", "scale_source", "AR_inv_std", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2") %in% mv_fields_chk)
   if (cur_ver >= PACKERA_SCHEMA_USER_VERSION &&
-      el_has_zone && om_has_cauline &&
+      el_has_zone && om_has_cauline && mv_has_latest &&
       (identical(eff_path, ":memory:") || db_table_exists_safe(conn, "v_integrative_triage_master"))) {
     return(conn)
   }
@@ -505,7 +508,8 @@ connect_packera_db <- function(
         "is_typical_morphotype", "min_congener_mahal_d2", "min_congener_taxon",
         "open_set_novelty_p", "is_confident_label_noise",
         "type_edaphic_z_score", "nearest_type_niche_taxon", "matches_type_lithology",
-        "cryptic_cluster_cohesion_pass"
+        "cryptic_cluster_cohesion_pass", "is_passive", "scale_source",
+        "AR_inv_std", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2"
       )
       if (length(v_cols) > 0L && !all(req_v_cols %in% v_cols)) {
         view_needs_refresh <- TRUE
@@ -1348,7 +1352,55 @@ fetch_step04_morphometrics_from_db <- function(
     df[[pair[2]]] <- NULL
   }
   df$run_id <- NULL
-  coerce_sqlite_logical_cols(df)
+  df <- coerce_sqlite_logical_cols(df)
+  has_prev_s04 <- ("cda_predicted_taxon" %in% names(df) && any(!is.na(df$cda_predicted_taxon))) ||
+                  ("gmm_cluster" %in% names(df) && any(!is.na(df$gmm_cluster)))
+  if (isTRUE(has_prev_s04)) {
+    if (!is.null(harmonics_path) && nzchar(harmonics_path) && file.exists(harmonics_path)) {
+      hm_raw <- tryCatch(
+        if (requireNamespace("data.table", quietly = TRUE)) as.data.frame(data.table::fread(harmonics_path, showProgress = FALSE))
+        else utils::read.csv(harmonics_path, stringsAsFactors = FALSE, check.names = FALSE),
+        error = function(e) NULL
+      )
+      if (!is.null(hm_raw) && "catalogNumber" %in% names(hm_raw) && nrow(hm_raw) > 0L) {
+        if (!("plant_individual_id" %in% names(hm_raw))) hm_raw$plant_individual_id <- 0L
+        hm_raw$plant_individual_id[is.na(hm_raw$plant_individual_id)] <- 0L
+        k_db <- paste0(trimws(as.character(df$catalogNumber)), "||", as.integer(df$plant_individual_id))
+        k_hm <- paste0(trimws(as.character(hm_raw$catalogNumber)), "||", as.integer(hm_raw$plant_individual_id))
+        if (!any(duplicated(k_hm))) {
+          m_idx <- match(k_db, k_hm)
+          ok_m <- which(!is.na(m_idx))
+          if (length(ok_m) > 0L) {
+            raw_s03_cols <- intersect(
+              c(PACKERA_DB_SYM_HARMONIC_COLS, PACKERA_DB_PC_COLS,
+                "ECT_PC1", "ECT_PC2", "ECT_PC3", "Cauline_PC1", "Cauline_PC2", "Cauline_PC3",
+                "Cauline_ECT_PC1", "Cauline_ECT_PC2", "aspect_ratio", "solidity", "q25_solidity",
+                "dissection_index", "dissected_leaf_fraction", "within_rosette_efa_dispersion",
+                "heteroblasty_efa_distance", "heteroblasty_ect_distance", "ect_lobe_complexity",
+                "cauline_ect_lobe_complexity", "centroid_size", "log_centsize", "scale_source"),
+              names(hm_raw)
+            )
+            for (rc in raw_s03_cols) {
+              df[[rc]][ok_m] <- hm_raw[[rc]][m_idx[ok_m]]
+            }
+          }
+        }
+      }
+    }
+    stale_s04_cols <- c(
+      "gmm_cluster", "gmm_uncertainty", "cda_predicted_taxon", "cda_posterior_prob",
+      "cda_second_taxon", "cda_second_posterior_prob", "cda_posterior_margin",
+      "loocv_accuracy", "can1", "can2", "can3", "ecoregion_cda_predicted",
+      "ecoregion_cda_posterior_prob", "ecoregion_can1", "ecoregion_can2",
+      "morphometric_outlier_flag", "misidentification_flag", "triage_priority",
+      "discordance_reason", "has_empirical_type_anchor", "type_morph_mahal_d2",
+      "nearest_type_morph_taxon", "type_morph_concordance", "is_typical_morphotype",
+      "min_congener_mahal_d2", "min_congener_taxon", "open_set_novelty_p",
+      "is_confident_label_noise", "selected_morph_features"
+    )
+    df <- df[, setdiff(names(df), stale_s04_cols), drop = FALSE]
+  }
+  df
 }
 
 persist_step04_to_sqlite <- function(
@@ -1638,6 +1690,32 @@ try_fetch_master_view_for_cohort <- function(
 
   if (isTRUE(require_step04) && !has_m) return(NULL)
   if ((isTRUE(require_step05) || isTRUE(require_step06)) && !has_s) return(NULL)
+
+  if (!isTRUE(require_step06)) {
+    stale_ct_cols <- c(
+      "w_morph_kappa", "w_edaphic_kappa", "w_pheno_kappa", "n_available_modalities",
+      "probabilistic_consensus_conflict", "probabilistic_consensus_score",
+      "delta_doy_resid", "taxonomic_status_call", "recommended_determination",
+      "taxonomic_treatment_broad", "taxonomic_treatment_subtype",
+      "synthesis_triage_priority", "synthesis_triage_action", "synthesis_rationale",
+      "cryptic_cluster_cohesion_pass", "is_completed_voucher"
+    )
+    master_df <- master_df[, setdiff(names(master_df), stale_ct_cols), drop = FALSE]
+  }
+  if (!isTRUE(require_step05) && !isTRUE(require_step06)) {
+    stale_srf_cols <- c(
+      "rf_predicted_taxon", "rf_predicted_prob", "rf_given_taxon_prob", "rf_prediction_source",
+      "edaphic_best_fit_taxon", "spatial_block_cv_acc", "spatial_autocorr_range_km",
+      "spatial_block_id", "expected_doy", "hopkins_expected", "hopkins_adjusted_doy",
+      "delta_doy", "pheno_timing_category", "anthesis_filter_status", "edaphic_z_score",
+      "climatic_z_score", "type_edaphic_z_score", "nearest_type_niche_taxon",
+      "matches_type_lithology", "primary_env_predictors", "primary_clim_predictors",
+      "primary_edaph_predictors", "substrate_specialist_flag", "n_observed_modalities",
+      "multimodal_concordance", "multimodal_conflict_flag", "triage_category",
+      "conflict_discordance_notes"
+    )
+    master_df <- master_df[, setdiff(names(master_df), stale_srf_cols), drop = FALSE]
+  }
   master_df
 }
 

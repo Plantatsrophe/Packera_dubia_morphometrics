@@ -212,9 +212,11 @@ def _build_master_view_ddl() -> str:
         COALESCE(rac.species_standardized, om.species_standardized, v.species_standardized) AS species_standardized,
         COALESCE(rac.is_promoted_bronze, om.is_promoted_bronze, 0) AS is_promoted_bronze,
         COALESCE(rac.authority_weight, om.authority_weight) AS authority_weight,
+        om.is_passive AS is_passive,
         COALESCE(rac.spatial_balance_weight, v.spatial_balance_weight, 1.0) AS spatial_balance_weight,
         COALESCE(om.pixels_per_mm, v.pixels_per_mm) AS pixels_per_mm,
         COALESCE(om.is_calibrated_mm, v.is_calibrated_mm) AS is_calibrated_mm,
+        om.scale_source AS scale_source,
         v.qc_status AS qc_status,
         -- Plant individual & linear petiole/scape traits
         pi.rosette_centroid_x AS rosette_centroid_x,
@@ -242,6 +244,8 @@ def _build_master_view_ddl() -> str:
         CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_height_mm ELSE vrp0.involucre_height_mm END AS involucre_height_mm,
         CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.involucre_width_mm ELSE vrp0.involucre_width_mm END AS involucre_width_mm,
         COALESCE(om.AR_inv, CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.AR_inv ELSE vrp0.AR_inv END) AS AR_inv,
+        om.AR_inv_std AS AR_inv_std,
+        om.reproductive_trait_status AS reproductive_trait_status,
         CASE WHEN vrp.catalogNumber IS NOT NULL THEN COALESCE(vrp.total_capitula, vrp.capitula_count) ELSE COALESCE(vrp0.total_capitula, vrp0.capitula_count) END AS total_capitula,
         CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.n_anthesis ELSE vrp0.n_anthesis END AS n_anthesis,
         CASE WHEN vrp.catalogNumber IS NOT NULL THEN vrp.n_bud ELSE vrp0.n_bud END AS n_bud,
@@ -310,6 +314,8 @@ def _build_master_view_ddl() -> str:
         om.can3 AS can3,
         om.ecoregion_cda_predicted AS ecoregion_cda_predicted,
         om.ecoregion_cda_posterior_prob AS ecoregion_cda_posterior_prob,
+        om.ecoregion_can1 AS ecoregion_can1,
+        om.ecoregion_can2 AS ecoregion_can2,
         om.morphometric_outlier_flag AS morphometric_outlier_flag,
         om.misidentification_flag AS misidentification_flag,
         om.triage_priority AS triage_priority,
@@ -363,7 +369,7 @@ def _build_master_view_ddl() -> str:
         ct.n_available_modalities AS n_available_modalities,
         ct.probabilistic_consensus_conflict AS probabilistic_consensus_conflict,
         ct.probabilistic_consensus_score AS probabilistic_consensus_score,
-        COALESCE(ct.hopkins_adjusted_doy, srf.hopkins_adjusted_doy) AS hopkins_adjusted_doy,
+        COALESCE(srf.hopkins_adjusted_doy, ct.hopkins_adjusted_doy) AS hopkins_adjusted_doy,
         ct.delta_doy_resid AS delta_doy_resid,
         ct.taxonomic_status_call AS taxonomic_status_call,
         ct.recommended_determination AS recommended_determination,
@@ -733,6 +739,7 @@ def _build_schema_ddl() -> str:
         is_passive INTEGER,
         pixels_per_mm REAL,
         is_calibrated_mm INTEGER,
+        scale_source TEXT,
         solidity REAL,
         dissection_index REAL,
         q25_solidity REAL,
@@ -1034,6 +1041,7 @@ _DYNAMIC_TABLE_MIGRATION_SPECS: Dict[str, Tuple[Tuple[str, str], ...]] = {
             ("area_mm2", "REAL"),
             ("petiole_width_mm", "REAL"),
             ("blade_width_mm", "REAL"),
+            ("scale_source", "TEXT"),
             ("within_rosette_efa_dispersion", "REAL"),
         ]
     ),
@@ -1230,7 +1238,22 @@ def init_db_schema(conn: sqlite3.Connection) -> None:
                 _migrate_vouchers_schema_columns(conn)
             el_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(extracted_leaves);").fetchall()}
             om_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
-            if "leaf_zone" not in el_cols or "area_mm2" not in el_cols or "ect_path" not in el_cols or "mask_is_upright" not in el_cols or "petiole_width_mm" not in el_cols or "cauline_leaf_count" not in om_cols or "ECT_PC1" not in om_cols or "blade_width_mm" not in om_cols or "is_promoted_bronze" not in om_cols or "within_rosette_efa_dispersion" not in om_cols:
+            mv_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
+            req_mv_cols = {"is_passive", "scale_source", "AR_inv_std", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2"}
+            if (
+                "leaf_zone" not in el_cols
+                or "area_mm2" not in el_cols
+                or "ect_path" not in el_cols
+                or "mask_is_upright" not in el_cols
+                or "petiole_width_mm" not in el_cols
+                or "cauline_leaf_count" not in om_cols
+                or "ECT_PC1" not in om_cols
+                or "blade_width_mm" not in om_cols
+                or "scale_source" not in om_cols
+                or "is_promoted_bronze" not in om_cols
+                or "within_rosette_efa_dispersion" not in om_cols
+                or not req_mv_cols.issubset(mv_cols)
+            ):
                 _migrate_dynamic_schema_columns(conn, recreate_view=True)
             conn.execute("PRAGMA foreign_keys = ON;")
             return

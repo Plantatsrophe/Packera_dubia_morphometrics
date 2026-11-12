@@ -773,6 +773,65 @@ class TestSQLPipelineHandshake(unittest.TestCase):
             finally:
                 conn_post.close()
 
+    def test_master_view_step04_parity_and_upstream_hopkins_precedence(self):
+        """Verify v_integrative_triage_master exposes Step 04 parity columns and fresh Step 05 hopkins_adjusted_doy overrides stale Step 06 curation_triage."""
+        conn = get_db_connection(":memory:", init_schema=True)
+        try:
+            mv_cols = {r[1] for r in conn.execute("PRAGMA table_info(v_integrative_triage_master);").fetchall()}
+            om_cols = {r[1] for r in conn.execute("PRAGMA table_info(otu_morphometrics);").fetchall()}
+            self.assertIn("scale_source", om_cols)
+            for req in ("is_passive", "scale_source", "AR_inv_std", "reproductive_trait_status", "ecoregion_can1", "ecoregion_can2"):
+                self.assertIn(req, mv_cols)
+
+            conn.execute("INSERT INTO pipeline_runs (run_id) VALUES ('run_hopkins_test');")
+            conn.execute(
+                """
+                INSERT INTO vouchers (catalogNumber, scientificName, species_standardized, determiner_tier)
+                VALUES ('NCU-HOP-1', 'Packera aurea', 'Packera aurea', 'Tier_3_Bronze');
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO run_active_cohort (run_id, catalogNumber, plant_individual_id, species_standardized, determiner_tier, is_promoted_bronze, authority_weight)
+                VALUES ('run_hopkins_test', 'NCU-HOP-1', 0, 'Packera aurea', 'Tier_3_Bronze', 0, 0.0);
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO otu_morphometrics (run_id, catalogNumber, plant_individual_id, is_passive, scale_source, AR_inv_std, reproductive_trait_status, ecoregion_can1, ecoregion_can2)
+                VALUES ('run_hopkins_test', 'NCU-HOP-1', 0, 1, 'ruler_calibrated', 1.25, 'Measured', -0.45, 0.85);
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO spatial_rf_predictions (run_id, catalogNumber, plant_individual_id, hopkins_adjusted_doy)
+                VALUES ('run_hopkins_test', 'NCU-HOP-1', 0, 134.5);
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO curation_triage (run_id, catalogNumber, plant_individual_id, hopkins_adjusted_doy)
+                VALUES ('run_hopkins_test', 'NCU-HOP-1', 0, 99.0);
+                """
+            )
+            row = conn.execute(
+                """
+                SELECT is_passive, scale_source, AR_inv_std, reproductive_trait_status, ecoregion_can1, ecoregion_can2, hopkins_adjusted_doy
+                FROM v_integrative_triage_master
+                WHERE run_id = 'run_hopkins_test' AND catalogNumber = 'NCU-HOP-1';
+                """
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(int(row[0]), 1)
+            self.assertEqual(str(row[1]), "ruler_calibrated")
+            self.assertAlmostEqual(float(row[2]), 1.25)
+            self.assertEqual(str(row[3]), "Measured")
+            self.assertAlmostEqual(float(row[4]), -0.45)
+            self.assertAlmostEqual(float(row[5]), 0.85)
+            self.assertAlmostEqual(float(row[6]), 134.5)
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

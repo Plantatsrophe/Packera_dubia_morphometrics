@@ -939,11 +939,7 @@ def run_morphometrics(args: argparse.Namespace, cfg: PipelineConfig) -> None:
         if run_dir is not None
         else cfg.get("paths", {}).get("morphometric_flags_csv", str(tables_dir / "morphometric_flags.csv"))
     )
-    default_plot_out = (
-        figures_dir / "cda_passive_projection.pdf"
-        if run_dir is not None
-        else cfg.get("paths", {}).get("cda_biplot_pdf", "outputs/figures/Figure_Integrative_Packera_Revision.pdf")
-    )
+    default_plot_out = figures_dir / "cda_passive_projection.pdf"
     default_report_out = (
         run_dir / "outputs" / "reports" / "gmm_bayes_factors_summary.csv"
         if run_dir is not None
