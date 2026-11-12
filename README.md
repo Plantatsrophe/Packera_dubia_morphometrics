@@ -148,7 +148,10 @@ Rscript -e 'install.packages(c("remotes", "tidyverse", "optparse", "mclust", "cl
 # 11. Reset all Step 02 to 06 segments, masks, contours, ECT arrays, and runs/ (keeps Step 01 scans & SQLite vouchers)
 ./run_pipeline.sh --purge-segments
 
-# 12. Standalone Step 06 taxonomic synthesis, HTML dashboard, and 300-DPI complex network plate
+# 12. Automated 4-stage focal species-complex resolution workflow (defaults to Packera dubia)
+./resolve_packera_dubia_complex.sh --threads 12 --gpu-batch-size 16
+
+# 13. Standalone Step 06 taxonomic synthesis, HTML dashboard, and 300-DPI complex network plate
 Rscript scripts/analysis/06_triage_dashboard_synthesis.R \
   --vouchers runs/latest/data/tables/curated_vouchers.csv \
   --harmonics runs/latest/data/tables/leaf_efa_harmonics.csv \
@@ -284,6 +287,7 @@ Packera_dubia_morphometrics/
 ├── requirements.txt                                 # Primary Python (.venv) orchestration dependencies
 ├── setup_leafmachine3.sh                            # Automated uv + LeafMachine3 ONNX installer and doctor check
 ├── run_pipeline.sh                                  # Master run-scoped shell orchestrator (Steps 01 to 06)
+├── resolve_packera_dubia_complex.sh                 # Automated 4-stage Packera dubia complex-resolution wrapper
 ├── main.py                                          # Unified Python CLI runner and preflight checker
 └── scripts/
     ├── core/
@@ -311,7 +315,8 @@ Packera_dubia_morphometrics/
     │   └── step02_figures.py                        # Step 02 300-DPI PNG plates (fig02a, fig02b) and native LM3 asset/overlay exporters
     ├── pipeline/
     │   ├── 01_voucher_harvester.py                  # Step 01 pipeline module alias
-    │   └── 02_segment_and_extract.py                # Step 02 read-only LM3 adapter and 3-stage asynchronous wave engine
+    │   ├── 02_segment_and_extract.py                # Step 02 read-only LM3 adapter and 3-stage asynchronous wave engine
+    │   └── resolve_focal_species_complex.py         # 4-stage focal species-complex runner and cross-stage report compiler
     ├── morphometrics/
     │   ├── 03_fourier_extractor.R                   # Step 03 LM3 EFA QC, homologized Momocs EFA, 32x360 ECT SVD, and basal/cauline medians
     │   ├── 04_gmm_morphotools.R                     # Step 04 RRPP allometry, canonical GMM, deme-blocked shrinkage CDA, OSR, and batch audit
@@ -335,18 +340,21 @@ Packera_dubia_morphometrics/
     │   ├── edaphic_fine_grain_utils.R               # SSURGO SDA, POLARIS 30 m, SOLUS100, 3DEP 30 m topography, and USGS SGMC extractors
     │   ├── 06_triage_dashboard_synthesis.R          # Step 06 OOF kappa consensus, 5-stage decision matrix, Markdown report, and offline HTML dashboard
     │   └── taxon_complex_discovery_utils.R          # Step 06 Leiden/Louvain modularity and Ward.D2 species-complex delimitation
-    └── tests/                                       # 250-test Python, SQLite handshake, R integration, and code-hygiene QA suite
+    └── tests/                                       # 222-test Python, SQLite handshake, warm-R integration, and code-hygiene QA suite
 ```
 
 ## Verification, Reproducibility, and Troubleshooting
 
 Developer workflow conventions, R script line-count budgets, and pre-commit QA rules are documented in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-### Running the Automated Audit Suite (`250` Tests)
+### Running the Automated Audit Suite (`222` Tests)
 
 ```bash
-# Run the centralized 250-test Python + R integration and code-hygiene runner
+# Run the centralized 222-test Python + warm-R integration and code-hygiene runner
 .venv/bin/python scripts/tests/run_audit.py
+
+# Run rapid Python-only preflight checks (~25s, skips Rscript workers cleanly)
+.venv/bin/python scripts/tests/run_audit.py --fast
 
 # Or run targeted suites via pytest / unittest
 .venv/bin/python -m unittest scripts/tests/test_code_hygiene.py

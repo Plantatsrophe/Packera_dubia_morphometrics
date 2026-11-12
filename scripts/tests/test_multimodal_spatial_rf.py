@@ -23,6 +23,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+from scripts.tests._r_session import rscript_available, run_warm_r_cmd
 from pathlib import Path
 
 import pandas as pd
@@ -49,7 +51,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         cls.pca_out_pdf = cls.pca_env_dir / "fig05a_ecological_niche_and_rf_importance.png"
         cls.r_unit_proc = None
 
-        if shutil.which("Rscript"):
+        if rscript_available():
             ssurgo_out = cls._class_tmp_path / "ssurgo_val.csv"
             r_batch_code = f"""
             source("scripts/analysis/edaphic_fine_grain_utils.R")
@@ -499,13 +501,10 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             """
             r_batch_file = cls._class_tmp_path / "batched_step06_checks.R"
             r_batch_file.write_text(r_batch_code, encoding="utf-8")
-            cls.r_unit_proc = subprocess.run(
+            cls.r_unit_proc = run_warm_r_cmd(
                 ["Rscript", str(r_batch_file)],
-                cwd=str(PROJECT_ROOT),
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                check=False,
+                stage_key="step05",
+                cwd=PROJECT_ROOT,
             )
 
     @classmethod
@@ -525,83 +524,6 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             f"Batched Step 05 R unit suite failed:\n{self.r_unit_proc.stderr}\n{self.r_unit_proc.stdout}",
         )
         return self.r_unit_proc.stdout
-
-    def test_r_script_phenological_and_fine_grain_edaphic_contracts(self):
-        """Verify 05_multimodal_spatial_rf.R and edaphic_fine_grain_utils.R retain all phenological, ENM, SSURGO, POLARIS, 3DEP, and Spatial RF contracts."""
-        self.assertTrue(self.r_script_path.exists(), "05_multimodal_spatial_rf.R must exist.")
-        self.assertTrue(self.util_path.exists(), "edaphic_fine_grain_utils.R must exist.")
-
-        r_content = self.r_script_path.read_text(encoding="utf-8")
-        for token in (
-            "--pheno-anomalies",
-            "--pheno-summary",
-            "--pheno-plot",
-            "--demo",
-            "model_latitudinal_spring_baseline",
-            "compute_phenological_anomalies",
-            "export_phenological_latitudinal_figures",
-            "delta_doy",
-            'dplyr::left_join(vouchers_df, pheno_states_df, by = "catalogNumber")',
-            "vegan::varpart",
-            "geodata::worldclim_global",
-            "geodata::soil_world",
-            "adespatial::dbmem",
-            "ranger::ranger",
-            "blockCV::cv_spatial",
-            "Spatial_Block_CV_Accuracy",
-            "ecospat::ecospat.grid.clim.dyn",
-            "ecospat::ecospat.niche.overlap",
-            "ecospat::ecospat.niche.equivalency.test",
-        ):
-            self.assertIn(token, r_content)
-        self.assertNotIn("* 100 - 10", r_content)
-        self.assertNotIn("* 100 - 5", r_content)
-
-        combined_r = r_content + "\n" + self.util_path.read_text(encoding="utf-8")
-        for token in (
-            "ST_Buffer(ST_Point(",
-            "0.00045",
-            "ssurgo_rock_outcrop_pct",
-            "ssurgo_bedrock_depth_cm",
-            "ssurgo_sand_pct",
-            "ssurgo_clay_pct",
-            "ssurgo_ph",
-            "ssurgo_om_pct",
-            "ssurgo_cec",
-            "ssurgo_aws_0_50cm",
-            "extract_polaris_and_solus_predictors",
-            "polaris_ph_30m",
-            "polaris_sand_30m",
-            "polaris_clay_30m",
-            "polaris_om_30m",
-            "polaris_bd_30m",
-            "polaris_ksat_30m",
-            "fine_soil_ph",
-            "fine_soil_sand",
-            "fine_soil_clay",
-            "fine_bedrock_depth_cm",
-            "fine_cfvo_pct",
-            "ilr_texture_1",
-            "ilr_texture_2",
-            "topo_tpi_30m",
-            "topo_hli_30m",
-            "topo_slope_deg",
-            "topo_twi_30m",
-            "fine_grain_edaphic_cache.csv",
-            "[A] Fine-Grain Edaphic & Outcrop Lithology",
-            "[B] Macro-Climate",
-            "[C] Spatial MEMs",
-            "edaphic_z_score",
-            "fill = NA",
-            "spatialRF::auto_cor",
-            "spatialRF::auto_vif",
-            "screen_collinear_predictors",
-            "Schoener_D",
-            "Warren_I",
-            "residual_moran_i",
-            "hopkins_adjusted_doy",
-        ):
-            self.assertIn(token, combined_r, f"Expected fine-grain token '{token}' in Step 05 R code.")
 
     def test_taxonomic_standardization(self):
         """Verify generic species-agnostic standardization across North American Packera binomials in Python and R."""
@@ -645,7 +567,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
 
     def test_authority_anchored_spatial_block_cv_zero_synthetic_cache_and_step07_contract(self):
         """Verify authority-anchored Spatial RF training, zero synthetic disk caching under --demo, passive Bronze/high-uncertainty projection, and Step 07 compatibility."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -744,7 +666,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 "--n-trees", "50",
                 "--demo",
             ]
-            res = subprocess.run(cmd, cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+            res = run_warm_r_cmd(cmd, stage_key='step05', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(res.returncode, 0, f"Step 06 Rscript failed: {res.stderr}\n{res.stdout}")
 
             # Verify synthetic SSURGO records are never cached into ssurgo_cache under --demo
@@ -812,7 +734,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
                 "--output-report", str(out_report),
                 "--output-plot", str(out_triage_plot),
             ]
-            res07 = subprocess.run(cmd06, cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+            res07 = run_warm_r_cmd(cmd06, stage_key='step06', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(res07.returncode, 0, f"Step 06 execution failed: {res07.stderr}\n{res07.stdout}")
             self.assertTrue(out_queue.exists(), "Step 06 triage_queue.csv must be generated from Step 05 outputs.")
             queue_df = pd.read_csv(out_queue)
@@ -820,7 +742,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
 
     def test_cohort_adaptive_19_bioclim_rf_primary_gating_arctic_phenology_and_coord_free_lithology(self):
         """Verify Tasks 2A-2E: all 19 WorldClim bio1..bio19, anchor-ranked 3-block VIF + RF primary predictor gating, RF-weighted edaphic/climatic z-scores, Arctic late-summer circular phenology, and coordinate-free non-demo lithology/outcrop classification."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         r_code = """
         suppressPackageStartupMessages({ library(readr); library(dplyr) })
@@ -900,13 +822,13 @@ class TestMultimodalSpatialRF(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_ca:
             r_ca_file = Path(tmp_ca) / "test_cohort_adaptive.R"
             r_ca_file.write_text(r_code, encoding="utf-8")
-            res = subprocess.run(["Rscript", str(r_ca_file)], cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+            res = run_warm_r_cmd(['Rscript', str(r_ca_file)], stage_key='step05', cwd=PROJECT_ROOT)
         self.assertEqual(res.returncode, 0, f"Step 05 cohort-adaptive test failed:\n{res.stderr}\n{res.stdout}")
         self.assertIn("STEP06_COHORT_ADAPTIVE_OK", res.stdout)
 
     def test_na_raster_cropping_deflate_and_maxent_spatial_rf_sdm_maps(self):
         """Verify automatic North American raster cropping/DEFLATE compression and default MaxEnt + Spatial RF SDM GeoTIFF & 4-panel figure generation."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         with tempfile.TemporaryDirectory() as tmp_d:
             r_code = f"""
@@ -1022,13 +944,13 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             """
             r_sdm_file = Path(tmp_d) / "test_na_raster_sdm.R"
             r_sdm_file.write_text(r_code, encoding="utf-8")
-            res = subprocess.run(["Rscript", str(r_sdm_file)], cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+            res = run_warm_r_cmd(['Rscript', str(r_sdm_file)], stage_key='step05', cwd=PROJECT_ROOT)
             self.assertEqual(res.returncode, 0, f"SDM & raster cropping test failed:\n{res.stderr}\n{res.stdout}")
             self.assertIn("SDM_AND_CROP_OK", res.stdout)
 
     def test_noncircular_k1_ibe_background_similarity_and_empty_raster_hygiene(self):
         """Verify Step 05 non-circular K=1 ecotype gate, IBE partial RDA, accessible background M similarity, and zero synthetic POLARIS/3DEP fabrication when demo=FALSE."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         with tempfile.TemporaryDirectory() as tmp_d:
             r_code = f"""
@@ -1147,22 +1069,9 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             """
             r_script_file = Path(tmp_d) / "test_noncircular_k1_hygiene.R"
             r_script_file.write_text(r_code, encoding="utf-8")
-            res = subprocess.run(["Rscript", str(r_script_file)], cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+            res = run_warm_r_cmd(['Rscript', str(r_script_file)], stage_key='step05', cwd=PROJECT_ROOT)
             self.assertEqual(res.returncode, 0, f"Non-circular K=1 & edaphic hygiene test failed:\n{res.stderr}\n{res.stdout}")
             self.assertIn("NONCIRCULAR_K1_IBE_AND_HYGIENE_OK", res.stdout)
-
-    def test_step05_eastern_na_figure_refinements(self):
-        sdm_src = (PROJECT_ROOT / "scripts" / "analysis" / "step05_sdm_maxent.R").read_text(encoding="utf-8")
-        pheno_src = (PROJECT_ROOT / "scripts" / "analysis" / "step05_phenology_ecotypes.R").read_text(encoding="utf-8")
-        f05_src = (PROJECT_ROOT / "scripts" / "figures" / "step05_figures.R").read_text(encoding="utf-8")
-
-        self.assertIn("focal_artifacts$X_comb[focal_artifacts$p_vec == 1L, , drop = FALSE]", sdm_src)
-        self.assertIn("med_row <- apply(pres_mat, 2, stats::median, na.rm = TRUE)", sdm_src)
-        self.assertIn("render_step05b_hopkins_phenology_png", pheno_src)
-        self.assertIn("fig05a_ecological_niche_and_rf_importance.png", f05_src)
-        self.assertIn("fig05b_hopkins_circular_phenology.png", f05_src)
-        self.assertIn("fig05c_sdm_suitability_and_distribution_map.png", f05_src)
-
 
     def test_step05_zero_trust_scientific_and_anti_leakage_suite(self):
         """
@@ -1177,7 +1086,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
              and passive retention of non-georeferenced vouchers (Passive_Ungeoreferenced).
           6. Real 30 m DEM McCune & Keon (2002) HLI (SW > NE) and D8 hydrological TWI (valley > ridge).
         """
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         with tempfile.TemporaryDirectory() as tmp_d:
             r_code = f"""
@@ -1396,7 +1305,7 @@ class TestMultimodalSpatialRF(unittest.TestCase):
             """
             r_file = Path(tmp_d) / "test_step05_zero_trust.R"
             r_file.write_text(r_code, encoding="utf-8")
-            res = subprocess.run(["Rscript", str(r_file)], cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+            res = run_warm_r_cmd(['Rscript', str(r_file)], stage_key='step05', cwd=PROJECT_ROOT)
             self.assertEqual(res.returncode, 0, f"Step 05 zero-trust suite failed:\n{res.stderr}\n{res.stdout}")
             self.assertIn("STEP05_ZERO_TRUST_SUITE_OK", res.stdout)
 

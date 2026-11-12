@@ -37,6 +37,8 @@ import tempfile
 from typing import Any, Dict, List, Tuple
 import unittest
 
+from scripts.tests._r_session import rscript_available, run_warm_r_cmd
+
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -217,17 +219,16 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 conn.close()
 
             # Verify R db_utils.R spatial R*Tree bounding-box helper against the same SQLite DB
-            rscript_bin = shutil.which("Rscript")
-            if not rscript_bin:
-                self.skipTest("Rscript not installed.")
-            r_expr = (
-                "source('scripts/core/db_utils.R'); "
-                f"df <- query_environmental_cache_sqlite(db_path = '{db_file.as_posix()}', "
-                "bbox = c(-80.5, -78.0, 35.0, 36.5)); "
-                "cat('R_BBOX_N=', nrow(df), 'CAT=', as.character(df$catalogNumber[1]), sep='')"
-            )
-            r_proc = subprocess.run([rscript_bin, "-e", r_expr], cwd=PROJECT_ROOT, capture_output=True, text=True, check=True)
-            self.assertIn("R_BBOX_N=1CAT=NCU-GEO-NC", r_proc.stdout)
+            if rscript_available():
+                r_expr = (
+                    "source('scripts/core/db_utils.R'); "
+                    f"df <- query_environmental_cache_sqlite(db_path = '{db_file.as_posix()}', "
+                    "bbox = c(-80.5, -78.0, 35.0, 36.5)); "
+                    "cat('R_BBOX_N=', nrow(df), 'CAT=', as.character(df$catalogNumber[1]), sep='')"
+                )
+                r_proc = run_warm_r_cmd(["Rscript", "-e", r_expr], stage_key="step03", cwd=PROJECT_ROOT)
+                self.assertEqual(r_proc.returncode, 0, msg=r_proc.stderr)
+                self.assertIn("R_BBOX_N=1CAT=NCU-GEO-NC", r_proc.stdout)
 
             # Verify optional DuckDB analytical attachment if duckdb is installed in .venv
             if importlib.util.find_spec("duckdb") is not None:
@@ -240,9 +241,9 @@ class TestSQLPipelineHandshake(unittest.TestCase):
 
     def test_contour_migration_and_step03_efa_zero_csv_reads(self) -> None:
         """Migrate CSVs + 120-vertex contours to SQLite, delete contour CSVs, and run Step 03 EFA purely from SQLite."""
-        rscript_bin = shutil.which("Rscript")
-        if not rscript_bin:
-            self.skipTest("Rscript not installed.")
+        if not rscript_available():
+            self.skipTest("Rscript not installed or fast mode enabled.")
+        rscript_bin = "Rscript"
 
         with tempfile.TemporaryDirectory() as tmp_d:
             ws = Path(tmp_d) / "ws"
@@ -384,7 +385,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 "--output-individual", str(out_ind_csv),
                 "--permutations", "19",
             ]
-            proc = subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=False)
+            proc = run_warm_r_cmd(cmd, stage_key='step03', cwd=PROJECT_ROOT, env=env, skip_figures=True)
             combined_log = proc.stdout + "\n" + proc.stderr
             self.assertEqual(proc.returncode, 0, f"Step 03 failed with empty contours_dir:\n{combined_log}")
             self.assertIn("from SQLite extracted_leaves", combined_log)
@@ -416,9 +417,9 @@ class TestSQLPipelineHandshake(unittest.TestCase):
 
     def test_multi_plant_and_non_georeferenced_retention_across_step06_and_step07(self) -> None:
         """Verify multi-plant (catalogNumber, plant_individual_id) & non-georeferenced retention across Step 06, Step 07, and v_integrative_triage_master."""
-        rscript_bin = shutil.which("Rscript")
-        if not rscript_bin:
-            self.skipTest("Rscript not installed.")
+        if not rscript_available():
+            self.skipTest("Rscript not installed or fast mode enabled.")
+        rscript_bin = "Rscript"
 
         with tempfile.TemporaryDirectory() as tmp_d:
             ws = Path(tmp_d) / "ws_master"
@@ -700,7 +701,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 "--permutations", "9",
                 "--n-trees", "50",
             ]
-            proc05 = subprocess.run(cmd_step05, cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=False)
+            proc05 = run_warm_r_cmd(cmd_step05, stage_key='step05', cwd=PROJECT_ROOT, env=env, skip_figures=True)
             self.assertEqual(proc05.returncode, 0, f"Step 05 failed:\n{proc05.stdout}\n{proc05.stderr}")
             self.assertTrue(conflict_csv.is_file())
 
@@ -727,7 +728,7 @@ class TestSQLPipelineHandshake(unittest.TestCase):
                 "--output-report", str(rev_report_md),
                 "--output-html", str(rev_html),
             ]
-            proc06 = subprocess.run(cmd_step06, cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=False)
+            proc06 = run_warm_r_cmd(cmd_step06, stage_key='step06', cwd=PROJECT_ROOT, env=env, skip_figures=True)
             combined06 = proc06.stdout + "\n" + proc06.stderr
             self.assertEqual(proc06.returncode, 0, f"Step 06 failed:\n{combined06}")
             self.assertIn("v_integrative_triage_master", combined06)

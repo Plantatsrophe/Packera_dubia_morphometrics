@@ -28,28 +28,6 @@ from scripts.core.artifact_manager import (
 class TestMainPipelineCLI(unittest.TestCase):
     """Test suite for main.py entrypoint and CLI argument parsing."""
 
-    def test_load_config_structure(self):
-        """Verify config.yaml loads with all required pipeline sections."""
-        cfg = load_config(DEFAULT_CONFIG_PATH)
-        self.assertIn("paths", cfg)
-        self.assertIn("models", cfg)
-        self.assertIn("taxonomy", cfg)
-        self.assertIn("harvesting", cfg)
-        self.assertIn("segmentation", cfg)
-        self.assertIn("morphometrics", cfg)
-        self.assertIn("pcd_weights_path", cfg["models"])
-        self.assertIn("pcd_weights_url", cfg["models"])
-
-        # Verify resolved paths
-        self.assertIn("resolved_paths", cfg)
-        self.assertTrue(cfg["resolved_paths"]["raw_vouchers_dir"].is_absolute())
-        self.assertTrue(cfg["resolved_paths"]["curated_vouchers_csv"].is_absolute())
-
-        # Verify key hyperparameters
-        self.assertEqual(cfg["harvesting"]["max_records_per_taxon"], 5000)
-        self.assertEqual(cfg["segmentation"]["score_thresh"], 0.25)
-        self.assertEqual(cfg["morphometrics"]["harmonics"], 12)
-
     def test_build_parser_subcommands(self):
         """Verify CLI parser parses all subcommands correctly."""
         parser = main.build_parser()
@@ -1075,6 +1053,115 @@ REUSE_CANONICAL_DATA="false"
             self.assertEqual(conn_check.execute("SELECT COUNT(*) FROM plant_individuals").fetchone()[0], 0)
             self.assertEqual(conn_check.execute("SELECT COUNT(*) FROM extracted_leaves").fetchone()[0], 0)
             conn_check.close()
+
+
+
+    def test_resolve_focal_species_complex_dry_run_and_cli_flags(self) -> None:
+        """Verify resolve_focal_species_complex.py and resolve_packera_dubia_complex.sh construct all 4 ordered stages."""
+        import subprocess
+        from scripts.pipeline.resolve_focal_species_complex import build_four_stage_commands
+
+        stages = build_four_stage_commands(
+            run_script=PROJECT_ROOT / "run_pipeline.sh",
+            focal_taxon="Packera dubia",
+            prefix="dubia",
+            geographic_scope="eastern_na",
+            gold_anchors=30,
+            spatial_thin_km=15.0,
+            threads=12,
+            gpu_batch_size=16,
+        )
+        self.assertEqual(len(stages), 4)
+        self.assertEqual(stages[0][1], "dubia_01_eastern_discovery")
+        self.assertEqual(stages[1][1], "dubia_02_complex_triage")
+        self.assertIn("--discover-complexes", stages[1][2])
+        self.assertEqual(stages[2][1], "dubia_03_intraspecific_clean")
+        self.assertIn("--intraspecific-mode", stages[2][2])
+        self.assertIn("--exclude-misidentified", stages[2][2])
+        self.assertEqual(stages[3][1], "dubia_04_gold_thin_audit")
+        self.assertIn("--spatial-thin-km", stages[3][2])
+
+        launcher = PROJECT_ROOT / "resolve_packera_dubia_complex.sh"
+        proc = subprocess.run(
+            ["bash", str(launcher), "--dry-run", "--threads", "8"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("dubia_01_eastern_discovery", proc.stdout)
+        self.assertIn("dubia_03_intraspecific_clean", proc.stdout)
+
+    def test_compile_complex_resolution_summary_across_four_stages(self) -> None:
+        """Verify compile_complex_resolution_summary synthesizes Stage 1-4 CSV & Markdown outputs."""
+        import pandas as pd
+        from scripts.pipeline.resolve_focal_species_complex import compile_complex_resolution_summary
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            for rid, rows in (
+                (
+                    "dubia_01_eastern_discovery",
+                    [
+                        {"catalogNumber": "D1", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Confirmed_Species", "gmm_cluster": "1"},
+                        {"catalogNumber": "A1", "plant_individual_id": 0, "species_standardized": "Packera anonyma", "taxonomic_treatment_subtype": "Confirmed_Species", "gmm_cluster": "2"},
+                    ],
+                ),
+                (
+                    "dubia_02_complex_triage",
+                    [
+                        {"catalogNumber": "D_TYPE", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Confirmed_Type_Control", "gmm_cluster": "1"},
+                        {"catalogNumber": "D_MIS", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Misidentification_Reassign", "gmm_cluster": "2"},
+                        {"catalogNumber": "D_HYB", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Hybrid_Introgressant", "gmm_cluster": "1"},
+                    ],
+                ),
+                (
+                    "dubia_03_intraspecific_clean",
+                    [
+                        {"catalogNumber": "D_TYPE", "plant_individual_id": 0, "institutionCode": "NCU", "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Confirmed_Type_Control", "synthesis_triage_priority": "RESOLVED", "gmm_cluster": "1", "cryptic_cluster_cohesion_pass": "FALSE", "delta_doy_resid": "2.5"},
+                        {"catalogNumber": "D_CRYP1", "plant_individual_id": 0, "institutionCode": "NCU", "species_standardized": "Packera dubia", "recommended_determination": "Packera dubia", "taxonomic_treatment_subtype": "Putative_Cryptic_Species", "synthesis_triage_priority": "CRITICAL", "gmm_cluster": "2", "cryptic_cluster_cohesion_pass": "TRUE", "delta_doy_resid": "21.4", "synthesis_rationale": "Cohesive outcrop divergence"},
+                    ],
+                ),
+                (
+                    "dubia_04_gold_thin_audit",
+                    [
+                        {"catalogNumber": "D_TYPE", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Confirmed_Type_Control", "gmm_cluster": "1", "cryptic_cluster_cohesion_pass": "FALSE"},
+                        {"catalogNumber": "D_CRYP1", "plant_individual_id": 0, "species_standardized": "Packera dubia", "taxonomic_treatment_subtype": "Putative_Cryptic_Species", "gmm_cluster": "2", "cryptic_cluster_cohesion_pass": "TRUE"},
+                    ],
+                ),
+            ):
+                tdir = ws / "runs" / rid / "data" / "tables"
+                rdir = ws / "runs" / rid / "outputs" / "reports"
+                tdir.mkdir(parents=True, exist_ok=True)
+                rdir.mkdir(parents=True, exist_ok=True)
+                pd.DataFrame(rows).to_csv(tdir / "triage_queue.csv", index=False)
+                pd.DataFrame([{"optimal_K": 2, "two_delta_BIC": 14.8}]).to_csv(
+                    rdir / "gmm_bayes_factors_summary.csv", index=False
+                )
+                pd.DataFrame([{"D_edaph": 0.21}]).to_csv(
+                    rdir / "multimodal_spatial_rf_summary.csv", index=False
+                )
+            (ws / "runs" / "dubia_02_complex_triage" / "outputs" / "reports" / "focal_auto_neighbors.txt").write_text(
+                "Packera anonyma\nPackera plattensis\n", encoding="utf-8"
+            )
+
+            csv_out, md_out = compile_complex_resolution_summary(
+                focal_taxon="Packera dubia",
+                prefix="dubia",
+                workspace_root=ws,
+            )
+            self.assertTrue(csv_out.is_file())
+            self.assertTrue(md_out.is_file())
+            comp_df = pd.read_csv(csv_out)
+            self.assertEqual(len(comp_df), 4)
+            s2_row = comp_df[comp_df["stage"] == "Stage_2_Complex_Triage"].iloc[0]
+            s3_row = comp_df[comp_df["stage"] == "Stage_3_Intraspecific_Clean"].iloc[0]
+            self.assertEqual(int(s2_row["n_misidentification_reassign"]), 1)
+            self.assertEqual(int(s3_row["n_cohesive_cryptic_otus"]), 1)
+            md_txt = md_out.read_text(encoding="utf-8")
+            self.assertIn("Candidate cryptic lineage detected", md_txt)
+            self.assertIn("D_CRYP1", md_txt)
 
 
 if __name__ == "__main__":

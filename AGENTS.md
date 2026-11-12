@@ -16,7 +16,7 @@ I define here the non-negotiable architectural and mathematical invariants along
 * **Dual Virtualenv Boundaries:**
   * `.venv`: Primary orchestration (`main.py`, `run_pipeline.sh`), environmental layer downloads, and DuckDB/SQLite management.
   * `.venv_LM3` (`LeafMachine3/.venv`): LeafMachine3 ONNX Runtime isolation (YOLO26x, UNet++ v9, Ruler solver, ECT, and visual product rendering), relying strictly on standard-library `sqlite3`.
-* **Verification Gate:** Verify code hygiene and cross-stage contracts via `.venv/bin/python scripts/tests/run_audit.py`.
+* **Verification Gate:** Verify code hygiene and cross-stage contracts via `.venv/bin/python scripts/tests/run_audit.py` (or `.venv/bin/python scripts/tests/run_audit.py --fast` for rapid Python-only iteration before running the full warm-R audit).
 
 ## 2. Refactored Module Ownership Map
 
@@ -27,11 +27,11 @@ Parallel work must maintain file-disjoint ownership across the active directory 
 | **`scripts/core/`** | `config.py`, `db.py`, `db_schema.py`, `db_utils.R`, `harvester.py`, `taxonomy_authority.py`, `epa_ecoregions.py`, `usda_plants_ranges.py`, `artifact_manager.py`, `logger.py` | Configuration schemas, SQLite WAL engine (`20261121`), dynamic migrations, atomic CSV bridge, GBIF/iDigBio harvester, EPA Level III ecoregions, USDA PLANTS county ranges, and authority engine. |
 | **`scripts/data_prep/`** | `01_voucher_harvester.py`, `download_environmental_layers.py` | Step 01 CLI parser and occurrence harvester; automated pre-Step-05 SOLUS100, USGS SGMC `.gpkg`, and cohort 3DEP 30 m DEM downloader. |
 | **`scripts/vision/`** | `configure_leafmachine3.py`, `lm3_compat.py`, `lm3_data_loader.py`, `lm3_inference_engines.py`, `leaf_geometry_utils.py`, `organ_crown_metrics.py`, `capitulum_phenology_classifier.py`, `step02_figures.py` | LeafMachine3 config, ONNX Runtime engines, DBSCAN ramet clustering, anatomical `leaf_zone` classification, petiole/scape metrics, optical phenology, and Step 02 300-DPI PNG plates + native LM3 asset caches. |
-| **`scripts/pipeline/`** | `01_voucher_harvester.py`, `02_segment_and_extract.py` | Step 01 pipeline alias; Step 02 read-only LeafMachine3 ingestion adapter, 3-stage wave engine, $32 \times 360$ ECT export, and per-voucher SQLite transactions. |
+| **`scripts/pipeline/`** | `01_voucher_harvester.py`, `02_segment_and_extract.py`, `resolve_focal_species_complex.py` | Step 01 pipeline alias; Step 02 read-only LeafMachine3 ingestion adapter, 3-stage wave engine, $32 \times 360$ ECT export, and per-voucher SQLite transactions; 4-stage focal species-complex orchestrator. |
 | **`scripts/morphometrics/`** | `03_fourier_extractor.R`, `04_gmm_morphotools.R`, `authority_weighting_utils.R`, `dissected_leaf_utils.R`, `fourier_parallel_utils.R`, `plasticity_mitigation_utils.R`, `pub_figures_utils.R`, `pub_ecoregion_manova_utils.R`, `pub_synthesis_plates.R` | Step 03 LM3 EFA QC (`<= 800` lines), homologized EFA, $32 \times 360$ ECT SVD, basal/cauline OTU medians; Step 04 (`<= 650` lines) deme plasticity mitigation, `RRPP` allometry, Stratified Authority Pool Cap, canonical GMM, shrinkage CDA, OSR, and EPA Ecoregion MANOVA. |
 | **`scripts/figures/`** | `theme_packera_pub.R`, `step03_figures.R`, `step04_figures.R`, `step05_figures.R`, `step06_figures.R` | Modular `ggplot2` + `patchwork` + `sf` 300-DPI PNG figure suite (`fig03a` to `fig06b`), 60-taxon hollow symbol/palette scaling, ICN rank-aware formatting, and `EPSG:5070` projected mapping. |
 | **`scripts/analysis/`** | `05_multimodal_spatial_rf.R`, `step05_phenology_ecotypes.R`, `step05_sdm_maxent.R`, `edaphic_fine_grain_utils.R`, `06_triage_dashboard_synthesis.R`, `taxon_complex_discovery_utils.R` | Step 05 19-BioClim and 0 to 15 cm rhizosphere Spatial RF, circular Hopkins phenology, and MaxEnt SDMs; Step 06 5-stage consensus triage, offline HTML dashboard, and Leiden/Ward.D2 complex discovery (`<= 800` lines). |
-| **`scripts/tests/`** | `run_audit.py` + 15 `test_*.py` modules | 250-test unit, SQLite handshake, R statistical integration, figure contract, and static code-hygiene suite. |
+| **`scripts/tests/`** | `run_audit.py`, `_r_session.py` + 13 `test_*.py` modules | 222-test unit, SQLite handshake, persistent warm-R statistical integration, figure contract, and static code-hygiene suite. |
 
 ## 3. Two-Tier Storage Architecture and Relational Contracts
 

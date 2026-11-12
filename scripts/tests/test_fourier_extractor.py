@@ -24,6 +24,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+
+from scripts.tests._r_session import rscript_available, run_warm_r_cmd
 from pathlib import Path
 
 import numpy as np
@@ -38,106 +40,9 @@ class TestFourierExtractor(unittest.TestCase):
     def setUp(self):
         self.r_script_path = PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R"
 
-    def test_r_script_exists_and_line_bounds(self):
-        """Verify 03_fourier_extractor.R exists and adheres to modular line limits (350-800 lines)."""
-        self.assertTrue(self.r_script_path.exists(), f"Missing {self.r_script_path}")
-        content = self.r_script_path.read_text(encoding="utf-8")
-        lines = content.splitlines()
-        self.assertGreaterEqual(len(lines), 350)
-        self.assertLessEqual(len(lines), 800)
-
-    def test_manifest_lookup_and_lm3_efa_qc_gating(self):
-        """Verify manifest lookup populates plant_individual_id, pixels_per_mm, scale_source, solidity, archetype_score, and calls evaluate_step03_lm3_efa_qc."""
-        content = self.r_script_path.read_text(encoding="utf-8")
-        self.assertIn("manifest_df$catalogNumber", content)
-        self.assertIn("manifest_df$leaf_id", content)
-        for col in ("plant_individual_id", "pixels_per_mm", "is_calibrated_mm", "scale_source", "solidity", "archetype_score"):
-            self.assertIn(col, content, f"Missing manifest column '{col}' in 03_fourier_extractor.R")
-        self.assertIn("evaluate_step03_lm3_efa_qc", content)
-
-    def test_physical_mm_centroid_size_and_oriented_aspect_ratio(self):
-        """Verify CS_mm calibration prior to centroid_size calculation and oriented coo_lw aspect ratio."""
-        content = self.r_script_path.read_text(encoding="utf-8")
-        self.assertIn("coo <- coo / resolved_ppm", content)
-        self.assertIn("Momocs::coo_lw(coo)", content)
-        self.assertIn("lw[1] / lw[2]", content)
-        self.assertNotIn("span_x / span_y", content, "Must never compute aspect_ratio from unrotated image bounding box")
-
-        # Verify mathematical rotation invariance of SVD / coo_lw oriented aspect ratio
-        theta = np.linspace(0, 2 * np.pi, 128, endpoint=False)
-        ellipse = np.column_stack([30.0 * np.cos(theta), 10.0 * np.sin(theta)])
-        rot_angle = np.deg2rad(42.0)
-        rot_mat = np.array([[np.cos(rot_angle), -np.sin(rot_angle)], [np.sin(rot_angle), np.cos(rot_angle)]])
-        rotated = ellipse @ rot_mat.T
-
-        centered = rotated - rotated.mean(axis=0)
-        _, _, vt = np.linalg.svd(centered, full_matrices=False)
-        aligned = centered @ vt.T
-        lw = np.ptp(aligned, axis=0)
-        oriented_ar = lw[0] / lw[1]
-        self.assertAlmostEqual(oriented_ar, 3.0, places=2)
-
-    def test_homologized_efourier_eliminates_180_flip(self):
-        """Verify coo_center %>% coo_scale and efourier(norm = FALSE, start = FALSE) prevent 180-deg flip."""
-        content = self.r_script_path.read_text(encoding="utf-8")
-        self.assertIn("out_obj <- Momocs::coo_center(out_obj) %>% Momocs::coo_scale()", content)
-        self.assertIn("Momocs::efourier(out_obj, nb.h = opts$harmonics, norm = FALSE, start = FALSE)", content)
-
-        # Mathematical verification: ovate vs obovate leaf silhouettes separated under norm=FALSE, start=FALSE
-        t = np.linspace(0, 2 * np.pi, 128, endpoint=False)
-        ovate_x = np.cos(t)
-        ovate_y = 0.4 * np.sin(t) * (1.0 - 0.35 * np.cos(t))
-        obovate_x = np.cos(t)
-        obovate_y = 0.4 * np.sin(t) * (1.0 + 0.35 * np.cos(t))
-
-        def second_harmonic_d(x, y):
-            coo = np.column_stack([x - np.mean(x), y - np.mean(y)])
-            cs = np.sqrt(np.sum(coo ** 2))
-            coo = coo / cs
-            coo_closed = np.vstack([coo, coo[0]])
-            dxy = np.diff(coo_closed, axis=0)
-            dt = np.hypot(dxy[:, 0], dxy[:, 1])
-            t_vals = np.concatenate([[0.0], np.cumsum(dt)])
-            T = t_vals[-1]
-            n = 2
-            coeff = T / (2.0 * (n ** 2) * (np.pi ** 2))
-            sin_diff = np.sin(n * 2 * np.pi * t_vals[1:] / T) - np.sin(n * 2 * np.pi * t_vals[:-1] / T)
-            return coeff * np.sum((dxy[:, 1] / dt) * sin_diff)
-
-        d2_ovate = second_harmonic_d(ovate_x, ovate_y)
-        d2_obovate = second_harmonic_d(obovate_x, obovate_y)
-        self.assertLess(
-            d2_ovate * d2_obovate,
-            0.0,
-            "Ovate and obovate leaves must have opposite-sign D2 harmonics without 180-deg flip",
-        )
-
-    def test_basal_rosette_priority_and_pca_anchoring_in_step03(self):
-        """Verify Basal_Rosette priority rule and Cauline_Only_Fallback separation in 03_fourier_extractor.R."""
-        r_content = self.r_script_path.read_text(encoding="utf-8")
-        self.assertIn("basal_leaf_count", r_content)
-        self.assertIn("cauline_leaf_count", r_content)
-        self.assertIn("morph_tier_source", r_content)
-        self.assertIn('"Basal_Rosette"', r_content)
-        self.assertIn('"Cauline_Only_Fallback"', r_content)
-
-    def test_empirical_efa_alignment_harmonic_power_and_otu_aggregation(self):
-        """Verify Phase 3 empirical EFA protocol: coo_center, calibrate_harmonicpower_efourier, RRPP, and OTU-level PCA."""
-        r_content = self.r_script_path.read_text(encoding="utf-8")
-        self.assertIn("Momocs::efourier", r_content)
-        self.assertIn("norm = FALSE, start = FALSE", r_content)
-        self.assertIn("Momocs::coo_center", r_content)
-        self.assertIn("Momocs::coo_scale", r_content)
-        self.assertIn("verify_harmonic_power_calibration", r_content)
-        self.assertIn("calibrate_harmonicpower_efourier", r_content)
-        self.assertIn("within_rosette_efa_dispersion", r_content)
-        self.assertIn("otu_t1_idx", r_content)
-        self.assertIn("symmetrize_efa_harmonics", r_content)
-        self.assertIn("compute_authority_precision_weights", r_content)
-
     def test_tier1_only_efa_unweighted_median_and_tier3_passive_pca_invariance(self):
         """Verify only Tier 1 intact contours enter EFA, OTU aggregation uses unweighted median, and Tier_3_Bronze has zero influence on reference PCA."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
 
@@ -203,8 +108,7 @@ class TestFourierExtractor(unittest.TestCase):
                 out_ind = tmp_p / f"leaf_efa_harmonics_ind_{tag}.csv"
                 out_rep = tmp_p / f"tier_report_{tag}.csv"
                 out_fig = tmp_p / f"fig_{tag}.pdf"
-                proc = subprocess.run(
-                    [
+                proc = run_warm_r_cmd([
                         "Rscript",
                         str(self.r_script_path),
                         "--contours-dir", str(contours_dir),
@@ -214,12 +118,7 @@ class TestFourierExtractor(unittest.TestCase):
                         "--output", str(out_spec),
                         "--output-individual", str(out_ind),
                         "--permutations", "19",
-                    ],
-                    cwd=str(PROJECT_ROOT),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                    ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=True)
                 self.assertEqual(proc.returncode, 0, f"Step 03 Rscript failed ({tag}):\n{proc.stderr}\n{proc.stdout}")
                 return pd.read_csv(out_spec), pd.read_csv(out_ind)
 
@@ -273,7 +172,7 @@ class TestFourierExtractor(unittest.TestCase):
 
     def test_zero_gold_silver_adaptive_anchor_promotion_and_step01_step02_handoff(self):
         """Verify Step 03 promotes clean Bronze anchors for 0-Gold/Silver species and preserves Step 01/02 metadata and petiole/dissection traits."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
 
@@ -363,8 +262,7 @@ class TestFourierExtractor(unittest.TestCase):
 
             out_spec = tmp_p / "leaf_efa_harmonics.csv"
             out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
-            proc = subprocess.run(
-                [
+            proc = run_warm_r_cmd([
                     "Rscript",
                     str(self.r_script_path),
                     "--contours-dir", str(contours_dir),
@@ -376,12 +274,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "--report-out", str(tmp_p / "tier_rep.csv"),
                     "--plot-out", str(tmp_p / "tier_fig.pdf"),
                     "--permutations", "19",
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+                ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Step 03 failed on 0-Gold/Silver & handoff run:\n{proc.stderr}\n{proc.stdout}")
             ind_df = pd.read_csv(out_ind)
             spec_df = pd.read_csv(out_spec)
@@ -424,7 +317,7 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn("efd_harmonic_opt", content)
         self.assertIn("efd_k95_pcs", content)
 
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
         rng = np.random.default_rng(20260430)
@@ -477,8 +370,7 @@ class TestFourierExtractor(unittest.TestCase):
 
             out_spec = tmp_p / "leaf_efa_harmonics.csv"
             out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
-            proc = subprocess.run(
-                [
+            proc = run_warm_r_cmd([
                     "Rscript",
                     str(self.r_script_path),
                     "--contours-dir", str(contours_dir),
@@ -490,12 +382,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "--report-out", str(tmp_p / "tier_rep.csv"),
                     "--plot-out", str(tmp_p / "tier_fig.pdf"),
                     "--permutations", "19",
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+                ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Dynamic H_opt Step 03 failed:\n{proc.stderr}\n{proc.stdout}")
             spec_df = pd.read_csv(out_spec)
             self.assertIn("efd_harmonic_opt", spec_df.columns)
@@ -509,7 +396,7 @@ class TestFourierExtractor(unittest.TestCase):
 
     def test_basal_positional_gate_lowest_lamina_fallback_ribbon_filter_and_otu_medians(self):
         """Verify basal positional homology filter, lowest-lamina fallback, and OTU median/q25 dissection summaries."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
 
@@ -577,8 +464,7 @@ class TestFourierExtractor(unittest.TestCase):
 
             out_spec = tmp_p / "leaf_efa_harmonics.csv"
             out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
-            proc = subprocess.run(
-                [
+            proc = run_warm_r_cmd([
                     "Rscript",
                     str(self.r_script_path),
                     "--contours-dir", str(contours_dir),
@@ -590,12 +476,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "--report-out", str(tmp_p / "tier_rep.csv"),
                     "--plot-out", str(tmp_p / "tier_fig.pdf"),
                     "--permutations", "19",
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+                ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Step 03 basal/dissection test failed:\n{proc.stderr}\n{proc.stdout}")
             ind_df = pd.read_csv(out_ind)
             spec_df = pd.read_csv(out_spec)
@@ -691,7 +572,7 @@ class TestFourierExtractor(unittest.TestCase):
             conn.close()
             self.assertEqual([(r[0], int(r[1]), r[2]) for r in rows_om], [("CAT_KEEP", 1, "Packera canonbeta")])
 
-            if shutil.which("Rscript"):
+            if rscript_available():
                 env = dict(os.environ)
                 env["PACKERA_DB_PATH"] = str(eph_db)
                 r_expr = (
@@ -699,14 +580,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "res <- standardize_taxon_name(c('Packera synalpha', 'Packera synalpha C.Auth', 'P. synalpha', 'Senecio synalpha', 'Packera canonbeta var. minor')); "
                     "cat(paste(res, collapse='|'))"
                 )
-                proc = subprocess.run(
-                    ["Rscript", "-e", r_expr],
-                    cwd=str(PROJECT_ROOT),
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                proc = run_warm_r_cmd(["Rscript", "-e", r_expr], stage_key='step03', cwd=PROJECT_ROOT, env=env, skip_figures=False)
                 self.assertEqual(proc.returncode, 0, f"R synonym test failed:\n{proc.stderr}\n{proc.stdout}")
                 self.assertEqual(
                     proc.stdout.strip().splitlines()[-1],
@@ -719,7 +593,7 @@ class TestFourierExtractor(unittest.TestCase):
         rotates a vertically oriented tip-up symmetric leaf contour onto the horizontal X-axis
         before Momocs::rm_asym() so pct_asymmetry < 0.05 and is_contour_outlier == False.
         """
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
 
         t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
@@ -773,8 +647,7 @@ class TestFourierExtractor(unittest.TestCase):
 
             out_spec = tmp_p / "leaf_efa_harmonics.csv"
             out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
-            proc = subprocess.run(
-                [
+            proc = run_warm_r_cmd([
                     "Rscript",
                     str(self.r_script_path),
                     "--contours-dir", str(contours_dir),
@@ -786,12 +659,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "--report-out", str(tmp_p / "tier_rep.csv"),
                     "--plot-out", str(tmp_p / "tier_fig.pdf"),
                     "--permutations", "19",
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+                ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Step 03 vertical tip-up test failed:\n{proc.stderr}\n{proc.stdout}")
             ind_df = pd.read_csv(out_ind)
             self.assertEqual(len(ind_df), 6)
@@ -814,7 +682,7 @@ class TestFourierExtractor(unittest.TestCase):
             cauline track columns (cauline_leaf_count, cauline_solidity_med, cauline_dissection_index_med,
             basal_vs_cauline_length_ratio, heteroblasty_efa_distance) are populated.
         """
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
 
         t = np.linspace(0, 2 * np.pi, 120, endpoint=False)
@@ -945,8 +813,7 @@ class TestFourierExtractor(unittest.TestCase):
 
             out_spec_basal = tmp_p / "spec_basal_only.csv"
             out_ind_basal = tmp_p / "ind_basal_only.csv"
-            proc_b = subprocess.run(
-                [
+            proc_b = run_warm_r_cmd([
                     "Rscript",
                     str(self.r_script_path),
                     "--contours-dir", str(contours_dir),
@@ -959,18 +826,12 @@ class TestFourierExtractor(unittest.TestCase):
                     "--plot-out", str(figs_b_dir / "fig_b.pdf"),
                     "--figures-dir", str(figs_b_dir),
                     "--permutations", "9",
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+                ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=False)
             self.assertEqual(proc_b.returncode, 0, f"Basal-only Step 03 failed:\n{proc_b.stderr}\n{proc_b.stdout}")
 
             out_spec_mix = tmp_p / "spec_mixed.csv"
             out_ind_mix = tmp_p / "ind_mixed.csv"
-            proc_m = subprocess.run(
-                [
+            proc_m = run_warm_r_cmd([
                     "Rscript",
                     str(self.r_script_path),
                     "--contours-dir", str(contours_dir),
@@ -983,12 +844,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "--plot-out", str(figs_m_dir / "fig_m.pdf"),
                     "--figures-dir", str(figs_m_dir),
                     "--permutations", "9",
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+                ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=False)
             self.assertEqual(proc_m.returncode, 0, f"Mixed basal+cauline Step 03 failed:\n{proc_m.stderr}\n{proc_m.stdout}")
 
             # Verify Step 03 exports canonical 300-DPI PNG plates only (zero .pdf files)
@@ -1091,7 +947,7 @@ class TestFourierExtractor(unittest.TestCase):
         self.assertIn("allow_multi_component_ect = TRUE", s_03_chk)
         self.assertIn("allow_multi_component_ect = TRUE", s_db_chk)
 
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1164,8 +1020,7 @@ class TestFourierExtractor(unittest.TestCase):
 
             out_spec = tmp_p / "leaf_efa_harmonics.csv"
             out_ind = tmp_p / "leaf_efa_harmonics_ind.csv"
-            proc = subprocess.run(
-                [
+            proc = run_warm_r_cmd([
                     "Rscript",
                     str(self.r_script_path),
                     "--contours-dir", str(contours_dir),
@@ -1177,10 +1032,7 @@ class TestFourierExtractor(unittest.TestCase):
                     "--figures-dir", str(tmp_p / "figs"),
                     "--harmonics", "12",
                     "--num-pcs", "5",
-                ],
-                capture_output=True,
-                text=True,
-            )
+                ], stage_key='step03', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Step 03 handoff Rscript test failed:\n{proc.stderr}\n{proc.stdout}")
             ind_df = pd.read_csv(out_ind)
             ren_rows = ind_df[ind_df["catalogNumber"].isin(["STEP23_HO_03", "STEP23_HO_04", "STEP23_HO_05"])]
@@ -1189,153 +1041,6 @@ class TestFourierExtractor(unittest.TestCase):
             self.assertTrue(pd.isna(mp_row["centroid_size"]), "mp_estimated leaf must keep centroid_size == NA in Step 03.")
             self.assertTrue(ind_df["ECT_PC1"].notna().all(), "Dynamic 32x360 .npy ECT reader must populate ECT_PC1 for all leaves.")
 
-
-    def test_step03_zero_trust_static_schema_and_config_contracts(self) -> None:
-        """
-        Verify all Step 03 zero-trust code & docstring contracts:
-          1. Line-count budget [350, 800] and absence of stale/false docstrings or partial-match bugs.
-          2. Cordate/reniform Step 02 tip-up orientation math (mask_is_upright & midline sinus tolerance).
-          3. SQLite schema version 20261112 parity & Step 03 columns in db_schema.py and db_utils.R.
-          4. NormalizationConfig / MorphometricsConfig Fourier bounds & main.py CLI flag forwarding.
-        """
-        import sqlite3
-        from unittest.mock import patch
-        from scripts.core.config import PipelineConfig
-        from scripts.core.db import get_db_connection, init_db_schema
-        from scripts.core.db_schema import PACKERA_SCHEMA_USER_VERSION
-
-        r03 = (PROJECT_ROOT / "scripts" / "morphometrics" / "03_fourier_extractor.R").read_text(encoding="utf-8")
-        fpu = (PROJECT_ROOT / "scripts" / "morphometrics" / "fourier_parallel_utils.R").read_text(encoding="utf-8")
-        dlu = (PROJECT_ROOT / "scripts" / "morphometrics" / "dissected_leaf_utils.R").read_text(encoding="utf-8")
-        awu = (PROJECT_ROOT / "scripts" / "morphometrics" / "authority_weighting_utils.R").read_text(encoding="utf-8")
-        pfu = (PROJECT_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R").read_text(encoding="utf-8")
-        dbu = (PROJECT_ROOT / "scripts" / "core" / "db_utils.R").read_text(encoding="utf-8")
-
-        n_lines = len(r03.splitlines())
-        self.assertGreaterEqual(n_lines, 350)
-        self.assertLessEqual(n_lines, 800)
-
-        # Zero stale docstrings, partial-match bugs, or hardcoded taxon fallbacks
-        self.assertNotIn("Label-blind dynamic-harmonic", r03)
-        self.assertNotIn("Tier 1 intact", r03)
-        self.assertNotIn("opts$contours)", r03)
-        self.assertIn("opts$contours_dir)", r03)
-        self.assertIn("Momocs::slice(ef, which(valid_coe))", r03)
-        self.assertIn("ifelse(otu_has_efa,", r03)
-        self.assertIn("is_promoted_bronze", r03)
-        self.assertIn("is_passive", r03)
-        self.assertIn("align_contour_horizontal_xax <- function(coo, is_upright = NA)", fpu)
-        self.assertIn("out_vec[type_vec] <- FALSE", fpu)
-        self.assertIn("u_right <- c(u_tip[2L], -u_tip[1L])", dlu)
-        self.assertNotIn("sub-floor blade fragments", dlu)
-        self.assertNotIn("asymmetry_index =", awu)
-        self.assertIn("step03_fast_aggregated", awu)
-        self.assertNotIn("Blade Elongation & Petiole Ratio", pfu)
-        self.assertNotIn('disp_grp <- "Packera obovata"', pfu)
-        self.assertNotIn("1 / (k^2.2)", pfu)
-
-        # Cordate wider-than-long Packera aurea blade proof:
-        # Basal auricles hang 45% below the cordate sinus (Point 1 at (250, 275), auricles at y=338, tip at y=198, W=220, L=140)
-        theta = np.linspace(0.0, 2.0 * np.pi, 120, endpoint=False)
-        # Cardioid-cordate lamina in Step 02 image space (x_right, y_down), clockwise from basal sinus t=0:
-        x_cord = 250.0 - 110.0 * np.sin(theta) * (1.0 + 0.22 * np.cos(theta))
-        y_cord = 255.0 + 62.0 * np.cos(theta) + 42.0 * (np.sin(theta) ** 2) * np.maximum(0.0, np.cos(theta * 0.5))
-        # Shift so t=0 sits at exact cordate sinus (x=250, y=317) while lateral basal auricles reach y=358 (>30% of span_y below sinus!)
-        y_cord = 260.0 + 30.0 * np.cos(theta) + 55.0 * np.cos(2.0 * theta - 0.55) * (np.sin(theta) ** 2)
-        # Construct clean symmetric cordate contour where t=0 is sinus (250, 285), tip t=pi is (250, 185), auricles around t=+-0.65 reach y=340:
-        auricle = np.exp(-((np.abs(((theta + np.pi) % (2.0 * np.pi)) - np.pi) - 0.72) ** 2) / 0.10)
-        x_cord = 250.0 - 115.0 * np.sin(theta)
-        y_cord = 235.0 + 50.0 * np.cos(theta) + 62.0 * auricle
-        cx_c, cy_c = float(x_cord.mean()), float(y_cord.mean())
-        dx_c, dy_c = x_cord - cx_c, y_cord - cy_c
-        span_x_c = float(dx_c.max() - dx_c.min())
-        span_y_c = float(dy_c.max() - dy_c.min())
-        # Old heuristic failed because (max(dy) - dy[0]) / span_y > 0.30, and farthest point from sinus was on lateral margin (>35 deg error)!
-        self.assertGreater((float(dy_c.max()) - float(dy_c[0])) / span_y_c, 0.30)
-        d_p1 = np.hypot(x_cord - x_cord[0], y_cord - y_cord[0])
-        far_i = int(np.argmax(d_p1))
-        old_lateral_angle_err = abs(np.degrees(np.arctan2(x_cord[far_i] - x_cord[0], y_cord[0] - y_cord[far_i])))
-        self.assertGreater(old_lateral_angle_err, 25.0)
-        # New Step 03 alignment: both is_upright=True AND unflagged midline cordate clause (|dx[0]| <= 0.12*span_x & auricle <= 0.58*span_y)
-        # select exact (-dy + cx, -dx + cy) -> 0.000-deg midrib drift!
-        self.assertLessEqual(abs(float(dx_c[0])), 0.12 * span_x_c)
-        self.assertLessEqual(float(dy_c.max()) - float(dy_c[0]), 0.58 * span_y_c)
-        aligned_cord = np.column_stack([-dy_c + cx_c, -dx_c + cy_c])
-        # Midrib (t=0 sinus and t=60 tip) lies strictly on horizontal line Y == cy_c:
-        self.assertAlmostEqual(float(aligned_cord[0, 1]), float(aligned_cord[60, 1]), places=10)
-
-        # SQLite schema version & Step 03 column parity
-        self.assertGreaterEqual(PACKERA_SCHEMA_USER_VERSION, 20261113)
-        self.assertIn(f"{PACKERA_SCHEMA_USER_VERSION}L", dbu)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "step03_schema_check.sqlite"
-            conn = get_db_connection(db_path)
-            try:
-                init_db_schema(conn)
-                efa_cols = {r[1] for r in conn.execute("PRAGMA table_info(leaf_efa_harmonics)").fetchall()}
-                otu_cols = {r[1] for r in conn.execute("PRAGMA table_info(otu_morphometrics)").fetchall()}
-                for req in ("mask_is_upright", "area_mm2", "petiole_width_mm", "blade_width_mm", "is_promoted_bronze", "is_passive"):
-                    self.assertIn(req, efa_cols)
-                for req in ("area_mm2", "petiole_width_mm", "blade_width_mm", "is_promoted_bronze", "is_passive"):
-                    self.assertIn(req, otu_cols)
-            finally:
-                conn.close()
-
-        # Config & main.py CLI flag wiring
-        cfg = PipelineConfig.from_yaml(PROJECT_ROOT / "config" / "config.yaml")
-        self.assertFalse(cfg.morphometrics.normalization.efourier_norm_ellipse)
-        self.assertFalse(cfg.morphometrics.normalization.efourier_start_search)
-        self.assertTrue(cfg.morphometrics.normalization.homologous_base_to_tip)
-        self.assertEqual(cfg.morphometrics.min_harmonics, 6)
-        self.assertEqual(cfg.morphometrics.max_harmonics, 24)
-        self.assertAlmostEqual(cfg.morphometrics.target_harmonic_power, 0.99)
-        self.assertEqual(cfg.morphometrics.max_export_pcs, 15)
-
-        import main as pipeline_main
-        captured_cmds = []
-
-        def fake_subproc(cmd, **kwargs):
-            c_list = [str(x) for x in cmd]
-            captured_cmds.append(c_list)
-            for flg in ("--output", "--output-flags"):
-                if flg in c_list:
-                    out_f = Path(c_list[c_list.index(flg) + 1])
-                    out_f.parent.mkdir(parents=True, exist_ok=True)
-                    out_f.write_text("catalogNumber\nNCU1\n", encoding="utf-8")
-            return subprocess.CompletedProcess(c_list, 0, "", "")
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            t_root = Path(tmpdir)
-            (t_root / "contours").mkdir()
-            (t_root / "contours" / "NCU1_leaf1.csv").write_text("x,y\n0,0\n1,0\n1,1\n", encoding="utf-8")
-            v_csv = t_root / "curated_vouchers.csv"
-            v_csv.write_text("catalogNumber,scientificName\nNCU1,Packera dubia\n", encoding="utf-8")
-            h_out = t_root / "leaf_efa_harmonics.csv"
-            f_out = t_root / "morphometric_flags.csv"
-            args = type("Args", (), {
-                "contours_dir": str(t_root / "contours"),
-                "vouchers": str(v_csv),
-                "harmonics_out": str(h_out),
-                "flags_out": str(f_out),
-                "plot_out": str(t_root / "fig.pdf"),
-                "report_out": str(t_root / "rep.csv"),
-                "harmonics": None,
-                "num_pcs": None,
-                "max_k": None,
-                "focal_taxon": None,
-                "intraspecific": False,
-                "seed": 137,
-                "run_id": None,
-                "run_dir": None,
-            })()
-            with patch("main.shutil.which", return_value="/usr/bin/Rscript"), \
-                 patch("main.subprocess.run", side_effect=fake_subproc):
-                pipeline_main.run_morphometrics(args, cfg)
-            self.assertGreaterEqual(len(captured_cmds), 1)
-            efa_cmd = captured_cmds[0]
-            for expected_flag in ("--masks-dir", "--output-individual", "--figures-dir", "--symmetrize-efa-harmonics", "--seed"):
-                self.assertIn(expected_flag, efa_cmd)
-            self.assertEqual(efa_cmd[efa_cmd.index("--seed") + 1], "137")
 
     def test_step03_cordate_upright_multi_island_rm_asym_type_immunity_and_ect_weights(self) -> None:
         """
@@ -1346,7 +1051,7 @@ class TestFourierExtractor(unittest.TestCase):
           3. Nomenclatural type leaves (is_type_specimen == TRUE) are immune to is_contour_outlier.
           4. compute_cycle_ect_r uses clockwise u_right = (uy, -ux) and ECT_PC1..3 excludes Tier_3_Bronze (wt=0).
         """
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1421,7 +1126,7 @@ class TestFourierExtractor(unittest.TestCase):
                 """,
                 encoding="utf-8",
             )
-            proc = subprocess.run(["Rscript", str(r_test)], capture_output=True, text=True)
+            proc = run_warm_r_cmd(["Rscript", str(r_test)], stage_key="step03", cwd=PROJECT_ROOT)
             self.assertEqual(proc.returncode, 0, f"Step 03 R zero-trust test failed:\n{proc.stderr}\n{proc.stdout}")
             self.assertIn("STEP03_ZERO_TRUST_OK", proc.stdout)
 

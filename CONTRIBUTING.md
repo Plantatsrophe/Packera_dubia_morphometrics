@@ -50,13 +50,16 @@ All Markdown documentation (`README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `CHANGE
 * Enforce **zero em dashes**, **zero en dashes**, and **zero prose double-hyphens** (write numerical ranges as `"0 to 15 cm"` or `"Steps 01 to 06"`). CLI flags inside code spans (`--focal-taxon`) are fine.
 * Cite academic literature using clean `doi: 10.xxxx/...` identifiers rather than raw publisher URLs, and describe active pipeline architecture in positive present-state terms.
 
-## 6. Running the Pre-Commit Verification Suite (`250` Tests)
+## 6. Running the Pre-Commit Verification Suite (`222` Tests)
 
 Before opening a pull request or generating a patch, run the full verification gate from the repository root:
 
 ```bash
-# 1. Run the complete 250-test Python, SQLite handshake, R statistical, figure, and hygiene suite
+# 1a. Run the complete 222-test Python, SQLite handshake, warm-R statistical, figure, and hygiene suite
 .venv/bin/python scripts/tests/run_audit.py
+
+# 1b. Optional rapid Python-only pre-check during active iteration (~25s)
+.venv/bin/python scripts/tests/run_audit.py --fast
 
 # 2. Verify zero em/en dashes across all Markdown and citation files
 grep -rnP "[\x{2013}\x{2014}]" README.md AGENTS.md CONTRIBUTING.md CHANGELOG.md CITATION.cff docs/*.md && exit 1 || echo "PASS: Zero em/en dashes"

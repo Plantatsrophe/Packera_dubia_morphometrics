@@ -41,6 +41,7 @@ normalize_png_path <- function(out_path) {
 save_packera_png_300 <- function(plot_or_fn, out_path, width = 12.5, height = 8.0, dpi = 300L, also_copy_to = NULL) {
   png_final <- normalize_png_path(out_path)
   if (!nzchar(png_final)) return(invisible(""))
+  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(png_final))
   fdir <- dirname(png_final)
   dir.create(fdir, recursive = TRUE, showWarnings = FALSE)
   stem <- tools::file_path_sans_ext(basename(png_final))

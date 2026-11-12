@@ -7,7 +7,7 @@ suppressPackageStartupMessages({
 })
 
 # 1. CLI Argument Parsing
-parse_args_robust <- function() {
+parse_args_robust <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   option_list <- list(
     optparse::make_option(c("-v", "--vouchers"), type = "character", default = "data/tables/curated_vouchers.csv"), optparse::make_option(c("-e", "--harmonics"), type = "character", default = "data/tables/leaf_efa_harmonics.csv"),
     optparse::make_option(c("-m", "--reproductive"), type = "character", default = "data/tables/voucher_reproductive_metrics.csv"), optparse::make_option(c("--outline-only"), action = "store_true", default = FALSE),
@@ -19,12 +19,12 @@ parse_args_robust <- function() {
     optparse::make_option(c("-d", "--num-pcs"), type = "integer", default = 5), optparse::make_option(c("--permutations"), type = "integer", default = 999),
     optparse::make_option(c("--seed"), type = "integer", default = 42), optparse::make_option(c("--intraspecific-mode"), action = "store_true", default = FALSE), optparse::make_option(c("--focal-taxon"), type = "character", default = "")
   )
-  if (requireNamespace("optparse", quietly = TRUE)) { opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list)); names(opts) <- gsub("-", "_", names(opts)); return(opts) }
+  if (requireNamespace("optparse", quietly = TRUE)) { opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list), args = cli_args); names(opts) <- gsub("-", "_", names(opts)); return(opts) }
   defs <- list(vouchers = "data/tables/curated_vouchers.csv", harmonics = "data/tables/leaf_efa_harmonics.csv", reproductive = "data/tables/voucher_reproductive_metrics.csv", outline_only = FALSE, correct_allometry = "auto",
        allometry_report = "outputs/reports/allometry_significance_audit.csv", allometry_pairwise = "outputs/reports/allometry_pairwise_trajectories.csv", allometry_plot = "outputs/figures/fig04a_foliar_allometry_audit.png",
        use_clustvarsel = FALSE, output_flags = "data/tables/morphometric_flags.csv", output_plot = "outputs/figures/fig04b_gmm_cda_morphometrics.png", output_report = "outputs/reports/gmm_bayes_factors_summary.csv",
        output_batch_audit = "outputs/reports/institutional_batch_effect_audit.csv", max_k = 8L, num_pcs = 5L, permutations = 999L, seed = 42L, intraspecific_mode = FALSE, focal_taxon = "")
-  if (exists(".parse_step04_cli_fallback", mode = "function")) .parse_step04_cli_fallback(commandArgs(trailingOnly = TRUE), defs) else defs
+  if (exists(".parse_step04_cli_fallback", mode = "function")) .parse_step04_cli_fallback(cli_args, defs) else defs
 }
 
 # 2. Taxonomic Concept Standardization & Dynamic Column Discovery

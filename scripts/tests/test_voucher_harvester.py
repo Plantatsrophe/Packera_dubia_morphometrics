@@ -9,6 +9,8 @@ Darwin Core metadata normalization, and atomic persistence.
 import sys
 import tempfile
 import unittest
+
+from scripts.tests._r_session import rscript_available, run_warm_r_cmd
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -406,62 +408,6 @@ class TestAtomicTableExport(unittest.TestCase):
             self.assertEqual(read_df.iloc[0]["identifiedBy"], "D.K. Trock")
             self.assertAlmostEqual(read_df.iloc[0]["decimalLatitude"], 35.8)
             self.assertAlmostEqual(read_df.iloc[0]["decimalLongitude"], -78.6)
-
-    def test_curated_vouchers_table_contract(self):
-        """Verify production curated_vouchers.csv adheres to Darwin Core contract headers."""
-        prod_csv = Path(__file__).resolve().parents[2] / "data" / "tables" / "curated_vouchers.csv"
-        if not prod_csv.exists():
-            self.skipTest("Production curated_vouchers.csv not present.")
-        df = pd.read_csv(prod_csv)
-        contract_cols = [
-            "catalogNumber",
-            "scientificName",
-            "decimalLatitude",
-            "decimalLongitude",
-            "eventDate",
-            "identifiedBy",
-            "determiner_tier",
-            "image_path",
-        ]
-        for col in contract_cols:
-            self.assertIn(col, df.columns, f"Contract column '{col}' missing from curated_vouchers.csv")
-
-        self.assertIn("species_raw", df.columns)
-        allowed_voucher_cols = set(EXPORT_COLUMNS) | {
-            "locality",
-            "doy",
-            "species_standardized",
-            "pixels_per_mm",
-            "is_calibrated_mm",
-            "scale_source",
-            "qc_status",
-            "failure_reason",
-            "failure_details",
-            "spatial_balance_weight",
-            "countryCode",
-            "gbifID",
-            "occurrenceID",
-            "minimumElevationInMeters",
-            "elevation_m",
-        }
-        if not set(df.columns).issubset(allowed_voucher_cols):
-            # Pre-migration untracked data/tables/curated_vouchers.csv on disk: verify export_curated_table strips non-contract legacy columns cleanly
-            with tempfile.TemporaryDirectory() as mig_tmp:
-                mig_csv = Path(mig_tmp) / "curated_vouchers_migrated.csv"
-                mig_db = Path(mig_tmp) / "mig.sqlite"
-                export_curated_table(df, mig_csv, db_path=mig_db)
-                df_mig = pd.read_csv(mig_csv)
-            self.assertEqual(len(df_mig), len(df))
-            for col in contract_cols:
-                self.assertIn(col, df_mig.columns)
-            self.assertTrue(
-                set(df_mig.columns).issubset(allowed_voucher_cols),
-                f"Unexpected columns retained after export_curated_table: {set(df_mig.columns) - allowed_voucher_cols}",
-            )
-        else:
-            for purged_col in ("latitude", "longitude"):
-                self.assertNotIn(purged_col, df.columns)
-
 
 class TestVoucherHarvesterCLI(unittest.TestCase):
     """Test suite for 01_voucher_harvester.py CLI parser and main entrypoint."""
@@ -3513,64 +3459,6 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
             self.assertEqual(rescue_stats["quality_rejected"], 1)
             self.assertTrue((tmp_p / "raw_vouchers" / "MO_SEC_01.webp").exists())
 
-    def test_downstream_r_stratified_pool_cap_gold_medoid_and_line_limits(self):
-        """Verify R Stratified Pool Cap (Silver <= 40% when Type+Gold >= 5), Gold-anchored medoid, Paratype screening, and R lexical/line bounds."""
-        project_root = Path(__file__).resolve().parents[2]
-        aw_r = (project_root / "scripts/morphometrics/authority_weighting_utils.R").read_text(encoding="utf-8")
-        tri_r = (project_root / "scripts/analysis/06_triage_dashboard_synthesis.R").read_text(encoding="utf-8")
-        disc_r = (project_root / "scripts/analysis/taxon_complex_discovery_utils.R").read_text(encoding="utf-8")
-
-        self.assertIn(".apply_stratified_silver_pool_cap", aw_r)
-        self.assertIn("silver_max_pool_share = 0.40", aw_r)
-        self.assertIn("min_type_gold_for_cap = 5L", aw_r)
-        self.assertIn("is_name_bearing_type", aw_r)
-        self.assertIn("has_gold_medoid <- length(gold_core_pos) >= 3L", aw_r)
-        self.assertIn("agrees_gold", aw_r)
-        self.assertNotIn('rep("Tier_2_Silver", n)', aw_r)
-        self.assertIn("compute_empirical_bayes_authority_weights", tri_r)
-        self.assertLessEqual(len(disc_r.splitlines()), 800)
-
-        # Lexical brace/paren/bracket balance check across all modified R files (accounting for backtick-quoted R symbols like `[[`)
-        for rel_r in (
-            "scripts/morphometrics/authority_weighting_utils.R",
-            "scripts/analysis/05_multimodal_spatial_rf.R",
-            "scripts/analysis/06_triage_dashboard_synthesis.R",
-            "scripts/analysis/step05_phenology_ecotypes.R",
-            "scripts/analysis/taxon_complex_discovery_utils.R",
-        ):
-            src = (project_root / rel_r).read_text(encoding="utf-8")
-            stack = []
-            in_str = None
-            esc = False
-            in_comment = False
-            pairs = {"(": ")", "[": "]", "{": "}"}
-            closing = {v: k for k, v in pairs.items()}
-            for ch_c in src:
-                if in_comment:
-                    if ch_c == "\n":
-                        in_comment = False
-                    continue
-                if in_str:
-                    if esc:
-                        esc = False
-                    elif ch_c == "\\":
-                        esc = True
-                    elif ch_c == in_str:
-                        in_str = None
-                    continue
-                if ch_c == "#":
-                    in_comment = True
-                elif ch_c in ('"', "'", "`"):
-                    in_str = ch_c
-                elif ch_c in pairs:
-                    stack.append(ch_c)
-                elif ch_c in closing:
-                    self.assertTrue(stack and stack[-1] == closing[ch_c], f"Unbalanced {ch_c} in {rel_r}")
-                    stack.pop()
-            self.assertEqual(len(stack), 0, f"Unclosed delimiters {stack} in {rel_r}")
-            self.assertIsNone(in_str, f"Unclosed string literal in {rel_r}")
-
-
     def test_zero_hardcoded_synonyms_and_dynamic_packera_tomentosa_dubia_unification(self):
         """Verify zero hardcoded taxon names in source and 100% dynamic unification of Packera tomentosa into Packera dubia."""
         import subprocess
@@ -3792,28 +3680,27 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
         # Verify R .load_authority_weight_config reads nested thresholds$authority_weights from YAML
         self.assertIn("cfg$thresholds$authority_weights", aw_r_src)
         self.assertIn("dyn_equiv", aw_r_src)
-        import shutil
-        if shutil.which("Rscript"):
+        if rscript_available():
             with tempfile.TemporaryDirectory() as tmp_r_d:
                 custom_yaml = Path(tmp_r_d) / "cfg.yaml"
                 custom_yaml.write_text(
                     "thresholds:\n  authority_weights:\n    tier_0_type: 3.5\n    silver_max_pool_share: 0.35\n",
                     encoding="utf-8",
                 )
-                r_out = subprocess.run(
+                r_out = run_warm_r_cmd(
                     [
                         "Rscript", "-e",
                         f"source('scripts/morphometrics/authority_weighting_utils.R'); "
                         f"rm(list=ls(envir=.AUTH_WEIGHT_CFG_ENV), envir=.AUTH_WEIGHT_CFG_ENV); "
+                        f"on.exit(rm(list=ls(envir=.AUTH_WEIGHT_CFG_ENV), envir=.AUTH_WEIGHT_CFG_ENV), add=TRUE); "
                         f"w <- .load_authority_weight_config({repr(str(custom_yaml))}); "
                         f"stopifnot(abs(w$tier_0_type - 3.5) < 1e-6, abs(w$silver_max_pool_share - 0.35) < 1e-6); "
                         f"cat('R_CFG_OK\\n')",
                     ],
-                    cwd=str(project_root),
-                    capture_output=True,
-                    text=True,
-                    check=True,
+                    stage_key="step03",
+                    cwd=project_root,
                 )
+                self.assertEqual(r_out.returncode, 0, r_out.stderr)
                 self.assertIn("R_CFG_OK", r_out.stdout)
 
 

@@ -9,23 +9,23 @@ suppressPackageStartupMessages({
   if (requireNamespace("tibble", quietly = TRUE)) library(tibble); if (requireNamespace("optparse", quietly = TRUE)) library(optparse)
 })
 for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "pub_figures_utils.R"))) {
-  if (!is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
+  if (!exists("generate_step03_pub_figures", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
 }
 for (.aw_p in c("scripts/morphometrics/authority_weighting_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "authority_weighting_utils.R"))) {
-  if (!is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
+  if (!exists("compute_authority_precision_weights", mode = "function") && !is.na(.aw_p) && nzchar(.aw_p) && file.exists(.aw_p)) { source(.aw_p); break }
 }
 for (.dl_p in c("scripts/morphometrics/dissected_leaf_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "dissected_leaf_utils.R"))) {
-  if (!is.na(.dl_p) && nzchar(.dl_p) && file.exists(.dl_p)) { source(.dl_p); break }
+  if (!exists("compute_dissected_leaf_descriptors", mode = "function") && !is.na(.dl_p) && nzchar(.dl_p) && file.exists(.dl_p)) { source(.dl_p); break }
 }
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
-  if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+  if (!exists("persist_step03_to_sqlite", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
 for (.fp_p in c("scripts/morphometrics/fourier_parallel_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "fourier_parallel_utils.R"))) {
-  if (!is.na(.fp_p) && nzchar(.fp_p) && file.exists(.fp_p)) { source(.fp_p); break }
+  if (!exists("align_contour_horizontal_xax", mode = "function") && !is.na(.fp_p) && nzchar(.fp_p) && file.exists(.fp_p)) { source(.fp_p); break }
 }
 
 # 1. CLI Argument Parsing
-parse_args_robust <- function() {
+parse_args_robust <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   option_list <- list(
     optparse::make_option(c("-i", "--input"), type = "character", default = "data/contours/", help = "Directory containing contour CSVs (alias for --contours-dir) [default: %default]"),
     optparse::make_option(c("-c", "--contours-dir"), type = "character", default = "data/contours/", help = "Directory containing contour CSVs [default: %default]"),
@@ -44,12 +44,12 @@ parse_args_robust <- function() {
     optparse::make_option(c("--seed"), type = "integer", default = 42, help = "Random seed for reproducible permutations [default: %default]")
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
-    opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
+    opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list), args = cli_args)
     names(opts) <- gsub("-", "_", names(opts))
     if (!is.null(opts$contours_dir) && opts$contours_dir != "data/contours/") opts$input <- opts$contours_dir else if (!is.null(opts$input) && opts$contours_dir == "data/contours/") opts$contours_dir <- opts$input
     return(opts)
   }
-  raw_args <- commandArgs(trailingOnly = TRUE)
+  raw_args <- cli_args
   opts <- list(input = "data/contours/", contours_dir = "data/contours/", manifest = "data/tables/extracted_leaf_manifest.csv",
                masks_dir = "data/masks/", vouchers = "data/tables/curated_vouchers.csv", output = "data/tables/leaf_efa_harmonics.csv",
                output_individual = "data/tables/leaf_efa_harmonics_individual.csv", harmonics = 12, num_pcs = 5, symmetrize_efa_harmonics = TRUE,

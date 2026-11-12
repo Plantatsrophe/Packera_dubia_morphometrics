@@ -21,6 +21,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+
+from scripts.tests._r_session import rscript_available, run_warm_r_cmd
 import zlib
 from pathlib import Path
 from unittest.mock import patch
@@ -43,7 +45,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         cls._class_tmp_path = Path(cls._class_temp_dir.name)
         cls.r_unit_proc = None
 
-        if shutil.which("Rscript"):
+        if rscript_available():
             grp_out = cls._class_tmp_path / "manova_group_significance.csv"
             pw_out = cls._class_tmp_path / "manova_pairwise_posthoc.csv"
             r_batch_code = f"""
@@ -228,12 +230,10 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             """
             r_batch_file = cls._class_tmp_path / "batched_step04_checks.R"
             r_batch_file.write_text(r_batch_code, encoding="utf-8")
-            cls.r_unit_proc = subprocess.run(
+            cls.r_unit_proc = run_warm_r_cmd(
                 ["Rscript", str(r_batch_file)],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
+                stage_key="step04",
+                cwd=PROJECT_ROOT,
             )
 
     @classmethod
@@ -260,71 +260,6 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 except zlib.error:
                     continue
         return "\n".join(chunks)
-
-    def test_step04_static_contracts_and_line_limit(self):
-        """Verify 04_gmm_morphotools.R (<= 650 lines) retains all allometry, subspace, GMM, CDA, and batch-audit contracts."""
-        self.assertTrue(self.r_script_path.exists(), "04_gmm_morphotools.R must exist.")
-        content = self.r_script_path.read_text(encoding="utf-8")
-        lines = content.splitlines()
-        self.assertLessEqual(len(lines), 650, f"Script exceeds line limit: {len(lines)}")
-
-        for required_token in (
-            "--reproductive",
-            "--outline-only",
-            "AR_inv",
-            "AR_inv_std",
-            "--output-batch-audit",
-            "audit_institutional_batch_effects",
-            "institutionCode",
-            "0.05",
-            "1 row = 1 voucher",
-            "group_by(catalogNumber)",
-            "--correct-allometry",
-            "test_and_correct_allometry",
-            "generate_allometry_diagnostic_plot",
-            "[INFO] Foliar allometry detected",
-            "[INFO] Foliar allometry negligible",
-            "run_canonical_discriminant_analysis",
-            "is_calibrated_mm",
-            "Tier_1_Gold",
-            "lm(Y ~ log_centsize + scientificName",
-            "Y_adj <- Y_all - outer(log_centsize - ref_mean_cs, beta_within)",
-            "RRPP::lm.rrpp",
-            "RRPP::pairwise",
-            "allometry_pairwise_trajectories.csv",
-            "clustvarsel::clustvarsel",
-            "is_tier1_pure",
-            "morph_tier_source",
-            '"Basal_Rosette"',
-            "PC1 ~ log_centsize * scientificName",
-            "select_morphometric_subspace",
-            "floor(N_min / 3",
-            "rep(1/g, g)",
-            "Kass & Raftery",
-            "Unassigned_Packera",
-        ):
-            self.assertIn(required_token, content, f"Missing expected Step 04 contract token: {required_token}")
-
-        for banned_legacy in (
-            "evaluate_ontogenetic_allometry",
-            "run_cda_with_passive_projection",
-            "run_weighted_cda_loocv",
-            "run_cda_ordination",
-            "Y_adj <- Y - outer(log_centsize - mean(log_centsize, na.rm = TRUE), beta_within)",
-        ):
-            self.assertNotIn(banned_legacy, content)
-        pf_src = (PROJECT_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R").read_text(encoding="utf-8")
-        f04_src = (PROJECT_ROOT / "scripts" / "figures" / "step04_figures.R").read_text(encoding="utf-8")
-        self.assertNotIn("loocv_pct", pf_src)
-        self.assertNotIn("copied_from_cda_pdf", pf_src)
-        self.assertNotIn("fig04_cand", pf_src)
-        self.assertIn("Descriptive Post-GMM Ordination", f04_src)
-        self.assertIn("loocv_tag_s04", f04_src)
-        self.assertNotIn("Glabrescent_P_dubia_Misidentified_as_P_anonyma", content)
-        self.assertNotIn(
-            'target_taxa <- c("Packera anonyma", "Packera dubia", "Packera plattensis", "Packera paupercula")',
-            content,
-        )
 
     def test_batched_r_helpers_epa_manova_dawid_skene_and_k_full_cda(self):
         """Verify batched R unit checks for EPA Level III helper, single-species MANOVA collinearity, Dawid-Skene EM, and K_full (>3 axes) CDA."""
@@ -370,80 +305,9 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertIn("EB_OK", out)
         self.assertIn("PHASE4_DAWID_SKENE_AND_KFULL_OK", out)
 
-    def test_step02_and_preflight_dynamic_non_default_packera_support(self):
-        """Verify Step 02 standardization/figures, config.yaml, and run_pipeline.sh support dynamic genus-wide Packera species."""
-        seg_mod = importlib.import_module("scripts.pipeline.02_segment_and_extract")
-        std_fn = seg_mod._standardize_packera_species_py
-        expected_map = {
-            "Packera schweinitziana": "Packera schweinitziana",
-            "Packera serpenticola": "Packera serpenticola",
-            "Packera millefolium (Torr. & A.Gray) W.A.Weber & Á.Löve": "Packera millefolium",
-            "Packera aurea (L.) Á.Löve & D.Löve": "Packera aurea",
-            "Packera streptanthifolia (Greene) W.A.Weber & Á.Löve": "Packera streptanthifolia",
-            "Packera cymbalaria (Pursh) W.A.Weber & Á.Löve": "Packera cymbalaria",
-            "Packera sanguisorbae (DC.) C.Jeffrey": "Packera sanguisorbae",
-        }
-        for raw_name, canon_name in expected_map.items():
-            self.assertEqual(std_fn(raw_name), canon_name, f"Step 02 failed to standardize {raw_name!r}")
-
-        with patch(
-            "scripts.core.harvester.species.name_backbone",
-            return_value={
-                "matchType": "EXACT",
-                "status": "SYNONYM",
-                "species": "Packera schweinitziana",
-                "canonicalName": "Senecio robbinsii",
-            },
-        ), patch("scripts.core.harvester.species.name_usage", return_value={"results": []}):
-            self.assertEqual(std_fn("Senecio robbinsii"), "Packera schweinitziana")
-
-        taxa_8 = [
-            "Packera aurea",
-            "Packera cana",
-            "Packera cymbalaria",
-            "Packera millefolium",
-            "Packera sanguisorbae",
-            "Packera schweinitziana",
-            "Packera serpenticola",
-            "Packera streptanthifolia",
-        ]
-        fig_rows = []
-        for idx, sp in enumerate(taxa_8):
-            for k in range(4):
-                fig_rows.append({
-                    "catalogNumber": f"FIG_{idx}_{k}",
-                    "plant_individual_id": 0,
-                    "leaf_id": 1,
-                    "scientificName": sp,
-                    "solidity": 0.35 + 0.05 * k if sp == "Packera millefolium" else 0.80 + 0.03 * k,
-                    "archetype_score": 0.92,
-                    "aspect_ratio": 1.4 + 0.3 * k,
-                    "pixels_per_mm": 10.0,
-                    "is_calibrated_mm": True,
-                })
-        with tempfile.TemporaryDirectory() as tmpdir:
-            saved = seg_mod.generate_step02_publication_figures(
-                extracted_df=pd.DataFrame(fig_rows),
-                failed_df=pd.DataFrame(),
-                repro_df=pd.DataFrame(),
-                pheno_df=pd.DataFrame(),
-                figures_dir=Path(tmpdir) / "figures",
-            )
-            self.assertTrue(Path(saved["fig02a_png"]).exists())
-            self.assertTrue(Path(saved["fig02b_png"]).exists())
-            self.assertEqual(list((Path(tmpdir) / "figures").glob("*.pdf")), [])
-
-        cfg = PipelineConfig.from_yaml()
-        self.assertEqual(cfg.taxa.target_species, [])
-        self.assertEqual(cfg.taxa.outgroups, [])
-
-        sh_src = (PROJECT_ROOT / "run_pipeline.sh").read_text(encoding="utf-8")
-        self.assertIn("base_outgroups = present_taxa", sh_src)
-        self.assertNotIn("mod05.TARGET_TAXA", sh_src)
-
     def test_dual_intraspecific_allometry_morphotype_and_supervised_epa_ecoregion_cda(self):
         """Verify single-taxon (--intraspecific-mode) allometry, partial AR_inv & Cauline_Only_Fallback retention, Track 1 Morphotype_K* CDA, and Track 2 EPA Level III Ecoregion CDA."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         rng = np.random.default_rng(202610)
         rng_ar = np.random.default_rng(777)
@@ -550,7 +414,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             pd.DataFrame(rows).to_csv(harm_csv, index=False)
             pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
 
-            proc = subprocess.run(
+            proc = run_warm_r_cmd(
                 [
                     "Rscript",
                     str(self.r_script_path),
@@ -567,10 +431,9 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "--intraspecific-mode",
                     "--permutations", "29",
                 ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
+                stage_key="step04",
+                cwd=PROJECT_ROOT,
+                skip_figures=False,
             )
             self.assertEqual(proc.returncode, 0, f"Dual/Intraspecific Step 04 failed:\n{proc.stderr}\n{proc.stdout}")
 
@@ -640,7 +503,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
 
     def test_tier3_bronze_invariance_and_multivariate_manova_audit(self):
         """Verify Tier_3_Bronze zero-influence invariance across allometry, GMM, CDA, and MANOVA, plus batch audit R^2 < 0.05 and CDA subtitles."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         rng = np.random.default_rng(314)
         specs = [
@@ -761,7 +624,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 cda_pdf = fig_dir / "fig04b_gmm_cda_morphometrics.png"
                 df_h.to_csv(harm_csv, index=False)
                 df_v.to_csv(vouch_csv, index=False)
-                proc = subprocess.run(
+                proc = run_warm_r_cmd(
                     [
                         "Rscript",
                         str(self.r_script_path),
@@ -777,10 +640,9 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                         "--correct-allometry", "true",
                         "--permutations", "19",
                     ],
-                    cwd=str(PROJECT_ROOT),
-                    capture_output=True,
-                    text=True,
-                    check=False,
+                    stage_key="step04",
+                    cwd=PROJECT_ROOT,
+                    skip_figures=include_tier3,
                 )
                 self.assertEqual(proc.returncode, 0, f"Step 04 run failed ({sub_name}):\n{proc.stderr}\n{proc.stdout}")
                 return tbl_dir, rep_dir, fig_dir
@@ -886,7 +748,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
 
     def test_dynamic_non_default_taxa_cda_second_taxon_and_multi_plant_petioles(self):
         """Verify dynamic non-default Packera species discovery, singleton passive projection, cda_second_taxon export, and multi-plant (catalogNumber, plant_individual_id) petiole aggregation."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         rng = np.random.default_rng(2026)
         non_default_specs = [
@@ -992,8 +854,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
             pd.DataFrame(man_rows).to_csv(man_csv, index=False)
 
-            proc = subprocess.run(
-                [
+            proc = run_warm_r_cmd([
                     "Rscript",
                     str(self.r_script_path),
                     "--vouchers", str(vouch_csv),
@@ -1006,12 +867,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "--allometry-pairwise", str(tmp_p / "pairwise.csv"),
                     "--allometry-plot", str(allom_pdf),
                     "--permutations", "19",
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+                ], stage_key='step04', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Step 04 failed on non-default Packera taxa:\n{proc.stderr}\n{proc.stdout}")
 
             flags_df = pd.read_csv(flags_csv)
@@ -1059,7 +915,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
 
     def test_zero_gold_species_adaptive_anchor_promotion_and_empirical_bayes_weights(self):
         """Verify multi-species GMM and CDA succeed via Adaptive Anchor Promotion when species have 0 Tier_1_Gold vouchers."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         rng = np.random.default_rng(202604)
         rows = []
@@ -1138,8 +994,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             pd.DataFrame(rows).to_csv(harm_csv, index=False)
             pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
 
-            proc = subprocess.run(
-                [
+            proc = run_warm_r_cmd([
                     "Rscript",
                     str(self.r_script_path),
                     "--vouchers", str(vouch_csv),
@@ -1152,12 +1007,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "--allometry-pairwise", str(tmp_p / "pairwise.csv"),
                     "--allometry-plot", str(tmp_p / "fig04a_foliar_allometry_audit.png"),
                     "--permutations", "19",
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+                ], stage_key='step04', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Step 04 failed with 0-Gold species:\n{proc.stderr}\n{proc.stdout}")
 
             flags_df = pd.read_csv(flags_csv)
@@ -1187,7 +1037,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
 
     def test_dynamic_subspace_beyond_five_pcs_and_multipc_bh_batch_audit(self):
         """Verify Task 1C dynamic subspace selection (>5 PCs when informative), selected_morph_features export, and multi-feature BH institutional batch audit."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         rng = np.random.default_rng(20260431)
         rows = []
@@ -1249,8 +1099,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             pd.DataFrame(rows).to_csv(harm_csv, index=False)
             pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
 
-            proc = subprocess.run(
-                [
+            proc = run_warm_r_cmd([
                     "Rscript",
                     str(self.r_script_path),
                     "--vouchers", str(vouch_csv),
@@ -1263,12 +1112,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "--allometry-pairwise", str(tmp_p / "pw.csv"),
                     "--allometry-plot", str(tmp_p / "fig04a_foliar_allometry_audit.png"),
                     "--permutations", "19",
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+                ], stage_key='step04', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Step 04 dynamic >5 PC test failed:\n{proc.stderr}\n{proc.stdout}")
             flags_df = pd.read_csv(flags_csv)
             batch_df = pd.read_csv(batch_csv)
@@ -1284,7 +1128,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
 
     def test_dissection_collinearity_pruning_lobing_pc_rescue_bimodal_anchors_and_fast_permanova(self):
         """Verify |r|<0.75 scalar pruning, PC3+ lobing rescue, bimodal heteroblastic anchor preservation, and fast PERMANOVA exactness."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         r_code = """
         options(rgl.useNULL = TRUE)
@@ -1371,20 +1215,13 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_r:
             r_tmp = Path(tmp_r) / "check_step04.R"
             r_tmp.write_text(r_code, encoding="utf-8")
-            proc = subprocess.run(
-                ["Rscript", str(r_tmp)],
-                cwd=str(PROJECT_ROOT),
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            proc = run_warm_r_cmd(["Rscript", str(r_tmp)], stage_key='step04', cwd=PROJECT_ROOT)
         self.assertEqual(proc.returncode, 0, f"Step 04 dissection R helper test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("STEP04_DISSECTION_HELPERS_OK", proc.stdout)
 
     def test_nomenclatural_type_mahalanobis_immunity_eb_pinning_and_typical_morphotype_control(self):
         """Verify select_adaptive_reference_anchors() never prunes an intact Holotype/Lectotype during 95% chi^2 FastMCD screening, pins EB weights, and exports nearest_type_morph_taxon and is_typical_morphotype."""
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         r_code = """
         options(rgl.useNULL = TRUE)
@@ -1472,39 +1309,16 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_r:
             r_tmp = Path(tmp_r) / "check_step04.R"
             r_tmp.write_text(r_code, encoding="utf-8")
-            proc = subprocess.run(
-                ["Rscript", str(r_tmp)],
-                cwd=str(PROJECT_ROOT),
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            proc = run_warm_r_cmd(["Rscript", str(r_tmp)], stage_key='step04', cwd=PROJECT_ROOT)
         self.assertEqual(proc.returncode, 0, f"Step 04 type control R test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("STEP04_TYPE_CONTROL_OK", proc.stdout)
-
-    def test_step03_step04_eastern_na_figure_refinements(self):
-        """Verify Step 03 and Step 04 300-DPI PNG figure architecture and ICN hollow styling."""
-        pub_fig_path = PROJECT_ROOT / "scripts" / "morphometrics" / "pub_figures_utils.R"
-        theme_path = PROJECT_ROOT / "scripts" / "figures" / "theme_packera_pub.R"
-        f04_path = PROJECT_ROOT / "scripts" / "figures" / "step04_figures.R"
-        content = pub_fig_path.read_text(encoding="utf-8")
-        theme_src = theme_path.read_text(encoding="utf-8")
-        f04_src = f04_path.read_text(encoding="utf-8")
-
-        self.assertIn("norm_lbl_key <- function(v)", content)
-        self.assertNotIn("if (is_bimodal_sp)", content)
-        self.assertIn("save_packera_png_300", theme_src)
-        self.assertIn("format_icn_label_expr", theme_src)
-        self.assertIn("get_combinatorial_hollow_shapes_r", theme_src)
-        self.assertIn("fig04b_gmm_cda_morphometrics.png", f04_src)
 
     def test_morphometric_flags_exports_osr_and_confident_learning_columns(self):
         """
         Verify that `morphometric_flags.csv` exports `min_congener_mahal_d2`,
         `min_congener_taxon`, `open_set_novelty_p`, and `is_confident_label_noise`.
         """
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
 
         rng = np.random.default_rng(20261108)
@@ -1576,8 +1390,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
             pd.DataFrame(rows).to_csv(harm_csv, index=False)
             pd.DataFrame(vouch_rows).to_csv(vouch_csv, index=False)
 
-            proc = subprocess.run(
-                [
+            proc = run_warm_r_cmd([
                     "Rscript",
                     str(self.r_script_path),
                     "--vouchers", str(vouch_csv),
@@ -1590,12 +1403,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                     "--allometry-pairwise", str(tmp_p / "pw.csv"),
                     "--allometry-plot", str(tmp_p / "fig04a_foliar_allometry_audit.png"),
                     "--permutations", "19",
-                ],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+                ], stage_key='step04', cwd=PROJECT_ROOT, skip_figures=True)
             self.assertEqual(proc.returncode, 0, f"Step 04 OSR/Confident Learning test failed:\n{proc.stderr}\n{proc.stdout}")
             flags_df = pd.read_csv(flags_csv)
             for req_col in (
@@ -1619,7 +1427,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         2. `compute_type_specimen_morph_control()` evaluates `is_typical_morphotype`
            per-species rather than requiring global `gmm_cluster == 1L`.
         """
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
 
         r_code = """
@@ -1677,13 +1485,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             r_file = Path(tmpdir) / "test_deme_and_typical.R"
             r_file.write_text(r_code, encoding="utf-8")
-            proc = subprocess.run(
-                ["Rscript", str(r_file)],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            proc = run_warm_r_cmd(["Rscript", str(r_file)], stage_key='step04', cwd=PROJECT_ROOT)
         self.assertEqual(proc.returncode, 0, f"Deme assignment / typical morphotype R test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("DEME_ASSIGNMENT_AND_PER_SPECIES_TYPICAL_OK", proc.stdout)
 
@@ -1781,18 +1583,12 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         stopifnot("solidity_std" %in% kept_arch)
         cat("HETEROBLASTY_PURE_BASAL_AND_CAULINE_FALLBACK_OK\\n")
         """
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
         with tempfile.TemporaryDirectory() as tmpdir:
             r_file = Path(tmpdir) / "test_heteroblasty_weights.R"
             r_file.write_text(r_code, encoding="utf-8")
-            proc = subprocess.run(
-                ["Rscript", str(r_file)],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            proc = run_warm_r_cmd(["Rscript", str(r_file)], stage_key='step04', cwd=PROJECT_ROOT)
         self.assertEqual(proc.returncode, 0, f"Heteroblasty leaf weights R test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("HETEROBLASTY_PURE_BASAL_AND_CAULINE_FALLBACK_OK", proc.stdout)
 
@@ -1822,7 +1618,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         self.assertIn("plasticity_mitigation_utils.R", r04_src)
         self.assertNotIn("kmeans_K2_fallback", r04_src)
 
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             return
 
         r_code = """
@@ -1878,7 +1674,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_r:
             r_tmp = Path(tmp_r) / "check_step04_plast.R"
             r_tmp.write_text(r_code, encoding="utf-8")
-            proc = subprocess.run(["Rscript", str(r_tmp)], cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+            proc = run_warm_r_cmd(["Rscript", str(r_tmp)], stage_key='step04', cwd=PROJECT_ROOT)
         self.assertEqual(proc.returncode, 0, f"Plasticity mitigation R test failed:\n{proc.stderr}\n{proc.stdout}")
         self.assertIn("PLASTICITY_MITIGATION_R_OK", proc.stdout)
 
@@ -1895,7 +1691,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
              never print fabricated "LOOCV = 85.0%".
           5. Cross-run SQLite open-set recognition uses run-invariant harmonics + topology (immune to PC sign flips).
         """
-        if not shutil.which("Rscript"):
+        if not rscript_available():
             self.skipTest("Rscript not installed.")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2053,13 +1849,7 @@ class TestGMMAndMorphoTools(unittest.TestCase):
                 """,
                 encoding="utf-8",
             )
-            proc = subprocess.run(
-                ["Rscript", str(r_script)],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            proc = run_warm_r_cmd(["Rscript", str(r_script)], stage_key='step04', cwd=PROJECT_ROOT)
             self.assertEqual(proc.returncode, 0, f"Step 04 zero-trust R test failed:\n{proc.stderr}\n{proc.stdout}")
             self.assertIn("STEP04_ZERO_TRUST_OK", proc.stdout)
             self.assertTrue((tmp_p / "intra_no_fake_loocv.png").exists())

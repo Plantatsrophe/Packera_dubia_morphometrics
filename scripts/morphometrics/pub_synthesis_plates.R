@@ -69,6 +69,7 @@ generate_step06_pub_figures <- function(triage_df, out_fig_pdf = NULL) {
 }
 
 render_step06_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL, focal_taxon = "") {
+  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   .ensure_step06_fig_modules()
   out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) normalize_png_path(out_pdf) else "outputs/figures/fig06a_integrative_taxonomic_synthesis.png"
   render_step06a_integrative_synthesis_png(
@@ -80,6 +81,7 @@ render_step06_synthesis_plate_pdf <- function(df, out_pdf, cda_summary = NULL, f
 }
 
 render_step06_complex_discovery_pdf <- function(W, part_res, out_pdf, min_affinity = 0.03) {
+  if (identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) return(invisible(""))
   .ensure_step06_fig_modules()
   out_png <- if (!is.null(out_pdf) && nzchar(out_pdf)) normalize_png_path(out_pdf) else "outputs/figures/fig06b_taxon_complex_delimitation_network.png"
   cdf_in <- if (is.list(part_res) && !is.null(part_res$complexes_df)) part_res$complexes_df else as.data.frame(part_res, stringsAsFactors = FALSE)

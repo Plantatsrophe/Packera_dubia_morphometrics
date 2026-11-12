@@ -39,10 +39,10 @@ suppressPackageStartupMessages({
 for (.pf_p in c("scripts/morphometrics/pub_figures_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "morphometrics", "pub_figures_utils.R"))) {
   if (!exists("atomic_save_dual_plot", mode = "function") && !is.na(.pf_p) && nzchar(.pf_p) && file.exists(.pf_p)) { source(.pf_p); break }
 }
-if (file.exists("scripts/morphometrics/authority_weighting_utils.R")) {
+if (!exists("compute_authority_precision_weights", mode = "function") && file.exists("scripts/morphometrics/authority_weighting_utils.R")) {
   try(source("scripts/morphometrics/authority_weighting_utils.R"), silent = TRUE)
 }
-if (file.exists("scripts/analysis/edaphic_fine_grain_utils.R")) {
+if (!exists("extract_fine_grain_edaphic_metrics", mode = "function") && file.exists("scripts/analysis/edaphic_fine_grain_utils.R")) {
   source("scripts/analysis/edaphic_fine_grain_utils.R")
 } else {
   args_all <- commandArgs(trailingOnly = FALSE)
@@ -54,7 +54,7 @@ if (file.exists("scripts/analysis/edaphic_fine_grain_utils.R")) {
 }
 
 for (.db_p in c("scripts/core/db_utils.R", file.path(dirname(c(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)), unlist(lapply(sys.frames(), function(fr) fr$ofile)))), "..", "core", "db_utils.R"))) {
-  if (!is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
+  if (!exists("persist_step05_to_sqlite", mode = "function") && !is.na(.db_p) && nzchar(.db_p) && file.exists(.db_p)) { source(.db_p); break }
 }
 
 OKABE_ITO_FALLBACK_HEX <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#332288", "#88CCEE", "#44AA99")
@@ -201,7 +201,7 @@ if (!exists("resolve_ecological_authority_weights", mode = "function")) {
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing & Taxonomic Standardization
 # ------------------------------------------------------------------------------
-parse_args_robust <- function() {
+parse_args_robust <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   run_dir <- Sys.getenv("PACKERA_RUN_DIR", unset = "")
   rp <- function(rel) if (nzchar(run_dir)) file.path(run_dir, rel) else rel
   option_list <- list(
@@ -244,7 +244,7 @@ parse_args_robust <- function() {
     optparse::make_option(c("--demo"), action = "store_true",
       default = FALSE, help = "Enable synthetic fallback data for demonstration/test runs [default: %default]")
   )
-  raw_args <- commandArgs(trailingOnly = TRUE)
+  raw_args <- cli_args
   raw_args <- sub("^--batch-size(?==|$)", "--ssurgo-batch-size", raw_args, perl = TRUE)
   if (requireNamespace("optparse", quietly = TRUE)) {
     opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list), args = raw_args)
@@ -3710,9 +3710,9 @@ left_join_by_voucher_individual <- function(base_df, mod_df, keep_cols) {
   }
 }
 
-main <- function() {
+main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   set.seed(42)
-  opts <- parse_args_robust()
+  opts <- parse_args_robust(cli_args)
   message("=== Starting Multimodal Spatial RF & Ecological Niche Analysis ===")
 
   if (!file.exists(opts$vouchers)) stop("Missing vouchers file: ", opts$vouchers)
@@ -3876,7 +3876,9 @@ main <- function() {
     demo = demo_mode
   )
   vouchers_df <- pheno_res$df
-  export_phenological_latitudinal_figures(vouchers_df, pheno_res$baseline, opts$pheno_plot)
+  if (!identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) {
+    export_phenological_latitudinal_figures(vouchers_df, pheno_res$baseline, opts$pheno_plot)
+  }
 
   # Discover strictly extrinsic, artifact-free physiological ENM predictors (include_pheno = FALSE; zero species-median imputation!)
   cand_eco <- discover_candidate_eco_predictors(vouchers_df, include_pheno = FALSE, min_finite = 3L)
@@ -4028,7 +4030,9 @@ main <- function() {
     }
   }
 
-  export_spatial_rf_figures(geo_vouchers_df, srf_res, niche_res, opts$output_plot, pheno_res = pheno_res)
+  if (!identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) {
+    export_spatial_rf_figures(geo_vouchers_df, srf_res, niche_res, opts$output_plot, pheno_res = pheno_res)
+  }
 
   sdm_out_dir <- dirname(dirname(opts$output_plot))
   if (is.null(sdm_out_dir) || !nzchar(sdm_out_dir) || identical(sdm_out_dir, ".")) sdm_out_dir <- "outputs"
@@ -4037,7 +4041,7 @@ main <- function() {
   } else {
     "Packera dubia"
   }
-  tryCatch(
+  if (!identical(Sys.getenv("PACKERA_SKIP_FIGURES", unset = ""), "1")) tryCatch(
     fit_and_project_maxent_sdm_maps(
       df = geo_vouchers_df,
       srf_res = srf_res,

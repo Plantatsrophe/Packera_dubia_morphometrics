@@ -59,7 +59,7 @@ for (.tc_p in c("scripts/analysis/taxon_complex_discovery_utils.R", file.path(di
 # ------------------------------------------------------------------------------
 # 1. CLI Argument Parsing & Taxonomic Normalization
 # ------------------------------------------------------------------------------
-parse_args_robust <- function() {
+parse_args_robust <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   run_dir <- Sys.getenv("PACKERA_RUN_DIR", unset = "")
   rp <- function(rel) if (nzchar(run_dir)) file.path(run_dir, rel) else rel
   option_list <- list(
@@ -88,8 +88,8 @@ parse_args_robust <- function() {
     optparse::make_option(c("--demo"), action = "store_true", default = FALSE)
   )
   if (requireNamespace("optparse", quietly = TRUE)) {
-    raw_cli <- commandArgs(trailingOnly = TRUE)
-    opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list))
+    raw_cli <- cli_args
+    opts <- optparse::parse_args(optparse::OptionParser(usage = "%prog [options]", option_list = option_list), args = cli_args)
     names(opts) <- gsub("-", "_", names(opts))
     if (!is.null(opts$spatial_flags) && nzchar(opts$spatial_flags)) opts$multimodal_flags <- opts$spatial_flags
     opts$cli_has_multimodal <- any(grepl("^(-c|--multimodal-flags|--spatial-flags)(=|$)", raw_cli))
@@ -2571,9 +2571,9 @@ generate_interactive_triage_html <- function(df, html_path, focal_taxon = "", op
 # ------------------------------------------------------------------------------
 # 8. Main Execution Pipeline
 # ------------------------------------------------------------------------------
-main <- function() {
+main <- function(cli_args = commandArgs(trailingOnly = TRUE)) {
   set.seed(42)
-  opts <- parse_args_robust()
+  opts <- parse_args_robust(cli_args)
   message("=== Starting Step 06 Triage Dashboard & Taxonomic Synthesis ===")
   triage_df <- build_triage_queue(opts)
   render_synthesis_figure_pdf(triage_df, opts$output_plot, cda_summary = opts$cda_summary, focal_taxon = opts$focal_taxon)

@@ -180,6 +180,6 @@ if violations:
 print("PASS: Docs clean and renumbered to Steps 01 to 06")
 '
 
-pytest scripts/tests/ -q
-pytest scripts/tests/test_code_hygiene.py -q
+.venv/bin/python scripts/tests/run_audit.py
+.venv/bin/python scripts/tests/run_audit.py --fast -q
 ```
