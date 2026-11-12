@@ -99,8 +99,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.core.config import (
     DEFAULT_COUNTRIES,
+    CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES,
+    CIS_MISSISSIPPI_STATES_PROVINCES,
+    DEFAULT_CIS_MISSISSIPPI_LON,
     DEFAULT_GEOGRAPHIC_SCOPE,
     DEFAULT_HOME_HERBARIUM,
+    DEFAULT_MIN_CIS_MISSISSIPPI_FRAC,
+    DEFAULT_TRANSCONTINENTAL_LON,
+    TRANSCONTINENTAL_BOREAL_PACKERA_SPECIES,
     DEFAULT_MIN_FILE_SIZE_KB,
     DEFAULT_MIN_MEGAPIXELS,
     DEFAULT_MIN_SHARPNESS_LAPLACIAN,
@@ -995,6 +1001,8 @@ from scripts.core.taxonomy_authority import (
     generate_exsiccatae_key,
     get_image_resolution_score,
     haversine_distance_meters,
+    evaluate_eastern_na_cohort_filter,
+    is_cis_mississippi_record,
     is_excluded_western_region,
     normalize_collector,
     normalize_determiner_surnames,
@@ -1823,8 +1831,11 @@ class VoucherHarvester:
         usda_exempt_gold: bool = DEFAULT_USDA_EXEMPT_GOLD,
         usda_cache_dir: Optional[Path] = None,
         usda_county_geojson_path: Optional[Path] = None,
-        harvest_full_continental_range: bool = True,
-        min_eastern_residency_records: int = 3,
+        harvest_full_continental_range: bool = False,
+        min_eastern_residency_records: int = 10,
+        cis_mississippi_longitude_threshold: float = DEFAULT_CIS_MISSISSIPPI_LON,
+        min_cis_mississippi_fraction: float = DEFAULT_MIN_CIS_MISSISSIPPI_FRAC,
+        transcontinental_longitude_threshold: float = DEFAULT_TRANSCONTINENTAL_LON,
         webp_quality: int = 92,
     ):
         self.logger = logger or logging.getLogger("VoucherHarvester")
@@ -1857,46 +1868,62 @@ class VoucherHarvester:
                 and not hasattr(occ.search, "_mock_name")
                 and not hasattr(occ.search, "assert_called")
             ):
-                lon_bound = f"{float(western_longitude_threshold)},-50.0"
+                cis_lon_bound = f"{float(cis_mississippi_longitude_threshold)},-50.0"
                 facet_countries = list(eff_countries) if eff_countries else ["US", "CA"]
                 min_res_n = max(1, int(min_eastern_residency_records))
+                min_cis_frac = float(min_cis_mississippi_fraction)
                 self.logger.info(
-                    f"Querying GBIF server-side species facet for Eastern NA residency "
-                    f"(countries={facet_countries}, decimalLongitude={lon_bound}, min_records={min_res_n})..."
+                    f"Querying GBIF server-side species facet for strict Cis-Mississippi Eastern NA residency "
+                    f"(countries={facet_countries}, cis_lon={cis_lon_bound}, min_records={min_res_n}, min_frac={min_cis_frac:.2f})..."
                 )
                 eastern_residents = []
                 try:
                     import urllib.parse
                     genus_key_val = _get_packera_genus_key_gbif() or 3109225
-                    agg_key_counts: Dict[int, int] = {}
-                    east_us_states = sorted(
+                    cis_key_counts: Dict[int, int] = {}
+                    tot_key_counts: Dict[int, int] = {}
+                    cis_us_states = sorted(
                         st_title
                         for st_low, st_title in {
                             v.lower(): v.title() for v in _US_STATE_ABBR_TO_FULL.values()
                         }.items()
-                        if st_low.upper() not in EXCLUDED_WESTERN_STATES
+                        if st_low.upper() in CIS_MISSISSIPPI_STATES_PROVINCES
                     )
-                    east_ca_provs = [
+                    cis_ca_provs = [
                         "Ontario", "Quebec", "New Brunswick", "Nova Scotia",
-                        "Prince Edward Island", "Newfoundland and Labrador", "Manitoba",
+                        "Prince Edward Island", "Newfoundland and Labrador",
                     ]
                     for ctry in facet_countries:
-                        facet_urls = [
-                            (
-                                f"https://api.gbif.org/v1/occurrence/search?"
-                                f"taxonKey={genus_key_val}&country={ctry}&decimalLongitude={lon_bound}"
-                                f"&basisOfRecord=PRESERVED_SPECIMEN&mediaType=StillImage"
-                                f"&facet=speciesKey&facetMincount=1&facetLimit=500&limit=0"
-                            )
-                        ]
-                        # Also tally locality-redacted (ungeoreferenced) sheets in Eastern states/provinces
-                        # so imperiled Eastern endemics with withheld coordinates are never pre-screened out.
-                        st_list = east_us_states if ctry == "US" else (east_ca_provs if ctry == "CA" else [])
+                        # Total country count per speciesKey to compute cis-Mississippi residency share
+                        tot_url = (
+                            f"https://api.gbif.org/v1/occurrence/search?"
+                            f"taxonKey={genus_key_val}&country={ctry}"
+                            f"&basisOfRecord=PRESERVED_SPECIMEN&mediaType=StillImage"
+                            f"&facet=speciesKey&facetMincount=1&facetLimit=500&limit=0"
+                        )
+                        req_tot = urllib.request.Request(tot_url, headers={"Accept": "application/json"})
+                        with urllib.request.urlopen(req_tot, timeout=15.0) as resp_tot:
+                            tot_payload = json.loads(resp_tot.read().decode("utf-8"))
+                        tot_facets = tot_payload.get("facets", []) or []
+                        for item in ((tot_facets[0].get("counts", []) or []) if tot_facets else []):
+                            if isinstance(item, dict) and str(item.get("name", "")).isdigit():
+                                k_int = int(item["name"])
+                                tot_key_counts[k_int] = tot_key_counts.get(k_int, 0) + int(item.get("count", 0))
+
+                        st_list = cis_us_states if ctry == "US" else (cis_ca_provs if ctry == "CA" else [])
+                        facet_urls = []
                         if st_list:
                             st_q = "&".join(f"stateProvince={urllib.parse.quote(s)}" for s in st_list)
                             facet_urls.append(
                                 f"https://api.gbif.org/v1/occurrence/search?"
-                                f"taxonKey={genus_key_val}&country={ctry}&hasCoordinate=false&{st_q}"
+                                f"taxonKey={genus_key_val}&country={ctry}&{st_q}"
+                                f"&basisOfRecord=PRESERVED_SPECIMEN&mediaType=StillImage"
+                                f"&facet=speciesKey&facetMincount=1&facetLimit=500&limit=0"
+                            )
+                        else:
+                            facet_urls.append(
+                                f"https://api.gbif.org/v1/occurrence/search?"
+                                f"taxonKey={genus_key_val}&country={ctry}&decimalLongitude={cis_lon_bound}"
                                 f"&basisOfRecord=PRESERVED_SPECIMEN&mediaType=StillImage"
                                 f"&facet=speciesKey&facetMincount=1&facetLimit=500&limit=0"
                             )
@@ -1909,22 +1936,33 @@ class VoucherHarvester:
                             for item in sp_counts:
                                 if isinstance(item, dict) and str(item.get("name", "")).isdigit():
                                     k_int = int(item["name"])
-                                    agg_key_counts[k_int] = agg_key_counts.get(k_int, 0) + int(item.get("count", 0))
-                    resident_keys = [k_int for k_int, c_tot in agg_key_counts.items() if c_tot >= min_res_n]
+                                    cis_key_counts[k_int] = cis_key_counts.get(k_int, 0) + int(item.get("count", 0))
+
+                    canon_whitelist_low = {s.lower() for s in CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES}
                     base_set_lower = {b.lower(): b for b in base_taxa}
                     resolved_names = set()
-                    for sk in resident_keys:
+                    for sk, c_cis in cis_key_counts.items():
+                        c_tot = max(c_cis, tot_key_counts.get(sk, c_cis))
+                        cis_share = float(c_cis) / float(max(1, c_tot))
                         try:
                             u_info = species.name_usage(key=sk) if hasattr(species, "name_usage") else {}
+                            cand = None
                             if isinstance(u_info, dict):
                                 cand = _extract_canonical_binomial(
                                     u_info.get("canonicalName") or u_info.get("species") or u_info.get("scientificName"),
                                     {"Packera"},
                                 )
-                                if cand:
-                                    resolved_names.add(base_set_lower.get(cand.lower(), cand))
+                            if not cand:
+                                continue
+                            is_canon_east = cand.lower() in canon_whitelist_low
+                            if is_canon_east or (c_cis >= min_res_n and cis_share >= min_cis_frac):
+                                resolved_names.add(base_set_lower.get(cand.lower(), cand))
                         except Exception:
                             pass
+                    # Ensure narrow cis-Mississippi endemics in base_taxa with locality-redacted records are never dropped
+                    for b_tx in base_taxa:
+                        if b_tx.lower() in canon_whitelist_low:
+                            resolved_names.add(b_tx)
                     eastern_residents = sorted(resolved_names)
                 except Exception as facet_exc:
                     self.logger.warning(f"Facet pre-screen fallback triggered ({facet_exc}).")
@@ -2033,6 +2071,9 @@ class VoucherHarvester:
         )
         self.harvest_full_continental_range = bool(harvest_full_continental_range)
         self.min_eastern_residency_records = max(1, int(min_eastern_residency_records))
+        self.cis_mississippi_longitude_threshold = float(cis_mississippi_longitude_threshold)
+        self.min_cis_mississippi_fraction = float(min_cis_mississippi_fraction)
+        self.transcontinental_longitude_threshold = float(transcontinental_longitude_threshold)
         self.webp_quality = max(1, min(100, int(webp_quality)))
         self.last_usda_filter_stats: Optional[Dict[str, Any]] = None
         self._secondary_duplicate_pool: Optional[pd.DataFrame] = None
@@ -2413,6 +2454,14 @@ class VoucherHarvester:
                 taxon_retained += 1
 
             use_server_lon_filter = bool(self.exclude_western and not self.harvest_full_continental_range)
+            canon_query_bin = _extract_canonical_binomial(taxon, {"Packera"}) or standardize_packera_taxon(taxon) or ""
+            is_transcont_query = bool(
+                self.is_genus_wide
+                and canon_query_bin.lower() in {s.lower() for s in TRANSCONTINENTAL_BOREAL_PACKERA_SPECIES}
+            )
+            eff_query_west_lon = (
+                self.transcontinental_longitude_threshold if is_transcont_query else self.western_longitude_threshold
+            )
             for country_code in country_targets:
                 offset = 0
                 limit = 300
@@ -2429,7 +2478,7 @@ class VoucherHarvester:
                     if country_code:
                         search_kwargs["country"] = country_code
                     if use_server_lon_filter:
-                        search_kwargs["decimalLongitude"] = f"{self.western_longitude_threshold},-50.0"
+                        search_kwargs["decimalLongitude"] = f"{eff_query_west_lon},-50.0"
                     try:
                         response = occ.search(**search_kwargs)
                     except Exception as e:
@@ -2493,42 +2542,72 @@ class VoucherHarvester:
                 and len(df) < self.min_eastern_residency_records
             )
             if self.exclude_western and not is_direct_single_genus_tiny_mock:
-                canon_series = df["scientificName"].map(
-                    lambda x: standardize_packera_taxon(x) or str(x).strip()
-                )
-                west_mask = (
-                    df["_is_western_rec"].astype(bool)
-                    if "_is_western_rec" in df.columns
-                    else pd.Series(False, index=df.index)
-                )
-                type_mask_r = (
-                    df["_is_type_rec"].astype(bool)
-                    if "_is_type_rec" in df.columns
-                    else pd.Series(False, index=df.index)
-                )
-                east_non_type_mask = (~west_mask) & (~type_mask_r)
-                east_counts = canon_series[east_non_type_mask].value_counts().to_dict()
-                resident_species = {
-                    sp for sp, cnt in east_counts.items() if int(cnt) >= self.min_eastern_residency_records
-                }
-
-                if self.is_genus_wide:
-                    keep_res_mask = canon_series.isin(resident_species)
+                if self.is_genus_wide and not self.harvest_full_continental_range:
+                    keep_res_mask, cis_stats = evaluate_eastern_na_cohort_filter(
+                        df,
+                        standardize_packera_taxon,
+                        western_longitude_threshold=self.western_longitude_threshold,
+                        transcontinental_longitude_threshold=self.transcontinental_longitude_threshold,
+                        cis_longitude_threshold=self.cis_mississippi_longitude_threshold,
+                        min_cis_records=self.min_eastern_residency_records,
+                        min_cis_fraction=self.min_cis_mississippi_fraction,
+                    )
                     if not keep_res_mask.all():
-                        removed_sp = sorted(set(canon_series.dropna().unique()) - resident_species)
                         pre_len = len(df)
                         df = df.loc[keep_res_mask].reset_index(drop=True)
                         self.logger.info(
-                            f"Eastern NA Biogeographic Residency Filter: Removed {len(removed_sp)} "
-                            f"non-resident Cordilleran/western species ({pre_len - len(df)} records) with "
-                            f"< {self.min_eastern_residency_records} Eastern NA occurrences."
+                            f"Cis-Mississippi Eastern NA Filter: Retained {len(df)}/{pre_len} vouchers across "
+                            f"{len(cis_stats['retained_species'])} Eastern species (dropped {len(cis_stats['dropped_species'])} "
+                            f"Cordilleran/Plains species: {cis_stats['dropped_species']})."
                         )
-                elif self.harvest_full_continental_range:
-                    # Verified Eastern NA resident species (>= min_eastern_residency_records in Eastern NA)
-                    # retain their full US + CA continental range; non-resident species drop western strays.
-                    keep_res_mask = canon_series.isin(resident_species) | (~west_mask)
-                    if not keep_res_mask.all():
-                        df = df.loc[keep_res_mask].reset_index(drop=True)
+                else:
+                    canon_series = df["scientificName"].map(
+                        lambda x: standardize_packera_taxon(x) or str(x).strip()
+                    )
+                    west_mask = (
+                        df["_is_western_rec"].astype(bool)
+                        if "_is_western_rec" in df.columns
+                        else pd.Series(False, index=df.index)
+                    )
+                    type_mask_r = (
+                        df["_is_type_rec"].astype(bool)
+                        if "_is_type_rec" in df.columns
+                        else pd.Series(False, index=df.index)
+                    )
+                    cis_mask = pd.Series(
+                        [
+                            is_cis_mississippi_record(
+                                st_v,
+                                lat=lat_v,
+                                lon=lon_v,
+                                cis_longitude_threshold=self.cis_mississippi_longitude_threshold,
+                            )
+                            for st_v, lat_v, lon_v in zip(
+                                df.get("stateProvince", pd.Series([""] * len(df))),
+                                df.get("decimalLatitude", pd.Series([None] * len(df))),
+                                df.get("decimalLongitude", pd.Series([None] * len(df))),
+                            )
+                        ],
+                        index=df.index,
+                        dtype=bool,
+                    )
+                    eff_min_res = (
+                        self.min_eastern_residency_records
+                        if len(df) >= 50
+                        else min(3, max(1, self.min_eastern_residency_records))
+                    )
+                    cis_counts = canon_series[cis_mask & (~type_mask_r)].value_counts().to_dict()
+                    resident_species = {
+                        sp for sp, cnt in cis_counts.items() if int(cnt) >= eff_min_res
+                    }
+                    if self.is_genus_wide:
+                        keep_res_mask = canon_series.isin(resident_species)
+                        if not keep_res_mask.all():
+                            df = df.loc[keep_res_mask].reset_index(drop=True)
+                    elif self.harvest_full_continental_range:
+                        keep_res_mask = canon_series.isin(resident_species) | (~west_mask)
+                        if not keep_res_mask.all():
+                            df = df.loc[keep_res_mask].reset_index(drop=True)
 
                 if df.empty:
                     for c_tmp in ("_is_western_rec", "_is_type_rec"):

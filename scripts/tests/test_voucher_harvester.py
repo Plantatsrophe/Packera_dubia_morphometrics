@@ -1586,9 +1586,9 @@ class TestDynamicAuthorityEngineAndSynonymExpansion(unittest.TestCase):
                 {
                     "key": sci_ord * 10000 + idx + 1,
                     "scientificName": f"{sci} Auth.",
-                    "stateProvince": "Texas",
-                    "decimalLatitude": 31.20 + idx * 0.05,
-                    "decimalLongitude": -95.50 - idx * 0.05,
+                    "stateProvince": "North Carolina",
+                    "decimalLatitude": 35.80 + idx * 0.05,
+                    "decimalLongitude": -79.50 - idx * 0.05,
                     "coordinateUncertaintyInMeters": 100.0,
                     "year": 2021,
                     "month": 5,
@@ -2323,7 +2323,6 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
                     }
                 return {"results": [], "count": 0}
 
-            self.assertNotIn("decimalLongitude", kwargs)
             ctry = kwargs.get("country")
             if sci == "Packera aurea":
                 if ctry == "CA":
@@ -2429,14 +2428,24 @@ class TestPhase1AuthorityHygieneAndExsiccataeConflict(unittest.TestCase):
 
         with patch("scripts.core.harvester.species", mock_species), \
              patch("scripts.core.harvester.occ.search", side_effect=_fake_occ_residency):
+            # Default eastern_na drops Montana (-110.5W) and non-cis-Mississippi P. bolanderi while keeping cis-Mississippi + Holotype
             harvester = VoucherHarvester(taxa=[], max_records_per_taxon=10, expand_synonyms=False)
             df = harvester.harvest()
+            self.assertEqual(set(df["species_standardized"]), {"Packera aurea"})
+            self.assertNotIn("Packera bolanderi", set(df["species_standardized"]))
+            self.assertIn("PH_AUREA_HOLOTYPE", set(df["catalogNumber"]))
+            self.assertIn("CAN_AUREA_ON", set(df["catalogNumber"]))
+            self.assertNotIn("MONT_AUREA_WEST", set(df["catalogNumber"]))
 
-        self.assertEqual(set(df["species_standardized"]), {"Packera aurea"})
-        self.assertNotIn("Packera bolanderi", set(df["species_standardized"]))
-        self.assertIn("PH_AUREA_HOLOTYPE", set(df["catalogNumber"]))
-        self.assertIn("CAN_AUREA_ON", set(df["catalogNumber"]))
-        self.assertIn("MONT_AUREA_WEST", set(df["catalogNumber"]))
+            # Explicit harvest_full_continental_range=True opt-in still retains Montana conspecific
+            harvester_full = VoucherHarvester(
+                taxa=[],
+                max_records_per_taxon=10,
+                expand_synonyms=False,
+                harvest_full_continental_range=True,
+            )
+            df_full = harvester_full.harvest()
+            self.assertIn("MONT_AUREA_WEST", set(df_full["catalogNumber"]))
 
     def test_harvest_deduplicates_secondary_exsiccatae_and_migrates_jpg_to_webp(self):
         """Verify harvest() deduplicates secondary exsiccatae before download and migrate_existing_vouchers_to_webp converts .jpg to .webp."""
@@ -3702,6 +3711,95 @@ class TestStep1SystematicsAndDownstreamAuthorityAudit(unittest.TestCase):
                 )
                 self.assertEqual(r_out.returncode, 0, r_out.stderr)
                 self.assertIn("R_CFG_OK", r_out.stdout)
+
+
+    def test_cis_mississippi_disjunct_filter_and_prune_eastern_cohort(self):
+        """Verify Cis-Mississippi filter keeps P. dubia / P. obovata disjuncts up to -100W, drops P. cana & western P. paupercula, and prunes SQLite + CSVs."""
+        import sqlite3
+        from scripts.core.db import get_db_connection
+        from scripts.data_prep.prune_eastern_cohort import prune_workspace_cohort
+
+        with tempfile.TemporaryDirectory() as tmp_d:
+            ws = Path(tmp_d)
+            tables_dir = ws / "data" / "tables"
+            tables_dir.mkdir(parents=True, exist_ok=True)
+            db_p = ws / "data" / "packera_pipeline.sqlite"
+
+            conn = get_db_connection(db_path=db_p, init_schema=True, workspace_root=ws)
+            rows = [
+                # 1. Packera dubia cis-Mississippi (NC) -> KEEP
+                ("NCU_DUBIA_NC", "NCU", "Packera dubia", "Cineraria dubia", "North Carolina", 35.9, -79.0, "Tier_1_Gold", ""),
+                # 2. Packera dubia trans-Mississippi disjunct in East Texas (-95.2W >= -100W) -> KEEP
+                ("TEX_DUBIA_ETX", "TEX", "Packera dubia", "Senecio tomentosus", "Texas", 31.2, -95.2, "Tier_2_Silver", ""),
+                # 3. Packera obovata Edwards Plateau TX disjunct (-98.6W >= -100W) -> KEEP
+                ("BRIT_OBOVATA_TX", "BRIT", "Packera obovata", "Packera obovata", "Texas", 30.1, -98.6, "Tier_1_Gold", ""),
+                # 4. Packera obovata West Texas stray (-103.9W < -100W) -> DROP
+                ("SRSC_OBOVATA_WTX", "SRSC", "Packera obovata", "Packera obovata", "Texas", 30.6, -103.9, "Tier_3_Bronze", ""),
+                # 5. Packera obovata Western Type Rescue (-104.5W Holotype) -> KEEP (nomenclatural type)
+                ("NY_OBOVATA_TYPE", "NY", "Packera obovata", "Packera obovata", "New Mexico", 35.1, -104.5, "Tier_1_Gold", "Holotype"),
+                # 6. Packera paupercula cis-Mississippi (NC) & Driftless IA (-91.5W) -> KEEP
+                ("NCU_PAUP_NC", "NCU", "Packera paupercula", "Packera paupercula", "North Carolina", 36.1, -81.2, "Tier_1_Gold", ""),
+                ("ISC_PAUP_IA", "ISC", "Packera paupercula", "Packera paupercula", "Iowa", 42.9, -91.5, "Tier_2_Silver", ""),
+                # 7. Packera paupercula Western / Great Plains (SD -103.5W, TX -98.0W, BC -120.5W) -> DROP
+                ("RM_PAUP_SD", "RM", "Packera paupercula", "Packera paupercula", "South Dakota", 43.8, -103.5, "Tier_2_Silver", ""),
+                ("TEX_PAUP_TX", "TEX", "Packera paupercula", "Packera paupercula", "Texas", 30.4, -98.0, "Tier_3_Bronze", ""),
+                ("UBC_PAUP_BC", "UBC", "Packera paupercula", "Packera paupercula", "British Columbia", 50.2, -120.5, "Tier_2_Silver", ""),
+                # 8. Packera cana (Cordilleran/Plains with 1 stray IL sheet + 5 western sheets) -> DROP ENTIRE SPECIES
+                ("ILL_CANA_STRAY", "ILL", "Packera cana", "Packera cana", "Illinois", 40.1, -89.2, "Tier_3_Bronze", ""),
+                ("COLO_CANA_1", "COLO", "Packera cana", "Packera cana", "Colorado", 40.0, -105.3, "Tier_1_Gold", ""),
+                ("COLO_CANA_2", "COLO", "Packera cana", "Packera cana", "Wyoming", 43.1, -108.2, "Tier_1_Gold", ""),
+                ("MONT_CANA_3", "MONT", "Packera cana", "Packera cana", "Montana", 46.5, -112.0, "Tier_2_Silver", ""),
+            ]
+            with conn:
+                for cat, inst, sn, sr, st, lat, lon, tier, tstat in rows:
+                    conn.execute(
+                        """
+                        INSERT INTO vouchers (
+                            catalogNumber, institutionCode, scientificName, species_raw, species_standardized,
+                            stateProvince, decimalLatitude, decimalLongitude, determiner_tier, type_status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        (cat, inst, sn, sr, sn, st, lat, lon, tier, tstat),
+                    )
+                    conn.execute(
+                        "INSERT INTO plant_individuals (catalogNumber, plant_individual_id) VALUES (?, 0);",
+                        (cat,),
+                    )
+                    conn.execute(
+                        "INSERT INTO extracted_leaves (leaf_id, catalogNumber, plant_individual_id, leaf_zone, contour_xy_json) VALUES (?, ?, 0, 'basal', '[]');",
+                        (f"{cat}_L1", cat),
+                    )
+            v_df = pd.read_sql_query("SELECT * FROM vouchers;", conn)
+            v_df.to_csv(tables_dir / "curated_vouchers.csv", index=False)
+            conn.close()
+
+            res = prune_workspace_cohort(workspace_root=ws, db_path=db_p, vacuum=False, dry_run=False)
+            expected_kept = {
+                "NCU_DUBIA_NC",
+                "TEX_DUBIA_ETX",
+                "BRIT_OBOVATA_TX",
+                "NY_OBOVATA_TYPE",
+                "NCU_PAUP_NC",
+                "ISC_PAUP_IA",
+            }
+            self.assertEqual(res["keep_catalog_count"], len(expected_kept))
+            self.assertIn("Packera cana", res["dropped_species"])
+
+            conn_chk = sqlite3.connect(str(db_p))
+            try:
+                rem_cats = {r[0] for r in conn_chk.execute("SELECT catalogNumber FROM vouchers;").fetchall()}
+                rem_leaves = {r[0] for r in conn_chk.execute("SELECT catalogNumber FROM extracted_leaves;").fetchall()}
+                self.assertEqual(rem_cats, expected_kept)
+                self.assertEqual(rem_leaves, expected_kept)
+            finally:
+                conn_chk.close()
+
+            pruned_csv = pd.read_csv(tables_dir / "curated_vouchers.csv")
+            self.assertEqual(set(pruned_csv["catalogNumber"]), expected_kept)
+            # Also verify missing extracted_leaf_manifest.csv was reconstructed automatically from SQLite!
+            self.assertTrue((tables_dir / "extracted_leaf_manifest.csv").is_file())
+            rebuilt_leaves = pd.read_csv(tables_dir / "extracted_leaf_manifest.csv")
+            self.assertEqual(set(rebuilt_leaves["catalogNumber"]), expected_kept)
 
 
 if __name__ == "__main__":

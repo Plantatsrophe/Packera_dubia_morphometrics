@@ -932,8 +932,27 @@ if unres_mask.any():
     df = df[~unres_mask].copy()
     print(f'[Preflight: Taxon Hygiene] Dropped {n_unres} vouchers with unresolvable or open-nomenclature taxon strings.')
 
-from scripts.core.taxonomy_authority import apply_corpus_authority_tiers
+from scripts.core.taxonomy_authority import apply_corpus_authority_tiers, evaluate_eastern_na_cohort_filter
 df = apply_corpus_authority_tiers(df)
+
+eff_geo_scope = '${GEOGRAPHIC_SCOPE:-eastern_na}'.strip().lower() or 'eastern_na'
+inc_west_pf = '${INCLUDE_WESTERN:-false}'.strip().lower() == 'true'
+has_geo_cols = (
+    ('stateProvince' in df.columns and df['stateProvince'].astype(str).str.strip().replace({'nan': '', 'None': ''}).ne('').any())
+    or ('decimalLongitude' in df.columns and pd.to_numeric(df['decimalLongitude'], errors='coerce').notna().any())
+)
+if eff_geo_scope == 'eastern_na' and not inc_west_pf and not custom_taxa and not focal_raw and has_geo_cols:
+    keep_east_pf, east_pf_stats = evaluate_eastern_na_cohort_filter(df, standardize_packera_taxon)
+    if not keep_east_pf.all():
+        before_east_pf = len(df)
+        df = df.loc[keep_east_pf].reset_index(drop=True)
+        ret_sp_n = len(east_pf_stats.get('retained_species', []))
+        drp_sp_list = east_pf_stats.get('dropped_species', [])
+        print(
+            f'[Preflight: Cis-Mississippi Eastern NA Scope] Retained {len(df)} / {before_east_pf} vouchers '
+            f'across {ret_sp_n} cis-Mississippi Eastern species '
+            f'(dropped non-Eastern/western species: {drp_sp_list}).'
+        )
 
 if custom_taxa:
     before_custom_n = len(df)

@@ -325,6 +325,9 @@ def main(argv: list[str] | None = None) -> None:
             getattr(args, "harvest_full_continental_range", cfg.harvesting.harvest_full_continental_range)
         ),
         min_eastern_residency_records=int(cfg.harvesting.min_eastern_residency_records),
+        cis_mississippi_longitude_threshold=float(cfg.harvesting.cis_mississippi_longitude_threshold),
+        min_cis_mississippi_fraction=float(cfg.harvesting.min_cis_mississippi_fraction),
+        transcontinental_longitude_threshold=float(cfg.harvesting.transcontinental_longitude_threshold),
         webp_quality=int(cfg.harvesting.webp_quality),
     )
 

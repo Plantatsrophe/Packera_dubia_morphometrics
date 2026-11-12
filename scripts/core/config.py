@@ -322,7 +322,7 @@ class ThresholdsConfig:
     min_file_size_kb: float = 500.0
     min_sharpness_laplacian: float = 80.0
     max_uncertainty_meters: float = 5000.0
-    western_longitude_threshold: float = -104.05
+    western_longitude_threshold: float = -100.0
     geographic_scope: str = "eastern_na"
     countries: List[str] = field(default_factory=lambda: ["US", "CA"])
     capitulum_phenology: CapitulumPhenologyConfig = field(default_factory=CapitulumPhenologyConfig)
@@ -391,9 +391,12 @@ class HarvestingConfig:
     geographic_scope: str = "eastern_na"
     countries: List[str] = field(default_factory=lambda: ["US", "CA"])
     exclude_western: bool = True
-    harvest_full_continental_range: bool = True
-    min_eastern_residency_records: int = 3
-    western_longitude_threshold: float = -104.05
+    harvest_full_continental_range: bool = False
+    min_eastern_residency_records: int = 10
+    western_longitude_threshold: float = -100.0
+    cis_mississippi_longitude_threshold: float = -90.5
+    min_cis_mississippi_fraction: float = 0.05
+    transcontinental_longitude_threshold: float = -95.5
     home_herbarium: str = "NCU"
     min_megapixels: float = 8.0
     min_file_size_kb: float = 500.0
@@ -831,6 +834,61 @@ EXCLUDED_WESTERN_STATES: Set[str] = {
     "YT", "YUKON", "YUKON TERRITORY", "NT", "NORTHWEST TERRITORIES", "NU", "NUNAVUT",
 }
 
+# Strictly cis-Mississippi US states + D.C. and Eastern Canadian provinces (excluding trans-Mississippi Plains/Highlands)
+CIS_MISSISSIPPI_STATES_PROVINCES: Set[str] = {
+    "AL", "ALABAMA", "CT", "CONNECTICUT", "DC", "DISTRICT OF COLUMBIA",
+    "WASHINGTON, D.C.", "WASHINGTON D.C.", "WASHINGTON DC",
+    "DE", "DELAWARE", "FL", "FLORIDA", "GA", "GEORGIA", "IL", "ILLINOIS",
+    "IN", "INDIANA", "KY", "KENTUCKY", "MA", "MASSACHUSETTS", "MD", "MARYLAND",
+    "ME", "MAINE", "MI", "MICHIGAN", "MS", "MISSISSIPPI", "NC", "NORTH CAROLINA",
+    "NH", "NEW HAMPSHIRE", "NJ", "NEW JERSEY", "NY", "NEW YORK", "OH", "OHIO",
+    "PA", "PENNSYLVANIA", "RI", "RHODE ISLAND", "SC", "SOUTH CAROLINA",
+    "TN", "TENNESSEE", "VA", "VIRGINIA", "VT", "VERMONT", "WI", "WISCONSIN",
+    "WV", "WEST VIRGINIA",
+    "ON", "ONTARIO", "QC", "QUEBEC", "QUÉBEC", "NB", "NEW BRUNSWICK",
+    "NS", "NOVA SCOTIA", "PE", "PEI", "PRINCE EDWARD ISLAND",
+    "NL", "NEWFOUNDLAND", "NEWFOUNDLAND AND LABRADOR",
+}
+
+# Great Plains states/provinces west of the immediate Mississippi-border tier (MN, IA, MO, AR, LA)
+GREAT_PLAINS_STRADDLING_STATES: Set[str] = {
+    "ND", "NORTH DAKOTA", "SD", "SOUTH DAKOTA", "NE", "NEBRASKA",
+    "KS", "KANSAS", "OK", "OKLAHOMA", "TX", "TEXAS", "MB", "MANITOBA",
+}
+
+# Verified native/established cis-Mississippi Eastern North American Packera species
+CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES: Set[str] = {
+    "Packera anonyma",
+    "Packera antennariifolia",
+    "Packera aurea",
+    "Packera balsamitae",
+    "Packera crawfordii",
+    "Packera dubia",
+    "Packera gaspensis",
+    "Packera glabella",
+    "Packera glabrata",
+    "Packera imparipinnata",
+    "Packera indecora",
+    "Packera insulae-regalis",
+    "Packera millefolium",
+    "Packera obovata",
+    "Packera pauciflora",
+    "Packera paupercula",
+    "Packera plattensis",
+    "Packera schweinitziana",
+    "Packera serpenticola",
+    "Packera tampicana",
+    "Packera x memmingeri",
+    "Packera ×memmingeri",
+}
+
+# Transcontinental boreal/cordilleran species whose Great Plains / Western sheets must be capped at the Mississippi corridor
+TRANSCONTINENTAL_BOREAL_PACKERA_SPECIES: Set[str] = {
+    "Packera paupercula",
+    "Packera indecora",
+    "Packera pauciflora",
+}
+
 # Module-level defaults instantiated dynamically from configuration YAML
 _DEFAULT_CONFIG = PipelineConfig.from_yaml()
 DEFAULT_WORKSPACE = _DEFAULT_CONFIG.paths.workspace_root
@@ -845,6 +903,9 @@ DEFAULT_MIN_FILE_SIZE_KB = _DEFAULT_CONFIG.thresholds.min_file_size_kb
 DEFAULT_MIN_SHARPNESS_LAPLACIAN = _DEFAULT_CONFIG.thresholds.min_sharpness_laplacian
 DEFAULT_TARGET_TAXA: List[str] = []
 WESTERN_LONGITUDE_THRESHOLD = _DEFAULT_CONFIG.thresholds.western_longitude_threshold
+DEFAULT_CIS_MISSISSIPPI_LON = _DEFAULT_CONFIG.harvesting.cis_mississippi_longitude_threshold
+DEFAULT_MIN_CIS_MISSISSIPPI_FRAC = _DEFAULT_CONFIG.harvesting.min_cis_mississippi_fraction
+DEFAULT_TRANSCONTINENTAL_LON = _DEFAULT_CONFIG.harvesting.transcontinental_longitude_threshold
 DEFAULT_GEOGRAPHIC_SCOPE = _DEFAULT_CONFIG.harvesting.geographic_scope
 DEFAULT_COUNTRIES = _DEFAULT_CONFIG.harvesting.countries
 DEFAULT_HOME_HERBARIUM = _DEFAULT_CONFIG.harvesting.home_herbarium

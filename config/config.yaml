@@ -64,7 +64,7 @@ thresholds:
   min_file_size_kb: 500.0
   min_sharpness_laplacian: 80.0
   max_uncertainty_meters: 5000.0
-  western_longitude_threshold: -104.05
+  western_longitude_threshold: -100.0
   geographic_scope: "eastern_na"
   countries:
     - "US"
@@ -104,9 +104,12 @@ harvesting:
     - "US"
     - "CA"
   exclude_western: true
-  harvest_full_continental_range: true
-  min_eastern_residency_records: 3
-  western_longitude_threshold: -104.05
+  harvest_full_continental_range: false
+  min_eastern_residency_records: 10
+  western_longitude_threshold: -100.0
+  cis_mississippi_longitude_threshold: -90.5
+  min_cis_mississippi_fraction: 0.05
+  transcontinental_longitude_threshold: -95.5
   home_herbarium: "NCU"
   min_megapixels: 8.0
   min_file_size_kb: 500.0

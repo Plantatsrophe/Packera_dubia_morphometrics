@@ -40,9 +40,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 from scripts.core.config import (
     DEFAULT_COUNTRIES,
+    CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES,
+    CIS_MISSISSIPPI_STATES_PROVINCES,
+    DEFAULT_CIS_MISSISSIPPI_LON,
     DEFAULT_GEOGRAPHIC_SCOPE,
     DEFAULT_HOME_HERBARIUM,
+    DEFAULT_MIN_CIS_MISSISSIPPI_FRAC,
+    DEFAULT_TRANSCONTINENTAL_LON,
     EXCLUDED_WESTERN_STATES,
+    GREAT_PLAINS_STRADDLING_STATES,
+    TRANSCONTINENTAL_BOREAL_PACKERA_SPECIES,
     MAJOR_HERBARIA_CODES,
     PRIMARY_TYPE_STATUSES,
     SECONDARY_TYPE_STATUSES,
@@ -2190,7 +2197,7 @@ def is_excluded_western_region(
                     "WASHINGTON, D.C.", "WASHINGTON D.C.", "WASHINGTON DC", "DISTRICT OF COLUMBIA", "DC",
                     "ON", "ONTARIO", "QC", "QUEBEC", "QUÉBEC", "NB", "NEW BRUNSWICK",
                     "NS", "NOVA SCOTIA", "PE", "PEI", "PRINCE EDWARD ISLAND",
-                    "NL", "NEWFOUNDLAND", "NEWFOUNDLAND AND LABRADOR", "MB", "MANITOBA",
+                    "NL", "NEWFOUNDLAND", "NEWFOUNDLAND AND LABRADOR",
                 }:
                     return False
 
@@ -2212,6 +2219,240 @@ def is_excluded_western_region(
         return True
 
     return False
+
+
+def _clean_upper_state_province(state_province: Optional[Any]) -> str:
+    if state_province is None or (isinstance(state_province, float) and math.isnan(state_province)):
+        return ""
+    if pd is not None and pd.isna(state_province):
+        return ""
+    raw_state = str(state_province).strip()
+    cleaned = re.sub(r"\((?:state|province|territory)\)", "", raw_state, flags=re.IGNORECASE).strip(" ._,-")
+    up = cleaned.upper()
+    if up in {"NONE", "NAN", "NA", "N/A", "NULL", "UNKNOWN", "UNSPECIFIED", "UNRECORDED"}:
+        return ""
+    return up
+
+
+def is_cis_mississippi_record(
+    state_province: Optional[str],
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    cis_longitude_threshold: float = DEFAULT_CIS_MISSISSIPPI_LON,
+) -> bool:
+    """
+    Returns True strictly when an occurrence lies east of the Mississippi River
+    (`CIS_MISSISSIPPI_STATES_PROVINCES`, or `lon >= cis_longitude_threshold` when state is missing).
+    Trans-Mississippi states (MN, IA, MO, AR, LA, ND, SD, NE, KS, OK, TX, MB) return False so
+    Cordilleran and Great Plains species cannot pass Eastern NA species-residency discovery.
+    """
+    up_state = _clean_upper_state_province(state_province)
+    lon_val: Optional[float] = None
+    if lon is not None:
+        try:
+            cand_lon = float(lon)
+            if math.isfinite(cand_lon):
+                lon_val = cand_lon
+        except (ValueError, TypeError):
+            lon_val = None
+
+    if up_state:
+        if up_state in CIS_MISSISSIPPI_STATES_PROVINCES:
+            # Guard against grossly transposed western coordinates inside an eastern state label
+            if lon_val is not None and lon_val < -92.5 and up_state not in {"ONTARIO", "ON"}:
+                return False
+            return True
+        return False
+
+    if lon_val is not None and float(cis_longitude_threshold) <= lon_val <= -50.0:
+        if lat is not None:
+            try:
+                lat_f = float(lat)
+                if math.isfinite(lat_f) and lat_f < 24.0:
+                    return False
+            except (ValueError, TypeError):
+                pass
+        return True
+    return False
+
+
+def evaluate_eastern_na_cohort_filter(
+    df: "pd.DataFrame",
+    standardize_taxon_fn: Any,
+    *,
+    western_longitude_threshold: float = WESTERN_LONGITUDE_THRESHOLD,
+    transcontinental_longitude_threshold: float = DEFAULT_TRANSCONTINENTAL_LON,
+    cis_longitude_threshold: float = DEFAULT_CIS_MISSISSIPPI_LON,
+    min_cis_records: int = 10,
+    min_cis_fraction: float = DEFAULT_MIN_CIS_MISSISSIPPI_FRAC,
+    strict_species_whitelist: bool = False,
+) -> Tuple["pd.Series", Dict[str, Any]]:
+    """
+    Two-stage Cis-Mississippi Eastern North America + Disjunct cohort filter:
+      1. Species Gate: Retains only genuinely cis-Mississippi Eastern Packera species
+         (either in `CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES` or meeting both
+         `cis_count >= eff_min_cis` and `cis_fraction >= min_cis_fraction` east of the
+         Mississippi River), dropping Cordilleran and Great Plains species (e.g. P. cana,
+         P. tridenticulata, P. streptanthifolia, P. pseudaurea, P. multilobata, P. bolanderi).
+      2. Voucher Gate: Retains cis-Mississippi vouchers plus trans-Mississippi disjuncts
+         (MO, AR, LA, IA, MN, and eastern TX/OK/KS/NE/SD/ND) up to `western_longitude_threshold`
+         (default `-100.0W`) for predominantly Eastern taxa (e.g. P. dubia, P. obovata, P. aurea),
+         while capping transcontinental boreal/cordilleran species (`P. paupercula`, `P. indecora`)
+         at `transcontinental_longitude_threshold` (`-95.5W`, excluding `GREAT_PLAINS_STRADDLING_STATES`)
+         and unconditionally rescuing verified nomenclatural types of retained Eastern species.
+    """
+    if df is None or df.empty:
+        empty_mask = pd.Series(dtype=bool, index=df.index if df is not None else None)
+        return empty_mask, {"retained_species": [], "dropped_species": [], "species_breakdown": {}}
+
+    canonical_whitelist_low = {s.lower(): s for s in CANONICAL_CIS_MISSISSIPPI_PACKERA_SPECIES}
+    transcontinental_low = {s.lower() for s in TRANSCONTINENTAL_BOREAL_PACKERA_SPECIES}
+
+    def _resolve_sp(row: Mapping[str, Any]) -> str:
+        for col in ("species_standardized", "scientificName", "species_raw"):
+            val = row.get(col)
+            if val is not None and str(val).strip() and str(val).strip().lower() not in {"nan", "none"}:
+                std = standardize_taxon_fn(val) if callable(standardize_taxon_fn) else None
+                if std:
+                    return str(std).strip()
+        raw_fb = str(row.get("scientificName") or row.get("species_raw") or "").strip()
+        return raw_fb
+
+    lat_col = "decimalLatitude" if "decimalLatitude" in df.columns else ("latitude" if "latitude" in df.columns else None)
+    lon_col = "decimalLongitude" if "decimalLongitude" in df.columns else ("longitude" if "longitude" in df.columns else None)
+
+    n_rows = len(df)
+    sp_list: List[str] = []
+    is_type_list: List[bool] = []
+    is_cis_list: List[bool] = []
+    is_west_excl_list: List[bool] = []
+    is_transcont_west_list: List[bool] = []
+
+    records = df.to_dict(orient="records")
+    for rec in records:
+        sp = _resolve_sp(rec)
+        sp_list.append(sp)
+        if "_is_type_rec" in rec and rec["_is_type_rec"] is not None and not pd.isna(rec["_is_type_rec"]):
+            is_t = bool(rec["_is_type_rec"])
+        else:
+            is_t, _ = _is_verified_type_status(rec.get("type_status") or rec.get("_raw_type_status"))
+        is_type_list.append(is_t)
+
+        st_val = rec.get("stateProvince")
+        lat_val = rec.get(lat_col) if lat_col else None
+        lon_val = rec.get(lon_col) if lon_col else None
+
+        cis_ok = is_cis_mississippi_record(
+            st_val, lat=lat_val, lon=lon_val, cis_longitude_threshold=cis_longitude_threshold
+        )
+        is_cis_list.append(cis_ok)
+
+        west_excl = is_excluded_western_region(
+            st_val,
+            lat=lat_val,
+            lon=lon_val,
+            western_longitude_threshold=western_longitude_threshold,
+            exclude_western=True,
+            is_type_specimen=is_t,
+        )
+        is_west_excl_list.append(west_excl)
+
+        # Stricter western/Plains cap for transcontinental boreal/cordilleran taxa (e.g. P. paupercula)
+        tc_west = False
+        if not is_t and sp.lower() in transcontinental_low:
+            up_st = _clean_upper_state_province(st_val)
+            if up_st in GREAT_PLAINS_STRADDLING_STATES or up_st in EXCLUDED_WESTERN_STATES:
+                tc_west = True
+            elif lon_val is not None:
+                try:
+                    lf = float(lon_val)
+                    if math.isfinite(lf) and lf < float(transcontinental_longitude_threshold):
+                        tc_west = True
+                except (ValueError, TypeError):
+                    pass
+        is_transcont_west_list.append(tc_west)
+
+    eff_min_cis = int(min_cis_records) if n_rows >= 50 else min(3, max(1, int(min_cis_records)))
+
+    sp_totals: Dict[str, int] = {}
+    sp_non_type_totals: Dict[str, int] = {}
+    sp_cis_counts: Dict[str, int] = {}
+    for sp, is_t, is_cis in zip(sp_list, is_type_list, is_cis_list):
+        if not sp:
+            continue
+        sp_totals[sp] = sp_totals.get(sp, 0) + 1
+        if not is_t:
+            sp_non_type_totals[sp] = sp_non_type_totals.get(sp, 0) + 1
+            if is_cis:
+                sp_cis_counts[sp] = sp_cis_counts.get(sp, 0) + 1
+
+    retained_species: Set[str] = set()
+    for sp, tot_n in sp_totals.items():
+        cis_n = sp_cis_counts.get(sp, 0)
+        nt_n = max(1, sp_non_type_totals.get(sp, 0))
+        cis_frac = float(cis_n) / float(nt_n)
+        in_whitelist = sp.lower() in canonical_whitelist_low
+        if strict_species_whitelist:
+            if in_whitelist:
+                retained_species.add(sp)
+        else:
+            if in_whitelist and (cis_n >= 1 or tot_n == sp_totals[sp] - sp_non_type_totals.get(sp, 0) or n_rows < 50):
+                # Canonical cis-Mississippi species with >=1 cis-Mississippi sheet (or type-only / small test cohort)
+                if cis_n >= 1 or sp_non_type_totals.get(sp, 0) == 0:
+                    retained_species.add(sp)
+                elif cis_frac >= float(min_cis_fraction):
+                    retained_species.add(sp)
+                else:
+                    # Even if only trans-Mississippi disjuncts of P. dubia / P. obovata were loaded in a subset CSV, retain canonical Eastern endemics
+                    if sp.lower() not in transcontinental_low:
+                        retained_species.add(sp)
+            elif cis_n >= eff_min_cis and cis_frac >= float(min_cis_fraction):
+                retained_species.add(sp)
+
+    keep_flags: List[bool] = []
+    species_breakdown: Dict[str, Dict[str, Any]] = {}
+    for sp in sorted(sp_totals.keys()):
+        species_breakdown[sp] = {
+            "total": sp_totals[sp],
+            "cis_mississippi": sp_cis_counts.get(sp, 0),
+            "retained": 0,
+            "disjunct_retained": 0,
+            "dropped": 0,
+            "resident_accepted": sp in retained_species,
+        }
+
+    for sp, is_t, is_cis, west_excl, tc_west in zip(
+        sp_list, is_type_list, is_cis_list, is_west_excl_list, is_transcont_west_list
+    ):
+        if not sp or sp not in retained_species:
+            keep_flags.append(False)
+            if sp in species_breakdown:
+                species_breakdown[sp]["dropped"] += 1
+            continue
+        if is_t:
+            keep_flags.append(True)
+            species_breakdown[sp]["retained"] += 1
+            continue
+        if west_excl or tc_west:
+            keep_flags.append(False)
+            species_breakdown[sp]["dropped"] += 1
+            continue
+        keep_flags.append(True)
+        species_breakdown[sp]["retained"] += 1
+        if not is_cis:
+            species_breakdown[sp]["disjunct_retained"] += 1
+
+    keep_series = pd.Series(keep_flags, index=df.index, dtype=bool)
+    dropped_species = sorted(set(sp_totals.keys()) - retained_species)
+    stats = {
+        "initial_rows": n_rows,
+        "retained_rows": int(keep_series.sum()),
+        "dropped_rows": int(n_rows - int(keep_series.sum())),
+        "retained_species": sorted(retained_species),
+        "dropped_species": dropped_species,
+        "species_breakdown": species_breakdown,
+    }
+    return keep_series, stats
 
 
 def select_cascading_outgroup_anchors(
