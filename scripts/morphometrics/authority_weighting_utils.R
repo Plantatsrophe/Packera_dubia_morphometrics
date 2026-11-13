@@ -1512,10 +1512,10 @@ solve_shrinkage_cda_eigen <- function(S_reg, B, max_axes = NULL) {
   if (target_modality != "vision" && "is_label_corrupted" %in% names(df)) {
     eps_err <- apply_bool_flag(eps_err, df$is_label_corrupted, pos_rate = 0.85, neg_rate = 0.05)
   }
-  if (target_modality != "morph" && "morphometric_outlier_flag" %in% names(df)) {
+  if (!(target_modality %in% c("morph", "ecological")) && "morphometric_outlier_flag" %in% names(df)) {
     eps_err <- apply_bool_flag(eps_err, df$morphometric_outlier_flag, pos_rate = 0.75, neg_rate = 0.05)
   }
-  if ("multimodal_conflict_flag" %in% names(df)) {
+  if (target_modality != "ecological" && "multimodal_conflict_flag" %in% names(df)) {
     eps_err <- apply_bool_flag(eps_err, df$multimodal_conflict_flag, pos_rate = 0.78, neg_rate = 0.05)
   }
   eps_err
@@ -1678,7 +1678,7 @@ compute_empirical_bayes_authority_weights <- function(
       pred_sources[["exsiccatae"]] <- list(taxon = p_ex, conf = rep(0.92, n), valid = valid_ex)
     }
   }
-  if (target_modality != "morph" && "cda_predicted_taxon" %in% names(df)) {
+  if (!(target_modality %in% c("morph", "ecological")) && "cda_predicted_taxon" %in% names(df)) {
     p_cda <- safe_std_tx(df$cda_predicted_taxon)
     c_cda <- if ("cda_posterior_prob" %in% names(df)) suppressWarnings(as.numeric(df$cda_posterior_prob)) else rep(0.82, n)
     c_cda[!is.finite(c_cda)] <- 0.82
@@ -1708,7 +1708,7 @@ compute_empirical_bayes_authority_weights <- function(
     names(df)
   )
   has_exog_signals <- length(exog_cols) > 0L && any(vapply(exog_cols, function(cl) any(!is.na(df[[cl]]) & nzchar(trimws(as.character(df[[cl]])))), logical(1)))
-  use_loo_pc <- (G >= 2L) && (target_modality != "morph")
+  use_loo_pc <- (G >= 2L) && !(target_modality %in% c("morph", "ecological"))
   L_pc <- if (use_loo_pc) .compute_loo_pc_likelihoods(df, taxa_vec, det_tier, is_promoted, eval_mask, valid_taxa, pi_vec) else NULL
 
   y_idx <- match(taxa_vec, valid_taxa)

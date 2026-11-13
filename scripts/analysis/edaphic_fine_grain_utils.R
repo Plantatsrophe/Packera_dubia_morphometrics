@@ -2000,7 +2000,7 @@ screen_collinear_predictors_by_block <- function(
   }
 
   if (is.null(clim_vars)) {
-    clim_vars <- grep("^(bio[0-9]*_|delta_doy|doy|hopkins_|sin_doy|cos_doy)", all_cols, value = TRUE, ignore.case = TRUE)
+    clim_vars <- grep("^(bio[0-9]*_|summer_moisture_|maritime_continentality_|delta_doy|doy|hopkins_|sin_doy|cos_doy)", all_cols, value = TRUE, ignore.case = TRUE)
   } else {
     clim_vars <- intersect(clim_vars, all_cols)
   }

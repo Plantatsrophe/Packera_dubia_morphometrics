@@ -1019,8 +1019,8 @@ resolve_analysis_group <- function(
     mu_v[j] <- mean(vj[anc_idx])
     sd_v[j] <- max(stats::sd(vj[anc_idx]), 1e-6)
   }
-  Z_std <- sweep(sweep(E_raw, 2L, mu_v, "-"), 2L, sd_v, "/")
-  Z_std[!is.finite(Z_std)] <- 0.0
+  Z_full <- sweep(sweep(E_raw, 2L, mu_v, "-"), 2L, sd_v, "/")
+  Z_full[!is.finite(Z_full)] <- 0.0
 
   assign_eco_domain <- function(vn) {
     vl <- tolower(vn)
@@ -1029,7 +1029,42 @@ resolve_analysis_group <- function(
     if (grepl("topo_|slope|tpi|twi|hli|elev", vl)) return("Microtopography")
     "Hydrothermal_Maritime_Climate"
   }
-  dom_vec <- vapply(cand_env, assign_eco_domain, character(1))
+  dom_full <- vapply(cand_env, assign_eco_domain, character(1))
+
+  # Deduplicate within-domain collinear predictors (|r| > 0.75) before PCA/k-means
+  # so redundant lithic/climatic rasters do not inflate single-axis microsite splits
+  keep_idx <- integer(0)
+  for (dm in sort(unique(dom_full))) {
+    dm_idx <- which(dom_full == dm)
+    if (length(dm_idx) <= 1L) {
+      keep_idx <- c(keep_idx, dm_idx)
+    } else {
+      iqr_sc <- vapply(dm_idx, function(jj) {
+        zj <- Z_full[anc_idx, jj]
+        as.numeric(stats::quantile(zj, 0.75, na.rm = TRUE, names = FALSE) - stats::quantile(zj, 0.25, na.rm = TRUE, names = FALSE))
+      }, numeric(1))
+      ord_dm <- dm_idx[order(-iqr_sc, dm_idx)]
+      sel_dm <- integer(0)
+      for (jj in ord_dm) {
+        if (length(sel_dm) == 0L) {
+          sel_dm <- jj
+        } else {
+          cors_j <- vapply(sel_dm, function(ss) {
+            r_val <- suppressWarnings(stats::cor(Z_full[anc_idx, jj], Z_full[anc_idx, ss], use = "complete.obs"))
+            if (is.finite(r_val)) abs(r_val) else 0.0
+          }, numeric(1))
+          if (all(cors_j <= 0.75)) sel_dm <- c(sel_dm, jj)
+        }
+      }
+      keep_idx <- c(keep_idx, sort(sel_dm))
+    }
+  }
+  keep_idx <- sort(unique(keep_idx))
+  cand_env <- cand_env[keep_idx]
+  E_raw <- E_raw[, keep_idx, drop = FALSE]
+  Z_std <- Z_full[, keep_idx, drop = FALSE]
+  dom_vec <- dom_full[keep_idx]
+
   dom_counts <- table(dom_vec)
   col_dom_wts <- vapply(dom_vec, function(dm) 1.0 / sqrt(max(1.0, as.numeric(dom_counts[[dm]]))), numeric(1))
   if (!is.null(rf_var_weights) && length(rf_var_weights) > 0L && !is.null(names(rf_var_weights))) {
@@ -1049,9 +1084,9 @@ resolve_analysis_group <- function(
     if (!is.null(pca_e) && ncol(pca_e$rotation) >= 1L) {
       ev <- pca_e$sdev^2
       cum_ev <- cumsum(ev) / max(sum(ev), 1e-12)
-      k_pc <- which(cum_ev >= 0.85)[1L]
+      k_pc <- which(cum_ev >= 0.92)[1L]
       if (is.na(k_pc)) k_pc <- ncol(pca_e$rotation)
-      k_pc <- max(1L, min(4L, k_pc, ncol(pca_e$rotation)))
+      k_pc <- max(1L, min(5L, k_pc, ncol(pca_e$rotation)))
       rot_e <- pca_e$rotation[, seq_len(k_pc), drop = FALSE]
       S_anc <- sweep(Z_anc, 2L, pca_e$center, "-") %*% rot_e
       S_all <- sweep(Z_bal, 2L, pca_e$center, "-") %*% rot_e
@@ -1098,6 +1133,7 @@ resolve_analysis_group <- function(
     mean(s_vals, na.rm = TRUE)
   }
 
+  active_doms <- unique(dom_vec)
   cand_fits <- list()
   for (k_try in 2L:max_k_cand) {
     km <- tryCatch(stats::kmeans(S_anc, centers = k_try, nstart = 30L, iter.max = 60L), error = function(e) NULL)
@@ -1107,39 +1143,75 @@ resolve_analysis_group <- function(
     sil_k <- calc_mean_sil(km$cluster)
     var_red_k <- 1.0 - (km$tot.withinss / max(tot_ss, 1e-9))
 
+    # Pairwise pooled-SD separation (Ashman's D / Cohen's d, Ashman et al. 1994):
+    # Slicing a unimodal Gaussian N(0,1) at its median yields theoretical d = 2.647,
+    # whereas genuine multimodal ecological regime transitions exceed d >= 3.2.
+    pair_min_best_d <- Inf
+    var_max_pair_d <- rep(0.0, length(cand_env))
+    u_cls <- sort(unique(km$cluster))
+    for (ia in seq_len(length(u_cls) - 1L)) {
+      for (ib in (ia + 1L):length(u_cls)) {
+        ca <- u_cls[ia]
+        cb <- u_cls[ib]
+        best_ab_d <- 0.0
+        for (j in seq_along(cand_env)) {
+          ga <- Z_std[anc_idx[km$cluster == ca], j]
+          gb <- Z_std[anc_idx[km$cluster == cb], j]
+          va <- if (length(ga) > 1L) stats::var(ga, na.rm = TRUE) else 0.0
+          vb <- if (length(gb) > 1L) stats::var(gb, na.rm = TRUE) else 0.0
+          if (!is.finite(va)) va <- 0.0
+          if (!is.finite(vb)) vb <- 0.0
+          d_ab_j <- abs(mean(ga, na.rm = TRUE) - mean(gb, na.rm = TRUE)) / sqrt(0.5 * (va + vb) + 0.04)
+          if (is.finite(d_ab_j)) {
+            if (d_ab_j > best_ab_d) best_ab_d <- d_ab_j
+            if (d_ab_j > var_max_pair_d[j]) var_max_pair_d[j] <- d_ab_j
+          }
+        }
+        if (best_ab_d < pair_min_best_d) pair_min_best_d <- best_ab_d
+      }
+    }
+
     kw_p <- vapply(seq_along(cand_env), function(j) {
       vj <- Z_std[anc_idx, j]
       if (stats::sd(vj) <= 1e-6) return(1.0)
       tryCatch(suppressWarnings(as.numeric(stats::kruskal.test(vj ~ factor(km$cluster))$p.value)), error = function(e) 1.0)
     }, numeric(1))
-    f_stats <- vapply(seq_along(cand_env), function(j) {
+    kw_q <- stats::p.adjust(kw_p, method = "BH")
+
+    eta2_vec <- numeric(length(cand_env))
+    f_stats <- numeric(length(cand_env))
+    for (j in seq_along(cand_env)) {
       vj <- Z_std[anc_idx, j]
-      if (stats::sd(vj) <= 1e-6) return(0.0)
-      tryCatch({
+      if (stats::sd(vj) <= 1e-6) next
+      ss_tot_j <- sum((vj - mean(vj, na.rm = TRUE))^2)
+      ss_btw_j <- sum(vapply(u_cls, function(cc) {
+        gc <- vj[km$cluster == cc]
+        length(gc) * ((mean(gc, na.rm = TRUE) - mean(vj, na.rm = TRUE))^2)
+      }, numeric(1)))
+      eta2_vec[j] <- ss_btw_j / max(ss_tot_j, 1e-9)
+      f_stats[j] <- tryCatch({
         af <- summary(stats::aov(vj ~ factor(km$cluster)))[[1]]
         suppressWarnings(as.numeric(af[["F value"]][1L]))
       }, error = function(e) 0.0)
-    }, numeric(1))
+    }
     f_stats[!is.finite(f_stats)] <- 0.0
-    max_gap_sd <- max(vapply(seq_along(cand_env), function(j) {
-      means_j <- tapply(Z_std[anc_idx, j], km$cluster, mean, na.rm = TRUE)
-      diff(range(means_j, na.rm = TRUE))
-    }, numeric(1)), na.rm = TRUE)
 
-    sig_vars_k <- cand_env[is.finite(kw_p) & kw_p < 0.005]
+    sig_mask_k <- is.finite(kw_q) & (kw_q < 0.005) & (eta2_vec >= 0.25) & (var_max_pair_d >= 3.2)
+    sig_vars_k <- cand_env[sig_mask_k]
     n_sig_vars <- length(sig_vars_k)
-    n_sig_doms <- length(unique(dom_vec[cand_env %in% sig_vars_k]))
+    n_sig_doms <- length(unique(dom_vec[sig_mask_k]))
 
     req_sig_vars <- if (length(cand_env) >= 4L) 2L else 1L
+    req_sig_doms <- min(2L, length(active_doms))
     pass_eco_gate <- (
-      is.finite(sil_k) && sil_k >= 0.27 &&
-      is.finite(var_red_k) && var_red_k >= (0.28 + 0.05 * (k_try - 2L)) &&
+      is.finite(sil_k) && sil_k >= 0.28 &&
+      is.finite(var_red_k) && var_red_k >= (0.30 + 0.05 * (k_try - 2L)) &&
+      is.finite(pair_min_best_d) && pair_min_best_d >= 3.2 &&
       n_sig_vars >= req_sig_vars &&
-      (n_sig_doms >= min(2L, length(unique(dom_vec))) || (sil_k >= 0.48 && var_red_k >= 0.55)) &&
-      is.finite(max_gap_sd) && max_gap_sd >= 1.35
+      n_sig_doms >= req_sig_doms
     )
 
-    score_k <- sil_k + 0.35 * var_red_k + 0.04 * min(n_sig_doms, 4L) - 0.025 * (k_try - 2L)
+    score_k <- sil_k + 0.35 * var_red_k + 0.05 * min(n_sig_doms, 4L) + 0.02 * min(pair_min_best_d, 6.0) - 0.02 * (k_try - 2L)
     cand_fits[[as.character(k_try)]] <- list(
       k = k_try,
       km = km,

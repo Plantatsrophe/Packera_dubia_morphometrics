@@ -1441,9 +1441,11 @@ class TestMultimodalSpatialRF(unittest.TestCase):
 
             cand_d <- discover_candidate_eco_predictors(res_clean, include_pheno = FALSE)
             stopifnot(all(c("lithic_outcrop_index", "summer_moisture_deficit_idx", "maritime_continentality_idx") %in% cand_d))
+            stopifnot(identical(resolve_ecological_authority_weights(res_clean), resolve_ecological_authority_weights(res_mut)))
             srf_c <- compute_spatial_rf_mems(res_clean, cand_d, n_trees = 60, intraspecific_mode = TRUE)
             srf_m <- compute_spatial_rf_mems(res_mut, cand_d, n_trees = 60, intraspecific_mode = TRUE)
             stopifnot(max(abs(srf_c$oof_prob_matrix - srf_m$oof_prob_matrix), na.rm = TRUE) < 1e-12)
+            stopifnot(srf_c$Spatial_Block_CV_Accuracy >= 0.75)
 
             # Verify Step 06 synthesizes multi-ecotype + unimodal morphology as Confirmed_Species without Morph=0.05 / Edaphic=0.95 tautology
             res_clean$rf_predicted_taxon <- srf_c$rf_predicted_taxon

@@ -2792,6 +2792,33 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
     fold_ids_anc <- assign_spatial_grid_blocks(coords[anchor_idx, , drop = FALSE], block_deg = autocorr_info$range_deg, k = min(5L, max(2L, floor(n_anc / 2))))
   }
 
+  # Guard against disjunct regional ecotypes/endemics being 100% placed into a single coarse spatial block
+  # (which leaves zero training examples for that class in held-out CV evaluation; Valavi et al. 2019)
+  cls_tab_anc <- table(y_anchor)
+  multi_cls_anc <- names(cls_tab_anc[cls_tab_anc >= 2L])
+  if (length(multi_cls_anc) >= 2L) {
+    u_fids <- sort(unique(stats::na.omit(fold_ids_anc)))
+    drops_class <- length(u_fids) < 2L || any(vapply(u_fids, function(fid) {
+      !all(multi_cls_anc %in% as.character(y_anchor[which(fold_ids_anc != fid)]))
+    }, logical(1)))
+    if (isTRUE(drops_class)) {
+      k_strat_sp <- min(5L, max(2L, min(as.integer(cls_tab_anc[multi_cls_anc]))))
+      fold_ids_anc <- integer(n_anc)
+      for (ci_idx in seq_along(levels(y_anchor))) {
+        cl_nm <- levels(y_anchor)[ci_idx]
+        idx_cl <- which(as.character(y_anchor) == cl_nm)
+        if (length(idx_cl) == 0L) next
+        if (length(idx_cl) == 1L) {
+          fold_ids_anc[idx_cl] <- ((ci_idx - 1L) %% k_strat_sp) + 1L
+        } else {
+          spatial_ord <- order(coords[anchor_idx[idx_cl], 1] + 0.618034 * coords[anchor_idx[idx_cl], 2])
+          raw_bins <- ceiling(seq_along(spatial_ord) * k_strat_sp / length(spatial_ord))
+          fold_ids_anc[idx_cl[spatial_ord]] <- ((raw_bins + ci_idx - 2L) %% k_strat_sp) + 1L
+        }
+      }
+    }
+  }
+
   # Generate Out-of-Fold (OOF) Ecological Probabilities for Gold/Silver Anchors via Spatial Block CV
   cls_levels <- levels(y_anchor)
   oof_prob_mat <- matrix(NA_real_, nrow = n_anc, ncol = length(cls_levels), dimnames = list(NULL, cls_levels))
@@ -2813,6 +2840,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
                                  probability = TRUE, case.weights = wts_tr_f, num.threads = rf_threads, seed = 42 + as.integer(f_id))
         pr_mat <- stats::predict(fit_cv, data = te_df, num.threads = rf_threads)$predictions
         if (!is.matrix(pr_mat)) pr_mat <- matrix(pr_mat, nrow = length(te_sub), dimnames = list(NULL, names(pr_mat)))
+        oof_prob_mat[te_sub, ] <- 0.0
         for (cl_nm in intersect(colnames(pr_mat), cls_levels)) {
           oof_prob_mat[te_sub, cl_nm] <- pr_mat[, cl_nm]
         }
@@ -2820,6 +2848,7 @@ compute_spatial_rf_mems <- function(df, env_vars, n_trees = 500, intraspecific_m
       } else {
         fit_cv <- randomForest::randomForest(x = X_tr_f, y = droplevels(y_anchor[tr_sub]), ntree = max(100, floor(n_trees / 2)))
         pr_mat <- stats::predict(fit_cv, newdata = X_te_f, type = "prob")
+        oof_prob_mat[te_sub, ] <- 0.0
         for (cl_nm in intersect(colnames(pr_mat), cls_levels)) {
           oof_prob_mat[te_sub, cl_nm] <- pr_mat[, cl_nm]
         }
